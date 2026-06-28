@@ -15,7 +15,9 @@ use bevy::{
     asset::RenderAssetUsages,
     camera::RenderTarget,
     feathers::{
-        controls::FeathersButton,
+        controls::{
+            FeathersButton, FeathersNumberInput, NumberFormat, NumberInputValue, UpdateNumberInput,
+        },
         dark_theme::create_dark_theme,
         theme::{ThemeBackgroundColor, ThemedText, UiTheme},
         tokens, FeathersPlugins,
@@ -35,7 +37,7 @@ use bevy::{
     },
     scene::{Scene, SceneList}, // the bsn traits — shadow the prelude's `Scene` asset struct
     tasks::{block_on, futures_lite::future, AsyncComputeTaskPool, Task},
-    ui_widgets::Activate,
+    ui_widgets::{Activate, ValueChange},
     window::ExitCondition,
     winit::WinitPlugin,
 };
@@ -108,6 +110,9 @@ struct DraggingCut(bool);
 struct StatusLabel;
 #[derive(Component, Clone, Default)]
 struct CutLabel;
+/// Marks the numeric entry field for the active cut's X.
+#[derive(Component, Clone, Default)]
+struct CutInput;
 
 /// A cut-plane overlay, tied to its cut in the stack by index.
 #[derive(Component)]
@@ -157,6 +162,7 @@ fn run_windowed(scene: SceneCfg) {
         .add_observer(on_drag_start)
         .add_observer(on_drag)
         .add_observer(on_drag_end)
+        .add_observer(on_cut_typed)
         .add_systems(Startup, (setup_windowed, ui_root.spawn()))
         .add_systems(
             Update,
@@ -168,6 +174,7 @@ fn run_windowed(scene: SceneCfg) {
                 sync_overlays,
                 sync_overlay_visuals,
                 update_cut_label,
+                sync_cut_input,
             ),
         )
         .run();
@@ -386,6 +393,41 @@ fn update_cut_label(cuts: Res<Cuts>, mut labels: Query<&mut Text, With<CutLabel>
     };
     for mut t in &mut labels {
         *t = Text::new(text.clone());
+    }
+}
+
+/// Type a number → set the active cut's X (the typed half of "drag + type").
+fn on_cut_typed(
+    ev: On<ValueChange<f32>>,
+    inputs: Query<(), With<CutInput>>,
+    bounds: Res<ModelBounds>,
+    mut cuts: ResMut<Cuts>,
+) {
+    if !inputs.contains(ev.source) {
+        return;
+    }
+    let v = clamp_to_bounds(ev.value, &bounds);
+    let a = cuts.active;
+    if let Some(c) = cuts.list.get_mut(a) {
+        c.at = v;
+    }
+}
+
+/// Push the active cut's X into the numeric field so it reflects drag/next/add. Silent while the
+/// field is focused (number_input_on_update skips focused inputs), so it never fights typing.
+fn sync_cut_input(cuts: Res<Cuts>, inputs: Query<Entity, With<CutInput>>, mut commands: Commands) {
+    if !cuts.is_changed() {
+        return;
+    }
+    let Some(active) = cuts.list.get(cuts.active) else {
+        return;
+    };
+    let at = active.at;
+    for e in &inputs {
+        commands.trigger(UpdateNumberInput {
+            entity: e,
+            value: NumberInputValue::F32(at),
+        });
     }
 }
 
@@ -723,6 +765,7 @@ fn run_scripted(scene: SceneCfg, actions: Vec<Action>) {
                 sync_overlays,
                 sync_overlay_visuals,
                 update_cut_label,
+                sync_cut_input,
                 run_script,
             ),
         )
@@ -992,6 +1035,7 @@ fn panel() -> impl Scene {
             (Text("fab-gui") ThemedText),
             (Text("rendering…") ThemedText StatusLabel),
             (Text("(no cuts)") ThemedText CutLabel),
+            (@FeathersNumberInput { @number_format: NumberFormat::F32 } CutInput),
             (
                 Node { flex_direction: FlexDirection::Row, column_gap: px(6) }
                 Children[

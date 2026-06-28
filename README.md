@@ -35,6 +35,8 @@ from the cwd, so it runs from anywhere in the tree.
 - `fab plan --size WxHxD [--printer NAME]` — fit a part on the bed (from `printers.toml`):
   orient it, rotate it diagonally, or — last resort — report the fewest cuts + the
   `slice(cuts=…)` to feed the slicer.
+- `fab coupon --type pin|insert [--screw M3] [--slops …]` — emit + render a printable
+  tolerance-test coupon (a joint swept across slop values) to dial in fit before a full print.
 - `fab publish` — stubbed (Phase 7).
 
 Opening designs in the OpenSCAD GUI by hand needs OPENSCADPATH in your shell — see

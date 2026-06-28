@@ -1,5 +1,8 @@
 //! The GUI's bridge to fab — drives geometry in-process via the shared `fab_scad` lib
-//! (no subprocess, same code `fab slice` runs). Render a source to a mesh; slice it.
+//! (no subprocess, same code `fab slice` runs). Renders/slices at PREVIEW quality: it wraps
+//! the source in `$preview = true; include <source>;` so models that gate detail on
+//! `$fn = $preview ? low : high` render fast (nail_cure: 2.4s vs 43s at full $fn). Final,
+//! full-quality output is `fab`'s job; the GUI just needs a quick, responsive preview.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -26,18 +29,17 @@ pub fn find_root() -> Option<PathBuf> {
     }
 }
 
-/// Render a source `.scad` to an STL (the whole model, for display).
+/// Render the source whole at PREVIEW quality, returning the STL.
 pub fn render_whole(root: Option<&Path>, source: &Path, out_dir: &Path) -> Result<PathBuf> {
-    std::fs::create_dir_all(out_dir)?;
     let oscad = Openscad::discover(root)?;
-    let stem = stem_of(source);
-    let out = out_dir.join(format!("{stem}.stl"));
-    let r = oscad.render(source, &out, TIMEOUT)?;
+    let wrap = preview_wrapper(source, out_dir)?;
+    let out = out_dir.join(format!("{}.stl", stem_of(source)));
+    let r = oscad.render(&wrap, &out, TIMEOUT)?;
     ensure!(r.ok, "render of {} failed", source.display());
     Ok(out)
 }
 
-/// Slice the source at one X cut and return the sliced STL (pieces fanned out by `spread`).
+/// Slice the source at one X cut (preview quality), returning the sliced STL.
 pub fn reslice(
     root: Option<&Path>,
     source: &Path,
@@ -46,6 +48,7 @@ pub fn reslice(
     out_dir: &Path,
 ) -> Result<PathBuf> {
     let oscad = Openscad::discover(root)?;
+    let wrap = preview_wrapper(source, out_dir)?;
     let spec = Slicing {
         printer: None,
         cut: vec![Cut {
@@ -54,7 +57,17 @@ pub fn reslice(
         }],
         connector: vec![],
     };
-    slicing::slice_part(&oscad, source, &spec, spread, out_dir, TIMEOUT)
+    slicing::slice_part(&oscad, &wrap, &spec, spread, out_dir, TIMEOUT)
+}
+
+/// Write a `$preview = true; include <source>;` wrapper so the source's
+/// `$fn = $preview ? low : high` resolves to the low (fast) path. Returns the wrapper path.
+fn preview_wrapper(source: &Path, out_dir: &Path) -> Result<PathBuf> {
+    std::fs::create_dir_all(out_dir)?;
+    let abs = source.canonicalize()?;
+    let wrap = out_dir.join(format!("{}-preview.scad", stem_of(source)));
+    std::fs::write(&wrap, format!("$preview = true;\ninclude <{}>;\n", abs.display()))?;
+    Ok(wrap)
 }
 
 fn stem_of(p: &Path) -> String {

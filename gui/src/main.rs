@@ -562,6 +562,21 @@ fn on_click(
     }
 }
 
+/// Place a connector on `cut` at `pos`, or — if the click lands on one already there — remove it.
+/// Click-to-toggle: clicking a placed connector a second time deletes it.
+fn toggle_connector(conns: &mut Conns, cut: usize, pos: [f32; 2]) {
+    const HIT: f32 = 5.0; // mm; a bit larger than the 3mm marker, so it's a forgiving target
+    if let Some(j) = conns
+        .list
+        .iter()
+        .position(|c| c.cut == cut && (c.pos[0] - pos[0]).hypot(c.pos[1] - pos[1]) < HIT)
+    {
+        conns.list.remove(j);
+    } else {
+        conns.list.push(PlacedConn { cut, pos });
+    }
+}
+
 /// When placement is armed, a click on the model body drops a connector on the nearest enabled
 /// cut, at the clicked point projected onto that cut's plane. Editing (collapsed) view only.
 #[allow(clippy::too_many_arguments)]
@@ -601,8 +616,10 @@ fn on_place_click(
     // pos = the hit's two non-axis coords (ascending dim order — matches the driver projection).
     let ai = c.axis.index();
     let others: Vec<usize> = (0..3).filter(|&a| a != ai).collect();
-    conns.list.push(PlacedConn { cut: idx, pos: [comp(hit, others[0]), comp(hit, others[1])] });
-    status.0 = format!("placed connector on {} cut", c.axis.label());
+    let before = conns.list.len();
+    toggle_connector(&mut conns, idx, [comp(hit, others[0]), comp(hit, others[1])]);
+    let verb = if conns.list.len() < before { "removed" } else { "placed" };
+    status.0 = format!("{verb} connector on {} cut", c.axis.label());
 }
 
 /// In the 2D connector editor: a click on the (face-on) cut plane drops a connector on the cut
@@ -624,7 +641,7 @@ fn place_on_profile_click(
         return;
     };
     let others: Vec<usize> = (0..3).filter(|&a| a != c.axis.index()).collect();
-    conns.list.push(PlacedConn { cut: i, pos: [comp(hit, others[0]), comp(hit, others[1])] });
+    toggle_connector(&mut conns, i, [comp(hit, others[0]), comp(hit, others[1])]);
 }
 
 /// The Explode/Collapse button: collapse to the uncut model, or explode the last sliced result —
@@ -1599,7 +1616,7 @@ fn run_script(
         Action::Wait(n) => runner.timer >= n,
         Action::Conn(i, a, b) => {
             if runner.timer == 1 {
-                conns.list.push(PlacedConn { cut: i, pos: [a, b] });
+                toggle_connector(&mut conns, i, [a, b]);
             }
             runner.timer >= 2
         }
@@ -1986,6 +2003,20 @@ mod tests {
             active: 0,
         };
         assert_eq!(cuts.enabled_cuts(), vec![('x', -10.0), ('y', 20.0)]);
+    }
+
+    #[test]
+    fn toggle_connector_places_then_removes_on_a_second_nearby_click() {
+        let mut conns = Conns::default();
+        toggle_connector(&mut conns, 0, [20.0, -10.0]); // place
+        assert_eq!(conns.list.len(), 1);
+        toggle_connector(&mut conns, 0, [22.0, -8.0]); // within 5mm → removes the same one
+        assert!(conns.list.is_empty());
+        toggle_connector(&mut conns, 0, [20.0, -10.0]); // place again
+        toggle_connector(&mut conns, 0, [0.0, 0.0]); // far away → a second connector, not a remove
+        assert_eq!(conns.list.len(), 2);
+        toggle_connector(&mut conns, 1, [20.0, -10.0]); // same pos, different cut → places
+        assert_eq!(conns.list.len(), 3);
     }
 
     #[test]

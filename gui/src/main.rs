@@ -364,12 +364,13 @@ fn sync_overlay_visuals(
 }
 
 fn cut_color(active: bool, enabled: bool) -> Color {
+    // Distinct hues, none of them the model's yellow: green = editing, blue = on, red = off.
     if !enabled {
-        Color::srgba(0.45, 0.45, 0.5, 0.12) // off — faint grey
+        Color::srgba(0.95, 0.30, 0.30, 0.30) // off — red
     } else if active {
-        Color::srgba(1.0, 0.8, 0.2, 0.5) // active — amber
+        Color::srgba(0.25, 1.0, 0.35, 0.65) // active — bright green
     } else {
-        Color::srgba(0.25, 0.7, 1.0, 0.32) // enabled — blue
+        Color::srgba(0.20, 0.55, 1.0, 0.50) // on — blue
     }
 }
 

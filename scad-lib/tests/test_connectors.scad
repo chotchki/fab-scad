@@ -13,3 +13,8 @@ test_insert_spec();
 bolt_joint("M3", through = 12);
 right(25) pin_joint(d = 6, depth = 8);
 right(50) dowel(d = 6, len = 16);
+
+// Tagged + attachable path (chotchki's idiom): attach a joint to a face and diff it out.
+back(40) tag_scope() diff()
+    cuboid([30, 30, 20])
+        attach(TOP) tag("remove") bolt_joint("M3", through = 10);

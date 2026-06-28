@@ -47,6 +47,24 @@ enum Commands {
         #[arg(long)]
         printer: Option<String>,
     },
+    /// Emit + render a printable tolerance-test coupon (a joint swept across slop values).
+    Coupon {
+        /// Feature to test: "pin" (dowel socket) or "insert" (heat-set pocket).
+        #[arg(long = "type", default_value = "pin")]
+        kind: String,
+        /// Screw size for insert pockets (M3/M4/M5).
+        #[arg(long, default_value = "M3")]
+        screw: String,
+        /// Dowel diameter for pin sockets, in mm.
+        #[arg(long, default_value_t = 6.0)]
+        d: f64,
+        /// Comma-separated slop values in mm.
+        #[arg(long, default_value = "0,0.05,0.1,0.15,0.2,0.25")]
+        slops: String,
+        /// Output .scad path (default: ./coupon-<type>.scad).
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
     /// Render a .scad to geometry (+ optional PNG thumbnail).
     /// File-level for now; project/DAG-aware in Phase 6.
     Render {
@@ -72,6 +90,7 @@ fn main() -> Result<()> {
         Commands::Focus { project } => project::focus_cmd(&require_root()?, project),
         Commands::New { name } => project::new_cmd(&require_root()?, &name),
         Commands::Plan { size, printer } => plan_cmd(&size, printer),
+        Commands::Coupon { kind, screw, d, slops, out } => coupon_cmd(&kind, &screw, d, &slops, out),
         Commands::Render {
             target,
             png,
@@ -135,6 +154,52 @@ fn parse_size(s: &str) -> Result<[f64; 3]> {
         [x, y, z] => Ok([x, y, z]),
         _ => bail!("--size must be three numbers WxHxD, got '{s}'"),
     }
+}
+
+fn coupon_cmd(kind: &str, screw: &str, d: f64, slops_str: &str, out: Option<PathBuf>) -> Result<()> {
+    if kind != "pin" && kind != "insert" {
+        bail!("--type must be 'pin' or 'insert', got '{kind}'");
+    }
+    let root = require_root()?;
+    let slops = parse_slops(slops_str)?;
+    let list = slops
+        .iter()
+        .map(|s| format!("{s}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let driver = format!(
+        "include <coupon.scad>\nslop_coupon(type = \"{kind}\", d = {d}, screw = \"{screw}\", slops = [{list}]);\n"
+    );
+    let scad = out.unwrap_or_else(|| PathBuf::from(format!("coupon-{kind}.scad")));
+    std::fs::write(&scad, driver).with_context(|| format!("writing {}", scad.display()))?;
+    println!("wrote {}", scad.display());
+
+    let oscad = Openscad::discover(Some(&root))?;
+    let timeout = Duration::from_secs(120);
+    let stl = scad.with_extension("stl");
+    println!("render {} -> {}", scad.display(), stl.display());
+    let r = oscad.render(&scad, &stl, timeout)?;
+    print_report(&r);
+    let png = scad.with_extension("png");
+    let t = oscad.thumbnail(&scad, &png, (640, 360), timeout)?;
+    print_report(&t);
+
+    if !r.ok {
+        bail!("coupon render failed");
+    }
+    Ok(())
+}
+
+fn parse_slops(s: &str) -> Result<Vec<f64>> {
+    let v: Vec<f64> = s
+        .split(',')
+        .map(|p| p.trim().parse::<f64>())
+        .collect::<std::result::Result<_, _>>()
+        .map_err(|e| anyhow::anyhow!("bad --slops '{s}': {e}"))?;
+    if v.is_empty() {
+        bail!("--slops needs at least one value");
+    }
+    Ok(v)
 }
 
 fn render_cmd(target: &Path, out: Option<PathBuf>, png: bool, timeout_secs: u64) -> Result<()> {

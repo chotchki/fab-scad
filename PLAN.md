@@ -10,14 +10,6 @@ Driven by `claude-plan-bridge` (FORMATv2). Hand-authored; run
 `claude-plan-bridge baseline` after a rewrite to resync the state file.
 -->
 
-## Phase 3 - fab foundation (workflow layer + OpenSCAD wrap spike)
-- [x] 3.1 - fab repo + CI + clap skeleton; `fab doctor` (openscad/manifold/NAS/pins/submodules)
-- [x] 3.2 - Dogfood the OpenSCAD integration pattern: headless render, preview, geometry I/O (the wrap fab + GUI build on)
-- [ ] 3.3 - `fab focus <project>` active-project context (no name on every command)
-- [x] 3.4 - Parse a MINIMAL project.toml (name/title/part); schema grows by dogfooding
-- [ ] 3.5 - `fab new <name>` scaffolds from the template
-- [x] 3.6 - Wire scad-models + libs + scad-lib as pinned submodules under fab-scad
-
 ## Phase 4 - Linear slicing (SCAD lib; kill the 2^N blowup)
 - [ ] 4.1 - Characterize blowup: confirm nested partition() ~2^N; quantify on window_light_blocker + shoe_holder
 - [ ] 4.2 - Linear slicer module in scad-lib: planar slab cuts, piece = source ∩ slab (child once per piece)

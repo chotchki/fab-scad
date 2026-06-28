@@ -22,3 +22,6 @@ target
 .claude/plan-bridge-state.json
 .claude/plan-bridge-state.json.lock
 .claude/plan-bridge-cleared.jsonl
+
+# fab per-user working state (active project, etc.) — not shared
+.fab/

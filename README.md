@@ -5,17 +5,37 @@ output, publish — plus the shared SCAD toolkit my designs lean on. OpenSCAD is
 geometry engine with no workflow story; `fab-scad` IS the workflow, and it owns it (this
 repo is the superproject root).
 
-**WIP.** Right now this is the skeleton; the plan and rationale live (for the moment) in
-the `scad-models` designs repo's `SPEC.md` / `PLAN.md` and migrate here during the reorg.
+**WIP.** The foundation (Phase 3) has landed: the `fab` binary, the OpenSCAD wrap, the
+minimal manifest, and the focus + scaffolding workflow. `SPEC.md` / `PLAN.md` live here at
+the root now. Next up is the linear slicer (Phase 4).
 
 ## Layout
 
-- `src/` — the `fab` binary (Phase 3; not here yet)
+- `src/` — the `fab` binary (`doctor`, `new`, `focus`, `render`)
 - `scad-lib/` — my shared SCAD modules (MIT): the linear slicer + connector lib, version
   stamping, part numbering
 - `libs/` — third-party OpenSCAD deps as PINNED submodules (BOSL2, ...)
 - `printers.toml` — printer / bed profiles
-- `models/` — the `scad-models` designs repo, pinned as a submodule (Phase 3); CC BY-NC-SA
+- `models/` — the `scad-models` designs repo, pinned as a submodule; CC BY-NC-SA
+
+## Commands
+
+`fab` finds the workspace root (the dir with `printers.toml` + `scad-lib/`) by walking up
+from the cwd, so it runs from anywhere in the tree.
+
+- `fab doctor` — env preflight: OpenSCAD + Manifold backend, submodules, scad-lib,
+  OPENSCADPATH, NAS mount.
+- `fab new <name>` — scaffold a project under `models/<name>/` (minimal `project.toml` +
+  starter `src/<name>.scad`) and focus it.
+- `fab focus [<project>]` — set the active project, or show it with no arg, so later
+  commands need no name. Recorded per-user in `.fab/focus` (gitignored).
+- `fab render <file.scad> [--png]` — render geometry via Manifold, OPENSCADPATH injected so
+  `<BOSL2/...>` and scad-lib includes resolve. File-level for now; project/DAG-aware in
+  Phase 6.
+- `fab publish` — stubbed (Phase 7).
+
+Opening designs in the OpenSCAD GUI by hand needs OPENSCADPATH in your shell — see
+`docs/openscad-libraries.md`.
 
 ## License
 

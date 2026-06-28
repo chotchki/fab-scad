@@ -24,3 +24,16 @@
 - [x] 2.7 - Stand up scad-lib in fab-scad (MIT): version-stamp + part-numbering modules
 
 
+---
+
+## 2026-06-28
+
+## Phase 3 - fab foundation (workflow layer + OpenSCAD wrap spike)
+- [x] 3.1 - fab repo + CI + clap skeleton; `fab doctor` (openscad/manifold/NAS/pins/submodules)
+- [x] 3.2 - Dogfood the OpenSCAD integration pattern: headless render, preview, geometry I/O (the wrap fab + GUI build on)
+- [x] 3.3 - `fab focus <project>` active-project context (no name on every command)
+- [x] 3.4 - Parse a MINIMAL project.toml (name/title/part); schema grows by dogfooding
+- [x] 3.5 - `fab new <name>` scaffolds from the template
+- [x] 3.6 - Wire scad-models + libs + scad-lib as pinned submodules under fab-scad
+
+

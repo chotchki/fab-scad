@@ -7,12 +7,13 @@
 
 mod manifest;
 mod openscad;
+mod project;
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 
 use openscad::Openscad;
@@ -32,9 +33,9 @@ struct Cli {
 enum Commands {
     /// Environment preflight: OpenSCAD, Manifold, submodules, NAS, OPENSCADPATH.
     Doctor,
-    /// Set the active project so later commands need no name. (Phase 3.2 -> 3.3)
+    /// Set the active project (or show it with no arg) so later commands need no name.
     Focus { project: Option<String> },
-    /// Scaffold a new project from the template. (Phase 3.5)
+    /// Scaffold a new project (minimal manifest + starter scad) and focus it.
     New { name: String },
     /// Render a .scad to geometry (+ optional PNG thumbnail).
     /// File-level for now; project/DAG-aware in Phase 6.
@@ -58,8 +59,8 @@ enum Commands {
 fn main() -> Result<()> {
     match Cli::parse().command {
         Commands::Doctor => doctor(),
-        Commands::Focus { .. } => not_yet("focus", "3.3"),
-        Commands::New { .. } => not_yet("new", "3.5"),
+        Commands::Focus { project } => project::focus_cmd(&require_root()?, project),
+        Commands::New { name } => project::new_cmd(&require_root()?, &name),
         Commands::Render {
             target,
             png,
@@ -242,6 +243,13 @@ fn doctor() -> Result<()> {
         bail!("doctor found blocking problems");
     }
     Ok(())
+}
+
+/// The fab-scad root, or a clear error — the workflow commands all need it.
+fn require_root() -> Result<PathBuf> {
+    find_root().context(
+        "not inside a fab-scad tree — no `printers.toml` + `scad-lib/` found above the current dir",
+    )
 }
 
 /// Walk up from the cwd to the fab-scad root (the dir holding `printers.toml` + `scad-lib`).

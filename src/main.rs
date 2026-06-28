@@ -228,41 +228,28 @@ fn slice_cmd(target: &Path, spread: f64, out: Option<PathBuf>, png: bool) -> Res
 
     let oscad = Openscad::discover(root.as_deref())?;
     let timeout = Duration::from_secs(120);
-    let dir = target.parent().unwrap_or_else(|| Path::new("."));
+    let outdir = target.parent().unwrap_or_else(|| Path::new(".")).join("out");
     let stem = target
         .file_stem()
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_else(|| "part".into());
-    let outdir = dir.join("out");
-    std::fs::create_dir_all(&outdir).with_context(|| format!("creating {}", outdir.display()))?;
 
-    // 1. Freeze the source to a mesh — slicing the frozen STL is linear (no 2^N).
-    let source_stl = outdir.join(format!("{stem}.stl"));
-    println!("freeze {} -> {}", target.display(), source_stl.display());
-    let f = oscad.render(target, &source_stl, timeout)?;
-    print_report(&f);
-    if !f.ok {
-        bail!("source render failed");
-    }
+    println!("slice {}", target.display());
+    let sliced = slicing::slice_part(&oscad, target, spec, spread, &outdir, timeout)?;
+    let final_out = match out {
+        Some(o) => {
+            std::fs::copy(&sliced, &o).with_context(|| format!("writing {}", o.display()))?;
+            o
+        }
+        None => sliced,
+    };
+    println!("  -> {}", final_out.display());
 
-    // 2. Generate the slicer driver from the spec (imports the frozen mesh by name).
-    let driver = slicing::driver_scad(spec, &format!("{stem}.stl"), spread)?;
-    let driver_path = outdir.join(format!("{stem}-sliced.scad"));
-    std::fs::write(&driver_path, driver)
-        .with_context(|| format!("writing {}", driver_path.display()))?;
-
-    // 3. Render the sliced result.
-    let sliced = out.unwrap_or_else(|| outdir.join(format!("{stem}-sliced.stl")));
-    println!("slice  {} -> {}", driver_path.display(), sliced.display());
-    let r = oscad.render(&driver_path, &sliced, timeout)?;
-    print_report(&r);
     if png {
-        let thumb = sliced.with_extension("png");
-        let t = oscad.thumbnail(&driver_path, &thumb, (512, 512), timeout)?;
+        let driver = outdir.join(format!("{stem}-sliced.scad"));
+        let thumb = final_out.with_extension("png");
+        let t = oscad.thumbnail(&driver, &thumb, (512, 512), timeout)?;
         print_report(&t);
-    }
-    if !r.ok {
-        bail!("slice render failed");
     }
     Ok(())
 }

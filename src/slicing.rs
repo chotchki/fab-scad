@@ -3,11 +3,51 @@
 //! lives in `slice_cmd`. This is the GUI ↔ fab contract: the GUI edits the spec, this
 //! reproduces the same SCAD headlessly, so preview and `fab slice` are one path.
 
+use std::path::{Path, PathBuf};
+use std::time::Duration;
+
 use anyhow::{bail, Context, Result};
 
 use crate::manifest::{Connector, Slicing};
+use crate::openscad::Openscad;
 
 const AXIS: [&str; 3] = ["RIGHT", "BACK", "UP"];
+
+/// Freeze `source` to a mesh, generate the slicer driver from `spec`, render the pieces.
+/// Returns the sliced STL path. The shared slice flow — `fab slice` and the GUI both call it.
+pub fn slice_part(
+    oscad: &Openscad,
+    source: &Path,
+    spec: &Slicing,
+    spread: f64,
+    out_dir: &Path,
+    timeout: Duration,
+) -> Result<PathBuf> {
+    std::fs::create_dir_all(out_dir).with_context(|| format!("creating {}", out_dir.display()))?;
+    let stem = source
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "part".into());
+
+    // Freeze the source to a mesh (slicing the frozen STL stays linear — no 2^N).
+    let source_stl = out_dir.join(format!("{stem}.stl"));
+    let f = oscad.render(source, &source_stl, timeout)?;
+    if !f.ok {
+        bail!("source render failed: {}", source.display());
+    }
+
+    // Generate the driver from the spec (imports the frozen mesh by name) and render it.
+    let driver = driver_scad(spec, &format!("{stem}.stl"), spread)?;
+    let driver_path = out_dir.join(format!("{stem}-sliced.scad"));
+    std::fs::write(&driver_path, driver)
+        .with_context(|| format!("writing {}", driver_path.display()))?;
+    let sliced = out_dir.join(format!("{stem}-sliced.stl"));
+    let r = oscad.render(&driver_path, &sliced, timeout)?;
+    if !r.ok {
+        bail!("slice render failed");
+    }
+    Ok(sliced)
+}
 
 /// Format a coordinate without a trailing `.0` for whole numbers (tidy generated SCAD).
 fn n(x: f64) -> String {

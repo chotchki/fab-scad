@@ -1,11 +1,10 @@
-//! fab-gui — the slicing GUI (Phase 5.1). A Bevy 0.19 viewport over a `fab`-rendered mesh
-//! with the printer bed for reference. Two entry modes:
+//! fab-gui — the slicing GUI (Phase 5.1). A Bevy 0.19 viewport over a model, with the printer
+//! bed for reference and a Feathers control panel. "Re-slice" drives `fab` in-process (the
+//! shared `fab_scad` lib) and swaps in the sliced result. Modes:
 //!
-//!   cargo run -p fab-gui -- part.stl                 # windowed: orbit, Feathers UI
-//!   cargo run -p fab-gui -- --screenshot out.png part.stl   # headless render to PNG (self-verify)
-//!
-//! The screenshot mode is the tooling that lets a display-less environment SEE the viewport.
-//! Geometry stays in OpenSCAD (via `fab`); the GUI loads the rendered STL and owns the view.
+//!   cargo run -p fab-gui -- part.scad                       # windowed: orbit, Re-slice
+//!   cargo run -p fab-gui -- part.scad --screenshot out.png  # headless render to PNG (self-verify)
+//!   cargo run -p fab-gui -- part.scad --screenshot out.png --reslice   # ...showing the sliced result
 
 use std::path::{Path, PathBuf};
 
@@ -23,36 +22,52 @@ use bevy::{
     input::mouse::{MouseMotion, MouseWheel},
     mesh::Indices,
     prelude::*,
-    scene::{Scene, SceneList}, // the bsn traits — shadow the prelude's `Scene` asset struct
-    ui_widgets::{Activate, SliderStep},
     render::{
         render_resource::{PrimitiveTopology, TextureFormat, TextureUsages},
         view::screenshot::{save_to_disk, Screenshot},
     },
+    scene::{Scene, SceneList}, // the bsn traits — shadow the prelude's `Scene` asset struct
+    ui_widgets::{Activate, SliderStep},
     window::ExitCondition,
     winit::WinitPlugin,
 };
 
+mod fab;
 mod stl;
 
-/// Scene inputs shared by both modes (model STL path + printer bed footprint).
+/// Scene inputs shared by both modes.
 #[derive(Resource, Clone)]
 struct SceneCfg {
-    model: Option<String>,
+    source: Option<PathBuf>, // .scad source (sliceable, preferred)
+    stl: Option<PathBuf>,    // .stl to display directly (when there's no source)
     bed: [f32; 2],
+    root: Option<PathBuf>, // workspace root, for OPENSCADPATH
+    tmp: PathBuf,          // scratch dir for rendered/sliced STLs
+    reslice_on_start: bool, // screenshot --reslice: display the sliced result
 }
+
+/// Marks the displayed model entity, so re-slice can swap it out.
+#[derive(Component)]
+struct Model;
+
+/// Button → "re-slice the source and swap the mesh".
+#[derive(Message)]
+struct ReSlice;
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let model = args.iter().find(|a| a.ends_with(".stl")).cloned();
     let bed = bed_size().unwrap_or([256.0; 3]);
-    let scene = SceneCfg {
-        model,
+    let cfg = SceneCfg {
+        source: args.iter().find(|a| a.ends_with(".scad")).map(PathBuf::from),
+        stl: args.iter().find(|a| a.ends_with(".stl")).map(PathBuf::from),
         bed: [bed[0] as f32, bed[1] as f32],
+        root: fab::find_root(),
+        tmp: std::env::temp_dir().join("fab-gui"),
+        reslice_on_start: args.iter().any(|a| a == "--reslice"),
     };
     match flag_value(&args, "--screenshot") {
-        Some(png) => run_screenshot(scene, PathBuf::from(png)),
-        None => run_windowed(scene),
+        Some(png) => run_screenshot(cfg, PathBuf::from(png)),
+        None => run_windowed(cfg),
     }
 }
 
@@ -68,8 +83,9 @@ fn run_windowed(scene: SceneCfg) {
         .insert_resource(UiTheme(create_dark_theme()))
         .insert_resource(ClearColor(Color::srgb(0.10, 0.10, 0.12)))
         .insert_resource(scene)
+        .add_message::<ReSlice>()
         .add_systems(Startup, (setup_windowed, ui_root.spawn()))
-        .add_systems(Update, orbit)
+        .add_systems(Update, (orbit, do_reslice))
         .run();
 }
 
@@ -86,7 +102,7 @@ fn setup_windowed(
     mut materials: ResMut<Assets<StandardMaterial>>,
     scene: Res<SceneCfg>,
 ) {
-    spawn_world(&mut commands, &mut meshes, &mut materials, &scene);
+    spawn_world(&mut commands, &mut meshes, &mut materials, &scene, scene.reslice_on_start);
     let radius = scene.bed[0].max(scene.bed[1]).max(80.0);
     commands.spawn((
         Camera3d::default(),
@@ -122,6 +138,35 @@ fn orbit(
     *t = orbit_transform(o.yaw, o.pitch, o.radius);
 }
 
+/// On a Re-slice message: slice the source in-process and swap in the pieces.
+fn do_reslice(
+    mut ev: MessageReader<ReSlice>,
+    cfg: Res<SceneCfg>,
+    models: Query<Entity, With<Model>>,
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+) {
+    if ev.read().count() == 0 {
+        return;
+    }
+    let Some(src) = cfg.source.as_deref() else {
+        warn!("no .scad source to slice (launch fab-gui with a source .scad)");
+        return;
+    };
+    info!("re-slicing {}", src.display());
+    match fab::reslice(cfg.root.as_deref(), src, 0.0, 50.0, &cfg.tmp) {
+        Ok(stl) => {
+            for e in &models {
+                commands.entity(e).despawn();
+            }
+            let mesh = load_model(&mut meshes, Some(&stl));
+            commands.spawn((Mesh3d(mesh), MeshMaterial3d(part_material(&mut materials)), Model));
+        }
+        Err(e) => error!("re-slice failed: {e:#}"),
+    }
+}
+
 // ---- headless screenshot --------------------------------------------------------------
 
 #[derive(Resource)]
@@ -131,6 +176,9 @@ struct Shot {
     frame: u32,
     captured: bool,
 }
+
+#[derive(Resource)]
+struct ScreenshotPng(PathBuf);
 
 fn run_screenshot(scene: SceneCfg, png: PathBuf) {
     App::new()
@@ -156,9 +204,6 @@ fn run_screenshot(scene: SceneCfg, png: PathBuf) {
         .run();
 }
 
-#[derive(Resource)]
-struct ScreenshotPng(PathBuf);
-
 fn setup_offscreen(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
@@ -167,7 +212,7 @@ fn setup_offscreen(
     scene: Res<SceneCfg>,
     png: Res<ScreenshotPng>,
 ) {
-    spawn_world(&mut commands, &mut meshes, &mut materials, &scene);
+    spawn_world(&mut commands, &mut meshes, &mut materials, &scene, scene.reslice_on_start);
 
     // Offscreen render target the camera draws into and we screenshot.
     let (w, h) = (960u32, 720u32);
@@ -198,7 +243,6 @@ fn capture_then_exit(
     mut exit: MessageWriter<AppExit>,
 ) {
     shot.frame += 1;
-    // Let a few frames render, then screenshot the target image and save it.
     if !shot.captured && shot.frame >= 3 {
         let png = shot.png.clone();
         commands
@@ -207,7 +251,6 @@ fn capture_then_exit(
         shot.captured = true;
         info!("capturing -> {}", png.display());
     }
-    // Give the async GPU readback + save time to finish, then exit.
     if shot.captured && shot.frame >= 30 {
         if shot.png.exists() {
             info!("saved {}", shot.png.display());
@@ -224,34 +267,16 @@ fn spawn_world(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<StandardMaterial>,
-    scene: &SceneCfg,
+    cfg: &SceneCfg,
+    reslice: bool,
 ) {
-    // Model: the STL (a `fab`-rendered part), else a placeholder block.
-    let model = match scene.model.as_deref() {
-        Some(p) if Path::new(p).exists() => match stl::load_stl(Path::new(p)) {
-            Ok(s) => {
-                info!("loaded {p} ({} tris)", s.positions.len() / 3);
-                meshes.add(build_mesh(&s))
-            }
-            Err(e) => {
-                error!("loading {p}: {e:#}");
-                meshes.add(Cuboid::new(60.0, 40.0, 30.0))
-            }
-        },
-        _ => meshes.add(Cuboid::new(60.0, 40.0, 30.0)),
-    };
-    commands.spawn((
-        Mesh3d(model),
-        MeshMaterial3d(materials.add(StandardMaterial {
-            base_color: Color::srgb(0.90, 0.74, 0.20),
-            perceptual_roughness: 0.7,
-            ..default()
-        })),
-    ));
+    let stl = resolve_stl(cfg, reslice);
+    let mesh = load_model(meshes, stl.as_deref());
+    commands.spawn((Mesh3d(mesh), MeshMaterial3d(part_material(materials)), Model));
 
     // Printer bed reference at z=0 (from the shared fab_scad::printers lib).
     commands.spawn((
-        Mesh3d(meshes.add(Cuboid::new(scene.bed[0], scene.bed[1], 1.0))),
+        Mesh3d(meshes.add(Cuboid::new(cfg.bed[0], cfg.bed[1], 1.0))),
         MeshMaterial3d(materials.add(StandardMaterial {
             base_color: Color::srgb(0.18, 0.18, 0.22),
             ..default()
@@ -274,6 +299,50 @@ fn spawn_world(
         },
         Transform::from_xyz(-120.0, 100.0, 60.0).looking_at(Vec3::ZERO, Vec3::Z),
     ));
+}
+
+/// The STL to display: render the source whole (or sliced, if `reslice`), else the given .stl.
+fn resolve_stl(cfg: &SceneCfg, reslice: bool) -> Option<PathBuf> {
+    if let Some(src) = cfg.source.as_deref() {
+        let r = if reslice {
+            fab::reslice(cfg.root.as_deref(), src, 0.0, 50.0, &cfg.tmp)
+        } else {
+            fab::render_whole(cfg.root.as_deref(), src, &cfg.tmp)
+        };
+        match r {
+            Ok(p) => Some(p),
+            Err(e) => {
+                error!("{e:#}");
+                None
+            }
+        }
+    } else {
+        cfg.stl.clone()
+    }
+}
+
+fn load_model(meshes: &mut Assets<Mesh>, stl: Option<&Path>) -> Handle<Mesh> {
+    match stl {
+        Some(p) if p.exists() => match stl::load_stl(p) {
+            Ok(s) => {
+                info!("loaded {} ({} tris)", p.display(), s.positions.len() / 3);
+                meshes.add(build_mesh(&s))
+            }
+            Err(e) => {
+                error!("loading {}: {e:#}", p.display());
+                meshes.add(Cuboid::new(60.0, 40.0, 30.0))
+            }
+        },
+        _ => meshes.add(Cuboid::new(60.0, 40.0, 30.0)),
+    }
+}
+
+fn part_material(materials: &mut Assets<StandardMaterial>) -> Handle<StandardMaterial> {
+    materials.add(StandardMaterial {
+        base_color: Color::srgb(0.90, 0.74, 0.20),
+        perceptual_roughness: 0.7,
+        ..default()
+    })
 }
 
 /// Camera transform orbiting the origin at (yaw, pitch, radius), Z-up.
@@ -308,8 +377,7 @@ fn bed_size() -> Option<[f64; 3]> {
 
 // ---- Feathers UI ----------------------------------------------------------------------
 
-/// The control panel as a bsn scene: a title, a cut-position slider, and a re-slice button —
-/// the first real Feathers/bsn widgets, to grow into the full cut + connector controls.
+/// The control panel as a bsn scene: a title, a cut-position slider, and a Re-slice button.
 fn ui_root() -> impl SceneList {
     bsn_list![panel()]
 }
@@ -332,7 +400,7 @@ fn panel() -> impl Scene {
             (@FeathersSlider { @max: 100.0, @value: 50.0 } SliderStep(1.0)),
             (
                 @FeathersButton { @caption: bsn!{ Text("Re-slice") ThemedText } }
-                on(|_: On<Activate>| info!("re-slice clicked"))
+                on(|_: On<Activate>, mut w: MessageWriter<ReSlice>| { w.write(ReSlice); })
             ),
         ]
     }

@@ -3,6 +3,7 @@
 //! the `fab` CLI (src/main.rs) and the Bevy GUI (gui/), so the slicing-spec and printer types
 //! have ONE definition, not a mirror per front-end.
 
+pub mod cross_section;
 pub mod manifest;
 pub mod num;
 pub mod openscad;

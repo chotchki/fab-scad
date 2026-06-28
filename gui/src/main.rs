@@ -119,6 +119,10 @@ struct DisplaySpread(f32);
 #[derive(Resource, Default)]
 struct SlicedMesh(Option<Handle<Mesh>>);
 
+/// Set when cuts change after the last slice — so Explode knows to re-slice first.
+#[derive(Resource, Default)]
+struct SliceDirty(bool);
+
 /// Marks the panel's status text + cut-list text so systems can update them.
 #[derive(Component, Clone, Default)]
 struct StatusLabel;
@@ -187,6 +191,7 @@ fn run_windowed(scene: SceneCfg) {
         .init_resource::<DraggingCut>()
         .init_resource::<WholeMesh>()
         .init_resource::<SlicedMesh>()
+        .init_resource::<SliceDirty>()
         .init_resource::<DisplaySpread>()
         .insert_resource(Status("rendering…".into()))
         .add_message::<ReSlice>()
@@ -210,6 +215,7 @@ fn run_windowed(scene: SceneCfg) {
                 sync_dim_labels,
                 update_view_label,
                 nudge_buttons,
+                mark_dirty,
                 revert_on_edit,
                 auto_scale,
             ),
@@ -367,26 +373,41 @@ fn on_click(
     }
 }
 
-/// The Explode/Collapse button: swap between the uncut model and the last sliced result.
+/// The Explode/Collapse button: collapse to the uncut model, or explode the last sliced result —
+/// auto-slicing first if the cuts changed (or were never sliced), so it works without Re-slice.
 fn toggle_view(
     _ev: On<Activate>,
     whole: Res<WholeMesh>,
     sliced: Res<SlicedMesh>,
+    dirty: Res<SliceDirty>,
     mut dspread: ResMut<DisplaySpread>,
+    mut reslice_w: MessageWriter<ReSlice>,
     mut models: Query<&mut Mesh3d, With<Model>>,
 ) {
     if dspread.0 > 0.0 {
+        // Collapse → the uncut model.
         if let Some(h) = whole.0.clone() {
             for mut m in &mut models {
                 m.0 = h.clone();
             }
             dspread.0 = 0.0;
         }
+    } else if dirty.0 || sliced.0.is_none() {
+        // Explode, but the slice is stale/missing — re-slice (poll_job explodes when it lands).
+        reslice_w.write(ReSlice);
     } else if let Some(h) = sliced.0.clone() {
+        // Explode the up-to-date result, no re-render needed.
         for mut m in &mut models {
             m.0 = h.clone();
         }
         dspread.0 = SPREAD as f32;
+    }
+}
+
+/// Mark the slice stale whenever the cut stack changes, so Explode re-slices.
+fn mark_dirty(cuts: Res<Cuts>, mut dirty: ResMut<SliceDirty>) {
+    if cuts.is_changed() {
+        dirty.0 = true;
     }
 }
 
@@ -750,6 +771,7 @@ fn poll_job(
     mut cuts: ResMut<Cuts>,
     mut whole: ResMut<WholeMesh>,
     mut sliced: ResMut<SlicedMesh>,
+    mut dirty: ResMut<SliceDirty>,
     mut dspread: ResMut<DisplaySpread>,
     models: Query<Entity, With<Model>>,
     mut commands: Commands,
@@ -773,6 +795,7 @@ fn poll_job(
             commands.spawn((Mesh3d(mesh.clone()), MeshMaterial3d(part_material(&mut materials)), Model));
             if is_reslice {
                 sliced.0 = Some(mesh); // remember it so the view toggle can re-show it
+                dirty.0 = false; // this slice matches the current cuts
                 dspread.0 = SPREAD as f32; // now showing the fanned pieces
             } else {
                 whole.0 = Some(mesh); // remember the uncut mesh, so editing can revert to it
@@ -1018,6 +1041,7 @@ fn run_scripted(scene: SceneCfg, actions: Vec<Action>) {
         .init_resource::<ModelBounds>()
         .init_resource::<WholeMesh>()
         .init_resource::<SlicedMesh>()
+        .init_resource::<SliceDirty>()
         .init_resource::<DisplaySpread>()
         .insert_resource(Status("rendering…".into()))
         .insert_resource(ScriptRunner { actions, idx: 0, timer: 0 })
@@ -1035,6 +1059,7 @@ fn run_scripted(scene: SceneCfg, actions: Vec<Action>) {
                 sync_cut_input,
                 sync_dim_labels,
                 update_view_label,
+                mark_dirty,
                 revert_on_edit,
                 run_script,
             ),
@@ -1304,11 +1329,6 @@ fn panel() -> impl Scene {
         Children[
             (Text("fab-gui") ThemedText),
             (Text("rendering…") ThemedText StatusLabel),
-            (
-                @FeathersButton { @caption: bsn!{ Text("Explode") ThemedText ViewToggleLabel } }
-                ViewToggleButton
-                on(toggle_view)
-            ),
             (Text("(no cuts)") ThemedText CutLabel),
             (@FeathersNumberInput { @number_format: NumberFormat::F32 } CutInput),
             (
@@ -1321,6 +1341,11 @@ fn panel() -> impl Scene {
             (
                 @FeathersButton { @caption: bsn!{ Text("Re-slice") ThemedText } }
                 on(|_: On<Activate>, mut w: MessageWriter<ReSlice>| { w.write(ReSlice); })
+            ),
+            (
+                @FeathersButton { @caption: bsn!{ Text("Explode") ThemedText ViewToggleLabel } }
+                ViewToggleButton
+                on(toggle_view)
             ),
         ]
     }

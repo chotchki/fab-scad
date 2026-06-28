@@ -1590,6 +1590,7 @@ fn sync_selected(cuts: Res<Cuts>, rows: Query<(Entity, &RowFor, Has<bevy::ui::Se
 
 /// Render `IconText` captions in the bundled icon font — set the real TextFont once it differs
 /// from the theme default (idempotent, so it catches freshly-spawned rows after a panel rebuild).
+#[allow(clippy::type_complexity)] // a Bevy query filter — not worth a type alias
 fn apply_icon_font(
     icon: Res<IconFont>,
     mut q: Query<(Entity, &mut TextFont), (With<IconText>, Without<IconApplied>)>,

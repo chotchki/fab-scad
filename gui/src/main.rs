@@ -242,6 +242,7 @@ fn kick_job(job: &mut Job, status: &mut Status, cfg: &SceneCfg, reslice: bool, c
 }
 
 /// Poll the in-flight job; when it finishes, swap in the new mesh (and spawn the cut plane once).
+#[allow(clippy::too_many_arguments)] // a Bevy system — params are dependencies, not a smell
 fn poll_job(
     mut job: ResMut<Job>,
     mut status: ResMut<Status>,

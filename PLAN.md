@@ -12,7 +12,7 @@ Driven by `claude-plan-bridge` (FORMATv2). Hand-authored; run
 
 ## Phase 5 - Slicer / workflow GUI (EARLY; dogfood the OpenSCAD wrap)
 - [ ] 5.1 - GUI MVP: load model, set cut planes, click a face to place pegs/connectors, preview piece-vs-bed + orientation
-  - [ ] 5.1.1 - Sim-interaction test harness: scripted input → real systems → screenshot
+  - [x] 5.1.1 - Sim-interaction test harness: scripted input → real systems → screenshot
   - [ ] 5.1.2 - Multi-cut + per-cut axis: set cut lines, rotate/pick the plane
   - [ ] 5.1.3 - Face-pick connector placement: click model → drop bolt/pin on the cut
 - [x] 5.2 - Emit the slicing spec that scad-lib/fab consume; round-trip it through `fab render`

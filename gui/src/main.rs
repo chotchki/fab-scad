@@ -15,7 +15,7 @@ use bevy::{
     asset::RenderAssetUsages,
     camera::RenderTarget,
     feathers::{
-        controls::{FeathersButton, FeathersListRow, FeathersListView},
+        controls::{ButtonVariant, FeathersButton, FeathersListRow, FeathersListView},
         dark_theme::create_dark_theme,
         theme::{ThemeBackgroundColor, ThemedText, UiTheme},
         tokens, FeathersPlugins,
@@ -1399,12 +1399,14 @@ fn plane_card(cuts: &Cuts, axis: Axis) -> impl Scene + 'static {
                 }
             };
             let on_off = if c.enabled { "on" } else { "off" };
+            // On = blue (Primary), off = grey (Normal) — state as colour.
+            let on_variant = if c.enabled { ButtonVariant::Primary } else { ButtonVariant::Normal };
             bsn! {
                 @FeathersListRow
                 RowFor(idx)
                 Children [
                     (Text(pos_text(c.at)) ThemedText),
-                    (@FeathersButton { @caption: bsn!{ Text(on_off) ThemedText } } on(toggle)),
+                    (@FeathersButton { @variant: {on_variant}, @caption: bsn!{ Text(on_off) ThemedText } } on(toggle)),
                     (@FeathersButton { @caption: bsn!{ Text("x") ThemedText } } on(del)),
                 ]
             }
@@ -1433,7 +1435,7 @@ fn plane_card(cuts: &Cuts, axis: Axis) -> impl Scene + 'static {
                 }
                 Children [
                     (Text(format!("{} plane", axis.label())) ThemedText),
-                    (@FeathersButton { @caption: bsn!{ Text("+cut") ThemedText } } on(add)),
+                    (@FeathersButton { @variant: {ButtonVariant::Primary}, @caption: bsn!{ Text("+cut") ThemedText } } on(add)),
                 ]
             ),
             (@FeathersListView { @rows: { Box::new(rows) as Box<dyn SceneList> } }),
@@ -1465,7 +1467,7 @@ fn build_panel(cuts: &Cuts) -> impl Scene + 'static {
             ),
             (Text("rendering") ThemedText StatusLabel),
             (
-                @FeathersButton { @caption: bsn!{ Text("Re-slice") ThemedText } }
+                @FeathersButton { @variant: {ButtonVariant::Primary}, @caption: bsn!{ Text("Re-slice") ThemedText } }
                 on(|_: On<Activate>, mut w: MessageWriter<ReSlice>| { w.write(ReSlice); })
             ),
             (

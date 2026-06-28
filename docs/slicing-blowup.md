@@ -80,8 +80,23 @@ cuts N      nested 2^N      linear N+1      speedup
 At the real 7-cut scale that's a 16x cut in evaluations, and it only diverges further. It
 also makes the `import()` crutch unnecessary (SPEC 6.6): the live model is cheap enough to
 re-render, so pieces can stay a function of source — no frozen intermediate to drift out of
-sync. The slab approach lands in `scad-lib` next (4.2) and replaces the nested-`slice_part()`
-idiom.
+sync.
+
+`scad-lib/slicer.scad` implements this (4.2): `slice(cuts, axis, size, spread)` emits
+`piece_i = children() ∩ slab_i`, the child evaluated once per piece. Re-running the
+benchmark with it (same leaf, cuts along X) flattens the curve completely:
+
+```
+N (cuts)   pieces   linear slice()   nested 2^N (measured)
+    0          1        0.18 s          0.17 s
+    5          6        0.23 s          0.98 s
+   10         11        0.24 s         26.8 s
+   20         21        0.29 s          ~2^20 — intractable
+```
+
+Where nested doubles with every cut, the slab slicer holds flat — ~5 ms per added piece
+against the ~0.18 s fixed render cost. N=20 (21 pieces) renders in 0.29 s; the nested form
+can't get there at all. This replaces the nested-`slice_part()` idiom.
 
 ## Reproduce
 

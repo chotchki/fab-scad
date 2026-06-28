@@ -20,6 +20,7 @@ Driven by `claude-plan-bridge` (FORMATv2). Hand-authored; run
 - [ ] 4.7 - Test coupons: emit a sample joint to tune slop before full prints
 - [ ] 4.8 - Dimensional-integrity check: reassembled pieces == original within tolerance (no shrink)
 
+- [x] 4.9 - Family logo stamp module (scad-lib, BOSL2 attachable)
 ## Phase 5 - Slicer / workflow GUI (EARLY; dogfood the OpenSCAD wrap)
 - [ ] 5.1 - GUI MVP: load model, set cut planes, click a face to place pegs/connectors, preview piece-vs-bed + orientation
 - [ ] 5.2 - Emit the slicing spec that scad-lib/fab consume; round-trip it through `fab render`

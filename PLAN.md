@@ -10,17 +10,6 @@ Driven by `claude-plan-bridge` (FORMATv2). Hand-authored; run
 `claude-plan-bridge baseline` after a rewrite to resync the state file.
 -->
 
-## Phase 4 - Linear slicing (SCAD lib; kill the 2^N blowup)
-- [x] 4.1 - Characterize blowup: confirm nested partition() ~2^N; quantify on window_light_blocker + shoe_holder
-- [x] 4.2 - Linear slicer module in scad-lib: planar slab cuts, piece = source ∩ slab (child once per piece)
-- [x] 4.3 - Cut minimization: fit by rotation/diagonal against printer bed before cutting (printers.toml)
-- [x] 4.4 - Connector lib: heat-set insert + M bolt (default) and teardrop pin + glue; reuse BOSL2 screw_hole/nut_trap; harvest insert specs
-- [x] 4.5 - Per-piece print orientation drives connector orientation so all features print support-free
-- [x] 4.6 - Auto-place connectors on a face + manual override (shared across connector types)
-- [x] 4.7 - Test coupons: emit a sample joint to tune slop before full prints
-- [x] 4.8 - Dimensional-integrity check: reassembled pieces == original within tolerance (no shrink)
-
-- [x] 4.9 - Family logo stamp module (scad-lib, BOSL2 attachable)
 ## Phase 5 - Slicer / workflow GUI (EARLY; dogfood the OpenSCAD wrap)
 - [ ] 5.1 - GUI MVP: load model, set cut planes, click a face to place pegs/connectors, preview piece-vs-bed + orientation
 - [ ] 5.2 - Emit the slicing spec that scad-lib/fab consume; round-trip it through `fab render`

@@ -382,6 +382,7 @@ fn run_windowed(scene: SceneCfg) {
         .add_observer(on_drag_end)
         .add_observer(on_click)
         .add_observer(on_place_click)
+        .add_observer(place_on_profile_click)
         .add_systems(Startup, (setup_windowed, load_icons))
         .add_systems(
             Update,
@@ -449,9 +450,10 @@ fn orbit(
     mut motion: MessageReader<MouseMotion>,
     mut wheel: MessageReader<MouseWheel>,
     dragging: Res<DraggingCut>,
+    edit: Res<EditCut>,
 ) {
-    if dragging.0 {
-        // A cut plane has the pointer — don't orbit underneath the drag.
+    if dragging.0 || edit.0.is_some() {
+        // A cut plane has the pointer, or the connector editor holds a fixed face-on view.
         motion.clear();
         wheel.clear();
         return;
@@ -606,6 +608,28 @@ fn on_place_click(
     status.0 = format!("placed connector on {} cut", c.axis.label());
 }
 
+/// In the 2D connector editor: a click on the (face-on) cut plane drops a connector on the cut
+/// being edited, at the clicked point — the precise picking the assembled-model click can't give.
+fn place_on_profile_click(
+    ev: On<Pointer<Click>>,
+    editing: Res<EditCut>,
+    planes: Query<&CutPlaneViz>,
+    cuts: Res<Cuts>,
+    mut conns: ResMut<Conns>,
+) {
+    let Some(i) = editing.0 else {
+        return;
+    };
+    if ev.event.button != PointerButton::Primary || planes.get(ev.entity).is_err() {
+        return;
+    }
+    let (Some(hit), Some(c)) = (ev.event.hit.position, cuts.list.get(i)) else {
+        return;
+    };
+    let others: Vec<usize> = (0..3).filter(|&a| a != c.axis.index()).collect();
+    conns.list.push(PlacedConn { cut: i, pos: [comp(hit, others[0]), comp(hit, others[1])] });
+}
+
 /// The Explode/Collapse button: collapse to the uncut model, or explode the last sliced result —
 /// auto-slicing first if the cuts changed (or were never sliced), so it works without Re-slice.
 fn toggle_view(
@@ -718,12 +742,15 @@ fn sync_conn_markers(
 /// React to opening/closing a cut's connector editor: hide the model + compute the cut's
 /// cross-section (blocking, but fast — projects the already-rendered preview STL, no re-render),
 /// or restore the model when closed. (TODO: move off-thread + recompute when the cut moves.)
+#[allow(clippy::too_many_arguments)]
 fn edit_mode(
     edit: Res<EditCut>,
     cuts: Res<Cuts>,
     cfg: Res<SceneCfg>,
     mut xsection: ResMut<XSection>,
     mut models: Query<&mut Visibility, With<Model>>,
+    mut cam: Query<(&mut Transform, &mut Orbit)>,
+    bounds: Res<ModelBounds>,
     mut status: ResMut<Status>,
 ) {
     if !edit.is_changed() {
@@ -743,6 +770,20 @@ fn edit_mode(
         xsection.0 = None;
         return;
     };
+    // Face the camera square onto the cut (Z avoids the up=Z gimbal with a near-top-down pitch).
+    // Set the transform here directly — `orbit` yields while editing, so it won't apply it for us.
+    if let Ok((mut t, mut o)) = cam.single_mut() {
+        use std::f32::consts::FRAC_PI_2;
+        (o.yaw, o.pitch) = match c.axis {
+            Axis::X => (0.0, 0.0),
+            Axis::Y => (FRAC_PI_2, 0.0),
+            Axis::Z => (-FRAC_PI_2, FRAC_PI_2 - 0.01),
+        };
+        // Look at the cut's centre: model centre in the non-axis dims, `at` along the axis.
+        let center = bounds.0.map(|(mn, mx)| (mn + mx) * 0.5).unwrap_or(Vec3::ZERO);
+        o.target = with_comp(center, c.axis.index(), c.at);
+        *t = orbit_transform(o.yaw, o.pitch, o.radius, o.target);
+    }
     let stl = fab::whole_stl(&src, &cfg.tmp);
     match fab::cross_section(cfg.root.as_deref(), &stl, c.axis.index(), c.at as f64, &cfg.tmp) {
         Ok(loops) => {
@@ -1467,6 +1508,7 @@ fn setup_script(
         Camera3d::default(),
         RenderTarget::Image(target.clone().into()),
         orbit_transform(-0.7, 0.5, radius, Vec3::ZERO),
+        Orbit { yaw: -0.7, pitch: 0.5, radius, target: Vec3::ZERO },
         bevy::ui::IsDefaultUiCamera,
     ));
     commands.insert_resource(RenderTargetImage(target));

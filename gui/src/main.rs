@@ -168,10 +168,6 @@ struct Conns {
     list: Vec<PlacedConn>,
 }
 
-/// True when "Place connector" is armed — a click on the model drops one on the nearest cut.
-#[derive(Resource, Default)]
-struct PlaceMode(bool);
-
 /// Which cut's 2D connector editor is open (None = normal 3D view). When set, the model hides and
 /// the cut's cross-section profile is shown face-on for precise picking.
 #[derive(Resource, Default)]
@@ -253,12 +249,12 @@ struct SliceDirty(bool);
 #[derive(Resource)]
 struct IconFont(Handle<Font>);
 
-/// Material Icons codepoints used on buttons.
+/// Material Symbols codepoints used on buttons (subset baked into gui/assets/fonts).
 const ICON_DELETE: &str = "\u{e872}"; // trash can
 const ICON_ADD: &str = "\u{e145}"; // plus
 const ICON_ON: &str = "\u{e8f4}"; // eye (visible)
 const ICON_OFF: &str = "\u{e8f5}"; // eye-off (hidden)
-const ICON_CONN: &str = "\u{e3c9}"; // edit (pencil) — open this cut's connector editor
+const ICON_CONN: &str = "\u{f35a}"; // plug_connect — open this cut's connector editor
 
 /// Marks the panel's status text so a system can update it.
 #[derive(Component, Clone, Default)]
@@ -268,11 +264,6 @@ struct StatusLabel;
 struct ViewToggleButton;
 #[derive(Component, Clone, Default)]
 struct ViewToggleLabel;
-/// The "Place connector" arm/disarm button + its caption (relabelled to show the armed state).
-#[derive(Component, Clone, Default)]
-struct PlaceButton;
-#[derive(Component, Clone, Default)]
-struct PlaceLabel;
 /// A 3D marker (small sphere) for a placed connector, by its index in the `Conns` list.
 #[derive(Component)]
 struct ConnMarker(usize);
@@ -351,7 +342,7 @@ fn assets_dir() -> AssetPlugin {
 
 /// Load the bundled icon font (Startup, before the panel first builds).
 fn load_icons(asset_server: Res<AssetServer>, mut commands: Commands) {
-    commands.insert_resource(IconFont(asset_server.load("fonts/MaterialIcons-Regular.ttf")));
+    commands.insert_resource(IconFont(asset_server.load("fonts/MaterialSymbols-subset.ttf")));
 }
 
 // ---- windowed -------------------------------------------------------------------------
@@ -367,7 +358,6 @@ fn run_windowed(scene: SceneCfg) {
         .init_resource::<Conns>()
         .init_resource::<EditCut>()
         .init_resource::<XSection>()
-        .init_resource::<PlaceMode>()
         .init_resource::<ModelBounds>()
         .init_resource::<DraggingCut>()
         .init_resource::<WholeMesh>()
@@ -381,7 +371,6 @@ fn run_windowed(scene: SceneCfg) {
         .add_observer(on_drag)
         .add_observer(on_drag_end)
         .add_observer(on_click)
-        .add_observer(on_place_click)
         .add_observer(place_on_profile_click)
         .add_systems(Startup, (setup_windowed, load_icons))
         .add_systems(
@@ -395,7 +384,6 @@ fn run_windowed(scene: SceneCfg) {
                 sync_overlay_visuals,
                 sync_dim_labels,
                 update_view_label,
-                update_place_label,
                 sync_conn_markers,
                 edit_mode,
                 draw_profile,
@@ -577,51 +565,6 @@ fn toggle_connector(conns: &mut Conns, cut: usize, pos: [f32; 2]) {
     }
 }
 
-/// When placement is armed, a click on the model body drops a connector on the nearest enabled
-/// cut, at the clicked point projected onto that cut's plane. Editing (collapsed) view only.
-#[allow(clippy::too_many_arguments)]
-fn on_place_click(
-    ev: On<Pointer<Click>>,
-    place: Res<PlaceMode>,
-    dspread: Res<DisplaySpread>,
-    models: Query<(), With<Model>>,
-    cuts: Res<Cuts>,
-    mut conns: ResMut<Conns>,
-    mut status: ResMut<Status>,
-) {
-    if !place.0 || ev.event.button != PointerButton::Primary || dspread.0 > 0.0 {
-        return;
-    }
-    if !models.contains(ev.entity) {
-        return; // only the model body, not a cut plane or the bed
-    }
-    let Some(hit) = ev.event.hit.position else {
-        return;
-    };
-    // Nearest enabled cut by perpendicular distance to its plane.
-    let best = cuts
-        .list
-        .iter()
-        .enumerate()
-        .filter(|(_, c)| c.enabled)
-        .min_by(|(_, a), (_, b)| {
-            let da = (comp(hit, a.axis.index()) - a.at).abs();
-            let db = (comp(hit, b.axis.index()) - b.at).abs();
-            da.total_cmp(&db)
-        });
-    let Some((idx, c)) = best else {
-        status.0 = "no enabled cut to place on".into();
-        return;
-    };
-    // pos = the hit's two non-axis coords (ascending dim order — matches the driver projection).
-    let ai = c.axis.index();
-    let others: Vec<usize> = (0..3).filter(|&a| a != ai).collect();
-    let before = conns.list.len();
-    toggle_connector(&mut conns, idx, [comp(hit, others[0]), comp(hit, others[1])]);
-    let verb = if conns.list.len() < before { "removed" } else { "placed" };
-    status.0 = format!("{verb} connector on {} cut", c.axis.label());
-}
-
 /// In the 2D connector editor: a click on the (face-on) cut plane drops a connector on the cut
 /// being edited, at the clicked point — the precise picking the assembled-model click can't give.
 fn place_on_profile_click(
@@ -688,17 +631,6 @@ fn update_view_label(dspread: Res<DisplaySpread>, mut q: Query<&mut Text, With<V
         return;
     }
     let label = if dspread.0 > 0.0 { "Collapse" } else { "Explode" };
-    for mut t in &mut q {
-        *t = Text::new(label);
-    }
-}
-
-/// Relabel the Place button to show whether placement is armed.
-fn update_place_label(place: Res<PlaceMode>, mut q: Query<&mut Text, With<PlaceLabel>>) {
-    if !place.is_changed() {
-        return;
-    }
-    let label = if place.0 { "Placing: click model" } else { "Place connector" };
     for mut t in &mut q {
         *t = Text::new(label);
     }
@@ -1265,7 +1197,6 @@ fn run_screenshot(scene: SceneCfg, png: PathBuf) {
         .init_resource::<Conns>()
         .init_resource::<EditCut>()
         .init_resource::<XSection>()
-        .init_resource::<PlaceMode>()
         .init_resource::<ModelBounds>()
         .init_resource::<DraggingCut>()
         .init_resource::<WholeMesh>()
@@ -1466,7 +1397,6 @@ fn run_scripted(scene: SceneCfg, actions: Vec<Action>) {
         .init_resource::<Conns>()
         .init_resource::<EditCut>()
         .init_resource::<XSection>()
-        .init_resource::<PlaceMode>()
         .init_resource::<ModelBounds>()
         .init_resource::<WholeMesh>()
         .init_resource::<SlicedMesh>()
@@ -1487,7 +1417,6 @@ fn run_scripted(scene: SceneCfg, actions: Vec<Action>) {
                 sync_overlay_visuals,
                 sync_dim_labels,
                 update_view_label,
-                update_place_label,
                 sync_conn_markers,
                 edit_mode,
                 draw_profile,
@@ -1900,11 +1829,6 @@ fn build_panel(cuts: &Cuts) -> impl Scene + 'static {
                 @FeathersButton { @caption: bsn!{ Text("Explode") ThemedText ViewToggleLabel } }
                 ViewToggleButton
                 on(toggle_view)
-            ),
-            (
-                @FeathersButton { @caption: bsn!{ Text("Place connector") ThemedText PlaceLabel } }
-                PlaceButton
-                on(|_: On<Activate>, mut place: ResMut<PlaceMode>| { place.0 = !place.0; })
             ),
         ]
     }

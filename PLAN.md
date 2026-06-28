@@ -11,8 +11,8 @@ Driven by `claude-plan-bridge` (FORMATv2). Hand-authored; run
 -->
 
 ## Phase 4 - Linear slicing (SCAD lib; kill the 2^N blowup)
-- [ ] 4.1 - Characterize blowup: confirm nested partition() ~2^N; quantify on window_light_blocker + shoe_holder
-- [ ] 4.2 - Linear slicer module in scad-lib: planar slab cuts, piece = source ∩ slab (child once per piece)
+- [x] 4.1 - Characterize blowup: confirm nested partition() ~2^N; quantify on window_light_blocker + shoe_holder
+- [x] 4.2 - Linear slicer module in scad-lib: planar slab cuts, piece = source ∩ slab (child once per piece)
 - [ ] 4.3 - Cut minimization: fit by rotation/diagonal against printer bed before cutting (printers.toml)
 - [ ] 4.4 - Connector lib: heat-set insert + M bolt (default) and teardrop pin + glue; reuse BOSL2 screw_hole/nut_trap; harvest insert specs
 - [ ] 4.5 - Per-piece print orientation drives connector orientation so all features print support-free

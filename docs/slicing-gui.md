@@ -105,8 +105,10 @@ any window and is the thing the GUI stands on:
 
 - **Picking quality** — Bevy ray-mesh picking on a dense STL: fast enough? (Decimate the
   preview mesh — 7.1's decimation may land early here.)
-- **WASM bundle size** — Bevy's web build is hefty; fine for the desktop tool, but trim
-  features / lazy-load it for the 7.1 site viewer.
+- **WASM bundle size** — Bevy's web build is hefty, so on the site (7.1) the viewer is
+  **lazy-loaded, not shipped on page load**: only on pages that have a model, and only after
+  the visitor asks to interact. Show the static cover image first (7.2), then swap in the
+  Bevy/WASM viewer on click. The heavy bundle is opt-in, so normal page loads stay fast.
 - **Cut-plane coords** — the GUI thinks in model space; the spec stores model-space `at`; the
   slicer is centered-origin. Pin the coordinate convention in 5.2 so there's one source of truth.
 - **Per-piece orientation** — 4.5 left "which lay" to here; the GUI is where you actually choose

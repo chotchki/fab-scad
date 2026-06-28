@@ -22,6 +22,11 @@ use bevy::{
     image::Image,
     input::mouse::{MouseMotion, MouseWheel},
     mesh::Indices,
+    picking::{
+        events::{Drag, DragEnd, DragStart, Pointer},
+        mesh_picking::MeshPickingPlugin,
+        pointer::PointerButton,
+    },
     prelude::*,
     render::{
         render_resource::{PrimitiveTopology, TextureFormat, TextureUsages},
@@ -75,6 +80,10 @@ struct CutPlane(f32);
 #[derive(Resource, Default)]
 struct ModelBounds(Option<(Vec3, Vec3)>);
 
+/// True while a cut plane is being dragged, so the camera orbit yields to it.
+#[derive(Resource, Default)]
+struct DraggingCut(bool);
+
 /// Marks the panel's status text so a system can update it.
 #[derive(Component, Clone, Default)]
 struct StatusLabel;
@@ -116,15 +125,19 @@ fn flag_value(args: &[String], flag: &str) -> Option<String> {
 
 fn run_windowed(scene: SceneCfg) {
     App::new()
-        .add_plugins((DefaultPlugins, FeathersPlugins))
+        .add_plugins((DefaultPlugins, FeathersPlugins, MeshPickingPlugin))
         .insert_resource(UiTheme(create_dark_theme()))
         .insert_resource(ClearColor(Color::srgb(0.10, 0.10, 0.12)))
         .insert_resource(scene)
         .init_resource::<Job>()
         .init_resource::<CutPlane>()
         .init_resource::<ModelBounds>()
+        .init_resource::<DraggingCut>()
         .insert_resource(Status("rendering…".into()))
         .add_message::<ReSlice>()
+        .add_observer(on_drag_start)
+        .add_observer(on_drag)
+        .add_observer(on_drag_end)
         .add_systems(Startup, (setup_windowed, ui_root.spawn()))
         .add_systems(Update, (orbit, request_reslice, poll_job, update_status, update_cut))
         .run();
@@ -165,7 +178,14 @@ fn orbit(
     buttons: Res<ButtonInput<MouseButton>>,
     mut motion: MessageReader<MouseMotion>,
     mut wheel: MessageReader<MouseWheel>,
+    dragging: Res<DraggingCut>,
 ) {
+    if dragging.0 {
+        // A cut plane has the pointer — don't orbit underneath the drag.
+        motion.clear();
+        wheel.clear();
+        return;
+    }
     let Ok((mut t, mut o)) = cam.single_mut() else {
         return;
     };
@@ -206,6 +226,69 @@ fn update_cut(
     for mut text in &mut labels {
         *text = Text::new(format!("cut x = {cut_x:.1}"));
     }
+}
+
+/// Begin dragging when a left-press lands on the cut plane, so the camera orbit yields to it.
+fn on_drag_start(
+    ev: On<Pointer<DragStart>>,
+    planes: Query<(), With<CutPlaneViz>>,
+    mut dragging: ResMut<DraggingCut>,
+) {
+    if ev.event.button == PointerButton::Primary && planes.contains(ev.entity) {
+        dragging.0 = true;
+    }
+}
+
+/// Drag the cut plane along its axis: cast a ray from the cursor, find where it's closest to the
+/// cut axis, and feed that back through the slider — so update_cut still owns CutPlane + overlay.
+fn on_drag(
+    ev: On<Pointer<Drag>>,
+    planes: Query<(), With<CutPlaneViz>>,
+    dragging: Res<DraggingCut>,
+    bounds: Res<ModelBounds>,
+    cam: Query<(&Camera, &GlobalTransform)>,
+    sliders: Query<Entity, With<CutSlider>>,
+    mut commands: Commands,
+) {
+    if !dragging.0 || !planes.contains(ev.entity) {
+        return;
+    }
+    let Some((min, max)) = bounds.0 else {
+        return;
+    };
+    let Ok((camera, cam_tf)) = cam.single() else {
+        return;
+    };
+    let Ok(ray) = camera.viewport_to_world(cam_tf, ev.pointer_location.position) else {
+        return;
+    };
+    // Axis line through the model centre, along X (the only cut axis for now).
+    let p0 = Vec3::new(0.0, (min.y + max.y) * 0.5, (min.z + max.z) * 0.5);
+    let cut_at =
+        (p0.x + closest_on_axis(p0, Vec3::X, ray.origin, *ray.direction)).clamp(min.x, max.x);
+    let span = (max.x - min.x).max(1e-3);
+    let pct = ((cut_at - min.x) / span * 100.0).clamp(0.0, 100.0);
+    if let Ok(e) = sliders.single() {
+        commands.entity(e).insert(SliderValue(pct));
+    }
+}
+
+fn on_drag_end(_ev: On<Pointer<DragEnd>>, mut dragging: ResMut<DraggingCut>) {
+    dragging.0 = false;
+}
+
+/// Offset along `axis` (a unit vector through `p0`) of the point on that line closest to the ray
+/// (`ray_d` unit). The classic skew-line solution; pure, so it's unit-tested.
+fn closest_on_axis(p0: Vec3, axis: Vec3, ray_o: Vec3, ray_d: Vec3) -> f32 {
+    let w0 = p0 - ray_o;
+    let b = axis.dot(ray_d);
+    let d = axis.dot(w0);
+    let e = ray_d.dot(w0);
+    let denom = 1.0 - b * b;
+    if denom.abs() < 1e-6 {
+        return 0.0; // ray ~parallel to the axis — no stable solution
+    }
+    (b * e - d) / denom
 }
 
 /// Re-slice button → start a background slice job at the current cut (ignored if one's running).
@@ -734,5 +817,24 @@ fn panel() -> impl Scene {
                 on(|_: On<Activate>, mut w: MessageWriter<ReSlice>| { w.write(ReSlice); })
             ),
         ]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn drag_ray_maps_to_axis_coordinate() {
+        // A ray pointing straight down (-Z) through x=5 is closest to the X axis at x=5.
+        let sc = closest_on_axis(Vec3::ZERO, Vec3::X, Vec3::new(5.0, 0.0, 10.0), Vec3::NEG_Z);
+        assert!((sc - 5.0).abs() < 1e-4, "expected 5.0, got {sc}");
+    }
+
+    #[test]
+    fn drag_ray_parallel_to_axis_is_safe() {
+        // Ray parallel to the axis is degenerate — return 0, never NaN.
+        let sc = closest_on_axis(Vec3::ZERO, Vec3::X, Vec3::new(0.0, 1.0, 0.0), Vec3::X);
+        assert_eq!(sc, 0.0);
     }
 }

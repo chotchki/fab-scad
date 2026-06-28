@@ -8,4 +8,4 @@ license = "MIT"
 [dependencies]
 fab-scad = { path = ".." }
 anyhow = "1"
-bevy = { version = "0.19", features = ["bevy_feathers"] }
+bevy = { version = "0.19", features = ["bevy_feathers", "bevy_picking", "mesh_picking"] }

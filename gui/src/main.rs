@@ -1,34 +1,71 @@
-//! fab-gui — the slicing GUI (Phase 5.1). A Bevy viewport over a `fab`-rendered mesh with the
-//! printer bed for reference; cut-plane dragging, connector placement, and the Feathers UI
-//! build out from here. The GUI shares fab's types (printer beds, the slicing spec) via the
-//! `fab_scad` lib and drives geometry by calling `fab`.
+//! fab-gui — the slicing GUI (Phase 5.1). A Bevy 0.19 viewport over a `fab`-rendered mesh
+//! with the printer bed for reference. Two entry modes:
 //!
-//! Run: `cargo run -p fab-gui -- path/to/part.stl`   (no arg → a placeholder block)
+//!   cargo run -p fab-gui -- part.stl                 # windowed: orbit, Feathers UI
+//!   cargo run -p fab-gui -- --screenshot out.png part.stl   # headless render to PNG (self-verify)
+//!
+//! The screenshot mode is the tooling that lets a display-less environment SEE the viewport.
+//! Geometry stays in OpenSCAD (via `fab`); the GUI loads the rendered STL and owns the view.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use bevy::{
+    app::ScheduleRunnerPlugin,
     asset::RenderAssetUsages,
+    camera::RenderTarget,
     feathers::{dark_theme::create_dark_theme, theme::UiTheme, FeathersPlugins},
+    image::Image,
     input::mouse::{MouseMotion, MouseWheel},
     mesh::Indices,
     prelude::*,
-    render::render_resource::PrimitiveTopology,
+    render::{
+        render_resource::{PrimitiveTopology, TextureFormat, TextureUsages},
+        view::screenshot::{save_to_disk, Screenshot},
+    },
+    window::ExitCondition,
+    winit::WinitPlugin,
 };
 
 mod stl;
 
+/// Scene inputs shared by both modes (model STL path + printer bed footprint).
+#[derive(Resource, Clone)]
+struct Scene {
+    model: Option<String>,
+    bed: [f32; 2],
+}
+
 fn main() {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let model = args.iter().find(|a| a.ends_with(".stl")).cloned();
+    let bed = bed_size().unwrap_or([256.0; 3]);
+    let scene = Scene {
+        model,
+        bed: [bed[0] as f32, bed[1] as f32],
+    };
+    match flag_value(&args, "--screenshot") {
+        Some(png) => run_screenshot(scene, PathBuf::from(png)),
+        None => run_windowed(scene),
+    }
+}
+
+fn flag_value(args: &[String], flag: &str) -> Option<String> {
+    args.iter().position(|a| a == flag).and_then(|i| args.get(i + 1)).cloned()
+}
+
+// ---- windowed -------------------------------------------------------------------------
+
+fn run_windowed(scene: Scene) {
     App::new()
         .add_plugins((DefaultPlugins, FeathersPlugins))
         .insert_resource(UiTheme(create_dark_theme()))
         .insert_resource(ClearColor(Color::srgb(0.10, 0.10, 0.12)))
-        .add_systems(Startup, setup)
+        .insert_resource(scene)
+        .add_systems(Startup, setup_windowed)
         .add_systems(Update, orbit)
         .run();
 }
 
-/// Orbit state for the camera. Z-up, matching the printer / OpenSCAD frame.
 #[derive(Component)]
 struct Orbit {
     yaw: f32,
@@ -36,64 +73,14 @@ struct Orbit {
     radius: f32,
 }
 
-fn setup(
+fn setup_windowed(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    scene: Res<Scene>,
 ) {
-    // The model: an STL path on the CLI (a `fab`-rendered part), else a placeholder block.
-    let model = match std::env::args().nth(1) {
-        Some(p) if Path::new(&p).exists() => match stl::load_binary_stl(Path::new(&p)) {
-            Ok(s) => {
-                info!("loaded {p} ({} tris)", s.positions.len() / 3);
-                meshes.add(build_mesh(&s))
-            }
-            Err(e) => {
-                error!("loading {p}: {e:#}");
-                meshes.add(Cuboid::new(60.0, 40.0, 30.0))
-            }
-        },
-        _ => meshes.add(Cuboid::new(60.0, 40.0, 30.0)),
-    };
-    commands.spawn((
-        Mesh3d(model),
-        MeshMaterial3d(materials.add(StandardMaterial {
-            base_color: Color::srgb(0.90, 0.74, 0.20),
-            perceptual_roughness: 0.7,
-            ..default()
-        })),
-    ));
-
-    // Printer bed from fab-scad's printers.toml (the SHARED lib) — reference footprint at z=0.
-    let bed = bed_size().unwrap_or([256.0; 3]);
-    let (bx, by) = (bed[0] as f32, bed[1] as f32);
-    commands.spawn((
-        Mesh3d(meshes.add(Cuboid::new(bx, by, 1.0))),
-        MeshMaterial3d(materials.add(StandardMaterial {
-            base_color: Color::srgb(0.18, 0.18, 0.22),
-            ..default()
-        })),
-        Transform::from_xyz(0.0, 0.0, -0.5),
-    ));
-
-    // Key + fill directional lights (Z-up; no AmbientLight, to keep the API surface small).
-    commands.spawn((
-        DirectionalLight {
-            illuminance: 6000.0,
-            ..default()
-        },
-        Transform::from_xyz(80.0, -120.0, 160.0).looking_at(Vec3::ZERO, Vec3::Z),
-    ));
-    commands.spawn((
-        DirectionalLight {
-            illuminance: 2000.0,
-            ..default()
-        },
-        Transform::from_xyz(-120.0, 100.0, 60.0).looking_at(Vec3::ZERO, Vec3::Z),
-    ));
-
-    // Orbit camera (Z-up). `orbit` drives its transform each frame.
-    let radius = bx.max(by).max(80.0);
+    spawn_world(&mut commands, &mut meshes, &mut materials, &scene);
+    let radius = scene.bed[0].max(scene.bed[1]).max(80.0);
     commands.spawn((
         Camera3d::default(),
         Transform::default(),
@@ -103,8 +90,6 @@ fn setup(
             radius,
         },
     ));
-
-    // Minimal overlay (plain bevy_ui for now; Feathers controls land next).
     commands.spawn((
         Node {
             position_type: PositionType::Absolute,
@@ -112,11 +97,10 @@ fn setup(
             left: Val::Px(8.0),
             ..default()
         },
-        Text::new("fab-gui — drag: orbit \u{b7} scroll: zoom"),
+        Text::new("fab-gui \u{2014} drag: orbit \u{b7} scroll: zoom"),
     ));
 }
 
-/// Left-drag orbits, scroll zooms. Camera stays aimed at the origin, Z-up.
 fn orbit(
     mut cam: Query<(&mut Transform, &mut Orbit)>,
     buttons: Res<ButtonInput<MouseButton>>,
@@ -137,13 +121,164 @@ fn orbit(
     for ev in wheel.read() {
         o.radius = (o.radius * (1.0 - ev.y * 0.1)).clamp(10.0, 4000.0);
     }
-    let cp = o.pitch.cos();
-    let pos = Vec3::new(
-        o.radius * cp * o.yaw.cos(),
-        o.radius * cp * o.yaw.sin(),
-        o.radius * o.pitch.sin(),
-    );
-    *t = Transform::from_translation(pos).looking_at(Vec3::ZERO, Vec3::Z);
+    *t = orbit_transform(o.yaw, o.pitch, o.radius);
+}
+
+// ---- headless screenshot --------------------------------------------------------------
+
+#[derive(Resource)]
+struct Shot {
+    target: Handle<Image>,
+    png: PathBuf,
+    frame: u32,
+    captured: bool,
+}
+
+fn run_screenshot(scene: Scene, png: PathBuf) {
+    App::new()
+        .add_plugins(
+            DefaultPlugins
+                .set(WindowPlugin {
+                    primary_window: None,
+                    exit_condition: ExitCondition::DontExit,
+                    ..default()
+                })
+                .disable::<WinitPlugin>(),
+        )
+        .add_plugins(ScheduleRunnerPlugin::run_loop(
+            std::time::Duration::from_secs_f64(1.0 / 60.0),
+        ))
+        .insert_resource(ClearColor(Color::srgb(0.10, 0.10, 0.12)))
+        .insert_resource(scene)
+        .insert_resource(ScreenshotPng(png))
+        .add_systems(Startup, setup_offscreen)
+        .add_systems(Update, capture_then_exit)
+        .run();
+}
+
+#[derive(Resource)]
+struct ScreenshotPng(PathBuf);
+
+fn setup_offscreen(
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut images: ResMut<Assets<Image>>,
+    scene: Res<Scene>,
+    png: Res<ScreenshotPng>,
+) {
+    spawn_world(&mut commands, &mut meshes, &mut materials, &scene);
+
+    // Offscreen render target the camera draws into and we screenshot.
+    let (w, h) = (960u32, 720u32);
+    let mut img = Image::new_target_texture(w, h, TextureFormat::Rgba8UnormSrgb, None);
+    img.texture_descriptor.usage |= TextureUsages::COPY_SRC;
+    let target = images.add(img);
+
+    let radius = scene.bed[0].max(scene.bed[1]).max(80.0);
+    commands.spawn((
+        Camera3d::default(),
+        RenderTarget::Image(target.clone().into()),
+        orbit_transform(-0.7, 0.5, radius),
+    ));
+
+    commands.insert_resource(Shot {
+        target,
+        png: png.0.clone(),
+        frame: 0,
+        captured: false,
+    });
+}
+
+fn capture_then_exit(
+    mut commands: Commands,
+    mut shot: ResMut<Shot>,
+    mut exit: MessageWriter<AppExit>,
+) {
+    shot.frame += 1;
+    // Let a few frames render, then screenshot the target image and save it.
+    if !shot.captured && shot.frame >= 3 {
+        let png = shot.png.clone();
+        commands
+            .spawn(Screenshot::image(shot.target.clone()))
+            .observe(save_to_disk(png.clone()));
+        shot.captured = true;
+        info!("capturing -> {}", png.display());
+    }
+    // Give the async GPU readback + save time to finish, then exit.
+    if shot.captured && shot.frame >= 30 {
+        if shot.png.exists() {
+            info!("saved {}", shot.png.display());
+        } else {
+            error!("screenshot did not appear at {}", shot.png.display());
+        }
+        exit.write(AppExit::Success);
+    }
+}
+
+// ---- shared scene ---------------------------------------------------------------------
+
+fn spawn_world(
+    commands: &mut Commands,
+    meshes: &mut Assets<Mesh>,
+    materials: &mut Assets<StandardMaterial>,
+    scene: &Scene,
+) {
+    // Model: the STL (a `fab`-rendered part), else a placeholder block.
+    let model = match scene.model.as_deref() {
+        Some(p) if Path::new(p).exists() => match stl::load_stl(Path::new(p)) {
+            Ok(s) => {
+                info!("loaded {p} ({} tris)", s.positions.len() / 3);
+                meshes.add(build_mesh(&s))
+            }
+            Err(e) => {
+                error!("loading {p}: {e:#}");
+                meshes.add(Cuboid::new(60.0, 40.0, 30.0))
+            }
+        },
+        _ => meshes.add(Cuboid::new(60.0, 40.0, 30.0)),
+    };
+    commands.spawn((
+        Mesh3d(model),
+        MeshMaterial3d(materials.add(StandardMaterial {
+            base_color: Color::srgb(0.90, 0.74, 0.20),
+            perceptual_roughness: 0.7,
+            ..default()
+        })),
+    ));
+
+    // Printer bed reference at z=0 (from the shared fab_scad::printers lib).
+    commands.spawn((
+        Mesh3d(meshes.add(Cuboid::new(scene.bed[0], scene.bed[1], 1.0))),
+        MeshMaterial3d(materials.add(StandardMaterial {
+            base_color: Color::srgb(0.18, 0.18, 0.22),
+            ..default()
+        })),
+        Transform::from_xyz(0.0, 0.0, -0.5),
+    ));
+
+    // Key + fill directional lights (Z-up).
+    commands.spawn((
+        DirectionalLight {
+            illuminance: 6000.0,
+            ..default()
+        },
+        Transform::from_xyz(80.0, -120.0, 160.0).looking_at(Vec3::ZERO, Vec3::Z),
+    ));
+    commands.spawn((
+        DirectionalLight {
+            illuminance: 2000.0,
+            ..default()
+        },
+        Transform::from_xyz(-120.0, 100.0, 60.0).looking_at(Vec3::ZERO, Vec3::Z),
+    ));
+}
+
+/// Camera transform orbiting the origin at (yaw, pitch, radius), Z-up.
+fn orbit_transform(yaw: f32, pitch: f32, radius: f32) -> Transform {
+    let cp = pitch.cos();
+    let pos = Vec3::new(radius * cp * yaw.cos(), radius * cp * yaw.sin(), radius * pitch.sin());
+    Transform::from_translation(pos).looking_at(Vec3::ZERO, Vec3::Z)
 }
 
 fn build_mesh(s: &stl::StlMesh) -> Mesh {

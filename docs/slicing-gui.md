@@ -51,8 +51,9 @@ Two payoffs past "it's Rust":
 - **bsn.** Bevy 0.19's scene notation gives a declarative way to describe the viewport scene
   and UI — a direction worth leaning into rather than hand-wiring widgets.
 
-UI panels (cut/connector controls): Bevy's bsn-driven UI, or `bevy_egui` if its immediate-mode
-panels are faster to stand up — settle that when 5.1 lands; it doesn't gate the architecture.
+UI panels (cut/connector controls): **bsn + Feather** — Bevy's native scene-notation UI plus
+its widget set (chotchki's call; we'll see how it goes when 5.1 lands). `bevy_egui` stays the
+fallback if Feather is too green. Either way it doesn't gate the architecture.
 
 Rejected: **Tauri + web/Three.js** (splits the stack into JS, mirrors the spec types in TS).
 Plain **egui + three-d** was the other Rust option — lighter, but loses the web-unification and

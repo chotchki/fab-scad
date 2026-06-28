@@ -258,7 +258,7 @@ const ICON_DELETE: &str = "\u{e872}"; // trash can
 const ICON_ADD: &str = "\u{e145}"; // plus
 const ICON_ON: &str = "\u{e8f4}"; // eye (visible)
 const ICON_OFF: &str = "\u{e8f5}"; // eye-off (hidden)
-const ICON_CONN: &str = "\u{e3a1}"; // grain (scattered dots) — edit this cut's connectors
+const ICON_CONN: &str = "\u{e3c9}"; // edit (pencil) — open this cut's connector editor
 
 /// Marks the panel's status text so a system can update it.
 #[derive(Component, Clone, Default)]
@@ -399,10 +399,7 @@ fn run_windowed(scene: SceneCfg) {
                 sync_conn_markers,
                 edit_mode,
                 draw_profile,
-                push_fields,
-                sync_selected,
-                apply_icon_font,
-                rebuild_panel,
+                (push_fields, sync_selected, apply_icon_font, rebuild_panel).chain(),
                 nudge_buttons,
                 mark_dirty,
                 revert_on_edit,
@@ -1262,7 +1259,7 @@ fn run_screenshot(scene: SceneCfg, png: PathBuf) {
         .insert_resource(Status("rendering".into()))
         .add_message::<ReSlice>()
         .add_systems(Startup, (setup_offscreen, load_icons))
-        .add_systems(Update, (capture_then_exit, push_fields, sync_selected, apply_icon_font, rebuild_panel, update_status))
+        .add_systems(Update, (capture_then_exit, (push_fields, sync_selected, apply_icon_font, rebuild_panel).chain(), update_status))
         .run();
 }
 
@@ -1477,10 +1474,7 @@ fn run_scripted(scene: SceneCfg, actions: Vec<Action>) {
                 sync_conn_markers,
                 edit_mode,
                 draw_profile,
-                push_fields,
-                sync_selected,
-                apply_icon_font,
-                rebuild_panel,
+                (push_fields, sync_selected, apply_icon_font, rebuild_panel).chain(),
                 mark_dirty,
                 revert_on_edit,
                 run_script,

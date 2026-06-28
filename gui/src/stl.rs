@@ -47,7 +47,7 @@ fn parse_ascii(text: &str) -> Result<StlMesh> {
     let mut normals = Vec::new();
     let mut normal = [0.0f32; 3];
     let mut tok = text.split_whitespace();
-    let mut three = |tok: &mut std::str::SplitWhitespace| -> Result<[f32; 3]> {
+    let three = |tok: &mut std::str::SplitWhitespace| -> Result<[f32; 3]> {
         Ok([read(tok)?, read(tok)?, read(tok)?])
     };
     while let Some(t) = tok.next() {

@@ -1,11 +1,11 @@
 //! fab-gui — the slicing GUI (Phase 5.1). A Bevy 0.19 viewport over a model, with the printer
-//! bed for reference and a Feathers control panel. "Re-slice" drives `fab` in-process (the
-//! shared `fab_scad` lib) ON A BACKGROUND THREAD so the UI stays responsive, swapping in the
-//! result when it's ready. Modes:
+//! bed for reference and a Feathers control panel. The slider drives a visible cut plane across
+//! the model's X-extent; "Re-slice" drives `fab` in-process (the shared `fab_scad` lib) ON A
+//! BACKGROUND THREAD at that cut, swapping in the result when it's ready. Modes:
 //!
-//!   cargo run -p fab-gui -- part.scad                       # windowed: orbit, Re-slice
+//!   cargo run -p fab-gui -- part.scad                       # windowed: orbit, slider, Re-slice
 //!   cargo run -p fab-gui -- part.scad --screenshot out.png  # headless render to PNG (self-verify)
-//!   cargo run -p fab-gui -- part.scad --screenshot out.png --reslice   # ...showing the sliced result
+//!   cargo run -p fab-gui -- part.scad --screenshot out.png --reslice --cut 30   # sliced at 30%
 
 use std::path::{Path, PathBuf};
 
@@ -29,13 +29,15 @@ use bevy::{
     },
     scene::{Scene, SceneList}, // the bsn traits — shadow the prelude's `Scene` asset struct
     tasks::{block_on, futures_lite::future, AsyncComputeTaskPool, Task},
-    ui_widgets::{Activate, SliderStep},
+    ui_widgets::{Activate, SliderStep, SliderValue},
     window::ExitCondition,
     winit::WinitPlugin,
 };
 
 mod fab;
 mod stl;
+
+const SPREAD: f64 = 50.0;
 
 /// Scene inputs shared by both modes.
 #[derive(Resource, Clone)]
@@ -46,6 +48,7 @@ struct SceneCfg {
     root: Option<PathBuf>, // workspace root, for OPENSCADPATH
     tmp: PathBuf,          // scratch dir for rendered/sliced STLs
     reslice_on_start: bool, // screenshot --reslice: display the sliced result
+    cut_pct: f32,          // screenshot --cut <0..100>: where along X to cut
 }
 
 /// Marks the displayed model entity, so re-slice can swap it out.
@@ -64,9 +67,25 @@ struct Job(Option<Task<Result<PathBuf, String>>>);
 #[derive(Resource)]
 struct Status(String);
 
+/// The chosen cut position in model-space X (driven by the slider).
+#[derive(Resource, Default)]
+struct CutPlane(f32);
+
+/// The whole model's AABB (min, max), set once on the first render — maps the slider 0..100.
+#[derive(Resource, Default)]
+struct ModelBounds(Option<(Vec3, Vec3)>);
+
 /// Marks the panel's status text so a system can update it.
 #[derive(Component, Clone, Default)]
 struct StatusLabel;
+
+/// Marks the cut-position slider, the cut-plane overlay, and the cut-position label.
+#[derive(Component, Clone, Default)]
+struct CutSlider;
+#[derive(Component, Clone, Default)]
+struct CutPlaneViz;
+#[derive(Component, Clone, Default)]
+struct CutLabel;
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -78,6 +97,7 @@ fn main() {
         root: fab::find_root(),
         tmp: std::env::temp_dir().join("fab-gui"),
         reslice_on_start: args.iter().any(|a| a == "--reslice"),
+        cut_pct: flag_value(&args, "--cut").and_then(|v| v.parse().ok()).unwrap_or(50.0),
     };
     match flag_value(&args, "--screenshot") {
         Some(png) => run_screenshot(cfg, PathBuf::from(png)),
@@ -98,10 +118,12 @@ fn run_windowed(scene: SceneCfg) {
         .insert_resource(ClearColor(Color::srgb(0.10, 0.10, 0.12)))
         .insert_resource(scene)
         .init_resource::<Job>()
+        .init_resource::<CutPlane>()
+        .init_resource::<ModelBounds>()
         .insert_resource(Status("rendering…".into()))
         .add_message::<ReSlice>()
         .add_systems(Startup, (setup_windowed, ui_root.spawn()))
-        .add_systems(Update, (orbit, request_reslice, poll_job, update_status))
+        .add_systems(Update, (orbit, request_reslice, poll_job, update_status, update_cut))
         .run();
 }
 
@@ -131,8 +153,8 @@ fn setup_windowed(
             radius,
         },
     ));
-    // Render the model off-thread; poll_job spawns it when ready (UI stays responsive).
-    kick_job(&mut job, &mut status, &scene, false);
+    // Render the model off-thread; poll_job spawns it (+ the cut plane) when ready.
+    kick_job(&mut job, &mut status, &scene, false, 0.0);
 }
 
 fn orbit(
@@ -158,12 +180,38 @@ fn orbit(
     *t = orbit_transform(o.yaw, o.pitch, o.radius);
 }
 
-/// Re-slice button → start a background slice job (ignored if one's already running).
+/// Slider → cut position: map 0..100 across the model's X-extent, move the cut-plane overlay.
+fn update_cut(
+    sliders: Query<&SliderValue, With<CutSlider>>,
+    bounds: Res<ModelBounds>,
+    mut cut: ResMut<CutPlane>,
+    mut viz: Query<&mut Transform, With<CutPlaneViz>>,
+    mut labels: Query<&mut Text, With<CutLabel>>,
+) {
+    let Ok(val) = sliders.single() else {
+        return;
+    };
+    let Some((min, max)) = bounds.0 else {
+        return;
+    };
+    let t = (val.0 / 100.0).clamp(0.0, 1.0);
+    let cut_x = min.x + t * (max.x - min.x);
+    cut.0 = cut_x;
+    for mut tr in &mut viz {
+        tr.translation.x = cut_x;
+    }
+    for mut text in &mut labels {
+        *text = Text::new(format!("cut x = {cut_x:.1}"));
+    }
+}
+
+/// Re-slice button → start a background slice job at the current cut (ignored if one's running).
 fn request_reslice(
     mut ev: MessageReader<ReSlice>,
     mut job: ResMut<Job>,
     mut status: ResMut<Status>,
     cfg: Res<SceneCfg>,
+    cut: Res<CutPlane>,
 ) {
     if ev.read().count() == 0 {
         return;
@@ -172,11 +220,11 @@ fn request_reslice(
         info!("busy — ignoring re-slice");
         return;
     }
-    kick_job(&mut job, &mut status, &cfg, true);
+    kick_job(&mut job, &mut status, &cfg, true, cut.0 as f64);
 }
 
 /// Spawn the render/slice on the async compute pool (blocking OpenSCAD work, off-thread).
-fn kick_job(job: &mut Job, status: &mut Status, cfg: &SceneCfg, reslice: bool) {
+fn kick_job(job: &mut Job, status: &mut Status, cfg: &SceneCfg, reslice: bool, cut_x: f64) {
     let Some(src) = cfg.source.clone() else {
         status.0 = "no .scad source".into();
         return;
@@ -184,7 +232,7 @@ fn kick_job(job: &mut Job, status: &mut Status, cfg: &SceneCfg, reslice: bool) {
     let (root, tmp) = (cfg.root.clone(), cfg.tmp.clone());
     let task = AsyncComputeTaskPool::get().spawn(async move {
         if reslice {
-            fab::reslice(root.as_deref(), &src, 0.0, 50.0, &tmp).map_err(|e| format!("{e:#}"))
+            fab::reslice(root.as_deref(), &src, cut_x, SPREAD, &tmp).map_err(|e| format!("{e:#}"))
         } else {
             fab::render_whole(root.as_deref(), &src, &tmp).map_err(|e| format!("{e:#}"))
         }
@@ -193,10 +241,12 @@ fn kick_job(job: &mut Job, status: &mut Status, cfg: &SceneCfg, reslice: bool) {
     status.0 = if reslice { "slicing…".into() } else { "rendering…".into() };
 }
 
-/// Poll the in-flight job; when it finishes, swap in the new mesh.
+/// Poll the in-flight job; when it finishes, swap in the new mesh (and spawn the cut plane once).
 fn poll_job(
     mut job: ResMut<Job>,
     mut status: ResMut<Status>,
+    mut bounds: ResMut<ModelBounds>,
+    cut: Res<CutPlane>,
     models: Query<Entity, With<Model>>,
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
@@ -211,11 +261,18 @@ fn poll_job(
     job.0 = None;
     match result {
         Ok(stl) => {
+            let (mesh, aabb) = mesh_and_bounds(&mut meshes, &stl);
             for e in &models {
                 commands.entity(e).despawn();
             }
-            let mesh = load_model(&mut meshes, Some(&stl));
             commands.spawn((Mesh3d(mesh), MeshMaterial3d(part_material(&mut materials)), Model));
+            // First (whole) render fixes the bounds and reveals the cut plane.
+            if bounds.0.is_none() {
+                if let Some((min, max)) = aabb {
+                    bounds.0 = Some((min, max));
+                    spawn_cut_plane(&mut commands, &mut meshes, &mut materials, min, max, cut.0);
+                }
+            }
             status.0 = "ready".into();
         }
         Err(e) => {
@@ -280,10 +337,10 @@ fn setup_offscreen(
     png: Res<ScreenshotPng>,
 ) {
     spawn_environment(&mut commands, &mut meshes, &mut materials, &scene);
-    // Synchronous here — no UI to freeze, and the screenshot needs the mesh ready.
-    let stl = resolve_stl(&scene, scene.reslice_on_start);
-    let mesh = load_model(&mut meshes, stl.as_deref());
-    commands.spawn((Mesh3d(mesh), MeshMaterial3d(part_material(&mut materials)), Model));
+    // Synchronous here — no UI to freeze. Render whole for bounds + the cut plane, then
+    // (if asked) slice at the chosen cut so the PNG verifies an off-center cut.
+    let display = setup_offscreen_model(&mut commands, &mut meshes, &mut materials, &scene);
+    commands.spawn((Mesh3d(display), MeshMaterial3d(part_material(&mut materials)), Model));
 
     // Offscreen render target the camera draws into and we screenshot.
     let (w, h) = (960u32, 720u32);
@@ -305,6 +362,42 @@ fn setup_offscreen(
         frame: 0,
         captured: false,
     });
+}
+
+/// Headless model prep: render whole (→ bounds + cut plane), optionally slice at the cut.
+/// Returns the mesh handle to display.
+fn setup_offscreen_model(
+    commands: &mut Commands,
+    meshes: &mut Assets<Mesh>,
+    materials: &mut Assets<StandardMaterial>,
+    scene: &SceneCfg,
+) -> Handle<Mesh> {
+    let Some(src) = scene.source.as_deref() else {
+        return load_model(meshes, scene.stl.as_deref());
+    };
+    let whole = match fab::render_whole(scene.root.as_deref(), src, &scene.tmp) {
+        Ok(p) => p,
+        Err(e) => {
+            error!("{e:#}");
+            return load_model(meshes, None);
+        }
+    };
+    let (whole_mesh, aabb) = mesh_and_bounds(meshes, &whole);
+    let mut cut_x = 0.0;
+    if let Some((min, max)) = aabb {
+        cut_x = min.x + (scene.cut_pct / 100.0) * (max.x - min.x);
+        spawn_cut_plane(commands, meshes, materials, min, max, cut_x);
+    }
+    if !scene.reslice_on_start {
+        return whole_mesh;
+    }
+    match fab::reslice(scene.root.as_deref(), src, cut_x as f64, SPREAD, &scene.tmp) {
+        Ok(sliced) => load_model(meshes, Some(&sliced)),
+        Err(e) => {
+            error!("{e:#}");
+            whole_mesh
+        }
+    }
 }
 
 fn capture_then_exit(
@@ -333,7 +426,7 @@ fn capture_then_exit(
 
 // ---- shared scene ---------------------------------------------------------------------
 
-/// The bed + lights (everything but the model, which loads via a job / synchronously).
+/// The bed + lights (everything but the model + cut plane, which load via a job / synchronously).
 fn spawn_environment(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
@@ -364,38 +457,58 @@ fn spawn_environment(
     ));
 }
 
-/// The STL to display: render the source whole (or sliced, if `reslice`), else the given .stl.
-fn resolve_stl(cfg: &SceneCfg, reslice: bool) -> Option<PathBuf> {
-    if let Some(src) = cfg.source.as_deref() {
-        let r = if reslice {
-            fab::reslice(cfg.root.as_deref(), src, 0.0, 50.0, &cfg.tmp)
-        } else {
-            fab::render_whole(cfg.root.as_deref(), src, &cfg.tmp)
-        };
-        match r {
-            Ok(p) => Some(p),
-            Err(e) => {
-                error!("{e:#}");
-                None
-            }
+/// A translucent plane on the cut, spanning the model's Y/Z, thin in X — the cut preview.
+fn spawn_cut_plane(
+    commands: &mut Commands,
+    meshes: &mut Assets<Mesh>,
+    materials: &mut Assets<StandardMaterial>,
+    min: Vec3,
+    max: Vec3,
+    cut_x: f32,
+) {
+    let yspan = (max.y - min.y).max(1.0) * 1.15;
+    let zspan = (max.z - min.z).max(1.0) * 1.15;
+    commands.spawn((
+        Mesh3d(meshes.add(Cuboid::new(0.6, yspan, zspan))),
+        MeshMaterial3d(materials.add(StandardMaterial {
+            base_color: Color::srgba(0.25, 0.7, 1.0, 0.35),
+            alpha_mode: AlphaMode::Blend,
+            unlit: true,
+            ..default()
+        })),
+        Transform::from_xyz(cut_x, (min.y + max.y) * 0.5, (min.z + max.z) * 0.5),
+        CutPlaneViz,
+    ));
+}
+
+/// Load an STL into a mesh and its AABB (None on failure → placeholder mesh, no bounds).
+fn mesh_and_bounds(meshes: &mut Assets<Mesh>, stl: &Path) -> (Handle<Mesh>, Option<(Vec3, Vec3)>) {
+    match stl::load_stl(stl) {
+        Ok(s) => {
+            info!("loaded {} ({} tris)", stl.display(), s.positions.len() / 3);
+            (meshes.add(build_mesh(&s)), aabb_of(&s))
         }
-    } else {
-        cfg.stl.clone()
+        Err(e) => {
+            error!("loading {}: {e:#}", stl.display());
+            (meshes.add(Cuboid::new(60.0, 40.0, 30.0)), None)
+        }
     }
+}
+
+fn aabb_of(s: &stl::StlMesh) -> Option<(Vec3, Vec3)> {
+    let mut iter = s.positions.iter().map(|p| Vec3::from_array(*p));
+    let first = iter.next()?;
+    let (mut min, mut max) = (first, first);
+    for v in iter {
+        min = min.min(v);
+        max = max.max(v);
+    }
+    Some((min, max))
 }
 
 fn load_model(meshes: &mut Assets<Mesh>, stl: Option<&Path>) -> Handle<Mesh> {
     match stl {
-        Some(p) if p.exists() => match stl::load_stl(p) {
-            Ok(s) => {
-                info!("loaded {} ({} tris)", p.display(), s.positions.len() / 3);
-                meshes.add(build_mesh(&s))
-            }
-            Err(e) => {
-                error!("loading {}: {e:#}", p.display());
-                meshes.add(Cuboid::new(60.0, 40.0, 30.0))
-            }
-        },
+        Some(p) if p.exists() => mesh_and_bounds(meshes, p).0,
         _ => meshes.add(Cuboid::new(60.0, 40.0, 30.0)),
     }
 }
@@ -460,8 +573,8 @@ fn panel() -> impl Scene {
         Children[
             (Text("fab-gui") ThemedText),
             (Text("rendering…") ThemedText StatusLabel),
-            (Text("cut position") ThemedText),
-            (@FeathersSlider { @max: 100.0, @value: 50.0 } SliderStep(1.0)),
+            (Text("cut x = ?") ThemedText CutLabel),
+            (@FeathersSlider { @max: 100.0, @value: 50.0 } SliderStep(1.0) CutSlider),
             (
                 @FeathersButton { @caption: bsn!{ Text("Re-slice") ThemedText } }
                 on(|_: On<Activate>, mut w: MessageWriter<ReSlice>| { w.write(ReSlice); })

@@ -168,6 +168,22 @@ struct Conns {
     list: Vec<PlacedConn>,
 }
 
+/// True when "Place connector" is armed — a click on the model drops one on the nearest cut.
+#[derive(Resource, Default)]
+struct PlaceMode(bool);
+
+/// A connector's 3D point: `at` along its cut's axis, `pos` in the two non-axis dims (matching
+/// the driver's projection). `None` if the cut it references is gone.
+fn conn_point(cuts: &Cuts, pc: &PlacedConn) -> Option<Vec3> {
+    let c = cuts.list.get(pc.cut)?;
+    let ai = c.axis.index();
+    let others: Vec<usize> = (0..3).filter(|&a| a != ai).collect();
+    let mut p = with_comp(Vec3::ZERO, ai, c.at);
+    p = with_comp(p, others[0], pc.pos[0]);
+    p = with_comp(p, others[1], pc.pos[1]);
+    Some(p)
+}
+
 /// The X/Y/Z component of `v`.
 fn comp(v: Vec3, i: usize) -> f32 {
     match i {
@@ -230,6 +246,14 @@ struct StatusLabel;
 struct ViewToggleButton;
 #[derive(Component, Clone, Default)]
 struct ViewToggleLabel;
+/// The "Place connector" arm/disarm button + its caption (relabelled to show the armed state).
+#[derive(Component, Clone, Default)]
+struct PlaceButton;
+#[derive(Component, Clone, Default)]
+struct PlaceLabel;
+/// A 3D marker (small sphere) for a placed connector, by its index in the `Conns` list.
+#[derive(Component)]
+struct ConnMarker(usize);
 /// The whole panel's root entity — despawned + rebuilt when the cut structure changes.
 #[derive(Component, Clone, Default)]
 struct PanelRoot;
@@ -319,6 +343,7 @@ fn run_windowed(scene: SceneCfg) {
         .init_resource::<Job>()
         .init_resource::<Cuts>()
         .init_resource::<Conns>()
+        .init_resource::<PlaceMode>()
         .init_resource::<ModelBounds>()
         .init_resource::<DraggingCut>()
         .init_resource::<WholeMesh>()
@@ -332,6 +357,7 @@ fn run_windowed(scene: SceneCfg) {
         .add_observer(on_drag)
         .add_observer(on_drag_end)
         .add_observer(on_click)
+        .add_observer(on_place_click)
         .add_systems(Startup, (setup_windowed, load_icons))
         .add_systems(
             Update,
@@ -344,6 +370,8 @@ fn run_windowed(scene: SceneCfg) {
                 sync_overlay_visuals,
                 sync_dim_labels,
                 update_view_label,
+                update_place_label,
+                sync_conn_markers,
                 push_fields,
                 sync_selected,
                 apply_icon_font,
@@ -509,6 +537,49 @@ fn on_click(
     }
 }
 
+/// When placement is armed, a click on the model body drops a connector on the nearest enabled
+/// cut, at the clicked point projected onto that cut's plane. Editing (collapsed) view only.
+#[allow(clippy::too_many_arguments)]
+fn on_place_click(
+    ev: On<Pointer<Click>>,
+    place: Res<PlaceMode>,
+    dspread: Res<DisplaySpread>,
+    models: Query<(), With<Model>>,
+    cuts: Res<Cuts>,
+    mut conns: ResMut<Conns>,
+    mut status: ResMut<Status>,
+) {
+    if !place.0 || ev.event.button != PointerButton::Primary || dspread.0 > 0.0 {
+        return;
+    }
+    if !models.contains(ev.entity) {
+        return; // only the model body, not a cut plane or the bed
+    }
+    let Some(hit) = ev.event.hit.position else {
+        return;
+    };
+    // Nearest enabled cut by perpendicular distance to its plane.
+    let best = cuts
+        .list
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| c.enabled)
+        .min_by(|(_, a), (_, b)| {
+            let da = (comp(hit, a.axis.index()) - a.at).abs();
+            let db = (comp(hit, b.axis.index()) - b.at).abs();
+            da.total_cmp(&db)
+        });
+    let Some((idx, c)) = best else {
+        status.0 = "no enabled cut to place on".into();
+        return;
+    };
+    // pos = the hit's two non-axis coords (ascending dim order — matches the driver projection).
+    let ai = c.axis.index();
+    let others: Vec<usize> = (0..3).filter(|&a| a != ai).collect();
+    conns.list.push(PlacedConn { cut: idx, pos: [comp(hit, others[0]), comp(hit, others[1])] });
+    status.0 = format!("placed connector on {} cut", c.axis.label());
+}
+
 /// The Explode/Collapse button: collapse to the uncut model, or explode the last sliced result —
 /// auto-slicing first if the cuts changed (or were never sliced), so it works without Re-slice.
 fn toggle_view(
@@ -555,6 +626,66 @@ fn update_view_label(dspread: Res<DisplaySpread>, mut q: Query<&mut Text, With<V
     let label = if dspread.0 > 0.0 { "Collapse" } else { "Explode" };
     for mut t in &mut q {
         *t = Text::new(label);
+    }
+}
+
+/// Relabel the Place button to show whether placement is armed.
+fn update_place_label(place: Res<PlaceMode>, mut q: Query<&mut Text, With<PlaceLabel>>) {
+    if !place.is_changed() {
+        return;
+    }
+    let label = if place.0 { "Placing: click model" } else { "Place connector" };
+    for mut t in &mut q {
+        *t = Text::new(label);
+    }
+}
+
+/// Keep one sphere marker per placed connector: respawn the set when the count changes, and each
+/// frame park each marker at its connector's point (so dragging a cut moves its markers too).
+/// Hidden in the exploded view, since the pieces (and their pockets) have fanned apart.
+#[allow(clippy::too_many_arguments)]
+fn sync_conn_markers(
+    conns: Res<Conns>,
+    cuts: Res<Cuts>,
+    dspread: Res<DisplaySpread>,
+    mut last: Local<usize>,
+    existing: Query<Entity, With<ConnMarker>>,
+    mut markers: Query<(&ConnMarker, &mut Transform, &mut Visibility)>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut mats: ResMut<Assets<StandardMaterial>>,
+    mut commands: Commands,
+) {
+    if conns.list.len() != *last {
+        *last = conns.list.len();
+        for e in &existing {
+            commands.entity(e).despawn();
+        }
+        let mesh = meshes.add(Sphere::new(3.0));
+        let mat = mats.add(StandardMaterial {
+            base_color: Color::srgb(0.95, 0.45, 0.45),
+            unlit: true,
+            depth_bias: 1.0e8, // render on top — the connector point sits inside the solid model
+            ..default()
+        });
+        for i in 0..conns.list.len() {
+            commands.spawn((
+                ConnMarker(i),
+                Mesh3d(mesh.clone()),
+                MeshMaterial3d(mat.clone()),
+                Transform::default(),
+                Visibility::Hidden,
+            ));
+        }
+        return; // positions land next frame, once the new markers exist
+    }
+    for (m, mut tf, mut vis) in &mut markers {
+        match (dspread.0 == 0.0).then(|| conns.list.get(m.0).and_then(|pc| conn_point(&cuts, pc))) {
+            Some(Some(p)) => {
+                tf.translation = p;
+                *vis = Visibility::Visible;
+            }
+            _ => *vis = Visibility::Hidden,
+        }
     }
 }
 
@@ -986,6 +1117,7 @@ fn run_screenshot(scene: SceneCfg, png: PathBuf) {
         .insert_resource(ScreenshotPng(png))
         .init_resource::<Cuts>()
         .init_resource::<Conns>()
+        .init_resource::<PlaceMode>()
         .init_resource::<ModelBounds>()
         .init_resource::<DraggingCut>()
         .init_resource::<WholeMesh>()
@@ -1182,6 +1314,7 @@ fn run_scripted(scene: SceneCfg, actions: Vec<Action>) {
         .init_resource::<Job>()
         .init_resource::<Cuts>()
         .init_resource::<Conns>()
+        .init_resource::<PlaceMode>()
         .init_resource::<ModelBounds>()
         .init_resource::<WholeMesh>()
         .init_resource::<SlicedMesh>()
@@ -1202,6 +1335,8 @@ fn run_scripted(scene: SceneCfg, actions: Vec<Action>) {
                 sync_overlay_visuals,
                 sync_dim_labels,
                 update_view_label,
+                update_place_label,
+                sync_conn_markers,
                 push_fields,
                 sync_selected,
                 apply_icon_font,
@@ -1598,6 +1733,11 @@ fn build_panel(cuts: &Cuts) -> impl Scene + 'static {
                 @FeathersButton { @caption: bsn!{ Text("Explode") ThemedText ViewToggleLabel } }
                 ViewToggleButton
                 on(toggle_view)
+            ),
+            (
+                @FeathersButton { @caption: bsn!{ Text("Place connector") ThemedText PlaceLabel } }
+                PlaceButton
+                on(|_: On<Activate>, mut place: ResMut<PlaceMode>| { place.0 = !place.0; })
             ),
         ]
     }

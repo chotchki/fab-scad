@@ -4,3 +4,6 @@
 [submodule "libs/machineblocks"]
 	path = libs/machineblocks
 	url = https://github.com/pks5/machineblocks.git
+[submodule "models"]
+	path = models
+	url = git@github.com:chotchki/scad-models.git

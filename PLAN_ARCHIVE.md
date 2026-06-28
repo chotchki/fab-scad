@@ -1,0 +1,26 @@
+## 2026-06-28
+
+## Phase 0 - Safety net (no deletions until this is green)
+- [x] 0.1 - Confirm NAS reachable + capacity; pick cold-archive root (hotchkiss.io:/Volumes/NAS/3d_print/_cold_archive)
+- [x] 0.2 - Full immutable snapshot of current ~7.6 G to NAS (done manually)
+- [x] 0.3 - Verify the manual archive is complete + intact (checksums); record an inventory of what's where
+
+
+## Phase 1 - Git backup (fab-scad MIT tool repo + scad-models designs repo)
+- [x] 1.1 - Author .gitignore (out/, target/, BOSL2.wiki, downloaded models, .DS_Store)
+- [x] 1.2 - git init / first commit of source into scad-models (git@github.com:chotchki/scad-models.git)
+- [x] 1.3 - Push both repos (fab-scad MIT done; scad-models stays PRIVATE for now); verify a fresh clone is small/fast
+- [x] 1.4 - Apply CC BY-NC-SA 4.0 to scad-models (LICENSE + headers + README terms); then decide public
+- [x] 1.5 - Root README (workflow overview, how the pieces fit)
+
+
+## Phase 2 - fab-scad skeleton + BOSL2 pin + standardization + shared SCAD lib
+- [x] 2.1 - Stand up fab-scad superproject skeleton (clone repo, layout: libs/ scad-lib/ printers.toml, MIT)
+- [x] 2.2 - Pin BOSL2 submodule under fab-scad/libs to latest tag (v2.0.746); track tagged releases, bump deliberately
+- [x] 2.3 - Canonical include mechanism (OPENSCADPATH up into fab-scad so BOSL2/std.scad resolves); document it
+- [x] 2.4 - Standardize include paths across projects to canonical <BOSL2/...> form (scripted)
+- [x] 2.5 - Inventory pass: which projects fail to compile at the pin via .csg eval (report only)
+- [x] 2.6 - Pin other third-party libs as submodules (gridfinity_extended, machineblocks)
+- [x] 2.7 - Stand up scad-lib in fab-scad (MIT): version-stamp + part-numbering modules
+
+

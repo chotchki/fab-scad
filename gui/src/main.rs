@@ -1504,7 +1504,6 @@ fn panel() -> impl Scene {
         ThemeBackgroundColor(tokens::WINDOW_BG)
         Children[
             (Text("fab-gui") ThemedText),
-            (Text("rendering…") ThemedText StatusLabel),
             (Text("(no cuts)") ThemedText CutLabel),
             (@FeathersNumberInput { @number_format: NumberFormat::F32 } CutInput),
             (
@@ -1515,6 +1514,7 @@ fn panel() -> impl Scene {
                     (@FeathersButton { @caption: bsn!{ Text("axis: X") ThemedText AxisLabel } } on(cycle_axis)),
                 ]
             ),
+            (Text("rendering…") ThemedText StatusLabel),
             (
                 @FeathersButton { @caption: bsn!{ Text("Re-slice") ThemedText } }
                 on(|_: On<Activate>, mut w: MessageWriter<ReSlice>| { w.write(ReSlice); })

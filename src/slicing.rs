@@ -81,8 +81,11 @@ pub fn driver_scad(s: &Slicing, source: &str, spread: f64) -> Result<String> {
         bail!("[slicing] has no cuts");
     }
 
+    // `force_tag()` pulls the raw `import()` mesh into BOSL2's tag system — without it `diff()`
+    // doesn't see the import as keep geometry and the connectors don't carve (BOSL2's own
+    // attachable primitives are tagged automatically; `import()` is not).
     let mut body = String::from("tag_scope() diff() {\n");
-    body += &format!("    import(\"{source}\");\n");
+    body += &format!("    force_tag() import(\"{source}\");\n");
     for c in &s.connector {
         body += &connector_line(s, c)?;
     }
@@ -147,7 +150,8 @@ mod tests {
         );
         let d = driver_scad(&s, "t.stl", 0.0).unwrap();
         assert!(d.contains("slice([-10, 25], axis = RIGHT, spread = 0)"), "{d}");
-        assert!(d.contains("import(\"t.stl\")"));
+        // force_tag() is load-bearing: without it diff() won't carve connectors from the import.
+        assert!(d.contains("force_tag() import(\"t.stl\")"), "{d}");
         assert!(d.contains("tag_scope() diff()"));
     }
 

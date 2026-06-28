@@ -115,6 +115,10 @@ struct WholeMesh(Option<Handle<Mesh>>);
 #[derive(Resource, Default)]
 struct DisplaySpread(f32);
 
+/// The last sliced (exploded) mesh, so the view toggle can re-show it without re-slicing.
+#[derive(Resource, Default)]
+struct SlicedMesh(Option<Handle<Mesh>>);
+
 /// Marks the panel's status text + cut-list text so systems can update them.
 #[derive(Component, Clone, Default)]
 struct StatusLabel;
@@ -123,6 +127,14 @@ struct CutLabel;
 /// Marks the numeric entry field for the active cut's X.
 #[derive(Component, Clone, Default)]
 struct CutInput;
+/// The Explode/Collapse view-toggle button and its caption (relabelled to match the state).
+#[derive(Component, Clone, Default)]
+struct ViewToggleButton;
+#[derive(Component, Clone, Default)]
+struct ViewToggleLabel;
+/// A brief attention flash (seconds remaining), drawn as a fading outline.
+#[derive(Component)]
+struct Nudge(f32);
 
 /// A cut-plane overlay, tied to its cut in the stack by index.
 #[derive(Component)]
@@ -174,6 +186,7 @@ fn run_windowed(scene: SceneCfg) {
         .init_resource::<ModelBounds>()
         .init_resource::<DraggingCut>()
         .init_resource::<WholeMesh>()
+        .init_resource::<SlicedMesh>()
         .init_resource::<DisplaySpread>()
         .insert_resource(Status("rendering…".into()))
         .add_message::<ReSlice>()
@@ -195,6 +208,8 @@ fn run_windowed(scene: SceneCfg) {
                 update_cut_label,
                 sync_cut_input,
                 sync_dim_labels,
+                update_view_label,
+                nudge_buttons,
                 revert_on_edit,
                 auto_scale,
             ),
@@ -330,10 +345,76 @@ fn on_drag_end(_ev: On<Pointer<DragEnd>>, mut dragging: ResMut<DraggingCut>) {
     dragging.0 = false;
 }
 
-/// Click a cut plane (a tap, no drag) to make it the active cut — select without moving.
-fn on_click(ev: On<Pointer<Click>>, planes: Query<&CutPlaneViz>, mut cuts: ResMut<Cuts>) {
-    if let Ok(cpv) = planes.get(ev.entity) {
+/// Click a cut plane: select it (collapsed/editing), or — in the read-only exploded view — flash
+/// the Collapse button to point the user back to editing.
+fn on_click(
+    ev: On<Pointer<Click>>,
+    planes: Query<&CutPlaneViz>,
+    dspread: Res<DisplaySpread>,
+    buttons: Query<Entity, With<ViewToggleButton>>,
+    mut cuts: ResMut<Cuts>,
+    mut commands: Commands,
+) {
+    let Ok(cpv) = planes.get(ev.entity) else {
+        return;
+    };
+    if dspread.0 > 0.0 {
+        for e in &buttons {
+            commands.entity(e).insert(Nudge(0.7));
+        }
+    } else {
         cuts.active = cpv.idx;
+    }
+}
+
+/// The Explode/Collapse button: swap between the uncut model and the last sliced result.
+fn toggle_view(
+    _ev: On<Activate>,
+    whole: Res<WholeMesh>,
+    sliced: Res<SlicedMesh>,
+    mut dspread: ResMut<DisplaySpread>,
+    mut models: Query<&mut Mesh3d, With<Model>>,
+) {
+    if dspread.0 > 0.0 {
+        if let Some(h) = whole.0.clone() {
+            for mut m in &mut models {
+                m.0 = h.clone();
+            }
+            dspread.0 = 0.0;
+        }
+    } else if let Some(h) = sliced.0.clone() {
+        for mut m in &mut models {
+            m.0 = h.clone();
+        }
+        dspread.0 = SPREAD as f32;
+    }
+}
+
+/// Relabel the toggle button to the action it performs from the current view.
+fn update_view_label(dspread: Res<DisplaySpread>, mut q: Query<&mut Text, With<ViewToggleLabel>>) {
+    if !dspread.is_changed() {
+        return;
+    }
+    let label = if dspread.0 > 0.0 { "Collapse" } else { "Explode" };
+    for mut t in &mut q {
+        *t = Text::new(label);
+    }
+}
+
+/// Fade out the attention flash on nudged buttons (drawn as an outline).
+fn nudge_buttons(time: Res<Time>, mut q: Query<(Entity, &mut Nudge)>, mut commands: Commands) {
+    for (e, mut n) in &mut q {
+        n.0 -= time.delta_secs();
+        if n.0 <= 0.0 {
+            commands.entity(e).remove::<Nudge>().remove::<Outline>();
+        } else {
+            let a = (n.0 / 0.7).clamp(0.0, 1.0);
+            commands.entity(e).insert(Outline {
+                width: Val::Px(3.0),
+                offset: Val::Px(2.0),
+                color: Color::srgba(1.0, 0.8, 0.2, a),
+            });
+        }
     }
 }
 
@@ -668,6 +749,7 @@ fn poll_job(
     mut bounds: ResMut<ModelBounds>,
     mut cuts: ResMut<Cuts>,
     mut whole: ResMut<WholeMesh>,
+    mut sliced: ResMut<SlicedMesh>,
     mut dspread: ResMut<DisplaySpread>,
     models: Query<Entity, With<Model>>,
     mut commands: Commands,
@@ -690,6 +772,7 @@ fn poll_job(
             }
             commands.spawn((Mesh3d(mesh.clone()), MeshMaterial3d(part_material(&mut materials)), Model));
             if is_reslice {
+                sliced.0 = Some(mesh); // remember it so the view toggle can re-show it
                 dspread.0 = SPREAD as f32; // now showing the fanned pieces
             } else {
                 whole.0 = Some(mesh); // remember the uncut mesh, so editing can revert to it
@@ -934,6 +1017,7 @@ fn run_scripted(scene: SceneCfg, actions: Vec<Action>) {
         .init_resource::<Cuts>()
         .init_resource::<ModelBounds>()
         .init_resource::<WholeMesh>()
+        .init_resource::<SlicedMesh>()
         .init_resource::<DisplaySpread>()
         .insert_resource(Status("rendering…".into()))
         .insert_resource(ScriptRunner { actions, idx: 0, timer: 0 })
@@ -950,6 +1034,7 @@ fn run_scripted(scene: SceneCfg, actions: Vec<Action>) {
                 update_cut_label,
                 sync_cut_input,
                 sync_dim_labels,
+                update_view_label,
                 revert_on_edit,
                 run_script,
             ),
@@ -1219,6 +1304,11 @@ fn panel() -> impl Scene {
         Children[
             (Text("fab-gui") ThemedText),
             (Text("rendering…") ThemedText StatusLabel),
+            (
+                @FeathersButton { @caption: bsn!{ Text("Explode") ThemedText ViewToggleLabel } }
+                ViewToggleButton
+                on(toggle_view)
+            ),
             (Text("(no cuts)") ThemedText CutLabel),
             (@FeathersNumberInput { @number_format: NumberFormat::F32 } CutInput),
             (

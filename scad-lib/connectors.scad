@@ -31,8 +31,13 @@ function _insert_spec(screw) =
 // plane (CENTER). +Z (bolt-access piece): clearance + socket-head counterbore (BOSL2
 // screw_hole), outer face at z = `through` (set it to that piece's thickness for a flush
 // head). -Z (insert piece): heat-set pocket + a chamfer lead-in at the cut face.
+//
+// `teardrop`: print support-free when the joint axis ends up HORIZONTAL on the bed — the
+// clearance becomes a teardrop (BOSL2) and the insert pocket a teardrop too (point toward the
+// joint axis's +Y, i.e. up once the piece is laid down). Drive it per piece with
+// needs_teardrop($slice_axis, print_up) — the piece's print orientation decides it (4.5).
 module bolt_joint(screw = "M3", through = 12, counterbore = 5, lead_in = 0.7,
-                  anchor = CENTER, spin = 0, orient = UP) {
+                  teardrop = false, anchor = CENTER, spin = 0, orient = UP) {
     spec = _insert_spec(screw);
     idia = spec[0];
     idepth = spec[1];
@@ -40,13 +45,24 @@ module bolt_joint(screw = "M3", through = 12, counterbore = 5, lead_in = 0.7,
     attachable(anchor, spin, orient, size = size) {
         union() {
             up(through) screw_hole(str(screw, ",", through), head = "socket",
-                                   counterbore = counterbore, anchor = TOP, orient = DOWN);
-            cyl(d = idia, h = idepth, anchor = TOP);                       // insert pocket
-            cyl(d1 = idia, d2 = idia + 2 * lead_in, h = lead_in, anchor = TOP); // lead-in
+                                   counterbore = counterbore, teardrop = teardrop,
+                                   anchor = TOP, orient = DOWN);
+            if (teardrop) {
+                // teardrop pocket: bore along -Z, point up (+Y of the teardrop) for support-free
+                down(idepth) teardrop(h = idepth, d = idia, ang = 45, orient = DOWN, anchor = TOP);
+            } else {
+                cyl(d = idia, h = idepth, anchor = TOP);                       // insert pocket
+                cyl(d1 = idia, d2 = idia + 2 * lead_in, h = lead_in, anchor = TOP); // lead-in
+            }
         }
         children();
     }
 }
+
+// True when a joint along `axis` would print with an overhang (axis more than ~45° off the
+// piece's build-up direction), so its holes need teardrop. Feed bolt_joint's `teardrop`.
+function needs_teardrop(axis, up = UP) =
+    abs(unit(axis) * unit(up)) < 0.71;   // |cos| < cos(45°) => axis is closer to horizontal
 
 // pin_joint — a teardrop socket each side of the cut for a separately printed, glued dowel().
 // Attachable on the cut plane (CENTER). Teardrop (ang 20) prints support-free when the joint

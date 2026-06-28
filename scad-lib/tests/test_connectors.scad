@@ -18,3 +18,10 @@ right(50) dowel(d = 6, len = 16);
 back(40) tag_scope() diff()
     cuboid([30, 30, 20])
         attach(TOP) tag("remove") bolt_joint("M3", through = 10);
+
+module test_needs_teardrop() {
+    assert(needs_teardrop(UP) == false);     // vertical bore prints support-free
+    assert(needs_teardrop(RIGHT) == true);   // horizontal bore overhangs -> teardrop
+    assert(needs_teardrop(BACK) == true);
+}
+test_needs_teardrop();

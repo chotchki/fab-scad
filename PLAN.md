@@ -15,7 +15,7 @@ Driven by `claude-plan-bridge` (FORMATv2). Hand-authored; run
 - [x] 4.2 - Linear slicer module in scad-lib: planar slab cuts, piece = source ∩ slab (child once per piece)
 - [x] 4.3 - Cut minimization: fit by rotation/diagonal against printer bed before cutting (printers.toml)
 - [x] 4.4 - Connector lib: heat-set insert + M bolt (default) and teardrop pin + glue; reuse BOSL2 screw_hole/nut_trap; harvest insert specs
-- [ ] 4.5 - Per-piece print orientation drives connector orientation so all features print support-free
+- [x] 4.5 - Per-piece print orientation drives connector orientation so all features print support-free
 - [ ] 4.6 - Auto-place connectors on a face + manual override (shared across connector types)
 - [ ] 4.7 - Test coupons: emit a sample joint to tune slop before full prints
 - [ ] 4.8 - Dimensional-integrity check: reassembled pieces == original within tolerance (no shrink)

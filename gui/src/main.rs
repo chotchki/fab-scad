@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 
 use bevy::{
     app::ScheduleRunnerPlugin,
-    asset::RenderAssetUsages,
+    asset::{AssetPlugin, RenderAssetUsages},
     camera::RenderTarget,
     feathers::{
         controls::{ButtonVariant, FeathersButton, FeathersListRow, FeathersListView},
@@ -35,6 +35,7 @@ use bevy::{
     },
     scene::{Scene, SceneList}, // the bsn traits — shadow the prelude's `Scene` asset struct
     tasks::{block_on, futures_lite::future, AsyncComputeTaskPool, Task},
+    text::{FontSize, FontSource, TextFont},
     ui_widgets::Activate,
     window::ExitCondition,
     winit::WinitPlugin,
@@ -187,6 +188,16 @@ struct SlicedMesh(Option<Handle<Mesh>>);
 #[derive(Resource, Default)]
 struct SliceDirty(bool);
 
+/// The bundled Material Icons font (gui/assets/fonts), for button glyphs (trash, etc.).
+#[derive(Resource)]
+struct IconFont(Handle<Font>);
+
+/// Material Icons codepoints used on buttons.
+const ICON_DELETE: &str = "\u{e872}"; // trash can
+const ICON_ADD: &str = "\u{e145}"; // plus
+const ICON_ON: &str = "\u{e8f4}"; // eye (visible)
+const ICON_OFF: &str = "\u{e8f5}"; // eye-off (hidden)
+
 /// Marks the panel's status text so a system can update it.
 #[derive(Component, Clone, Default)]
 struct StatusLabel;
@@ -202,6 +213,12 @@ struct PanelRoot;
 #[derive(Component, Clone, Default, Reflect)]
 #[reflect(Component)]
 struct RowFor(usize);
+/// Marks a button caption that should render in the bundled icon font.
+#[derive(Component, Clone, Default)]
+struct IconText;
+/// Set once the icon font has been applied to an IconText caption.
+#[derive(Component)]
+struct IconApplied;
 
 /// The cut stack's structural signature (axis + enabled per cut) — the panel rebuilds when it
 /// changes (add/remove/rotate/toggle); position-only edits update rows in place instead.
@@ -250,11 +267,24 @@ fn flag_value(args: &[String], flag: &str) -> Option<String> {
     args.iter().position(|a| a == flag).and_then(|i| args.get(i + 1)).cloned()
 }
 
+/// Point the asset server at this crate's `assets/` (where the icon font lives), regardless of CWD.
+fn assets_dir() -> AssetPlugin {
+    AssetPlugin {
+        file_path: concat!(env!("CARGO_MANIFEST_DIR"), "/assets").into(),
+        ..default()
+    }
+}
+
+/// Load the bundled icon font (Startup, before the panel first builds).
+fn load_icons(asset_server: Res<AssetServer>, mut commands: Commands) {
+    commands.insert_resource(IconFont(asset_server.load("fonts/MaterialIcons-Regular.ttf")));
+}
+
 // ---- windowed -------------------------------------------------------------------------
 
 fn run_windowed(scene: SceneCfg) {
     App::new()
-        .add_plugins((DefaultPlugins, FeathersPlugins, MeshPickingPlugin))
+        .add_plugins((DefaultPlugins.set(assets_dir()), FeathersPlugins, MeshPickingPlugin))
         .insert_resource(UiTheme(create_dark_theme()))
         .insert_resource(ClearColor(Color::srgb(0.10, 0.10, 0.12)))
         .insert_resource(scene)
@@ -273,7 +303,7 @@ fn run_windowed(scene: SceneCfg) {
         .add_observer(on_drag)
         .add_observer(on_drag_end)
         .add_observer(on_click)
-        .add_systems(Startup, setup_windowed)
+        .add_systems(Startup, (setup_windowed, load_icons))
         .add_systems(
             Update,
             (
@@ -287,6 +317,7 @@ fn run_windowed(scene: SceneCfg) {
                 update_view_label,
                 update_rows,
                 sync_selected,
+                apply_icon_font,
                 rebuild_panel,
                 nudge_buttons,
                 mark_dirty,
@@ -883,6 +914,7 @@ fn run_screenshot(scene: SceneCfg, png: PathBuf) {
     App::new()
         .add_plugins(
             DefaultPlugins
+                .set(assets_dir())
                 .set(WindowPlugin {
                     primary_window: None,
                     exit_condition: ExitCondition::DontExit,
@@ -908,8 +940,8 @@ fn run_screenshot(scene: SceneCfg, png: PathBuf) {
         .init_resource::<PanelSig>()
         .insert_resource(Status("rendering".into()))
         .add_message::<ReSlice>()
-        .add_systems(Startup, setup_offscreen)
-        .add_systems(Update, (capture_then_exit, update_rows, sync_selected, rebuild_panel, update_status))
+        .add_systems(Startup, (setup_offscreen, load_icons))
+        .add_systems(Update, (capture_then_exit, update_rows, sync_selected, apply_icon_font, rebuild_panel, update_status))
         .run();
 }
 
@@ -1070,6 +1102,7 @@ fn run_scripted(scene: SceneCfg, actions: Vec<Action>) {
     App::new()
         .add_plugins(
             DefaultPlugins
+                .set(assets_dir())
                 .set(WindowPlugin {
                     primary_window: None,
                     exit_condition: ExitCondition::DontExit,
@@ -1095,7 +1128,7 @@ fn run_scripted(scene: SceneCfg, actions: Vec<Action>) {
         .insert_resource(Status("rendering".into()))
         .insert_resource(ScriptRunner { actions, idx: 0, timer: 0 })
         .add_message::<ReSlice>()
-        .add_systems(Startup, setup_script)
+        .add_systems(Startup, (setup_script, load_icons))
         .add_systems(
             Update,
             (
@@ -1108,6 +1141,7 @@ fn run_scripted(scene: SceneCfg, actions: Vec<Action>) {
                 update_view_label,
                 update_rows,
                 sync_selected,
+                apply_icon_font,
                 rebuild_panel,
                 mark_dirty,
                 revert_on_edit,
@@ -1398,16 +1432,28 @@ fn plane_card(cuts: &Cuts, axis: Axis) -> impl Scene + 'static {
                     }
                 }
             };
-            let on_off = if c.enabled { "on" } else { "off" };
-            // On = blue (Primary), off = grey (Normal) — state as colour.
+            let eye = if c.enabled { ICON_ON } else { ICON_OFF };
+            // On = blue (Primary), off = grey (Normal) — state as colour; eye/eye-off icon too.
             let on_variant = if c.enabled { ButtonVariant::Primary } else { ButtonVariant::Normal };
             bsn! {
                 @FeathersListRow
                 RowFor(idx)
                 Children [
                     (Text(pos_text(c.at)) ThemedText),
-                    (@FeathersButton { @variant: {on_variant}, @caption: bsn!{ Text(on_off) ThemedText } } on(toggle)),
-                    (@FeathersButton { @caption: bsn!{ Text("x") ThemedText } } on(del)),
+                    (
+                        @FeathersButton { @variant: {on_variant}, @caption: bsn!{
+                            Text(eye) IconText
+                        } }
+                        on(toggle)
+                    ),
+                    (
+                        @FeathersButton { @caption: bsn!{
+                            Text(ICON_DELETE)
+                            IconText
+                            TextColor({Color::srgb(0.95, 0.5, 0.5)})
+                        } }
+                        on(del)
+                    ),
                 ]
             }
         })
@@ -1435,7 +1481,12 @@ fn plane_card(cuts: &Cuts, axis: Axis) -> impl Scene + 'static {
                 }
                 Children [
                     (Text(format!("{} plane", axis.label())) ThemedText),
-                    (@FeathersButton { @variant: {ButtonVariant::Primary}, @caption: bsn!{ Text("+cut") ThemedText } } on(add)),
+                    (
+                        @FeathersButton { @variant: {ButtonVariant::Primary}, @caption: bsn!{
+                            Text(ICON_ADD) IconText
+                        } }
+                        on(add)
+                    ),
                 ]
             ),
             (@FeathersListView { @rows: { Box::new(rows) as Box<dyn SceneList> } }),
@@ -1446,7 +1497,8 @@ fn plane_card(cuts: &Cuts, axis: Axis) -> impl Scene + 'static {
 /// The whole panel scene, built from the current cut stack: title, an X/Y/Z card stack, and a
 /// bottom bar (status + Re-slice + Explode/Collapse).
 fn build_panel(cuts: &Cuts) -> impl Scene + 'static {
-    let cards: Vec<_> = [Axis::X, Axis::Y, Axis::Z].into_iter().map(|a| plane_card(cuts, a)).collect();
+    let cards: Vec<_> =
+        [Axis::X, Axis::Y, Axis::Z].into_iter().map(|a| plane_card(cuts, a)).collect();
     bsn! {
         Node {
             position_type: PositionType::Absolute,
@@ -1533,6 +1585,20 @@ fn sync_selected(cuts: Res<Cuts>, rows: Query<(Entity, &RowFor, Has<bevy::ui::Se
         } else if !should && selected {
             commands.entity(e).remove::<bevy::ui::Selected>();
         }
+    }
+}
+
+/// Render `IconText` captions in the bundled icon font — set the real TextFont once it differs
+/// from the theme default (idempotent, so it catches freshly-spawned rows after a panel rebuild).
+fn apply_icon_font(
+    icon: Res<IconFont>,
+    mut q: Query<(Entity, &mut TextFont), (With<IconText>, Without<IconApplied>)>,
+    mut commands: Commands,
+) {
+    for (e, mut tf) in &mut q {
+        tf.font = FontSource::Handle(icon.0.clone());
+        tf.font_size = FontSize::Px(16.0);
+        commands.entity(e).insert(IconApplied);
     }
 }
 

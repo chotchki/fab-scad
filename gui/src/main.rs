@@ -13,11 +13,18 @@ use bevy::{
     app::ScheduleRunnerPlugin,
     asset::RenderAssetUsages,
     camera::RenderTarget,
-    feathers::{dark_theme::create_dark_theme, theme::UiTheme, FeathersPlugins},
+    feathers::{
+        controls::{FeathersButton, FeathersSlider},
+        dark_theme::create_dark_theme,
+        theme::{ThemeBackgroundColor, ThemedText, UiTheme},
+        tokens, FeathersPlugins,
+    },
     image::Image,
     input::mouse::{MouseMotion, MouseWheel},
     mesh::Indices,
     prelude::*,
+    scene::{Scene, SceneList}, // the bsn traits — shadow the prelude's `Scene` asset struct
+    ui_widgets::{Activate, SliderStep},
     render::{
         render_resource::{PrimitiveTopology, TextureFormat, TextureUsages},
         view::screenshot::{save_to_disk, Screenshot},
@@ -30,7 +37,7 @@ mod stl;
 
 /// Scene inputs shared by both modes (model STL path + printer bed footprint).
 #[derive(Resource, Clone)]
-struct Scene {
+struct SceneCfg {
     model: Option<String>,
     bed: [f32; 2],
 }
@@ -39,7 +46,7 @@ fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let model = args.iter().find(|a| a.ends_with(".stl")).cloned();
     let bed = bed_size().unwrap_or([256.0; 3]);
-    let scene = Scene {
+    let scene = SceneCfg {
         model,
         bed: [bed[0] as f32, bed[1] as f32],
     };
@@ -55,13 +62,13 @@ fn flag_value(args: &[String], flag: &str) -> Option<String> {
 
 // ---- windowed -------------------------------------------------------------------------
 
-fn run_windowed(scene: Scene) {
+fn run_windowed(scene: SceneCfg) {
     App::new()
         .add_plugins((DefaultPlugins, FeathersPlugins))
         .insert_resource(UiTheme(create_dark_theme()))
         .insert_resource(ClearColor(Color::srgb(0.10, 0.10, 0.12)))
         .insert_resource(scene)
-        .add_systems(Startup, setup_windowed)
+        .add_systems(Startup, (setup_windowed, ui_root.spawn()))
         .add_systems(Update, orbit)
         .run();
 }
@@ -77,7 +84,7 @@ fn setup_windowed(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
-    scene: Res<Scene>,
+    scene: Res<SceneCfg>,
 ) {
     spawn_world(&mut commands, &mut meshes, &mut materials, &scene);
     let radius = scene.bed[0].max(scene.bed[1]).max(80.0);
@@ -89,15 +96,6 @@ fn setup_windowed(
             pitch: 0.5,
             radius,
         },
-    ));
-    commands.spawn((
-        Node {
-            position_type: PositionType::Absolute,
-            top: Val::Px(8.0),
-            left: Val::Px(8.0),
-            ..default()
-        },
-        Text::new("fab-gui \u{2014} drag: orbit \u{b7} scroll: zoom"),
     ));
 }
 
@@ -134,7 +132,7 @@ struct Shot {
     captured: bool,
 }
 
-fn run_screenshot(scene: Scene, png: PathBuf) {
+fn run_screenshot(scene: SceneCfg, png: PathBuf) {
     App::new()
         .add_plugins(
             DefaultPlugins
@@ -148,10 +146,12 @@ fn run_screenshot(scene: Scene, png: PathBuf) {
         .add_plugins(ScheduleRunnerPlugin::run_loop(
             std::time::Duration::from_secs_f64(1.0 / 60.0),
         ))
+        .add_plugins(FeathersPlugins)
+        .insert_resource(UiTheme(create_dark_theme()))
         .insert_resource(ClearColor(Color::srgb(0.10, 0.10, 0.12)))
         .insert_resource(scene)
         .insert_resource(ScreenshotPng(png))
-        .add_systems(Startup, setup_offscreen)
+        .add_systems(Startup, (setup_offscreen, ui_root.spawn()))
         .add_systems(Update, capture_then_exit)
         .run();
 }
@@ -164,7 +164,7 @@ fn setup_offscreen(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut images: ResMut<Assets<Image>>,
-    scene: Res<Scene>,
+    scene: Res<SceneCfg>,
     png: Res<ScreenshotPng>,
 ) {
     spawn_world(&mut commands, &mut meshes, &mut materials, &scene);
@@ -180,6 +180,8 @@ fn setup_offscreen(
         Camera3d::default(),
         RenderTarget::Image(target.clone().into()),
         orbit_transform(-0.7, 0.5, radius),
+        // No window here, so make this offscreen camera the UI target (so the panel renders).
+        bevy::ui::IsDefaultUiCamera,
     ));
 
     commands.insert_resource(Shot {
@@ -222,7 +224,7 @@ fn spawn_world(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<StandardMaterial>,
-    scene: &Scene,
+    scene: &SceneCfg,
 ) {
     // Model: the STL (a `fab`-rendered part), else a placeholder block.
     let model = match scene.model.as_deref() {
@@ -301,5 +303,37 @@ fn bed_size() -> Option<[f64; 3]> {
         if !dir.pop() {
             return None;
         }
+    }
+}
+
+// ---- Feathers UI ----------------------------------------------------------------------
+
+/// The control panel as a bsn scene: a title, a cut-position slider, and a re-slice button —
+/// the first real Feathers/bsn widgets, to grow into the full cut + connector controls.
+fn ui_root() -> impl SceneList {
+    bsn_list![panel()]
+}
+
+fn panel() -> impl Scene {
+    bsn! {
+        Node {
+            position_type: PositionType::Absolute,
+            top: px(8),
+            left: px(8),
+            flex_direction: FlexDirection::Column,
+            row_gap: px(8),
+            padding: UiRect::all(px(10)),
+            min_width: px(190),
+        }
+        ThemeBackgroundColor(tokens::WINDOW_BG)
+        Children[
+            (Text("fab-gui") ThemedText),
+            (Text("cut position") ThemedText),
+            (@FeathersSlider { @max: 100.0, @value: 50.0 } SliderStep(1.0)),
+            (
+                @FeathersButton { @caption: bsn!{ Text("Re-slice") ThemedText } }
+                on(|_: On<Activate>| info!("re-slice clicked"))
+            ),
+        ]
     }
 }

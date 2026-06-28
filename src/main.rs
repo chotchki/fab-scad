@@ -5,6 +5,7 @@
 //! geometry. Foundation: a CLI skeleton, a real `doctor` preflight, and the OpenSCAD
 //! wrap (see [`openscad`]).
 
+mod manifest;
 mod openscad;
 
 use std::path::{Path, PathBuf};

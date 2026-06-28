@@ -677,19 +677,32 @@ fn sync_dim_labels(
     let Ok((camera, cam_gt)) = cam.single() else {
         return;
     };
-    // Measure along the axis you're editing: segments between that axis's enabled cuts + edges.
-    let axis = cuts.active_axis();
-    let ai = axis.index();
-    let mut xs: Vec<f32> =
-        cuts.list.iter().filter(|c| c.enabled && c.axis == axis).map(|c| c.at).collect();
-    xs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    let mut edges = vec![comp(min, ai)];
-    edges.extend(xs);
-    edges.push(comp(max, ai));
-    let n_pieces = edges.len() - 1;
+    // Build a (world position, width) for every piece segment on EVERY axis that has cuts.
+    let center = (min + max) * 0.5;
+    let mut segs: Vec<(Vec3, f32)> = Vec::new();
+    for axis in [Axis::X, Axis::Y, Axis::Z] {
+        let ai = axis.index();
+        let mut xs: Vec<f32> =
+            cuts.list.iter().filter(|c| c.enabled && c.axis == axis).map(|c| c.at).collect();
+        if xs.is_empty() {
+            continue;
+        }
+        xs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let mut edges = vec![comp(min, ai)];
+        edges.extend(xs);
+        edges.push(comp(max, ai));
+        for (k, w) in edges.windows(2).enumerate() {
+            let mid = (w[0] + w[1]) * 0.5 + k as f32 * dspread.0;
+            let mut pos = with_comp(center, ai, mid);
+            if ai != 2 {
+                pos.z = max.z; // float above the model for X/Y segments
+            }
+            segs.push((pos, w[1] - w[0]));
+        }
+    }
 
-    // Spawn a label entity for any segment that lacks one.
-    for i in existing.iter().count()..n_pieces {
+    // Spawn a label entity for any segment that lacks one (count only grows).
+    for i in existing.iter().count()..segs.len() {
         commands.spawn((
             Text::new(""),
             TextColor(Color::srgb(0.95, 0.95, 1.0)),
@@ -699,23 +712,16 @@ fn sync_dim_labels(
         ));
     }
 
-    let center = (min + max) * 0.5;
     for (dl, mut node, mut text, mut vis) in &mut labels {
-        if dl.idx >= n_pieces {
+        let Some(&(pos, width)) = segs.get(dl.idx) else {
             *vis = Visibility::Hidden;
             continue;
-        }
-        let (lo, hi) = (edges[dl.idx], edges[dl.idx + 1]);
-        let mid = (lo + hi) * 0.5 + dl.idx as f32 * dspread.0;
-        let mut pos = with_comp(center, ai, mid);
-        if ai != 2 {
-            pos.z = max.z; // float above the model for X/Y cuts
-        }
+        };
         match camera.world_to_viewport(cam_gt, pos) {
             Ok(p) => {
                 node.left = px(p.x);
                 node.top = px(p.y);
-                *text = Text::new(format!("{:.0}", hi - lo));
+                *text = Text::new(format!("{width:.0}"));
                 *vis = Visibility::Visible;
             }
             Err(_) => *vis = Visibility::Hidden,

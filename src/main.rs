@@ -2,13 +2,19 @@
 //!
 //! OpenSCAD is a great geometry engine with no workflow story; `fab` supplies the
 //! lifecycle it lacks (render, slice, output, publish) and never reimplements the
-//! geometry. This is the foundation: a CLI skeleton plus a real `doctor` preflight.
+//! geometry. Foundation: a CLI skeleton, a real `doctor` preflight, and the OpenSCAD
+//! wrap (see [`openscad`]).
+
+mod openscad;
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::Duration;
 
 use anyhow::{bail, Result};
 use clap::{Parser, Subcommand};
+
+use openscad::Openscad;
 
 #[derive(Parser)]
 #[command(
@@ -25,12 +31,25 @@ struct Cli {
 enum Commands {
     /// Environment preflight: OpenSCAD, Manifold, submodules, NAS, OPENSCADPATH.
     Doctor,
-    /// Set the active project so later commands need no name. (Phase 3.2)
+    /// Set the active project so later commands need no name. (Phase 3.2 -> 3.3)
     Focus { project: Option<String> },
     /// Scaffold a new project from the template. (Phase 3.5)
     New { name: String },
-    /// Render a project's outputs. (Phase 6)
-    Render { project: Option<String> },
+    /// Render a .scad to geometry (+ optional PNG thumbnail).
+    /// File-level for now; project/DAG-aware in Phase 6.
+    Render {
+        /// Path to a .scad file.
+        target: PathBuf,
+        /// Also write an auto-framed PNG thumbnail next to the output.
+        #[arg(long)]
+        png: bool,
+        /// Output path (default: <dir>/out/<stem>.stl).
+        #[arg(long)]
+        out: Option<PathBuf>,
+        /// Kill the render after this many seconds.
+        #[arg(long, default_value_t = 120)]
+        timeout: u64,
+    },
     /// Build + publish a project to hotchkiss.io. (Phase 7)
     Publish { project: Option<String> },
 }
@@ -38,9 +57,14 @@ enum Commands {
 fn main() -> Result<()> {
     match Cli::parse().command {
         Commands::Doctor => doctor(),
-        Commands::Focus { .. } => not_yet("focus", "3.2"),
+        Commands::Focus { .. } => not_yet("focus", "3.3"),
         Commands::New { .. } => not_yet("new", "3.5"),
-        Commands::Render { .. } => not_yet("render", "6"),
+        Commands::Render {
+            target,
+            png,
+            out,
+            timeout,
+        } => render_cmd(&target, out, png, timeout),
         Commands::Publish { .. } => not_yet("publish", "7"),
     }
 }
@@ -48,6 +72,59 @@ fn main() -> Result<()> {
 fn not_yet(cmd: &str, phase: &str) -> Result<()> {
     println!("`fab {cmd}` is not implemented yet (planned for Phase {phase}).");
     Ok(())
+}
+
+fn render_cmd(target: &Path, out: Option<PathBuf>, png: bool, timeout_secs: u64) -> Result<()> {
+    if !target.exists() {
+        bail!("no such file: {}", target.display());
+    }
+    let root = find_root();
+    let oscad = Openscad::discover(root.as_deref())?;
+    let timeout = Duration::from_secs(timeout_secs);
+
+    let stl = out.unwrap_or_else(|| default_out(target, "stl"));
+    println!("render {} -> {}", target.display(), stl.display());
+    let r = oscad.render(target, &stl, timeout)?;
+    print_report(&r);
+
+    if png {
+        let thumb = stl.with_extension("png");
+        println!("thumb  {} -> {}", target.display(), thumb.display());
+        let t = oscad.thumbnail(target, &thumb, (512, 512), timeout)?;
+        print_report(&t);
+    }
+
+    if !r.ok {
+        bail!("render failed");
+    }
+    Ok(())
+}
+
+fn default_out(target: &Path, ext: &str) -> PathBuf {
+    let stem = target
+        .file_stem()
+        .map(|s| s.to_os_string())
+        .unwrap_or_else(|| "out".into());
+    target
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join("out")
+        .join(stem)
+        .with_extension(ext)
+}
+
+fn print_report(r: &openscad::Report) {
+    let status = if r.timed_out {
+        "TIMEOUT".to_string()
+    } else if r.ok {
+        format!("ok ({:.1?})", r.duration)
+    } else {
+        "FAILED".to_string()
+    };
+    println!("  [{status}] {}", r.output.display());
+    for w in &r.warnings {
+        println!("    {w}");
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -72,15 +149,15 @@ fn doctor() -> Result<()> {
         )),
     }
 
-    match find_openscad() {
+    match openscad::find_bin() {
         Some(p) => {
-            let ver = openscad_version(&p).unwrap_or_else(|| "unknown version".into());
+            let ver = openscad::version(&p).unwrap_or_else(|| "unknown version".into());
             checks.push((
                 Level::Ok,
                 "OpenSCAD".into(),
                 format!("{ver} ({})", p.display()),
             ));
-            let (lvl, detail) = if openscad_has_manifold(&p) {
+            let (lvl, detail) = if openscad::has_manifold(&p) {
                 (Level::Ok, "available".into())
             } else {
                 (
@@ -177,45 +254,6 @@ fn find_root() -> Option<PathBuf> {
             return None;
         }
     }
-}
-
-fn find_openscad() -> Option<PathBuf> {
-    if let Ok(p) = std::env::var("OPENSCAD") {
-        let pb = PathBuf::from(p);
-        if pb.exists() {
-            return Some(pb);
-        }
-    }
-    let app = PathBuf::from("/Applications/OpenSCAD.app/Contents/MacOS/OpenSCAD");
-    if app.exists() {
-        return Some(app);
-    }
-    if Command::new("openscad").arg("--version").output().is_ok() {
-        return Some(PathBuf::from("openscad"));
-    }
-    None
-}
-
-fn openscad_version(p: &Path) -> Option<String> {
-    let out = Command::new(p).arg("--version").output().ok()?;
-    let text = if out.stderr.is_empty() {
-        String::from_utf8_lossy(&out.stdout)
-    } else {
-        String::from_utf8_lossy(&out.stderr)
-    };
-    text.lines().next().map(|l| l.trim().to_string())
-}
-
-fn openscad_has_manifold(p: &Path) -> bool {
-    let Ok(out) = Command::new(p).arg("--help").output() else {
-        return false;
-    };
-    let text = format!(
-        "{}{}",
-        String::from_utf8_lossy(&out.stdout),
-        String::from_utf8_lossy(&out.stderr)
-    );
-    text.to_lowercase().contains("manifold")
 }
 
 fn git_describe(dir: &Path) -> Option<String> {

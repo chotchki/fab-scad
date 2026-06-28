@@ -39,6 +39,24 @@ function _ascending(v, i = 0) =
 function _axis_index(axis) =
     is_vector(axis) ? (axis.x != 0 ? 0 : axis.y != 0 ? 1 : 2) : axis;
 
+// slice_residual — dimensional-integrity check (4.8). Renders the symmetric difference of the
+// source and the union of its in-place pieces. The linear cut is lossless by construction
+// (consecutive slabs share exact boundaries), so the result has ZERO VOLUME — either empty,
+// or, since mesh CSG leaves coincident faces at the cut planes, a zero-thickness shell (a
+// hollow outline with no solid interior; cross-section it to confirm it's hollow). A SOLID
+// residual means real material was lost or shrunk by the cut — that's the failure to catch.
+// (Physical print shrink is a separate, post-print concern — measure it with `fab coupon`.)
+module slice_residual(cuts, axis = RIGHT, size = 500) {
+    difference() {
+        children();
+        union() slice(cuts, axis = axis, size = size) children();
+    }
+    difference() {
+        union() slice(cuts, axis = axis, size = size) children();
+        children();
+    }
+}
+
 module slice(cuts, axis = RIGHT, size = 500, spread = 0, only = undef) {
     req_children($children);
     ai = _axis_index(axis);

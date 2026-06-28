@@ -15,9 +15,7 @@ use bevy::{
     asset::RenderAssetUsages,
     camera::RenderTarget,
     feathers::{
-        controls::{
-            FeathersButton, FeathersNumberInput, NumberFormat, NumberInputValue, UpdateNumberInput,
-        },
+        controls::{FeathersButton, FeathersListRow, FeathersListView},
         dark_theme::create_dark_theme,
         theme::{ThemeBackgroundColor, ThemedText, UiTheme},
         tokens, FeathersPlugins,
@@ -37,7 +35,7 @@ use bevy::{
     },
     scene::{Scene, SceneList}, // the bsn traits — shadow the prelude's `Scene` asset struct
     tasks::{block_on, futures_lite::future, AsyncComputeTaskPool, Task},
-    ui_widgets::{Activate, ValueChange},
+    ui_widgets::Activate,
     window::ExitCondition,
     winit::WinitPlugin,
 };
@@ -115,13 +113,6 @@ impl Axis {
             Axis::Z => 'z',
         }
     }
-    fn next(self) -> Axis {
-        match self {
-            Axis::X => Axis::Y,
-            Axis::Y => Axis::Z,
-            Axis::Z => Axis::X,
-        }
-    }
 }
 
 /// One planar cut: which axis it's normal to, its position along that axis, and whether it's in
@@ -196,22 +187,26 @@ struct SlicedMesh(Option<Handle<Mesh>>);
 #[derive(Resource, Default)]
 struct SliceDirty(bool);
 
-/// Marks the panel's status text + cut-list text so systems can update them.
+/// Marks the panel's status text so a system can update it.
 #[derive(Component, Clone, Default)]
 struct StatusLabel;
-#[derive(Component, Clone, Default)]
-struct CutLabel;
-/// Marks the numeric entry field for the active cut's X.
-#[derive(Component, Clone, Default)]
-struct CutInput;
 /// The Explode/Collapse view-toggle button and its caption (relabelled to match the state).
 #[derive(Component, Clone, Default)]
 struct ViewToggleButton;
 #[derive(Component, Clone, Default)]
 struct ViewToggleLabel;
-/// The caption of the per-cut axis rotate button (relabelled to the active cut's axis).
+/// The whole panel's root entity — despawned + rebuilt when the cut structure changes.
 #[derive(Component, Clone, Default)]
-struct AxisLabel;
+struct PanelRoot;
+/// A cut row in a plane card, tagged with the cut index it shows (for targeted text updates).
+#[derive(Component, Clone, Default, Reflect)]
+#[reflect(Component)]
+struct RowFor(usize);
+
+/// The cut stack's structural signature (one axis per cut) — the panel rebuilds when it changes;
+/// value-only edits (position, on/off) update rows in place instead.
+#[derive(Resource, Default)]
+struct PanelSig(Option<Vec<Axis>>);
 /// A brief attention flash (seconds remaining), drawn as a fading outline.
 #[derive(Component)]
 struct Nudge(f32);
@@ -271,14 +266,14 @@ fn run_windowed(scene: SceneCfg) {
         .init_resource::<SlicedMesh>()
         .init_resource::<SliceDirty>()
         .init_resource::<DisplaySpread>()
+        .init_resource::<PanelSig>()
         .insert_resource(Status("rendering…".into()))
         .add_message::<ReSlice>()
         .add_observer(on_drag_start)
         .add_observer(on_drag)
         .add_observer(on_drag_end)
         .add_observer(on_click)
-        .add_observer(on_cut_typed)
-        .add_systems(Startup, (setup_windowed, ui_root.spawn()))
+        .add_systems(Startup, setup_windowed)
         .add_systems(
             Update,
             (
@@ -288,11 +283,10 @@ fn run_windowed(scene: SceneCfg) {
                 update_status,
                 sync_overlays,
                 sync_overlay_visuals,
-                update_cut_label,
-                sync_cut_input,
                 sync_dim_labels,
                 update_view_label,
-                update_axis_label,
+                rebuild_panel,
+                update_rows,
                 nudge_buttons,
                 mark_dirty,
                 revert_on_edit,
@@ -520,47 +514,6 @@ fn nudge_buttons(time: Res<Time>, mut q: Query<(Entity, &mut Nudge)>, mut comman
     }
 }
 
-/// "+cut" — add a cut at the model centre, on the active cut's axis, and make it active.
-fn add_cut(_ev: On<Activate>, mut cuts: ResMut<Cuts>, bounds: Res<ModelBounds>) {
-    if let Some((min, max)) = bounds.0 {
-        let axis = cuts.active_axis();
-        let at = comp((min + max) * 0.5, axis.index());
-        cuts.list.push(CutDef { axis, at, enabled: true });
-        cuts.active = cuts.list.len() - 1;
-    }
-}
-
-/// "toggle" — flip the active cut on/off (kept in the stack, just out of the slice).
-fn toggle_cut(_ev: On<Activate>, mut cuts: ResMut<Cuts>) {
-    let a = cuts.active;
-    if let Some(c) = cuts.list.get_mut(a) {
-        c.enabled = !c.enabled;
-    }
-}
-
-/// "axis: X" — rotate the active cut's plane to the next axis, re-centring it on that axis.
-fn cycle_axis(_ev: On<Activate>, bounds: Res<ModelBounds>, mut cuts: ResMut<Cuts>) {
-    let Some((min, max)) = bounds.0 else {
-        return;
-    };
-    let a = cuts.active;
-    if let Some(c) = cuts.list.get_mut(a) {
-        c.axis = c.axis.next();
-        c.at = comp((min + max) * 0.5, c.axis.index());
-    }
-}
-
-/// Relabel the rotate button to the active cut's axis.
-fn update_axis_label(cuts: Res<Cuts>, mut q: Query<&mut Text, With<AxisLabel>>) {
-    if !cuts.is_changed() {
-        return;
-    }
-    let label = format!("axis: {}", cuts.active_axis().label());
-    for mut t in &mut q {
-        *t = Text::new(label.clone());
-    }
-}
-
 /// Spawn an overlay for any cut that lacks one (covers cuts added by button OR harness).
 fn sync_overlays(
     cuts: Res<Cuts>,
@@ -780,86 +733,6 @@ fn cut_color(active: bool, enabled: bool) -> Color {
     }
 }
 
-fn update_cut_label(
-    cuts: Res<Cuts>,
-    bounds: Res<ModelBounds>,
-    mut labels: Query<&mut Text, With<CutLabel>>,
-) {
-    if !cuts.is_changed() && !bounds.is_changed() {
-        return;
-    }
-    let mut text = if cuts.list.is_empty() {
-        "(no cuts)".to_string()
-    } else {
-        cuts.list
-            .iter()
-            .enumerate()
-            .map(|(i, c)| {
-                let mark = if i == cuts.active { "›" } else { " " };
-                let st = if c.enabled { "on" } else { "off" };
-                format!("{mark}{}={:.0} {st}", c.axis.label(), c.at)
-            })
-            .collect::<Vec<_>>()
-            .join("\n")
-    };
-    // Live piece widths per axis: distances between that axis's sorted enabled cuts and its edges.
-    if let Some((min, max)) = bounds.0 {
-        for axis in [Axis::X, Axis::Y, Axis::Z] {
-            let ai = axis.index();
-            let mut xs: Vec<f32> =
-                cuts.list.iter().filter(|c| c.enabled && c.axis == axis).map(|c| c.at).collect();
-            if xs.is_empty() {
-                continue;
-            }
-            xs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-            let mut edges = vec![comp(min, ai)];
-            edges.extend(xs);
-            edges.push(comp(max, ai));
-            let widths: Vec<String> =
-                edges.windows(2).map(|w| format!("{:.0}", w[1] - w[0])).collect();
-            text.push_str(&format!("\n{}: {} mm", axis.label(), widths.join(" | ")));
-        }
-    }
-    for mut t in &mut labels {
-        *t = Text::new(text.clone());
-    }
-}
-
-/// Type a number → set the active cut's X (the typed half of "drag + type").
-fn on_cut_typed(
-    ev: On<ValueChange<f32>>,
-    inputs: Query<(), With<CutInput>>,
-    bounds: Res<ModelBounds>,
-    mut cuts: ResMut<Cuts>,
-) {
-    if !inputs.contains(ev.source) {
-        return;
-    }
-    let v = clamp_to_bounds(ev.value, cuts.active_axis(), &bounds);
-    let a = cuts.active;
-    if let Some(c) = cuts.list.get_mut(a) {
-        c.at = v;
-    }
-}
-
-/// Push the active cut's X into the numeric field so it reflects drag/next/add. Silent while the
-/// field is focused (number_input_on_update skips focused inputs), so it never fights typing.
-fn sync_cut_input(cuts: Res<Cuts>, inputs: Query<Entity, With<CutInput>>, mut commands: Commands) {
-    if !cuts.is_changed() {
-        return;
-    }
-    let Some(active) = cuts.list.get(cuts.active) else {
-        return;
-    };
-    let at = active.at;
-    for e in &inputs {
-        commands.trigger(UpdateNumberInput {
-            entity: e,
-            value: NumberInputValue::F32(at),
-        });
-    }
-}
-
 /// Offset along `axis` (a unit vector through `p0`) of the point on that line closest to the ray
 /// (`ray_d` unit). The classic skew-line solution; pure, so it's unit-tested.
 fn closest_on_axis(p0: Vec3, axis: Vec3, ray_o: Vec3, ray_d: Vec3) -> f32 {
@@ -1023,9 +896,15 @@ fn run_screenshot(scene: SceneCfg, png: PathBuf) {
         .init_resource::<Cuts>()
         .init_resource::<ModelBounds>()
         .init_resource::<DraggingCut>()
+        .init_resource::<WholeMesh>()
+        .init_resource::<SlicedMesh>()
+        .init_resource::<SliceDirty>()
+        .init_resource::<DisplaySpread>()
+        .init_resource::<PanelSig>()
+        .insert_resource(Status("rendering…".into()))
         .add_message::<ReSlice>()
-        .add_systems(Startup, (setup_offscreen, ui_root.spawn()))
-        .add_systems(Update, capture_then_exit)
+        .add_systems(Startup, setup_offscreen)
+        .add_systems(Update, (capture_then_exit, rebuild_panel, update_rows, update_status))
         .run();
 }
 
@@ -1207,10 +1086,11 @@ fn run_scripted(scene: SceneCfg, actions: Vec<Action>) {
         .init_resource::<SlicedMesh>()
         .init_resource::<SliceDirty>()
         .init_resource::<DisplaySpread>()
+        .init_resource::<PanelSig>()
         .insert_resource(Status("rendering…".into()))
         .insert_resource(ScriptRunner { actions, idx: 0, timer: 0 })
         .add_message::<ReSlice>()
-        .add_systems(Startup, (setup_script, ui_root.spawn()))
+        .add_systems(Startup, setup_script)
         .add_systems(
             Update,
             (
@@ -1219,11 +1099,10 @@ fn run_scripted(scene: SceneCfg, actions: Vec<Action>) {
                 update_status,
                 sync_overlays,
                 sync_overlay_visuals,
-                update_cut_label,
-                sync_cut_input,
                 sync_dim_labels,
                 update_view_label,
-                update_axis_label,
+                rebuild_panel,
+                update_rows,
                 mark_dirty,
                 revert_on_edit,
                 run_script,
@@ -1483,36 +1362,82 @@ fn bed_size() -> Option<[f64; 3]> {
     }
 }
 
-// ---- Feathers UI ----------------------------------------------------------------------
+// ---- Feathers UI: plane-grouped cards -------------------------------------------------
 
-/// The control panel as a bsn scene: title, status, the cut list, cut buttons, Re-slice.
-fn ui_root() -> impl SceneList {
-    bsn_list![panel()]
+/// Text for a cut row: active marker, position, on/off.
+fn row_text(idx: usize, at: f32, enabled: bool, active: usize) -> String {
+    let mark = if idx == active { "› " } else { "  " };
+    let st = if enabled { "on" } else { "off" };
+    format!("{mark}{at:.0} mm  {st}")
 }
 
-fn panel() -> impl Scene {
+/// One plane card: a header (plane name + per-plane "+cut") and a list of that plane's cuts.
+fn plane_card(cuts: &Cuts, axis: Axis) -> impl Scene + 'static {
+    let rows: Vec<_> = cuts
+        .list
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| c.axis == axis)
+        .map(|(idx, c)| {
+            bsn! {
+                @FeathersListRow
+                RowFor(idx)
+                Children [ (Text(row_text(idx, c.at, c.enabled, cuts.active)) ThemedText) ]
+            }
+        })
+        .collect();
+    // Per-plane add: a move-closure capturing this card's axis.
+    let add = move |_: On<Activate>, mut cuts: ResMut<Cuts>, bounds: Res<ModelBounds>| {
+        if let Some((mn, mx)) = bounds.0 {
+            let at = comp((mn + mx) * 0.5, axis.index());
+            cuts.list.push(CutDef { axis, at, enabled: true });
+            cuts.active = cuts.list.len() - 1;
+        }
+    };
+    bsn! {
+        Node {
+            flex_direction: FlexDirection::Column,
+            row_gap: px(3),
+            padding: UiRect::all(px(4)),
+        }
+        Children [
+            (
+                Node {
+                    flex_direction: FlexDirection::Row,
+                    column_gap: px(8),
+                    justify_content: JustifyContent::SpaceBetween,
+                }
+                Children [
+                    (Text(format!("{} plane", axis.label())) ThemedText),
+                    (@FeathersButton { @caption: bsn!{ Text("+cut") ThemedText } } on(add)),
+                ]
+            ),
+            (@FeathersListView { @rows: { Box::new(rows) as Box<dyn SceneList> } }),
+        ]
+    }
+}
+
+/// The whole panel scene, built from the current cut stack: title, an X/Y/Z card stack, and a
+/// bottom bar (status + Re-slice + Explode/Collapse).
+fn build_panel(cuts: &Cuts) -> impl Scene + 'static {
+    let cards: Vec<_> = [Axis::X, Axis::Y, Axis::Z].into_iter().map(|a| plane_card(cuts, a)).collect();
     bsn! {
         Node {
             position_type: PositionType::Absolute,
             top: px(8),
             left: px(8),
             flex_direction: FlexDirection::Column,
-            row_gap: px(8),
-            padding: UiRect::all(px(10)),
-            min_width: px(190),
+            row_gap: px(6),
+            padding: UiRect::all(px(8)),
+            min_width: px(220),
         }
+        PanelRoot
         ThemeBackgroundColor(tokens::WINDOW_BG)
-        Children[
+        Children [
             (Text("fab-gui") ThemedText),
-            (Text("(no cuts)") ThemedText CutLabel),
-            (@FeathersNumberInput { @number_format: NumberFormat::F32 } CutInput),
             (
-                Node { flex_direction: FlexDirection::Row, column_gap: px(6) }
-                Children[
-                    (@FeathersButton { @caption: bsn!{ Text("+cut") ThemedText } } on(add_cut)),
-                    (@FeathersButton { @caption: bsn!{ Text("toggle") ThemedText } } on(toggle_cut)),
-                    (@FeathersButton { @caption: bsn!{ Text("axis: X") ThemedText AxisLabel } } on(cycle_axis)),
-                ]
+                Node { flex_direction: FlexDirection::Column, row_gap: px(6) }
+                Children [ { Box::new(cards) as Box<dyn SceneList> } ]
             ),
             (Text("rendering…") ThemedText StatusLabel),
             (
@@ -1525,6 +1450,49 @@ fn panel() -> impl Scene {
                 on(toggle_view)
             ),
         ]
+    }
+}
+
+/// Rebuild the whole panel when the cut STRUCTURE changes (a cut added/removed/rotated → the
+/// per-cut axis sequence differs). Value-only edits leave it alone; update_rows refreshes those.
+fn rebuild_panel(
+    cuts: Res<Cuts>,
+    mut sig: ResMut<PanelSig>,
+    roots: Query<Entity, With<PanelRoot>>,
+    mut commands: Commands,
+) {
+    let cur: Vec<Axis> = cuts.list.iter().map(|c| c.axis).collect();
+    if sig.0.as_deref() == Some(cur.as_slice()) {
+        return;
+    }
+    sig.0 = Some(cur);
+    for e in &roots {
+        commands.entity(e).despawn();
+    }
+    commands.queue(|world: &mut World| {
+        let scene = build_panel(world.resource::<Cuts>());
+        if let Err(e) = world.spawn_scene(scene) {
+            error!("panel spawn failed: {e:?}");
+        }
+    });
+}
+
+/// Refresh each row's text from its cut, in place — so position/on-off edits show without a rebuild.
+fn update_rows(cuts: Res<Cuts>, rows: Query<(&RowFor, &Children)>, mut texts: Query<&mut Text>) {
+    if !cuts.is_changed() {
+        return;
+    }
+    for (rf, children) in &rows {
+        let Some(c) = cuts.list.get(rf.0) else {
+            continue;
+        };
+        let label = row_text(rf.0, c.at, c.enabled, cuts.active);
+        for child in children.iter() {
+            if let Ok(mut t) = texts.get_mut(child) {
+                *t = Text::new(label.clone());
+                break;
+            }
+        }
     }
 }
 

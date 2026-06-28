@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use anyhow::{ensure, Result};
 
-use fab_scad::manifest::{Cut, Slicing};
+use fab_scad::manifest::{Connector, Cut, Slicing};
 use fab_scad::num::Num;
 use fab_scad::openscad::Openscad;
 use fab_scad::slicing;
@@ -45,6 +45,7 @@ pub fn reslice(
     root: Option<&Path>,
     source: &Path,
     cuts: &[(char, f64)],
+    connectors: &[Conn],
     spread: f64,
     out_dir: &Path,
 ) -> Result<PathBuf> {
@@ -57,12 +58,31 @@ pub fn reslice(
             at: Num::Float(at),
         })
         .collect();
+    let connector = connectors
+        .iter()
+        .map(|c| Connector {
+            cut: c.cut,
+            kind: "bolt".to_string(),
+            screw: Some("M3".to_string()),
+            pos: [Num::Float(c.pos[0]), Num::Float(c.pos[1])],
+            through: None,
+        })
+        .collect();
     let spec = Slicing {
         printer: None,
         cut,
-        connector: vec![],
+        connector,
     };
     slicing::slice_part(&oscad, &wrap, &spec, spread, out_dir, TIMEOUT)
+}
+
+/// A connector to place, resolved for slicing: `cut` is the index into the cuts slice passed
+/// alongside, `pos` the two coords in the cut plane's non-axis dims. Bolt-only for now (the kind
+/// + screw default live here until the model grows them — see the connector roadmap, #36).
+#[derive(Clone, Copy)]
+pub struct Conn {
+    pub cut: usize,
+    pub pos: [f64; 2],
 }
 
 /// Write a `$preview = true; include <source>;` wrapper so the source's

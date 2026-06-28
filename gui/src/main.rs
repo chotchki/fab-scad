@@ -142,9 +142,30 @@ impl Cuts {
         self.list.iter().filter(|c| c.enabled).map(|c| (c.axis.scad(), c.at as f64)).collect()
     }
 
+    /// Stack indices of the enabled cuts, in order — a connector's stack-index maps to its
+    /// position here to reference the right cut in the sliced spec.
+    fn enabled_indices(&self) -> Vec<usize> {
+        self.list.iter().enumerate().filter(|(_, c)| c.enabled).map(|(i, _)| i).collect()
+    }
+
     fn active_axis(&self) -> Axis {
         self.list.get(self.active).map(|c| c.axis).unwrap_or(Axis::X)
     }
+}
+
+/// A placed connector: which cut (stack index) it sits on, and its position in that cut plane's
+/// two non-axis dims. Bolt-only for now; the kind/orientation/params grow per the connector
+/// roadmap (#36) — see the connector-design memory.
+#[derive(Clone, Copy)]
+struct PlacedConn {
+    cut: usize,
+    pos: [f32; 2],
+}
+
+/// The placed connectors (manual face-pick). Like the cut stack, a pure input to the slice.
+#[derive(Resource, Default)]
+struct Conns {
+    list: Vec<PlacedConn>,
 }
 
 /// The X/Y/Z component of `v`.
@@ -297,6 +318,7 @@ fn run_windowed(scene: SceneCfg) {
         .insert_resource(scene)
         .init_resource::<Job>()
         .init_resource::<Cuts>()
+        .init_resource::<Conns>()
         .init_resource::<ModelBounds>()
         .init_resource::<DraggingCut>()
         .init_resource::<WholeMesh>()
@@ -364,7 +386,7 @@ fn setup_windowed(
         },
     ));
     // Render the model off-thread; poll_job seeds the first cut when bounds land.
-    kick_job(&mut job, &mut status, &scene, false, vec![]);
+    kick_job(&mut job, &mut status, &scene, false, vec![], vec![]);
 }
 
 fn orbit(
@@ -799,6 +821,7 @@ fn request_reslice(
     mut status: ResMut<Status>,
     cfg: Res<SceneCfg>,
     cuts: Res<Cuts>,
+    conns: Res<Conns>,
 ) {
     if ev.read().count() == 0 {
         return;
@@ -812,11 +835,34 @@ fn request_reslice(
         status.0 = "no enabled cuts".into();
         return;
     }
-    kick_job(&mut job, &mut status, &cfg, true, xs);
+    kick_job(&mut job, &mut status, &cfg, true, xs, resolve_conns(&cuts, &conns));
+}
+
+/// Map placed connectors to the sliced spec: a connector's stack-cut index → its position in the
+/// enabled-cut list (which is what `fab::reslice` indexes). Connectors on a disabled cut drop out.
+fn resolve_conns(cuts: &Cuts, conns: &Conns) -> Vec<fab::Conn> {
+    let enabled = cuts.enabled_indices();
+    conns
+        .list
+        .iter()
+        .filter_map(|pc| {
+            enabled.iter().position(|&si| si == pc.cut).map(|ei| fab::Conn {
+                cut: ei,
+                pos: [pc.pos[0] as f64, pc.pos[1] as f64],
+            })
+        })
+        .collect()
 }
 
 /// Spawn the render/slice on the async compute pool (blocking OpenSCAD work, off-thread).
-fn kick_job(job: &mut Job, status: &mut Status, cfg: &SceneCfg, reslice: bool, cuts: Vec<(char, f64)>) {
+fn kick_job(
+    job: &mut Job,
+    status: &mut Status,
+    cfg: &SceneCfg,
+    reslice: bool,
+    cuts: Vec<(char, f64)>,
+    conns: Vec<fab::Conn>,
+) {
     let Some(src) = cfg.source.clone() else {
         status.0 = "no .scad source".into();
         return;
@@ -824,7 +870,8 @@ fn kick_job(job: &mut Job, status: &mut Status, cfg: &SceneCfg, reslice: bool, c
     let (root, tmp) = (cfg.root.clone(), cfg.tmp.clone());
     let task = AsyncComputeTaskPool::get().spawn(async move {
         if reslice {
-            fab::reslice(root.as_deref(), &src, &cuts, SPREAD, &tmp).map_err(|e| format!("{e:#}"))
+            fab::reslice(root.as_deref(), &src, &cuts, &conns, SPREAD, &tmp)
+                .map_err(|e| format!("{e:#}"))
         } else {
             fab::render_whole(root.as_deref(), &src, &tmp).map_err(|e| format!("{e:#}"))
         }
@@ -938,6 +985,7 @@ fn run_screenshot(scene: SceneCfg, png: PathBuf) {
         .insert_resource(scene)
         .insert_resource(ScreenshotPng(png))
         .init_resource::<Cuts>()
+        .init_resource::<Conns>()
         .init_resource::<ModelBounds>()
         .init_resource::<DraggingCut>()
         .init_resource::<WholeMesh>()
@@ -1016,7 +1064,7 @@ fn setup_offscreen_model(
     if !scene.reslice_on_start {
         return whole_mesh;
     }
-    match fab::reslice(scene.root.as_deref(), src, &[('x', cut_x as f64)], SPREAD, &scene.tmp) {
+    match fab::reslice(scene.root.as_deref(), src, &[('x', cut_x as f64)], &[], SPREAD, &scene.tmp) {
         Ok(sliced) => load_model(meshes, Some(&sliced)),
         Err(e) => {
             error!("{e:#}");
@@ -1063,6 +1111,7 @@ enum Action {
     Reslice,       // trigger a slice, then wait for the async job
     Shot(PathBuf), // screenshot the viewport to this path
     Wait(u32),     // idle this many frames
+    Conn(usize, f32, f32), // place a connector on cut <i> at (a, b) in its plane's non-axis dims
 }
 
 #[derive(Resource)]
@@ -1095,6 +1144,12 @@ fn parse_script(s: &str) -> Vec<Action> {
                 "reslice" => Some(Action::Reslice),
                 "shot" => it.next().map(|p| Action::Shot(PathBuf::from(p))),
                 "wait" => it.next()?.parse().ok().map(Action::Wait),
+                "conn" => {
+                    let i = it.next()?.parse().ok()?;
+                    let a = it.next()?.parse().ok()?;
+                    let b = it.next()?.parse().ok()?;
+                    Some(Action::Conn(i, a, b))
+                }
                 other => {
                     eprintln!("script: unknown action '{other}'");
                     None
@@ -1126,6 +1181,7 @@ fn run_scripted(scene: SceneCfg, actions: Vec<Action>) {
         .insert_resource(scene)
         .init_resource::<Job>()
         .init_resource::<Cuts>()
+        .init_resource::<Conns>()
         .init_resource::<ModelBounds>()
         .init_resource::<WholeMesh>()
         .init_resource::<SlicedMesh>()
@@ -1180,7 +1236,7 @@ fn setup_script(
         bevy::ui::IsDefaultUiCamera,
     ));
     commands.insert_resource(RenderTargetImage(target));
-    kick_job(&mut job, &mut status, &scene, false, vec![]);
+    kick_job(&mut job, &mut status, &scene, false, vec![], vec![]);
 }
 
 /// Step the script: each action drives the real systems, waiting on async work to settle.
@@ -1191,6 +1247,7 @@ fn run_script(
     job: Res<Job>,
     target: Res<RenderTargetImage>,
     mut cuts: ResMut<Cuts>,
+    mut conns: ResMut<Conns>,
     mut reslice_w: MessageWriter<ReSlice>,
     mut commands: Commands,
     mut exit: MessageWriter<AppExit>,
@@ -1269,6 +1326,12 @@ fn run_script(
             runner.timer >= 30 // give the GPU readback + save time
         }
         Action::Wait(n) => runner.timer >= n,
+        Action::Conn(i, a, b) => {
+            if runner.timer == 1 {
+                conns.list.push(PlacedConn { cut: i, pos: [a, b] });
+            }
+            runner.timer >= 2
+        }
     };
     if done {
         runner.idx += 1;

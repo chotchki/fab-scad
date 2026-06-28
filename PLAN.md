@@ -13,8 +13,12 @@ Driven by `claude-plan-bridge` (FORMATv2). Hand-authored; run
 ## Phase 5 - Slicer / workflow GUI (EARLY; dogfood the OpenSCAD wrap)
 - [ ] 5.1 - GUI MVP: load model, set cut planes, click a face to place pegs/connectors, preview piece-vs-bed + orientation
   - [x] 5.1.1 - Sim-interaction test harness: scripted input → real systems → screenshot
-  - [ ] 5.1.2 - Multi-cut + per-cut axis: set cut lines, rotate/pick the plane
+  - [x] 5.1.2 - Multi-cut + per-cut axis: set cut lines, rotate/pick the plane
   - [ ] 5.1.3 - Face-pick connector placement: click model → drop bolt/pin on the cut
+    - [ ] 5.1.3.1 - Manual face-pick: click model → drop a connector on the nearest cut (build first)
+    - [ ] 5.1.3.2 - BOSL2 onion connector (support-free), replacing pin/dowel
+    - [ ] 5.1.3.3 - Per-piece print-orientation UI → derive connector orientation
+    - [ ] 5.1.3.4 - Cross-section-driven auto-size + auto-place connectors
 - [x] 5.2 - Emit the slicing spec that scad-lib/fab consume; round-trip it through `fab render`
 - [ ] 5.3 - Grow into a friendly workflow front-end (cut the verb-memorization tax)
 
@@ -43,3 +47,8 @@ Driven by `claude-plan-bridge` (FORMATv2). Hand-authored; run
 - [ ] 9.1 - Lock the fab-scad-owned folder convention (libs/scad-lib/models submodules, excluded outputs, NAS archive)
 - [ ] 9.2 - Triage remaining ~59 projects (mine / third-party / downloaded / dead) into a migration backlog
 - [ ] 9.3 - Migrate remaining projects opportunistically (backlog)
+
+## Backlog (not yet phased)
+
+- **fab owns $fn: inject draft/final quality + strip `$fn = $preview ? …` from all scad model files** — added 2026-06-28.
+- **Eventual: auto-pick per-piece orientation for least support (discrete heuristic first)** — added 2026-06-28.

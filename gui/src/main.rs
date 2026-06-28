@@ -1,11 +1,12 @@
 //! fab-gui — the slicing GUI (Phase 5.1). A Bevy 0.19 viewport over a model, with the printer
-//! bed for reference and a Feathers control panel. The slider drives a visible cut plane across
-//! the model's X-extent; "Re-slice" drives `fab` in-process (the shared `fab_scad` lib) ON A
-//! BACKGROUND THREAD at that cut, swapping in the result when it's ready. Modes:
+//! bed for reference and a Feathers control panel. A STACK of cut planes (each draggable in 3D
+//! and toggleable on/off) drives `fab` in-process (the shared `fab_scad` lib) ON A BACKGROUND
+//! THREAD; Re-slice swaps in the result. The cut stack is the unit a DAG cache will key on:
+//! a slice is a pure function of (source, enabled cuts). Modes:
 //!
-//!   cargo run -p fab-gui -- part.scad                       # windowed: orbit, slider, Re-slice
+//!   cargo run -p fab-gui -- part.scad                       # windowed: orbit, drag cuts, Re-slice
 //!   cargo run -p fab-gui -- part.scad --screenshot out.png  # headless render to PNG (self-verify)
-//!   cargo run -p fab-gui -- part.scad --screenshot out.png --reslice --cut 30   # sliced at 30%
+//!   cargo run -p fab-gui -- part.scad --script "addcut 30; reslice; shot a.png"  # scripted harness
 
 use std::path::{Path, PathBuf};
 
@@ -14,7 +15,7 @@ use bevy::{
     asset::RenderAssetUsages,
     camera::RenderTarget,
     feathers::{
-        controls::{FeathersButton, FeathersSlider},
+        controls::FeathersButton,
         dark_theme::create_dark_theme,
         theme::{ThemeBackgroundColor, ThemedText, UiTheme},
         tokens, FeathersPlugins,
@@ -34,7 +35,7 @@ use bevy::{
     },
     scene::{Scene, SceneList}, // the bsn traits — shadow the prelude's `Scene` asset struct
     tasks::{block_on, futures_lite::future, AsyncComputeTaskPool, Task},
-    ui_widgets::{Activate, SliderStep, SliderValue},
+    ui_widgets::Activate,
     window::ExitCondition,
     winit::WinitPlugin,
 };
@@ -72,11 +73,29 @@ struct Job(Option<Task<Result<PathBuf, String>>>);
 #[derive(Resource)]
 struct Status(String);
 
-/// The chosen cut position in model-space X (driven by the slider).
-#[derive(Resource, Default)]
-struct CutPlane(f32);
+/// One planar cut: a position along X (model space) and whether it's in the slice.
+#[derive(Clone)]
+struct CutDef {
+    at: f32,
+    enabled: bool,
+}
 
-/// The whole model's AABB (min, max), set once on the first render — maps the slider 0..100.
+/// The ordered cut stack + which cut the drag edits. A slice is a pure function of
+/// (source, enabled cuts) — the node a DAG cache will key on.
+#[derive(Resource, Default)]
+struct Cuts {
+    list: Vec<CutDef>,
+    active: usize,
+}
+
+impl Cuts {
+    /// Enabled cut positions, the input to `fab::reslice`.
+    fn enabled_x(&self) -> Vec<f64> {
+        self.list.iter().filter(|c| c.enabled).map(|c| c.at as f64).collect()
+    }
+}
+
+/// The whole model's AABB (min, max), set once on the first render — maps drag/positions.
 #[derive(Resource, Default)]
 struct ModelBounds(Option<(Vec3, Vec3)>);
 
@@ -84,17 +103,17 @@ struct ModelBounds(Option<(Vec3, Vec3)>);
 #[derive(Resource, Default)]
 struct DraggingCut(bool);
 
-/// Marks the panel's status text so a system can update it.
+/// Marks the panel's status text + cut-list text so systems can update them.
 #[derive(Component, Clone, Default)]
 struct StatusLabel;
-
-/// Marks the cut-position slider, the cut-plane overlay, and the cut-position label.
-#[derive(Component, Clone, Default)]
-struct CutSlider;
-#[derive(Component, Clone, Default)]
-struct CutPlaneViz;
 #[derive(Component, Clone, Default)]
 struct CutLabel;
+
+/// A cut-plane overlay, tied to its cut in the stack by index.
+#[derive(Component)]
+struct CutPlaneViz {
+    idx: usize,
+}
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -130,7 +149,7 @@ fn run_windowed(scene: SceneCfg) {
         .insert_resource(ClearColor(Color::srgb(0.10, 0.10, 0.12)))
         .insert_resource(scene)
         .init_resource::<Job>()
-        .init_resource::<CutPlane>()
+        .init_resource::<Cuts>()
         .init_resource::<ModelBounds>()
         .init_resource::<DraggingCut>()
         .insert_resource(Status("rendering…".into()))
@@ -139,7 +158,18 @@ fn run_windowed(scene: SceneCfg) {
         .add_observer(on_drag)
         .add_observer(on_drag_end)
         .add_systems(Startup, (setup_windowed, ui_root.spawn()))
-        .add_systems(Update, (orbit, request_reslice, poll_job, update_status, update_cut))
+        .add_systems(
+            Update,
+            (
+                orbit,
+                request_reslice,
+                poll_job,
+                update_status,
+                sync_overlays,
+                sync_overlay_visuals,
+                update_cut_label,
+            ),
+        )
         .run();
 }
 
@@ -169,8 +199,8 @@ fn setup_windowed(
             radius,
         },
     ));
-    // Render the model off-thread; poll_job spawns it (+ the cut plane) when ready.
-    kick_job(&mut job, &mut status, &scene, false, 0.0);
+    // Render the model off-thread; poll_job seeds the first cut when bounds land.
+    kick_job(&mut job, &mut status, &scene, false, vec![]);
 }
 
 fn orbit(
@@ -203,52 +233,33 @@ fn orbit(
     *t = orbit_transform(o.yaw, o.pitch, o.radius);
 }
 
-/// Slider → cut position: map 0..100 across the model's X-extent, move the cut-plane overlay.
-fn update_cut(
-    sliders: Query<&SliderValue, With<CutSlider>>,
-    bounds: Res<ModelBounds>,
-    mut cut: ResMut<CutPlane>,
-    mut viz: Query<&mut Transform, With<CutPlaneViz>>,
-    mut labels: Query<&mut Text, With<CutLabel>>,
-) {
-    let Ok(val) = sliders.single() else {
-        return;
-    };
-    let Some((min, max)) = bounds.0 else {
-        return;
-    };
-    let t = (val.0 / 100.0).clamp(0.0, 1.0);
-    let cut_x = min.x + t * (max.x - min.x);
-    cut.0 = cut_x;
-    for mut tr in &mut viz {
-        tr.translation.x = cut_x;
-    }
-    for mut text in &mut labels {
-        *text = Text::new(format!("cut x = {cut_x:.1}"));
-    }
-}
+// ---- cut stack: drag, buttons, overlays -----------------------------------------------
 
-/// Begin dragging when a left-press lands on the cut plane, so the camera orbit yields to it.
+/// Begin dragging when a left-press lands on a cut plane: make it active + let orbit yield.
 fn on_drag_start(
     ev: On<Pointer<DragStart>>,
-    planes: Query<(), With<CutPlaneViz>>,
+    planes: Query<&CutPlaneViz>,
+    mut cuts: ResMut<Cuts>,
     mut dragging: ResMut<DraggingCut>,
 ) {
-    if ev.event.button == PointerButton::Primary && planes.contains(ev.entity) {
+    if ev.event.button != PointerButton::Primary {
+        return;
+    }
+    if let Ok(cpv) = planes.get(ev.entity) {
+        cuts.active = cpv.idx;
         dragging.0 = true;
     }
 }
 
-/// Drag the cut plane along its axis: cast a ray from the cursor, find where it's closest to the
-/// cut axis, and feed that back through the slider — so update_cut still owns CutPlane + overlay.
+/// Drag the active cut along X: cast a ray from the cursor, find where it's closest to the cut
+/// axis, and write that into the active cut (sync_overlay_visuals then moves the overlay).
 fn on_drag(
     ev: On<Pointer<Drag>>,
     planes: Query<(), With<CutPlaneViz>>,
     dragging: Res<DraggingCut>,
     bounds: Res<ModelBounds>,
     cam: Query<(&Camera, &GlobalTransform)>,
-    sliders: Query<Entity, With<CutSlider>>,
-    mut commands: Commands,
+    mut cuts: ResMut<Cuts>,
 ) {
     if !dragging.0 || !planes.contains(ev.entity) {
         return;
@@ -266,15 +277,116 @@ fn on_drag(
     let p0 = Vec3::new(0.0, (min.y + max.y) * 0.5, (min.z + max.z) * 0.5);
     let cut_at =
         (p0.x + closest_on_axis(p0, Vec3::X, ray.origin, *ray.direction)).clamp(min.x, max.x);
-    let span = (max.x - min.x).max(1e-3);
-    let pct = ((cut_at - min.x) / span * 100.0).clamp(0.0, 100.0);
-    if let Ok(e) = sliders.single() {
-        commands.entity(e).insert(SliderValue(pct));
+    let a = cuts.active;
+    if let Some(c) = cuts.list.get_mut(a) {
+        c.at = cut_at;
     }
 }
 
 fn on_drag_end(_ev: On<Pointer<DragEnd>>, mut dragging: ResMut<DraggingCut>) {
     dragging.0 = false;
+}
+
+/// "+cut" — add a cut at the model centre and make it active.
+fn add_cut(_ev: On<Activate>, mut cuts: ResMut<Cuts>, bounds: Res<ModelBounds>) {
+    if let Some((min, max)) = bounds.0 {
+        cuts.list.push(CutDef {
+            at: (min.x + max.x) * 0.5,
+            enabled: true,
+        });
+        cuts.active = cuts.list.len() - 1;
+    }
+}
+
+/// "toggle" — flip the active cut on/off (kept in the stack, just out of the slice).
+fn toggle_cut(_ev: On<Activate>, mut cuts: ResMut<Cuts>) {
+    let a = cuts.active;
+    if let Some(c) = cuts.list.get_mut(a) {
+        c.enabled = !c.enabled;
+    }
+}
+
+/// "next" — cycle which cut is active (drag + toggle act on it).
+fn next_cut(_ev: On<Activate>, mut cuts: ResMut<Cuts>) {
+    let n = cuts.list.len();
+    if n > 0 {
+        cuts.active = (cuts.active + 1) % n;
+    }
+}
+
+/// Spawn an overlay for any cut that lacks one (covers cuts added by button OR harness).
+fn sync_overlays(
+    cuts: Res<Cuts>,
+    bounds: Res<ModelBounds>,
+    existing: Query<&CutPlaneViz>,
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+) {
+    if !cuts.is_changed() {
+        return;
+    }
+    let Some((min, max)) = bounds.0 else {
+        return;
+    };
+    let have: Vec<usize> = existing.iter().map(|c| c.idx).collect();
+    for i in 0..cuts.list.len() {
+        if !have.contains(&i) {
+            spawn_cut_plane(&mut commands, &mut meshes, &mut materials, min, max, cuts.list[i].at, i);
+        }
+    }
+}
+
+/// Position + colour each overlay from its cut (active = amber, enabled = blue, off = faint).
+fn sync_overlay_visuals(
+    cuts: Res<Cuts>,
+    mut overlays: Query<(&CutPlaneViz, &mut Transform, &MeshMaterial3d<StandardMaterial>)>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+) {
+    if !cuts.is_changed() {
+        return;
+    }
+    for (cpv, mut tf, mat) in &mut overlays {
+        if let Some(c) = cuts.list.get(cpv.idx) {
+            tf.translation.x = c.at;
+            if let Some(mut m) = materials.get_mut(&mat.0) {
+                m.base_color = cut_color(cpv.idx == cuts.active, c.enabled);
+            }
+        }
+    }
+}
+
+fn cut_color(active: bool, enabled: bool) -> Color {
+    if !enabled {
+        Color::srgba(0.45, 0.45, 0.5, 0.12) // off — faint grey
+    } else if active {
+        Color::srgba(1.0, 0.8, 0.2, 0.5) // active — amber
+    } else {
+        Color::srgba(0.25, 0.7, 1.0, 0.32) // enabled — blue
+    }
+}
+
+fn update_cut_label(cuts: Res<Cuts>, mut labels: Query<&mut Text, With<CutLabel>>) {
+    if !cuts.is_changed() {
+        return;
+    }
+    let text = if cuts.list.is_empty() {
+        "(no cuts)".to_string()
+    } else {
+        cuts.list
+            .iter()
+            .enumerate()
+            .map(|(i, c)| {
+                let mark = if i == cuts.active { "›" } else { " " };
+                let st = if c.enabled { "on" } else { "off" };
+                format!("{mark} x={:.0} {st}", c.at)
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    for mut t in &mut labels {
+        *t = Text::new(text.clone());
+    }
 }
 
 /// Offset along `axis` (a unit vector through `p0`) of the point on that line closest to the ray
@@ -291,13 +403,15 @@ fn closest_on_axis(p0: Vec3, axis: Vec3, ray_o: Vec3, ray_d: Vec3) -> f32 {
     (b * e - d) / denom
 }
 
-/// Re-slice button → start a background slice job at the current cut (ignored if one's running).
+// ---- slicing job ----------------------------------------------------------------------
+
+/// Re-slice button → start a background slice job from the enabled cuts (ignored if one's running).
 fn request_reslice(
     mut ev: MessageReader<ReSlice>,
     mut job: ResMut<Job>,
     mut status: ResMut<Status>,
     cfg: Res<SceneCfg>,
-    cut: Res<CutPlane>,
+    cuts: Res<Cuts>,
 ) {
     if ev.read().count() == 0 {
         return;
@@ -306,11 +420,16 @@ fn request_reslice(
         info!("busy — ignoring re-slice");
         return;
     }
-    kick_job(&mut job, &mut status, &cfg, true, cut.0 as f64);
+    let xs = cuts.enabled_x();
+    if xs.is_empty() {
+        status.0 = "no enabled cuts".into();
+        return;
+    }
+    kick_job(&mut job, &mut status, &cfg, true, xs);
 }
 
 /// Spawn the render/slice on the async compute pool (blocking OpenSCAD work, off-thread).
-fn kick_job(job: &mut Job, status: &mut Status, cfg: &SceneCfg, reslice: bool, cut_x: f64) {
+fn kick_job(job: &mut Job, status: &mut Status, cfg: &SceneCfg, reslice: bool, cuts: Vec<f64>) {
     let Some(src) = cfg.source.clone() else {
         status.0 = "no .scad source".into();
         return;
@@ -318,7 +437,7 @@ fn kick_job(job: &mut Job, status: &mut Status, cfg: &SceneCfg, reslice: bool, c
     let (root, tmp) = (cfg.root.clone(), cfg.tmp.clone());
     let task = AsyncComputeTaskPool::get().spawn(async move {
         if reslice {
-            fab::reslice(root.as_deref(), &src, cut_x, SPREAD, &tmp).map_err(|e| format!("{e:#}"))
+            fab::reslice(root.as_deref(), &src, &cuts, SPREAD, &tmp).map_err(|e| format!("{e:#}"))
         } else {
             fab::render_whole(root.as_deref(), &src, &tmp).map_err(|e| format!("{e:#}"))
         }
@@ -327,13 +446,13 @@ fn kick_job(job: &mut Job, status: &mut Status, cfg: &SceneCfg, reslice: bool, c
     status.0 = if reslice { "slicing…".into() } else { "rendering…".into() };
 }
 
-/// Poll the in-flight job; when it finishes, swap in the new mesh (and spawn the cut plane once).
+/// Poll the in-flight job; when it finishes, swap in the new mesh (and seed the first cut once).
 #[allow(clippy::too_many_arguments)] // a Bevy system — params are dependencies, not a smell
 fn poll_job(
     mut job: ResMut<Job>,
     mut status: ResMut<Status>,
     mut bounds: ResMut<ModelBounds>,
-    cut: Res<CutPlane>,
+    mut cuts: ResMut<Cuts>,
     models: Query<Entity, With<Model>>,
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
@@ -353,11 +472,17 @@ fn poll_job(
                 commands.entity(e).despawn();
             }
             commands.spawn((Mesh3d(mesh), MeshMaterial3d(part_material(&mut materials)), Model));
-            // First (whole) render fixes the bounds and reveals the cut plane.
+            // First (whole) render fixes the bounds and seeds a centre cut (sync_overlays draws it).
             if bounds.0.is_none() {
                 if let Some((min, max)) = aabb {
                     bounds.0 = Some((min, max));
-                    spawn_cut_plane(&mut commands, &mut meshes, &mut materials, min, max, cut.0);
+                    if cuts.list.is_empty() {
+                        cuts.list.push(CutDef {
+                            at: (min.x + max.x) * 0.5,
+                            enabled: true,
+                        });
+                        cuts.active = 0;
+                    }
                 }
             }
             status.0 = "ready".into();
@@ -410,6 +535,10 @@ fn run_screenshot(scene: SceneCfg, png: PathBuf) {
         .insert_resource(ClearColor(Color::srgb(0.10, 0.10, 0.12)))
         .insert_resource(scene)
         .insert_resource(ScreenshotPng(png))
+        .init_resource::<Cuts>()
+        .init_resource::<ModelBounds>()
+        .init_resource::<DraggingCut>()
+        .add_message::<ReSlice>()
         .add_systems(Startup, (setup_offscreen, ui_root.spawn()))
         .add_systems(Update, capture_then_exit)
         .run();
@@ -473,12 +602,12 @@ fn setup_offscreen_model(
     let mut cut_x = 0.0;
     if let Some((min, max)) = aabb {
         cut_x = min.x + (scene.cut_pct / 100.0) * (max.x - min.x);
-        spawn_cut_plane(commands, meshes, materials, min, max, cut_x);
+        spawn_cut_plane(commands, meshes, materials, min, max, cut_x, 0);
     }
     if !scene.reslice_on_start {
         return whole_mesh;
     }
-    match fab::reslice(scene.root.as_deref(), src, cut_x as f64, SPREAD, &scene.tmp) {
+    match fab::reslice(scene.root.as_deref(), src, &[cut_x as f64], SPREAD, &scene.tmp) {
         Ok(sliced) => load_model(meshes, Some(&sliced)),
         Err(e) => {
             error!("{e:#}");
@@ -513,11 +642,14 @@ fn capture_then_exit(
 
 // ---- scripted interaction harness -----------------------------------------------------
 
-/// One step in a `--script` timeline. Drives the REAL systems (update_cut, request_reslice,
-/// poll_job) with synthetic input, then screenshots — so interaction is verified, not just setup.
+/// One step in a `--script` timeline. Drives the REAL systems (the cut stack, request_reslice,
+/// poll_job) with synthetic input, then screenshots — interaction is verified, not just setup.
 #[derive(Clone)]
 enum Action {
-    Cut(f32),      // set the cut slider to this percent
+    Cut(f32),      // set the ACTIVE cut's X position
+    AddCut(f32),   // add a cut at X, make it active
+    Toggle,        // toggle the active cut on/off
+    Next,          // cycle the active cut
     Reslice,       // trigger a slice, then wait for the async job
     Shot(PathBuf), // screenshot the viewport to this path
     Wait(u32),     // idle this many frames
@@ -534,13 +666,16 @@ struct ScriptRunner {
 #[derive(Resource)]
 struct RenderTargetImage(Handle<Image>);
 
-/// Parse `"cut 25; reslice; shot a.png; wait 10"` into a timeline.
+/// Parse `"addcut 30; reslice; shot a.png; toggle; reslice; shot b.png"` into a timeline.
 fn parse_script(s: &str) -> Vec<Action> {
     s.split(';')
         .filter_map(|part| {
             let mut it = part.split_whitespace();
             match it.next()? {
                 "cut" => it.next()?.parse().ok().map(Action::Cut),
+                "addcut" => it.next()?.parse().ok().map(Action::AddCut),
+                "toggle" => Some(Action::Toggle),
+                "next" => Some(Action::Next),
                 "reslice" => Some(Action::Reslice),
                 "shot" => it.next().map(|p| Action::Shot(PathBuf::from(p))),
                 "wait" => it.next()?.parse().ok().map(Action::Wait),
@@ -573,13 +708,24 @@ fn run_scripted(scene: SceneCfg, actions: Vec<Action>) {
         .insert_resource(ClearColor(Color::srgb(0.10, 0.10, 0.12)))
         .insert_resource(scene)
         .init_resource::<Job>()
-        .init_resource::<CutPlane>()
+        .init_resource::<Cuts>()
         .init_resource::<ModelBounds>()
         .insert_resource(Status("rendering…".into()))
         .insert_resource(ScriptRunner { actions, idx: 0, timer: 0 })
         .add_message::<ReSlice>()
         .add_systems(Startup, (setup_script, ui_root.spawn()))
-        .add_systems(Update, (request_reslice, poll_job, update_status, update_cut, run_script))
+        .add_systems(
+            Update,
+            (
+                request_reslice,
+                poll_job,
+                update_status,
+                sync_overlays,
+                sync_overlay_visuals,
+                update_cut_label,
+                run_script,
+            ),
+        )
         .run();
 }
 
@@ -605,8 +751,7 @@ fn setup_script(
         bevy::ui::IsDefaultUiCamera,
     ));
     commands.insert_resource(RenderTargetImage(target));
-    // Render the model off-thread; poll_job spawns it + bounds + cut plane, then the script runs.
-    kick_job(&mut job, &mut status, &scene, false, 0.0);
+    kick_job(&mut job, &mut status, &scene, false, vec![]);
 }
 
 /// Step the script: each action drives the real systems, waiting on async work to settle.
@@ -616,13 +761,13 @@ fn run_script(
     bounds: Res<ModelBounds>,
     job: Res<Job>,
     target: Res<RenderTargetImage>,
-    sliders: Query<Entity, With<CutSlider>>,
+    mut cuts: ResMut<Cuts>,
     mut reslice_w: MessageWriter<ReSlice>,
     mut commands: Commands,
     mut exit: MessageWriter<AppExit>,
 ) {
     if bounds.0.is_none() {
-        return; // wait for the initial render (model + bounds + cut plane)
+        return; // wait for the initial render (model + bounds + first cut)
     }
     if runner.idx >= runner.actions.len() {
         exit.write(AppExit::Success);
@@ -630,13 +775,41 @@ fn run_script(
     }
     runner.timer += 1;
     let done = match runner.actions[runner.idx].clone() {
-        Action::Cut(pct) => {
+        Action::Cut(v) => {
             if runner.timer == 1 {
-                if let Ok(e) = sliders.single() {
-                    commands.entity(e).insert(SliderValue(pct)); // immutable component → replace
+                let a = cuts.active;
+                let v = clamp_to_bounds(v, &bounds);
+                if let Some(c) = cuts.list.get_mut(a) {
+                    c.at = v;
                 }
             }
-            runner.timer >= 3 // let update_cut map it + the overlay move
+            runner.timer >= 2
+        }
+        Action::AddCut(v) => {
+            if runner.timer == 1 {
+                let at = clamp_to_bounds(v, &bounds);
+                cuts.list.push(CutDef { at, enabled: true });
+                cuts.active = cuts.list.len() - 1;
+            }
+            runner.timer >= 2
+        }
+        Action::Toggle => {
+            if runner.timer == 1 {
+                let a = cuts.active;
+                if let Some(c) = cuts.list.get_mut(a) {
+                    c.enabled = !c.enabled;
+                }
+            }
+            runner.timer >= 2
+        }
+        Action::Next => {
+            if runner.timer == 1 {
+                let n = cuts.list.len();
+                if n > 0 {
+                    cuts.active = (cuts.active + 1) % n;
+                }
+            }
+            runner.timer >= 2
         }
         Action::Reslice => {
             if runner.timer == 1 {
@@ -661,9 +834,16 @@ fn run_script(
     }
 }
 
+fn clamp_to_bounds(x: f32, bounds: &ModelBounds) -> f32 {
+    match bounds.0 {
+        Some((min, max)) => x.clamp(min.x, max.x),
+        None => x,
+    }
+}
+
 // ---- shared scene ---------------------------------------------------------------------
 
-/// The bed + lights (everything but the model + cut plane, which load via a job / synchronously).
+/// The bed + lights (everything but the model + cut planes, which load via a job / synchronously).
 fn spawn_environment(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
@@ -694,27 +874,28 @@ fn spawn_environment(
     ));
 }
 
-/// A translucent plane on the cut, spanning the model's Y/Z, thin in X — the cut preview.
+/// A translucent plane on a cut, spanning the model's Y/Z, thin in X — the cut preview.
 fn spawn_cut_plane(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<StandardMaterial>,
     min: Vec3,
     max: Vec3,
-    cut_x: f32,
+    at: f32,
+    idx: usize,
 ) {
     let yspan = (max.y - min.y).max(1.0) * 1.15;
     let zspan = (max.z - min.z).max(1.0) * 1.15;
     commands.spawn((
         Mesh3d(meshes.add(Cuboid::new(0.6, yspan, zspan))),
         MeshMaterial3d(materials.add(StandardMaterial {
-            base_color: Color::srgba(0.25, 0.7, 1.0, 0.35),
+            base_color: cut_color(true, true),
             alpha_mode: AlphaMode::Blend,
             unlit: true,
             ..default()
         })),
-        Transform::from_xyz(cut_x, (min.y + max.y) * 0.5, (min.z + max.z) * 0.5),
-        CutPlaneViz,
+        Transform::from_xyz(at, (min.y + max.y) * 0.5, (min.z + max.z) * 0.5),
+        CutPlaneViz { idx },
     ));
 }
 
@@ -790,7 +971,7 @@ fn bed_size() -> Option<[f64; 3]> {
 
 // ---- Feathers UI ----------------------------------------------------------------------
 
-/// The control panel as a bsn scene: title, status line, a cut-position slider, Re-slice.
+/// The control panel as a bsn scene: title, status, the cut list, cut buttons, Re-slice.
 fn ui_root() -> impl SceneList {
     bsn_list![panel()]
 }
@@ -810,8 +991,15 @@ fn panel() -> impl Scene {
         Children[
             (Text("fab-gui") ThemedText),
             (Text("rendering…") ThemedText StatusLabel),
-            (Text("cut x = ?") ThemedText CutLabel),
-            (@FeathersSlider { @max: 100.0, @value: 50.0 } SliderStep(1.0) CutSlider),
+            (Text("(no cuts)") ThemedText CutLabel),
+            (
+                Node { flex_direction: FlexDirection::Row, column_gap: px(6) }
+                Children[
+                    (@FeathersButton { @caption: bsn!{ Text("+cut") ThemedText } } on(add_cut)),
+                    (@FeathersButton { @caption: bsn!{ Text("toggle") ThemedText } } on(toggle_cut)),
+                    (@FeathersButton { @caption: bsn!{ Text("next") ThemedText } } on(next_cut)),
+                ]
+            ),
             (
                 @FeathersButton { @caption: bsn!{ Text("Re-slice") ThemedText } }
                 on(|_: On<Activate>, mut w: MessageWriter<ReSlice>| { w.write(ReSlice); })
@@ -836,5 +1024,18 @@ mod tests {
         // Ray parallel to the axis is degenerate — return 0, never NaN.
         let sc = closest_on_axis(Vec3::ZERO, Vec3::X, Vec3::new(0.0, 1.0, 0.0), Vec3::X);
         assert_eq!(sc, 0.0);
+    }
+
+    #[test]
+    fn enabled_cuts_filter_out_disabled() {
+        let cuts = Cuts {
+            list: vec![
+                CutDef { at: -10.0, enabled: true },
+                CutDef { at: 5.0, enabled: false },
+                CutDef { at: 20.0, enabled: true },
+            ],
+            active: 0,
+        };
+        assert_eq!(cuts.enabled_x(), vec![-10.0, 20.0]);
     }
 }

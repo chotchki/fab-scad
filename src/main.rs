@@ -5,13 +5,6 @@
 //! geometry. Foundation: a CLI skeleton, a real `doctor` preflight, and the OpenSCAD
 //! wrap (see [`openscad`]).
 
-mod manifest;
-mod num;
-mod openscad;
-mod printers;
-mod project;
-mod slicing;
-
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
@@ -19,7 +12,8 @@ use std::time::Duration;
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 
-use openscad::Openscad;
+use fab_scad::openscad::{self, Openscad};
+use fab_scad::{manifest, printers, project, slicing};
 
 #[derive(Parser)]
 #[command(

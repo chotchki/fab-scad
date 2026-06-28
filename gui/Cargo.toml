@@ -1,0 +1,11 @@
+[package]
+name = "fab-gui"
+version = "0.1.0"
+edition = "2021"
+description = "Bevy GUI for fab-scad: set cut planes, place connectors, preview piece-vs-bed"
+license = "MIT"
+
+[dependencies]
+fab-scad = { path = ".." }
+anyhow = "1"
+bevy = { version = "0.19", features = ["bevy_feathers"] }

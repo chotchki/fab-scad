@@ -76,9 +76,59 @@ struct Job(Option<(bool, Task<Result<PathBuf, String>>)>);
 #[derive(Resource)]
 struct Status(String);
 
-/// One planar cut: a position along X (model space) and whether it's in the slice.
+/// The axis a cut plane is normal to (which way it slices).
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
+enum Axis {
+    #[default]
+    X,
+    Y,
+    Z,
+}
+
+impl Axis {
+    fn index(self) -> usize {
+        match self {
+            Axis::X => 0,
+            Axis::Y => 1,
+            Axis::Z => 2,
+        }
+    }
+    fn unit(self) -> Vec3 {
+        match self {
+            Axis::X => Vec3::X,
+            Axis::Y => Vec3::Y,
+            Axis::Z => Vec3::Z,
+        }
+    }
+    fn label(self) -> &'static str {
+        match self {
+            Axis::X => "X",
+            Axis::Y => "Y",
+            Axis::Z => "Z",
+        }
+    }
+    /// The slicer's axis letter.
+    fn scad(self) -> char {
+        match self {
+            Axis::X => 'x',
+            Axis::Y => 'y',
+            Axis::Z => 'z',
+        }
+    }
+    fn next(self) -> Axis {
+        match self {
+            Axis::X => Axis::Y,
+            Axis::Y => Axis::Z,
+            Axis::Z => Axis::X,
+        }
+    }
+}
+
+/// One planar cut: which axis it's normal to, its position along that axis, and whether it's in
+/// the slice.
 #[derive(Clone)]
 struct CutDef {
+    axis: Axis,
     at: f32,
     enabled: bool,
 }
@@ -92,10 +142,33 @@ struct Cuts {
 }
 
 impl Cuts {
-    /// Enabled cut positions, the input to `fab::reslice`.
-    fn enabled_x(&self) -> Vec<f64> {
-        self.list.iter().filter(|c| c.enabled).map(|c| c.at as f64).collect()
+    /// Enabled cuts as `(axis letter, position)`, the input to `fab::reslice`.
+    fn enabled_cuts(&self) -> Vec<(char, f64)> {
+        self.list.iter().filter(|c| c.enabled).map(|c| (c.axis.scad(), c.at as f64)).collect()
     }
+
+    fn active_axis(&self) -> Axis {
+        self.list.get(self.active).map(|c| c.axis).unwrap_or(Axis::X)
+    }
+}
+
+/// The X/Y/Z component of `v`.
+fn comp(v: Vec3, i: usize) -> f32 {
+    match i {
+        0 => v.x,
+        1 => v.y,
+        _ => v.z,
+    }
+}
+
+/// `v` with component `i` set to `val`.
+fn with_comp(mut v: Vec3, i: usize, val: f32) -> Vec3 {
+    match i {
+        0 => v.x = val,
+        1 => v.y = val,
+        _ => v.z = val,
+    }
+    v
 }
 
 /// The whole model's AABB (min, max), set once on the first render — maps drag/positions.
@@ -136,14 +209,19 @@ struct CutInput;
 struct ViewToggleButton;
 #[derive(Component, Clone, Default)]
 struct ViewToggleLabel;
+/// The caption of the per-cut axis rotate button (relabelled to the active cut's axis).
+#[derive(Component, Clone, Default)]
+struct AxisLabel;
 /// A brief attention flash (seconds remaining), drawn as a fading outline.
 #[derive(Component)]
 struct Nudge(f32);
 
-/// A cut-plane overlay, tied to its cut in the stack by index.
+/// A cut-plane overlay, tied to its cut in the stack by index. Tracks its axis so the plane mesh
+/// can be rebuilt when the cut is rotated.
 #[derive(Component)]
 struct CutPlaneViz {
     idx: usize,
+    axis: Axis,
 }
 
 /// A floating piece-width label (one per piece), positioned by projecting the piece centre to screen.
@@ -214,6 +292,7 @@ fn run_windowed(scene: SceneCfg) {
                 sync_cut_input,
                 sync_dim_labels,
                 update_view_label,
+                update_axis_label,
                 nudge_buttons,
                 mark_dirty,
                 revert_on_edit,
@@ -337,10 +416,12 @@ fn on_drag(
     let Ok(ray) = camera.viewport_to_world(cam_tf, ev.pointer_location.position) else {
         return;
     };
-    // Axis line through the model centre, along X (the only cut axis for now).
-    let p0 = Vec3::new(0.0, (min.y + max.y) * 0.5, (min.z + max.z) * 0.5);
-    let cut_at =
-        (p0.x + closest_on_axis(p0, Vec3::X, ray.origin, *ray.direction)).clamp(min.x, max.x);
+    // Axis line through the model centre, along the active cut's axis.
+    let axis = cuts.active_axis();
+    let ai = axis.index();
+    let p0 = with_comp((min + max) * 0.5, ai, 0.0);
+    let cut_at = closest_on_axis(p0, axis.unit(), ray.origin, *ray.direction)
+        .clamp(comp(min, ai), comp(max, ai));
     let a = cuts.active;
     if let Some(c) = cuts.list.get_mut(a) {
         c.at = cut_at;
@@ -439,13 +520,12 @@ fn nudge_buttons(time: Res<Time>, mut q: Query<(Entity, &mut Nudge)>, mut comman
     }
 }
 
-/// "+cut" — add a cut at the model centre and make it active.
+/// "+cut" — add a cut at the model centre, on the active cut's axis, and make it active.
 fn add_cut(_ev: On<Activate>, mut cuts: ResMut<Cuts>, bounds: Res<ModelBounds>) {
     if let Some((min, max)) = bounds.0 {
-        cuts.list.push(CutDef {
-            at: (min.x + max.x) * 0.5,
-            enabled: true,
-        });
+        let axis = cuts.active_axis();
+        let at = comp((min + max) * 0.5, axis.index());
+        cuts.list.push(CutDef { axis, at, enabled: true });
         cuts.active = cuts.list.len() - 1;
     }
 }
@@ -455,6 +535,29 @@ fn toggle_cut(_ev: On<Activate>, mut cuts: ResMut<Cuts>) {
     let a = cuts.active;
     if let Some(c) = cuts.list.get_mut(a) {
         c.enabled = !c.enabled;
+    }
+}
+
+/// "axis: X" — rotate the active cut's plane to the next axis, re-centring it on that axis.
+fn cycle_axis(_ev: On<Activate>, bounds: Res<ModelBounds>, mut cuts: ResMut<Cuts>) {
+    let Some((min, max)) = bounds.0 else {
+        return;
+    };
+    let a = cuts.active;
+    if let Some(c) = cuts.list.get_mut(a) {
+        c.axis = c.axis.next();
+        c.at = comp((min + max) * 0.5, c.axis.index());
+    }
+}
+
+/// Relabel the rotate button to the active cut's axis.
+fn update_axis_label(cuts: Res<Cuts>, mut q: Query<&mut Text, With<AxisLabel>>) {
+    if !cuts.is_changed() {
+        return;
+    }
+    let label = format!("axis: {}", cuts.active_axis().label());
+    for mut t in &mut q {
+        *t = Text::new(label.clone());
     }
 }
 
@@ -476,35 +579,47 @@ fn sync_overlays(
     let have: Vec<usize> = existing.iter().map(|c| c.idx).collect();
     for i in 0..cuts.list.len() {
         if !have.contains(&i) {
-            spawn_cut_plane(&mut commands, &mut meshes, &mut materials, min, max, cuts.list[i].at, i);
+            spawn_cut_plane(&mut commands, &mut meshes, &mut materials, min, max, &cuts.list[i], i);
         }
     }
 }
 
-/// Position + colour each overlay from its cut. X tracks the displayed geometry: `cut.at` when
-/// editing the whole model, fanned into the piece gaps when showing the exploded result.
+/// Position + orient + colour each overlay from its cut. Position tracks the displayed geometry:
+/// at `cut.at` when editing, fanned into the piece gaps when exploded. The plane mesh is rebuilt
+/// (thin along the cut axis) only when the cut is rotated.
 fn sync_overlay_visuals(
     cuts: Res<Cuts>,
+    bounds: Res<ModelBounds>,
     dspread: Res<DisplaySpread>,
-    mut overlays: Query<(&CutPlaneViz, &mut Transform, &MeshMaterial3d<StandardMaterial>)>,
+    mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    mut overlays: Query<(&mut CutPlaneViz, &mut Transform, &mut Mesh3d, &MeshMaterial3d<StandardMaterial>)>,
 ) {
     if !cuts.is_changed() && !dspread.is_changed() {
         return;
     }
-    for (cpv, mut tf, mat) in &mut overlays {
-        if let Some(c) = cuts.list.get(cpv.idx) {
-            tf.translation.x = c.at + spread_offset(&cuts, cpv.idx, dspread.0);
-            if let Some(mut m) = materials.get_mut(&mat.0) {
-                m.base_color = cut_color(cpv.idx == cuts.active, c.enabled);
-            }
+    let Some((min, max)) = bounds.0 else {
+        return;
+    };
+    for (mut cpv, mut tf, mut mesh3d, mat) in &mut overlays {
+        let idx = cpv.idx;
+        let Some(c) = cuts.list.get(idx) else {
+            continue;
+        };
+        if cpv.axis != c.axis {
+            cpv.axis = c.axis;
+            mesh3d.0 = meshes.add(plane_cuboid(c.axis, min, max));
+        }
+        tf.translation = cut_center(&cuts, idx, min, max, dspread.0);
+        if let Some(mut m) = materials.get_mut(&mat.0) {
+            m.base_color = cut_color(idx == cuts.active, c.enabled);
         }
     }
 }
 
-/// Where cut `idx` lands in the exploded layout (relative to its uncut `at`): the slicer fans
-/// piece k by `k * spread`, so an enabled cut sits in the gap (+0.5) above the pieces below it,
-/// and a disabled cut rides along with the piece it's inside. 0 when not exploded.
+/// Offset of cut `idx` along ITS axis in the exploded layout (the slicer fans piece k by
+/// `k*spread`): an enabled cut sits in the gap (+0.5) above the same-axis cuts below it; a
+/// disabled cut rides with the piece it's inside. 0 when not exploded.
 fn spread_offset(cuts: &Cuts, idx: usize, spread: f32) -> f32 {
     if spread == 0.0 {
         return 0.0;
@@ -516,12 +631,31 @@ fn spread_offset(cuts: &Cuts, idx: usize, spread: f32) -> f32 {
         .list
         .iter()
         .enumerate()
-        .filter(|(j, o)| *j != idx && o.enabled && o.at < cut.at)
+        .filter(|(j, o)| *j != idx && o.enabled && o.axis == cut.axis && o.at < cut.at)
         .count() as f32;
     if cut.enabled {
         (rank + 0.5) * spread
     } else {
         rank * spread
+    }
+}
+
+/// World-space centre of a cut's overlay: at its position (+ explode offset) along its axis,
+/// centred on the model in the other two.
+fn cut_center(cuts: &Cuts, idx: usize, min: Vec3, max: Vec3, spread: f32) -> Vec3 {
+    let Some(c) = cuts.list.get(idx) else {
+        return (min + max) * 0.5;
+    };
+    with_comp((min + max) * 0.5, c.axis.index(), c.at + spread_offset(cuts, idx, spread))
+}
+
+/// A thin slab spanning the model in the two axes the cut doesn't slice.
+fn plane_cuboid(axis: Axis, min: Vec3, max: Vec3) -> Cuboid {
+    let s = (max - min) * 1.15;
+    match axis {
+        Axis::X => Cuboid::new(0.6, s.y.max(1.0), s.z.max(1.0)),
+        Axis::Y => Cuboid::new(s.x.max(1.0), 0.6, s.z.max(1.0)),
+        Axis::Z => Cuboid::new(s.x.max(1.0), s.y.max(1.0), 0.6),
     }
 }
 
@@ -543,14 +677,18 @@ fn sync_dim_labels(
     let Ok((camera, cam_gt)) = cam.single() else {
         return;
     };
-    let mut edges = vec![min.x];
-    let mut xs: Vec<f32> = cuts.list.iter().filter(|c| c.enabled).map(|c| c.at).collect();
+    // Measure along the axis you're editing: segments between that axis's enabled cuts + edges.
+    let axis = cuts.active_axis();
+    let ai = axis.index();
+    let mut xs: Vec<f32> =
+        cuts.list.iter().filter(|c| c.enabled && c.axis == axis).map(|c| c.at).collect();
     xs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let mut edges = vec![comp(min, ai)];
     edges.extend(xs);
-    edges.push(max.x);
+    edges.push(comp(max, ai));
     let n_pieces = edges.len() - 1;
 
-    // Spawn a label entity for any piece that lacks one.
+    // Spawn a label entity for any segment that lacks one.
     for i in existing.iter().count()..n_pieces {
         commands.spawn((
             Text::new(""),
@@ -561,15 +699,19 @@ fn sync_dim_labels(
         ));
     }
 
-    let (cy, cz) = ((min.y + max.y) * 0.5, max.z);
+    let center = (min + max) * 0.5;
     for (dl, mut node, mut text, mut vis) in &mut labels {
         if dl.idx >= n_pieces {
             *vis = Visibility::Hidden;
             continue;
         }
         let (lo, hi) = (edges[dl.idx], edges[dl.idx + 1]);
-        let cx = (lo + hi) * 0.5 + dl.idx as f32 * dspread.0;
-        match camera.world_to_viewport(cam_gt, Vec3::new(cx, cy, cz)) {
+        let mid = (lo + hi) * 0.5 + dl.idx as f32 * dspread.0;
+        let mut pos = with_comp(center, ai, mid);
+        if ai != 2 {
+            pos.z = max.z; // float above the model for X/Y cuts
+        }
+        match camera.world_to_viewport(cam_gt, pos) {
             Ok(p) => {
                 node.left = px(p.x);
                 node.top = px(p.y);
@@ -649,21 +791,28 @@ fn update_cut_label(
             .map(|(i, c)| {
                 let mark = if i == cuts.active { "›" } else { " " };
                 let st = if c.enabled { "on" } else { "off" };
-                format!("{mark} x={:.0} {st}", c.at)
+                format!("{mark}{}={:.0} {st}", c.axis.label(), c.at)
             })
             .collect::<Vec<_>>()
             .join("\n")
     };
-    // Live piece widths: the distances between sorted enabled cuts and the model edges.
+    // Live piece widths per axis: distances between that axis's sorted enabled cuts and its edges.
     if let Some((min, max)) = bounds.0 {
-        let mut edges = vec![min.x];
-        let mut xs: Vec<f32> = cuts.list.iter().filter(|c| c.enabled).map(|c| c.at).collect();
-        xs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-        edges.extend(xs);
-        edges.push(max.x);
-        let widths: Vec<String> =
-            edges.windows(2).map(|w| format!("{:.0}", w[1] - w[0])).collect();
-        text.push_str(&format!("\npieces: {} mm", widths.join(" | ")));
+        for axis in [Axis::X, Axis::Y, Axis::Z] {
+            let ai = axis.index();
+            let mut xs: Vec<f32> =
+                cuts.list.iter().filter(|c| c.enabled && c.axis == axis).map(|c| c.at).collect();
+            if xs.is_empty() {
+                continue;
+            }
+            xs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            let mut edges = vec![comp(min, ai)];
+            edges.extend(xs);
+            edges.push(comp(max, ai));
+            let widths: Vec<String> =
+                edges.windows(2).map(|w| format!("{:.0}", w[1] - w[0])).collect();
+            text.push_str(&format!("\n{}: {} mm", axis.label(), widths.join(" | ")));
+        }
     }
     for mut t in &mut labels {
         *t = Text::new(text.clone());
@@ -680,7 +829,7 @@ fn on_cut_typed(
     if !inputs.contains(ev.source) {
         return;
     }
-    let v = clamp_to_bounds(ev.value, &bounds);
+    let v = clamp_to_bounds(ev.value, cuts.active_axis(), &bounds);
     let a = cuts.active;
     if let Some(c) = cuts.list.get_mut(a) {
         c.at = v;
@@ -736,7 +885,7 @@ fn request_reslice(
         info!("busy — ignoring re-slice");
         return;
     }
-    let xs = cuts.enabled_x();
+    let xs = cuts.enabled_cuts();
     if xs.is_empty() {
         status.0 = "no enabled cuts".into();
         return;
@@ -745,7 +894,7 @@ fn request_reslice(
 }
 
 /// Spawn the render/slice on the async compute pool (blocking OpenSCAD work, off-thread).
-fn kick_job(job: &mut Job, status: &mut Status, cfg: &SceneCfg, reslice: bool, cuts: Vec<f64>) {
+fn kick_job(job: &mut Job, status: &mut Status, cfg: &SceneCfg, reslice: bool, cuts: Vec<(char, f64)>) {
     let Some(src) = cfg.source.clone() else {
         status.0 = "no .scad source".into();
         return;
@@ -806,6 +955,7 @@ fn poll_job(
                         bounds.0 = Some((min, max));
                         if cuts.list.is_empty() {
                             cuts.list.push(CutDef {
+                                axis: Axis::X,
                                 at: (min.x + max.x) * 0.5,
                                 enabled: true,
                             });
@@ -931,12 +1081,13 @@ fn setup_offscreen_model(
     let mut cut_x = 0.0;
     if let Some((min, max)) = aabb {
         cut_x = min.x + (scene.cut_pct / 100.0) * (max.x - min.x);
-        spawn_cut_plane(commands, meshes, materials, min, max, cut_x, 0);
+        let cut = CutDef { axis: Axis::X, at: cut_x, enabled: true };
+        spawn_cut_plane(commands, meshes, materials, min, max, &cut, 0);
     }
     if !scene.reslice_on_start {
         return whole_mesh;
     }
-    match fab::reslice(scene.root.as_deref(), src, &[cut_x as f64], SPREAD, &scene.tmp) {
+    match fab::reslice(scene.root.as_deref(), src, &[('x', cut_x as f64)], SPREAD, &scene.tmp) {
         Ok(sliced) => load_model(meshes, Some(&sliced)),
         Err(e) => {
             error!("{e:#}");
@@ -975,8 +1126,9 @@ fn capture_then_exit(
 /// poll_job) with synthetic input, then screenshots — interaction is verified, not just setup.
 #[derive(Clone)]
 enum Action {
-    Cut(f32),      // set the ACTIVE cut's X position
-    AddCut(f32),   // add a cut at X, make it active
+    Cut(f32),      // set the ACTIVE cut's position (along its axis)
+    AddCut(f32),   // add a cut at this position (on the active axis), make it active
+    SetAxis(Axis), // set the active cut's axis
     Toggle,        // toggle the active cut on/off
     Next,          // cycle the active cut
     Reslice,       // trigger a slice, then wait for the async job
@@ -1003,6 +1155,12 @@ fn parse_script(s: &str) -> Vec<Action> {
             match it.next()? {
                 "cut" => it.next()?.parse().ok().map(Action::Cut),
                 "addcut" => it.next()?.parse().ok().map(Action::AddCut),
+                "axis" => match it.next()? {
+                    "x" => Some(Action::SetAxis(Axis::X)),
+                    "y" => Some(Action::SetAxis(Axis::Y)),
+                    "z" => Some(Action::SetAxis(Axis::Z)),
+                    _ => None,
+                },
                 "toggle" => Some(Action::Toggle),
                 "next" => Some(Action::Next),
                 "reslice" => Some(Action::Reslice),
@@ -1059,6 +1217,7 @@ fn run_scripted(scene: SceneCfg, actions: Vec<Action>) {
                 sync_cut_input,
                 sync_dim_labels,
                 update_view_label,
+                update_axis_label,
                 mark_dirty,
                 revert_on_edit,
                 run_script,
@@ -1116,7 +1275,7 @@ fn run_script(
         Action::Cut(v) => {
             if runner.timer == 1 {
                 let a = cuts.active;
-                let v = clamp_to_bounds(v, &bounds);
+                let v = clamp_to_bounds(v, cuts.active_axis(), &bounds);
                 if let Some(c) = cuts.list.get_mut(a) {
                     c.at = v;
                 }
@@ -1125,9 +1284,22 @@ fn run_script(
         }
         Action::AddCut(v) => {
             if runner.timer == 1 {
-                let at = clamp_to_bounds(v, &bounds);
-                cuts.list.push(CutDef { at, enabled: true });
+                let axis = cuts.active_axis();
+                let at = clamp_to_bounds(v, axis, &bounds);
+                cuts.list.push(CutDef { axis, at, enabled: true });
                 cuts.active = cuts.list.len() - 1;
+            }
+            runner.timer >= 2
+        }
+        Action::SetAxis(ax) => {
+            if runner.timer == 1 {
+                let a = cuts.active;
+                if let Some((min, max)) = bounds.0 {
+                    if let Some(c) = cuts.list.get_mut(a) {
+                        c.axis = ax;
+                        c.at = comp((min + max) * 0.5, ax.index());
+                    }
+                }
             }
             runner.timer >= 2
         }
@@ -1172,9 +1344,9 @@ fn run_script(
     }
 }
 
-fn clamp_to_bounds(x: f32, bounds: &ModelBounds) -> f32 {
+fn clamp_to_bounds(x: f32, axis: Axis, bounds: &ModelBounds) -> f32 {
     match bounds.0 {
-        Some((min, max)) => x.clamp(min.x, max.x),
+        Some((min, max)) => x.clamp(comp(min, axis.index()), comp(max, axis.index())),
         None => x,
     }
 }
@@ -1212,28 +1384,26 @@ fn spawn_environment(
     ));
 }
 
-/// A translucent plane on a cut, spanning the model's Y/Z, thin in X — the cut preview.
+/// A translucent slab on a cut, thin along its axis, spanning the model in the other two.
 fn spawn_cut_plane(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<StandardMaterial>,
     min: Vec3,
     max: Vec3,
-    at: f32,
+    cut: &CutDef,
     idx: usize,
 ) {
-    let yspan = (max.y - min.y).max(1.0) * 1.15;
-    let zspan = (max.z - min.z).max(1.0) * 1.15;
     commands.spawn((
-        Mesh3d(meshes.add(Cuboid::new(0.6, yspan, zspan))),
+        Mesh3d(meshes.add(plane_cuboid(cut.axis, min, max))),
         MeshMaterial3d(materials.add(StandardMaterial {
-            base_color: cut_color(true, true),
+            base_color: cut_color(true, cut.enabled),
             alpha_mode: AlphaMode::Blend,
             unlit: true,
             ..default()
         })),
-        Transform::from_xyz(at, (min.y + max.y) * 0.5, (min.z + max.z) * 0.5),
-        CutPlaneViz { idx },
+        Transform::from_translation(with_comp((min + max) * 0.5, cut.axis.index(), cut.at)),
+        CutPlaneViz { idx, axis: cut.axis },
     ));
 }
 
@@ -1336,6 +1506,7 @@ fn panel() -> impl Scene {
                 Children[
                     (@FeathersButton { @caption: bsn!{ Text("+cut") ThemedText } } on(add_cut)),
                     (@FeathersButton { @caption: bsn!{ Text("toggle") ThemedText } } on(toggle_cut)),
+                    (@FeathersButton { @caption: bsn!{ Text("axis: X") ThemedText AxisLabel } } on(cycle_axis)),
                 ]
             ),
             (
@@ -1370,15 +1541,32 @@ mod tests {
     }
 
     #[test]
-    fn enabled_cuts_filter_out_disabled() {
+    fn enabled_cuts_filter_out_disabled_and_carry_axis() {
         let cuts = Cuts {
             list: vec![
-                CutDef { at: -10.0, enabled: true },
-                CutDef { at: 5.0, enabled: false },
-                CutDef { at: 20.0, enabled: true },
+                CutDef { axis: Axis::X, at: -10.0, enabled: true },
+                CutDef { axis: Axis::X, at: 5.0, enabled: false },
+                CutDef { axis: Axis::Y, at: 20.0, enabled: true },
             ],
             active: 0,
         };
-        assert_eq!(cuts.enabled_x(), vec![-10.0, 20.0]);
+        assert_eq!(cuts.enabled_cuts(), vec![('x', -10.0), ('y', 20.0)]);
+    }
+
+    #[test]
+    fn spread_offset_is_per_axis() {
+        // Two X cuts + one Y cut. The second X cut (rank 1) sits in the gap above one X piece;
+        // the Y cut (rank 0 on its own axis) is unaffected by the X cuts.
+        let cuts = Cuts {
+            list: vec![
+                CutDef { axis: Axis::X, at: -10.0, enabled: true },
+                CutDef { axis: Axis::X, at: 20.0, enabled: true },
+                CutDef { axis: Axis::Y, at: 0.0, enabled: true },
+            ],
+            active: 0,
+        };
+        assert_eq!(spread_offset(&cuts, 0, 10.0), 5.0); // X rank 0 → (0+0.5)*10
+        assert_eq!(spread_offset(&cuts, 1, 10.0), 15.0); // X rank 1 → (1+0.5)*10
+        assert_eq!(spread_offset(&cuts, 2, 10.0), 5.0); // Y rank 0 → (0+0.5)*10
     }
 }

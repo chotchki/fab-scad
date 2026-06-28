@@ -39,21 +39,21 @@ pub fn render_whole(root: Option<&Path>, source: &Path, out_dir: &Path) -> Resul
     Ok(out)
 }
 
-/// Slice the source at the given X cuts (preview quality), returning the sliced STL.
-/// A pure function of (source, cuts) — the unit a DAG cache would key on later.
+/// Slice the source at the given cuts — each `(axis, at)` with axis in `'x' | 'y' | 'z'` (preview
+/// quality), returning the sliced STL. A pure function of (source, cuts) — the DAG-cache unit.
 pub fn reslice(
     root: Option<&Path>,
     source: &Path,
-    cuts_x: &[f64],
+    cuts: &[(char, f64)],
     spread: f64,
     out_dir: &Path,
 ) -> Result<PathBuf> {
     let oscad = Openscad::discover(root)?;
     let wrap = preview_wrapper(source, out_dir)?;
-    let cut = cuts_x
+    let cut = cuts
         .iter()
-        .map(|&at| Cut {
-            axis: "x".into(),
+        .map(|&(axis, at)| Cut {
+            axis: axis.to_string(),
             at: Num::Float(at),
         })
         .collect();

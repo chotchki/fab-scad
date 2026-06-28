@@ -12,7 +12,7 @@ Driven by `claude-plan-bridge` (FORMATv2). Hand-authored; run
 
 ## Phase 5 - Slicer / workflow GUI (EARLY; dogfood the OpenSCAD wrap)
 - [ ] 5.1 - GUI MVP: load model, set cut planes, click a face to place pegs/connectors, preview piece-vs-bed + orientation
-- [ ] 5.2 - Emit the slicing spec that scad-lib/fab consume; round-trip it through `fab render`
+- [x] 5.2 - Emit the slicing spec that scad-lib/fab consume; round-trip it through `fab render`
 - [ ] 5.3 - Grow into a friendly workflow front-end (cut the verb-memorization tax)
 
 ## Phase 6 - fab render + output (3mf, magnets, Bambu)

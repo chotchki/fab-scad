@@ -6,9 +6,11 @@
 //! wrap (see [`openscad`]).
 
 mod manifest;
+mod num;
 mod openscad;
 mod printers;
 mod project;
+mod slicing;
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -65,6 +67,21 @@ enum Commands {
         #[arg(long)]
         out: Option<PathBuf>,
     },
+    /// Slice a part per its project.toml [slicing] spec: freeze the source, apply cuts +
+    /// connectors, render the pieces. The headless half of the GUI (5.2).
+    Slice {
+        /// The part .scad to slice (its project.toml [slicing] is consumed).
+        target: PathBuf,
+        /// Fan pieces out along each cut axis by this much, mm (0 = assembled in place).
+        #[arg(long, default_value_t = 0.0)]
+        spread: f64,
+        /// Output STL (default: <dir>/out/<stem>-sliced.stl).
+        #[arg(long)]
+        out: Option<PathBuf>,
+        /// Also write a PNG thumbnail.
+        #[arg(long)]
+        png: bool,
+    },
     /// Render a .scad to geometry (+ optional PNG thumbnail).
     /// File-level for now; project/DAG-aware in Phase 6.
     Render {
@@ -91,6 +108,7 @@ fn main() -> Result<()> {
         Commands::New { name } => project::new_cmd(&require_root()?, &name),
         Commands::Plan { size, printer } => plan_cmd(&size, printer),
         Commands::Coupon { kind, screw, d, slops, out } => coupon_cmd(&kind, &screw, d, &slops, out),
+        Commands::Slice { target, spread, out, png } => slice_cmd(&target, spread, out, png),
         Commands::Render {
             target,
             png,
@@ -200,6 +218,75 @@ fn parse_slops(s: &str) -> Result<Vec<f64>> {
         bail!("--slops needs at least one value");
     }
     Ok(v)
+}
+
+fn slice_cmd(target: &Path, spread: f64, out: Option<PathBuf>, png: bool) -> Result<()> {
+    if !target.exists() {
+        bail!("no such file: {}", target.display());
+    }
+    let root = find_root();
+    let manifest_path = find_manifest(target)?;
+    let m = manifest::Manifest::load(&manifest_path)?;
+    let spec = m
+        .slicing
+        .as_ref()
+        .with_context(|| format!("no [slicing] spec in {}", manifest_path.display()))?;
+
+    let oscad = Openscad::discover(root.as_deref())?;
+    let timeout = Duration::from_secs(120);
+    let dir = target.parent().unwrap_or_else(|| Path::new("."));
+    let stem = target
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "part".into());
+    let outdir = dir.join("out");
+    std::fs::create_dir_all(&outdir).with_context(|| format!("creating {}", outdir.display()))?;
+
+    // 1. Freeze the source to a mesh — slicing the frozen STL is linear (no 2^N).
+    let source_stl = outdir.join(format!("{stem}.stl"));
+    println!("freeze {} -> {}", target.display(), source_stl.display());
+    let f = oscad.render(target, &source_stl, timeout)?;
+    print_report(&f);
+    if !f.ok {
+        bail!("source render failed");
+    }
+
+    // 2. Generate the slicer driver from the spec (imports the frozen mesh by name).
+    let driver = slicing::driver_scad(spec, &format!("{stem}.stl"), spread)?;
+    let driver_path = outdir.join(format!("{stem}-sliced.scad"));
+    std::fs::write(&driver_path, driver)
+        .with_context(|| format!("writing {}", driver_path.display()))?;
+
+    // 3. Render the sliced result.
+    let sliced = out.unwrap_or_else(|| outdir.join(format!("{stem}-sliced.stl")));
+    println!("slice  {} -> {}", driver_path.display(), sliced.display());
+    let r = oscad.render(&driver_path, &sliced, timeout)?;
+    print_report(&r);
+    if png {
+        let thumb = sliced.with_extension("png");
+        let t = oscad.thumbnail(&driver_path, &thumb, (512, 512), timeout)?;
+        print_report(&t);
+    }
+    if !r.ok {
+        bail!("slice render failed");
+    }
+    Ok(())
+}
+
+/// Walk up from a target file to the nearest `project.toml`.
+fn find_manifest(target: &Path) -> Result<PathBuf> {
+    let abs = target
+        .canonicalize()
+        .with_context(|| format!("resolving {}", target.display()))?;
+    let mut dir = abs.parent();
+    while let Some(d) = dir {
+        let m = d.join("project.toml");
+        if m.exists() {
+            return Ok(m);
+        }
+        dir = d.parent();
+    }
+    bail!("no project.toml found above {}", target.display());
 }
 
 fn render_cmd(target: &Path, out: Option<PathBuf>, png: bool, timeout_secs: u64) -> Result<()> {

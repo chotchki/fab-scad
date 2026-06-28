@@ -14,21 +14,7 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use serde::Deserialize;
 
-// Accept bed dims written as either ints (325) or floats (325.0) in the toml.
-#[derive(Debug, Clone, Copy, Deserialize)]
-#[serde(untagged)]
-enum Num {
-    Int(i64),
-    Float(f64),
-}
-impl Num {
-    fn f(self) -> f64 {
-        match self {
-            Num::Int(i) => i as f64,
-            Num::Float(x) => x,
-        }
-    }
-}
+use crate::num::Num;
 
 #[derive(Debug, Deserialize)]
 struct PrintersFile {

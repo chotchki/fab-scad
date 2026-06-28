@@ -8,14 +8,18 @@
 
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use serde::Deserialize;
+
+use crate::num::Num;
 
 #[derive(Debug, Deserialize)]
 pub struct Manifest {
     pub project: Project,
     #[serde(default)]
     pub part: Vec<Part>,
+    /// Slicing spec — cuts + connectors the GUI edits and `fab slice` consumes (Phase 5).
+    pub slicing: Option<Slicing>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -34,6 +38,52 @@ pub struct Part {
     pub name: Option<String>,
     /// Optional explicit output path.
     pub out: Option<PathBuf>,
+}
+
+/// The slicing spec: how to split a part into printable pieces. Edited by the GUI (5.1),
+/// consumed by `fab slice` (5.2), applied via `slicer.scad` / `connectors.scad`.
+#[derive(Debug, Deserialize)]
+pub struct Slicing {
+    /// Printer whose bed the pieces target (defaults to printers.toml's default).
+    pub printer: Option<String>,
+    #[serde(default)]
+    pub cut: Vec<Cut>,
+    #[serde(default)]
+    pub connector: Vec<Connector>,
+}
+
+/// One slab cut: a plane perpendicular to `axis` at coordinate `at` (model space).
+#[derive(Debug, Deserialize)]
+pub struct Cut {
+    pub axis: String, // "x" | "y" | "z"
+    pub at: Num,      // mm, model coords
+}
+
+/// A joint across a cut face: `cut` indexes into `cut`, `pos` is the 2D spot on that plane.
+#[derive(Debug, Deserialize)]
+pub struct Connector {
+    pub cut: usize,
+    #[serde(rename = "type")]
+    pub kind: String, // "bolt" | "pin"
+    pub screw: Option<String>,
+    #[serde(default)]
+    pub pos: [Num; 2],
+    pub through: Option<f64>,
+}
+
+impl Cut {
+    /// 0 = X, 1 = Y, 2 = Z.
+    pub fn axis_index(&self) -> Result<usize> {
+        match self.axis.to_lowercase().as_str() {
+            "x" => Ok(0),
+            "y" => Ok(1),
+            "z" => Ok(2),
+            other => bail!("slicing cut: axis must be x/y/z, got '{other}'"),
+        }
+    }
+    pub fn at(&self) -> f64 {
+        self.at.f()
+    }
 }
 
 impl Manifest {

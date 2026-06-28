@@ -99,9 +99,12 @@ fn main() {
         reslice_on_start: args.iter().any(|a| a == "--reslice"),
         cut_pct: flag_value(&args, "--cut").and_then(|v| v.parse().ok()).unwrap_or(50.0),
     };
-    match flag_value(&args, "--screenshot") {
-        Some(png) => run_screenshot(cfg, PathBuf::from(png)),
-        None => run_windowed(cfg),
+    if let Some(script) = flag_value(&args, "--script") {
+        run_scripted(cfg, parse_script(&script));
+    } else if let Some(png) = flag_value(&args, "--screenshot") {
+        run_screenshot(cfg, PathBuf::from(png));
+    } else {
+        run_windowed(cfg);
     }
 }
 
@@ -422,6 +425,156 @@ fn capture_then_exit(
             error!("screenshot did not appear at {}", shot.png.display());
         }
         exit.write(AppExit::Success);
+    }
+}
+
+// ---- scripted interaction harness -----------------------------------------------------
+
+/// One step in a `--script` timeline. Drives the REAL systems (update_cut, request_reslice,
+/// poll_job) with synthetic input, then screenshots — so interaction is verified, not just setup.
+#[derive(Clone)]
+enum Action {
+    Cut(f32),      // set the cut slider to this percent
+    Reslice,       // trigger a slice, then wait for the async job
+    Shot(PathBuf), // screenshot the viewport to this path
+    Wait(u32),     // idle this many frames
+}
+
+#[derive(Resource)]
+struct ScriptRunner {
+    actions: Vec<Action>,
+    idx: usize,
+    timer: u32,
+}
+
+/// The offscreen image the camera renders into, so scripted shots can grab it.
+#[derive(Resource)]
+struct RenderTargetImage(Handle<Image>);
+
+/// Parse `"cut 25; reslice; shot a.png; wait 10"` into a timeline.
+fn parse_script(s: &str) -> Vec<Action> {
+    s.split(';')
+        .filter_map(|part| {
+            let mut it = part.split_whitespace();
+            match it.next()? {
+                "cut" => it.next()?.parse().ok().map(Action::Cut),
+                "reslice" => Some(Action::Reslice),
+                "shot" => it.next().map(|p| Action::Shot(PathBuf::from(p))),
+                "wait" => it.next()?.parse().ok().map(Action::Wait),
+                other => {
+                    eprintln!("script: unknown action '{other}'");
+                    None
+                }
+            }
+        })
+        .collect()
+}
+
+/// Headless, but runs the FULL windowed systems + an offscreen camera, then walks the script.
+fn run_scripted(scene: SceneCfg, actions: Vec<Action>) {
+    App::new()
+        .add_plugins(
+            DefaultPlugins
+                .set(WindowPlugin {
+                    primary_window: None,
+                    exit_condition: ExitCondition::DontExit,
+                    ..default()
+                })
+                .disable::<WinitPlugin>(),
+        )
+        .add_plugins(ScheduleRunnerPlugin::run_loop(
+            std::time::Duration::from_secs_f64(1.0 / 60.0),
+        ))
+        .add_plugins(FeathersPlugins)
+        .insert_resource(UiTheme(create_dark_theme()))
+        .insert_resource(ClearColor(Color::srgb(0.10, 0.10, 0.12)))
+        .insert_resource(scene)
+        .init_resource::<Job>()
+        .init_resource::<CutPlane>()
+        .init_resource::<ModelBounds>()
+        .insert_resource(Status("rendering…".into()))
+        .insert_resource(ScriptRunner { actions, idx: 0, timer: 0 })
+        .add_message::<ReSlice>()
+        .add_systems(Startup, (setup_script, ui_root.spawn()))
+        .add_systems(Update, (request_reslice, poll_job, update_status, update_cut, run_script))
+        .run();
+}
+
+fn setup_script(
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut images: ResMut<Assets<Image>>,
+    scene: Res<SceneCfg>,
+    mut job: ResMut<Job>,
+    mut status: ResMut<Status>,
+) {
+    spawn_environment(&mut commands, &mut meshes, &mut materials, &scene);
+    let (w, h) = (960u32, 720u32);
+    let mut img = Image::new_target_texture(w, h, TextureFormat::Rgba8UnormSrgb, None);
+    img.texture_descriptor.usage |= TextureUsages::COPY_SRC;
+    let target = images.add(img);
+    let radius = scene.bed[0].max(scene.bed[1]).max(80.0);
+    commands.spawn((
+        Camera3d::default(),
+        RenderTarget::Image(target.clone().into()),
+        orbit_transform(-0.7, 0.5, radius),
+        bevy::ui::IsDefaultUiCamera,
+    ));
+    commands.insert_resource(RenderTargetImage(target));
+    // Render the model off-thread; poll_job spawns it + bounds + cut plane, then the script runs.
+    kick_job(&mut job, &mut status, &scene, false, 0.0);
+}
+
+/// Step the script: each action drives the real systems, waiting on async work to settle.
+#[allow(clippy::too_many_arguments)]
+fn run_script(
+    mut runner: ResMut<ScriptRunner>,
+    bounds: Res<ModelBounds>,
+    job: Res<Job>,
+    target: Res<RenderTargetImage>,
+    sliders: Query<Entity, With<CutSlider>>,
+    mut reslice_w: MessageWriter<ReSlice>,
+    mut commands: Commands,
+    mut exit: MessageWriter<AppExit>,
+) {
+    if bounds.0.is_none() {
+        return; // wait for the initial render (model + bounds + cut plane)
+    }
+    if runner.idx >= runner.actions.len() {
+        exit.write(AppExit::Success);
+        return;
+    }
+    runner.timer += 1;
+    let done = match runner.actions[runner.idx].clone() {
+        Action::Cut(pct) => {
+            if runner.timer == 1 {
+                if let Ok(e) = sliders.single() {
+                    commands.entity(e).insert(SliderValue(pct)); // immutable component → replace
+                }
+            }
+            runner.timer >= 3 // let update_cut map it + the overlay move
+        }
+        Action::Reslice => {
+            if runner.timer == 1 {
+                reslice_w.write(ReSlice);
+            }
+            runner.timer > 3 && job.0.is_none() // kicked, then completed
+        }
+        Action::Shot(path) => {
+            if runner.timer == 1 {
+                commands
+                    .spawn(Screenshot::image(target.0.clone()))
+                    .observe(save_to_disk(path.clone()));
+                info!("script: shot -> {}", path.display());
+            }
+            runner.timer >= 30 // give the GPU readback + save time
+        }
+        Action::Wait(n) => runner.timer >= n,
+    };
+    if done {
+        runner.idx += 1;
+        runner.timer = 0;
     }
 }
 

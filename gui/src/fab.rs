@@ -39,6 +39,24 @@ pub fn render_whole(root: Option<&Path>, source: &Path, out_dir: &Path) -> Resul
     Ok(out)
 }
 
+/// The preview STL `render_whole` writes for `source` (reused by the cross-section, no re-render).
+pub fn whole_stl(source: &Path, out_dir: &Path) -> PathBuf {
+    out_dir.join(format!("{}.stl", stem_of(source)))
+}
+
+/// The cut's 2D cross-section profile (loops in connector-pos coords), from the already-rendered
+/// preview STL — for the per-cut connector editor.
+pub fn cross_section(
+    root: Option<&Path>,
+    stl: &Path,
+    axis: usize,
+    at: f64,
+    out_dir: &Path,
+) -> Result<Vec<Vec<[f64; 2]>>> {
+    let oscad = Openscad::discover(root)?;
+    fab_scad::cross_section::cross_section(&oscad, stl, axis, at, out_dir, TIMEOUT)
+}
+
 /// Slice the source at the given cuts — each `(axis, at)` with axis in `'x' | 'y' | 'z'` (preview
 /// quality), returning the sliced STL. A pure function of (source, cuts) — the DAG-cache unit.
 pub fn reslice(

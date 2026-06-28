@@ -172,6 +172,27 @@ struct Conns {
 #[derive(Resource, Default)]
 struct PlaceMode(bool);
 
+/// Which cut's 2D connector editor is open (None = normal 3D view). When set, the model hides and
+/// the cut's cross-section profile is shown face-on for precise picking.
+#[derive(Resource, Default)]
+struct EditCut(Option<usize>);
+
+/// The open cut's cross-section: profile loops in connector-pos coords (the cut's two non-axis
+/// dims). `None` until computed / when no editor is open.
+#[derive(Resource, Default)]
+struct XSection(Option<Vec<Vec<[f32; 2]>>>);
+
+/// The 3D point of a `(pos_a, pos_b)` on a cut plane: `at` along the axis, pos in the two non-axis
+/// dims (ascending) — the inverse of the connector projection.
+fn profile_point(axis: Axis, at: f32, pos: [f32; 2]) -> Vec3 {
+    let ai = axis.index();
+    let others: Vec<usize> = (0..3).filter(|&a| a != ai).collect();
+    let mut p = with_comp(Vec3::ZERO, ai, at);
+    p = with_comp(p, others[0], pos[0]);
+    p = with_comp(p, others[1], pos[1]);
+    p
+}
+
 /// A connector's 3D point: `at` along its cut's axis, `pos` in the two non-axis dims (matching
 /// the driver's projection). `None` if the cut it references is gone.
 fn conn_point(cuts: &Cuts, pc: &PlacedConn) -> Option<Vec3> {
@@ -237,6 +258,7 @@ const ICON_DELETE: &str = "\u{e872}"; // trash can
 const ICON_ADD: &str = "\u{e145}"; // plus
 const ICON_ON: &str = "\u{e8f4}"; // eye (visible)
 const ICON_OFF: &str = "\u{e8f5}"; // eye-off (hidden)
+const ICON_CONN: &str = "\u{e3a1}"; // grain (scattered dots) — edit this cut's connectors
 
 /// Marks the panel's status text so a system can update it.
 #[derive(Component, Clone, Default)]
@@ -343,6 +365,8 @@ fn run_windowed(scene: SceneCfg) {
         .init_resource::<Job>()
         .init_resource::<Cuts>()
         .init_resource::<Conns>()
+        .init_resource::<EditCut>()
+        .init_resource::<XSection>()
         .init_resource::<PlaceMode>()
         .init_resource::<ModelBounds>()
         .init_resource::<DraggingCut>()
@@ -372,6 +396,8 @@ fn run_windowed(scene: SceneCfg) {
                 update_view_label,
                 update_place_label,
                 sync_conn_markers,
+                edit_mode,
+                draw_profile,
                 push_fields,
                 sync_selected,
                 apply_icon_font,
@@ -685,6 +711,71 @@ fn sync_conn_markers(
                 *vis = Visibility::Visible;
             }
             _ => *vis = Visibility::Hidden,
+        }
+    }
+}
+
+/// React to opening/closing a cut's connector editor: hide the model + compute the cut's
+/// cross-section (blocking, but fast — projects the already-rendered preview STL, no re-render),
+/// or restore the model when closed. (TODO: move off-thread + recompute when the cut moves.)
+fn edit_mode(
+    edit: Res<EditCut>,
+    cuts: Res<Cuts>,
+    cfg: Res<SceneCfg>,
+    mut xsection: ResMut<XSection>,
+    mut models: Query<&mut Visibility, With<Model>>,
+    mut status: ResMut<Status>,
+) {
+    if !edit.is_changed() {
+        return;
+    }
+    let Some(i) = edit.0 else {
+        for mut v in &mut models {
+            *v = Visibility::Inherited;
+        }
+        xsection.0 = None;
+        return;
+    };
+    for mut v in &mut models {
+        *v = Visibility::Hidden;
+    }
+    let (Some(c), Some(src)) = (cuts.list.get(i), cfg.source.clone()) else {
+        xsection.0 = None;
+        return;
+    };
+    let stl = fab::whole_stl(&src, &cfg.tmp);
+    match fab::cross_section(cfg.root.as_deref(), &stl, c.axis.index(), c.at as f64, &cfg.tmp) {
+        Ok(loops) => {
+            xsection.0 = Some(
+                loops
+                    .into_iter()
+                    .map(|l| l.into_iter().map(|[a, b]| [a as f32, b as f32]).collect())
+                    .collect(),
+            );
+            status.0 = format!("editing connectors on {} cut", c.axis.label());
+        }
+        Err(e) => {
+            status.0 = format!("cross-section failed: {e}");
+            xsection.0 = None;
+        }
+    }
+}
+
+/// Draw the open cut's profile as a line-loop outline (immediate-mode gizmos, every frame).
+fn draw_profile(xsection: Res<XSection>, edit: Res<EditCut>, cuts: Res<Cuts>, mut gizmos: Gizmos) {
+    let (Some(loops), Some(i)) = (&xsection.0, edit.0) else {
+        return;
+    };
+    let Some(c) = cuts.list.get(i) else {
+        return;
+    };
+    let color = Color::srgb(0.35, 0.8, 1.0);
+    for lp in loops {
+        let n = lp.len();
+        for j in 0..n {
+            let a = profile_point(c.axis, c.at, lp[j]);
+            let b = profile_point(c.axis, c.at, lp[(j + 1) % n]);
+            gizmos.line(a, b, color);
         }
     }
 }
@@ -1117,6 +1208,8 @@ fn run_screenshot(scene: SceneCfg, png: PathBuf) {
         .insert_resource(ScreenshotPng(png))
         .init_resource::<Cuts>()
         .init_resource::<Conns>()
+        .init_resource::<EditCut>()
+        .init_resource::<XSection>()
         .init_resource::<PlaceMode>()
         .init_resource::<ModelBounds>()
         .init_resource::<DraggingCut>()
@@ -1244,6 +1337,7 @@ enum Action {
     Shot(PathBuf), // screenshot the viewport to this path
     Wait(u32),     // idle this many frames
     Conn(usize, f32, f32), // place a connector on cut <i> at (a, b) in its plane's non-axis dims
+    Edit(usize),           // open cut <i>'s 2D connector editor
 }
 
 #[derive(Resource)]
@@ -1282,6 +1376,7 @@ fn parse_script(s: &str) -> Vec<Action> {
                     let b = it.next()?.parse().ok()?;
                     Some(Action::Conn(i, a, b))
                 }
+                "edit" => it.next()?.parse().ok().map(Action::Edit),
                 other => {
                     eprintln!("script: unknown action '{other}'");
                     None
@@ -1314,6 +1409,8 @@ fn run_scripted(scene: SceneCfg, actions: Vec<Action>) {
         .init_resource::<Job>()
         .init_resource::<Cuts>()
         .init_resource::<Conns>()
+        .init_resource::<EditCut>()
+        .init_resource::<XSection>()
         .init_resource::<PlaceMode>()
         .init_resource::<ModelBounds>()
         .init_resource::<WholeMesh>()
@@ -1337,6 +1434,8 @@ fn run_scripted(scene: SceneCfg, actions: Vec<Action>) {
                 update_view_label,
                 update_place_label,
                 sync_conn_markers,
+                edit_mode,
+                draw_profile,
                 push_fields,
                 sync_selected,
                 apply_icon_font,
@@ -1383,6 +1482,7 @@ fn run_script(
     target: Res<RenderTargetImage>,
     mut cuts: ResMut<Cuts>,
     mut conns: ResMut<Conns>,
+    mut edit_cut: ResMut<EditCut>,
     mut reslice_w: MessageWriter<ReSlice>,
     mut commands: Commands,
     mut exit: MessageWriter<AppExit>,
@@ -1466,6 +1566,12 @@ fn run_script(
                 conns.list.push(PlacedConn { cut: i, pos: [a, b] });
             }
             runner.timer >= 2
+        }
+        Action::Edit(i) => {
+            if runner.timer == 1 {
+                edit_cut.0 = Some(i);
+            }
+            runner.timer >= 10 // give the cross-section render + profile build time
         }
     };
     if done {
@@ -1639,6 +1745,10 @@ fn plane_card(cuts: &Cuts, axis: Axis) -> impl Scene + 'static {
                     cuts.active = idx;
                 }
             };
+            // Open/close this cut's 2D connector editor.
+            let open_conn = move |_: On<Activate>, mut ec: ResMut<EditCut>| {
+                ec.0 = if ec.0 == Some(idx) { None } else { Some(idx) };
+            };
             let eye = if c.enabled { ICON_ON } else { ICON_OFF };
             // On = blue (Primary), off = grey (Normal) — state as colour; eye/eye-off icon too.
             let on_variant = if c.enabled { ButtonVariant::Primary } else { ButtonVariant::Normal };
@@ -1660,6 +1770,10 @@ fn plane_card(cuts: &Cuts, axis: Axis) -> impl Scene + 'static {
                             TextColor({Color::srgb(0.95, 0.5, 0.5)})
                         } }
                         on(del)
+                    ),
+                    (
+                        @FeathersButton { @caption: bsn!{ Text(ICON_CONN) IconText } }
+                        on(open_conn)
                     ),
                 ]
             }

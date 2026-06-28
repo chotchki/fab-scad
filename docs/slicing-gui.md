@@ -116,3 +116,21 @@ any window and is the thing the GUI stands on:
   it and see the support-free consequence. That closes the 4.5 loop.
 - **Live-ness** — start with re-render-on-commit (a button / drag-release), not every frame;
   revisit if it feels laggy.
+
+## Bevy 0.19 implementation notes (banked while building 5.1)
+
+0.19 + bsn/Feathers post-dates most references, so the non-obvious bits:
+
+- Buffered input reads with `MessageReader<T>`, not `EventReader<T>` (the Event/Message split).
+- A camera's render target is a standalone `RenderTarget` **component**, not a `Camera.target` field.
+- The bsn `Scene`/`SceneList` **traits** (in `bevy_scene`) collide with the prelude's `Scene`
+  asset **struct** — import them explicitly to shadow it, and don't name your own type `Scene`.
+- Headless UI: UI defaults to the primary-window camera; with no window the offscreen camera
+  needs `IsDefaultUiCamera`, or the panel won't render.
+- Feathers controls are bsn "scene components" (`@FeathersButton { @caption: … }`), spawned via
+  `scene.spawn()` as a Startup system from a `bsn!`/`bsn_list!` scene.
+- OpenSCAD exports ASCII STL (`solid …`); the GUI's loader handles ascii + binary.
+
+**The verification tool:** `fab-gui --screenshot out.png [part.stl]` renders headless to a PNG.
+It works in a display-less sandbox (Bevy grabs the Metal adapter offscreen), so the viewport +
+UI can be eyeballed with no window — which is how this was built.

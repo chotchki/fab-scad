@@ -26,7 +26,7 @@ use bevy::{
     input::mouse::{MouseMotion, MouseWheel},
     mesh::Indices,
     picking::{
-        events::{Drag, DragEnd, DragStart, Pointer},
+        events::{Click, Drag, DragEnd, DragStart, Pointer},
         mesh_picking::MeshPickingPlugin,
         pointer::PointerButton,
     },
@@ -130,6 +130,12 @@ struct CutPlaneViz {
     idx: usize,
 }
 
+/// A floating piece-width label (one per piece), positioned by projecting the piece centre to screen.
+#[derive(Component)]
+struct DimLabel {
+    idx: usize,
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let bed = bed_size().unwrap_or([256.0; 3]);
@@ -174,6 +180,7 @@ fn run_windowed(scene: SceneCfg) {
         .add_observer(on_drag_start)
         .add_observer(on_drag)
         .add_observer(on_drag_end)
+        .add_observer(on_click)
         .add_observer(on_cut_typed)
         .add_systems(Startup, (setup_windowed, ui_root.spawn()))
         .add_systems(
@@ -187,6 +194,7 @@ fn run_windowed(scene: SceneCfg) {
                 sync_overlay_visuals,
                 update_cut_label,
                 sync_cut_input,
+                sync_dim_labels,
                 revert_on_edit,
                 auto_scale,
             ),
@@ -322,6 +330,13 @@ fn on_drag_end(_ev: On<Pointer<DragEnd>>, mut dragging: ResMut<DraggingCut>) {
     dragging.0 = false;
 }
 
+/// Click a cut plane (a tap, no drag) to make it the active cut — select without moving.
+fn on_click(ev: On<Pointer<Click>>, planes: Query<&CutPlaneViz>, mut cuts: ResMut<Cuts>) {
+    if let Ok(cpv) = planes.get(ev.entity) {
+        cuts.active = cpv.idx;
+    }
+}
+
 /// "+cut" — add a cut at the model centre and make it active.
 fn add_cut(_ev: On<Activate>, mut cuts: ResMut<Cuts>, bounds: Res<ModelBounds>) {
     if let Some((min, max)) = bounds.0 {
@@ -338,14 +353,6 @@ fn toggle_cut(_ev: On<Activate>, mut cuts: ResMut<Cuts>) {
     let a = cuts.active;
     if let Some(c) = cuts.list.get_mut(a) {
         c.enabled = !c.enabled;
-    }
-}
-
-/// "next" — cycle which cut is active (drag + toggle act on it).
-fn next_cut(_ev: On<Activate>, mut cuts: ResMut<Cuts>) {
-    let n = cuts.list.len();
-    if n > 0 {
-        cuts.active = (cuts.active + 1) % n;
     }
 }
 
@@ -413,6 +420,62 @@ fn spread_offset(cuts: &Cuts, idx: usize, spread: f32) -> f32 {
         (rank + 0.5) * spread
     } else {
         rank * spread
+    }
+}
+
+/// Floating piece-width labels in the 3D view: project each piece's centre to the screen and put
+/// the width there, tracking the explode (and the camera, every frame, so they follow orbit/pan).
+#[allow(clippy::too_many_arguments)]
+fn sync_dim_labels(
+    cuts: Res<Cuts>,
+    bounds: Res<ModelBounds>,
+    dspread: Res<DisplaySpread>,
+    cam: Query<(&Camera, &GlobalTransform)>,
+    existing: Query<&DimLabel>,
+    mut labels: Query<(&DimLabel, &mut Node, &mut Text, &mut Visibility)>,
+    mut commands: Commands,
+) {
+    let Some((min, max)) = bounds.0 else {
+        return;
+    };
+    let Ok((camera, cam_gt)) = cam.single() else {
+        return;
+    };
+    let mut edges = vec![min.x];
+    let mut xs: Vec<f32> = cuts.list.iter().filter(|c| c.enabled).map(|c| c.at).collect();
+    xs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    edges.extend(xs);
+    edges.push(max.x);
+    let n_pieces = edges.len() - 1;
+
+    // Spawn a label entity for any piece that lacks one.
+    for i in existing.iter().count()..n_pieces {
+        commands.spawn((
+            Text::new(""),
+            TextColor(Color::srgb(0.95, 0.95, 1.0)),
+            TextFont::from_font_size(13.0),
+            Node { position_type: PositionType::Absolute, ..default() },
+            DimLabel { idx: i },
+        ));
+    }
+
+    let (cy, cz) = ((min.y + max.y) * 0.5, max.z);
+    for (dl, mut node, mut text, mut vis) in &mut labels {
+        if dl.idx >= n_pieces {
+            *vis = Visibility::Hidden;
+            continue;
+        }
+        let (lo, hi) = (edges[dl.idx], edges[dl.idx + 1]);
+        let cx = (lo + hi) * 0.5 + dl.idx as f32 * dspread.0;
+        match camera.world_to_viewport(cam_gt, Vec3::new(cx, cy, cz)) {
+            Ok(p) => {
+                node.left = px(p.x);
+                node.top = px(p.y);
+                *text = Text::new(format!("{:.0}", hi - lo));
+                *vis = Visibility::Visible;
+            }
+            Err(_) => *vis = Visibility::Hidden,
+        }
     }
 }
 
@@ -886,6 +949,7 @@ fn run_scripted(scene: SceneCfg, actions: Vec<Action>) {
                 sync_overlay_visuals,
                 update_cut_label,
                 sync_cut_input,
+                sync_dim_labels,
                 revert_on_edit,
                 run_script,
             ),
@@ -1162,7 +1226,6 @@ fn panel() -> impl Scene {
                 Children[
                     (@FeathersButton { @caption: bsn!{ Text("+cut") ThemedText } } on(add_cut)),
                     (@FeathersButton { @caption: bsn!{ Text("toggle") ThemedText } } on(toggle_cut)),
-                    (@FeathersButton { @caption: bsn!{ Text("next") ThemedText } } on(next_cut)),
                 ]
             ),
             (

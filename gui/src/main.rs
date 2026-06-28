@@ -70,7 +70,7 @@ struct ReSlice;
 #[derive(Resource, Default)]
 struct Job(Option<(bool, Task<Result<PathBuf, String>>)>);
 
-/// One-line status shown in the panel (e.g. "slicing…", "ready").
+/// One-line status shown in the panel (e.g. "slicing", "ready").
 #[derive(Resource)]
 struct Status(String);
 
@@ -203,10 +203,10 @@ struct PanelRoot;
 #[reflect(Component)]
 struct RowFor(usize);
 
-/// The cut stack's structural signature (one axis per cut) — the panel rebuilds when it changes;
-/// value-only edits (position, on/off) update rows in place instead.
+/// The cut stack's structural signature (axis + enabled per cut) — the panel rebuilds when it
+/// changes (add/remove/rotate/toggle); position-only edits update rows in place instead.
 #[derive(Resource, Default)]
-struct PanelSig(Option<Vec<Axis>>);
+struct PanelSig(Option<Vec<(Axis, bool)>>);
 /// A brief attention flash (seconds remaining), drawn as a fading outline.
 #[derive(Component)]
 struct Nudge(f32);
@@ -267,7 +267,7 @@ fn run_windowed(scene: SceneCfg) {
         .init_resource::<SliceDirty>()
         .init_resource::<DisplaySpread>()
         .init_resource::<PanelSig>()
-        .insert_resource(Status("rendering…".into()))
+        .insert_resource(Status("rendering".into()))
         .add_message::<ReSlice>()
         .add_observer(on_drag_start)
         .add_observer(on_drag)
@@ -285,8 +285,9 @@ fn run_windowed(scene: SceneCfg) {
                 sync_overlay_visuals,
                 sync_dim_labels,
                 update_view_label,
-                rebuild_panel,
                 update_rows,
+                sync_selected,
+                rebuild_panel,
                 nudge_buttons,
                 mark_dirty,
                 revert_on_edit,
@@ -514,27 +515,31 @@ fn nudge_buttons(time: Res<Time>, mut q: Query<(Entity, &mut Nudge)>, mut comman
     }
 }
 
-/// Spawn an overlay for any cut that lacks one (covers cuts added by button OR harness).
+/// Keep one overlay per cut. When the cut COUNT changes (add/remove), the index→cut mapping can
+/// shift, so despawn all + respawn fresh; positions/colours are then refreshed by
+/// sync_overlay_visuals. (Runs on every cut change, but only rebuilds on a count change.)
 fn sync_overlays(
     cuts: Res<Cuts>,
     bounds: Res<ModelBounds>,
-    existing: Query<&CutPlaneViz>,
+    existing: Query<Entity, With<CutPlaneViz>>,
+    mut last: Local<usize>,
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
-    if !cuts.is_changed() {
+    if !cuts.is_changed() || *last == cuts.list.len() {
         return;
     }
     let Some((min, max)) = bounds.0 else {
         return;
     };
-    let have: Vec<usize> = existing.iter().map(|c| c.idx).collect();
-    for i in 0..cuts.list.len() {
-        if !have.contains(&i) {
-            spawn_cut_plane(&mut commands, &mut meshes, &mut materials, min, max, &cuts.list[i], i);
-        }
+    for e in &existing {
+        commands.entity(e).despawn();
     }
+    for (i, c) in cuts.list.iter().enumerate() {
+        spawn_cut_plane(&mut commands, &mut meshes, &mut materials, min, max, c, i);
+    }
+    *last = cuts.list.len();
 }
 
 /// Position + orient + colour each overlay from its cut. Position tracks the displayed geometry:
@@ -787,7 +792,7 @@ fn kick_job(job: &mut Job, status: &mut Status, cfg: &SceneCfg, reslice: bool, c
         }
     });
     job.0 = Some((reslice, task));
-    status.0 = if reslice { "slicing…".into() } else { "rendering…".into() };
+    status.0 = if reslice { "slicing".into() } else { "rendering".into() };
 }
 
 /// Poll the in-flight job; when it finishes, swap in the new mesh (and seed the first cut once).
@@ -901,10 +906,10 @@ fn run_screenshot(scene: SceneCfg, png: PathBuf) {
         .init_resource::<SliceDirty>()
         .init_resource::<DisplaySpread>()
         .init_resource::<PanelSig>()
-        .insert_resource(Status("rendering…".into()))
+        .insert_resource(Status("rendering".into()))
         .add_message::<ReSlice>()
         .add_systems(Startup, setup_offscreen)
-        .add_systems(Update, (capture_then_exit, rebuild_panel, update_rows, update_status))
+        .add_systems(Update, (capture_then_exit, update_rows, sync_selected, rebuild_panel, update_status))
         .run();
 }
 
@@ -1087,7 +1092,7 @@ fn run_scripted(scene: SceneCfg, actions: Vec<Action>) {
         .init_resource::<SliceDirty>()
         .init_resource::<DisplaySpread>()
         .init_resource::<PanelSig>()
-        .insert_resource(Status("rendering…".into()))
+        .insert_resource(Status("rendering".into()))
         .insert_resource(ScriptRunner { actions, idx: 0, timer: 0 })
         .add_message::<ReSlice>()
         .add_systems(Startup, setup_script)
@@ -1101,8 +1106,9 @@ fn run_scripted(scene: SceneCfg, actions: Vec<Action>) {
                 sync_overlay_visuals,
                 sync_dim_labels,
                 update_view_label,
-                rebuild_panel,
                 update_rows,
+                sync_selected,
+                rebuild_panel,
                 mark_dirty,
                 revert_on_edit,
                 run_script,
@@ -1364,11 +1370,10 @@ fn bed_size() -> Option<[f64; 3]> {
 
 // ---- Feathers UI: plane-grouped cards -------------------------------------------------
 
-/// Text for a cut row: active marker, position, on/off.
-fn row_text(idx: usize, at: f32, enabled: bool, active: usize) -> String {
-    let mark = if idx == active { "› " } else { "  " };
-    let st = if enabled { "on" } else { "off" };
-    format!("{mark}{at:.0} mm  {st}")
+/// Label for a cut row — its position (the active row is highlighted via `Selected`, on/off by
+/// its toggle button).
+fn pos_text(at: f32) -> String {
+    format!("{at:.0} mm")
 }
 
 /// One plane card: a header (plane name + per-plane "+cut") and a list of that plane's cuts.
@@ -1379,10 +1384,29 @@ fn plane_card(cuts: &Cuts, axis: Axis) -> impl Scene + 'static {
         .enumerate()
         .filter(|(_, c)| c.axis == axis)
         .map(|(idx, c)| {
+            // Per-row actions, each a move-closure capturing this cut's index.
+            let toggle = move |_: On<Activate>, mut cuts: ResMut<Cuts>| {
+                if let Some(c) = cuts.list.get_mut(idx) {
+                    c.enabled = !c.enabled;
+                }
+            };
+            let del = move |_: On<Activate>, mut cuts: ResMut<Cuts>| {
+                if idx < cuts.list.len() {
+                    cuts.list.remove(idx);
+                    if !cuts.list.is_empty() && cuts.active >= cuts.list.len() {
+                        cuts.active = cuts.list.len() - 1;
+                    }
+                }
+            };
+            let on_off = if c.enabled { "on" } else { "off" };
             bsn! {
                 @FeathersListRow
                 RowFor(idx)
-                Children [ (Text(row_text(idx, c.at, c.enabled, cuts.active)) ThemedText) ]
+                Children [
+                    (Text(pos_text(c.at)) ThemedText),
+                    (@FeathersButton { @caption: bsn!{ Text(on_off) ThemedText } } on(toggle)),
+                    (@FeathersButton { @caption: bsn!{ Text("x") ThemedText } } on(del)),
+                ]
             }
         })
         .collect();
@@ -1439,7 +1463,7 @@ fn build_panel(cuts: &Cuts) -> impl Scene + 'static {
                 Node { flex_direction: FlexDirection::Column, row_gap: px(6) }
                 Children [ { Box::new(cards) as Box<dyn SceneList> } ]
             ),
-            (Text("rendering…") ThemedText StatusLabel),
+            (Text("rendering") ThemedText StatusLabel),
             (
                 @FeathersButton { @caption: bsn!{ Text("Re-slice") ThemedText } }
                 on(|_: On<Activate>, mut w: MessageWriter<ReSlice>| { w.write(ReSlice); })
@@ -1461,7 +1485,7 @@ fn rebuild_panel(
     roots: Query<Entity, With<PanelRoot>>,
     mut commands: Commands,
 ) {
-    let cur: Vec<Axis> = cuts.list.iter().map(|c| c.axis).collect();
+    let cur: Vec<(Axis, bool)> = cuts.list.iter().map(|c| (c.axis, c.enabled)).collect();
     if sig.0.as_deref() == Some(cur.as_slice()) {
         return;
     }
@@ -1486,12 +1510,26 @@ fn update_rows(cuts: Res<Cuts>, rows: Query<(&RowFor, &Children)>, mut texts: Qu
         let Some(c) = cuts.list.get(rf.0) else {
             continue;
         };
-        let label = row_text(rf.0, c.at, c.enabled, cuts.active);
+        let label = pos_text(c.at);
+        // The position is the row's first direct Text child (button captions are grandchildren).
         for child in children.iter() {
             if let Ok(mut t) = texts.get_mut(child) {
                 *t = Text::new(label.clone());
                 break;
             }
+        }
+    }
+}
+
+/// Highlight the active cut's row (and only it) via `Selected`. Idempotent — only touches rows
+/// whose state is wrong — so it's cheap to run every frame and survives panel rebuilds.
+fn sync_selected(cuts: Res<Cuts>, rows: Query<(Entity, &RowFor, Has<bevy::ui::Selected>)>, mut commands: Commands) {
+    for (e, rf, selected) in &rows {
+        let should = rf.0 == cuts.active;
+        if should && !selected {
+            commands.entity(e).insert(bevy::ui::Selected);
+        } else if !should && selected {
+            commands.entity(e).remove::<bevy::ui::Selected>();
         }
     }
 }

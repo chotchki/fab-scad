@@ -1,0 +1,10 @@
+# Printer / bed profiles.
+# Consumed by the slicer (Phase 4) to minimize cuts: try rotating / diagonal-fitting a part
+# on the bed BEFORE splitting it. Fewer cuts > clever cuts.
+#
+# TODO(chotchki): replace the example with your actual printer(s) + real bed dims.
+
+# [[printer]]
+# name = "X1C"             # example only
+# bed = [256, 256, 256]    # x, y, z in mm (usable build volume)
+# default = true

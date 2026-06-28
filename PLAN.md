@@ -16,7 +16,7 @@ Driven by `claude-plan-bridge` (FORMATv2). Hand-authored; run
 - [ ] 3.3 - `fab focus <project>` active-project context (no name on every command)
 - [x] 3.4 - Parse a MINIMAL project.toml (name/title/part); schema grows by dogfooding
 - [ ] 3.5 - `fab new <name>` scaffolds from the template
-- [ ] 3.6 - Wire scad-models + libs + scad-lib as pinned submodules under fab-scad
+- [x] 3.6 - Wire scad-models + libs + scad-lib as pinned submodules under fab-scad
 
 ## Phase 4 - Linear slicing (SCAD lib; kill the 2^N blowup)
 - [ ] 4.1 - Characterize blowup: confirm nested partition() ~2^N; quantify on window_light_blocker + shoe_holder

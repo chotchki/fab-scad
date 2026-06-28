@@ -64,6 +64,22 @@ module bolt_joint(screw = "M3", through = 12, counterbore = 5, lead_in = 0.7,
 function needs_teardrop(axis, up = UP) =
     abs(unit(axis) * unit(up)) < 0.71;   // |cos| < cos(45°) => axis is closer to horizontal
 
+// auto-place a connector across a cut face: a cols×rows grid inset from the edges, centered
+// on the cut plane. `face` = [w, h], the cut-plane footprint. Shared across connector types —
+// children() is any connector (bolt_joint, pin_joint, …). Manual override: skip this and
+// position the connector yourself.
+//
+//   cuboid([80,50,30]) connector_grid(face=[80,50], cols=3) tag("remove") bolt_joint("M3");
+module connector_grid(face, cols = 2, rows = 1, inset = 15) {
+    w = max(face[0] - 2 * inset, 0);
+    h = max(face[1] - 2 * inset, 0);
+    for (i = [0 : cols - 1], j = [0 : rows - 1]) {
+        x = cols == 1 ? 0 : -w / 2 + w * i / (cols - 1);   // centered; no /0 for a single col/row
+        y = rows == 1 ? 0 : -h / 2 + h * j / (rows - 1);
+        translate([x, y, 0]) children();
+    }
+}
+
 // pin_joint — a teardrop socket each side of the cut for a separately printed, glued dowel().
 // Attachable on the cut plane (CENTER). Teardrop (ang 20) prints support-free when the joint
 // is horizontal; harmless when vertical.

@@ -25,3 +25,6 @@ module test_needs_teardrop() {
     assert(needs_teardrop(BACK) == true);
 }
 test_needs_teardrop();
+
+// auto-placement smoke (4.6): a 3×2 grid of joints renders
+fwd(90) connector_grid(face = [80, 40], cols = 3, rows = 2) bolt_joint("M3", through = 10);

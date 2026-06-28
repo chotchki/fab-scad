@@ -67,9 +67,10 @@ struct Model;
 #[derive(Message)]
 struct ReSlice;
 
-/// The in-flight render/slice (off the main thread). `Ok(stl)` when done, else an error string.
+/// The in-flight render/slice (off the main thread): `(was_reslice, task)`. The task yields
+/// `Ok(stl)` when done, else an error string.
 #[derive(Resource, Default)]
-struct Job(Option<Task<Result<PathBuf, String>>>);
+struct Job(Option<(bool, Task<Result<PathBuf, String>>)>);
 
 /// One-line status shown in the panel (e.g. "slicing…", "ready").
 #[derive(Resource)]
@@ -104,6 +105,15 @@ struct ModelBounds(Option<(Vec3, Vec3)>);
 /// True while a cut plane is being dragged, so the camera orbit yields to it.
 #[derive(Resource, Default)]
 struct DraggingCut(bool);
+
+/// The uncut model's mesh, kept so editing can revert from the exploded view without re-rendering.
+#[derive(Resource, Default)]
+struct WholeMesh(Option<Handle<Mesh>>);
+
+/// Spread applied to the currently-displayed mesh: 0 = uncut (editing), >0 = exploded result.
+/// Overlays track it: at `cut.at` when 0, fanned into the piece gaps when >0.
+#[derive(Resource, Default)]
+struct DisplaySpread(f32);
 
 /// Marks the panel's status text + cut-list text so systems can update them.
 #[derive(Component, Clone, Default)]
@@ -157,6 +167,8 @@ fn run_windowed(scene: SceneCfg) {
         .init_resource::<Cuts>()
         .init_resource::<ModelBounds>()
         .init_resource::<DraggingCut>()
+        .init_resource::<WholeMesh>()
+        .init_resource::<DisplaySpread>()
         .insert_resource(Status("rendering…".into()))
         .add_message::<ReSlice>()
         .add_observer(on_drag_start)
@@ -175,6 +187,8 @@ fn run_windowed(scene: SceneCfg) {
                 sync_overlay_visuals,
                 update_cut_label,
                 sync_cut_input,
+                revert_on_edit,
+                auto_scale,
             ),
         )
         .run();
@@ -185,6 +199,7 @@ struct Orbit {
     yaw: f32,
     pitch: f32,
     radius: f32,
+    target: Vec3, // look-at point; right-drag pans it
 }
 
 fn setup_windowed(
@@ -204,6 +219,7 @@ fn setup_windowed(
             yaw: -0.7,
             pitch: 0.5,
             radius,
+            target: Vec3::ZERO,
         },
     ));
     // Render the model off-thread; poll_job seeds the first cut when bounds land.
@@ -226,10 +242,18 @@ fn orbit(
     let Ok((mut t, mut o)) = cam.single_mut() else {
         return;
     };
+    // Camera basis (for panning in the view plane), captured before we move it.
+    let right = t.rotation * Vec3::X;
+    let up = t.rotation * Vec3::Y;
     if buttons.pressed(MouseButton::Left) {
         for ev in motion.read() {
             o.yaw -= ev.delta.x * 0.008;
             o.pitch = (o.pitch + ev.delta.y * 0.008).clamp(-1.5, 1.5);
+        }
+    } else if buttons.pressed(MouseButton::Right) {
+        let scale = o.radius * 0.0015;
+        for ev in motion.read() {
+            o.target += (-right * ev.delta.x + up * ev.delta.y) * scale;
         }
     } else {
         motion.clear();
@@ -237,7 +261,7 @@ fn orbit(
     for ev in wheel.read() {
         o.radius = (o.radius * (1.0 - ev.y * 0.1)).clamp(10.0, 4000.0);
     }
-    *t = orbit_transform(o.yaw, o.pitch, o.radius);
+    *t = orbit_transform(o.yaw, o.pitch, o.radius, o.target);
 }
 
 // ---- cut stack: drag, buttons, overlays -----------------------------------------------
@@ -246,11 +270,15 @@ fn orbit(
 fn on_drag_start(
     ev: On<Pointer<DragStart>>,
     planes: Query<&CutPlaneViz>,
+    dspread: Res<DisplaySpread>,
     mut cuts: ResMut<Cuts>,
     mut dragging: ResMut<DraggingCut>,
 ) {
     if ev.event.button != PointerButton::Primary {
         return;
+    }
+    if dspread.0 > 0.0 {
+        return; // exploded view is read-only — leave the drag to orbit the camera
     }
     if let Ok(cpv) = planes.get(ev.entity) {
         cuts.active = cpv.idx;
@@ -344,23 +372,88 @@ fn sync_overlays(
     }
 }
 
-/// Position + colour each overlay from its cut (active = amber, enabled = blue, off = faint).
+/// Position + colour each overlay from its cut. X tracks the displayed geometry: `cut.at` when
+/// editing the whole model, fanned into the piece gaps when showing the exploded result.
 fn sync_overlay_visuals(
     cuts: Res<Cuts>,
+    dspread: Res<DisplaySpread>,
     mut overlays: Query<(&CutPlaneViz, &mut Transform, &MeshMaterial3d<StandardMaterial>)>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
-    if !cuts.is_changed() {
+    if !cuts.is_changed() && !dspread.is_changed() {
         return;
     }
     for (cpv, mut tf, mat) in &mut overlays {
         if let Some(c) = cuts.list.get(cpv.idx) {
-            tf.translation.x = c.at;
+            tf.translation.x = c.at + spread_offset(&cuts, cpv.idx, dspread.0);
             if let Some(mut m) = materials.get_mut(&mat.0) {
                 m.base_color = cut_color(cpv.idx == cuts.active, c.enabled);
             }
         }
     }
+}
+
+/// Where cut `idx` lands in the exploded layout (relative to its uncut `at`): the slicer fans
+/// piece k by `k * spread`, so an enabled cut sits in the gap (+0.5) above the pieces below it,
+/// and a disabled cut rides along with the piece it's inside. 0 when not exploded.
+fn spread_offset(cuts: &Cuts, idx: usize, spread: f32) -> f32 {
+    if spread == 0.0 {
+        return 0.0;
+    }
+    let Some(cut) = cuts.list.get(idx) else {
+        return 0.0;
+    };
+    let rank = cuts
+        .list
+        .iter()
+        .enumerate()
+        .filter(|(j, o)| *j != idx && o.enabled && o.at < cut.at)
+        .count() as f32;
+    if cut.enabled {
+        (rank + 0.5) * spread
+    } else {
+        rank * spread
+    }
+}
+
+/// On a change of what's displayed, frame it: centre on the (possibly exploded) bounds + fit.
+fn auto_scale(
+    dspread: Res<DisplaySpread>,
+    cuts: Res<Cuts>,
+    bounds: Res<ModelBounds>,
+    mut cams: Query<&mut Orbit>,
+) {
+    if !dspread.is_changed() {
+        return;
+    }
+    let Some((min, max)) = bounds.0 else {
+        return;
+    };
+    let enabled = cuts.list.iter().filter(|c| c.enabled).count() as f32;
+    let extra = enabled * dspread.0; // exploded fans pieces this much further along X
+    let span = ((max.x - min.x) + extra).max(max.y - min.y).max(80.0);
+    for mut o in &mut cams {
+        o.target = Vec3::new((min.x + max.x) * 0.5 + extra * 0.5, (min.y + max.y) * 0.5, (min.z + max.z) * 0.5);
+        o.radius = span * 1.3;
+    }
+}
+
+/// Revert to the uncut model the moment a cut is edited, so editing is always on the intact part.
+fn revert_on_edit(
+    cuts: Res<Cuts>,
+    whole: Res<WholeMesh>,
+    mut dspread: ResMut<DisplaySpread>,
+    mut models: Query<&mut Mesh3d, With<Model>>,
+) {
+    if dspread.0 == 0.0 || !cuts.is_changed() {
+        return;
+    }
+    if let Some(h) = whole.0.clone() {
+        for mut m in &mut models {
+            m.0 = h.clone();
+        }
+    }
+    dspread.0 = 0.0;
 }
 
 fn cut_color(active: bool, enabled: bool) -> Color {
@@ -374,11 +467,15 @@ fn cut_color(active: bool, enabled: bool) -> Color {
     }
 }
 
-fn update_cut_label(cuts: Res<Cuts>, mut labels: Query<&mut Text, With<CutLabel>>) {
-    if !cuts.is_changed() {
+fn update_cut_label(
+    cuts: Res<Cuts>,
+    bounds: Res<ModelBounds>,
+    mut labels: Query<&mut Text, With<CutLabel>>,
+) {
+    if !cuts.is_changed() && !bounds.is_changed() {
         return;
     }
-    let text = if cuts.list.is_empty() {
+    let mut text = if cuts.list.is_empty() {
         "(no cuts)".to_string()
     } else {
         cuts.list
@@ -392,6 +489,17 @@ fn update_cut_label(cuts: Res<Cuts>, mut labels: Query<&mut Text, With<CutLabel>
             .collect::<Vec<_>>()
             .join("\n")
     };
+    // Live piece widths: the distances between sorted enabled cuts and the model edges.
+    if let Some((min, max)) = bounds.0 {
+        let mut edges = vec![min.x];
+        let mut xs: Vec<f32> = cuts.list.iter().filter(|c| c.enabled).map(|c| c.at).collect();
+        xs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        edges.extend(xs);
+        edges.push(max.x);
+        let widths: Vec<String> =
+            edges.windows(2).map(|w| format!("{:.0}", w[1] - w[0])).collect();
+        text.push_str(&format!("\npieces: {} mm", widths.join(" | ")));
+    }
     for mut t in &mut labels {
         *t = Text::new(text.clone());
     }
@@ -485,7 +593,7 @@ fn kick_job(job: &mut Job, status: &mut Status, cfg: &SceneCfg, reslice: bool, c
             fab::render_whole(root.as_deref(), &src, &tmp).map_err(|e| format!("{e:#}"))
         }
     });
-    job.0 = Some(task);
+    job.0 = Some((reslice, task));
     status.0 = if reslice { "slicing…".into() } else { "rendering…".into() };
 }
 
@@ -496,14 +604,17 @@ fn poll_job(
     mut status: ResMut<Status>,
     mut bounds: ResMut<ModelBounds>,
     mut cuts: ResMut<Cuts>,
+    mut whole: ResMut<WholeMesh>,
+    mut dspread: ResMut<DisplaySpread>,
     models: Query<Entity, With<Model>>,
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
-    let Some(task) = job.0.as_mut() else {
+    let Some((is_reslice, task)) = job.0.as_mut() else {
         return;
     };
+    let is_reslice = *is_reslice;
     let Some(result) = block_on(future::poll_once(task)) else {
         return;
     };
@@ -514,17 +625,23 @@ fn poll_job(
             for e in &models {
                 commands.entity(e).despawn();
             }
-            commands.spawn((Mesh3d(mesh), MeshMaterial3d(part_material(&mut materials)), Model));
-            // First (whole) render fixes the bounds and seeds a centre cut (sync_overlays draws it).
-            if bounds.0.is_none() {
-                if let Some((min, max)) = aabb {
-                    bounds.0 = Some((min, max));
-                    if cuts.list.is_empty() {
-                        cuts.list.push(CutDef {
-                            at: (min.x + max.x) * 0.5,
-                            enabled: true,
-                        });
-                        cuts.active = 0;
+            commands.spawn((Mesh3d(mesh.clone()), MeshMaterial3d(part_material(&mut materials)), Model));
+            if is_reslice {
+                dspread.0 = SPREAD as f32; // now showing the fanned pieces
+            } else {
+                whole.0 = Some(mesh); // remember the uncut mesh, so editing can revert to it
+                dspread.0 = 0.0;
+                // First whole render fixes the bounds and seeds a centre cut (sync_overlays draws it).
+                if bounds.0.is_none() {
+                    if let Some((min, max)) = aabb {
+                        bounds.0 = Some((min, max));
+                        if cuts.list.is_empty() {
+                            cuts.list.push(CutDef {
+                                at: (min.x + max.x) * 0.5,
+                                enabled: true,
+                            });
+                            cuts.active = 0;
+                        }
                     }
                 }
             }
@@ -611,7 +728,7 @@ fn setup_offscreen(
     commands.spawn((
         Camera3d::default(),
         RenderTarget::Image(target.clone().into()),
-        orbit_transform(-0.7, 0.5, radius),
+        orbit_transform(-0.7, 0.5, radius, Vec3::ZERO),
         bevy::ui::IsDefaultUiCamera,
     ));
 
@@ -753,6 +870,8 @@ fn run_scripted(scene: SceneCfg, actions: Vec<Action>) {
         .init_resource::<Job>()
         .init_resource::<Cuts>()
         .init_resource::<ModelBounds>()
+        .init_resource::<WholeMesh>()
+        .init_resource::<DisplaySpread>()
         .insert_resource(Status("rendering…".into()))
         .insert_resource(ScriptRunner { actions, idx: 0, timer: 0 })
         .add_message::<ReSlice>()
@@ -767,6 +886,7 @@ fn run_scripted(scene: SceneCfg, actions: Vec<Action>) {
                 sync_overlay_visuals,
                 update_cut_label,
                 sync_cut_input,
+                revert_on_edit,
                 run_script,
             ),
         )
@@ -791,7 +911,7 @@ fn setup_script(
     commands.spawn((
         Camera3d::default(),
         RenderTarget::Image(target.clone().into()),
-        orbit_transform(-0.7, 0.5, radius),
+        orbit_transform(-0.7, 0.5, radius, Vec3::ZERO),
         bevy::ui::IsDefaultUiCamera,
     ));
     commands.insert_resource(RenderTargetImage(target));
@@ -983,11 +1103,11 @@ fn part_material(materials: &mut Assets<StandardMaterial>) -> Handle<StandardMat
     })
 }
 
-/// Camera transform orbiting the origin at (yaw, pitch, radius), Z-up.
-fn orbit_transform(yaw: f32, pitch: f32, radius: f32) -> Transform {
+/// Camera transform orbiting `target` at (yaw, pitch, radius), Z-up.
+fn orbit_transform(yaw: f32, pitch: f32, radius: f32, target: Vec3) -> Transform {
     let cp = pitch.cos();
-    let pos = Vec3::new(radius * cp * yaw.cos(), radius * cp * yaw.sin(), radius * pitch.sin());
-    Transform::from_translation(pos).looking_at(Vec3::ZERO, Vec3::Z)
+    let off = Vec3::new(radius * cp * yaw.cos(), radius * cp * yaw.sin(), radius * pitch.sin());
+    Transform::from_translation(target + off).looking_at(target, Vec3::Z)
 }
 
 fn build_mesh(s: &stl::StlMesh) -> Mesh {

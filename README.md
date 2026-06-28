@@ -32,6 +32,9 @@ from the cwd, so it runs from anywhere in the tree.
 - `fab render <file.scad> [--png]` — render geometry via Manifold, OPENSCADPATH injected so
   `<BOSL2/...>` and scad-lib includes resolve. File-level for now; project/DAG-aware in
   Phase 6.
+- `fab plan --size WxHxD [--printer NAME]` — fit a part on the bed (from `printers.toml`):
+  orient it, rotate it diagonally, or — last resort — report the fewest cuts + the
+  `slice(cuts=…)` to feed the slicer.
 - `fab publish` — stubbed (Phase 7).
 
 Opening designs in the OpenSCAD GUI by hand needs OPENSCADPATH in your shell — see

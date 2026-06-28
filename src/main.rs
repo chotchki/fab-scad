@@ -7,6 +7,7 @@
 
 mod manifest;
 mod openscad;
+mod printers;
 mod project;
 
 use std::path::{Path, PathBuf};
@@ -37,6 +38,15 @@ enum Commands {
     Focus { project: Option<String> },
     /// Scaffold a new project (minimal manifest + starter scad) and focus it.
     New { name: String },
+    /// Plan how to fit a part on the printer bed: orient/rotate, or (last resort) cut.
+    Plan {
+        /// Part bounding box as WxHxD in mm, e.g. 400x200x150.
+        #[arg(long)]
+        size: String,
+        /// Printer name from printers.toml (default: the one flagged `default`).
+        #[arg(long)]
+        printer: Option<String>,
+    },
     /// Render a .scad to geometry (+ optional PNG thumbnail).
     /// File-level for now; project/DAG-aware in Phase 6.
     Render {
@@ -61,6 +71,7 @@ fn main() -> Result<()> {
         Commands::Doctor => doctor(),
         Commands::Focus { project } => project::focus_cmd(&require_root()?, project),
         Commands::New { name } => project::new_cmd(&require_root()?, &name),
+        Commands::Plan { size, printer } => plan_cmd(&size, printer),
         Commands::Render {
             target,
             png,
@@ -74,6 +85,56 @@ fn main() -> Result<()> {
 fn not_yet(cmd: &str, phase: &str) -> Result<()> {
     println!("`fab {cmd}` is not implemented yet (planned for Phase {phase}).");
     Ok(())
+}
+
+fn plan_cmd(size_str: &str, printer: Option<String>) -> Result<()> {
+    use printers::Outcome;
+    let root = require_root()?;
+    let size = parse_size(size_str)?;
+    let profiles = printers::load(&root.join("printers.toml"))?;
+    let pr = printers::select(&profiles, printer.as_deref())?;
+    let plan = printers::plan(size, pr.bed);
+
+    let f = |x: f64| if x.fract() == 0.0 { format!("{}", x as i64) } else { format!("{x:.1}") };
+    println!("printer {}  bed {} × {} × {} mm", pr.name, f(pr.bed[0]), f(pr.bed[1]), f(pr.bed[2]));
+    println!("part    {} × {} × {} mm", f(size[0]), f(size[1]), f(size[2]));
+    match &plan.outcome {
+        Outcome::FitsAsIs { up } => {
+            println!("→ fits whole ({} up); no cuts", printers::axis_name(*up));
+        }
+        Outcome::FitsRotated { up, degrees } => {
+            println!(
+                "→ fits whole, rotate {degrees:.1}° in XY ({} up); no cuts",
+                printers::axis_name(*up)
+            );
+        }
+        Outcome::NeedsCuts { oriented, cuts, pieces } => {
+            println!(
+                "→ {pieces} pieces; orient [{} × {} × {}] mm on the bed:",
+                f(oriented[0]), f(oriented[1]), f(oriented[2])
+            );
+            for c in cuts {
+                let pos: Vec<String> = c.positions.iter().map(|p| f(*p)).collect();
+                println!(
+                    "   {} cut(s) on {} → slice(cuts=[{}], axis={})",
+                    c.count, c.axis, pos.join(", "), printers::slice_axis(c.axis)
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+fn parse_size(s: &str) -> Result<[f64; 3]> {
+    let parts: Vec<f64> = s
+        .split(['x', 'X', '*'])
+        .map(|p| p.trim().parse::<f64>())
+        .collect::<std::result::Result<_, _>>()
+        .map_err(|e| anyhow::anyhow!("bad --size '{s}': {e} (want WxHxD, e.g. 400x200x150)"))?;
+    match parts[..] {
+        [x, y, z] => Ok([x, y, z]),
+        _ => bail!("--size must be three numbers WxHxD, got '{s}'"),
+    }
 }
 
 fn render_cmd(target: &Path, out: Option<PathBuf>, png: bool, timeout_secs: u64) -> Result<()> {

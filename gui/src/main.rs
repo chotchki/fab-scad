@@ -15,7 +15,10 @@ use bevy::{
     asset::{AssetPlugin, RenderAssetUsages},
     camera::RenderTarget,
     feathers::{
-        controls::{ButtonVariant, FeathersButton, FeathersListRow, FeathersListView},
+        controls::{
+            ButtonVariant, FeathersButton, FeathersListRow, FeathersListView, FeathersNumberInput,
+            NumberFormat, NumberInputValue, UpdateNumberInput,
+        },
         dark_theme::create_dark_theme,
         theme::{ThemeBackgroundColor, ThemedText, UiTheme},
         tokens, FeathersPlugins,
@@ -36,7 +39,7 @@ use bevy::{
     scene::{Scene, SceneList}, // the bsn traits — shadow the prelude's `Scene` asset struct
     tasks::{block_on, futures_lite::future, AsyncComputeTaskPool, Task},
     text::{FontSize, FontSource, TextFont},
-    ui_widgets::Activate,
+    ui_widgets::{Activate, ValueChange},
     window::ExitCondition,
     winit::WinitPlugin,
 };
@@ -213,6 +216,10 @@ struct PanelRoot;
 #[derive(Component, Clone, Default, Reflect)]
 #[reflect(Component)]
 struct RowFor(usize);
+/// The position number-input on a cut row, tagged with the cut index (for value push-back).
+#[derive(Component, Clone, Default, Reflect)]
+#[reflect(Component)]
+struct FieldFor(usize);
 /// Marks a button caption that should render in the bundled icon font.
 #[derive(Component, Clone, Default)]
 struct IconText;
@@ -315,7 +322,7 @@ fn run_windowed(scene: SceneCfg) {
                 sync_overlay_visuals,
                 sync_dim_labels,
                 update_view_label,
-                update_rows,
+                push_fields,
                 sync_selected,
                 apply_icon_font,
                 rebuild_panel,
@@ -941,7 +948,7 @@ fn run_screenshot(scene: SceneCfg, png: PathBuf) {
         .insert_resource(Status("rendering".into()))
         .add_message::<ReSlice>()
         .add_systems(Startup, (setup_offscreen, load_icons))
-        .add_systems(Update, (capture_then_exit, update_rows, sync_selected, apply_icon_font, rebuild_panel, update_status))
+        .add_systems(Update, (capture_then_exit, push_fields, sync_selected, apply_icon_font, rebuild_panel, update_status))
         .run();
 }
 
@@ -1139,7 +1146,7 @@ fn run_scripted(scene: SceneCfg, actions: Vec<Action>) {
                 sync_overlay_visuals,
                 sync_dim_labels,
                 update_view_label,
-                update_rows,
+                push_fields,
                 sync_selected,
                 apply_icon_font,
                 rebuild_panel,
@@ -1404,12 +1411,6 @@ fn bed_size() -> Option<[f64; 3]> {
 
 // ---- Feathers UI: plane-grouped cards -------------------------------------------------
 
-/// Label for a cut row — its position (the active row is highlighted via `Selected`, on/off by
-/// its toggle button).
-fn pos_text(at: f32) -> String {
-    format!("{at:.0} mm")
-}
-
 /// One plane card: a header (plane name + per-plane "+cut") and a list of that plane's cuts.
 fn plane_card(cuts: &Cuts, axis: Axis) -> impl Scene + 'static {
     let rows: Vec<_> = cuts
@@ -1432,6 +1433,14 @@ fn plane_card(cuts: &Cuts, axis: Axis) -> impl Scene + 'static {
                     }
                 }
             };
+            // Type a position → set the cut + select it.
+            let edit = move |ev: On<ValueChange<f32>>, bounds: Res<ModelBounds>, mut cuts: ResMut<Cuts>| {
+                if idx < cuts.list.len() {
+                    let ax = cuts.list[idx].axis;
+                    cuts.list[idx].at = clamp_to_bounds(ev.value, ax, &bounds);
+                    cuts.active = idx;
+                }
+            };
             let eye = if c.enabled { ICON_ON } else { ICON_OFF };
             // On = blue (Primary), off = grey (Normal) — state as colour; eye/eye-off icon too.
             let on_variant = if c.enabled { ButtonVariant::Primary } else { ButtonVariant::Normal };
@@ -1439,7 +1448,7 @@ fn plane_card(cuts: &Cuts, axis: Axis) -> impl Scene + 'static {
                 @FeathersListRow
                 RowFor(idx)
                 Children [
-                    (Text(pos_text(c.at)) ThemedText),
+                    (@FeathersNumberInput { @number_format: NumberFormat::F32 } FieldFor(idx) on(edit)),
                     (
                         @FeathersButton { @variant: {on_variant}, @caption: bsn!{
                             Text(eye) IconText
@@ -1555,22 +1564,14 @@ fn rebuild_panel(
     });
 }
 
-/// Refresh each row's text from its cut, in place — so position/on-off edits show without a rebuild.
-fn update_rows(cuts: Res<Cuts>, rows: Query<(&RowFor, &Children)>, mut texts: Query<&mut Text>) {
-    if !cuts.is_changed() {
-        return;
-    }
-    for (rf, children) in &rows {
-        let Some(c) = cuts.list.get(rf.0) else {
-            continue;
-        };
-        let label = pos_text(c.at);
-        // The position is the row's first direct Text child (button captions are grandchildren).
-        for child in children.iter() {
-            if let Ok(mut t) = texts.get_mut(child) {
-                *t = Text::new(label.clone());
-                break;
-            }
+/// Push each cut's position into its row field, so dragging a plane updates the number you see.
+/// The widget ignores the push while the field is focused, so it never fights typing.
+fn push_fields(cuts: Res<Cuts>, fields: Query<(Entity, &FieldFor)>, mut commands: Commands) {
+    // Every frame (not gated on cuts change) so a field spawned by a panel rebuild also inits;
+    // the widget no-ops if the value is unchanged and ignores the push while focused.
+    for (e, ff) in &fields {
+        if let Some(c) = cuts.list.get(ff.0) {
+            commands.trigger(UpdateNumberInput { entity: e, value: NumberInputValue::F32(c.at) });
         }
     }
 }

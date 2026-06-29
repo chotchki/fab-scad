@@ -102,3 +102,31 @@ module dowel(d = 6, len = 16, ang = 20, anchor = CENTER, spin = 0, orient = UP) 
     teardrop(h = len, d = d, ang = ang, anchor = anchor, spin = spin, orient = orient)
         children();
 }
+
+// ── onion joint (support-free, no separate part) ──────────────────────────────────────────
+// A BOSL2 onion() centred on the cut plane (sphere equator at the cut, cap +Z). Unlike bolt/pin
+// these are NOT both-sides negatives: the slicer applies them PER PIECE — UNION the peg into the
+// lower piece, DIFF the socket from the upper piece — so one half grows a bump and the other a
+// matching socket. Orient +Z along EACH piece's build-up (4.5 / #40) and it prints support-free:
+// the exposed bump (upper hemisphere + cap) only narrows going up, and the socket's ceiling is the
+// cap. `d` is the joint diameter; auto-sized from the cut's cross-section where placed (#41).
+
+// onion_peg — MALE half. UNION into the lower piece: lower hemisphere merges into the piece, the
+// upper hemisphere + cap stand proud as the self-supporting bump.
+module onion_peg(d = 10, ang = 45, anchor = CENTER, spin = 0, orient = UP) {
+    r = d / 2;
+    attachable(anchor, spin, orient, r = r) {
+        onion(r = r, ang = ang);
+        children();
+    }
+}
+
+// onion_socket — FEMALE half: the same onion grown by `slop`. tag("remove") and DIFF from the
+// upper piece; the peg drops in. Cap-up so the cavity ceiling self-supports (opens downward).
+module onion_socket(d = 10, slop = 0.2, ang = 45, anchor = CENTER, spin = 0, orient = UP) {
+    r = d / 2 + slop;
+    attachable(anchor, spin, orient, r = r) {
+        onion(r = r, ang = ang);
+        children();
+    }
+}

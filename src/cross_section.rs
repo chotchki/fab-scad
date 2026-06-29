@@ -80,6 +80,32 @@ fn parse_loops(svg: &str) -> Vec<Vec<[f64; 2]>> {
     loops
 }
 
+/// Auto-size a connector at `point` inside a cross-section: the largest diameter that still keeps
+/// a `wall`-thick margin to the nearest profile edge — the outer outline OR any hole — clamped to
+/// `[min_d, max_d]`. So a connector near a thin wall or a hole shrinks, one in open material grows
+/// to the cap. The GUI feeds this at placement and #41's auto-place fits to the same loops.
+pub fn fit_diameter(loops: &[Loop], point: [f64; 2], wall: f64, min_d: f64, max_d: f64) -> f64 {
+    let nearest = loops
+        .iter()
+        .flat_map(|lp| (0..lp.len()).map(move |i| (lp, i)))
+        .map(|(lp, i)| point_to_segment(point, lp[i], lp[(i + 1) % lp.len()]))
+        .fold(f64::INFINITY, f64::min);
+    (2.0 * (nearest - wall)).clamp(min_d, max_d)
+}
+
+/// Shortest distance from `p` to segment `a`–`b`.
+fn point_to_segment(p: [f64; 2], a: [f64; 2], b: [f64; 2]) -> f64 {
+    let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
+    let len2 = dx * dx + dy * dy;
+    let t = if len2 <= 0.0 {
+        0.0
+    } else {
+        (((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / len2).clamp(0.0, 1.0)
+    };
+    let (cx, cy) = (a[0] + t * dx, a[1] + t * dy);
+    ((p[0] - cx).powi(2) + (p[1] - cy).powi(2)).sqrt()
+}
+
 /// Map a loop's projected (u, v) to connector-pos coords (the cut's two non-axis dims, ascending).
 /// From the `projection_scad` transforms: X → (u,v)=(z,y) so pos=(y,z)=(v,u); Y → (u,v)=(x,z)=pos;
 /// Z → (u,v)=(x,y)=pos. Only X swaps.
@@ -133,6 +159,21 @@ mod tests {
     fn yz_axes_pass_uv_through() {
         assert_eq!(map_to_pos(vec![[3.0, 7.0]], 1), vec![[3.0, 7.0]]);
         assert_eq!(map_to_pos(vec![[3.0, 7.0]], 2), vec![[3.0, 7.0]]);
+    }
+
+    #[test]
+    fn fit_diameter_sizes_to_nearest_edge() {
+        // a 40x40 square outline centred at origin
+        let sq = vec![vec![[-20.0, -20.0], [20.0, -20.0], [20.0, 20.0], [-20.0, 20.0]]];
+        // mid-material: 5mm to the right edge, wall 1 -> d = 2*(5-1) = 8
+        assert!((fit_diameter(&sq, [15.0, 0.0], 1.0, 4.0, 16.0) - 8.0).abs() < 1e-9);
+        // open centre: 20mm to any edge -> 2*(20-1)=38, clamped to max 16
+        assert_eq!(fit_diameter(&sq, [0.0, 0.0], 1.0, 4.0, 16.0), 16.0);
+        // hard against a wall -> clamped to min
+        assert_eq!(fit_diameter(&sq, [19.5, 0.0], 1.0, 4.0, 16.0), 4.0);
+        // a hole pulls the size down too
+        let with_hole = vec![sq[0].clone(), vec![[4.0, -2.0], [8.0, -2.0], [8.0, 2.0], [4.0, 2.0]]];
+        assert!(fit_diameter(&with_hole, [0.0, 0.0], 1.0, 4.0, 16.0) < 16.0);
     }
 
     #[test]

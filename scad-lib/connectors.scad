@@ -1,22 +1,20 @@
-// connectors.scad — joints across a slicer cut plane, BOSL2 attachment-style. The joint is
-// built around the cut plane at the origin (CENTER anchor = the cut plane), bolt/dowel axis
-// +Z; reorient with the standard `orient`/`spin`/`anchor`.
+// connectors.scad — joints across a slicer cut plane, BOSL2 attachment-style. The joint is built
+// around the cut plane at the origin (CENTER anchor = the cut plane), bolt axis +Z; reorient with
+// the standard `orient`/`spin`/`anchor`.
 //
-// All-NEGATIVE: tag them "remove" and diff them out of the model BEFORE slicing — each piece
-// keeps its own half (the slab clip splits the holes). Use chotchki's tagged idiom, and wrap
-// in tag_scope() so the removes don't leak when this nests inside another diff:
+// Two joiners: the heat-set-insert + bolt (`bolt_joint`, removable), and the support-free `onion`
+// (glue-free, no separate part — applied per-piece by the slicer). The onion REPLACED the old
+// pin/dowel (a glued removable peg); bolt_joint stays. bolt_joint is all-NEGATIVE — tag it "remove"
+// and diff it out before slicing so each piece keeps its half; wrap removes in tag_scope() so they
+// don't leak when nested in another diff:
 //
 //   slice([cut], axis=UP)
 //     tag_scope() diff()
-//       my_model() {                          // an attachable model
-//         left(15)  tag("remove") bolt_joint("M3", through = upper_thickness);
-//         right(15) tag("remove") pin_joint(d = 6);
-//       };
-//   // ...and print dowel(d = 6) on its own for each pin_joint, then glue.
+//       my_model()                            // an attachable model
+//         left(15) tag("remove") bolt_joint("M3", through = upper_thickness);
 //
-// The only positive part is dowel() (the separately printed pin). Seeded from chotchki's
-// projects (see the fastener-specs harvest): M3 default heat-set (5.0 × 6mm), garage_door
-// boss params, $slop 0.1, teardrop ang 20, peg→socket +0.2.
+// Seeded from chotchki's projects (see the fastener-specs harvest): M3 default heat-set (5.0 × 6mm),
+// garage_door boss params, $slop 0.1, onion peg→socket +0.2.
 include <BOSL2/std.scad>
 include <BOSL2/screws.scad>
 
@@ -66,8 +64,8 @@ function needs_teardrop(axis, up = UP) =
 
 // auto-place a connector across a cut face: a cols×rows grid inset from the edges, centered
 // on the cut plane. `face` = [w, h], the cut-plane footprint. Shared across connector types —
-// children() is any connector (bolt_joint, pin_joint, …). Manual override: skip this and
-// position the connector yourself.
+// children() is any connector (bolt_joint, …). Manual override: skip this and position the
+// connector yourself.
 //
 //   cuboid([80,50,30]) connector_grid(face=[80,50], cols=3) tag("remove") bolt_joint("M3");
 module connector_grid(face, cols = 2, rows = 1, inset = 15) {
@@ -80,31 +78,8 @@ module connector_grid(face, cols = 2, rows = 1, inset = 15) {
     }
 }
 
-// pin_joint — a teardrop socket each side of the cut for a separately printed, glued dowel().
-// Attachable on the cut plane (CENTER). Teardrop (ang 20) prints support-free when the joint
-// is horizontal; harmless when vertical.
-module pin_joint(d = 6, depth = 8, slop = 0.2, ang = 20,
-                 anchor = CENTER, spin = 0, orient = UP) {
-    sd = d + 2 * slop;
-    size = [sd * 1.4, sd, 2 * depth];
-    attachable(anchor, spin, orient, size = size) {
-        union() {
-            teardrop(h = depth, d = sd, ang = ang, anchor = BOTTOM, orient = UP);
-            teardrop(h = depth, d = sd, ang = ang, anchor = BOTTOM, orient = DOWN);
-        }
-        children();
-    }
-}
-
-// dowel — the separately printed pin for pin_joint (glue in). Nominal `d`; the socket is
-// d + 2*slop, so it drops in. Length spans both sockets. Attachable (delegates to teardrop).
-module dowel(d = 6, len = 16, ang = 20, anchor = CENTER, spin = 0, orient = UP) {
-    teardrop(h = len, d = d, ang = ang, anchor = anchor, spin = spin, orient = orient)
-        children();
-}
-
 // ── onion joint (support-free, no separate part) ──────────────────────────────────────────
-// A BOSL2 onion() centred on the cut plane (sphere equator at the cut, cap +Z). Unlike bolt/pin
+// A BOSL2 onion() centred on the cut plane (sphere equator at the cut, cap +Z). Unlike the bolt
 // these are NOT both-sides negatives: the slicer applies them PER PIECE — UNION the peg into the
 // lower piece, DIFF the socket from the upper piece — so one half grows a bump and the other a
 // matching socket. Orient +Z along EACH piece's build-up (4.5 / #40) and it prints support-free:

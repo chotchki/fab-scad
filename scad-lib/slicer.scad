@@ -68,7 +68,7 @@ module slice_residual(cuts, axis = RIGHT, size = 500) {
 // optional `(ox,oy,oz)` cap axis + `ang` come from the per-piece orientation derivation — when
 // absent the cap defaults to the cut axis + ang 45, today's behaviour). Applied PER PIECE — the
 // piece BELOW a connector's cut UNIONs the peg (it stands proud past the cut), the piece ABOVE
-// DIFFs the socket. Bolt/pin (symmetric negatives) still go in children(); only the asymmetric
+// DIFFs the socket. The bolt (a symmetric negative) still goes in children(); only the asymmetric
 // onion needs this per-piece path. Empty = unchanged.
 module slice(cuts, axis = RIGHT, size = 500, spread = 0, only = undef, connectors = []) {
     req_children($children);

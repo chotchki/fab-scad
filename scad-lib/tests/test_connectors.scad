@@ -11,8 +11,8 @@ test_insert_spec();
 
 // Each module instantiates and produces geometry without error (headless render check).
 bolt_joint("M3", through = 12);
-right(25) pin_joint(d = 6, depth = 8);
-right(50) dowel(d = 6, len = 16);
+right(25) onion_peg(d = 10);
+right(50) onion_socket(d = 10);
 
 // Tagged + attachable path (chotchki's idiom): attach a joint to a face and diff it out.
 back(40) tag_scope() diff()

@@ -320,15 +320,14 @@ fn connector_line(s: &Slicing, c: &Connector) -> Result<String> {
 
     let conn = match c.kind.as_str() {
         // An onion that can't print support-free for both pieces downgrades to a bolt here
-        // (its halves orient independently). chotchki's pick: bolt over pin.
+        // (its halves orient independently) — chotchki's pick for the infeasible case.
         "bolt" | "onion" => format!(
             "bolt_joint(\"{}\", through = {}, orient = {})",
             c.screw.as_deref().unwrap_or("M3"),
             n(c.through.unwrap_or(12.0)),
             AXIS[ai]
         ),
-        "pin" => format!("pin_joint(orient = {})", AXIS[ai]),
-        other => bail!("connector type must be 'bolt', 'pin', or 'onion', got '{other}'"),
+        other => bail!("connector type must be 'bolt' or 'onion', got '{other}'"),
     };
     Ok(format!(
         "    translate([{}, {}, {}]) tag(\"remove\") {conn};\n",
@@ -554,7 +553,18 @@ mod tests {
         let s = spec(
             "[project]\nname=\"t\"\n[slicing]\n\
              [[slicing.cut]]\naxis=\"x\"\nat=0\n\
-             [[slicing.connector]]\ncut=5\ntype=\"pin\"\n",
+             [[slicing.connector]]\ncut=5\ntype=\"bolt\"\n",
+        );
+        assert!(driver_scad(&s, "t.stl", 0.0).is_err());
+    }
+
+    #[test]
+    fn retired_pin_connector_type_errors() {
+        // pin/dowel was retired (the onion replaced the glued peg); bolt + onion remain.
+        let s = spec(
+            "[project]\nname=\"t\"\n[slicing]\n\
+             [[slicing.cut]]\naxis=\"z\"\nat=0\n\
+             [[slicing.connector]]\ncut=0\ntype=\"pin\"\n",
         );
         assert!(driver_scad(&s, "t.stl", 0.0).is_err());
     }

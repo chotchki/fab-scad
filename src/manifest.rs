@@ -77,7 +77,7 @@ pub struct Cut {
 pub struct Connector {
     pub cut: usize,
     #[serde(rename = "type")]
-    pub kind: String, // "bolt" | "pin" | "onion"
+    pub kind: String, // "bolt" (heat-set + bolt) | "onion" (support-free; replaced pin/dowel)
     pub screw: Option<String>,
     #[serde(default)]
     pub pos: [Num; 2],

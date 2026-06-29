@@ -19,7 +19,7 @@ Driven by `claude-plan-bridge` (FORMATv2). Hand-authored; run
     - [ ] 5.1.3.2 - BOSL2 onion connector (support-free), replacing pin/dowel
     - [ ] 5.1.3.3 - Per-piece print-orientation UI → derive connector orientation
     - [ ] 5.1.3.4 - Cross-section-driven auto-size + auto-place connectors
-    - [ ] 5.1.3.5 - Per-cut 2D cross-section connector editor: button on a cut → see its profile → pick connectors on it
+    - [x] 5.1.3.5 - Per-cut 2D cross-section connector editor: button on a cut → see its profile → pick connectors on it
 - [x] 5.2 - Emit the slicing spec that scad-lib/fab consume; round-trip it through `fab render`
 - [ ] 5.3 - Grow into a friendly workflow front-end (cut the verb-memorization tax)
 
@@ -52,4 +52,3 @@ Driven by `claude-plan-bridge` (FORMATv2). Hand-authored; run
 ## Backlog (not yet phased)
 
 - **fab owns $fn: inject draft/final quality + strip `$fn = $preview ? …` from all scad model files** — added 2026-06-28.
-- **Eventual: auto-pick per-piece orientation for least support (discrete heuristic first)** — added 2026-06-28.

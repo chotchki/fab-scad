@@ -218,6 +218,12 @@ struct PrintJob(Option<Task<Result<Vec<fab::PiecePrint>, String>>>);
 #[derive(Resource, Default)]
 struct PrintPieces(Option<Vec<fab::PiecePrint>>);
 
+/// The orbit camera (yaw, pitch, radius, target) as it was in NORMAL view, saved while there so a
+/// mode that hijacks the camera (the 2D editor's face-on, the print preview's bed-frame) can hand
+/// it back when you return. Without this, leaving a mode strands you at the mode's camera.
+#[derive(Resource, Default)]
+struct PrevCam(Option<(f32, f32, f32, Vec3)>);
+
 /// Per-placed-connector onion feasibility (index-aligned with `Conns::list`): `true` = prints
 /// support-free, `false` = downgrades to a bolt under the current orientations. Drives the marker
 /// colour + the downgrade count. Recomputed when cuts / connectors / orientations change.
@@ -413,6 +419,7 @@ fn run_windowed(scene: SceneCfg) {
         .init_resource::<PrintView>()
         .init_resource::<PrintJob>()
         .init_resource::<PrintPieces>()
+        .init_resource::<PrevCam>()
         .init_resource::<Feas>()
         .init_resource::<ModelBounds>()
         .init_resource::<DraggingCut>()
@@ -450,6 +457,9 @@ fn run_windowed(scene: SceneCfg) {
                 revert_on_edit,
                 auto_scale,
                 (
+                    enforce_exclusive_modes,
+                    apply_view_visibility,
+                    manage_view_camera,
                     enter_exit_print,
                     // poll seeds the auto-orient, then sync_orientation lays out + flags downgrades.
                     (poll_print_job, sync_orientation).chain(),
@@ -768,16 +778,20 @@ fn sync_conn_markers(
     }
 }
 
-/// React to opening/closing a cut's connector editor: hide the model + compute the cut's
-/// cross-section (blocking, but fast — projects the already-rendered preview STL, no re-render),
-/// or restore the model when closed. (TODO: move off-thread + recompute when the cut moves.)
+/// React to opening/closing a cut's connector editor: compute the cut's cross-section (blocking,
+/// but fast — projects the already-rendered preview STL, no re-render) and face the camera onto the
+/// cut. Editing is always on the collapsed whole model, so opening drops any explode. The model's
+/// visibility + the camera restore on close are owned by `apply_view_visibility` / `manage_view_camera`.
 #[allow(clippy::too_many_arguments)]
 fn edit_mode(
     edit: Res<EditCut>,
+    print: Res<PrintView>,
     cuts: Res<Cuts>,
     cfg: Res<SceneCfg>,
+    whole: Res<WholeMesh>,
     mut xsection: ResMut<XSection>,
-    mut models: Query<&mut Visibility, With<Model>>,
+    mut dspread: ResMut<DisplaySpread>,
+    mut models: Query<&mut Mesh3d, With<Model>>,
     mut cam: Query<(&mut Transform, &mut Orbit)>,
     bounds: Res<ModelBounds>,
     mut status: ResMut<Status>,
@@ -786,14 +800,18 @@ fn edit_mode(
         return;
     }
     let Some(i) = edit.0 else {
-        for mut v in &mut models {
-            *v = Visibility::Inherited;
-        }
         xsection.0 = None;
+        if !print.0 {
+            status.0 = "ready".into(); // closed the editor (unless print took over)
+        }
         return;
     };
-    for mut v in &mut models {
-        *v = Visibility::Hidden;
+    // Edit on the collapsed whole model so the profile + the cut plane overlay line up.
+    dspread.0 = 0.0;
+    if let Some(h) = whole.0.clone() {
+        for mut m in &mut models {
+            m.0 = h.clone();
+        }
     }
     let (Some(c), Some(src)) = (cuts.list.get(i), cfg.source.clone()) else {
         xsection.0 = None;
@@ -1287,6 +1305,7 @@ fn update_status(status: Res<Status>, mut q: Query<&mut Text, With<StatusLabel>>
 #[allow(clippy::too_many_arguments)]
 fn enter_exit_print(
     print: Res<PrintView>,
+    edit: Res<EditCut>,
     mut was_on: Local<bool>,
     cfg: Res<SceneCfg>,
     cuts: Res<Cuts>,
@@ -1294,8 +1313,6 @@ fn enter_exit_print(
     mut cache: ResMut<PrintPieces>,
     mut status: ResMut<Status>,
     pieces: Query<Entity, With<PrintPiece>>,
-    mut models: Query<&mut Visibility, (With<Model>, Without<CutPlaneViz>)>,
-    mut planes: Query<&mut Visibility, (With<CutPlaneViz>, Without<Model>)>,
     mut commands: Commands,
 ) {
     if print.0 == *was_on {
@@ -1303,12 +1320,6 @@ fn enter_exit_print(
     }
     *was_on = print.0;
     if print.0 {
-        for mut v in &mut models {
-            *v = Visibility::Hidden;
-        }
-        for mut v in &mut planes {
-            *v = Visibility::Hidden;
-        }
         cache.0 = None; // cuts may have moved — wait for a fresh render before laying out
         if job.0.is_none() {
             kick_print_job(&mut job, &mut status, &cfg, cuts.enabled_cuts());
@@ -1318,14 +1329,76 @@ fn enter_exit_print(
             commands.entity(e).despawn();
         }
         cache.0 = None;
-        for mut v in &mut models {
-            *v = Visibility::Inherited;
+        if edit.0.is_none() {
+            status.0 = "ready".into(); // don't clobber the editor when print closed because it opened
         }
-        for mut v in &mut planes {
-            *v = Visibility::Inherited;
-        }
-        status.0 = "ready".into();
     }
+    // The model + cut-plane visibility (hidden in the preview, shown otherwise) is owned by
+    // apply_view_visibility; the camera hand-back is owned by manage_view_camera.
+}
+
+/// Model + cut-plane visibility, derived authoritatively from the active view mode every frame, so
+/// a mode transition can never leave the wrong things on screen: the model shows only in normal
+/// view (not the 2D editor, not the print preview); the cut planes hide in the print preview.
+fn apply_view_visibility(
+    edit: Res<EditCut>,
+    print: Res<PrintView>,
+    mut models: Query<&mut Visibility, (With<Model>, Without<CutPlaneViz>)>,
+    mut planes: Query<&mut Visibility, (With<CutPlaneViz>, Without<Model>)>,
+) {
+    let model_vis =
+        if edit.0.is_none() && !print.0 { Visibility::Inherited } else { Visibility::Hidden };
+    for mut v in &mut models {
+        if *v != model_vis {
+            *v = model_vis;
+        }
+    }
+    let plane_vis = if print.0 { Visibility::Hidden } else { Visibility::Inherited };
+    for mut v in &mut planes {
+        if *v != plane_vis {
+            *v = plane_vis;
+        }
+    }
+}
+
+/// The 2D editor and the print preview are mutually-exclusive view modes — if both end up active,
+/// keep whichever was just toggled. Reconciles whether the toggle came from a button or the harness.
+fn enforce_exclusive_modes(mut edit: ResMut<EditCut>, mut print: ResMut<PrintView>) {
+    if !(edit.0.is_some() && print.0) {
+        return;
+    }
+    if edit.is_changed() && !print.is_changed() {
+        print.0 = false; // the editor just opened — leave the print preview
+    } else {
+        edit.0 = None; // print just opened (or both at once) — close the editor
+    }
+}
+
+/// Save the orbit camera while in normal view and hand it back when a hijacking mode (2D editor,
+/// print preview) closes — so leaving a mode restores the pan/orbit/zoom you had, not the mode's
+/// view. Writes the transform directly on restore (like `edit_mode` does), so it doesn't depend on
+/// `orbit` running that frame.
+fn manage_view_camera(
+    edit: Res<EditCut>,
+    print: Res<PrintView>,
+    mut prev: ResMut<PrevCam>,
+    mut cams: Query<(&mut Transform, &mut Orbit)>,
+    mut was_hijack: Local<bool>,
+) {
+    let hijack = edit.0.is_some() || print.0;
+    let Ok((mut t, mut o)) = cams.single_mut() else {
+        *was_hijack = hijack;
+        return;
+    };
+    if !hijack && *was_hijack {
+        if let Some((yaw, pitch, radius, target)) = prev.0 {
+            (o.yaw, o.pitch, o.radius, o.target) = (yaw, pitch, radius, target);
+            *t = orbit_transform(yaw, pitch, radius, target);
+        }
+    } else if !hijack {
+        prev.0 = Some((o.yaw, o.pitch, o.radius, o.target)); // steady normal view — remember it
+    }
+    *was_hijack = hijack;
 }
 
 /// Spawn the per-piece render + auto-orient on the compute pool (the OpenSCAD work is off-thread,
@@ -1792,6 +1865,7 @@ fn run_scripted(scene: SceneCfg, actions: Vec<Action>) {
         .init_resource::<PrintView>()
         .init_resource::<PrintJob>()
         .init_resource::<PrintPieces>()
+        .init_resource::<PrevCam>()
         .init_resource::<Feas>()
         .init_resource::<ModelBounds>()
         .init_resource::<WholeMesh>()
@@ -1820,6 +1894,9 @@ fn run_scripted(scene: SceneCfg, actions: Vec<Action>) {
                 mark_dirty,
                 revert_on_edit,
                 (
+                    enforce_exclusive_modes,
+                    apply_view_visibility,
+                    manage_view_camera,
                     enter_exit_print,
                     // poll seeds the auto-orient, then sync_orientation lays out + flags downgrades.
                     (poll_print_job, sync_orientation).chain(),
@@ -1957,7 +2034,7 @@ fn run_script(
         }
         Action::Edit(i) => {
             if runner.timer == 1 {
-                edit_cut.0 = Some(i);
+                edit_cut.0 = if edit_cut.0 == Some(i) { None } else { Some(i) };
             }
             runner.timer >= 10 // give the cross-section render + profile build time
         }

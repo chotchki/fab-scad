@@ -153,13 +153,14 @@ impl Cuts {
     }
 }
 
-/// A placed connector: which cut (stack index) it sits on, and its position in that cut plane's
-/// two non-axis dims. Bolt-only for now; the kind/orientation/params grow per the connector
-/// roadmap (#36) — see the connector-design memory.
+/// A placed connector: which cut (stack index) it sits on, its position in that cut plane's two
+/// non-axis dims, and its diameter (auto-sized from the cross-section at placement — the onion's
+/// widest footprint, at the cut). Kind/orientation grow per the connector roadmap (#36).
 #[derive(Clone, Copy)]
 struct PlacedConn {
     cut: usize,
     pos: [f32; 2],
+    size: f32,
 }
 
 /// The placed connectors (manual face-pick). Like the cut stack, a pure input to the slice.
@@ -550,9 +551,9 @@ fn on_click(
     }
 }
 
-/// Place a connector on `cut` at `pos`, or — if the click lands on one already there — remove it.
-/// Click-to-toggle: clicking a placed connector a second time deletes it.
-fn toggle_connector(conns: &mut Conns, cut: usize, pos: [f32; 2]) {
+/// Place a connector on `cut` at `pos` (diameter `size`), or — if the click lands on one already
+/// there — remove it. Click-to-toggle: clicking a placed connector a second time deletes it.
+fn toggle_connector(conns: &mut Conns, cut: usize, pos: [f32; 2], size: f32) {
     const HIT: f32 = 5.0; // mm; a bit larger than the 3mm marker, so it's a forgiving target
     if let Some(j) = conns
         .list
@@ -561,8 +562,24 @@ fn toggle_connector(conns: &mut Conns, cut: usize, pos: [f32; 2]) {
     {
         conns.list.remove(j);
     } else {
-        conns.list.push(PlacedConn { cut, pos });
+        conns.list.push(PlacedConn { cut, pos, size });
     }
+}
+
+/// Auto-size a connector at `pos` from the open cut's cross-section: the largest onion that keeps a
+/// wall-margin to the nearest edge/hole (`fit_diameter`), clamped to a sane connector range. Falls
+/// back to a default when there's no section (e.g. the headless `conn` verb without an open editor).
+fn auto_size(xsection: &XSection, pos: [f32; 2]) -> f32 {
+    const DEFAULT: f32 = 10.0;
+    let Some(loops) = &xsection.0 else {
+        return DEFAULT;
+    };
+    let loops: Vec<Vec<[f64; 2]>> = loops
+        .iter()
+        .map(|l| l.iter().map(|&[a, b]| [a as f64, b as f64]).collect())
+        .collect();
+    fab_scad::cross_section::fit_diameter(&loops, [pos[0] as f64, pos[1] as f64], 1.5, 6.0, 20.0)
+        as f32
 }
 
 /// In the 2D connector editor: a click on the (face-on) cut plane drops a connector on the cut
@@ -572,6 +589,7 @@ fn place_on_profile_click(
     editing: Res<EditCut>,
     planes: Query<&CutPlaneViz>,
     cuts: Res<Cuts>,
+    xsection: Res<XSection>,
     mut conns: ResMut<Conns>,
 ) {
     let Some(i) = editing.0 else {
@@ -584,7 +602,8 @@ fn place_on_profile_click(
         return;
     };
     let others: Vec<usize> = (0..3).filter(|&a| a != c.axis.index()).collect();
-    toggle_connector(&mut conns, i, [comp(hit, others[0]), comp(hit, others[1])]);
+    let pos = [comp(hit, others[0]), comp(hit, others[1])];
+    toggle_connector(&mut conns, i, pos, auto_size(&xsection, pos));
 }
 
 /// The Explode/Collapse button: collapse to the uncut model, or explode the last sliced result —
@@ -748,22 +767,36 @@ fn edit_mode(
     }
 }
 
-/// Draw the open cut's profile as a line-loop outline (immediate-mode gizmos, every frame).
-fn draw_profile(xsection: Res<XSection>, edit: Res<EditCut>, cuts: Res<Cuts>, mut gizmos: Gizmos) {
+/// Draw the open cut's profile as a line-loop outline, plus — at each placed connector — a circle
+/// of its auto-sized diameter: the exact onion footprint that will land at the cut (its widest).
+fn draw_profile(
+    xsection: Res<XSection>,
+    edit: Res<EditCut>,
+    cuts: Res<Cuts>,
+    conns: Res<Conns>,
+    mut gizmos: Gizmos,
+) {
     let (Some(loops), Some(i)) = (&xsection.0, edit.0) else {
         return;
     };
     let Some(c) = cuts.list.get(i) else {
         return;
     };
-    let color = Color::srgb(0.35, 0.8, 1.0);
+    let outline = Color::srgb(0.35, 0.8, 1.0);
     for lp in loops {
         let n = lp.len();
         for j in 0..n {
             let a = profile_point(c.axis, c.at, lp[j]);
             let b = profile_point(c.axis, c.at, lp[(j + 1) % n]);
-            gizmos.line(a, b, color);
+            gizmos.line(a, b, outline);
         }
+    }
+    // Onion footprints — a circle of `size` on the cut plane at each connector on this cut.
+    let onion = Color::srgb(1.0, 0.6, 0.2);
+    let rot = Quat::from_rotation_arc(Vec3::Z, c.axis.unit());
+    for pc in conns.list.iter().filter(|pc| pc.cut == i) {
+        let center = profile_point(c.axis, c.at, pc.pos);
+        gizmos.circle(Isometry3d::new(center, rot), pc.size / 2.0, onion);
     }
 }
 
@@ -1465,6 +1498,7 @@ fn run_script(
     mut cuts: ResMut<Cuts>,
     mut conns: ResMut<Conns>,
     mut edit_cut: ResMut<EditCut>,
+    xsection: Res<XSection>,
     mut reslice_w: MessageWriter<ReSlice>,
     mut commands: Commands,
     mut exit: MessageWriter<AppExit>,
@@ -1545,7 +1579,7 @@ fn run_script(
         Action::Wait(n) => runner.timer >= n,
         Action::Conn(i, a, b) => {
             if runner.timer == 1 {
-                toggle_connector(&mut conns, i, [a, b]);
+                toggle_connector(&mut conns, i, [a, b], auto_size(&xsection, [a, b]));
             }
             runner.timer >= 2
         }
@@ -1932,14 +1966,14 @@ mod tests {
     #[test]
     fn toggle_connector_places_then_removes_on_a_second_nearby_click() {
         let mut conns = Conns::default();
-        toggle_connector(&mut conns, 0, [20.0, -10.0]); // place
+        toggle_connector(&mut conns, 0, [20.0, -10.0], 10.0); // place
         assert_eq!(conns.list.len(), 1);
-        toggle_connector(&mut conns, 0, [22.0, -8.0]); // within 5mm → removes the same one
+        toggle_connector(&mut conns, 0, [22.0, -8.0], 10.0); // within 5mm → removes the same one
         assert!(conns.list.is_empty());
-        toggle_connector(&mut conns, 0, [20.0, -10.0]); // place again
-        toggle_connector(&mut conns, 0, [0.0, 0.0]); // far away → a second connector, not a remove
+        toggle_connector(&mut conns, 0, [20.0, -10.0], 10.0); // place again
+        toggle_connector(&mut conns, 0, [0.0, 0.0], 10.0); // far away → a second connector
         assert_eq!(conns.list.len(), 2);
-        toggle_connector(&mut conns, 1, [20.0, -10.0]); // same pos, different cut → places
+        toggle_connector(&mut conns, 1, [20.0, -10.0], 10.0); // same pos, different cut → places
         assert_eq!(conns.list.len(), 3);
     }
 

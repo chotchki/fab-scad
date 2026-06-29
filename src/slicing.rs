@@ -8,10 +8,94 @@ use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
 
+use crate::geom::{self, V3};
 use crate::manifest::{Connector, Slicing};
 use crate::openscad::Openscad;
 
 const AXIS: [&str; 3] = ["RIGHT", "BACK", "UP"];
+
+// --- onion orientation gate (#40) -----------------------------------------------------------
+// Tunable; the geometric ideal is 45°, refined by a printed coupon (Phase A). See the
+// connector-orientation design memory for the derivation.
+const SUPPORT_ANGLE: f64 = 45.0; // overhang threshold, degrees from vertical
+const CAP_ANG_MIN: f64 = 20.0; // pointiest onion cap we'll print (BOSL2 ang is from vertical)
+const CAP_SAFETY: f64 = 0.0; // extra socket margin; 0 keeps the aligned case at today's ang=45
+
+/// The shared onion cap axis + cap angle for one joint, or Infeasible (→ downgrade to a bolt).
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum OnionAxis {
+    Feasible { cap: V3, ang: f64 },
+    Infeasible,
+}
+
+/// Derive the ONE shared onion cap axis + angle from the cut axis `a` (signed +toward the upper
+/// piece) and the two bordering pieces' build-ups `u_lo` (peg piece, below) and `u_up` (socket
+/// piece, above). The onion is a solid of revolution, so only the cap AXIS matters:
+/// - PEG (convex bump, lower piece): support-free iff the lower piece builds within SUPPORT_ANGLE
+///   of +a (its exposed sub-equatorial sliver is the limiter; the cap axis can't help it).
+/// - SOCKET (cavity, upper piece): the cap is the void's ceiling — fine if the upper piece builds
+///   AWAY from the cut (a bowl, no ceiling), else the cap must clear the upper piece's tilt.
+///
+/// Cap axis is chosen on the arc [a → u_lo] nearest u_up (bias toward the tighter socket half).
+fn onion_axis(a: V3, u_lo: V3, u_up: V3) -> OnionAxis {
+    if geom::angle_deg(a, u_lo) > SUPPORT_ANGLE {
+        return OnionAxis::Infeasible; // no cap axis can save the peg
+    }
+    let cands = [a, geom::normalize(geom::add(a, u_lo)), geom::normalize(u_lo)];
+    let cap = cands
+        .into_iter()
+        .min_by(|x, y| geom::angle_deg(*x, u_up).total_cmp(&geom::angle_deg(*y, u_up)))
+        .unwrap();
+    let bowl_up = geom::dot(u_up, a) < 0.0; // socket opens away from the cut → no ceiling
+    let tilt = geom::angle_deg(cap, u_up);
+    if !bowl_up && tilt > SUPPORT_ANGLE - CAP_ANG_MIN {
+        return OnionAxis::Infeasible; // cap can't be steepened enough to clear the socket tilt
+    }
+    let ang = if bowl_up {
+        SUPPORT_ANGLE
+    } else {
+        (SUPPORT_ANGLE - tilt - CAP_SAFETY).clamp(CAP_ANG_MIN, SUPPORT_ANGLE)
+    };
+    OnionAxis::Feasible { cap, ang }
+}
+
+/// +unit vector along axis 0/1/2 (the cut axis, pointing toward the upper piece).
+fn unit_v(axis: usize) -> V3 {
+    [(axis == 0) as i32 as f64, (axis == 1) as i32 as f64, (axis == 2) as i32 as f64]
+}
+
+/// Slab index of `coord` among `sorted_cuts` (cuts strictly below it). For a cut's own position
+/// this is the LOWER piece's index on that axis; the upper piece is +1.
+fn slab_index(sorted_cuts: &[f64], coord: f64) -> usize {
+    sorted_cuts.iter().filter(|&&x| x < coord - 1e-6).count()
+}
+
+/// A piece's build-up: a manual override from the spec, else +Z (auto-orient fills this in #42/D).
+fn piece_up(s: &Slicing, mi: [usize; 3]) -> V3 {
+    s.orient
+        .iter()
+        .find(|p| p.piece == mi)
+        .map(|p| geom::normalize([p.up[0].f(), p.up[1].f(), p.up[2].f()]))
+        .unwrap_or([0.0, 0.0, 1.0])
+}
+
+/// Resolve one onion connector to its cap axis/angle (or Infeasible) from its two bordering
+/// pieces' orientations. `by_axis` holds the sorted enabled cuts per axis (for slab lookup).
+fn onion_resolution(s: &Slicing, by_axis: &[Vec<f64>; 3], c: &Connector) -> Result<OnionAxis> {
+    let cut = s.cut.get(c.cut).with_context(|| {
+        format!("connector references cut {}, but there are {} cut(s)", c.cut, s.cut.len())
+    })?;
+    let axis = cut.axis_index()?;
+    let others: Vec<usize> = (0..3).filter(|&x| x != axis).collect();
+    let k = slab_index(&by_axis[axis], cut.at()); // lower piece's index on the cut axis
+    let mut lo = [0usize; 3];
+    lo[axis] = k;
+    lo[others[0]] = slab_index(&by_axis[others[0]], c.pos[0].f());
+    lo[others[1]] = slab_index(&by_axis[others[1]], c.pos[1].f());
+    let mut up = lo;
+    up[axis] = k + 1;
+    Ok(onion_axis(unit_v(axis), piece_up(s, lo), piece_up(s, up)))
+}
 
 /// Freeze `source` to a mesh, generate the slicer driver from `spec`, render the pieces.
 /// Returns the sliced STL path. The shared slice flow — `fab slice` and the GUI both call it.
@@ -75,7 +159,7 @@ pub fn driver_scad(s: &Slicing, source: &str, spread: f64) -> Result<String> {
         if !cuts.is_empty() {
             let list = cuts.iter().map(|&x| n(x)).collect::<Vec<_>>().join(", ");
             // Onion joints ride slice()'s per-piece `connectors`; bolt/pin stay in the diff below.
-            let onions = onion_param(s, ax)?;
+            let onions = onion_param(s, ax, &by_axis)?;
             slices += &format!(
                 "slice([{list}], axis = {}, spread = {}, connectors = {onions})\n",
                 AXIS[ax],
@@ -93,8 +177,12 @@ pub fn driver_scad(s: &Slicing, source: &str, spread: f64) -> Result<String> {
     let mut body = String::from("tag_scope() diff() {\n");
     body += &format!("    force_tag() import(\"{source}\");\n");
     for c in &s.connector {
-        if c.kind != "onion" {
-            body += &connector_line(s, c)?; // bolt/pin: symmetric pre-slice negatives
+        // bolt/pin go here as-is; a feasible onion rides slice()'s connectors param (skip it here);
+        // an INFEASIBLE onion downgrades to a bolt in the diff (connector_line handles "onion").
+        let feasible_onion = c.kind == "onion"
+            && matches!(onion_resolution(s, &by_axis, c)?, OnionAxis::Feasible { .. });
+        if !feasible_onion {
+            body += &connector_line(s, c)?;
         }
     }
     body += "}\n";
@@ -107,12 +195,12 @@ pub fn driver_scad(s: &Slicing, source: &str, spread: f64) -> Result<String> {
     ))
 }
 
-/// The onion connectors on `axis` as a SCAD list `[[cut_pos, a, b, d, ox, oy, oz, ang], ...]` for
-/// `slice()`'s `connectors` param — applied per piece (peg into the lower, socket out of the
-/// upper). `(ox,oy,oz)` is the onion's cap axis + `ang` its cap angle, DERIVED per joint from the
-/// two bordering pieces' print orientations. Phase B: cap axis = the cut axis, ang = 45 (today's
-/// behaviour); Phase C swaps in the orientation gate. Errors on a bad cut index.
-fn onion_param(s: &Slicing, axis: usize) -> Result<String> {
+/// The FEASIBLE onion connectors on `axis` as a SCAD list `[[cut_pos, a, b, d, ox, oy, oz, ang],
+/// ...]` for `slice()`'s `connectors` param — applied per piece (peg into the lower, socket out of
+/// the upper). `(ox,oy,oz)` is the cap axis + `ang` its cap angle, DERIVED per joint from the two
+/// bordering pieces' print orientations (`onion_axis`). Infeasible onions are omitted here and
+/// downgraded to a bolt in the diff body. `by_axis` = sorted enabled cuts per axis, for piece lookup.
+fn onion_param(s: &Slicing, axis: usize, by_axis: &[Vec<f64>; 3]) -> Result<String> {
     let mut items = Vec::new();
     for c in s.connector.iter().filter(|c| c.kind == "onion") {
         let cut = s.cut.get(c.cut).with_context(|| {
@@ -121,19 +209,19 @@ fn onion_param(s: &Slicing, axis: usize) -> Result<String> {
         if cut.axis_index()? != axis {
             continue;
         }
-        // Cap axis = the cut-axis unit (Phase B); ang = 45.
-        let unit = |a: usize| if a == axis { 1.0 } else { 0.0 };
-        items.push(format!(
-            "[{}, {}, {}, {}, {}, {}, {}, {}]",
-            n(cut.at()),
-            n(c.pos[0].f()),
-            n(c.pos[1].f()),
-            n(c.size.unwrap_or(10.0)),
-            n(unit(0)),
-            n(unit(1)),
-            n(unit(2)),
-            n(45.0)
-        ));
+        if let OnionAxis::Feasible { cap, ang } = onion_resolution(s, by_axis, c)? {
+            items.push(format!(
+                "[{}, {}, {}, {}, {}, {}, {}, {}]",
+                n(cut.at()),
+                n(c.pos[0].f()),
+                n(c.pos[1].f()),
+                n(c.size.unwrap_or(10.0)),
+                n(cap[0]),
+                n(cap[1]),
+                n(cap[2]),
+                n(ang)
+            ));
+        }
     }
     Ok(format!("[{}]", items.join(", ")))
 }
@@ -153,14 +241,16 @@ fn connector_line(s: &Slicing, c: &Connector) -> Result<String> {
     p[others[1]] = c.pos[1].f();
 
     let conn = match c.kind.as_str() {
-        "bolt" => format!(
+        // An onion that can't print support-free for both pieces downgrades to a bolt here
+        // (its halves orient independently). chotchki's pick: bolt over pin.
+        "bolt" | "onion" => format!(
             "bolt_joint(\"{}\", through = {}, orient = {})",
             c.screw.as_deref().unwrap_or("M3"),
             n(c.through.unwrap_or(12.0)),
             AXIS[ai]
         ),
         "pin" => format!("pin_joint(orient = {})", AXIS[ai]),
-        other => bail!("connector type must be 'bolt' or 'pin', got '{other}'"),
+        other => bail!("connector type must be 'bolt', 'pin', or 'onion', got '{other}'"),
     };
     Ok(format!(
         "    translate([{}, {}, {}]) tag(\"remove\") {conn};\n",
@@ -207,6 +297,79 @@ mod tests {
             d.contains("translate([5, -3, 0]) tag(\"remove\") bolt_joint(\"M4\", through = 15, orient = UP)"),
             "{d}"
         );
+    }
+
+    fn deg(d: f64) -> f64 {
+        d.to_radians()
+    }
+
+    #[test]
+    fn onion_axis_aligned_case_matches_today() {
+        // both pieces build +Z, Z cut: cap = +Z, ang = 45 (identical to pre-orientation output).
+        match onion_axis([0.0, 0.0, 1.0], [0.0, 0.0, 1.0], [0.0, 0.0, 1.0]) {
+            OnionAxis::Feasible { cap, ang } => {
+                assert!((cap[2] - 1.0).abs() < 1e-9 && cap[0].abs() < 1e-9);
+                assert!((ang - 45.0).abs() < 1e-9);
+            }
+            _ => panic!("aligned case must be feasible"),
+        }
+    }
+
+    #[test]
+    fn onion_peg_infeasible_when_lower_piece_builds_off_axis() {
+        // lower piece builds +X, cut on Z: 90° off the cut axis -> peg can't print -> downgrade.
+        assert_eq!(onion_axis([0.0, 0.0, 1.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]), OnionAxis::Infeasible);
+    }
+
+    #[test]
+    fn onion_socket_steepens_cap_for_a_tilted_upper_piece() {
+        // upper piece tilted 20° from +Z; lower stays +Z. cap stays +Z, ang shrinks to clear it.
+        let u_up = [deg(20.0).sin(), 0.0, deg(20.0).cos()];
+        match onion_axis([0.0, 0.0, 1.0], [0.0, 0.0, 1.0], u_up) {
+            OnionAxis::Feasible { ang, .. } => assert!((ang - 25.0).abs() < 0.5, "ang {ang}"),
+            _ => panic!("20° upper tilt should be feasible with a steeper cap"),
+        }
+        // 30° upper tilt exceeds the cap budget (45-CAP_ANG_MIN=25) -> infeasible.
+        let steep = [deg(30.0).sin(), 0.0, deg(30.0).cos()];
+        assert_eq!(onion_axis([0.0, 0.0, 1.0], [0.0, 0.0, 1.0], steep), OnionAxis::Infeasible);
+    }
+
+    #[test]
+    fn onion_socket_bowl_up_is_always_feasible() {
+        // upper piece builds AWAY from the cut (-Z): the socket opens upward, no ceiling.
+        match onion_axis([0.0, 0.0, 1.0], [0.0, 0.0, 1.0], [0.0, 0.0, -1.0]) {
+            OnionAxis::Feasible { ang, .. } => assert!((ang - 45.0).abs() < 1e-9),
+            _ => panic!("bowl-up socket must be feasible"),
+        }
+    }
+
+    #[test]
+    fn onion_on_xy_cut_with_default_up_downgrades_to_bolt() {
+        // X cut, both pieces default +Z: the peg would build across the cut axis -> infeasible ->
+        // the onion downgrades to a bolt in the diff body, leaving the slice connectors empty.
+        let s = spec(
+            "[project]\nname=\"t\"\n[slicing]\n\
+             [[slicing.cut]]\naxis=\"x\"\nat=0\n\
+             [[slicing.connector]]\ncut=0\ntype=\"onion\"\npos=[5,-3]\nsize=12\n",
+        );
+        let d = driver_scad(&s, "t.stl", 30.0).unwrap();
+        assert!(d.contains("connectors = []"), "no feasible onion on X: {d}");
+        assert!(d.contains("bolt_joint("), "infeasible onion -> bolt downgrade: {d}");
+    }
+
+    #[test]
+    fn orientation_override_on_the_lower_piece_can_force_a_downgrade() {
+        // Z cut; override the LOWER piece [0,0,0] to build +X (90° off the cut axis) -> peg
+        // infeasible -> downgrade. Exercises the override -> piece_up -> slab-lookup -> gate path.
+        let s = spec(
+            "[project]\nname=\"t\"\n[slicing]\n\
+             [[slicing.cut]]\naxis=\"z\"\nat=0\n\
+             [[slicing.connector]]\ncut=0\ntype=\"onion\"\npos=[0,0]\nsize=12\n\
+             [[slicing.orient]]\npiece=[0,0,0]\nup=[1,0,0]\n",
+        );
+        let d = driver_scad(&s, "t.stl", 0.0).unwrap();
+        assert!(d.contains("connectors = []"), "override forces infeasible: {d}");
+        assert!(d.contains("bolt_joint("), "downgraded to bolt: {d}");
     }
 
     #[test]

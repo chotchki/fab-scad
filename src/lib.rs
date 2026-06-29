@@ -4,6 +4,7 @@
 //! have ONE definition, not a mirror per front-end.
 
 pub mod cross_section;
+pub mod geom;
 pub mod manifest;
 pub mod num;
 pub mod openscad;

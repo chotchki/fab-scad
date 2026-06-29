@@ -64,11 +64,12 @@ pub struct Cut {
 pub struct Connector {
     pub cut: usize,
     #[serde(rename = "type")]
-    pub kind: String, // "bolt" | "pin"
+    pub kind: String, // "bolt" | "pin" | "onion"
     pub screw: Option<String>,
     #[serde(default)]
     pub pos: [Num; 2],
     pub through: Option<f64>,
+    pub size: Option<f64>, // onion joint diameter (auto-sized from the cross-section)
 }
 
 impl Cut {

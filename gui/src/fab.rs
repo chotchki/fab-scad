@@ -80,10 +80,11 @@ pub fn reslice(
         .iter()
         .map(|c| Connector {
             cut: c.cut,
-            kind: "bolt".to_string(),
-            screw: Some("M3".to_string()),
+            kind: "onion".to_string(),
+            screw: None,
             pos: [Num::Float(c.pos[0]), Num::Float(c.pos[1])],
             through: None,
+            size: Some(c.size),
         })
         .collect();
     let spec = Slicing {
@@ -95,12 +96,13 @@ pub fn reslice(
 }
 
 /// A connector to place, resolved for slicing: `cut` is the index into the cuts slice passed
-/// alongside, `pos` the two coords in the cut plane's non-axis dims. Bolt-only for now (the kind
-/// + screw default live here until the model grows them — see the connector roadmap, #36).
+/// alongside, `pos` the two coords in the cut plane's non-axis dims, `size` the onion diameter
+/// (auto-sized from the cross-section). Onion is the GUI's connector kind now (#39).
 #[derive(Clone, Copy)]
 pub struct Conn {
     pub cut: usize,
     pub pos: [f64; 2],
+    pub size: f64,
 }
 
 /// Write a `$preview = true; include <source>;` wrapper so the source's

@@ -74,7 +74,13 @@ pub fn driver_scad(s: &Slicing, source: &str, spread: f64) -> Result<String> {
     for (ax, cuts) in by_axis.iter().enumerate() {
         if !cuts.is_empty() {
             let list = cuts.iter().map(|&x| n(x)).collect::<Vec<_>>().join(", ");
-            slices += &format!("slice([{list}], axis = {}, spread = {})\n", AXIS[ax], n(spread));
+            // Onion joints ride slice()'s per-piece `connectors`; bolt/pin stay in the diff below.
+            let onions = onion_param(s, ax)?;
+            slices += &format!(
+                "slice([{list}], axis = {}, spread = {}, connectors = {onions})\n",
+                AXIS[ax],
+                n(spread)
+            );
         }
     }
     if slices.is_empty() {
@@ -87,7 +93,9 @@ pub fn driver_scad(s: &Slicing, source: &str, spread: f64) -> Result<String> {
     let mut body = String::from("tag_scope() diff() {\n");
     body += &format!("    force_tag() import(\"{source}\");\n");
     for c in &s.connector {
-        body += &connector_line(s, c)?;
+        if c.kind != "onion" {
+            body += &connector_line(s, c)?; // bolt/pin: symmetric pre-slice negatives
+        }
     }
     body += "}\n";
 
@@ -97,6 +105,29 @@ pub fn driver_scad(s: &Slicing, source: &str, spread: f64) -> Result<String> {
          include <connectors.scad>\n\n\
          {slices}{body}"
     ))
+}
+
+/// The onion connectors on `axis` as a SCAD list `[[cut_pos, a, b, d], ...]` for `slice()`'s
+/// `connectors` param. They're applied per piece (peg into the lower, socket out of the upper),
+/// so they go here rather than the pre-slice diff. Errors on a bad cut index, like connector_line.
+fn onion_param(s: &Slicing, axis: usize) -> Result<String> {
+    let mut items = Vec::new();
+    for c in s.connector.iter().filter(|c| c.kind == "onion") {
+        let cut = s.cut.get(c.cut).with_context(|| {
+            format!("connector references cut {}, but there are {} cut(s)", c.cut, s.cut.len())
+        })?;
+        if cut.axis_index()? != axis {
+            continue;
+        }
+        items.push(format!(
+            "[{}, {}, {}, {}]",
+            n(cut.at()),
+            n(c.pos[0].f()),
+            n(c.pos[1].f()),
+            n(c.size.unwrap_or(10.0))
+        ));
+    }
+    Ok(format!("[{}]", items.join(", ")))
 }
 
 /// One `tag("remove") <connector>` line, positioned on its cut plane and oriented along the
@@ -149,7 +180,7 @@ mod tests {
              [[slicing.cut]]\naxis=\"x\"\nat=-10\n",
         );
         let d = driver_scad(&s, "t.stl", 0.0).unwrap();
-        assert!(d.contains("slice([-10, 25], axis = RIGHT, spread = 0)"), "{d}");
+        assert!(d.contains("slice([-10, 25], axis = RIGHT, spread = 0, connectors = [])"), "{d}");
         // force_tag() is load-bearing: without it diff() won't carve connectors from the import.
         assert!(d.contains("force_tag() import(\"t.stl\")"), "{d}");
         assert!(d.contains("tag_scope() diff()"));
@@ -168,6 +199,20 @@ mod tests {
             d.contains("translate([5, -3, 0]) tag(\"remove\") bolt_joint(\"M4\", through = 15, orient = UP)"),
             "{d}"
         );
+    }
+
+    #[test]
+    fn onion_rides_the_slice_param_not_the_diff() {
+        let s = spec(
+            "[project]\nname=\"t\"\n[slicing]\n\
+             [[slicing.cut]]\naxis=\"z\"\nat=0\n\
+             [[slicing.connector]]\ncut=0\ntype=\"onion\"\npos=[5,-3]\nsize=12\n",
+        );
+        let d = driver_scad(&s, "t.stl", 30.0).unwrap();
+        // Z cut -> others (x,y); onion enters slice()'s per-piece connectors param as [at,a,b,d].
+        assert!(d.contains("connectors = [[0, 5, -3, 12]]"), "{d}");
+        // ...and is NOT emitted as a pre-slice remove in the diff body.
+        assert!(!d.contains("onion_"), "{d}");
     }
 
     #[test]

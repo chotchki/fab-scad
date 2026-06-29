@@ -1091,6 +1091,7 @@ fn resolve_conns(cuts: &Cuts, conns: &Conns) -> Vec<fab::Conn> {
             enabled.iter().position(|&si| si == pc.cut).map(|ei| fab::Conn {
                 cut: ei,
                 pos: [pc.pos[0] as f64, pc.pos[1] as f64],
+                size: pc.size as f64,
             })
         })
         .collect()

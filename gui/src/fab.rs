@@ -7,7 +7,7 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use anyhow::{ensure, Result};
+use anyhow::{ensure, Context, Result};
 
 use fab_scad::manifest::{Connector, Cut, Slicing};
 use fab_scad::num::Num;
@@ -42,6 +42,30 @@ pub fn render_whole(root: Option<&Path>, source: &Path, out_dir: &Path) -> Resul
 /// The preview STL `render_whole` writes for `source` (reused by the cross-section, no re-render).
 pub fn whole_stl(source: &Path, out_dir: &Path) -> PathBuf {
     out_dir.join(format!("{}.stl", stem_of(source)))
+}
+
+/// Render ONE bare piece (slab multi-index) of the already-rendered preview STL — for auto-orient
+/// overhang scoring + the print-orientation preview. Returns the piece STL (empty if no geometry).
+pub fn render_piece(
+    root: Option<&Path>,
+    stl: &Path,
+    cuts: &[(char, f64)],
+    piece: [usize; 3],
+    out_dir: &Path,
+) -> Result<PathBuf> {
+    let oscad = Openscad::discover(root)?;
+    let cut = cuts
+        .iter()
+        .map(|&(axis, at)| Cut { axis: axis.to_string(), at: Num::Float(at) })
+        .collect();
+    let spec = Slicing { printer: None, cut, connector: vec![], orient: vec![] };
+    let name = stl.file_name().and_then(|n| n.to_str()).context("non-UTF8 STL name")?;
+    let tag = format!("piece-{}-{}-{}", piece[0], piece[1], piece[2]);
+    let scad = out_dir.join(format!("{tag}.scad"));
+    let out = out_dir.join(format!("{tag}.stl"));
+    std::fs::write(&scad, slicing::piece_driver(&spec, name, piece)?)?;
+    oscad.render(&scad, &out, TIMEOUT)?; // a piece may be empty (L-shaped gaps) — caller checks
+    Ok(out)
 }
 
 /// The cut's 2D cross-section profile (loops in connector-pos coords), from the already-rendered

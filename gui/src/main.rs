@@ -639,10 +639,14 @@ fn toggle_connector(conns: &mut Conns, cut: usize, pos: [f32; 2], size: f32) {
 }
 
 /// Auto-size a connector at `pos` from the open cut's cross-section: the largest onion that keeps a
-/// wall-margin to the nearest edge/hole (`fit_diameter`), clamped to a sane connector range. Falls
-/// back to a default when there's no section (e.g. the headless `conn` verb without an open editor).
+/// wall-margin to the nearest edge/hole (`fit_diameter`), so it fits the wall rather than blowing
+/// past it. A low floor lets thin walls take a small joint instead of an oversized one; falls back
+/// to a modest default when there's no section (e.g. the headless `conn` verb without an editor).
 fn auto_size(xsection: &XSection, pos: [f32; 2]) -> f32 {
-    const DEFAULT: f32 = 10.0;
+    const DEFAULT: f32 = 6.0;
+    const WALL: f64 = 1.2; // material to leave between the onion's equator and the nearest edge
+    const MIN_D: f64 = 3.0; // below this an onion isn't worth placing; thin walls shrink to it
+    const MAX_D: f64 = 16.0;
     let Some(loops) = &xsection.0 else {
         return DEFAULT;
     };
@@ -650,7 +654,7 @@ fn auto_size(xsection: &XSection, pos: [f32; 2]) -> f32 {
         .iter()
         .map(|l| l.iter().map(|&[a, b]| [a as f64, b as f64]).collect())
         .collect();
-    fab_scad::cross_section::fit_diameter(&loops, [pos[0] as f64, pos[1] as f64], 1.5, 6.0, 20.0)
+    fab_scad::cross_section::fit_diameter(&loops, [pos[0] as f64, pos[1] as f64], WALL, MIN_D, MAX_D)
         as f32
 }
 
@@ -1309,6 +1313,7 @@ fn enter_exit_print(
     mut was_on: Local<bool>,
     cfg: Res<SceneCfg>,
     cuts: Res<Cuts>,
+    conns: Res<Conns>,
     mut job: ResMut<PrintJob>,
     mut cache: ResMut<PrintPieces>,
     mut status: ResMut<Status>,
@@ -1322,7 +1327,7 @@ fn enter_exit_print(
     if print.0 {
         cache.0 = None; // cuts may have moved — wait for a fresh render before laying out
         if job.0.is_none() {
-            kick_print_job(&mut job, &mut status, &cfg, cuts.enabled_cuts());
+            kick_print_job(&mut job, &mut status, &cfg, cuts.enabled_cuts(), resolve_conns(&cuts, &conns));
         }
     } else {
         for e in &pieces {
@@ -1402,8 +1407,15 @@ fn manage_view_camera(
 }
 
 /// Spawn the per-piece render + auto-orient on the compute pool (the OpenSCAD work is off-thread,
-/// so the UI stays live while the plate lays out).
-fn kick_print_job(job: &mut PrintJob, status: &mut Status, cfg: &SceneCfg, cuts: Vec<(char, f64)>) {
+/// so the UI stays live while the plate lays out). Carries the connectors so the preview pieces show
+/// their joints.
+fn kick_print_job(
+    job: &mut PrintJob,
+    status: &mut Status,
+    cfg: &SceneCfg,
+    cuts: Vec<(char, f64)>,
+    conns: Vec<fab::Conn>,
+) {
     let Some(src) = cfg.source.clone() else {
         status.0 = "no .scad source".into();
         return;
@@ -1413,8 +1425,9 @@ fn kick_print_job(job: &mut PrintJob, status: &mut Status, cfg: &SceneCfg, cuts:
         return;
     }
     let (root, tmp) = (cfg.root.clone(), cfg.tmp.clone());
-    let task = AsyncComputeTaskPool::get()
-        .spawn(async move { fab::print_layout(root.as_deref(), &src, &cuts, &tmp).map_err(|e| format!("{e:#}")) });
+    let task = AsyncComputeTaskPool::get().spawn(async move {
+        fab::print_layout(root.as_deref(), &src, &cuts, &conns, &tmp).map_err(|e| format!("{e:#}"))
+    });
     job.0 = Some(task);
     status.0 = "orienting pieces".into();
 }

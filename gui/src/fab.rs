@@ -82,41 +82,44 @@ pub fn whole_stl(source: &Path, out_dir: &Path) -> PathBuf {
     out_dir.join(format!("{}.stl", stem_of(source)))
 }
 
-/// Render ONE bare piece (slab multi-index) of the already-rendered preview STL — for auto-orient
-/// overhang scoring + the print-orientation preview. Returns the piece STL (empty if no geometry).
+/// Render ONE piece (slab multi-index) of the already-rendered preview STL per `spec` — a bare spec
+/// (no connectors) for auto-orient overhang scoring, the full spec (onions + orientations) for the
+/// print-orientation preview's joined piece. Returns the piece STL (empty if no geometry).
 pub fn render_piece(
     oscad: &Openscad,
     stl: &Path,
-    cuts: &[(char, f64)],
+    spec: &Slicing,
     piece: [usize; 3],
     out_dir: &Path,
 ) -> Result<PathBuf> {
-    let spec = cuts_to_spec(cuts);
     let name = stl.file_name().and_then(|n| n.to_str()).context("non-UTF8 STL name")?;
     let tag = format!("piece-{}-{}-{}", piece[0], piece[1], piece[2]);
     let scad = out_dir.join(format!("{tag}.scad"));
     let out = out_dir.join(format!("{tag}.stl"));
-    std::fs::write(&scad, slicing::piece_driver(&spec, name, piece)?)?;
+    std::fs::write(&scad, slicing::piece_driver(spec, name, piece)?)?;
     oscad.render(&scad, &out, TIMEOUT)?; // a piece may be empty (L-shaped gaps) — caller checks
     Ok(out)
 }
 
-/// One piece, rendered + auto-oriented for the print-orientation preview: its slab multi-index,
-/// mesh, and the least-support build-up (`auto_orient::best_up`). Empty slabs are dropped upstream.
+/// One piece, rendered + auto-oriented for the print-orientation preview: its slab multi-index, mesh
+/// (WITH its joints carved — peg/socket), and the least-support build-up (`auto_orient::best_up`).
+/// Empty slabs are dropped upstream.
 pub struct PiecePrint {
     pub piece: [usize; 3],
     pub mesh: StlMesh,
     pub up: [f32; 3],
 }
 
-/// Render every piece of `source` at `cuts`, load each, and auto-pick its print orientation (the
-/// build-up with the least overhang). The data behind the print-orientation preview AND the seed
-/// for the orientations threaded back into `reslice`. Serial: a piece is a cheap STL intersection
-/// off the already-frozen whole mesh, not a re-render of the source.
+/// Render every piece of `source` at `cuts` + `connectors`, auto-pick each piece's print orientation
+/// (least overhang), then re-render each piece WITH its feasible onions carved so the preview shows
+/// the real printable geometry — joints and all. Two passes: bare → `best_up` (orientation gates the
+/// onions), then carve with those orientations. Serial; pieces are cheap STL intersections off the
+/// frozen whole mesh. Seeds the orientations `reslice` threads back in.
 pub fn print_layout(
     root: Option<&Path>,
     source: &Path,
     cuts: &[(char, f64)],
+    connectors: &[Conn],
     out_dir: &Path,
 ) -> Result<Vec<PiecePrint>> {
     let oscad = Openscad::discover(root)?;
@@ -125,17 +128,39 @@ pub fn print_layout(
     if !whole.exists() {
         render_whole(root, source, out_dir)?;
     }
-    let spec = cuts_to_spec(cuts);
-    let mut out = Vec::new();
-    for piece in slicing::piece_indices(&spec)? {
-        let stl = render_piece(&oscad, &whole, cuts, piece, out_dir)?;
-        let mesh = stl::load_stl(&stl)?;
+    let bare = cuts_to_spec(cuts);
+
+    // Pass 1: bare render of each non-empty piece -> least-support orientation. (Axis-aligned cuts
+    // only today, so the cut-face normals are already in `best_up`'s base set — pass none.)
+    let mut ups: Vec<([usize; 3], [f64; 3])> = Vec::new();
+    for piece in slicing::piece_indices(&bare)? {
+        let mesh = stl::load_stl(&render_piece(&oscad, &whole, &bare, piece, out_dir)?)?;
         if mesh.positions.is_empty() {
             continue; // an empty slab (L-shaped gap) — nothing to print
         }
-        // Axis-aligned cuts only today, so the cut-face normals are already in `best_up`'s base
-        // candidate set — pass none. (Rotated cut planes will want them here.)
-        let up = fab_scad::auto_orient::best_up(&to_tris(&mesh), &[]);
+        ups.push((piece, fab_scad::auto_orient::best_up(&to_tris(&mesh), &[])));
+    }
+
+    // Pass 2: carve each piece with the onions, gated by the orientations just picked, so the
+    // preview's joints match what the slice would produce.
+    let spec = Slicing {
+        printer: None,
+        cut: bare.cut,
+        connector: to_connectors(connectors),
+        orient: ups
+            .iter()
+            .map(|&(piece, up)| PieceOrient {
+                piece,
+                up: [Num::Float(up[0]), Num::Float(up[1]), Num::Float(up[2])],
+            })
+            .collect(),
+    };
+    let mut out = Vec::new();
+    for (piece, up) in ups {
+        let mesh = stl::load_stl(&render_piece(&oscad, &whole, &spec, piece, out_dir)?)?;
+        if mesh.positions.is_empty() {
+            continue;
+        }
         out.push(PiecePrint { piece, mesh, up: [up[0] as f32, up[1] as f32, up[2] as f32] });
     }
     Ok(out)

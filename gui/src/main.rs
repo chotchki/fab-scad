@@ -498,6 +498,9 @@ fn setup_windowed(
             target: Vec3::ZERO,
         },
     ));
+    // Seed the camera-restore slot with the startup pose, so a mode entered before the first
+    // normal-view frame still has something to hand back (manage_view_camera).
+    commands.insert_resource(PrevCam(Some((-0.7, 0.5, radius, Vec3::ZERO))));
     // Render the model off-thread; poll_job seeds the first cut when bounds land.
     kick_job(&mut job, &mut status, &scene, false, vec![], vec![], vec![]);
 }
@@ -623,9 +626,33 @@ fn on_click(
     }
 }
 
+/// Delete cut `idx`, keeping the connectors consistent: connectors store cut indices into the
+/// stack, so a bare `remove` would silently re-point survivors at the wrong cut. Drop the deleted
+/// cut's connectors and renumber the rest (a connector on a later cut shifts down one).
+fn remove_cut(cuts: &mut Cuts, conns: &mut Conns, idx: usize) {
+    if idx >= cuts.list.len() {
+        return;
+    }
+    cuts.list.remove(idx);
+    if !cuts.list.is_empty() && cuts.active >= cuts.list.len() {
+        cuts.active = cuts.list.len() - 1;
+    }
+    conns.list.retain(|c| c.cut != idx);
+    for c in conns.list.iter_mut() {
+        if c.cut > idx {
+            c.cut -= 1;
+        }
+    }
+}
+
+/// Smallest onion worth placing (mm): below this the wall/slab is too thin for a useful joint, so
+/// we decline rather than punch an oversized peg through it.
+const MIN_ONION: f32 = 2.0;
+
 /// Place a connector on `cut` at `pos` (diameter `size`), or — if the click lands on one already
-/// there — remove it. Click-to-toggle: clicking a placed connector a second time deletes it.
-fn toggle_connector(conns: &mut Conns, cut: usize, pos: [f32; 2], size: f32) {
+/// there — remove it (click-to-toggle). Declines to place a sub-`MIN_ONION` onion (too thin a spot)
+/// but always allows the remove. Returns a one-line status describing what it did.
+fn toggle_connector(conns: &mut Conns, cut: usize, pos: [f32; 2], size: f32) -> &'static str {
     const HIT: f32 = 5.0; // mm; a bit larger than the 3mm marker, so it's a forgiving target
     if let Some(j) = conns
         .list
@@ -633,40 +660,76 @@ fn toggle_connector(conns: &mut Conns, cut: usize, pos: [f32; 2], size: f32) {
         .position(|c| c.cut == cut && (c.pos[0] - pos[0]).hypot(c.pos[1] - pos[1]) < HIT)
     {
         conns.list.remove(j);
+        "removed connector"
+    } else if size < MIN_ONION {
+        "too thin for an onion here"
     } else {
         conns.list.push(PlacedConn { cut, pos, size });
+        "placed connector"
     }
 }
 
-/// Auto-size a connector at `pos` from the open cut's cross-section: the largest onion that keeps a
-/// wall-margin to the nearest edge/hole (`fit_diameter`), so it fits the wall rather than blowing
-/// past it. A low floor lets thin walls take a small joint instead of an oversized one; falls back
-/// to a modest default when there's no section (e.g. the headless `conn` verb without an editor).
-fn auto_size(xsection: &XSection, pos: [f32; 2]) -> f32 {
+/// Auto-size a connector at `pos` on `cut`: the largest onion that FITS — both the cut's
+/// cross-section wall (`fit_diameter`) AND the slab thickness either side of the cut (the onion is
+/// a sphere, so it reaches d/2 into each piece along the cut axis — cap it so it can't pierce the
+/// thinner slab). No lower clamp: a thin spot returns a small (sub-`MIN_ONION`) value and the caller
+/// declines. Falls back to a modest default when there's no cross-section (headless `conn` verb).
+fn auto_size(xsection: &XSection, cuts: &Cuts, bounds: &ModelBounds, cut: usize, pos: [f32; 2]) -> f32 {
     const DEFAULT: f32 = 6.0;
-    const WALL: f64 = 1.2; // material to leave between the onion's equator and the nearest edge
-    const MIN_D: f64 = 3.0; // below this an onion isn't worth placing; thin walls shrink to it
+    const WALL: f64 = 1.2; // material between the onion's equator and the nearest edge / slab face
     const MAX_D: f64 = 16.0;
-    let Some(loops) = &xsection.0 else {
-        return DEFAULT;
+    let cross = match &xsection.0 {
+        Some(loops) => {
+            let loops: Vec<Vec<[f64; 2]>> = loops
+                .iter()
+                .map(|l| l.iter().map(|&[a, b]| [a as f64, b as f64]).collect())
+                .collect();
+            fab_scad::cross_section::fit_diameter(&loops, [pos[0] as f64, pos[1] as f64], WALL, MAX_D)
+                as f32
+        }
+        None => DEFAULT,
     };
-    let loops: Vec<Vec<[f64; 2]>> = loops
-        .iter()
-        .map(|l| l.iter().map(|&[a, b]| [a as f64, b as f64]).collect())
-        .collect();
-    fab_scad::cross_section::fit_diameter(&loops, [pos[0] as f64, pos[1] as f64], WALL, MIN_D, MAX_D)
-        as f32
+    // Axial cap: d/2 <= min(slab below, slab above) - wall  =>  d <= 2*(room - wall).
+    let axial = (2.0 * (axial_room(cuts, cut, bounds) - WALL as f32)).max(0.0);
+    cross.min(axial)
+}
+
+/// The thinner of the two slabs bordering `cut` along its axis — how much room the onion has to
+/// reach into before it pokes out the far face. Distance from the cut to its nearest same-axis
+/// neighbour (or the model bound) on each side, min of the two. Huge (no cap) if bounds are unset.
+fn axial_room(cuts: &Cuts, cut: usize, bounds: &ModelBounds) -> f32 {
+    let (Some(c), Some((min, max))) = (cuts.list.get(cut), bounds.0) else {
+        return f32::INFINITY;
+    };
+    let (ai, at) = (c.axis.index(), c.at);
+    let mut below = comp(min, ai);
+    let mut above = comp(max, ai);
+    for (j, o) in cuts.list.iter().enumerate() {
+        if j == cut || o.axis != c.axis {
+            continue;
+        }
+        if o.at <= at && o.at > below {
+            below = o.at;
+        }
+        if o.at >= at && o.at < above {
+            above = o.at;
+        }
+    }
+    (at - below).min(above - at)
 }
 
 /// In the 2D connector editor: a click on the (face-on) cut plane drops a connector on the cut
 /// being edited, at the clicked point — the precise picking the assembled-model click can't give.
+#[allow(clippy::too_many_arguments)] // a Bevy observer — params are dependencies, not a smell
 fn place_on_profile_click(
     ev: On<Pointer<Click>>,
     editing: Res<EditCut>,
     planes: Query<&CutPlaneViz>,
     cuts: Res<Cuts>,
+    bounds: Res<ModelBounds>,
     xsection: Res<XSection>,
     mut conns: ResMut<Conns>,
+    mut status: ResMut<Status>,
 ) {
     let Some(i) = editing.0 else {
         return;
@@ -679,7 +742,8 @@ fn place_on_profile_click(
     };
     let others: Vec<usize> = (0..3).filter(|&a| a != c.axis.index()).collect();
     let pos = [comp(hit, others[0]), comp(hit, others[1])];
-    toggle_connector(&mut conns, i, pos, auto_size(&xsection, pos));
+    let size = auto_size(&xsection, &cuts, &bounds, i, pos);
+    status.0 = toggle_connector(&mut conns, i, pos, size).into();
 }
 
 /// The Explode/Collapse button: collapse to the uncut model, or explode the last sliced result —
@@ -771,13 +835,21 @@ fn sync_conn_markers(
         }
         return; // positions land next frame, once the new markers exist
     }
+    // Show a marker only in the collapsed assembled view, and only for a connector on an ENABLED
+    // cut — one on a disabled cut isn't in the slice, so showing it (teal/clean) would mislead.
+    let live = dspread.0 == 0.0 && !print.0;
     for (m, mut tf, mut vis) in &mut markers {
-        match (dspread.0 == 0.0 && !print.0).then(|| conns.list.get(m.0).and_then(|pc| conn_point(&cuts, pc))) {
-            Some(Some(p)) => {
+        let point = live
+            .then(|| conns.list.get(m.0))
+            .flatten()
+            .filter(|pc| cuts.list.get(pc.cut).is_some_and(|c| c.enabled))
+            .and_then(|pc| conn_point(&cuts, pc));
+        match point {
+            Some(p) => {
                 tf.translation = p;
                 *vis = Visibility::Visible;
             }
-            _ => *vis = Visibility::Hidden,
+            None => *vis = Visibility::Hidden,
         }
     }
 }
@@ -1943,6 +2015,7 @@ fn setup_script(
         Orbit { yaw: -0.7, pitch: 0.5, radius, target: Vec3::ZERO },
         bevy::ui::IsDefaultUiCamera,
     ));
+    commands.insert_resource(PrevCam(Some((-0.7, 0.5, radius, Vec3::ZERO))));
     commands.insert_resource(RenderTargetImage(target));
     kick_job(&mut job, &mut status, &scene, false, vec![], vec![], vec![]);
 }
@@ -2041,7 +2114,8 @@ fn run_script(
         Action::Wait(n) => runner.timer >= n,
         Action::Conn(i, a, b) => {
             if runner.timer == 1 {
-                toggle_connector(&mut conns, i, [a, b], auto_size(&xsection, [a, b]));
+                let size = auto_size(&xsection, &cuts, &bounds, i, [a, b]);
+                toggle_connector(&mut conns, i, [a, b], size);
             }
             runner.timer >= 2
         }
@@ -2220,13 +2294,8 @@ fn plane_card(cuts: &Cuts, axis: Axis) -> impl Scene + 'static {
                     c.enabled = !c.enabled;
                 }
             };
-            let del = move |_: On<Activate>, mut cuts: ResMut<Cuts>| {
-                if idx < cuts.list.len() {
-                    cuts.list.remove(idx);
-                    if !cuts.list.is_empty() && cuts.active >= cuts.list.len() {
-                        cuts.active = cuts.list.len() - 1;
-                    }
-                }
+            let del = move |_: On<Activate>, mut cuts: ResMut<Cuts>, mut conns: ResMut<Conns>| {
+                remove_cut(&mut cuts, &mut conns, idx);
             };
             // Type a position → set the cut + select it.
             let edit = move |ev: On<ValueChange<f32>>, bounds: Res<ModelBounds>, mut cuts: ResMut<Cuts>| {
@@ -2454,6 +2523,58 @@ mod tests {
         assert_eq!(conns.list.len(), 2);
         toggle_connector(&mut conns, 1, [20.0, -10.0], 10.0); // same pos, different cut → places
         assert_eq!(conns.list.len(), 3);
+    }
+
+    #[test]
+    fn toggle_connector_declines_a_too_thin_spot() {
+        let mut conns = Conns::default();
+        toggle_connector(&mut conns, 0, [0.0, 0.0], 1.0); // below MIN_ONION → not placed
+        assert!(conns.list.is_empty());
+        toggle_connector(&mut conns, 0, [0.0, 0.0], 5.0); // fits → placed
+        assert_eq!(conns.list.len(), 1);
+    }
+
+    #[test]
+    fn axial_room_is_the_thinner_bordering_slab() {
+        let cuts = Cuts {
+            list: vec![
+                CutDef { axis: Axis::X, at: -10.0, enabled: true },
+                CutDef { axis: Axis::X, at: 0.0, enabled: true },
+                CutDef { axis: Axis::X, at: 16.0, enabled: true },
+            ],
+            active: 0,
+        };
+        let bounds = ModelBounds(Some((Vec3::splat(-20.0), Vec3::splat(20.0))));
+        // middle cut: slabs to -10 (10 thick) and to 16 (16 thick) -> min 10
+        assert_eq!(axial_room(&cuts, 1, &bounds), 10.0);
+        // first cut: to the -20 bound (10) and to the next cut at 0 (10) -> 10
+        assert_eq!(axial_room(&cuts, 0, &bounds), 10.0);
+        // last cut: to the cut at 0 (16) and to the +20 bound (4) -> 4 (the thin end slab)
+        assert_eq!(axial_room(&cuts, 2, &bounds), 4.0);
+    }
+
+    #[test]
+    fn remove_cut_renumbers_surviving_connectors() {
+        let mut cuts = Cuts {
+            list: vec![
+                CutDef { axis: Axis::X, at: -10.0, enabled: true },
+                CutDef { axis: Axis::X, at: 0.0, enabled: true },
+                CutDef { axis: Axis::X, at: 10.0, enabled: true },
+            ],
+            active: 2,
+        };
+        let mut conns = Conns {
+            list: vec![
+                PlacedConn { cut: 0, pos: [0.0, 0.0], size: 6.0 },
+                PlacedConn { cut: 1, pos: [0.0, 0.0], size: 6.0 }, // on the cut we delete → dropped
+                PlacedConn { cut: 2, pos: [0.0, 0.0], size: 6.0 }, // shifts down to cut 1
+            ],
+        };
+        remove_cut(&mut cuts, &mut conns, 1);
+        assert_eq!(cuts.list.len(), 2);
+        assert_eq!(cuts.active, 1); // clamped from 2
+        let cuts_of: Vec<usize> = conns.list.iter().map(|c| c.cut).collect();
+        assert_eq!(cuts_of, vec![0, 1]); // cut-0 connector kept; cut-1 dropped; cut-2 → cut-1
     }
 
     #[test]

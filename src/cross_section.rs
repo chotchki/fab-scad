@@ -80,17 +80,18 @@ fn parse_loops(svg: &str) -> Vec<Vec<[f64; 2]>> {
     loops
 }
 
-/// Auto-size a connector at `point` inside a cross-section: the largest diameter that still keeps
-/// a `wall`-thick margin to the nearest profile edge — the outer outline OR any hole — clamped to
-/// `[min_d, max_d]`. So a connector near a thin wall or a hole shrinks, one in open material grows
-/// to the cap. The GUI feeds this at placement and #41's auto-place fits to the same loops.
-pub fn fit_diameter(loops: &[Loop], point: [f64; 2], wall: f64, min_d: f64, max_d: f64) -> f64 {
+/// Auto-size a connector at `point` inside a cross-section: the largest diameter that still keeps a
+/// `wall`-thick margin to the nearest profile edge — the outer outline OR any hole — capped at
+/// `max_d`. There is NO lower clamp: a point against a thin wall returns a SMALL (down to 0)
+/// diameter, never one forced up past the wall. The CALLER decides a usable minimum / whether to
+/// place. The GUI feeds this at placement and #41's auto-place fits to the same loops.
+pub fn fit_diameter(loops: &[Loop], point: [f64; 2], wall: f64, max_d: f64) -> f64 {
     let nearest = loops
         .iter()
         .flat_map(|lp| (0..lp.len()).map(move |i| (lp, i)))
         .map(|(lp, i)| point_to_segment(point, lp[i], lp[(i + 1) % lp.len()]))
         .fold(f64::INFINITY, f64::min);
-    (2.0 * (nearest - wall)).clamp(min_d, max_d)
+    (2.0 * (nearest - wall)).clamp(0.0, max_d)
 }
 
 /// Shortest distance from `p` to segment `a`–`b`.
@@ -166,14 +167,16 @@ mod tests {
         // a 40x40 square outline centred at origin
         let sq = vec![vec![[-20.0, -20.0], [20.0, -20.0], [20.0, 20.0], [-20.0, 20.0]]];
         // mid-material: 5mm to the right edge, wall 1 -> d = 2*(5-1) = 8
-        assert!((fit_diameter(&sq, [15.0, 0.0], 1.0, 4.0, 16.0) - 8.0).abs() < 1e-9);
+        assert!((fit_diameter(&sq, [15.0, 0.0], 1.0, 16.0) - 8.0).abs() < 1e-9);
         // open centre: 20mm to any edge -> 2*(20-1)=38, clamped to max 16
-        assert_eq!(fit_diameter(&sq, [0.0, 0.0], 1.0, 4.0, 16.0), 16.0);
-        // hard against a wall -> clamped to min
-        assert_eq!(fit_diameter(&sq, [19.5, 0.0], 1.0, 4.0, 16.0), 4.0);
+        assert_eq!(fit_diameter(&sq, [0.0, 0.0], 1.0, 16.0), 16.0);
+        // hard against a wall -> shrinks toward 0, never forced up past the wall
+        assert_eq!(fit_diameter(&sq, [19.5, 0.0], 1.0, 16.0), 0.0);
+        // a thin wall returns a small (sub-min) diameter rather than an oversized one
+        assert!((fit_diameter(&sq, [17.5, 0.0], 1.0, 16.0) - 3.0).abs() < 1e-9); // 2*(2.5-1)
         // a hole pulls the size down too
         let with_hole = vec![sq[0].clone(), vec![[4.0, -2.0], [8.0, -2.0], [8.0, 2.0], [4.0, 2.0]]];
-        assert!(fit_diameter(&with_hole, [0.0, 0.0], 1.0, 4.0, 16.0) < 16.0);
+        assert!(fit_diameter(&with_hole, [0.0, 0.0], 1.0, 16.0) < 16.0);
     }
 
     #[test]

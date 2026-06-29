@@ -16,7 +16,7 @@ Driven by `claude-plan-bridge` (FORMATv2). Hand-authored; run
   - [x] 5.1.2 - Multi-cut + per-cut axis: set cut lines, rotate/pick the plane
   - [ ] 5.1.3 - Face-pick connector placement: click model → drop bolt/pin on the cut
     - [x] 5.1.3.1 - Manual face-pick: click model → drop a connector on the nearest cut (build first)
-    - [ ] 5.1.3.2 - BOSL2 onion connector (support-free), replacing pin/dowel
+    - [x] 5.1.3.2 - BOSL2 onion connector (support-free), replacing pin/dowel
     - [x] 5.1.3.3 - Per-piece print-orientation UI → derive connector orientation
     - [ ] 5.1.3.4 - Cross-section-driven auto-size + auto-place connectors
     - [x] 5.1.3.5 - Per-cut 2D cross-section connector editor: button on a cut → see its profile → pick connectors on it

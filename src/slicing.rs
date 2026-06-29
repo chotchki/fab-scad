@@ -48,8 +48,11 @@ fn onion_axis(a: V3, u_lo: V3, u_up: V3) -> OnionAxis {
         .unwrap();
     let bowl_up = geom::dot(u_up, a) < 0.0; // socket opens away from the cut → no ceiling
     let tilt = geom::angle_deg(cap, u_up);
-    if !bowl_up && tilt > SUPPORT_ANGLE - CAP_ANG_MIN {
-        return OnionAxis::Infeasible; // cap can't be steepened enough to clear the socket tilt
+    // Reject when even the steepest cap (after CAP_SAFETY) can't clear the socket tilt — same
+    // threshold the `ang` formula below clamps at, so the gate and the formula stay consistent
+    // once CAP_SAFETY is tuned off 0.
+    if !bowl_up && tilt > SUPPORT_ANGLE - CAP_ANG_MIN - CAP_SAFETY {
+        return OnionAxis::Infeasible;
     }
     let ang = if bowl_up {
         SUPPORT_ANGLE

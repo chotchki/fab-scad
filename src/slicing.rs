@@ -195,6 +195,27 @@ pub fn driver_scad(s: &Slicing, source: &str, spread: f64) -> Result<String> {
     ))
 }
 
+/// Every piece's slab multi-index: the cartesian product of `0..(cuts_on_axis + 1)` per axis (an
+/// axis with no cuts contributes only index 0). Iteration is x-outer → z-inner, and each axis runs
+/// in ascending-cut order — the SAME order `piece_driver` sorts by — so a returned `[ix, iy, iz]`
+/// selects exactly the slab that `piece_driver`/`slice(only=)` would carve. Feeds the per-piece
+/// render sweep (auto-orient #42, print-orientation preview).
+pub fn piece_indices(s: &Slicing) -> Result<Vec<[usize; 3]>> {
+    let mut slabs = [1usize; 3]; // an uncut axis is one slab
+    for c in &s.cut {
+        slabs[c.axis_index()?] += 1;
+    }
+    let mut out = Vec::with_capacity(slabs[0] * slabs[1] * slabs[2]);
+    for ix in 0..slabs[0] {
+        for iy in 0..slabs[1] {
+            for iz in 0..slabs[2] {
+                out.push([ix, iy, iz]);
+            }
+        }
+    }
+    Ok(out)
+}
+
 /// Codegen for ONE bare piece (no connectors, no spread): nested `slice(only=)` per axis around
 /// the imported source. For per-piece rendering — auto-orient overhang scoring (#42) and the
 /// print-orientation preview. `piece` is the slab multi-index; an axis with no cuts must be index 0.
@@ -433,6 +454,25 @@ mod tests {
         assert!(d.contains("import(\"m.stl\")") && !d.contains("connectors ="), "{d}");
         // an axis with no cuts must be index 0
         assert!(piece_driver(&s, "m.stl", [0, 1, 0]).is_err());
+    }
+
+    #[test]
+    fn piece_indices_are_the_axis_slab_product() {
+        // 2 X cuts (3 X slabs) + 1 Z cut (2 Z slabs), no Y cuts (1 Y slab) -> 3*1*2 = 6 pieces.
+        let s = spec(
+            "[project]\nname=\"t\"\n[slicing]\n\
+             [[slicing.cut]]\naxis=\"x\"\nat=-10\n\
+             [[slicing.cut]]\naxis=\"x\"\nat=25\n\
+             [[slicing.cut]]\naxis=\"z\"\nat=0\n",
+        );
+        let pieces = piece_indices(&s).unwrap();
+        assert_eq!(pieces.len(), 6);
+        assert!(pieces.contains(&[0, 0, 0]) && pieces.contains(&[2, 0, 1]));
+        // every Y index is 0 (no Y cuts), and no index exceeds its axis's slab count
+        assert!(pieces.iter().all(|p| p[1] == 0 && p[0] < 3 && p[2] < 2));
+        // an uncut model is a single piece
+        let none = spec("[project]\nname=\"t\"\n[slicing]\n");
+        assert_eq!(piece_indices(&none).unwrap(), vec![[0, 0, 0]]);
     }
 
     #[test]

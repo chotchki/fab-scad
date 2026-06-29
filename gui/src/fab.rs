@@ -9,12 +9,24 @@ use std::time::Duration;
 
 use anyhow::{ensure, Context, Result};
 
-use fab_scad::manifest::{Connector, Cut, Slicing};
+use fab_scad::manifest::{Connector, Cut, PieceOrient, Slicing};
 use fab_scad::num::Num;
 use fab_scad::openscad::Openscad;
 use fab_scad::slicing;
 
+use crate::stl::{self, StlMesh};
+
 const TIMEOUT: Duration = Duration::from_secs(120);
+
+/// A `[slicing]` spec carrying only the cuts — the shared base for per-piece rendering and the
+/// orientation sweep (connectors/orientation are layered on by the specific caller).
+fn cuts_to_spec(cuts: &[(char, f64)]) -> Slicing {
+    let cut = cuts
+        .iter()
+        .map(|&(axis, at)| Cut { axis: axis.to_string(), at: Num::Float(at) })
+        .collect();
+    Slicing { printer: None, cut, connector: vec![], orient: vec![] }
+}
 
 /// Walk up to the fab-scad root (the dir with `printers.toml` + `scad-lib/`) for OPENSCADPATH.
 pub fn find_root() -> Option<PathBuf> {
@@ -46,20 +58,14 @@ pub fn whole_stl(source: &Path, out_dir: &Path) -> PathBuf {
 
 /// Render ONE bare piece (slab multi-index) of the already-rendered preview STL — for auto-orient
 /// overhang scoring + the print-orientation preview. Returns the piece STL (empty if no geometry).
-#[allow(dead_code)] // wired in by the print-orientation preview (next)
 pub fn render_piece(
-    root: Option<&Path>,
+    oscad: &Openscad,
     stl: &Path,
     cuts: &[(char, f64)],
     piece: [usize; 3],
     out_dir: &Path,
 ) -> Result<PathBuf> {
-    let oscad = Openscad::discover(root)?;
-    let cut = cuts
-        .iter()
-        .map(|&(axis, at)| Cut { axis: axis.to_string(), at: Num::Float(at) })
-        .collect();
-    let spec = Slicing { printer: None, cut, connector: vec![], orient: vec![] };
+    let spec = cuts_to_spec(cuts);
     let name = stl.file_name().and_then(|n| n.to_str()).context("non-UTF8 STL name")?;
     let tag = format!("piece-{}-{}-{}", piece[0], piece[1], piece[2]);
     let scad = out_dir.join(format!("{tag}.scad"));
@@ -67,6 +73,54 @@ pub fn render_piece(
     std::fs::write(&scad, slicing::piece_driver(&spec, name, piece)?)?;
     oscad.render(&scad, &out, TIMEOUT)?; // a piece may be empty (L-shaped gaps) — caller checks
     Ok(out)
+}
+
+/// One piece, rendered + auto-oriented for the print-orientation preview: its slab multi-index,
+/// mesh, and the least-support build-up (`auto_orient::best_up`). Empty slabs are dropped upstream.
+pub struct PiecePrint {
+    pub piece: [usize; 3],
+    pub mesh: StlMesh,
+    pub up: [f32; 3],
+}
+
+/// Render every piece of `source` at `cuts`, load each, and auto-pick its print orientation (the
+/// build-up with the least overhang). The data behind the print-orientation preview AND the seed
+/// for the orientations threaded back into `reslice`. Serial: a piece is a cheap STL intersection
+/// off the already-frozen whole mesh, not a re-render of the source.
+pub fn print_layout(
+    root: Option<&Path>,
+    source: &Path,
+    cuts: &[(char, f64)],
+    out_dir: &Path,
+) -> Result<Vec<PiecePrint>> {
+    let oscad = Openscad::discover(root)?;
+    // The pieces slice from the frozen whole mesh; render it once if a prior whole render didn't.
+    let whole = whole_stl(source, out_dir);
+    if !whole.exists() {
+        render_whole(root, source, out_dir)?;
+    }
+    let spec = cuts_to_spec(cuts);
+    let mut out = Vec::new();
+    for piece in slicing::piece_indices(&spec)? {
+        let stl = render_piece(&oscad, &whole, cuts, piece, out_dir)?;
+        let mesh = stl::load_stl(&stl)?;
+        if mesh.positions.is_empty() {
+            continue; // an empty slab (L-shaped gap) — nothing to print
+        }
+        // Axis-aligned cuts only today, so the cut-face normals are already in `best_up`'s base
+        // candidate set — pass none. (Rotated cut planes will want them here.)
+        let up = fab_scad::auto_orient::best_up(&to_tris(&mesh), &[]);
+        out.push(PiecePrint { piece, mesh, up: [up[0] as f32, up[1] as f32, up[2] as f32] });
+    }
+    Ok(out)
+}
+
+/// `StlMesh` positions (flat, 3 verts per tri) → `[[f64; 3]; 3]` triangles for the orientation math.
+fn to_tris(m: &StlMesh) -> Vec<[[f64; 3]; 3]> {
+    m.positions
+        .chunks_exact(3)
+        .map(|t| std::array::from_fn(|i| [t[i][0] as f64, t[i][1] as f64, t[i][2] as f64]))
+        .collect()
 }
 
 /// The cut's 2D cross-section profile (loops in connector-pos coords), from the already-rendered
@@ -89,6 +143,7 @@ pub fn reslice(
     source: &Path,
     cuts: &[(char, f64)],
     connectors: &[Conn],
+    orient: &[Orient3],
     spread: f64,
     out_dir: &Path,
 ) -> Result<PathBuf> {
@@ -112,12 +167,17 @@ pub fn reslice(
             size: Some(c.size),
         })
         .collect();
-    let spec = Slicing {
-        printer: None,
-        cut,
-        connector,
-        orient: vec![], // per-piece orientation overrides arrive in Phase E (GUI ORIENT stage)
-    };
+    // Per-piece print orientations (auto-picked, seeded by the print-orientation preview). They
+    // GATE the onions — a piece oriented off its cut axis downgrades that joint to a bolt. Empty =
+    // every piece defaults to +Z (`slicing::piece_up`), which is the pre-orientation behaviour.
+    let orient = orient
+        .iter()
+        .map(|o| PieceOrient {
+            piece: o.piece,
+            up: [Num::Float(o.up[0]), Num::Float(o.up[1]), Num::Float(o.up[2])],
+        })
+        .collect();
+    let spec = Slicing { printer: None, cut, connector, orient };
     slicing::slice_part(&oscad, &wrap, &spec, spread, out_dir, TIMEOUT)
 }
 
@@ -129,6 +189,15 @@ pub struct Conn {
     pub cut: usize,
     pub pos: [f64; 2],
     pub size: f64,
+}
+
+/// A per-piece print orientation, resolved for slicing: the slab multi-index and its build-up
+/// direction (model space, unit). Threaded into `reslice` as `[slicing.orient]` so the slice
+/// honours the auto-picked / manual print orientation (and gates the onions accordingly).
+#[derive(Clone, Copy)]
+pub struct Orient3 {
+    pub piece: [usize; 3],
+    pub up: [f64; 3],
 }
 
 /// Write a `$preview = true; include <source>;` wrapper so the source's

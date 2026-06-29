@@ -8,6 +8,7 @@
 //!   cargo run -p fab-gui -- part.scad --screenshot out.png  # headless render to PNG (self-verify)
 //!   cargo run -p fab-gui -- part.scad --script "addcut 30; reslice; shot a.png"  # scripted harness
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use bevy::{
@@ -178,6 +179,28 @@ struct EditCut(Option<usize>);
 /// dims). `None` until computed / when no editor is open.
 #[derive(Resource, Default)]
 struct XSection(Option<Vec<Vec<[f32; 2]>>>);
+
+/// Per-piece print orientations, keyed by slab multi-index — the least-support build-up auto-picked
+/// by the print-orientation preview (manual override is Phase E). Threaded into `reslice` so the
+/// slice gates its onions on how each piece actually prints. Empty = every piece defaults to +Z.
+#[derive(Resource, Default)]
+struct Orient {
+    map: HashMap<[usize; 3], [f32; 3]>,
+}
+
+/// Whether the print-orientation preview is showing: the model + cut planes hide, and every piece
+/// is laid out on the bed rotated to its print-up. A workflow MODE, like the connector editor.
+#[derive(Resource, Default)]
+struct PrintView(bool);
+
+/// The in-flight print-layout render (off-thread): renders + auto-orients every piece. Yields the
+/// pieces (mesh + multi-index + build-up) on success, else an error string.
+#[derive(Resource, Default)]
+struct PrintJob(Option<Task<Result<Vec<fab::PiecePrint>, String>>>);
+
+/// One laid-out piece in the print-orientation preview, despawned when the preview closes.
+#[derive(Component)]
+struct PrintPiece;
 
 /// The 3D point of a `(pos_a, pos_b)` on a cut plane: `at` along the axis, pos in the two non-axis
 /// dims (ascending) — the inverse of the connector projection.
@@ -359,6 +382,9 @@ fn run_windowed(scene: SceneCfg) {
         .init_resource::<Conns>()
         .init_resource::<EditCut>()
         .init_resource::<XSection>()
+        .init_resource::<Orient>()
+        .init_resource::<PrintView>()
+        .init_resource::<PrintJob>()
         .init_resource::<ModelBounds>()
         .init_resource::<DraggingCut>()
         .init_resource::<WholeMesh>()
@@ -393,6 +419,8 @@ fn run_windowed(scene: SceneCfg) {
                 mark_dirty,
                 revert_on_edit,
                 auto_scale,
+                enter_exit_print,
+                poll_print_job,
             ),
         )
         .run();
@@ -427,7 +455,7 @@ fn setup_windowed(
         },
     ));
     // Render the model off-thread; poll_job seeds the first cut when bounds land.
-    kick_job(&mut job, &mut status, &scene, false, vec![], vec![]);
+    kick_job(&mut job, &mut status, &scene, false, vec![], vec![], vec![]);
 }
 
 fn orbit(
@@ -663,6 +691,7 @@ fn sync_conn_markers(
     conns: Res<Conns>,
     cuts: Res<Cuts>,
     dspread: Res<DisplaySpread>,
+    print: Res<PrintView>,
     mut last: Local<usize>,
     existing: Query<Entity, With<ConnMarker>>,
     mut markers: Query<(&ConnMarker, &mut Transform, &mut Visibility)>,
@@ -694,7 +723,7 @@ fn sync_conn_markers(
         return; // positions land next frame, once the new markers exist
     }
     for (m, mut tf, mut vis) in &mut markers {
-        match (dspread.0 == 0.0).then(|| conns.list.get(m.0).and_then(|pc| conn_point(&cuts, pc))) {
+        match (dspread.0 == 0.0 && !print.0).then(|| conns.list.get(m.0).and_then(|pc| conn_point(&cuts, pc))) {
             Some(Some(p)) => {
                 tf.translation = p;
                 *vis = Visibility::Visible;
@@ -926,11 +955,19 @@ fn sync_dim_labels(
     cuts: Res<Cuts>,
     bounds: Res<ModelBounds>,
     dspread: Res<DisplaySpread>,
+    print: Res<PrintView>,
     cam: Query<(&Camera, &GlobalTransform)>,
     existing: Query<&DimLabel>,
     mut labels: Query<(&DimLabel, &mut Node, &mut Text, &mut Visibility)>,
     mut commands: Commands,
 ) {
+    if print.0 {
+        // The print preview lays pieces out apart — the assembled-part width labels don't apply.
+        for (_, _, _, mut vis) in &mut labels {
+            *vis = Visibility::Hidden;
+        }
+        return;
+    }
     let Some((min, max)) = bounds.0 else {
         return;
     };
@@ -1064,6 +1101,7 @@ fn request_reslice(
     cfg: Res<SceneCfg>,
     cuts: Res<Cuts>,
     conns: Res<Conns>,
+    orient: Res<Orient>,
 ) {
     if ev.read().count() == 0 {
         return;
@@ -1077,7 +1115,17 @@ fn request_reslice(
         status.0 = "no enabled cuts".into();
         return;
     }
-    kick_job(&mut job, &mut status, &cfg, true, xs, resolve_conns(&cuts, &conns));
+    kick_job(&mut job, &mut status, &cfg, true, xs, resolve_conns(&cuts, &conns), orient_inputs(&orient));
+}
+
+/// The auto-picked (eventually manual) per-piece orientations as `fab::Orient3` for `reslice`. Empty
+/// until the print-orientation preview runs and seeds the map — then every slice honours them.
+fn orient_inputs(orient: &Orient) -> Vec<fab::Orient3> {
+    orient
+        .map
+        .iter()
+        .map(|(&piece, &up)| fab::Orient3 { piece, up: [up[0] as f64, up[1] as f64, up[2] as f64] })
+        .collect()
 }
 
 /// Map placed connectors to the sliced spec: a connector's stack-cut index → its position in the
@@ -1098,6 +1146,7 @@ fn resolve_conns(cuts: &Cuts, conns: &Conns) -> Vec<fab::Conn> {
 }
 
 /// Spawn the render/slice on the async compute pool (blocking OpenSCAD work, off-thread).
+#[allow(clippy::too_many_arguments)]
 fn kick_job(
     job: &mut Job,
     status: &mut Status,
@@ -1105,6 +1154,7 @@ fn kick_job(
     reslice: bool,
     cuts: Vec<(char, f64)>,
     conns: Vec<fab::Conn>,
+    orient: Vec<fab::Orient3>,
 ) {
     let Some(src) = cfg.source.clone() else {
         status.0 = "no .scad source".into();
@@ -1113,7 +1163,7 @@ fn kick_job(
     let (root, tmp) = (cfg.root.clone(), cfg.tmp.clone());
     let task = AsyncComputeTaskPool::get().spawn(async move {
         if reslice {
-            fab::reslice(root.as_deref(), &src, &cuts, &conns, SPREAD, &tmp)
+            fab::reslice(root.as_deref(), &src, &cuts, &conns, &orient, SPREAD, &tmp)
                 .map_err(|e| format!("{e:#}"))
         } else {
             fab::render_whole(root.as_deref(), &src, &tmp).map_err(|e| format!("{e:#}"))
@@ -1192,6 +1242,170 @@ fn update_status(status: Res<Status>, mut q: Query<&mut Text, With<StatusLabel>>
     for mut t in &mut q {
         *t = Text::new(status.0.clone());
     }
+}
+
+// ---- print-orientation preview --------------------------------------------------------
+
+/// Enter/leave the print-orientation preview on a toggle. Entering hides the model + cut planes and
+/// kicks the per-piece render/auto-orient job; leaving despawns the laid-out pieces and restores
+/// the model. A `Local` tracks the last state so the initial (false) frame isn't a spurious leave.
+#[allow(clippy::too_many_arguments)]
+fn enter_exit_print(
+    print: Res<PrintView>,
+    mut was_on: Local<bool>,
+    cfg: Res<SceneCfg>,
+    cuts: Res<Cuts>,
+    mut job: ResMut<PrintJob>,
+    mut status: ResMut<Status>,
+    pieces: Query<Entity, With<PrintPiece>>,
+    mut models: Query<&mut Visibility, (With<Model>, Without<CutPlaneViz>)>,
+    mut planes: Query<&mut Visibility, (With<CutPlaneViz>, Without<Model>)>,
+    mut commands: Commands,
+) {
+    if print.0 == *was_on {
+        return; // no transition (and not the initial add) — nothing to do
+    }
+    *was_on = print.0;
+    if print.0 {
+        for mut v in &mut models {
+            *v = Visibility::Hidden;
+        }
+        for mut v in &mut planes {
+            *v = Visibility::Hidden;
+        }
+        if job.0.is_none() {
+            kick_print_job(&mut job, &mut status, &cfg, cuts.enabled_cuts());
+        }
+    } else {
+        for e in &pieces {
+            commands.entity(e).despawn();
+        }
+        for mut v in &mut models {
+            *v = Visibility::Inherited;
+        }
+        for mut v in &mut planes {
+            *v = Visibility::Inherited;
+        }
+        status.0 = "ready".into();
+    }
+}
+
+/// Spawn the per-piece render + auto-orient on the compute pool (the OpenSCAD work is off-thread,
+/// so the UI stays live while the plate lays out).
+fn kick_print_job(job: &mut PrintJob, status: &mut Status, cfg: &SceneCfg, cuts: Vec<(char, f64)>) {
+    let Some(src) = cfg.source.clone() else {
+        status.0 = "no .scad source".into();
+        return;
+    };
+    if cuts.is_empty() {
+        status.0 = "no enabled cuts".into();
+        return;
+    }
+    let (root, tmp) = (cfg.root.clone(), cfg.tmp.clone());
+    let task = AsyncComputeTaskPool::get()
+        .spawn(async move { fab::print_layout(root.as_deref(), &src, &cuts, &tmp).map_err(|e| format!("{e:#}")) });
+    job.0 = Some(task);
+    status.0 = "orienting pieces".into();
+}
+
+/// Poll the print-layout job; when it lands, record every piece's auto-orientation (for `reslice`)
+/// and — if still in the preview — shelf-pack the pieces across the bed, each rotated to its
+/// print-up and resting on z=0.
+#[allow(clippy::too_many_arguments)]
+fn poll_print_job(
+    mut job: ResMut<PrintJob>,
+    mut orient: ResMut<Orient>,
+    mut status: ResMut<Status>,
+    cfg: Res<SceneCfg>,
+    print: Res<PrintView>,
+    existing: Query<Entity, With<PrintPiece>>,
+    mut cams: Query<&mut Orbit>,
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+) {
+    let Some(task) = job.0.as_mut() else {
+        return;
+    };
+    let Some(result) = block_on(future::poll_once(task)) else {
+        return;
+    };
+    job.0 = None;
+    let pieces = match result {
+        Ok(p) => p,
+        Err(e) => {
+            error!("{e}");
+            status.0 = format!("error: {e}");
+            return;
+        }
+    };
+    for e in &existing {
+        commands.entity(e).despawn();
+    }
+    orient.map.clear();
+
+    // Pass 1: shelf-pack from the origin (walk a row left→right, wrap when the next piece overruns
+    // the bed width), recording each piece's print rotation + placement and the block's extent.
+    // Each piece's translation lands its rotated min-corner at the cursor, resting on the bed (z=0).
+    let gap = 6.0_f32;
+    let bw = cfg.bed[0];
+    let (mut cx, mut cy, mut row_h) = (0.0_f32, 0.0_f32, 0.0_f32);
+    let (mut bb_x, mut bb_y) = (0.0_f32, 0.0_f32);
+    let mut placed: Vec<(usize, Quat, Vec3)> = Vec::new(); // (piece index, rotation, translation)
+    for (i, pp) in pieces.iter().enumerate() {
+        let up = Vec3::from_array(pp.up).normalize_or_zero();
+        let rot = if up == Vec3::ZERO { Quat::IDENTITY } else { Quat::from_rotation_arc(up, Vec3::Z) };
+        orient.map.insert(pp.piece, pp.up);
+        let (rmin, rmax) = rotated_bounds(&pp.mesh.positions, rot);
+        let (w, h) = (rmax.x - rmin.x, rmax.y - rmin.y);
+        if cx > 0.0 && cx + w > bw {
+            cx = 0.0;
+            cy += row_h + gap;
+            row_h = 0.0;
+        }
+        placed.push((i, rot, Vec3::new(cx - rmin.x, cy - rmin.y, -rmin.z)));
+        bb_x = bb_x.max(cx + w);
+        bb_y = bb_y.max(cy + h);
+        cx += w + gap;
+        row_h = row_h.max(h);
+    }
+
+    // Pass 2: centre the packed block on the bed origin (like a slicer auto-arrange) and lay it out.
+    if print.0 {
+        let shift = Vec3::new(-bb_x * 0.5, -bb_y * 0.5, 0.0);
+        for &(i, rot, t) in &placed {
+            let mat = materials.add(StandardMaterial {
+                base_color: Color::hsl((i as f32 * 47.0) % 360.0, 0.55, 0.55),
+                perceptual_roughness: 0.7,
+                ..default()
+            });
+            commands.spawn((
+                Mesh3d(meshes.add(build_mesh(&pieces[i].mesh))),
+                MeshMaterial3d(mat),
+                Transform { translation: t + shift, rotation: rot, ..default() },
+                PrintPiece,
+            ));
+        }
+        let span = bb_x.max(bb_y).max(80.0);
+        for mut o in &mut cams {
+            o.target = Vec3::ZERO;
+            o.radius = span * 1.3;
+        }
+    }
+    let n = pieces.len();
+    status.0 = format!("{n} piece{} auto-oriented for print", if n == 1 { "" } else { "s" });
+}
+
+/// AABB of `positions` after applying `rot` (the print-up rotation), for shelf-packing the piece.
+fn rotated_bounds(positions: &[[f32; 3]], rot: Quat) -> (Vec3, Vec3) {
+    let mut it = positions.iter().map(|p| rot * Vec3::from_array(*p));
+    let first = it.next().unwrap_or(Vec3::ZERO);
+    let (mut min, mut max) = (first, first);
+    for v in it {
+        min = min.min(v);
+        max = max.max(v);
+    }
+    (min, max)
 }
 
 // ---- headless screenshot --------------------------------------------------------------
@@ -1309,7 +1523,7 @@ fn setup_offscreen_model(
     if !scene.reslice_on_start {
         return whole_mesh;
     }
-    match fab::reslice(scene.root.as_deref(), src, &[('x', cut_x as f64)], &[], SPREAD, &scene.tmp) {
+    match fab::reslice(scene.root.as_deref(), src, &[('x', cut_x as f64)], &[], &[], SPREAD, &scene.tmp) {
         Ok(sliced) => load_model(meshes, Some(&sliced)),
         Err(e) => {
             error!("{e:#}");
@@ -1358,6 +1572,7 @@ enum Action {
     Wait(u32),     // idle this many frames
     Conn(usize, f32, f32), // place a connector on cut <i> at (a, b) in its plane's non-axis dims
     Edit(usize),           // open cut <i>'s 2D connector editor
+    PrintView,             // toggle the print-orientation preview (renders + auto-orients pieces)
 }
 
 #[derive(Resource)]
@@ -1397,6 +1612,7 @@ fn parse_script(s: &str) -> Vec<Action> {
                     Some(Action::Conn(i, a, b))
                 }
                 "edit" => it.next()?.parse().ok().map(Action::Edit),
+                "printview" => Some(Action::PrintView),
                 other => {
                     eprintln!("script: unknown action '{other}'");
                     None
@@ -1431,6 +1647,9 @@ fn run_scripted(scene: SceneCfg, actions: Vec<Action>) {
         .init_resource::<Conns>()
         .init_resource::<EditCut>()
         .init_resource::<XSection>()
+        .init_resource::<Orient>()
+        .init_resource::<PrintView>()
+        .init_resource::<PrintJob>()
         .init_resource::<ModelBounds>()
         .init_resource::<WholeMesh>()
         .init_resource::<SlicedMesh>()
@@ -1457,6 +1676,8 @@ fn run_scripted(scene: SceneCfg, actions: Vec<Action>) {
                 (push_fields, sync_selected, apply_icon_font, rebuild_panel).chain(),
                 mark_dirty,
                 revert_on_edit,
+                enter_exit_print,
+                poll_print_job,
                 run_script,
             ),
         )
@@ -1486,7 +1707,7 @@ fn setup_script(
         bevy::ui::IsDefaultUiCamera,
     ));
     commands.insert_resource(RenderTargetImage(target));
-    kick_job(&mut job, &mut status, &scene, false, vec![], vec![]);
+    kick_job(&mut job, &mut status, &scene, false, vec![], vec![], vec![]);
 }
 
 /// Step the script: each action drives the real systems, waiting on async work to settle.
@@ -1499,6 +1720,8 @@ fn run_script(
     mut cuts: ResMut<Cuts>,
     mut conns: ResMut<Conns>,
     mut edit_cut: ResMut<EditCut>,
+    mut print: ResMut<PrintView>,
+    print_job: Res<PrintJob>,
     xsection: Res<XSection>,
     mut reslice_w: MessageWriter<ReSlice>,
     mut commands: Commands,
@@ -1589,6 +1812,13 @@ fn run_script(
                 edit_cut.0 = Some(i);
             }
             runner.timer >= 10 // give the cross-section render + profile build time
+        }
+        Action::PrintView => {
+            if runner.timer == 1 {
+                print.0 = !print.0;
+            }
+            // enter_exit_print kicks the render next frame; wait for the off-thread layout to land.
+            runner.timer > 3 && print_job.0.is_none()
         }
     };
     if done {
@@ -1864,6 +2094,10 @@ fn build_panel(cuts: &Cuts) -> impl Scene + 'static {
                 @FeathersButton { @caption: bsn!{ Text("Explode") ThemedText ViewToggleLabel } }
                 ViewToggleButton
                 on(toggle_view)
+            ),
+            (
+                @FeathersButton { @caption: bsn!{ Text("Print view") ThemedText } }
+                on(|_: On<Activate>, mut pv: ResMut<PrintView>| { pv.0 = !pv.0; })
             ),
         ]
     }

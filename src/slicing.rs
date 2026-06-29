@@ -59,6 +59,37 @@ fn onion_axis(a: V3, u_lo: V3, u_up: V3) -> OnionAxis {
     OnionAxis::Feasible { cap, ang }
 }
 
+/// Cut positions grouped by axis, each ascending — the shared prep for the driver, per-piece
+/// codegen, and the feasibility query (`slice()` and the slab math both need sorted cuts).
+fn axes_sorted(s: &Slicing) -> Result<[Vec<f64>; 3]> {
+    let mut by_axis: [Vec<f64>; 3] = [Vec::new(), Vec::new(), Vec::new()];
+    for c in &s.cut {
+        by_axis[c.axis_index()?].push(c.at());
+    }
+    for v in by_axis.iter_mut() {
+        v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    }
+    Ok(by_axis)
+}
+
+/// Per-connector onion feasibility under the spec's orientations, index-aligned with `s.connector`:
+/// `true` = the onion prints support-free for both bordering pieces, `false` = its orientation gate
+/// failed and `driver_scad` downgrades it to a bolt. Non-onion connectors are `true` (nothing to
+/// downgrade). The GUI's joint-downgrade flag runs through THIS — same gate the slice applies, so
+/// the flag the user sees and the joint the slice carves never disagree.
+pub fn onion_feasibility(s: &Slicing) -> Result<Vec<bool>> {
+    let by_axis = axes_sorted(s)?;
+    s.connector
+        .iter()
+        .map(|c| {
+            if c.kind != "onion" {
+                return Ok(true);
+            }
+            Ok(matches!(onion_resolution(s, &by_axis, c)?, OnionAxis::Feasible { .. }))
+        })
+        .collect()
+}
+
 /// +unit vector along axis 0/1/2 (the cut axis, pointing toward the upper piece).
 fn unit_v(axis: usize) -> V3 {
     [(axis == 0) as i32 as f64, (axis == 1) as i32 as f64, (axis == 2) as i32 as f64]
@@ -145,14 +176,7 @@ fn n(x: f64) -> String {
 /// Generate the driver: nested `slice()` per axis around a `diff()` of the imported source
 /// minus the connectors. `source` is the import path, relative to the driver file.
 pub fn driver_scad(s: &Slicing, source: &str, spread: f64) -> Result<String> {
-    // Group cut positions by axis, ascending (slice() requires ascending cuts).
-    let mut by_axis: [Vec<f64>; 3] = [Vec::new(), Vec::new(), Vec::new()];
-    for c in &s.cut {
-        by_axis[c.axis_index()?].push(c.at());
-    }
-    for v in by_axis.iter_mut() {
-        v.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    }
+    let by_axis = axes_sorted(s)?; // slice() requires ascending cuts
 
     let mut slices = String::new();
     for (ax, cuts) in by_axis.iter().enumerate() {
@@ -220,13 +244,7 @@ pub fn piece_indices(s: &Slicing) -> Result<Vec<[usize; 3]>> {
 /// the imported source. For per-piece rendering — auto-orient overhang scoring (#42) and the
 /// print-orientation preview. `piece` is the slab multi-index; an axis with no cuts must be index 0.
 pub fn piece_driver(s: &Slicing, source: &str, piece: [usize; 3]) -> Result<String> {
-    let mut by_axis: [Vec<f64>; 3] = [Vec::new(), Vec::new(), Vec::new()];
-    for c in &s.cut {
-        by_axis[c.axis_index()?].push(c.at());
-    }
-    for v in by_axis.iter_mut() {
-        v.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    }
+    let by_axis = axes_sorted(s)?;
     let mut slices = String::new();
     for (ax, cuts) in by_axis.iter().enumerate() {
         if cuts.is_empty() {
@@ -454,6 +472,28 @@ mod tests {
         assert!(d.contains("import(\"m.stl\")") && !d.contains("connectors ="), "{d}");
         // an axis with no cuts must be index 0
         assert!(piece_driver(&s, "m.stl", [0, 1, 0]).is_err());
+    }
+
+    #[test]
+    fn onion_feasibility_flags_the_downgrade() {
+        // Z-cut onion (default +Z) prints; X-cut onion (default +Z) can't (peg across the cut
+        // axis) -> [true, false], index-aligned with the connector list. The GUI's flag.
+        let s = spec(
+            "[project]\nname=\"t\"\n[slicing]\n\
+             [[slicing.cut]]\naxis=\"z\"\nat=0\n\
+             [[slicing.cut]]\naxis=\"x\"\nat=0\n\
+             [[slicing.connector]]\ncut=0\ntype=\"onion\"\npos=[0,0]\nsize=10\n\
+             [[slicing.connector]]\ncut=1\ntype=\"onion\"\npos=[0,0]\nsize=10\n",
+        );
+        assert_eq!(onion_feasibility(&s).unwrap(), vec![true, false]);
+        // An orientation override that tilts the Z-cut's lower piece off-axis downgrades it too.
+        let tilted = spec(
+            "[project]\nname=\"t\"\n[slicing]\n\
+             [[slicing.cut]]\naxis=\"z\"\nat=0\n\
+             [[slicing.connector]]\ncut=0\ntype=\"onion\"\npos=[0,0]\nsize=10\n\
+             [[slicing.orient]]\npiece=[0,0,0]\nup=[1,0,0]\n",
+        );
+        assert_eq!(onion_feasibility(&tilted).unwrap(), vec![false]);
     }
 
     #[test]

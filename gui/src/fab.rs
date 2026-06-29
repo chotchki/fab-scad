@@ -28,6 +28,32 @@ fn cuts_to_spec(cuts: &[(char, f64)]) -> Slicing {
     Slicing { printer: None, cut, connector: vec![], orient: vec![] }
 }
 
+/// GUI onion placements → manifest connectors (the GUI's only connector kind is the onion now).
+fn to_connectors(connectors: &[Conn]) -> Vec<Connector> {
+    connectors
+        .iter()
+        .map(|c| Connector {
+            cut: c.cut,
+            kind: "onion".to_string(),
+            screw: None,
+            pos: [Num::Float(c.pos[0]), Num::Float(c.pos[1])],
+            through: None,
+            size: Some(c.size),
+        })
+        .collect()
+}
+
+/// GUI per-piece orientations → manifest `[slicing.orient]` entries.
+fn to_orient(orient: &[Orient3]) -> Vec<PieceOrient> {
+    orient
+        .iter()
+        .map(|o| PieceOrient {
+            piece: o.piece,
+            up: [Num::Float(o.up[0]), Num::Float(o.up[1]), Num::Float(o.up[2])],
+        })
+        .collect()
+}
+
 /// Walk up to the fab-scad root (the dir with `printers.toml` + `scad-lib/`) for OPENSCADPATH.
 pub fn find_root() -> Option<PathBuf> {
     let mut dir = std::env::current_dir().ok()?;
@@ -156,29 +182,30 @@ pub fn reslice(
             at: Num::Float(at),
         })
         .collect();
-    let connector = connectors
-        .iter()
-        .map(|c| Connector {
-            cut: c.cut,
-            kind: "onion".to_string(),
-            screw: None,
-            pos: [Num::Float(c.pos[0]), Num::Float(c.pos[1])],
-            through: None,
-            size: Some(c.size),
-        })
-        .collect();
     // Per-piece print orientations (auto-picked, seeded by the print-orientation preview). They
     // GATE the onions — a piece oriented off its cut axis downgrades that joint to a bolt. Empty =
     // every piece defaults to +Z (`slicing::piece_up`), which is the pre-orientation behaviour.
-    let orient = orient
-        .iter()
-        .map(|o| PieceOrient {
-            piece: o.piece,
-            up: [Num::Float(o.up[0]), Num::Float(o.up[1]), Num::Float(o.up[2])],
-        })
-        .collect();
-    let spec = Slicing { printer: None, cut, connector, orient };
+    let spec = Slicing {
+        printer: None,
+        cut,
+        connector: to_connectors(connectors),
+        orient: to_orient(orient),
+    };
     slicing::slice_part(&oscad, &wrap, &spec, spread, out_dir, TIMEOUT)
+}
+
+/// Per-connector onion feasibility under the current cuts + orientations, index-aligned with
+/// `connectors`: `true` = prints support-free, `false` = downgrades to a bolt. Pure (no render),
+/// so the GUI can flag joints live as cuts/orientations change. Same gate `reslice` carves with.
+pub fn conn_feasibility(
+    cuts: &[(char, f64)],
+    connectors: &[Conn],
+    orient: &[Orient3],
+) -> Result<Vec<bool>> {
+    let mut spec = cuts_to_spec(cuts);
+    spec.connector = to_connectors(connectors);
+    spec.orient = to_orient(orient);
+    slicing::onion_feasibility(&spec)
 }
 
 /// A connector to place, resolved for slicing: `cut` is the index into the cuts slice passed

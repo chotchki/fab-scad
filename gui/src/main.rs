@@ -8,7 +8,7 @@
 //!   cargo run -p fab-gui -- part.scad --screenshot out.png  # headless render to PNG (self-verify)
 //!   cargo run -p fab-gui -- part.scad --script "addcut 30; reslice; shot a.png"  # scripted harness
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use bevy::{
@@ -180,12 +180,27 @@ struct EditCut(Option<usize>);
 #[derive(Resource, Default)]
 struct XSection(Option<Vec<Vec<[f32; 2]>>>);
 
-/// Per-piece print orientations, keyed by slab multi-index — the least-support build-up auto-picked
-/// by the print-orientation preview (manual override is Phase E). Threaded into `reslice` so the
-/// slice gates its onions on how each piece actually prints. Empty = every piece defaults to +Z.
+/// Per-piece print orientations, keyed by slab multi-index — the build-up direction (model space)
+/// each piece prints in. The preview seeds `map` with the auto-pick (`auto_orient::best_up`);
+/// clicking a piece's face sets a MANUAL override (recorded in `manual` so a re-render keeps it).
+/// Threaded into `reslice` so the slice gates its onions on how each piece actually prints. Empty =
+/// every piece defaults to +Z (the pre-orientation behaviour).
 #[derive(Resource, Default)]
 struct Orient {
     map: HashMap<[usize; 3], [f32; 3]>,
+    manual: HashSet<[usize; 3]>,
+}
+
+impl Orient {
+    /// Record a user-chosen build-up for `piece` (model space, normalised by the caller).
+    fn set_manual(&mut self, piece: [usize; 3], up: [f32; 3]) {
+        self.map.insert(piece, up);
+        self.manual.insert(piece);
+    }
+    /// This piece's build-up, falling back to `auto` (the auto-pick) when unset.
+    fn up_or(&self, piece: [usize; 3], auto: [f32; 3]) -> [f32; 3] {
+        self.map.get(&piece).copied().unwrap_or(auto)
+    }
 }
 
 /// Whether the print-orientation preview is showing: the model + cut planes hide, and every piece
@@ -198,9 +213,21 @@ struct PrintView(bool);
 #[derive(Resource, Default)]
 struct PrintJob(Option<Task<Result<Vec<fab::PiecePrint>, String>>>);
 
-/// One laid-out piece in the print-orientation preview, despawned when the preview closes.
+/// The last print-layout's rendered pieces, kept so a manual re-orient re-lays-out from the cached
+/// meshes (no re-render). Cleared when the preview closes.
+#[derive(Resource, Default)]
+struct PrintPieces(Option<Vec<fab::PiecePrint>>);
+
+/// Per-placed-connector onion feasibility (index-aligned with `Conns::list`): `true` = prints
+/// support-free, `false` = downgrades to a bolt under the current orientations. Drives the marker
+/// colour + the downgrade count. Recomputed when cuts / connectors / orientations change.
+#[derive(Resource, Default)]
+struct Feas(Vec<bool>);
+
+/// One laid-out piece in the print-orientation preview (its slab multi-index, for the click→orient
+/// pick). Despawned when the preview closes.
 #[derive(Component)]
-struct PrintPiece;
+struct PrintPiece([usize; 3]);
 
 /// The 3D point of a `(pos_a, pos_b)` on a cut plane: `at` along the axis, pos in the two non-axis
 /// dims (ascending) — the inverse of the connector projection.
@@ -385,6 +412,8 @@ fn run_windowed(scene: SceneCfg) {
         .init_resource::<Orient>()
         .init_resource::<PrintView>()
         .init_resource::<PrintJob>()
+        .init_resource::<PrintPieces>()
+        .init_resource::<Feas>()
         .init_resource::<ModelBounds>()
         .init_resource::<DraggingCut>()
         .init_resource::<WholeMesh>()
@@ -399,6 +428,7 @@ fn run_windowed(scene: SceneCfg) {
         .add_observer(on_drag_end)
         .add_observer(on_click)
         .add_observer(place_on_profile_click)
+        .add_observer(orient_piece_on_click)
         .add_systems(Startup, (setup_windowed, load_icons))
         .add_systems(
             Update,
@@ -419,8 +449,12 @@ fn run_windowed(scene: SceneCfg) {
                 mark_dirty,
                 revert_on_edit,
                 auto_scale,
-                enter_exit_print,
-                poll_print_job,
+                (
+                    enter_exit_print,
+                    // poll seeds the auto-orient, then sync_orientation lays out + flags downgrades.
+                    (poll_print_job, sync_orientation).chain(),
+                    color_conn_markers,
+                ),
             ),
         )
         .run();
@@ -705,17 +739,18 @@ fn sync_conn_markers(
             commands.entity(e).despawn();
         }
         let mesh = meshes.add(Sphere::new(3.0));
-        let mat = mats.add(StandardMaterial {
-            base_color: Color::srgb(0.95, 0.45, 0.45),
-            unlit: true,
-            depth_bias: 1.0e8, // render on top — the connector point sits inside the solid model
-            ..default()
-        });
         for i in 0..conns.list.len() {
+            // Each marker gets its OWN material so color_conn_markers can tint it by feasibility.
+            let mat = mats.add(StandardMaterial {
+                base_color: Color::srgb(0.30, 0.85, 0.70),
+                unlit: true,
+                depth_bias: 1.0e8, // render on top — the connector point sits inside the solid model
+                ..default()
+            });
             commands.spawn((
                 ConnMarker(i),
                 Mesh3d(mesh.clone()),
-                MeshMaterial3d(mat.clone()),
+                MeshMaterial3d(mat),
                 Transform::default(),
                 Visibility::Hidden,
             ));
@@ -1256,6 +1291,7 @@ fn enter_exit_print(
     cfg: Res<SceneCfg>,
     cuts: Res<Cuts>,
     mut job: ResMut<PrintJob>,
+    mut cache: ResMut<PrintPieces>,
     mut status: ResMut<Status>,
     pieces: Query<Entity, With<PrintPiece>>,
     mut models: Query<&mut Visibility, (With<Model>, Without<CutPlaneViz>)>,
@@ -1273,6 +1309,7 @@ fn enter_exit_print(
         for mut v in &mut planes {
             *v = Visibility::Hidden;
         }
+        cache.0 = None; // cuts may have moved — wait for a fresh render before laying out
         if job.0.is_none() {
             kick_print_job(&mut job, &mut status, &cfg, cuts.enabled_cuts());
         }
@@ -1280,6 +1317,7 @@ fn enter_exit_print(
         for e in &pieces {
             commands.entity(e).despawn();
         }
+        cache.0 = None;
         for mut v in &mut models {
             *v = Visibility::Inherited;
         }
@@ -1308,21 +1346,15 @@ fn kick_print_job(job: &mut PrintJob, status: &mut Status, cfg: &SceneCfg, cuts:
     status.0 = "orienting pieces".into();
 }
 
-/// Poll the print-layout job; when it lands, record every piece's auto-orientation (for `reslice`)
-/// and — if still in the preview — shelf-pack the pieces across the bed, each rotated to its
-/// print-up and resting on z=0.
-#[allow(clippy::too_many_arguments)]
+/// Poll the print-layout job; when it lands, cache the rendered pieces (so a manual re-orient can
+/// re-lay-out without re-rendering) and seed every piece's auto-orientation. A fresh render is a
+/// fresh auto-pick: it resets the orientations (dropping prior manual overrides — re-entering the
+/// preview is the reset gesture). `relayout_pieces` does the actual layout from here.
 fn poll_print_job(
     mut job: ResMut<PrintJob>,
     mut orient: ResMut<Orient>,
+    mut cache: ResMut<PrintPieces>,
     mut status: ResMut<Status>,
-    cfg: Res<SceneCfg>,
-    print: Res<PrintView>,
-    existing: Query<Entity, With<PrintPiece>>,
-    mut cams: Query<&mut Orbit>,
-    mut commands: Commands,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
     let Some(task) = job.0.as_mut() else {
         return;
@@ -1339,23 +1371,85 @@ fn poll_print_job(
             return;
         }
     };
+    orient.map.clear();
+    orient.manual.clear();
+    for pp in &pieces {
+        orient.map.insert(pp.piece, pp.up);
+    }
+    let n = pieces.len();
+    cache.0 = Some(pieces);
+    status.0 = format!("{n} piece{}: click a face to set print-down", if n == 1 { "" } else { "s" });
+}
+
+/// React to a change in cuts / connectors / orientations / cache: recompute every connector's onion
+/// feasibility (drives the marker colour + the downgrade count), and — in the preview — lay the
+/// cached pieces out rotated to their build-up, shelf-packed and centred on the bed (z=0). ONE
+/// system so feasibility and layout share a run: the status's downgrade count is always the count
+/// for the orientation just laid out, never a frame stale. Re-runs from the mesh cache (no OpenSCAD).
+#[allow(clippy::too_many_arguments)]
+fn sync_orientation(
+    print: Res<PrintView>,
+    cuts: Res<Cuts>,
+    conns: Res<Conns>,
+    orient: Res<Orient>,
+    cache: Res<PrintPieces>,
+    cfg: Res<SceneCfg>,
+    mut feas: ResMut<Feas>,
+    existing: Query<Entity, With<PrintPiece>>,
+    mut cams: Query<&mut Orbit>,
+    mut status: ResMut<Status>,
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+) {
+    if !(cuts.is_changed() || conns.is_changed() || orient.is_changed() || cache.is_changed()) {
+        return;
+    }
+
+    // Feasibility: resolve placed connectors to the enabled-cut indexing (tracking their source
+    // index), run the SAME gate the slice applies, write flags back aligned with `Conns::list`.
+    let enabled = cuts.enabled_indices();
+    let mut resolved = Vec::new();
+    let mut src = Vec::new();
+    for (i, pc) in conns.list.iter().enumerate() {
+        if let Some(ei) = enabled.iter().position(|&si| si == pc.cut) {
+            resolved.push(fab::Conn { cut: ei, pos: [pc.pos[0] as f64, pc.pos[1] as f64], size: pc.size as f64 });
+            src.push(i);
+        }
+    }
+    let mut flags = vec![true; conns.list.len()];
+    match fab::conn_feasibility(&cuts.enabled_cuts(), &resolved, &orient_inputs(&orient)) {
+        Ok(f) => {
+            for (k, ok) in f.into_iter().enumerate() {
+                flags[src[k]] = ok;
+            }
+        }
+        Err(e) => error!("feasibility: {e:#}"),
+    }
+    let down = flags.iter().filter(|&&ok| !ok).count();
+    feas.0 = flags;
+
+    // Layout: only in the preview, only once a render has populated the cache.
+    if !print.0 {
+        return;
+    }
+    let Some(pieces) = &cache.0 else {
+        return;
+    };
     for e in &existing {
         commands.entity(e).despawn();
     }
-    orient.map.clear();
 
-    // Pass 1: shelf-pack from the origin (walk a row left→right, wrap when the next piece overruns
-    // the bed width), recording each piece's print rotation + placement and the block's extent.
-    // Each piece's translation lands its rotated min-corner at the cursor, resting on the bed (z=0).
+    // Pass 1: shelf-pack from the origin (walk a row left→right, wrap at the bed width), each piece
+    // rotated to its build-up. Translation lands the rotated min-corner at the cursor, on z=0.
     let gap = 6.0_f32;
     let bw = cfg.bed[0];
     let (mut cx, mut cy, mut row_h) = (0.0_f32, 0.0_f32, 0.0_f32);
-    let (mut bb_x, mut bb_y) = (0.0_f32, 0.0_f32);
+    let (mut bb_x, mut bb_y, mut bb_z) = (0.0_f32, 0.0_f32, 0.0_f32);
     let mut placed: Vec<(usize, Quat, Vec3)> = Vec::new(); // (piece index, rotation, translation)
     for (i, pp) in pieces.iter().enumerate() {
-        let up = Vec3::from_array(pp.up).normalize_or_zero();
+        let up = Vec3::from_array(orient.up_or(pp.piece, pp.up)).normalize_or_zero();
         let rot = if up == Vec3::ZERO { Quat::IDENTITY } else { Quat::from_rotation_arc(up, Vec3::Z) };
-        orient.map.insert(pp.piece, pp.up);
         let (rmin, rmax) = rotated_bounds(&pp.mesh.positions, rot);
         let (w, h) = (rmax.x - rmin.x, rmax.y - rmin.y);
         if cx > 0.0 && cx + w > bw {
@@ -1366,34 +1460,75 @@ fn poll_print_job(
         placed.push((i, rot, Vec3::new(cx - rmin.x, cy - rmin.y, -rmin.z)));
         bb_x = bb_x.max(cx + w);
         bb_y = bb_y.max(cy + h);
+        bb_z = bb_z.max(rmax.z - rmin.z); // a tilted piece stands tall — frame for it too
         cx += w + gap;
         row_h = row_h.max(h);
     }
 
-    // Pass 2: centre the packed block on the bed origin (like a slicer auto-arrange) and lay it out.
-    if print.0 {
-        let shift = Vec3::new(-bb_x * 0.5, -bb_y * 0.5, 0.0);
-        for &(i, rot, t) in &placed {
-            let mat = materials.add(StandardMaterial {
-                base_color: Color::hsl((i as f32 * 47.0) % 360.0, 0.55, 0.55),
-                perceptual_roughness: 0.7,
-                ..default()
-            });
-            commands.spawn((
-                Mesh3d(meshes.add(build_mesh(&pieces[i].mesh))),
-                MeshMaterial3d(mat),
-                Transform { translation: t + shift, rotation: rot, ..default() },
-                PrintPiece,
-            ));
-        }
-        let span = bb_x.max(bb_y).max(80.0);
-        for mut o in &mut cams {
-            o.target = Vec3::ZERO;
-            o.radius = span * 1.3;
-        }
+    // Pass 2: centre the block on the bed origin (like a slicer auto-arrange) and spawn.
+    let shift = Vec3::new(-bb_x * 0.5, -bb_y * 0.5, 0.0);
+    for &(i, rot, t) in &placed {
+        let mat = materials.add(StandardMaterial {
+            base_color: Color::hsl((i as f32 * 47.0) % 360.0, 0.55, 0.55),
+            perceptual_roughness: 0.7,
+            ..default()
+        });
+        commands.spawn((
+            Mesh3d(meshes.add(build_mesh(&pieces[i].mesh))),
+            MeshMaterial3d(mat),
+            Transform { translation: t + shift, rotation: rot, ..default() },
+            PrintPiece(pieces[i].piece),
+        ));
+    }
+    // Frame the laid-out block — including a tall tilted piece (account for height, raise the target).
+    let span = bb_x.max(bb_y).max(bb_z).max(80.0);
+    for mut o in &mut cams {
+        o.target = Vec3::new(0.0, 0.0, bb_z * 0.4);
+        o.radius = span * 1.3;
     }
     let n = pieces.len();
-    status.0 = format!("{n} piece{} auto-oriented for print", if n == 1 { "" } else { "s" });
+    status.0 = if down > 0 {
+        format!("{n} pieces, {down} onion{} -> bolt (this orientation)", if down == 1 { "" } else { "s" })
+    } else {
+        format!("{n} pieces oriented, onions print clean")
+    };
+}
+
+/// Click a piece's face in the preview to lay that face on the bed: the new build-up is the
+/// model-space direction opposite the clicked face (the piece's current rotation maps model→world,
+/// so invert it to bring the hit normal back to model space). Recorded as a manual override.
+fn orient_piece_on_click(
+    ev: On<Pointer<Click>>,
+    print: Res<PrintView>,
+    pieces: Query<(&PrintPiece, &Transform)>,
+    mut orient: ResMut<Orient>,
+) {
+    if !print.0 || ev.event.button != PointerButton::Primary {
+        return;
+    }
+    let (Ok((pp, tf)), Some(world_n)) = (pieces.get(ev.entity), ev.event.hit.normal) else {
+        return;
+    };
+    let up_model = -(tf.rotation.inverse() * world_n);
+    orient.set_manual(pp.0, up_model.normalize_or_zero().to_array());
+}
+
+/// Colour each connector marker by feasibility: teal = the onion prints support-free, orange = it
+/// downgrades to a bolt under the current orientations. Live feedback in the assembled/exploded view.
+fn color_conn_markers(
+    feas: Res<Feas>,
+    markers: Query<(&ConnMarker, &MeshMaterial3d<StandardMaterial>)>,
+    mut mats: ResMut<Assets<StandardMaterial>>,
+) {
+    for (m, mat) in &markers {
+        let ok = feas.0.get(m.0).copied().unwrap_or(true);
+        let want = if ok { Color::srgb(0.30, 0.85, 0.70) } else { Color::srgb(1.0, 0.55, 0.15) };
+        if let Some(mut material) = mats.get_mut(&mat.0) {
+            if material.base_color != want {
+                material.base_color = want;
+            }
+        }
+    }
 }
 
 /// AABB of `positions` after applying `rot` (the print-up rotation), for shelf-packing the piece.
@@ -1573,6 +1708,7 @@ enum Action {
     Conn(usize, f32, f32), // place a connector on cut <i> at (a, b) in its plane's non-axis dims
     Edit(usize),           // open cut <i>'s 2D connector editor
     PrintView,             // toggle the print-orientation preview (renders + auto-orients pieces)
+    Orient([usize; 3], [f32; 3]), // manually set piece [ix,iy,iz]'s build-up to (ux,uy,uz)
 }
 
 #[derive(Resource)]
@@ -1613,6 +1749,11 @@ fn parse_script(s: &str) -> Vec<Action> {
                 }
                 "edit" => it.next()?.parse().ok().map(Action::Edit),
                 "printview" => Some(Action::PrintView),
+                "orient" => {
+                    let piece = [it.next()?.parse().ok()?, it.next()?.parse().ok()?, it.next()?.parse().ok()?];
+                    let up = [it.next()?.parse().ok()?, it.next()?.parse().ok()?, it.next()?.parse().ok()?];
+                    Some(Action::Orient(piece, up))
+                }
                 other => {
                     eprintln!("script: unknown action '{other}'");
                     None
@@ -1650,6 +1791,8 @@ fn run_scripted(scene: SceneCfg, actions: Vec<Action>) {
         .init_resource::<Orient>()
         .init_resource::<PrintView>()
         .init_resource::<PrintJob>()
+        .init_resource::<PrintPieces>()
+        .init_resource::<Feas>()
         .init_resource::<ModelBounds>()
         .init_resource::<WholeMesh>()
         .init_resource::<SlicedMesh>()
@@ -1676,8 +1819,12 @@ fn run_scripted(scene: SceneCfg, actions: Vec<Action>) {
                 (push_fields, sync_selected, apply_icon_font, rebuild_panel).chain(),
                 mark_dirty,
                 revert_on_edit,
-                enter_exit_print,
-                poll_print_job,
+                (
+                    enter_exit_print,
+                    // poll seeds the auto-orient, then sync_orientation lays out + flags downgrades.
+                    (poll_print_job, sync_orientation).chain(),
+                    color_conn_markers,
+                ),
                 run_script,
             ),
         )
@@ -1721,6 +1868,7 @@ fn run_script(
     mut conns: ResMut<Conns>,
     mut edit_cut: ResMut<EditCut>,
     mut print: ResMut<PrintView>,
+    mut orient: ResMut<Orient>,
     print_job: Res<PrintJob>,
     xsection: Res<XSection>,
     mut reslice_w: MessageWriter<ReSlice>,
@@ -1819,6 +1967,12 @@ fn run_script(
             }
             // enter_exit_print kicks the render next frame; wait for the off-thread layout to land.
             runner.timer > 3 && print_job.0.is_none()
+        }
+        Action::Orient(piece, up) => {
+            if runner.timer == 1 {
+                orient.set_manual(piece, Vec3::from_array(up).normalize_or_zero().to_array());
+            }
+            runner.timer >= 3 // let relayout + feasibility catch up
         }
     };
     if done {

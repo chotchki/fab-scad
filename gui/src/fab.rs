@@ -46,6 +46,7 @@ pub fn whole_stl(source: &Path, out_dir: &Path) -> PathBuf {
 
 /// Render ONE bare piece (slab multi-index) of the already-rendered preview STL — for auto-orient
 /// overhang scoring + the print-orientation preview. Returns the piece STL (empty if no geometry).
+#[allow(dead_code)] // wired in by the print-orientation preview (next)
 pub fn render_piece(
     root: Option<&Path>,
     stl: &Path,

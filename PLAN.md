@@ -14,11 +14,11 @@ Driven by `claude-plan-bridge` (FORMATv2). Hand-authored; run
 - [ ] 5.1 - GUI MVP: load model, set cut planes, click a face to place pegs/connectors, preview piece-vs-bed + orientation
   - [x] 5.1.1 - Sim-interaction test harness: scripted input → real systems → screenshot
   - [x] 5.1.2 - Multi-cut + per-cut axis: set cut lines, rotate/pick the plane
-  - [ ] 5.1.3 - Face-pick connector placement: click model → drop bolt/pin on the cut
+  - [x] 5.1.3 - Face-pick connector placement: click model → drop bolt/pin on the cut
     - [x] 5.1.3.1 - Manual face-pick: click model → drop a connector on the nearest cut (build first)
     - [x] 5.1.3.2 - BOSL2 onion connector (support-free), replacing pin/dowel
     - [x] 5.1.3.3 - Per-piece print-orientation UI → derive connector orientation
-    - [ ] 5.1.3.4 - Cross-section-driven auto-size + auto-place connectors
+    - [x] 5.1.3.4 - Cross-section-driven auto-size + auto-place connectors
     - [x] 5.1.3.5 - Per-cut 2D cross-section connector editor: button on a cut → see its profile → pick connectors on it
 - [x] 5.2 - Emit the slicing spec that scad-lib/fab consume; round-trip it through `fab render`
 - [ ] 5.3 - Grow into a friendly workflow front-end (cut the verb-memorization tax)

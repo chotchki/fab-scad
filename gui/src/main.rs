@@ -70,6 +70,10 @@ struct Model;
 #[derive(Message)]
 struct ReSlice;
 
+/// Button / `autoplace` verb → "fill the open cut's cross-section with auto-sized onions".
+#[derive(Message)]
+struct AutoPlace;
+
 /// The in-flight render/slice (off the main thread): `(was_reslice, task)`. The task yields
 /// `Ok(stl)` when done, else an error string.
 #[derive(Resource, Default)]
@@ -430,6 +434,7 @@ fn run_windowed(scene: SceneCfg) {
         .init_resource::<PanelSig>()
         .insert_resource(Status("rendering".into()))
         .add_message::<ReSlice>()
+        .add_message::<AutoPlace>()
         .add_observer(on_drag_start)
         .add_observer(on_drag)
         .add_observer(on_drag_end)
@@ -464,6 +469,7 @@ fn run_windowed(scene: SceneCfg) {
                     // poll seeds the auto-orient, then sync_orientation lays out + flags downgrades.
                     (poll_print_job, sync_orientation).chain(),
                     color_conn_markers,
+                    do_auto_place,
                 ),
             ),
         )
@@ -648,6 +654,12 @@ fn remove_cut(cuts: &mut Cuts, conns: &mut Conns, idx: usize) {
 /// Smallest onion worth placing (mm): below this the wall/slab is too thin for a useful joint, so
 /// we decline rather than punch an oversized peg through it.
 const MIN_ONION: f32 = 2.0;
+/// Material to leave between the onion's equator and the nearest edge / slab face.
+const ONION_WALL: f64 = 1.2;
+/// Largest onion the auto-sizer will grow to in open material.
+const ONION_MAX_D: f64 = 16.0;
+/// Grid pitch for auto-place — connectors land roughly this far apart across the cut face.
+const ONION_SPACING: f64 = 18.0;
 
 /// Place a connector on `cut` at `pos` (diameter `size`), or — if the click lands on one already
 /// there — remove it (click-to-toggle). Declines to place a sub-`MIN_ONION` onion (too thin a spot)
@@ -676,22 +688,24 @@ fn toggle_connector(conns: &mut Conns, cut: usize, pos: [f32; 2], size: f32) -> 
 /// declines. Falls back to a modest default when there's no cross-section (headless `conn` verb).
 fn auto_size(xsection: &XSection, cuts: &Cuts, bounds: &ModelBounds, cut: usize, pos: [f32; 2]) -> f32 {
     const DEFAULT: f32 = 6.0;
-    const WALL: f64 = 1.2; // material between the onion's equator and the nearest edge / slab face
-    const MAX_D: f64 = 16.0;
     let cross = match &xsection.0 {
         Some(loops) => {
             let loops: Vec<Vec<[f64; 2]>> = loops
                 .iter()
                 .map(|l| l.iter().map(|&[a, b]| [a as f64, b as f64]).collect())
                 .collect();
-            fab_scad::cross_section::fit_diameter(&loops, [pos[0] as f64, pos[1] as f64], WALL, MAX_D)
+            fab_scad::cross_section::fit_diameter(&loops, [pos[0] as f64, pos[1] as f64], ONION_WALL, ONION_MAX_D)
                 as f32
         }
         None => DEFAULT,
     };
-    // Axial cap: d/2 <= min(slab below, slab above) - wall  =>  d <= 2*(room - wall).
-    let axial = (2.0 * (axial_room(cuts, cut, bounds) - WALL as f32)).max(0.0);
-    cross.min(axial)
+    cross.min(axial_cap(cuts, cut, bounds))
+}
+
+/// The onion-diameter cap from the slab thickness either side of `cut`: the onion reaches d/2 into
+/// each piece along the cut axis, so `d <= 2*(thinner slab - wall)`. Shared by manual sizing + auto-place.
+fn axial_cap(cuts: &Cuts, cut: usize, bounds: &ModelBounds) -> f32 {
+    (2.0 * (axial_room(cuts, cut, bounds) - ONION_WALL as f32)).max(0.0)
 }
 
 /// The thinner of the two slabs bordering `cut` along its axis — how much room the onion has to
@@ -744,6 +758,43 @@ fn place_on_profile_click(
     let pos = [comp(hit, others[0]), comp(hit, others[1])];
     let size = auto_size(&xsection, &cuts, &bounds, i, pos);
     status.0 = toggle_connector(&mut conns, i, pos, size).into();
+}
+
+/// Auto-place connectors across the OPEN cut's cross-section (#41): a grid of wall-fitting onions
+/// over the cut face (`cross_section::auto_place`), each capped by the slab's axial room, replacing
+/// that cut's existing connectors with a fresh auto-layout. Manual tweaks (place/remove) still work
+/// on top. No-op with a hint if no editor is open.
+fn do_auto_place(
+    mut ev: MessageReader<AutoPlace>,
+    edit: Res<EditCut>,
+    xsection: Res<XSection>,
+    cuts: Res<Cuts>,
+    bounds: Res<ModelBounds>,
+    mut conns: ResMut<Conns>,
+    mut status: ResMut<Status>,
+) {
+    if ev.read().count() == 0 {
+        return;
+    }
+    let (Some(i), Some(loops)) = (edit.0, xsection.0.as_ref()) else {
+        status.0 = "open a cut's connector editor to auto-place".into();
+        return;
+    };
+    let loops: Vec<Vec<[f64; 2]>> =
+        loops.iter().map(|l| l.iter().map(|&[a, b]| [a as f64, b as f64]).collect()).collect();
+    let placements =
+        fab_scad::cross_section::auto_place(&loops, ONION_WALL, ONION_MAX_D, ONION_SPACING, MIN_ONION as f64);
+    let cap = axial_cap(&cuts, i, &bounds);
+    conns.list.retain(|c| c.cut != i); // fresh auto-layout for this cut
+    let mut n = 0;
+    for (p, d) in placements {
+        let size = (d as f32).min(cap);
+        if size >= MIN_ONION {
+            conns.list.push(PlacedConn { cut: i, pos: [p[0] as f32, p[1] as f32], size });
+            n += 1;
+        }
+    }
+    status.0 = format!("auto-placed {n} connector{}", if n == 1 { "" } else { "s" });
 }
 
 /// The Explode/Collapse button: collapse to the uncut model, or explode the last sliced result —
@@ -1747,6 +1798,7 @@ fn run_screenshot(scene: SceneCfg, png: PathBuf) {
         .init_resource::<PanelSig>()
         .insert_resource(Status("rendering".into()))
         .add_message::<ReSlice>()
+        .add_message::<AutoPlace>()
         .add_systems(Startup, (setup_offscreen, load_icons))
         .add_systems(Update, (capture_then_exit, (push_fields, sync_selected, apply_icon_font, rebuild_panel).chain(), update_status))
         .run();
@@ -1867,6 +1919,7 @@ enum Action {
     Edit(usize),           // open cut <i>'s 2D connector editor
     PrintView,             // toggle the print-orientation preview (renders + auto-orients pieces)
     Orient([usize; 3], [f32; 3]), // manually set piece [ix,iy,iz]'s build-up to (ux,uy,uz)
+    AutoPlace,             // auto-place connectors across the open cut's cross-section
 }
 
 #[derive(Resource)]
@@ -1907,6 +1960,7 @@ fn parse_script(s: &str) -> Vec<Action> {
                 }
                 "edit" => it.next()?.parse().ok().map(Action::Edit),
                 "printview" => Some(Action::PrintView),
+                "autoplace" => Some(Action::AutoPlace),
                 "orient" => {
                     let piece = [it.next()?.parse().ok()?, it.next()?.parse().ok()?, it.next()?.parse().ok()?];
                     let up = [it.next()?.parse().ok()?, it.next()?.parse().ok()?, it.next()?.parse().ok()?];
@@ -1961,6 +2015,7 @@ fn run_scripted(scene: SceneCfg, actions: Vec<Action>) {
         .insert_resource(Status("rendering".into()))
         .insert_resource(ScriptRunner { actions, idx: 0, timer: 0 })
         .add_message::<ReSlice>()
+        .add_message::<AutoPlace>()
         .add_systems(Startup, (setup_script, load_icons))
         .add_systems(
             Update,
@@ -1986,6 +2041,7 @@ fn run_scripted(scene: SceneCfg, actions: Vec<Action>) {
                     // poll seeds the auto-orient, then sync_orientation lays out + flags downgrades.
                     (poll_print_job, sync_orientation).chain(),
                     color_conn_markers,
+                    do_auto_place,
                 ),
                 run_script,
             ),
@@ -2035,6 +2091,7 @@ fn run_script(
     print_job: Res<PrintJob>,
     xsection: Res<XSection>,
     mut reslice_w: MessageWriter<ReSlice>,
+    mut autoplace_w: MessageWriter<AutoPlace>,
     mut commands: Commands,
     mut exit: MessageWriter<AppExit>,
 ) {
@@ -2137,6 +2194,12 @@ fn run_script(
                 orient.set_manual(piece, Vec3::from_array(up).normalize_or_zero().to_array());
             }
             runner.timer >= 3 // let relayout + feasibility catch up
+        }
+        Action::AutoPlace => {
+            if runner.timer == 1 {
+                autoplace_w.write(AutoPlace);
+            }
+            runner.timer >= 3 // let do_auto_place run + conns update
         }
     };
     if done {
@@ -2411,6 +2474,10 @@ fn build_panel(cuts: &Cuts) -> impl Scene + 'static {
             (
                 @FeathersButton { @caption: bsn!{ Text("Print view") ThemedText } }
                 on(|_: On<Activate>, mut pv: ResMut<PrintView>| { pv.0 = !pv.0; })
+            ),
+            (
+                @FeathersButton { @caption: bsn!{ Text("Auto-place") ThemedText } }
+                on(|_: On<Activate>, mut w: MessageWriter<AutoPlace>| { w.write(AutoPlace); })
             ),
         ]
     }

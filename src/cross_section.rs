@@ -94,6 +94,72 @@ pub fn fit_diameter(loops: &[Loop], point: [f64; 2], wall: f64, max_d: f64) -> f
     (2.0 * (nearest - wall)).clamp(0.0, max_d)
 }
 
+/// Auto-place onion connectors across a cross-section: a grid of candidate points `spacing` apart
+/// (centred in the profile bbox), keeping each that sits in SOLID material — inside the outline,
+/// outside any hole — with room for at least a `min_d` onion. Each kept point gets the largest
+/// wall-fitting diameter (`fit_diameter`, capped at `max_d`). chotchki's "fit the area" placement
+/// (#41); the GUI adds these to a cut (and caps each by the slab's axial room). Returns (point,
+/// diameter) in connector-pos coords.
+pub fn auto_place(
+    loops: &[Loop],
+    wall: f64,
+    max_d: f64,
+    spacing: f64,
+    min_d: f64,
+) -> Vec<([f64; 2], f64)> {
+    if loops.is_empty() || spacing <= 0.0 {
+        return Vec::new();
+    }
+    let (mut lo, mut hi) = ([f64::INFINITY; 2], [f64::NEG_INFINITY; 2]);
+    for lp in loops {
+        for p in lp {
+            lo[0] = lo[0].min(p[0]);
+            lo[1] = lo[1].min(p[1]);
+            hi[0] = hi[0].max(p[0]);
+            hi[1] = hi[1].max(p[1]);
+        }
+    }
+    // A centred grid: n+1 points per axis, offset so they sit symmetrically in the bbox.
+    let n = [((hi[0] - lo[0]) / spacing).floor() as i64, ((hi[1] - lo[1]) / spacing).floor() as i64];
+    let start =
+        [(lo[0] + hi[0]) / 2.0 - n[0] as f64 * spacing / 2.0, (lo[1] + hi[1]) / 2.0 - n[1] as f64 * spacing / 2.0];
+    let mut out = Vec::new();
+    for i in 0..=n[0] {
+        for j in 0..=n[1] {
+            let p = [start[0] + i as f64 * spacing, start[1] + j as f64 * spacing];
+            if !point_in_material(loops, p) {
+                continue;
+            }
+            let d = fit_diameter(loops, p, wall, max_d);
+            if d >= min_d {
+                out.push((p, d));
+            }
+        }
+    }
+    out
+}
+
+/// True if `point` is in solid material: inside the outer outline and OUTSIDE any hole. Even-odd
+/// ray-crossing over all loop segments (inside the outline = odd crossings; inside a hole flips it
+/// back to even = not material), so it's correct for a profile with holes regardless of winding.
+fn point_in_material(loops: &[Loop], point: [f64; 2]) -> bool {
+    let [px, py] = point;
+    let mut inside = false;
+    for lp in loops {
+        let n = lp.len();
+        for i in 0..n {
+            let (a, b) = (lp[i], lp[(i + 1) % n]);
+            if (a[1] > py) != (b[1] > py) {
+                let x = a[0] + (py - a[1]) / (b[1] - a[1]) * (b[0] - a[0]);
+                if x > px {
+                    inside = !inside;
+                }
+            }
+        }
+    }
+    inside
+}
+
 /// Shortest distance from `p` to segment `a`–`b`.
 fn point_to_segment(p: [f64; 2], a: [f64; 2], b: [f64; 2]) -> f64 {
     let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
@@ -177,6 +243,36 @@ mod tests {
         // a hole pulls the size down too
         let with_hole = vec![sq[0].clone(), vec![[4.0, -2.0], [8.0, -2.0], [8.0, 2.0], [4.0, 2.0]]];
         assert!(fit_diameter(&with_hole, [0.0, 0.0], 1.0, 16.0) < 16.0);
+    }
+
+    #[test]
+    fn point_in_material_respects_holes() {
+        let sq = vec![[-10.0, -10.0], [10.0, -10.0], [10.0, 10.0], [-10.0, 10.0]];
+        let hole = vec![[-2.0, -2.0], [2.0, -2.0], [2.0, 2.0], [-2.0, 2.0]];
+        let loops = vec![sq.clone(), hole];
+        assert!(point_in_material(&loops, [7.0, 0.0])); // in the wall -> material
+        assert!(!point_in_material(&loops, [0.0, 0.0])); // in the hole -> not material
+        assert!(!point_in_material(&loops, [20.0, 0.0])); // outside everything
+    }
+
+    #[test]
+    fn auto_place_fills_material_and_skips_holes() {
+        // 40x40 square, hole in the middle. Grid at spacing 10 should place several onions in the
+        // material ring and NONE in the central hole.
+        let sq = vec![[-20.0, -20.0], [20.0, -20.0], [20.0, 20.0], [-20.0, 20.0]];
+        let hole = vec![[-6.0, -6.0], [6.0, -6.0], [6.0, 6.0], [-6.0, 6.0]];
+        let placed = auto_place(&[sq, hole], 1.0, 16.0, 10.0, 3.0);
+        assert!(!placed.is_empty(), "should place some connectors");
+        // every placement sits in material (not in the hole) and is at least min_d
+        for (p, d) in &placed {
+            assert!(*d >= 3.0);
+            assert!(!(p[0].abs() < 6.0 && p[1].abs() < 6.0), "placed inside the hole: {p:?}");
+        }
+    }
+
+    #[test]
+    fn auto_place_empty_section_is_empty() {
+        assert!(auto_place(&[], 1.0, 16.0, 10.0, 3.0).is_empty());
     }
 
     #[test]

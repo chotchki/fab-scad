@@ -24,9 +24,15 @@
 //   slice([0], axis=UP, spread=40) my_model(); // cut on Z, fanned out
 //   slice([0], only=1) my_model();             // upper piece only
 include <BOSL2/std.scad>
+include <connectors.scad>   // onion_peg / onion_socket, applied per piece (include-once)
 
 // Cut planes padded with the outer ±size/2 sentinels — the N+1 slab boundaries.
 function slice_boundaries(cuts, size = 500) = concat([-size / 2], cuts, [size / 2]);
+
+// 3D point of an onion connector `[cut_pos, a, b, d]` on axis `ai`: `cut_pos` along the axis, the
+// (a, b) in the two NON-axis dims `others` (ascending) — the inverse of the connector projection.
+function _conn_point(cn, ai, others) =
+    [for (a = [0:2]) a == ai ? cn[0] : a == others[0] ? cn[1] : cn[2]];
 
 // Pieces produced by `cuts` (N cuts -> N+1 pieces).
 function slice_count(cuts) = len(cuts) + 1;
@@ -57,14 +63,21 @@ module slice_residual(cuts, axis = RIGHT, size = 500) {
     }
 }
 
-module slice(cuts, axis = RIGHT, size = 500, spread = 0, only = undef) {
+// `connectors`: onion joints as `[cut_pos, a, b, d]` (cut position along `axis`; a,b in the cut
+// plane's two non-axis dims; d the diameter). Applied PER PIECE — the piece BELOW a connector's
+// cut UNIONs the peg (it stands proud past the cut), the piece ABOVE DIFFs the socket — so one
+// half grows a bump and the other its matching cavity. Bolt/pin (symmetric negatives) still go in
+// children() as today; only the asymmetric onion needs this per-piece path. Empty = unchanged.
+module slice(cuts, axis = RIGHT, size = 500, spread = 0, only = undef, connectors = []) {
     req_children($children);
     ai = _axis_index(axis);
     assert(ai == 0 || ai == 1 || ai == 2, "slice(): axis must be RIGHT/BACK/UP or 0/1/2");
     unit = [for (a = [0:2]) a == ai ? 1 : 0];
+    others = [for (a = [0:2]) if (a != ai) a];
     bounds = slice_boundaries(cuts, size);
     assert(_ascending(bounds), "slice(): cuts must be ascending and within ±size/2");
     n = len(bounds) - 1;
+    eps = 1e-4;
     for (i = [0 : n - 1]) {
         if (is_undef(only) || only == i) {
             lo = bounds[i];
@@ -76,9 +89,25 @@ module slice(cuts, axis = RIGHT, size = 500, spread = 0, only = undef) {
             $slice_axis = unit;
             $slice_lo = i == 0 ? undef : lo;       // cut plane below (undef at the model end)
             $slice_hi = i == n - 1 ? undef : hi;   // cut plane above
-            move(unit * (i * spread)) intersection() {
-                children();
-                move(center) cuboid(dims);
+            move(unit * (i * spread)) difference() {
+                union() {
+                    intersection() {
+                        children();
+                        move(center) cuboid(dims);
+                    }
+                    // peg into this piece for each onion at its UPPER cut (this piece is below it)
+                    if (i < n - 1)
+                        for (cn = connectors)
+                            if (abs(cn[0] - hi) < eps)
+                                translate(_conn_point(cn, ai, others))
+                                    onion_peg(d = cn[3], orient = unit);
+                }
+                // socket out of this piece for each onion at its LOWER cut (this piece is above it)
+                if (i > 0)
+                    for (cn = connectors)
+                        if (abs(cn[0] - lo) < eps)
+                            translate(_conn_point(cn, ai, others))
+                                onion_socket(d = cn[3], orient = unit);
             }
         }
     }

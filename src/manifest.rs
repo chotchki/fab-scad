@@ -50,6 +50,19 @@ pub struct Slicing {
     pub cut: Vec<Cut>,
     #[serde(default)]
     pub connector: Vec<Connector>,
+    /// Manual per-piece print-orientation overrides (sparse). A piece is the slab multi-index
+    /// `[ix,iy,iz]` from the sorted enabled cuts per axis; `up` is its build direction (the model
+    /// direction that points +Z on the bed). Un-listed pieces derive +Z (or the auto-pick). The
+    /// onion's cap axis is DERIVED from these per joint, never stored — see connector-orientation.
+    #[serde(default)]
+    pub orient: Vec<PieceOrient>,
+}
+
+/// A manual print-orientation override for one piece (#40).
+#[derive(Debug, Deserialize)]
+pub struct PieceOrient {
+    pub piece: [usize; 3], // slab multi-index [ix, iy, iz]
+    pub up: [Num; 3],      // build-up direction in model space (unit)
 }
 
 /// One slab cut: a plane perpendicular to `axis` at coordinate `at` (model space).

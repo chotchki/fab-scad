@@ -91,6 +91,7 @@ pub fn reslice(
         printer: None,
         cut,
         connector,
+        orient: vec![], // per-piece orientation overrides arrive in Phase E (GUI ORIENT stage)
     };
     slicing::slice_part(&oscad, &wrap, &spec, spread, out_dir, TIMEOUT)
 }

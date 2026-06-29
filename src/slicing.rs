@@ -107,9 +107,11 @@ pub fn driver_scad(s: &Slicing, source: &str, spread: f64) -> Result<String> {
     ))
 }
 
-/// The onion connectors on `axis` as a SCAD list `[[cut_pos, a, b, d], ...]` for `slice()`'s
-/// `connectors` param. They're applied per piece (peg into the lower, socket out of the upper),
-/// so they go here rather than the pre-slice diff. Errors on a bad cut index, like connector_line.
+/// The onion connectors on `axis` as a SCAD list `[[cut_pos, a, b, d, ox, oy, oz, ang], ...]` for
+/// `slice()`'s `connectors` param — applied per piece (peg into the lower, socket out of the
+/// upper). `(ox,oy,oz)` is the onion's cap axis + `ang` its cap angle, DERIVED per joint from the
+/// two bordering pieces' print orientations. Phase B: cap axis = the cut axis, ang = 45 (today's
+/// behaviour); Phase C swaps in the orientation gate. Errors on a bad cut index.
 fn onion_param(s: &Slicing, axis: usize) -> Result<String> {
     let mut items = Vec::new();
     for c in s.connector.iter().filter(|c| c.kind == "onion") {
@@ -119,12 +121,18 @@ fn onion_param(s: &Slicing, axis: usize) -> Result<String> {
         if cut.axis_index()? != axis {
             continue;
         }
+        // Cap axis = the cut-axis unit (Phase B); ang = 45.
+        let unit = |a: usize| if a == axis { 1.0 } else { 0.0 };
         items.push(format!(
-            "[{}, {}, {}, {}]",
+            "[{}, {}, {}, {}, {}, {}, {}, {}]",
             n(cut.at()),
             n(c.pos[0].f()),
             n(c.pos[1].f()),
-            n(c.size.unwrap_or(10.0))
+            n(c.size.unwrap_or(10.0)),
+            n(unit(0)),
+            n(unit(1)),
+            n(unit(2)),
+            n(45.0)
         ));
     }
     Ok(format!("[{}]", items.join(", ")))
@@ -209,8 +217,9 @@ mod tests {
              [[slicing.connector]]\ncut=0\ntype=\"onion\"\npos=[5,-3]\nsize=12\n",
         );
         let d = driver_scad(&s, "t.stl", 30.0).unwrap();
-        // Z cut -> others (x,y); onion enters slice()'s per-piece connectors param as [at,a,b,d].
-        assert!(d.contains("connectors = [[0, 5, -3, 12]]"), "{d}");
+        // Z cut -> others (x,y); onion enters slice()'s connectors param as [at,a,b,d,ox,oy,oz,ang],
+        // cap axis = the cut axis (+Z) at Phase B.
+        assert!(d.contains("connectors = [[0, 5, -3, 12, 0, 0, 1, 45]]"), "{d}");
         // ...and is NOT emitted as a pre-slice remove in the diff body.
         assert!(!d.contains("onion_"), "{d}");
     }

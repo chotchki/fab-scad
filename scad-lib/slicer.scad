@@ -63,17 +63,22 @@ module slice_residual(cuts, axis = RIGHT, size = 500) {
     }
 }
 
-// `connectors`: onion joints as `[cut_pos, a, b, d]` (cut position along `axis`; a,b in the cut
-// plane's two non-axis dims; d the diameter). Applied PER PIECE — the piece BELOW a connector's
-// cut UNIONs the peg (it stands proud past the cut), the piece ABOVE DIFFs the socket — so one
-// half grows a bump and the other its matching cavity. Bolt/pin (symmetric negatives) still go in
-// children() as today; only the asymmetric onion needs this per-piece path. Empty = unchanged.
+// `connectors`: onion joints as `[cut_pos, a, b, d]` or `[cut_pos, a, b, d, ox, oy, oz, ang]`
+// (cut position along `axis`; a,b in the cut plane's two non-axis dims; d the diameter; the
+// optional `(ox,oy,oz)` cap axis + `ang` come from the per-piece orientation derivation — when
+// absent the cap defaults to the cut axis + ang 45, today's behaviour). Applied PER PIECE — the
+// piece BELOW a connector's cut UNIONs the peg (it stands proud past the cut), the piece ABOVE
+// DIFFs the socket. Bolt/pin (symmetric negatives) still go in children(); only the asymmetric
+// onion needs this per-piece path. Empty = unchanged.
 module slice(cuts, axis = RIGHT, size = 500, spread = 0, only = undef, connectors = []) {
     req_children($children);
     ai = _axis_index(axis);
     assert(ai == 0 || ai == 1 || ai == 2, "slice(): axis must be RIGHT/BACK/UP or 0/1/2");
     unit = [for (a = [0:2]) a == ai ? 1 : 0];
     others = [for (a = [0:2]) if (a != ai) a];
+    for (cn = connectors)
+        assert(len(cn) == 4 || len(cn) == 8,
+               "slice(): connector must be [cut,a,b,d] or [cut,a,b,d,ox,oy,oz,ang]");
     bounds = slice_boundaries(cuts, size);
     assert(_ascending(bounds), "slice(): cuts must be ascending and within ±size/2");
     n = len(bounds) - 1;
@@ -100,14 +105,18 @@ module slice(cuts, axis = RIGHT, size = 500, spread = 0, only = undef, connector
                         for (cn = connectors)
                             if (abs(cn[0] - hi) < eps)
                                 translate(_conn_point(cn, ai, others))
-                                    onion_peg(d = cn[3], orient = unit);
+                                    onion_peg(d = cn[3],
+                                              orient = len(cn) > 4 ? [cn[4], cn[5], cn[6]] : unit,
+                                              ang = len(cn) > 7 ? cn[7] : 45);
                 }
                 // socket out of this piece for each onion at its LOWER cut (this piece is above it)
                 if (i > 0)
                     for (cn = connectors)
                         if (abs(cn[0] - lo) < eps)
                             translate(_conn_point(cn, ai, others))
-                                onion_socket(d = cn[3], orient = unit);
+                                onion_socket(d = cn[3],
+                                             orient = len(cn) > 4 ? [cn[4], cn[5], cn[6]] : unit,
+                                             ang = len(cn) > 7 ? cn[7] : 45);
             }
         }
     }

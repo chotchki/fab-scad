@@ -137,6 +137,22 @@ pub fn closure(entry: &Path, search: &[PathBuf]) -> BTreeSet<PathBuf> {
     seen
 }
 
+/// A content hash of `entry`'s WHOLE include closure — it changes iff any file in the graph changes.
+/// The key for incremental rebuild (6.2): same hash ⇒ same inputs ⇒ the last render is still valid.
+/// Hashes each file's canonical path + bytes in the closure's sorted order, so it's stable per run.
+pub fn content_hash(entry: &Path, search: &[PathBuf]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    for path in closure(entry, search) {
+        path.hash(&mut h);
+        match std::fs::read(&path) {
+            Ok(bytes) => bytes.hash(&mut h),
+            Err(_) => 0u8.hash(&mut h), // unreadable — fold in a marker so it still differs
+        }
+    }
+    h.finish()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -230,6 +246,18 @@ mod tests {
         assert!(cl.contains(&canon("c.scad")));
         assert!(cl.contains(&canon("libs/shared.scad")));
         assert_eq!(cl.len(), 4, "cycle visited once, no dup: {cl:?}");
+    }
+
+    #[test]
+    fn content_hash_tracks_the_whole_closure() {
+        let s = Scratch::new("hash");
+        let a = s.write("a.scad", "include <b.scad>\ncube(1);\n");
+        s.write("b.scad", "module m() { cube(2); }\n");
+        let h0 = content_hash(&a, &[]);
+        assert_eq!(h0, content_hash(&a, &[]), "stable when nothing changes");
+        // editing the INCLUDED file changes the hash (that's the whole point)
+        s.write("b.scad", "module m() { cube(3); }\n");
+        assert_ne!(h0, content_hash(&a, &[]), "an included edit invalidates");
     }
 
     #[test]

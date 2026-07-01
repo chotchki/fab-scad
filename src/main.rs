@@ -84,6 +84,9 @@ enum Commands {
         /// and print a pass/fail summary. The correctness sweep (6.8); needs no manifests.
         #[arg(long)]
         all: bool,
+        /// With --all, ignore the incremental cache and re-render every model.
+        #[arg(long)]
+        force: bool,
         /// Also write an auto-framed PNG thumbnail next to the output.
         #[arg(long)]
         png: bool,
@@ -109,12 +112,13 @@ fn main() -> Result<()> {
         Commands::Render {
             target,
             all,
+            force,
             png,
             out,
             timeout,
         } => {
             if all {
-                render_all_cmd(target, timeout)
+                render_all_cmd(target, timeout, force)
             } else {
                 let target = target.context("render needs a .scad target (or --all to sweep a tree)")?;
                 render_cmd(&target, out, png, timeout)
@@ -310,8 +314,8 @@ fn render_cmd(target: &Path, out: Option<PathBuf>, png: bool, timeout_secs: u64)
 /// `fab render --all [PATH]` (6.8) — the correctness sweep: find every renderable `.scad` under
 /// `path` (or the workspace root), smoke-render them in parallel, and print a pass/fail summary.
 /// Exits non-zero if any model fails, so it drops straight into CI or a pre-refactor baseline.
-fn render_all_cmd(path: Option<PathBuf>, timeout_secs: u64) -> Result<()> {
-    use fab_scad::smoke;
+fn render_all_cmd(path: Option<PathBuf>, timeout_secs: u64, force: bool) -> Result<()> {
+    use fab_scad::{deps, smoke};
     use rayon::prelude::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -327,35 +331,72 @@ fn render_all_cmd(path: Option<PathBuf>, timeout_secs: u64) -> Result<()> {
     let tmp = std::env::temp_dir();
     let timeout = Duration::from_secs(timeout_secs);
     let total = files.len();
+
+    // Incremental (6.2): key each file's cache entry on the content-hash of its include closure,
+    // resolved against the workspace OPENSCADPATH. Same hash + a prior pass ⇒ skip the render.
+    let search: Vec<PathBuf> = root
+        .as_ref()
+        .map(|r| vec![r.join("libs"), r.join("scad-lib")])
+        .unwrap_or_default();
+    let version = oscad.tool_version().unwrap_or_default();
+    let cache_dir = root.clone().unwrap_or_else(|| sweep.clone());
+    let cache_path = cache_dir.join(".fab/smoke-cache");
+    let cache = if force {
+        smoke::SweepCache::empty()
+    } else {
+        smoke::SweepCache::load(&cache_path, &version)
+    };
     println!("smoke-rendering {total} .scad under {} ...", sweep.display());
 
     // Parallel across the rayon pool; a running counter to stderr so a long sweep isn't silent.
     let done = AtomicUsize::new(0);
-    let mut results: Vec<smoke::Smoke> = files
+    let mut results: Vec<(smoke::Smoke, u64)> = files
         .par_iter()
         .map(|f| {
-            let s = smoke::smoke(&oscad, f, &tmp, timeout);
+            let hash = deps::content_hash(f, &search);
+            let s = match cache.hit(f, hash) {
+                Some(faces) => smoke::Smoke {
+                    input: f.clone(),
+                    pass: true,
+                    faces,
+                    duration: Duration::ZERO,
+                    detail: "cached".into(),
+                },
+                None => smoke::smoke(&oscad, f, &tmp, timeout),
+            };
             let n = done.fetch_add(1, Ordering::Relaxed) + 1;
-            eprint!("\r  {n}/{total} rendered");
-            s
+            eprint!("\r  {n}/{total} checked");
+            (s, hash)
         })
         .collect();
     eprintln!();
-    results.sort_by(|a, b| a.input.cmp(&b.input));
+    results.sort_by(|a, b| a.0.input.cmp(&b.0.input));
 
     let rel = |p: &Path| p.strip_prefix(&sweep).unwrap_or(p).display().to_string();
-    let mut passed = 0;
-    for s in &results {
+    let (mut passed, mut cached) = (0, 0);
+    let mut passing = Vec::new();
+    for (s, hash) in &results {
         if s.pass {
             passed += 1;
-            println!("  ok    {} ({} faces, {:.1}s)", rel(&s.input), s.faces, s.duration.as_secs_f64());
+            passing.push((s.input.clone(), *hash, s.faces));
+            if s.detail == "cached" {
+                cached += 1;
+                println!("  ok    {} ({} faces, cached)", rel(&s.input), s.faces);
+            } else {
+                println!("  ok    {} ({} faces, {:.1}s)", rel(&s.input), s.faces, s.duration.as_secs_f64());
+            }
         } else {
             println!("  FAIL  {} — {}", rel(&s.input), s.detail);
         }
     }
+    // Persist the passing set so the next sweep skips the unchanged ones. Failures are omitted, so
+    // they always re-run. Best-effort — a cache we can't write just means no speedup next time.
+    let _ = smoke::SweepCache::save(&cache_path, &version, &passing);
+
     let failed = total - passed;
     let tail = if failed > 0 { format!(", {failed} FAILED") } else { String::new() };
-    println!("\n{passed}/{total} passed{tail}");
+    let cache_note = if cached > 0 { format!(" ({cached} cached)") } else { String::new() };
+    println!("\n{passed}/{total} passed{tail}{cache_note}");
     if failed > 0 {
         bail!("{failed} model(s) failed to render");
     }

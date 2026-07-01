@@ -84,6 +84,12 @@ impl Openscad {
         Ok(Self { bin, openscadpath })
     }
 
+    /// This toolchain's version string, for cache-keying an incremental sweep (6.2) — a bump
+    /// invalidates cached verdicts. None if it can't be read.
+    pub fn tool_version(&self) -> Option<String> {
+        version(&self.bin)
+    }
+
     /// Render geometry (format inferred from `output`'s extension) via Manifold.
     pub fn render(&self, input: &Path, output: &Path, timeout: Duration) -> Result<Report> {
         ensure_parent(output)?;

@@ -4,6 +4,7 @@
 //! and a render that silently collapses to nothing — without the cost of golden meshes (deferred to 8.4).
 
 use crate::openscad::Openscad;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -100,9 +101,83 @@ fn collect(dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
+/// Incremental cache (6.2) for the sweep: each file's include-closure content-hash + face count from
+/// its last PASS, so a re-sweep re-renders only what changed (or last failed). Keyed by the OpenSCAD
+/// version — a toolchain bump invalidates the lot. Plain-text, one `hash<TAB>faces<TAB>path` per
+/// line; a corrupt or version-mismatched file simply misses (re-render everything), never errors.
+pub struct SweepCache {
+    entries: HashMap<PathBuf, (u64, u64)>,
+}
+
+impl SweepCache {
+    /// An empty cache — the effect of `--force` (nothing hits, everything re-renders).
+    pub fn empty() -> Self {
+        SweepCache {
+            entries: HashMap::new(),
+        }
+    }
+
+    /// Load the cache at `path`, trusting it only if its version header matches `version`.
+    pub fn load(path: &Path, version: &str) -> Self {
+        let mut entries = HashMap::new();
+        let header = format!("# fab-smoke v1 {version}");
+        if let Ok(text) = std::fs::read_to_string(path) {
+            let mut lines = text.lines();
+            if lines.next() == Some(header.as_str()) {
+                for l in lines {
+                    let mut it = l.splitn(3, '\t');
+                    if let (Some(h), Some(f), Some(p)) = (it.next(), it.next(), it.next()) {
+                        if let (Ok(h), Ok(f)) = (h.parse::<u64>(), f.parse::<u64>()) {
+                            entries.insert(PathBuf::from(p), (h, f));
+                        }
+                    }
+                }
+            }
+        }
+        SweepCache { entries }
+    }
+
+    /// The cached face count for `file`, IFF its closure hash still matches (else None → re-render).
+    pub fn hit(&self, file: &Path, hash: u64) -> Option<u64> {
+        self.entries
+            .get(file)
+            .filter(|(h, _)| *h == hash)
+            .map(|(_, f)| *f)
+    }
+
+    /// Overwrite the cache: version header + one line per passing `(file, hash, faces)`.
+    pub fn save(path: &Path, version: &str, passing: &[(PathBuf, u64, u64)]) -> std::io::Result<()> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let mut out = format!("# fab-smoke v1 {version}\n");
+        for (p, h, f) in passing {
+            out.push_str(&format!("{h}\t{f}\t{}\n", p.display()));
+        }
+        std::fs::write(path, out)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sweep_cache_hits_only_on_a_matching_hash() {
+        let dir = std::env::temp_dir().join(format!("smoke_cache_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let cache = dir.join(".fab/smoke-cache");
+        let f = PathBuf::from("/models/a.scad");
+        SweepCache::save(&cache, "v2024", &[(f.clone(), 42, 100)]).unwrap();
+
+        let loaded = SweepCache::load(&cache, "v2024");
+        assert_eq!(loaded.hit(&f, 42), Some(100)); // matching hash → cached faces
+        assert_eq!(loaded.hit(&f, 99), None); // changed inputs → miss
+
+        // a version bump invalidates the whole cache
+        assert_eq!(SweepCache::load(&cache, "v2025").hit(&f, 42), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn counts_binary_stl_from_the_header() {

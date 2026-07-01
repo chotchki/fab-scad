@@ -68,6 +68,12 @@ struct SceneCfg {
 #[derive(Component)]
 struct Model;
 
+/// Marks the printer-bed slab, so `seat_bed` can drop it to the model's Z-floor (the model's native
+/// coords may put its bottom below z=0; move the bed to meet it rather than shift the model — which
+/// would desync the cut positions from the source the slicer re-renders).
+#[derive(Component)]
+struct Bed;
+
 /// Button → "re-slice the source and swap the mesh".
 #[derive(Message)]
 struct ReSlice;
@@ -562,7 +568,7 @@ fn run_windowed(scene: SceneCfg) {
                 nudge_buttons,
                 mark_dirty,
                 revert_on_edit,
-                (auto_scale, split_viewport),
+                (auto_scale, split_viewport, seat_bed),
                 (
                     enforce_exclusive_modes,
                     apply_view_visibility,
@@ -1337,6 +1343,20 @@ fn plane_cuboid(axis: Axis, min: Vec3, max: Vec3) -> Cuboid {
         Axis::X => Cuboid::new(0.6, s.y.max(1.0), s.z.max(1.0)),
         Axis::Y => Cuboid::new(s.x.max(1.0), 0.6, s.z.max(1.0)),
         Axis::Z => Cuboid::new(s.x.max(1.0), s.y.max(1.0), 0.6),
+    }
+}
+
+/// Drop the bed slab so its top meets the model's Z-floor — the model rests on the bed instead of
+/// dipping below it (its native coords needn't put the bottom at z=0). Runs when the bounds change.
+fn seat_bed(bounds: Res<ModelBounds>, mut beds: Query<&mut Transform, With<Bed>>) {
+    if !bounds.is_changed() {
+        return;
+    }
+    let Some((min, _)) = bounds.0 else {
+        return;
+    };
+    for mut t in &mut beds {
+        t.translation.z = min.z - 0.5; // the slab is 1.0 thick → its top lands at min.z
     }
 }
 
@@ -2218,7 +2238,7 @@ fn run_screenshot(scene: SceneCfg, png: PathBuf) {
         .add_message::<AutoPlace>()
         .add_message::<SwitchFile>()
         .add_systems(Startup, (setup_offscreen, load_icons))
-        .add_systems(Update, (capture_then_exit, (push_fields, sync_selected, apply_icon_font, rebuild_panel).chain(), update_status, split_viewport))
+        .add_systems(Update, (capture_then_exit, (push_fields, sync_selected, apply_icon_font, rebuild_panel).chain(), update_status, split_viewport, seat_bed))
         .run();
 }
 
@@ -2484,6 +2504,7 @@ fn run_scripted(scene: SceneCfg, actions: Vec<Action>) {
                     color_conn_markers,
                     do_auto_place,
                     split_viewport,
+                    seat_bed,
                 ),
                 run_script,
             ),
@@ -2711,6 +2732,7 @@ fn spawn_environment(
             ..default()
         })),
         Transform::from_xyz(0.0, 0.0, -0.5),
+        Bed,
     ));
     commands.spawn((
         DirectionalLight {

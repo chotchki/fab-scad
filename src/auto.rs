@@ -21,8 +21,9 @@ pub const MIN_ONION: f64 = 2.0;
 pub const ONION_WALL: f64 = 1.2;
 /// Largest onion the auto-sizer grows to in open material.
 pub const ONION_MAX_D: f64 = 16.0;
-/// Auto-place grid pitch — onions land roughly this far apart across a cut face.
-pub const ONION_SPACING: f64 = 18.0;
+/// Target span BETWEEN alignment onions — the count scales with the face, so a big joint gets a few
+/// spread out and a small one gets a single guide (they align, they don't fill).
+pub const ONION_SPACING: f64 = 120.0;
 /// Teardrop tip reach = 1/sin(20°): bounds the WORST-case cap the slicer emits (`CAP_ANG_MIN`), so
 /// the onion fits at any print orientation decided later.
 pub const ONION_TIP: f64 = 2.9238;

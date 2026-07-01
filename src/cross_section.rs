@@ -144,12 +144,13 @@ pub fn fit_onion(
     }
 }
 
-/// Auto-place onion connectors across a cross-section: a grid of candidate points `spacing` apart
-/// (centred in the profile bbox), keeping each that sits in SOLID material — inside the outline,
-/// outside any hole — with room for at least a `min_d` onion. Each kept point gets the largest
-/// teardrop-fitting diameter (`fit_onion` with `cap_dir` + `tip_factor`, capped at `max_d`).
-/// chotchki's "fit the area" placement (#41); the GUI adds these to a cut (and caps each by the
-/// slab's axial room). Returns (point, diameter) in connector-pos coords.
+/// Auto-place onion connectors across a cross-section. Onions are ALIGNMENT guides, so this seeds a
+/// FEW spread across the face rather than a dense fill: `spacing` is the target span BETWEEN onions,
+/// so the count scales with the face (a big joint gets more, a small one gets one), placed at
+/// cell-CENTRES (so none land on the boundary). Each candidate must sit in SOLID material (inside the
+/// outline, outside any hole) with room for a `min_d` onion; it gets the largest teardrop-fitting
+/// diameter (`fit_onion` with `cap_dir` + `tip_factor`, capped at `max_d`). The GUI + `auto::plan`
+/// both cap each by the slab's axial room. Returns (point, diameter) in connector-pos coords.
 pub fn auto_place(
     loops: &[Loop],
     wall: f64,
@@ -171,14 +172,20 @@ pub fn auto_place(
             hi[1] = hi[1].max(p[1]);
         }
     }
-    // A centred grid: n+1 points per axis, offset so they sit symmetrically in the bbox.
-    let n = [((hi[0] - lo[0]) / spacing).floor() as i64, ((hi[1] - lo[1]) / spacing).floor() as i64];
-    let start =
-        [(lo[0] + hi[0]) / 2.0 - n[0] as f64 * spacing / 2.0, (lo[1] + hi[1]) / 2.0 - n[1] as f64 * spacing / 2.0];
+    // Count per axis from the target span (`spacing`), at least one — so a big face gets a few and a
+    // small one gets a single centred guide. Cell-CENTRE placement spreads them across the interior
+    // and keeps them off the boundary (where the edge clearance would reject them anyway).
+    let count = [
+        ((hi[0] - lo[0]) / spacing).round().max(1.0) as i64,
+        ((hi[1] - lo[1]) / spacing).round().max(1.0) as i64,
+    ];
     let mut out = Vec::new();
-    for i in 0..=n[0] {
-        for j in 0..=n[1] {
-            let p = [start[0] + i as f64 * spacing, start[1] + j as f64 * spacing];
+    for i in 0..count[0] {
+        for j in 0..count[1] {
+            let p = [
+                lo[0] + (i as f64 + 0.5) / count[0] as f64 * (hi[0] - lo[0]),
+                lo[1] + (j as f64 + 0.5) / count[1] as f64 * (hi[1] - lo[1]),
+            ];
             if !point_in_material(loops, p) {
                 continue;
             }
@@ -328,6 +335,21 @@ mod tests {
     #[test]
     fn auto_place_empty_section_is_empty() {
         assert!(auto_place(&[], 1.0, 16.0, 10.0, 3.0, None, 1.0).is_empty());
+    }
+
+    #[test]
+    fn auto_place_is_a_sparse_spread_not_a_fill() {
+        // A 400×250 solid face. At a 120mm alignment span the onions are a handful, spread across the
+        // interior — NOT the dozens a fine fill grid would drop.
+        let face = vec![vec![[0.0, 0.0], [400.0, 0.0], [400.0, 250.0], [0.0, 250.0]]];
+        let pts = auto_place(&face, 1.2, 16.0, 120.0, 3.0, None, 2.9238);
+        // round(400/120)=3 × round(250/120)=2 = 6 cell centres, all interior → all kept.
+        assert_eq!(pts.len(), 6, "a handful of alignment guides, got {}", pts.len());
+        // They spread across the long axis and stay off the boundary.
+        let xs: Vec<f64> = pts.iter().map(|(p, _)| p[0]).collect();
+        let (lo, hi) = (xs.iter().cloned().fold(f64::MAX, f64::min), xs.iter().cloned().fold(f64::MIN, f64::max));
+        assert!(hi - lo > 200.0, "spread across the face, span {}", hi - lo);
+        assert!(lo > 0.0 && hi < 400.0, "off the boundary: {lo}..{hi}");
     }
 
     #[test]

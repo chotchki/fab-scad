@@ -188,6 +188,55 @@ pub fn slice_part_3mf(
     Ok(out_3mf)
 }
 
+/// Slice IN-PROCESS via the Manifold kernel (Track C 11.9) instead of the scad driver. OpenSCAD is
+/// still the front-door — it renders the base model to a mesh ONCE — then import + slice + connectors
+/// + export all happen in-process (no per-piece spawn). `as_3mf` writes pieces as separate objects on
+/// a plate; otherwise a single merged STL. `spread` fans each piece by its slab index × spread.
+#[cfg(feature = "kernel")]
+pub fn slice_part_kernel(
+    oscad: &Openscad,
+    source: &Path,
+    spec: &Slicing,
+    spread: f64,
+    out_dir: &Path,
+    timeout: Duration,
+    as_3mf: bool,
+) -> Result<PathBuf> {
+    std::fs::create_dir_all(out_dir).with_context(|| format!("creating {}", out_dir.display()))?;
+    let stem = source
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "part".into());
+
+    // The one OpenSCAD spawn: freeze the base model to a mesh.
+    let source_stl = out_dir.join(format!("{stem}.stl"));
+    let f = oscad.render(source, &source_stl, timeout)?;
+    if !f.ok {
+        bail!("source render failed: {}", source.display());
+    }
+
+    let base = Solid::from_stl_file(&source_stl)?;
+    let pieces = slice_solid(spec, &base)?;
+    if pieces.is_empty() {
+        bail!("slice produced no pieces");
+    }
+    // Fan each piece by its slab multi-index × spread (0 = assembled in place).
+    let laid: Vec<Solid> = pieces
+        .iter()
+        .map(|(idx, s)| s.translate(idx[0] as f64 * spread, idx[1] as f64 * spread, idx[2] as f64 * spread))
+        .collect();
+
+    if as_3mf {
+        let out = out_dir.join(format!("{stem}.3mf"));
+        Solid::write_3mf(&out, &laid)?;
+        Ok(out)
+    } else {
+        let out = out_dir.join(format!("{stem}-sliced.stl"));
+        Solid::batch_union(&laid).write_stl(&out)?;
+        Ok(out)
+    }
+}
+
 /// Format a coordinate without a trailing `.0` for whole numbers (tidy generated SCAD).
 fn n(x: f64) -> String {
     if x.fract() == 0.0 {

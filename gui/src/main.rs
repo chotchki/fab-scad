@@ -121,7 +121,7 @@ struct Job(Option<(bool, Task<Result<PathBuf, String>>)>);
 struct Status(String);
 
 /// The axis a cut plane is normal to (which way it slices).
-#[derive(Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Clone, Copy, PartialEq, Eq, Default, Debug)]
 enum Axis {
     #[default]
     X,
@@ -1512,7 +1512,6 @@ fn seat_bed(bounds: Res<ModelBounds>, mut beds: Query<&mut Transform, With<Bed>>
 fn sync_dim_labels(
     cuts: Res<Cuts>,
     bounds: Res<ModelBounds>,
-    dspread: Res<DisplaySpread>,
     print: Res<PrintView>,
     cam: Query<(&Camera, &GlobalTransform), With<Camera3d>>,
     existing: Query<&DimLabel>,
@@ -1578,9 +1577,10 @@ fn sync_dim_labels(
             a[p0] = tick;
             Vec3::from_array(a)
         };
-        for (k, w) in edges.windows(2).enumerate() {
-            let shift = k as f32 * dspread.0;
-            let (lo, hi) = (w[0] + shift, w[1] + shift);
+        // Dimensions stay at the ASSEMBLED positions — they don't ride the explode, so the widths
+        // read as one clean bracket instead of fanning apart into that scattered second bracket.
+        for w in edges.windows(2) {
+            let (lo, hi) = (w[0], w[1]);
             let (a, b) = (dim_pt(lo), dim_pt(hi));
             gizmos.line(a, b, dim_col);
             gizmos.line(face_pt(lo), a, dim_col.with_alpha(0.4));

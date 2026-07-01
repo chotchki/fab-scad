@@ -1533,8 +1533,10 @@ fn sync_dim_labels(
     };
     // One dimension per piece width. `segs` collects each dimension's TEXT anchor (the line midpoint,
     // off the part) + its width; the lines/ticks are drawn as gizmos as we go.
-    let gap = (max - min).max_element() * 0.12 + 6.0; // how far the dimension sits off the part
-    let tick = gap * 0.25;
+    // How far the dimension sits off the part — a hair off the model, clamped so a long axis doesn't
+    // shove the short-axis dimensions way out into space.
+    let gap = ((max - min).max_element() * 0.05).clamp(8.0, 22.0);
+    let tick = gap * 0.35;
     let mut segs: Vec<(Vec3, f32, Color)> = Vec::new();
     for axis in [Axis::X, Axis::Y, Axis::Z] {
         let ai = axis.index();

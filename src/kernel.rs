@@ -11,17 +11,38 @@
 use anyhow::{anyhow, Context, Result};
 use manifold3d::{Manifold, MeshGL};
 use std::collections::HashMap;
+use std::marker::PhantomData;
 use std::path::Path;
 
 /// A closed, manifold 3D solid — the unit every kernel op consumes and produces.
+///
+/// **!Send/!Sync by construction** (the `PhantomData<*const ()>`). The upstream binding declares
+/// `unsafe impl Send/Sync for Manifold`, but it isn't airtight: `clone` SHARES the underlying
+/// `CsgNode`, and `CsgLeafNode::GetImpl()` bakes a pending transform via an UNLOCKED mutation of a
+/// `mutable` member — so a transform-pending leaf shared across threads (via clone) and evaluated
+/// concurrently is a data race (UB). Rather than depend on that, we forbid moving a `Solid` across
+/// threads at the type level: thread boundaries must carry inert mesh data (STL bytes / vertex
+/// buffers) and rebuild the `Solid` on the far side. See `docs/manifold-thread-safety.md`.
+///
+/// The !Send guarantee is locked in — this must NOT compile:
+/// ```compile_fail
+/// # use fab_scad::kernel::Solid;
+/// fn assert_send<T: Send>(_: T) {}
+/// assert_send(Solid::cube(1.0, 1.0, 1.0, true)); // Solid is !Send by construction
+/// ```
 #[derive(Clone)]
-pub struct Solid(Manifold);
+pub struct Solid(Manifold, PhantomData<*const ()>);
 
 impl Solid {
+    /// The single construction point — keeps the !Send marker consistent everywhere.
+    fn wrap(m: Manifold) -> Self {
+        Solid(m, PhantomData)
+    }
+
     /// Wrap a raw Manifold (import/slicer internals build these). Used by 11.2 import / 11.4 slicer.
     #[allow(dead_code)]
     pub(crate) fn from_manifold(m: Manifold) -> Self {
-        Solid(m)
+        Solid::wrap(m)
     }
 
     /// Borrow the underlying handle (for ops the wrapper doesn't surface yet). Used by 11.3 export.
@@ -32,18 +53,18 @@ impl Solid {
 
     /// An axis-aligned box. `center` puts the centroid at the origin (else the min corner).
     pub fn cube(x: f64, y: f64, z: f64, center: bool) -> Self {
-        Solid(Manifold::cube(x, y, z, center))
+        Solid::wrap(Manifold::cube(x, y, z, center))
     }
 
     /// A UV sphere of `radius` with `segments` around the equator.
     pub fn sphere(radius: f64, segments: i32) -> Self {
-        Solid(Manifold::sphere(radius, segments))
+        Solid::wrap(Manifold::sphere(radius, segments))
     }
 
     /// A cone/cylinder along +Z: `r_low` at the base, `r_high` at the top (0 ⇒ a point). `center`
     /// puts the mid-height at the origin; otherwise the base is at z=0 spanning `[0, height]`.
     pub fn cylinder(height: f64, r_low: f64, r_high: f64, segments: i32, center: bool) -> Self {
-        Solid(Manifold::cylinder(height, r_low, r_high, segments, center))
+        Solid::wrap(Manifold::cylinder(height, r_low, r_high, segments, center))
     }
 
     // --- connector solids (11.6) -----------------------------------------------------------------
@@ -117,7 +138,7 @@ impl Solid {
         let mesh = MeshGL::new(&verts, 3, &idx).map_err(|e| anyhow!("building mesh: {e:?}"))?;
         let m = Manifold::from_meshgl(&mesh)
             .map_err(|e| anyhow!("STL is not a valid manifold after weld: {e:?}"))?;
-        Ok(Solid(m))
+        Ok(Solid::wrap(m))
     }
 
     // --- export (11.3) ---------------------------------------------------------------------------
@@ -177,33 +198,33 @@ impl Solid {
     // --- booleans --------------------------------------------------------------------------------
 
     pub fn union(&self, other: &Solid) -> Solid {
-        Solid(self.0.union(&other.0))
+        Solid::wrap(self.0.union(&other.0))
     }
     pub fn difference(&self, other: &Solid) -> Solid {
-        Solid(self.0.difference(&other.0))
+        Solid::wrap(self.0.difference(&other.0))
     }
     pub fn intersection(&self, other: &Solid) -> Solid {
-        Solid(self.0.intersection(&other.0))
+        Solid::wrap(self.0.intersection(&other.0))
     }
 
     /// Union many solids at once (cheaper + more robust than folding `union`). Empty ⇒ empty solid.
     pub fn batch_union(solids: &[Solid]) -> Solid {
         let hs: Vec<Manifold> = solids.iter().map(|s| s.0.clone()).collect();
-        Solid(Manifold::batch_union(&hs))
+        Solid::wrap(Manifold::batch_union(&hs))
     }
 
     // --- transforms ------------------------------------------------------------------------------
 
     pub fn translate(&self, x: f64, y: f64, z: f64) -> Solid {
-        Solid(self.0.translate(x, y, z))
+        Solid::wrap(self.0.translate(x, y, z))
     }
     /// Rotate by Euler angles in DEGREES (X then Y then Z).
     pub fn rotate(&self, x_deg: f64, y_deg: f64, z_deg: f64) -> Solid {
-        Solid(self.0.rotate(x_deg, y_deg, z_deg))
+        Solid::wrap(self.0.rotate(x_deg, y_deg, z_deg))
     }
     /// Apply a 3×4 affine (column-major 12-float, as Manifold expects).
     pub fn transform(&self, m: &[f64; 12]) -> Solid {
-        Solid(self.0.transform(m))
+        Solid::wrap(self.0.transform(m))
     }
 
     /// Rotate so local +Z maps onto unit `axis` — used to point a connector's cap along its
@@ -301,12 +322,12 @@ impl Solid {
     /// (11.4), preferred over `trim_by_plane` because both sides come back clean.
     pub fn split_by_plane(&self, normal: [f64; 3], offset: f64) -> (Solid, Solid) {
         let (pos, neg) = self.0.split_by_plane(normal, offset);
-        (Solid(pos), Solid(neg))
+        (Solid::wrap(pos), Solid::wrap(neg))
     }
     /// Keep only the `normal·p > offset` half (drops the rest). NOTE upstream #1516: trimmed halves
     /// may not re-union cleanly (coincident faces) — use `split_by_plane` when you need both sides.
     pub fn trim_by_plane(&self, normal: [f64; 3], offset: f64) -> Solid {
-        Solid(self.0.trim_by_plane(normal, offset))
+        Solid::wrap(self.0.trim_by_plane(normal, offset))
     }
 
     // --- queries ---------------------------------------------------------------------------------

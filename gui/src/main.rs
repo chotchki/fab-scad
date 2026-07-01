@@ -1608,7 +1608,7 @@ fn sync_dim_labels(
     }
 
     for (dl, mut node, mut text, mut vis, mut color) in &mut labels {
-        let Some(&(pos, width, col)) = segs.get(dl.idx) else {
+        let Some(&(pos, width, _col)) = segs.get(dl.idx) else {
             *vis = Visibility::Hidden;
             continue;
         };
@@ -1620,7 +1620,9 @@ fn sync_dim_labels(
                 node.left = px(p.x - s.len() as f32 * 3.5);
                 node.top = px(p.y - 8.0);
                 *text = Text::new(s);
-                *color = TextColor(col);
+                // White, not the axis colour — a green number vanishes on the green plane/part. The
+                // per-axis colour lives on the LINE, which is the x/y/z signal.
+                *color = TextColor(Color::srgb(0.96, 0.96, 1.0));
                 *vis = Visibility::Visible;
             }
             Err(_) => *vis = Visibility::Hidden,

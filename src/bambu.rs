@@ -20,7 +20,10 @@
 use std::io::Write;
 use std::path::Path;
 
-use anyhow::{Context, Result};
+use anyhow::{ensure, Context, Result};
+
+use crate::geom;
+use crate::pack::{self, Footprint};
 
 /// An indexed triangle mesh: vertices and 0-based triangle indices into them.
 pub struct Mesh {
@@ -171,6 +174,125 @@ pub fn write_project(path: &Path, plates: &[Vec<Placed>], bed: [f64; 2]) -> Resu
     Ok(())
 }
 
+// --- orchestration: orient → seat → pack → place → write ----------------------------------------
+
+/// A piece to lay out for print: its mesh in MODEL space (as it sits in the assembled part) and the
+/// build-up direction it prints along (unit, model space — `auto_orient::best_up`). `export_plates`
+/// rotates it so the build-up is +Z, seats it on the bed, packs it, and writes the project.
+pub struct PieceToPlace {
+    pub mesh: Mesh,
+    pub up: [f64; 3],
+}
+
+/// What an export produced — for a status read-out.
+pub struct ExportSummary {
+    pub plates: usize,
+    pub pieces: usize,
+    pub fill: f64,
+}
+
+/// Lay out `pieces` and write a Bambu multi-plate project to `path`: orient each to its build-up
+/// (+Z), seat it on the bed (min z = 0), pack the footprints onto the fewest `bed` = `[x, y]` mm
+/// plates (leaving `gap` mm between pieces), and emit the `.3mf`. Mesh-based end to end — no `Solid`,
+/// so it runs happily on a worker thread. Errors if a piece can't fit the bed.
+pub fn export_plates(
+    path: &Path,
+    pieces: Vec<PieceToPlace>,
+    bed: [f64; 2],
+    gap: f64,
+) -> Result<ExportSummary> {
+    ensure!(!pieces.is_empty(), "no pieces to export");
+
+    // Orient (build-up → +Z) + seat (footprint min-corner to the origin); collect footprints.
+    let mut oriented: Vec<Mesh> = Vec::with_capacity(pieces.len());
+    let mut foots: Vec<Footprint> = Vec::with_capacity(pieces.len());
+    for p in &pieces {
+        let r = rot_up_to_z(p.up);
+        let mut verts: Vec<[f64; 3]> = p.mesh.verts.iter().map(|&v| matvec(r, v)).collect();
+        let (min, max) = bbox(&verts).context("piece has no vertices")?;
+        for v in &mut verts {
+            for k in 0..3 {
+                v[k] -= min[k];
+            }
+        }
+        oriented.push(Mesh { verts, tris: p.mesh.tris.clone() });
+        foots.push(Footprint { w: max[0] - min[0], h: max[1] - min[1] });
+    }
+
+    let placements = pack::pack(&foots, bed, gap)?;
+    let plate_n = pack::plate_count(&placements);
+    let fill = pack::fill_ratio(&foots, &placements, bed);
+
+    let mut plates: Vec<Vec<Placed>> = (0..plate_n).map(|_| Vec::new()).collect();
+    for (i, mut mesh) in oriented.into_iter().enumerate() {
+        let pl = placements[i];
+        if pl.rotated {
+            // 90° CCW about Z: (x, y) → (-y, x); then re-seat the min-corner to the origin so the
+            // footprint matches the packer's landscape-normalized dims.
+            for v in &mut mesh.verts {
+                let (x, y) = (v[0], v[1]);
+                v[0] = -y;
+                v[1] = x;
+            }
+            let (min, _) = bbox(&mesh.verts).expect("non-empty after orient");
+            for v in &mut mesh.verts {
+                v[0] -= min[0];
+                v[1] -= min[1];
+            }
+        }
+        plates[pl.plate].push(Placed { mesh, at: [pl.x, pl.y] });
+    }
+
+    write_project(path, &plates, bed)?;
+    Ok(ExportSummary { plates: plate_n, pieces: pieces.len(), fill })
+}
+
+/// Axis-aligned bounding box of a vertex set (`None` if empty).
+fn bbox(verts: &[[f64; 3]]) -> Option<([f64; 3], [f64; 3])> {
+    if verts.is_empty() {
+        return None;
+    }
+    let mut min = [f64::INFINITY; 3];
+    let mut max = [f64::NEG_INFINITY; 3];
+    for v in verts {
+        for k in 0..3 {
+            min[k] = min[k].min(v[k]);
+            max[k] = max[k].max(v[k]);
+        }
+    }
+    Some((min, max))
+}
+
+/// 3×3 (row-major) times a column vector.
+fn matvec(m: [[f64; 3]; 3], v: [f64; 3]) -> [f64; 3] {
+    std::array::from_fn(|i| m[i][0] * v[0] + m[i][1] * v[1] + m[i][2] * v[2])
+}
+
+/// 3×3 (row-major) product.
+fn matmul(a: [[f64; 3]; 3], b: [[f64; 3]; 3]) -> [[f64; 3]; 3] {
+    std::array::from_fn(|i| std::array::from_fn(|j| (0..3).map(|k| a[i][k] * b[k][j]).sum()))
+}
+
+/// Rotation (row-major 3×3) taking unit `up` to +Z, via Rodrigues — the minimal rotation, so the
+/// piece's spin about the build-up axis is arbitrary (fine, it prints the same either way). Handles
+/// the already-aligned and antipodal (`up ≈ -Z`) cases.
+fn rot_up_to_z(up: [f64; 3]) -> [[f64; 3]; 3] {
+    const I: [[f64; 3]; 3] = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+    let u = geom::normalize(up);
+    let c = u[2]; // u · +Z
+    if c > 1.0 - 1e-9 {
+        return I;
+    }
+    if c < -1.0 + 1e-9 {
+        return [[1.0, 0.0, 0.0], [0.0, -1.0, 0.0], [0.0, 0.0, -1.0]]; // 180° about X
+    }
+    let v = geom::cross(u, [0.0, 0.0, 1.0]); // rotation axis × sin
+    let vx = [[0.0, -v[2], v[1]], [v[2], 0.0, -v[0]], [-v[1], v[0], 0.0]];
+    let k = 1.0 / (1.0 + c);
+    let vx2 = matmul(vx, vx);
+    std::array::from_fn(|i| std::array::from_fn(|j| I[i][j] + vx[i][j] + vx2[i][j] * k))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -254,6 +376,41 @@ mod tests {
         assert_eq!(settings.matches("<plate>").count(), 2, "expected 2 plates");
         assert!(settings.contains("value=\"1\"") && settings.contains("value=\"2\""), "plater ids");
         assert_eq!(settings.matches("<model_instance>").count(), 2, "one instance per plate");
+
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    #[test]
+    fn rot_up_to_z_maps_the_build_up_to_plus_z() {
+        for up in [[0.0, 0.0, 1.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, -1.0], [1.0, 1.0, 1.0]] {
+            let z = matvec(rot_up_to_z(up), geom::normalize(up));
+            assert!((z[0]).abs() < 1e-9 && (z[1]).abs() < 1e-9 && (z[2] - 1.0).abs() < 1e-9, "up {up:?} → {z:?}");
+        }
+    }
+
+    #[test]
+    fn export_plates_orients_and_writes() {
+        let tmp = std::env::temp_dir().join(format!("bambu_export_{}.3mf", std::process::id()));
+        // Two cubes, different build-ups — both small, so they share one plate.
+        let pieces = vec![
+            PieceToPlace { mesh: unit_cube(), up: [0.0, 0.0, 1.0] },
+            PieceToPlace { mesh: unit_cube(), up: [1.0, 0.0, 0.0] },
+        ];
+        let sum = export_plates(&tmp, pieces, [256.0, 256.0], 3.0).unwrap();
+        assert_eq!(sum.pieces, 2);
+        assert_eq!(sum.plates, 1, "two 1mm cubes fit one 256 bed");
+        assert!(sum.fill > 0.0);
+
+        let f = std::fs::File::open(&tmp).unwrap();
+        let mut zip = zip::ZipArchive::new(f).unwrap();
+        use std::io::Read;
+        let mut model = String::new();
+        zip.by_name("3D/3dmodel.model").unwrap().read_to_string(&mut model).unwrap();
+        assert!(model.contains("name=\"Application\">BambuStudio-"));
+        assert_eq!(model.matches("<item ").count(), 2);
+        let mut settings = String::new();
+        zip.by_name("Metadata/model_settings.config").unwrap().read_to_string(&mut settings).unwrap();
+        assert_eq!(settings.matches("<plate>").count(), 1, "one shared plate");
 
         let _ = std::fs::remove_file(&tmp);
     }

@@ -3312,6 +3312,11 @@ fn view_section(cuts: &Cuts, files: &FileList) -> impl Scene + 'static {
                 })
             ),
             { Box::new(vec![files_card]) as Box<dyn SceneList> },
+            // Jump to OpenSCAD to edit the active source; the file-watch reloads on save.
+            (
+                @FeathersButton { @caption: bsn!{ Text("Edit in OpenSCAD") ThemedText } }
+                on(edit_in_openscad_action)
+            ),
             (
                 Node { flex_direction: FlexDirection::Column, row_gap: px(6) }
                 Children [ { Box::new(cards) as Box<dyn SceneList> } ]
@@ -3334,6 +3339,19 @@ fn view_section(cuts: &Cuts, files: &FileList) -> impl Scene + 'static {
                 on(|_: On<Activate>, mut pv: ResMut<PrintView>| { pv.0 = true; })
             ),
         ]
+    }
+}
+
+/// Open the active `.scad` source in the OpenSCAD GUI (detached) so you can edit it; the file-watch
+/// re-renders here on save.
+fn edit_in_openscad_action(_: On<Activate>, scene: Res<SceneCfg>, mut status: ResMut<Status>) {
+    let Some(src) = scene.source.clone() else {
+        status.0 = "no .scad source to edit".into();
+        return;
+    };
+    match fab::open_in_openscad(scene.root.as_deref(), &src) {
+        Ok(()) => status.0 = format!("opened {} in OpenSCAD", src.display()),
+        Err(e) => status.0 = format!("couldn't launch OpenSCAD: {e:#}"),
     }
 }
 

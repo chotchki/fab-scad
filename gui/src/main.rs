@@ -576,7 +576,7 @@ fn run_windowed(scene: SceneCfg) {
                 nudge_buttons,
                 auto_reslice,
                 revert_on_edit,
-                (auto_scale, split_viewport, seat_bed, loading_pulse),
+                (auto_scale, split_viewport, seat_bed, loading_pulse, draw_axis_gizmo),
                 (
                     enforce_exclusive_modes,
                     apply_view_visibility,
@@ -1502,10 +1502,9 @@ fn seat_bed(bounds: Res<ModelBounds>, mut beds: Query<&mut Transform, With<Bed>>
     }
 }
 
-/// CAD-style dimension lines for each piece width: a line PERPENDICULAR to the cut plane (parallel to
-/// the cut axis), offset OUTSIDE the part with extension lines + end ticks (gizmos), and the width
-/// printed on the line. The text rides the offset line over the dark background, so it stays readable
-/// instead of washing out on the part.
+/// Piece-width measurements: a number floating at each piece in 3D — no leader lines, just the value
+/// where the piece is. White + centred so it reads on the part or the dark background. (The corner
+/// XYZ orientation gizmo is a separate thing — see `draw_axis_gizmo`.)
 #[allow(clippy::too_many_arguments)]
 fn sync_dim_labels(
     cuts: Res<Cuts>,
@@ -1514,13 +1513,12 @@ fn sync_dim_labels(
     print: Res<PrintView>,
     cam: Query<(&Camera, &GlobalTransform), With<Camera3d>>,
     existing: Query<&DimLabel>,
-    mut labels: Query<(&DimLabel, &mut Node, &mut Text, &mut Visibility, &mut TextColor)>,
+    mut labels: Query<(&DimLabel, &mut Node, &mut Text, &mut Visibility)>,
     mut commands: Commands,
-    mut gizmos: Gizmos,
 ) {
     if print.0 {
         // The print preview lays pieces out apart — the assembled-part width labels don't apply.
-        for (_, _, _, mut vis, _) in &mut labels {
+        for (_, _, _, mut vis) in &mut labels {
             *vis = Visibility::Hidden;
         }
         return;
@@ -1533,19 +1531,10 @@ fn sync_dim_labels(
     };
     // One dimension per piece width. `segs` collects each dimension's TEXT anchor (the line midpoint,
     // off the part) + its width; the lines/ticks are drawn as gizmos as we go.
-    // How far the dimension sits off the part — a hair off the model, clamped so a long axis doesn't
-    // shove the short-axis dimensions way out into space.
-    let gap = ((max - min).max_element() * 0.05).clamp(8.0, 22.0);
-    let tick = gap * 0.35;
-    let mut segs: Vec<(Vec3, f32, Color)> = Vec::new();
+    let center = (min + max) * 0.5;
+    let mut segs: Vec<(Vec3, f32)> = Vec::new();
     for axis in [Axis::X, Axis::Y, Axis::Z] {
         let ai = axis.index();
-        // Per-axis colour, the RGB=XYZ convention (X red, Y green, Z blue).
-        let dim_col = match axis {
-            Axis::X => Color::srgb(1.0, 0.4, 0.4),
-            Axis::Y => Color::srgb(0.4, 0.9, 0.45),
-            Axis::Z => Color::srgb(0.5, 0.6, 1.0),
-        };
         let mut xs: Vec<f32> =
             cuts.list.iter().filter(|c| c.enabled && c.axis == axis).map(|c| c.at).collect();
         if xs.is_empty() {
@@ -1555,44 +1544,11 @@ fn sync_dim_labels(
         let mut edges = vec![comp(min, ai)];
         edges.extend(xs);
         edges.push(comp(max, ai));
-
-        // Offset the dimension line OUTSIDE the model on one perpendicular axis (p0), at the near face
-        // on the other (p1). `dim_pt` walks the dim line; `face_pt` its match on the model face (for
-        // the extension line). Coords built by index so this is axis-agnostic.
-        let others: Vec<usize> = (0..3).filter(|&a| a != ai).collect();
-        let (p0, p1) = (others[0], others[1]);
-        let off0 = comp(min, p0) - gap;
-        let face1 = comp(min, p1);
-        let dim_pt = |v: f32| {
-            let mut a = [0.0f32; 3];
-            a[ai] = v;
-            a[p0] = off0;
-            a[p1] = face1;
-            Vec3::from_array(a)
-        };
-        let face_pt = |v: f32| {
-            let mut a = [0.0f32; 3];
-            a[ai] = v;
-            a[p0] = comp(min, p0);
-            a[p1] = face1;
-            Vec3::from_array(a)
-        };
-        let tvec = {
-            let mut a = [0.0f32; 3];
-            a[p0] = tick;
-            Vec3::from_array(a)
-        };
-
         for (k, w) in edges.windows(2).enumerate() {
-            let shift = k as f32 * dspread.0; // track the exploded piece
-            let (lo, hi) = (w[0] + shift, w[1] + shift);
-            let (a, b) = (dim_pt(lo), dim_pt(hi));
-            gizmos.line(a, b, dim_col); // the dimension line
-            gizmos.line(face_pt(lo), a, dim_col.with_alpha(0.4)); // extension lines from the part
-            gizmos.line(face_pt(hi), b, dim_col.with_alpha(0.4));
-            gizmos.line(a - tvec, a + tvec, dim_col); // end ticks
-            gizmos.line(b - tvec, b + tvec, dim_col);
-            segs.push(((a + b) * 0.5, w[1] - w[0], dim_col)); // text at the dim-line midpoint
+            // Float the number at the piece centre (its midpoint on the cut axis, model centre in the
+            // other two dims), tracking the explode. No leader lines.
+            let mid = (w[0] + w[1]) * 0.5 + k as f32 * dspread.0;
+            segs.push((with_comp(center, ai, mid), w[1] - w[0]));
         }
     }
 
@@ -1607,8 +1563,8 @@ fn sync_dim_labels(
         ));
     }
 
-    for (dl, mut node, mut text, mut vis, mut color) in &mut labels {
-        let Some(&(pos, width, _col)) = segs.get(dl.idx) else {
+    for (dl, mut node, mut text, mut vis) in &mut labels {
+        let Some(&(pos, width)) = segs.get(dl.idx) else {
             *vis = Visibility::Hidden;
             continue;
         };
@@ -1620,14 +1576,34 @@ fn sync_dim_labels(
                 node.left = px(p.x - s.len() as f32 * 3.5);
                 node.top = px(p.y - 8.0);
                 *text = Text::new(s);
-                // White, not the axis colour — a green number vanishes on the green plane/part. The
-                // per-axis colour lives on the LINE, which is the x/y/z signal.
-                *color = TextColor(Color::srgb(0.96, 0.96, 1.0));
                 *vis = Visibility::Visible;
             }
             Err(_) => *vis = Visibility::Hidden,
         }
     }
+}
+
+/// A small XYZ orientation gizmo pinned to the lower-left of the 3D viewport: arrows along world X
+/// (red), Y (green), Z (blue), drawn at a fixed camera-relative offset. Because the arrows point
+/// along the WORLD axes but the anchor rides with the camera, it spins as you orbit yet stays put on
+/// pan/zoom — the "which way is the origin" indicator.
+fn draw_axis_gizmo(cam: Query<(&GlobalTransform, &Projection), With<Camera3d>>, mut gizmos: Gizmos) {
+    let Ok((gt, proj)) = cam.single() else {
+        return;
+    };
+    let Projection::Perspective(p) = proj else {
+        return;
+    };
+    // Place the anchor at the lower-left of the frustum, a short distance in front of the camera.
+    let d = 12.0;
+    let half_h = d * (p.fov * 0.5).tan();
+    let half_w = half_h * p.aspect_ratio;
+    let origin =
+        gt.translation() + gt.forward() * d - gt.right() * (half_w * 0.85) - gt.up() * (half_h * 0.78);
+    let len = half_h * 0.22;
+    gizmos.arrow(origin, origin + Vec3::X * len, Color::srgb(1.0, 0.4, 0.4)); // X red
+    gizmos.arrow(origin, origin + Vec3::Y * len, Color::srgb(0.4, 0.9, 0.45)); // Y green
+    gizmos.arrow(origin, origin + Vec3::Z * len, Color::srgb(0.5, 0.6, 1.0)); // Z blue
 }
 
 /// On a change of what's displayed, frame it: centre on the (possibly exploded) bounds + fit.

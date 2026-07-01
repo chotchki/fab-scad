@@ -576,7 +576,7 @@ fn run_windowed(scene: SceneCfg) {
                 nudge_buttons,
                 auto_reslice,
                 revert_on_edit,
-                (auto_scale, split_viewport, seat_bed),
+                (auto_scale, split_viewport, seat_bed, loading_pulse),
                 (
                     enforce_exclusive_modes,
                     apply_view_visibility,
@@ -1109,6 +1109,38 @@ fn update_view_label(dspread: Res<DisplaySpread>, mut q: Query<&mut Text, With<V
     let label = if dspread.0 > 0.0 { "Collapse" } else { "Explode" };
     for mut t in &mut q {
         *t = Text::new(label);
+    }
+}
+
+/// Loading feedback (the DAG success criterion): while a render/slice job runs, DISABLE the panel
+/// buttons (feathers dims a `InteractionDisabled` button) and PULSE the status line — so a background
+/// rebuild reads as "recomputing", not frozen. The disable is idempotent + rebuild-safe: it toggles
+/// only buttons in the wrong state, so a panel rebuilt mid-job still comes up disabled.
+fn loading_pulse(
+    time: Res<Time>,
+    job: Res<Job>,
+    to_disable: Query<Entity, (With<bevy::ui_widgets::Button>, Without<bevy::ui::InteractionDisabled>)>,
+    to_enable: Query<Entity, (With<bevy::ui_widgets::Button>, With<bevy::ui::InteractionDisabled>)>,
+    mut status_c: Query<&mut TextColor, With<StatusLabel>>,
+    mut commands: Commands,
+) {
+    let busy = job.0.is_some();
+    if busy {
+        for e in &to_disable {
+            commands.entity(e).insert(bevy::ui::InteractionDisabled);
+        }
+    } else {
+        for e in &to_enable {
+            commands.entity(e).remove::<bevy::ui::InteractionDisabled>();
+        }
+    }
+    for mut c in &mut status_c {
+        c.0 = if busy {
+            let t = (time.elapsed_secs() * 5.0).sin() * 0.5 + 0.5; // 0..1
+            Color::srgb(0.45 + 0.45 * t, 0.65 + 0.3 * t, 1.0) // pulsing blue
+        } else {
+            Color::srgb(0.9, 0.9, 0.95)
+        };
     }
 }
 
@@ -2615,6 +2647,7 @@ fn run_scripted(scene: SceneCfg, actions: Vec<Action>) {
                     do_auto_place,
                     split_viewport,
                     seat_bed,
+                    loading_pulse,
                 ),
                 run_script,
             ),

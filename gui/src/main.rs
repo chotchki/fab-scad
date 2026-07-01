@@ -1151,7 +1151,22 @@ fn draw_profile(
         let iso = Isometry3d::new(center, rot);
         match pc.kind {
             fab::ConnKind::Onion => {
-                gizmos.circle(iso, pc.size / 2.0, onion_col);
+                // The onion is a TEARDROP, cap along the build (+Z): the tip reaches √2·r past centre
+                // (ang=45). Draw that, not a bare circle, so the real footprint — and any poke past
+                // the profile edge — is visible. When the cut is ⟂ the build (Z-cut) the cap points
+                // out of plane, so the 2D footprint IS the equatorial circle.
+                let r = pc.size / 2.0;
+                let normal = c.axis.unit();
+                let cap = Vec3::Z - normal * Vec3::Z.dot(normal); // build, projected into the cut plane
+                gizmos.circle(iso, r, onion_col);
+                if cap.length() > 1e-3 {
+                    let cap = cap.normalize();
+                    let tip = center + cap * (r * std::f32::consts::SQRT_2);
+                    let t1 = center + (Quat::from_axis_angle(normal, std::f32::consts::FRAC_PI_4) * cap) * r;
+                    let t2 = center + (Quat::from_axis_angle(normal, -std::f32::consts::FRAC_PI_4) * cap) * r;
+                    gizmos.line(t1, tip, onion_col);
+                    gizmos.line(t2, tip, onion_col);
+                }
             }
             fab::ConnKind::Bolt => {
                 let r = pc.screw.head_r();

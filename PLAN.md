@@ -32,7 +32,12 @@ Driven by `claude-plan-bridge` (FORMATv2). Hand-authored; run
   - [x] 5.3.7 - Onion feasibility follows build axis, not cut axis
   - [x] 5.3.8 - Bound onions to teardrop tip, not sphere radius
   - [ ] 5.3.9 - Bolt: bound through-depth + wire teardrop shaft in slicer
-  - [ ] 5.3.10 - Seat the loaded model on the bed (Z-floor)
+  - [x] 5.3.10 - Seat the loaded model on the bed (Z-floor)
+- [x] 5.4 - Track B: reactive render DAG (dogfood-driven)
+  - [x] 5.4.1 - Include/use dependency resolver (fab_scad::deps)
+  - [x] 5.4.2 - Include-graph file-watch (closes 5.3.3 gap)
+  - [x] 5.4.3 - Reactive auto-reslice: no Re-slice button
+  - [x] 5.4.4 - Loading pulse while recomputing
 ## Phase 6 - fab render + output (3mf, magnets, Bambu)
 - [ ] 6.1 - Render engine: enumerate targets → parallel (rayon) render → report; a "target" is any .scad→out unit (pieces/parts/projects collapse to target sets); per-target thumbnail + N/M progress
 - [ ] 6.2 - Incremental rebuild: skip pieces whose inputs are unchanged (content hash)

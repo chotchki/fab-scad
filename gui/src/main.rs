@@ -381,9 +381,14 @@ struct DisplaySpread(f32);
 #[derive(Resource, Default)]
 struct SlicedMesh(Option<Handle<Mesh>>);
 
-/// Set when cuts change after the last slice — so Explode knows to re-slice first.
+/// True while the in-flight slice was kicked by `auto_reslice` (a background rebuild), so `poll_job`
+/// refreshes the pieces WITHOUT jumping the view to exploded — vs an explicit slice, which shows them.
 #[derive(Resource, Default)]
-struct SliceDirty(bool);
+struct SliceInBackground(bool);
+
+/// How long inputs must settle (no change) before a background reslice fires — coalesces a cut drag
+/// or a burst of connector edits into ONE rebuild instead of one per frame.
+const AUTOSLICE_DEBOUNCE: f32 = 0.35;
 
 /// The bundled Material Icons font (gui/assets/fonts), for button glyphs (trash, etc.).
 #[derive(Resource)]
@@ -538,7 +543,7 @@ fn run_windowed(scene: SceneCfg) {
         .init_resource::<Watch>()
         .init_resource::<WholeMesh>()
         .init_resource::<SlicedMesh>()
-        .init_resource::<SliceDirty>()
+        .init_resource::<SliceInBackground>()
         .init_resource::<DisplaySpread>()
         .init_resource::<PanelSig>()
         .insert_resource(Status("rendering".into()))
@@ -569,7 +574,7 @@ fn run_windowed(scene: SceneCfg) {
                 draw_profile,
                 (push_fields, sync_selected, apply_icon_font, rebuild_panel).chain(),
                 nudge_buttons,
-                mark_dirty,
+                auto_reslice,
                 revert_on_edit,
                 (auto_scale, split_viewport, seat_bed),
                 (
@@ -993,7 +998,6 @@ fn toggle_view(
     _ev: On<Activate>,
     whole: Res<WholeMesh>,
     sliced: Res<SlicedMesh>,
-    dirty: Res<SliceDirty>,
     mut dspread: ResMut<DisplaySpread>,
     mut reslice_w: MessageWriter<ReSlice>,
     mut models: Query<&mut Mesh3d, With<Model>>,
@@ -1006,23 +1010,95 @@ fn toggle_view(
             }
             dspread.0 = 0.0;
         }
-    } else if dirty.0 || sliced.0.is_none() {
-        // Explode, but the slice is stale/missing — re-slice (poll_job explodes when it lands).
-        reslice_w.write(ReSlice);
     } else if let Some(h) = sliced.0.clone() {
-        // Explode the up-to-date result, no re-render needed.
+        // Explode the sliced pieces — `auto_reslice` keeps them fresh in the background, and a
+        // pending rebuild refreshes them in place when it lands (poll_job, dspread > 0).
         for mut m in &mut models {
             m.0 = h.clone();
         }
         dspread.0 = SPREAD as f32;
+    } else {
+        // Nothing sliced yet — kick one explicitly; poll_job explodes it when it arrives.
+        reslice_w.write(ReSlice);
     }
 }
 
-/// Mark the slice stale whenever the cut stack changes, so Explode re-slices.
-fn mark_dirty(cuts: Res<Cuts>, mut dirty: ResMut<SliceDirty>) {
-    if cuts.is_changed() {
-        dirty.0 = true;
+/// A content hash of EXACTLY the inputs the slice depends on — the enabled cuts, the placed
+/// connectors, and the per-piece orientations — quantised so float jitter doesn't churn it, and
+/// deliberately EXCLUDING UI state like the active cut. `auto_reslice` keys the rebuild on this, not
+/// Bevy change-detection, which fires on any `ResMut` deref (re-selecting a cut, a same-value field
+/// echo) and would re-slice endlessly.
+fn slice_hash(cuts: &Cuts, conns: &Conns, orient: &Orient) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    let q = |x: f32| (x as f64 * 1000.0).round() as i64; // 0.001mm — below print resolution
+    for c in cuts.list.iter().filter(|c| c.enabled) {
+        c.axis.index().hash(&mut h);
+        q(c.at).hash(&mut h);
     }
+    0xC0FFEE_u64.hash(&mut h); // section marker so [cut] vs [conn] can't alias
+    for pc in &conns.list {
+        pc.cut.hash(&mut h);
+        q(pc.pos[0]).hash(&mut h);
+        q(pc.pos[1]).hash(&mut h);
+        q(pc.size).hash(&mut h);
+        matches!(pc.kind, fab::ConnKind::Bolt).hash(&mut h);
+        pc.screw.label().hash(&mut h);
+    }
+    0xBEEF_u64.hash(&mut h);
+    let mut om: Vec<_> = orient.map.iter().collect(); // HashMap — sort for a stable hash
+    om.sort_by_key(|(p, _)| **p);
+    for (piece, up) in om {
+        piece.hash(&mut h);
+        up.iter().for_each(|&x| q(x).hash(&mut h));
+    }
+    h.finish()
+}
+
+/// The reactive core (the DAG success criterion): when the slice inputs change, rebuild in the
+/// BACKGROUND after a short settle — no Re-slice button. `prev` debounces (reset the clock while the
+/// inputs move frame-to-frame, e.g. a cut drag); `sliced_h` records what was last sliced so identical
+/// inputs never re-fire. Skips while a job runs (retries once idle) or before the bounds land.
+/// `poll_job` refreshes the exploded view in place when the result lands, or banks it if assembled.
+#[allow(clippy::too_many_arguments)]
+fn auto_reslice(
+    time: Res<Time>,
+    mut settle: Local<f32>,
+    mut prev: Local<Option<u64>>,
+    mut sliced_h: Local<Option<u64>>,
+    mut job: ResMut<Job>,
+    mut bg: ResMut<SliceInBackground>,
+    bounds: Res<ModelBounds>,
+    cfg: Res<SceneCfg>,
+    cuts: Res<Cuts>,
+    conns: Res<Conns>,
+    orient: Res<Orient>,
+    mut status: ResMut<Status>,
+) {
+    if bounds.0.is_none() {
+        return;
+    }
+    let h = slice_hash(&cuts, &conns, &orient);
+    if *prev != Some(h) {
+        *settle = 0.0; // inputs moved this frame → re-arm the debounce
+        *prev = Some(h);
+    } else {
+        *settle += time.delta_secs();
+    }
+    if *sliced_h == Some(h) || job.0.is_some() {
+        return; // already sliced these exact inputs, or a job is running
+    }
+    if *settle < AUTOSLICE_DEBOUNCE {
+        return; // still settling
+    }
+    let xs = cuts.enabled_cuts();
+    if xs.is_empty() {
+        *sliced_h = Some(h); // nothing enabled to slice — treat as done
+        return;
+    }
+    bg.0 = true; // background rebuild → poll_job won't jump the view to exploded
+    kick_job(&mut job, &mut status, &cfg, true, xs, resolve_conns(&cuts, &conns), orient_inputs(&orient));
+    *sliced_h = Some(h);
 }
 
 /// Relabel the toggle button to the action it performs from the current view.
@@ -1541,11 +1617,13 @@ fn closest_on_axis(p0: Vec3, axis: Vec3, ray_o: Vec3, ray_d: Vec3) -> f32 {
 
 // ---- slicing job ----------------------------------------------------------------------
 
-/// Re-slice button → start a background slice job from the enabled cuts (ignored if one's running).
+/// Explicit `ReSlice` (the scripted harness; Explode when there's no slice yet) → slice NOW and
+/// show the pieces (foreground). The reactive UI path is `auto_reslice` (background).
 fn request_reslice(
     mut ev: MessageReader<ReSlice>,
     mut job: ResMut<Job>,
     mut status: ResMut<Status>,
+    mut bg: ResMut<SliceInBackground>,
     cfg: Res<SceneCfg>,
     cuts: Res<Cuts>,
     conns: Res<Conns>,
@@ -1563,6 +1641,7 @@ fn request_reslice(
         status.0 = "no enabled cuts".into();
         return;
     }
+    bg.0 = false; // explicit → poll_job jumps to the exploded view when it lands
     kick_job(&mut job, &mut status, &cfg, true, xs, resolve_conns(&cuts, &conns), orient_inputs(&orient));
 }
 
@@ -1612,7 +1691,6 @@ struct ModelState<'w> {
     bounds: ResMut<'w, ModelBounds>,
     whole: ResMut<'w, WholeMesh>,
     sliced: ResMut<'w, SlicedMesh>,
-    dirty: ResMut<'w, SliceDirty>,
     panel_sig: ResMut<'w, PanelSig>,
     watch: ResMut<'w, Watch>,
 }
@@ -1635,7 +1713,6 @@ impl ModelState<'_> {
         *self.bounds = ModelBounds::default();
         *self.whole = WholeMesh::default();
         *self.sliced = SlicedMesh::default();
-        *self.dirty = SliceDirty::default();
         *self.panel_sig = PanelSig::default();
         *self.watch = Watch::default();
     }
@@ -1807,8 +1884,8 @@ fn poll_job(
     mut cuts: ResMut<Cuts>,
     mut whole: ResMut<WholeMesh>,
     mut sliced: ResMut<SlicedMesh>,
-    mut dirty: ResMut<SliceDirty>,
     mut dspread: ResMut<DisplaySpread>,
+    bg: Res<SliceInBackground>,
     models: Query<Entity, With<Model>>,
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
@@ -1825,15 +1902,25 @@ fn poll_job(
     match result {
         Ok(stl) => {
             let (mesh, aabb) = mesh_and_bounds(&mut meshes, &stl);
-            for e in &models {
-                commands.entity(e).despawn();
-            }
-            commands.spawn((Mesh3d(mesh.clone()), MeshMaterial3d(part_material(&mut materials)), Model));
             if is_reslice {
-                sliced.0 = Some(mesh); // remember it so the view toggle can re-show it
-                dirty.0 = false; // this slice matches the current cuts
-                dspread.0 = SPREAD as f32; // now showing the fanned pieces
+                sliced.0 = Some(mesh.clone()); // bank it so the view toggle can re-show it
+                // A BACKGROUND rebuild refreshes the display only if the user is already exploded;
+                // an explicit slice (or a background one while exploded) shows the fanned pieces.
+                let show = !bg.0;
+                if show || dspread.0 > 0.0 {
+                    for e in &models {
+                        commands.entity(e).despawn();
+                    }
+                    commands.spawn((Mesh3d(mesh), MeshMaterial3d(part_material(&mut materials)), Model));
+                    if show {
+                        dspread.0 = SPREAD as f32;
+                    }
+                }
             } else {
+                for e in &models {
+                    commands.entity(e).despawn();
+                }
+                commands.spawn((Mesh3d(mesh.clone()), MeshMaterial3d(part_material(&mut materials)), Model));
                 whole.0 = Some(mesh); // remember the uncut mesh, so editing can revert to it
                 dspread.0 = 0.0;
                 // First whole render fixes the bounds and seeds a centre cut (sync_overlays draws it).
@@ -2253,7 +2340,7 @@ fn run_screenshot(scene: SceneCfg, png: PathBuf) {
         .init_resource::<DraggingCut>()
         .init_resource::<WholeMesh>()
         .init_resource::<SlicedMesh>()
-        .init_resource::<SliceDirty>()
+        .init_resource::<SliceInBackground>()
         .init_resource::<DisplaySpread>()
         .init_resource::<PanelSig>()
         .insert_resource(Status("rendering".into()))
@@ -2490,7 +2577,7 @@ fn run_scripted(scene: SceneCfg, actions: Vec<Action>) {
         .init_resource::<Watch>()
         .init_resource::<WholeMesh>()
         .init_resource::<SlicedMesh>()
-        .init_resource::<SliceDirty>()
+        .init_resource::<SliceInBackground>()
         .init_resource::<DisplaySpread>()
         .init_resource::<PanelSig>()
         .insert_resource(Status("rendering".into()))
@@ -2515,7 +2602,7 @@ fn run_scripted(scene: SceneCfg, actions: Vec<Action>) {
                 edit_mode,
                 draw_profile,
                 (push_fields, sync_selected, apply_icon_font, rebuild_panel).chain(),
-                mark_dirty,
+                auto_reslice,
                 revert_on_edit,
                 (
                     enforce_exclusive_modes,
@@ -3077,10 +3164,7 @@ fn view_section(cuts: &Cuts, files: &FileList) -> impl Scene + 'static {
                 Children [ { Box::new(cards) as Box<dyn SceneList> } ]
             ),
             (Text("rendering") ThemedText StatusLabel),
-            (
-                @FeathersButton { @variant: {ButtonVariant::Primary}, @caption: bsn!{ Text("Re-slice") ThemedText } }
-                on(|_: On<Activate>, mut w: MessageWriter<ReSlice>| { w.write(ReSlice); })
-            ),
+            // No Re-slice button — edits invalidate and rebuild in the background (auto_reslice).
             (
                 @FeathersButton { @caption: bsn!{ Text("Explode") ThemedText ViewToggleLabel } }
                 ViewToggleButton

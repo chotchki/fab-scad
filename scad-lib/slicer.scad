@@ -100,14 +100,24 @@ module slice(cuts, axis = RIGHT, size = 500, spread = 0, only = undef, connector
                         children();
                         move(center) cuboid(dims);
                     }
-                    // peg into this piece for each onion at its UPPER cut (this piece is below it)
+                    // peg into this piece for each onion at its UPPER cut (this piece is below it),
+                    // CONFINED to the model envelope. `children()` here is carved on the inner
+                    // (perpendicular) axes but spans this axis in full, so the peg keeps its proud
+                    // half + cap (into the neighbour across THIS cut) yet can't float into another
+                    // piece's cell when the model is sliced on more than one axis (#43). No trim in
+                    // the normal case — the envelope contains an interior peg whole; it only clips a
+                    // peg placed right on a cut-plane intersection, which auto-place already avoids.
                     if (i < n - 1)
-                        for (cn = connectors)
-                            if (abs(cn[0] - hi) < eps)
-                                translate(_conn_point(cn, ai, others))
-                                    onion_peg(d = cn[3],
-                                              orient = len(cn) > 4 ? [cn[4], cn[5], cn[6]] : unit,
-                                              ang = len(cn) > 7 ? cn[7] : 45);
+                        intersection() {
+                            union()
+                                for (cn = connectors)
+                                    if (abs(cn[0] - hi) < eps)
+                                        translate(_conn_point(cn, ai, others))
+                                            onion_peg(d = cn[3],
+                                                      orient = len(cn) > 4 ? [cn[4], cn[5], cn[6]] : unit,
+                                                      ang = len(cn) > 7 ? cn[7] : 45);
+                            children();
+                        }
                 }
                 // socket out of this piece for each onion at its LOWER cut (this piece is above it)
                 if (i > 0)

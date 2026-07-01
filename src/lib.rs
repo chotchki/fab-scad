@@ -14,6 +14,7 @@ pub mod kernel;
 pub mod manifest;
 pub mod num;
 pub mod openscad;
+pub mod pack;
 pub mod printers;
 pub mod project;
 pub mod slicing;

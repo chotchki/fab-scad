@@ -233,6 +233,54 @@ pub fn reslice(
     slicing::slice_part(&oscad, &wrap, &spec, spread, out_dir, TIMEOUT)
 }
 
+/// Reslice IN-PROCESS via the Manifold kernel (Track C 11.10) — the reactive hot path. OpenSCAD
+/// renders the base mesh only on a CACHE MISS (`whole_stl` absent); every cut/connector/orientation
+/// edit after that is a pure in-process slice off the cached base, no spawn. Same signature +
+/// merged-STL output as `reslice`, so `poll_job` is unchanged.
+///
+/// Thread-safety: the `Solid` is built AND consumed here; only the output STL PATH leaves this
+/// function. A `Solid` is `!Send` and never crosses the task boundary — the compiler enforces it.
+/// See `docs/manifold-thread-safety.md`.
+pub fn reslice_kernel(
+    root: Option<&Path>,
+    source: &Path,
+    cuts: &[(char, f64)],
+    connectors: &[Conn],
+    orient: &[Orient3],
+    spread: f64,
+    out_dir: &Path,
+) -> Result<PathBuf> {
+    use fab_scad::kernel::Solid;
+
+    // Cache the base: render the whole model once; reuse it across every reslice.
+    let base_stl = whole_stl(source, out_dir);
+    if !base_stl.exists() {
+        render_whole(root, source, out_dir)?;
+    }
+    let base = Solid::from_stl_file(&base_stl)?;
+
+    let cut = cuts
+        .iter()
+        .map(|&(axis, at)| Cut { axis: axis.to_string(), at: Num::Float(at) })
+        .collect();
+    let spec = Slicing {
+        printer: None,
+        cut,
+        connector: to_connectors(connectors),
+        orient: to_orient(orient),
+    };
+
+    let pieces = slicing::slice_solid(&spec, &base)?;
+    ensure!(!pieces.is_empty(), "slice produced no pieces");
+    let laid: Vec<Solid> = pieces
+        .iter()
+        .map(|(i, s)| s.translate(i[0] as f64 * spread, i[1] as f64 * spread, i[2] as f64 * spread))
+        .collect();
+    let out = out_dir.join(format!("{}-sliced.stl", stem_of(source)));
+    Solid::batch_union(&laid).write_stl(&out)?;
+    Ok(out)
+}
+
 /// Per-connector onion feasibility under the current cuts + orientations, index-aligned with
 /// `connectors`: `true` = prints support-free, `false` = downgrades to a bolt. Pure (no render),
 /// so the GUI can flag joints live as cuts/orientations change. Same gate `reslice` carves with.
@@ -292,4 +340,35 @@ fn stem_of(p: &Path) -> String {
     p.file_stem()
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_else(|| "part".into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[ignore = "needs OpenSCAD; run with --ignored"]
+    fn reslice_kernel_caches_the_base() {
+        let tmp = std::env::temp_dir().join(format!("gui_reslice_{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let src = tmp.join("box.scad");
+        std::fs::write(&src, "cube([60,40,30], center=true);").unwrap();
+
+        let conns = [Conn { cut: 0, pos: [12.0, 0.0], size: 12.0, kind: ConnKind::Onion, screw: "M3" }];
+        // Two-axis cut + onion — the floater case — sliced in-process off the cached base.
+        let out = reslice_kernel(None, &src, &[('x', 0.0), ('y', 0.0)], &conns, &[], 40.0, &tmp)
+            .expect("first reslice");
+        let base = whole_stl(&src, &tmp);
+        assert!(base.exists(), "base STL should be cached after the first reslice");
+        assert!(!stl::load_stl(&out).unwrap().positions.is_empty(), "sliced mesh has geometry");
+
+        // A second reslice (different cut) must NOT re-render the base — that's the reactivity win.
+        let mtime0 = std::fs::metadata(&base).unwrap().modified().unwrap();
+        reslice_kernel(None, &src, &[('x', 5.0), ('y', 0.0)], &conns, &[], 40.0, &tmp)
+            .expect("second reslice");
+        let mtime1 = std::fs::metadata(&base).unwrap().modified().unwrap();
+        assert_eq!(mtime0, mtime1, "second reslice re-rendered the base (cache miss)");
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
 }

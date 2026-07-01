@@ -1897,7 +1897,9 @@ fn kick_job(
     let (root, tmp) = (cfg.root.clone(), cfg.tmp.clone());
     let task = AsyncComputeTaskPool::get().spawn(async move {
         if reslice {
-            fab::reslice(root.as_deref(), &src, &cuts, &conns, &orient, SPREAD, &tmp)
+            // In-process kernel slice off the cached base (Track C 11.10) — no per-edit spawn. The
+            // Solid lives and dies inside reslice_kernel; only the STL path returns (Solid is !Send).
+            fab::reslice_kernel(root.as_deref(), &src, &cuts, &conns, &orient, SPREAD, &tmp)
                 .map_err(|e| format!("{e:#}"))
         } else {
             fab::render_whole(root.as_deref(), &src, &tmp).map_err(|e| format!("{e:#}"))

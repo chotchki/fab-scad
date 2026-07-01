@@ -25,7 +25,7 @@ use bevy::{
         tokens, FeathersPlugins,
     },
     image::Image,
-    input::mouse::{MouseMotion, MouseWheel},
+    input::mouse::{MouseMotion, MouseScrollUnit, MouseWheel},
     mesh::Indices,
     picking::{
         events::{Click, Drag, DragEnd, DragStart, Pointer},
@@ -675,7 +675,14 @@ fn orbit(
         motion.clear();
     }
     for ev in wheel.read() {
-        o.radius = (o.radius * (1.0 - ev.y * 0.1)).clamp(10.0, 4000.0);
+        // Zoom per notch is a fraction of the current radius (constant feel at any distance). Line
+        // events (a mouse wheel) come one notch at a time; Pixel events (a trackpad) stream many
+        // small deltas per gesture, so scale them WAY down or the zoom rockets past what you're on.
+        let step = match ev.unit {
+            MouseScrollUnit::Line => ev.y * 0.05,
+            MouseScrollUnit::Pixel => ev.y * 0.004,
+        };
+        o.radius = (o.radius * (1.0 - step)).clamp(10.0, 4000.0);
     }
     *t = orbit_transform(o.yaw, o.pitch, o.radius, o.target);
 }
@@ -1521,6 +1528,15 @@ fn sync_dim_labels(
     let Ok((camera, cam_gt)) = cam.single() else {
         return;
     };
+    // `world_to_viewport` returns coords relative to the (inset) viewport, but the label Nodes
+    // position in full-window logical px — so add the viewport's top-left offset, else every label
+    // sits shifted left by the panel width and hides behind it until you pan the model rightward.
+    let scale = camera.target_scaling_factor().unwrap_or(1.0);
+    let vp_off = camera
+        .viewport
+        .as_ref()
+        .map(|v| Vec2::new(v.physical_position.x as f32, v.physical_position.y as f32) / scale)
+        .unwrap_or(Vec2::ZERO);
     // Build a (world position, width) for every piece segment on EVERY axis that has cuts.
     let center = (min + max) * 0.5;
     let mut segs: Vec<(Vec3, f32)> = Vec::new();
@@ -1563,8 +1579,8 @@ fn sync_dim_labels(
         };
         match camera.world_to_viewport(cam_gt, pos) {
             Ok(p) => {
-                node.left = px(p.x);
-                node.top = px(p.y);
+                node.left = px(p.x + vp_off.x);
+                node.top = px(p.y + vp_off.y);
                 *text = Text::new(format!("{width:.0}"));
                 *vis = Visibility::Visible;
             }

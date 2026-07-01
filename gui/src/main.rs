@@ -616,10 +616,17 @@ fn setup_windowed(
     // Two cameras: a full-window UI camera (draws the panel + clears the dark bg) and the 3D camera,
     // whose viewport `split_viewport` insets to the right of the panel so the model centres in the
     // VISIBLE area. UI layout follows a camera's viewport, so the panel needs its own full-window one.
-    commands.spawn((Camera2d, Camera { order: 0, ..default() }, bevy::ui::IsDefaultUiCamera));
+    // The 3D camera renders FIRST (order 0) and clears the dark bg in its inset; the UI camera renders
+    // on top (order 1, no clear) so panel + dimension NUMBERS sit over the model and cut-plane
+    // overlays instead of being occluded by them.
+    commands.spawn((
+        Camera2d,
+        Camera { order: 1, clear_color: bevy::camera::ClearColorConfig::None, ..default() },
+        bevy::ui::IsDefaultUiCamera,
+    ));
     commands.spawn((
         Camera3d::default(),
-        Camera { order: 1, clear_color: bevy::camera::ClearColorConfig::None, ..default() },
+        Camera { order: 0, ..default() },
         Transform::default(),
         Orbit {
             yaw: -0.7,

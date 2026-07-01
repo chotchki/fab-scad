@@ -3021,7 +3021,9 @@ fn connector_section(cuts: &Cuts, i: usize, active: ActiveConn) -> impl Scene + 
             .map(|s| {
                 let v = if s == active.screw { ButtonVariant::Primary } else { ButtonVariant::Normal };
                 let label = s.label(); // bsn's Text(..) won't parse a method call inline
-                let set = move |_: On<Activate>, mut ac: ResMut<ActiveConn>| ac.screw = s;
+                let set = move |_: On<Activate>, mut ac: ResMut<ActiveConn>| {
+                    ac.screw = s;
+                };
                 bsn! {
                     @FeathersButton { @variant: {v}, @caption: bsn!{ Text(label) ThemedText } }
                     on(set)
@@ -3041,11 +3043,15 @@ fn connector_section(cuts: &Cuts, i: usize, active: ActiveConn) -> impl Scene + 
                 Children [
                     (
                         @FeathersButton { @variant: {onion_v}, @caption: bsn!{ Text("Onion") ThemedText } }
-                        on(|_: On<Activate>, mut ac: ResMut<ActiveConn>| ac.kind = fab::ConnKind::Onion)
+                        on(|_: On<Activate>, mut ac: ResMut<ActiveConn>| {
+                            ac.kind = fab::ConnKind::Onion;
+                        })
                     ),
                     (
                         @FeathersButton { @variant: {bolt_v}, @caption: bsn!{ Text("Bolt") ThemedText } }
-                        on(|_: On<Activate>, mut ac: ResMut<ActiveConn>| ac.kind = fab::ConnKind::Bolt)
+                        on(|_: On<Activate>, mut ac: ResMut<ActiveConn>| {
+                            ac.kind = fab::ConnKind::Bolt;
+                        })
                     ),
                 ]
             ),

@@ -9,6 +9,7 @@ use std::time::Duration;
 
 use anyhow::{ensure, Result};
 
+use fab_scad::bambu::{self, PieceToPlace};
 use fab_scad::manifest::{Connector, Cut, PieceOrient, Slicing};
 use fab_scad::num::Num;
 use fab_scad::openscad::Openscad;
@@ -327,6 +328,47 @@ fn stem_of(p: &Path) -> String {
     p.file_stem()
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_else(|| "part".into())
+}
+
+/// A preview `StlMesh` (triangle soup) → an indexed `bambu::Mesh`, deduping shared vertices by exact
+/// bits (the kernel emits bit-identical coords for shared verts, so the weld is exact).
+fn stlmesh_to_bambu(m: &StlMesh) -> bambu::Mesh {
+    use std::collections::HashMap;
+    let mut map: HashMap<[u32; 3], u32> = HashMap::new();
+    let mut verts: Vec<[f64; 3]> = Vec::new();
+    let mut tris: Vec<[u32; 3]> = Vec::new();
+    let mut cur = [0u32; 3];
+    for (k, p) in m.positions.iter().enumerate() {
+        let key = [p[0].to_bits(), p[1].to_bits(), p[2].to_bits()];
+        let idx = *map.entry(key).or_insert_with(|| {
+            verts.push([p[0] as f64, p[1] as f64, p[2] as f64]);
+            (verts.len() - 1) as u32
+        });
+        cur[k % 3] = idx;
+        if k % 3 == 2 {
+            tris.push(cur);
+        }
+    }
+    bambu::Mesh { verts, tris }
+}
+
+/// Export the print-oriented preview pieces as a Bambu multi-plate project `.3mf` at `out`. `ups[i]`
+/// is the resolved build-up for `pieces[i]` (auto-pick or the user's manual override). Bin-packs onto
+/// the fewest `bed`-sized plates, `gap` mm apart. Pure mesh work — no `Solid` — so the caller can run
+/// it wherever; it's cheap enough to call inline on a click.
+pub fn export_plates(
+    pieces: &[PiecePrint],
+    ups: &[[f64; 3]],
+    bed: [f64; 2],
+    gap: f64,
+    out: &Path,
+) -> Result<bambu::ExportSummary> {
+    let to_place: Vec<PieceToPlace> = pieces
+        .iter()
+        .zip(ups)
+        .map(|(pp, &up)| PieceToPlace { mesh: stlmesh_to_bambu(&pp.mesh), up })
+        .collect();
+    bambu::export_plates(out, to_place, bed, gap)
 }
 
 #[cfg(test)]

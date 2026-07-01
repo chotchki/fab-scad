@@ -3421,10 +3421,63 @@ fn print_section() -> impl Scene + 'static {
             (Text("Print orientation") ThemedText),
             (Text("click a piece to set which way it prints") ThemedText),
             (
+                @FeathersButton { @variant: {ButtonVariant::Primary}, @caption: bsn!{ Text("Export plates") ThemedText } }
+                on(export_plates_action)
+            ),
+            (
                 @FeathersButton { @caption: bsn!{ Text("Done") ThemedText } }
                 on(|_: On<Activate>, mut pv: ResMut<PrintView>| { pv.0 = false; })
             ),
         ]
+    }
+}
+
+/// Between-piece + edge spacing left on the export plates (mm).
+const PLATE_GAP: f64 = 5.0;
+
+/// Export the print-oriented pieces as a Bambu multi-plate project `.3mf` next to the source. Runs
+/// inline — a handful of piece meshes to a zip is quick — and the status line reports the plate count
+/// + fill so you can see how tight it packed. The bed comes from the loaded scene, so it must match
+/// the printer the project opens on (Bambu bins pieces to plates by position).
+fn export_plates_action(
+    _: On<Activate>,
+    pieces: Res<PrintPieces>,
+    orient: Res<Orient>,
+    scene: Res<SceneCfg>,
+    mut status: ResMut<Status>,
+) {
+    let Some(list) = pieces.0.as_ref().filter(|l| !l.is_empty()) else {
+        status.0 = "no pieces to export — slice first".into();
+        return;
+    };
+    // Resolve each piece's build-up: the manual override if set, else the auto-pick.
+    let ups: Vec<[f64; 3]> = list
+        .iter()
+        .map(|pp| {
+            let u = orient.up_or(pp.piece, pp.up);
+            [u[0] as f64, u[1] as f64, u[2] as f64]
+        })
+        .collect();
+    let out = match &scene.source {
+        Some(s) => {
+            let stem = s.file_stem().and_then(|n| n.to_str()).unwrap_or("part");
+            s.with_file_name(format!("{stem}-plates.3mf"))
+        }
+        None => scene.tmp.join("plates.3mf"),
+    };
+    let bed = [scene.bed[0] as f64, scene.bed[1] as f64];
+    match fab::export_plates(list, &ups, bed, PLATE_GAP, &out) {
+        Ok(sum) => {
+            status.0 = format!(
+                "exported {} piece(s) on {} plate(s), {}% full → {}",
+                sum.pieces,
+                sum.plates,
+                (sum.fill * 100.0).round() as i32,
+                out.display()
+            );
+            info!("{}", status.0);
+        }
+        Err(e) => status.0 = format!("export failed: {e:#}"),
     }
 }
 

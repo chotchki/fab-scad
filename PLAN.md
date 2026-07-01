@@ -66,12 +66,18 @@ Driven by `claude-plan-bridge` (FORMATv2). Hand-authored; run
 - [ ] 9.1 - Lock the fab-scad-owned folder convention (libs/scad-lib/models submodules, excluded outputs, NAS archive)
 - [ ] 9.2 - Triage remaining ~59 projects (mine / third-party / downloaded / dead) into a migration backlog
 - [ ] 9.3 - Migrate remaining projects opportunistically (backlog)
-## Phase 10 - Manifold in-process kernel — spike (go/no-go)
-- [x] 10.1 - Vet a Rust Manifold binding: build + boolean + STL export
-- [x] 10.2 - Import the real Underdesk STL into Manifold; check robustness
-- [x] 10.3 - In-process slab slice: parity + latency vs OpenSCAD
-- [x] 10.4 - Multi-object 3mf export from Manifold meshes
-- [x] 10.5 - Go/no-go writeup + scope Track C or park
+## Phase 11 - Track C: in-process Manifold geometry kernel
+- [ ] 11.1 - geo module scaffold: manifold3d dep + typed Solid wrapper
+- [ ] 11.2 - STL import: weld to a valid manifold Solid
+- [ ] 11.3 - Export: Solid to binary STL + multi-object 3mf
+- [ ] 11.4 - In-process slab slicer: piece by multi-index
+- [ ] 11.5 - Slicer parity harness vs OpenSCAD
+- [ ] 11.6 - Connector solids in Rust: onion + bolt clearance
+- [ ] 11.7 - Apply connectors per piece, floater-free by construction
+- [ ] 11.8 - Connector parity vs the scad path
+- [ ] 11.9 - fab render/slice: in-process kernel path with OpenSCAD fallback
+- [ ] 11.10 - GUI reactive DAG on the cached base mesh
+- [ ] 11.11 - Corpus parity + latency validation; demote scad codegen; docs
 
 ## Backlog (not yet phased)
 

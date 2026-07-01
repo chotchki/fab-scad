@@ -53,3 +53,14 @@
 
 - [x] 4.9 - Family logo stamp module (scad-lib, BOSL2 attachable)
 
+---
+
+## 2026-07-01
+
+## Phase 10 - Manifold in-process kernel — spike (go/no-go)
+- [x] 10.1 - Vet a Rust Manifold binding: build + boolean + STL export
+- [x] 10.2 - Import the real Underdesk STL into Manifold; check robustness
+- [x] 10.3 - In-process slab slice: parity + latency vs OpenSCAD
+- [x] 10.4 - Multi-object 3mf export from Manifold meshes
+- [x] 10.5 - Go/no-go writeup + scope Track C or park
+

@@ -5,6 +5,7 @@
 
 pub mod auto_orient;
 pub mod cross_section;
+pub mod deps;
 pub mod geom;
 pub mod manifest;
 pub mod num;

@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use bevy::{
     app::ScheduleRunnerPlugin,
     asset::{AssetPlugin, RenderAssetUsages},
-    camera::RenderTarget,
+    camera::{visibility::RenderLayers, RenderTarget},
     feathers::{
         controls::{
             ButtonVariant, FeathersButton, FeathersListRow, FeathersListView, FeathersNumberInput,
@@ -609,6 +609,7 @@ fn setup_windowed(
     scene: Res<SceneCfg>,
     mut job: ResMut<Job>,
     mut status: ResMut<Status>,
+    mut gizmo_cfg: ResMut<GizmoConfigStore>,
 ) {
     spawn_environment(&mut commands, &mut meshes, &mut materials, &scene);
     let radius = scene.bed[0].max(scene.bed[1]).max(80.0);
@@ -626,7 +627,13 @@ fn setup_windowed(
             radius,
             target: Vec3::ZERO,
         },
+        // Renders the model (layer 0) AND the gizmos (layer 1). Keeping gizmos on layer 1 means the
+        // full-window Camera2d (layer 0) never re-draws them as flat 2D ghosts — the phantom
+        // dimension bracket was exactly that: the 3D leader ortho-projected by the UI camera.
+        RenderLayers::from_layers(&[0, 1]),
     ));
+    // 3D gizmos live on layer 1 so ONLY the 3D camera draws them (see the Camera3d note above).
+    gizmo_cfg.config_mut::<DefaultGizmoConfigGroup>().0.render_layers = RenderLayers::layer(1);
     // Seed the camera-restore slot with the startup pose, so a mode entered before the first
     // normal-view frame still has something to hand back (manage_view_camera).
     commands.insert_resource(PrevCam(Some((-0.7, 0.5, radius, Vec3::ZERO))));

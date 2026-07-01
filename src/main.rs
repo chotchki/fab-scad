@@ -119,9 +119,10 @@ fn main() -> Result<()> {
         } => {
             if all {
                 render_all_cmd(target, timeout, force)
-            } else {
-                let target = target.context("render needs a .scad target (or --all to sweep a tree)")?;
+            } else if let Some(target) = target {
                 render_cmd(&target, out, png, timeout)
+            } else {
+                render_focus_cmd(png, timeout) // no target → the focused project's parts (6.9)
             }
         }
         Commands::Publish { .. } => not_yet("publish", "7"),
@@ -399,6 +400,66 @@ fn render_all_cmd(path: Option<PathBuf>, timeout_secs: u64, force: bool) -> Resu
     println!("\n{passed}/{total} passed{tail}{cache_note}");
     if failed > 0 {
         bail!("{failed} model(s) failed to render");
+    }
+    Ok(())
+}
+
+/// `fab render` with no target (6.9): render every `[[part]]` of the FOCUSED project. Paths resolve
+/// against the project dir (`src = "src/foo.scad"`), outputs land in `renders/` unless `out` overrides.
+/// The zero-argument entry point — `fab focus <name>` once, then just `fab render`.
+fn render_focus_cmd(png: bool, timeout_secs: u64) -> Result<()> {
+    let root = require_root()?;
+    let name = project::read_focus(&root)
+        .context("no focused project — run `fab focus <name>`, or pass a .scad target / --all")?;
+    let pdir = project::project_dir(&root, &name);
+    let manifest = manifest::Manifest::load(&pdir.join("project.toml"))?;
+    if manifest.part.is_empty() {
+        bail!("project '{name}' has no [[part]] entries to render");
+    }
+    let oscad = Openscad::discover(Some(&root))?;
+    let timeout = Duration::from_secs(timeout_secs);
+    let total = manifest.part.len();
+    println!("render project '{name}' — {total} part(s)");
+
+    let mut failed = 0;
+    for (i, part) in manifest.part.iter().enumerate() {
+        let src = pdir.join(&part.src);
+        let stem = src
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "part".into());
+        let label = part.name.clone().unwrap_or_else(|| stem.clone());
+        let out = part
+            .out
+            .as_ref()
+            .map(|o| pdir.join(o))
+            .unwrap_or_else(|| pdir.join("renders").join(format!("{stem}.stl")));
+        println!("  [{}/{total}] {label}", i + 1);
+        if !src.exists() {
+            println!("        FAIL — no such src: {}", src.display());
+            failed += 1;
+            continue;
+        }
+        match oscad.render(&src, &out, timeout) {
+            Ok(r) if r.ok => {
+                println!("        -> {} ({:.1}s)", out.display(), r.duration.as_secs_f64());
+                if png {
+                    let thumb = out.with_extension("png");
+                    let _ = oscad.thumbnail(&src, &thumb, (512, 512), timeout);
+                }
+            }
+            Ok(_) => {
+                println!("        FAIL — openscad error or empty output");
+                failed += 1;
+            }
+            Err(e) => {
+                println!("        FAIL — {e:#}");
+                failed += 1;
+            }
+        }
+    }
+    if failed > 0 {
+        bail!("{failed}/{total} part(s) failed to render");
     }
     Ok(())
 }

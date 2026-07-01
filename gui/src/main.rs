@@ -301,6 +301,15 @@ struct PrintJob(Option<Task<Result<Vec<fab::PiecePrint>, String>>>);
 #[derive(Resource, Default)]
 struct PrintPieces(Option<Vec<fab::PiecePrint>>);
 
+/// The in-flight auto-plan job (auto-slice + onion auto-place, off-thread) — auto-on-open's worker.
+#[derive(Resource, Default)]
+struct AutoJob(Option<Task<Result<fab_scad::auto::AutoPlan, String>>>);
+
+/// The source already auto-planned on open, so it fires ONCE per fresh too-big model — not every
+/// frame, and not again after you clear the cuts by hand.
+#[derive(Resource, Default)]
+struct AutoPlanned(Option<PathBuf>);
+
 /// The orbit camera (yaw, pitch, radius, target) as it was in NORMAL view, saved while there so a
 /// mode that hijacks the camera (the 2D editor's face-on, the print preview's bed-frame) can hand
 /// it back when you return. Without this, leaving a mode strands you at the mode's camera.
@@ -534,6 +543,8 @@ fn run_windowed(scene: SceneCfg) {
         .init_resource::<PrintView>()
         .init_resource::<PrintJob>()
         .init_resource::<PrintPieces>()
+        .init_resource::<AutoJob>()
+        .init_resource::<AutoPlanned>()
         .init_resource::<PrevCam>()
         .init_resource::<Feas>()
         .init_resource::<ModelBounds>()
@@ -563,6 +574,9 @@ fn run_windowed(scene: SceneCfg) {
                 orbit,
                 request_reslice,
                 poll_job,
+                // Auto-on-open: a fresh too-big model auto-slices + connects (kick), then the plan
+                // lands and seeds cuts + connectors (poll). After poll_job so bounds are set.
+                (kick_auto_plan, poll_auto_plan).chain().after(poll_job),
                 (poll_open_dialog, apply_switch_file, watch_source),
                 update_status,
                 sync_overlays,
@@ -2069,11 +2083,20 @@ fn poll_job(
                 commands.spawn((Mesh3d(mesh.clone()), MeshMaterial3d(part_material(&mut materials)), Model));
                 whole.0 = Some(mesh); // remember the uncut mesh, so editing can revert to it
                 dspread.0 = 0.0;
-                // First whole render fixes the bounds and seeds a centre cut (sync_overlays draws it).
+                // First whole render fixes the bounds. A model that FITS the bed gets a manual
+                // centre-cut starting point; one that OVERFLOWS is left empty for auto-on-open
+                // (kick_auto_plan) to slice + connect.
                 if bounds.0.is_none() {
                     if let Some((min, max)) = aabb {
                         bounds.0 = Some((min, max));
-                        if cuts.list.is_empty() {
+                        let bed = bed_size().unwrap_or([256.0; 3]);
+                        let fits = fab_scad::auto_slice::auto_slice(
+                            [min.x as f64, min.y as f64, min.z as f64],
+                            [max.x as f64, max.y as f64, max.z as f64],
+                            bed,
+                        )
+                        .is_empty();
+                        if cuts.list.is_empty() && fits {
                             cuts.list.push(CutDef {
                                 axis: Axis::X,
                                 at: (min.x + max.x) * 0.5,
@@ -3393,6 +3416,100 @@ fn auto_slice_action(
     let pieces = fab_scad::auto_slice::piece_count(lo, hi, bed);
     status.0 = format!("auto-sliced: {} cut(s) → {pieces} piece(s)", planned.len());
     info!("{}", status.0);
+}
+
+/// Auto-on-open: when a fresh model that OVERFLOWS the bed finishes its whole render, kick the
+/// auto-plan (auto-slice + onion auto-place, off-thread) — ONCE per source. Fits-the-bed models,
+/// already-planned sources, and ones that already have cuts are left alone.
+fn kick_auto_plan(
+    bounds: Res<ModelBounds>,
+    cuts: Res<Cuts>,
+    scene: Res<SceneCfg>,
+    mut planned: ResMut<AutoPlanned>,
+    mut job: ResMut<AutoJob>,
+    mut status: ResMut<Status>,
+) {
+    if job.0.is_some() {
+        return; // one already in flight
+    }
+    let (Some((min, max)), Some(src)) = (bounds.0, scene.source.clone()) else {
+        return;
+    };
+    if planned.0.as_deref() == Some(src.as_path()) || !cuts.list.is_empty() {
+        return; // already planned this source, or it already has cuts
+    }
+    let (lo, hi) =
+        ([min.x as f64, min.y as f64, min.z as f64], [max.x as f64, max.y as f64, max.z as f64]);
+    let bed = bed_size().unwrap_or([256.0; 3]);
+    if fab_scad::auto_slice::auto_slice(lo, hi, bed).is_empty() {
+        return; // fits the bed — nothing to auto
+    }
+    let base_stl = fab::whole_stl(&src, &scene.tmp);
+    if !base_stl.exists() {
+        return; // base not rendered to disk yet
+    }
+    planned.0 = Some(src.clone()); // fire once per source
+    let (root, tmp) = (scene.root.clone(), scene.tmp.clone());
+    let task = AsyncComputeTaskPool::get().spawn(async move {
+        let oscad =
+            fab_scad::openscad::Openscad::discover(root.as_deref()).map_err(|e| format!("{e:#}"))?;
+        fab_scad::auto::plan(&oscad, &base_stl, lo, hi, bed, &tmp, std::time::Duration::from_secs(60))
+            .map_err(|e| format!("{e:#}"))
+    });
+    job.0 = Some(task);
+    status.0 = "auto-planning…".into();
+}
+
+/// Land the auto-plan: seed the cut stack + connectors from it, and the reactive loop reslices.
+fn poll_auto_plan(
+    mut job: ResMut<AutoJob>,
+    mut cuts: ResMut<Cuts>,
+    mut conns: ResMut<Conns>,
+    mut status: ResMut<Status>,
+) {
+    let Some(task) = job.0.as_mut() else {
+        return;
+    };
+    let Some(result) = block_on(future::poll_once(task)) else {
+        return;
+    };
+    job.0 = None;
+    match result {
+        Ok(plan) => {
+            cuts.list = plan
+                .cuts
+                .iter()
+                .map(|&(ax, at)| CutDef {
+                    axis: match ax {
+                        'y' => Axis::Y,
+                        'z' => Axis::Z,
+                        _ => Axis::X,
+                    },
+                    at: at as f32,
+                    enabled: true,
+                })
+                .collect();
+            cuts.active = 0;
+            conns.list = plan
+                .connectors
+                .iter()
+                .map(|c| PlacedConn {
+                    cut: c.cut,
+                    pos: [c.pos[0].f() as f32, c.pos[1].f() as f32],
+                    size: c.size.unwrap_or(6.0) as f32,
+                    kind: if c.kind == "bolt" { fab::ConnKind::Bolt } else { fab::ConnKind::Onion },
+                    screw: Screw::M3,
+                })
+                .collect();
+            status.0 = format!(
+                "auto-planned: {} cut(s), {} connector(s)",
+                cuts.list.len(),
+                conns.list.len()
+            );
+            info!("{}", status.0);
+        }
+        Err(e) => status.0 = format!("auto-plan failed: {e:#}"),
+    }
 }
 
 /// Connector-editor mode: which cut you're editing, the active connector type (Onion/Bolt + screw

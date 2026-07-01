@@ -414,4 +414,73 @@ mod tests {
 
         let _ = std::fs::remove_file(&tmp);
     }
+
+    /// A 200×200 slab authored with min-corner at the origin (fills most of a 256 bed → one per plate).
+    fn slab() -> Mesh {
+        let s = 200.0;
+        Mesh {
+            verts: vec![
+                [0.0, 0.0, 0.0],
+                [s, 0.0, 0.0],
+                [s, s, 0.0],
+                [0.0, s, 0.0],
+                [0.0, 0.0, 5.0],
+                [s, 0.0, 5.0],
+                [s, s, 5.0],
+                [0.0, s, 5.0],
+            ],
+            tris: vec![
+                [0, 2, 1],
+                [0, 3, 2],
+                [4, 5, 6],
+                [4, 6, 7],
+                [0, 1, 5],
+                [0, 5, 4],
+                [1, 2, 6],
+                [1, 6, 5],
+                [2, 3, 7],
+                [2, 7, 6],
+                [3, 0, 4],
+                [3, 4, 7],
+            ],
+        }
+    }
+
+    #[test]
+    fn pieces_land_inside_their_plate_cells() {
+        // FACT 2: Bambu bins each piece to a plate by POSITION. Three bed-filling slabs → three
+        // plates, one each; every build-item transform must sit inside its plate's world bed cell.
+        let bed = [256.0, 256.0];
+        let mut pieces = Vec::new();
+        for _ in 0..3 {
+            pieces.push(PieceToPlace { mesh: slab(), up: [0.0, 0.0, 1.0] });
+        }
+        let tmp = std::env::temp_dir().join(format!("bambu_cells_{}.3mf", std::process::id()));
+        let sum = export_plates(&tmp, pieces, bed, 5.0).unwrap();
+        assert_eq!(sum.plates, 3, "three bed-filling slabs need three plates");
+
+        let f = std::fs::File::open(&tmp).unwrap();
+        let mut zip = zip::ZipArchive::new(f).unwrap();
+        use std::io::Read;
+        let mut model = String::new();
+        zip.by_name("3D/3dmodel.model").unwrap().read_to_string(&mut model).unwrap();
+
+        let cols = column_count(3);
+        let mut plates_hit = std::collections::HashSet::new();
+        for line in model.lines().filter(|l| l.contains("<item ")) {
+            let xf = line.split("transform=\"").nth(1).unwrap().split('"').next().unwrap();
+            let n: Vec<f64> = xf.split_whitespace().map(|s| s.parse().unwrap()).collect();
+            let (tx, ty) = (n[9], n[10]); // translation = last three of the 12
+            let p = (0..3)
+                .find(|&p| {
+                    let [ox, oy] = plate_origin(p, cols, bed);
+                    tx >= ox - 1e-6 && tx <= ox + bed[0] + 1e-6 && ty >= oy - 1e-6 && ty <= oy + bed[1] + 1e-6
+                })
+                .unwrap_or_else(|| panic!("item at ({tx},{ty}) fell in no plate cell"));
+            plates_hit.insert(p);
+        }
+        assert_eq!(plates_hit.len(), 3, "each of the three plates holds exactly one piece");
+
+        let _ = std::fs::remove_file(&tmp);
+    }
 }

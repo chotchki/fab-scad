@@ -40,14 +40,14 @@ Driven by `claude-plan-bridge` (FORMATv2). Hand-authored; run
   - [x] 5.4.4 - Loading pulse while recomputing
 ## Phase 6 - fab render + output (3mf, magnets, Bambu)
 - [ ] 6.1 - Render engine: enumerate targets → parallel (rayon) render → report; a "target" is any .scad→out unit (pieces/parts/projects collapse to target sets); per-target thumbnail + N/M progress
-- [ ] 6.2 - Incremental rebuild: skip pieces whose inputs are unchanged (content hash)
+- [x] 6.2 - Incremental rebuild: skip pieces whose inputs are unchanged (content hash)
 - [ ] 6.3 - Multipart 3mf: export pieces as SEPARATE objects on a plate (lazy-union); verify separation
 - [ ] 6.4 - Embedded magnets: clean split around cavities + pause-at-layer in the 3mf
 - [ ] 6.5 - Investigate Bambu 3mf settings embedding (plate/material/pause) for one-click print; adopt only if clean
 - [ ] 6.6 - Demote import() crutch to optional freeze-source-once; DAG resolver as fallback only
 - [x] 6.7 - Smoke oracle: a render "passes" iff OpenSCAD exits 0 AND mesh face-count > 0 (fast, no goldens; parity-vs-archived deferred to 8.4)
 - [x] 6.8 - `fab render --all [PATH]`: walk the tree, enumerate every .scad, parallel smoke-render, print a pass/fail summary (the correctness sweep; needs no manifests)
-- [ ] 6.9 - Wire `.fab/focus`: `fab render` with no arg renders the focused project's parts (needs one minimal project.toml; scaffold from the existing template)
+- [x] 6.9 - Wire `.fab/focus`: `fab render` with no arg renders the focused project's parts (needs one minimal project.toml; scaffold from the existing template)
 
 ## Phase 7 - Web + publish
 - [ ] 7.1 - STL decimation for the Three.js viewer (poly budget)

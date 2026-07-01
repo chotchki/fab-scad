@@ -29,8 +29,9 @@ use bevy::{
     mesh::Indices,
     picking::{
         events::{Click, Drag, DragEnd, DragStart, Pointer},
+        hover::HoverMap,
         mesh_picking::MeshPickingPlugin,
-        pointer::PointerButton,
+        pointer::{PointerButton, PointerId},
     },
     prelude::*,
     render::{
@@ -185,20 +186,62 @@ impl Cuts {
     }
 }
 
+/// Machine-screw size for bolt connectors; `label` is the manifest / BOSL2 string.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Screw {
+    M3,
+    M4,
+    M5,
+}
+
+impl Screw {
+    fn label(self) -> &'static str {
+        match self {
+            Screw::M3 => "M3",
+            Screw::M4 => "M4",
+            Screw::M5 => "M5",
+        }
+    }
+    /// Approx socket-head / counterbore radius (mm) — the bolt's footprint in the editor profile.
+    fn head_r(self) -> f32 {
+        match self {
+            Screw::M3 => 2.75,
+            Screw::M4 => 3.5,
+            Screw::M5 => 4.25,
+        }
+    }
+}
+
 /// A placed connector: which cut (stack index) it sits on, its position in that cut plane's two
-/// non-axis dims, and its diameter (auto-sized from the cross-section at placement — the onion's
-/// widest footprint, at the cut). Kind/orientation grow per the connector roadmap (#36).
+/// non-axis dims, its onion diameter (auto-sized at placement; ignored for a bolt), and its `kind`
+/// + bolt `screw` — set from the active type when placed, so onion and bolt can mix on one cut.
 #[derive(Clone, Copy)]
 struct PlacedConn {
     cut: usize,
     pos: [f32; 2],
     size: f32,
+    kind: fab::ConnKind,
+    screw: Screw,
 }
 
 /// The placed connectors (manual face-pick). Like the cut stack, a pure input to the slice.
 #[derive(Resource, Default)]
 struct Conns {
     list: Vec<PlacedConn>,
+}
+
+/// The kind + screw NEW placements take (manual click + Auto-place). Existing connectors keep their
+/// own — you can mix onion and bolt on a cut. Set by the connector editor's type selector.
+#[derive(Resource, Clone, Copy, PartialEq, Eq)]
+struct ActiveConn {
+    kind: fab::ConnKind,
+    screw: Screw,
+}
+
+impl Default for ActiveConn {
+    fn default() -> Self {
+        Self { kind: fab::ConnKind::Onion, screw: Screw::M3 }
+    }
 }
 
 /// Which cut's 2D connector editor is open (None = normal 3D view). When set, the model hides and
@@ -373,13 +416,36 @@ struct IconText;
 #[derive(Component)]
 struct IconApplied;
 
-/// The panel's structural signature: the cut stack (axis + enabled per cut) PLUS the file-list
-/// shape (count + active index). The panel rebuilds when any change (cut add/remove/rotate/toggle,
-/// a new Open, a file switch); position-only cut edits update rows in place instead.
-type PanelSignature = (Vec<(Axis, bool)>, usize, Option<usize>);
+/// The panel's structural signature: the cut stack (axis + enabled per cut), the file-list shape
+/// (count + active index), and the modal layout. The panel rebuilds when any change (cut
+/// add/remove/rotate/toggle, a new Open, a file switch, entering/leaving a sub-mode);
+/// position-only cut edits update rows in place instead.
+type PanelSignature = (Vec<(Axis, bool)>, usize, Option<usize>, PanelMode, ActiveConn);
 
 #[derive(Resource, Default)]
 struct PanelSig(Option<PanelSignature>);
+
+/// Which modal layout the panel shows. Derived from the editor/print resources — the sub-modes are
+/// mutually exclusive (`enforce_exclusive_modes`), so at most one is active; the panel shows ONLY
+/// that mode's controls (full-focus), never a pile of buttons that don't apply.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PanelMode {
+    View,              // assembled model: file list, cut cards, slice/explode/print controls
+    Connectors(usize), // the 2D connector editor for cut i
+    Print,             // the print-orientation preview
+}
+
+/// The active panel mode from the editor + print resources. `enforce_exclusive_modes` guarantees
+/// they're never both set; the editor wins the tie regardless.
+fn panel_mode(edit: &EditCut, print: &PrintView) -> PanelMode {
+    if let Some(i) = edit.0 {
+        PanelMode::Connectors(i)
+    } else if print.0 {
+        PanelMode::Print
+    } else {
+        PanelMode::View
+    }
+}
 /// A brief attention flash (seconds remaining), drawn as a fading outline.
 #[derive(Component)]
 struct Nudge(f32);
@@ -447,6 +513,7 @@ fn run_windowed(scene: SceneCfg) {
         .init_resource::<Job>()
         .init_resource::<Cuts>()
         .init_resource::<Conns>()
+        .init_resource::<ActiveConn>()
         .init_resource::<EditCut>()
         .init_resource::<XSection>()
         .init_resource::<Orient>()
@@ -495,7 +562,7 @@ fn run_windowed(scene: SceneCfg) {
                 nudge_buttons,
                 mark_dirty,
                 revert_on_edit,
-                auto_scale,
+                (auto_scale, split_viewport),
                 (
                     enforce_exclusive_modes,
                     apply_view_visibility,
@@ -529,8 +596,13 @@ fn setup_windowed(
 ) {
     spawn_environment(&mut commands, &mut meshes, &mut materials, &scene);
     let radius = scene.bed[0].max(scene.bed[1]).max(80.0);
+    // Two cameras: a full-window UI camera (draws the panel + clears the dark bg) and the 3D camera,
+    // whose viewport `split_viewport` insets to the right of the panel so the model centres in the
+    // VISIBLE area. UI layout follows a camera's viewport, so the panel needs its own full-window one.
+    commands.spawn((Camera2d, Camera { order: 0, ..default() }, bevy::ui::IsDefaultUiCamera));
     commands.spawn((
         Camera3d::default(),
+        Camera { order: 1, clear_color: bevy::camera::ClearColorConfig::None, ..default() },
         Transform::default(),
         Orbit {
             yaw: -0.7,
@@ -553,9 +625,18 @@ fn orbit(
     mut wheel: MessageReader<MouseWheel>,
     dragging: Res<DraggingCut>,
     edit: Res<EditCut>,
+    hover: Res<HoverMap>,
+    ui_nodes: Query<(), With<Node>>,
 ) {
-    if dragging.0 || edit.0.is_some() {
-        // A cut plane has the pointer, or the connector editor holds a fixed face-on view.
+    // The wheel is shared: the ScrollArea observer scrolls the file list off the picking event, but
+    // orbit reads the raw MouseWheel — so without this, scrolling the panel ALSO zooms the camera.
+    // Yield the whole gesture (wheel + drag) whenever the pointer is over a UI node.
+    let over_ui = hover
+        .get(&PointerId::Mouse)
+        .is_some_and(|hits| hits.keys().any(|e| ui_nodes.contains(*e)));
+    if dragging.0 || edit.0.is_some() || over_ui {
+        // A cut plane has the pointer, the connector editor holds a fixed face-on view, or the
+        // pointer is over the panel (the list owns the wheel there).
         motion.clear();
         wheel.clear();
         return;
@@ -614,7 +695,7 @@ fn on_drag(
     planes: Query<(), With<CutPlaneViz>>,
     dragging: Res<DraggingCut>,
     bounds: Res<ModelBounds>,
-    cam: Query<(&Camera, &GlobalTransform)>,
+    cam: Query<(&Camera, &GlobalTransform), With<Camera3d>>,
     mut cuts: ResMut<Cuts>,
 ) {
     if !dragging.0 || !planes.contains(ev.entity) {
@@ -696,10 +777,17 @@ const ONION_MAX_D: f64 = 16.0;
 /// Grid pitch for auto-place — connectors land roughly this far apart across the cut face.
 const ONION_SPACING: f64 = 18.0;
 
-/// Place a connector on `cut` at `pos` (diameter `size`), or — if the click lands on one already
-/// there — remove it (click-to-toggle). Declines to place a sub-`MIN_ONION` onion (too thin a spot)
-/// but always allows the remove. Returns a one-line status describing what it did.
-fn toggle_connector(conns: &mut Conns, cut: usize, pos: [f32; 2], size: f32) -> &'static str {
+/// Place a `kind` connector on `cut` at `pos` (onion diameter `size`, or the `screw` for a bolt), or
+/// — if the click lands on one already there — remove it (click-to-toggle). Declines a sub-`MIN_ONION`
+/// onion (too thin a spot); a bolt has no such gate. Returns a one-line status describing what it did.
+fn toggle_connector(
+    conns: &mut Conns,
+    cut: usize,
+    pos: [f32; 2],
+    size: f32,
+    kind: fab::ConnKind,
+    screw: Screw,
+) -> &'static str {
     const HIT: f32 = 5.0; // mm; a bit larger than the 3mm marker, so it's a forgiving target
     if let Some(j) = conns
         .list
@@ -708,11 +796,14 @@ fn toggle_connector(conns: &mut Conns, cut: usize, pos: [f32; 2], size: f32) -> 
     {
         conns.list.remove(j);
         "removed connector"
-    } else if size < MIN_ONION {
+    } else if kind == fab::ConnKind::Onion && size < MIN_ONION {
         "too thin for an onion here"
     } else {
-        conns.list.push(PlacedConn { cut, pos, size });
-        "placed connector"
+        conns.list.push(PlacedConn { cut, pos, size, kind, screw });
+        match kind {
+            fab::ConnKind::Onion => "placed onion",
+            fab::ConnKind::Bolt => "placed bolt",
+        }
     }
 }
 
@@ -777,6 +868,7 @@ fn place_on_profile_click(
     cuts: Res<Cuts>,
     bounds: Res<ModelBounds>,
     xsection: Res<XSection>,
+    active: Res<ActiveConn>,
     mut conns: ResMut<Conns>,
     mut status: ResMut<Status>,
 ) {
@@ -792,7 +884,7 @@ fn place_on_profile_click(
     let others: Vec<usize> = (0..3).filter(|&a| a != c.axis.index()).collect();
     let pos = [comp(hit, others[0]), comp(hit, others[1])];
     let size = auto_size(&xsection, &cuts, &bounds, i, pos);
-    status.0 = toggle_connector(&mut conns, i, pos, size).into();
+    status.0 = toggle_connector(&mut conns, i, pos, size, active.kind, active.screw).into();
 }
 
 /// Auto-place connectors across the OPEN cut's cross-section (#41): a grid of wall-fitting onions
@@ -805,6 +897,7 @@ fn do_auto_place(
     xsection: Res<XSection>,
     cuts: Res<Cuts>,
     bounds: Res<ModelBounds>,
+    active: Res<ActiveConn>,
     mut conns: ResMut<Conns>,
     mut status: ResMut<Status>,
 ) {
@@ -823,13 +916,26 @@ fn do_auto_place(
     conns.list.retain(|c| c.cut != i); // fresh auto-layout for this cut
     let mut n = 0;
     for (p, d) in placements {
+        // The fitted onion diameter doubles as a "has room" proxy for a bolt (auto-place fits to the
+        // cross-section either way); the active type decides what actually lands here.
         let size = (d as f32).min(cap);
         if size >= MIN_ONION {
-            conns.list.push(PlacedConn { cut: i, pos: [p[0] as f32, p[1] as f32], size });
+            conns.list.push(PlacedConn {
+                cut: i,
+                pos: [p[0] as f32, p[1] as f32],
+                size,
+                kind: active.kind,
+                screw: active.screw,
+            });
             n += 1;
         }
     }
-    status.0 = format!("auto-placed {n} connector{}", if n == 1 { "" } else { "s" });
+    let noun = match active.kind {
+        fab::ConnKind::Onion => "onion",
+        fab::ConnKind::Bolt => "bolt",
+    };
+    info!("auto-place: {n} {noun}(s) on cut {i}");
+    status.0 = format!("auto-placed {n} {noun}{}", if n == 1 { "" } else { "s" });
 }
 
 /// The Explode/Collapse button: collapse to the uncut model, or explode the last sliced result —
@@ -1011,8 +1117,9 @@ fn edit_mode(
     }
 }
 
-/// Draw the open cut's profile as a line-loop outline, plus — at each placed connector — a circle
-/// of its auto-sized diameter: the exact onion footprint that will land at the cut (its widest).
+/// Draw the open cut's profile as a line-loop outline, plus — at each placed connector — its
+/// footprint, drawn PER KIND so the editor shows what you picked: a teal circle at the onion's
+/// auto-sized diameter, or an amber circle + cross sized to the bolt's screw head.
 fn draw_profile(
     xsection: Res<XSection>,
     edit: Res<EditCut>,
@@ -1035,12 +1142,27 @@ fn draw_profile(
             gizmos.line(a, b, outline);
         }
     }
-    // Onion footprints — a circle of `size` on the cut plane at each connector on this cut.
-    let onion = Color::srgb(1.0, 0.6, 0.2);
+    // Connector footprints on the cut plane, coloured + shaped by kind (matches the 3D markers).
+    let onion_col = Color::srgb(0.30, 0.85, 0.70); // teal
+    let bolt_col = Color::srgb(0.95, 0.70, 0.20); // amber
     let rot = Quat::from_rotation_arc(Vec3::Z, c.axis.unit());
     for pc in conns.list.iter().filter(|pc| pc.cut == i) {
         let center = profile_point(c.axis, c.at, pc.pos);
-        gizmos.circle(Isometry3d::new(center, rot), pc.size / 2.0, onion);
+        let iso = Isometry3d::new(center, rot);
+        match pc.kind {
+            fab::ConnKind::Onion => {
+                gizmos.circle(iso, pc.size / 2.0, onion_col);
+            }
+            fab::ConnKind::Bolt => {
+                let r = pc.screw.head_r();
+                gizmos.circle(iso, r, bolt_col);
+                // a small cross so a bolt reads as a screw hole, not just a smaller onion
+                let right = rot * (Vec3::X * r);
+                let up = rot * (Vec3::Y * r);
+                gizmos.line(center - right, center + right, bolt_col);
+                gizmos.line(center - up, center + up, bolt_col);
+            }
+        }
     }
 }
 
@@ -1171,7 +1293,7 @@ fn sync_dim_labels(
     bounds: Res<ModelBounds>,
     dspread: Res<DisplaySpread>,
     print: Res<PrintView>,
-    cam: Query<(&Camera, &GlobalTransform)>,
+    cam: Query<(&Camera, &GlobalTransform), With<Camera3d>>,
     existing: Query<&DimLabel>,
     mut labels: Query<(&DimLabel, &mut Node, &mut Text, &mut Visibility)>,
     mut commands: Commands,
@@ -1260,6 +1382,39 @@ fn auto_scale(
     for mut o in &mut cams {
         o.target = Vec3::new((min.x + max.x) * 0.5 + extra * 0.5, (min.y + max.y) * 0.5, (min.z + max.z) * 0.5);
         o.radius = span * 1.3;
+    }
+}
+
+/// Inset the 3D camera's viewport to the area RIGHT of the panel, so the model auto-frames in the
+/// visible region instead of centering behind the floating panel. Keyed off the panel's rendered
+/// width (it tracks the file list) and the camera's target size, so it follows resize + panel growth.
+fn split_viewport(
+    panel: Query<&bevy::ui::ComputedNode, With<PanelRoot>>,
+    mut cam: Query<&mut Camera, With<Camera3d>>,
+) {
+    let (Ok(panel), Ok(mut camera)) = (panel.single(), cam.single_mut()) else {
+        return;
+    };
+    let Some(target) = camera.physical_target_size() else {
+        return;
+    };
+    // ComputedNode::size() is physical px; the panel sits at left:8 (logical), so its right edge is
+    // 8*scale + width. Leave a small gap after it.
+    let scale = if panel.inverse_scale_factor > 0.0 { 1.0 / panel.inverse_scale_factor } else { 1.0 };
+    let x0 = ((16.0 * scale + panel.size().x).round() as u32).min(target.x.saturating_sub(1));
+    let pos = UVec2::new(x0, 0);
+    let size = UVec2::new(target.x - x0, target.y.max(1));
+    // Viewport isn't PartialEq — compare the fields we set to skip redundant writes.
+    let unchanged = camera
+        .viewport
+        .as_ref()
+        .is_some_and(|v| v.physical_position == pos && v.physical_size == size);
+    if !unchanged {
+        camera.viewport = Some(bevy::camera::Viewport {
+            physical_position: pos,
+            physical_size: size,
+            ..default()
+        });
     }
 }
 
@@ -1355,6 +1510,8 @@ fn resolve_conns(cuts: &Cuts, conns: &Conns) -> Vec<fab::Conn> {
                 cut: ei,
                 pos: [pc.pos[0] as f64, pc.pos[1] as f64],
                 size: pc.size as f64,
+                kind: pc.kind,
+                screw: pc.screw.label(),
             })
         })
         .collect()
@@ -1812,7 +1969,13 @@ fn sync_orientation(
     let mut src = Vec::new();
     for (i, pc) in conns.list.iter().enumerate() {
         if let Some(ei) = enabled.iter().position(|&si| si == pc.cut) {
-            resolved.push(fab::Conn { cut: ei, pos: [pc.pos[0] as f64, pc.pos[1] as f64], size: pc.size as f64 });
+            resolved.push(fab::Conn {
+                cut: ei,
+                pos: [pc.pos[0] as f64, pc.pos[1] as f64],
+                size: pc.size as f64,
+                kind: pc.kind,
+                screw: pc.screw.label(),
+            });
             src.push(i);
         }
     }
@@ -1912,16 +2075,21 @@ fn orient_piece_on_click(
     orient.set_manual(pp.0, up_model.normalize_or_zero().to_array());
 }
 
-/// Colour each connector marker by feasibility: teal = the onion prints support-free, orange = it
-/// downgrades to a bolt under the current orientations. Live feedback in the assembled/exploded view.
+/// Colour each connector marker by kind + feasibility: amber = a bolt (explicit); teal = an onion
+/// that prints support-free; red = an onion that can't and downgrades to a bolt under the current
+/// orientations. Live feedback in the assembled/exploded view.
 fn color_conn_markers(
     feas: Res<Feas>,
+    conns: Res<Conns>,
     markers: Query<(&ConnMarker, &MeshMaterial3d<StandardMaterial>)>,
     mut mats: ResMut<Assets<StandardMaterial>>,
 ) {
     for (m, mat) in &markers {
-        let ok = feas.0.get(m.0).copied().unwrap_or(true);
-        let want = if ok { Color::srgb(0.30, 0.85, 0.70) } else { Color::srgb(1.0, 0.55, 0.15) };
+        let want = match conns.list.get(m.0).map(|c| c.kind) {
+            Some(fab::ConnKind::Bolt) => Color::srgb(0.95, 0.70, 0.20), // amber = bolt
+            _ if feas.0.get(m.0).copied().unwrap_or(true) => Color::srgb(0.30, 0.85, 0.70), // teal onion
+            _ => Color::srgb(0.95, 0.35, 0.25), // red = onion that downgrades to a bolt
+        };
         if let Some(mut material) = mats.get_mut(&mat.0) {
             if material.base_color != want {
                 material.base_color = want;
@@ -1979,7 +2147,9 @@ fn run_screenshot(scene: SceneCfg, png: PathBuf) {
         .init_resource::<OpenDialog>()
         .init_resource::<Cuts>()
         .init_resource::<Conns>()
+        .init_resource::<ActiveConn>()
         .init_resource::<EditCut>()
+        .init_resource::<PrintView>()
         .init_resource::<XSection>()
         .init_resource::<ModelBounds>()
         .init_resource::<DraggingCut>()
@@ -1993,7 +2163,7 @@ fn run_screenshot(scene: SceneCfg, png: PathBuf) {
         .add_message::<AutoPlace>()
         .add_message::<SwitchFile>()
         .add_systems(Startup, (setup_offscreen, load_icons))
-        .add_systems(Update, (capture_then_exit, (push_fields, sync_selected, apply_icon_font, rebuild_panel).chain(), update_status))
+        .add_systems(Update, (capture_then_exit, (push_fields, sync_selected, apply_icon_font, rebuild_panel).chain(), update_status, split_viewport))
         .run();
 }
 
@@ -2019,10 +2189,16 @@ fn setup_offscreen(
 
     let radius = scene.bed[0].max(scene.bed[1]).max(80.0);
     commands.spawn((
+        Camera2d,
+        Camera { order: 0, ..default() },
+        RenderTarget::Image(target.clone().into()),
+        bevy::ui::IsDefaultUiCamera,
+    ));
+    commands.spawn((
         Camera3d::default(),
+        Camera { order: 1, clear_color: bevy::camera::ClearColorConfig::None, ..default() },
         RenderTarget::Image(target.clone().into()),
         orbit_transform(-0.7, 0.5, radius, Vec3::ZERO),
-        bevy::ui::IsDefaultUiCamera,
     ));
 
     commands.insert_resource(Shot {
@@ -2113,6 +2289,7 @@ enum Action {
     PrintView,             // toggle the print-orientation preview (renders + auto-orients pieces)
     Orient([usize; 3], [f32; 3]), // manually set piece [ix,iy,iz]'s build-up to (ux,uy,uz)
     AutoPlace,             // auto-place connectors across the open cut's cross-section
+    ConnType(fab::ConnKind), // set the active connector kind for new placements (onion|bolt)
     Open(PathBuf),         // switch the active source to <path> (a dir → its .scad; a file → itself)
     Touch(PathBuf),        // bump <path>'s mtime (rewrite same bytes) → exercise watch_source reload
 }
@@ -2144,6 +2321,11 @@ fn parse_script(s: &str) -> Vec<Action> {
                 },
                 "toggle" => Some(Action::Toggle),
                 "next" => Some(Action::Next),
+                "conntype" => match it.next()? {
+                    "onion" => Some(Action::ConnType(fab::ConnKind::Onion)),
+                    "bolt" => Some(Action::ConnType(fab::ConnKind::Bolt)),
+                    _ => None,
+                },
                 "open" => it.next().map(|p| Action::Open(PathBuf::from(p))),
                 "touch" => it.next().map(|p| Action::Touch(PathBuf::from(p))),
                 "reslice" => Some(Action::Reslice),
@@ -2195,6 +2377,7 @@ fn run_scripted(scene: SceneCfg, actions: Vec<Action>) {
         .init_resource::<Job>()
         .init_resource::<Cuts>()
         .init_resource::<Conns>()
+        .init_resource::<ActiveConn>()
         .init_resource::<EditCut>()
         .init_resource::<XSection>()
         .init_resource::<Orient>()
@@ -2245,6 +2428,7 @@ fn run_scripted(scene: SceneCfg, actions: Vec<Action>) {
                     (poll_print_job, sync_orientation).chain(),
                     color_conn_markers,
                     do_auto_place,
+                    split_viewport,
                 ),
                 run_script,
             ),
@@ -2268,11 +2452,17 @@ fn setup_script(
     let target = images.add(img);
     let radius = scene.bed[0].max(scene.bed[1]).max(80.0);
     commands.spawn((
+        Camera2d,
+        Camera { order: 0, ..default() },
+        RenderTarget::Image(target.clone().into()),
+        bevy::ui::IsDefaultUiCamera,
+    ));
+    commands.spawn((
         Camera3d::default(),
+        Camera { order: 1, clear_color: bevy::camera::ClearColorConfig::None, ..default() },
         RenderTarget::Image(target.clone().into()),
         orbit_transform(-0.7, 0.5, radius, Vec3::ZERO),
         Orbit { yaw: -0.7, pitch: 0.5, radius, target: Vec3::ZERO },
-        bevy::ui::IsDefaultUiCamera,
     ));
     commands.insert_resource(PrevCam(Some((-0.7, 0.5, radius, Vec3::ZERO))));
     commands.insert_resource(RenderTargetImage(target));
@@ -2298,7 +2488,7 @@ fn run_script(
     mut commands: Commands,
     mut exit: MessageWriter<AppExit>,
     // Bundled: Bevy caps a system at 16 params, and a tuple counts as one.
-    mut sw: (ResMut<FileList>, MessageWriter<SwitchFile>),
+    mut sw: (ResMut<FileList>, MessageWriter<SwitchFile>, ResMut<ActiveConn>),
 ) {
     if bounds.0.is_none() {
         return; // wait for the initial render (model + bounds + first cut)
@@ -2377,7 +2567,13 @@ fn run_script(
         Action::Conn(i, a, b) => {
             if runner.timer == 1 {
                 let size = auto_size(&xsection, &cuts, &bounds, i, [a, b]);
-                toggle_connector(&mut conns, i, [a, b], size);
+                toggle_connector(&mut conns, i, [a, b], size, sw.2.kind, sw.2.screw);
+            }
+            runner.timer >= 2
+        }
+        Action::ConnType(k) => {
+            if runner.timer == 1 {
+                sw.2.kind = k;
             }
             runner.timer >= 2
         }
@@ -2697,29 +2893,45 @@ fn file_card(files: &FileList) -> impl Scene + 'static {
         })
         .collect();
     bsn! {
+        // flex_grow + min_height:0 make this card claim the panel's leftover height and shrink
+        // below its content, so the ListView's inner ScrollArea (overflow: scroll_y) actually
+        // engages instead of the whole list expanding past the window.
         Node {
             flex_direction: FlexDirection::Column,
+            flex_grow: 1.0,
+            min_height: px(0),
             row_gap: px(3),
             padding: UiRect::all(px(4)),
         }
         Children [
             (Text(format!("files ({})", files.files.len())) ThemedText),
-            (@FeathersListView { @rows: { Box::new(rows) as Box<dyn SceneList> } }),
+            // Patch the ListView's own Node (field-merge, keeps its scrollbar gutter) to fill and
+            // bound this card — the ScrollArea can only scroll once its ancestor height is capped.
+            (
+                @FeathersListView { @rows: { Box::new(rows) as Box<dyn SceneList> } }
+                Node { flex_grow: 1.0, min_height: px(0) }
+            ),
         ]
     }
 }
 
-/// The whole panel scene, built from the current cut stack: title, an X/Y/Z card stack, and a
-/// bottom bar (status + Re-slice + Explode/Collapse).
-fn build_panel(cuts: &Cuts, files: &FileList) -> impl Scene + 'static {
-    let cards: Vec<_> =
-        [Axis::X, Axis::Y, Axis::Z].into_iter().map(|a| plane_card(cuts, a)).collect();
-    let files_card = file_card(files);
+/// The whole panel: a pinned title, then ONE mode section (the file list + cut cards in View, or the
+/// connector-editor / print-preview controls in a sub-mode). The bounded root (top+bottom anchored)
+/// keeps it in the window; the View section flex-grows so the file list scrolls.
+fn build_panel(cuts: &Cuts, files: &FileList, mode: PanelMode, active: ActiveConn) -> impl Scene + 'static {
+    let section: Box<dyn SceneList> = match mode {
+        PanelMode::View => Box::new(vec![view_section(cuts, files)]),
+        PanelMode::Connectors(i) => Box::new(vec![connector_section(cuts, i, active)]),
+        PanelMode::Print => Box::new(vec![print_section()]),
+    };
     bsn! {
         Node {
             position_type: PositionType::Absolute,
             top: px(8),
             left: px(8),
+            // Anchor bottom too so the panel is bounded to the window height — the View section's
+            // file list flex-grows into the leftover space and scrolls instead of running off-screen.
+            bottom: px(8),
             flex_direction: FlexDirection::Column,
             row_gap: px(6),
             padding: UiRect::all(px(8)),
@@ -2729,6 +2941,21 @@ fn build_panel(cuts: &Cuts, files: &FileList) -> impl Scene + 'static {
         ThemeBackgroundColor(tokens::WINDOW_BG)
         Children [
             (Text("fab-gui") ThemedText),
+            { section }
+        ]
+    }
+}
+
+/// View mode: Open + the file list, the X/Y/Z cut cards, and the slice / explode / print controls.
+/// (Auto-place lives in the connector editor — it only ever worked with a cut's editor open.)
+fn view_section(cuts: &Cuts, files: &FileList) -> impl Scene + 'static {
+    let cards: Vec<_> =
+        [Axis::X, Axis::Y, Axis::Z].into_iter().map(|a| plane_card(cuts, a)).collect();
+    let files_card = file_card(files);
+    bsn! {
+        // flex_grow so the file list (inside) can claim the panel's leftover height and scroll.
+        Node { flex_direction: FlexDirection::Column, flex_grow: 1.0, min_height: px(0), row_gap: px(6) }
+        Children [
             // Open a project directory → its .scad files fill the list below (5.3.1). Async pick on
             // the task pool so the native panel never freezes the render loop.
             (
@@ -2761,11 +2988,98 @@ fn build_panel(cuts: &Cuts, files: &FileList) -> impl Scene + 'static {
             ),
             (
                 @FeathersButton { @caption: bsn!{ Text("Print view") ThemedText } }
-                on(|_: On<Activate>, mut pv: ResMut<PrintView>| { pv.0 = !pv.0; })
+                on(|_: On<Activate>, mut pv: ResMut<PrintView>| { pv.0 = true; })
+            ),
+        ]
+    }
+}
+
+/// Connector-editor mode: which cut you're editing, the active connector type (Onion/Bolt + screw
+/// for new placements), Auto-place, Clear (drop this cut's connectors), and Done. The 2D
+/// cross-section is drawn in the viewport; picking is on it.
+fn connector_section(cuts: &Cuts, i: usize, active: ActiveConn) -> impl Scene + 'static {
+    let header = match cuts.list.get(i) {
+        Some(c) => {
+            let at = c.at;
+            let pos = if at.fract() == 0.0 { format!("{}", at as i64) } else { format!("{at:.1}") };
+            format!("Connectors: {} cut @ {}", c.axis.label(), pos)
+        }
+        None => "Connectors".to_string(),
+    };
+    let clear = move |_: On<Activate>, mut conns: ResMut<Conns>| {
+        conns.list.retain(|c| c.cut != i);
+    };
+    let onion_v =
+        if active.kind == fab::ConnKind::Onion { ButtonVariant::Primary } else { ButtonVariant::Normal };
+    let bolt_v =
+        if active.kind == fab::ConnKind::Bolt { ButtonVariant::Primary } else { ButtonVariant::Normal };
+    // Screw picker — only when Bolt is the active kind. One closure site keeps the button type
+    // uniform, so the vec is homogeneous (empty for onion, three buttons for bolt).
+    let screw_btns: Vec<_> = if active.kind == fab::ConnKind::Bolt {
+        [Screw::M3, Screw::M4, Screw::M5]
+            .into_iter()
+            .map(|s| {
+                let v = if s == active.screw { ButtonVariant::Primary } else { ButtonVariant::Normal };
+                let label = s.label(); // bsn's Text(..) won't parse a method call inline
+                let set = move |_: On<Activate>, mut ac: ResMut<ActiveConn>| ac.screw = s;
+                bsn! {
+                    @FeathersButton { @variant: {v}, @caption: bsn!{ Text(label) ThemedText } }
+                    on(set)
+                }
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    bsn! {
+        Node { flex_direction: FlexDirection::Column, row_gap: px(6) }
+        Children [
+            (Text(header) ThemedText),
+            // Active-type toggle: what new placements (manual + Auto-place) become.
+            (
+                Node { flex_direction: FlexDirection::Row, column_gap: px(6) }
+                Children [
+                    (
+                        @FeathersButton { @variant: {onion_v}, @caption: bsn!{ Text("Onion") ThemedText } }
+                        on(|_: On<Activate>, mut ac: ResMut<ActiveConn>| ac.kind = fab::ConnKind::Onion)
+                    ),
+                    (
+                        @FeathersButton { @variant: {bolt_v}, @caption: bsn!{ Text("Bolt") ThemedText } }
+                        on(|_: On<Activate>, mut ac: ResMut<ActiveConn>| ac.kind = fab::ConnKind::Bolt)
+                    ),
+                ]
             ),
             (
-                @FeathersButton { @caption: bsn!{ Text("Auto-place") ThemedText } }
+                Node { flex_direction: FlexDirection::Row, column_gap: px(6) }
+                Children [ { Box::new(screw_btns) as Box<dyn SceneList> } ]
+            ),
+            (
+                @FeathersButton { @variant: {ButtonVariant::Primary}, @caption: bsn!{ Text("Auto-place") ThemedText } }
                 on(|_: On<Activate>, mut w: MessageWriter<AutoPlace>| { w.write(AutoPlace); })
+            ),
+            (
+                @FeathersButton { @caption: bsn!{ Text("Clear connectors") ThemedText } }
+                on(clear)
+            ),
+            (
+                @FeathersButton { @caption: bsn!{ Text("Done") ThemedText } }
+                on(|_: On<Activate>, mut ec: ResMut<EditCut>| { ec.0 = None; })
+            ),
+        ]
+    }
+}
+
+/// Print-preview mode: a hint + Done. Per-piece build-up is set by clicking pieces in the viewport
+/// (`orient_piece_on_click`), so there are no per-piece panel controls.
+fn print_section() -> impl Scene + 'static {
+    bsn! {
+        Node { flex_direction: FlexDirection::Column, row_gap: px(6) }
+        Children [
+            (Text("Print orientation") ThemedText),
+            (Text("click a piece to set which way it prints") ThemedText),
+            (
+                @FeathersButton { @caption: bsn!{ Text("Done") ThemedText } }
+                on(|_: On<Activate>, mut pv: ResMut<PrintView>| { pv.0 = false; })
             ),
         ]
     }
@@ -2776,6 +3090,9 @@ fn build_panel(cuts: &Cuts, files: &FileList) -> impl Scene + 'static {
 fn rebuild_panel(
     cuts: Res<Cuts>,
     files: Res<FileList>,
+    edit: Res<EditCut>,
+    print: Res<PrintView>,
+    active: Res<ActiveConn>,
     mut sig: ResMut<PanelSig>,
     roots: Query<Entity, With<PanelRoot>>,
     mut commands: Commands,
@@ -2784,6 +3101,8 @@ fn rebuild_panel(
         cuts.list.iter().map(|c| (c.axis, c.enabled)).collect::<Vec<_>>(),
         files.files.len(),
         files.active,
+        panel_mode(&edit, &print),
+        *active,
     );
     if sig.0.as_ref() == Some(&cur) {
         return;
@@ -2793,7 +3112,9 @@ fn rebuild_panel(
         commands.entity(e).despawn();
     }
     commands.queue(|world: &mut World| {
-        let scene = build_panel(world.resource::<Cuts>(), world.resource::<FileList>());
+        let mode = panel_mode(world.resource::<EditCut>(), world.resource::<PrintView>());
+        let active = *world.resource::<ActiveConn>();
+        let scene = build_panel(world.resource::<Cuts>(), world.resource::<FileList>(), mode, active);
         if let Err(e) = world.spawn_scene(scene) {
             error!("panel spawn failed: {e:?}");
         }
@@ -2874,24 +3195,29 @@ mod tests {
     #[test]
     fn toggle_connector_places_then_removes_on_a_second_nearby_click() {
         let mut conns = Conns::default();
-        toggle_connector(&mut conns, 0, [20.0, -10.0], 10.0); // place
+        let onion = fab::ConnKind::Onion;
+        toggle_connector(&mut conns, 0, [20.0, -10.0], 10.0, onion, Screw::M3); // place
         assert_eq!(conns.list.len(), 1);
-        toggle_connector(&mut conns, 0, [22.0, -8.0], 10.0); // within 5mm → removes the same one
+        toggle_connector(&mut conns, 0, [22.0, -8.0], 10.0, onion, Screw::M3); // within 5mm → removes it
         assert!(conns.list.is_empty());
-        toggle_connector(&mut conns, 0, [20.0, -10.0], 10.0); // place again
-        toggle_connector(&mut conns, 0, [0.0, 0.0], 10.0); // far away → a second connector
+        toggle_connector(&mut conns, 0, [20.0, -10.0], 10.0, onion, Screw::M3); // place again
+        toggle_connector(&mut conns, 0, [0.0, 0.0], 10.0, onion, Screw::M3); // far away → a second
         assert_eq!(conns.list.len(), 2);
-        toggle_connector(&mut conns, 1, [20.0, -10.0], 10.0); // same pos, different cut → places
+        toggle_connector(&mut conns, 1, [20.0, -10.0], 10.0, onion, Screw::M3); // diff cut → places
         assert_eq!(conns.list.len(), 3);
     }
 
     #[test]
-    fn toggle_connector_declines_a_too_thin_spot() {
+    fn toggle_connector_declines_a_too_thin_onion_but_not_a_bolt() {
         let mut conns = Conns::default();
-        toggle_connector(&mut conns, 0, [0.0, 0.0], 1.0); // below MIN_ONION → not placed
-        assert!(conns.list.is_empty());
-        toggle_connector(&mut conns, 0, [0.0, 0.0], 5.0); // fits → placed
+        toggle_connector(&mut conns, 0, [0.0, 0.0], 1.0, fab::ConnKind::Onion, Screw::M3); // sub-MIN_ONION
+        assert!(conns.list.is_empty(), "a too-thin onion is declined");
+        toggle_connector(&mut conns, 0, [0.0, 0.0], 5.0, fab::ConnKind::Onion, Screw::M3); // fits
         assert_eq!(conns.list.len(), 1);
+        // A bolt has no onion thin-gate — it places regardless of the fitted diameter.
+        toggle_connector(&mut conns, 1, [0.0, 0.0], 1.0, fab::ConnKind::Bolt, Screw::M4);
+        assert_eq!(conns.list.len(), 2);
+        assert!(matches!(conns.list[1].kind, fab::ConnKind::Bolt));
     }
 
     #[test]
@@ -2923,11 +3249,12 @@ mod tests {
             ],
             active: 2,
         };
+        let onion = fab::ConnKind::Onion;
         let mut conns = Conns {
             list: vec![
-                PlacedConn { cut: 0, pos: [0.0, 0.0], size: 6.0 },
-                PlacedConn { cut: 1, pos: [0.0, 0.0], size: 6.0 }, // on the cut we delete → dropped
-                PlacedConn { cut: 2, pos: [0.0, 0.0], size: 6.0 }, // shifts down to cut 1
+                PlacedConn { cut: 0, pos: [0.0, 0.0], size: 6.0, kind: onion, screw: Screw::M3 },
+                PlacedConn { cut: 1, pos: [0.0, 0.0], size: 6.0, kind: onion, screw: Screw::M3 }, // deleted
+                PlacedConn { cut: 2, pos: [0.0, 0.0], size: 6.0, kind: onion, screw: Screw::M3 }, // shifts down
             ],
         };
         remove_cut(&mut cuts, &mut conns, 1);

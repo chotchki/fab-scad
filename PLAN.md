@@ -25,7 +25,10 @@ Driven by `claude-plan-bridge` (FORMATv2). Hand-authored; run
   - [x] 5.3.1 - Directory/file picker: rfd "Open" button → choose a project dir or .scad (retire CLI-arg-only entry)
   - [x] 5.3.2 - File-list side panel: FileList resource (Vec<PathBuf> + active); click a row to switch (SceneCfg.source stays the scalar active pointer — lower blast radius)
   - [x] 5.3.3 - File-watch: mtime-poll on the active .scad → auto re-render on save (open-file only; include-graph gap → 6.6)
+  - [x] 5.3.4 - Panel UX pass (dogfooding): full-focus mode-aware panel (View / Connectors / Print — hide controls that don't apply, in-mode Done); scroll-bound the file list + orbit yields over the panel; fix cross-section Y-flip (OpenSCAD negates SVG Y → auto-place scattered connectors below the model)
 
+  - [x] 5.3.5 - Connector type picker (onion/bolt) in GUI editor
+  - [x] 5.3.6 - Split view: dock panel, inset 3D camera viewport
 ## Phase 6 - fab render + output (3mf, magnets, Bambu)
 - [ ] 6.1 - Render engine: enumerate targets → parallel (rayon) render → report; a "target" is any .scad→out unit (pieces/parts/projects collapse to target sets); per-target thumbnail + N/M progress
 - [ ] 6.2 - Incremental rebuild: skip pieces whose inputs are unchanged (content hash)

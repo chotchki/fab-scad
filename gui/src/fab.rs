@@ -28,17 +28,31 @@ fn cuts_to_spec(cuts: &[(char, f64)]) -> Slicing {
     Slicing { printer: None, cut, connector: vec![], orient: vec![] }
 }
 
-/// GUI onion placements → manifest connectors (the GUI's only connector kind is the onion now).
+/// GUI placements → manifest connectors, per kind: an onion carries its auto-sized diameter; a bolt
+/// carries its screw size (and lets the slicer default `through`). The slicer consumes both.
 fn to_connectors(connectors: &[Conn]) -> Vec<Connector> {
     connectors
         .iter()
-        .map(|c| Connector {
-            cut: c.cut,
-            kind: "onion".to_string(),
-            screw: None,
-            pos: [Num::Float(c.pos[0]), Num::Float(c.pos[1])],
-            through: None,
-            size: Some(c.size),
+        .map(|c| {
+            let pos = [Num::Float(c.pos[0]), Num::Float(c.pos[1])];
+            match c.kind {
+                ConnKind::Onion => Connector {
+                    cut: c.cut,
+                    kind: "onion".to_string(),
+                    screw: None,
+                    pos,
+                    through: None,
+                    size: Some(c.size),
+                },
+                ConnKind::Bolt => Connector {
+                    cut: c.cut,
+                    kind: "bolt".to_string(),
+                    screw: Some(c.screw.to_string()),
+                    pos,
+                    through: None, // slicer defaults through-depth (12mm) until we expose it
+                    size: None,
+                },
+            }
         })
         .collect()
 }
@@ -233,14 +247,26 @@ pub fn conn_feasibility(
     slicing::onion_feasibility(&spec)
 }
 
+/// The two connector kinds the GUI places (both consumed by the slicer): Onion = support-free
+/// peg/socket, auto-sized from the cross-section; Bolt = heat-set pocket + machine screw across the
+/// cut. An onion that can't print support-free downgrades to a bolt in the slice regardless.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum ConnKind {
+    Onion,
+    Bolt,
+}
+
 /// A connector to place, resolved for slicing: `cut` is the index into the cuts slice passed
-/// alongside, `pos` the two coords in the cut plane's non-axis dims, `size` the onion diameter
-/// (auto-sized from the cross-section). Onion is the GUI's connector kind now (#39).
+/// alongside, `pos` the two coords in the cut plane's non-axis dims. `size` is the onion diameter
+/// (auto-sized from the cross-section, ignored for a bolt); `screw` the bolt size ("M3"/"M4"/"M5",
+/// ignored for an onion). `kind` picks which.
 #[derive(Clone, Copy)]
 pub struct Conn {
     pub cut: usize,
     pub pos: [f64; 2],
     pub size: f64,
+    pub kind: ConnKind,
+    pub screw: &'static str,
 }
 
 /// A per-piece print orientation, resolved for slicing: the slab multi-index and its build-up

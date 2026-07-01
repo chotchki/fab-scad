@@ -1514,13 +1514,13 @@ fn sync_dim_labels(
     print: Res<PrintView>,
     cam: Query<(&Camera, &GlobalTransform), With<Camera3d>>,
     existing: Query<&DimLabel>,
-    mut labels: Query<(&DimLabel, &mut Node, &mut Text, &mut Visibility)>,
+    mut labels: Query<(&DimLabel, &mut Node, &mut Text, &mut Visibility, &mut TextColor)>,
     mut commands: Commands,
     mut gizmos: Gizmos,
 ) {
     if print.0 {
         // The print preview lays pieces out apart — the assembled-part width labels don't apply.
-        for (_, _, _, mut vis) in &mut labels {
+        for (_, _, _, mut vis, _) in &mut labels {
             *vis = Visibility::Hidden;
         }
         return;
@@ -1535,10 +1535,15 @@ fn sync_dim_labels(
     // off the part) + its width; the lines/ticks are drawn as gizmos as we go.
     let gap = (max - min).max_element() * 0.12 + 6.0; // how far the dimension sits off the part
     let tick = gap * 0.25;
-    let dim_col = Color::srgb(0.85, 0.9, 1.0);
-    let mut segs: Vec<(Vec3, f32)> = Vec::new();
+    let mut segs: Vec<(Vec3, f32, Color)> = Vec::new();
     for axis in [Axis::X, Axis::Y, Axis::Z] {
         let ai = axis.index();
+        // Per-axis colour, the RGB=XYZ convention (X red, Y green, Z blue).
+        let dim_col = match axis {
+            Axis::X => Color::srgb(1.0, 0.4, 0.4),
+            Axis::Y => Color::srgb(0.4, 0.9, 0.45),
+            Axis::Z => Color::srgb(0.5, 0.6, 1.0),
+        };
         let mut xs: Vec<f32> =
             cuts.list.iter().filter(|c| c.enabled && c.axis == axis).map(|c| c.at).collect();
         if xs.is_empty() {
@@ -1585,7 +1590,7 @@ fn sync_dim_labels(
             gizmos.line(face_pt(hi), b, dim_col.with_alpha(0.4));
             gizmos.line(a - tvec, a + tvec, dim_col); // end ticks
             gizmos.line(b - tvec, b + tvec, dim_col);
-            segs.push(((a + b) * 0.5, w[1] - w[0])); // text at the dim-line midpoint
+            segs.push(((a + b) * 0.5, w[1] - w[0], dim_col)); // text at the dim-line midpoint
         }
     }
 
@@ -1600,16 +1605,20 @@ fn sync_dim_labels(
         ));
     }
 
-    for (dl, mut node, mut text, mut vis) in &mut labels {
-        let Some(&(pos, width)) = segs.get(dl.idx) else {
+    for (dl, mut node, mut text, mut vis, mut color) in &mut labels {
+        let Some(&(pos, width, col)) = segs.get(dl.idx) else {
             *vis = Visibility::Hidden;
             continue;
         };
         match camera.world_to_viewport(cam_gt, pos) {
             Ok(p) => {
-                node.left = px(p.x);
-                node.top = px(p.y);
-                *text = Text::new(format!("{width:.0}"));
+                let s = format!("{width:.0}");
+                // Centre the number on the anchor — Node left/top is its top-left corner, so back
+                // off half the glyph run (~7px/char at size 13) and half the line height.
+                node.left = px(p.x - s.len() as f32 * 3.5);
+                node.top = px(p.y - 8.0);
+                *text = Text::new(s);
+                *color = TextColor(col);
                 *vis = Visibility::Visible;
             }
             Err(_) => *vis = Visibility::Hidden,

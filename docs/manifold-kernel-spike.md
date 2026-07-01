@@ -75,3 +75,26 @@ angle), print-orientation transforms (have `rotate` + a 12-float `transform`), a
 settings question (6.5) is orthogonal to this. None look blocking.
 
 Spike code lives in scratch (`manifold_spike`), not the repo — it was a throwaway to answer go/no-go.
+
+## Outcome — Track C (Phase 11), shipped opt-in
+
+The spike became the plan, and the kernel landed:
+
+- **`fab_scad::kernel`** — a typed `Solid` over manifold3d: STL import+weld, STL + multi-object 3mf
+  export, the slab slicer (`slab_pieces` via `split_by_plane`), the connector solids (onion =
+  sphere ∪ tangent cone, bolt clearance), and `align_z_to` for cap orientation. Feature-gated
+  (`kernel`, default-on); `--no-default-features` still builds the OpenSCAD-only path with no C++
+  toolchain.
+- **`slicing::slice_solid`** — the in-process twin of `piece_driver`. The two-axis onion floater
+  can't exist here: a connector is matched to the exact two cells it borders, so no foreign peg is
+  placed and nothing is trimmed (chotchki's never-trim intent, by construction).
+- **`fab slice --kernel`** — opt-in. OpenSCAD renders the base mesh once (the front-door), the rest
+  runs in-process. ~10× end-to-end even on a trivial box (944 ms → 87 ms); the reactivity-relevant
+  per-piece number is the spike's ~70×.
+- **Validated:** parity harnesses (slicer + connector) match OpenSCAD on bbox within tolerance, and
+  a corpus-robustness sweep sliced **15/15** sampled real models to all-manifold pieces — the
+  robustness risk is retired. (`cargo test --test slicer_parity -- --ignored`.)
+
+**Deliberately still opt-in.** The default stays the OpenSCAD codegen path; `--kernel` is the way in
+until the GUI reactive loop (11.10) is wired onto the cached base mesh and dogfooded. Flip the
+default only after that.

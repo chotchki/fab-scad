@@ -86,6 +86,67 @@ fn slab_pieces_match_openscad() {
     let _ = std::fs::remove_dir_all(&tmp);
 }
 
+/// Corpus robustness (Track C 11.11): the spike's flagged risk was whether Manifold booleans hold up
+/// on arbitrary real geometry (not just cubes). Sample real models across the tree, render each base,
+/// import, and slab-slice on X+Y — every piece must come back a valid 2-manifold. Reports the ratio.
+#[test]
+#[ignore = "needs OpenSCAD + models/; run with --ignored"]
+fn corpus_robustness() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let models = root.join("models");
+    if !models.is_dir() {
+        eprintln!("skipping: no models/ submodule");
+        return;
+    }
+    let Ok(os) = Openscad::discover(Some(root.as_path())) else {
+        eprintln!("skipping: OpenSCAD not found");
+        return;
+    };
+    let tmp = std::env::temp_dir().join(format!("fab_corpus_{}", std::process::id()));
+    std::fs::create_dir_all(&tmp).unwrap();
+    let stl = tmp.join("base.stl");
+
+    // Spread the sample across the (sorted) corpus rather than the first N alphabetically.
+    let files = fab_scad::smoke::scad_files(&models);
+    let step = (files.len() / 25).max(1);
+    let (mut tested, mut ok) = (0, 0);
+    let mut failures = Vec::new();
+    for f in files.iter().step_by(step) {
+        if tested >= 15 {
+            break;
+        }
+        match os.render(f, &stl, Duration::from_secs(60)) {
+            Ok(r) if r.ok => {}
+            _ => continue, // base didn't render — not this test's concern
+        }
+        let Ok(base) = Solid::from_stl_file(&stl) else {
+            tested += 1;
+            failures.push(format!("{}: import", f.display()));
+            continue;
+        };
+        let Some((min, max)) = base.bbox() else { continue };
+        let cuts = [
+            vec![(min[0] + max[0]) / 2.0],
+            vec![(min[1] + max[1]) / 2.0],
+            vec![],
+        ];
+        let pieces = base.slab_pieces(&cuts);
+        tested += 1;
+        if !pieces.is_empty() && pieces.iter().all(|(_, s)| s.is_manifold()) {
+            ok += 1;
+        } else {
+            failures.push(format!("{}: {} pieces, non-manifold", f.display(), pieces.len()));
+        }
+    }
+    let _ = std::fs::remove_dir_all(&tmp);
+    eprintln!("corpus robustness: {ok}/{tested} models sliced to all-manifold pieces");
+    for fail in &failures {
+        eprintln!("  FAIL {fail}");
+    }
+    assert!(tested > 0, "no models rendered — corpus check ran nothing");
+    assert!(failures.is_empty(), "{} corpus models failed the in-process slice", failures.len());
+}
+
 #[test]
 #[ignore = "needs OpenSCAD; run with --ignored"]
 fn connectors_match_openscad() {

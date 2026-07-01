@@ -101,12 +101,15 @@ struct FileList {
 #[derive(Resource, Default)]
 struct OpenDialog(Option<Task<Option<PathBuf>>>);
 
-/// Auto-reload watch (5.3.3): the active source's mtime at its last (re)load. `watch_source` polls
-/// the open file each frame and re-renders when the mtime advances (an external editor saved it).
-/// mtime-poll, not the `notify` crate — trivial syscall, no thread/dep, same effect; the
-/// include-graph (edits to `include`d modules) is the DAG problem tracked in 6.6.
+/// Auto-reload watch (5.3.3 + the DAG): the latest mtime across the source's whole include CLOSURE
+/// (`fab_scad::deps`), and that closure cached. `watch_source` polls it each frame and re-renders
+/// when ANY dep advances — edit an `include`d module and the preview rebuilds, not just the open
+/// file. mtime-poll, not the `notify` crate — trivial syscalls, no thread/dep, same effect.
 #[derive(Resource, Default)]
-struct Watch(Option<std::time::SystemTime>);
+struct Watch {
+    mtime: Option<std::time::SystemTime>,
+    closure: Vec<PathBuf>,
+}
 
 /// The in-flight render/slice (off the main thread): `(was_reslice, task)`. The task yields
 /// `Ok(stl)` when done, else an error string.
@@ -1702,20 +1705,40 @@ fn watch_source(
     let Some(src) = scene.source.as_deref() else {
         return;
     };
-    let Ok(mtime) = std::fs::metadata(src).and_then(|m| m.modified()) else {
-        return;
-    };
-    match watch.0 {
-        None => watch.0 = Some(mtime), // first sight: arm, don't render (the load already did)
+    // Resolve the include closure once per (re)load (empty = first sight after a reset); it's
+    // re-derived on a real change below so newly added/removed `include`s are tracked.
+    if watch.closure.is_empty() {
+        watch.closure = dep_closure(src, &scene);
+    }
+    // Latest mtime across the WHOLE closure — editing any included module advances it.
+    let mtime = watch
+        .closure
+        .iter()
+        .filter_map(|p| std::fs::metadata(p).and_then(|m| m.modified()).ok())
+        .max();
+    match (watch.mtime, mtime) {
+        (None, m) => watch.mtime = m, // first sight: arm, don't render (the load already did)
         // A render in flight (mtime advanced but job busy) falls through to `_` and does nothing —
         // the next idle frame retries, so a save mid-render is never lost.
-        Some(prev) if mtime > prev && job.0.is_none() => {
-            watch.0 = Some(mtime);
-            info!("reload {}", src.display());
+        (Some(prev), Some(m)) if m > prev && job.0.is_none() => {
+            watch.mtime = Some(m);
+            watch.closure = dep_closure(src, &scene); // the edit may have changed the include set
+            info!("reload {} (+{} deps)", src.display(), watch.closure.len().saturating_sub(1));
             kick_job(&mut job, &mut status, &scene, false, vec![], vec![], vec![]);
         }
         _ => {}
     }
+}
+
+/// The transitive `include`/`use` closure of `src`, resolved against the workspace OPENSCADPATH
+/// (`root/libs` + `root/scad-lib`) — the files whose edits should trigger a rebuild.
+fn dep_closure(src: &Path, scene: &SceneCfg) -> Vec<PathBuf> {
+    let search: Vec<PathBuf> = scene
+        .root
+        .as_ref()
+        .map(|r| vec![r.join("libs"), r.join("scad-lib")])
+        .unwrap_or_default();
+    fab_scad::deps::closure(src, &search).into_iter().collect()
 }
 
 /// Every `.scad` under `dir` (recursive), sorted, skipping generated/VCS/hidden dirs. The picker's

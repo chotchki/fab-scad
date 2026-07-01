@@ -1502,8 +1502,10 @@ fn seat_bed(bounds: Res<ModelBounds>, mut beds: Query<&mut Transform, With<Bed>>
     }
 }
 
-/// Floating piece-width labels in the 3D view: project each piece's centre to the screen and put
-/// the width there, tracking the explode (and the camera, every frame, so they follow orbit/pan).
+/// CAD-style dimension lines for each piece width: a line PERPENDICULAR to the cut plane (parallel to
+/// the cut axis), offset OUTSIDE the part with extension lines + end ticks (gizmos), and the width
+/// printed on the line. The text rides the offset line over the dark background, so it stays readable
+/// instead of washing out on the part.
 #[allow(clippy::too_many_arguments)]
 fn sync_dim_labels(
     cuts: Res<Cuts>,
@@ -1514,6 +1516,7 @@ fn sync_dim_labels(
     existing: Query<&DimLabel>,
     mut labels: Query<(&DimLabel, &mut Node, &mut Text, &mut Visibility)>,
     mut commands: Commands,
+    mut gizmos: Gizmos,
 ) {
     if print.0 {
         // The print preview lays pieces out apart — the assembled-part width labels don't apply.
@@ -1528,10 +1531,11 @@ fn sync_dim_labels(
     let Ok((camera, cam_gt)) = cam.single() else {
         return;
     };
-    // NB: `world_to_viewport` already maps into the logical viewport rect (adds the inset origin), so
-    // its result is full-window logical px — no manual panel offset needed.
-    // Build a (world position, width) for every piece segment on EVERY axis that has cuts.
-    let center = (min + max) * 0.5;
+    // One dimension per piece width. `segs` collects each dimension's TEXT anchor (the line midpoint,
+    // off the part) + its width; the lines/ticks are drawn as gizmos as we go.
+    let gap = (max - min).max_element() * 0.12 + 6.0; // how far the dimension sits off the part
+    let tick = gap * 0.25;
+    let dim_col = Color::srgb(0.85, 0.9, 1.0);
     let mut segs: Vec<(Vec3, f32)> = Vec::new();
     for axis in [Axis::X, Axis::Y, Axis::Z] {
         let ai = axis.index();
@@ -1544,13 +1548,44 @@ fn sync_dim_labels(
         let mut edges = vec![comp(min, ai)];
         edges.extend(xs);
         edges.push(comp(max, ai));
+
+        // Offset the dimension line OUTSIDE the model on one perpendicular axis (p0), at the near face
+        // on the other (p1). `dim_pt` walks the dim line; `face_pt` its match on the model face (for
+        // the extension line). Coords built by index so this is axis-agnostic.
+        let others: Vec<usize> = (0..3).filter(|&a| a != ai).collect();
+        let (p0, p1) = (others[0], others[1]);
+        let off0 = comp(min, p0) - gap;
+        let face1 = comp(min, p1);
+        let dim_pt = |v: f32| {
+            let mut a = [0.0f32; 3];
+            a[ai] = v;
+            a[p0] = off0;
+            a[p1] = face1;
+            Vec3::from_array(a)
+        };
+        let face_pt = |v: f32| {
+            let mut a = [0.0f32; 3];
+            a[ai] = v;
+            a[p0] = comp(min, p0);
+            a[p1] = face1;
+            Vec3::from_array(a)
+        };
+        let tvec = {
+            let mut a = [0.0f32; 3];
+            a[p0] = tick;
+            Vec3::from_array(a)
+        };
+
         for (k, w) in edges.windows(2).enumerate() {
-            let mid = (w[0] + w[1]) * 0.5 + k as f32 * dspread.0;
-            // Sit the label at the segment midpoint, centred in the other two dims (model centre) —
-            // NOT floating at max.z, which for a tall part projects off the top of the frame and
-            // reads as "the measurements are hidden".
-            let pos = with_comp(center, ai, mid);
-            segs.push((pos, w[1] - w[0]));
+            let shift = k as f32 * dspread.0; // track the exploded piece
+            let (lo, hi) = (w[0] + shift, w[1] + shift);
+            let (a, b) = (dim_pt(lo), dim_pt(hi));
+            gizmos.line(a, b, dim_col); // the dimension line
+            gizmos.line(face_pt(lo), a, dim_col.with_alpha(0.4)); // extension lines from the part
+            gizmos.line(face_pt(hi), b, dim_col.with_alpha(0.4));
+            gizmos.line(a - tvec, a + tvec, dim_col); // end ticks
+            gizmos.line(b - tvec, b + tvec, dim_col);
+            segs.push(((a + b) * 0.5, w[1] - w[0])); // text at the dim-line midpoint
         }
     }
 

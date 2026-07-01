@@ -161,6 +161,52 @@ impl Solid {
         Solid(self.0.transform(m))
     }
 
+    // --- slab slicer (11.4) ----------------------------------------------------------------------
+
+    /// Extract ONE piece: this base clipped to the cell that slab multi-index `piece` selects, given
+    /// `cuts` (ascending cut coordinates per axis, empty for an uncut axis). Each axis clips to
+    /// [cut[i-1], cut[i]] via split_by_plane — the linear O(N) slice, no 2^N blowup. An uncut axis
+    /// spans the whole model (its index must be 0). Returns an empty solid when the cell holds no
+    /// material (an L-shaped model leaves some cells bare).
+    pub fn slab_piece(&self, cuts: &[Vec<f64>; 3], piece: [usize; 3]) -> Solid {
+        let mut s = self.clone();
+        for a in 0..3 {
+            let ac = &cuts[a];
+            if ac.is_empty() {
+                continue; // uncut axis — whole span; piece[a] is 0
+            }
+            let i = piece[a];
+            let mut normal = [0.0; 3];
+            normal[a] = 1.0;
+            if i > 0 {
+                s = s.split_by_plane(normal, ac[i - 1]).0; // keep the > lower-cut half
+            }
+            if i < ac.len() {
+                s = s.split_by_plane(normal, ac[i]).1; // keep the < upper-cut half
+            }
+        }
+        s
+    }
+
+    /// Slice the base into every non-empty piece, paired with its slab multi-index (ix outer → iz
+    /// inner, matching `slicing::piece_indices`). Empty cells are dropped. This is the whole slice.
+    pub fn slab_pieces(&self, cuts: &[Vec<f64>; 3]) -> Vec<([usize; 3], Solid)> {
+        let counts = [cuts[0].len() + 1, cuts[1].len() + 1, cuts[2].len() + 1];
+        let mut out = Vec::new();
+        for ix in 0..counts[0] {
+            for iy in 0..counts[1] {
+                for iz in 0..counts[2] {
+                    let piece = [ix, iy, iz];
+                    let s = self.slab_piece(cuts, piece);
+                    if !s.is_empty() {
+                        out.push((piece, s));
+                    }
+                }
+            }
+        }
+        out
+    }
+
     // --- half-space cuts (the slicer primitives, 11.4) -------------------------------------------
 
     /// Split by the plane `normal·p = offset` into `(positive, negative)` — the positive half is the
@@ -333,6 +379,39 @@ mod tests {
         let objects: usize = models.iter().map(|m| m.resources.object.len()).sum();
         assert_eq!(objects, 2, "two pieces should be two separate objects on the plate");
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn slices_one_axis_into_partitioned_slabs() {
+        // 60mm cube on X, cut at -10 and +10 -> 3 slabs: [-30,-10], [-10,10], [10,30].
+        let c = Solid::cube(60.0, 60.0, 60.0, true);
+        let cuts = [vec![-10.0, 10.0], vec![], vec![]];
+        let pieces = c.slab_pieces(&cuts);
+        assert_eq!(pieces.len(), 3);
+        let want = [(-30.0, -10.0), (-10.0, 10.0), (10.0, 30.0)];
+        for ((idx, s), (lo, hi)) in pieces.iter().zip(want) {
+            s.check().unwrap();
+            let (min, max) = s.bbox().unwrap();
+            assert!((min[0] - lo).abs() < 1e-4 && (max[0] - hi).abs() < 1e-4, "piece {idx:?}: {min:?}..{max:?}");
+        }
+    }
+
+    #[test]
+    fn slices_two_axes_into_cells() {
+        // Cut on X@0 and Y@0 -> 4 quadrant cells, each a valid solid, X/Y each half-width.
+        let c = Solid::cube(40.0, 40.0, 40.0, true);
+        let cuts = [vec![0.0], vec![0.0], vec![]];
+        let pieces = c.slab_pieces(&cuts);
+        assert_eq!(pieces.len(), 4);
+        for (idx, s) in &pieces {
+            s.check().unwrap();
+            let (min, max) = s.bbox().unwrap();
+            assert!((max[0] - min[0] - 20.0).abs() < 1e-4, "cell {idx:?} X width");
+            assert!((max[1] - min[1] - 20.0).abs() < 1e-4, "cell {idx:?} Y width");
+            assert!((max[2] - min[2] - 40.0).abs() < 1e-4, "cell {idx:?} Z full");
+        }
+        // The middle piece of a single-axis onion floater bug can't recur here — each cell is built
+        // by clipping the SAME base, so nothing from a neighbour cell leaks in.
     }
 
     #[test]

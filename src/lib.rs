@@ -4,6 +4,8 @@
 //! have ONE definition, not a mirror per front-end.
 
 pub mod auto_orient;
+#[cfg(feature = "kernel")]
+pub mod bambu;
 pub mod cross_section;
 pub mod deps;
 pub mod geom;

@@ -2580,6 +2580,7 @@ dependencies = [
  "serde",
  "threemf",
  "toml",
+ "zip",
 ]
 
 [[package]]

@@ -22,7 +22,7 @@ members = ["gui"]
 # exercise it, but gated so `--no-default-features` still builds the OpenSCAD-only path without
 # needing a C++ toolchain (cmake/clang) during the transition.
 default = ["kernel"]
-kernel = ["dep:manifold3d", "dep:threemf"]
+kernel = ["dep:manifold3d", "dep:threemf", "dep:zip"]
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
@@ -32,3 +32,5 @@ toml = "0.8"
 rayon = "1"
 manifold3d = { version = "0.3.1", optional = true }
 threemf = { version = "0.8.0", optional = true }
+# Stored (no compression) only — default features pull bzip2/zstd backends we don't need.
+zip = { version = "8", optional = true, default-features = false }

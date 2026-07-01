@@ -776,9 +776,12 @@ const ONION_WALL: f64 = 1.2;
 const ONION_MAX_D: f64 = 16.0;
 /// Grid pitch for auto-place — connectors land roughly this far apart across the cut face.
 const ONION_SPACING: f64 = 18.0;
-/// The onion teardrop's tip reaches this many radii past centre in the cap (+build) direction —
-/// BOSL2 onion `ang=45` gives √2. The sizer bounds the tip so the cap can't poke past the surface.
-const ONION_TIP: f64 = std::f64::consts::SQRT_2;
+/// The onion teardrop's tip reaches r/sin(ang) past centre in the cap (+build) direction. `ang` is
+/// set by the piece's print orientation — decided AFTER the onion is sized — so the sizer bounds for
+/// the WORST case: the steepest cap the slicer emits (`CAP_ANG_MIN` = 20° in slicing.rs), tip
+/// 1/sin(20°) ≈ 2.92·r. Onions near the +build edge shrink so the tip fits at any orientation; they
+/// guide alignment for clamp-and-glue, so smaller is fine (chotchki's call).
+const ONION_TIP: f64 = 2.9238; // 1 / sin(20°)
 
 /// The onion cap direction (+build = +Z) in a cut's 2D cross-section coords, or `None` when the cap
 /// points OUT of the section plane (a Z cut) — there the cap is bounded axially, not in-section.

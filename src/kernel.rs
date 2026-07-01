@@ -75,6 +75,60 @@ impl Solid {
         Ok(Solid(m))
     }
 
+    // --- export (11.3) ---------------------------------------------------------------------------
+
+    /// Serialize to binary STL bytes (per-face normals computed from the winding).
+    pub fn to_stl_bytes(&self) -> Vec<u8> {
+        let (v, stride, idx) = self.0.to_mesh_f64();
+        let p = |i: u64| { let b = i as usize * stride; [v[b] as f32, v[b + 1] as f32, v[b + 2] as f32] };
+        let ntri = (idx.len() / 3) as u32;
+        let mut out = Vec::with_capacity(84 + 50 * ntri as usize);
+        out.extend_from_slice(&[0u8; 80]); // header
+        out.extend_from_slice(&ntri.to_le_bytes());
+        for t in idx.chunks_exact(3) {
+            let (a, b, c) = (p(t[0]), p(t[1]), p(t[2]));
+            let u = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+            let w = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
+            let mut n = [u[1] * w[2] - u[2] * w[1], u[2] * w[0] - u[0] * w[2], u[0] * w[1] - u[1] * w[0]];
+            let l = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
+            if l > 0.0 { n = [n[0] / l, n[1] / l, n[2] / l]; }
+            for comp in n { out.extend_from_slice(&comp.to_le_bytes()); }
+            for vert in [a, b, c] { for comp in vert { out.extend_from_slice(&comp.to_le_bytes()); } }
+            out.extend_from_slice(&[0u8; 2]); // attribute byte count
+        }
+        out
+    }
+
+    /// Write this solid as a binary STL.
+    pub fn write_stl(&self, path: &Path) -> Result<()> {
+        std::fs::write(path, self.to_stl_bytes())
+            .with_context(|| format!("writing STL {}", path.display()))
+    }
+
+    /// Write `pieces` as SEPARATE objects on ONE 3mf plate — the multipart export (replaces the
+    /// OpenSCAD lazy-union trick; separation is first-class here). Object/item ids are 1-based.
+    pub fn write_3mf(path: &Path, pieces: &[Solid]) -> Result<()> {
+        use threemf::model::{Build, Item, Model, Object, Resources};
+        let object = pieces
+            .iter()
+            .enumerate()
+            .map(|(i, p)| Object { id: i + 1, mesh: Some(to_3mf_mesh(p)), ..Default::default() })
+            .collect();
+        let item = (0..pieces.len())
+            .map(|i| Item { objectid: i + 1, transform: None, partnumber: None })
+            .collect();
+        let model = Model {
+            xmlns: "http://schemas.microsoft.com/3dmanufacturing/core/2015/02".into(),
+            xmlns_m: None,
+            metadata: vec![],
+            resources: Resources { object, basematerials: None },
+            build: Build { item },
+            unit: Default::default(),
+        };
+        let f = std::fs::File::create(path).with_context(|| format!("creating 3mf {}", path.display()))?;
+        threemf::write(f, model).map_err(|e| anyhow!("writing 3mf: {e:?}"))
+    }
+
     // --- booleans --------------------------------------------------------------------------------
 
     pub fn union(&self, other: &Solid) -> Solid {
@@ -183,6 +237,22 @@ fn read_stl_soup(bytes: &[u8]) -> Result<Vec<[f32; 3]>> {
     Ok(out)
 }
 
+/// A Solid's mesh as a threemf Mesh (indexed verts + triangles) for the 3mf writer.
+fn to_3mf_mesh(s: &Solid) -> threemf::model::Mesh {
+    let (v, stride, idx) = s.0.to_mesh_f64();
+    let vertex = (0..v.len() / stride)
+        .map(|i| threemf::model::Vertex { x: v[i * stride], y: v[i * stride + 1], z: v[i * stride + 2] })
+        .collect();
+    let triangle = idx
+        .chunks_exact(3)
+        .map(|t| threemf::model::Triangle { v1: t[0] as usize, v2: t[1] as usize, v3: t[2] as usize })
+        .collect();
+    threemf::model::Mesh {
+        vertices: threemf::model::Vertices { vertex },
+        triangles: threemf::model::Triangles { triangle },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -239,6 +309,30 @@ mod tests {
         // One lone triangle — three open edges, not a closed solid.
         let err = Solid::from_stl_bytes(&binary_stl(&TETRA[..1])).err().expect("should reject");
         assert!(format!("{err:#}").contains("not a valid manifold"), "got: {err:#}");
+    }
+
+    #[test]
+    fn stl_export_roundtrips() {
+        let c = Solid::cube(10.0, 20.0, 30.0, true);
+        let back = Solid::from_stl_bytes(&c.to_stl_bytes()).unwrap();
+        assert_eq!((back.num_vert(), back.num_tri()), (8, 12));
+        let (min, max) = back.bbox().unwrap();
+        for k in 0..3 {
+            assert!((min[k] - c.bbox().unwrap().0[k]).abs() < 1e-4);
+            assert!((max[k] - c.bbox().unwrap().1[k]).abs() < 1e-4);
+        }
+    }
+
+    #[test]
+    fn writes_two_pieces_as_separate_3mf_objects() {
+        let a = Solid::cube(10.0, 10.0, 10.0, true);
+        let b = Solid::cube(10.0, 10.0, 10.0, true).translate(30.0, 0.0, 0.0);
+        let path = std::env::temp_dir().join(format!("kernel_3mf_{}.3mf", std::process::id()));
+        Solid::write_3mf(&path, &[a, b]).unwrap();
+        let models = threemf::read(std::fs::File::open(&path).unwrap()).unwrap();
+        let objects: usize = models.iter().map(|m| m.resources.object.len()).sum();
+        assert_eq!(objects, 2, "two pieces should be two separate objects on the plate");
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

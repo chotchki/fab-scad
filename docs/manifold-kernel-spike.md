@@ -91,10 +91,17 @@ The spike became the plan, and the kernel landed:
 - **`fab slice --kernel`** — opt-in. OpenSCAD renders the base mesh once (the front-door), the rest
   runs in-process. ~10× end-to-end even on a trivial box (944 ms → 87 ms); the reactivity-relevant
   per-piece number is the spike's ~70×.
+- **GUI reactive loop + print preview, in-process (11.10, 11.12).** The reslice hot path
+  (`reslice_kernel`) and the print-orientation preview (`print_layout_kernel`) both run off the
+  cached base mesh — no per-piece OpenSCAD spawn anywhere in the GUI. Print layout is two kernel
+  passes: a bare `slice_solid` picks each piece's least-support build-up (`auto_orient::best_up`),
+  then a carved `slice_solid` gated by those orientations matches the real slice's joints. OpenSCAD
+  renders the base ONCE, as the front-door; everything downstream is Manifold.
 - **Validated:** parity harnesses (slicer + connector) match OpenSCAD on bbox within tolerance, and
   a corpus-robustness sweep sliced **15/15** sampled real models to all-manifold pieces — the
   robustness risk is retired. (`cargo test --test slicer_parity -- --ignored`.)
 
-**Deliberately still opt-in.** The default stays the OpenSCAD codegen path; `--kernel` is the way in
-until the GUI reactive loop (11.10) is wired onto the cached base mesh and dogfooded. Flip the
-default only after that.
+**Track C is fully wired and dogfooded.** The GUI runs entirely on the kernel; the spawn-storm is
+gone. The remaining flip — making `--kernel` the `fab slice` DEFAULT (demoting the OpenSCAD codegen
+to opt-in fallback + parity oracle) — is now unblocked, since the dogfooding gate (11.10 wired onto
+the cached base) is met.

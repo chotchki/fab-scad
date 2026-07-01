@@ -75,6 +75,9 @@ enum Commands {
         /// Also write a PNG thumbnail.
         #[arg(long)]
         png: bool,
+        /// Export a multi-object 3mf (pieces as SEPARATE objects on a plate) instead of a merged STL.
+        #[arg(long = "3mf")]
+        threemf: bool,
     },
     /// Render a .scad to geometry (+ optional PNG thumbnail), or smoke-render a whole tree with --all.
     Render {
@@ -108,7 +111,7 @@ fn main() -> Result<()> {
         Commands::New { name } => project::new_cmd(&require_root()?, &name),
         Commands::Plan { size, printer } => plan_cmd(&size, printer),
         Commands::Coupon { kind, screw, d, slops, out } => coupon_cmd(&kind, &screw, d, &slops, out),
-        Commands::Slice { target, spread, out, png } => slice_cmd(&target, spread, out, png),
+        Commands::Slice { target, spread, out, png, threemf } => slice_cmd(&target, spread, out, png, threemf),
         Commands::Render {
             target,
             all,
@@ -230,7 +233,7 @@ fn parse_slops(s: &str) -> Result<Vec<f64>> {
     Ok(v)
 }
 
-fn slice_cmd(target: &Path, spread: f64, out: Option<PathBuf>, png: bool) -> Result<()> {
+fn slice_cmd(target: &Path, spread: f64, out: Option<PathBuf>, png: bool, threemf: bool) -> Result<()> {
     if !target.exists() {
         bail!("no such file: {}", target.display());
     }
@@ -249,6 +252,21 @@ fn slice_cmd(target: &Path, spread: f64, out: Option<PathBuf>, png: bool) -> Res
         .file_stem()
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_else(|| "part".into());
+
+    // 3mf path: pieces as separate objects on a plate (6.3) — no PNG/STL-copy branch below.
+    if threemf {
+        println!("slice {} -> 3mf", target.display());
+        let plate = slicing::slice_part_3mf(&oscad, target, spec, spread, &outdir, timeout)?;
+        let final_out = match out {
+            Some(o) => {
+                std::fs::copy(&plate, &o).with_context(|| format!("writing {}", o.display()))?;
+                o
+            }
+            None => plate,
+        };
+        println!("  -> {}", final_out.display());
+        return Ok(());
+    }
 
     println!("slice {}", target.display());
     let sliced = slicing::slice_part(&oscad, target, spec, spread, &outdir, timeout)?;

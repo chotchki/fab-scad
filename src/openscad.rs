@@ -105,6 +105,24 @@ impl Openscad {
         Ok(r)
     }
 
+    /// Render to a MULTI-OBJECT 3mf with lazy-union on, so top-level objects stay separate (6.3) —
+    /// a multipart plate the slicer emits one piece per top-level statement. Otherwise like `render`;
+    /// point `output` at a `.3mf`.
+    pub fn render_multipart(&self, input: &Path, output: &Path, timeout: Duration) -> Result<Report> {
+        ensure_parent(output)?;
+        let args = [
+            OsString::from("--backend"),
+            OsString::from("Manifold"),
+            OsString::from("--enable=lazy-union"),
+            OsString::from("-o"),
+            output.as_os_str().to_owned(),
+            input.as_os_str().to_owned(),
+        ];
+        let mut r = self.run(&args, output, timeout)?;
+        r.ok = r.ok && file_nonempty(output);
+        Ok(r)
+    }
+
     /// Render an auto-framed PNG thumbnail.
     pub fn thumbnail(
         &self,

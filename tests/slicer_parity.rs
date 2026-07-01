@@ -7,7 +7,9 @@
 #![cfg(feature = "kernel")]
 
 use fab_scad::kernel::Solid;
+use fab_scad::manifest::Manifest;
 use fab_scad::openscad::Openscad;
+use fab_scad::slicing::{piece_driver, slice_solid};
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -80,6 +82,55 @@ fn slab_pieces_match_openscad() {
                 "tri-count mismatch cuts={cuts:?} piece={idx:?}: kernel {kt} vs os {ot} (tol {tol})");
         }
         eprintln!("parity OK for cuts {cuts:?}: {} pieces", pieces.len());
+    }
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+#[test]
+#[ignore = "needs OpenSCAD; run with --ignored"]
+fn connectors_match_openscad() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let Ok(os) = Openscad::discover(Some(root.as_path())) else {
+        eprintln!("skipping: OpenSCAD not found");
+        return;
+    };
+    let tmp = std::env::temp_dir().join(format!("fab_conn_parity_{}", std::process::id()));
+    std::fs::create_dir_all(&tmp).unwrap();
+    let t = |n: &str| tmp.join(n);
+
+    // A plain box, one X-cut, one feasible onion on it (both pieces build +Z ⇒ cap +Z, support-free).
+    let fixture = t("box.scad");
+    std::fs::write(&fixture, "cube([60,40,30], center=true);").unwrap();
+    let base_stl = t("box.stl");
+    os.render(&fixture, &base_stl, Duration::from_secs(120)).expect("render base");
+    let base = Solid::from_stl_file(&base_stl).expect("import base");
+
+    let s = ::toml::from_str::<Manifest>(
+        "[project]\nname=\"t\"\n[slicing]\n\
+         [[slicing.cut]]\naxis=\"x\"\nat=0\n\
+         [[slicing.connector]]\ncut=0\ntype=\"onion\"\npos=[0,0]\nsize=12\n",
+    )
+    .unwrap()
+    .slicing
+    .unwrap();
+
+    let kpieces = slice_solid(&s, &base).expect("kernel slice");
+    assert_eq!(kpieces.len(), 2, "one cut -> two pieces");
+    for (idx, kpiece) in &kpieces {
+        // scad's version of the SAME piece — piece_driver emits the feasible onion into slice().
+        let drv = t("piece.scad");
+        std::fs::write(&drv, piece_driver(&s, base_stl.to_str().unwrap(), *idx).unwrap()).unwrap();
+        let ostl = t("piece.stl");
+        os.render(&drv, &ostl, Duration::from_secs(120)).expect("render scad piece");
+        let opiece = Solid::from_stl_file(&ostl).expect("import scad piece");
+
+        // Same onion radius + cap in both engines ⇒ the peg extends the bbox the same amount. Allow
+        // 0.5mm for the two tessellations (BOSL2 onion vs sphere∪cone).
+        let (kmin, kmax) = kpiece.bbox().unwrap();
+        let (omin, omax) = opiece.bbox().unwrap();
+        assert!(approx(kmin, omin, 0.5) && approx(kmax, omax, 0.5),
+            "connector bbox mismatch piece {idx:?}: kernel {kmin:?}..{kmax:?} vs os {omin:?}..{omax:?}");
+        eprintln!("connector parity OK piece {idx:?}: kernel {} tris, os {} tris", kpiece.num_tri(), opiece.num_tri());
     }
     let _ = std::fs::remove_dir_all(&tmp);
 }

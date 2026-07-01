@@ -76,8 +76,9 @@ Driven by `claude-plan-bridge` (FORMATv2). Hand-authored; run
 - [x] 11.7 - Apply connectors per piece, floater-free by construction
 - [x] 11.8 - Connector parity vs the scad path
 - [x] 11.9 - fab render/slice: in-process kernel path with OpenSCAD fallback
-- [ ] 11.10 - GUI reactive DAG on the cached base mesh
+- [x] 11.10 - GUI reactive DAG on the cached base mesh
 - [x] 11.11 - Corpus parity + latency validation; demote scad codegen; docs
+- [ ] 11.12 - Port the print-orientation preview to the kernel
 
 ## Backlog (not yet phased)
 

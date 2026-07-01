@@ -1528,15 +1528,8 @@ fn sync_dim_labels(
     let Ok((camera, cam_gt)) = cam.single() else {
         return;
     };
-    // `world_to_viewport` returns coords relative to the (inset) viewport, but the label Nodes
-    // position in full-window logical px — so add the viewport's top-left offset, else every label
-    // sits shifted left by the panel width and hides behind it until you pan the model rightward.
-    let scale = camera.target_scaling_factor().unwrap_or(1.0);
-    let vp_off = camera
-        .viewport
-        .as_ref()
-        .map(|v| Vec2::new(v.physical_position.x as f32, v.physical_position.y as f32) / scale)
-        .unwrap_or(Vec2::ZERO);
+    // NB: `world_to_viewport` already maps into the logical viewport rect (adds the inset origin), so
+    // its result is full-window logical px — no manual panel offset needed.
     // Build a (world position, width) for every piece segment on EVERY axis that has cuts.
     let center = (min + max) * 0.5;
     let mut segs: Vec<(Vec3, f32)> = Vec::new();
@@ -1553,10 +1546,10 @@ fn sync_dim_labels(
         edges.push(comp(max, ai));
         for (k, w) in edges.windows(2).enumerate() {
             let mid = (w[0] + w[1]) * 0.5 + k as f32 * dspread.0;
-            let mut pos = with_comp(center, ai, mid);
-            if ai != 2 {
-                pos.z = max.z; // float above the model for X/Y segments
-            }
+            // Sit the label at the segment midpoint, centred in the other two dims (model centre) —
+            // NOT floating at max.z, which for a tall part projects off the top of the frame and
+            // reads as "the measurements are hidden".
+            let pos = with_comp(center, ai, mid);
             segs.push((pos, w[1] - w[0]));
         }
     }
@@ -1579,8 +1572,8 @@ fn sync_dim_labels(
         };
         match camera.world_to_viewport(cam_gt, pos) {
             Ok(p) => {
-                node.left = px(p.x + vp_off.x);
-                node.top = px(p.y + vp_off.y);
+                node.left = px(p.x);
+                node.top = px(p.y);
                 *text = Text::new(format!("{width:.0}"));
                 *vis = Visibility::Visible;
             }

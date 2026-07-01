@@ -13,3 +13,4 @@ pub mod openscad;
 pub mod printers;
 pub mod project;
 pub mod slicing;
+pub mod smoke;

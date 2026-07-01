@@ -76,18 +76,21 @@ enum Commands {
         #[arg(long)]
         png: bool,
     },
-    /// Render a .scad to geometry (+ optional PNG thumbnail).
-    /// File-level for now; project/DAG-aware in Phase 6.
+    /// Render a .scad to geometry (+ optional PNG thumbnail), or smoke-render a whole tree with --all.
     Render {
-        /// Path to a .scad file.
-        target: PathBuf,
+        /// A .scad file to render; with --all, a directory to sweep (default: the workspace root).
+        target: Option<PathBuf>,
+        /// Smoke-render EVERY .scad under `target` in parallel — pass iff it renders to faces > 0 —
+        /// and print a pass/fail summary. The correctness sweep (6.8); needs no manifests.
+        #[arg(long)]
+        all: bool,
         /// Also write an auto-framed PNG thumbnail next to the output.
         #[arg(long)]
         png: bool,
         /// Output path (default: <dir>/out/<stem>.stl).
         #[arg(long)]
         out: Option<PathBuf>,
-        /// Kill the render after this many seconds.
+        /// Kill each render after this many seconds.
         #[arg(long, default_value_t = 120)]
         timeout: u64,
     },
@@ -105,10 +108,18 @@ fn main() -> Result<()> {
         Commands::Slice { target, spread, out, png } => slice_cmd(&target, spread, out, png),
         Commands::Render {
             target,
+            all,
             png,
             out,
             timeout,
-        } => render_cmd(&target, out, png, timeout),
+        } => {
+            if all {
+                render_all_cmd(target, timeout)
+            } else {
+                let target = target.context("render needs a .scad target (or --all to sweep a tree)")?;
+                render_cmd(&target, out, png, timeout)
+            }
+        }
         Commands::Publish { .. } => not_yet("publish", "7"),
     }
 }
@@ -292,6 +303,61 @@ fn render_cmd(target: &Path, out: Option<PathBuf>, png: bool, timeout_secs: u64)
 
     if !r.ok {
         bail!("render failed");
+    }
+    Ok(())
+}
+
+/// `fab render --all [PATH]` (6.8) — the correctness sweep: find every renderable `.scad` under
+/// `path` (or the workspace root), smoke-render them in parallel, and print a pass/fail summary.
+/// Exits non-zero if any model fails, so it drops straight into CI or a pre-refactor baseline.
+fn render_all_cmd(path: Option<PathBuf>, timeout_secs: u64) -> Result<()> {
+    use fab_scad::smoke;
+    use rayon::prelude::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let root = find_root();
+    // Sweep the given path, else the workspace root, else the current dir.
+    let sweep = path.or_else(|| root.clone()).unwrap_or_else(|| PathBuf::from("."));
+    let files = smoke::scad_files(&sweep);
+    if files.is_empty() {
+        println!("no renderable .scad under {}", sweep.display());
+        return Ok(());
+    }
+    let oscad = Openscad::discover(root.as_deref())?;
+    let tmp = std::env::temp_dir();
+    let timeout = Duration::from_secs(timeout_secs);
+    let total = files.len();
+    println!("smoke-rendering {total} .scad under {} ...", sweep.display());
+
+    // Parallel across the rayon pool; a running counter to stderr so a long sweep isn't silent.
+    let done = AtomicUsize::new(0);
+    let mut results: Vec<smoke::Smoke> = files
+        .par_iter()
+        .map(|f| {
+            let s = smoke::smoke(&oscad, f, &tmp, timeout);
+            let n = done.fetch_add(1, Ordering::Relaxed) + 1;
+            eprint!("\r  {n}/{total} rendered");
+            s
+        })
+        .collect();
+    eprintln!();
+    results.sort_by(|a, b| a.input.cmp(&b.input));
+
+    let rel = |p: &Path| p.strip_prefix(&sweep).unwrap_or(p).display().to_string();
+    let mut passed = 0;
+    for s in &results {
+        if s.pass {
+            passed += 1;
+            println!("  ok    {} ({} faces, {:.1}s)", rel(&s.input), s.faces, s.duration.as_secs_f64());
+        } else {
+            println!("  FAIL  {} — {}", rel(&s.input), s.detail);
+        }
+    }
+    let failed = total - passed;
+    let tail = if failed > 0 { format!(", {failed} FAILED") } else { String::new() };
+    println!("\n{passed}/{total} passed{tail}");
+    if failed > 0 {
+        bail!("{failed} model(s) failed to render");
     }
     Ok(())
 }

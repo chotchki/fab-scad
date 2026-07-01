@@ -206,6 +206,48 @@ impl Solid {
         Solid(self.0.transform(m))
     }
 
+    /// Rotate so local +Z maps onto unit `axis` — used to point a connector's cap along its
+    /// derived build axis before translating it onto the cut. Rodrigues' rotation between vectors;
+    /// the antipodal (+Z→−Z) case flips about X. A zero/degenerate axis leaves it unrotated.
+    pub fn align_z_to(&self, axis: [f64; 3]) -> Solid {
+        let n = (axis[0] * axis[0] + axis[1] * axis[1] + axis[2] * axis[2]).sqrt();
+        if n < 1e-12 {
+            return self.clone();
+        }
+        let u = [axis[0] / n, axis[1] / n, axis[2] / n];
+        let d = u[2]; // cos angle between +Z and u
+        let r = if d > 1.0 - 1e-9 {
+            [[1., 0., 0.], [0., 1., 0.], [0., 0., 1.]]
+        } else if d < -1.0 + 1e-9 {
+            [[1., 0., 0.], [0., -1., 0.], [0., 0., -1.]] // 180° about X
+        } else {
+            let v = [-u[1], u[0], 0.0]; // z × u
+            let k = [[0.0, -v[2], v[1]], [v[2], 0.0, -v[0]], [-v[1], v[0], 0.0]];
+            let mut k2 = [[0.0; 3]; 3];
+            for i in 0..3 {
+                for j in 0..3 {
+                    k2[i][j] = (0..3).map(|m| k[i][m] * k[m][j]).sum();
+                }
+            }
+            let f = 1.0 / (1.0 + d);
+            let mut r = [[0.0; 3]; 3];
+            for i in 0..3 {
+                for j in 0..3 {
+                    r[i][j] = if i == j { 1.0 } else { 0.0 } + k[i][j] + k2[i][j] * f;
+                }
+            }
+            r
+        };
+        // Manifold wants a column-major 3×4: columns 0..2 are R's columns, column 3 the translation.
+        let m = [
+            r[0][0], r[1][0], r[2][0], //
+            r[0][1], r[1][1], r[2][1], //
+            r[0][2], r[1][2], r[2][2], //
+            0.0, 0.0, 0.0,
+        ];
+        self.transform(&m)
+    }
+
     // --- slab slicer (11.4) ----------------------------------------------------------------------
 
     /// Extract ONE piece: this base clipped to the cell that slab multi-index `piece` selects, given
@@ -481,6 +523,16 @@ mod tests {
         // The peg drops fully into the socket — self-consistent, no BOSL2 dependency.
         assert!(peg.difference(&socket).is_empty(), "peg should fit inside the slop-grown socket");
         assert!(socket.bbox().unwrap().1[2] > peg.bbox().unwrap().1[2], "socket is larger");
+    }
+
+    #[test]
+    fn align_z_to_points_the_cap() {
+        // A cone tips toward +Z; align it to +X and the tip should move to the +X extreme.
+        let cone = Solid::cylinder(10.0, 4.0, 0.0, 32, false); // apex at z=10
+        let along_x = cone.align_z_to([1.0, 0.0, 0.0]);
+        let (min, max) = along_x.bbox().unwrap();
+        assert!((max[0] - 10.0).abs() < 0.05, "tip should reach +X=10, got {}", max[0]);
+        assert!(max[2] < 4.1 && min[2] > -4.1, "no longer tall on Z: {min:?}..{max:?}");
     }
 
     #[test]

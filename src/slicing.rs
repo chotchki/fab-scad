@@ -9,6 +9,8 @@ use std::time::Duration;
 use anyhow::{bail, Context, Result};
 
 use crate::geom::{self, V3};
+#[cfg(feature = "kernel")]
+use crate::kernel::Solid;
 use crate::manifest::{Connector, Slicing};
 use crate::openscad::Openscad;
 
@@ -430,6 +432,112 @@ fn connector_line(s: &Slicing, c: &Connector) -> Result<String> {
     ))
 }
 
+/// Bolt-clearance dims by screw, mirroring connectors.scad `_insert_spec` (+ a shaft clearance and
+/// head counterbore): `(clearance_d, through, counterbore_d, counterbore_h, insert_d, insert_depth)`.
+/// `through` is a placeholder default until it's bound to the slab thickness (PLAN 5.3.9).
+#[cfg(feature = "kernel")]
+fn bolt_dims(screw: Option<&str>) -> (f64, f64, f64, f64, f64, f64) {
+    match screw.unwrap_or("M3") {
+        "M4" => (4.5, 12.0, 8.0, 4.0, 6.0, 6.0),
+        "M5" => (5.5, 12.0, 10.0, 5.0, 7.0, 10.0),
+        _ => (3.4, 12.0, 6.0, 3.0, 5.0, 6.0), // M3 default
+    }
+}
+
+/// Slice `base` into finished pieces IN-PROCESS (Track C 11.7) — the kernel twin of `piece_driver`.
+/// Each cell is carved by the slab slicer, then its connectors are applied: a feasible onion UNIONs
+/// its peg into the below-cell and DIFFs its slop-grown socket from the above-cell; an infeasible
+/// onion (and any bolt) DIFFs a bolt clearance from both. A connector only touches the two cells it
+/// actually borders — matched by cut-axis slab AND perpendicular slab index — so the two-axis onion
+/// floater the scad path grew CAN'T happen and nothing is trimmed. Returns each non-empty piece with
+/// its slab multi-index (piece_indices order).
+#[cfg(feature = "kernel")]
+pub fn slice_solid(s: &Slicing, base: &Solid) -> Result<Vec<([usize; 3], Solid)>> {
+    const SEG: i32 = 48; // connector circular resolution
+    const SLOP: f64 = 0.2; // socket grows the onion by this (matches onion_socket)
+
+    let by_axis = axes_sorted(s)?;
+
+    // A connector's shape + the two cells it bridges.
+    enum Shape {
+        Onion { cap: V3, ang: f64, d: f64 },
+        Bolt { axis: V3, screw: Option<String> },
+    }
+    struct Placed {
+        below: [usize; 3],
+        above: [usize; 3],
+        point: V3,
+        shape: Shape,
+    }
+    // Slab index on `axis` that a coordinate falls into = cuts strictly below it.
+    let slab_of = |axis: usize, coord: f64| by_axis[axis].iter().filter(|&&x| x < coord - 1e-9).count();
+
+    let mut placed = Vec::with_capacity(s.connector.len());
+    for c in &s.connector {
+        let cut = s.cut.get(c.cut).with_context(|| {
+            format!("connector references cut {}, but there are {} cut(s)", c.cut, s.cut.len())
+        })?;
+        let ai = cut.axis_index()?;
+        let at = cut.at();
+        let others: Vec<usize> = (0..3).filter(|&a| a != ai).collect();
+
+        let mut point = [0.0; 3];
+        point[ai] = at;
+        point[others[0]] = c.pos[0].f();
+        point[others[1]] = c.pos[1].f();
+
+        // Below/above cells: same perpendicular slab, adjacent across the cut on `ai`.
+        let mut below = [0usize; 3];
+        for (m, &aj) in others.iter().enumerate() {
+            below[aj] = slab_of(aj, c.pos[m].f());
+        }
+        below[ai] = slab_of(ai, at);
+        let mut above = below;
+        above[ai] = below[ai] + 1;
+
+        let d = c.size.unwrap_or(10.0);
+        let mut axis_unit = [0.0; 3];
+        axis_unit[ai] = 1.0;
+        let shape = if c.kind == "onion" {
+            match onion_resolution(s, &by_axis, c)? {
+                OnionAxis::Feasible { cap, ang } => Shape::Onion { cap, ang, d },
+                OnionAxis::Infeasible => Shape::Bolt { axis: axis_unit, screw: c.screw.clone() },
+            }
+        } else {
+            Shape::Bolt { axis: axis_unit, screw: c.screw.clone() }
+        };
+        placed.push(Placed { below, above, point, shape });
+    }
+
+    let mut out = Vec::new();
+    for (piece, mut cell) in base.slab_pieces(&by_axis) {
+        for p in &placed {
+            let at = |sol: Solid| sol.translate(p.point[0], p.point[1], p.point[2]);
+            match &p.shape {
+                Shape::Onion { cap, ang, d } => {
+                    if piece == p.below {
+                        cell = cell.union(&at(Solid::onion(*d, *ang, SEG).align_z_to(*cap)));
+                    } else if piece == p.above {
+                        let socket = Solid::onion(*d + 2.0 * SLOP, *ang, SEG).align_z_to(*cap);
+                        cell = cell.difference(&at(socket));
+                    }
+                }
+                Shape::Bolt { axis, screw } => {
+                    if piece == p.below || piece == p.above {
+                        let (cl, thru, cb_d, cb_h, ins_d, ins_h) = bolt_dims(screw.as_deref());
+                        let bolt = Solid::bolt_clearance(cl, thru, cb_d, cb_h, ins_d, ins_h, SEG).align_z_to(*axis);
+                        cell = cell.difference(&at(bolt));
+                    }
+                }
+            }
+        }
+        if !cell.is_empty() {
+            out.push((piece, cell));
+        }
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -473,6 +581,32 @@ mod tests {
         assert_eq!(d.matches("_part();").count(), 3, "{d}");
         assert!(d.contains("only = 0") && d.contains("only = 1") && d.contains("only = 2"), "{d}");
         assert!(d.contains("module _part()"), "{d}");
+    }
+
+    #[cfg(feature = "kernel")]
+    #[test]
+    fn slice_solid_places_pegs_only_on_owning_cells() {
+        // The two-axis floater regression: cut X@0 and Y@0, one onion on the X-cut at y=+15.
+        let base = Solid::cube(40.0, 40.0, 40.0, true);
+        let s = spec(
+            "[project]\nname=\"t\"\n[slicing]\n\
+             [[slicing.cut]]\naxis=\"x\"\nat=0\n\
+             [[slicing.cut]]\naxis=\"y\"\nat=0\n\
+             [[slicing.connector]]\ncut=0\ntype=\"onion\"\npos=[15,0]\nsize=10\n",
+        );
+        let pieces = slice_solid(&s, &base).unwrap();
+        assert_eq!(pieces.len(), 4, "2×2 cells");
+        let get = |idx: [usize; 3]| pieces.iter().find(|(p, _)| *p == idx).map(|(_, s)| s).unwrap();
+
+        // The owning below-cell (x<0, y>0) grows the peg — it stands proud past the cut on +X.
+        let owning = get([0, 1, 0]);
+        owning.check().unwrap();
+        assert!(owning.bbox().unwrap().1[0] > 1.0, "peg should stand proud +X on the owning cell");
+
+        // The non-owning cell (x<0, y<0) must NOT get a floating peg — its +X edge stays at the cut.
+        let other = get([0, 0, 0]);
+        other.check().unwrap();
+        assert!(other.bbox().unwrap().1[0] < 0.01, "floater leaked: {:?}", other.bbox().unwrap());
     }
 
     #[test]

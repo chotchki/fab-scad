@@ -44,6 +44,7 @@ use bevy::{
     window::ExitCondition,
     winit::WinitPlugin,
 };
+use bevy::ecs::system::SystemParam;
 
 mod fab;
 mod stl;
@@ -73,6 +74,32 @@ struct ReSlice;
 /// Button / `autoplace` verb → "fill the open cut's cross-section with auto-sized onions".
 #[derive(Message)]
 struct AutoPlace;
+
+/// A file-list row click / the `open` script verb / the picker landing → "make file <i> the active
+/// source": wipe the old model's state and render the new one (`apply_switch_file`).
+#[derive(Message, Clone, Copy)]
+struct SwitchFile(usize);
+
+/// The browsable source list (5.3.2): every `.scad` the picker turned up, plus which one is active.
+/// `SceneCfg.source` stays the single source of truth for "what's loaded" — this just adds the list
+/// the panel shows and the switch machinery indexes. Empty until the first Open.
+#[derive(Resource, Default)]
+struct FileList {
+    files: Vec<PathBuf>,
+    active: Option<usize>,
+}
+
+/// The in-flight native folder pick (5.3.1), off the main thread like a render job. `Some(path)` on
+/// pick, `None` if the user cancelled; `poll_open_dialog` drains it into `FileList`.
+#[derive(Resource, Default)]
+struct OpenDialog(Option<Task<Option<PathBuf>>>);
+
+/// Auto-reload watch (5.3.3): the active source's mtime at its last (re)load. `watch_source` polls
+/// the open file each frame and re-renders when the mtime advances (an external editor saved it).
+/// mtime-poll, not the `notify` crate — trivial syscall, no thread/dep, same effect; the
+/// include-graph (edits to `include`d modules) is the DAG problem tracked in 6.6.
+#[derive(Resource, Default)]
+struct Watch(Option<std::time::SystemTime>);
 
 /// The in-flight render/slice (off the main thread): `(was_reslice, task)`. The task yields
 /// `Ok(stl)` when done, else an error string.
@@ -346,10 +373,13 @@ struct IconText;
 #[derive(Component)]
 struct IconApplied;
 
-/// The cut stack's structural signature (axis + enabled per cut) — the panel rebuilds when it
-/// changes (add/remove/rotate/toggle); position-only edits update rows in place instead.
+/// The panel's structural signature: the cut stack (axis + enabled per cut) PLUS the file-list
+/// shape (count + active index). The panel rebuilds when any change (cut add/remove/rotate/toggle,
+/// a new Open, a file switch); position-only cut edits update rows in place instead.
+type PanelSignature = (Vec<(Axis, bool)>, usize, Option<usize>);
+
 #[derive(Resource, Default)]
-struct PanelSig(Option<Vec<(Axis, bool)>>);
+struct PanelSig(Option<PanelSignature>);
 /// A brief attention flash (seconds remaining), drawn as a fading outline.
 #[derive(Component)]
 struct Nudge(f32);
@@ -427,6 +457,9 @@ fn run_windowed(scene: SceneCfg) {
         .init_resource::<Feas>()
         .init_resource::<ModelBounds>()
         .init_resource::<DraggingCut>()
+        .init_resource::<FileList>()
+        .init_resource::<OpenDialog>()
+        .init_resource::<Watch>()
         .init_resource::<WholeMesh>()
         .init_resource::<SlicedMesh>()
         .init_resource::<SliceDirty>()
@@ -435,6 +468,7 @@ fn run_windowed(scene: SceneCfg) {
         .insert_resource(Status("rendering".into()))
         .add_message::<ReSlice>()
         .add_message::<AutoPlace>()
+        .add_message::<SwitchFile>()
         .add_observer(on_drag_start)
         .add_observer(on_drag)
         .add_observer(on_drag_end)
@@ -448,6 +482,7 @@ fn run_windowed(scene: SceneCfg) {
                 orbit,
                 request_reslice,
                 poll_job,
+                (poll_open_dialog, apply_switch_file, watch_source),
                 update_status,
                 sync_overlays,
                 sync_overlay_visuals,
@@ -1325,6 +1360,161 @@ fn resolve_conns(cuts: &Cuts, conns: &Conns) -> Vec<fab::Conn> {
         .collect()
 }
 
+/// The model-derived resources, bundled so `apply_switch_file` can wipe them in one system param
+/// (Bevy caps a system at 16 params; a `SystemParam` struct counts as one). Everything here is a
+/// pure function of the current source + user edits — stale the instant a different `.scad` loads.
+#[derive(SystemParam)]
+struct ModelState<'w> {
+    cuts: ResMut<'w, Cuts>,
+    conns: ResMut<'w, Conns>,
+    edit_cut: ResMut<'w, EditCut>,
+    xsection: ResMut<'w, XSection>,
+    orient: ResMut<'w, Orient>,
+    print: ResMut<'w, PrintView>,
+    print_job: ResMut<'w, PrintJob>,
+    print_pieces: ResMut<'w, PrintPieces>,
+    feas: ResMut<'w, Feas>,
+    bounds: ResMut<'w, ModelBounds>,
+    whole: ResMut<'w, WholeMesh>,
+    sliced: ResMut<'w, SlicedMesh>,
+    dirty: ResMut<'w, SliceDirty>,
+    panel_sig: ResMut<'w, PanelSig>,
+    watch: ResMut<'w, Watch>,
+}
+
+impl ModelState<'_> {
+    /// Reset to a clean slate for a freshly-loaded source: no cuts/connectors/orientations, bounds
+    /// cleared so `poll_job` re-seeds the first cut, modes exited, cached meshes dropped, any
+    /// in-flight print job cancelled, panel signature invalidated (forces a rebuild), and the watch
+    /// disarmed so `watch_source` records the new file's mtime instead of re-triggering.
+    fn reset(&mut self) {
+        *self.cuts = Cuts::default();
+        *self.conns = Conns::default();
+        *self.edit_cut = EditCut::default();
+        *self.xsection = XSection::default();
+        *self.orient = Orient::default();
+        *self.print = PrintView::default();
+        *self.print_job = PrintJob::default();
+        *self.print_pieces = PrintPieces::default();
+        *self.feas = Feas::default();
+        *self.bounds = ModelBounds::default();
+        *self.whole = WholeMesh::default();
+        *self.sliced = SlicedMesh::default();
+        *self.dirty = SliceDirty::default();
+        *self.panel_sig = PanelSig::default();
+        *self.watch = Watch::default();
+    }
+}
+
+/// Apply a pending file switch: point `SceneCfg.source` at file `i`, wipe the old model's state,
+/// kick a fresh whole render. Row clicks, the picker landing, and the `open` script verb all funnel
+/// here via `SwitchFile`.
+fn apply_switch_file(
+    mut ev: MessageReader<SwitchFile>,
+    mut files: ResMut<FileList>,
+    mut scene: ResMut<SceneCfg>,
+    mut job: ResMut<Job>,
+    mut status: ResMut<Status>,
+    mut state: ModelState,
+) {
+    // Coalesce: only the last switch requested this frame matters.
+    let Some(SwitchFile(i)) = ev.read().copied().last() else {
+        return;
+    };
+    let Some(path) = files.files.get(i).cloned() else {
+        return;
+    };
+    files.active = Some(i);
+    scene.source = Some(path.clone());
+    state.reset();
+    kick_job(&mut job, &mut status, &scene, false, vec![], vec![], vec![]);
+    info!("open: {}", path.display());
+}
+
+/// Drain the native folder pick: on a chosen directory, list its `.scad` files and switch to the
+/// first; on cancel, nothing. The dialog future was spawned by the Open button.
+fn poll_open_dialog(
+    mut dlg: ResMut<OpenDialog>,
+    mut files: ResMut<FileList>,
+    mut switch: MessageWriter<SwitchFile>,
+    mut status: ResMut<Status>,
+) {
+    let Some(task) = dlg.0.as_mut() else {
+        return;
+    };
+    let Some(result) = block_on(future::poll_once(task)) else {
+        return; // dialog still open
+    };
+    dlg.0 = None;
+    let Some(dir) = result else {
+        return; // cancelled
+    };
+    let scads = scad_files(&dir);
+    if scads.is_empty() {
+        status.0 = format!("no .scad under {}", dir.display());
+        return;
+    }
+    files.files = scads;
+    switch.write(SwitchFile(0));
+}
+
+/// Auto-reload (5.3.3): if the active source's mtime advanced since its last load, re-render the
+/// whole model — an external editor / OpenSCAD saved it. Fires only when no job is in flight (which
+/// debounces multi-write saves); the cut stack is PRESERVED (re-slice to refresh the exploded view).
+fn watch_source(
+    scene: Res<SceneCfg>,
+    mut watch: ResMut<Watch>,
+    mut job: ResMut<Job>,
+    mut status: ResMut<Status>,
+) {
+    let Some(src) = scene.source.as_deref() else {
+        return;
+    };
+    let Ok(mtime) = std::fs::metadata(src).and_then(|m| m.modified()) else {
+        return;
+    };
+    match watch.0 {
+        None => watch.0 = Some(mtime), // first sight: arm, don't render (the load already did)
+        // A render in flight (mtime advanced but job busy) falls through to `_` and does nothing —
+        // the next idle frame retries, so a save mid-render is never lost.
+        Some(prev) if mtime > prev && job.0.is_none() => {
+            watch.0 = Some(mtime);
+            info!("reload {}", src.display());
+            kick_job(&mut job, &mut status, &scene, false, vec![], vec![], vec![]);
+        }
+        _ => {}
+    }
+}
+
+/// Every `.scad` under `dir` (recursive), sorted, skipping generated/VCS/hidden dirs. The picker's
+/// project→files expansion — handles both flat (`foo/bar.scad`) and `src/`-nested layouts.
+fn scad_files(dir: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    collect_scads(dir, &mut out);
+    out.sort();
+    out
+}
+
+fn collect_scads(dir: &Path, out: &mut Vec<PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for e in entries.flatten() {
+        let p = e.path();
+        let name = e.file_name();
+        let name = name.to_string_lossy();
+        if p.is_dir() {
+            // generated output + VCS + hidden dirs are never source
+            if name.starts_with('.') || matches!(name.as_ref(), "out" | "renders" | "target") {
+                continue;
+            }
+            collect_scads(&p, out);
+        } else if p.extension().is_some_and(|x| x.eq_ignore_ascii_case("scad")) {
+            out.push(p);
+        }
+    }
+}
+
 /// Spawn the render/slice on the async compute pool (blocking OpenSCAD work, off-thread).
 #[allow(clippy::too_many_arguments)]
 fn kick_job(
@@ -1785,6 +1975,8 @@ fn run_screenshot(scene: SceneCfg, png: PathBuf) {
         .insert_resource(ClearColor(Color::srgb(0.10, 0.10, 0.12)))
         .insert_resource(scene)
         .insert_resource(ScreenshotPng(png))
+        .init_resource::<FileList>()
+        .init_resource::<OpenDialog>()
         .init_resource::<Cuts>()
         .init_resource::<Conns>()
         .init_resource::<EditCut>()
@@ -1799,6 +1991,7 @@ fn run_screenshot(scene: SceneCfg, png: PathBuf) {
         .insert_resource(Status("rendering".into()))
         .add_message::<ReSlice>()
         .add_message::<AutoPlace>()
+        .add_message::<SwitchFile>()
         .add_systems(Startup, (setup_offscreen, load_icons))
         .add_systems(Update, (capture_then_exit, (push_fields, sync_selected, apply_icon_font, rebuild_panel).chain(), update_status))
         .run();
@@ -1920,6 +2113,8 @@ enum Action {
     PrintView,             // toggle the print-orientation preview (renders + auto-orients pieces)
     Orient([usize; 3], [f32; 3]), // manually set piece [ix,iy,iz]'s build-up to (ux,uy,uz)
     AutoPlace,             // auto-place connectors across the open cut's cross-section
+    Open(PathBuf),         // switch the active source to <path> (a dir → its .scad; a file → itself)
+    Touch(PathBuf),        // bump <path>'s mtime (rewrite same bytes) → exercise watch_source reload
 }
 
 #[derive(Resource)]
@@ -1949,6 +2144,8 @@ fn parse_script(s: &str) -> Vec<Action> {
                 },
                 "toggle" => Some(Action::Toggle),
                 "next" => Some(Action::Next),
+                "open" => it.next().map(|p| Action::Open(PathBuf::from(p))),
+                "touch" => it.next().map(|p| Action::Touch(PathBuf::from(p))),
                 "reslice" => Some(Action::Reslice),
                 "shot" => it.next().map(|p| Action::Shot(PathBuf::from(p))),
                 "wait" => it.next()?.parse().ok().map(Action::Wait),
@@ -2007,6 +2204,9 @@ fn run_scripted(scene: SceneCfg, actions: Vec<Action>) {
         .init_resource::<PrevCam>()
         .init_resource::<Feas>()
         .init_resource::<ModelBounds>()
+        .init_resource::<FileList>()
+        .init_resource::<OpenDialog>()
+        .init_resource::<Watch>()
         .init_resource::<WholeMesh>()
         .init_resource::<SlicedMesh>()
         .init_resource::<SliceDirty>()
@@ -2016,12 +2216,15 @@ fn run_scripted(scene: SceneCfg, actions: Vec<Action>) {
         .insert_resource(ScriptRunner { actions, idx: 0, timer: 0 })
         .add_message::<ReSlice>()
         .add_message::<AutoPlace>()
+        .add_message::<SwitchFile>()
         .add_systems(Startup, (setup_script, load_icons))
         .add_systems(
             Update,
             (
                 request_reslice,
                 poll_job,
+                apply_switch_file,
+                watch_source,
                 update_status,
                 sync_overlays,
                 sync_overlay_visuals,
@@ -2094,6 +2297,8 @@ fn run_script(
     mut autoplace_w: MessageWriter<AutoPlace>,
     mut commands: Commands,
     mut exit: MessageWriter<AppExit>,
+    // Bundled: Bevy caps a system at 16 params, and a tuple counts as one.
+    mut sw: (ResMut<FileList>, MessageWriter<SwitchFile>),
 ) {
     if bounds.0.is_none() {
         return; // wait for the initial render (model + bounds + first cut)
@@ -2200,6 +2405,30 @@ fn run_script(
                 autoplace_w.write(AutoPlace);
             }
             runner.timer >= 3 // let do_auto_place run + conns update
+        }
+        Action::Open(path) => {
+            if runner.timer == 1 {
+                let list = if path.is_dir() { scad_files(&path) } else { vec![path.clone()] };
+                if list.is_empty() {
+                    eprintln!("script: open — no .scad under {}", path.display());
+                } else {
+                    sw.0.files = list;
+                    sw.1.write(SwitchFile(0));
+                }
+            }
+            // apply_switch_file clears bounds → None; the top guard pauses run_script until the new
+            // whole render lands (bounds Some again + job idle).
+            runner.timer >= 2 && job.0.is_none()
+        }
+        Action::Touch(path) => {
+            if runner.timer == 1 {
+                // Rewrite identical bytes to bump the mtime — watch_source should catch it and
+                // re-render. Fails quietly if the path is gone (the test asserts on the log).
+                let _ = std::fs::read(&path).and_then(|b| std::fs::write(&path, b));
+            }
+            // Generous fixed floor so watch_source detects + the reload render completes; if watch
+            // never fires, job stays idle and this still ends — the log grep is the real assertion.
+            runner.timer >= 90 && job.0.is_none()
         }
     };
     if done {
@@ -2438,11 +2667,54 @@ fn plane_card(cuts: &Cuts, axis: Axis) -> impl Scene + 'static {
     }
 }
 
+/// The file list (5.3.2): one clickable row per `.scad` the picker found, the active one lit
+/// Primary. A click writes `SwitchFile(i)` → `apply_switch_file` swaps the source + re-renders.
+/// Empty (nothing opened yet) collapses to just the header.
+fn file_card(files: &FileList) -> impl Scene + 'static {
+    let rows: Vec<_> = files
+        .files
+        .iter()
+        .enumerate()
+        .map(|(i, path)| {
+            let label = path
+                .file_name()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "?".into());
+            let variant =
+                if files.active == Some(i) { ButtonVariant::Primary } else { ButtonVariant::Normal };
+            let pick = move |_: On<Activate>, mut w: MessageWriter<SwitchFile>| {
+                w.write(SwitchFile(i));
+            };
+            bsn! {
+                @FeathersListRow
+                Children [
+                    (
+                        @FeathersButton { @variant: {variant}, @caption: bsn!{ Text(label) ThemedText } }
+                        on(pick)
+                    ),
+                ]
+            }
+        })
+        .collect();
+    bsn! {
+        Node {
+            flex_direction: FlexDirection::Column,
+            row_gap: px(3),
+            padding: UiRect::all(px(4)),
+        }
+        Children [
+            (Text(format!("files ({})", files.files.len())) ThemedText),
+            (@FeathersListView { @rows: { Box::new(rows) as Box<dyn SceneList> } }),
+        ]
+    }
+}
+
 /// The whole panel scene, built from the current cut stack: title, an X/Y/Z card stack, and a
 /// bottom bar (status + Re-slice + Explode/Collapse).
-fn build_panel(cuts: &Cuts) -> impl Scene + 'static {
+fn build_panel(cuts: &Cuts, files: &FileList) -> impl Scene + 'static {
     let cards: Vec<_> =
         [Axis::X, Axis::Y, Axis::Z].into_iter().map(|a| plane_card(cuts, a)).collect();
+    let files_card = file_card(files);
     bsn! {
         Node {
             position_type: PositionType::Absolute,
@@ -2457,6 +2729,22 @@ fn build_panel(cuts: &Cuts) -> impl Scene + 'static {
         ThemeBackgroundColor(tokens::WINDOW_BG)
         Children [
             (Text("fab-gui") ThemedText),
+            // Open a project directory → its .scad files fill the list below (5.3.1). Async pick on
+            // the task pool so the native panel never freezes the render loop.
+            (
+                @FeathersButton { @variant: {ButtonVariant::Primary}, @caption: bsn!{ Text("Open…") ThemedText } }
+                on(|_: On<Activate>, mut dlg: ResMut<OpenDialog>| {
+                    if dlg.0.is_none() {
+                        dlg.0 = Some(AsyncComputeTaskPool::get().spawn(async move {
+                            rfd::AsyncFileDialog::new()
+                                .pick_folder()
+                                .await
+                                .map(|h| h.path().to_path_buf())
+                        }));
+                    }
+                })
+            ),
+            { Box::new(vec![files_card]) as Box<dyn SceneList> },
             (
                 Node { flex_direction: FlexDirection::Column, row_gap: px(6) }
                 Children [ { Box::new(cards) as Box<dyn SceneList> } ]
@@ -2487,12 +2775,17 @@ fn build_panel(cuts: &Cuts) -> impl Scene + 'static {
 /// per-cut axis sequence differs). Value-only edits leave it alone; update_rows refreshes those.
 fn rebuild_panel(
     cuts: Res<Cuts>,
+    files: Res<FileList>,
     mut sig: ResMut<PanelSig>,
     roots: Query<Entity, With<PanelRoot>>,
     mut commands: Commands,
 ) {
-    let cur: Vec<(Axis, bool)> = cuts.list.iter().map(|c| (c.axis, c.enabled)).collect();
-    if sig.0.as_deref() == Some(cur.as_slice()) {
+    let cur = (
+        cuts.list.iter().map(|c| (c.axis, c.enabled)).collect::<Vec<_>>(),
+        files.files.len(),
+        files.active,
+    );
+    if sig.0.as_ref() == Some(&cur) {
         return;
     }
     sig.0 = Some(cur);
@@ -2500,7 +2793,7 @@ fn rebuild_panel(
         commands.entity(e).despawn();
     }
     commands.queue(|world: &mut World| {
-        let scene = build_panel(world.resource::<Cuts>());
+        let scene = build_panel(world.resource::<Cuts>(), world.resource::<FileList>());
         if let Err(e) = world.spawn_scene(scene) {
             error!("panel spawn failed: {e:?}");
         }

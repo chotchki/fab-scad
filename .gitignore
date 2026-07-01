@@ -25,3 +25,7 @@ target
 
 # fab per-user working state (active project, etc.) — not shared
 .fab/
+
+# macOS Finder metadata
+.DS_Store
+**/.DS_Store

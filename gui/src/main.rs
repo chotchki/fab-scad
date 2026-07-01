@@ -967,9 +967,33 @@ fn do_auto_place(
         ONION_TIP,
     );
     let cap = axial_cap(&cuts, i, &bounds);
+
+    // Corner clearance: an onion near where ANOTHER cut crosses this one straddles the intersection
+    // — the messy jigsaw case. Project each PERPENDICULAR enabled cut into this cross-section's 2D
+    // coords (a line at `coord = at`) and drop placements whose footprint (radius d/2 + a wall) would
+    // reach it. Cuts on this cut's own axis are parallel — they never cross this face.
+    let ai = axis.index();
+    let others: Vec<usize> = (0..3).filter(|&a| a != ai).collect();
+    let perp: Vec<(usize, f64)> = cuts
+        .list
+        .iter()
+        .enumerate()
+        .filter(|&(j, c)| j != i && c.enabled)
+        .filter_map(|(_, c)| match c.axis.index() {
+            a if a == others[0] => Some((0, c.at as f64)),
+            a if a == others[1] => Some((1, c.at as f64)),
+            _ => None, // same axis as this cut → parallel, no intersection line
+        })
+        .collect();
+
     conns.list.retain(|c| c.cut != i); // fresh auto-layout for this cut
     let mut n = 0;
     for (p, d) in placements {
+        // Skip onions that don't clear the perpendicular cuts (see above).
+        let clearance = d / 2.0 + ONION_WALL;
+        if perp.iter().any(|&(c, at)| (p[c] - at).abs() < clearance) {
+            continue;
+        }
         // The fitted onion diameter doubles as a "has room" proxy for a bolt (auto-place fits to the
         // cross-section either way); the active type decides what actually lands here.
         let size = (d as f32).min(cap);

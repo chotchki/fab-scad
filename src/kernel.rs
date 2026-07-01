@@ -40,6 +40,51 @@ impl Solid {
         Solid(Manifold::sphere(radius, segments))
     }
 
+    /// A cone/cylinder along +Z: `r_low` at the base, `r_high` at the top (0 ⇒ a point). `center`
+    /// puts the mid-height at the origin; otherwise the base is at z=0 spanning `[0, height]`.
+    pub fn cylinder(height: f64, r_low: f64, r_high: f64, segments: i32, center: bool) -> Self {
+        Solid(Manifold::cylinder(height, r_low, r_high, segments, center))
+    }
+
+    // --- connector solids (11.6) -----------------------------------------------------------------
+
+    /// A BOSL2-style onion (`onion(r, ang)` = `rotate_extrude(teardrop2d)`): a sphere with a tangent
+    /// conical cap so it prints support-free cap-up. Centered at the origin (sphere equator on z=0,
+    /// which sits on the cut plane), cap toward +Z. `ang` is the cap half-angle FROM VERTICAL in
+    /// degrees (BOSL2's convention) — smaller = pointier; the tip reaches `r/sin(ang)`. Built as
+    /// sphere ∪ cone because the cone of slope −cot(ang) is exactly tangent to the sphere at latitude
+    /// z = r·sin(ang), so the union is smooth — identical to revolving the teardrop profile.
+    pub fn onion(d: f64, ang_deg: f64, segments: i32) -> Self {
+        let r = d / 2.0;
+        let ang = ang_deg.to_radians();
+        let (s, c) = (ang.sin(), ang.cos());
+        let z_tangent = r * s; // where the cap leaves the sphere
+        let cone_h = r * c * c / s; // tip (r/sin) minus z_tangent
+        let base_r = r * c; // sphere radius at that latitude
+        let cone = Solid::cylinder(cone_h, base_r, 0.0, segments, false).translate(0.0, 0.0, z_tangent);
+        Solid::sphere(r, segments).union(&cone)
+    }
+
+    /// The bolt-joint NEGATIVE (the fallback when an onion can't print support-free): a through
+    /// clearance shaft + head counterbore on the +Z (access) piece, and a heat-set insert pocket on
+    /// the −Z piece. Centered on the cut plane at the origin, axis +Z; diff it from BOTH pieces.
+    pub fn bolt_clearance(
+        clearance_d: f64,
+        through: f64,
+        counterbore_d: f64,
+        counterbore_h: f64,
+        insert_d: f64,
+        insert_depth: f64,
+        segments: i32,
+    ) -> Self {
+        let shaft = Solid::cylinder(through, clearance_d / 2.0, clearance_d / 2.0, segments, false);
+        let cbore = Solid::cylinder(counterbore_h, counterbore_d / 2.0, counterbore_d / 2.0, segments, false)
+            .translate(0.0, 0.0, through - counterbore_h);
+        let pocket = Solid::cylinder(insert_depth, insert_d / 2.0, insert_d / 2.0, segments, false)
+            .translate(0.0, 0.0, -insert_depth);
+        Solid::batch_union(&[shaft, cbore, pocket])
+    }
+
     // --- import (11.2) ---------------------------------------------------------------------------
 
     /// Load an STL file (binary or ASCII) as a Solid — the front-door for a mesh OpenSCAD rendered.
@@ -412,6 +457,39 @@ mod tests {
         }
         // The middle piece of a single-axis onion floater bug can't recur here — each cell is built
         // by clipping the SAME base, so nothing from a neighbour cell leaks in.
+    }
+
+    #[test]
+    fn onion_is_a_support_free_teardrop() {
+        let (d, ang) = (10.0, 45.0_f64);
+        let o = Solid::onion(d, ang, 64);
+        o.check().unwrap();
+        let (min, max) = o.bbox().unwrap();
+        let r = d / 2.0;
+        let tip = r / ang.to_radians().sin();
+        // Widest at the equator (radius r), pointed tip at r/sin(ang), rounded bottom at -r.
+        assert!((max[2] - tip).abs() < 0.05, "tip {} want {tip}", max[2]);
+        assert!((min[2] + r).abs() < 0.05, "bottom {}", min[2]);
+        assert!((max[0] - r).abs() < 0.06 && (min[0] + r).abs() < 0.06, "equator radius {max:?}");
+    }
+
+    #[test]
+    fn socket_swallows_the_peg() {
+        let (d, ang, slop) = (10.0, 45.0, 0.2);
+        let peg = Solid::onion(d, ang, 64);
+        let socket = Solid::onion(d + 2.0 * slop, ang, 64); // grow the whole onion by slop
+        // The peg drops fully into the socket — self-consistent, no BOSL2 dependency.
+        assert!(peg.difference(&socket).is_empty(), "peg should fit inside the slop-grown socket");
+        assert!(socket.bbox().unwrap().1[2] > peg.bbox().unwrap().1[2], "socket is larger");
+    }
+
+    #[test]
+    fn bolt_clearance_spans_both_pieces() {
+        let b = Solid::bolt_clearance(3.4, 12.0, 6.0, 3.0, 5.0, 6.0, 48);
+        b.check().unwrap();
+        let (min, max) = b.bbox().unwrap();
+        assert!((min[2] + 6.0).abs() < 1e-6, "insert pocket depth {}", min[2]); // -insert_depth
+        assert!((max[2] - 12.0).abs() < 1e-6, "through length {}", max[2]); // +through
     }
 
     #[test]

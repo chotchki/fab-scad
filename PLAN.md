@@ -45,8 +45,8 @@ Driven by `claude-plan-bridge` (FORMATv2). Hand-authored; run
 - [ ] 6.4 - Embedded magnets: clean split around cavities + pause-at-layer in the 3mf
 - [ ] 6.5 - Investigate Bambu 3mf settings embedding (plate/material/pause) for one-click print; adopt only if clean
 - [ ] 6.6 - Demote import() crutch to optional freeze-source-once; DAG resolver as fallback only
-- [ ] 6.7 - Smoke oracle: a render "passes" iff OpenSCAD exits 0 AND mesh face-count > 0 (fast, no goldens; parity-vs-archived deferred to 8.4)
-- [ ] 6.8 - `fab render --all [PATH]`: walk the tree, enumerate every .scad, parallel smoke-render, print a pass/fail summary (the correctness sweep; needs no manifests)
+- [x] 6.7 - Smoke oracle: a render "passes" iff OpenSCAD exits 0 AND mesh face-count > 0 (fast, no goldens; parity-vs-archived deferred to 8.4)
+- [x] 6.8 - `fab render --all [PATH]`: walk the tree, enumerate every .scad, parallel smoke-render, print a pass/fail summary (the correctness sweep; needs no manifests)
 - [ ] 6.9 - Wire `.fab/focus`: `fab render` with no arg renders the focused project's parts (needs one minimal project.toml; scaffold from the existing template)
 
 ## Phase 7 - Web + publish

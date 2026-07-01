@@ -3316,6 +3316,12 @@ fn view_section(cuts: &Cuts, files: &FileList) -> impl Scene + 'static {
                 Node { flex_direction: FlexDirection::Column, row_gap: px(6) }
                 Children [ { Box::new(cards) as Box<dyn SceneList> } ]
             ),
+            // Auto-slice: partition the model to fit the bed (fab_scad::auto_slice), replacing the
+            // cut stack with the plan. The reactive loop reslices from there; you refine by hand.
+            (
+                @FeathersButton { @variant: {ButtonVariant::Primary}, @caption: bsn!{ Text("Auto-slice") ThemedText } }
+                on(auto_slice_action)
+            ),
             (Text("rendering") ThemedText StatusLabel),
             // No Re-slice button — edits invalidate and rebuild in the background (auto_reslice).
             (
@@ -3329,6 +3335,46 @@ fn view_section(cuts: &Cuts, files: &FileList) -> impl Scene + 'static {
             ),
         ]
     }
+}
+
+/// Auto-slice the loaded model to fit the printer bed: replace the cut stack with
+/// `fab_scad::auto_slice`'s plan (equal division on each overflowing axis), clear connectors (they
+/// referenced the old cuts), and let the reactive loop reslice. The seed you then refine by hand.
+fn auto_slice_action(
+    _: On<Activate>,
+    bounds: Res<ModelBounds>,
+    mut cuts: ResMut<Cuts>,
+    mut conns: ResMut<Conns>,
+    mut status: ResMut<Status>,
+) {
+    let Some((min, max)) = bounds.0 else {
+        status.0 = "no model loaded yet".into();
+        return;
+    };
+    let bed = bed_size().unwrap_or([256.0; 3]);
+    let (lo, hi) = ([min.x as f64, min.y as f64, min.z as f64], [max.x as f64, max.y as f64, max.z as f64]);
+    let planned = fab_scad::auto_slice::auto_slice(lo, hi, bed);
+    if planned.is_empty() {
+        status.0 = "model already fits the bed — no cuts needed".into();
+        return;
+    }
+    cuts.list = planned
+        .iter()
+        .map(|c| CutDef {
+            axis: match c.axis {
+                0 => Axis::X,
+                1 => Axis::Y,
+                _ => Axis::Z,
+            },
+            at: c.at as f32,
+            enabled: true,
+        })
+        .collect();
+    cuts.active = 0;
+    conns.list.clear(); // the old connectors referenced the replaced cut stack
+    let pieces = fab_scad::auto_slice::piece_count(lo, hi, bed);
+    status.0 = format!("auto-sliced: {} cut(s) → {pieces} piece(s)", planned.len());
+    info!("{}", status.0);
 }
 
 /// Connector-editor mode: which cut you're editing, the active connector type (Onion/Bolt + screw

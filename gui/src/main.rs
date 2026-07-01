@@ -576,7 +576,7 @@ fn run_windowed(scene: SceneCfg) {
                 nudge_buttons,
                 auto_reslice,
                 revert_on_edit,
-                (auto_scale, split_viewport, seat_bed, loading_pulse, draw_axis_gizmo),
+                (auto_scale, split_viewport, seat_bed, loading_pulse),
                 (
                     enforce_exclusive_modes,
                     apply_view_visibility,
@@ -589,6 +589,8 @@ fn run_windowed(scene: SceneCfg) {
                 ),
             ),
         )
+        // After `orbit` so the corner axis gizmo reads THIS frame's orbit state (no swim/flicker).
+        .add_systems(Update, draw_axis_gizmo.after(orbit))
         .run();
 }
 
@@ -1502,9 +1504,10 @@ fn seat_bed(bounds: Res<ModelBounds>, mut beds: Query<&mut Transform, With<Bed>>
     }
 }
 
-/// Piece-width measurements: a number floating at each piece in 3D — no leader lines, just the value
-/// where the piece is. White + centred so it reads on the part or the dark background. (The corner
-/// XYZ orientation gizmo is a separate thing — see `draw_axis_gizmo`.)
+/// Piece-width dimensions for the ACTIVE cut's axis ONLY (so three axes of dimensions don't scatter
+/// across the view): a leader line parallel to the cut axis, offset a hair off the part, with end
+/// ticks and the width as a white centred number. The corner gizmo (`draw_axis_gizmo`) shows how all
+/// three axes point; this dimensions just the one you're working on.
 #[allow(clippy::too_many_arguments)]
 fn sync_dim_labels(
     cuts: Res<Cuts>,
@@ -1515,6 +1518,7 @@ fn sync_dim_labels(
     existing: Query<&DimLabel>,
     mut labels: Query<(&DimLabel, &mut Node, &mut Text, &mut Visibility)>,
     mut commands: Commands,
+    mut gizmos: Gizmos,
 ) {
     if print.0 {
         // The print preview lays pieces out apart — the assembled-part width labels don't apply.
@@ -1529,26 +1533,61 @@ fn sync_dim_labels(
     let Ok((camera, cam_gt)) = cam.single() else {
         return;
     };
-    // One dimension per piece width. `segs` collects each dimension's TEXT anchor (the line midpoint,
-    // off the part) + its width; the lines/ticks are drawn as gizmos as we go.
-    let center = (min + max) * 0.5;
+    // Only the selected cut's axis gets dimensioned — one clean single-axis leader, no scatter.
+    let Some(active_axis) = cuts.list.get(cuts.active).map(|c| c.axis) else {
+        return;
+    };
+    let gap = ((max - min).max_element() * 0.05).clamp(8.0, 22.0);
+    let tick = gap * 0.35;
+    let dim_col = match active_axis {
+        Axis::X => Color::srgb(1.0, 0.4, 0.4),
+        Axis::Y => Color::srgb(0.4, 0.9, 0.45),
+        Axis::Z => Color::srgb(0.5, 0.6, 1.0),
+    };
+    let ai = active_axis.index();
+    let mut xs: Vec<f32> =
+        cuts.list.iter().filter(|c| c.enabled && c.axis == active_axis).map(|c| c.at).collect();
     let mut segs: Vec<(Vec3, f32)> = Vec::new();
-    for axis in [Axis::X, Axis::Y, Axis::Z] {
-        let ai = axis.index();
-        let mut xs: Vec<f32> =
-            cuts.list.iter().filter(|c| c.enabled && c.axis == axis).map(|c| c.at).collect();
-        if xs.is_empty() {
-            continue;
-        }
+    if !xs.is_empty() {
         xs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
         let mut edges = vec![comp(min, ai)];
         edges.extend(xs);
         edges.push(comp(max, ai));
+
+        // Leader line offset off the model on p0, at the near face on p1 (index-addressed).
+        let others: Vec<usize> = (0..3).filter(|&a| a != ai).collect();
+        let (p0, p1) = (others[0], others[1]);
+        let off0 = comp(min, p0) - gap;
+        let face1 = comp(min, p1);
+        let dim_pt = |v: f32| {
+            let mut a = [0.0f32; 3];
+            a[ai] = v;
+            a[p0] = off0;
+            a[p1] = face1;
+            Vec3::from_array(a)
+        };
+        let face_pt = |v: f32| {
+            let mut a = [0.0f32; 3];
+            a[ai] = v;
+            a[p0] = comp(min, p0);
+            a[p1] = face1;
+            Vec3::from_array(a)
+        };
+        let tvec = {
+            let mut a = [0.0f32; 3];
+            a[p0] = tick;
+            Vec3::from_array(a)
+        };
         for (k, w) in edges.windows(2).enumerate() {
-            // Float the number at the piece centre (its midpoint on the cut axis, model centre in the
-            // other two dims), tracking the explode. No leader lines.
-            let mid = (w[0] + w[1]) * 0.5 + k as f32 * dspread.0;
-            segs.push((with_comp(center, ai, mid), w[1] - w[0]));
+            let shift = k as f32 * dspread.0;
+            let (lo, hi) = (w[0] + shift, w[1] + shift);
+            let (a, b) = (dim_pt(lo), dim_pt(hi));
+            gizmos.line(a, b, dim_col);
+            gizmos.line(face_pt(lo), a, dim_col.with_alpha(0.4));
+            gizmos.line(face_pt(hi), b, dim_col.with_alpha(0.4));
+            gizmos.line(a - tvec, a + tvec, dim_col);
+            gizmos.line(b - tvec, b + tvec, dim_col);
+            segs.push(((a + b) * 0.5, w[1] - w[0]));
         }
     }
 
@@ -1587,19 +1626,22 @@ fn sync_dim_labels(
 /// (red), Y (green), Z (blue), drawn at a fixed camera-relative offset. Because the arrows point
 /// along the WORLD axes but the anchor rides with the camera, it spins as you orbit yet stays put on
 /// pan/zoom — the "which way is the origin" indicator.
-fn draw_axis_gizmo(cam: Query<(&GlobalTransform, &Projection), With<Camera3d>>, mut gizmos: Gizmos) {
-    let Ok((gt, proj)) = cam.single() else {
+fn draw_axis_gizmo(cam: Query<(&Orbit, &Projection), With<Camera3d>>, mut gizmos: Gizmos) {
+    let Ok((o, proj)) = cam.single() else {
         return;
     };
     let Projection::Perspective(p) = proj else {
         return;
     };
+    // Recompute the camera transform from the orbit state THIS frame — the camera's GlobalTransform
+    // is a frame stale (propagated in PostUpdate), which makes a camera-locked gizmo swim/flicker.
+    let t = orbit_transform(o.yaw, o.pitch, o.radius, o.target);
     // Place the anchor at the lower-left of the frustum, a short distance in front of the camera.
     let d = 12.0;
     let half_h = d * (p.fov * 0.5).tan();
     let half_w = half_h * p.aspect_ratio;
     let origin =
-        gt.translation() + gt.forward() * d - gt.right() * (half_w * 0.85) - gt.up() * (half_h * 0.78);
+        t.translation + t.forward() * d - t.right() * (half_w * 0.85) - t.up() * (half_h * 0.78);
     let len = half_h * 0.22;
     gizmos.arrow(origin, origin + Vec3::X * len, Color::srgb(1.0, 0.4, 0.4)); // X red
     gizmos.arrow(origin, origin + Vec3::Y * len, Color::srgb(0.4, 0.9, 0.45)); // Y green

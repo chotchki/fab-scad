@@ -7,7 +7,7 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use anyhow::{ensure, Context, Result};
+use anyhow::{ensure, Result};
 
 use fab_scad::manifest::{Connector, Cut, PieceOrient, Slicing};
 use fab_scad::num::Num;
@@ -96,25 +96,6 @@ pub fn whole_stl(source: &Path, out_dir: &Path) -> PathBuf {
     out_dir.join(format!("{}.stl", stem_of(source)))
 }
 
-/// Render ONE piece (slab multi-index) of the already-rendered preview STL per `spec` — a bare spec
-/// (no connectors) for auto-orient overhang scoring, the full spec (onions + orientations) for the
-/// print-orientation preview's joined piece. Returns the piece STL (empty if no geometry).
-pub fn render_piece(
-    oscad: &Openscad,
-    stl: &Path,
-    spec: &Slicing,
-    piece: [usize; 3],
-    out_dir: &Path,
-) -> Result<PathBuf> {
-    let name = stl.file_name().and_then(|n| n.to_str()).context("non-UTF8 STL name")?;
-    let tag = format!("piece-{}-{}-{}", piece[0], piece[1], piece[2]);
-    let scad = out_dir.join(format!("{tag}.scad"));
-    let out = out_dir.join(format!("{tag}.stl"));
-    std::fs::write(&scad, slicing::piece_driver(spec, name, piece)?)?;
-    oscad.render(&scad, &out, TIMEOUT)?; // a piece may be empty (L-shaped gaps) — caller checks
-    Ok(out)
-}
-
 /// One piece, rendered + auto-oriented for the print-orientation preview: its slab multi-index, mesh
 /// (WITH its joints carved — peg/socket), and the least-support build-up (`auto_orient::best_up`).
 /// Empty slabs are dropped upstream.
@@ -124,57 +105,63 @@ pub struct PiecePrint {
     pub up: [f32; 3],
 }
 
-/// Render every piece of `source` at `cuts` + `connectors`, auto-pick each piece's print orientation
-/// (least overhang), then re-render each piece WITH its feasible onions carved so the preview shows
-/// the real printable geometry — joints and all. Two passes: bare → `best_up` (orientation gates the
-/// onions), then carve with those orientations. Serial; pieces are cheap STL intersections off the
-/// frozen whole mesh. Seeds the orientations `reslice` threads back in.
-pub fn print_layout(
+/// Print-orientation layout IN-PROCESS via the Manifold kernel (Track C 11.12) — the kernel twin of
+/// `print_layout`. OpenSCAD renders the base mesh ONCE (the front-door); both passes then run in
+/// Manifold off the cached base: a BARE slice picks each piece's least-support build-up
+/// (`auto_orient::best_up`), then a CARVED slice gated by those orientations makes the preview's
+/// onion joints match what the real slice produces. No per-piece spawn — the `slice_solid` twin of
+/// `piece_driver` does both.
+///
+/// Thread-safety: every `Solid` is built AND consumed here; only the piece MESHES (`StlMesh`, Send)
+/// leave. A `Solid` is `!Send` and never crosses the task boundary — the compiler enforces it. See
+/// `docs/manifold-thread-safety.md`.
+pub fn print_layout_kernel(
     root: Option<&Path>,
     source: &Path,
     cuts: &[(char, f64)],
     connectors: &[Conn],
     out_dir: &Path,
 ) -> Result<Vec<PiecePrint>> {
-    let oscad = Openscad::discover(root)?;
-    // The pieces slice from the frozen whole mesh; render it once if a prior whole render didn't.
-    let whole = whole_stl(source, out_dir);
-    if !whole.exists() {
+    use fab_scad::kernel::Solid;
+
+    // Cache the base: render the whole model once (front-door), reuse across both passes.
+    let base_stl = whole_stl(source, out_dir);
+    if !base_stl.exists() {
         render_whole(root, source, out_dir)?;
     }
-    let bare = cuts_to_spec(cuts);
+    let base = Solid::from_stl_file(&base_stl)?;
 
-    // Pass 1: bare render of each non-empty piece -> least-support orientation. (Axis-aligned cuts
-    // only today, so the cut-face normals are already in `best_up`'s base set — pass none.)
+    // Pass 1: BARE slice (no connectors) → least-support orientation per non-empty piece. (Axis-
+    // aligned cuts only today, so the cut-face normals are already in `best_up`'s base set — none.)
     let mut ups: Vec<([usize; 3], [f64; 3])> = Vec::new();
-    for piece in slicing::piece_indices(&bare)? {
-        let mesh = stl::load_stl(&render_piece(&oscad, &whole, &bare, piece, out_dir)?)?;
+    for (piece, solid) in slicing::slice_solid(&cuts_to_spec(cuts), &base)? {
+        let mesh = stl::load_stl_bytes(&solid.to_stl_bytes())?;
         if mesh.positions.is_empty() {
             continue; // an empty slab (L-shaped gap) — nothing to print
         }
         ups.push((piece, fab_scad::auto_orient::best_up(&to_tris(&mesh), &[])));
     }
 
-    // Pass 2: carve each piece with the onions, gated by the orientations just picked, so the
-    // preview's joints match what the slice would produce.
-    let spec = Slicing {
-        printer: None,
-        cut: bare.cut,
-        connector: to_connectors(connectors),
-        orient: ups
-            .iter()
-            .map(|&(piece, up)| PieceOrient {
-                piece,
-                up: [Num::Float(up[0]), Num::Float(up[1]), Num::Float(up[2])],
-            })
-            .collect(),
-    };
+    // Pass 2: carve each piece with the onions, gated by the orientations just picked.
+    let mut spec = cuts_to_spec(cuts);
+    spec.connector = to_connectors(connectors);
+    spec.orient = ups
+        .iter()
+        .map(|&(piece, up)| PieceOrient {
+            piece,
+            up: [Num::Float(up[0]), Num::Float(up[1]), Num::Float(up[2])],
+        })
+        .collect();
+
     let mut out = Vec::new();
-    for (piece, up) in ups {
-        let mesh = stl::load_stl(&render_piece(&oscad, &whole, &spec, piece, out_dir)?)?;
+    for (piece, solid) in slicing::slice_solid(&spec, &base)? {
+        let mesh = stl::load_stl_bytes(&solid.to_stl_bytes())?;
         if mesh.positions.is_empty() {
             continue;
         }
+        // The build-up this piece was oriented to in pass 1 (default +Z if a connector diff dropped
+        // a bare piece that reappears carved — shouldn't happen with axis-aligned cuts).
+        let up = ups.iter().find(|(p, _)| *p == piece).map(|(_, u)| *u).unwrap_or([0.0, 0.0, 1.0]);
         out.push(PiecePrint { piece, mesh, up: [up[0] as f32, up[1] as f32, up[2] as f32] });
     }
     Ok(out)
@@ -368,6 +355,27 @@ mod tests {
             .expect("second reslice");
         let mtime1 = std::fs::metadata(&base).unwrap().modified().unwrap();
         assert_eq!(mtime0, mtime1, "second reslice re-rendered the base (cache miss)");
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    #[ignore = "needs OpenSCAD; run with --ignored"]
+    fn print_layout_kernel_orients_every_piece() {
+        let tmp = std::env::temp_dir().join(format!("gui_printlayout_{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let src = tmp.join("box.scad");
+        std::fs::write(&src, "cube([60,40,30], center=true);").unwrap();
+
+        // One X cut → two pieces; both lay out with a unit build-up and real geometry.
+        let pieces = print_layout_kernel(None, &src, &[('x', 0.0)], &[], &tmp).expect("print layout");
+        assert_eq!(pieces.len(), 2, "one cut on a box makes two pieces");
+        for p in &pieces {
+            assert!(!p.mesh.positions.is_empty(), "piece {:?} has geometry", p.piece);
+            let n = (p.up[0] * p.up[0] + p.up[1] * p.up[1] + p.up[2] * p.up[2]).sqrt();
+            assert!((n - 1.0).abs() < 1e-3, "up {:?} should be a unit vector", p.up);
+        }
+        assert!(whole_stl(&src, &tmp).exists(), "base STL cached (front-door rendered once)");
 
         let _ = std::fs::remove_dir_all(&tmp);
     }

@@ -2227,7 +2227,9 @@ fn kick_print_job(
     }
     let (root, tmp) = (cfg.root.clone(), cfg.tmp.clone());
     let task = AsyncComputeTaskPool::get().spawn(async move {
-        fab::print_layout(root.as_deref(), &src, &cuts, &conns, &tmp).map_err(|e| format!("{e:#}"))
+        // In-process via the Manifold kernel (11.12): base rendered once, both passes off the cache.
+        fab::print_layout_kernel(root.as_deref(), &src, &cuts, &conns, &tmp)
+            .map_err(|e| format!("{e:#}"))
     });
     job.0 = Some(task);
     status.0 = "orienting pieces".into();

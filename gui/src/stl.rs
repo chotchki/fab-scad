@@ -12,15 +12,21 @@ pub struct StlMesh {
     pub normals: Vec<[f32; 3]>,
 }
 
-/// Load an STL, detecting binary vs ASCII by the binary size formula (`84 + 50*count`).
+/// Load an STL from disk, detecting binary vs ASCII by the binary size formula (`84 + 50*count`).
 pub fn load_stl(path: &Path) -> Result<StlMesh> {
     let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
+    load_stl_bytes(&bytes)
+}
+
+/// Parse STL bytes in memory (same binary-vs-ASCII detection as `load_stl`) — lets the Manifold
+/// kernel path turn a `Solid`'s `to_stl_bytes()` straight into a mesh, no disk round-trip.
+pub fn load_stl_bytes(bytes: &[u8]) -> Result<StlMesh> {
     ensure!(bytes.len() >= 84, "STL too short");
     let count = u32::from_le_bytes([bytes[80], bytes[81], bytes[82], bytes[83]]) as usize;
     if bytes.len() == 84 + 50 * count {
-        parse_binary(&bytes, count)
+        parse_binary(bytes, count)
     } else {
-        parse_ascii(&String::from_utf8_lossy(&bytes))
+        parse_ascii(&String::from_utf8_lossy(bytes))
     }
 }
 

@@ -2951,6 +2951,10 @@ fn spawn_cut_plane(
             base_color: cut_color(true, cut.enabled),
             alpha_mode: AlphaMode::Blend,
             unlit: true,
+            // The cut plane sits INSIDE the solid model, so without this the model occludes it and
+            // its coplanar faces z-fight (the "layering" mess). Bias it to the front like the
+            // connector markers do (line ~1205) → a clean translucent guide seen through the part.
+            depth_bias: 1.0e8,
             ..default()
         })),
         Transform::from_translation(with_comp((min + max) * 0.5, cut.axis.index(), cut.at)),

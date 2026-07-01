@@ -3,6 +3,7 @@
 //! the `fab` CLI (src/main.rs) and the Bevy GUI (gui/), so the slicing-spec and printer types
 //! have ONE definition, not a mirror per front-end.
 
+pub mod auto;
 pub mod auto_orient;
 pub mod auto_slice;
 #[cfg(feature = "kernel")]

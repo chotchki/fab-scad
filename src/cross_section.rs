@@ -173,11 +173,13 @@ fn point_to_segment(p: [f64; 2], a: [f64; 2], b: [f64; 2]) -> f64 {
     ((p[0] - cx).powi(2) + (p[1] - cy).powi(2)).sqrt()
 }
 
-/// Map a loop's projected (u, v) to connector-pos coords (the cut's two non-axis dims, ascending).
-/// From the `projection_scad` transforms: X → (u,v)=(z,y) so pos=(y,z)=(v,u); Y → (u,v)=(x,z)=pos;
-/// Z → (u,v)=(x,y)=pos. Only X swaps.
+/// Map a loop's parsed SVG (u, v) to connector-pos coords (the cut's two non-axis dims, ascending).
+/// OpenSCAD's SVG export NEGATES Y (SVG's y-axis points down), so the parsed `v` is the negated
+/// projected coordinate — undo that here, or the whole profile comes back upside-down and auto-place
+/// scatters connectors below the model. Per `projection_scad`: X → (u,v)=(z,-y) so pos=(y,z)=(-v,u);
+/// Y → (u,v)=(x,-z) so pos=(x,z)=(u,-v); Z → (u,v)=(x,-y) so pos=(x,y)=(u,-v).
 fn map_to_pos(loop_uv: Vec<[f64; 2]>, axis: usize) -> Vec<[f64; 2]> {
-    loop_uv.into_iter().map(|[u, v]| if axis == 0 { [v, u] } else { [u, v] }).collect()
+    loop_uv.into_iter().map(|[u, v]| if axis == 0 { [-v, u] } else { [u, -v] }).collect()
 }
 
 /// SCAD number: trim a trailing `.0` so `translate` reads cleanly; never scientific notation.
@@ -216,16 +218,17 @@ mod tests {
     }
 
     #[test]
-    fn x_axis_swaps_uv_to_pos_yz() {
-        // X cut: SVG (u,v) = (z, y); connector pos must be (y, z) = (v, u).
+    fn x_axis_maps_uv_to_pos_yz() {
+        // X cut: SVG (u,v) = (z, -y) after OpenSCAD's Y-flip; connector pos = (y, z) = (-v, u).
         let mapped = map_to_pos(vec![[3.0, 7.0]], 0);
-        assert_eq!(mapped, vec![[7.0, 3.0]]);
+        assert_eq!(mapped, vec![[-7.0, 3.0]]);
     }
 
     #[test]
-    fn yz_axes_pass_uv_through() {
-        assert_eq!(map_to_pos(vec![[3.0, 7.0]], 1), vec![[3.0, 7.0]]);
-        assert_eq!(map_to_pos(vec![[3.0, 7.0]], 2), vec![[3.0, 7.0]]);
+    fn yz_axes_unflip_v() {
+        // Y/Z: SVG (u,v) = (first, -second) after the Y-flip; pos = (first, second) = (u, -v).
+        assert_eq!(map_to_pos(vec![[3.0, 7.0]], 1), vec![[3.0, -7.0]]);
+        assert_eq!(map_to_pos(vec![[3.0, 7.0]], 2), vec![[3.0, -7.0]]);
     }
 
     #[test]

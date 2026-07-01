@@ -94,18 +94,70 @@ pub fn fit_diameter(loops: &[Loop], point: [f64; 2], wall: f64, max_d: f64) -> f
     (2.0 * (nearest - wall)).clamp(0.0, max_d)
 }
 
+/// Distance from `point` to the profile boundary along unit `dir` — the nearest positive-t crossing
+/// of the ray over every loop segment, or +inf if it never exits. Used to bound the onion's cap,
+/// which reaches past the sphere only in the build direction.
+pub fn dist_along(loops: &[Loop], point: [f64; 2], dir: [f64; 2]) -> f64 {
+    let [px, py] = point;
+    let [dx, dy] = dir;
+    let mut best = f64::INFINITY;
+    for lp in loops {
+        let n = lp.len();
+        for i in 0..n {
+            let (a, b) = (lp[i], lp[(i + 1) % n]);
+            let (ex, ey) = (b[0] - a[0], b[1] - a[1]);
+            let denom = dx * ey - dy * ex; // cross(dir, edge); ~0 = parallel
+            if denom.abs() < 1e-12 {
+                continue;
+            }
+            let (rx, ry) = (a[0] - px, a[1] - py);
+            let t = (rx * ey - ry * ex) / denom; // ray param (distance, dir is unit)
+            let s = (rx * dy - ry * dx) / denom; // segment param
+            if t > 1e-9 && (0.0..=1.0).contains(&s) {
+                best = best.min(t);
+            }
+        }
+    }
+    best
+}
+
+/// Largest onion diameter at `point` that fits with a `wall` margin. Like `fit_diameter`, but the
+/// onion is a TEARDROP: its tip reaches `tip_factor`·r past the sphere in the cap direction `cap_dir`
+/// (unit, cross-section coords), so bound the tip against the edge in that direction too. `None`
+/// cap_dir (the cut is perpendicular to the build, cap out of plane) falls back to the sphere.
+pub fn fit_onion(
+    loops: &[Loop],
+    point: [f64; 2],
+    wall: f64,
+    max_d: f64,
+    cap_dir: Option<[f64; 2]>,
+    tip_factor: f64,
+) -> f64 {
+    let sphere = fit_diameter(loops, point, wall, max_d);
+    match cap_dir {
+        Some(dir) if tip_factor > 0.0 => {
+            let clear = dist_along(loops, point, dir);
+            let cap = (2.0 * (clear - wall) / tip_factor).max(0.0);
+            sphere.min(cap)
+        }
+        _ => sphere,
+    }
+}
+
 /// Auto-place onion connectors across a cross-section: a grid of candidate points `spacing` apart
 /// (centred in the profile bbox), keeping each that sits in SOLID material — inside the outline,
 /// outside any hole — with room for at least a `min_d` onion. Each kept point gets the largest
-/// wall-fitting diameter (`fit_diameter`, capped at `max_d`). chotchki's "fit the area" placement
-/// (#41); the GUI adds these to a cut (and caps each by the slab's axial room). Returns (point,
-/// diameter) in connector-pos coords.
+/// teardrop-fitting diameter (`fit_onion` with `cap_dir` + `tip_factor`, capped at `max_d`).
+/// chotchki's "fit the area" placement (#41); the GUI adds these to a cut (and caps each by the
+/// slab's axial room). Returns (point, diameter) in connector-pos coords.
 pub fn auto_place(
     loops: &[Loop],
     wall: f64,
     max_d: f64,
     spacing: f64,
     min_d: f64,
+    cap_dir: Option<[f64; 2]>,
+    tip_factor: f64,
 ) -> Vec<([f64; 2], f64)> {
     if loops.is_empty() || spacing <= 0.0 {
         return Vec::new();
@@ -130,7 +182,7 @@ pub fn auto_place(
             if !point_in_material(loops, p) {
                 continue;
             }
-            let d = fit_diameter(loops, p, wall, max_d);
+            let d = fit_onion(loops, p, wall, max_d, cap_dir, tip_factor);
             if d >= min_d {
                 out.push((p, d));
             }
@@ -264,7 +316,7 @@ mod tests {
         // material ring and NONE in the central hole.
         let sq = vec![[-20.0, -20.0], [20.0, -20.0], [20.0, 20.0], [-20.0, 20.0]];
         let hole = vec![[-6.0, -6.0], [6.0, -6.0], [6.0, 6.0], [-6.0, 6.0]];
-        let placed = auto_place(&[sq, hole], 1.0, 16.0, 10.0, 3.0);
+        let placed = auto_place(&[sq, hole], 1.0, 16.0, 10.0, 3.0, None, 1.0);
         assert!(!placed.is_empty(), "should place some connectors");
         // every placement sits in material (not in the hole) and is at least min_d
         for (p, d) in &placed {
@@ -275,7 +327,27 @@ mod tests {
 
     #[test]
     fn auto_place_empty_section_is_empty() {
-        assert!(auto_place(&[], 1.0, 16.0, 10.0, 3.0).is_empty());
+        assert!(auto_place(&[], 1.0, 16.0, 10.0, 3.0, None, 1.0).is_empty());
+    }
+
+    #[test]
+    fn fit_onion_bounds_the_teardrop_tip_toward_the_cap() {
+        // 40x40 square; a point 10 below the top edge. The sphere would fit d = 2*(10-1) = 18, but a
+        // teardrop with tip 1.5x its radius toward +Y can only be d/2 = (10-1)/1.5 -> d = 12.
+        let sq = vec![vec![[-20.0, -20.0], [20.0, -20.0], [20.0, 20.0], [-20.0, 20.0]]];
+        let p = [0.0, 10.0]; // 10 from the +Y edge
+        assert!((fit_diameter(&sq, p, 1.0, 40.0) - 18.0).abs() < 1e-9);
+        let capped = fit_onion(&sq, p, 1.0, 40.0, Some([0.0, 1.0]), 1.5);
+        assert!((capped - 12.0).abs() < 1e-6, "cap-bounded d {capped}");
+        // no cap direction -> the plain sphere fit
+        assert!((fit_onion(&sq, p, 1.0, 40.0, None, 1.5) - 18.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn dist_along_hits_the_facing_edge() {
+        let sq = vec![vec![[-20.0, -20.0], [20.0, -20.0], [20.0, 20.0], [-20.0, 20.0]]];
+        assert!((dist_along(&sq, [0.0, 5.0], [0.0, 1.0]) - 15.0).abs() < 1e-9); // up to +Y edge
+        assert!((dist_along(&sq, [0.0, 5.0], [0.0, -1.0]) - 25.0).abs() < 1e-9); // down to -Y edge
     }
 
     #[test]

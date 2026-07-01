@@ -29,7 +29,8 @@ Driven by `claude-plan-bridge` (FORMATv2). Hand-authored; run
 
   - [x] 5.3.5 - Connector type picker (onion/bolt) in GUI editor
   - [x] 5.3.6 - Split view: dock panel, inset 3D camera viewport
-  - [ ] 5.3.7 - Onion feasibility follows build axis, not cut axis
+  - [x] 5.3.7 - Onion feasibility follows build axis, not cut axis
+  - [ ] 5.3.8 - Bound onions to teardrop tip, not sphere radius
 ## Phase 6 - fab render + output (3mf, magnets, Bambu)
 - [ ] 6.1 - Render engine: enumerate targets → parallel (rayon) render → report; a "target" is any .scad→out unit (pieces/parts/projects collapse to target sets); per-target thumbnail + N/M progress
 - [ ] 6.2 - Incremental rebuild: skip pieces whose inputs are unchanged (content hash)

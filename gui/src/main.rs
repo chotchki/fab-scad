@@ -776,6 +776,18 @@ const ONION_WALL: f64 = 1.2;
 const ONION_MAX_D: f64 = 16.0;
 /// Grid pitch for auto-place — connectors land roughly this far apart across the cut face.
 const ONION_SPACING: f64 = 18.0;
+/// The onion teardrop's tip reaches this many radii past centre in the cap (+build) direction —
+/// BOSL2 onion `ang=45` gives √2. The sizer bounds the tip so the cap can't poke past the surface.
+const ONION_TIP: f64 = std::f64::consts::SQRT_2;
+
+/// The onion cap direction (+build = +Z) in a cut's 2D cross-section coords, or `None` when the cap
+/// points OUT of the section plane (a Z cut) — there the cap is bounded axially, not in-section.
+fn cap_dir_2d(axis: Axis) -> Option<[f64; 2]> {
+    match axis {
+        Axis::X | Axis::Y => Some([0.0, 1.0]), // +Z is the section's second coord for X/Y cuts
+        Axis::Z => None,
+    }
+}
 
 /// Place a `kind` connector on `cut` at `pos` (onion diameter `size`, or the `screw` for a bolt), or
 /// — if the click lands on one already there — remove it (click-to-toggle). Declines a sub-`MIN_ONION`
@@ -814,32 +826,49 @@ fn toggle_connector(
 /// declines. Falls back to a modest default when there's no cross-section (headless `conn` verb).
 fn auto_size(xsection: &XSection, cuts: &Cuts, bounds: &ModelBounds, cut: usize, pos: [f32; 2]) -> f32 {
     const DEFAULT: f32 = 6.0;
+    let axis = cuts.list.get(cut).map(|c| c.axis).unwrap_or(Axis::X);
     let cross = match &xsection.0 {
         Some(loops) => {
             let loops: Vec<Vec<[f64; 2]>> = loops
                 .iter()
                 .map(|l| l.iter().map(|&[a, b]| [a as f64, b as f64]).collect())
                 .collect();
-            fab_scad::cross_section::fit_diameter(&loops, [pos[0] as f64, pos[1] as f64], ONION_WALL, ONION_MAX_D)
-                as f32
+            fab_scad::cross_section::fit_onion(
+                &loops,
+                [pos[0] as f64, pos[1] as f64],
+                ONION_WALL,
+                ONION_MAX_D,
+                cap_dir_2d(axis),
+                ONION_TIP,
+            ) as f32
         }
         None => DEFAULT,
     };
     cross.min(axial_cap(cuts, cut, bounds))
 }
 
-/// The onion-diameter cap from the slab thickness either side of `cut`: the onion reaches d/2 into
-/// each piece along the cut axis, so `d <= 2*(thinner slab - wall)`. Shared by manual sizing + auto-place.
+/// The onion-diameter cap from the slab thickness either side of `cut`. The onion reaches d/2 (the
+/// sphere) into each piece along the cut axis, EXCEPT for a Z cut, where the cap points +Z (the
+/// build) into the upper slab and reaches √2·d/2 — so that side reserves the tip, not the sphere.
 fn axial_cap(cuts: &Cuts, cut: usize, bounds: &ModelBounds) -> f32 {
-    (2.0 * (axial_room(cuts, cut, bounds) - ONION_WALL as f32)).max(0.0)
+    let (below, above) = axial_room(cuts, cut, bounds);
+    let is_z = cuts.list.get(cut).map(|c| c.axis == Axis::Z).unwrap_or(false);
+    let wall = ONION_WALL as f32;
+    let below_d = 2.0 * (below - wall);
+    // Z cut: the cap (+Z) reaches into the upper (above) slab as the teardrop tip, √2·r deep.
+    let above_d = if is_z {
+        2.0 * (above - wall) / ONION_TIP as f32
+    } else {
+        2.0 * (above - wall)
+    };
+    below_d.min(above_d).max(0.0)
 }
 
-/// The thinner of the two slabs bordering `cut` along its axis — how much room the onion has to
-/// reach into before it pokes out the far face. Distance from the cut to its nearest same-axis
-/// neighbour (or the model bound) on each side, min of the two. Huge (no cap) if bounds are unset.
-fn axial_room(cuts: &Cuts, cut: usize, bounds: &ModelBounds) -> f32 {
+/// The room bordering `cut` along its axis on each side (below, above): distance from the cut to its
+/// nearest same-axis neighbour (or the model bound) on each side. Huge (no cap) if bounds are unset.
+fn axial_room(cuts: &Cuts, cut: usize, bounds: &ModelBounds) -> (f32, f32) {
     let (Some(c), Some((min, max))) = (cuts.list.get(cut), bounds.0) else {
-        return f32::INFINITY;
+        return (f32::INFINITY, f32::INFINITY);
     };
     let (ai, at) = (c.axis.index(), c.at);
     let mut below = comp(min, ai);
@@ -855,7 +884,7 @@ fn axial_room(cuts: &Cuts, cut: usize, bounds: &ModelBounds) -> f32 {
             above = o.at;
         }
     }
-    (at - below).min(above - at)
+    (at - below, above - at)
 }
 
 /// In the 2D connector editor: a click on the (face-on) cut plane drops a connector on the cut
@@ -910,8 +939,16 @@ fn do_auto_place(
     };
     let loops: Vec<Vec<[f64; 2]>> =
         loops.iter().map(|l| l.iter().map(|&[a, b]| [a as f64, b as f64]).collect()).collect();
-    let placements =
-        fab_scad::cross_section::auto_place(&loops, ONION_WALL, ONION_MAX_D, ONION_SPACING, MIN_ONION as f64);
+    let axis = cuts.list.get(i).map(|c| c.axis).unwrap_or(Axis::X);
+    let placements = fab_scad::cross_section::auto_place(
+        &loops,
+        ONION_WALL,
+        ONION_MAX_D,
+        ONION_SPACING,
+        MIN_ONION as f64,
+        cap_dir_2d(axis),
+        ONION_TIP,
+    );
     let cap = axial_cap(&cuts, i, &bounds);
     conns.list.retain(|c| c.cut != i); // fresh auto-layout for this cut
     let mut n = 0;
@@ -3242,7 +3279,7 @@ mod tests {
     }
 
     #[test]
-    fn axial_room_is_the_thinner_bordering_slab() {
+    fn axial_room_reports_both_bordering_slabs() {
         let cuts = Cuts {
             list: vec![
                 CutDef { axis: Axis::X, at: -10.0, enabled: true },
@@ -3252,12 +3289,12 @@ mod tests {
             active: 0,
         };
         let bounds = ModelBounds(Some((Vec3::splat(-20.0), Vec3::splat(20.0))));
-        // middle cut: slabs to -10 (10 thick) and to 16 (16 thick) -> min 10
-        assert_eq!(axial_room(&cuts, 1, &bounds), 10.0);
-        // first cut: to the -20 bound (10) and to the next cut at 0 (10) -> 10
-        assert_eq!(axial_room(&cuts, 0, &bounds), 10.0);
-        // last cut: to the cut at 0 (16) and to the +20 bound (4) -> 4 (the thin end slab)
-        assert_eq!(axial_room(&cuts, 2, &bounds), 4.0);
+        // middle cut: (below to -10 = 10, above to 16 = 16)
+        assert_eq!(axial_room(&cuts, 1, &bounds), (10.0, 16.0));
+        // first cut: (below to the -20 bound = 10, above to the cut at 0 = 10)
+        assert_eq!(axial_room(&cuts, 0, &bounds), (10.0, 10.0));
+        // last cut: (below to the cut at 0 = 16, above to the +20 bound = 4 — the thin end slab)
+        assert_eq!(axial_room(&cuts, 2, &bounds), (16.0, 4.0));
     }
 
     #[test]

@@ -1511,10 +1511,10 @@ fn seat_bed(bounds: Res<ModelBounds>, mut beds: Query<&mut Transform, With<Bed>>
     }
 }
 
-/// Piece-width dimensions for the ACTIVE cut's axis ONLY (so three axes of dimensions don't scatter
-/// across the view): a leader line parallel to the cut axis, offset a hair off the part, with end
-/// ticks and the width as a white centred number. The corner gizmo (`draw_axis_gizmo`) shows how all
-/// three axes point; this dimensions just the one you're working on.
+/// Piece-width dimensions for EVERY axis that has an enabled cut: per axis, a leader line parallel to
+/// the cut, offset a hair off the part, with end ticks and the width as a white centred number, in
+/// that axis's colour (X red / Y green / Z blue). Safe to show all at once now that gizmos render on
+/// the 3D camera only — the old "scatter" was the UI camera ghosting each leader, not the extra axes.
 #[allow(clippy::too_many_arguments)]
 fn sync_dim_labels(
     cuts: Res<Cuts>,
@@ -1539,22 +1539,22 @@ fn sync_dim_labels(
     let Ok((camera, cam_gt)) = cam.single() else {
         return;
     };
-    // Only the selected cut's axis gets dimensioned — one clean single-axis leader, no scatter.
-    let Some(active_axis) = cuts.list.get(cuts.active).map(|c| c.axis) else {
-        return;
-    };
     let gap = ((max - min).max_element() * 0.05).clamp(8.0, 22.0);
     let tick = gap * 0.35;
-    let dim_col = match active_axis {
-        Axis::X => Color::srgb(1.0, 0.4, 0.4),
-        Axis::Y => Color::srgb(0.4, 0.9, 0.45),
-        Axis::Z => Color::srgb(0.5, 0.6, 1.0),
-    };
-    let ai = active_axis.index();
-    let mut xs: Vec<f32> =
-        cuts.list.iter().filter(|c| c.enabled && c.axis == active_axis).map(|c| c.at).collect();
     let mut segs: Vec<(Vec3, f32)> = Vec::new();
-    if !xs.is_empty() {
+    // Dimension every axis that has an enabled cut — each on its own edge, in its own colour.
+    for axis in [Axis::X, Axis::Y, Axis::Z] {
+        let ai = axis.index();
+        let dim_col = match axis {
+            Axis::X => Color::srgb(1.0, 0.4, 0.4),
+            Axis::Y => Color::srgb(0.4, 0.9, 0.45),
+            Axis::Z => Color::srgb(0.5, 0.6, 1.0),
+        };
+        let mut xs: Vec<f32> =
+            cuts.list.iter().filter(|c| c.enabled && c.axis == axis).map(|c| c.at).collect();
+        if xs.is_empty() {
+            continue;
+        }
         xs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
         let mut edges = vec![comp(min, ai)];
         edges.extend(xs);
@@ -1584,8 +1584,7 @@ fn sync_dim_labels(
             a[p0] = tick;
             Vec3::from_array(a)
         };
-        // Dimensions stay at the ASSEMBLED positions — they don't ride the explode, so the widths
-        // read as one clean bracket instead of fanning apart into that scattered second bracket.
+        // Dimensions stay at the ASSEMBLED positions — they don't ride the explode.
         for w in edges.windows(2) {
             let (lo, hi) = (w[0], w[1]);
             let (a, b) = (dim_pt(lo), dim_pt(hi));

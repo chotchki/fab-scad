@@ -119,8 +119,18 @@ enum Commands {
         #[arg(long, default_value_t = 120)]
         timeout: u64,
     },
-    /// Build + publish a project to hotchkiss.io. (Phase 7)
-    Publish { project: Option<String> },
+    /// Publish a model to hotchkiss.io: render a cover + a low-`$fn` preview mesh + the full STL,
+    /// upload them, and create/update the project page (Phase 15). Auth with an `hio_` API key.
+    Publish {
+        /// The model .scad to publish (its project.toml [project]/[publish] is consumed).
+        target: PathBuf,
+        /// hotchkiss.io base URL (default: $HIO_URL, else https://hotchkiss.io).
+        #[arg(long)]
+        url: Option<String>,
+        /// API key `hio_…` (default: $HIO_API_KEY).
+        #[arg(long)]
+        api_key: Option<String>,
+    },
 }
 
 fn main() -> Result<()> {
@@ -150,13 +160,8 @@ fn main() -> Result<()> {
                 render_focus_cmd(png, timeout) // no target → the focused project's parts (6.9)
             }
         }
-        Commands::Publish { .. } => not_yet("publish", "7"),
+        Commands::Publish { target, url, api_key } => publish_cmd(&target, url, api_key),
     }
-}
-
-fn not_yet(cmd: &str, phase: &str) -> Result<()> {
-    println!("`fab {cmd}` is not implemented yet (planned for Phase {phase}).");
-    Ok(())
 }
 
 fn plan_cmd(size_str: &str, printer: Option<String>) -> Result<()> {
@@ -253,6 +258,81 @@ fn parse_slops(s: &str) -> Result<Vec<f64>> {
         bail!("--slops needs at least one value");
     }
     Ok(v)
+}
+
+fn publish_cmd(target: &Path, url: Option<String>, api_key: Option<String>) -> Result<()> {
+    if !target.exists() {
+        bail!("no such file: {}", target.display());
+    }
+    let m = manifest::Manifest::load(&find_manifest(target)?)?;
+    let title = m.project.title.clone().unwrap_or_else(|| m.project.name.clone());
+    let description = m.publish.map(|p| p.description).unwrap_or_default();
+
+    let key = api_key
+        .or_else(|| std::env::var("HIO_API_KEY").ok())
+        .context("no API key — pass --api-key or set HIO_API_KEY")?;
+    let base = url
+        .or_else(|| std::env::var("HIO_URL").ok())
+        .unwrap_or_else(|| "https://hotchkiss.io".to_string());
+
+    let root = find_root();
+    let oscad = Openscad::discover(root.as_deref())?;
+    let timeout = Duration::from_secs(120);
+    let stem = target
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "part".into());
+    let out = target.parent().unwrap_or_else(|| Path::new(".")).join("out").join("publish");
+    std::fs::create_dir_all(&out)?;
+
+    // Cover thumbnail.
+    println!("rendering cover…");
+    let cover = out.join(format!("{stem}.png"));
+    if !oscad.thumbnail(target, &cover, (1200, 900), timeout)?.ok {
+        bail!("cover render failed");
+    }
+
+    // Full-res mesh (download).
+    println!("rendering full-res mesh…");
+    let full_stl = out.join(format!("{stem}.stl"));
+    if !oscad.render(target, &full_stl, timeout)?.ok {
+        bail!("mesh render failed");
+    }
+
+    // Low-`$fn` viewer mesh: force `$preview = true` so the source's `$fn = $preview ? low : high`
+    // takes the low path — a light mesh the in-browser viewer can handle.
+    println!("rendering preview mesh…");
+    let viewer_stl = out.join(format!("{stem}-preview.stl"));
+    let wrapper = out.join(format!("{stem}-preview.scad"));
+    let abs = target.canonicalize().with_context(|| format!("resolving {}", target.display()))?;
+    std::fs::write(&wrapper, format!("$preview = true;\ninclude <{}>;\n", abs.display()))?;
+    if !oscad.render(&wrapper, &viewer_stl, timeout)?.ok {
+        bail!("preview render failed");
+    }
+
+    // Downloads: the full STL, plus the print-plates .3mf if `fab make` left one next to the model.
+    let mut downloads =
+        vec![fab_scad::publish::Media { path: &full_stl, title: format!("{title} — STL") }];
+    let plates = target.with_file_name(format!("{stem}-plates.3mf"));
+    if plates.exists() {
+        downloads.push(fab_scad::publish::Media {
+            path: &plates,
+            title: format!("{title} — print plates (.3mf)"),
+        });
+    }
+
+    println!("publishing to {base}…");
+    let client = fab_scad::publish::Client::new(&base, &key)?;
+    let project = fab_scad::publish::Project {
+        title: &title,
+        description_md: &description,
+        cover_png: &cover,
+        viewer_stl: &viewer_stl,
+        downloads,
+    };
+    let page_url = fab_scad::publish::publish(&client, &project)?;
+    println!("published → {page_url}");
+    Ok(())
 }
 
 #[cfg(feature = "kernel")]

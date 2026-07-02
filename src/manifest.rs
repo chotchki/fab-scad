@@ -20,6 +20,16 @@ pub struct Manifest {
     pub part: Vec<Part>,
     /// Slicing spec — cuts + connectors the GUI edits and `fab slice` consumes (Phase 5).
     pub slicing: Option<Slicing>,
+    /// Publish metadata for `fab publish` → hotchkiss.io (Phase 15).
+    pub publish: Option<Publish>,
+}
+
+/// Publish metadata: the project-page body shown on hotchkiss.io/projects/<slug>.
+#[derive(Debug, Deserialize)]
+pub struct Publish {
+    /// Markdown description, rendered above the interactive preview + downloads on the project page.
+    #[serde(default)]
+    pub description: String,
 }
 
 #[derive(Debug, Deserialize)]

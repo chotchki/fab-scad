@@ -54,10 +54,11 @@ pub struct Project<'a> {
     pub title: &'a str,
     pub description_md: &'a str,
     pub cover_png: &'a Path,
-    /// The low-`$fn` preview mesh for the in-browser viewer — a COLORED 3MF (OpenSCAD carries the
-    /// model's `color()` into 3MF base materials), light enough to spin in a browser.
-    pub viewer: &'a Path,
-    /// Downloadable artifacts — full-res STL, plates `.3mf`, etc.
+    /// Mesh variants (LOD) uploaded as ONE media item — the site makes a variant per file in a
+    /// single request. Order low-res → full-res: the viewer renders the light one, the full one is
+    /// the download. Both COLORED 3MF (OpenSCAD carries `color()` into base materials).
+    pub mesh_variants: Vec<&'a Path>,
+    /// Extra standalone downloads (e.g. the print-plates `.3mf`), each its own media item.
     pub downloads: Vec<Media<'a>>,
 }
 
@@ -111,21 +112,27 @@ impl Client {
             .with_context(|| format!("{what} failed after {RETRIES} attempts"))
     }
 
-    /// Upload one file as media; returns its `media_ref`. `title` is the media's human label.
-    fn upload_media(&self, file: &Path, title: &str) -> Result<String> {
+    /// Upload one or more files as ONE media item — the site makes a variant per file in a single
+    /// request, so multiple files become LOD variants of one item (viewer picks the light one).
+    /// Returns the item's `media_ref`.
+    fn upload_media_multi(&self, files: &[&Path], title: &str) -> Result<String> {
         let url = format!("{}/admin/media/upload", self.base);
         let resp = self.send_retry("media upload", || {
-            let form = reqwest::blocking::multipart::Form::new()
-                .text("title", title.to_string())
-                .file("file", file)
-                .with_context(|| format!("reading {}", file.display()))?;
+            let mut form = reqwest::blocking::multipart::Form::new().text("title", title.to_string());
+            for f in files {
+                form = form.file("file", f).with_context(|| format!("reading {}", f.display()))?;
+            }
             Ok(self.http.post(&url).bearer_auth(&self.key).multipart(form))
         })?;
-        let status = resp.status();
-        if !status.is_success() {
-            bail!("media upload {} → {}", file.display(), status);
+        if !resp.status().is_success() {
+            bail!("media upload → {}", resp.status());
         }
         Ok(resp.json::<UploadResp>().context("parsing upload response")?.media_ref)
+    }
+
+    /// Upload a single file as its own media item; returns its `media_ref`.
+    fn upload_media(&self, file: &Path, title: &str) -> Result<String> {
+        self.upload_media_multi(&[file], title)
     }
 
     /// Does a project page already exist at this slug? (GET is public; 2xx = yes.)
@@ -179,13 +186,15 @@ pub fn publish(client: &Client, p: &Project) -> Result<String> {
     }
 
     let cover = client.upload_media(p.cover_png, &format!("{} — cover", p.title))?;
-    let viewer = client.upload_media(p.viewer, &format!("{} — preview", p.title))?;
+    // The mesh: all LOD variants in ONE request → one item (viewer renders the light variant, the
+    // full one downloads). Uploading them separately would make them unrelated items.
+    let model = client.upload_media_multi(&p.mesh_variants, &format!("{} — model", p.title))?;
     let mut downloads = Vec::with_capacity(p.downloads.len());
     for d in &p.downloads {
         downloads.push((d.title.clone(), client.upload_media(d.path, &d.title)?));
     }
 
-    let markdown = compose_markdown(p.description_md, &viewer, &downloads);
+    let markdown = compose_markdown(p.description_md, &model, &downloads);
     if !client.page_exists(&slug)? {
         client.create_page(p.title)?;
     }
@@ -231,7 +240,8 @@ pub fn publish_model(
         bail!("preview render failed");
     }
 
-    let mut downloads = vec![Media { path: &full, title: format!("{title} — 3MF") }];
+    // Standalone downloads (its own item each): the print-plates .3mf, if `fab make` left one.
+    let mut downloads = Vec::new();
     let plates = target.with_file_name(format!("{stem}-plates.3mf"));
     if plates.exists() {
         downloads.push(Media { path: &plates, title: format!("{title} — print plates (.3mf)") });
@@ -242,7 +252,8 @@ pub fn publish_model(
         title,
         description_md: description,
         cover_png: &cover,
-        viewer: &viewer,
+        // low-res (viewer) first, then full-res (download) — one item, LOD variants.
+        mesh_variants: vec![&viewer, &full],
         downloads,
     };
     publish(&client, &project)

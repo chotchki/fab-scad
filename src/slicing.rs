@@ -482,14 +482,14 @@ fn connector_line(s: &Slicing, c: &Connector) -> Result<String> {
 }
 
 /// Bolt-clearance dims by screw, mirroring connectors.scad `_insert_spec` (+ a shaft clearance and
-/// head counterbore): `(clearance_d, through, counterbore_d, counterbore_h, insert_d, insert_depth)`.
-/// `through` is a placeholder default until it's bound to the slab thickness (PLAN 5.3.9).
+/// head counterbore): `(clearance_d, counterbore_d, counterbore_h, insert_d, insert_depth)`. The
+/// through-depth is NOT here — `slice_solid` binds it to the above-slab thickness per placement.
 #[cfg(feature = "kernel")]
-fn bolt_dims(screw: Option<&str>) -> (f64, f64, f64, f64, f64, f64) {
+fn bolt_dims(screw: Option<&str>) -> (f64, f64, f64, f64, f64) {
     match screw.unwrap_or("M3") {
-        "M4" => (4.5, 12.0, 8.0, 4.0, 6.0, 6.0),
-        "M5" => (5.5, 12.0, 10.0, 5.0, 7.0, 10.0),
-        _ => (3.4, 12.0, 6.0, 3.0, 5.0, 6.0), // M3 default
+        "M4" => (4.5, 8.0, 4.0, 6.0, 6.0),
+        "M5" => (5.5, 10.0, 5.0, 7.0, 10.0),
+        _ => (3.4, 6.0, 3.0, 5.0, 6.0), // M3 default
     }
 }
 
@@ -506,11 +506,12 @@ pub fn slice_solid(s: &Slicing, base: &Solid) -> Result<Vec<([usize; 3], Solid)>
     const SLOP: f64 = 0.2; // socket grows the onion by this (matches onion_socket)
 
     let by_axis = axes_sorted(s)?;
+    let (_bmin, bmax) = base.bbox().context("slicing an empty base solid")?;
 
     // A connector's shape + the two cells it bridges.
     enum Shape {
         Onion { cap: V3, ang: f64, d: f64 },
-        Bolt { axis: V3, screw: Option<String> },
+        Bolt { axis: V3, screw: Option<String>, through: f64 },
     }
     struct Placed {
         below: [usize; 3],
@@ -547,13 +548,17 @@ pub fn slice_solid(s: &Slicing, base: &Solid) -> Result<Vec<([usize; 3], Solid)>
         let d = c.size.unwrap_or(10.0);
         let mut axis_unit = [0.0; 3];
         axis_unit[ai] = 1.0;
+        // Above-slab thickness on the cut axis (+ a hair for a clean boolean exit): the shaft spans
+        // exactly this piece so the head counterbore seats at its outer face, not a fixed depth.
+        let above_top = by_axis[ai].iter().copied().find(|&x| x > at + 1e-9).unwrap_or(bmax[ai]);
+        let through = above_top - at + 0.02;
         let shape = if c.kind == "onion" {
             match onion_resolution(s, &by_axis, c)? {
                 OnionAxis::Feasible { cap, ang } => Shape::Onion { cap, ang, d },
-                OnionAxis::Infeasible => Shape::Bolt { axis: axis_unit, screw: c.screw.clone() },
+                OnionAxis::Infeasible => Shape::Bolt { axis: axis_unit, screw: c.screw.clone(), through },
             }
         } else {
-            Shape::Bolt { axis: axis_unit, screw: c.screw.clone() }
+            Shape::Bolt { axis: axis_unit, screw: c.screw.clone(), through }
         };
         placed.push(Placed { below, above, point, shape });
     }
@@ -571,10 +576,10 @@ pub fn slice_solid(s: &Slicing, base: &Solid) -> Result<Vec<([usize; 3], Solid)>
                         cell = cell.difference(&at(socket));
                     }
                 }
-                Shape::Bolt { axis, screw } => {
+                Shape::Bolt { axis, screw, through } => {
                     if piece == p.below || piece == p.above {
-                        let (cl, thru, cb_d, cb_h, ins_d, ins_h) = bolt_dims(screw.as_deref());
-                        let bolt = Solid::bolt_clearance(cl, thru, cb_d, cb_h, ins_d, ins_h, SEG).align_z_to(*axis);
+                        let (cl, cb_d, cb_h, ins_d, ins_h) = bolt_dims(screw.as_deref());
+                        let bolt = Solid::bolt_clearance(cl, *through, cb_d, cb_h, ins_d, ins_h, SEG).align_z_to(*axis);
                         cell = cell.difference(&at(bolt));
                     }
                 }

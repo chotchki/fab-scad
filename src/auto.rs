@@ -88,23 +88,22 @@ fn axial_cap(cuts: &[(usize, f64)], i: usize, min: [f64; 3], max: [f64; 3]) -> f
 
 /// Auto-plan a print for a model too big for the bed: [`crate::auto_slice`] the bbox, then seed
 /// onions on each cut's cross-section (auto-placed, corner-cleared against perpendicular cuts,
-/// axial-capped by slab thickness). `base_stl` is the rendered whole model; `min`/`max` its bbox;
-/// `bed` the printer build volume `[x, y, z]`. A model that already fits → an empty plan.
+/// axial-capped by slab thickness). Cross-sections are IN-PROCESS ([`crate::kernel::Solid::cross_section`]),
+/// no OpenSCAD spawn. `base` is the whole-model solid; `min`/`max` its bbox; `bed` the printer build
+/// volume `[x, y, z]`. A model that already fits → an empty plan.
+#[cfg(feature = "kernel")]
 pub fn plan(
-    oscad: &Openscad,
-    base_stl: &Path,
+    base: &crate::kernel::Solid,
     min: [f64; 3],
     max: [f64; 3],
     bed: [f64; 3],
-    out_dir: &Path,
-    timeout: Duration,
 ) -> Result<AutoPlan> {
     let cuts: Vec<(usize, f64)> =
         crate::auto_slice::auto_slice(min, max, bed).into_iter().map(|c| (c.axis, c.at)).collect();
 
     let mut connectors = Vec::new();
     for (i, &(ai, at)) in cuts.iter().enumerate() {
-        let loops = cross_section::cross_section(oscad, base_stl, ai, at, out_dir, timeout)?;
+        let loops = base.cross_section(ai, at); // in-process, no OpenSCAD spawn (17.2)
         let placements = cross_section::auto_place(
             &loops,
             ONION_WALL,
@@ -189,8 +188,8 @@ pub fn make(
     let base = Solid::from_stl_file(&base_stl)?;
     let (min, max) = base.bbox().context("model has no geometry")?;
 
-    // Auto-plan cuts + onions.
-    let planned = plan(oscad, &base_stl, min, max, bed, out_dir, timeout)?;
+    // Auto-plan cuts + onions (in-process cross-sections, no per-cut OpenSCAD spawn).
+    let planned = plan(&base, min, max, bed)?;
     let connectors = planned.connectors;
     let make_cut = || -> Vec<Cut> {
         planned.cuts.iter().map(|&(ax, at)| Cut { axis: ax.to_string(), at: Num::Float(at) }).collect()
@@ -294,23 +293,15 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "needs OpenSCAD; run with --ignored"]
+    #[cfg(feature = "kernel")]
     fn plan_slices_and_connects_a_big_box() {
-        let tmp = std::env::temp_dir().join(format!("auto_plan_{}", std::process::id()));
-        std::fs::create_dir_all(&tmp).unwrap();
-        let scad = tmp.join("box.scad");
-        std::fs::write(&scad, "cube([600,100,50]);").unwrap();
-        let stl = tmp.join("box.stl");
-        let oscad = Openscad::discover(None).unwrap();
-        oscad.render(&scad, &stl, Duration::from_secs(60)).unwrap();
-
-        // 600mm on X, 256 bed → X overflows (only X) → cuts on X, onions on the cut faces.
-        let p = plan(&oscad, &stl, [0.0; 3], [600.0, 100.0, 50.0], [256.0; 3], &tmp, Duration::from_secs(60))
-            .unwrap();
+        // Now in-process — no OpenSCAD needed. 600mm on X, 256 bed → X overflows (only X) → cuts on
+        // X, onions on the cut faces. Kernel cube (min corner at origin) matches the min/max.
+        let base = crate::kernel::Solid::cube(600.0, 100.0, 50.0, false);
+        let p = plan(&base, [0.0; 3], [600.0, 100.0, 50.0], [256.0; 3]).unwrap();
         assert!(!p.cuts.is_empty(), "600mm on a 256 bed must be cut");
         assert!(p.cuts.iter().all(|&(ax, _)| ax == 'x'), "only X overflows: {:?}", p.cuts);
         assert!(!p.connectors.is_empty(), "onions seeded on the cut faces");
         assert!(p.connectors.iter().all(|c| c.kind == "onion" && c.size.is_some()));
-        let _ = std::fs::remove_dir_all(&tmp);
     }
 }

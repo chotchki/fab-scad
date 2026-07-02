@@ -177,16 +177,25 @@ fn to_tris(m: &StlMesh) -> Vec<[[f64; 3]; 3]> {
 }
 
 /// The cut's 2D cross-section profile (loops in connector-pos coords), from the already-rendered
-/// preview STL — for the per-cut connector editor.
-pub fn cross_section(
-    root: Option<&Path>,
-    stl: &Path,
-    axis: usize,
-    at: f64,
-    out_dir: &Path,
-) -> Result<Vec<Vec<[f64; 2]>>> {
-    let oscad = Openscad::discover(root)?;
-    fab_scad::cross_section::cross_section(&oscad, stl, axis, at, out_dir, TIMEOUT)
+/// preview STL — for the per-cut connector editor. IN-PROCESS via the kernel (no OpenSCAD spawn);
+/// the Solid lives + dies here (it's !Send).
+pub fn cross_section(stl: &Path, axis: usize, at: f64) -> Result<Vec<Vec<[f64; 2]>>> {
+    use fab_scad::kernel::Solid;
+    Ok(Solid::from_stl_file(stl)?.cross_section(axis, at))
+}
+
+/// Auto-plan cuts + onion connectors for a too-big model — loads the base solid from the rendered
+/// STL and runs the in-process planner ([`fab_scad::auto::plan`], no per-cut OpenSCAD spawn). The
+/// Solid lives + dies here (it's !Send); only the plain-data plan crosses back.
+pub fn auto_plan(
+    base_stl: &Path,
+    min: [f64; 3],
+    max: [f64; 3],
+    bed: [f64; 3],
+) -> Result<fab_scad::auto::AutoPlan> {
+    use fab_scad::kernel::Solid;
+    let base = Solid::from_stl_file(base_stl)?;
+    fab_scad::auto::plan(&base, min, max, bed)
 }
 
 /// Slice the source at the given cuts — each `(axis, at)` with axis in `'x' | 'y' | 'z'` (preview

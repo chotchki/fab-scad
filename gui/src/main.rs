@@ -1326,7 +1326,7 @@ fn edit_mode(
         *t = orbit_transform(o.yaw, o.pitch, o.radius, o.target);
     }
     let stl = fab::whole_stl(&src, &cfg.tmp);
-    match fab::cross_section(cfg.root.as_deref(), &stl, c.axis.index(), c.at as f64, &cfg.tmp) {
+    match fab::cross_section(&stl, c.axis.index(), c.at as f64) {
         Ok(loops) => {
             xsection.0 = Some(
                 loops
@@ -3533,12 +3533,9 @@ fn kick_auto_plan(
         return; // base not rendered to disk yet
     }
     planned.0 = Some(src.clone()); // fire once per source
-    let (root, tmp) = (scene.root.clone(), scene.tmp.clone());
     let task = AsyncComputeTaskPool::get().spawn(async move {
-        let oscad =
-            fab_scad::openscad::Openscad::discover(root.as_deref()).map_err(|e| format!("{e:#}"))?;
-        fab_scad::auto::plan(&oscad, &base_stl, lo, hi, bed, &tmp, std::time::Duration::from_secs(60))
-            .map_err(|e| format!("{e:#}"))
+        // In-process cross-sections — the base Solid lives + dies inside fab::auto_plan (!Send).
+        fab::auto_plan(&base_stl, lo, hi, bed).map_err(|e| format!("{e:#}"))
     });
     job.0 = Some(task);
     status.0 = "auto-planning…".into();

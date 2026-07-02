@@ -10,12 +10,13 @@ HIO_API_KEY=hio_… fab publish Underdesk.scad
 ## What it uploads
 
 - **Cover thumbnail** (`.png`) — OpenSCAD's auto-framed render (`--viewall`, Cornfield).
-- **Preview mesh** (`.stl`) — a LOW-`$fn` render for the in-browser 3D viewer. Forced by a
-  `$preview = true` include wrapper, so the source's `$fn = $preview ? low : high` takes the light
-  path — a mesh a browser can spin without choking. (A model with no curves, or that doesn't follow
-  the convention, just gets the same mesh as full-res — fine, it falls back.)
-- **Downloads** — the full-res `.stl`, plus `<stem>-plates.3mf` if `fab make` left a printable plate
-  next to the model.
+- **Preview mesh** (`.3mf`) — a LOW-`$fn`, COLORED render for the in-browser viewer. OpenSCAD's 3MF
+  export carries the model's `color()` as base materials (STL is colorless — that's why the viewer is
+  3MF), and low-`$fn` keeps it light. Forced by a `$preview = true` include wrapper so the source's
+  `$fn = $preview ? low : high` takes the light path. (A model with no curves just gets the same mesh
+  as full-res — fine, it falls back.)
+- **Downloads** — the full-res `.3mf` (colored, and far lighter than the equivalent STL — a bowtie
+  went 23 MB STL → 1.5 MB 3MF), plus `<stem>-plates.3mf` if `fab make` left a printable plate.
 
 ## Setup
 

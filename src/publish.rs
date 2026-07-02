@@ -216,8 +216,9 @@ pub fn publish_model(
     if !oscad.thumbnail(target, &cover, (1200, 900), timeout)?.ok {
         bail!("cover render failed");
     }
-    let full_stl = out_dir.join(format!("{stem}.stl"));
-    if !oscad.render(target, &full_stl, timeout)?.ok {
+    // Full-res download as 3MF too — carries color, and lighter than a raw STL.
+    let full = out_dir.join(format!("{stem}.3mf"));
+    if !oscad.render(target, &full, timeout)?.ok {
         bail!("mesh render failed");
     }
     // A COLORED 3MF, not a flat STL: OpenSCAD's 3MF export carries the model's `color()` as base
@@ -230,7 +231,7 @@ pub fn publish_model(
         bail!("preview render failed");
     }
 
-    let mut downloads = vec![Media { path: &full_stl, title: format!("{title} — STL") }];
+    let mut downloads = vec![Media { path: &full, title: format!("{title} — 3MF") }];
     let plates = target.with_file_name(format!("{stem}-plates.3mf"));
     if plates.exists() {
         downloads.push(Media { path: &plates, title: format!("{title} — print plates (.3mf)") });

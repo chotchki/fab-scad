@@ -9,14 +9,15 @@ HIO_API_KEY=hio_… fab publish Underdesk.scad
 
 ## What it uploads
 
-- **Cover thumbnail** (`.png`) — OpenSCAD's auto-framed render (`--viewall`, Cornfield).
-- **Preview mesh** (`.3mf`) — a LOW-`$fn`, COLORED render for the in-browser viewer. OpenSCAD's 3MF
-  export carries the model's `color()` as base materials (STL is colorless — that's why the viewer is
-  3MF), and low-`$fn` keeps it light. Forced by a `$preview = true` include wrapper so the source's
-  `$fn = $preview ? low : high` takes the light path. (A model with no curves just gets the same mesh
-  as full-res — fine, it falls back.)
-- **Downloads** — the full-res `.3mf` (colored, and far lighter than the equivalent STL — a bowtie
-  went 23 MB STL → 1.5 MB 3MF), plus `<stem>-plates.3mf` if `fab make` left a printable plate.
+- **Cover** (`.png`) — OpenSCAD's auto-framed render; the page cover (its own media item).
+- **Model mesh** — the low-`$fn` COLORED 3MF (viewer) + the full-res COLORED 3MF (download), uploaded
+  as ONE media item with **LOD variants**. The site groups a multi-file upload into one item (a
+  variant per file), so the viewer renders the light variant and the full one is its download —
+  uploading them separately would make two unrelated items. OpenSCAD's 3MF export carries the model's
+  `color()` as base materials (STL is colorless — that's why the mesh is 3MF); low-`$fn` (via the
+  `$preview = true` include wrapper) keeps the viewer variant light — a bowtie's full mesh went 23 MB
+  STL → 1.5 MB 3MF. (A model with no curves just gets the same mesh both ways — fine, it falls back.)
+- **Print plates** — `<stem>-plates.3mf` if `fab make` left one beside the model, as its own download.
 
 ## Setup
 
@@ -47,8 +48,10 @@ resolves the manifest, renders + uploads, and reports the page URL in the status
 The site has no bespoke publish API — `fab publish` drives the *existing* admin + media endpoints:
 
 - **Auth**: `Authorization: Bearer hio_…`.
-- **Media**: `POST /admin/media/upload` (multipart `file` + `title`) → JSON `{media_ref}`. Content-
-  addressed, so re-uploading identical bytes dedups server-side.
+- **Media**: `POST /admin/media/upload` (multipart: one or more `file` parts + `title`) → JSON
+  `{media_ref}`. Multiple `file` parts in ONE request = one item with a variant each (this is how LOD
+  works — batch them, don't upload separately). Content-addressed, so identical bytes dedup. Served
+  at `/media/file/<ref>` (what the markdown embeds/links point at).
 - **Page**: create `POST /pages/projects` (form `page_title`, server slugifies), then write
   `PUT /pages/projects/{slug}` (markdown body + `page_cover_media_ref`).
 - **Idempotent by slug**: there's no upsert route, so the client mirrors the server's `slugify`

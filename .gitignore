@@ -26,6 +26,9 @@ target
 # fab per-user working state (active project, etc.) — not shared
 .fab/
 
+# fab render/slice/make/publish output — regenerable, never committed
+out/
+
 # macOS Finder metadata
 .DS_Store
 **/.DS_Store

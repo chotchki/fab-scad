@@ -186,7 +186,14 @@ pub fn make(
         bail!("source render failed: {}", source.display());
     }
     let base = Solid::from_stl_file(&base_stl)?;
-    let (min, max) = base.bbox().context("model has no geometry")?;
+    base.bbox().context("model has no geometry")?;
+
+    // Rotate-to-fit: spin the model to the fewest bed pieces before cutting — a part lying diagonally
+    // fits in fewer. The pieces come out in the rotated frame and re-orient per-piece for printing, so
+    // the assembled object is identical, just cut less. Identity when no spin helps.
+    let fit = crate::auto_slice::best_fit_rotation(&base, bed);
+    let base = base.transform(&fit.rot);
+    let (min, max) = (fit.min, fit.max);
 
     // Auto-plan cuts + onions (in-process cross-sections, no per-cut OpenSCAD spawn).
     let planned = plan(&base, min, max, bed)?;

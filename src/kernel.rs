@@ -135,6 +135,26 @@ impl Solid {
         Solid::batch_union(&[shaft, cbore, pocket])
     }
 
+    /// Cross-section at `axis` (0=X, 1=Y, 2=Z) = `at`, as profile loops in connector-pos coords (the
+    /// cut's two non-axis dims, ascending) — the IN-PROCESS twin of the OpenSCAD `projection(cut=true)`
+    /// path, no shell-out. Rotate the cut plane onto z with a PROPER rotation that also lands the two
+    /// non-axis dims on (x, y) in order, then slice: the slice's (x, y) IS pos — X→(y,z), Y→(x,z),
+    /// Z→(x,y), no SVG y-negation to undo. One outer loop + one per hole; empty if the plane misses.
+    pub fn cross_section(&self, axis: usize, at: f64) -> Vec<Vec<[f64; 2]>> {
+        // Column-major 3×4 (columns = images of e_x, e_y, e_z; last = translation). Each is a proper
+        // rotation (det +1) so loop winding is preserved.
+        let (rot, h) = match axis {
+            // (x,y,z) → (y, z, x): x-normal → +z; slice at `at`, giving (y, z).
+            0 => (self.transform(&[0., 0., 1., 1., 0., 0., 0., 1., 0., 0., 0., 0.]), at),
+            // (x,y,z) → (x, z, −y): y-normal → −z; slice at −`at`, giving (x, z).
+            1 => (self.transform(&[1., 0., 0., 0., 0., -1., 0., 1., 0., 0., 0., 0.]), -at),
+            // z-normal already +z; slice at `at`, giving (x, y).
+            2 => (self.clone(), at),
+            _ => return Vec::new(),
+        };
+        rot.0.slice_at_z(h)
+    }
+
     // --- import (11.2) ---------------------------------------------------------------------------
 
     /// Load an STL file (binary or ASCII) as a Solid — the front-door for a mesh OpenSCAD rendered.
@@ -491,6 +511,36 @@ mod tests {
         assert!((min[1] + r).abs() < 0.1, "y bottom ≈ −r, got {}", min[1]);
         assert!((max[1] - r * std::f64::consts::SQRT_2).abs() < 0.2, "y peak ≈ r·√2, got {}", max[1]);
         assert!(min[2].abs() < 1e-6 && (max[2] - len).abs() < 1e-6, "z ∈ [0,len]");
+    }
+
+    #[test]
+    fn cross_section_returns_pos_coords_per_axis() {
+        // A box with distinct extents so a swapped/negated axis can't hide: x∈[0,10], y∈[0,20], z∈[0,30].
+        let b = Solid::cube(10.0, 20.0, 30.0, false);
+        let bbox2 = |loops: Vec<Vec<[f64; 2]>>| {
+            let (mut lo, mut hi) = ([f64::INFINITY; 2], [f64::NEG_INFINITY; 2]);
+            for lp in &loops {
+                for p in lp {
+                    for k in 0..2 {
+                        lo[k] = lo[k].min(p[k]);
+                        hi[k] = hi[k].max(p[k]);
+                    }
+                }
+            }
+            (lo, hi)
+        };
+        let approx = |a: f64, b: f64| (a - b).abs() < 0.05;
+        // Z cut → pos (x, y) = [0,10]×[0,20].
+        let (lo, hi) = bbox2(b.cross_section(2, 15.0));
+        assert!(approx(lo[0], 0.0) && approx(hi[0], 10.0) && approx(lo[1], 0.0) && approx(hi[1], 20.0), "Z: {lo:?}..{hi:?}");
+        // X cut → pos (y, z) = [0,20]×[0,30].
+        let (lo, hi) = bbox2(b.cross_section(0, 5.0));
+        assert!(approx(lo[0], 0.0) && approx(hi[0], 20.0) && approx(lo[1], 0.0) && approx(hi[1], 30.0), "X: {lo:?}..{hi:?}");
+        // Y cut → pos (x, z) = [0,10]×[0,30].
+        let (lo, hi) = bbox2(b.cross_section(1, 10.0));
+        assert!(approx(lo[0], 0.0) && approx(hi[0], 10.0) && approx(lo[1], 0.0) && approx(hi[1], 30.0), "Y: {lo:?}..{hi:?}");
+        // A plane that misses the solid → no loops.
+        assert!(b.cross_section(2, 99.0).is_empty(), "miss → empty");
     }
 
     #[test]

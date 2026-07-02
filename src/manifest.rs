@@ -117,6 +117,25 @@ impl Manifest {
         toml::from_str(&text).with_context(|| format!("parsing manifest {}", path.display()))
     }
 
+    /// Walk up from `near` to the nearest `project.toml`.
+    pub fn find(near: &Path) -> Result<PathBuf> {
+        let abs = near.canonicalize().with_context(|| format!("resolving {}", near.display()))?;
+        let mut dir = abs.parent();
+        while let Some(d) = dir {
+            let m = d.join("project.toml");
+            if m.exists() {
+                return Ok(m);
+            }
+            dir = d.parent();
+        }
+        anyhow::bail!("no project.toml found above {}", near.display())
+    }
+
+    /// Find + load the manifest nearest `near` (the project.toml above it).
+    pub fn load_near(near: &Path) -> Result<Manifest> {
+        Self::load(&Self::find(near)?)
+    }
+
     pub fn title(&self) -> &str {
         self.project.title.as_deref().unwrap_or(&self.project.name)
     }

@@ -310,6 +310,11 @@ struct AutoJob(Option<Task<Result<fab_scad::auto::AutoPlan, String>>>);
 #[derive(Resource, Default)]
 struct AutoPlanned(Option<PathBuf>);
 
+/// The in-flight publish job (render artifacts + upload to hotchkiss.io, off-thread). Yields the
+/// published page URL or an error string.
+#[derive(Resource, Default)]
+struct PublishJob(Option<Task<Result<String, String>>>);
+
 /// The orbit camera (yaw, pitch, radius, target) as it was in NORMAL view, saved while there so a
 /// mode that hijacks the camera (the 2D editor's face-on, the print preview's bed-frame) can hand
 /// it back when you return. Without this, leaving a mode strands you at the mode's camera.
@@ -545,6 +550,7 @@ fn run_windowed(scene: SceneCfg) {
         .init_resource::<PrintPieces>()
         .init_resource::<AutoJob>()
         .init_resource::<AutoPlanned>()
+        .init_resource::<PublishJob>()
         .init_resource::<PrevCam>()
         .init_resource::<Feas>()
         .init_resource::<ModelBounds>()
@@ -577,6 +583,7 @@ fn run_windowed(scene: SceneCfg) {
                 // Auto-on-open: a fresh too-big model auto-slices + connects (kick), then the plan
                 // lands and seeds cuts + connectors (poll). After poll_job so bounds are set.
                 (kick_auto_plan, poll_auto_plan).chain().after(poll_job),
+                poll_publish,
                 (poll_open_dialog, apply_switch_file, watch_source),
                 update_status,
                 sync_overlays,
@@ -3362,7 +3369,83 @@ fn view_section(cuts: &Cuts, files: &FileList) -> impl Scene + 'static {
                 @FeathersButton { @caption: bsn!{ Text("Print view") ThemedText } }
                 on(|_: On<Activate>, mut pv: ResMut<PrintView>| { pv.0 = true; })
             ),
+            // Publish to hotchkiss.io (needs $HIO_API_KEY). Renders cover + preview + full off-thread.
+            (
+                @FeathersButton { @caption: bsn!{ Text("Publish") ThemedText } }
+                on(publish_action)
+            ),
         ]
+    }
+}
+
+/// Publish the active model to hotchkiss.io off-thread: render the cover + low-`$fn` preview + full
+/// STL and upload them via `fab_scad::publish::publish_model`, reusing the CLI's exact path. Auth +
+/// base URL come from `$HIO_API_KEY` / `$HIO_URL`; title/description from the project.toml.
+fn publish_action(
+    _: On<Activate>,
+    scene: Res<SceneCfg>,
+    mut job: ResMut<PublishJob>,
+    mut status: ResMut<Status>,
+) {
+    if job.0.is_some() {
+        status.0 = "already publishing…".into();
+        return;
+    }
+    let Some(src) = scene.source.clone() else {
+        status.0 = "no .scad to publish".into();
+        return;
+    };
+    let Ok(key) = std::env::var("HIO_API_KEY") else {
+        status.0 = "set $HIO_API_KEY to publish".into();
+        return;
+    };
+    let base = std::env::var("HIO_URL").unwrap_or_else(|_| "https://hotchkiss.io".to_string());
+    let (root, out) = (scene.root.clone(), scene.tmp.join("publish"));
+    let task = AsyncComputeTaskPool::get().spawn(async move {
+        let oscad =
+            fab_scad::openscad::Openscad::discover(root.as_deref()).map_err(|e| format!("{e:#}"))?;
+        // Title/description from the nearest project.toml; fall back to the file stem.
+        let (title, description) = match fab_scad::manifest::Manifest::load_near(&src) {
+            Ok(m) => {
+                let title = m.title().to_string();
+                (title, m.publish.map(|p| p.description).unwrap_or_default())
+            }
+            Err(_) => (
+                src.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "model".into()),
+                String::new(),
+            ),
+        };
+        fab_scad::publish::publish_model(
+            &oscad,
+            &src,
+            &title,
+            &description,
+            &base,
+            &key,
+            &out,
+            std::time::Duration::from_secs(180),
+        )
+        .map_err(|e| format!("{e:#}"))
+    });
+    job.0 = Some(task);
+    status.0 = "publishing…".into();
+}
+
+/// Land the publish job: show the URL, or the error.
+fn poll_publish(mut job: ResMut<PublishJob>, mut status: ResMut<Status>) {
+    let Some(task) = job.0.as_mut() else {
+        return;
+    };
+    let Some(result) = block_on(future::poll_once(task)) else {
+        return;
+    };
+    job.0 = None;
+    match result {
+        Ok(url) => {
+            status.0 = format!("published → {url}");
+            info!("{}", status.0);
+        }
+        Err(e) => status.0 = format!("publish failed: {e}"),
     }
 }
 

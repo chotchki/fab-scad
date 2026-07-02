@@ -18,6 +18,8 @@ use std::time::Duration;
 use anyhow::{anyhow, bail, Context, Result};
 use serde::Deserialize;
 
+use crate::openscad::Openscad;
+
 /// Max attempts for a transient (connection / timeout / 5xx) failure — chotchki's "overload retry".
 const RETRIES: u32 = 5;
 
@@ -188,6 +190,58 @@ pub fn publish(client: &Client, p: &Project) -> Result<String> {
     }
     client.update_page(&slug, p.title, &markdown, &cover)?;
     Ok(format!("{}/pages/projects/{}", client.base, slug))
+}
+
+/// Render the publish artifacts for `target` and publish them: a cover thumbnail, the full-res STL,
+/// and a low-`$fn` PREVIEW mesh (forced via a `$preview = true` include wrapper so the source's
+/// `$fn = $preview ? low : high` takes the light path — a mesh a browser viewer can handle). Gathers
+/// downloads (the full STL + a `<stem>-plates.3mf` if `fab make` left one beside the model), then
+/// creates/updates the project page. Shared by the CLI (`fab publish`) and the GUI Publish button.
+pub fn publish_model(
+    oscad: &Openscad,
+    target: &Path,
+    title: &str,
+    description: &str,
+    base: &str,
+    key: &str,
+    out_dir: &Path,
+    timeout: Duration,
+) -> Result<String> {
+    std::fs::create_dir_all(out_dir)?;
+    let stem =
+        target.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "part".into());
+
+    let cover = out_dir.join(format!("{stem}.png"));
+    if !oscad.thumbnail(target, &cover, (1200, 900), timeout)?.ok {
+        bail!("cover render failed");
+    }
+    let full_stl = out_dir.join(format!("{stem}.stl"));
+    if !oscad.render(target, &full_stl, timeout)?.ok {
+        bail!("mesh render failed");
+    }
+    let viewer_stl = out_dir.join(format!("{stem}-preview.stl"));
+    let wrapper = out_dir.join(format!("{stem}-preview.scad"));
+    let abs = target.canonicalize().with_context(|| format!("resolving {}", target.display()))?;
+    std::fs::write(&wrapper, format!("$preview = true;\ninclude <{}>;\n", abs.display()))?;
+    if !oscad.render(&wrapper, &viewer_stl, timeout)?.ok {
+        bail!("preview render failed");
+    }
+
+    let mut downloads = vec![Media { path: &full_stl, title: format!("{title} — STL") }];
+    let plates = target.with_file_name(format!("{stem}-plates.3mf"));
+    if plates.exists() {
+        downloads.push(Media { path: &plates, title: format!("{title} — print plates (.3mf)") });
+    }
+
+    let client = Client::new(base, key)?;
+    let project = Project {
+        title,
+        description_md: description,
+        cover_png: &cover,
+        viewer_stl: &viewer_stl,
+        downloads,
+    };
+    publish(&client, &project)
 }
 
 /// Compose the page body: the description, the embedded interactive preview mesh, then a downloads

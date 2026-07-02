@@ -277,60 +277,18 @@ fn publish_cmd(target: &Path, url: Option<String>, api_key: Option<String>) -> R
 
     let root = find_root();
     let oscad = Openscad::discover(root.as_deref())?;
-    let timeout = Duration::from_secs(120);
-    let stem = target
-        .file_stem()
-        .map(|s| s.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "part".into());
     let out = target.parent().unwrap_or_else(|| Path::new(".")).join("out").join("publish");
-    std::fs::create_dir_all(&out)?;
-
-    // Cover thumbnail.
-    println!("rendering cover…");
-    let cover = out.join(format!("{stem}.png"));
-    if !oscad.thumbnail(target, &cover, (1200, 900), timeout)?.ok {
-        bail!("cover render failed");
-    }
-
-    // Full-res mesh (download).
-    println!("rendering full-res mesh…");
-    let full_stl = out.join(format!("{stem}.stl"));
-    if !oscad.render(target, &full_stl, timeout)?.ok {
-        bail!("mesh render failed");
-    }
-
-    // Low-`$fn` viewer mesh: force `$preview = true` so the source's `$fn = $preview ? low : high`
-    // takes the low path — a light mesh the in-browser viewer can handle.
-    println!("rendering preview mesh…");
-    let viewer_stl = out.join(format!("{stem}-preview.stl"));
-    let wrapper = out.join(format!("{stem}-preview.scad"));
-    let abs = target.canonicalize().with_context(|| format!("resolving {}", target.display()))?;
-    std::fs::write(&wrapper, format!("$preview = true;\ninclude <{}>;\n", abs.display()))?;
-    if !oscad.render(&wrapper, &viewer_stl, timeout)?.ok {
-        bail!("preview render failed");
-    }
-
-    // Downloads: the full STL, plus the print-plates .3mf if `fab make` left one next to the model.
-    let mut downloads =
-        vec![fab_scad::publish::Media { path: &full_stl, title: format!("{title} — STL") }];
-    let plates = target.with_file_name(format!("{stem}-plates.3mf"));
-    if plates.exists() {
-        downloads.push(fab_scad::publish::Media {
-            path: &plates,
-            title: format!("{title} — print plates (.3mf)"),
-        });
-    }
-
-    println!("publishing to {base}…");
-    let client = fab_scad::publish::Client::new(&base, &key)?;
-    let project = fab_scad::publish::Project {
-        title: &title,
-        description_md: &description,
-        cover_png: &cover,
-        viewer_stl: &viewer_stl,
-        downloads,
-    };
-    let page_url = fab_scad::publish::publish(&client, &project)?;
+    println!("publishing {} to {base}… (rendering cover + full + preview meshes)", target.display());
+    let page_url = fab_scad::publish::publish_model(
+        &oscad,
+        target,
+        &title,
+        &description,
+        &base,
+        &key,
+        &out,
+        Duration::from_secs(120),
+    )?;
     println!("published → {page_url}");
     Ok(())
 }

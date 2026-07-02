@@ -6,6 +6,7 @@
 
 #![cfg(feature = "kernel")]
 
+use fab_scad::cross_section;
 use fab_scad::kernel::Solid;
 use fab_scad::manifest::Manifest;
 use fab_scad::openscad::Openscad;
@@ -192,6 +193,70 @@ fn connectors_match_openscad() {
         assert!(approx(kmin, omin, 0.5) && approx(kmax, omax, 0.5),
             "connector bbox mismatch piece {idx:?}: kernel {kmin:?}..{kmax:?} vs os {omin:?}..{omax:?}");
         eprintln!("connector parity OK piece {idx:?}: kernel {} tris, os {} tris", kpiece.num_tri(), opiece.num_tri());
+    }
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+fn approx2(a: [f64; 2], b: [f64; 2], tol: f64) -> bool {
+    (0..2).all(|k| (a[k] - b[k]).abs() < tol)
+}
+
+fn bbox2(loops: &[Vec<[f64; 2]>]) -> ([f64; 2], [f64; 2]) {
+    let (mut lo, mut hi) = ([f64::INFINITY; 2], [f64::NEG_INFINITY; 2]);
+    for lp in loops {
+        for p in lp {
+            for k in 0..2 {
+                lo[k] = lo[k].min(p[k]);
+                hi[k] = hi[k].max(p[k]);
+            }
+        }
+    }
+    (lo, hi)
+}
+
+/// The in-process kernel cross-section must describe the SAME cut profile OpenSCAD's projection does:
+/// same extent (coords + convention) and same loop count (a hole shows up in both). Fixture is a
+/// 100×80×40 box with an off-centre Z through-hole.
+#[test]
+#[ignore = "needs OpenSCAD; run with --ignored"]
+fn cross_section_matches_openscad() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let Ok(os) = Openscad::discover(Some(root.as_path())) else {
+        eprintln!("skipping: OpenSCAD not found");
+        return;
+    };
+    let tmp = std::env::temp_dir().join(format!("fab_xsec_parity_{}", std::process::id()));
+    std::fs::create_dir_all(&tmp).unwrap();
+    let t = |n: &str| tmp.join(n);
+    let fixture = t("fixture.scad");
+    std::fs::write(
+        &fixture,
+        "difference(){ cube([100,80,40],center=true); translate([12,-6,0]) cylinder(h=60,d=24,center=true,$fn=64); }",
+    )
+    .unwrap();
+    let base_stl = t("base.stl");
+    assert!(os.render(&fixture, &base_stl, Duration::from_secs(60)).unwrap().ok);
+    let solid = Solid::from_stl_file(&base_stl).unwrap();
+
+    // (axis, at, expected loop count, expected pos bbox). Z@0 slices THROUGH the hole (outer+hole=2);
+    // X@-30 and Y@30 miss the hole (plain rectangle=1). Bboxes double as the coord-convention check:
+    // Z→(x,y), X→(y,z), Y→(x,z).
+    let cases = [
+        (2usize, 0.0f64, 2, ([-50.0, -40.0], [50.0, 40.0])),
+        (0, -30.0, 1, ([-40.0, -20.0], [40.0, 20.0])),
+        (1, 30.0, 1, ([-50.0, -20.0], [50.0, 20.0])),
+    ];
+    for &(axis, at, want_loops, (want_lo, want_hi)) in &cases {
+        let os_loops =
+            cross_section::cross_section(&os, &base_stl, axis, at, &tmp, Duration::from_secs(60)).unwrap();
+        let ks_loops = solid.cross_section(axis, at);
+        assert_eq!(os_loops.len(), want_loops, "OpenSCAD axis {axis} loop count");
+        assert_eq!(ks_loops.len(), want_loops, "kernel axis {axis} loop count");
+        let (klo, khi) = bbox2(&ks_loops);
+        let (olo, ohi) = bbox2(&os_loops);
+        assert!(approx2(klo, want_lo, 0.6) && approx2(khi, want_hi, 0.6), "kernel axis {axis} bbox {klo:?}..{khi:?}");
+        assert!(approx2(olo, want_lo, 0.6) && approx2(ohi, want_hi, 0.6), "os axis {axis} bbox {olo:?}..{ohi:?}");
+        eprintln!("xsec parity OK axis {axis}: {want_loops} loop(s), bbox {klo:?}..{khi:?}");
     }
     let _ = std::fs::remove_dir_all(&tmp);
 }

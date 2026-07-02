@@ -5,13 +5,17 @@
 //! into the jigsaw-intersection mess chotchki wants to avoid). Pure bbox math, so `fab make` and the
 //! GUI compute the same cuts.
 //!
-//! Known v1 limits (deliberate, documented rather than hidden):
+//! [`best_fit_rotation`] (v2, Phase 17) closes the rotate-to-fit gap: it spins the model to the
+//! fewest bed pieces (trying ±45° about each axis) BEFORE this partitions the resulting bbox — so a
+//! diagonal part lines up with an axis instead of over-cutting. `fab make` applies it.
+//!
+//! Known limits (deliberate, documented rather than hidden):
 //!   - **bbox-based**: cuts the whole grid even through empty space — an L-model's empty cells just
 //!     drop out downstream (the slicer discards empty pieces).
-//!   - **no rotate-to-fit**: each cell is cut to fit AXIS-ALIGNED against the matching bed dim, so a
-//!     piece that would fit the bed if spun still gets cut. Conservative, occasionally over-cuts.
 //!   - **feature-blind placement**: equal division doesn't dodge thin features or spots a connector
 //!     can't seat. Cuts land on the even grid; a v2 could nudge them.
+//!   - **coarse rotation set**: rotate-to-fit tries a fixed ±45°/axis set, not a continuous search —
+//!     enough for the common diagonal case, but not an optimal orientation solver.
 
 /// A planned cut: which axis (0 = X, 1 = Y, 2 = Z) and its position along that axis (model coords).
 #[derive(Debug, Clone, Copy, PartialEq)]

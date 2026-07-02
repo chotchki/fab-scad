@@ -14,11 +14,15 @@ fab make Underdesk.scad --printer H2D -o plates.3mf
 All of it is ONE pure lib (`fab_scad::auto`), called by both front-ends — so the CLI and the GUI
 produce the same plan, there is no logic mirrored per skin.
 
-1. **auto-slice** (`auto_slice`) — partition the model's bbox so every cell fits the bed. For each
-   axis the model overflows, cut into `ceil(extent / bed)` EQUAL slabs (equal so there are no
-   slivers), and cut ONLY the overflowing axes (single-axis when just one dimension is too big — no
-   needless grid intersections).
-2. **auto-connect** (`plan` → `cross_section::auto_place`) — seed onions on each cut's cross-section.
+1. **rotate-to-fit + auto-slice** (`auto_slice`) — FIRST spin the model to the fewest bed pieces
+   (`best_fit_rotation` tries ±45° about each axis, rotating the actual geometry and scoring each by
+   piece count), so a part lying diagonally lines up with an axis instead of over-cutting — a 500mm
+   bar at 45° drops from 4 pieces to 2. THEN partition the (rotated) bbox so every cell fits the bed:
+   for each overflowing axis, cut into `ceil(extent / bed)` EQUAL slabs (equal so there are no
+   slivers), and cut ONLY the overflowing axes (no needless grid intersections). The pieces come out
+   rotated and re-orient per-piece for printing, so the assembled object is identical — just cut less.
+2. **auto-connect** (`plan` → `cross_section::auto_place`) — seed onions on each cut's cross-section,
+   computed IN-PROCESS via the Manifold kernel (`Solid::cross_section`, no per-cut OpenSCAD spawn).
    Onions are ALIGNMENT guides, not structure, so the placement is a GEODESIC covering: it floods the
    connected material (grid BFS) out to `ONION_SPACING` and drops a guide wherever a stretch would
    otherwise go unpinned. Distance follows the SHAPE, so each rail gets pinned along its own length
@@ -37,26 +41,31 @@ produce the same plan, there is no logic mirrored per skin.
 ## Two front-ends, one brain
 
 - **`fab make`** — headless one-shot. `auto::make` renders the base once (OpenSCAD front-door), runs
-  the pipeline in-process (Manifold kernel), writes the `.3mf`. Scriptable, zero interaction. When
-  the defaults aren't right, the escape hatch is: open the same model in the GUI and nudge.
+  the pipeline fully in-process (Manifold kernel — rotate-to-fit, slice, cross-sections, all no-spawn),
+  writes the `.3mf`. Scriptable, zero interaction. When the defaults aren't right, the escape hatch is:
+  open the same model in the GUI and nudge.
 - **GUI auto-on-open** — open a model that OVERFLOWS the bed and it auto-plans itself (slice +
   connect) as a SEED, then the reactive loop reslices and you refine any cut/onion/orientation by
   hand. Fires ONCE per source; a model that fits the bed is left alone. It's auto-seed, human-refine
   — never a black box, matching the reactive standard (no rebuild button, background rebuild).
+  (Rotate-to-fit is `fab make`-only for now — the GUI's axis-aligned cut model needs the loaded model
+  re-oriented first; tracked as 17.6.)
 
-## Honest limits (v1)
+## Honest limits
 
 Documented, not hidden — each is a known place the greedy heuristic leaves quality on the table:
 
 - **bbox slicing** — cuts the whole grid even through empty space (empty cells drop downstream), and
-  places cuts on the even grid without dodging thin features or spots a connector can't seat. No
-  rotate-to-fit either: a piece that WOULD fit the bed if spun still gets cut. Conservative, safe,
-  occasionally over-cuts.
+  places cuts on the even grid without dodging thin features or spots a connector can't seat.
+  Conservative, safe, occasionally over-cuts.
+- **rotate-to-fit is coarse + CLI-only** — it tries a fixed ±45°/axis set, not a continuous optimal
+  orientation search (enough for the common diagonal case), and it's `fab make`-only for now — the
+  GUI's axis-aligned cut model needs the loaded model re-oriented first (17.6).
 - **bbox packing** — pieces pack by their bounding box, so an L-bracket won't nest into another's
   concave corner. `fill_ratio` reports how tight it got; true polygon nesting is the upgrade if
   plates run too empty.
 - **onion coverage is 4-connected** — the geodesic flood uses grid Manhattan distance, which
   overestimates true distance slightly, so it errs toward MORE pins (extra alignment, never a gap).
 
-None of these block the flow — they're the v2 backlog. The v1 gets you from a too-big model to a
-printable, jointed, packed project in a second and a half.
+None of these block the flow — they're the v2 backlog. `fab make` gets you from a too-big model to a
+printable, jointed, packed project in about a second, all in-process.

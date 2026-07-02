@@ -172,36 +172,64 @@ pub fn auto_place(
             hi[1] = hi[1].max(p[1]);
         }
     }
-    // Dense candidate grid at a FINE pitch, so we reliably find solid material even in a cut face
-    // full of walls + holes (a sparse grid would miss it — the 0-connector trap). Keep each point in
-    // material with room for a `min_d` onion.
-    let pitch = (spacing / 6.0).max(min_d.max(1.0));
-    let n = [((hi[0] - lo[0]) / pitch).floor() as i64, ((hi[1] - lo[1]) / pitch).floor() as i64];
-    let start = [
-        (lo[0] + hi[0]) / 2.0 - n[0] as f64 * pitch / 2.0,
-        (lo[1] + hi[1]) / 2.0 - n[1] as f64 * pitch / 2.0,
-    ];
-    let mut cand: Vec<([f64; 2], f64)> = Vec::new();
-    for i in 0..=n[0] {
-        for j in 0..=n[1] {
-            let p = [start[0] + i as f64 * pitch, start[1] + j as f64 * pitch];
-            if !point_in_material(loops, p) {
-                continue;
-            }
-            let d = fit_onion(loops, p, wall, max_d, cap_dir, tip_factor);
-            if d >= min_d {
-                cand.push((p, d));
+    // Rasterise the face onto a fine grid: mark cells that are material, and which of those fit a
+    // `min_d` onion (candidates). The grid lets coverage use CONNECTED (geodesic) distance — so a
+    // rail across a slot isn't counted as aligned by a straight-line-near onion on the next rail.
+    // Pitch is FINE (a few mm) so it samples the interior of narrow rails, but floored to the longer
+    // extent / 200 so a huge face doesn't blow the grid up.
+    let pitch = min_d.max(3.0).max((hi[0] - lo[0]).max(hi[1] - lo[1]) / 200.0);
+    let nx = ((hi[0] - lo[0]) / pitch).floor() as usize + 1;
+    let ny = ((hi[1] - lo[1]) / pitch).floor() as usize + 1;
+    let cell = |i: usize, j: usize| j * nx + i;
+    let pos = |i: usize, j: usize| [lo[0] + i as f64 * pitch, lo[1] + j as f64 * pitch];
+    let mut material = vec![false; nx * ny];
+    let mut diam = vec![0.0f64; nx * ny];
+    for i in 0..nx {
+        for j in 0..ny {
+            let p = pos(i, j);
+            if point_in_material(loops, p) {
+                material[cell(i, j)] = true;
+                let d = fit_onion(loops, p, wall, max_d, cap_dir, tip_factor);
+                if d >= min_d {
+                    diam[cell(i, j)] = d;
+                }
             }
         }
     }
-    // Thin to alignment guides: biggest onions first (the best guides, in the most open material),
-    // keeping a candidate only when it clears every kept one by `spacing`. Poisson-disk-style — a few
-    // well-separated onions instead of a fill.
-    cand.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    // Greedy GEODESIC covering: place an onion on the biggest still-uncovered candidate, then flood
+    // the connected material out to `spacing` (4-connected BFS — distance follows the shape, not a
+    // straight line) marking what that onion aligns. Repeat until every candidate is covered, so each
+    // rail is pinned along its OWN length rather than deemed done by an onion on a neighbouring one.
+    let mut cands: Vec<usize> = (0..nx * ny).filter(|&c| diam[c] >= min_d).collect();
+    cands.sort_by(|&a, &b| diam[b].partial_cmp(&diam[a]).unwrap_or(std::cmp::Ordering::Equal));
+    let reach = (spacing / pitch).round().max(1.0) as i32;
+    let mut covered = vec![false; nx * ny];
     let mut out: Vec<([f64; 2], f64)> = Vec::new();
-    for (p, d) in cand {
-        if out.iter().all(|(q, _)| (p[0] - q[0]).hypot(p[1] - q[1]) >= spacing) {
-            out.push((p, d));
+    for &c in &cands {
+        if covered[c] {
+            continue;
+        }
+        out.push((pos(c % nx, c / nx), diam[c]));
+        let mut visited = vec![false; nx * ny];
+        visited[c] = true;
+        let mut q = std::collections::VecDeque::from([(c % nx, c / nx, 0i32)]);
+        while let Some((x, y, d)) = q.pop_front() {
+            covered[cell(x, y)] = true;
+            if d >= reach {
+                continue;
+            }
+            let (x, y) = (x as i32, y as i32);
+            for (dx, dy) in [(-1, 0), (1, 0), (0, -1), (0, 1)] {
+                let (a, b) = (x + dx, y + dy);
+                if a < 0 || b < 0 || a >= nx as i32 || b >= ny as i32 {
+                    continue;
+                }
+                let (a, b) = (a as usize, b as usize);
+                if material[cell(a, b)] && !visited[cell(a, b)] {
+                    visited[cell(a, b)] = true;
+                    q.push_back((a, b, d + 1));
+                }
+            }
         }
     }
     out
@@ -352,18 +380,36 @@ mod tests {
         // interior — NOT the dozens a fine fill grid would drop.
         let face = vec![vec![[0.0, 0.0], [400.0, 0.0], [400.0, 250.0], [0.0, 250.0]]];
         let pts = auto_place(&face, 1.2, 16.0, 120.0, 3.0, None, 2.9238);
-        // A handful of guides thinned to ≥120mm apart — not the dozens a fill would give.
-        assert!((3..=10).contains(&pts.len()), "a handful of alignment guides, got {}", pts.len());
-        // Every kept pair clears the 120mm alignment span, and they spread across the long axis.
-        for a in 0..pts.len() {
-            for b in (a + 1)..pts.len() {
-                let (p, q) = (pts[a].0, pts[b].0);
-                assert!((p[0] - q[0]).hypot(p[1] - q[1]) >= 120.0 - 1e-6, "too close");
-            }
-        }
+        // Covering guides on a ~120mm max-gap grid — a couple dozen at most, NOT the thousands a
+        // fine fill would drop. (4-connected covering is deliberately conservative: extra pins, no gaps.)
+        assert!((4..=25).contains(&pts.len()), "covering guides, got {}", pts.len());
+        // Spread across the long axis, and every one sits in material.
         let xs: Vec<f64> = pts.iter().map(|(p, _)| p[0]).collect();
         let (lo, hi) = (xs.iter().cloned().fold(f64::MAX, f64::min), xs.iter().cloned().fold(f64::MIN, f64::max));
         assert!(hi - lo > 200.0, "spread across the face, span {}", hi - lo);
+        for (p, _) in &pts {
+            assert!(point_in_material(&face, *p), "onion off material at {p:?}");
+        }
+    }
+
+    #[test]
+    fn coverage_follows_the_shape_not_straight_lines() {
+        // A U: two 20-wide rails (x∈[0,20] and [100,120]) joined ONLY by a bottom bar (y∈[0,20]). The
+        // rail tops are 100mm apart in a straight line but far along the material — so both rails must
+        // get onions, not one deemed to cover the other Euclidean-near (the left-rail-only bug).
+        let u = vec![vec![
+            [0.0, 0.0],
+            [120.0, 0.0],
+            [120.0, 200.0],
+            [100.0, 200.0],
+            [100.0, 20.0],
+            [20.0, 20.0],
+            [20.0, 200.0],
+            [0.0, 200.0],
+        ]];
+        let pts = auto_place(&u, 1.2, 16.0, 120.0, 3.0, None, 2.9238);
+        assert!(pts.iter().any(|(p, _)| p[0] < 30.0), "left rail must be pinned");
+        assert!(pts.iter().any(|(p, _)| p[0] > 90.0), "right rail must be pinned");
     }
 
     #[test]

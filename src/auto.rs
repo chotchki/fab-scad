@@ -157,6 +157,78 @@ pub fn plan(
     Ok(AutoPlan { cuts, connectors })
 }
 
+/// Make a printable Bambu multi-plate project from a model in ONE shot (14.3) — the headless twin of
+/// the GUI's auto-open. Renders the base (front-door), auto-slices it to fit `bed`, auto-places
+/// onions ([`plan`]), orients each piece least-support ([`crate::auto_orient::best_up`]), packs onto
+/// the fewest plates, and writes the project to `out_3mf`. Reuses the EXACT lib code the GUI drives,
+/// so CLI and GUI produce the same result. Returns the export summary (plates, pieces, fill).
+#[cfg(feature = "kernel")]
+pub fn make(
+    oscad: &Openscad,
+    source: &Path,
+    bed: [f64; 3],
+    out_3mf: &Path,
+    out_dir: &Path,
+    timeout: Duration,
+    gap: f64,
+) -> Result<crate::bambu::ExportSummary> {
+    use crate::bambu::{self, PieceToPlace};
+    use crate::kernel::Solid;
+    use crate::manifest::{Cut, PieceOrient, Slicing};
+    use anyhow::{bail, Context};
+
+    std::fs::create_dir_all(out_dir)?;
+    let stem =
+        source.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "part".into());
+
+    // Front-door: render the base model to a mesh once.
+    let base_stl = out_dir.join(format!("{stem}.stl"));
+    if !oscad.render(source, &base_stl, timeout)?.ok {
+        bail!("source render failed: {}", source.display());
+    }
+    let base = Solid::from_stl_file(&base_stl)?;
+    let (min, max) = base.bbox().context("model has no geometry")?;
+
+    // Auto-plan cuts + onions.
+    let planned = plan(oscad, &base_stl, min, max, bed, out_dir, timeout)?;
+    let connectors = planned.connectors;
+    let make_cut = || -> Vec<Cut> {
+        planned.cuts.iter().map(|&(ax, at)| Cut { axis: ax.to_string(), at: Num::Float(at) }).collect()
+    };
+
+    // Bare slice → least-support orientation per piece.
+    let bare = Slicing { printer: None, cut: make_cut(), connector: vec![], orient: vec![] };
+    let mut ups: Vec<([usize; 3], [f64; 3])> = Vec::new();
+    for (piece, solid) in crate::slicing::slice_solid(&bare, &base)? {
+        ups.push((piece, crate::auto_orient::best_up(&solid.tris(), &[])));
+    }
+
+    // Carved slice, gated by those orientations.
+    let orient = ups
+        .iter()
+        .map(|&(piece, up)| PieceOrient {
+            piece,
+            up: [Num::Float(up[0]), Num::Float(up[1]), Num::Float(up[2])],
+        })
+        .collect();
+    let spec = Slicing { printer: None, cut: make_cut(), connector: connectors, orient };
+    let pieces = crate::slicing::slice_solid(&spec, &base)?;
+    if pieces.is_empty() {
+        bail!("slice produced no pieces");
+    }
+
+    // Orient (best_up) + pack + export.
+    let to_place: Vec<PieceToPlace> = pieces
+        .iter()
+        .map(|(piece, solid)| {
+            let up = ups.iter().find(|(p, _)| p == piece).map(|(_, u)| *u).unwrap_or([0.0, 0.0, 1.0]);
+            let (verts, tris) = solid.to_indexed();
+            PieceToPlace { mesh: bambu::Mesh { verts, tris }, up }
+        })
+        .collect();
+    bambu::export_plates(out_3mf, to_place, [bed[0], bed[1]], gap)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -191,6 +263,34 @@ mod tests {
         let zc = [(2usize, 250.0)];
         let expect = (2.0 * (250.0 - ONION_WALL) / ONION_TIP).min(2.0 * (250.0 - ONION_WALL));
         assert!((axial_cap(&zc, 0, min, max) - expect).abs() < 1e-6);
+    }
+
+    #[test]
+    #[cfg(feature = "kernel")]
+    #[ignore = "needs OpenSCAD; run with --ignored"]
+    fn make_produces_a_multi_plate_bambu_project() {
+        let tmp = std::env::temp_dir().join(format!("auto_make_{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let scad = tmp.join("bigbox.scad");
+        std::fs::write(&scad, "cube([700,120,60]);").unwrap(); // 700mm > a 256 bed → must be cut
+        let oscad = Openscad::discover(None).unwrap();
+        let out = tmp.join("bigbox-plates.3mf");
+
+        let sum =
+            make(&oscad, &scad, [256.0, 256.0, 256.0], &out, &tmp, Duration::from_secs(60), 5.0).unwrap();
+        assert_eq!(sum.pieces, 3, "700mm on a 256 bed → 3 pieces");
+        assert!(out.exists(), "wrote the project");
+
+        // It's a valid Bambu project: the gate + one plate per piece it couldn't co-locate.
+        let f = std::fs::File::open(&out).unwrap();
+        let mut zip = zip::ZipArchive::new(f).unwrap();
+        use std::io::Read;
+        let mut model = String::new();
+        zip.by_name("3D/3dmodel.model").unwrap().read_to_string(&mut model).unwrap();
+        assert!(model.contains("name=\"Application\">BambuStudio-"));
+        assert_eq!(model.matches("<item ").count(), 3);
+        assert!(sum.plates >= 1);
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     #[test]

@@ -165,6 +165,22 @@ impl Solid {
         out
     }
 
+    /// Indexed mesh: deduped vertices + 0-based triangle indices (for exporters that want indexed
+    /// geometry, e.g. the Bambu writer).
+    pub fn to_indexed(&self) -> (Vec<[f64; 3]>, Vec<[u32; 3]>) {
+        let (v, stride, idx) = self.0.to_mesh_f64();
+        let verts =
+            (0..v.len() / stride).map(|i| [v[i * stride], v[i * stride + 1], v[i * stride + 2]]).collect();
+        let tris = idx.chunks_exact(3).map(|t| [t[0] as u32, t[1] as u32, t[2] as u32]).collect();
+        (verts, tris)
+    }
+
+    /// Triangles as coordinate triples — for orientation math (`auto_orient::best_up`).
+    pub fn tris(&self) -> Vec<[[f64; 3]; 3]> {
+        let (verts, tris) = self.to_indexed();
+        tris.iter().map(|t| [verts[t[0] as usize], verts[t[1] as usize], verts[t[2] as usize]]).collect()
+    }
+
     /// Write this solid as a binary STL.
     pub fn write_stl(&self, path: &Path) -> Result<()> {
         std::fs::write(path, self.to_stl_bytes())

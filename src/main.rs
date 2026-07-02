@@ -83,6 +83,21 @@ enum Commands {
         #[arg(long)]
         kernel: bool,
     },
+    /// Make a printable Bambu multi-plate project from a model in ONE shot: render, auto-slice,
+    /// auto-connect, orient, pack, export. The headless twin of the GUI's auto-open (Track C 14.3).
+    Make {
+        /// The model .scad to make printable.
+        target: PathBuf,
+        /// Printer name from printers.toml (default: the one flagged `default`).
+        #[arg(long)]
+        printer: Option<String>,
+        /// Output .3mf (default: <model>-plates.3mf next to the model).
+        #[arg(long, short)]
+        out: Option<PathBuf>,
+        /// Spacing between packed pieces on a plate, mm.
+        #[arg(long, default_value_t = 5.0)]
+        gap: f64,
+    },
     /// Render a .scad to geometry (+ optional PNG thumbnail), or smoke-render a whole tree with --all.
     Render {
         /// A .scad file to render; with --all, a directory to sweep (default: the workspace root).
@@ -118,6 +133,7 @@ fn main() -> Result<()> {
         Commands::Slice { target, spread, out, png, threemf, kernel } => {
             slice_cmd(&target, spread, out, png, threemf, kernel)
         }
+        Commands::Make { target, printer, out, gap } => make_cmd(&target, printer, out, gap),
         Commands::Render {
             target,
             all,
@@ -237,6 +253,47 @@ fn parse_slops(s: &str) -> Result<Vec<f64>> {
         bail!("--slops needs at least one value");
     }
     Ok(v)
+}
+
+#[cfg(feature = "kernel")]
+fn make_cmd(target: &Path, printer: Option<String>, out: Option<PathBuf>, gap: f64) -> Result<()> {
+    if !target.exists() {
+        bail!("no such file: {}", target.display());
+    }
+    let root = require_root()?;
+    let oscad = Openscad::discover(Some(&root))?;
+    let profiles = printers::load(&root.join("printers.toml"))?;
+    let pr = printers::select(&profiles, printer.as_deref())?;
+    let stem = target
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "part".into());
+    let out_3mf = out.unwrap_or_else(|| target.with_file_name(format!("{stem}-plates.3mf")));
+    let out_dir = root.join("out").join("make");
+    let f = |x: f64| if x.fract() == 0.0 { format!("{}", x as i64) } else { format!("{x:.1}") };
+    println!(
+        "make {} on {} ({} × {} × {} mm bed)",
+        target.display(),
+        pr.name,
+        f(pr.bed[0]),
+        f(pr.bed[1]),
+        f(pr.bed[2])
+    );
+    let sum =
+        fab_scad::auto::make(&oscad, target, pr.bed, &out_3mf, &out_dir, Duration::from_secs(120), gap)?;
+    println!(
+        "  -> {} piece(s) on {} plate(s) ({:.0}% full) -> {}",
+        sum.pieces,
+        sum.plates,
+        sum.fill * 100.0,
+        out_3mf.display()
+    );
+    Ok(())
+}
+
+#[cfg(not(feature = "kernel"))]
+fn make_cmd(_: &Path, _: Option<String>, _: Option<PathBuf>, _: f64) -> Result<()> {
+    bail!("fab make needs the `kernel` feature (built without it)")
 }
 
 fn slice_cmd(

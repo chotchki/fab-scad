@@ -57,6 +57,75 @@ pub fn piece_count(min: [f64; 3], max: [f64; 3], bed: [f64; 3]) -> usize {
         .product()
 }
 
+/// The rotation rotate-to-fit chose: the matrix to spin the model by before slicing, plus the
+/// resulting bbox + piece count. `rot` is column-major 3×4 for [`crate::kernel::Solid::transform`]
+/// (identity when no spin beats leaving it alone).
+#[cfg(feature = "kernel")]
+#[derive(Debug, Clone, Copy)]
+pub struct FitRotation {
+    pub rot: [f64; 12],
+    pub min: [f64; 3],
+    pub max: [f64; 3],
+    pub pieces: usize,
+}
+
+/// Rotate-to-fit: pick the model orientation that needs the FEWEST bed-fit pieces. A long part lying
+/// diagonally in the model frame gets over-cut axis-aligned; spinning it to line up with an axis can
+/// shrink its footprint below the bed. We try identity + ±45° about each axis (chotchki's "does 45°
+/// reduce cuts" — where the win is), rotating the ACTUAL geometry (not just the bbox, or a compact
+/// part's AABB would only ever grow) and scoring each by [`piece_count`]. Rotate ONLY when it strictly
+/// reduces pieces (ties keep identity — no needless spin); among spins that tie on pieces, the tighter
+/// bbox wins. The pieces come out in the rotated frame and re-orient per-piece for printing anyway, so
+/// the model's original orientation doesn't matter downstream.
+#[cfg(feature = "kernel")]
+pub fn best_fit_rotation(base: &crate::kernel::Solid, bed: [f64; 3]) -> FitRotation {
+    let rad = std::f64::consts::FRAC_PI_4; // 45°
+    let mut candidates = vec![identity()];
+    for &a in &[rad, -rad] {
+        candidates.push(rot_x(a));
+        candidates.push(rot_y(a));
+        candidates.push(rot_z(a));
+    }
+    let vol = |min: [f64; 3], max: [f64; 3]| (max[0] - min[0]) * (max[1] - min[1]) * (max[2] - min[2]);
+    // Seed with identity so a spin must EARN the swap.
+    let mut best: Option<FitRotation> = None;
+    for rot in candidates {
+        let Some((min, max)) = base.transform(&rot).bbox() else { continue };
+        let pieces = piece_count(min, max, bed);
+        let cand = FitRotation { rot, min, max, pieces };
+        let take = match best {
+            None => true,
+            Some(b) => pieces < b.pieces || (pieces == b.pieces && vol(min, max) + 1e-6 < vol(b.min, b.max)),
+        };
+        if take {
+            best = Some(cand);
+        }
+    }
+    best.expect("at least identity is always a candidate")
+}
+
+/// Column-major 3×4 rotation matrices for `Solid::transform` (columns = images of e_x, e_y, e_z, then
+/// a zero translation).
+#[cfg(feature = "kernel")]
+fn identity() -> [f64; 12] {
+    [1., 0., 0., 0., 1., 0., 0., 0., 1., 0., 0., 0.]
+}
+#[cfg(feature = "kernel")]
+fn rot_x(a: f64) -> [f64; 12] {
+    let (s, c) = a.sin_cos();
+    [1., 0., 0., 0., c, s, 0., -s, c, 0., 0., 0.]
+}
+#[cfg(feature = "kernel")]
+fn rot_y(a: f64) -> [f64; 12] {
+    let (s, c) = a.sin_cos();
+    [c, 0., -s, 0., 1., 0., s, 0., c, 0., 0., 0.]
+}
+#[cfg(feature = "kernel")]
+fn rot_z(a: f64) -> [f64; 12] {
+    let (s, c) = a.sin_cos();
+    [c, s, 0., -s, c, 0., 0., 0., 1., 0., 0., 0.]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -105,5 +174,29 @@ mod tests {
     #[test]
     fn exact_bed_fit_is_not_cut() {
         assert!(auto_slice([0.0; 3], [256.0, 256.0, 256.0], BED).is_empty());
+    }
+
+    #[test]
+    #[cfg(feature = "kernel")]
+    fn rotate_to_fit_spins_a_diagonal_bar_into_fewer_pieces() {
+        use crate::kernel::Solid;
+        // A 400×20×20 bar lying at 45° in XY: its footprint bloats to ~297×297 → 2×2 = 4 pieces
+        // axis-aligned. rotate-to-fit should spin it back to the 400×20×20 orientation → 2 pieces.
+        let bar = Solid::cube(400.0, 20.0, 20.0, true).transform(&rot_z(std::f64::consts::FRAC_PI_4));
+        let (min, max) = bar.bbox().unwrap();
+        assert_eq!(piece_count(min, max, BED), 4, "diagonal bar over-cuts axis-aligned");
+        let fit = best_fit_rotation(&bar, BED);
+        assert_eq!(fit.pieces, 2, "rotate-to-fit spins it back to 2 pieces");
+        assert!(fit.rot != identity(), "it chose a non-identity spin");
+    }
+
+    #[test]
+    #[cfg(feature = "kernel")]
+    fn rotate_to_fit_leaves_a_fitting_part_alone() {
+        use crate::kernel::Solid;
+        let cube = Solid::cube(200.0, 200.0, 200.0, true);
+        let fit = best_fit_rotation(&cube, BED);
+        assert_eq!(fit.pieces, 1);
+        assert_eq!(fit.rot, identity(), "no needless spin when it already fits");
     }
 }

@@ -172,27 +172,36 @@ pub fn auto_place(
             hi[1] = hi[1].max(p[1]);
         }
     }
-    // Count per axis from the target span (`spacing`), at least one — so a big face gets a few and a
-    // small one gets a single centred guide. Cell-CENTRE placement spreads them across the interior
-    // and keeps them off the boundary (where the edge clearance would reject them anyway).
-    let count = [
-        ((hi[0] - lo[0]) / spacing).round().max(1.0) as i64,
-        ((hi[1] - lo[1]) / spacing).round().max(1.0) as i64,
+    // Dense candidate grid at a FINE pitch, so we reliably find solid material even in a cut face
+    // full of walls + holes (a sparse grid would miss it — the 0-connector trap). Keep each point in
+    // material with room for a `min_d` onion.
+    let pitch = (spacing / 6.0).max(min_d.max(1.0));
+    let n = [((hi[0] - lo[0]) / pitch).floor() as i64, ((hi[1] - lo[1]) / pitch).floor() as i64];
+    let start = [
+        (lo[0] + hi[0]) / 2.0 - n[0] as f64 * pitch / 2.0,
+        (lo[1] + hi[1]) / 2.0 - n[1] as f64 * pitch / 2.0,
     ];
-    let mut out = Vec::new();
-    for i in 0..count[0] {
-        for j in 0..count[1] {
-            let p = [
-                lo[0] + (i as f64 + 0.5) / count[0] as f64 * (hi[0] - lo[0]),
-                lo[1] + (j as f64 + 0.5) / count[1] as f64 * (hi[1] - lo[1]),
-            ];
+    let mut cand: Vec<([f64; 2], f64)> = Vec::new();
+    for i in 0..=n[0] {
+        for j in 0..=n[1] {
+            let p = [start[0] + i as f64 * pitch, start[1] + j as f64 * pitch];
             if !point_in_material(loops, p) {
                 continue;
             }
             let d = fit_onion(loops, p, wall, max_d, cap_dir, tip_factor);
             if d >= min_d {
-                out.push((p, d));
+                cand.push((p, d));
             }
+        }
+    }
+    // Thin to alignment guides: biggest onions first (the best guides, in the most open material),
+    // keeping a candidate only when it clears every kept one by `spacing`. Poisson-disk-style — a few
+    // well-separated onions instead of a fill.
+    cand.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    let mut out: Vec<([f64; 2], f64)> = Vec::new();
+    for (p, d) in cand {
+        if out.iter().all(|(q, _)| (p[0] - q[0]).hypot(p[1] - q[1]) >= spacing) {
+            out.push((p, d));
         }
     }
     out
@@ -343,13 +352,18 @@ mod tests {
         // interior — NOT the dozens a fine fill grid would drop.
         let face = vec![vec![[0.0, 0.0], [400.0, 0.0], [400.0, 250.0], [0.0, 250.0]]];
         let pts = auto_place(&face, 1.2, 16.0, 120.0, 3.0, None, 2.9238);
-        // round(400/120)=3 × round(250/120)=2 = 6 cell centres, all interior → all kept.
-        assert_eq!(pts.len(), 6, "a handful of alignment guides, got {}", pts.len());
-        // They spread across the long axis and stay off the boundary.
+        // A handful of guides thinned to ≥120mm apart — not the dozens a fill would give.
+        assert!((3..=10).contains(&pts.len()), "a handful of alignment guides, got {}", pts.len());
+        // Every kept pair clears the 120mm alignment span, and they spread across the long axis.
+        for a in 0..pts.len() {
+            for b in (a + 1)..pts.len() {
+                let (p, q) = (pts[a].0, pts[b].0);
+                assert!((p[0] - q[0]).hypot(p[1] - q[1]) >= 120.0 - 1e-6, "too close");
+            }
+        }
         let xs: Vec<f64> = pts.iter().map(|(p, _)| p[0]).collect();
         let (lo, hi) = (xs.iter().cloned().fold(f64::MAX, f64::min), xs.iter().cloned().fold(f64::MIN, f64::max));
         assert!(hi - lo > 200.0, "spread across the face, span {}", hi - lo);
-        assert!(lo > 0.0 && hi < 400.0, "off the boundary: {lo}..{hi}");
     }
 
     #[test]

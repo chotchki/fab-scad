@@ -256,11 +256,11 @@ fn compose_markdown(description: &str, viewer_ref: &str, downloads: &[(String, S
         md.push_str(description.trim());
         md.push_str("\n\n");
     }
-    md.push_str(&format!("![Interactive preview](/media/{viewer_ref})\n\n"));
+    md.push_str(&format!("![Interactive preview](/media/file/{viewer_ref})\n\n"));
     if !downloads.is_empty() {
         md.push_str("## Downloads\n\n");
         for (title, r) in downloads {
-            md.push_str(&format!("- [{title}](/media/{r})\n"));
+            md.push_str(&format!("- [{title}](/media/file/{r})\n"));
         }
     }
     md
@@ -290,15 +290,15 @@ mod tests {
             &[("Full STL".into(), "full456".into()), ("Plates 3mf".into(), "plates789".into())],
         );
         assert!(md.starts_with("A desk mount.\n\n"));
-        assert!(md.contains("![Interactive preview](/media/cover123)"));
+        assert!(md.contains("![Interactive preview](/media/file/cover123)"));
         assert!(md.contains("## Downloads"));
-        assert!(md.contains("- [Full STL](/media/full456)"));
-        assert!(md.contains("- [Plates 3mf](/media/plates789)"));
+        assert!(md.contains("- [Full STL](/media/file/full456)"));
+        assert!(md.contains("- [Plates 3mf](/media/file/plates789)"));
     }
 
     #[test]
     fn markdown_without_downloads_or_description() {
         let md = compose_markdown("", "v1", &[]);
-        assert_eq!(md, "![Interactive preview](/media/v1)\n\n");
+        assert_eq!(md, "![Interactive preview](/media/file/v1)\n\n");
     }
 }

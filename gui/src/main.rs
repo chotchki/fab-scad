@@ -825,9 +825,9 @@ const MIN_ONION: f32 = 2.0;
 const ONION_WALL: f64 = 1.2;
 /// Largest onion the auto-sizer will grow to in open material.
 const ONION_MAX_D: f64 = 16.0;
-/// Target span between alignment onions in auto-place — the count scales with the face, so a big
-/// joint gets a few spread out and a small one a single guide (they align, they don't fill).
-const ONION_SPACING: f64 = 120.0;
+/// Max gap between alignment onions (mm) — auto-place guarantees every stretch of a join face is
+/// within this of an onion, so no long span sags. The alignment interval, not a fill pitch.
+const ONION_SPACING: f64 = 80.0;
 /// The onion teardrop's tip reaches r/sin(ang) past centre in the cap (+build) direction. `ang` is
 /// set by the piece's print orientation — decided AFTER the onion is sized — so the sizer bounds for
 /// the WORST case: the steepest cap the slicer emits (`CAP_ANG_MIN` = 20° in slicing.rs), tip

@@ -54,8 +54,9 @@ pub struct Project<'a> {
     pub title: &'a str,
     pub description_md: &'a str,
     pub cover_png: &'a Path,
-    /// The low-`$fn` render — the in-browser 3D preview mesh (light enough for a viewer).
-    pub viewer_stl: &'a Path,
+    /// The low-`$fn` preview mesh for the in-browser viewer — a COLORED 3MF (OpenSCAD carries the
+    /// model's `color()` into 3MF base materials), light enough to spin in a browser.
+    pub viewer: &'a Path,
     /// Downloadable artifacts — full-res STL, plates `.3mf`, etc.
     pub downloads: Vec<Media<'a>>,
 }
@@ -178,7 +179,7 @@ pub fn publish(client: &Client, p: &Project) -> Result<String> {
     }
 
     let cover = client.upload_media(p.cover_png, &format!("{} — cover", p.title))?;
-    let viewer = client.upload_media(p.viewer_stl, &format!("{} — preview mesh", p.title))?;
+    let viewer = client.upload_media(p.viewer, &format!("{} — preview", p.title))?;
     let mut downloads = Vec::with_capacity(p.downloads.len());
     for d in &p.downloads {
         downloads.push((d.title.clone(), client.upload_media(d.path, &d.title)?));
@@ -219,11 +220,13 @@ pub fn publish_model(
     if !oscad.render(target, &full_stl, timeout)?.ok {
         bail!("mesh render failed");
     }
-    let viewer_stl = out_dir.join(format!("{stem}-preview.stl"));
+    // A COLORED 3MF, not a flat STL: OpenSCAD's 3MF export carries the model's `color()` as base
+    // materials, so the site viewer shows the real colors. Still low-`$fn` (the `$preview` wrapper).
+    let viewer = out_dir.join(format!("{stem}-preview.3mf"));
     let wrapper = out_dir.join(format!("{stem}-preview.scad"));
     let abs = target.canonicalize().with_context(|| format!("resolving {}", target.display()))?;
     std::fs::write(&wrapper, format!("$preview = true;\ninclude <{}>;\n", abs.display()))?;
-    if !oscad.render(&wrapper, &viewer_stl, timeout)?.ok {
+    if !oscad.render(&wrapper, &viewer, timeout)?.ok {
         bail!("preview render failed");
     }
 
@@ -238,7 +241,7 @@ pub fn publish_model(
         title,
         description_md: description,
         cover_png: &cover,
-        viewer_stl: &viewer_stl,
+        viewer: &viewer,
         downloads,
     };
     publish(&client, &project)

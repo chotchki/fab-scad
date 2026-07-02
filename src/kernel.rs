@@ -9,7 +9,7 @@
 //! connectors (11.6) build on it.
 
 use anyhow::{anyhow, Context, Result};
-use manifold3d::{Manifold, MeshGL};
+use manifold3d::{CrossSection, Manifold, MeshGL};
 use std::collections::HashMap;
 use std::marker::PhantomData;
 use std::path::Path;
@@ -67,6 +67,23 @@ impl Solid {
         Solid::wrap(Manifold::cylinder(height, r_low, r_high, segments, center))
     }
 
+    /// A teardrop PRISM along +Z (spanning `[0, length]`): a circle of radius `r` with a pointed cap
+    /// toward +Y — the convex hull of the circle plus an apex at `(0, r·√2)`, where the two 45°
+    /// tangents to the circle meet. That's a self-supporting hole: the printed ceiling never exceeds
+    /// 45°. Traced as a 2D `CrossSection` (hull of the circle points + apex) and extruded. The peak is
+    /// +Y in this local frame; the caller rotates it toward the print build-up.
+    pub fn teardrop_prism(r: f64, length: f64, segments: i32) -> Self {
+        let n = segments.max(3);
+        let mut pts: Vec<[f64; 2]> = (0..n)
+            .map(|i| {
+                let a = std::f64::consts::TAU * i as f64 / n as f64;
+                [r * a.cos(), r * a.sin()]
+            })
+            .collect();
+        pts.push([0.0, r * std::f64::consts::SQRT_2]); // apex where the 45° tangents meet
+        Solid::wrap(CrossSection::hull_simple_polygon(&pts).extrude(length))
+    }
+
     // --- connector solids (11.6) -----------------------------------------------------------------
 
     /// A BOSL2-style onion (`onion(r, ang)` = `rotate_extrude(teardrop2d)`): a sphere with a tangent
@@ -97,10 +114,22 @@ impl Solid {
         insert_d: f64,
         insert_depth: f64,
         segments: i32,
+        teardrop: bool,
     ) -> Self {
-        let shaft = Solid::cylinder(through, clearance_d / 2.0, clearance_d / 2.0, segments, false);
-        let cbore = Solid::cylinder(counterbore_h, counterbore_d / 2.0, counterbore_d / 2.0, segments, false)
-            .translate(0.0, 0.0, through - counterbore_h);
+        // When the hole runs horizontal on the bed, a TEARDROP shaft + counterbore self-support (peak
+        // toward +Y here; the slicer rotates it to the build-up). The insert pocket stays round — a
+        // short blind hole that seats a cylindrical heat-set insert.
+        let shaft = if teardrop {
+            Solid::teardrop_prism(clearance_d / 2.0, through, segments)
+        } else {
+            Solid::cylinder(through, clearance_d / 2.0, clearance_d / 2.0, segments, false)
+        };
+        let cbore = if teardrop {
+            Solid::teardrop_prism(counterbore_d / 2.0, counterbore_h, segments)
+        } else {
+            Solid::cylinder(counterbore_h, counterbore_d / 2.0, counterbore_d / 2.0, segments, false)
+        }
+        .translate(0.0, 0.0, through - counterbore_h);
         let pocket = Solid::cylinder(insert_depth, insert_d / 2.0, insert_d / 2.0, segments, false)
             .translate(0.0, 0.0, -insert_depth);
         Solid::batch_union(&[shaft, cbore, pocket])
@@ -451,6 +480,20 @@ mod tests {
     }
 
     #[test]
+    fn teardrop_prism_is_a_pointed_manifold() {
+        let (r, len) = (5.0, 10.0);
+        let t = Solid::teardrop_prism(r, len, 48);
+        assert!(t.is_manifold(), "teardrop prism should be a valid manifold");
+        let (min, max) = t.bbox().unwrap();
+        // Circle in x (±r); y from −r (circle bottom) up to the apex r·√2 ≈ 7.07 (the point);
+        // extruded z ∈ [0, len].
+        assert!((min[0] + r).abs() < 0.1 && (max[0] - r).abs() < 0.1, "x spans ±r: {min:?}..{max:?}");
+        assert!((min[1] + r).abs() < 0.1, "y bottom ≈ −r, got {}", min[1]);
+        assert!((max[1] - r * std::f64::consts::SQRT_2).abs() < 0.2, "y peak ≈ r·√2, got {}", max[1]);
+        assert!(min[2].abs() < 1e-6 && (max[2] - len).abs() < 1e-6, "z ∈ [0,len]");
+    }
+
+    #[test]
     fn welds_a_binary_soup_into_a_manifold() {
         let s = Solid::from_stl_bytes(&binary_stl(&TETRA)).unwrap();
         assert_eq!(s.num_vert(), 4, "12 soup verts should weld to 4 corners");
@@ -574,11 +617,24 @@ mod tests {
 
     #[test]
     fn bolt_clearance_spans_both_pieces() {
-        let b = Solid::bolt_clearance(3.4, 12.0, 6.0, 3.0, 5.0, 6.0, 48);
+        let b = Solid::bolt_clearance(3.4, 12.0, 6.0, 3.0, 5.0, 6.0, 48, false);
         b.check().unwrap();
         let (min, max) = b.bbox().unwrap();
         assert!((min[2] + 6.0).abs() < 1e-6, "insert pocket depth {}", min[2]); // -insert_depth
         assert!((max[2] - 12.0).abs() < 1e-6, "through length {}", max[2]); // +through
+        // Plain (cylinder) shaft: symmetric in Y, no peak.
+        assert!((max[1] - 3.0).abs() < 0.1 && (min[1] + 3.0).abs() < 0.1, "round shaft ±r in Y");
+    }
+
+    #[test]
+    fn teardrop_bolt_has_a_peak_toward_plus_y() {
+        // The counterbore (d=6 → r=3) is the widest teardrop, so the +Y peak reaches ~3·√2 ≈ 4.24,
+        // well past the round radius — that pointed ceiling is what self-supports a horizontal hole.
+        let b = Solid::bolt_clearance(3.4, 12.0, 6.0, 3.0, 5.0, 6.0, 48, true);
+        b.check().unwrap();
+        let (min, max) = b.bbox().unwrap();
+        assert!(max[1] > 3.0 * std::f64::consts::SQRT_2 - 0.3, "teardrop peak in +Y, got {}", max[1]);
+        assert!((min[1] + 3.0).abs() < 0.2, "round on the −Y side, got {}", min[1]);
     }
 
     #[test]

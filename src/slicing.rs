@@ -579,8 +579,24 @@ pub fn slice_solid(s: &Slicing, base: &Solid) -> Result<Vec<([usize; 3], Solid)>
                 Shape::Bolt { axis, screw, through } => {
                     if piece == p.below || piece == p.above {
                         let (cl, cb_d, cb_h, ins_d, ins_h) = bolt_dims(screw.as_deref());
-                        let bolt = Solid::bolt_clearance(cl, *through, cb_d, cb_h, ins_d, ins_h, SEG).align_z_to(*axis);
-                        cell = cell.difference(&at(bolt));
+                        // Teardrop the hole when THIS piece prints it >45° off vertical (the build-up's
+                        // component ⟂ the bolt axis), so the ceiling self-supports; aim the peak at the
+                        // build-up via a full basis. A near-vertical hole needs none → plain cylinder.
+                        let up = piece_up(s, piece);
+                        let peak = geom::sub(up, geom::scale(*axis, geom::dot(up, *axis)));
+                        let teardrop = geom::norm(peak) > 0.707;
+                        let bolt = Solid::bolt_clearance(cl, *through, cb_d, cb_h, ins_d, ins_h, SEG, teardrop);
+                        let oriented = if teardrop {
+                            let zc = geom::normalize(*axis);
+                            let yc = geom::normalize(peak);
+                            let xc = geom::cross(yc, zc);
+                            bolt.transform(&[
+                                xc[0], xc[1], xc[2], yc[0], yc[1], yc[2], zc[0], zc[1], zc[2], 0.0, 0.0, 0.0,
+                            ])
+                        } else {
+                            bolt.align_z_to(*axis)
+                        };
+                        cell = cell.difference(&at(oriented));
                     }
                 }
             }
@@ -661,6 +677,28 @@ mod tests {
         let other = get([0, 0, 0]);
         other.check().unwrap();
         assert!(other.bbox().unwrap().1[0] < 0.01, "floater leaked: {:?}", other.bbox().unwrap());
+    }
+
+    #[cfg(feature = "kernel")]
+    #[test]
+    fn bolt_teardrop_carves_valid_pieces() {
+        // Cut X@0 with a bolt on it. The default build-up (+Z) is ⟂ the X bolt axis, so the hole
+        // prints horizontal → teardropped (peak +Z) and through-depth bound to the 20mm half-slab.
+        // Both pieces must survive the teardrop + basis-transform + diff as valid manifolds.
+        let base = Solid::cube(40.0, 40.0, 40.0, true);
+        let s = spec(
+            "[project]\nname=\"t\"\n[slicing]\n\
+             [[slicing.cut]]\naxis=\"x\"\nat=0\n\
+             [[slicing.connector]]\ncut=0\ntype=\"bolt\"\nscrew=\"M4\"\npos=[0,0]\n",
+        );
+        let pieces = slice_solid(&s, &base).unwrap();
+        assert_eq!(pieces.len(), 2, "one cut → two pieces");
+        for (idx, p) in &pieces {
+            p.check().unwrap_or_else(|e| panic!("piece {idx:?} not manifold after bolt carve: {e}"));
+        }
+        // The bolt carved material out of each piece (a solid 20×40×40 half is 32000 mm³).
+        let vol = |idx: [usize; 3]| pieces.iter().find(|(p, _)| *p == idx).unwrap().1.num_tri();
+        assert!(vol([0, 0, 0]) > 12 && vol([1, 0, 0]) > 12, "both halves carved (not bare boxes)");
     }
 
     #[test]

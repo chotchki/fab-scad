@@ -6,7 +6,10 @@
 //! Runs native too (`cargo run -p fab-web -- --demo --bed=40`).
 
 use bevy::asset::RenderAssetUsages;
+use bevy::input::mouse::{MouseMotion, MouseScrollUnit, MouseWheel};
+use bevy::picking::hover::HoverMap;
 use bevy::picking::mesh_picking::MeshPickingPlugin;
+use bevy::picking::pointer::PointerId;
 use bevy::prelude::*;
 use bevy::render::mesh::{Indices, PrimitiveTopology};
 use bevy::tasks::{block_on, futures_lite::future, AsyncComputeTaskPool, Task};
@@ -75,6 +78,7 @@ pub fn run() {
             ),
         )
         .init_resource::<EditMode>()
+        .init_resource::<DragGuard>()
         .add_systems(
             Update,
             (
@@ -84,6 +88,7 @@ pub fn run() {
                 run_edit_actions,
                 draw_section,
                 sync_edit_ui,
+                orbit_input,
             ),
         )
         .run();
@@ -216,6 +221,23 @@ enum EditMode {
 /// Marker for panel rows that only apply while editing a cut.
 #[derive(Component, Clone, Default)]
 struct EditUi;
+
+/// Z-up orbit camera state (B.7) — same grammar as the desktop GUI: left-drag orbit,
+/// right-drag pan, wheel zoom; the whole gesture yields over the panel and while editing.
+#[derive(Component, Clone, Copy)]
+struct Orbit {
+    yaw: f32,
+    pitch: f32,
+    radius: f32,
+    target: Vec3,
+}
+
+/// Accumulated pointer travel for the CURRENT left-button gesture — a plane click that ends an
+/// orbit drag must not enter the editor (Click fires on release regardless of travel).
+#[derive(Resource, Default)]
+struct DragGuard {
+    moved: f32,
+}
 
 /// The currently displayed model/pieces (despawned and replaced on load/slice).
 #[derive(Component)]
@@ -363,7 +385,7 @@ fn load_demo_if_requested(
     meshes: ResMut<Assets<Mesh>>,
     mats: ResMut<Assets<StandardMaterial>>,
     existing: Query<Entity, Or<(With<LoadedModel>, With<CutPlane>)>>,
-    cams: Query<&mut Transform, With<Camera3d>>,
+    cams: Query<(&mut Transform, &mut Orbit), With<Camera3d>>,
     labels: Query<&mut Text, With<StatusLabel>>,
 ) {
     if demo_requested() {
@@ -407,27 +429,91 @@ fn setup_scene(
         Transform::from_xyz(200.0, 300.0, 400.0).looking_at(Vec3::ZERO, Vec3::Z),
     ));
     // AmbientLight is per-camera in 0.19 — it rides the camera entity, not a resource.
+    let orbit = framed_orbit(Vec3::ZERO, bed.0[0].max(bed.0[1]) as f32);
     commands.spawn((
         Camera3d::default(),
         AmbientLight {
             brightness: 220.0,
             ..default()
         },
-        frame_camera(Vec3::ZERO, bed.0[0].max(bed.0[1]) as f32),
+        orbit_transform(&orbit),
+        orbit,
     ));
 }
 
-/// Z-up orbit-style framing: fixed yaw/pitch, radius scaled to the content extent.
-fn frame_camera(target: Vec3, extent: f32) -> Transform {
-    let (yaw, pitch) = (-45f32.to_radians(), 30f32.to_radians());
-    let r = (extent * 3.2).max(120.0);
-    let eye = target
+/// Auto-framing: the default view of `extent`-sized content at `target` (user orbits from here).
+fn framed_orbit(target: Vec3, extent: f32) -> Orbit {
+    Orbit {
+        yaw: -45f32.to_radians(),
+        pitch: 30f32.to_radians(),
+        radius: (extent * 3.2).max(120.0),
+        target,
+    }
+}
+
+/// Z-up spherical camera placement from the orbit state.
+fn orbit_transform(o: &Orbit) -> Transform {
+    let eye = o.target
         + Vec3::new(
-            r * pitch.cos() * yaw.cos(),
-            r * pitch.cos() * yaw.sin(),
-            r * pitch.sin(),
+            o.radius * o.pitch.cos() * o.yaw.cos(),
+            o.radius * o.pitch.cos() * o.yaw.sin(),
+            o.radius * o.pitch.sin(),
         );
-    Transform::from_translation(eye).looking_at(target, Vec3::Z)
+    Transform::from_translation(eye).looking_at(o.target, Vec3::Z)
+}
+
+/// The desktop's orbit, ported: left-drag orbit, right-drag pan, wheel zoom (Line one notch at
+/// a time, Pixel trackpad streams scaled way down). Yields entirely while the pointer is over
+/// the panel or a cut is being edited (the editor owns clicks; desktop does the same).
+#[allow(clippy::too_many_arguments)] // an input relay, not an API
+fn orbit_input(
+    mut cam: Query<(&mut Transform, &mut Orbit), With<Camera3d>>,
+    buttons: Res<ButtonInput<MouseButton>>,
+    mut motion: MessageReader<MouseMotion>,
+    mut wheel: MessageReader<MouseWheel>,
+    mode: Res<EditMode>,
+    hover: Res<HoverMap>,
+    ui_nodes: Query<(), With<Node>>,
+    mut guard: ResMut<DragGuard>,
+) {
+    if buttons.just_pressed(MouseButton::Left) {
+        guard.moved = 0.0;
+    }
+    let over_ui = hover
+        .get(&PointerId::Mouse)
+        .is_some_and(|hits| hits.keys().any(|e| ui_nodes.contains(*e)));
+    if over_ui || matches!(&*mode, EditMode::Cut { .. }) {
+        motion.clear();
+        wheel.clear();
+        return;
+    }
+    let Ok((mut t, mut o)) = cam.single_mut() else {
+        return;
+    };
+    let right = t.rotation * Vec3::X;
+    let up = t.rotation * Vec3::Y;
+    if buttons.pressed(MouseButton::Left) {
+        for ev in motion.read() {
+            guard.moved += ev.delta.length();
+            o.yaw -= ev.delta.x * 0.008;
+            o.pitch = (o.pitch + ev.delta.y * 0.008).clamp(-1.5, 1.5);
+        }
+    } else if buttons.pressed(MouseButton::Right) {
+        let scale = o.radius * 0.0015;
+        for ev in motion.read() {
+            o.target += (-right * ev.delta.x + up * ev.delta.y) * scale;
+        }
+    } else {
+        motion.clear();
+    }
+    for ev in wheel.read() {
+        let step = match ev.unit {
+            MouseScrollUnit::Line => ev.y * 0.05,
+            MouseScrollUnit::Pixel => ev.y * 0.004,
+        };
+        o.radius = (o.radius * (1.0 - step)).clamp(10.0, 4000.0);
+    }
+    *t = orbit_transform(&o);
 }
 
 /// Top inset for the panel: the hosting page's chrome (back button etc.) overlays our top-left,
@@ -536,7 +622,7 @@ fn poll_picked_file(
     meshes: ResMut<Assets<Mesh>>,
     mats: ResMut<Assets<StandardMaterial>>,
     existing: Query<Entity, Or<(With<LoadedModel>, With<CutPlane>)>>,
-    cams: Query<&mut Transform, With<Camera3d>>,
+    cams: Query<(&mut Transform, &mut Orbit), With<Camera3d>>,
     labels: Query<&mut Text, With<StatusLabel>>,
 ) {
     let Some(t) = task.0.as_mut() else { return };
@@ -564,7 +650,7 @@ fn present_model(
     mut meshes: ResMut<Assets<Mesh>>,
     mut mats: ResMut<Assets<StandardMaterial>>,
     existing: Query<Entity, Or<(With<LoadedModel>, With<CutPlane>)>>,
-    mut cams: Query<&mut Transform, With<Camera3d>>,
+    mut cams: Query<(&mut Transform, &mut Orbit), With<Camera3d>>,
     mut labels: Query<&mut Text, With<StatusLabel>>,
 ) {
     let mut status = |s: String| {
@@ -662,8 +748,9 @@ fn present_model(
         spawn_cut_planes(&mut commands, &mut meshes, &mut mats, p, offset);
     }
     let extent = size.length().max(1.0);
-    for mut cam in &mut cams {
-        *cam = frame_camera(Vec3::new(0.0, 0.0, size.z / 2.0), extent);
+    for (mut t, mut o) in &mut cams {
+        *o = framed_orbit(Vec3::new(0.0, 0.0, size.z / 2.0), extent);
+        *t = orbit_transform(&o);
     }
 
     let parts_note = if n_parts > 1 {
@@ -765,6 +852,7 @@ fn cut_basis(axis: char) -> (usize, [usize; 2]) {
 fn on_cut_plane_click(
     ev: On<Pointer<Click>>,
     planes: Query<&CutPlane>,
+    guard: Res<DragGuard>,
     mut mode: ResMut<EditMode>,
     mut part: ResMut<Part>,
     mut labels: Query<&mut Text, With<StatusLabel>>,
@@ -772,6 +860,9 @@ fn on_cut_plane_click(
     let Ok(&CutPlane(ci)) = planes.get(ev.entity) else {
         return;
     };
+    if guard.moved > 8.0 {
+        return; // that release ended an orbit drag, not a click
+    }
     let Some(hit) = ev.event.hit.position else {
         return;
     };
@@ -887,7 +978,7 @@ fn run_slice(
     mut meshes: ResMut<Assets<Mesh>>,
     mut mats: ResMut<Assets<StandardMaterial>>,
     existing: Query<Entity, Or<(With<LoadedModel>, With<CutPlane>)>>,
-    mut cams: Query<&mut Transform, With<Camera3d>>,
+    mut cams: Query<(&mut Transform, &mut Orbit), With<Camera3d>>,
     mut labels: Query<&mut Text, With<StatusLabel>>,
 ) {
     if !act.slice {
@@ -979,8 +1070,9 @@ fn run_slice(
         ));
     }
     let extent = (size[0].powi(2) + size[1].powi(2) + size[2].powi(2)).sqrt() + spread * 2.0;
-    for mut cam in &mut cams {
-        *cam = frame_camera(Vec3::new(0.0, 0.0, (size[2] / 2.0) + spread / 2.0), extent);
+    for (mut t, mut o) in &mut cams {
+        *o = framed_orbit(Vec3::new(0.0, 0.0, (size[2] / 2.0) + spread / 2.0), extent);
+        *t = orbit_transform(&o);
     }
     if multi {
         status(format!(

@@ -133,3 +133,18 @@
 - [x] 16.2 - Bolt: teardrop the shaft + counterbore for support-free horizontal holes (build-up aimed)
 - [x] 16.3 - Bolt: tests (through-depth spans slab, teardrop self-supports) + scad bolt_joint parity
 
+---
+
+## 2026-07-03
+
+## Phase A - fab-web build-out: the browser slicer
+- [x] A.1 - fab-web crate (workspace member web/): canvas-bound app skeleton + STL upload→view (rfd pick_file → bytes → mesh, bed-seated, auto-framed camera); repoint dev.sh + release-web.yml payloads off the probe
+- [x] A.2 - Slice in the browser: fab-scad kernel dep (kernel, no native) + rotate-to-fit + auto::plan on upload → cut planes + piece preview; CI needs LLVM 20+ & lld for the wasm kernel build (ubuntu-24.04 clang 18 too old)
+- [x] A.3 - Connector editor subset: per-cut cross-section view, auto-placed onions visible, add/remove/resize — lift the desktop editor's hot path
+- [x] A.4 - Export: pack → Bambu multi-plate 3mf via Cursor<Vec<u8>> seam → browser blob download (zero server-side outputs)
+- [x] A.5 - Share don't fork: unify stl.rs + scene helpers duplicated between gui/ and web/ (duplicates drift)
+- [x] A.6 - Size trim: prune bevy default features (audio/gltf/animation/scene formats) + wasm-opt parity in dev; budget ≤7 MiB brotli on the wire
+- [x] A.7 - Ship web-v0.3.0 (real slicer payload: plan/slice/export in-browser), retire spikes/wasm-gui, hotchkiss-io pin bump
+- [x] A.8 - Perf gate: 100k+ tri STL upload/slice on the main thread — measure jank; if bad, geometry web worker over mesh-bytes postMessage (the !Send Solid contract maps 1:1)
+- [x] A.9 - 3MF upload alongside STL (color carry-through): parse 3mf meshes + material/color groups → per-object colored meshes; picker filter grows to [stl, 3mf]; keep colors through slice → export
+

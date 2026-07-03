@@ -29,6 +29,10 @@ asset is a single tar.gz the site build unpacks.
 
 ## Rules the bundle promises (server side counts on these)
 
+- **The document must provide `<canvas id="fab-web">`** — the app binds to it (panics if
+  missing) and `fit_canvas_to_parent` tracks the parent's size, so the page owns layout.
+  `index.reference.html` shows the minimal working shape.
+
 - **Relative fetches only.** The glue resolves `fab_web_bg.wasm` off `import.meta.url`, so the
   bundle works under ANY mount path (`/apps/fab/...`). Nothing in the bundle assumes an origin.
 - **No inline eval / no external hosts** — CSP-friendly, works under COEP `require-corp`.

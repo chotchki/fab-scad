@@ -13,13 +13,22 @@
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 
-CRATE=${FAB_WEB_CRATE:-spikes/wasm-gui} # flips to the real fab-web crate at build-out
-(cd "$CRATE" && cargo build --release --target wasm32-unknown-unknown)
-WASM=$(ls "$CRATE"/target/wasm32-unknown-unknown/release/*.wasm | head -1)
+PKG=${FAB_WEB_PKG:-fab-web} # workspace member; underscored name below is the cdylib artifact
+cargo build -p "$PKG" --release --target wasm32-unknown-unknown
+WASM="target/wasm32-unknown-unknown/release/${PKG//-/_}.wasm"
 
 STAGE=target/fab-web/stage
-mkdir -p "$STAGE"
+rm -rf "$STAGE" && mkdir -p "$STAGE" # stale stage files once masked a broken loader — always clean
 wasm-bindgen --target web --no-typescript --out-name fab_web --out-dir "$STAGE" "$WASM"
+# wasm-opt PARITY with CI (the v0.1.0 lesson: the one transform dev skipped was the one that
+# broke prod). Explicit feature flags defend against binaryens too old to read the feature section.
+if command -v wasm-opt >/dev/null; then
+    wasm-opt -Oz --enable-reference-types --enable-bulk-memory \
+        -o "$STAGE/fab_web_bg.wasm.opt" "$STAGE/fab_web_bg.wasm"
+    mv "$STAGE/fab_web_bg.wasm.opt" "$STAGE/fab_web_bg.wasm"
+else
+    echo "WARN: wasm-opt not installed (brew install binaryen) — stage skips the CI transform"
+fi
 cp packaging/web/index.reference.html "$STAGE/index.html"
 # Contract-complete variants at dev-grade compression (brotli -q5 ~seconds vs -q11 ~minutes).
 if command -v brotli >/dev/null; then brotli -q 5 -kf "$STAGE/fab_web_bg.wasm"; fi

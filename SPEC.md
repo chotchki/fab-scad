@@ -250,6 +250,26 @@ has a Three.js STL viewer (markdown `![](x.stl)` → 3D), on-the-fly AVIF resizi
 the site. **Auth:** the site uses passkeys today; chotchki is fine adding API keys (or
 similar) so `fab publish` can post safely — that's the leaning for the publish mechanism.
 
+### Deployment (resolved — Phase 18 spike, 2026-07-03)
+
+Both candidate modes were spiked to WORKING artifacts in a day; evidence + port notes in
+[deploy-spike-notes](docs/deploy-spike-notes.md). Web-first is the sequencing decision, not a
+religion — native is proven and parked, not dead.
+
+- **Web (primary):** the slicer ships as a wasm bundle hotchkiss.io bakes into a special page —
+  standalone full-page app, client-only, ZERO outputs stored server-side (a visitor's model
+  never leaves their browser; that line goes ON the page). Stack held up under fire: Bevy 0.19
+  + feathers render on wasm32-unknown-unknown (bevy#22620 did not reproduce, WebGL2 AND
+  WebGPU), and the Manifold kernel runs in Chrome via manifold-csg `unstable-wasm-uu` +
+  wasm-bindgen — 387 KB of kernel in a Bevy-dominated bundle. STL-upload-first; openscad-wasm
+  (.scad in the browser) stays a stretch with a known GPL calculus. Artifact contract + tag
+  `web-v*` release pipeline + seconds-scale dev loop: [web-bundle](docs/web-bundle.md).
+- **Native (parked):** cargo-packager emits a working .app+DMG and NSIS from one config —
+  proven locally, workflows kept manual-dispatch only. The signing bill is known ($99/yr Apple
+  is unavoidable post-Sequoia; Windows ships unsigned via winget): [packaging](docs/packaging.md).
+- **crates.io (opportunistic):** the `fab-scad` name is free and the package verifies at
+  103 KiB — publishing claims the name; `cargo install` becomes the from-source channel.
+
 ## Constraints & risks
 
 - **Data loss is the cardinal sin.** Cold-archive lands BEFORE any deletion; pruning is

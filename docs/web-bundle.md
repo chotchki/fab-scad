@@ -43,6 +43,20 @@ asset is a single tar.gz the site build unpacks.
   on-the-fly compression (keeps Content-Length + ranges).
 - Immutable caching keyed by version (the site's `?cb=` convention or the versioned dir path).
 
+## Local iteration (don't ship a release to test a change)
+
+`./packaging/web/dev.sh` — build → bindgen → stage `target/fab-web/stage/` in the contract
+shape → serve http://127.0.0.1:8787/ with PROD headers (COOP/COEP, `application/wasm`,
+no-store). Verified: `crossOriginIsolated === true` and the app boots under `require-corp`,
+so header-dependent behavior fails here, not on the special page. `--stage-only` refreshes the
+dir and exits. Dev deltas from the released artifact, on purpose: no wasm-opt and fast
+compression levels — the file SET still matches, so consumers need no special-casing.
+
+For the hotchkiss-io side of the loop: give build.rs a local override, e.g.
+`FAB_WEB_LOCAL=/Users/chotchki/workspace/fab-scad/target/fab-web/stage` copies that dir
+instead of fetching the pinned release — iterate both repos at seconds-scale, drop the env
+var to go back to the pin. (Same escape-hatch shape as pin-with-override everywhere else.)
+
 ## CI
 
 `.github/workflows/release-web.yml`, live now: push a `web-v*` tag → build (wasm32) →

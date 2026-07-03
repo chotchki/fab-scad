@@ -2595,6 +2595,7 @@ dependencies = [
  "js-sys",
  "rfd",
  "wasm-bindgen",
+ "wasm-bindgen-futures",
  "web-sys",
 ]
 

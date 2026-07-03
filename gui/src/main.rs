@@ -48,7 +48,7 @@ use bevy::{
 };
 
 mod fab;
-mod stl;
+use fab_scad::stl;
 
 const SPREAD: f64 = 50.0;
 

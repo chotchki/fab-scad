@@ -16,7 +16,7 @@ use fab_scad::manifest::{Connector, Cut, Slicing};
 use fab_scad::num::Num;
 use fab_scad::{auto, auto_slice, slicing};
 
-mod stl;
+use fab_scad::stl;
 
 /// Default build volume (mm); `?bed=N` / `--bed=N` overrides (cube bed) until printers.toml
 /// grows a browser home.
@@ -68,6 +68,7 @@ pub fn run() {
                 setup_scene,
                 setup_ui,
                 load_demo_if_requested.after(setup_ui),
+                seed_source_request,
             ),
         )
         .add_systems(Update, (poll_picked_file, run_slice, run_export))
@@ -155,6 +156,61 @@ fn bed_override() -> Option<f64> {
 #[cfg(target_arch = "wasm32")]
 fn query_string() -> Option<String> {
     web_sys::window().and_then(|w| w.location().search().ok())
+}
+
+#[cfg(target_arch = "wasm32")]
+fn param(key: &str) -> Option<String> {
+    let q = query_string()?;
+    q.trim_start_matches('?').split('&').find_map(|kv| {
+        let (k, v) = kv.split_once('=')?;
+        (k == key).then(|| v.to_string())
+    })
+}
+
+/// `?stl=<same-origin url>` (web) / `--stl=<path>` (native): load without the picker — the
+/// deep-link half of showcase→slicer (a project page hands its STL straight in), and the perf
+/// harness's front door. Seeds [`PickTask`], so it IS the upload path from there on.
+fn seed_source_request(mut task: ResMut<PickTask>) {
+    #[cfg(target_arch = "wasm32")]
+    if let Some(url) = param("stl") {
+        info!("seeding from ?stl={url}");
+        task.0 = Some(AsyncComputeTaskPool::get().spawn(async move {
+            info!("fetch task polled: {url}");
+            let name = url.rsplit('/').next().unwrap_or(&url).to_string();
+            match fetch_bytes(&url).await {
+                Ok(bytes) => Some((name, bytes)),
+                Err(e) => {
+                    error!("?stl fetch: {e:#}");
+                    None
+                }
+            }
+        }));
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    if let Some(path) = std::env::args().find_map(|a| a.strip_prefix("--stl=").map(String::from)) {
+        let name = path.rsplit('/').next().unwrap_or(&path).to_string();
+        let bytes = std::fs::read(&path).ok();
+        task.0 = Some(AsyncComputeTaskPool::get().spawn(async move { bytes.map(|b| (name, b)) }));
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+async fn fetch_bytes(url: &str) -> anyhow::Result<Vec<u8>> {
+    use wasm_bindgen::JsCast;
+    use wasm_bindgen_futures::JsFuture;
+    let err = |w: &str| anyhow::anyhow!("fetch {w}");
+    let win = web_sys::window().ok_or_else(|| err("window"))?;
+    let resp = JsFuture::from(win.fetch_with_str(url))
+        .await
+        .map_err(|_| err("request"))?;
+    let resp: web_sys::Response = resp.dyn_into().map_err(|_| err("response"))?;
+    if !resp.ok() {
+        anyhow::bail!("fetch {url}: HTTP {}", resp.status());
+    }
+    let buf = JsFuture::from(resp.array_buffer().map_err(|_| err("body"))?)
+        .await
+        .map_err(|_| err("body await"))?;
+    Ok(js_sys::Uint8Array::new(&buf).to_vec())
 }
 
 fn load_demo_if_requested(
@@ -349,6 +405,7 @@ fn present_model(
             t.0 = s.clone();
         }
     };
+    info!("presenting {name} ({} bytes)", bytes.len());
 
     // Kernel plan first — when the mesh is sliceable we DISPLAY the rotated frame, so the
     // planes/pieces/export all agree with what's on screen.

@@ -1,6 +1,9 @@
-//! STL bytes → triangle soup, binary-vs-ASCII detected by the binary size formula
-//! (`84 + 50*count`). LIFTED from gui/src/stl.rs (the bytes half — no disk path here);
-//! unify into a shared crate at A.5 — until then keep both in sync.
+//! Minimal STL reader → triangle soup (positions + normals, 3 verts/tri, flat) — shared by the
+//! desktop GUI and fab-web so the parser exists ONCE (A.5). Handles BOTH formats: OpenSCAD
+//! emits ASCII (`solid …`), everything else mostly binary; detected by the binary size formula.
+//! Pure std — no bevy, no feature gate; `load_stl` (path) simply fails at runtime on wasm.
+
+use std::path::Path;
 
 use anyhow::{ensure, Context, Result};
 
@@ -10,7 +13,14 @@ pub struct StlMesh {
     pub normals: Vec<[f32; 3]>,
 }
 
-/// Parse STL bytes in memory — the browser upload path (File → bytes → mesh, no disk).
+/// Load an STL from disk, detecting binary vs ASCII by the binary size formula (`84 + 50*count`).
+pub fn load_stl(path: &Path) -> Result<StlMesh> {
+    let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
+    load_stl_bytes(&bytes)
+}
+
+/// Parse STL bytes in memory (same binary-vs-ASCII detection as `load_stl`) — lets the Manifold
+/// kernel path turn a `Solid`'s `to_stl_bytes()` straight into a mesh, no disk round-trip.
 pub fn load_stl_bytes(bytes: &[u8]) -> Result<StlMesh> {
     ensure!(bytes.len() >= 84, "STL too short");
     let count = u32::from_le_bytes([bytes[80], bytes[81], bytes[82], bytes[83]]) as usize;
@@ -81,7 +91,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parses_binary_stl_bytes() {
+    fn parses_binary_stl() {
         let mut b = vec![0u8; 80];
         b.extend_from_slice(&1u32.to_le_bytes());
         let mut push = |v: [f32; 3]| {
@@ -94,21 +104,25 @@ mod tests {
         push([0.0, 1.0, 0.0]);
         push([0.0, 0.0, 2.0]);
         b.extend_from_slice(&0u16.to_le_bytes());
-        let m = load_stl_bytes(&b).unwrap();
+        let path = std::env::temp_dir().join(format!("fab-gui-bin-{}.stl", std::process::id()));
+        std::fs::write(&path, &b).unwrap();
+        let m = load_stl(&path).unwrap();
+        std::fs::remove_file(&path).ok();
         assert_eq!(m.positions.len(), 3);
         assert_eq!(m.positions[2], [0.0, 0.0, 2.0]);
         assert_eq!(m.normals, vec![[0.0, 0.0, 1.0]; 3]);
     }
 
     #[test]
-    fn parses_ascii_stl_bytes() {
+    fn parses_ascii_stl() {
         let text = "solid x\n\
             facet normal 0 0 1\n outer loop\n\
             vertex 1 0 0\n vertex 0 1 0\n vertex 0 0 2\n\
             endloop\n endfacet\nendsolid x\n";
-        let m = load_stl_bytes(text.as_bytes()).unwrap();
+        let m = parse_ascii(text).unwrap();
         assert_eq!(m.positions.len(), 3);
         assert_eq!(m.positions[0], [1.0, 0.0, 0.0]);
+        assert_eq!(m.positions[2], [0.0, 0.0, 2.0]);
         assert_eq!(m.normals, vec![[0.0, 0.0, 1.0]; 3]);
     }
 }

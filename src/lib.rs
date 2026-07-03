@@ -26,3 +26,4 @@ pub mod publish;
 pub mod slicing;
 #[cfg(feature = "native")]
 pub mod smoke;
+pub mod stl;

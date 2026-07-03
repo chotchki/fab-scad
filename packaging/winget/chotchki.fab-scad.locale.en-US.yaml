@@ -1,0 +1,11 @@
+# DRAFT (18.2) — winget-pkgs default-locale manifest.
+PackageIdentifier: chotchki.fab-scad
+PackageVersion: 0.1.0
+PackageLocale: en-US
+Publisher: Christopher Hotchkiss
+PackageName: fab-scad
+License: MIT
+ShortDescription: Workflow layer around OpenSCAD - slice oversized models, place connectors, export printable 3mf plates.
+Moniker: fab-scad
+ManifestType: defaultLocale
+ManifestVersion: 1.6.0

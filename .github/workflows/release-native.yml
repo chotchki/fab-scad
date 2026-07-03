@@ -1,0 +1,35 @@
+# PARKED (18.2, web-first decision 2026-07-03): native installers (mac .app+DMG, Windows NSIS)
+# are proven locally (docs/packaging.md) but the channel is deliberately idle while the wasm/web
+# path integrates into hotchkiss.io. No automatic trigger — dispatch by hand when native resumes.
+# Signing bill + gaps before a real release: docs/packaging.md.
+name: release-native
+
+on:
+  workflow_dispatch:
+
+jobs:
+  package:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14
+            formats: app,dmg
+          - os: windows-latest
+            formats: nsis
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # cargo-packager does NOT build — binaries must exist first.
+      - run: cargo build --release --workspace --bins
+      - run: cargo install cargo-packager --locked
+      - run: cargo packager --release --formats ${{ matrix.formats }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: fab-scad-${{ matrix.os }}
+          path: |
+            target/packager/*.dmg
+            target/packager/*.exe
+          if-no-files-found: error

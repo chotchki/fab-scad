@@ -1,0 +1,23 @@
+# cargo-packager (CrabNebula) — macOS .app + DMG. Spike config (PLAN 18.1): unsigned,
+# bundles BOTH binaries (fab-gui is the app, fab CLI rides along in Contents/MacOS).
+# Build first: cargo build --release --workspace --bins && cargo packager --release
+name = "fab-scad"
+product-name = "fab-scad"
+identifier = "io.hotchkiss.fab-scad"
+version = "0.1.0"
+out-dir = "target/packager"
+binaries-dir = "target/release"
+formats = ["app", "dmg"]
+
+[[binaries]]
+path = "fab-gui"
+main = true
+
+[[binaries]]
+path = "fab"
+
+# Bevy assets (icon font). Lands in Contents/Resources/assets — assets_dir() in gui/src/main.rs
+# knows to look there when the baked dev path is absent.
+[[resources]]
+src = "gui/assets"
+target = "assets"

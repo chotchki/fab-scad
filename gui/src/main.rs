@@ -518,11 +518,21 @@ fn flag_value(args: &[String], flag: &str) -> Option<String> {
 }
 
 /// Point the asset server at this crate's `assets/` (where the icon font lives), regardless of CWD.
+/// Dev builds use the baked crate path; a packaged .app doesn't have it, so fall back to `assets/`
+/// next to the executable, then the bundle's `Contents/Resources/assets`.
 fn assets_dir() -> AssetPlugin {
-    AssetPlugin {
-        file_path: concat!(env!("CARGO_MANIFEST_DIR"), "/assets").into(),
-        ..default()
-    }
+    let dev = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/assets"));
+    let file_path = if dev.exists() {
+        dev.to_path_buf()
+    } else {
+        let exe_dir = std::env::current_exe()
+            .ok()
+            .and_then(|e| e.parent().map(Path::to_path_buf))
+            .unwrap_or_default();
+        let bundled = exe_dir.join("../Resources/assets");
+        if bundled.exists() { bundled } else { exe_dir.join("assets") }
+    };
+    AssetPlugin { file_path: file_path.to_string_lossy().into_owned(), ..default() }
 }
 
 /// Load the bundled icon font (Startup, before the panel first builds).

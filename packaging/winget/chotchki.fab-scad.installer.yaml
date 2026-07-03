@@ -1,0 +1,13 @@
+# DRAFT (18.2) — winget-pkgs installer manifest. Not submittable until a real GitHub release
+# exists: fill InstallerUrl with the release asset and InstallerSha256 with its hash
+# (winget pins by SHA256; unsigned NSIS is ACCEPTED — only MSIX requires Authenticode).
+# Submit via komac or winget-releaser once releases are automated.
+PackageIdentifier: chotchki.fab-scad
+PackageVersion: 0.1.0
+InstallerType: nullsoft
+Installers:
+  - Architecture: x64
+    InstallerUrl: https://github.com/chotchki/fab-scad/releases/download/v0.1.0/fab-scad_0.1.0_x64-setup.exe
+    InstallerSha256: TODO_FILL_FROM_RELEASE_ASSET
+ManifestType: installer
+ManifestVersion: 1.6.0

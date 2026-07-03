@@ -1,0 +1,6 @@
+# DRAFT (18.2) — winget-pkgs version manifest.
+PackageIdentifier: chotchki.fab-scad
+PackageVersion: 0.1.0
+DefaultLocale: en-US
+ManifestType: version
+ManifestVersion: 1.6.0

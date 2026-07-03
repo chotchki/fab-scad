@@ -18,6 +18,9 @@ use fab_scad::{auto, auto_slice, cross_section, slicing};
 
 use fab_scad::stl;
 
+#[cfg(target_arch = "wasm32")]
+mod scad_worker;
+
 /// Default build volume (mm); `?bed=N` / `--bed=N` overrides (cube bed) until printers.toml
 /// grows a browser home.
 const DEFAULT_BED: f64 = 256.0;
@@ -262,6 +265,37 @@ fn bed_override() -> Option<f64> {
         .ok()
 }
 
+/// .scad sources take one extra hop — the OpenSCAD worker renders them to STL bytes — then
+/// join the normal pipeline (present_model sees STL bytes either way, the name stays honest).
+/// Native fab-web has no worker; the desktop GUI is the native .scad front-end.
+async fn maybe_render_scad(name: String, bytes: Vec<u8>) -> Option<(String, Vec<u8>)> {
+    if !name.to_ascii_lowercase().ends_with(".scad") {
+        return Some((name, bytes));
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        let source = match String::from_utf8(bytes) {
+            Ok(s) => s,
+            Err(e) => {
+                error!("{name}: not utf-8 scad ({e})");
+                return None;
+            }
+        };
+        match scad_worker::render(source).await {
+            Ok(stl) => Some((name, stl)),
+            Err(e) => {
+                error!("{name}: {e:#}");
+                None
+            }
+        }
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        error!("{name}: .scad rendering is web-only here (use fab-gui natively)");
+        None
+    }
+}
+
 #[cfg(target_arch = "wasm32")]
 fn query_string() -> Option<String> {
     web_sys::window().and_then(|w| w.location().search().ok())
@@ -284,10 +318,9 @@ fn seed_source_request(mut task: ResMut<PickTask>) {
     if let Some(url) = param("stl") {
         info!("seeding from ?stl={url}");
         task.0 = Some(AsyncComputeTaskPool::get().spawn(async move {
-            info!("fetch task polled: {url}");
             let name = url.rsplit('/').next().unwrap_or(&url).to_string();
             match fetch_bytes(&url).await {
-                Ok(bytes) => Some((name, bytes)),
+                Ok(bytes) => maybe_render_scad(name, bytes).await,
                 Err(e) => {
                     error!("?stl fetch: {e:#}");
                     None
@@ -304,7 +337,7 @@ fn seed_source_request(mut task: ResMut<PickTask>) {
 }
 
 #[cfg(target_arch = "wasm32")]
-async fn fetch_bytes(url: &str) -> anyhow::Result<Vec<u8>> {
+pub(crate) async fn fetch_bytes(url: &str) -> anyhow::Result<Vec<u8>> {
     use wasm_bindgen::JsCast;
     use wasm_bindgen_futures::JsFuture;
     let err = |w: &str| anyhow::anyhow!("fetch {w}");
@@ -448,13 +481,17 @@ fn setup_ui(world: &mut World) {
                         return; // dialog already up
                     }
                     task.0 = Some(AsyncComputeTaskPool::get().spawn(async {
+                        #[cfg(target_arch = "wasm32")]
+                        let filter: &[&str] = &["stl", "3mf", "scad"];
+                        #[cfg(not(target_arch = "wasm32"))]
+                        let filter: &[&str] = &["stl", "3mf"];
                         let file = rfd::AsyncFileDialog::new()
-                            .add_filter("mesh", &["stl", "3mf"])
+                            .add_filter("model", filter)
                             .pick_file()
                             .await?;
                         let name = file.file_name();
                         let bytes = file.read().await;
-                        Some((name, bytes))
+                        maybe_render_scad(name, bytes).await
                     }));
                 })
             ),

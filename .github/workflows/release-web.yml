@@ -17,6 +17,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # libs/ only (BOSL2 pin for the lib pack) — models/ is a separate private-ish submodule
+      # and the wasm build needs neither it nor scad-lib beyond the working tree.
+      - run: git submodule update --init libs/BOSL2
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
@@ -56,11 +59,24 @@ jobs:
           brotli -q 11 -k "$STAGE/fab_web_bg.wasm"
           gzip -9 -k "$STAGE/fab_web_bg.wasm"
           cp packaging/web/index.reference.html "$STAGE/"
+          # OpenSCAD side-module (Phase B): pinned official build + our worker + baked lib pins
+          # (BOSL2 @ submodule tag, scad-lib @ this commit). Lazily fetched; GPL module UNMODIFIED.
+          OSC_SHA="10e0937dd2627116a1f7ab6fb1ed75762b66572f21f4e5054c7dc00526cdd1ff"
+          curl -sL -o /tmp/osc.zip "https://files.openscad.org/snapshots/OpenSCAD-2026.07.01-WebAssembly-web.zip"
+          echo "$OSC_SHA  /tmp/osc.zip" | shasum -a 256 -c - >/dev/null
+          mkdir -p "$STAGE/openscad"
+          unzip -o -q /tmp/osc.zip -d "$STAGE/openscad"
+          cp packaging/web/openscad-worker.js packaging/web/OPENSCAD-NOTICE.txt "$STAGE/openscad/"
+          python3 packaging/web/pack_libs.py "$STAGE/openscad/libs.json"
+          brotli -q 11 -kf "$STAGE/openscad/openscad.wasm"
           python3 - "$STAGE" "$VERSION" <<'EOF'
           import hashlib, json, os, sys
           stage, version = sys.argv[1], sys.argv[2]
-          sha = {f: hashlib.sha256(open(os.path.join(stage, f), 'rb').read()).hexdigest()
-                 for f in sorted(os.listdir(stage))}
+          sha = {}
+          for root, _, names in os.walk(stage):
+              for n in sorted(names):
+                  rel = os.path.relpath(os.path.join(root, n), stage)
+                  sha[rel] = hashlib.sha256(open(os.path.join(root, n), "rb").read()).hexdigest()
           json.dump({"version": version, "entry": "fab_web.js", "wasm": "fab_web_bg.wasm", "sha256": sha},
                     open(os.path.join(stage, "manifest.json"), "w"), indent=1)
           EOF

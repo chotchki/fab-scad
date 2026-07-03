@@ -12,9 +12,8 @@ asset is a single tar.gz the site build unpacks.
   is parked (18.2); pushing the tag runs `.github/workflows/release-web.yml` and attaches the
   bundle to a prerelease. Converge with native `v*` tags at build-out if it ever matters.
 - Arch-independent (wasm), one asset per release.
-- Payload today: the 18.5 probe app (feathers + picking scene) — a REAL artifact in the real
-  contract shape so the site integration can land first; the slicer port swaps in at build-out
-  without touching the contract or the pipeline.
+- Payload: the fab-web slicer (upload STL/3mf/scad → auto-plan → edit connectors → slice →
+  Bambu 3mf download, all client-side).
 
 ## Archive layout (flat — extract straight into a version-keyed dir)
 
@@ -27,14 +26,22 @@ asset is a single tar.gz the site build unpacks.
 | `manifest.json`       | `{version, entry, wasm, sha256:{...}}` — assert the contract at build time |
 | `index.reference.html`| a working loader page to CRIB FROM — the site owns the real document |
 
-## Planned members (Phase B — .scad in the browser)
+## The OpenSCAD side-module (Phase B — live)
 
-The archive GROWS, the contract shape doesn't: `openscad.wasm` (+`.br`, ~13 MB — the GPL
-module, own worker) and `libs/bosl2-<tag>.zip` + `libs/scad-lib.zip` — BOTH baked at release
-time from the repo's own pins (BOSL2 = the libs/ submodule tag, scad-lib = the app's commit),
-so one site pin bump moves app + libraries atomically and any .scad resolves
-`include <BOSL2/std.scad>` / `<slicer.scad>` with zero setup. All Phase-B members are fetched
-LAZILY — STL-only users never download them. manifest.json lists them like everything else.
+`.scad` files render in-browser: the bundle's `openscad/` dir carries the UNMODIFIED official
+OpenSCAD wasm build (10.7 MB + `.br`), our MIT worker glue (`openscad-worker.js`), a GPL
+notice, and `libs.json` — BOSL2 (the libs/ submodule pin, v2.0.746) + scad-lib (the app's
+commit) as one path→text pack the worker writes into its virtual FS (`/libraries` is
+OpenSCAD's default search path; `include <BOSL2/std.scad>` just works). Everything under
+`openscad/` is fetched LAZILY on the first .scad open — STL/3mf users never download it.
+Members are DOCUMENT-RELATIVE like the rest of the bundle (the app spawns
+`openscad/openscad-worker.js` relative to the page).
+
+**Licensing, decided consciously:** the GPL module ships unmodified in its own worker with
+notice + source links (`openscad/OPENSCAD-NOTICE.txt`); the page-level combination conveys
+under GPL terms while fab's own files stay MIT (GPL-compatible — the dossier's calculus). The
+hosting page SHOULD show an "OpenSCAD (GPL)" attribution line near the app; measured worker
+cost on a real part: ~10 s first render including the lazy fetch, seconds after.
 
 ## Rules the bundle promises (server side counts on these)
 

@@ -1,0 +1,100 @@
+//! .scad → STL bytes through the OpenSCAD worker (Phase B). Everything here is LAZY: the
+//! worker script, the 10.7 MB OpenSCAD wasm and the lib pack (BOSL2 + scad-lib, baked at the
+//! repo's pins) are only fetched when the first .scad opens — STL/3mf users never pay. The
+//! GPL module runs UNMODIFIED in its own worker; this file and the worker glue are the
+//! arm's-length seam (see docs/web-bundle.md for the licensing stance). One render in flight
+//! at a time — matches the app's single-flight picker.
+
+use std::cell::RefCell;
+
+use anyhow::{anyhow, Result};
+use bevy::log::info;
+use js_sys::{Object, Reflect, Uint8Array};
+use wasm_bindgen::prelude::*;
+use wasm_bindgen::JsCast;
+use wasm_bindgen_futures::JsFuture;
+
+thread_local! {
+    static WORKER: RefCell<Option<web_sys::Worker>> = const { RefCell::new(None) };
+    static LIBS: RefCell<Option<JsValue>> = const { RefCell::new(None) };
+}
+
+/// Render `source` to binary STL bytes. Errors carry OpenSCAD's last log lines.
+pub async fn render(source: String) -> Result<Vec<u8>> {
+    let err = |w: String| anyhow!("openscad: {w}");
+    let libs = libs_object().await?;
+    let worker = get_worker()?;
+
+    // One-shot: the next message out of the worker resolves this promise.
+    let promise = js_sys::Promise::new(&mut |resolve, _| {
+        let cb = Closure::once_into_js(move |e: web_sys::MessageEvent| {
+            resolve.call1(&JsValue::UNDEFINED, &e.data()).ok();
+        });
+        worker.set_onmessage(Some(cb.unchecked_ref()));
+    });
+
+    let msg = Object::new();
+    let set = |k: &str, v: &JsValue| Reflect::set(&msg, &JsValue::from_str(k), v).ok();
+    set("id", &JsValue::from_f64(1.0));
+    set("source", &JsValue::from_str(&source));
+    set("files", &libs);
+    set("args", &js_sys::Array::new());
+    worker
+        .post_message(&msg)
+        .map_err(|_| err("postMessage failed".into()))?;
+
+    let data = JsFuture::from(promise)
+        .await
+        .map_err(|_| err("worker died".into()))?;
+    let get = |k: &str| Reflect::get(&data, &JsValue::from_str(k)).ok();
+    let ok = get("ok").map(|v| v.is_truthy()).unwrap_or(false);
+    if !ok {
+        let e = get("error")
+            .and_then(|v| v.as_string())
+            .unwrap_or_else(|| "unknown".into());
+        let logs = get("logs")
+            .map(|l| js_sys::Array::from(&l))
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_string())
+                    .rev()
+                    .take(4)
+                    .collect::<Vec<_>>()
+                    .join(" | ")
+            })
+            .unwrap_or_default();
+        return Err(err(format!("{e} ({logs})")));
+    }
+    let stl = get("stl").ok_or_else(|| err("no stl in reply".into()))?;
+    let bytes = Uint8Array::new(&stl).to_vec();
+    info!("openscad rendered {} bytes", bytes.len());
+    Ok(bytes)
+}
+
+/// The lib pack, fetched + parsed once: a JS object of path → text the worker writes into its
+/// virtual FS before every render.
+async fn libs_object() -> Result<JsValue> {
+    if let Some(libs) = LIBS.with(|l| l.borrow().clone()) {
+        return Ok(libs);
+    }
+    let bytes = crate::fetch_bytes("openscad/libs.json").await?;
+    let text = String::from_utf8(bytes).map_err(|_| anyhow!("libs.json not utf-8"))?;
+    let parsed = js_sys::JSON::parse(&text).map_err(|_| anyhow!("libs.json: bad json"))?;
+    LIBS.with(|l| *l.borrow_mut() = Some(parsed.clone()));
+    Ok(parsed)
+}
+
+/// The worker, created once (document-relative URL — the bundle contract serves members next
+/// to the page). The heavy fetches (worker script + openscad.js + wasm) happen HERE, on first
+/// use only.
+fn get_worker() -> Result<web_sys::Worker> {
+    if let Some(w) = WORKER.with(|w| w.borrow().clone()) {
+        return Ok(w);
+    }
+    let opts = web_sys::WorkerOptions::new();
+    opts.set_type(web_sys::WorkerType::Module);
+    let worker = web_sys::Worker::new_with_options("openscad/openscad-worker.js", &opts)
+        .map_err(|_| anyhow!("openscad worker failed to start"))?;
+    WORKER.with(|w| *w.borrow_mut() = Some(worker.clone()));
+    Ok(worker)
+}

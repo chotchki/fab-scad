@@ -27,6 +27,15 @@ asset is a single tar.gz the site build unpacks.
 | `manifest.json`       | `{version, entry, wasm, sha256:{...}}` — assert the contract at build time |
 | `index.reference.html`| a working loader page to CRIB FROM — the site owns the real document |
 
+## Planned members (Phase B — .scad in the browser)
+
+The archive GROWS, the contract shape doesn't: `openscad.wasm` (+`.br`, ~13 MB — the GPL
+module, own worker) and `libs/bosl2-<tag>.zip` + `libs/scad-lib.zip` — BOTH baked at release
+time from the repo's own pins (BOSL2 = the libs/ submodule tag, scad-lib = the app's commit),
+so one site pin bump moves app + libraries atomically and any .scad resolves
+`include <BOSL2/std.scad>` / `<slicer.scad>` with zero setup. All Phase-B members are fetched
+LAZILY — STL-only users never download them. manifest.json lists them like everything else.
+
 ## Rules the bundle promises (server side counts on these)
 
 - **The document must provide `<canvas id="fab-web">`** — the app binds to it (panics if

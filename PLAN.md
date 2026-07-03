@@ -85,14 +85,21 @@ Driven by `claude-plan-bridge` (FORMATv2). Hand-authored; run
 - [ ] 18.9 - crates.io channel: claim the free `fab-scad` name — fix package contents (exclude models/spikes/docs), `cargo publish --dry-run` clean, then publish 0.1.0 (cargo install = third distribution channel, source-build tradeoff documented)
 ## Phase A - fab-web build-out: the browser slicer
 - [x] A.1 - fab-web crate (workspace member web/): canvas-bound app skeleton + STL upload→view (rfd pick_file → bytes → mesh, bed-seated, auto-framed camera); repoint dev.sh + release-web.yml payloads off the probe
-- [ ] A.2 - Slice in the browser: fab-scad kernel dep (kernel, no native) + rotate-to-fit + auto::plan on upload → cut planes + piece preview; CI needs LLVM 20+ & lld for the wasm kernel build (ubuntu-24.04 clang 18 too old)
+- [x] A.2 - Slice in the browser: fab-scad kernel dep (kernel, no native) + rotate-to-fit + auto::plan on upload → cut planes + piece preview; CI needs LLVM 20+ & lld for the wasm kernel build (ubuntu-24.04 clang 18 too old)
 - [ ] A.3 - Connector editor subset: per-cut cross-section view, auto-placed onions visible, add/remove/resize — lift the desktop editor's hot path
-- [ ] A.4 - Export: pack → Bambu multi-plate 3mf via Cursor<Vec<u8>> seam → browser blob download (zero server-side outputs)
+- [x] A.4 - Export: pack → Bambu multi-plate 3mf via Cursor<Vec<u8>> seam → browser blob download (zero server-side outputs)
 - [ ] A.5 - Share don't fork: unify stl.rs + scene helpers duplicated between gui/ and web/ (duplicates drift)
 - [ ] A.6 - Size trim: prune bevy default features (audio/gltf/animation/scene formats) + wasm-opt parity in dev; budget ≤7 MiB brotli on the wire
 - [ ] A.7 - Ship web-v0.3.0 (real slicer payload: plan/slice/export in-browser), retire spikes/wasm-gui, hotchkiss-io pin bump
 - [ ] A.8 - Perf gate: 100k+ tri STL upload/slice on the main thread — measure jank; if bad, geometry web worker over mesh-bytes postMessage (the !Send Solid contract maps 1:1)
 - [ ] A.9 - 3MF upload alongside STL (color carry-through): parse 3mf meshes + material/color groups → per-object colored meshes; picker filter grows to [stl, 3mf]; keep colors through slice → export
+## Phase B - openscad-wasm: render .scad in the browser (BOSL2 + scad-lib)
+- [ ] B.1 - Worker spike: pinned official openscad-wasm snapshot (files.openscad.org) in a web worker — write .scad + includes into the Emscripten FS, callMain (Manifold backend; --backend=manifold on older pins), read STL bytes back; own ~100-line glue from the README, do NOT fork the playground's GPL runner
+- [ ] B.2 - Bake tagged lib pins INTO the bundle: release CI packs BOSL2 (the libs/ submodule pin, v2.0.746 today) + scad-lib (same commit as the app) as zip members of the fab-web artifact; worker mounts them at /libraries so any .scad hits include <BOSL2/std.scad> / <slicer.scad> with ZERO setup; prove screw_hole/onion/teardrop render
+- [ ] B.3 - fab-web integration: picker accepts .scad → worker render (progress in the panel) → STL bytes → the SAME present_model path (plan/slice/export just work)
+- [ ] B.4 - Lazy delivery + licensing: openscad wasm (~13 MB) + library zips as separate bundle members fetched only when a .scad opens; GPL done consciously — unmodified module in its own worker, notice + source link on the page (page-level combo conveys GPL, MIT files stay MIT)
+- [ ] B.5 - Dogfood a real models/ part end to end in the browser: .scad with scad-lib + BOSL2 includes → worker render → auto-slice → export; the baked pins (B.2) must resolve everything with no manual mounting
+- [ ] B.6 - Customizer stretch: expose the .scad's top-level params in the panel, tweak → worker re-render (defer if B.1-B.5 drag)
 
 ## Backlog (not yet phased)
 

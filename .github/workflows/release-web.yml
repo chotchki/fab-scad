@@ -22,10 +22,11 @@ jobs:
           targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
       # The Manifold kernel's wasm-uu build needs LLVM 20+ with wasm-ld; ubuntu-24.04 ships 18.
-      - name: Install LLVM 21 + lld
+      - name: Install LLVM 21 + lld + libc++
         run: |
           wget -qO- https://apt.llvm.org/llvm.sh | sudo bash -s -- 21
-          sudo apt-get install -y lld-21
+          # wasm-cxx-shim's probe wants clang++ AND libc++ headers under the same prefix.
+          sudo apt-get install -y lld-21 libc++-21-dev libc++abi-21-dev
       - name: Install bundle tools (wasm-bindgen pinned to the lockfile, PINNED binaryen, brotli)
         run: |
           V=$(grep -A1 'name = "wasm-bindgen"' Cargo.lock | grep version | head -1 | cut -d'"' -f2)

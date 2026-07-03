@@ -83,14 +83,6 @@ Driven by `claude-plan-bridge` (FORMATv2). Hand-authored; run
 - [x] 18.7 - Decision memo → SPEC.md: pick primary mode; web = standalone client-only auto-slicer, zero server-side outputs (decided 2026-07-03; STL-upload-first, openscad-wasm stretch); spawn the build-out phase
 - [x] 18.8 - fab-web bundle contract: GitHub-release artifact (tar.gz: ES-module glue + wasm + br/gz + manifest.json; tailwind-style pinned fetch) — contract doc + spike bundle handed to the 18.6 gate
 - [ ] 18.9 - crates.io channel: claim the free `fab-scad` name — fix package contents (exclude models/spikes/docs), `cargo publish --dry-run` clean, then publish 0.1.0 (cargo install = third distribution channel, source-build tradeoff documented)
-## Phase B - openscad-wasm: render .scad in the browser (BOSL2 + scad-lib)
-- [x] B.1 - Worker spike: pinned official openscad-wasm snapshot (files.openscad.org) in a web worker — write .scad + includes into the Emscripten FS, callMain (Manifold backend; --backend=manifold on older pins), read STL bytes back; own ~100-line glue from the README, do NOT fork the playground's GPL runner
-- [x] B.2 - Bake tagged lib pins INTO the bundle: release CI packs BOSL2 (the libs/ submodule pin, v2.0.746 today) + scad-lib (same commit as the app) as zip members of the fab-web artifact; worker mounts them at /libraries so any .scad hits include <BOSL2/std.scad> / <slicer.scad> with ZERO setup; prove screw_hole/onion/teardrop render
-- [x] B.3 - fab-web integration: picker accepts .scad → worker render (progress in the panel) → STL bytes → the SAME present_model path (plan/slice/export just work)
-- [x] B.4 - Lazy delivery + licensing: openscad wasm (~13 MB) + library zips as separate bundle members fetched only when a .scad opens; GPL done consciously — unmodified module in its own worker, notice + source link on the page (page-level combo conveys GPL, MIT files stay MIT)
-- [x] B.5 - Dogfood a real models/ part end to end in the browser: .scad with scad-lib + BOSL2 includes → worker render → auto-slice → export; the baked pins (B.2) must resolve everything with no manual mounting
-- [ ] B.6 - Customizer stretch: expose the .scad's top-level params in the panel, tweak → worker re-render (defer if B.1-B.5 drag)
-- [ ] B.7 - Viewer controls: orbit (left-drag), pan (middle-drag / shift+left), zoom (wheel) on the fab-web 3D view — Z-up like the desktop; clicks still pick (drag-guard suppresses click-after-orbit); input yields over the panel
 
 ## Backlog (not yet phased)
 
@@ -100,3 +92,4 @@ Driven by `claude-plan-bridge` (FORMATv2). Hand-authored; run
 - **Geometry web worker for fab-web: move weld/plan/slice/export off the main thread over mesh-bytes postMessage (the !Send Solid contract) — earns its keep when the connector editor makes re-slicing interactive; A.8 measured ~5-10s main-thread freeze slicing a 119k-tri 27-piece monster (typical parts are ms)** — added 2026-07-03.
 - **Colored 3mf EXPORT: assemblies export per-part pieces as separate objects with extruder mapping (distinct color → Bambu AMS slot; extend bambu::Placed + model_settings extruder) — the other half of A.9's color carry-through** — added 2026-07-03.
 - **fab-web wire-size stretch: below 8.5 → ≤7 MiB brotli needs build-std (opt-size std, panic=abort) and/or naga shader stripping — feature-level surgery is EXHAUSTED (measured: meta-group trim ~1 MB, granular assembly ~0.2 MB; the weight is bevy_render/wgpu/naga)** — added 2026-07-03.
+- B.6 - Customizer stretch: expose the .scad's top-level params in the panel, tweak → worker re-render (defer if B.1-B.5 drag) *(deferred from phase `B` on 2026-07-03)*

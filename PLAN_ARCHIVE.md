@@ -148,3 +148,16 @@
 - [x] A.8 - Perf gate: 100k+ tri STL upload/slice on the main thread — measure jank; if bad, geometry web worker over mesh-bytes postMessage (the !Send Solid contract maps 1:1)
 - [x] A.9 - 3MF upload alongside STL (color carry-through): parse 3mf meshes + material/color groups → per-object colored meshes; picker filter grows to [stl, 3mf]; keep colors through slice → export
 
+---
+
+## 2026-07-03
+
+## Phase B - openscad-wasm: render .scad in the browser (BOSL2 + scad-lib)
+- [x] B.1 - Worker spike: pinned official openscad-wasm snapshot (files.openscad.org) in a web worker — write .scad + includes into the Emscripten FS, callMain (Manifold backend; --backend=manifold on older pins), read STL bytes back; own ~100-line glue from the README, do NOT fork the playground's GPL runner
+- [x] B.2 - Bake tagged lib pins INTO the bundle: release CI packs BOSL2 (the libs/ submodule pin, v2.0.746 today) + scad-lib (same commit as the app) as zip members of the fab-web artifact; worker mounts them at /libraries so any .scad hits include <BOSL2/std.scad> / <slicer.scad> with ZERO setup; prove screw_hole/onion/teardrop render
+- [x] B.3 - fab-web integration: picker accepts .scad → worker render (progress in the panel) → STL bytes → the SAME present_model path (plan/slice/export just work)
+- [x] B.4 - Lazy delivery + licensing: openscad wasm (~13 MB) + library zips as separate bundle members fetched only when a .scad opens; GPL done consciously — unmodified module in its own worker, notice + source link on the page (page-level combo conveys GPL, MIT files stay MIT)
+- [x] B.5 - Dogfood a real models/ part end to end in the browser: .scad with scad-lib + BOSL2 includes → worker render → auto-slice → export; the baked pins (B.2) must resolve everything with no manual mounting
+- [>] B.6 - Customizer stretch: expose the .scad's top-level params in the panel, tweak → worker re-render (defer if B.1-B.5 drag)
+- [x] B.7 - Viewer controls: orbit (left-drag), pan (middle-drag / shift+left), zoom (wheel) on the fab-web 3D view — Z-up like the desktop; clicks still pick (drag-guard suppresses click-after-orbit); input yields over the panel
+

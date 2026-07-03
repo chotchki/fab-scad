@@ -260,7 +260,7 @@ pub fn auto_place(
 /// True if `point` is in solid material: inside the outer outline and OUTSIDE any hole. Even-odd
 /// ray-crossing over all loop segments (inside the outline = odd crossings; inside a hole flips it
 /// back to even = not material), so it's correct for a profile with holes regardless of winding.
-fn point_in_material(loops: &[Loop], point: [f64; 2]) -> bool {
+pub fn point_in_material(loops: &[Loop], point: [f64; 2]) -> bool {
     let [px, py] = point;
     let mut inside = false;
     for lp in loops {

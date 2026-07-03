@@ -43,9 +43,10 @@ pub struct AutoPlan {
 }
 
 /// Onion cap direction (+build = +Z) in a cut's 2D cross-section coords, or `None` for a Z cut (cap
-/// points out of the section plane — bounded axially, not in-section).
+/// points out of the section plane — bounded axially, not in-section). Pub: the web editor sizes
+/// manual onions with the same rule auto-place uses.
 #[cfg(feature = "kernel")]
-fn cap_dir(axis: usize) -> Option<[f64; 2]> {
+pub fn cap_dir(axis: usize) -> Option<[f64; 2]> {
     match axis {
         0 | 1 => Some([0.0, 1.0]), // X / Y cut: +Z is the section's 2nd coord
         _ => None,                 // Z cut
@@ -217,9 +218,7 @@ pub fn make_solid<W: std::io::Write + std::io::Seek>(
     out: W,
     gap: f64,
 ) -> Result<crate::bambu::ExportSummary> {
-    use crate::bambu::{self, PieceToPlace};
-    use crate::manifest::{Cut, PieceOrient, Slicing};
-    use anyhow::{bail, Context};
+    use anyhow::Context;
 
     base.bbox().context("model has no geometry")?;
 
@@ -232,11 +231,27 @@ pub fn make_solid<W: std::io::Write + std::io::Seek>(
 
     // Auto-plan cuts + onions (in-process cross-sections, no per-cut OpenSCAD spawn).
     let planned = plan(&base, min, max, bed)?;
-    let connectors = planned.connectors;
+    make_planned(base, &planned.cuts, planned.connectors, bed, out, gap)
+}
+
+/// The pack/export tail of [`make_solid`] with the plan SUPPLIED — the web editor's export runs
+/// this so user-edited connectors survive; `make_solid` feeds it the auto-plan. `base` must
+/// already be in the plan's frame.
+#[cfg(feature = "kernel")]
+pub fn make_planned<W: std::io::Write + std::io::Seek>(
+    base: crate::kernel::Solid,
+    cuts: &[(char, f64)],
+    connectors: Vec<Connector>,
+    bed: [f64; 3],
+    out: W,
+    gap: f64,
+) -> Result<crate::bambu::ExportSummary> {
+    use crate::bambu::{self, PieceToPlace};
+    use crate::manifest::{Cut, PieceOrient, Slicing};
+    use anyhow::bail;
+
     let make_cut = || -> Vec<Cut> {
-        planned
-            .cuts
-            .iter()
+        cuts.iter()
             .map(|&(ax, at)| Cut {
                 axis: ax.to_string(),
                 at: Num::Float(at),

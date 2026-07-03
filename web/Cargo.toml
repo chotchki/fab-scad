@@ -21,6 +21,9 @@ bevy = { version = "0.19", default-features = false, features = [
     "bevy_feathers",
     "bevy_picking",
     "mesh_picking",
+    # the A.3 editor overlay (section loops + onion circles) is immediate-mode gizmos
+    "bevy_gizmos",
+    "bevy_gizmos_render",
 ] }
 # File open on both targets: native dialog on desktop, <input type=file> on wasm.
 rfd = "0.17"

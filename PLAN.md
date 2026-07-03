@@ -88,10 +88,10 @@ Driven by `claude-plan-bridge` (FORMATv2). Hand-authored; run
 - [x] A.2 - Slice in the browser: fab-scad kernel dep (kernel, no native) + rotate-to-fit + auto::plan on upload → cut planes + piece preview; CI needs LLVM 20+ & lld for the wasm kernel build (ubuntu-24.04 clang 18 too old)
 - [ ] A.3 - Connector editor subset: per-cut cross-section view, auto-placed onions visible, add/remove/resize — lift the desktop editor's hot path
 - [x] A.4 - Export: pack → Bambu multi-plate 3mf via Cursor<Vec<u8>> seam → browser blob download (zero server-side outputs)
-- [ ] A.5 - Share don't fork: unify stl.rs + scene helpers duplicated between gui/ and web/ (duplicates drift)
+- [x] A.5 - Share don't fork: unify stl.rs + scene helpers duplicated between gui/ and web/ (duplicates drift)
 - [ ] A.6 - Size trim: prune bevy default features (audio/gltf/animation/scene formats) + wasm-opt parity in dev; budget ≤7 MiB brotli on the wire
 - [x] A.7 - Ship web-v0.3.0 (real slicer payload: plan/slice/export in-browser), retire spikes/wasm-gui, hotchkiss-io pin bump
-- [ ] A.8 - Perf gate: 100k+ tri STL upload/slice on the main thread — measure jank; if bad, geometry web worker over mesh-bytes postMessage (the !Send Solid contract maps 1:1)
+- [x] A.8 - Perf gate: 100k+ tri STL upload/slice on the main thread — measure jank; if bad, geometry web worker over mesh-bytes postMessage (the !Send Solid contract maps 1:1)
 - [ ] A.9 - 3MF upload alongside STL (color carry-through): parse 3mf meshes + material/color groups → per-object colored meshes; picker filter grows to [stl, 3mf]; keep colors through slice → export
 ## Phase B - openscad-wasm: render .scad in the browser (BOSL2 + scad-lib)
 - [ ] B.1 - Worker spike: pinned official openscad-wasm snapshot (files.openscad.org) in a web worker — write .scad + includes into the Emscripten FS, callMain (Manifold backend; --backend=manifold on older pins), read STL bytes back; own ~100-line glue from the README, do NOT fork the playground's GPL runner
@@ -106,3 +106,4 @@ Driven by `claude-plan-bridge` (FORMATv2). Hand-authored; run
 - **fab owns $fn: inject draft/final quality + strip `$fn = $preview ? …` from all scad model files** — added 2026-06-28.
 - **Showcase→slicer deep-link: project page hands its published STL into the slicer special page (same-origin fetch, COEP-safe) — publish-side wiring + slicer URL param** — added 2026-07-03.
 - **Resume the native channel: dispatch release-native.yml (mac DMG + Windows NSIS artifacts), fill winget InstallerSha256 from the release, decide the signing purchases (docs/packaging.md)** — added 2026-07-03.
+- **Geometry web worker for fab-web: move weld/plan/slice/export off the main thread over mesh-bytes postMessage (the !Send Solid contract) — earns its keep when the connector editor makes re-slicing interactive; A.8 measured ~5-10s main-thread freeze slicing a 119k-tri 27-piece monster (typical parts are ms)** — added 2026-07-03.

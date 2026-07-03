@@ -14,7 +14,7 @@ use bevy::tasks::{block_on, futures_lite::future, AsyncComputeTaskPool, Task};
 use fab_scad::kernel::Solid;
 use fab_scad::manifest::{Connector, Cut, Slicing};
 use fab_scad::num::Num;
-use fab_scad::{auto, auto_slice, slicing};
+use fab_scad::{auto, auto_slice, cross_section, slicing};
 
 use fab_scad::stl;
 
@@ -71,7 +71,18 @@ pub fn run() {
                 seed_source_request,
             ),
         )
-        .add_systems(Update, (poll_picked_file, run_slice, run_export))
+        .init_resource::<EditMode>()
+        .add_systems(
+            Update,
+            (
+                poll_picked_file,
+                run_slice,
+                run_export,
+                run_edit_actions,
+                draw_section,
+                sync_edit_ui,
+            ),
+        )
         .run();
 }
 
@@ -103,15 +114,39 @@ struct Plan {
 struct Actions {
     slice: bool,
     export: bool,
+    done: bool,
+    remove: bool,
+    grow: bool,
+    shrink: bool,
 }
+
+/// A.3: the connector-editor mode. `Cut` = editing one cut's join face IN PLACE — the section
+/// profile + onion markers draw on the cut plane in 3D (no separate 2D view to port), clicks on
+/// the plane add/select, panel buttons act on the selection.
+#[derive(Resource, Default)]
+enum EditMode {
+    #[default]
+    Scene,
+    Cut {
+        cut: usize,
+        /// Cached section profile (connector-pos coords) — recomputed on entry.
+        loops: Vec<Vec<[f64; 2]>>,
+        /// Index into `Part.plan.connectors` (the GLOBAL list, not per-cut).
+        selected: Option<usize>,
+    },
+}
+
+/// Marker for panel rows that only apply while editing a cut.
+#[derive(Component, Clone, Default)]
+struct EditUi;
 
 /// The currently displayed model/pieces (despawned and replaced on load/slice).
 #[derive(Component)]
 struct LoadedModel;
 
-/// Translucent cut-plane quads (despawned with the model).
+/// Translucent cut-plane quads (despawned with the model); payload = cut index into the plan.
 #[derive(Component)]
-struct CutPlane;
+struct CutPlane(usize);
 
 /// Status line in the panel.
 #[derive(Component, Clone, Default)]
@@ -214,6 +249,7 @@ async fn fetch_bytes(url: &str) -> anyhow::Result<Vec<u8>> {
 }
 
 fn load_demo_if_requested(
+    mut mode: ResMut<EditMode>,
     bed: Res<Bed>,
     part: ResMut<Part>,
     commands: Commands,
@@ -229,6 +265,7 @@ fn load_demo_if_requested(
             include_bytes!("../assets/demo.stl"),
             &bed,
             part,
+            &mut mode,
             commands,
             meshes,
             mats,
@@ -276,7 +313,7 @@ fn setup_scene(
 /// Z-up orbit-style framing: fixed yaw/pitch, radius scaled to the content extent.
 fn frame_camera(target: Vec3, extent: f32) -> Transform {
     let (yaw, pitch) = (-45f32.to_radians(), 30f32.to_radians());
-    let r = (extent * 2.3).max(80.0);
+    let r = (extent * 3.2).max(120.0);
     let eye = target
         + Vec3::new(
             r * pitch.cos() * yaw.cos(),
@@ -325,6 +362,7 @@ fn setup_ui(world: &mut World) {
             row_gap: px(6),
             padding: UiRect::all(px(8)),
             min_width: px(240),
+            max_width: px(300),
         }
         ThemeBackgroundColor(tokens::WINDOW_BG)
         Children [
@@ -354,6 +392,22 @@ fn setup_ui(world: &mut World) {
                 @FeathersButton { @caption: bsn!{ Text("Export 3mf") ThemedText } }
                 on(|_: On<Activate>, mut act: ResMut<Actions>| { act.export = true; })
             ),
+            (
+                @FeathersButton { @caption: bsn!{ Text("Done editing") ThemedText } } EditUi
+                on(|_: On<Activate>, mut act: ResMut<Actions>| { act.done = true; })
+            ),
+            (
+                @FeathersButton { @caption: bsn!{ Text("Remove onion") ThemedText } } EditUi
+                on(|_: On<Activate>, mut act: ResMut<Actions>| { act.remove = true; })
+            ),
+            (
+                @FeathersButton { @caption: bsn!{ Text("Bigger") ThemedText } } EditUi
+                on(|_: On<Activate>, mut act: ResMut<Actions>| { act.grow = true; })
+            ),
+            (
+                @FeathersButton { @caption: bsn!{ Text("Smaller") ThemedText } } EditUi
+                on(|_: On<Activate>, mut act: ResMut<Actions>| { act.shrink = true; })
+            ),
             (Text("pick an STL to begin") ThemedText StatusLabel),
         ]
     };
@@ -364,6 +418,7 @@ fn setup_ui(world: &mut World) {
 #[allow(clippy::too_many_arguments)] // a system-params relay, not an API
 fn poll_picked_file(
     mut task: ResMut<PickTask>,
+    mut mode: ResMut<EditMode>,
     bed: Res<Bed>,
     part: ResMut<Part>,
     commands: Commands,
@@ -380,7 +435,7 @@ fn poll_picked_file(
     task.0 = None;
     let Some((name, bytes)) = done else { return }; // cancelled
     present_model(
-        &name, &bytes, &bed, part, commands, meshes, mats, existing, cams, labels,
+        &name, &bytes, &bed, part, &mut mode, commands, meshes, mats, existing, cams, labels,
     );
 }
 
@@ -393,6 +448,7 @@ fn present_model(
     bytes: &[u8],
     bed: &Bed,
     mut part: ResMut<Part>,
+    mode: &mut EditMode,
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut mats: ResMut<Assets<StandardMaterial>>,
@@ -491,6 +547,7 @@ fn present_model(
     part.name = name.to_string();
     part.stl = bytes.to_vec();
     part.plan = plan;
+    *mode = EditMode::Scene;
 }
 
 /// One translucent quad per planned cut, in display coordinates (plan frame + seat offset).
@@ -519,7 +576,7 @@ fn spawn_cut_planes(
         ((plan.min[2] + plan.max[2]) / 2.0) as f32,
     ];
     const M: f32 = 6.0; // margin past the model so planes read as planes
-    for &(axis, at) in &plan.cuts {
+    for (ci, &(axis, at)) in plan.cuts.iter().enumerate() {
         let ai = match axis {
             'x' => 0,
             'y' => 1,
@@ -529,19 +586,160 @@ fn spawn_cut_planes(
         dims[ai] = 0.4;
         let mut pos = mid;
         pos[ai] = at as f32;
-        commands.spawn((
-            Mesh3d(meshes.add(Cuboid::new(dims[0], dims[1], dims[2]))),
-            MeshMaterial3d(mat.clone()),
-            Transform::from_translation(Vec3::from_array(pos) + offset),
-            CutPlane,
-        ));
+        commands
+            .spawn((
+                Mesh3d(meshes.add(Cuboid::new(dims[0], dims[1], dims[2]))),
+                MeshMaterial3d(mat.clone()),
+                Transform::from_translation(Vec3::from_array(pos) + offset),
+                CutPlane(ci),
+            ))
+            .observe(on_cut_plane_click);
     }
+}
+
+/// The seat translation the DISPLAY applies to plan-frame geometry (XY-center + Z-floor).
+fn seat_offset(plan: &Plan) -> Vec3 {
+    Vec3::new(
+        -((plan.min[0] + plan.max[0]) / 2.0) as f32,
+        -((plan.min[1] + plan.max[1]) / 2.0) as f32,
+        -plan.min[2] as f32,
+    )
+}
+
+/// Cut axis index + the two non-axis dims in ascending order — the section's 2D basis, matching
+/// BOTH `Solid::cross_section`'s output convention and `Connector.pos`.
+fn cut_basis(axis: char) -> (usize, [usize; 2]) {
+    match axis {
+        'x' => (0, [1, 2]),
+        'y' => (1, [0, 2]),
+        _ => (2, [0, 1]),
+    }
+}
+
+/// Clicking a cut plane: Scene mode → enter the editor for that cut. Already editing → the click
+/// is an ADD (empty spot, sized by the same fit rule auto-place uses) or a SELECT (near an
+/// existing onion). Uses the pick's world-space hit mapped into section coords.
+fn on_cut_plane_click(
+    ev: On<Pointer<Click>>,
+    planes: Query<&CutPlane>,
+    mut mode: ResMut<EditMode>,
+    mut part: ResMut<Part>,
+    mut labels: Query<&mut Text, With<StatusLabel>>,
+) {
+    let Ok(&CutPlane(ci)) = planes.get(ev.entity) else {
+        return;
+    };
+    let Some(hit) = ev.event.hit.position else {
+        return;
+    };
+    let mut status = |s: String| {
+        for mut t in &mut labels {
+            t.0 = s.clone();
+        }
+    };
+    let part = &mut *part; // split field borrows (plan &mut, stl &)
+    let Some(plan) = &mut part.plan else { return };
+    let Some(&(axis, _at)) = plan.cuts.get(ci) else {
+        return;
+    };
+    let (_, others) = cut_basis(axis);
+    let rf = hit - seat_offset(plan); // display space → plan (rotated) frame
+    let p2d = [rf[others[0]] as f64, rf[others[1]] as f64];
+
+    let entering = !matches!(&*mode, EditMode::Cut { cut, .. } if *cut == ci);
+    if entering {
+        let loops = match Solid::from_stl_bytes(&part.stl) {
+            Ok(sol) => {
+                let rotated = sol.transform(&plan.rot);
+                let (_, at) = plan.cuts[ci];
+                rotated.cross_section(cut_basis(plan.cuts[ci].0).0, at)
+            }
+            Err(e) => {
+                error!("section: {e:#}");
+                return;
+            }
+        };
+        let n = plan.connectors.iter().filter(|c| c.cut == ci).count();
+        status(format!(
+            "editing cut {} - {n} onion(s); click the plane to add, an onion to select",
+            ci + 1
+        ));
+        *mode = EditMode::Cut {
+            cut: ci,
+            loops,
+            selected: None,
+        };
+        return;
+    }
+
+    // Same cut, already editing: select-or-add.
+    let EditMode::Cut {
+        loops, selected, ..
+    } = &mut *mode
+    else {
+        return;
+    };
+    // Select: nearest connector on this cut whose disc covers the click (min 4mm halo).
+    let mut best: Option<(usize, f64)> = None;
+    for (gi, c) in plan.connectors.iter().enumerate() {
+        if c.cut != ci {
+            continue;
+        }
+        let d = ((c.pos[0].f() - p2d[0]).powi(2) + (c.pos[1].f() - p2d[1]).powi(2)).sqrt();
+        let halo = (c.size.unwrap_or(10.0) / 2.0).max(4.0);
+        if d <= halo && best.is_none_or(|(_, bd)| d < bd) {
+            best = Some((gi, d));
+        }
+    }
+    if let Some((gi, _)) = best {
+        *selected = Some(gi);
+        let c = &plan.connectors[gi];
+        status(format!(
+            "selected onion at ({:.0}, {:.0}), d={:.1}mm - Remove / Bigger / Smaller",
+            c.pos[0].f(),
+            c.pos[1].f(),
+            c.size.unwrap_or(10.0)
+        ));
+        return;
+    }
+    // Add: same sizing rule as auto-place (teardrop fit against the profile).
+    if !cross_section::point_in_material(loops, p2d) {
+        status("no material there - click inside the profile".into());
+        return;
+    }
+    let (ai, _) = cut_basis(axis);
+    let d = cross_section::fit_onion(
+        loops,
+        p2d,
+        auto::ONION_WALL,
+        auto::ONION_MAX_D,
+        auto::cap_dir(ai),
+        auto::ONION_TIP,
+    );
+    if d < auto::MIN_ONION {
+        status(format!("too tight here (fit {d:.1}mm) - pick an open spot"));
+        return;
+    }
+    plan.connectors.push(Connector {
+        cut: ci,
+        kind: "onion".to_string(),
+        screw: None,
+        pos: [Num::Float(p2d[0]), Num::Float(p2d[1])],
+        through: None,
+        size: Some(d),
+    });
+    *selected = Some(plan.connectors.len() - 1);
+    status(format!(
+        "added onion d={d:.1}mm - {} on this cut",
+        plan.connectors.iter().filter(|c| c.cut == ci).count()
+    ));
 }
 
 /// Slice in-process and show the pieces fanned apart by slab index — auto onions included
 /// (pegs proud on the lower piece, sockets carved from the upper).
 fn run_slice(
     mut act: ResMut<Actions>,
+    mut mode: ResMut<EditMode>,
     part: Res<Part>,
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
@@ -554,6 +752,7 @@ fn run_slice(
         return;
     }
     act.slice = false;
+    *mode = EditMode::Scene;
     let mut status = |s: String| {
         for mut t in &mut labels {
             t.0 = s.clone();
@@ -671,9 +870,18 @@ fn run_export(
         part.name.strip_suffix(".stl").unwrap_or(&part.name)
     );
     let result = (|| -> anyhow::Result<(usize, usize, Vec<u8>)> {
-        let solid = Solid::from_stl_bytes(&part.stl)?;
+        // make_planned, not make_solid: the user's edited connectors must survive the export.
+        let plan = part.plan.as_ref().expect("checked above");
+        let rotated = Solid::from_stl_bytes(&part.stl)?.transform(&plan.rot);
         let mut buf = std::io::Cursor::new(Vec::new());
-        let sum = auto::make_solid(solid, bed.0, &mut buf, GAP)?;
+        let sum = auto::make_planned(
+            rotated,
+            &plan.cuts,
+            plan.connectors.clone(),
+            bed.0,
+            &mut buf,
+            GAP,
+        )?;
         Ok((sum.pieces, sum.plates, buf.into_inner()))
     })();
     match result {
@@ -719,6 +927,166 @@ fn download_bytes(name: &str, bytes: &[u8]) -> anyhow::Result<()> {
 fn download_bytes(name: &str, bytes: &[u8]) -> anyhow::Result<()> {
     std::fs::write(name, bytes)?;
     Ok(())
+}
+
+/// Immediate-mode overlay while editing a cut: profile loops + one circle per onion on the
+/// plane (selected = orange). Gizmos redraw per frame; nothing to despawn on exit.
+fn draw_section(mode: Res<EditMode>, part: Res<Part>, mut gizmos: Gizmos) {
+    let EditMode::Cut {
+        cut,
+        loops,
+        selected,
+    } = &*mode
+    else {
+        return;
+    };
+    let Some(plan) = &part.plan else { return };
+    let Some(&(axis, at)) = plan.cuts.get(*cut) else {
+        return;
+    };
+    let (ai, others) = cut_basis(axis);
+    let offset = seat_offset(plan);
+    // Section 2D → display 3D, nudged off the plane so lines beat the quad's depth.
+    let lift = 0.6;
+    let to_world = |p: [f64; 2], side: f32| {
+        let mut v = [0.0f32; 3];
+        v[ai] = at as f32 + side * lift;
+        v[others[0]] = p[0] as f32;
+        v[others[1]] = p[1] as f32;
+        Vec3::from_array(v) + offset
+    };
+    for lp in loops {
+        if lp.len() < 2 {
+            continue;
+        }
+        let mut pts: Vec<Vec3> = lp.iter().map(|&p| to_world(p, 1.0)).collect();
+        pts.push(pts[0]);
+        gizmos.linestrip(pts.clone(), Color::srgb(0.95, 0.95, 0.98));
+        for p in &mut pts {
+            *p -= Vec3::from_array({
+                let mut n = [0.0f32; 3];
+                n[ai] = 2.0 * lift;
+                n
+            });
+        }
+        gizmos.linestrip(pts, Color::srgb(0.95, 0.95, 0.98));
+    }
+    let mut normal = [0.0f32; 3];
+    normal[ai] = 1.0;
+    let normal = Dir3::new(Vec3::from_array(normal)).unwrap();
+    for (gi, c) in plan.connectors.iter().enumerate() {
+        if c.cut != *cut {
+            continue;
+        }
+        let center = to_world([c.pos[0].f(), c.pos[1].f()], 1.0);
+        let color = if Some(gi) == *selected {
+            Color::srgb(0.95, 0.55, 0.15)
+        } else {
+            Color::srgb(0.25, 0.85, 0.45)
+        };
+        let iso = Isometry3d::new(center, Quat::from_rotation_arc(Vec3::Z, *normal));
+        gizmos.circle(iso, (c.size.unwrap_or(10.0) / 2.0) as f32, color);
+        gizmos.circle(iso, 1.2, color);
+    }
+}
+
+/// Apply the edit buttons to the selection; sizes clamp to the same fit rule that placed them.
+fn run_edit_actions(
+    mut act: ResMut<Actions>,
+    mut mode: ResMut<EditMode>,
+    mut part: ResMut<Part>,
+    mut labels: Query<&mut Text, With<StatusLabel>>,
+) {
+    let (done, remove, grow, shrink) = (act.done, act.remove, act.grow, act.shrink);
+    if !(done || remove || grow || shrink) {
+        return;
+    }
+    act.done = false;
+    act.remove = false;
+    act.grow = false;
+    act.shrink = false;
+    let mut status = |s: String| {
+        for mut t in &mut labels {
+            t.0 = s.clone();
+        }
+    };
+    if done {
+        *mode = EditMode::Scene;
+        if let Some(plan) = &part.plan {
+            status(format!(
+                "{} cut(s), {} onion(s) - Slice / Export when ready",
+                plan.cuts.len(),
+                plan.connectors.len()
+            ));
+        }
+        return;
+    }
+    let EditMode::Cut {
+        cut,
+        loops,
+        selected,
+    } = &mut *mode
+    else {
+        return;
+    };
+    let Some(plan) = &mut part.plan else { return };
+    let Some(gi) = *selected else {
+        status("nothing selected - click an onion first".into());
+        return;
+    };
+    if remove {
+        plan.connectors.remove(gi);
+        *selected = None;
+        status(format!(
+            "removed - {} onion(s) left on this cut",
+            plan.connectors.iter().filter(|c| c.cut == *cut).count()
+        ));
+        return;
+    }
+    let Some(&(axis, _)) = plan.cuts.get(*cut) else {
+        return;
+    };
+    let (ai, _) = cut_basis(axis);
+    let c = &mut plan.connectors[gi];
+    let p2d = [c.pos[0].f(), c.pos[1].f()];
+    let max_fit = cross_section::fit_onion(
+        loops,
+        p2d,
+        auto::ONION_WALL,
+        auto::ONION_MAX_D,
+        auto::cap_dir(ai),
+        auto::ONION_TIP,
+    );
+    let cur = c.size.unwrap_or(10.0);
+    let next = if grow { cur + 1.0 } else { cur - 1.0 }
+        .clamp(auto::MIN_ONION, max_fit.max(auto::MIN_ONION));
+    c.size = Some(next);
+    status(format!("onion d={next:.1}mm (fit caps at {max_fit:.1})"));
+}
+
+/// Show the edit-only buttons exactly while a cut is being edited — and hide the MODEL while
+/// editing: it occludes the cut plane (both visually and for picking), and the section overlay
+/// is the editing surface. The desktop uses a separate 2D view for the same reason.
+fn sync_edit_ui(
+    mode: Res<EditMode>,
+    mut rows: Query<&mut Node, With<EditUi>>,
+    mut model: Query<&mut Visibility, With<LoadedModel>>,
+) {
+    let editing = matches!(&*mode, EditMode::Cut { .. });
+    for mut node in &mut rows {
+        node.display = if editing {
+            Display::Flex
+        } else {
+            Display::None
+        };
+    }
+    for mut vis in &mut model {
+        *vis = if editing {
+            Visibility::Hidden
+        } else {
+            Visibility::Inherited
+        };
+    }
 }
 
 fn aabb(s: &stl::StlMesh) -> (Vec3, Vec3) {

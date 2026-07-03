@@ -37,7 +37,12 @@ pub fn smoke(oscad: &Openscad, input: &Path, tmp_dir: &Path, timeout: Duration) 
             format!("timed out after {}s", timeout.as_secs()),
             r.duration,
         ),
-        Ok(r) if !r.ok => (false, 0, "openscad error or empty output".into(), r.duration),
+        Ok(r) if !r.ok => (
+            false,
+            0,
+            "openscad error or empty output".into(),
+            r.duration,
+        ),
         Ok(r) => match stl_triangle_count(&out) {
             0 => (false, 0, "rendered but zero faces".into(), r.duration),
             n => (true, n, String::new(), r.duration),
@@ -68,7 +73,9 @@ pub fn stl_triangle_count(path: &Path) -> u64 {
             return n;
         }
     }
-    String::from_utf8_lossy(&bytes).matches("facet normal").count() as u64
+    String::from_utf8_lossy(&bytes)
+        .matches("facet normal")
+        .count() as u64
 }
 
 /// Every renderable `.scad` under `root` (recursive, sorted). Skips VCS/build/output dirs and the
@@ -90,7 +97,10 @@ fn collect(dir: &Path, out: &mut Vec<PathBuf>) {
         if p.is_dir() {
             let name = p.file_name().and_then(|s| s.to_str()).unwrap_or("");
             if name.starts_with('.')
-                || matches!(name, "out" | "target" | "node_modules" | "scad-lib" | "libs")
+                || matches!(
+                    name,
+                    "out" | "target" | "node_modules" | "scad-lib" | "libs"
+                )
             {
                 continue;
             }
@@ -146,7 +156,11 @@ impl SweepCache {
     }
 
     /// Overwrite the cache: version header + one line per passing `(file, hash, faces)`.
-    pub fn save(path: &Path, version: &str, passing: &[(PathBuf, u64, u64)]) -> std::io::Result<()> {
+    pub fn save(
+        path: &Path,
+        version: &str,
+        passing: &[(PathBuf, u64, u64)],
+    ) -> std::io::Result<()> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -224,7 +238,12 @@ mod tests {
         mk(".hidden/c.scad"); // hidden — skipped
         let found: Vec<_> = scad_files(&root)
             .iter()
-            .map(|p| p.strip_prefix(&root).unwrap().to_string_lossy().replace('\\', "/"))
+            .map(|p| {
+                p.strip_prefix(&root)
+                    .unwrap()
+                    .to_string_lossy()
+                    .replace('\\', "/")
+            })
             .collect();
         assert_eq!(found, vec!["models/a.scad", "sub/b.scad"]);
         let _ = std::fs::remove_dir_all(&root);

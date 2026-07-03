@@ -40,7 +40,10 @@ pub fn auto_slice(min: [f64; 3], max: [f64; 3], bed: [f64; 3]) -> Vec<AutoCut> {
         let n = (extent / bed_dim).ceil() as usize; // pieces along this axis (≥ 2 here)
         let step = extent / n as f64;
         for k in 1..n {
-            cuts.push(AutoCut { axis, at: min[axis] + step * k as f64 });
+            cuts.push(AutoCut {
+                axis,
+                at: min[axis] + step * k as f64,
+            });
         }
     }
     cuts
@@ -90,16 +93,27 @@ pub fn best_fit_rotation(base: &crate::kernel::Solid, bed: [f64; 3]) -> FitRotat
         candidates.push(rot_y(a));
         candidates.push(rot_z(a));
     }
-    let vol = |min: [f64; 3], max: [f64; 3]| (max[0] - min[0]) * (max[1] - min[1]) * (max[2] - min[2]);
+    let vol =
+        |min: [f64; 3], max: [f64; 3]| (max[0] - min[0]) * (max[1] - min[1]) * (max[2] - min[2]);
     // Seed with identity so a spin must EARN the swap.
     let mut best: Option<FitRotation> = None;
     for rot in candidates {
-        let Some((min, max)) = base.transform(&rot).bbox() else { continue };
+        let Some((min, max)) = base.transform(&rot).bbox() else {
+            continue;
+        };
         let pieces = piece_count(min, max, bed);
-        let cand = FitRotation { rot, min, max, pieces };
+        let cand = FitRotation {
+            rot,
+            min,
+            max,
+            pieces,
+        };
         let take = match best {
             None => true,
-            Some(b) => pieces < b.pieces || (pieces == b.pieces && vol(min, max) + 1e-6 < vol(b.min, b.max)),
+            Some(b) => {
+                pieces < b.pieces
+                    || (pieces == b.pieces && vol(min, max) + 1e-6 < vol(b.min, b.max))
+            }
         };
         if take {
             best = Some(cand);
@@ -154,7 +168,13 @@ mod tests {
     fn equal_division_leaves_no_sliver() {
         // 600 on X, bed 256 → ceil(600/256)=3 equal 200mm pieces → cuts at 200 and 400 (NOT 256+256+88).
         let cuts = auto_slice([0.0; 3], [600.0, 100.0, 50.0], BED);
-        assert_eq!(cuts, vec![AutoCut { axis: 0, at: 200.0 }, AutoCut { axis: 0, at: 400.0 }]);
+        assert_eq!(
+            cuts,
+            vec![
+                AutoCut { axis: 0, at: 200.0 },
+                AutoCut { axis: 0, at: 400.0 }
+            ]
+        );
     }
 
     #[test]
@@ -163,7 +183,11 @@ mod tests {
         let cuts = auto_slice([0.0; 3], [400.0, 300.0, 50.0], BED);
         assert_eq!(cuts.iter().filter(|c| c.axis == 0).count(), 1);
         assert_eq!(cuts.iter().filter(|c| c.axis == 1).count(), 1);
-        assert_eq!(cuts.iter().filter(|c| c.axis == 2).count(), 0, "Z fits, no Z cut");
+        assert_eq!(
+            cuts.iter().filter(|c| c.axis == 2).count(),
+            0,
+            "Z fits, no Z cut"
+        );
         assert_eq!(piece_count([0.0; 3], [400.0, 300.0, 50.0], BED), 4);
     }
 
@@ -186,9 +210,14 @@ mod tests {
         use crate::kernel::Solid;
         // A 400×20×20 bar lying at 45° in XY: its footprint bloats to ~297×297 → 2×2 = 4 pieces
         // axis-aligned. rotate-to-fit should spin it back to the 400×20×20 orientation → 2 pieces.
-        let bar = Solid::cube(400.0, 20.0, 20.0, true).transform(&rot_z(std::f64::consts::FRAC_PI_4));
+        let bar =
+            Solid::cube(400.0, 20.0, 20.0, true).transform(&rot_z(std::f64::consts::FRAC_PI_4));
         let (min, max) = bar.bbox().unwrap();
-        assert_eq!(piece_count(min, max, BED), 4, "diagonal bar over-cuts axis-aligned");
+        assert_eq!(
+            piece_count(min, max, BED),
+            4,
+            "diagonal bar over-cuts axis-aligned"
+        );
         let fit = best_fit_rotation(&bar, BED);
         assert_eq!(fit.pieces, 2, "rotate-to-fit spins it back to 2 pieces");
         assert!(fit.rot != identity(), "it chose a non-identity spin");

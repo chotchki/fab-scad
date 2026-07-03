@@ -96,13 +96,21 @@ pub fn write_project(path: &Path, plates: &[Vec<Placed>], bed: [f64; 2]) -> Resu
             let (mesh_id, wrap_id) = (2 * gi + 1, 2 * gi + 2);
 
             // Mesh object.
-            model.push_str(&format!("  <object id=\"{mesh_id}\" type=\"model\">\n   <mesh>\n    <vertices>\n"));
+            model.push_str(&format!(
+                "  <object id=\"{mesh_id}\" type=\"model\">\n   <mesh>\n    <vertices>\n"
+            ));
             for v in &placed.mesh.verts {
-                model.push_str(&format!("     <vertex x=\"{}\" y=\"{}\" z=\"{}\"/>\n", v[0], v[1], v[2]));
+                model.push_str(&format!(
+                    "     <vertex x=\"{}\" y=\"{}\" z=\"{}\"/>\n",
+                    v[0], v[1], v[2]
+                ));
             }
             model.push_str("    </vertices>\n    <triangles>\n");
             for t in &placed.mesh.tris {
-                model.push_str(&format!("     <triangle v1=\"{}\" v2=\"{}\" v3=\"{}\"/>\n", t[0], t[1], t[2]));
+                model.push_str(&format!(
+                    "     <triangle v1=\"{}\" v2=\"{}\" v3=\"{}\"/>\n",
+                    t[0], t[1], t[2]
+                ));
             }
             model.push_str("    </triangles>\n   </mesh>\n  </object>\n");
 
@@ -167,8 +175,10 @@ pub fn write_project(path: &Path, plates: &[Vec<Placed>], bed: [f64; 2]) -> Resu
         ("3D/3dmodel.model", model.as_str()),
         ("Metadata/model_settings.config", settings.as_str()),
     ] {
-        zip.start_file(name, opts).with_context(|| format!("zip entry {name}"))?;
-        zip.write_all(body.as_bytes()).with_context(|| format!("writing {name}"))?;
+        zip.start_file(name, opts)
+            .with_context(|| format!("zip entry {name}"))?;
+        zip.write_all(body.as_bytes())
+            .with_context(|| format!("writing {name}"))?;
     }
     zip.finish().context("finalizing 3mf zip")?;
     Ok(())
@@ -215,8 +225,14 @@ pub fn export_plates(
                 v[k] -= min[k];
             }
         }
-        oriented.push(Mesh { verts, tris: p.mesh.tris.clone() });
-        foots.push(Footprint { w: max[0] - min[0], h: max[1] - min[1] });
+        oriented.push(Mesh {
+            verts,
+            tris: p.mesh.tris.clone(),
+        });
+        foots.push(Footprint {
+            w: max[0] - min[0],
+            h: max[1] - min[1],
+        });
     }
 
     let placements = pack::pack(&foots, bed, gap)?;
@@ -240,11 +256,18 @@ pub fn export_plates(
                 v[1] -= min[1];
             }
         }
-        plates[pl.plate].push(Placed { mesh, at: [pl.x, pl.y] });
+        plates[pl.plate].push(Placed {
+            mesh,
+            at: [pl.x, pl.y],
+        });
     }
 
     write_project(path, &plates, bed)?;
-    Ok(ExportSummary { plates: plate_n, pieces: pieces.len(), fill })
+    Ok(ExportSummary {
+        plates: plate_n,
+        pieces: pieces.len(),
+        fill,
+    })
 }
 
 /// Axis-aligned bounding box of a vertex set (`None` if empty).
@@ -328,7 +351,17 @@ mod tests {
 
     #[test]
     fn column_count_matches_bambu_grid() {
-        for (n, cols) in [(1, 1), (2, 2), (3, 2), (4, 2), (5, 3), (6, 3), (9, 3), (10, 4), (16, 4)] {
+        for (n, cols) in [
+            (1, 1),
+            (2, 2),
+            (3, 2),
+            (4, 2),
+            (5, 3),
+            (6, 3),
+            (9, 3),
+            (10, 4),
+            (16, 4),
+        ] {
             assert_eq!(column_count(n), cols, "n={n}");
         }
     }
@@ -346,8 +379,14 @@ mod tests {
     fn writes_a_valid_two_plate_project() {
         let tmp = std::env::temp_dir().join(format!("bambu_{}.3mf", std::process::id()));
         let plates = vec![
-            vec![Placed { mesh: unit_cube(), at: [10.0, 10.0] }],
-            vec![Placed { mesh: unit_cube(), at: [20.0, 20.0] }],
+            vec![Placed {
+                mesh: unit_cube(),
+                at: [10.0, 10.0],
+            }],
+            vec![Placed {
+                mesh: unit_cube(),
+                at: [20.0, 20.0],
+            }],
         ];
         write_project(&tmp, &plates, [256.0, 256.0]).unwrap();
 
@@ -355,8 +394,16 @@ mod tests {
         let f = std::fs::File::open(&tmp).unwrap();
         let mut zip = zip::ZipArchive::new(f).unwrap();
         let names: Vec<String> = zip.file_names().map(str::to_string).collect();
-        for want in ["[Content_Types].xml", "_rels/.rels", "3D/3dmodel.model", "Metadata/model_settings.config"] {
-            assert!(names.iter().any(|n| n == want), "missing {want}; have {names:?}");
+        for want in [
+            "[Content_Types].xml",
+            "_rels/.rels",
+            "3D/3dmodel.model",
+            "Metadata/model_settings.config",
+        ] {
+            assert!(
+                names.iter().any(|n| n == want),
+                "missing {want}; have {names:?}"
+            );
         }
         let read = |zip: &mut zip::ZipArchive<std::fs::File>, name: &str| {
             use std::io::Read;
@@ -366,7 +413,10 @@ mod tests {
         };
         let model = read(&mut zip, "3D/3dmodel.model");
         // FACT 1: the recognition gate.
-        assert!(model.contains("name=\"Application\">BambuStudio-"), "Application gate missing");
+        assert!(
+            model.contains("name=\"Application\">BambuStudio-"),
+            "Application gate missing"
+        );
         // Two pieces → two build items, two wrapper objects (id 2 and 4).
         assert_eq!(model.matches("<item ").count(), 2, "expected 2 build items");
         assert!(model.contains("objectid=\"2\""));
@@ -374,17 +424,33 @@ mod tests {
 
         let settings = read(&mut zip, "Metadata/model_settings.config");
         assert_eq!(settings.matches("<plate>").count(), 2, "expected 2 plates");
-        assert!(settings.contains("value=\"1\"") && settings.contains("value=\"2\""), "plater ids");
-        assert_eq!(settings.matches("<model_instance>").count(), 2, "one instance per plate");
+        assert!(
+            settings.contains("value=\"1\"") && settings.contains("value=\"2\""),
+            "plater ids"
+        );
+        assert_eq!(
+            settings.matches("<model_instance>").count(),
+            2,
+            "one instance per plate"
+        );
 
         let _ = std::fs::remove_file(&tmp);
     }
 
     #[test]
     fn rot_up_to_z_maps_the_build_up_to_plus_z() {
-        for up in [[0.0, 0.0, 1.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, -1.0], [1.0, 1.0, 1.0]] {
+        for up in [
+            [0.0, 0.0, 1.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, -1.0],
+            [1.0, 1.0, 1.0],
+        ] {
             let z = matvec(rot_up_to_z(up), geom::normalize(up));
-            assert!((z[0]).abs() < 1e-9 && (z[1]).abs() < 1e-9 && (z[2] - 1.0).abs() < 1e-9, "up {up:?} → {z:?}");
+            assert!(
+                (z[0]).abs() < 1e-9 && (z[1]).abs() < 1e-9 && (z[2] - 1.0).abs() < 1e-9,
+                "up {up:?} → {z:?}"
+            );
         }
     }
 
@@ -393,8 +459,14 @@ mod tests {
         let tmp = std::env::temp_dir().join(format!("bambu_export_{}.3mf", std::process::id()));
         // Two cubes, different build-ups — both small, so they share one plate.
         let pieces = vec![
-            PieceToPlace { mesh: unit_cube(), up: [0.0, 0.0, 1.0] },
-            PieceToPlace { mesh: unit_cube(), up: [1.0, 0.0, 0.0] },
+            PieceToPlace {
+                mesh: unit_cube(),
+                up: [0.0, 0.0, 1.0],
+            },
+            PieceToPlace {
+                mesh: unit_cube(),
+                up: [1.0, 0.0, 0.0],
+            },
         ];
         let sum = export_plates(&tmp, pieces, [256.0, 256.0], 3.0).unwrap();
         assert_eq!(sum.pieces, 2);
@@ -405,11 +477,17 @@ mod tests {
         let mut zip = zip::ZipArchive::new(f).unwrap();
         use std::io::Read;
         let mut model = String::new();
-        zip.by_name("3D/3dmodel.model").unwrap().read_to_string(&mut model).unwrap();
+        zip.by_name("3D/3dmodel.model")
+            .unwrap()
+            .read_to_string(&mut model)
+            .unwrap();
         assert!(model.contains("name=\"Application\">BambuStudio-"));
         assert_eq!(model.matches("<item ").count(), 2);
         let mut settings = String::new();
-        zip.by_name("Metadata/model_settings.config").unwrap().read_to_string(&mut settings).unwrap();
+        zip.by_name("Metadata/model_settings.config")
+            .unwrap()
+            .read_to_string(&mut settings)
+            .unwrap();
         assert_eq!(settings.matches("<plate>").count(), 1, "one shared plate");
 
         let _ = std::fs::remove_file(&tmp);
@@ -453,7 +531,10 @@ mod tests {
         let bed = [256.0, 256.0];
         let mut pieces = Vec::new();
         for _ in 0..3 {
-            pieces.push(PieceToPlace { mesh: slab(), up: [0.0, 0.0, 1.0] });
+            pieces.push(PieceToPlace {
+                mesh: slab(),
+                up: [0.0, 0.0, 1.0],
+            });
         }
         let tmp = std::env::temp_dir().join(format!("bambu_cells_{}.3mf", std::process::id()));
         let sum = export_plates(&tmp, pieces, bed, 5.0).unwrap();
@@ -463,23 +544,39 @@ mod tests {
         let mut zip = zip::ZipArchive::new(f).unwrap();
         use std::io::Read;
         let mut model = String::new();
-        zip.by_name("3D/3dmodel.model").unwrap().read_to_string(&mut model).unwrap();
+        zip.by_name("3D/3dmodel.model")
+            .unwrap()
+            .read_to_string(&mut model)
+            .unwrap();
 
         let cols = column_count(3);
         let mut plates_hit = std::collections::HashSet::new();
         for line in model.lines().filter(|l| l.contains("<item ")) {
-            let xf = line.split("transform=\"").nth(1).unwrap().split('"').next().unwrap();
+            let xf = line
+                .split("transform=\"")
+                .nth(1)
+                .unwrap()
+                .split('"')
+                .next()
+                .unwrap();
             let n: Vec<f64> = xf.split_whitespace().map(|s| s.parse().unwrap()).collect();
             let (tx, ty) = (n[9], n[10]); // translation = last three of the 12
             let p = (0..3)
                 .find(|&p| {
                     let [ox, oy] = plate_origin(p, cols, bed);
-                    tx >= ox - 1e-6 && tx <= ox + bed[0] + 1e-6 && ty >= oy - 1e-6 && ty <= oy + bed[1] + 1e-6
+                    tx >= ox - 1e-6
+                        && tx <= ox + bed[0] + 1e-6
+                        && ty >= oy - 1e-6
+                        && ty <= oy + bed[1] + 1e-6
                 })
                 .unwrap_or_else(|| panic!("item at ({tx},{ty}) fell in no plate cell"));
             plates_hit.insert(p);
         }
-        assert_eq!(plates_hit.len(), 3, "each of the three plates holds exactly one piece");
+        assert_eq!(
+            plates_hit.len(),
+            3,
+            "each of the three plates holds exactly one piece"
+        );
 
         let _ = std::fs::remove_file(&tmp);
     }

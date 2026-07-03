@@ -89,4 +89,4 @@ Driven by `claude-plan-bridge` (FORMATv2). Hand-authored; run
 - **fab owns $fn: inject draft/final quality + strip `$fn = $preview ? …` from all scad model files** — added 2026-06-28.
 - **Showcase→slicer deep-link: project page hands its published STL into the slicer special page (same-origin fetch, COEP-safe) — publish-side wiring + slicer URL param** — added 2026-07-03.
 - **Resume the native channel: dispatch release-native.yml (mac DMG + Windows NSIS artifacts), fill winget InstallerSha256 from the release, decide the signing purchases (docs/packaging.md)** — added 2026-07-03.
-- **Fix ci.yml: every run dies at checkout cloning the private scad-models submodule (red since 2026-06-29) — drop `submodules: recursive` or add a deploy key; then face the fmt/clippy drift it's been masking** — added 2026-07-03.
+- **Fix ci.yml leftovers: scad-models is public now (checkout fixed 2026-07-03) — remaining: the fmt/clippy drift the dead CI was masking (local run shows fmt diffs in gui/examples + a few new-lint clippy warnings)** — added 2026-07-03.

@@ -66,7 +66,11 @@ fn setup(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
         RenderTarget::Image(target.clone().into()),
         bevy::ui::IsDefaultUiCamera,
     ));
-    commands.insert_resource(Spike { frame: 0, list: None, target });
+    commands.insert_resource(Spike {
+        frame: 0,
+        list: None,
+        target,
+    });
 }
 
 /// Re-spawn the list with `n` rows, built from data.
@@ -109,7 +113,9 @@ fn rebuild(commands: &mut Commands, old: Option<Entity>, n: usize) {
 
 fn shot(commands: &mut Commands, target: &Handle<Image>, name: &str) {
     let path: PathBuf = std::env::temp_dir().join(name);
-    commands.spawn(Screenshot::image(target.clone())).observe(save_to_disk(path.clone()));
+    commands
+        .spawn(Screenshot::image(target.clone()))
+        .observe(save_to_disk(path.clone()));
     info!("shot {}", path.display());
 }
 

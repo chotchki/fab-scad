@@ -43,7 +43,10 @@ pub fn plate_count(ps: &[Placement]) -> usize {
 /// nothing fits.
 pub fn pack(items: &[Footprint], bed: [f64; 2], gap: f64) -> Result<Vec<Placement>> {
     let [bw, bh] = bed;
-    ensure!(bw > 0.0 && bh > 0.0, "bed dimensions must be positive, got {bw}×{bh}");
+    ensure!(
+        bw > 0.0 && bh > 0.0,
+        "bed dimensions must be positive, got {bw}×{bh}"
+    );
 
     // Normalize to landscape (w ≥ h), remembering the rotation, and validate bed-fit up front.
     struct Norm {
@@ -54,7 +57,11 @@ pub fn pack(items: &[Footprint], bed: [f64; 2], gap: f64) -> Result<Vec<Placemen
     }
     let mut norm: Vec<Norm> = Vec::with_capacity(items.len());
     for (idx, f) in items.iter().enumerate() {
-        let (w, h, rot) = if f.w >= f.h { (f.w, f.h, false) } else { (f.h, f.w, true) };
+        let (w, h, rot) = if f.w >= f.h {
+            (f.w, f.h, false)
+        } else {
+            (f.h, f.w, true)
+        };
         ensure!(
             w + gap <= bw + 1e-9 && h + gap <= bh + 1e-9,
             "piece {idx} ({:.1}×{:.1} mm) doesn't fit the {bw:.0}×{bh:.0} bed in either orientation",
@@ -74,32 +81,68 @@ pub fn pack(items: &[Footprint], bed: [f64; 2], gap: f64) -> Result<Vec<Placemen
     }
     let mut shelves: Vec<Shelf> = Vec::new();
     let mut plate_top: Vec<f64> = Vec::new(); // next free y (new-shelf baseline) per plate
-    let mut out = vec![Placement { plate: 0, x: 0.0, y: 0.0, rotated: false }; items.len()];
+    let mut out = vec![
+        Placement {
+            plate: 0,
+            x: 0.0,
+            y: 0.0,
+            rotated: false
+        };
+        items.len()
+    ];
 
     for it in &norm {
         // 1) First existing shelf (any plate) that fits both width and height.
-        if let Some(sh) =
-            shelves.iter_mut().find(|s| it.h <= s.height + 1e-9 && s.x + it.w + gap <= bw + 1e-9)
+        if let Some(sh) = shelves
+            .iter_mut()
+            .find(|s| it.h <= s.height + 1e-9 && s.x + it.w + gap <= bw + 1e-9)
         {
-            out[it.idx] = Placement { plate: sh.plate, x: sh.x, y: sh.y0, rotated: it.rot };
+            out[it.idx] = Placement {
+                plate: sh.plate,
+                x: sh.x,
+                y: sh.y0,
+                rotated: it.rot,
+            };
             sh.x += it.w + gap;
             continue;
         }
         // 2) New shelf on the first plate with vertical room.
-        if let Some((p, top)) =
-            plate_top.iter_mut().enumerate().find(|(_, top)| **top + it.h + gap <= bh + 1e-9)
+        if let Some((p, top)) = plate_top
+            .iter_mut()
+            .enumerate()
+            .find(|(_, top)| **top + it.h + gap <= bh + 1e-9)
         {
             let y0 = *top;
             *top = y0 + it.h + gap;
-            shelves.push(Shelf { plate: p, y0, height: it.h, x: it.w + gap });
-            out[it.idx] = Placement { plate: p, x: 0.0, y: y0, rotated: it.rot };
+            shelves.push(Shelf {
+                plate: p,
+                y0,
+                height: it.h,
+                x: it.w + gap,
+            });
+            out[it.idx] = Placement {
+                plate: p,
+                x: 0.0,
+                y: y0,
+                rotated: it.rot,
+            };
             continue;
         }
         // 3) A fresh plate.
         let p = plate_top.len();
         plate_top.push(it.h + gap);
-        shelves.push(Shelf { plate: p, y0: 0.0, height: it.h, x: it.w + gap });
-        out[it.idx] = Placement { plate: p, x: 0.0, y: 0.0, rotated: it.rot };
+        shelves.push(Shelf {
+            plate: p,
+            y0: 0.0,
+            height: it.h,
+            x: it.w + gap,
+        });
+        out[it.idx] = Placement {
+            plate: p,
+            x: 0.0,
+            y: 0.0,
+            rotated: it.rot,
+        };
     }
     Ok(out)
 }
@@ -125,7 +168,11 @@ mod tests {
 
     // Placed rectangle (post-rotation) for overlap checks.
     fn rect(items: &[Footprint], p: &Placement, i: usize) -> (f64, f64, f64, f64) {
-        let (w, h) = if p.rotated { (items[i].h, items[i].w) } else { (items[i].w, items[i].h) };
+        let (w, h) = if p.rotated {
+            (items[i].h, items[i].w)
+        } else {
+            (items[i].w, items[i].h)
+        };
         (p.x, p.y, p.x + w, p.y + h)
     }
 
@@ -137,10 +184,16 @@ mod tests {
     fn assert_valid(items: &[Footprint], ps: &[Placement], bed: [f64; 2]) {
         for i in 0..items.len() {
             let (x0, y0, x1, y1) = rect(items, &ps[i], i);
-            assert!(x0 >= -1e-6 && y0 >= -1e-6 && x1 <= bed[0] + 1e-6 && y1 <= bed[1] + 1e-6, "piece {i} off-bed");
+            assert!(
+                x0 >= -1e-6 && y0 >= -1e-6 && x1 <= bed[0] + 1e-6 && y1 <= bed[1] + 1e-6,
+                "piece {i} off-bed"
+            );
             for j in (i + 1)..items.len() {
                 if ps[i].plate == ps[j].plate {
-                    assert!(!overlaps(rect(items, &ps[i], i), rect(items, &ps[j], j)), "pieces {i},{j} overlap");
+                    assert!(
+                        !overlaps(rect(items, &ps[i], i), rect(items, &ps[j], j)),
+                        "pieces {i},{j} overlap"
+                    );
                 }
             }
         }
@@ -157,7 +210,10 @@ mod tests {
     #[test]
     fn oversized_piece_errors() {
         let items = [fp(300.0, 40.0)];
-        assert!(pack(&items, [256.0, 256.0], 2.0).is_err(), "300mm > 256mm bed in both orientations");
+        assert!(
+            pack(&items, [256.0, 256.0], 2.0).is_err(),
+            "300mm > 256mm bed in both orientations"
+        );
     }
 
     #[test]
@@ -165,7 +221,10 @@ mod tests {
         // 40 wide × 200 tall on a 256 bed: fits either way, but normalized to landscape → rotated.
         let items = [fp(40.0, 200.0)];
         let ps = pack(&items, [256.0, 256.0], 2.0).unwrap();
-        assert!(ps[0].rotated, "portrait piece should be rotated to landscape");
+        assert!(
+            ps[0].rotated,
+            "portrait piece should be rotated to landscape"
+        );
         assert_valid(&items, &ps, [256.0, 256.0]);
     }
 
@@ -180,7 +239,12 @@ mod tests {
     #[test]
     fn big_pieces_spill_to_more_plates() {
         // Four ~200×200 slabs can't co-exist on a 256 bed (only one fits per plate) → 4 plates.
-        let items = [fp(200.0, 200.0), fp(200.0, 200.0), fp(200.0, 200.0), fp(200.0, 200.0)];
+        let items = [
+            fp(200.0, 200.0),
+            fp(200.0, 200.0),
+            fp(200.0, 200.0),
+            fp(200.0, 200.0),
+        ];
         let ps = pack(&items, [256.0, 256.0], 2.0).unwrap();
         assert_eq!(plate_count(&ps), 4);
         assert_valid(&items, &ps, [256.0, 256.0]);

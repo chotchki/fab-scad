@@ -37,7 +37,10 @@ pub fn cross_section(
     let r = oscad.render(&scad, &svg, timeout)?;
     ensure!(r.ok, "cross-section render failed (axis {axis} at {at})");
     let text = std::fs::read_to_string(&svg).context("read cross-section SVG")?;
-    Ok(parse_loops(&text).into_iter().map(|l| map_to_pos(l, axis)).collect())
+    Ok(parse_loops(&text)
+        .into_iter()
+        .map(|l| map_to_pos(l, axis))
+        .collect())
 }
 
 /// The projection driver for one cut: rotate the cut plane onto z=0 (after centring it there with
@@ -52,7 +55,9 @@ fn projection_scad(stl: &Path, axis: usize, at: f64) -> Result<String> {
         2 => format!("translate([0, 0, {}])", num(-at)),
         _ => bail!("axis must be 0/1/2, got {axis}"),
     };
-    Ok(format!("projection(cut = true) {xform} import(\"{stl}\");\n"))
+    Ok(format!(
+        "projection(cut = true) {xform} import(\"{stl}\");\n"
+    ))
 }
 
 /// Parse the `M x,y L x,y … z` paths of an OpenSCAD 2D SVG into loops of (u, v) points. Projection
@@ -61,7 +66,11 @@ fn projection_scad(stl: &Path, axis: usize, at: f64) -> Result<String> {
 #[cfg(feature = "native")]
 fn parse_loops(svg: &str) -> Vec<Vec<[f64; 2]>> {
     let mut loops = Vec::new();
-    for d in svg.split("d=\"").skip(1).filter_map(|s| s.split('"').next()) {
+    for d in svg
+        .split("d=\"")
+        .skip(1)
+        .filter_map(|s| s.split('"').next())
+    {
         let mut pts: Vec<[f64; 2]> = Vec::new();
         for tok in d.split_whitespace() {
             match tok {
@@ -184,7 +193,9 @@ pub fn auto_place(
     // rail across a slot isn't counted as aligned by a straight-line-near onion on the next rail.
     // Pitch is FINE (a few mm) so it samples the interior of narrow rails, but floored to the longer
     // extent / 200 so a huge face doesn't blow the grid up.
-    let pitch = min_d.max(3.0).max((hi[0] - lo[0]).max(hi[1] - lo[1]) / 200.0);
+    let pitch = min_d
+        .max(3.0)
+        .max((hi[0] - lo[0]).max(hi[1] - lo[1]) / 200.0);
     let nx = ((hi[0] - lo[0]) / pitch).floor() as usize + 1;
     let ny = ((hi[1] - lo[1]) / pitch).floor() as usize + 1;
     let cell = |i: usize, j: usize| j * nx + i;
@@ -208,7 +219,11 @@ pub fn auto_place(
     // straight line) marking what that onion aligns. Repeat until every candidate is covered, so each
     // rail is pinned along its OWN length rather than deemed done by an onion on a neighbouring one.
     let mut cands: Vec<usize> = (0..nx * ny).filter(|&c| diam[c] >= min_d).collect();
-    cands.sort_by(|&a, &b| diam[b].partial_cmp(&diam[a]).unwrap_or(std::cmp::Ordering::Equal));
+    cands.sort_by(|&a, &b| {
+        diam[b]
+            .partial_cmp(&diam[a])
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     let reach = (spacing / pitch).round().max(1.0) as i32;
     let mut covered = vec![false; nx * ny];
     let mut out: Vec<([f64; 2], f64)> = Vec::new();
@@ -283,7 +298,10 @@ fn point_to_segment(p: [f64; 2], a: [f64; 2], b: [f64; 2]) -> f64 {
 /// Y → (u,v)=(x,-z) so pos=(x,z)=(u,-v); Z → (u,v)=(x,-y) so pos=(x,y)=(u,-v).
 #[cfg(feature = "native")]
 fn map_to_pos(loop_uv: Vec<[f64; 2]>, axis: usize) -> Vec<[f64; 2]> {
-    loop_uv.into_iter().map(|[u, v]| if axis == 0 { [-v, u] } else { [u, -v] }).collect()
+    loop_uv
+        .into_iter()
+        .map(|[u, v]| if axis == 0 { [-v, u] } else { [u, -v] })
+        .collect()
 }
 
 /// SCAD number: trim a trailing `.0` so `translate` reads cleanly; never scientific notation.
@@ -312,7 +330,10 @@ mod tests {
     fn parses_a_single_loop() {
         let loops = parse_loops(SVG);
         assert_eq!(loops.len(), 1);
-        assert_eq!(loops[0], vec![[0.0, 0.0], [10.0, 0.0], [10.0, 5.0], [0.0, 5.0]]);
+        assert_eq!(
+            loops[0],
+            vec![[0.0, 0.0], [10.0, 0.0], [10.0, 5.0], [0.0, 5.0]]
+        );
     }
 
     #[test]
@@ -343,7 +364,12 @@ mod tests {
     #[test]
     fn fit_diameter_sizes_to_nearest_edge() {
         // a 40x40 square outline centred at origin
-        let sq = vec![vec![[-20.0, -20.0], [20.0, -20.0], [20.0, 20.0], [-20.0, 20.0]]];
+        let sq = vec![vec![
+            [-20.0, -20.0],
+            [20.0, -20.0],
+            [20.0, 20.0],
+            [-20.0, 20.0],
+        ]];
         // mid-material: 5mm to the right edge, wall 1 -> d = 2*(5-1) = 8
         assert!((fit_diameter(&sq, [15.0, 0.0], 1.0, 16.0) - 8.0).abs() < 1e-9);
         // open centre: 20mm to any edge -> 2*(20-1)=38, clamped to max 16
@@ -352,8 +378,11 @@ mod tests {
         assert_eq!(fit_diameter(&sq, [19.5, 0.0], 1.0, 16.0), 0.0);
         // a thin wall returns a small (sub-min) diameter rather than an oversized one
         assert!((fit_diameter(&sq, [17.5, 0.0], 1.0, 16.0) - 3.0).abs() < 1e-9); // 2*(2.5-1)
-        // a hole pulls the size down too
-        let with_hole = vec![sq[0].clone(), vec![[4.0, -2.0], [8.0, -2.0], [8.0, 2.0], [4.0, 2.0]]];
+                                                                                 // a hole pulls the size down too
+        let with_hole = vec![
+            sq[0].clone(),
+            vec![[4.0, -2.0], [8.0, -2.0], [8.0, 2.0], [4.0, 2.0]],
+        ];
         assert!(fit_diameter(&with_hole, [0.0, 0.0], 1.0, 16.0) < 16.0);
     }
 
@@ -378,7 +407,10 @@ mod tests {
         // every placement sits in material (not in the hole) and is at least min_d
         for (p, d) in &placed {
             assert!(*d >= 3.0);
-            assert!(!(p[0].abs() < 6.0 && p[1].abs() < 6.0), "placed inside the hole: {p:?}");
+            assert!(
+                !(p[0].abs() < 6.0 && p[1].abs() < 6.0),
+                "placed inside the hole: {p:?}"
+            );
         }
     }
 
@@ -395,10 +427,17 @@ mod tests {
         let pts = auto_place(&face, 1.2, 16.0, 120.0, 3.0, None, 2.9238);
         // Covering guides on a ~120mm max-gap grid — a couple dozen at most, NOT the thousands a
         // fine fill would drop. (4-connected covering is deliberately conservative: extra pins, no gaps.)
-        assert!((4..=25).contains(&pts.len()), "covering guides, got {}", pts.len());
+        assert!(
+            (4..=25).contains(&pts.len()),
+            "covering guides, got {}",
+            pts.len()
+        );
         // Spread across the long axis, and every one sits in material.
         let xs: Vec<f64> = pts.iter().map(|(p, _)| p[0]).collect();
-        let (lo, hi) = (xs.iter().cloned().fold(f64::MAX, f64::min), xs.iter().cloned().fold(f64::MIN, f64::max));
+        let (lo, hi) = (
+            xs.iter().cloned().fold(f64::MAX, f64::min),
+            xs.iter().cloned().fold(f64::MIN, f64::max),
+        );
         assert!(hi - lo > 200.0, "spread across the face, span {}", hi - lo);
         for (p, _) in &pts {
             assert!(point_in_material(&face, *p), "onion off material at {p:?}");
@@ -421,15 +460,26 @@ mod tests {
             [0.0, 200.0],
         ]];
         let pts = auto_place(&u, 1.2, 16.0, 120.0, 3.0, None, 2.9238);
-        assert!(pts.iter().any(|(p, _)| p[0] < 30.0), "left rail must be pinned");
-        assert!(pts.iter().any(|(p, _)| p[0] > 90.0), "right rail must be pinned");
+        assert!(
+            pts.iter().any(|(p, _)| p[0] < 30.0),
+            "left rail must be pinned"
+        );
+        assert!(
+            pts.iter().any(|(p, _)| p[0] > 90.0),
+            "right rail must be pinned"
+        );
     }
 
     #[test]
     fn fit_onion_bounds_the_teardrop_tip_toward_the_cap() {
         // 40x40 square; a point 10 below the top edge. The sphere would fit d = 2*(10-1) = 18, but a
         // teardrop with tip 1.5x its radius toward +Y can only be d/2 = (10-1)/1.5 -> d = 12.
-        let sq = vec![vec![[-20.0, -20.0], [20.0, -20.0], [20.0, 20.0], [-20.0, 20.0]]];
+        let sq = vec![vec![
+            [-20.0, -20.0],
+            [20.0, -20.0],
+            [20.0, 20.0],
+            [-20.0, 20.0],
+        ]];
         let p = [0.0, 10.0]; // 10 from the +Y edge
         assert!((fit_diameter(&sq, p, 1.0, 40.0) - 18.0).abs() < 1e-9);
         let capped = fit_onion(&sq, p, 1.0, 40.0, Some([0.0, 1.0]), 1.5);
@@ -440,18 +490,30 @@ mod tests {
 
     #[test]
     fn dist_along_hits_the_facing_edge() {
-        let sq = vec![vec![[-20.0, -20.0], [20.0, -20.0], [20.0, 20.0], [-20.0, 20.0]]];
+        let sq = vec![vec![
+            [-20.0, -20.0],
+            [20.0, -20.0],
+            [20.0, 20.0],
+            [-20.0, 20.0],
+        ]];
         assert!((dist_along(&sq, [0.0, 5.0], [0.0, 1.0]) - 15.0).abs() < 1e-9); // up to +Y edge
-        assert!((dist_along(&sq, [0.0, 5.0], [0.0, -1.0]) - 25.0).abs() < 1e-9); // down to -Y edge
+        assert!((dist_along(&sq, [0.0, 5.0], [0.0, -1.0]) - 25.0).abs() < 1e-9);
+        // down to -Y edge
     }
 
     #[test]
     #[cfg(feature = "native")]
     fn projection_scad_per_axis() {
         let p = Path::new("m.stl");
-        assert!(projection_scad(p, 0, 5.0).unwrap().contains("rotate([0, 90, 0]) translate([-5, 0, 0])"));
-        assert!(projection_scad(p, 1, -3.0).unwrap().contains("rotate([-90, 0, 0]) translate([0, 3, 0])"));
-        assert!(projection_scad(p, 2, 0.0).unwrap().contains("translate([0, 0, 0])"));
+        assert!(projection_scad(p, 0, 5.0)
+            .unwrap()
+            .contains("rotate([0, 90, 0]) translate([-5, 0, 0])"));
+        assert!(projection_scad(p, 1, -3.0)
+            .unwrap()
+            .contains("rotate([-90, 0, 0]) translate([0, 3, 0])"));
+        assert!(projection_scad(p, 2, 0.0)
+            .unwrap()
+            .contains("translate([0, 0, 0])"));
         assert!(projection_scad(p, 3, 0.0).is_err());
     }
 }

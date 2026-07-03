@@ -119,7 +119,9 @@ impl Manifest {
 
     /// Walk up from `near` to the nearest `project.toml`.
     pub fn find(near: &Path) -> Result<PathBuf> {
-        let abs = near.canonicalize().with_context(|| format!("resolving {}", near.display()))?;
+        let abs = near
+            .canonicalize()
+            .with_context(|| format!("resolving {}", near.display()))?;
         let mut dir = abs.parent();
         while let Some(d) = dir {
             let m = d.join("project.toml");

@@ -24,9 +24,17 @@ const TIMEOUT: Duration = Duration::from_secs(120);
 fn cuts_to_spec(cuts: &[(char, f64)]) -> Slicing {
     let cut = cuts
         .iter()
-        .map(|&(axis, at)| Cut { axis: axis.to_string(), at: Num::Float(at) })
+        .map(|&(axis, at)| Cut {
+            axis: axis.to_string(),
+            at: Num::Float(at),
+        })
         .collect();
-    Slicing { printer: None, cut, connector: vec![], orient: vec![] }
+    Slicing {
+        printer: None,
+        cut,
+        connector: vec![],
+        orient: vec![],
+    }
 }
 
 /// GUI placements → manifest connectors, per kind: an onion carries its auto-sized diameter; a bolt
@@ -64,7 +72,11 @@ fn to_orient(orient: &[Orient3]) -> Vec<PieceOrient> {
         .iter()
         .map(|o| PieceOrient {
             piece: o.piece,
-            up: [Num::Float(o.up[0]), Num::Float(o.up[1]), Num::Float(o.up[2])],
+            up: [
+                Num::Float(o.up[0]),
+                Num::Float(o.up[1]),
+                Num::Float(o.up[2]),
+            ],
         })
         .collect()
 }
@@ -162,8 +174,16 @@ pub fn print_layout_kernel(
         }
         // The build-up this piece was oriented to in pass 1 (default +Z if a connector diff dropped
         // a bare piece that reappears carved — shouldn't happen with axis-aligned cuts).
-        let up = ups.iter().find(|(p, _)| *p == piece).map(|(_, u)| *u).unwrap_or([0.0, 0.0, 1.0]);
-        out.push(PiecePrint { piece, mesh, up: [up[0] as f32, up[1] as f32, up[2] as f32] });
+        let up = ups
+            .iter()
+            .find(|(p, _)| *p == piece)
+            .map(|(_, u)| *u)
+            .unwrap_or([0.0, 0.0, 1.0]);
+        out.push(PiecePrint {
+            piece,
+            mesh,
+            up: [up[0] as f32, up[1] as f32, up[2] as f32],
+        });
     }
     Ok(out)
 }
@@ -258,7 +278,10 @@ pub fn reslice_kernel(
 
     let cut = cuts
         .iter()
-        .map(|&(axis, at)| Cut { axis: axis.to_string(), at: Num::Float(at) })
+        .map(|&(axis, at)| Cut {
+            axis: axis.to_string(),
+            at: Num::Float(at),
+        })
         .collect();
     let spec = Slicing {
         printer: None,
@@ -271,7 +294,13 @@ pub fn reslice_kernel(
     ensure!(!pieces.is_empty(), "slice produced no pieces");
     let laid: Vec<Solid> = pieces
         .iter()
-        .map(|(i, s)| s.translate(i[0] as f64 * spread, i[1] as f64 * spread, i[2] as f64 * spread))
+        .map(|(i, s)| {
+            s.translate(
+                i[0] as f64 * spread,
+                i[1] as f64 * spread,
+                i[2] as f64 * spread,
+            )
+        })
         .collect();
     let out = out_dir.join(format!("{}-sliced.stl", stem_of(source)));
     Solid::batch_union(&laid).write_stl(&out)?;
@@ -329,7 +358,10 @@ fn preview_wrapper(source: &Path, out_dir: &Path) -> Result<PathBuf> {
     std::fs::create_dir_all(out_dir)?;
     let abs = source.canonicalize()?;
     let wrap = out_dir.join(format!("{}-preview.scad", stem_of(source)));
-    std::fs::write(&wrap, format!("$preview = true;\ninclude <{}>;\n", abs.display()))?;
+    std::fs::write(
+        &wrap,
+        format!("$preview = true;\ninclude <{}>;\n", abs.display()),
+    )?;
     Ok(wrap)
 }
 
@@ -375,7 +407,10 @@ pub fn export_plates(
     let to_place: Vec<PieceToPlace> = pieces
         .iter()
         .zip(ups)
-        .map(|(pp, &up)| PieceToPlace { mesh: stlmesh_to_bambu(&pp.mesh), up })
+        .map(|(pp, &up)| PieceToPlace {
+            mesh: stlmesh_to_bambu(&pp.mesh),
+            up,
+        })
         .collect();
     bambu::export_plates(out, to_place, bed, gap)
 }
@@ -392,10 +427,15 @@ pub fn open_in_openscad(root: Option<&Path>, source: &Path) -> Result<()> {
     if let Some(r) = root {
         cmd.env(
             "OPENSCADPATH",
-            format!("{}:{}", r.join("libs").display(), r.join("scad-lib").display()),
+            format!(
+                "{}:{}",
+                r.join("libs").display(),
+                r.join("scad-lib").display()
+            ),
         );
     }
-    cmd.spawn().with_context(|| format!("launching OpenSCAD ({})", bin.display()))?;
+    cmd.spawn()
+        .with_context(|| format!("launching OpenSCAD ({})", bin.display()))?;
     Ok(())
 }
 
@@ -411,20 +451,51 @@ mod tests {
         let src = tmp.join("box.scad");
         std::fs::write(&src, "cube([60,40,30], center=true);").unwrap();
 
-        let conns = [Conn { cut: 0, pos: [12.0, 0.0], size: 12.0, kind: ConnKind::Onion, screw: "M3" }];
+        let conns = [Conn {
+            cut: 0,
+            pos: [12.0, 0.0],
+            size: 12.0,
+            kind: ConnKind::Onion,
+            screw: "M3",
+        }];
         // Two-axis cut + onion — the floater case — sliced in-process off the cached base.
-        let out = reslice_kernel(None, &src, &[('x', 0.0), ('y', 0.0)], &conns, &[], 40.0, &tmp)
-            .expect("first reslice");
+        let out = reslice_kernel(
+            None,
+            &src,
+            &[('x', 0.0), ('y', 0.0)],
+            &conns,
+            &[],
+            40.0,
+            &tmp,
+        )
+        .expect("first reslice");
         let base = whole_stl(&src, &tmp);
-        assert!(base.exists(), "base STL should be cached after the first reslice");
-        assert!(!stl::load_stl(&out).unwrap().positions.is_empty(), "sliced mesh has geometry");
+        assert!(
+            base.exists(),
+            "base STL should be cached after the first reslice"
+        );
+        assert!(
+            !stl::load_stl(&out).unwrap().positions.is_empty(),
+            "sliced mesh has geometry"
+        );
 
         // A second reslice (different cut) must NOT re-render the base — that's the reactivity win.
         let mtime0 = std::fs::metadata(&base).unwrap().modified().unwrap();
-        reslice_kernel(None, &src, &[('x', 5.0), ('y', 0.0)], &conns, &[], 40.0, &tmp)
-            .expect("second reslice");
+        reslice_kernel(
+            None,
+            &src,
+            &[('x', 5.0), ('y', 0.0)],
+            &conns,
+            &[],
+            40.0,
+            &tmp,
+        )
+        .expect("second reslice");
         let mtime1 = std::fs::metadata(&base).unwrap().modified().unwrap();
-        assert_eq!(mtime0, mtime1, "second reslice re-rendered the base (cache miss)");
+        assert_eq!(
+            mtime0, mtime1,
+            "second reslice re-rendered the base (cache miss)"
+        );
 
         let _ = std::fs::remove_dir_all(&tmp);
     }
@@ -438,14 +509,26 @@ mod tests {
         std::fs::write(&src, "cube([60,40,30], center=true);").unwrap();
 
         // One X cut → two pieces; both lay out with a unit build-up and real geometry.
-        let pieces = print_layout_kernel(None, &src, &[('x', 0.0)], &[], &tmp).expect("print layout");
+        let pieces =
+            print_layout_kernel(None, &src, &[('x', 0.0)], &[], &tmp).expect("print layout");
         assert_eq!(pieces.len(), 2, "one cut on a box makes two pieces");
         for p in &pieces {
-            assert!(!p.mesh.positions.is_empty(), "piece {:?} has geometry", p.piece);
+            assert!(
+                !p.mesh.positions.is_empty(),
+                "piece {:?} has geometry",
+                p.piece
+            );
             let n = (p.up[0] * p.up[0] + p.up[1] * p.up[1] + p.up[2] * p.up[2]).sqrt();
-            assert!((n - 1.0).abs() < 1e-3, "up {:?} should be a unit vector", p.up);
+            assert!(
+                (n - 1.0).abs() < 1e-3,
+                "up {:?} should be a unit vector",
+                p.up
+            );
         }
-        assert!(whole_stl(&src, &tmp).exists(), "base STL cached (front-door rendered once)");
+        assert!(
+            whole_stl(&src, &tmp).exists(),
+            "base STL cached (front-door rendered once)"
+        );
 
         let _ = std::fs::remove_dir_all(&tmp);
     }

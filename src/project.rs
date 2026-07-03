@@ -92,16 +92,16 @@ pub fn new_cmd(root: &Path, name: &str) -> Result<()> {
     println!("  {}", rel(root, &manifest));
     println!("  {}", rel(root, &scad));
     println!("focused {name}");
-    println!("next: edit {0}, then `fab render {0} --png`", rel(root, &scad));
+    println!(
+        "next: edit {0}, then `fab render {0} --png`",
+        rel(root, &scad)
+    );
     Ok(())
 }
 
 /// Render a path relative to the fab-scad root for tidy output (falls back to absolute).
 fn rel(root: &Path, p: &Path) -> String {
-    p.strip_prefix(root)
-        .unwrap_or(p)
-        .display()
-        .to_string()
+    p.strip_prefix(root).unwrap_or(p).display().to_string()
 }
 
 /// A project name is its URL/dir slug: lowercase ascii, digits, `_`/`-`, starting
@@ -198,7 +198,15 @@ mod tests {
         for ok in ["shoe_holder", "new_desk_v2", "ashtray", "k-tent", "a"] {
             assert!(validate_name(ok).is_ok(), "{ok} should be valid");
         }
-        for bad in ["", "Shoe", "../etc", "a/b", "_leading", "-leading", "has space"] {
+        for bad in [
+            "",
+            "Shoe",
+            "../etc",
+            "a/b",
+            "_leading",
+            "-leading",
+            "has space",
+        ] {
             assert!(validate_name(bad).is_err(), "{bad:?} should be invalid");
         }
     }

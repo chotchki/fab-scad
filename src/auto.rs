@@ -108,8 +108,10 @@ pub fn plan(
     max: [f64; 3],
     bed: [f64; 3],
 ) -> Result<AutoPlan> {
-    let cuts: Vec<(usize, f64)> =
-        crate::auto_slice::auto_slice(min, max, bed).into_iter().map(|c| (c.axis, c.at)).collect();
+    let cuts: Vec<(usize, f64)> = crate::auto_slice::auto_slice(min, max, bed)
+        .into_iter()
+        .map(|c| (c.axis, c.at))
+        .collect();
 
     let mut connectors = Vec::new();
     for (i, &(ai, at)) in cuts.iter().enumerate() {
@@ -162,7 +164,10 @@ pub fn plan(
         }
     }
 
-    let cuts = cuts.into_iter().map(|(ai, at)| (axis_char(ai), at)).collect();
+    let cuts = cuts
+        .into_iter()
+        .map(|(ai, at)| (axis_char(ai), at))
+        .collect();
     Ok(AutoPlan { cuts, connectors })
 }
 
@@ -187,8 +192,10 @@ pub fn make(
     use anyhow::{bail, Context};
 
     std::fs::create_dir_all(out_dir)?;
-    let stem =
-        source.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "part".into());
+    let stem = source
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "part".into());
 
     // Front-door: render the base model to a mesh once.
     let base_stl = out_dir.join(format!("{stem}.stl"));
@@ -209,11 +216,23 @@ pub fn make(
     let planned = plan(&base, min, max, bed)?;
     let connectors = planned.connectors;
     let make_cut = || -> Vec<Cut> {
-        planned.cuts.iter().map(|&(ax, at)| Cut { axis: ax.to_string(), at: Num::Float(at) }).collect()
+        planned
+            .cuts
+            .iter()
+            .map(|&(ax, at)| Cut {
+                axis: ax.to_string(),
+                at: Num::Float(at),
+            })
+            .collect()
     };
 
     // Bare slice → least-support orientation per piece.
-    let bare = Slicing { printer: None, cut: make_cut(), connector: vec![], orient: vec![] };
+    let bare = Slicing {
+        printer: None,
+        cut: make_cut(),
+        connector: vec![],
+        orient: vec![],
+    };
     let mut ups: Vec<([usize; 3], [f64; 3])> = Vec::new();
     for (piece, solid) in crate::slicing::slice_solid(&bare, &base)? {
         ups.push((piece, crate::auto_orient::best_up(&solid.tris(), &[])));
@@ -227,7 +246,12 @@ pub fn make(
             up: [Num::Float(up[0]), Num::Float(up[1]), Num::Float(up[2])],
         })
         .collect();
-    let spec = Slicing { printer: None, cut: make_cut(), connector: connectors, orient };
+    let spec = Slicing {
+        printer: None,
+        cut: make_cut(),
+        connector: connectors,
+        orient,
+    };
     let pieces = crate::slicing::slice_solid(&spec, &base)?;
     if pieces.is_empty() {
         bail!("slice produced no pieces");
@@ -237,9 +261,16 @@ pub fn make(
     let to_place: Vec<PieceToPlace> = pieces
         .iter()
         .map(|(piece, solid)| {
-            let up = ups.iter().find(|(p, _)| p == piece).map(|(_, u)| *u).unwrap_or([0.0, 0.0, 1.0]);
+            let up = ups
+                .iter()
+                .find(|(p, _)| p == piece)
+                .map(|(_, u)| *u)
+                .unwrap_or([0.0, 0.0, 1.0]);
             let (verts, tris) = solid.to_indexed();
-            PieceToPlace { mesh: bambu::Mesh { verts, tris }, up }
+            PieceToPlace {
+                mesh: bambu::Mesh { verts, tris },
+                up,
+            }
         })
         .collect();
     bambu::export_plates(out_3mf, to_place, [bed[0], bed[1]], gap)
@@ -267,7 +298,7 @@ mod tests {
         let (min, max) = ([0.0; 3], [500.0, 500.0, 500.0]);
         assert_eq!(axial_room(&cuts, 0, min, max), (100.0, 200.0)); // [0..100..300]
         assert_eq!(axial_room(&cuts, 1, min, max), (200.0, 200.0)); // [100..300..500]
-        // The Y cut ignores the X cuts entirely.
+                                                                    // The Y cut ignores the X cuts entirely.
         assert_eq!(axial_room(&cuts, 2, min, max), (250.0, 250.0));
     }
 
@@ -295,8 +326,16 @@ mod tests {
         let oscad = Openscad::discover(None).unwrap();
         let out = tmp.join("bigbox-plates.3mf");
 
-        let sum =
-            make(&oscad, &scad, [256.0, 256.0, 256.0], &out, &tmp, Duration::from_secs(60), 5.0).unwrap();
+        let sum = make(
+            &oscad,
+            &scad,
+            [256.0, 256.0, 256.0],
+            &out,
+            &tmp,
+            Duration::from_secs(60),
+            5.0,
+        )
+        .unwrap();
         assert_eq!(sum.pieces, 3, "700mm on a 256 bed → 3 pieces");
         assert!(out.exists(), "wrote the project");
 
@@ -305,7 +344,10 @@ mod tests {
         let mut zip = zip::ZipArchive::new(f).unwrap();
         use std::io::Read;
         let mut model = String::new();
-        zip.by_name("3D/3dmodel.model").unwrap().read_to_string(&mut model).unwrap();
+        zip.by_name("3D/3dmodel.model")
+            .unwrap()
+            .read_to_string(&mut model)
+            .unwrap();
         assert!(model.contains("name=\"Application\">BambuStudio-"));
         assert_eq!(model.matches("<item ").count(), 3);
         assert!(sum.plates >= 1);
@@ -320,8 +362,15 @@ mod tests {
         let base = crate::kernel::Solid::cube(600.0, 100.0, 50.0, false);
         let p = plan(&base, [0.0; 3], [600.0, 100.0, 50.0], [256.0; 3]).unwrap();
         assert!(!p.cuts.is_empty(), "600mm on a 256 bed must be cut");
-        assert!(p.cuts.iter().all(|&(ax, _)| ax == 'x'), "only X overflows: {:?}", p.cuts);
+        assert!(
+            p.cuts.iter().all(|&(ax, _)| ax == 'x'),
+            "only X overflows: {:?}",
+            p.cuts
+        );
         assert!(!p.connectors.is_empty(), "onions seeded on the cut faces");
-        assert!(p.connectors.iter().all(|c| c.kind == "onion" && c.size.is_some()));
+        assert!(p
+            .connectors
+            .iter()
+            .all(|c| c.kind == "onion" && c.size.is_some()));
     }
 }

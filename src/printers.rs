@@ -110,7 +110,11 @@ pub fn plan(size: [f64; 3], bed: [f64; 3]) -> Plan {
         }
     }
     if let Some(up) = whole {
-        return Plan { size, bed, outcome: Outcome::FitsAsIs { up } };
+        return Plan {
+            size,
+            bed,
+            outcome: Outcome::FitsAsIs { up },
+        };
     }
 
     // 2. Whole fit by rotating the footprint diagonally — least rotation wins.
@@ -127,7 +131,11 @@ pub fn plan(size: [f64; 3], bed: [f64; 3]) -> Plan {
         }
     }
     if let Some((up, degrees)) = rot {
-        return Plan { size, bed, outcome: Outcome::FitsRotated { up, degrees } };
+        return Plan {
+            size,
+            bed,
+            outcome: Outcome::FitsRotated { up, degrees },
+        };
     }
 
     // 3. Cut. Pick the orientation + footprint assignment with the fewest pieces.
@@ -144,22 +152,45 @@ pub fn plan(size: [f64; 3], bed: [f64; 3]) -> Plan {
             let pieces = px * py * pz;
             let mut cuts = Vec::new();
             if px > 1 {
-                cuts.push(Cut { axis: 'X', count: px - 1, positions: even_cuts(dx, px) });
+                cuts.push(Cut {
+                    axis: 'X',
+                    count: px - 1,
+                    positions: even_cuts(dx, px),
+                });
             }
             if py > 1 {
-                cuts.push(Cut { axis: 'Y', count: py - 1, positions: even_cuts(dy, py) });
+                cuts.push(Cut {
+                    axis: 'Y',
+                    count: py - 1,
+                    positions: even_cuts(dy, py),
+                });
             }
             if pz > 1 {
-                cuts.push(Cut { axis: 'Z', count: pz - 1, positions: even_cuts(h, pz) });
+                cuts.push(Cut {
+                    axis: 'Z',
+                    count: pz - 1,
+                    positions: even_cuts(h, pz),
+                });
             }
             // Fewest pieces wins; tie-break to the flattest orientation (smallest height).
-            if best.as_ref().is_none_or(|(bp, bo, _)| (pieces, h) < (*bp, bo[2])) {
+            if best
+                .as_ref()
+                .is_none_or(|(bp, bo, _)| (pieces, h) < (*bp, bo[2]))
+            {
                 best = Some((pieces, [dx, dy, h], cuts));
             }
         }
     }
     let (pieces, oriented, cuts) = best.expect("3 orientations always produce a candidate");
-    Plan { size, bed, outcome: Outcome::NeedsCuts { oriented, cuts, pieces } }
+    Plan {
+        size,
+        bed,
+        outcome: Outcome::NeedsCuts {
+            oriented,
+            cuts,
+            pieces,
+        },
+    }
 }
 
 /// The two dimensions perpendicular to the `up` axis (the footprint).
@@ -234,11 +265,18 @@ mod tests {
         let printers: Vec<Printer> = f
             .printer
             .into_iter()
-            .map(|p| Printer { name: p.name, bed: [p.bed[0].f(), p.bed[1].f(), p.bed[2].f()], is_default: p.default })
+            .map(|p| Printer {
+                name: p.name,
+                bed: [p.bed[0].f(), p.bed[1].f(), p.bed[2].f()],
+                is_default: p.default,
+            })
             .collect();
         assert_eq!(printers.len(), 2);
         assert_eq!(select(&printers, None).unwrap().name, "H2D");
-        assert_eq!(select(&printers, Some("H2C")).unwrap().bed, [300.0, 320.0, 320.0]);
+        assert_eq!(
+            select(&printers, Some("H2C")).unwrap().bed,
+            [300.0, 320.0, 320.0]
+        );
         assert!(select(&printers, Some("nope")).is_err());
     }
 

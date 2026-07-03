@@ -23,7 +23,11 @@ fn os_piece_driver(cuts: &[Vec<f64>; 3], piece: [usize; 3], base_stl: &str) -> S
         if cuts[a].is_empty() {
             continue;
         }
-        let list = cuts[a].iter().map(|x| x.to_string()).collect::<Vec<_>>().join(", ");
+        let list = cuts[a]
+            .iter()
+            .map(|x| x.to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
         s += &format!("slice([{list}], axis = {}, only = {})\n", axis[a], piece[a]);
     }
     s += &format!("import(\"{base_stl}\");\n");
@@ -54,7 +58,8 @@ fn slab_pieces_match_openscad() {
     )
     .unwrap();
     let base_stl = t("base.stl");
-    os.render(&fixture, &base_stl, Duration::from_secs(120)).expect("render base");
+    os.render(&fixture, &base_stl, Duration::from_secs(120))
+        .expect("render base");
     let base = Solid::from_stl_file(&base_stl).expect("import base");
 
     // One-axis (3 slabs) and two-axis (4 cells — the floater-prone case).
@@ -67,9 +72,14 @@ fn slab_pieces_match_openscad() {
         for (idx, kpiece) in &pieces {
             // OpenSCAD's version of this same piece.
             let drv = t("piece.scad");
-            std::fs::write(&drv, os_piece_driver(&cuts, *idx, base_stl.to_str().unwrap())).unwrap();
+            std::fs::write(
+                &drv,
+                os_piece_driver(&cuts, *idx, base_stl.to_str().unwrap()),
+            )
+            .unwrap();
             let ostl = t("piece.stl");
-            os.render(&drv, &ostl, Duration::from_secs(120)).expect("render piece");
+            os.render(&drv, &ostl, Duration::from_secs(120))
+                .expect("render piece");
             let opiece = Solid::from_stl_file(&ostl).expect("import piece");
 
             let (kmin, kmax) = kpiece.bbox().unwrap();
@@ -125,7 +135,9 @@ fn corpus_robustness() {
             failures.push(format!("{}: import", f.display()));
             continue;
         };
-        let Some((min, max)) = base.bbox() else { continue };
+        let Some((min, max)) = base.bbox() else {
+            continue;
+        };
         let cuts = [
             vec![(min[0] + max[0]) / 2.0],
             vec![(min[1] + max[1]) / 2.0],
@@ -136,7 +148,11 @@ fn corpus_robustness() {
         if !pieces.is_empty() && pieces.iter().all(|(_, s)| s.is_manifold()) {
             ok += 1;
         } else {
-            failures.push(format!("{}: {} pieces, non-manifold", f.display(), pieces.len()));
+            failures.push(format!(
+                "{}: {} pieces, non-manifold",
+                f.display(),
+                pieces.len()
+            ));
         }
     }
     let _ = std::fs::remove_dir_all(&tmp);
@@ -145,7 +161,11 @@ fn corpus_robustness() {
         eprintln!("  FAIL {fail}");
     }
     assert!(tested > 0, "no models rendered — corpus check ran nothing");
-    assert!(failures.is_empty(), "{} corpus models failed the in-process slice", failures.len());
+    assert!(
+        failures.is_empty(),
+        "{} corpus models failed the in-process slice",
+        failures.len()
+    );
 }
 
 #[test]
@@ -164,7 +184,8 @@ fn connectors_match_openscad() {
     let fixture = t("box.scad");
     std::fs::write(&fixture, "cube([60,40,30], center=true);").unwrap();
     let base_stl = t("box.stl");
-    os.render(&fixture, &base_stl, Duration::from_secs(120)).expect("render base");
+    os.render(&fixture, &base_stl, Duration::from_secs(120))
+        .expect("render base");
     let base = Solid::from_stl_file(&base_stl).expect("import base");
 
     let s = ::toml::from_str::<Manifest>(
@@ -181,9 +202,14 @@ fn connectors_match_openscad() {
     for (idx, kpiece) in &kpieces {
         // scad's version of the SAME piece — piece_driver emits the feasible onion into slice().
         let drv = t("piece.scad");
-        std::fs::write(&drv, piece_driver(&s, base_stl.to_str().unwrap(), *idx).unwrap()).unwrap();
+        std::fs::write(
+            &drv,
+            piece_driver(&s, base_stl.to_str().unwrap(), *idx).unwrap(),
+        )
+        .unwrap();
         let ostl = t("piece.stl");
-        os.render(&drv, &ostl, Duration::from_secs(120)).expect("render scad piece");
+        os.render(&drv, &ostl, Duration::from_secs(120))
+            .expect("render scad piece");
         let opiece = Solid::from_stl_file(&ostl).expect("import scad piece");
 
         // Same onion radius + cap in both engines ⇒ the peg extends the bbox the same amount. Allow
@@ -192,7 +218,11 @@ fn connectors_match_openscad() {
         let (omin, omax) = opiece.bbox().unwrap();
         assert!(approx(kmin, omin, 0.5) && approx(kmax, omax, 0.5),
             "connector bbox mismatch piece {idx:?}: kernel {kmin:?}..{kmax:?} vs os {omin:?}..{omax:?}");
-        eprintln!("connector parity OK piece {idx:?}: kernel {} tris, os {} tris", kpiece.num_tri(), opiece.num_tri());
+        eprintln!(
+            "connector parity OK piece {idx:?}: kernel {} tris, os {} tris",
+            kpiece.num_tri(),
+            opiece.num_tri()
+        );
     }
     let _ = std::fs::remove_dir_all(&tmp);
 }
@@ -235,7 +265,11 @@ fn cross_section_matches_openscad() {
     )
     .unwrap();
     let base_stl = t("base.stl");
-    assert!(os.render(&fixture, &base_stl, Duration::from_secs(60)).unwrap().ok);
+    assert!(
+        os.render(&fixture, &base_stl, Duration::from_secs(60))
+            .unwrap()
+            .ok
+    );
     let solid = Solid::from_stl_file(&base_stl).unwrap();
 
     // (axis, at, expected loop count, expected pos bbox). Z@0 slices THROUGH the hole (outer+hole=2);
@@ -248,14 +282,25 @@ fn cross_section_matches_openscad() {
     ];
     for &(axis, at, want_loops, (want_lo, want_hi)) in &cases {
         let os_loops =
-            cross_section::cross_section(&os, &base_stl, axis, at, &tmp, Duration::from_secs(60)).unwrap();
+            cross_section::cross_section(&os, &base_stl, axis, at, &tmp, Duration::from_secs(60))
+                .unwrap();
         let ks_loops = solid.cross_section(axis, at);
-        assert_eq!(os_loops.len(), want_loops, "OpenSCAD axis {axis} loop count");
+        assert_eq!(
+            os_loops.len(),
+            want_loops,
+            "OpenSCAD axis {axis} loop count"
+        );
         assert_eq!(ks_loops.len(), want_loops, "kernel axis {axis} loop count");
         let (klo, khi) = bbox2(&ks_loops);
         let (olo, ohi) = bbox2(&os_loops);
-        assert!(approx2(klo, want_lo, 0.6) && approx2(khi, want_hi, 0.6), "kernel axis {axis} bbox {klo:?}..{khi:?}");
-        assert!(approx2(olo, want_lo, 0.6) && approx2(ohi, want_hi, 0.6), "os axis {axis} bbox {olo:?}..{ohi:?}");
+        assert!(
+            approx2(klo, want_lo, 0.6) && approx2(khi, want_hi, 0.6),
+            "kernel axis {axis} bbox {klo:?}..{khi:?}"
+        );
+        assert!(
+            approx2(olo, want_lo, 0.6) && approx2(ohi, want_hi, 0.6),
+            "os axis {axis} bbox {olo:?}..{ohi:?}"
+        );
         eprintln!("xsec parity OK axis {axis}: {want_loops} loop(s), bbox {klo:?}..{khi:?}");
     }
     let _ = std::fs::remove_dir_all(&tmp);

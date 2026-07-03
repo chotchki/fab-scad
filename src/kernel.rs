@@ -99,13 +99,15 @@ impl Solid {
         let z_tangent = r * s; // where the cap leaves the sphere
         let cone_h = r * c * c / s; // tip (r/sin) minus z_tangent
         let base_r = r * c; // sphere radius at that latitude
-        let cone = Solid::cylinder(cone_h, base_r, 0.0, segments, false).translate(0.0, 0.0, z_tangent);
+        let cone =
+            Solid::cylinder(cone_h, base_r, 0.0, segments, false).translate(0.0, 0.0, z_tangent);
         Solid::sphere(r, segments).union(&cone)
     }
 
     /// The bolt-joint NEGATIVE (the fallback when an onion can't print support-free): a through
     /// clearance shaft + head counterbore on the +Z (access) piece, and a heat-set insert pocket on
     /// the −Z piece. Centered on the cut plane at the origin, axis +Z; diff it from BOTH pieces.
+    #[allow(clippy::too_many_arguments)] // a dimension list, not a design smell — mirrors _insert_spec
     pub fn bolt_clearance(
         clearance_d: f64,
         through: f64,
@@ -122,16 +124,34 @@ impl Solid {
         let shaft = if teardrop {
             Solid::teardrop_prism(clearance_d / 2.0, through, segments)
         } else {
-            Solid::cylinder(through, clearance_d / 2.0, clearance_d / 2.0, segments, false)
+            Solid::cylinder(
+                through,
+                clearance_d / 2.0,
+                clearance_d / 2.0,
+                segments,
+                false,
+            )
         };
         let cbore = if teardrop {
             Solid::teardrop_prism(counterbore_d / 2.0, counterbore_h, segments)
         } else {
-            Solid::cylinder(counterbore_h, counterbore_d / 2.0, counterbore_d / 2.0, segments, false)
+            Solid::cylinder(
+                counterbore_h,
+                counterbore_d / 2.0,
+                counterbore_d / 2.0,
+                segments,
+                false,
+            )
         }
         .translate(0.0, 0.0, through - counterbore_h);
-        let pocket = Solid::cylinder(insert_depth, insert_d / 2.0, insert_d / 2.0, segments, false)
-            .translate(0.0, 0.0, -insert_depth);
+        let pocket = Solid::cylinder(
+            insert_depth,
+            insert_d / 2.0,
+            insert_d / 2.0,
+            segments,
+            false,
+        )
+        .translate(0.0, 0.0, -insert_depth);
         Solid::batch_union(&[shaft, cbore, pocket])
     }
 
@@ -145,9 +165,15 @@ impl Solid {
         // rotation (det +1) so loop winding is preserved.
         let (rot, h) = match axis {
             // (x,y,z) → (y, z, x): x-normal → +z; slice at `at`, giving (y, z).
-            0 => (self.transform(&[0., 0., 1., 1., 0., 0., 0., 1., 0., 0., 0., 0.]), at),
+            0 => (
+                self.transform(&[0., 0., 1., 1., 0., 0., 0., 1., 0., 0., 0., 0.]),
+                at,
+            ),
             // (x,y,z) → (x, z, −y): y-normal → −z; slice at −`at`, giving (x, z).
-            1 => (self.transform(&[1., 0., 0., 0., 0., -1., 0., 1., 0., 0., 0., 0.]), -at),
+            1 => (
+                self.transform(&[1., 0., 0., 0., 0., -1., 0., 1., 0., 0., 0., 0.]),
+                -at,
+            ),
             // z-normal already +z; slice at `at`, giving (x, y).
             2 => (self.clone(), at),
             _ => return Vec::new(),
@@ -159,7 +185,8 @@ impl Solid {
 
     /// Load an STL file (binary or ASCII) as a Solid — the front-door for a mesh OpenSCAD rendered.
     pub fn from_stl_file(path: &Path) -> Result<Self> {
-        let bytes = std::fs::read(path).with_context(|| format!("reading STL {}", path.display()))?;
+        let bytes =
+            std::fs::read(path).with_context(|| format!("reading STL {}", path.display()))?;
         Self::from_stl_bytes(&bytes).with_context(|| format!("importing STL {}", path.display()))
     }
 
@@ -195,7 +222,10 @@ impl Solid {
     /// Serialize to binary STL bytes (per-face normals computed from the winding).
     pub fn to_stl_bytes(&self) -> Vec<u8> {
         let (v, stride, idx) = self.0.to_mesh_f64();
-        let p = |i: u64| { let b = i as usize * stride; [v[b] as f32, v[b + 1] as f32, v[b + 2] as f32] };
+        let p = |i: u64| {
+            let b = i as usize * stride;
+            [v[b] as f32, v[b + 1] as f32, v[b + 2] as f32]
+        };
         let ntri = (idx.len() / 3) as u32;
         let mut out = Vec::with_capacity(84 + 50 * ntri as usize);
         out.extend_from_slice(&[0u8; 80]); // header
@@ -204,11 +234,23 @@ impl Solid {
             let (a, b, c) = (p(t[0]), p(t[1]), p(t[2]));
             let u = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
             let w = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
-            let mut n = [u[1] * w[2] - u[2] * w[1], u[2] * w[0] - u[0] * w[2], u[0] * w[1] - u[1] * w[0]];
+            let mut n = [
+                u[1] * w[2] - u[2] * w[1],
+                u[2] * w[0] - u[0] * w[2],
+                u[0] * w[1] - u[1] * w[0],
+            ];
             let l = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
-            if l > 0.0 { n = [n[0] / l, n[1] / l, n[2] / l]; }
-            for comp in n { out.extend_from_slice(&comp.to_le_bytes()); }
-            for vert in [a, b, c] { for comp in vert { out.extend_from_slice(&comp.to_le_bytes()); } }
+            if l > 0.0 {
+                n = [n[0] / l, n[1] / l, n[2] / l];
+            }
+            for comp in n {
+                out.extend_from_slice(&comp.to_le_bytes());
+            }
+            for vert in [a, b, c] {
+                for comp in vert {
+                    out.extend_from_slice(&comp.to_le_bytes());
+                }
+            }
             out.extend_from_slice(&[0u8; 2]); // attribute byte count
         }
         out
@@ -218,16 +260,28 @@ impl Solid {
     /// geometry, e.g. the Bambu writer).
     pub fn to_indexed(&self) -> (Vec<[f64; 3]>, Vec<[u32; 3]>) {
         let (v, stride, idx) = self.0.to_mesh_f64();
-        let verts =
-            (0..v.len() / stride).map(|i| [v[i * stride], v[i * stride + 1], v[i * stride + 2]]).collect();
-        let tris = idx.chunks_exact(3).map(|t| [t[0] as u32, t[1] as u32, t[2] as u32]).collect();
+        let verts = (0..v.len() / stride)
+            .map(|i| [v[i * stride], v[i * stride + 1], v[i * stride + 2]])
+            .collect();
+        let tris = idx
+            .chunks_exact(3)
+            .map(|t| [t[0] as u32, t[1] as u32, t[2] as u32])
+            .collect();
         (verts, tris)
     }
 
     /// Triangles as coordinate triples — for orientation math (`auto_orient::best_up`).
     pub fn tris(&self) -> Vec<[[f64; 3]; 3]> {
         let (verts, tris) = self.to_indexed();
-        tris.iter().map(|t| [verts[t[0] as usize], verts[t[1] as usize], verts[t[2] as usize]]).collect()
+        tris.iter()
+            .map(|t| {
+                [
+                    verts[t[0] as usize],
+                    verts[t[1] as usize],
+                    verts[t[2] as usize],
+                ]
+            })
+            .collect()
     }
 
     /// Write this solid as a binary STL.
@@ -243,20 +297,32 @@ impl Solid {
         let object = pieces
             .iter()
             .enumerate()
-            .map(|(i, p)| Object { id: i + 1, mesh: Some(to_3mf_mesh(p)), ..Default::default() })
+            .map(|(i, p)| Object {
+                id: i + 1,
+                mesh: Some(to_3mf_mesh(p)),
+                ..Default::default()
+            })
             .collect();
         let item = (0..pieces.len())
-            .map(|i| Item { objectid: i + 1, transform: None, partnumber: None })
+            .map(|i| Item {
+                objectid: i + 1,
+                transform: None,
+                partnumber: None,
+            })
             .collect();
         let model = Model {
             xmlns: "http://schemas.microsoft.com/3dmanufacturing/core/2015/02".into(),
             xmlns_m: None,
             metadata: vec![],
-            resources: Resources { object, basematerials: None },
+            resources: Resources {
+                object,
+                basematerials: None,
+            },
             build: Build { item },
             unit: Default::default(),
         };
-        let f = std::fs::File::create(path).with_context(|| format!("creating 3mf {}", path.display()))?;
+        let f = std::fs::File::create(path)
+            .with_context(|| format!("creating 3mf {}", path.display()))?;
         threemf::write(f, model).map_err(|e| anyhow!("writing 3mf: {e:?}"))
     }
 
@@ -399,7 +465,9 @@ impl Solid {
 
     /// Err if the solid isn't a valid 2-manifold — the gate a slice/connector result must pass.
     pub fn check(&self) -> Result<()> {
-        self.0.status().map_err(|e| anyhow!("non-manifold solid: {e:?}"))
+        self.0
+            .status()
+            .map_err(|e| anyhow!("non-manifold solid: {e:?}"))
     }
     pub fn is_manifold(&self) -> bool {
         self.0.status().is_ok()
@@ -433,7 +501,12 @@ fn read_stl_soup(bytes: &[u8]) -> Result<Vec<[f32; 3]>> {
                 for v in 0..3 {
                     let o = base + v * 12;
                     let f = |k: usize| {
-                        f32::from_le_bytes([bytes[o + k], bytes[o + k + 1], bytes[o + k + 2], bytes[o + k + 3]])
+                        f32::from_le_bytes([
+                            bytes[o + k],
+                            bytes[o + k + 1],
+                            bytes[o + k + 2],
+                            bytes[o + k + 3],
+                        ])
                     };
                     out.push([f(0), f(4), f(8)]);
                 }
@@ -460,11 +533,19 @@ fn read_stl_soup(bytes: &[u8]) -> Result<Vec<[f32; 3]>> {
 fn to_3mf_mesh(s: &Solid) -> threemf::model::Mesh {
     let (v, stride, idx) = s.0.to_mesh_f64();
     let vertex = (0..v.len() / stride)
-        .map(|i| threemf::model::Vertex { x: v[i * stride], y: v[i * stride + 1], z: v[i * stride + 2] })
+        .map(|i| threemf::model::Vertex {
+            x: v[i * stride],
+            y: v[i * stride + 1],
+            z: v[i * stride + 2],
+        })
         .collect();
     let triangle = idx
         .chunks_exact(3)
-        .map(|t| threemf::model::Triangle { v1: t[0] as usize, v2: t[1] as usize, v3: t[2] as usize })
+        .map(|t| threemf::model::Triangle {
+            v1: t[0] as usize,
+            v2: t[1] as usize,
+            v3: t[2] as usize,
+        })
         .collect();
     threemf::model::Mesh {
         vertices: threemf::model::Vertices { vertex },
@@ -507,10 +588,20 @@ mod tests {
         let (min, max) = t.bbox().unwrap();
         // Circle in x (±r); y from −r (circle bottom) up to the apex r·√2 ≈ 7.07 (the point);
         // extruded z ∈ [0, len].
-        assert!((min[0] + r).abs() < 0.1 && (max[0] - r).abs() < 0.1, "x spans ±r: {min:?}..{max:?}");
+        assert!(
+            (min[0] + r).abs() < 0.1 && (max[0] - r).abs() < 0.1,
+            "x spans ±r: {min:?}..{max:?}"
+        );
         assert!((min[1] + r).abs() < 0.1, "y bottom ≈ −r, got {}", min[1]);
-        assert!((max[1] - r * std::f64::consts::SQRT_2).abs() < 0.2, "y peak ≈ r·√2, got {}", max[1]);
-        assert!(min[2].abs() < 1e-6 && (max[2] - len).abs() < 1e-6, "z ∈ [0,len]");
+        assert!(
+            (max[1] - r * std::f64::consts::SQRT_2).abs() < 0.2,
+            "y peak ≈ r·√2, got {}",
+            max[1]
+        );
+        assert!(
+            min[2].abs() < 1e-6 && (max[2] - len).abs() < 1e-6,
+            "z ∈ [0,len]"
+        );
     }
 
     #[test]
@@ -532,13 +623,22 @@ mod tests {
         let approx = |a: f64, b: f64| (a - b).abs() < 0.05;
         // Z cut → pos (x, y) = [0,10]×[0,20].
         let (lo, hi) = bbox2(b.cross_section(2, 15.0));
-        assert!(approx(lo[0], 0.0) && approx(hi[0], 10.0) && approx(lo[1], 0.0) && approx(hi[1], 20.0), "Z: {lo:?}..{hi:?}");
+        assert!(
+            approx(lo[0], 0.0) && approx(hi[0], 10.0) && approx(lo[1], 0.0) && approx(hi[1], 20.0),
+            "Z: {lo:?}..{hi:?}"
+        );
         // X cut → pos (y, z) = [0,20]×[0,30].
         let (lo, hi) = bbox2(b.cross_section(0, 5.0));
-        assert!(approx(lo[0], 0.0) && approx(hi[0], 20.0) && approx(lo[1], 0.0) && approx(hi[1], 30.0), "X: {lo:?}..{hi:?}");
+        assert!(
+            approx(lo[0], 0.0) && approx(hi[0], 20.0) && approx(lo[1], 0.0) && approx(hi[1], 30.0),
+            "X: {lo:?}..{hi:?}"
+        );
         // Y cut → pos (x, z) = [0,10]×[0,30].
         let (lo, hi) = bbox2(b.cross_section(1, 10.0));
-        assert!(approx(lo[0], 0.0) && approx(hi[0], 10.0) && approx(lo[1], 0.0) && approx(hi[1], 30.0), "Y: {lo:?}..{hi:?}");
+        assert!(
+            approx(lo[0], 0.0) && approx(hi[0], 10.0) && approx(lo[1], 0.0) && approx(hi[1], 30.0),
+            "Y: {lo:?}..{hi:?}"
+        );
         // A plane that misses the solid → no loops.
         assert!(b.cross_section(2, 99.0).is_empty(), "miss → empty");
     }
@@ -570,8 +670,13 @@ mod tests {
     #[test]
     fn rejects_a_non_manifold_open_mesh() {
         // One lone triangle — three open edges, not a closed solid.
-        let err = Solid::from_stl_bytes(&binary_stl(&TETRA[..1])).err().expect("should reject");
-        assert!(format!("{err:#}").contains("not a valid manifold"), "got: {err:#}");
+        let err = Solid::from_stl_bytes(&binary_stl(&TETRA[..1]))
+            .err()
+            .expect("should reject");
+        assert!(
+            format!("{err:#}").contains("not a valid manifold"),
+            "got: {err:#}"
+        );
     }
 
     #[test]
@@ -594,7 +699,10 @@ mod tests {
         Solid::write_3mf(&path, &[a, b]).unwrap();
         let models = threemf::read(std::fs::File::open(&path).unwrap()).unwrap();
         let objects: usize = models.iter().map(|m| m.resources.object.len()).sum();
-        assert_eq!(objects, 2, "two pieces should be two separate objects on the plate");
+        assert_eq!(
+            objects, 2,
+            "two pieces should be two separate objects on the plate"
+        );
         let _ = std::fs::remove_file(&path);
     }
 
@@ -609,7 +717,10 @@ mod tests {
         for ((idx, s), (lo, hi)) in pieces.iter().zip(want) {
             s.check().unwrap();
             let (min, max) = s.bbox().unwrap();
-            assert!((min[0] - lo).abs() < 1e-4 && (max[0] - hi).abs() < 1e-4, "piece {idx:?}: {min:?}..{max:?}");
+            assert!(
+                (min[0] - lo).abs() < 1e-4 && (max[0] - hi).abs() < 1e-4,
+                "piece {idx:?}: {min:?}..{max:?}"
+            );
         }
     }
 
@@ -623,8 +734,14 @@ mod tests {
         for (idx, s) in &pieces {
             s.check().unwrap();
             let (min, max) = s.bbox().unwrap();
-            assert!((max[0] - min[0] - 20.0).abs() < 1e-4, "cell {idx:?} X width");
-            assert!((max[1] - min[1] - 20.0).abs() < 1e-4, "cell {idx:?} Y width");
+            assert!(
+                (max[0] - min[0] - 20.0).abs() < 1e-4,
+                "cell {idx:?} X width"
+            );
+            assert!(
+                (max[1] - min[1] - 20.0).abs() < 1e-4,
+                "cell {idx:?} Y width"
+            );
             assert!((max[2] - min[2] - 40.0).abs() < 1e-4, "cell {idx:?} Z full");
         }
         // The middle piece of a single-axis onion floater bug can't recur here — each cell is built
@@ -642,7 +759,10 @@ mod tests {
         // Widest at the equator (radius r), pointed tip at r/sin(ang), rounded bottom at -r.
         assert!((max[2] - tip).abs() < 0.05, "tip {} want {tip}", max[2]);
         assert!((min[2] + r).abs() < 0.05, "bottom {}", min[2]);
-        assert!((max[0] - r).abs() < 0.06 && (min[0] + r).abs() < 0.06, "equator radius {max:?}");
+        assert!(
+            (max[0] - r).abs() < 0.06 && (min[0] + r).abs() < 0.06,
+            "equator radius {max:?}"
+        );
     }
 
     #[test]
@@ -650,9 +770,15 @@ mod tests {
         let (d, ang, slop) = (10.0, 45.0, 0.2);
         let peg = Solid::onion(d, ang, 64);
         let socket = Solid::onion(d + 2.0 * slop, ang, 64); // grow the whole onion by slop
-        // The peg drops fully into the socket — self-consistent, no BOSL2 dependency.
-        assert!(peg.difference(&socket).is_empty(), "peg should fit inside the slop-grown socket");
-        assert!(socket.bbox().unwrap().1[2] > peg.bbox().unwrap().1[2], "socket is larger");
+                                                            // The peg drops fully into the socket — self-consistent, no BOSL2 dependency.
+        assert!(
+            peg.difference(&socket).is_empty(),
+            "peg should fit inside the slop-grown socket"
+        );
+        assert!(
+            socket.bbox().unwrap().1[2] > peg.bbox().unwrap().1[2],
+            "socket is larger"
+        );
     }
 
     #[test]
@@ -661,8 +787,15 @@ mod tests {
         let cone = Solid::cylinder(10.0, 4.0, 0.0, 32, false); // apex at z=10
         let along_x = cone.align_z_to([1.0, 0.0, 0.0]);
         let (min, max) = along_x.bbox().unwrap();
-        assert!((max[0] - 10.0).abs() < 0.05, "tip should reach +X=10, got {}", max[0]);
-        assert!(max[2] < 4.1 && min[2] > -4.1, "no longer tall on Z: {min:?}..{max:?}");
+        assert!(
+            (max[0] - 10.0).abs() < 0.05,
+            "tip should reach +X=10, got {}",
+            max[0]
+        );
+        assert!(
+            max[2] < 4.1 && min[2] > -4.1,
+            "no longer tall on Z: {min:?}..{max:?}"
+        );
     }
 
     #[test]
@@ -670,10 +803,17 @@ mod tests {
         let b = Solid::bolt_clearance(3.4, 12.0, 6.0, 3.0, 5.0, 6.0, 48, false);
         b.check().unwrap();
         let (min, max) = b.bbox().unwrap();
-        assert!((min[2] + 6.0).abs() < 1e-6, "insert pocket depth {}", min[2]); // -insert_depth
+        assert!(
+            (min[2] + 6.0).abs() < 1e-6,
+            "insert pocket depth {}",
+            min[2]
+        ); // -insert_depth
         assert!((max[2] - 12.0).abs() < 1e-6, "through length {}", max[2]); // +through
-        // Plain (cylinder) shaft: symmetric in Y, no peak.
-        assert!((max[1] - 3.0).abs() < 0.1 && (min[1] + 3.0).abs() < 0.1, "round shaft ±r in Y");
+                                                                            // Plain (cylinder) shaft: symmetric in Y, no peak.
+        assert!(
+            (max[1] - 3.0).abs() < 0.1 && (min[1] + 3.0).abs() < 0.1,
+            "round shaft ±r in Y"
+        );
     }
 
     #[test]
@@ -683,8 +823,16 @@ mod tests {
         let b = Solid::bolt_clearance(3.4, 12.0, 6.0, 3.0, 5.0, 6.0, 48, true);
         b.check().unwrap();
         let (min, max) = b.bbox().unwrap();
-        assert!(max[1] > 3.0 * std::f64::consts::SQRT_2 - 0.3, "teardrop peak in +Y, got {}", max[1]);
-        assert!((min[1] + 3.0).abs() < 0.2, "round on the −Y side, got {}", min[1]);
+        assert!(
+            max[1] > 3.0 * std::f64::consts::SQRT_2 - 0.3,
+            "teardrop peak in +Y, got {}",
+            max[1]
+        );
+        assert!(
+            (min[1] + 3.0).abs() < 0.2,
+            "round on the −Y side, got {}",
+            min[1]
+        );
     }
 
     #[test]

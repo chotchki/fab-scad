@@ -108,7 +108,12 @@ impl Openscad {
     /// Render to a MULTI-OBJECT 3mf with lazy-union on, so top-level objects stay separate (6.3) —
     /// a multipart plate the slicer emits one piece per top-level statement. Otherwise like `render`;
     /// point `output` at a `.3mf`.
-    pub fn render_multipart(&self, input: &Path, output: &Path, timeout: Duration) -> Result<Report> {
+    pub fn render_multipart(
+        &self,
+        input: &Path,
+        output: &Path,
+        timeout: Duration,
+    ) -> Result<Report> {
         ensure_parent(output)?;
         let args = [
             OsString::from("--backend"),

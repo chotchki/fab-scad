@@ -81,7 +81,11 @@ impl Client {
             .timeout(Duration::from_secs(180))
             .build()
             .context("building HTTP client")?;
-        Ok(Self { base: base.trim_end_matches('/').to_string(), key: key.to_string(), http })
+        Ok(Self {
+            base: base.trim_end_matches('/').to_string(),
+            key: key.to_string(),
+            http,
+        })
     }
 
     /// Send a request built fresh each attempt (multipart bodies aren't reusable), retrying with
@@ -101,7 +105,9 @@ impl Client {
                     last = Some(anyhow!("{what}: server returned {}", resp.status()));
                 }
                 Ok(resp) => return Ok(resp),
-                Err(e) => last = Some(anyhow::Error::new(e).context(format!("{what}: request failed"))),
+                Err(e) => {
+                    last = Some(anyhow::Error::new(e).context(format!("{what}: request failed")))
+                }
             }
             if attempt < RETRIES {
                 std::thread::sleep(delay);
@@ -118,16 +124,22 @@ impl Client {
     fn upload_media_multi(&self, files: &[&Path], title: &str) -> Result<String> {
         let url = format!("{}/admin/media/upload", self.base);
         let resp = self.send_retry("media upload", || {
-            let mut form = reqwest::blocking::multipart::Form::new().text("title", title.to_string());
+            let mut form =
+                reqwest::blocking::multipart::Form::new().text("title", title.to_string());
             for f in files {
-                form = form.file("file", f).with_context(|| format!("reading {}", f.display()))?;
+                form = form
+                    .file("file", f)
+                    .with_context(|| format!("reading {}", f.display()))?;
             }
             Ok(self.http.post(&url).bearer_auth(&self.key).multipart(form))
         })?;
         if !resp.status().is_success() {
             bail!("media upload → {}", resp.status());
         }
-        Ok(resp.json::<UploadResp>().context("parsing upload response")?.media_ref)
+        Ok(resp
+            .json::<UploadResp>()
+            .context("parsing upload response")?
+            .media_ref)
     }
 
     /// Upload a single file as its own media item; returns its `media_ref`.
@@ -138,7 +150,9 @@ impl Client {
     /// Does a project page already exist at this slug? (GET is public; 2xx = yes.)
     fn page_exists(&self, slug: &str) -> Result<bool> {
         let url = format!("{}/pages/projects/{}", self.base, slug);
-        let resp = self.send_retry("page check", || Ok(self.http.get(&url).bearer_auth(&self.key)))?;
+        let resp = self.send_retry("page check", || {
+            Ok(self.http.get(&url).bearer_auth(&self.key))
+        })?;
         Ok(resp.status().is_success())
     }
 
@@ -147,7 +161,11 @@ impl Client {
     fn create_page(&self, title: &str) -> Result<()> {
         let url = format!("{}/pages/projects", self.base);
         let resp = self.send_retry("page create", || {
-            Ok(self.http.post(&url).bearer_auth(&self.key).form(&[("page_title", title)]))
+            Ok(self
+                .http
+                .post(&url)
+                .bearer_auth(&self.key)
+                .form(&[("page_title", title)]))
         })?;
         let s = resp.status();
         if !(s.is_success() || s.is_redirection()) {
@@ -207,6 +225,7 @@ pub fn publish(client: &Client, p: &Project) -> Result<String> {
 /// `$fn = $preview ? low : high` takes the light path — a mesh a browser viewer can handle). Gathers
 /// downloads (the full STL + a `<stem>-plates.3mf` if `fab make` left one beside the model), then
 /// creates/updates the project page. Shared by the CLI (`fab publish`) and the GUI Publish button.
+#[allow(clippy::too_many_arguments)] // CLI/GUI shared entry — args mirror the publish form fields
 pub fn publish_model(
     oscad: &Openscad,
     target: &Path,
@@ -218,8 +237,10 @@ pub fn publish_model(
     timeout: Duration,
 ) -> Result<String> {
     std::fs::create_dir_all(out_dir)?;
-    let stem =
-        target.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "part".into());
+    let stem = target
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "part".into());
 
     let cover = out_dir.join(format!("{stem}.png"));
     if !oscad.thumbnail(target, &cover, (1200, 900), timeout)?.ok {
@@ -234,8 +255,13 @@ pub fn publish_model(
     // materials, so the site viewer shows the real colors. Still low-`$fn` (the `$preview` wrapper).
     let viewer = out_dir.join(format!("{stem}-preview.3mf"));
     let wrapper = out_dir.join(format!("{stem}-preview.scad"));
-    let abs = target.canonicalize().with_context(|| format!("resolving {}", target.display()))?;
-    std::fs::write(&wrapper, format!("$preview = true;\ninclude <{}>;\n", abs.display()))?;
+    let abs = target
+        .canonicalize()
+        .with_context(|| format!("resolving {}", target.display()))?;
+    std::fs::write(
+        &wrapper,
+        format!("$preview = true;\ninclude <{}>;\n", abs.display()),
+    )?;
     if !oscad.render(&wrapper, &viewer, timeout)?.ok {
         bail!("preview render failed");
     }
@@ -244,7 +270,10 @@ pub fn publish_model(
     let mut downloads = Vec::new();
     let plates = target.with_file_name(format!("{stem}-plates.3mf"));
     if plates.exists() {
-        downloads.push(Media { path: &plates, title: format!("{title} — print plates (.3mf)") });
+        downloads.push(Media {
+            path: &plates,
+            title: format!("{title} — print plates (.3mf)"),
+        });
     }
 
     let client = Client::new(base, key)?;
@@ -267,7 +296,9 @@ fn compose_markdown(description: &str, viewer_ref: &str, downloads: &[(String, S
         md.push_str(description.trim());
         md.push_str("\n\n");
     }
-    md.push_str(&format!("![Interactive preview](/media/file/{viewer_ref})\n\n"));
+    md.push_str(&format!(
+        "![Interactive preview](/media/file/{viewer_ref})\n\n"
+    ));
     if !downloads.is_empty() {
         md.push_str("## Downloads\n\n");
         for (title, r) in downloads {
@@ -284,7 +315,10 @@ mod tests {
     #[test]
     fn slugify_mirrors_the_server() {
         // The exact cases from hotchkiss-io's slug.rs test — the mirror must not drift.
-        assert_eq!(slugify("How I Make AI Write Software I Trust"), "how-i-make-ai-write-software-i-trust");
+        assert_eq!(
+            slugify("How I Make AI Write Software I Trust"),
+            "how-i-make-ai-write-software-i-trust"
+        );
         assert_eq!(slugify("  Hello,   World!!!  "), "hello-world");
         assert_eq!(slugify("already-a-slug"), "already-a-slug");
         assert_eq!(slugify("--Edge--"), "edge");
@@ -298,7 +332,10 @@ mod tests {
         let md = compose_markdown(
             "A desk mount.",
             "cover123",
-            &[("Full STL".into(), "full456".into()), ("Plates 3mf".into(), "plates789".into())],
+            &[
+                ("Full STL".into(), "full456".into()),
+                ("Plates 3mf".into(), "plates789".into()),
+            ],
         );
         assert!(md.starts_with("A desk mount.\n\n"));
         assert!(md.contains("![Interactive preview](/media/file/cover123)"));

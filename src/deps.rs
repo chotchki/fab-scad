@@ -217,7 +217,7 @@ mod tests {
         let from = s.0.join("proj");
         // a name only on the search path resolves there
         assert_eq!(
-            resolve("shared.scad", &from, &[libdir.clone()]),
+            resolve("shared.scad", &from, std::slice::from_ref(&libdir)),
             Some(libdir.join("shared.scad").canonicalize().unwrap())
         );
         // a name in the from_dir wins over the search path
@@ -241,7 +241,10 @@ mod tests {
         let search = vec![s.0.clone()]; // so <libs/shared.scad> resolves from the search path too
         let cl = closure(&a, &search);
         let canon = |r: &str| s.0.join(r).canonicalize().unwrap();
-        assert!(cl.contains(&canon("a.scad")), "entry itself is in the closure");
+        assert!(
+            cl.contains(&canon("a.scad")),
+            "entry itself is in the closure"
+        );
         assert!(cl.contains(&canon("b.scad")));
         assert!(cl.contains(&canon("c.scad")));
         assert!(cl.contains(&canon("libs/shared.scad")));

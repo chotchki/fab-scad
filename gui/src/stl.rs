@@ -31,7 +31,8 @@ pub fn load_stl_bytes(bytes: &[u8]) -> Result<StlMesh> {
 }
 
 fn parse_binary(bytes: &[u8], count: usize) -> Result<StlMesh> {
-    let f = |at: usize| f32::from_le_bytes([bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]]);
+    let f =
+        |at: usize| f32::from_le_bytes([bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]]);
     let mut positions = Vec::with_capacity(count * 3);
     let mut normals = Vec::with_capacity(count * 3);
     let mut off = 84;

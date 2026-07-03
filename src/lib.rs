@@ -18,11 +18,11 @@ pub mod num;
 #[cfg(feature = "native")]
 pub mod openscad;
 pub mod pack;
-#[cfg(feature = "native")]
-pub mod publish;
 pub mod printers;
 #[cfg(feature = "native")]
 pub mod project;
+#[cfg(feature = "native")]
+pub mod publish;
 pub mod slicing;
 #[cfg(feature = "native")]
 pub mod smoke;

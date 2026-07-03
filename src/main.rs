@@ -139,11 +139,27 @@ fn main() -> Result<()> {
         Commands::Focus { project } => project::focus_cmd(&require_root()?, project),
         Commands::New { name } => project::new_cmd(&require_root()?, &name),
         Commands::Plan { size, printer } => plan_cmd(&size, printer),
-        Commands::Coupon { kind, screw, d, slops, out } => coupon_cmd(&kind, &screw, d, &slops, out),
-        Commands::Slice { target, spread, out, png, threemf, kernel } => {
-            slice_cmd(&target, spread, out, png, threemf, kernel)
-        }
-        Commands::Make { target, printer, out, gap } => make_cmd(&target, printer, out, gap),
+        Commands::Coupon {
+            kind,
+            screw,
+            d,
+            slops,
+            out,
+        } => coupon_cmd(&kind, &screw, d, &slops, out),
+        Commands::Slice {
+            target,
+            spread,
+            out,
+            png,
+            threemf,
+            kernel,
+        } => slice_cmd(&target, spread, out, png, threemf, kernel),
+        Commands::Make {
+            target,
+            printer,
+            out,
+            gap,
+        } => make_cmd(&target, printer, out, gap),
         Commands::Render {
             target,
             all,
@@ -160,7 +176,11 @@ fn main() -> Result<()> {
                 render_focus_cmd(png, timeout) // no target → the focused project's parts (6.9)
             }
         }
-        Commands::Publish { target, url, api_key } => publish_cmd(&target, url, api_key),
+        Commands::Publish {
+            target,
+            url,
+            api_key,
+        } => publish_cmd(&target, url, api_key),
     }
 }
 
@@ -172,9 +192,26 @@ fn plan_cmd(size_str: &str, printer: Option<String>) -> Result<()> {
     let pr = printers::select(&profiles, printer.as_deref())?;
     let plan = printers::plan(size, pr.bed);
 
-    let f = |x: f64| if x.fract() == 0.0 { format!("{}", x as i64) } else { format!("{x:.1}") };
-    println!("printer {}  bed {} × {} × {} mm", pr.name, f(pr.bed[0]), f(pr.bed[1]), f(pr.bed[2]));
-    println!("part    {} × {} × {} mm", f(size[0]), f(size[1]), f(size[2]));
+    let f = |x: f64| {
+        if x.fract() == 0.0 {
+            format!("{}", x as i64)
+        } else {
+            format!("{x:.1}")
+        }
+    };
+    println!(
+        "printer {}  bed {} × {} × {} mm",
+        pr.name,
+        f(pr.bed[0]),
+        f(pr.bed[1]),
+        f(pr.bed[2])
+    );
+    println!(
+        "part    {} × {} × {} mm",
+        f(size[0]),
+        f(size[1]),
+        f(size[2])
+    );
     match &plan.outcome {
         Outcome::FitsAsIs { up } => {
             println!("→ fits whole ({} up); no cuts", printers::axis_name(*up));
@@ -185,16 +222,25 @@ fn plan_cmd(size_str: &str, printer: Option<String>) -> Result<()> {
                 printers::axis_name(*up)
             );
         }
-        Outcome::NeedsCuts { oriented, cuts, pieces } => {
+        Outcome::NeedsCuts {
+            oriented,
+            cuts,
+            pieces,
+        } => {
             println!(
                 "→ {pieces} pieces; orient [{} × {} × {}] mm on the bed:",
-                f(oriented[0]), f(oriented[1]), f(oriented[2])
+                f(oriented[0]),
+                f(oriented[1]),
+                f(oriented[2])
             );
             for c in cuts {
                 let pos: Vec<String> = c.positions.iter().map(|p| f(*p)).collect();
                 println!(
                     "   {} cut(s) on {} → slice(cuts=[{}], axis={})",
-                    c.count, c.axis, pos.join(", "), printers::slice_axis(c.axis)
+                    c.count,
+                    c.axis,
+                    pos.join(", "),
+                    printers::slice_axis(c.axis)
                 );
             }
         }
@@ -214,7 +260,13 @@ fn parse_size(s: &str) -> Result<[f64; 3]> {
     }
 }
 
-fn coupon_cmd(kind: &str, screw: &str, d: f64, slops_str: &str, out: Option<PathBuf>) -> Result<()> {
+fn coupon_cmd(
+    kind: &str,
+    screw: &str,
+    d: f64,
+    slops_str: &str,
+    out: Option<PathBuf>,
+) -> Result<()> {
     if kind != "pin" && kind != "insert" {
         bail!("--type must be 'pin' or 'insert', got '{kind}'");
     }
@@ -265,7 +317,11 @@ fn publish_cmd(target: &Path, url: Option<String>, api_key: Option<String>) -> R
         bail!("no such file: {}", target.display());
     }
     let m = manifest::Manifest::load(&find_manifest(target)?)?;
-    let title = m.project.title.clone().unwrap_or_else(|| m.project.name.clone());
+    let title = m
+        .project
+        .title
+        .clone()
+        .unwrap_or_else(|| m.project.name.clone());
     let description = m.publish.map(|p| p.description).unwrap_or_default();
 
     let key = api_key
@@ -277,8 +333,15 @@ fn publish_cmd(target: &Path, url: Option<String>, api_key: Option<String>) -> R
 
     let root = find_root();
     let oscad = Openscad::discover(root.as_deref())?;
-    let out = target.parent().unwrap_or_else(|| Path::new(".")).join("out").join("publish");
-    println!("publishing {} to {base}… (rendering cover + full + preview meshes)", target.display());
+    let out = target
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join("out")
+        .join("publish");
+    println!(
+        "publishing {} to {base}… (rendering cover + full + preview meshes)",
+        target.display()
+    );
     let page_url = fab_scad::publish::publish_model(
         &oscad,
         target,
@@ -308,7 +371,13 @@ fn make_cmd(target: &Path, printer: Option<String>, out: Option<PathBuf>, gap: f
         .unwrap_or_else(|| "part".into());
     let out_3mf = out.unwrap_or_else(|| target.with_file_name(format!("{stem}-plates.3mf")));
     let out_dir = root.join("out").join("make");
-    let f = |x: f64| if x.fract() == 0.0 { format!("{}", x as i64) } else { format!("{x:.1}") };
+    let f = |x: f64| {
+        if x.fract() == 0.0 {
+            format!("{}", x as i64)
+        } else {
+            format!("{x:.1}")
+        }
+    };
     println!(
         "make {} on {} ({} × {} × {} mm bed)",
         target.display(),
@@ -317,8 +386,15 @@ fn make_cmd(target: &Path, printer: Option<String>, out: Option<PathBuf>, gap: f
         f(pr.bed[1]),
         f(pr.bed[2])
     );
-    let sum =
-        fab_scad::auto::make(&oscad, target, pr.bed, &out_3mf, &out_dir, Duration::from_secs(120), gap)?;
+    let sum = fab_scad::auto::make(
+        &oscad,
+        target,
+        pr.bed,
+        &out_3mf,
+        &out_dir,
+        Duration::from_secs(120),
+        gap,
+    )?;
     println!(
         "  -> {} piece(s) on {} plate(s) ({:.0}% full) -> {}",
         sum.pieces,
@@ -355,7 +431,10 @@ fn slice_cmd(
 
     let oscad = Openscad::discover(root.as_deref())?;
     let timeout = Duration::from_secs(120);
-    let outdir = target.parent().unwrap_or_else(|| Path::new(".")).join("out");
+    let outdir = target
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join("out");
     let stem = target
         .file_stem()
         .map(|s| s.to_string_lossy().into_owned())
@@ -366,12 +445,18 @@ fn slice_cmd(
     if kernel {
         #[cfg(feature = "kernel")]
         {
-            println!("slice {} -> {} (kernel)", target.display(), if threemf { "3mf" } else { "stl" });
-            let produced =
-                slicing::slice_part_kernel(&oscad, target, spec, spread, &outdir, timeout, threemf)?;
+            println!(
+                "slice {} -> {} (kernel)",
+                target.display(),
+                if threemf { "3mf" } else { "stl" }
+            );
+            let produced = slicing::slice_part_kernel(
+                &oscad, target, spec, spread, &outdir, timeout, threemf,
+            )?;
             let final_out = match out {
                 Some(o) => {
-                    std::fs::copy(&produced, &o).with_context(|| format!("writing {}", o.display()))?;
+                    std::fs::copy(&produced, &o)
+                        .with_context(|| format!("writing {}", o.display()))?;
                     o
                 }
                 None => produced,
@@ -470,7 +555,9 @@ fn render_all_cmd(path: Option<PathBuf>, timeout_secs: u64, force: bool) -> Resu
 
     let root = find_root();
     // Sweep the given path, else the workspace root, else the current dir.
-    let sweep = path.or_else(|| root.clone()).unwrap_or_else(|| PathBuf::from("."));
+    let sweep = path
+        .or_else(|| root.clone())
+        .unwrap_or_else(|| PathBuf::from("."));
     let files = smoke::scad_files(&sweep);
     if files.is_empty() {
         println!("no renderable .scad under {}", sweep.display());
@@ -495,7 +582,10 @@ fn render_all_cmd(path: Option<PathBuf>, timeout_secs: u64, force: bool) -> Resu
     } else {
         smoke::SweepCache::load(&cache_path, &version)
     };
-    println!("smoke-rendering {total} .scad under {} ...", sweep.display());
+    println!(
+        "smoke-rendering {total} .scad under {} ...",
+        sweep.display()
+    );
 
     // Parallel across the rayon pool; a running counter to stderr so a long sweep isn't silent.
     let done = AtomicUsize::new(0);
@@ -532,7 +622,12 @@ fn render_all_cmd(path: Option<PathBuf>, timeout_secs: u64, force: bool) -> Resu
                 cached += 1;
                 println!("  ok    {} ({} faces, cached)", rel(&s.input), s.faces);
             } else {
-                println!("  ok    {} ({} faces, {:.1}s)", rel(&s.input), s.faces, s.duration.as_secs_f64());
+                println!(
+                    "  ok    {} ({} faces, {:.1}s)",
+                    rel(&s.input),
+                    s.faces,
+                    s.duration.as_secs_f64()
+                );
             }
         } else {
             println!("  FAIL  {} — {}", rel(&s.input), s.detail);
@@ -543,8 +638,16 @@ fn render_all_cmd(path: Option<PathBuf>, timeout_secs: u64, force: bool) -> Resu
     let _ = smoke::SweepCache::save(&cache_path, &version, &passing);
 
     let failed = total - passed;
-    let tail = if failed > 0 { format!(", {failed} FAILED") } else { String::new() };
-    let cache_note = if cached > 0 { format!(" ({cached} cached)") } else { String::new() };
+    let tail = if failed > 0 {
+        format!(", {failed} FAILED")
+    } else {
+        String::new()
+    };
+    let cache_note = if cached > 0 {
+        format!(" ({cached} cached)")
+    } else {
+        String::new()
+    };
     println!("\n{passed}/{total} passed{tail}{cache_note}");
     if failed > 0 {
         bail!("{failed} model(s) failed to render");
@@ -590,7 +693,11 @@ fn render_focus_cmd(png: bool, timeout_secs: u64) -> Result<()> {
         }
         match oscad.render(&src, &out, timeout) {
             Ok(r) if r.ok => {
-                println!("        -> {} ({:.1}s)", out.display(), r.duration.as_secs_f64());
+                println!(
+                    "        -> {} ({:.1}s)",
+                    out.display(),
+                    r.duration.as_secs_f64()
+                );
                 if png {
                     let thumb = out.with_extension("png");
                     let _ = oscad.thumbnail(&src, &thumb, (512, 512), timeout);

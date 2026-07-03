@@ -11,6 +11,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
+use bevy::ecs::system::SystemParam;
 use bevy::{
     app::ScheduleRunnerPlugin,
     asset::{AssetPlugin, RenderAssetUsages},
@@ -45,7 +46,6 @@ use bevy::{
     window::ExitCondition,
     winit::WinitPlugin,
 };
-use bevy::ecs::system::SystemParam;
 
 mod fab;
 mod stl;
@@ -58,10 +58,10 @@ struct SceneCfg {
     source: Option<PathBuf>, // .scad source (sliceable, preferred)
     stl: Option<PathBuf>,    // .stl to display directly (when there's no source)
     bed: [f32; 2],
-    root: Option<PathBuf>, // workspace root, for OPENSCADPATH
-    tmp: PathBuf,          // scratch dir for rendered/sliced STLs
+    root: Option<PathBuf>,  // workspace root, for OPENSCADPATH
+    tmp: PathBuf,           // scratch dir for rendered/sliced STLs
     reslice_on_start: bool, // screenshot --reslice: display the sliced result
-    cut_pct: f32,          // screenshot --cut <0..100>: where along X to cut
+    cut_pct: f32,           // screenshot --cut <0..100>: where along X to cut
 }
 
 /// Marks the displayed model entity, so re-slice can swap it out.
@@ -181,17 +181,29 @@ struct Cuts {
 impl Cuts {
     /// Enabled cuts as `(axis letter, position)`, the input to `fab::reslice`.
     fn enabled_cuts(&self) -> Vec<(char, f64)> {
-        self.list.iter().filter(|c| c.enabled).map(|c| (c.axis.scad(), c.at as f64)).collect()
+        self.list
+            .iter()
+            .filter(|c| c.enabled)
+            .map(|c| (c.axis.scad(), c.at as f64))
+            .collect()
     }
 
     /// Stack indices of the enabled cuts, in order — a connector's stack-index maps to its
     /// position here to reference the right cut in the sliced spec.
     fn enabled_indices(&self) -> Vec<usize> {
-        self.list.iter().enumerate().filter(|(_, c)| c.enabled).map(|(i, _)| i).collect()
+        self.list
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| c.enabled)
+            .map(|(i, _)| i)
+            .collect()
     }
 
     fn active_axis(&self) -> Axis {
-        self.list.get(self.active).map(|c| c.axis).unwrap_or(Axis::X)
+        self.list
+            .get(self.active)
+            .map(|c| c.axis)
+            .unwrap_or(Axis::X)
     }
 }
 
@@ -249,7 +261,10 @@ struct ActiveConn {
 
 impl Default for ActiveConn {
     fn default() -> Self {
-        Self { kind: fab::ConnKind::Onion, screw: Screw::M3 }
+        Self {
+            kind: fab::ConnKind::Onion,
+            screw: Screw::M3,
+        }
     }
 }
 
@@ -448,7 +463,13 @@ struct IconApplied;
 /// (count + active index), and the modal layout. The panel rebuilds when any change (cut
 /// add/remove/rotate/toggle, a new Open, a file switch, entering/leaving a sub-mode);
 /// position-only cut edits update rows in place instead.
-type PanelSignature = (Vec<(Axis, bool)>, usize, Option<usize>, PanelMode, ActiveConn);
+type PanelSignature = (
+    Vec<(Axis, bool)>,
+    usize,
+    Option<usize>,
+    PanelMode,
+    ActiveConn,
+);
 
 #[derive(Resource, Default)]
 struct PanelSig(Option<PanelSignature>);
@@ -496,13 +517,18 @@ fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let bed = bed_size().unwrap_or([256.0; 3]);
     let cfg = SceneCfg {
-        source: args.iter().find(|a| a.ends_with(".scad")).map(PathBuf::from),
+        source: args
+            .iter()
+            .find(|a| a.ends_with(".scad"))
+            .map(PathBuf::from),
         stl: args.iter().find(|a| a.ends_with(".stl")).map(PathBuf::from),
         bed: [bed[0] as f32, bed[1] as f32],
         root: fab::find_root(),
         tmp: std::env::temp_dir().join("fab-gui"),
         reslice_on_start: args.iter().any(|a| a == "--reslice"),
-        cut_pct: flag_value(&args, "--cut").and_then(|v| v.parse().ok()).unwrap_or(50.0),
+        cut_pct: flag_value(&args, "--cut")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(50.0),
     };
     if let Some(script) = flag_value(&args, "--script") {
         run_scripted(cfg, parse_script(&script));
@@ -514,7 +540,10 @@ fn main() {
 }
 
 fn flag_value(args: &[String], flag: &str) -> Option<String> {
-    args.iter().position(|a| a == flag).and_then(|i| args.get(i + 1)).cloned()
+    args.iter()
+        .position(|a| a == flag)
+        .and_then(|i| args.get(i + 1))
+        .cloned()
 }
 
 /// Point the asset server at this crate's `assets/` (where the icon font lives), regardless of CWD.
@@ -530,21 +559,34 @@ fn assets_dir() -> AssetPlugin {
             .and_then(|e| e.parent().map(Path::to_path_buf))
             .unwrap_or_default();
         let bundled = exe_dir.join("../Resources/assets");
-        if bundled.exists() { bundled } else { exe_dir.join("assets") }
+        if bundled.exists() {
+            bundled
+        } else {
+            exe_dir.join("assets")
+        }
     };
-    AssetPlugin { file_path: file_path.to_string_lossy().into_owned(), ..default() }
+    AssetPlugin {
+        file_path: file_path.to_string_lossy().into_owned(),
+        ..default()
+    }
 }
 
 /// Load the bundled icon font (Startup, before the panel first builds).
 fn load_icons(asset_server: Res<AssetServer>, mut commands: Commands) {
-    commands.insert_resource(IconFont(asset_server.load("fonts/MaterialSymbols-subset.ttf")));
+    commands.insert_resource(IconFont(
+        asset_server.load("fonts/MaterialSymbols-subset.ttf"),
+    ));
 }
 
 // ---- windowed -------------------------------------------------------------------------
 
 fn run_windowed(scene: SceneCfg) {
     App::new()
-        .add_plugins((DefaultPlugins.set(assets_dir()), FeathersPlugins, MeshPickingPlugin))
+        .add_plugins((
+            DefaultPlugins.set(assets_dir()),
+            FeathersPlugins,
+            MeshPickingPlugin,
+        ))
         .insert_resource(UiTheme(create_dark_theme()))
         .insert_resource(ClearColor(Color::srgb(0.10, 0.10, 0.12)))
         .insert_resource(scene)
@@ -652,12 +694,19 @@ fn setup_windowed(
     // overlays instead of being occluded by them.
     commands.spawn((
         Camera2d,
-        Camera { order: 1, clear_color: bevy::camera::ClearColorConfig::None, ..default() },
+        Camera {
+            order: 1,
+            clear_color: bevy::camera::ClearColorConfig::None,
+            ..default()
+        },
         bevy::ui::IsDefaultUiCamera,
     ));
     commands.spawn((
         Camera3d::default(),
-        Camera { order: 0, ..default() },
+        Camera {
+            order: 0,
+            ..default()
+        },
         Transform::default(),
         Orbit {
             yaw: -0.7,
@@ -671,7 +720,10 @@ fn setup_windowed(
         RenderLayers::from_layers(&[0, 1]),
     ));
     // 3D gizmos live on layer 1 so ONLY the 3D camera draws them (see the Camera3d note above).
-    gizmo_cfg.config_mut::<DefaultGizmoConfigGroup>().0.render_layers = RenderLayers::layer(1);
+    gizmo_cfg
+        .config_mut::<DefaultGizmoConfigGroup>()
+        .0
+        .render_layers = RenderLayers::layer(1);
     // Seed the camera-restore slot with the startup pose, so a mode entered before the first
     // normal-view frame still has something to hand back (manage_view_camera).
     commands.insert_resource(PrevCam(Some((-0.7, 0.5, radius, Vec3::ZERO))));
@@ -883,7 +935,13 @@ fn toggle_connector(
     } else if kind == fab::ConnKind::Onion && size < MIN_ONION {
         "too thin for an onion here"
     } else {
-        conns.list.push(PlacedConn { cut, pos, size, kind, screw });
+        conns.list.push(PlacedConn {
+            cut,
+            pos,
+            size,
+            kind,
+            screw,
+        });
         match kind {
             fab::ConnKind::Onion => "placed onion",
             fab::ConnKind::Bolt => "placed bolt",
@@ -896,7 +954,13 @@ fn toggle_connector(
 /// a sphere, so it reaches d/2 into each piece along the cut axis — cap it so it can't pierce the
 /// thinner slab). No lower clamp: a thin spot returns a small (sub-`MIN_ONION`) value and the caller
 /// declines. Falls back to a modest default when there's no cross-section (headless `conn` verb).
-fn auto_size(xsection: &XSection, cuts: &Cuts, bounds: &ModelBounds, cut: usize, pos: [f32; 2]) -> f32 {
+fn auto_size(
+    xsection: &XSection,
+    cuts: &Cuts,
+    bounds: &ModelBounds,
+    cut: usize,
+    pos: [f32; 2],
+) -> f32 {
     const DEFAULT: f32 = 6.0;
     let axis = cuts.list.get(cut).map(|c| c.axis).unwrap_or(Axis::X);
     let cross = match &xsection.0 {
@@ -924,7 +988,11 @@ fn auto_size(xsection: &XSection, cuts: &Cuts, bounds: &ModelBounds, cut: usize,
 /// build) into the upper slab and reaches √2·d/2 — so that side reserves the tip, not the sphere.
 fn axial_cap(cuts: &Cuts, cut: usize, bounds: &ModelBounds) -> f32 {
     let (below, above) = axial_room(cuts, cut, bounds);
-    let is_z = cuts.list.get(cut).map(|c| c.axis == Axis::Z).unwrap_or(false);
+    let is_z = cuts
+        .list
+        .get(cut)
+        .map(|c| c.axis == Axis::Z)
+        .unwrap_or(false);
     let wall = ONION_WALL as f32;
     let below_d = 2.0 * (below - wall);
     // Z cut: the cap (+Z) reaches into the upper (above) slab as the teardrop tip, √2·r deep.
@@ -1009,8 +1077,10 @@ fn do_auto_place(
         status.0 = "open a cut's connector editor to auto-place".into();
         return;
     };
-    let loops: Vec<Vec<[f64; 2]>> =
-        loops.iter().map(|l| l.iter().map(|&[a, b]| [a as f64, b as f64]).collect()).collect();
+    let loops: Vec<Vec<[f64; 2]>> = loops
+        .iter()
+        .map(|l| l.iter().map(|&[a, b]| [a as f64, b as f64]).collect())
+        .collect();
     let axis = cuts.list.get(i).map(|c| c.axis).unwrap_or(Axis::X);
     let placements = fab_scad::cross_section::auto_place(
         &loops,
@@ -1176,7 +1246,15 @@ fn auto_reslice(
         return;
     }
     bg.0 = true; // background rebuild → poll_job won't jump the view to exploded
-    kick_job(&mut job, &mut status, &cfg, true, xs, resolve_conns(&cuts, &conns), orient_inputs(&orient));
+    kick_job(
+        &mut job,
+        &mut status,
+        &cfg,
+        true,
+        xs,
+        resolve_conns(&cuts, &conns),
+        orient_inputs(&orient),
+    );
     *sliced_h = Some(h);
 }
 
@@ -1185,7 +1263,11 @@ fn update_view_label(dspread: Res<DisplaySpread>, mut q: Query<&mut Text, With<V
     if !dspread.is_changed() {
         return;
     }
-    let label = if dspread.0 > 0.0 { "Collapse" } else { "Explode" };
+    let label = if dspread.0 > 0.0 {
+        "Collapse"
+    } else {
+        "Explode"
+    };
     for mut t in &mut q {
         *t = Text::new(label);
     }
@@ -1198,8 +1280,20 @@ fn update_view_label(dspread: Res<DisplaySpread>, mut q: Query<&mut Text, With<V
 fn loading_pulse(
     time: Res<Time>,
     job: Res<Job>,
-    to_disable: Query<Entity, (With<bevy::ui_widgets::Button>, Without<bevy::ui::InteractionDisabled>)>,
-    to_enable: Query<Entity, (With<bevy::ui_widgets::Button>, With<bevy::ui::InteractionDisabled>)>,
+    to_disable: Query<
+        Entity,
+        (
+            With<bevy::ui_widgets::Button>,
+            Without<bevy::ui::InteractionDisabled>,
+        ),
+    >,
+    to_enable: Query<
+        Entity,
+        (
+            With<bevy::ui_widgets::Button>,
+            With<bevy::ui::InteractionDisabled>,
+        ),
+    >,
     mut status_c: Query<&mut TextColor, With<StatusLabel>>,
     mut commands: Commands,
 ) {
@@ -1331,7 +1425,10 @@ fn edit_mode(
             Axis::Z => (-FRAC_PI_2, FRAC_PI_2 - 0.01),
         };
         // Look at the cut's centre: model centre in the non-axis dims, `at` along the axis.
-        let center = bounds.0.map(|(mn, mx)| (mn + mx) * 0.5).unwrap_or(Vec3::ZERO);
+        let center = bounds
+            .0
+            .map(|(mn, mx)| (mn + mx) * 0.5)
+            .unwrap_or(Vec3::ZERO);
         o.target = with_comp(center, c.axis.index(), c.at);
         *t = orbit_transform(o.yaw, o.pitch, o.radius, o.target);
     }
@@ -1398,8 +1495,10 @@ fn draw_profile(
                 if cap.length() > 1e-3 {
                     let cap = cap.normalize();
                     let tip = center + cap * (r * std::f32::consts::SQRT_2);
-                    let t1 = center + (Quat::from_axis_angle(normal, std::f32::consts::FRAC_PI_4) * cap) * r;
-                    let t2 = center + (Quat::from_axis_angle(normal, -std::f32::consts::FRAC_PI_4) * cap) * r;
+                    let t1 = center
+                        + (Quat::from_axis_angle(normal, std::f32::consts::FRAC_PI_4) * cap) * r;
+                    let t2 = center
+                        + (Quat::from_axis_angle(normal, -std::f32::consts::FRAC_PI_4) * cap) * r;
                     gizmos.line(t1, tip, onion_col);
                     gizmos.line(t2, tip, onion_col);
                 }
@@ -1470,7 +1569,12 @@ fn sync_overlay_visuals(
     dspread: Res<DisplaySpread>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
-    mut overlays: Query<(&mut CutPlaneViz, &mut Transform, &mut Mesh3d, &MeshMaterial3d<StandardMaterial>)>,
+    mut overlays: Query<(
+        &mut CutPlaneViz,
+        &mut Transform,
+        &mut Mesh3d,
+        &MeshMaterial3d<StandardMaterial>,
+    )>,
 ) {
     if !cuts.is_changed() && !dspread.is_changed() {
         return;
@@ -1523,7 +1627,11 @@ fn cut_center(cuts: &Cuts, idx: usize, min: Vec3, max: Vec3, spread: f32) -> Vec
     let Some(c) = cuts.list.get(idx) else {
         return (min + max) * 0.5;
     };
-    with_comp((min + max) * 0.5, c.axis.index(), c.at + spread_offset(cuts, idx, spread))
+    with_comp(
+        (min + max) * 0.5,
+        c.axis.index(),
+        c.at + spread_offset(cuts, idx, spread),
+    )
 }
 
 /// A thin slab spanning the model in the two axes the cut doesn't slice.
@@ -1589,8 +1697,12 @@ fn sync_dim_labels(
             Axis::Y => Color::srgb(0.4, 0.9, 0.45),
             Axis::Z => Color::srgb(0.5, 0.6, 1.0),
         };
-        let mut xs: Vec<f32> =
-            cuts.list.iter().filter(|c| c.enabled && c.axis == axis).map(|c| c.at).collect();
+        let mut xs: Vec<f32> = cuts
+            .list
+            .iter()
+            .filter(|c| c.enabled && c.axis == axis)
+            .map(|c| c.at)
+            .collect();
         if xs.is_empty() {
             continue;
         }
@@ -1642,7 +1754,10 @@ fn sync_dim_labels(
             Text::new(""),
             TextColor(Color::srgb(0.95, 0.95, 1.0)),
             TextFont::from_font_size(13.0),
-            Node { position_type: PositionType::Absolute, ..default() },
+            Node {
+                position_type: PositionType::Absolute,
+                ..default()
+            },
             DimLabel { idx: i },
         ));
     }
@@ -1710,7 +1825,11 @@ fn auto_scale(
     let extra = enabled * dspread.0; // exploded fans pieces this much further along X
     let span = ((max.x - min.x) + extra).max(max.y - min.y).max(80.0);
     for mut o in &mut cams {
-        o.target = Vec3::new((min.x + max.x) * 0.5 + extra * 0.5, (min.y + max.y) * 0.5, (min.z + max.z) * 0.5);
+        o.target = Vec3::new(
+            (min.x + max.x) * 0.5 + extra * 0.5,
+            (min.y + max.y) * 0.5,
+            (min.z + max.z) * 0.5,
+        );
         o.radius = span * 1.3;
     }
 }
@@ -1730,7 +1849,11 @@ fn split_viewport(
     };
     // ComputedNode::size() is physical px; the panel sits at left:8 (logical), so its right edge is
     // 8*scale + width. Leave a small gap after it.
-    let scale = if panel.inverse_scale_factor > 0.0 { 1.0 / panel.inverse_scale_factor } else { 1.0 };
+    let scale = if panel.inverse_scale_factor > 0.0 {
+        1.0 / panel.inverse_scale_factor
+    } else {
+        1.0
+    };
     let x0 = ((16.0 * scale + panel.size().x).round() as u32).min(target.x.saturating_sub(1));
     let pos = UVec2::new(x0, 0);
     let size = UVec2::new(target.x - x0, target.y.max(1));
@@ -1818,7 +1941,15 @@ fn request_reslice(
         return;
     }
     bg.0 = false; // explicit → poll_job jumps to the exploded view when it lands
-    kick_job(&mut job, &mut status, &cfg, true, xs, resolve_conns(&cuts, &conns), orient_inputs(&orient));
+    kick_job(
+        &mut job,
+        &mut status,
+        &cfg,
+        true,
+        xs,
+        resolve_conns(&cuts, &conns),
+        orient_inputs(&orient),
+    );
 }
 
 /// The auto-picked (eventually manual) per-piece orientations as `fab::Orient3` for `reslice`. Empty
@@ -1827,7 +1958,10 @@ fn orient_inputs(orient: &Orient) -> Vec<fab::Orient3> {
     orient
         .map
         .iter()
-        .map(|(&piece, &up)| fab::Orient3 { piece, up: [up[0] as f64, up[1] as f64, up[2] as f64] })
+        .map(|(&piece, &up)| fab::Orient3 {
+            piece,
+            up: [up[0] as f64, up[1] as f64, up[2] as f64],
+        })
         .collect()
 }
 
@@ -1839,13 +1973,16 @@ fn resolve_conns(cuts: &Cuts, conns: &Conns) -> Vec<fab::Conn> {
         .list
         .iter()
         .filter_map(|pc| {
-            enabled.iter().position(|&si| si == pc.cut).map(|ei| fab::Conn {
-                cut: ei,
-                pos: [pc.pos[0] as f64, pc.pos[1] as f64],
-                size: pc.size as f64,
-                kind: pc.kind,
-                screw: pc.screw.label(),
-            })
+            enabled
+                .iter()
+                .position(|&si| si == pc.cut)
+                .map(|ei| fab::Conn {
+                    cut: ei,
+                    pos: [pc.pos[0] as f64, pc.pos[1] as f64],
+                    size: pc.size as f64,
+                    kind: pc.kind,
+                    screw: pc.screw.label(),
+                })
         })
         .collect()
 }
@@ -1976,7 +2113,11 @@ fn watch_source(
         (Some(prev), Some(m)) if m > prev && job.0.is_none() => {
             watch.mtime = Some(m);
             watch.closure = dep_closure(src, &scene); // the edit may have changed the include set
-            info!("reload {} (+{} deps)", src.display(), watch.closure.len().saturating_sub(1));
+            info!(
+                "reload {} (+{} deps)",
+                src.display(),
+                watch.closure.len().saturating_sub(1)
+            );
             kick_job(&mut job, &mut status, &scene, false, vec![], vec![], vec![]);
         }
         _ => {}
@@ -2017,7 +2158,10 @@ fn collect_scads(dir: &Path, out: &mut Vec<PathBuf>) {
                 continue;
             }
             collect_scads(&p, out);
-        } else if p.extension().is_some_and(|x| x.eq_ignore_ascii_case("scad")) {
+        } else if p
+            .extension()
+            .is_some_and(|x| x.eq_ignore_ascii_case("scad"))
+        {
             out.push(p);
         }
     }
@@ -2050,7 +2194,11 @@ fn kick_job(
         }
     });
     job.0 = Some((reslice, task));
-    status.0 = if reslice { "slicing".into() } else { "rendering".into() };
+    status.0 = if reslice {
+        "slicing".into()
+    } else {
+        "rendering".into()
+    };
 }
 
 /// Poll the in-flight job; when it finishes, swap in the new mesh (and seed the first cut once).
@@ -2082,14 +2230,18 @@ fn poll_job(
             let (mesh, aabb) = mesh_and_bounds(&mut meshes, &stl);
             if is_reslice {
                 sliced.0 = Some(mesh.clone()); // bank it so the view toggle can re-show it
-                // A BACKGROUND rebuild refreshes the display only if the user is already exploded;
-                // an explicit slice (or a background one while exploded) shows the fanned pieces.
+                                               // A BACKGROUND rebuild refreshes the display only if the user is already exploded;
+                                               // an explicit slice (or a background one while exploded) shows the fanned pieces.
                 let show = !bg.0;
                 if show || dspread.0 > 0.0 {
                     for e in &models {
                         commands.entity(e).despawn();
                     }
-                    commands.spawn((Mesh3d(mesh), MeshMaterial3d(part_material(&mut materials)), Model));
+                    commands.spawn((
+                        Mesh3d(mesh),
+                        MeshMaterial3d(part_material(&mut materials)),
+                        Model,
+                    ));
                     if show {
                         dspread.0 = SPREAD as f32;
                     }
@@ -2098,7 +2250,11 @@ fn poll_job(
                 for e in &models {
                     commands.entity(e).despawn();
                 }
-                commands.spawn((Mesh3d(mesh.clone()), MeshMaterial3d(part_material(&mut materials)), Model));
+                commands.spawn((
+                    Mesh3d(mesh.clone()),
+                    MeshMaterial3d(part_material(&mut materials)),
+                    Model,
+                ));
                 whole.0 = Some(mesh); // remember the uncut mesh, so editing can revert to it
                 dspread.0 = 0.0;
                 // First whole render fixes the bounds. A model that FITS the bed gets a manual
@@ -2169,7 +2325,13 @@ fn enter_exit_print(
     if print.0 {
         cache.0 = None; // cuts may have moved — wait for a fresh render before laying out
         if job.0.is_none() {
-            kick_print_job(&mut job, &mut status, &cfg, cuts.enabled_cuts(), resolve_conns(&cuts, &conns));
+            kick_print_job(
+                &mut job,
+                &mut status,
+                &cfg,
+                cuts.enabled_cuts(),
+                resolve_conns(&cuts, &conns),
+            );
         }
     } else {
         for e in &pieces {
@@ -2193,14 +2355,21 @@ fn apply_view_visibility(
     mut models: Query<&mut Visibility, (With<Model>, Without<CutPlaneViz>)>,
     mut planes: Query<&mut Visibility, (With<CutPlaneViz>, Without<Model>)>,
 ) {
-    let model_vis =
-        if edit.0.is_none() && !print.0 { Visibility::Inherited } else { Visibility::Hidden };
+    let model_vis = if edit.0.is_none() && !print.0 {
+        Visibility::Inherited
+    } else {
+        Visibility::Hidden
+    };
     for mut v in &mut models {
         if *v != model_vis {
             *v = model_vis;
         }
     }
-    let plane_vis = if print.0 { Visibility::Hidden } else { Visibility::Inherited };
+    let plane_vis = if print.0 {
+        Visibility::Hidden
+    } else {
+        Visibility::Inherited
+    };
     for mut v in &mut planes {
         if *v != plane_vis {
             *v = plane_vis;
@@ -2308,7 +2477,10 @@ fn poll_print_job(
     }
     let n = pieces.len();
     cache.0 = Some(pieces);
-    status.0 = format!("{n} piece{}: click a face to set print-down", if n == 1 { "" } else { "s" });
+    status.0 = format!(
+        "{n} piece{}: click a face to set print-down",
+        if n == 1 { "" } else { "s" }
+    );
 }
 
 /// React to a change in cuts / connectors / orientations / cache: recompute every connector's onion
@@ -2385,7 +2557,11 @@ fn sync_orientation(
     let mut placed: Vec<(usize, Quat, Vec3)> = Vec::new(); // (piece index, rotation, translation)
     for (i, pp) in pieces.iter().enumerate() {
         let up = Vec3::from_array(orient.up_or(pp.piece, pp.up)).normalize_or_zero();
-        let rot = if up == Vec3::ZERO { Quat::IDENTITY } else { Quat::from_rotation_arc(up, Vec3::Z) };
+        let rot = if up == Vec3::ZERO {
+            Quat::IDENTITY
+        } else {
+            Quat::from_rotation_arc(up, Vec3::Z)
+        };
         let (rmin, rmax) = rotated_bounds(&pp.mesh.positions, rot);
         let (w, h) = (rmax.x - rmin.x, rmax.y - rmin.y);
         if cx > 0.0 && cx + w > bw {
@@ -2412,7 +2588,11 @@ fn sync_orientation(
         commands.spawn((
             Mesh3d(meshes.add(build_mesh(&pieces[i].mesh))),
             MeshMaterial3d(mat),
-            Transform { translation: t + shift, rotation: rot, ..default() },
+            Transform {
+                translation: t + shift,
+                rotation: rot,
+                ..default()
+            },
             PrintPiece(pieces[i].piece),
         ));
     }
@@ -2424,7 +2604,10 @@ fn sync_orientation(
     }
     let n = pieces.len();
     status.0 = if down > 0 {
-        format!("{n} pieces, {down} onion{} -> bolt (this orientation)", if down == 1 { "" } else { "s" })
+        format!(
+            "{n} pieces, {down} onion{} -> bolt (this orientation)",
+            if down == 1 { "" } else { "s" }
+        )
     } else {
         format!("{n} pieces oriented, onions print clean")
     };
@@ -2537,7 +2720,16 @@ fn run_screenshot(scene: SceneCfg, png: PathBuf) {
         .add_message::<AutoPlace>()
         .add_message::<SwitchFile>()
         .add_systems(Startup, (setup_offscreen, load_icons))
-        .add_systems(Update, (capture_then_exit, (push_fields, sync_selected, apply_icon_font, rebuild_panel).chain(), update_status, split_viewport, seat_bed))
+        .add_systems(
+            Update,
+            (
+                capture_then_exit,
+                (push_fields, sync_selected, apply_icon_font, rebuild_panel).chain(),
+                update_status,
+                split_viewport,
+                seat_bed,
+            ),
+        )
         .run();
 }
 
@@ -2553,7 +2745,11 @@ fn setup_offscreen(
     // Synchronous here — no UI to freeze. Render whole for bounds + the cut plane, then
     // (if asked) slice at the chosen cut so the PNG verifies an off-center cut.
     let display = setup_offscreen_model(&mut commands, &mut meshes, &mut materials, &scene);
-    commands.spawn((Mesh3d(display), MeshMaterial3d(part_material(&mut materials)), Model));
+    commands.spawn((
+        Mesh3d(display),
+        MeshMaterial3d(part_material(&mut materials)),
+        Model,
+    ));
 
     // Offscreen render target the camera draws into and we screenshot.
     let (w, h) = (960u32, 720u32);
@@ -2564,13 +2760,20 @@ fn setup_offscreen(
     let radius = scene.bed[0].max(scene.bed[1]).max(80.0);
     commands.spawn((
         Camera2d,
-        Camera { order: 0, ..default() },
+        Camera {
+            order: 0,
+            ..default()
+        },
         RenderTarget::Image(target.clone().into()),
         bevy::ui::IsDefaultUiCamera,
     ));
     commands.spawn((
         Camera3d::default(),
-        Camera { order: 1, clear_color: bevy::camera::ClearColorConfig::None, ..default() },
+        Camera {
+            order: 1,
+            clear_color: bevy::camera::ClearColorConfig::None,
+            ..default()
+        },
         RenderTarget::Image(target.clone().into()),
         orbit_transform(-0.7, 0.5, radius, Vec3::ZERO),
     ));
@@ -2605,13 +2808,25 @@ fn setup_offscreen_model(
     let mut cut_x = 0.0;
     if let Some((min, max)) = aabb {
         cut_x = min.x + (scene.cut_pct / 100.0) * (max.x - min.x);
-        let cut = CutDef { axis: Axis::X, at: cut_x, enabled: true };
+        let cut = CutDef {
+            axis: Axis::X,
+            at: cut_x,
+            enabled: true,
+        };
         spawn_cut_plane(commands, meshes, materials, min, max, &cut, 0);
     }
     if !scene.reslice_on_start {
         return whole_mesh;
     }
-    match fab::reslice(scene.root.as_deref(), src, &[('x', cut_x as f64)], &[], &[], SPREAD, &scene.tmp) {
+    match fab::reslice(
+        scene.root.as_deref(),
+        src,
+        &[('x', cut_x as f64)],
+        &[],
+        &[],
+        SPREAD,
+        &scene.tmp,
+    ) {
         Ok(sliced) => load_model(meshes, Some(&sliced)),
         Err(e) => {
             error!("{e:#}");
@@ -2650,22 +2865,22 @@ fn capture_then_exit(
 /// poll_job) with synthetic input, then screenshots — interaction is verified, not just setup.
 #[derive(Clone)]
 enum Action {
-    Cut(f32),      // set the ACTIVE cut's position (along its axis)
-    AddCut(f32),   // add a cut at this position (on the active axis), make it active
-    SetAxis(Axis), // set the active cut's axis
-    Toggle,        // toggle the active cut on/off
-    Next,          // cycle the active cut
-    Reslice,       // trigger a slice, then wait for the async job
-    Shot(PathBuf), // screenshot the viewport to this path
-    Wait(u32),     // idle this many frames
+    Cut(f32),                     // set the ACTIVE cut's position (along its axis)
+    AddCut(f32),                  // add a cut at this position (on the active axis), make it active
+    SetAxis(Axis),                // set the active cut's axis
+    Toggle,                       // toggle the active cut on/off
+    Next,                         // cycle the active cut
+    Reslice,                      // trigger a slice, then wait for the async job
+    Shot(PathBuf),                // screenshot the viewport to this path
+    Wait(u32),                    // idle this many frames
     Conn(usize, f32, f32), // place a connector on cut <i> at (a, b) in its plane's non-axis dims
     Edit(usize),           // open cut <i>'s 2D connector editor
     PrintView,             // toggle the print-orientation preview (renders + auto-orients pieces)
     Orient([usize; 3], [f32; 3]), // manually set piece [ix,iy,iz]'s build-up to (ux,uy,uz)
     AutoPlace,             // auto-place connectors across the open cut's cross-section
     ConnType(fab::ConnKind), // set the active connector kind for new placements (onion|bolt)
-    Open(PathBuf),         // switch the active source to <path> (a dir → its .scad; a file → itself)
-    Touch(PathBuf),        // bump <path>'s mtime (rewrite same bytes) → exercise watch_source reload
+    Open(PathBuf), // switch the active source to <path> (a dir → its .scad; a file → itself)
+    Touch(PathBuf), // bump <path>'s mtime (rewrite same bytes) → exercise watch_source reload
 }
 
 #[derive(Resource)]
@@ -2715,8 +2930,16 @@ fn parse_script(s: &str) -> Vec<Action> {
                 "printview" => Some(Action::PrintView),
                 "autoplace" => Some(Action::AutoPlace),
                 "orient" => {
-                    let piece = [it.next()?.parse().ok()?, it.next()?.parse().ok()?, it.next()?.parse().ok()?];
-                    let up = [it.next()?.parse().ok()?, it.next()?.parse().ok()?, it.next()?.parse().ok()?];
+                    let piece = [
+                        it.next()?.parse().ok()?,
+                        it.next()?.parse().ok()?,
+                        it.next()?.parse().ok()?,
+                    ];
+                    let up = [
+                        it.next()?.parse().ok()?,
+                        it.next()?.parse().ok()?,
+                        it.next()?.parse().ok()?,
+                    ];
                     Some(Action::Orient(piece, up))
                 }
                 other => {
@@ -2770,7 +2993,11 @@ fn run_scripted(scene: SceneCfg, actions: Vec<Action>) {
         .init_resource::<DisplaySpread>()
         .init_resource::<PanelSig>()
         .insert_resource(Status("rendering".into()))
-        .insert_resource(ScriptRunner { actions, idx: 0, timer: 0 })
+        .insert_resource(ScriptRunner {
+            actions,
+            idx: 0,
+            timer: 0,
+        })
         .add_message::<ReSlice>()
         .add_message::<AutoPlace>()
         .add_message::<SwitchFile>()
@@ -2829,16 +3056,28 @@ fn setup_script(
     let radius = scene.bed[0].max(scene.bed[1]).max(80.0);
     commands.spawn((
         Camera2d,
-        Camera { order: 0, ..default() },
+        Camera {
+            order: 0,
+            ..default()
+        },
         RenderTarget::Image(target.clone().into()),
         bevy::ui::IsDefaultUiCamera,
     ));
     commands.spawn((
         Camera3d::default(),
-        Camera { order: 1, clear_color: bevy::camera::ClearColorConfig::None, ..default() },
+        Camera {
+            order: 1,
+            clear_color: bevy::camera::ClearColorConfig::None,
+            ..default()
+        },
         RenderTarget::Image(target.clone().into()),
         orbit_transform(-0.7, 0.5, radius, Vec3::ZERO),
-        Orbit { yaw: -0.7, pitch: 0.5, radius, target: Vec3::ZERO },
+        Orbit {
+            yaw: -0.7,
+            pitch: 0.5,
+            radius,
+            target: Vec3::ZERO,
+        },
     ));
     commands.insert_resource(PrevCam(Some((-0.7, 0.5, radius, Vec3::ZERO))));
     commands.insert_resource(RenderTargetImage(target));
@@ -2864,7 +3103,11 @@ fn run_script(
     mut commands: Commands,
     mut exit: MessageWriter<AppExit>,
     // Bundled: Bevy caps a system at 16 params, and a tuple counts as one.
-    mut sw: (ResMut<FileList>, MessageWriter<SwitchFile>, ResMut<ActiveConn>),
+    mut sw: (
+        ResMut<FileList>,
+        MessageWriter<SwitchFile>,
+        ResMut<ActiveConn>,
+    ),
 ) {
     if bounds.0.is_none() {
         return; // wait for the initial render (model + bounds + first cut)
@@ -2889,7 +3132,11 @@ fn run_script(
             if runner.timer == 1 {
                 let axis = cuts.active_axis();
                 let at = clamp_to_bounds(v, axis, &bounds);
-                cuts.list.push(CutDef { axis, at, enabled: true });
+                cuts.list.push(CutDef {
+                    axis,
+                    at,
+                    enabled: true,
+                });
                 cuts.active = cuts.list.len() - 1;
             }
             runner.timer >= 2
@@ -2980,7 +3227,11 @@ fn run_script(
         }
         Action::Open(path) => {
             if runner.timer == 1 {
-                let list = if path.is_dir() { scad_files(&path) } else { vec![path.clone()] };
+                let list = if path.is_dir() {
+                    scad_files(&path)
+                } else {
+                    vec![path.clone()]
+                };
                 if list.is_empty() {
                     eprintln!("script: open — no .scad under {}", path.display());
                 } else {
@@ -3073,7 +3324,10 @@ fn spawn_cut_plane(
             ..default()
         })),
         Transform::from_translation(with_comp((min + max) * 0.5, cut.axis.index(), cut.at)),
-        CutPlaneViz { idx, axis: cut.axis },
+        CutPlaneViz {
+            idx,
+            axis: cut.axis,
+        },
     ));
 }
 
@@ -3120,16 +3374,23 @@ fn part_material(materials: &mut Assets<StandardMaterial>) -> Handle<StandardMat
 /// Camera transform orbiting `target` at (yaw, pitch, radius), Z-up.
 fn orbit_transform(yaw: f32, pitch: f32, radius: f32, target: Vec3) -> Transform {
     let cp = pitch.cos();
-    let off = Vec3::new(radius * cp * yaw.cos(), radius * cp * yaw.sin(), radius * pitch.sin());
+    let off = Vec3::new(
+        radius * cp * yaw.cos(),
+        radius * cp * yaw.sin(),
+        radius * pitch.sin(),
+    );
     Transform::from_translation(target + off).looking_at(target, Vec3::Z)
 }
 
 fn build_mesh(s: &stl::StlMesh) -> Mesh {
     let n = s.positions.len() as u32;
-    Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::default())
-        .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, s.positions.clone())
-        .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, s.normals.clone())
-        .with_inserted_indices(Indices::U32((0..n).collect()))
+    Mesh::new(
+        PrimitiveTopology::TriangleList,
+        RenderAssetUsages::default(),
+    )
+    .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, s.positions.clone())
+    .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, s.normals.clone())
+    .with_inserted_indices(Indices::U32((0..n).collect()))
 }
 
 /// The default printer's bed, read from fab-scad's printers.toml via the shared lib.
@@ -3139,7 +3400,9 @@ fn bed_size() -> Option<[f64; 3]> {
         let toml = dir.join("printers.toml");
         if toml.exists() {
             let printers = fab_scad::printers::load(&toml).ok()?;
-            return fab_scad::printers::select(&printers, None).ok().map(|p| p.bed);
+            return fab_scad::printers::select(&printers, None)
+                .ok()
+                .map(|p| p.bed);
         }
         if !dir.pop() {
             return None;
@@ -3212,7 +3475,11 @@ fn plane_card(cuts: &Cuts, axis: Axis) -> impl Scene + 'static {
     let add = move |_: On<Activate>, mut cuts: ResMut<Cuts>, bounds: Res<ModelBounds>| {
         if let Some((mn, mx)) = bounds.0 {
             let at = comp((mn + mx) * 0.5, axis.index());
-            cuts.list.push(CutDef { axis, at, enabled: true });
+            cuts.list.push(CutDef {
+                axis,
+                at,
+                enabled: true,
+            });
             cuts.active = cuts.list.len() - 1;
         }
     };
@@ -3299,7 +3566,12 @@ fn file_card(files: &FileList) -> impl Scene + 'static {
 /// The whole panel: a pinned title, then ONE mode section (the file list + cut cards in View, or the
 /// connector-editor / print-preview controls in a sub-mode). The bounded root (top+bottom anchored)
 /// keeps it in the window; the View section flex-grows so the file list scrolls.
-fn build_panel(cuts: &Cuts, files: &FileList, mode: PanelMode, active: ActiveConn) -> impl Scene + 'static {
+fn build_panel(
+    cuts: &Cuts,
+    files: &FileList,
+    mode: PanelMode,
+    active: ActiveConn,
+) -> impl Scene + 'static {
     let section: Box<dyn SceneList> = match mode {
         PanelMode::View => Box::new(vec![view_section(cuts, files)]),
         PanelMode::Connectors(i) => Box::new(vec![connector_section(cuts, i, active)]),
@@ -3330,8 +3602,10 @@ fn build_panel(cuts: &Cuts, files: &FileList, mode: PanelMode, active: ActiveCon
 /// View mode: Open + the file list, the X/Y/Z cut cards, and the slice / explode / print controls.
 /// (Auto-place lives in the connector editor — it only ever worked with a cut's editor open.)
 fn view_section(cuts: &Cuts, files: &FileList) -> impl Scene + 'static {
-    let cards: Vec<_> =
-        [Axis::X, Axis::Y, Axis::Z].into_iter().map(|a| plane_card(cuts, a)).collect();
+    let cards: Vec<_> = [Axis::X, Axis::Y, Axis::Z]
+        .into_iter()
+        .map(|a| plane_card(cuts, a))
+        .collect();
     let files_card = file_card(files);
     bsn! {
         // flex_grow so the file list (inside) can claim the panel's leftover height and scroll.
@@ -3412,8 +3686,8 @@ fn publish_action(
     let base = std::env::var("HIO_URL").unwrap_or_else(|_| "https://hotchkiss.io".to_string());
     let (root, out) = (scene.root.clone(), scene.tmp.join("publish"));
     let task = AsyncComputeTaskPool::get().spawn(async move {
-        let oscad =
-            fab_scad::openscad::Openscad::discover(root.as_deref()).map_err(|e| format!("{e:#}"))?;
+        let oscad = fab_scad::openscad::Openscad::discover(root.as_deref())
+            .map_err(|e| format!("{e:#}"))?;
         // Title/description from the nearest project.toml; fall back to the file stem.
         let (title, description) = match fab_scad::manifest::Manifest::load_near(&src) {
             Ok(m) => {
@@ -3421,7 +3695,9 @@ fn publish_action(
                 (title, m.publish.map(|p| p.description).unwrap_or_default())
             }
             Err(_) => (
-                src.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "model".into()),
+                src.file_stem()
+                    .map(|s| s.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| "model".into()),
                 String::new(),
             ),
         };
@@ -3487,7 +3763,10 @@ fn auto_slice_action(
         return;
     };
     let bed = bed_size().unwrap_or([256.0; 3]);
-    let (lo, hi) = ([min.x as f64, min.y as f64, min.z as f64], [max.x as f64, max.y as f64, max.z as f64]);
+    let (lo, hi) = (
+        [min.x as f64, min.y as f64, min.z as f64],
+        [max.x as f64, max.y as f64, max.z as f64],
+    );
     let planned = fab_scad::auto_slice::auto_slice(lo, hi, bed);
     if planned.is_empty() {
         status.0 = "model already fits the bed — no cuts needed".into();
@@ -3532,8 +3811,10 @@ fn kick_auto_plan(
     if planned.0.as_deref() == Some(src.as_path()) || !cuts.list.is_empty() {
         return; // already planned this source, or it already has cuts
     }
-    let (lo, hi) =
-        ([min.x as f64, min.y as f64, min.z as f64], [max.x as f64, max.y as f64, max.z as f64]);
+    let (lo, hi) = (
+        [min.x as f64, min.y as f64, min.z as f64],
+        [max.x as f64, max.y as f64, max.z as f64],
+    );
     let bed = bed_size().unwrap_or([256.0; 3]);
     if fab_scad::auto_slice::auto_slice(lo, hi, bed).is_empty() {
         return; // fits the bed — nothing to auto
@@ -3588,7 +3869,11 @@ fn poll_auto_plan(
                     cut: c.cut,
                     pos: [c.pos[0].f() as f32, c.pos[1].f() as f32],
                     size: c.size.unwrap_or(6.0) as f32,
-                    kind: if c.kind == "bolt" { fab::ConnKind::Bolt } else { fab::ConnKind::Onion },
+                    kind: if c.kind == "bolt" {
+                        fab::ConnKind::Bolt
+                    } else {
+                        fab::ConnKind::Onion
+                    },
                     screw: Screw::M3,
                 })
                 .collect();
@@ -3610,7 +3895,11 @@ fn connector_section(cuts: &Cuts, i: usize, active: ActiveConn) -> impl Scene + 
     let header = match cuts.list.get(i) {
         Some(c) => {
             let at = c.at;
-            let pos = if at.fract() == 0.0 { format!("{}", at as i64) } else { format!("{at:.1}") };
+            let pos = if at.fract() == 0.0 {
+                format!("{}", at as i64)
+            } else {
+                format!("{at:.1}")
+            };
             format!("Connectors: {} cut @ {}", c.axis.label(), pos)
         }
         None => "Connectors".to_string(),
@@ -3618,17 +3907,27 @@ fn connector_section(cuts: &Cuts, i: usize, active: ActiveConn) -> impl Scene + 
     let clear = move |_: On<Activate>, mut conns: ResMut<Conns>| {
         conns.list.retain(|c| c.cut != i);
     };
-    let onion_v =
-        if active.kind == fab::ConnKind::Onion { ButtonVariant::Primary } else { ButtonVariant::Normal };
-    let bolt_v =
-        if active.kind == fab::ConnKind::Bolt { ButtonVariant::Primary } else { ButtonVariant::Normal };
+    let onion_v = if active.kind == fab::ConnKind::Onion {
+        ButtonVariant::Primary
+    } else {
+        ButtonVariant::Normal
+    };
+    let bolt_v = if active.kind == fab::ConnKind::Bolt {
+        ButtonVariant::Primary
+    } else {
+        ButtonVariant::Normal
+    };
     // Screw picker — only when Bolt is the active kind. One closure site keeps the button type
     // uniform, so the vec is homogeneous (empty for onion, three buttons for bolt).
     let screw_btns: Vec<_> = if active.kind == fab::ConnKind::Bolt {
         [Screw::M3, Screw::M4, Screw::M5]
             .into_iter()
             .map(|s| {
-                let v = if s == active.screw { ButtonVariant::Primary } else { ButtonVariant::Normal };
+                let v = if s == active.screw {
+                    ButtonVariant::Primary
+                } else {
+                    ButtonVariant::Normal
+                };
                 let label = s.label(); // bsn's Text(..) won't parse a method call inline
                 let set = move |_: On<Activate>, mut ac: ResMut<ActiveConn>| {
                     ac.screw = s;
@@ -3766,7 +4065,10 @@ fn rebuild_panel(
     mut commands: Commands,
 ) {
     let cur = (
-        cuts.list.iter().map(|c| (c.axis, c.enabled)).collect::<Vec<_>>(),
+        cuts.list
+            .iter()
+            .map(|c| (c.axis, c.enabled))
+            .collect::<Vec<_>>(),
         files.files.len(),
         files.active,
         panel_mode(&edit, &print),
@@ -3782,7 +4084,12 @@ fn rebuild_panel(
     commands.queue(|world: &mut World| {
         let mode = panel_mode(world.resource::<EditCut>(), world.resource::<PrintView>());
         let active = *world.resource::<ActiveConn>();
-        let scene = build_panel(world.resource::<Cuts>(), world.resource::<FileList>(), mode, active);
+        let scene = build_panel(
+            world.resource::<Cuts>(),
+            world.resource::<FileList>(),
+            mode,
+            active,
+        );
         if let Err(e) = world.spawn_scene(scene) {
             error!("panel spawn failed: {e:?}");
         }
@@ -3796,14 +4103,21 @@ fn push_fields(cuts: Res<Cuts>, fields: Query<(Entity, &FieldFor)>, mut commands
     // the widget no-ops if the value is unchanged and ignores the push while focused.
     for (e, ff) in &fields {
         if let Some(c) = cuts.list.get(ff.0) {
-            commands.trigger(UpdateNumberInput { entity: e, value: NumberInputValue::F32(c.at) });
+            commands.trigger(UpdateNumberInput {
+                entity: e,
+                value: NumberInputValue::F32(c.at),
+            });
         }
     }
 }
 
 /// Highlight the active cut's row (and only it) via `Selected`. Idempotent — only touches rows
 /// whose state is wrong — so it's cheap to run every frame and survives panel rebuilds.
-fn sync_selected(cuts: Res<Cuts>, rows: Query<(Entity, &RowFor, Has<bevy::ui::Selected>)>, mut commands: Commands) {
+fn sync_selected(
+    cuts: Res<Cuts>,
+    rows: Query<(Entity, &RowFor, Has<bevy::ui::Selected>)>,
+    mut commands: Commands,
+) {
     for (e, rf, selected) in &rows {
         let should = rf.0 == cuts.active;
         if should && !selected {
@@ -3851,9 +4165,21 @@ mod tests {
     fn enabled_cuts_filter_out_disabled_and_carry_axis() {
         let cuts = Cuts {
             list: vec![
-                CutDef { axis: Axis::X, at: -10.0, enabled: true },
-                CutDef { axis: Axis::X, at: 5.0, enabled: false },
-                CutDef { axis: Axis::Y, at: 20.0, enabled: true },
+                CutDef {
+                    axis: Axis::X,
+                    at: -10.0,
+                    enabled: true,
+                },
+                CutDef {
+                    axis: Axis::X,
+                    at: 5.0,
+                    enabled: false,
+                },
+                CutDef {
+                    axis: Axis::Y,
+                    at: 20.0,
+                    enabled: true,
+                },
             ],
             active: 0,
         };
@@ -3878,12 +4204,33 @@ mod tests {
     #[test]
     fn toggle_connector_declines_a_too_thin_onion_but_not_a_bolt() {
         let mut conns = Conns::default();
-        toggle_connector(&mut conns, 0, [0.0, 0.0], 1.0, fab::ConnKind::Onion, Screw::M3); // sub-MIN_ONION
+        toggle_connector(
+            &mut conns,
+            0,
+            [0.0, 0.0],
+            1.0,
+            fab::ConnKind::Onion,
+            Screw::M3,
+        ); // sub-MIN_ONION
         assert!(conns.list.is_empty(), "a too-thin onion is declined");
-        toggle_connector(&mut conns, 0, [0.0, 0.0], 5.0, fab::ConnKind::Onion, Screw::M3); // fits
+        toggle_connector(
+            &mut conns,
+            0,
+            [0.0, 0.0],
+            5.0,
+            fab::ConnKind::Onion,
+            Screw::M3,
+        ); // fits
         assert_eq!(conns.list.len(), 1);
         // A bolt has no onion thin-gate — it places regardless of the fitted diameter.
-        toggle_connector(&mut conns, 1, [0.0, 0.0], 1.0, fab::ConnKind::Bolt, Screw::M4);
+        toggle_connector(
+            &mut conns,
+            1,
+            [0.0, 0.0],
+            1.0,
+            fab::ConnKind::Bolt,
+            Screw::M4,
+        );
         assert_eq!(conns.list.len(), 2);
         assert!(matches!(conns.list[1].kind, fab::ConnKind::Bolt));
     }
@@ -3892,9 +4239,21 @@ mod tests {
     fn axial_room_reports_both_bordering_slabs() {
         let cuts = Cuts {
             list: vec![
-                CutDef { axis: Axis::X, at: -10.0, enabled: true },
-                CutDef { axis: Axis::X, at: 0.0, enabled: true },
-                CutDef { axis: Axis::X, at: 16.0, enabled: true },
+                CutDef {
+                    axis: Axis::X,
+                    at: -10.0,
+                    enabled: true,
+                },
+                CutDef {
+                    axis: Axis::X,
+                    at: 0.0,
+                    enabled: true,
+                },
+                CutDef {
+                    axis: Axis::X,
+                    at: 16.0,
+                    enabled: true,
+                },
             ],
             active: 0,
         };
@@ -3911,18 +4270,48 @@ mod tests {
     fn remove_cut_renumbers_surviving_connectors() {
         let mut cuts = Cuts {
             list: vec![
-                CutDef { axis: Axis::X, at: -10.0, enabled: true },
-                CutDef { axis: Axis::X, at: 0.0, enabled: true },
-                CutDef { axis: Axis::X, at: 10.0, enabled: true },
+                CutDef {
+                    axis: Axis::X,
+                    at: -10.0,
+                    enabled: true,
+                },
+                CutDef {
+                    axis: Axis::X,
+                    at: 0.0,
+                    enabled: true,
+                },
+                CutDef {
+                    axis: Axis::X,
+                    at: 10.0,
+                    enabled: true,
+                },
             ],
             active: 2,
         };
         let onion = fab::ConnKind::Onion;
         let mut conns = Conns {
             list: vec![
-                PlacedConn { cut: 0, pos: [0.0, 0.0], size: 6.0, kind: onion, screw: Screw::M3 },
-                PlacedConn { cut: 1, pos: [0.0, 0.0], size: 6.0, kind: onion, screw: Screw::M3 }, // deleted
-                PlacedConn { cut: 2, pos: [0.0, 0.0], size: 6.0, kind: onion, screw: Screw::M3 }, // shifts down
+                PlacedConn {
+                    cut: 0,
+                    pos: [0.0, 0.0],
+                    size: 6.0,
+                    kind: onion,
+                    screw: Screw::M3,
+                },
+                PlacedConn {
+                    cut: 1,
+                    pos: [0.0, 0.0],
+                    size: 6.0,
+                    kind: onion,
+                    screw: Screw::M3,
+                }, // deleted
+                PlacedConn {
+                    cut: 2,
+                    pos: [0.0, 0.0],
+                    size: 6.0,
+                    kind: onion,
+                    screw: Screw::M3,
+                }, // shifts down
             ],
         };
         remove_cut(&mut cuts, &mut conns, 1);
@@ -3938,9 +4327,21 @@ mod tests {
         // the Y cut (rank 0 on its own axis) is unaffected by the X cuts.
         let cuts = Cuts {
             list: vec![
-                CutDef { axis: Axis::X, at: -10.0, enabled: true },
-                CutDef { axis: Axis::X, at: 20.0, enabled: true },
-                CutDef { axis: Axis::Y, at: 0.0, enabled: true },
+                CutDef {
+                    axis: Axis::X,
+                    at: -10.0,
+                    enabled: true,
+                },
+                CutDef {
+                    axis: Axis::X,
+                    at: 20.0,
+                    enabled: true,
+                },
+                CutDef {
+                    axis: Axis::Y,
+                    at: 0.0,
+                    enabled: true,
+                },
             ],
             active: 0,
         };

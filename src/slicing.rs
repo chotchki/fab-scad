@@ -48,7 +48,10 @@ fn onion_axis(u_lo: V3, u_up: V3) -> OnionAxis {
     let tilt = geom::angle_deg(cap, u_up); // socket-ceiling tilt off the upper build
     let budget = SUPPORT_ANGLE - CAP_ANG_MIN - CAP_SAFETY; // tilt the steepest printable cap absorbs
     if tilt >= 180.0 - budget {
-        return OnionAxis::Feasible { cap, ang: SUPPORT_ANGLE }; // cap points away → bowl, no ceiling
+        return OnionAxis::Feasible {
+            cap,
+            ang: SUPPORT_ANGLE,
+        }; // cap points away → bowl, no ceiling
     }
     if tilt > budget {
         return OnionAxis::Infeasible; // ceiling overhangs even at the steepest printable cap
@@ -83,7 +86,10 @@ pub fn onion_feasibility(s: &Slicing) -> Result<Vec<bool>> {
             if c.kind != "onion" {
                 return Ok(true);
             }
-            Ok(matches!(onion_resolution(s, &by_axis, c)?, OnionAxis::Feasible { .. }))
+            Ok(matches!(
+                onion_resolution(s, &by_axis, c)?,
+                OnionAxis::Feasible { .. }
+            ))
         })
         .collect()
 }
@@ -107,7 +113,11 @@ fn piece_up(s: &Slicing, mi: [usize; 3]) -> V3 {
 /// pieces' orientations. `by_axis` holds the sorted enabled cuts per axis (for slab lookup).
 fn onion_resolution(s: &Slicing, by_axis: &[Vec<f64>; 3], c: &Connector) -> Result<OnionAxis> {
     let cut = s.cut.get(c.cut).with_context(|| {
-        format!("connector references cut {}, but there are {} cut(s)", c.cut, s.cut.len())
+        format!(
+            "connector references cut {}, but there are {} cut(s)",
+            c.cut,
+            s.cut.len()
+        )
     })?;
     let axis = cut.axis_index()?;
     let others: Vec<usize> = (0..3).filter(|&x| x != axis).collect();
@@ -194,9 +204,9 @@ pub fn slice_part_3mf(
 }
 
 /// Slice IN-PROCESS via the Manifold kernel (Track C 11.9) instead of the scad driver. OpenSCAD is
-/// still the front-door — it renders the base model to a mesh ONCE — then import + slice + connectors
-/// + export all happen in-process (no per-piece spawn). `as_3mf` writes pieces as separate objects on
-/// a plate; otherwise a single merged STL. `spread` fans each piece by its slab index × spread.
+/// still the front-door — it renders the base model to a mesh ONCE — then import, slice, connectors
+/// and export all happen in-process (no per-piece spawn). `as_3mf` writes pieces as separate objects
+/// on a plate; otherwise a single merged STL. `spread` fans each piece by its slab index × spread.
 #[cfg(all(feature = "kernel", feature = "native"))]
 pub fn slice_part_kernel(
     oscad: &Openscad,
@@ -228,7 +238,13 @@ pub fn slice_part_kernel(
     // Fan each piece by its slab multi-index × spread (0 = assembled in place).
     let laid: Vec<Solid> = pieces
         .iter()
-        .map(|(idx, s)| s.translate(idx[0] as f64 * spread, idx[1] as f64 * spread, idx[2] as f64 * spread))
+        .map(|(idx, s)| {
+            s.translate(
+                idx[0] as f64 * spread,
+                idx[1] as f64 * spread,
+                idx[2] as f64 * spread,
+            )
+        })
         .collect();
 
     if as_3mf {
@@ -401,7 +417,10 @@ pub fn piece_driver(s: &Slicing, source: &str, piece: [usize; 3]) -> Result<Stri
     for (ax, cuts) in by_axis.iter().enumerate() {
         if cuts.is_empty() {
             if piece[ax] != 0 {
-                bail!("piece index {} on axis {ax} but that axis has no cuts", piece[ax]);
+                bail!(
+                    "piece index {} on axis {ax} but that axis has no cuts",
+                    piece[ax]
+                );
             }
             continue;
         }
@@ -431,7 +450,11 @@ fn onion_param(s: &Slicing, axis: usize, by_axis: &[Vec<f64>; 3]) -> Result<Stri
     let mut items = Vec::new();
     for c in s.connector.iter().filter(|c| c.kind == "onion") {
         let cut = s.cut.get(c.cut).with_context(|| {
-            format!("connector references cut {}, but there are {} cut(s)", c.cut, s.cut.len())
+            format!(
+                "connector references cut {}, but there are {} cut(s)",
+                c.cut,
+                s.cut.len()
+            )
         })?;
         if cut.axis_index()? != axis {
             continue;
@@ -457,7 +480,11 @@ fn onion_param(s: &Slicing, axis: usize, by_axis: &[Vec<f64>; 3]) -> Result<Stri
 /// cut axis (so it slices into both pieces correctly).
 fn connector_line(s: &Slicing, c: &Connector) -> Result<String> {
     let cut = s.cut.get(c.cut).with_context(|| {
-        format!("connector references cut {}, but there are {} cut(s)", c.cut, s.cut.len())
+        format!(
+            "connector references cut {}, but there are {} cut(s)",
+            c.cut,
+            s.cut.len()
+        )
     })?;
     let ai = cut.axis_index()?;
     // Point = `at` along the cut axis, `pos` in the two perpendicular dims.
@@ -515,8 +542,16 @@ pub fn slice_solid(s: &Slicing, base: &Solid) -> Result<Vec<([usize; 3], Solid)>
 
     // A connector's shape + the two cells it bridges.
     enum Shape {
-        Onion { cap: V3, ang: f64, d: f64 },
-        Bolt { axis: V3, screw: Option<String>, through: f64 },
+        Onion {
+            cap: V3,
+            ang: f64,
+            d: f64,
+        },
+        Bolt {
+            axis: V3,
+            screw: Option<String>,
+            through: f64,
+        },
     }
     struct Placed {
         below: [usize; 3],
@@ -525,12 +560,17 @@ pub fn slice_solid(s: &Slicing, base: &Solid) -> Result<Vec<([usize; 3], Solid)>
         shape: Shape,
     }
     // Slab index on `axis` that a coordinate falls into = cuts strictly below it.
-    let slab_of = |axis: usize, coord: f64| by_axis[axis].iter().filter(|&&x| x < coord - 1e-9).count();
+    let slab_of =
+        |axis: usize, coord: f64| by_axis[axis].iter().filter(|&&x| x < coord - 1e-9).count();
 
     let mut placed = Vec::with_capacity(s.connector.len());
     for c in &s.connector {
         let cut = s.cut.get(c.cut).with_context(|| {
-            format!("connector references cut {}, but there are {} cut(s)", c.cut, s.cut.len())
+            format!(
+                "connector references cut {}, but there are {} cut(s)",
+                c.cut,
+                s.cut.len()
+            )
         })?;
         let ai = cut.axis_index()?;
         let at = cut.at();
@@ -555,17 +595,34 @@ pub fn slice_solid(s: &Slicing, base: &Solid) -> Result<Vec<([usize; 3], Solid)>
         axis_unit[ai] = 1.0;
         // Above-slab thickness on the cut axis (+ a hair for a clean boolean exit): the shaft spans
         // exactly this piece so the head counterbore seats at its outer face, not a fixed depth.
-        let above_top = by_axis[ai].iter().copied().find(|&x| x > at + 1e-9).unwrap_or(bmax[ai]);
+        let above_top = by_axis[ai]
+            .iter()
+            .copied()
+            .find(|&x| x > at + 1e-9)
+            .unwrap_or(bmax[ai]);
         let through = above_top - at + 0.02;
         let shape = if c.kind == "onion" {
             match onion_resolution(s, &by_axis, c)? {
                 OnionAxis::Feasible { cap, ang } => Shape::Onion { cap, ang, d },
-                OnionAxis::Infeasible => Shape::Bolt { axis: axis_unit, screw: c.screw.clone(), through },
+                OnionAxis::Infeasible => Shape::Bolt {
+                    axis: axis_unit,
+                    screw: c.screw.clone(),
+                    through,
+                },
             }
         } else {
-            Shape::Bolt { axis: axis_unit, screw: c.screw.clone(), through }
+            Shape::Bolt {
+                axis: axis_unit,
+                screw: c.screw.clone(),
+                through,
+            }
         };
-        placed.push(Placed { below, above, point, shape });
+        placed.push(Placed {
+            below,
+            above,
+            point,
+            shape,
+        });
     }
 
     let mut out = Vec::new();
@@ -581,7 +638,11 @@ pub fn slice_solid(s: &Slicing, base: &Solid) -> Result<Vec<([usize; 3], Solid)>
                         cell = cell.difference(&at(socket));
                     }
                 }
-                Shape::Bolt { axis, screw, through } => {
+                Shape::Bolt {
+                    axis,
+                    screw,
+                    through,
+                } => {
                     if piece == p.below || piece == p.above {
                         let (cl, cb_d, cb_h, ins_d, ins_h) = bolt_dims(screw.as_deref());
                         // Teardrop the hole when THIS piece prints it >45° off vertical (the build-up's
@@ -590,13 +651,16 @@ pub fn slice_solid(s: &Slicing, base: &Solid) -> Result<Vec<([usize; 3], Solid)>
                         let up = piece_up(s, piece);
                         let peak = geom::sub(up, geom::scale(*axis, geom::dot(up, *axis)));
                         let teardrop = geom::norm(peak) > 0.707;
-                        let bolt = Solid::bolt_clearance(cl, *through, cb_d, cb_h, ins_d, ins_h, SEG, teardrop);
+                        let bolt = Solid::bolt_clearance(
+                            cl, *through, cb_d, cb_h, ins_d, ins_h, SEG, teardrop,
+                        );
                         let oriented = if teardrop {
                             let zc = geom::normalize(*axis);
                             let yc = geom::normalize(peak);
                             let xc = geom::cross(yc, zc);
                             bolt.transform(&[
-                                xc[0], xc[1], xc[2], yc[0], yc[1], yc[2], zc[0], zc[1], zc[2], 0.0, 0.0, 0.0,
+                                xc[0], xc[1], xc[2], yc[0], yc[1], yc[2], zc[0], zc[1], zc[2], 0.0,
+                                0.0, 0.0,
                             ])
                         } else {
                             bolt.align_z_to(*axis)
@@ -631,7 +695,10 @@ mod tests {
              [[slicing.cut]]\naxis=\"x\"\nat=-10\n",
         );
         let d = driver_scad(&s, "t.stl", 0.0).unwrap();
-        assert!(d.contains("slice([-10, 25], axis = RIGHT, spread = 0, connectors = [])"), "{d}");
+        assert!(
+            d.contains("slice([-10, 25], axis = RIGHT, spread = 0, connectors = [])"),
+            "{d}"
+        );
         // force_tag() is load-bearing: without it diff() won't carve connectors from the import.
         assert!(d.contains("force_tag() import(\"t.stl\")"), "{d}");
         assert!(d.contains("tag_scope() diff()"));
@@ -654,7 +721,10 @@ mod tests {
         let d = multipart_driver_scad(&s, "t.stl", 30.0).unwrap();
         // 2 cuts → 3 pieces → 3 top-level `slice(..., only = i) _part();` statements (separate objects).
         assert_eq!(d.matches("_part();").count(), 3, "{d}");
-        assert!(d.contains("only = 0") && d.contains("only = 1") && d.contains("only = 2"), "{d}");
+        assert!(
+            d.contains("only = 0") && d.contains("only = 1") && d.contains("only = 2"),
+            "{d}"
+        );
         assert!(d.contains("module _part()"), "{d}");
     }
 
@@ -671,17 +741,30 @@ mod tests {
         );
         let pieces = slice_solid(&s, &base).unwrap();
         assert_eq!(pieces.len(), 4, "2×2 cells");
-        let get = |idx: [usize; 3]| pieces.iter().find(|(p, _)| *p == idx).map(|(_, s)| s).unwrap();
+        let get = |idx: [usize; 3]| {
+            pieces
+                .iter()
+                .find(|(p, _)| *p == idx)
+                .map(|(_, s)| s)
+                .unwrap()
+        };
 
         // The owning below-cell (x<0, y>0) grows the peg — it stands proud past the cut on +X.
         let owning = get([0, 1, 0]);
         owning.check().unwrap();
-        assert!(owning.bbox().unwrap().1[0] > 1.0, "peg should stand proud +X on the owning cell");
+        assert!(
+            owning.bbox().unwrap().1[0] > 1.0,
+            "peg should stand proud +X on the owning cell"
+        );
 
         // The non-owning cell (x<0, y<0) must NOT get a floating peg — its +X edge stays at the cut.
         let other = get([0, 0, 0]);
         other.check().unwrap();
-        assert!(other.bbox().unwrap().1[0] < 0.01, "floater leaked: {:?}", other.bbox().unwrap());
+        assert!(
+            other.bbox().unwrap().1[0] < 0.01,
+            "floater leaked: {:?}",
+            other.bbox().unwrap()
+        );
     }
 
     #[cfg(feature = "kernel")]
@@ -699,11 +782,15 @@ mod tests {
         let pieces = slice_solid(&s, &base).unwrap();
         assert_eq!(pieces.len(), 2, "one cut → two pieces");
         for (idx, p) in &pieces {
-            p.check().unwrap_or_else(|e| panic!("piece {idx:?} not manifold after bolt carve: {e}"));
+            p.check()
+                .unwrap_or_else(|e| panic!("piece {idx:?} not manifold after bolt carve: {e}"));
         }
         // The bolt carved material out of each piece (a solid 20×40×40 half is 32000 mm³).
         let vol = |idx: [usize; 3]| pieces.iter().find(|(p, _)| *p == idx).unwrap().1.num_tri();
-        assert!(vol([0, 0, 0]) > 12 && vol([1, 0, 0]) > 12, "both halves carved (not bare boxes)");
+        assert!(
+            vol([0, 0, 0]) > 12 && vol([1, 0, 0]) > 12,
+            "both halves carved (not bare boxes)"
+        );
     }
 
     #[test]
@@ -741,7 +828,10 @@ mod tests {
     fn onion_infeasible_when_the_two_pieces_build_90_apart() {
         // peg piece builds +X, socket piece builds +Z: no single cap serves both — the socket
         // ceiling sits at a 90° overhang. The CUT axis is irrelevant; only the build mismatch is.
-        assert_eq!(onion_axis([1.0, 0.0, 0.0], [0.0, 0.0, 1.0]), OnionAxis::Infeasible);
+        assert_eq!(
+            onion_axis([1.0, 0.0, 0.0], [0.0, 0.0, 1.0]),
+            OnionAxis::Infeasible
+        );
     }
 
     #[test]
@@ -776,8 +866,14 @@ mod tests {
              [[slicing.connector]]\ncut=0\ntype=\"onion\"\npos=[5,-3]\nsize=12\n",
         );
         let d = driver_scad(&s, "t.stl", 30.0).unwrap();
-        assert!(d.contains("connectors = [[0, 5, -3, 12, 0, 0, 1, 45]]"), "onion rides the slice: {d}");
-        assert!(!d.contains("bolt_joint("), "feasible onion is NOT downgraded: {d}");
+        assert!(
+            d.contains("connectors = [[0, 5, -3, 12, 0, 0, 1, 45]]"),
+            "onion rides the slice: {d}"
+        );
+        assert!(
+            !d.contains("bolt_joint("),
+            "feasible onion is NOT downgraded: {d}"
+        );
     }
 
     #[test]
@@ -792,7 +888,10 @@ mod tests {
              [[slicing.orient]]\npiece=[0,0,0]\nup=[1,0,0]\n",
         );
         let d = driver_scad(&s, "t.stl", 0.0).unwrap();
-        assert!(d.contains("connectors = []"), "override forces infeasible: {d}");
+        assert!(
+            d.contains("connectors = []"),
+            "override forces infeasible: {d}"
+        );
         assert!(d.contains("bolt_joint("), "downgraded to bolt: {d}");
     }
 
@@ -806,7 +905,10 @@ mod tests {
         let d = driver_scad(&s, "t.stl", 30.0).unwrap();
         // Z cut -> others (x,y); onion enters slice()'s connectors param as [at,a,b,d,ox,oy,oz,ang],
         // cap axis = the cut axis (+Z) at Phase B.
-        assert!(d.contains("connectors = [[0, 5, -3, 12, 0, 0, 1, 45]]"), "{d}");
+        assert!(
+            d.contains("connectors = [[0, 5, -3, 12, 0, 0, 1, 45]]"),
+            "{d}"
+        );
         // ...and is NOT emitted as a pre-slice remove in the diff body.
         assert!(!d.contains("onion_"), "{d}");
     }
@@ -821,8 +923,14 @@ mod tests {
         );
         let d = piece_driver(&s, "m.stl", [1, 0, 1]).unwrap();
         // bare spec -> per-axis slice(only=) with no onions
-        assert!(d.contains("slice([-10, 25], axis = RIGHT, only = 1, connectors = [])"), "{d}");
-        assert!(d.contains("slice([0], axis = UP, only = 1, connectors = [])"), "{d}");
+        assert!(
+            d.contains("slice([-10, 25], axis = RIGHT, only = 1, connectors = [])"),
+            "{d}"
+        );
+        assert!(
+            d.contains("slice([0], axis = UP, only = 1, connectors = [])"),
+            "{d}"
+        );
         assert!(d.contains("import(\"m.stl\")"), "{d}");
         // an axis with no cuts must be index 0
         assert!(piece_driver(&s, "m.stl", [0, 1, 0]).is_err());
@@ -838,7 +946,10 @@ mod tests {
              [[slicing.connector]]\ncut=0\ntype=\"onion\"\npos=[5,-3]\nsize=12\n",
         );
         let d = piece_driver(&s, "m.stl", [0, 0, 0]).unwrap();
-        assert!(d.contains("connectors = [[0, 5, -3, 12, 0, 0, 1, 45]]"), "{d}");
+        assert!(
+            d.contains("connectors = [[0, 5, -3, 12, 0, 0, 1, 45]]"),
+            "{d}"
+        );
     }
 
     #[test]

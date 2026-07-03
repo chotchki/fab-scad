@@ -48,8 +48,11 @@ fn tri_area(t: &[V3; 3]) -> f64 {
 fn areas(tris: &[[V3; 3]], up: V3) -> (f64, f64) {
     let up = geom::normalize(up);
     let cos_t = SUPPORT_ANGLE.to_radians().cos(); // 0.707 at 45°
-    let z_min =
-        tris.iter().flat_map(|t| t.iter()).map(|&v| geom::dot(v, up)).fold(f64::INFINITY, f64::min);
+    let z_min = tris
+        .iter()
+        .flat_map(|t| t.iter())
+        .map(|&v| geom::dot(v, up))
+        .fold(f64::INFINITY, f64::min);
     let (mut overhang, mut contact) = (0.0, 0.0);
     for t in tris {
         let normal = geom::normalize(geom::cross(geom::sub(t[1], t[0]), geom::sub(t[2], t[0])));
@@ -104,7 +107,10 @@ pub fn best_up(tris: &[[V3; 3]], cut_normals: &[V3]) -> V3 {
         .filter(|(_, s)| s.1 <= min_over + tol)
         // Max contact; on a contact tie, the earliest candidate (smaller index) wins.
         .max_by(|a, b| {
-            a.1 .2.partial_cmp(&b.1 .2).unwrap_or(std::cmp::Ordering::Equal).then(b.0.cmp(&a.0))
+            a.1 .2
+                .partial_cmp(&b.1 .2)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then(b.0.cmp(&a.0))
         })
         .map(|(_, s)| s.0)
         .unwrap_or([0.0, 0.0, 1.0])
@@ -143,9 +149,16 @@ mod tests {
         tris.extend(down_quad(0.0)); // base
         tris.extend(down_quad(10.0)); // roof (overhang when printed +Z)
         let up = best_up(&tris, &[]);
-        assert_ne!(up, [0.0, 0.0, 1.0], "should avoid the orientation with the roof overhang");
+        assert_ne!(
+            up,
+            [0.0, 0.0, 1.0],
+            "should avoid the orientation with the roof overhang"
+        );
         assert!(overhang_score(&tris, up) <= overhang_score(&tris, [0.0, 0.0, 1.0]));
-        assert!(overhang_score(&tris, up) < 0.5, "chosen up should have ~no overhang");
+        assert!(
+            overhang_score(&tris, up) < 0.5,
+            "chosen up should have ~no overhang"
+        );
     }
 
     #[test]
@@ -166,7 +179,14 @@ mod tests {
             [w, d, h],
             [0.0, d, h],
         ];
-        let faces = [[0, 3, 2, 1], [4, 5, 6, 7], [0, 1, 5, 4], [2, 3, 7, 6], [1, 2, 6, 5], [0, 4, 7, 3]];
+        let faces = [
+            [0, 3, 2, 1],
+            [4, 5, 6, 7],
+            [0, 1, 5, 4],
+            [2, 3, 7, 6],
+            [1, 2, 6, 5],
+            [0, 4, 7, 3],
+        ];
         let mut tris = Vec::new();
         for f in faces {
             tris.push([v[f[0]], v[f[1]], v[f[2]]]);
@@ -182,14 +202,21 @@ mod tests {
         // box orientation, so this is purely the stability tie-break.
         let tris = box_mesh(60.0, 40.0, 120.0);
         let up = best_up(&tris, &[]);
-        assert_eq!(up, [0.0, 1.0, 0.0], "should lay the largest face down, not stand tall");
+        assert_eq!(
+            up,
+            [0.0, 1.0, 0.0],
+            "should lay the largest face down, not stand tall"
+        );
         assert_ne!(up, [0.0, 0.0, 1.0]);
         // The chosen orientation genuinely has the most bed contact of any overhang-free candidate.
         let best_contact = areas(&tris, up).1;
         for u in candidates(&[]) {
             let (o, c) = areas(&tris, u);
             if o <= 1e-6 {
-                assert!(c <= best_contact + 1e-6, "a flatter face existed but wasn't chosen");
+                assert!(
+                    c <= best_contact + 1e-6,
+                    "a flatter face existed but wasn't chosen"
+                );
             }
         }
     }

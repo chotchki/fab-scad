@@ -86,7 +86,7 @@ Driven by `claude-plan-bridge` (FORMATv2). Hand-authored; run
 ## Phase A - fab-web build-out: the browser slicer
 - [x] A.1 - fab-web crate (workspace member web/): canvas-bound app skeleton + STL upload→view (rfd pick_file → bytes → mesh, bed-seated, auto-framed camera); repoint dev.sh + release-web.yml payloads off the probe
 - [x] A.2 - Slice in the browser: fab-scad kernel dep (kernel, no native) + rotate-to-fit + auto::plan on upload → cut planes + piece preview; CI needs LLVM 20+ & lld for the wasm kernel build (ubuntu-24.04 clang 18 too old)
-- [ ] A.3 - Connector editor subset: per-cut cross-section view, auto-placed onions visible, add/remove/resize — lift the desktop editor's hot path
+- [x] A.3 - Connector editor subset: per-cut cross-section view, auto-placed onions visible, add/remove/resize — lift the desktop editor's hot path
 - [x] A.4 - Export: pack → Bambu multi-plate 3mf via Cursor<Vec<u8>> seam → browser blob download (zero server-side outputs)
 - [x] A.5 - Share don't fork: unify stl.rs + scene helpers duplicated between gui/ and web/ (duplicates drift)
 - [ ] A.6 - Size trim: prune bevy default features (audio/gltf/animation/scene formats) + wasm-opt parity in dev; budget ≤7 MiB brotli on the wire

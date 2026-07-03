@@ -217,6 +217,20 @@ impl Solid {
         Ok(Solid::wrap(m))
     }
 
+    /// Build from an ALREADY-indexed mesh (3mf objects arrive this way — no weld needed; the
+    /// file's own topology is authoritative). Fails like `from_stl_bytes` if it isn't manifold.
+    pub fn from_indexed(verts: &[[f64; 3]], tris: &[[u32; 3]]) -> Result<Self> {
+        if verts.is_empty() || tris.is_empty() {
+            return Err(anyhow!("indexed mesh is empty"));
+        }
+        let flat: Vec<f32> = verts.iter().flatten().map(|&c| c as f32).collect();
+        let idx: Vec<u32> = tris.iter().flatten().copied().collect();
+        let mesh = MeshGL::new(&flat, 3, &idx).map_err(|e| anyhow!("building mesh: {e:?}"))?;
+        let m = Manifold::from_meshgl(&mesh)
+            .map_err(|e| anyhow!("mesh is not a valid manifold: {e:?}"))?;
+        Ok(Solid::wrap(m))
+    }
+
     // --- export (11.3) ---------------------------------------------------------------------------
 
     /// Serialize to binary STL bytes (per-face normals computed from the winding).

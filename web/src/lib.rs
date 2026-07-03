@@ -97,7 +97,81 @@ struct Bed([f64; 3]);
 struct Part {
     name: String,
     stl: Vec<u8>,
+    /// Per printable object: stl bytes ALREADY in the plan (rotated) frame + its 3mf color.
+    /// A plain STL is one uncolored object; a 3mf assembly keeps its parts separate so the
+    /// slice view can tint fragments by source part (A.9).
+    objects: Vec<(Vec<u8>, Option<[f32; 4]>)>,
     plan: Option<Plan>,
+}
+
+/// One source object: triangle soup for display, a Solid when the geometry welds, 3mf color.
+struct SourceObj {
+    soup: stl::StlMesh,
+    solid: Option<Solid>,
+    color: Option<[f32; 4]>,
+}
+
+/// Extension-dispatched loader: STL = one uncolored object; 3MF = its built objects with
+/// basematerial colors. `solid: None` = that object doesn't weld (the whole part goes view-only).
+fn load_source(name: &str, bytes: &[u8]) -> anyhow::Result<Vec<SourceObj>> {
+    if name.to_ascii_lowercase().ends_with(".3mf") {
+        Ok(fab_scad::threemf_in::parse_3mf(bytes)?
+            .into_iter()
+            .map(|o| SourceObj {
+                soup: soup_from_indexed(&o.verts, &o.tris),
+                solid: Solid::from_indexed(&o.verts, &o.tris).ok(),
+                color: o.color,
+            })
+            .collect())
+    } else {
+        Ok(vec![SourceObj {
+            soup: stl::load_stl_bytes(bytes)?,
+            solid: Solid::from_stl_bytes(bytes).ok(),
+            color: None,
+        }])
+    }
+}
+
+/// Indexed mesh → flat soup with per-face normals (display only).
+fn soup_from_indexed(verts: &[[f64; 3]], tris: &[[u32; 3]]) -> stl::StlMesh {
+    let mut positions = Vec::with_capacity(tris.len() * 3);
+    let mut normals = Vec::with_capacity(tris.len() * 3);
+    for t in tris {
+        let p: [Vec3; 3] = std::array::from_fn(|k| {
+            let v = verts[t[k] as usize];
+            Vec3::new(v[0] as f32, v[1] as f32, v[2] as f32)
+        });
+        let n = (p[1] - p[0]).cross(p[2] - p[0]).normalize_or_zero();
+        for v in p {
+            positions.push(v.to_array());
+            normals.push(n.to_array());
+        }
+    }
+    stl::StlMesh { positions, normals }
+}
+
+/// Rebuild the plan-frame union from the stored per-object bytes (they're already rotated).
+fn rotated_union(objects: &[(Vec<u8>, Option<[f32; 4]>)]) -> anyhow::Result<Solid> {
+    let solids: Vec<Solid> = objects
+        .iter()
+        .map(|(b, _)| Solid::from_stl_bytes(b))
+        .collect::<anyhow::Result<_>>()?;
+    Ok(match solids.len() {
+        1 => solids.into_iter().next().expect("len checked"),
+        _ => Solid::batch_union(&solids),
+    })
+}
+
+/// The display material for an object: its 3mf color, else fab gold.
+fn part_material(color: Option<[f32; 4]>) -> StandardMaterial {
+    let c = color.map_or(Color::srgb(0.90, 0.74, 0.20), |c| {
+        Color::srgb(c[0], c[1], c[2])
+    });
+    StandardMaterial {
+        base_color: c,
+        perceptual_roughness: 0.7,
+        ..default()
+    }
 }
 
 /// The auto-plan in the ROTATED (display) frame; `rot` maps upload bytes into that frame.
@@ -375,7 +449,7 @@ fn setup_ui(world: &mut World) {
                     }
                     task.0 = Some(AsyncComputeTaskPool::get().spawn(async {
                         let file = rfd::AsyncFileDialog::new()
-                            .add_filter("mesh", &["stl"])
+                            .add_filter("mesh", &["stl", "3mf"])
                             .pick_file()
                             .await?;
                         let name = file.file_name();
@@ -463,67 +537,90 @@ fn present_model(
     };
     info!("presenting {name} ({} bytes)", bytes.len());
 
-    // Kernel plan first — when the mesh is sliceable we DISPLAY the rotated frame, so the
-    // planes/pieces/export all agree with what's on screen.
-    let (display_bytes, plan) = match Solid::from_stl_bytes(bytes) {
-        Ok(solid) => {
-            let fit = auto_slice::best_fit_rotation(&solid, bed.0);
-            let rotated = solid.transform(&fit.rot);
-            match auto::plan(&rotated, fit.min, fit.max, bed.0) {
-                Ok(p) => {
-                    info!(
-                        "auto-plan: {} cuts, {} connectors",
-                        p.cuts.len(),
-                        p.connectors.len()
-                    );
-                    (
-                        rotated.to_stl_bytes(),
-                        Some(Plan {
-                            rot: fit.rot,
-                            min: fit.min,
-                            max: fit.max,
-                            cuts: p.cuts,
-                            connectors: p.connectors,
-                        }),
-                    )
-                }
-                Err(e) => {
-                    warn!("auto-plan failed: {e:#}");
-                    (bytes.to_vec(), None)
-                }
-            }
-        }
+    let sources = match load_source(name, bytes) {
+        Ok(o) => o,
         Err(e) => {
-            warn!("not sliceable ({e:#}) — view only");
-            (bytes.to_vec(), None)
-        }
-    };
-
-    let m = match stl::load_stl_bytes(&display_bytes) {
-        Ok(m) => m,
-        Err(e) => {
-            status(format!("{name}: not a readable STL ({e:#})"));
+            status(format!("{name}: not readable ({e:#})"));
             error!("parsing {name}: {e:#}");
             return;
         }
     };
+    let n_parts = sources.len();
 
-    let (min, max) = aabb(&m);
+    // Kernel plan on the UNION when every object welds — display in the rotated frame so the
+    // planes/pieces/export all agree with what's on screen. Any non-manifold object degrades
+    // the whole part to view-only (raw frame, no plan).
+    let mut soups: Vec<(stl::StlMesh, Option<[f32; 4]>)> = Vec::new();
+    let mut objects: Vec<(Vec<u8>, Option<[f32; 4]>)> = Vec::new();
+    let mut plan: Option<Plan> = None;
+    let mut solids: Vec<Solid> = Vec::new();
+    let mut all_solid = true;
+    for o in sources {
+        if let Some(sol) = o.solid {
+            solids.push(sol);
+        } else {
+            all_solid = false;
+        }
+        soups.push((o.soup, o.color));
+    }
+    if all_solid {
+        let union = match solids.len() {
+            1 => solids[0].transform(&[1., 0., 0., 0., 1., 0., 0., 0., 1., 0., 0., 0.]),
+            _ => Solid::batch_union(&solids),
+        };
+        let fit = auto_slice::best_fit_rotation(&union, bed.0);
+        match auto::plan(&union.transform(&fit.rot), fit.min, fit.max, bed.0) {
+            Ok(p) => {
+                info!(
+                    "auto-plan: {} cuts, {} connectors",
+                    p.cuts.len(),
+                    p.connectors.len()
+                );
+                // Rotate every object into the plan frame; display + slice + export share it.
+                objects = solids
+                    .iter()
+                    .zip(soups.iter())
+                    .map(|(s, (_, c))| (s.transform(&fit.rot).to_stl_bytes(), *c))
+                    .collect();
+                soups = objects
+                    .iter()
+                    .filter_map(|(b, c)| stl::load_stl_bytes(b).ok().map(|m| (m, *c)))
+                    .collect();
+                plan = Some(Plan {
+                    rot: fit.rot,
+                    min: fit.min,
+                    max: fit.max,
+                    cuts: p.cuts,
+                    connectors: p.connectors,
+                });
+            }
+            Err(e) => warn!("auto-plan failed: {e:#}"),
+        }
+    } else {
+        warn!("not sliceable — view only");
+    }
+
+    let (min, max) = soups
+        .iter()
+        .map(|(m, _)| aabb(m))
+        .fold((Vec3::INFINITY, Vec3::NEG_INFINITY), |(lo, hi), (a, b)| {
+            (lo.min(a), hi.max(b))
+        });
     let size = max - min;
     let offset = Vec3::new(-(min.x + max.x) / 2.0, -(min.y + max.y) / 2.0, -min.z);
     for e in &existing {
         commands.entity(e).despawn();
     }
-    commands.spawn((
-        Mesh3d(meshes.add(build_mesh(&m))),
-        MeshMaterial3d(mats.add(StandardMaterial {
-            base_color: Color::srgb(0.90, 0.74, 0.20),
-            perceptual_roughness: 0.7,
-            ..default()
-        })),
-        Transform::from_translation(offset), // seat: XY-center on the bed, Z-floor
-        LoadedModel,
-    ));
+    let mut tris = 0usize;
+    for (m, color) in &soups {
+        tris += m.positions.len() / 3;
+        commands.spawn((
+            Mesh3d(meshes.add(build_mesh(m))),
+            MeshMaterial3d(mats.add(part_material(*color))),
+            Transform::from_translation(offset), // seat: XY-center on the bed, Z-floor
+            LoadedModel,
+        ));
+    }
     if let Some(p) = &plan {
         spawn_cut_planes(&mut commands, &mut meshes, &mut mats, p, offset);
     }
@@ -532,7 +629,15 @@ fn present_model(
         *cam = frame_camera(Vec3::new(0.0, 0.0, size.z / 2.0), extent);
     }
 
-    let dims = format!("{:.0} x {:.0} x {:.0} mm", size.x, size.y, size.z);
+    let parts_note = if n_parts > 1 {
+        format!("{n_parts} parts, ")
+    } else {
+        String::new()
+    };
+    let dims = format!(
+        "{parts_note}{:.0} x {:.0} x {:.0} mm",
+        size.x, size.y, size.z
+    );
     match &plan {
         Some(p) if p.cuts.is_empty() => status(format!("{name}: {dims} - fits the bed")),
         Some(p) => status(format!(
@@ -542,10 +647,11 @@ fn present_model(
         )),
         None => status(format!("{name}: {dims} - view only (mesh not sliceable)")),
     }
-    info!("loaded {name} ({} tris)", m.positions.len() / 3);
+    info!("loaded {name} ({tris} tris)");
 
     part.name = name.to_string();
     part.stl = bytes.to_vec();
+    part.objects = objects;
     part.plan = plan;
     *mode = EditMode::Scene;
 }
@@ -648,11 +754,10 @@ fn on_cut_plane_click(
 
     let entering = !matches!(&*mode, EditMode::Cut { cut, .. } if *cut == ci);
     if entering {
-        let loops = match Solid::from_stl_bytes(&part.stl) {
-            Ok(sol) => {
-                let rotated = sol.transform(&plan.rot);
+        let loops = match rotated_union(&part.objects) {
+            Ok(union) => {
                 let (_, at) = plan.cuts[ci];
-                rotated.cross_section(cut_basis(plan.cuts[ci].0).0, at)
+                union.cross_section(cut_basis(plan.cuts[ci].0).0, at)
             }
             Err(e) => {
                 error!("section: {e:#}");
@@ -766,14 +871,40 @@ fn run_slice(
         status("fits the bed - nothing to cut".into());
         return;
     }
-    let pieces = match slice_current(&part.stl, plan) {
-        Ok(p) => p,
-        Err(e) => {
-            status(format!("slice failed: {e:#}"));
-            error!("slice: {e:#}");
-            return;
-        }
+    // Multi-part (3mf assembly): cut each part separately so fragments keep their colors.
+    // Connector booleans only make sense against the whole join, so the multi-part VIEW skips
+    // them — the export (union) still carries them.
+    let multi = part.objects.len() > 1;
+    let spec = Slicing {
+        printer: None,
+        cut: plan
+            .cuts
+            .iter()
+            .map(|&(ax, at)| Cut {
+                axis: ax.to_string(),
+                at: Num::Float(at),
+            })
+            .collect(),
+        connector: if multi {
+            vec![]
+        } else {
+            plan.connectors.clone()
+        },
+        orient: vec![],
     };
+    let mut pieces: Vec<([usize; 3], Solid, Option<[f32; 4]>)> = Vec::new();
+    for (obytes, color) in &part.objects {
+        let sliced =
+            Solid::from_stl_bytes(obytes).and_then(|sol| slicing::slice_solid(&spec, &sol));
+        match sliced {
+            Ok(ps) => pieces.extend(ps.into_iter().map(|(i, sol)| (i, sol, *color))),
+            Err(e) => {
+                status(format!("slice failed: {e:#}"));
+                error!("slice: {e:#}");
+                return;
+            }
+        }
+    }
 
     for e in &existing {
         commands.entity(e).despawn();
@@ -789,13 +920,8 @@ fn run_slice(
         -((plan.min[1] + plan.max[1]) / 2.0) as f32,
         -plan.min[2] as f32,
     );
-    let mat = mats.add(StandardMaterial {
-        base_color: Color::srgb(0.90, 0.74, 0.20),
-        perceptual_roughness: 0.7,
-        ..default()
-    });
     let n = pieces.len();
-    for (idx, solid) in &pieces {
+    for (idx, solid, color) in &pieces {
         let m = match stl::load_stl_bytes(&solid.to_stl_bytes()) {
             Ok(m) => m,
             Err(e) => {
@@ -810,7 +936,7 @@ fn run_slice(
         );
         commands.spawn((
             Mesh3d(meshes.add(build_mesh(&m))),
-            MeshMaterial3d(mat.clone()),
+            MeshMaterial3d(mats.add(part_material(*color))),
             Transform::from_translation(offset + fan),
             LoadedModel,
         ));
@@ -819,29 +945,14 @@ fn run_slice(
     for mut cam in &mut cams {
         *cam = frame_camera(Vec3::new(0.0, 0.0, (size[2] / 2.0) + spread / 2.0), extent);
     }
-    status(format!("{n} pieces - onions carried on the cut faces"));
+    if multi {
+        status(format!(
+            "{n} pieces - colors kept; connector preview off for assemblies (export carries them)"
+        ));
+    } else {
+        status(format!("{n} pieces - onions carried on the cut faces"));
+    }
     info!("sliced: {n} pieces");
-}
-
-/// Rebuild the Solid from the stored bytes, move it into the plan's frame, slice with the
-/// stored cuts + connectors — display and geometry can't disagree because the SAME `rot`
-/// produced both.
-fn slice_current(stl_bytes: &[u8], plan: &Plan) -> anyhow::Result<Vec<([usize; 3], Solid)>> {
-    let rotated = Solid::from_stl_bytes(stl_bytes)?.transform(&plan.rot);
-    let spec = Slicing {
-        printer: None,
-        cut: plan
-            .cuts
-            .iter()
-            .map(|&(ax, at)| Cut {
-                axis: ax.to_string(),
-                at: Num::Float(at),
-            })
-            .collect(),
-        connector: plan.connectors.clone(),
-        orient: vec![],
-    };
-    slicing::slice_solid(&spec, &rotated)
 }
 
 /// Export: the full `fab make` pipeline (fit → plan → orient → pack → Bambu 3mf) from the stored
@@ -865,14 +976,17 @@ fn run_export(
         status("nothing sliceable loaded".into());
         return;
     }
-    let out_name = format!(
-        "{}-plates.3mf",
-        part.name.strip_suffix(".stl").unwrap_or(&part.name)
-    );
+    let stem = part
+        .name
+        .strip_suffix(".stl")
+        .or_else(|| part.name.strip_suffix(".3mf"))
+        .unwrap_or(&part.name);
+    let out_name = format!("{stem}-plates.3mf");
     let result = (|| -> anyhow::Result<(usize, usize, Vec<u8>)> {
         // make_planned, not make_solid: the user's edited connectors must survive the export.
+        // The union loses per-part colors — the extruder-mapping follow-up owns that.
         let plan = part.plan.as_ref().expect("checked above");
-        let rotated = Solid::from_stl_bytes(&part.stl)?.transform(&plan.rot);
+        let rotated = rotated_union(&part.objects)?;
         let mut buf = std::io::Cursor::new(Vec::new());
         let sum = auto::make_planned(
             rotated,

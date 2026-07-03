@@ -25,7 +25,7 @@ members = ["gui", "web"]
 # The in-process Manifold geometry kernel (Track C). Default-on so the normal build + tests
 # exercise it, but gated so a kernel-less build doesn't need a C++ toolchain (cmake/clang).
 default = ["kernel", "native"]
-kernel = ["dep:manifold3d", "dep:threemf", "dep:zip"]
+kernel = ["dep:manifold3d", "dep:threemf", "dep:zip", "dep:quick-xml"]
 # Everything that needs an OS (18.3): the OpenSCAD spawn, publish (blocking reqwest), project
 # scaffolding, the smoke sweep, and the CLI-only deps. `--no-default-features` is the wasm32-safe
 # core — pure geometry/slicing/spec logic, no process spawn, no network.
@@ -38,6 +38,9 @@ serde = { version = "1", features = ["derive"] }
 toml = "0.8"
 rayon = { version = "1", optional = true }
 threemf = { version = "0.8.0", optional = true }
+# threemf's serde can't round-trip <m:basematerials> (namespace-prefix renames) — threemf_in
+# pull-parses the materials table itself, prefix-agnostic.
+quick-xml = { version = "0.39", optional = true }
 # Stored (no compression) only — default features pull bzip2/zstd backends we don't need.
 zip = { version = "8", optional = true, default-features = false }
 # Publish client (fab publish → hotchkiss.io). Blocking (the CLI/GUI aren't async here); rustls so

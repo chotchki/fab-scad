@@ -27,3 +27,5 @@ pub mod slicing;
 #[cfg(feature = "native")]
 pub mod smoke;
 pub mod stl;
+#[cfg(feature = "kernel")]
+pub mod threemf_in;

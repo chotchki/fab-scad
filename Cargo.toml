@@ -5,6 +5,9 @@ edition = "2021"
 description = "Workflow layer around OpenSCAD: render, slice, output, publish"
 license = "MIT"
 repository = "https://github.com/chotchki/fab-scad"
+# crates.io ships ONLY the tool (18.9) — without this the .crate drags models/, docs/, spikes/
+# and blows past the registry's 10 MiB cap (naive package: 26.5 MiB compressed).
+include = ["src/**", "LICENSE", "README.md"]
 
 [lib]
 name = "fab_scad"
@@ -13,32 +16,46 @@ path = "src/lib.rs"
 [[bin]]
 name = "fab"
 path = "src/main.rs"
+required-features = ["native"]
 
 [workspace]
 members = ["gui"]
 
 [features]
 # The in-process Manifold geometry kernel (Track C). Default-on so the normal build + tests
-# exercise it, but gated so `--no-default-features` still builds the OpenSCAD-only path without
-# needing a C++ toolchain (cmake/clang) during the transition.
-default = ["kernel"]
+# exercise it, but gated so a kernel-less build doesn't need a C++ toolchain (cmake/clang).
+default = ["kernel", "native"]
 kernel = ["dep:manifold3d", "dep:threemf", "dep:zip"]
+# Everything that needs an OS (18.3): the OpenSCAD spawn, publish (blocking reqwest), project
+# scaffolding, the smoke sweep, and the CLI-only deps. `--no-default-features` is the wasm32-safe
+# core — pure geometry/slicing/spec logic, no process spawn, no network.
+native = ["dep:reqwest", "dep:clap", "dep:rayon"]
 
 [dependencies]
-clap = { version = "4", features = ["derive"] }
+clap = { version = "4", features = ["derive"], optional = true }
 anyhow = "1"
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
-rayon = "1"
-manifold3d = { version = "0.3.1", optional = true }
+rayon = { version = "1", optional = true }
 threemf = { version = "0.8.0", optional = true }
 # Stored (no compression) only — default features pull bzip2/zstd backends we don't need.
 zip = { version = "8", optional = true, default-features = false }
 # Publish client (fab publish → hotchkiss.io). Blocking (the CLI/GUI aren't async here); rustls so
 # we don't drag in system OpenSSL. multipart for media upload, json for the upload response.
-reqwest = { version = "0.12", default-features = false, features = [
+reqwest = { version = "0.12", default-features = false, optional = true, features = [
     "blocking",
     "multipart",
     "json",
     "rustls-tls",
+] }
+
+# The kernel per target (18.4): native gets the default `parallel` (TBB); wasm32 swaps to the
+# provisional `unstable-wasm-uu` backend (C++ via wasm-cxx-shim, single-threaded, no exceptions).
+# Same crate, same API — kernel.rs doesn't know which it got.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+manifold3d = { version = "0.3.1", optional = true }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+manifold3d = { version = "0.3.1", optional = true, default-features = false, features = [
+    "unstable-wasm-uu",
 ] }

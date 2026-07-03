@@ -5,11 +5,15 @@
 //! plane's two NON-AXIS dims, ascending — i.e. connector-pos space — so the GUI can draw the
 //! profile and pick connectors on it directly, and #41 can fit to it, with no extra mapping.
 
+#[cfg(feature = "native")]
 use std::path::Path;
+#[cfg(feature = "native")]
 use std::time::Duration;
 
+#[cfg(feature = "native")]
 use anyhow::{bail, ensure, Context, Result};
 
+#[cfg(feature = "native")]
 use crate::openscad::Openscad;
 
 /// A closed loop of 2D points in connector-pos coords. One outer outline, plus one loop per hole.
@@ -17,6 +21,7 @@ pub type Loop = Vec<[f64; 2]>;
 
 /// Cross-section of `stl` (a rendered mesh) at `axis` (0=X, 1=Y, 2=Z) = `at`, as profile loops in
 /// connector-pos coords (the cut plane's two non-axis dims, ascending).
+#[cfg(feature = "native")]
 pub fn cross_section(
     oscad: &Openscad,
     stl: &Path,
@@ -38,6 +43,7 @@ pub fn cross_section(
 /// The projection driver for one cut: rotate the cut plane onto z=0 (after centring it there with
 /// the translate), then `projection(cut = true)`. The chosen rotations leave the projected (u, v)
 /// axis-aligned and un-flipped — see `map_to_pos`.
+#[cfg(feature = "native")]
 fn projection_scad(stl: &Path, axis: usize, at: f64) -> Result<String> {
     let stl = stl.to_str().context("non-UTF8 STL path")?;
     let xform = match axis {
@@ -52,6 +58,7 @@ fn projection_scad(stl: &Path, axis: usize, at: f64) -> Result<String> {
 /// Parse the `M x,y L x,y … z` paths of an OpenSCAD 2D SVG into loops of (u, v) points. Projection
 /// of a faceted mesh is straight segments only, so M/L/z is the whole grammar; each `<path>` (or
 /// each `z`) closes one loop.
+#[cfg(feature = "native")]
 fn parse_loops(svg: &str) -> Vec<Vec<[f64; 2]>> {
     let mut loops = Vec::new();
     for d in svg.split("d=\"").skip(1).filter_map(|s| s.split('"').next()) {
@@ -274,11 +281,13 @@ fn point_to_segment(p: [f64; 2], a: [f64; 2], b: [f64; 2]) -> f64 {
 /// projected coordinate — undo that here, or the whole profile comes back upside-down and auto-place
 /// scatters connectors below the model. Per `projection_scad`: X → (u,v)=(z,-y) so pos=(y,z)=(-v,u);
 /// Y → (u,v)=(x,-z) so pos=(x,z)=(u,-v); Z → (u,v)=(x,-y) so pos=(x,y)=(u,-v).
+#[cfg(feature = "native")]
 fn map_to_pos(loop_uv: Vec<[f64; 2]>, axis: usize) -> Vec<[f64; 2]> {
     loop_uv.into_iter().map(|[u, v]| if axis == 0 { [-v, u] } else { [u, -v] }).collect()
 }
 
 /// SCAD number: trim a trailing `.0` so `translate` reads cleanly; never scientific notation.
+#[cfg(feature = "native")]
 fn num(x: f64) -> String {
     if x == 0.0 {
         return "0".to_string(); // also folds -0.0
@@ -299,6 +308,7 @@ mod tests {
         </svg>"#;
 
     #[test]
+    #[cfg(feature = "native")]
     fn parses_a_single_loop() {
         let loops = parse_loops(SVG);
         assert_eq!(loops.len(), 1);
@@ -306,6 +316,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "native")]
     fn parses_outer_plus_hole() {
         let svg = r#"<path d="M 0,0 L 4,0 L 4,4 z"/><path d="M 1,1 L 2,1 L 2,2 z"/>"#;
         let loops = parse_loops(svg);
@@ -314,6 +325,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "native")]
     fn x_axis_maps_uv_to_pos_yz() {
         // X cut: SVG (u,v) = (z, -y) after OpenSCAD's Y-flip; connector pos = (y, z) = (-v, u).
         let mapped = map_to_pos(vec![[3.0, 7.0]], 0);
@@ -321,6 +333,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "native")]
     fn yz_axes_unflip_v() {
         // Y/Z: SVG (u,v) = (first, -second) after the Y-flip; pos = (first, second) = (u, -v).
         assert_eq!(map_to_pos(vec![[3.0, 7.0]], 1), vec![[3.0, -7.0]]);
@@ -433,6 +446,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "native")]
     fn projection_scad_per_axis() {
         let p = Path::new("m.stl");
         assert!(projection_scad(p, 0, 5.0).unwrap().contains("rotate([0, 90, 0]) translate([-5, 0, 0])"));

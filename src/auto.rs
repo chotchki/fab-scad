@@ -5,14 +5,20 @@
 //! Auto button) and the CLI (`fab make`) so both seed IDENTICAL plans — the constants + placement
 //! rules live here, not mirrored per front-end.
 
+#[cfg(all(feature = "kernel", feature = "native"))]
 use std::path::Path;
+#[cfg(all(feature = "kernel", feature = "native"))]
 use std::time::Duration;
 
+#[cfg(feature = "kernel")]
 use anyhow::Result;
 
+#[cfg(feature = "kernel")]
 use crate::cross_section;
 use crate::manifest::Connector;
+#[cfg(feature = "kernel")]
 use crate::num::Num;
+#[cfg(all(feature = "kernel", feature = "native"))]
 use crate::openscad::Openscad;
 
 /// Smallest onion worth placing (mm) — below this the slab/wall is too thin for a useful joint.
@@ -38,6 +44,7 @@ pub struct AutoPlan {
 
 /// Onion cap direction (+build = +Z) in a cut's 2D cross-section coords, or `None` for a Z cut (cap
 /// points out of the section plane — bounded axially, not in-section).
+#[cfg(feature = "kernel")]
 fn cap_dir(axis: usize) -> Option<[f64; 2]> {
     match axis {
         0 | 1 => Some([0.0, 1.0]), // X / Y cut: +Z is the section's 2nd coord
@@ -45,6 +52,7 @@ fn cap_dir(axis: usize) -> Option<[f64; 2]> {
     }
 }
 
+#[cfg(feature = "kernel")]
 fn axis_char(axis: usize) -> char {
     match axis {
         0 => 'x',
@@ -55,6 +63,7 @@ fn axis_char(axis: usize) -> char {
 
 /// Room bordering cut `i` along its axis on each side `(below, above)`: distance to the nearest
 /// same-axis neighbour, or the model bound.
+#[cfg(feature = "kernel")]
 fn axial_room(cuts: &[(usize, f64)], i: usize, min: [f64; 3], max: [f64; 3]) -> (f64, f64) {
     let (ai, at) = cuts[i];
     let (mut below, mut above) = (min[ai], max[ai]);
@@ -75,6 +84,7 @@ fn axial_room(cuts: &[(usize, f64)], i: usize, min: [f64; 3], max: [f64; 3]) -> 
 /// Onion-diameter cap from the slab thickness either side of cut `i`: the onion is a sphere reaching
 /// d/2 into each piece, except the +Z cap of a Z cut, which reaches the teardrop tip (`ONION_TIP`·r)
 /// into the upper slab.
+#[cfg(feature = "kernel")]
 fn axial_cap(cuts: &[(usize, f64)], i: usize, min: [f64; 3], max: [f64; 3]) -> f64 {
     let (below, above) = axial_room(cuts, i, min, max);
     let below_d = 2.0 * (below - ONION_WALL);
@@ -161,7 +171,7 @@ pub fn plan(
 /// onions ([`plan`]), orients each piece least-support ([`crate::auto_orient::best_up`]), packs onto
 /// the fewest plates, and writes the project to `out_3mf`. Reuses the EXACT lib code the GUI drives,
 /// so CLI and GUI produce the same result. Returns the export summary (plates, pieces, fill).
-#[cfg(feature = "kernel")]
+#[cfg(all(feature = "kernel", feature = "native"))]
 pub fn make(
     oscad: &Openscad,
     source: &Path,
@@ -240,6 +250,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[cfg(feature = "kernel")]
     fn cap_direction_and_axis_char() {
         assert_eq!(cap_dir(0), Some([0.0, 1.0]));
         assert_eq!(cap_dir(1), Some([0.0, 1.0]));
@@ -248,6 +259,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "kernel")]
     fn axial_room_finds_nearest_same_axis_neighbours() {
         // Three X cuts in a model spanning X ∈ [0, 500]. The middle cut's room is bounded by its
         // neighbours; the edge cuts by the model bound.
@@ -260,6 +272,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "kernel")]
     fn axial_cap_reserves_the_wall_and_z_tip() {
         let cuts = [(0usize, 250.0)]; // one X cut, slab 250 each side
         let (min, max) = ([0.0; 3], [500.0, 500.0, 500.0]);
@@ -272,7 +285,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "kernel")]
+    #[cfg(all(feature = "kernel", feature = "native"))]
     #[ignore = "needs OpenSCAD; run with --ignored"]
     fn make_produces_a_multi_plate_bambu_project() {
         let tmp = std::env::temp_dir().join(format!("auto_make_{}", std::process::id()));

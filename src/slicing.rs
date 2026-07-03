@@ -3,7 +3,9 @@
 //! lives in `slice_cmd`. This is the GUI ↔ fab contract: the GUI edits the spec, this
 //! reproduces the same SCAD headlessly, so preview and `fab slice` are one path.
 
+#[cfg(feature = "native")]
 use std::path::{Path, PathBuf};
+#[cfg(feature = "native")]
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
@@ -12,6 +14,7 @@ use crate::geom::{self, V3};
 #[cfg(feature = "kernel")]
 use crate::kernel::Solid;
 use crate::manifest::{Connector, Slicing};
+#[cfg(feature = "native")]
 use crate::openscad::Openscad;
 
 const AXIS: [&str; 3] = ["RIGHT", "BACK", "UP"];
@@ -120,6 +123,7 @@ fn onion_resolution(s: &Slicing, by_axis: &[Vec<f64>; 3], c: &Connector) -> Resu
 
 /// Freeze `source` to a mesh, generate the slicer driver from `spec`, render the pieces.
 /// Returns the sliced STL path. The shared slice flow — `fab slice` and the GUI both call it.
+#[cfg(feature = "native")]
 pub fn slice_part(
     oscad: &Openscad,
     source: &Path,
@@ -156,6 +160,7 @@ pub fn slice_part(
 
 /// Like `slice_part`, but emits the pieces as SEPARATE objects in a multi-object `.3mf` (6.3) — the
 /// printable plate. Same frozen mesh; a multipart driver rendered with lazy-union.
+#[cfg(feature = "native")]
 pub fn slice_part_3mf(
     oscad: &Openscad,
     source: &Path,
@@ -192,7 +197,7 @@ pub fn slice_part_3mf(
 /// still the front-door — it renders the base model to a mesh ONCE — then import + slice + connectors
 /// + export all happen in-process (no per-piece spawn). `as_3mf` writes pieces as separate objects on
 /// a plate; otherwise a single merged STL. `spread` fans each piece by its slab index × spread.
-#[cfg(feature = "kernel")]
+#[cfg(all(feature = "kernel", feature = "native"))]
 pub fn slice_part_kernel(
     oscad: &Openscad,
     source: &Path,

@@ -2585,6 +2585,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "fab-web"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bevy",
+ "console_error_panic_hook",
+ "rfd",
+ "wasm-bindgen",
+ "web-sys",
+]
+
+[[package]]
 name = "fastrand"
 version = "2.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"

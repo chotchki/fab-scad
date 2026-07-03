@@ -1,0 +1,24 @@
+[package]
+name = "fab-web"
+version = "0.1.0"
+edition = "2021"
+description = "Browser build of the fab slicer: client-only auto-slicing, zero server-side outputs"
+license = "MIT"
+
+# cdylib = the wasm module; rlib so the native dev bin (src/main.rs) links the same app.
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+anyhow = "1"
+# Same version + features as gui/ so the workspace builds ONE bevy. Default features stay on
+# until A.6 (size trim) measures what the web build can drop.
+bevy = { version = "0.19", features = ["bevy_feathers", "bevy_picking", "mesh_picking"] }
+# File open on both targets: native dialog on desktop, <input type=file> on wasm.
+rfd = "0.17"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = "0.2"
+console_error_panic_hook = "0.1"
+# just Window+Location: read the ?demo query param
+web-sys = { version = "0.3", features = ["Window", "Location"] }

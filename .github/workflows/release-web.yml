@@ -21,6 +21,11 @@ jobs:
         with:
           targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
+      # The Manifold kernel's wasm-uu build needs LLVM 20+ with wasm-ld; ubuntu-24.04 ships 18.
+      - name: Install LLVM 21 + lld
+        run: |
+          wget -qO- https://apt.llvm.org/llvm.sh | sudo bash -s -- 21
+          sudo apt-get install -y lld-21
       - name: Install bundle tools (wasm-bindgen pinned to the lockfile, PINNED binaryen, brotli)
         run: |
           V=$(grep -A1 'name = "wasm-bindgen"' Cargo.lock | grep version | head -1 | cut -d'"' -f2)
@@ -71,13 +76,15 @@ jobs:
           (cd "$STAGE" && python3 -m http.server 8899 &>/dev/null &)
           sleep 1
           google-chrome --headless=new --no-sandbox --enable-logging=stderr \
-            --virtual-time-budget=30000 --window-size=1000,700 \
-            --screenshot=/tmp/boot-gate.png http://127.0.0.1:8899/index.html?demo 2> /tmp/console.log || true
+            --virtual-time-budget=35000 --window-size=1000,700 \
+            --screenshot=/tmp/boot-gate.png "http://127.0.0.1:8899/index.html?demo&bed=40" 2> /tmp/console.log || true
           if grep -qE "RuntimeError|panicked|could not grow" /tmp/console.log; then
             echo "::error::bundle failed to boot"; grep -E "RuntimeError|panicked|could not grow" /tmp/console.log | head -5; exit 1
           fi
           grep -q "loaded demo.stl" /tmp/console.log || { echo "::error::demo model never loaded"; tail -20 /tmp/console.log; exit 1; }
-          echo "boot gate: OK"
+          # The KERNEL gate: the 45mm demo on a 40mm bed must produce a real auto-plan in-browser.
+          grep -qE "auto-plan: [1-9]" /tmp/console.log || { echo "::error::kernel never planned"; tail -20 /tmp/console.log; exit 1; }
+          echo "boot gate: OK (bundle boots + kernel plans)"
       - uses: actions/upload-artifact@v4
         with:
           name: fab-web-${{ env.VERSION }}

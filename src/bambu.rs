@@ -17,7 +17,7 @@
 //! Minimal viable project = 4 zip entries: `[Content_Types].xml`, `_rels/.rels`, `3D/3dmodel.model`,
 //! `Metadata/model_settings.config`. No gcode, no thumbnails — Bambu re-slices on open.
 
-use std::io::Write;
+use std::io::{Seek, Write};
 use std::path::Path;
 
 use anyhow::{ensure, Context, Result};
@@ -73,6 +73,18 @@ fn plate_origin(p: usize, cols: usize, bed: [f64; 2]) -> [f64; 2] {
 /// mm (e.g. `[256.0, 256.0]` for an X1C) — it sets both the plate-grid stride AND the coordinate
 /// frame Bambu bins pieces against, so it MUST match the printer the project opens on.
 pub fn write_project(path: &Path, plates: &[Vec<Placed>], bed: [f64; 2]) -> Result<()> {
+    let file =
+        std::fs::File::create(path).with_context(|| format!("creating 3mf {}", path.display()))?;
+    write_project_to(file, plates, bed)
+}
+
+/// The writer-generic twin of [`write_project`] — the browser build streams the project into a
+/// `Cursor<Vec<u8>>` and hands the bytes to a download, no filesystem anywhere.
+pub fn write_project_to<W: Write + Seek>(
+    out: W,
+    plates: &[Vec<Placed>],
+    bed: [f64; 2],
+) -> Result<()> {
     let cols = column_count(plates.len());
 
     // 3D/3dmodel.model — two-level objects (mesh + wrapper) and one build item per piece. Only the
@@ -164,9 +176,7 @@ pub fn write_project(path: &Path, plates: &[Vec<Placed>], bed: [f64; 2]) -> Resu
  <Relationship Target=\"/3D/3dmodel.model\" Id=\"rel-1\" Type=\"http://schemas.microsoft.com/3dmanufacturing/2013/01/3dmodel\"/>\n\
 </Relationships>\n";
 
-    let file =
-        std::fs::File::create(path).with_context(|| format!("creating 3mf {}", path.display()))?;
-    let mut zip = zip::ZipWriter::new(file);
+    let mut zip = zip::ZipWriter::new(out);
     let opts =
         zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
     for (name, body) in [
@@ -207,6 +217,18 @@ pub struct ExportSummary {
 /// so it runs happily on a worker thread. Errors if a piece can't fit the bed.
 pub fn export_plates(
     path: &Path,
+    pieces: Vec<PieceToPlace>,
+    bed: [f64; 2],
+    gap: f64,
+) -> Result<ExportSummary> {
+    let file =
+        std::fs::File::create(path).with_context(|| format!("creating 3mf {}", path.display()))?;
+    export_plates_to(file, pieces, bed, gap)
+}
+
+/// The writer-generic twin of [`export_plates`] — same layout/pack/emit, any `Write + Seek` sink.
+pub fn export_plates_to<W: Write + Seek>(
+    out: W,
     pieces: Vec<PieceToPlace>,
     bed: [f64; 2],
     gap: f64,
@@ -262,7 +284,7 @@ pub fn export_plates(
         });
     }
 
-    write_project(path, &plates, bed)?;
+    write_project_to(out, &plates, bed)?;
     Ok(ExportSummary {
         plates: plate_n,
         pieces: pieces.len(),

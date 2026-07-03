@@ -2591,6 +2591,8 @@ dependencies = [
  "anyhow",
  "bevy",
  "console_error_panic_hook",
+ "fab-scad",
+ "js-sys",
  "rfd",
  "wasm-bindgen",
  "web-sys",

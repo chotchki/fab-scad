@@ -186,9 +186,7 @@ pub fn make(
     timeout: Duration,
     gap: f64,
 ) -> Result<crate::bambu::ExportSummary> {
-    use crate::bambu::{self, PieceToPlace};
     use crate::kernel::Solid;
-    use crate::manifest::{Cut, PieceOrient, Slicing};
     use anyhow::{bail, Context};
 
     std::fs::create_dir_all(out_dir)?;
@@ -203,6 +201,26 @@ pub fn make(
         bail!("source render failed: {}", source.display());
     }
     let base = Solid::from_stl_file(&base_stl)?;
+    let out = std::fs::File::create(out_3mf)
+        .with_context(|| format!("creating {}", out_3mf.display()))?;
+    make_solid(base, bed, out, gap)
+}
+
+/// The kernel-only core of [`make`]: everything after the front-door render — rotate-to-fit,
+/// auto-plan, per-piece orientation, pack, Bambu emit — from a `Solid` straight into any
+/// `Write + Seek` sink. The browser build's whole export IS this call (bytes in, 3mf out,
+/// no filesystem); native `make` wraps it with the OpenSCAD render + a `File`.
+#[cfg(feature = "kernel")]
+pub fn make_solid<W: std::io::Write + std::io::Seek>(
+    base: crate::kernel::Solid,
+    bed: [f64; 3],
+    out: W,
+    gap: f64,
+) -> Result<crate::bambu::ExportSummary> {
+    use crate::bambu::{self, PieceToPlace};
+    use crate::manifest::{Cut, PieceOrient, Slicing};
+    use anyhow::{bail, Context};
+
     base.bbox().context("model has no geometry")?;
 
     // Rotate-to-fit: spin the model to the fewest bed pieces before cutting — a part lying diagonally
@@ -273,7 +291,7 @@ pub fn make(
             }
         })
         .collect();
-    bambu::export_plates(out_3mf, to_place, [bed[0], bed[1]], gap)
+    bambu::export_plates_to(out, to_place, [bed[0], bed[1]], gap)
 }
 
 #[cfg(test)]
@@ -352,6 +370,28 @@ mod tests {
         assert_eq!(model.matches("<item ").count(), 3);
         assert!(sum.plates >= 1);
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    #[cfg(feature = "kernel")]
+    fn make_solid_exports_plates_in_memory() {
+        // The browser export path end to end: Solid in, Bambu 3mf bytes out, no filesystem.
+        // 700mm on a 256 bed → 3 pieces, valid multi-piece project in the Cursor.
+        let base = crate::kernel::Solid::cube(700.0, 120.0, 60.0, false);
+        let mut buf = std::io::Cursor::new(Vec::new());
+        let sum = make_solid(base, [256.0; 3], &mut buf, 5.0).unwrap();
+        assert_eq!(sum.pieces, 3, "700mm on a 256 bed → 3 pieces");
+        let bytes = buf.into_inner();
+        assert!(!bytes.is_empty());
+        let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
+        use std::io::Read;
+        let mut model = String::new();
+        zip.by_name("3D/3dmodel.model")
+            .unwrap()
+            .read_to_string(&mut model)
+            .unwrap();
+        assert!(model.contains("name=\"Application\">BambuStudio-"));
+        assert_eq!(model.matches("<item ").count(), 3);
     }
 
     #[test]

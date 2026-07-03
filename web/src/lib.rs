@@ -1,8 +1,9 @@
-//! fab-web (Phase A): the browser slicer. A.1 scope — canvas-bound Bevy app, STL upload → view:
-//! pick a file (rfd: native dialog on desktop, `<input type=file>` on wasm), parse the bytes,
-//! seat the model on the bed plane and auto-frame the camera, Z-up like the desktop GUI.
-//! The slicing pipeline (rotate-to-fit + auto::plan + 3mf export) wires in at A.2+ on the same
-//! kernel the desktop uses. Runs native too (`cargo run -p fab-web`) for quick iteration.
+//! fab-web (Phase A): the browser slicer. Upload an STL → the Manifold kernel plans it against
+//! the bed (rotate-to-fit + auto cuts + auto onions, A.2), cut planes render on the model, Slice
+//! shows the pieces, Export packs plates and downloads a Bambu 3mf (A.4) — all client-side, zero
+//! server-side outputs. `Solid` is !Send by design: state holds the upload BYTES and every op
+//! rebuilds the Solid where it runs — the same discipline a future worker split needs (A.8).
+//! Runs native too (`cargo run -p fab-web -- --demo --bed=40`).
 
 use bevy::asset::RenderAssetUsages;
 use bevy::picking::mesh_picking::MeshPickingPlugin;
@@ -10,10 +11,18 @@ use bevy::prelude::*;
 use bevy::render::mesh::{Indices, PrimitiveTopology};
 use bevy::tasks::{block_on, futures_lite::future, AsyncComputeTaskPool, Task};
 
+use fab_scad::kernel::Solid;
+use fab_scad::manifest::{Connector, Cut, Slicing};
+use fab_scad::num::Num;
+use fab_scad::{auto, auto_slice, slicing};
+
 mod stl;
 
-/// Default build volume (mm) until printers.toml grows a browser home (A.2).
-const BED: [f32; 3] = [256.0, 256.0, 256.0];
+/// Default build volume (mm); `?bed=N` / `--bed=N` overrides (cube bed) until printers.toml
+/// grows a browser home.
+const DEFAULT_BED: f64 = 256.0;
+/// Plate gap for the packed export (mm) — matches `fab make`'s default.
+const GAP: f64 = 5.0;
 
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen::prelude::wasm_bindgen(start)]
@@ -23,6 +32,7 @@ pub fn start() {
 }
 
 pub fn run() {
+    let bed = bed_override().unwrap_or(DEFAULT_BED);
     let mut app = App::new();
     app.add_plugins((
         DefaultPlugins.set(WindowPlugin {
@@ -48,7 +58,10 @@ pub fn run() {
     }
 
     app.insert_resource(ClearColor(Color::srgb(0.10, 0.10, 0.12)))
+        .insert_resource(Bed([bed, bed, bed]))
+        .init_resource::<Part>()
         .init_resource::<PickTask>()
+        .init_resource::<Actions>()
         .add_systems(
             Startup,
             (
@@ -57,19 +70,61 @@ pub fn run() {
                 load_demo_if_requested.after(setup_ui),
             ),
         )
-        .add_systems(Update, poll_picked_file)
+        .add_systems(Update, (poll_picked_file, run_slice, run_export))
         .run();
 }
 
-/// `?demo` (web) / `--demo` (native): push the embedded sample through the EXACT upload path —
-/// the headless e2e drives this, and the site can link it as "try it without a file".
+/// Printer build volume `[x, y, z]` mm.
+#[derive(Resource)]
+struct Bed([f64; 3]);
+
+/// The loaded part: the upload BYTES (never a Solid — !Send) + what the kernel derived from
+/// them. Every slice/export rebuilds the Solid from `stl` and re-derives the SAME fit (the
+/// rotation search is deterministic), so display and export can't drift apart.
+#[derive(Resource, Default)]
+struct Part {
+    name: String,
+    stl: Vec<u8>,
+    plan: Option<Plan>,
+}
+
+/// The auto-plan in the ROTATED (display) frame; `rot` maps upload bytes into that frame.
+struct Plan {
+    rot: [f64; 12],
+    min: [f64; 3],
+    max: [f64; 3],
+    cuts: Vec<(char, f64)>,
+    connectors: Vec<Connector>,
+}
+
+/// Button → system handoff: observers set flags, Update systems do the heavy work.
+#[derive(Resource, Default)]
+struct Actions {
+    slice: bool,
+    export: bool,
+}
+
+/// The currently displayed model/pieces (despawned and replaced on load/slice).
+#[derive(Component)]
+struct LoadedModel;
+
+/// Translucent cut-plane quads (despawned with the model).
+#[derive(Component)]
+struct CutPlane;
+
+/// Status line in the panel.
+#[derive(Component, Clone, Default)]
+struct StatusLabel;
+
+/// In-flight file pick: `None` payload = dialog cancelled. Single-flight.
+#[derive(Resource, Default)]
+struct PickTask(Option<Task<Option<(String, Vec<u8>)>>>);
+
+/// `?demo` (web) / `--demo` (native): push the embedded sample through the EXACT upload path.
 fn demo_requested() -> bool {
     #[cfg(target_arch = "wasm32")]
     {
-        web_sys::window()
-            .and_then(|w| w.location().search().ok())
-            .map(|q| q.contains("demo"))
-            .unwrap_or(false)
+        query_string().is_some_and(|q| q.contains("demo"))
     }
     #[cfg(not(target_arch = "wasm32"))]
     {
@@ -77,11 +132,38 @@ fn demo_requested() -> bool {
     }
 }
 
+/// `?bed=N` / `--bed=N`: cube-bed override in mm.
+fn bed_override() -> Option<f64> {
+    let arg: Option<String>;
+    #[cfg(target_arch = "wasm32")]
+    {
+        arg = query_string();
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        arg = std::env::args().find(|a| a.starts_with("--bed="));
+    }
+    let s = arg?;
+    let tail = s.split("bed=").nth(1)?;
+    tail.chars()
+        .take_while(|c| c.is_ascii_digit() || *c == '.')
+        .collect::<String>()
+        .parse()
+        .ok()
+}
+
+#[cfg(target_arch = "wasm32")]
+fn query_string() -> Option<String> {
+    web_sys::window().and_then(|w| w.location().search().ok())
+}
+
 fn load_demo_if_requested(
+    bed: Res<Bed>,
+    part: ResMut<Part>,
     commands: Commands,
     meshes: ResMut<Assets<Mesh>>,
     mats: ResMut<Assets<StandardMaterial>>,
-    existing: Query<Entity, With<LoadedModel>>,
+    existing: Query<Entity, Or<(With<LoadedModel>, With<CutPlane>)>>,
     cams: Query<&mut Transform, With<Camera3d>>,
     labels: Query<&mut Text, With<StatusLabel>>,
 ) {
@@ -89,6 +171,8 @@ fn load_demo_if_requested(
         present_model(
             "demo.stl",
             include_bytes!("../assets/demo.stl"),
+            &bed,
+            part,
             commands,
             meshes,
             mats,
@@ -99,27 +183,15 @@ fn load_demo_if_requested(
     }
 }
 
-/// The currently loaded model (despawned and replaced on each upload).
-#[derive(Component)]
-struct LoadedModel;
-
-/// Status line in the panel.
-#[derive(Component, Clone, Default)]
-struct StatusLabel;
-
-/// In-flight file pick: `None` payload = dialog cancelled. Single-flight — the Open button
-/// no-ops while a dialog is already up.
-#[derive(Resource, Default)]
-struct PickTask(Option<Task<Option<(String, Vec<u8>)>>>);
-
 /// Bed plate + light + a Z-up camera framing the empty bed.
 fn setup_scene(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut mats: ResMut<Assets<StandardMaterial>>,
+    bed: Res<Bed>,
 ) {
     commands.spawn((
-        Mesh3d(meshes.add(Cuboid::new(BED[0], BED[1], 2.0))),
+        Mesh3d(meshes.add(Cuboid::new(bed.0[0] as f32, bed.0[1] as f32, 2.0))),
         MeshMaterial3d(mats.add(StandardMaterial {
             base_color: Color::srgb(0.16, 0.17, 0.20),
             perceptual_roughness: 0.9,
@@ -141,14 +213,14 @@ fn setup_scene(
             brightness: 220.0,
             ..default()
         },
-        frame_camera(Vec3::ZERO, BED[0].max(BED[1])),
+        frame_camera(Vec3::ZERO, bed.0[0].max(bed.0[1]) as f32),
     ));
 }
 
 /// Z-up orbit-style framing: fixed yaw/pitch, radius scaled to the content extent.
 fn frame_camera(target: Vec3, extent: f32) -> Transform {
     let (yaw, pitch) = (-45f32.to_radians(), 30f32.to_radians());
-    let r = (extent * 1.9).max(80.0);
+    let r = (extent * 2.3).max(80.0);
     let eye = target
         + Vec3::new(
             r * pitch.cos() * yaw.cos(),
@@ -178,7 +250,7 @@ fn ui_top_inset() -> f32 {
     }
 }
 
-/// Feathers panel: title, Open STL (kicks off the async picker), status line.
+/// Feathers panel: title, Open STL / Slice / Export buttons, status line.
 fn setup_ui(world: &mut World) {
     use bevy::feathers::{
         controls::{ButtonVariant, FeathersButton},
@@ -196,7 +268,7 @@ fn setup_ui(world: &mut World) {
             flex_direction: FlexDirection::Column,
             row_gap: px(6),
             padding: UiRect::all(px(8)),
-            min_width: px(220),
+            min_width: px(240),
         }
         ThemeBackgroundColor(tokens::WINDOW_BG)
         Children [
@@ -218,6 +290,14 @@ fn setup_ui(world: &mut World) {
                     }));
                 })
             ),
+            (
+                @FeathersButton { @caption: bsn!{ Text("Slice") ThemedText } }
+                on(|_: On<Activate>, mut act: ResMut<Actions>| { act.slice = true; })
+            ),
+            (
+                @FeathersButton { @caption: bsn!{ Text("Export 3mf") ThemedText } }
+                on(|_: On<Activate>, mut act: ResMut<Actions>| { act.export = true; })
+            ),
             (Text("pick an STL to begin") ThemedText StatusLabel),
         ]
     };
@@ -225,14 +305,17 @@ fn setup_ui(world: &mut World) {
 }
 
 /// Drain the picker task and hand the bytes to [`present_model`].
+#[allow(clippy::too_many_arguments)] // a system-params relay, not an API
 fn poll_picked_file(
     mut task: ResMut<PickTask>,
-    mut commands: Commands,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut mats: ResMut<Assets<StandardMaterial>>,
-    existing: Query<Entity, With<LoadedModel>>,
-    mut cams: Query<&mut Transform, With<Camera3d>>,
-    mut labels: Query<&mut Text, With<StatusLabel>>,
+    bed: Res<Bed>,
+    part: ResMut<Part>,
+    commands: Commands,
+    meshes: ResMut<Assets<Mesh>>,
+    mats: ResMut<Assets<StandardMaterial>>,
+    existing: Query<Entity, Or<(With<LoadedModel>, With<CutPlane>)>>,
+    cams: Query<&mut Transform, With<Camera3d>>,
+    labels: Query<&mut Text, With<StatusLabel>>,
 ) {
     let Some(t) = task.0.as_mut() else { return };
     let Some(done) = block_on(future::poll_once(t)) else {
@@ -241,21 +324,23 @@ fn poll_picked_file(
     task.0 = None;
     let Some((name, bytes)) = done else { return }; // cancelled
     present_model(
-        &name, &bytes, commands, meshes, mats, existing, cams, labels,
+        &name, &bytes, &bed, part, commands, meshes, mats, existing, cams, labels,
     );
 }
 
-/// The one load path: bytes → mesh → replace the loaded model, seat it on the bed (Z-floor,
-/// XY-centered — the desktop convention), reframe the camera, report in the panel. Picker and
-/// demo mode both land here; A.2's slicing hooks in after this.
+/// The one load path: bytes → kernel plan (rotate-to-fit + auto cuts/onions) → display the model
+/// in the ROTATED frame with its cut planes, seated on the bed. A soup that Manifold rejects
+/// still displays (view-only) — slicing just stays off.
 #[allow(clippy::too_many_arguments)] // a system-params relay, not an API
 fn present_model(
     name: &str,
     bytes: &[u8],
+    bed: &Bed,
+    mut part: ResMut<Part>,
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut mats: ResMut<Assets<StandardMaterial>>,
-    existing: Query<Entity, With<LoadedModel>>,
+    existing: Query<Entity, Or<(With<LoadedModel>, With<CutPlane>)>>,
     mut cams: Query<&mut Transform, With<Camera3d>>,
     mut labels: Query<&mut Text, With<StatusLabel>>,
 ) {
@@ -264,43 +349,319 @@ fn present_model(
             t.0 = s.clone();
         }
     };
-    match stl::load_stl_bytes(bytes) {
-        Ok(m) => {
-            let (min, max) = aabb(&m);
-            let size = max - min;
-            let center = (min + max) / 2.0;
-            for e in &existing {
-                commands.entity(e).despawn();
+
+    // Kernel plan first — when the mesh is sliceable we DISPLAY the rotated frame, so the
+    // planes/pieces/export all agree with what's on screen.
+    let (display_bytes, plan) = match Solid::from_stl_bytes(bytes) {
+        Ok(solid) => {
+            let fit = auto_slice::best_fit_rotation(&solid, bed.0);
+            let rotated = solid.transform(&fit.rot);
+            match auto::plan(&rotated, fit.min, fit.max, bed.0) {
+                Ok(p) => {
+                    info!(
+                        "auto-plan: {} cuts, {} connectors",
+                        p.cuts.len(),
+                        p.connectors.len()
+                    );
+                    (
+                        rotated.to_stl_bytes(),
+                        Some(Plan {
+                            rot: fit.rot,
+                            min: fit.min,
+                            max: fit.max,
+                            cuts: p.cuts,
+                            connectors: p.connectors,
+                        }),
+                    )
+                }
+                Err(e) => {
+                    warn!("auto-plan failed: {e:#}");
+                    (bytes.to_vec(), None)
+                }
             }
-            commands.spawn((
-                Mesh3d(meshes.add(build_mesh(&m))),
-                MeshMaterial3d(mats.add(StandardMaterial {
-                    base_color: Color::srgb(0.90, 0.74, 0.20),
-                    perceptual_roughness: 0.7,
-                    ..default()
-                })),
-                // Seat: XY-center on the bed, Z-floor to the build plane.
-                Transform::from_xyz(-center.x, -center.y, -min.z),
-                LoadedModel,
-            ));
-            let extent = size.length().max(1.0);
-            for mut cam in &mut cams {
-                *cam = frame_camera(Vec3::new(0.0, 0.0, size.z / 2.0), extent);
-            }
-            status(format!(
-                "{name}: {} tris, {:.0} x {:.0} x {:.0} mm",
-                m.positions.len() / 3,
-                size.x,
-                size.y,
-                size.z
-            ));
-            info!("loaded {name} ({} tris)", m.positions.len() / 3);
         }
+        Err(e) => {
+            warn!("not sliceable ({e:#}) — view only");
+            (bytes.to_vec(), None)
+        }
+    };
+
+    let m = match stl::load_stl_bytes(&display_bytes) {
+        Ok(m) => m,
         Err(e) => {
             status(format!("{name}: not a readable STL ({e:#})"));
             error!("parsing {name}: {e:#}");
+            return;
+        }
+    };
+
+    let (min, max) = aabb(&m);
+    let size = max - min;
+    let offset = Vec3::new(-(min.x + max.x) / 2.0, -(min.y + max.y) / 2.0, -min.z);
+    for e in &existing {
+        commands.entity(e).despawn();
+    }
+    commands.spawn((
+        Mesh3d(meshes.add(build_mesh(&m))),
+        MeshMaterial3d(mats.add(StandardMaterial {
+            base_color: Color::srgb(0.90, 0.74, 0.20),
+            perceptual_roughness: 0.7,
+            ..default()
+        })),
+        Transform::from_translation(offset), // seat: XY-center on the bed, Z-floor
+        LoadedModel,
+    ));
+    if let Some(p) = &plan {
+        spawn_cut_planes(&mut commands, &mut meshes, &mut mats, p, offset);
+    }
+    let extent = size.length().max(1.0);
+    for mut cam in &mut cams {
+        *cam = frame_camera(Vec3::new(0.0, 0.0, size.z / 2.0), extent);
+    }
+
+    let dims = format!("{:.0} x {:.0} x {:.0} mm", size.x, size.y, size.z);
+    match &plan {
+        Some(p) if p.cuts.is_empty() => status(format!("{name}: {dims} - fits the bed")),
+        Some(p) => status(format!(
+            "{name}: {dims} - {} cut(s), {} onion(s) planned",
+            p.cuts.len(),
+            p.connectors.len()
+        )),
+        None => status(format!("{name}: {dims} - view only (mesh not sliceable)")),
+    }
+    info!("loaded {name} ({} tris)", m.positions.len() / 3);
+
+    part.name = name.to_string();
+    part.stl = bytes.to_vec();
+    part.plan = plan;
+}
+
+/// One translucent quad per planned cut, in display coordinates (plan frame + seat offset).
+fn spawn_cut_planes(
+    commands: &mut Commands,
+    meshes: &mut Assets<Mesh>,
+    mats: &mut Assets<StandardMaterial>,
+    plan: &Plan,
+    offset: Vec3,
+) {
+    let mat = mats.add(StandardMaterial {
+        base_color: Color::srgba(0.25, 0.55, 0.95, 0.35),
+        alpha_mode: AlphaMode::Blend,
+        unlit: true,
+        cull_mode: None,
+        ..default()
+    });
+    let size = [
+        (plan.max[0] - plan.min[0]) as f32,
+        (plan.max[1] - plan.min[1]) as f32,
+        (plan.max[2] - plan.min[2]) as f32,
+    ];
+    let mid = [
+        ((plan.min[0] + plan.max[0]) / 2.0) as f32,
+        ((plan.min[1] + plan.max[1]) / 2.0) as f32,
+        ((plan.min[2] + plan.max[2]) / 2.0) as f32,
+    ];
+    const M: f32 = 6.0; // margin past the model so planes read as planes
+    for &(axis, at) in &plan.cuts {
+        let ai = match axis {
+            'x' => 0,
+            'y' => 1,
+            _ => 2,
+        };
+        let mut dims = [size[0] + M, size[1] + M, size[2] + M];
+        dims[ai] = 0.4;
+        let mut pos = mid;
+        pos[ai] = at as f32;
+        commands.spawn((
+            Mesh3d(meshes.add(Cuboid::new(dims[0], dims[1], dims[2]))),
+            MeshMaterial3d(mat.clone()),
+            Transform::from_translation(Vec3::from_array(pos) + offset),
+            CutPlane,
+        ));
+    }
+}
+
+/// Slice in-process and show the pieces fanned apart by slab index — auto onions included
+/// (pegs proud on the lower piece, sockets carved from the upper).
+fn run_slice(
+    mut act: ResMut<Actions>,
+    part: Res<Part>,
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut mats: ResMut<Assets<StandardMaterial>>,
+    existing: Query<Entity, Or<(With<LoadedModel>, With<CutPlane>)>>,
+    mut cams: Query<&mut Transform, With<Camera3d>>,
+    mut labels: Query<&mut Text, With<StatusLabel>>,
+) {
+    if !act.slice {
+        return;
+    }
+    act.slice = false;
+    let mut status = |s: String| {
+        for mut t in &mut labels {
+            t.0 = s.clone();
+        }
+    };
+    let Some(plan) = &part.plan else {
+        status("nothing sliceable loaded".into());
+        return;
+    };
+    if plan.cuts.is_empty() {
+        status("fits the bed - nothing to cut".into());
+        return;
+    }
+    let pieces = match slice_current(&part.stl, plan) {
+        Ok(p) => p,
+        Err(e) => {
+            status(format!("slice failed: {e:#}"));
+            error!("slice: {e:#}");
+            return;
+        }
+    };
+
+    for e in &existing {
+        commands.entity(e).despawn();
+    }
+    let size = [
+        (plan.max[0] - plan.min[0]) as f32,
+        (plan.max[1] - plan.min[1]) as f32,
+        (plan.max[2] - plan.min[2]) as f32,
+    ];
+    let spread = (size[0].max(size[1]).max(size[2]) * 0.18).max(8.0);
+    let offset = Vec3::new(
+        -((plan.min[0] + plan.max[0]) / 2.0) as f32,
+        -((plan.min[1] + plan.max[1]) / 2.0) as f32,
+        -plan.min[2] as f32,
+    );
+    let mat = mats.add(StandardMaterial {
+        base_color: Color::srgb(0.90, 0.74, 0.20),
+        perceptual_roughness: 0.7,
+        ..default()
+    });
+    let n = pieces.len();
+    for (idx, solid) in &pieces {
+        let m = match stl::load_stl_bytes(&solid.to_stl_bytes()) {
+            Ok(m) => m,
+            Err(e) => {
+                error!("piece mesh: {e:#}");
+                continue;
+            }
+        };
+        let fan = Vec3::new(
+            idx[0] as f32 * spread,
+            idx[1] as f32 * spread,
+            idx[2] as f32 * spread,
+        );
+        commands.spawn((
+            Mesh3d(meshes.add(build_mesh(&m))),
+            MeshMaterial3d(mat.clone()),
+            Transform::from_translation(offset + fan),
+            LoadedModel,
+        ));
+    }
+    let extent = (size[0].powi(2) + size[1].powi(2) + size[2].powi(2)).sqrt() + spread * 2.0;
+    for mut cam in &mut cams {
+        *cam = frame_camera(Vec3::new(0.0, 0.0, (size[2] / 2.0) + spread / 2.0), extent);
+    }
+    status(format!("{n} pieces - onions carried on the cut faces"));
+    info!("sliced: {n} pieces");
+}
+
+/// Rebuild the Solid from the stored bytes, move it into the plan's frame, slice with the
+/// stored cuts + connectors — display and geometry can't disagree because the SAME `rot`
+/// produced both.
+fn slice_current(stl_bytes: &[u8], plan: &Plan) -> anyhow::Result<Vec<([usize; 3], Solid)>> {
+    let rotated = Solid::from_stl_bytes(stl_bytes)?.transform(&plan.rot);
+    let spec = Slicing {
+        printer: None,
+        cut: plan
+            .cuts
+            .iter()
+            .map(|&(ax, at)| Cut {
+                axis: ax.to_string(),
+                at: Num::Float(at),
+            })
+            .collect(),
+        connector: plan.connectors.clone(),
+        orient: vec![],
+    };
+    slicing::slice_solid(&spec, &rotated)
+}
+
+/// Export: the full `fab make` pipeline (fit → plan → orient → pack → Bambu 3mf) from the stored
+/// bytes into memory, then a browser download / native file. Zero server-side outputs.
+fn run_export(
+    mut act: ResMut<Actions>,
+    part: Res<Part>,
+    bed: Res<Bed>,
+    mut labels: Query<&mut Text, With<StatusLabel>>,
+) {
+    if !act.export {
+        return;
+    }
+    act.export = false;
+    let mut status = |s: String| {
+        for mut t in &mut labels {
+            t.0 = s.clone();
+        }
+    };
+    if part.plan.is_none() {
+        status("nothing sliceable loaded".into());
+        return;
+    }
+    let out_name = format!(
+        "{}-plates.3mf",
+        part.name.strip_suffix(".stl").unwrap_or(&part.name)
+    );
+    let result = (|| -> anyhow::Result<(usize, usize, Vec<u8>)> {
+        let solid = Solid::from_stl_bytes(&part.stl)?;
+        let mut buf = std::io::Cursor::new(Vec::new());
+        let sum = auto::make_solid(solid, bed.0, &mut buf, GAP)?;
+        Ok((sum.pieces, sum.plates, buf.into_inner()))
+    })();
+    match result {
+        Ok((pieces, plates, bytes)) => match download_bytes(&out_name, &bytes) {
+            Ok(()) => {
+                status(format!("{out_name}: {pieces} pieces on {plates} plate(s)"));
+                info!("exported {out_name} ({} bytes)", bytes.len());
+            }
+            Err(e) => status(format!("download failed: {e:#}")),
+        },
+        Err(e) => {
+            status(format!("export failed: {e:#}"));
+            error!("export: {e:#}");
         }
     }
+}
+
+/// Hand bytes to the user: a Blob download in the browser, a file beside the cwd natively.
+#[cfg(target_arch = "wasm32")]
+fn download_bytes(name: &str, bytes: &[u8]) -> anyhow::Result<()> {
+    use wasm_bindgen::JsCast;
+    let err = |what: &str| anyhow::anyhow!("browser download: {what}");
+    let array = js_sys::Array::new();
+    array.push(&js_sys::Uint8Array::from(bytes));
+    let blob = web_sys::Blob::new_with_u8_array_sequence(&array).map_err(|_| err("blob"))?;
+    let url = web_sys::Url::create_object_url_with_blob(&blob).map_err(|_| err("url"))?;
+    let document = web_sys::window()
+        .and_then(|w| w.document())
+        .ok_or_else(|| err("document"))?;
+    let a: web_sys::HtmlAnchorElement = document
+        .create_element("a")
+        .map_err(|_| err("anchor"))?
+        .dyn_into()
+        .map_err(|_| err("anchor cast"))?;
+    a.set_href(&url);
+    a.set_download(name);
+    a.click();
+    web_sys::Url::revoke_object_url(&url).ok();
+    Ok(())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn download_bytes(name: &str, bytes: &[u8]) -> anyhow::Result<()> {
+    std::fs::write(name, bytes)?;
+    Ok(())
 }
 
 fn aabb(s: &stl::StlMesh) -> (Vec3, Vec3) {

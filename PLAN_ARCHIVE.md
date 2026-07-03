@@ -64,3 +64,72 @@
 - [x] 10.4 - Multi-object 3mf export from Manifold meshes
 - [x] 10.5 - Go/no-go writeup + scope Track C or park
 
+---
+
+## 2026-07-01
+
+## Phase 11 - Track C: in-process Manifold geometry kernel
+- [x] 11.1 - kernel module scaffold: manifold3d dep + typed Solid wrapper
+- [x] 11.2 - STL import: weld to a valid manifold Solid
+- [x] 11.3 - Export: Solid to binary STL + multi-object 3mf
+- [x] 11.4 - In-process slab slicer: piece by multi-index
+- [x] 11.5 - Slicer parity harness vs OpenSCAD
+- [x] 11.6 - Connector solids in Rust: onion + bolt clearance
+- [x] 11.7 - Apply connectors per piece, floater-free by construction
+- [x] 11.8 - Connector parity vs the scad path
+- [x] 11.9 - fab render/slice: in-process kernel path with OpenSCAD fallback
+- [x] 11.10 - GUI reactive DAG on the cached base mesh
+- [x] 11.11 - Corpus parity + latency validation; demote scad codegen; docs
+- [x] 11.12 - Port the print-orientation preview to the kernel
+
+---
+
+## 2026-07-01
+
+## Phase 12 - Bambu multi-plate export
+- [x] 12.1 - fab_scad::bambu writer — multi-plate project .3mf
+- [x] 12.2 - 2D bin-packer — oriented footprints to fewest bed plates
+- [x] 12.3 - export_plates orchestration — orient, seat, pack, place, write
+- [x] 12.4 - GUI "Export plates" action in the print view
+- [x] 12.5 - Round-trip test + Bambu Studio validation
+
+---
+
+## 2026-07-01
+
+## Phase 13 - Auto-slice & orient
+- [x] 13.1 - auto_orient: stability tie-break — largest face down when overhang allows
+- [x] 13.2 - auto_slice: bbox partition into bed-fit cells (equal division, overflowing axes only)
+- [x] 13.3 - GUI Auto-slice button — seed cuts from model bbox + printer bed
+
+---
+
+## 2026-07-02
+
+## Phase 14 - fab make: the one-shot auto pipeline
+- [x] 14.1 - fab_scad::auto — plan() chaining auto_slice + connector auto-place (lib extraction)
+- [x] 14.2 - GUI: auto-on-open for unsliced too-big models + Auto button on auto::plan
+- [x] 14.3 - CLI: fab make <model> — render, plan, slice, orient, export a Bambu project
+- [x] 14.4 - fab make end-to-end dogfood + docs
+- [x] 14.5 - Adaptive onion placement — a few alignment guides, spread + scaled to face
+
+---
+
+## 2026-07-02
+
+## Phase 15 - Publish to hotchkiss.io
+- [x] 15.1 - Manifest [publish] section + fab_scad::publish client (auth, slugify, upload, page CRUD, retry)
+- [x] 15.2 - publish orchestration: gather artifacts (cover, low-fn viewer STL, full STL, 3mf), compose markdown, idempotent create+update
+- [x] 15.3 - fab publish CLI command — API key (env/flag) + base URL, render artifacts, publish
+- [x] 15.4 - GUI Publish button
+- [x] 15.5 - Publish end-to-end dogfood against hotchkiss-io + docs
+
+---
+
+## 2026-07-02
+
+## Phase 16 - Bolt: bound through-depth + teardrop shaft
+- [x] 16.1 - Bolt: bound through-depth to the above-slab thickness (kernel slice_solid)
+- [x] 16.2 - Bolt: teardrop the shaft + counterbore for support-free horizontal holes (build-up aimed)
+- [x] 16.3 - Bolt: tests (through-depth spans slab, teardrop self-supports) + scad bolt_joint parity
+

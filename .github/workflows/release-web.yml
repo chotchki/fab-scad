@@ -1,0 +1,77 @@
+# The web channel (18.8): build the fab-web wasm bundle and attach it to a GitHub release —
+# the artifact hotchkiss-io's build.rs fetches (contract: docs/web-bundle.md).
+# Tag `web-vX.Y.Z` → prerelease with fab-web-X.Y.Z.tar.gz. Manual dispatch → CI artifact only.
+# Payload is currently the 18.5 probe (spikes/wasm-gui); the real slicer app replaces it at
+# build-out WITHOUT changing the contract or this pipeline's shape.
+# NOTE: no submodules on checkout — the wasm build needs none (and models/ is private).
+name: release-web
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ["web-v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  bundle:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: spikes/wasm-gui
+      - name: Install bundle tools (wasm-bindgen pinned to the lockfile, wasm-opt, brotli)
+        run: |
+          V=$(grep -A1 'name = "wasm-bindgen"' spikes/wasm-gui/Cargo.lock | grep version | head -1 | cut -d'"' -f2)
+          cargo install wasm-bindgen-cli --version "$V" --locked
+          sudo apt-get update && sudo apt-get install -y binaryen brotli
+      - name: Build the wasm app
+        run: cargo build --release --target wasm32-unknown-unknown
+        working-directory: spikes/wasm-gui
+      - name: Stage the bundle (web-bundle.md contract)
+        run: |
+          set -euo pipefail
+          case "$GITHUB_REF" in
+            refs/tags/web-v*) VERSION="${GITHUB_REF_NAME#web-v}" ;;
+            *) VERSION="dev-${GITHUB_SHA::7}" ;;
+          esac
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          STAGE=target/fab-web/stage && mkdir -p "$STAGE"
+          wasm-bindgen --target web --no-typescript --out-name fab_web --out-dir "$STAGE" \
+            spikes/wasm-gui/target/wasm32-unknown-unknown/release/wasm_gui_spike.wasm
+          wasm-opt -Oz -o "$STAGE/fab_web_bg.wasm.opt" "$STAGE/fab_web_bg.wasm"
+          mv "$STAGE/fab_web_bg.wasm.opt" "$STAGE/fab_web_bg.wasm"
+          brotli -q 11 -k "$STAGE/fab_web_bg.wasm"
+          gzip -9 -k "$STAGE/fab_web_bg.wasm"
+          cp packaging/web/index.reference.html "$STAGE/"
+          python3 - "$STAGE" "$VERSION" <<'EOF'
+          import hashlib, json, os, sys
+          stage, version = sys.argv[1], sys.argv[2]
+          sha = {f: hashlib.sha256(open(os.path.join(stage, f), 'rb').read()).hexdigest()
+                 for f in sorted(os.listdir(stage))}
+          json.dump({"version": version, "entry": "fab_web.js", "wasm": "fab_web_bg.wasm", "sha256": sha},
+                    open(os.path.join(stage, "manifest.json"), "w"), indent=1)
+          EOF
+          mkdir -p target/fab-web/out
+          tar -czf "target/fab-web/out/fab-web-${VERSION}.tar.gz" -C "$STAGE" .
+          ls -la target/fab-web/out/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: fab-web-${{ env.VERSION }}
+          path: target/fab-web/out/*.tar.gz
+          if-no-files-found: error
+      - name: Release (tags only)
+        if: startsWith(github.ref, 'refs/tags/web-v')
+        uses: softprops/action-gh-release@v2
+        with:
+          prerelease: true
+          files: target/fab-web/out/*.tar.gz
+          body: |
+            fab-web bundle — the wasm app hotchkiss-io bakes into its special page.
+            Contract: docs/web-bundle.md (ES-module glue + wasm + .br/.gz + manifest.json).
+            Payload: 18.5 probe app (placeholder until the slicer port lands).

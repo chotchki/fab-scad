@@ -1,0 +1,13 @@
+<!-- Reference loader for the fab-web bundle — CRIB, don't ship: the site's special page owns
+     the real document (headers, chrome, canvas sizing). The init().catch matters: winit exits
+     App::run via a control-flow JS exception that would otherwise read as a crash. -->
+<!doctype html>
+<meta charset="utf-8">
+<title>fab</title>
+<style>html,body{margin:0;height:100%}canvas{display:block}</style>
+<script type="module">
+  import init from './fab_web.js';
+  init().catch(e => {
+    if (!`${e}`.includes('Using exceptions for control flow')) console.error('INIT ERROR:', e);
+  });
+</script>

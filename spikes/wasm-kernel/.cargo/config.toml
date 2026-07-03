@@ -1,0 +1,7 @@
+# Spike-local: `cargo test` here runs the wasm through wasm-bindgen-test-runner
+# (browser via chromedriver when the test asks for it, Node otherwise).
+[build]
+target = "wasm32-unknown-unknown"
+
+[target.wasm32-unknown-unknown]
+runner = "wasm-bindgen-test-runner"

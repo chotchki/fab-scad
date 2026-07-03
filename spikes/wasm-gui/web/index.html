@@ -1,0 +1,19 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>wasm-gui-spike</title>
+  <style>html, body { margin: 0; background: #111; } canvas { outline: none; }</style>
+</head>
+<body>
+  <script type="module">
+    import init from './wasm_gui_spike.js';
+    // winit exits App::run via a control-flow JS exception — not an error, don't log it as one.
+    init().catch((e) => {
+      if (!`${e}`.includes('Using exceptions for control flow')) {
+        console.error('INIT ERROR:', e);
+      }
+    });
+  </script>
+</body>
+</html>

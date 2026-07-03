@@ -32,3 +32,7 @@ out/
 # macOS Finder metadata
 .DS_Store
 **/.DS_Store
+
+# wasm spike: generated bindgen output next to the committed loader page
+spikes/wasm-gui/web/*
+!spikes/wasm-gui/web/index.html

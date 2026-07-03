@@ -13,9 +13,15 @@ crate-type = ["cdylib", "rlib"]
 anyhow = "1"
 # The kernel WITHOUT native: booleans/slicing/plan in-process, no OpenSCAD, no reqwest.
 fab-scad = { path = "..", default-features = false, features = ["kernel"] }
-# Same version + features as gui/ so the workspace builds ONE bevy. Default features stay on
-# until A.6 (size trim) measures what the web build can drop.
-bevy = { version = "0.19", features = ["bevy_feathers", "bevy_picking", "mesh_picking"] }
+# A.6 trim: bevy defaults are [2d, 3d, ui, audio] — we render 3d + feathers ui only, so drop
+# the sprite pipeline + audio (the AudioContext-before-gesture console warning goes with it).
+bevy = { version = "0.19", default-features = false, features = [
+    "3d",
+    "ui",
+    "bevy_feathers",
+    "bevy_picking",
+    "mesh_picking",
+] }
 # File open on both targets: native dialog on desktop, <input type=file> on wasm.
 rfd = "0.17"
 

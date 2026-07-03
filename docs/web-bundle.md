@@ -32,6 +32,9 @@ asset is a single tar.gz the site build unpacks.
 - **The document must provide `<canvas id="fab-web">`** — the app binds to it (panics if
   missing) and `fit_canvas_to_parent` tracks the parent's size, so the page owns layout.
   `index.reference.html` shows the minimal working shape.
+- **Page chrome clearance:** the app's panel sits top-left inside the canvas; a page whose
+  chrome (back button etc.) overlays that corner declares its height once —
+  `<canvas id="fab-web" data-inset-top="44">` — and the panel starts below it. Default 44 px.
 
 - **Relative fetches only.** The glue resolves `fab_web_bg.wasm` off `import.meta.url`, so the
   bundle works under ANY mount path (`/apps/fab/...`). Nothing in the bundle assumes an origin.

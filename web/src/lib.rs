@@ -158,6 +158,26 @@ fn frame_camera(target: Vec3, extent: f32) -> Transform {
     Transform::from_translation(eye).looking_at(target, Vec3::Z)
 }
 
+/// Top inset for the panel: the hosting page's chrome (back button etc.) overlays our top-left,
+/// and the page knows its own chrome — it can declare the clearance on the canvas
+/// (`<canvas id="fab-web" data-inset-top="44">`). Default clears a typical button row on web;
+/// native has no page chrome.
+fn ui_top_inset() -> f32 {
+    #[cfg(target_arch = "wasm32")]
+    {
+        web_sys::window()
+            .and_then(|w| w.document())
+            .and_then(|d| d.get_element_by_id("fab-web"))
+            .and_then(|c| c.get_attribute("data-inset-top"))
+            .and_then(|v| v.parse::<f32>().ok())
+            .unwrap_or(44.0)
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        8.0
+    }
+}
+
 /// Feathers panel: title, Open STL (kicks off the async picker), status line.
 fn setup_ui(world: &mut World) {
     use bevy::feathers::{
@@ -167,10 +187,11 @@ fn setup_ui(world: &mut World) {
     };
     use bevy::ui_widgets::Activate;
 
+    let inset = ui_top_inset();
     let scene = bsn! {
         Node {
             position_type: PositionType::Absolute,
-            top: px(8),
+            top: px(inset),
             left: px(8),
             flex_direction: FlexDirection::Column,
             row_gap: px(6),

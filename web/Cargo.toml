@@ -20,5 +20,5 @@ rfd = "0.17"
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wasm-bindgen = "0.2"
 console_error_panic_hook = "0.1"
-# just Window+Location: read the ?demo query param
-web-sys = { version = "0.3", features = ["Window", "Location"] }
+# Window+Location: the ?demo query param; Document+Element: the canvas data-inset-top attribute
+web-sys = { version = "0.3", features = ["Window", "Location", "Document", "Element"] }

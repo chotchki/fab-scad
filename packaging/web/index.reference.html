@@ -8,7 +8,8 @@
 <meta charset="utf-8">
 <title>fab</title>
 <style>html,body{margin:0;height:100%}canvas{display:block;width:100%;height:100%}</style>
-<canvas id="fab-web"></canvas>
+<!-- data-inset-top: px of page chrome overlaying the canvas top-left (default 44) -->
+<canvas id="fab-web" data-inset-top="44"></canvas>
 <script type="module">
   import init from './fab_web.js';
   init().catch(e => {

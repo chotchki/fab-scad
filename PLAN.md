@@ -79,12 +79,12 @@ Driven by `claude-plan-bridge` (FORMATv2). Hand-authored; run
 - [x] 18.3 - Wasm: `native` feature seam — lib compiles on wasm32-unknown-unknown with openscad/publish/reqwest gated off (pure modules + STL bytes green)
 - [x] 18.4 - Wasm kernel gate (GO/NO-GO): manifold-csg `unstable-wasm-uu` — Solid boolean + slice_at_z under wasm-bindgen in a browser; npm-bridge fallback assessment if no
 - [x] 18.5 - Wasm GUI gate: fab-gui via bevy_cli on wasm — feathers render (bevy#22620: WebGL2 vs WebGPU), mesh_picking, rfd pick_file→bytes
-- [ ] 18.6 - Wasm hosting gate: hotchkiss-io special page serving the fab wasm bundle as a build-time artifact (full-page document, NOT an iframe) — COOP/COEP on the app document, precompressed bytes, wasm out of CompressionLayer; crossOriginIsolated proven
+- [x] 18.6 - Wasm hosting gate: hotchkiss-io special page serving the fab wasm bundle as a build-time artifact (full-page document, NOT an iframe) — COOP/COEP on the app document, precompressed bytes, wasm out of CompressionLayer; crossOriginIsolated proven
 - [x] 18.7 - Decision memo → SPEC.md: pick primary mode; web = standalone client-only auto-slicer, zero server-side outputs (decided 2026-07-03; STL-upload-first, openscad-wasm stretch); spawn the build-out phase
 - [x] 18.8 - fab-web bundle contract: GitHub-release artifact (tar.gz: ES-module glue + wasm + br/gz + manifest.json; tailwind-style pinned fetch) — contract doc + spike bundle handed to the 18.6 gate
 - [ ] 18.9 - crates.io channel: claim the free `fab-scad` name — fix package contents (exclude models/spikes/docs), `cargo publish --dry-run` clean, then publish 0.1.0 (cargo install = third distribution channel, source-build tradeoff documented)
 ## Phase A - fab-web build-out: the browser slicer
-- [ ] A.1 - fab-web crate (workspace member web/): canvas-bound app skeleton + STL upload→view (rfd pick_file → bytes → mesh, bed-seated, auto-framed camera); repoint dev.sh + release-web.yml payloads off the probe
+- [x] A.1 - fab-web crate (workspace member web/): canvas-bound app skeleton + STL upload→view (rfd pick_file → bytes → mesh, bed-seated, auto-framed camera); repoint dev.sh + release-web.yml payloads off the probe
 - [ ] A.2 - Slice in the browser: fab-scad kernel dep (kernel, no native) + rotate-to-fit + auto::plan on upload → cut planes + piece preview; CI needs LLVM 20+ & lld for the wasm kernel build (ubuntu-24.04 clang 18 too old)
 - [ ] A.3 - Connector editor subset: per-cut cross-section view, auto-placed onions visible, add/remove/resize — lift the desktop editor's hot path
 - [ ] A.4 - Export: pack → Bambu multi-plate 3mf via Cursor<Vec<u8>> seam → browser blob download (zero server-side outputs)

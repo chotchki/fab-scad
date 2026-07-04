@@ -1,7 +1,8 @@
 # SPEC: scad-rs — the OpenSCAD language in Rust over Manifold
 
-Round 1, 2026-07-04. Drafting live; `[OPEN]` marks questions we haven't settled. The workflow
-tool's spec moved to SPEC_workflow.md — it keeps working and its backlog waits in PLAN.md.
+Round 2, 2026-07-04 (round 1 + chotchki's inline comments absorbed as decisions). `[OPEN]`
+marks what's still unsettled. The workflow tool's spec moved to SPEC_workflow.md — it keeps
+working and its backlog waits in PLAN.md.
 
 ## Mission
 
@@ -54,24 +55,38 @@ escape, not community respect.
 .scad source ──parse──▶ AST ──eval──▶ CSG node tree ──lower──▶ kernel::Solid (Manifold)
                          │                │                       + Clipper2 (2D subsystem)
                   customizer walk   explicit stack,
-                  (params = AST)    caching per node
+                  (params = AST)    content-addressed cache
 ```
 
-- **Parser:** port of OpenSCAD's bison grammar (we're GPL — read it, translate it). Rust
-  recursive-descent or LALR via grammar-faithful translation. Lossless-enough AST to power
-  the customizer (param extraction with comments/annotations) and future tooling.
+- **Parser: winnow (DECIDED).** Hand-written combinator parser on winnow (nom's successor;
+  chotchki has deep nom history, winnow is where that lineage is going). The bison grammar
+  in src/core is the CONFORMANCE REFERENCE, not the implementation strategy — we generate
+  grammar-conformance tests from it rather than translating LALR mechanics. Winnow buys us
+  error quality + streaming + a customizer-friendly lossless-enough AST (params with
+  comments/annotations survive).
 - **Evaluator:** the hard 90%. Tree-walker, EXPLICIT STACK (no host recursion — the Safari
   class of failure becomes structurally impossible), lexical+dynamic scoping exactly as
   OpenSCAD does it ($-variables are dynamically scoped; `children()` is late-bound), value
   model with FAST PATHS: contiguous `Vec<f64>` for numeric lists (BOSL2 is 90% numeric list
   math — OpenSCAD's boxed-variant Values are the reason BOSL2 is slow there), interned
   strings, ranges as lazy triples. Undef-propagation semantics preserved bug-for-bug where
-  models depend on them. [OPEN] value NaN-boxing vs enum — measure before committing.
+  models depend on them. [OPEN] value NaN-boxing vs enum — benchmark before committing
+  (NaN-boxing also buys a proof burden; see Kani below).
+- **Caching is a first-class design input, not a retrofit.** OpenSCAD has visibly struggled
+  to bolt a good cache onto the Manifold backend from outside. We design for it from node
+  one: every CSG node gets a CONTENT HASH (subtree structure + resolved params + $-context
+  that reaches it), evaluation is pure node-in/geometry-out, and the cache is
+  hash → Manifold result — in-memory first, the on-disk tier drops in later because the keys
+  are already content-addressed. This is the same discipline as fab's 6.2 incremental
+  rebuild, pushed down to the language level. The DAG engine's per-node progress/cancel
+  hangs off the same node identity.
 - **Builtin geometry surface (deliberately small):** polyhedron, primitives, multmatrix,
   union/difference/intersection, hull, linear_extrude/rotate_extrude (2D via Clipper2 crate),
   offset, projection. `import()` = our existing STL/3MF readers. DEFERRED: text() (fonts —
-  the whole freetype/harfbuzz/fontconfig tree), minkowski (Manifold lacks it; OpenSCAD's
-  manifold-backend minkowski still calls CGAL — rare in our corpus), surface().
+  the whole freetype/harfbuzz/fontconfig tree), surface(), and minkowski — which Manifold
+  lacks and OpenSCAD's own manifold backend still farms to CGAL. Deferred = BLOW UP AND
+  COMPLAIN LOUDLY, never silently wrong; if corpus pressure ever demands minkowski, we do
+  our own implementation over Manifold hulls (decided direction, unscheduled).
 - **Module boundary:** scad-rs lives behind the SAME geomsg seam the workers use today — a
   `Render{source, params}` request. The official-wasm worker remains wired as a FALLBACK
   during cutover; per-model, whichever engine is trusted answers.
@@ -85,74 +100,119 @@ each independently shippable:
    Expected 10-50× on BOSL2's VNF-building workload before any cleverness. This alone likely
    makes keystroke-reactive rendering real for typical parts.
 2. **Pin-verified intrinsics.** The runtime recognizes pinned-BOSL2 functions by name and
-   swaps in native Rust (vnf_vertex_array, affine ops, path math on Clipper2). NumPy-vs-pure-
-   Python, for scad. The pin makes it SOUND: an intrinsic activates only after proving
-   equivalence against the userland original over the differential harness, re-proven at
-   every BOSL2 pin bump; failures fall back to interpretation. BOSL2 remains the source of
-   truth — intrinsics are theorem-checked shortcuts, not forks.
-3. **JIT, if rungs 1-2 leave anything on the table.** scad→wasm emission for hot monomorphic
+   swaps in native implementations. Two HARD constraints (decided):
+   - An intrinsic is PURE RUST or a MANIFOLD CALL — nothing else. No new native deps ride in
+     through the intrinsic door; the wasm build stays one clean module.
+   - **Benchmark data is captured and KEPT for every corpus run** — per-call timings at
+     BOSL2-function granularity. The point isn't just "what's hot": BOSL2 pays a permanent
+     tax working within stock OpenSCAD's limits (no mutation, no real arrays, userland VNF
+     math), so the WIN often lives at a HIGHER call level than the obvious leaf — e.g. one
+     native `skin()`/`attachable` path can beat perfectly-optimized leaves it would have
+     called. The timing corpus is what finds those grain boundaries; intrinsic selection is
+     data-driven, not vibes-driven.
+   The pin makes it SOUND: an intrinsic activates only after proving equivalence against the
+   userland original over the differential harness, re-proven at every BOSL2 pin bump;
+   failures fall back to interpretation. BOSL2 remains the source of truth — intrinsics are
+   theorem-checked shortcuts, not forks.
+3. **JIT — a real destination, not a vestige.** scad→wasm emission for hot monomorphic
    numeric functions (browser: emit bytes + WebAssembly.instantiate; native: cranelift).
-   Gated on MEASURED need — rung 1's constant factor plus rung 2's algorithmic swaps may
-   saturate. [OPEN] don't design this until the profiler says so.
+   Still gated on measured need for SHIPPING it — but this rung is also deliberately a
+   learning vehicle for the coming feophant work, so design notes and spikes here are
+   first-class even before the profiler demands them.
 
 ## Oracle + corpus
 
 The oracle is stock OpenSCAD running stock BOSL2 — natively via the CLI we've always wrapped
-(CI installs it today), no custom build required. Corpus, in escalating order:
+(CI installs it today), no custom build required. **Use OpenSCAD's deterministic/predictable
+output mode in the harness** (sorted/reproducible export ordering) — it collapses a chunk of
+the mesh-comparison problem at the source. (Exact flag + coverage to verify in G.3; the
+float-jitter problem remains real regardless.)
+
+Corpus, in escalating order:
 1. OpenSCAD's own test suite (GPL, ours to use directly now).
 2. BOSL2's test suite (tests/ in the pinned submodule).
 3. Our models/ tree (~60 real projects — corner_brace.scad is the Safari-killer poster child).
 4. Generated programs (differential fuzzing, below).
 
-## Testing + verification (the section to work through)
+## Testing + verification
 
 Layered, cheapest-first; each layer catches what the previous can't:
 
+- **Lints:** clippy at -D warnings from day one (already house rule), and the lint set
+  RATCHETS — we keep tightening (pedantic picks, unsafe_op_in_unsafe_fn, missing_docs on
+  public surface) as the codebase matures. Loosening is a reviewed decision, never drift.
+- **Unit tests:** table stakes, written with the code (house rule).
+- **Interface tests at the Manifold boundary — soundness split (adjusted from the miri
+  comment):** miri cannot execute foreign code, so it can't watch real FFI calls. The goal
+  stands; the mechanism splits: (a) the geometry backend sits behind a trait; interface
+  tests run against a PURE-RUST MOCK under MIRI, which checks all our unsafe/ownership
+  handling up to the boundary; (b) the SAME interface tests re-run against real Manifold
+  under AddressSanitizer/LeakSanitizer in a CI job, which is the tool class that actually
+  sees across FFI. Between miri-on-mock and ASAN-on-real, the boundary is covered from both
+  sides.
 - **Differential testing (the workhorse).** Same source → scad-rs and oracle → compare.
-  Comparison is the subtle part [OPEN — discuss]: meshes aren't byte-comparable (triangulation
-  order, float jitter). Candidate metrics, strictest-first: exact vertex-multiset match after
+  Mesh equality is subtle (triangulation order, float jitter — even with deterministic
+  output mode). Candidate metrics, strictest-first: exact vertex-multiset match after
   canonical sort+quantize; volume + surface area + Euler characteristic within epsilon;
-  boolean-difference residual volume ≈ 0 (compute `A-B` and `B-A` in Manifold — the honest
-  "same solid" test and we already own the machinery). Echo/console output compares EXACTLY
-  (BOSL2 asserts print — string equality is free fidelity signal).
+  boolean-difference residual volume ≈ 0 (`A−B` and `B−A` in Manifold — the honest "same
+  solid" test, machinery we already own). Echo/console output compares EXACTLY (BOSL2
+  asserts print — string equality is free fidelity signal).
+  **The G.3 MVP is exactly this question made small (decided):** low-poly sphere first —
+  what is the STRICTEST comparison that passes `sphere($fn=8)` against the oracle? Then
+  scale $fn up and watch which tiers survive. The metric GATE is chosen empirically from
+  that experiment, per model class (polyhedral = stricter tier, curved = residual tier).
 - **Property-based (proptest).** Parser: print(parse(s)) roundtrips; parse never panics.
   Evaluator invariants: scope push/pop balance, explicit-stack depth == semantic depth,
   numeric-list fast path == boxed slow path on random inputs (the fast paths get tested
   AGAINST OUR OWN slow path — an internal differential).
-- **Differential fuzzing.** Generate well-typed-ish scad programs (grammar-directed
-  generation, not byte fuzzing), run both engines, diff. This is where evaluator semantics
-  bugs that no hand-written test imagines get caught. cargo-fuzz for the parser proper
-  (bytes → no panic, no hang).
+- **Fuzzing — we live and die here (decided), so it's INFRASTRUCTURE, not a chore:**
+  grammar-directed program generation feeding the differential harness (evaluator semantics
+  bugs no hand-written test imagines), cargo-fuzz on the parser (bytes → no panic, no hang),
+  corpora persisted + minimized in-repo, a scheduled CI fuzz job from the first parser
+  commit, and a trophy log (every fuzzer-found bug becomes a named regression test).
 - **Intrinsic equivalence protocol (rung 2's gate).** Per intrinsic: proptest inputs drawn
   from the function's real domain + every call site's argument shapes observed in corpus
   runs; equivalence vs the interpreted BOSL2 original at the CURRENT pin; CI re-runs the
   whole protocol on any pin bump; failure = intrinsic silently disabled + report, never
-  wrong geometry.
-- **Proof-grade spots (Kani or similar), scoped tight [OPEN — how far do we want to go?].**
-  Candidates where a proof buys real safety: value-representation invariants (if we NaN-box),
-  the explicit-stack machine's push/pop discipline (no underflow/type confusion), range
-  iteration termination, the quantizer used by mesh comparison. NOT candidates: whole-
-  evaluator correctness (that's what the differential net is for — formal spec of OpenSCAD
-  semantics doesn't exist and writing one IS the reimplementation).
-- **[OPEN] executable semantics as documentation?** Every semantics decision we make
-  (scoping corner, undef case, $fn resolution order) lands as a named test citing the
-  oracle behavior + the src/core line it was ported from. The test suite BECOMES the
-  OpenSCAD language spec that upstream never wrote. Decide: do we structure these as a
-  separate `semantics/` corpus with provenance annotations from day one?
+  wrong geometry. **The matrix is PUBLISHED with every test run (decided):** per-intrinsic
+  status (active/disabled/why) + equivalence stats + the benchmark deltas, as a CI artifact
+  from day one — trend line over time, not a point-in-time claim.
+- **Proof-grade spots (Kani), scoped to LOW-LEVEL components (decided):** the explicit-stack
+  machine's push/pop discipline (no underflow, no type confusion), value-representation
+  invariants (mandatory if we NaN-box), range-iteration termination, the mesh-comparison
+  quantizer. NOT whole-evaluator correctness — that's the differential net's job; a formal
+  OpenSCAD semantics doesn't exist and writing one IS the reimplementation.
+- **semantics/ — a SEGMENTED executable-spec corpus (decided):** every ported semantics
+  decision (scoping corner, undef case, $fn resolution order) lands as a named test in its
+  own `semantics/` tree, annotated with the oracle-observed behavior AND the src/core
+  provenance it was translated from. The suite becomes the OpenSCAD language spec upstream
+  never wrote — and the most upstreamable artifact this project can produce, in exactly the
+  license they can take.
 
 ## Non-goals (round 1)
 
-- text(), surface(), minkowski — deferred, not refused; corpus determines urgency.
+- text(), surface(), minkowski — deferred loudly, not refused; corpus determines urgency
+  (minkowski direction if demanded: our own, over Manifold hulls).
 - The preview/CSG-cache/OpenCSG rendering path — we render meshes, full stop.
 - Language extensions. scad-rs runs OpenSCAD, it doesn't improve it. (Upstreamability cuts
   both ways: divergence would kill it.)
 
-## Open questions (gathered)
+## Open questions (remaining)
 
-1. Mesh-equality metric for the differential harness — which tier is the GATE?
-2. Value representation: NaN-box vs enum-with-fast-Vec — benchmark first?
-3. Proof scope: Kani on the stack machine + value invariants, or skip proofs round 1?
-4. semantics/ corpus with src/core provenance annotations from day one?
-5. Grammar: hand recursive-descent (better errors, customizer-friendly) vs LALR-faithful
-   translation of the bison file (fidelity by construction)?
-6. Where does scad-rs live: in-tree module (fab_scad::lang) vs sibling crate in the workspace?
+1. ~~Mesh-equality metric~~ → RESOLVED as G.3's empirical MVP: strictest-passing tier on
+   low-poly sphere, scaled up, gate chosen per model class.
+2. Value representation: NaN-box vs enum-with-fast-Vec — benchmark first (leaning enum:
+   simpler proofs, no tag-smuggling; NaN-box only if the benchmark screams).
+3. ~~Proof scope~~ → RESOLVED: Kani on low-level components only (stack machine, value
+   invariants, quantizer, range termination).
+4. ~~semantics/ corpus~~ → RESOLVED: yes, segmented, provenance-annotated, from day one.
+5. ~~Grammar strategy~~ → RESOLVED: winnow hand-parser; bison grammar as conformance
+   reference generating tests.
+6. Where does scad-rs live: in-tree module (fab_scad::lang) vs sibling crate in the
+   workspace (leaning `lang/` sibling, same pattern as geom/ — keeps kernel-only consumers
+   light and gives the fuzzer a clean target).
+7. NEW — deterministic output mode: confirm the exact OpenSCAD flag + what it does/doesn't
+   sort (G.3 verifies empirically).
+8. NEW — timing-capture design for the benchmark corpus: per-BOSL2-function wall times need
+   HOOKS in the evaluator (call-site instrumentation) — decide sampling vs full-trace before
+   rung 1 lands so the data exists when rung 2 wants it.

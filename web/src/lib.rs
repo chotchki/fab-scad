@@ -79,10 +79,14 @@ pub fn run() {
         )
         .init_resource::<EditMode>()
         .init_resource::<DragGuard>()
+        .init_resource::<RenderTask>()
+        .init_resource::<Busy>()
         .add_systems(
             Update,
             (
                 poll_picked_file,
+                poll_render_task,
+                busy_pulse,
                 run_slice,
                 run_export,
                 run_edit_actions,
@@ -200,6 +204,9 @@ struct Actions {
     remove: bool,
     grow: bool,
     shrink: bool,
+    /// Countdown frames before the synchronous work runs — the busy label paints first.
+    slice_armed: Option<u8>,
+    export_armed: Option<u8>,
 }
 
 /// A.3: the connector-editor mode. `Cut` = editing one cut's join face IN PLACE — the section
@@ -258,6 +265,26 @@ type PickResult = Option<Result<(String, Vec<u8>), String>>;
 #[derive(Resource, Default)]
 struct PickTask(Option<Task<PickResult>>);
 
+/// The .scad → STL hop, split from PickTask so the panel can say WHOSE render is running.
+#[derive(Resource, Default)]
+struct RenderTask(Option<Task<Result<(String, Vec<u8>), String>>>);
+
+/// The loading pulse (the desktop standard, ported): while set, the status line animates
+/// `label |/-\`. Async work pulses live; synchronous work (slice/export) arms itself two
+/// frames ahead so the label PAINTS before the main thread blocks — the pulse freezes, the
+/// words don't lie.
+#[derive(Resource, Default)]
+struct Busy(Option<String>);
+
+fn busy_pulse(busy: Res<Busy>, time: Res<Time>, mut labels: Query<&mut Text, With<StatusLabel>>) {
+    let Some(label) = &busy.0 else { return };
+    const FRAMES: [char; 4] = ['|', '/', '-', '\\'];
+    let c = FRAMES[(time.elapsed_secs() * 6.0) as usize % 4];
+    for mut t in &mut labels {
+        t.0 = format!("{label} {c}");
+    }
+}
+
 /// `?demo` (web) / `--demo` (native): push the embedded sample through the EXACT upload path.
 fn demo_requested() -> bool {
     #[cfg(target_arch = "wasm32")]
@@ -288,31 +315,6 @@ fn bed_override() -> Option<f64> {
         .collect::<String>()
         .parse()
         .ok()
-}
-
-/// .scad sources take one extra hop — the OpenSCAD worker renders them to STL bytes — then
-/// join the normal pipeline (present_model sees STL bytes either way, the name stays honest).
-/// Native fab-web has no worker; the desktop GUI is the native .scad front-end. Failures come
-/// back as `Err(text)` for the status line — silent failure already bit once.
-async fn maybe_render_scad(name: String, bytes: Vec<u8>) -> Result<(String, Vec<u8>), String> {
-    if !name.to_ascii_lowercase().ends_with(".scad") {
-        return Ok((name, bytes));
-    }
-    #[cfg(target_arch = "wasm32")]
-    {
-        let source =
-            String::from_utf8(bytes).map_err(|e| format!("{name}: not utf-8 scad ({e})"))?;
-        scad_worker::render(source)
-            .await
-            .map(|stl| (name.clone(), stl))
-            .map_err(|e| format!("{name}: {e:#}"))
-    }
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        Err(format!(
-            "{name}: .scad rendering is web-only here (use fab-gui natively)"
-        ))
-    }
 }
 
 /// Where the bundle's members live, as the PAGE declares it: `<canvas id="fab-web"
@@ -352,14 +354,17 @@ fn param(key: &str) -> Option<String> {
 /// `?stl=<same-origin url>` (web) / `--stl=<path>` (native): load without the picker — the
 /// deep-link half of showcase→slicer (a project page hands its STL straight in), and the perf
 /// harness's front door. Seeds [`PickTask`], so it IS the upload path from there on.
-fn seed_source_request(mut task: ResMut<PickTask>) {
+fn seed_source_request(mut task: ResMut<PickTask>, mut busy: ResMut<Busy>) {
+    #[cfg(not(target_arch = "wasm32"))]
+    let _ = &mut busy;
     #[cfg(target_arch = "wasm32")]
     if let Some(url) = param("stl") {
         info!("seeding from ?stl={url}");
+        busy.0 = Some(format!("fetching {url}"));
         task.0 = Some(AsyncComputeTaskPool::get().spawn(async move {
             let name = url.rsplit('/').next().unwrap_or(&url).to_string();
             match fetch_bytes(&url).await {
-                Ok(bytes) => Some(maybe_render_scad(name, bytes).await),
+                Ok(bytes) => Some(Ok((name, bytes))),
                 Err(e) => Some(Err(format!("fetching {url}: {e:#}"))),
             }
         }));
@@ -592,7 +597,7 @@ fn setup_ui(world: &mut World) {
                             .await?;
                         let name = file.file_name();
                         let bytes = file.read().await;
-                        Some(maybe_render_scad(name, bytes).await)
+                        Some(Ok((name, bytes)))
                     }));
                 })
             ),
@@ -630,6 +635,8 @@ fn setup_ui(world: &mut World) {
 #[allow(clippy::too_many_arguments)] // a system-params relay, not an API
 fn poll_picked_file(
     mut task: ResMut<PickTask>,
+    mut render: ResMut<RenderTask>,
+    mut busy: ResMut<Busy>,
     mut mode: ResMut<EditMode>,
     bed: Res<Bed>,
     part: ResMut<Part>,
@@ -645,6 +652,7 @@ fn poll_picked_file(
         return;
     };
     task.0 = None;
+    busy.0 = None;
     let (name, bytes) = match done {
         None => return, // cancelled
         Some(Err(e)) => {
@@ -656,9 +664,70 @@ fn poll_picked_file(
         }
         Some(Ok(nb)) => nb,
     };
+    if name.to_ascii_lowercase().ends_with(".scad") {
+        #[cfg(target_arch = "wasm32")]
+        {
+            busy.0 = Some(format!("rendering {name} (OpenSCAD)"));
+            let source = match String::from_utf8(bytes) {
+                Ok(s) => s,
+                Err(e) => {
+                    busy.0 = None;
+                    for mut t in &mut labels {
+                        t.0 = format!("{name}: not utf-8 scad ({e})");
+                    }
+                    return;
+                }
+            };
+            render.0 = Some(AsyncComputeTaskPool::get().spawn(async move {
+                scad_worker::render(source)
+                    .await
+                    .map(|stl| (name.clone(), stl))
+                    .map_err(|e| format!("{name}: {e:#}"))
+            }));
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        for mut t in &mut labels {
+            t.0 = format!("{name}: .scad rendering is web-only here (use fab-gui natively)");
+        }
+        return;
+    }
     present_model(
         &name, &bytes, &bed, part, &mut mode, commands, meshes, mats, existing, cams, labels,
     );
+}
+
+/// Drain the OpenSCAD render hop: STL bytes join the normal pipeline, errors hit the panel.
+#[allow(clippy::too_many_arguments)] // a system-params relay, not an API
+fn poll_render_task(
+    mut render: ResMut<RenderTask>,
+    mut busy: ResMut<Busy>,
+    mut mode: ResMut<EditMode>,
+    bed: Res<Bed>,
+    part: ResMut<Part>,
+    commands: Commands,
+    meshes: ResMut<Assets<Mesh>>,
+    mats: ResMut<Assets<StandardMaterial>>,
+    existing: Query<Entity, Or<(With<LoadedModel>, With<CutPlane>)>>,
+    cams: Query<(&mut Transform, &mut Orbit), With<Camera3d>>,
+    mut labels: Query<&mut Text, With<StatusLabel>>,
+) {
+    let Some(t) = render.0.as_mut() else { return };
+    let Some(done) = block_on(future::poll_once(t)) else {
+        return;
+    };
+    render.0 = None;
+    busy.0 = None;
+    match done {
+        Ok((name, bytes)) => present_model(
+            &name, &bytes, &bed, part, &mut mode, commands, meshes, mats, existing, cams, labels,
+        ),
+        Err(e) => {
+            error!("{e}");
+            for mut t in &mut labels {
+                t.0 = e.clone();
+            }
+        }
+    }
 }
 
 /// The one load path: bytes → kernel plan (rotate-to-fit + auto cuts/onions) → display the model
@@ -997,6 +1066,7 @@ fn on_cut_plane_click(
 /// (pegs proud on the lower piece, sockets carved from the upper).
 fn run_slice(
     mut act: ResMut<Actions>,
+    mut busy: ResMut<Busy>,
     mut mode: ResMut<EditMode>,
     part: Res<Part>,
     mut commands: Commands,
@@ -1006,10 +1076,25 @@ fn run_slice(
     mut cams: Query<(&mut Transform, &mut Orbit), With<Camera3d>>,
     mut labels: Query<&mut Text, With<StatusLabel>>,
 ) {
-    if !act.slice {
+    if act.slice {
+        act.slice = false;
+        if part.plan.is_some() {
+            busy.0 = Some("slicing".into());
+            act.slice_armed = Some(2); // let the label paint before the main thread blocks
+        } else {
+            for mut t in &mut labels {
+                t.0 = "nothing sliceable loaded".into();
+            }
+        }
         return;
     }
-    act.slice = false;
+    let Some(n) = act.slice_armed else { return };
+    if n > 0 {
+        act.slice_armed = Some(n - 1);
+        return;
+    }
+    act.slice_armed = None;
+    busy.0 = None;
     *mode = EditMode::Scene;
     let mut status = |s: String| {
         for mut t in &mut labels {
@@ -1113,23 +1198,35 @@ fn run_slice(
 /// bytes into memory, then a browser download / native file. Zero server-side outputs.
 fn run_export(
     mut act: ResMut<Actions>,
+    mut busy: ResMut<Busy>,
     part: Res<Part>,
     bed: Res<Bed>,
     mut labels: Query<&mut Text, With<StatusLabel>>,
 ) {
-    if !act.export {
+    if act.export {
+        act.export = false;
+        if part.plan.is_some() {
+            busy.0 = Some("packing plates".into());
+            act.export_armed = Some(2); // let the label paint before the main thread blocks
+        } else {
+            for mut t in &mut labels {
+                t.0 = "nothing sliceable loaded".into();
+            }
+        }
         return;
     }
-    act.export = false;
+    let Some(n) = act.export_armed else { return };
+    if n > 0 {
+        act.export_armed = Some(n - 1);
+        return;
+    }
+    act.export_armed = None;
+    busy.0 = None;
     let mut status = |s: String| {
         for mut t in &mut labels {
             t.0 = s.clone();
         }
     };
-    if part.plan.is_none() {
-        status("nothing sliceable loaded".into());
-        return;
-    }
     let stem = part
         .name
         .strip_suffix(".stl")

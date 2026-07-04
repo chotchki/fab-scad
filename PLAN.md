@@ -83,6 +83,8 @@ Driven by `claude-plan-bridge` (FORMATv2). Hand-authored; run
 - [x] 18.7 - Decision memo → SPEC.md: pick primary mode; web = standalone client-only auto-slicer, zero server-side outputs (decided 2026-07-03; STL-upload-first, openscad-wasm stretch); spawn the build-out phase
 - [x] 18.8 - fab-web bundle contract: GitHub-release artifact (tar.gz: ES-module glue + wasm + br/gz + manifest.json; tailwind-style pinned fetch) — contract doc + spike bundle handed to the 18.6 gate
 - [ ] 18.9 - crates.io channel: claim the free `fab-scad` name — fix package contents (exclude models/spikes/docs), `cargo publish --dry-run` clean, then publish 0.1.0 (cargo install = third distribution channel, source-build tradeoff documented)
+## Phase C - fab-web beta feedback
+- [ ] C.1 - Busy pulse + staged sync work: animated "rendering {name} (OpenSCAD)" while the worker runs; "slicing…"/"packing…" labels armed 2 frames ahead so they PAINT before the main-thread block; all completions clear to a real status (the desktop loading-pulse standard, ported)
 
 ## Backlog (not yet phased)
 

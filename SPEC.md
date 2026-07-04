@@ -243,11 +243,12 @@ Layered, cheapest-first; each layer catches what the previous can't:
 4. ~~semantics/ corpus~~ → RESOLVED: yes, segmented, provenance-annotated, from day one.
 5. ~~Grammar strategy~~ → RESOLVED: winnow hand-parser; bison grammar as conformance
    reference generating tests.
-6. Where does scad-rs live: in-tree module (fab_scad::lang) vs sibling crate in the
-   workspace (leaning `lang/` sibling, same pattern as geom/ — keeps kernel-only consumers
-   light and gives the fuzzer a clean target).
-7. NEW — deterministic output mode: confirm the exact OpenSCAD flag + what it does/doesn't
-   sort (G.3 verifies empirically).
-8. NEW — timing-capture design for the benchmark corpus: per-BOSL2-function wall times need
-   HOOKS in the evaluator (call-site instrumentation) — decide sampling vs full-trace before
-   rung 1 lands so the data exists when rung 2 wants it.
+6. ~~Crate location~~ → RESOLVED: `lang/` workspace sibling (geom/ pattern) — light
+   kernel-only consumers, clean fuzz target.
+7. Deterministic output mode: confirm the exact OpenSCAD flag + what it does/doesn't sort —
+   NEEDS TESTING, owned by G.3's harness work.
+8. ~~Timing capture~~ → RESOLVED: FULL TRACE via the `tracing` crate, treated exactly like
+   logging — spans on the evaluator's function-call path (name = scad function), a custom
+   aggregating layer turns spans into the per-call benchmark corpus, and release builds
+   compile it out entirely (`release_max_level_off` / feature gate). Dual use for free:
+   the same spans ARE the evaluator's structured debugging story.

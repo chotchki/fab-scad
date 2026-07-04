@@ -101,14 +101,25 @@ jobs:
           cp packaging/web/index.reference.html "$STAGE/index.html"
           (cd "$STAGE" && python3 -m http.server 8899 &>/dev/null &)
           sleep 1
+          # REAL time, not --virtual-time-budget: since C.2 the demo plans through the
+          # fab-geom worker, and virtual time races real worker threads (the A-phase lesson,
+          # relearned the hard way when this gate broke on 0.11.0). Chrome stays up; we poll.
           google-chrome --headless=new --no-sandbox --enable-logging=stderr \
-            --virtual-time-budget=35000 --window-size=1000,700 \
-            --screenshot=/tmp/boot-gate.png "http://127.0.0.1:8899/index.html?demo&bed=40" 2> /tmp/console.log || true
+            --window-size=1000,700 \
+            "http://127.0.0.1:8899/index.html?demo&bed=40" 2> /tmp/console.log &
+          CHROME=$!
+          for i in $(seq 1 30); do
+            sleep 2
+            grep -qE "auto-plan: [1-9]" /tmp/console.log && break
+            grep -qE "RuntimeError|panicked|could not grow" /tmp/console.log && break
+          done
+          kill $CHROME 2>/dev/null || true
           if grep -qE "RuntimeError|panicked|could not grow" /tmp/console.log; then
             echo "::error::bundle failed to boot"; grep -E "RuntimeError|panicked|could not grow" /tmp/console.log | head -5; exit 1
           fi
           grep -q "loaded demo.stl" /tmp/console.log || { echo "::error::demo model never loaded"; tail -20 /tmp/console.log; exit 1; }
-          # The KERNEL gate: the 45mm demo on a 40mm bed must produce a real auto-plan in-browser.
+          # The KERNEL gate: the 45mm demo on a 40mm bed must produce a real auto-plan in-browser
+          # (through the geometry WORKER — this line proves the whole geom/ chain).
           grep -qE "auto-plan: [1-9]" /tmp/console.log || { echo "::error::kernel never planned"; tail -20 /tmp/console.log; exit 1; }
           echo "boot gate: OK (bundle boots + kernel plans)"
       - uses: actions/upload-artifact@v4

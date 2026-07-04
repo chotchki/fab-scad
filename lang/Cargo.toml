@@ -1,0 +1,60 @@
+[package]
+name = "fab-lang"
+version = "0.1.0"
+edition = "2024"
+description = "scad-rs: an OpenSCAD-language front end in Rust, feeding the Manifold kernel"
+license = "GPL-2.0-or-later"
+
+[lib]
+name = "fab_lang"
+path = "src/lib.rs"
+
+[features]
+# `trace` un-gates parser + evaluator observability for debugging. OFF by default so it costs
+# nothing shipped: winnow's trace() is a no-op without `winnow/debug` (wired in below), and the
+# evaluator's tracing spans compile out in release when the linking binary sets `tracing`'s
+# `release_max_level_off`. Same compile-out-like-a-logger doctrine on both sides.
+default = []
+trace = ["winnow/debug"]
+
+[dependencies]
+# The parser-combinator engine (hand-written lexer + parser). Latest major; winnow 1.0.x is
+# already in the workspace tree via toml_edit, and toml/toml_edit are native-only so this adds
+# no wasm bloat. The `debug` feature (parser trace tree) rides the crate `trace` feature above.
+winnow = "1"
+# Typed public errors. Already in the workspace lock at 1.x, so this adds nothing to the graph.
+# The PARSER's errors stay winnow-native (SPEC); this is only the crate's outer boundary.
+thiserror = "1"
+# Evaluator/parse observability, treated exactly like a logger: the macros live here, the level
+# and subscriber are the linking binary's call. See the crate docs for the compile-out story.
+tracing = "0.1"
+
+[lints.rust]
+# The ratchet (SPEC: the lint set only ever tightens). Public surface must be documented.
+missing_docs = "warn"
+# no-unsafe across the whole fab-lang tree. The unsafe lives behind the kernel FFI boundary in
+# fab-scad; the language crate is pure safe Rust. `forbid` (not `deny`) = no `#[allow]` escape
+# hatch anywhere, ever. Subsumes unsafe_op_in_unsafe_fn — you can't write an `unsafe fn` at all.
+unsafe_code = "forbid"
+
+[lints.clippy]
+# pedantic as the baseline, from the first commit. `priority = -1` lets a specific lint be
+# downgraded later without dropping the whole group — a reviewed decision each time, per SPEC.
+pedantic = { level = "warn", priority = -1 }
+# Every #[allow] must carry `reason = "…"` — loosening a lint is a REVIEWED decision, never
+# silent drift (SPEC). The enforcement arm of the determinism/no-panic bans in clippy.toml:
+# you may escape a ban, but only by writing down WHY. (From chotchki's verification methodology.)
+allow_attributes_without_reason = "warn"
+# no-panic / no-unwrap doctrine. A language runtime chewing on untrusted .scad must have NO
+# reachable panic — the fuzz doctrine is "bytes -> no panic, no hang", and every failure travels
+# through the typed Error, never a panic!/unwrap/expect. Tests are exempted in clippy.toml.
+# (indexing_slicing + arithmetic_side_effects are the NEXT ratchet — held back for now; they
+# fight the geometry/math code and deserve a deliberate pass, not a drive-by flip.)
+unwrap_used = "warn"
+expect_used = "warn"
+panic = "warn"
+unimplemented = "warn"
+todo = "warn"
+unreachable = "warn"
+exit = "warn"
+panic_in_result_fn = "warn"

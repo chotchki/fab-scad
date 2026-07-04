@@ -1,0 +1,35 @@
+//! The crate's public error type.
+//!
+//! Three failure stages — parse, evaluate, lower — plus a LOUD "not yet implemented" for
+//! deferred constructs and tracer-bullet stubs (SPEC: deferred features blow up, never wrong
+//! silently). `#[non_exhaustive]` because the payloads gain structure as phases land: the `Parse`
+//! variant will carry a caret-rendered winnow diagnostic (G.3.3), not a bespoke error tree — the
+//! parser stays winnow-native.
+
+use thiserror::Error;
+
+/// The crate result alias.
+pub type Result<T> = std::result::Result<T, Error>;
+
+/// A failure somewhere in the parse → evaluate → lower pipeline.
+#[derive(Debug, Error)]
+#[non_exhaustive]
+pub enum Error {
+    /// Source failed to parse. Payload is a human-rendered diagnostic (a plain message until
+    /// G.3.3 wires winnow's context stack + spans into caret output).
+    #[error("parse error:\n{0}")]
+    Parse(String),
+
+    /// A well-formed program failed at evaluation time (arity, undef misuse, `assert`, …).
+    #[error("evaluation error: {0}")]
+    Eval(String),
+
+    /// A CSG node could not be lowered to a `kernel::Solid`.
+    #[error("geometry error: {0}")]
+    Lower(String),
+
+    /// A deferred construct or an unbuilt pipeline stage was reached — fail LOUD, never silently
+    /// wrong (SPEC deferral doctrine; `text()`/`minkowski()`/`surface()` land here).
+    #[error("not yet implemented: {0}")]
+    Unimplemented(&'static str),
+}

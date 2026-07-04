@@ -1,0 +1,3 @@
+module m() {
+  for (i = [0:$fn]) sphere(r = i * .5e-3);
+}

@@ -13,8 +13,23 @@ jobs:
           submodules: recursive
       - uses: dtolnay/rust-toolchain@stable
         with:
-          components: clippy, rustfmt
+          components: clippy, rustfmt, llvm-tools-preview
       - run: cargo fmt --all -- --check
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo build --verbose
       - run: cargo test --verbose
+      # scad-rs (fab-lang) lane. The language crate is NOT a workspace default member, so the
+      # steps above (which resolve to fab-scad) never touch it — it needs its own -p steps. Kept
+      # separate on purpose: fab-lang carries the pedantic + missing_docs ratchet the older crates
+      # don't, so its lint gate can't ride the shared clippy run. fmt --all above already covers it.
+      - run: cargo clippy -p fab-lang --all-targets --all-features -- -D warnings
+      - run: cargo test -p fab-lang --verbose
+      # Parser/lexer coverage gate: 100% LINE + FUNCTION coverage. A DELIBERATE exception scoped to
+      # the language crate (chotchki) — NOT a blanket workspace policy; lexers/parsers earn it because
+      # an unexercised branch there is a silent mis-tokenization. Region coverage is intentionally NOT
+      # gated: infallible-in-context `?` error arms and test-side matches!/assert failure arms are
+      # structurally unreachable, so 100% regions would ban idiomatic `?`/`matches!`.
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov
+      - run: cargo llvm-cov -p fab-lang --fail-under-lines 100 --fail-under-functions 100

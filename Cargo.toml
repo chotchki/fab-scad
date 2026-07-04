@@ -19,7 +19,7 @@ path = "src/main.rs"
 required-features = ["native"]
 
 [workspace]
-members = ["geom", "gui", "web"]
+members = ["geom", "gui", "lang", "web"]
 
 [features]
 # The in-process Manifold geometry kernel (Track C). Default-on so the normal build + tests

@@ -187,6 +187,13 @@ Layered, cheapest-first; each layer catches what the previous can't:
   RATCHETS — we keep tightening (pedantic picks, unsafe_op_in_unsafe_fn, missing_docs on
   public surface) as the codebase matures. Loosening is a reviewed decision, never drift.
 - **Unit tests:** table stakes, written with the code (house rule).
+- **Coverage — 100%, but ONLY for the parser/lexer (deliberate exception, not a blanket rule):**
+  the `fab-lang` CI lane gates `cargo llvm-cov --fail-under-lines 100 --fail-under-functions 100`. In
+  a tokenizer an unexercised branch is a silent mis-tokenization, so the gap IS the bug — worth the
+  friction here, nowhere else. LINE + FUNCTION only; region is NOT gated (infallible-in-context `?`
+  error arms and test-side `matches!`/`assert` failure arms are structurally unreachable, so 100%
+  regions would outlaw idiomatic `?`/`matches!`). Defensive branches get covered by testing the
+  public decode helpers directly; genuinely-dead branches get DELETED, not excluded.
 - **Interface tests at the Manifold boundary — soundness split (adjusted from the miri
   comment):** miri cannot execute foreign code, so it can't watch real FFI calls. The goal
   stands; the mechanism splits: (a) the geometry backend sits behind a trait; interface

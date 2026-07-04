@@ -1,0 +1,26 @@
+# Proper nouns / library names that recur across scad-rs doc prose. Extends clippy's default
+# doc-valid-idents (the ".." keeps the built-ins: NaN, GitHub, TrueType, …) so `doc_markdown`
+# (pedantic) stops demanding backticks around names that aren't code. Add project terms HERE
+# rather than backticking them in every comment.
+doc-valid-idents = ["..", "OpenSCAD", "BOSL2", "Clipper2", "OpenCSG", "ChaCha8"]
+
+# The no-unwrap/no-panic doctrine (see lang/Cargo.toml [lints.clippy]) is production-code law,
+# but `.unwrap()`/`.expect()` in tests is normal and readable — assertions ARE the test. Exempt
+# only #[cfg(test)] code so the doctrine stays strict where it counts.
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+
+# DETERMINISM doctrine (SPEC): same source -> bit-identical output, every run, every platform.
+# The ENGINE must obey too, so the nondeterminism sources are banned at the door. Escaping a ban
+# needs `#[allow(..., reason = "…")]`, and allow_attributes_without_reason forces the writedown.
+# NOTE: Instant::now is deliberately NOT banned — the I.6 benchmark layer needs it, it's
+# instrumentation compiled out in release, and it never reaches geometry output.
+disallowed-methods = [
+    { path = "rand::random", reason = "all randomness derives from ONE ChaCha8 seed (SPEC); no ambient entropy in the engine" },
+    { path = "rand::thread_rng", reason = "thread_rng is unseeded + StdRng-backed — thread a seeded ChaCha8Rng from the harness seed instead" },
+    { path = "std::time::SystemTime::now", reason = "wall-clock time must never touch evaluation output (SPEC: no time dependence in eval)" },
+]
+disallowed-types = [
+    { path = "std::collections::HashMap", reason = "nondeterministic iteration order can leak into output (echo/tessellation/traversal) — use BTreeMap or IndexMap (SPEC)" },
+    { path = "std::collections::HashSet", reason = "same nondeterministic-order hazard as HashMap — use BTreeSet or IndexSet (SPEC)" },
+]

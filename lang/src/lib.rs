@@ -37,10 +37,15 @@
 mod error;
 mod lexer;
 mod mesh;
+mod parser;
 
 pub use error::{Error, Result};
 pub use lexer::{Lexed, Token, TokenKind, decode_str, lex, num_value};
 pub use mesh::Mesh;
+pub use parser::{
+    Arg, BinOp, Expr, ExprKind, Modifiers, ModuleInstantiation, Program, Span, Stmt, StmtKind,
+    UnOp, parse,
+};
 
 /// Evaluate OpenSCAD source to a triangle [`Mesh`] — the end-to-end tracer-bullet spine.
 ///
@@ -53,11 +58,11 @@ pub use mesh::Mesh;
 /// malformed source, [`Error::Eval`] for a well-formed program that fails at runtime, and
 /// [`Error::Lower`] when a CSG node cannot be realized as geometry.
 pub fn evaluate(source: &str) -> Result<Mesh> {
-    lex(source)?; // stage 1 (G.3.2): lexes, surfacing Error::Parse on malformed source
+    parse(source)?; // stages 1-2 (G.3.2 lex + G.3.3 parse), surfacing Error::Parse on bad source
     // Evaluator `tracing` spans (the per-call benchmark corpus) arrive with the real evaluator at
     // G.3.4/I.6 — instrumenting this stub would only add uncoverable disabled-span branches.
     Err(Error::Unimplemented(
-        "evaluate: parse/eval/lower stages land in Phase G",
+        "evaluate: eval + lower stages land in Phase G",
     ))
 }
 

@@ -2,7 +2,20 @@
 # doc-valid-idents (the ".." keeps the built-ins: NaN, GitHub, TrueType, …) so `doc_markdown`
 # (pedantic) stops demanding backticks around names that aren't code. Add project terms HERE
 # rather than backticking them in every comment.
-doc-valid-idents = ["..", "OpenSCAD", "BOSL2", "Clipper2", "OpenCSG", "ChaCha8"]
+doc-valid-idents = [
+    "..",
+    "OpenSCAD",
+    "BOSL2",
+    "Clipper2",
+    "OpenCSG",
+    "ChaCha8",
+    # winnow API terms that recur in parser doc prose
+    "TokenSlice",
+    "ContextError",
+    "StrContext",
+    "ParseError",
+    "cut_err",
+]
 
 # The no-unwrap/no-panic doctrine (see lang/Cargo.toml [lints.clippy]) is production-code law,
 # but `.unwrap()`/`.expect()` in tests is normal and readable — assertions ARE the test. Exempt

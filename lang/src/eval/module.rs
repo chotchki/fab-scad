@@ -1,0 +1,105 @@
+//! Module instantiation → [`Mesh`]: sphere/cube/cylinder argument resolution + tessellation dispatch.
+//!
+//! Argument binding (OpenSCAD `primitives.cc`): positional args fill the primitive's parameter list
+//! in order, named args bind by name; diameter beats radius (`d = 2r`). `$`-args (`$fn=8`) set the
+//! dynamically-scoped `$`-variables in a child scope, feeding the fragment count. Transforms,
+//! booleans, and user modules are deferred LOUD.
+
+use std::collections::BTreeMap;
+
+use super::eval_expr;
+use super::fragments::fragments;
+use super::geometry;
+use super::scope::Scope;
+use super::value::Value;
+use crate::Mesh;
+use crate::parser::ModuleInstantiation;
+
+/// Evaluate a module instantiation to a mesh.
+pub(super) fn eval_module(mi: &ModuleInstantiation, scope: &Scope) -> crate::Result<Mesh> {
+    let mut child = scope.clone();
+    let mut positional = Vec::new();
+    let mut named = BTreeMap::new();
+    for arg in &mi.args {
+        let value = eval_expr(&arg.value, scope)?;
+        match &arg.name {
+            Some(name) if name.starts_with('$') => child.bind(name.clone(), value),
+            Some(name) => {
+                named.insert(name.clone(), value);
+            }
+            None => positional.push(value),
+        }
+    }
+    match mi.name.as_str() {
+        "sphere" => Ok(eval_sphere(&positional, &named, &child)),
+        "cube" => Ok(eval_cube(&positional, &named)),
+        "cylinder" => Ok(eval_cylinder(&positional, &named, &child)),
+        _ => Err(crate::Error::Unimplemented(
+            "only sphere/cube/cylinder are implemented (G.3.5); transforms/booleans/user modules land later",
+        )),
+    }
+}
+
+fn eval_sphere(positional: &[Value], named: &BTreeMap<String, Value>, scope: &Scope) -> Mesh {
+    let map = bind(positional, named, &["r"]);
+    let r = get_radius(&map, "r", "d").unwrap_or(1.0);
+    let (fn_, fa, fs) = scope.fn_fa_fs();
+    geometry::sphere(r, fragments(r, fn_, fa, fs))
+}
+
+fn eval_cube(positional: &[Value], named: &BTreeMap<String, Value>) -> Mesh {
+    let map = bind(positional, named, &["size", "center"]);
+    let size = match map.get("size") {
+        Some(Value::Num(s)) => [*s, *s, *s],
+        Some(Value::NumList(v)) => match v[..] {
+            [x, y, z, ..] => [x, y, z],
+            _ => [1.0, 1.0, 1.0],
+        },
+        _ => [1.0, 1.0, 1.0],
+    };
+    geometry::cube(size, is_true(&map, "center"))
+}
+
+fn eval_cylinder(positional: &[Value], named: &BTreeMap<String, Value>, scope: &Scope) -> Mesh {
+    let map = bind(positional, named, &["h", "r1", "r2", "center"]);
+    let h = get_num(&map, "h").unwrap_or(1.0);
+    // `r`/`d` set both radii; `r1`/`r2` (and `d1`/`d2`) then override.
+    let both = get_radius(&map, "r", "d");
+    let r1 = get_radius(&map, "r1", "d1").or(both).unwrap_or(1.0);
+    let r2 = get_radius(&map, "r2", "d2").or(both).unwrap_or(1.0);
+    let (fn_, fa, fs) = scope.fn_fa_fs();
+    let frags = fragments(r1.max(r2), fn_, fa, fs); // fmax(r1, r2)
+    geometry::cylinder(h, r1, r2, frags, is_true(&map, "center"))
+}
+
+/// Bind positional args to their parameter names in order; named args (already in `named`) win.
+fn bind(
+    positional: &[Value],
+    named: &BTreeMap<String, Value>,
+    params: &[&str],
+) -> BTreeMap<String, Value> {
+    let mut map = named.clone();
+    for (value, name) in positional.iter().zip(params.iter()) {
+        map.entry((*name).to_string())
+            .or_insert_with(|| value.clone());
+    }
+    map
+}
+
+fn get_num(map: &BTreeMap<String, Value>, key: &str) -> Option<f64> {
+    match map.get(key) {
+        Some(Value::Num(n)) => Some(*n),
+        _ => None,
+    }
+}
+
+/// Radius, with diameter winning (`d`/2). Returns `None` if neither is a number.
+fn get_radius(map: &BTreeMap<String, Value>, r_key: &str, d_key: &str) -> Option<f64> {
+    get_num(map, d_key)
+        .map(|d| d / 2.0)
+        .or_else(|| get_num(map, r_key))
+}
+
+fn is_true(map: &BTreeMap<String, Value>, key: &str) -> bool {
+    matches!(map.get(key), Some(Value::Bool(true)))
+}

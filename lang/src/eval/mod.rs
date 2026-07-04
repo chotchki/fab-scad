@@ -11,15 +11,19 @@
 //! I.1/I.4. Arithmetic/undef semantics are bug-for-bug OpenSCAD (`ops`).
 
 mod fragments;
+mod geometry;
+mod module;
 mod ops;
 mod scope;
+mod trig;
 mod value;
 
 pub use fragments::fragments;
 pub use scope::Scope;
 pub use value::Value;
 
-use crate::parser::{BinOp, Expr, ExprKind, UnOp};
+use crate::Mesh;
+use crate::parser::{BinOp, Expr, ExprKind, Program, Stmt, StmtKind, UnOp};
 
 /// One step on the evaluator's explicit work-stack.
 enum Task<'a> {
@@ -141,4 +145,44 @@ fn build_vector(items: Vec<Value>) -> crate::Result<Value> {
         }
     }
     Ok(Value::num_list(nums))
+}
+
+/// Evaluate a whole program to a [`Mesh`] — the tracer-bullet spine's tail. Assignments bind into
+/// the scope; a single top-level object produces its mesh.
+///
+/// # Errors
+/// Deferred constructs fail LOUD: unknown modules / transforms / booleans (module eval), and
+/// multiple top-level objects (implicit union — J.2).
+pub fn eval_program(program: &Program, scope: &Scope) -> crate::Result<Mesh> {
+    let mut scope = scope.clone();
+    let mut meshes = Vec::new();
+    for stmt in &program.stmts {
+        eval_stmt(stmt, &mut scope, &mut meshes)?;
+    }
+    match meshes.len() {
+        0 => Ok(Mesh::new()),
+        1 => Ok(meshes.pop().unwrap_or_default()),
+        _ => Err(crate::Error::Unimplemented(
+            "multiple top-level objects (implicit union) are not yet implemented (J.2)",
+        )),
+    }
+}
+
+/// Statement recursion is bounded by the parser's `MAX_DEPTH`, so host recursion here can't overflow
+/// (unlike unbounded EXPRESSION recursion, which the explicit stack handles).
+fn eval_stmt(stmt: &Stmt, scope: &mut Scope, meshes: &mut Vec<Mesh>) -> crate::Result<()> {
+    match &stmt.kind {
+        StmtKind::Empty => {}
+        StmtKind::Assignment { name, value } => {
+            let value = eval_expr(value, scope)?;
+            scope.bind(name.clone(), value);
+        }
+        StmtKind::Block(stmts) => {
+            for stmt in stmts {
+                eval_stmt(stmt, scope, meshes)?;
+            }
+        }
+        StmtKind::Module(mi) => meshes.push(module::eval_module(mi, scope)?),
+    }
+    Ok(())
 }

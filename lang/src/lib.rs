@@ -41,7 +41,7 @@ mod mesh;
 mod parser;
 
 pub use error::{Error, Result};
-pub use eval::{Scope, Value, eval_expr, fragments};
+pub use eval::{Scope, Value, eval_expr, eval_program, fragments};
 pub use lexer::{Lexed, Token, TokenKind, decode_str, lex, num_value};
 pub use mesh::Mesh;
 pub use parser::{
@@ -51,21 +51,17 @@ pub use parser::{
 
 /// Evaluate OpenSCAD source to a triangle [`Mesh`] — the end-to-end tracer-bullet spine.
 ///
-/// Currently a stub: the parse/eval/lower stages land across Phase G, wired end to end for
-/// `sphere()`/`cube()`/`cylinder()` at G.3.5.
+/// Wired end to end for the G.3.5 subset (`sphere`/`cube`/`cylinder`, expressions, `$fn/$fa/$fs`);
+/// everything past that fails LOUD ([`Error::Unimplemented`]) — transforms, booleans, user modules,
+/// multiple top-level objects, functions, and so on land across the later phases.
 ///
 /// # Errors
 ///
-/// Returns [`Error::Unimplemented`] until the pipeline is wired. Thereafter: [`Error::Parse`] for
-/// malformed source, [`Error::Eval`] for a well-formed program that fails at runtime, and
-/// [`Error::Lower`] when a CSG node cannot be realized as geometry.
+/// [`Error::Parse`] for malformed source, and [`Error::Unimplemented`] for a well-formed program
+/// that uses a construct beyond the G.3.5 subset.
 pub fn evaluate(source: &str) -> Result<Mesh> {
-    parse(source)?; // stages 1-2 (G.3.2 lex + G.3.3 parse), surfacing Error::Parse on bad source
-    // Evaluator `tracing` spans (the per-call benchmark corpus) arrive with the real evaluator at
-    // G.3.4/I.6 — instrumenting this stub would only add uncoverable disabled-span branches.
-    Err(Error::Unimplemented(
-        "evaluate: eval + lower stages land in Phase G",
-    ))
+    let program = parse(source)?; // G.3.2 lex → G.3.3 parse
+    eval_program(&program, &Scope::new()) // G.3.4 eval → G.3.5 tessellate to a Mesh
 }
 
 #[cfg(test)]
@@ -73,15 +69,21 @@ mod tests {
     use super::{Error, evaluate};
 
     #[test]
-    fn evaluate_is_a_loud_stub() {
-        // The tracer-bullet spine exists and fails LOUD, not silent, until Phase G wires it.
-        let err = evaluate("sphere(1);").unwrap_err();
+    fn evaluate_produces_a_mesh() {
+        // The tracer-bullet spine reaches geometry: source → a real triangle mesh.
+        let mesh = evaluate("sphere(5, $fn = 8);").expect("sphere evaluates");
+        assert!(mesh.tri_count() > 0 && mesh.vert_count() > 0);
+    }
+
+    #[test]
+    fn evaluate_defers_transforms_loud() {
+        // Beyond the G.3.5 subset (a transform) → LOUD, never silently wrong.
+        let err = evaluate("translate([1,0,0]) cube(1);").unwrap_err();
         assert!(matches!(err, Error::Unimplemented(_)), "got {err:?}");
     }
 
     #[test]
-    fn evaluate_surfaces_lex_errors() {
-        // Malformed source fails at the now-wired lex stage — not the Unimplemented stub.
+    fn evaluate_surfaces_parse_errors() {
         let err = evaluate("\"unterminated").unwrap_err();
         assert!(matches!(err, Error::Parse(_)), "got {err:?}");
     }

@@ -8,7 +8,8 @@
     clippy::unwrap_used,
     clippy::expect_used,
     clippy::panic,
-    reason = "integration-test helpers: unwrap/expect/panic ARE the assertions"
+    clippy::float_cmp,
+    reason = "integration-test helpers: unwrap/expect/panic ARE the assertions; exact float asserts are deterministic values"
 )]
 
 use fab_lang::{Error, Scope, StmtKind, Value, eval_expr, fragments, parse};

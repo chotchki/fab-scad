@@ -85,14 +85,14 @@ Driven by `claude-plan-bridge` (FORMATv2). Hand-authored; run
 - [ ] 18.9 - crates.io channel: claim the free `fab-scad` name — fix package contents (exclude models/spikes/docs), `cargo publish --dry-run` clean, then publish 0.1.0 (cargo install = third distribution channel, source-build tradeoff documented)
 ## Phase C - fab-web beta feedback
 - [x] C.1 - Busy pulse + staged sync work: animated "rendering {name} (OpenSCAD)" while the worker runs; "slicing…"/"packing…" labels armed 2 frames ahead so they PAINT before the main-thread block; all completions clear to a real status (the desktop loading-pulse standard, ported)
-- [ ] C.2 - Geometry worker (fab-geom): a second SMALL wasm (kernel-only, no bevy, ~1 MB) in its own web worker runs weld/plan/slice/export over mesh-bytes postMessage — the !Send Solid contract as designed; makes the C.1 slice/export labels a LIVE pulse instead of a painted-then-frozen one (A.8 measured 5-10 s block on a 119k-tri part)
+- [x] C.2 - Geometry worker (fab-geom): a second SMALL wasm (kernel-only, no bevy, ~1 MB) in its own web worker runs weld/plan/slice/export over mesh-bytes postMessage — the !Send Solid contract as designed; makes the C.1 slice/export labels a LIVE pulse instead of a painted-then-frozen one (A.8 measured 5-10 s block on a 119k-tri part)
+- [ ] C.3 - Printer selection: preset cycle button (A1 mini / P1-X1 / MK4 / Ender 3 / Voron 350) + localStorage persistence (fab-web.bed) — no hardcoded 256³; changing printer re-plans the loaded part in the background (reactive standard, live pulse); ?bed= deep-link still wins at startup
 
 ## Backlog (not yet phased)
 
 - **fab owns $fn: inject draft/final quality + strip `$fn = $preview ? …` from all scad model files** — added 2026-06-28.
 - **Showcase→slicer deep-link: project page hands its published STL into the slicer special page (same-origin fetch, COEP-safe) — publish-side wiring + slicer URL param** — added 2026-07-03.
 - **Resume the native channel: dispatch release-native.yml (mac DMG + Windows NSIS artifacts), fill winget InstallerSha256 from the release, decide the signing purchases (docs/packaging.md)** — added 2026-07-03.
-- **Geometry web worker for fab-web: move weld/plan/slice/export off the main thread over mesh-bytes postMessage (the !Send Solid contract) — earns its keep when the connector editor makes re-slicing interactive; A.8 measured ~5-10s main-thread freeze slicing a 119k-tri 27-piece monster (typical parts are ms)** — added 2026-07-03.
 - **Colored 3mf EXPORT: assemblies export per-part pieces as separate objects with extruder mapping (distinct color → Bambu AMS slot; extend bambu::Placed + model_settings extruder) — the other half of A.9's color carry-through** — added 2026-07-03.
 - **fab-web wire-size stretch: below 8.5 → ≤7 MiB brotli needs build-std (opt-size std, panic=abort) and/or naga shader stripping — feature-level surgery is EXHAUSTED (measured: meta-group trim ~1 MB, granular assembly ~0.2 MB; the weight is bevy_render/wgpu/naga)** — added 2026-07-03.
 - B.6 - Customizer stretch: expose the .scad's top-level params in the panel, tweak → worker re-render (defer if B.1-B.5 drag) *(deferred from phase `B` on 2026-07-03)*

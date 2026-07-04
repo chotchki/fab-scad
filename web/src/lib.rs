@@ -24,9 +24,18 @@ mod geom_worker;
 #[cfg(target_arch = "wasm32")]
 mod scad_worker;
 
-/// Default build volume (mm); `?bed=N` / `--bed=N` overrides (cube bed) until printers.toml
-/// grows a browser home.
-const DEFAULT_BED: f64 = 256.0;
+/// Printer presets the panel cycles through — the common fleet, not MY printer (C.3).
+/// `?bed=N` / `--bed=N` still wins at startup (deep-links), localStorage remembers the pick.
+const PRESETS: &[(&str, [f64; 3])] = &[
+    ("A1 mini", [180.0, 180.0, 180.0]),
+    ("P1/X1", [256.0, 256.0, 256.0]),
+    ("MK4", [250.0, 210.0, 220.0]),
+    ("Ender 3", [220.0, 220.0, 250.0]),
+    ("Voron 350", [350.0, 350.0, 350.0]),
+];
+const DEFAULT_PRESET: usize = 1;
+#[cfg(target_arch = "wasm32")]
+const BED_STORE_KEY: &str = "fab-web.bed";
 /// Plate gap for the packed export (mm) — matches `fab make`'s default.
 const GAP: f64 = 5.0;
 
@@ -38,7 +47,7 @@ pub fn start() {
 }
 
 pub fn run() {
-    let bed = bed_override().unwrap_or(DEFAULT_BED);
+    let printer = startup_printer();
     let mut app = App::new();
     app.add_plugins((
         DefaultPlugins.set(WindowPlugin {
@@ -64,7 +73,7 @@ pub fn run() {
     }
 
     app.insert_resource(ClearColor(Color::srgb(0.10, 0.10, 0.12)))
-        .insert_resource(Bed([bed, bed, bed]))
+        .insert_resource(printer)
         .init_resource::<Part>()
         .init_resource::<PickTask>()
         .init_resource::<RenderTask>()
@@ -92,6 +101,7 @@ pub fn run() {
                 run_slice,
                 run_export,
                 run_edit_actions,
+                cycle_printer,
                 draw_section,
                 sync_edit_ui,
                 orbit_input,
@@ -100,9 +110,63 @@ pub fn run() {
         .run();
 }
 
-/// Printer build volume `[x, y, z]` mm.
-#[derive(Resource)]
-struct Bed([f64; 3]);
+/// The selected printer: display name + build volume mm. Cycled by the panel button; a
+/// `?bed=N` deep-link shows as "custom".
+#[derive(Resource, Clone)]
+struct Bed {
+    name: String,
+    dims: [f64; 3],
+}
+
+/// Startup order: deep-link param > localStorage > the fleet default. NOT my printer anymore.
+fn startup_printer() -> Bed {
+    if let Some(n) = bed_override() {
+        return Bed {
+            name: "custom".into(),
+            dims: [n, n, n],
+        };
+    }
+    #[cfg(target_arch = "wasm32")]
+    if let Some(b) = load_saved_bed() {
+        return b;
+    }
+    let (name, dims) = PRESETS[DEFAULT_PRESET];
+    Bed {
+        name: name.into(),
+        dims,
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn local_storage() -> Option<web_sys::Storage> {
+    web_sys::window().and_then(|w| w.local_storage().ok().flatten())
+}
+
+/// Saved shape: `name|x|y|z` — no JSON dep for four fields.
+#[cfg(target_arch = "wasm32")]
+fn load_saved_bed() -> Option<Bed> {
+    let raw = local_storage()?.get_item(BED_STORE_KEY).ok()??;
+    let mut it = raw.split('|');
+    let name = it.next()?.to_string();
+    let mut dims = [0.0; 3];
+    for d in dims.iter_mut() {
+        *d = it.next()?.parse().ok()?;
+    }
+    (dims.iter().all(|d| (10.0..=2000.0).contains(d))).then_some(Bed { name, dims })
+}
+
+#[cfg(target_arch = "wasm32")]
+fn save_bed(bed: &Bed) {
+    if let Some(st) = local_storage() {
+        let v = format!(
+            "{}|{}|{}|{}",
+            bed.name, bed.dims[0], bed.dims[1], bed.dims[2]
+        );
+        st.set_item(BED_STORE_KEY, &v).ok();
+    }
+}
+#[cfg(not(target_arch = "wasm32"))]
+fn save_bed(_bed: &Bed) {}
 
 /// The loaded part, exactly as the geometry service handed it back: per-object stl bytes in
 /// the plan (rotated) frame + colors, and the plan the editor mutates. No Solids here — every
@@ -112,6 +176,9 @@ struct Part {
     name: String,
     objects: Vec<GeomObject>,
     plan: Option<PlanOut>,
+    /// The bytes Analyze last ran on (post-scad-render for .scad) — a printer change re-plans
+    /// from these without re-picking (the reactive standard: no apply button).
+    raw: Vec<u8>,
 }
 
 /// The display material for an object: its 3mf color, else fab gold.
@@ -135,6 +202,7 @@ struct Actions {
     remove: bool,
     grow: bool,
     shrink: bool,
+    cycle_printer: bool,
 }
 
 /// A.3: the connector-editor mode. `Cut` = editing one cut's join face IN PLACE — the section
@@ -186,6 +254,14 @@ struct CutPlane(usize);
 /// Status line in the panel.
 #[derive(Component, Clone, Default)]
 struct StatusLabel;
+
+/// The printer button's caption — rewritten whenever the selection changes.
+#[derive(Component, Clone, Default)]
+struct PrinterLabel;
+
+/// The bed plate mesh — resized when the printer changes.
+#[derive(Component)]
+struct BedPlate;
 
 /// In-flight source load: `None` = dialog cancelled (silent); `Some(Err)` = a failure the
 /// STATUS LINE must show (a 404'd worker script once failed silently — never again).
@@ -368,13 +444,14 @@ fn setup_scene(
     bed: Res<Bed>,
 ) {
     commands.spawn((
-        Mesh3d(meshes.add(Cuboid::new(bed.0[0] as f32, bed.0[1] as f32, 2.0))),
+        Mesh3d(meshes.add(Cuboid::new(bed.dims[0] as f32, bed.dims[1] as f32, 2.0))),
         MeshMaterial3d(mats.add(StandardMaterial {
             base_color: Color::srgb(0.16, 0.17, 0.20),
             perceptual_roughness: 0.9,
             ..default()
         })),
         Transform::from_xyz(0.0, 0.0, -1.0), // top face = the build plane z=0
+        BedPlate,
     ));
     commands.spawn((
         DirectionalLight {
@@ -384,7 +461,7 @@ fn setup_scene(
         Transform::from_xyz(200.0, 300.0, 400.0).looking_at(Vec3::ZERO, Vec3::Z),
     ));
     // AmbientLight is per-camera in 0.19 — it rides the camera entity, not a resource.
-    let orbit = framed_orbit(Vec3::ZERO, bed.0[0].max(bed.0[1]) as f32);
+    let orbit = framed_orbit(Vec3::ZERO, bed.dims[0].max(bed.dims[1]) as f32);
     commands.spawn((
         Camera3d::default(),
         AmbientLight {
@@ -560,10 +637,76 @@ fn setup_ui(world: &mut World) {
                 @FeathersButton { @caption: bsn!{ Text("Smaller") ThemedText } } EditUi
                 on(|_: On<Activate>, mut act: ResMut<Actions>| { act.shrink = true; })
             ),
+            (
+                @FeathersButton { @caption: bsn!{ Text("Printer") ThemedText PrinterLabel } }
+                on(|_: On<Activate>, mut act: ResMut<Actions>| { act.cycle_printer = true; })
+            ),
             (Text("pick a model to begin") ThemedText StatusLabel),
         ]
     };
     world.spawn_scene(scene).expect("spawn fab panel");
+}
+
+/// Cycle the printer preset: update the bed, persist the pick, and — reactive standard, no
+/// apply button — re-plan whatever's loaded through the service (live pulse). Also keeps the
+/// button caption honest, including on the first frame.
+fn cycle_printer(
+    mut act: ResMut<Actions>,
+    mut bed: ResMut<Bed>,
+    mut geom: ResMut<GeomCall>,
+    mut busy: ResMut<Busy>,
+    part: Res<Part>,
+    mut plabels: Query<&mut Text, (With<PrinterLabel>, Without<StatusLabel>)>,
+    mut slabels: Query<&mut Text, (With<StatusLabel>, Without<PrinterLabel>)>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut plate: Query<&mut Mesh3d, With<BedPlate>>,
+) {
+    let clicked = act.cycle_printer;
+    if clicked {
+        act.cycle_printer = false;
+        if geom.task.is_some() {
+            for mut t in &mut slabels {
+                t.0 = "still working - one moment".into();
+            }
+            return;
+        }
+        let cur = PRESETS.iter().position(|(n, _)| *n == bed.name);
+        let next = cur.map_or(0, |i| (i + 1) % PRESETS.len());
+        let (name, dims) = PRESETS[next];
+        bed.name = name.into();
+        bed.dims = dims;
+        save_bed(&bed);
+        if !part.raw.is_empty() {
+            busy.0 = Some(format!("re-planning for {name}"));
+            spawn_geom(
+                &mut geom,
+                Purpose::Analyze {
+                    name: part.name.clone(),
+                },
+                Request::Analyze {
+                    name: part.name.clone(),
+                    bytes: part.raw.clone(),
+                    bed: bed.dims,
+                },
+            );
+        }
+    }
+    if clicked {
+        for mut m in &mut plate {
+            m.0 = meshes.add(Cuboid::new(bed.dims[0] as f32, bed.dims[1] as f32, 2.0));
+        }
+    }
+    if clicked || bed.is_changed() || bed.is_added() {
+        let d = bed.dims;
+        let dims_txt = if d[0] == d[1] && d[1] == d[2] {
+            format!("{:.0}", d[0])
+        } else {
+            format!("{:.0}x{:.0}x{:.0}", d[0], d[1], d[2])
+        };
+        for mut t in &mut plabels {
+            t.0 = format!("Printer: {} ({dims_txt})", bed.name);
+        }
+    }
 }
 
 /// Kick a geometry-service call (single-flight; the caller set the busy label).
@@ -579,6 +722,7 @@ fn poll_picked_file(
     mut render: ResMut<RenderTask>,
     mut geom: ResMut<GeomCall>,
     mut busy: ResMut<Busy>,
+    mut part: ResMut<Part>,
     bed: Res<Bed>,
     mut labels: Query<&mut Text, With<StatusLabel>>,
 ) {
@@ -630,13 +774,14 @@ fn poll_picked_file(
         return;
     }
     busy.0 = Some(format!("analyzing {name}"));
+    part.raw = bytes.clone();
     spawn_geom(
         &mut geom,
         Purpose::Analyze { name: name.clone() },
         Request::Analyze {
             name,
             bytes,
-            bed: bed.0,
+            bed: bed.dims,
         },
     );
 }
@@ -646,6 +791,7 @@ fn poll_render_task(
     mut render: ResMut<RenderTask>,
     mut geom: ResMut<GeomCall>,
     mut busy: ResMut<Busy>,
+    mut part: ResMut<Part>,
     bed: Res<Bed>,
     mut labels: Query<&mut Text, With<StatusLabel>>,
 ) {
@@ -657,13 +803,14 @@ fn poll_render_task(
     match done {
         Ok((name, bytes)) => {
             busy.0 = Some(format!("analyzing {name}"));
+            part.raw = bytes.clone();
             spawn_geom(
                 &mut geom,
                 Purpose::Analyze { name: name.clone() },
                 Request::Analyze {
                     name,
                     bytes,
-                    bed: bed.0,
+                    bed: bed.dims,
                 },
             );
         }
@@ -1190,7 +1337,7 @@ fn run_export(
             objects: part.objects.clone(),
             cuts: plan.cuts.clone(),
             connectors: plan.connectors.clone(),
-            bed: bed.0,
+            bed: bed.dims,
             gap: GAP,
         },
     );

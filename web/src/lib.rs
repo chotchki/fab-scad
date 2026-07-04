@@ -23,6 +23,8 @@ use fab_scad::{auto, cross_section};
 mod geom_worker;
 #[cfg(target_arch = "wasm32")]
 mod scad_worker;
+#[cfg(target_arch = "wasm32")]
+mod worker_rpc;
 
 /// Printer presets the panel cycles through — the common fleet, not MY printer (C.3).
 /// `?bed=N` / `--bed=N` still wins at startup (deep-links), localStorage remembers the pick.
@@ -121,10 +123,12 @@ struct Bed {
 /// Startup order: deep-link param > localStorage > the fleet default. NOT my printer anymore.
 fn startup_printer() -> Bed {
     if let Some(n) = bed_override() {
-        return Bed {
-            name: "custom".into(),
-            dims: [n, n, n],
-        };
+        if (10.0..=2000.0).contains(&n) {
+            return Bed {
+                name: "custom".into(),
+                dims: [n, n, n],
+            };
+        }
     }
     #[cfg(target_arch = "wasm32")]
     if let Some(b) = load_saved_bed() {
@@ -288,6 +292,9 @@ enum Purpose {
     Idle,
     Analyze {
         name: String,
+        /// The analyzed bytes — committed to Part.raw only on SUCCESS, so a failed upload
+        /// can't poison the printer re-plan of the still-displayed model (review finding).
+        raw: Vec<u8>,
     },
     Slice,
     Export {
@@ -657,19 +664,15 @@ fn cycle_printer(
     mut busy: ResMut<Busy>,
     part: Res<Part>,
     mut plabels: Query<&mut Text, (With<PrinterLabel>, Without<StatusLabel>)>,
-    mut slabels: Query<&mut Text, (With<StatusLabel>, Without<PrinterLabel>)>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut plate: Query<&mut Mesh3d, With<BedPlate>>,
 ) {
     let clicked = act.cycle_printer;
     if clicked {
-        act.cycle_printer = false;
         if geom.task.is_some() {
-            for mut t in &mut slabels {
-                t.0 = "still working - one moment".into();
-            }
-            return;
+            return; // leave the click queued — it applies the moment the current call drains
         }
+        act.cycle_printer = false;
         let cur = PRESETS.iter().position(|(n, _)| *n == bed.name);
         let next = cur.map_or(0, |i| (i + 1) % PRESETS.len());
         let (name, dims) = PRESETS[next];
@@ -682,6 +685,7 @@ fn cycle_printer(
                 &mut geom,
                 Purpose::Analyze {
                     name: part.name.clone(),
+                    raw: part.raw.clone(),
                 },
                 Request::Analyze {
                     name: part.name.clone(),
@@ -722,11 +726,13 @@ fn poll_picked_file(
     mut render: ResMut<RenderTask>,
     mut geom: ResMut<GeomCall>,
     mut busy: ResMut<Busy>,
-    mut part: ResMut<Part>,
     bed: Res<Bed>,
     mut labels: Query<&mut Text, With<StatusLabel>>,
 ) {
     let Some(t) = task.0.as_mut() else { return };
+    if render.0.is_some() || geom.task.is_some() {
+        return; // queue the pick — draining now would clobber the in-flight call (review HIGH)
+    }
     let Some(done) = block_on(future::poll_once(t)) else {
         return;
     };
@@ -774,10 +780,12 @@ fn poll_picked_file(
         return;
     }
     busy.0 = Some(format!("analyzing {name}"));
-    part.raw = bytes.clone();
     spawn_geom(
         &mut geom,
-        Purpose::Analyze { name: name.clone() },
+        Purpose::Analyze {
+            name: name.clone(),
+            raw: bytes.clone(),
+        },
         Request::Analyze {
             name,
             bytes,
@@ -791,11 +799,13 @@ fn poll_render_task(
     mut render: ResMut<RenderTask>,
     mut geom: ResMut<GeomCall>,
     mut busy: ResMut<Busy>,
-    mut part: ResMut<Part>,
     bed: Res<Bed>,
     mut labels: Query<&mut Text, With<StatusLabel>>,
 ) {
     let Some(t) = render.0.as_mut() else { return };
+    if geom.task.is_some() {
+        return; // queue behind the in-flight geometry call (review HIGH)
+    }
     let Some(done) = block_on(future::poll_once(t)) else {
         return;
     };
@@ -803,10 +813,12 @@ fn poll_render_task(
     match done {
         Ok((name, bytes)) => {
             busy.0 = Some(format!("analyzing {name}"));
-            part.raw = bytes.clone();
             spawn_geom(
                 &mut geom,
-                Purpose::Analyze { name: name.clone() },
+                Purpose::Analyze {
+                    name: name.clone(),
+                    raw: bytes.clone(),
+                },
                 Request::Analyze {
                     name,
                     bytes,
@@ -865,7 +877,7 @@ fn poll_geom(
             status(error);
         }
         (
-            Purpose::Analyze { name },
+            Purpose::Analyze { name, raw },
             Response::Analyzed {
                 objects,
                 plan,
@@ -884,6 +896,7 @@ fn poll_geom(
                 &name,
                 objects,
                 plan,
+                raw,
                 &mut part,
                 &mut mode,
                 &mut commands,
@@ -990,6 +1003,7 @@ fn present_display(
     name: &str,
     objects: Vec<GeomObject>,
     plan: Option<PlanOut>,
+    raw: Vec<u8>,
     part: &mut Part,
     mode: &mut EditMode,
     commands: &mut Commands,
@@ -1057,6 +1071,7 @@ fn present_display(
     part.name = name.to_string();
     part.objects = objects;
     part.plan = plan;
+    part.raw = raw;
     *mode = EditMode::Scene;
 }
 

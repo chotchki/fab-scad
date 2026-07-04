@@ -87,6 +87,7 @@ Driven by `claude-plan-bridge` (FORMATv2). Hand-authored; run
 - [x] C.1 - Busy pulse + staged sync work: animated "rendering {name} (OpenSCAD)" while the worker runs; "slicing…"/"packing…" labels armed 2 frames ahead so they PAINT before the main-thread block; all completions clear to a real status (the desktop loading-pulse standard, ported)
 - [x] C.2 - Geometry worker (fab-geom): a second SMALL wasm (kernel-only, no bevy, ~1 MB) in its own web worker runs weld/plan/slice/export over mesh-bytes postMessage — the !Send Solid contract as designed; makes the C.1 slice/export labels a LIVE pulse instead of a painted-then-frozen one (A.8 measured 5-10 s block on a 119k-tri part)
 - [ ] C.3 - Printer selection: preset cycle button (A1 mini / P1-X1 / MK4 / Ender 3 / Voron 350) + localStorage persistence (fab-web.bed) — no hardcoded 256³; changing printer re-plans the loaded part in the background (reactive standard, live pulse); ?bed= deep-link still wins at startup
+- [ ] C.4 - Adversarial review of C.2/C.3 (40-agent workflow: 4 lenses × 2-skeptic verify) + fixes: pick/render polls queue behind in-flight geometry (single-flight bypass = crossed worker replies), id-matched persistent worker transport + onerror (404'd worker script errored visibly instead of eternal pulse), Part.raw commits only on Analyze success, worker-init retry, ?bed= clamp, queued printer clicks
 
 ## Backlog (not yet phased)
 

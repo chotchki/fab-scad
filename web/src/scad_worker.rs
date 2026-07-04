@@ -6,16 +6,18 @@
 //! at a time — matches the app's single-flight picker.
 
 use std::cell::RefCell;
+use std::rc::Rc;
 
 use anyhow::{anyhow, Result};
 use bevy::log::info;
 use js_sys::{Object, Reflect, Uint8Array};
 use wasm_bindgen::prelude::*;
-use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::JsFuture;
 
+use crate::worker_rpc::Rpc;
+
 thread_local! {
-    static WORKER: RefCell<Option<web_sys::Worker>> = const { RefCell::new(None) };
+    static WORKER: RefCell<Option<(web_sys::Worker, Rc<Rpc>)>> = const { RefCell::new(None) };
     static LIBS: RefCell<Option<JsValue>> = const { RefCell::new(None) };
 }
 
@@ -23,19 +25,12 @@ thread_local! {
 pub async fn render(source: String) -> Result<Vec<u8>> {
     let err = |w: String| anyhow!("openscad: {w}");
     let libs = libs_object().await?;
-    let worker = get_worker()?;
-
-    // One-shot: the next message out of the worker resolves this promise.
-    let promise = js_sys::Promise::new(&mut |resolve, _| {
-        let cb = Closure::once_into_js(move |e: web_sys::MessageEvent| {
-            resolve.call1(&JsValue::UNDEFINED, &e.data()).ok();
-        });
-        worker.set_onmessage(Some(cb.unchecked_ref()));
-    });
+    let (worker, rpc) = get_worker()?;
+    let (id, promise) = rpc.register();
 
     let msg = Object::new();
     let set = |k: &str, v: &JsValue| Reflect::set(&msg, &JsValue::from_str(k), v).ok();
-    set("id", &JsValue::from_f64(1.0));
+    set("id", &JsValue::from_f64(id as f64));
     set("source", &JsValue::from_str(&source));
     set("files", &libs);
     set("args", &js_sys::Array::new());
@@ -87,7 +82,7 @@ async fn libs_object() -> Result<JsValue> {
 /// The worker, created once (document-relative URL — the bundle contract serves members next
 /// to the page). The heavy fetches (worker script + openscad.js + wasm) happen HERE, on first
 /// use only.
-fn get_worker() -> Result<web_sys::Worker> {
+fn get_worker() -> Result<(web_sys::Worker, Rc<Rpc>)> {
     if let Some(w) = WORKER.with(|w| w.borrow().clone()) {
         return Ok(w);
     }
@@ -96,6 +91,10 @@ fn get_worker() -> Result<web_sys::Worker> {
     let url = format!("{}openscad/openscad-worker.js", crate::bundle_base());
     let worker = web_sys::Worker::new_with_options(&url, &opts)
         .map_err(|_| anyhow!("openscad worker failed to start ({url})"))?;
-    WORKER.with(|w| *w.borrow_mut() = Some(worker.clone()));
-    Ok(worker)
+    let rpc = Rpc::attach(
+        &worker,
+        "openscad worker failed to load - is openscad/ deployed and data-base right?",
+    );
+    WORKER.with(|w| *w.borrow_mut() = Some((worker.clone(), rpc.clone())));
+    Ok((worker, rpc))
 }

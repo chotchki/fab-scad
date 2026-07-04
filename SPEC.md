@@ -70,8 +70,15 @@ escape, not community respect.
   model with FAST PATHS: contiguous `Vec<f64>` for numeric lists (BOSL2 is 90% numeric list
   math — OpenSCAD's boxed-variant Values are the reason BOSL2 is slow there), interned
   strings, ranges as lazy triples. Undef-propagation semantics preserved bug-for-bug where
-  models depend on them. [OPEN] value NaN-boxing vs enum — benchmark before committing
-  (NaN-boxing also buys a proof burden; see Kani below).
+  models depend on them. **Value representation (DECIDED): plain enum + fast-path variants,
+  NaN-boxing REJECTED.** Grounds: SIMD lives in the `NumList(Vec<f64>)` fast path (present
+  either way — LLVM auto-vectorizes contiguous f64, incl. wasm SIMD128); NaN-boxing gives
+  ZERO SIMD upside (per-element tag checks kill vectorization, and NaN canonicalization
+  taxes even pure-number loops), has no maintained production crate (the small ones predate
+  strict provenance), and buys a mandatory Kani proof burden. The enum keeps exhaustive
+  match, miri, Kani and the determinism doctrine all cheap. Ecosystem precedent agrees: Boa
+  ships the enum; starlark-rust's tagged-pointer + frozen-arena design is the prior art
+  worth READING (immutable values, like ours) without adopting its unsafe.
 - **Caching is a first-class design input, not a retrofit.** OpenSCAD has visibly struggled
   to bolt a good cache onto the Manifold backend from outside. We design for it from node
   one: every CSG node gets a CONTENT HASH (subtree structure + resolved params + $-context
@@ -152,6 +159,12 @@ it all — test reproduction is trivial by construction. Two layers, because Rus
   time/address/thread-id dependence in evaluation. This isn't just hygiene: the
   content-addressed cache is UNSOUND without it (same key must mean same value), and the
   differential harness needs the engine side as reproducible as the generator side.
+- **Float accumulation order is FIXED, everywhere (decided with the enum call):** strict
+  IEEE means reduction order is semantics. Two rules: (1) fast path and slow path use the
+  SAME fixed chunked accumulation order, so the "fast == slow bitwise" property holds by
+  construction; (2) chunk width is a CONSTANT (4 lanes) regardless of hardware — wider SIMD
+  processes fixed-width chunks, so native AVX, wasm SIMD128 and plain scalar all produce
+  identical bits. Lane width is a throughput knob, never a semantics knob.
 
 ## Testing + verification
 
@@ -220,8 +233,11 @@ Layered, cheapest-first; each layer catches what the previous can't:
 
 1. ~~Mesh-equality metric~~ → RESOLVED as G.3's empirical MVP: strictest-passing tier on
    low-poly sphere, scaled up, gate chosen per model class.
-2. Value representation: NaN-box vs enum-with-fast-Vec — benchmark first (leaning enum:
-   simpler proofs, no tag-smuggling; NaN-box only if the benchmark screams).
+2. ~~Value representation~~ → RESOLVED: enum + fast-path variants (NumList etc.).
+   NaN-boxing rejected on SIMD (no upside, tag-check + canonicalization tax), crate reality
+   (nothing maintained post-strict-provenance) and proof burden. Revisiting requires a
+   profiler mandate AND the Kani value-repr proofs landing in the same PR — the door is
+   open, the toll is posted.
 3. ~~Proof scope~~ → RESOLVED: Kani on low-level components only (stack machine, value
    invariants, quantizer, range termination).
 4. ~~semantics/ corpus~~ → RESOLVED: yes, segmented, provenance-annotated, from day one.

@@ -9,15 +9,54 @@ dead. Cardinal rule unchanged: nothing deleted before it's archived AND validate
 Driven by `claude-plan-bridge` (FORMATv2). Hand-authored; run
 `claude-plan-bridge baseline` after a rewrite to resync the state file.
 -->
-## Phase G - scad-rs: the OpenSCAD language in Rust over Manifold
+## Phase G - scad-rs bootstrap: pivot + spec + tracer bullet
 - [x] G.1 - Relicense + pivot mechanics: GPL-2.0-or-later (OpenSCAD's EXACT license, chosen for zero-friction upstreaming) across LICENSE + 4 crate manifests + README/NOTICE/web-bundle docs; SPEC.md → SPEC_workflow.md; PLAN restructured — all non-G work backlogged with provenance, phases 5/6/17/18/C archived
-- [x] G.2 - SPEC.md round 1 (drafted WITH chotchki): mission + license stance, architecture (parser / explicit-stack evaluator / value model / Manifold+Clipper2 geometry mapping), the BOSL2 strategy rungs (fast evaluator → pin-verified intrinsics → JIT-if-earned), oracle + differential testing design, and the testing/formal-verification approach (proptest, differential fuzzing, Kani-scoped proofs, intrinsic equivalence protocol)
-- [ ] G.3 - Tracer bullet: lang/ crate (winnow lexer/parser core: literals, exprs, module calls, $args) + explicit-stack evaluator skeleton + lower sphere()/cube() to kernel::Solid + differential harness v0 vs oracle CLI — verify the deterministic-output flag (spec Q7), run the strictest-metric experiment (sphere $fn=8 → high-poly), document the metric GATE per model class, first semantics/ tests land
-- [ ] G.4 - Parser to full grammar: whole OpenSCAD language on winnow (modules, functions, comprehensions, let/each/assert/echo, ranges, string escapes, use/include) + bison-derived conformance tests + proptest print/parse roundtrip + cargo-fuzz target with a SCHEDULED CI fuzz job from this commit (fuzzing-as-infrastructure doctrine) + customizer annotations preserved in the AST
-- [ ] G.5 - Evaluator core: enum values + NumList fast path (fixed 4-lane accumulation order, fast==slow bitwise property), lexical + dynamic $-scoping, children()/late binding, control flow, list comprehensions, recursion on the explicit stack, undef propagation bug-for-bug, tracing spans on the call path (compiled out in release) — Kani proofs on the stack machine discipline land here
-- [ ] G.6 - Builtin geometry surface + lowering: primitives, multmatrix, booleans, polyhedron, hull, linear/rotate_extrude + offset + projection via Clipper2, import() through our STL/3MF readers, content-addressed CSG-node cache (in-memory tier) — text/minkowski/surface = LOUD deferred stubs; geometry-backend trait lands here (miri-on-mock + ASAN-on-Manifold interface tests)
-- [ ] G.7 - semantics/ corpus + differential harness v1: segmented provenance-annotated semantics tests (oracle behavior + src/core line per decision), corpus tiers wired in CI (OpenSCAD test suite, BOSL2 tests, models/), ChaCha8-seeded grammar-directed program generator v0, seeds logged per run, trophy log started
-- [ ] G.8 - The BOSL2 gauntlet (phase exit gate): run the pinned BOSL2 test suite + our models/ through scad-rs, burn down divergences to zero-or-documented; benchmark corpus captured via the tracing layer on every run (rung 2's data exists before rung 2 starts); exit = smoke corpus green end-to-end (teardrop/onion/screw_hole + corner_brace + Underdesk) — rungs 2/3 (intrinsics, JIT) phase as H from these numbers
+- [x] G.2 - SPEC.md rounds 1-2 (drafted WITH chotchki): mission + license stance, architecture, BOSL2 rungs, determinism doctrine, testing/verification layers — all open questions resolved or scheduled (winnow, enum values, Kani-low-level, semantics/ segmented, lang/ sibling, tracing full-trace)
+- [ ] G.3 - Tracer bullet: sphere-vs-oracle end to end, metric gate chosen from data
+  - [ ] G.3.1 - lang/ crate scaffold: workspace sibling, error type, tracing dep (compiled-out default), clippy-pedantic baseline, CI lane (fmt/clippy/test)
+  - [ ] G.3.2 - winnow lexer: tokens, numbers/strings/identifiers, comments PRESERVED (customizer needs them later); lexer fuzz seed corpus started
+  - [ ] G.3.3 - parser core: expression precedence, module instantiation, argument lists incl. $-args; AST with source spans
+  - [ ] G.3.4 - evaluator skeleton: explicit-stack machine over the subset; Value v0 (Num/Bool/Str/NumList/Undef); $fn/$fa/$fs resolution
+  - [ ] G.3.5 - lower sphere()/cube()/cylinder() to kernel::Solid — tessellation EXACTLY matching src/core primitives (ring/segment math ported, provenance noted)
+  - [ ] G.3.6 - oracle runner: drive the openscad CLI, capture mesh + echo; VERIFY the deterministic-output flag (spec Q7) — what it sorts, what it doesn't
+  - [ ] G.3.7 - metric experiment: implement the comparison tiers (quantized vertex-multiset, vol/area/Euler, boolean residual); sphere $fn=8→256 matrix; DOCUMENT the gate per model class back into SPEC.md
+  - [ ] G.3.8 - first semantics/ tests land (provenance-annotated from G.3.5's port)
+
+## Phase H - scad-rs: the whole grammar
+- [ ] H.1 - Grammar inventory: bison file → conformance checklist doc (every production accounted for)
+- [ ] H.2 - Statements/items: assignments, module defs, function defs, use/include resolution, if/else, for/intersection_for, let/each, assert/echo
+- [ ] H.3 - Expressions complete: list comprehensions (every form), ranges, function literals, ternary, string escapes/unicode
+- [ ] H.4 - Customizer annotations survive: parameter comments/groups/ranges in the AST (lossless-enough)
+- [ ] H.5 - proptest print/parse roundtrip + the bison-derived conformance suite green
+- [ ] H.6 - cargo-fuzz target + SCHEDULED CI fuzz job + persisted/minimized corpus + trophy log (fuzz-from-first-commit doctrine starts here, not later)
+
+## Phase I - scad-rs: evaluator core
+- [ ] I.1 - Value model full: enum + NumList fast path + interned strings + lazy ranges; fast==slow BITWISE property via the shared fixed 4-lane accumulation order
+- [ ] I.2 - Scoping engine: lexical envs, dynamic $-variables, children()/late binding, module+function call machinery on the explicit stack
+- [ ] I.3 - Control flow + comprehensions + recursion bounded by memory — corner_brace-class deep recursion as the standing regression proof
+- [ ] I.4 - Builtin function library (~80: math/list/string/type predicates), each landing with its semantics/ test
+- [ ] I.5 - undef propagation + warning/echo text bug-for-bug (string-equal vs oracle)
+- [ ] I.6 - tracing spans on the call path + aggregating benchmark layer; release builds compile it out; overhead measured
+- [ ] I.7 - Kani proofs: stack-machine push/pop discipline, range-iteration termination
+
+## Phase J - scad-rs: geometry surface + cache
+- [ ] J.1 - Geometry backend trait; interface suite runs miri-on-mock AND ASAN-on-real-Manifold in CI (the split that replaced raw miri-on-FFI)
+- [ ] J.2 - 3D: primitives, multmatrix, booleans through Manifold; polyhedron with oracle-matching validation semantics
+- [ ] J.3 - 2D subsystem on Clipper2: square/circle/polygon/offset/projection + linear/rotate_extrude bridging 2D→3D with tessellation parity
+- [ ] J.4 - hull; import() via our STL/3MF readers; text/minkowski/surface = LOUD deferred stubs (blow up, complain, never silently wrong)
+- [ ] J.5 - Content-addressed CSG cache: node hash = subtree + resolved params + reaching $-context; in-memory tier + hit-rate counters (the on-disk tier stays a storage decision)
+
+## Phase K - scad-rs: differential harness + semantics corpus
+- [ ] K.1 - Harness v1: both engines, metric gate per model class, corpus tiers 1-3 wired in CI (OpenSCAD suite, BOSL2 tests, models/)
+- [ ] K.2 - semantics/ segmentation formalized: naming + provenance conventions; G.3/I tests migrated in
+- [ ] K.3 - ChaCha8-seeded grammar-directed program generator v0; seed logged per run; one-command failure replay
+- [ ] K.4 - Published artifacts per run: divergence report + the (initially empty) intrinsic matrix — the trend line starts before the intrinsics do
+
+## Phase L - scad-rs: the BOSL2 gauntlet (exit gate for the bet)
+- [ ] L.1 - Pinned BOSL2 test suite through scad-rs; divergences triaged into named buckets
+- [ ] L.2 - Burn-down: fixes land as semantics/ tests; expect this to expose evaluator gaps — that's the point
+- [ ] L.3 - models/ tree end-to-end (teardrop/onion/screw_hole, corner_brace, Underdesk); benchmark corpus captured via the tracing layer on every run
+- [ ] L.4 - Exit review: divergences zero-or-documented, perf-vs-oracle published; rung 2/3 (intrinsics, JIT) phase cut FROM THIS DATA
 
 ## Backlog (not yet phased)
 

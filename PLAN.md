@@ -16,7 +16,7 @@ Driven by `claude-plan-bridge` (FORMATv2). Hand-authored; run
   - [x] G.3.1 - lang/ crate scaffold: workspace sibling, error type, tracing dep (compiled-out default), clippy-pedantic baseline, CI lane (fmt/clippy/test)
   - [x] G.3.2 - winnow lexer: tokens, numbers/strings/identifiers, comments PRESERVED (customizer needs them later); every named parser wrapped in winnow trace() from day one (debug-feature-gated, zero cost off); lexer fuzz seed corpus started
   - [x] G.3.3 - parser core: expression precedence, module instantiation, argument lists incl. $-args; AST with source spans (LocatingSlice + .with_span()); winnow-native errors from production one — StrContext label+expected everywhere, cut_err at commit points, caret rendering from the context stack
-  - [ ] G.3.4 - evaluator skeleton: explicit-stack machine over the subset; Value v0 (Num/Bool/Str/NumList/Undef); $fn/$fa/$fs resolution
+  - [x] G.3.4 - evaluator skeleton: explicit-stack machine over the subset; Value v0 (Num/Bool/Str/NumList/Undef); $fn/$fa/$fs resolution
   - [ ] G.3.5 - lower sphere()/cube()/cylinder() to kernel::Solid — tessellation EXACTLY matching src/core primitives (ring/segment math ported, provenance noted)
   - [ ] G.3.6 - oracle runner: drive the openscad CLI, capture mesh + echo; VERIFY the deterministic-output flag (spec Q7) — what it sorts, what it doesn't
   - [ ] G.3.7 - metric experiment: implement the comparison tiers (quantized vertex-multiset, vol/area/Euler, boolean residual); sphere $fn=8→256 matrix; DOCUMENT the gate per model class back into SPEC.md
@@ -53,6 +53,7 @@ Driven by `claude-plan-bridge` (FORMATv2). Hand-authored; run
 - [ ] K.4 - Published artifacts per run: divergence report + the (initially empty) intrinsic matrix — the trend line starts before the intrinsics do
 
 ## Phase L - scad-rs: the BOSL2 gauntlet (exit gate for the bet)
+  Meta - This is where we should evaluate if BOSL2 is special or if it would be wiser to move towards a JIT approach for seen user defined OpenSCAD functions (with the ability to override to custom performance implementations)
 - [ ] L.1 - Pinned BOSL2 test suite through scad-rs; divergences triaged into named buckets
 - [ ] L.2 - Burn-down: fixes land as semantics/ tests; expect this to expose evaluator gaps — that's the point
 - [ ] L.3 - models/ tree end-to-end (teardrop/onion/screw_hole, corner_brace, Underdesk); benchmark corpus captured via the tracing layer on every run
@@ -87,3 +88,4 @@ Parked 2026-07-04 for the scad-rs pivot — the workflow tool works and stays in
 - **cargo-mutants mutation gates on the parser + evaluator — proves the tests CATCH bugs, not just run (kills survivors that fuzzing/proptest miss; complements the fuzzer). Wire at the H.5 / I test phases.** — added 2026-07-04.
 - **Enable clippy::allow_attributes on fab-lang (prefer #[expect] over #[allow] so a suppression fails once it's no longer needed) — the stricter sibling of allow_attributes_without_reason. Turn on once the suppression set stabilizes.** — added 2026-07-04.
 - **Migrate fab-scad/fab-geom/fab-gui/fab-web from edition 2021 to 2024 (fab-lang is already 2024). Mechanical via `cargo fix --edition` per crate + verify each. Do this when we're done working in lang/ — not before (avoid churning the established crates mid-lexer).** — added 2026-07-04.
+- **Evaluate make_mut copy-on-write (or an im-style persistent vector) for the NumList list-BUILD path — a BOSL2 VNF-math perf optimization. v0 uses immutable Rc<[f64]> (read/memory-optimal). Profile-driven at I.1 / the intrinsics work: measure whether BOSL2's concat/comprehension append-accumulation benefits vs the read-path cost. Internal to the Value enum, non-breaking to swap.** — added 2026-07-04.

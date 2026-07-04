@@ -1,0 +1,228 @@
+//! G.3.4 evaluator conformance corpus — OpenSCAD `Value.cc` semantics + the fragment formula.
+//!
+//! Arithmetic/undef rules are asserted bug-for-bug (dot product, `str+str`→undef, silent-truncate,
+//! `fmod`, `pow`, cross-type equality/ordering). The explicit-stack machine is proven on a 100k-deep
+//! chain (would overflow a recursive tree-walker). These seed the H.6 fuzz corpus.
+
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    reason = "integration-test helpers: unwrap/expect/panic ARE the assertions"
+)]
+
+use fab_lang::{Error, Scope, StmtKind, Value, eval_expr, fragments, parse};
+
+/// Evaluate a bare expression with a default scope.
+fn ev(src: &str) -> Value {
+    let prog = parse(&format!("v={src};")).expect("parses");
+    let StmtKind::Assignment { value, .. } = prog.stmts.into_iter().next().unwrap().kind else {
+        panic!("expected an assignment");
+    };
+    eval_expr(&value, &Scope::new()).expect("evaluates")
+}
+
+/// Evaluate expecting an error (a deferred construct).
+fn ev_err(src: &str) -> Error {
+    let prog = parse(&format!("v={src};")).expect("parses");
+    let StmtKind::Assignment { value, .. } = prog.stmts.into_iter().next().unwrap().kind else {
+        panic!("expected an assignment");
+    };
+    eval_expr(&value, &Scope::new()).unwrap_err()
+}
+
+fn num(n: f64) -> Value {
+    Value::Num(n)
+}
+fn list(xs: &[f64]) -> Value {
+    Value::num_list(xs.to_vec())
+}
+
+// ─────────────────────────────── numeric arithmetic ────────────────────────────────────────────
+
+#[test]
+fn number_arithmetic() {
+    assert_eq!(ev("1+2"), num(3.0));
+    assert_eq!(ev("5-3"), num(2.0));
+    assert_eq!(ev("2*3"), num(6.0));
+    assert_eq!(ev("6/2"), num(3.0));
+    assert_eq!(ev("5%3"), num(2.0)); // fmod
+    assert_eq!(ev("-5%3"), num(-2.0)); // fmod: sign of dividend
+    assert_eq!(ev("2^10"), num(1024.0)); // pow, not xor
+    assert_eq!(ev("1/0"), num(f64::INFINITY)); // IEEE
+    assert!(matches!(ev("0/0"), Value::Num(n) if n.is_nan())); // IEEE
+}
+
+#[test]
+fn vector_arithmetic_and_the_dot_product_trap() {
+    assert_eq!(ev("[1,2]+[3,4]"), list(&[4.0, 6.0]));
+    assert_eq!(ev("[5,5]-[1,2]"), list(&[4.0, 3.0]));
+    assert_eq!(ev("[1,2]+[3,4,5]"), list(&[4.0, 6.0])); // silent-truncate to shorter
+    assert_eq!(ev("2*[1,2]"), list(&[2.0, 4.0])); // scalar broadcast
+    assert_eq!(ev("[1,2]*2"), list(&[2.0, 4.0]));
+    assert_eq!(ev("[1,2]*[3,4]"), num(11.0)); // DOT PRODUCT (1*3+2*4), not element-wise
+    assert_eq!(ev("[6,4]/2"), list(&[3.0, 2.0]));
+    assert_eq!(ev("12/[2,3]"), list(&[6.0, 4.0]));
+    assert_eq!(ev("[1,2]*[3,4,5]"), Value::Undef); // unequal length → undef, not dot
+}
+
+#[test]
+fn undef_propagation() {
+    assert_eq!(ev("1+undef"), Value::Undef);
+    assert_eq!(ev("1-\"a\""), Value::Undef);
+    assert_eq!(ev("\"a\"+\"b\""), Value::Undef); // str + str is NOT concat
+    assert_eq!(ev("undef*1"), Value::Undef);
+    assert_eq!(ev("1/undef"), Value::Undef);
+    assert_eq!(ev("5%undef"), Value::Undef);
+    assert_eq!(ev("2^undef"), Value::Undef);
+    assert_eq!(ev("[]*[]"), Value::Undef); // empty vectors → undef
+}
+
+// ─────────────────────────────── comparison + logical ──────────────────────────────────────────
+
+#[test]
+fn equality_never_coerces() {
+    assert_eq!(ev("1==1"), Value::Bool(true));
+    assert_eq!(ev("1==2"), Value::Bool(false));
+    assert_eq!(ev("1==true"), Value::Bool(false)); // cross-type → false, no coercion
+    assert_eq!(ev("undef==undef"), Value::Bool(true));
+    assert_eq!(ev("1!=2"), Value::Bool(true));
+    assert_eq!(ev("[1,2]==[1,2]"), Value::Bool(true));
+}
+
+#[test]
+fn ordering() {
+    assert_eq!(ev("1<2"), Value::Bool(true));
+    assert_eq!(ev("2<=2"), Value::Bool(true));
+    assert_eq!(ev("3>2"), Value::Bool(true));
+    assert_eq!(ev("2>=2"), Value::Bool(true));
+    assert_eq!(ev("\"a\"<\"b\""), Value::Bool(true)); // string lexicographic
+    assert_eq!(ev("[1,2]<[1,3]"), Value::Bool(true)); // list: 1==1, then 2<3
+    assert_eq!(ev("[1,3]<[1,2]"), Value::Bool(false)); // list: 1==1, then 3>2
+    assert_eq!(ev("[1,2]<[1,2,3]"), Value::Bool(true)); // shorter < longer
+    assert_eq!(ev("[1,2]<[1,2]"), Value::Bool(false)); // equal
+    assert_eq!(ev("1<\"a\""), Value::Undef); // cross-type ordering → undef
+    assert_eq!(ev("(0/0)<1"), Value::Bool(false)); // NaN comparison → false
+    assert_eq!(ev("[0/0,1]<[1,2]"), Value::Bool(false)); // NaN in a list → false
+}
+
+#[test]
+fn logical_and_bitwise() {
+    assert_eq!(ev("true&&false"), Value::Bool(false));
+    assert_eq!(ev("true||false"), Value::Bool(true));
+    assert_eq!(ev("5|2"), num(7.0));
+    assert_eq!(ev("6&2"), num(2.0));
+    assert_eq!(ev("1<<3"), num(8.0));
+    assert_eq!(ev("16>>2"), num(4.0));
+    assert_eq!(ev("1<<64"), Value::Undef); // >= 64 shift → undef
+    assert_eq!(ev("1<<-1"), Value::Undef); // negative shift → undef
+    assert_eq!(ev("undef|1"), Value::Undef); // non-number → undef
+    assert_eq!(ev("5<<undef"), Value::Undef);
+}
+
+#[test]
+fn unary() {
+    assert_eq!(ev("-5"), num(-5.0));
+    assert_eq!(ev("-[1,2]"), list(&[-1.0, -2.0]));
+    assert_eq!(ev("-\"a\""), Value::Undef);
+    assert_eq!(ev("+5"), num(5.0)); // no-op
+    assert_eq!(ev("!true"), Value::Bool(false));
+    assert_eq!(ev("!0"), Value::Bool(true)); // 0 is falsy
+    assert_eq!(ev("~5"), num(-6.0)); // bitwise not
+    assert_eq!(ev("~\"a\""), Value::Undef);
+}
+
+// ─────────────────────────────── atoms + control ───────────────────────────────────────────────
+
+#[test]
+fn literals_idents_ternary_vectors() {
+    assert_eq!(ev("true"), Value::Bool(true));
+    assert_eq!(ev("undef"), Value::Undef);
+    assert_eq!(ev(r#""hi""#), Value::string("hi"));
+    assert_eq!(ev("$fn"), num(0.0)); // resolves the special default
+    assert_eq!(ev("nope"), Value::Undef); // unbound → undef
+    assert_eq!(ev("true?1:2"), num(1.0));
+    assert_eq!(ev("false?1:2"), num(2.0));
+    assert_eq!(ev("[1,2,3]"), list(&[1.0, 2.0, 3.0]));
+    assert_eq!(ev("[]"), list(&[]));
+}
+
+#[test]
+fn deferred_constructs_are_loud() {
+    assert!(matches!(ev_err("f(1)"), Error::Unimplemented(m) if m.contains("I.4")));
+    assert!(matches!(ev_err("a[0]"), Error::Unimplemented(m) if m.contains("I.1")));
+    assert!(matches!(ev_err("a.b"), Error::Unimplemented(m) if m.contains("I.1")));
+    assert!(matches!(ev_err("[0:5]"), Error::Unimplemented(m) if m.contains("I.1")));
+    assert!(matches!(ev_err("[1,true]"), Error::Unimplemented(m) if m.contains("I.1"))); // heterogeneous
+}
+
+// ─────────────────────────────── the explicit stack ────────────────────────────────────────────
+
+#[test]
+fn explicit_stack_evaluates_deep_chains_without_overflow() {
+    // A 100k-deep left-spine would blow a recursive tree-walker; the explicit stack grows the HEAP.
+    let chain = format!("{}1", "1+".repeat(100_000));
+    assert_eq!(ev(&chain), num(100_001.0));
+}
+
+// ─────────────────────────────── scope + $fn/$fa/$fs ────────────────────────────────────────────
+
+#[test]
+fn scope_defaults_lookup_bind() {
+    let mut s = Scope::new();
+    assert_eq!(s.fn_fa_fs(), (0.0, 12.0, 2.0)); // Builtins defaults
+    assert_eq!(s.lookup("$fn"), num(0.0));
+    assert_eq!(s.lookup("unbound"), Value::Undef);
+    s.bind("x", num(7.0));
+    assert_eq!(s.lookup("x"), num(7.0));
+    s.bind("$fn", Value::string("oops")); // non-number $-var → 0.0 via toDouble
+    assert_eq!(s.fn_fa_fs().0, 0.0);
+    assert_eq!(Scope::default().fn_fa_fs(), (0.0, 12.0, 2.0));
+}
+
+// ─────────────────────────────── the fragment formula ──────────────────────────────────────────
+
+#[test]
+fn fragment_formula() {
+    assert_eq!(fragments(5.0, 8.0, 12.0, 2.0), 8); // $fn > 0 → $fn (integer)
+    assert_eq!(fragments(5.0, 2.0, 12.0, 2.0), 3); // $fn > 0 but < 3 → clamp to 3
+    assert_eq!(fragments(1.0, 0.0, 12.0, 2.0), 5); // $fn=0: min(30, π)=3.14, floor 5 → 5
+    assert_eq!(fragments(5.0, 0.0, 12.0, 2.0), 16); // min(30, 5π=15.7) → ceil 16
+    assert_eq!(fragments(100.0, 0.0, 12.0, 2.0), 30); // $fa caps it: 360/12 = 30
+    assert_eq!(fragments(5.0, -1.0, 12.0, 2.0), 16); // $fn < 0 → 0 → $fa/$fs branch
+    assert_eq!(fragments(0.0, 0.0, 12.0, 2.0), 3); // r < GRID_FINE → 3
+    assert_eq!(fragments(f64::NAN, 0.0, 12.0, 2.0), 3); // non-finite r → 3
+    assert_eq!(fragments(5.0, f64::INFINITY, 12.0, 2.0), 3); // non-finite $fn → 3
+    assert!(fragments(5.0, 0.0, 0.0, 0.0) > 30); // $fa/$fs floored at 0.01 → large count
+}
+
+// ─────────────────────────────── value model + determinism ─────────────────────────────────────
+
+#[test]
+fn value_truthiness_and_type_name() {
+    assert!(!Value::Undef.is_truthy());
+    assert!(Value::Bool(true).is_truthy());
+    assert!(!Value::Num(0.0).is_truthy());
+    assert!(Value::Num(f64::NAN).is_truthy()); // NaN != 0 → truthy
+    assert!(!Value::string("").is_truthy());
+    assert!(Value::string("x").is_truthy());
+    assert!(!list(&[]).is_truthy());
+    assert!(list(&[0.0]).is_truthy()); // non-empty (even [0]) is truthy
+    for (v, name) in [
+        (Value::Undef, "undef"),
+        (Value::Bool(true), "bool"),
+        (num(1.0), "number"),
+        (Value::string("s"), "string"),
+        (list(&[1.0]), "list"),
+    ] {
+        assert_eq!(v.type_name(), name);
+        assert_eq!(v.clone(), v); // Clone + PartialEq
+        assert!(!format!("{v:?}").is_empty()); // Debug
+    }
+}
+
+#[test]
+fn evaluation_is_deterministic() {
+    let expr = "1 + 2*3 - [1,2]*[3,4] + (true ? 10 : 20)";
+    assert_eq!(ev(expr), ev(expr));
+}

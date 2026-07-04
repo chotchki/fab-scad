@@ -35,11 +35,13 @@
 //! rules apply in distributed builds via Apache-2.0 Manifold). See `README.md`.
 
 mod error;
+mod eval;
 mod lexer;
 mod mesh;
 mod parser;
 
 pub use error::{Error, Result};
+pub use eval::{Scope, Value, eval_expr, fragments};
 pub use lexer::{Lexed, Token, TokenKind, decode_str, lex, num_value};
 pub use mesh::Mesh;
 pub use parser::{

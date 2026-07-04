@@ -77,7 +77,7 @@ async fn libs_object() -> Result<JsValue> {
     if let Some(libs) = LIBS.with(|l| l.borrow().clone()) {
         return Ok(libs);
     }
-    let bytes = crate::fetch_bytes("openscad/libs.json").await?;
+    let bytes = crate::fetch_bytes(&format!("{}openscad/libs.json", crate::bundle_base())).await?;
     let text = String::from_utf8(bytes).map_err(|_| anyhow!("libs.json not utf-8"))?;
     let parsed = js_sys::JSON::parse(&text).map_err(|_| anyhow!("libs.json: bad json"))?;
     LIBS.with(|l| *l.borrow_mut() = Some(parsed.clone()));
@@ -93,8 +93,9 @@ fn get_worker() -> Result<web_sys::Worker> {
     }
     let opts = web_sys::WorkerOptions::new();
     opts.set_type(web_sys::WorkerType::Module);
-    let worker = web_sys::Worker::new_with_options("openscad/openscad-worker.js", &opts)
-        .map_err(|_| anyhow!("openscad worker failed to start"))?;
+    let url = format!("{}openscad/openscad-worker.js", crate::bundle_base());
+    let worker = web_sys::Worker::new_with_options(&url, &opts)
+        .map_err(|_| anyhow!("openscad worker failed to start ({url})"))?;
     WORKER.with(|w| *w.borrow_mut() = Some(worker.clone()));
     Ok(worker)
 }

@@ -51,6 +51,10 @@ cost on a real part: ~10 s first render including the lazy fetch, seconds after.
 - **Page chrome clearance:** the app's panel sits top-left inside the canvas; a page whose
   chrome (back button etc.) overlays that corner declares its height once —
   `<canvas id="fab-web" data-inset-top="44">` — and the panel starts below it. Default 44 px.
+- **Bundle base:** runtime fetches (the lazy `openscad/` module) default to DOCUMENT-relative,
+  which only works when the page lives inside the bundle dir. A page that mounts the bundle at
+  a versioned path declares it once — `data-base="/3d/editor/<version>/"` — the same path the
+  page already writes into its import statement.
 
 - **Relative fetches only.** The glue resolves `fab_web_bg.wasm` off `import.meta.url`, so the
   bundle works under ANY mount path (`/apps/fab/...`). Nothing in the bundle assumes an origin.

@@ -315,6 +315,26 @@ async fn maybe_render_scad(name: String, bytes: Vec<u8>) -> Result<(String, Vec<
     }
 }
 
+/// Where the bundle's members live, as the PAGE declares it: `<canvas id="fab-web"
+/// data-base="/3d/editor/0.8.2/">`. Defaults to document-relative (the reference-loader
+/// layout, where the page sits inside the bundle dir). Real sites mount the bundle in a
+/// VERSIONED subdir while the document has a clean URL — document-relative breaks there,
+/// which is exactly how beta found this.
+#[cfg(target_arch = "wasm32")]
+pub(crate) fn bundle_base() -> String {
+    web_sys::window()
+        .and_then(|w| w.document())
+        .and_then(|d| d.get_element_by_id("fab-web"))
+        .and_then(|c| c.get_attribute("data-base"))
+        .map(|mut b| {
+            if !b.ends_with('/') {
+                b.push('/');
+            }
+            b
+        })
+        .unwrap_or_default()
+}
+
 #[cfg(target_arch = "wasm32")]
 fn query_string() -> Option<String> {
     web_sys::window().and_then(|w| w.location().search().ok())

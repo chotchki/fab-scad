@@ -4,10 +4,9 @@
 //! `$fn == 0` branch). The `$fn/$fa/$fs` clamps happen HERE (OpenSCAD applies them at discretizer
 //! construction, before the formula).
 //!
-//! **[VERIFY at G.3.6]** the `$fn > 0` rounding is version-sensitive: master `ceil()`, 2021.01
-//! truncation. It only diverges for NON-INTEGER `$fn` (`$fn = 6.5` → 7 vs 6); integer `$fn` (the
-//! usual case, e.g. `$fn = 8` → 8) is identical. We match 2021.01 (truncation) as the stable oracle
-//! until G.3.6 pins the actual OpenSCAD version.
+//! The `$fn > 0` rounding is version-sensitive (master `ceil()`, 2021.01 truncation — diverges only
+//! for NON-INTEGER `$fn`: `$fn = 6.5` → 7 vs 6). RESOLVED at G.3.6: the installed oracle is nightly
+//! (2026.06.12 = master), so we match `ceil()`.
 
 use std::f64::consts::PI;
 
@@ -21,8 +20,8 @@ const FALLBACK: u32 = 3;
 
 /// The number of fragments a full circle of radius `r` is tessellated into, given `$fn`/`$fa`/`$fs`.
 ///
-/// `$fn > 0` → `$fn` itself (floored at 3). `$fn == 0` → `ceil(max(min(360/$fa, 2·π·r/$fs), 5))`.
-/// Degenerate (`r < GRID_FINE`, or non-finite `$fn`/`r`) → 3.
+/// `$fn > 0` → `ceil(max($fn, 3))` (master/nightly rounds up). `$fn == 0` →
+/// `ceil(max(min(360/$fa, 2·π·r/$fs), 5))`. Degenerate (`r < GRID_FINE`, or non-finite `$fn`/`r`) → 3.
 #[must_use]
 pub fn fragments(r: f64, fn_: f64, fa: f64, fs: f64) -> u32 {
     // Clamps applied before the formula (OpenSCAD does these at discretizer construction).
@@ -35,8 +34,9 @@ pub fn fragments(r: f64, fn_: f64, fa: f64, fs: f64) -> u32 {
     }
 
     let result = if fn_ > 0.0 {
-        // 2021.01: truncation via cast; master would ceil. Identical for integer $fn. [VERIFY G.3.6]
-        if fn_ >= 3.0 { fn_ } else { 3.0 }
+        // master/nightly rounds UP: ceil(max($fn, 3)). (2021.01 truncated; identical for integer $fn.)
+        // The installed oracle is nightly (2026.06.12), so we match ceil. G.3.6-resolved.
+        (if fn_ >= 3.0 { fn_ } else { 3.0 }).ceil()
     } else {
         // $fn == 0 branch — byte-identical master/legacy.
         (360.0 / fa).min(r * 2.0 * PI / fs).max(5.0).ceil()

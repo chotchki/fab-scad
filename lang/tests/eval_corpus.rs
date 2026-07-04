@@ -186,6 +186,7 @@ fn scope_defaults_lookup_bind() {
 #[test]
 fn fragment_formula() {
     assert_eq!(fragments(5.0, 8.0, 12.0, 2.0), 8); // $fn > 0 → $fn (integer)
+    assert_eq!(fragments(5.0, 6.5, 12.0, 2.0), 7); // $fn > 0 non-integer → ceil (nightly/master)
     assert_eq!(fragments(5.0, 2.0, 12.0, 2.0), 3); // $fn > 0 but < 3 → clamp to 3
     assert_eq!(fragments(1.0, 0.0, 12.0, 2.0), 5); // $fn=0: min(30, π)=3.14, floor 5 → 5
     assert_eq!(fragments(5.0, 0.0, 12.0, 2.0), 16); // min(30, 5π=15.7) → ceil 16

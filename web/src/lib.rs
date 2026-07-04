@@ -251,9 +251,12 @@ struct CutPlane(usize);
 #[derive(Component, Clone, Default)]
 struct StatusLabel;
 
-/// In-flight file pick: `None` payload = dialog cancelled. Single-flight.
+/// In-flight source load: `None` = dialog cancelled (silent); `Some(Err)` = a failure the
+/// STATUS LINE must show (a 404'd worker script once failed silently — never again).
+type PickResult = Option<Result<(String, Vec<u8>), String>>;
+
 #[derive(Resource, Default)]
-struct PickTask(Option<Task<Option<(String, Vec<u8>)>>>);
+struct PickTask(Option<Task<PickResult>>);
 
 /// `?demo` (web) / `--demo` (native): push the embedded sample through the EXACT upload path.
 fn demo_requested() -> bool {
@@ -289,32 +292,26 @@ fn bed_override() -> Option<f64> {
 
 /// .scad sources take one extra hop — the OpenSCAD worker renders them to STL bytes — then
 /// join the normal pipeline (present_model sees STL bytes either way, the name stays honest).
-/// Native fab-web has no worker; the desktop GUI is the native .scad front-end.
-async fn maybe_render_scad(name: String, bytes: Vec<u8>) -> Option<(String, Vec<u8>)> {
+/// Native fab-web has no worker; the desktop GUI is the native .scad front-end. Failures come
+/// back as `Err(text)` for the status line — silent failure already bit once.
+async fn maybe_render_scad(name: String, bytes: Vec<u8>) -> Result<(String, Vec<u8>), String> {
     if !name.to_ascii_lowercase().ends_with(".scad") {
-        return Some((name, bytes));
+        return Ok((name, bytes));
     }
     #[cfg(target_arch = "wasm32")]
     {
-        let source = match String::from_utf8(bytes) {
-            Ok(s) => s,
-            Err(e) => {
-                error!("{name}: not utf-8 scad ({e})");
-                return None;
-            }
-        };
-        match scad_worker::render(source).await {
-            Ok(stl) => Some((name, stl)),
-            Err(e) => {
-                error!("{name}: {e:#}");
-                None
-            }
-        }
+        let source =
+            String::from_utf8(bytes).map_err(|e| format!("{name}: not utf-8 scad ({e})"))?;
+        scad_worker::render(source)
+            .await
+            .map(|stl| (name.clone(), stl))
+            .map_err(|e| format!("{name}: {e:#}"))
     }
     #[cfg(not(target_arch = "wasm32"))]
     {
-        error!("{name}: .scad rendering is web-only here (use fab-gui natively)");
-        None
+        Err(format!(
+            "{name}: .scad rendering is web-only here (use fab-gui natively)"
+        ))
     }
 }
 
@@ -342,11 +339,8 @@ fn seed_source_request(mut task: ResMut<PickTask>) {
         task.0 = Some(AsyncComputeTaskPool::get().spawn(async move {
             let name = url.rsplit('/').next().unwrap_or(&url).to_string();
             match fetch_bytes(&url).await {
-                Ok(bytes) => maybe_render_scad(name, bytes).await,
-                Err(e) => {
-                    error!("?stl fetch: {e:#}");
-                    None
-                }
+                Ok(bytes) => Some(maybe_render_scad(name, bytes).await),
+                Err(e) => Some(Err(format!("fetching {url}: {e:#}"))),
             }
         }));
     }
@@ -354,7 +348,8 @@ fn seed_source_request(mut task: ResMut<PickTask>) {
     if let Some(path) = std::env::args().find_map(|a| a.strip_prefix("--stl=").map(String::from)) {
         let name = path.rsplit('/').next().unwrap_or(&path).to_string();
         let bytes = std::fs::read(&path).ok();
-        task.0 = Some(AsyncComputeTaskPool::get().spawn(async move { bytes.map(|b| (name, b)) }));
+        task.0 =
+            Some(AsyncComputeTaskPool::get().spawn(async move { bytes.map(|b| Ok((name, b))) }));
     }
 }
 
@@ -561,7 +556,7 @@ fn setup_ui(world: &mut World) {
         Children [
             (Text("fab") ThemedText),
             (
-                @FeathersButton { @variant: {ButtonVariant::Primary}, @caption: bsn!{ Text("Open STL") ThemedText } }
+                @FeathersButton { @variant: {ButtonVariant::Primary}, @caption: bsn!{ Text("Open (stl / 3mf / scad)") ThemedText } }
                 on(|_: On<Activate>, mut task: ResMut<PickTask>| {
                     if task.0.is_some() {
                         return; // dialog already up
@@ -577,7 +572,7 @@ fn setup_ui(world: &mut World) {
                             .await?;
                         let name = file.file_name();
                         let bytes = file.read().await;
-                        maybe_render_scad(name, bytes).await
+                        Some(maybe_render_scad(name, bytes).await)
                     }));
                 })
             ),
@@ -623,14 +618,24 @@ fn poll_picked_file(
     mats: ResMut<Assets<StandardMaterial>>,
     existing: Query<Entity, Or<(With<LoadedModel>, With<CutPlane>)>>,
     cams: Query<(&mut Transform, &mut Orbit), With<Camera3d>>,
-    labels: Query<&mut Text, With<StatusLabel>>,
+    mut labels: Query<&mut Text, With<StatusLabel>>,
 ) {
     let Some(t) = task.0.as_mut() else { return };
     let Some(done) = block_on(future::poll_once(t)) else {
         return;
     };
     task.0 = None;
-    let Some((name, bytes)) = done else { return }; // cancelled
+    let (name, bytes) = match done {
+        None => return, // cancelled
+        Some(Err(e)) => {
+            error!("{e}");
+            for mut t in &mut labels {
+                t.0 = e.clone();
+            }
+            return;
+        }
+        Some(Ok(nb)) => nb,
+    };
     present_model(
         &name, &bytes, &bed, part, &mut mode, commands, meshes, mats, existing, cams, labels,
     );

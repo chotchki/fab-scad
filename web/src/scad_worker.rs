@@ -58,7 +58,14 @@ pub async fn render(source: String) -> Result<Vec<u8>> {
                     .join(" | ")
             })
             .unwrap_or_default();
-        return Err(err(format!("{e} ({logs})")));
+        // JSC (Safari) blows its engine stack on deeply recursive models (BOSL2 attachable
+        // trees) that V8 renders fine — same wasm, different engine headroom. Say so.
+        let hint = if e.contains("Maximum call stack") {
+            " - this model's recursion exceeds this browser's WebAssembly stack; deep BOSL2 models currently need Chrome/Edge/Firefox"
+        } else {
+            ""
+        };
+        return Err(err(format!("{e}{hint} ({logs})")));
     }
     let stl = get("stl").ok_or_else(|| err("no stl in reply".into()))?;
     let bytes = Uint8Array::new(&stl).to_vec();

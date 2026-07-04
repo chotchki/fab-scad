@@ -26,6 +26,16 @@ asset is a single tar.gz the site build unpacks.
 | `manifest.json`       | `{version, entry, wasm, sha256:{...}}` — assert the contract at build time |
 | `index.reference.html`| a working loader page to CRIB FROM — the site owns the real document |
 
+## Known limitation: Safari + deeply recursive .scad
+
+Safari's JavaScriptCore gives WebAssembly less call-stack headroom than V8. Ordinary models
+(incl. multi-include BOSL2 parts) render fine; DEEPLY recursive ones (heavy attachable/
+tag_diff nesting) throw `RangeError: Maximum call stack size exceeded` at render — the SAME
+bundle renders them in Chrome/Edge/Firefox. Verified against byte-identical stages and three
+snapshot pins (2026.06.12/06.21/07.01): not a deploy issue, not fixable by pin-shopping. The
+app's error message names the workaround; a custom wasm build with a larger baked stack is
+the open lead (backlog). Hosting pages may want a one-line hint near the app.
+
 ## The geometry worker (C.2 — live)
 
 `geom/` ships fab-geom: the kernel (Manifold weld/plan/slice/export/section) as its OWN ~1 MB

@@ -91,9 +91,14 @@ Driven by `claude-plan-bridge` (FORMATv2). Hand-authored; run
 
 ## Backlog (not yet phased)
 
+- document gui startup
+- gui remembers last folder it was used against
 - **fab owns $fn: inject draft/final quality + strip `$fn = $preview ? …` from all scad model files** — added 2026-06-28.
+
+
 - **Showcase→slicer deep-link: project page hands its published STL into the slicer special page (same-origin fetch, COEP-safe) — publish-side wiring + slicer URL param** — added 2026-07-03.
 - **Resume the native channel: dispatch release-native.yml (mac DMG + Windows NSIS artifacts), fill winget InstallerSha256 from the release, decide the signing purchases (docs/packaging.md)** — added 2026-07-03.
 - **Colored 3mf EXPORT: assemblies export per-part pieces as separate objects with extruder mapping (distinct color → Bambu AMS slot; extend bambu::Placed + model_settings extruder) — the other half of A.9's color carry-through** — added 2026-07-03.
 - **fab-web wire-size stretch: below 8.5 → ≤7 MiB brotli needs build-std (opt-size std, panic=abort) and/or naga shader stripping — feature-level surgery is EXHAUSTED (measured: meta-group trim ~1 MB, granular assembly ~0.2 MB; the weight is bevy_render/wgpu/naga)** — added 2026-07-03.
 - B.6 - Customizer stretch: expose the .scad's top-level params in the panel, tweak → worker re-render (defer if B.1-B.5 drag) *(deferred from phase `B` on 2026-07-03)*
+- **Safari deep-recursion fix, the real one: build openscad wasm ourselves (openscad-wasm docker recipe) with -sSTACK_SIZE=8MB+, test corner_brace.scad under JSC via safaridriver; if the bigger baked stack fixes it, swap the pin to our build (GPL stance unchanged — still unmodified source, we only relink); if not, it's JSC engine frames and upstream/WebKit territory** — added 2026-07-04.

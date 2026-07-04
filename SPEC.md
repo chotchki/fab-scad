@@ -134,6 +134,25 @@ Corpus, in escalating order:
 3. Our models/ tree (~60 real projects — corner_brace.scad is the Safari-killer poster child).
 4. Generated programs (differential fuzzing, below).
 
+## Determinism doctrine (decided — imported from quicksight)
+
+ANY randomness, anywhere, derives from a single seeded PRNG so the initial seed determines
+it all — test reproduction is trivial by construction. Two layers, because Rust adds teeth:
+
+- **Harness determinism:** the grammar-directed program generator, proptest strategies,
+  corpus sampling, shuffling — all draw from ONE seed per run, logged in every CI artifact
+  and failure report. The PRNG is ALGORITHM-PINNED (`ChaCha8Rng`), never `StdRng` — StdRng's
+  algorithm may change between rand releases, which turns "reproducible" into "reproducible
+  until cargo update". Failure = seed + generator version = exact replay. (proptest's
+  persisted regressions and libFuzzer's crash artifacts already conform — the input IS the
+  seed there.)
+- **Engine determinism:** same source → BIT-IDENTICAL output, every run, every platform we
+  ship. Concretely: no HashMap iteration order anywhere it can leak into output (echo order,
+  tessellation, traversal) — BTreeMap/IndexMap at any order-visible surface; no
+  time/address/thread-id dependence in evaluation. This isn't just hygiene: the
+  content-addressed cache is UNSOUND without it (same key must mean same value), and the
+  differential harness needs the engine side as reproducible as the generator side.
+
 ## Testing + verification
 
 Layered, cheapest-first; each layer catches what the previous can't:

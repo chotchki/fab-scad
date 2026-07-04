@@ -68,6 +68,14 @@ escape, not community respect.
   the attempt/backtrack tree; without it, zero cost). Same compile-out-like-a-logger
   doctrine as the evaluator's tracing spans — parse decisions and evaluation each observable
   from their idiomatic tool, both free in release.
+  **Winnow-NATIVE error discipline (decided) — lean on the nom heritage, don't reinvent it:**
+  `ContextError` + `StrContext::Label`/`Expected` on EVERY named production (errors name the
+  construct and what was expected, never bare "parse error"); `cut_err` at commit points
+  (past `module ident (` there is no backtracking — the error points AT the problem, not at
+  some outer alternative that was never viable); `Located` input so AST nodes + diagnostics
+  carry spans natively. The only part we own: RENDERING — winnow's context stack + spans →
+  caret-style terminal output, built once, and the same structured diagnostic feeds the
+  GUI/customizer later. No bespoke error types, no external parser-error framework.
 - **Evaluator:** the hard 90%. Tree-walker, EXPLICIT STACK (no host recursion — the Safari
   class of failure becomes structurally impossible), lexical+dynamic scoping exactly as
   OpenSCAD does it ($-variables are dynamically scoped; `children()` is late-bound), value

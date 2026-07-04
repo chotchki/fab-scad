@@ -15,7 +15,7 @@ Driven by `claude-plan-bridge` (FORMATv2). Hand-authored; run
 - [ ] G.3 - Tracer bullet: sphere-vs-oracle end to end, metric gate chosen from data
   - [ ] G.3.1 - lang/ crate scaffold: workspace sibling, error type, tracing dep (compiled-out default), clippy-pedantic baseline, CI lane (fmt/clippy/test)
   - [ ] G.3.2 - winnow lexer: tokens, numbers/strings/identifiers, comments PRESERVED (customizer needs them later); every named parser wrapped in winnow trace() from day one (debug-feature-gated, zero cost off); lexer fuzz seed corpus started
-  - [ ] G.3.3 - parser core: expression precedence, module instantiation, argument lists incl. $-args; AST with source spans
+  - [ ] G.3.3 - parser core: expression precedence, module instantiation, argument lists incl. $-args; AST with source spans (Located input); winnow-native errors from production one — StrContext label+expected everywhere, cut_err at commit points, caret rendering from the context stack
   - [ ] G.3.4 - evaluator skeleton: explicit-stack machine over the subset; Value v0 (Num/Bool/Str/NumList/Undef); $fn/$fa/$fs resolution
   - [ ] G.3.5 - lower sphere()/cube()/cylinder() to kernel::Solid — tessellation EXACTLY matching src/core primitives (ring/segment math ported, provenance noted)
   - [ ] G.3.6 - oracle runner: drive the openscad CLI, capture mesh + echo; VERIFY the deterministic-output flag (spec Q7) — what it sorts, what it doesn't

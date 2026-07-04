@@ -20,6 +20,8 @@ pub mod manifest;
 pub mod num;
 #[cfg(feature = "native")]
 pub mod openscad;
+#[cfg(feature = "native")]
+pub mod oracle;
 pub mod pack;
 pub mod printers;
 #[cfg(feature = "native")]

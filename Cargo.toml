@@ -29,9 +29,12 @@ kernel = ["dep:manifold3d", "dep:threemf", "dep:zip", "dep:quick-xml"]
 # Everything that needs an OS (18.3): the OpenSCAD spawn, publish (blocking reqwest), project
 # scaffolding, the smoke sweep, and the CLI-only deps. `--no-default-features` is the wasm32-safe
 # core — pure geometry/slicing/spec logic, no process spawn, no network.
-native = ["dep:reqwest", "dep:clap", "dep:rayon"]
+native = ["dep:reqwest", "dep:clap", "dep:rayon", "dep:fab-lang"]
 
 [dependencies]
+# scad-rs, our OpenSCAD reimplementation — the differential harness's OTHER engine (G.3.7). Pure
+# Rust + wasm-clean, but only the native differ uses it for now, so gate it behind `native`.
+fab-lang = { path = "lang", optional = true }
 clap = { version = "4", features = ["derive"], optional = true }
 anyhow = "1"
 serde = { version = "1", features = ["derive"] }

@@ -500,6 +500,21 @@ impl Solid {
     pub fn bbox(&self) -> Option<([f64; 3], [f64; 3])> {
         self.0.bounding_box().map(|b| (b.min(), b.max()))
     }
+
+    /// Enclosed volume — a topology-invariant scalar the differential harness compares (G.3.7).
+    pub fn volume(&self) -> f64 {
+        self.0.volume()
+    }
+
+    /// Total surface area — the differential harness's second bulk metric.
+    pub fn surface_area(&self) -> f64 {
+        self.0.surface_area()
+    }
+
+    /// Genus (handle count). Euler characteristic of the closed surface is `2 - 2·genus`.
+    pub fn genus(&self) -> i32 {
+        self.0.genus()
+    }
 }
 
 /// Parse an STL (binary or ASCII) into a flat triangle soup (3 verts/triangle, dup'd at shared

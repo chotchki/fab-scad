@@ -1,9 +1,11 @@
 //! Primitive tessellation → [`Mesh`] — sphere/cube/cylinder, matching OpenSCAD `primitives.cc`.
 //!
-//! VERTICES are exact (OpenSCAD's ring math + exact-quadrant [`trig`](super::trig)); this is the
-//! conformance-critical part the differential harness checks. The TRIANGULATION of the n-gon caps +
-//! quad sides is a sensible fan/split — matching OpenSCAD's exact triangle SET (it tessellates its
-//! PolySet before Manifold) is the strictest metric tier's job, resolved empirically at G.3.7.
+//! VERTICES are exact (OpenSCAD's ring math + exact-quadrant [`trig`](super::trig)) — the vertices
+//! ARE the solid, so this is the conformance-critical part. The TRIANGULATION is our OWN fan/split
+//! and deliberately does NOT reproduce OpenSCAD's: G.3.7 established that the gate for curved solids
+//! is the boolean-difference RESIDUAL, which is triangulation-independent — so ANY valid
+//! closed-manifold triangulation of these vertices is conformant. We have to be a manifold, not a
+//! mimic. (Bit-exact trig still earns its keep on the polyhedral/exact classes + BOSL2 vertex math.)
 //!
 //! Degenerate inputs (r/size/h ≤ 0, non-finite) return an empty mesh (OpenSCAD returns empty
 //! geometry, not an error). A representability guard keeps `u32` indices from overflowing on an

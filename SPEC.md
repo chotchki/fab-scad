@@ -143,10 +143,12 @@ each independently shippable:
 ## Oracle + corpus
 
 The oracle is stock OpenSCAD running stock BOSL2 — natively via the CLI we've always wrapped
-(CI installs it today), no custom build required. **Use OpenSCAD's deterministic/predictable
-output mode in the harness** (sorted/reproducible export ordering) — it collapses a chunk of
-the mesh-comparison problem at the source. (Exact flag + coverage to verify in G.3; the
-float-jitter problem remains real regardless.)
+(CI installs it today), no custom build required. **Determinism (G.3.6 RESOLVED):** the export
+is byte-identical run-to-run with NO flag — there is no "sort the output" mode to enable, and
+vertex/face order is GENERATION order (ring-major, same as scad-rs), not canonicalized. So the
+harness compares vertices as a MULTISET, order-independent. The float-jitter AND export-
+quantization problems (the oracle only writes OFF at ~6 digits, STL at f32) remain real
+regardless — they set the metric FLOOR at ~1e-6, so exact-f64 through a file is off the table.
 
 Corpus, in escalating order:
 1. OpenSCAD's own test suite (GPL, ours to use directly now).
@@ -203,16 +205,22 @@ Layered, cheapest-first; each layer catches what the previous can't:
   sees across FFI. Between miri-on-mock and ASAN-on-real, the boundary is covered from both
   sides.
 - **Differential testing (the workhorse).** Same source → scad-rs and oracle → compare.
-  Mesh equality is subtle (triangulation order, float jitter — even with deterministic
-  output mode). Candidate metrics, strictest-first: exact vertex-multiset match after
-  canonical sort+quantize; volume + surface area + Euler characteristic within epsilon;
-  boolean-difference residual volume ≈ 0 (`A−B` and `B−A` in Manifold — the honest "same
-  solid" test, machinery we already own). Echo/console output compares EXACTLY (BOSL2
-  asserts print — string equality is free fidelity signal).
-  **The G.3 MVP is exactly this question made small (decided):** low-poly sphere first —
-  what is the STRICTEST comparison that passes `sphere($fn=8)` against the oracle? Then
-  scale $fn up and watch which tiers survive. The metric GATE is chosen empirically from
-  that experiment, per model class (polyhedral = stricter tier, curved = residual tier).
+  Mesh equality is subtle (triangulation order, float jitter, and the oracle EXPORT quantizes),
+  so the gate is tolerance-based. **G.3.7 ran the experiment (sphere r=10, `$fn` 8→256 vs the
+  nightly oracle) and RESOLVED the gate per model class:**
+    - **Boolean-difference residual** — `vol((A−B) ∪ (B−A)) / vol(A)` in Manifold — is the gate
+      for CURVED solids: triangulation-independent, "same solid" by construction, and it held at
+      ~5e-7 flat across the whole sweep (that ~1e-6 floor IS the export precision — scad-rs is as
+      close as a file round-trip permits). Backstop: volume + surface area within ~1e-7 relative,
+      genus EXACT (0/0 every rung). Gate threshold: residual < 1e-5.
+    - **Vertex-multiset** (canonical quantize) is a LOW-resolution / POLYHEDRAL gate only. It
+      passed at `$fn`≤32 (eps 1e-5) but the quantization-boundary straddle makes it fragile as
+      vertices densify (`$fn`≥64 read "none" while every other tier stayed tiny — a grid artifact,
+      NOT divergence). Exact/polyhedral classes can use it; curved classes gate on residual.
+    - Bonus: vertex AND triangle counts matched the oracle EXACTLY at every rung (32→32768 verts,
+      60→65532 tris) — the tessellation port is faithful, not merely close. The exact-quadrant
+      trig even reproduces the oracle's `-0.0` at θ=180.
+  Echo/console output compares EXACTLY (BOSL2 asserts print — string equality is free fidelity).
 - **Property-based (proptest).** Parser: print(parse(s)) roundtrips; parse never panics.
   Evaluator invariants: scope push/pop balance, explicit-stack depth == semantic depth,
   numeric-list fast path == boxed slow path on random inputs (the fast paths get tested
@@ -251,8 +259,9 @@ Layered, cheapest-first; each layer catches what the previous can't:
 
 ## Open questions (remaining)
 
-1. ~~Mesh-equality metric~~ → RESOLVED as G.3's empirical MVP: strictest-passing tier on
-   low-poly sphere, scaled up, gate chosen per model class.
+1. ~~Mesh-equality metric~~ → RESOLVED (G.3.7 sphere sweep vs the nightly oracle): boolean-
+   residual gate (< 1e-5) for curved classes, vertex-multiset for polyhedral, with a vol/area/
+   genus backstop. Sphere held at ~5e-7 residual across `$fn` 8→256; see Testing + verification.
 2. ~~Value representation~~ → RESOLVED: enum + fast-path variants (NumList etc.).
    NaN-boxing rejected on SIMD (no upside, tag-check + canonicalization tax), crate reality
    (nothing maintained post-strict-provenance) and proof burden. Revisiting requires a

@@ -136,10 +136,10 @@ impl SweepCache {
             if lines.next() == Some(header.as_str()) {
                 for l in lines {
                     let mut it = l.splitn(3, '\t');
-                    if let (Some(h), Some(f), Some(p)) = (it.next(), it.next(), it.next()) {
-                        if let (Ok(h), Ok(f)) = (h.parse::<u64>(), f.parse::<u64>()) {
-                            entries.insert(PathBuf::from(p), (h, f));
-                        }
+                    if let (Some(h), Some(f), Some(p)) = (it.next(), it.next(), it.next())
+                        && let (Ok(h), Ok(f)) = (h.parse::<u64>(), f.parse::<u64>())
+                    {
+                        entries.insert(PathBuf::from(p), (h, f));
                     }
                 }
             }

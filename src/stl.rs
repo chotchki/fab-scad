@@ -5,7 +5,7 @@
 
 use std::path::Path;
 
-use anyhow::{ensure, Context, Result};
+use anyhow::{Context, Result, ensure};
 
 /// Per-vertex positions and normals (3 vertices per triangle, flat).
 pub struct StlMesh {

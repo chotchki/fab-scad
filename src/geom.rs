@@ -34,11 +34,7 @@ pub fn norm(a: V3) -> f64 {
 /// Unit vector; returns the input unchanged if it's ~zero (avoid NaN).
 pub fn normalize(a: V3) -> V3 {
     let n = norm(a);
-    if n < 1e-12 {
-        a
-    } else {
-        scale(a, 1.0 / n)
-    }
+    if n < 1e-12 { a } else { scale(a, 1.0 / n) }
 }
 
 /// Angle between `a` and `b`, in DEGREES (0..=180).

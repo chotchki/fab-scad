@@ -3,7 +3,7 @@
 //! implementation. Bincode-safe by construction: plain f64s, no untagged enums (`Num` maps at
 //! the edge), meshes as raw `Vec<u8>`.
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use serde::{Deserialize, Serialize};
 
 use crate::manifest::Connector;

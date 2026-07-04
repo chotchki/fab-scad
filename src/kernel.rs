@@ -8,7 +8,7 @@
 //! shape instead of raw bindings. Import (11.2), STL/3mf export (11.3), the slicer (11.4), and the
 //! connectors (11.6) build on it.
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use manifold3d::{CrossSection, Manifold, MeshGL};
 use std::collections::HashMap;
 use std::marker::PhantomData;
@@ -784,7 +784,7 @@ mod tests {
         let (d, ang, slop) = (10.0, 45.0, 0.2);
         let peg = Solid::onion(d, ang, 64);
         let socket = Solid::onion(d + 2.0 * slop, ang, 64); // grow the whole onion by slop
-                                                            // The peg drops fully into the socket — self-consistent, no BOSL2 dependency.
+        // The peg drops fully into the socket — self-consistent, no BOSL2 dependency.
         assert!(
             peg.difference(&socket).is_empty(),
             "peg should fit inside the slop-grown socket"
@@ -823,7 +823,7 @@ mod tests {
             min[2]
         ); // -insert_depth
         assert!((max[2] - 12.0).abs() < 1e-6, "through length {}", max[2]); // +through
-                                                                            // Plain (cylinder) shaft: symmetric in Y, no peak.
+        // Plain (cylinder) shaft: symmetric in Y, no peak.
         assert!(
             (max[1] - 3.0).abs() < 0.1 && (min[1] + 3.0).abs() < 0.1,
             "round shaft ±r in Y"

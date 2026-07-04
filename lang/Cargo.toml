@@ -22,9 +22,9 @@ trace = ["winnow/debug"]
 # already in the workspace tree via toml_edit, and toml/toml_edit are native-only so this adds
 # no wasm bloat. The `debug` feature (parser trace tree) rides the crate `trace` feature above.
 winnow = "1"
-# Typed public errors. Already in the workspace lock at 1.x, so this adds nothing to the graph.
-# The PARSER's errors stay winnow-native (SPEC); this is only the crate's outer boundary.
-thiserror = "1"
+# Typed public errors — the right call for a library boundary (vs anyhow, which fab-scad uses as
+# an app). The PARSER's errors stay winnow-native (SPEC); this is only the crate's outer boundary.
+thiserror = "2"
 # Evaluator/parse observability, treated exactly like a logger: the macros live here, the level
 # and subscriber are the linking binary's call. See the crate docs for the compile-out story.
 tracing = "0.1"

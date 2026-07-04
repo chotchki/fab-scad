@@ -107,8 +107,8 @@ pub fn best_up(tris: &[[V3; 3]], cut_normals: &[V3]) -> V3 {
         .filter(|(_, s)| s.1 <= min_over + tol)
         // Max contact; on a contact tie, the earliest candidate (smaller index) wins.
         .max_by(|a, b| {
-            a.1 .2
-                .partial_cmp(&b.1 .2)
+            a.1.2
+                .partial_cmp(&b.1.2)
                 .unwrap_or(std::cmp::Ordering::Equal)
                 .then(b.0.cmp(&a.0))
         })

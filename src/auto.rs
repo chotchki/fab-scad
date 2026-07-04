@@ -187,7 +187,7 @@ pub fn make(
     gap: f64,
 ) -> Result<crate::bambu::ExportSummary> {
     use crate::kernel::Solid;
-    use anyhow::{bail, Context};
+    use anyhow::{Context, bail};
 
     std::fs::create_dir_all(out_dir)?;
     let stem = source
@@ -330,7 +330,7 @@ mod tests {
         let (min, max) = ([0.0; 3], [500.0, 500.0, 500.0]);
         assert_eq!(axial_room(&cuts, 0, min, max), (100.0, 200.0)); // [0..100..300]
         assert_eq!(axial_room(&cuts, 1, min, max), (200.0, 200.0)); // [100..300..500]
-                                                                    // The Y cut ignores the X cuts entirely.
+        // The Y cut ignores the X cuts entirely.
         assert_eq!(axial_room(&cuts, 2, min, max), (250.0, 250.0));
     }
 
@@ -422,9 +422,10 @@ mod tests {
             p.cuts
         );
         assert!(!p.connectors.is_empty(), "onions seeded on the cut faces");
-        assert!(p
-            .connectors
-            .iter()
-            .all(|c| c.kind == "onion" && c.size.is_some()));
+        assert!(
+            p.connectors
+                .iter()
+                .all(|c| c.kind == "onion" && c.size.is_some())
+        );
     }
 }

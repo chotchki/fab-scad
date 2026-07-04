@@ -124,10 +124,10 @@ pub fn plan(size: [f64; 3], bed: [f64; 3]) -> Plan {
             continue;
         }
         let f = others(size, up);
-        if let Some(deg) = min_rotation(f[0], f[1], bx, by) {
-            if rot.is_none_or(|(_, d)| deg < d) {
-                rot = Some((up, deg));
-            }
+        if let Some(deg) = min_rotation(f[0], f[1], bx, by)
+            && rot.is_none_or(|(_, d)| deg < d)
+        {
+            rot = Some((up, deg));
         }
     }
     if let Some((up, degrees)) = rot {

@@ -84,13 +84,17 @@ fn slab_pieces_match_openscad() {
 
             let (kmin, kmax) = kpiece.bbox().unwrap();
             let (omin, omax) = opiece.bbox().unwrap();
-            assert!(approx(kmin, omin, 1e-3) && approx(kmax, omax, 1e-3),
-                "bbox mismatch cuts={cuts:?} piece={idx:?}: kernel {kmin:?}..{kmax:?} vs os {omin:?}..{omax:?}");
+            assert!(
+                approx(kmin, omin, 1e-3) && approx(kmax, omax, 1e-3),
+                "bbox mismatch cuts={cuts:?} piece={idx:?}: kernel {kmin:?}..{kmax:?} vs os {omin:?}..{omax:?}"
+            );
 
             let (kt, ot) = (kpiece.num_tri() as i64, opiece.num_tri() as i64);
             let tol = (ot / 10).max(24); // cut-face triangulation differs; allow ~10% or 24 tris
-            assert!((kt - ot).abs() <= tol,
-                "tri-count mismatch cuts={cuts:?} piece={idx:?}: kernel {kt} vs os {ot} (tol {tol})");
+            assert!(
+                (kt - ot).abs() <= tol,
+                "tri-count mismatch cuts={cuts:?} piece={idx:?}: kernel {kt} vs os {ot} (tol {tol})"
+            );
         }
         eprintln!("parity OK for cuts {cuts:?}: {} pieces", pieces.len());
     }
@@ -216,8 +220,10 @@ fn connectors_match_openscad() {
         // 0.5mm for the two tessellations (BOSL2 onion vs sphere∪cone).
         let (kmin, kmax) = kpiece.bbox().unwrap();
         let (omin, omax) = opiece.bbox().unwrap();
-        assert!(approx(kmin, omin, 0.5) && approx(kmax, omax, 0.5),
-            "connector bbox mismatch piece {idx:?}: kernel {kmin:?}..{kmax:?} vs os {omin:?}..{omax:?}");
+        assert!(
+            approx(kmin, omin, 0.5) && approx(kmax, omax, 0.5),
+            "connector bbox mismatch piece {idx:?}: kernel {kmin:?}..{kmax:?} vs os {omin:?}..{omax:?}"
+        );
         eprintln!(
             "connector parity OK piece {idx:?}: kernel {} tris, os {} tris",
             kpiece.num_tri(),

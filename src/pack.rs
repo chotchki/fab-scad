@@ -9,7 +9,7 @@
 
 use std::cmp::Ordering;
 
-use anyhow::{ensure, Result};
+use anyhow::{Result, ensure};
 
 /// A rectangular footprint to pack: extent in X and Y (mm). The packer may rotate it 90°.
 #[derive(Clone, Copy, Debug)]

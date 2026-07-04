@@ -127,10 +127,10 @@ pub fn closure(entry: &Path, search: &[PathBuf]) -> BTreeSet<PathBuf> {
         };
         let dir = path.parent().unwrap_or_else(|| Path::new("."));
         for name in parse_deps(&src) {
-            if let Some(dep) = resolve(&name, dir, search) {
-                if !seen.contains(&dep) {
-                    stack.push(dep);
-                }
+            if let Some(dep) = resolve(&name, dir, search)
+                && !seen.contains(&dep)
+            {
+                stack.push(dep);
             }
         }
     }

@@ -20,7 +20,7 @@
 use std::io::{Seek, Write};
 use std::path::Path;
 
-use anyhow::{ensure, Context, Result};
+use anyhow::{Context, Result, ensure};
 
 use crate::geom;
 use crate::pack::{self, Footprint};
@@ -53,11 +53,7 @@ fn column_count(n: usize) -> usize {
     }
     let v = (n as f64).sqrt();
     let r = v.round();
-    if v > r {
-        r as usize + 1
-    } else {
-        r as usize
-    }
+    if v > r { r as usize + 1 } else { r as usize }
 }
 
 /// World-space min-corner of plate `p` in Bambu's global grid. Plates tile a near-square grid in ONE

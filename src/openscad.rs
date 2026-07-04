@@ -66,6 +66,8 @@ pub struct Report {
     pub timed_out: bool,
     pub ok: bool,
     pub warnings: Vec<String>,
+    /// `ECHO:` lines from the run, in order — the oracle's console output (G.3.6 differential harness).
+    pub echo: Vec<String>,
 }
 
 impl Openscad {
@@ -195,6 +197,12 @@ impl Openscad {
             .filter(|l| l.contains("WARNING") || l.contains("ERROR:"))
             .map(str::to_string)
             .collect();
+        // Echo goes to stderr as `ECHO: …` lines (verified G.3.6) — the oracle's console output.
+        let echo = stderr
+            .lines()
+            .filter(|l| l.trim_start().starts_with("ECHO:"))
+            .map(str::to_string)
+            .collect();
 
         let ok = !timed_out && status.map(|s| s.success()).unwrap_or(false);
         Ok(Report {
@@ -203,16 +211,17 @@ impl Openscad {
             timed_out,
             ok,
             warnings,
+            echo,
         })
     }
 }
 
 fn ensure_parent(p: &Path) -> Result<()> {
-    if let Some(parent) = p.parent() {
-        if !parent.as_os_str().is_empty() {
-            fs::create_dir_all(parent)
-                .with_context(|| format!("failed to create {}", parent.display()))?;
-        }
+    if let Some(parent) = p.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
     }
     Ok(())
 }

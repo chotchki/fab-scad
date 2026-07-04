@@ -2615,7 +2615,7 @@ dependencies = [
 name = "fab-lang"
 version = "0.1.0"
 dependencies = [
- "thiserror 1.0.69",
+ "thiserror 2.0.18",
  "tracing",
  "winnow 1.0.3",
 ]

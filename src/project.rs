@@ -9,7 +9,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 
 /// Where designs live, relative to the fab-scad root (the scad-models submodule).
 pub fn models_dir(root: &Path) -> PathBuf {

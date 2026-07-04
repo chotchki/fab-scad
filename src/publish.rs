@@ -15,7 +15,7 @@
 use std::path::Path;
 use std::time::Duration;
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
 use serde::Deserialize;
 
 use crate::openscad::Openscad;

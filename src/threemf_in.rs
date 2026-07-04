@@ -8,7 +8,7 @@
 use std::collections::HashMap;
 use std::io::{Cursor, Read};
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
 use threemf::model::{Model, Object};
 
 /// Basematerial group id → displaycolors, in `<m:base>` order. Parsed by US with quick-xml on
@@ -163,10 +163,10 @@ fn read_materials(bytes: &[u8]) -> Result<Materials> {
                         if let Some(id) = group {
                             materials.entry(id).or_default();
                         }
-                    } else if local.as_ref() == b"base" {
-                        if let (Some(id), Some(c)) = (group, attr("displaycolor")) {
-                            materials.entry(id).or_default().push(c);
-                        }
+                    } else if local.as_ref() == b"base"
+                        && let (Some(id), Some(c)) = (group, attr("displaycolor"))
+                    {
+                        materials.entry(id).or_default().push(c);
                     }
                 }
                 Event::End(e) if e.local_name().as_ref() == b"basematerials" => group = None,

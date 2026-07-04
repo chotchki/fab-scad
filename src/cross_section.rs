@@ -11,7 +11,7 @@ use std::path::Path;
 use std::time::Duration;
 
 #[cfg(feature = "native")]
-use anyhow::{bail, ensure, Context, Result};
+use anyhow::{Context, Result, bail, ensure};
 
 #[cfg(feature = "native")]
 use crate::openscad::Openscad;
@@ -81,10 +81,10 @@ fn parse_loops(svg: &str) -> Vec<Vec<[f64; 2]>> {
                     }
                 }
                 _ => {
-                    if let Some((x, y)) = tok.split_once(',') {
-                        if let (Ok(x), Ok(y)) = (x.parse(), y.parse()) {
-                            pts.push([x, y]);
-                        }
+                    if let Some((x, y)) = tok.split_once(',')
+                        && let (Ok(x), Ok(y)) = (x.parse(), y.parse())
+                    {
+                        pts.push([x, y]);
                     }
                 }
             }
@@ -378,7 +378,7 @@ mod tests {
         assert_eq!(fit_diameter(&sq, [19.5, 0.0], 1.0, 16.0), 0.0);
         // a thin wall returns a small (sub-min) diameter rather than an oversized one
         assert!((fit_diameter(&sq, [17.5, 0.0], 1.0, 16.0) - 3.0).abs() < 1e-9); // 2*(2.5-1)
-                                                                                 // a hole pulls the size down too
+        // a hole pulls the size down too
         let with_hole = vec![
             sq[0].clone(),
             vec![[4.0, -2.0], [8.0, -2.0], [8.0, 2.0], [4.0, 2.0]],
@@ -505,15 +505,21 @@ mod tests {
     #[cfg(feature = "native")]
     fn projection_scad_per_axis() {
         let p = Path::new("m.stl");
-        assert!(projection_scad(p, 0, 5.0)
-            .unwrap()
-            .contains("rotate([0, 90, 0]) translate([-5, 0, 0])"));
-        assert!(projection_scad(p, 1, -3.0)
-            .unwrap()
-            .contains("rotate([-90, 0, 0]) translate([0, 3, 0])"));
-        assert!(projection_scad(p, 2, 0.0)
-            .unwrap()
-            .contains("translate([0, 0, 0])"));
+        assert!(
+            projection_scad(p, 0, 5.0)
+                .unwrap()
+                .contains("rotate([0, 90, 0]) translate([-5, 0, 0])")
+        );
+        assert!(
+            projection_scad(p, 1, -3.0)
+                .unwrap()
+                .contains("rotate([-90, 0, 0]) translate([0, 3, 0])")
+        );
+        assert!(
+            projection_scad(p, 2, 0.0)
+                .unwrap()
+                .contains("translate([0, 0, 0])")
+        );
         assert!(projection_scad(p, 3, 0.0).is_err());
     }
 }

@@ -43,9 +43,8 @@ pub struct AutoPlan {
 }
 
 /// Onion cap direction (+build = +Z) in a cut's 2D cross-section coords, or `None` for a Z cut (cap
-/// points out of the section plane — bounded axially, not in-section). Pub: the web editor sizes
-/// manual onions with the same rule auto-place uses.
-#[cfg(feature = "kernel")]
+/// points out of the section plane — bounded axially, not in-section). Pub + ungated: the web
+/// editor sizes manual onions with the same rule auto-place uses, kernel or not.
 pub fn cap_dir(axis: usize) -> Option<[f64; 2]> {
     match axis {
         0 | 1 => Some([0.0, 1.0]), // X / Y cut: +Z is the section's 2nd coord

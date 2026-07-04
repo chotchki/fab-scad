@@ -26,6 +26,15 @@ asset is a single tar.gz the site build unpacks.
 | `manifest.json`       | `{version, entry, wasm, sha256:{...}}` — assert the contract at build time |
 | `index.reference.html`| a working loader page to CRIB FROM — the site owns the real document |
 
+## The geometry worker (C.2 — live)
+
+`geom/` ships fab-geom: the kernel (Manifold weld/plan/slice/export/section) as its OWN ~1 MB
+wasm, run in a web worker over a bincode byte envelope. The APP wasm carries no kernel at all
+— every geometry op is async, the UI pulses live through 100k-tri slices that used to freeze
+the tab. Members: `geom/geom-worker.js` (MIT glue), `geom/fab_geom.js`, `geom/fab_geom_bg.wasm`
+(+ .br/.gz). Lazily created on first model open; resolved against `data-base` like everything
+else. Serve the whole tree — a missing `geom/` breaks ALL loading, visibly, in the panel.
+
 ## The OpenSCAD side-module (Phase B — live)
 
 `.scad` files render in-browser: the bundle's `openscad/` dir carries the UNMODIFIED official

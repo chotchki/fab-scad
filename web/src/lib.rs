@@ -1,9 +1,11 @@
-//! fab-web (Phase A): the browser slicer. Upload an STL → the Manifold kernel plans it against
-//! the bed (rotate-to-fit + auto cuts + auto onions, A.2), cut planes render on the model, Slice
-//! shows the pieces, Export packs plates and downloads a Bambu 3mf (A.4) — all client-side, zero
-//! server-side outputs. `Solid` is !Send by design: state holds the upload BYTES and every op
-//! rebuilds the Solid where it runs — the same discipline a future worker split needs (A.8).
-//! Runs native too (`cargo run -p fab-web -- --demo --bed=40`).
+//! fab-web: the browser slicer. Upload STL / colored 3MF / raw .scad → auto-plan against the
+//! bed → edit connectors on the cut planes → sliced pieces → packed Bambu 3mf download, all
+//! client-side. ALL geometry runs off the main thread (C.2): OpenSCAD renders in one worker,
+//! the Manifold kernel (weld/plan/slice/export/section) in another — fab-geom, a kernel-only
+//! ~1 MB wasm speaking `geomsg` bytes over postMessage. This crate holds NO kernel: Solids
+//! live only inside the workers (the !Send contract, as designed). The busy pulse is LIVE for
+//! everything now. Runs native too (`cargo run -p fab-web -- --demo --bed=40`) — same seam,
+//! the service just runs on a pool thread.
 
 use bevy::asset::RenderAssetUsages;
 use bevy::input::mouse::{MouseMotion, MouseScrollUnit, MouseWheel};
@@ -14,13 +16,11 @@ use bevy::prelude::*;
 use bevy::render::mesh::{Indices, PrimitiveTopology};
 use bevy::tasks::{block_on, futures_lite::future, AsyncComputeTaskPool, Task};
 
-use fab_scad::kernel::Solid;
-use fab_scad::manifest::{Connector, Cut, Slicing};
-use fab_scad::num::Num;
-use fab_scad::{auto, auto_slice, cross_section, slicing};
-
+use fab_scad::geomsg::{GeomObject, PlanOut, Request, Response, WireConn};
 use fab_scad::stl;
+use fab_scad::{auto, cross_section};
 
+mod geom_worker;
 #[cfg(target_arch = "wasm32")]
 mod scad_worker;
 
@@ -67,7 +67,12 @@ pub fn run() {
         .insert_resource(Bed([bed, bed, bed]))
         .init_resource::<Part>()
         .init_resource::<PickTask>()
+        .init_resource::<RenderTask>()
+        .init_resource::<GeomCall>()
         .init_resource::<Actions>()
+        .init_resource::<EditMode>()
+        .init_resource::<DragGuard>()
+        .init_resource::<Busy>()
         .add_systems(
             Startup,
             (
@@ -77,15 +82,12 @@ pub fn run() {
                 seed_source_request,
             ),
         )
-        .init_resource::<EditMode>()
-        .init_resource::<DragGuard>()
-        .init_resource::<RenderTask>()
-        .init_resource::<Busy>()
         .add_systems(
             Update,
             (
                 poll_picked_file,
                 poll_render_task,
+                poll_geom,
                 busy_pulse,
                 run_slice,
                 run_export,
@@ -102,76 +104,14 @@ pub fn run() {
 #[derive(Resource)]
 struct Bed([f64; 3]);
 
-/// The loaded part: the upload BYTES (never a Solid — !Send) + what the kernel derived from
-/// them. Every slice/export rebuilds the Solid from `stl` and re-derives the SAME fit (the
-/// rotation search is deterministic), so display and export can't drift apart.
+/// The loaded part, exactly as the geometry service handed it back: per-object stl bytes in
+/// the plan (rotated) frame + colors, and the plan the editor mutates. No Solids here — every
+/// geometry op is a round-trip through the service.
 #[derive(Resource, Default)]
 struct Part {
     name: String,
-    stl: Vec<u8>,
-    /// Per printable object: stl bytes ALREADY in the plan (rotated) frame + its 3mf color.
-    /// A plain STL is one uncolored object; a 3mf assembly keeps its parts separate so the
-    /// slice view can tint fragments by source part (A.9).
-    objects: Vec<(Vec<u8>, Option<[f32; 4]>)>,
-    plan: Option<Plan>,
-}
-
-/// One source object: triangle soup for display, a Solid when the geometry welds, 3mf color.
-struct SourceObj {
-    soup: stl::StlMesh,
-    solid: Option<Solid>,
-    color: Option<[f32; 4]>,
-}
-
-/// Extension-dispatched loader: STL = one uncolored object; 3MF = its built objects with
-/// basematerial colors. `solid: None` = that object doesn't weld (the whole part goes view-only).
-fn load_source(name: &str, bytes: &[u8]) -> anyhow::Result<Vec<SourceObj>> {
-    if name.to_ascii_lowercase().ends_with(".3mf") {
-        Ok(fab_scad::threemf_in::parse_3mf(bytes)?
-            .into_iter()
-            .map(|o| SourceObj {
-                soup: soup_from_indexed(&o.verts, &o.tris),
-                solid: Solid::from_indexed(&o.verts, &o.tris).ok(),
-                color: o.color,
-            })
-            .collect())
-    } else {
-        Ok(vec![SourceObj {
-            soup: stl::load_stl_bytes(bytes)?,
-            solid: Solid::from_stl_bytes(bytes).ok(),
-            color: None,
-        }])
-    }
-}
-
-/// Indexed mesh → flat soup with per-face normals (display only).
-fn soup_from_indexed(verts: &[[f64; 3]], tris: &[[u32; 3]]) -> stl::StlMesh {
-    let mut positions = Vec::with_capacity(tris.len() * 3);
-    let mut normals = Vec::with_capacity(tris.len() * 3);
-    for t in tris {
-        let p: [Vec3; 3] = std::array::from_fn(|k| {
-            let v = verts[t[k] as usize];
-            Vec3::new(v[0] as f32, v[1] as f32, v[2] as f32)
-        });
-        let n = (p[1] - p[0]).cross(p[2] - p[0]).normalize_or_zero();
-        for v in p {
-            positions.push(v.to_array());
-            normals.push(n.to_array());
-        }
-    }
-    stl::StlMesh { positions, normals }
-}
-
-/// Rebuild the plan-frame union from the stored per-object bytes (they're already rotated).
-fn rotated_union(objects: &[(Vec<u8>, Option<[f32; 4]>)]) -> anyhow::Result<Solid> {
-    let solids: Vec<Solid> = objects
-        .iter()
-        .map(|(b, _)| Solid::from_stl_bytes(b))
-        .collect::<anyhow::Result<_>>()?;
-    Ok(match solids.len() {
-        1 => solids.into_iter().next().expect("len checked"),
-        _ => Solid::batch_union(&solids),
-    })
+    objects: Vec<GeomObject>,
+    plan: Option<PlanOut>,
 }
 
 /// The display material for an object: its 3mf color, else fab gold.
@@ -186,15 +126,6 @@ fn part_material(color: Option<[f32; 4]>) -> StandardMaterial {
     }
 }
 
-/// The auto-plan in the ROTATED (display) frame; `rot` maps upload bytes into that frame.
-struct Plan {
-    rot: [f64; 12],
-    min: [f64; 3],
-    max: [f64; 3],
-    cuts: Vec<(char, f64)>,
-    connectors: Vec<Connector>,
-}
-
 /// Button → system handoff: observers set flags, Update systems do the heavy work.
 #[derive(Resource, Default)]
 struct Actions {
@@ -204,21 +135,19 @@ struct Actions {
     remove: bool,
     grow: bool,
     shrink: bool,
-    /// Countdown frames before the synchronous work runs — the busy label paints first.
-    slice_armed: Option<u8>,
-    export_armed: Option<u8>,
 }
 
 /// A.3: the connector-editor mode. `Cut` = editing one cut's join face IN PLACE — the section
-/// profile + onion markers draw on the cut plane in 3D (no separate 2D view to port), clicks on
-/// the plane add/select, panel buttons act on the selection.
+/// profile + onion markers draw on the cut plane in 3D, clicks on the plane add/select, panel
+/// buttons act on the selection. Entry is async now: the profile comes from the geometry
+/// worker (Purpose::Section), so the mode flips when the loops arrive.
 #[derive(Resource, Default)]
 enum EditMode {
     #[default]
     Scene,
     Cut {
         cut: usize,
-        /// Cached section profile (connector-pos coords) — recomputed on entry.
+        /// Section profile (connector-pos coords), computed by the service on entry.
         loops: Vec<Vec<[f64; 2]>>,
         /// Index into `Part.plan.connectors` (the GLOBAL list, not per-cut).
         selected: Option<usize>,
@@ -269,10 +198,32 @@ struct PickTask(Option<Task<PickResult>>);
 #[derive(Resource, Default)]
 struct RenderTask(Option<Task<Result<(String, Vec<u8>), String>>>);
 
-/// The loading pulse (the desktop standard, ported): while set, the status line animates
-/// `label |/-\`. Async work pulses live; synchronous work (slice/export) arms itself two
-/// frames ahead so the label PAINTS before the main thread blocks — the pulse freezes, the
-/// words don't lie.
+/// One in-flight geometry-service call + what to do with its answer. Single-flight: buttons
+/// no-op (with a status note) while a call is out.
+#[derive(Resource, Default)]
+struct GeomCall {
+    task: Option<Task<anyhow::Result<Response>>>,
+    purpose: Purpose,
+}
+
+#[derive(Default, Clone)]
+enum Purpose {
+    #[default]
+    Idle,
+    Analyze {
+        name: String,
+    },
+    Slice,
+    Export {
+        out_name: String,
+    },
+    Section {
+        cut: usize,
+    },
+}
+
+/// The loading pulse (the desktop standard): while set, the status line animates `label |/-\`.
+/// LIVE for everything since C.2 — all geometry is off the main thread.
 #[derive(Resource, Default)]
 struct Busy(Option<String>);
 
@@ -318,10 +269,9 @@ fn bed_override() -> Option<f64> {
 }
 
 /// Where the bundle's members live, as the PAGE declares it: `<canvas id="fab-web"
-/// data-base="/3d/editor/0.8.2/">`. Defaults to document-relative (the reference-loader
-/// layout, where the page sits inside the bundle dir). Real sites mount the bundle in a
-/// VERSIONED subdir while the document has a clean URL — document-relative breaks there,
-/// which is exactly how beta found this.
+/// data-base="/3d/editor/<version>/">`. Defaults to document-relative (the reference-loader
+/// layout). Real sites mount the bundle in a VERSIONED subdir while the document has a clean
+/// URL — document-relative breaks there, which is exactly how beta found this.
 #[cfg(target_arch = "wasm32")]
 pub(crate) fn bundle_base() -> String {
     web_sys::window()
@@ -352,8 +302,8 @@ fn param(key: &str) -> Option<String> {
 }
 
 /// `?stl=<same-origin url>` (web) / `--stl=<path>` (native): load without the picker — the
-/// deep-link half of showcase→slicer (a project page hands its STL straight in), and the perf
-/// harness's front door. Seeds [`PickTask`], so it IS the upload path from there on.
+/// deep-link half of showcase→slicer, and the perf harness's front door. Seeds [`PickTask`],
+/// so it IS the upload path from there on.
 fn seed_source_request(mut task: ResMut<PickTask>, mut busy: ResMut<Busy>) {
     #[cfg(not(target_arch = "wasm32"))]
     let _ = &mut busy;
@@ -397,31 +347,16 @@ pub(crate) async fn fetch_bytes(url: &str) -> anyhow::Result<Vec<u8>> {
     Ok(js_sys::Uint8Array::new(&buf).to_vec())
 }
 
-fn load_demo_if_requested(
-    mut mode: ResMut<EditMode>,
-    bed: Res<Bed>,
-    part: ResMut<Part>,
-    commands: Commands,
-    meshes: ResMut<Assets<Mesh>>,
-    mats: ResMut<Assets<StandardMaterial>>,
-    existing: Query<Entity, Or<(With<LoadedModel>, With<CutPlane>)>>,
-    cams: Query<(&mut Transform, &mut Orbit), With<Camera3d>>,
-    labels: Query<&mut Text, With<StatusLabel>>,
-) {
-    if demo_requested() {
-        present_model(
-            "demo.stl",
-            include_bytes!("../assets/demo.stl"),
-            &bed,
-            part,
-            &mut mode,
-            commands,
-            meshes,
-            mats,
-            existing,
-            cams,
-            labels,
-        );
+/// The demo seeds the SAME pipeline as an upload — picker task → analyze → display.
+fn load_demo_if_requested(mut task: ResMut<PickTask>, mut busy: ResMut<Busy>) {
+    if demo_requested() && task.0.is_none() {
+        busy.0 = Some("loading demo".into());
+        task.0 = Some(AsyncComputeTaskPool::get().spawn(async {
+            Some(Ok((
+                "demo.stl".to_string(),
+                include_bytes!("../assets/demo.stl").to_vec(),
+            )))
+        }));
     }
 }
 
@@ -556,7 +491,7 @@ fn ui_top_inset() -> f32 {
     }
 }
 
-/// Feathers panel: title, Open STL / Slice / Export buttons, status line.
+/// Feathers panel: title, Open / Slice / Export buttons, edit-only rows, status line.
 fn setup_ui(world: &mut World) {
     use bevy::feathers::{
         controls::{ButtonVariant, FeathersButton},
@@ -625,26 +560,26 @@ fn setup_ui(world: &mut World) {
                 @FeathersButton { @caption: bsn!{ Text("Smaller") ThemedText } } EditUi
                 on(|_: On<Activate>, mut act: ResMut<Actions>| { act.shrink = true; })
             ),
-            (Text("pick an STL to begin") ThemedText StatusLabel),
+            (Text("pick a model to begin") ThemedText StatusLabel),
         ]
     };
     world.spawn_scene(scene).expect("spawn fab panel");
 }
 
-/// Drain the picker task and hand the bytes to [`present_model`].
-#[allow(clippy::too_many_arguments)] // a system-params relay, not an API
+/// Kick a geometry-service call (single-flight; the caller set the busy label).
+fn spawn_geom(geom: &mut GeomCall, purpose: Purpose, req: Request) {
+    geom.purpose = purpose;
+    geom.task = Some(AsyncComputeTaskPool::get().spawn(geom_worker::call(req)));
+}
+
+/// Drain the picker: .scad goes through the OpenSCAD worker first, everything else straight to
+/// the geometry service for analysis.
 fn poll_picked_file(
     mut task: ResMut<PickTask>,
     mut render: ResMut<RenderTask>,
+    mut geom: ResMut<GeomCall>,
     mut busy: ResMut<Busy>,
-    mut mode: ResMut<EditMode>,
     bed: Res<Bed>,
-    part: ResMut<Part>,
-    commands: Commands,
-    meshes: ResMut<Assets<Mesh>>,
-    mats: ResMut<Assets<StandardMaterial>>,
-    existing: Query<Entity, Or<(With<LoadedModel>, With<CutPlane>)>>,
-    cams: Query<(&mut Transform, &mut Orbit), With<Camera3d>>,
     mut labels: Query<&mut Text, With<StatusLabel>>,
 ) {
     let Some(t) = task.0.as_mut() else { return };
@@ -686,29 +621,32 @@ fn poll_picked_file(
             }));
         }
         #[cfg(not(target_arch = "wasm32"))]
-        for mut t in &mut labels {
-            t.0 = format!("{name}: .scad rendering is web-only here (use fab-gui natively)");
+        {
+            let _ = &mut render;
+            for mut t in &mut labels {
+                t.0 = format!("{name}: .scad rendering is web-only here (use fab-gui natively)");
+            }
         }
         return;
     }
-    present_model(
-        &name, &bytes, &bed, part, &mut mode, commands, meshes, mats, existing, cams, labels,
+    busy.0 = Some(format!("analyzing {name}"));
+    spawn_geom(
+        &mut geom,
+        Purpose::Analyze { name: name.clone() },
+        Request::Analyze {
+            name,
+            bytes,
+            bed: bed.0,
+        },
     );
 }
 
-/// Drain the OpenSCAD render hop: STL bytes join the normal pipeline, errors hit the panel.
-#[allow(clippy::too_many_arguments)] // a system-params relay, not an API
+/// Drain the OpenSCAD render hop: STL bytes go to the geometry service like any upload.
 fn poll_render_task(
     mut render: ResMut<RenderTask>,
+    mut geom: ResMut<GeomCall>,
     mut busy: ResMut<Busy>,
-    mut mode: ResMut<EditMode>,
     bed: Res<Bed>,
-    part: ResMut<Part>,
-    commands: Commands,
-    meshes: ResMut<Assets<Mesh>>,
-    mats: ResMut<Assets<StandardMaterial>>,
-    existing: Query<Entity, Or<(With<LoadedModel>, With<CutPlane>)>>,
-    cams: Query<(&mut Transform, &mut Orbit), With<Camera3d>>,
     mut labels: Query<&mut Text, With<StatusLabel>>,
 ) {
     let Some(t) = render.0.as_mut() else { return };
@@ -716,12 +654,21 @@ fn poll_render_task(
         return;
     };
     render.0 = None;
-    busy.0 = None;
     match done {
-        Ok((name, bytes)) => present_model(
-            &name, &bytes, &bed, part, &mut mode, commands, meshes, mats, existing, cams, labels,
-        ),
+        Ok((name, bytes)) => {
+            busy.0 = Some(format!("analyzing {name}"));
+            spawn_geom(
+                &mut geom,
+                Purpose::Analyze { name: name.clone() },
+                Request::Analyze {
+                    name,
+                    bytes,
+                    bed: bed.0,
+                },
+            );
+        }
         Err(e) => {
+            busy.0 = None;
             error!("{e}");
             for mut t in &mut labels {
                 t.0 = e.clone();
@@ -730,16 +677,14 @@ fn poll_render_task(
     }
 }
 
-/// The one load path: bytes → kernel plan (rotate-to-fit + auto cuts/onions) → display the model
-/// in the ROTATED frame with its cut planes, seated on the bed. A soup that Manifold rejects
-/// still displays (view-only) — slicing just stays off.
+/// Drain the geometry service and apply the answer per purpose. This is where every heavy
+/// result lands: analyzed models, sliced pieces, packed exports, section profiles.
 #[allow(clippy::too_many_arguments)] // a system-params relay, not an API
-fn present_model(
-    name: &str,
-    bytes: &[u8],
-    bed: &Bed,
+fn poll_geom(
+    mut geom: ResMut<GeomCall>,
+    mut busy: ResMut<Busy>,
+    mut mode: ResMut<EditMode>,
     mut part: ResMut<Part>,
-    mode: &mut EditMode,
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut mats: ResMut<Assets<StandardMaterial>>,
@@ -747,76 +692,174 @@ fn present_model(
     mut cams: Query<(&mut Transform, &mut Orbit), With<Camera3d>>,
     mut labels: Query<&mut Text, With<StatusLabel>>,
 ) {
+    let Some(t) = geom.task.as_mut() else { return };
+    let Some(done) = block_on(future::poll_once(t)) else {
+        return;
+    };
+    geom.task = None;
+    busy.0 = None;
+    let purpose = std::mem::take(&mut geom.purpose);
     let mut status = |s: String| {
         for mut t in &mut labels {
             t.0 = s.clone();
         }
     };
-    info!("presenting {name} ({} bytes)", bytes.len());
-
-    let sources = match load_source(name, bytes) {
-        Ok(o) => o,
+    let response = match done {
+        Ok(r) => r,
         Err(e) => {
-            status(format!("{name}: not readable ({e:#})"));
-            error!("parsing {name}: {e:#}");
+            error!("{e:#}");
+            status(format!("{e:#}"));
             return;
         }
     };
-    let n_parts = sources.len();
-
-    // Kernel plan on the UNION when every object welds — display in the rotated frame so the
-    // planes/pieces/export all agree with what's on screen. Any non-manifold object degrades
-    // the whole part to view-only (raw frame, no plan).
-    let mut soups: Vec<(stl::StlMesh, Option<[f32; 4]>)> = Vec::new();
-    let mut objects: Vec<(Vec<u8>, Option<[f32; 4]>)> = Vec::new();
-    let mut plan: Option<Plan> = None;
-    let mut solids: Vec<Solid> = Vec::new();
-    let mut all_solid = true;
-    for o in sources {
-        if let Some(sol) = o.solid {
-            solids.push(sol);
-        } else {
-            all_solid = false;
+    match (purpose, response) {
+        (_, Response::Failed { error }) => {
+            error!("{error}");
+            status(error);
         }
-        soups.push((o.soup, o.color));
-    }
-    if all_solid {
-        let union = match solids.len() {
-            1 => solids[0].transform(&[1., 0., 0., 0., 1., 0., 0., 0., 1., 0., 0., 0.]),
-            _ => Solid::batch_union(&solids),
-        };
-        let fit = auto_slice::best_fit_rotation(&union, bed.0);
-        match auto::plan(&union.transform(&fit.rot), fit.min, fit.max, bed.0) {
-            Ok(p) => {
+        (
+            Purpose::Analyze { name },
+            Response::Analyzed {
+                objects,
+                plan,
+                tris,
+            },
+        ) => {
+            info!("loaded {name} ({tris} tris)");
+            if let Some(p) = &plan {
                 info!(
                     "auto-plan: {} cuts, {} connectors",
                     p.cuts.len(),
                     p.connectors.len()
                 );
-                // Rotate every object into the plan frame; display + slice + export share it.
-                objects = solids
-                    .iter()
-                    .zip(soups.iter())
-                    .map(|(s, (_, c))| (s.transform(&fit.rot).to_stl_bytes(), *c))
-                    .collect();
-                soups = objects
-                    .iter()
-                    .filter_map(|(b, c)| stl::load_stl_bytes(b).ok().map(|m| (m, *c)))
-                    .collect();
-                plan = Some(Plan {
-                    rot: fit.rot,
-                    min: fit.min,
-                    max: fit.max,
-                    cuts: p.cuts,
-                    connectors: p.connectors,
-                });
             }
-            Err(e) => warn!("auto-plan failed: {e:#}"),
+            present_display(
+                &name,
+                objects,
+                plan,
+                &mut part,
+                &mut mode,
+                &mut commands,
+                &mut meshes,
+                &mut mats,
+                &existing,
+                &mut cams,
+                &mut status,
+            );
         }
-    } else {
-        warn!("not sliceable — view only");
+        (Purpose::Slice, Response::Sliced { pieces }) => {
+            let Some(plan) = &part.plan else { return };
+            for e in &existing {
+                commands.entity(e).despawn();
+            }
+            let size = plan_size(plan);
+            let spread = (size[0].max(size[1]).max(size[2]) * 0.18).max(8.0);
+            let offset = seat_offset(plan);
+            let n = pieces.len();
+            for p in &pieces {
+                let m = match stl::load_stl_bytes(&p.stl) {
+                    Ok(m) => m,
+                    Err(e) => {
+                        error!("piece mesh: {e:#}");
+                        continue;
+                    }
+                };
+                let fan = Vec3::new(
+                    p.idx[0] as f32 * spread,
+                    p.idx[1] as f32 * spread,
+                    p.idx[2] as f32 * spread,
+                );
+                commands.spawn((
+                    Mesh3d(meshes.add(build_mesh(&m))),
+                    MeshMaterial3d(mats.add(part_material(p.color))),
+                    Transform::from_translation(offset + fan),
+                    LoadedModel,
+                ));
+            }
+            let extent =
+                (size[0].powi(2) + size[1].powi(2) + size[2].powi(2)).sqrt() + spread * 2.0;
+            for (mut t, mut o) in &mut cams {
+                *o = framed_orbit(Vec3::new(0.0, 0.0, (size[2] / 2.0) + spread / 2.0), extent);
+                *t = orbit_transform(&o);
+            }
+            if part.objects.len() > 1 {
+                status(format!(
+                    "{n} pieces - colors kept; connector preview off for assemblies (export carries them)"
+                ));
+            } else {
+                status(format!("{n} pieces - onions carried on the cut faces"));
+            }
+            info!("sliced: {n} pieces");
+        }
+        (
+            Purpose::Export { out_name },
+            Response::Exported {
+                threemf,
+                pieces,
+                plates,
+            },
+        ) => match download_bytes(&out_name, &threemf) {
+            Ok(()) => {
+                status(format!("{out_name}: {pieces} pieces on {plates} plate(s)"));
+                info!("exported {out_name} ({} bytes)", threemf.len());
+            }
+            Err(e) => status(format!("download failed: {e:#}")),
+        },
+        (Purpose::Section { cut }, Response::Sectioned { loops }) => {
+            let n = part
+                .plan
+                .as_ref()
+                .map(|p| p.connectors.iter().filter(|c| c.cut == cut).count())
+                .unwrap_or(0);
+            status(format!(
+                "editing cut {} - {n} onion(s); click the plane to add, an onion to select",
+                cut + 1
+            ));
+            *mode = EditMode::Cut {
+                cut,
+                loops,
+                selected: None,
+            };
+        }
+        (p, _) => {
+            // A mismatched pair means a logic bug, not a user problem — say so plainly.
+            let which = match p {
+                Purpose::Idle => "idle",
+                Purpose::Analyze { .. } => "analyze",
+                Purpose::Slice => "slice",
+                Purpose::Export { .. } => "export",
+                Purpose::Section { .. } => "section",
+            };
+            error!("geometry service replied out of order (purpose: {which})");
+            status("internal: geometry reply mismatch".into());
+        }
     }
+}
 
+/// Show an analyzed part: per-object meshes (colors kept), cut planes from the plan, camera
+/// framed, status told. Pure display — all geometry already happened in the service.
+#[allow(clippy::too_many_arguments)] // a poll_geom helper, not an API
+fn present_display(
+    name: &str,
+    objects: Vec<GeomObject>,
+    plan: Option<PlanOut>,
+    part: &mut Part,
+    mode: &mut EditMode,
+    commands: &mut Commands,
+    meshes: &mut Assets<Mesh>,
+    mats: &mut Assets<StandardMaterial>,
+    existing: &Query<Entity, Or<(With<LoadedModel>, With<CutPlane>)>>,
+    cams: &mut Query<(&mut Transform, &mut Orbit), With<Camera3d>>,
+    status: &mut dyn FnMut(String),
+) {
+    let soups: Vec<(stl::StlMesh, Option<[f32; 4]>)> = objects
+        .iter()
+        .filter_map(|o| stl::load_stl_bytes(&o.stl).ok().map(|m| (m, o.color)))
+        .collect();
+    if soups.is_empty() {
+        status(format!("{name}: nothing displayable came back"));
+        return;
+    }
     let (min, max) = soups
         .iter()
         .map(|(m, _)| aabb(m))
@@ -825,12 +868,10 @@ fn present_model(
         });
     let size = max - min;
     let offset = Vec3::new(-(min.x + max.x) / 2.0, -(min.y + max.y) / 2.0, -min.z);
-    for e in &existing {
+    for e in existing {
         commands.entity(e).despawn();
     }
-    let mut tris = 0usize;
     for (m, color) in &soups {
-        tris += m.positions.len() / 3;
         commands.spawn((
             Mesh3d(meshes.add(build_mesh(m))),
             MeshMaterial3d(mats.add(part_material(*color))),
@@ -839,16 +880,16 @@ fn present_model(
         ));
     }
     if let Some(p) = &plan {
-        spawn_cut_planes(&mut commands, &mut meshes, &mut mats, p, offset);
+        spawn_cut_planes(commands, meshes, mats, p, offset);
     }
     let extent = size.length().max(1.0);
-    for (mut t, mut o) in &mut cams {
+    for (mut t, mut o) in cams.iter_mut() {
         *o = framed_orbit(Vec3::new(0.0, 0.0, size.z / 2.0), extent);
         *t = orbit_transform(&o);
     }
 
-    let parts_note = if n_parts > 1 {
-        format!("{n_parts} parts, ")
+    let parts_note = if objects.len() > 1 {
+        format!("{} parts, ", objects.len())
     } else {
         String::new()
     };
@@ -865,13 +906,19 @@ fn present_model(
         )),
         None => status(format!("{name}: {dims} - view only (mesh not sliceable)")),
     }
-    info!("loaded {name} ({tris} tris)");
 
     part.name = name.to_string();
-    part.stl = bytes.to_vec();
     part.objects = objects;
     part.plan = plan;
     *mode = EditMode::Scene;
+}
+
+fn plan_size(plan: &PlanOut) -> [f32; 3] {
+    [
+        (plan.max[0] - plan.min[0]) as f32,
+        (plan.max[1] - plan.min[1]) as f32,
+        (plan.max[2] - plan.min[2]) as f32,
+    ]
 }
 
 /// One translucent quad per planned cut, in display coordinates (plan frame + seat offset).
@@ -879,7 +926,7 @@ fn spawn_cut_planes(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
     mats: &mut Assets<StandardMaterial>,
-    plan: &Plan,
+    plan: &PlanOut,
     offset: Vec3,
 ) {
     let mat = mats.add(StandardMaterial {
@@ -889,11 +936,7 @@ fn spawn_cut_planes(
         cull_mode: None,
         ..default()
     });
-    let size = [
-        (plan.max[0] - plan.min[0]) as f32,
-        (plan.max[1] - plan.min[1]) as f32,
-        (plan.max[2] - plan.min[2]) as f32,
-    ];
+    let size = plan_size(plan);
     let mid = [
         ((plan.min[0] + plan.max[0]) / 2.0) as f32,
         ((plan.min[1] + plan.max[1]) / 2.0) as f32,
@@ -922,7 +965,7 @@ fn spawn_cut_planes(
 }
 
 /// The seat translation the DISPLAY applies to plan-frame geometry (XY-center + Z-floor).
-fn seat_offset(plan: &Plan) -> Vec3 {
+fn seat_offset(plan: &PlanOut) -> Vec3 {
     Vec3::new(
         -((plan.min[0] + plan.max[0]) / 2.0) as f32,
         -((plan.min[1] + plan.max[1]) / 2.0) as f32,
@@ -931,7 +974,7 @@ fn seat_offset(plan: &Plan) -> Vec3 {
 }
 
 /// Cut axis index + the two non-axis dims in ascending order — the section's 2D basis, matching
-/// BOTH `Solid::cross_section`'s output convention and `Connector.pos`.
+/// BOTH the service's section convention and `WireConn.pos`.
 fn cut_basis(axis: char) -> (usize, [usize; 2]) {
     match axis {
         'x' => (0, [1, 2]),
@@ -940,15 +983,18 @@ fn cut_basis(axis: char) -> (usize, [usize; 2]) {
     }
 }
 
-/// Clicking a cut plane: Scene mode → enter the editor for that cut. Already editing → the click
-/// is an ADD (empty spot, sized by the same fit rule auto-place uses) or a SELECT (near an
-/// existing onion). Uses the pick's world-space hit mapped into section coords.
+/// Clicking a cut plane: Scene mode → ask the service for the section (the editor opens when
+/// the profile arrives). Already editing → the click is an ADD (sized by the same fit rule
+/// auto-place uses) or a SELECT (near an existing onion).
+#[allow(clippy::too_many_arguments)] // an observer relay, not an API
 fn on_cut_plane_click(
     ev: On<Pointer<Click>>,
     planes: Query<&CutPlane>,
     guard: Res<DragGuard>,
     mut mode: ResMut<EditMode>,
     mut part: ResMut<Part>,
+    mut geom: ResMut<GeomCall>,
+    mut busy: ResMut<Busy>,
     mut labels: Query<&mut Text, With<StatusLabel>>,
 ) {
     let Ok(&CutPlane(ci)) = planes.get(ev.entity) else {
@@ -965,37 +1011,31 @@ fn on_cut_plane_click(
             t.0 = s.clone();
         }
     };
-    let part = &mut *part; // split field borrows (plan &mut, stl &)
+    let part = &mut *part;
     let Some(plan) = &mut part.plan else { return };
-    let Some(&(axis, _at)) = plan.cuts.get(ci) else {
+    let Some(&(axis, at)) = plan.cuts.get(ci) else {
         return;
     };
-    let (_, others) = cut_basis(axis);
+    let (ai, others) = cut_basis(axis);
     let rf = hit - seat_offset(plan); // display space → plan (rotated) frame
     let p2d = [rf[others[0]] as f64, rf[others[1]] as f64];
 
     let entering = !matches!(&*mode, EditMode::Cut { cut, .. } if *cut == ci);
     if entering {
-        let loops = match rotated_union(&part.objects) {
-            Ok(union) => {
-                let (_, at) = plan.cuts[ci];
-                union.cross_section(cut_basis(plan.cuts[ci].0).0, at)
-            }
-            Err(e) => {
-                error!("section: {e:#}");
-                return;
-            }
-        };
-        let n = plan.connectors.iter().filter(|c| c.cut == ci).count();
-        status(format!(
-            "editing cut {} - {n} onion(s); click the plane to add, an onion to select",
-            ci + 1
-        ));
-        *mode = EditMode::Cut {
-            cut: ci,
-            loops,
-            selected: None,
-        };
+        if geom.task.is_some() {
+            status("still working - one moment".into());
+            return;
+        }
+        busy.0 = Some(format!("sectioning cut {}", ci + 1));
+        spawn_geom(
+            &mut geom,
+            Purpose::Section { cut: ci },
+            Request::Section {
+                objects: part.objects.clone(),
+                axis: ai,
+                at,
+            },
+        );
         return;
     }
 
@@ -1012,7 +1052,7 @@ fn on_cut_plane_click(
         if c.cut != ci {
             continue;
         }
-        let d = ((c.pos[0].f() - p2d[0]).powi(2) + (c.pos[1].f() - p2d[1]).powi(2)).sqrt();
+        let d = ((c.pos[0] - p2d[0]).powi(2) + (c.pos[1] - p2d[1]).powi(2)).sqrt();
         let halo = (c.size.unwrap_or(10.0) / 2.0).max(4.0);
         if d <= halo && best.is_none_or(|(_, bd)| d < bd) {
             best = Some((gi, d));
@@ -1023,8 +1063,8 @@ fn on_cut_plane_click(
         let c = &plan.connectors[gi];
         status(format!(
             "selected onion at ({:.0}, {:.0}), d={:.1}mm - Remove / Bigger / Smaller",
-            c.pos[0].f(),
-            c.pos[1].f(),
+            c.pos[0],
+            c.pos[1],
             c.size.unwrap_or(10.0)
         ));
         return;
@@ -1034,7 +1074,6 @@ fn on_cut_plane_click(
         status("no material there - click inside the profile".into());
         return;
     }
-    let (ai, _) = cut_basis(axis);
     let d = cross_section::fit_onion(
         loops,
         p2d,
@@ -1047,11 +1086,11 @@ fn on_cut_plane_click(
         status(format!("too tight here (fit {d:.1}mm) - pick an open spot"));
         return;
     }
-    plan.connectors.push(Connector {
+    plan.connectors.push(WireConn {
         cut: ci,
         kind: "onion".to_string(),
         screw: None,
-        pos: [Num::Float(p2d[0]), Num::Float(p2d[1])],
+        pos: p2d,
         through: None,
         size: Some(d),
     });
@@ -1062,45 +1101,30 @@ fn on_cut_plane_click(
     ));
 }
 
-/// Slice in-process and show the pieces fanned apart by slab index — auto onions included
-/// (pegs proud on the lower piece, sockets carved from the upper).
+/// Slice: ask the service, live pulse while it works. Multi-part (3mf assembly) cuts each part
+/// separately so fragments keep colors — connector booleans only make sense against the whole
+/// join, so the multi-part VIEW skips them (the export union still carries them).
 fn run_slice(
     mut act: ResMut<Actions>,
     mut busy: ResMut<Busy>,
     mut mode: ResMut<EditMode>,
+    mut geom: ResMut<GeomCall>,
     part: Res<Part>,
-    mut commands: Commands,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut mats: ResMut<Assets<StandardMaterial>>,
-    existing: Query<Entity, Or<(With<LoadedModel>, With<CutPlane>)>>,
-    mut cams: Query<(&mut Transform, &mut Orbit), With<Camera3d>>,
     mut labels: Query<&mut Text, With<StatusLabel>>,
 ) {
-    if act.slice {
-        act.slice = false;
-        if part.plan.is_some() {
-            busy.0 = Some("slicing".into());
-            act.slice_armed = Some(2); // let the label paint before the main thread blocks
-        } else {
-            for mut t in &mut labels {
-                t.0 = "nothing sliceable loaded".into();
-            }
-        }
+    if !act.slice {
         return;
     }
-    let Some(n) = act.slice_armed else { return };
-    if n > 0 {
-        act.slice_armed = Some(n - 1);
-        return;
-    }
-    act.slice_armed = None;
-    busy.0 = None;
-    *mode = EditMode::Scene;
+    act.slice = false;
     let mut status = |s: String| {
         for mut t in &mut labels {
             t.0 = s.clone();
         }
     };
+    if geom.task.is_some() {
+        status("still working - one moment".into());
+        return;
+    }
     let Some(plan) = &part.plan else {
         status("nothing sliceable loaded".into());
         return;
@@ -1109,159 +1133,67 @@ fn run_slice(
         status("fits the bed - nothing to cut".into());
         return;
     }
-    // Multi-part (3mf assembly): cut each part separately so fragments keep their colors.
-    // Connector booleans only make sense against the whole join, so the multi-part VIEW skips
-    // them — the export (union) still carries them.
-    let multi = part.objects.len() > 1;
-    let spec = Slicing {
-        printer: None,
-        cut: plan
-            .cuts
-            .iter()
-            .map(|&(ax, at)| Cut {
-                axis: ax.to_string(),
-                at: Num::Float(at),
-            })
-            .collect(),
-        connector: if multi {
-            vec![]
-        } else {
-            plan.connectors.clone()
+    *mode = EditMode::Scene;
+    busy.0 = Some("slicing".into());
+    spawn_geom(
+        &mut geom,
+        Purpose::Slice,
+        Request::Slice {
+            objects: part.objects.clone(),
+            cuts: plan.cuts.clone(),
+            connectors: plan.connectors.clone(),
+            with_connectors: part.objects.len() == 1,
         },
-        orient: vec![],
-    };
-    let mut pieces: Vec<([usize; 3], Solid, Option<[f32; 4]>)> = Vec::new();
-    for (obytes, color) in &part.objects {
-        let sliced =
-            Solid::from_stl_bytes(obytes).and_then(|sol| slicing::slice_solid(&spec, &sol));
-        match sliced {
-            Ok(ps) => pieces.extend(ps.into_iter().map(|(i, sol)| (i, sol, *color))),
-            Err(e) => {
-                status(format!("slice failed: {e:#}"));
-                error!("slice: {e:#}");
-                return;
-            }
-        }
-    }
-
-    for e in &existing {
-        commands.entity(e).despawn();
-    }
-    let size = [
-        (plan.max[0] - plan.min[0]) as f32,
-        (plan.max[1] - plan.min[1]) as f32,
-        (plan.max[2] - plan.min[2]) as f32,
-    ];
-    let spread = (size[0].max(size[1]).max(size[2]) * 0.18).max(8.0);
-    let offset = Vec3::new(
-        -((plan.min[0] + plan.max[0]) / 2.0) as f32,
-        -((plan.min[1] + plan.max[1]) / 2.0) as f32,
-        -plan.min[2] as f32,
     );
-    let n = pieces.len();
-    for (idx, solid, color) in &pieces {
-        let m = match stl::load_stl_bytes(&solid.to_stl_bytes()) {
-            Ok(m) => m,
-            Err(e) => {
-                error!("piece mesh: {e:#}");
-                continue;
-            }
-        };
-        let fan = Vec3::new(
-            idx[0] as f32 * spread,
-            idx[1] as f32 * spread,
-            idx[2] as f32 * spread,
-        );
-        commands.spawn((
-            Mesh3d(meshes.add(build_mesh(&m))),
-            MeshMaterial3d(mats.add(part_material(*color))),
-            Transform::from_translation(offset + fan),
-            LoadedModel,
-        ));
-    }
-    let extent = (size[0].powi(2) + size[1].powi(2) + size[2].powi(2)).sqrt() + spread * 2.0;
-    for (mut t, mut o) in &mut cams {
-        *o = framed_orbit(Vec3::new(0.0, 0.0, (size[2] / 2.0) + spread / 2.0), extent);
-        *t = orbit_transform(&o);
-    }
-    if multi {
-        status(format!(
-            "{n} pieces - colors kept; connector preview off for assemblies (export carries them)"
-        ));
-    } else {
-        status(format!("{n} pieces - onions carried on the cut faces"));
-    }
-    info!("sliced: {n} pieces");
 }
 
-/// Export: the full `fab make` pipeline (fit → plan → orient → pack → Bambu 3mf) from the stored
-/// bytes into memory, then a browser download / native file. Zero server-side outputs.
+/// Export: the full make pipeline in the service, then a browser download. Zero server-side
+/// outputs; user-edited connectors ride along (the service uses make_planned).
 fn run_export(
     mut act: ResMut<Actions>,
     mut busy: ResMut<Busy>,
+    mut geom: ResMut<GeomCall>,
     part: Res<Part>,
     bed: Res<Bed>,
     mut labels: Query<&mut Text, With<StatusLabel>>,
 ) {
-    if act.export {
-        act.export = false;
-        if part.plan.is_some() {
-            busy.0 = Some("packing plates".into());
-            act.export_armed = Some(2); // let the label paint before the main thread blocks
-        } else {
-            for mut t in &mut labels {
-                t.0 = "nothing sliceable loaded".into();
-            }
-        }
+    if !act.export {
         return;
     }
-    let Some(n) = act.export_armed else { return };
-    if n > 0 {
-        act.export_armed = Some(n - 1);
-        return;
-    }
-    act.export_armed = None;
-    busy.0 = None;
+    act.export = false;
     let mut status = |s: String| {
         for mut t in &mut labels {
             t.0 = s.clone();
         }
     };
+    if geom.task.is_some() {
+        status("still working - one moment".into());
+        return;
+    }
+    let Some(plan) = &part.plan else {
+        status("nothing sliceable loaded".into());
+        return;
+    };
     let stem = part
         .name
         .strip_suffix(".stl")
         .or_else(|| part.name.strip_suffix(".3mf"))
+        .or_else(|| part.name.strip_suffix(".scad"))
         .unwrap_or(&part.name);
-    let out_name = format!("{stem}-plates.3mf");
-    let result = (|| -> anyhow::Result<(usize, usize, Vec<u8>)> {
-        // make_planned, not make_solid: the user's edited connectors must survive the export.
-        // The union loses per-part colors — the extruder-mapping follow-up owns that.
-        let plan = part.plan.as_ref().expect("checked above");
-        let rotated = rotated_union(&part.objects)?;
-        let mut buf = std::io::Cursor::new(Vec::new());
-        let sum = auto::make_planned(
-            rotated,
-            &plan.cuts,
-            plan.connectors.clone(),
-            bed.0,
-            &mut buf,
-            GAP,
-        )?;
-        Ok((sum.pieces, sum.plates, buf.into_inner()))
-    })();
-    match result {
-        Ok((pieces, plates, bytes)) => match download_bytes(&out_name, &bytes) {
-            Ok(()) => {
-                status(format!("{out_name}: {pieces} pieces on {plates} plate(s)"));
-                info!("exported {out_name} ({} bytes)", bytes.len());
-            }
-            Err(e) => status(format!("download failed: {e:#}")),
+    busy.0 = Some("packing plates".into());
+    spawn_geom(
+        &mut geom,
+        Purpose::Export {
+            out_name: format!("{stem}-plates.3mf"),
         },
-        Err(e) => {
-            status(format!("export failed: {e:#}"));
-            error!("export: {e:#}");
-        }
-    }
+        Request::Export {
+            objects: part.objects.clone(),
+            cuts: plan.cuts.clone(),
+            connectors: plan.connectors.clone(),
+            bed: bed.0,
+            gap: GAP,
+        },
+    );
 }
 
 /// Hand bytes to the user: a Blob download in the browser, a file beside the cwd natively.
@@ -1343,7 +1275,7 @@ fn draw_section(mode: Res<EditMode>, part: Res<Part>, mut gizmos: Gizmos) {
         if c.cut != *cut {
             continue;
         }
-        let center = to_world([c.pos[0].f(), c.pos[1].f()], 1.0);
+        let center = to_world(c.pos, 1.0);
         let color = if Some(gi) == *selected {
             Color::srgb(0.95, 0.55, 0.15)
         } else {
@@ -1413,10 +1345,9 @@ fn run_edit_actions(
     };
     let (ai, _) = cut_basis(axis);
     let c = &mut plan.connectors[gi];
-    let p2d = [c.pos[0].f(), c.pos[1].f()];
     let max_fit = cross_section::fit_onion(
         loops,
-        p2d,
+        c.pos,
         auto::ONION_WALL,
         auto::ONION_MAX_D,
         auto::cap_dir(ai),

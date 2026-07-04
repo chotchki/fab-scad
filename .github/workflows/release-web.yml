@@ -40,7 +40,7 @@ jobs:
           echo "$PWD/binaryen-version_130/bin" >> "$GITHUB_PATH"
           sudo apt-get update && sudo apt-get install -y brotli
       - name: Build the wasm app
-        run: cargo build -p fab-web --release --target wasm32-unknown-unknown
+        run: cargo build -p fab-web -p fab-geom --release --target wasm32-unknown-unknown
       - name: Stage the bundle (web-bundle.md contract)
         run: |
           set -euo pipefail
@@ -59,6 +59,15 @@ jobs:
           brotli -q 11 -k "$STAGE/fab_web_bg.wasm"
           gzip -9 -k "$STAGE/fab_web_bg.wasm"
           cp packaging/web/index.reference.html "$STAGE/"
+          # Geometry worker (C.2): kernel-only wasm in its own worker.
+          mkdir -p "$STAGE/geom"
+          wasm-bindgen --target web --no-typescript --out-name fab_geom --out-dir "$STAGE/geom" \
+            target/wasm32-unknown-unknown/release/fab_geom.wasm
+          wasm-opt -Oz --enable-reference-types --enable-bulk-memory \
+            -o "$STAGE/geom/fab_geom_bg.wasm.opt" "$STAGE/geom/fab_geom_bg.wasm"
+          mv "$STAGE/geom/fab_geom_bg.wasm.opt" "$STAGE/geom/fab_geom_bg.wasm"
+          brotli -q 11 -kf "$STAGE/geom/fab_geom_bg.wasm"
+          cp packaging/web/geom-worker.js "$STAGE/geom/"
           # OpenSCAD side-module (Phase B): pinned official build + our worker + baked lib pins
           # (BOSL2 @ submodule tag, scad-lib @ this commit). Lazily fetched; GPL module UNMODIFIED.
           OSC_SHA="10e0937dd2627116a1f7ab6fb1ed75762b66572f21f4e5054c7dc00526cdd1ff"

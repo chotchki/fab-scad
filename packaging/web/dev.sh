@@ -14,7 +14,7 @@ set -euo pipefail
 cd "$(dirname "$0")/../.."
 
 PKG=${FAB_WEB_PKG:-fab-web} # workspace member; underscored name below is the cdylib artifact
-cargo build -p "$PKG" --release --target wasm32-unknown-unknown
+cargo build -p "$PKG" -p fab-geom --release --target wasm32-unknown-unknown
 WASM="target/wasm32-unknown-unknown/release/${PKG//-/_}.wasm"
 
 STAGE=target/fab-web/stage
@@ -43,6 +43,17 @@ if [ ! -f "$OSC_CACHE/openscad.wasm" ]; then
     echo "$OSC_SHA  $OSC_CACHE/osc.zip" | shasum -a 256 -c - >/dev/null
     unzip -o -q "$OSC_CACHE/osc.zip" -d "$OSC_CACHE"
 fi
+# The geometry worker (C.2): kernel-only wasm, its own worker, mesh bytes over postMessage.
+mkdir -p "$STAGE/geom"
+wasm-bindgen --target web --no-typescript --out-name fab_geom --out-dir "$STAGE/geom" \
+    target/wasm32-unknown-unknown/release/fab_geom.wasm
+if command -v wasm-opt >/dev/null; then
+    wasm-opt -Oz --enable-reference-types --enable-bulk-memory \
+        -o "$STAGE/geom/fab_geom_bg.wasm.opt" "$STAGE/geom/fab_geom_bg.wasm"
+    mv "$STAGE/geom/fab_geom_bg.wasm.opt" "$STAGE/geom/fab_geom_bg.wasm"
+fi
+cp packaging/web/geom-worker.js "$STAGE/geom/"
+
 mkdir -p "$STAGE/openscad"
 cp "$OSC_CACHE/openscad.js" "$OSC_CACHE/openscad.wasm" "$STAGE/openscad/"
 cp packaging/web/openscad-worker.js packaging/web/OPENSCAD-NOTICE.txt "$STAGE/openscad/"

@@ -9,7 +9,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::num::Num;
 
@@ -52,7 +52,7 @@ pub struct Part {
 
 /// The slicing spec: how to split a part into printable pieces. Edited by the GUI (5.1),
 /// consumed by `fab slice` (5.2), applied via `slicer.scad` / `connectors.scad`.
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Slicing {
     /// Printer whose bed the pieces target (defaults to printers.toml's default).
     pub printer: Option<String>,
@@ -69,21 +69,21 @@ pub struct Slicing {
 }
 
 /// A manual print-orientation override for one piece (#40).
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct PieceOrient {
     pub piece: [usize; 3], // slab multi-index [ix, iy, iz]
     pub up: [Num; 3],      // build-up direction in model space (unit)
 }
 
 /// One slab cut: a plane perpendicular to `axis` at coordinate `at` (model space).
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Cut {
     pub axis: String, // "x" | "y" | "z"
     pub at: Num,      // mm, model coords
 }
 
 /// A joint across a cut face: `cut` indexes into `cut`, `pos` is the 2D spot on that plane.
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Connector {
     pub cut: usize,
     #[serde(rename = "type")]

@@ -12,7 +12,11 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 anyhow = "1"
 # The kernel WITHOUT native: booleans/slicing/plan in-process, no OpenSCAD, no reqwest.
-fab-scad = { path = "..", default-features = false, features = ["kernel"] }
+# The app itself is KERNEL-FREE on wasm (C.2): geometry runs in the fab-geom worker, this
+# crate only links the wire types + pure editor helpers. Native keeps the kernel so the same
+# geomsvc seam runs in-process on a pool thread.
+fab-scad = { path = "..", default-features = false }
+
 # A.6 trim: bevy defaults are [2d, 3d, ui, audio] — we render 3d + feathers ui only, so drop
 # the sprite pipeline + audio (the AudioContext-before-gesture console warning goes with it).
 # Hand-assembled from what the 3d/ui meta-groups expand to, MINUS the default_platform pieces
@@ -61,3 +65,9 @@ web-sys = { version = "0.3", features = [
     "WorkerType",
     "MessageEvent",
 ] }
+
+# Native keeps the kernel: geomsvc::handle runs in-process on a pool thread (same seam).
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies.fab-scad]
+path = ".."
+default-features = false
+features = ["kernel"]

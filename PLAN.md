@@ -84,7 +84,8 @@ Driven by `claude-plan-bridge` (FORMATv2). Hand-authored; run
 - [x] 18.8 - fab-web bundle contract: GitHub-release artifact (tar.gz: ES-module glue + wasm + br/gz + manifest.json; tailwind-style pinned fetch) — contract doc + spike bundle handed to the 18.6 gate
 - [ ] 18.9 - crates.io channel: claim the free `fab-scad` name — fix package contents (exclude models/spikes/docs), `cargo publish --dry-run` clean, then publish 0.1.0 (cargo install = third distribution channel, source-build tradeoff documented)
 ## Phase C - fab-web beta feedback
-- [ ] C.1 - Busy pulse + staged sync work: animated "rendering {name} (OpenSCAD)" while the worker runs; "slicing…"/"packing…" labels armed 2 frames ahead so they PAINT before the main-thread block; all completions clear to a real status (the desktop loading-pulse standard, ported)
+- [x] C.1 - Busy pulse + staged sync work: animated "rendering {name} (OpenSCAD)" while the worker runs; "slicing…"/"packing…" labels armed 2 frames ahead so they PAINT before the main-thread block; all completions clear to a real status (the desktop loading-pulse standard, ported)
+- [ ] C.2 - Geometry worker (fab-geom): a second SMALL wasm (kernel-only, no bevy, ~1 MB) in its own web worker runs weld/plan/slice/export over mesh-bytes postMessage — the !Send Solid contract as designed; makes the C.1 slice/export labels a LIVE pulse instead of a painted-then-frozen one (A.8 measured 5-10 s block on a 119k-tri part)
 
 ## Backlog (not yet phased)
 

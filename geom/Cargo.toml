@@ -1,0 +1,17 @@
+[package]
+name = "fab-geom"
+version = "0.1.0"
+edition = "2021"
+description = "The geometry worker's wasm: fab-scad's geomsvc behind one byte-envelope export"
+license = "MIT"
+
+# cdylib = the worker's wasm; rlib keeps `cargo test -p fab-geom` possible natively.
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+fab-scad = { path = "..", default-features = false, features = ["kernel"] }
+wasm-bindgen = "0.2"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+console_error_panic_hook = "0.1"

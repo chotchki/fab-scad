@@ -86,6 +86,43 @@ fn read(tok: &mut std::str::SplitWhitespace) -> Result<f32> {
         .context("STL: bad float")
 }
 
+/// Indexed mesh → binary STL bytes (per-face normals from winding). The display-fallback
+/// twin of the kernel's `to_stl_bytes` for meshes that DON'T weld — viewing needs no manifold.
+pub fn binary_from_indexed(verts: &[[f64; 3]], tris: &[[u32; 3]]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(84 + 50 * tris.len());
+    out.extend_from_slice(&[0u8; 80]);
+    out.extend_from_slice(&(tris.len() as u32).to_le_bytes());
+    for t in tris {
+        let p: Vec<[f32; 3]> = t
+            .iter()
+            .map(|&i| {
+                let v = verts[i as usize];
+                [v[0] as f32, v[1] as f32, v[2] as f32]
+            })
+            .collect();
+        let u = [p[1][0] - p[0][0], p[1][1] - p[0][1], p[1][2] - p[0][2]];
+        let w = [p[2][0] - p[0][0], p[2][1] - p[0][1], p[2][2] - p[0][2]];
+        let mut n = [
+            u[1] * w[2] - u[2] * w[1],
+            u[2] * w[0] - u[0] * w[2],
+            u[0] * w[1] - u[1] * w[0],
+        ];
+        let l = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
+        if l > 0.0 {
+            for c in &mut n {
+                *c /= l;
+            }
+        }
+        for v in std::iter::once(&n).chain(p.iter()) {
+            for c in v {
+                out.extend_from_slice(&c.to_le_bytes());
+            }
+        }
+        out.extend_from_slice(&[0u8; 2]);
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

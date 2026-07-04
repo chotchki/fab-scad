@@ -1,9 +1,9 @@
 //! A TOML scalar that may be written as either an integer or a float — chotchki hand-edits
 //! these manifests, so `at = -10` and `at = -10.0` must both parse.
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Copy, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
 #[serde(untagged)]
 pub enum Num {
     Int(i64),

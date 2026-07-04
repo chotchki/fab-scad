@@ -49,6 +49,12 @@ Opening designs in the OpenSCAD GUI by hand needs OPENSCADPATH in your shell —
 
 ## License
 
-The tool + `scad-lib` are **MIT** (`LICENSE`). The designs in `models/` are a separate repo
+The tool is **GPL-2.0-or-later** (`LICENSE`) — a deliberate flip from MIT, made when the
+scad-rs work began, and EXACTLY OpenSCAD's license on purpose. The Rust OpenSCAD
+implementation derives its correctness from the OpenSCAD community's accumulated semantics,
+tests + docs; taking that value while licensing around their GPL would be legal and wrong.
+Matching their license byte-for-byte means anything here flows UPSTREAM with zero friction
+if they ever find value in it — and lets us port from `src/core` directly instead of
+clean-room guessing. `scad-lib` stays MIT. The designs in `models/` are a separate repo
 under **CC BY-NC-SA 4.0** — different repo, different license, on purpose (keeps the slicer
 upstreamable without entangling the designs' terms).

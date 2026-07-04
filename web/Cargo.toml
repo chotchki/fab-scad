@@ -3,7 +3,7 @@ name = "fab-web"
 version = "0.1.0"
 edition = "2021"
 description = "Browser build of the fab slicer: client-only auto-slicing, zero server-side outputs"
-license = "MIT"
+license = "GPL-2.0-or-later"
 
 # cdylib = the wasm module; rlib so the native dev bin (src/main.rs) links the same app.
 [lib]

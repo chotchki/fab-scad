@@ -3,7 +3,7 @@ name = "fab-geom"
 version = "0.1.0"
 edition = "2021"
 description = "The geometry worker's wasm: fab-scad's geomsvc behind one byte-envelope export"
-license = "MIT"
+license = "GPL-2.0-or-later"
 
 # cdylib = the worker's wasm; rlib keeps `cargo test -p fab-geom` possible natively.
 [lib]

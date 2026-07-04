@@ -41,14 +41,14 @@ the open lead (backlog). Hosting pages may want a one-line hint near the app.
 `geom/` ships fab-geom: the kernel (Manifold weld/plan/slice/export/section) as its OWN ~1 MB
 wasm, run in a web worker over a bincode byte envelope. The APP wasm carries no kernel at all
 — every geometry op is async, the UI pulses live through 100k-tri slices that used to freeze
-the tab. Members: `geom/geom-worker.js` (MIT glue), `geom/fab_geom.js`, `geom/fab_geom_bg.wasm`
+the tab. Members: `geom/geom-worker.js` (GPL, ours), `geom/fab_geom.js`, `geom/fab_geom_bg.wasm`
 (+ .br/.gz). Lazily created on first model open; resolved against `data-base` like everything
 else. Serve the whole tree — a missing `geom/` breaks ALL loading, visibly, in the panel.
 
 ## The OpenSCAD side-module (Phase B — live)
 
 `.scad` files render in-browser: the bundle's `openscad/` dir carries the UNMODIFIED official
-OpenSCAD wasm build (10.7 MB + `.br`), our MIT worker glue (`openscad-worker.js`), a GPL
+OpenSCAD wasm build (10.7 MB + `.br`), our worker glue (`openscad-worker.js`), a GPL
 notice, and `libs.json` — BOSL2 (the libs/ submodule pin, v2.0.746) + scad-lib (the app's
 commit) as one path→text pack the worker writes into its virtual FS (`/libraries` is
 OpenSCAD's default search path; `include <BOSL2/std.scad>` just works). Everything under
@@ -58,7 +58,8 @@ Members are DOCUMENT-RELATIVE like the rest of the bundle (the app spawns
 
 **Licensing, decided consciously:** the GPL module ships unmodified in its own worker with
 notice + source links (`openscad/OPENSCAD-NOTICE.txt`); the page-level combination conveys
-under GPL terms while fab's own files stay MIT (GPL-compatible — the dossier's calculus). The
+under GPL terms; since 2026-07-04 fab's own files are GPL-2.0-or-later too (OpenSCAD's exact license) (the scad-rs
+relicense — one license, no arm's-length calculus needed). The
 hosting page SHOULD show an "OpenSCAD (GPL)" attribution line near the app; measured worker
 cost on a real part: ~10 s first render including the lazy fetch, seconds after.
 

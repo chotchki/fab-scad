@@ -3,7 +3,7 @@ name = "fab-gui"
 version = "0.1.0"
 edition = "2021"
 description = "Bevy GUI for fab-scad: set cut planes, place connectors, preview piece-vs-bed"
-license = "MIT"
+license = "GPL-2.0-or-later"
 
 [dependencies]
 fab-scad = { path = ".." }

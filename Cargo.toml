@@ -3,7 +3,7 @@ name = "fab-scad"
 version = "0.1.0"
 edition = "2021"
 description = "Workflow layer around OpenSCAD: render, slice, output, publish"
-license = "MIT"
+license = "GPL-2.0-or-later"
 repository = "https://github.com/chotchki/fab-scad"
 # crates.io ships ONLY the tool (18.9) — without this the .crate drags models/, docs/, spikes/
 # and blows past the registry's 10 MiB cap (naive package: 26.5 MiB compressed).

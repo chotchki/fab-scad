@@ -8,5 +8,5 @@ This directory contains the UNMODIFIED official OpenSCAD WebAssembly build
 
 It runs in its own Web Worker and communicates only via message passing
 (scad text in, STL bytes out). openscad-worker.js (the glue) and the fab-web
-app are MIT-licensed; libs.json bundles BOSL2 (BSD-2-Clause) and fab's
-scad-lib (MIT) at pinned revisions.
+app are GPL-2.0-or-later (fab-scad relicensed 2026-07-04, matching OpenSCAD); libs.json bundles
+BOSL2 (BSD-2-Clause) and fab's scad-lib (MIT) at pinned revisions.

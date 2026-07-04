@@ -31,6 +31,12 @@ read the bison grammar, read the evaluator, translate truthfully — instead of 
 guessing. The ethics choice IS the engineering advantage. (`scad-lib` stays MIT; BOSL2 is
 BSD-2, compatible.)
 
+Nuance (researched 2026-07-04): Apache-2.0 deps (Manifold — the same one OpenSCAD links)
+are GPLv2-incompatible but flow into GPLv3, so every DISTRIBUTED build operates under the
+grant's v3 option. Grant = 2-or-later for upstream's sake; effective rules = v3. The README
+says this out loud. This is also why OpenSCAD+Manifold is legal at all — the or-later
+escape, not community respect.
+
 ## What the research established (2026-07-04, 8-agent verified)
 
 - **No linkable OpenSCAD exists.** `OpenSCADLibInternal` is a test-only artifact (never

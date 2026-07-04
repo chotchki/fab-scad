@@ -55,6 +55,15 @@ implementation derives its correctness from the OpenSCAD community's accumulated
 tests + docs; taking that value while licensing around their GPL would be legal and wrong.
 Matching their license byte-for-byte means anything here flows UPSTREAM with zero friction
 if they ever find value in it — and lets us port from `src/core` directly instead of
-clean-room guessing. `scad-lib` stays MIT. The designs in `models/` are a separate repo
+clean-room guessing.
+
+**In practice this codebase operates under GPLv3 rules.** Our dependency tree includes
+Apache-2.0 code (Manifold, via manifold-csg — the same Manifold OpenSCAD itself links), and
+Apache-2.0 is incompatible with GPLv2's terms but one-way compatible into GPLv3. The
+`or-later` is what makes the combination legal: any distributed build takes the GPL grant at
+its v3 option. (This is also, for the record, the mechanism that makes OpenSCAD+Manifold
+legal — not just community respect.) The GRANT stays 2-or-later so upstream can take our
+code on their terms; the effective rules you comply with when distributing are v3's.
+`scad-lib` stays MIT. The designs in `models/` are a separate repo
 under **CC BY-NC-SA 4.0** — different repo, different license, on purpose (keeps the slicer
 upstreamable without entangling the designs' terms).

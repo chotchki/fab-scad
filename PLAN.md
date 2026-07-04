@@ -14,7 +14,7 @@ Driven by `claude-plan-bridge` (FORMATv2). Hand-authored; run
 - [x] G.2 - SPEC.md rounds 1-2 (drafted WITH chotchki): mission + license stance, architecture, BOSL2 rungs, determinism doctrine, testing/verification layers — all open questions resolved or scheduled (winnow, enum values, Kani-low-level, semantics/ segmented, lang/ sibling, tracing full-trace)
 - [ ] G.3 - Tracer bullet: sphere-vs-oracle end to end, metric gate chosen from data
   - [ ] G.3.1 - lang/ crate scaffold: workspace sibling, error type, tracing dep (compiled-out default), clippy-pedantic baseline, CI lane (fmt/clippy/test)
-  - [ ] G.3.2 - winnow lexer: tokens, numbers/strings/identifiers, comments PRESERVED (customizer needs them later); lexer fuzz seed corpus started
+  - [ ] G.3.2 - winnow lexer: tokens, numbers/strings/identifiers, comments PRESERVED (customizer needs them later); every named parser wrapped in winnow trace() from day one (debug-feature-gated, zero cost off); lexer fuzz seed corpus started
   - [ ] G.3.3 - parser core: expression precedence, module instantiation, argument lists incl. $-args; AST with source spans
   - [ ] G.3.4 - evaluator skeleton: explicit-stack machine over the subset; Value v0 (Num/Bool/Str/NumList/Undef); $fn/$fa/$fs resolution
   - [ ] G.3.5 - lower sphere()/cube()/cylinder() to kernel::Solid — tessellation EXACTLY matching src/core primitives (ring/segment math ported, provenance noted)

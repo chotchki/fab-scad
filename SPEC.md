@@ -63,7 +63,11 @@ escape, not community respect.
   in src/core is the CONFORMANCE REFERENCE, not the implementation strategy — we generate
   grammar-conformance tests from it rather than translating LALR mechanics. Winnow buys us
   error quality + streaming + a customizer-friendly lossless-enough AST (params with
-  comments/annotations survive).
+  comments/annotations survive) — AND built-in observability: every named parser is wrapped
+  in winnow's `trace()` combinator from the first one written (the `debug` feature prints
+  the attempt/backtrack tree; without it, zero cost). Same compile-out-like-a-logger
+  doctrine as the evaluator's tracing spans — parse decisions and evaluation each observable
+  from their idiomatic tool, both free in release.
 - **Evaluator:** the hard 90%. Tree-walker, EXPLICIT STACK (no host recursion — the Safari
   class of failure becomes structurally impossible), lexical+dynamic scoping exactly as
   OpenSCAD does it ($-variables are dynamically scoped; `children()` is late-bound), value

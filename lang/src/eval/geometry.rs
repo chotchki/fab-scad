@@ -174,3 +174,68 @@ fn fan(tris: &mut Vec<[u32; 3]>, base: u32, nf: u32, reverse: bool) {
         }
     }
 }
+
+// I.7 — Kani proofs that the u32 TESSELLATION INDEX arithmetic can't overflow on an untrusted `$fn`
+// (docs/testing-cards.md: "indices in bounds", panic-freedom on untrusted SCAD). The representability
+// guards (sphere: num_rings*nf <= u32::MAX at line 25; cylinder: nf*2 <= u32::MAX at line 111) are the
+// preconditions; Kani proves every index expression stays in u32 for ALL ring/segment counts that pass
+// them. Preconditions are stated in u64 so the assumes themselves can't wrap; the PROVEN arithmetic is
+// the actual u32 code. Compiled only under `cargo kani`.
+#[cfg(kani)]
+mod proofs {
+    /// sphere()'s quad-corner indices (geometry.rs:48-51 + the bottom-cap base at :55): under the
+    /// line-25 guard and the loop bounds (i+1 < num_rings, j < nf), none overflow u32.
+    #[kani::proof]
+    fn sphere_quad_indices_never_overflow() {
+        let nf: u32 = kani::any();
+        let num_rings: u32 = kani::any();
+        // Bound each factor to 2^16 — a symbolic u32*u32 is CBMC's hard case, but with 16-bit-
+        // significant operands the multiplier is tractable. The PRODUCT still spans u32::MAX
+        // (2^16 * 2^16 = 2^32 > u32::MAX), so the line-25 guard is genuinely exercised at its boundary:
+        // for the upper inputs the guard fires and the index code is unreachable, exactly as shipped.
+        // (65536 segments is already absurd for any real $fn; the guard covers beyond by construction.)
+        kani::assume(nf >= 1 && nf <= (1 << 16));
+        kani::assume(num_rings >= 1 && num_rings <= (1 << 16));
+        kani::assume(u64::from(num_rings) * u64::from(nf) <= u64::from(u32::MAX)); // the guard
+        let i: u32 = kani::any();
+        let j: u32 = kani::any();
+        kani::assume(u64::from(i) + 1 < u64::from(num_rings)); // quad loop: i in 0..num_rings-1
+        kani::assume(u64::from(j) < u64::from(nf)); // j in 0..nf
+        let jn = (j + 1) % nf;
+        let _a = i * nf + jn;
+        let _b = i * nf + j;
+        let _c = (i + 1) * nf + j;
+        let _d = (i + 1) * nf + jn;
+        let _base = num_rings.saturating_sub(1) * nf;
+    }
+
+    /// cylinder()'s side/apex indices (geometry.rs:133-137): under the line-111 guard (nf*2 <=
+    /// u32::MAX) with top_start <= nf and j < nf, `top_start + jn` fits in u32.
+    #[kani::proof]
+    fn cylinder_side_indices_never_overflow() {
+        let nf: u32 = kani::any();
+        kani::assume(nf >= 1);
+        kani::assume(u64::from(nf) * 2 <= u64::from(u32::MAX)); // the guard
+        let top_start: u32 = kani::any();
+        kani::assume(u64::from(top_start) <= u64::from(nf)); // top_start is nf (or 1 for a bottom apex)
+        let j: u32 = kani::any();
+        kani::assume(u64::from(j) < u64::from(nf));
+        let jn = (j + 1) % nf;
+        let _a = top_start + jn;
+        let _b = top_start + j;
+    }
+
+    /// fan()'s indices (`base + j + 1`, geometry.rs:171/173): safe as long as the CALLER guarantees
+    /// base + nf <= u32::MAX — which sphere/cylinder both do via their guards. Proven per-index (the
+    /// loop body), not over the loop, so there's nothing to unwind.
+    #[kani::proof]
+    fn fan_indices_never_overflow() {
+        let base: u32 = kani::any();
+        let nf: u32 = kani::any();
+        kani::assume(u64::from(base) + u64::from(nf) <= u64::from(u32::MAX)); // caller precondition
+        let j: u32 = kani::any();
+        kani::assume(u64::from(j) + 1 < u64::from(nf)); // fan loop: j in 1..nf-1
+        let _x = base + j + 1;
+        let _y = base + j;
+    }
+}

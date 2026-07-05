@@ -42,6 +42,10 @@ tracing-subscriber = { version = "0.3", default-features = false, features = ["r
 [lints.rust]
 # The ratchet (SPEC: the lint set only ever tightens). Public surface must be documented.
 missing_docs = "warn"
+# `cfg(kani)` gates the I.7 model-checking proofs — compiled ONLY under `cargo kani`, which sets the
+# cfg. Register it here so the normal build doesn't flag it as an unexpected cfg (the -D warnings gate
+# would otherwise fail on every `#[cfg(kani)]` proof module).
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)'] }
 # no-unsafe across the whole fab-lang tree. The unsafe lives behind the kernel FFI boundary in
 # fab-scad; the language crate is pure safe Rust. `forbid` (not `deny`) = no `#[allow]` escape
 # hatch anywhere, ever. Subsumes unsafe_op_in_unsafe_fn — you can't write an `unsafe fn` at all.

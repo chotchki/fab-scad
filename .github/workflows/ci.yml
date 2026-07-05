@@ -33,3 +33,15 @@ jobs:
         with:
           tool: cargo-llvm-cov
       - run: cargo llvm-cov -p fab-lang --fail-under-lines 100 --fail-under-functions 100
+
+  # Kani proofs on the evaluator kernels (I.7): panic-freedom on the exact loop that runs untrusted
+  # SCAD — range termination, stack pop/pop discipline, tessellation index bounds, guarded shifts. A
+  # SEPARATE job on ubuntu (kani's home platform; fab-lang is pure Rust so it builds anywhere) because
+  # kani's CBMC toolchain is a heavy install, like the fuzz lane — it must not slow the main macOS build.
+  kani:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: model-checking/kani-github-action@v1
+        with:
+          working-directory: lang

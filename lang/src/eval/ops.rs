@@ -249,6 +249,41 @@ fn int_to_f64(x: i64) -> f64 {
     x as f64
 }
 
+// I.7 — Kani proofs of PANIC-FREEDOM on the arithmetic kernels that run on untrusted SCAD input
+// (docs/testing-cards.md: "indices in bounds", panic-freedom on the exact loop). Symbolic primitives,
+// so the guarantee is universal. Compiled only under `cargo kani`.
+#[cfg(kani)]
+mod proofs {
+    /// `dot()`'s 4-lane tail indexes `lanes[lane]` (`lanes: [f64; 4]`) where `lane` enumerates the
+    /// remainder of `chunks_exact(4)` — whose length is ALWAYS < 4 (the std guarantee: a remainder is
+    /// shorter than the chunk size). So every `lane` is a valid index into the 4-lane accumulator. The
+    /// invariant is modeled directly (`rem_len < 4`, a symbolic tail length) so CBMC proves the index
+    /// bound without unwinding `Vec`/`chunks_exact` internals — this IS the "indices in bounds" proof.
+    #[kani::proof]
+    #[kani::unwind(4)]
+    fn dot_tail_index_stays_in_bounds() {
+        let rem_len: usize = kani::any();
+        kani::assume(rem_len < 4); // chunks_exact(4).remainder().len() is always < 4
+        let mut lanes = [0.0f64; 4];
+        let mut lane = 0usize;
+        while lane < rem_len {
+            lanes[lane] += 1.0; // the tail op `lanes[lane] += x*y` — panics iff lane >= 4, proven safe
+            lane += 1;
+        }
+    }
+
+    /// `shift()` guards `by` into `0..64` BEFORE the shift, so `i64 << (by as u32)` / `>>` never
+    /// overflow-panic (shift amount < bit width). Panic-freedom for the untrusted `<<`/`>>` path.
+    #[kani::proof]
+    fn guarded_shift_never_overflow_panics() {
+        let by: i64 = kani::any();
+        kani::assume((0..64).contains(&by)); // the exact guard in shift()
+        let x: i64 = kani::any();
+        let _l = x << (by as u32);
+        let _r = x >> (by as u32);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::dot;

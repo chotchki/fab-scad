@@ -200,6 +200,43 @@ impl Iterator for RangeIter {
     }
 }
 
+// I.7 — Kani proofs of range-iteration TERMINATION. Model-checked over SYMBOLIC f64 bounds (nan/inf/
+// zero-step/wrong-direction all included), so the guarantee holds for every input, not just the tested
+// ones. Compiled only under `cargo kani` (cfg(kani)); a normal build never sees them.
+#[cfg(kani)]
+mod proofs {
+    use super::{RANGE_MAX, range_iter};
+
+    /// The iterator's length is CAPPED at `RANGE_MAX` for any bounds — so `next()` is called at most
+    /// `RANGE_MAX` times. This is the "runaway range can't hang the evaluator" guarantee.
+    #[kani::proof]
+    fn range_len_is_capped() {
+        let it = range_iter(kani::any(), kani::any(), kani::any());
+        assert!(it.len <= RANGE_MAX);
+    }
+
+    /// From ANY not-yet-exhausted index, `next()` yields a value AND advances the index by exactly 1 —
+    /// strict progress toward the (bounded) length. Bounded length + monotone progress ⇒ termination.
+    #[kani::proof]
+    fn range_next_makes_progress() {
+        let mut it = range_iter(kani::any(), kani::any(), kani::any());
+        it.i = kani::any(); // an arbitrary progress point, not just the start
+        kani::assume(it.i < it.len);
+        let before = it.i;
+        assert!(it.next().is_some());
+        assert!(it.i == before + 1);
+    }
+
+    /// Once exhausted (`i >= len`), `next()` HALTS — `None`, no further advance.
+    #[kani::proof]
+    fn range_next_halts_when_exhausted() {
+        let mut it = range_iter(kani::any(), kani::any(), kani::any());
+        it.i = kani::any();
+        kani::assume(it.i >= it.len);
+        assert!(it.next().is_none());
+    }
+}
+
 #[cfg(test)]
 #[allow(
     clippy::float_cmp,

@@ -446,6 +446,46 @@ fn list_string_builtins() {
 }
 
 #[test]
+fn type_predicate_builtins() {
+    let t = Value::Bool(true);
+    let f = Value::Bool(false);
+
+    // is_undef treats a MISSING or unbound arg as undef; the positive predicates need the value present.
+    assert_eq!(ev("is_undef(undef)"), t);
+    assert_eq!(ev("is_undef(nope)"), t); // an unbound name is undef
+    assert_eq!(ev("is_undef()"), t); // no arg → undef-like
+    assert_eq!(ev("is_undef(5)"), f);
+
+    assert_eq!(ev("is_bool(true)"), t);
+    assert_eq!(ev("is_bool(1)"), f); // 1 is a number, not a bool (no coercion)
+
+    assert_eq!(ev("is_num(5)"), t);
+    assert_eq!(ev("is_num(0/0)"), t); // NaN is still a number
+    assert_eq!(ev(r#"is_num("a")"#), f);
+    assert_eq!(ev("is_num([1, 2])"), f);
+    assert_eq!(ev("is_num()"), f); // no arg → false
+
+    assert_eq!(ev(r#"is_string("a")"#), t);
+    assert_eq!(ev("is_string(5)"), f);
+
+    assert_eq!(ev("is_list([1, 2])"), t); // NumList fast path
+    assert_eq!(ev(r#"is_list([1, "a"])"#), t); // heterogeneous List
+    assert_eq!(ev("is_list([])"), t); // empty is a list
+    assert_eq!(ev(r#"is_list("a")"#), f); // a string is NOT a list
+    assert_eq!(ev("is_list([0:2])"), f); // a range is NOT a list
+
+    assert_eq!(ev("is_function(function(x) x)"), t);
+    assert_eq!(ev("is_function(5)"), f);
+
+    // version — a PINNED constant (last stable 2021.01), deterministic by doctrine.
+    assert_eq!(ev("version()"), list(&[2021.0, 1.0, 0.0]));
+    assert_eq!(ev("version_num()"), num(20_210_100.0));
+
+    // rands is a DELIBERATE loud defer (non-deterministic seedless; seeded needs boost's RNG bug-for-bug).
+    assert!(matches!(ev_err("rands(0, 1, 5)"), Error::Unimplemented(m) if m.contains("I.4")));
+}
+
+#[test]
 fn let_expressions() {
     assert_eq!(ev("let(a = 1) a + 1"), num(2.0));
     assert_eq!(ev("let(a = 1, b = 2) a + b"), num(3.0));

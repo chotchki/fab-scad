@@ -11,6 +11,14 @@
 //! formatter (so echo at I.5 refines ONE place), and `lookup`/`search` are the table primitives —
 //! `lookup` linear-interpolates + clamps at the ends, `search` follows `func.cc`'s per-match protocol
 //! (`num_returns_per_match`: 1 = flat first-hits, 0 = all, n = up to n; `index_col_num` picks a column).
+//!
+//! Type predicates (I.4.3) are trivial variant tests. `version`/`version_num` report a PINNED constant
+//! (last stable `2021.01`), NOT the host build — the oracle is nightly (a build-date version), but the
+//! determinism doctrine forbids env-derived values, so we pin a release that clears BOSL2's minimum and
+//! bucket the oracle's build-date `version()` as a known K divergence. `rands` is a DELIBERATE loud
+//! defer (kept out of [`is_builtin`], so a call hits the unimplemented-builtin error): seedless it is
+//! non-deterministic (banned), and seeded it would have to replicate boost's `mt19937` +
+//! `uniform_real_distribution` bit-for-bit — a K divergence-bucket decision, not this leaf.
 
 use std::collections::BTreeMap;
 
@@ -54,6 +62,15 @@ pub(super) fn is_builtin(name: &str) -> bool {
             | "reverse"
             | "lookup"
             | "search"
+            // type predicates + version (I.4.3)
+            | "is_undef"
+            | "is_bool"
+            | "is_num"
+            | "is_string"
+            | "is_list"
+            | "is_function"
+            | "version"
+            | "version_num"
     )
 }
 
@@ -89,6 +106,14 @@ pub(super) fn apply(name: &str, pos: &[Value], _named: &BTreeMap<String, Value>)
         "reverse" => reverse(pos),
         "lookup" => lookup(pos),
         "search" => search(pos),
+        "is_undef" => Value::Bool(matches!(pos.first(), None | Some(Value::Undef))),
+        "is_bool" => pred(pos, |v| matches!(v, Value::Bool(_))),
+        "is_num" => pred(pos, |v| matches!(v, Value::Num(_))),
+        "is_string" => pred(pos, |v| matches!(v, Value::Str(_))),
+        "is_list" => pred(pos, |v| matches!(v, Value::NumList(_) | Value::List(_))),
+        "is_function" => pred(pos, |v| matches!(v, Value::Function { .. })),
+        "version" => Value::num_list(vec![2021.0, 1.0, 0.0]),
+        "version_num" => Value::Num(20_210_100.0),
         _ => Value::Undef,
     }
 }
@@ -425,6 +450,15 @@ fn column(elem: &Value, i: usize) -> Option<Value> {
         Value::List(xs) => xs.get(i).cloned(),
         _ => None,
     }
+}
+
+// ─────────────────────────────── type predicates + version (I.4.3) ────────────────────────────────
+
+/// A positive type predicate (`is_bool`/`is_num`/…): the first arg is present AND satisfies `f`. A
+/// missing arg → `false` (there is no value of that type). `is_undef` is the one that treats absence
+/// as `undef` (→ `true`), so it doesn't go through here.
+fn pred(pos: &[Value], f: impl Fn(&Value) -> bool) -> Value {
+    Value::Bool(pos.first().is_some_and(f))
 }
 
 #[cfg(test)]

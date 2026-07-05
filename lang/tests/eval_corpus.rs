@@ -549,8 +549,7 @@ fn program_level_defers_are_loud() {
     // eval_program on one is loud (the loader happy-path lives in loader_corpus.rs).
     for (src, needle) in [
         ("module m() cube(1); m();", "user modules"), // defining is fine; instantiating rides J
-        ("if (true) cube(1);", "I.3"),
-        ("use <lib.scad>", "use/include"), // raw eval_program can't resolve it — loud
+        ("use <lib.scad>", "use/include"),            // raw eval_program can't resolve it — loud
         ("include <lib.scad>", "use/include"),
         ("x = a.b;", "I.1"), // an erroring assignment RHS propagates out of eval_stmt
         ("{ y = a.b; }", "I.1"), // …and out of a block's inner statement

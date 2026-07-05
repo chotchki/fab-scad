@@ -314,5 +314,9 @@ mod tests {
         );
         // a transform preserves volume:
         assert!((vol("translate([100, 0, 0]) rotate([30, 20, 10]) cube(3);") - 27.0).abs() < 1e-6);
+        // control flow (I.3.3): `if` picks a branch, `for` unions its iterations.
+        assert!((vol("if (true) cube(2);") - 8.0).abs() < 1e-6);
+        assert!((vol("if (false) cube(2);")).abs() < 1e-6); // empty
+        assert!((vol("for (i = [0:2]) translate([i * 10, 0, 0]) cube(2);") - 24.0).abs() < 1e-6); // 3×8
     }
 }

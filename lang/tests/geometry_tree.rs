@@ -86,6 +86,51 @@ fn bare_block_groups_its_children_into_a_union() {
 }
 
 #[test]
+fn if_contributes_the_taken_branch() {
+    assert!(matches!(
+        evaluate_geometry("if (true) cube(1);").unwrap(),
+        GeoNode::Leaf(_)
+    ));
+    assert_eq!(
+        evaluate_geometry("if (false) cube(1);").unwrap(),
+        GeoNode::Empty
+    );
+    assert!(matches!(
+        evaluate_geometry("if (1 > 2) cube(1); else sphere(1, $fn = 8);").unwrap(),
+        GeoNode::Leaf(_) // the else branch
+    ));
+}
+
+#[test]
+fn for_iterates_and_unions() {
+    let count = |src| match evaluate_geometry(src).unwrap() {
+        GeoNode::Union(c) | GeoNode::Intersection(c) => c.len(),
+        other => panic!("expected a fold node, got {other:?}"),
+    };
+    assert_eq!(
+        count("for (i = [0:2]) translate([i * 5, 0, 0]) cube(2);"),
+        3
+    ); // range 0,1,2
+    assert_eq!(
+        count("for (x = [1, 5, 9]) translate([x, 0, 0]) cube(1);"),
+        3
+    ); // number list
+    assert_eq!(
+        count("for (p = [[0, 0, 0], [5, 0, 0]]) translate(p) cube(1);"),
+        2
+    ); // list of vecs
+    assert_eq!(
+        count("for (i = [0:1], j = [0:2]) translate([i, j, 0]) cube(1);"),
+        6
+    ); // product 2×3
+    assert_eq!(count("for (i = 5) translate([i, 0, 0]) cube(1);"), 1); // scalar → one iteration
+    assert_eq!(
+        count("intersection_for (i = [0:2]) rotate([0, 0, i * 30]) cube(10);"),
+        3
+    );
+}
+
+#[test]
 fn evaluate_geometry_file_reads_and_builds_a_tree() {
     let dir = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR"));
     let path = dir.join("geometry_tree_file.scad");

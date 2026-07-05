@@ -770,6 +770,44 @@ fn union_of(mut nodes: Vec<GeoNode>) -> GeoNode {
     }
 }
 
+/// Iterate a `for`/`intersection_for` over its loop-variable ARGS (a Cartesian PRODUCT for multiple
+/// vars), evaluating the body's geometry once per binding tuple and pushing each iteration's node.
+/// Recursion depth = the number of loop vars (parse-bounded), so it can't overflow.
+fn for_product<'a>(
+    args: &'a [Arg],
+    children: &[&'a Stmt],
+    scope: &Scope,
+    ctx: &Ctx<'a>,
+    out: &mut Vec<GeoNode>,
+) -> crate::Result<()> {
+    match args.split_first() {
+        None => out.push(union_of(eval_nodes(children, ctx, scope)?)), // all vars bound → the body
+        Some((arg, rest)) => {
+            let name = arg.name.as_deref().unwrap_or("");
+            let iterable = eval_with_ctx(&arg.value, scope, ctx)?;
+            for value in iterate_values(&iterable) {
+                let mut child = scope.clone();
+                child.bind(name, value);
+                for_product(rest, children, &child, ctx, out)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The values a `for` binding iterates: a range → its (capped) values, a vector → its elements, a
+/// scalar → a single iteration (OpenSCAD's `for(i = 5)`).
+fn iterate_values(v: &Value) -> Vec<Value> {
+    match v {
+        Value::Range { start, step, end } => {
+            range_iter(*start, *step, *end).map(Value::Num).collect()
+        }
+        Value::NumList(xs) => xs.iter().map(|&n| Value::Num(n)).collect(),
+        Value::List(xs) => xs.to_vec(),
+        other => vec![other.clone()],
+    }
+}
+
 /// Flatten a geometry tree WITHOUT a backend: `Empty` → an empty mesh, a single `Leaf` → its mesh.
 /// Anything with a transform or a boolean needs the Manifold backend (fab-scad), so it errors LOUD —
 /// callers reach for [`evaluate_geometry`](crate::evaluate_geometry) + a backend instead.
@@ -933,12 +971,30 @@ fn eval_stmt<'a>(
                 _ => GeoNode::Union(children),
             });
         }
+        // `for` / `intersection_for`: bind the loop variable(s) over a range/vector, evaluate the body
+        // per iteration, and union (or intersect) the results (I.3.3 — the statement half of control
+        // flow). Multiple loop vars nest as a product, like the comprehension `for`.
+        StmtKind::Module(mi) if mi.name == "for" || mi.name == "intersection_for" => {
+            let children: Vec<&Stmt> = mi.children.iter().collect();
+            let mut iterations = Vec::new();
+            for_product(&mi.args, &children, scope, ctx, &mut iterations)?;
+            nodes.push(if mi.name == "intersection_for" {
+                GeoNode::Intersection(iterations)
+            } else {
+                GeoNode::Union(iterations)
+            });
+        }
         // A PRIMITIVE → a `Leaf` (a still-deferred user module fails LOUD inside `eval_module`).
         StmtKind::Module(mi) => nodes.push(GeoNode::Leaf(module::eval_module(mi, scope, ctx)?)),
-        StmtKind::If { .. } => {
-            return Err(crate::Error::Unimplemented(
-                "if/else evaluation is not yet implemented (I.3)",
-            ));
+        // `if (cond) A else B` contributes the TAKEN branch's geometry (I.3.3).
+        StmtKind::If { cond, then, els } => {
+            let branch = if eval_with_ctx(cond, scope, ctx)?.is_truthy() {
+                then
+            } else {
+                els
+            };
+            let refs: Vec<&Stmt> = branch.iter().collect();
+            nodes.push(union_of(eval_nodes(&refs, ctx, scope)?));
         }
         // The loader resolves top-level `use`/`include` away (include → spliced, use → imported), so a
         // node reaching here is either a raw `eval_program` on an unloaded program or a `use`/`include`

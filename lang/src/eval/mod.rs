@@ -62,13 +62,14 @@ enum Task<'a> {
         els: &'a Expr,
         scope: Scope,
     },
-    /// Pop `params.len()` argument values, bind them to the params in a fresh child of `base`, then
-    /// evaluate the function `body` in that call scope. The heart of a call — no host recursion, so
-    /// recursion depth is bounded by the heap (the corner_brace-class killer).
+    /// Pop `names.len()` values and bind them (params, then `$`-args) into a fresh child of `base`,
+    /// seeded first with the CALLER's dynamic `$`-context, then evaluate `body` in that call scope. The
+    /// heart of a call — no host recursion, so recursion depth is bounded by the heap (`corner_brace`).
     Apply {
-        params: &'a [Parameter],
+        names: Vec<&'a str>,
         body: &'a Expr,
         base: Scope,
+        caller: Scope,
     },
     /// Pop an evaluated CALLEE; if it's a [`Value::Function`], invoke it (its body evaluates in the
     /// captured env). Anything else → `undef` (calling a non-function). The dynamic-callee path:
@@ -137,11 +138,21 @@ pub(super) fn eval_with_ctx<'a>(
                 let branch = if cond.is_truthy() { then } else { els };
                 tasks.push(Task::Eval(branch, scope));
             }
-            Task::Apply { params, body, base } => {
-                let args = values.split_off(values.len().saturating_sub(params.len()));
+            Task::Apply {
+                names,
+                body,
+                base,
+                caller,
+            } => {
+                let vals = values.split_off(values.len().saturating_sub(names.len()));
                 let mut call = base.child();
-                for (param, value) in params.iter().zip(args) {
-                    call.bind(param.name.clone(), value);
+                // dynamic $-context: inherit the caller's reaching $-vars BEFORE the call's own
+                // bindings, so a call's $-args (bound below) override the inherited ones.
+                for (name, value) in caller.specials() {
+                    call.bind(name, value);
+                }
+                for (name, value) in names.iter().zip(vals) {
+                    call.bind(*name, value);
                 }
                 tasks.push(Task::Eval(body, call));
             }
@@ -294,6 +305,7 @@ fn push_call<'a>(
     tasks: &mut Vec<Task<'a>>,
 ) {
     let mut slots: Vec<Option<(&'a Expr, Scope)>> = vec![None; params.len()];
+    let mut dollars: Vec<(&'a str, &'a Expr)> = Vec::new(); // $-args → dynamic $-var injections
     let mut positional = 0;
     for arg in args {
         match &arg.name {
@@ -303,6 +315,8 @@ fn push_call<'a>(
                 }
                 positional += 1;
             }
+            // a $-arg is a per-call dynamic override — injected into the call scope, not param-matched.
+            Some(name) if name.starts_with('$') => dollars.push((name.as_str(), &arg.value)),
             Some(name) => {
                 if let Some(i) = params.iter().position(|p| &p.name == name)
                     && let Some(slot) = slots.get_mut(i)
@@ -317,12 +331,20 @@ fn push_call<'a>(
             *slot = Some((default, base.clone()));
         }
     }
+    // bind order: params first, then $-args (bound last → they override the inherited $-context).
+    let mut names: Vec<&'a str> = params.iter().map(|p| p.name.as_str()).collect();
+    names.extend(dollars.iter().map(|(name, _)| *name));
     tasks.push(Task::Apply {
-        params,
+        names,
         body,
         base: base.clone(),
+        caller: caller.clone(),
     });
-    // reversed so param 0 evaluates first (its value lands at the bottom of the popped run).
+    // push evals so the popped run is [params.., dollars..]: dollars first (deeper → on top), then
+    // params reversed (param 0 evaluates first, lands at the bottom of the run).
+    for (_, expr) in dollars.iter().rev() {
+        tasks.push(Task::Eval(expr, caller.clone()));
+    }
     for slot in slots.into_iter().rev() {
         match slot {
             Some((expr, scope)) => tasks.push(Task::Eval(expr, scope)),
@@ -541,6 +563,29 @@ mod tests {
         );
         // calling a NON-function value → undef (not an error).
         assert_eq!(eval_last("g = 5; y = g(1);"), Value::Undef);
+    }
+
+    #[test]
+    fn dollar_vars_are_dynamically_scoped() {
+        // a $-arg injects into the call scope (per-call override), visible in the body.
+        assert_eq!(
+            eval_last("function f() = $fn; y = f($fn = 8);"),
+            Value::Num(8.0)
+        );
+        // with no override, the callee sees the CALLER's reaching $-context (here the root $fn = 0).
+        assert_eq!(eval_last("function f() = $fn; y = f();"), Value::Num(0.0));
+        // DOWN the call tree: outer's injected $fn propagates to inner (dynamic, not lexical).
+        assert_eq!(
+            eval_last("function inner() = $fn; function outer() = inner(); y = outer($fn = 8);"),
+            Value::Num(8.0)
+        );
+        // a nested per-call override WINS over the inherited $-context.
+        assert_eq!(
+            eval_last(
+                "function inner() = $fn; function outer() = inner($fn = 3); y = outer($fn = 8);"
+            ),
+            Value::Num(3.0)
+        );
     }
 
     #[test]

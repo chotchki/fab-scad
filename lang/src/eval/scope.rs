@@ -83,6 +83,26 @@ impl Scope {
         }
     }
 
+    /// The reaching special (`$`-)variables, walking child→parent (inner SHADOWS outer). Unlike regular
+    /// variables (lexically scoped), `$`-vars are DYNAMICALLY scoped — a callee inherits the CALLER's
+    /// `$`-context (I.2.2), so a call seeds its scope with the caller's `specials()`.
+    #[must_use]
+    pub fn specials(&self) -> BTreeMap<String, Value> {
+        let mut out = BTreeMap::new();
+        let mut frame = &self.frame;
+        loop {
+            for (name, value) in &frame.vars {
+                if name.starts_with('$') {
+                    out.entry(name.clone()).or_insert_with(|| value.clone()); // child wins
+                }
+            }
+            match &frame.parent {
+                Some(parent) => frame = parent,
+                None => return out,
+            }
+        }
+    }
+
     /// Resolve `$fn`, `$fa`, `$fs` as `f64` (non-number → `0.0`, per OpenSCAD `toDouble`) — the inputs
     /// to the fragment formula. Resolves through the chain, so a child scope sees the root defaults.
     #[must_use]

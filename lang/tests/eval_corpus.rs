@@ -241,6 +241,8 @@ fn function_values() {
     assert_eq!(ev("(function(x, y) x * y)(6, 7)"), num(42.0));
     assert_eq!(ev("(function(x, y = 10) x + y)(5)"), num(15.0)); // defaults work for closures too
     assert_eq!(ev("(function(x) x)()"), Value::Undef); // unfilled param → undef
+    assert_eq!(ev("(function() $fn)($fn = 7)"), num(7.0)); // a $-arg injects into a closure call
+    assert_eq!(ev("(function() $fn)()"), num(0.0)); // else the callee sees the reaching $fn (root 0)
 }
 
 #[test]

@@ -34,12 +34,14 @@
 //! License: GPL-2.0-or-later — OpenSCAD's exact license, on purpose (frictionless upstreaming; v3
 //! rules apply in distributed builds via Apache-2.0 Manifold). See `README.md`.
 
+mod customizer;
 mod error;
 mod eval;
 mod lexer;
 mod mesh;
 mod parser;
 
+pub use customizer::{Constraint, CustomParam, Customizer, DropdownItem, customize};
 pub use error::{Error, Result};
 pub use eval::{Scope, Value, eval_expr, eval_program, fragments};
 pub use lexer::{Lexed, Token, TokenKind, decode_str, lex, num_value};

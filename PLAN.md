@@ -28,10 +28,10 @@ Driven by `claude-plan-bridge` (FORMATv2). Hand-authored; run
   - [x] H.3.5 - assert/echo expressions with OPTIONAL trailing expr (expr_or_empty): assert(args) expr?, echo(args) expr?
   - [x] H.3.6 - Ranges + string-escape/unicode: audit + pin with tests (already implemented in G.3.3 + the lexer — confirm, don't rebuild)
 - [ ] H.4 - Customizer annotations survive: parameter comments/groups/ranges in the AST (lossless-enough)
-  - [ ] H.4.1 - Customizer annotation model: group / description / widget-constraint (range, step, dropdown k:v, string maxlen) types in the AST
-  - [ ] H.4.2 - Trivia-association pass: walk Lexed::all, bind trailing line-comment + active group header to each top-level assignment (top-of-file scope, per OpenSCAD)
-  - [ ] H.4.3 - Constraint mini-grammar parser: [min:max], [min:step:max], [v,…], [k:label,…], [maxlen]; group headers incl. [Hidden]/[Global]
-  - [ ] H.4.4 - Customizer lossless-enough roundtrip test: annotations survive parse → (edit a value) → emit
+  - [x] H.4.1 - Customizer annotation model: group / description / widget-constraint (range, step, dropdown k:v, string maxlen) types in the AST
+  - [x] H.4.2 - Trivia-association pass: walk Lexed::all, bind trailing line-comment + active group header to each top-level assignment (top-of-file scope, per OpenSCAD)
+  - [x] H.4.3 - Constraint mini-grammar parser: [min:max], [min:step:max], [v,…], [k:label,…], [maxlen]; group headers incl. [Hidden]/[Global]
+  - [x] H.4.4 - Customizer lossless-enough roundtrip test: annotations survive parse → (edit a value) → emit
 - [ ] H.5 - proptest print/parse roundtrip + the bison-derived conformance suite green
   - [x] H.5.1 - Pretty-printer: AST → canonical OpenSCAD source (Display over the whole AST) — the missing prerequisite for the roundtrip property
   - [x] H.5.2 - proptest strategy over the AST + print→parse→assert-equal property (structural eq modulo spans)

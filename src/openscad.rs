@@ -86,6 +86,22 @@ impl Openscad {
         Ok(Self { bin, openscadpath })
     }
 
+    /// Construct with an EXPLICIT `OPENSCADPATH` (the library search dirs), rather than deriving it
+    /// from a project root. The differential harness materializes a `use`/`include` graph in a temp dir
+    /// and points the oracle at its `libs/` so `<lib.scad>` resolves the same way scad-rs's loader does.
+    pub fn with_library_paths(library_paths: &[PathBuf]) -> Result<Self> {
+        let bin = find_bin().context("OpenSCAD not found — set $OPENSCAD or install it")?;
+        let joined = library_paths
+            .iter()
+            .map(|p| p.display().to_string())
+            .collect::<Vec<_>>()
+            .join(":");
+        Ok(Self {
+            bin,
+            openscadpath: OsString::from(joined),
+        })
+    }
+
     /// This toolchain's version string, for cache-keying an incremental sweep (6.2) — a bump
     /// invalidates cached verdicts. None if it can't be read.
     pub fn tool_version(&self) -> Option<String> {

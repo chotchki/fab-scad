@@ -9,12 +9,31 @@
 //! `no_test_bypasses_a_driver` (a source meta-lint) + `both_drivers_run_when_the_oracle_is_present`
 //! (the both-legs gate). Add a driver and every case starts checking it for free.
 
-use fab_scad::differ::{diff, drivers};
+use std::path::PathBuf;
+
+use fab_scad::differ::{diff, diff_files, drivers};
 use fab_scad::openscad::find_bin;
 
 /// Assert a snippet agrees across every registered driver (panics with the divergence on mismatch).
 fn agree(scad: &str) {
     if let Err(why) = diff(scad) {
+        panic!("differential divergence: {why}");
+    }
+}
+
+/// Materialize a `use`/`include` FILE GRAPH under a fresh temp subdir, then assert its `root` file
+/// agrees across every driver (`libs` are subdirs of the graph, joined into the oracle's OPENSCADPATH).
+fn agree_graph(subdir: &str, files: &[(&str, &str)], root: &str, libs: &[&str]) {
+    let base = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join("differential")
+        .join(subdir);
+    for (rel, contents) in files {
+        let path = base.join(rel);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, contents).unwrap();
+    }
+    let lib_paths: Vec<PathBuf> = libs.iter().map(|l| base.join(l)).collect();
+    if let Err(why) = diff_files(&base.join(root), &lib_paths) {
         panic!("differential divergence: {why}");
     }
 }
@@ -35,6 +54,75 @@ fn primitives_and_expressions_match_the_oracle() {
     agree("cylinder(h = 10, r1 = 5, r2 = 2, $fn = 16);");
     agree("r = 3 + 4; sphere(r, $fn = 16);"); // expression value flows to geometry
     agree("sphere(max(3, 7), $fn = 16);"); // builtin value
+}
+
+#[test]
+fn use_include_loader_matches_the_oracle() {
+    // The loader's core semantics, validated against the real binary (constant-returning functions, so
+    // we stay clear of the known use-imported-fn-sees-root-scope gap). Single-object, no cycle/diamond
+    // (those are our LOUD defers — a deliberate oracle divergence covered self-consistently in
+    // lang/tests/loader_corpus.rs).
+    //
+    // include splices a var into the shared scope → geometry sees it:
+    agree_graph(
+        "inc_var",
+        &[
+            ("consts.scad", "size = 7;\n"),
+            (
+                "root.scad",
+                "include <consts.scad>\nsphere(size, $fn = 24);\n",
+            ),
+        ],
+        "root.scad",
+        &[],
+    );
+    // use imports a function → feeds geometry:
+    agree_graph(
+        "use_fn",
+        &[
+            ("lib.scad", "function r() = 8;\n"),
+            ("root.scad", "use <lib.scad>\nsphere(r(), $fn = 24);\n"),
+        ],
+        "root.scad",
+        &[],
+    );
+    // last-USE-wins: two libs define r(), the later use wins (b → 5, not a → 8):
+    agree_graph(
+        "use_order",
+        &[
+            ("a.scad", "function r() = 8;\n"),
+            ("b.scad", "function r() = 5;\n"),
+            (
+                "root.scad",
+                "use <a.scad>\nuse <b.scad>\nsphere(r(), $fn = 24);\n",
+            ),
+        ],
+        "root.scad",
+        &[],
+    );
+    // local def BEATS the used def (position-independent):
+    agree_graph(
+        "local_wins",
+        &[
+            ("lib.scad", "function r() = 8;\n"),
+            (
+                "root.scad",
+                "use <lib.scad>\nfunction r() = 3;\nsphere(r(), $fn = 24);\n",
+            ),
+        ],
+        "root.scad",
+        &[],
+    );
+    // library-path resolution: the lib lives under libs/, reachable only via OPENSCADPATH:
+    agree_graph(
+        "lib_path",
+        &[
+            ("libs/pathlib.scad", "function pr() = 6;\n"),
+            ("root.scad", "use <pathlib.scad>\nsphere(pr(), $fn = 24);\n"),
+        ],
+        "root.scad",
+        &["libs"],
+    );
 }
 
 // ─────────────────────── enforcement (the discipline, AS tests) ──────────────────────────────────

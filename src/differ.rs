@@ -13,6 +13,7 @@
 //! `Mesh → Solid::from_indexed` hand-off the G.3.5 architecture deferred to here.
 
 use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -152,6 +153,9 @@ pub trait Driver {
     fn name(&self) -> &'static str;
     /// Evaluate `.scad` source to a comparable [`Outcome`].
     fn eval(&self, scad: &str) -> Outcome;
+    /// Evaluate a `.scad` FILE (resolving its `use`/`include` graph against `library_paths` after the
+    /// file's own dir) to a comparable [`Outcome`] — the `use`/`include` differential's entry point.
+    fn eval_file(&self, root: &Path, library_paths: &[PathBuf]) -> Outcome;
 }
 
 /// scad-rs's own pure-Rust evaluator — the baseline.
@@ -162,13 +166,20 @@ impl Driver for FabLang {
         "fab-lang"
     }
     fn eval(&self, scad: &str) -> Outcome {
-        match fab_lang::evaluate(scad) {
-            Ok(m) if m.verts.is_empty() => Outcome::Empty,
-            Ok(m) => {
-                Solid::from_indexed(&m.verts, &m.tris).map_or(Outcome::Rejected, Outcome::Solid)
-            }
-            Err(_) => Outcome::Rejected,
-        }
+        fab_outcome(fab_lang::evaluate(scad))
+    }
+    fn eval_file(&self, root: &Path, library_paths: &[PathBuf]) -> Outcome {
+        fab_outcome(fab_lang::evaluate_file(root, library_paths))
+    }
+}
+
+/// Map scad-rs's evaluate result to a comparable [`Outcome`]: no geometry → `Empty`, a manifold mesh →
+/// `Solid`, an error or non-manifold mesh → `Rejected`.
+fn fab_outcome(result: fab_lang::Result<fab_lang::Mesh>) -> Outcome {
+    match result {
+        Ok(m) if m.verts.is_empty() => Outcome::Empty,
+        Ok(m) => Solid::from_indexed(&m.verts, &m.tris).map_or(Outcome::Rejected, Outcome::Solid),
+        Err(_) => Outcome::Rejected,
     }
 }
 
@@ -189,6 +200,25 @@ impl Driver for OpenScad {
             }
             Err(_) => Outcome::Rejected,
         }
+    }
+    fn eval_file(&self, root: &Path, library_paths: &[PathBuf]) -> Outcome {
+        oracle_file_outcome(root, library_paths)
+    }
+}
+
+/// Render a `.scad` FILE through the OpenSCAD binary (`library_paths` → `OPENSCADPATH`) → STL → `Solid`.
+/// A missing binary / render failure / non-manifold export → `Rejected`.
+fn oracle_file_outcome(root: &Path, library_paths: &[PathBuf]) -> Outcome {
+    let os = if library_paths.is_empty() {
+        crate::openscad::Openscad::discover(None)
+    } else {
+        crate::openscad::Openscad::with_library_paths(library_paths)
+    };
+    let Ok(os) = os else { return Outcome::Rejected };
+    let out = root.with_extension("oracle-render.stl");
+    match os.render(root, &out, Duration::from_secs(30)) {
+        Ok(r) if r.ok => Solid::from_stl_file(&out).map_or(Outcome::Rejected, Outcome::Solid),
+        _ => Outcome::Rejected,
     }
 }
 
@@ -216,6 +246,27 @@ pub fn diff(scad: &str) -> std::result::Result<(), String> {
     for d in &drivers[1..] {
         outcomes_agree(&base, &d.eval(scad))
             .map_err(|why| format!("{scad:?}: {} vs {}: {why}", drivers[0].name(), d.name()))?;
+    }
+    Ok(())
+}
+
+/// Run a `.scad` FILE (its `use`/`include` graph, resolved against `library_paths`) through every
+/// registered driver and check they AGREE — the file-based sibling of [`diff`], for the loader.
+///
+/// # Errors
+/// The first `(baseline vs driver)` disagreement, as a human-readable reason.
+pub fn diff_files(root: &Path, library_paths: &[PathBuf]) -> std::result::Result<(), String> {
+    let drivers = drivers();
+    let base = drivers[0].eval_file(root, library_paths);
+    for d in &drivers[1..] {
+        outcomes_agree(&base, &d.eval_file(root, library_paths)).map_err(|why| {
+            format!(
+                "{}: {} vs {}: {why}",
+                root.display(),
+                drivers[0].name(),
+                d.name()
+            )
+        })?;
     }
     Ok(())
 }

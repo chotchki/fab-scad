@@ -14,12 +14,107 @@ use super::ast::{Arg, BinOp, Expr, ExprKind, Parameter, UnOp};
 use super::{MAX_DEPTH, Tokens, bail, bump, expect, peek_kind, peek_kind2};
 use crate::lexer::{TokenKind, decode_str, num_value};
 
-/// Parse a full expression (parser.y:334).
+/// Parse a full expression (parser.y:334). The prefix forms (`function`/`let`/`assert`/`echo`) sit at
+/// the TOP of the `expr` grammar, ABOVE the ternary/binary cascade — so their body greedily consumes
+/// a whole `expr` (`function(x) x + 1` is `function(x) (x + 1)`). They are NOT valid as an operand
+/// inside the cascade (`1 + function(x) x` is a syntax error), which falls out because the cascade
+/// enters at `ternary`, never re-entering `expr`.
 pub(crate) fn expr(i: &mut Tokens<'_, '_>, depth: usize) -> ModalResult<Expr> {
     if depth >= MAX_DEPTH {
         return bail(i, "expression nested too deeply");
     }
-    ternary(i, depth)
+    match peek_kind(i) {
+        Some(TokenKind::Function) => function_literal(i, depth),
+        Some(TokenKind::Let) => let_expr(i, depth),
+        Some(TokenKind::Assert) => assert_or_echo(i, depth, false),
+        Some(TokenKind::Echo) => assert_or_echo(i, depth, true),
+        _ => ternary(i, depth),
+    }
+}
+
+/// A function-literal expression `function(params) body` (parser.y:336).
+fn function_literal(i: &mut Tokens<'_, '_>, depth: usize) -> ModalResult<Expr> {
+    let start = i.current_token_start();
+    bump(i)?; // 'function'
+    expect(i, TokenKind::LParen, "'(' after `function`")?;
+    let params = param_list(i, depth + 1)?;
+    expect(i, TokenKind::RParen, "closing ')' of the parameter list")?;
+    let body = expr(i, depth + 1)?;
+    Ok(Expr {
+        kind: ExprKind::FunctionLiteral {
+            params,
+            body: Box::new(body),
+        },
+        span: start..i.previous_token_end(),
+    })
+}
+
+/// A `let(bindings) body` expression (parser.y:345).
+fn let_expr(i: &mut Tokens<'_, '_>, depth: usize) -> ModalResult<Expr> {
+    let start = i.current_token_start();
+    bump(i)?; // 'let'
+    expect(i, TokenKind::LParen, "'(' after `let`")?;
+    let bindings = arg_list(i, depth + 1)?;
+    expect(i, TokenKind::RParen, "closing ')' of the `let` bindings")?;
+    let body = expr(i, depth + 1)?;
+    Ok(Expr {
+        kind: ExprKind::Let {
+            bindings,
+            body: Box::new(body),
+        },
+        span: start..i.previous_token_end(),
+    })
+}
+
+/// An `assert(args) body?` or `echo(args) body?` expression (parser.y:350-359). The trailing body is
+/// OPTIONAL (`expr_or_empty`): present iff the next token can START an expression.
+fn assert_or_echo(i: &mut Tokens<'_, '_>, depth: usize, is_echo: bool) -> ModalResult<Expr> {
+    let start = i.current_token_start();
+    bump(i)?; // 'assert' / 'echo'
+    expect(i, TokenKind::LParen, "'(' after `assert`/`echo`")?;
+    let args = arg_list(i, depth + 1)?;
+    expect(i, TokenKind::RParen, "closing ')' of the arguments")?;
+    let body = if starts_expr(peek_kind(i)) {
+        Some(Box::new(expr(i, depth + 1)?))
+    } else {
+        None
+    };
+    let kind = if is_echo {
+        ExprKind::Echo { args, body }
+    } else {
+        ExprKind::Assert { args, body }
+    };
+    Ok(Expr {
+        kind,
+        span: start..i.previous_token_end(),
+    })
+}
+
+/// Whether `k` can begin an expression — the lookahead for `expr_or_empty`. Every token an `expr` can
+/// start with; anything else (`;`, `)`, `]`, `,`, `:`, `}`, EOF, …) means "no body".
+fn starts_expr(k: Option<TokenKind<'_>>) -> bool {
+    matches!(
+        k,
+        Some(
+            TokenKind::Num(_)
+                | TokenKind::Str(_)
+                | TokenKind::True
+                | TokenKind::False
+                | TokenKind::Undef
+                | TokenKind::Ident(_)
+                | TokenKind::DollarIdent(_)
+                | TokenKind::LParen
+                | TokenKind::LBracket
+                | TokenKind::Minus
+                | TokenKind::Plus
+                | TokenKind::Bang
+                | TokenKind::Tilde
+                | TokenKind::Function
+                | TokenKind::Let
+                | TokenKind::Assert
+                | TokenKind::Echo
+        )
+    )
 }
 
 /// C-style ternary `cond ? then : els`, right-associative; the condition is a binary-level
@@ -214,17 +309,9 @@ fn primary(i: &mut Tokens<'_, '_>, depth: usize) -> ModalResult<Expr> {
             return Ok(inner); // OpenSCAD returns the inner expr; no paren node
         }
         Some(TokenKind::LBracket) => return vector_or_range(i, depth),
-        Some(TokenKind::Function) => {
-            return bail(
-                i,
-                "function-literal expressions are not yet implemented (H.2)",
-            );
-        }
-        Some(TokenKind::Let) => return bail(i, "let-expressions are not yet implemented (H.2)"),
-        Some(TokenKind::Assert) => {
-            return bail(i, "assert-expressions are not yet implemented (H.2)");
-        }
-        Some(TokenKind::Echo) => return bail(i, "echo-expressions are not yet implemented (H.2)"),
+        // `function`/`let`/`assert`/`echo` are handled at `expr` (the top of the grammar); reaching
+        // them HERE means they were used as an operand inside the cascade (`1 + let(a=1) a`), which is
+        // a syntax error — fall through to the generic "expected an expression".
         _ => return bail(i, "an expression"),
     };
     bump(i)?; // the single-token atom
@@ -290,15 +377,122 @@ fn vector_or_range(i: &mut Tokens<'_, '_>, depth: usize) -> ModalResult<Expr> {
     })
 }
 
-/// A vector element — a plain expression; comprehension elements are deferred LOUD (H.3).
+/// A vector element (parser.y:640): a comprehension generator (`for`/`each`/`if`/`let`, or one
+/// wrapped in parens) OR a plain expression. Comprehensions NEST — every `body` is itself a
+/// vector element.
 fn vector_element(i: &mut Tokens<'_, '_>, depth: usize) -> ModalResult<Expr> {
-    if matches!(
-        peek_kind(i),
-        Some(TokenKind::For | TokenKind::Each | TokenKind::Let | TokenKind::If)
-    ) {
-        return bail(i, "list comprehensions are not yet implemented (H.3)");
+    if depth >= MAX_DEPTH {
+        return bail(i, "list comprehension nested too deeply");
     }
-    expr(i, depth)
+    match peek_kind(i) {
+        Some(TokenKind::For) => lc_for(i, depth),
+        Some(TokenKind::Each) => lc_each(i, depth),
+        Some(TokenKind::If) => lc_if(i, depth),
+        Some(TokenKind::Let) => lc_let(i, depth),
+        // `( list_comprehension_elements )` — parens around a comprehension (parser.y:616), grouping
+        // only. Guarded on a comprehension keyword AFTER the `(`, so a plain `(expr)` still routes to
+        // `expr`. (`(let …)` converges: both paths build the same `Let` node.)
+        Some(TokenKind::LParen)
+            if matches!(
+                peek_kind2(i),
+                Some(TokenKind::For | TokenKind::Each | TokenKind::If | TokenKind::Let)
+            ) =>
+        {
+            bump(i)?; // '('
+            let inner = vector_element(i, depth + 1)?;
+            expect(i, TokenKind::RParen, "closing ')' of a comprehension")?;
+            Ok(inner)
+        }
+        _ => expr(i, depth),
+    }
+}
+
+/// `for (bindings) body` or the C-style `for (init; cond; update) body` (parser.y:592-602).
+fn lc_for(i: &mut Tokens<'_, '_>, depth: usize) -> ModalResult<Expr> {
+    let start = i.current_token_start();
+    bump(i)?; // 'for'
+    expect(i, TokenKind::LParen, "'(' after `for`")?;
+    let init = arg_list(i, depth + 1)?;
+    let kind = if peek_kind(i) == Some(TokenKind::Semi) {
+        bump(i)?; // ';'  → C-style
+        let cond = expr(i, depth + 1)?;
+        expect(i, TokenKind::Semi, "';' between the C-style `for` clauses")?;
+        let update = arg_list(i, depth + 1)?;
+        expect(i, TokenKind::RParen, "closing ')' of the `for` clauses")?;
+        let body = vector_element(i, depth + 1)?;
+        ExprKind::LcForC {
+            init,
+            cond: Box::new(cond),
+            update,
+            body: Box::new(body),
+        }
+    } else {
+        expect(i, TokenKind::RParen, "closing ')' of the `for` bindings")?;
+        let body = vector_element(i, depth + 1)?;
+        ExprKind::LcFor {
+            bindings: init,
+            body: Box::new(body),
+        }
+    };
+    Ok(Expr {
+        kind,
+        span: start..i.previous_token_end(),
+    })
+}
+
+/// `each body` — splice `body`'s list into the enclosing vector (parser.y:588).
+fn lc_each(i: &mut Tokens<'_, '_>, depth: usize) -> ModalResult<Expr> {
+    let start = i.current_token_start();
+    bump(i)?; // 'each'
+    let body = vector_element(i, depth + 1)?;
+    Ok(Expr {
+        kind: ExprKind::LcEach(Box::new(body)),
+        span: start..i.previous_token_end(),
+    })
+}
+
+/// A comprehension `if (cond) then [else els]` (parser.y:603-607) — the else binds greedily, as with
+/// the statement `if`.
+fn lc_if(i: &mut Tokens<'_, '_>, depth: usize) -> ModalResult<Expr> {
+    let start = i.current_token_start();
+    bump(i)?; // 'if'
+    expect(i, TokenKind::LParen, "'(' after `if` in a comprehension")?;
+    let cond = expr(i, depth + 1)?;
+    expect(i, TokenKind::RParen, "closing ')' of a comprehension `if`")?;
+    let then = vector_element(i, depth + 1)?;
+    let els = if peek_kind(i) == Some(TokenKind::Else) {
+        bump(i)?; // 'else'
+        Some(Box::new(vector_element(i, depth + 1)?))
+    } else {
+        None
+    };
+    Ok(Expr {
+        kind: ExprKind::LcIf {
+            cond: Box::new(cond),
+            then: Box::new(then),
+            els,
+        },
+        span: start..i.previous_token_end(),
+    })
+}
+
+/// `let (bindings) body` as a comprehension element (parser.y:583). Reuses [`ExprKind::Let`] — a
+/// vector `let` is semantically the let-EXPRESSION (bind, then evaluate the body); the only twist is
+/// its body is a vector element, so it may be a nested comprehension.
+fn lc_let(i: &mut Tokens<'_, '_>, depth: usize) -> ModalResult<Expr> {
+    let start = i.current_token_start();
+    bump(i)?; // 'let'
+    expect(i, TokenKind::LParen, "'(' after `let`")?;
+    let bindings = arg_list(i, depth + 1)?;
+    expect(i, TokenKind::RParen, "closing ')' of the `let` bindings")?;
+    let body = vector_element(i, depth + 1)?;
+    Ok(Expr {
+        kind: ExprKind::Let {
+            bindings,
+            body: Box::new(body),
+        },
+        span: start..i.previous_token_end(),
+    })
 }
 
 /// A call argument list (positional and/or named), with an optional trailing comma (parser.y:679-710).

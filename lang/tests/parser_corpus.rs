@@ -15,7 +15,7 @@
 )]
 
 use fab_lang::ExprKind::*;
-use fab_lang::{Arg, Error, Expr, StmtKind, parse};
+use fab_lang::{Arg, Error, Expr, Parameter, StmtKind, parse};
 
 // ─────────────────────────────── S-expression pretty-printer (test-only) ───────────────────────
 
@@ -49,7 +49,59 @@ fn sx(e: &Expr) -> String {
             step: None,
             end,
         } => format!("(range {} {})", sx(start), sx(end)),
+        FunctionLiteral { params, body } => {
+            format!(
+                "(fn [{}] {})",
+                params.iter().map(sp).collect::<Vec<_>>().join(" "),
+                sx(body)
+            )
+        }
+        Let { bindings, body } => format!("(let [{}] {})", sargs(bindings), sx(body)),
+        Assert { args, body } => format!("(assert [{}]{})", sargs(args), sbody(body.as_deref())),
+        Echo { args, body } => format!("(echo [{}]{})", sargs(args), sbody(body.as_deref())),
+        LcFor { bindings, body } => format!("(for [{}] {})", sargs(bindings), sx(body)),
+        LcForC {
+            init,
+            cond,
+            update,
+            body,
+        } => format!(
+            "(forc [{}] {} [{}] {})",
+            sargs(init),
+            sx(cond),
+            sargs(update),
+            sx(body)
+        ),
+        LcEach(body) => format!("(each {})", sx(body)),
+        LcIf {
+            cond,
+            then,
+            els: Some(e),
+        } => format!("(lcif {} {} {})", sx(cond), sx(then), sx(e)),
+        LcIf {
+            cond,
+            then,
+            els: None,
+        } => format!("(lcif {} {})", sx(cond), sx(then)),
     }
+}
+
+/// Format a parameter: `name` or `name=default`.
+fn sp(p: &Parameter) -> String {
+    match &p.default {
+        Some(d) => format!("{}={}", p.name, sx(d)),
+        None => p.name.clone(),
+    }
+}
+
+/// Format an argument list (space-joined).
+fn sargs(args: &[Arg]) -> String {
+    args.iter().map(sa).collect::<Vec<_>>().join(" ")
+}
+
+/// Format an optional `expr_or_empty` body — a leading space + the body, or nothing.
+fn sbody(body: Option<&Expr>) -> String {
+    body.map_or(String::new(), |b| format!(" {}", sx(b)))
 }
 
 fn sa(a: &Arg) -> String {
@@ -252,15 +304,88 @@ fn syntax_errors_point_and_name() {
 }
 
 #[test]
-fn deferred_constructs_fail_loud() {
-    // These parse-level bails retire as their H.2/H.3 tasks land; the tag names which. Module +
-    // function DEFS, if/else, and use/include moved to their own positive tests as H.2.1-H.2.5 landed.
-    assert!(err("v=function(x)x;").contains("H.2"));
-    assert!(err("v=let(a=1)a;").contains("H.2"));
-    assert!(err("v=assert(true)1;").contains("H.2"));
-    assert!(err("v=echo(1)2;").contains("H.2"));
-    assert!(err("v=[for(i=[0:3])i];").contains("H.3")); // list comprehension
-    assert!(err("v=[1,each[2,3]];").contains("H.3")); // comprehension mid-vector
+fn list_comprehensions_parse_every_form() {
+    // With H.3.2, the whole grammar parses — no parse-level construct bails anymore.
+    assert_eq!(e("[for(i=[0:3]) i]"), "[(for [i=(range 0 3)] i)]"); // basic for
+    assert_eq!(e("[each [1,2], 3]"), "[(each [1 2]) 3]"); // each splices; mixed with a plain elem
+    assert_eq!(
+        e("[for(i=0; i<5; i=i+1) i]"),
+        "[(forc [i=0] (Lt i 5) [i=(Add i 1)] i)]" // C-style for
+    );
+    assert_eq!(e("[for(i=r) if(i>0) i]"), "[(for [i=r] (lcif (Gt i 0) i))]"); // comprehension if
+    assert_eq!(
+        e("[for(i=r) if(i>0) i else -i]"),
+        "[(for [i=r] (lcif (Gt i 0) i (Neg i)))]" // if/else
+    );
+    assert_eq!(
+        e("[for(i=r) let(j=i*2) j]"),
+        "[(for [i=r] (let [j=(Mul i 2)] j))]" // let in a comprehension
+    );
+    assert_eq!(
+        e("[for(i=r) for(j=r) [i,j]]"),
+        "[(for [i=r] (for [j=r] [i j]))]" // nesting
+    );
+    assert_eq!(e("[(for(i=r) i)]"), "[(for [i=r] i)]"); // parenthesized comprehension element
+    assert_eq!(e("[(1+2), 3]"), "[(Add 1 2) 3]"); // a plain `(expr)` element is NOT a comprehension
+    assert_eq!(e("[for(i=r, j=s) i+j]"), "[(for [i=r j=s] (Add i j))]"); // multiple bindings
+    assert_eq!(e("[0, for(i=r) i, 9]"), "[0 (for [i=r] i) 9]"); // mixed plain + comprehension
+}
+
+#[test]
+fn ranges_and_string_escapes_pinned() {
+    // H.3.6 — ranges + string escapes/unicode were already implemented (G.3.3 + the lexer); this pins
+    // them as part of the "expressions complete" audit. Ranges: 2-part and 3-part, expr bounds.
+    assert_eq!(e("[a:b]"), "(range a b)");
+    assert_eq!(e("[a:s:b]"), "(range a s b)");
+    // String literals arrive DECODED (lexer `decode_str`): `\n`→newline, `\u{H}{4}`→codepoint,
+    // undefined escape drops the backslash. The Debug print re-escapes, so this round-trips the value.
+    assert_eq!(parse_str(r#""tab\tend""#), "tab\tend");
+    assert_eq!(parse_str(r#""é!""#), "é!"); // non-ASCII UTF-8 passes through a string body verbatim
+    assert_eq!(parse_str(r#""\q""#), "q"); // undefined escape → the bare char
+}
+
+/// Parse a string-literal expression and return its DECODED value.
+fn parse_str(src: &str) -> String {
+    match &parse_expr(src).kind {
+        Str(s) => s.clone(),
+        other => panic!("expected a string literal, got {other:?}"),
+    }
+}
+
+#[test]
+fn comprehension_syntax_errors() {
+    assert!(err("v=[for i=r) i];").contains('(')); // missing '(' after for
+    assert!(err("v=[for(i=r i];").contains(')')); // missing ')' of for bindings
+    assert!(err("v=[for(i=0; i<5 i=i+1) i];").contains(';')); // missing ';' between C-clauses
+    assert!(err("v=[if(x) 1;").contains(')')); // missing ')' of comprehension if
+    assert!(err("v=[(for(i=r) i];").contains(')')); // missing ')' of a parenthesized comprehension
+    // a pathologically-nested comprehension errors LOUD via the depth guard, never overflows.
+    let deep = format!("v=[{}x];", "each ".repeat(80));
+    assert!(err(&deep).contains("deeply"));
+}
+
+#[test]
+fn function_let_assert_echo_expressions_parse() {
+    // function literal — body greedily takes a full expr (`function(x) x + 1` is `function(x)(x+1)`).
+    assert_eq!(e("function(x) x + 1"), "(fn [x] (Add x 1))");
+    assert_eq!(e("function(a, b=2) a*b"), "(fn [a b=2] (Mul a b))");
+    assert_eq!(e("function() 0"), "(fn [] 0)"); // no params
+    // let expression.
+    assert_eq!(e("let(a=1, b=2) a+b"), "(let [a=1 b=2] (Add a b))");
+    // assert / echo WITH a pass-through body.
+    assert_eq!(e("assert(x>0) y"), "(assert [(Gt x 0)] y)");
+    assert_eq!(e(r#"echo("hi", x) y"#), r#"(echo ["hi" x] y)"#);
+    // assert / echo with NO body (expr_or_empty empty — next token is `;` from the wrapper).
+    assert_eq!(e("assert(x)"), "(assert [x])");
+    assert_eq!(e("echo(x)"), "(echo [x])");
+    // the forms nest as bodies of one another.
+    assert_eq!(
+        e("let(a=1) function(x) a+x"),
+        "(let [a=1] (fn [x] (Add a x)))"
+    );
+    // they are NOT valid as a cascade operand — `1 + function(x) x` is a syntax error.
+    assert!(err("v=1+function(x)x;").contains("expression"));
+    assert!(err("v=1+let(a=1)a;").contains("expression"));
 }
 
 #[test]
@@ -515,7 +640,9 @@ fn ast_clones_compares_debugs_and_is_deterministic() {
         h = arr[0].field(k=1, $fn=2); i = \"s\"; j = undef; k = true; l = false; m = $t;\n\
         translate([1,0,0]) cube(2); #%*!sphere(); group(){ x(); } echo(\"z\"); ;\n\
         module box(w, d=1, $fn=8) { cube([w,d,1]); } function sq(x) = x*x;\n\
-        if ($t > 0) cube(1); else if (n) sphere(); else ;\n";
+        if ($t > 0) cube(1); else if (n) sphere(); else ;\n\
+        fl = function(x) let(a=x) assert(a>0, \"pos\") echo(a) a*a;\n\
+        lc = [for(i=[0:2]) each [i, i*2], for(k=0;k<2;k=k+1) if(k) k else -k];\n";
     let a = parse(src).expect("parses");
     let b = parse(src).expect("parses");
     assert_eq!(a, b); // deterministic + PartialEq over all variants

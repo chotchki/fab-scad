@@ -126,6 +126,24 @@ fn eval_node<'a>(
                 "ranges are not yet implemented (I.1)",
             ));
         }
+        ExprKind::FunctionLiteral { .. } | ExprKind::Let { .. } => {
+            return Err(crate::Error::Unimplemented(
+                "function-literal / let expressions are not yet implemented (I.2)",
+            ));
+        }
+        ExprKind::Assert { .. } | ExprKind::Echo { .. } => {
+            return Err(crate::Error::Unimplemented(
+                "assert / echo expressions are not yet implemented (I.5)",
+            ));
+        }
+        ExprKind::LcFor { .. }
+        | ExprKind::LcForC { .. }
+        | ExprKind::LcEach(_)
+        | ExprKind::LcIf { .. } => {
+            return Err(crate::Error::Unimplemented(
+                "list comprehensions are not yet implemented (I.3)",
+            ));
+        }
     }
     Ok(())
 }

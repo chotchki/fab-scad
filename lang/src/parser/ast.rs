@@ -225,6 +225,71 @@ pub enum ExprKind {
         /// The end value.
         end: Box<Expr>,
     },
+    /// A function-literal expression `function(params) body` (parser.y:336). The body is a full
+    /// `expr` (greedy), so `function(x) x + 1` binds as `function(x) (x + 1)`.
+    FunctionLiteral {
+        /// The formal parameters.
+        params: Vec<Parameter>,
+        /// The body expression.
+        body: Box<Expr>,
+    },
+    /// A `let(bindings) body` expression (parser.y:345) — binds `name = value` args, then evaluates
+    /// `body` in that scope. Distinct from the `let` MODULE call (statement position); this is the
+    /// expression form.
+    Let {
+        /// The `name = value` bindings.
+        bindings: Vec<Arg>,
+        /// The body evaluated in the extended scope.
+        body: Box<Expr>,
+    },
+    /// An `assert(args) body?` expression (parser.y:350). `body` is OPTIONAL (`expr_or_empty`):
+    /// `assert(cond)` checks and passes through, `assert(cond) x` checks then yields `x`.
+    Assert {
+        /// The assertion arguments (condition, optional message).
+        args: Vec<Arg>,
+        /// The optional pass-through body.
+        body: Option<Box<Expr>>,
+    },
+    /// An `echo(args) body?` expression (parser.y:355). `body` is OPTIONAL (`expr_or_empty`).
+    Echo {
+        /// The echo arguments.
+        args: Vec<Arg>,
+        /// The optional pass-through body.
+        body: Option<Box<Expr>>,
+    },
+    /// A list-comprehension `for (bindings) body` (parser.y:592) — iterate `bindings`, contributing
+    /// `body` each step. Only produced as a vector element ([`ExprKind::Vector`]). `body` is itself a
+    /// vector element, so comprehensions NEST (`[for(i=r) for(j=r) [i,j]]`).
+    LcFor {
+        /// The `name = range/list` iteration bindings.
+        bindings: Vec<Arg>,
+        /// The per-step contribution (a vector element).
+        body: Box<Expr>,
+    },
+    /// A C-style list-comprehension `for (init; cond; update) body` (parser.y:597).
+    LcForC {
+        /// The initializer bindings.
+        init: Vec<Arg>,
+        /// The loop condition.
+        cond: Box<Expr>,
+        /// The per-step update bindings.
+        update: Vec<Arg>,
+        /// The per-step contribution.
+        body: Box<Expr>,
+    },
+    /// A list-comprehension `each body` (parser.y:588) — SPLICE `body`'s list into the enclosing
+    /// vector (flatten one level) rather than nesting it.
+    LcEach(Box<Expr>),
+    /// A list-comprehension `if (cond) then [else els]` (parser.y:603-607) — conditionally contribute
+    /// `then` (or `els`). Distinct from the STATEMENT [`StmtKind::If`]: this yields list elements.
+    LcIf {
+        /// The condition.
+        cond: Box<Expr>,
+        /// The contribution when true.
+        then: Box<Expr>,
+        /// The contribution when false (absent ⇒ nothing).
+        els: Option<Box<Expr>>,
+    },
 }
 
 /// A prefix unary operator (parser.y:467-491).
@@ -319,6 +384,43 @@ impl Drop for Expr {
                         stack.push(take_kind(*step));
                     }
                     stack.push(take_kind(*end));
+                }
+                ExprKind::FunctionLiteral { params, body } => {
+                    stack.push(take_kind(*body));
+                    stack.extend(params.into_iter().filter_map(|p| p.default).map(take_kind));
+                }
+                ExprKind::Let { bindings, body } => {
+                    stack.push(take_kind(*body));
+                    stack.extend(bindings.into_iter().map(|a| take_kind(a.value)));
+                }
+                ExprKind::Assert { args, body } | ExprKind::Echo { args, body } => {
+                    if let Some(body) = body {
+                        stack.push(take_kind(*body));
+                    }
+                    stack.extend(args.into_iter().map(|a| take_kind(a.value)));
+                }
+                ExprKind::LcFor { bindings, body } => {
+                    stack.push(take_kind(*body));
+                    stack.extend(bindings.into_iter().map(|a| take_kind(a.value)));
+                }
+                ExprKind::LcForC {
+                    init,
+                    cond,
+                    update,
+                    body,
+                } => {
+                    stack.push(take_kind(*body));
+                    stack.push(take_kind(*cond));
+                    stack.extend(init.into_iter().map(|a| take_kind(a.value)));
+                    stack.extend(update.into_iter().map(|a| take_kind(a.value)));
+                }
+                ExprKind::LcEach(body) => stack.push(take_kind(*body)),
+                ExprKind::LcIf { cond, then, els } => {
+                    stack.push(take_kind(*cond));
+                    stack.push(take_kind(*then));
+                    if let Some(els) = els {
+                        stack.push(take_kind(*els));
+                    }
                 }
                 ExprKind::Num(_)
                 | ExprKind::Str(_)

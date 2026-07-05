@@ -155,6 +155,14 @@ fn deferred_constructs_are_loud() {
     assert!(matches!(ev_err("a.b"), Error::Unimplemented(m) if m.contains("I.1")));
     assert!(matches!(ev_err("[0:5]"), Error::Unimplemented(m) if m.contains("I.1")));
     assert!(matches!(ev_err("[1,true]"), Error::Unimplemented(m) if m.contains("I.1"))); // heterogeneous
+    // the H.3 expression forms parse but defer: function-literal / let → I.2, assert / echo → I.5.
+    assert!(matches!(ev_err("function(x)x"), Error::Unimplemented(m) if m.contains("I.2")));
+    assert!(matches!(ev_err("let(a=1)a"), Error::Unimplemented(m) if m.contains("I.2")));
+    assert!(matches!(ev_err("assert(true)1"), Error::Unimplemented(m) if m.contains("I.5")));
+    assert!(matches!(ev_err("echo(1)2"), Error::Unimplemented(m) if m.contains("I.5")));
+    // list comprehensions defer to I.3 (control flow).
+    assert!(matches!(ev_err("[for(i=[0:3])i]"), Error::Unimplemented(m) if m.contains("I.3")));
+    assert!(matches!(ev_err("[each [1]]"), Error::Unimplemented(m) if m.contains("I.3")));
 }
 
 #[test]

@@ -91,11 +91,11 @@ powers; `exponent`/`unary`/`call` are their own fns. All ✅ (G.3.3).
 | Production | `parser.y` | AST node | Status | Anchor |
 |------------|-----------|----------|--------|--------|
 | `expr : logic_or '?' expr ':' expr` | 341 | `ExprKind::Ternary` | ✅ | `ternary_is_right_assoc` |
-| `expr : TOK_FUNCTION '(' parameters ')' expr` | 336 | `ExprKind::FunctionLiteral` | 🔨 H.3.3 | — |
-| `expr : TOK_LET '(' arguments ')' expr` | 345 | `ExprKind::Let` | 🔨 H.3.4 | — |
-| `expr : TOK_ASSERT '(' arguments ')' expr_or_empty` | 350 | `ExprKind::Assert{body:Option}` | 🔨 H.3.5 | — |
-| `expr : TOK_ECHO '(' arguments ')' expr_or_empty` | 355 | `ExprKind::Echo{body:Option}` | 🔨 H.3.5 | — |
-| `expr_or_empty : /*empty*/ \| expr` | 569 | `Option<Box<Expr>>` | 🔨 H.3.5 | — |
+| `expr : TOK_FUNCTION '(' parameters ')' expr` | 336 | `ExprKind::FunctionLiteral` | ✅ H.3.3 | `function_let_assert_echo_expressions_parse` |
+| `expr : TOK_LET '(' arguments ')' expr` | 345 | `ExprKind::Let` | ✅ H.3.4 | `function_let_assert_echo_expressions_parse` |
+| `expr : TOK_ASSERT '(' arguments ')' expr_or_empty` | 350 | `ExprKind::Assert{body:Option}` | ✅ H.3.5 | `function_let_assert_echo_expressions_parse` |
+| `expr : TOK_ECHO '(' arguments ')' expr_or_empty` | 355 | `ExprKind::Echo{body:Option}` | ✅ H.3.5 | `function_let_assert_echo_expressions_parse` |
+| `expr_or_empty : /*empty*/ \| expr` | 569 | `Option<Box<Expr>>` | ✅ H.3.5 | `function_let_assert_echo_expressions_parse` |
 
 ### Primary + collections
 
@@ -112,21 +112,24 @@ powers; `exponent`/`unary`/`call` are their own fns. All ✅ (G.3.3).
 | `primary : '[' ']'` | 559 | `ExprKind::Vector([])` | ✅ | `vectors_and_ranges` |
 | `primary : '[' vector_elements optional_trailing_comma ']'` | 563 | `ExprKind::Vector` | ✅ | `vectors_and_ranges` |
 | `vector_elements` / `optional_trailing_comma` | 622-638 | `Vector` + trailing comma | ✅ | `vectors_and_ranges` |
-| `vector_element : list_comprehension_elements_p \| expr` | 640 | `VectorElement` enum | 🔨 H.3.2 | — |
+| `vector_element : list_comprehension_elements_p \| expr` | 640 | `vector_element()` dispatch | ✅ H.3.2 | `list_comprehensions_parse_every_form` |
 
-### List comprehensions (H.3.2)
+### List comprehensions (H.3.2) — ✅
 
-All 🔨 H.3.2. The last element may not be a bare `let` (that parses as the `let` EXPRESSION) —
-`list_comprehension_elements_p` allows the optional-paren wrap.
+All landed H.3.2, anchor `list_comprehensions_parse_every_form`. NOTE: the `let` comprehension reuses
+[`ExprKind::Let`] rather than a distinct `LcLet` — a vector `let` is semantically the let-EXPRESSION
+(bind, evaluate body), the only twist being its body is a vector element (may nest a comprehension).
+The AST shape differs from OpenSCAD's `LcLet` there, but the VALUE is identical; a deliberate
+simplification.
 
 | Production | `parser.y` | AST node | Status |
 |------------|-----------|----------|--------|
-| `TOK_LET '(' arguments ')' lce_p` | 583 | `LcLet` | 🔨 H.3.2 |
-| `TOK_EACH vector_element` | 588 | `LcEach` | 🔨 H.3.2 |
-| `TOK_FOR '(' arguments ')' vector_element` | 592 | `LcFor` | 🔨 H.3.2 |
-| `TOK_FOR '(' arguments ';' expr ';' arguments ')' vector_element` | 597 | `LcForC` (C-style) | 🔨 H.3.2 |
-| `TOK_IF '(' expr ')' vector_element [TOK_ELSE vector_element]` | 603-607 | `LcIf{els:Option}` | 🔨 H.3.2 |
-| `list_comprehension_elements_p : lce \| '(' lce ')'` | 614 | parenthesized wrap | 🔨 H.3.2 |
+| `TOK_LET '(' arguments ')' lce_p` | 583 | `ExprKind::Let` (see note) | ✅ H.3.2 |
+| `TOK_EACH vector_element` | 588 | `LcEach` | ✅ H.3.2 |
+| `TOK_FOR '(' arguments ')' vector_element` | 592 | `LcFor` | ✅ H.3.2 |
+| `TOK_FOR '(' arguments ';' expr ';' arguments ')' vector_element` | 597 | `LcForC` (C-style) | ✅ H.3.2 |
+| `TOK_IF '(' expr ')' vector_element [TOK_ELSE vector_element]` | 603-607 | `LcIf{els:Option}` | ✅ H.3.2 |
+| `list_comprehension_elements_p : lce \| '(' lce ')'` | 614 | paren-guard in `vector_element()` | ✅ H.3.2 |
 
 ### Parameters + arguments
 

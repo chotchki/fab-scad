@@ -815,6 +815,8 @@ pub(crate) fn mesh_of(tree: GeoNode) -> crate::Result<Mesh> {
     match tree {
         GeoNode::Empty => Ok(Mesh::new()),
         GeoNode::Leaf(mesh) => Ok(mesh),
+        // Color is a display property, not geometry — a colored PRIMITIVE still flattens with no backend.
+        GeoNode::Color { child, .. } => mesh_of(*child),
         _ => Err(crate::Error::Unimplemented(
             "geometry with transforms or booleans needs a backend — use evaluate_geometry (J.2)",
         )),
@@ -970,6 +972,20 @@ fn eval_stmt<'a>(
                 "intersection" => GeoNode::Intersection(children),
                 _ => GeoNode::Union(children),
             });
+        }
+        // `color()` — set the subtree's display color (BOSL2-critical, J.2.8). An INVALID color (unknown
+        // name, wrong arg type) INHERITS: no Color node, just the children (OpenSCAD's -1 sentinel).
+        StmtKind::Module(mi) if mi.name == "color" => {
+            let (positional, named, _) = module::eval_args(mi, scope, ctx)?;
+            let refs: Vec<&Stmt> = mi.children.iter().collect();
+            let child = union_of(eval_nodes(&refs, ctx, scope)?);
+            match geo::resolve_color(&positional, &named) {
+                Some(color) => nodes.push(GeoNode::Color {
+                    color,
+                    child: Box::new(child),
+                }),
+                None => nodes.push(child),
+            }
         }
         // `for` / `intersection_for`: bind the loop variable(s) over a range/vector, evaluate the body
         // per iteration, and union (or intersect) the results (I.3.3 — the statement half of control

@@ -44,6 +44,9 @@ pub fn build<B: GeometryBackend>(node: &GeoNode, backend: &B) -> B::Solid {
         GeoNode::Union(kids) => reduce(kids, backend, |b, x, y| b.union(x, y)),
         GeoNode::Difference(kids) => reduce(kids, backend, |b, x, y| b.difference(x, y)),
         GeoNode::Intersection(kids) => reduce(kids, backend, |b, x, y| b.intersection(x, y)),
+        // Color is a display property — geometry is the child's. Manifold vertex-property propagation
+        // is J.2.9; for now the color is dropped at the backend (the geometry differential is unaffected).
+        GeoNode::Color { child, .. } => build(child, backend),
     }
 }
 

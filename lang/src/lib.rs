@@ -44,6 +44,7 @@ mod geom;
 mod lexer;
 mod mesh;
 mod parser;
+mod webcolors;
 
 pub use customizer::{Constraint, CustomParam, Customizer, DropdownItem, customize};
 pub use error::{Error, Result};
@@ -51,7 +52,7 @@ pub use eval::{
     Evaluation, GeoNode, Message, RANGE_MAX, RangeIter, Scope, Value, eval_expr, eval_program,
     fragments, range_iter, range_len,
 };
-pub use geom::{Affine, Dims, Tri, Vec3};
+pub use geom::{Affine, Dims, Rgba, Tri, Vec3};
 pub use lexer::{Lexed, Token, TokenKind, decode_str, lex, num_value};
 pub use mesh::Mesh;
 pub use parser::{

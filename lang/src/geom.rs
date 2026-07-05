@@ -271,13 +271,101 @@ impl Index<usize> for Dims {
     }
 }
 
+/// An RGBA color — four channels in `[0, 1]` (OpenSCAD's `color()` model; alpha 1 = opaque). The named
+/// CSS table (`color("red")`) + hex (`"#rgb"` … `"#rrggbbaa"`) are the `from_*` constructors. NOT
+/// clamped — OpenSCAD stores an out-of-range channel verbatim (warns only at export), so we preserve
+/// it. BOSL2-critical: `recolor` / `rainbow` / debug-viz all ride on this.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Rgba {
+    /// Red, `0..=1`.
+    pub r: f64,
+    /// Green, `0..=1`.
+    pub g: f64,
+    /// Blue, `0..=1`.
+    pub b: f64,
+    /// Alpha, `0..=1` (1 = opaque).
+    pub a: f64,
+}
+
+impl Rgba {
+    /// Opaque white.
+    pub const WHITE: Rgba = Rgba::new(1.0, 1.0, 1.0, 1.0);
+
+    /// A color from its four channels.
+    #[must_use]
+    pub const fn new(r: f64, g: f64, b: f64, a: f64) -> Self {
+        Rgba { r, g, b, a }
+    }
+
+    /// An opaque color (`a = 1`).
+    #[must_use]
+    pub const fn opaque(r: f64, g: f64, b: f64) -> Self {
+        Rgba::new(r, g, b, 1.0)
+    }
+
+    /// To an `[r, g, b, a]` array.
+    #[must_use]
+    pub const fn to_array(self) -> [f64; 4] {
+        [self.r, self.g, self.b, self.a]
+    }
+
+    /// From 0-255 sRGB bytes (opaque) — what the named + hex tables produce.
+    #[must_use]
+    pub fn from_u8(r: u8, g: u8, b: u8) -> Self {
+        Rgba::opaque(
+            f64::from(r) / 255.0,
+            f64::from(g) / 255.0,
+            f64::from(b) / 255.0,
+        )
+    }
+
+    /// A CSS color NAME (case-insensitive) → its color, or `None` if unknown. `"transparent"` is the
+    /// one OpenSCAD-specific entry: `{0, 0, 0, 0}` (fully transparent), NOT just black.
+    #[must_use]
+    pub fn from_name(name: &str) -> Option<Rgba> {
+        if name.eq_ignore_ascii_case("transparent") {
+            return Some(Rgba::new(0.0, 0.0, 0.0, 0.0));
+        }
+        crate::webcolors::lookup(name).map(|[r, g, b]| Rgba::from_u8(r, g, b))
+    }
+
+    /// A hex string `"#rgb"` / `"#rgba"` / `"#rrggbb"` / `"#rrggbbaa"` → its color, `None` if malformed.
+    /// Short forms scale each nibble by 17 (`#f80` → `#ff8800`).
+    #[must_use]
+    #[allow(
+        clippy::many_single_char_names,
+        reason = "r/g/b/a ARE the color channels; s/h the input + hex body"
+    )]
+    pub fn from_hex(s: &str) -> Option<Rgba> {
+        let h = s.strip_prefix('#')?;
+        let chan = |v: u8| f64::from(v) / 255.0;
+        let (r, g, b, a) = match h.len() {
+            3 => (nibble(h, 0)?, nibble(h, 1)?, nibble(h, 2)?, 255),
+            4 => (nibble(h, 0)?, nibble(h, 1)?, nibble(h, 2)?, nibble(h, 3)?),
+            6 => (byte(h, 0)?, byte(h, 2)?, byte(h, 4)?, 255),
+            8 => (byte(h, 0)?, byte(h, 2)?, byte(h, 4)?, byte(h, 6)?),
+            _ => return None,
+        };
+        Some(Rgba::new(chan(r), chan(g), chan(b), chan(a)))
+    }
+}
+
+/// One hex nibble at byte `i`, scaled to a full byte (`0xF` → `0xFF`).
+fn nibble(h: &str, i: usize) -> Option<u8> {
+    Some(u8::from_str_radix(h.get(i..i + 1)?, 16).ok()? * 17)
+}
+/// Two hex digits at byte `i` → a byte.
+fn byte(h: &str, i: usize) -> Option<u8> {
+    u8::from_str_radix(h.get(i..i + 2)?, 16).ok()
+}
+
 #[cfg(test)]
 #[allow(
     clippy::float_cmp,
     reason = "exact vector/matrix arithmetic on literal inputs"
 )]
 mod tests {
-    use super::{Affine, Dims, Tri, Vec3};
+    use super::{Affine, Dims, Rgba, Tri, Vec3};
 
     #[test]
     fn vec3_ops() {
@@ -334,6 +422,26 @@ mod tests {
     #[should_panic(expected = "out of range")]
     fn dims_index_out_of_range() {
         let _ = Dims::new(1.0, 2.0, 3.0)[3];
+    }
+
+    #[test]
+    fn rgba_named_hex_and_alpha() {
+        assert_eq!(Rgba::from_name("red"), Some(Rgba::opaque(1.0, 0.0, 0.0)));
+        assert_eq!(Rgba::from_name("RED"), Some(Rgba::opaque(1.0, 0.0, 0.0))); // case-insensitive
+        assert_eq!(
+            Rgba::from_name("transparent"),
+            Some(Rgba::new(0.0, 0.0, 0.0, 0.0))
+        );
+        assert_eq!(Rgba::from_name("notacolor"), None);
+        assert_eq!(Rgba::from_u8(255, 0, 0), Rgba::opaque(1.0, 0.0, 0.0));
+        assert_eq!(Rgba::WHITE.to_array(), [1.0, 1.0, 1.0, 1.0]);
+        // hex: #rgb short form scales each nibble ×17; #rrggbb; #rgba/#rrggbbaa carry alpha.
+        assert_eq!(Rgba::from_hex("#f80"), Rgba::from_hex("#ff8800"));
+        assert_eq!(Rgba::from_hex("#ff0000"), Some(Rgba::opaque(1.0, 0.0, 0.0)));
+        assert_eq!(Rgba::from_hex("#ffff"), Rgba::from_hex("#ffffffff"));
+        assert_eq!(Rgba::from_hex("#00000080").unwrap().a, 128.0 / 255.0);
+        assert!(Rgba::from_hex("#xyz").is_none() && Rgba::from_hex("nope").is_none());
+        assert!(Rgba::from_hex("#12345").is_none()); // wrong length (not 3/4/6/8)
     }
 
     #[test]

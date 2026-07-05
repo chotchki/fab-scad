@@ -21,7 +21,7 @@ use std::collections::BTreeMap;
 use super::trig::{cos_degrees, sin_degrees};
 use super::value::Value;
 use crate::Mesh;
-use crate::geom::Affine;
+use crate::geom::{Affine, Rgba};
 
 /// A node in the CSG geometry tree.
 #[derive(Debug, Clone, PartialEq)]
@@ -43,6 +43,14 @@ pub enum GeoNode {
     Difference(Vec<GeoNode>),
     /// `intersection()` — the common volume of all children.
     Intersection(Vec<GeoNode>),
+    /// `color()` over a subtree — sets its display color (BOSL2-critical). Geometry is UNCHANGED; the
+    /// backend applies it as a Manifold vertex property (J.2.9). Outermost `color()` wins (OpenSCAD).
+    Color {
+        /// The RGBA color.
+        color: Rgba,
+        /// The colored subtree.
+        child: Box<GeoNode>,
+    },
 }
 
 /// Whether `name` is a built-in affine transform (dispatched to [`GeoNode::Transform`]).
@@ -56,6 +64,27 @@ pub(super) fn is_transform(name: &str) -> bool {
 /// Whether `name` is a built-in CSG boolean (dispatched to the union/difference/intersection nodes).
 pub(super) fn is_boolean(name: &str) -> bool {
     matches!(name, "union" | "difference" | "intersection")
+}
+
+/// Resolve a `color()` module's evaluated args to an [`Rgba`], or `None` when the color is INVALID
+/// (unknown name, non-string/non-vector `c`) — OpenSCAD leaves such a node's color at the `Color4f(-1,…)`
+/// sentinel meaning "inherit", so the caller wraps NO color node. `c` (1st positional / `c=`) is a
+/// name/hex STRING or an `[r, g, b(, a)]` vector; `alpha` (2nd positional / `alpha=`, when a number)
+/// OVERRIDES the alpha, applied LAST — unclamped, exactly as OpenSCAD stores it.
+pub(super) fn resolve_color(positional: &[Value], named: &BTreeMap<String, Value>) -> Option<Rgba> {
+    let c = positional.first().or_else(|| named.get("c"))?;
+    let mut rgba = match c {
+        Value::Str(s) => Rgba::from_name(s).or_else(|| Rgba::from_hex(s))?,
+        Value::NumList(xs) => {
+            let ch = |i: usize, d: f64| xs.get(i).copied().unwrap_or(d);
+            Rgba::new(ch(0, 0.0), ch(1, 0.0), ch(2, 0.0), ch(3, 1.0)) // short vector back-fills a = 1
+        }
+        _ => return None,
+    };
+    if let Some(Value::Num(a)) = positional.get(1).or_else(|| named.get("alpha")) {
+        rgba.a = *a;
+    }
+    Some(rgba)
 }
 
 /// The 3×4 affine for a transform module, from its EVALUATED arguments. Unknown/degenerate args fall

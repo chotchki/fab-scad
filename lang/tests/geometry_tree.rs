@@ -10,7 +10,7 @@
     reason = "integration test: unwrap/panic ARE the assertions; translate/scale matrices are EXACT (the literal args, no trig)"
 )]
 
-use fab_lang::{GeoNode, evaluate, evaluate_geometry};
+use fab_lang::{GeoNode, Rgba, evaluate, evaluate_geometry};
 
 #[test]
 fn primitive_is_a_leaf() {
@@ -132,6 +132,50 @@ fn for_iterates_and_unions() {
         count("intersection_for (i = [0:2]) rotate([0, 0, i * 30]) cube(10);"),
         3
     );
+}
+
+#[test]
+fn color_wraps_its_subtree() {
+    // A named color → GeoNode::Color with the resolved Rgba; child is the primitive.
+    match evaluate_geometry("color(\"red\") cube(10);").unwrap() {
+        GeoNode::Color { color, child } => {
+            assert_eq!(color, Rgba::opaque(1.0, 0.0, 0.0));
+            assert!(matches!(*child, GeoNode::Leaf(_)));
+        }
+        other => panic!("expected Color, got {other:?}"),
+    }
+    // rgb vector + alpha override; hex; case-insensitive name.
+    assert!(matches!(
+        evaluate_geometry("color([0, 1, 0], 0.5) cube(1);").unwrap(),
+        GeoNode::Color { color, .. } if color == Rgba::new(0.0, 1.0, 0.0, 0.5)
+    ));
+    assert!(matches!(
+        evaluate_geometry("color(\"#0000ff\") sphere(1, $fn = 8);").unwrap(),
+        GeoNode::Color { color, .. } if color == Rgba::opaque(0.0, 0.0, 1.0)
+    ));
+    // color OVER a boolean: the whole difference is the colored subtree.
+    assert!(matches!(
+        evaluate_geometry("color(\"red\") difference() { cube(10); sphere(6, $fn = 8); }").unwrap(),
+        GeoNode::Color { child, .. } if matches!(*child, GeoNode::Difference(_))
+    ));
+    // INVALID color inherits — NO Color node, just the child (OpenSCAD's -1 sentinel).
+    assert!(matches!(
+        evaluate_geometry("color(\"notacolor\") cube(1);").unwrap(),
+        GeoNode::Leaf(_)
+    ));
+    // a non-string / non-vector color arg (a number) is also invalid → inherit.
+    assert!(matches!(
+        evaluate_geometry("color(5) cube(1);").unwrap(),
+        GeoNode::Leaf(_)
+    ));
+    // nested: the OUTER node wraps the inner (the backend resolves outer-wins at J.2.9).
+    assert!(matches!(
+        evaluate_geometry("color(\"red\") color(\"blue\") cube(1);").unwrap(),
+        GeoNode::Color { color, child }
+            if color == Rgba::opaque(1.0, 0.0, 0.0) && matches!(*child, GeoNode::Color { .. })
+    ));
+    // ...and a single colored primitive still flattens with no backend (color dropped from the mesh).
+    assert!(evaluate("color(\"red\") cube(10);").unwrap().tri_count() > 0);
 }
 
 #[test]

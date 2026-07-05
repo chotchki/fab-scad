@@ -6,6 +6,10 @@
 pub mod auto;
 pub mod auto_orient;
 pub mod auto_slice;
+// The geometry backend trait (J.1): the CSG op vocabulary the geometry lowering targets, with a mock
+// (miri-tested) + the real Manifold impl (ASAN-tested). Needs fab-lang's Mesh, hence `native`.
+#[cfg(feature = "native")]
+pub mod backend;
 #[cfg(feature = "kernel")]
 pub mod bambu;
 pub mod cross_section;

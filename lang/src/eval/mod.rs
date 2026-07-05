@@ -709,10 +709,23 @@ fn run_stmts<'a>(
     ctx: &Ctx<'a>,
     scope: &Scope,
 ) -> crate::Result<Mesh> {
+    let stmts: Vec<&Stmt> = stmts.collect();
     let mut scope = scope.clone();
+    // Pass 1 — HOIST: bind every top-level assignment BEFORE any geometry (OpenSCAD's whole-scope,
+    // last-assignment-wins rule), evaluating them in first-occurrence order so a forward or
+    // self-referential reference sees `undef` (verified against the oracle: `sphere(x); x = 5;` →
+    // sphere(5); `n = 1; n = n + 1;` → n is undef). This is why geometry sees a variable's FINAL value
+    // regardless of source position.
+    for (name, expr) in hoisted_assignments(&stmts) {
+        let value = eval_with_ctx(expr, &scope, ctx)?;
+        scope.bind(name.to_string(), value);
+    }
+    // Pass 2 — GEOMETRY: execute the non-assignment statements with the fully-bound scope.
     let mut meshes = Vec::new();
-    for stmt in stmts {
-        eval_stmt(stmt, &mut scope, ctx, &mut meshes)?;
+    for stmt in &stmts {
+        if !matches!(stmt.kind, StmtKind::Assignment { .. }) {
+            eval_stmt(stmt, &mut scope, ctx, &mut meshes)?;
+        }
     }
     match meshes.len() {
         0 => Ok(Mesh::new()),
@@ -721,6 +734,28 @@ fn run_stmts<'a>(
             "multiple top-level objects (implicit union) are not yet implemented (J.2)",
         )),
     }
+}
+
+/// The hoisted assignment order of a scope, as a PURE function (statements in → ordered `(name, expr)`
+/// out, no evaluation, no side effects): a scope's assignments deduped by name in FIRST-occurrence
+/// order, each carrying the LAST assignment's expr. Mirrors OpenSCAD's parser (`handle_assignment`
+/// overwrites a duplicate's expr in place, keeping its position) feeding `ScopeContext::init`, which
+/// evaluates them in that order. The caller evaluates + binds; keeping the ORDER pure makes the
+/// last-assignment-wins + forward-ref-is-undef rules unit-testable without a scope.
+fn hoisted_assignments<'a>(stmts: &[&'a Stmt]) -> Vec<(&'a str, &'a Expr)> {
+    let mut order: Vec<(&'a str, &'a Expr)> = Vec::new();
+    let mut index: BTreeMap<&'a str, usize> = BTreeMap::new();
+    for stmt in stmts {
+        if let StmtKind::Assignment { name, value } = &stmt.kind {
+            if let Some(&i) = index.get(name.as_str()) {
+                order[i].1 = value; // seen: last expr wins, first-occurrence position kept
+            } else {
+                index.insert(name.as_str(), order.len());
+                order.push((name.as_str(), value));
+            }
+        }
+    }
+    order
 }
 
 /// Collect user function definitions into the [`Ctx`] store (their own namespace). A pre-pass over the
@@ -916,5 +951,20 @@ mod tests {
         // just heap. sum(n) = n(n+1)/2, so sum(100000) = 5000050000 (exact in f64).
         let deep = "function sum(n) = n <= 0 ? 0 : n + sum(n - 1); y = sum(100000);";
         assert_eq!(eval_last(deep), Value::Num(5_000_050_000.0));
+    }
+
+    #[test]
+    fn hoisted_assignments_dedup_first_occurrence_last_expr() {
+        // The PURE override resolver: `a = 1; b = 2; a = 3;` → order [a, b] (FIRST-occurrence position),
+        // and a carries the LAST expr (3, not 1). This is the whole rule the run_stmts hoist rides on.
+        use crate::parser::{ExprKind, Stmt};
+        let prog = parse("a = 1; b = 2; a = 3;").expect("parses");
+        let stmts: Vec<&Stmt> = prog.stmts.iter().collect();
+        let order = super::hoisted_assignments(&stmts);
+        assert_eq!(
+            order.iter().map(|(n, _)| *n).collect::<Vec<_>>(),
+            ["a", "b"]
+        );
+        assert!(matches!(order[0].1.kind, ExprKind::Num(n) if n == 3.0)); // a's expr is the last (3)
     }
 }

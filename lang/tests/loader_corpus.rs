@@ -116,14 +116,15 @@ const FIXTURES: &[(&str, &str)] = &[
         "use_nontransitive_reach.scad",
         "use <lib_uses_inner.scad>\nsphere(inner_r(), $fn = 8);\n",
     ),
-    // OBSERVABLE diamond: a counter incremented via BOTH arms proves the shared file splices TWICE.
-    // The v=7 diamond can't catch a dedup regression (7 whether spliced once or twice); this can (n=1).
-    ("d_count_shared.scad", "n = n + 1;\n"),
-    ("d_count_left.scad", "include <d_count_shared.scad>\n"),
-    ("d_count_right.scad", "include <d_count_shared.scad>\n"),
+    // OBSERVABLE diamond: a shared file with GEOMETRY reached via BOTH arms splices TWICE → two
+    // top-level objects. (A counter can't prove it — hoisting makes `n = n + 1` twice → undef, per the
+    // oracle; and a constant is dedup-invariant. Geometry duplication is the only echo-free signal.)
+    ("dup_geom_shared.scad", "cube(1);\n"),
+    ("dup_geom_left.scad", "include <dup_geom_shared.scad>\n"),
+    ("dup_geom_right.scad", "include <dup_geom_shared.scad>\n"),
     (
-        "d_count_top.scad",
-        "n = 0;\ninclude <d_count_left.scad>\ninclude <d_count_right.scad>\nsphere(n, $fn = 8);\n",
+        "dup_geom_top.scad",
+        "include <dup_geom_left.scad>\ninclude <dup_geom_right.scad>\n",
     ),
     // use imports FUNCTIONS only — a used file's top-level var (noise = 99 in lib_with_geom) is NOT
     // imported, so reading it in the using scope yields undef.
@@ -158,10 +159,11 @@ fn file(name: &str, libs: &[PathBuf]) -> Mesh {
     evaluate_file(&root().join(name), libs).unwrap_or_else(|e| panic!("{name}: {e}"))
 }
 
-/// Two meshes are the same shape iff their vertex + triangle counts match — sufficient here because
-/// every case renders ONE deterministic primitive, so equal counts ⇒ identical tessellation.
-fn same_shape(a: &Mesh, b: &Mesh) -> bool {
-    a.vert_count() == b.vert_count() && a.tri_count() == b.tri_count()
+/// FULL mesh equality — verts AND tris, positions included (`Mesh` is `PartialEq`, tessellation is
+/// deterministic). Counts alone can't distinguish a sphere's radius (topology is radius-independent),
+/// so a value flowing through wrong would pass a counts check; equality actually pins the VALUE.
+fn same_mesh(a: &Mesh, b: &Mesh) -> bool {
+    a == b
 }
 
 /// The heart of the corpus: a loader graph must render EXACTLY its inlined single-file equivalent.
@@ -189,8 +191,6 @@ fn loader_matches_the_inlined_equivalent() {
         ("use_selfcycle.scad", vec![], "sphere(7, $fn = 8);"),
         // lu_r() reaches through one `use`; the used file's OWN `use` is not re-exported → lu_r() = 2
         ("use_nontransitive.scad", vec![], "sphere(2, $fn = 8);"),
-        // OBSERVABLE diamond: shared counter spliced via both arms → n = 2 (a dedup regression → n=1)
-        ("d_count_top.scad", vec![], "sphere(2, $fn = 8);"),
         // use imports functions only → noise stays undef in the using scope → sphere(undef)
         ("use_var.scad", vec![], "sphere(undef, $fn = 8);"),
         // pathlib reachable only via the library path → pr() = 4
@@ -203,7 +203,7 @@ fn loader_matches_the_inlined_equivalent() {
         let got = file(fixture, &libs);
         let want = evaluate(equivalent).expect("inline equivalent evaluates");
         assert!(
-            same_shape(&got, &want),
+            same_mesh(&got, &want),
             "{fixture}: got {}v/{}t, inlined {equivalent:?} is {}v/{}t",
             got.vert_count(),
             got.tri_count(),
@@ -211,6 +211,16 @@ fn loader_matches_the_inlined_equivalent() {
             want.tri_count(),
         );
     }
+}
+
+#[test]
+fn a_diamond_re_splices_shared_geometry() {
+    // A shared file with geometry, reached via both diamond arms, splices TWICE → two top-level
+    // objects → the implicit-union defer (J.2). A dedup regression would give ONE object → a mesh, no
+    // error — so this fails LOUD if the loader ever stops re-splicing. (Flip to a 2-object union
+    // assertion when J.2 lands.)
+    let err = evaluate_file(&root().join("dup_geom_top.scad"), &[]).unwrap_err();
+    assert!(matches!(err, Error::Unimplemented(_)), "got {err:?}");
 }
 
 #[test]
@@ -236,7 +246,7 @@ fn a_plain_program_still_round_trips_through_the_loader() {
     // The `evaluate` sugar now routes through the loader; an include-free program must be unaffected.
     let via_loader = evaluate("x = 4; sphere(x, $fn = 8);").expect("evaluates");
     let direct = evaluate("sphere(4, $fn = 8);").expect("evaluates");
-    assert!(same_shape(&via_loader, &direct));
+    assert!(same_mesh(&via_loader, &direct));
 }
 
 #[test]
@@ -246,7 +256,7 @@ fn an_absolute_path_reference_resolves() {
     let src = format!("include <{}>\nsphere(size, $fn = 8);\n", abs.display());
     let got = evaluate_with_base(&src, root(), &[]).expect("absolute include resolves");
     let want = evaluate("sphere(3, $fn = 8);").expect("evaluates");
-    assert!(same_shape(&got, &want));
+    assert!(same_mesh(&got, &want));
 }
 
 #[test]

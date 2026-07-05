@@ -142,6 +142,12 @@ fn program_eval() {
     assert_eq!(mesh(";").vert_count(), 0); // only empty statements
     assert_eq!(mesh("x = 5; sphere(x, $fn = 8);").vert_count(), 32); // assignment then use
     assert_eq!(mesh("{ sphere(1, $fn = 8); }").vert_count(), 32); // block
+    // a block-INTERNAL assignment binds sequentially (blocks don't yet hoist — that rides Phase J with
+    // module bodies; top-level hoisting is I.2.7). In-order, so it matches either way:
+    assert_eq!(
+        mesh("{ x = 5; sphere(x, $fn = 8); }"),
+        mesh("sphere(5, $fn = 8);")
+    );
 }
 
 #[test]
@@ -159,6 +165,38 @@ fn beyond_the_subset_is_loud() {
         err("v = 1; sphere(bogus_fn(v));"),
         Error::Unimplemented(_)
     )); // an UNKNOWN function in an arg (builtin/known-function calls in args now work — I.4)
+}
+
+#[test]
+fn whole_scope_variable_hoisting() {
+    // Top-level assignments hoist: geometry sees a variable's FINAL value regardless of source
+    // position, last-assignment-wins, evaluated in first-occurrence order (so forward/self refs are
+    // undef). Every case matches a `ECHO:` probe against the real OpenSCAD 2026.06.12 oracle.
+    // read-before-assign → the hoisted value:
+    assert_eq!(
+        mesh("sphere(x, $fn = 8); x = 5;"),
+        mesh("sphere(5, $fn = 8);")
+    );
+    // reassignment, last wins:
+    assert_eq!(
+        mesh("x = 1; sphere(x, $fn = 8); x = 9;"),
+        mesh("sphere(9, $fn = 8);")
+    );
+    // the self-referential gotcha: `n = n + 4` sees n as undef → sphere(undef):
+    assert_eq!(
+        mesh("n = 1; n = n + 4; sphere(n, $fn = 8);"),
+        mesh("sphere(undef, $fn = 8);")
+    );
+    // forward reference → undef (a is evaluated before b is bound, in first-occurrence order):
+    assert_eq!(
+        mesh("sphere(a, $fn = 8); a = b; b = 5;"),
+        mesh("sphere(undef, $fn = 8);")
+    );
+    // backward reference resolves normally:
+    assert_eq!(
+        mesh("b = 5; a = b; sphere(a, $fn = 8);"),
+        mesh("sphere(5, $fn = 8);")
+    );
 }
 
 #[test]

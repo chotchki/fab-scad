@@ -25,10 +25,12 @@ pub use value::{RANGE_MAX, RangeIter, Value, range_iter, range_len};
 use crate::Mesh;
 use crate::parser::{BinOp, Expr, ExprKind, Program, Stmt, StmtKind, UnOp};
 
-/// One step on the evaluator's explicit work-stack.
+/// One step on the evaluator's explicit work-stack. Each `Eval` carries the [`Scope`] it evaluates
+/// in (an `Rc<Frame>` clone — cheap), so a call's body can evaluate in the callee's scope while the
+/// caller's continuation waits on the same stack (I.2.3). Value-combining tasks need no scope.
 enum Task<'a> {
-    /// Evaluate this expression, pushing its result onto the value stack.
-    Eval(&'a Expr),
+    /// Evaluate this expression in this scope, pushing its result onto the value stack.
+    Eval(&'a Expr, Scope),
     /// Pop two values, apply the binary op, push the result.
     Binary(BinOp),
     /// Pop one value, apply the unary op, push the result.
@@ -39,8 +41,12 @@ enum Task<'a> {
     Index,
     /// Pop end, (step if `stepped`), start; build a range value.
     Range { stepped: bool },
-    /// Pop the condition, then schedule the taken branch.
-    Ternary { then: &'a Expr, els: &'a Expr },
+    /// Pop the condition, then schedule the taken branch (in `scope`).
+    Ternary {
+        then: &'a Expr,
+        els: &'a Expr,
+        scope: Scope,
+    },
 }
 
 /// Evaluate an expression to a [`Value`] on the explicit stack.
@@ -49,11 +55,11 @@ enum Task<'a> {
 /// [`Error::Unimplemented`](crate::Error::Unimplemented) for constructs deferred past v0 (function
 /// calls, indexing, member access, ranges, heterogeneous/nested vectors).
 pub fn eval_expr(root: &Expr, scope: &Scope) -> crate::Result<Value> {
-    let mut tasks: Vec<Task<'_>> = vec![Task::Eval(root)];
+    let mut tasks: Vec<Task<'_>> = vec![Task::Eval(root, scope.clone())];
     let mut values: Vec<Value> = Vec::new();
     while let Some(task) = tasks.pop() {
         match task {
-            Task::Eval(e) => eval_node(e, scope, &mut tasks, &mut values)?,
+            Task::Eval(e, s) => eval_node(e, &s, &mut tasks, &mut values)?,
             Task::Binary(op) => {
                 // pop order: rhs was pushed after lhs, so it's on top.
                 let rhs = values.pop().unwrap_or(Value::Undef);
@@ -85,9 +91,10 @@ pub fn eval_expr(root: &Expr, scope: &Scope) -> crate::Result<Value> {
                 let start = values.pop().unwrap_or(Value::Undef);
                 values.push(build_range(&start, &step, &end));
             }
-            Task::Ternary { then, els } => {
+            Task::Ternary { then, els, scope } => {
                 let cond = values.pop().unwrap_or(Value::Undef);
-                tasks.push(Task::Eval(if cond.is_truthy() { then } else { els }));
+                let branch = if cond.is_truthy() { then } else { els };
+                tasks.push(Task::Eval(branch, scope));
             }
         }
     }
@@ -110,21 +117,25 @@ fn eval_node<'a>(
         ExprKind::Ident(name) => values.push(scope.lookup(name)),
         ExprKind::Unary { op, operand } => {
             tasks.push(Task::Unary(*op));
-            tasks.push(Task::Eval(operand));
+            tasks.push(Task::Eval(operand, scope.clone()));
         }
         ExprKind::Binary { op, lhs, rhs } => {
             tasks.push(Task::Binary(*op));
-            tasks.push(Task::Eval(rhs));
-            tasks.push(Task::Eval(lhs)); // popped (and evaluated) first
+            tasks.push(Task::Eval(rhs, scope.clone()));
+            tasks.push(Task::Eval(lhs, scope.clone())); // popped (and evaluated) first
         }
         ExprKind::Ternary { cond, then, els } => {
-            tasks.push(Task::Ternary { then, els });
-            tasks.push(Task::Eval(cond));
+            tasks.push(Task::Ternary {
+                then,
+                els,
+                scope: scope.clone(),
+            });
+            tasks.push(Task::Eval(cond, scope.clone()));
         }
         ExprKind::Vector(elems) => {
             tasks.push(Task::Vector(elems.len()));
             for el in elems.iter().rev() {
-                tasks.push(Task::Eval(el)); // reversed pushes → forward evaluation order
+                tasks.push(Task::Eval(el, scope.clone())); // reversed pushes → forward eval order
             }
         }
         ExprKind::Call { .. } => {
@@ -134,8 +145,8 @@ fn eval_node<'a>(
         }
         ExprKind::Index { base, index } => {
             tasks.push(Task::Index);
-            tasks.push(Task::Eval(index));
-            tasks.push(Task::Eval(base)); // popped (and evaluated) first → base under index
+            tasks.push(Task::Eval(index, scope.clone()));
+            tasks.push(Task::Eval(base, scope.clone())); // evaluated first → base under index
         }
         ExprKind::Member { .. } => {
             return Err(crate::Error::Unimplemented(
@@ -147,11 +158,11 @@ fn eval_node<'a>(
             tasks.push(Task::Range {
                 stepped: step.is_some(),
             });
-            tasks.push(Task::Eval(end));
+            tasks.push(Task::Eval(end, scope.clone()));
             if let Some(step) = step {
-                tasks.push(Task::Eval(step));
+                tasks.push(Task::Eval(step, scope.clone()));
             }
-            tasks.push(Task::Eval(start));
+            tasks.push(Task::Eval(start, scope.clone()));
         }
         ExprKind::FunctionLiteral { .. } | ExprKind::Let { .. } => {
             return Err(crate::Error::Unimplemented(

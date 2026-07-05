@@ -219,18 +219,28 @@ fn ranges_are_first_class_values() {
 #[test]
 fn deferred_constructs_are_loud() {
     assert!(matches!(ev_err("f(1)"), Error::Unimplemented(m) if m.contains("I.4"))); // unknown/builtin fn
-    assert!(
-        matches!(ev_err("(function(x)x)(5)"), Error::Unimplemented(m) if m.contains("I.2.3.3"))
-    ); // calling a fn VALUE
     assert!(matches!(ev_err("a.b"), Error::Unimplemented(m) if m.contains("I.1"))); // member access
-    // the H.3 expression forms parse but defer: function-literal / let → I.2, assert / echo → I.5.
-    assert!(matches!(ev_err("function(x)x"), Error::Unimplemented(m) if m.contains("I.2")));
-    assert!(matches!(ev_err("let(a=1)a"), Error::Unimplemented(m) if m.contains("I.2")));
+    // (function literals + calling a function VALUE now evaluate — I.2.3.3; see function_values below.)
+    // the remaining H.3 expression forms parse but defer: let → I.3, assert / echo → I.5.
+    assert!(matches!(ev_err("let(a=1)a"), Error::Unimplemented(m) if m.contains("I.3")));
     assert!(matches!(ev_err("assert(true)1"), Error::Unimplemented(m) if m.contains("I.5")));
     assert!(matches!(ev_err("echo(1)2"), Error::Unimplemented(m) if m.contains("I.5")));
     // list comprehensions defer to I.3 (control flow).
     assert!(matches!(ev_err("[for(i=[0:3])i]"), Error::Unimplemented(m) if m.contains("I.3")));
     assert!(matches!(ev_err("[each [1]]"), Error::Unimplemented(m) if m.contains("I.3")));
+}
+
+#[test]
+fn function_values() {
+    // `function(params) body` evaluates to a first-class Function value (a closure).
+    assert!(matches!(ev("function(x) x"), Value::Function { .. }));
+    assert_eq!(ev("function() 1").type_name(), "function");
+    assert_eq!(ev("(function() 1) ? 10 : 20"), num(10.0)); // a function value is truthy
+    // immediately-invoked: `(expr)(args)` — the dynamic-callee path.
+    assert_eq!(ev("(function(x) x + 1)(41)"), num(42.0));
+    assert_eq!(ev("(function(x, y) x * y)(6, 7)"), num(42.0));
+    assert_eq!(ev("(function(x, y = 10) x + y)(5)"), num(15.0)); // defaults work for closures too
+    assert_eq!(ev("(function(x) x)()"), Value::Undef); // unfilled param → undef
 }
 
 #[test]

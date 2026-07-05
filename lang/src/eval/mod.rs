@@ -22,17 +22,22 @@ pub use fragments::fragments;
 pub use scope::Scope;
 pub use value::{RANGE_MAX, RangeIter, Value, range_iter, range_len};
 
+use std::cell::RefCell;
 use std::collections::BTreeMap;
 
 use crate::Mesh;
 use crate::parser::{Arg, BinOp, Expr, ExprKind, Parameter, Program, Stmt, StmtKind, UnOp};
 
-/// The evaluation context: the user-function store, borrowed from the `Program`. Functions live in
-/// their OWN namespace (separate from variables), so a call resolves by name here — which is why
-/// recursion and mutual recursion work regardless of scope. Built once per program (`build_ctx`).
+/// The evaluation context, borrowed from the `Program`:
+/// - `functions`: the user-function store (name → params + body). Functions live in their OWN
+///   namespace (separate from variables), so a call resolves by name — which is why recursion and
+///   mutual recursion work regardless of scope. Built once per program (`build_ctx`).
+/// - `closures`: function-literal VALUES registered as they evaluate (indexed by [`Value::Function`]'s
+///   `closure_id`). `&'a` AST refs, so a [`Value`] holding a `closure_id` stays `'static`.
 #[derive(Default)]
 pub(super) struct Ctx<'a> {
     functions: BTreeMap<&'a str, (&'a [Parameter], &'a Expr)>,
+    closures: RefCell<Vec<(&'a [Parameter], &'a Expr)>>,
 }
 
 /// One step on the evaluator's explicit work-stack. Each `Eval` carries the [`Scope`] it evaluates
@@ -65,6 +70,10 @@ enum Task<'a> {
         body: &'a Expr,
         base: Scope,
     },
+    /// Pop an evaluated CALLEE; if it's a [`Value::Function`], invoke it (its body evaluates in the
+    /// captured env). Anything else → `undef` (calling a non-function). The dynamic-callee path:
+    /// `(expr)(args)`, or a variable holding a closure.
+    CallValue { args: &'a [Arg], caller: Scope },
     /// Push an `undef` — the value of an unfilled, defaultless parameter slot.
     PushUndef,
 }
@@ -136,6 +145,16 @@ pub(super) fn eval_with_ctx<'a>(
                 }
                 tasks.push(Task::Eval(body, call));
             }
+            Task::CallValue { args, caller } => {
+                match values.pop().unwrap_or(Value::Undef) {
+                    Value::Function { closure_id, env } => {
+                        let (params, body) = ctx.closures.borrow()[closure_id];
+                        // a closure's body is lexically scoped to its captured env, not the caller's.
+                        push_call(params, body, args, &caller, &env, &mut tasks);
+                    }
+                    _ => values.push(Value::Undef), // calling a non-function → undef
+                }
+            }
             Task::PushUndef => values.push(Value::Undef),
         }
     }
@@ -182,17 +201,25 @@ fn eval_node<'a>(
             }
         }
         ExprKind::Call { callee, args } => {
-            let ExprKind::Ident(name) = &callee.kind else {
-                return Err(crate::Error::Unimplemented(
-                    "calling a function VALUE is not yet implemented (I.2.3.3)",
-                ));
-            };
-            let Some(&(params, body)) = ctx.functions.get(name.as_str()) else {
-                return Err(crate::Error::Unimplemented(
-                    "call to a builtin or unknown function is not yet implemented (I.4)",
-                ));
-            };
-            push_call(params, body, args, scope, global, tasks);
+            if let ExprKind::Ident(name) = &callee.kind {
+                // a named user function (its own namespace) resolves first.
+                if let Some(&(params, body)) = ctx.functions.get(name.as_str()) {
+                    push_call(params, body, args, scope, global, tasks);
+                    return Ok(());
+                }
+                // an UNBOUND identifier callee is a builtin (or genuinely unknown) → LOUD (I.4).
+                if matches!(scope.lookup(name), Value::Undef) {
+                    return Err(crate::Error::Unimplemented(
+                        "call to a builtin or unknown function is not yet implemented (I.4)",
+                    ));
+                }
+            }
+            // otherwise the callee is a value — evaluate it, then apply (a closure in a var, `(e)(a)`).
+            tasks.push(Task::CallValue {
+                args,
+                caller: scope.clone(),
+            });
+            tasks.push(Task::Eval(callee, scope.clone()));
         }
         ExprKind::Index { base, index } => {
             tasks.push(Task::Index);
@@ -215,9 +242,22 @@ fn eval_node<'a>(
             }
             tasks.push(Task::Eval(start, scope.clone()));
         }
-        ExprKind::FunctionLiteral { .. } | ExprKind::Let { .. } => {
+        ExprKind::FunctionLiteral { params, body } => {
+            // register the literal's &'a params + body in the closure table; the VALUE holds just the
+            // index + the captured env, so it stays 'static.
+            let closure_id = {
+                let mut closures = ctx.closures.borrow_mut();
+                closures.push((params.as_slice(), body.as_ref()));
+                closures.len() - 1
+            };
+            values.push(Value::Function {
+                closure_id,
+                env: scope.clone(),
+            });
+        }
+        ExprKind::Let { .. } => {
             return Err(crate::Error::Unimplemented(
-                "function-literal / let expressions are not yet implemented (I.2)",
+                "let expressions are not yet implemented (I.3)",
             ));
         }
         ExprKind::Assert { .. } | ExprKind::Echo { .. } => {
@@ -237,18 +277,20 @@ fn eval_node<'a>(
     Ok(())
 }
 
-/// Push the tasks for a user-function call: one value-source per parameter — an arg expr (in the
-/// CALLER scope), a default (in the lexical `global` scope), or `undef` — then an [`Task::Apply`] that
-/// binds them and evaluates the body. OpenSCAD arg-matching: positional args fill params left-to-right,
-/// named args fill by name (extra/unknown args are dropped). Two documented first-cut simplifications:
-/// `$`-arg injection is I.2.2, and defaults evaluate in the definition scope, not the partially-bound
-/// call scope (so a default can't reference an earlier param — rare; defaults are usually constants).
+/// Push the tasks for a function call (a named user function OR a closure): one value-source per
+/// parameter — an arg expr (in the CALLER scope), a default (in the lexical `base` scope), or `undef` —
+/// then an [`Task::Apply`] that binds them and evaluates the body. `base` is the lexical base of the
+/// body: the top-level `global` for a named function, the captured `env` for a closure. OpenSCAD
+/// arg-matching: positional args fill params left-to-right, named args fill by name (extra/unknown args
+/// are dropped). Two documented first-cut simplifications: `$`-arg injection is I.2.2, and defaults
+/// evaluate in the definition scope, not the partially-bound call scope (so a default can't reference
+/// an earlier param — rare; defaults are usually constants).
 fn push_call<'a>(
     params: &'a [Parameter],
     body: &'a Expr,
     args: &'a [Arg],
     caller: &Scope,
-    global: &Scope,
+    base: &Scope,
     tasks: &mut Vec<Task<'a>>,
 ) {
     let mut slots: Vec<Option<(&'a Expr, Scope)>> = vec![None; params.len()];
@@ -272,13 +314,13 @@ fn push_call<'a>(
     }
     for (slot, param) in slots.iter_mut().zip(params) {
         if let (None, Some(default)) = (&slot, &param.default) {
-            *slot = Some((default, global.clone()));
+            *slot = Some((default, base.clone()));
         }
     }
     tasks.push(Task::Apply {
         params,
         body,
-        base: global.clone(),
+        base: base.clone(),
     });
     // reversed so param 0 evaluates first (its value lands at the bottom of the popped run).
     for slot in slots.into_iter().rev() {
@@ -349,7 +391,10 @@ fn build_ctx(program: &Program) -> Ctx<'_> {
             functions.insert(name.as_str(), (params.as_slice(), body));
         }
     }
-    Ctx { functions }
+    Ctx {
+        functions,
+        closures: RefCell::default(),
+    }
 }
 
 /// Statement recursion is bounded by the parser's `MAX_DEPTH`, so host recursion here can't overflow
@@ -473,6 +518,29 @@ mod tests {
                       function odd(n) = n == 0 ? false : even(n - 1); \
                       y = even(10);";
         assert_eq!(eval_last(mutual), Value::Bool(true));
+    }
+
+    #[test]
+    fn closures_capture_their_env_and_are_higher_order() {
+        // a closure CAPTURES the scope at its definition (k = 100 is closed over).
+        assert_eq!(
+            eval_last("k = 100; g = function(x) x + k; y = g(1);"),
+            Value::Num(101.0)
+        );
+        // a closure bound to a variable is called through the variable (the CallValue path).
+        assert_eq!(
+            eval_last("g = function(x) x * 2; y = g(21);"),
+            Value::Num(42.0)
+        );
+        // higher-order: pass a closure as an argument, call it inside.
+        assert_eq!(
+            eval_last(
+                "function apply(f, x) = f(x); double = function(n) n * 2; y = apply(double, 7);"
+            ),
+            Value::Num(14.0)
+        );
+        // calling a NON-function value → undef (not an error).
+        assert_eq!(eval_last("g = 5; y = g(1);"), Value::Undef);
     }
 
     #[test]

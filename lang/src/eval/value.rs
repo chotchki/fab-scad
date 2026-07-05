@@ -11,6 +11,8 @@
 
 use std::rc::Rc;
 
+use super::scope::Scope;
+
 /// A scad-rs runtime value.
 #[derive(Debug, Clone)]
 pub enum Value {
@@ -35,6 +37,16 @@ pub enum Value {
         step: f64,
         /// The INCLUSIVE upper (or lower, if descending) bound.
         end: f64,
+    },
+    /// A function-literal VALUE (closure): its params + body live in the eval `Ctx`'s closure table
+    /// (indexed by `closure_id`, `&'prog` AST refs — so `Value` stays `'static`), and `env` is the
+    /// scope captured at definition (an `Rc<Frame>` clone). Calling it reuses the I.2.3.2 machinery
+    /// with `base = env`. `FunctionType` in OpenSCAD.
+    Function {
+        /// Index into the `Ctx` closure table (this eval's lifetime).
+        closure_id: usize,
+        /// The lexical environment captured when the literal was evaluated.
+        env: Scope,
     },
 }
 
@@ -68,7 +80,7 @@ impl Value {
             Value::Str(s) => !s.is_empty(),
             Value::NumList(xs) => !xs.is_empty(),
             Value::List(xs) => !xs.is_empty(),
-            Value::Range { .. } => true, // a range is always truthy (Value.cc `toBool`)
+            Value::Range { .. } | Value::Function { .. } => true, // ranges + functions are truthy
         }
     }
 
@@ -82,6 +94,7 @@ impl Value {
             Value::Str(_) => "string",
             Value::NumList(_) | Value::List(_) => "list",
             Value::Range { .. } => "range",
+            Value::Function { .. } => "function",
         }
     }
 }

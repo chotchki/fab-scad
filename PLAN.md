@@ -9,40 +9,6 @@ dead. Cardinal rule unchanged: nothing deleted before it's archived AND validate
 Driven by `claude-plan-bridge` (FORMATv2). Hand-authored; run
 `claude-plan-bridge baseline` after a rewrite to resync the state file.
 -->
-## Phase H - scad-rs: the whole grammar
-- [ ] H.1 - Grammar inventory: bison file → conformance checklist doc (every production accounted for)
-  - [x] H.1.1 - grammar-inventory.md: every parser.y production + lexer.l rule → {AST node, parser fn, status, conformance anchor}; the matrix H.5's suite derives from
-  - [x] H.1.2 - Lexer completeness audit vs lexer.l: confirm hex/float/escapes/unicode/$-idents/digit-idents/EOT/operators all covered; document the DELIBERATE divergences (comments preserved, zero file-IO in the lexer)
-- [ ] H.2 - Statements/items (parse-only): module def, function def, if/else, use/include → AST — the 4 genuinely-new constructs; for/intersection_for/let/each/assert/echo ALREADY parse as module calls (their semantics are I.2/I.3)
-  - [x] H.2.1 - Parameter type + params-list parser (id | id=default, trailing comma) — shared by module def, function def, and the function-literal expr
-  - [x] H.2.2 - Module def: `module id(params) statement` → StmtKind::ModuleDef (body is one statement, usually a block)
-  - [x] H.2.3 - Function def: `function id(params) = expr;` → StmtKind::FunctionDef
-  - [x] H.2.4 - if/else in the module_instantiation path: dangling-else (%prec NO_ELSE), else-if chains, works in child position for free (translate() if(x) cube();)
-  - [x] H.2.5 - use/include → AST nodes (parse-only, zero-IO); resolution/splice is I.2's loader; the evaluator stays LOUD-deferred on these nodes until then
-  - [x] H.2.6 - Conformance nicety: child_statements ⊂ inner_input (module/function DEFS illegal inside a module-call child block) — tighten block() or consciously defer
-- [ ] H.3 - Expressions complete: list comprehensions (every form), ranges, function literals, ternary, string escapes/unicode
-  - [x] H.3.1 - Extend the non-recursive Drop + MAX_DEPTH guards for every new recursive node (the Safari-cliff discipline — do the pattern once, here)
-  - [x] H.3.2 - List-comprehension elements: LcFor, LcForC (C-style for(init;cond;next)), LcEach, LcLet, LcIf/else, parenthesized _p, arbitrary nesting
-  - [x] H.3.3 - Function-literal expr: `function(params) expr` → ExprKind::FunctionLiteral
-  - [x] H.3.4 - let-expression: `let(args) expr` → ExprKind::Let
-  - [x] H.3.5 - assert/echo expressions with OPTIONAL trailing expr (expr_or_empty): assert(args) expr?, echo(args) expr?
-  - [x] H.3.6 - Ranges + string-escape/unicode: audit + pin with tests (already implemented in G.3.3 + the lexer — confirm, don't rebuild)
-- [ ] H.4 - Customizer annotations survive: parameter comments/groups/ranges in the AST (lossless-enough)
-  - [x] H.4.1 - Customizer annotation model: group / description / widget-constraint (range, step, dropdown k:v, string maxlen) types in the AST
-  - [x] H.4.2 - Trivia-association pass: walk Lexed::all, bind trailing line-comment + active group header to each top-level assignment (top-of-file scope, per OpenSCAD)
-  - [x] H.4.3 - Constraint mini-grammar parser: [min:max], [min:step:max], [v,…], [k:label,…], [maxlen]; group headers incl. [Hidden]/[Global]
-  - [x] H.4.4 - Customizer lossless-enough roundtrip test: annotations survive parse → (edit a value) → emit
-- [ ] H.5 - proptest print/parse roundtrip + the bison-derived conformance suite green
-  - [x] H.5.1 - Pretty-printer: AST → canonical OpenSCAD source (Display over the whole AST) — the missing prerequisite for the roundtrip property
-  - [x] H.5.2 - proptest strategy over the AST + print→parse→assert-equal property (structural eq modulo spans)
-  - [x] H.5.3 - Bison-derived conformance suite: one+ example per production from grammar-inventory.md, all green — fills the doc's H.5.3 anchor holes
-  - [ ] H.5.4 - cargo-mutants gate on the parser (backlog #37) — prove the tests CATCH bugs, kill survivors
-- [ ] H.6 - cargo-fuzz target + SCHEDULED CI fuzz job + persisted/minimized corpus + trophy log (fuzz-from-first-commit doctrine starts here, not later)
-
-  - [x] H.6.1 - cargo-fuzz target: parse(arbitrary bytes) never panics/hangs/OOMs — wire the fuzz crate + the parse harness
-  - [x] H.6.2 - Fuzz seed corpus: extend the lexer seed set to the parser + a structure-aware corpus from H.5's generator
-  - [x] H.6.3 - Scheduled CI fuzz job + persisted/minimized corpus artifact (the fuzz-from-first-commit doctrine)
-  - [x] H.6.4 - TROPHIES.md doctrine: every fuzz-found bug logged + regression-pinned as a test
 ## Phase I - scad-rs: evaluator core
   Meta - Cranelift is the NATIVE JIT rung (chotchki's find: VERY approachable, and it's determinism-friendly — no auto-FMA, transcendentals stay CALLS to our own math, so the fixed-accumulation doctrine survives). NOT a replacement for the interpreter: the wasm/browser target can't JIT in-sandbox (the bet's #1 differentiator needs ONE implementation everywhere), and the interpreter is the bit-identical baseline the JIT validates against (fast==slow extends to fast==JIT). Spiked at I.8 (one hot function, prove bit-identical); the JIT-vs-intrinsics PROMOTE decision lands at Phase L with data.
 - [ ] I.1 - Value model full: enum + NumList fast path + interned strings + lazy ranges; fast==slow BITWISE property via the shared fixed 4-lane accumulation order

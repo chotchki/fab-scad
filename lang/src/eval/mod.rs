@@ -10,6 +10,7 @@
 //! heterogeneous/nested vectors fail LOUD ([`Error::Unimplemented`](crate::Error::Unimplemented)) —
 //! I.1/I.4. Arithmetic/undef semantics are bug-for-bug OpenSCAD (`ops`).
 
+mod builtins;
 mod fragments;
 mod geometry;
 mod module;
@@ -76,6 +77,8 @@ enum Task<'a> {
     /// captured env). Anything else → `undef` (calling a non-function). The dynamic-callee path:
     /// `(expr)(args)`, or a variable holding a closure.
     CallValue { args: &'a [Arg], caller: Scope },
+    /// Pop the builtin's argument values, split into positional/named, and apply the builtin `name`.
+    Builtin { name: &'a str, args: &'a [Arg] },
     /// Pop the just-evaluated binding value, bind it as `name` in a child of `scope`, then either
     /// evaluate the next `let` binding in that scope or (no bindings left) evaluate `body`. `let`
     /// bindings are SEQUENTIAL — a later one sees the earlier ones.
@@ -219,6 +222,7 @@ fn eval_with_global<'a>(
                     None => tasks.push(Task::Eval(body, inner)),
                 }
             }
+            Task::Builtin { name, args } => run_builtin(name, args, &mut values),
             Task::PushUndef => values.push(Value::Undef),
         }
     }
@@ -329,6 +333,22 @@ fn eval_node<'a>(
     Ok(())
 }
 
+/// Pop a builtin call's argument values, split them into positional/named, and push the builtin result.
+fn run_builtin(name: &str, args: &[Arg], values: &mut Vec<Value>) {
+    let vals = values.split_off(values.len().saturating_sub(args.len()));
+    let mut positional = Vec::new();
+    let mut named = BTreeMap::new();
+    for (arg, value) in args.iter().zip(vals) {
+        match &arg.name {
+            Some(n) => {
+                named.insert(n.clone(), value);
+            }
+            None => positional.push(value),
+        }
+    }
+    values.push(builtins::apply(name, &positional, &named));
+}
+
 /// Dispatch a call `callee(args)`: a NAMED user function (own namespace) resolves first; an UNBOUND
 /// identifier callee is a builtin or genuinely unknown → LOUD (I.4); otherwise the callee is a value —
 /// evaluate it and apply it (a closure in a variable, or `(expr)(args)`).
@@ -341,13 +361,23 @@ fn dispatch_call<'a>(
     tasks: &mut Vec<Task<'a>>,
 ) -> crate::Result<()> {
     if let ExprKind::Ident(name) = &callee.kind {
+        // resolution order (OpenSCAD): a user function may shadow a builtin.
         if let Some(&(params, body)) = ctx.functions.get(name.as_str()) {
             push_call(params, body, args, scope, global, tasks);
             return Ok(());
         }
+        if builtins::is_builtin(name) {
+            tasks.push(Task::Builtin { name, args });
+            for arg in args.iter().rev() {
+                tasks.push(Task::Eval(&arg.value, scope.clone()));
+            }
+            return Ok(());
+        }
         if matches!(scope.lookup(name), Value::Undef) {
+            // not a user fn, not a builtin, not a bound function-value → an unimplemented builtin or a
+            // typo. LOUD for now (catches missing builtins); OpenSCAD's warn-and-undef is I.5.
             return Err(crate::Error::Unimplemented(
-                "call to a builtin or unknown function is not yet implemented (I.4)",
+                "call to an unimplemented builtin or unknown function (I.4)",
             ));
         }
     }

@@ -156,9 +156,9 @@ fn beyond_the_subset_is_loud() {
         Error::Unimplemented(_)
     )); // transform
     assert!(matches!(
-        err("v = 1; sphere(sin(v));"),
+        err("v = 1; sphere(bogus_fn(v));"),
         Error::Unimplemented(_)
-    )); // function call in arg
+    )); // an UNKNOWN function in an arg (builtin/known-function calls in args now work — I.4)
 }
 
 #[test]

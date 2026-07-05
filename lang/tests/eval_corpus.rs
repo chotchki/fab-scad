@@ -38,6 +38,13 @@ fn num(n: f64) -> Value {
 fn list(xs: &[f64]) -> Value {
     Value::num_list(xs.to_vec())
 }
+/// Assert a value is a number within 1e-9 of `expected` (for transcendental builtins).
+fn approx(v: Value, expected: f64) {
+    match v {
+        Value::Num(n) => assert!((n - expected).abs() < 1e-9, "{n} != {expected}"),
+        other => panic!("expected a number, got {other:?}"),
+    }
+}
 
 // ─────────────────────────────── numeric arithmetic ────────────────────────────────────────────
 
@@ -273,6 +280,53 @@ fn list_comprehensions() {
         ev("[for(i = 0; i < 2; i = i + 1, k = i) i]"),
         list(&[0.0, 1.0])
     ); // C-style update adds a new var
+}
+
+#[test]
+fn math_builtins() {
+    // exact (algebraic) results
+    assert_eq!(ev("abs(-5)"), num(5.0));
+    assert_eq!(ev("sign(-3)"), num(-1.0));
+    assert_eq!(ev("sign(0)"), num(0.0));
+    assert_eq!(ev("sign(3)"), num(1.0));
+    assert_eq!(ev("floor(2.7)"), num(2.0));
+    assert_eq!(ev("ceil(2.1)"), num(3.0));
+    assert_eq!(ev("round(2.5)"), num(3.0));
+    assert_eq!(ev("round(-2.5)"), num(-3.0)); // half AWAY from zero
+    assert_eq!(ev("sqrt(16)"), num(4.0));
+    assert_eq!(ev("pow(2, 10)"), num(1024.0));
+    assert_eq!(ev("exp(0)"), num(1.0));
+    assert_eq!(ev("ln(1)"), num(0.0));
+    assert_eq!(ev("log(100)"), num(2.0)); // base 10
+    assert_eq!(ev("min(3, 1, 2)"), num(1.0)); // several args
+    assert_eq!(ev("min(7)"), num(7.0)); // single number
+    assert_eq!(ev("max([1, 5, 2])"), num(5.0)); // a list arg
+    assert_eq!(ev("norm([3, 4])"), num(5.0));
+    assert_eq!(ev("cross([1, 0, 0], [0, 1, 0])"), list(&[0.0, 0.0, 1.0]));
+    assert_eq!(ev("cross([1, 0], [0, 1])"), num(1.0)); // 2D cross → scalar
+    // trig in DEGREES — exact at the quadrants (trig.rs), approx elsewhere
+    assert_eq!(ev("sin(90)"), num(1.0));
+    assert_eq!(ev("cos(0)"), num(1.0));
+    assert_eq!(ev("cos(90)"), num(0.0));
+    approx(ev("sin(30)"), 0.5);
+    approx(ev("tan(45)"), 1.0);
+    approx(ev("asin(1)"), 90.0);
+    approx(ev("acos(0)"), 90.0);
+    approx(ev("atan(1)"), 45.0);
+    approx(ev("atan2(1, 1)"), 45.0);
+    // undef propagation: non-number / missing / empty / wrong-shape
+    assert_eq!(ev(r#"sqrt("a")"#), Value::Undef);
+    assert_eq!(ev("abs()"), Value::Undef); // no args
+    assert_eq!(ev("pow(2)"), Value::Undef); // missing 2nd arg
+    assert_eq!(ev("min()"), Value::Undef); // no numbers
+    assert_eq!(ev("norm(5)"), Value::Undef); // not a vector
+    assert_eq!(ev("cross([1], [2])"), Value::Undef); // wrong-dimension cross
+    assert_eq!(ev("cross(1, 2)"), Value::Undef); // non-vector cross
+    assert_eq!(ev(r#"min(1, "a")"#), Value::Undef); // a non-number among several args
+    assert_eq!(ev("abs(x = -5)"), Value::Undef); // math builtins take positional args (named → undef)
+    // a user function may SHADOW a builtin (resolution order).
+    // (unimplemented/unknown functions stay LOUD until I.5's warn-and-undef.)
+    assert!(matches!(ev_err("nope_fn(1)"), Error::Unimplemented(m) if m.contains("I.4")));
 }
 
 #[test]

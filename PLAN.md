@@ -9,19 +9,6 @@ dead. Cardinal rule unchanged: nothing deleted before it's archived AND validate
 Driven by `claude-plan-bridge` (FORMATv2). Hand-authored; run
 `claude-plan-bridge baseline` after a rewrite to resync the state file.
 -->
-## Phase G - scad-rs bootstrap: pivot + spec + tracer bullet
-- [x] G.1 - Relicense + pivot mechanics: GPL-2.0-or-later (OpenSCAD's EXACT license, chosen for zero-friction upstreaming) across LICENSE + 4 crate manifests + README/NOTICE/web-bundle docs; SPEC.md → SPEC_workflow.md; PLAN restructured — all non-G work backlogged with provenance, phases 5/6/17/18/C archived
-- [x] G.2 - SPEC.md rounds 1-2 (drafted WITH chotchki): mission + license stance, architecture, BOSL2 rungs, determinism doctrine, testing/verification layers — all open questions resolved or scheduled (winnow, enum values, Kani-low-level, semantics/ segmented, lang/ sibling, tracing full-trace)
-- [ ] G.3 - Tracer bullet: sphere-vs-oracle end to end, metric gate chosen from data
-  - [x] G.3.1 - lang/ crate scaffold: workspace sibling, error type, tracing dep (compiled-out default), clippy-pedantic baseline, CI lane (fmt/clippy/test)
-  - [x] G.3.2 - winnow lexer: tokens, numbers/strings/identifiers, comments PRESERVED (customizer needs them later); every named parser wrapped in winnow trace() from day one (debug-feature-gated, zero cost off); lexer fuzz seed corpus started
-  - [x] G.3.3 - parser core: expression precedence, module instantiation, argument lists incl. $-args; AST with source spans (LocatingSlice + .with_span()); winnow-native errors from production one — StrContext label+expected everywhere, cut_err at commit points, caret rendering from the context stack
-  - [x] G.3.4 - evaluator skeleton: explicit-stack machine over the subset; Value v0 (Num/Bool/Str/NumList/Undef); $fn/$fa/$fs resolution
-  - [x] G.3.5 - lower sphere()/cube()/cylinder() to kernel::Solid — tessellation EXACTLY matching src/core primitives (ring/segment math ported, provenance noted)
-  - [ ] G.3.6 - oracle runner: drive the openscad CLI, capture mesh + echo; VERIFY the deterministic-output flag (spec Q7) — what it sorts, what it doesn't
-  - [ ] G.3.7 - metric experiment: implement the comparison tiers (quantized vertex-multiset, vol/area/Euler, boolean residual); sphere $fn=8→256 matrix; DOCUMENT the gate per model class back into SPEC.md
-  - [ ] G.3.8 - first semantics/ tests land (provenance-annotated from G.3.5's port)
-
 ## Phase H - scad-rs: the whole grammar
 - [ ] H.1 - Grammar inventory: bison file → conformance checklist doc (every production accounted for)
 - [ ] H.2 - Statements/items: assignments, module defs, function defs, use/include resolution, if/else, for/intersection_for, let/each, assert/echo

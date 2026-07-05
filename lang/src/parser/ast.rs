@@ -4,11 +4,11 @@
 //! content-addressed cache, and threads freely. Every node carries a byte [`Span`] into the
 //! original source (from winnow's `.with_span()`), so diagnostics and the customizer can point back.
 //!
-//! Scope is the G.3.3 tracer bullet: the full expression grammar + module instantiation +
-//! assignment. Constructs beyond that (module/function defs, if/else, `use`, the function-literal /
-//! `let` / `assert` / `echo` EXPRESSION forms, list comprehensions) are parsed to a LOUD
-//! [`Error::Unimplemented`](crate::Error::Unimplemented), never silently dropped — they land in
-//! H.2/H.3. Conformance reference: OpenSCAD `src/core/parser.y`.
+//! Phase H completes the grammar: module/function defs, if/else, use/include, the function-literal
+//! / `let` / `assert` / `echo` EXPRESSION forms, and list comprehensions. Anything not yet parsed
+//! fails LOUD ([`Error::Unimplemented`](crate::Error::Unimplemented)) rather than silently dropping.
+//! Conformance reference: OpenSCAD `src/core/parser.y`; the live production ledger (what's parsed vs
+//! deferred) is `lang/docs/grammar-inventory.md`.
 
 use core::ops::Range;
 
@@ -47,6 +47,56 @@ pub enum StmtKind {
     Module(ModuleInstantiation),
     /// A `{ … }` block of statements (parser.y:187 / `inner_input`).
     Block(Vec<Stmt>),
+    /// `module name(params) body` (parser.y:193). The body is a single statement (usually a block).
+    ModuleDef {
+        /// The module name.
+        name: String,
+        /// The formal parameters (positional order; each may carry a default).
+        params: Vec<Parameter>,
+        /// The body — one statement.
+        body: Box<Stmt>,
+    },
+    /// `function name(params) = body;` (parser.y:207).
+    FunctionDef {
+        /// The function name.
+        name: String,
+        /// The formal parameters (positional order; each may carry a default).
+        params: Vec<Parameter>,
+        /// The body expression.
+        body: Expr,
+    },
+    /// `use <path>` (parser.y:176 / lexer.l:153). Imports the file's modules + functions (NOT its
+    /// variables). Parse-only here: the raw path is captured; RESOLUTION is I.2's loader. `use` is
+    /// top-level-only in OpenSCAD — we accept it as a statement anywhere (a benign widening).
+    Use(String),
+    /// `include <path>` (lexer.l:139). OpenSCAD splices the file textually in the LEXER; we emit a
+    /// node carrying the raw path and splice in I.2's loader (parse stays zero-IO).
+    Include(String),
+    /// `if (cond) then [else els]` (parser.y:271-298). Grammatically an `ifelse_statement`, itself a
+    /// `module_instantiation` — so `if` is legal wherever a module call is (top level OR a child).
+    /// `then`/`els` are child-statement lists (0/1/many, like module children); an empty `els` means
+    /// no `else`. `else if` chains fall out naturally: `els` is `[If { … }]`.
+    If {
+        /// The condition expression.
+        cond: Expr,
+        /// The then-branch children.
+        then: Vec<Stmt>,
+        /// The else-branch children (empty ⇒ no `else`).
+        els: Vec<Stmt>,
+    },
+}
+
+/// A module/function formal parameter: `id` or `id = default` (parser.y:666-677). Shared by module
+/// defs, function defs, and function-literal expressions. A `$`-prefixed name is a special-variable
+/// parameter (dynamic-scope injection, e.g. `module m($fn = 8)`), so the name may begin with `$`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Parameter {
+    /// The parameter name (may begin with `$`).
+    pub name: String,
+    /// The default-value expression, present iff the `id = expr` form was used.
+    pub default: Option<Expr>,
+    /// Byte span of the whole parameter.
+    pub span: Span,
 }
 
 /// A module instantiation: `mods name(args) child` (parser.y:234-332).

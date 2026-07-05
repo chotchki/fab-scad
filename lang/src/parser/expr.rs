@@ -10,7 +10,7 @@
 use winnow::error::ModalResult;
 use winnow::stream::Location;
 
-use super::ast::{Arg, BinOp, Expr, ExprKind, UnOp};
+use super::ast::{Arg, BinOp, Expr, ExprKind, Parameter, UnOp};
 use super::{MAX_DEPTH, Tokens, bail, bump, expect, peek_kind, peek_kind2};
 use crate::lexer::{TokenKind, decode_str, num_value};
 
@@ -318,6 +318,49 @@ pub(crate) fn arg_list(i: &mut Tokens<'_, '_>, depth: usize) -> ModalResult<Vec<
         }
     }
     Ok(args)
+}
+
+/// A parameter list (module/function defs, function literals), optional trailing comma, possibly
+/// empty (parser.y:645-664). Mirrors [`arg_list`], but each element is a `name`/`name = default`
+/// [`Parameter`], not an [`Arg`]. The caller has consumed the opening `(`; this stops at the `)`.
+pub(crate) fn param_list(i: &mut Tokens<'_, '_>, depth: usize) -> ModalResult<Vec<Parameter>> {
+    let mut params = Vec::new();
+    if peek_kind(i) == Some(TokenKind::RParen) {
+        return Ok(params); // empty ()
+    }
+    loop {
+        params.push(parameter(i, depth)?);
+        if peek_kind(i) != Some(TokenKind::Comma) {
+            break;
+        }
+        bump(i)?; // ','
+        if peek_kind(i) == Some(TokenKind::RParen) {
+            break; // trailing comma
+        }
+    }
+    Ok(params)
+}
+
+/// One parameter: `id` or `id = default` (parser.y:666-677). A `$`-prefixed name is a
+/// special-variable parameter, so both plain and `$`-idents are accepted.
+fn parameter(i: &mut Tokens<'_, '_>, depth: usize) -> ModalResult<Parameter> {
+    let start = i.current_token_start();
+    let name = match peek_kind(i) {
+        Some(TokenKind::Ident(n) | TokenKind::DollarIdent(n)) => n.to_string(),
+        _ => return bail(i, "a parameter name"),
+    };
+    bump(i)?; // the name
+    let default = if peek_kind(i) == Some(TokenKind::Eq) {
+        bump(i)?; // '='
+        Some(expr(i, depth + 1)?)
+    } else {
+        None
+    };
+    Ok(Parameter {
+        name,
+        default,
+        span: start..i.previous_token_end(),
+    })
 }
 
 /// One argument: `name = expr` (named, incl. `$fn = 8`) or a bare `expr` (positional) (parser.y:700-710).

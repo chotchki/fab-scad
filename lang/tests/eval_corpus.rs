@@ -12,7 +12,7 @@
     reason = "integration-test helpers: unwrap/expect/panic ARE the assertions; exact float asserts are deterministic values"
 )]
 
-use fab_lang::{Error, Scope, StmtKind, Value, eval_expr, fragments, parse};
+use fab_lang::{Error, Scope, StmtKind, Value, eval_expr, eval_program, fragments, parse};
 
 /// Evaluate a bare expression with a default scope.
 fn ev(src: &str) -> Value {
@@ -155,6 +155,26 @@ fn deferred_constructs_are_loud() {
     assert!(matches!(ev_err("a.b"), Error::Unimplemented(m) if m.contains("I.1")));
     assert!(matches!(ev_err("[0:5]"), Error::Unimplemented(m) if m.contains("I.1")));
     assert!(matches!(ev_err("[1,true]"), Error::Unimplemented(m) if m.contains("I.1"))); // heterogeneous
+}
+
+#[test]
+fn program_level_defers_are_loud() {
+    // These constructs parse (H.2) but eval defers to a later phase (the tag says which): defs → the
+    // I.2 loader/scope engine, if/else → I.3 control flow.
+    for (src, phase) in [
+        ("module m() cube(1);", "I.2"),
+        ("function f() = 1;", "I.2"),
+        ("if (true) cube(1);", "I.3"),
+        ("use <lib.scad>", "I.2"),
+        ("include <lib.scad>", "I.2"),
+    ] {
+        let prog = parse(src).expect("parses");
+        let err = eval_program(&prog, &Scope::new()).unwrap_err();
+        assert!(
+            matches!(&err, Error::Unimplemented(m) if m.contains(phase)),
+            "expected Unimplemented({phase}) for {src:?}, got {err:?}"
+        );
+    }
 }
 
 // ─────────────────────────────── the explicit stack ────────────────────────────────────────────

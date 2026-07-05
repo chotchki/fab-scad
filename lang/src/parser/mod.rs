@@ -15,7 +15,8 @@ mod expr;
 mod stmt;
 
 pub use ast::{
-    Arg, BinOp, Expr, ExprKind, Modifiers, ModuleInstantiation, Program, Span, Stmt, StmtKind, UnOp,
+    Arg, BinOp, Expr, ExprKind, Modifiers, ModuleInstantiation, Parameter, Program, Span, Stmt,
+    StmtKind, UnOp,
 };
 
 use winnow::Parser;

@@ -45,8 +45,8 @@ pub use eval::{Scope, Value, eval_expr, eval_program, fragments};
 pub use lexer::{Lexed, Token, TokenKind, decode_str, lex, num_value};
 pub use mesh::Mesh;
 pub use parser::{
-    Arg, BinOp, Expr, ExprKind, Modifiers, ModuleInstantiation, Program, Span, Stmt, StmtKind,
-    UnOp, parse,
+    Arg, BinOp, Expr, ExprKind, Modifiers, ModuleInstantiation, Parameter, Program, Span, Stmt,
+    StmtKind, UnOp, parse,
 };
 
 /// Evaluate OpenSCAD source to a triangle [`Mesh`] — the end-to-end tracer-bullet spine.

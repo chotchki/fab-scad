@@ -183,6 +183,21 @@ fn eval_stmt(stmt: &Stmt, scope: &mut Scope, meshes: &mut Vec<Mesh>) -> crate::R
             }
         }
         StmtKind::Module(mi) => meshes.push(module::eval_module(mi, scope)?),
+        StmtKind::ModuleDef { .. } | StmtKind::FunctionDef { .. } => {
+            return Err(crate::Error::Unimplemented(
+                "user-defined modules and functions are not yet implemented (I.2)",
+            ));
+        }
+        StmtKind::If { .. } => {
+            return Err(crate::Error::Unimplemented(
+                "if/else evaluation is not yet implemented (I.3)",
+            ));
+        }
+        StmtKind::Use(_) | StmtKind::Include(_) => {
+            return Err(crate::Error::Unimplemented(
+                "use/include resolution is not yet implemented (I.2 loader)",
+            ));
+        }
     }
     Ok(())
 }

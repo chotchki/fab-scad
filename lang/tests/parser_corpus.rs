@@ -253,17 +253,164 @@ fn syntax_errors_point_and_name() {
 
 #[test]
 fn deferred_constructs_fail_loud() {
-    assert!(err("module m(){}").contains("H.2"));
-    assert!(err("function f()=1;").contains("H.2"));
-    assert!(err("if(true) a();").contains("H.2"));
-    assert!(err("use <lib.scad>").contains("H.2"));
-    assert!(err("include <lib.scad>").contains("H.2"));
+    // These parse-level bails retire as their H.2/H.3 tasks land; the tag names which. Module +
+    // function DEFS, if/else, and use/include moved to their own positive tests as H.2.1-H.2.5 landed.
     assert!(err("v=function(x)x;").contains("H.2"));
     assert!(err("v=let(a=1)a;").contains("H.2"));
     assert!(err("v=assert(true)1;").contains("H.2"));
     assert!(err("v=echo(1)2;").contains("H.2"));
     assert!(err("v=[for(i=[0:3])i];").contains("H.3")); // list comprehension
     assert!(err("v=[1,each[2,3]];").contains("H.3")); // comprehension mid-vector
+}
+
+#[test]
+fn module_and_function_defs_parse() {
+    // module def: plain param, defaulted param, $-var param; body is a block (inner_input).
+    let p = parse("module box(w, h=1, $fn=8) { cube([w,h,1]); }").expect("parses");
+    let StmtKind::ModuleDef { name, params, body } = &p.stmts[0].kind else {
+        panic!("module def");
+    };
+    assert_eq!(name, "box");
+    assert_eq!(params.len(), 3);
+    assert_eq!(params[0].name, "w");
+    assert!(params[0].default.is_none());
+    assert_eq!(params[1].name, "h");
+    assert!(params[1].default.is_some());
+    assert_eq!(params[2].name, "$fn"); // special-variable parameter
+    assert!(matches!(body.kind, StmtKind::Block(_)));
+
+    // empty params + single-statement (non-block) body.
+    let p = parse("module unit() cube(1);").expect("parses");
+    let StmtKind::ModuleDef { params, body, .. } = &p.stmts[0].kind else {
+        panic!("module def");
+    };
+    assert!(params.is_empty());
+    assert!(matches!(body.kind, StmtKind::Module(_)));
+
+    // trailing comma in the parameter list; `;` (empty) body.
+    let p = parse("module m(a, b,) ;").expect("parses");
+    let StmtKind::ModuleDef { params, .. } = &p.stmts[0].kind else {
+        panic!("module def");
+    };
+    assert_eq!(params.len(), 2);
+
+    // function def: expression body, defaulted param.
+    let p = parse("function sq(x, k=2) = x*x + k;").expect("parses");
+    let StmtKind::FunctionDef { name, params, body } = &p.stmts[0].kind else {
+        panic!("function def");
+    };
+    assert_eq!(name, "sq");
+    assert_eq!(params.len(), 2);
+    assert_eq!(sx(body), "(Add (Mul x x) k)");
+
+    // nested def inside a module body — inner_input admits defs (parser.y:221).
+    let p = parse("module outer() { function inner() = 1; }").expect("parses");
+    let StmtKind::ModuleDef { body, .. } = &p.stmts[0].kind else {
+        panic!("module def");
+    };
+    let StmtKind::Block(stmts) = &body.kind else {
+        panic!("block body");
+    };
+    assert!(matches!(stmts[0].kind, StmtKind::FunctionDef { .. }));
+}
+
+#[test]
+fn defs_are_rejected_inside_child_blocks() {
+    // child_statements ⊂ inner_input (H.2.6): a module/function def inside a module-call or `if`
+    // child block is a parse error — matching parser.y's split grammar.
+    assert!(err("translate() { module m(){} }").contains("child block")); // Module
+    assert!(err("group() { function f() = 1; }").contains("child block")); // Function
+    assert!(err("if (x) { module m(){} }").contains("child block")); // if children are child_statements
+    assert!(err("a() { { function f()=1; } }").contains("child block")); // nested child block too
+    // ...but a def in a TOP-LEVEL block (inner_input) or a module BODY is legal.
+    assert!(parse("{ module m(){} }").is_ok());
+    assert!(parse("module outer() { function inner() = 1; }").is_ok());
+}
+
+#[test]
+fn use_and_include_parse_to_nodes_with_the_raw_path() {
+    let p = parse("use <mcad/gears.scad>\ncube(1);").expect("parses");
+    let StmtKind::Use(path) = &p.stmts[0].kind else {
+        panic!("use node");
+    };
+    assert_eq!(path, "mcad/gears.scad");
+    assert!(matches!(p.stmts[1].kind, StmtKind::Module(_))); // code after the use still parses
+
+    let p = parse("include <util.scad>").expect("parses");
+    let StmtKind::Include(path) = &p.stmts[0].kind else {
+        panic!("include node");
+    };
+    assert_eq!(path, "util.scad");
+}
+
+#[test]
+fn if_else_parses_in_every_position() {
+    // bare if, no else → empty els.
+    let p = parse("if (x) cube(1);").expect("parses");
+    let StmtKind::If { then, els, .. } = &p.stmts[0].kind else {
+        panic!("if");
+    };
+    assert_eq!(then.len(), 1);
+    assert!(els.is_empty());
+
+    // if/else, block branches.
+    let p = parse("if (x > 0) { a(); b(); } else { c(); }").expect("parses");
+    let StmtKind::If { then, els, .. } = &p.stmts[0].kind else {
+        panic!("if");
+    };
+    assert_eq!(then.len(), 2);
+    assert_eq!(els.len(), 1);
+
+    // else-if chain: els is a single nested If (dangling-else binds to the nearest if).
+    let p = parse("if (a) x(); else if (b) y(); else z();").expect("parses");
+    let StmtKind::If { els, .. } = &p.stmts[0].kind else {
+        panic!("if");
+    };
+    assert!(matches!(
+        els.first().map(|s| &s.kind),
+        Some(StmtKind::If { .. })
+    ));
+
+    // if in CHILD position — `if` is a module_instantiation, so this is free.
+    let p = parse("translate([1,0,0]) if (t) cube(1);").expect("parses");
+    let StmtKind::Module(m) = &p.stmts[0].kind else {
+        panic!("module");
+    };
+    assert!(matches!(
+        m.children.first().map(|s| &s.kind),
+        Some(StmtKind::If { .. })
+    ));
+
+    // empty then-branch (`;`).
+    let p = parse("if (x) ;").expect("parses");
+    let StmtKind::If { then, .. } = &p.stmts[0].kind else {
+        panic!("if");
+    };
+    assert!(then.is_empty());
+}
+
+#[test]
+fn if_syntax_errors_and_depth_guard() {
+    assert!(err("if x) a();").contains('(')); // missing '('
+    assert!(err("if (x a();").contains(')')); // missing ')'
+    assert!(err("if () a();").contains("expression")); // empty condition
+    // A pathological else-if chain errors LOUD via the if/else depth guard, never overflows. Empty
+    // (`;`) then-branches keep the recursion purely in the else-chain, so the if/else guard fires
+    // FIRST — a `b()` then-branch would trip the module-call guard at depth before this one.
+    let deep = format!("{};", "if (x) ; else ".repeat(60));
+    assert!(err(&deep).contains("deeply"));
+}
+
+#[test]
+fn def_syntax_errors() {
+    // Every commit point in the def parsers names what it expected.
+    assert!(err("module {}").contains("module name")); // def_name bail (module)
+    assert!(err("module m {}").contains('(')); // missing '(' after the name
+    assert!(err("module m(a {}").contains(')')); // missing ')' of the param list
+    assert!(err("module m(1){}").contains("parameter name")); // parameter bail (a number)
+    assert!(err("function (x)=1;").contains("function name")); // def_name bail (function)
+    assert!(err("function f(x) 1;").contains('=')); // missing '='
+    assert!(err("function f(x)=1").contains(';')); // missing ';'
 }
 
 // ─────────────────────────────── depth guards (nesting → LOUD, not overflow) ────────────────────
@@ -360,12 +507,15 @@ fn caret_diagnostic_points_at_the_line() {
 fn ast_clones_compares_debugs_and_is_deterministic() {
     // One comprehensive program exercising every variant, then Clone + PartialEq + Debug.
     let src = "\
+        use <mcad.scad>\n include <util.scad>\n\
         a = 1+2*3-4/5%6^7 << 8 >> 9 | 10 & 11 == 12 != 13 < 14 <= 15 > 16 >= 17 && 18 || 19;\n\
         b = -1 + +2 + !x + ~3;\n\
         c = p ? q : r;\n\
         d = [1,2,3]; e = []; f = [0:5]; g = [0:2:10];\n\
         h = arr[0].field(k=1, $fn=2); i = \"s\"; j = undef; k = true; l = false; m = $t;\n\
-        translate([1,0,0]) cube(2); #%*!sphere(); group(){ x(); } echo(\"z\"); ;\n";
+        translate([1,0,0]) cube(2); #%*!sphere(); group(){ x(); } echo(\"z\"); ;\n\
+        module box(w, d=1, $fn=8) { cube([w,d,1]); } function sq(x) = x*x;\n\
+        if ($t > 0) cube(1); else if (n) sphere(); else ;\n";
     let a = parse(src).expect("parses");
     let b = parse(src).expect("parses");
     assert_eq!(a, b); // deterministic + PartialEq over all variants

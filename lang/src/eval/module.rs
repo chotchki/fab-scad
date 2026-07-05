@@ -7,21 +7,24 @@
 
 use std::collections::BTreeMap;
 
-use super::eval_expr;
 use super::fragments::fragments;
-use super::geometry;
 use super::scope::Scope;
 use super::value::Value;
+use super::{Ctx, eval_with_ctx, geometry};
 use crate::Mesh;
 use crate::parser::ModuleInstantiation;
 
 /// Evaluate a module instantiation to a mesh.
-pub(super) fn eval_module(mi: &ModuleInstantiation, scope: &Scope) -> crate::Result<Mesh> {
+pub(super) fn eval_module<'a>(
+    mi: &'a ModuleInstantiation,
+    scope: &Scope,
+    ctx: &Ctx<'a>,
+) -> crate::Result<Mesh> {
     let mut child = scope.clone();
     let mut positional = Vec::new();
     let mut named = BTreeMap::new();
     for arg in &mi.args {
-        let value = eval_expr(&arg.value, scope)?;
+        let value = eval_with_ctx(&arg.value, scope, ctx)?;
         match &arg.name {
             Some(name) if name.starts_with('$') => child.bind(name.clone(), value),
             Some(name) => {

@@ -251,37 +251,33 @@ fn int_to_f64(x: i64) -> f64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{Value, apply_binary, dot};
-    use crate::parser::BinOp;
+    use super::dot;
     use proptest::prelude::*;
 
-    /// An INDEPENDENT reference for the fixed 4-lane order: box each product through a `Value` (the
-    /// "slow" path — how a heterogeneous `List` would compute it), then reduce with `lane = k % 4`.
-    /// Different code from `dot`'s chunk loop, SAME order — the whole point of the property below.
-    fn slow_boxed_dot(a: &[f64], b: &[f64]) -> f64 {
+    /// An INDEPENDENT reference for the fixed 4-lane order: reduce products with `lane = k % 4`.
+    /// Different code from `dot`'s SIMD-shaped chunk loop, SAME order — the whole point of the property
+    /// below. (That boxed `Value` arithmetic matches raw `f64` is covered by the `eval_corpus` dot tests.)
+    fn reference_dot(a: &[f64], b: &[f64]) -> f64 {
         let mut lanes = [0.0f64; 4];
         for (k, (&x, &y)) in a.iter().zip(b).enumerate() {
-            // Num * Num is always Num (no fallback arm to leave uncovered).
-            if let Value::Num(p) = apply_binary(BinOp::Mul, Value::Num(x), Value::Num(y)) {
-                lanes[k % 4] += p;
-            }
+            lanes[k % 4] += x * y;
         }
         (lanes[0] + lanes[1]) + (lanes[2] + lanes[3])
     }
 
     proptest! {
         /// fast == slow, BIT-FOR-BIT: the contiguous `NumList` dot (`dot`, the SIMD-shaped chunk loop)
-        /// equals the boxed-`Value` dot (`slow_boxed_dot`, k%4) on random numeric vectors. Both use the
-        /// fixed 4-lane order, so they agree by construction — and this LOCKS it: a future SIMD dot that
+        /// equals the reference dot (`reference_dot`, k%4) on random numeric vectors. Both use the fixed
+        /// 4-lane order, so they agree by construction — and this LOCKS it: a future SIMD dot that
         /// reorders the reduction, or an FMA that fuses product+add, fails here instead of silently
         /// diverging from the oracle. Lengths span full 4-chunks + every remainder (0..3).
         #[test]
-        fn fast_dot_equals_slow_boxed_dot(
+        fn fast_dot_equals_the_fixed_order_reference(
             v in prop::collection::vec((-1.0e6f64..1.0e6, -1.0e6f64..1.0e6), 0..64)
         ) {
             let a: Vec<f64> = v.iter().map(|&(x, _)| x).collect();
             let b: Vec<f64> = v.iter().map(|&(_, y)| y).collect();
-            prop_assert_eq!(dot(&a, &b).to_bits(), slow_boxed_dot(&a, &b).to_bits());
+            prop_assert_eq!(dot(&a, &b).to_bits(), reference_dot(&a, &b).to_bits());
         }
     }
 }

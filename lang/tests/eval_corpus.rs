@@ -106,12 +106,14 @@ fn ordering() {
     assert_eq!(ev("1<\"a\""), Value::Undef); // cross-type ordering → undef
     assert_eq!(ev("(0/0)<1"), Value::Bool(false)); // NaN comparison → false
     assert_eq!(ev("[0/0,1]<[1,2]"), Value::Bool(false)); // NaN in a list → false
+    assert_eq!(ev("[true]<[false]"), Value::Bool(false)); // list of NON-orderable (bool) elems → incomparable
 }
 
 #[test]
 fn logical_and_bitwise() {
     assert_eq!(ev("true&&false"), Value::Bool(false));
     assert_eq!(ev("true||false"), Value::Bool(true));
+    assert_eq!(ev("false||true"), Value::Bool(true)); // OR: LHS false → RHS is evaluated
     assert_eq!(ev("5|2"), num(7.0));
     assert_eq!(ev("6&2"), num(2.0));
     assert_eq!(ev("1<<3"), num(8.0));
@@ -162,6 +164,8 @@ fn heterogeneous_lists_and_indexing() {
     // fast == slow: the two representations of the same vector compare EQUAL.
     assert_eq!(ev("[1,2] == [1,2]"), Value::Bool(true));
     assert_eq!(ev("[1,2]"), Value::list(vec![num(1.0), num(2.0)])); // NumList == List, via the custom eq
+    assert_ne!(ev("[1,2]"), Value::list(vec![num(1.0)])); // cross-repr, unequal length → not equal
+    assert_ne!(ev("[1,2]"), Value::list(vec![num(1.0), num(3.0)])); // cross-repr, same length, one differs
     assert_eq!(ev("[1,[2,3]] == [1,[2,3]]"), Value::Bool(true)); // nested equality
     // indexing (Value.cc operator[]): in-range, out-of-range → undef, fractional truncates, negative → undef.
     assert_eq!(ev("[10,20,30][1]"), num(20.0));
@@ -214,7 +218,10 @@ fn ranges_are_first_class_values() {
 
 #[test]
 fn deferred_constructs_are_loud() {
-    assert!(matches!(ev_err("f(1)"), Error::Unimplemented(m) if m.contains("I.4")));
+    assert!(matches!(ev_err("f(1)"), Error::Unimplemented(m) if m.contains("I.4"))); // unknown/builtin fn
+    assert!(
+        matches!(ev_err("(function(x)x)(5)"), Error::Unimplemented(m) if m.contains("I.2.3.3"))
+    ); // calling a fn VALUE
     assert!(matches!(ev_err("a.b"), Error::Unimplemented(m) if m.contains("I.1"))); // member access
     // the H.3 expression forms parse but defer: function-literal / let → I.2, assert / echo → I.5.
     assert!(matches!(ev_err("function(x)x"), Error::Unimplemented(m) if m.contains("I.2")));
@@ -230,12 +237,14 @@ fn deferred_constructs_are_loud() {
 fn program_level_defers_are_loud() {
     // These constructs parse (H.2) but eval defers to a later phase (the tag says which): defs → the
     // I.2 loader/scope engine, if/else → I.3 control flow.
+    // (user FUNCTION defs now evaluate — I.2.3.2; their calls are covered by the eval/mod.rs unit tests.)
     for (src, phase) in [
-        ("module m() cube(1);", "I.2"),
-        ("function f() = 1;", "I.2"),
+        ("module m() cube(1);", "I.2.4"),
         ("if (true) cube(1);", "I.3"),
         ("use <lib.scad>", "I.2"),
         ("include <lib.scad>", "I.2"),
+        ("x = a.b;", "I.1"), // an erroring assignment RHS propagates out of eval_stmt
+        ("{ y = a.b; }", "I.1"), // …and out of a block's inner statement
     ] {
         let prog = parse(src).expect("parses");
         let err = eval_program(&prog, &Scope::new()).unwrap_err();

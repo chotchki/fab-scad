@@ -22,8 +22,18 @@ pub use fragments::fragments;
 pub use scope::Scope;
 pub use value::{RANGE_MAX, RangeIter, Value, range_iter, range_len};
 
+use std::collections::BTreeMap;
+
 use crate::Mesh;
-use crate::parser::{BinOp, Expr, ExprKind, Program, Stmt, StmtKind, UnOp};
+use crate::parser::{Arg, BinOp, Expr, ExprKind, Parameter, Program, Stmt, StmtKind, UnOp};
+
+/// The evaluation context: the user-function store, borrowed from the `Program`. Functions live in
+/// their OWN namespace (separate from variables), so a call resolves by name here — which is why
+/// recursion and mutual recursion work regardless of scope. Built once per program (`build_ctx`).
+#[derive(Default)]
+pub(super) struct Ctx<'a> {
+    functions: BTreeMap<&'a str, (&'a [Parameter], &'a Expr)>,
+}
 
 /// One step on the evaluator's explicit work-stack. Each `Eval` carries the [`Scope`] it evaluates
 /// in (an `Rc<Frame>` clone — cheap), so a call's body can evaluate in the callee's scope while the
@@ -47,6 +57,16 @@ enum Task<'a> {
         els: &'a Expr,
         scope: Scope,
     },
+    /// Pop `params.len()` argument values, bind them to the params in a fresh child of `base`, then
+    /// evaluate the function `body` in that call scope. The heart of a call — no host recursion, so
+    /// recursion depth is bounded by the heap (the corner_brace-class killer).
+    Apply {
+        params: &'a [Parameter],
+        body: &'a Expr,
+        base: Scope,
+    },
+    /// Push an `undef` — the value of an unfilled, defaultless parameter slot.
+    PushUndef,
 }
 
 /// Evaluate an expression to a [`Value`] on the explicit stack.
@@ -55,11 +75,23 @@ enum Task<'a> {
 /// [`Error::Unimplemented`](crate::Error::Unimplemented) for constructs deferred past v0 (function
 /// calls, indexing, member access, ranges, heterogeneous/nested vectors).
 pub fn eval_expr(root: &Expr, scope: &Scope) -> crate::Result<Value> {
-    let mut tasks: Vec<Task<'_>> = vec![Task::Eval(root, scope.clone())];
+    eval_with_ctx(root, scope, &Ctx::default())
+}
+
+/// Evaluate an expression with a function-store [`Ctx`] in scope (so calls resolve). `scope` doubles
+/// as the LEXICAL base for function bodies: a call's body evaluates in `global.child()` + its params,
+/// NOT the caller's locals (OpenSCAD functions are lexically scoped; `$`-var dynamic override is I.2.2).
+pub(super) fn eval_with_ctx<'a>(
+    root: &'a Expr,
+    scope: &Scope,
+    ctx: &Ctx<'a>,
+) -> crate::Result<Value> {
+    let global = scope.clone();
+    let mut tasks: Vec<Task<'a>> = vec![Task::Eval(root, scope.clone())];
     let mut values: Vec<Value> = Vec::new();
     while let Some(task) = tasks.pop() {
         match task {
-            Task::Eval(e, s) => eval_node(e, &s, &mut tasks, &mut values)?,
+            Task::Eval(e, s) => eval_node(e, &s, &global, ctx, &mut tasks, &mut values)?,
             Task::Binary(op) => {
                 // pop order: rhs was pushed after lhs, so it's on top.
                 let rhs = values.pop().unwrap_or(Value::Undef);
@@ -96,6 +128,15 @@ pub fn eval_expr(root: &Expr, scope: &Scope) -> crate::Result<Value> {
                 let branch = if cond.is_truthy() { then } else { els };
                 tasks.push(Task::Eval(branch, scope));
             }
+            Task::Apply { params, body, base } => {
+                let args = values.split_off(values.len().saturating_sub(params.len()));
+                let mut call = base.child();
+                for (param, value) in params.iter().zip(args) {
+                    call.bind(param.name.clone(), value);
+                }
+                tasks.push(Task::Eval(body, call));
+            }
+            Task::PushUndef => values.push(Value::Undef),
         }
     }
     Ok(values.pop().unwrap_or(Value::Undef))
@@ -106,6 +147,8 @@ pub fn eval_expr(root: &Expr, scope: &Scope) -> crate::Result<Value> {
 fn eval_node<'a>(
     e: &'a Expr,
     scope: &Scope,
+    global: &Scope,
+    ctx: &Ctx<'a>,
     tasks: &mut Vec<Task<'a>>,
     values: &mut Vec<Value>,
 ) -> crate::Result<()> {
@@ -138,10 +181,18 @@ fn eval_node<'a>(
                 tasks.push(Task::Eval(el, scope.clone())); // reversed pushes → forward eval order
             }
         }
-        ExprKind::Call { .. } => {
-            return Err(crate::Error::Unimplemented(
-                "function calls are not yet implemented (I.4)",
-            ));
+        ExprKind::Call { callee, args } => {
+            let ExprKind::Ident(name) = &callee.kind else {
+                return Err(crate::Error::Unimplemented(
+                    "calling a function VALUE is not yet implemented (I.2.3.3)",
+                ));
+            };
+            let Some(&(params, body)) = ctx.functions.get(name.as_str()) else {
+                return Err(crate::Error::Unimplemented(
+                    "call to a builtin or unknown function is not yet implemented (I.4)",
+                ));
+            };
+            push_call(params, body, args, scope, global, tasks);
         }
         ExprKind::Index { base, index } => {
             tasks.push(Task::Index);
@@ -186,6 +237,58 @@ fn eval_node<'a>(
     Ok(())
 }
 
+/// Push the tasks for a user-function call: one value-source per parameter — an arg expr (in the
+/// CALLER scope), a default (in the lexical `global` scope), or `undef` — then an [`Task::Apply`] that
+/// binds them and evaluates the body. OpenSCAD arg-matching: positional args fill params left-to-right,
+/// named args fill by name (extra/unknown args are dropped). Two documented first-cut simplifications:
+/// `$`-arg injection is I.2.2, and defaults evaluate in the definition scope, not the partially-bound
+/// call scope (so a default can't reference an earlier param — rare; defaults are usually constants).
+fn push_call<'a>(
+    params: &'a [Parameter],
+    body: &'a Expr,
+    args: &'a [Arg],
+    caller: &Scope,
+    global: &Scope,
+    tasks: &mut Vec<Task<'a>>,
+) {
+    let mut slots: Vec<Option<(&'a Expr, Scope)>> = vec![None; params.len()];
+    let mut positional = 0;
+    for arg in args {
+        match &arg.name {
+            None => {
+                if let Some(slot) = slots.get_mut(positional) {
+                    *slot = Some((&arg.value, caller.clone()));
+                }
+                positional += 1;
+            }
+            Some(name) => {
+                if let Some(i) = params.iter().position(|p| &p.name == name)
+                    && let Some(slot) = slots.get_mut(i)
+                {
+                    *slot = Some((&arg.value, caller.clone()));
+                }
+            }
+        }
+    }
+    for (slot, param) in slots.iter_mut().zip(params) {
+        if let (None, Some(default)) = (&slot, &param.default) {
+            *slot = Some((default, global.clone()));
+        }
+    }
+    tasks.push(Task::Apply {
+        params,
+        body,
+        base: global.clone(),
+    });
+    // reversed so param 0 evaluates first (its value lands at the bottom of the popped run).
+    for slot in slots.into_iter().rev() {
+        match slot {
+            Some((expr, scope)) => tasks.push(Task::Eval(expr, scope)),
+            None => tasks.push(Task::PushUndef),
+        }
+    }
+}
+
 /// Build a vector value: the all-numeric `NumList` fast path when every element is a number, else the
 /// general heterogeneous `List`. The two compare EQUAL element-for-element (see `Value`'s `PartialEq`).
 fn build_vector(items: Vec<Value>) -> Value {
@@ -221,10 +324,11 @@ fn build_range(start: &Value, step: &Value, end: &Value) -> Value {
 /// Deferred constructs fail LOUD: unknown modules / transforms / booleans (module eval), and
 /// multiple top-level objects (implicit union — J.2).
 pub fn eval_program(program: &Program, scope: &Scope) -> crate::Result<Mesh> {
+    let ctx = build_ctx(program);
     let mut scope = scope.clone();
     let mut meshes = Vec::new();
     for stmt in &program.stmts {
-        eval_stmt(stmt, &mut scope, &mut meshes)?;
+        eval_stmt(stmt, &mut scope, &ctx, &mut meshes)?;
     }
     match meshes.len() {
         0 => Ok(Mesh::new()),
@@ -235,24 +339,44 @@ pub fn eval_program(program: &Program, scope: &Scope) -> crate::Result<Mesh> {
     }
 }
 
+/// Collect user function definitions into the [`Ctx`] store (their own namespace). A pre-pass over the
+/// whole program, so a call can resolve a function defined anywhere (whole-program visibility, like
+/// OpenSCAD); a duplicate name — last definition wins (`BTreeMap::insert`).
+fn build_ctx(program: &Program) -> Ctx<'_> {
+    let mut functions = BTreeMap::new();
+    for stmt in &program.stmts {
+        if let StmtKind::FunctionDef { name, params, body } = &stmt.kind {
+            functions.insert(name.as_str(), (params.as_slice(), body));
+        }
+    }
+    Ctx { functions }
+}
+
 /// Statement recursion is bounded by the parser's `MAX_DEPTH`, so host recursion here can't overflow
 /// (unlike unbounded EXPRESSION recursion, which the explicit stack handles).
-fn eval_stmt(stmt: &Stmt, scope: &mut Scope, meshes: &mut Vec<Mesh>) -> crate::Result<()> {
+fn eval_stmt<'a>(
+    stmt: &'a Stmt,
+    scope: &mut Scope,
+    ctx: &Ctx<'a>,
+    meshes: &mut Vec<Mesh>,
+) -> crate::Result<()> {
     match &stmt.kind {
-        StmtKind::Empty => {}
+        // `Empty`: nothing. `FunctionDef`: already registered into `ctx` by `build_ctx` (function
+        // definitions live in their own namespace) — nothing to evaluate here.
+        StmtKind::Empty | StmtKind::FunctionDef { .. } => {}
         StmtKind::Assignment { name, value } => {
-            let value = eval_expr(value, scope)?;
+            let value = eval_with_ctx(value, scope, ctx)?;
             scope.bind(name.clone(), value);
         }
         StmtKind::Block(stmts) => {
             for stmt in stmts {
-                eval_stmt(stmt, scope, meshes)?;
+                eval_stmt(stmt, scope, ctx, meshes)?;
             }
         }
-        StmtKind::Module(mi) => meshes.push(module::eval_module(mi, scope)?),
-        StmtKind::ModuleDef { .. } | StmtKind::FunctionDef { .. } => {
+        StmtKind::Module(mi) => meshes.push(module::eval_module(mi, scope, ctx)?),
+        StmtKind::ModuleDef { .. } => {
             return Err(crate::Error::Unimplemented(
-                "user-defined modules and functions are not yet implemented (I.2)",
+                "user-defined modules are not yet implemented (I.2.4)",
             ));
         }
         StmtKind::If { .. } => {
@@ -267,4 +391,96 @@ fn eval_stmt(stmt: &Stmt, scope: &mut Scope, meshes: &mut Vec<Mesh>) -> crate::R
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::float_cmp,
+    reason = "unit-test helpers: unwrap/expect/panic ARE the assertions; exact float asserts are deterministic"
+)]
+mod tests {
+    use super::{Scope, Value, build_ctx, eval_with_ctx};
+    use crate::parser::{StmtKind, parse};
+
+    /// Evaluate a program's assignments in order (binding each), returning the LAST assignment's value
+    /// — with the program's function store in scope. The end-to-end call test harness.
+    fn eval_last(src: &str) -> Value {
+        let prog = parse(src).expect("parses");
+        let ctx = build_ctx(&prog);
+        let mut scope = Scope::new();
+        let mut last = Value::Undef;
+        for stmt in &prog.stmts {
+            if let StmtKind::Assignment { name, value } = &stmt.kind {
+                last = eval_with_ctx(value, &scope, &ctx).expect("evaluates");
+                scope.bind(name.clone(), last.clone());
+            }
+        }
+        last
+    }
+
+    #[test]
+    fn positional_named_and_default_args() {
+        assert_eq!(
+            eval_last("function f(x) = x + 1; y = f(2);"),
+            Value::Num(3.0)
+        );
+        assert_eq!(
+            eval_last("function f(x, y = 10) = x + y; a = f(5);"),
+            Value::Num(15.0)
+        ); // default
+        assert_eq!(
+            eval_last("function f(x, y = 10) = x + y; a = f(5, 20);"),
+            Value::Num(25.0)
+        ); // override
+        assert_eq!(
+            eval_last("function f(a, b) = a - b; y = f(b = 1, a = 10);"),
+            Value::Num(9.0)
+        ); // named, reordered
+        assert_eq!(eval_last("function f(x, y) = y; a = f(1);"), Value::Undef); // unfilled, no default → undef
+        assert_eq!(
+            eval_last("function f(x) = x; y = f(1, 2, 3);"),
+            Value::Num(1.0)
+        ); // extra positional dropped
+        assert_eq!(
+            eval_last("function f(x) = x; y = f(x = 1, z = 9);"),
+            Value::Num(1.0)
+        ); // unknown named dropped
+    }
+
+    #[test]
+    fn functions_are_lexically_scoped() {
+        assert_eq!(
+            eval_last("g = 7; function f() = g; y = f();"),
+            Value::Num(7.0)
+        ); // sees the global
+        // a caller's LOCAL does NOT leak into the callee (lexical, not dynamic): inner sees no `x`.
+        assert_eq!(
+            eval_last("function inner() = x; function outer(x) = inner(); y = outer(99);"),
+            Value::Undef
+        );
+    }
+
+    #[test]
+    fn recursion_and_mutual_recursion() {
+        assert_eq!(
+            eval_last("function fac(n) = n <= 1 ? 1 : n * fac(n - 1); y = fac(5);"),
+            Value::Num(120.0)
+        );
+        let mutual = "function even(n) = n == 0 ? true : odd(n - 1); \
+                      function odd(n) = n == 0 ? false : even(n - 1); \
+                      y = even(10);";
+        assert_eq!(eval_last(mutual), Value::Bool(true));
+    }
+
+    #[test]
+    fn deep_non_tail_recursion_is_heap_bounded() {
+        // The corner_brace-class proof: 100k-deep NON-tail recursion — each level parks a pending `+`
+        // on the stack — would blow a recursive tree-walker's HOST stack. On the explicit stack it's
+        // just heap. sum(n) = n(n+1)/2, so sum(100000) = 5000050000 (exact in f64).
+        let deep = "function sum(n) = n <= 0 ? 0 : n + sum(n - 1); y = sum(100000);";
+        assert_eq!(eval_last(deep), Value::Num(5_000_050_000.0));
+    }
 }

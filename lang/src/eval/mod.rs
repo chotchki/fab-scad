@@ -13,6 +13,7 @@
 mod builtins;
 mod fmt;
 mod fragments;
+mod geo;
 mod geometry;
 mod loader;
 mod message;
@@ -23,6 +24,7 @@ mod trig;
 mod value;
 
 pub use fragments::fragments;
+pub use geo::GeoNode;
 pub use message::{Evaluation, Message};
 pub use scope::Scope;
 pub use value::{RANGE_MAX, RangeIter, Value, range_iter, range_len};
@@ -693,7 +695,7 @@ pub fn eval_program(program: &Program, scope: &Scope) -> crate::Result<Mesh> {
     // free with no subscriber, compiled out in release under `release_max_level_off`.
     let _span = tracing::trace_span!("eval_program").entered();
     let ctx = build_ctx(program);
-    run_stmts(program.stmts.iter(), &ctx, scope)
+    mesh_of(run_stmts(program.stmts.iter(), &ctx, scope)?)
 }
 
 /// Evaluate `source` with its `use`/`include` graph resolved — the pure-crate spine behind
@@ -710,7 +712,7 @@ pub(crate) fn evaluate_source(
     base_dir: &std::path::Path,
     root_path: Option<&std::path::Path>,
     library_paths: &[std::path::PathBuf],
-) -> crate::Result<Evaluation> {
+) -> crate::Result<(GeoNode, Vec<Message>)> {
     let _span = tracing::trace_span!("eval_program").entered();
     let loaded = loader::load(source, base_dir, root_path, library_paths)?;
     let (exec, functions) = loader::flatten(&loaded)?;
@@ -719,44 +721,64 @@ pub(crate) fn evaluate_source(
         closures: RefCell::default(),
         messages: RefCell::default(),
     };
-    let mesh = run_stmts(exec.into_iter(), &ctx, &Scope::new())?;
-    Ok(Evaluation {
-        mesh,
-        messages: ctx.messages.into_inner(),
-    })
+    let tree = run_stmts(exec.into_iter(), &ctx, &Scope::new())?;
+    Ok((tree, ctx.messages.into_inner()))
 }
 
-/// Evaluate a statement stream with a prebuilt [`Ctx`] — shared by [`eval_program`] (one program's
-/// statements) and the loader path (a flattened multi-file exec stream). Assignments bind into `scope`;
-/// a single top-level object produces its mesh, multiple are the implicit-union defer (J.2).
+/// Evaluate a statement stream to a geometry TREE ([`GeoNode`]) — shared by [`eval_program`] and the
+/// loader path. The result is the implicit union of the top-level objects. The tree keeps fab-lang
+/// backend-agnostic: a single primitive is a `Leaf` [`mesh_of`] can flatten with no kernel; anything
+/// with a transform or a boolean needs the downstream Manifold backend (J.2).
 fn run_stmts<'a>(
     stmts: impl Iterator<Item = &'a Stmt>,
     ctx: &Ctx<'a>,
     scope: &Scope,
-) -> crate::Result<Mesh> {
+) -> crate::Result<GeoNode> {
     let stmts: Vec<&Stmt> = stmts.collect();
+    Ok(union_of(eval_nodes(&stmts, ctx, scope)?))
+}
+
+/// The geometry nodes a statement list produces, in order. Pass 1 HOISTS every assignment BEFORE any
+/// geometry (OpenSCAD's whole-scope, last-assignment-wins rule), evaluating them in first-occurrence
+/// order so a forward or self-referential reference sees `undef` (`sphere(x); x = 5;` → sphere(5);
+/// `n = 1; n = n + 1;` → undef — verified against the oracle). Pass 2 runs the geometry statements with
+/// the fully-bound scope. Shared by the top level, bare blocks, and every transform/boolean's children
+/// (each gets a fresh hoisted child scope). Recursion is bounded by the parser's `MAX_DEPTH`, so the
+/// geometry tree can't be deep enough to overflow (unlike the expression stack, which is explicit).
+fn eval_nodes<'a>(stmts: &[&'a Stmt], ctx: &Ctx<'a>, scope: &Scope) -> crate::Result<Vec<GeoNode>> {
     let mut scope = scope.clone();
-    // Pass 1 — HOIST: bind every top-level assignment BEFORE any geometry (OpenSCAD's whole-scope,
-    // last-assignment-wins rule), evaluating them in first-occurrence order so a forward or
-    // self-referential reference sees `undef` (verified against the oracle: `sphere(x); x = 5;` →
-    // sphere(5); `n = 1; n = n + 1;` → n is undef). This is why geometry sees a variable's FINAL value
-    // regardless of source position.
-    for (name, expr) in hoisted_assignments(&stmts) {
+    for (name, expr) in hoisted_assignments(stmts) {
         let value = eval_with_ctx(expr, &scope, ctx)?;
         scope.bind(name.to_string(), value);
     }
-    // Pass 2 — GEOMETRY: execute the non-assignment statements with the fully-bound scope.
-    let mut meshes = Vec::new();
-    for stmt in &stmts {
+    let mut nodes = Vec::new();
+    for stmt in stmts {
         if !matches!(stmt.kind, StmtKind::Assignment { .. }) {
-            eval_stmt(stmt, &mut scope, ctx, &mut meshes)?;
+            eval_stmt(stmt, &mut scope, ctx, &mut nodes)?;
         }
     }
-    match meshes.len() {
-        0 => Ok(Mesh::new()),
-        1 => Ok(meshes.pop().unwrap_or_default()),
+    Ok(nodes)
+}
+
+/// Wrap geometry nodes in the implicit union: none → `Empty`, one → itself, many → `Union` (OpenSCAD
+/// unions multiple top-level objects + a block's children).
+fn union_of(mut nodes: Vec<GeoNode>) -> GeoNode {
+    match nodes.len() {
+        0 => GeoNode::Empty,
+        1 => nodes.pop().unwrap_or(GeoNode::Empty),
+        _ => GeoNode::Union(nodes),
+    }
+}
+
+/// Flatten a geometry tree WITHOUT a backend: `Empty` → an empty mesh, a single `Leaf` → its mesh.
+/// Anything with a transform or a boolean needs the Manifold backend (fab-scad), so it errors LOUD —
+/// callers reach for [`evaluate_geometry`](crate::evaluate_geometry) + a backend instead.
+pub(crate) fn mesh_of(tree: GeoNode) -> crate::Result<Mesh> {
+    match tree {
+        GeoNode::Empty => Ok(Mesh::new()),
+        GeoNode::Leaf(mesh) => Ok(mesh),
         _ => Err(crate::Error::Unimplemented(
-            "multiple top-level objects (implicit union) are not yet implemented (J.2)",
+            "geometry with transforms or booleans needs a backend — use evaluate_geometry (J.2)",
         )),
     }
 }
@@ -863,7 +885,7 @@ fn eval_stmt<'a>(
     stmt: &'a Stmt,
     scope: &mut Scope,
     ctx: &Ctx<'a>,
-    meshes: &mut Vec<Mesh>,
+    nodes: &mut Vec<GeoNode>,
 ) -> crate::Result<()> {
     match &stmt.kind {
         // Definitions + empties are no-ops at eval. `Empty`: nothing. `FunctionDef`: already registered
@@ -871,23 +893,48 @@ fn eval_stmt<'a>(
         // defining an unused module IS nothing, and INSTANTIATING a user module still fails LOUD in
         // `module::eval_module`; that relaxation (from LOUD-on-def) is what lets `use`/`include` load
         // real files, which define modules everywhere (the call machinery is I.2.4 / Phase J).
-        StmtKind::Empty | StmtKind::FunctionDef { .. } | StmtKind::ModuleDef { .. } => {}
-        StmtKind::Assignment { name, value } => {
-            let value = eval_with_ctx(value, scope, ctx)?;
-            scope.bind(name.clone(), value);
-        }
+        // `Assignment` is a no-op HERE: `eval_nodes` hoists every assignment (whole-scope, last-wins)
+        // and skips it in the geometry pass, so a bound assignment never reaches `eval_stmt`.
+        StmtKind::Empty
+        | StmtKind::FunctionDef { .. }
+        | StmtKind::ModuleDef { .. }
+        | StmtKind::Assignment { .. } => {}
+        // A bare `{ … }` block groups its children into ONE implicit-union node, in a fresh child scope
+        // (its own hoisting).
         StmtKind::Block(stmts) => {
-            for stmt in stmts {
-                eval_stmt(stmt, scope, ctx, meshes)?;
-            }
+            let refs: Vec<&Stmt> = stmts.iter().collect();
+            nodes.push(union_of(eval_nodes(&refs, ctx, scope)?));
         }
         // `echo`/`assert` at statement level are module instantiations, but they produce console
-        // output, not geometry — handle them here (no mesh pushed) before the primitive dispatch. Their
-        // geometry CHILDREN (`echo(x) cube();`) are a passthrough that rides the module-children
-        // machinery (I.2.4 / J); rare with echo/assert, and deferred there.
+        // output, not geometry — handle them here (no node pushed) before the geometry dispatch. Their
+        // geometry CHILDREN (`echo(x) cube();`) ride the module-children machinery (I.2.4 / J); rare.
         StmtKind::Module(mi) if mi.name == "echo" => emit_echo(&mi.args, scope, scope, ctx)?,
         StmtKind::Module(mi) if mi.name == "assert" => check_assert(&mi.args, scope, scope, ctx)?,
-        StmtKind::Module(mi) => meshes.push(module::eval_module(mi, scope, ctx)?),
+        // An affine TRANSFORM wraps the implicit union of its children (J.2). `$`-args don't reach a
+        // transform, so its child scope is dropped.
+        StmtKind::Module(mi) if geo::is_transform(&mi.name) => {
+            let (positional, named, _) = module::eval_args(mi, scope, ctx)?;
+            let matrix = geo::transform_matrix(&mi.name, &positional, &named);
+            let refs: Vec<&Stmt> = mi.children.iter().collect();
+            let child = union_of(eval_nodes(&refs, ctx, scope)?);
+            nodes.push(GeoNode::Transform {
+                matrix,
+                child: Box::new(child),
+            });
+        }
+        // A CSG BOOLEAN over its children — each geometry child is an operand (J.2). `difference` is the
+        // first minus the rest, `intersection` is the common volume, `union` merges (also the default).
+        StmtKind::Module(mi) if geo::is_boolean(&mi.name) => {
+            let refs: Vec<&Stmt> = mi.children.iter().collect();
+            let children = eval_nodes(&refs, ctx, scope)?;
+            nodes.push(match mi.name.as_str() {
+                "difference" => GeoNode::Difference(children),
+                "intersection" => GeoNode::Intersection(children),
+                _ => GeoNode::Union(children),
+            });
+        }
+        // A PRIMITIVE → a `Leaf` (a still-deferred user module fails LOUD inside `eval_module`).
+        StmtKind::Module(mi) => nodes.push(GeoNode::Leaf(module::eval_module(mi, scope, ctx)?)),
         StmtKind::If { .. } => {
             return Err(crate::Error::Unimplemented(
                 "if/else evaluation is not yet implemented (I.3)",

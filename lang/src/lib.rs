@@ -47,8 +47,8 @@ mod parser;
 pub use customizer::{Constraint, CustomParam, Customizer, DropdownItem, customize};
 pub use error::{Error, Result};
 pub use eval::{
-    Evaluation, Message, RANGE_MAX, RangeIter, Scope, Value, eval_expr, eval_program, fragments,
-    range_iter, range_len,
+    Evaluation, GeoNode, Message, RANGE_MAX, RangeIter, Scope, Value, eval_expr, eval_program,
+    fragments, range_iter, range_len,
 };
 pub use lexer::{Lexed, Token, TokenKind, decode_str, lex, num_value};
 pub use mesh::Mesh;
@@ -106,7 +106,11 @@ pub fn evaluate_file_full(path: &Path, library_paths: &[PathBuf]) -> Result<Eval
     // The including-file dir. An empty parent (a bare `foo.scad`) resolves relative to CWD via the
     // loader's canonicalize, so no special-casing is needed beyond the parent-less root (`.`).
     let base_dir = path.parent().unwrap_or(Path::new("."));
-    eval::evaluate_source(&source, base_dir, Some(path), library_paths)
+    let (tree, messages) = eval::evaluate_source(&source, base_dir, Some(path), library_paths)?;
+    Ok(Evaluation {
+        mesh: eval::mesh_of(tree)?,
+        messages,
+    })
 }
 
 /// Evaluate in-memory `source` as if it lived in `base_dir` — a GUI's unsaved buffer for the file it's
@@ -133,7 +137,44 @@ pub fn evaluate_with_base_full(
     base_dir: &Path,
     library_paths: &[PathBuf],
 ) -> Result<Evaluation> {
-    eval::evaluate_source(source, base_dir, None, library_paths)
+    let (tree, messages) = eval::evaluate_source(source, base_dir, None, library_paths)?;
+    Ok(Evaluation {
+        mesh: eval::mesh_of(tree)?,
+        messages,
+    })
+}
+
+/// Evaluate OpenSCAD `source` to a CSG geometry TREE ([`GeoNode`]) — the J.2 output for CSG. A tree
+/// with transforms or booleans can't be flattened by fab-lang alone (that needs the Manifold kernel);
+/// a downstream backend (fab-scad's `GeometryBackend`) walks it. `use`/`include` resolve against CWD.
+///
+/// # Errors
+/// As [`evaluate`], minus the single-primitive restriction (a transform/boolean tree is fine here).
+pub fn evaluate_geometry(source: &str) -> Result<GeoNode> {
+    evaluate_geometry_with_base(source, Path::new("."), &[])
+}
+
+/// Like [`evaluate_geometry`], but for a `.scad` FILE, resolving its `use`/`include` graph.
+///
+/// # Errors
+/// As [`evaluate_file`], minus the single-primitive restriction.
+pub fn evaluate_geometry_file(path: &Path, library_paths: &[PathBuf]) -> Result<GeoNode> {
+    let source = std::fs::read_to_string(path)
+        .map_err(|e| Error::Load(format!("{}: {e}", path.display())))?;
+    let base_dir = path.parent().unwrap_or(Path::new("."));
+    Ok(eval::evaluate_source(&source, base_dir, Some(path), library_paths)?.0)
+}
+
+/// Like [`evaluate_geometry`], but resolving `use`/`include` against `base_dir` (a GUI's unsaved buffer).
+///
+/// # Errors
+/// As [`evaluate_with_base`], minus the single-primitive restriction.
+pub fn evaluate_geometry_with_base(
+    source: &str,
+    base_dir: &Path,
+    library_paths: &[PathBuf],
+) -> Result<GeoNode> {
+    Ok(eval::evaluate_source(source, base_dir, None, library_paths)?.0)
 }
 
 #[cfg(test)]

@@ -14,15 +14,14 @@ use super::{Ctx, eval_with_ctx, geometry};
 use crate::Mesh;
 use crate::parser::ModuleInstantiation;
 
-/// Evaluate a module instantiation to a mesh.
-pub(super) fn eval_module<'a>(
+/// Evaluate a module instantiation's arguments: positional values, named values, and a child scope
+/// with the `$`-args bound (dynamic scope). Shared by the primitive dispatch and the transform-matrix
+/// builder (J.2) — both need the same OpenSCAD arg-matching.
+pub(super) fn eval_args<'a>(
     mi: &'a ModuleInstantiation,
     scope: &Scope,
     ctx: &Ctx<'a>,
-) -> crate::Result<Mesh> {
-    // A benchmark span per primitive (I.6): its busy-time is the tessellation cost. TRACE level, so a
-    // subscriber-less build pays one atomic load and `release_max_level_off` strips it entirely.
-    let _span = tracing::trace_span!("module", module = mi.name.as_str()).entered();
+) -> crate::Result<(Vec<Value>, BTreeMap<String, Value>, Scope)> {
     let mut child = scope.clone();
     let mut positional = Vec::new();
     let mut named = BTreeMap::new();
@@ -36,6 +35,20 @@ pub(super) fn eval_module<'a>(
             None => positional.push(value),
         }
     }
+    Ok((positional, named, child))
+}
+
+/// Evaluate a PRIMITIVE module instantiation to a mesh (sphere/cube/cylinder). Transforms + booleans +
+/// user modules are dispatched by the caller ([`super::eval_stmt`]); anything else fails LOUD.
+pub(super) fn eval_module<'a>(
+    mi: &'a ModuleInstantiation,
+    scope: &Scope,
+    ctx: &Ctx<'a>,
+) -> crate::Result<Mesh> {
+    // A benchmark span per primitive (I.6): its busy-time is the tessellation cost. TRACE level, so a
+    // subscriber-less build pays one atomic load and `release_max_level_off` strips it entirely.
+    let _span = tracing::trace_span!("module", module = mi.name.as_str()).entered();
+    let (positional, named, child) = eval_args(mi, scope, ctx)?;
     match mi.name.as_str() {
         "sphere" => Ok(eval_sphere(&positional, &named, &child)),
         "cube" => Ok(eval_cube(&positional, &named)),

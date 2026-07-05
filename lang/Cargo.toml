@@ -29,6 +29,12 @@ thiserror = "2"
 # and subscriber are the linking binary's call. See the crate docs for the compile-out story.
 tracing = "0.1"
 
+[dev-dependencies]
+# Property testing for the print/parse roundtrip (H.5.2) — seeded + reproducible (its own TestRng,
+# failures persisted to .proptest-regressions), so it respects the determinism doctrine. Dev-only,
+# so it never touches the shipped lib or its wasm profile.
+proptest = "1"
+
 [lints.rust]
 # The ratchet (SPEC: the lint set only ever tightens). Public surface must be documented.
 missing_docs = "warn"

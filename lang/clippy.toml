@@ -30,9 +30,14 @@ allow-expect-in-tests = true
 # needs `#[allow(..., reason = "…")]`, and allow_attributes_without_reason forces the writedown.
 # NOTE: Instant::now is deliberately NOT banned — the I.6 benchmark layer needs it, it's
 # instrumentation compiled out in release, and it never reaches geometry output.
+# `allow-invalid` on the rand entries: rand is only a TRANSITIVE dev-dep (via proptest), and its
+# ambient-RNG surface moved across versions (`thread_rng` → `rng` in rand 0.9). The ban stays active
+# whenever a listed path resolves; `allow-invalid` just silences the "unreachable function" note when
+# the current rand version doesn't have that exact name. OUR engine never uses rand — this is the door.
 disallowed-methods = [
-    { path = "rand::random", reason = "all randomness derives from ONE ChaCha8 seed (SPEC); no ambient entropy in the engine" },
-    { path = "rand::thread_rng", reason = "thread_rng is unseeded + StdRng-backed — thread a seeded ChaCha8Rng from the harness seed instead" },
+    { path = "rand::random", reason = "all randomness derives from ONE ChaCha8 seed (SPEC); no ambient entropy in the engine", allow-invalid = true },
+    { path = "rand::thread_rng", reason = "thread_rng is unseeded + StdRng-backed — thread a seeded ChaCha8Rng from the harness seed instead", allow-invalid = true },
+    { path = "rand::rng", reason = "rand 0.9's ambient thread RNG (renamed from thread_rng) — same unseeded hazard", allow-invalid = true },
     { path = "std::time::SystemTime::now", reason = "wall-clock time must never touch evaluation output (SPEC: no time dependence in eval)" },
 ]
 disallowed-types = [

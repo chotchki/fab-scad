@@ -12,12 +12,14 @@
 mod ast;
 mod diag;
 mod expr;
+mod print;
 mod stmt;
 
 pub use ast::{
     Arg, BinOp, Expr, ExprKind, Modifiers, ModuleInstantiation, Parameter, Program, Span, Stmt,
     StmtKind, UnOp,
 };
+pub use print::{print, print_expr};
 
 use winnow::Parser;
 use winnow::combinator::{cut_err, fail};

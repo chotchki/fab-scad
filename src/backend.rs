@@ -9,7 +9,7 @@
 //! solid is empty-aware, and the ops encode the empty CSG algebra — ∅∪x = x, ∅−x = ∅, x−∅ = x,
 //! ∅∩x = ∅ — so a lowered CSG tree behaves the same whether a subtree collapsed to nothing or not.
 
-use fab_lang::Mesh;
+use fab_lang::{GeoNode, Mesh};
 
 /// A geometry backend: tessellated meshes → solids, combined via CSG + affine transforms. `Solid` is
 /// the backend's opaque handle (real Manifold's is `!Send`; the mock's is inert data).
@@ -32,6 +32,34 @@ pub trait GeometryBackend {
     fn to_mesh(&self, s: &Self::Solid) -> Mesh;
     /// Whether the solid is empty (no geometry) — the differential's `Empty` outcome.
     fn is_empty(&self, s: &Self::Solid) -> bool;
+}
+
+/// Lower a fab-lang CSG tree ([`GeoNode`], J.2) to a backend solid — the geometry lowering. This is
+/// the integration seam: fab-lang builds the backend-agnostic tree, the backend does the real CSG.
+/// Recursion is bounded by the tree depth (the parser's `MAX_DEPTH`), so it can't overflow the stack.
+pub fn build<B: GeometryBackend>(node: &GeoNode, backend: &B) -> B::Solid {
+    match node {
+        GeoNode::Empty => backend.leaf(&Mesh::new()),
+        GeoNode::Leaf(mesh) => backend.leaf(mesh),
+        GeoNode::Transform { matrix, child } => backend.transform(&build(child, backend), matrix),
+        GeoNode::Union(kids) => reduce(kids, backend, |b, x, y| b.union(x, y)),
+        GeoNode::Difference(kids) => reduce(kids, backend, |b, x, y| b.difference(x, y)),
+        GeoNode::Intersection(kids) => reduce(kids, backend, |b, x, y| b.intersection(x, y)),
+    }
+}
+
+/// Fold children left-to-right with `combine` (the empty algebra lives in the backend ops). An empty
+/// child list → the empty solid; for `difference` the fold is `first − rest`.
+fn reduce<B: GeometryBackend>(
+    kids: &[GeoNode],
+    backend: &B,
+    combine: impl Fn(&B, &B::Solid, &B::Solid) -> B::Solid,
+) -> B::Solid {
+    let mut solids = kids.iter().map(|k| build(k, backend));
+    match solids.next() {
+        Some(first) => solids.fold(first, |acc, s| combine(backend, &acc, &s)),
+        None => backend.leaf(&Mesh::new()),
+    }
 }
 
 /// Apply a 3×4 row-major affine `m` to a vertex.
@@ -85,7 +113,12 @@ impl GeometryBackend for ManifoldBackend {
     }
 
     fn transform(&self, s: &Self::Solid, m: &[f64; 12]) -> Self::Solid {
-        s.as_ref().map(|s| s.transform(m))
+        // geo.rs affines are 3x4 ROW-MAJOR (OpenSCAD `multmatrix` + the mock's convention); Manifold's
+        // `transform` wants COLUMN-MAJOR (kernel.rs) — transpose the 3x4 (col c, row r) → (r, c).
+        let cm = [
+            m[0], m[4], m[8], m[1], m[5], m[9], m[2], m[6], m[10], m[3], m[7], m[11],
+        ];
+        s.as_ref().map(|s| s.transform(&cm))
     }
 
     fn to_mesh(&self, s: &Self::Solid) -> Mesh {
@@ -253,5 +286,33 @@ mod tests {
     #[test]
     fn manifold_backend_interface() {
         exercise(&super::ManifoldBackend);
+    }
+
+    // J.2.3/J.2.7 — the tree-walker lowers CSG booleans + transforms through the REAL Manifold backend
+    // correctly, checked by exact VOLUME (no oracle re-import, which the harness can't do for boolean
+    // meshes yet). cube(5) sits inside cube(10)'s corner (both [0,size]³), so the results are exact.
+    #[cfg(feature = "kernel")]
+    #[test]
+    fn boolean_and_transform_lowering_volumes() {
+        let vol = |scad: &str| -> f64 {
+            match super::build(
+                &fab_lang::evaluate_geometry(scad).expect("evaluates"),
+                &super::ManifoldBackend,
+            ) {
+                Some(s) => s.volume(),
+                None => 0.0,
+            }
+        };
+        assert!((vol("cube(10);") - 1000.0).abs() < 1e-6);
+        assert!((vol("difference() { cube(10); cube(5); }") - 875.0).abs() < 1e-6); // 1000 − 125
+        assert!((vol("union() { cube(10); cube(5); }") - 1000.0).abs() < 1e-6); // cube(5) ⊂ cube(10)
+        assert!((vol("intersection() { cube(10); cube(5); }") - 125.0).abs() < 1e-6); // = cube(5)
+        // difference with a subtrahend moved fully clear removes nothing (transform composes into it):
+        assert!(
+            (vol("difference() { cube(10); translate([20, 0, 0]) cube(5); }") - 1000.0).abs()
+                < 1e-6
+        );
+        // a transform preserves volume:
+        assert!((vol("translate([100, 0, 0]) rotate([30, 20, 10]) cube(3);") - 27.0).abs() < 1e-6);
     }
 }

@@ -168,10 +168,10 @@ impl Driver for FabLang {
         "fab-lang"
     }
     fn eval(&self, scad: &str) -> Outcome {
-        fab_outcome(fab_lang::evaluate(scad))
+        fab_geometry_outcome(fab_lang::evaluate_geometry(scad))
     }
     fn eval_file(&self, root: &Path, library_paths: &[PathBuf]) -> Outcome {
-        fab_outcome(fab_lang::evaluate_file(root, library_paths))
+        fab_geometry_outcome(fab_lang::evaluate_geometry_file(root, library_paths))
     }
     fn echo(&self, scad: &str) -> Vec<String> {
         fab_lang::evaluate_full(scad)
@@ -185,12 +185,16 @@ impl Driver for FabLang {
     }
 }
 
-/// Map scad-rs's evaluate result to a comparable [`Outcome`]: no geometry → `Empty`, a manifold mesh →
-/// `Solid`, an error or non-manifold mesh → `Rejected`.
-fn fab_outcome(result: fab_lang::Result<fab_lang::Mesh>) -> Outcome {
+/// Map scad-rs's geometry TREE to a comparable [`Outcome`]: walk it through the Manifold backend (J.2
+/// — the geometry lowering under test), then no geometry → `Empty`, a manifold solid → `Solid`, an
+/// evaluation error → `Rejected`. Manifold's ops always yield a valid manifold, so a `Some` solid is
+/// never rejected here (that distinction is the oracle's job on the OTHER leg).
+fn fab_geometry_outcome(result: fab_lang::Result<fab_lang::GeoNode>) -> Outcome {
     match result {
-        Ok(m) if m.verts.is_empty() => Outcome::Empty,
-        Ok(m) => Solid::from_indexed(&m.verts, &m.tris).map_or(Outcome::Rejected, Outcome::Solid),
+        Ok(tree) => match crate::backend::build(&tree, &crate::backend::ManifoldBackend) {
+            Some(solid) if !solid.is_empty() => Outcome::Solid(solid),
+            _ => Outcome::Empty,
+        },
         Err(_) => Outcome::Rejected,
     }
 }

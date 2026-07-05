@@ -67,6 +67,30 @@ fn primitives_and_expressions_match_the_oracle() {
 }
 
 #[test]
+fn transforms_match_the_oracle() {
+    // J.2: transforms lower to GeoNode::Transform, walked through the Manifold backend. The
+    // boolean-residual metric is tessellation-independent but POSE-sensitive — a wrong rotation order
+    // or matrix would put the solid in the wrong place and blow the residual, so this validates the
+    // 3x4 affine math (translate/rotate/scale/mirror/multmatrix) against the real binary.
+    agree("translate([5, 0, 0]) cube(10);");
+    agree("translate([1, 2, 3]) sphere(5, $fn = 24);");
+    agree("rotate([0, 0, 45]) cube(10);"); // Euler about Z
+    agree("rotate([90, 0, 0]) cylinder(h = 10, r = 3, $fn = 24);"); // about X, non-centered
+    agree("rotate(30) cube([10, 2, 2]);"); // scalar rotate about Z
+    agree("rotate(a = 90, v = [1, 1, 0]) cube([8, 2, 2]);"); // angle-axis
+    agree("scale([2, 1, 0.5]) cube(10);");
+    agree("mirror([1, 0, 0]) translate([5, 0, 0]) cube(4);"); // nested transform
+    agree("multmatrix([[1, 0, 0, 5], [0, 1, 0, 2], [0, 0, 1, 0], [0, 0, 0, 1]]) cube(3);");
+}
+
+// NOTE: boolean/multi-object programs are NOT oracle-differential-tested here yet. OpenSCAD renders
+// them fine, but the harness's oracle-side re-import (`Solid::from_indexed`) downcasts f64→f32 for
+// Manifold's MeshGL, and a boolean-RESULT mesh has near-coincident seam vertices that merge in f32 →
+// non-manifold → the oracle leg reports `rejected`. Not a fab-lang bug (it lowers booleans through
+// Manifold correctly — validated by exact VOLUME in `src/backend.rs`). Restoring the boolean
+// differential needs an f64 mesh re-import (MeshGL64) or a weld tolerance — filed as a harness box.
+
+#[test]
 fn use_include_loader_matches_the_oracle() {
     // The loader's core semantics, validated against the real binary (constant-returning functions, so
     // we stay clear of the known use-imported-fn-sees-root-scope gap). Single-object, no cycle/diamond

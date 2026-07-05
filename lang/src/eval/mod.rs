@@ -58,6 +58,18 @@ pub(super) struct Ctx<'a> {
     /// body re-enters `eval_stmt`), so a self-recursive module could overflow; this bounds it, LOUD
     /// ([`MAX_MODULE_DEPTH`]), never a silent stack crash.
     module_depth: Cell<usize>,
+    /// The children-frame STACK for `children()` (I.2.5): each active module call pushes its call-site
+    /// children + the caller's scope, so a `children()` in the body renders them LATE-bound. A stack, so
+    /// nested module calls each see their own children; `children()` pops during eval so a `children()`
+    /// inside the rendered children refers to the ENCLOSING call, not this one.
+    children_stack: RefCell<Vec<ChildrenFrame<'a>>>,
+}
+
+/// One active module call's children context: the call-site child statements (borrowed from the AST) +
+/// the CALLER's scope they evaluate in (OpenSCAD renders `children()` in the instantiation context).
+struct ChildrenFrame<'a> {
+    stmts: &'a [Stmt],
+    scope: Scope,
 }
 
 /// Max nested user-module call depth before we bail LOUD (OpenSCAD caps recursion similarly). Statement
@@ -736,6 +748,7 @@ pub(crate) fn evaluate_source(
         closures: RefCell::default(),
         messages: RefCell::default(),
         module_depth: Cell::default(),
+        children_stack: RefCell::default(),
     };
     let tree = run_stmts(exec.into_iter(), &ctx, &Scope::new())?;
     Ok((tree, ctx.messages.into_inner()))
@@ -863,11 +876,70 @@ fn call_user_module<'a>(
     }
     ctx.module_depth.set(depth + 1);
     let mut call = bind_module_scope(params, &mi.args, caller, global, ctx)?;
+    // `$children` = the call-site child count; the children themselves are stashed for `children()` to
+    // render LATE, in the CALLER's scope (I.2.5).
+    call.bind("$children", Value::Num(child_count(mi.children.len())));
+    ctx.children_stack.borrow_mut().push(ChildrenFrame {
+        stmts: mi.children.as_slice(),
+        scope: caller.clone(),
+    });
     let mut nodes = Vec::new();
     let result = eval_stmt(body, &mut call, global, ctx, &mut nodes);
-    ctx.module_depth.set(depth); // restore even on error (no `?` before this)
+    ctx.children_stack.borrow_mut().pop(); // restore even on error (no `?` before these)
+    ctx.module_depth.set(depth);
     result?;
     Ok(union_of(nodes))
+}
+
+/// Render `children()` / `children(i)` (I.2.5): the current module call's stashed call-site children,
+/// evaluated LATE in the CALLER's scope. `children()` → all; `children(i)` → the i-th; `children([i,j])`
+/// → those (out-of-range / negative indices drop). Outside any module call the stash is empty → no
+/// geometry. The current frame is POPPED for the duration so a `children()` INSIDE the rendered children
+/// refers to the ENCLOSING call (OpenSCAD's late-binding), then restored for the caller's continuation.
+fn eval_children<'a>(
+    mi: &'a ModuleInstantiation,
+    scope: &Scope,
+    global: &Scope,
+    ctx: &Ctx<'a>,
+) -> crate::Result<GeoNode> {
+    let (positional, _, _) = module::eval_args(mi, scope, ctx)?;
+    let Some(frame) = ctx.children_stack.borrow_mut().pop() else {
+        return Ok(GeoNode::Empty); // children() outside a module call → nothing
+    };
+    let selected: Vec<&Stmt> = match positional.first() {
+        None => frame.stmts.iter().collect(), // children() → all
+        Some(Value::Num(i)) => child_at(*i)
+            .and_then(|i| frame.stmts.get(i))
+            .into_iter()
+            .collect(),
+        Some(Value::NumList(xs)) => xs
+            .iter()
+            .filter_map(|&i| child_at(i).and_then(|i| frame.stmts.get(i)))
+            .collect(),
+        _ => Vec::new(),
+    };
+    let result = eval_nodes(&selected, ctx, &frame.scope, global);
+    ctx.children_stack.borrow_mut().push(frame); // restore for the caller's continuation
+    Ok(union_of(result?))
+}
+
+/// A child count as a `Num` — the child list is tiny, so the `usize → f64` widening is exact.
+#[allow(
+    clippy::cast_precision_loss,
+    reason = "a call's child count is small; the widening is exact"
+)]
+fn child_count(n: usize) -> f64 {
+    n as f64
+}
+
+/// A `children(i)` index: a non-negative WHOLE number → its `usize`, else `None` (dropped).
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "guarded: only a non-negative integer-valued f64 converts; everything else is None"
+)]
+fn child_at(i: f64) -> Option<usize> {
+    (i >= 0.0 && i.fract() == 0.0).then_some(i as usize)
 }
 
 /// Build a user module's call scope: match `args` to `params` (positional fill left-to-right, named by
@@ -1056,6 +1128,7 @@ fn build_ctx(program: &Program) -> Ctx<'_> {
         closures: RefCell::default(),
         messages: RefCell::default(),
         module_depth: Cell::default(),
+        children_stack: RefCell::default(),
     }
 }
 
@@ -1127,6 +1200,11 @@ fn eval_stmt<'a>(
                 }),
                 None => nodes.push(child),
             }
+        }
+        // `children()` / `children(i)` (I.2.5) — render the enclosing module call's CALL-SITE children,
+        // late-bound in the caller's scope. The BOSL2 currency: a wrapper module transforms `children()`.
+        StmtKind::Module(mi) if mi.name == "children" => {
+            nodes.push(eval_children(mi, scope, global, ctx)?);
         }
         // `for` / `intersection_for`: bind the loop variable(s) over a range/vector, evaluate the body
         // per iteration, and union (or intersect) the results (I.3.3 — the statement half of control

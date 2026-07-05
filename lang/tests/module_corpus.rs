@@ -127,3 +127,83 @@ fn unknown_module_is_loud() {
         Error::Unimplemented(m) if m.contains("unknown module")
     ));
 }
+
+// ───────────────────────────── children() / $children (I.2.5) ─────────────────────────────
+
+/// A wrapper module renders its call-site children via `children()` — the BOSL2 currency (a module
+/// that transforms / recolors / arrays whatever it's given).
+#[test]
+fn children_renders_call_site_children() {
+    // `children()` wrapped in a transform → the child, transformed.
+    assert!(matches!(
+        evaluate_geometry("module m() translate([5, 0, 0]) children(); m() cube(1);").unwrap(),
+        GeoNode::Transform { .. }
+    ));
+    // several children → their union.
+    assert!(matches!(
+        evaluate_geometry("module m() children(); m() { cube(1); translate([5, 0, 0]) cube(1); }")
+            .unwrap(),
+        GeoNode::Union(c) if c.len() == 2
+    ));
+    // `children()` OUTSIDE any module call → nothing.
+    assert_eq!(evaluate_geometry("children();").unwrap(), GeoNode::Empty);
+}
+
+/// `children(i)` picks the i-th call-site child; `$children` is their count.
+#[test]
+fn children_index_and_count() {
+    let verts = |src: &str| evaluate(src).unwrap().vert_count();
+    let (cube, sphere) = (verts("cube(1);"), verts("sphere(2, $fn = 8);"));
+    assert_ne!(cube, sphere); // distinguishable
+    // child 0 is the cube, child 1 the sphere.
+    assert_eq!(
+        verts("module pick() children(0); pick() { cube(1); sphere(2, $fn = 8); }"),
+        cube
+    );
+    assert_eq!(
+        verts("module pick() children(1); pick() { cube(1); sphere(2, $fn = 8); }"),
+        sphere
+    );
+    // an out-of-range index → nothing.
+    assert_eq!(
+        evaluate_geometry("module pick() children(9); pick() cube(1);").unwrap(),
+        GeoNode::Empty
+    );
+    // children([indices]) → those children (out-of-range drop).
+    assert!(matches!(
+        evaluate_geometry(
+            "module pick() children([0, 2]); pick() { cube(1); sphere(1, $fn = 8); cube(2); }"
+        )
+        .unwrap(),
+        GeoNode::Union(c) if c.len() == 2
+    ));
+    // a non-index arg (a string) → nothing.
+    assert_eq!(
+        evaluate_geometry("module pick() children(\"x\"); pick() cube(1);").unwrap(),
+        GeoNode::Empty
+    );
+    // $children is the count — a module can gate on it.
+    assert!(matches!(
+        evaluate_geometry(
+            "module g() if ($children == 2) cube(1); g() { sphere(1, $fn = 8); sphere(1, $fn = 8); }"
+        )
+        .unwrap(),
+        GeoNode::Leaf(_)
+    ));
+    assert_eq!(
+        evaluate_geometry("module g() if ($children == 2) cube(1); g() sphere(1, $fn = 8);")
+            .unwrap(),
+        GeoNode::Empty
+    );
+}
+
+/// `children()` LATE-binds: a `children()` inside the rendered children refers to the ENCLOSING call,
+/// not the current one — so a wrapper-of-a-wrapper passes the outer children all the way through.
+#[test]
+fn children_late_binds_through_nesting() {
+    // a() calls b() with `children()` as b's child; b() renders it → a()'s child (the cube).
+    assert_eq!(
+        evaluate("module a() b() children(); module b() children(); a() cube(1);").unwrap(),
+        evaluate("cube(1);").unwrap()
+    );
+}

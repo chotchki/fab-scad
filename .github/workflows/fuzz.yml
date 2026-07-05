@@ -1,0 +1,51 @@
+# Scheduled fuzzing of the fab-lang parser + lexer (the "fuzz-from-first-commit" doctrine, SPEC).
+# Not a per-PR gate — a nightly campaign that persists+minimizes the corpus and, on a crash, fails
+# LOUD and uploads the reproducer for the trophy log (lang/fuzz/TROPHIES.md).
+name: fuzz
+
+on:
+  schedule:
+    - cron: '0 6 * * *' # nightly, 06:00 UTC
+  workflow_dispatch: {} # manual runs (pick a longer budget by editing -max_total_time)
+
+concurrency:
+  group: fuzz
+  cancel-in-progress: false
+
+jobs:
+  fuzz:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-fuzz
+      # A crash makes `cargo fuzz run` exit non-zero → the job FAILS → the reproducer is uploaded and
+      # goes into TROPHIES.md as a regression test. Budgets are per-target wall-clock.
+      - name: fuzz parse
+        working-directory: lang
+        run: cargo fuzz run parse -- -max_total_time=300 -rss_limit_mb=2048
+      - name: fuzz lex
+        working-directory: lang
+        run: cargo fuzz run lex -- -max_total_time=120 -rss_limit_mb=2048
+      # Minimize the accumulated corpus to a coverage-minimal set + publish it, so the next run (and
+      # anyone reproducing locally) starts from the best-known corpus.
+      - name: minimize corpus
+        if: always()
+        working-directory: lang
+        run: cargo fuzz cmin parse && cargo fuzz cmin lex
+      - name: upload minimized corpus
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fab-lang-fuzz-corpus
+          path: lang/fuzz/corpus
+          retention-days: 30
+      - name: upload crash reproducers
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fab-lang-fuzz-crashes
+          path: lang/fuzz/artifacts
+          retention-days: 90

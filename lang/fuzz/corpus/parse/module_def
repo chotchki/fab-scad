@@ -1,0 +1,1 @@
+module box(w, d=1, $fn=8) { cube([w,d,1]); }

@@ -39,10 +39,10 @@ Driven by `claude-plan-bridge` (FORMATv2). Hand-authored; run
   - [ ] H.5.4 - cargo-mutants gate on the parser (backlog #37) — prove the tests CATCH bugs, kill survivors
 - [ ] H.6 - cargo-fuzz target + SCHEDULED CI fuzz job + persisted/minimized corpus + trophy log (fuzz-from-first-commit doctrine starts here, not later)
 
-  - [ ] H.6.1 - cargo-fuzz target: parse(arbitrary bytes) never panics/hangs/OOMs — wire the fuzz crate + the parse harness
-  - [ ] H.6.2 - Fuzz seed corpus: extend the lexer seed set to the parser + a structure-aware corpus from H.5's generator
-  - [ ] H.6.3 - Scheduled CI fuzz job + persisted/minimized corpus artifact (the fuzz-from-first-commit doctrine)
-  - [ ] H.6.4 - TROPHIES.md doctrine: every fuzz-found bug logged + regression-pinned as a test
+  - [x] H.6.1 - cargo-fuzz target: parse(arbitrary bytes) never panics/hangs/OOMs — wire the fuzz crate + the parse harness
+  - [x] H.6.2 - Fuzz seed corpus: extend the lexer seed set to the parser + a structure-aware corpus from H.5's generator
+  - [x] H.6.3 - Scheduled CI fuzz job + persisted/minimized corpus artifact (the fuzz-from-first-commit doctrine)
+  - [x] H.6.4 - TROPHIES.md doctrine: every fuzz-found bug logged + regression-pinned as a test
 ## Phase I - scad-rs: evaluator core
 Meta - I've been looking into cranelift and it looks like it would be VERY approachable for us leverage for execution instead of going the interpreter route
 - [ ] I.1 - Value model full: enum + NumList fast path + interned strings + lazy ranges; fast==slow BITWISE property via the shared fixed 4-lane accumulation order

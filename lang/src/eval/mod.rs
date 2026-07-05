@@ -75,6 +75,15 @@ enum Task<'a> {
     /// captured env). Anything else → `undef` (calling a non-function). The dynamic-callee path:
     /// `(expr)(args)`, or a variable holding a closure.
     CallValue { args: &'a [Arg], caller: Scope },
+    /// Pop the just-evaluated binding value, bind it as `name` in a child of `scope`, then either
+    /// evaluate the next `let` binding in that scope or (no bindings left) evaluate `body`. `let`
+    /// bindings are SEQUENTIAL — a later one sees the earlier ones.
+    LetStep {
+        name: &'a str,
+        rest: &'a [Arg],
+        body: &'a Expr,
+        scope: Scope,
+    },
     /// Push an `undef` — the value of an unfilled, defaultless parameter slot.
     PushUndef,
 }
@@ -166,6 +175,28 @@ pub(super) fn eval_with_ctx<'a>(
                     _ => values.push(Value::Undef), // calling a non-function → undef
                 }
             }
+            Task::LetStep {
+                name,
+                rest,
+                body,
+                scope,
+            } => {
+                let value = values.pop().unwrap_or(Value::Undef);
+                let mut inner = scope.child();
+                inner.bind(name, value);
+                match rest.split_first() {
+                    Some((next, remaining)) => {
+                        tasks.push(Task::LetStep {
+                            name: next.name.as_deref().unwrap_or("_"),
+                            rest: remaining,
+                            body,
+                            scope: inner.clone(),
+                        });
+                        tasks.push(Task::Eval(&next.value, inner));
+                    }
+                    None => tasks.push(Task::Eval(body, inner)),
+                }
+            }
             Task::PushUndef => values.push(Value::Undef),
         }
     }
@@ -211,27 +242,7 @@ fn eval_node<'a>(
                 tasks.push(Task::Eval(el, scope.clone())); // reversed pushes → forward eval order
             }
         }
-        ExprKind::Call { callee, args } => {
-            if let ExprKind::Ident(name) = &callee.kind {
-                // a named user function (its own namespace) resolves first.
-                if let Some(&(params, body)) = ctx.functions.get(name.as_str()) {
-                    push_call(params, body, args, scope, global, tasks);
-                    return Ok(());
-                }
-                // an UNBOUND identifier callee is a builtin (or genuinely unknown) → LOUD (I.4).
-                if matches!(scope.lookup(name), Value::Undef) {
-                    return Err(crate::Error::Unimplemented(
-                        "call to a builtin or unknown function is not yet implemented (I.4)",
-                    ));
-                }
-            }
-            // otherwise the callee is a value — evaluate it, then apply (a closure in a var, `(e)(a)`).
-            tasks.push(Task::CallValue {
-                args,
-                caller: scope.clone(),
-            });
-            tasks.push(Task::Eval(callee, scope.clone()));
-        }
+        ExprKind::Call { callee, args } => dispatch_call(callee, args, scope, global, ctx, tasks)?,
         ExprKind::Index { base, index } => {
             tasks.push(Task::Index);
             tasks.push(Task::Eval(index, scope.clone()));
@@ -266,11 +277,18 @@ fn eval_node<'a>(
                 env: scope.clone(),
             });
         }
-        ExprKind::Let { .. } => {
-            return Err(crate::Error::Unimplemented(
-                "let expressions are not yet implemented (I.3)",
-            ));
-        }
+        ExprKind::Let { bindings, body } => match bindings.split_first() {
+            Some((first, rest)) => {
+                tasks.push(Task::LetStep {
+                    name: first.name.as_deref().unwrap_or("_"),
+                    rest,
+                    body,
+                    scope: scope.clone(),
+                });
+                tasks.push(Task::Eval(&first.value, scope.clone()));
+            }
+            None => tasks.push(Task::Eval(body, scope.clone())), // `let() body` → just the body
+        },
         ExprKind::Assert { .. } | ExprKind::Echo { .. } => {
             return Err(crate::Error::Unimplemented(
                 "assert / echo expressions are not yet implemented (I.5)",
@@ -285,6 +303,36 @@ fn eval_node<'a>(
             ));
         }
     }
+    Ok(())
+}
+
+/// Dispatch a call `callee(args)`: a NAMED user function (own namespace) resolves first; an UNBOUND
+/// identifier callee is a builtin or genuinely unknown → LOUD (I.4); otherwise the callee is a value —
+/// evaluate it and apply it (a closure in a variable, or `(expr)(args)`).
+fn dispatch_call<'a>(
+    callee: &'a Expr,
+    args: &'a [Arg],
+    scope: &Scope,
+    global: &Scope,
+    ctx: &Ctx<'a>,
+    tasks: &mut Vec<Task<'a>>,
+) -> crate::Result<()> {
+    if let ExprKind::Ident(name) = &callee.kind {
+        if let Some(&(params, body)) = ctx.functions.get(name.as_str()) {
+            push_call(params, body, args, scope, global, tasks);
+            return Ok(());
+        }
+        if matches!(scope.lookup(name), Value::Undef) {
+            return Err(crate::Error::Unimplemented(
+                "call to a builtin or unknown function is not yet implemented (I.4)",
+            ));
+        }
+    }
+    tasks.push(Task::CallValue {
+        args,
+        caller: scope.clone(),
+    });
+    tasks.push(Task::Eval(callee, scope.clone()));
     Ok(())
 }
 

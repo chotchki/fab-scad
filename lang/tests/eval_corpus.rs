@@ -220,14 +220,24 @@ fn ranges_are_first_class_values() {
 fn deferred_constructs_are_loud() {
     assert!(matches!(ev_err("f(1)"), Error::Unimplemented(m) if m.contains("I.4"))); // unknown/builtin fn
     assert!(matches!(ev_err("a.b"), Error::Unimplemented(m) if m.contains("I.1"))); // member access
-    // (function literals + calling a function VALUE now evaluate — I.2.3.3; see function_values below.)
-    // the remaining H.3 expression forms parse but defer: let → I.3, assert / echo → I.5.
-    assert!(matches!(ev_err("let(a=1)a"), Error::Unimplemented(m) if m.contains("I.3")));
+    // (function literals + calling a function VALUE now evaluate — I.2.3.3; let → I.3.1; see below.)
+    // the remaining H.3 expression forms parse but defer: assert / echo → I.5.
     assert!(matches!(ev_err("assert(true)1"), Error::Unimplemented(m) if m.contains("I.5")));
     assert!(matches!(ev_err("echo(1)2"), Error::Unimplemented(m) if m.contains("I.5")));
     // list comprehensions defer to I.3 (control flow).
     assert!(matches!(ev_err("[for(i=[0:3])i]"), Error::Unimplemented(m) if m.contains("I.3")));
     assert!(matches!(ev_err("[each [1]]"), Error::Unimplemented(m) if m.contains("I.3")));
+}
+
+#[test]
+fn let_expressions() {
+    assert_eq!(ev("let(a = 1) a + 1"), num(2.0));
+    assert_eq!(ev("let(a = 1, b = 2) a + b"), num(3.0));
+    assert_eq!(ev("let(a = 1, b = a + 1) b"), num(2.0)); // SEQUENTIAL: b sees a
+    assert_eq!(ev("let(a = 1, a = 2) a"), num(2.0)); // a later binding shadows an earlier one
+    assert_eq!(ev("let() 5"), num(5.0)); // no bindings → just the body
+    assert_eq!(ev("let(a = 10) let(b = a) b"), num(10.0)); // nested lets: inner sees the outer binding
+    assert_eq!(ev("let(a = 1) (a) + nope"), Value::Undef); // a bound inside; an outer-unbound name is undef
 }
 
 #[test]

@@ -28,6 +28,9 @@ Driven by `claude-plan-bridge` (FORMATv2). Hand-authored; run
   - [ ] I.2.5 - children() / $children late binding (refers to the call-site children, late-bound)
   - [ ] I.2.6 - use/include LOADER: path resolution + include-splice + use-import (resolves H's zero-IO AST nodes; parser stays zero-IO)
 - [ ] I.3 - Control flow + comprehensions + recursion bounded by memory — corner_brace-class deep recursion as the standing regression proof
+  - [x] I.3.1 - let-expression `let(a=1,b=2) body` (ExprKind::Let): bind args left-to-right in a child scope, evaluate body there. Pure expression — deferred here from I.2.3.3. Reused by the comprehension `let`.
+  - [ ] I.3.2 - List comprehensions on the explicit stack: LcFor (iterate range/list), LcForC (C-style), LcEach (splice), LcIf/else (filter), lc-let — produce a List, nesting arbitrarily. Uses the I.1.2 range iterator; the element cap + warning ride here.
+  - [ ] I.3.3 - STATEMENT control flow (if/for producing geometry → the CSG tree) — GEOMETRY-COUPLED, deferred to sit with Phase J (needs transforms/booleans/multi-child union). The expression-level halves (I.3.1/I.3.2) land now; this is the statement half.
 - [ ] I.4 - Builtin function library (~80: math/list/string/type predicates), each landing with its semantics/ test
 - [ ] I.5 - undef propagation + warning/echo text bug-for-bug (string-equal vs oracle)
 - [ ] I.6 - tracing spans on the call path + aggregating benchmark layer; release builds compile it out; overhead measured

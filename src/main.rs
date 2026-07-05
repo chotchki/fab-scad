@@ -389,7 +389,7 @@ fn make_cmd(target: &Path, printer: Option<String>, out: Option<PathBuf>, gap: f
     let sum = fab_scad::auto::make(
         &oscad,
         target,
-        pr.bed,
+        fab_lang::Dims::from_array(pr.bed),
         &out_3mf,
         &out_dir,
         Duration::from_secs(120),

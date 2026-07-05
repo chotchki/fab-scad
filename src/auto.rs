@@ -20,6 +20,8 @@ use crate::manifest::Connector;
 use crate::num::Num;
 #[cfg(all(feature = "kernel", feature = "native"))]
 use crate::openscad::Openscad;
+#[cfg(feature = "kernel")]
+use fab_lang::{Dims, Vec3};
 
 /// Smallest onion worth placing (mm) — below this the slab/wall is too thin for a useful joint.
 pub const MIN_ONION: f64 = 2.0;
@@ -64,7 +66,7 @@ fn axis_char(axis: usize) -> char {
 /// Room bordering cut `i` along its axis on each side `(below, above)`: distance to the nearest
 /// same-axis neighbour, or the model bound.
 #[cfg(feature = "kernel")]
-fn axial_room(cuts: &[(usize, f64)], i: usize, min: [f64; 3], max: [f64; 3]) -> (f64, f64) {
+fn axial_room(cuts: &[(usize, f64)], i: usize, min: Vec3, max: Vec3) -> (f64, f64) {
     let (ai, at) = cuts[i];
     let (mut below, mut above) = (min[ai], max[ai]);
     for (j, &(aj, aj_at)) in cuts.iter().enumerate() {
@@ -85,7 +87,7 @@ fn axial_room(cuts: &[(usize, f64)], i: usize, min: [f64; 3], max: [f64; 3]) -> 
 /// d/2 into each piece, except the +Z cap of a Z cut, which reaches the teardrop tip (`ONION_TIP`·r)
 /// into the upper slab.
 #[cfg(feature = "kernel")]
-fn axial_cap(cuts: &[(usize, f64)], i: usize, min: [f64; 3], max: [f64; 3]) -> f64 {
+fn axial_cap(cuts: &[(usize, f64)], i: usize, min: Vec3, max: Vec3) -> f64 {
     let (below, above) = axial_room(cuts, i, min, max);
     let below_d = 2.0 * (below - ONION_WALL);
     let above_d = if cuts[i].0 == 2 {
@@ -102,12 +104,7 @@ fn axial_cap(cuts: &[(usize, f64)], i: usize, min: [f64; 3], max: [f64; 3]) -> f
 /// no OpenSCAD spawn. `base` is the whole-model solid; `min`/`max` its bbox; `bed` the printer build
 /// volume `[x, y, z]`. A model that already fits → an empty plan.
 #[cfg(feature = "kernel")]
-pub fn plan(
-    base: &crate::kernel::Solid,
-    min: [f64; 3],
-    max: [f64; 3],
-    bed: [f64; 3],
-) -> Result<AutoPlan> {
+pub fn plan(base: &crate::kernel::Solid, min: Vec3, max: Vec3, bed: Dims) -> Result<AutoPlan> {
     let cuts: Vec<(usize, f64)> = crate::auto_slice::auto_slice(min, max, bed)
         .into_iter()
         .map(|c| (c.axis, c.at))
@@ -180,7 +177,7 @@ pub fn plan(
 pub fn make(
     oscad: &Openscad,
     source: &Path,
-    bed: [f64; 3],
+    bed: Dims,
     out_3mf: &Path,
     out_dir: &Path,
     timeout: Duration,
@@ -213,7 +210,7 @@ pub fn make(
 #[cfg(feature = "kernel")]
 pub fn make_solid<W: std::io::Write + std::io::Seek>(
     base: crate::kernel::Solid,
-    bed: [f64; 3],
+    bed: Dims,
     out: W,
     gap: f64,
 ) -> Result<crate::bambu::ExportSummary> {
@@ -241,7 +238,7 @@ pub fn make_planned<W: std::io::Write + std::io::Seek>(
     base: crate::kernel::Solid,
     cuts: &[(char, f64)],
     connectors: Vec<Connector>,
-    bed: [f64; 3],
+    bed: Dims,
     out: W,
     gap: f64,
 ) -> Result<crate::bambu::ExportSummary> {
@@ -331,7 +328,10 @@ mod tests {
         // Three X cuts in a model spanning X ∈ [0, 500]. The middle cut's room is bounded by its
         // neighbours; the edge cuts by the model bound.
         let cuts = [(0usize, 100.0), (0, 300.0), (1, 250.0)]; // the Y cut is a different axis
-        let (min, max) = ([0.0; 3], [500.0, 500.0, 500.0]);
+        let (min, max) = (
+            Vec3::from_array([0.0; 3]),
+            Vec3::from_array([500.0, 500.0, 500.0]),
+        );
         assert_eq!(axial_room(&cuts, 0, min, max), (100.0, 200.0)); // [0..100..300]
         assert_eq!(axial_room(&cuts, 1, min, max), (200.0, 200.0)); // [100..300..500]
         // The Y cut ignores the X cuts entirely.
@@ -342,7 +342,10 @@ mod tests {
     #[cfg(feature = "kernel")]
     fn axial_cap_reserves_the_wall_and_z_tip() {
         let cuts = [(0usize, 250.0)]; // one X cut, slab 250 each side
-        let (min, max) = ([0.0; 3], [500.0, 500.0, 500.0]);
+        let (min, max) = (
+            Vec3::from_array([0.0; 3]),
+            Vec3::from_array([500.0, 500.0, 500.0]),
+        );
         // X cut: sphere both sides → 2·(250 − 1.2) = 497.6.
         assert!((axial_cap(&cuts, 0, min, max) - 497.6).abs() < 1e-6);
         // Z cut: the +Z (above) side reserves the teardrop tip, so it's the tighter cap.
@@ -365,7 +368,7 @@ mod tests {
         let sum = make(
             &oscad,
             &scad,
-            [256.0, 256.0, 256.0],
+            Dims::from_array([256.0, 256.0, 256.0]),
             &out,
             &tmp,
             Duration::from_secs(60),
@@ -397,7 +400,7 @@ mod tests {
         // 700mm on a 256 bed → 3 pieces, valid multi-piece project in the Cursor.
         let base = crate::kernel::Solid::cube(700.0, 120.0, 60.0, false);
         let mut buf = std::io::Cursor::new(Vec::new());
-        let sum = make_solid(base, [256.0; 3], &mut buf, 5.0).unwrap();
+        let sum = make_solid(base, Dims::from_array([256.0; 3]), &mut buf, 5.0).unwrap();
         assert_eq!(sum.pieces, 3, "700mm on a 256 bed → 3 pieces");
         let bytes = buf.into_inner();
         assert!(!bytes.is_empty());
@@ -418,7 +421,13 @@ mod tests {
         // Now in-process — no OpenSCAD needed. 600mm on X, 256 bed → X overflows (only X) → cuts on
         // X, onions on the cut faces. Kernel cube (min corner at origin) matches the min/max.
         let base = crate::kernel::Solid::cube(600.0, 100.0, 50.0, false);
-        let p = plan(&base, [0.0; 3], [600.0, 100.0, 50.0], [256.0; 3]).unwrap();
+        let p = plan(
+            &base,
+            Vec3::from_array([0.0; 3]),
+            Vec3::from_array([600.0, 100.0, 50.0]),
+            Dims::from_array([256.0; 3]),
+        )
+        .unwrap();
         assert!(!p.cuts.is_empty(), "600mm on a 256 bed must be cut");
         assert!(
             p.cuts.iter().all(|&(ax, _)| ax == 'x'),

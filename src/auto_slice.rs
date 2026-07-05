@@ -17,6 +17,8 @@
 //!   - **coarse rotation set**: rotate-to-fit tries a fixed ±45°/axis set, not a continuous search —
 //!     enough for the common diagonal case, but not an optimal orientation solver.
 
+use fab_lang::{Affine, Dims, Vec3};
+
 /// A planned cut: which axis (0 = X, 1 = Y, 2 = Z) and its position along that axis (model coords).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct AutoCut {
@@ -27,7 +29,7 @@ pub struct AutoCut {
 /// Cuts that partition the model bbox `[min, max]` into cells each fitting `bed` = `[x, y, z]` mm.
 /// Per axis: if the extent overflows the matching bed dimension, cut into `ceil(extent / bed)` equal
 /// slabs (`n − 1` interior planes); otherwise leave it whole. Empty when the model already fits.
-pub fn auto_slice(min: [f64; 3], max: [f64; 3], bed: [f64; 3]) -> Vec<AutoCut> {
+pub fn auto_slice(min: Vec3, max: Vec3, bed: Dims) -> Vec<AutoCut> {
     let mut cuts = Vec::new();
     for axis in 0..3 {
         let extent = max[axis] - min[axis];
@@ -51,7 +53,7 @@ pub fn auto_slice(min: [f64; 3], max: [f64; 3], bed: [f64; 3]) -> Vec<AutoCut> {
 
 /// The piece count `auto_slice` produces for `[min, max]` on `bed` — the product of per-axis slab
 /// counts. Handy for a "this will make N pieces across M plates" read-out before committing.
-pub fn piece_count(min: [f64; 3], max: [f64; 3], bed: [f64; 3]) -> usize {
+pub fn piece_count(min: Vec3, max: Vec3, bed: Dims) -> usize {
     (0..3)
         .map(|axis| {
             let extent = max[axis] - min[axis];
@@ -70,9 +72,9 @@ pub fn piece_count(min: [f64; 3], max: [f64; 3], bed: [f64; 3]) -> usize {
 #[cfg(feature = "kernel")]
 #[derive(Debug, Clone, Copy)]
 pub struct FitRotation {
-    pub rot: fab_lang::Affine,
-    pub min: [f64; 3],
-    pub max: [f64; 3],
+    pub rot: Affine,
+    pub min: Vec3,
+    pub max: Vec3,
     pub pieces: usize,
 }
 
@@ -85,26 +87,24 @@ pub struct FitRotation {
 /// bbox wins. The pieces come out in the rotated frame and re-orient per-piece for printing anyway, so
 /// the model's original orientation doesn't matter downstream.
 #[cfg(feature = "kernel")]
-pub fn best_fit_rotation(base: &crate::kernel::Solid, bed: [f64; 3]) -> FitRotation {
+pub fn best_fit_rotation(base: &crate::kernel::Solid, bed: Dims) -> FitRotation {
     let rad = std::f64::consts::FRAC_PI_4; // 45°
     // The rotation builders are column-major (for the OLD transform); wrap as Affine so from_column_major
     // ∘ to_column_major round-trips — Manifold receives the identical matrix, byte for byte.
-    let cm = fab_lang::Affine::from_column_major;
+    let cm = Affine::from_column_major;
     let mut candidates = vec![cm(identity())];
     for &a in &[rad, -rad] {
         candidates.push(cm(rot_x(a)));
         candidates.push(cm(rot_y(a)));
         candidates.push(cm(rot_z(a)));
     }
-    let vol =
-        |min: [f64; 3], max: [f64; 3]| (max[0] - min[0]) * (max[1] - min[1]) * (max[2] - min[2]);
+    let vol = |min: Vec3, max: Vec3| Dims::from_extent(min, max).volume();
     // Seed with identity so a spin must EARN the swap.
     let mut best: Option<FitRotation> = None;
     for rot in candidates {
         let Some((min, max)) = base.transform(&rot).bbox() else {
             continue;
         };
-        let (min, max) = (min.to_array(), max.to_array()); // Vec3 → the printer domain's [f64; 3]
         let pieces = piece_count(min, max, bed);
         let cand = FitRotation {
             rot,
@@ -152,26 +152,55 @@ fn rot_z(a: f64) -> [f64; 12] {
 mod tests {
     use super::*;
 
-    const BED: [f64; 3] = [256.0, 256.0, 256.0];
+    const BED: Dims = Dims::new(256.0, 256.0, 256.0);
 
     #[test]
     fn model_within_bed_makes_no_cuts() {
-        assert!(auto_slice([0.0; 3], [200.0, 200.0, 200.0], BED).is_empty());
-        assert_eq!(piece_count([0.0; 3], [200.0, 200.0, 200.0], BED), 1);
+        assert!(
+            auto_slice(
+                Vec3::from_array([0.0; 3]),
+                Vec3::from_array([200.0, 200.0, 200.0]),
+                BED
+            )
+            .is_empty()
+        );
+        assert_eq!(
+            piece_count(
+                Vec3::from_array([0.0; 3]),
+                Vec3::from_array([200.0, 200.0, 200.0]),
+                BED
+            ),
+            1
+        );
     }
 
     #[test]
     fn one_overflowing_axis_one_cut() {
         // 500 on X, bed 256 → 2 equal pieces → a single cut at the midpoint. Y/Z untouched.
-        let cuts = auto_slice([0.0; 3], [500.0, 100.0, 50.0], BED);
+        let cuts = auto_slice(
+            Vec3::from_array([0.0; 3]),
+            Vec3::from_array([500.0, 100.0, 50.0]),
+            BED,
+        );
         assert_eq!(cuts, vec![AutoCut { axis: 0, at: 250.0 }]);
-        assert_eq!(piece_count([0.0; 3], [500.0, 100.0, 50.0], BED), 2);
+        assert_eq!(
+            piece_count(
+                Vec3::from_array([0.0; 3]),
+                Vec3::from_array([500.0, 100.0, 50.0]),
+                BED
+            ),
+            2
+        );
     }
 
     #[test]
     fn equal_division_leaves_no_sliver() {
         // 600 on X, bed 256 → ceil(600/256)=3 equal 200mm pieces → cuts at 200 and 400 (NOT 256+256+88).
-        let cuts = auto_slice([0.0; 3], [600.0, 100.0, 50.0], BED);
+        let cuts = auto_slice(
+            Vec3::from_array([0.0; 3]),
+            Vec3::from_array([600.0, 100.0, 50.0]),
+            BED,
+        );
         assert_eq!(
             cuts,
             vec![
@@ -184,7 +213,11 @@ mod tests {
     #[test]
     fn two_overflowing_axes_grid() {
         // 400×300 footprint on a 256 bed → 1 cut on X (2 pieces), 1 on Y (2 pieces) → a 2×2 grid.
-        let cuts = auto_slice([0.0; 3], [400.0, 300.0, 50.0], BED);
+        let cuts = auto_slice(
+            Vec3::from_array([0.0; 3]),
+            Vec3::from_array([400.0, 300.0, 50.0]),
+            BED,
+        );
         assert_eq!(cuts.iter().filter(|c| c.axis == 0).count(), 1);
         assert_eq!(cuts.iter().filter(|c| c.axis == 1).count(), 1);
         assert_eq!(
@@ -192,20 +225,38 @@ mod tests {
             0,
             "Z fits, no Z cut"
         );
-        assert_eq!(piece_count([0.0; 3], [400.0, 300.0, 50.0], BED), 4);
+        assert_eq!(
+            piece_count(
+                Vec3::from_array([0.0; 3]),
+                Vec3::from_array([400.0, 300.0, 50.0]),
+                BED
+            ),
+            4
+        );
     }
 
     #[test]
     fn cuts_offset_by_model_min() {
         // A model not at the origin: cuts are placed in model coords (min + step·k), not from zero.
-        let cuts = auto_slice([-100.0, 0.0, 0.0], [400.0, 100.0, 50.0], BED);
+        let cuts = auto_slice(
+            Vec3::from_array([-100.0, 0.0, 0.0]),
+            Vec3::from_array([400.0, 100.0, 50.0]),
+            BED,
+        );
         // extent 500 on X → 2 pieces → cut at min + 250 = 150.
         assert_eq!(cuts, vec![AutoCut { axis: 0, at: 150.0 }]);
     }
 
     #[test]
     fn exact_bed_fit_is_not_cut() {
-        assert!(auto_slice([0.0; 3], [256.0, 256.0, 256.0], BED).is_empty());
+        assert!(
+            auto_slice(
+                Vec3::from_array([0.0; 3]),
+                Vec3::from_array([256.0, 256.0, 256.0]),
+                BED
+            )
+            .is_empty()
+        );
     }
 
     #[test]
@@ -218,7 +269,6 @@ mod tests {
             &fab_lang::Affine::from_column_major(rot_z(std::f64::consts::FRAC_PI_4)),
         );
         let (min, max) = bar.bbox().unwrap();
-        let (min, max) = (min.to_array(), max.to_array());
         assert_eq!(
             piece_count(min, max, BED),
             4,

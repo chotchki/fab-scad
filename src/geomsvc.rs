@@ -9,13 +9,13 @@ use crate::kernel::Solid;
 use crate::manifest::{Connector, Cut, Slicing};
 use crate::num::Num;
 use crate::{auto, auto_slice, slicing, stl, threemf_in};
-use fab_lang::{Affine, Tri, Vec3};
+use fab_lang::{Affine, Dims, Tri, Vec3};
 
 /// The service: never panics outward, never errors the transport — failures are a Response.
 pub fn handle(req: Request) -> Response {
     let run = || -> Result<Response> {
         match req {
-            Request::Analyze { name, bytes, bed } => analyze(&name, &bytes, bed),
+            Request::Analyze { name, bytes, bed } => analyze(&name, &bytes, Dims::from_array(bed)),
             Request::Slice {
                 objects,
                 cuts,
@@ -28,7 +28,7 @@ pub fn handle(req: Request) -> Response {
                 connectors,
                 bed,
                 gap,
-            } => export(&objects, &cuts, &connectors, bed, gap),
+            } => export(&objects, &cuts, &connectors, Dims::from_array(bed), gap),
             Request::Section { objects, axis, at } => Ok(Response::Sectioned {
                 loops: rotated_union(&objects)?.cross_section(axis, at),
             }),
@@ -39,7 +39,7 @@ pub fn handle(req: Request) -> Response {
     })
 }
 
-fn analyze(name: &str, bytes: &[u8], bed: [f64; 3]) -> Result<Response> {
+fn analyze(name: &str, bytes: &[u8], bed: Dims) -> Result<Response> {
     // Per object: (display-fallback bytes, maybe a Solid, color, tri count).
     let mut solids: Vec<Solid> = Vec::new();
     let mut raw: Vec<GeomObject> = Vec::new();
@@ -100,8 +100,8 @@ fn analyze(name: &str, bytes: &[u8], bed: [f64; 3]) -> Result<Response> {
         objects,
         plan: Some(PlanOut {
             rot: fit.rot.to_column_major(), // the wire carries the column-major matrix, as before
-            min: fit.min,
-            max: fit.max,
+            min: fit.min.to_array(),
+            max: fit.max.to_array(),
             cuts: planned.cuts,
             connectors: planned.connectors.iter().map(WireConn::from).collect(),
         }),
@@ -154,7 +154,7 @@ fn export(
     objects: &[GeomObject],
     cuts: &[(char, f64)],
     connectors: &[WireConn],
-    bed: [f64; 3],
+    bed: Dims,
     gap: f64,
 ) -> Result<Response> {
     let base = rotated_union(objects)?;

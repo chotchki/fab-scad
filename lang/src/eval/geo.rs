@@ -21,6 +21,7 @@ use std::collections::BTreeMap;
 use super::trig::{cos_degrees, sin_degrees};
 use super::value::Value;
 use crate::Mesh;
+use crate::geom::Affine;
 
 /// A node in the CSG geometry tree.
 #[derive(Debug, Clone, PartialEq)]
@@ -31,8 +32,8 @@ pub enum GeoNode {
     Leaf(Mesh),
     /// An affine transform of a subtree (`translate`/`rotate`/`scale`/`mirror`/`multmatrix`).
     Transform {
-        /// 3×4 row-major affine.
-        matrix: [f64; 12],
+        /// The affine.
+        matrix: Affine,
         /// The transformed subtree.
         child: Box<GeoNode>,
     },
@@ -63,8 +64,8 @@ pub(super) fn transform_matrix(
     name: &str,
     positional: &[Value],
     named: &BTreeMap<String, Value>,
-) -> [f64; 12] {
-    match name {
+) -> Affine {
+    Affine::row_major(match name {
         "translate" => translate(vec3(arg(positional, named, 0, "v"))),
         "scale" => scale(scale_factor(arg(positional, named, 0, "v"))),
         "mirror" => mirror(vec3(arg(positional, named, 0, "v"))),
@@ -74,7 +75,7 @@ pub(super) fn transform_matrix(
             positional.get(1).or_else(|| named.get("v")),
         ),
         _ => IDENTITY,
-    }
+    })
 }
 
 const IDENTITY: [f64; 12] = [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0];
@@ -245,6 +246,10 @@ mod tests {
     fn approx(a: f64, b: f64) {
         assert!((a - b).abs() < 1e-12, "{a} != {b}");
     }
+    /// `transform_matrix` as a row-major `[f64; 12]`, for the exact-literal asserts.
+    fn tm(name: &str, positional: &[Value], named: &BTreeMap<String, Value>) -> [f64; 12] {
+        transform_matrix(name, positional, named).as_row_major()
+    }
 
     #[test]
     fn predicates() {
@@ -262,35 +267,20 @@ mod tests {
     fn translate_scale_mirror() {
         let none = BTreeMap::new();
         assert_eq!(
-            transform_matrix("translate", &[nl(&[1.0, 2.0, 3.0])], &none),
+            tm("translate", &[nl(&[1.0, 2.0, 3.0])], &none),
             [1.0, 0.0, 0.0, 1.0, 0.0, 1.0, 0.0, 2.0, 0.0, 0.0, 1.0, 3.0]
         );
+        assert_eq!(tm("translate", &[nl(&[1.0, 2.0])], &none)[11], 0.0); // short → pad z
+        assert_eq!(tm("translate", &[Value::Num(9.0)], &none), IDENTITY); // scalar → zero vec
         assert_eq!(
-            transform_matrix("translate", &[nl(&[1.0, 2.0])], &none)[11],
-            0.0
-        ); // short → pad z
-        assert_eq!(
-            transform_matrix("translate", &[Value::Num(9.0)], &none),
-            IDENTITY
-        ); // scalar → zero vec
-        assert_eq!(
-            transform_matrix("scale", &[nl(&[2.0, 3.0, 4.0])], &none),
+            tm("scale", &[nl(&[2.0, 3.0, 4.0])], &none),
             [2.0, 0.0, 0.0, 0.0, 0.0, 3.0, 0.0, 0.0, 0.0, 0.0, 4.0, 0.0]
         );
-        assert_eq!(transform_matrix("scale", &[Value::Num(5.0)], &none)[0], 5.0); // uniform
-        assert_eq!(transform_matrix("scale", &[nl(&[2.0])], &none)[5], 1.0); // short → pad 1
-        assert_eq!(
-            transform_matrix("scale", &[Value::Bool(true)], &none),
-            IDENTITY
-        ); // non-numeric
-        assert_eq!(
-            transform_matrix("mirror", &[nl(&[1.0, 0.0, 0.0])], &none)[0],
-            -1.0
-        ); // reflect x
-        assert_eq!(
-            transform_matrix("mirror", &[nl(&[0.0, 0.0, 0.0])], &none),
-            IDENTITY
-        ); // zero normal
+        assert_eq!(tm("scale", &[Value::Num(5.0)], &none)[0], 5.0); // uniform
+        assert_eq!(tm("scale", &[nl(&[2.0])], &none)[5], 1.0); // short → pad 1
+        assert_eq!(tm("scale", &[Value::Bool(true)], &none), IDENTITY); // non-numeric
+        assert_eq!(tm("mirror", &[nl(&[1.0, 0.0, 0.0])], &none)[0], -1.0); // reflect x
+        assert_eq!(tm("mirror", &[nl(&[0.0, 0.0, 0.0])], &none), IDENTITY); // zero normal
     }
 
     #[test]
@@ -303,52 +293,49 @@ mod tests {
             nl(&[0.0, 0.0, 0.0, 1.0]),
         ]);
         assert_eq!(
-            transform_matrix("multmatrix", &[m], &none),
+            tm("multmatrix", &[m], &none),
             [1.0, 0.0, 0.0, 7.0, 0.0, 1.0, 0.0, 8.0, 0.0, 0.0, 1.0, 9.0]
         );
         // short row → padded from identity; not-a-list arg → identity; a non-list row → identity.
         assert_eq!(
-            transform_matrix(
+            tm(
                 "multmatrix",
                 &[Value::list(vec![nl(&[2.0]), nl(&[]), nl(&[])])],
                 &none
             ),
             [2.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0]
         );
-        assert_eq!(
-            transform_matrix("multmatrix", &[Value::Num(1.0)], &none),
-            IDENTITY
-        );
+        assert_eq!(tm("multmatrix", &[Value::Num(1.0)], &none), IDENTITY);
         let bad = Value::list(vec![nl(&[1.0]), Value::Num(2.0), nl(&[3.0])]);
-        assert_eq!(transform_matrix("multmatrix", &[bad], &none), IDENTITY);
+        assert_eq!(tm("multmatrix", &[bad], &none), IDENTITY);
     }
 
     #[test]
     fn rotate_scalar_euler_and_axis() {
         let none = BTreeMap::new();
         // scalar 90° about +Z: col0 = (cos, sin) = (0, 1).
-        let rz = transform_matrix("rotate", &[Value::Num(90.0)], &none);
+        let rz = tm("rotate", &[Value::Num(90.0)], &none);
         approx(rz[0], 0.0);
         approx(rz[4], 1.0);
         approx(rz[1], -1.0);
         // euler [90,0,0] about X: the y-axis maps toward +z.
-        let rx = transform_matrix("rotate", &[nl(&[90.0, 0.0, 0.0])], &none);
+        let rx = tm("rotate", &[nl(&[90.0, 0.0, 0.0])], &none);
         approx(rx[5], 0.0);
         approx(rx[9], 1.0);
         // angle-axis 90° about a NON-unit z axis (exercises normalization) == scalar 90.
-        let aa = transform_matrix("rotate", &[Value::Num(90.0), nl(&[0.0, 0.0, 2.0])], &none);
+        let aa = tm("rotate", &[Value::Num(90.0), nl(&[0.0, 0.0, 2.0])], &none);
         approx(aa[0], 0.0);
         approx(aa[4], 1.0);
         assert_eq!(
-            transform_matrix("rotate", &[Value::Num(90.0), nl(&[0.0, 0.0, 0.0])], &none),
+            tm("rotate", &[Value::Num(90.0), nl(&[0.0, 0.0, 0.0])], &none),
             IDENTITY // zero axis
         );
-        assert_eq!(transform_matrix("rotate", &[], &none), IDENTITY); // no args
+        assert_eq!(tm("rotate", &[], &none), IDENTITY); // no args
         // named fallback: rotate(a = 90).
         let mut named = BTreeMap::new();
         named.insert("a".to_string(), Value::Num(90.0));
-        approx(transform_matrix("rotate", &[], &named)[4], 1.0);
+        approx(tm("rotate", &[], &named)[4], 1.0);
         // an unrecognized transform name → identity.
-        assert_eq!(transform_matrix("bogus", &[], &none), IDENTITY);
+        assert_eq!(tm("bogus", &[], &none), IDENTITY);
     }
 }

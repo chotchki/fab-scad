@@ -8,7 +8,7 @@
 //!
 //! `Rgba` (the `color()` model, BOSL2-critical) joins this vocabulary at J.2.8, wired to a real use.
 
-use std::ops::{Add, Mul, Neg, Sub};
+use std::ops::{Add, Index, Mul, Neg, Sub};
 
 /// A 3D coordinate — a point or a vector (OpenSCAD doesn't distinguish).
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -91,6 +91,22 @@ impl Neg for Vec3 {
         Vec3::new(-self.x, -self.y, -self.z)
     }
 }
+impl Index<usize> for Vec3 {
+    type Output = f64;
+    /// Component access: `0`→x, `1`→y, `2`→z. Panics out of range, like slice indexing.
+    #[allow(
+        clippy::panic,
+        reason = "an out-of-range component index is a bug — panics by contract, exactly as [f64; 3] does"
+    )]
+    fn index(&self, i: usize) -> &f64 {
+        match i {
+            0 => &self.x,
+            1 => &self.y,
+            2 => &self.z,
+            _ => panic!("Vec3 index {i} out of range (0..3)"),
+        }
+    }
+}
 
 /// A triangle — three vertex indices into a mesh's vertex list, in winding order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -124,6 +140,19 @@ impl Affine {
     #[must_use]
     pub const fn row_major(m: [f64; 12]) -> Self {
         Affine(m)
+    }
+
+    /// From a COLUMN-major `[m0..m11]` (Manifold's layout) — the exact inverse of [`to_column_major`],
+    /// so a call site holding column-major data wraps it byte-for-byte instead of transposing by hand.
+    ///
+    /// [`to_column_major`]: Affine::to_column_major
+    #[must_use]
+    pub const fn from_column_major(c: [f64; 12]) -> Self {
+        Affine([
+            c[0], c[3], c[6], c[9], // row 0
+            c[1], c[4], c[7], c[10], // row 1
+            c[2], c[5], c[8], c[11], // row 2
+        ])
     }
 
     /// The row-major `[m0..m11]`.
@@ -183,6 +212,13 @@ mod tests {
             [1.0, 2.0, 3.0]
         );
         assert_eq!(Vec3::ZERO, Vec3::new(0.0, 0.0, 0.0));
+        assert_eq!([a[0], a[1], a[2]], [1.0, 2.0, 3.0]); // Index<usize>
+    }
+
+    #[test]
+    #[should_panic(expected = "out of range")]
+    fn vec3_index_out_of_range() {
+        let _ = Vec3::ZERO[3];
     }
 
     #[test]
@@ -206,5 +242,10 @@ mod tests {
             Affine::IDENTITY.apply(Vec3::new(7.0, 8.0, 9.0)),
             Vec3::new(7.0, 8.0, 9.0)
         );
+        // from_column_major is the exact inverse of to_column_major (wrap column-major data losslessly).
+        let cm = [
+            1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0,
+        ];
+        assert_eq!(Affine::from_column_major(cm).to_column_major(), cm);
     }
 }

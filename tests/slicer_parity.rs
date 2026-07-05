@@ -34,7 +34,7 @@ fn os_piece_driver(cuts: &[Vec<f64>; 3], piece: [usize; 3], base_stl: &str) -> S
     s
 }
 
-fn approx(a: [f64; 3], b: [f64; 3], tol: f64) -> bool {
+fn approx(a: fab_lang::Vec3, b: fab_lang::Vec3, tol: f64) -> bool {
     (0..3).all(|k| (a[k] - b[k]).abs() < tol)
 }
 

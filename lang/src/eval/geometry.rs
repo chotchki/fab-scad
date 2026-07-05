@@ -13,6 +13,7 @@
 
 use super::trig::{cos_degrees, sin_degrees};
 use crate::Mesh;
+use crate::geom::{Tri, Vec3};
 
 /// `sphere(r)` tessellated into `fragments` segments (OpenSCAD `SphereNode`, `primitives.cc:177-223`).
 #[must_use]
@@ -33,7 +34,11 @@ pub(crate) fn sphere(r: f64, fragments: u32) -> Mesh {
         let z = r * cos_degrees(phi);
         for j in 0..nf {
             let theta = 360.0 * f64::from(j) / f64::from(nf);
-            verts.push([ring_r * cos_degrees(theta), ring_r * sin_degrees(theta), z]);
+            verts.push(Vec3::new(
+                ring_r * cos_degrees(theta),
+                ring_r * sin_degrees(theta),
+                z,
+            ));
         }
     }
 
@@ -69,28 +74,28 @@ pub(crate) fn cube(size: [f64; 3], center: bool) -> Mesh {
         ([0.0, 0.0, 0.0], [x, y, z])
     };
     let verts = vec![
-        [lo[0], lo[1], lo[2]], // 0
-        [hi[0], lo[1], lo[2]], // 1
-        [hi[0], hi[1], lo[2]], // 2
-        [lo[0], hi[1], lo[2]], // 3
-        [lo[0], lo[1], hi[2]], // 4
-        [hi[0], lo[1], hi[2]], // 5
-        [hi[0], hi[1], hi[2]], // 6
-        [lo[0], hi[1], hi[2]], // 7
+        Vec3::new(lo[0], lo[1], lo[2]), // 0
+        Vec3::new(hi[0], lo[1], lo[2]), // 1
+        Vec3::new(hi[0], hi[1], lo[2]), // 2
+        Vec3::new(lo[0], hi[1], lo[2]), // 3
+        Vec3::new(lo[0], lo[1], hi[2]), // 4
+        Vec3::new(hi[0], lo[1], hi[2]), // 5
+        Vec3::new(hi[0], hi[1], hi[2]), // 6
+        Vec3::new(lo[0], hi[1], hi[2]), // 7
     ];
     let tris = vec![
-        [0, 3, 2],
-        [0, 2, 1], // bottom  (-z)
-        [4, 5, 6],
-        [4, 6, 7], // top     (+z)
-        [0, 1, 5],
-        [0, 5, 4], // front   (-y)
-        [1, 2, 6],
-        [1, 6, 5], // right   (+x)
-        [2, 3, 7],
-        [2, 7, 6], // back    (+y)
-        [3, 0, 4],
-        [3, 4, 7], // left    (-x)
+        Tri::new(0, 3, 2),
+        Tri::new(0, 2, 1), // bottom  (-z)
+        Tri::new(4, 5, 6),
+        Tri::new(4, 6, 7), // top     (+z)
+        Tri::new(0, 1, 5),
+        Tri::new(0, 5, 4), // front   (-y)
+        Tri::new(1, 2, 6),
+        Tri::new(1, 6, 5), // right   (+x)
+        Tri::new(2, 3, 7),
+        Tri::new(2, 7, 6), // back    (+y)
+        Tri::new(3, 0, 4),
+        Tri::new(3, 4, 7), // left    (-x)
     ];
     Mesh { verts, tris }
 }
@@ -130,9 +135,9 @@ pub(crate) fn cylinder(h: f64, r1: f64, r2: f64, fragments: u32, center: bool) -
     for j in 0..nf {
         let jn = (j + 1) % nf;
         if bottom_apex {
-            tris.push([0, top_start + jn, top_start + j]); // triangle to bottom apex
+            tris.push(Tri::new(0, top_start + jn, top_start + j)); // triangle to bottom apex
         } else if top_apex {
-            tris.push([j, jn, top_start]); // triangle to top apex
+            tris.push(Tri::new(j, jn, top_start)); // triangle to top apex
         } else {
             quad(&mut tris, j, jn, top_start + jn, top_start + j); // quad between two rings
         }
@@ -147,30 +152,30 @@ pub(crate) fn cylinder(h: f64, r1: f64, r2: f64, fragments: u32, center: bool) -
 }
 
 /// Push a ring of `nf` vertices at height `z` (or a single apex vertex at the axis if `apex`).
-fn push_ring(verts: &mut Vec<[f64; 3]>, r: f64, z: f64, nf: u32, apex: bool) {
+fn push_ring(verts: &mut Vec<Vec3>, r: f64, z: f64, nf: u32, apex: bool) {
     if apex {
-        verts.push([0.0, 0.0, z]);
+        verts.push(Vec3::new(0.0, 0.0, z));
         return;
     }
     for j in 0..nf {
         let theta = 360.0 * f64::from(j) / f64::from(nf);
-        verts.push([r * cos_degrees(theta), r * sin_degrees(theta), z]);
+        verts.push(Vec3::new(r * cos_degrees(theta), r * sin_degrees(theta), z));
     }
 }
 
 /// Triangulate a quad `[a, b, c, d]` into two triangles.
-fn quad(tris: &mut Vec<[u32; 3]>, a: u32, b: u32, c: u32, d: u32) {
-    tris.push([a, b, c]);
-    tris.push([a, c, d]);
+fn quad(tris: &mut Vec<Tri>, a: u32, b: u32, c: u32, d: u32) {
+    tris.push(Tri::new(a, b, c));
+    tris.push(Tri::new(a, c, d));
 }
 
 /// Fan-triangulate an `nf`-gon starting at vertex `base`; `reverse` flips the winding.
-fn fan(tris: &mut Vec<[u32; 3]>, base: u32, nf: u32, reverse: bool) {
+fn fan(tris: &mut Vec<Tri>, base: u32, nf: u32, reverse: bool) {
     for j in 1..nf.saturating_sub(1) {
         if reverse {
-            tris.push([base, base + j + 1, base + j]);
+            tris.push(Tri::new(base, base + j + 1, base + j));
         } else {
-            tris.push([base, base + j, base + j + 1]);
+            tris.push(Tri::new(base, base + j, base + j + 1));
         }
     }
 }

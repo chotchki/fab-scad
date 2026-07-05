@@ -69,17 +69,17 @@ fn cube_corners() {
     let m = mesh("cube([2, 3, 4]);");
     assert_eq!(m.vert_count(), 8);
     assert_eq!(m.tri_count(), 12);
-    assert_eq!(m.verts[0], [0.0, 0.0, 0.0]);
-    assert_eq!(m.verts[6], [2.0, 3.0, 4.0]);
+    assert_eq!(m.verts[0].to_array(), [0.0, 0.0, 0.0]);
+    assert_eq!(m.verts[6].to_array(), [2.0, 3.0, 4.0]);
 }
 
 #[test]
 fn cube_scalar_centered_and_defaults() {
     let m = mesh("cube(2, center = true);");
-    assert_eq!(m.verts[0], [-1.0, -1.0, -1.0]); // scalar → [2,2,2], centered
-    assert_eq!(m.verts[6], [1.0, 1.0, 1.0]);
-    assert_eq!(mesh("cube();").verts[6], [1.0, 1.0, 1.0]); // default [1,1,1]
-    assert_eq!(mesh("cube([1, 2]);").verts[6], [1.0, 1.0, 1.0]); // short vector → default
+    assert_eq!(m.verts[0].to_array(), [-1.0, -1.0, -1.0]); // scalar → [2,2,2], centered
+    assert_eq!(m.verts[6].to_array(), [1.0, 1.0, 1.0]);
+    assert_eq!(mesh("cube();").verts[6].to_array(), [1.0, 1.0, 1.0]); // default [1,1,1]
+    assert_eq!(mesh("cube([1, 2]);").verts[6].to_array(), [1.0, 1.0, 1.0]); // short vector → default
 }
 
 #[test]

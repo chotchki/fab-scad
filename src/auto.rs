@@ -267,7 +267,13 @@ pub fn make_planned<W: std::io::Write + std::io::Seek>(
     };
     let mut ups: Vec<([usize; 3], [f64; 3])> = Vec::new();
     for (piece, solid) in crate::slicing::slice_solid(&bare, &base)? {
-        ups.push((piece, crate::auto_orient::best_up(&solid.tris(), &[])));
+        // auto_orient works in the printer domain's [f64; 3]; drop the mesh triangles to arrays.
+        let tris: Vec<[[f64; 3]; 3]> = solid
+            .tris()
+            .iter()
+            .map(|[a, b, c]| [a.to_array(), b.to_array(), c.to_array()])
+            .collect();
+        ups.push((piece, crate::auto_orient::best_up(&tris, &[])));
     }
 
     // Carved slice, gated by those orientations.
@@ -298,7 +304,9 @@ pub fn make_planned<W: std::io::Write + std::io::Seek>(
                 .find(|(p, _)| p == piece)
                 .map(|(_, u)| *u)
                 .unwrap_or([0.0, 0.0, 1.0]);
-            let (verts, tris) = solid.to_indexed();
+            let (v, t) = solid.to_indexed();
+            let verts = v.iter().map(|p| p.to_array()).collect();
+            let tris = t.iter().map(|f| f.indices()).collect();
             PieceToPlace {
                 mesh: bambu::Mesh { verts, tris },
                 up,

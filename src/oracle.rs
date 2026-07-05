@@ -16,13 +16,14 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context, Result, ensure};
+use fab_lang::{Tri, Vec3};
 
 use crate::openscad::Openscad;
 
 /// A mesh from the oracle: shared vertices + polygon faces (OFF preserves OpenSCAD's face structure).
 #[derive(Debug, Clone)]
 pub struct OracleMesh {
-    pub verts: Vec<[f64; 3]>,
+    pub verts: Vec<Vec3>,
     pub faces: Vec<Vec<u32>>,
 }
 
@@ -35,11 +36,11 @@ impl OracleMesh {
 
     /// Fan-triangulate the polygon faces into a triangle list (for Manifold / `from_indexed`).
     #[must_use]
-    pub fn tris(&self) -> Vec<[u32; 3]> {
+    pub fn tris(&self) -> Vec<Tri> {
         let mut out = Vec::new();
         for face in &self.faces {
             for i in 1..face.len().saturating_sub(1) {
-                out.push([face[0], face[i], face[i + 1]]);
+                out.push(Tri::new(face[0], face[i], face[i + 1]));
             }
         }
         out
@@ -138,11 +139,11 @@ fn parse_off(text: &str) -> Result<OracleMesh> {
             .next()
             .context("OFF: missing vertex line")?
             .split_whitespace();
-        verts.push([
+        verts.push(Vec3::new(
             next_f64(&mut t, "vertex x")?,
             next_f64(&mut t, "vertex y")?,
             next_f64(&mut t, "vertex z")?,
-        ]);
+        ));
     }
     let mut faces = Vec::with_capacity(nfaces);
     for _ in 0..nfaces {
@@ -191,7 +192,7 @@ mod tests {
         let off = "OFF 4 2 0\n0 0 0\n1 0 0\n0 1 0\n0 0 1\n3 0 1 2\n4 0 1 3 2\n";
         let m = parse_off(off).unwrap();
         assert_eq!(m.vert_count(), 4);
-        assert_eq!(m.verts[1], [1.0, 0.0, 0.0]);
+        assert_eq!(m.verts[1].to_array(), [1.0, 0.0, 0.0]);
         assert_eq!(m.tris().len(), 3); // triangle → 1, quad → 2
     }
 
@@ -207,13 +208,13 @@ mod tests {
         let off = "OFF 3 1 0\n0 0 0\n1 0 0\n0 1 0\n3 0 1 2 249 215 44\n";
         let m = parse_off(off).unwrap();
         assert_eq!(m.vert_count(), 3);
-        assert_eq!(m.tris(), vec![[0u32, 1, 2]]); // color dropped
+        assert_eq!(m.tris(), vec![Tri::new(0, 1, 2)]); // color dropped
     }
 
     #[test]
     fn parse_off_accepts_counts_on_the_next_line() {
         let off = "OFF\n3 1 0\n0 0 0\n1 0 0\n0 1 0\n3 0 1 2\n";
-        assert_eq!(parse_off(off).unwrap().tris(), vec![[0u32, 1, 2]]);
+        assert_eq!(parse_off(off).unwrap().tris(), vec![Tri::new(0, 1, 2)]);
     }
 
     // The live-oracle tests skip when OpenSCAD isn't installed, so CI without it stays green.

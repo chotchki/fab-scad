@@ -32,7 +32,8 @@ fn empty_program_is_empty() {
 fn transform_wraps_its_child_with_the_matrix() {
     match evaluate_geometry("translate([5, 2, 9]) cube(10);").unwrap() {
         GeoNode::Transform { matrix, child } => {
-            assert_eq!([matrix[3], matrix[7], matrix[11]], [5.0, 2.0, 9.0]); // translation column
+            let m = matrix.as_row_major();
+            assert_eq!([m[3], m[7], m[11]], [5.0, 2.0, 9.0]); // translation column
             assert!(matches!(*child, GeoNode::Leaf(_)));
         }
         other => panic!("expected Transform, got {other:?}"),
@@ -40,7 +41,10 @@ fn transform_wraps_its_child_with_the_matrix() {
     // scale is a diagonal; multmatrix passes through; rotate(0) is identity.
     assert!(matches!(
         evaluate_geometry("scale([2, 3, 4]) cube(1);").unwrap(),
-        GeoNode::Transform { matrix, .. } if [matrix[0], matrix[5], matrix[10]] == [2.0, 3.0, 4.0]
+        GeoNode::Transform { matrix, .. } if {
+            let m = matrix.as_row_major();
+            [m[0], m[5], m[10]] == [2.0, 3.0, 4.0]
+        }
     ));
 }
 

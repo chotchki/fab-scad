@@ -20,10 +20,10 @@ fn sphere_ring_structure() {
 fn cube_is_eight_corners() {
     let m = evaluate("cube([2,3,4]);").unwrap();
     assert_eq!(m.vert_count(), 8);
-    assert_eq!(m.verts[0], [0.0, 0.0, 0.0]);
-    assert_eq!(m.verts[6], [2.0, 3.0, 4.0]);
+    assert_eq!(m.verts[0].to_array(), [0.0, 0.0, 0.0]);
+    assert_eq!(m.verts[6].to_array(), [2.0, 3.0, 4.0]);
     assert_eq!(
-        evaluate("cube(2, center=true);").unwrap().verts[0],
+        evaluate("cube(2, center=true);").unwrap().verts[0].to_array(),
         [-1.0, -1.0, -1.0]
     );
 }

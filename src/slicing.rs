@@ -16,6 +16,7 @@ use crate::kernel::Solid;
 use crate::manifest::{Connector, Slicing};
 #[cfg(feature = "native")]
 use crate::openscad::Openscad;
+use fab_lang::{Affine, Vec3};
 
 const AXIS: [&str; 3] = ["RIGHT", "BACK", "UP"];
 
@@ -239,11 +240,11 @@ pub fn slice_part_kernel(
     let laid: Vec<Solid> = pieces
         .iter()
         .map(|(idx, s)| {
-            s.translate(
+            s.translate(Vec3::new(
                 idx[0] as f64 * spread,
                 idx[1] as f64 * spread,
                 idx[2] as f64 * spread,
-            )
+            ))
         })
         .collect();
 
@@ -628,13 +629,16 @@ pub fn slice_solid(s: &Slicing, base: &Solid) -> Result<Vec<([usize; 3], Solid)>
     let mut out = Vec::new();
     for (piece, mut cell) in base.slab_pieces(&by_axis) {
         for p in &placed {
-            let at = |sol: Solid| sol.translate(p.point[0], p.point[1], p.point[2]);
+            let at = |sol: Solid| sol.translate(Vec3::from_array(p.point));
             match &p.shape {
                 Shape::Onion { cap, ang, d } => {
                     if piece == p.below {
-                        cell = cell.union(&at(Solid::onion(*d, *ang, SEG).align_z_to(*cap)));
+                        cell = cell.union(&at(
+                            Solid::onion(*d, *ang, SEG).align_z_to(Vec3::from_array(*cap))
+                        ));
                     } else if piece == p.above {
-                        let socket = Solid::onion(*d + 2.0 * SLOP, *ang, SEG).align_z_to(*cap);
+                        let socket = Solid::onion(*d + 2.0 * SLOP, *ang, SEG)
+                            .align_z_to(Vec3::from_array(*cap));
                         cell = cell.difference(&at(socket));
                     }
                 }
@@ -658,12 +662,12 @@ pub fn slice_solid(s: &Slicing, base: &Solid) -> Result<Vec<([usize; 3], Solid)>
                             let zc = geom::normalize(*axis);
                             let yc = geom::normalize(peak);
                             let xc = geom::cross(yc, zc);
-                            bolt.transform(&[
+                            bolt.transform(&Affine::from_column_major([
                                 xc[0], xc[1], xc[2], yc[0], yc[1], yc[2], zc[0], zc[1], zc[2], 0.0,
                                 0.0, 0.0,
-                            ])
+                            ]))
                         } else {
-                            bolt.align_z_to(*axis)
+                            bolt.align_z_to(Vec3::from_array(*axis))
                         };
                         cell = cell.difference(&at(oriented));
                     }

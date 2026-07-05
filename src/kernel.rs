@@ -9,6 +9,7 @@
 //! connectors (11.6) build on it.
 
 use anyhow::{Context, Result, anyhow};
+use fab_lang::{Affine, Tri, Vec3};
 use manifold3d::{CrossSection, Manifold, MeshGL};
 use std::collections::HashMap;
 use std::marker::PhantomData;
@@ -99,8 +100,8 @@ impl Solid {
         let z_tangent = r * s; // where the cap leaves the sphere
         let cone_h = r * c * c / s; // tip (r/sin) minus z_tangent
         let base_r = r * c; // sphere radius at that latitude
-        let cone =
-            Solid::cylinder(cone_h, base_r, 0.0, segments, false).translate(0.0, 0.0, z_tangent);
+        let cone = Solid::cylinder(cone_h, base_r, 0.0, segments, false)
+            .translate(Vec3::new(0.0, 0.0, z_tangent));
         Solid::sphere(r, segments).union(&cone)
     }
 
@@ -143,7 +144,7 @@ impl Solid {
                 false,
             )
         }
-        .translate(0.0, 0.0, through - counterbore_h);
+        .translate(Vec3::new(0.0, 0.0, through - counterbore_h));
         let pocket = Solid::cylinder(
             insert_depth,
             insert_d / 2.0,
@@ -151,7 +152,7 @@ impl Solid {
             segments,
             false,
         )
-        .translate(0.0, 0.0, -insert_depth);
+        .translate(Vec3::new(0.0, 0.0, -insert_depth));
         Solid::batch_union(&[shaft, cbore, pocket])
     }
 
@@ -166,12 +167,16 @@ impl Solid {
         let (rot, h) = match axis {
             // (x,y,z) → (y, z, x): x-normal → +z; slice at `at`, giving (y, z).
             0 => (
-                self.transform(&[0., 0., 1., 1., 0., 0., 0., 1., 0., 0., 0., 0.]),
+                self.transform(&Affine::from_column_major([
+                    0., 0., 1., 1., 0., 0., 0., 1., 0., 0., 0., 0.,
+                ])),
                 at,
             ),
             // (x,y,z) → (x, z, −y): y-normal → −z; slice at −`at`, giving (x, z).
             1 => (
-                self.transform(&[1., 0., 0., 0., 0., -1., 0., 1., 0., 0., 0., 0.]),
+                self.transform(&Affine::from_column_major([
+                    1., 0., 0., 0., 0., -1., 0., 1., 0., 0., 0., 0.,
+                ])),
                 -at,
             ),
             // z-normal already +z; slice at `at`, giving (x, y).
@@ -219,15 +224,18 @@ impl Solid {
 
     /// Build from an ALREADY-indexed mesh (3mf objects arrive this way — no weld needed; the
     /// file's own topology is authoritative). Fails like `from_stl_bytes` if it isn't manifold.
-    pub fn from_indexed(verts: &[[f64; 3]], tris: &[[u32; 3]]) -> Result<Self> {
+    pub fn from_indexed(verts: &[Vec3], tris: &[Tri]) -> Result<Self> {
         if verts.is_empty() || tris.is_empty() {
             return Err(anyhow!("indexed mesh is empty"));
         }
         // f64 ALL THE WAY — MeshGL64 (not the f32 MeshGL), so a re-imported boolean-RESULT mesh keeps
         // its near-coincident seam vertices distinct instead of merging them in f32 → non-manifold
         // (J.2.7.1). The precision floor is now the OFF export's ~6 sig digits, never an f32 downcast.
-        let flat: Vec<f64> = verts.iter().flatten().copied().collect();
-        let idx: Vec<u64> = tris.iter().flatten().map(|&i| u64::from(i)).collect();
+        let flat: Vec<f64> = verts.iter().flat_map(|v| v.to_array()).collect();
+        let idx: Vec<u64> = tris
+            .iter()
+            .flat_map(|t| t.indices().map(u64::from))
+            .collect();
         let m = Manifold::from_mesh_f64(&flat, 3, &idx)
             .map_err(|e| anyhow!("mesh is not a valid manifold: {e:?}"))?;
         Ok(Solid::wrap(m))
@@ -274,28 +282,25 @@ impl Solid {
 
     /// Indexed mesh: deduped vertices + 0-based triangle indices (for exporters that want indexed
     /// geometry, e.g. the Bambu writer).
-    pub fn to_indexed(&self) -> (Vec<[f64; 3]>, Vec<[u32; 3]>) {
+    pub fn to_indexed(&self) -> (Vec<Vec3>, Vec<Tri>) {
         let (v, stride, idx) = self.0.to_mesh_f64();
         let verts = (0..v.len() / stride)
-            .map(|i| [v[i * stride], v[i * stride + 1], v[i * stride + 2]])
+            .map(|i| Vec3::new(v[i * stride], v[i * stride + 1], v[i * stride + 2]))
             .collect();
         let tris = idx
             .chunks_exact(3)
-            .map(|t| [t[0] as u32, t[1] as u32, t[2] as u32])
+            .map(|t| Tri::new(t[0] as u32, t[1] as u32, t[2] as u32))
             .collect();
         (verts, tris)
     }
 
     /// Triangles as coordinate triples — for orientation math (`auto_orient::best_up`).
-    pub fn tris(&self) -> Vec<[[f64; 3]; 3]> {
+    pub fn tris(&self) -> Vec<[Vec3; 3]> {
         let (verts, tris) = self.to_indexed();
         tris.iter()
             .map(|t| {
-                [
-                    verts[t[0] as usize],
-                    verts[t[1] as usize],
-                    verts[t[2] as usize],
-                ]
+                let [a, b, c] = t.indices();
+                [verts[a as usize], verts[b as usize], verts[c as usize]]
             })
             .collect()
     }
@@ -362,22 +367,22 @@ impl Solid {
 
     // --- transforms ------------------------------------------------------------------------------
 
-    pub fn translate(&self, x: f64, y: f64, z: f64) -> Solid {
-        Solid::wrap(self.0.translate(x, y, z))
+    pub fn translate(&self, v: Vec3) -> Solid {
+        Solid::wrap(self.0.translate(v.x, v.y, v.z))
     }
     /// Rotate by Euler angles in DEGREES (X then Y then Z).
     pub fn rotate(&self, x_deg: f64, y_deg: f64, z_deg: f64) -> Solid {
         Solid::wrap(self.0.rotate(x_deg, y_deg, z_deg))
     }
-    /// Apply a 3×4 affine (column-major 12-float, as Manifold expects).
-    pub fn transform(&self, m: &[f64; 12]) -> Solid {
-        Solid::wrap(self.0.transform(m))
+    /// Apply a 3×4 [`Affine`] (row-major; transposed to Manifold's column-major at the boundary).
+    pub fn transform(&self, m: &Affine) -> Solid {
+        Solid::wrap(self.0.transform(&m.to_column_major()))
     }
 
     /// Rotate so local +Z maps onto unit `axis` — used to point a connector's cap along its
     /// derived build axis before translating it onto the cut. Rodrigues' rotation between vectors;
     /// the antipodal (+Z→−Z) case flips about X. A zero/degenerate axis leaves it unrotated.
-    pub fn align_z_to(&self, axis: [f64; 3]) -> Solid {
+    pub fn align_z_to(&self, axis: Vec3) -> Solid {
         let n = (axis[0] * axis[0] + axis[1] * axis[1] + axis[2] * axis[2]).sqrt();
         if n < 1e-12 {
             return self.clone();
@@ -406,14 +411,15 @@ impl Solid {
             }
             r
         };
-        // Manifold wants a column-major 3×4: columns 0..2 are R's columns, column 3 the translation.
+        // A column-major 3×4: columns 0..2 are R's columns, column 3 the translation. Wrapped as an
+        // Affine via from_column_major so no transpose is redone (transform re-transposes to Manifold).
         let m = [
             r[0][0], r[1][0], r[2][0], //
             r[0][1], r[1][1], r[2][1], //
             r[0][2], r[1][2], r[2][2], //
             0.0, 0.0, 0.0,
         ];
-        self.transform(&m)
+        self.transform(&Affine::from_column_major(m))
     }
 
     // --- slab slicer (11.4) ----------------------------------------------------------------------
@@ -433,6 +439,7 @@ impl Solid {
             let i = piece[a];
             let mut normal = [0.0; 3];
             normal[a] = 1.0;
+            let normal = Vec3::from_array(normal);
             if i > 0 {
                 s = s.split_by_plane(normal, ac[i - 1]).0; // keep the > lower-cut half
             }
@@ -467,14 +474,14 @@ impl Solid {
     /// Split by the plane `normal·p = offset` into `(positive, negative)` — the positive half is the
     /// `normal·p > offset` side. Both halves are independent solids; this is the slicer primitive
     /// (11.4), preferred over `trim_by_plane` because both sides come back clean.
-    pub fn split_by_plane(&self, normal: [f64; 3], offset: f64) -> (Solid, Solid) {
-        let (pos, neg) = self.0.split_by_plane(normal, offset);
+    pub fn split_by_plane(&self, normal: Vec3, offset: f64) -> (Solid, Solid) {
+        let (pos, neg) = self.0.split_by_plane(normal.to_array(), offset);
         (Solid::wrap(pos), Solid::wrap(neg))
     }
     /// Keep only the `normal·p > offset` half (drops the rest). NOTE upstream #1516: trimmed halves
     /// may not re-union cleanly (coincident faces) — use `split_by_plane` when you need both sides.
-    pub fn trim_by_plane(&self, normal: [f64; 3], offset: f64) -> Solid {
-        Solid::wrap(self.0.trim_by_plane(normal, offset))
+    pub fn trim_by_plane(&self, normal: Vec3, offset: f64) -> Solid {
+        Solid::wrap(self.0.trim_by_plane(normal.to_array(), offset))
     }
 
     // --- queries ---------------------------------------------------------------------------------
@@ -499,8 +506,10 @@ impl Solid {
     }
 
     /// `(min, max)` corners, or None when empty.
-    pub fn bbox(&self) -> Option<([f64; 3], [f64; 3])> {
-        self.0.bounding_box().map(|b| (b.min(), b.max()))
+    pub fn bbox(&self) -> Option<(Vec3, Vec3)> {
+        self.0
+            .bounding_box()
+            .map(|b| (Vec3::from_array(b.min()), Vec3::from_array(b.max())))
     }
 
     /// Enclosed volume — a topology-invariant scalar the differential harness compares (G.3.7).
@@ -725,7 +734,7 @@ mod tests {
     #[test]
     fn writes_two_pieces_as_separate_3mf_objects() {
         let a = Solid::cube(10.0, 10.0, 10.0, true);
-        let b = Solid::cube(10.0, 10.0, 10.0, true).translate(30.0, 0.0, 0.0);
+        let b = Solid::cube(10.0, 10.0, 10.0, true).translate(Vec3::new(30.0, 0.0, 0.0));
         let path = std::env::temp_dir().join(format!("kernel_3mf_{}.3mf", std::process::id()));
         Solid::write_3mf(&path, &[a, b]).unwrap();
         let models = threemf::read(std::fs::File::open(&path).unwrap()).unwrap();
@@ -816,7 +825,7 @@ mod tests {
     fn align_z_to_points_the_cap() {
         // A cone tips toward +Z; align it to +X and the tip should move to the +X extreme.
         let cone = Solid::cylinder(10.0, 4.0, 0.0, 32, false); // apex at z=10
-        let along_x = cone.align_z_to([1.0, 0.0, 0.0]);
+        let along_x = cone.align_z_to(Vec3::new(1.0, 0.0, 0.0));
         let (min, max) = along_x.bbox().unwrap();
         assert!(
             (max[0] - 10.0).abs() < 0.05,
@@ -869,7 +878,7 @@ mod tests {
     #[test]
     fn cube_union_is_a_valid_solid() {
         let a = Solid::cube(40.0, 40.0, 40.0, true);
-        let b = Solid::cube(30.0, 30.0, 30.0, true).translate(15.0, 0.0, 0.0);
+        let b = Solid::cube(30.0, 30.0, 30.0, true).translate(Vec3::new(15.0, 0.0, 0.0));
         a.check().unwrap();
         let u = a.union(&b);
         u.check().unwrap();
@@ -883,7 +892,7 @@ mod tests {
     #[test]
     fn split_halves_partition_the_solid() {
         let c = Solid::cube(20.0, 20.0, 20.0, true);
-        let (pos, neg) = c.split_by_plane([1.0, 0.0, 0.0], 0.0); // (x>0, x<0)
+        let (pos, neg) = c.split_by_plane(Vec3::new(1.0, 0.0, 0.0), 0.0); // (x>0, x<0)
         pos.check().unwrap();
         neg.check().unwrap();
         // Each half is 10mm thick on X; the positive half is [0, 10], the negative [-10, 0].

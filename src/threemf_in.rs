@@ -237,7 +237,8 @@ mod tests {
     fn roundtrips_a_kernel_3mf_with_transform_and_no_color() {
         // Write two cubes via the kernel's own 3mf writer, read them back.
         let a = crate::kernel::Solid::cube(10.0, 10.0, 10.0, false);
-        let b = crate::kernel::Solid::cube(5.0, 5.0, 5.0, false).translate(20.0, 0.0, 0.0);
+        let b = crate::kernel::Solid::cube(5.0, 5.0, 5.0, false)
+            .translate(fab_lang::Vec3::new(20.0, 0.0, 0.0));
         let path = std::env::temp_dir().join(format!("threemf_in_{}.3mf", std::process::id()));
         crate::kernel::Solid::write_3mf(&path, &[a, b]).unwrap();
         let objs = parse_3mf(&std::fs::read(&path).unwrap()).unwrap();
@@ -247,9 +248,15 @@ mod tests {
         // The second cube sits at x ∈ [20, 25].
         let xs: Vec<f64> = objs[1].verts.iter().map(|v| v[0]).collect();
         assert!(xs.iter().cloned().fold(f64::MAX, f64::min) >= 19.9);
-        // And both weld into valid solids through from_indexed.
+        // And both weld into valid solids through from_indexed (lift the 3mf arrays to Vec3/Tri).
         for o in &objs {
-            crate::kernel::Solid::from_indexed(&o.verts, &o.tris)
+            let verts: Vec<fab_lang::Vec3> = o
+                .verts
+                .iter()
+                .map(|&v| fab_lang::Vec3::from_array(v))
+                .collect();
+            let tris: Vec<fab_lang::Tri> = o.tris.iter().map(|&t| fab_lang::Tri(t)).collect();
+            crate::kernel::Solid::from_indexed(&verts, &tris)
                 .unwrap()
                 .check()
                 .unwrap();

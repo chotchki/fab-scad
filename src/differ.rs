@@ -20,6 +20,7 @@ use anyhow::{Context, Result};
 
 use crate::kernel::Solid;
 use crate::oracle;
+use fab_lang::Vec3;
 
 /// One source compared across every tier.
 #[derive(Debug, Clone)]
@@ -97,11 +98,11 @@ fn rel_err(a: f64, b: f64) -> f64 {
 /// points straddling a cell edge quantize apart. Harmless for well-separated tessellation vertices
 /// at a sane `eps`; a boundary-tolerant snap is the fix if a pathological corpus needs it.
 #[must_use]
-pub fn vertex_multiset_matches(a: &[[f64; 3]], b: &[[f64; 3]], eps: f64) -> bool {
+pub fn vertex_multiset_matches(a: &[Vec3], b: &[Vec3], eps: f64) -> bool {
     a.len() == b.len() && quantized_multiset(a, eps) == quantized_multiset(b, eps)
 }
 
-fn quantized_multiset(verts: &[[f64; 3]], eps: f64) -> BTreeMap<[i64; 3], u32> {
+fn quantized_multiset(verts: &[Vec3], eps: f64) -> BTreeMap<[i64; 3], u32> {
     let mut m = BTreeMap::new();
     for v in verts {
         *m.entry(quantize(*v, eps)).or_insert(0) += 1;
@@ -110,7 +111,7 @@ fn quantized_multiset(verts: &[[f64; 3]], eps: f64) -> BTreeMap<[i64; 3], u32> {
 }
 
 /// Snap a vertex to an integer grid of `eps` units so near-equal floats collapse to one key.
-fn quantize(v: [f64; 3], eps: f64) -> [i64; 3] {
+fn quantize(v: Vec3, eps: f64) -> [i64; 3] {
     [
         (v[0] / eps).round() as i64,
         (v[1] / eps).round() as i64,
@@ -352,13 +353,13 @@ mod tests {
 
     #[test]
     fn multiset_is_order_independent_and_eps_tolerant() {
-        let a = [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]];
-        let b = [[1.0, 0.0, 0.0], [0.0, 0.0, 1e-9]]; // reordered + 1e-9 jitter
+        let a = [Vec3::new(0.0, 0.0, 0.0), Vec3::new(1.0, 0.0, 0.0)];
+        let b = [Vec3::new(1.0, 0.0, 0.0), Vec3::new(0.0, 0.0, 1e-9)]; // reordered + 1e-9 jitter
         assert!(vertex_multiset_matches(&a, &b, 1e-6)); // coarse grid: jitter absorbed
         assert!(!vertex_multiset_matches(&a, &b, 1e-12)); // fine grid: jitter separates
         assert!(!vertex_multiset_matches(
             &a,
-            &[[0.0, 0.0, 0.0], [2.0, 0.0, 0.0]],
+            &[Vec3::new(0.0, 0.0, 0.0), Vec3::new(2.0, 0.0, 0.0)],
             1e-6
         )); // genuinely different set
         assert!(!vertex_multiset_matches(&a, &a[..1], 1e-6)); // length mismatch

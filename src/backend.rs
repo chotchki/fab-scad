@@ -9,7 +9,7 @@
 //! solid is empty-aware, and the ops encode the empty CSG algebra — ∅∪x = x, ∅−x = ∅, x−∅ = x,
 //! ∅∩x = ∅ — so a lowered CSG tree behaves the same whether a subtree collapsed to nothing or not.
 
-use fab_lang::{GeoNode, Mesh};
+use fab_lang::{Affine, GeoNode, Mesh, Tri};
 
 /// A geometry backend: tessellated meshes → solids, combined via CSG + affine transforms. `Solid` is
 /// the backend's opaque handle (real Manifold's is `!Send`; the mock's is inert data).
@@ -25,9 +25,8 @@ pub trait GeometryBackend {
     fn difference(&self, a: &Self::Solid, b: &Self::Solid) -> Self::Solid;
     /// Boolean intersection.
     fn intersection(&self, a: &Self::Solid, b: &Self::Solid) -> Self::Solid;
-    /// An affine transform — a 3×4 row-major matrix (OpenSCAD `multmatrix`, covering
-    /// translate / rotate / scale / mirror).
-    fn transform(&self, s: &Self::Solid, m: &[f64; 12]) -> Self::Solid;
+    /// An affine transform (OpenSCAD `multmatrix`, covering translate / rotate / scale / mirror).
+    fn transform(&self, s: &Self::Solid, m: &Affine) -> Self::Solid;
     /// Extract the result as a triangle mesh (the empty solid → an empty mesh).
     fn to_mesh(&self, s: &Self::Solid) -> Mesh;
     /// Whether the solid is empty (no geometry) — the differential's `Empty` outcome.
@@ -60,15 +59,6 @@ fn reduce<B: GeometryBackend>(
         Some(first) => solids.fold(first, |acc, s| combine(backend, &acc, &s)),
         None => backend.leaf(&Mesh::new()),
     }
-}
-
-/// Apply a 3×4 row-major affine `m` to a vertex.
-fn affine(m: &[f64; 12], v: [f64; 3]) -> [f64; 3] {
-    [
-        m[0] * v[0] + m[1] * v[1] + m[2] * v[2] + m[3],
-        m[4] * v[0] + m[5] * v[1] + m[6] * v[2] + m[7],
-        m[8] * v[0] + m[9] * v[1] + m[10] * v[2] + m[11],
-    ]
 }
 
 // ─────────────────────────────── the real backend (Manifold) ───────────────────────────────────
@@ -112,13 +102,10 @@ impl GeometryBackend for ManifoldBackend {
         }
     }
 
-    fn transform(&self, s: &Self::Solid, m: &[f64; 12]) -> Self::Solid {
-        // geo.rs affines are 3x4 ROW-MAJOR (OpenSCAD `multmatrix` + the mock's convention); Manifold's
-        // `transform` wants COLUMN-MAJOR (kernel.rs) — transpose the 3x4 (col c, row r) → (r, c).
-        let cm = [
-            m[0], m[4], m[8], m[1], m[5], m[9], m[2], m[6], m[10], m[3], m[7], m[11],
-        ];
-        s.as_ref().map(|s| s.transform(&cm))
+    fn transform(&self, s: &Self::Solid, m: &Affine) -> Self::Solid {
+        // Solid::transform owns the row→column-major transpose now (it re-transposes to Manifold's
+        // layout), so this just forwards the Affine.
+        s.as_ref().map(|s| s.transform(m))
     }
 
     fn to_mesh(&self, s: &Self::Solid) -> Mesh {
@@ -163,11 +150,12 @@ fn append(a: &Mesh, b: &Mesh) -> Mesh {
     verts.extend_from_slice(&b.verts);
     let mut tris = a.tris.clone();
     tris.extend(b.tris.iter().map(|t| {
-        [
-            t[0].saturating_add(offset),
-            t[1].saturating_add(offset),
-            t[2].saturating_add(offset),
-        ]
+        let [x, y, z] = t.indices();
+        Tri::new(
+            x.saturating_add(offset),
+            y.saturating_add(offset),
+            z.saturating_add(offset),
+        )
     }));
     Mesh { verts, tris }
 }
@@ -219,8 +207,8 @@ impl GeometryBackend for MockBackend {
         }
     }
 
-    fn transform(&self, s: &Self::Solid, m: &[f64; 12]) -> Self::Solid {
-        let verts = s.mesh.verts.iter().map(|&v| affine(m, v)).collect();
+    fn transform(&self, s: &Self::Solid, m: &Affine) -> Self::Solid {
+        let verts = s.mesh.verts.iter().map(|&v| m.apply(v)).collect();
         MockSolid {
             mesh: Mesh {
                 verts,
@@ -261,7 +249,9 @@ mod tests {
         let i = b.intersection(&cube, &sphere);
         let moved = b.transform(
             &cube,
-            &[1.0, 0.0, 0.0, 5.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+            &fab_lang::Affine::row_major([
+                1.0, 0.0, 0.0, 5.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0,
+            ]),
         );
         for s in [&u, &d, &i, &moved] {
             assert!(!b.is_empty(s));

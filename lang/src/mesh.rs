@@ -5,16 +5,18 @@
 //! common denominator. Mirrors the shape of `kernel::Solid::to_indexed` so lowering (G.3.5) is a
 //! straight hand-off.
 
+use crate::geom::{Tri, Vec3};
+
 /// An indexed triangle mesh: a vertex table plus triangles indexing into it.
 ///
 /// Winding and vertex order are whatever the producing stage emits — canonicalization for
 /// comparison is the harness's job (G.3.7), not this type's.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Mesh {
-    /// Vertex positions, `[x, y, z]`.
-    pub verts: Vec<[f64; 3]>,
-    /// Triangles as index triples into [`Mesh::verts`].
-    pub tris: Vec<[u32; 3]>,
+    /// Vertex positions.
+    pub verts: Vec<Vec3>,
+    /// Triangles indexing into [`Mesh::verts`].
+    pub tris: Vec<Tri>,
 }
 
 impl Mesh {
@@ -39,7 +41,7 @@ impl Mesh {
 
 #[cfg(test)]
 mod tests {
-    use super::Mesh;
+    use super::{Mesh, Tri, Vec3};
 
     #[test]
     fn empty_mesh() {
@@ -52,8 +54,12 @@ mod tests {
     #[test]
     fn populated_mesh_counts_and_derives() {
         let m = Mesh {
-            verts: vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
-            tris: vec![[0, 1, 2]],
+            verts: vec![
+                Vec3::new(0.0, 0.0, 0.0),
+                Vec3::new(1.0, 0.0, 0.0),
+                Vec3::new(0.0, 1.0, 0.0),
+            ],
+            tris: vec![Tri::new(0, 1, 2)],
         };
         assert_eq!(m.vert_count(), 3);
         assert_eq!(m.tri_count(), 1);

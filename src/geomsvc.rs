@@ -9,6 +9,7 @@ use crate::kernel::Solid;
 use crate::manifest::{Connector, Cut, Slicing};
 use crate::num::Num;
 use crate::{auto, auto_slice, slicing, stl, threemf_in};
+use fab_lang::{Affine, Tri, Vec3};
 
 /// The service: never panics outward, never errors the transport — failures are a Response.
 pub fn handle(req: Request) -> Response {
@@ -48,7 +49,10 @@ fn analyze(name: &str, bytes: &[u8], bed: [f64; 3]) -> Result<Response> {
     if name.to_ascii_lowercase().ends_with(".3mf") {
         for o in threemf_in::parse_3mf(bytes)? {
             tris += o.tris.len();
-            match Solid::from_indexed(&o.verts, &o.tris) {
+            // The 3mf reader speaks raw [f64;3]/[u32;3]; lift to the kernel's Vec3/Tri at the boundary.
+            let verts: Vec<Vec3> = o.verts.iter().map(|&v| Vec3::from_array(v)).collect();
+            let faces: Vec<Tri> = o.tris.iter().map(|&t| Tri(t)).collect();
+            match Solid::from_indexed(&verts, &faces) {
                 Ok(s) => solids.push(s),
                 Err(_) => all_solid = false,
             }
@@ -79,7 +83,7 @@ fn analyze(name: &str, bytes: &[u8], bed: [f64; 3]) -> Result<Response> {
     }
 
     let union = match solids.len() {
-        1 => solids[0].transform(&[1., 0., 0., 0., 1., 0., 0., 0., 1., 0., 0., 0.]),
+        1 => solids[0].transform(&Affine::IDENTITY),
         _ => Solid::batch_union(&solids),
     };
     let fit = auto_slice::best_fit_rotation(&union, bed);
@@ -95,7 +99,7 @@ fn analyze(name: &str, bytes: &[u8], bed: [f64; 3]) -> Result<Response> {
     Ok(Response::Analyzed {
         objects,
         plan: Some(PlanOut {
-            rot: fit.rot,
+            rot: fit.rot.to_column_major(), // the wire carries the column-major matrix, as before
             min: fit.min,
             max: fit.max,
             cuts: planned.cuts,

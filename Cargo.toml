@@ -25,7 +25,9 @@ members = ["geom", "gui", "jit", "lang", "web"]
 # The in-process Manifold geometry kernel (Track C). Default-on so the normal build + tests
 # exercise it, but gated so a kernel-less build doesn't need a C++ toolchain (cmake/clang).
 default = ["kernel", "native"]
-kernel = ["dep:manifold3d", "dep:threemf", "dep:zip", "dep:quick-xml"]
+# `geometry` (fab-lang) too: the kernel now speaks the shared geom vocabulary (Vec3/Tri/Affine), so
+# Solid's mesh + transform APIs are typed. fab-lang is pure Rust — cheap to pull in alongside Manifold.
+kernel = ["geometry", "dep:manifold3d", "dep:threemf", "dep:zip", "dep:quick-xml"]
 # Everything that needs an OS (18.3): the OpenSCAD spawn, publish (blocking reqwest), project
 # scaffolding, the smoke sweep, and the CLI-only deps. `--no-default-features` is the wasm32-safe
 # core — pure geometry/slicing/spec logic, no process spawn, no network.

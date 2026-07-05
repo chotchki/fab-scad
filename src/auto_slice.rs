@@ -70,7 +70,7 @@ pub fn piece_count(min: [f64; 3], max: [f64; 3], bed: [f64; 3]) -> usize {
 #[cfg(feature = "kernel")]
 #[derive(Debug, Clone, Copy)]
 pub struct FitRotation {
-    pub rot: [f64; 12],
+    pub rot: fab_lang::Affine,
     pub min: [f64; 3],
     pub max: [f64; 3],
     pub pieces: usize,
@@ -87,11 +87,14 @@ pub struct FitRotation {
 #[cfg(feature = "kernel")]
 pub fn best_fit_rotation(base: &crate::kernel::Solid, bed: [f64; 3]) -> FitRotation {
     let rad = std::f64::consts::FRAC_PI_4; // 45°
-    let mut candidates = vec![identity()];
+    // The rotation builders are column-major (for the OLD transform); wrap as Affine so from_column_major
+    // ∘ to_column_major round-trips — Manifold receives the identical matrix, byte for byte.
+    let cm = fab_lang::Affine::from_column_major;
+    let mut candidates = vec![cm(identity())];
     for &a in &[rad, -rad] {
-        candidates.push(rot_x(a));
-        candidates.push(rot_y(a));
-        candidates.push(rot_z(a));
+        candidates.push(cm(rot_x(a)));
+        candidates.push(cm(rot_y(a)));
+        candidates.push(cm(rot_z(a)));
     }
     let vol =
         |min: [f64; 3], max: [f64; 3]| (max[0] - min[0]) * (max[1] - min[1]) * (max[2] - min[2]);
@@ -101,6 +104,7 @@ pub fn best_fit_rotation(base: &crate::kernel::Solid, bed: [f64; 3]) -> FitRotat
         let Some((min, max)) = base.transform(&rot).bbox() else {
             continue;
         };
+        let (min, max) = (min.to_array(), max.to_array()); // Vec3 → the printer domain's [f64; 3]
         let pieces = piece_count(min, max, bed);
         let cand = FitRotation {
             rot,
@@ -210,9 +214,11 @@ mod tests {
         use crate::kernel::Solid;
         // A 400×20×20 bar lying at 45° in XY: its footprint bloats to ~297×297 → 2×2 = 4 pieces
         // axis-aligned. rotate-to-fit should spin it back to the 400×20×20 orientation → 2 pieces.
-        let bar =
-            Solid::cube(400.0, 20.0, 20.0, true).transform(&rot_z(std::f64::consts::FRAC_PI_4));
+        let bar = Solid::cube(400.0, 20.0, 20.0, true).transform(
+            &fab_lang::Affine::from_column_major(rot_z(std::f64::consts::FRAC_PI_4)),
+        );
         let (min, max) = bar.bbox().unwrap();
+        let (min, max) = (min.to_array(), max.to_array());
         assert_eq!(
             piece_count(min, max, BED),
             4,
@@ -220,7 +226,10 @@ mod tests {
         );
         let fit = best_fit_rotation(&bar, BED);
         assert_eq!(fit.pieces, 2, "rotate-to-fit spins it back to 2 pieces");
-        assert!(fit.rot != identity(), "it chose a non-identity spin");
+        assert!(
+            fit.rot != fab_lang::Affine::from_column_major(identity()),
+            "it chose a non-identity spin"
+        );
     }
 
     #[test]
@@ -230,6 +239,10 @@ mod tests {
         let cube = Solid::cube(200.0, 200.0, 200.0, true);
         let fit = best_fit_rotation(&cube, BED);
         assert_eq!(fit.pieces, 1);
-        assert_eq!(fit.rot, identity(), "no needless spin when it already fits");
+        assert_eq!(
+            fit.rot,
+            fab_lang::Affine::from_column_major(identity()),
+            "no needless spin when it already fits"
+        );
     }
 }

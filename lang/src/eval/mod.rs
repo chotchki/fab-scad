@@ -15,6 +15,7 @@ mod fmt;
 mod fragments;
 mod geometry;
 mod loader;
+mod message;
 mod module;
 mod ops;
 mod scope;
@@ -22,6 +23,7 @@ mod trig;
 mod value;
 
 pub use fragments::fragments;
+pub use message::{Evaluation, Message};
 pub use scope::Scope;
 pub use value::{RANGE_MAX, RangeIter, Value, range_iter, range_len};
 
@@ -37,10 +39,14 @@ use crate::parser::{Arg, BinOp, Expr, ExprKind, Parameter, Program, Stmt, StmtKi
 ///   mutual recursion work regardless of scope. Built once per program (`build_ctx`).
 /// - `closures`: function-literal VALUES registered as they evaluate (indexed by [`Value::Function`]'s
 ///   `closure_id`). `&'a` AST refs, so a [`Value`] holding a `closure_id` stays `'static`.
+/// - `messages`: `echo`/warning console output, accumulated in EMISSION order (I.5) — a shared buffer
+///   because echo can fire deep in an expression, not just at a statement. Extracted into
+///   [`Evaluation`] at the end; the mesh-only `evaluate*` sugar drops it.
 #[derive(Default)]
 pub(super) struct Ctx<'a> {
     functions: BTreeMap<&'a str, (&'a [Parameter], &'a Expr)>,
     closures: RefCell<Vec<(&'a [Parameter], &'a Expr)>>,
+    messages: RefCell<Vec<Message>>,
 }
 
 /// One step on the evaluator's explicit work-stack. Each `Eval` carries the [`Scope`] it evaluates
@@ -317,10 +323,24 @@ fn eval_node<'a>(
             }
             None => tasks.push(Task::Eval(body, scope.clone())), // `let() body` → just the body
         },
-        ExprKind::Assert { .. } | ExprKind::Echo { .. } => {
-            return Err(crate::Error::Unimplemented(
-                "assert / echo expressions are not yet implemented (I.5)",
-            ));
+        ExprKind::Echo { args, body } => {
+            // `echo(args) body?` — emit the ECHO line (side effect), then yield `body` (or undef). The
+            // args + body sub-evaluate off the stack (bounded, like comprehensions); echo is rare + cold.
+            emit_echo(args, scope, global, ctx)?;
+            let value = match body {
+                Some(b) => eval_with_global(b, scope, global, ctx)?,
+                None => Value::Undef,
+            };
+            values.push(value);
+        }
+        ExprKind::Assert { args, body } => {
+            // `assert(cond, msg?) body?` — LOUD on a falsy condition, else yield `body` (or undef).
+            check_assert(args, scope, global, ctx)?;
+            let value = match body {
+                Some(b) => eval_with_global(b, scope, global, ctx)?,
+                None => Value::Undef,
+            };
+            values.push(value);
         }
         ExprKind::LcFor { .. }
         | ExprKind::LcForC { .. }
@@ -690,15 +710,20 @@ pub(crate) fn evaluate_source(
     base_dir: &std::path::Path,
     root_path: Option<&std::path::Path>,
     library_paths: &[std::path::PathBuf],
-) -> crate::Result<Mesh> {
+) -> crate::Result<Evaluation> {
     let _span = tracing::trace_span!("eval_program").entered();
     let loaded = loader::load(source, base_dir, root_path, library_paths)?;
     let (exec, functions) = loader::flatten(&loaded)?;
     let ctx = Ctx {
         functions,
         closures: RefCell::default(),
+        messages: RefCell::default(),
     };
-    run_stmts(exec.into_iter(), &ctx, &Scope::new())
+    let mesh = run_stmts(exec.into_iter(), &ctx, &Scope::new())?;
+    Ok(Evaluation {
+        mesh,
+        messages: ctx.messages.into_inner(),
+    })
 }
 
 /// Evaluate a statement stream with a prebuilt [`Ctx`] — shared by [`eval_program`] (one program's
@@ -758,6 +783,63 @@ fn hoisted_assignments<'a>(stmts: &[&'a Stmt]) -> Vec<(&'a str, &'a Expr)> {
     order
 }
 
+/// Evaluate an `echo`'s arguments and push the formatted `ECHO:` content onto the message log — named
+/// args render `name = value`, positional just `value`, joined by `, ` (OpenSCAD's echo order). The
+/// value form is the shared [`fmt::format_value`] (strings QUOTED), so it's bug-for-bug with the oracle.
+fn emit_echo<'a>(
+    args: &'a [Arg],
+    scope: &Scope,
+    global: &Scope,
+    ctx: &Ctx<'a>,
+) -> crate::Result<()> {
+    let mut parts = Vec::with_capacity(args.len());
+    for arg in args {
+        let value = eval_with_global(&arg.value, scope, global, ctx)?;
+        parts.push(match &arg.name {
+            Some(name) => format!("{name} = {}", fmt::format_value(&value)),
+            None => fmt::format_value(&value),
+        });
+    }
+    ctx.messages
+        .borrow_mut()
+        .push(Message::Echo(parts.join(", ")));
+    Ok(())
+}
+
+/// Evaluate an `assert`'s arguments and fail LOUD if the condition is falsy: `assert(cond)`,
+/// `assert(cond, msg)`, or the named `assert(condition = …, message = …)`. The failure text is NOT
+/// matched to the oracle word-for-word (an agreed non-goal); it carries the user's message when given.
+fn check_assert<'a>(
+    args: &'a [Arg],
+    scope: &Scope,
+    global: &Scope,
+    ctx: &Ctx<'a>,
+) -> crate::Result<()> {
+    let mut positional = Vec::new();
+    let mut named_condition = None;
+    let mut named_message = None;
+    for arg in args {
+        let value = eval_with_global(&arg.value, scope, global, ctx)?;
+        match arg.name.as_deref() {
+            None => positional.push(value),
+            Some("condition") => named_condition = Some(value),
+            Some("message") => named_message = Some(value),
+            Some(_) => {} // unknown named arg — dropped, as OpenSCAD arg-matching does
+        }
+    }
+    // A named `condition`/`message` beats the positional slot (params are `condition`, then `message`).
+    let condition = named_condition.or_else(|| positional.first().cloned());
+    let message = named_message.or_else(|| positional.get(1).cloned());
+    if condition.is_some_and(|c| c.is_truthy()) {
+        return Ok(());
+    }
+    Err(crate::Error::Eval(match message {
+        Some(Value::Str(s)) => format!("assertion failed: {s}"),
+        Some(other) => format!("assertion failed: {}", fmt::format_value(&other)),
+        None => "assertion failed".to_string(),
+    }))
+}
+
 /// Collect user function definitions into the [`Ctx`] store (their own namespace). A pre-pass over the
 /// whole program, so a call can resolve a function defined anywhere (whole-program visibility, like
 /// OpenSCAD); a duplicate name — last definition wins (`BTreeMap::insert`).
@@ -771,6 +853,7 @@ fn build_ctx(program: &Program) -> Ctx<'_> {
     Ctx {
         functions,
         closures: RefCell::default(),
+        messages: RefCell::default(),
     }
 }
 
@@ -798,6 +881,12 @@ fn eval_stmt<'a>(
                 eval_stmt(stmt, scope, ctx, meshes)?;
             }
         }
+        // `echo`/`assert` at statement level are module instantiations, but they produce console
+        // output, not geometry — handle them here (no mesh pushed) before the primitive dispatch. Their
+        // geometry CHILDREN (`echo(x) cube();`) are a passthrough that rides the module-children
+        // machinery (I.2.4 / J); rare with echo/assert, and deferred there.
+        StmtKind::Module(mi) if mi.name == "echo" => emit_echo(&mi.args, scope, scope, ctx)?,
+        StmtKind::Module(mi) if mi.name == "assert" => check_assert(&mi.args, scope, scope, ctx)?,
         StmtKind::Module(mi) => meshes.push(module::eval_module(mi, scope, ctx)?),
         StmtKind::If { .. } => {
             return Err(crate::Error::Unimplemented(

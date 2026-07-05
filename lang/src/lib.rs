@@ -47,7 +47,8 @@ mod parser;
 pub use customizer::{Constraint, CustomParam, Customizer, DropdownItem, customize};
 pub use error::{Error, Result};
 pub use eval::{
-    RANGE_MAX, RangeIter, Scope, Value, eval_expr, eval_program, fragments, range_iter, range_len,
+    Evaluation, Message, RANGE_MAX, RangeIter, Scope, Value, eval_expr, eval_program, fragments,
+    range_iter, range_len,
 };
 pub use lexer::{Lexed, Token, TokenKind, decode_str, lex, num_value};
 pub use mesh::Mesh;
@@ -69,7 +70,16 @@ use std::path::{Path, PathBuf};
 /// [`Error::Parse`] for malformed source, [`Error::Load`] for an unresolvable `use`/`include`, and
 /// [`Error::Unimplemented`] for a well-formed program that uses a construct beyond the current subset.
 pub fn evaluate(source: &str) -> Result<Mesh> {
-    evaluate_with_base(source, Path::new("."), &[])
+    evaluate_full(source).map(|e| e.mesh)
+}
+
+/// Like [`evaluate`], but returns the full [`Evaluation`] — the mesh PLUS the ordered `echo`/warning
+/// console messages (I.5). The `evaluate*` functions are mesh-only sugar over their `*_full` siblings.
+///
+/// # Errors
+/// As [`evaluate`].
+pub fn evaluate_full(source: &str) -> Result<Evaluation> {
+    evaluate_with_base_full(source, Path::new("."), &[])
 }
 
 /// Evaluate a `.scad` FILE, resolving its `use`/`include` graph. Relative references resolve against
@@ -83,6 +93,14 @@ pub fn evaluate(source: &str) -> Result<Mesh> {
 /// [`Error::Load`] if the file or any `use`/`include` target can't be read/resolved, [`Error::Parse`]
 /// for malformed source, and [`Error::Unimplemented`] for constructs beyond the current subset.
 pub fn evaluate_file(path: &Path, library_paths: &[PathBuf]) -> Result<Mesh> {
+    evaluate_file_full(path, library_paths).map(|e| e.mesh)
+}
+
+/// Like [`evaluate_file`], but returns the full [`Evaluation`] (mesh + `echo`/warning messages).
+///
+/// # Errors
+/// As [`evaluate_file`].
+pub fn evaluate_file_full(path: &Path, library_paths: &[PathBuf]) -> Result<Evaluation> {
     let source = std::fs::read_to_string(path)
         .map_err(|e| Error::Load(format!("{}: {e}", path.display())))?;
     // The including-file dir. An empty parent (a bare `foo.scad`) resolves relative to CWD via the
@@ -103,6 +121,18 @@ pub fn evaluate_with_base(
     base_dir: &Path,
     library_paths: &[PathBuf],
 ) -> Result<Mesh> {
+    evaluate_with_base_full(source, base_dir, library_paths).map(|e| e.mesh)
+}
+
+/// Like [`evaluate_with_base`], but returns the full [`Evaluation`] (mesh + `echo`/warning messages).
+///
+/// # Errors
+/// As [`evaluate_with_base`].
+pub fn evaluate_with_base_full(
+    source: &str,
+    base_dir: &Path,
+    library_paths: &[PathBuf],
+) -> Result<Evaluation> {
     eval::evaluate_source(source, base_dir, None, library_paths)
 }
 

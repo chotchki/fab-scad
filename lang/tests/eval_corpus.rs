@@ -227,11 +227,41 @@ fn ranges_are_first_class_values() {
 fn deferred_constructs_are_loud() {
     assert!(matches!(ev_err("f(1)"), Error::Unimplemented(m) if m.contains("I.4"))); // unknown/builtin fn
     assert!(matches!(ev_err("a.b"), Error::Unimplemented(m) if m.contains("I.1"))); // member access
-    // (function literals + calling a function VALUE now evaluate — I.2.3.3; let → I.3.1; see below.)
-    // the remaining H.3 expression forms parse but defer: assert / echo → I.5.
-    // (list comprehensions now evaluate — I.3.2; see list_comprehensions below.)
-    assert!(matches!(ev_err("assert(true)1"), Error::Unimplemented(m) if m.contains("I.5")));
-    assert!(matches!(ev_err("echo(1)2"), Error::Unimplemented(m) if m.contains("I.5")));
+    // (function literals + calling a function VALUE now evaluate — I.2.3.3; let → I.3.1; list
+    // comprehensions → I.3.2; assert / echo → I.5 — see echo_and_assert_evaluate below.)
+}
+
+#[test]
+fn echo_and_assert_evaluate() {
+    // I.5: assert passes through its trailing value (a falsy condition is LOUD); echo emits an ECHO
+    // line then passes through. Expression forms via the ev helper:
+    assert_eq!(ev("assert(true) 1"), num(1.0));
+    assert_eq!(ev("echo(1) 2"), num(2.0));
+    assert_eq!(ev("echo(1)"), Value::Undef); // no trailing body → undef
+    assert_eq!(ev("assert(true)"), Value::Undef);
+    assert!(matches!(ev_err("assert(false)"), Error::Eval(_)));
+    // assert arg forms: named condition/message, an unknown named (dropped), a non-string message.
+    assert!(matches!(
+        ev_err("assert(condition = false, message = \"m\")"),
+        Error::Eval(m) if m.contains('m')
+    ));
+    assert!(matches!(ev_err("assert(false, foo = 1)"), Error::Eval(_))); // unknown named dropped
+    assert!(matches!(
+        ev_err("assert(false, 42)"),
+        Error::Eval(m) if m.contains("42") // non-string message
+    ));
+    // Echo OUTPUT via the program path — evaluate_full captures the ordered message log; numbers are
+    // formatted bug-for-bug (0.333333), strings quoted, named args as `a = 5`.
+    let full =
+        fab_lang::evaluate_full("echo(9); echo(1 / 3); echo(\"hi\", a = 5);").expect("evaluates");
+    assert_eq!(full.echos(), ["9", "0.333333", "\"hi\", a = 5"]);
+    assert!(full.warnings().is_empty());
+    // A top-level assert/echo is NOT geometry; a falsy assert is loud.
+    assert!(fab_lang::evaluate("assert(true); sphere(1, $fn = 8);").is_ok());
+    assert!(matches!(
+        fab_lang::evaluate("assert(1 == 2, \"nope\");"),
+        Err(Error::Eval(_))
+    ));
 }
 
 #[test]

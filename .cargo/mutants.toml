@@ -1,0 +1,28 @@
+# cargo-mutants config (H.5.4 / backlog #37): prove the fab-lang PARSER's tests CATCH bugs, not merely
+# run. cargo-mutants mutates the code (swaps operators, deletes statements, replaces returns) and
+# reruns the suite per mutant; a SURVIVING mutant is one no test noticed — a hole the fuzzer and
+# proptest can't see. It runs the whole suite per mutant, so it's a PERIODIC gate (like fuzz), invoked
+# explicitly:
+#
+#     PROPTEST_CASES=24 cargo mutants --package fab-lang
+#
+# `examine_globs` scopes the mutation surface to the parser for Phase H (the `**/src/parser/**` form is
+# robust to package- vs workspace-relative path resolution). Broaden it to the evaluator at Phase I —
+# note the mutation sweep already flagged weak spots there (eval/geometry.rs especially), which is the
+# I-phase mutation-hardening work, not H's.
+examine_globs = ["**/src/parser/**"]
+
+# The parser's depth-counter mutations (`depth + 1` -> `depth`) defeat the MAX_DEPTH guard and make the
+# deep-nesting tests recurse into a hang — a REAL catch, surfaced as a timeout rather than a clean
+# failure. Give those the room to be detected instead of racing the default timeout.
+minimum_test_timeout = 60
+
+# RESIDUAL (2026-07-04, 208 caught / 47 missed / 167 unviable): the 47 survivors are ALL `replace +
+# with -/*` on a `depth + 1` in a NON-self-nesting position (a param/arg list, a C-style-for
+# init/cond/update, a binary rhs). They can't compound into a stack overflow — another `+1` on the
+# same recursion path compensates, or the path can't self-nest through that increment. The
+# SELF-NESTING body recursions (function-literal/let/comprehension bodies, deep ternary/call/exponent)
+# ARE caught, by `every_recursive_construct_guards_depth`. Killing the residual would mean asserting
+# the EXACT depth the guard fires at — pinning an arbitrary constant per construct, testing
+# implementation detail. So this gate is a REVIEW ("are all survivors the benign depth class?"), not a
+# 0-survivor CI check: `exclude_re`-ing `depth` would also hide a real depth bug in a self-nesting spot.

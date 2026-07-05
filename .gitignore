@@ -36,3 +36,6 @@ out/
 # wasm spike: generated bindgen output next to the committed loader page
 spikes/wasm-gui/web/*
 !spikes/wasm-gui/web/index.html
+
+# cargo-mutants working dir (periodic gate; results reviewed, not committed)
+/mutants.out/

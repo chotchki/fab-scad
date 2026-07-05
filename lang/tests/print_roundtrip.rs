@@ -69,6 +69,10 @@ fn canonical_form_is_fully_parenthesized() {
     assert_eq!(rt("v = a?b:c;"), "v = (a ? b : c);\n");
     assert_eq!(rt("v = a[0].f(1);"), "v = a[0].f(1);\n"); // postfix needs no parens
     assert_eq!(rt("v = [0:2:9];"), "v = [0 : 2 : 9];\n");
+    // vector ELEMENTS + parameters are printed in full (the idempotent roundtrip can't see a printer
+    // that drops them — `[]`/`()` re-parse to themselves — so pin the exact content).
+    assert_eq!(rt("v = [1, 2, 3];"), "v = [1, 2, 3];\n");
+    assert_eq!(rt("module m(a, b = 2) ;"), "module m(a, b = 2) ;\n");
     // module children always print braced (round-trips a single nested-block child).
     assert_eq!(rt("cube(2);"), "cube(2){}\n");
     // strings re-escape so the VALUE round-trips — every escape arm: `\ " \n \t \r`, plus a plain char.

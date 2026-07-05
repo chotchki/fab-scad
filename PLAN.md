@@ -44,15 +44,27 @@ Driven by `claude-plan-bridge` (FORMATv2). Hand-authored; run
   - [x] H.6.3 - Scheduled CI fuzz job + persisted/minimized corpus artifact (the fuzz-from-first-commit doctrine)
   - [x] H.6.4 - TROPHIES.md doctrine: every fuzz-found bug logged + regression-pinned as a test
 ## Phase I - scad-rs: evaluator core
-Meta - I've been looking into cranelift and it looks like it would be VERY approachable for us leverage for execution instead of going the interpreter route
+  Meta - Cranelift is the NATIVE JIT rung (chotchki's find: VERY approachable, and it's determinism-friendly — no auto-FMA, transcendentals stay CALLS to our own math, so the fixed-accumulation doctrine survives). NOT a replacement for the interpreter: the wasm/browser target can't JIT in-sandbox (the bet's #1 differentiator needs ONE implementation everywhere), and the interpreter is the bit-identical baseline the JIT validates against (fast==slow extends to fast==JIT). Spiked at I.8 (one hot function, prove bit-identical); the JIT-vs-intrinsics PROMOTE decision lands at Phase L with data.
 - [ ] I.1 - Value model full: enum + NumList fast path + interned strings + lazy ranges; fast==slow BITWISE property via the shared fixed 4-lane accumulation order
+  - [ ] I.1.1 - Heterogeneous List(Rc<[Value]>) alongside the NumList fast path: nested lists, indexing, eq/order per Value.cc
+  - [ ] I.1.2 - Lazy Range value (start/step/end): inclusive-end iteration, element cap + warning, range-as-value
+  - [ ] I.1.3 - Function values / closures (params + body + captured env) — the currency I.2's calls spend
+  - [ ] I.1.4 - Interned strings (deterministic intern table) + string indexing / char access
+  - [ ] I.1.5 - Fixed 4-lane accumulation order + the fast==slow BITWISE proptest (NumList fast path == List slow path)
 - [ ] I.2 - Scoping engine: lexical envs, dynamic $-variables, children()/late binding, module+function call machinery on the explicit stack; + the use/include LOADER (file resolution + include-splice + use-import — parser stays zero-IO, this is where H's use/include AST nodes get resolved)
+  - [ ] I.2.1 - Lexical env chain (vars) + the frame representation — THE design decision (persistent Rc-chain vs frame-arena, explicit-stack-friendly)
+  - [ ] I.2.2 - Dynamic $-variables: down-the-call-tree propagation + per-call override + the reaching-$-context
+  - [ ] I.2.3 - Function-call machinery ON THE EXPLICIT STACK: resolve + arg-match (positional/named/default) + body eval + return, no host recursion
+  - [ ] I.2.4 - Module-call machinery on the explicit stack: resolve user module + arg-bind + children eval → geometry tree
+  - [ ] I.2.5 - children() / $children late binding (refers to the call-site children, late-bound)
+  - [ ] I.2.6 - use/include LOADER: path resolution + include-splice + use-import (resolves H's zero-IO AST nodes; parser stays zero-IO)
 - [ ] I.3 - Control flow + comprehensions + recursion bounded by memory — corner_brace-class deep recursion as the standing regression proof
 - [ ] I.4 - Builtin function library (~80: math/list/string/type predicates), each landing with its semantics/ test
 - [ ] I.5 - undef propagation + warning/echo text bug-for-bug (string-equal vs oracle)
 - [ ] I.6 - tracing spans on the call path + aggregating benchmark layer; release builds compile it out; overhead measured
 - [ ] I.7 - Kani proofs: stack-machine push/pop discipline, range-iteration termination
 
+- [ ] I.8 - Cranelift JIT spike: after the interpreter core, JIT one hot numeric function, measure speedup vs interpreter, PROVE bit-identical (fast==JIT); bank the float-discipline recipe — de-risks the L JIT-vs-intrinsics decision
 ## Phase J - scad-rs: geometry surface + cache
 - [ ] J.1 - Geometry backend trait; interface suite runs miri-on-mock AND ASAN-on-real-Manifold in CI (the split that replaced raw miri-on-FFI)
 - [ ] J.2 - 3D: primitives, multmatrix, booleans through Manifold; polyhedron with oracle-matching validation semantics

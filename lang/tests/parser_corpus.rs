@@ -327,6 +327,12 @@ fn list_comprehensions_parse_every_form() {
     );
     assert_eq!(e("[(for(i=r) i)]"), "[(for [i=r] i)]"); // parenthesized comprehension element
     assert_eq!(e("[(1+2), 3]"), "[(Add 1 2) 3]"); // a plain `(expr)` element is NOT a comprehension
+    // a vector `let` whose body IS a comprehension takes the lc_let path (Let{body: LcFor}), which the
+    // plain let-expr path (body: expr) can't parse — `for` isn't an expression.
+    assert_eq!(e("[let(a=1) for(i=r) a]"), "[(let [a=1] (for [i=r] a))]");
+    // a parenthesized expr FOLLOWED BY an operator is a plain expr, not a paren-comprehension — the
+    // `(`-guard must peek at what's inside, not fire on every `(`.
+    assert_eq!(e("[(1)+2, 3]"), "[(Add 1 2) 3]");
     assert_eq!(e("[for(i=r, j=s) i+j]"), "[(for [i=r j=s] (Add i j))]"); // multiple bindings
     assert_eq!(e("[0, for(i=r) i, 9]"), "[0 (for [i=r] i) 9]"); // mixed plain + comprehension
 }
@@ -554,6 +560,60 @@ fn deep_nesting_errors_not_overflows() {
     assert!(err(&deep_children).contains("module calls")); // module_instantiation guard
 }
 
+// ─────────────────────────────── depth guards, EVERY recursive construct ────────────────────────
+
+#[test]
+fn every_recursive_construct_guards_depth() {
+    // Each self-nesting parser path must trip a MAX_DEPTH guard (error contains "deeply"), never
+    // overflow — the Safari-cliff discipline, per construct. A broken `depth + 1` on any of these is
+    // a real stack-overflow vuln (cargo-mutants H.5.4 surfaced them): a mutant that stops the depth
+    // growing recurses the full input, which either parses (so `err` panics on the unexpected Ok) or
+    // overflows — caught either way.
+    let n = 300;
+    let deep: Vec<(String, &str)> = vec![
+        (
+            format!("v={}0;", "function(x) ".repeat(n)),
+            "function-literal",
+        ),
+        (format!("v={}0;", "let(a=1) ".repeat(n)), "let-expr"),
+        (format!("v={}0;", "assert(1) ".repeat(n)), "assert-expr"),
+        (format!("v={}0;", "echo(1) ".repeat(n)), "echo-expr"),
+        (
+            format!("v={}0{};", "1?".repeat(n), ":0".repeat(n)),
+            "ternary",
+        ),
+        (
+            format!("v={}0{};", "[".repeat(n), "]".repeat(n)),
+            "nested vector",
+        ),
+        (
+            format!("v={}0{};", "f(".repeat(n), ")".repeat(n)),
+            "call args",
+        ),
+        (format!("v={}2;", "2^".repeat(n)), "exponent"),
+        (
+            format!("v=[{}0];", "for(i=r) ".repeat(n)),
+            "comprehension for",
+        ),
+        (format!("v=[{}0];", "each ".repeat(n)), "comprehension each"),
+        (format!("v=[{}0];", "if(x) ".repeat(n)), "comprehension if"),
+        (
+            format!("v=[{}0];", "let(a=1) ".repeat(n)),
+            "comprehension let",
+        ),
+        (
+            format!("{}cube();", "module m() ".repeat(n)),
+            "module def body",
+        ),
+    ];
+    for (src, what) in deep {
+        assert!(
+            err(&src).contains("deeply"),
+            "{what} must trip the depth guard, never overflow"
+        );
+    }
+}
+
 // ─────────────────────────────── drop-safety (the non-recursive Drop) ───────────────────────────
 
 #[test]
@@ -617,9 +677,20 @@ fn never_panics_on_adversarial_input() {
 
 #[test]
 fn caret_diagnostic_points_at_the_line() {
-    let msg = err("a = 1;\nb = f(2;\nc = 3;"); // error on line 2
-    assert!(msg.contains("2 | "), "want line-2 gutter in:\n{msg}");
-    assert!(msg.contains('^'), "want a caret in:\n{msg}");
+    let msg = err("a = 1;\nb = f(2;\nc = 3;"); // error on line 2, under the `;` where `)` was expected
+    // The gutter + the FULL offending line (not truncated — this pins `line_end`; a mutation there
+    // drops the trailing `;`).
+    assert!(
+        msg.contains("2 | b = f(2;"),
+        "want the full line-2 source in:\n{msg}"
+    );
+    // The caret aligns under the `;`: the 4-char gutter + the line prefix before `;` (this pins the
+    // character `col`, so a mutation that shifts it is caught).
+    let caret = format!("\n{}^", " ".repeat("2 | b = f(2".len()));
+    assert!(
+        msg.contains(&caret),
+        "want the caret aligned under `;` in:\n{msg}"
+    );
     // error at end-of-input maps to source length, not a panic
     assert!(!err("v=1").is_empty());
     // multibyte before the caret keeps it aligned (no byte/char confusion, no panic)

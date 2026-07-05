@@ -43,7 +43,9 @@ mod parser;
 
 pub use customizer::{Constraint, CustomParam, Customizer, DropdownItem, customize};
 pub use error::{Error, Result};
-pub use eval::{Scope, Value, eval_expr, eval_program, fragments};
+pub use eval::{
+    RANGE_MAX, RangeIter, Scope, Value, eval_expr, eval_program, fragments, range_iter, range_len,
+};
 pub use lexer::{Lexed, Token, TokenKind, decode_str, lex, num_value};
 pub use mesh::Mesh;
 pub use parser::{

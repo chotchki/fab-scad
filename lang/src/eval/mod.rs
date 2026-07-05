@@ -20,7 +20,7 @@ mod value;
 
 pub use fragments::fragments;
 pub use scope::Scope;
-pub use value::Value;
+pub use value::{RANGE_MAX, RangeIter, Value, range_iter, range_len};
 
 use crate::Mesh;
 use crate::parser::{BinOp, Expr, ExprKind, Program, Stmt, StmtKind, UnOp};
@@ -35,6 +35,10 @@ enum Task<'a> {
     Unary(UnOp),
     /// Pop `n` values and build a vector from them.
     Vector(usize),
+    /// Pop the index then the base, apply `base[index]`.
+    Index,
+    /// Pop end, (step if `stepped`), start; build a range value.
+    Range { stepped: bool },
     /// Pop the condition, then schedule the taken branch.
     Ternary { then: &'a Expr, els: &'a Expr },
 }
@@ -62,7 +66,24 @@ pub fn eval_expr(root: &Expr, scope: &Scope) -> crate::Result<Value> {
             }
             Task::Vector(n) => {
                 let items = values.split_off(values.len().saturating_sub(n));
-                values.push(build_vector(items)?);
+                values.push(build_vector(items));
+            }
+            Task::Index => {
+                // index was pushed after base, so it's on top.
+                let index = values.pop().unwrap_or(Value::Undef);
+                let base = values.pop().unwrap_or(Value::Undef);
+                values.push(ops::index(base, &index));
+            }
+            Task::Range { stepped } => {
+                // pushed start, [step], end → pop end, [step], start.
+                let end = values.pop().unwrap_or(Value::Undef);
+                let step = if stepped {
+                    values.pop().unwrap_or(Value::Undef)
+                } else {
+                    Value::Num(1.0)
+                };
+                let start = values.pop().unwrap_or(Value::Undef);
+                values.push(build_range(&start, &step, &end));
             }
             Task::Ternary { then, els } => {
                 let cond = values.pop().unwrap_or(Value::Undef);
@@ -111,20 +132,26 @@ fn eval_node<'a>(
                 "function calls are not yet implemented (I.4)",
             ));
         }
-        ExprKind::Index { .. } => {
-            return Err(crate::Error::Unimplemented(
-                "list indexing is not yet implemented (I.1)",
-            ));
+        ExprKind::Index { base, index } => {
+            tasks.push(Task::Index);
+            tasks.push(Task::Eval(index));
+            tasks.push(Task::Eval(base)); // popped (and evaluated) first → base under index
         }
         ExprKind::Member { .. } => {
             return Err(crate::Error::Unimplemented(
                 "member access is not yet implemented (I.1)",
             ));
         }
-        ExprKind::Range { .. } => {
-            return Err(crate::Error::Unimplemented(
-                "ranges are not yet implemented (I.1)",
-            ));
+        ExprKind::Range { start, step, end } => {
+            // pushed so start evaluates first (bottom of the value stack), end last (top).
+            tasks.push(Task::Range {
+                stepped: step.is_some(),
+            });
+            tasks.push(Task::Eval(end));
+            if let Some(step) = step {
+                tasks.push(Task::Eval(step));
+            }
+            tasks.push(Task::Eval(start));
         }
         ExprKind::FunctionLiteral { .. } | ExprKind::Let { .. } => {
             return Err(crate::Error::Unimplemented(
@@ -148,21 +175,32 @@ fn eval_node<'a>(
     Ok(())
 }
 
-/// Build a vector value. v0 supports the all-numeric fast path only; heterogeneous/nested vectors
-/// are I.1.
-fn build_vector(items: Vec<Value>) -> crate::Result<Value> {
-    let mut nums = Vec::with_capacity(items.len());
-    for v in items {
-        match v {
-            Value::Num(n) => nums.push(n),
-            _ => {
-                return Err(crate::Error::Unimplemented(
-                    "non-numeric / nested vectors are not yet implemented (I.1)",
-                ));
-            }
-        }
+/// Build a vector value: the all-numeric `NumList` fast path when every element is a number, else the
+/// general heterogeneous `List`. The two compare EQUAL element-for-element (see `Value`'s `PartialEq`).
+fn build_vector(items: Vec<Value>) -> Value {
+    match items.iter().map(as_num).collect::<Option<Vec<f64>>>() {
+        Some(nums) => Value::num_list(nums),
+        None => Value::list(items),
     }
-    Ok(Value::num_list(nums))
+}
+
+/// A number's `f64`, else `None` — the all-numeric test for the `NumList` fast path.
+fn as_num(v: &Value) -> Option<f64> {
+    match v {
+        Value::Num(n) => Some(*n),
+        _ => None,
+    }
+}
+
+/// Build a range value from its (already-evaluated) bounds — non-numeric bounds make the whole range
+/// `undef` (OpenSCAD requires numeric range bounds).
+fn build_range(start: &Value, step: &Value, end: &Value) -> Value {
+    match (start, step, end) {
+        (&Value::Num(start), &Value::Num(step), &Value::Num(end)) => {
+            Value::Range { start, step, end }
+        }
+        _ => Value::Undef,
+    }
 }
 
 /// Evaluate a whole program to a [`Mesh`] — the tracer-bullet spine's tail. Assignments bind into

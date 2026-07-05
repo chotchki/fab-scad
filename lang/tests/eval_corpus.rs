@@ -149,12 +149,72 @@ fn literals_idents_ternary_vectors() {
 }
 
 #[test]
+fn heterogeneous_lists_and_indexing() {
+    // representation: all-number → NumList fast path; anything else → the general List slow path.
+    assert!(matches!(ev("[1,2,3]"), Value::NumList(_)));
+    assert!(matches!(ev("[1,true]"), Value::List(_)));
+    assert!(matches!(ev("[[1,2],[3,4]]"), Value::List(_))); // nested → List (elements are lists)
+    assert_eq!(
+        ev("[1, true, \"a\"]"),
+        Value::list(vec![num(1.0), Value::Bool(true), Value::string("a")])
+    );
+    // fast == slow: the two representations of the same vector compare EQUAL.
+    assert_eq!(ev("[1,2] == [1,2]"), Value::Bool(true));
+    assert_eq!(ev("[1,2]"), Value::list(vec![num(1.0), num(2.0)])); // NumList == List, via the custom eq
+    assert_eq!(ev("[1,[2,3]] == [1,[2,3]]"), Value::Bool(true)); // nested equality
+    // indexing (Value.cc operator[]): in-range, out-of-range → undef, fractional truncates, negative → undef.
+    assert_eq!(ev("[10,20,30][1]"), num(20.0));
+    assert_eq!(ev("[10,20][5]"), Value::Undef);
+    assert_eq!(ev("[10,20][1.9]"), num(20.0)); // trunc toward zero
+    assert_eq!(ev("[10,20][-1]"), Value::Undef);
+    assert_eq!(ev("[1,[2,3]][1]"), list(&[2.0, 3.0])); // nested element
+    assert_eq!(ev(r#""abc"[1]"#), Value::string("b")); // string index → the char
+    assert_eq!(ev("5[0]"), Value::Undef); // indexing a scalar → undef
+    assert_eq!(ev(r#"[1,2]["x"]"#), Value::Undef); // non-number index → undef
+    // a non-empty List is truthy; Lists order lexicographically like NumLists (mixed-element too).
+    assert_eq!(ev("[1,true] ? 10 : 20"), num(10.0));
+    assert_eq!(ev(r#"[1,"a"] < [1,"b"]"#), Value::Bool(true));
+}
+
+#[test]
+fn ranges_are_first_class_values() {
+    // a range is a lazy VALUE (assignable, comparable), NOT materialized into a list.
+    assert_eq!(
+        ev("[0:5]"),
+        Value::Range {
+            start: 0.0,
+            step: 1.0,
+            end: 5.0
+        }
+    ); // 2-part → default step 1
+    assert_eq!(
+        ev("[0:2:10]"),
+        Value::Range {
+            start: 0.0,
+            step: 2.0,
+            end: 10.0
+        }
+    ); // 3-part
+    assert_eq!(
+        ev("[5:-1:0]"),
+        Value::Range {
+            start: 5.0,
+            step: -1.0,
+            end: 0.0
+        }
+    ); // descending
+    assert_eq!(ev("[a:b]"), Value::Undef); // non-numeric bounds → undef
+    assert_eq!(ev("[0:5] == [0:5]"), Value::Bool(true)); // fieldwise equality
+    assert_eq!(ev("[0:5] == [0:1:5]"), Value::Bool(true)); // 2-part == explicit step 1
+    assert_eq!(ev("[0:5] == [0:6]"), Value::Bool(false)); // different end
+    assert_eq!(ev("[0:5] ? 1 : 2"), num(1.0)); // a range is truthy
+    assert_eq!(ev("[0:5]").type_name(), "range");
+}
+
+#[test]
 fn deferred_constructs_are_loud() {
     assert!(matches!(ev_err("f(1)"), Error::Unimplemented(m) if m.contains("I.4")));
-    assert!(matches!(ev_err("a[0]"), Error::Unimplemented(m) if m.contains("I.1")));
-    assert!(matches!(ev_err("a.b"), Error::Unimplemented(m) if m.contains("I.1")));
-    assert!(matches!(ev_err("[0:5]"), Error::Unimplemented(m) if m.contains("I.1")));
-    assert!(matches!(ev_err("[1,true]"), Error::Unimplemented(m) if m.contains("I.1"))); // heterogeneous
+    assert!(matches!(ev_err("a.b"), Error::Unimplemented(m) if m.contains("I.1"))); // member access
     // the H.3 expression forms parse but defer: function-literal / let → I.2, assert / echo → I.5.
     assert!(matches!(ev_err("function(x)x"), Error::Unimplemented(m) if m.contains("I.2")));
     assert!(matches!(ev_err("let(a=1)a"), Error::Unimplemented(m) if m.contains("I.2")));

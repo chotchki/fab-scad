@@ -97,26 +97,89 @@ fn dot(a: &[f64], b: &[f64]) -> f64 {
     a.iter().zip(b.iter()).map(|(&x, &y)| x * y).sum()
 }
 
-/// Ordering comparison: same-type → the type's order (NaN → `false`), cross-type → `Undef`.
+/// Ordering comparison. CROSS-type (`1 < "a"`) is `undef` — a type error. SAME orderable type
+/// (num/num, str/str, list/list) always yields a BOOL: a well-typed comparison that's IEEE-incomparable
+/// (a `NaN` anywhere) is `false`, matching OpenSCAD (`(0/0) < 1` is `false`, not `undef`).
 fn order(a: &Value, b: &Value, want: impl Fn(Ordering) -> bool) -> Value {
-    let ord = match (a, b) {
-        (Value::Num(x), Value::Num(y)) => x.partial_cmp(y),
-        (Value::Str(x), Value::Str(y)) => Some(x.cmp(y)),
-        (Value::NumList(x), Value::NumList(y)) => list_order(x, y),
-        _ => return Value::Undef, // cross-type ordering is undef (a value)
-    };
-    Value::Bool(ord.is_some_and(want))
+    if same_orderable_type(a, b) {
+        Value::Bool(value_cmp(a, b).is_some_and(want)) // NaN → None → false
+    } else {
+        Value::Undef // cross-type ordering is a type error (a value)
+    }
 }
 
-/// Lexicographic order of two numeric vectors; any `NaN` element makes it incomparable (`None`).
-fn list_order(a: &[f64], b: &[f64]) -> Option<Ordering> {
-    for (&x, &y) in a.iter().zip(b.iter()) {
-        match x.partial_cmp(&y)? {
-            Ordering::Equal => {}
-            non_eq => return Some(non_eq),
+/// Do `a` and `b` share an orderable type — both numbers, both strings, or both lists (either
+/// representation)? `undef`/`bool` and cross-type pairs are NOT orderable.
+fn same_orderable_type(a: &Value, b: &Value) -> bool {
+    matches!(
+        (a, b),
+        (Value::Num(_), Value::Num(_)) | (Value::Str(_), Value::Str(_))
+    ) || (list_len(a).is_some() && list_len(b).is_some())
+}
+
+/// A total-ish order over values: numbers numerically, strings lexicographically, lists
+/// element-wise-lexicographically (recursively, across BOTH list representations). `None` =
+/// incomparable (cross-type, `NaN`, `undef`, `bool`). Recurses on nested lists (parse-bounded here;
+/// deep-list ordering joins the explicit-stack work if comprehensions ever build one).
+fn value_cmp(a: &Value, b: &Value) -> Option<Ordering> {
+    match (a, b) {
+        (Value::Num(x), Value::Num(y)) => x.partial_cmp(y),
+        (Value::Str(x), Value::Str(y)) => Some(x.cmp(y)),
+        _ => {
+            let (la, lb) = (list_len(a)?, list_len(b)?);
+            for i in 0..la.min(lb) {
+                match value_cmp(&list_get(a, i), &list_get(b, i))? {
+                    Ordering::Equal => {}
+                    non_eq => return Some(non_eq),
+                }
+            }
+            Some(la.cmp(&lb))
         }
     }
-    Some(a.len().cmp(&b.len()))
+}
+
+/// The element count of a list value (`NumList` or `List`), or `None` if it isn't a list.
+fn list_len(v: &Value) -> Option<usize> {
+    match v {
+        Value::NumList(xs) => Some(xs.len()),
+        Value::List(xs) => Some(xs.len()),
+        _ => None,
+    }
+}
+
+/// The `i`-th element of a list value as a `Value` (`Undef` out of range / not a list).
+fn list_get(v: &Value, i: usize) -> Value {
+    match v {
+        Value::NumList(xs) => xs.get(i).copied().map_or(Value::Undef, Value::Num),
+        Value::List(xs) => xs.get(i).cloned().unwrap_or(Value::Undef),
+        _ => Value::Undef,
+    }
+}
+
+/// `base[index]` (`Value.cc` `operator[]`). The index is `size_t(toDouble(index))` — a non-number,
+/// negative, or non-finite index is out of range (`undef`), a fractional one truncates toward zero.
+/// Indexing a string yields the code-point-`idx` character as a 1-char string; a scalar yields `undef`.
+#[must_use]
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "guarded: i is finite and >= 0 here, so `as usize` truncates like OpenSCAD's size_t cast (huge → saturates → out of range → undef)"
+)]
+pub(crate) fn index(base: Value, index: &Value) -> Value {
+    let &Value::Num(i) = index else {
+        return Value::Undef;
+    };
+    if i < 0.0 || !i.is_finite() {
+        return Value::Undef;
+    }
+    let idx = i as usize;
+    match base {
+        Value::Str(s) => s
+            .chars()
+            .nth(idx)
+            .map_or(Value::Undef, |c| Value::string(c.to_string())),
+        other => list_get(&other, idx),
+    }
 }
 
 fn bitwise(lhs: Value, rhs: Value, combine: impl Fn(i64, i64) -> i64) -> Value {

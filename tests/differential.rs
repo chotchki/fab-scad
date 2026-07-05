@@ -83,12 +83,20 @@ fn transforms_match_the_oracle() {
     agree("multmatrix([[1, 0, 0, 5], [0, 1, 0, 2], [0, 0, 1, 0], [0, 0, 0, 1]]) cube(3);");
 }
 
-// NOTE: boolean/multi-object programs are NOT oracle-differential-tested here yet. OpenSCAD renders
-// them fine, but the harness's oracle-side re-import (`Solid::from_indexed`) downcasts f64→f32 for
-// Manifold's MeshGL, and a boolean-RESULT mesh has near-coincident seam vertices that merge in f32 →
-// non-manifold → the oracle leg reports `rejected`. Not a fab-lang bug (it lowers booleans through
-// Manifold correctly — validated by exact VOLUME in `src/backend.rs`). Restoring the boolean
-// differential needs an f64 mesh re-import (MeshGL64) or a weld tolerance — filed as a harness box.
+#[test]
+fn booleans_and_multi_object_match_the_oracle() {
+    // Now that the oracle-side re-import is f64-pure (MeshGL64, J.2.7.1), boolean-RESULT meshes read
+    // back cleanly — including a DISJOINT multi-object union (a 2-component mesh) that f32 rejected.
+    agree("cube(10); translate([20, 0, 0]) sphere(5, $fn = 24);"); // disjoint implicit union
+    agree("cube(10); translate([5, 0, 0]) sphere(6, $fn = 24);"); // overlapping implicit union
+    agree("union() { cube(10); translate([5, 5, 5]) sphere(6, $fn = 24); }");
+    agree("difference() { cube(10); translate([5, 5, 5]) sphere(6, $fn = 24); }");
+    agree("intersection() { cube(10); sphere(7, $fn = 24); }");
+    agree("difference() { cube(10); cube(5); }"); // first minus the rest
+    agree("translate([2, 0, 0]) difference() { cube(10); sphere(6, $fn = 24); }"); // transform of a boolean
+    agree("for (i = [0:2]) translate([i * 12, 0, 0]) cube(5);"); // for-loop union → the oracle
+    agree("{ cube(4); translate([6, 0, 0]) cube(4); }"); // a bare block groups + unions
+}
 
 #[test]
 fn use_include_loader_matches_the_oracle() {

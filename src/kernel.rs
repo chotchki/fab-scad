@@ -223,10 +223,12 @@ impl Solid {
         if verts.is_empty() || tris.is_empty() {
             return Err(anyhow!("indexed mesh is empty"));
         }
-        let flat: Vec<f32> = verts.iter().flatten().map(|&c| c as f32).collect();
-        let idx: Vec<u32> = tris.iter().flatten().copied().collect();
-        let mesh = MeshGL::new(&flat, 3, &idx).map_err(|e| anyhow!("building mesh: {e:?}"))?;
-        let m = Manifold::from_meshgl(&mesh)
+        // f64 ALL THE WAY — MeshGL64 (not the f32 MeshGL), so a re-imported boolean-RESULT mesh keeps
+        // its near-coincident seam vertices distinct instead of merging them in f32 → non-manifold
+        // (J.2.7.1). The precision floor is now the OFF export's ~6 sig digits, never an f32 downcast.
+        let flat: Vec<f64> = verts.iter().flatten().copied().collect();
+        let idx: Vec<u64> = tris.iter().flatten().map(|&i| u64::from(i)).collect();
+        let m = Manifold::from_mesh_f64(&flat, 3, &idx)
             .map_err(|e| anyhow!("mesh is not a valid manifold: {e:?}"))?;
         Ok(Solid::wrap(m))
     }

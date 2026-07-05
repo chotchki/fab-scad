@@ -97,51 +97,82 @@ pub fn run(source: &str, timeout: Duration) -> Result<OracleRun> {
 }
 
 /// Parse a plain OFF file: `OFF`, then `nverts nfaces nedges`, then vertices (`x y z`), then faces
-/// (`n i0 … i(n-1)`). Whitespace-tokenized, so the counts may sit on the `OFF` line (OpenSCAD emits
-/// them inline) or the next.
+/// (`n i0 … i(n-1)` + OPTIONAL trailing per-face color). LINE-BASED (see the body): counts may sit on
+/// the `OFF` line or the next; per-face color is ignored.
 fn parse_off(text: &str) -> Result<OracleMesh> {
-    let mut tok = text.split_whitespace();
+    // LINE-BASED, because a face line may carry trailing per-face COLOR (`n i0 i1 i2 r g b`) — OpenSCAD
+    // colors a CSG result (a boolean/multi-object export gets `249 215 44`, plain primitives don't). A
+    // whole-file tokenizer would read that color as the NEXT face's arity and derail. So we read each
+    // face's arity + indices from its own line and ignore the rest. Blank / `#`-comment lines skipped.
+    let mut lines = text
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with('#'));
+
+    let header: Vec<&str> = lines
+        .next()
+        .context("OFF: empty file")?
+        .split_whitespace()
+        .collect();
     ensure!(
-        tok.next() == Some("OFF"),
+        header.first() == Some(&"OFF"),
         "not an OFF file (missing OFF magic)"
     );
-    let nverts = next_usize(&mut tok, "vertex count")?;
-    let nfaces = next_usize(&mut tok, "face count")?;
-    let _nedges = next_usize(&mut tok, "edge count")?;
+    // Counts sit on the `OFF` line (OpenSCAD's style) or the next line.
+    let counts: Vec<&str> = if header.len() >= 4 {
+        header[1..].to_vec()
+    } else {
+        lines
+            .next()
+            .context("OFF: missing counts line")?
+            .split_whitespace()
+            .collect()
+    };
+    let mut cs = counts.into_iter();
+    let nverts = next_usize(&mut cs, "vertex count")?;
+    let nfaces = next_usize(&mut cs, "face count")?;
 
     let mut verts = Vec::with_capacity(nverts);
     for _ in 0..nverts {
+        let mut t = lines
+            .next()
+            .context("OFF: missing vertex line")?
+            .split_whitespace();
         verts.push([
-            next_f64(&mut tok, "vertex x")?,
-            next_f64(&mut tok, "vertex y")?,
-            next_f64(&mut tok, "vertex z")?,
+            next_f64(&mut t, "vertex x")?,
+            next_f64(&mut t, "vertex y")?,
+            next_f64(&mut t, "vertex z")?,
         ]);
     }
     let mut faces = Vec::with_capacity(nfaces);
     for _ in 0..nfaces {
-        let arity = next_usize(&mut tok, "face arity")?;
+        let mut t = lines
+            .next()
+            .context("OFF: missing face line")?
+            .split_whitespace();
+        let arity = next_usize(&mut t, "face arity")?;
         let mut face = Vec::with_capacity(arity);
         for _ in 0..arity {
-            face.push(next_u32(&mut tok, "face index")?);
+            face.push(next_u32(&mut t, "face index")?);
         }
-        faces.push(face);
+        faces.push(face); // trailing per-face color (if any) is left unread
     }
     Ok(OracleMesh { verts, faces })
 }
 
-fn next_usize(tok: &mut std::str::SplitWhitespace, what: &str) -> Result<usize> {
+fn next_usize<'a>(tok: &mut impl Iterator<Item = &'a str>, what: &str) -> Result<usize> {
     tok.next()
         .with_context(|| format!("OFF: missing {what}"))?
         .parse()
         .with_context(|| format!("OFF: bad {what}"))
 }
-fn next_u32(tok: &mut std::str::SplitWhitespace, what: &str) -> Result<u32> {
+fn next_u32<'a>(tok: &mut impl Iterator<Item = &'a str>, what: &str) -> Result<u32> {
     tok.next()
         .with_context(|| format!("OFF: missing {what}"))?
         .parse()
         .with_context(|| format!("OFF: bad {what}"))
 }
-fn next_f64(tok: &mut std::str::SplitWhitespace, what: &str) -> Result<f64> {
+fn next_f64<'a>(tok: &mut impl Iterator<Item = &'a str>, what: &str) -> Result<f64> {
     tok.next()
         .with_context(|| format!("OFF: missing {what}"))?
         .parse()
@@ -167,6 +198,22 @@ mod tests {
     #[test]
     fn rejects_non_off() {
         assert!(parse_off("solid foo\n").is_err());
+    }
+
+    #[test]
+    fn parse_off_ignores_per_face_color() {
+        // A boolean-result OFF carries trailing per-face RGB (OpenSCAD colors CSG output); the parser
+        // must read only the arity + indices, or the color derails the next face (J.2.7.1).
+        let off = "OFF 3 1 0\n0 0 0\n1 0 0\n0 1 0\n3 0 1 2 249 215 44\n";
+        let m = parse_off(off).unwrap();
+        assert_eq!(m.vert_count(), 3);
+        assert_eq!(m.tris(), vec![[0u32, 1, 2]]); // color dropped
+    }
+
+    #[test]
+    fn parse_off_accepts_counts_on_the_next_line() {
+        let off = "OFF\n3 1 0\n0 0 0\n1 0 0\n0 1 0\n3 0 1 2\n";
+        assert_eq!(parse_off(off).unwrap().tris(), vec![[0u32, 1, 2]]);
     }
 
     // The live-oracle tests skip when OpenSCAD isn't installed, so CI without it stays green.

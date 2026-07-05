@@ -62,6 +62,7 @@ fn vector_arithmetic_and_the_dot_product_trap() {
     assert_eq!(ev("2*[1,2]"), list(&[2.0, 4.0])); // scalar broadcast
     assert_eq!(ev("[1,2]*2"), list(&[2.0, 4.0]));
     assert_eq!(ev("[1,2]*[3,4]"), num(11.0)); // DOT PRODUCT (1*3+2*4), not element-wise
+    assert_eq!(ev("[1,2,3,4,5]*[1,1,1,1,1]"), num(15.0)); // 5-element dot: a full 4-lane chunk + 1 tail
     assert_eq!(ev("[6,4]/2"), list(&[3.0, 2.0]));
     assert_eq!(ev("12/[2,3]"), list(&[6.0, 4.0]));
     assert_eq!(ev("[1,2]*[3,4,5]"), Value::Undef); // unequal length → undef, not dot

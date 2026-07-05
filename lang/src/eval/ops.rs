@@ -53,7 +53,7 @@ pub fn apply_binary(op: BinOp, a: Value, b: Value) -> Value {
             (Num(x), Num(y)) => Num(x.powf(y)),
             _ => Value::Undef,
         },
-        BinOp::Eq => Value::Bool(a == b), // derived PartialEq == OpenSCAD `==` for this subset
+        BinOp::Eq => Value::Bool(a == b), // Value's custom PartialEq IS OpenSCAD `==` (no coercion)
         BinOp::Ne => Value::Bool(a != b),
         BinOp::Lt => order(&a, &b, |o| o == Ordering::Less),
         BinOp::Le => order(&a, &b, |o| o != Ordering::Greater),
@@ -91,10 +91,26 @@ fn zip_trunc(a: &[f64], b: &[f64], f: impl Fn(f64, f64) -> f64) -> Rc<[f64]> {
     a.iter().zip(b.iter()).map(|(&x, &y)| f(x, y)).collect()
 }
 
-/// Dot product of two equal-length numeric vectors. Sequential (deterministic) sum; the fixed
-/// 4-lane accumulation order (the fast==slow bitwise property) is I.1.
+/// Dot product of two equal-length numeric vectors, in the FIXED 4-lane accumulation order (the
+/// reduction doctrine, SPEC): lane `j` sums every 4th product, then the lanes combine as
+/// `(l0+l1)+(l2+l3)`. This is (1) DETERMINISTIC and (2) the exact shape a 4-wide SIMD reduction
+/// produces, so a future SIMD fast path equals this scalar path BIT-FOR-BIT (the `fast == slow`
+/// property, proven below). It matches OpenSCAD's naive left-fold for ≤3-element vectors (the common
+/// geometry case); 4+ elements diverge by ≤1 ULP on non-integer inputs — verified visible-or-not at
+/// I.5 (echo precision) / K (the harness).
 fn dot(a: &[f64], b: &[f64]) -> f64 {
-    a.iter().zip(b.iter()).map(|(&x, &y)| x * y).sum()
+    let mut lanes = [0.0f64; 4];
+    let (mut ac, mut bc) = (a.chunks_exact(4), b.chunks_exact(4));
+    for (ca, cb) in ac.by_ref().zip(bc.by_ref()) {
+        lanes[0] += ca[0] * cb[0];
+        lanes[1] += ca[1] * cb[1];
+        lanes[2] += ca[2] * cb[2];
+        lanes[3] += ca[3] * cb[3];
+    }
+    for (lane, (&x, &y)) in ac.remainder().iter().zip(bc.remainder()).enumerate() {
+        lanes[lane] += x * y;
+    }
+    (lanes[0] + lanes[1]) + (lanes[2] + lanes[3])
 }
 
 /// Ordering comparison. CROSS-type (`1 < "a"`) is `undef` — a type error. SAME orderable type
@@ -231,4 +247,41 @@ fn f64_to_int(x: f64) -> i64 {
 )]
 fn int_to_f64(x: i64) -> f64 {
     x as f64
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Value, apply_binary, dot};
+    use crate::parser::BinOp;
+    use proptest::prelude::*;
+
+    /// An INDEPENDENT reference for the fixed 4-lane order: box each product through a `Value` (the
+    /// "slow" path — how a heterogeneous `List` would compute it), then reduce with `lane = k % 4`.
+    /// Different code from `dot`'s chunk loop, SAME order — the whole point of the property below.
+    fn slow_boxed_dot(a: &[f64], b: &[f64]) -> f64 {
+        let mut lanes = [0.0f64; 4];
+        for (k, (&x, &y)) in a.iter().zip(b).enumerate() {
+            // Num * Num is always Num (no fallback arm to leave uncovered).
+            if let Value::Num(p) = apply_binary(BinOp::Mul, Value::Num(x), Value::Num(y)) {
+                lanes[k % 4] += p;
+            }
+        }
+        (lanes[0] + lanes[1]) + (lanes[2] + lanes[3])
+    }
+
+    proptest! {
+        /// fast == slow, BIT-FOR-BIT: the contiguous `NumList` dot (`dot`, the SIMD-shaped chunk loop)
+        /// equals the boxed-`Value` dot (`slow_boxed_dot`, k%4) on random numeric vectors. Both use the
+        /// fixed 4-lane order, so they agree by construction — and this LOCKS it: a future SIMD dot that
+        /// reorders the reduction, or an FMA that fuses product+add, fails here instead of silently
+        /// diverging from the oracle. Lengths span full 4-chunks + every remainder (0..3).
+        #[test]
+        fn fast_dot_equals_slow_boxed_dot(
+            v in prop::collection::vec((-1.0e6f64..1.0e6, -1.0e6f64..1.0e6), 0..64)
+        ) {
+            let a: Vec<f64> = v.iter().map(|&(x, _)| x).collect();
+            let b: Vec<f64> = v.iter().map(|&(_, y)| y).collect();
+            prop_assert_eq!(dot(&a, &b).to_bits(), slow_boxed_dot(&a, &b).to_bits());
+        }
+    }
 }

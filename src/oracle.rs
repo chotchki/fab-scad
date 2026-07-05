@@ -16,7 +16,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context, Result, ensure};
-use fab_lang::{Tri, Vec3};
+use fab_lang::{Rgba, Tri, Vec3};
 
 use crate::openscad::Openscad;
 
@@ -25,6 +25,17 @@ use crate::openscad::Openscad;
 pub struct OracleMesh {
     pub verts: Vec<Vec3>,
     pub faces: Vec<Vec<u32>>,
+    /// Per-face color (parallel to `faces`) — `Some` when the OFF face line carried a trailing
+    /// `r g b [a]`, `None` for an uncolored face. OpenSCAD emits color per-face on CSG results (J.2.9).
+    pub face_colors: Vec<Option<Rgba>>,
+}
+
+/// Quantize a color to 0-255 RGBA — the tessellation/representation-independent key the color
+/// differential compares (our per-vertex f64 vs the oracle's per-face bytes both reduce to this).
+#[must_use]
+pub fn quantize_color(c: Rgba) -> [u8; 4] {
+    let q = |v: f64| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
+    [q(c.r), q(c.g), q(c.b), q(c.a)]
 }
 
 impl OracleMesh {
@@ -32,6 +43,21 @@ impl OracleMesh {
     #[must_use]
     pub fn vert_count(&self) -> usize {
         self.verts.len()
+    }
+
+    /// The distinct per-face colors present, quantized + sorted + deduped — RAW (includes OpenSCAD's
+    /// colorscheme DEFAULT color, which it leaks onto uncolored CSG results). The differential subtracts
+    /// that default (probed dynamically, since it's `249 215 44` on one install, `157 203 81` on another
+    /// — a preference, not semantic).
+    #[must_use]
+    pub fn distinct_colors(&self) -> Vec<[u8; 4]> {
+        let set: std::collections::BTreeSet<[u8; 4]> = self
+            .face_colors
+            .iter()
+            .flatten()
+            .map(|&c| quantize_color(c))
+            .collect();
+        set.into_iter().collect()
     }
 
     /// Fan-triangulate the polygon faces into a triangle list (for Manifold / `from_indexed`).
@@ -99,12 +125,13 @@ pub fn run(source: &str, timeout: Duration) -> Result<OracleRun> {
 
 /// Parse a plain OFF file: `OFF`, then `nverts nfaces nedges`, then vertices (`x y z`), then faces
 /// (`n i0 … i(n-1)` + OPTIONAL trailing per-face color). LINE-BASED (see the body): counts may sit on
-/// the `OFF` line or the next; per-face color is ignored.
+/// the `OFF` line or the next; per-face color is CAPTURED into `face_colors` (J.2.9).
 fn parse_off(text: &str) -> Result<OracleMesh> {
     // LINE-BASED, because a face line may carry trailing per-face COLOR (`n i0 i1 i2 r g b`) — OpenSCAD
-    // colors a CSG result (a boolean/multi-object export gets `249 215 44`, plain primitives don't). A
-    // whole-file tokenizer would read that color as the NEXT face's arity and derail. So we read each
-    // face's arity + indices from its own line and ignore the rest. Blank / `#`-comment lines skipped.
+    // colors a CSG result (a boolean/multi-object export; plain primitives don't) with the applied
+    // color or, when uncolored, its colorscheme default. A whole-file tokenizer would read that color as
+    // the NEXT face's arity and derail, so we read each face's arity + indices from its own line and take
+    // the rest as the color. Blank / `#`-comment lines skipped.
     let mut lines = text
         .lines()
         .map(str::trim)
@@ -146,6 +173,7 @@ fn parse_off(text: &str) -> Result<OracleMesh> {
         ));
     }
     let mut faces = Vec::with_capacity(nfaces);
+    let mut face_colors = Vec::with_capacity(nfaces);
     for _ in 0..nfaces {
         let mut t = lines
             .next()
@@ -156,9 +184,35 @@ fn parse_off(text: &str) -> Result<OracleMesh> {
         for _ in 0..arity {
             face.push(next_u32(&mut t, "face index")?);
         }
-        faces.push(face); // trailing per-face color (if any) is left unread
+        // Whatever trails the indices is the per-face color: `r g b` or `r g b a`, ints 0-255 (J.2.9).
+        face_colors.push(parse_face_color(&t.collect::<Vec<_>>()));
+        faces.push(face);
     }
-    Ok(OracleMesh { verts, faces })
+    Ok(OracleMesh {
+        verts,
+        faces,
+        face_colors,
+    })
+}
+
+/// The trailing tokens of an OFF face line → its color: `[r, g, b]` or `[r, g, b, a]` (0-255) → an
+/// [`Rgba`]; anything else (no trailing tokens, or an unparseable count) → `None` (uncolored).
+fn parse_face_color(rest: &[&str]) -> Option<Rgba> {
+    let byte = |s: &str| s.parse::<u8>().ok().map(f64::from);
+    match rest {
+        [r, g, b] => Some(Rgba::opaque(
+            byte(r)? / 255.0,
+            byte(g)? / 255.0,
+            byte(b)? / 255.0,
+        )),
+        [r, g, b, a] => Some(Rgba::new(
+            byte(r)? / 255.0,
+            byte(g)? / 255.0,
+            byte(b)? / 255.0,
+            byte(a)? / 255.0,
+        )),
+        _ => None,
+    }
 }
 
 fn next_usize<'a>(tok: &mut impl Iterator<Item = &'a str>, what: &str) -> Result<usize> {
@@ -202,13 +256,29 @@ mod tests {
     }
 
     #[test]
-    fn parse_off_ignores_per_face_color() {
-        // A boolean-result OFF carries trailing per-face RGB (OpenSCAD colors CSG output); the parser
-        // must read only the arity + indices, or the color derails the next face (J.2.7.1).
-        let off = "OFF 3 1 0\n0 0 0\n1 0 0\n0 1 0\n3 0 1 2 249 215 44\n";
+    fn parse_off_captures_per_face_color_off_the_indices() {
+        // A face line's trailing color must NOT derail the arity/indices (J.2.7.1)...
+        let off = "OFF 3 1 0\n0 0 0\n1 0 0\n0 1 0\n3 0 1 2 255 0 0\n";
         let m = parse_off(off).unwrap();
         assert_eq!(m.vert_count(), 3);
-        assert_eq!(m.tris(), vec![Tri::new(0, 1, 2)]); // color dropped
+        assert_eq!(m.tris(), vec![Tri::new(0, 1, 2)]); // indices clean
+        // ...and it's now CAPTURED as the face's color (J.2.9).
+        assert_eq!(m.face_colors, vec![Some(Rgba::opaque(1.0, 0.0, 0.0))]);
+        assert_eq!(m.distinct_colors(), vec![[255, 0, 0, 255]]);
+    }
+
+    #[test]
+    fn distinct_colors_are_raw_and_uncolored_is_none() {
+        // distinct_colors reports colors RAW — the default-color normalization is the differ's job.
+        let m = parse_off("OFF 3 1 0\n0 0 0\n1 0 0\n0 1 0\n3 0 1 2 249 215 44\n").unwrap();
+        assert_eq!(m.face_colors, vec![Some(Rgba::from_u8(249, 215, 44))]);
+        assert_eq!(m.distinct_colors(), vec![[249, 215, 44, 255]]);
+        // A plain (colorless) face → None, and an alpha'd color keeps its 4th channel.
+        let plain = parse_off("OFF 3 1 0\n0 0 0\n1 0 0\n0 1 0\n3 0 1 2\n").unwrap();
+        assert_eq!(plain.face_colors, vec![None]);
+        assert!(plain.distinct_colors().is_empty());
+        let rgba = parse_off("OFF 3 1 0\n0 0 0\n1 0 0\n0 1 0\n3 0 1 2 0 0 255 127\n").unwrap();
+        assert_eq!(rgba.distinct_colors(), vec![[0, 0, 255, 127]]);
     }
 
     #[test]

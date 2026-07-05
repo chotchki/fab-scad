@@ -9,7 +9,7 @@
 //! solid is empty-aware, and the ops encode the empty CSG algebra — ∅∪x = x, ∅−x = ∅, x−∅ = x,
 //! ∅∩x = ∅ — so a lowered CSG tree behaves the same whether a subtree collapsed to nothing or not.
 
-use fab_lang::{Affine, GeoNode, Mesh, Tri};
+use fab_lang::{Affine, GeoNode, Mesh, Rgba, Tri};
 
 /// A geometry backend: tessellated meshes → solids, combined via CSG + affine transforms. `Solid` is
 /// the backend's opaque handle (real Manifold's is `!Send`; the mock's is inert data).
@@ -27,6 +27,8 @@ pub trait GeometryBackend {
     fn intersection(&self, a: &Self::Solid, b: &Self::Solid) -> Self::Solid;
     /// An affine transform (OpenSCAD `multmatrix`, covering translate / rotate / scale / mirror).
     fn transform(&self, s: &Self::Solid, m: &Affine) -> Self::Solid;
+    /// Set the solid's color (`color()`) — sets EVERY vertex, so outermost `color()` wins (J.2.9).
+    fn color(&self, s: &Self::Solid, rgba: Rgba) -> Self::Solid;
     /// Extract the result as a triangle mesh (the empty solid → an empty mesh).
     fn to_mesh(&self, s: &Self::Solid) -> Mesh;
     /// Whether the solid is empty (no geometry) — the differential's `Empty` outcome.
@@ -44,9 +46,9 @@ pub fn build<B: GeometryBackend>(node: &GeoNode, backend: &B) -> B::Solid {
         GeoNode::Union(kids) => reduce(kids, backend, |b, x, y| b.union(x, y)),
         GeoNode::Difference(kids) => reduce(kids, backend, |b, x, y| b.difference(x, y)),
         GeoNode::Intersection(kids) => reduce(kids, backend, |b, x, y| b.intersection(x, y)),
-        // Color is a display property — geometry is the child's. Manifold vertex-property propagation
-        // is J.2.9; for now the color is dropped at the backend (the geometry differential is unaffected).
-        GeoNode::Color { child, .. } => build(child, backend),
+        // Color sets EVERY vertex of the child subtree (J.2.9). Outermost `color()` wins because the
+        // enclosing node's color op overwrites any inner one; distinct colors survive a union.
+        GeoNode::Color { color, child } => backend.color(&build(child, backend), *color),
     }
 }
 
@@ -119,6 +121,10 @@ impl GeometryBackend for ManifoldBackend {
             }
             None => Mesh::new(),
         }
+    }
+
+    fn color(&self, s: &Self::Solid, rgba: Rgba) -> Self::Solid {
+        s.as_ref().map(|s| s.with_color(rgba))
     }
 
     fn is_empty(&self, s: &Self::Solid) -> bool {
@@ -217,6 +223,16 @@ impl GeometryBackend for MockBackend {
                 verts,
                 tris: s.mesh.tris.clone(),
             },
+            ops: s.ops + 1,
+        }
+    }
+
+    fn color(&self, s: &Self::Solid, _rgba: Rgba) -> Self::Solid {
+        // The mock doesn't model color VALUES (that's the real kernel's SetProperties, tested via a unit
+        // test + the differential) — it just walks the op so the interface suite exercises the dispatch
+        // under miri. Geometry is unchanged (color moves no vertices).
+        MockSolid {
+            mesh: s.mesh.clone(),
             ops: s.ops + 1,
         }
     }

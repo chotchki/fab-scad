@@ -9,7 +9,7 @@
 //! connectors (11.6) build on it.
 
 use anyhow::{Context, Result, anyhow};
-use fab_lang::{Affine, Tri, Vec3};
+use fab_lang::{Affine, Rgba, Tri, Vec3};
 use manifold3d::{CrossSection, Manifold, MeshGL};
 use std::collections::HashMap;
 use std::marker::PhantomData;
@@ -292,6 +292,35 @@ impl Solid {
             .map(|t| Tri::new(t[0] as u32, t[1] as u32, t[2] as u32))
             .collect();
         (verts, tris)
+    }
+
+    // --- color (J.2.9) — RGBA as 4 EXTRA Manifold vertex properties (numProp 4 → MeshGL stride 7).
+    // Manifold carries properties through every boolean, so a colored subtree keeps its color when
+    // union/difference/intersection'd (seam verts linear-interpolate, which is exact for a uniform color).
+
+    /// Set EVERY vertex's color to `rgba` — the `color()` module's overwrite (outermost wins in
+    /// OpenSCAD, so re-coloring replaces any inner color). Cheap: one `SetProperties` pass.
+    pub fn with_color(&self, rgba: Rgba) -> Solid {
+        Solid::wrap(self.0.set_properties(4, move |new, _pos, _old| {
+            new.copy_from_slice(&rgba.to_array());
+        }))
+    }
+
+    /// Per-vertex colors, index-aligned with [`to_indexed`](Self::to_indexed)'s verts — or `None` when
+    /// the solid is UNCOLORED (no color property: MeshGL stride 3, not 7).
+    pub fn vertex_colors(&self) -> Option<Vec<Rgba>> {
+        let (v, stride, _) = self.0.to_mesh_f64();
+        if stride < 7 {
+            return None; // xyz only — never colored
+        }
+        Some(
+            (0..v.len() / stride)
+                .map(|i| {
+                    let p = i * stride + 3;
+                    Rgba::new(v[p], v[p + 1], v[p + 2], v[p + 3])
+                })
+                .collect(),
+        )
     }
 
     /// Triangles as coordinate triples — for orientation math (`auto_orient::best_up`).
@@ -641,6 +670,42 @@ mod tests {
         assert!(
             min[2].abs() < 1e-6 && (max[2] - len).abs() < 1e-6,
             "z ∈ [0,len]"
+        );
+    }
+
+    #[test]
+    fn color_sets_every_vertex_and_survives_booleans() {
+        let red = Rgba::opaque(1.0, 0.0, 0.0);
+        let blue = Rgba::opaque(0.0, 0.0, 1.0);
+        let cube = Solid::cube(10.0, 10.0, 10.0, false);
+
+        // Uncolored solids carry no color property (MeshGL stride 3, not 7).
+        assert!(cube.vertex_colors().is_none());
+        // with_color sets EVERY vertex.
+        let red_cube = cube.with_color(red);
+        let cols = red_cube.vertex_colors().expect("colored → Some");
+        assert!(!cols.is_empty() && cols.iter().all(|&c| c == red));
+
+        // Outer color() over a boolean is UNIFORM: color the RESULT → all red (OpenSCAD outer-wins).
+        let hole = Solid::cube(6.0, 6.0, 6.0, false).translate(Vec3::new(5.0, 5.0, 5.0));
+        let uniform = cube.difference(&hole).with_color(red);
+        assert!(uniform.vertex_colors().unwrap().iter().all(|&c| c == red));
+
+        // Distinct colors SURVIVE a union — Manifold carries per-vertex props through the boolean.
+        let blue_cube = Solid::cube(6.0, 6.0, 6.0, false)
+            .translate(Vec3::new(20.0, 0.0, 0.0))
+            .with_color(blue);
+        let both = red_cube.union(&blue_cube).vertex_colors().unwrap();
+        assert!(both.contains(&red) && both.contains(&blue));
+
+        // Re-coloring OVERWRITES — color("red") color("blue") cube → the outer red would win.
+        assert!(
+            red_cube
+                .with_color(blue)
+                .vertex_colors()
+                .unwrap()
+                .iter()
+                .all(|&c| c == blue)
         );
     }
 

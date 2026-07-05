@@ -86,6 +86,91 @@ pub fn compare(source: &str, timeout: Duration) -> Result<Comparison> {
     })
 }
 
+/// The colors each engine produced for a program, quantized to 0-255 RGBA + deduped — the J.2.9 color
+/// differential. Both sides reduce to the same distinct-color SET: our per-face colors vs the oracle's
+/// per-face colors. That's tessellation- AND representation-independent (our kernel stores color
+/// per-VERTEX, the oracle exports per-FACE — a face whose 3 verts agree is that color). The oracle's
+/// default gold normalizes to uncolored. REGION-exact color matching (which face is which color, not
+/// just which colors appear) is a documented future refinement.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ColorComparison {
+    /// scad-rs's distinct colors (sorted).
+    pub scad_colors: Vec<[u8; 4]>,
+    /// The oracle's distinct explicit colors (sorted, default gold excluded).
+    pub oracle_colors: Vec<[u8; 4]>,
+}
+
+impl ColorComparison {
+    /// Do both engines agree on the SET of colors present?
+    #[must_use]
+    pub fn matches(&self) -> bool {
+        self.scad_colors == self.oracle_colors
+    }
+}
+
+/// Compare the COLORS scad-rs and the oracle produce for `source` (J.2.9). `timeout` bounds the render.
+///
+/// # Errors
+/// Fails if the oracle errors or scad-rs can't parse/evaluate the program.
+pub fn compare_colors(source: &str, timeout: Duration) -> Result<ColorComparison> {
+    let tree = fab_lang::evaluate_geometry(source).context("scad-rs evaluate_geometry")?;
+    let scad_colors = match crate::backend::build(&tree, &crate::backend::ManifoldBackend) {
+        Some(solid) => distinct_face_colors(&solid),
+        None => Vec::new(),
+    };
+    let run = oracle::run(source, timeout).context("oracle run")?;
+    let default = oracle_default_colors(timeout);
+    let oracle_colors = run
+        .mesh
+        .distinct_colors()
+        .into_iter()
+        .filter(|q| !default.contains(q)) // drop OpenSCAD's colorscheme default (uncolored ⇒ no color)
+        .collect();
+    Ok(ColorComparison {
+        scad_colors,
+        oracle_colors,
+    })
+}
+
+/// OpenSCAD leaks its colorscheme's DEFAULT object color onto an UNCOLORED CSG result's faces (`249 215
+/// 44` on Cornfield, `157 203 81` on another scheme — a user preference, not geometry). Probe it once by
+/// rendering a known-uncolored difference, so the differential can subtract it and an uncolored result
+/// compares equal to our (colorless) one. Cached — it's constant per OpenSCAD install.
+fn oracle_default_colors(timeout: Duration) -> Vec<[u8; 4]> {
+    static DEFAULT: std::sync::OnceLock<Vec<[u8; 4]>> = std::sync::OnceLock::new();
+    DEFAULT
+        .get_or_init(|| {
+            oracle::run(
+                "difference() { cube(2); translate([0.5, 0.5, 0.5]) cube(2); }",
+                timeout,
+            )
+            .map(|r| r.mesh.distinct_colors())
+            .unwrap_or_default()
+        })
+        .clone()
+}
+
+/// The distinct colors of a solid's UNIFORMLY-colored faces (a triangle whose 3 verts quantize equal),
+/// sorted + deduped. Seam triangles — whose verts carry Manifold's linear-blended props from a boolean
+/// between differently-colored solids — have mixed vertex colors and are SKIPPED, matching OpenSCAD's
+/// per-face (unblended) export. An uncolored solid → `[]`.
+fn distinct_face_colors(solid: &Solid) -> Vec<[u8; 4]> {
+    let Some(colors) = solid.vertex_colors() else {
+        return Vec::new();
+    };
+    let (_verts, tris) = solid.to_indexed();
+    let mut set: std::collections::BTreeSet<[u8; 4]> = std::collections::BTreeSet::new();
+    for t in &tris {
+        let [a, b, c] = t.indices();
+        let q = |i: u32| oracle::quantize_color(colors[i as usize]);
+        let (qa, qb, qc) = (q(a), q(b), q(c));
+        if qa == qb && qb == qc {
+            set.insert(qa);
+        }
+    }
+    set.into_iter().collect()
+}
+
 /// Relative error `|a−b| / max(|a|,|b|)`.
 fn rel_err(a: f64, b: f64) -> f64 {
     let denom = a.abs().max(b.abs()).max(f64::MIN_POSITIVE);
@@ -371,6 +456,45 @@ mod tests {
             return true;
         }
         false
+    }
+
+    /// The J.2.9 color differential: scad-rs's colors vs the oracle's, across the well-defined cases —
+    /// a named/hex color, an outer color() over a boolean (uniform), a disjoint two-color union, and the
+    /// uncolored baselines (a bare primitive → no color; an uncolored CSG result → oracle's default gold,
+    /// normalized to uncolored). Both engines must agree on the SET of colors present.
+    #[test]
+    fn color_differential_matches_the_oracle() {
+        if skip_if_no_oracle() {
+            return;
+        }
+        let red = [255, 0, 0, 255];
+        let blue = [0, 0, 255, 255];
+        let cases: [(&str, Vec<[u8; 4]>); 5] = [
+            ("color(\"red\") cube(10);", vec![red]),
+            ("cube(10);", vec![]),
+            (
+                "color(\"red\") difference() { cube(10); translate([5, 5, 5]) cube(8); }",
+                vec![red],
+            ),
+            (
+                "difference() { cube(10); translate([5, 5, 5]) cube(8); }",
+                vec![],
+            ),
+            (
+                "color(\"red\") cube(5); color(\"blue\") translate([20, 0, 0]) cube(5);",
+                vec![blue, red], // sorted: blue < red
+            ),
+        ];
+        for (src, expected) in cases {
+            let c = compare_colors(src, Duration::from_secs(60)).unwrap();
+            assert!(
+                c.matches(),
+                "{src}\n  scad:   {:?}\n  oracle: {:?}",
+                c.scad_colors,
+                c.oracle_colors
+            );
+            assert_eq!(c.scad_colors, expected, "{src}: scad colors");
+        }
     }
 
     /// The tracer bullet's payoff: run the sphere resolution sweep, print the tier matrix, and gate

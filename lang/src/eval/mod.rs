@@ -14,6 +14,7 @@ mod builtins;
 mod fmt;
 mod fragments;
 mod geometry;
+mod loader;
 mod module;
 mod ops;
 mod scope;
@@ -672,10 +673,46 @@ pub fn eval_program(program: &Program, scope: &Scope) -> crate::Result<Mesh> {
     // free with no subscriber, compiled out in release under `release_max_level_off`.
     let _span = tracing::trace_span!("eval_program").entered();
     let ctx = build_ctx(program);
+    run_stmts(program.stmts.iter(), &ctx, scope)
+}
+
+/// Evaluate `source` with its `use`/`include` graph resolved — the pure-crate spine behind
+/// [`evaluate_file`](crate::evaluate_file) / [`evaluate_with_base`](crate::evaluate_with_base). The
+/// loader owns every reachable file (so the evaluator's `&'a`-into-the-AST borrows span all of them);
+/// we evaluate the flattened statement stream against the merged, precedence-correct function store.
+/// `root_path` is the root's own path when it's a file (for back-reference dedup + cycle-break).
+///
+/// # Errors
+/// Loader failures ([`Error::Load`](crate::Error::Load)), parse errors, and any evaluation error from
+/// the flattened program.
+pub(crate) fn evaluate_source(
+    source: &str,
+    base_dir: &std::path::Path,
+    root_path: Option<&std::path::Path>,
+    library_paths: &[std::path::PathBuf],
+) -> crate::Result<Mesh> {
+    let _span = tracing::trace_span!("eval_program").entered();
+    let loaded = loader::load(source, base_dir, root_path, library_paths)?;
+    let (exec, functions) = loader::flatten(&loaded)?;
+    let ctx = Ctx {
+        functions,
+        closures: RefCell::default(),
+    };
+    run_stmts(exec.into_iter(), &ctx, &Scope::new())
+}
+
+/// Evaluate a statement stream with a prebuilt [`Ctx`] — shared by [`eval_program`] (one program's
+/// statements) and the loader path (a flattened multi-file exec stream). Assignments bind into `scope`;
+/// a single top-level object produces its mesh, multiple are the implicit-union defer (J.2).
+fn run_stmts<'a>(
+    stmts: impl Iterator<Item = &'a Stmt>,
+    ctx: &Ctx<'a>,
+    scope: &Scope,
+) -> crate::Result<Mesh> {
     let mut scope = scope.clone();
     let mut meshes = Vec::new();
-    for stmt in &program.stmts {
-        eval_stmt(stmt, &mut scope, &ctx, &mut meshes)?;
+    for stmt in stmts {
+        eval_stmt(stmt, &mut scope, ctx, &mut meshes)?;
     }
     match meshes.len() {
         0 => Ok(Mesh::new()),
@@ -711,9 +748,12 @@ fn eval_stmt<'a>(
     meshes: &mut Vec<Mesh>,
 ) -> crate::Result<()> {
     match &stmt.kind {
-        // `Empty`: nothing. `FunctionDef`: already registered into `ctx` by `build_ctx` (function
-        // definitions live in their own namespace) — nothing to evaluate here.
-        StmtKind::Empty | StmtKind::FunctionDef { .. } => {}
+        // Definitions + empties are no-ops at eval. `Empty`: nothing. `FunctionDef`: already registered
+        // into `ctx` by `build_ctx` (its own namespace). `ModuleDef`: likewise a registration only —
+        // defining an unused module IS nothing, and INSTANTIATING a user module still fails LOUD in
+        // `module::eval_module`; that relaxation (from LOUD-on-def) is what lets `use`/`include` load
+        // real files, which define modules everywhere (the call machinery is I.2.4 / Phase J).
+        StmtKind::Empty | StmtKind::FunctionDef { .. } | StmtKind::ModuleDef { .. } => {}
         StmtKind::Assignment { name, value } => {
             let value = eval_with_ctx(value, scope, ctx)?;
             scope.bind(name.clone(), value);
@@ -724,19 +764,17 @@ fn eval_stmt<'a>(
             }
         }
         StmtKind::Module(mi) => meshes.push(module::eval_module(mi, scope, ctx)?),
-        StmtKind::ModuleDef { .. } => {
-            return Err(crate::Error::Unimplemented(
-                "user-defined modules are not yet implemented (I.2.4)",
-            ));
-        }
         StmtKind::If { .. } => {
             return Err(crate::Error::Unimplemented(
                 "if/else evaluation is not yet implemented (I.3)",
             ));
         }
+        // The loader resolves top-level `use`/`include` away (include → spliced, use → imported), so a
+        // node reaching here is either a raw `eval_program` on an unloaded program or a `use`/`include`
+        // NESTED inside a block/module body (not scanned — top-level is the OpenSCAD norm). LOUD.
         StmtKind::Use(_) | StmtKind::Include(_) => {
             return Err(crate::Error::Unimplemented(
-                "use/include resolution is not yet implemented (I.2 loader)",
+                "unresolved use/include (nested, or eval_program on an unloaded program — use evaluate_file/evaluate_with_base)",
             ));
         }
     }

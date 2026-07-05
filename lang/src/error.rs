@@ -28,6 +28,14 @@ pub enum Error {
     #[error("geometry error: {0}")]
     Lower(String),
 
+    /// A `use`/`include` target could not be resolved or read — bad path, missing library, or an
+    /// I/O failure reading a resolved file. OpenSCAD WARNS and renders on without the file; we fail
+    /// LOUD instead (never-silently-wrong doctrine — a missing lib in a correct corpus is a
+    /// resolution BUG on our side, and we want it loud). Revisit once I.5's warning buffer lands and
+    /// we can match the oracle's warn-and-continue bug-for-bug.
+    #[error("load error: {0}")]
+    Load(String),
+
     /// A deferred construct or an unbuilt pipeline stage was reached — fail LOUD, never silently
     /// wrong (SPEC deferral doctrine; `text()`/`minkowski()`/`surface()` land here).
     #[error("not yet implemented: {0}")]

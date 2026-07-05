@@ -513,22 +513,23 @@ fn function_values() {
 
 #[test]
 fn program_level_defers_are_loud() {
-    // These constructs parse (H.2) but eval defers to a later phase (the tag says which): defs → the
-    // I.2 loader/scope engine, if/else → I.3 control flow.
-    // (user FUNCTION defs now evaluate — I.2.3.2; their calls are covered by the eval/mod.rs unit tests.)
-    for (src, phase) in [
-        ("module m() cube(1);", "I.2.4"),
+    // Constructs that parse (H.2) but eval defers loudly. NOTE the moving line since I.2.6: a module
+    // DEFINITION is now a no-op (like a function def) — only INSTANTIATING a user module is loud (J);
+    // and `use`/`include` are RESOLVED by the loader (evaluate_file / evaluate_with_base), so a RAW
+    // eval_program on one is loud (the loader happy-path lives in loader_corpus.rs).
+    for (src, needle) in [
+        ("module m() cube(1); m();", "user modules"), // defining is fine; instantiating rides J
         ("if (true) cube(1);", "I.3"),
-        ("use <lib.scad>", "I.2"),
-        ("include <lib.scad>", "I.2"),
+        ("use <lib.scad>", "use/include"), // raw eval_program can't resolve it — loud
+        ("include <lib.scad>", "use/include"),
         ("x = a.b;", "I.1"), // an erroring assignment RHS propagates out of eval_stmt
         ("{ y = a.b; }", "I.1"), // …and out of a block's inner statement
     ] {
         let prog = parse(src).expect("parses");
         let err = eval_program(&prog, &Scope::new()).unwrap_err();
         assert!(
-            matches!(&err, Error::Unimplemented(m) if m.contains(phase)),
-            "expected Unimplemented({phase}) for {src:?}, got {err:?}"
+            matches!(&err, Error::Unimplemented(m) if m.contains(needle)),
+            "expected Unimplemented(…{needle}…) for {src:?}, got {err:?}"
         );
     }
 }

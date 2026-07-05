@@ -56,19 +56,54 @@ pub use parser::{
     StmtKind, UnOp, parse, print, print_expr,
 };
 
+use std::path::{Path, PathBuf};
+
 /// Evaluate OpenSCAD source to a triangle [`Mesh`] — the end-to-end tracer-bullet spine.
 ///
-/// Wired end to end for the G.3.5 subset (`sphere`/`cube`/`cylinder`, expressions, `$fn/$fa/$fs`);
-/// everything past that fails LOUD ([`Error::Unimplemented`]) — transforms, booleans, user modules,
-/// multiple top-level objects, functions, and so on land across the later phases.
+/// Convenience over [`evaluate_with_base`]: no library paths, and `use`/`include` resolve relative to
+/// the process CWD (the `.` base). For reproducible resolution — the determinism doctrine's concern —
+/// use [`evaluate_file`] or [`evaluate_with_base`] with an explicit base + library paths.
 ///
 /// # Errors
 ///
-/// [`Error::Parse`] for malformed source, and [`Error::Unimplemented`] for a well-formed program
-/// that uses a construct beyond the G.3.5 subset.
+/// [`Error::Parse`] for malformed source, [`Error::Load`] for an unresolvable `use`/`include`, and
+/// [`Error::Unimplemented`] for a well-formed program that uses a construct beyond the current subset.
 pub fn evaluate(source: &str) -> Result<Mesh> {
-    let program = parse(source)?; // G.3.2 lex → G.3.3 parse
-    eval_program(&program, &Scope::new()) // G.3.4 eval → G.3.5 tessellate to a Mesh
+    evaluate_with_base(source, Path::new("."), &[])
+}
+
+/// Evaluate a `.scad` FILE, resolving its `use`/`include` graph. Relative references resolve against
+/// the file's OWN directory first, then `library_paths` in order (OpenSCAD's search order after the
+/// including dir). The crate stays PURE — it never reads `OPENSCADPATH`; the caller (app/harness) reads
+/// the environment + knows the BOSL2 dir and hands the resolved paths down. That keeps "same input →
+/// bit-identical output" honest.
+///
+/// # Errors
+///
+/// [`Error::Load`] if the file or any `use`/`include` target can't be read/resolved, [`Error::Parse`]
+/// for malformed source, and [`Error::Unimplemented`] for constructs beyond the current subset.
+pub fn evaluate_file(path: &Path, library_paths: &[PathBuf]) -> Result<Mesh> {
+    let source = std::fs::read_to_string(path)
+        .map_err(|e| Error::Load(format!("{}: {e}", path.display())))?;
+    // The including-file dir. An empty parent (a bare `foo.scad`) resolves relative to CWD via the
+    // loader's canonicalize, so no special-casing is needed beyond the parent-less root (`.`).
+    let base_dir = path.parent().unwrap_or(Path::new("."));
+    eval::evaluate_source(&source, base_dir, Some(path), library_paths)
+}
+
+/// Evaluate in-memory `source` as if it lived in `base_dir` — a GUI's unsaved buffer for the file it's
+/// editing — resolving `use`/`include` against `base_dir`, then `library_paths`. Pass an ABSOLUTE
+/// `base_dir` for reproducible resolution.
+///
+/// # Errors
+///
+/// As [`evaluate_file`], minus the root-file read.
+pub fn evaluate_with_base(
+    source: &str,
+    base_dir: &Path,
+    library_paths: &[PathBuf],
+) -> Result<Mesh> {
+    eval::evaluate_source(source, base_dir, None, library_paths)
 }
 
 #[cfg(test)]

@@ -49,3 +49,32 @@ jobs:
       - uses: model-checking/kani-github-action@v1
         with:
           working-directory: lang
+
+  # J.1.2 — miri on the pure-Rust MockBackend: proves the interface glue (tessellate → backend ops →
+  # mesh) is UB-free. miri can't cross the Manifold FFI, so it runs the MOCK; the `geometry` feature
+  # pulls fab-lang's Mesh WITHOUT the OS-heavy native deps (reqwest/clap/rayon choke miri). `--lib`
+  # keeps it off the native/kernel-only integration tests.
+  miri:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: miri
+      - run: cargo miri test -p fab-scad --no-default-features --features geometry --lib backend
+
+  # J.1.2 — ASAN on the REAL Manifold backend: proves the FFI marshalling (Rust ↔ Manifold C++) is
+  # memory-clean. The COMPLEMENT to miri — ASAN instruments the binary FFI boundary miri structurally
+  # can't see. On macOS because that's where the Manifold C++ kernel builds (matching the main job).
+  asan:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@nightly
+      - run: >
+          RUSTFLAGS="-Zsanitizer=address"
+          cargo test -p fab-scad --features "geometry kernel"
+          --target $(rustc -vV | sed -n 's/host: //p')
+          --lib backend::tests::manifold_backend_interface

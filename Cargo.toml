@@ -29,7 +29,10 @@ kernel = ["dep:manifold3d", "dep:threemf", "dep:zip", "dep:quick-xml"]
 # Everything that needs an OS (18.3): the OpenSCAD spawn, publish (blocking reqwest), project
 # scaffolding, the smoke sweep, and the CLI-only deps. `--no-default-features` is the wasm32-safe
 # core — pure geometry/slicing/spec logic, no process spawn, no network.
-native = ["dep:reqwest", "dep:clap", "dep:rayon", "dep:fab-lang"]
+# fab-lang (the scad-rs evaluator) ALONE — the geometry backend + its miri interface test need `Mesh`
+# without the OS-heavy native deps (reqwest/clap/rayon choke miri). `native` implies it.
+geometry = ["dep:fab-lang"]
+native = ["dep:reqwest", "dep:clap", "dep:rayon", "geometry"]
 
 [dependencies]
 # scad-rs, our OpenSCAD reimplementation — the differential harness's OTHER engine (G.3.7). Pure

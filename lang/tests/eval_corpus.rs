@@ -543,13 +543,13 @@ fn function_values() {
 
 #[test]
 fn program_level_defers_are_loud() {
-    // Constructs that parse (H.2) but eval defers loudly. NOTE the moving line since I.2.6: a module
-    // DEFINITION is now a no-op (like a function def) — only INSTANTIATING a user module is loud (J);
-    // and `use`/`include` are RESOLVED by the loader (evaluate_file / evaluate_with_base), so a RAW
-    // eval_program on one is loud (the loader happy-path lives in loader_corpus.rs).
+    // Constructs that parse (H.2) but eval defers loudly. NOTE the moving line: as of I.2.4 a user
+    // module DEFINITION and its INSTANTIATION both work (see module_corpus.rs); what's still loud here is
+    // an UNKNOWN module (a typo / unimplemented builtin) and a RAW eval_program on `use`/`include` (the
+    // loader resolves those via evaluate_file / evaluate_with_base — happy path in loader_corpus.rs).
     for (src, needle) in [
-        ("module m() cube(1); m();", "user modules"), // defining is fine; instantiating rides J
-        ("use <lib.scad>", "use/include"),            // raw eval_program can't resolve it — loud
+        ("nope_module();", "user module"), // an unknown module name — loud (typo / unimplemented)
+        ("use <lib.scad>", "use/include"), // raw eval_program can't resolve it — loud
         ("include <lib.scad>", "use/include"),
         ("x = a.b;", "I.1"), // an erroring assignment RHS propagates out of eval_stmt
         ("{ y = a.b; }", "I.1"), // …and out of a block's inner statement
@@ -561,6 +561,18 @@ fn program_level_defers_are_loud() {
             "expected Unimplemented(…{needle}…) for {src:?}, got {err:?}"
         );
     }
+}
+
+#[test]
+fn user_module_via_eval_program() {
+    // The NON-loader path (eval_program → build_ctx) also registers + calls a user module: define,
+    // instantiate, get the body's geometry. (The loader path is covered in module_corpus.rs.)
+    let mesh = eval_program(
+        &parse("module box(s) cube(s); box(3);").expect("parses"),
+        &Scope::new(),
+    )
+    .expect("a user module call flattens to its body's mesh");
+    assert!(mesh.tri_count() > 0);
 }
 
 // ─────────────────────────────── the explicit stack ────────────────────────────────────────────

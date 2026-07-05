@@ -54,7 +54,8 @@ pub(super) fn eval_module<'a>(
         "cube" => Ok(eval_cube(&positional, &named)),
         "cylinder" => Ok(eval_cylinder(&positional, &named, &child)),
         _ => Err(crate::Error::Unimplemented(
-            "only sphere/cube/cylinder are implemented (G.3.5); transforms/booleans/user modules land later",
+            "unknown module — not a builtin primitive (sphere/cube/cylinder), transform, boolean, or a \
+             defined user module (a typo, or a builtin still deferred past the current subset)",
         )),
     }
 }

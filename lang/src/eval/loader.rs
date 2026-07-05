@@ -37,9 +37,10 @@
 //! `OPENSCADPATH` (a hidden input would dent the "same input → bit-identical" doctrine). The app/
 //! harness reads the env + knows the BOSL2 dir and hands the paths down.
 //!
-//! Scope note (I.2.6): def-collection is FUNCTIONS only today. Module-def import rides for free when
-//! I.2.4's module machinery lands — `use`/`include` already splice/collect them; only instantiation is
-//! LOUD-deferred (`module.rs`). A missing library fails LOUD (`Error::Load`) rather than OpenSCAD's
+//! Scope note (I.2.4): def-collection is FUNCTIONS **and** MODULES — both flow through [`Defs`] with the
+//! same use-tier/local-override precedence, so a `use`d library's modules import exactly like its
+//! functions (the evaluator's module-call machinery lives in `mod.rs`). A missing library fails LOUD
+//! (`Error::Load`) rather than OpenSCAD's
 //! warn-and-continue — a missing lib in a correct corpus is OUR resolution bug, and we want it loud
 //! until I.5's warning buffer can match the oracle's warn-and-render bug-for-bug.
 
@@ -193,6 +194,27 @@ pub(super) fn load(
 type FnDef<'a> = (&'a [Parameter], &'a Expr);
 /// The function store the evaluator's [`Ctx`](super::Ctx) is built from: name → its definition.
 pub(super) type FnStore<'a> = BTreeMap<&'a str, FnDef<'a>>;
+/// A user module definition's params + body STATEMENT (usually a block), borrowed from the [`Program`].
+type ModDef<'a> = (&'a [Parameter], &'a Stmt);
+/// The module store — name → its definition. Collected + merged EXACTLY like [`FnStore`] (`use` tier
+/// base, local/`include` overrides), since `use` imports modules alongside functions.
+pub(super) type ModStore<'a> = BTreeMap<&'a str, ModDef<'a>>;
+
+/// The function + module definitions collected from a load graph — both name→def, same precedence.
+/// Bundled so the flatten recursion threads ONE accumulator per tier instead of two.
+#[derive(Default)]
+pub(super) struct Defs<'a> {
+    pub functions: FnStore<'a>,
+    pub modules: ModStore<'a>,
+}
+
+impl<'a> Defs<'a> {
+    /// Merge `other` INTO self (other overrides on a name clash) — the local-over-use precedence step.
+    fn extend(&mut self, other: Defs<'a>) {
+        self.functions.extend(other.functions);
+        self.modules.extend(other.modules);
+    }
+}
 
 /// Flatten the graph for evaluation: the executable statement stream (includes spliced in place, uses
 /// dropped) plus the merged function store with OpenSCAD's precedence baked in.
@@ -204,10 +226,10 @@ pub(super) type FnStore<'a> = BTreeMap<&'a str, FnDef<'a>>;
 /// # Errors
 /// [`Error::Load`](crate::Error::Load) if the graph is pathological — a `use`/`include` chain deeper
 /// than [`MAX_INCLUDE_DEPTH`] or a fan-out exceeding [`MAX_EXPANSION`] total statements.
-pub(super) fn flatten(loaded: &Loaded) -> crate::Result<(Vec<&Stmt>, FnStore<'_>)> {
+pub(super) fn flatten(loaded: &Loaded) -> crate::Result<(Vec<&Stmt>, Defs<'_>)> {
     let mut exec = Vec::new();
-    let mut local: FnStore = BTreeMap::new(); // local/include tier — last-wins
-    let mut used: FnStore = BTreeMap::new(); // use tier — first-wins
+    let mut local = Defs::default(); // local/include tier — last-wins
+    let mut used = Defs::default(); // use tier — first-wins
     let mut stack = Vec::new();
     let mut budget = MAX_EXPANSION;
     expand(
@@ -222,9 +244,9 @@ pub(super) fn flatten(loaded: &Loaded) -> crate::Result<(Vec<&Stmt>, FnStore<'_>
     )?;
 
     // Precedence: use-tier is the base, local/include OVERRIDES it (local always beats use).
-    let mut functions = used;
-    functions.extend(local);
-    Ok((exec, functions))
+    let mut defs = used;
+    defs.extend(local);
+    Ok((exec, defs))
 }
 
 /// Recursively expand program `idx` into the exec stream + local def tier. An `include` recurses (its
@@ -240,8 +262,8 @@ fn expand<'a>(
     loaded: &'a Loaded,
     idx: usize,
     exec: &mut Vec<&'a Stmt>,
-    local: &mut FnStore<'a>,
-    used: &mut FnStore<'a>,
+    local: &mut Defs<'a>,
+    used: &mut Defs<'a>,
     stack: &mut Vec<usize>,
     depth: usize,
     budget: &mut usize,
@@ -266,13 +288,19 @@ fn expand<'a>(
             Some(Link::Use(target)) => {
                 // Overwrite in source order → the textually-LAST `use` wins (OpenSCAD front-inserts
                 // into usedlibs then takes the first hit; same result without the front-insert).
-                for (name, def) in exported_defs(loaded, *target, budget)? {
-                    used.insert(name, def);
-                }
+                used.extend(exported_defs(loaded, *target, budget)?);
             }
             None => match &stmt.kind {
                 StmtKind::FunctionDef { name, params, body } => {
-                    local.insert(name.as_str(), (params.as_slice(), body)); // last-wins
+                    local
+                        .functions
+                        .insert(name.as_str(), (params.as_slice(), body)); // last-wins
+                    exec.push(stmt); // eval_stmt no-ops it; kept for stream parity
+                }
+                StmtKind::ModuleDef { name, params, body } => {
+                    local
+                        .modules
+                        .insert(name.as_str(), (params.as_slice(), &**body)); // last-wins
                     exec.push(stmt); // eval_stmt no-ops it; kept for stream parity
                 }
                 _ => exec.push(stmt),
@@ -290,8 +318,8 @@ fn exported_defs<'a>(
     loaded: &'a Loaded,
     idx: usize,
     budget: &mut usize,
-) -> crate::Result<FnStore<'a>> {
-    let mut defs = BTreeMap::new();
+) -> crate::Result<Defs<'a>> {
+    let mut defs = Defs::default();
     let mut stack = Vec::new();
     collect_exported(loaded, idx, &mut defs, &mut stack, 0, budget)?;
     Ok(defs)
@@ -302,7 +330,7 @@ fn exported_defs<'a>(
 fn collect_exported<'a>(
     loaded: &'a Loaded,
     idx: usize,
-    defs: &mut FnStore<'a>,
+    defs: &mut Defs<'a>,
     stack: &mut Vec<usize>,
     depth: usize,
     budget: &mut usize,
@@ -322,11 +350,17 @@ fn collect_exported<'a>(
                 collect_exported(loaded, *target, defs, stack, depth + 1, budget)?;
             }
             Some(Link::Use(_)) => {} // `use` is NOT transitive — don't follow the used file's own uses
-            None => {
-                if let StmtKind::FunctionDef { name, params, body } = &stmt.kind {
-                    defs.insert(name.as_str(), (params.as_slice(), body)); // last-wins
+            None => match &stmt.kind {
+                StmtKind::FunctionDef { name, params, body } => {
+                    defs.functions
+                        .insert(name.as_str(), (params.as_slice(), body)); // last-wins
                 }
-            }
+                StmtKind::ModuleDef { name, params, body } => {
+                    defs.modules
+                        .insert(name.as_str(), (params.as_slice(), &**body)); // last-wins
+                }
+                _ => {}
+            },
         }
     }
     stack.pop();

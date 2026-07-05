@@ -38,6 +38,9 @@ const FIXTURES: &[(&str, &str)] = &[
         "function r() = 8;\nfunction dbl(x) = x * 2;\n",
     ),
     ("lib_r5.scad", "function r() = 5;\n"),
+    // a used file exporting a MODULE (not just functions) — I.2.4's use-imported-module path
+    ("lib_mod.scad", "module libbox(s) cube(s);\n"),
+    ("use_module.scad", "use <lib_mod.scad>\nlibbox(4);\n"),
     // a lib that ALSO has a top-level var + geometry — `use` must run NEITHER
     (
         "lib_with_geom.scad",
@@ -175,6 +178,8 @@ fn loader_matches_the_inlined_equivalent() {
         ("include_var.scad", vec![], "sphere(3, $fn = 8);"),
         // use imports r() = 8 → sphere r = 8
         ("use_fn.scad", vec![], "sphere(8, $fn = 16);"),
+        // use imports a MODULE def → libbox(4) renders exactly cube(4)
+        ("use_module.scad", vec![], "cube(4);"),
         // local r() = 2 beats the used r() = 8
         ("local_wins.scad", vec![], "sphere(2, $fn = 8);"),
         // last use (lib_r5) wins → r() = 5

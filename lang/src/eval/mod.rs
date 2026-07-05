@@ -29,11 +29,13 @@ pub use message::{Evaluation, Message};
 pub use scope::Scope;
 pub use value::{RANGE_MAX, RangeIter, Value, range_iter, range_len};
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
 
 use crate::Mesh;
-use crate::parser::{Arg, BinOp, Expr, ExprKind, Parameter, Program, Stmt, StmtKind, UnOp};
+use crate::parser::{
+    Arg, BinOp, Expr, ExprKind, ModuleInstantiation, Parameter, Program, Stmt, StmtKind, UnOp,
+};
 
 /// The evaluation context, borrowed from the `Program`:
 /// - `functions`: the user-function store (name → params + body). Functions live in their OWN
@@ -47,9 +49,21 @@ use crate::parser::{Arg, BinOp, Expr, ExprKind, Parameter, Program, Stmt, StmtKi
 #[derive(Default)]
 pub(super) struct Ctx<'a> {
     functions: BTreeMap<&'a str, (&'a [Parameter], &'a Expr)>,
+    /// User MODULE definitions (their own namespace, whole-program visibility) — name → (params, body
+    /// statement). A module CALL resolves here before the builtin-primitive fallthrough (I.2.4).
+    modules: loader::ModStore<'a>,
     closures: RefCell<Vec<(&'a [Parameter], &'a Expr)>>,
     messages: RefCell<Vec<Message>>,
+    /// Live user-module call depth — the Safari-cliff guard. Statement eval is HOST-recursive (a module
+    /// body re-enters `eval_stmt`), so a self-recursive module could overflow; this bounds it, LOUD
+    /// ([`MAX_MODULE_DEPTH`]), never a silent stack crash.
+    module_depth: Cell<usize>,
 }
+
+/// Max nested user-module call depth before we bail LOUD (OpenSCAD caps recursion similarly). Statement
+/// recursion is host-stack-bound — unlike the EXPRESSION machine (explicit stack, memory-bound) — so
+/// this guard is what keeps a `module m() { m(); }` from crashing the process.
+const MAX_MODULE_DEPTH: usize = 256;
 
 /// One step on the evaluator's explicit work-stack. Each `Eval` carries the [`Scope`] it evaluates
 /// in (an `Rc<Frame>` clone — cheap), so a call's body can evaluate in the callee's scope while the
@@ -715,11 +729,13 @@ pub(crate) fn evaluate_source(
 ) -> crate::Result<(GeoNode, Vec<Message>)> {
     let _span = tracing::trace_span!("eval_program").entered();
     let loaded = loader::load(source, base_dir, root_path, library_paths)?;
-    let (exec, functions) = loader::flatten(&loaded)?;
+    let (exec, defs) = loader::flatten(&loaded)?;
     let ctx = Ctx {
-        functions,
+        functions: defs.functions,
+        modules: defs.modules,
         closures: RefCell::default(),
         messages: RefCell::default(),
+        module_depth: Cell::default(),
     };
     let tree = run_stmts(exec.into_iter(), &ctx, &Scope::new())?;
     Ok((tree, ctx.messages.into_inner()))
@@ -735,7 +751,12 @@ fn run_stmts<'a>(
     scope: &Scope,
 ) -> crate::Result<GeoNode> {
     let stmts: Vec<&Stmt> = stmts.collect();
-    Ok(union_of(eval_nodes(&stmts, ctx, scope)?))
+    // The top-level hoisted scope IS the GLOBAL base for module bodies (a user module evaluates in
+    // `global.child()` + its params — OpenSCAD's lexical hygiene). Hoist ONCE (not a pre-hoist +
+    // re-hoist — that would let a forward reference see the pre-bound value, breaking `a = b; b = 5` →
+    // `a` is undef), then evaluate the geometry in that same scope.
+    let global = hoist_scope(&stmts, scope, ctx)?;
+    Ok(union_of(eval_geometry(&stmts, &global, &global, ctx)?))
 }
 
 /// The geometry nodes a statement list produces, in order. Pass 1 HOISTS every assignment BEFORE any
@@ -745,16 +766,42 @@ fn run_stmts<'a>(
 /// the fully-bound scope. Shared by the top level, bare blocks, and every transform/boolean's children
 /// (each gets a fresh hoisted child scope). Recursion is bounded by the parser's `MAX_DEPTH`, so the
 /// geometry tree can't be deep enough to overflow (unlike the expression stack, which is explicit).
-fn eval_nodes<'a>(stmts: &[&'a Stmt], ctx: &Ctx<'a>, scope: &Scope) -> crate::Result<Vec<GeoNode>> {
+fn eval_nodes<'a>(
+    stmts: &[&'a Stmt],
+    ctx: &Ctx<'a>,
+    scope: &Scope,
+    global: &Scope,
+) -> crate::Result<Vec<GeoNode>> {
+    let hoisted = hoist_scope(stmts, scope, ctx)?;
+    eval_geometry(stmts, &hoisted, global, ctx)
+}
+
+/// Hoist a statement list's assignments into a fresh working scope (a clone of `scope`): OpenSCAD's
+/// whole-scope, last-assignment-wins rule, evaluating them in first-occurrence order so a forward /
+/// self-reference sees `undef`. Returns the bound scope — the pure prefix `eval_nodes` and `run_stmts`
+/// share. Hoisting into a FRESH scope (nothing pre-bound) is what keeps `a = b; b = 5` → `a` undef.
+fn hoist_scope<'a>(stmts: &[&'a Stmt], scope: &Scope, ctx: &Ctx<'a>) -> crate::Result<Scope> {
     let mut scope = scope.clone();
     for (name, expr) in hoisted_assignments(stmts) {
         let value = eval_with_ctx(expr, &scope, ctx)?;
         scope.bind(name.to_string(), value);
     }
+    Ok(scope)
+}
+
+/// Evaluate the GEOMETRY statements of a list (assignments already hoisted into `scope`) → their nodes,
+/// threading `global` unchanged for any module body's lexical base.
+fn eval_geometry<'a>(
+    stmts: &[&'a Stmt],
+    scope: &Scope,
+    global: &Scope,
+    ctx: &Ctx<'a>,
+) -> crate::Result<Vec<GeoNode>> {
+    let mut scope = scope.clone();
     let mut nodes = Vec::new();
     for stmt in stmts {
         if !matches!(stmt.kind, StmtKind::Assignment { .. }) {
-            eval_stmt(stmt, &mut scope, ctx, &mut nodes)?;
+            eval_stmt(stmt, &mut scope, global, ctx, &mut nodes)?;
         }
     }
     Ok(nodes)
@@ -777,22 +824,106 @@ fn for_product<'a>(
     args: &'a [Arg],
     children: &[&'a Stmt],
     scope: &Scope,
+    global: &Scope,
     ctx: &Ctx<'a>,
     out: &mut Vec<GeoNode>,
 ) -> crate::Result<()> {
     match args.split_first() {
-        None => out.push(union_of(eval_nodes(children, ctx, scope)?)), // all vars bound → the body
+        // all vars bound → the body
+        None => out.push(union_of(eval_nodes(children, ctx, scope, global)?)),
         Some((arg, rest)) => {
             let name = arg.name.as_deref().unwrap_or("");
             let iterable = eval_with_ctx(&arg.value, scope, ctx)?;
             for value in iterate_values(&iterable) {
                 let mut child = scope.clone();
                 child.bind(name, value);
-                for_product(rest, children, &child, ctx, out)?;
+                for_product(rest, children, &child, global, ctx, out)?;
             }
         }
     }
     Ok(())
+}
+
+/// Call a user MODULE (I.2.4): bind the call's args into a fresh child of `global` (OpenSCAD lexical
+/// hygiene — the body sees globals + params, not the caller's locals), then evaluate the body statement
+/// there → its geometry (implicit-unioned). Guarded against unbounded self-recursion ([`MAX_MODULE_DEPTH`])
+/// because statement eval is HOST-recursive — LOUD on overflow, never a silent stack crash.
+fn call_user_module<'a>(
+    mi: &'a ModuleInstantiation,
+    caller: &Scope,
+    global: &Scope,
+    ctx: &Ctx<'a>,
+) -> crate::Result<GeoNode> {
+    let (params, body) = ctx.modules[mi.name.as_str()]; // the arm guarded `contains_key`
+    let depth = ctx.module_depth.get();
+    if depth >= MAX_MODULE_DEPTH {
+        return Err(crate::Error::Unimplemented(
+            "user-module recursion too deep (the statement-eval depth guard — a runaway recursive module)",
+        ));
+    }
+    ctx.module_depth.set(depth + 1);
+    let mut call = bind_module_scope(params, &mi.args, caller, global, ctx)?;
+    let mut nodes = Vec::new();
+    let result = eval_stmt(body, &mut call, global, ctx, &mut nodes);
+    ctx.module_depth.set(depth); // restore even on error (no `?` before this)
+    result?;
+    Ok(union_of(nodes))
+}
+
+/// Build a user module's call scope: match `args` to `params` (positional fill left-to-right, named by
+/// name, defaults for the rest), then bind them + the `$`-args into a fresh child of `global`. Mirrors
+/// the function-call arg-match ([`push_call`]) but EAGER (statement level, no `Task` machine): arg exprs
+/// evaluate in the CALLER scope, defaults in `global` (the definition scope), `$`-args bind LAST so they
+/// override the inherited dynamic `$`-context.
+fn bind_module_scope<'a>(
+    params: &'a [Parameter],
+    args: &'a [Arg],
+    caller: &Scope,
+    global: &Scope,
+    ctx: &Ctx<'a>,
+) -> crate::Result<Scope> {
+    let mut slots: Vec<Option<(&'a Expr, Scope)>> = vec![None; params.len()];
+    let mut dollars: Vec<(&'a str, &'a Expr)> = Vec::new();
+    let mut positional = 0;
+    for arg in args {
+        match &arg.name {
+            None => {
+                if let Some(slot) = slots.get_mut(positional) {
+                    *slot = Some((&arg.value, caller.clone()));
+                }
+                positional += 1;
+            }
+            Some(name) if name.starts_with('$') => dollars.push((name.as_str(), &arg.value)),
+            Some(name) => {
+                if let Some(i) = params.iter().position(|p| &p.name == name)
+                    && let Some(slot) = slots.get_mut(i)
+                {
+                    *slot = Some((&arg.value, caller.clone()));
+                }
+            }
+        }
+    }
+    for (slot, param) in slots.iter_mut().zip(params) {
+        if let (None, Some(default)) = (&slot, &param.default) {
+            *slot = Some((default, global.clone()));
+        }
+    }
+    let mut call = global.child();
+    for (name, value) in caller.specials() {
+        call.bind(name, value); // inherit the caller's reaching $-context first
+    }
+    for (param, slot) in params.iter().zip(&slots) {
+        let value = match slot {
+            Some((expr, s)) => eval_with_ctx(expr, s, ctx)?,
+            None => Value::Undef,
+        };
+        call.bind(param.name.as_str(), value);
+    }
+    for (name, expr) in dollars {
+        let value = eval_with_ctx(expr, caller, ctx)?;
+        call.bind(name, value); // $-args last → override the inherited $-context
+    }
+    Ok(call)
 }
 
 /// The values a `for` binding iterates: a range → its (capped) values, a vector → its elements, a
@@ -907,15 +1038,24 @@ fn check_assert<'a>(
 /// OpenSCAD); a duplicate name — last definition wins (`BTreeMap::insert`).
 fn build_ctx(program: &Program) -> Ctx<'_> {
     let mut functions = BTreeMap::new();
+    let mut modules = BTreeMap::new();
     for stmt in &program.stmts {
-        if let StmtKind::FunctionDef { name, params, body } = &stmt.kind {
-            functions.insert(name.as_str(), (params.as_slice(), body));
+        match &stmt.kind {
+            StmtKind::FunctionDef { name, params, body } => {
+                functions.insert(name.as_str(), (params.as_slice(), body));
+            }
+            StmtKind::ModuleDef { name, params, body } => {
+                modules.insert(name.as_str(), (params.as_slice(), &**body));
+            }
+            _ => {}
         }
     }
     Ctx {
         functions,
+        modules,
         closures: RefCell::default(),
         messages: RefCell::default(),
+        module_depth: Cell::default(),
     }
 }
 
@@ -924,6 +1064,7 @@ fn build_ctx(program: &Program) -> Ctx<'_> {
 fn eval_stmt<'a>(
     stmt: &'a Stmt,
     scope: &mut Scope,
+    global: &Scope,
     ctx: &Ctx<'a>,
     nodes: &mut Vec<GeoNode>,
 ) -> crate::Result<()> {
@@ -943,7 +1084,7 @@ fn eval_stmt<'a>(
         // (its own hoisting).
         StmtKind::Block(stmts) => {
             let refs: Vec<&Stmt> = stmts.iter().collect();
-            nodes.push(union_of(eval_nodes(&refs, ctx, scope)?));
+            nodes.push(union_of(eval_nodes(&refs, ctx, scope, global)?));
         }
         // `echo`/`assert` at statement level are module instantiations, but they produce console
         // output, not geometry — handle them here (no node pushed) before the geometry dispatch. Their
@@ -956,7 +1097,7 @@ fn eval_stmt<'a>(
             let (positional, named, _) = module::eval_args(mi, scope, ctx)?;
             let matrix = geo::transform_matrix(&mi.name, &positional, &named);
             let refs: Vec<&Stmt> = mi.children.iter().collect();
-            let child = union_of(eval_nodes(&refs, ctx, scope)?);
+            let child = union_of(eval_nodes(&refs, ctx, scope, global)?);
             nodes.push(GeoNode::Transform {
                 matrix,
                 child: Box::new(child),
@@ -966,7 +1107,7 @@ fn eval_stmt<'a>(
         // first minus the rest, `intersection` is the common volume, `union` merges (also the default).
         StmtKind::Module(mi) if geo::is_boolean(&mi.name) => {
             let refs: Vec<&Stmt> = mi.children.iter().collect();
-            let children = eval_nodes(&refs, ctx, scope)?;
+            let children = eval_nodes(&refs, ctx, scope, global)?;
             nodes.push(match mi.name.as_str() {
                 "difference" => GeoNode::Difference(children),
                 "intersection" => GeoNode::Intersection(children),
@@ -978,7 +1119,7 @@ fn eval_stmt<'a>(
         StmtKind::Module(mi) if mi.name == "color" => {
             let (positional, named, _) = module::eval_args(mi, scope, ctx)?;
             let refs: Vec<&Stmt> = mi.children.iter().collect();
-            let child = union_of(eval_nodes(&refs, ctx, scope)?);
+            let child = union_of(eval_nodes(&refs, ctx, scope, global)?);
             match geo::resolve_color(&positional, &named) {
                 Some(color) => nodes.push(GeoNode::Color {
                     color,
@@ -993,14 +1134,22 @@ fn eval_stmt<'a>(
         StmtKind::Module(mi) if mi.name == "for" || mi.name == "intersection_for" => {
             let children: Vec<&Stmt> = mi.children.iter().collect();
             let mut iterations = Vec::new();
-            for_product(&mi.args, &children, scope, ctx, &mut iterations)?;
+            for_product(&mi.args, &children, scope, global, ctx, &mut iterations)?;
             nodes.push(if mi.name == "intersection_for" {
                 GeoNode::Intersection(iterations)
             } else {
                 GeoNode::Union(iterations)
             });
         }
-        // A PRIMITIVE → a `Leaf` (a still-deferred user module fails LOUD inside `eval_module`).
+        // A USER MODULE call (I.2.4): resolve in the module store + bind args into a fresh child of the
+        // GLOBAL scope (OpenSCAD hygiene — a module body sees globals + params, NOT the caller's locals),
+        // then evaluate its body there. Checked before the builtin fallthrough; a name matching a builtin
+        // transform/boolean/color was already dispatched above (so a user module can't shadow those — a
+        // documented v1 simplification).
+        StmtKind::Module(mi) if ctx.modules.contains_key(mi.name.as_str()) => {
+            nodes.push(call_user_module(mi, scope, global, ctx)?);
+        }
+        // A PRIMITIVE → a `Leaf` (an unknown user module fails LOUD inside `eval_module`).
         StmtKind::Module(mi) => nodes.push(GeoNode::Leaf(module::eval_module(mi, scope, ctx)?)),
         // `if (cond) A else B` contributes the TAKEN branch's geometry (I.3.3).
         StmtKind::If { cond, then, els } => {
@@ -1010,7 +1159,7 @@ fn eval_stmt<'a>(
                 els
             };
             let refs: Vec<&Stmt> = branch.iter().collect();
-            nodes.push(union_of(eval_nodes(&refs, ctx, scope)?));
+            nodes.push(union_of(eval_nodes(&refs, ctx, scope, global)?));
         }
         // The loader resolves top-level `use`/`include` away (include → spliced, use → imported), so a
         // node reaching here is either a raw `eval_program` on an unloaded program or a `use`/`include`

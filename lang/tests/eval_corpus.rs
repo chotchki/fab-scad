@@ -330,6 +330,122 @@ fn math_builtins() {
 }
 
 #[test]
+fn list_string_builtins() {
+    let str = |x: &str| Value::string(x); // shorthand for expected string values
+    let strs = |xs: &[&str]| Value::list(xs.iter().map(|s| Value::string(*s)).collect::<Vec<_>>());
+
+    // len — element count, or CHARACTER count for a string (é is 1 char, 2 bytes).
+    assert_eq!(ev("len([1, 2, 3])"), num(3.0));
+    assert_eq!(ev(r#"len("héllo")"#), num(5.0));
+    assert_eq!(ev("len([])"), num(0.0));
+    assert_eq!(ev(r#"len(["a", [1, 2]])"#), num(2.0));
+    assert_eq!(ev("len(5)"), Value::Undef); // a number has no length
+
+    // concat — flatten ONE level; non-lists appended whole (strings NOT expanded).
+    assert_eq!(ev("concat([1, 2], [3, 4])"), list(&[1.0, 2.0, 3.0, 4.0]));
+    assert_eq!(ev("concat(1, [2, 3], 4)"), list(&[1.0, 2.0, 3.0, 4.0]));
+    assert_eq!(ev(r#"concat("a", "b")"#), strs(&["a", "b"])); // strings appended, not split
+    assert_eq!(ev("concat()"), list(&[])); // nothing → empty
+    assert_eq!(
+        ev("concat([1], [[2, 3]])"), // a nested list stays nested (one level only)
+        Value::list(vec![num(1.0), list(&[2.0, 3.0])])
+    );
+
+    // str — concatenate string forms; top-level string RAW, nested strings QUOTED.
+    assert_eq!(ev(r#"str("x=", 5)"#), str("x=5"));
+    assert_eq!(ev("str(1, 2, 3)"), str("123"));
+    assert_eq!(ev("str(true, false)"), str("truefalse"));
+    assert_eq!(ev("str(undef)"), str("undef"));
+    assert_eq!(ev("str(1.5)"), str("1.5"));
+    assert_eq!(ev("str(-0)"), str("0")); // -0 normalizes
+    assert_eq!(ev("str([1, 2])"), str("[1, 2]"));
+    assert_eq!(ev(r#"str(["a", "b"])"#), str(r#"["a", "b"]"#)); // nested strings quoted
+    assert_eq!(ev("str([0:2:6])"), str("[0 : 2 : 6]"));
+    assert_eq!(ev("str()"), str("")); // no args → empty string
+    assert_eq!(ev("str(function(x) x)"), str("function ...")); // function form deferred to I.5
+
+    // chr — codepoints → string; sub-1 / non-scalar codepoints SKIPPED; string arg → undef.
+    assert_eq!(ev("chr(65)"), str("A"));
+    assert_eq!(ev("chr([72, 105])"), str("Hi"));
+    assert_eq!(ev(r#"chr([72, "x", 105])"#), str("Hi")); // non-number entries skipped
+    assert_eq!(ev("chr([97:99])"), str("abc")); // a range of codepoints
+    assert_eq!(ev("chr(0)"), str("")); // codepoint < 1 → skipped
+    assert_eq!(ev("chr(1114112)"), str("")); // above U+10FFFF → not a scalar → skipped
+    assert_eq!(ev(r#"chr("A")"#), Value::Undef); // chr wants numbers
+
+    // ord — first char's codepoint.
+    assert_eq!(ev(r#"ord("A")"#), num(65.0));
+    assert_eq!(ev(r#"ord("abc")"#), num(97.0)); // first char only
+    assert_eq!(ev(r#"ord("é")"#), num(233.0)); // U+00E9
+    assert_eq!(ev(r#"ord("")"#), Value::Undef); // empty → undef
+    assert_eq!(ev("ord(5)"), Value::Undef); // non-string → undef
+
+    // reverse — list or string.
+    assert_eq!(ev("reverse([1, 2, 3])"), list(&[3.0, 2.0, 1.0]));
+    assert_eq!(ev(r#"reverse("abc")"#), str("cba"));
+    assert_eq!(
+        ev(r#"reverse(["a", 1])"#),
+        Value::list(vec![num(1.0), str("a")])
+    );
+    assert_eq!(ev("reverse(5)"), Value::Undef); // not a list/string
+
+    // lookup — linear interpolation, CLAMPED at the ends.
+    assert_eq!(
+        ev("lookup(2, [[0, 0], [1, 10], [2, 20], [3, 30]])"),
+        num(20.0)
+    ); // exact
+    assert_eq!(ev("lookup(1.5, [[0, 0], [1, 10], [2, 20]])"), num(15.0)); // interpolated
+    assert_eq!(ev("lookup(-5, [[0, 0], [1, 10]])"), num(0.0)); // below all → clamp to first
+    assert_eq!(ev("lookup(100, [[0, 0], [1, 10]])"), num(10.0)); // above all → clamp to last
+    assert_eq!(ev(r#"lookup("a", [[0, 0]])"#), Value::Undef); // non-numeric key
+    assert_eq!(ev("lookup(1, [])"), Value::Undef); // no valid pairs
+
+    // search — func.cc's find-indices protocol.
+    assert_eq!(ev("search(3, [1, 2, 3, 4, 5])"), list(&[2.0])); // number → flat index list
+    assert_eq!(ev("search(3, [3, 3, 3, 3], 2)"), list(&[0.0, 1.0])); // capped at num_returns
+    assert_eq!(ev(r#"search("b", "abcabc")"#), list(&[1.0])); // string, first hit per char
+    assert_eq!(ev(r#"search("bc", "abcabc")"#), list(&[1.0, 2.0])); // one index per search char
+    assert_eq!(ev(r#"search("e", "abc")"#), list(&[])); // no match, num_returns=1 → dropped
+    assert_eq!(
+        ev(r#"search("a", "abcabc", 0)"#), // num_returns=0 → ALL, nested
+        Value::list(vec![list(&[0.0, 3.0])])
+    );
+    assert_eq!(
+        ev(r#"search("ab", "abcabc", 0)"#),
+        Value::list(vec![list(&[0.0, 3.0]), list(&[1.0, 4.0])])
+    );
+    assert_eq!(ev("search([1, 3], [1, 2, 3, 4])"), list(&[0.0, 2.0])); // vector find
+    // index_col_num: search a specific column of table rows.
+    assert_eq!(
+        ev(r#"search(3, [[1, "a"], [3, "b"], [3, "c"]], 0, 0)"#),
+        list(&[1.0, 2.0])
+    );
+    assert_eq!(
+        ev(r#"search("b", [["a", 1], ["b", 2], ["c", 3]], 1, 0)"#),
+        list(&[1.0])
+    );
+    assert_eq!(ev(r#"search(2, [["a", 1], ["b", 2]], 1, 1)"#), list(&[1.0])); // column 1
+    assert_eq!(ev("search(3, [[1, 2], [3, 4]])"), list(&[1.0])); // numeric ROW, column-0 match
+    assert_eq!(ev("search(1)"), Value::Undef); // missing the table arg → undef
+    assert_eq!(ev("search(1, 5)"), list(&[])); // a non-list table yields no matches
+    assert_eq!(ev("search(undef, [1, 2])"), Value::Undef); // a non-searchable find → undef
+    assert_eq!(ev(r#"search("a", "aaa", -1)"#), list(&[0.0])); // a bad num_returns falls back to 1
+
+    // lookup edge cases: labeled tables, malformed rows, missing/degenerate inputs.
+    assert_eq!(
+        ev(r#"lookup(1.5, [[1, 10, "a"], [2, 20, "b"]])"#),
+        num(15.0)
+    ); // extra label column ignored
+    assert_eq!(
+        ev(r#"lookup(1.5, [["x", 0], [1, 10], [2, 20]])"#),
+        num(15.0)
+    ); // a non-pair row is skipped
+    assert_eq!(ev("lookup(5)"), Value::Undef); // missing the table arg
+    assert_eq!(ev("lookup(1, [[5]])"), Value::Undef); // a too-short row is not a pair
+    assert_eq!(ev(r#"lookup(1, "abc")"#), Value::Undef); // no pairs in a string table
+}
+
+#[test]
 fn let_expressions() {
     assert_eq!(ev("let(a = 1) a + 1"), num(2.0));
     assert_eq!(ev("let(a = 1, b = 2) a + b"), num(3.0));

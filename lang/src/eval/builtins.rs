@@ -5,11 +5,19 @@
 //! Trig is in DEGREES and reuses `trig`'s exact-quadrant `sin`/`cos` so `sin(30)` etc. match the
 //! geometry path bit-for-bit. `rands` (non-deterministic) is deliberately NOT here — it needs the
 //! seeded-RNG discipline (I.4.3). Names here MUST match [`is_builtin`].
+//!
+//! The list/string group (I.4.2) is the glue BOSL2 lives on: `len`/`concat`/`reverse` are vector
+//! surgery, `chr`/`ord` bridge codepoints↔strings, `str` routes through the shared [`fmt`](super::fmt)
+//! formatter (so echo at I.5 refines ONE place), and `lookup`/`search` are the table primitives —
+//! `lookup` linear-interpolates + clamps at the ends, `search` follows `func.cc`'s per-match protocol
+//! (`num_returns_per_match`: 1 = flat first-hits, 0 = all, n = up to n; `index_col_num` picks a column).
 
 use std::collections::BTreeMap;
 
+use super::fmt::format_value;
 use super::trig;
 use super::value::Value;
+use super::{build_vector, iter_values};
 
 /// Is `name` a builtin we implement? Checked at a call site AFTER user functions, BEFORE "unknown"
 /// (so a user function may shadow a builtin, per OpenSCAD).
@@ -37,6 +45,15 @@ pub(super) fn is_builtin(name: &str) -> bool {
             | "max"
             | "norm"
             | "cross"
+            // list + string (I.4.2)
+            | "len"
+            | "concat"
+            | "str"
+            | "chr"
+            | "ord"
+            | "reverse"
+            | "lookup"
+            | "search"
     )
 }
 
@@ -64,6 +81,14 @@ pub(super) fn apply(name: &str, pos: &[Value], _named: &BTreeMap<String, Value>)
         "max" => min_max(pos, false),
         "norm" => norm(pos),
         "cross" => cross(pos),
+        "len" => len(pos),
+        "concat" => concat(pos),
+        "str" => str_concat(pos),
+        "chr" => chr(pos),
+        "ord" => ord(pos),
+        "reverse" => reverse(pos),
+        "lookup" => lookup(pos),
+        "search" => search(pos),
         _ => Value::Undef,
     }
 }
@@ -141,6 +166,264 @@ fn cross(pos: &[Value]) -> Value {
             _ => Value::Undef,
         },
         _ => Value::Undef,
+    }
+}
+
+// ─────────────────────────────── list + string group (I.4.2) ─────────────────────────────────────
+
+/// A `usize` from a list index / length as an `f64` — indices and lengths are far below `2^53`, so
+/// the conversion is exact (this is the one place the cast lives, so the `allow` lives here too).
+#[allow(
+    clippy::cast_precision_loss,
+    reason = "list indices/lengths are far below 2^53; f64 is exact"
+)]
+fn count(n: usize) -> f64 {
+    n as f64
+}
+
+/// A finite, non-negative `Value::Num` as a `usize` — the form of `search`'s `num_returns_per_match`
+/// and `index_col_num` params. Anything else → `None` (caller supplies the default).
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "checked finite and >= 0; `as usize` truncates the fraction (OpenSCAD casts to int too)"
+)]
+fn as_index(v: &Value) -> Option<usize> {
+    match v {
+        &Value::Num(n) if n.is_finite() && n >= 0.0 => Some(n as usize),
+        _ => None,
+    }
+}
+
+/// `len(x)` — element count of a list, or CHARACTER count of a string (Unicode scalars, not bytes).
+/// A number / bool / undef / range / function has no length → `undef`.
+fn len(pos: &[Value]) -> Value {
+    match pos.first() {
+        Some(Value::NumList(xs)) => Value::Num(count(xs.len())),
+        Some(Value::List(xs)) => Value::Num(count(xs.len())),
+        Some(Value::Str(s)) => Value::Num(count(s.chars().count())),
+        _ => Value::Undef,
+    }
+}
+
+/// `concat(a, b, …)` — flatten ONE level: a list arg contributes its elements, anything else (number,
+/// string, range, undef) is appended whole (`func.cc` expands vectors only). All-numeric → `NumList`.
+fn concat(pos: &[Value]) -> Value {
+    let mut out = Vec::new();
+    for v in pos {
+        match v {
+            Value::NumList(xs) => out.extend(xs.iter().map(|&x| Value::Num(x))),
+            Value::List(xs) => out.extend(xs.iter().cloned()),
+            other => out.push(other.clone()),
+        }
+    }
+    build_vector(out)
+}
+
+/// `str(a, b, …)` — concatenate each arg's string form. A TOP-LEVEL string is raw (`str("ab") == "ab"`);
+/// everything else routes through the shared [`format_value`] (which quotes strings nested in lists).
+fn str_concat(pos: &[Value]) -> Value {
+    let mut s = String::new();
+    for v in pos {
+        match v {
+            Value::Str(x) => s.push_str(x), // top-level string: raw, no quotes
+            other => s.push_str(&format_value(other)),
+        }
+    }
+    Value::string(s)
+}
+
+/// `chr(n | [n…] | range)` — Unicode codepoints → a string. Codepoints below `1`, non-finite, or not a
+/// valid scalar value are SKIPPED (`func.cc`). A string / bool / undef arg → `undef` (chr wants numbers).
+fn chr(pos: &[Value]) -> Value {
+    let Some(source @ (Value::Num(_) | Value::NumList(_) | Value::List(_) | Value::Range { .. })) =
+        pos.first()
+    else {
+        return Value::Undef;
+    };
+    let mut s = String::new();
+    for value in iter_values(source) {
+        if let Value::Num(n) = value
+            && let Some(c) = code_to_char(n)
+        {
+            s.push(c);
+        }
+    }
+    Value::string(s)
+}
+
+/// A codepoint `f64` → its `char`, or `None` when below `1`, non-finite, or not a valid Unicode scalar
+/// (surrogate / above `U+10FFFF`). The fraction truncates (OpenSCAD casts to int).
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "guarded finite and >= 1; `as u32` saturates a huge value, then from_u32 rejects it"
+)]
+fn code_to_char(code: f64) -> Option<char> {
+    if !code.is_finite() || code < 1.0 {
+        return None;
+    }
+    char::from_u32(code as u32)
+}
+
+/// `ord(s)` — the codepoint of a string's FIRST character. Empty string / non-string → `undef`.
+fn ord(pos: &[Value]) -> Value {
+    match pos.first() {
+        Some(Value::Str(s)) => match s.chars().next() {
+            Some(c) => Value::Num(f64::from(c as u32)),
+            None => Value::Undef, // ord("") → undef
+        },
+        _ => Value::Undef,
+    }
+}
+
+/// `reverse(x)` — a list or string reversed. Number / range / undef / function → `undef`.
+fn reverse(pos: &[Value]) -> Value {
+    match pos.first() {
+        Some(Value::NumList(xs)) => Value::num_list(xs.iter().rev().copied().collect::<Vec<_>>()),
+        Some(Value::List(xs)) => Value::list(xs.iter().rev().cloned().collect::<Vec<_>>()),
+        Some(Value::Str(s)) => Value::string(s.chars().rev().collect::<String>()),
+        _ => Value::Undef,
+    }
+}
+
+/// `lookup(key, table)` — linear interpolation over a table of `[x, y]` pairs, CLAMPED at the ends
+/// (below the lowest `x` → its `y`, above the highest → its `y`), matching `func.cc`. Non-numeric key
+/// or no valid pairs → `undef`. The table need not be sorted: the bracketing pair is found by scan.
+fn lookup(pos: &[Value]) -> Value {
+    let key = match pos.first() {
+        Some(&Value::Num(k)) if k.is_finite() => k,
+        _ => return Value::Undef,
+    };
+    let table = match pos.get(1) {
+        Some(t) => iter_values(t),
+        None => return Value::Undef,
+    };
+    // low = the pair with the largest x <= key; high = the smallest x >= key.
+    let mut low: Option<(f64, f64)> = None;
+    let mut high: Option<(f64, f64)> = None;
+    for row in &table {
+        if let Some((x, y)) = as_pair(row) {
+            if x <= key && low.is_none_or(|(lx, _)| x > lx) {
+                low = Some((x, y));
+            }
+            if x >= key && high.is_none_or(|(hx, _)| x < hx) {
+                high = Some((x, y));
+            }
+        }
+    }
+    match (low, high) {
+        (None, None) => Value::Undef,            // no valid pairs
+        (Some((_, ly)), None) => Value::Num(ly), // key above all → clamp to last y
+        (None, Some((_, hy))) => Value::Num(hy), // key below all → clamp to first y
+        // low/high always bracket the key (lx <= key <= hx). `key <= lx` means key == lx — an exact
+        // hit on a point (and, when lx == hx, the degenerate single-point case) → that y; it also
+        // guards the divisor, since lx < key implies hx > key strictly (a point AT key would have set
+        // lx == key). Otherwise interpolate. (`func.cc` writes the two end-clamps as separate `>=`/`<=`
+        // guards; here the bracket invariant collapses the high clamp into the exact-hit case.)
+        (Some((lx, ly)), Some((hx, hy))) => {
+            if key <= lx {
+                Value::Num(ly)
+            } else {
+                let f = (key - lx) / (hx - lx);
+                Value::Num(ly * (1.0 - f) + hy * f)
+            }
+        }
+    }
+}
+
+/// A table row as an `[x, y]` numeric pair (extra columns ignored), else `None`.
+fn as_pair(row: &Value) -> Option<(f64, f64)> {
+    match row {
+        Value::NumList(xs) => match &xs[..] {
+            [x, y, ..] => Some((*x, *y)),
+            _ => None,
+        },
+        Value::List(xs) => match &xs[..] {
+            [Value::Num(x), Value::Num(y), ..] => Some((*x, *y)),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// `search(find, table, num_returns_per_match = 1, index_col_num = 0)` — `func.cc`'s find-indices
+/// primitive. A NUMBER `find` returns a FLAT list of the matching indices (capped by `num_returns`,
+/// `0` = all). A STRING or LIST `find` searches PER element/char: with `num_returns == 1` each hit is
+/// its first index flattened in (a miss contributes nothing); otherwise each contributes a SUB-list of
+/// up to `num_returns` indices (`0` = all), so misses show as `[]`. `index_col_num` compares against
+/// `row[index_col_num]` when the table rows are lists.
+fn search(pos: &[Value]) -> Value {
+    let (Some(find), Some(table)) = (pos.first(), pos.get(1)) else {
+        return Value::Undef;
+    };
+    let num_returns = pos.get(2).and_then(as_index).unwrap_or(1);
+    let index_col = pos.get(3).and_then(as_index).unwrap_or(0);
+    let rows = iter_values(table);
+    match find {
+        // a numeric search is always a flat list of hit indices, capped by num_returns (0 = all).
+        Value::Num(_) | Value::Bool(_) => build_vector(hits(find, &rows, num_returns, index_col)),
+        Value::Str(s) => {
+            let keys: Vec<Value> = s.chars().map(|c| Value::string(c.to_string())).collect();
+            build_vector(per_key_search(&keys, &rows, num_returns, index_col))
+        }
+        Value::NumList(_) | Value::List(_) => build_vector(per_key_search(
+            &iter_values(find),
+            &rows,
+            num_returns,
+            index_col,
+        )),
+        _ => Value::Undef,
+    }
+}
+
+/// The indices in `rows` matching `key` (via [`matches_at`]), capped at `num_returns` (`0` = all),
+/// as `Value::Num`s.
+fn hits(key: &Value, rows: &[Value], num_returns: usize, index_col: usize) -> Vec<Value> {
+    let mut out = Vec::new();
+    for (j, elem) in rows.iter().enumerate() {
+        if matches_at(key, elem, index_col) {
+            out.push(Value::Num(count(j)));
+            if num_returns != 0 && out.len() >= num_returns {
+                break;
+            }
+        }
+    }
+    out
+}
+
+/// The per-key half of `search` for STRING/LIST `find`: `num_returns == 1` flattens each key's first
+/// hit (misses drop out); otherwise each key contributes a sub-list (misses → `[]`).
+fn per_key_search(
+    keys: &[Value],
+    rows: &[Value],
+    num_returns: usize,
+    index_col: usize,
+) -> Vec<Value> {
+    let mut out = Vec::new();
+    for key in keys {
+        let found = hits(key, rows, num_returns, index_col);
+        if num_returns == 1 {
+            out.extend(found.into_iter().next()); // first hit, or nothing
+        } else {
+            out.push(build_vector(found));
+        }
+    }
+    out
+}
+
+/// Does `key` match table row `elem`? Directly when `index_col == 0`, else against `elem[index_col]`
+/// (when `elem` is a list long enough). `NaN` never matches (IEEE), like OpenSCAD.
+fn matches_at(key: &Value, elem: &Value, index_col: usize) -> bool {
+    (index_col == 0 && key == elem) || column(elem, index_col).as_ref() == Some(key)
+}
+
+/// The `i`-th column of a list row, else `None` (scalar row, or too short).
+fn column(elem: &Value, i: usize) -> Option<Value> {
+    match elem {
+        Value::NumList(xs) => xs.get(i).map(|&n| Value::Num(n)),
+        Value::List(xs) => xs.get(i).cloned(),
+        _ => None,
     }
 }
 

@@ -11,6 +11,7 @@
 //! I.1/I.4. Arithmetic/undef semantics are bug-for-bug OpenSCAD (`ops`).
 
 mod builtins;
+mod fmt;
 mod fragments;
 mod geometry;
 mod module;

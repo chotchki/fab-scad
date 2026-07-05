@@ -10,7 +10,6 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 
-use crate::geom::{self, V3};
 #[cfg(feature = "kernel")]
 use crate::kernel::Solid;
 use crate::manifest::{Connector, Slicing};
@@ -30,7 +29,7 @@ const CAP_SAFETY: f64 = 0.0; // extra socket margin; 0 keeps the aligned case at
 /// The shared onion cap axis + cap angle for one joint, or Infeasible (→ downgrade to a bolt).
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum OnionAxis {
-    Feasible { cap: V3, ang: f64 },
+    Feasible { cap: Vec3, ang: f64 },
     Infeasible,
 }
 
@@ -44,9 +43,9 @@ enum OnionAxis {
 /// - SOCKET (cavity, upper piece): the cap is the void's CEILING. Fine when the cap tilts little off
 ///   +u_up (steepen `ang` to clear it); fine again when it points well AWAY (the cavity opens up — a
 ///   bowl, no ceiling). The band between is where the ceiling overhangs → downgrade to a bolt.
-fn onion_axis(u_lo: V3, u_up: V3) -> OnionAxis {
+fn onion_axis(u_lo: Vec3, u_up: Vec3) -> OnionAxis {
     let cap = u_lo; // peg-priority: the proud bump follows the lower build, always support-free
-    let tilt = geom::angle_deg(cap, u_up); // socket-ceiling tilt off the upper build
+    let tilt = cap.angle_deg(u_up); // socket-ceiling tilt off the upper build
     let budget = SUPPORT_ANGLE - CAP_ANG_MIN - CAP_SAFETY; // tilt the steepest printable cap absorbs
     if tilt >= 180.0 - budget {
         return OnionAxis::Feasible {
@@ -102,12 +101,12 @@ fn slab_index(sorted_cuts: &[f64], coord: f64) -> usize {
 }
 
 /// A piece's build-up: a manual override from the spec, else +Z (auto-orient fills this in #42/D).
-fn piece_up(s: &Slicing, mi: [usize; 3]) -> V3 {
+fn piece_up(s: &Slicing, mi: [usize; 3]) -> Vec3 {
     s.orient
         .iter()
         .find(|p| p.piece == mi)
-        .map(|p| geom::normalize([p.up[0].f(), p.up[1].f(), p.up[2].f()]))
-        .unwrap_or([0.0, 0.0, 1.0])
+        .map(|p| Vec3::new(p.up[0].f(), p.up[1].f(), p.up[2].f()).normalize())
+        .unwrap_or(Vec3::new(0.0, 0.0, 1.0))
 }
 
 /// Resolve one onion connector to its cap axis/angle (or Infeasible) from its two bordering
@@ -544,12 +543,12 @@ pub fn slice_solid(s: &Slicing, base: &Solid) -> Result<Vec<([usize; 3], Solid)>
     // A connector's shape + the two cells it bridges.
     enum Shape {
         Onion {
-            cap: V3,
+            cap: Vec3,
             ang: f64,
             d: f64,
         },
         Bolt {
-            axis: V3,
+            axis: Vec3,
             screw: Option<String>,
             through: f64,
         },
@@ -557,7 +556,7 @@ pub fn slice_solid(s: &Slicing, base: &Solid) -> Result<Vec<([usize; 3], Solid)>
     struct Placed {
         below: [usize; 3],
         above: [usize; 3],
-        point: V3,
+        point: Vec3,
         shape: Shape,
     }
     // Slab index on `axis` that a coordinate falls into = cuts strictly below it.
@@ -606,14 +605,14 @@ pub fn slice_solid(s: &Slicing, base: &Solid) -> Result<Vec<([usize; 3], Solid)>
             match onion_resolution(s, &by_axis, c)? {
                 OnionAxis::Feasible { cap, ang } => Shape::Onion { cap, ang, d },
                 OnionAxis::Infeasible => Shape::Bolt {
-                    axis: axis_unit,
+                    axis: Vec3::from_array(axis_unit),
                     screw: c.screw.clone(),
                     through,
                 },
             }
         } else {
             Shape::Bolt {
-                axis: axis_unit,
+                axis: Vec3::from_array(axis_unit),
                 screw: c.screw.clone(),
                 through,
             }
@@ -621,7 +620,7 @@ pub fn slice_solid(s: &Slicing, base: &Solid) -> Result<Vec<([usize; 3], Solid)>
         placed.push(Placed {
             below,
             above,
-            point,
+            point: Vec3::from_array(point),
             shape,
         });
     }
@@ -629,16 +628,13 @@ pub fn slice_solid(s: &Slicing, base: &Solid) -> Result<Vec<([usize; 3], Solid)>
     let mut out = Vec::new();
     for (piece, mut cell) in base.slab_pieces(&by_axis) {
         for p in &placed {
-            let at = |sol: Solid| sol.translate(Vec3::from_array(p.point));
+            let at = |sol: Solid| sol.translate(p.point);
             match &p.shape {
                 Shape::Onion { cap, ang, d } => {
                     if piece == p.below {
-                        cell = cell.union(&at(
-                            Solid::onion(*d, *ang, SEG).align_z_to(Vec3::from_array(*cap))
-                        ));
+                        cell = cell.union(&at(Solid::onion(*d, *ang, SEG).align_z_to(*cap)));
                     } else if piece == p.above {
-                        let socket = Solid::onion(*d + 2.0 * SLOP, *ang, SEG)
-                            .align_z_to(Vec3::from_array(*cap));
+                        let socket = Solid::onion(*d + 2.0 * SLOP, *ang, SEG).align_z_to(*cap);
                         cell = cell.difference(&at(socket));
                     }
                 }
@@ -653,21 +649,21 @@ pub fn slice_solid(s: &Slicing, base: &Solid) -> Result<Vec<([usize; 3], Solid)>
                         // component ⟂ the bolt axis), so the ceiling self-supports; aim the peak at the
                         // build-up via a full basis. A near-vertical hole needs none → plain cylinder.
                         let up = piece_up(s, piece);
-                        let peak = geom::sub(up, geom::scale(*axis, geom::dot(up, *axis)));
-                        let teardrop = geom::norm(peak) > 0.707;
+                        let peak = up - (*axis * up.dot(*axis));
+                        let teardrop = peak.length() > 0.707;
                         let bolt = Solid::bolt_clearance(
                             cl, *through, cb_d, cb_h, ins_d, ins_h, SEG, teardrop,
                         );
                         let oriented = if teardrop {
-                            let zc = geom::normalize(*axis);
-                            let yc = geom::normalize(peak);
-                            let xc = geom::cross(yc, zc);
+                            let zc = axis.normalize();
+                            let yc = peak.normalize();
+                            let xc = yc.cross(zc);
                             bolt.transform(&Affine::from_column_major([
                                 xc[0], xc[1], xc[2], yc[0], yc[1], yc[2], zc[0], zc[1], zc[2], 0.0,
                                 0.0, 0.0,
                             ]))
                         } else {
-                            bolt.align_z_to(Vec3::from_array(*axis))
+                            bolt.align_z_to(*axis)
                         };
                         cell = cell.difference(&at(oriented));
                     }
@@ -819,7 +815,7 @@ mod tests {
     #[test]
     fn onion_axis_aligned_case_matches_today() {
         // both pieces build +Z: cap = +Z, ang = 45 (identical to pre-orientation output).
-        match onion_axis([0.0, 0.0, 1.0], [0.0, 0.0, 1.0]) {
+        match onion_axis(Vec3::new(0.0, 0.0, 1.0), Vec3::new(0.0, 0.0, 1.0)) {
             OnionAxis::Feasible { cap, ang } => {
                 assert!((cap[2] - 1.0).abs() < 1e-9 && cap[0].abs() < 1e-9);
                 assert!((ang - 45.0).abs() < 1e-9);
@@ -833,7 +829,7 @@ mod tests {
         // peg piece builds +X, socket piece builds +Z: no single cap serves both — the socket
         // ceiling sits at a 90° overhang. The CUT axis is irrelevant; only the build mismatch is.
         assert_eq!(
-            onion_axis([1.0, 0.0, 0.0], [0.0, 0.0, 1.0]),
+            onion_axis(Vec3::new(1.0, 0.0, 0.0), Vec3::new(0.0, 0.0, 1.0)),
             OnionAxis::Infeasible
         );
     }
@@ -841,20 +837,23 @@ mod tests {
     #[test]
     fn onion_socket_steepens_cap_for_a_tilted_upper_piece() {
         // upper piece tilted 20° from the lower's +Z. cap stays +Z (the peg), ang shrinks to clear it.
-        let u_up = [deg(20.0).sin(), 0.0, deg(20.0).cos()];
-        match onion_axis([0.0, 0.0, 1.0], u_up) {
+        let u_up = Vec3::new(deg(20.0).sin(), 0.0, deg(20.0).cos());
+        match onion_axis(Vec3::new(0.0, 0.0, 1.0), u_up) {
             OnionAxis::Feasible { ang, .. } => assert!((ang - 25.0).abs() < 0.5, "ang {ang}"),
             _ => panic!("20° upper tilt should be feasible with a steeper cap"),
         }
         // 30° upper tilt exceeds the cap budget (45-CAP_ANG_MIN=25) -> infeasible.
-        let steep = [deg(30.0).sin(), 0.0, deg(30.0).cos()];
-        assert_eq!(onion_axis([0.0, 0.0, 1.0], steep), OnionAxis::Infeasible);
+        let steep = Vec3::new(deg(30.0).sin(), 0.0, deg(30.0).cos());
+        assert_eq!(
+            onion_axis(Vec3::new(0.0, 0.0, 1.0), steep),
+            OnionAxis::Infeasible
+        );
     }
 
     #[test]
     fn onion_socket_bowl_up_is_always_feasible() {
         // upper piece builds opposite the lower (-Z vs +Z): the socket opens upward, no ceiling.
-        match onion_axis([0.0, 0.0, 1.0], [0.0, 0.0, -1.0]) {
+        match onion_axis(Vec3::new(0.0, 0.0, 1.0), Vec3::new(0.0, 0.0, -1.0)) {
             OnionAxis::Feasible { ang, .. } => assert!((ang - 45.0).abs() < 1e-9),
             _ => panic!("bowl-up socket must be feasible"),
         }

@@ -17,7 +17,6 @@ pub mod cross_section;
 pub mod deps;
 #[cfg(all(feature = "native", feature = "kernel"))]
 pub mod differ;
-pub mod geom;
 pub mod geomsg;
 #[cfg(feature = "kernel")]
 pub mod geomsvc;

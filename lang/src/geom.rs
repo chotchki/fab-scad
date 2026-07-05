@@ -64,6 +64,23 @@ impl Vec3 {
     pub fn length(self) -> f64 {
         self.dot(self).sqrt()
     }
+
+    /// Unit vector in the same direction. A ~zero vector is returned unchanged (no NaN).
+    #[must_use]
+    pub fn normalize(self) -> Vec3 {
+        let n = self.length();
+        if n < 1e-12 { self } else { self * (1.0 / n) }
+    }
+
+    /// Angle to `other` in DEGREES (`0..=180`). Zero-length inputs clamp cleanly.
+    #[must_use]
+    pub fn angle_deg(self, other: Vec3) -> f64 {
+        self.normalize()
+            .dot(other.normalize())
+            .clamp(-1.0, 1.0)
+            .acos()
+            .to_degrees()
+    }
 }
 
 impl Add for Vec3 {
@@ -185,13 +202,82 @@ impl Affine {
     }
 }
 
+/// A 3-axis SIZE — width / depth / height, same units as [`Vec3`] but a MEASUREMENT, not a point:
+/// always-nonnegative magnitudes, and the ops say so (componentwise fit + volume, never dot / cross /
+/// normalize). Distinct from `Vec3` on purpose — a bed size can't be passed where a point is wanted,
+/// and a point can't be passed where a size is: the type IS the check.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Dims {
+    /// Extent along x.
+    pub x: f64,
+    /// Extent along y.
+    pub y: f64,
+    /// Extent along z.
+    pub z: f64,
+}
+
+impl Dims {
+    /// A size from its three axis extents.
+    #[must_use]
+    pub const fn new(x: f64, y: f64, z: f64) -> Self {
+        Dims { x, y, z }
+    }
+
+    /// From an `[x, y, z]` array.
+    #[must_use]
+    pub const fn from_array([x, y, z]: [f64; 3]) -> Self {
+        Dims { x, y, z }
+    }
+
+    /// To an `[x, y, z]` array.
+    #[must_use]
+    pub const fn to_array(self) -> [f64; 3] {
+        [self.x, self.y, self.z]
+    }
+
+    /// The extent of the AABB between two corner points — `|max − min|` per axis (order-independent).
+    #[must_use]
+    pub fn from_extent(a: Vec3, b: Vec3) -> Self {
+        Dims::new((b.x - a.x).abs(), (b.y - a.y).abs(), (b.z - a.z).abs())
+    }
+
+    /// Whether this size fits within `bed` on every axis (componentwise `≤`).
+    #[must_use]
+    pub fn fits_within(self, bed: Dims) -> bool {
+        self.x <= bed.x && self.y <= bed.y && self.z <= bed.z
+    }
+
+    /// The box volume `x · y · z`.
+    #[must_use]
+    pub fn volume(self) -> f64 {
+        self.x * self.y * self.z
+    }
+}
+
+impl Index<usize> for Dims {
+    type Output = f64;
+    /// Axis access: `0`→x, `1`→y, `2`→z. Panics out of range, like slice indexing.
+    #[allow(
+        clippy::panic,
+        reason = "an out-of-range axis index is a bug — panics by contract, like [f64; 3]"
+    )]
+    fn index(&self, i: usize) -> &f64 {
+        match i {
+            0 => &self.x,
+            1 => &self.y,
+            2 => &self.z,
+            _ => panic!("Dims index {i} out of range (0..3)"),
+        }
+    }
+}
+
 #[cfg(test)]
 #[allow(
     clippy::float_cmp,
     reason = "exact vector/matrix arithmetic on literal inputs"
 )]
 mod tests {
-    use super::{Affine, Tri, Vec3};
+    use super::{Affine, Dims, Tri, Vec3};
 
     #[test]
     fn vec3_ops() {
@@ -213,6 +299,41 @@ mod tests {
         );
         assert_eq!(Vec3::ZERO, Vec3::new(0.0, 0.0, 0.0));
         assert_eq!([a[0], a[1], a[2]], [1.0, 2.0, 3.0]); // Index<usize>
+        // normalize + angle_deg (ported from the old geom::V3 helpers).
+        assert_eq!(
+            Vec3::new(0.0, 0.0, 5.0).normalize(),
+            Vec3::new(0.0, 0.0, 1.0)
+        );
+        assert_eq!(Vec3::ZERO.normalize(), Vec3::ZERO); // ~zero → unchanged, no NaN
+        assert!((Vec3::new(1.0, 0.0, 0.0).angle_deg(Vec3::new(0.0, 2.0, 0.0)) - 90.0).abs() < 1e-9);
+        assert!(
+            Vec3::new(1.0, 0.0, 0.0)
+                .angle_deg(Vec3::new(3.0, 0.0, 0.0))
+                .abs()
+                < 1e-9
+        ); // parallel
+    }
+
+    #[test]
+    fn dims_measurements() {
+        let d = Dims::new(10.0, 20.0, 30.0);
+        assert_eq!(d.to_array(), [10.0, 20.0, 30.0]);
+        assert_eq!(Dims::from_array([1.0, 2.0, 3.0]), Dims::new(1.0, 2.0, 3.0));
+        assert_eq!(d.volume(), 6000.0);
+        assert_eq!([d[0], d[1], d[2]], [10.0, 20.0, 30.0]); // Index
+        // extent between corners: |max − min| per axis, order-independent + nonneg.
+        let (a, b) = (Vec3::new(5.0, 0.0, -2.0), Vec3::new(1.0, 3.0, 4.0));
+        assert_eq!(Dims::from_extent(a, b), Dims::new(4.0, 3.0, 6.0));
+        assert_eq!(Dims::from_extent(b, a), Dims::new(4.0, 3.0, 6.0));
+        // fits_within: componentwise ≤.
+        assert!(Dims::new(10.0, 10.0, 10.0).fits_within(Dims::new(10.0, 20.0, 30.0)));
+        assert!(!Dims::new(10.0, 25.0, 10.0).fits_within(Dims::new(10.0, 20.0, 30.0)));
+    }
+
+    #[test]
+    #[should_panic(expected = "out of range")]
+    fn dims_index_out_of_range() {
+        let _ = Dims::new(1.0, 2.0, 3.0)[3];
     }
 
     #[test]

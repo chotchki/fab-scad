@@ -267,13 +267,9 @@ pub fn make_planned<W: std::io::Write + std::io::Seek>(
     };
     let mut ups: Vec<([usize; 3], [f64; 3])> = Vec::new();
     for (piece, solid) in crate::slicing::slice_solid(&bare, &base)? {
-        // auto_orient works in the printer domain's [f64; 3]; drop the mesh triangles to arrays.
-        let tris: Vec<[[f64; 3]; 3]> = solid
-            .tris()
-            .iter()
-            .map(|[a, b, c]| [a.to_array(), b.to_array(), c.to_array()])
-            .collect();
-        ups.push((piece, crate::auto_orient::best_up(&tris, &[])));
+        // best_up now speaks Vec3 (mesh tris are [Vec3;3]); keep the [usize;3]→[f64;3] up map as arrays.
+        let up = crate::auto_orient::best_up(&solid.tris(), &[]);
+        ups.push((piece, up.to_array()));
     }
 
     // Carved slice, gated by those orientations.

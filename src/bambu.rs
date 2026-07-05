@@ -22,8 +22,8 @@ use std::path::Path;
 
 use anyhow::{Context, Result, ensure};
 
-use crate::geom;
 use crate::pack::{self, Footprint};
+use fab_lang::Vec3;
 
 /// An indexed triangle mesh: vertices and 0-based triangle indices into them.
 pub struct Mesh {
@@ -319,7 +319,8 @@ fn matmul(a: [[f64; 3]; 3], b: [[f64; 3]; 3]) -> [[f64; 3]; 3] {
 /// the already-aligned and antipodal (`up ≈ -Z`) cases.
 fn rot_up_to_z(up: [f64; 3]) -> [[f64; 3]; 3] {
     const I: [[f64; 3]; 3] = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
-    let u = geom::normalize(up);
+    // bambu keeps its 3×3-matrix math in raw [f64;3] (export leaf); borrow Vec3 just for the vector ops.
+    let u = Vec3::from_array(up).normalize().to_array();
     let c = u[2]; // u · +Z
     if c > 1.0 - 1e-9 {
         return I;
@@ -327,7 +328,9 @@ fn rot_up_to_z(up: [f64; 3]) -> [[f64; 3]; 3] {
     if c < -1.0 + 1e-9 {
         return [[1.0, 0.0, 0.0], [0.0, -1.0, 0.0], [0.0, 0.0, -1.0]]; // 180° about X
     }
-    let v = geom::cross(u, [0.0, 0.0, 1.0]); // rotation axis × sin
+    let v = Vec3::from_array(u)
+        .cross(Vec3::new(0.0, 0.0, 1.0))
+        .to_array(); // rotation axis × sin
     let vx = [[0.0, -v[2], v[1]], [v[2], 0.0, -v[0]], [-v[1], v[0], 0.0]];
     let k = 1.0 / (1.0 + c);
     let vx2 = matmul(vx, vx);
@@ -464,7 +467,7 @@ mod tests {
             [0.0, 0.0, -1.0],
             [1.0, 1.0, 1.0],
         ] {
-            let z = matvec(rot_up_to_z(up), geom::normalize(up));
+            let z = matvec(rot_up_to_z(up), Vec3::from_array(up).normalize().to_array());
             assert!(
                 (z[0]).abs() < 1e-9 && (z[1]).abs() < 1e-9 && (z[2] - 1.0).abs() < 1e-9,
                 "up {up:?} → {z:?}"

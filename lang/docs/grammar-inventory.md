@@ -34,7 +34,7 @@ tracks the first, and names the phase that owns the second.
 
 | Production | `parser.y` | AST node / parser fn | Status | Anchor |
 |------------|-----------|----------------------|--------|--------|
-| `input : /*empty*/` | 174 | `Program{stmts:[]}` | ✅ | H.5.3 |
+| `input : /*empty*/` | 174 | `Program{stmts:[]}` | ✅ | `conformance::empty_program_is_no_statements` |
 | `input : input TOK_USE` | 176 | `StmtKind::Use` | ✅ H.2.5 | `use_and_include_parse_to_nodes_with_the_raw_path` |
 | `input : input statement` | 182 | `program()` loop | ✅ | `assignment_and_empty` |
 | `statement : ';'` | 186 | `StmtKind::Empty` | ✅ | `assignment_and_empty` |
@@ -43,7 +43,7 @@ tracks the first, and names the phase that owns the second.
 | `statement : assignment` | 192 | `StmtKind::Assignment` | ✅ | `assignment_and_empty` |
 | `statement : TOK_MODULE TOK_ID '(' parameters ')' statement` | 193 | `StmtKind::ModuleDef` | ✅ H.2.2 | `module_and_function_defs_parse` |
 | `statement : TOK_FUNCTION TOK_ID '(' parameters ')' '=' expr ';'` | 207 | `StmtKind::FunctionDef` | ✅ H.2.3 | `module_and_function_defs_parse` |
-| `statement : TOK_EOT` | 215 | `StmtKind::Empty` (ETX sentinel) | ✅ | H.5.3 |
+| `statement : TOK_EOT` | 215 | `StmtKind::Empty` (ETX sentinel) | ✅ | `conformance::eot_marker_is_an_empty_statement` |
 | `inner_input` | 221 | `block()` contents | ✅ | `top_level_block` |
 | `assignment : TOK_ID '=' expr ';'` | 226 | `StmtKind::Assignment` | ✅ | `assignment_and_empty` |
 
@@ -157,7 +157,7 @@ kept for the customizer). Phase H's lexer work is H.1.2: audit-and-pin, not buil
 | undefined escape → warn + literal | 190 | `decode_str` passthrough (warn is I.5) | ✅ | `decode_and_num_edge_paths` |
 | line `//` / block `/* */` comments | 205-219 | `LineComment` / `BlockComment` (KEPT) | ✅ ⚠️ | `comments_kept_in_all_filtered_from_code` |
 | block comment non-nesting | 213 | first `*/` closes | ✅ | `block_comments_do_not_nest` |
-| `\x03` → `TOK_EOT` | 239 | `TokenKind::Eot` | ✅ | H.5.3 |
+| `\x03` → `TOK_EOT` | 239 | `TokenKind::Eot` | ✅ | `conformance::eot_marker_is_an_empty_statement` |
 | keywords (module…undef) | 241-253 | whole-lexeme keyword match | ✅ | `every_keyword_lexes` / `keyword_only_as_whole_lexeme` |
 | nbsp `\xc2\xa0` / BOM `\xef\xbb\xbf` skip | 260-271 | `skip_trivia_ws` (U+00A0, U+FEFF) | ✅ | `bom_and_nbsp_are_skipped` |
 | other non-ASCII UTF-8 → `TOK_ERROR` | 277 | rejected at the `&str`/token boundary | ✅ ⚠️ | `non_ascii_identifier_is_a_hard_error` |
@@ -199,10 +199,11 @@ Not gaps — choices, each with a reason. These are the ⚠️ rows above.
   to the file's `input` level) — harmless while resolution is deferred, and the I.2 loader owns
   placement validation.
 
-## How H.5.3 consumes this
+## How H.5.3 consumes this — DONE
 
-The conformance suite is derived mechanically: each row with a concrete production contributes at
-least one source snippet that must parse to the named AST node. A row whose anchor is `H.5.3` (or
-`—` for a not-yet-built 🔨 row) is a HOLE the suite must fill before that box can tick. When every
-row has a real anchor and the suite is green, "every production accounted for" (H.1) is proven, not
-asserted.
+The conformance suite (`tests/conformance.rs`, H.5.3) is the executable form of this table: one
+minimal source snippet per production, asserted to parse. Every production row now has a real anchor
+and the suite is green, so "every production accounted for" (H.1) is PROVEN, not asserted. Behavioral
+depth (precedence, exact AST shape, drop-safety) lives in `parser_corpus.rs`; the print/parse
+roundtrip (`print_roundtrip.rs`, H.5.2) proves the AST survives a print→parse cycle. There are no
+remaining `H.5.3`/`—` holes for a landed (✅) production.

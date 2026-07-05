@@ -35,7 +35,7 @@ Driven by `claude-plan-bridge` (FORMATv2). Hand-authored; run
 - [ ] H.5 - proptest print/parse roundtrip + the bison-derived conformance suite green
   - [x] H.5.1 - Pretty-printer: AST → canonical OpenSCAD source (Display over the whole AST) — the missing prerequisite for the roundtrip property
   - [x] H.5.2 - proptest strategy over the AST + print→parse→assert-equal property (structural eq modulo spans)
-  - [ ] H.5.3 - Bison-derived conformance suite: one+ example per production from grammar-inventory.md, all green — fills the doc's H.5.3 anchor holes
+  - [x] H.5.3 - Bison-derived conformance suite: one+ example per production from grammar-inventory.md, all green — fills the doc's H.5.3 anchor holes
   - [ ] H.5.4 - cargo-mutants gate on the parser (backlog #37) — prove the tests CATCH bugs, kill survivors
 - [ ] H.6 - cargo-fuzz target + SCHEDULED CI fuzz job + persisted/minimized corpus + trophy log (fuzz-from-first-commit doctrine starts here, not later)
 

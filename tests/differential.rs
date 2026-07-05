@@ -11,13 +11,23 @@
 
 use std::path::PathBuf;
 
-use fab_scad::differ::{diff, diff_files, drivers};
+use fab_scad::differ::{diff, diff_echo, diff_files, drivers};
 use fab_scad::openscad::find_bin;
 
-/// Assert a snippet agrees across every registered driver (panics with the divergence on mismatch).
+/// Assert a snippet's GEOMETRY agrees across every registered driver (panics on mismatch).
 fn agree(scad: &str) {
     if let Err(why) = diff(scad) {
         panic!("differential divergence: {why}");
+    }
+}
+
+/// Assert a snippet's ECHO output agrees across every driver — the I.5 string-equal gate. A `cube` is
+/// appended so the ORACLE's render (which captures echo alongside a mesh EXPORT) succeeds; a
+/// geometry-less program has nothing to export. The echo lines are identical either way.
+fn agree_echo(scad: &str) {
+    let with_geometry = format!("{scad}\ncube(1);");
+    if let Err(why) = diff_echo(&with_geometry) {
+        panic!("echo differential divergence: {why}");
     }
 }
 
@@ -123,6 +133,19 @@ fn use_include_loader_matches_the_oracle() {
         "root.scad",
         &["libs"],
     );
+}
+
+#[test]
+fn echo_output_matches_the_oracle() {
+    // I.5: the number formatter + quoting + named-arg rendering, validated against the real binary's
+    // ECHO: console line-for-line (not just against my probes).
+    agree_echo("echo(9); echo(9.5); echo(-42);"); // integers + short decimals
+    agree_echo("echo(1 / 3, 2 / 3, 10 / 3);"); // 6-sig-fig rounding
+    agree_echo("echo(1e6, 1e7, 1e21, 1e-6, 1e-5, 1e-4);"); // scientific crossover, both ends
+    agree_echo("echo(\"hi\", a = 5, [1, 2, 3]);"); // quoting + named args + a list
+    agree_echo("echo(true, false, undef);");
+    agree_echo("echo(1 / 0, -1 / 0, 0 / 0);"); // inf / -inf / nan
+    agree_echo("echo([1.5, \"a\", true, undef]);"); // heterogeneous list
 }
 
 // ─────────────────────── enforcement (the discipline, AS tests) ──────────────────────────────────

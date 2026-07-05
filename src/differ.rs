@@ -156,6 +156,8 @@ pub trait Driver {
     /// Evaluate a `.scad` FILE (resolving its `use`/`include` graph against `library_paths` after the
     /// file's own dir) to a comparable [`Outcome`] — the `use`/`include` differential's entry point.
     fn eval_file(&self, root: &Path, library_paths: &[PathBuf]) -> Outcome;
+    /// The `ECHO:` console lines `scad` produces, trimmed, in order — the I.5 string-equal channel.
+    fn echo(&self, scad: &str) -> Vec<String>;
 }
 
 /// scad-rs's own pure-Rust evaluator — the baseline.
@@ -170,6 +172,16 @@ impl Driver for FabLang {
     }
     fn eval_file(&self, root: &Path, library_paths: &[PathBuf]) -> Outcome {
         fab_outcome(fab_lang::evaluate_file(root, library_paths))
+    }
+    fn echo(&self, scad: &str) -> Vec<String> {
+        fab_lang::evaluate_full(scad)
+            .map(|e| {
+                e.echos()
+                    .into_iter()
+                    .map(|c| format!("ECHO: {c}"))
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 }
 
@@ -203,6 +215,11 @@ impl Driver for OpenScad {
     }
     fn eval_file(&self, root: &Path, library_paths: &[PathBuf]) -> Outcome {
         oracle_file_outcome(root, library_paths)
+    }
+    fn echo(&self, scad: &str) -> Vec<String> {
+        oracle::run(scad, Duration::from_secs(30))
+            .map(|run| run.echo.iter().map(|l| l.trim().to_string()).collect())
+            .unwrap_or_default()
     }
 }
 
@@ -246,6 +263,28 @@ pub fn diff(scad: &str) -> std::result::Result<(), String> {
     for d in &drivers[1..] {
         outcomes_agree(&base, &d.eval(scad))
             .map_err(|why| format!("{scad:?}: {} vs {}: {why}", drivers[0].name(), d.name()))?;
+    }
+    Ok(())
+}
+
+/// Run `scad` through every registered driver and check the ECHO output agrees line-for-line — the
+/// I.5 string-equal-vs-oracle gate: number formatting (6 sig figs, scientific crossover), string
+/// quoting/escaping, and named-arg rendering all match the real binary's console, not just my probes.
+///
+/// # Errors
+/// The first driver whose echo lines differ from the baseline (fab-lang).
+pub fn diff_echo(scad: &str) -> std::result::Result<(), String> {
+    let drivers = drivers();
+    let base = drivers[0].echo(scad);
+    for d in &drivers[1..] {
+        let other = d.echo(scad);
+        if base != other {
+            return Err(format!(
+                "{scad:?}: {} echo {base:?} vs {} echo {other:?}",
+                drivers[0].name(),
+                d.name()
+            ));
+        }
     }
     Ok(())
 }

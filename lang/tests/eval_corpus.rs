@@ -222,11 +222,57 @@ fn deferred_constructs_are_loud() {
     assert!(matches!(ev_err("a.b"), Error::Unimplemented(m) if m.contains("I.1"))); // member access
     // (function literals + calling a function VALUE now evaluate — I.2.3.3; let → I.3.1; see below.)
     // the remaining H.3 expression forms parse but defer: assert / echo → I.5.
+    // (list comprehensions now evaluate — I.3.2; see list_comprehensions below.)
     assert!(matches!(ev_err("assert(true)1"), Error::Unimplemented(m) if m.contains("I.5")));
     assert!(matches!(ev_err("echo(1)2"), Error::Unimplemented(m) if m.contains("I.5")));
-    // list comprehensions defer to I.3 (control flow).
-    assert!(matches!(ev_err("[for(i=[0:3])i]"), Error::Unimplemented(m) if m.contains("I.3")));
-    assert!(matches!(ev_err("[each [1]]"), Error::Unimplemented(m) if m.contains("I.3")));
+}
+
+#[test]
+fn list_comprehensions() {
+    assert_eq!(ev("[for(i = [0:3]) i]"), list(&[0.0, 1.0, 2.0, 3.0])); // for over a range
+    assert_eq!(ev("[for(i = [10, 20, 30]) i]"), list(&[10.0, 20.0, 30.0])); // for over a list
+    assert_eq!(ev("[for(i = [1:3]) i * i]"), list(&[1.0, 4.0, 9.0])); // body is an expression
+    assert_eq!(ev("[1, for(i = [2:3]) i, 4]"), list(&[1.0, 2.0, 3.0, 4.0])); // spliced among plain elems
+    assert_eq!(ev("[each [1, 2, 3]]"), list(&[1.0, 2.0, 3.0])); // each splices
+    assert_eq!(ev("[each 5]"), list(&[5.0])); // each on a scalar → one element
+    assert_eq!(ev("[for(i = [1:4]) if (i % 2 == 0) i]"), list(&[2.0, 4.0])); // if filters
+    assert_eq!(ev("[if (true) 1 else 2]"), list(&[1.0])); // top-level if/else element
+    assert_eq!(ev("[if (false) 1]"), list(&[])); // if with no else, false → nothing
+    assert_eq!(
+        ev("[for(i = [1:2]) for(j = [1:2]) i * 10 + j]"),
+        list(&[11.0, 12.0, 21.0, 22.0])
+    ); // nested
+    assert_eq!(
+        ev("[for(i = [1:2], j = [1:2]) i * 10 + j]"),
+        list(&[11.0, 12.0, 21.0, 22.0])
+    ); // multi-binding
+    assert_eq!(
+        ev("[for(i = [1:2]) [i, i]]"),
+        Value::list(vec![list(&[1.0, 1.0]), list(&[2.0, 2.0])])
+    ); // list body → nested
+    assert_eq!(ev("[let(a = 5) for(i = [1:2]) i + a]"), list(&[6.0, 7.0])); // comprehension let
+    assert_eq!(
+        ev("[for(i = 0; i < 3; i = i + 1) i]"),
+        list(&[0.0, 1.0, 2.0])
+    ); // C-style for
+    assert_eq!(ev("[let(a = 5) a]"), list(&[5.0])); // a let with a plain (scalar) body → one element
+    assert_eq!(
+        ev("[for(i = [[1], [2]]) i]"),
+        Value::list(vec![list(&[1.0]), list(&[2.0])])
+    ); // iterate a heterogeneous List
+    assert_eq!(
+        ev(r#"[each "ab"]"#),
+        Value::list(vec![Value::string("a"), Value::string("b")])
+    ); // each a string → its chars
+    assert_eq!(ev("[if (false) 1 else 2]"), list(&[2.0])); // if/else, the ELSE taken
+    assert_eq!(
+        ev("[for(i = [1:2]) let(a = i) a * 10]"),
+        list(&[10.0, 20.0])
+    ); // a let NESTED in a for body
+    assert_eq!(
+        ev("[for(i = 0; i < 2; i = i + 1, k = i) i]"),
+        list(&[0.0, 1.0])
+    ); // C-style update adds a new var
 }
 
 #[test]

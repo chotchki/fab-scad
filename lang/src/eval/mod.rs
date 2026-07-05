@@ -50,8 +50,9 @@ enum Task<'a> {
     Binary(BinOp),
     /// Pop one value, apply the unary op, push the result.
     Unary(UnOp),
-    /// Pop `n` values and build a vector from them.
-    Vector(usize),
+    /// Pop one value per element and build a vector — a COMPREHENSION element's value is SPLICED (its
+    /// list's elements appended), a plain element is appended as one.
+    VectorSplice(&'a [Expr]),
     /// Pop the index then the base, apply `base[index]`.
     Index,
     /// Pop end, (step if `stepped`), start; build a range value.
@@ -97,15 +98,28 @@ pub fn eval_expr(root: &Expr, scope: &Scope) -> crate::Result<Value> {
     eval_with_ctx(root, scope, &Ctx::default())
 }
 
-/// Evaluate an expression with a function-store [`Ctx`] in scope (so calls resolve). `scope` doubles
-/// as the LEXICAL base for function bodies: a call's body evaluates in `global.child()` + its params,
-/// NOT the caller's locals (OpenSCAD functions are lexically scoped; `$`-var dynamic override is I.2.2).
+/// Evaluate an expression with a function-store [`Ctx`] in scope (so calls resolve). At the top level
+/// the lexical `global` (the base for function bodies) IS the eval scope.
 pub(super) fn eval_with_ctx<'a>(
     root: &'a Expr,
     scope: &Scope,
     ctx: &Ctx<'a>,
 ) -> crate::Result<Value> {
-    let global = scope.clone();
+    eval_with_global(root, scope, scope, ctx)
+}
+
+/// Evaluate `root` in `scope`, with `global` as the LEXICAL base for any function body called during
+/// it (a call's body evaluates in `global.child()` + its params, NOT the caller's locals — OpenSCAD
+/// functions are lexically scoped; `$`-var dynamic override is I.2.2). `global` is threaded (not
+/// re-derived from `scope`) so a nested eval — a comprehension body carrying loop variables — still
+/// resolves function bodies against the TOP-LEVEL globals, not the loop scope.
+fn eval_with_global<'a>(
+    root: &'a Expr,
+    scope: &Scope,
+    global: &Scope,
+    ctx: &Ctx<'a>,
+) -> crate::Result<Value> {
+    let global = global.clone();
     let mut tasks: Vec<Task<'a>> = vec![Task::Eval(root, scope.clone())];
     let mut values: Vec<Value> = Vec::new();
     while let Some(task) = tasks.pop() {
@@ -121,9 +135,17 @@ pub(super) fn eval_with_ctx<'a>(
                 let v = values.pop().unwrap_or(Value::Undef);
                 values.push(ops::apply_unary(op, v));
             }
-            Task::Vector(n) => {
-                let items = values.split_off(values.len().saturating_sub(n));
-                values.push(build_vector(items));
+            Task::VectorSplice(elems) => {
+                let vals = values.split_off(values.len().saturating_sub(elems.len()));
+                let mut out = Vec::new();
+                for (elem, val) in elems.iter().zip(vals) {
+                    if is_comprehension(elem) {
+                        splice_into(val, &mut out);
+                    } else {
+                        out.push(val);
+                    }
+                }
+                values.push(build_vector(out));
             }
             Task::Index => {
                 // index was pushed after base, so it's on top.
@@ -237,7 +259,7 @@ fn eval_node<'a>(
             tasks.push(Task::Eval(cond, scope.clone()));
         }
         ExprKind::Vector(elems) => {
-            tasks.push(Task::Vector(elems.len()));
+            tasks.push(Task::VectorSplice(elems));
             for el in elems.iter().rev() {
                 tasks.push(Task::Eval(el, scope.clone())); // reversed pushes → forward eval order
             }
@@ -298,9 +320,10 @@ fn eval_node<'a>(
         | ExprKind::LcForC { .. }
         | ExprKind::LcEach(_)
         | ExprKind::LcIf { .. } => {
-            return Err(crate::Error::Unimplemented(
-                "list comprehensions are not yet implemented (I.3)",
-            ));
+            // a comprehension element evaluates to its CONTRIBUTION list (spliced by the enclosing
+            // VectorSplice). Only reached as a vector element (parser invariant).
+            let contribution = eval_comprehension(e, scope, global, ctx)?;
+            values.push(build_vector(contribution));
         }
     }
     Ok(())
@@ -399,6 +422,176 @@ fn push_call<'a>(
             None => tasks.push(Task::PushUndef),
         }
     }
+}
+
+/// Is this expression a list-comprehension element (spliced into the enclosing vector) rather than a
+/// plain element (appended as one)? `let` in a vector is a comprehension-`let`.
+fn is_comprehension(e: &Expr) -> bool {
+    matches!(
+        e.kind,
+        ExprKind::LcFor { .. }
+            | ExprKind::LcForC { .. }
+            | ExprKind::LcEach(_)
+            | ExprKind::LcIf { .. }
+            | ExprKind::Let { .. }
+    )
+}
+
+/// Splice a comprehension element's value into the vector accumulator: a list contributes its
+/// elements; a scalar (e.g. `each 5`) contributes itself.
+fn splice_into(val: Value, out: &mut Vec<Value>) {
+    match val {
+        Value::NumList(xs) => out.extend(xs.iter().map(|&x| Value::Num(x))),
+        Value::List(xs) => out.extend(xs.iter().cloned()),
+        other => out.push(other),
+    }
+}
+
+/// The values a `for`/`each` iterable yields: a list's elements, a range's values (capped by
+/// `range_iter`), a string's characters, or a scalar as a single value.
+fn iter_values(v: &Value) -> Vec<Value> {
+    match v {
+        Value::NumList(xs) => xs.iter().map(|&x| Value::Num(x)).collect(),
+        Value::List(xs) => xs.to_vec(),
+        Value::Range { start, step, end } => {
+            range_iter(*start, *step, *end).map(Value::Num).collect()
+        }
+        Value::Str(s) => s.chars().map(|c| Value::string(c.to_string())).collect(),
+        other => vec![other.clone()],
+    }
+}
+
+/// Evaluate a comprehension element to its CONTRIBUTION — the values it splices into the enclosing
+/// vector. A plain expr contributes `[value]`; `for`/`each`/`if`/`let` flatmap/splice/filter/scope.
+///
+/// Comprehension NESTING is parse-bounded (`MAX_DEPTH`), so this bounded host recursion can't overflow;
+/// iteration is capped (`RANGE_MAX`, list length). Each sub-expression re-enters the explicit-stack
+/// evaluator carrying the TOP-LEVEL `global` (so a function called in a body resolves against globals,
+/// not the loop scope) — a fresh stack per step; folding it onto one explicit stack is a deferred perf
+/// optimization, and the element-cap WARNING text is I.5.
+fn eval_comprehension<'a>(
+    elem: &'a Expr,
+    scope: &Scope,
+    global: &Scope,
+    ctx: &Ctx<'a>,
+) -> crate::Result<Vec<Value>> {
+    match &elem.kind {
+        ExprKind::LcFor { bindings, body } => lc_for(bindings, body, scope, global, ctx),
+        ExprKind::LcForC {
+            init,
+            cond,
+            update,
+            body,
+        } => lc_for_c(init, cond, update, body, scope, global, ctx),
+        ExprKind::LcEach(e) => Ok(iter_values(&eval_with_global(e, scope, global, ctx)?)),
+        ExprKind::LcIf { cond, then, els } => {
+            if eval_with_global(cond, scope, global, ctx)?.is_truthy() {
+                eval_comprehension(then, scope, global, ctx)
+            } else {
+                match els {
+                    Some(e) => eval_comprehension(e, scope, global, ctx),
+                    None => Ok(Vec::new()),
+                }
+            }
+        }
+        ExprKind::Let { bindings, body } => {
+            let inner = comprehension_let_scope(bindings, scope, global, ctx)?;
+            eval_comprehension(body, &inner, global, ctx)
+        }
+        _ => Ok(vec![eval_with_global(elem, scope, global, ctx)?]), // a plain element → [value]
+    }
+}
+
+/// `for (name = iterable, …) body` — iterate each binding (multiple bindings NEST), evaluate `body`'s
+/// contribution per step, concatenate.
+fn lc_for<'a>(
+    bindings: &'a [Arg],
+    body: &'a Expr,
+    scope: &Scope,
+    global: &Scope,
+    ctx: &Ctx<'a>,
+) -> crate::Result<Vec<Value>> {
+    match bindings.split_first() {
+        None => eval_comprehension(body, scope, global, ctx),
+        Some((binding, rest)) => {
+            let var = binding.name.as_deref().unwrap_or("_");
+            let iterable = eval_with_global(&binding.value, scope, global, ctx)?;
+            let mut out = Vec::new();
+            for value in iter_values(&iterable) {
+                let mut inner = scope.child();
+                inner.bind(var, value);
+                out.extend(lc_for(rest, body, &inner, global, ctx)?);
+            }
+            Ok(out)
+        }
+    }
+}
+
+/// C-style `for (init; cond; update) body`: the loop variables live in a flat map (each iteration a
+/// fresh `scope.child()`, so no chain accumulation), `cond`/`update` see the current values, and
+/// `update` MERGES into them (unmentioned vars persist). Capped at `RANGE_MAX` iterations.
+fn lc_for_c<'a>(
+    init: &'a [Arg],
+    cond: &'a Expr,
+    update: &'a [Arg],
+    body: &'a Expr,
+    scope: &Scope,
+    global: &Scope,
+    ctx: &Ctx<'a>,
+) -> crate::Result<Vec<Value>> {
+    let mut vars: Vec<(String, Value)> = Vec::new();
+    for arg in init {
+        let name = arg.name.as_deref().unwrap_or("_").to_string();
+        let value = eval_with_global(&arg.value, scope, global, ctx)?;
+        vars.push((name, value));
+    }
+    let mut out = Vec::new();
+    let mut iterations = 0u64;
+    loop {
+        let mut loop_scope = scope.child();
+        for (name, value) in &vars {
+            loop_scope.bind(name.clone(), value.clone());
+        }
+        if !eval_with_global(cond, &loop_scope, global, ctx)?.is_truthy() {
+            break;
+        }
+        out.extend(eval_comprehension(body, &loop_scope, global, ctx)?);
+        for arg in update {
+            let name = arg.name.as_deref().unwrap_or("_");
+            let value = eval_with_global(&arg.value, &loop_scope, global, ctx)?;
+            match vars.iter_mut().find(|(n, _)| n == name) {
+                Some(entry) => entry.1 = value,
+                None => vars.push((name.to_string(), value)),
+            }
+        }
+        iterations += 1;
+        if iterations >= RANGE_MAX {
+            // The runaway-`for(i=0; 1; …)` guard. Reaching it needs RANGE_MAX (1e7) real iterations, so
+            // it's the single line the corpus can't cover — a defensive limit, equivalent-mutant class.
+            // (Eval isn't under the parser/lexer mandatory-100% rule; the warning TEXT is I.5.)
+            break;
+        }
+    }
+    Ok(out)
+}
+
+/// Bind a comprehension `let`'s bindings SEQUENTIALLY (a later one sees the earlier), returning the
+/// extended scope in which the `let` body's contribution is then evaluated.
+fn comprehension_let_scope<'a>(
+    bindings: &'a [Arg],
+    scope: &Scope,
+    global: &Scope,
+    ctx: &Ctx<'a>,
+) -> crate::Result<Scope> {
+    let mut s = scope.clone();
+    for binding in bindings {
+        let name = binding.name.as_deref().unwrap_or("_");
+        let value = eval_with_global(&binding.value, &s, global, ctx)?;
+        let mut next = s.child();
+        next.bind(name, value);
+        s = next;
+    }
+    Ok(s)
 }
 
 /// Build a vector value: the all-numeric `NumList` fast path when every element is a number, else the

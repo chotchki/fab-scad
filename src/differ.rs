@@ -68,11 +68,7 @@ pub fn compare(source: &str, timeout: Duration) -> Result<Comparison> {
     let area_rel_err = rel_err(scad_solid.surface_area(), oracle_solid.surface_area());
 
     // Tier 3: boolean residual — the symmetric difference's volume, normalized.
-    let sym_diff = scad_solid
-        .difference(&oracle_solid)
-        .union(&oracle_solid.difference(&scad_solid));
-    let ref_vol = scad_solid.volume().abs().max(f64::MIN_POSITIVE);
-    let boolean_residual = sym_diff.volume() / ref_vol;
+    let boolean_residual = sym_diff_ratio(&scad_solid, &oracle_solid);
 
     Ok(Comparison {
         scad_verts: mesh.vert_count(),
@@ -119,6 +115,140 @@ fn quantize(v: [f64; 3], eps: f64) -> [i64; 3] {
         (v[1] / eps).round() as i64,
         (v[2] / eps).round() as i64,
     ]
+}
+
+// ───────────────── the two-driver differential (recon-gen / quicksight pattern) ──────────────────
+//
+// A `Driver` turns .scad SOURCE into a comparable `Outcome`, sealing the backend away so a test body
+// stays engine-agnostic: `diff(scad)` runs it through EVERY registered driver and reports the first
+// disagreement. Adding a driver (Phase-L's JIT — fast==JIT is the same discipline) makes every
+// differential case check it too, for free. The rule "no test reaches a backend except through a
+// Driver" is enforced in `tests/differential.rs` (a no-leak source lint + a both-drivers gate).
+
+/// The comparable result of running a program through ONE engine.
+pub enum Outcome {
+    /// A realized manifold solid — compared by boolean residual (tessellation-independent).
+    Solid(Solid),
+    /// A valid program with NO geometry (both engines should agree it renders nothing).
+    Empty,
+    /// The engine rejected the program, or its mesh wasn't a manifold solid — an agreement axis of
+    /// its own (do BOTH engines reject?).
+    Rejected,
+}
+
+impl Outcome {
+    fn kind(&self) -> &'static str {
+        match self {
+            Outcome::Solid(_) => "solid",
+            Outcome::Empty => "empty",
+            Outcome::Rejected => "rejected",
+        }
+    }
+}
+
+/// A differential driver — the test vocabulary. `name` discriminates it (quicksight's `dialect`).
+pub trait Driver {
+    /// The driver's short name, for divergence messages + the enforcement gate.
+    fn name(&self) -> &'static str;
+    /// Evaluate `.scad` source to a comparable [`Outcome`].
+    fn eval(&self, scad: &str) -> Outcome;
+}
+
+/// scad-rs's own pure-Rust evaluator — the baseline.
+pub struct FabLang;
+
+impl Driver for FabLang {
+    fn name(&self) -> &'static str {
+        "fab-lang"
+    }
+    fn eval(&self, scad: &str) -> Outcome {
+        match fab_lang::evaluate(scad) {
+            Ok(m) if m.verts.is_empty() => Outcome::Empty,
+            Ok(m) => {
+                Solid::from_indexed(&m.verts, &m.tris).map_or(Outcome::Rejected, Outcome::Solid)
+            }
+            Err(_) => Outcome::Rejected,
+        }
+    }
+}
+
+/// The real OpenSCAD binary — the oracle.
+pub struct OpenScad;
+
+impl Driver for OpenScad {
+    fn name(&self) -> &'static str {
+        "openscad"
+    }
+    fn eval(&self, scad: &str) -> Outcome {
+        match oracle::run(scad, Duration::from_secs(30)) {
+            Ok(run) if run.mesh.verts.is_empty() => Outcome::Empty,
+            Ok(run) => {
+                let tris = run.mesh.tris();
+                Solid::from_indexed(&run.mesh.verts, &tris)
+                    .map_or(Outcome::Rejected, Outcome::Solid)
+            }
+            Err(_) => Outcome::Rejected,
+        }
+    }
+}
+
+/// Every registered driver, fab-lang FIRST (the baseline). OpenSCAD is OPTIONAL — omitted when the
+/// binary isn't installed, so a machine without it runs the fab-lang leg only (the "optional not
+/// required" gate). Phase-L's JIT slots in here and every case starts checking it automatically.
+#[must_use]
+pub fn drivers() -> Vec<Box<dyn Driver>> {
+    let mut v: Vec<Box<dyn Driver>> = vec![Box::new(FabLang)];
+    if crate::openscad::find_bin().is_some() {
+        v.push(Box::new(OpenScad));
+    }
+    v
+}
+
+/// Run `scad` through every registered driver and check they AGREE (fab-lang is the baseline). `Ok`
+/// when all agree — or when only fab-lang is present (no oracle → nothing to differ, a clean skip).
+/// PURE: it renders + compares, it never panics (the test wrapper turns an `Err` into a failure).
+///
+/// # Errors
+/// The first `(baseline vs driver)` disagreement, as a human-readable reason.
+pub fn diff(scad: &str) -> std::result::Result<(), String> {
+    let drivers = drivers();
+    let base = drivers[0].eval(scad);
+    for d in &drivers[1..] {
+        outcomes_agree(&base, &d.eval(scad))
+            .map_err(|why| format!("{scad:?}: {} vs {}: {why}", drivers[0].name(), d.name()))?;
+    }
+    Ok(())
+}
+
+/// Two outcomes agree iff both empty, both rejected, or two solids with equal genus + a negligible
+/// symmetric difference — the strongest, tessellation-independent tier (same gate as [`compare`]).
+fn outcomes_agree(a: &Outcome, b: &Outcome) -> std::result::Result<(), String> {
+    match (a, b) {
+        (Outcome::Empty, Outcome::Empty) | (Outcome::Rejected, Outcome::Rejected) => Ok(()),
+        (Outcome::Solid(x), Outcome::Solid(y)) => {
+            if x.genus() != y.genus() {
+                return Err(format!("genus {} vs {}", x.genus(), y.genus()));
+            }
+            let resid = sym_diff_ratio(x, y);
+            if resid < 1e-3 {
+                Ok(())
+            } else {
+                Err(format!("boolean residual {resid:.2e} exceeds 1e-3"))
+            }
+        }
+        (a, b) => Err(format!(
+            "shape-class mismatch: {} vs {}",
+            a.kind(),
+            b.kind()
+        )),
+    }
+}
+
+/// `vol((A−B) ∪ (B−A)) / vol(A)` — the symmetric-difference ratio (0 = identical solids).
+fn sym_diff_ratio(a: &Solid, b: &Solid) -> f64 {
+    let sym = a.difference(b).union(&b.difference(a));
+    let ref_vol = a.volume().abs().max(f64::MIN_POSITIVE);
+    sym.volume() / ref_vol
 }
 
 #[cfg(test)]

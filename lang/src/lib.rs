@@ -40,6 +40,7 @@
 mod customizer;
 mod error;
 mod eval;
+mod geom;
 mod lexer;
 mod mesh;
 mod parser;
@@ -50,6 +51,7 @@ pub use eval::{
     Evaluation, GeoNode, Message, RANGE_MAX, RangeIter, Scope, Value, eval_expr, eval_program,
     fragments, range_iter, range_len,
 };
+pub use geom::{Affine, Tri, Vec3};
 pub use lexer::{Lexed, Token, TokenKind, decode_str, lex, num_value};
 pub use mesh::Mesh;
 pub use parser::{

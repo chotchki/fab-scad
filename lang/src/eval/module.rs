@@ -20,6 +20,9 @@ pub(super) fn eval_module<'a>(
     scope: &Scope,
     ctx: &Ctx<'a>,
 ) -> crate::Result<Mesh> {
+    // A benchmark span per primitive (I.6): its busy-time is the tessellation cost. TRACE level, so a
+    // subscriber-less build pays one atomic load and `release_max_level_off` strips it entirely.
+    let _span = tracing::trace_span!("module", module = mi.name.as_str()).entered();
     let mut child = scope.clone();
     let mut positional = Vec::new();
     let mut named = BTreeMap::new();

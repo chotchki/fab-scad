@@ -336,6 +336,9 @@ fn eval_node<'a>(
 
 /// Pop a builtin call's argument values, split them into positional/named, and push the builtin result.
 fn run_builtin(name: &str, args: &[Arg], values: &mut Vec<Value>) {
+    // A benchmark span per builtin application (I.6); `builtin` field lets a layer break cost down by
+    // name. All the tracing spans sit at TRACE level — the "compile-out-like-a-logger" doctrine.
+    let _span = tracing::trace_span!("builtin", builtin = name).entered();
     let vals = values.split_off(values.len().saturating_sub(args.len()));
     let mut positional = Vec::new();
     let mut named = BTreeMap::new();
@@ -364,6 +367,10 @@ fn dispatch_call<'a>(
     if let ExprKind::Ident(name) = &callee.kind {
         // resolution order (OpenSCAD): a user function may shadow a builtin.
         if let Some(&(params, body)) = ctx.functions.get(name.as_str()) {
+            // A call-path EVENT, not a span: the call's body evaluates across later loop iterations on
+            // the explicit stack (no host recursion), so its subtree isn't scope-bounded here — the
+            // event marks WHICH function was entered, the enclosing `eval_program` span times the whole.
+            tracing::trace!(function = name.as_str(), "call");
             push_call(params, body, args, scope, global, tasks);
             return Ok(());
         }
@@ -660,6 +667,10 @@ fn build_range(start: &Value, step: &Value, end: &Value) -> Value {
 /// Deferred constructs fail LOUD: unknown modules / transforms / booleans (module eval), and
 /// multiple top-level objects (implicit union — J.2).
 pub fn eval_program(program: &Program, scope: &Scope) -> crate::Result<Mesh> {
+    // The top-of-tree benchmark span (I.6): its busy-time is the whole evaluation. Everything below
+    // nests under it, so a subscriber can attribute cost to `builtin`/`module` children. TRACE level →
+    // free with no subscriber, compiled out in release under `release_max_level_off`.
+    let _span = tracing::trace_span!("eval_program").entered();
     let ctx = build_ctx(program);
     let mut scope = scope.clone();
     let mut meshes = Vec::new();

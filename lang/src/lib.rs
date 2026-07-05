@@ -27,8 +27,11 @@
 //! release. The parser leans on winnow's OWN tooling first — every named production wraps in
 //! winnow's `trace()` (gated behind the `trace` feature → `winnow/debug`); we only reach for the
 //! [`tracing`] crate on the parse side if winnow's isn't enough. The evaluator is the tracing
-//! crate's home turf: spans on the call path that double as the per-call benchmark corpus. In
-//! release those spans compile out when the linking binary sets `tracing`'s `release_max_level_off`
+//! crate's home turf: TRACE-level spans on the eval path (`eval_program`, per-`builtin`, per-`module`)
+//! that double as the benchmark corpus — a `Layer` aggregates their busy-time by name (see
+//! `tests/tracing_bench.rs`). The explicit-stack machine means a user function's subtree isn't
+//! scope-bounded, so a `call` event marks the path while the enclosing `eval_program` span times it.
+//! In release those spans compile out when the linking binary sets `tracing`'s `release_max_level_off`
 //! — compile-out-like-a-logger, the doctrine both sides share.
 //!
 //! License: GPL-2.0-or-later — OpenSCAD's exact license, on purpose (frictionless upstreaming; v3

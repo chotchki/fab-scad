@@ -2633,6 +2633,7 @@ dependencies = [
  "proptest",
  "thiserror 2.0.18",
  "tracing",
+ "tracing-subscriber",
  "winnow 1.0.3",
 ]
 

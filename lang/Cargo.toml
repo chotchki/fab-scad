@@ -34,6 +34,10 @@ tracing = "0.1"
 # failures persisted to .proptest-regressions), so it respects the determinism doctrine. Dev-only,
 # so it never touches the shipped lib or its wasm profile.
 proptest = "1"
+# The subscriber SIDE of the evaluator's tracing spans (I.6): the aggregating benchmark layer + the
+# overhead measurement live in tests/, so the shipped lib stays subscriber-agnostic (a binary picks
+# its own) and wasm never sees tracing-subscriber. `registry` gives the span store the layer times.
+tracing-subscriber = { version = "0.3", default-features = false, features = ["registry", "std"] }
 
 [lints.rust]
 # The ratchet (SPEC: the lint set only ever tightens). Public surface must be documented.

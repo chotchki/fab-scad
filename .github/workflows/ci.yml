@@ -33,6 +33,10 @@ jobs:
         with:
           tool: cargo-llvm-cov
       - run: cargo llvm-cov -p fab-lang --fail-under-lines 100 --fail-under-functions 100
+      # fab-jit (I.8): the Cranelift JIT spike. Native-only + not a workspace default member, so its
+      # own -p steps. The test suite IS the fast==JIT bit-identity gate (+ the speedup benchmark).
+      - run: cargo clippy -p fab-jit --all-targets -- -D warnings
+      - run: cargo test -p fab-jit
 
   # Kani proofs on the evaluator kernels (I.7): panic-freedom on the exact loop that runs untrusted
   # SCAD — range termination, stack pop/pop discipline, tessellation index bounds, guarded shifts. A

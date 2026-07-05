@@ -37,11 +37,16 @@ Driven by `claude-plan-bridge` (FORMATv2). Hand-authored; run
   - [x] I.4.1 - Math builtins: abs/sign, sin/cos/tan/asin/acos/atan/atan2 (DEGREES, reuse trig.rs), floor/ceil/round, ln/log/exp/pow/sqrt, min/max, norm/cross. Bug-for-bug func.cc. (rands is non-deterministic → deferred separately.)
   - [x] I.4.2 - List + string builtins: len, concat, str, chr, ord, lookup, search, reverse — the glue BOSL2 lives on.
   - [x] I.4.3 - Type-predicate builtins: is_undef, is_bool, is_num, is_string, is_list, is_function — + version/version_num. rands as a SEEDED deterministic builtin (or a loud defer if the seed threading isn't ready).
-- [ ] I.5 - undef propagation + warning/echo text bug-for-bug (string-equal vs oracle)
+- [x] I.5 - undef propagation + warning/echo text bug-for-bug (string-equal vs oracle)
 - [x] I.6 - tracing spans on the call path + aggregating benchmark layer; release builds compile it out; overhead measured
-- [ ] I.7 - Kani proofs: stack-machine push/pop discipline, range-iteration termination
+- [x] I.7 - Kani proofs: stack-machine push/pop discipline, range-iteration termination
 
-- [ ] I.8 - Cranelift JIT spike: after the interpreter core, JIT one hot numeric function, measure speedup vs interpreter, PROVE bit-identical (fast==JIT); bank the float-discipline recipe — de-risks the L JIT-vs-intrinsics decision
+- [x] I.8 - Cranelift JIT spike: after the interpreter core, JIT one hot numeric function, measure speedup vs interpreter, PROVE bit-identical (fast==JIT); bank the float-discipline recipe — de-risks the L JIT-vs-intrinsics decision
+  - [x] I.8.1 - fab-jit crate scaffold: cranelift-jit deps, native-only, the single documented unsafe seam (fn-ptr call)
+  - [x] I.8.2 - Expr → Cranelift IR compiler for the numeric subset, fixed left-to-right order matching the interpreter
+  - [x] I.8.3 - Ops Cranelift lacks → external CALLS to our Rust math (% → a%b, ^ → a.powf(b)) — the determinism recipe
+  - [x] I.8.4 - fast==JIT BITWISE differential (corpus + coeff-proptest) + the speedup benchmark
+  - [x] I.8.5 - Bank the float-discipline recipe (doc) — feeds the Phase-L JIT-vs-intrinsics promote decision
 ## Phase J - scad-rs: geometry surface + cache
 - [ ] J.1 - Geometry backend trait; interface suite runs miri-on-mock AND ASAN-on-real-Manifold in CI (the split that replaced raw miri-on-FFI)
 - [ ] J.2 - 3D: primitives, multmatrix, booleans through Manifold; polyhedron with oracle-matching validation semantics
@@ -93,3 +98,6 @@ Parked 2026-07-04 for the scad-rs pivot — the workflow tool works and stays in
 - **Migrate fab-scad/fab-geom/fab-gui/fab-web from edition 2021 to 2024 (fab-lang is already 2024). Mechanical via `cargo fix --edition` per crate + verify each. Do this when we're done working in lang/ — not before (avoid churning the established crates mid-lexer).** — added 2026-07-04.
 - **Evaluate make_mut copy-on-write (or an im-style persistent vector) for the NumList list-BUILD path — a BOSL2 VNF-math perf optimization. v0 uses immutable Rc<[f64]> (read/memory-optimal). Profile-driven at I.1 / the intrinsics work: measure whether BOSL2's concat/comprehension append-accumulation benefits vs the read-path cost. Internal to the Value enum, non-breaking to swap.** — added 2026-07-04.
 - **Longer-term: re-evaluate adopting more of Manifold's NATIVE primitives/operations vs our OpenSCAD-matching tessellation, once scad-rs is fully implemented and the differential harness (K) has data. Manifold-native avoids our tessellation but DIVERGES from OpenSCAD's mesh (different vertex algorithm) — only wise where the metric tolerates it or we deliberately accept non-byte-exact output for perf. Revisit alongside the geometry backend (J.1) + intrinsics (rung 2).** — added 2026-07-04.
+- **Aggregate corpus profiling: sum the I.6 tracing layer across the whole BOSL2/models corpus → hot-spot report** — added 2026-07-05.
+- **Receipts ledger (docs/testing-cards.md): when a real bug lands, log which testing card caught it + why the rest missed — the ledger feeds the blog series, the proven-panic-free browser-safe claim and the FeOphant playbook. Start filling at K.1/L.2 when divergences flow.** — added 2026-07-05.
+- **Warning text bug-for-bug vs the oracle — the deferred half of I.5 (Message::Warning channel exists, empty)** — added 2026-07-05.

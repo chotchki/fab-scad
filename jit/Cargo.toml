@@ -1,0 +1,24 @@
+[package]
+name = "fab-jit"
+version = "0.1.0"
+edition = "2024"
+description = "scad-rs: a Cranelift JIT spike (I.8) — proves fast==JIT bit-identical vs the interpreter"
+license = "GPL-2.0-or-later"
+
+[lib]
+name = "fab_jit"
+path = "src/lib.rs"
+
+[dependencies]
+# The interpreter + AST this JIT compiles from and validates against (fast==JIT is the whole point).
+fab-lang = { path = "../lang" }
+# Cranelift — the NATIVE JIT rung (determinism-friendly: no auto-FMA, transcendentals stay CALLS to
+# our own math). The umbrella crate re-exports codegen + frontend behind a prelude and pulls in the
+# jit/module/native backends via features, so one dep gives the whole ergonomic surface. NATIVE-ONLY
+# on purpose: the browser can't JIT in-sandbox, so the interpreter is the one-implementation-everywhere
+# baseline and this crate is a native accelerator that must match it.
+cranelift = { version = "0.133", features = ["jit", "module", "native"] }
+
+[dev-dependencies]
+# fast==JIT over generated polynomial coefficients + inputs (the bit-identity property).
+proptest = "1"

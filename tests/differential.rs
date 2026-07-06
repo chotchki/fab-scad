@@ -59,33 +59,39 @@ fn agree_graph(subdir: &str, files: &[(&str, &str)], root: &str, libs: &[&str]) 
     }
 }
 
-/// Assert a BOSL2 2D `shape` renders the same as the oracle (J.3.7). `include <std.scad>` is BOSL2's
+/// Assert a BOSL2 geometry `body` renders the same as the oracle. `include <std.scad>` is BOSL2's
 /// REQUIRED form — its attachable system reads file-level constants + `$`-context from the caller scope,
-/// which only `include` splices in (`use` does not). The 2D result bridges to a unit-height solid via
-/// `linear_extrude(1)` so the existing boolean-residual differential compares it (volume == area). Skips
-/// cleanly when the `libs/BOSL2` submodule isn't checked out (or the oracle binary is absent, in
-/// `diff_files`), so it's a real gate on a dev box + a no-op elsewhere.
-fn agree_bosl2(shape: &str) {
+/// which only `include` splices in (`use` does not). Skips cleanly when the `libs/BOSL2` submodule isn't
+/// checked out (or the oracle binary is absent, in `diff_files`), so it's a real gate on a dev box + a
+/// no-op elsewhere.
+fn agree_bosl2_body(body: &str) {
     let bosl2 = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("libs/BOSL2");
     if !bosl2.join("std.scad").exists() {
         return; // submodule not checked out — nothing to compare against
     }
-    let base = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("bosl2_2d");
+    let base = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("bosl2_diff");
     std::fs::create_dir_all(&base).unwrap();
-    let safe: String = shape
+    let safe: String = body
         .chars()
         .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
         .take(60)
         .collect();
     let root = base.join(format!("{safe}.scad"));
-    std::fs::write(
-        &root,
-        format!("include <std.scad>\nlinear_extrude(1) {shape};\n"),
-    )
-    .unwrap();
+    std::fs::write(&root, format!("include <std.scad>\n{body};\n")).unwrap();
     if let Err(why) = diff_files(&root, &[bosl2]) {
-        panic!("BOSL2 2D differential divergence: {why}");
+        panic!("BOSL2 differential divergence: {why}");
     }
+}
+
+/// A BOSL2 2D `shape` (J.3.7), bridged to a unit-height solid via `linear_extrude(1)` so the
+/// boolean-residual differential compares it (volume == area).
+fn agree_bosl2(shape: &str) {
+    agree_bosl2_body(&format!("linear_extrude(1) {shape}"));
+}
+
+/// A BOSL2 3D `shape` — an attachable solid or a VNF (J.2.6.3) — compared as-is (no extrude wrap).
+fn agree_bosl2_solid(shape: &str) {
+    agree_bosl2_body(shape);
 }
 
 #[test]
@@ -104,6 +110,26 @@ fn primitives_and_expressions_match_the_oracle() {
     agree("cylinder(h = 10, r1 = 5, r2 = 2, $fn = 16);");
     agree("r = 3 + 4; sphere(r, $fn = 16);"); // expression value flows to geometry
     agree("sphere(max(3, 7), $fn = 16);"); // builtin value
+}
+
+#[test]
+fn polyhedron_and_vnf_match_the_oracle() {
+    // J.2.6.3: polyhedron() (with the winding fixed, J.2.6 — faces wound clockwise-from-outside get
+    // reversed to Manifold's CCW) + BOSL2 VNF/attachable solids, vs the oracle by boolean residual.
+    // Plain polyhedron primitives (no BOSL2) → the strict agree() gate:
+    agree(
+        "polyhedron(points = [[0, 0, 0], [10, 0, 0], [10, 10, 0], [0, 10, 0], [5, 5, 8]], \
+         faces = [[0, 1, 2, 3], [0, 4, 1], [1, 4, 2], [2, 4, 3], [3, 4, 0]]);",
+    ); // a square pyramid — a QUAD base face + 4 triangular sides
+    agree(
+        "polyhedron(points = [[0, 0, 0], [1, 0, 0], [0, 1, 0], [0, 0, 1]], \
+         faces = [[0, 1, 2], [0, 3, 1], [1, 3, 2], [2, 3, 0]]);",
+    ); // a tetrahedron
+    // BOSL2 VNF + attachable solids (include-based) — the shapes the polyhedron/VNF path drives:
+    agree_bosl2_solid("spheroid(r = 5, $fn = 16)"); // a VNF sphere
+    agree_bosl2_solid("cyl(h = 10, r = 4, $fn = 24)"); // an attachable cylinder
+    agree_bosl2_solid("prismoid(size1 = [6, 6], size2 = [3, 3], h = 5)"); // a VNF prismoid
+    agree_bosl2_solid("vnf_polyhedron(cube([4, 4, 4]))"); // a VNF fed straight to vnf_polyhedron
 }
 
 #[test]

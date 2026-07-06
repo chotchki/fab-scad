@@ -259,7 +259,9 @@ impl Driver for FabLang {
         fab_geometry_outcome(fab_lang::evaluate_geometry(scad))
     }
     fn eval_file(&self, root: &Path, library_paths: &[PathBuf]) -> Outcome {
-        fab_geometry_outcome(fab_lang::evaluate_geometry_file(root, library_paths))
+        // Through the import reader (M.5/M.6), so an `import()`/`surface()` in the file resolves its mesh
+        // instead of failing LOUD — a no-import file is unaffected (the reader is never called).
+        fab_geometry_outcome(crate::import::resolve_geometry_file(root, library_paths))
     }
     fn echo(&self, scad: &str) -> Vec<String> {
         fab_lang::evaluate_full(scad)

@@ -11,7 +11,7 @@
 
 use std::path::PathBuf;
 
-use fab_scad::differ::{diff, diff_echo, diff_files, drivers};
+use fab_scad::differ::{Outcome, diff, diff_echo, diff_files, drivers};
 use fab_scad::openscad::find_bin;
 
 /// Assert a snippet's GEOMETRY agrees across every registered driver (panics on mismatch).
@@ -415,6 +415,34 @@ fn both_drivers_run_when_the_oracle_is_present() {
         );
     } else {
         eprintln!("note: OpenSCAD not found — oracle leg skipped (the optional-not-required gate)");
+    }
+}
+
+#[test]
+fn import_stl_matches_the_oracle() {
+    // M.6: validate M.5.1's STL import against the oracle. Generate the fixture from a KNOWN-valid cube
+    // (Solid::cube → STL bytes) so both engines import a real manifold — a hand-wound soup could make BOTH
+    // reject and "agree" falsely (the trap chotchki flagged). Our reader dedups the soup back; OpenSCAD
+    // welds its own way; the boolean-residual / vertex-multiset metric tolerates the tessellation route.
+    let base = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join("differential")
+        .join("import_stl");
+    std::fs::create_dir_all(&base).unwrap();
+    let cube_stl = fab_scad::kernel::Solid::cube(10.0, 10.0, 10.0, false).to_stl_bytes();
+    std::fs::write(base.join("cube.stl"), cube_stl).unwrap();
+    let root = base.join("model.scad");
+    std::fs::write(&root, "import(\"cube.stl\");\n").unwrap();
+
+    // Guard the false-positive: our leg must produce a REAL solid, not a rejection that would trivially
+    // "agree" with an oracle rejection. (The FabLang driver is always first — the pure-Rust baseline.)
+    let fab = drivers().into_iter().next().unwrap();
+    assert!(
+        matches!(fab.eval_file(&root, &[]), Outcome::Solid(_)),
+        "import(cube.stl) must lower to a real solid, not a rejection"
+    );
+
+    if let Err(why) = diff_files(&root, &[]) {
+        panic!("import STL differential divergence: {why}");
     }
 }
 

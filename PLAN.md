@@ -118,7 +118,7 @@ added 2026-07-05.
   - [x] M.4.2 - M.4.2 - The io module: outer fixpoint driver + thin wrappers
   - [x] M.4.3 - M.4.1 - Loader → pure: excise std::fs, surface Scad needs
 - [ ] M.5 - M.5 - import()/surface() backend: readers fulfill File needs → Mesh
-  - [ ] M.5.1 - M.5.1 - import() reader: STL/3MF → fab_lang::Mesh + driver
+  - [x] M.5.1 - M.5.1 - import() reader: STL/3MF → fab_lang::Mesh + driver
   - [ ] M.5.2 - M.5.2 - surface() heightmap: DAT/PNG → Mesh + center/invert eval-threading
 - [ ] M.6 - M.6 - Differential + coverage close-out
 

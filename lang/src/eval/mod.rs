@@ -1527,9 +1527,9 @@ fn eval_stmt<'a>(
             }
         }
         // `color()` — set the subtree's display color (BOSL2-critical, J.2.8). An INVALID color (unknown
-        // name, wrong arg type) INHERITS: no Color node, just the children (OpenSCAD's -1 sentinel). Color
-        // is a 3D-only display property in our tree; a 2D child passes THROUGH uncolored (color is
-        // display-only — geometrically identical — and `Shape2D` carries no color, a documented v1 gap).
+        // name, wrong arg type) INHERITS: no Color node, just the children (OpenSCAD's -1 sentinel),
+        // regardless of dimension. A VALID color on a 2D child is LOUD — `Shape2D` carries no color yet,
+        // and silently dropping it would diverge from OpenSCAD without a peep (a J.3 follow-up).
         StmtKind::Module(mi) if mi.name == "color" => {
             let (positional, named, _) = module::eval_args(mi, scope, ctx)?;
             let refs: Vec<&Stmt> = mi.children.iter().collect();
@@ -1539,8 +1539,14 @@ fn eval_stmt<'a>(
                     color,
                     child: Box::new(node),
                 })),
-                // invalid color (inherit) OR a 2D child (no color node) → the child unchanged
-                (child, _) => nodes.push(child),
+                (Geo::D2(_), Some(_)) => {
+                    return Err(crate::Error::Unimplemented(
+                        "color() on 2D geometry is not yet wired (Shape2D carries no color) — a J.3 \
+                         follow-up",
+                    ));
+                }
+                // invalid color → inherit: the child unchanged, either dimension.
+                (child, None) => nodes.push(child),
             }
         }
         // `children()` / `children(i)` (I.2.5) — render the enclosing module call's CALL-SITE children,

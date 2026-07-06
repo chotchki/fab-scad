@@ -314,13 +314,33 @@ fn hull_over_2d_is_loud() {
 }
 
 #[test]
-fn color_over_2d_passes_through() {
-    // color() is a 3D display property; over a 2D child it passes through UNCHANGED (Shape2D carries no
-    // color) — geometrically identical, a documented v1 gap.
+fn color_over_2d_is_loud() {
+    // A VALID color on a 2D child can't be tracked (Shape2D carries no color) — LOUD, never a silent
+    // drop that would diverge from OpenSCAD unnoticed.
+    assert!(matches!(
+        evaluate_geometry("color(\"red\") circle(3, $fn = 8);").unwrap_err(),
+        Error::Unimplemented(m) if m.contains("color") && m.contains("2D")
+    ));
+    // ...but an INVALID color inherits regardless of dimension → the 2D child passes through unchanged
+    // (no color to apply, matching OpenSCAD's -1 sentinel).
     assert_eq!(
-        d2("color(\"red\") circle(3, $fn = 8);"),
+        d2("color(\"notacolor\") circle(3, $fn = 8);"),
         d2("circle(3, $fn = 8);")
     );
+}
+
+#[test]
+fn deferred_2d_bridge_modules_are_loud() {
+    // The 2D↔3D bridges + offset are the NEXT J.3 tasks — each fails LOUD (naming its feature + task),
+    // never silently nothing. (Their full semantics land in J.3.3–J.3.6.)
+    let deferred =
+        |src: &str| matches!(evaluate_geometry(src).unwrap_err(), Error::Unimplemented(_));
+    assert!(deferred("linear_extrude(5) square(2);"));
+    assert!(deferred(
+        "rotate_extrude() translate([2, 0]) circle(1, $fn = 8);"
+    ));
+    assert!(deferred("projection() cube(2);"));
+    assert!(deferred("offset(1) square(2);"));
 }
 
 #[test]

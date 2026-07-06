@@ -126,6 +126,16 @@ enum Task<'a> {
     },
     /// Push an `undef` — the value of an unfilled, defaultless parameter slot.
     PushUndef,
+    /// Short-circuit a `&&`/`||`: the LHS is on the value stack. `||` on a TRUTHY LHS yields `true` and
+    /// `&&` on a FALSY LHS yields `false` — the RHS is NEVER evaluated (so its asserts / recursion don't
+    /// run). Otherwise the RHS is evaluated and combined with the LHS by the normal op. This is
+    /// load-bearing for OpenSCAD: BOSL2 guards recursion base-cases + assertions behind `a || b` / `a &&
+    /// b`, so eager evaluation makes guarded asserts fire and guarded recursion never terminate.
+    ShortCircuit {
+        op: BinOp,
+        rhs: &'a Expr,
+        scope: Scope,
+    },
 }
 
 /// Evaluate an expression to a [`Value`] on the explicit stack.
@@ -152,6 +162,11 @@ pub(super) fn eval_with_ctx<'a>(
 /// functions are lexically scoped; `$`-var dynamic override is I.2.2). `global` is threaded (not
 /// re-derived from `scope`) so a nested eval — a comprehension body carrying loop variables — still
 /// resolves function bodies against the TOP-LEVEL globals, not the loop scope.
+#[allow(
+    clippy::too_many_lines,
+    reason = "the explicit-stack work-loop: one match arm per Task variant — splitting it would just \
+    scatter the machine across helpers that each need the shared tasks/values stacks"
+)]
 fn eval_with_global<'a>(
     root: &'a Expr,
     scope: &Scope,
@@ -260,6 +275,18 @@ fn eval_with_global<'a>(
             }
             Task::Builtin { name, args } => run_builtin(name, args, &mut values),
             Task::PushUndef => values.push(Value::Undef),
+            Task::ShortCircuit { op, rhs, scope } => {
+                let lhs = values.pop().unwrap_or(Value::Undef);
+                let or = matches!(op, BinOp::Or);
+                if lhs.is_truthy() == or {
+                    values.push(Value::Bool(or)); // `||` on truthy → true; `&&` on falsy → false
+                } else {
+                    // Not short-circuited: evaluate the RHS and combine it with the kept LHS.
+                    values.push(lhs);
+                    tasks.push(Task::Binary(op));
+                    tasks.push(Task::Eval(rhs, scope));
+                }
+            }
         }
     }
     Ok(values.pop().unwrap_or(Value::Undef))
@@ -267,6 +294,11 @@ fn eval_with_global<'a>(
 
 /// Dispatch one AST node: leaves push a value directly; composites push their sub-tasks (children
 /// first, so they evaluate before the combining task).
+#[allow(
+    clippy::too_many_lines,
+    reason = "the expression-node dispatch: one match arm per ExprKind — a cohesive jump table, not \
+    separable without threading the tasks stack through every helper"
+)]
 fn eval_node<'a>(
     e: &'a Expr,
     scope: &Scope,
@@ -284,6 +316,20 @@ fn eval_node<'a>(
         ExprKind::Unary { op, operand } => {
             tasks.push(Task::Unary(*op));
             tasks.push(Task::Eval(operand, scope.clone()));
+        }
+        // `&&` / `||` SHORT-CIRCUIT (OpenSCAD semantics): evaluate the LHS, then a `ShortCircuit` task
+        // decides whether the RHS runs at all — so a guarded assert or recursion behind it stays guarded.
+        ExprKind::Binary {
+            op: op @ (BinOp::And | BinOp::Or),
+            lhs,
+            rhs,
+        } => {
+            tasks.push(Task::ShortCircuit {
+                op: *op,
+                rhs,
+                scope: scope.clone(),
+            });
+            tasks.push(Task::Eval(lhs, scope.clone()));
         }
         ExprKind::Binary { op, lhs, rhs } => {
             tasks.push(Task::Binary(*op));

@@ -132,6 +132,33 @@ fn logical_and_bitwise() {
 }
 
 #[test]
+fn logical_ops_short_circuit() {
+    // `&&`/`||` SHORT-CIRCUIT (OpenSCAD semantics) — the RHS runs ONLY when the LHS doesn't decide it.
+    // BOSL2 leans on this HARD: it guards assertions + recursion base-cases behind `a || b` / `a && b`,
+    // so eager evaluation makes guarded asserts fire (`is_undef(x) || assert(is_num(x))`) and guarded
+    // recursion never terminate (`n<=0 || f(n-1)`). A skipped RHS's `assert(false)` proves it's untouched.
+    // (the guarded assert is PARENTHESIZED — `assert`/`let`/`echo` aren't bare binary operands in
+    // OpenSCAD's grammar, so BOSL2 always wraps them: `is_undef(x) || (assert(is_num(x)) …)`.)
+    assert_eq!(ev("true || (assert(false) false)"), Value::Bool(true)); // `||` truthy LHS → RHS skipped
+    assert_eq!(ev("1 || (assert(false) 0)"), Value::Bool(true)); // truthy NON-bool LHS short-circuits too
+    assert_eq!(ev("false && (assert(false) true)"), Value::Bool(false)); // `&&` falsy LHS → RHS skipped
+    assert_eq!(ev("0 && (assert(false) 1)"), Value::Bool(false));
+    // when NOT short-circuited the RHS runs, and the result is its truthiness as a Bool (OpenSCAD).
+    assert_eq!(ev("false || 5"), Value::Bool(true));
+    assert_eq!(ev("true && 5"), Value::Bool(true));
+    assert_eq!(ev("true && false"), Value::Bool(false));
+}
+
+#[test]
+fn guarded_recursion_terminates_via_short_circuit() {
+    // `g(n) = n<=0 || g(n-1)` — WITHOUT short-circuit the guarded recursive call runs unconditionally and
+    // never stops (the BOSL2 eval hang). WITH it, `g(0)` short-circuits at `0<=0` → true, and it unwinds.
+    let prog = parse("v = g(500); function g(n) = n<=0 || g(n-1);").expect("parses");
+    let mesh = eval_program(&prog, &Scope::new()).expect("terminates");
+    assert_eq!(mesh.tri_count(), 0); // an assignment → no geometry; the point is it RETURNS
+}
+
+#[test]
 fn unary() {
     assert_eq!(ev("-5"), num(-5.0));
     assert_eq!(ev("-[1,2]"), list(&[-1.0, -2.0]));

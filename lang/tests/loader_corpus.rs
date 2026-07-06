@@ -162,6 +162,25 @@ const FIXTURES: &[(&str, &str)] = &[
         "diamond_use.scad",
         "include <shared_use_a.scad>\ninclude <shared_use_b.scad>\nmodule cube(s) { _sq(s); }\ncube(2);\n",
     ),
+    // J.3.7 USE-SCOPE — a `use`d file's function/module body reads its OWN file's top-level CONSTANT,
+    // which `use` does NOT import into the caller (so `LIBK` is undef at the root). OpenSCAD gives the
+    // used defs their file's scope; this is what BOSL2's function-form shapes lean on (they read
+    // `_ANCHOR_TYPES`-class constants). The default `lk_box(s = LIBK)` also proves the constant reaches a
+    // DEFAULT expression.
+    (
+        "lib_const.scad",
+        "LIBK = 6;\nfunction lk_r() = LIBK;\nmodule lk_box(s = LIBK) cube(s);\n",
+    ),
+    (
+        "use_const_fn.scad",
+        "use <lib_const.scad>\nsphere(lk_r(), $fn = 8);\n",
+    ),
+    ("use_const_mod.scad", "use <lib_const.scad>\nlk_box();\n"),
+    // the caller still does NOT see `LIBK` (use imports defs, not vars) — sphere(undef) empties.
+    (
+        "use_const_leak.scad",
+        "use <lib_const.scad>\nsphere(LIBK, $fn = 8);\n",
+    ),
 ];
 
 /// Materialize the fixture graph once into `CARGO_TARGET_TMPDIR/loader` and hand back its path.
@@ -230,6 +249,13 @@ fn loader_matches_the_inlined_equivalent() {
             vec![libdir.clone()],
             "sphere(4, $fn = 8);",
         ),
+        // J.3.7 use-scope: lk_r() reads its OWN file's `LIBK = 6` → sphere r = 6 (before the fix it saw
+        // `undef` and rendered nothing — the BOSL2 function-form asserts in one reduced case).
+        ("use_const_fn.scad", vec![], "sphere(6, $fn = 8);"),
+        // and a used MODULE's default `s = LIBK` reads it too → cube(6).
+        ("use_const_mod.scad", vec![], "cube(6);"),
+        // the constant still does NOT leak to the caller (use imports defs, not vars) → sphere(undef).
+        ("use_const_leak.scad", vec![], "sphere(undef, $fn = 8);"),
     ] {
         let got = file(fixture, &libs);
         let want = evaluate(equivalent).expect("inline equivalent evaluates");

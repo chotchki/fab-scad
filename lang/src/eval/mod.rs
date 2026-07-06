@@ -52,7 +52,21 @@ use crate::parser::{
 ///   [`Evaluation`] at the end; the mesh-only `evaluate*` sugar drops it.
 #[derive(Default)]
 pub(super) struct Ctx<'a> {
-    functions: BTreeMap<&'a str, (&'a [Parameter], &'a Expr)>,
+    /// User FUNCTION definitions, name → (def, HOME ISLAND). Resolution is the root file's flat view
+    /// (island 0's own defs override its `use`-imported ones — the common precedence); the home island
+    /// tag is what the use-scope fix rides on: a called function's body evaluates with its home island's
+    /// constants ([`Ctx::island_globals`]) as the lexical base, so a `use`d function reads its OWN file's
+    /// top-level constants (which `use` never imports into the caller), not the caller's. (Fully LEXICAL
+    /// per-call-site function resolution — like modules' — stays deferred; functions aren't shadowed
+    /// across files the way `builtins.scad` shadows modules, so the flat view holds for the corpus.)
+    functions: BTreeMap<&'a str, (loader::FnDef<'a>, usize)>,
+    /// Per-island CONSTANT scope: `island_globals[i]` is island `i`'s top-level assignments hoisted into a
+    /// scope (whole-scope, last-wins), seeded with the `$fn`/`PI` defaults. Index 0 is the ROOT file's
+    /// global (built by [`run_stmts`]); each `use` target's is built from its [`loader::Island`]
+    /// assignments. A function/module body evaluates against its HOME island's entry. A `RefCell` only
+    /// because it's populated AFTER the `Ctx` exists (building an island global needs the `Ctx` to call
+    /// functions); it's write-once-per-island at setup, read-only during geometry eval.
+    island_globals: std::cell::RefCell<Vec<Scope>>,
     /// User MODULE definitions, as per-file scope ISLANDS (I.9.5) — module resolution is LEXICAL, not
     /// global. `islands[0]` is the root file; each `use` target gets its own island. A module CALL
     /// resolves against the CURRENT island (its own file's defs + the files it uses + builtins) via
@@ -402,7 +416,7 @@ fn eval_node<'a>(
                 tasks.push(Task::Eval(el, scope.clone())); // reversed pushes → forward eval order
             }
         }
-        ExprKind::Call { callee, args } => dispatch_call(callee, args, scope, global, ctx, tasks)?,
+        ExprKind::Call { callee, args } => dispatch_call(callee, args, scope, ctx, tasks)?,
         ExprKind::Index { base, index } => {
             tasks.push(Task::Index);
             tasks.push(Task::Eval(index, scope.clone()));
@@ -530,13 +544,12 @@ fn dispatch_call<'a>(
     callee: &'a Expr,
     args: &'a [Arg],
     scope: &Scope,
-    global: &Scope,
     ctx: &Ctx<'a>,
     tasks: &mut Vec<Task<'a>>,
 ) -> crate::Result<()> {
     if let ExprKind::Ident(name) = &callee.kind {
         // resolution order (OpenSCAD): a user function may shadow a builtin.
-        if let Some(&(params, body)) = ctx.functions.get(name.as_str()) {
+        if let Some(&((params, body), home)) = ctx.functions.get(name.as_str()) {
             // A call-path EVENT, not a span: the call's body evaluates across later loop iterations on
             // the explicit stack (no host recursion), so its subtree isn't scope-bounded here — the
             // event marks WHICH function was entered, the enclosing `eval_program` span times the whole.
@@ -544,7 +557,11 @@ fn dispatch_call<'a>(
             if trace::on() {
                 tasks.push(Task::TraceReturn { name }); // fires when the body's value lands (peek-only)
             }
-            push_call(params, body, args, scope, global, tasks);
+            // The body's lexical base is the function's HOME ISLAND global (its own file's constants), NOT
+            // the caller's `global` — the use-scope fix. For a root-defined function home is 0 (the root
+            // global), so this is a no-op there; for a `use`d function it swaps in the library's constants.
+            let base = ctx.island_globals.borrow()[home].clone();
+            push_call(params, body, args, scope, &base, tasks);
             return Ok(());
         }
         if builtins::is_builtin(name) {
@@ -866,21 +883,74 @@ pub(crate) fn evaluate_source(
 ) -> crate::Result<(Geo, Vec<Message>)> {
     let _span = tracing::trace_span!("eval_program").entered();
     let loaded = loader::load(source, base_dir, root_path, library_paths)?;
-    // `flatten` gives the executable statement stream + the global FUNCTION store; `islands` gives the
-    // per-file MODULE scopes (I.9.5). `defs.modules` is intentionally unused — module resolution is
-    // island-scoped now, not the single global map the old `Ctx.modules` was.
-    let (exec, defs) = loader::flatten(&loaded)?;
+    // `flatten` gives the executable statement stream (its own function/module stores are now unused —
+    // both are island-scoped). `islands` gives the per-file MODULE scopes AND (the use-scope fix) each
+    // file's FUNCTION defs + top-level CONSTANTS, so a `use`d function's body sees its own file's scope.
+    let (exec, _defs) = loader::flatten(&loaded)?;
     let islands = loader::islands(&loaded);
+    let functions = tagged_functions(&islands);
+    let n = islands.len();
     let ctx = Ctx {
-        functions: defs.functions,
+        functions,
+        // Island 0 (root) is filled by `run_stmts`; the rest are seeded empty and built just below.
+        island_globals: RefCell::new(vec![Scope::new(); n]),
         islands,
         closures: RefCell::default(),
         messages: RefCell::default(),
         module_depth: Cell::default(),
         children_stack: RefCell::default(),
     };
+    // Build each `use`d file's constant scope (islands 1..n) — hoisting needs the `Ctx` (constants can
+    // call functions), which is why this runs AFTER construction, into the `RefCell`.
+    for i in 1..n {
+        let island_global = build_island_global(i, &ctx)?;
+        if let Some(slot) = ctx.island_globals.borrow_mut().get_mut(i) {
+            *slot = island_global;
+        }
+    }
     let tree = run_stmts(exec.into_iter(), &ctx, &Scope::new())?;
     Ok((tree, ctx.messages.into_inner()))
+}
+
+/// The root file's flat FUNCTION view with home-island tags: island 0's `use`d islands FIRST in source
+/// order (a later `use` overwrites an earlier one → textually-last `use` wins, matching module
+/// resolution), then island 0's OWN defs overriding any `use`-imported name — the precedence
+/// [`loader::flatten`] bakes into its function store, but carrying each def's home island so its body can
+/// evaluate against that island's constants (the use-scope fix). Fully lexical per-call-site resolution
+/// stays deferred; this flat root view is correct for a call from the root, and close enough for a call
+/// inside a `use`d function (which almost never hits a name the root also defines).
+fn tagged_functions<'a>(
+    islands: &loader::Islands<'a>,
+) -> BTreeMap<&'a str, (loader::FnDef<'a>, usize)> {
+    let mut out = BTreeMap::new();
+    // `islands` always has island 0 (the root), so `first()` is the whole population here — no early
+    // return, the `if let` just avoids indexing that could theoretically panic.
+    if let Some(root) = islands.first() {
+        for &u in &root.uses {
+            for (&name, &def) in &islands[u].functions {
+                out.insert(name, (def, u));
+            }
+        }
+        for (&name, &def) in &root.functions {
+            out.insert(name, (def, 0));
+        }
+    }
+    out
+}
+
+/// Build island `i`'s CONSTANT scope: its top-level assignments hoisted (whole-scope, last-wins, in
+/// first-occurrence order) into a fresh `$fn`/`PI`-seeded scope — so a `use`d function/module body reads
+/// its own file's constants. Evaluated with `ctx` (constants can call functions). The island's own global
+/// isn't stored yet, so a constant that calls a function reading a LATER constant of the same island sees
+/// `undef` — the same whole-scope forward-reference rule the root global follows (`n = 1; n = n + 1;` →
+/// undef); real libraries define constants as literals or in dependency order.
+fn build_island_global(island: usize, ctx: &Ctx<'_>) -> crate::Result<Scope> {
+    let mut scope = Scope::new();
+    for &(name, expr) in &ctx.islands[island].assignments {
+        let value = eval_with_ctx(expr, &scope, ctx)?;
+        scope.bind(name.to_string(), value);
+    }
+    Ok(scope)
 }
 
 /// Evaluate a statement stream to a dimension-tagged geometry TREE ([`Geo`]) — shared by
@@ -899,6 +969,11 @@ fn run_stmts<'a>(
     // re-hoist — that would let a forward reference see the pre-bound value, breaking `a = b; b = 5` →
     // `a` is undef), then evaluate the geometry in that same scope.
     let global = hoist_scope(&stmts, scope, ctx)?;
+    // The root file IS island 0 — publish its hoisted global so a root-defined function's body resolves
+    // against it (the home-island lookup in `dispatch_call`). Write-once, before any geometry evaluates.
+    if let Some(slot) = ctx.island_globals.borrow_mut().get_mut(0) {
+        *slot = global.clone();
+    }
     // Top-level statements resolve modules against island 0 (the root file, I.9.5).
     Ok(union_of(
         eval_geometry(&stmts, &global, &global, 0, ctx)?,
@@ -1190,7 +1265,6 @@ fn call_user_module<'a>(
     def: loader::ModDef<'a>,
     home: usize,
     caller: &Scope,
-    global: &Scope,
     island: usize,
     ctx: &Ctx<'a>,
 ) -> crate::Result<Geo> {
@@ -1202,7 +1276,11 @@ fn call_user_module<'a>(
         ));
     }
     ctx.module_depth.set(depth + 1);
-    let mut call = bind_module_scope(params, &mi.args, caller, global, ctx)?;
+    // The body's lexical base is the module's HOME ISLAND global (its own file's constants + params), not
+    // the caller's — the use-scope fix, matching functions. Home 0 is the root global, so this is a no-op
+    // for a root-defined module. Args, though, still evaluate in the CALLER's scope (below).
+    let home_global = ctx.island_globals.borrow()[home].clone();
+    let mut call = bind_module_scope(params, &mi.args, caller, &home_global, ctx)?;
     // `$children` = the call-site child count; the children themselves are stashed for `children()` to
     // render LATE, in the CALLER's scope AND island (I.2.5 / I.9.5).
     call.bind("$children", Value::Num(child_count(mi.children.len())));
@@ -1213,7 +1291,7 @@ fn call_user_module<'a>(
     });
     let mut nodes = Vec::new();
     // The body resolves ITS module calls against the module's DEFINITION island (`home`), not the caller's.
-    let result = eval_stmt(body, &mut call, global, home, ctx, &mut nodes);
+    let result = eval_stmt(body, &mut call, &home_global, home, ctx, &mut nodes);
     ctx.children_stack.borrow_mut().pop(); // restore even on error (no `?` before these)
     ctx.module_depth.set(depth);
     result?;
@@ -1460,7 +1538,9 @@ fn build_ctx(program: &Program) -> Ctx<'_> {
     for stmt in &program.stmts {
         match &stmt.kind {
             StmtKind::FunctionDef { name, params, body } => {
-                functions.insert(name.as_str(), (params.as_slice(), body));
+                // Home island 0 — a single-program eval is all one island, so every function's body
+                // evaluates against the root global (island 0), exactly the old behavior.
+                functions.insert(name.as_str(), ((params.as_slice(), body), 0usize));
             }
             StmtKind::ModuleDef { name, params, body } => {
                 modules.insert(name.as_str(), (params.as_slice(), &**body));
@@ -1470,10 +1550,15 @@ fn build_ctx(program: &Program) -> Ctx<'_> {
     }
     // A raw single-program eval (no loader) has no `use`/`include` graph → one island (the whole
     // program), used by nothing. Module resolution against island 0 is exactly the old global lookup.
+    // The island's own function/assignment stores stay empty — island 0's global (constants) is the root
+    // global that `run_stmts` hoists + publishes, not something built from `Island::assignments` here.
     Ctx {
         functions,
+        island_globals: RefCell::new(vec![Scope::new()]),
         islands: vec![loader::Island {
             modules,
+            functions: BTreeMap::new(),
+            assignments: Vec::new(),
             uses: Vec::new(),
         }],
         closures: RefCell::default(),
@@ -1715,7 +1800,7 @@ fn eval_stmt<'a>(
             trace::module(ctx.module_depth.get(), &mi.name);
             match ctx.resolve_module(island, mi.name.as_str()) {
                 Some((def, home)) => {
-                    nodes.push(call_user_module(mi, def, home, scope, global, island, ctx)?);
+                    nodes.push(call_user_module(mi, def, home, scope, island, ctx)?);
                 }
                 None => nodes.push(module::eval_module(mi, scope, ctx)?),
             }
@@ -1774,8 +1859,15 @@ mod proofs {
     reason = "unit-test helpers: unwrap/expect/panic ARE the assertions; exact float asserts are deterministic"
 )]
 mod tests {
-    use super::{Scope, Value, build_ctx, eval_with_ctx};
+    use super::{Scope, Value, build_ctx, eval_with_ctx, tagged_functions};
     use crate::parser::{StmtKind, parse};
+
+    /// The empty-graph guard in [`tagged_functions`]: no islands → no functions (in production `islands`
+    /// always has the root, so this defensive branch is only reachable here).
+    #[test]
+    fn tagged_functions_of_no_islands_is_empty() {
+        assert!(tagged_functions(&Vec::new()).is_empty());
+    }
 
     /// Evaluate a program's assignments in order (binding each), returning the LAST assignment's value
     /// — with the program's function store in scope. The end-to-end call test harness.
@@ -1786,6 +1878,11 @@ mod tests {
         let mut last = Value::Undef;
         for stmt in &prog.stmts {
             if let StmtKind::Assignment { name, value } = &stmt.kind {
+                // Publish the current scope as island 0's global so a function call sees the top-level
+                // bindings (production drives this through `run_stmts`; this helper hand-rolls the loop).
+                if let Some(slot) = ctx.island_globals.borrow_mut().get_mut(0) {
+                    *slot = scope.clone();
+                }
                 last = eval_with_ctx(value, &scope, &ctx).expect("evaluates");
                 scope.bind(name.clone(), last.clone());
             }

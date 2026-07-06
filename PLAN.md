@@ -84,7 +84,7 @@ added 2026-07-05.
   - [x] J.3.4 - linear_extrude (height/twist/scale/slices) → 3D; tessellation parity MEASURED vs oracle (Manifold's if the metric tolerates, else our loft)
     - [x] J.3.4.1 - J.3.4.1 - twisted linear_extrude loft: match OpenSCAD's profile-resampling + slice interpolation
   - [x] J.3.5 - rotate_extrude (angle, $fn) → 3D; reuse the ring/segment math
-  - [ ] J.3.6 - projection(cut) 3D→2D via slice_to_cross_section
+  - [x] J.3.6 - projection(cut) 3D→2D via slice_to_cross_section
   - [ ] J.3.7 - Differential: path/region-derived BOSL2 2D shapes vs oracle
 - [ ] J.4 - hull; import() via our STL/3MF readers; text/minkowski/surface = LOUD deferred stubs (blow up, complain, never silently wrong)
   - Comment: Text could be handled by https://github.com/pop-os/cosmic-text . I'm still researching minkowski.

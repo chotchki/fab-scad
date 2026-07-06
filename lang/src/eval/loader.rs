@@ -21,11 +21,15 @@
 //! is not transitive. (`use` also shadows a builtin of the same name; that lookup-order nuance lives
 //! in `dispatch_call`, not here.)
 //!
-//! KNOWN LIMITATION (deferred, flagged for the comparison test): a `use`-imported function evaluates
-//! against the ROOT global scope, not its OWN file's top-level scope. So a used function that reads a
-//! constant defined at its file's top level sees `undef` — OpenSCAD builds a `FileContext` over the
-//! used file so its constants ARE visible. `include` has no such gap (its assignments splice into the
-//! shared scope and execute). The per-used-file lexical base is a Phase-J scoping refinement.
+//! USE-SCOPE (the per-file lexical base, J.3.7): a `use`d function/module evaluates its body against its
+//! OWN file's top-level scope, not the caller's — so a used def that reads a constant defined at its
+//! file's top level sees that constant, exactly as OpenSCAD does (it builds a `FileContext` over the used
+//! file). Each [`Island`] therefore carries its file's `functions` + `assignments` (the constant scope)
+//! alongside its `modules`; the evaluator hoists each island's assignments into a per-island global and
+//! evaluates a call's body against its HOME island's global (see `Ctx::island_globals` in `mod.rs`). This
+//! is what lets BOSL2's `use`-form functions (path/VNF returns reading `_ANCHOR_TYPES`-class constants)
+//! resolve instead of asserting on `undef`. `include` never needed it — its assignments splice into the
+//! shared scope directly.
 //!
 //! Resolution mirrors `find_valid_path_`: an absolute path is used as-is; a relative one resolves
 //! against the INCLUDING file's directory first, then each library path in order (first existing
@@ -191,7 +195,7 @@ pub(super) fn load(
 }
 
 /// A user function definition's slice-of-params + body, borrowed from the owning [`Program`].
-type FnDef<'a> = (&'a [Parameter], &'a Expr);
+pub(super) type FnDef<'a> = (&'a [Parameter], &'a Expr);
 /// The function store the evaluator's [`Ctx`](super::Ctx) is built from: name → its definition.
 pub(super) type FnStore<'a> = BTreeMap<&'a str, FnDef<'a>>;
 /// A user module definition's params + body STATEMENT (usually a block), borrowed from the [`Program`].
@@ -211,6 +215,15 @@ pub(super) type ModStore<'a> = BTreeMap<&'a str, ModDef<'a>>;
 pub(super) struct Island<'a> {
     /// This file's include-flattened module defs (last-wins). A name here beats any `use`-imported one.
     pub modules: ModStore<'a>,
+    /// This file's include-flattened FUNCTION defs (last-wins), collected alongside `modules` so a called
+    /// function's body can be evaluated with THIS island's constants as its lexical base (the use-scope
+    /// fix): a function reads the constants of the file it was DEFINED in, not the caller's.
+    pub functions: FnStore<'a>,
+    /// This file's include-flattened top-level ASSIGNMENTS (name → value expr), in first-occurrence order
+    /// — the file's constant scope. Hoisted (whole-scope, last-wins) into this island's global by the
+    /// evaluator so `use`d functions/modules see their own file's `_ANCHOR_TYPES`-class constants (which
+    /// `use` does NOT import into the caller). OpenSCAD builds a per-file `FileContext` for exactly this.
+    pub assignments: Vec<(&'a str, &'a Expr)>,
     /// Island indices of the files this one `use`s, in source order. Resolution scans them REVERSED so
     /// the textually-last `use` wins (matching OpenSCAD's front-inserted `usedlibs`). Non-transitive:
     /// resolution looks only at a used island's OWN `modules`, never its `uses`.
@@ -416,23 +429,31 @@ pub(super) fn islands(loaded: &Loaded) -> Islands<'_> {
             }
         }
     }
-    // Pass 2: collect each island's include-flattened modules + its used-island indices.
+    // Pass 2: collect each island's include-flattened modules/functions/assignments + its used islands.
     let mut islands = Vec::with_capacity(roots.len());
     for &root_node in &roots {
-        let mut modules = ModStore::new();
-        let mut uses = Vec::new();
+        let mut scope = IslandScope::default();
         let mut stack = Vec::new();
-        collect_island(
-            loaded,
-            root_node,
-            &node_to_island,
-            &mut modules,
-            &mut uses,
-            &mut stack,
-        );
-        islands.push(Island { modules, uses });
+        collect_island(loaded, root_node, &node_to_island, &mut scope, &mut stack);
+        islands.push(Island {
+            modules: scope.modules,
+            functions: scope.functions,
+            assignments: scope.assignments,
+            uses: scope.uses,
+        });
     }
     islands
+}
+
+/// The mutable accumulators [`collect_island`] fills for one island — a file's own module/function defs,
+/// its top-level constant assignments (in order), and the islands it `use`s. Bundled so the include walk
+/// threads one struct instead of four out-params.
+#[derive(Default)]
+struct IslandScope<'a> {
+    modules: ModStore<'a>,
+    functions: FnStore<'a>,
+    assignments: Vec<(&'a str, &'a Expr)>,
+    uses: Vec<usize>,
 }
 
 /// Walk island-root `idx`'s include subtree, collecting module defs (last-wins) and recording each `use`
@@ -443,8 +464,7 @@ fn collect_island<'a>(
     loaded: &'a Loaded,
     idx: usize,
     node_to_island: &BTreeMap<usize, usize>,
-    modules: &mut ModStore<'a>,
-    uses: &mut Vec<usize>,
+    scope: &mut IslandScope<'a>,
     stack: &mut Vec<usize>,
 ) {
     if stack.contains(&idx) {
@@ -455,21 +475,34 @@ fn collect_island<'a>(
     for (i, stmt) in node.program.stmts.iter().enumerate() {
         match node.links.get(&i) {
             Some(Link::Include(target)) => {
-                collect_island(loaded, *target, node_to_island, modules, uses, stack);
+                collect_island(loaded, *target, node_to_island, scope, stack);
             }
-            // A `use` is a scope boundary: record the used file's island (its modules resolve THERE, not
+            // A `use` is a scope boundary: record the used file's island (its defs resolve THERE, not
             // here). `node_to_island` has every `use` target from pass 1; the `if let` is a defensive
             // no-panic guard for a can't-happen miss, not a real branch.
             Some(Link::Use(target)) => {
                 if let Some(&island) = node_to_island.get(target) {
-                    uses.push(island);
+                    scope.uses.push(island);
                 }
             }
-            None => {
-                if let StmtKind::ModuleDef { name, params, body } = &stmt.kind {
-                    modules.insert(name.as_str(), (params.as_slice(), &**body)); // last-wins
+            None => match &stmt.kind {
+                StmtKind::ModuleDef { name, params, body } => {
+                    scope
+                        .modules
+                        .insert(name.as_str(), (params.as_slice(), &**body)); // last-wins
                 }
-            }
+                StmtKind::FunctionDef { name, params, body } => {
+                    scope
+                        .functions
+                        .insert(name.as_str(), (params.as_slice(), body)); // last-wins
+                }
+                // Top-level constants — kept in source order for whole-scope hoisting (last-wins on a
+                // repeated name is the hoister's job, so DON'T dedup here; a later assign must appear later).
+                StmtKind::Assignment { name, value } => {
+                    scope.assignments.push((name.as_str(), value));
+                }
+                _ => {}
+            },
         }
     }
     stack.pop();

@@ -13,8 +13,10 @@
 //!
 //! Evaluation produces a dimension-tagged [`Geo`]; each sub-tree under a tag is homogeneous. Everything
 //! here is backend-agnostic (like `GeoNode`): the fab-scad backend lowers a `Shape2D` to a Manifold
-//! `CrossSection`. This module is the TYPE scaffolding + bridge shape (J.3.1); the evaluator wiring that
-//! PRODUCES these nodes (the 2D primitives, offset, the extrude modules) is J.3.2 onward.
+//! `CrossSection`. This module is the TYPE scaffolding + bridge shape (J.3.1). The evaluator wiring that
+//! PRODUCES these nodes lands incrementally: the 2D primitives + transforms + booleans + the 2D/3D
+//! dimension-mixing rules are J.3.2.1 (`eval/mod.rs` + `eval/module.rs`); `offset` and the `extrude` /
+//! `projection` bridge modules are J.3.3 onward.
 
 use super::geo::GeoNode;
 use crate::geom::{Affine2, Vec2};
@@ -116,6 +118,29 @@ pub enum Geo {
     D2(Shape2D),
     /// A 3D result.
     D3(GeoNode),
+}
+
+impl Geo {
+    /// This result's dimension as `2` or `3` — the number OpenSCAD prints in its "Mixing 2D and 3D
+    /// objects" / "Ignoring {n}D child object" warnings.
+    #[must_use]
+    pub fn dim(&self) -> u8 {
+        match self {
+            Geo::D2(_) => 2,
+            Geo::D3(_) => 3,
+        }
+    }
+
+    /// Whether this is a NULL result — the `Empty` variant, meaning "no geometry object at all" (a `{}`
+    /// block, an `if` with no taken branch, a `for` that never ran). Null geometry is DIM-NEUTRAL: it
+    /// neither fixes a group's dimension nor triggers a mixing warning, and it drops out of an operand
+    /// list. This is DISTINCT from a present-but-empty primitive like `cube(0)` — that tessellates to an
+    /// empty mesh but is still a 3D object (`GeoNode::Leaf`), and it DOES fix the dimension (verified vs
+    /// OpenSCAD 2026.06.12: `union(){ cube(0); circle(5); }` warns "Ignoring 2D child" → the result is 3D).
+    #[must_use]
+    pub fn is_null(&self) -> bool {
+        matches!(self, Geo::D2(Shape2D::Empty) | Geo::D3(GeoNode::Empty))
+    }
 }
 
 #[cfg(test)]

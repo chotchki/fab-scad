@@ -114,7 +114,9 @@ impl ColorComparison {
 /// Fails if the oracle errors or scad-rs can't parse/evaluate the program.
 pub fn compare_colors(source: &str, timeout: Duration) -> Result<ColorComparison> {
     let tree = fab_lang::evaluate_geometry(source).context("scad-rs evaluate_geometry")?;
-    let scad_colors = match crate::backend::build(&tree, &crate::backend::ManifoldBackend) {
+    // Colors are a 3D display property; a 2D result has no 3D faces, so `build_geo` lowers it to the
+    // empty solid → no distinct colors (compared equal to the oracle's colorless 2D output).
+    let scad_colors = match crate::backend::build_geo(&tree, &crate::backend::ManifoldBackend) {
         Some(solid) => distinct_face_colors(&solid),
         None => Vec::new(),
     };
@@ -274,10 +276,12 @@ impl Driver for FabLang {
 /// Map scad-rs's geometry TREE to a comparable [`Outcome`]: walk it through the Manifold backend (J.2
 /// — the geometry lowering under test), then no geometry → `Empty`, a manifold solid → `Solid`, an
 /// evaluation error → `Rejected`. Manifold's ops always yield a valid manifold, so a `Some` solid is
-/// never rejected here (that distinction is the oracle's job on the OTHER leg).
-fn fab_geometry_outcome(result: fab_lang::Result<fab_lang::GeoNode>) -> Outcome {
+/// never rejected here (that distinction is the oracle's job on the OTHER leg). A 2D result lowers to
+/// `Empty` on this 3D-mesh axis — the oracle's 3D export of a 2D program is likewise empty, so they agree;
+/// the 2D geometry differential (region/area) is a separate leg (J.3.7).
+fn fab_geometry_outcome(result: fab_lang::Result<fab_lang::Geo>) -> Outcome {
     match result {
-        Ok(tree) => match crate::backend::build(&tree, &crate::backend::ManifoldBackend) {
+        Ok(tree) => match crate::backend::build_geo(&tree, &crate::backend::ManifoldBackend) {
             Some(solid) if !solid.is_empty() => Outcome::Solid(solid),
             _ => Outcome::Empty,
         },

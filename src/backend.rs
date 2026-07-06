@@ -10,7 +10,7 @@
 //! ∅∩x = ∅ — so a lowered CSG tree behaves the same whether a subtree collapsed to nothing or not.
 
 use fab_lang::{
-    Affine, Affine2, ExtrudeKind, GeoNode, Join2D, Mesh, Rgba, Shape2D, Tri, Vec2, Vec3,
+    Affine, Affine2, ExtrudeKind, Geo, GeoNode, Join2D, Mesh, Rgba, Shape2D, Tri, Vec2, Vec3,
 };
 
 /// A geometry backend: tessellated meshes → solids, combined via CSG + affine transforms. `Solid` is
@@ -73,6 +73,17 @@ pub trait GeometryBackend {
     fn to_polygons(&self, s: &Self::Shape) -> Vec<Vec<[f64; 2]>>;
     /// Whether the region is empty (no area).
     fn is_empty_2d(&self, s: &Self::Shape) -> bool;
+}
+
+/// Lower a dimension-tagged [`Geo`] result to a backend SOLID — the top-level lowering entry a consumer
+/// reaches for after [`fab_lang::evaluate_geometry`]. A 3D tree lowers via [`build`]; a 2D result has no
+/// 3D solid, so on this axis it lowers to the empty solid (its 2D region is reached by matching the
+/// [`Geo::D2`] and calling [`build_2d`] on the `Shape2D` — the extrude/projection path, J.3).
+pub fn build_geo<B: GeometryBackend>(geo: &Geo, backend: &B) -> B::Solid {
+    match geo {
+        Geo::D3(node) => build(node, backend),
+        Geo::D2(_) => backend.leaf(&Mesh::new()),
+    }
 }
 
 /// Lower a fab-lang CSG tree ([`GeoNode`], J.2) to a backend solid — the geometry lowering. This is
@@ -707,7 +718,7 @@ mod tests {
     #[test]
     fn boolean_and_transform_lowering_volumes() {
         let vol = |scad: &str| -> f64 {
-            match super::build(
+            match super::build_geo(
                 &fab_lang::evaluate_geometry(scad).expect("evaluates"),
                 &super::ManifoldBackend,
             ) {

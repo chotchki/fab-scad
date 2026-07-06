@@ -10,12 +10,21 @@
     reason = "integration test: unwrap/panic ARE the assertions; translate/scale matrices are EXACT (the literal args, no trig)"
 )]
 
-use fab_lang::{GeoNode, Rgba, evaluate, evaluate_geometry};
+use fab_lang::{Geo, GeoNode, Rgba, evaluate, evaluate_geometry};
+
+/// Unwrap a 3D geometry result to its [`GeoNode`] — every case in this file is 3D (the 2D subsystem's
+/// tree structure is pinned in `geometry_tree_2d.rs`), so the `Geo::D3` tag is just noise to strip.
+fn d3(g: Geo) -> GeoNode {
+    match g {
+        Geo::D3(node) => node,
+        Geo::D2(shape) => panic!("expected a 3D result, got 2D: {shape:?}"),
+    }
+}
 
 #[test]
 fn primitive_is_a_leaf() {
     assert!(matches!(
-        evaluate_geometry("cube(10);").unwrap(),
+        d3(evaluate_geometry("cube(10);").unwrap()),
         GeoNode::Leaf(_)
     ));
     // ...and a single Leaf still flattens to a mesh with no backend (the evaluate() path).
@@ -24,13 +33,13 @@ fn primitive_is_a_leaf() {
 
 #[test]
 fn empty_program_is_empty() {
-    assert_eq!(evaluate_geometry("x = 5;").unwrap(), GeoNode::Empty);
+    assert_eq!(d3(evaluate_geometry("x = 5;").unwrap()), GeoNode::Empty);
     assert_eq!(evaluate("x = 5;").unwrap().tri_count(), 0); // Empty flattens to an empty mesh
 }
 
 #[test]
 fn transform_wraps_its_child_with_the_matrix() {
-    match evaluate_geometry("translate([5, 2, 9]) cube(10);").unwrap() {
+    match d3(evaluate_geometry("translate([5, 2, 9]) cube(10);").unwrap()) {
         GeoNode::Transform { matrix, child } => {
             let m = matrix.as_row_major();
             assert_eq!([m[3], m[7], m[11]], [5.0, 2.0, 9.0]); // translation column
@@ -40,7 +49,7 @@ fn transform_wraps_its_child_with_the_matrix() {
     }
     // scale is a diagonal; multmatrix passes through; rotate(0) is identity.
     assert!(matches!(
-        evaluate_geometry("scale([2, 3, 4]) cube(1);").unwrap(),
+        d3(evaluate_geometry("scale([2, 3, 4]) cube(1);").unwrap()),
         GeoNode::Transform { matrix, .. } if {
             let m = matrix.as_row_major();
             [m[0], m[5], m[10]] == [2.0, 3.0, 4.0]
@@ -50,7 +59,7 @@ fn transform_wraps_its_child_with_the_matrix() {
 
 #[test]
 fn multiple_objects_are_an_implicit_union() {
-    match evaluate_geometry("cube(10); sphere(5, $fn = 8);").unwrap() {
+    match d3(evaluate_geometry("cube(10); sphere(5, $fn = 8);").unwrap()) {
         GeoNode::Union(children) => assert_eq!(children.len(), 2),
         other => panic!("expected Union, got {other:?}"),
     }
@@ -60,7 +69,7 @@ fn multiple_objects_are_an_implicit_union() {
 
 #[test]
 fn booleans_build_their_nodes_over_children() {
-    let two = |src| match evaluate_geometry(src).unwrap() {
+    let two = |src| match d3(evaluate_geometry(src).unwrap()) {
         GeoNode::Difference(c) | GeoNode::Intersection(c) | GeoNode::Union(c) => c.len(),
         other => panic!("expected a boolean node, got {other:?}"),
     };
@@ -71,22 +80,23 @@ fn booleans_build_their_nodes_over_children() {
 
 #[test]
 fn hull_builds_an_n_ary_node_over_children() {
-    match evaluate_geometry("hull() { cube(2); translate([5, 0, 0]) sphere(1, $fn = 8); }").unwrap()
-    {
+    match d3(
+        evaluate_geometry("hull() { cube(2); translate([5, 0, 0]) sphere(1, $fn = 8); }").unwrap(),
+    ) {
         GeoNode::Hull(children) => assert_eq!(children.len(), 2),
         other => panic!("expected a Hull node, got {other:?}"),
     }
     // hull() of a single child is still a Hull (of one) — the backend hulls it to its convex hull.
     assert!(
-        matches!(evaluate_geometry("hull() cube(2);").unwrap(), GeoNode::Hull(c) if c.len() == 1)
+        matches!(d3(evaluate_geometry("hull() cube(2);").unwrap()), GeoNode::Hull(c) if c.len() == 1)
     );
 }
 
 #[test]
 fn nested_transform_over_a_boolean() {
-    match evaluate_geometry("translate([1, 0, 0]) union() { cube(2); sphere(1, $fn = 8); }")
-        .unwrap()
-    {
+    match d3(
+        evaluate_geometry("translate([1, 0, 0]) union() { cube(2); sphere(1, $fn = 8); }").unwrap(),
+    ) {
         GeoNode::Transform { child, .. } => {
             assert!(matches!(*child, GeoNode::Union(ref c) if c.len() == 2));
         }
@@ -96,7 +106,7 @@ fn nested_transform_over_a_boolean() {
 
 #[test]
 fn bare_block_groups_its_children_into_a_union() {
-    match evaluate_geometry("{ cube(2); sphere(1, $fn = 8); }").unwrap() {
+    match d3(evaluate_geometry("{ cube(2); sphere(1, $fn = 8); }").unwrap()) {
         GeoNode::Union(children) => assert_eq!(children.len(), 2),
         other => panic!("expected Union, got {other:?}"),
     }
@@ -105,22 +115,22 @@ fn bare_block_groups_its_children_into_a_union() {
 #[test]
 fn if_contributes_the_taken_branch() {
     assert!(matches!(
-        evaluate_geometry("if (true) cube(1);").unwrap(),
+        d3(evaluate_geometry("if (true) cube(1);").unwrap()),
         GeoNode::Leaf(_)
     ));
     assert_eq!(
-        evaluate_geometry("if (false) cube(1);").unwrap(),
+        d3(evaluate_geometry("if (false) cube(1);").unwrap()),
         GeoNode::Empty
     );
     assert!(matches!(
-        evaluate_geometry("if (1 > 2) cube(1); else sphere(1, $fn = 8);").unwrap(),
+        d3(evaluate_geometry("if (1 > 2) cube(1); else sphere(1, $fn = 8);").unwrap()),
         GeoNode::Leaf(_) // the else branch
     ));
 }
 
 #[test]
 fn for_iterates_and_unions() {
-    let count = |src| match evaluate_geometry(src).unwrap() {
+    let count = |src| match d3(evaluate_geometry(src).unwrap()) {
         GeoNode::Union(c) | GeoNode::Intersection(c) => c.len(),
         other => panic!("expected a fold node, got {other:?}"),
     };
@@ -140,7 +150,11 @@ fn for_iterates_and_unions() {
         count("for (i = [0:1], j = [0:2]) translate([i, j, 0]) cube(1);"),
         6
     ); // product 2×3
-    assert_eq!(count("for (i = 5) translate([i, 0, 0]) cube(1);"), 1); // scalar → one iteration
+    // scalar → one iteration: union_of collapses a single iteration to the child itself (a Transform).
+    assert!(matches!(
+        d3(evaluate_geometry("for (i = 5) translate([i, 0, 0]) cube(1);").unwrap()),
+        GeoNode::Transform { .. }
+    ));
     assert_eq!(
         count("intersection_for (i = [0:2]) rotate([0, 0, i * 30]) cube(10);"),
         3
@@ -150,7 +164,7 @@ fn for_iterates_and_unions() {
 #[test]
 fn color_wraps_its_subtree() {
     // A named color → GeoNode::Color with the resolved Rgba; child is the primitive.
-    match evaluate_geometry("color(\"red\") cube(10);").unwrap() {
+    match d3(evaluate_geometry("color(\"red\") cube(10);").unwrap()) {
         GeoNode::Color { color, child } => {
             assert_eq!(color, Rgba::opaque(1.0, 0.0, 0.0));
             assert!(matches!(*child, GeoNode::Leaf(_)));
@@ -159,31 +173,31 @@ fn color_wraps_its_subtree() {
     }
     // rgb vector + alpha override; hex; case-insensitive name.
     assert!(matches!(
-        evaluate_geometry("color([0, 1, 0], 0.5) cube(1);").unwrap(),
+        d3(evaluate_geometry("color([0, 1, 0], 0.5) cube(1);").unwrap()),
         GeoNode::Color { color, .. } if color == Rgba::new(0.0, 1.0, 0.0, 0.5)
     ));
     assert!(matches!(
-        evaluate_geometry("color(\"#0000ff\") sphere(1, $fn = 8);").unwrap(),
+        d3(evaluate_geometry("color(\"#0000ff\") sphere(1, $fn = 8);").unwrap()),
         GeoNode::Color { color, .. } if color == Rgba::opaque(0.0, 0.0, 1.0)
     ));
     // color OVER a boolean: the whole difference is the colored subtree.
     assert!(matches!(
-        evaluate_geometry("color(\"red\") difference() { cube(10); sphere(6, $fn = 8); }").unwrap(),
+        d3(evaluate_geometry("color(\"red\") difference() { cube(10); sphere(6, $fn = 8); }").unwrap()),
         GeoNode::Color { child, .. } if matches!(*child, GeoNode::Difference(_))
     ));
     // INVALID color inherits — NO Color node, just the child (OpenSCAD's -1 sentinel).
     assert!(matches!(
-        evaluate_geometry("color(\"notacolor\") cube(1);").unwrap(),
+        d3(evaluate_geometry("color(\"notacolor\") cube(1);").unwrap()),
         GeoNode::Leaf(_)
     ));
     // a non-string / non-vector color arg (a number) is also invalid → inherit.
     assert!(matches!(
-        evaluate_geometry("color(5) cube(1);").unwrap(),
+        d3(evaluate_geometry("color(5) cube(1);").unwrap()),
         GeoNode::Leaf(_)
     ));
     // nested: the OUTER node wraps the inner (the backend resolves outer-wins at J.2.9).
     assert!(matches!(
-        evaluate_geometry("color(\"red\") color(\"blue\") cube(1);").unwrap(),
+        d3(evaluate_geometry("color(\"red\") color(\"blue\") cube(1);").unwrap()),
         GeoNode::Color { color, child }
             if color == Rgba::opaque(1.0, 0.0, 0.0) && matches!(*child, GeoNode::Color { .. })
     ));
@@ -197,7 +211,7 @@ fn evaluate_geometry_file_reads_and_builds_a_tree() {
     let path = dir.join("geometry_tree_file.scad");
     std::fs::write(&path, "translate([1, 0, 0]) cube(2);").unwrap();
     assert!(matches!(
-        fab_lang::evaluate_geometry_file(&path, &[]).unwrap(),
+        d3(fab_lang::evaluate_geometry_file(&path, &[]).unwrap()),
         GeoNode::Transform { .. }
     ));
     // an unreadable path → Error::Load.

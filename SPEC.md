@@ -118,9 +118,14 @@ escape, not community respect.
   and worse, the warning would have to fire in the backend, which has no message channel. The
   typed tree makes well-formed input (all of BOSL2) impossible to mis-lower at COMPILE time,
   keeps the backend two clean types, and puts the mixing warning in eval where its source
-  location belongs. Strong typing is testing-before-the-test. Tessellation parity for the
-  extrudes is MEASURED against the oracle, not assumed — Manifold's `extrude`/`revolve` if the
-  metric tolerates, our own loft if not.
+  location belongs. Strong typing is testing-before-the-test. The eval-wire (J.3.2.1) realized
+  this: primitives + transforms + booleans build `Shape2D` nodes, and the mixing rule is pinned
+  BUG-FOR-BUG against OpenSCAD 2026.06.12 — the FIRST non-null child fixes a group's dimension
+  (a present-but-empty `cube(0)` counts; only a truly-absent `{}`/never-run-`for` is neutral),
+  each mismatched child is dropped with `Ignoring {n}D child object for {m}D operation`, and
+  `Mixing 2D and 3D objects is not supported` fires once per operation. Tessellation parity for
+  the extrudes is MEASURED against the oracle, not assumed — Manifold's `extrude`/`revolve` if
+  the metric tolerates, our own loft if not.
 - **Builtin geometry surface (deliberately small):** polyhedron, primitives, multmatrix,
   union/difference/intersection, hull, linear_extrude/rotate_extrude (2D via Manifold
   `CrossSection`, above), offset, projection. `import()` = our existing STL/3MF readers. DEFERRED: text() (fonts —

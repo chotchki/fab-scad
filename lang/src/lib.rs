@@ -147,13 +147,14 @@ pub fn evaluate_with_base_full(
     })
 }
 
-/// Evaluate OpenSCAD `source` to a CSG geometry TREE ([`GeoNode`]) — the J.2 output for CSG. A tree
-/// with transforms or booleans can't be flattened by fab-lang alone (that needs the Manifold kernel);
-/// a downstream backend (fab-scad's `GeometryBackend`) walks it. `use`/`include` resolve against CWD.
+/// Evaluate OpenSCAD `source` to a dimension-tagged geometry TREE ([`Geo`]) — the J.2/J.3 output. A
+/// tree with transforms, booleans, or any 2D geometry can't be flattened by fab-lang alone (that needs
+/// the Manifold kernel); a downstream backend (fab-scad's `GeometryBackend`) walks it, dispatching on the
+/// [`Geo::D2`]/[`Geo::D3`] tag. `use`/`include` resolve against CWD.
 ///
 /// # Errors
-/// As [`evaluate`], minus the single-primitive restriction (a transform/boolean tree is fine here).
-pub fn evaluate_geometry(source: &str) -> Result<GeoNode> {
+/// As [`evaluate`], minus the single-primitive restriction (a transform/boolean/2D tree is fine here).
+pub fn evaluate_geometry(source: &str) -> Result<Geo> {
     evaluate_geometry_with_base(source, Path::new("."), &[])
 }
 
@@ -161,7 +162,7 @@ pub fn evaluate_geometry(source: &str) -> Result<GeoNode> {
 ///
 /// # Errors
 /// As [`evaluate_file`], minus the single-primitive restriction.
-pub fn evaluate_geometry_file(path: &Path, library_paths: &[PathBuf]) -> Result<GeoNode> {
+pub fn evaluate_geometry_file(path: &Path, library_paths: &[PathBuf]) -> Result<Geo> {
     let source = std::fs::read_to_string(path)
         .map_err(|e| Error::Load(format!("{}: {e}", path.display())))?;
     let base_dir = path.parent().unwrap_or(Path::new("."));
@@ -176,8 +177,20 @@ pub fn evaluate_geometry_with_base(
     source: &str,
     base_dir: &Path,
     library_paths: &[PathBuf],
-) -> Result<GeoNode> {
+) -> Result<Geo> {
     Ok(eval::evaluate_source(source, base_dir, None, library_paths)?.0)
+}
+
+/// Like [`evaluate_geometry`], but returns the geometry tree PLUS the ordered `echo`/warning
+/// [`Message`]s — the tree-side analogue of [`evaluate_full`]. Needed when a 2D or mixed program's
+/// warnings matter (the 2D/3D "Mixing…" diagnostics), since [`evaluate_full`] can't reach them: it
+/// flattens through the no-backend `mesh_of`, which a 2D result LOUD-rejects. `use`/`include` resolve
+/// against CWD.
+///
+/// # Errors
+/// As [`evaluate_geometry`].
+pub fn evaluate_geometry_full(source: &str) -> Result<(Geo, Vec<Message>)> {
+    eval::evaluate_source(source, Path::new("."), None, &[])
 }
 
 #[cfg(test)]

@@ -36,6 +36,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
 
 use crate::Mesh;
+use crate::geom::{Affine, Affine2};
 use crate::parser::{
     Arg, BinOp, Expr, ExprKind, ModuleInstantiation, Parameter, Program, Stmt, StmtKind, UnOp,
 };
@@ -98,6 +99,12 @@ impl<'a> Ctx<'a> {
             .iter()
             .rev()
             .find_map(|&u| self.islands[u].modules.get(name).map(|&def| (def, u)))
+    }
+
+    /// Push a [`Message::Warning`] onto the ordered console log — the same buffer `echo` writes to, so
+    /// warnings and echoes keep their emission order (I.5).
+    fn warn(&self, message: String) {
+        self.messages.borrow_mut().push(Message::Warning(message));
     }
 }
 
@@ -856,7 +863,7 @@ pub(crate) fn evaluate_source(
     base_dir: &std::path::Path,
     root_path: Option<&std::path::Path>,
     library_paths: &[std::path::PathBuf],
-) -> crate::Result<(GeoNode, Vec<Message>)> {
+) -> crate::Result<(Geo, Vec<Message>)> {
     let _span = tracing::trace_span!("eval_program").entered();
     let loaded = loader::load(source, base_dir, root_path, library_paths)?;
     // `flatten` gives the executable statement stream + the global FUNCTION store; `islands` gives the
@@ -876,15 +883,16 @@ pub(crate) fn evaluate_source(
     Ok((tree, ctx.messages.into_inner()))
 }
 
-/// Evaluate a statement stream to a geometry TREE ([`GeoNode`]) — shared by [`eval_program`] and the
-/// loader path. The result is the implicit union of the top-level objects. The tree keeps fab-lang
-/// backend-agnostic: a single primitive is a `Leaf` [`mesh_of`] can flatten with no kernel; anything
-/// with a transform or a boolean needs the downstream Manifold backend (J.2).
+/// Evaluate a statement stream to a dimension-tagged geometry TREE ([`Geo`]) — shared by
+/// [`eval_program`] and the loader path. The result is the implicit union of the top-level objects (2D or
+/// 3D per their dimension, mixing warned). The tree keeps fab-lang backend-agnostic: a single 3D primitive
+/// is a `Leaf` [`mesh_of`] can flatten with no kernel; anything with a transform, a boolean, or any 2D
+/// geometry needs the downstream Manifold backend (J.2 / J.3).
 fn run_stmts<'a>(
     stmts: impl Iterator<Item = &'a Stmt>,
     ctx: &Ctx<'a>,
     scope: &Scope,
-) -> crate::Result<GeoNode> {
+) -> crate::Result<Geo> {
     let stmts: Vec<&Stmt> = stmts.collect();
     // The top-level hoisted scope IS the GLOBAL base for module bodies (a user module evaluates in
     // `global.child()` + its params — OpenSCAD's lexical hygiene). Hoist ONCE (not a pre-hoist +
@@ -892,7 +900,10 @@ fn run_stmts<'a>(
     // `a` is undef), then evaluate the geometry in that same scope.
     let global = hoist_scope(&stmts, scope, ctx)?;
     // Top-level statements resolve modules against island 0 (the root file, I.9.5).
-    Ok(union_of(eval_geometry(&stmts, &global, &global, 0, ctx)?))
+    Ok(union_of(
+        eval_geometry(&stmts, &global, &global, 0, ctx)?,
+        ctx,
+    ))
 }
 
 /// The geometry nodes a statement list produces, in order. Pass 1 HOISTS every assignment BEFORE any
@@ -908,7 +919,7 @@ fn eval_nodes<'a>(
     scope: &Scope,
     global: &Scope,
     island: usize,
-) -> crate::Result<Vec<GeoNode>> {
+) -> crate::Result<Vec<Geo>> {
     let hoisted = hoist_scope(stmts, scope, ctx)?;
     eval_geometry(stmts, &hoisted, global, island, ctx)
 }
@@ -936,7 +947,7 @@ fn eval_geometry<'a>(
     global: &Scope,
     island: usize,
     ctx: &Ctx<'a>,
-) -> crate::Result<Vec<GeoNode>> {
+) -> crate::Result<Vec<Geo>> {
     let mut scope = scope.clone();
     let mut nodes = Vec::new();
     for stmt in stmts {
@@ -947,13 +958,152 @@ fn eval_geometry<'a>(
     Ok(nodes)
 }
 
-/// Wrap geometry nodes in the implicit union: none → `Empty`, one → itself, many → `Union` (OpenSCAD
-/// unions multiple top-level objects + a block's children).
-fn union_of(mut nodes: Vec<GeoNode>) -> GeoNode {
-    match nodes.len() {
-        0 => GeoNode::Empty,
-        1 => nodes.pop().unwrap_or(GeoNode::Empty),
-        _ => GeoNode::Union(nodes),
+/// A dimension-homogeneous child list — the output of [`partition_children`], ready to become a boolean
+/// or a union node of the right dimension. Exactly one dimension survives a group (OpenSCAD picks the
+/// first child's), so this is a 2-way split, not a pair of lists.
+enum Children {
+    /// The kept children are all 3D.
+    D3(Vec<GeoNode>),
+    /// The kept children are all 2D.
+    D2(Vec<Shape2D>),
+}
+
+/// Filter a group's children to a SINGLE dimension, warning on (and dropping) any mismatch — OpenSCAD's
+/// "Mixing 2D and 3D objects is not supported". This is the shared choke point for every N-ary grouping
+/// op (implicit union, `union`/`difference`/`intersection`, `for`), so the rule lives in one place.
+///
+/// The dimension is set by the FIRST non-null child; each later NON-NULL child whose dimension differs is
+/// dropped with an "Ignoring {n}D child object for {m}D operation" warning, and the "Mixing…" warning
+/// fires ONCE (on the first mismatch). A matching child AFTER a mismatch still survives. Null children
+/// ([`Geo::is_null`] — a `{}` / never-run `for`) are dim-neutral: dropped, never dimension-fixing, never
+/// warned. Every clause here is pinned against OpenSCAD 2026.06.12 (see the `mixing_*` tests).
+///
+/// NOTE: the warning text matches OpenSCAD's core message; the ` in file …, line N` suffix it appends is
+/// deferred with the rest of location-aware diagnostics (I.5 / #94) — the geometry tree carries no spans.
+fn partition_children(children: Vec<Geo>, ctx: &Ctx) -> Children {
+    let mut d3: Vec<GeoNode> = Vec::new();
+    let mut d2: Vec<Shape2D> = Vec::new();
+    let mut dim: Option<u8> = None;
+    let mut warned_mixing = false;
+    for child in children {
+        if child.is_null() {
+            continue; // a `{}` / never-run `for` — no geometry object, so dimension-neutral
+        }
+        let cdim = child.dim();
+        match dim {
+            None => {
+                dim = Some(cdim); // the first present child fixes the group's dimension
+                push_child(child, &mut d2, &mut d3);
+            }
+            Some(d) if d == cdim => push_child(child, &mut d2, &mut d3),
+            Some(d) => {
+                if !warned_mixing {
+                    ctx.warn("Mixing 2D and 3D objects is not supported".to_string());
+                    warned_mixing = true;
+                }
+                ctx.warn(format!("Ignoring {cdim}D child object for {d}D operation"));
+                // dropped — the mismatched child contributes nothing to this operation
+            }
+        }
+    }
+    // No present child → an empty 3D result (the historical `Empty`, dimension-agnostic for export).
+    if matches!(dim, Some(2)) {
+        Children::D2(d2)
+    } else {
+        Children::D3(d3)
+    }
+}
+
+/// Route a kept child into its dimension's bucket (the mismatched dimension's bucket stays empty, since
+/// [`partition_children`] only keeps one dimension).
+fn push_child(child: Geo, d2: &mut Vec<Shape2D>, d3: &mut Vec<GeoNode>) {
+    match child {
+        Geo::D2(s) => d2.push(s),
+        Geo::D3(n) => d3.push(n),
+    }
+}
+
+/// Wrap a group's children in the implicit union of their (single) dimension: none → `Empty`, one →
+/// itself, many → `Union` (OpenSCAD unions multiple top-level objects + a block's children). The
+/// dimension mix is resolved first by [`partition_children`]. The collapse to `Empty` on an EMPTY group is
+/// deliberate — a `{}` / never-run `for` / not-taken `if` is null (dim-neutral); it means `for(i=[]) …`
+/// drops out of a CSG operand list rather than acting as an empty operand (OpenSCAD keeps a bare `{}` out
+/// of the list the same way, though it treats an empty `for` as a present empty operand — a node-identity
+/// quirk we don't reproduce; no real program relies on it).
+fn union_of(children: Vec<Geo>, ctx: &Ctx) -> Geo {
+    collapse(
+        partition_children(children, ctx),
+        GeoNode::Union,
+        Shape2D::Union,
+    )
+}
+
+/// The implicit-INTERSECTION combinator — `intersection_for`'s per-dimension collapse (none → `Empty`,
+/// one → itself, many → `Intersection`). The intersection sibling of [`union_of`], same null-collapse rule.
+fn intersection_of(children: Vec<Geo>, ctx: &Ctx) -> Geo {
+    collapse(
+        partition_children(children, ctx),
+        GeoNode::Intersection,
+        Shape2D::Intersection,
+    )
+}
+
+/// Collapse a dimension-resolved child list into ONE node of that dimension: none → `Empty`, one → the
+/// child itself, many → the N-ary node built by `mk3`/`mk2`. Shared by [`union_of`] and [`intersection_of`]
+/// (they differ only in the many-child constructor). Only the 3D side needs an empty case: a `D2` tag
+/// means the first non-null child was 2D and got kept, so a 2D list is NEVER empty (see
+/// [`partition_children`]) — the 2D side is a two-way split, no dead zero-arm.
+fn collapse(
+    children: Children,
+    mk3: fn(Vec<GeoNode>) -> GeoNode,
+    mk2: fn(Vec<Shape2D>) -> Shape2D,
+) -> Geo {
+    match children {
+        Children::D3(mut nodes) => Geo::D3(match nodes.len() {
+            0 => GeoNode::Empty,
+            1 => nodes.pop().unwrap_or(GeoNode::Empty),
+            _ => mk3(nodes),
+        }),
+        Children::D2(mut shapes) => Geo::D2(if shapes.len() == 1 {
+            shapes.pop().unwrap_or(Shape2D::Empty)
+        } else {
+            mk2(shapes) // ≥ 2 — a D2 partition never yields an empty list
+        }),
+    }
+}
+
+/// Build an EXPLICIT CSG boolean node (`union` / `difference` / `intersection` module) of its children's
+/// single dimension — no single-child collapse (an explicit `union(){ a; }` keeps its node, unlike the
+/// implicit [`union_of`]). `difference` is first-minus-rest, resolved by the backend's fold.
+fn boolean_of(name: &str, children: Vec<Geo>, ctx: &Ctx) -> Geo {
+    match partition_children(children, ctx) {
+        Children::D3(kids) => Geo::D3(match name {
+            "difference" => GeoNode::Difference(kids),
+            "intersection" => GeoNode::Intersection(kids),
+            _ => GeoNode::Union(kids),
+        }),
+        Children::D2(kids) => Geo::D2(match name {
+            "difference" => Shape2D::Difference(kids),
+            "intersection" => Shape2D::Intersection(kids),
+            _ => Shape2D::Union(kids),
+        }),
+    }
+}
+
+/// Wrap a single (already dimension-resolved) child in an affine transform of its dimension: a 3D child
+/// gets a [`GeoNode::Transform`] with the full 3×4 matrix; a 2D child a [`Shape2D::Transform`] with the
+/// matrix's 2D restriction ([`Affine2::from_affine3`] — a 2D shape lives in the `z = 0` plane, so only the
+/// in-plane part applies, matching OpenSCAD; verified vs 2026.06.12 for translate/scale/rotate).
+fn transform_of(matrix: Affine, child: Geo) -> Geo {
+    match child {
+        Geo::D3(node) => Geo::D3(GeoNode::Transform {
+            matrix,
+            child: Box::new(node),
+        }),
+        Geo::D2(shape) => Geo::D2(Shape2D::Transform {
+            matrix: Affine2::from_affine3(&matrix),
+            child: Box::new(shape),
+        }),
     }
 }
 
@@ -967,11 +1117,14 @@ fn for_product<'a>(
     global: &Scope,
     island: usize,
     ctx: &Ctx<'a>,
-    out: &mut Vec<GeoNode>,
+    out: &mut Vec<Geo>,
 ) -> crate::Result<()> {
     match args.split_first() {
         // all vars bound → the body
-        None => out.push(union_of(eval_nodes(children, ctx, scope, global, island)?)),
+        None => out.push(union_of(
+            eval_nodes(children, ctx, scope, global, island)?,
+            ctx,
+        )),
         Some((arg, rest)) => {
             let name = arg.name.as_deref().unwrap_or("");
             let iterable = eval_with_ctx(&arg.value, scope, ctx)?;
@@ -1006,7 +1159,7 @@ fn call_user_module<'a>(
     global: &Scope,
     island: usize,
     ctx: &Ctx<'a>,
-) -> crate::Result<GeoNode> {
+) -> crate::Result<Geo> {
     let (params, body) = def;
     let depth = ctx.module_depth.get();
     if depth >= MAX_MODULE_DEPTH {
@@ -1030,7 +1183,7 @@ fn call_user_module<'a>(
     ctx.children_stack.borrow_mut().pop(); // restore even on error (no `?` before these)
     ctx.module_depth.set(depth);
     result?;
-    Ok(union_of(nodes))
+    Ok(union_of(nodes, ctx))
 }
 
 /// Render `children()` / `children(i)` (I.2.5): the current module call's stashed call-site children,
@@ -1043,10 +1196,10 @@ fn eval_children<'a>(
     scope: &Scope,
     global: &Scope,
     ctx: &Ctx<'a>,
-) -> crate::Result<GeoNode> {
+) -> crate::Result<Geo> {
     let (positional, _, _) = module::eval_args(mi, scope, ctx)?;
     let Some(frame) = ctx.children_stack.borrow_mut().pop() else {
-        return Ok(GeoNode::Empty); // children() outside a module call → nothing
+        return Ok(Geo::D3(GeoNode::Empty)); // children() outside a module call → nothing
     };
     let selected: Vec<&Stmt> = match positional.first() {
         None => frame.stmts.iter().collect(), // children() → all
@@ -1063,7 +1216,7 @@ fn eval_children<'a>(
     // Children render in the CALLER's scope AND module island (both stashed on the frame, I.9.5).
     let result = eval_nodes(&selected, ctx, &frame.scope, global, frame.island);
     ctx.children_stack.borrow_mut().push(frame); // restore for the caller's continuation
-    Ok(union_of(result?))
+    Ok(union_of(result?, ctx))
 }
 
 /// A child count as a `Num` — the child list is tiny, so the `usize → f64` widening is exact.
@@ -1154,17 +1307,22 @@ fn iterate_values(v: &Value) -> Vec<Value> {
     }
 }
 
-/// Flatten a geometry tree WITHOUT a backend: `Empty` → an empty mesh, a single `Leaf` → its mesh.
-/// Anything with a transform or a boolean needs the Manifold backend (fab-scad), so it errors LOUD —
-/// callers reach for [`evaluate_geometry`](crate::evaluate_geometry) + a backend instead.
-pub(crate) fn mesh_of(tree: GeoNode) -> crate::Result<Mesh> {
+/// Flatten a geometry tree WITHOUT a backend: `Empty` → an empty mesh, a single 3D `Leaf` → its mesh.
+/// Anything with a transform, a boolean, or ANY 2D geometry needs the Manifold backend (fab-scad), so it
+/// errors LOUD — callers reach for [`evaluate_geometry`](crate::evaluate_geometry) + a backend instead.
+pub(crate) fn mesh_of(tree: Geo) -> crate::Result<Mesh> {
     match tree {
-        GeoNode::Empty => Ok(Mesh::new()),
-        GeoNode::Leaf(mesh) => Ok(mesh),
+        Geo::D3(GeoNode::Empty) => Ok(Mesh::new()),
+        Geo::D3(GeoNode::Leaf(mesh)) => Ok(mesh),
         // Color is a display property, not geometry — a colored PRIMITIVE still flattens with no backend.
-        GeoNode::Color { child, .. } => mesh_of(*child),
-        _ => Err(crate::Error::Unimplemented(
+        Geo::D3(GeoNode::Color { child, .. }) => mesh_of(Geo::D3(*child)),
+        Geo::D3(_) => Err(crate::Error::Unimplemented(
             "geometry with transforms or booleans needs a backend — use evaluate_geometry (J.2)",
+        )),
+        // 2D geometry can't become a 3D mesh — it lowers to a Manifold CrossSection in the backend (J.3).
+        Geo::D2(_) => Err(crate::Error::Unimplemented(
+            "2D geometry (square/circle/polygon/…) has no 3D mesh — use evaluate_geometry + a backend, or \
+             extrude it into 3D (J.3)",
         )),
     }
 }
@@ -1304,7 +1462,7 @@ fn eval_stmt<'a>(
     global: &Scope,
     island: usize,
     ctx: &Ctx<'a>,
-    nodes: &mut Vec<GeoNode>,
+    nodes: &mut Vec<Geo>,
 ) -> crate::Result<()> {
     match &stmt.kind {
         // Definitions + empties are no-ops at eval. `Empty`: nothing. `FunctionDef`: already registered
@@ -1322,55 +1480,67 @@ fn eval_stmt<'a>(
         // (its own hoisting).
         StmtKind::Block(stmts) => {
             let refs: Vec<&Stmt> = stmts.iter().collect();
-            nodes.push(union_of(eval_nodes(&refs, ctx, scope, global, island)?));
+            nodes.push(union_of(
+                eval_nodes(&refs, ctx, scope, global, island)?,
+                ctx,
+            ));
         }
         // `echo`/`assert` at statement level are module instantiations, but they produce console
         // output, not geometry — handle them here (no node pushed) before the geometry dispatch. Their
         // geometry CHILDREN (`echo(x) cube();`) ride the module-children machinery (I.2.4 / J); rare.
         StmtKind::Module(mi) if mi.name == "echo" => emit_echo(&mi.args, scope, scope, ctx)?,
         StmtKind::Module(mi) if mi.name == "assert" => check_assert(&mi.args, scope, scope, ctx)?,
-        // An affine TRANSFORM wraps the implicit union of its children (J.2). `$`-args don't reach a
-        // transform, so its child scope is dropped.
+        // An affine TRANSFORM wraps the implicit union of its children (J.2 / J.3) — a 3D child gets a
+        // `GeoNode::Transform`, a 2D child a `Shape2D::Transform` of the 2D sub-matrix ([`transform_of`]).
+        // `$`-args don't reach a transform, so its child scope is dropped.
         StmtKind::Module(mi) if geo::is_transform(&mi.name) => {
             let (positional, named, _) = module::eval_args(mi, scope, ctx)?;
             let matrix = geo::transform_matrix(&mi.name, &positional, &named);
             let refs: Vec<&Stmt> = mi.children.iter().collect();
-            let child = union_of(eval_nodes(&refs, ctx, scope, global, island)?);
-            nodes.push(GeoNode::Transform {
-                matrix,
-                child: Box::new(child),
-            });
+            let child = union_of(eval_nodes(&refs, ctx, scope, global, island)?, ctx);
+            nodes.push(transform_of(matrix, child));
         }
-        // A CSG BOOLEAN over its children — each geometry child is an operand (J.2). `difference` is the
-        // first minus the rest, `intersection` is the common volume, `union` merges (also the default).
+        // A CSG BOOLEAN over its children — each geometry child is an operand (J.2 / J.3). `difference` is
+        // the first minus the rest, `intersection` is the common area/volume, `union` merges (also the
+        // default). The operands' dimension is resolved (mixing warned) by [`boolean_of`], so a 2D
+        // boolean builds `Shape2D` nodes and a 3D one `GeoNode`s.
         StmtKind::Module(mi) if geo::is_boolean(&mi.name) => {
             let refs: Vec<&Stmt> = mi.children.iter().collect();
             let children = eval_nodes(&refs, ctx, scope, global, island)?;
-            nodes.push(match mi.name.as_str() {
-                "difference" => GeoNode::Difference(children),
-                "intersection" => GeoNode::Intersection(children),
-                _ => GeoNode::Union(children),
-            });
+            nodes.push(boolean_of(mi.name.as_str(), children, ctx));
         }
         // `hull()` — the convex hull of the implicit union of its children (J.4.1). Like a boolean over
-        // the children, but N-ary (the backend hulls the whole set at once, not a pairwise fold).
+        // the children, but N-ary (the backend hulls the whole set at once, not a pairwise fold). 2D hull
+        // is LOUD-deferred: `Shape2D` has no hull node yet (the 2D backend surface lacks a `hull_2d`) — a
+        // follow-up, never silently wrong.
         StmtKind::Module(mi) if mi.name == "hull" => {
             let refs: Vec<&Stmt> = mi.children.iter().collect();
             let children = eval_nodes(&refs, ctx, scope, global, island)?;
-            nodes.push(GeoNode::Hull(children));
+            match partition_children(children, ctx) {
+                Children::D3(kids) => nodes.push(Geo::D3(GeoNode::Hull(kids))),
+                Children::D2(_) => {
+                    return Err(crate::Error::Unimplemented(
+                        "hull() over 2D children is not yet wired (the 2D backend has no hull op) — a J.3 \
+                         follow-up",
+                    ));
+                }
+            }
         }
         // `color()` — set the subtree's display color (BOSL2-critical, J.2.8). An INVALID color (unknown
-        // name, wrong arg type) INHERITS: no Color node, just the children (OpenSCAD's -1 sentinel).
+        // name, wrong arg type) INHERITS: no Color node, just the children (OpenSCAD's -1 sentinel). Color
+        // is a 3D-only display property in our tree; a 2D child passes THROUGH uncolored (color is
+        // display-only — geometrically identical — and `Shape2D` carries no color, a documented v1 gap).
         StmtKind::Module(mi) if mi.name == "color" => {
             let (positional, named, _) = module::eval_args(mi, scope, ctx)?;
             let refs: Vec<&Stmt> = mi.children.iter().collect();
-            let child = union_of(eval_nodes(&refs, ctx, scope, global, island)?);
-            match geo::resolve_color(&positional, &named) {
-                Some(color) => nodes.push(GeoNode::Color {
+            let child = union_of(eval_nodes(&refs, ctx, scope, global, island)?, ctx);
+            match (child, geo::resolve_color(&positional, &named)) {
+                (Geo::D3(node), Some(color)) => nodes.push(Geo::D3(GeoNode::Color {
                     color,
-                    child: Box::new(child),
-                }),
-                None => nodes.push(child),
+                    child: Box::new(node),
+                })),
+                // invalid color (inherit) OR a 2D child (no color node) → the child unchanged
+                (child, _) => nodes.push(child),
             }
         }
         // `children()` / `children(i)` (I.2.5) — render the enclosing module call's CALL-SITE children,
@@ -1389,11 +1559,16 @@ fn eval_stmt<'a>(
                 child.bind(arg.name.as_deref().unwrap_or(""), value);
             }
             let refs: Vec<&Stmt> = mi.children.iter().collect();
-            nodes.push(union_of(eval_nodes(&refs, ctx, &child, global, island)?));
+            nodes.push(union_of(
+                eval_nodes(&refs, ctx, &child, global, island)?,
+                ctx,
+            ));
         }
         // `for` / `intersection_for`: bind the loop variable(s) over a range/vector, evaluate the body
         // per iteration, and union (or intersect) the results (I.3.3 — the statement half of control
-        // flow). Multiple loop vars nest as a product, like the comprehension `for`.
+        // flow). Multiple loop vars nest as a product, like the comprehension `for`. The combinators
+        // resolve the iterations' dimension (a 2D `for` unions `Shape2D`s), and collapse an empty loop to
+        // a null result.
         StmtKind::Module(mi) if mi.name == "for" || mi.name == "intersection_for" => {
             let children: Vec<&Stmt> = mi.children.iter().collect();
             let mut iterations = Vec::new();
@@ -1407,9 +1582,9 @@ fn eval_stmt<'a>(
                 &mut iterations,
             )?;
             nodes.push(if mi.name == "intersection_for" {
-                GeoNode::Intersection(iterations)
+                intersection_of(iterations, ctx)
             } else {
-                GeoNode::Union(iterations)
+                union_of(iterations, ctx)
             });
         }
         // A module INSTANTIATION: resolve the name against the CURRENT island (I.9.5), which is what a
@@ -1424,7 +1599,7 @@ fn eval_stmt<'a>(
                 Some((def, home)) => {
                     nodes.push(call_user_module(mi, def, home, scope, global, island, ctx)?);
                 }
-                None => nodes.push(GeoNode::Leaf(module::eval_module(mi, scope, ctx)?)),
+                None => nodes.push(module::eval_module(mi, scope, ctx)?),
             }
         }
         // `if (cond) A else B` contributes the TAKEN branch's geometry (I.3.3).
@@ -1435,7 +1610,10 @@ fn eval_stmt<'a>(
                 els
             };
             let refs: Vec<&Stmt> = branch.iter().collect();
-            nodes.push(union_of(eval_nodes(&refs, ctx, scope, global, island)?));
+            nodes.push(union_of(
+                eval_nodes(&refs, ctx, scope, global, island)?,
+                ctx,
+            ));
         }
         // The loader resolves top-level `use`/`include` away (include → spliced, use → imported), so a
         // node reaching here is either a raw `eval_program` on an unloaded program or a `use`/`include`

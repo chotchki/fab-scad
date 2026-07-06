@@ -10,7 +10,7 @@
     reason = "integration test: unwrap/panic ARE the assertions; the extents are EXACT (literal cube args, no trig)"
 )]
 
-use fab_lang::{Error, GeoNode, evaluate, evaluate_geometry};
+use fab_lang::{Error, Geo, GeoNode, evaluate, evaluate_geometry};
 
 /// The max-x extent of a single-primitive program's mesh — a `cube(s)` (uncentered) spans `x ∈ [0, s]`,
 /// so this reads back `s`, letting a test prove which arg value actually reached the body.
@@ -21,6 +21,15 @@ fn extent(src: &str) -> f64 {
         .iter()
         .map(|v| v.x)
         .fold(f64::MIN, f64::max)
+}
+
+/// Unwrap a 3D geometry result to its [`GeoNode`] — every module here builds 3D geometry, so the
+/// `Geo::D3` dimension tag is just noise to strip before matching on the tree shape.
+fn d3(g: Geo) -> GeoNode {
+    match g {
+        Geo::D3(node) => node,
+        Geo::D2(shape) => panic!("expected a 3D result, got 2D: {shape:?}"),
+    }
 }
 
 /// A module wrapping a single primitive flattens to that primitive's mesh (no backend needed).
@@ -53,16 +62,16 @@ fn module_call_binds_args() {
 #[test]
 fn module_body_is_full_geometry() {
     assert!(matches!(
-        evaluate_geometry("module shifted() translate([5, 0, 0]) cube(1); shifted();").unwrap(),
+        d3(evaluate_geometry("module shifted() translate([5, 0, 0]) cube(1); shifted();").unwrap()),
         GeoNode::Transform { .. }
     ));
     assert!(matches!(
-        evaluate_geometry("module two() { cube(1); sphere(1, $fn = 8); } two();").unwrap(),
+        d3(evaluate_geometry("module two() { cube(1); sphere(1, $fn = 8); } two();").unwrap()),
         GeoNode::Union(c) if c.len() == 2
     ));
     // instantiated twice → two objects → an implicit union at the top level.
     assert!(matches!(
-        evaluate_geometry("module u() cube(1); u(); translate([3, 0, 0]) u();").unwrap(),
+        d3(evaluate_geometry("module u() cube(1); u(); translate([3, 0, 0]) u();").unwrap()),
         GeoNode::Union(c) if c.len() == 2
     ));
 }
@@ -100,10 +109,10 @@ fn recursive_module_terminates() {
     )
     .unwrap();
     // 3 cubes get produced (n = 3, 2, 1); the exact nesting is union/transform, just assert it built.
-    assert!(!matches!(tree, GeoNode::Empty));
+    assert!(!matches!(d3(tree), GeoNode::Empty));
     // rec(0) → the `if` is false → no geometry.
     assert_eq!(
-        evaluate_geometry("module rec(n) if (n > 0) cube(1); rec(0);").unwrap(),
+        d3(evaluate_geometry("module rec(n) if (n > 0) cube(1); rec(0);").unwrap()),
         GeoNode::Empty
     );
 }
@@ -154,7 +163,7 @@ fn statement_let_binds_children() {
     );
     // it wraps MULTIPLE children (a block), all under the bindings → a union
     assert!(matches!(
-        evaluate_geometry("let(a = 1) { cube(a); translate([2, 0, 0]) cube(a); }").unwrap(),
+        d3(evaluate_geometry("let(a = 1) { cube(a); translate([2, 0, 0]) cube(a); }").unwrap()),
         GeoNode::Union(_)
     ));
 }
@@ -194,17 +203,20 @@ fn special_variable_assignment_scopes() {
 fn children_renders_call_site_children() {
     // `children()` wrapped in a transform → the child, transformed.
     assert!(matches!(
-        evaluate_geometry("module m() translate([5, 0, 0]) children(); m() cube(1);").unwrap(),
+        d3(evaluate_geometry("module m() translate([5, 0, 0]) children(); m() cube(1);").unwrap()),
         GeoNode::Transform { .. }
     ));
     // several children → their union.
     assert!(matches!(
-        evaluate_geometry("module m() children(); m() { cube(1); translate([5, 0, 0]) cube(1); }")
-            .unwrap(),
+        d3(evaluate_geometry("module m() children(); m() { cube(1); translate([5, 0, 0]) cube(1); }")
+            .unwrap()),
         GeoNode::Union(c) if c.len() == 2
     ));
     // `children()` OUTSIDE any module call → nothing.
-    assert_eq!(evaluate_geometry("children();").unwrap(), GeoNode::Empty);
+    assert_eq!(
+        d3(evaluate_geometry("children();").unwrap()),
+        GeoNode::Empty
+    );
 }
 
 /// `children(i)` picks the i-th call-site child; `$children` is their count.
@@ -224,33 +236,35 @@ fn children_index_and_count() {
     );
     // an out-of-range index → nothing.
     assert_eq!(
-        evaluate_geometry("module pick() children(9); pick() cube(1);").unwrap(),
+        d3(evaluate_geometry("module pick() children(9); pick() cube(1);").unwrap()),
         GeoNode::Empty
     );
     // children([indices]) → those children (out-of-range drop).
     assert!(matches!(
-        evaluate_geometry(
+        d3(evaluate_geometry(
             "module pick() children([0, 2]); pick() { cube(1); sphere(1, $fn = 8); cube(2); }"
         )
-        .unwrap(),
+        .unwrap()),
         GeoNode::Union(c) if c.len() == 2
     ));
     // a non-index arg (a string) → nothing.
     assert_eq!(
-        evaluate_geometry("module pick() children(\"x\"); pick() cube(1);").unwrap(),
+        d3(evaluate_geometry("module pick() children(\"x\"); pick() cube(1);").unwrap()),
         GeoNode::Empty
     );
     // $children is the count — a module can gate on it.
     assert!(matches!(
-        evaluate_geometry(
+        d3(evaluate_geometry(
             "module g() if ($children == 2) cube(1); g() { sphere(1, $fn = 8); sphere(1, $fn = 8); }"
         )
-        .unwrap(),
+        .unwrap()),
         GeoNode::Leaf(_)
     ));
     assert_eq!(
-        evaluate_geometry("module g() if ($children == 2) cube(1); g() sphere(1, $fn = 8);")
-            .unwrap(),
+        d3(
+            evaluate_geometry("module g() if ($children == 2) cube(1); g() sphere(1, $fn = 8);")
+                .unwrap()
+        ),
         GeoNode::Empty
     );
 }

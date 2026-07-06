@@ -185,19 +185,14 @@ pub(crate) fn cylinder(h: f64, r1: f64, r2: f64, fragments: u32, center: bool) -
 
 // ─────────────────────────────── 2D primitives (J.3.2) → contours ───────────────────────────────
 // The tessellation half of J.3.2 (parity-critical, esp. circle's `$fn`): pure `args → contours`
-// builders, unit-tested against exact geometry. WIRING them into the evaluator — recognizing
-// square/circle/polygon as 2D module calls and threading the dimension-tagged `Geo` result through the
-// geometry pass — is the J.3.2 eval-wire follow-up (it changes `evaluate_geometry`'s return type, which
-// ripples into fab-scad, so it lands with review). The `dead_code` allow drops with that wiring.
+// builders, unit-tested against exact geometry. The evaluator wires these in via
+// [`module::eval_module`](super::module) (J.3.2.1) — square/circle/polygon are recognized as 2D module
+// calls that build `Shape2D::Polygon` leaves, threaded through the dimension-tagged `Geo` geometry pass.
 
 /// `square([x, y], center)` → its single contour (OpenSCAD `SquareNode`). CCW winding
 /// `[0,0] → [x,0] → [x,y] → [0,y]`; `center` puts the centroid at the origin. Degenerate
 /// (non-positive / non-finite) → no contours (an empty region).
 #[must_use]
-#[allow(
-    dead_code,
-    reason = "J.3.2 2D tessellation; the eval-wire follow-up (Geo-tagged geometry pass) calls it"
-)]
 pub(crate) fn square(x: f64, y: f64, center: bool) -> Vec<Contour> {
     if !(x.is_finite() && y.is_finite()) || x <= 0.0 || y <= 0.0 {
         return Vec::new();
@@ -220,10 +215,6 @@ pub(crate) fn square(x: f64, y: f64, center: bool) -> Vec<Contour> {
 /// and 3D share `$fn` parity to the bit). `fragments` is `$fn`-resolved by [`fragments`](super::fragments)
 /// (always ≥ 3). Degenerate radius (non-positive / non-finite) → no contours.
 #[must_use]
-#[allow(
-    dead_code,
-    reason = "J.3.2 2D tessellation; the eval-wire follow-up (Geo-tagged geometry pass) calls it"
-)]
 pub(crate) fn circle(r: f64, fragments: u32) -> Vec<Contour> {
     if !r.is_finite() || r <= 0.0 {
         return Vec::new();
@@ -242,10 +233,6 @@ pub(crate) fn circle(r: f64, fragments: u32) -> Vec<Contour> {
 /// is DROPPED and a contour of fewer than 3 valid points is discarded (the exact out-of-range ERROR is
 /// the validation layer, a later J.3 task, mirroring [`polyhedron`]). No usable contour → empty.
 #[must_use]
-#[allow(
-    dead_code,
-    reason = "J.3.2 2D tessellation; the eval-wire follow-up (Geo-tagged geometry pass) calls it"
-)]
 pub(crate) fn polygon(points: &[Vec2], paths: Option<&[Vec<u32>]>) -> Vec<Contour> {
     match paths {
         // No paths → the whole point list is one contour (needs ≥ 3 to bound any area).

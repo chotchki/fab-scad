@@ -249,6 +249,18 @@ impl Affine2 {
         Affine2(m)
     }
 
+    /// The 2D restriction of a 3D [`Affine`] — its top-left 2×2 plus the x/y translation, with the z row
+    /// and column DROPPED. This is how a `translate`/`rotate`/`scale`/`mirror` on a 2D shape lowers: a 2D
+    /// object lives in the `z = 0` plane, so the in-plane part of the 3D transform is the 2D transform
+    /// (OpenSCAD does the same — a 2D node carries the 2D sub-transform of its 3D matrix). An out-of-plane
+    /// rotation (e.g. `rotate([90,0,0])`) collapses here, matching OpenSCAD's flatten-to-XY.
+    #[must_use]
+    pub const fn from_affine3(a: &Affine) -> Self {
+        let m = &a.0;
+        // rows 0,1 / columns 0,1 (x,y basis) + column 3 (translation) — z (cols 2, rows 2) dropped.
+        Affine2([m[0], m[1], m[3], m[4], m[5], m[7]])
+    }
+
     /// The row-major `[a, b, c, d, e, f]`.
     #[must_use]
     pub const fn as_row_major(&self) -> [f64; 6] {

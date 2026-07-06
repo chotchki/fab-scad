@@ -49,8 +49,9 @@ mod webcolors;
 pub use customizer::{Constraint, CustomParam, Customizer, DropdownItem, customize};
 pub use error::{Error, Result};
 pub use eval::{
-    Contour, Evaluation, ExtrudeKind, Geo, GeoNode, Join2D, Message, RANGE_MAX, RangeIter, Scope,
-    Shape2D, Value, eval_expr, eval_program, fragments, range_iter, range_len,
+    Contour, Evaluation, ExtrudeKind, FileTable, Geo, GeoNode, Join2D, Message, RANGE_MAX,
+    RangeIter, Resolution, Scope, Shape2D, SourceNeed, Value, eval_expr, eval_program, fragments,
+    range_iter, range_len,
 };
 pub use geom::{Affine, Affine2, Dims, Rgba, Tri, Vec2, Vec3};
 pub use lexer::{Lexed, Token, TokenKind, decode_str, lex, num_value};
@@ -191,6 +192,43 @@ pub fn evaluate_geometry_with_base(
 /// As [`evaluate_geometry`].
 pub fn evaluate_geometry_full(source: &str) -> Result<(Geo, Vec<Message>)> {
     eval::evaluate_source(source, Path::new("."), None, &[])
+}
+
+/// Resolve `source` to a [`Resolution`] against a caller-supplied mesh [`FileTable`] — the pure needs
+/// fixpoint's INNER step (M.3). `import`/`surface` paths are RUNTIME expressions, discovered only by
+/// executing; a path the table lacks comes back as [`Resolution::Incomplete`] naming it (the run
+/// substitutes an empty placeholder + keeps going, so ONE call surfaces EVERY missing file). The caller
+/// reads the named files, adds their meshes to the table, and calls again — iterating to
+/// [`Resolution::Complete`]. fab-lang itself does ZERO IO; the M.4 shell drives this loop. Returning
+/// Incomplete instead of a sync reader callback is what lets an ASYNC (wasm) shell await between rounds.
+///
+/// # Errors
+/// As [`evaluate_geometry`] (parse / `use`/`include` load / eval), minus the import LOUD-defer — a missing
+/// import file is a NEED here, not an error.
+pub fn resolve_geometry_with_base(
+    source: &str,
+    base_dir: &Path,
+    library_paths: &[PathBuf],
+    files: &FileTable,
+) -> Result<Resolution> {
+    eval::resolve_source(source, base_dir, None, library_paths, files)
+}
+
+/// Like [`resolve_geometry_with_base`], but for a `.scad` FILE — resolving its `use`/`include` graph AND
+/// its `import`/`surface` File needs. The ROOT file is read here (it names itself); the imported meshes come
+/// from `files`.
+///
+/// # Errors
+/// As [`evaluate_geometry_file`], minus the import LOUD-defer.
+pub fn resolve_geometry_file(
+    path: &Path,
+    library_paths: &[PathBuf],
+    files: &FileTable,
+) -> Result<Resolution> {
+    let source = std::fs::read_to_string(path)
+        .map_err(|e| Error::Load(format!("{}: {e}", path.display())))?;
+    let base_dir = path.parent().unwrap_or(Path::new("."));
+    eval::resolve_source(&source, base_dir, Some(path), library_paths, files)
 }
 
 #[cfg(test)]

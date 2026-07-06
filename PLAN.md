@@ -112,8 +112,8 @@ added 2026-07-05.
 - [ ] L.4 - Exit review: divergences zero-or-documented, perf-vs-oracle published; rung 2/3 (intrinsics, JIT) phase cut FROM THIS DATA
 ## Phase M - scad-rs: pure source-provider (fab-lang zero-IO; caller fulfills a needs fixpoint)
 - [ ] M.1 - M.1 - The pure source-provider contract
-- [ ] M.2 - M.2 - Pure loader: source table in, Scad needs out (static parse-time fixpoint)
-- [ ] M.3 - M.3 - Eval-time File needs: import/surface emit needs + placeholder-continue
+- [x] M.2 - M.2 - Pure loader: source table in, Scad needs out (static parse-time fixpoint)
+- [x] M.3 - M.3 - Eval-time File needs: import/surface emit needs + placeholder-continue
 - [ ] M.4 - M.4 - The IO shell: the outer fixpoint loop (the one place std::fs lives)
 - [ ] M.5 - M.5 - import()/surface() backend: readers fulfill File needs → Mesh
 - [ ] M.6 - M.6 - Differential + coverage close-out

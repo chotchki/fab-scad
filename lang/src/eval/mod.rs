@@ -33,13 +33,61 @@ pub use scope::Scope;
 pub use value::{RANGE_MAX, RangeIter, Value, range_iter, range_len};
 
 use std::cell::{Cell, RefCell};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::Mesh;
 use crate::geom::{Affine, Affine2};
 use crate::parser::{
     Arg, BinOp, Expr, ExprKind, ModuleInstantiation, Parameter, Program, Stmt, StmtKind, UnOp,
 };
+
+/// The caller-supplied mesh table that fulfills `import`/`surface` [`SourceNeed::File`]s (M.3): the literal
+/// `file=` path a call named → the [`Mesh`] the caller read for it. fab-lang does ZERO IO, so it never
+/// reads these files itself — the impure caller (the M.4 shell, via M.5's STL/3MF/heightmap readers) reads
+/// them and hands the meshes back through this table, keyed by the EXACT `raw` string the need carried.
+pub type FileTable = BTreeMap<String, Mesh>;
+
+/// A source the pure evaluator needs but can't produce — the caller reads it, adds it, and re-runs (the
+/// needs fixpoint). Two kinds, one per discovery phase: a `Scad` reference (a `use`/`include` target, found
+/// STATICALLY by the loader) and a `File` reference (an `import`/`surface` mesh path, found only by
+/// EXECUTING — the path is a runtime expression, not a static token). M.3 emits `File`; the loader's own
+/// Scad channel folds into this same enum in M.4, when its fixpoint loop lifts out of `loader::load`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SourceNeed {
+    /// A `use`/`include` target: the literal `<...>` path `raw`, resolved against the requesting file's
+    /// directory `from_dir` (the base for the library-path search).
+    Scad {
+        /// The requesting file's directory — the base `raw` resolves against.
+        from_dir: std::path::PathBuf,
+        /// The literal `<...>` reference text.
+        raw: String,
+    },
+    /// An `import`/`surface` mesh path: the literal `file=` string, resolved + read by the caller.
+    File {
+        /// The literal `file=` path the call named.
+        raw: String,
+    },
+}
+
+/// The outcome of a pure evaluation (M.1): either it CLOSED — every referenced source was present, so here's
+/// the geometry tree + its ordered `echo`/warning messages — or it's still missing sources, which the caller
+/// fulfills and re-runs. [`Resolution::Incomplete`] deliberately carries NO geo/messages: the caller re-runs
+/// from scratch with a fuller [`FileTable`], which re-emits them on the closing pass, so surfacing them here
+/// would only double-count. A mesh rarely gates control flow, so one re-run usually closes the fixpoint.
+pub enum Resolution {
+    /// Nothing left to resolve — the geometry tree plus the run's ordered console messages.
+    Complete {
+        /// The evaluated geometry tree.
+        geo: Geo,
+        /// The run's `echo`/warning messages, in emission order.
+        messages: Vec<Message>,
+    },
+    /// Still-missing sources; the caller reads them, adds them to the table, and evaluates again.
+    Incomplete {
+        /// The sources this run asked for and couldn't get, deduped + deterministically ordered.
+        needs: Vec<SourceNeed>,
+    },
+}
 
 /// The evaluation context, borrowed from the `Program`:
 /// - `functions`: the user-function store (name → params + body). Functions live in their OWN
@@ -76,6 +124,15 @@ pub(super) struct Ctx<'a> {
     islands: loader::Islands<'a>,
     closures: RefCell<Vec<(&'a [Parameter], &'a Expr)>>,
     messages: RefCell<Vec<Message>>,
+    /// The caller-supplied mesh table an `import`/`surface` resolves its `file=` path against (M.3). `None`
+    /// on the non-loader `build_ctx`/`default` paths — no table means every import is a need. Read-only
+    /// during geometry eval.
+    files: Option<&'a FileTable>,
+    /// The `file=` paths this run asked for but the table didn't have (M.3): `import`/`surface` records each
+    /// here and keeps going on an EMPTY placeholder mesh, so ONE run surfaces ALL its needs (a mesh rarely
+    /// gates control flow). A `BTreeSet` dedups + orders them deterministically; drained into
+    /// [`Resolution::Incomplete`] (or a LOUD error on the no-table entries).
+    file_needs: RefCell<BTreeSet<String>>,
     /// Live user-module call depth — the Safari-cliff guard. Statement eval is HOST-recursive (a module
     /// body re-enters `eval_stmt`), so a self-recursive module could overflow; this bounds it, LOUD
     /// ([`MAX_MODULE_DEPTH`]), never a silent stack crash.
@@ -119,6 +176,33 @@ impl<'a> Ctx<'a> {
     /// warnings and echoes keep their emission order (I.5).
     fn warn(&self, message: String) {
         self.messages.borrow_mut().push(Message::Warning(message));
+    }
+
+    /// Resolve an `import`/`surface` `file=` path to a [`Mesh`] (M.3): the caller-supplied mesh if the
+    /// [`FileTable`] has it, else an EMPTY placeholder — recording `raw` as a [`SourceNeed::File`] so the
+    /// caller can read it and re-run. A `None` path (an absent or non-string `file=`, e.g. `import(undef)`)
+    /// has nothing to name, so it's an empty result with no need — matching the oracle's warn-and-render on
+    /// a bad path (the warning TEXT is #94 / M.6). Never silently WRONG: a real missing file becomes a LOUD
+    /// need (or, on the no-table paths, a LOUD error downstream), not a quietly-empty mesh.
+    fn request_file(&self, raw: Option<String>) -> Mesh {
+        let Some(raw) = raw else {
+            return Mesh::new();
+        };
+        if let Some(mesh) = self.files.and_then(|t| t.get(&raw)) {
+            mesh.clone()
+        } else {
+            self.file_needs.borrow_mut().insert(raw);
+            Mesh::new()
+        }
+    }
+
+    /// Drain the File needs discovered this run into the ordered [`SourceNeed`] set (M.3). Empty → the run
+    /// closed; non-empty → the caller must supply the meshes and evaluate again.
+    fn take_file_needs(&self) -> Vec<SourceNeed> {
+        std::mem::take(&mut *self.file_needs.borrow_mut())
+            .into_iter()
+            .map(|raw| SourceNeed::File { raw })
+            .collect()
     }
 }
 
@@ -863,24 +947,35 @@ pub fn eval_program(program: &Program, scope: &Scope) -> crate::Result<Mesh> {
     // free with no subscriber, compiled out in release under `release_max_level_off`.
     let _span = tracing::trace_span!("eval_program").entered();
     let ctx = build_ctx(program);
-    mesh_of(run_stmts(program.stmts.iter(), &ctx, scope)?)
+    let tree = run_stmts(program.stmts.iter(), &ctx, scope)?;
+    // The raw AST path has no file table (`build_ctx` sets `files: None`), so an `import`/`surface` here
+    // can't be fulfilled — fail LOUD naming the files rather than return a silently-empty mesh. Real import
+    // resolution goes through the file-table entries (`resolve_geometry_*`) + the M.4 shell.
+    let needs = ctx.take_file_needs();
+    if !needs.is_empty() {
+        return Err(unresolved_files(&needs));
+    }
+    mesh_of(tree)
 }
 
-/// Evaluate `source` with its `use`/`include` graph resolved — the pure-crate spine behind
-/// [`evaluate_file`](crate::evaluate_file) / [`evaluate_with_base`](crate::evaluate_with_base). The
-/// loader owns every reachable file (so the evaluator's `&'a`-into-the-AST borrows span all of them);
-/// we evaluate the flattened statement stream against the merged, precedence-correct function store.
-/// `root_path` is the root's own path when it's a file (for back-reference dedup + cycle-break).
+/// Resolve `source` against a caller-supplied mesh [`FileTable`] to a [`Resolution`] — the pure needs
+/// fixpoint's INNER step (M.3), and the spine behind every public `evaluate*`/`resolve_geometry_*` entry.
+/// The loader owns every reachable `use`/`include` file (so the evaluator's `&'a`-into-the-AST borrows span
+/// all of them); we evaluate the flattened statement stream against the merged, precedence-correct function
+/// store. An `import`/`surface` path the `files` table lacks comes back as [`Resolution::Incomplete`]
+/// naming it — the run substitutes an empty placeholder + keeps going, so ONE call surfaces every missing
+/// file. `root_path` is the root's own path when it's a file (for back-reference dedup + cycle-break).
 ///
 /// # Errors
-/// Loader failures ([`Error::Load`](crate::Error::Load)), parse errors, and any evaluation error from
-/// the flattened program.
-pub(crate) fn evaluate_source(
+/// Loader failures ([`Error::Load`](crate::Error::Load)), parse errors, and any evaluation error from the
+/// flattened program. A missing import file is a NEED, not an error.
+pub(crate) fn resolve_source(
     source: &str,
     base_dir: &std::path::Path,
     root_path: Option<&std::path::Path>,
     library_paths: &[std::path::PathBuf],
-) -> crate::Result<(Geo, Vec<Message>)> {
+    files: &FileTable,
+) -> crate::Result<Resolution> {
     let _span = tracing::trace_span!("eval_program").entered();
     let loaded = loader::load(source, base_dir, root_path, library_paths)?;
     // `flatten` gives the executable statement stream (its own function/module stores are now unused —
@@ -897,6 +992,8 @@ pub(crate) fn evaluate_source(
         islands,
         closures: RefCell::default(),
         messages: RefCell::default(),
+        files: Some(files),
+        file_needs: RefCell::default(),
         module_depth: Cell::default(),
         children_stack: RefCell::default(),
     };
@@ -909,7 +1006,50 @@ pub(crate) fn evaluate_source(
         }
     }
     let tree = run_stmts(exec.into_iter(), &ctx, &Scope::new())?;
-    Ok((tree, ctx.messages.into_inner()))
+    let needs = ctx.take_file_needs();
+    if needs.is_empty() {
+        Ok(Resolution::Complete {
+            geo: tree,
+            messages: ctx.messages.into_inner(),
+        })
+    } else {
+        // A run that named files it couldn't get — the caller reads them + re-runs. The partial `tree`
+        // (empty placeholders where the meshes go) is discarded: the closing pass rebuilds it whole.
+        Ok(Resolution::Incomplete { needs })
+    }
+}
+
+/// Complete-or-LOUD sugar over [`resolve_source`] with NO file table — the spine the mesh/geometry
+/// convenience entries ([`evaluate`](crate::evaluate) / [`evaluate_geometry`](crate::evaluate_geometry) and
+/// kin) run on. Those entries carry no mesh table, so an `import`/`surface` through them can't be fulfilled;
+/// rather than a silently-empty mesh, it fails LOUD naming the files. Real import resolution goes through
+/// [`resolve_source`] + the M.4 IO shell, which supplies the meshes.
+///
+/// # Errors
+/// As [`resolve_source`], plus [`Error::Load`](crate::Error::Load) when the run named unresolved import
+/// files (there's no table here to satisfy them).
+pub(crate) fn evaluate_source(
+    source: &str,
+    base_dir: &std::path::Path,
+    root_path: Option<&std::path::Path>,
+    library_paths: &[std::path::PathBuf],
+) -> crate::Result<(Geo, Vec<Message>)> {
+    match resolve_source(source, base_dir, root_path, library_paths, &FileTable::new())? {
+        Resolution::Complete { geo, messages } => Ok((geo, messages)),
+        Resolution::Incomplete { needs } => Err(unresolved_files(&needs)),
+    }
+}
+
+/// The LOUD error the no-table paths raise when `import`/`surface` named files they couldn't get (M.3): the
+/// convenience entries don't carry a mesh table, so an import through them is unfulfillable — a named error
+/// beats a silently-empty mesh. Real resolution supplies a [`FileTable`] via `resolve_geometry_*` + the M.4
+/// shell, where a missing file is a NEED, not an error.
+fn unresolved_files(needs: &[SourceNeed]) -> crate::Error {
+    crate::Error::Load(format!(
+        "import/surface referenced {} file(s) with no mesh table to resolve them: {needs:?} — evaluate \
+         through resolve_geometry_* + the M.4 IO shell to supply the meshes",
+        needs.len()
+    ))
 }
 
 /// The root file's flat FUNCTION view with home-island tags: island 0's `use`d islands FIRST in source
@@ -1563,6 +1703,10 @@ fn build_ctx(program: &Program) -> Ctx<'_> {
         }],
         closures: RefCell::default(),
         messages: RefCell::default(),
+        // No file table on the raw AST path — an import/surface here becomes a need `eval_program` then
+        // rejects LOUD (a silently-empty mesh is the thing the doctrine forbids).
+        files: None,
+        file_needs: RefCell::default(),
         module_depth: Cell::default(),
         children_stack: RefCell::default(),
     }

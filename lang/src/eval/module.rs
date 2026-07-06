@@ -68,13 +68,18 @@ pub(super) fn eval_module<'a>(
         "square" => Ok(poly2(eval_square(&positional, &named))),
         "circle" => Ok(poly2(eval_circle(&positional, &named, &child))),
         "polygon" => Ok(poly2(eval_polygon(&positional, &named))),
-        // KNOWN-but-deferred builtins — recognized so the error NAMES the feature + its task instead of
-        // a misleading "typo?" (`offset`, the extrudes, and `projection` are wired in eval_stmt as of
-        // J.3.3–J.3.6). These stay LOUD-deferred stubs: blow up naming the feature, never silently empty.
-        "import" => Err(crate::Error::Unimplemented(
-            "import() is not yet wired (J.4.2) — the STL/3MF readers exist on the fab-scad side; the eval \
-             node + backend file-read land there. Deferred, never silently nothing.",
-        )),
+        // import()/surface() reference a mesh FILE by a RUNTIME path — resolvable only by EXECUTING to here
+        // (the path is an expression, not a static `<...>` token like use/include). Ask the caller's table
+        // (M.3): its mesh if present, else an EMPTY placeholder + a recorded File need so the run keeps going
+        // and surfaces the REST of its needs (a mesh rarely gates control flow → the caller usually closes
+        // the fixpoint in one more round). Both take the file as their leading arg, so one path serves both;
+        // the STL/3MF/heightmap READER that fills the table — and surface's center/invert transform — are
+        // caller-side (M.5). A 3D leaf: the table is `raw → Mesh` (3D); 2D import (DXF/SVG) is a later
+        // refinement, not the M.1 contract.
+        "import" | "surface" => Ok(leaf3(ctx.request_file(file_arg(&positional, &named)))),
+        // KNOWN-but-deferred builtins — recognized so the error NAMES the feature + its task instead of a
+        // misleading "typo?". These stay LOUD-deferred stubs: blow up naming the feature, never silently
+        // empty. (`offset`, the extrudes, and `projection` are wired in eval_stmt as of J.3.3–J.3.6.)
         "text" => Err(crate::Error::Unimplemented(
             "text() is not yet implemented (J.4.3) — the 2D glyph outlines need a font stack (cosmic-text \
              is the candidate). Deferred, never silently empty.",
@@ -82,10 +87,6 @@ pub(super) fn eval_module<'a>(
         "minkowski" => Err(crate::Error::Unimplemented(
             "minkowski() is not yet implemented (J.4.4) — Manifold lacks it and OpenSCAD's own manifold \
              backend farms it to CGAL; the approach is still open. Deferred, never silently wrong.",
-        )),
-        "surface" => Err(crate::Error::Unimplemented(
-            "surface() is not yet implemented (J.4.4) — a heightmap-from-file primitive (DAT/PNG) that \
-             needs the import path first. Deferred, never silently empty.",
         )),
         _ => Err(crate::Error::Unimplemented(
             "unknown module — not a builtin primitive (sphere/cube/cylinder/polyhedron, \
@@ -232,6 +233,19 @@ fn get_radius(map: &BTreeMap<String, Value>, r_key: &str, d_key: &str) -> Option
 
 fn is_true(map: &BTreeMap<String, Value>, key: &str) -> bool {
     matches!(map.get(key), Some(Value::Bool(true)))
+}
+
+/// The `import`/`surface` `file=` path — positional-leading or named (M.3). Both builtins take the file as
+/// their first argument, so binding just `["file"]` catches `import("a.stl")` and `import(file = "a.stl")`
+/// alike. `None` for an absent or non-string `file=` (`import(undef)`, `import(5)`) → an empty result, which
+/// matches the oracle's warn-and-render on a bad path (the reader-specific args like `surface`'s
+/// invert/center ride in M.5, so they're ignored here).
+fn file_arg(positional: &[Value], named: &BTreeMap<String, Value>) -> Option<String> {
+    let map = bind(positional, named, &["file"]);
+    match map.get("file") {
+        Some(Value::Str(s)) => Some(s.to_string()),
+        _ => None,
+    }
 }
 
 /// `polyhedron(points, faces, convexity)` → a mesh (J.2.6). `points` is a list of 3-vectors, `faces` a

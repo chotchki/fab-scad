@@ -169,16 +169,15 @@ fn beyond_the_subset_is_loud() {
 
 #[test]
 fn deferred_builtins_name_their_feature() {
-    // J.4: text/import/minkowski/surface are LOUD-deferred stubs — the error NAMES the feature (+ its
-    // task), never a silent nothing and never a misleading "unknown module — a typo?".
+    // text/minkowski stay LOUD-deferred stubs — the error NAMES the feature (+ its task), never a silent
+    // nothing and never a misleading "unknown module — a typo?". (import/surface left this club at M.3:
+    // they now emit a File NEED instead of erroring — see resolve_needs.rs.)
     for (src, feature) in [
         ("text(\"hi\");", "text()"),
-        ("import(\"a.stl\");", "import()"),
         (
             "minkowski() { cube(1); sphere(1, $fn = 8); }",
             "minkowski()",
         ),
-        ("surface(\"h.dat\");", "surface()"),
     ] {
         assert!(
             matches!(&err(src), Error::Unimplemented(m) if m.contains(feature)),

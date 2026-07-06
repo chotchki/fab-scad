@@ -197,6 +197,7 @@ fn literals_idents_ternary_vectors() {
     assert_eq!(ev("undef"), Value::Undef);
     assert_eq!(ev(r#""hi""#), Value::string("hi"));
     assert_eq!(ev("$fn"), num(0.0)); // resolves the special default
+    assert_eq!(ev("PI"), num(std::f64::consts::PI)); // OpenSCAD's one builtin math constant
     assert_eq!(ev("nope"), Value::Undef); // unbound → undef
     assert_eq!(ev("true?1:2"), num(1.0));
     assert_eq!(ev("false?1:2"), num(2.0));

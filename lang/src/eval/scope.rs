@@ -35,13 +35,17 @@ pub struct Scope {
 }
 
 impl Scope {
-    /// A fresh root scope with OpenSCAD's `$fn=0`, `$fa=12`, `$fs=2` defaults.
+    /// A fresh root scope with OpenSCAD's `$fn=0`, `$fa=12`, `$fs=2` fragment defaults plus the builtin
+    /// `PI` constant (`Builtins.cc`). `PI` is OpenSCAD's ONE named math constant — a plain shadowable
+    /// variable, not a keyword — so it lives at the root like the `$`-vars; BOSL2 leans on `2*PI` heavily
+    /// (`segs`, every arc/circle), and without it those go `undef` and cascade.
     #[must_use]
     pub fn new() -> Self {
         let mut vars = BTreeMap::new();
         vars.insert("$fn".to_string(), Value::Num(0.0));
         vars.insert("$fa".to_string(), Value::Num(12.0));
         vars.insert("$fs".to_string(), Value::Num(2.0));
+        vars.insert("PI".to_string(), Value::Num(std::f64::consts::PI));
         Self {
             frame: Rc::new(Frame { vars, parent: None }),
         }

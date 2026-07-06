@@ -128,6 +128,23 @@ fn unknown_module_is_loud() {
     ));
 }
 
+/// A statement-level `$special = value;` assignment parses AND scopes (BOSL2 leans on it heavily —
+/// `$fn=8;`, `$tags=…;`, `$color=…;`). `$fn = 8` reaches the geometry exactly like passing it as an arg.
+#[test]
+fn special_variable_assignment_scopes() {
+    assert_eq!(
+        evaluate("$fn = 8; sphere(10);").unwrap().vert_count(),
+        evaluate("sphere(10, $fn = 8);").unwrap().vert_count()
+    );
+    // inside a module body it rides the call scope + reaches the module's own geometry.
+    assert_eq!(
+        evaluate("module ball() { $fn = 8; sphere(10); } ball();")
+            .unwrap()
+            .vert_count(),
+        evaluate("sphere(10, $fn = 8);").unwrap().vert_count()
+    );
+}
+
 // ───────────────────────────── children() / $children (I.2.5) ─────────────────────────────
 
 /// A wrapper module renders its call-site children via `children()` — the BOSL2 currency (a module

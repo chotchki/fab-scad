@@ -73,7 +73,11 @@ fn statement(i: &mut Tokens<'_, '_>, depth: usize, allow_defs: bool) -> ModalRes
                 span: start..i.previous_token_end(),
             })
         }
-        Some(TokenKind::Ident(name)) if peek_kind2(i) == Some(TokenKind::Eq) => {
+        // `name = expr;` OR `$special = expr;` — a `$`-var assignment sets a special for the enclosing
+        // scope + its children (OpenSCAD dynamic scoping); BOSL2 leans on it (`$fn=8;`, `$tags=…;`).
+        Some(TokenKind::Ident(name) | TokenKind::DollarIdent(name))
+            if peek_kind2(i) == Some(TokenKind::Eq) =>
+        {
             assignment(i, name, depth)
         }
         Some(
@@ -92,7 +96,8 @@ fn statement(i: &mut Tokens<'_, '_>, depth: usize, allow_defs: bool) -> ModalRes
     }
 }
 
-/// `name = expr;` (parser.y:227). The caller has verified `name` is an identifier followed by `=`.
+/// `name = expr;` or `$special = expr;` (parser.y:227). The caller has verified `name` is a plain or
+/// `$`-prefixed identifier followed by `=`.
 fn assignment(i: &mut Tokens<'_, '_>, name: &str, depth: usize) -> ModalResult<Stmt> {
     let start = i.current_token_start();
     bump(i)?; // name

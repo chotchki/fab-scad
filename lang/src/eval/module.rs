@@ -63,7 +63,7 @@ pub(super) fn eval_module<'a>(
         "sphere" => Ok(leaf3(eval_sphere(&positional, &named, &child))),
         "cube" => Ok(leaf3(eval_cube(&positional, &named))),
         "cylinder" => Ok(leaf3(eval_cylinder(&positional, &named, &child))),
-        "polyhedron" => Ok(leaf3(eval_polyhedron(&positional, &named))),
+        "polyhedron" => Ok(leaf3(eval_polyhedron(&positional, &named, ctx))),
         // 2D primitives → a contour polygon (the Shape2D leaf, J.3.2).
         "square" => Ok(poly2(eval_square(&positional, &named))),
         "circle" => Ok(poly2(eval_circle(&positional, &named, &child))),
@@ -181,7 +181,7 @@ fn to_points_2d(v: Option<&Value>) -> Vec<Vec2> {
 /// A present list reuses [`to_faces`]' numeric-index-list parse (each entry a contour).
 fn to_paths(v: Option<&Value>) -> Option<Vec<Vec<u32>>> {
     match v {
-        Some(Value::List(_)) => Some(to_faces(v)),
+        Some(Value::List(items)) => Some(to_faces(items)),
         _ => None,
     }
 }
@@ -222,9 +222,47 @@ fn is_true(map: &BTreeMap<String, Value>, key: &str) -> bool {
 /// list of vertex-index loops; both feed [`geometry::polyhedron`], which fan-triangulates. `convexity` is
 /// a render hint we don't need. Malformed entries (a non-3 point, a bad index) drop, so a bad input
 /// yields a partial/empty mesh here — the exact OpenSCAD ERROR/WARNING is the validation layer (J.2.6.2).
-fn eval_polyhedron(positional: &[Value], named: &BTreeMap<String, Value>) -> Mesh {
+fn eval_polyhedron(positional: &[Value], named: &BTreeMap<String, Value>, ctx: &Ctx) -> Mesh {
     let map = bind(positional, named, &["points", "faces", "convexity"]);
-    geometry::polyhedron(to_points(map.get("points")), &to_faces(map.get("faces")))
+    let points = to_points(map.get("points"));
+    let n = u32::try_from(points.len()).unwrap_or(u32::MAX);
+    geometry::polyhedron(points, &validated_faces(map.get("faces"), n, ctx))
+}
+
+/// Faces → index loops, matching OpenSCAD's `polyhedron` VALIDATION (J.2.6.2): a face that references an
+/// out-of-range point index is DROPPED WHOLE (not just the triangles touching it) and, for a clean
+/// too-big index, warned with OpenSCAD's exact text — the WARN-AND-RENDER behavior (never an error).
+/// A non-numeric face drops silently, as does a `<3`-vertex face downstream (an empty fan). The exact
+/// warning-text-vs-oracle comparison is the warning-differential channel (#94); this emits the right text.
+fn validated_faces(v: Option<&Value>, n: u32, ctx: &Ctx) -> Vec<Vec<u32>> {
+    let Some(Value::List(items)) = v else {
+        return Vec::new();
+    };
+    items
+        .iter()
+        .enumerate()
+        .filter_map(|(i, f)| {
+            let Value::NumList(raw) = f else {
+                return None; // a non-numeric face → dropped silently (as before)
+            };
+            // The FIRST out-of-range index fails the whole face (OpenSCAD drops the face, not the tri).
+            for (j, &r) in raw.iter().enumerate() {
+                let idx = to_index(r);
+                if idx >= n {
+                    // Only a clean non-negative index gets OpenSCAD's "out of bounds" warning; a negative
+                    // or non-finite one is a different malformation (its exact text is #94's job) — drop
+                    // it silently rather than emit a misleading `4294967295`.
+                    if r.is_finite() && r >= 0.0 {
+                        ctx.warn(format!(
+                            "Point index {idx} is out of bounds (from faces[{i}][{j}])"
+                        ));
+                    }
+                    return None;
+                }
+            }
+            Some(raw.iter().map(|&r| to_index(r)).collect())
+        })
+        .collect()
 }
 
 /// A `points` value → the vertex table: a list of numeric 3-vectors → `Vec3`s (a shorter or non-numeric
@@ -244,12 +282,11 @@ fn to_points(v: Option<&Value>) -> Vec<crate::geom::Vec3> {
         .collect()
 }
 
-/// A `faces` value → index loops: a list of numeric index lists (each a face). A non-numeric face is
-/// dropped; [`to_index`] maps each entry.
-fn to_faces(v: Option<&Value>) -> Vec<Vec<u32>> {
-    let Some(Value::List(items)) = v else {
-        return Vec::new();
-    };
+/// Index loops from a list's `items`: each numeric index-list is a contour/path (a non-numeric entry is
+/// dropped); [`to_index`] maps each index. The caller has already matched the outer `Value::List`, so this
+/// takes the items directly. Used for `polygon`'s `paths` (`polyhedron`'s faces go through
+/// [`validated_faces`], which adds the out-of-range check + warning).
+fn to_faces(items: &[Value]) -> Vec<Vec<u32>> {
     items
         .iter()
         .filter_map(|f| match f {

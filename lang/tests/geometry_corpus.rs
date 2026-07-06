@@ -10,7 +10,7 @@
     reason = "integration-test helpers: unwrap/expect/panic ARE the assertions; exact geometry asserts are deterministic"
 )]
 
-use fab_lang::{Error, Mesh, evaluate};
+use fab_lang::{Error, Mesh, Message, evaluate, evaluate_full};
 
 fn mesh(src: &str) -> Mesh {
     evaluate(src).expect("evaluates to a mesh")
@@ -253,4 +253,29 @@ fn polyhedron_drops_bad_faces_without_panicking() {
     let bad = mesh("polyhedron(points=[[0,0,0],[1,0,0],7], faces=[[0,1,2],\"x\"]);");
     assert_eq!(bad.vert_count(), 2); // the number `7` isn't a point → dropped
     assert_eq!(bad.tri_count(), 0); // face [0,1,2] refs the dropped point 2 → OOB → drops; "x" drops
+}
+
+#[test]
+fn polyhedron_out_of_range_index_warns_and_renders() {
+    // J.2.6.2: OpenSCAD WARNS on an out-of-range point index (bug-for-bug text) + drops that FACE (not
+    // just a triangle) + renders the rest — never an error. Here faces[4][2] = 9 past the 5-point table.
+    let ev = evaluate_full(
+        "polyhedron(points=[[0,0,0],[1,0,0],[1,1,0],[0,1,0],[0.5,0.5,1]], \
+         faces=[[0,1,2,3],[0,4,1],[1,4,2],[2,4,3],[3,4,9]]);",
+    )
+    .expect("renders (warn, not error)");
+    assert_eq!(ev.mesh.tri_count(), 5); // the base (2) + 3 valid sides; the 9-index face dropped
+    assert!(
+        ev.messages.iter().any(|m| matches!(
+            m,
+            Message::Warning(w) if w == "Point index 9 is out of bounds (from faces[4][2])"
+        )),
+        "expected OpenSCAD's exact out-of-bounds warning, got {:?}",
+        ev.messages
+    );
+    // a whole QUAD face with one bad index drops ENTIRELY (OpenSCAD's per-face rule, not per-triangle):
+    // [0,1,2,9] would fan to (0,2,1) + (0,3=9,2) — the second bad — but OpenSCAD drops BOTH → 0 tris here.
+    let quad = evaluate_full("polyhedron(points=[[0,0,0],[1,0,0],[1,1,0]], faces=[[0,1,2,9]]);")
+        .expect("renders");
+    assert_eq!(quad.mesh.tri_count(), 0); // the whole face dropped, not just the bad triangle
 }

@@ -85,11 +85,13 @@ added 2026-07-05.
     - [x] J.3.4.1 - J.3.4.1 - twisted linear_extrude loft: match OpenSCAD's profile-resampling + slice interpolation
   - [x] J.3.5 - rotate_extrude (angle, $fn) → 3D; reuse the ring/segment math
   - [x] J.3.6 - projection(cut) 3D→2D via slice_to_cross_section
-  - [ ] J.3.7 - Differential: path/region-derived BOSL2 2D shapes vs oracle
+  - [x] J.3.7 - Differential: path/region-derived BOSL2 2D shapes vs oracle
 - [ ] J.4 - hull; import() via our STL/3MF readers; text/minkowski/surface = LOUD deferred stubs (blow up, complain, never silently wrong)
   - Comment: Text could be handled by https://github.com/pop-os/cosmic-text . I'm still researching minkowski.
   - [x] J.4.1 - hull() → Manifold hull/batch_hull over children (2D + 3D); unblocks cuboid chamfer/rounding + masks
   - [ ] J.4.2 - import() via our STL/3MF readers (threemf/zip/quick-xml deps already present)
+    - [ ] J.4.2.1 - J.4.2.1 - import() eval + backend wiring (STL/3MF readers → Leaf)
+    - [ ] J.4.2.2 - J.4.2.2 - import() differential vs oracle (round-trip a known STL + 3MF)
   - [ ] J.4.3 - text() = LOUD deferred stub (never silently wrong); cosmic-text is the candidate — its own task
   - [ ] J.4.4 - minkowski()/surface() = LOUD deferred stubs (never silently wrong); minkowski approach still open
 - [ ] J.5 - Content-addressed CSG cache: node hash = subtree + resolved params + reaching $-context; in-memory tier + hit-rate counters (the on-disk tier stays a storage decision)

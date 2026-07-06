@@ -100,6 +100,16 @@ fn polygon_paths_select_contours_and_bad_input_drops() {
     );
     // `points` that isn't a list at all → no vertices → no contour.
     assert_eq!(d2("polygon(5);"), Shape2D::Polygon(vec![]));
+    // `paths` that isn't a list → no paths given, so it falls back to the single all-points contour.
+    assert_eq!(
+        d2("polygon([[0, 0], [4, 0], [2, 3]], paths = 5);"),
+        Shape2D::Polygon(vec![vec![p(0.0, 0.0), p(4.0, 0.0), p(2.0, 3.0)]])
+    );
+    // a non-numeric-list path entry (a string) is DROPPED → an empty path set → no contour.
+    assert_eq!(
+        d2("polygon([[0, 0], [4, 0], [2, 3]], paths = [\"x\"]);"),
+        Shape2D::Polygon(vec![])
+    );
 }
 
 #[test]

@@ -151,11 +151,16 @@ pub(super) fn resolve_linear_extrude(
         Some(s) if s >= 1.0 => whole_u32(s),
         _ => helix_slices(twist, fn_),
     };
+    // The twist RESAMPLE count is `$fn` (the perimeter fragments OpenSCAD splits the outline into); 0 when
+    // `$fn` is unset ($fa/$fs mode — the backend falls back to a default fragment length). Only used when
+    // `twist != 0`.
+    let facets = if fn_ >= 3.0 { whole_u32(fn_) } else { 0 };
     ExtrudeKind::Linear {
         height,
         twist,
         scale,
         slices,
+        facets,
         center,
     }
 }

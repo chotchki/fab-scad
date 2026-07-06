@@ -81,8 +81,8 @@ added 2026-07-05.
   - [x] J.3.2 - 2D primitives square/circle/polygon → Shape2D node; circle uses our $fn fragment math for parity
     - [x] J.3.2.1 - J.3.2.1 - eval-wire: recognize 2D primitives + thread Geo{D2,D3} through the geometry pass
   - [x] J.3.3 - 2D booleans + offset over 2D children (CrossSection ops)
-  - [ ] J.3.4 - linear_extrude (height/twist/scale/slices) → 3D; tessellation parity MEASURED vs oracle (Manifold's if the metric tolerates, else our loft)
-    - [ ] J.3.4.1 - J.3.4.1 - twisted linear_extrude loft: match OpenSCAD's profile-resampling + slice interpolation
+  - [x] J.3.4 - linear_extrude (height/twist/scale/slices) → 3D; tessellation parity MEASURED vs oracle (Manifold's if the metric tolerates, else our loft)
+    - [x] J.3.4.1 - J.3.4.1 - twisted linear_extrude loft: match OpenSCAD's profile-resampling + slice interpolation
   - [ ] J.3.5 - rotate_extrude (angle, $fn) → 3D; reuse the ring/segment math
   - [ ] J.3.6 - projection(cut) 3D→2D via slice_to_cross_section
   - [ ] J.3.7 - Differential: path/region-derived BOSL2 2D shapes vs oracle

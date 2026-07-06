@@ -583,6 +583,45 @@ impl Solid {
 /// **!Send/!Sync by construction**, same discipline as [`Solid`] — cross threads with polygon data
 /// (`to_polygons`), never a live handle. `CrossSection`'s upstream `unsafe impl Send` shares state on
 /// `clone` the same way `Manifold` does; we don't lean on it.
+/// Resample each contour of a 2D profile for a TWISTED [`extrude`](Section::extrude), matching OpenSCAD:
+/// split each edge into `round(edge_len / perimeter · facets)` even segments (min 1), corners preserved,
+/// so the swept helical walls line up. `facets` is `$fn`; when unset (< 3) OpenSCAD fragments by `$fs`
+/// instead, which we approximate with its default fragment length of 2.0 (≈ `perimeter / 2` segments).
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "a segment count is a small non-negative rounded value; max(1.0) floors it before the cast"
+)]
+fn resample_for_twist(polygons: &[Vec<[f64; 2]>], facets: u32) -> Vec<Vec<[f64; 2]>> {
+    let dist = |a: [f64; 2], b: [f64; 2]| ((b[0] - a[0]).powi(2) + (b[1] - a[1]).powi(2)).sqrt();
+    polygons
+        .iter()
+        .map(|contour| {
+            let n = contour.len();
+            let perimeter: f64 = (0..n).map(|i| dist(contour[i], contour[(i + 1) % n])).sum();
+            if n < 3 || perimeter <= 0.0 {
+                return contour.clone(); // not a fillable ring — leave it be
+            }
+            // $fn sets the perimeter fragment count; without it, OpenSCAD's default $fs = 2.0 length.
+            let frags = if facets >= 3 {
+                f64::from(facets)
+            } else {
+                (perimeter / 2.0).round().max(3.0)
+            };
+            let mut out = Vec::new();
+            for i in 0..n {
+                let (a, b) = (contour[i], contour[(i + 1) % n]);
+                let segs = (dist(a, b) / perimeter * frags).round().max(1.0) as u32;
+                for k in 0..segs {
+                    let t = f64::from(k) / f64::from(segs);
+                    out.push([a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t]);
+                }
+            }
+            out
+        })
+        .collect()
+}
+
 #[derive(Clone)]
 pub struct Section(CrossSection, PhantomData<*const ()>);
 
@@ -642,13 +681,28 @@ impl Section {
                 twist,
                 scale,
                 slices,
+                facets,
                 center,
             } => {
+                // TWIST: Manifold spins the OPPOSITE way from OpenSCAD (so negate), and OpenSCAD resamples
+                // the profile perimeter to `facets` ($fn) points before sweeping — each edge into
+                // `round(len / perimeter · facets)` even segments — so the helical walls line up. The raw
+                // profile only matches an un-twisted sweep. J.3.4.1 (measured 22.8% residual → 6.9% after
+                // the negate → ~1-2% at typical $fn after the resample; a small per-slice tessellation-phase
+                // remainder is an accepted, documented divergence). `resampled` outlives the borrow below.
+                let resampled;
+                let profile = if twist == 0.0 {
+                    &self.0
+                } else {
+                    resampled =
+                        Section::from_polygons(&resample_for_twist(&self.to_polygons(), facets));
+                    &resampled.0
+                };
                 let m = Manifold::extrude_with_options(
-                    &self.0,
+                    profile,
                     height,
                     slices as i32,
-                    twist,
+                    -twist,
                     scale[0],
                     scale[1],
                 );

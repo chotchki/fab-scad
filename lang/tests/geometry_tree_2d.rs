@@ -435,10 +435,11 @@ fn linear_extrude_builds_the_2d_to_3d_bridge() {
         evaluate_geometry("linear_extrude(5) cube(2);").unwrap(),
         Geo::D3(GeoNode::Extrude { child, .. }) if matches!(*child, Shape2D::Empty)
     ));
-    // TWIST is LOUD-deferred — Manifold's helix diverges from the oracle (measured), pending J.3.4.1's loft.
+    // TWIST builds (J.3.4.1: negate + resample); the `$fn`-resolved facet count rides the kind.
     assert!(matches!(
-        evaluate_geometry("linear_extrude(10, twist = 90) square(4);").unwrap_err(),
-        Error::Unimplemented(m) if m.contains("twist")
+        evaluate_geometry("linear_extrude(10, twist = 90, $fn = 32) square(4);").unwrap(),
+        Geo::D3(GeoNode::Extrude { kind: ExtrudeKind::Linear { twist, facets, .. }, .. })
+            if twist == 90.0 && facets == 32
     ));
     // explicit `slices` (a scalar `scale` too); a saturating slices count clamps, not overflows.
     assert!(matches!(

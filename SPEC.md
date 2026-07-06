@@ -125,7 +125,13 @@ escape, not community respect.
   each mismatched child is dropped with `Ignoring {n}D child object for {m}D operation`, and
   `Mixing 2D and 3D objects is not supported` fires once per operation. Tessellation parity for
   the extrudes is MEASURED against the oracle, not assumed — Manifold's `extrude`/`revolve` if
-  the metric tolerates, our own loft if not.
+  the metric tolerates, our own loft if not. OUTCOME (J.3.4): un-twisted `linear_extrude` (prism +
+  scale) passes the strict 1e-3 boolean-residual gate on Manifold's extrude. TWIST needed two fixes —
+  Manifold spins the OPPOSITE way (we negate the sign) and OpenSCAD resamples the profile perimeter to
+  `$fn` points before sweeping (each edge → `round(edge/perimeter·$fn)` segments, reproduced) — after
+  which the SHAPE matches; a small per-slice tessellation-phase remainder (~1-2% at typical `$fn`,
+  larger for curved/low-`$fn`) is an ACCEPTED, DOCUMENTED divergence behind a relaxed per-class residual
+  tolerance (the exact slice-phase match is J.3.4.1, revisited only if it compounds).
 - **Builtin geometry surface (deliberately small):** polyhedron, primitives, multmatrix,
   union/difference/intersection, hull, linear_extrude/rotate_extrude (2D via Manifold
   `CrossSection`, above), offset, projection. `import()` = our existing STL/3MF readers. DEFERRED: text() (fonts —

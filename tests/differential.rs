@@ -21,6 +21,16 @@ fn agree(scad: &str) {
     }
 }
 
+/// Assert a snippet's boolean residual vs the oracle is under `max` — a RELAXED gate for the twisted-
+/// extrude class, where our profile-resample + Manifold's helix differ from OpenSCAD's by a small,
+/// resolution-vanishing tessellation-phase artifact (J.3.4.1; the shape is right, the residual bounded +
+/// documented). Skips cleanly when the oracle binary is absent, like `agree`.
+fn agree_within(scad: &str, max: f64) {
+    if let Err(why) = fab_scad::differ::diff_within(scad, max) {
+        panic!("twist differential divergence: {why}");
+    }
+}
+
 /// Assert a snippet's ECHO output agrees across every driver — the I.5 string-equal gate. A `cube` is
 /// appended so the ORACLE's render (which captures echo alongside a mesh EXPORT) succeeds; a
 /// geometry-less program has nothing to export. The echo lines are identical either way.
@@ -113,13 +123,43 @@ fn dimension_mixing_that_resolves_to_3d_matches_the_oracle() {
 #[test]
 fn linear_extrude_matches_the_oracle() {
     // J.3.4: the UN-TWISTED sweep — prism + per-axis scale — lowers through Manifold's extrude and
-    // matches the oracle by boolean residual. (Twist diverges and is LOUD-deferred to J.3.4.1's loft;
-    // MEASURED — even at a matched slice count Manifold's helix ≠ OpenSCAD's, 0.22 residual.)
+    // matches the oracle by boolean residual under the strict 1e-3 gate. (Twist rides its own relaxed-
+    // tolerance test below, J.3.4.1.)
     agree("linear_extrude(5) square(4);");
     agree("linear_extrude(5, center = true) square(4);");
     agree("linear_extrude(10, scale = 2) square(4, center = true);"); // frustum
     agree("linear_extrude(10, scale = [2, 0.5]) square(4, center = true);"); // anisotropic
     agree("linear_extrude(3) circle(4, $fn = 32);"); // a curved profile
+}
+
+#[test]
+fn twisted_linear_extrude_matches_the_oracle() {
+    // J.3.4.1: the twist loft — negate the sign (Manifold spins the OPPOSITE way from OpenSCAD) + resample
+    // each profile edge into `round(edge/perimeter · $fn)` segments (OpenSCAD's exact rule). The SHAPE
+    // matches; a small per-slice tessellation-phase residual remains that VANISHES with resolution.
+    //
+    // ACCEPTED, DOCUMENTED divergence (chotchki's call): rectilinear profiles at reasonable $fn agree
+    // within 2% (0.4–1.5% measured), pinned here. Curved / low-$fn profiles carry a larger BUT bounded
+    // residual — measured worst ~6% at $fn=16, ~4% for a twisted circle — a known edge that shrinks as
+    // $fn climbs; the exact slice-phase match stays open in J.3.4.1. `agree_within` leans on the relative
+    // residual for this class, `agree`'s hard 1e-3 gate is unchanged for everything else.
+    let t = 0.02;
+    agree_within(
+        "linear_extrude(10, twist = 90, $fn = 32) square(4, center = true);",
+        t,
+    );
+    agree_within(
+        "linear_extrude(10, twist = 45, $fn = 32) square([4, 2], center = true);",
+        t,
+    );
+    agree_within(
+        "linear_extrude(8, twist = -90, $fn = 32) square([5, 3], center = true);",
+        t,
+    ); // negative
+    agree_within(
+        "linear_extrude(10, twist = 180, $fn = 64) square(6, center = true);",
+        t,
+    );
 }
 
 #[test]

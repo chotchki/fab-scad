@@ -96,6 +96,10 @@ pub enum ExtrudeKind {
         scale: [f64; 2],
         /// Number of intermediate layers (subdivisions along Z).
         slices: u32,
+        /// Profile-perimeter fragment count (`$fn`) used to RESAMPLE the 2D outline when `twist != 0`
+        /// — OpenSCAD subdivides each edge into `round(edge_len / perimeter · facets)` segments so the
+        /// twisted walls follow the helix (J.3.4.1). Ignored when `twist == 0` (the raw profile extrudes).
+        facets: u32,
         /// Center the result on `z = 0` instead of resting on it.
         center: bool,
     },
@@ -205,6 +209,7 @@ mod tests {
             twist: 90.0,
             scale: [0.5, 0.5],
             slices: 8,
+            facets: 32,
             center: false,
         };
         let rot = ExtrudeKind::Rotate {

@@ -635,6 +635,7 @@ mod tests {
             twist: 0.0,
             scale: [1.0, 1.0],
             slices: 1,
+            facets: 0,
             center: false,
         };
         let box3d = b.extrude(&sq, &lin);
@@ -650,6 +651,7 @@ mod tests {
                 twist: 0.0,
                 scale: [1.0, 1.0],
                 slices: 1,
+                facets: 0,
                 center: true,
             },
         );
@@ -695,6 +697,7 @@ mod tests {
                 twist: 0.0,
                 scale: [1.0, 1.0],
                 slices: 1,
+                facets: 0,
                 center: false,
             },
             child: Box::new(square),

@@ -1574,16 +1574,6 @@ fn eval_stmt<'a>(
                 ctx,
             );
             let kind = geo::resolve_linear_extrude(&positional, &named, &child_scope);
-            // TWIST diverges from the oracle: Manifold's helix and OpenSCAD's disagree even at a matched
-            // slice count (MEASURED — boolean residual 0.22, over the 1e-3 gate). So twist is LOUD-deferred
-            // to its own loft (J.3.4.1); the un-twisted sweep (prism + scale) matches Manifold exactly and
-            // ships here. Never silently wrong.
-            if matches!(kind, ExtrudeKind::Linear { twist, .. } if twist != 0.0) {
-                return Err(crate::Error::Unimplemented(
-                    "twisted linear_extrude doesn't yet match the oracle (Manifold's helix diverges from \
-                     OpenSCAD's — measured) — the matching loft is J.3.4.1; un-twisted extrude works",
-                ));
-            }
             nodes.push(Geo::D3(GeoNode::Extrude {
                 kind,
                 child: Box::new(shape),

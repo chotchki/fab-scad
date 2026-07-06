@@ -90,10 +90,10 @@ added 2026-07-05.
   - Comment: Text could be handled by https://github.com/pop-os/cosmic-text . I'm still researching minkowski.
   - [x] J.4.1 - hull() → Manifold hull/batch_hull over children (2D + 3D); unblocks cuboid chamfer/rounding + masks
   - [ ] J.4.2 - import() via our STL/3MF readers (threemf/zip/quick-xml deps already present)
-    - [ ] J.4.2.1 - J.4.2.1 - import() eval + backend wiring (STL/3MF readers → Leaf)
-    - [ ] J.4.2.2 - J.4.2.2 - import() differential vs oracle (round-trip a known STL + 3MF)
-  - [ ] J.4.3 - text() = LOUD deferred stub (never silently wrong); cosmic-text is the candidate — its own task
-  - [ ] J.4.4 - minkowski()/surface() = LOUD deferred stubs (never silently wrong); minkowski approach still open
+    - [>] J.4.2.1 - J.4.2.1 - import() eval + backend wiring (STL/3MF readers → Leaf)
+    - [>] J.4.2.2 - J.4.2.2 - import() differential vs oracle (round-trip a known STL + 3MF)
+  - [x] J.4.3 - text() = LOUD deferred stub (never silently wrong); cosmic-text is the candidate — its own task
+  - [x] J.4.4 - minkowski()/surface() = LOUD deferred stubs (never silently wrong); minkowski approach still open
 - [ ] J.5 - Content-addressed CSG cache: node hash = subtree + resolved params + reaching $-context; in-memory tier + hit-rate counters (the on-disk tier stays a storage decision)
 
 - [x] J.6 - Unify fab-scad's geom::V3 ([f64;3] orientation helpers) + printer-domain [f64;3] into fab_lang::Vec3
@@ -110,6 +110,13 @@ added 2026-07-05.
 - [ ] L.2 - Burn-down: fixes land as semantics/ tests; expect this to expose evaluator gaps — that's the point
 - [ ] L.3 - models/ tree end-to-end (teardrop/onion/screw_hole, corner_brace, Underdesk); benchmark corpus captured via the tracing layer on every run
 - [ ] L.4 - Exit review: divergences zero-or-documented, perf-vs-oracle published; rung 2/3 (intrinsics, JIT) phase cut FROM THIS DATA
+## Phase M - scad-rs: pure source-provider (fab-lang zero-IO; caller fulfills a needs fixpoint)
+- [ ] M.1 - M.1 - The pure source-provider contract
+- [ ] M.2 - M.2 - Pure loader: source table in, Scad needs out (static parse-time fixpoint)
+- [ ] M.3 - M.3 - Eval-time File needs: import/surface emit needs + placeholder-continue
+- [ ] M.4 - M.4 - The IO shell: the outer fixpoint loop (the one place std::fs lives)
+- [ ] M.5 - M.5 - import()/surface() backend: readers fulfill File needs → Mesh
+- [ ] M.6 - M.6 - Differential + coverage close-out
 
 ## Backlog (not yet phased)
 
@@ -147,3 +154,5 @@ Parked 2026-07-04 for the scad-rs pivot — the workflow tool works and stays in
 - **Warning text bug-for-bug vs the oracle — the deferred half of I.5 (Message::Warning channel exists, empty)** — added 2026-07-05.
 - **Verify release builds actually emit SIMD/AVX for the lane-based dot + matrix accumulation** — added 2026-07-06.
 - **Explicit-stack STATEMENT machine: convert eval_stmt/call_user_module from host-recursion to an explicit work-stack (like the expression machine), retiring MAX_MODULE_DEPTH's stack-fragility — 'Safari cliff structurally impossible' on the statement side. Deferred at I.9.6 (production-safe at 256; do at the I/J boundary)** — added 2026-07-06.
+- **J.4.2.1 - import() eval + backend wiring (STL/3MF readers → Leaf)** — deferred from J.4.2.1 on 2026-07-06.
+- **J.4.2.2 - import() differential vs oracle (round-trip a known STL + 3MF)** — deferred from J.4.2.2 on 2026-07-06.

@@ -133,19 +133,94 @@ pub(super) fn load(
     root_path: Option<&Path>,
     library_paths: &[PathBuf],
 ) -> crate::Result<Loaded> {
+    // The IO SHELL (M.4): the ONE place `use`/`include` touches the filesystem. It runs the pure
+    // [`resolve_graph`] fixpoint — resolve-graph names the references it can't satisfy, the shell reads
+    // them (find_valid_path + read + canonicalize), re-runs — until the graph closes. `use`/`include` is
+    // STATIC (literal top-level refs), so this is a parse-time fixpoint over the include graph; no eval.
+    let root_id = root_path.and_then(|p| std::fs::canonicalize(p).ok());
+    let mut provided = SourceMap::new();
+    loop {
+        match resolve_graph(source, base_dir, root_id.as_deref(), &provided)? {
+            GraphOutcome::Complete(loaded) => return Ok(loaded),
+            GraphOutcome::Incomplete(needs) => {
+                for need in needs {
+                    let key = (need.from_dir.clone(), need.raw.clone());
+                    if provided.contains_key(&key) {
+                        continue; // already satisfied this round (a duplicate need in the same pass)
+                    }
+                    let id =
+                        resolve(&need.from_dir, &need.raw, library_paths).ok_or_else(|| {
+                            crate::Error::Load(format!(
+                                "can't find '{}' from {}",
+                                need.raw,
+                                need.from_dir.display()
+                            ))
+                        })?;
+                    let source = std::fs::read_to_string(&id).map_err(|e| {
+                        // Defensive, never-panic: `resolve` already canonicalized this as a readable file,
+                        // so a failure here is a TOCTOU race (deleted / perms changed between resolve and
+                        // read). This — and the canonicalize/read above — are the SHELL's IO, off the pure
+                        // core's coverage.
+                        crate::Error::Load(format!("{}: {e}", id.display()))
+                    })?;
+                    let dir = id.parent().unwrap_or(Path::new(".")).to_path_buf();
+                    provided.insert(key, ProvidedSource { id, dir, source });
+                }
+            }
+        }
+    }
+}
+
+/// A `use`/`include` reference the pure resolver couldn't satisfy from the [`SourceMap`] — the shell
+/// resolves + reads it, adds it, and re-runs. `from_dir` is the requesting file's directory (the base for
+/// resolving `raw` against the library paths); `raw` is the literal `<...>` path.
+pub(super) struct ScadNeed {
+    pub from_dir: PathBuf,
+    pub raw: String,
+}
+
+/// A source the shell has resolved + read: `id` is its canonical path (the opaque dedup/cycle-break key
+/// the pure resolver compares by, never canonicalizing itself), `dir` its directory (the base for ITS own
+/// relative refs), `source` the text.
+struct ProvidedSource {
+    id: PathBuf,
+    dir: PathBuf,
+    source: String,
+}
+
+/// The sources the shell has supplied so far, keyed by the `(requesting dir, raw ref)` the resolver asks
+/// with — so the pure resolver looks a reference up WITHOUT resolving it (no IO in the core).
+type SourceMap = BTreeMap<(PathBuf, String), ProvidedSource>;
+
+/// The pure graph resolver's result: the fully-closed graph, or the references it still needs.
+enum GraphOutcome {
+    Complete(Loaded),
+    Incomplete(Vec<ScadNeed>),
+}
+
+/// PURE (zero IO): build the `use`/`include` graph from `source` + the shell-supplied [`SourceMap`],
+/// naming any reference not yet in the map as a [`ScadNeed`] instead of reading it. A single BFS pass
+/// (parse-once via the canonical-`id` index, which also breaks cycles) — either every reference resolves
+/// (→ [`GraphOutcome::Complete`]) or the pass collects ALL the still-missing ones at once (→ `Incomplete`,
+/// which the shell fills before re-running). `root_id` is the root file's canonical id, so a dependency
+/// referencing the root back dedups to node 0 rather than re-parsing it.
+fn resolve_graph(
+    source: &str,
+    base_dir: &Path,
+    root_id: Option<&Path>,
+    provided: &SourceMap,
+) -> crate::Result<GraphOutcome> {
     let mut programs = vec![Node {
         program: parse(source)?,
         dir: base_dir.to_path_buf(),
         links: BTreeMap::new(),
     }];
-    // canonical path → index, so a diamond parses ONCE and a cycle terminates the worklist.
     let mut index: BTreeMap<PathBuf, usize> = BTreeMap::new();
-    // The root's own canonical path maps to node 0 — a back-reference to it dedups to the root rather
-    // than re-parsing a second copy (and then breaks as a cycle in `expand`).
-    if let Some(canon) = root_path.and_then(|p| std::fs::canonicalize(p).ok()) {
-        index.insert(canon, 0);
+    if let Some(id) = root_id {
+        index.insert(id.to_path_buf(), 0);
     }
     let mut queue: Vec<usize> = vec![0];
+    let mut needs = Vec::new();
 
     while let Some(idx) = queue.pop() {
         // Scan into OWNED data first (path strings), dropping the `&programs[idx]` borrow before we
@@ -154,29 +229,25 @@ pub(super) fn load(
         let dir = programs[idx].dir.clone();
         let mut links = BTreeMap::new();
         for (stmt_i, raw, kind) in refs {
-            let resolved = resolve(&dir, &raw, library_paths).ok_or_else(|| {
-                crate::Error::Load(format!("can't find '{raw}' from {}", dir.display()))
-            })?;
-            let child = if let Some(&i) = index.get(&resolved) {
+            let Some(src) = provided.get(&(dir.clone(), raw.clone())) else {
+                // Not supplied yet — collect the need and keep scanning (gather ALL of this pass's needs).
+                needs.push(ScadNeed {
+                    from_dir: dir.clone(),
+                    raw,
+                });
+                continue;
+            };
+            let child = if let Some(&i) = index.get(&src.id) {
                 i // parse-once: a diamond / back-reference reuses the existing node
             } else {
-                let src = match std::fs::read_to_string(&resolved) {
-                    Ok(src) => src,
-                    // Defensive, never-panic: `resolve` already canonicalized this as a readable file,
-                    // so a failure here is a TOCTOU race (deleted / perms changed between resolve and
-                    // read). The Err arm is the loader's one intentionally-uncovered line.
-                    Err(e) => {
-                        return Err(crate::Error::Load(format!("{}: {e}", resolved.display())));
-                    }
-                };
                 let node = Node {
-                    program: parse(&src)?,
-                    dir: resolved.parent().unwrap_or(Path::new(".")).to_path_buf(),
+                    program: parse(&src.source)?,
+                    dir: src.dir.clone(),
                     links: BTreeMap::new(),
                 };
                 let i = programs.len();
                 programs.push(node);
-                index.insert(resolved.clone(), i);
+                index.insert(src.id.clone(), i);
                 queue.push(i);
                 i
             };
@@ -191,7 +262,11 @@ pub(super) fn load(
         programs[idx].links = links; // assign after: borrow dropped, children pushed
     }
 
-    Ok(Loaded { programs })
+    if needs.is_empty() {
+        Ok(GraphOutcome::Complete(Loaded { programs }))
+    } else {
+        Ok(GraphOutcome::Incomplete(needs))
+    }
 }
 
 /// A user function definition's slice-of-params + body, borrowed from the owning [`Program`].

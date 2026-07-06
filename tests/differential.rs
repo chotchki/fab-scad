@@ -447,6 +447,19 @@ fn import_stl_matches_the_oracle() {
 }
 
 #[test]
+fn a_missing_use_warns_and_renders_like_the_oracle() {
+    // M.6.1: a missing use/include is warn-and-RENDER (exit 0) in BOTH engines — the reference drops to
+    // nothing (no statements, no defs) and the rest of the program renders. cube uses no def from the
+    // missing lib, so the render is well-defined; both engines must land the same cube.
+    agree_graph(
+        "missing_use",
+        &[("model.scad", "use <nonexistent.scad>\ncube([10, 20, 30]);\n")],
+        "model.scad",
+        &[],
+    );
+}
+
+#[test]
 fn no_test_bypasses_a_driver() {
     // The no-leak meta-lint (the recon-gen no-playwright-leak analog): this suite may touch an engine
     // ONLY through a differ::Driver. Scanning our own source, the raw engine entrypoints must not

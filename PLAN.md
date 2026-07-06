@@ -121,6 +121,9 @@ added 2026-07-05.
   - [x] M.5.1 - M.5.1 - import() reader: STL/3MF → fab_lang::Mesh + driver
   - [ ] M.5.2 - M.5.2 - surface() heightmap: DAT/PNG → Mesh + center/invert eval-threading
 - [ ] M.6 - M.6 - Differential + coverage close-out
+  - [ ] M.6.1 - M.6.1 - Tolerant loader: missing/broken use/include → warn+render
+  - [x] M.6.2 - M.6.2 - Differential: import() STL matches the oracle
+  - [ ] M.6.3 - M.6.3 - Coverage close-out: verify functions-100 + lcov-DA-lines-100
 
 ## Backlog (not yet phased)
 

@@ -17,7 +17,13 @@ use std::path::{Path, PathBuf};
 use super::loader::{ProvidedSource, SourceMap};
 use super::{FileTable, Geo, Message, Resolution, SourceNeed, resolve_source};
 use crate::Mesh;
-use crate::parser::parse;
+use crate::parser::{Program, parse};
+
+/// An empty program — the stand-in a tolerated missing/broken `use`/`include` contributes (no statements,
+/// no defs), so the graph closes and the run renders on (M.6.1).
+fn empty_program() -> Program {
+    Program { stmts: Vec::new() }
+}
 
 /// Read a root `.scad` file to source text — the entry read behind [`evaluate_file`](crate::evaluate_file)
 /// and kin. Split out here so the crate's every `std::fs` call lives in this one module.
@@ -53,12 +59,25 @@ where
     let root_id = root_path.and_then(|p| std::fs::canonicalize(p).ok());
     let mut scad = SourceMap::new();
     let mut files = FileTable::new();
+    // Loader warnings (a missing/broken `use`/`include`, M.6.1) are emitted at LOAD time, BEFORE the run's
+    // echoes — so we accumulate them across rounds and prepend them to the eval messages when the run closes.
+    let mut warnings: Vec<Message> = Vec::new();
     loop {
         match resolve_source(source, base_dir, root_id.as_deref(), &scad, &files)? {
-            Resolution::Complete { geo, messages } => return Ok((geo, messages)),
+            Resolution::Complete { geo, messages } => {
+                warnings.extend(messages);
+                return Ok((geo, warnings));
+            }
             Resolution::Incomplete { needs } => {
                 for need in needs {
-                    fulfill(need, library_paths, &mut mesh_reader, &mut scad, &mut files)?;
+                    fulfill(
+                        need,
+                        library_paths,
+                        &mut mesh_reader,
+                        &mut scad,
+                        &mut files,
+                        &mut warnings,
+                    )?;
                 }
             }
         }
@@ -76,6 +95,7 @@ fn fulfill<R>(
     mesh_reader: &mut R,
     scad: &mut SourceMap,
     files: &mut FileTable,
+    warnings: &mut Vec<Message>,
 ) -> crate::Result<()>
 where
     R: FnMut(&str) -> crate::Result<Mesh>,
@@ -86,16 +106,36 @@ where
             if scad.contains_key(&key) {
                 return Ok(()); // duplicate reference surfaced this round — already fulfilled
             }
-            let id = resolve(&from_dir, &raw, library_paths).ok_or_else(|| {
-                crate::Error::Load(format!("can't find '{}' from {}", raw, from_dir.display()))
-            })?;
+            let Some(id) = resolve(&from_dir, &raw, library_paths) else {
+                // TOLERANT (M.6.1): a missing library → warn + an EMPTY program (no statements, no defs), so
+                // the graph closes + eval renders ON, matching OpenSCAD's warn-and-render (exit 0). The ROOT
+                // is NOT tolerated — it's parsed in `resolve_source`, and a missing/broken root stays LOUD.
+                // Exact warning TEXT is #94; this pins the RENDER behavior. The synthetic id (the unresolved
+                // path) keeps this missing ref a distinct, self-consistent node in the graph.
+                warnings.push(Message::Warning(format!("Can't open library '{raw}'.")));
+                let id = from_dir.join(&raw);
+                scad.insert(
+                    key,
+                    ProvidedSource {
+                        id,
+                        dir: from_dir,
+                        program: empty_program(),
+                    },
+                );
+                return Ok(());
+            };
             let text = std::fs::read_to_string(&id).map_err(|e| {
                 // TOCTOU: `resolve` already canonicalized this as a readable file, so a failure here is a
                 // race (deleted / perms flipped). Off the pure core's coverage — this module is the seam.
                 crate::Error::Load(format!("{}: {e}", id.display()))
             })?;
-            let program = parse(&text)?;
             let dir = id.parent().unwrap_or(Path::new(".")).to_path_buf();
+            // A parse-broken USED/INCLUDED file is ALSO tolerated (warn + empty) — OpenSCAD renders on. The
+            // root's parse (in `resolve_source`) is the only one that stays LOUD.
+            let program = parse(&text).unwrap_or_else(|_| {
+                warnings.push(Message::Warning(format!("Failed to parse '{raw}'.")));
+                empty_program()
+            });
             scad.insert(key, ProvidedSource { id, dir, program });
         }
         SourceNeed::File { raw } => {

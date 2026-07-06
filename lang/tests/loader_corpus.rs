@@ -26,7 +26,9 @@
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
-use fab_lang::{Error, Mesh, evaluate, evaluate_file, evaluate_with_base};
+use fab_lang::{
+    Error, Mesh, evaluate, evaluate_file, evaluate_with_base, evaluate_with_base_full,
+};
 
 /// Every fixture in the graph, as `(relative path, contents)`. Subdirectories (e.g. `lib/`) are created
 /// on demand. Kept together so the whole multi-file corpus is reviewable in one place.
@@ -137,6 +139,8 @@ const FIXTURES: &[(&str, &str)] = &[
     ),
     // library-path resolution: pathlib lives in lib/, reachable only via a library path
     ("lib/pathlib.scad", "function pr() = 4;\n"),
+    // a used file that EXISTS but doesn't parse (unterminated string) — the tolerant broken-file case
+    ("broken.scad", "\"unterminated\n"),
     (
         "use_via_libpath.scad",
         "use <pathlib.scad>\nsphere(pr(), $fn = 8);\n",
@@ -281,21 +285,49 @@ fn a_diamond_re_splices_shared_geometry() {
 }
 
 #[test]
-fn missing_include_is_loud() {
-    // OpenSCAD warns + renders on; we fail LOUD (a missing lib in a correct corpus is our bug).
-    let err = evaluate_with_base("include <does_not_exist.scad>\n", root(), &[]).unwrap_err();
-    assert!(matches!(err, Error::Load(_)), "got {err:?}");
-    // …and the same for a missing `use`.
-    let err = evaluate_with_base("use <no_such_lib.scad>\n", root(), &[]).unwrap_err();
-    assert!(matches!(err, Error::Load(_)), "got {err:?}");
+fn missing_use_include_warns_and_renders() {
+    // TOLERANT (M.6.1): OpenSCAD warns + renders ON a missing lib (exit 0); we match — a missing include or
+    // use contributes NOTHING (no statements, no defs) and the rest of the program still renders. The ROOT
+    // stays LOUD (see `a_missing_root_file_is_loud`).
+    let want = evaluate("sphere(3, $fn = 8);").expect("evaluates");
+    let inc = evaluate_with_base(
+        "include <does_not_exist.scad>\nsphere(3, $fn = 8);\n",
+        root(),
+        &[],
+    )
+    .expect("missing include renders on");
+    assert!(same_mesh(&inc, &want), "missing include drops to nothing, sphere still renders");
+    let usg = evaluate_with_base("use <no_such_lib.scad>\nsphere(3, $fn = 8);\n", root(), &[])
+        .expect("missing use renders on");
+    assert!(same_mesh(&usg, &want), "missing use drops to nothing, sphere still renders");
+    // …and the drop is WARNED, never silently swallowed (exact text is #94; presence is pinned here).
+    let ev = evaluate_with_base_full("use <no_such_lib.scad>\nsphere(3, $fn = 8);\n", root(), &[])
+        .expect("renders");
+    assert!(!ev.warnings().is_empty(), "a missing use emits a warning");
+}
+
+#[test]
+fn a_broken_used_file_warns_and_renders() {
+    // A used/included file that EXISTS but fails to parse is tolerated the same way (warn + no defs) —
+    // OpenSCAD renders on. (A broken ROOT is a parse error, not tolerated — that's `resolve_source`'s.)
+    let want = evaluate("sphere(3, $fn = 8);").expect("evaluates");
+    let got = evaluate_with_base("use <broken.scad>\nsphere(3, $fn = 8);\n", root(), &[])
+        .expect("broken use renders on");
+    assert!(same_mesh(&got, &want), "a broken used file contributes nothing");
 }
 
 #[test]
 fn library_path_is_only_searched_after_the_local_dir() {
-    // Without the lib path, pathlib.scad is unreachable from the root dir → LOUD (proves the local dir
-    // is tried first + the lib path is what makes it resolve).
+    // pathlib lives in lib/, unreachable from the root dir. WITH the lib path it resolves → `pr()` = 4 →
+    // sphere(4) renders. WITHOUT it, the `use` is tolerantly DROPPED (warn, M.6.1), but then `pr()` is an
+    // UNKNOWN function — still a LOUD defer in our engine (unknown-function → undef is a SEPARATE divergence,
+    // #94-adjacent, not the loader's job). So the file still fails, now on the unknown call rather than the
+    // missing lib — which is itself the proof pathlib is unreachable without the lib path (local dir first).
+    let with_lib = evaluate_file(&root().join("use_via_libpath.scad"), &[root().join("lib")])
+        .expect("with the lib path, pr() resolves");
+    assert!(with_lib.tri_count() > 0, "sphere(4) renders");
     let err = evaluate_file(&root().join("use_via_libpath.scad"), &[]).unwrap_err();
-    assert!(matches!(err, Error::Load(_)), "got {err:?}");
+    assert!(matches!(err, Error::Unimplemented(_)), "got {err:?}");
 }
 
 #[test]

@@ -45,10 +45,11 @@
 //!
 //! Scope note (I.2.4): def-collection is FUNCTIONS **and** MODULES — both flow through [`Defs`] with the
 //! same use-tier/local-override precedence, so a `use`d library's modules import exactly like its
-//! functions (the evaluator's module-call machinery lives in `mod.rs`). A missing library fails LOUD
-//! (`Error::Load`, raised by the shell) rather than OpenSCAD's warn-and-continue — a missing lib in a
-//! correct corpus is OUR resolution bug, and we want it loud until #94's warning buffer can match the
-//! oracle's warn-and-render bug-for-bug (M.6).
+//! functions (the evaluator's module-call machinery lives in `mod.rs`). TOLERANT (M.6.1): a missing library
+//! OR a parse-broken used/included file WARNs + contributes an EMPTY program (no statements, no defs) and
+//! the run renders ON — OpenSCAD's warn-and-render (exit 0), reproduced in the [`io`](super::io) shell. The
+//! ROOT is NOT tolerated: a missing/broken root is LOUD (its read + parse are the shell's / `resolve_source`'s,
+//! not here). Exact warning TEXT is #94; this reproduces the RENDER behavior.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};

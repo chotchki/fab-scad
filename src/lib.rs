@@ -20,6 +20,10 @@ pub mod differ;
 pub mod geomsg;
 #[cfg(feature = "kernel")]
 pub mod geomsvc;
+// import()/surface() mesh readers (M.5): needs stl (native) + threemf_in (kernel) + fab-lang, same gate
+// as differ. The impure side of fab-lang's needs fixpoint.
+#[cfg(all(feature = "native", feature = "kernel"))]
+pub mod import;
 #[cfg(feature = "kernel")]
 pub mod kernel;
 pub mod manifest;

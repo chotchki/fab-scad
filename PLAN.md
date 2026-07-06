@@ -110,20 +110,6 @@ added 2026-07-05.
 - [ ] L.2 - Burn-down: fixes land as semantics/ tests; expect this to expose evaluator gaps — that's the point
 - [ ] L.3 - models/ tree end-to-end (teardrop/onion/screw_hole, corner_brace, Underdesk); benchmark corpus captured via the tracing layer on every run
 - [ ] L.4 - Exit review: divergences zero-or-documented, perf-vs-oracle published; rung 2/3 (intrinsics, JIT) phase cut FROM THIS DATA
-## Phase M - scad-rs: pure source-provider (fab-lang zero-IO; caller fulfills a needs fixpoint)
-- [x] M.1 - M.1 - The pure source-provider contract
-- [x] M.2 - M.2 - Pure loader: source table in, Scad needs out (static parse-time fixpoint)
-- [x] M.3 - M.3 - Eval-time File needs: import/surface emit needs + placeholder-continue
-- [x] M.4 - M.4 - The IO shell: the outer fixpoint loop (the one place std::fs lives)
-  - [x] M.4.2 - M.4.2 - The io module: outer fixpoint driver + thin wrappers
-  - [x] M.4.3 - M.4.1 - Loader → pure: excise std::fs, surface Scad needs
-- [ ] M.5 - M.5 - import()/surface() backend: readers fulfill File needs → Mesh
-  - [x] M.5.1 - M.5.1 - import() reader: STL/3MF → fab_lang::Mesh + driver
-  - [ ] M.5.2 - M.5.2 - surface() heightmap: DAT/PNG → Mesh + center/invert eval-threading
-- [x] M.6 - M.6 - Differential + coverage close-out
-  - [x] M.6.1 - M.6.1 - Tolerant loader: missing/broken use/include → warn+render
-  - [x] M.6.2 - M.6.2 - Differential: import() STL matches the oracle
-  - [x] M.6.3 - M.6.3 - Coverage close-out: verify functions-100 + lcov-DA-lines-100
 
 ## Backlog (not yet phased)
 

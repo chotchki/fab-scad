@@ -202,6 +202,23 @@ fn partial_rotate_extrude_matches_the_oracle() {
 }
 
 #[test]
+fn projection_matches_the_oracle() {
+    // J.3.6: the 3D→2D bridge, the inverse of the extrudes. `cut = false` is the shadow (the whole solid
+    // flattened onto XY); `cut = true` slices at z = 0. A bare 2D result compares trivially on the 3D
+    // axis (both empty), so each case re-extrudes the projection to a unit-height solid whose VOLUME is
+    // the projected AREA — the existing boolean-residual differential then re-runs OpenSCAD on it. All
+    // pass the STRICT 1e-3 gate (no phase artifact — a projection is exact, not a swept tessellation).
+    agree("linear_extrude(1) projection() sphere(5, $fn = 32);"); // shadow of a sphere → a disk
+    agree("linear_extrude(1) projection() translate([0, 0, 3]) cube(6, center = true);"); // lifted cube
+    agree("linear_extrude(1) projection() cylinder(h = 10, r = 4, $fn = 24);"); // shadow of a cylinder
+    agree("linear_extrude(1) projection(cut = true) sphere(5, $fn = 32);"); // equatorial slice
+    agree("linear_extrude(1) projection(cut = true) cube(6, center = true);"); // a square slice
+    agree(
+        "linear_extrude(1) projection(cut = true) rotate([30, 0, 0]) cylinder(h = 10, r = 4, center = true, $fn = 32);",
+    ); // a tilted-cylinder slice → an ellipse-ish section
+}
+
+#[test]
 fn extrude_brings_the_2d_catches_live() {
     // The J.3.2.1/J.3.3 2D catches were pinned as unit tests with oracle-derived LITERALS. linear_extrude
     // bridges them to a 3D solid whose VOLUME is the 2D area, so the EXISTING boolean-residual differential

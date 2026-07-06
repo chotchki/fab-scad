@@ -399,12 +399,24 @@ fn color_over_2d_is_loud() {
 }
 
 #[test]
-fn deferred_2d_bridge_modules_are_loud() {
-    // The remaining 2D↔3D bridge is `projection` (J.3.6) — it fails LOUD (naming its feature + task),
-    // never silently nothing. (`offset`, `linear_extrude`, and `rotate_extrude` are wired through J.3.5.)
-    let deferred =
-        |src: &str| matches!(evaluate_geometry(src).unwrap_err(), Error::Unimplemented(_));
-    assert!(deferred("projection() cube(2);"));
+fn projection_builds_the_3d_to_2d_bridge() {
+    // J.3.6, the last 2D↔3D bridge. A shadow (default cut = false) of a 3D solid → a 2D result wrapping
+    // the 3D subtree.
+    assert!(matches!(
+        evaluate_geometry("projection() cube(2);").unwrap(),
+        Geo::D2(Shape2D::Projection { cut: false, child }) if matches!(*child, GeoNode::Leaf(_))
+    ));
+    // `cut = true` rides the flag; a multi-object group collapses into one union node.
+    assert!(matches!(
+        evaluate_geometry("projection(cut = true) { cube(2); sphere(3, $fn = 8); }").unwrap(),
+        Geo::D2(Shape2D::Projection { cut: true, child }) if matches!(*child, GeoNode::Union(_))
+    ));
+    // A 2D child is coerced OUT (force_3d) → an empty subtree, not a projection of a plane (OpenSCAD
+    // warns `Ignoring 2D child object for 3D operation` + renders nothing).
+    assert!(matches!(
+        evaluate_geometry("projection() square(5);").unwrap(),
+        Geo::D2(Shape2D::Projection { child, .. }) if matches!(*child, GeoNode::Empty)
+    ));
 }
 
 #[test]

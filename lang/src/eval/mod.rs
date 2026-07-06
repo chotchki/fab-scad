@@ -1124,6 +1124,23 @@ fn force_2d(child: Geo, ctx: &Ctx) -> Shape2D {
     }
 }
 
+/// Coerce a child to 3D for a FIXED-3D operation (`projection`, which consumes a solid and flattens it).
+/// A 3D child is taken as-is — INCLUDING a null `{}` (which arrives as `Geo::D3(GeoNode::Empty)`, so the
+/// empty node passes silently, no warning). A real 2D child is IGNORED with OpenSCAD's `Ignoring 2D child
+/// object for 3D operation` warning (verified vs 2026.06.12 — `projection() square(5)` → that warning +
+/// an empty result). Simpler than the [`force_2d`] null special-case: there the null child comes in on the
+/// OPPOSITE dimension (a 3D null under a 2D op), so it must dodge the warning explicitly; here the null is
+/// already 3D and rides the first arm.
+fn force_3d(child: Geo, ctx: &Ctx) -> GeoNode {
+    match child {
+        Geo::D3(node) => node,
+        Geo::D2(_) => {
+            ctx.warn("Ignoring 2D child object for 3D operation".to_string());
+            GeoNode::Empty
+        }
+    }
+}
+
 /// Iterate a `for`/`intersection_for` over its loop-variable ARGS (a Cartesian PRODUCT for multiple
 /// vars), evaluating the body's geometry once per binding tuple and pushing each iteration's node.
 /// Recursion depth = the number of loop vars (parse-bounded), so it can't overflow.
@@ -1599,6 +1616,26 @@ fn eval_stmt<'a>(
             nodes.push(Geo::D3(GeoNode::Extrude {
                 kind,
                 child: Box::new(shape),
+            }));
+        }
+        // `projection()` — the 3D→2D bridge (J.3.6), the inverse of the extrudes. `cut = true` slices the
+        // solid at `z = 0`; `cut = false` (default) is the shadow (the whole solid flattened onto XY). The
+        // children are a FIXED-3D group ([`force_3d`] coerces a stray 2D child out), collapsed into one node
+        // the backend flattens via `slice_to_cross_section` (cut) / `project` (shadow).
+        StmtKind::Module(mi) if mi.name == "projection" => {
+            let (positional, named, _child_scope) = module::eval_args(mi, scope, ctx)?;
+            let cut = matches!(
+                named.get("cut").or_else(|| positional.first()),
+                Some(Value::Bool(true))
+            );
+            let refs: Vec<&Stmt> = mi.children.iter().collect();
+            let child = force_3d(
+                union_of(eval_nodes(&refs, ctx, scope, global, island)?, ctx),
+                ctx,
+            );
+            nodes.push(Geo::D2(Shape2D::Projection {
+                cut,
+                child: Box::new(child),
             }));
         }
         // `color()` — set the subtree's display color (BOSL2-critical, J.2.8). An INVALID color (unknown

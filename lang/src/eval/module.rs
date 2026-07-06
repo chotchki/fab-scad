@@ -69,11 +69,8 @@ pub(super) fn eval_module<'a>(
         "circle" => Ok(poly2(eval_circle(&positional, &named, &child))),
         "polygon" => Ok(poly2(eval_polygon(&positional, &named))),
         // KNOWN-but-deferred builtins — recognized so the error NAMES the feature + its task instead of
-        // a misleading "typo?". The 2D↔3D bridge modules + `offset` are the next J.3 tasks; each fails
-        // LOUD here until wired (never silently wrong). (text/import/minkowski/surface are J.4.)
-        "projection" => Err(crate::Error::Unimplemented(
-            "projection() (the 3D→2D flatten bridge) is not yet wired — J.3.6",
-        )),
+        // a misleading "typo?". (`offset`, the extrudes, and `projection` are wired in eval_stmt as of
+        // J.3.3–J.3.6; text/import/minkowski/surface are J.4.)
         _ => Err(crate::Error::Unimplemented(
             "unknown module — not a builtin primitive (sphere/cube/cylinder/polyhedron, \
              square/circle/polygon), transform, boolean, or a defined user module (a typo, or a builtin \

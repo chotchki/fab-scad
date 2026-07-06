@@ -118,11 +118,13 @@ pub(crate) fn polyhedron(points: Vec<Vec3>, faces: &[Vec<u32>]) -> Mesh {
     let n = u32::try_from(points.len()).unwrap_or(u32::MAX);
     let mut tris = Vec::new();
     for face in faces {
-        // fan: (face[0], face[k], face[k+1]) for k in 1..len-1
+        // fan: (face[0], face[k], face[k+1]) for k in 1..len-1. OpenSCAD winds faces CLOCKWISE as seen
+        // from OUTSIDE, but Manifold (right-hand rule) wants CCW for an outward normal — so REVERSE each
+        // triangle (a, c, b), else the solid is inside-out (Manifold reads a negative volume).
         for pair in face.windows(2).skip(1) {
             let (a, b, c) = (face[0], pair[0], pair[1]);
             if a < n && b < n && c < n {
-                tris.push(Tri::new(a, b, c));
+                tris.push(Tri::new(a, c, b));
             }
         }
     }

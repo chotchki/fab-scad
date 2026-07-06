@@ -228,9 +228,11 @@ fn polyhedron_vertices_and_fan_triangulation() {
     );
     assert_eq!(pyr.vert_count(), 5);
     assert_eq!(pyr.tri_count(), 6);
-    // the base quad [0,1,2,3] fans from vertex 0: (0,1,2) then (0,2,3)
-    assert_eq!(pyr.tris[0].0, [0, 1, 2]);
-    assert_eq!(pyr.tris[1].0, [0, 2, 3]);
+    // the base quad [0,1,2,3] fans from vertex 0, each triangle REVERSED (J.2.6): OpenSCAD winds faces
+    // clockwise-from-outside, Manifold wants CCW, so (0,1,2)→(0,2,1) and (0,2,3)→(0,3,2). Without the
+    // flip the solid is inside-out (a 2.0 boolean residual vs the oracle — the whole volume wrong).
+    assert_eq!(pyr.tris[0].0, [0, 2, 1]);
+    assert_eq!(pyr.tris[1].0, [0, 3, 2]);
 }
 
 #[test]

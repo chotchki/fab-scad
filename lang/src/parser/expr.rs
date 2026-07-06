@@ -11,7 +11,7 @@ use winnow::error::ModalResult;
 use winnow::stream::Location;
 
 use super::ast::{Arg, BinOp, Expr, ExprKind, Parameter, UnOp};
-use super::{MAX_DEPTH, Tokens, bail, bump, expect, peek_kind, peek_kind2};
+use super::{MAX_DEPTH, Tokens, bail, bump, expect, labeled, peek_kind, peek_kind2};
 use crate::lexer::{TokenKind, decode_str, num_value};
 
 /// Parse a full expression (parser.y:334). The prefix forms (`function`/`let`/`assert`/`echo`) sit at
@@ -502,7 +502,7 @@ pub(crate) fn arg_list(i: &mut Tokens<'_, '_>, depth: usize) -> ModalResult<Vec<
         return Ok(args); // empty ()
     }
     loop {
-        args.push(argument(i, depth)?);
+        args.push(labeled(i, "a call argument", |i| argument(i, depth))?);
         if peek_kind(i) != Some(TokenKind::Comma) {
             break;
         }

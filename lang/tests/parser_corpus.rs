@@ -303,6 +303,22 @@ fn syntax_errors_point_and_name() {
     assert!(err("cube(2) 5;").contains("module name")); // bad single child
 }
 
+/// A parse error carries a "while parsing …" BREADCRUMB — the grammar path the parser was on, so a
+/// deep failure reports WHERE it went wrong, not just the leaf (BOSL2 diagnosis needs this).
+#[test]
+fn syntax_errors_carry_a_context_breadcrumb() {
+    // a broken argument names both the leaf reason AND that we were in a call argument.
+    let arg = err("cube(1+);");
+    assert!(arg.contains("expected"), "reworded head: {arg}");
+    assert!(
+        arg.contains("while parsing a call argument"),
+        "breadcrumb: {arg}"
+    );
+    // a broken assignment value / function body point at their construct too.
+    assert!(err("x = 1 + ;").contains("while parsing an assignment value"));
+    assert!(err("function f() = 1 + ;").contains("while parsing a function body"));
+}
+
 #[test]
 fn list_comprehensions_parse_every_form() {
     // With H.3.2, the whole grammar parses — no parse-level construct bails anymore.

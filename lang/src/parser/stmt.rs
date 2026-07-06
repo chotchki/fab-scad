@@ -12,7 +12,7 @@ use winnow::stream::Location;
 
 use super::ast::{Modifiers, ModuleInstantiation, Program, Stmt, StmtKind};
 use super::expr::{arg_list, expr, param_list};
-use super::{MAX_DEPTH, Tokens, bail, bump, expect, peek_kind, peek_kind2};
+use super::{MAX_DEPTH, Tokens, bail, bump, expect, labeled, peek_kind, peek_kind2};
 use crate::lexer::TokenKind;
 
 /// The top-level program: statements up to the `Eof` sentinel (parser.y:174-183).
@@ -102,7 +102,7 @@ fn assignment(i: &mut Tokens<'_, '_>, name: &str, depth: usize) -> ModalResult<S
     let start = i.current_token_start();
     bump(i)?; // name
     bump(i)?; // '='
-    let value = expr(i, depth + 1)?;
+    let value = labeled(i, "an assignment value", |i| expr(i, depth + 1))?;
     expect(i, TokenKind::Semi, "';' after an assignment")?;
     Ok(Stmt {
         kind: StmtKind::Assignment {
@@ -143,7 +143,7 @@ fn function_def(i: &mut Tokens<'_, '_>, depth: usize) -> ModalResult<Stmt> {
     let params = param_list(i, depth + 1)?;
     expect(i, TokenKind::RParen, "closing ')' of the parameter list")?;
     expect(i, TokenKind::Eq, "'=' in a function definition")?;
-    let body = expr(i, depth + 1)?;
+    let body = labeled(i, "a function body", |i| expr(i, depth + 1))?;
     expect(i, TokenKind::Semi, "';' after a function definition")?;
     Ok(Stmt {
         kind: StmtKind::FunctionDef { name, params, body },

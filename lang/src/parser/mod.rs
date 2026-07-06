@@ -23,8 +23,8 @@ pub use print::{print, print_expr};
 
 use winnow::Parser;
 use winnow::combinator::{cut_err, fail};
-use winnow::error::{ContextError, ErrMode, ModalResult, StrContext, StrContextValue};
-use winnow::stream::TokenSlice;
+use winnow::error::{AddContext, ContextError, ErrMode, ModalResult, StrContext, StrContextValue};
+use winnow::stream::{Stream, TokenSlice};
 use winnow::token::any;
 
 use crate::lexer::{Token, TokenKind};
@@ -84,6 +84,19 @@ where
 /// unexpected tokens, deferred constructs (H.2/H.3), and the depth guard. Always returns `Err`.
 pub(crate) fn bail<T>(i: &mut Tokens<'_, '_>, label: &'static str) -> ModalResult<T> {
     cut_err(fail.context(StrContext::Label(label))).parse_next(i)
+}
+
+/// Run `f`, tagging any failure with a grammar-breadcrumb `label` (the construct we were parsing), so a
+/// deep error reports the PATH it was on — `expected an expression` ‹ `a call argument` — not just the
+/// leaf. The label lands OUTER of `f`'s own leaf context, building the innermost-first stack that
+/// [`diag`] renders as the "while parsing …" breadcrumb. A hand-rolled analog of winnow's `.context()`.
+pub(crate) fn labeled<'t, 's, T>(
+    i: &mut Tokens<'t, 's>,
+    label: &'static str,
+    f: impl FnOnce(&mut Tokens<'t, 's>) -> ModalResult<T>,
+) -> ModalResult<T> {
+    let start = i.checkpoint();
+    f(i).map_err(|e| e.map(|ctx| ctx.add_context(i, &start, StrContext::Label(label))))
 }
 
 /// Consume a required token at a COMMIT point — a mismatch is a HARD (Cut) error naming what was

@@ -111,7 +111,7 @@ added 2026-07-05.
 - [ ] L.3 - models/ tree end-to-end (teardrop/onion/screw_hole, corner_brace, Underdesk); benchmark corpus captured via the tracing layer on every run
 - [ ] L.4 - Exit review: divergences zero-or-documented, perf-vs-oracle published; rung 2/3 (intrinsics, JIT) phase cut FROM THIS DATA
 ## Phase M - scad-rs: pure source-provider (fab-lang zero-IO; caller fulfills a needs fixpoint)
-- [ ] M.1 - M.1 - The pure source-provider contract
+- [x] M.1 - M.1 - The pure source-provider contract
 - [x] M.2 - M.2 - Pure loader: source table in, Scad needs out (static parse-time fixpoint)
 - [x] M.3 - M.3 - Eval-time File needs: import/surface emit needs + placeholder-continue
 - [ ] M.4 - M.4 - The IO shell: the outer fixpoint loop (the one place std::fs lives)

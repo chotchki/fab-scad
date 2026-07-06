@@ -151,6 +151,25 @@ escape, not community respect.
   lacks and OpenSCAD's own manifold backend still farms to CGAL. Deferred = BLOW UP AND
   COMPLAIN LOUDLY, never silently wrong; if corpus pressure ever demands minkowski, we do
   our own implementation over Manifold hulls (decided direction, unscheduled).
+- **Pure source-provider — fab-lang does ZERO IO, the caller fulfills a needs fixpoint (DECIDED,
+  Phase M).** The language crate never touches the filesystem; every external source enters as
+  DATA the caller supplies. Evaluation returns a `Resolution { Complete { geo, messages } |
+  Incomplete { needs } }`, and a need is a `SourceNeed { Scad { from_dir, raw } | File { raw } }`
+  — the impure caller reads the named sources, adds them to a table, and RE-RUNS until the graph
+  closes. Two discovery phases, grounded in oracle tests (2026.06.12): `use`/`include` is STATIC
+  (literal `<...>` tokens, top-level only — a variable path `use <x>` looks for a file literally
+  named "x") so the loader closes it with a PARSE-TIME fixpoint (M.2); `import`/`surface` paths are
+  DYNAMIC (runtime expressions) so they're found only by EXECUTING — a mesh path the caller's
+  `FileTable` (raw → `Mesh`) lacks records a `File` need and substitutes an EMPTY placeholder so the
+  run KEEPS GOING and surfaces the rest (a mesh rarely gates control flow → usually one more round,
+  not one-per-file). Returning Incomplete instead of a sync reader-callback is the load-bearing
+  choice: the browser reads files ASYNCHRONOUSLY and a sync callback can't await — Incomplete lets
+  the async shell await between rounds. This is also why the coverage math gets EASIER (the pure
+  core has no IO branches to cover) while the calling gets harder — which is fine, fab-scad's IO
+  shell (M.4) is the ONE place `std::fs` lives, and it's the same seam an async wasm shell slots
+  into. The determinism doctrine's "same input → bit-identical output" stays honest because the
+  input is now EXPLICIT (the source + file tables + library paths), with no hidden `OPENSCADPATH`
+  or ambient disk read reaching the evaluator.
 - **Module boundary:** scad-rs lives behind the SAME geomsg seam the workers use today — a
   `Render{source, params}` request. The official-wasm worker remains wired as a FALLBACK
   during cutover; per-model, whichever engine is trusted answers.

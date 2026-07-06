@@ -129,6 +129,83 @@ pub(super) fn resolve_offset(
     (0.0, Join2D::Miter, 0) // no r/delta → identity
 }
 
+/// Resolve a `linear_extrude()` module's evaluated args to an [`ExtrudeKind::Linear`]. `height` (1st
+/// positional / `height=`) defaults to 100 (OpenSCAD's fallback for a missing/degenerate height); `twist`
+/// (degrees, default 0), `scale` (scalar → `[s, s]`, or `[x, y]`, default `[1, 1]`), and `center` ride
+/// their named args. `slices` is the twist subdivision: explicit if given, else OpenSCAD's `$fn`-driven
+/// default ([`helix_slices`]) — 1 when there's no twist.
+pub(super) fn resolve_linear_extrude(
+    positional: &[Value],
+    named: &BTreeMap<String, Value>,
+    scope: &Scope,
+) -> ExtrudeKind {
+    let height = arg(positional, named, 0, "height")
+        .and_then(as_num)
+        .filter(|h| h.is_finite() && *h > 0.0)
+        .unwrap_or(100.0);
+    let twist = named.get("twist").and_then(as_num).unwrap_or(0.0);
+    let scale = extrude_scale(named.get("scale"));
+    let center = matches!(named.get("center"), Some(Value::Bool(true)));
+    let (fn_, _, _) = scope.fn_fa_fs();
+    let slices = match named.get("slices").and_then(as_num) {
+        Some(s) if s >= 1.0 => whole_u32(s),
+        _ => helix_slices(twist, fn_),
+    };
+    ExtrudeKind::Linear {
+        height,
+        twist,
+        scale,
+        slices,
+        center,
+    }
+}
+
+/// A value as a plain number, else `None`.
+fn as_num(v: &Value) -> Option<f64> {
+    match v {
+        Value::Num(n) => Some(*n),
+        _ => None,
+    }
+}
+
+/// `linear_extrude`'s `scale`: a scalar → uniform `[s, s]`, an `[x, y]` list → per-axis, anything else →
+/// `[1, 1]` (no scaling).
+fn extrude_scale(v: Option<&Value>) -> [f64; 2] {
+    match v {
+        Some(Value::Num(s)) => [*s, *s],
+        Some(Value::NumList(xs)) => [
+            xs.first().copied().unwrap_or(1.0),
+            xs.get(1).copied().unwrap_or(1.0),
+        ],
+        _ => [1.0, 1.0],
+    }
+}
+
+/// The default twist-subdivision count — OpenSCAD's `Calc::get_helix_slices` for the `$fn > 0` case:
+/// `max(1, |twist| · $fn / 360)`. No twist → a single band (a straight prism). The `$fa`/`$fs` fallback
+/// (when `$fn == 0`) is deferred; a twisted extrude in the wild sets `$fn`.
+fn helix_slices(twist: f64, fn_: f64) -> u32 {
+    if twist == 0.0 {
+        return 1;
+    }
+    whole_u32((twist.abs() * fn_ / 360.0).max(1.0))
+}
+
+/// A validated `slices` count → its `u32`, saturating at `u32::MAX`. Callers guarantee a FINITE value
+/// `≥ 1` (an explicit `slices >= 1.0`, or [`helix_slices`]' `.max(1.0)`), so there's no sub-1/NaN guard.
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "guarded: only a finite value ≥ 1 reaches the cast; it saturates at u32::MAX"
+)]
+fn whole_u32(s: f64) -> u32 {
+    if s >= f64::from(u32::MAX) {
+        u32::MAX
+    } else {
+        s as u32
+    }
+}
+
 /// The 3×4 affine for a transform module, from its EVALUATED arguments. Unknown/degenerate args fall
 /// back to identity (OpenSCAD treats a malformed transform as a no-op rather than an error).
 pub(super) fn transform_matrix(

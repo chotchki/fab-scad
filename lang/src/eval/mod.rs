@@ -1562,6 +1562,33 @@ fn eval_stmt<'a>(
                 child: Box::new(shape),
             }));
         }
+        // `linear_extrude()` — sweep a 2D profile up +Z into a 3D solid (J.3.4), the 2D→3D bridge. A
+        // FIXED-2D op like `offset` ([`force_2d`] coerces the child); `height`/`twist`/`scale`/`slices`/
+        // `center` resolve via [`geo::resolve_linear_extrude`], the `$fn` twist-slices default riding the
+        // call's child scope. The backend (`Manifold::extrude_with_options`) does the sweep.
+        StmtKind::Module(mi) if mi.name == "linear_extrude" => {
+            let (positional, named, child_scope) = module::eval_args(mi, scope, ctx)?;
+            let refs: Vec<&Stmt> = mi.children.iter().collect();
+            let shape = force_2d(
+                union_of(eval_nodes(&refs, ctx, scope, global, island)?, ctx),
+                ctx,
+            );
+            let kind = geo::resolve_linear_extrude(&positional, &named, &child_scope);
+            // TWIST diverges from the oracle: Manifold's helix and OpenSCAD's disagree even at a matched
+            // slice count (MEASURED — boolean residual 0.22, over the 1e-3 gate). So twist is LOUD-deferred
+            // to its own loft (J.3.4.1); the un-twisted sweep (prism + scale) matches Manifold exactly and
+            // ships here. Never silently wrong.
+            if matches!(kind, ExtrudeKind::Linear { twist, .. } if twist != 0.0) {
+                return Err(crate::Error::Unimplemented(
+                    "twisted linear_extrude doesn't yet match the oracle (Manifold's helix diverges from \
+                     OpenSCAD's — measured) — the matching loft is J.3.4.1; un-twisted extrude works",
+                ));
+            }
+            nodes.push(Geo::D3(GeoNode::Extrude {
+                kind,
+                child: Box::new(shape),
+            }));
+        }
         // `color()` — set the subtree's display color (BOSL2-critical, J.2.8). An INVALID color (unknown
         // name, wrong arg type) INHERITS: no Color node, just the children (OpenSCAD's -1 sentinel),
         // regardless of dimension. A VALID color on a 2D child is LOUD — `Shape2D` carries no color yet,

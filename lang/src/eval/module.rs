@@ -71,8 +71,8 @@ pub(super) fn eval_module<'a>(
         // KNOWN-but-deferred builtins — recognized so the error NAMES the feature + its task instead of
         // a misleading "typo?". The 2D↔3D bridge modules + `offset` are the next J.3 tasks; each fails
         // LOUD here until wired (never silently wrong). (text/import/minkowski/surface are J.4.)
-        "linear_extrude" | "rotate_extrude" => Err(crate::Error::Unimplemented(
-            "linear_extrude / rotate_extrude (the 2D→3D sweep bridge) is not yet wired — J.3.4 / J.3.5",
+        "rotate_extrude" => Err(crate::Error::Unimplemented(
+            "rotate_extrude() (the 2D→3D revolve bridge) is not yet wired — J.3.5",
         )),
         "projection" => Err(crate::Error::Unimplemented(
             "projection() (the 3D→2D flatten bridge) is not yet wired — J.3.6",

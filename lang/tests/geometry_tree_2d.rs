@@ -400,15 +400,61 @@ fn color_over_2d_is_loud() {
 
 #[test]
 fn deferred_2d_bridge_modules_are_loud() {
-    // The 2D↔3D bridges are the NEXT J.3 tasks — each fails LOUD (naming its feature + task), never
-    // silently nothing. (Their semantics land in J.3.4–J.3.6; `offset` is wired as of J.3.3.)
+    // The remaining 2D↔3D bridges are the NEXT J.3 tasks — each fails LOUD (naming its feature + task),
+    // never silently nothing. (`offset` + un-twisted `linear_extrude` are wired as of J.3.3/J.3.4.)
     let deferred =
         |src: &str| matches!(evaluate_geometry(src).unwrap_err(), Error::Unimplemented(_));
-    assert!(deferred("linear_extrude(5) square(2);"));
     assert!(deferred(
         "rotate_extrude() translate([2, 0]) circle(1, $fn = 8);"
     ));
     assert!(deferred("projection() cube(2);"));
+}
+
+#[test]
+fn linear_extrude_builds_the_2d_to_3d_bridge() {
+    use fab_lang::ExtrudeKind;
+    // linear_extrude wraps a 2D child in the GeoNode::Extrude bridge (a 3D result).
+    match evaluate_geometry("linear_extrude(5) square(4);").unwrap() {
+        Geo::D3(GeoNode::Extrude { kind, child }) => {
+            assert!(matches!(*child, Shape2D::Polygon(_)));
+            assert!(matches!(
+                kind,
+                ExtrudeKind::Linear { height, twist, center, .. } if height == 5.0 && twist == 0.0 && !center
+            ));
+        }
+        other => panic!("expected a 3D Extrude, got {other:?}"),
+    }
+    // height / center / scale ride their args.
+    assert!(matches!(
+        evaluate_geometry("linear_extrude(height = 10, center = true, scale = [2, 0.5]) square(4);").unwrap(),
+        Geo::D3(GeoNode::Extrude { kind: ExtrudeKind::Linear { height, center, scale, .. }, .. })
+            if height == 10.0 && center && scale == [2.0, 0.5]
+    ));
+    // a 3D child is IGNORED (force_2d, no "Mixing") → an extrude of the empty region.
+    assert!(matches!(
+        evaluate_geometry("linear_extrude(5) cube(2);").unwrap(),
+        Geo::D3(GeoNode::Extrude { child, .. }) if matches!(*child, Shape2D::Empty)
+    ));
+    // TWIST is LOUD-deferred — Manifold's helix diverges from the oracle (measured), pending J.3.4.1's loft.
+    assert!(matches!(
+        evaluate_geometry("linear_extrude(10, twist = 90) square(4);").unwrap_err(),
+        Error::Unimplemented(m) if m.contains("twist")
+    ));
+    // explicit `slices` (a scalar `scale` too); a saturating slices count clamps, not overflows.
+    assert!(matches!(
+        evaluate_geometry("linear_extrude(5, slices = 4, scale = 2) square(4);").unwrap(),
+        Geo::D3(GeoNode::Extrude { kind: ExtrudeKind::Linear { slices, scale, .. }, .. })
+            if slices == 4 && scale == [2.0, 2.0]
+    ));
+    assert!(matches!(
+        evaluate_geometry("linear_extrude(5, slices = 5e9) square(4);").unwrap(),
+        Geo::D3(GeoNode::Extrude { kind: ExtrudeKind::Linear { slices, .. }, .. }) if slices == u32::MAX
+    ));
+    // a non-numeric height arg falls back to the default (100) — `as_num` returns None.
+    assert!(matches!(
+        evaluate_geometry("linear_extrude([1, 2]) square(4);").unwrap(),
+        Geo::D3(GeoNode::Extrude { kind: ExtrudeKind::Linear { height, .. }, .. }) if height == 100.0
+    ));
 }
 
 #[test]

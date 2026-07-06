@@ -111,6 +111,35 @@ fn dimension_mixing_that_resolves_to_3d_matches_the_oracle() {
 }
 
 #[test]
+fn linear_extrude_matches_the_oracle() {
+    // J.3.4: the UN-TWISTED sweep — prism + per-axis scale — lowers through Manifold's extrude and
+    // matches the oracle by boolean residual. (Twist diverges and is LOUD-deferred to J.3.4.1's loft;
+    // MEASURED — even at a matched slice count Manifold's helix ≠ OpenSCAD's, 0.22 residual.)
+    agree("linear_extrude(5) square(4);");
+    agree("linear_extrude(5, center = true) square(4);");
+    agree("linear_extrude(10, scale = 2) square(4, center = true);"); // frustum
+    agree("linear_extrude(10, scale = [2, 0.5]) square(4, center = true);"); // anisotropic
+    agree("linear_extrude(3) circle(4, $fn = 32);"); // a curved profile
+}
+
+#[test]
+fn extrude_brings_the_2d_catches_live() {
+    // The J.3.2.1/J.3.3 2D catches were pinned as unit tests with oracle-derived LITERALS. linear_extrude
+    // bridges them to a 3D solid whose VOLUME is the 2D area, so the EXISTING boolean-residual differential
+    // now re-runs OpenSCAD on them — the frozen literals become live oracle comparisons.
+    agree("linear_extrude(1) offset(r = 2, $fn = 64) square(5);"); // rounded offset
+    agree("linear_extrude(1) offset(delta = 2) square(5);"); // mitered
+    agree("linear_extrude(1) offset(delta = 2, chamfer = true) square(5);"); // chamfer = jtSquare (the bug)
+    agree("linear_extrude(1) offset(-1) square(5);"); // shrink
+    agree("linear_extrude(1) difference() { square(4); translate([2, 2]) square(4); }"); // 2D difference
+    agree("linear_extrude(1) intersection() { square(4); translate([2, 2]) square(4); }"); // 2D intersection
+    agree("linear_extrude(1) { square(4); translate([2, 2]) square(4); }"); // 2D implicit union
+    agree("linear_extrude(1) polygon([[0, 0], [4, 0], [2, 3]]);"); // polygon primitive
+    agree("linear_extrude(1) circle(5, $fn = 6);"); // circle $fn parity, extruded
+    agree("linear_extrude(1) translate([3, 4]) scale([2, 3]) square(1);"); // 2D transform chain
+}
+
+#[test]
 fn use_include_loader_matches_the_oracle() {
     // The loader's core semantics, validated against the real binary (constant-returning functions, so
     // we stay clear of the known use-imported-fn-sees-root-scope gap). Single-object, no cycle/diamond

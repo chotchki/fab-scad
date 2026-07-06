@@ -135,7 +135,9 @@ escape, not community respect.
   `rotate_extrude` FULL revolutions pass the same strict gate — segment count (`$fn`, else `$fa`/`$fs`
   on the profile's max radius) + ring tessellation line up, no direction/phase quirk. PARTIAL angles
   (< 360) carry the twist's same small, converging arc-phase residual (0.2-2%), the same relaxed-
-  tolerance treatment.
+  tolerance treatment. OUTCOME (J.3.6): `projection` (the inverse bridge — `cut=false` shadow / `cut=true`
+  z=0 slice) is EXACT: no swept tessellation, so shadow + cut cases (incl. a tilted-cylinder section) all
+  pass the strict gate.
 - **Builtin geometry surface (deliberately small):** polyhedron, primitives, multmatrix,
   union/difference/intersection, hull, linear_extrude/rotate_extrude (2D via Manifold
   `CrossSection`, above), offset, projection. `import()` = our existing STL/3MF readers. DEFERRED: text() (fonts —

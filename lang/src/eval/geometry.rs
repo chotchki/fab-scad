@@ -1,4 +1,5 @@
-//! Primitive tessellation → [`Mesh`] — sphere/cube/cylinder, matching OpenSCAD `primitives.cc`.
+//! Primitive tessellation → [`Mesh`] (3D) / contours (2D) — sphere/cube/cylinder + square/circle/polygon,
+//! matching OpenSCAD `primitives.cc`.
 //!
 //! VERTICES are exact (OpenSCAD's ring math + exact-quadrant [`trig`](super::trig)) — the vertices
 //! ARE the solid, so this is the conformance-critical part. The TRIANGULATION is our OWN fan/split
@@ -7,13 +8,18 @@
 //! closed-manifold triangulation of these vertices is conformant. We have to be a manifold, not a
 //! mimic. (Bit-exact trig still earns its keep on the polyhedral/exact classes + BOSL2 vertex math.)
 //!
-//! Degenerate inputs (r/size/h ≤ 0, non-finite) return an empty mesh (OpenSCAD returns empty
-//! geometry, not an error). A representability guard keeps `u32` indices from overflowing on an
-//! absurd `$fn`.
+//! The 2D primitives produce CONTOURS (rings of [`Vec2`]) — the [`Shape2D::Polygon`] leaf data (J.3.2),
+//! the 2D analogue of a [`Mesh`]. `circle` reuses the SAME exact-quadrant ring math as `cylinder`/`sphere`
+//! (OpenSCAD's `generate_circle` is `cos_degrees`/`sin_degrees` too), so 2D and 3D share `$fn` parity.
+//!
+//! Degenerate inputs (r/size/h ≤ 0, non-finite) return empty geometry — an empty mesh / no contours
+//! (OpenSCAD returns empty geometry, not an error). A representability guard keeps `u32` indices from
+//! overflowing on an absurd `$fn`.
 
+use super::geo2d::Contour;
 use super::trig::{cos_degrees, sin_degrees};
 use crate::Mesh;
-use crate::geom::{Tri, Vec3};
+use crate::geom::{Tri, Vec2, Vec3};
 
 /// `sphere(r)` tessellated into `fragments` segments (OpenSCAD `SphereNode`, `primitives.cc:177-223`).
 #[must_use]
@@ -177,6 +183,93 @@ pub(crate) fn cylinder(h: f64, r1: f64, r2: f64, fragments: u32, center: bool) -
     Mesh { verts, tris }
 }
 
+// ─────────────────────────────── 2D primitives (J.3.2) → contours ───────────────────────────────
+// The tessellation half of J.3.2 (parity-critical, esp. circle's `$fn`): pure `args → contours`
+// builders, unit-tested against exact geometry. WIRING them into the evaluator — recognizing
+// square/circle/polygon as 2D module calls and threading the dimension-tagged `Geo` result through the
+// geometry pass — is the J.3.2 eval-wire follow-up (it changes `evaluate_geometry`'s return type, which
+// ripples into fab-scad, so it lands with review). The `dead_code` allow drops with that wiring.
+
+/// `square([x, y], center)` → its single contour (OpenSCAD `SquareNode`). CCW winding
+/// `[0,0] → [x,0] → [x,y] → [0,y]`; `center` puts the centroid at the origin. Degenerate
+/// (non-positive / non-finite) → no contours (an empty region).
+#[must_use]
+#[allow(
+    dead_code,
+    reason = "J.3.2 2D tessellation; the eval-wire follow-up (Geo-tagged geometry pass) calls it"
+)]
+pub(crate) fn square(x: f64, y: f64, center: bool) -> Vec<Contour> {
+    if !(x.is_finite() && y.is_finite()) || x <= 0.0 || y <= 0.0 {
+        return Vec::new();
+    }
+    let (x0, y0, x1, y1) = if center {
+        (-x / 2.0, -y / 2.0, x / 2.0, y / 2.0)
+    } else {
+        (0.0, 0.0, x, y)
+    };
+    vec![vec![
+        Vec2::new(x0, y0),
+        Vec2::new(x1, y0),
+        Vec2::new(x1, y1),
+        Vec2::new(x0, y1),
+    ]]
+}
+
+/// `circle(r)` tessellated into `fragments` segments (OpenSCAD `CircleNode` / `generate_circle`) — a
+/// regular `fragments`-gon, CCW, using the SAME exact-quadrant ring math as `cylinder`/`sphere` (so 2D
+/// and 3D share `$fn` parity to the bit). `fragments` is `$fn`-resolved by [`fragments`](super::fragments)
+/// (always ≥ 3). Degenerate radius (non-positive / non-finite) → no contours.
+#[must_use]
+#[allow(
+    dead_code,
+    reason = "J.3.2 2D tessellation; the eval-wire follow-up (Geo-tagged geometry pass) calls it"
+)]
+pub(crate) fn circle(r: f64, fragments: u32) -> Vec<Contour> {
+    if !r.is_finite() || r <= 0.0 {
+        return Vec::new();
+    }
+    let contour = (0..fragments)
+        .map(|i| {
+            let theta = 360.0 * f64::from(i) / f64::from(fragments);
+            Vec2::new(r * cos_degrees(theta), r * sin_degrees(theta))
+        })
+        .collect();
+    vec![contour]
+}
+
+/// `polygon(points, paths)` → its contours (OpenSCAD `PolygonNode`). With `paths`, each path is a ring
+/// of indices into `points`; without, the single contour is all `points` in order. An out-of-range index
+/// is DROPPED and a contour of fewer than 3 valid points is discarded (the exact out-of-range ERROR is
+/// the validation layer, a later J.3 task, mirroring [`polyhedron`]). No usable contour → empty.
+#[must_use]
+#[allow(
+    dead_code,
+    reason = "J.3.2 2D tessellation; the eval-wire follow-up (Geo-tagged geometry pass) calls it"
+)]
+pub(crate) fn polygon(points: &[Vec2], paths: Option<&[Vec<u32>]>) -> Vec<Contour> {
+    match paths {
+        // No paths → the whole point list is one contour (needs ≥ 3 to bound any area).
+        None => {
+            if points.len() < 3 {
+                Vec::new()
+            } else {
+                vec![points.to_vec()]
+            }
+        }
+        // Each path selects its contour's points by index; bad indices drop, short contours discard.
+        Some(paths) => paths
+            .iter()
+            .filter_map(|path| {
+                let contour: Contour = path
+                    .iter()
+                    .filter_map(|&i| points.get(i as usize).copied())
+                    .collect();
+                (contour.len() >= 3).then_some(contour)
+            })
+            .collect(),
+    }
+}
+
 /// Push a ring of `nf` vertices at height `z` (or a single apex vertex at the axis if `apex`).
 fn push_ring(verts: &mut Vec<Vec3>, r: f64, z: f64, nf: u32, apex: bool) {
     if apex {
@@ -203,6 +296,77 @@ fn fan(tris: &mut Vec<Tri>, base: u32, nf: u32, reverse: bool) {
         } else {
             tris.push(Tri::new(base, base + j, base + j + 1));
         }
+    }
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::float_cmp,
+    reason = "2D primitive vertices are EXACT — literal square corners + exact-quadrant circle points"
+)]
+mod tests {
+    use super::{circle, polygon, square};
+    use crate::geom::Vec2;
+
+    /// A 2D point.
+    fn p(x: f64, y: f64) -> Vec2 {
+        Vec2::new(x, y)
+    }
+
+    #[test]
+    fn square_corners_and_centering() {
+        // Resting on the origin: CCW from [0,0].
+        assert_eq!(
+            square(2.0, 3.0, false),
+            vec![vec![p(0.0, 0.0), p(2.0, 0.0), p(2.0, 3.0), p(0.0, 3.0)]]
+        );
+        // Centered: centroid at the origin.
+        assert_eq!(
+            square(2.0, 2.0, true),
+            vec![vec![p(-1.0, -1.0), p(1.0, -1.0), p(1.0, 1.0), p(-1.0, 1.0)]]
+        );
+        // Degenerate → no contours.
+        assert!(square(0.0, 5.0, false).is_empty());
+        assert!(square(5.0, -1.0, false).is_empty());
+        assert!(square(f64::NAN, 5.0, false).is_empty());
+    }
+
+    #[test]
+    fn circle_is_a_regular_polygon_with_exact_quadrants() {
+        // $fn = 4 → a diamond at the axes; exact-quadrant trig makes these EXACT.
+        assert_eq!(
+            circle(1.0, 4),
+            vec![vec![p(1.0, 0.0), p(0.0, 1.0), p(-1.0, 0.0), p(0.0, -1.0)]]
+        );
+        // A finer circle: `fragments` points, first on +x, none degenerate.
+        let c = circle(5.0, 32);
+        assert_eq!(c.len(), 1);
+        assert_eq!(c[0].len(), 32);
+        assert_eq!(c[0][0], p(5.0, 0.0));
+        // Degenerate radius → no contours.
+        assert!(circle(0.0, 16).is_empty());
+        assert!(circle(-2.0, 16).is_empty());
+        assert!(circle(f64::INFINITY, 16).is_empty());
+    }
+
+    #[test]
+    fn polygon_from_points_and_paths() {
+        let pts = [p(0.0, 0.0), p(4.0, 0.0), p(4.0, 4.0), p(0.0, 4.0)];
+        // No paths → all points, one contour.
+        assert_eq!(polygon(&pts, None), vec![pts.to_vec()]);
+        // Fewer than 3 points → no contour.
+        assert!(polygon(&pts[..2], None).is_empty());
+        // Paths select + reorder points; two contours (e.g. an outer + a hole).
+        let inner = [p(1.0, 1.0), p(2.0, 1.0), p(2.0, 2.0)];
+        let all: Vec<Vec2> = pts.iter().chain(inner.iter()).copied().collect();
+        let paths = vec![vec![0, 1, 2, 3], vec![4, 5, 6]];
+        assert_eq!(
+            polygon(&all, Some(&paths)),
+            vec![pts.to_vec(), inner.to_vec()]
+        );
+        // An out-of-range index is dropped; a path left with < 3 points is discarded entirely.
+        let paths_bad = vec![vec![0, 1, 99], vec![0, 1, 2]];
+        assert_eq!(polygon(&pts, Some(&paths_bad)), vec![pts[..3].to_vec()]);
     }
 }
 

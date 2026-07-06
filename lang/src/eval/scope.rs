@@ -51,18 +51,26 @@ impl Scope {
         }
     }
 
-    /// Look up a variable, walking child→parent (inner SHADOWS outer). Unbound → `undef` (OpenSCAD
-    /// warns + returns undef).
+    /// Look up a variable, walking child→parent (inner SHADOWS outer). Unbound → `undef`.
     #[must_use]
     pub fn lookup(&self, name: &str) -> Value {
+        self.lookup_opt(name).unwrap_or(Value::Undef)
+    }
+
+    /// Like [`lookup`](Self::lookup) but distinguishes UNBOUND (`None`) from bound-to-`undef`
+    /// (`Some(Undef)`) — the difference OpenSCAD keys its "Ignoring unknown variable" warning on: a
+    /// genuinely-unknown name warns, an explicit `x = undef;` (or an unfilled defaultless param) stays
+    /// silent. Same child→parent walk as `lookup`.
+    #[must_use]
+    pub fn lookup_opt(&self, name: &str) -> Option<Value> {
         let mut frame = &self.frame;
         loop {
             if let Some(value) = frame.vars.get(name) {
-                return value.clone();
+                return Some(value.clone());
             }
             match &frame.parent {
                 Some(parent) => frame = parent,
-                None => return Value::Undef,
+                None => return None,
             }
         }
     }

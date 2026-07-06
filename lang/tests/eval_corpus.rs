@@ -349,6 +349,12 @@ fn echo_and_assert_evaluate() {
         fab_lang::evaluate_full("echo(9); echo(1 / 3); echo(\"hi\", a = 5);").expect("evaluates");
     assert_eq!(full.echos(), ["9", "0.333333", "\"hi\", a = 5"]);
     assert!(full.warnings().is_empty());
+    // An UNKNOWN variable warns bug-for-bug with OpenSCAD ("Ignoring unknown variable 'x'"); an explicit
+    // `x = undef` is BOUND, so it stays silent; a `$`-special stays silent too (dynamically scoped).
+    let w = fab_lang::evaluate_full("echo(nope); u = undef; echo(u); echo($nope); cube(1);")
+        .expect("evaluates");
+    assert_eq!(w.warnings(), ["Ignoring unknown variable 'nope'"]);
+    assert_eq!(w.console()[0], "WARNING: Ignoring unknown variable 'nope'"); // full rendered line
     // A top-level assert/echo is NOT geometry; a falsy assert is loud.
     assert!(fab_lang::evaluate("assert(true); sphere(1, $fn = 8);").is_ok());
     assert!(matches!(

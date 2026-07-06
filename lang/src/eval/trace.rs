@@ -83,6 +83,15 @@ pub(super) fn builtin(
     }
 }
 
+/// Trace an UNBOUND `$`-special reference. OpenSCAD stays SILENT on these (dynamically scoped, often
+/// optionally-set), so they never reach the user-facing warning log — but for US a `$`-var that resolves
+/// to nothing may be one we haven't implemented, so it goes here, to the dev trace, to be caught.
+pub(super) fn unbound_special(name: &str) {
+    if on() {
+        eprintln!("+ [unbound $] {name}");
+    }
+}
+
 /// Trace a MODULE instantiation — geometry, not a value, so there's nothing to show a result for; the
 /// name marks entry so the value trace beneath it has a frame. `depth` indents by call nesting.
 pub(super) fn module(depth: usize, name: &str) {

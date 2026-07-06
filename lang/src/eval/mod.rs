@@ -355,7 +355,7 @@ fn eval_node<'a>(
         ExprKind::Bool(b) => values.push(Value::Bool(*b)),
         ExprKind::Undef => values.push(Value::Undef),
         ExprKind::Str(s) => values.push(Value::string(s.as_str())),
-        ExprKind::Ident(name) => values.push(scope.lookup(name)),
+        ExprKind::Ident(name) => values.push(resolve_ident(name, scope, ctx)),
         ExprKind::Unary { op, operand } => {
             tasks.push(Task::Unary(*op));
             tasks.push(Task::Eval(operand, scope.clone()));
@@ -490,6 +490,28 @@ fn run_builtin(name: &str, args: &[Arg], values: &mut Vec<Value>) {
     let result = builtins::apply(name, &positional, &named);
     trace::builtin(name, &positional, &named, &result); // gated inside; shows `name(args) => result`
     values.push(result);
+}
+
+/// Resolve a bare identifier to its value, WARNING on a genuinely-unknown name — OpenSCAD's "Ignoring
+/// unknown variable" (`Expression.cc` `Lookup::evaluate`). A `$`-special stays SILENT when unbound: it's
+/// dynamically scoped, so absence is normal (BOSL2 reads many optional `$`-vars). An explicit `x = undef`
+/// (or an unfilled defaultless param) is BOUND, so it doesn't warn either. The value is `undef` in every
+/// unbound case. NOTE: OpenSCAD also appends `in file …, line …` — deferred with source-position
+/// threading; the warning CONTENT matches, the location suffix doesn't yet (flagged for the K oracle).
+fn resolve_ident(name: &str, scope: &Scope, ctx: &Ctx<'_>) -> Value {
+    if let Some(value) = scope.lookup_opt(name) {
+        return value;
+    }
+    if name.starts_with('$') {
+        // OpenSCAD is silent on unbound `$`-specials; WE trace them — a `$`-var that hits nothing may be
+        // one we haven't implemented, and the trace is how that surfaces during bring-up.
+        trace::unbound_special(name);
+    } else {
+        ctx.messages.borrow_mut().push(Message::Warning(format!(
+            "Ignoring unknown variable '{name}'"
+        )));
+    }
+    Value::Undef
 }
 
 /// Dispatch a call `callee(args)`: a NAMED user function (own namespace) resolves first; an UNBOUND
@@ -1481,6 +1503,7 @@ mod tests {
         assert_eq!(eval_last("y = max(1, 2, 3);"), Value::Num(3.0)); // builtin, positional args
         assert_eq!(eval_last("y = max(2, 3, extra = 1);"), Value::Num(3.0)); // + a NAMED arg (traced)
         assert_eq!(eval_last("y = assert(true) 5;"), Value::Num(5.0));
+        assert_eq!(eval_last("y = $unset;"), Value::Undef); // unbound $-special → dev trace line
         super::trace::set_enabled(false);
     }
 

@@ -288,6 +288,22 @@ impl Affine2 {
             m[3] * v.x + m[4] * v.y + m[5],
         )
     }
+
+    /// Compose `self ∘ inner` — the affine that applies `inner` FIRST, then `self`
+    /// (`self.compose(inner).apply(p) == self.apply(inner.apply(p))`). Used to accumulate a nested
+    /// transform chain down to a leaf.
+    #[must_use]
+    pub fn compose(&self, inner: &Affine2) -> Affine2 {
+        let (a, b) = (&self.0, &inner.0);
+        Affine2([
+            a[0] * b[0] + a[1] * b[3],
+            a[0] * b[1] + a[1] * b[4],
+            a[0] * b[2] + a[1] * b[5] + a[2],
+            a[3] * b[0] + a[4] * b[3],
+            a[3] * b[1] + a[4] * b[4],
+            a[3] * b[2] + a[4] * b[5] + a[5],
+        ])
+    }
 }
 
 /// A 3-axis SIZE — width / depth / height, same units as [`Vec3`] but a MEASUREMENT, not a point:

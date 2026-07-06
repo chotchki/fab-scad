@@ -21,13 +21,14 @@ fn agree(scad: &str) {
     }
 }
 
-/// Assert a snippet's boolean residual vs the oracle is under `max` — a RELAXED gate for the twisted-
-/// extrude class, where our profile-resample + Manifold's helix differ from OpenSCAD's by a small,
-/// resolution-vanishing tessellation-phase artifact (J.3.4.1; the shape is right, the residual bounded +
-/// documented). Skips cleanly when the oracle binary is absent, like `agree`.
+/// Assert a snippet's boolean residual vs the oracle is under `max` — a RELAXED gate for the extrude
+/// classes where Manifold's tessellation differs from OpenSCAD's by a small, resolution-vanishing phase
+/// artifact: twisted `linear_extrude` (J.3.4.1) and PARTIAL `rotate_extrude` (J.3.5). The shape is right,
+/// the residual bounded + documented; full revolutions and un-twisted extrudes hold the strict `agree`
+/// gate. Skips cleanly when the oracle binary is absent, like `agree`.
 fn agree_within(scad: &str, max: f64) {
     if let Err(why) = fab_scad::differ::diff_within(scad, max) {
-        panic!("twist differential divergence: {why}");
+        panic!("relaxed-tolerance differential divergence: {why}");
     }
 }
 
@@ -158,6 +159,44 @@ fn twisted_linear_extrude_matches_the_oracle() {
     ); // negative
     agree_within(
         "linear_extrude(10, twist = 180, $fn = 64) square(6, center = true);",
+        t,
+    );
+}
+
+#[test]
+fn rotate_extrude_matches_the_oracle() {
+    // J.3.5: revolve a 2D profile about +Z. FULL revolutions (the common case) match OpenSCAD under the
+    // STRICT 1e-3 gate — the segment count (`$fn`, else `$fa`/`$fs` on the profile's max radius) and the
+    // ring/segment tessellation line up exactly, including the `$fn`-unset default. Profile placement
+    // (X = radius, Y = height) and the axis both check out via the boolean residual.
+    agree("rotate_extrude($fn = 64) translate([10, 0]) square([2, 3]);"); // a square ring
+    agree("rotate_extrude($fn = 6) translate([10, 0]) square([2, 3]);"); // coarse → a hex sweep
+    agree("rotate_extrude($fn = 64) translate([10, 0]) circle(2, $fn = 32);"); // a torus
+    agree("rotate_extrude() translate([8, 0]) circle(2);"); // $fn unset → $fa/$fs from the ring radius
+    agree("rotate_extrude($fn = 48) polygon([[4, 0], [7, 0], [7, 2], [5, 5], [4, 3]]);"); // a profile poly
+}
+
+#[test]
+fn partial_rotate_extrude_matches_the_oracle() {
+    // J.3.5: a PARTIAL revolution (angle < 360) leaves two end caps and a proportional arc. Same family
+    // as the twist (J.3.4.1) — Manifold's arc tessellation vs OpenSCAD's differs by a small, resolution-
+    // vanishing phase artifact (0.2–2% measured, converging as $fn climbs), an ACCEPTED, DOCUMENTED
+    // divergence behind the relaxed per-class tolerance; full revolutions stay on the strict gate above.
+    let t = 0.025;
+    agree_within(
+        "rotate_extrude(angle = 90, $fn = 64) translate([10, 0]) square([2, 3]);",
+        t,
+    );
+    agree_within(
+        "rotate_extrude(angle = 180, $fn = 64) translate([10, 0]) square([2, 3]);",
+        t,
+    );
+    agree_within(
+        "rotate_extrude(angle = 270, $fn = 48) translate([10, 0]) square([2, 3]);",
+        t,
+    );
+    agree_within(
+        "rotate_extrude(angle = 45, $fn = 32) translate([10, 0]) circle(2, $fn = 24);",
         t,
     );
 }

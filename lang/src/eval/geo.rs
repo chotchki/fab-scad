@@ -165,6 +165,29 @@ pub(super) fn resolve_linear_extrude(
     }
 }
 
+/// Resolve a `rotate_extrude()` module's evaluated args to an [`ExtrudeKind::Rotate`]. `angle` (1st
+/// positional / `angle=`, default 360 — a full revolution) is how far the profile spins about +Z; a
+/// partial angle leaves the two end faces capped. `segments` is the full-circle facet count, from the
+/// profile's max radius `max_x` (its farthest point from the axis) via the SAME [`fragments`] path a
+/// `circle` uses (so `$fn` sets it directly, and `$fa`/`$fs` scale with the ring size). The backend's
+/// `revolve` scales `segments` down for a partial `angle`.
+pub(super) fn resolve_rotate_extrude(
+    positional: &[Value],
+    named: &BTreeMap<String, Value>,
+    scope: &Scope,
+    max_x: f64,
+) -> ExtrudeKind {
+    let angle = arg(positional, named, 0, "angle")
+        .and_then(as_num)
+        .filter(|a| a.is_finite())
+        .unwrap_or(360.0);
+    let (fn_, fa, fs) = scope.fn_fa_fs();
+    ExtrudeKind::Rotate {
+        angle,
+        segments: fragments(max_x.max(0.0), fn_, fa, fs),
+    }
+}
+
 /// A value as a plain number, else `None`.
 fn as_num(v: &Value) -> Option<f64> {
     match v {

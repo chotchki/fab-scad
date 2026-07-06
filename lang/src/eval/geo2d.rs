@@ -68,6 +68,37 @@ pub enum Shape2D {
     },
 }
 
+impl Shape2D {
+    /// The maximum x-coordinate over the profile's points, transforms applied — the revolve RADIUS for
+    /// `rotate_extrude` (its farthest point from the +Z axis, feeding the fragment count). `None` for an
+    /// empty profile or a subtree whose extent isn't statically known (a `Projection`); the caller falls
+    /// back to the minimum fragment count. `difference`/`intersection` use the union bound (an over-
+    /// estimate — a few extra segments, harmless — and those profiles are rare in a revolve); an
+    /// `offset` grows the child's extent by its positive delta.
+    #[must_use]
+    pub fn max_x(&self) -> Option<f64> {
+        fn walk(s: &Shape2D, m: &Affine2) -> Option<f64> {
+            let fold = |it: &mut dyn Iterator<Item = f64>| {
+                it.fold(None, |acc: Option<f64>, x| {
+                    Some(acc.map_or(x, |a| a.max(x)))
+                })
+            };
+            match s {
+                Shape2D::Polygon(contours) => {
+                    fold(&mut contours.iter().flatten().map(|p| m.apply(*p).x))
+                }
+                Shape2D::Transform { matrix, child } => walk(child, &m.compose(matrix)),
+                Shape2D::Union(kids) | Shape2D::Difference(kids) | Shape2D::Intersection(kids) => {
+                    fold(&mut kids.iter().filter_map(|c| walk(c, m)))
+                }
+                Shape2D::Offset { delta, child, .. } => walk(child, m).map(|x| x + delta.max(0.0)),
+                Shape2D::Projection { .. } | Shape2D::Empty => None,
+            }
+        }
+        walk(self, &Affine2::IDENTITY)
+    }
+}
+
 /// The corner-join style for [`Shape2D::Offset`] — how an inflated outline finishes its convex corners.
 /// The three OpenSCAD `offset()` reaches; maps onto Manifold/Clipper2 join types.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -1579,6 +1579,28 @@ fn eval_stmt<'a>(
                 child: Box::new(shape),
             }));
         }
+        // `rotate_extrude()` — revolve a 2D profile about +Z into a solid of revolution (J.3.5), the other
+        // 2D→3D bridge. Also FIXED-2D ([`force_2d`]); `angle` (default 360) + the `$fn`-from-the-profile-
+        // radius segment count resolve via [`geo::resolve_rotate_extrude`] (the profile's `max_x` is its
+        // farthest point from the axis). The backend (`Manifold::revolve`) spins it.
+        StmtKind::Module(mi) if mi.name == "rotate_extrude" => {
+            let (positional, named, child_scope) = module::eval_args(mi, scope, ctx)?;
+            let refs: Vec<&Stmt> = mi.children.iter().collect();
+            let shape = force_2d(
+                union_of(eval_nodes(&refs, ctx, scope, global, island)?, ctx),
+                ctx,
+            );
+            let kind = geo::resolve_rotate_extrude(
+                &positional,
+                &named,
+                &child_scope,
+                shape.max_x().unwrap_or(0.0),
+            );
+            nodes.push(Geo::D3(GeoNode::Extrude {
+                kind,
+                child: Box::new(shape),
+            }));
+        }
         // `color()` — set the subtree's display color (BOSL2-critical, J.2.8). An INVALID color (unknown
         // name, wrong arg type) INHERITS: no Color node, just the children (OpenSCAD's -1 sentinel),
         // regardless of dimension. A VALID color on a 2D child is LOUD — `Shape2D` carries no color yet,

@@ -400,14 +400,47 @@ fn color_over_2d_is_loud() {
 
 #[test]
 fn deferred_2d_bridge_modules_are_loud() {
-    // The remaining 2D↔3D bridges are the NEXT J.3 tasks — each fails LOUD (naming its feature + task),
-    // never silently nothing. (`offset` + un-twisted `linear_extrude` are wired as of J.3.3/J.3.4.)
+    // The remaining 2D↔3D bridge is `projection` (J.3.6) — it fails LOUD (naming its feature + task),
+    // never silently nothing. (`offset`, `linear_extrude`, and `rotate_extrude` are wired through J.3.5.)
     let deferred =
         |src: &str| matches!(evaluate_geometry(src).unwrap_err(), Error::Unimplemented(_));
-    assert!(deferred(
-        "rotate_extrude() translate([2, 0]) circle(1, $fn = 8);"
-    ));
     assert!(deferred("projection() cube(2);"));
+}
+
+#[test]
+fn rotate_extrude_builds_the_2d_to_3d_bridge() {
+    use fab_lang::ExtrudeKind;
+    // A full revolution: default angle 360, segment count straight from `$fn`.
+    assert!(matches!(
+        evaluate_geometry("rotate_extrude($fn = 64) translate([10, 0]) square([2, 3]);").unwrap(),
+        Geo::D3(GeoNode::Extrude { kind: ExtrudeKind::Rotate { angle, segments }, .. })
+            if angle == 360.0 && segments == 64
+    ));
+    // A partial angle rides `angle=`; the profile's max radius (10 + circle r 2 = 12) sets the `$fa`/`$fs`
+    // segment count when `$fn` is unset — proving `Shape2D::max_x` walked the translate.
+    assert!(matches!(
+        evaluate_geometry("rotate_extrude(angle = 90, $fa = 12, $fs = 2) translate([10, 0]) circle(2, $fn = 16);").unwrap(),
+        Geo::D3(GeoNode::Extrude { kind: ExtrudeKind::Rotate { angle, segments }, .. })
+            if angle == 90.0 && segments == fab_lang::fragments(12.0, 0.0, 12.0, 2.0)
+    ));
+    // A 3D child is coerced out (force_2d) → an empty profile, not a revolve of a solid.
+    assert!(matches!(
+        evaluate_geometry("rotate_extrude() cube(2);").unwrap(),
+        Geo::D3(GeoNode::Extrude { child, .. }) if matches!(*child, Shape2D::Empty)
+    ));
+    // A UNION profile: max_x walks BOTH children (two concentric rings) → the farther one (22) drives
+    // the fragment count — proving the boolean arm of the walk.
+    assert!(matches!(
+        evaluate_geometry("rotate_extrude($fa = 12, $fs = 2) { translate([10, 0]) square(2); translate([20, 0]) square(2); }").unwrap(),
+        Geo::D3(GeoNode::Extrude { kind: ExtrudeKind::Rotate { segments, .. }, .. })
+            if segments == fab_lang::fragments(22.0, 0.0, 12.0, 2.0)
+    ));
+    // An OFFSET grows the child's extent by its positive delta → a larger radius (12 + 1), more segments.
+    assert!(matches!(
+        evaluate_geometry("rotate_extrude($fa = 12, $fs = 2) offset(1) translate([10, 0]) square(2);").unwrap(),
+        Geo::D3(GeoNode::Extrude { kind: ExtrudeKind::Rotate { segments, .. }, .. })
+            if segments == fab_lang::fragments(13.0, 0.0, 12.0, 2.0)
+    ));
 }
 
 #[test]

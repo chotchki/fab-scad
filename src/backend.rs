@@ -244,7 +244,9 @@ impl GeometryBackend for ManifoldBackend {
     // ── 2D surface (J.3) — delegates to kernel::Section (Manifold CrossSection) ───────────────────
 
     fn leaf_2d(&self, contours: &[Vec<[f64; 2]>]) -> Self::Shape {
-        crate::kernel::Section::from_polygons(contours)
+        // `polygon()` primitives fill by even-odd nesting (OpenSCAD), not winding — so a clockwise
+        // BOSL2 path (`star`/`hexagon`) fills instead of vanishing under the default `Positive` rule.
+        crate::kernel::Section::polygon(contours)
     }
 
     fn union_2d(&self, a: &Self::Shape, b: &Self::Shape) -> Self::Shape {

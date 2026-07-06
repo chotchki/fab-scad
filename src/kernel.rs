@@ -10,7 +10,7 @@
 
 use anyhow::{Context, Result, anyhow};
 use fab_lang::{Affine, Affine2, ExtrudeKind, Join2D, Rgba, Tri, Vec3};
-use manifold3d::{CrossSection, JoinType, Manifold, MeshGL};
+use manifold3d::{CrossSection, FillRule, JoinType, Manifold, MeshGL};
 use std::collections::HashMap;
 use std::marker::PhantomData;
 use std::path::Path;
@@ -636,10 +636,22 @@ impl Section {
         Section::wrap(CrossSection::default())
     }
 
-    /// A region from closed contours (outer boundary + holes), resolved by Manifold's default
-    /// (`Positive`) fill rule — the `square` / `circle` / `polygon` leaf (J.3.2).
+    /// A region from closed contours, resolved by Manifold's default `Positive` fill rule (positively-
+    /// wound contours fill, negatively-wound are holes). Used for contours WE produce that are already
+    /// correctly wound — a `project` shadow, a twist resample — where the winding carries the intent.
     pub fn from_polygons(contours: &[Vec<[f64; 2]>]) -> Self {
         Section::wrap(CrossSection::from_polygons(contours))
+    }
+
+    /// A region from a `polygon()` primitive's raw contours (J.3.2) — the EVEN-ODD fill rule, matching
+    /// OpenSCAD: `polygon()` fills a contour by NESTING depth, not winding, so a lone clockwise loop (a
+    /// BOSL2 `star()`/`hexagon()` path, which winds CW) still fills, and a contour nested inside another
+    /// is a hole regardless of its winding. The default `Positive` rule would drop the CW loop to empty.
+    pub fn polygon(contours: &[Vec<[f64; 2]>]) -> Self {
+        Section::wrap(CrossSection::from_polygons_with_fill_rule(
+            contours,
+            FillRule::EvenOdd,
+        ))
     }
 
     pub fn union(&self, other: &Section) -> Section {

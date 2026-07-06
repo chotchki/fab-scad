@@ -59,6 +59,35 @@ fn agree_graph(subdir: &str, files: &[(&str, &str)], root: &str, libs: &[&str]) 
     }
 }
 
+/// Assert a BOSL2 2D `shape` renders the same as the oracle (J.3.7). `include <std.scad>` is BOSL2's
+/// REQUIRED form — its attachable system reads file-level constants + `$`-context from the caller scope,
+/// which only `include` splices in (`use` does not). The 2D result bridges to a unit-height solid via
+/// `linear_extrude(1)` so the existing boolean-residual differential compares it (volume == area). Skips
+/// cleanly when the `libs/BOSL2` submodule isn't checked out (or the oracle binary is absent, in
+/// `diff_files`), so it's a real gate on a dev box + a no-op elsewhere.
+fn agree_bosl2(shape: &str) {
+    let bosl2 = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("libs/BOSL2");
+    if !bosl2.join("std.scad").exists() {
+        return; // submodule not checked out — nothing to compare against
+    }
+    let base = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("bosl2_2d");
+    std::fs::create_dir_all(&base).unwrap();
+    let safe: String = shape
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+        .take(60)
+        .collect();
+    let root = base.join(format!("{safe}.scad"));
+    std::fs::write(
+        &root,
+        format!("include <std.scad>\nlinear_extrude(1) {shape};\n"),
+    )
+    .unwrap();
+    if let Err(why) = diff_files(&root, &[bosl2]) {
+        panic!("BOSL2 2D differential divergence: {why}");
+    }
+}
+
 #[test]
 fn whole_scope_hoisting_matches_the_oracle() {
     // I.2.7: geometry reflects the HOISTED value, so a hoisting bug renders a different solid.
@@ -216,6 +245,34 @@ fn projection_matches_the_oracle() {
     agree(
         "linear_extrude(1) projection(cut = true) rotate([30, 0, 0]) cylinder(h = 10, r = 4, center = true, $fn = 32);",
     ); // a tilted-cylinder slice → an ellipse-ish section
+}
+
+#[test]
+fn bosl2_2d_shapes_match_the_oracle() {
+    // J.3.7: real BOSL2 path/region-derived 2D shapes through the WHOLE 2D stack — attachable modules,
+    // path math, polygon, offset, region booleans — against the oracle. This is what the use-scope fix
+    // (a `use`d/`include`d function reads its file's constants) + the even-odd polygon fill (a BOSL2 path
+    // winds clockwise; even-odd fills it, `Positive` dropped it to empty) unlocked together.
+    // MODULE forms — attachable shapes:
+    agree_bosl2("rect([6, 4])");
+    agree_bosl2("rect([6, 4], rounding = 1)"); // offset-derived rounded corners
+    agree_bosl2("star(n = 5, r = 6, ir = 3)"); // a clockwise path → even-odd fill
+    agree_bosl2("hexagon(d = 8)");
+    agree_bosl2("regular_ngon(n = 7, r = 5)");
+    agree_bosl2("ellipse(d = [8, 5])");
+    agree_bosl2("teardrop2d(r = 5)");
+    agree_bosl2("glued_circles(d = 6, spread = 8)"); // a region — two circles + a connector
+    agree_bosl2("supershape(m1 = 6, n1 = 1, r = 5)"); // a superformula path
+    // FUNCTION forms → polygon(path): the shape called AS A FUNCTION returns its path, fed to polygon().
+    // These asserted on `undef` constants before the use-scope fix.
+    agree_bosl2("polygon(star(n = 5, r = 6, ir = 3))");
+    agree_bosl2("polygon(circle(r = 5, $fn = 7))");
+    agree_bosl2("polygon(hexagon(d = 8))");
+    agree_bosl2("polygon(path2d(square(5)))");
+    // 2D booleans + offset over BOSL2 shapes (regions):
+    agree_bosl2("difference() { rect([10, 8], rounding = 2); circle(d = 4); }");
+    agree_bosl2("offset(r = 1) star(n = 6, r = 5, ir = 2.5)");
+    agree_bosl2("region([square(6), move([3, 3], square(6))])");
 }
 
 #[test]

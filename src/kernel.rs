@@ -394,6 +394,13 @@ impl Solid {
         Solid::wrap(Manifold::batch_union(&hs))
     }
 
+    /// The convex hull of many solids COMBINED (`hull()`, J.4.1) — Manifold's `batch_hull` over the union
+    /// of their vertices. `hull()` of one solid is its own convex hull. Empty ⇒ empty solid.
+    pub fn batch_hull(solids: &[Solid]) -> Solid {
+        let hs: Vec<Manifold> = solids.iter().map(|s| s.0.clone()).collect();
+        Solid::wrap(Manifold::batch_hull(&hs))
+    }
+
     // --- transforms ------------------------------------------------------------------------------
 
     pub fn translate(&self, v: Vec3) -> Solid {

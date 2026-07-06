@@ -70,6 +70,19 @@ fn booleans_build_their_nodes_over_children() {
 }
 
 #[test]
+fn hull_builds_an_n_ary_node_over_children() {
+    match evaluate_geometry("hull() { cube(2); translate([5, 0, 0]) sphere(1, $fn = 8); }").unwrap()
+    {
+        GeoNode::Hull(children) => assert_eq!(children.len(), 2),
+        other => panic!("expected a Hull node, got {other:?}"),
+    }
+    // hull() of a single child is still a Hull (of one) — the backend hulls it to its convex hull.
+    assert!(
+        matches!(evaluate_geometry("hull() cube(2);").unwrap(), GeoNode::Hull(c) if c.len() == 1)
+    );
+}
+
+#[test]
 fn nested_transform_over_a_boolean() {
     match evaluate_geometry("translate([1, 0, 0]) union() { cube(2); sphere(1, $fn = 8); }")
         .unwrap()

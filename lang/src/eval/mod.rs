@@ -1291,6 +1291,11 @@ fn build_ctx(program: &Program) -> Ctx<'_> {
 
 /// Statement recursion is bounded by the parser's `MAX_DEPTH`, so host recursion here can't overflow
 /// (unlike unbounded EXPRESSION recursion, which the explicit stack handles).
+#[allow(
+    clippy::too_many_lines,
+    reason = "the statement dispatcher: one match arm per StmtKind / builtin module — splitting it would \
+    scatter the geometry-tree construction across helpers that each re-take scope/global/island/ctx/nodes"
+)]
 fn eval_stmt<'a>(
     stmt: &'a Stmt,
     scope: &mut Scope,
@@ -1344,6 +1349,13 @@ fn eval_stmt<'a>(
                 "intersection" => GeoNode::Intersection(children),
                 _ => GeoNode::Union(children),
             });
+        }
+        // `hull()` — the convex hull of the implicit union of its children (J.4.1). Like a boolean over
+        // the children, but N-ary (the backend hulls the whole set at once, not a pairwise fold).
+        StmtKind::Module(mi) if mi.name == "hull" => {
+            let refs: Vec<&Stmt> = mi.children.iter().collect();
+            let children = eval_nodes(&refs, ctx, scope, global, island)?;
+            nodes.push(GeoNode::Hull(children));
         }
         // `color()` — set the subtree's display color (BOSL2-critical, J.2.8). An INVALID color (unknown
         // name, wrong arg type) INHERITS: no Color node, just the children (OpenSCAD's -1 sentinel).

@@ -25,6 +25,9 @@ pub trait GeometryBackend {
     fn difference(&self, a: &Self::Solid, b: &Self::Solid) -> Self::Solid;
     /// Boolean intersection.
     fn intersection(&self, a: &Self::Solid, b: &Self::Solid) -> Self::Solid;
+    /// Convex hull of the operands COMBINED (`hull()`) — N-ary, not a pairwise fold. An empty list, or
+    /// all-empty operands, → the empty solid.
+    fn hull(&self, solids: &[Self::Solid]) -> Self::Solid;
     /// An affine transform (OpenSCAD `multmatrix`, covering translate / rotate / scale / mirror).
     fn transform(&self, s: &Self::Solid, m: &Affine) -> Self::Solid;
     /// Set the solid's color (`color()`) — sets EVERY vertex, so outermost `color()` wins (J.2.9).
@@ -46,6 +49,10 @@ pub fn build<B: GeometryBackend>(node: &GeoNode, backend: &B) -> B::Solid {
         GeoNode::Union(kids) => reduce(kids, backend, |b, x, y| b.union(x, y)),
         GeoNode::Difference(kids) => reduce(kids, backend, |b, x, y| b.difference(x, y)),
         GeoNode::Intersection(kids) => reduce(kids, backend, |b, x, y| b.intersection(x, y)),
+        // hull is N-ary — the backend hulls the whole operand set at once (not a pairwise fold).
+        GeoNode::Hull(kids) => {
+            backend.hull(&kids.iter().map(|k| build(k, backend)).collect::<Vec<_>>())
+        }
         // Color sets EVERY vertex of the child subtree (J.2.9). Outermost `color()` wins because the
         // enclosing node's color op overwrites any inner one; distinct colors survive a union.
         GeoNode::Color { color, child } => backend.color(&build(child, backend), *color),
@@ -105,6 +112,12 @@ impl GeometryBackend for ManifoldBackend {
             (Some(a), Some(b)) => Some(a.intersection(b)),
             _ => None, // ∅ ∩ x = ∅
         }
+    }
+
+    fn hull(&self, solids: &[Self::Solid]) -> Self::Solid {
+        // Hull the NON-empty operands combined; an empty operand contributes no vertices (all-empty → ∅).
+        let present: Vec<crate::kernel::Solid> = solids.iter().flatten().cloned().collect();
+        (!present.is_empty()).then(|| crate::kernel::Solid::batch_hull(&present))
     }
 
     fn transform(&self, s: &Self::Solid, m: &Affine) -> Self::Solid {
@@ -216,6 +229,18 @@ impl GeometryBackend for MockBackend {
         }
     }
 
+    fn hull(&self, solids: &[Self::Solid]) -> Self::Solid {
+        // The mock can't compute a real hull — it appends the NON-empty operands' meshes (structure, not
+        // geometry) + bumps ops, honoring the empty algebra (all-empty → empty). The real hull lives in
+        // ManifoldBackend; this just walks the op so the interface suite exercises the dispatch under miri.
+        let mesh = solids
+            .iter()
+            .filter(|s| !s.is_empty())
+            .fold(Mesh::new(), |acc, s| append(&acc, &s.mesh));
+        let ops = solids.iter().map(|s| s.ops).sum::<u32>() + 1;
+        MockSolid { mesh, ops }
+    }
+
     fn transform(&self, s: &Self::Solid, m: &Affine) -> Self::Solid {
         let verts = s.mesh.verts.iter().map(|&v| m.apply(v)).collect();
         MockSolid {
@@ -277,6 +302,20 @@ mod tests {
             let _ = b.to_mesh(s).tri_count(); // extract path exercised
         }
 
+        // hull() — N-ary; the convex hull of the operand set (J.4.1). Fresh leaves (the earlier meshes
+        // were shadowed into solids), then the empty algebra: all-empty → ∅, [x, ∅] → non-empty.
+        let a = b.leaf(&fab_lang::evaluate("cube(4);").expect("cube"));
+        let c = b.leaf(&fab_lang::evaluate("sphere(3, $fn = 8);").expect("sphere"));
+        let h = b.hull(&[a, c]);
+        assert!(!b.is_empty(&h));
+        let _ = b.to_mesh(&h).tri_count(); // extract path exercised
+        assert!(b.is_empty(&b.hull(&[]))); // hull of nothing → ∅
+        assert!(b.is_empty(&b.hull(&[b.leaf(&fab_lang::Mesh::new())]))); // hull of ∅ → ∅
+        assert!(!b.is_empty(&b.hull(&[
+            b.leaf(&fab_lang::evaluate("cube(4);").expect("cube")),
+            b.leaf(&fab_lang::Mesh::new()),
+        ]))); // hull of [x, ∅] = hull(x)
+
         // The empty algebra — must hold identically on both backends.
         let empty = b.leaf(&fab_lang::Mesh::new());
         assert!(b.is_empty(&empty));
@@ -316,6 +355,10 @@ mod tests {
         assert!((vol("difference() { cube(10); cube(5); }") - 875.0).abs() < 1e-6); // 1000 − 125
         assert!((vol("union() { cube(10); cube(5); }") - 1000.0).abs() < 1e-6); // cube(5) ⊂ cube(10)
         assert!((vol("intersection() { cube(10); cube(5); }") - 125.0).abs() < 1e-6); // = cube(5)
+        // hull() of a convex solid is the solid itself → cube(10) stays 1000; a single child hulls too.
+        assert!((vol("hull() cube(10);") - 1000.0).abs() < 1e-6);
+        // hull() of two separated cubes bridges them → a convex prism, strictly bigger than either.
+        assert!(vol("hull() { cube(2); translate([10, 0, 0]) cube(2); }") > 8.0);
         // difference with a subtrahend moved fully clear removes nothing (transform composes into it):
         assert!(
             (vol("difference() { cube(10); translate([20, 0, 0]) cube(5); }") - 1000.0).abs()

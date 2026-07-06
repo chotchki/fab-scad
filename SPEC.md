@@ -137,7 +137,13 @@ escape, not community respect.
   (< 360) carry the twist's same small, converging arc-phase residual (0.2-2%), the same relaxed-
   tolerance treatment. OUTCOME (J.3.6): `projection` (the inverse bridge — `cut=false` shadow / `cut=true`
   z=0 slice) is EXACT: no swept tessellation, so shadow + cut cases (incl. a tilted-cylinder section) all
-  pass the strict gate.
+  pass the strict gate. OUTCOME (J.3.7): 16 real BOSL2 path/region-derived 2D shapes (attachable modules,
+  path math, polygon, offset, region booleans) match the oracle strictly. Two fixes unlocked it: (1) the
+  USE-SCOPE fix — a `use`d/`include`d function/module reads its own file's top-level constants (per-island
+  constant scope), so BOSL2's function-form shapes stop asserting on `undef`; and (2) EVEN-ODD polygon
+  fill — `polygon()` fills by nesting not winding (a BOSL2 path winds CW; `Positive` fill dropped it to
+  empty). BOSL2 is loaded via `include <std.scad>` (attachable needs the file constants + `$`-context in
+  the caller scope, which only `include` splices in).
 - **Builtin geometry surface (deliberately small):** polyhedron, primitives, multmatrix,
   union/difference/intersection, hull, linear_extrude/rotate_extrude (2D via Manifold
   `CrossSection`, above), offset, projection. `import()` = our existing STL/3MF readers. DEFERRED: text() (fonts —

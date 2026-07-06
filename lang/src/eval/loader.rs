@@ -185,7 +185,7 @@ pub(super) struct ScadNeed {
 
 /// A source the shell has resolved + read + PARSED: `id` is its canonical path (the opaque dedup/cycle-break
 /// key the pure resolver compares by, never canonicalizing itself), `dir` its directory (the base for ITS
-/// own relative refs), `program` the parsed AST (parsed once by the shell; resolve_graph clones it).
+/// own relative refs), `program` the parsed AST (parsed once by the shell; `resolve_graph` clones it).
 struct ProvidedSource {
     id: PathBuf,
     dir: PathBuf,

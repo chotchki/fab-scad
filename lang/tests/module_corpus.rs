@@ -128,6 +128,16 @@ fn unknown_module_is_loud() {
     ));
 }
 
+/// An error inside a `for` body doesn't get swallowed by the iteration — it propagates LOUD out of the
+/// loop (the `for_product` `?`), same as anywhere else. A single deferred/unknown child kills the render.
+#[test]
+fn for_body_error_propagates() {
+    assert!(matches!(
+        evaluate_geometry("for (i = [0, 1]) not_a_module();").unwrap_err(),
+        Error::Unimplemented(m) if m.contains("unknown module")
+    ));
+}
+
 /// A statement-level `$special = value;` assignment parses AND scopes (BOSL2 leans on it heavily —
 /// `$fn=8;`, `$tags=…;`, `$color=…;`). `$fn = 8` reaches the geometry exactly like passing it as an arg.
 #[test]

@@ -49,9 +49,13 @@ use crate::parser::{
 #[derive(Default)]
 pub(super) struct Ctx<'a> {
     functions: BTreeMap<&'a str, (&'a [Parameter], &'a Expr)>,
-    /// User MODULE definitions (their own namespace, whole-program visibility) — name → (params, body
-    /// statement). A module CALL resolves here before the builtin-primitive fallthrough (I.2.4).
-    modules: loader::ModStore<'a>,
+    /// User MODULE definitions, as per-file scope ISLANDS (I.9.5) — module resolution is LEXICAL, not
+    /// global. `islands[0]` is the root file; each `use` target gets its own island. A module CALL
+    /// resolves against the CURRENT island (its own file's defs + the files it uses + builtins) via
+    /// [`Ctx::resolve_module`], before the builtin-primitive fallthrough (I.2.4). This is what lets a
+    /// `use`d module see the BUILTIN behind a name the including program has redefined (BOSL2's
+    /// `builtins.scad` `_cube → cube` trick), instead of recursing into the redefinition.
+    islands: loader::Islands<'a>,
     closures: RefCell<Vec<(&'a [Parameter], &'a Expr)>>,
     messages: RefCell<Vec<Message>>,
     /// Live user-module call depth — the Safari-cliff guard. Statement eval is HOST-recursive (a module
@@ -66,10 +70,32 @@ pub(super) struct Ctx<'a> {
 }
 
 /// One active module call's children context: the call-site child statements (borrowed from the AST) +
-/// the CALLER's scope they evaluate in (OpenSCAD renders `children()` in the instantiation context).
+/// the CALLER's scope AND module ISLAND they evaluate in (OpenSCAD renders `children()` in the
+/// instantiation context — same lexical scope AND same module-resolution scope as the call site, I.9.5).
 struct ChildrenFrame<'a> {
     stmts: &'a [Stmt],
     scope: Scope,
+    island: usize,
+}
+
+impl<'a> Ctx<'a> {
+    /// Resolve a MODULE name against `island`'s lexical scope (I.9.5): the island's OWN defs first (a
+    /// local/`include` def always beats a `use`-imported one), then each `use`d island in reverse source
+    /// order (textually-last `use` wins). Returns the def PLUS its home island — the body must evaluate
+    /// with the home as its current island so ITS calls resolve where the module was defined, not where
+    /// it was called. `None` → no user module by that name here, so the call falls through to a builtin
+    /// primitive (this is the fallthrough that turns `builtins.scad`'s `_cube`-body `cube` into the
+    /// BUILTIN cube instead of the program's redefinition).
+    fn resolve_module(&self, island: usize, name: &str) -> Option<(loader::ModDef<'a>, usize)> {
+        let here = &self.islands[island];
+        if let Some(&def) = here.modules.get(name) {
+            return Some((def, island));
+        }
+        here.uses
+            .iter()
+            .rev()
+            .find_map(|&u| self.islands[u].modules.get(name).map(|&def| (def, u)))
+    }
 }
 
 /// Max nested user-module call depth before we bail LOUD (OpenSCAD caps recursion similarly). Statement
@@ -792,10 +818,14 @@ pub(crate) fn evaluate_source(
 ) -> crate::Result<(GeoNode, Vec<Message>)> {
     let _span = tracing::trace_span!("eval_program").entered();
     let loaded = loader::load(source, base_dir, root_path, library_paths)?;
+    // `flatten` gives the executable statement stream + the global FUNCTION store; `islands` gives the
+    // per-file MODULE scopes (I.9.5). `defs.modules` is intentionally unused — module resolution is
+    // island-scoped now, not the single global map the old `Ctx.modules` was.
     let (exec, defs) = loader::flatten(&loaded)?;
+    let islands = loader::islands(&loaded);
     let ctx = Ctx {
         functions: defs.functions,
-        modules: defs.modules,
+        islands,
         closures: RefCell::default(),
         messages: RefCell::default(),
         module_depth: Cell::default(),
@@ -820,7 +850,8 @@ fn run_stmts<'a>(
     // re-hoist — that would let a forward reference see the pre-bound value, breaking `a = b; b = 5` →
     // `a` is undef), then evaluate the geometry in that same scope.
     let global = hoist_scope(&stmts, scope, ctx)?;
-    Ok(union_of(eval_geometry(&stmts, &global, &global, ctx)?))
+    // Top-level statements resolve modules against island 0 (the root file, I.9.5).
+    Ok(union_of(eval_geometry(&stmts, &global, &global, 0, ctx)?))
 }
 
 /// The geometry nodes a statement list produces, in order. Pass 1 HOISTS every assignment BEFORE any
@@ -835,9 +866,10 @@ fn eval_nodes<'a>(
     ctx: &Ctx<'a>,
     scope: &Scope,
     global: &Scope,
+    island: usize,
 ) -> crate::Result<Vec<GeoNode>> {
     let hoisted = hoist_scope(stmts, scope, ctx)?;
-    eval_geometry(stmts, &hoisted, global, ctx)
+    eval_geometry(stmts, &hoisted, global, island, ctx)
 }
 
 /// Hoist a statement list's assignments into a fresh working scope (a clone of `scope`): OpenSCAD's
@@ -854,18 +886,20 @@ fn hoist_scope<'a>(stmts: &[&'a Stmt], scope: &Scope, ctx: &Ctx<'a>) -> crate::R
 }
 
 /// Evaluate the GEOMETRY statements of a list (assignments already hoisted into `scope`) → their nodes,
-/// threading `global` unchanged for any module body's lexical base.
+/// threading `global` unchanged for any module body's lexical base and `island` for module resolution
+/// (I.9.5 — the module scope of the file these statements were textually defined in).
 fn eval_geometry<'a>(
     stmts: &[&'a Stmt],
     scope: &Scope,
     global: &Scope,
+    island: usize,
     ctx: &Ctx<'a>,
 ) -> crate::Result<Vec<GeoNode>> {
     let mut scope = scope.clone();
     let mut nodes = Vec::new();
     for stmt in stmts {
         if !matches!(stmt.kind, StmtKind::Assignment { .. }) {
-            eval_stmt(stmt, &mut scope, global, ctx, &mut nodes)?;
+            eval_stmt(stmt, &mut scope, global, island, ctx, &mut nodes)?;
         }
     }
     Ok(nodes)
@@ -889,19 +923,20 @@ fn for_product<'a>(
     children: &[&'a Stmt],
     scope: &Scope,
     global: &Scope,
+    island: usize,
     ctx: &Ctx<'a>,
     out: &mut Vec<GeoNode>,
 ) -> crate::Result<()> {
     match args.split_first() {
         // all vars bound → the body
-        None => out.push(union_of(eval_nodes(children, ctx, scope, global)?)),
+        None => out.push(union_of(eval_nodes(children, ctx, scope, global, island)?)),
         Some((arg, rest)) => {
             let name = arg.name.as_deref().unwrap_or("");
             let iterable = eval_with_ctx(&arg.value, scope, ctx)?;
             for value in iterate_values(&iterable) {
                 let mut child = scope.clone();
                 child.bind(name, value);
-                for_product(rest, children, &child, global, ctx, out)?;
+                for_product(rest, children, &child, global, island, ctx, out)?;
             }
         }
     }
@@ -910,15 +945,27 @@ fn for_product<'a>(
 
 /// Call a user MODULE (I.2.4): bind the call's args into a fresh child of `global` (OpenSCAD lexical
 /// hygiene — the body sees globals + params, not the caller's locals), then evaluate the body statement
-/// there → its geometry (implicit-unioned). Guarded against unbounded self-recursion ([`MAX_MODULE_DEPTH`])
-/// because statement eval is HOST-recursive — LOUD on overflow, never a silent stack crash.
+/// there → its geometry (implicit-unioned). `def`/`home` come pre-resolved from the caller's island
+/// ([`Ctx::resolve_module`]): the body evaluates with `home` as ITS module-resolution island (I.9.5 —
+/// so `_cube`'s body resolves `cube` in builtins.scad's scope, hitting the builtin), while the call-site
+/// children render at the CALLER's `island`. Guarded against unbounded self-recursion
+/// ([`MAX_MODULE_DEPTH`]) because statement eval is HOST-recursive — LOUD on overflow, never a silent
+/// stack crash.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the module-call context: the resolved def, its home island, the caller's scope/island, \
+    the lexical global, and ctx — each is a distinct piece of the OpenSCAD call semantics, not incidental"
+)]
 fn call_user_module<'a>(
     mi: &'a ModuleInstantiation,
+    def: loader::ModDef<'a>,
+    home: usize,
     caller: &Scope,
     global: &Scope,
+    island: usize,
     ctx: &Ctx<'a>,
 ) -> crate::Result<GeoNode> {
-    let (params, body) = ctx.modules[mi.name.as_str()]; // the arm guarded `contains_key`
+    let (params, body) = def;
     let depth = ctx.module_depth.get();
     if depth >= MAX_MODULE_DEPTH {
         return Err(crate::Error::Unimplemented(
@@ -928,14 +975,16 @@ fn call_user_module<'a>(
     ctx.module_depth.set(depth + 1);
     let mut call = bind_module_scope(params, &mi.args, caller, global, ctx)?;
     // `$children` = the call-site child count; the children themselves are stashed for `children()` to
-    // render LATE, in the CALLER's scope (I.2.5).
+    // render LATE, in the CALLER's scope AND island (I.2.5 / I.9.5).
     call.bind("$children", Value::Num(child_count(mi.children.len())));
     ctx.children_stack.borrow_mut().push(ChildrenFrame {
         stmts: mi.children.as_slice(),
         scope: caller.clone(),
+        island,
     });
     let mut nodes = Vec::new();
-    let result = eval_stmt(body, &mut call, global, ctx, &mut nodes);
+    // The body resolves ITS module calls against the module's DEFINITION island (`home`), not the caller's.
+    let result = eval_stmt(body, &mut call, global, home, ctx, &mut nodes);
     ctx.children_stack.borrow_mut().pop(); // restore even on error (no `?` before these)
     ctx.module_depth.set(depth);
     result?;
@@ -969,7 +1018,8 @@ fn eval_children<'a>(
             .collect(),
         _ => Vec::new(),
     };
-    let result = eval_nodes(&selected, ctx, &frame.scope, global);
+    // Children render in the CALLER's scope AND module island (both stashed on the frame, I.9.5).
+    let result = eval_nodes(&selected, ctx, &frame.scope, global, frame.island);
     ctx.children_stack.borrow_mut().push(frame); // restore for the caller's continuation
     Ok(union_of(result?))
 }
@@ -1173,9 +1223,14 @@ fn build_ctx(program: &Program) -> Ctx<'_> {
             _ => {}
         }
     }
+    // A raw single-program eval (no loader) has no `use`/`include` graph → one island (the whole
+    // program), used by nothing. Module resolution against island 0 is exactly the old global lookup.
     Ctx {
         functions,
-        modules,
+        islands: vec![loader::Island {
+            modules,
+            uses: Vec::new(),
+        }],
         closures: RefCell::default(),
         messages: RefCell::default(),
         module_depth: Cell::default(),
@@ -1189,6 +1244,7 @@ fn eval_stmt<'a>(
     stmt: &'a Stmt,
     scope: &mut Scope,
     global: &Scope,
+    island: usize,
     ctx: &Ctx<'a>,
     nodes: &mut Vec<GeoNode>,
 ) -> crate::Result<()> {
@@ -1208,7 +1264,7 @@ fn eval_stmt<'a>(
         // (its own hoisting).
         StmtKind::Block(stmts) => {
             let refs: Vec<&Stmt> = stmts.iter().collect();
-            nodes.push(union_of(eval_nodes(&refs, ctx, scope, global)?));
+            nodes.push(union_of(eval_nodes(&refs, ctx, scope, global, island)?));
         }
         // `echo`/`assert` at statement level are module instantiations, but they produce console
         // output, not geometry — handle them here (no node pushed) before the geometry dispatch. Their
@@ -1221,7 +1277,7 @@ fn eval_stmt<'a>(
             let (positional, named, _) = module::eval_args(mi, scope, ctx)?;
             let matrix = geo::transform_matrix(&mi.name, &positional, &named);
             let refs: Vec<&Stmt> = mi.children.iter().collect();
-            let child = union_of(eval_nodes(&refs, ctx, scope, global)?);
+            let child = union_of(eval_nodes(&refs, ctx, scope, global, island)?);
             nodes.push(GeoNode::Transform {
                 matrix,
                 child: Box::new(child),
@@ -1231,7 +1287,7 @@ fn eval_stmt<'a>(
         // first minus the rest, `intersection` is the common volume, `union` merges (also the default).
         StmtKind::Module(mi) if geo::is_boolean(&mi.name) => {
             let refs: Vec<&Stmt> = mi.children.iter().collect();
-            let children = eval_nodes(&refs, ctx, scope, global)?;
+            let children = eval_nodes(&refs, ctx, scope, global, island)?;
             nodes.push(match mi.name.as_str() {
                 "difference" => GeoNode::Difference(children),
                 "intersection" => GeoNode::Intersection(children),
@@ -1243,7 +1299,7 @@ fn eval_stmt<'a>(
         StmtKind::Module(mi) if mi.name == "color" => {
             let (positional, named, _) = module::eval_args(mi, scope, ctx)?;
             let refs: Vec<&Stmt> = mi.children.iter().collect();
-            let child = union_of(eval_nodes(&refs, ctx, scope, global)?);
+            let child = union_of(eval_nodes(&refs, ctx, scope, global, island)?);
             match geo::resolve_color(&positional, &named) {
                 Some(color) => nodes.push(GeoNode::Color {
                     color,
@@ -1263,23 +1319,33 @@ fn eval_stmt<'a>(
         StmtKind::Module(mi) if mi.name == "for" || mi.name == "intersection_for" => {
             let children: Vec<&Stmt> = mi.children.iter().collect();
             let mut iterations = Vec::new();
-            for_product(&mi.args, &children, scope, global, ctx, &mut iterations)?;
+            for_product(
+                &mi.args,
+                &children,
+                scope,
+                global,
+                island,
+                ctx,
+                &mut iterations,
+            )?;
             nodes.push(if mi.name == "intersection_for" {
                 GeoNode::Intersection(iterations)
             } else {
                 GeoNode::Union(iterations)
             });
         }
-        // A USER MODULE call (I.2.4): resolve in the module store + bind args into a fresh child of the
-        // GLOBAL scope (OpenSCAD hygiene — a module body sees globals + params, NOT the caller's locals),
-        // then evaluate its body there. Checked before the builtin fallthrough; a name matching a builtin
-        // transform/boolean/color was already dispatched above (so a user module can't shadow those — a
-        // documented v1 simplification).
-        StmtKind::Module(mi) if ctx.modules.contains_key(mi.name.as_str()) => {
-            nodes.push(call_user_module(mi, scope, global, ctx)?);
-        }
-        // A PRIMITIVE → a `Leaf` (an unknown user module fails LOUD inside `eval_module`).
-        StmtKind::Module(mi) => nodes.push(GeoNode::Leaf(module::eval_module(mi, scope, ctx)?)),
+        // A module INSTANTIATION: resolve the name against the CURRENT island (I.9.5), which is what a
+        // `use`d module needs to see the BUILTIN behind a name the program has redefined. A user module
+        // is called with its body resolving at its DEFINITION island (`home`); everything else falls
+        // through to the builtin PRIMITIVE path (an unknown name fails LOUD inside `eval_module`). Checked
+        // AFTER the builtin transform/boolean/color/children/for arms above, so a user module can't shadow
+        // those — a documented v1 simplification.
+        StmtKind::Module(mi) => match ctx.resolve_module(island, mi.name.as_str()) {
+            Some((def, home)) => {
+                nodes.push(call_user_module(mi, def, home, scope, global, island, ctx)?);
+            }
+            None => nodes.push(GeoNode::Leaf(module::eval_module(mi, scope, ctx)?)),
+        },
         // `if (cond) A else B` contributes the TAKEN branch's geometry (I.3.3).
         StmtKind::If { cond, then, els } => {
             let branch = if eval_with_ctx(cond, scope, ctx)?.is_truthy() {
@@ -1288,7 +1354,7 @@ fn eval_stmt<'a>(
                 els
             };
             let refs: Vec<&Stmt> = branch.iter().collect();
-            nodes.push(union_of(eval_nodes(&refs, ctx, scope, global)?));
+            nodes.push(union_of(eval_nodes(&refs, ctx, scope, global, island)?));
         }
         // The loader resolves top-level `use`/`include` away (include → spliced, use → imported), so a
         // node reaching here is either a raw `eval_program` on an unloaded program or a `use`/`include`

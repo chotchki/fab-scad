@@ -195,10 +195,33 @@ type FnDef<'a> = (&'a [Parameter], &'a Expr);
 /// The function store the evaluator's [`Ctx`](super::Ctx) is built from: name → its definition.
 pub(super) type FnStore<'a> = BTreeMap<&'a str, FnDef<'a>>;
 /// A user module definition's params + body STATEMENT (usually a block), borrowed from the [`Program`].
-type ModDef<'a> = (&'a [Parameter], &'a Stmt);
+pub(super) type ModDef<'a> = (&'a [Parameter], &'a Stmt);
 /// The module store — name → its definition. Collected + merged EXACTLY like [`FnStore`] (`use` tier
 /// base, local/`include` overrides), since `use` imports modules alongside functions.
 pub(super) type ModStore<'a> = BTreeMap<&'a str, ModDef<'a>>;
+
+/// One MODULE scope island (I.9.5): the module-name resolution scope of one file (the root or a `use`
+/// target). Module resolution is LEXICAL, not global — a module defined in a `use`d file resolves ITS
+/// OWN body's module calls against that file's island (its include-flattened defs + the files IT uses +
+/// builtins), NOT the includer's redefinitions. This is precisely what makes BOSL2's `builtins.scad`
+/// trick work: `module _cube(size,center) cube(size,center=center);` resolves `cube` to the BUILTIN
+/// primitive, because builtins.scad's island defines no `cube` — even though the program (via `include`)
+/// redefines `cube` as the attachable wrapper. A global store resolves that `cube` back to the wrapper →
+/// unbounded `cube → … → _cube → cube` recursion (the exact I.9.5 symptom).
+pub(super) struct Island<'a> {
+    /// This file's include-flattened module defs (last-wins). A name here beats any `use`-imported one.
+    pub modules: ModStore<'a>,
+    /// Island indices of the files this one `use`s, in source order. Resolution scans them REVERSED so
+    /// the textually-last `use` wins (matching OpenSCAD's front-inserted `usedlibs`). Non-transitive:
+    /// resolution looks only at a used island's OWN `modules`, never its `uses`.
+    pub uses: Vec<usize>,
+}
+
+/// The module scope islands of a load graph: index 0 is the ROOT file; each distinct `use` target gets
+/// its own island. Functions stay a single global store for now — the `use`d files in the BOSL2 corpus
+/// export only modules, so the function-side lexical scope is the still-deferred limitation (see the
+/// module header's KNOWN LIMITATION note), not a live divergence.
+pub(super) type Islands<'a> = Vec<Island<'a>>;
 
 /// The function + module definitions collected from a load graph — both name→def, same precedence.
 /// Bundled so the flatten recursion threads ONE accumulator per tier instead of two.
@@ -365,6 +388,91 @@ fn collect_exported<'a>(
     }
     stack.pop();
     Ok(())
+}
+
+/// Build the MODULE scope [`Islands`] of a load graph (I.9.5). Two passes: (1) assign an island index to
+/// the root (node 0) and to every node that is the TARGET of a `use` link anywhere in the graph — those
+/// are the only files whose module scope is ever entered as a lexical base. (2) For each island-root node,
+/// collect its include-flattened module defs (follow `include`, STOP at `use`) plus the island indices of
+/// the files it `use`s.
+///
+/// PRECONDITION: called only AFTER [`flatten`] on the same graph (see `evaluate_source`). Flatten's
+/// `expand`/`exported_defs` already walked this exact include structure under [`MAX_INCLUDE_DEPTH`] +
+/// [`MAX_EXPANSION`] and rejected any over-deep chain or fan-out bomb — so by the time we get here the
+/// graph is KNOWN-bounded, and [`collect_island`] needs no depth/budget guard of its own, only the
+/// cycle-break for termination. That's why this is infallible where `flatten` returns a `Result`.
+pub(super) fn islands(loaded: &Loaded) -> Islands<'_> {
+    // Pass 1: node index → island index. The root is island 0; each fresh `use` target gets the next.
+    let mut node_to_island: BTreeMap<usize, usize> = BTreeMap::new();
+    node_to_island.insert(0, 0);
+    let mut roots = vec![0usize]; // island i ↔ node roots[i]
+    for node in &loaded.programs {
+        for link in node.links.values() {
+            if let Link::Use(target) = link
+                && !node_to_island.contains_key(target)
+            {
+                node_to_island.insert(*target, roots.len());
+                roots.push(*target);
+            }
+        }
+    }
+    // Pass 2: collect each island's include-flattened modules + its used-island indices.
+    let mut islands = Vec::with_capacity(roots.len());
+    for &root_node in &roots {
+        let mut modules = ModStore::new();
+        let mut uses = Vec::new();
+        let mut stack = Vec::new();
+        collect_island(
+            loaded,
+            root_node,
+            &node_to_island,
+            &mut modules,
+            &mut uses,
+            &mut stack,
+        );
+        islands.push(Island { modules, uses });
+    }
+    islands
+}
+
+/// Walk island-root `idx`'s include subtree, collecting module defs (last-wins) and recording each `use`
+/// target as an island index (via `node_to_island`, which pass 1 guarantees is populated for every `use`
+/// target). Follows `include` (same island), stops at `use` (a scope boundary). The `stack` cycle-break is
+/// the only guard needed — the graph is already flatten-validated (see [`islands`]), so it's bounded.
+fn collect_island<'a>(
+    loaded: &'a Loaded,
+    idx: usize,
+    node_to_island: &BTreeMap<usize, usize>,
+    modules: &mut ModStore<'a>,
+    uses: &mut Vec<usize>,
+    stack: &mut Vec<usize>,
+) {
+    if stack.contains(&idx) {
+        return; // cycle: skip silently (the intended include-stack break)
+    }
+    stack.push(idx);
+    let node = &loaded.programs[idx];
+    for (i, stmt) in node.program.stmts.iter().enumerate() {
+        match node.links.get(&i) {
+            Some(Link::Include(target)) => {
+                collect_island(loaded, *target, node_to_island, modules, uses, stack);
+            }
+            // A `use` is a scope boundary: record the used file's island (its modules resolve THERE, not
+            // here). `node_to_island` has every `use` target from pass 1; the `if let` is a defensive
+            // no-panic guard for a can't-happen miss, not a real branch.
+            Some(Link::Use(target)) => {
+                if let Some(&island) = node_to_island.get(target) {
+                    uses.push(island);
+                }
+            }
+            None => {
+                if let StmtKind::ModuleDef { name, params, body } = &stmt.kind {
+                    modules.insert(name.as_str(), (params.as_slice(), &**body)); // last-wins
+                }
+            }
+        }
+    }
+    stack.pop();
 }
 
 /// Extract every top-level `use`/`include` as `(stmt-index, raw path, kind)` — OWNED, so the caller can

@@ -141,6 +141,27 @@ const FIXTURES: &[(&str, &str)] = &[
         "use_via_libpath.scad",
         "use <pathlib.scad>\nsphere(pr(), $fn = 8);\n",
     ),
+    // I.9.5 — per-file MODULE scope islands. A `use`d file's module resolves ITS body against ITS OWN
+    // island, so a name the INCLUDING program redefines still reaches the BUILTIN here. This is BOSL2's
+    // `builtins.scad` `module _cube(size) cube(size);` trick reduced to one pair: `cube(4)` calls the
+    // root's `cube`, whose body calls `_cube`, whose body's `cube` must be the BUILTIN — not the root's
+    // redefinition. A global module store resolves that inner `cube` back to the redefinition →
+    // unbounded `cube → _cube → cube → …` recursion (the exact I.9.5 attachable-path symptom).
+    ("lib_shadow.scad", "module _cube(size) cube(size);\n"),
+    (
+        "use_shadow_builtin.scad",
+        "use <lib_shadow.scad>\nmodule cube(size) { _cube(size); }\ncube(4);\n",
+    ),
+    // I.9.5 — TWO included files both `use` the SAME lib → the lib gets ONE island (dedup), reached from
+    // both include arms. Mirrors real BOSL2, where color/shapes2d/shapes3d all `use <builtins.scad>`.
+    // The shared `_sq` still resolves `cube` in ITS island → the builtin, from either arm.
+    ("lib_shared_use.scad", "module _sq(s) cube(s);\n"),
+    ("shared_use_a.scad", "use <lib_shared_use.scad>\n"),
+    ("shared_use_b.scad", "use <lib_shared_use.scad>\n"),
+    (
+        "diamond_use.scad",
+        "include <shared_use_a.scad>\ninclude <shared_use_b.scad>\nmodule cube(s) { _sq(s); }\ncube(2);\n",
+    ),
 ];
 
 /// Materialize the fixture graph once into `CARGO_TARGET_TMPDIR/loader` and hand back its path.
@@ -198,6 +219,11 @@ fn loader_matches_the_inlined_equivalent() {
         ("use_nontransitive.scad", vec![], "sphere(2, $fn = 8);"),
         // use imports functions only → noise stays undef in the using scope → sphere(undef)
         ("use_var.scad", vec![], "sphere(undef, $fn = 8);"),
+        // I.9.5: the used `_cube` resolves `cube` in ITS island → the BUILTIN, not the root's redefine.
+        // Renders exactly `cube(4)`; before per-file islands this recursed to the depth-guard error.
+        ("use_shadow_builtin.scad", vec![], "cube(4);"),
+        // I.9.5: the same lib `use`d via two include arms dedups to one island → `cube(2)` still renders.
+        ("diamond_use.scad", vec![], "cube(2);"),
         // pathlib reachable only via the library path → pr() = 4
         (
             "use_via_libpath.scad",

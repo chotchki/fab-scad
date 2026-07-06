@@ -75,6 +75,7 @@ pub enum SourceNeed {
 /// fulfills and re-runs. [`Resolution::Incomplete`] deliberately carries NO geo/messages: the caller re-runs
 /// from scratch with a fuller [`FileTable`], which re-emits them on the closing pass, so surfacing them here
 /// would only double-count. A mesh rarely gates control flow, so one re-run usually closes the fixpoint.
+#[derive(Debug)]
 pub enum Resolution {
     /// Nothing left to resolve — the geometry tree plus the run's ordered console messages.
     Complete {
@@ -959,26 +960,45 @@ pub fn eval_program(program: &Program, scope: &Scope) -> crate::Result<Mesh> {
     mesh_of(tree)
 }
 
-/// Resolve `source` against a caller-supplied mesh [`FileTable`] to a [`Resolution`] — the pure needs
-/// fixpoint's INNER step (M.3), and the spine behind every public `evaluate*`/`resolve_geometry_*` entry.
-/// The loader owns every reachable `use`/`include` file (so the evaluator's `&'a`-into-the-AST borrows span
-/// all of them); we evaluate the flattened statement stream against the merged, precedence-correct function
-/// store. An `import`/`surface` path the `files` table lacks comes back as [`Resolution::Incomplete`]
-/// naming it — the run substitutes an empty placeholder + keeps going, so ONE call surfaces every missing
-/// file. `root_path` is the root's own path when it's a file (for back-reference dedup + cycle-break).
+/// Resolve `source` against caller-supplied source tables to a [`Resolution`] — the PURE inner step of the
+/// needs fixpoint (M.4). ZERO IO: it consults `scad_sources` (the `use`/`include` graph the shell has read
+/// so far) and `files` (the `import`/`surface` meshes) and NAMES what's still missing. Three outcomes,
+/// staged because the two discovery phases can't interleave — a program can't RUN until its libraries LOAD:
+/// (1) the `use`/`include` graph isn't closed → [`Resolution::Incomplete`] with `Scad` needs, returned
+/// BEFORE any eval; (2) the graph closed but an `import`/`surface` referenced a mesh the table lacks →
+/// `Incomplete` with `File` needs (the run substituted empty placeholders + kept going, so ONE call surfaces
+/// them all); (3) nothing missing → [`Resolution::Complete`]. The impure [`io`] shell (or an async host)
+/// fulfills the needs and calls again. `root_id` is the root's CANONICAL path when it's a file (the shell
+/// canonicalizes) so a dependency referencing the root back dedups to the same node.
 ///
 /// # Errors
-/// Loader failures ([`Error::Load`](crate::Error::Load)), parse errors, and any evaluation error from the
-/// flattened program. A missing import file is a NEED, not an error.
-pub(crate) fn resolve_source(
+/// Parse errors and any evaluation error from the flattened program. A missing source is a NEED, not an
+/// error — the shell decides whether it can fulfill it.
+fn resolve_source(
     source: &str,
     base_dir: &std::path::Path,
-    root_path: Option<&std::path::Path>,
-    library_paths: &[std::path::PathBuf],
+    root_id: Option<&std::path::Path>,
+    scad_sources: &loader::SourceMap,
     files: &FileTable,
 ) -> crate::Result<Resolution> {
     let _span = tracing::trace_span!("eval_program").entered();
-    let loaded = io::load_graph(source, base_dir, root_path, library_paths)?;
+    // Phase 1 (STATIC): close the `use`/`include` graph. A reference not yet in the source table surfaces as
+    // a `Scad` need and we return BEFORE eval — the program can't execute until its libraries are present.
+    let loaded = match loader::resolve_graph(source, base_dir, root_id, scad_sources)? {
+        loader::GraphOutcome::Complete(loaded) => loaded,
+        loader::GraphOutcome::Incomplete(scad_needs) => {
+            return Ok(Resolution::Incomplete {
+                needs: scad_needs
+                    .into_iter()
+                    .map(|n| SourceNeed::Scad {
+                        from_dir: n.from_dir,
+                        raw: n.raw,
+                    })
+                    .collect(),
+            });
+        }
+    };
+    // Phase 2 (DYNAMIC): eval. `import`/`surface` `File` needs surface here — only executing reaches them.
     // `flatten` gives the executable statement stream (its own function/module stores are now unused —
     // both are island-scoped). `islands` gives the per-file MODULE scopes AND (the use-scope fix) each
     // file's FUNCTION defs + top-level CONSTANTS, so a `use`d function's body sees its own file's scope.
@@ -1020,35 +1040,32 @@ pub(crate) fn resolve_source(
     }
 }
 
-/// Complete-or-LOUD sugar over [`resolve_source`] with NO file table — the spine the mesh/geometry
-/// convenience entries ([`evaluate`](crate::evaluate) / [`evaluate_geometry`](crate::evaluate_geometry) and
-/// kin) run on. Those entries carry no mesh table, so an `import`/`surface` through them can't be fulfilled;
-/// rather than a silently-empty mesh, it fails LOUD naming the files. Real import resolution goes through
-/// [`resolve_source`] + the M.4 IO shell, which supplies the meshes.
+/// The no-import spine behind the mesh/geometry convenience entries ([`evaluate`](crate::evaluate) /
+/// [`evaluate_geometry`](crate::evaluate_geometry) and kin): drive the fixpoint (the [`io`] shell reads the
+/// `use`/`include` graph) with a reader that REFUSES `import`/`surface` files. So those entries stay
+/// pure-geometry, and an import through them fails LOUD naming the file rather than returning a
+/// silently-empty mesh. Import resolution with real meshes goes through the reader-based
+/// [`resolve_geometry_*`](crate::resolve_geometry_with_base) entries + the M.5 backend.
 ///
 /// # Errors
-/// As [`resolve_source`], plus [`Error::Load`](crate::Error::Load) when the run named unresolved import
-/// files (there's no table here to satisfy them).
+/// [`Error::Load`](crate::Error::Load) for an unresolvable `use`/`include` or any `import`/`surface`
+/// (no reader here); [`Error::Parse`](crate::Error::Parse) for malformed source; any evaluation error.
 pub(crate) fn evaluate_source(
     source: &str,
     base_dir: &std::path::Path,
     root_path: Option<&std::path::Path>,
     library_paths: &[std::path::PathBuf],
 ) -> crate::Result<(Geo, Vec<Message>)> {
-    match resolve_source(source, base_dir, root_path, library_paths, &FileTable::new())? {
-        Resolution::Complete { geo, messages } => Ok((geo, messages)),
-        Resolution::Incomplete { needs } => Err(unresolved_files(&needs)),
-    }
+    io::drive(source, base_dir, root_path, library_paths, io::no_import_reader)
 }
 
-/// The LOUD error the no-table paths raise when `import`/`surface` named files they couldn't get (M.3): the
-/// convenience entries don't carry a mesh table, so an import through them is unfulfillable — a named error
-/// beats a silently-empty mesh. Real resolution supplies a [`FileTable`] via `resolve_geometry_*` + the M.4
-/// shell, where a missing file is a NEED, not an error.
+/// The LOUD error the raw-AST path ([`eval_program`]) raises when `import`/`surface` executed with no file
+/// table (`build_ctx` sets `files: None`) — a named error beats a silently-empty mesh. The loader paths
+/// route imports through a mesh reader instead ([`io::drive`]); this covers only the table-less direct eval.
 fn unresolved_files(needs: &[SourceNeed]) -> crate::Error {
     crate::Error::Load(format!(
-        "import/surface referenced {} file(s) with no mesh table to resolve them: {needs:?} — evaluate \
-         through resolve_geometry_* + the M.4 IO shell to supply the meshes",
+        "import/surface referenced {} file(s) with no mesh reader (raw eval_program) — evaluate through \
+         resolve_geometry_* with a reader to supply the meshes: {needs:?}",
         needs.len()
     ))
 }
@@ -2012,6 +2029,64 @@ mod tests {
     #[test]
     fn tagged_functions_of_no_islands_is_empty() {
         assert!(tagged_functions(&Vec::new()).is_empty());
+    }
+
+    /// The PURE inner step ([`super::resolve_source`], M.4): with empty source tables it surfaces NEEDS
+    /// rather than doing IO — a `use`/`include` reference the source table lacks comes back as a `Scad`
+    /// need (before any eval), and an `import`/`surface` a `File` need (after the graph closes). The [`io`]
+    /// shell + integration tests exercise the fulfilling loop; here we pin that the core NAMES the right
+    /// needs and CLOSES when the tables hold them.
+    #[test]
+    fn resolve_source_surfaces_needs_then_closes() {
+        use std::path::Path;
+
+        use super::loader::SourceMap;
+        use super::{FileTable, Resolution, SourceNeed, resolve_source};
+
+        let here = Path::new(".");
+        let no_scad = SourceMap::new();
+        let no_files = FileTable::new();
+        let scad_need = |raw: &str| SourceNeed::Scad {
+            from_dir: here.to_path_buf(),
+            raw: raw.to_string(),
+        };
+        let file_need = |raw: &str| SourceNeed::File {
+            raw: raw.to_string(),
+        };
+
+        // Phase 1: an unloaded `use` surfaces a Scad need — BEFORE eval (the program can't run yet).
+        let scad = resolve_source("use <lib.scad>\ncube(1);", here, None, &no_scad, &no_files)
+            .expect("resolves");
+        assert!(
+            matches!(&scad, Resolution::Incomplete { needs } if needs == &[scad_need("lib.scad")]),
+            "expected a Scad need, got {scad:?}"
+        );
+
+        // Phase 2: no `use`, so the graph closes; imports with no mesh surface File needs. Two imports
+        // surface in ONE round (placeholder-continue) — deduped + sorted by the BTreeSet.
+        let files_wanted = resolve_source(
+            "import(\"a.stl\"); import(\"b.stl\"); import(\"a.stl\");",
+            here,
+            None,
+            &no_scad,
+            &no_files,
+        )
+        .expect("resolves");
+        assert!(
+            matches!(&files_wanted, Resolution::Incomplete { needs }
+                if needs == &[file_need("a.stl"), file_need("b.stl")]),
+            "expected two File needs in one round, got {files_wanted:?}"
+        );
+
+        // Supply the mesh → the run CLOSES (Complete). An empty placeholder mesh stands in for a read STL.
+        let mut have = FileTable::new();
+        have.insert("a.stl".to_string(), crate::Mesh::new());
+        let closed =
+            resolve_source("import(\"a.stl\");", here, None, &no_scad, &have).expect("resolves");
+        assert!(
+            matches!(&closed, Resolution::Complete { .. }),
+            "expected Complete, got {closed:?}"
+        );
     }
 
     /// Evaluate a program's assignments in order (binding each), returning the LAST assignment's value

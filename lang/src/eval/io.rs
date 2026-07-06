@@ -1,8 +1,10 @@
 //! The IO shell (M.4) — the ONE place fab-lang touches the filesystem. Everything else (parser,
-//! evaluator, loader) is PURE: it consumes source text + mesh tables handed IN and hands NEEDS back. This
-//! module is the impure boundary that fulfills those needs — `find_valid_path` + read for `use`/`include`
-//! sources, a caller-supplied reader for `import`/`surface` meshes — so a pure-wasm build can drop this
-//! module wholesale and drive the fixpoint from an async host instead.
+//! evaluator, loader) is PURE: it consumes source text + mesh tables handed IN and hands NEEDS back
+//! ([`resolve_source`](super::resolve_source) returns a [`Resolution`](super::Resolution)). This module is
+//! the impure boundary that DRIVES that fixpoint — it fulfills each need (`find_valid_path` + read for a
+//! `use`/`include` source, a caller-supplied reader for an `import`/`surface` mesh), augments the tables,
+//! and re-runs until the run closes. A pure-wasm build drops this module wholesale and drives the same
+//! fixpoint from an async host instead (awaiting between rounds where this sync loop reads inline).
 //!
 //! Its lines are DOCUMENTED off the pure-core 100% coverage gate: `std::fs` failure paths (a file deleted
 //! between resolve and read, a permissions flip) are TOCTOU races the corpus can't reproduce
@@ -12,7 +14,9 @@
 
 use std::path::{Path, PathBuf};
 
-use super::loader::{self, GraphOutcome, Loaded, ProvidedSource, SourceMap};
+use super::loader::{ProvidedSource, SourceMap};
+use super::{FileTable, Geo, Message, Resolution, SourceNeed, resolve_source};
+use crate::Mesh;
 use crate::parser::parse;
 
 /// Read a root `.scad` file to source text — the entry read behind [`evaluate_file`](crate::evaluate_file)
@@ -25,56 +29,98 @@ pub(crate) fn read_source(path: &Path) -> crate::Result<String> {
         .map_err(|e| crate::Error::Load(format!("{}: {e}", path.display())))
 }
 
-/// Load `source` (base directory `base_dir`) and everything it reaches via `use`/`include`, resolving
-/// against `library_paths` after the including file's own directory — the STATIC parse-time fixpoint over
-/// the include graph. Runs the pure [`loader::resolve_graph`]: the resolver names the references it can't
-/// satisfy, this shell reads them (`find_valid_path` + read + parse-once), re-runs, until the graph closes.
-/// `root_path` is the root's own file path when it has one (`evaluate_file`) so a dependency referencing the
-/// root back dedups to the SAME node — parse-once + cycle-break instead of a re-parse; `None` for an
-/// in-memory buffer (`evaluate_with_base`), which nothing on disk can name.
+/// Drive the needs fixpoint to completion — the outer loop behind every native entry point. Loops the pure
+/// [`resolve_source`]: on [`Resolution::Incomplete`] it fulfills each need (a `use`/`include` source via
+/// `find_valid_path` + read + parse-once; an `import`/`surface` mesh via `mesh_reader`), augments the
+/// tables, and re-runs — until [`Resolution::Complete`]. Progress is guaranteed: every surfaced need is
+/// absent from the tables (the resolver/eval only name what they're missing), so each round either grows a
+/// table or fails LOUD, bounded by the total sources. `root_path` is the root's own path when it's a file
+/// (canonicalized here for back-reference dedup + cycle-break).
 ///
 /// # Errors
-/// [`Error::Load`](crate::Error::Load) if a `use`/`include` target can't be resolved or read;
-/// [`Error::Parse`](crate::Error::Parse) if the root or any loaded file fails to parse.
-pub(super) fn load_graph(
+/// [`Error::Load`](crate::Error::Load) for an unresolvable/unreadable `use`/`include` or a `mesh_reader`
+/// failure; [`Error::Parse`](crate::Error::Parse) for a malformed source; any evaluation error.
+pub(crate) fn drive<R>(
     source: &str,
     base_dir: &Path,
     root_path: Option<&Path>,
     library_paths: &[PathBuf],
-) -> crate::Result<Loaded> {
+    mut mesh_reader: R,
+) -> crate::Result<(Geo, Vec<Message>)>
+where
+    R: FnMut(&str) -> crate::Result<Mesh>,
+{
     let root_id = root_path.and_then(|p| std::fs::canonicalize(p).ok());
-    let mut provided = SourceMap::new();
+    let mut scad = SourceMap::new();
+    let mut files = FileTable::new();
     loop {
-        match loader::resolve_graph(source, base_dir, root_id.as_deref(), &provided)? {
-            GraphOutcome::Complete(loaded) => return Ok(loaded),
-            GraphOutcome::Incomplete(needs) => {
+        match resolve_source(source, base_dir, root_id.as_deref(), &scad, &files)? {
+            Resolution::Complete { geo, messages } => return Ok((geo, messages)),
+            Resolution::Incomplete { needs } => {
                 for need in needs {
-                    let key = (need.from_dir.clone(), need.raw.clone());
-                    if provided.contains_key(&key) {
-                        continue; // already satisfied this round (a duplicate need in the same pass)
-                    }
-                    let id = resolve(&need.from_dir, &need.raw, library_paths).ok_or_else(|| {
-                        crate::Error::Load(format!(
-                            "can't find '{}' from {}",
-                            need.raw,
-                            need.from_dir.display()
-                        ))
-                    })?;
-                    let text = std::fs::read_to_string(&id).map_err(|e| {
-                        // Defensive, never-panic: `resolve` already canonicalized this as a readable file,
-                        // so a failure here is a TOCTOU race (deleted / perms changed between resolve and
-                        // read). Off the pure core's coverage — this whole module is the IO seam.
-                        crate::Error::Load(format!("{}: {e}", id.display()))
-                    })?;
-                    // Parse ONCE here, not on every fixpoint pass: cache the parsed AST so `resolve_graph`
-                    // clones it (cheap) instead of re-lexing a big library (`std.scad`'s graph) per pass.
-                    let program = parse(&text)?;
-                    let dir = id.parent().unwrap_or(Path::new(".")).to_path_buf();
-                    provided.insert(key, ProvidedSource { id, dir, program });
+                    fulfill(need, library_paths, &mut mesh_reader, &mut scad, &mut files)?;
                 }
             }
         }
     }
+}
+
+/// Fulfill one [`SourceNeed`] into its table: a `Scad` reference is resolved (`find_valid_path`), read, and
+/// parsed ONCE (cache the AST so the resolver clones it, not re-lexes a big library each pass); a `File`
+/// reference is handed to `mesh_reader`. An already-present key is a duplicate reference in the same round —
+/// skip it (the fulfill is idempotent). A source that can't be resolved/read/parsed, or a reader failure,
+/// fails LOUD.
+fn fulfill<R>(
+    need: SourceNeed,
+    library_paths: &[PathBuf],
+    mesh_reader: &mut R,
+    scad: &mut SourceMap,
+    files: &mut FileTable,
+) -> crate::Result<()>
+where
+    R: FnMut(&str) -> crate::Result<Mesh>,
+{
+    match need {
+        SourceNeed::Scad { from_dir, raw } => {
+            let key = (from_dir.clone(), raw.clone());
+            if scad.contains_key(&key) {
+                return Ok(()); // duplicate reference surfaced this round — already fulfilled
+            }
+            let id = resolve(&from_dir, &raw, library_paths).ok_or_else(|| {
+                crate::Error::Load(format!("can't find '{}' from {}", raw, from_dir.display()))
+            })?;
+            let text = std::fs::read_to_string(&id).map_err(|e| {
+                // TOCTOU: `resolve` already canonicalized this as a readable file, so a failure here is a
+                // race (deleted / perms flipped). Off the pure core's coverage — this module is the seam.
+                crate::Error::Load(format!("{}: {e}", id.display()))
+            })?;
+            let program = parse(&text)?;
+            let dir = id.parent().unwrap_or(Path::new(".")).to_path_buf();
+            scad.insert(key, ProvidedSource { id, dir, program });
+        }
+        SourceNeed::File { raw } => {
+            // No dedup guard needed: `Ctx::request_file` accumulates File needs in a `BTreeSet`, so each
+            // `raw` surfaces at most once per round, and a fulfilled one never re-surfaces (the table has
+            // it) — unlike `Scad`, where a diamond can name the same lib twice in one pass.
+            let mesh = mesh_reader(&raw)?;
+            files.insert(raw, mesh);
+        }
+    }
+    Ok(())
+}
+
+/// The mesh reader the no-import convenience entries pass: any `import`/`surface` file is a LOUD error,
+/// since those entries deliberately carry no reader (pure geometry only). A named error, never a
+/// silently-empty mesh — real meshes flow through `resolve_geometry_*` + a reader (the M.5 backend).
+///
+/// # Errors
+/// Always [`Error::Load`](crate::Error::Load): reaching this means an `import`/`surface` executed on an
+/// entry point that has no way to read the file.
+pub(super) fn no_import_reader(raw: &str) -> crate::Result<Mesh> {
+    Err(crate::Error::Load(format!(
+        "import/surface references '{raw}', but this entry point supplies no mesh reader — evaluate \
+         through resolve_geometry_* with a reader (the M.5 STL/3MF/heightmap backend)"
+    )))
 }
 
 /// Resolve a `use`/`include` path reference to a canonical file, mirroring OpenSCAD's `find_valid_path_`

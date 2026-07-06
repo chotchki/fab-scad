@@ -192,40 +192,46 @@ pub fn evaluate_geometry_full(source: &str) -> Result<(Geo, Vec<Message>)> {
     eval::evaluate_source(source, Path::new("."), None, &[])
 }
 
-/// Resolve `source` to a [`Resolution`] against a caller-supplied mesh [`FileTable`] — the pure needs
-/// fixpoint's INNER step (M.3). `import`/`surface` paths are RUNTIME expressions, discovered only by
-/// executing; a path the table lacks comes back as [`Resolution::Incomplete`] naming it (the run
-/// substitutes an empty placeholder + keeps going, so ONE call surfaces EVERY missing file). The caller
-/// reads the named files, adds their meshes to the table, and calls again — iterating to
-/// [`Resolution::Complete`]. fab-lang itself does ZERO IO; the M.4 shell drives this loop. Returning
-/// Incomplete instead of a sync reader callback is what lets an ASYNC (wasm) shell await between rounds.
+/// Evaluate `source` to a geometry [`Geo`] tree, resolving `import`/`surface` meshes through `mesh_reader`
+/// (M.4) — the native driver over the whole needs fixpoint. `import`/`surface` paths are RUNTIME
+/// expressions, discovered only by executing; each one the run reaches is handed to `mesh_reader` (the
+/// literal `file=` path in → a [`Mesh`] out), which fab-scad backs with its STL/3MF/heightmap readers
+/// (M.5). fab-lang itself does ZERO IO — the `io` shell loops the pure inner step, reading `use`/`include`
+/// sources + calling `mesh_reader` for meshes, until the run closes. (An ASYNC wasm host that can't run a
+/// sync reader drives the same pure step directly, awaiting between rounds; that public seam lands with its
+/// first consumer.)
 ///
 /// # Errors
-/// As [`evaluate_geometry`] (parse / `use`/`include` load / eval), minus the import LOUD-defer — a missing
-/// import file is a NEED here, not an error.
-pub fn resolve_geometry_with_base(
+/// As [`evaluate_geometry`] (parse / `use`/`include` load / eval), plus any error `mesh_reader` returns for
+/// a file it can't read.
+pub fn resolve_geometry_with_base<R>(
     source: &str,
     base_dir: &Path,
     library_paths: &[PathBuf],
-    files: &FileTable,
-) -> Result<Resolution> {
-    eval::resolve_source(source, base_dir, None, library_paths, files)
+    mesh_reader: R,
+) -> Result<Geo>
+where
+    R: FnMut(&str) -> Result<Mesh>,
+{
+    Ok(eval::io::drive(source, base_dir, None, library_paths, mesh_reader)?.0)
 }
 
 /// Like [`resolve_geometry_with_base`], but for a `.scad` FILE — resolving its `use`/`include` graph AND
-/// its `import`/`surface` File needs. The ROOT file is read here (it names itself); the imported meshes come
-/// from `files`.
+/// its `import`/`surface` meshes (through `mesh_reader`). The root file is read here.
 ///
 /// # Errors
-/// As [`evaluate_geometry_file`], minus the import LOUD-defer.
-pub fn resolve_geometry_file(
+/// As [`evaluate_geometry_file`], plus any error `mesh_reader` returns.
+pub fn resolve_geometry_file<R>(
     path: &Path,
     library_paths: &[PathBuf],
-    files: &FileTable,
-) -> Result<Resolution> {
+    mesh_reader: R,
+) -> Result<Geo>
+where
+    R: FnMut(&str) -> Result<Mesh>,
+{
     let source = eval::io::read_source(path)?;
     let base_dir = path.parent().unwrap_or(Path::new("."));
-    eval::resolve_source(&source, base_dir, Some(path), library_paths, files)
+    Ok(eval::io::drive(&source, base_dir, Some(path), library_paths, mesh_reader)?.0)
 }
 
 #[cfg(test)]

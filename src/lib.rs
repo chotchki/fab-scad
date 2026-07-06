@@ -42,5 +42,8 @@ pub mod slicing;
 #[cfg(feature = "native")]
 pub mod smoke;
 pub mod stl;
+// surface() heightmap → mesh (M.5.2, DAT-only): needs fab-lang (Mesh); called by the import reader.
+#[cfg(feature = "geometry")]
+pub mod surface;
 #[cfg(feature = "kernel")]
 pub mod threemf_in;

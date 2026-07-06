@@ -447,6 +447,34 @@ fn import_stl_matches_the_oracle() {
 }
 
 #[test]
+fn surface_dat_matches_the_oracle() {
+    // M.5.2: a DAT heightmap through surface(), both engines, boolean-residual. Our tessellation
+    // (cell-center fan on top + grid-mirror base + walls) must be the SAME solid as OpenSCAD's surface.cc.
+    let base = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join("differential")
+        .join("surface_dat");
+    std::fs::create_dir_all(&base).unwrap();
+    std::fs::write(base.join("bump.dat"), "0 0 0 0\n0 5 5 0\n0 5 5 0\n0 0 0 0\n").unwrap();
+
+    for (name, body) in [
+        ("plain.scad", "surface(file=\"bump.dat\");\n"),
+        ("centered.scad", "surface(file=\"bump.dat\", center=true);\n"),
+    ] {
+        let root = base.join(name);
+        std::fs::write(&root, body).unwrap();
+        // Guard the both-rejected false-pass: our surface must lower to a real solid.
+        let fab = drivers().into_iter().next().unwrap();
+        assert!(
+            matches!(fab.eval_file(&root, &[]), Outcome::Solid(_)),
+            "{name}: surface must lower to a real solid, not a rejection"
+        );
+        if let Err(why) = diff_files(&root, &[]) {
+            panic!("surface DAT differential divergence ({name}): {why}");
+        }
+    }
+}
+
+#[test]
 fn a_missing_use_warns_and_renders_like_the_oracle() {
     // M.6.1: a missing use/include is warn-and-RENDER (exit 0) in BOTH engines — the reference drops to
     // nothing (no statements, no defs) and the rest of the program renders. cube uses no def from the

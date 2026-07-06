@@ -32,8 +32,10 @@ pub fn read_mesh(base_dir: &Path, raw: &str) -> Result<Mesh, Error> {
         "3mf" => threemf_mesh(&path),
         "svg" | "dxf" => loud(raw, "2D vector import (svg/dxf) is deferred — no 2D import path yet"),
         "off" => loud(raw, "OFF import is deferred — the OFF reader isn't wired"),
-        "dat" | "png" => loud(raw, "surface() heightmap import is deferred (M.5.2)"),
-        _ => loud(raw, "unknown import extension — expected stl or 3mf"),
+        "dat" => crate::surface::dat_mesh(&path)
+            .map_err(|e| Error::Load(format!("{}: {e:#}", path.display()))),
+        "png" => loud(raw, "surface() PNG heightmap is deferred (backlog #159) — use a DAT file"),
+        _ => loud(raw, "unknown import extension — expected stl, 3mf, or dat"),
     }
 }
 
@@ -241,7 +243,7 @@ mod tests {
             ("drawing.svg", "svg"),
             ("shape.dxf", "dxf"),
             ("solid.off", "OFF"),
-            ("height.dat", "surface"),
+            ("height.png", "PNG"),
             ("mystery.xyz", "unknown"),
         ] {
             let err = read_mesh(&tmp(), raw).unwrap_err();

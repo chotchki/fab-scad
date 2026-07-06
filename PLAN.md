@@ -120,10 +120,10 @@ added 2026-07-05.
 - [ ] M.5 - M.5 - import()/surface() backend: readers fulfill File needs → Mesh
   - [x] M.5.1 - M.5.1 - import() reader: STL/3MF → fab_lang::Mesh + driver
   - [ ] M.5.2 - M.5.2 - surface() heightmap: DAT/PNG → Mesh + center/invert eval-threading
-- [ ] M.6 - M.6 - Differential + coverage close-out
-  - [ ] M.6.1 - M.6.1 - Tolerant loader: missing/broken use/include → warn+render
+- [x] M.6 - M.6 - Differential + coverage close-out
+  - [x] M.6.1 - M.6.1 - Tolerant loader: missing/broken use/include → warn+render
   - [x] M.6.2 - M.6.2 - Differential: import() STL matches the oracle
-  - [ ] M.6.3 - M.6.3 - Coverage close-out: verify functions-100 + lcov-DA-lines-100
+  - [x] M.6.3 - M.6.3 - Coverage close-out: verify functions-100 + lcov-DA-lines-100
 
 ## Backlog (not yet phased)
 
@@ -163,3 +163,4 @@ Parked 2026-07-04 for the scad-rs pivot — the workflow tool works and stays in
 - **Explicit-stack STATEMENT machine: convert eval_stmt/call_user_module from host-recursion to an explicit work-stack (like the expression machine), retiring MAX_MODULE_DEPTH's stack-fragility — 'Safari cliff structurally impossible' on the statement side. Deferred at I.9.6 (production-safe at 256; do at the I/J boundary)** — added 2026-07-06.
 - **J.4.2.1 - import() eval + backend wiring (STL/3MF readers → Leaf)** — deferred from J.4.2.1 on 2026-07-06.
 - **J.4.2.2 - import() differential vs oracle (round-trip a known STL + 3MF)** — deferred from J.4.2.2 on 2026-07-06.
+- **surface() PNG heightmap load (deferred from M.5.2)** — added 2026-07-06.

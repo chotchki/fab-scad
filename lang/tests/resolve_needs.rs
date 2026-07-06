@@ -134,6 +134,32 @@ fn the_no_reader_entries_are_loud_not_silent() {
 }
 
 #[test]
+fn surface_center_translates_the_mesh_eval_side() {
+    // center is applied EVAL-side (M.5.2): the path-only reader returns a natural-position mesh; surface's
+    // `center` flag translates it to the XY origin. center_xy is a generic XY translate, so a cube(2) at
+    // [0,2]³ stands in for a heightmap — plain stays at [0,2], centered shifts to [−1,1].
+    let mesh = a_mesh(); // cube(2), XY bounds [0, 2]
+    let x_range = |geo: Geo| match geo {
+        Geo::D3(GeoNode::Leaf(m)) => {
+            let lo = m.verts.iter().map(|v| v.x).fold(f64::INFINITY, f64::min);
+            let hi = m.verts.iter().map(|v| v.x).fold(f64::NEG_INFINITY, f64::max);
+            (lo, hi)
+        }
+        other => panic!("expected a 3D leaf, got {other:?}"),
+    };
+    let m1 = mesh.clone();
+    let (plo, phi) = x_range(resolve("surface(file=\"h.dat\");", move |_| Ok(m1.clone())).unwrap());
+    assert!(plo.abs() < 1e-9 && (phi - 2.0).abs() < 1e-9, "plain stays at [0,2], got [{plo},{phi}]");
+    let m2 = mesh.clone();
+    let (clo, chi) =
+        x_range(resolve("surface(file=\"h.dat\", center=true);", move |_| Ok(m2.clone())).unwrap());
+    assert!(
+        (clo + 1.0).abs() < 1e-9 && (chi - 1.0).abs() < 1e-9,
+        "center shifts XY bounds to the origin [−1,1], got [{clo},{chi}]"
+    );
+}
+
+#[test]
 fn source_need_variants_are_distinct() {
     // The M.1 contract type carries both discovery phases: a Scad ref (loader, static) and a File ref (eval,
     // dynamic). This locks the enum's Debug/Clone/eq over BOTH arms — the seam an async wasm host builds on.

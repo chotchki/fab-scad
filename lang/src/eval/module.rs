@@ -14,7 +14,7 @@ use super::scope::Scope;
 use super::value::Value;
 use super::{Ctx, eval_with_ctx, geometry};
 use crate::Mesh;
-use crate::geom::Vec2;
+use crate::geom::{Vec2, Vec3};
 use crate::parser::ModuleInstantiation;
 
 /// Evaluate a module instantiation's arguments: positional values, named values, and a child scope
@@ -72,11 +72,20 @@ pub(super) fn eval_module<'a>(
         // (the path is an expression, not a static `<...>` token like use/include). Ask the caller's table
         // (M.3): its mesh if present, else an EMPTY placeholder + a recorded File need so the run keeps going
         // and surfaces the REST of its needs (a mesh rarely gates control flow → the caller usually closes
-        // the fixpoint in one more round). Both take the file as their leading arg, so one path serves both;
-        // the STL/3MF/heightmap READER that fills the table — and surface's center/invert transform — are
-        // caller-side (M.5). A 3D leaf: the table is `raw → Mesh` (3D); 2D import (DXF/SVG) is a later
-        // refinement, not the M.1 contract.
-        "import" | "surface" => Ok(leaf3(ctx.request_file(file_arg(&positional, &named)))),
+        // the fixpoint in one more round). The STL/3MF/heightmap READER that fills the table is caller-side
+        // (M.5). A 3D leaf: the table is `raw → Mesh` (3D); 2D import (DXF/SVG) is a later refinement.
+        "import" => Ok(leaf3(ctx.request_file(file_arg(&positional, &named)))),
+        // surface() is import's heightmap sibling, plus `center` — a pure XY translate the path-only reader
+        // can't do, so it's applied HERE from the eval arg (M.5.2). (`invert` is PNG-only → deferred.)
+        "surface" => {
+            let mesh = ctx.request_file(file_arg(&positional, &named));
+            let map = bind(&positional, &named, &["file", "center"]);
+            Ok(leaf3(if is_true(&map, "center") {
+                center_xy(mesh)
+            } else {
+                mesh
+            }))
+        }
         // KNOWN-but-deferred builtins — recognized so the error NAMES the feature + its task instead of a
         // misleading "typo?". These stay LOUD-deferred stubs: blow up naming the feature, never silently
         // empty. (`offset`, the extrudes, and `projection` are wired in eval_stmt as of J.3.3–J.3.6.)
@@ -240,6 +249,36 @@ fn is_true(map: &BTreeMap<String, Value>, key: &str) -> bool {
 /// alike. `None` for an absent or non-string `file=` (`import(undef)`, `import(5)`) → an empty result, which
 /// matches the oracle's warn-and-render on a bad path (the reader-specific args like `surface`'s
 /// invert/center ride in M.5, so they're ignored here).
+/// Center a mesh on the XY origin — `surface()`'s `center` (M.5.2): translate so the XY bounding-box center
+/// sits at `(0, 0)`; z (the heights) is untouched. The reader produces the natural-position heightmap, and
+/// `center` is an EVAL arg the path-only reader never sees, so it's applied here.
+fn center_xy(mesh: Mesh) -> Mesh {
+    if mesh.verts.is_empty() {
+        return mesh;
+    }
+    let (mut min_x, mut max_x, mut min_y, mut max_y) = (
+        f64::INFINITY,
+        f64::NEG_INFINITY,
+        f64::INFINITY,
+        f64::NEG_INFINITY,
+    );
+    for v in &mesh.verts {
+        min_x = min_x.min(v.x);
+        max_x = max_x.max(v.x);
+        min_y = min_y.min(v.y);
+        max_y = max_y.max(v.y);
+    }
+    let (cx, cy) = (f64::midpoint(min_x, max_x), f64::midpoint(min_y, max_y));
+    Mesh {
+        verts: mesh
+            .verts
+            .iter()
+            .map(|v| Vec3::new(v.x - cx, v.y - cy, v.z))
+            .collect(),
+        tris: mesh.tris,
+    }
+}
+
 fn file_arg(positional: &[Value], named: &BTreeMap<String, Value>) -> Option<String> {
     let map = bind(positional, named, &["file"]);
     match map.get("file") {

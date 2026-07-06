@@ -66,6 +66,25 @@ fn vector_arithmetic_and_the_dot_product_trap() {
     assert_eq!(ev("[1,2]+[3,4]"), list(&[4.0, 6.0]));
     assert_eq!(ev("[5,5]-[1,2]"), list(&[4.0, 3.0]));
     assert_eq!(ev("[1,2]+[3,4,5]"), list(&[4.0, 6.0])); // silent-truncate to shorter
+    // `+`/`-` are element-wise regardless of NESTING — a MATRIX recurses per row down to the NumList
+    // kernel (I.9.3; BOSL2's `sum()` over a list of vectors/matrices rides this). Result is List-of-rows.
+    let mat = |rows: &[&[f64]]| {
+        Value::list(
+            rows.iter()
+                .map(|r| Value::num_list(r.to_vec()))
+                .collect::<Vec<_>>(),
+        )
+    };
+    assert_eq!(
+        ev("[[1,2],[3,4]]+[[5,6],[7,8]]"),
+        mat(&[&[6.0, 8.0], &[10.0, 12.0]])
+    );
+    assert_eq!(
+        ev("[[1,2],[3,4]]-[[1,1],[1,1]]"),
+        mat(&[&[0.0, 1.0], &[2.0, 3.0]])
+    );
+    assert_eq!(ev("[[1,2],[3,4]]+[[5,6]]"), mat(&[&[6.0, 8.0]])); // truncates to the shorter matrix
+    assert_eq!(ev("1+[[1,2],[3,4]]"), Value::Undef); // scalar + matrix is not a vector op → undef
     assert_eq!(ev("2*[1,2]"), list(&[2.0, 4.0])); // scalar broadcast
     assert_eq!(ev("[1,2]*2"), list(&[2.0, 4.0]));
     assert_eq!(ev("[1,2]*[3,4]"), num(11.0)); // DOT PRODUCT (1*3+2*4), not element-wise

@@ -24,12 +24,22 @@ pub fn apply_binary(op: BinOp, a: Value, b: Value) -> Value {
     match op {
         BinOp::Add => match (a, b) {
             (Num(x), Num(y)) => Num(x + y),
+            // The SIMD kernel: two contiguous `f64` vectors, element-wise (`zip_trunc` vectorizes).
             (NumList(x), NumList(y)) => Value::NumList(zip_trunc(&x, &y, |x, y| x + y)),
+            // A nested/heterogeneous vector (a MATRIX, `[[..],[..]]`) recurses PER ROW down to the
+            // NumList kernel above — so matrix `+` stays SIMD-friendly (rows are the hot loop, the outer
+            // walk is just dispatch). OpenSCAD adds vectors element-wise regardless of nesting depth.
+            (a, b) if list_len(&a).is_some() && list_len(&b).is_some() => {
+                elementwise(BinOp::Add, &a, &b)
+            }
             _ => Value::Undef,
         },
         BinOp::Sub => match (a, b) {
             (Num(x), Num(y)) => Num(x - y),
             (NumList(x), NumList(y)) => Value::NumList(zip_trunc(&x, &y, |x, y| x - y)),
+            (a, b) if list_len(&a).is_some() && list_len(&b).is_some() => {
+                elementwise(BinOp::Sub, &a, &b)
+            }
             _ => Value::Undef,
         },
         BinOp::Mul => match (a, b) {
@@ -114,6 +124,22 @@ pub fn apply_unary(op: UnOp, v: Value) -> Value {
 /// Element-wise combine, truncating to the shorter operand (OpenSCAD's silent-truncate).
 fn zip_trunc(a: &[f64], b: &[f64], f: impl Fn(f64, f64) -> f64) -> Rc<[f64]> {
     a.iter().zip(b.iter()).map(|(&x, &y)| f(x, y)).collect()
+}
+
+/// Element-wise recursive `op` (`+`/`-`) over two VECTOR values, OpenSCAD's nesting-agnostic vector
+/// arithmetic: pair elements to the shorter length (matching `zip_trunc`'s truncation), each pair
+/// combined by `op`. Called only when a heterogeneous [`Value::List`] is on at least one side — the flat
+/// `NumList op NumList` case is the inline SIMD kernel. A matrix (`List` of `NumList`) tiles down to
+/// per-ROW `NumList op NumList`, so the numeric hot loop stays the vectorizable `zip_trunc`; this outer
+/// walk is just row DISPATCH (cheap `Rc`-clone element access), not a per-scalar path.
+fn elementwise(op: BinOp, a: &Value, b: &Value) -> Value {
+    // The caller's arm guard guarantees both are lists; `unwrap_or(0)` is a no-panic floor, not a branch.
+    let n = list_len(a).unwrap_or(0).min(list_len(b).unwrap_or(0));
+    Value::list(
+        (0..n)
+            .map(|i| apply_binary(op, list_get(a, i), list_get(b, i)))
+            .collect::<Vec<_>>(),
+    )
 }
 
 /// Dot product of two equal-length numeric vectors, in the FIXED 4-lane accumulation order (the

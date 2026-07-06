@@ -487,7 +487,9 @@ fn run_builtin(name: &str, args: &[Arg], values: &mut Vec<Value>) {
             None => positional.push(value),
         }
     }
-    values.push(builtins::apply(name, &positional, &named));
+    let result = builtins::apply(name, &positional, &named);
+    trace::builtin(name, &positional, &named, &result); // gated inside; shows `name(args) => result`
+    values.push(result);
 }
 
 /// Dispatch a call `callee(args)`: a NAMED user function (own namespace) resolves first; an UNBOUND
@@ -515,9 +517,7 @@ fn dispatch_call<'a>(
             return Ok(());
         }
         if builtins::is_builtin(name) {
-            if trace::on() {
-                tasks.push(Task::TraceReturn { name });
-            }
+            // (no TraceReturn — `run_builtin` traces the builtin's args + result inline)
             tasks.push(Task::Builtin { name, args });
             for arg in args.iter().rev() {
                 tasks.push(Task::Eval(&arg.value, scope.clone()));
@@ -1478,7 +1478,8 @@ mod tests {
             eval_last("function f(x) = x + 1; y = f(2);"),
             Value::Num(3.0)
         );
-        assert_eq!(eval_last("y = max(1, 2, 3);"), Value::Num(3.0));
+        assert_eq!(eval_last("y = max(1, 2, 3);"), Value::Num(3.0)); // builtin, positional args
+        assert_eq!(eval_last("y = max(2, 3, extra = 1);"), Value::Num(3.0)); // + a NAMED arg (traced)
         assert_eq!(eval_last("y = assert(true) 5;"), Value::Num(5.0));
         super::trace::set_enabled(false);
     }

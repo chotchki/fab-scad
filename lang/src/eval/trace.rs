@@ -11,6 +11,7 @@
 //! outcomes. Module instantiation produces geometry, not a value, so it rides the `tracing` call-path
 //! spans ([`super`] `trace!` events) instead — this trace is for the arithmetic/logic layer.
 
+use std::collections::BTreeMap;
 use std::sync::LazyLock;
 
 use super::fmt::format_value;
@@ -49,12 +50,36 @@ pub(super) fn bind(kind: char, name: &str, value: &Value) {
     }
 }
 
-/// Trace a function/builtin call's RETURN value — `name => value`. Pushed as a peek-only continuation so
-/// it fires right as the call's value lands on the stack, before the caller consumes it. The params bound
-/// just above show the inputs; this shows what came back, so a wrong return is obvious in context.
+/// Trace a USER function's RETURN value — `name => value`. Pushed as a peek-only continuation so it fires
+/// right as the value lands on the stack, before the caller consumes it. Its args show up just above as
+/// `[p]` param binds; this shows what came back, so a wrong return is obvious in context.
 pub(super) fn ret(name: &str, value: &Value) {
     if on() {
         eprintln!("+ [call] {name} => {}", format_value(value));
+    }
+}
+
+/// Trace a BUILTIN call in FULL — `name(a, b, k=v) => result`. Builtins have no param binds to show their
+/// inputs (they're applied natively, not bound into a scope), so the args are printed inline — which is
+/// exactly what pins down e.g. `min(undef) => undef` vs `min(5) => 5` in a divergence.
+pub(super) fn builtin(
+    name: &str,
+    positional: &[Value],
+    named: &BTreeMap<String, Value>,
+    result: &Value,
+) {
+    if on() {
+        let mut parts: Vec<String> = positional.iter().map(format_value).collect();
+        parts.extend(
+            named
+                .iter()
+                .map(|(k, v)| format!("{k}={}", format_value(v))),
+        );
+        eprintln!(
+            "+ [call] {name}({}) => {}",
+            parts.join(", "),
+            format_value(result)
+        );
     }
 }
 

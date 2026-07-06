@@ -99,6 +99,18 @@ fn booleans_and_multi_object_match_the_oracle() {
 }
 
 #[test]
+fn dimension_mixing_that_resolves_to_3d_matches_the_oracle() {
+    // J.3.2.1: 2D/3D mixing where 3D WINS — the first non-null child fixes the dimension and the
+    // mismatched 2D children drop, so the surviving 3D solid must match the oracle (which drops the same
+    // ones). This is the subset the 3D differential can compare LIVE today; the 2D-winning cases become
+    // live cases once linear_extrude bridges them to a solid (J.3.4). The WARNING text isn't compared
+    // here — that's the warning-differential channel (#94); GEOMETRY agreement is what this pins.
+    agree("cube(2); circle(5);"); // 3D first → the cube; the 2D circle dropped
+    agree("union() { cube(2); circle(5); }"); // same under an explicit union
+    agree("difference() { { } cube(4, center = true); }"); // an empty {} block drops out → the cube
+}
+
+#[test]
 fn use_include_loader_matches_the_oracle() {
     // The loader's core semantics, validated against the real binary (constant-returning functions, so
     // we stay clear of the known use-imported-fn-sees-root-scope gap). Single-object, no cycle/diamond

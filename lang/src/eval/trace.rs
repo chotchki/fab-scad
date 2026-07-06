@@ -1,0 +1,76 @@
+//! `set -x` for scad — a debug-gated evaluation trace.
+//!
+//! When `FAB_TRACE` is present in the environment, the evaluator echoes each named binding + assert to
+//! stderr as it runs — the flow of values BOSL2 lives on — so a divergence traces straight to the value
+//! that went wrong (`+ minx = 24` next to `assert(minx <= size.x)` tells you the whole story). OFF by
+//! default: a single cached env read, then a `bool` check per binding, so it's free in the normal path
+//! and compiled to nearly nothing. It's a pure DEBUG affordance — stderr only, never touches the mesh or
+//! the `echo` message buffer, so it can't perturb the deterministic output (that's [`super::message`]).
+//!
+//! Granularity is the value-producing constructs: assignments, `let` bindings, call params, and assert
+//! outcomes. Module instantiation produces geometry, not a value, so it rides the `tracing` call-path
+//! spans ([`super`] `trace!` events) instead — this trace is for the arithmetic/logic layer.
+
+use std::sync::LazyLock;
+
+use super::fmt::format_value;
+use super::value::Value;
+
+/// Cached once: is `FAB_TRACE` set? Reading the env on every binding would be absurd; this reads it the
+/// first time the trace is consulted and holds the answer for the process.
+static ENABLED: LazyLock<bool> = LazyLock::new(|| std::env::var_os("FAB_TRACE").is_some());
+
+/// Test-only force flag: the `FAB_TRACE` env gate is process-cached, so a test can't flip it — this lets
+/// the trace-emitting paths be exercised (and covered) directly. Compiled out of non-test builds.
+#[cfg(test)]
+static FORCE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Whether the `set -x` trace is on.
+pub(super) fn on() -> bool {
+    #[cfg(test)]
+    if FORCE.load(std::sync::atomic::Ordering::Relaxed) {
+        return true;
+    }
+    *ENABLED
+}
+
+/// Test-only: force the trace on/off so the emit paths (and the evaluator's trace hooks) can be
+/// exercised despite the process-cached env gate. Reset to `false` after, to not leak into other tests.
+#[cfg(test)]
+pub(super) fn set_enabled(v: bool) {
+    FORCE.store(v, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Trace a binding `name = value` — an assignment, a `let`, or a bound call parameter. `kind` is a
+/// one-char sigil so the stream reads at a glance: `=` assignment, `l` let, `p` param.
+pub(super) fn bind(kind: char, name: &str, value: &Value) {
+    if on() {
+        eprintln!("+ [{kind}] {name} = {}", format_value(value));
+    }
+}
+
+/// Trace a function/builtin call's RETURN value — `name => value`. Pushed as a peek-only continuation so
+/// it fires right as the call's value lands on the stack, before the caller consumes it. The params bound
+/// just above show the inputs; this shows what came back, so a wrong return is obvious in context.
+pub(super) fn ret(name: &str, value: &Value) {
+    if on() {
+        eprintln!("+ [call] {name} => {}", format_value(value));
+    }
+}
+
+/// Trace a MODULE instantiation — geometry, not a value, so there's nothing to show a result for; the
+/// name marks entry so the value trace beneath it has a frame. `depth` indents by call nesting.
+pub(super) fn module(depth: usize, name: &str) {
+    if on() {
+        eprintln!("+ [mod]{} {name}()", "  ".repeat(depth));
+    }
+}
+
+/// Trace an assert outcome next to the pretty-printed condition (`ok`/`FAIL`), so the trace shows the
+/// guard that passed right before the one that blew.
+pub(super) fn assert(passed: bool, condition: &str) {
+    if on() {
+        let outcome = if passed { "ok" } else { "FAIL" };
+        eprintln!("+ [assert {outcome}] {condition}");
+    }
+}

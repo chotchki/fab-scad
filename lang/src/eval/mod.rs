@@ -20,6 +20,7 @@ mod message;
 mod module;
 mod ops;
 mod scope;
+mod trace;
 mod trig;
 mod value;
 
@@ -164,6 +165,10 @@ enum Task<'a> {
         rhs: &'a Expr,
         scope: Scope,
     },
+    /// DEBUG-only ([`trace`]): peek the top value (a call's just-produced return) and echo `name => value`
+    /// without consuming it. Pushed BELOW a call's tasks so it fires the instant the return lands, before
+    /// the caller reads it. Only ever pushed when the `FAB_TRACE` trace is on, so it's absent otherwise.
+    TraceReturn { name: &'a str },
 }
 
 /// Evaluate an expression to a [`Value`] on the explicit stack.
@@ -283,6 +288,11 @@ fn eval_with_global<'a>(
                     _ => values.push(Value::Undef), // calling a non-function → undef
                 }
             }
+            Task::TraceReturn { name } => {
+                if let Some(v) = values.last() {
+                    trace::ret(name, v);
+                }
+            }
             Task::LetStep {
                 name,
                 rest,
@@ -290,6 +300,7 @@ fn eval_with_global<'a>(
                 scope,
             } => {
                 let value = values.pop().unwrap_or(Value::Undef);
+                trace::bind('l', name, &value);
                 let mut inner = scope.child();
                 inner.bind(name, value);
                 match rest.split_first() {
@@ -497,10 +508,16 @@ fn dispatch_call<'a>(
             // the explicit stack (no host recursion), so its subtree isn't scope-bounded here — the
             // event marks WHICH function was entered, the enclosing `eval_program` span times the whole.
             tracing::trace!(function = name.as_str(), "call");
+            if trace::on() {
+                tasks.push(Task::TraceReturn { name }); // fires when the body's value lands (peek-only)
+            }
             push_call(params, body, args, scope, global, tasks);
             return Ok(());
         }
         if builtins::is_builtin(name) {
+            if trace::on() {
+                tasks.push(Task::TraceReturn { name });
+            }
             tasks.push(Task::Builtin { name, args });
             for arg in args.iter().rev() {
                 tasks.push(Task::Eval(&arg.value, scope.clone()));
@@ -880,6 +897,7 @@ fn hoist_scope<'a>(stmts: &[&'a Stmt], scope: &Scope, ctx: &Ctx<'a>) -> crate::R
     let mut scope = scope.clone();
     for (name, expr) in hoisted_assignments(stmts) {
         let value = eval_with_ctx(expr, &scope, ctx)?;
+        trace::bind('=', name, &value);
         scope.bind(name.to_string(), value);
     }
     Ok(scope)
@@ -1181,28 +1199,39 @@ fn check_assert<'a>(
     global: &Scope,
     ctx: &Ctx<'a>,
 ) -> crate::Result<()> {
-    let mut positional = Vec::new();
+    // Keep each condition's EXPR alongside its value: on failure we pretty-print the condition back to
+    // source (`print_expr`) as a `[assert(…)]` locator. BOSL2's asserts are usually message-less, so
+    // without this a failure is a blank "assertion failed" — the printed condition is grep-able straight
+    // into the library (e.g. `assert(is_finite(r) && !approx(r,0))` → one hit in shapes3d.scad). It's
+    // reconstructed from the AST, so it needs no retained source (true file:line is a separate feature).
+    let mut positional: Vec<(&Expr, Value)> = Vec::new();
     let mut named_condition = None;
     let mut named_message = None;
     for arg in args {
         let value = eval_with_global(&arg.value, scope, global, ctx)?;
         match arg.name.as_deref() {
-            None => positional.push(value),
-            Some("condition") => named_condition = Some(value),
+            None => positional.push((&arg.value, value)),
+            Some("condition") => named_condition = Some((&arg.value, value)),
             Some("message") => named_message = Some(value),
             Some(_) => {} // unknown named arg — dropped, as OpenSCAD arg-matching does
         }
     }
     // A named `condition`/`message` beats the positional slot (params are `condition`, then `message`).
     let condition = named_condition.or_else(|| positional.first().cloned());
-    let message = named_message.or_else(|| positional.get(1).cloned());
-    if condition.is_some_and(|c| c.is_truthy()) {
+    let message = named_message.or_else(|| positional.get(1).map(|(_, v)| v.clone()));
+    let passed = matches!(&condition, Some((_, c)) if c.is_truthy());
+    // Pretty-print the condition back to source ONCE — shared by the trace line and (on failure) the
+    // error locator. A real assert always has a condition; `""` covers the degenerate `assert()`.
+    let cond_src = condition.map_or_else(String::new, |(e, _)| crate::parser::print_expr(e));
+    trace::assert(passed, &cond_src); // gated inside (like bind/ret/module) — free when the trace is off
+    if passed {
         return Ok(());
     }
+    let locator = format!(" [assert({cond_src})]");
     Err(crate::Error::Eval(match message {
-        Some(Value::Str(s)) => format!("assertion failed: {s}"),
-        Some(other) => format!("assertion failed: {}", fmt::format_value(&other)),
-        None => "assertion failed".to_string(),
+        Some(Value::Str(s)) => format!("assertion failed: {s}{locator}"),
+        Some(other) => format!("assertion failed: {}{locator}", fmt::format_value(&other)),
+        None => format!("assertion failed{locator}"),
     }))
 }
 
@@ -1353,12 +1382,15 @@ fn eval_stmt<'a>(
         // through to the builtin PRIMITIVE path (an unknown name fails LOUD inside `eval_module`). Checked
         // AFTER the builtin transform/boolean/color/children/for arms above, so a user module can't shadow
         // those — a documented v1 simplification.
-        StmtKind::Module(mi) => match ctx.resolve_module(island, mi.name.as_str()) {
-            Some((def, home)) => {
-                nodes.push(call_user_module(mi, def, home, scope, global, island, ctx)?);
+        StmtKind::Module(mi) => {
+            trace::module(ctx.module_depth.get(), &mi.name);
+            match ctx.resolve_module(island, mi.name.as_str()) {
+                Some((def, home)) => {
+                    nodes.push(call_user_module(mi, def, home, scope, global, island, ctx)?);
+                }
+                None => nodes.push(GeoNode::Leaf(module::eval_module(mi, scope, ctx)?)),
             }
-            None => nodes.push(GeoNode::Leaf(module::eval_module(mi, scope, ctx)?)),
-        },
+        }
         // `if (cond) A else B` contributes the TAKEN branch's geometry (I.3.3).
         StmtKind::If { cond, then, els } => {
             let branch = if eval_with_ctx(cond, scope, ctx)?.is_truthy() {
@@ -1427,6 +1459,28 @@ mod tests {
             }
         }
         last
+    }
+
+    /// The `set -x` trace (`super::trace`), forced on so its output paths + the evaluator's hooks all run.
+    /// The ONLY test that touches the process-global force flag — kept to one test so nothing races on it
+    /// (other tests may briefly see the trace on, but the emit is stderr-only and never alters a result).
+    /// Direct calls cover the emit branches; the eval calls cover the `TraceReturn` push/handler + the
+    /// `check_assert` trace. No captured output to assert — this proves the debug paths don't panic.
+    #[test]
+    fn trace_hooks_and_emit_paths() {
+        super::trace::set_enabled(true);
+        // emit branches for bind/ret/module (the eval hooks below cover ret + assert, but not these)
+        super::trace::bind('=', "x", &Value::Num(1.0));
+        super::trace::ret("f", &Value::Undef);
+        super::trace::module(1, "cuboid");
+        // eval hooks: a user-fn return + a builtin return each push/fire TraceReturn; the assert traces
+        assert_eq!(
+            eval_last("function f(x) = x + 1; y = f(2);"),
+            Value::Num(3.0)
+        );
+        assert_eq!(eval_last("y = max(1, 2, 3);"), Value::Num(3.0));
+        assert_eq!(eval_last("y = assert(true) 5;"), Value::Num(5.0));
+        super::trace::set_enabled(false);
     }
 
     #[test]

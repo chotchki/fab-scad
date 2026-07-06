@@ -125,6 +125,37 @@ impl Index<usize> for Vec3 {
     }
 }
 
+/// A 2D coordinate — a point in the XY plane (the 2D subsystem's currency, J.3). A point OR a
+/// direction, same as [`Vec3`]: OpenSCAD conflates them. Contours (rings of these) build a
+/// [`Shape2D::Polygon`](crate::Shape2D).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Vec2 {
+    /// x coordinate.
+    pub x: f64,
+    /// y coordinate.
+    pub y: f64,
+}
+
+impl Vec2 {
+    /// A coordinate from its components.
+    #[must_use]
+    pub const fn new(x: f64, y: f64) -> Self {
+        Vec2 { x, y }
+    }
+
+    /// From an `[x, y]` array (the value / literal boundary).
+    #[must_use]
+    pub const fn from_array([x, y]: [f64; 2]) -> Self {
+        Vec2 { x, y }
+    }
+
+    /// To an `[x, y]` array (the FFI boundary — Manifold's `CrossSection` speaks `[f64; 2]`).
+    #[must_use]
+    pub const fn to_array(self) -> [f64; 2] {
+        [self.x, self.y]
+    }
+}
+
 /// A triangle — three vertex indices into a mesh's vertex list, in winding order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Tri(pub [u32; 3]);
@@ -198,6 +229,51 @@ impl Affine {
             m[0] * v.x + m[1] * v.y + m[2] * v.z + m[3],
             m[4] * v.x + m[5] * v.y + m[6] * v.z + m[7],
             m[8] * v.x + m[9] * v.y + m[10] * v.z + m[11],
+        )
+    }
+}
+
+/// A 2×3 ROW-MAJOR affine transform `[a, b, c, d, e, f]`, applied to a 2D point as
+/// `[a·x + b·y + c, d·x + e·y + f]` — the 2D analogue of [`Affine`], for [`Shape2D`](crate::Shape2D)
+/// transforms (translate / rotate / scale / mirror on a 2D shape).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Affine2(pub [f64; 6]);
+
+impl Affine2 {
+    /// The identity transform.
+    pub const IDENTITY: Affine2 = Affine2([1.0, 0.0, 0.0, 0.0, 1.0, 0.0]);
+
+    /// From a 2×3 row-major `[a, b, c, d, e, f]`.
+    #[must_use]
+    pub const fn row_major(m: [f64; 6]) -> Self {
+        Affine2(m)
+    }
+
+    /// The row-major `[a, b, c, d, e, f]`.
+    #[must_use]
+    pub const fn as_row_major(&self) -> [f64; 6] {
+        self.0
+    }
+
+    /// The COLUMN-major `[a, d, b, e, c, f]` — the layout Manifold's 2D `transform` wants, three
+    /// `(x, y)` column pairs (the two basis columns then the translation).
+    #[must_use]
+    pub const fn to_column_major(&self) -> [f64; 6] {
+        let m = &self.0;
+        [
+            m[0], m[3], // column 0
+            m[1], m[4], // column 1
+            m[2], m[5], // translation
+        ]
+    }
+
+    /// Apply the affine to a 2D coordinate.
+    #[must_use]
+    pub fn apply(&self, v: Vec2) -> Vec2 {
+        let m = &self.0;
+        Vec2::new(
+            m[0] * v.x + m[1] * v.y + m[2],
+            m[3] * v.x + m[4] * v.y + m[5],
         )
     }
 }
@@ -365,7 +441,29 @@ fn byte(h: &str, i: usize) -> Option<u8> {
     reason = "exact vector/matrix arithmetic on literal inputs"
 )]
 mod tests {
-    use super::{Affine, Dims, Rgba, Tri, Vec3};
+    use super::{Affine, Affine2, Dims, Rgba, Tri, Vec2, Vec3};
+
+    #[test]
+    fn vec2_ops() {
+        let a = Vec2::new(1.0, 2.0);
+        assert_eq!(a.to_array(), [1.0, 2.0]);
+        assert_eq!(Vec2::from_array([3.0, 4.0]), Vec2::new(3.0, 4.0));
+    }
+
+    #[test]
+    fn affine2_apply_and_layouts() {
+        // A translate-by-(5,7) plus a 2× x-scale: [2,0,5, 0,1,7].
+        let m = Affine2::row_major([2.0, 0.0, 5.0, 0.0, 1.0, 7.0]);
+        assert_eq!(m.apply(Vec2::new(3.0, 4.0)), Vec2::new(11.0, 11.0)); // 2·3+5, 1·4+7
+        assert_eq!(m.as_row_major(), [2.0, 0.0, 5.0, 0.0, 1.0, 7.0]);
+        // Column-major reorders row-major into three (x, y) column pairs.
+        assert_eq!(m.to_column_major(), [2.0, 0.0, 0.0, 1.0, 5.0, 7.0]);
+        assert_eq!(Affine2::IDENTITY.apply(a_point()), a_point()); // identity is a no-op
+    }
+
+    fn a_point() -> Vec2 {
+        Vec2::new(9.0, -3.0)
+    }
 
     #[test]
     fn vec3_ops() {

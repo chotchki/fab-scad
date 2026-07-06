@@ -49,10 +49,10 @@ mod webcolors;
 pub use customizer::{Constraint, CustomParam, Customizer, DropdownItem, customize};
 pub use error::{Error, Result};
 pub use eval::{
-    Evaluation, GeoNode, Message, RANGE_MAX, RangeIter, Scope, Value, eval_expr, eval_program,
-    fragments, range_iter, range_len,
+    Contour, Evaluation, ExtrudeKind, Geo, GeoNode, Join2D, Message, RANGE_MAX, RangeIter, Scope,
+    Shape2D, Value, eval_expr, eval_program, fragments, range_iter, range_len,
 };
-pub use geom::{Affine, Dims, Rgba, Tri, Vec3};
+pub use geom::{Affine, Affine2, Dims, Rgba, Tri, Vec2, Vec3};
 pub use lexer::{Lexed, Token, TokenKind, decode_str, lex, num_value};
 pub use mesh::Mesh;
 pub use parser::{

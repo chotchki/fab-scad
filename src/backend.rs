@@ -9,13 +9,23 @@
 //! solid is empty-aware, and the ops encode the empty CSG algebra — ∅∪x = x, ∅−x = ∅, x−∅ = x,
 //! ∅∩x = ∅ — so a lowered CSG tree behaves the same whether a subtree collapsed to nothing or not.
 
-use fab_lang::{Affine, GeoNode, Mesh, Rgba, Tri};
+use fab_lang::{
+    Affine, Affine2, ExtrudeKind, GeoNode, Join2D, Mesh, Rgba, Shape2D, Tri, Vec2, Vec3,
+};
 
 /// A geometry backend: tessellated meshes → solids, combined via CSG + affine transforms. `Solid` is
 /// the backend's opaque handle (real Manifold's is `!Send`; the mock's is inert data).
+///
+/// The 2D subsystem (J.3) rides the same trait: `Shape` is the backend's 2D-region handle (Manifold
+/// `CrossSection`), a SECOND associated type so no op is ever dimension-polymorphic — 2D and 3D are
+/// distinct types end to end (see SPEC "2D subsystem"). The two dimensions meet only at the bridges:
+/// [`extrude`](GeometryBackend::extrude) (2D→3D) and [`projection`](GeometryBackend::projection)
+/// (3D→2D).
 pub trait GeometryBackend {
     /// The backend's solid handle.
     type Solid;
+    /// The backend's 2D-region handle (Manifold `CrossSection`).
+    type Shape;
 
     /// A tessellated mesh (a fab-lang primitive) → a backend solid. An empty mesh → the empty solid.
     fn leaf(&self, mesh: &Mesh) -> Self::Solid;
@@ -36,6 +46,33 @@ pub trait GeometryBackend {
     fn to_mesh(&self, s: &Self::Solid) -> Mesh;
     /// Whether the solid is empty (no geometry) — the differential's `Empty` outcome.
     fn is_empty(&self, s: &Self::Solid) -> bool;
+
+    // ── 2D surface (J.3) ─────────────────────────────────────────────────────────────────────────
+
+    /// Closed contours (outer boundary + holes) → a 2D region — the `square`/`circle`/`polygon` leaf.
+    /// No contours → the empty region.
+    fn leaf_2d(&self, contours: &[Vec<[f64; 2]>]) -> Self::Shape;
+    /// 2D boolean union.
+    fn union_2d(&self, a: &Self::Shape, b: &Self::Shape) -> Self::Shape;
+    /// 2D boolean difference (`a − b`).
+    fn difference_2d(&self, a: &Self::Shape, b: &Self::Shape) -> Self::Shape;
+    /// 2D boolean intersection.
+    fn intersection_2d(&self, a: &Self::Shape, b: &Self::Shape) -> Self::Shape;
+    /// `offset()` — inflate by `delta` (negative shrinks), finishing convex corners per `join`.
+    /// `segments` is the `Round` join's facet count (`$fn`-resolved upstream; ignored by miter/bevel).
+    fn offset_2d(&self, s: &Self::Shape, delta: f64, join: Join2D, segments: u32) -> Self::Shape;
+    /// A 2D affine transform (translate / rotate / scale / mirror on a 2D shape).
+    fn transform_2d(&self, s: &Self::Shape, m: &Affine2) -> Self::Shape;
+    /// The 2D→3D bridge — sweep a region into a solid (`linear_extrude` / `rotate_extrude`). An empty
+    /// region → the empty solid.
+    fn extrude(&self, s: &Self::Shape, kind: &ExtrudeKind) -> Self::Solid;
+    /// The 3D→2D bridge — flatten a solid to a region (`projection`). `cut` slices at `z = 0`; else the
+    /// shadow. An empty solid → the empty region.
+    fn projection(&self, s: &Self::Solid, cut: bool) -> Self::Shape;
+    /// Extract the region as closed point contours (the 2D differential's data).
+    fn to_polygons(&self, s: &Self::Shape) -> Vec<Vec<[f64; 2]>>;
+    /// Whether the region is empty (no area).
+    fn is_empty_2d(&self, s: &Self::Shape) -> bool;
 }
 
 /// Lower a fab-lang CSG tree ([`GeoNode`], J.2) to a backend solid — the geometry lowering. This is
@@ -53,9 +90,55 @@ pub fn build<B: GeometryBackend>(node: &GeoNode, backend: &B) -> B::Solid {
         GeoNode::Hull(kids) => {
             backend.hull(&kids.iter().map(|k| build(k, backend)).collect::<Vec<_>>())
         }
+        // The 2D→3D bridge: lower the 2D child to a Shape, then sweep it into a Solid (J.3.4/J.3.5).
+        GeoNode::Extrude { kind, child } => backend.extrude(&build_2d(child, backend), kind),
         // Color sets EVERY vertex of the child subtree (J.2.9). Outermost `color()` wins because the
         // enclosing node's color op overwrites any inner one; distinct colors survive a union.
         GeoNode::Color { color, child } => backend.color(&build(child, backend), *color),
+    }
+}
+
+/// Lower a fab-lang 2D tree ([`Shape2D`], J.3) to a backend region — the 2D half of the geometry
+/// lowering, mutually recursive with [`build`] across the `Projection` (3D→2D) bridge. Bounded by tree
+/// depth (parser `MAX_DEPTH`), like `build`.
+pub fn build_2d<B: GeometryBackend>(shape: &Shape2D, backend: &B) -> B::Shape {
+    match shape {
+        Shape2D::Empty => backend.leaf_2d(&[]),
+        Shape2D::Polygon(contours) => {
+            let raw: Vec<Vec<[f64; 2]>> = contours
+                .iter()
+                .map(|c| c.iter().map(|p| p.to_array()).collect())
+                .collect();
+            backend.leaf_2d(&raw)
+        }
+        Shape2D::Union(kids) => reduce_2d(kids, backend, B::union_2d),
+        Shape2D::Difference(kids) => reduce_2d(kids, backend, B::difference_2d),
+        Shape2D::Intersection(kids) => reduce_2d(kids, backend, B::intersection_2d),
+        Shape2D::Offset {
+            delta,
+            join,
+            segments,
+            child,
+        } => backend.offset_2d(&build_2d(child, backend), *delta, *join, *segments),
+        Shape2D::Transform { matrix, child } => {
+            backend.transform_2d(&build_2d(child, backend), matrix)
+        }
+        // The 3D→2D bridge: lower the 3D child to a Solid, then flatten it to a region (J.3.6).
+        Shape2D::Projection { cut, child } => backend.projection(&build(child, backend), *cut),
+    }
+}
+
+/// Fold 2D children left-to-right with `combine` (the empty algebra lives in the backend ops). An empty
+/// child list → the empty region.
+fn reduce_2d<B: GeometryBackend>(
+    kids: &[Shape2D],
+    backend: &B,
+    combine: impl Fn(&B, &B::Shape, &B::Shape) -> B::Shape,
+) -> B::Shape {
+    let mut shapes = kids.iter().map(|k| build_2d(k, backend));
+    match shapes.next() {
+        Some(first) => shapes.fold(first, |acc, s| combine(backend, &acc, &s)),
+        None => backend.leaf_2d(&[]),
     }
 }
 
@@ -84,6 +167,9 @@ pub struct ManifoldBackend;
 #[cfg(feature = "kernel")]
 impl GeometryBackend for ManifoldBackend {
     type Solid = Option<crate::kernel::Solid>;
+    // `Section` (Manifold `CrossSection`) is empty-aware natively (`empty()` / `is_empty()`), so — unlike
+    // `Solid` — it needs no `Option` wrapper to represent the empty region.
+    type Shape = crate::kernel::Section;
 
     fn leaf(&self, mesh: &Mesh) -> Self::Solid {
         // `from_indexed` rejects an empty mesh (→ None); a non-manifold mesh also → None (polyhedron
@@ -143,6 +229,50 @@ impl GeometryBackend for ManifoldBackend {
     fn is_empty(&self, s: &Self::Solid) -> bool {
         s.as_ref().is_none_or(crate::kernel::Solid::is_empty)
     }
+
+    // ── 2D surface (J.3) — delegates to kernel::Section (Manifold CrossSection) ───────────────────
+
+    fn leaf_2d(&self, contours: &[Vec<[f64; 2]>]) -> Self::Shape {
+        crate::kernel::Section::from_polygons(contours)
+    }
+
+    fn union_2d(&self, a: &Self::Shape, b: &Self::Shape) -> Self::Shape {
+        a.union(b)
+    }
+
+    fn difference_2d(&self, a: &Self::Shape, b: &Self::Shape) -> Self::Shape {
+        a.difference(b)
+    }
+
+    fn intersection_2d(&self, a: &Self::Shape, b: &Self::Shape) -> Self::Shape {
+        a.intersection(b)
+    }
+
+    fn offset_2d(&self, s: &Self::Shape, delta: f64, join: Join2D, segments: u32) -> Self::Shape {
+        s.offset(delta, join, i32::try_from(segments).unwrap_or(i32::MAX))
+    }
+
+    fn transform_2d(&self, s: &Self::Shape, m: &Affine2) -> Self::Shape {
+        s.transform(m)
+    }
+
+    fn extrude(&self, s: &Self::Shape, kind: &ExtrudeKind) -> Self::Solid {
+        // An empty profile sweeps to nothing (Manifold would build a degenerate manifold otherwise).
+        (!s.is_empty()).then(|| s.extrude(kind))
+    }
+
+    fn projection(&self, s: &Self::Solid, cut: bool) -> Self::Shape {
+        s.as_ref()
+            .map_or_else(crate::kernel::Section::empty, |s| s.project_2d(cut))
+    }
+
+    fn to_polygons(&self, s: &Self::Shape) -> Vec<Vec<[f64; 2]>> {
+        s.to_polygons()
+    }
+
+    fn is_empty_2d(&self, s: &Self::Shape) -> bool {
+        s.is_empty()
+    }
 }
 
 // ─────────────────────────────── the mock backend (pure Rust) ──────────────────────────────────
@@ -182,11 +312,28 @@ fn append(a: &Mesh, b: &Mesh) -> Mesh {
     Mesh { verts, tris }
 }
 
+/// A pure-Rust MOCK 2D region — the 2D counterpart of [`MockSolid`]. Tracks its contours plus an op
+/// count; it does NOT compute real 2D booleans/offsets (miri can't call Manifold), it exercises the
+/// same Rust-side dispatch + point arithmetic the real path uses. Empty ⇔ no points.
+#[derive(Clone, Default)]
+pub struct MockShape {
+    contours: Vec<Vec<[f64; 2]>>,
+    /// 2D ops applied — lets a test confirm the tree was actually walked.
+    ops: u32,
+}
+
+impl MockShape {
+    fn is_empty(&self) -> bool {
+        self.contours.iter().all(Vec::is_empty)
+    }
+}
+
 /// The mock geometry backend — the miri-tested path.
 pub struct MockBackend;
 
 impl GeometryBackend for MockBackend {
     type Solid = MockSolid;
+    type Shape = MockShape;
 
     fn leaf(&self, mesh: &Mesh) -> Self::Solid {
         MockSolid {
@@ -269,6 +416,124 @@ impl GeometryBackend for MockBackend {
     fn is_empty(&self, s: &Self::Solid) -> bool {
         s.is_empty()
     }
+
+    // ── 2D surface (J.3) — structure-only, honoring the empty algebra so both backends' is_empty agree ──
+
+    fn leaf_2d(&self, contours: &[Vec<[f64; 2]>]) -> Self::Shape {
+        MockShape {
+            contours: contours.to_vec(),
+            ops: 0,
+        }
+    }
+
+    fn union_2d(&self, a: &Self::Shape, b: &Self::Shape) -> Self::Shape {
+        if a.is_empty() {
+            return b.clone();
+        }
+        if b.is_empty() {
+            return a.clone();
+        }
+        let mut contours = a.contours.clone();
+        contours.extend(b.contours.iter().cloned());
+        MockShape {
+            contours,
+            ops: a.ops + b.ops + 1,
+        }
+    }
+
+    fn difference_2d(&self, a: &Self::Shape, b: &Self::Shape) -> Self::Shape {
+        if a.is_empty() {
+            return MockShape::default(); // ∅ − x = ∅
+        }
+        // x − y ⊆ x; the mock can't carve, so it keeps a's contours (structure, not geometry).
+        MockShape {
+            contours: a.contours.clone(),
+            ops: a.ops + b.ops + 1,
+        }
+    }
+
+    fn intersection_2d(&self, a: &Self::Shape, b: &Self::Shape) -> Self::Shape {
+        if a.is_empty() || b.is_empty() {
+            return MockShape::default(); // ∅ ∩ x = ∅
+        }
+        MockShape {
+            contours: a.contours.clone(),
+            ops: a.ops + b.ops + 1,
+        }
+    }
+
+    fn offset_2d(
+        &self,
+        s: &Self::Shape,
+        _delta: f64,
+        _join: Join2D,
+        _segments: u32,
+    ) -> Self::Shape {
+        if s.is_empty() {
+            return MockShape::default();
+        }
+        // The mock can't inflate — it keeps the contours + bumps ops (real offset lives in ManifoldBackend).
+        MockShape {
+            contours: s.contours.clone(),
+            ops: s.ops + 1,
+        }
+    }
+
+    fn transform_2d(&self, s: &Self::Shape, m: &Affine2) -> Self::Shape {
+        let contours = s
+            .contours
+            .iter()
+            .map(|c| {
+                c.iter()
+                    .map(|&p| m.apply(Vec2::from_array(p)).to_array())
+                    .collect()
+            })
+            .collect();
+        MockShape {
+            contours,
+            ops: s.ops + 1,
+        }
+    }
+
+    fn extrude(&self, s: &Self::Shape, _kind: &ExtrudeKind) -> Self::Solid {
+        if s.is_empty() {
+            return MockSolid::default(); // an empty profile sweeps to nothing
+        }
+        // The mock can't sweep — it lifts the contour points to z=0 verts so is_empty()/dispatch hold.
+        let verts = s
+            .contours
+            .iter()
+            .flatten()
+            .map(|&[x, y]| Vec3::new(x, y, 0.0))
+            .collect();
+        MockSolid {
+            mesh: Mesh {
+                verts,
+                tris: Vec::new(),
+            },
+            ops: s.ops + 1,
+        }
+    }
+
+    fn projection(&self, s: &Self::Solid, _cut: bool) -> Self::Shape {
+        if s.is_empty() {
+            return MockShape::default();
+        }
+        // The mock flattens the solid's verts to one XY contour (structure, not a real slice/shadow).
+        let contour: Vec<[f64; 2]> = s.mesh.verts.iter().map(|v| [v.x, v.y]).collect();
+        MockShape {
+            contours: vec![contour],
+            ops: s.ops + 1,
+        }
+    }
+
+    fn to_polygons(&self, s: &Self::Shape) -> Vec<Vec<[f64; 2]>> {
+        s.contours.clone()
+    }
+
+    fn is_empty_2d(&self, s: &Self::Shape) -> bool {
+        s.is_empty()
+    }
 }
 
 #[cfg(test)]
@@ -323,6 +588,70 @@ mod tests {
         assert!(b.is_empty(&b.difference(&empty, &cube))); // ∅ − x = ∅
         assert!(!b.is_empty(&b.union(&cube, &empty))); // x ∪ ∅ = x
         assert!(!b.is_empty(&b.difference(&cube, &empty))); // x − ∅ = x
+
+        exercise_2d(b); // the 2D surface + both dimension bridges, same two memory models
+    }
+
+    /// Drive the WHOLE 2D op surface + both dimension bridges (J.3), asserting the invariants that hold
+    /// for ANY correct backend. Same discipline as [`exercise`]: miri on the mock, ASAN on Manifold.
+    pub fn exercise_2d<B: GeometryBackend>(b: &B) {
+        use fab_lang::{Affine2, ExtrudeKind, Join2D};
+        // A 2×2 square leaf + the empty region.
+        let square = |b: &B| b.leaf_2d(&[vec![[0.0, 0.0], [2.0, 0.0], [2.0, 2.0], [0.0, 2.0]]]);
+        let empty = b.leaf_2d(&[]);
+        assert!(b.is_empty_2d(&empty));
+        let sq = square(b);
+        assert!(!b.is_empty_2d(&sq));
+
+        // Booleans + the empty algebra (identical on both backends).
+        assert!(!b.is_empty_2d(&b.union_2d(&sq, &square(b))));
+        assert!(!b.is_empty_2d(&b.union_2d(&sq, &empty))); // x ∪ ∅ = x
+        assert!(!b.is_empty_2d(&b.difference_2d(&sq, &empty))); // x − ∅ = x
+        assert!(b.is_empty_2d(&b.difference_2d(&empty, &sq))); // ∅ − x = ∅
+        assert!(b.is_empty_2d(&b.intersection_2d(&sq, &empty))); // x ∩ ∅ = ∅
+        assert!(!b.is_empty_2d(&b.intersection_2d(&sq, &square(b)))); // sq ∩ sq = sq
+
+        // Offset (grow), transform (translate +x 3), and the extract path.
+        assert!(!b.is_empty_2d(&b.offset_2d(&sq, 1.0, Join2D::Round, 16)));
+        let moved = b.transform_2d(&sq, &Affine2::row_major([1.0, 0.0, 3.0, 0.0, 1.0, 0.0]));
+        assert!(!b.is_empty_2d(&moved));
+        assert!(!b.to_polygons(&sq).is_empty());
+        assert!(b.to_polygons(&empty).is_empty());
+
+        // The two bridges + both extrude kinds. Linear (resting) → box; its shadow (cut=false) is 2D.
+        let lin = ExtrudeKind::Linear {
+            height: 5.0,
+            twist: 0.0,
+            scale: [1.0, 1.0],
+            slices: 1,
+            center: false,
+        };
+        let box3d = b.extrude(&sq, &lin);
+        assert!(!b.is_empty(&box3d));
+        assert!(b.is_empty(&b.extrude(&empty, &lin))); // extrude of ∅ = ∅
+        assert!(!b.is_empty_2d(&b.projection(&box3d, false))); // shadow
+        assert!(b.is_empty_2d(&b.projection(&b.extrude(&empty, &lin), false))); // projection of ∅ = ∅
+        // A CENTERED extrude straddles z=0, so the cut=true slice is a real cross-section.
+        let centered = b.extrude(
+            &sq,
+            &ExtrudeKind::Linear {
+                height: 5.0,
+                twist: 0.0,
+                scale: [1.0, 1.0],
+                slices: 1,
+                center: true,
+            },
+        );
+        assert!(!b.is_empty_2d(&b.projection(&centered, true)));
+        // Rotate extrude of a profile offset from the axis → a ring solid.
+        let ring = b.extrude(
+            &moved,
+            &ExtrudeKind::Rotate {
+                angle: 360.0,
+                segments: 32,
+            },
+        );
+        assert!(!b.is_empty(&ring));
     }
 
     #[test]
@@ -334,6 +663,41 @@ mod tests {
     #[test]
     fn manifold_backend_interface() {
         exercise(&super::ManifoldBackend);
+    }
+
+    // J.3.1 — the tree-walker lowers a hand-built 2D tree through BOTH dimension bridges on the REAL
+    // Manifold backend, checked by exact volume + area. (The evaluator that PRODUCES Shape2D is J.3.2+;
+    // this pins the seam itself.) A 2×2 square extruded 5 tall → vol 20; its shadow back to 2D → area 4.
+    #[cfg(feature = "kernel")]
+    #[test]
+    fn extrude_and_projection_lowering() {
+        use fab_lang::{ExtrudeKind, GeoNode, Shape2D, Vec2};
+        let square = Shape2D::Polygon(vec![vec![
+            Vec2::new(0.0, 0.0),
+            Vec2::new(2.0, 0.0),
+            Vec2::new(2.0, 2.0),
+            Vec2::new(0.0, 2.0),
+        ]]);
+        let extruded = GeoNode::Extrude {
+            kind: ExtrudeKind::Linear {
+                height: 5.0,
+                twist: 0.0,
+                scale: [1.0, 1.0],
+                slices: 1,
+                center: false,
+            },
+            child: Box::new(square),
+        };
+        let solid = super::build(&extruded, &super::ManifoldBackend).expect("extrude → a solid");
+        assert!((solid.volume() - 20.0).abs() < 1e-6); // 2·2·5
+
+        // projection(cut=false) of that box back to 2D → the 2×2 shadow, area 4.
+        let projected = Shape2D::Projection {
+            cut: false,
+            child: Box::new(extruded),
+        };
+        let region = super::build_2d(&projected, &super::ManifoldBackend);
+        assert!((region.area() - 4.0).abs() < 1e-6);
     }
 
     // J.2.3/J.2.7 — the tree-walker lowers CSG booleans + transforms through the REAL Manifold backend

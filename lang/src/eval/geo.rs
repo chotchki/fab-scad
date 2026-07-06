@@ -18,6 +18,7 @@
 
 use std::collections::BTreeMap;
 
+use super::geo2d::{ExtrudeKind, Shape2D};
 use super::trig::{cos_degrees, sin_degrees};
 use super::value::Value;
 use crate::Mesh;
@@ -46,6 +47,14 @@ pub enum GeoNode {
     /// `hull()` — the convex hull of all children combined (N-ary, not a pairwise fold). Needs the
     /// backend (Manifold `batch_hull`); has no fab-lang mesh flattening (J.4.1).
     Hull(Vec<GeoNode>),
+    /// `linear_extrude` / `rotate_extrude` — sweep a 2D [`Shape2D`] into 3D (the 2D→3D dimension
+    /// bridge). Needs the backend (Manifold `extrude` / `revolve`); no fab-lang flattening (J.3.4/J.3.5).
+    Extrude {
+        /// Linear or rotational sweep, with its parameters.
+        kind: ExtrudeKind,
+        /// The 2D profile being swept.
+        child: Box<Shape2D>,
+    },
     /// `color()` over a subtree — sets its display color (BOSL2-critical). Geometry is UNCHANGED; the
     /// backend applies it as a Manifold vertex property (J.2.9). Outermost `color()` wins (OpenSCAD).
     Color {

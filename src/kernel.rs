@@ -9,8 +9,8 @@
 //! connectors (11.6) build on it.
 
 use anyhow::{Context, Result, anyhow};
-use fab_lang::{Affine, Rgba, Tri, Vec3};
-use manifold3d::{CrossSection, Manifold, MeshGL};
+use fab_lang::{Affine, Affine2, ExtrudeKind, Join2D, Rgba, Tri, Vec3};
+use manifold3d::{CrossSection, JoinType, Manifold, MeshGL};
 use std::collections::HashMap;
 use std::marker::PhantomData;
 use std::path::Path;
@@ -561,6 +561,122 @@ impl Solid {
     /// Genus (handle count). Euler characteristic of the closed surface is `2 - 2·genus`.
     pub fn genus(&self) -> i32 {
         self.0.genus()
+    }
+
+    /// `projection()` — flatten this solid to a 2D [`Section`] (the 3D→2D bridge, J.3.6). `cut = true`
+    /// takes the cross-section at `z = 0` (Manifold `slice`); `cut = false` is the shadow — the whole
+    /// solid projected onto the XY plane (Manifold `project`).
+    pub fn project_2d(&self, cut: bool) -> Section {
+        if cut {
+            Section::wrap(self.0.slice_to_cross_section(0.0))
+        } else {
+            Section::from_polygons(&self.0.project())
+        }
+    }
+}
+
+/// A 2D region — the unit the 2D subsystem (J.3) consumes and produces, a typed newtype over Manifold's
+/// `CrossSection` (which bundles Clipper2, the same 2D lib OpenSCAD 2021+ uses). The 2D analogue of
+/// [`Solid`]: the evaluator's [`Shape2D`](fab_lang::Shape2D) tree lowers to one of these, extrusion
+/// bridges it to a `Solid`, and `projection` bridges a `Solid` back to one.
+///
+/// **!Send/!Sync by construction**, same discipline as [`Solid`] — cross threads with polygon data
+/// (`to_polygons`), never a live handle. `CrossSection`'s upstream `unsafe impl Send` shares state on
+/// `clone` the same way `Manifold` does; we don't lean on it.
+#[derive(Clone)]
+pub struct Section(CrossSection, PhantomData<*const ()>);
+
+impl Section {
+    /// The single construction point — keeps the !Send marker consistent everywhere.
+    fn wrap(c: CrossSection) -> Self {
+        Section(c, PhantomData)
+    }
+
+    /// The empty region (no area) — the 2D identity for union, absorbing for intersection.
+    pub fn empty() -> Self {
+        Section::wrap(CrossSection::default())
+    }
+
+    /// A region from closed contours (outer boundary + holes), resolved by Manifold's default
+    /// (`Positive`) fill rule — the `square` / `circle` / `polygon` leaf (J.3.2).
+    pub fn from_polygons(contours: &[Vec<[f64; 2]>]) -> Self {
+        Section::wrap(CrossSection::from_polygons(contours))
+    }
+
+    pub fn union(&self, other: &Section) -> Section {
+        Section::wrap(self.0.union(&other.0))
+    }
+    pub fn difference(&self, other: &Section) -> Section {
+        Section::wrap(self.0.difference(&other.0))
+    }
+    pub fn intersection(&self, other: &Section) -> Section {
+        Section::wrap(self.0.intersection(&other.0))
+    }
+
+    /// `offset()` — inflate the outline by `delta` (negative shrinks), finishing convex corners per
+    /// `join`. `segments` is the Round join's facet count (`$fn`-resolved upstream; ignored otherwise);
+    /// the miter limit is Clipper2's default of 2.0.
+    pub fn offset(&self, delta: f64, join: Join2D, segments: i32) -> Section {
+        let jt = match join {
+            Join2D::Round => JoinType::Round,
+            Join2D::Miter => JoinType::Miter,
+            Join2D::Bevel => JoinType::Bevel,
+        };
+        Section::wrap(self.0.offset(delta, jt, 2.0, segments))
+    }
+
+    /// Apply a 2×3 [`Affine2`] (row-major; transposed to Manifold's column-pair layout at the boundary).
+    pub fn transform(&self, m: &Affine2) -> Section {
+        Section::wrap(self.0.transform(&m.to_column_major()))
+    }
+
+    /// Sweep this region into a 3D [`Solid`] — the 2D→3D bridge (`linear_extrude` / `rotate_extrude`,
+    /// J.3.4 / J.3.5). Linear uses Manifold's twist/scale/slice extrude (then centers on `z = 0` when
+    /// asked); rotate revolves it about +Z.
+    pub fn extrude(&self, kind: &ExtrudeKind) -> Solid {
+        match *kind {
+            ExtrudeKind::Linear {
+                height,
+                twist,
+                scale,
+                slices,
+                center,
+            } => {
+                let m = Manifold::extrude_with_options(
+                    &self.0,
+                    height,
+                    slices as i32,
+                    twist,
+                    scale[0],
+                    scale[1],
+                );
+                let s = Solid::wrap(m);
+                if center {
+                    s.translate(Vec3::new(0.0, 0.0, -height / 2.0))
+                } else {
+                    s
+                }
+            }
+            ExtrudeKind::Rotate { angle, segments } => {
+                Solid::wrap(Manifold::revolve(&self.0, segments as i32, angle))
+            }
+        }
+    }
+
+    /// Whether the region is empty (no area).
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// Total enclosed area — the 2D differential's bulk metric (J.3.7).
+    pub fn area(&self) -> f64 {
+        self.0.area()
+    }
+
+    /// The region's contours as closed point rings — the extract path + the inert data a `Section`
+    /// crosses a thread boundary as.
+    pub fn to_polygons(&self) -> Vec<Vec<[f64; 2]>> {
+        self.0.to_polygons()
     }
 }
 

@@ -14,6 +14,7 @@ mod builtins;
 mod fmt;
 mod fragments;
 mod geo;
+mod geo2d;
 mod geometry;
 mod loader;
 mod message;
@@ -26,6 +27,7 @@ mod value;
 
 pub use fragments::fragments;
 pub use geo::GeoNode;
+pub use geo2d::{Contour, ExtrudeKind, Geo, Join2D, Shape2D};
 pub use message::{Evaluation, Message};
 pub use scope::Scope;
 pub use value::{RANGE_MAX, RangeIter, Value, range_iter, range_len};

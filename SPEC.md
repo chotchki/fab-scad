@@ -53,7 +53,7 @@ escape, not community respect.
 
 ```
 .scad source ──parse──▶ AST ──eval──▶ CSG node tree ──lower──▶ kernel::Solid (Manifold)
-                         │                │                       + Clipper2 (2D subsystem)
+                         │                │                       + CrossSection (2D, Manifold)
                   customizer walk   explicit stack,
                   (params = AST)    content-addressed cache
 ```
@@ -100,9 +100,30 @@ escape, not community respect.
   are already content-addressed. This is the same discipline as fab's 6.2 incremental
   rebuild, pushed down to the language level. The DAG engine's per-node progress/cancel
   hangs off the same node identity.
+- **2D subsystem (DECIDED J.3.1) — Manifold `CrossSection`, and a strongly-typed 2D tree.**
+  TWO decisions. First, the library: NOT a separate `clipper2` crate — the `manifold-csg`
+  binding we ALREADY link ships `CrossSection` (2D booleans + `offset`), `extrude`/`revolve`
+  (2D→3D), and `slice_to_cross_section` (projection, 3D→2D), and it bundles Clipper2
+  INTERNALLY — the same library OpenSCAD 2021+ uses for its 2D. So the whole 2D surface (plus
+  hull, already landed) rides one dependency, and 2D results align with the oracle by
+  construction. Zero new geometry deps for the core. Second, the SHAPE: 2D and 3D are
+  DIFFERENT TYPES (a region isn't a solid; mixing them is an OpenSCAD *warning*), so we encode
+  dimension in the TYPE SYSTEM, not as a runtime property. A separate `Shape2D` tree runs
+  parallel to `GeoNode`, mutually recursive across the dimension bridges — `GeoNode::Extrude`
+  holds a `Shape2D` (2D→3D), `Shape2D::Projection` holds a `GeoNode` (3D→2D); eval yields a
+  dimension-tagged `Geo { D2, D3 }`, each sub-tree homogeneous. The backend grows a SECOND
+  associated type for the 2D handle (`CrossSection`), so no method body is ever
+  dimension-polymorphic. Why typed over OpenSCAD's own dimension-mixed tree: the mixing
+  warning forces eval to track dimension REGARDLESS, so the "one untyped tree" is a mirage —
+  and worse, the warning would have to fire in the backend, which has no message channel. The
+  typed tree makes well-formed input (all of BOSL2) impossible to mis-lower at COMPILE time,
+  keeps the backend two clean types, and puts the mixing warning in eval where its source
+  location belongs. Strong typing is testing-before-the-test. Tessellation parity for the
+  extrudes is MEASURED against the oracle, not assumed — Manifold's `extrude`/`revolve` if the
+  metric tolerates, our own loft if not.
 - **Builtin geometry surface (deliberately small):** polyhedron, primitives, multmatrix,
-  union/difference/intersection, hull, linear_extrude/rotate_extrude (2D via Clipper2 crate),
-  offset, projection. `import()` = our existing STL/3MF readers. DEFERRED: text() (fonts —
+  union/difference/intersection, hull, linear_extrude/rotate_extrude (2D via Manifold
+  `CrossSection`, above), offset, projection. `import()` = our existing STL/3MF readers. DEFERRED: text() (fonts —
   the whole freetype/harfbuzz/fontconfig tree), surface(), and minkowski — which Manifold
   lacks and OpenSCAD's own manifold backend still farms to CGAL. Deferred = BLOW UP AND
   COMPLAIN LOUDLY, never silently wrong; if corpus pressure ever demands minkowski, we do

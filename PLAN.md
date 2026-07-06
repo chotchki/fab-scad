@@ -77,7 +77,7 @@ added 2026-07-05.
   - [x] J.2.9 - Color propagation through Manifold (vertex props survive booleans) + oracle capture + differential
 - [ ] J.3 - 2D subsystem on Clipper2: square/circle/polygon/offset/projection + linear/rotate_extrude bridging 2D→3D with tessellation parity
   - Comment: Is clipper2 the right library for this? could manifold do it?
-  - [ ] J.3.1 - DECISION + 2D backend seam: Manifold CrossSection for all 2D/hull/extrude/projection (zero new geometry deps — bundles Clipper2, the lib OpenSCAD 2021+ uses). GeoNode↔CrossSection; note in SPEC
+  - [x] J.3.1 - DECISION + 2D backend seam: Manifold CrossSection for all 2D/hull/extrude/projection (zero new geometry deps — bundles Clipper2, the lib OpenSCAD 2021+ uses). GeoNode↔CrossSection; note in SPEC
   - [ ] J.3.2 - 2D primitives square/circle/polygon → Shape2D node; circle uses our $fn fragment math for parity
   - [ ] J.3.3 - 2D booleans + offset over 2D children (CrossSection ops)
   - [ ] J.3.4 - linear_extrude (height/twist/scale/slices) → 3D; tessellation parity MEASURED vs oracle (Manifold's if the metric tolerates, else our loft)
@@ -86,7 +86,7 @@ added 2026-07-05.
   - [ ] J.3.7 - Differential: path/region-derived BOSL2 2D shapes vs oracle
 - [ ] J.4 - hull; import() via our STL/3MF readers; text/minkowski/surface = LOUD deferred stubs (blow up, complain, never silently wrong)
   - Comment: Text could be handled by https://github.com/pop-os/cosmic-text . I'm still researching minkowski.
-  - [ ] J.4.1 - hull() → Manifold hull/batch_hull over children (2D + 3D); unblocks cuboid chamfer/rounding + masks
+  - [x] J.4.1 - hull() → Manifold hull/batch_hull over children (2D + 3D); unblocks cuboid chamfer/rounding + masks
   - [ ] J.4.2 - import() via our STL/3MF readers (threemf/zip/quick-xml deps already present)
   - [ ] J.4.3 - text() = LOUD deferred stub (never silently wrong); cosmic-text is the candidate — its own task
   - [ ] J.4.4 - minkowski()/surface() = LOUD deferred stubs (never silently wrong); minkowski approach still open

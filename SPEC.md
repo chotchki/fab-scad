@@ -131,7 +131,11 @@ escape, not community respect.
   `$fn` points before sweeping (each edge → `round(edge/perimeter·$fn)` segments, reproduced) — after
   which the SHAPE matches; a small per-slice tessellation-phase remainder (~1-2% at typical `$fn`,
   larger for curved/low-`$fn`) is an ACCEPTED, DOCUMENTED divergence behind a relaxed per-class residual
-  tolerance (the exact slice-phase match is J.3.4.1, revisited only if it compounds).
+  tolerance (the exact slice-phase match is J.3.4.1, revisited only if it compounds). OUTCOME (J.3.5):
+  `rotate_extrude` FULL revolutions pass the same strict gate — segment count (`$fn`, else `$fa`/`$fs`
+  on the profile's max radius) + ring tessellation line up, no direction/phase quirk. PARTIAL angles
+  (< 360) carry the twist's same small, converging arc-phase residual (0.2-2%), the same relaxed-
+  tolerance treatment.
 - **Builtin geometry surface (deliberately small):** polyhedron, primitives, multmatrix,
   union/difference/intersection, hull, linear_extrude/rotate_extrude (2D via Manifold
   `CrossSection`, above), offset, projection. `import()` = our existing STL/3MF readers. DEFERRED: text() (fonts —

@@ -620,7 +620,9 @@ impl Section {
         let jt = match join {
             Join2D::Round => JoinType::Round,
             Join2D::Miter => JoinType::Miter,
-            Join2D::Bevel => JoinType::Bevel,
+            // OpenSCAD's `offset(chamfer = true)` squares the corner off — its source maps chamfer →
+            // Clipper2 `jtSquare`, NOT `jtBevel` (verified by area vs 2026.06.12: square → 78.2548).
+            Join2D::Bevel => JoinType::Square,
         };
         Section::wrap(self.0.offset(delta, jt, 2.0, segments))
     }

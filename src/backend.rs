@@ -711,6 +711,35 @@ mod tests {
         assert!((region.area() - 4.0).abs() < 1e-6);
     }
 
+    // J.3.3 — 2D booleans + offset lower through the REAL Manifold `CrossSection`, checked by exact AREA.
+    // The miter/shrink/boolean cases are EXACT (axis-aligned squares → integer areas); the round + bevel
+    // cases are pinned to what OpenSCAD 2026.06.12 renders (both engines share Clipper2, so they agree).
+    #[cfg(feature = "kernel")]
+    #[test]
+    fn offset_and_2d_booleans_measure_correct_areas() {
+        use fab_lang::{Geo, evaluate_geometry};
+        let area = |scad: &str| -> f64 {
+            match evaluate_geometry(scad).expect("evaluates") {
+                Geo::D2(shape) => super::build_2d(&shape, &super::ManifoldBackend).area(),
+                other => panic!("expected a 2D result, got {other:?}"),
+            }
+        };
+        // offset: delta (miter) grows to sharp corners; a negative r shrinks with sharp inner corners.
+        assert!((area("offset(delta = 2) square(5);") - 81.0).abs() < 1e-9); // (5 + 2·2)²
+        assert!((area("offset(-1) square(5);") - 9.0).abs() < 1e-9); // (5 − 2·1)²
+        // round (r) + bevel (chamfer) match the oracle at a fixed $fn (Clipper2 on both sides).
+        assert!((area("offset(2, $fn = 64) square(5);") - 77.5462).abs() < 1e-3); // rounded corners
+        assert!((area("offset(delta = 2, chamfer = true) square(5);") - 78.2548).abs() < 1e-3); // bevel
+        // 2D booleans over two 4×4 squares — [0,4]² and [2,6]², overlap [2,4]² (area 4).
+        assert!((area("square(4); translate([2, 2]) square(4);") - 28.0).abs() < 1e-9); // union 16+16−4
+        assert!(
+            (area("difference() { square(4); translate([2, 2]) square(4); }") - 12.0).abs() < 1e-9
+        ); // 16 − 4
+        assert!(
+            (area("intersection() { square(4); translate([2, 2]) square(4); }") - 4.0).abs() < 1e-9
+        ); // the overlap
+    }
+
     // J.2.3/J.2.7 — the tree-walker lowers CSG booleans + transforms through the REAL Manifold backend
     // correctly, checked by exact VOLUME (no oracle re-import, which the harness can't do for boolean
     // meshes yet). cube(5) sits inside cube(10)'s corner (both [0,size]³), so the results are exact.

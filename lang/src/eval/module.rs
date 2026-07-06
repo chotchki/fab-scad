@@ -77,9 +77,6 @@ pub(super) fn eval_module<'a>(
         "projection" => Err(crate::Error::Unimplemented(
             "projection() (the 3D→2D flatten bridge) is not yet wired — J.3.6",
         )),
-        "offset" => Err(crate::Error::Unimplemented(
-            "offset() (2D outline grow/shrink) is not yet wired — J.3.3",
-        )),
         _ => Err(crate::Error::Unimplemented(
             "unknown module — not a builtin primitive (sphere/cube/cylinder/polyhedron, \
              square/circle/polygon), transform, boolean, or a defined user module (a typo, or a builtin \

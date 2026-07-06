@@ -18,7 +18,9 @@
 
 use std::collections::BTreeMap;
 
-use super::geo2d::{ExtrudeKind, Shape2D};
+use super::fragments::fragments;
+use super::geo2d::{ExtrudeKind, Join2D, Shape2D};
+use super::scope::Scope;
 use super::trig::{cos_degrees, sin_degrees};
 use super::value::Value;
 use crate::Mesh;
@@ -97,6 +99,34 @@ pub(super) fn resolve_color(positional: &[Value], named: &BTreeMap<String, Value
         rgba.a = *a;
     }
     Some(rgba)
+}
+
+/// Resolve an `offset()` module's evaluated args to its lowering params `(delta, join, segments)`.
+/// `r` (1st positional / `r=`) selects a ROUNDED offset, `$fn`-faceted by the SAME [`fragments`] calc as
+/// `circle` (`segments` = a full-circle count; ignored by miter/bevel). A `delta=` (only when there's no
+/// `r`) selects a MITERED offset, or a BEVELED one with `chamfer = true`. `r` BEATS `delta` (OpenSCAD —
+/// verified vs 2026.06.12: `offset(r=2, delta=9)` renders as `r=2`). No usable arg → a zero (identity)
+/// offset. Winding of the result is Clipper2's; `segments` for miter/bevel is unused so it's `0`.
+pub(super) fn resolve_offset(
+    positional: &[Value],
+    named: &BTreeMap<String, Value>,
+    scope: &Scope,
+) -> (f64, Join2D, u32) {
+    // `r` — positional 0, else named `r`. When present it wins: a rounded, $fn-faceted offset.
+    if let Some(&Value::Num(r)) = positional.first().or_else(|| named.get("r")) {
+        let (fn_, fa, fs) = scope.fn_fa_fs();
+        return (r, Join2D::Round, fragments(r.abs(), fn_, fa, fs));
+    }
+    // `delta` — named only (positional 0 is `r`). `chamfer = true` bevels the corners, else they miter.
+    if let Some(&Value::Num(delta)) = named.get("delta") {
+        let join = if matches!(named.get("chamfer"), Some(Value::Bool(true))) {
+            Join2D::Bevel
+        } else {
+            Join2D::Miter
+        };
+        return (delta, join, 0);
+    }
+    (0.0, Join2D::Miter, 0) // no r/delta → identity
 }
 
 /// The 3×4 affine for a transform module, from its EVALUATED arguments. Unknown/degenerate args fall

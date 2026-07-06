@@ -207,6 +207,75 @@ fn booleans_and_union_build_shape2d_nodes() {
     ));
 }
 
+// ─────────────────────────────── offset() (J.3.3) ───────────────────────────────
+
+#[test]
+fn offset_resolves_r_delta_and_chamfer() {
+    use fab_lang::Join2D;
+    // `r` (positional) → ROUNDED, $fn-faceted (segments = the full-circle count, like `circle`).
+    assert!(matches!(
+        d2("offset(2, $fn = 64) square(5);"),
+        Shape2D::Offset { delta, join: Join2D::Round, segments, child }
+            if delta == 2.0 && segments == 64 && matches!(*child, Shape2D::Polygon(_))
+    ));
+    // named `r` is the same rounded path.
+    assert!(matches!(
+        d2("offset(r = 3) square(5);"),
+        Shape2D::Offset {
+            join: Join2D::Round,
+            ..
+        }
+    ));
+    // `delta` (named, no `r`) → MITERED sharp corners.
+    assert!(matches!(
+        d2("offset(delta = 2) square(5);"),
+        Shape2D::Offset { delta, join: Join2D::Miter, .. } if delta == 2.0
+    ));
+    // `delta` + `chamfer = true` → BEVELED.
+    assert!(matches!(
+        d2("offset(delta = 2, chamfer = true) square(5);"),
+        Shape2D::Offset {
+            join: Join2D::Bevel,
+            ..
+        }
+    ));
+    // `r` BEATS `delta` — OpenSCAD (verified: offset(r=2, delta=9) renders as r=2, rounded).
+    assert!(matches!(
+        d2("offset(r = 2, delta = 9) square(5);"),
+        Shape2D::Offset { delta, join: Join2D::Round, .. } if delta == 2.0
+    ));
+}
+
+#[test]
+fn offset_is_a_fixed_2d_op() {
+    // A 3D child is IGNORED with just "Ignoring 3D child object for 2D operation" (NO "Mixing" — offset's
+    // dimension is fixed at 2D), yielding an empty 2D offset. Verified vs OpenSCAD 2026.06.12.
+    assert!(matches!(
+        d2("offset(2) cube(5);"),
+        Shape2D::Offset { child, .. } if matches!(*child, Shape2D::Empty)
+    ));
+    assert_eq!(
+        warnings("offset(2) cube(5);"),
+        ["Ignoring 3D child object for 2D operation"]
+    );
+    // A NULL child (`{}`) → an empty 2D offset, SILENTLY (no "Ignoring" — nothing there to ignore).
+    assert!(matches!(
+        d2("offset(2) { }"),
+        Shape2D::Offset { child, .. } if matches!(*child, Shape2D::Empty)
+    ));
+    assert!(warnings("offset(2) { }").is_empty());
+}
+
+#[test]
+fn offset_with_no_r_or_delta_is_the_identity() {
+    use fab_lang::Join2D;
+    // `offset()` with neither `r` nor `delta` → a zero (identity) offset — no change to the outline.
+    assert!(matches!(
+        d2("offset() square(5);"),
+        Shape2D::Offset { delta, join: Join2D::Miter, .. } if delta == 0.0
+    ));
+}
+
 // ─────────────────────── 2D/3D MIXING — every clause vs OpenSCAD 2026.06.12 ───────────────────────
 
 #[test]
@@ -331,8 +400,8 @@ fn color_over_2d_is_loud() {
 
 #[test]
 fn deferred_2d_bridge_modules_are_loud() {
-    // The 2D↔3D bridges + offset are the NEXT J.3 tasks — each fails LOUD (naming its feature + task),
-    // never silently nothing. (Their full semantics land in J.3.3–J.3.6.)
+    // The 2D↔3D bridges are the NEXT J.3 tasks — each fails LOUD (naming its feature + task), never
+    // silently nothing. (Their semantics land in J.3.4–J.3.6; `offset` is wired as of J.3.3.)
     let deferred =
         |src: &str| matches!(evaluate_geometry(src).unwrap_err(), Error::Unimplemented(_));
     assert!(deferred("linear_extrude(5) square(2);"));
@@ -340,7 +409,6 @@ fn deferred_2d_bridge_modules_are_loud() {
         "rotate_extrude() translate([2, 0]) circle(1, $fn = 8);"
     ));
     assert!(deferred("projection() cube(2);"));
-    assert!(deferred("offset(1) square(2);"));
 }
 
 #[test]

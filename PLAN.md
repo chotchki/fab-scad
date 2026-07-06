@@ -80,7 +80,7 @@ added 2026-07-05.
   - [x] J.3.1 - DECISION + 2D backend seam: Manifold CrossSection for all 2D/hull/extrude/projection (zero new geometry deps — bundles Clipper2, the lib OpenSCAD 2021+ uses). GeoNode↔CrossSection; note in SPEC
   - [x] J.3.2 - 2D primitives square/circle/polygon → Shape2D node; circle uses our $fn fragment math for parity
     - [x] J.3.2.1 - J.3.2.1 - eval-wire: recognize 2D primitives + thread Geo{D2,D3} through the geometry pass
-  - [ ] J.3.3 - 2D booleans + offset over 2D children (CrossSection ops)
+  - [x] J.3.3 - 2D booleans + offset over 2D children (CrossSection ops)
   - [ ] J.3.4 - linear_extrude (height/twist/scale/slices) → 3D; tessellation parity MEASURED vs oracle (Manifold's if the metric tolerates, else our loft)
   - [ ] J.3.5 - rotate_extrude (angle, $fn) → 3D; reuse the ring/segment math
   - [ ] J.3.6 - projection(cut) 3D→2D via slice_to_cross_section

@@ -1107,6 +1107,23 @@ fn transform_of(matrix: Affine, child: Geo) -> Geo {
     }
 }
 
+/// Coerce a child to 2D for a FIXED-2D operation (`offset`; later `linear_extrude` / `rotate_extrude`).
+/// A 2D child is taken as-is. A real 3D child is IGNORED with OpenSCAD's `Ignoring 3D child object for 2D
+/// operation` warning — note NO `Mixing` warning, unlike a dimension-DISCOVERING group: the op's
+/// dimension is fixed, so there's no mix to report — and the result is the empty region. A null child
+/// (`{}`) is the empty region, silently. Verified vs OpenSCAD 2026.06.12 (`offset(2) cube(5)` → exactly
+/// that one warning + an empty 2D result).
+fn force_2d(child: Geo, ctx: &Ctx) -> Shape2D {
+    match child {
+        Geo::D2(shape) => shape,
+        Geo::D3(GeoNode::Empty) => Shape2D::Empty, // a null child → empty, no warning
+        Geo::D3(_) => {
+            ctx.warn("Ignoring 3D child object for 2D operation".to_string());
+            Shape2D::Empty
+        }
+    }
+}
+
 /// Iterate a `for`/`intersection_for` over its loop-variable ARGS (a Cartesian PRODUCT for multiple
 /// vars), evaluating the body's geometry once per binding tuple and pushing each iteration's node.
 /// Recursion depth = the number of loop vars (parse-bounded), so it can't overflow.
@@ -1525,6 +1542,25 @@ fn eval_stmt<'a>(
                     ));
                 }
             }
+        }
+        // `offset()` — grow/shrink a 2D outline (J.3.3). A FIXED-2D op: its child is coerced to 2D
+        // ([`force_2d`] — a 3D child is ignored-with-warning, yielding empty). `r` (positional / `r=`) →
+        // ROUNDED, `$fn`-faceted; else `delta=` → MITERED, or BEVELED with `chamfer = true`; `r` beats
+        // `delta` ([`geo::resolve_offset`]). The `$fn` context rides the call's child scope (`$`-args).
+        StmtKind::Module(mi) if mi.name == "offset" => {
+            let (positional, named, child_scope) = module::eval_args(mi, scope, ctx)?;
+            let refs: Vec<&Stmt> = mi.children.iter().collect();
+            let shape = force_2d(
+                union_of(eval_nodes(&refs, ctx, scope, global, island)?, ctx),
+                ctx,
+            );
+            let (delta, join, segments) = geo::resolve_offset(&positional, &named, &child_scope);
+            nodes.push(Geo::D2(Shape2D::Offset {
+                delta,
+                join,
+                segments,
+                child: Box::new(shape),
+            }));
         }
         // `color()` — set the subtree's display color (BOSL2-critical, J.2.8). An INVALID color (unknown
         // name, wrong arg type) INHERITS: no Color node, just the children (OpenSCAD's -1 sentinel),

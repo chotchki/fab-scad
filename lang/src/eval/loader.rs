@@ -156,15 +156,19 @@ pub(super) fn load(
                                 need.from_dir.display()
                             ))
                         })?;
-                    let source = std::fs::read_to_string(&id).map_err(|e| {
+                    let text = std::fs::read_to_string(&id).map_err(|e| {
                         // Defensive, never-panic: `resolve` already canonicalized this as a readable file,
                         // so a failure here is a TOCTOU race (deleted / perms changed between resolve and
                         // read). This — and the canonicalize/read above — are the SHELL's IO, off the pure
                         // core's coverage.
                         crate::Error::Load(format!("{}: {e}", id.display()))
                     })?;
+                    // Parse ONCE here, not on every fixpoint pass: the shell caches the parsed AST so
+                    // `resolve_graph` clones it (cheap) instead of re-lexing a big library (`std.scad`'s
+                    // graph) once per BFS level.
+                    let program = parse(&text)?;
                     let dir = id.parent().unwrap_or(Path::new(".")).to_path_buf();
-                    provided.insert(key, ProvidedSource { id, dir, source });
+                    provided.insert(key, ProvidedSource { id, dir, program });
                 }
             }
         }
@@ -179,13 +183,13 @@ pub(super) struct ScadNeed {
     pub raw: String,
 }
 
-/// A source the shell has resolved + read: `id` is its canonical path (the opaque dedup/cycle-break key
-/// the pure resolver compares by, never canonicalizing itself), `dir` its directory (the base for ITS own
-/// relative refs), `source` the text.
+/// A source the shell has resolved + read + PARSED: `id` is its canonical path (the opaque dedup/cycle-break
+/// key the pure resolver compares by, never canonicalizing itself), `dir` its directory (the base for ITS
+/// own relative refs), `program` the parsed AST (parsed once by the shell; resolve_graph clones it).
 struct ProvidedSource {
     id: PathBuf,
     dir: PathBuf,
-    source: String,
+    program: Program,
 }
 
 /// The sources the shell has supplied so far, keyed by the `(requesting dir, raw ref)` the resolver asks
@@ -241,7 +245,7 @@ fn resolve_graph(
                 i // parse-once: a diamond / back-reference reuses the existing node
             } else {
                 let node = Node {
-                    program: parse(&src.source)?,
+                    program: src.program.clone(), // shell parsed it once; clone ≪ re-parse per pass
                     dir: src.dir.clone(),
                     links: BTreeMap::new(),
                 };

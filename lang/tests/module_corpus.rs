@@ -110,9 +110,19 @@ fn recursive_module_terminates() {
 
 /// A module with NO base case recurses forever — the depth guard bails LOUD instead of crashing the
 /// process on a blown host stack (the Safari-cliff doctrine for the statement side).
+///
+/// Reaching the guard means `MAX_MODULE_DEPTH` (256) host-recursive statement frames on the stack. Release
+/// frames are small enough that 256 fit on any real stack (the guard fires first), but cargo-llvm-cov's
+/// INSTRUMENTED frames are fat enough to blow a default 2MB test thread before depth 256 — so run the
+/// eval on a thread with headroom. This is a coverage-build accommodation, not a production limit.
 #[test]
 fn runaway_module_recursion_is_loud() {
-    let err = evaluate_geometry("module inf() inf(); inf();").unwrap_err();
+    let err = std::thread::Builder::new()
+        .stack_size(32 * 1024 * 1024)
+        .spawn(|| evaluate_geometry("module inf() inf(); inf();").unwrap_err())
+        .unwrap()
+        .join()
+        .unwrap();
     assert!(
         matches!(&err, Error::Unimplemented(m) if m.contains("recursion too deep")),
         "expected a LOUD depth-guard error, got {err:?}"
@@ -125,6 +135,27 @@ fn unknown_module_is_loud() {
     assert!(matches!(
         evaluate_geometry("not_a_module();").unwrap_err(),
         Error::Unimplemented(m) if m.contains("unknown module")
+    ));
+}
+
+/// `let(...) children` as a STATEMENT (I.9.6): binds vars for its children SEQUENTIALLY (a later binding
+/// sees the earlier ones), including the `$`-context BOSL2's `attachable` sets on the geometry it wraps.
+/// No geometry of its own — the statement sibling of the `let` EXPRESSION, a pure scope wrapper.
+#[test]
+fn statement_let_binds_children() {
+    // the bound var reaches the child primitive
+    assert_eq!(extent("let(a = 3) cube(a);"), 3.0);
+    // SEQUENTIAL binding: `b` sees `a` (bindings resolve left-to-right in the growing scope)
+    assert_eq!(extent("let(a = 2, b = a + 1) cube(b);"), 3.0);
+    // a `$`-binding reaches the geometry exactly like passing it as an arg — attachable's whole trick
+    assert_eq!(
+        evaluate("let($fn = 8) sphere(10);").unwrap(),
+        evaluate("sphere(10, $fn = 8);").unwrap()
+    );
+    // it wraps MULTIPLE children (a block), all under the bindings → a union
+    assert!(matches!(
+        evaluate_geometry("let(a = 1) { cube(a); translate([2, 0, 0]) cube(a); }").unwrap(),
+        GeoNode::Union(_)
     ));
 }
 

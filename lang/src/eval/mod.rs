@@ -1313,6 +1313,19 @@ fn eval_stmt<'a>(
         StmtKind::Module(mi) if mi.name == "children" => {
             nodes.push(eval_children(mi, scope, global, ctx)?);
         }
+        // `let(a=1,b=2) children` as a STATEMENT (I.9.6) — bind the args SEQUENTIALLY (a later binding
+        // sees the earlier ones) into a child scope, then render the children there. The statement
+        // sibling of the `let` EXPRESSION (I.3.1); BOSL2's `attachable` uses it to set the `$`-context
+        // (`$color`, `$tag`, …) its managed children render under. No geometry of its own — just a scope.
+        StmtKind::Module(mi) if mi.name == "let" => {
+            let mut child = scope.child();
+            for arg in &mi.args {
+                let value = eval_with_ctx(&arg.value, &child, ctx)?;
+                child.bind(arg.name.as_deref().unwrap_or(""), value);
+            }
+            let refs: Vec<&Stmt> = mi.children.iter().collect();
+            nodes.push(union_of(eval_nodes(&refs, ctx, &child, global, island)?));
+        }
         // `for` / `intersection_for`: bind the loop variable(s) over a range/vector, evaluate the body
         // per iteration, and union (or intersect) the results (I.3.3 — the statement half of control
         // flow). Multiple loop vars nest as a product, like the comprehension `for`.

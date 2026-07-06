@@ -6,8 +6,10 @@
 //! `vec + vec` silently TRUNCATES to the shorter, `%` is `fmod` (sign of dividend), `^` is `pow`,
 //! cross-type `==`/`!=` never coerce (`1 == true` → false), cross-type `< <= > >=` → `undef`.
 //!
-//! **[VERIFY at G.3.6]** `&&`/`||` are evaluated NON-short-circuit here (both operands already
-//! evaluated by the stack machine); if OpenSCAD short-circuits, `true || <erroring>` diverges.
+//! `&&`/`||` DO short-circuit (OpenSCAD does) — the stack machine's `ShortCircuit` task decides whether
+//! the RHS runs; the `And`/`Or` arms here only combine the both-evaluated case. Vector/matrix `*` is the
+//! full linear algebra (dot / matrix products) built on the lane-based `dot` (vectorizable, not
+//! OpenSCAD's serial sum — the ~1-ULP difference is under the differential metric's float tolerance).
 
 use std::cmp::Ordering;
 use std::rc::Rc;
@@ -18,7 +20,7 @@ use crate::parser::{BinOp, UnOp};
 /// Apply a binary operator to two already-evaluated values. Infallible (bad types → `Undef`).
 #[must_use]
 pub fn apply_binary(op: BinOp, a: Value, b: Value) -> Value {
-    use Value::{Num, NumList};
+    use Value::{List, Num, NumList};
     match op {
         BinOp::Add => match (a, b) {
             (Num(x), Num(y)) => Num(x + y),
@@ -35,14 +37,37 @@ pub fn apply_binary(op: BinOp, a: Value, b: Value) -> Value {
             (Num(s), NumList(v)) | (NumList(v), Num(s)) => {
                 Value::NumList(v.iter().map(|e| e * s).collect())
             }
+            // scalar × a NESTED / heterogeneous list broadcasts element-wise, RECURSIVELY (OpenSCAD's
+            // `multvecnum` multiplies each entry via `*`, so `0*[[..],[..]]` = `[0*[..], 0*[..]]`).
+            (Num(s), List(v)) | (List(v), Num(s)) => Value::list(
+                v.iter()
+                    .map(|e| apply_binary(BinOp::Mul, Num(s), e.clone()))
+                    .collect::<Vec<_>>(),
+            ),
             // equal-length non-empty number vectors → DOT PRODUCT (a scalar), NOT element-wise
             (NumList(x), NumList(y)) if !x.is_empty() && x.len() == y.len() => Num(dot(&x, &y)),
+            // linear algebra on vectors (NumList) and matrices (List-of-NumList), per OpenSCAD's
+            // `multiply_visitor`: vector×matrix, matrix×vector, matrix×matrix. Empty → undef.
+            (NumList(v), List(m)) if !v.is_empty() && !m.is_empty() => vec_times_mat(&v, &m),
+            (List(m), NumList(v)) if !m.is_empty() && !v.is_empty() => mat_times_vec(&m, &v),
+            (List(x), List(y)) if !x.is_empty() && !y.is_empty() => mat_times_mat(&x, &y),
             _ => Value::Undef,
         },
         BinOp::Div => match (a, b) {
             (Num(x), Num(y)) => Num(x / y), // IEEE: 1/0 → inf, 0/0 → NaN
             (NumList(v), Num(s)) => Value::NumList(v.iter().map(|e| e / s).collect()),
             (Num(s), NumList(v)) => Value::NumList(v.iter().map(|e| s / e).collect()),
+            // nested list ÷ scalar (and scalar ÷ nested list) recurse element-wise, like OpenSCAD's `/`.
+            (List(v), Num(s)) => Value::list(
+                v.iter()
+                    .map(|e| apply_binary(BinOp::Div, e.clone(), Num(s)))
+                    .collect::<Vec<_>>(),
+            ),
+            (Num(s), List(v)) => Value::list(
+                v.iter()
+                    .map(|e| apply_binary(BinOp::Div, Num(s), e.clone()))
+                    .collect::<Vec<_>>(),
+            ),
             _ => Value::Undef,
         },
         BinOp::Mod => match (a, b) {
@@ -111,6 +136,70 @@ fn dot(a: &[f64], b: &[f64]) -> f64 {
         lanes[lane] += x * y;
     }
     (lanes[0] + lanes[1]) + (lanes[2] + lanes[3])
+}
+
+/// The `f64` slice of an all-number vector (a `NumList` row), or `None` if `v` isn't one. Matrix
+/// multiplication is `undef` on a non-rectangular / non-numeric operand (OpenSCAD warns + returns undef),
+/// and our repr invariant guarantees an all-number vector is always the `NumList` fast path.
+fn num_row(v: &Value) -> Option<&[f64]> {
+    match v {
+        Value::NumList(xs) => Some(xs),
+        _ => None,
+    }
+}
+
+/// Matrix × vector: `out[i] = mat[i] · vec` (OpenSCAD `multmatvec`). Every row must be numeric and
+/// `vec`-length (rectangular); otherwise `undef`. The per-row `dot` is the lane-based (vectorizable) one.
+fn mat_times_vec(mat: &[Value], vec: &[f64]) -> Value {
+    let mut out = Vec::with_capacity(mat.len());
+    for row in mat {
+        match num_row(row) {
+            Some(r) if r.len() == vec.len() => out.push(dot(r, vec)),
+            _ => return Value::Undef,
+        }
+    }
+    Value::num_list(out)
+}
+
+/// Vector × matrix: `out[j] = Σ_i vec[i]·mat[i][j]` (OpenSCAD `multvecmat`). Requires `vec.len() ==
+/// mat.len()` (vector length == matrix row count) and a rectangular, all-numeric matrix. Columns are
+/// gathered so the reduction reuses the lane-based `dot`.
+fn vec_times_mat(vec: &[f64], mat: &[Value]) -> Value {
+    if vec.len() != mat.len() {
+        return Value::Undef;
+    }
+    let Some(rows) = mat.iter().map(num_row).collect::<Option<Vec<&[f64]>>>() else {
+        return Value::Undef;
+    };
+    let cols = rows[0].len();
+    if rows.iter().any(|r| r.len() != cols) {
+        return Value::Undef;
+    }
+    let mut col = vec![0.0; rows.len()];
+    let mut out = Vec::with_capacity(cols);
+    for j in 0..cols {
+        for (i, r) in rows.iter().enumerate() {
+            col[i] = r[j];
+        }
+        out.push(dot(vec, &col));
+    }
+    Value::num_list(out)
+}
+
+/// Matrix × matrix: each left ROW is a vector times the right matrix (OpenSCAD folds it exactly this
+/// way). Left column count must match right row count; a non-numeric row → `undef`.
+fn mat_times_mat(a: &[Value], b: &[Value]) -> Value {
+    let mut out = Vec::with_capacity(a.len());
+    for row in a {
+        let Some(r) = num_row(row) else {
+            return Value::Undef;
+        };
+        match vec_times_mat(r, b) {
+            Value::Undef => return Value::Undef,
+            v => out.push(v),
+        }
+    }
+    Value::list(out)
 }
 
 /// Ordering comparison. CROSS-type (`1 < "a"`) is `undef` — a type error. SAME orderable type

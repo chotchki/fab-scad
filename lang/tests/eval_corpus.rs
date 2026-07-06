@@ -258,6 +258,41 @@ fn deferred_constructs_are_loud() {
 }
 
 #[test]
+fn matrix_and_vector_multiplication() {
+    // OpenSCAD's `*` on lists is full linear algebra — the machinery BOSL2's affine transforms + is_matrix
+    // live on (I.9.2). A matrix is a List-of-NumList; `mat` builds one from rows.
+    let mat = |rows: &[&[f64]]| {
+        Value::list(
+            rows.iter()
+                .map(|r| Value::num_list(r.to_vec()))
+                .collect::<Vec<_>>(),
+        )
+    };
+    // scalar × a NESTED list broadcasts recursively — the `0*matrix` that `is_consistent`/`is_matrix` need.
+    assert_eq!(ev("0*[[1,0],[0,1]]"), mat(&[&[0.0, 0.0], &[0.0, 0.0]]));
+    assert_eq!(ev("[[2,4],[6,8]] / 2"), mat(&[&[1.0, 2.0], &[3.0, 4.0]])); // nested ÷ scalar
+    assert_eq!(ev("2/[[1,2],[4,8]]"), mat(&[&[2.0, 1.0], &[0.5, 0.25]])); // scalar ÷ nested list
+    // matrix × matrix, matrix × vector, vector × matrix
+    assert_eq!(
+        ev("[[1,0],[0,1]] * [[2,0],[0,3]]"),
+        mat(&[&[2.0, 0.0], &[0.0, 3.0]])
+    );
+    assert_eq!(ev("[[1,2],[3,4]] * [1,1]"), list(&[3.0, 7.0])); // matrix × vector
+    assert_eq!(ev("[1,1] * [[1,2],[3,4]]"), list(&[4.0, 6.0])); // vector × matrix
+    assert_eq!(ev("[[1,0,0,0],[0,1,0,5]] * [1,2,3,1]"), list(&[1.0, 7.0])); // affine row·vec
+    // dimension / rectangularity guards → undef (OpenSCAD warns + returns undef)
+    assert_eq!(ev("[[1,2]] * [1,2,3]"), Value::Undef); // matrix cols 2 ≠ vector length 3
+    assert_eq!(ev("[[1,2],[3]] * [1,1]"), Value::Undef); // non-rectangular matrix
+    assert_eq!(ev("[[1,2],[3,4]] * [[1,2,3]]"), Value::Undef); // left cols 2 ≠ right rows 1
+    assert_eq!(ev("[1,1,1] * [[1,2],[3,4]]"), Value::Undef); // vector length 3 ≠ matrix row count 2
+    // a non-numeric row anywhere → undef, at each product's rectangularity guard:
+    assert_eq!(ev(r#"[[1,2],"x"] * [1,1]"#), Value::Undef); // matrix × vector, bad row
+    assert_eq!(ev(r#"[1,1] * [[1,2],"x"]"#), Value::Undef); // vector × matrix, bad row
+    assert_eq!(ev("[1,1] * [[1,2],[3,4,5]]"), Value::Undef); // vector × matrix, ragged rows
+    assert_eq!(ev(r#"[[1,2],"x"] * [[1,2],[3,4]]"#), Value::Undef); // matrix × matrix, bad left row
+}
+
+#[test]
 fn member_access_reads_vector_components() {
     // `.x`/`.y`/`.z` → index 0/1/2 (OpenSCAD's named components; BOSL2 uses them everywhere) — I.9.1.
     assert_eq!(ev("[10,20,30].x"), num(10.0));

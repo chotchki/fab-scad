@@ -259,6 +259,14 @@ Layered, cheapest-first; each layer catches what the previous can't:
   error arms and test-side `matches!`/`assert` failure arms are structurally unreachable, so 100%
   regions would outlaw idiomatic `?`/`matches!`). Defensive branches get covered by testing the
   public decode helpers directly; genuinely-dead branches get DELETED, not excluded.
+  **The IO boundary is the one deliberate exception on the EVAL side (M.4/M.6):** fab-lang is PURE —
+  all `std::fs` lives in ONE `eval::io` module (the needs-fixpoint shell), whose lines are DOCUMENTED
+  off the gate. The justification is narrow: `std::fs` FAILURE paths (a file deleted between resolve
+  and read, a permissions flip) are TOCTOU races the corpus can't reproduce deterministically. So the
+  pure core (parser/lexer/eval/loader) is `std::fs`-free and stays at the functions-100 + lcov-DA-line
+  discipline; the io shell is the seam the doctrine draws its line at. (When fab-web first builds
+  fab-lang to wasm, the io module goes behind a feature + a CI `--no-default-features` lane proves the
+  core compiles without it — machine-checking the boundary instead of documenting it.)
 - **Interface tests at the Manifold boundary — soundness split (adjusted from the miri
   comment):** miri cannot execute foreign code, so it can't watch real FFI calls. The goal
   stands; the mechanism splits: (a) the geometry backend sits behind a trait; interface

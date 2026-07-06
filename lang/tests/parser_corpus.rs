@@ -301,6 +301,7 @@ fn syntax_errors_point_and_name() {
     assert!(err("v=;").contains("expression")); // no expression
     assert!(err("1;").contains("statement")); // number can't start a statement
     assert!(err("cube(2) 5;").contains("module name")); // bad single child
+    assert!(err("v=let(a=1);").contains("let")); // a `let` with no body is invalid
 }
 
 /// A parse error carries a "while parsing …" BREADCRUMB — the grammar path the parser was on, so a
@@ -591,9 +592,17 @@ fn every_recursive_construct_guards_depth() {
             format!("v={}0;", "function(x) ".repeat(n)),
             "function-literal",
         ),
-        (format!("v={}0;", "let(a=1) ".repeat(n)), "let-expr"),
-        (format!("v={}0;", "assert(1) ".repeat(n)), "assert-expr"),
-        (format!("v={}0;", "echo(1) ".repeat(n)), "echo-expr"),
+        // A let/assert/echo prefix CHAIN parses iteratively (asserted below) — but genuine NESTING still
+        // recurses + must still guard. Parenthesizing each body BREAKS the chain (the `(` isn't a chain
+        // prefix), forcing per-level recursion: `let(a=1)(let(a=1)(…0…))`. Same for a let bound to a let.
+        (
+            format!("v={}0{};", "let(a=1)(".repeat(n), ")".repeat(n)),
+            "nested (non-chain) let",
+        ),
+        (
+            format!("v={}0{};", "assert(1)(".repeat(n), ")".repeat(n)),
+            "nested (non-chain) assert",
+        ),
         (
             format!("v={}0{};", "1?".repeat(n), ":0".repeat(n)),
             "ternary",
@@ -627,6 +636,22 @@ fn every_recursive_construct_guards_depth() {
             err(&src).contains("deeply"),
             "{what} must trip the depth guard, never overflow"
         );
+    }
+
+    // let/assert/echo prefix CHAINS parse ITERATIVELY (OpenSCAD's series-of-statements idiom — a
+    // single-expression function chains `let(…) assert(…) echo(…)` 50-100+ deep to fake local variables;
+    // BOSL2's nurbs.scad needs this). So a deep chain PARSES + frees without overflow — it does NOT guard.
+    for (src, what) in [
+        (format!("v={}0;", "let(a=1) ".repeat(n)), "let chain"),
+        (format!("v={}0;", "assert(1) ".repeat(n)), "assert chain"),
+        (format!("v={}0;", "echo(1) ".repeat(n)), "echo chain"),
+        (
+            format!("v={}0;", "let(a=1) assert(1) echo(1) ".repeat(n)),
+            "mixed chain",
+        ),
+    ] {
+        let prog = parse(&src).unwrap_or_else(|e| panic!("{what} must parse, not guard: {e}"));
+        drop(prog); // and free without a teardown overflow (non-recursive Drop)
     }
 }
 

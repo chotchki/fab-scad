@@ -25,9 +25,7 @@ pub(crate) fn expr(i: &mut Tokens<'_, '_>, depth: usize) -> ModalResult<Expr> {
     }
     match peek_kind(i) {
         Some(TokenKind::Function) => function_literal(i, depth),
-        Some(TokenKind::Let) => let_expr(i, depth),
-        Some(TokenKind::Assert) => assert_or_echo(i, depth, false),
-        Some(TokenKind::Echo) => assert_or_echo(i, depth, true),
+        Some(TokenKind::Let | TokenKind::Assert | TokenKind::Echo) => chain_expr(i, depth),
         _ => ternary(i, depth),
     }
 }
@@ -50,44 +48,85 @@ fn function_literal(i: &mut Tokens<'_, '_>, depth: usize) -> ModalResult<Expr> {
 }
 
 /// A `let(bindings) body` expression (parser.y:345).
-fn let_expr(i: &mut Tokens<'_, '_>, depth: usize) -> ModalResult<Expr> {
-    let start = i.current_token_start();
-    bump(i)?; // 'let'
-    expect(i, TokenKind::LParen, "'(' after `let`")?;
-    let bindings = arg_list(i, depth + 1)?;
-    expect(i, TokenKind::RParen, "closing ')' of the `let` bindings")?;
-    let body = expr(i, depth + 1)?;
-    Ok(Expr {
-        kind: ExprKind::Let {
-            bindings,
-            body: Box::new(body),
-        },
-        span: start..i.previous_token_end(),
-    })
-}
-
-/// An `assert(args) body?` or `echo(args) body?` expression (parser.y:350-359). The trailing body is
-/// OPTIONAL (`expr_or_empty`): present iff the next token can START an expression.
-fn assert_or_echo(i: &mut Tokens<'_, '_>, depth: usize, is_echo: bool) -> ModalResult<Expr> {
-    let start = i.current_token_start();
-    bump(i)?; // 'assert' / 'echo'
-    expect(i, TokenKind::LParen, "'(' after `assert`/`echo`")?;
-    let args = arg_list(i, depth + 1)?;
-    expect(i, TokenKind::RParen, "closing ')' of the arguments")?;
-    let body = if starts_expr(peek_kind(i)) {
-        Some(Box::new(expr(i, depth + 1)?))
+/// A `let`/`assert`/`echo` prefix CHAIN + its optional final body (parser.y:337-359), parsed
+/// ITERATIVELY — a LOOP over the prefixes, never per-link recursion — then right-folded into the nested
+/// AST. OpenSCAD functions are single-expression, so this chain is THE idiom for a series of statements:
+/// `let` binds a local, `assert` checks, `echo` prints — each evaluated, then continuing to the body
+/// (an `assert`/`echo` is just an anonymous step, evaluated-not-saved). The three prefixes aren't special
+/// — they fold identically. BOSL2 writes them 50-100 deep to emulate locals, and recursing once per link
+/// would blow the expression depth cap; the loop keeps parse depth O(1). Consecutive `let`s additionally
+/// MERGE into one multi-binding node (`let(a) let(b)` == `let(a, b)`, same left-to-right binding).
+fn chain_expr(i: &mut Tokens<'_, '_>, depth: usize) -> ModalResult<Expr> {
+    enum Step {
+        Let(Vec<Arg>),
+        Assert(Vec<Arg>),
+        Echo(Vec<Arg>),
+    }
+    let mut steps: Vec<(Step, usize)> = Vec::new(); // each step + its start byte, for the node span
+    loop {
+        let at = i.current_token_start();
+        match peek_kind(i) {
+            Some(TokenKind::Let) => {
+                bump(i)?; // 'let'
+                expect(i, TokenKind::LParen, "'(' after `let`")?;
+                let bindings = arg_list(i, depth + 1)?;
+                expect(i, TokenKind::RParen, "closing ')' of the `let` bindings")?;
+                match steps.last_mut() {
+                    Some((Step::Let(prev), _)) => prev.extend(bindings), // fold a `let` run flat
+                    _ => steps.push((Step::Let(bindings), at)),
+                }
+            }
+            Some(k @ (TokenKind::Assert | TokenKind::Echo)) => {
+                bump(i)?; // 'assert' / 'echo'
+                expect(i, TokenKind::LParen, "'(' after `assert`/`echo`")?;
+                let args = arg_list(i, depth + 1)?;
+                expect(i, TokenKind::RParen, "closing ')' of the arguments")?;
+                let step = if k == TokenKind::Echo {
+                    Step::Echo(args)
+                } else {
+                    Step::Assert(args)
+                };
+                steps.push((step, at));
+            }
+            _ => break,
+        }
+    }
+    // The final body: an expression if one follows, else none — valid ONLY when the innermost step is an
+    // `assert`/`echo` (whose body is optional); a `let` with no body errors when it's folded below.
+    let mut body: Option<Expr> = if starts_expr(peek_kind(i)) {
+        Some(labeled(i, "a `let`/`assert`/`echo` body", |i| {
+            expr(i, depth + 1)
+        })?)
     } else {
         None
     };
-    let kind = if is_echo {
-        ExprKind::Echo { args, body }
-    } else {
-        ExprKind::Assert { args, body }
-    };
-    Ok(Expr {
-        kind,
-        span: start..i.previous_token_end(),
-    })
+    // Right-fold the steps outward: `let(a) assert(b) x` → Let{a, Assert{b, x}}.
+    for (step, at) in steps.into_iter().rev() {
+        let end = i.previous_token_end();
+        let kind = match step {
+            Step::Let(bindings) => match body.take() {
+                Some(b) => ExprKind::Let {
+                    bindings,
+                    body: Box::new(b),
+                },
+                None => return bail(i, "a `let` body"), // `let(a)` with nothing after is invalid
+            },
+            Step::Assert(args) => ExprKind::Assert {
+                args,
+                body: body.take().map(Box::new),
+            },
+            Step::Echo(args) => ExprKind::Echo {
+                args,
+                body: body.take().map(Box::new),
+            },
+        };
+        body = Some(Expr {
+            kind,
+            span: at..end,
+        });
+    }
+    // Dispatched on a let/assert/echo, so ≥1 step folded → `body` is always `Some` here.
+    body.map_or_else(|| bail(i, "a let/assert/echo chain"), Ok)
 }
 
 /// Whether `k` can begin an expression — the lookahead for `expr_or_empty`. Every token an `expr` can

@@ -646,3 +646,17 @@ fn evaluation_is_deterministic() {
     let expr = "1 + 2*3 - [1,2]*[3,4] + (true ? 10 : 20)";
     assert_eq!(ev(expr), ev(expr));
 }
+
+#[test]
+fn let_assert_echo_chain_evaluates_as_a_series() {
+    // A let/assert/echo chain as ONE expression — bind, check, echo, return: OpenSCAD's
+    // series-of-statements idiom that `chain_expr` folds. This proves the fold's SEMANTICS in one shot:
+    // the lets bind sequentially (b = a*3 = 6, so a's binding reached b), the assert HOLDS (else `ev`
+    // would panic on the eval error), the echo is a no-op on the value, and the body is `b + 1` = 7.
+    assert_eq!(
+        ev("let(a=2) let(b=a*3) assert(b==6) echo(b) b + 1"),
+        num(7.0)
+    );
+    // a FAILING assert in the chain aborts eval — LOUD, never a wrong value.
+    let _ = ev_err("let(a=1) assert(a==2) a");
+}

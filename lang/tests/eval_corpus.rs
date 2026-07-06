@@ -253,9 +253,20 @@ fn ranges_are_first_class_values() {
 #[test]
 fn deferred_constructs_are_loud() {
     assert!(matches!(ev_err("f(1)"), Error::Unimplemented(m) if m.contains("I.4"))); // unknown/builtin fn
-    assert!(matches!(ev_err("a.b"), Error::Unimplemented(m) if m.contains("I.1"))); // member access
     // (function literals + calling a function VALUE now evaluate — I.2.3.3; let → I.3.1; list
-    // comprehensions → I.3.2; assert / echo → I.5 — see echo_and_assert_evaluate below.)
+    // comprehensions → I.3.2; assert / echo → I.5; member access → I.9.1 below.)
+}
+
+#[test]
+fn member_access_reads_vector_components() {
+    // `.x`/`.y`/`.z` → index 0/1/2 (OpenSCAD's named components; BOSL2 uses them everywhere) — I.9.1.
+    assert_eq!(ev("[10,20,30].x"), num(10.0));
+    assert_eq!(ev("[10,20,30].y"), num(20.0));
+    assert_eq!(ev("[10,20,30].z"), num(30.0));
+    assert_eq!(ev("[1,2].z"), Value::Undef); // out of range → undef
+    assert_eq!(ev("a.x"), Value::Undef); // an unbound base → undef (not an error)
+    assert_eq!(ev("[1,2,3].w"), Value::Undef); // any other member name → undef
+    assert_eq!(ev("[[1,2],[3,4]].y.x"), num(3.0)); // chains: second element, then its x
 }
 
 #[test]
@@ -578,8 +589,8 @@ fn program_level_defers_are_loud() {
         ("nope_module();", "user module"), // an unknown module name — loud (typo / unimplemented)
         ("use <lib.scad>", "use/include"), // raw eval_program can't resolve it — loud
         ("include <lib.scad>", "use/include"),
-        ("x = a.b;", "I.1"), // an erroring assignment RHS propagates out of eval_stmt
-        ("{ y = a.b; }", "I.1"), // …and out of a block's inner statement
+        ("x = zz(1);", "I.4"), // an erroring assignment RHS (unknown fn) propagates out of eval_stmt
+        ("{ y = zz(1); }", "I.4"), // …and out of a block's inner statement
     ] {
         let prog = parse(src).expect("parses");
         let err = eval_program(&prog, &Scope::new()).unwrap_err();

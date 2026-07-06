@@ -198,6 +198,19 @@ pub(crate) fn index(base: Value, index: &Value) -> Value {
     }
 }
 
+/// Member access `v.x` / `v.y` / `v.z` → index 0 / 1 / 2 — OpenSCAD's named vector components (the only
+/// members it defines). Any other name → `undef`; the base rules (non-list, out-of-range → `undef`) are
+/// [`index`]'s. BOSL2 reads coordinates this way everywhere (`corner.x`, `shift.y`, `v.z`).
+pub(crate) fn member(base: Value, field: &str) -> Value {
+    let axis = match field {
+        "x" => 0.0,
+        "y" => 1.0,
+        "z" => 2.0,
+        _ => return Value::Undef,
+    };
+    index(base, &Value::Num(axis))
+}
+
 fn bitwise(lhs: Value, rhs: Value, combine: impl Fn(i64, i64) -> i64) -> Value {
     match (lhs, rhs) {
         (Value::Num(x), Value::Num(y)) => {

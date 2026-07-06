@@ -92,6 +92,8 @@ enum Task<'a> {
     VectorSplice(&'a [Expr]),
     /// Pop the index then the base, apply `base[index]`.
     Index,
+    /// Pop the base, apply member access `base.field` (`.x`/`.y`/`.z` → index 0/1/2).
+    Member(&'a str),
     /// Pop end, (step if `stepped`), start; build a range value.
     Range { stepped: bool },
     /// Pop the condition, then schedule the taken branch (in `scope`).
@@ -206,6 +208,10 @@ fn eval_with_global<'a>(
                 let index = values.pop().unwrap_or(Value::Undef);
                 let base = values.pop().unwrap_or(Value::Undef);
                 values.push(ops::index(base, &index));
+            }
+            Task::Member(field) => {
+                let base = values.pop().unwrap_or(Value::Undef);
+                values.push(ops::member(base, field));
             }
             Task::Range { stepped } => {
                 // pushed start, [step], end → pop end, [step], start.
@@ -356,10 +362,9 @@ fn eval_node<'a>(
             tasks.push(Task::Eval(index, scope.clone()));
             tasks.push(Task::Eval(base, scope.clone())); // evaluated first → base under index
         }
-        ExprKind::Member { .. } => {
-            return Err(crate::Error::Unimplemented(
-                "member access is not yet implemented (I.1)",
-            ));
+        ExprKind::Member { base, field } => {
+            tasks.push(Task::Member(field));
+            tasks.push(Task::Eval(base, scope.clone())); // base evaluated first, then `.field`
         }
         ExprKind::Range { start, step, end } => {
             // pushed so start evaluates first (bottom of the value stack), end last (top).

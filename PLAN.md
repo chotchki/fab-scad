@@ -55,7 +55,7 @@ added 2026-07-06.
   - [x] I.9.1 - Member access .x/.y/.z on vectors (ExprKind::Member) — deferred at I.1, now the next BOSL2 eval blocker
   - [x] I.9.2 - BOSL2 cyl → "Invalid transformation matrix" — a matrix helper (down/skew/up/multmatrix chain) diverges
   - [x] I.9.3 - BOSL2 cuboid → "Input to sum is non-numeric or inconsistent" — a list-build feeds sum() a non-numeric
-  - [ ] I.9.4 - BOSL2 sphere → "Bad arguments" — an arg-normalization assert fires (spherical primitive / attachable)
+  - [x] I.9.4 - BOSL2 sphere → "Bad arguments" — an arg-normalization assert fires (spherical primitive / attachable)
   - [x] I.9.5 - BOSL2 sphere/cyl/cuboid → "user-module recursion too deep" — unbounded recursion on the attachable path
   - [x] I.9.6 - BOSL2 attachable → `let(...) children()` used as a STATEMENT (module-form let)
 ## Phase J - scad-rs: geometry surface + cache
@@ -68,14 +68,28 @@ added 2026-07-05.
   - [x] J.2.2 - Boolean modules union/difference/intersection → the boolean GeoNodes over children
   - [x] J.2.3 - fab-scad tree-walker: GeoNode → Solid via GeometryBackend; rewire the FabLang differential driver through it
   - [ ] J.2.6 - polyhedron() primitive + oracle-matching validation semantics
+    - [ ] J.2.6.1 - polyhedron(points,faces,convexity) → Mesh Leaf in fab-lang: raw verts + fan-triangulated n-gon faces (OpenSCAD tessellation), no backend needed
+    - [ ] J.2.6.2 - polyhedron validation bug-for-bug: out-of-range face index / <3-vertex face / non-manifold → OpenSCAD warn-and-render vs error
+    - [ ] J.2.6.3 - Differential: spheroid + a VNF shape vs oracle (boolean-residual / vertex-multiset)
   - [ ] J.2.7 - Differential: CSG programs (transforms/booleans/multi-object/polyhedron) vs the oracle via boolean-residual
     - [x] J.2.7.1 - Harness: oracle-side re-import uses f32 MeshGL → boolean-result meshes fail; blocks the boolean differential
   - [x] J.2.8 - color() module → GeoNode::Color + Rgba vocab + CSS named-color table (BOSL2-critical)
   - [x] J.2.9 - Color propagation through Manifold (vertex props survive booleans) + oracle capture + differential
 - [ ] J.3 - 2D subsystem on Clipper2: square/circle/polygon/offset/projection + linear/rotate_extrude bridging 2D→3D with tessellation parity
   - Comment: Is clipper2 the right library for this? could manifold do it?
+  - [ ] J.3.1 - DECISION + 2D backend seam: Manifold CrossSection for all 2D/hull/extrude/projection (zero new geometry deps — bundles Clipper2, the lib OpenSCAD 2021+ uses). GeoNode↔CrossSection; note in SPEC
+  - [ ] J.3.2 - 2D primitives square/circle/polygon → Shape2D node; circle uses our $fn fragment math for parity
+  - [ ] J.3.3 - 2D booleans + offset over 2D children (CrossSection ops)
+  - [ ] J.3.4 - linear_extrude (height/twist/scale/slices) → 3D; tessellation parity MEASURED vs oracle (Manifold's if the metric tolerates, else our loft)
+  - [ ] J.3.5 - rotate_extrude (angle, $fn) → 3D; reuse the ring/segment math
+  - [ ] J.3.6 - projection(cut) 3D→2D via slice_to_cross_section
+  - [ ] J.3.7 - Differential: path/region-derived BOSL2 2D shapes vs oracle
 - [ ] J.4 - hull; import() via our STL/3MF readers; text/minkowski/surface = LOUD deferred stubs (blow up, complain, never silently wrong)
   - Comment: Text could be handled by https://github.com/pop-os/cosmic-text . I'm still researching minkowski.
+  - [ ] J.4.1 - hull() → Manifold hull/batch_hull over children (2D + 3D); unblocks cuboid chamfer/rounding + masks
+  - [ ] J.4.2 - import() via our STL/3MF readers (threemf/zip/quick-xml deps already present)
+  - [ ] J.4.3 - text() = LOUD deferred stub (never silently wrong); cosmic-text is the candidate — its own task
+  - [ ] J.4.4 - minkowski()/surface() = LOUD deferred stubs (never silently wrong); minkowski approach still open
 - [ ] J.5 - Content-addressed CSG cache: node hash = subtree + resolved params + reaching $-context; in-memory tier + hit-rate counters (the on-disk tier stays a storage decision)
 
 - [x] J.6 - Unify fab-scad's geom::V3 ([f64;3] orientation helpers) + printer-domain [f64;3] into fab_lang::Vec3
@@ -128,3 +142,4 @@ Parked 2026-07-04 for the scad-rs pivot — the workflow tool works and stays in
 - **Receipts ledger (docs/testing-cards.md): when a real bug lands, log which testing card caught it + why the rest missed — the ledger feeds the blog series, the proven-panic-free browser-safe claim and the FeOphant playbook. Start filling at K.1/L.2 when divergences flow.** — added 2026-07-05.
 - **Warning text bug-for-bug vs the oracle — the deferred half of I.5 (Message::Warning channel exists, empty)** — added 2026-07-05.
 - **Verify release builds actually emit SIMD/AVX for the lane-based dot + matrix accumulation** — added 2026-07-06.
+- **Explicit-stack STATEMENT machine: convert eval_stmt/call_user_module from host-recursion to an explicit work-stack (like the expression machine), retiring MAX_MODULE_DEPTH's stack-fragility — 'Safari cliff structurally impossible' on the statement side. Deferred at I.9.6 (production-safe at 256; do at the I/J boundary)** — added 2026-07-06.

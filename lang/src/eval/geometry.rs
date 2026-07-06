@@ -100,6 +100,32 @@ pub(crate) fn cube(size: [f64; 3], center: bool) -> Mesh {
     Mesh { verts, tris }
 }
 
+/// `polyhedron(points, faces)` → an indexed mesh (OpenSCAD `PolyhedronNode`, `primitives.cc`). Each face
+/// (a vertex-index loop) FAN-triangulates from its first vertex: `[i0,i1,…,in]` → `(i0,i1,i2)`,
+/// `(i0,i2,i3)`, … — OpenSCAD's exact triangulation. Winding is the PRODUCER's; OpenSCAD trusts the
+/// caller's clockwise-from-outside order and the harness canonicalizes for comparison, so we preserve
+/// index order. A face shorter than 3, or a triangle referencing an out-of-range vertex, is DROPPED here
+/// (no panic) — the exact OpenSCAD out-of-bounds ERROR + degenerate-face WARNING are the validation layer
+/// (J.2.6.2). `points` becomes the vertex table verbatim (unreferenced points are kept, as OpenSCAD does).
+#[must_use]
+pub(crate) fn polyhedron(points: Vec<Vec3>, faces: &[Vec<u32>]) -> Mesh {
+    let n = u32::try_from(points.len()).unwrap_or(u32::MAX);
+    let mut tris = Vec::new();
+    for face in faces {
+        // fan: (face[0], face[k], face[k+1]) for k in 1..len-1
+        for pair in face.windows(2).skip(1) {
+            let (a, b, c) = (face[0], pair[0], pair[1]);
+            if a < n && b < n && c < n {
+                tris.push(Tri::new(a, b, c));
+            }
+        }
+    }
+    Mesh {
+        verts: points,
+        tris,
+    }
+}
+
 /// `cylinder(h, r1, r2, center)` (OpenSCAD `CylinderNode`, `primitives.cc:251-308`). A ring collapses
 /// to an apex when its radius is 0 (cone / inverted cone).
 #[must_use]

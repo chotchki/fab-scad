@@ -204,3 +204,51 @@ fn evaluation_is_deterministic() {
     let src = "sphere(3, $fn = 16);";
     assert_eq!(mesh(src).verts, mesh(src).verts);
 }
+
+// ─────────────────────────────── polyhedron ──────────────────────────────────────────────────────
+
+#[test]
+fn polyhedron_vertices_and_fan_triangulation() {
+    // a tetrahedron: 4 points verbatim, 4 triangular faces → 4 tris
+    let tet = mesh(
+        "polyhedron(points=[[0,0,0],[1,0,0],[0,1,0],[0,0,1]], \
+         faces=[[0,2,1],[0,1,3],[1,2,3],[2,0,3]]);",
+    );
+    assert_eq!(tet.vert_count(), 4);
+    assert_eq!(tet.tri_count(), 4);
+    assert_eq!(
+        [tet.verts[1][0], tet.verts[1][1], tet.verts[1][2]],
+        [1.0, 0.0, 0.0]
+    ); // verbatim
+
+    // a square pyramid: the QUAD base fan-triangulates to 2, plus 4 triangular sides = 6
+    let pyr = mesh(
+        "polyhedron(points=[[0,0,0],[1,0,0],[1,1,0],[0,1,0],[0.5,0.5,1]], \
+         faces=[[0,1,2,3],[0,4,1],[1,4,2],[2,4,3],[3,4,0]]);",
+    );
+    assert_eq!(pyr.vert_count(), 5);
+    assert_eq!(pyr.tri_count(), 6);
+    // the base quad [0,1,2,3] fans from vertex 0: (0,1,2) then (0,2,3)
+    assert_eq!(pyr.tris[0].0, [0, 1, 2]);
+    assert_eq!(pyr.tris[1].0, [0, 2, 3]);
+}
+
+#[test]
+fn polyhedron_drops_bad_faces_without_panicking() {
+    // an out-of-range index (5, past the 3-vertex table) drops that triangle; a <3-vertex face drops too
+    let m = mesh("polyhedron(points=[[0,0,0],[1,0,0],[0,1,0]], faces=[[0,1,2],[0,1,5],[0,1]]);");
+    assert_eq!(m.vert_count(), 3); // points kept verbatim
+    assert_eq!(m.tri_count(), 1); // only [0,1,2] survives; the OOB and the 2-vertex face drop
+    // a negative index is out of range too (OpenSCAD's size_t cast overflows) → dropped
+    assert_eq!(
+        mesh("polyhedron(points=[[0,0,0],[1,0,0],[0,1,0]], faces=[[0,1,-1]]);").tri_count(),
+        0
+    );
+    // no points / no faces → an empty mesh, not an error
+    assert_eq!(mesh("polyhedron(points=[], faces=[]);").tri_count(), 0);
+    // a non-3-vector point (here a bare number) and a non-list face (a string) are each DROPPED — the
+    // malformed-entry arms — leaving the two good points + the one good face, whose refs then dangle:
+    let bad = mesh("polyhedron(points=[[0,0,0],[1,0,0],7], faces=[[0,1,2],\"x\"]);");
+    assert_eq!(bad.vert_count(), 2); // the number `7` isn't a point → dropped
+    assert_eq!(bad.tri_count(), 0); // face [0,1,2] refs the dropped point 2 → OOB → drops; "x" drops
+}

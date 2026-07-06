@@ -53,6 +53,7 @@ pub(super) fn eval_module<'a>(
         "sphere" => Ok(eval_sphere(&positional, &named, &child)),
         "cube" => Ok(eval_cube(&positional, &named)),
         "cylinder" => Ok(eval_cylinder(&positional, &named, &child)),
+        "polyhedron" => Ok(eval_polyhedron(&positional, &named)),
         _ => Err(crate::Error::Unimplemented(
             "unknown module — not a builtin primitive (sphere/cube/cylinder), transform, boolean, or a \
              defined user module (a typo, or a builtin still deferred past the current subset)",
@@ -122,4 +123,62 @@ fn get_radius(map: &BTreeMap<String, Value>, r_key: &str, d_key: &str) -> Option
 
 fn is_true(map: &BTreeMap<String, Value>, key: &str) -> bool {
     matches!(map.get(key), Some(Value::Bool(true)))
+}
+
+/// `polyhedron(points, faces, convexity)` → a mesh (J.2.6). `points` is a list of 3-vectors, `faces` a
+/// list of vertex-index loops; both feed [`geometry::polyhedron`], which fan-triangulates. `convexity` is
+/// a render hint we don't need. Malformed entries (a non-3 point, a bad index) drop, so a bad input
+/// yields a partial/empty mesh here — the exact OpenSCAD ERROR/WARNING is the validation layer (J.2.6.2).
+fn eval_polyhedron(positional: &[Value], named: &BTreeMap<String, Value>) -> Mesh {
+    let map = bind(positional, named, &["points", "faces", "convexity"]);
+    geometry::polyhedron(to_points(map.get("points")), &to_faces(map.get("faces")))
+}
+
+/// A `points` value → the vertex table: a list of numeric 3-vectors → `Vec3`s (a shorter or non-numeric
+/// entry is dropped, so its later face-references land out of range and drop too).
+fn to_points(v: Option<&Value>) -> Vec<crate::geom::Vec3> {
+    let Some(Value::List(items)) = v else {
+        return Vec::new();
+    };
+    items
+        .iter()
+        .filter_map(|p| match p {
+            Value::NumList(xs) if xs.len() >= 3 => {
+                Some(crate::geom::Vec3::new(xs[0], xs[1], xs[2]))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// A `faces` value → index loops: a list of numeric index lists (each a face). A non-numeric face is
+/// dropped; [`to_index`] maps each entry.
+fn to_faces(v: Option<&Value>) -> Vec<Vec<u32>> {
+    let Some(Value::List(items)) = v else {
+        return Vec::new();
+    };
+    items
+        .iter()
+        .filter_map(|f| match f {
+            Value::NumList(idx) => Some(idx.iter().map(|&i| to_index(i)).collect()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// A face's vertex index: a non-negative finite value truncates to its `u32` (OpenSCAD's `size_t` cast);
+/// anything else (negative, fractional-only is fine, non-finite) → `u32::MAX`, an out-of-range sentinel
+/// that [`geometry::polyhedron`] drops — matching OpenSCAD, where a bad index fails the face.
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "guarded: a non-negative finite index truncates to u32; everything else becomes the \
+    u32::MAX out-of-range sentinel"
+)]
+fn to_index(i: f64) -> u32 {
+    if i >= 0.0 && i.is_finite() {
+        i as u32
+    } else {
+        u32::MAX
+    }
 }

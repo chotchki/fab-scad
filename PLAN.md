@@ -115,6 +115,9 @@ added 2026-07-05.
 - [x] M.2 - M.2 - Pure loader: source table in, Scad needs out (static parse-time fixpoint)
 - [x] M.3 - M.3 - Eval-time File needs: import/surface emit needs + placeholder-continue
 - [ ] M.4 - M.4 - The IO shell: the outer fixpoint loop (the one place std::fs lives)
+  - [ ] M.4.2 - M.4.2 - The io module: outer fixpoint driver + thin wrappers
+  - [ ] M.4.3 - M.4.1 - Loader → pure: excise std::fs, surface Scad needs
+added 2026-07-06.
 - [ ] M.5 - M.5 - import()/surface() backend: readers fulfill File needs → Mesh
 - [ ] M.6 - M.6 - Differential + coverage close-out
 

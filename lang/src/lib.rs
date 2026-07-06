@@ -105,8 +105,7 @@ pub fn evaluate_file(path: &Path, library_paths: &[PathBuf]) -> Result<Mesh> {
 /// # Errors
 /// As [`evaluate_file`].
 pub fn evaluate_file_full(path: &Path, library_paths: &[PathBuf]) -> Result<Evaluation> {
-    let source = std::fs::read_to_string(path)
-        .map_err(|e| Error::Load(format!("{}: {e}", path.display())))?;
+    let source = eval::io::read_source(path)?;
     // The including-file dir. An empty parent (a bare `foo.scad`) resolves relative to CWD via the
     // loader's canonicalize, so no special-casing is needed beyond the parent-less root (`.`).
     let base_dir = path.parent().unwrap_or(Path::new("."));
@@ -164,8 +163,7 @@ pub fn evaluate_geometry(source: &str) -> Result<Geo> {
 /// # Errors
 /// As [`evaluate_file`], minus the single-primitive restriction.
 pub fn evaluate_geometry_file(path: &Path, library_paths: &[PathBuf]) -> Result<Geo> {
-    let source = std::fs::read_to_string(path)
-        .map_err(|e| Error::Load(format!("{}: {e}", path.display())))?;
+    let source = eval::io::read_source(path)?;
     let base_dir = path.parent().unwrap_or(Path::new("."));
     Ok(eval::evaluate_source(&source, base_dir, Some(path), library_paths)?.0)
 }
@@ -225,8 +223,7 @@ pub fn resolve_geometry_file(
     library_paths: &[PathBuf],
     files: &FileTable,
 ) -> Result<Resolution> {
-    let source = std::fs::read_to_string(path)
-        .map_err(|e| Error::Load(format!("{}: {e}", path.display())))?;
+    let source = eval::io::read_source(path)?;
     let base_dir = path.parent().unwrap_or(Path::new("."));
     eval::resolve_source(&source, base_dir, Some(path), library_paths, files)
 }

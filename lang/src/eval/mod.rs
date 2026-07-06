@@ -16,6 +16,7 @@ mod fragments;
 mod geo;
 mod geo2d;
 mod geometry;
+pub(crate) mod io;
 mod loader;
 mod message;
 mod module;
@@ -977,7 +978,7 @@ pub(crate) fn resolve_source(
     files: &FileTable,
 ) -> crate::Result<Resolution> {
     let _span = tracing::trace_span!("eval_program").entered();
-    let loaded = loader::load(source, base_dir, root_path, library_paths)?;
+    let loaded = io::load_graph(source, base_dir, root_path, library_paths)?;
     // `flatten` gives the executable statement stream (its own function/module stores are now unused —
     // both are island-scoped). `islands` gives the per-file MODULE scopes AND (the use-scope fix) each
     // file's FUNCTION defs + top-level CONSTANTS, so a `use`d function's body sees its own file's scope.

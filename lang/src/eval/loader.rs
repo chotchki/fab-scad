@@ -1,7 +1,10 @@
-//! The `use`/`include` loader — resolves H's zero-IO AST nodes into a real file graph, then flattens
-//! it for evaluation. The parser stays PURE (no file IO ever touches it); this module is the ONE place
-//! the outside filesystem enters the language, and it enters bug-for-bug against OpenSCAD's own
-//! `find_valid_path` + lexer token-splice (`src/core/parsersettings.cc`, `src/core/lexer.l`).
+//! The `use`/`include` loader — resolves H's zero-IO AST nodes into a real file graph, then flattens it
+//! for evaluation. PURE (M.4): zero filesystem access lives here. [`resolve_graph`] builds the graph from a
+//! caller-supplied source table ([`SourceMap`]) and NAMES any reference it can't satisfy as a [`ScadNeed`];
+//! the [`io`](super::io) shell resolves + reads + parses those (bug-for-bug against OpenSCAD's own
+//! `find_valid_path`, `src/core/parsersettings.cc`) and re-runs, until the graph closes. This module owns
+//! the SEMANTICS of `use`/`include` (splice, precedence, use-scope) — the lexer token-splice model
+//! (`src/core/lexer.l`) reproduced by flattening — not the IO.
 //!
 //! Two mechanisms, verified against the OpenSCAD source:
 //! - **`include <f>`** is a LEXER TOKEN SPLICE upstream — `f`'s tokens become part of the including
@@ -31,22 +34,21 @@
 //! resolve instead of asserting on `undef`. `include` never needed it — its assignments splice into the
 //! shared scope directly.
 //!
-//! Resolution mirrors `find_valid_path_`: an absolute path is used as-is; a relative one resolves
-//! against the INCLUDING file's directory first, then each library path in order (first existing
-//! non-directory wins). We canonicalize on resolve — that canonical path is both the parse-once key
-//! and the cycle key. A path already on the expansion stack is a CYCLE → skipped (so cycles break);
-//! a path merely seen-before is a DIAMOND → re-expanded (duplicated), faithful to the textual paste.
-//!
-//! Determinism: the crate stays PURE — the caller passes explicit `library_paths`; we never read
-//! `OPENSCADPATH` (a hidden input would dent the "same input → bit-identical" doctrine). The app/
-//! harness reads the env + knows the BOSL2 dir and hands the paths down.
+//! Resolution + canonicalization live in the [`io`](super::io) shell (`find_valid_path_`: absolute path
+//! as-is, else the including file's dir then each library path, first existing non-directory wins). The
+//! shell keys the [`SourceMap`] by the canonical id it reads, and [`resolve_graph`] uses that id as BOTH
+//! the parse-once key AND the cycle key: a path already on the expansion stack is a CYCLE → skipped (so
+//! cycles break); a path merely seen-before is a DIAMOND → re-expanded (duplicated), faithful to the
+//! textual paste. Determinism: the crate stays PURE — the caller passes explicit `library_paths` and we
+//! never read `OPENSCADPATH` (a hidden input would dent the "same input → bit-identical" doctrine); the
+//! app/harness reads the env + knows the BOSL2 dir and hands the paths down.
 //!
 //! Scope note (I.2.4): def-collection is FUNCTIONS **and** MODULES — both flow through [`Defs`] with the
 //! same use-tier/local-override precedence, so a `use`d library's modules import exactly like its
 //! functions (the evaluator's module-call machinery lives in `mod.rs`). A missing library fails LOUD
-//! (`Error::Load`) rather than OpenSCAD's
-//! warn-and-continue — a missing lib in a correct corpus is OUR resolution bug, and we want it loud
-//! until I.5's warning buffer can match the oracle's warn-and-render bug-for-bug.
+//! (`Error::Load`, raised by the shell) rather than OpenSCAD's warn-and-continue — a missing lib in a
+//! correct corpus is OUR resolution bug, and we want it loud until #94's warning buffer can match the
+//! oracle's warn-and-render bug-for-bug (M.6).
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -118,63 +120,6 @@ enum RefKind {
     Use,
 }
 
-/// Load `source` (base directory `base_dir`) and everything it reaches via `use`/`include`, resolving
-/// against `library_paths` after the including file's own directory. `root_path` is the root's own
-/// file path when it has one (`evaluate_file`) so a dependency that references the root back resolves
-/// to the SAME node — parse-once and cycle-break instead of a re-parse; `None` for an in-memory buffer
-/// (`evaluate_with_base`), which nothing on disk can name.
-///
-/// # Errors
-/// [`Error::Load`](crate::Error::Load) if a `use`/`include` target can't be resolved or read;
-/// [`Error::Parse`](crate::Error::Parse) if the root or any loaded file fails to parse.
-pub(super) fn load(
-    source: &str,
-    base_dir: &Path,
-    root_path: Option<&Path>,
-    library_paths: &[PathBuf],
-) -> crate::Result<Loaded> {
-    // The IO SHELL (M.4): the ONE place `use`/`include` touches the filesystem. It runs the pure
-    // [`resolve_graph`] fixpoint — resolve-graph names the references it can't satisfy, the shell reads
-    // them (find_valid_path + read + canonicalize), re-runs — until the graph closes. `use`/`include` is
-    // STATIC (literal top-level refs), so this is a parse-time fixpoint over the include graph; no eval.
-    let root_id = root_path.and_then(|p| std::fs::canonicalize(p).ok());
-    let mut provided = SourceMap::new();
-    loop {
-        match resolve_graph(source, base_dir, root_id.as_deref(), &provided)? {
-            GraphOutcome::Complete(loaded) => return Ok(loaded),
-            GraphOutcome::Incomplete(needs) => {
-                for need in needs {
-                    let key = (need.from_dir.clone(), need.raw.clone());
-                    if provided.contains_key(&key) {
-                        continue; // already satisfied this round (a duplicate need in the same pass)
-                    }
-                    let id =
-                        resolve(&need.from_dir, &need.raw, library_paths).ok_or_else(|| {
-                            crate::Error::Load(format!(
-                                "can't find '{}' from {}",
-                                need.raw,
-                                need.from_dir.display()
-                            ))
-                        })?;
-                    let text = std::fs::read_to_string(&id).map_err(|e| {
-                        // Defensive, never-panic: `resolve` already canonicalized this as a readable file,
-                        // so a failure here is a TOCTOU race (deleted / perms changed between resolve and
-                        // read). This — and the canonicalize/read above — are the SHELL's IO, off the pure
-                        // core's coverage.
-                        crate::Error::Load(format!("{}: {e}", id.display()))
-                    })?;
-                    // Parse ONCE here, not on every fixpoint pass: the shell caches the parsed AST so
-                    // `resolve_graph` clones it (cheap) instead of re-lexing a big library (`std.scad`'s
-                    // graph) once per BFS level.
-                    let program = parse(&text)?;
-                    let dir = id.parent().unwrap_or(Path::new(".")).to_path_buf();
-                    provided.insert(key, ProvidedSource { id, dir, program });
-                }
-            }
-        }
-    }
-}
-
 /// A `use`/`include` reference the pure resolver couldn't satisfy from the [`SourceMap`] — the shell
 /// resolves + reads it, adds it, and re-runs. `from_dir` is the requesting file's directory (the base for
 /// resolving `raw` against the library paths); `raw` is the literal `<...>` path.
@@ -186,18 +131,19 @@ pub(super) struct ScadNeed {
 /// A source the shell has resolved + read + PARSED: `id` is its canonical path (the opaque dedup/cycle-break
 /// key the pure resolver compares by, never canonicalizing itself), `dir` its directory (the base for ITS
 /// own relative refs), `program` the parsed AST (parsed once by the shell; `resolve_graph` clones it).
-struct ProvidedSource {
-    id: PathBuf,
-    dir: PathBuf,
-    program: Program,
+pub(super) struct ProvidedSource {
+    pub id: PathBuf,
+    pub dir: PathBuf,
+    pub program: Program,
 }
 
 /// The sources the shell has supplied so far, keyed by the `(requesting dir, raw ref)` the resolver asks
-/// with — so the pure resolver looks a reference up WITHOUT resolving it (no IO in the core).
-type SourceMap = BTreeMap<(PathBuf, String), ProvidedSource>;
+/// with — so the pure resolver looks a reference up WITHOUT resolving it (no IO in the core). The
+/// [`io`](super::io) shell builds + augments it (read + parse-once); [`resolve_graph`] only reads it.
+pub(super) type SourceMap = BTreeMap<(PathBuf, String), ProvidedSource>;
 
 /// The pure graph resolver's result: the fully-closed graph, or the references it still needs.
-enum GraphOutcome {
+pub(super) enum GraphOutcome {
     Complete(Loaded),
     Incomplete(Vec<ScadNeed>),
 }
@@ -208,7 +154,7 @@ enum GraphOutcome {
 /// (→ [`GraphOutcome::Complete`]) or the pass collects ALL the still-missing ones at once (→ `Incomplete`,
 /// which the shell fills before re-running). `root_id` is the root file's canonical id, so a dependency
 /// referencing the root back dedups to node 0 rather than re-parsing it.
-fn resolve_graph(
+pub(super) fn resolve_graph(
     source: &str,
     base_dir: &Path,
     root_id: Option<&Path>,
@@ -603,28 +549,3 @@ fn scan(program: &Program) -> Vec<(usize, String, RefKind)> {
         .collect()
 }
 
-/// Resolve a `use`/`include` path reference to a canonical file, mirroring OpenSCAD's `find_valid_path_`
-/// (`parsersettings.cc`): an absolute reference is checked directly; a relative one resolves against
-/// `base_dir` first, then each library path in order — first existing non-directory wins. `None` if no
-/// candidate is a readable file. Canonicalizing here makes the result the parse-once + cycle key.
-fn resolve(base_dir: &Path, raw: &str, library_paths: &[PathBuf]) -> Option<PathBuf> {
-    let local = Path::new(raw);
-    if local.is_absolute() {
-        return check_file(local);
-    }
-    if let Some(found) = check_file(&base_dir.join(local)) {
-        return Some(found);
-    }
-    library_paths
-        .iter()
-        .find_map(|lib| check_file(&lib.join(local)))
-}
-
-/// A path is valid iff it canonicalizes (so it exists) to a regular file (OpenSCAD rejects
-/// directories). The canonical form dedups symlinks/`..` for the parse-once + cycle keys.
-fn check_file(p: &Path) -> Option<PathBuf> {
-    match std::fs::canonicalize(p) {
-        Ok(canon) if canon.is_file() => Some(canon),
-        _ => None,
-    }
-}

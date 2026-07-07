@@ -101,6 +101,10 @@ pub struct TestCase {
     pub name: String,
     /// The scad program to run.
     pub script: String,
+    /// `false` for a `.scadtest` block marked `expect_success = false` — a test that DELIBERATELY feeds bad
+    /// input to prove a function REJECTS it (`test_*_errors`). For these, an eval error is the PASS and a
+    /// clean eval is the failure — the inverse of a normal test. Default `true`.
+    pub expect_success: bool,
 }
 
 /// One test's result: its origin, [`Bucket`], wall-time (ms), and (on failure) the error's first line.
@@ -125,6 +129,14 @@ type RunOutcome = (Bucket, u128, String);
 struct TestBlock {
     name: String,
     script: String,
+    /// BOSL2's `expect_success` flag (default `true`) — see [`TestCase::expect_success`].
+    #[serde(default = "yes")]
+    expect_success: bool,
+}
+
+/// serde default for [`TestBlock::expect_success`] — an absent flag means a normal (expect-success) test.
+fn yes() -> bool {
+    true
 }
 
 /// A `.scadtest` file: an array of `[[test]]` tables.
@@ -166,6 +178,7 @@ pub fn enumerate_tests(bosl2_dir: &Path) -> Result<Vec<TestCase>> {
                 file: file.clone(),
                 name: block.name,
                 script: block.script,
+                expect_success: block.expect_success,
             });
         }
     }
@@ -257,6 +270,16 @@ pub fn run_bosl2_corpus_isolated(bosl2_dir: &Path, worker_exe: &Path) -> Result<
         .zip(slots)
         .map(|(case, slot)| {
             let (bucket, ms, detail) = slot.unwrap_or((Bucket::Crash, 0, "not run".to_string()));
+            // `expect_success = false` INVERTS the verdict: the test feeds bad input to prove rejection, so
+            // ANY failure (error/crash/timeout) is the expected PASS, and a clean eval is the real failure.
+            let (bucket, detail) = match (case.expect_success, bucket) {
+                (true, b) => (b, detail),
+                (false, Bucket::Pass) => (
+                    Bucket::Assertion,
+                    "expected a failure (expect_success=false), but evaluated cleanly".to_string(),
+                ),
+                (false, _) => (Bucket::Pass, String::new()),
+            };
             TestResult {
                 file: case.file,
                 name: case.name,

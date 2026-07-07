@@ -17,7 +17,7 @@
 
 use std::path::{Path, PathBuf};
 
-use fab_scad::corpus::{Bucket, check_worker, histogram, run_bosl2_corpus_isolated};
+use fab_scad::corpus::{Bucket, check_worker, histogram, run_bosl2_corpus_isolated, signatures};
 
 /// The pinned pass-count floor (the ratchet). Raise it as fixes land in the Phase-I burn-down; a DROP means
 /// something that passed now fails — a regression the suite catches. Baseline 2026-07-06: 685/901 pass
@@ -64,6 +64,12 @@ fn bosl2_corpus_ratchet_and_report() {
                 eprintln!("  {}::{}: {}", r.file, r.name, r.detail);
             }
         }
+    }
+
+    // The burn-down worklist: the biggest failure clusters (same root cause), highest-leverage first.
+    eprintln!("\n=== top failure signatures (count × bucket: first-line) ===");
+    for (bucket, detail, count) in signatures(&results).into_iter().take(40) {
+        eprintln!("  {count:>4} × {:<13} {}", bucket.label(), detail);
     }
 
     assert!(

@@ -390,6 +390,20 @@ pub fn histogram(results: &[TestResult]) -> std::collections::BTreeMap<Bucket, u
     h
 }
 
+/// Cluster the failures by (bucket, error first-line) and count each — the burn-down worklist. Many tests
+/// share one root cause (a missing builtin, one broken helper's assert), so the biggest clusters are the
+/// highest-leverage fixes: knock one out and the pass count jumps. Sorted by count descending, then label.
+#[must_use]
+pub fn signatures(results: &[TestResult]) -> Vec<(Bucket, String, usize)> {
+    let mut map: std::collections::BTreeMap<(Bucket, String), usize> = std::collections::BTreeMap::new();
+    for r in results.iter().filter(|r| r.bucket != Bucket::Pass) {
+        *map.entry((r.bucket, r.detail.clone())).or_insert(0) += 1;
+    }
+    let mut v: Vec<(Bucket, String, usize)> = map.into_iter().map(|((b, d), n)| (b, d, n)).collect();
+    v.sort_by(|a, b| b.2.cmp(&a.2).then(a.0.cmp(&b.0)));
+    v
+}
+
 /// Guard against a malformed worker path being silently treated as "everything crashed".
 ///
 /// # Errors

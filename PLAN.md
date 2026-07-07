@@ -99,7 +99,7 @@ added 2026-07-05.
 - [x] J.6 - Unify fab-scad's geom::V3 ([f64;3] orientation helpers) + printer-domain [f64;3] into fab_lang::Vec3
 ## Phase K - scad-rs: differential harness + semantics corpus
 - [ ] K.1 - Harness v1: both engines, metric gate per model class, corpus tiers 1-3 wired in CI (OpenSCAD suite, BOSL2 tests, models/)
-  - [ ] K.1.1 - K.1.1 - BOSL2 test corpus tier: sweep the .scadtest suite through scad-rs
+  - [x] K.1.1 - K.1.1 - BOSL2 test corpus tier: sweep the .scadtest suite through scad-rs
   - [ ] K.1.2 - K.1.2 - Perf tier: scad-rs vs OpenSCAD full-pipeline wall-time on geometry
 - [ ] K.2 - semantics/ segmentation formalized: naming + provenance conventions; G.3/I tests migrated in
 - [ ] K.3 - ChaCha8-seeded grammar-directed program generator v0; seed logged per run; one-command failure replay

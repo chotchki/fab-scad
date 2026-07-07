@@ -117,7 +117,7 @@ added 2026-07-05.
   - [ ] L.2.5 - L.2.5 - Domain assert families: beziers, screw tables, polyhedra
   - [ ] L.2.6 - L.2.6 - The got==expected long tail: individual math divergences
   - [ ] L.2.7 - L.2.7 - Timeouts: the hull/region hangs
-  - [ ] L.2.8 - L.2.8 - Recursive function-literals (letrec): a closure must see its own binding
+  - [x] L.2.8 - L.2.8 - Recursive function-literals (letrec): a closure must see its own binding
 - [ ] L.3 - models/ tree end-to-end (teardrop/onion/screw_hole, corner_brace, Underdesk); benchmark corpus captured via the tracing layer on every run
 - [ ] L.4 - Exit review: divergences zero-or-documented, perf-vs-oracle published; rung 2/3 (intrinsics, JIT) phase cut FROM THIS DATA
 

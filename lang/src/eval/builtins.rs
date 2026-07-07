@@ -62,6 +62,7 @@ pub(super) fn is_builtin(name: &str) -> bool {
             | "reverse"
             | "lookup"
             | "search"
+            | "rands"
             // type predicates + version (I.4.3)
             | "is_undef"
             | "is_bool"
@@ -106,6 +107,7 @@ pub(super) fn apply(name: &str, pos: &[Value], _named: &BTreeMap<String, Value>)
         "reverse" => reverse(pos),
         "lookup" => lookup(pos),
         "search" => search(pos),
+        "rands" => rands(pos),
         "is_undef" => Value::Bool(matches!(pos.first(), None | Some(Value::Undef))),
         "is_bool" => pred(pos, |v| matches!(v, Value::Bool(_))),
         "is_num" => pred(pos, |v| matches!(v, Value::Num(_))),
@@ -462,6 +464,30 @@ fn column(elem: &Value, i: usize) -> Option<Value> {
         Value::List(xs) => xs.get(i).cloned(),
         _ => None,
     }
+}
+
+/// `rands(min, max, count, [seed])` → `count` uniform draws in `[min, max)`, bug-for-bug vs OpenSCAD's
+/// boost MT19937 + `uniform_real_distribution` (see [`super::rng`]). Non-numeric `min`/`max` or a bad
+/// `count` → `undef`. The seed is optional (a fixed default keeps us deterministic where OpenSCAD would
+/// time-seed); a non-finite seed falls back to that default.
+fn rands(pos: &[Value]) -> Value {
+    let (Some(&Value::Num(min)), Some(&Value::Num(max))) = (pos.first(), pos.get(1)) else {
+        return Value::Undef;
+    };
+    let Some(count) = pos.get(2).and_then(as_index) else {
+        return Value::Undef;
+    };
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "boost seeds mt19937 with the value cast to the engine's 32-bit result_type; the BOSL2 \
+                  seeds are small positive ints"
+    )]
+    let seed = match pos.get(3) {
+        Some(&Value::Num(s)) if s.is_finite() => Some(s as u32),
+        _ => None,
+    };
+    Value::num_list(super::rng::rands(min, max, count, seed))
 }
 
 // ─────────────────────────────── type predicates + version (I.4.3) ────────────────────────────────

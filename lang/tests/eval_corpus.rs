@@ -630,9 +630,17 @@ fn type_predicate_builtins() {
     assert_eq!(ev("version()"), list(&[2021.0, 1.0, 0.0]));
     assert_eq!(ev("version_num()"), num(20_210_100.0));
 
-    // rands is a DELIBERATE loud defer (non-deterministic seedless; seeded needs boost's RNG bug-for-bug).
-    // Not wired as a builtin, so it falls through to the unknown-symbol path — loud, names the symbol.
-    assert!(matches!(ev_err("rands(0, 1, 5)"), Error::Unknown(m) if m.contains("function `rands`")));
+    // rands: boost-MT19937 bug-for-bug (L.2.2). Seeded → deterministic + byte-exact vs the oracle; the RNG
+    // internals + the byte-exact proof live in the `rng` module — here just the builtin shape.
+    match ev("rands(0, 1, 5, 42)") {
+        Value::NumList(v) => {
+            assert_eq!(v.len(), 5);
+            assert!(v.iter().all(|&x| (0.0..1.0).contains(&x)));
+            assert!((v[0] - 0.796_543).abs() < 1e-5); // matches OpenSCAD 2026.06.12
+        }
+        other => panic!("rands should return a NumList, got {other:?}"),
+    }
+    assert_eq!(ev("rands(0, 1)"), Value::Undef); // missing count → undef
 }
 
 #[test]

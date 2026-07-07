@@ -112,12 +112,24 @@ Clustered, these are cheap and real:
 
 ## The compare leg — the correctness baseline
 
-`MODELS_COMPARE=1` ran the 59 rendered models against the oracle (boolean-residual, genus, shape-class).
-Baseline 2026-07-07: **8 match / 51 diverge.** That's the sobering counterpart to the profile — the BOSL2
-corpus at 99.8% proved the LANGUAGE is right, but only 14% of real rendered parts MATCH OpenSCAD's mesh. The
-corpus is assert-based unit tests; a real part stacks features the corpus never exercises together.
+`MODELS_COMPARE=1` runs the rendered models against the oracle (boolean-residual, genus, shape-class). The
+first baseline was sobering — the BOSL2 corpus at 99.8% proved the LANGUAGE is right, but only 14% of real
+rendered parts MATCHED OpenSCAD's mesh. Two root-cause fixes (below) moved it hard:
 
-The 51, categorized:
+| pass | render / timeout / error | match / diverge (of rendered) | match rate |
+|---|---|---|---|
+| baseline | 59 / 31 / 21 | 8 / 51 | 14% |
+| + `* ! %` modifiers | 79 / 17 / 10 | 15 / 64 | 19% |
+| + `assert`/`echo` passthrough | 54 / 29 / 23 | **35 / 19** | **65%** |
+
+Exact matches went **8 → 35**, divergences **51 → 19**. Note the coverage TRADE in the last row: fewer models
+fully render (54 vs 79) because the assert fix makes `left`/`fwd`/etc. do their REAL geometry — which is
+slower (more 10 s timeouts, the profile's whole point) and reaches DEEPER, exposing gaps the empty
+short-circuit used to hide (missing `.stl`/`.3mf`/`.svg` assets not vendored, 2D SVG import [deferred],
+`resize`/`render` [unimplemented]). That's visibility, not regression — the interpreter is now correct-but-slow
+where it was fast-but-empty, which is exactly the state the JIT/intrinsics tier exists to fix.
+
+The ORIGINAL 51 divergences, categorized (historical — most cleared by the two fixes):
 
 | category | count | reading |
 |---|---|---|

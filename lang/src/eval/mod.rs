@@ -2116,11 +2116,24 @@ fn eval_stmt_dispatch<'a>(
         // (`#` highlight is preview-only decoration, no geometry effect → ignored; `!` root — "render ONLY
         // this" — is a program-level filter, handled where the top-level nodes are assembled.)
         StmtKind::Module(mi) if mi.modifiers.disable || mi.modifiers.background => {}
-        // `echo`/`assert` at statement level are module instantiations, but they produce console
-        // output, not geometry — handle them here (no node pushed) before the geometry dispatch. Their
-        // geometry CHILDREN (`echo(x) cube();`) ride the module-children machinery (I.2.4 / J); rare.
-        StmtKind::Module(mi) if mi.name == "echo" => emit_echo(&mi.args, scope, scope, ctx)?,
-        StmtKind::Module(mi) if mi.name == "assert" => check_assert(&mi.args, scope, scope, ctx)?,
+        // `echo`/`assert` at statement level are a console side effect (or a hard check), not geometry — but
+        // they are PASSTHROUGH modules: any child geometry renders AFTER the side effect. BOSL2 leans on this
+        // hard — a module guards its body with `assert(is_finite(x), "…") translate(…) children();` (NO
+        // semicolon after the assert, so the geometry is the assert's CHILD). Dropping the children rendered
+        // EMPTY — `left()`/`right()`/`fwd()`/`back()` (whose `assert` guard lacks the semicolon that `up()`/
+        // `down()` have) produced nothing, the single biggest missing-geometry cause in the L.3 models sweep.
+        // Do the side effect first (echo emits / assert checks + can error), THEN the implicit union of kids.
+        StmtKind::Module(mi) if mi.name == "echo" || mi.name == "assert" => {
+            if mi.name == "echo" {
+                emit_echo(&mi.args, scope, scope, ctx)?;
+            } else {
+                check_assert(&mi.args, scope, scope, ctx)?;
+            }
+            if !mi.children.is_empty() {
+                let refs: Vec<&Stmt> = mi.children.iter().collect();
+                nodes.push(union_of(eval_nodes(&refs, ctx, scope, global, island)?, ctx));
+            }
+        }
         // An affine TRANSFORM wraps the implicit union of its children (J.2 / J.3) — a 3D child gets a
         // `GeoNode::Transform`, a 2D child a `Shape2D::Transform` of the 2D sub-matrix ([`transform_of`]).
         // `$`-args don't reach a transform, so its child scope is dropped.

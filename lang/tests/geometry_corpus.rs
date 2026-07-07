@@ -344,3 +344,17 @@ fn bang_root_renders_only_its_subtree() {
     assert_eq!(m.vert_count(), 8, "only the cube's 8 verts — the sibling sphere is gone");
     assert_eq!(bbox(&m), ([0.0; 3], [10.0; 3]), "cube at origin — the ancestor translate was dropped");
 }
+
+#[test]
+fn assert_and_echo_pass_through_to_child_geometry() {
+    // `assert(cond) <geometry>` and `echo(…) <geometry>` are PASSTHROUGH modules — the child renders after the
+    // check/emit. BOSL2's `left()`/`right()`/`fwd()`/`back()` guard their `translate(…) children()` body with a
+    // semicolon-LESS `assert(is_finite(x), …)`, so the geometry is the assert's CHILD; dropping it rendered
+    // EMPTY (the single biggest missing-geometry cause in the L.3 models sweep — those transforms are ubiquitous).
+    assert_eq!(mesh("assert(true) cube(10);").vert_count(), 8); // passing guard → child renders
+    assert_eq!(mesh("echo(\"hi\") cube(10);").vert_count(), 8);
+    assert!(evaluate("assert(1 > 2) cube(10);").is_err()); // a FAILING guard still errors (child unreached)
+    // (a guard over a TRANSFORMED child needs the backend → oracle-tested in fab-scad `differential`)
+    // the statement form (semicolon, no child) is unchanged — a pure check/emit, no geometry:
+    assert_eq!(mesh("assert(true); cube(10);").vert_count(), 8); // the cube is a SIBLING here, still one object
+}

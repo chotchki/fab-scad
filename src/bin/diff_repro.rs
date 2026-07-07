@@ -5,6 +5,7 @@
 //! models harness's one-line-per-model roster: when the sweep flags a model DIVERGE, reduce it to a minimal
 //! snippet and run it here to see exactly how the meshes differ. A dev tool, not user-facing.
 
+use fab_scad::differ::{Outcome, diff_files, drivers};
 use std::path::PathBuf;
 
 fn main() {
@@ -13,15 +14,32 @@ fn main() {
     let libs: Vec<PathBuf> = args.map(PathBuf::from).collect();
 
     // Big stack (deep-tree Drop overflows the default 8 MiB) — same reason the models harness evals on 1 GiB.
-    let verdict = std::thread::Builder::new()
+    let out = std::thread::Builder::new()
         .stack_size(1 << 30)
-        .spawn(move || match fab_scad::differ::diff_files(&file, &libs) {
-            Ok(()) => "AGREE".to_string(),
-            Err(why) => format!("DIVERGE: {why}"),
+        .spawn(move || {
+            // Per-engine volume + genus first (which direction the divergence goes — removing too much vs too
+            // little), then the verdict.
+            let mut lines: Vec<String> = drivers()
+                .iter()
+                .map(|d| format!("  {:8} {}", d.name(), describe(d.eval_file(&file, &libs))))
+                .collect();
+            lines.push(match diff_files(&file, &libs) {
+                Ok(()) => "AGREE".to_string(),
+                Err(why) => format!("DIVERGE: {why}"),
+            });
+            lines.join("\n")
         })
         .expect("spawn")
         .join()
         .unwrap_or_else(|_| "PANIC".to_string());
 
-    println!("{verdict}");
+    println!("{out}");
+}
+
+fn describe(o: Outcome) -> String {
+    match o {
+        Outcome::Solid(s) => format!("solid vol={:.1} genus={}", s.volume(), s.genus()),
+        Outcome::Empty => "empty".to_string(),
+        Outcome::Rejected => "rejected".to_string(),
+    }
 }

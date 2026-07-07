@@ -140,6 +140,7 @@ added 2026-07-07.
 - [x] L.3 - models/ tree end-to-end (teardrop/onion/screw_hole, corner_brace, Underdesk); benchmark corpus captured via the tracing layer on every run
   - [ ] L.3.1 - L.3.1 - models-surfaced evaluator gaps: resize/render modules + attachable×3
   - [x] L.3.2 - L.3.2 - `* ! % #` instantiation modifiers honored in eval (the #1 divergence)
+  - [x] L.3.3 - L.3.3 - assert/echo are passthrough: render child geometry (BOSL2 left/fwd fix)
 - [ ] L.4 - Exit review: divergences zero-or-documented, perf-vs-oracle published; rung 2/3 (intrinsics, JIT) phase cut FROM THIS DATA
 
 ## Backlog (not yet phased)

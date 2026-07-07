@@ -120,6 +120,17 @@ fn instantiation_modifiers_match_the_oracle() {
 }
 
 #[test]
+fn assert_echo_passthrough_matches_the_oracle() {
+    // `assert`/`echo` are passthrough — child geometry renders after the check/emit. Surfaced by the L.3 sweep:
+    // BOSL2's `left()`/`fwd()` guard their `translate() children()` with a semicolon-less `assert`, so the
+    // geometry is the assert's CHILD — dropping it rendered EMPTY.
+    agree("assert(true) translate([5, 0, 0]) cube(10);");
+    agree("echo(\"x\") cube(10);");
+    agree_bosl2_body("left(5) cube([10, 10, 10])"); // the real trigger — a bare BOSL2 named transform
+    agree_bosl2_body("diff() cuboid([40, 25, 80]) { tag(\"remove\") left(5) cuboid([10, 10, 90]); }");
+}
+
+#[test]
 fn primitives_and_expressions_match_the_oracle() {
     agree("sphere(10, $fn = 32);");
     agree("cube([10, 20, 30]);");

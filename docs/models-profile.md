@@ -153,6 +153,25 @@ the ORIGIN). `#` highlight is a preview no-op. Regression-tested in fab-lang `ge
 in fab-scad `differential`. corner_brace went genus −42 → residual 0.558 — the topology garbage is GONE; the
 residual 0.558 is a SEPARATE, smaller geometry issue in its rendered block, the next thread.
 
+### Root cause of a missing-geometry class: `assert`/`echo` dropped their child (fixed 2026-07-07)
+
+The second thread, from `corner_brace`'s leftover residual 0.558. Reducing with `diff_repro` (now printing each
+engine's volume + genus): the removal in a `diff()` wasn't happening — our volume was the FULL keep, OpenSCAD's
+had the piece carved out. It narrowed to `left(5) cube(...)` rendering EMPTY in our engine while `up(5)` worked.
+The definitions are identical BOSL2 transforms — except `left`/`right`/`fwd`/`back` guard their body with
+
+```
+assert(is_finite(x), "Invalid number")   // <- NO semicolon
+translate([-x,0,0]) children();
+```
+
+and `up`/`down` put a semicolon after the `assert`. With no semicolon, `translate(…) children()` is the
+assert's CHILD (OpenSCAD's `assert(cond) <statement>` guard form). Our `assert` arm ran the check but DROPPED
+`mi.children` — so the geometry vanished. `assert`/`echo` are PASSTHROUGH modules; the fix renders their child
+after the side effect. Because `left`/`right`/`fwd`/`back` are ubiquitous, this was the single biggest
+missing-geometry (empty-vs-solid) cause. `corner_brace` now AGREES with the oracle outright. Regression-tested
+in fab-lang `geometry_corpus` + fab-scad `differential` (incl. the bare BOSL2 `left(5) cube()` trigger).
+
 ### The other levers
 
 - **Excluding dead experiments.** 9 of 51 live in `unused/` or are named `_test` / `_slice` / `second_approach`

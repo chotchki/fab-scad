@@ -145,6 +145,13 @@ pub(super) struct Ctx<'a> {
     /// nested module calls each see their own children; `children()` pops during eval so a `children()`
     /// inside the rendered children refers to the ENCLOSING call, not this one.
     children_stack: RefCell<Vec<ChildrenFrame<'a>>>,
+    /// The evaluator's ONE advancing RNG for SEEDLESS `rands()` (I.2.8b). OpenSCAD draws every seedless
+    /// call from a single global engine, so consecutive `rands()` DIFFER; a fresh engine per call would
+    /// repeat and collapse BOSL2's random line/triangle to a degenerate case. Seeded once per evaluation
+    /// with a fixed default (→ reproducible, bit-identical) then advanced per seedless draw — the one
+    /// deliberately eval-order-stateful builtin (see [`rng::RandStream`]). Seeded `rands(…, seed=k)`
+    /// bypasses this (a fresh engine → oracle-exact + pure).
+    rand_stream: RefCell<rng::RandStream>,
 }
 
 /// One active module call's children context: the call-site child statements (borrowed from the AST) +
@@ -442,7 +449,7 @@ fn eval_with_global<'a>(
                     None => tasks.push(Task::Eval(body, inner)),
                 }
             }
-            Task::Builtin { name, args } => run_builtin(name, args, &mut values),
+            Task::Builtin { name, args } => run_builtin(name, args, &mut values, ctx),
             Task::PushUndef => values.push(Value::Undef),
             Task::ShortCircuit { op, rhs, scope } => {
                 let lhs = values.pop().unwrap_or(Value::Undef);
@@ -601,7 +608,7 @@ fn eval_node<'a>(
 }
 
 /// Pop a builtin call's argument values, split them into positional/named, and push the builtin result.
-fn run_builtin(name: &str, args: &[Arg], values: &mut Vec<Value>) {
+fn run_builtin(name: &str, args: &[Arg], values: &mut Vec<Value>, ctx: &Ctx<'_>) {
     // A benchmark span per builtin application (I.6); `builtin` field lets a layer break cost down by
     // name. All the tracing spans sit at TRACE level — the "compile-out-like-a-logger" doctrine.
     let _span = tracing::trace_span!("builtin", builtin = name).entered();
@@ -616,7 +623,13 @@ fn run_builtin(name: &str, args: &[Arg], values: &mut Vec<Value>) {
             None => positional.push(value),
         }
     }
-    let result = builtins::apply(name, &positional, &named);
+    // `rands` is the one STATEFUL builtin: seedless draws advance the evaluator's `rand_stream` (I.2.8b),
+    // so it's routed here where the `Ctx` is in scope rather than through the pure `builtins::apply`.
+    let result = if name == "rands" {
+        builtins::rands(&positional, &mut ctx.rand_stream.borrow_mut())
+    } else {
+        builtins::apply(name, &positional, &named)
+    };
     trace::builtin(name, &positional, &named, &result); // gated inside; shows `name(args) => result`
     values.push(result);
 }
@@ -1057,6 +1070,7 @@ fn resolve_source(
         file_needs: RefCell::default(),
         module_depth: Cell::default(),
         children_stack: RefCell::default(),
+        rand_stream: RefCell::new(rng::RandStream::new()),
     };
     // Build each `use`d file's constant scope (islands 1..n) — hoisting needs the `Ctx` (constants can
     // call functions), which is why this runs AFTER construction, into the `RefCell`.
@@ -1806,6 +1820,7 @@ fn build_ctx(program: &Program) -> Ctx<'_> {
         file_needs: RefCell::default(),
         module_depth: Cell::default(),
         children_stack: RefCell::default(),
+        rand_stream: RefCell::new(rng::RandStream::new()),
     }
 }
 

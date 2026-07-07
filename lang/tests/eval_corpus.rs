@@ -663,6 +663,16 @@ fn type_predicate_builtins() {
         other => panic!("rands should return a NumList, got {other:?}"),
     }
     assert_eq!(ev("rands(0, 1)"), Value::Undef); // missing count → undef
+
+    // Seedless rands ADVANCES one per-eval stream (L.2.8b): two seedless calls DIFFER — OpenSCAD draws
+    // them from a single global engine, so BOSL2 can build a non-degenerate random line from two rands()
+    // calls (a fresh engine per call would repeat and collapse it to a point). Seeded stays a pure fn.
+    let adv = fab_lang::evaluate_full("a = rands(-1, 1, 3); b = rands(-1, 1, 3); echo(a == b);")
+        .expect("evaluates");
+    assert_eq!(adv.echos(), ["false"]); // consecutive seedless draws differ
+    let seeded = fab_lang::evaluate_full("echo(rands(0, 1, 3, 42) == rands(0, 1, 3, 42));")
+        .expect("evaluates");
+    assert_eq!(seeded.echos(), ["true"]); // an explicit seed is reproducible (fresh engine, oracle-exact)
 }
 
 #[test]

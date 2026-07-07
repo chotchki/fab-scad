@@ -107,7 +107,8 @@ pub(super) fn apply(name: &str, pos: &[Value], _named: &BTreeMap<String, Value>)
         "reverse" => reverse(pos),
         "lookup" => lookup(pos),
         "search" => search(pos),
-        "rands" => rands(pos),
+        // `rands` is intercepted by `run_builtin` (it needs the evaluator's advancing RandStream for the
+        // seedless case) and never reaches this pure dispatch.
         "is_undef" => Value::Bool(matches!(pos.first(), None | Some(Value::Undef))),
         "is_bool" => pred(pos, |v| matches!(v, Value::Bool(_))),
         "is_num" => pred(pos, |v| matches!(v, Value::Num(_))),
@@ -468,9 +469,12 @@ fn column(elem: &Value, i: usize) -> Option<Value> {
 
 /// `rands(min, max, count, [seed])` → `count` uniform draws in `[min, max)`, bug-for-bug vs OpenSCAD's
 /// boost MT19937 + `uniform_real_distribution` (see [`super::rng`]). Non-numeric `min`/`max` or a bad
-/// `count` → `undef`. The seed is optional (a fixed default keeps us deterministic where OpenSCAD would
-/// time-seed); a non-finite seed falls back to that default.
-fn rands(pos: &[Value]) -> Value {
+/// `count` → `undef`. With an explicit `seed`, a fresh engine → a pure function of the args (oracle-exact).
+/// WITHOUT a seed, draws from the evaluator's ONE advancing [`RandStream`](super::rng::RandStream), so
+/// consecutive seedless calls DIFFER (OpenSCAD draws seedless from a single global engine — BOSL2 needs
+/// two `rands()` calls to make a non-degenerate line). Called via the [`run_builtin`](super::run_builtin)
+/// seam that holds the stream, not the pure `apply` dispatch.
+pub(super) fn rands(pos: &[Value], stream: &mut super::rng::RandStream) -> Value {
     let (Some(&Value::Num(min)), Some(&Value::Num(max))) = (pos.first(), pos.get(1)) else {
         return Value::Undef;
     };
@@ -487,7 +491,11 @@ fn rands(pos: &[Value]) -> Value {
         Some(&Value::Num(s)) if s.is_finite() => Some(s as u32),
         _ => None,
     };
-    Value::num_list(super::rng::rands(min, max, count, seed))
+    let draws = match seed {
+        Some(s) => super::rng::rands(min, max, count, Some(s)), // seeded → fresh engine, oracle-exact
+        None => stream.draw(min, max, count),                   // seedless → advance the eval's stream
+    };
+    Value::num_list(draws)
 }
 
 // ─────────────────────────────── type predicates + version (I.4.3) ────────────────────────────────

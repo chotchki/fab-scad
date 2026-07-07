@@ -120,7 +120,7 @@ added 2026-07-07.
   - [ ] L.2.7 - L.2.7 - Timeouts: the hull/region hangs
   - [x] L.2.8 - L.2.8 - Recursive function-literals (letrec): a closure must see its own binding
   - [x] L.2.8a - L.2.8a - Island-global bootstrapping: a top-level constant's fn call sees the constants hoisted so far (modular_hose +5)
-  - [ ] L.2.8b - L.2.8b - Residual bare-asserts: screws (4, fails in test body not load) + skin/plane_intersection/parent_part singletons
+  - [x] L.2.8b - L.2.8b - Empty-statement $children: a lone `;` is not a child (screw/attachable family +5)
 - [ ] L.3 - models/ tree end-to-end (teardrop/onion/screw_hole, corner_brace, Underdesk); benchmark corpus captured via the tracing layer on every run
 - [ ] L.4 - Exit review: divergences zero-or-documented, perf-vs-oracle published; rung 2/3 (intrinsics, JIT) phase cut FROM THIS DATA
 

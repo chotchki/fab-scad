@@ -81,12 +81,47 @@ impl Mt19937 {
 }
 
 /// `count` draws uniformly in `[min, max)` from a boost-compatible MT19937 seeded with `seed` (or
-/// [`DEFAULT_SEED`] when `None`). The stream matches OpenSCAD's `rands()` word-for-word.
+/// [`DEFAULT_SEED`] when `None`). The stream matches OpenSCAD's `rands()` word-for-word. This is the
+/// SEEDED path — a fresh engine per call, so `rands(…, seed=k)` is a pure function of its args.
 #[must_use]
 pub fn rands(min: f64, max: f64, count: usize, seed: Option<u32>) -> Vec<f64> {
     let mut rng = Mt19937::new(seed.unwrap_or(DEFAULT_SEED));
     let span = max - min;
     (0..count).map(|_| min + span * rng.canonical()).collect()
+}
+
+/// A LIVE MT19937 for SEEDLESS `rands`. OpenSCAD draws every seedless call from ONE global engine, so
+/// consecutive `rands()` calls DIFFER (`rands(-1,1,3)` twice gives two distinct points — BOSL2 leans on
+/// this to build a non-degenerate random line/triangle). A fresh engine per call (what the seeded path
+/// does) would return the SAME values every time and collapse those to a degenerate case. So the
+/// evaluator holds ONE stream, seeded once with [`DEFAULT_SEED`] and ADVANCED per seedless call. It's
+/// reset per evaluation (→ reproducible, bit-identical) but eval-order-STATEFUL within a run — the one
+/// deliberately-impure builtin (seedless `rands` is non-reproducible in OpenSCAD anyway). Any future
+/// parallelism must draw in the fixed eval order, same as the buffered echo/warning log.
+pub(crate) struct RandStream {
+    rng: Mt19937,
+}
+
+impl Default for RandStream {
+    /// A fresh stream at the fixed default seed — lets `Ctx` keep its derived `Default`.
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl RandStream {
+    /// A fresh stream at the fixed default seed — one per evaluation.
+    pub(crate) fn new() -> Self {
+        Self {
+            rng: Mt19937::new(DEFAULT_SEED),
+        }
+    }
+
+    /// `count` draws in `[min, max)`, ADVANCING the stream so the next call continues the sequence.
+    pub(crate) fn draw(&mut self, min: f64, max: f64, count: usize) -> Vec<f64> {
+        let span = max - min;
+        (0..count).map(|_| min + span * self.rng.canonical()).collect()
+    }
 }
 
 #[cfg(test)]

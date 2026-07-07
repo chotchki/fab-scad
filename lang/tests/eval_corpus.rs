@@ -661,6 +661,19 @@ fn function_values() {
     assert_eq!(ev("(function() $fn)()"), num(0.0)); // else the callee sees the reaching $fn (root 0)
 }
 
+/// Letrec: a function literal bound to a NAME can call ITSELF by that name (verified vs the oracle — both
+/// forms echo 15/10). Our COW frames can't self-reference at capture time, so the closure carries its
+/// definition name and re-injects it at call time. BOSL2 leans on this (gears.scad's `strip_left`,
+/// fnliterals' partial applications).
+#[test]
+fn recursive_function_literals() {
+    assert_eq!(ev("let(g = function(m) m <= 0 ? 0 : m + g(m - 1)) g(5)"), num(15.0));
+    // deep recursion (proves it's a real fixpoint, not one-level): sum 1..100
+    assert_eq!(ev("let(s = function(m) m <= 0 ? 0 : m + s(m - 1)) s(100)"), num(5050.0));
+    // an ANONYMOUS literal has no self-name → an unbound inner call is undef, not itself
+    assert_eq!(ev("(function(m) m)(7)"), num(7.0));
+}
+
 #[test]
 fn program_level_defers_are_loud() {
     // Constructs that parse (H.2) but eval defers loudly. NOTE the moving line: as of I.2.4 a user

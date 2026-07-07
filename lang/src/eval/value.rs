@@ -47,6 +47,11 @@ pub enum Value {
         closure_id: usize,
         /// The lexical environment captured when the literal was evaluated.
         env: Scope,
+        /// The name this closure was DEFINED as (`g` in `g = function…` / `let(g = function…)`), if any.
+        /// Re-injected into the body's scope at call time so the closure can call ITSELF by name — OpenSCAD's
+        /// letrec semantics (a shared-mutable context sees its own binding; we re-inject since our frames are
+        /// copy-on-write). `None` for an anonymous literal (never bound to a name).
+        self_name: Option<Rc<str>>,
     },
 }
 

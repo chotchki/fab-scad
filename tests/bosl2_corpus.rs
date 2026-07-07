@@ -20,11 +20,11 @@ use std::path::{Path, PathBuf};
 use fab_scad::corpus::{Bucket, check_worker, histogram, run_bosl2_corpus_isolated, signatures};
 
 /// The pinned pass-count floor (the ratchet). Raise it as fixes land in the L.2 burn-down; a DROP means
-/// something that passed now fails — a regression the suite catches. Baseline 2026-07-06: 711/901 pass
-/// (78.9%) — 128 assertion, 57 unimplemented, 5 timeout, 0 crash. Up from 686 when L.2.4's `search`
-/// list-match-miss fix cascaded through BOSL2's string/list layer (list_remove/str_split/screw/polyhedra,
-/// +25). Floored a touch below 711 to tolerate timeout-timing jitter under CI load, not real regressions.
-const PASS_FLOOR: usize = 705;
+/// something that passed now fails — a regression the suite catches. Baseline 2026-07-06: 723/901 pass
+/// (80.2%) — 128 assertion, 44 unimplemented, 6 timeout, 0 crash. Two foundational L.2 fixes cleared 37:
+/// `search` list-match-miss (686→711, string/list layer) + letrec self-recursive function literals
+/// (711→723, strip_left/fnliterals). Floored below 723 to tolerate timeout-timing jitter, not regressions.
+const PASS_FLOOR: usize = 717;
 
 #[test]
 #[ignore = "minutes-long full BOSL2 sweep; run explicitly with --ignored"]

@@ -388,11 +388,23 @@ fn eval_with_global<'a>(
                 tasks.push(Task::Eval(body, call));
             }
             Task::CallValue { args, caller } => {
-                match values.pop().unwrap_or(Value::Undef) {
-                    Value::Function { closure_id, env } => {
-                        let (params, body) = ctx.closures.borrow()[closure_id];
-                        // a closure's body is lexically scoped to its captured env, not the caller's.
-                        push_call(params, body, args, &caller, &env, &mut tasks);
+                let callee = values.pop().unwrap_or(Value::Undef);
+                match &callee {
+                    Value::Function { closure_id, env, self_name } => {
+                        let (params, body) = ctx.closures.borrow()[*closure_id];
+                        // a closure's body is lexically scoped to its captured env, not the caller's. If it
+                        // was defined with a name, re-inject NAME→itself so it can recurse (letrec) — our
+                        // COW frames can't self-reference at capture time, so we do it here, where we hold
+                        // the closure value. Every recursive call re-injects, so depth is unbounded.
+                        let base = match self_name {
+                            Some(name) => {
+                                let mut b = env.child();
+                                b.bind(name.to_string(), callee.clone());
+                                b
+                            }
+                            None => env.clone(),
+                        };
+                        push_call(params, body, args, &caller, &base, &mut tasks);
                     }
                     _ => values.push(Value::Undef), // calling a non-function → undef
                 }
@@ -408,7 +420,7 @@ fn eval_with_global<'a>(
                 body,
                 scope,
             } => {
-                let value = values.pop().unwrap_or(Value::Undef);
+                let value = name_closure(values.pop().unwrap_or(Value::Undef), name);
                 trace::bind('l', name, &value);
                 let mut inner = scope.child();
                 inner.bind(name, value);
@@ -534,6 +546,7 @@ fn eval_node<'a>(
             values.push(Value::Function {
                 closure_id,
                 env: scope.clone(),
+                self_name: None, // set when bound to a name (`g = function…`) — see `name_closure`
             });
         }
         ExprKind::Let { bindings, body } => match bindings.split_first() {
@@ -900,7 +913,7 @@ fn comprehension_let_scope<'a>(
     let mut s = scope.clone();
     for binding in bindings {
         let name = binding.name.as_deref().unwrap_or("_");
-        let value = eval_with_global(&binding.value, &s, global, ctx)?;
+        let value = name_closure(eval_with_global(&binding.value, &s, global, ctx)?, name);
         let mut next = s.child();
         next.bind(name, value);
         s = next;
@@ -910,6 +923,25 @@ fn comprehension_let_scope<'a>(
 
 /// Build a vector value: the all-numeric `NumList` fast path when every element is a number, else the
 /// general heterogeneous `List`. The two compare EQUAL element-for-element (see `Value`'s `PartialEq`).
+/// Tag a function literal with the NAME it's being bound to (`g = function…` / `let(g = function…)`), so it
+/// can call ITSELF by that name (letrec — the [`Task::CallValue`] injection uses it). Only tags an as-yet
+/// unnamed `Function`, preserving the ORIGINAL definition name if the same closure value is re-bound
+/// elsewhere. Non-functions pass through untouched.
+fn name_closure(value: Value, name: &str) -> Value {
+    match value {
+        Value::Function {
+            closure_id,
+            env,
+            self_name: None,
+        } => Value::Function {
+            closure_id,
+            env,
+            self_name: Some(std::rc::Rc::from(name)),
+        },
+        other => other,
+    }
+}
+
 fn build_vector(items: Vec<Value>) -> Value {
     match items.iter().map(as_num).collect::<Option<Vec<f64>>>() {
         Some(nums) => Value::num_list(nums),
@@ -1104,7 +1136,7 @@ fn tagged_functions<'a>(
 fn build_island_global(island: usize, ctx: &Ctx<'_>) -> crate::Result<Scope> {
     let mut scope = Scope::new();
     for &(name, expr) in &ctx.islands[island].assignments {
-        let value = eval_with_ctx(expr, &scope, ctx)?;
+        let value = name_closure(eval_with_ctx(expr, &scope, ctx)?, name);
         scope.bind(name.to_string(), value);
     }
     Ok(scope)
@@ -1163,7 +1195,7 @@ fn eval_nodes<'a>(
 fn hoist_scope<'a>(stmts: &[&'a Stmt], scope: &Scope, ctx: &Ctx<'a>) -> crate::Result<Scope> {
     let mut scope = scope.clone();
     for (name, expr) in hoisted_assignments(stmts) {
-        let value = eval_with_ctx(expr, &scope, ctx)?;
+        let value = name_closure(eval_with_ctx(expr, &scope, ctx)?, name);
         trace::bind('=', name, &value);
         scope.bind(name.to_string(), value);
     }

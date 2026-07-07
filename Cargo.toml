@@ -25,6 +25,14 @@ name = "corpus_worker"
 path = "src/bin/corpus_worker.rs"
 required-features = ["native"]
 
+# Single-test repro for the L.2 burn-down: runs ONE named BOSL2 test and prints its bucket, FULL error, and
+# console (echo/warning) output — with an optional `--trace` for the evaluator's `set -x`. The debug
+# counterpart to the sweep's one-line-per-test roster. A dev tool, not user-facing.
+[[bin]]
+name = "corpus_repro"
+path = "src/bin/corpus_repro.rs"
+required-features = ["native"]
+
 [workspace]
 members = ["geom", "gui", "jit", "lang", "web"]
 

@@ -192,6 +192,21 @@ pub fn evaluate_geometry_full(source: &str) -> Result<(Geo, Vec<Message>)> {
     eval::evaluate_source(source, Path::new("."), None, &[])
 }
 
+/// Like [`evaluate_geometry_with_base`], but ALSO returns the ordered `echo`/warning [`Message`]s — the
+/// base-dir analogue of [`evaluate_geometry_full`]. The BOSL2 corpus repro path wants both at once: a
+/// `.scadtest` script `include`s `<../std.scad>` (so it needs `base_dir`) AND its `echo` output is the
+/// clue when an `assert` diverges (so it needs the messages).
+///
+/// # Errors
+/// As [`evaluate_geometry_with_base`].
+pub fn evaluate_geometry_with_base_full(
+    source: &str,
+    base_dir: &Path,
+    library_paths: &[PathBuf],
+) -> Result<(Geo, Vec<Message>)> {
+    eval::evaluate_source(source, base_dir, None, library_paths)
+}
+
 /// Evaluate `source` to a geometry [`Geo`] tree, resolving `import`/`surface` meshes through `mesh_reader`
 /// (M.4) — the native driver over the whole needs fixpoint. `import`/`surface` paths are RUNTIME
 /// expressions, discovered only by executing; each one the run reaches is handed to `mesh_reader` (the

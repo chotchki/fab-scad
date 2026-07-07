@@ -155,6 +155,12 @@ pub(super) struct Ctx<'a> {
     /// during the body), a v1 simplification — real code never names a local module the same as a global
     /// one, so the dynamic reach never resolves the wrong def. Popped on body exit.
     local_modules: RefCell<Vec<(loader::ModStore<'a>, Scope)>>,
+    /// The NAMES of the currently-active user-module instantiations, innermost last — OpenSCAD's module
+    /// call stack, for `parent_module(n)` / `$parent_modules` (`control.cc`). `call_user_module` pushes the
+    /// callee's name before its body runs, pops after; `parent_module(n)` reads `stack[len-1-n]` (0 = the
+    /// current module, 1 = its parent). BOSL2's `deprecate()` echoes `parent_module(1)` to name the
+    /// deprecated module. `&'a str` — the name is borrowed from the call-site AST.
+    module_stack: RefCell<Vec<&'a str>>,
     /// The evaluator's ONE advancing RNG for SEEDLESS `rands()` (I.2.8b). OpenSCAD draws every seedless
     /// call from a single global engine, so consecutive `rands()` DIFFER; a fresh engine per call would
     /// repeat and collapse BOSL2's random line/triangle to a degenerate case. Seeded once per evaluation
@@ -664,6 +670,9 @@ fn run_builtin(name: &str, args: &[Arg], values: &mut Vec<Value>, ctx: &Ctx<'_>)
     // so it's routed here where the `Ctx` is in scope rather than through the pure `builtins::apply`.
     let result = if name == "rands" {
         builtins::rands(&positional, &mut ctx.rand_stream.borrow_mut())
+    } else if name == "parent_module" {
+        // Reads the live module-instantiation name stack (control.cc) — stateful, like `rands`.
+        builtins::parent_module(&positional, &ctx.module_stack.borrow())
     } else {
         builtins::apply(name, &positional)
     };
@@ -1136,6 +1145,7 @@ fn resolve_source(
         module_depth: Cell::default(),
         children_stack: RefCell::default(),
         local_modules: RefCell::default(),
+        module_stack: RefCell::default(),
         rand_stream: RefCell::new(rng::RandStream::new()),
     };
     // Build each `use`d file's constant scope (islands 1..n) — hoisting needs the `Ctx` (constants can
@@ -1648,10 +1658,19 @@ fn call_user_module<'a>(
         scope: caller.clone(),
         island,
     });
+    // `$parent_modules` = the count of ANCESTOR module instantiations (before pushing self), then push this
+    // module's name so a `parent_module(n)` in its body reads the stack (`control.cc`). BOSL2's `deprecate()`
+    // echoes `parent_module(1)`; the `no_children`/`req_children` guards read `$parent_modules > 0`.
+    call.bind(
+        "$parent_modules",
+        Value::Num(child_count(ctx.module_stack.borrow().len())),
+    );
+    ctx.module_stack.borrow_mut().push(&mi.name);
     let mut nodes = Vec::new();
     // The body resolves ITS module calls against the module's DEFINITION island (`home`), not the caller's.
     let result = eval_stmt(body, &mut call, &home_global, home, ctx, &mut nodes);
-    ctx.children_stack.borrow_mut().pop(); // restore even on error (no `?` before these)
+    ctx.module_stack.borrow_mut().pop(); // restore even on error (no `?` before these)
+    ctx.children_stack.borrow_mut().pop();
     ctx.module_depth.set(depth);
     result?;
     Ok(union_of(nodes, ctx))
@@ -1999,6 +2018,7 @@ fn build_ctx(program: &Program) -> Ctx<'_> {
         module_depth: Cell::default(),
         children_stack: RefCell::default(),
         local_modules: RefCell::default(),
+        module_stack: RefCell::default(),
         rand_stream: RefCell::new(rng::RandStream::new()),
     }
 }

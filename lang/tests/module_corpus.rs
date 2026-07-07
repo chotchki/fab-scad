@@ -91,6 +91,29 @@ fn module_body_local_definitions() {
     ));
 }
 
+/// `parent_module(n)` / `$parent_modules` (L.2.2, `control.cc`): the module instantiation stack, innermost
+/// first from `n=0`. BOSL2's `deprecate()` echoes `parent_module(1)` to name the deprecated module; the
+/// `no_children`/`req_children` guards read `$parent_modules > 0`. Clean eval means every inner assert held.
+#[test]
+fn parent_module_reads_the_instantiation_stack() {
+    // n=0 is the current module, n=1 its caller; `$parent_modules` counts the ancestors.
+    assert!(
+        evaluate(
+            r#"module inner() {
+                   assert(parent_module(0) == "inner");
+                   assert(parent_module(1) == "outer");
+                   assert($parent_modules == 1);
+                   cube(1);
+               }
+               module outer() { assert($parent_modules == 0); inner(); }
+               outer();"#
+        )
+        .is_ok()
+    );
+    // overrunning the stack → undef (not an error)
+    assert!(evaluate("module m() { assert(is_undef(parent_module(5))); cube(1); } m();").is_ok());
+}
+
 /// A module body can be a transform, a boolean, or a block of several children — the full statement
 /// vocabulary, producing real internal tree nodes.
 #[test]

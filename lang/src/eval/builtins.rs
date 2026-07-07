@@ -70,7 +70,28 @@ pub(super) fn is_builtin(name: &str) -> bool {
             | "is_function"
             | "version"
             | "version_num"
+            // module-instantiation stack introspection (control.cc) — stateful, routed via run_builtin
+            | "parent_module"
     )
+}
+
+/// `parent_module(n)` (`control.cc`) — the NAME of the module `n` levels up the instantiation stack (0 =
+/// the current module, 1 = its parent), or `undef` if `n` overruns the stack. `stack` is innermost-last
+/// (the current module at the end), so index `len-1-n`. A non-integer / negative `n` → `undef`. Stateful
+/// (reads the evaluator's module stack), so it's dispatched from [`run_builtin`](super::run_builtin), not
+/// the pure `apply`. BOSL2's `deprecate()` echoes `parent_module(1)` to name the deprecated module.
+pub(super) fn parent_module(pos: &[Value], stack: &[&str]) -> Value {
+    let n = match pos.first() {
+        None => 0,
+        Some(v) => match as_index(v) {
+            Some(n) => n,
+            None => return Value::Undef,
+        },
+    };
+    match stack.len().checked_sub(1 + n).and_then(|i| stack.get(i)) {
+        Some(name) => Value::string((*name).to_string()),
+        None => Value::Undef,
+    }
 }
 
 /// Apply a builtin by name to its args. OpenSCAD builtins have no declared parameter names, so `pos` is

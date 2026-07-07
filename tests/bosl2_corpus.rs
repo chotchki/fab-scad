@@ -52,8 +52,16 @@ use fab_scad::corpus::{Bucket, check_worker, histogram, run_bosl2_corpus_isolate
 /// make_path (rounding_edge_mask, fillet), qrok (qr_factor), nullcheck (null_space), valid_lock/apply_lock
 /// (rabbit_clip), check_path_apply (apply), testvercmp/diversify (version_cmp), ghost_if (pco1810_neck),
 /// corner_shape (nema_stepper, slider). Unimplemented 13→3: only `parent_module` (a genuine missing builtin,
-/// L.2.2/L.2.4) + minkowski (deferred) remain. Floored below 887 for timeout jitter.
-const PASS_FLOOR: usize = 885;
+/// L.2.2/L.2.4) + minkowski (deferred) remain.
+///
+/// 2026-07-07 (later still): 887→888 (98.6%) — 4 assertion, 1 unimplemented, ~7-8 timeout. `parent_module(n)`
+/// / `$parent_modules` +2 [L.2.2: the module-instantiation NAME stack — `call_user_module` pushes/pops the
+/// callee name, `parent_module(n)` reads `stack[len-1-n]`; BOSL2's `deprecate()` echoes `parent_module(1)`
+/// → test_rounding_angled_edge_mask/_corner_mask]. The whole "unknown function/module" CLASS is now gone —
+/// unimplemented is JUST the deferred minkowski (J.4.4). Remaining: 4 assertions (attachment-descriptor
+/// infra parent_part/desc_dist, correctly-rounded-acos f_acos, vector-math ring_hook) + the hull/region
+/// timeouts (L.2.7). Floored below 888 with room for the borderline-gears timeout jitter (±1-2).
+const PASS_FLOOR: usize = 886;
 
 #[test]
 #[ignore = "minutes-long full BOSL2 sweep; run explicitly with --ignored"]

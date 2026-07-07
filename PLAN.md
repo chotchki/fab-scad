@@ -118,7 +118,8 @@ added 2026-07-07.
   - [ ] L.2.4 - L.2.4 - Builtin correctness bugs: named singletons that return the wrong value
   - [ ] L.2.5 - L.2.5 - Domain assert families: beziers, screw tables, polyhedra
   - [ ] L.2.6 - L.2.6 - The got==expected long tail: individual math divergences
-  - [ ] L.2.7 - L.2.7 - Timeouts: the hull/region hangs
+  - [x] L.2.7 - L.2.7 - Timeouts: 6 of 8 CLEARED (893→899, 99.8%) by a FOUNDATIONAL scope perf fix — NOT hull/region hangs but per-call $-context COPYING. Every user function/module call copied the caller's reaching $-context into the call scope (`caller.specials()` → O(#$-vars)); BOSL2 sets 42 top-level $-vars, so call-heavy geometry paid 42 clones+inserts PER CALL. Fix: split the DYNAMIC $-chain from the LEXICAL chain in Scope — a call frame inherits the caller's $-context BY REFERENCE (`dynamic_parent`), O(1) call setup; iterative `Frame::Drop` keeps deep recursion heap-bounded (the dynamic chain is now deep). Cleared gears×3, circle_3points, exclusive_or, rot, vnf_area. gaussian_rands 52s→~12s. Remaining 2: gaussian_rands (borderline — passes solo, times out under the parallel sweep; a JIT/intrinsics target — 300k-element sqrt/ln/cos comprehension, per chotchki) + spheroid (investigate).
+  - [ ] L.2.7a - L.2.7a - spheroid timeout: investigate the last non-JIT timeout (high-$fn sphere geometry). gaussian_rands is deferred to the JIT/intrinsics tier (rung 2/3) — the numeric-comprehension hot path it exemplifies is exactly what optimized_functions/Cranelift target.
   - [x] L.2.8 - L.2.8 - Recursive function-literals (letrec): a closure must see its own binding
   - [x] L.2.8a - L.2.8a - Island-global bootstrapping: a top-level constant's fn call sees the constants hoisted so far (modular_hose +5)
   - [x] L.2.8b - L.2.8b - Empty-statement $children: a lone `;` is not a child (screw/attachable family +5)

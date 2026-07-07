@@ -87,7 +87,17 @@ use fab_scad::corpus::{Bucket, check_worker, histogram, run_bosl2_corpus_isolate
 /// doctrine follow-up: native geometry runs Manifold with TBB (`parallel` feature) = non-deterministic
 /// reduction; a single-threaded (`MANIFOLD_PAR=NONE`) build or verified-deterministic TBB is needed for
 /// doctrine #36. Floored below 893 for the timeout jitter.
-const PASS_FLOOR: usize = 890;
+///
+/// 2026-07-07 (L.2.7 scope perf): 893→899 (99.8%) — 6 of 8 timeouts CLEARED (gears×3, circle_3points,
+/// exclusive_or, rot, vnf_area). Root cause: every user function/module call COPIED the caller's reaching
+/// `$`-context into the call scope (`caller.specials()` → bind each), which is O(#`$`-vars) per call — and
+/// BOSL2 sets 42 top-level `$`-vars, so call-heavy geometry (list_to_matrix/move/etc.) paid 42 clones+inserts
+/// per call. Fix: split the DYNAMIC `$`-chain from the LEXICAL chain in `Scope` — a call frame inherits the
+/// caller's `$`-context BY REFERENCE (`dynamic_parent`) instead of copying (O(1) call setup). gaussian_rands
+/// 52s→~12s. Iterative `Frame::Drop` keeps deep recursion heap-bounded (the dynamic chain is now deep).
+/// Remaining 2 timeouts: gaussian_rands (borderline — passes solo ~12s, times out under the parallel sweep;
+/// a JIT/intrinsics target — a 300k-element sqrt/ln/cos comprehension) + spheroid. Floored below 899.
+const PASS_FLOOR: usize = 897;
 
 #[test]
 #[ignore = "minutes-long full BOSL2 sweep; run explicitly with --ignored"]

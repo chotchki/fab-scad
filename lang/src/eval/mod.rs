@@ -427,12 +427,11 @@ fn eval_with_global<'a>(
                 caller,
             } => {
                 let vals = values.split_off(values.len().saturating_sub(names.len()));
-                let mut call = base.child();
-                // dynamic $-context: inherit the caller's reaching $-vars BEFORE the call's own
-                // bindings, so a call's $-args (bound below) override the inherited ones.
-                for (name, value) in caller.specials() {
-                    call.bind(name, value);
-                }
+                // The call scope is lexically a child of `base` (the callee's home global — hygiene) but
+                // DYNAMICALLY a child of `caller`, so it inherits the caller's reaching $-context by
+                // reference (no per-call $-copy — the L.2.7 fix). A call's own $-args (bound below) land in
+                // this frame's specials, shadowing the inherited ones.
+                let mut call = Scope::call_frame(&base, &caller);
                 // Two-phase (OpenSCAD): bind DEFAULTS first, then the passed ARGS, so an arg wins over a
                 // default even when a param NAME repeats (a defaultless duplicate can't clobber a real arg).
                 for ((name, &prov), value) in names.iter().zip(&provided).zip(&vals) {
@@ -1710,10 +1709,11 @@ fn eval_children<'a>(
     // where it was written: BOSL2's `attachable()` sets `$parent_geom`/`$parent_parts` in its body right
     // before `children()`, and `parent()`/`attach()` inside the children must read those, not the caller's
     // stale `undef`. Without the overlay, `desc_dist`/`parent_part` saw a zero-size default geom.
-    let mut child_scope = frame.scope.clone();
-    for (name, value) in scope.specials() {
-        child_scope.bind(name, value);
-    }
+    // Children render in the CALLER's LEXICAL scope (`frame.scope`, late-bound) but with the CURRENT dynamic
+    // $-context (`scope`, where `children()` is instantiated) — a `call_frame` splices exactly that (L.2.8p),
+    // now by reference instead of copying every $-var (L.2.7). So `attachable()`'s `$parent_geom` reaches
+    // `parent()`/`desc_dist` in the children, while `x` stays the call-site's lexical value.
+    let child_scope = Scope::call_frame(&frame.scope, scope);
     let result = eval_nodes(&selected, ctx, &child_scope, global, frame.island);
     ctx.children_stack.borrow_mut().push(frame); // restore for the caller's continuation
     Ok(union_of(result?, ctx))
@@ -1772,10 +1772,9 @@ fn bind_module_scope<'a>(
         }
     }
 
-    let mut call = global.child();
-    for (name, value) in caller.specials() {
-        call.bind(name, value); // inherit the caller's reaching $-context first
-    }
+    // Lexically a child of the module's home `global` (hygiene), dynamically a child of `caller` (inherits
+    // the caller's $-context by reference — no per-call $-copy). $-args (bound last) shadow the inherited.
+    let mut call = Scope::call_frame(global, caller);
     // OpenSCAD binds in TWO phases — ALL defaults first (declaration order), THEN the passed args on top —
     // so an argument always wins over a default regardless of param order. That ordering is load-bearing
     // when a param NAME is DUPLICATED (BOSL2's `rounding_edge_mask` lists `r` twice, once defaultless): the

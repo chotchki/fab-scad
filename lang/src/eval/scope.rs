@@ -21,11 +21,43 @@ use std::rc::Rc;
 
 use super::value::Value;
 
-/// One frame of bindings plus a link to the enclosing frame (`None` at the root).
+/// One frame of bindings plus a link to the enclosing frame (`None` at the root). `$`-specials live in
+/// their OWN map, apart from the (often huge) lexical `vars`: every user call inherits the caller's reaching
+/// `$`-context via [`Scope::specials`], which must iterate ONLY the `$`-vars — a BOSL2 island global holds
+/// THOUSANDS of constants in `vars`, so folding `$`-vars in there made `specials()` (and thus every call)
+/// O(scope-size), the L.2.7 timeout tax. Kept split, each bound/looked-up by its `$` prefix.
 #[derive(Debug, Clone)]
 struct Frame {
     vars: BTreeMap<String, Value>,
+    specials: BTreeMap<String, Value>,
+    /// LEXICAL parent — walked for regular (`vars`) lookups. A `let`/comprehension child shares its
+    /// enclosing scope here; a CALL frame instead points at the callee's home global (hygiene).
     parent: Option<Rc<Frame>>,
+    /// DYNAMIC parent — walked for `$`-special lookups. For a `let`/comprehension it's the SAME as `parent`
+    /// (both inherit the enclosing scope). For a CALL frame it's the CALLER's frame, so the callee inherits
+    /// the caller's reaching `$`-context BY REFERENCE — no per-call copy of the (BOSL2: 42-strong) `$`-set,
+    /// which is the L.2.7 timeout fix (`specials()`-copy was O(#`$`-vars) on every call). See [`call_frame`].
+    dynamic_parent: Option<Rc<Frame>>,
+}
+
+/// ITERATIVE drop for the frame chain. Deep recursion (`f(n)=f(n-1)`) builds an N-deep `dynamic_parent`
+/// chain (each call frame references its caller); the default recursive `Drop` would overflow the HOST
+/// stack unwinding it — exactly the "recursion is heap-bounded" property the explicit-stack evaluator
+/// exists to guarantee. So unlink the chain into a worklist and drop iteratively. A frame we don't
+/// uniquely own is shared (another live scope holds it) — decrement and stop, don't descend.
+impl Drop for Frame {
+    fn drop(&mut self) {
+        let mut worklist: Vec<Rc<Frame>> = Vec::new();
+        worklist.extend(self.parent.take());
+        worklist.extend(self.dynamic_parent.take());
+        while let Some(rc) = worklist.pop() {
+            if let Ok(mut frame) = Rc::try_unwrap(rc) {
+                worklist.extend(frame.parent.take());
+                worklist.extend(frame.dynamic_parent.take());
+                // `frame` drops here with both links already None → no recursion.
+            }
+        }
+    }
 }
 
 /// A lexical/dynamic scope: an `Rc<Frame>` chain seeded with the `$fn`/`$fa`/`$fs` defaults at the root.
@@ -41,13 +73,36 @@ impl Scope {
     /// (`segs`, every arc/circle), and without it those go `undef` and cascade.
     #[must_use]
     pub fn new() -> Self {
+        let mut specials = BTreeMap::new();
+        specials.insert("$fn".to_string(), Value::Num(0.0));
+        specials.insert("$fa".to_string(), Value::Num(12.0));
+        specials.insert("$fs".to_string(), Value::Num(2.0));
         let mut vars = BTreeMap::new();
-        vars.insert("$fn".to_string(), Value::Num(0.0));
-        vars.insert("$fa".to_string(), Value::Num(12.0));
-        vars.insert("$fs".to_string(), Value::Num(2.0));
         vars.insert("PI".to_string(), Value::Num(std::f64::consts::PI));
         Self {
-            frame: Rc::new(Frame { vars, parent: None }),
+            frame: Rc::new(Frame {
+                vars,
+                specials,
+                parent: None,
+                dynamic_parent: None,
+            }),
+        }
+    }
+
+    /// A fresh CALL frame: lexically a child of `lexical_base` (the callee's home global — hygiene, so it
+    /// sees its own file's constants, not the caller's locals), but DYNAMICALLY a child of `caller` (so it
+    /// inherits the caller's reaching `$`-context by reference). This is what replaces the old
+    /// copy-every-`$`-var-into-the-call-scope, making a call O(1) in the `$`-set instead of O(#`$`-vars).
+    /// The caller then binds the call's params into `vars` and any `$`-args into `specials` (shadowing).
+    #[must_use]
+    pub fn call_frame(lexical_base: &Scope, caller: &Scope) -> Self {
+        Self {
+            frame: Rc::new(Frame {
+                vars: BTreeMap::new(),
+                specials: BTreeMap::new(),
+                parent: Some(Rc::clone(&lexical_base.frame)),
+                dynamic_parent: Some(Rc::clone(&caller.frame)),
+            }),
         }
     }
 
@@ -63,52 +118,75 @@ impl Scope {
     /// silent. Same child→parent walk as `lookup`.
     #[must_use]
     pub fn lookup_opt(&self, name: &str) -> Option<Value> {
+        // `$`-names live in `specials` and follow the DYNAMIC chain; everything else is in `vars` on the
+        // LEXICAL chain. Route by prefix, then walk that chain child→parent (inner shadows outer).
         let mut frame = &self.frame;
-        loop {
-            if let Some(value) = frame.vars.get(name) {
-                return Some(value.clone());
+        if name.starts_with('$') {
+            loop {
+                if let Some(value) = frame.specials.get(name) {
+                    return Some(value.clone());
+                }
+                match &frame.dynamic_parent {
+                    Some(parent) => frame = parent,
+                    None => return None,
+                }
             }
-            match &frame.parent {
-                Some(parent) => frame = parent,
-                None => return None,
+        } else {
+            loop {
+                if let Some(value) = frame.vars.get(name) {
+                    return Some(value.clone());
+                }
+                match &frame.parent {
+                    Some(parent) => frame = parent,
+                    None => return None,
+                }
             }
         }
     }
 
-    /// Bind (or rebind) a name in the CURRENT frame. Copy-on-write: free while this frame is unshared,
-    /// clones it once if a child/closure already holds it (so their view stays at capture time).
+    /// Bind (or rebind) a name in the CURRENT frame — a `$`-name into `specials`, else `vars`. Copy-on-write:
+    /// free while this frame is unshared, clones it once if a child/closure already holds it (so their view
+    /// stays at capture time).
     pub fn bind(&mut self, name: impl Into<String>, value: Value) {
-        Rc::make_mut(&mut self.frame)
-            .vars
-            .insert(name.into(), value);
+        let name = name.into();
+        let frame = Rc::make_mut(&mut self.frame);
+        if name.starts_with('$') {
+            frame.specials.insert(name, value);
+        } else {
+            frame.vars.insert(name, value);
+        }
     }
 
     /// Push a fresh empty child frame whose parent is this chain — one `Rc` clone. The unit of scope
     /// entry for calls (I.2.3), `let`, and comprehensions (I.3).
     #[must_use]
     pub fn child(&self) -> Self {
+        // A `let`/comprehension child inherits the enclosing scope both lexically AND dynamically (same
+        // frame for both) — only a `call_frame` splits them.
         Self {
             frame: Rc::new(Frame {
                 vars: BTreeMap::new(),
+                specials: BTreeMap::new(),
                 parent: Some(Rc::clone(&self.frame)),
+                dynamic_parent: Some(Rc::clone(&self.frame)),
             }),
         }
     }
 
     /// The reaching special (`$`-)variables, walking child→parent (inner SHADOWS outer). Unlike regular
     /// variables (lexically scoped), `$`-vars are DYNAMICALLY scoped — a callee inherits the CALLER's
-    /// `$`-context (I.2.2), so a call seeds its scope with the caller's `specials()`.
+    /// `$`-context (I.2.2), so a call seeds its scope with the caller's `specials()`. Walks only the
+    /// `specials` maps (a handful of `$`-vars), NOT the constant-laden `vars` — that split is what keeps
+    /// this O(#`$`-vars) instead of O(scope-size) on the every-call hot path (the L.2.7 fix).
     #[must_use]
     pub fn specials(&self) -> BTreeMap<String, Value> {
         let mut out = BTreeMap::new();
         let mut frame = &self.frame;
         loop {
-            for (name, value) in &frame.vars {
-                if name.starts_with('$') {
-                    out.entry(name.clone()).or_insert_with(|| value.clone()); // child wins
-                }
+            for (name, value) in &frame.specials {
+                out.entry(name.clone()).or_insert_with(|| value.clone()); // child wins
             }
-            match &frame.parent {
+            match &frame.dynamic_parent {
                 Some(parent) => frame = parent,
                 None => return out,
             }

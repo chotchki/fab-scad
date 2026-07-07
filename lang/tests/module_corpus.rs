@@ -55,6 +55,12 @@ fn module_call_binds_args() {
         evaluate("module m(x) cube(x); m();").unwrap(),
         evaluate("module m(x) cube(x); m(undef);").unwrap()
     );
+    // DUPLICATE param name: OpenSCAD binds all defaults first, THEN the passed args, so an explicit `s=3`
+    // wins even though a trailing defaultless `s` slot took no arg. A single interleaved pass let that
+    // trailing undef CLOBBER the real value → the body saw `s=undef` (BOSL2's `rounding_edge_mask` lists
+    // `r` twice; this is that shape, minimized). The box must be size 3, not empty/undef.
+    assert_eq!(extent("module box(s, w, s) cube(s); box(s = 3);"), 3.0);
+    assert_eq!(extent("module box(s, w, s) cube(s); box(3);"), 3.0); // positional fills the FIRST `s`
 }
 
 /// A module body can be a transform, a boolean, or a block of several children — the full statement

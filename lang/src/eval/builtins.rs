@@ -20,8 +20,6 @@
 //! non-deterministic (banned), and seeded it would have to replicate boost's `mt19937` +
 //! `uniform_real_distribution` bit-for-bit — a K divergence-bucket decision, not this leaf.
 
-use std::collections::BTreeMap;
-
 use super::fmt::format_value;
 use super::trig;
 use super::value::Value;
@@ -75,8 +73,10 @@ pub(super) fn is_builtin(name: &str) -> bool {
     )
 }
 
-/// Apply a builtin by name to its positional args (named args are unused by the math group).
-pub(super) fn apply(name: &str, pos: &[Value], _named: &BTreeMap<String, Value>) -> Value {
+/// Apply a builtin by name to its args. OpenSCAD builtins have no declared parameter names, so `pos` is
+/// the WHOLE argument list in source order (a named arg's name is dropped upstream in [`run_builtin`]);
+/// e.g. `search`'s `num_returns_per_match`/`index_col_num` are just positions 2 and 3 here.
+pub(super) fn apply(name: &str, pos: &[Value]) -> Value {
     match name {
         "abs" => num1(pos, f64::abs),
         "sign" => num1(pos, sign),
@@ -111,7 +111,9 @@ pub(super) fn apply(name: &str, pos: &[Value], _named: &BTreeMap<String, Value>)
         // seedless case) and never reaches this pure dispatch.
         "is_undef" => Value::Bool(matches!(pos.first(), None | Some(Value::Undef))),
         "is_bool" => pred(pos, |v| matches!(v, Value::Bool(_))),
-        "is_num" => pred(pos, |v| matches!(v, Value::Num(_))),
+        // A NaN is NOT `is_num` in OpenSCAD: `func.cc` guards `type()==NUMBER && !isnan(x)`, so
+        // `is_num(0/0)` is `false` (BOSL2's `f_is_num` test pins `[NAN, false]`). `is_nan` catches those.
+        "is_num" => pred(pos, |v| matches!(v, Value::Num(n) if !n.is_nan())),
         "is_string" => pred(pos, |v| matches!(v, Value::Str(_))),
         "is_list" => pred(pos, |v| matches!(v, Value::NumList(_) | Value::List(_))),
         "is_function" => pred(pos, |v| matches!(v, Value::Function { .. })),
@@ -509,13 +511,11 @@ fn pred(pos: &[Value], f: impl Fn(&Value) -> bool) -> Value {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
-
     use super::{Value, apply};
 
     #[test]
     fn unknown_name_is_undef() {
         // `apply` is gated by `is_builtin` at every call site, so this fallback is reachable only here.
-        assert_eq!(apply("not_a_builtin", &[], &BTreeMap::new()), Value::Undef);
+        assert_eq!(apply("not_a_builtin", &[]), Value::Undef);
     }
 }

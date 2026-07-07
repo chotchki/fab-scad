@@ -139,10 +139,28 @@ impl PartialEq for Value {
                     step: p1,
                     end: e1,
                 },
-            ) => s0 == s1 && p0 == p1 && e0 == e1,
+                // STRUCTURAL (not IEEE): a range equals another iff its three fields match bitwise-ish,
+                // with `NaN` treated equal to `NaN` — so a range EQUALS ITSELF even with a `NaN` step. That
+                // asymmetry vs lists (`[NaN] != [NaN]`, IEEE) is the oracle's: BOSL2's `typeof([0:NAN:INF])`
+                // is `"invalid"`, which needs `is_nan(r) = (r != r)` to be FALSE — i.e. the degenerate range
+                // is self-equal, so `typeof` falls through `is_range` (false: a field isn't finite) to
+                // `"invalid"` instead of reporting `"nan"`.
+            ) => float_id(*s0, *s1) && float_id(*p0, *p1) && float_id(*e0, *e1),
             _ => false, // cross-type is never equal
         }
     }
+}
+
+/// IDENTITY equality for a range field: IEEE `==` PLUS `NaN == NaN`, so a range's `NaN` step doesn't make
+/// the range differ from itself (see the [`PartialEq`] range arm). `-0.0 == 0.0` (IEEE) — ranges never
+/// hinge on signed zero, so the coarser "same value" is fine and matches `==` for every non-`NaN` field.
+#[allow(
+    clippy::float_cmp,
+    reason = "EXACT equality is the point — a range equals another iff its fields are identical, matching \
+              OpenSCAD's fieldwise `RangeType` compare; an epsilon margin would wrongly equate distinct ranges"
+)]
+fn float_id(a: f64, b: f64) -> bool {
+    a == b || (a.is_nan() && b.is_nan())
 }
 
 /// A runaway range (`[0:1e12]`) must not hang the evaluator, so iteration is capped. OpenSCAD warns +

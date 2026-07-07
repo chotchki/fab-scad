@@ -132,7 +132,13 @@ fn ordering() {
     assert_eq!(ev("1<\"a\""), Value::Undef); // cross-type ordering → undef
     assert_eq!(ev("(0/0)<1"), Value::Bool(false)); // NaN comparison → false
     assert_eq!(ev("[0/0,1]<[1,2]"), Value::Bool(false)); // NaN in a list → false
-    assert_eq!(ev("[true]<[false]"), Value::Bool(false)); // list of NON-orderable (bool) elems → incomparable
+    // Bools ARE orderable (false < true, coerced 0/1) — BOSL2's `compare_vals(true,false)>0` needs it.
+    assert_eq!(ev("false<true"), Value::Bool(true));
+    assert_eq!(ev("true>false"), Value::Bool(true));
+    assert_eq!(ev("true<true"), Value::Bool(false));
+    assert_eq!(ev("false>=false"), Value::Bool(true));
+    assert_eq!(ev("true<1"), Value::Undef); // but bool-vs-num is still CROSS-type → undef
+    assert_eq!(ev("[true]<[false]"), Value::Bool(false)); // element-wise: true>false, so [true]>[false]
 }
 
 #[test]
@@ -271,6 +277,10 @@ fn ranges_are_first_class_values() {
     assert_eq!(ev("[0:5] == [0:5]"), Value::Bool(true)); // fieldwise equality
     assert_eq!(ev("[0:5] == [0:1:5]"), Value::Bool(true)); // 2-part == explicit step 1
     assert_eq!(ev("[0:5] == [0:6]"), Value::Bool(false)); // different end
+    // A range is self-equal STRUCTURALLY: a NaN step doesn't make it differ from itself (unlike a list,
+    // where `[NaN] != [NaN]` IEEE). BOSL2's `typeof([0:NAN:INF])=="invalid"` needs `is_nan(r)=(r!=r)` false.
+    assert_eq!(ev("[0:0/0:1/0] == [0:0/0:1/0]"), Value::Bool(true)); // NaN step, Inf end → still self-equal
+    assert_eq!(ev("[0:0/0:1/0] != [0:0/0:1/0]"), Value::Bool(false));
     assert_eq!(ev("[0:5] ? 1 : 2"), num(1.0)); // a range is truthy
     assert_eq!(ev("[0:5]").type_name(), "range");
     // INDEXING a range → its three fields: `r[0]=start`, `r[1]=step`, `r[2]=end`, else undef (OpenSCAD
@@ -503,7 +513,10 @@ fn math_builtins() {
     assert_eq!(ev("cross([1], [2])"), Value::Undef); // wrong-dimension cross
     assert_eq!(ev("cross(1, 2)"), Value::Undef); // non-vector cross
     assert_eq!(ev(r#"min(1, "a")"#), Value::Undef); // a non-number among several args
-    assert_eq!(ev("abs(x = -5)"), Value::Undef); // math builtins take positional args (named → undef)
+    // A builtin has NO declared parameter names — OpenSCAD reads every arg by SOURCE POSITION and ignores
+    // the name (`func.cc` never consults `.name`), so `abs(x = -5)` is `abs(-5)` → 5, not undef. (Same rule
+    // that lets BOSL2 call `search(..., index_col_num=1)`: the name is decorative, the position is real.)
+    assert_eq!(ev("abs(x = -5)"), Value::Num(5.0));
     // a user function may SHADOW a builtin (resolution order).
     // (unimplemented/unknown functions stay LOUD until I.5's warn-and-undef.)
     assert!(matches!(ev_err("nope_fn(1)"), Error::Unknown(m) if m.contains("function `nope_fn`")));
@@ -630,6 +643,21 @@ fn search_num_returns_one_miss_asymmetry() {
     assert_eq!(ev("search(1, 5)"), list(&[])); // a non-list table yields no matches
     assert_eq!(ev("search(undef, [1, 2])"), Value::Undef); // a non-searchable find → undef
     assert_eq!(ev(r#"search("a", "aaa", -1)"#), list(&[0.0])); // a bad num_returns falls back to 1
+    // A builtin reads args by SOURCE POSITION, name ignored — so the DOCUMENTED names for `search`'s 3rd/4th
+    // args (`num_returns_per_match`, `index_col_num`) resolve positionally. BOSL2's `in_list(v,list,idx)`
+    // lives on this: `search([v], rows, num_returns_per_match=1, index_col_num=1)` must search COLUMN 1.
+    assert_eq!(
+        ev(r#"search(["bar"], [[2,"foo"],[4,"bar"],[3,"baz"]], num_returns_per_match=1, index_col_num=1)"#),
+        Value::list(vec![num(1.0)]) // "bar" is row 1's column 1 → first-hit index 1
+    );
+    // Positional-ONLY, taken literally: a name does NOT rescue an out-of-order arg. `index_col_num=1`
+    // alone sits at POSITION 2, so it's read as `num_returns_per_match=1` and `index_col_num` stays 0 →
+    // "bar" is searched against WHOLE rows, none match → a kept miss `[]`. (OpenSCAD behaves the same; this
+    // is why BOSL2 always passes BOTH names, in order.)
+    assert_eq!(
+        ev(r#"search(["bar"], [[2,"foo"],[4,"bar"]], index_col_num=1)"#),
+        Value::list(vec![Value::num_list(Vec::new())])
+    );
 
     // lookup edge cases: labeled tables, malformed rows, missing/degenerate inputs.
     assert_eq!(
@@ -660,7 +688,7 @@ fn type_predicate_builtins() {
     assert_eq!(ev("is_bool(1)"), f); // 1 is a number, not a bool (no coercion)
 
     assert_eq!(ev("is_num(5)"), t);
-    assert_eq!(ev("is_num(0/0)"), t); // NaN is still a number
+    assert_eq!(ev("is_num(0/0)"), f); // NaN is NOT is_num in OpenSCAD (`type==NUMBER && !isnan`) → is_nan catches it
     assert_eq!(ev(r#"is_num("a")"#), f);
     assert_eq!(ev("is_num([1, 2])"), f);
     assert_eq!(ev("is_num()"), f); // no arg → false
@@ -728,6 +756,11 @@ fn function_values() {
     assert_eq!(ev("(function(x) x)()"), Value::Undef); // unfilled param → undef
     assert_eq!(ev("(function() $fn)($fn = 7)"), num(7.0)); // a $-arg injects into a closure call
     assert_eq!(ev("(function() $fn)()"), num(0.0)); // else the callee sees the reaching $fn (root 0)
+    // DUPLICATE param name: the explicit `a = 3` wins over the trailing defaultless `a` slot (defaults bind
+    // first, args second — same OpenSCAD two-phase rule as modules). Without it the trailing undef clobbered
+    // the arg and the body saw `a = undef`.
+    assert_eq!(ev("(function(a, b, a) a)(a = 3, b = 2)"), num(3.0));
+    assert_eq!(ev("(function(a, b, a) a)(3, 2)"), num(3.0)); // positional fills the FIRST `a`
 }
 
 /// `str()` of a function VALUE renders its SOURCE, OpenSCAD-style (verified vs oracle) — the fnliterals

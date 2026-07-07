@@ -246,23 +246,30 @@ fn order(a: &Value, b: &Value, want: impl Fn(Ordering) -> bool) -> Value {
     }
 }
 
-/// Do `a` and `b` share an orderable type — both numbers, both strings, or both lists (either
-/// representation)? `undef`/`bool` and cross-type pairs are NOT orderable.
+/// Do `a` and `b` share an orderable type — both numbers, both strings, both bools, or both lists (either
+/// representation)? `undef` and cross-type pairs are NOT orderable. Two BOOLs order `false < true` (they
+/// coerce to `0`/`1`): BOSL2's `compare_vals(true, false) > 0` relies on it, and OpenSCAD's `<`/`>` return
+/// a real bool for a bool pair (only CROSS-type — `bool` vs `num` — stays `undef`; `compare_vals` reaches
+/// those through its own type-rank test, never through `<`).
 fn same_orderable_type(a: &Value, b: &Value) -> bool {
     matches!(
         (a, b),
-        (Value::Num(_), Value::Num(_)) | (Value::Str(_), Value::Str(_))
+        (Value::Num(_), Value::Num(_))
+            | (Value::Str(_), Value::Str(_))
+            | (Value::Bool(_), Value::Bool(_))
     ) || (list_len(a).is_some() && list_len(b).is_some())
 }
 
-/// A total-ish order over values: numbers numerically, strings lexicographically, lists
-/// element-wise-lexicographically (recursively, across BOTH list representations). `None` =
-/// incomparable (cross-type, `NaN`, `undef`, `bool`). Recurses on nested lists (parse-bounded here;
+/// A total-ish order over values: numbers numerically, strings lexicographically, bools `false < true`,
+/// lists element-wise-lexicographically (recursively, across BOTH list representations). `None` =
+/// incomparable (cross-type, `NaN`, `undef`). Recurses on nested lists (parse-bounded here;
 /// deep-list ordering joins the explicit-stack work if comprehensions ever build one).
 fn value_cmp(a: &Value, b: &Value) -> Option<Ordering> {
     match (a, b) {
         (Value::Num(x), Value::Num(y)) => x.partial_cmp(y),
         (Value::Str(x), Value::Str(y)) => Some(x.cmp(y)),
+        (Value::Bool(x), Value::Bool(y)) => Some(x.cmp(y)), // false < true
+
         _ => {
             let (la, lb) = (list_len(a)?, list_len(b)?);
             for i in 0..la.min(lb) {

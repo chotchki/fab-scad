@@ -31,8 +31,21 @@ use fab_scad::corpus::{Bucket, check_worker, histogram, run_bosl2_corpus_isolate
 /// C-style-for sequential binding +7 [L.2.8e: `for(…;…;x=…,y=x…)` — a later update sees the earlier one →
 /// skin(method="distance")'s `_dp_distance_row` DP], `each if`/`each for` splices +4 [L.2.8f:
 /// `each if(c) list` splices the list not `[[list]]` → nurbs_curve's `each if(…) lerpn(…)` sampling], nested-fn `str()` bare +2 [L.2.8g: `str()` renders nested function literals bare like OpenSCAD, not the canonical `(function (x) …)` → fnliterals f_1arg/f_2arg/f_3arg], let-in-vector transparency +3 [L.2.8h: `[let(x) [a,b]]` contributes one element (splices only if the body does) → trapezoid corner paths]);
-/// the `expect_success=false` scorer fix corrected 21 more. Floored below 868 for timeout jitter.
-const PASS_FLOOR: usize = 866;
+/// the `expect_success=false` scorer fix corrected 21 more.
+///
+/// 2026-07-07: 873→877 (97.3%) — 4 assertion, 13 unimplemented, 7 timeout. Builtin named-args are POSITIONAL
+/// +1 [L.2.4: an OpenSCAD builtin has no declared param names, so it reads every arg by source position and
+/// ignores the name — the split-off-named map dropped them, defaulting `search`'s `index_col_num` to 0 →
+/// test_in_list], bool ordering + range structural-equality land together as test_compare_vals /
+/// test_typeof +2 [L.2.6: `false<true` coerces 0/1, and a range is SELF-equal even with a NaN step so
+/// `is_nan([0:NAN:INF])` is false → "invalid"], is_num(NaN)=false +1 [L.2.8n: NaN routes to is_nan/typeof
+/// "nan", never "number" → test_f_is_num], duplicate-param two-phase binding +0 net [modules/functions bind
+/// ALL defaults then args, so BOSL2's `rounding_edge_mask`/`fillet` (param `r` listed twice) no longer see
+/// `r=undef` — they now clear the `all_nonnegative` assert and block one step later on a module-body-local
+/// `make_path`, an OPEN nested-definition gap (L.2.8m)]. NB f_acos's `(r/π)*180` rad2deg was tried + reverted
+/// (regressed test_glued_circles's arc discretization; needs correctly-rounded acos — L.2.8i). Floored below
+/// 877 for timeout jitter.
+const PASS_FLOOR: usize = 875;
 
 #[test]
 #[ignore = "minutes-long full BOSL2 sweep; run explicitly with --ignored"]

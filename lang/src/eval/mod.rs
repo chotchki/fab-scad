@@ -253,8 +253,12 @@ enum Task<'a> {
     /// Pop `names.len()` values and bind them (params, then `$`-args) into a fresh child of `base`,
     /// seeded first with the CALLER's dynamic `$`-context, then evaluate `body` in that call scope. The
     /// heart of a call — no host recursion, so recursion depth is bounded by the heap (`corner_brace`).
+    /// `provided[i]` marks a name that came from an explicit ARG (vs a default/undef): bind the defaults
+    /// FIRST, then the args, so an argument wins over a default even when a param NAME is DUPLICATED (see
+    /// [`bind_module_scope`] — same OpenSCAD two-phase rule, here for functions).
     Apply {
         names: Vec<&'a str>,
+        provided: Vec<bool>,
         body: &'a Expr,
         base: Scope,
         caller: Scope,
@@ -383,6 +387,7 @@ fn eval_with_global<'a>(
             }
             Task::Apply {
                 names,
+                provided,
                 body,
                 base,
                 caller,
@@ -394,8 +399,17 @@ fn eval_with_global<'a>(
                 for (name, value) in caller.specials() {
                     call.bind(name, value);
                 }
-                for (name, value) in names.iter().zip(vals) {
-                    call.bind(*name, value);
+                // Two-phase (OpenSCAD): bind DEFAULTS first, then the passed ARGS, so an arg wins over a
+                // default even when a param NAME repeats (a defaultless duplicate can't clobber a real arg).
+                for ((name, &prov), value) in names.iter().zip(&provided).zip(&vals) {
+                    if !prov {
+                        call.bind(*name, value.clone());
+                    }
+                }
+                for ((name, prov), value) in names.iter().zip(provided).zip(vals) {
+                    if prov {
+                        call.bind(*name, value);
+                    }
                 }
                 tasks.push(Task::Eval(body, call));
             }
@@ -612,25 +626,21 @@ fn run_builtin(name: &str, args: &[Arg], values: &mut Vec<Value>, ctx: &Ctx<'_>)
     // A benchmark span per builtin application (I.6); `builtin` field lets a layer break cost down by
     // name. All the tracing spans sit at TRACE level — the "compile-out-like-a-logger" doctrine.
     let _span = tracing::trace_span!("builtin", builtin = name).entered();
-    let vals = values.split_off(values.len().saturating_sub(args.len()));
-    let mut positional = Vec::new();
-    let mut named = BTreeMap::new();
-    for (arg, value) in args.iter().zip(vals) {
-        match &arg.name {
-            Some(n) => {
-                named.insert(n.clone(), value);
-            }
-            None => positional.push(value),
-        }
-    }
+    // OpenSCAD builtins declare NO parameter names: every argument — named or positional — is read by
+    // SOURCE POSITION and any name ignored (`func.cc` reads `arguments[i].value`, never `.name`). BOSL2's
+    // `search([v], list, num_returns_per_match=1, index_col_num=idx)` works ONLY because those trailing
+    // names sit at positions 2 and 3. The evaluated values are already on the stack in source order, so
+    // they pass straight through as one positional list — splitting the named ones off (as we used to)
+    // dropped them entirely, silently defaulting `search`'s `index_col_num` to 0.
+    let positional = values.split_off(values.len().saturating_sub(args.len()));
     // `rands` is the one STATEFUL builtin: seedless draws advance the evaluator's `rand_stream` (I.2.8b),
     // so it's routed here where the `Ctx` is in scope rather than through the pure `builtins::apply`.
     let result = if name == "rands" {
         builtins::rands(&positional, &mut ctx.rand_stream.borrow_mut())
     } else {
-        builtins::apply(name, &positional, &named)
+        builtins::apply(name, &positional)
     };
-    trace::builtin(name, &positional, &named, &result); // gated inside; shows `name(args) => result`
+    trace::builtin(name, &positional, &result); // gated inside; shows `name(args) => result`
     values.push(result);
 }
 
@@ -722,51 +732,54 @@ fn push_call<'a>(
     base: &Scope,
     tasks: &mut Vec<Task<'a>>,
 ) {
-    let mut slots: Vec<Option<(&'a Expr, Scope)>> = vec![None; params.len()];
+    // Which explicit-arg expr fills each param slot (positional by position, named by name). `None` = the
+    // param takes its default / undef. Kept separate from defaults so a DUPLICATE param name binds
+    // arg-over-default in the two-phase `Task::Apply` (an unfilled second slot can't clobber a real arg).
+    let mut arg_slots: Vec<Option<&'a Expr>> = vec![None; params.len()];
     let mut dollars: Vec<(&'a str, &'a Expr)> = Vec::new(); // $-args → dynamic $-var injections
     let mut positional = 0;
     for arg in args {
         match &arg.name {
             None => {
-                if let Some(slot) = slots.get_mut(positional) {
-                    *slot = Some((&arg.value, caller.clone()));
+                if let Some(slot) = arg_slots.get_mut(positional) {
+                    *slot = Some(&arg.value);
                 }
                 positional += 1;
             }
             // a $-arg is a per-call dynamic override — injected into the call scope, not param-matched.
             Some(name) if name.starts_with('$') => dollars.push((name.as_str(), &arg.value)),
             Some(name) => {
-                if let Some(i) = params.iter().position(|p| &p.name == name)
-                    && let Some(slot) = slots.get_mut(i)
-                {
-                    *slot = Some((&arg.value, caller.clone()));
+                if let Some(i) = params.iter().position(|p| &p.name == name) {
+                    arg_slots[i] = Some(&arg.value);
                 }
             }
         }
     }
-    for (slot, param) in slots.iter_mut().zip(params) {
-        if let (None, Some(default)) = (&slot, &param.default) {
-            *slot = Some((default, base.clone()));
-        }
-    }
-    // bind order: params first, then $-args (bound last → they override the inherited $-context).
+    // bind order: params first, then $-args (bound last → they override the inherited $-context). A param
+    // filled by an arg is `provided`; a param on its default (or a defaultless-unfilled undef) is not.
+    // `$`-args are always provided. `Task::Apply` binds the non-provided (defaults) before the provided.
     let mut names: Vec<&'a str> = params.iter().map(|p| p.name.as_str()).collect();
     names.extend(dollars.iter().map(|(name, _)| *name));
+    let mut provided: Vec<bool> = arg_slots.iter().map(Option::is_some).collect();
+    provided.extend(std::iter::repeat_n(true, dollars.len()));
     tasks.push(Task::Apply {
         names,
+        provided,
         body,
         base: base.clone(),
         caller: caller.clone(),
     });
     // push evals so the popped run is [params.., dollars..]: dollars first (deeper → on top), then
-    // params reversed (param 0 evaluates first, lands at the bottom of the run).
+    // params reversed (param 0 evaluates first, lands at the bottom of the run). An arg evaluates in the
+    // CALLER scope; a default in the function's lexical `base`; an unfilled defaultless slot → undef.
     for (_, expr) in dollars.iter().rev() {
         tasks.push(Task::Eval(expr, caller.clone()));
     }
-    for slot in slots.into_iter().rev() {
-        match slot {
-            Some((expr, scope)) => tasks.push(Task::Eval(expr, scope)),
-            None => tasks.push(Task::PushUndef),
+    for (slot, param) in arg_slots.into_iter().zip(params).rev() {
+        match (slot, &param.default) {
+            (Some(expr), _) => tasks.push(Task::Eval(expr, caller.clone())),
+            (None, Some(default)) => tasks.push(Task::Eval(default, base.clone())),
+            (None, None) => tasks.push(Task::PushUndef),
         }
     }
 }
@@ -1638,42 +1651,53 @@ fn bind_module_scope<'a>(
     global: &Scope,
     ctx: &Ctx<'a>,
 ) -> crate::Result<Scope> {
-    let mut slots: Vec<Option<(&'a Expr, Scope)>> = vec![None; params.len()];
+    // Which explicit-arg expr fills each param slot (positional by position, named by name). `None` = the
+    // param took no arg → it falls to its default in phase 1.
+    let mut arg_slots: Vec<Option<&'a Expr>> = vec![None; params.len()];
     let mut dollars: Vec<(&'a str, &'a Expr)> = Vec::new();
     let mut positional = 0;
     for arg in args {
         match &arg.name {
             None => {
-                if let Some(slot) = slots.get_mut(positional) {
-                    *slot = Some((&arg.value, caller.clone()));
+                if let Some(slot) = arg_slots.get_mut(positional) {
+                    *slot = Some(&arg.value);
                 }
                 positional += 1;
             }
             Some(name) if name.starts_with('$') => dollars.push((name.as_str(), &arg.value)),
             Some(name) => {
-                if let Some(i) = params.iter().position(|p| &p.name == name)
-                    && let Some(slot) = slots.get_mut(i)
-                {
-                    *slot = Some((&arg.value, caller.clone()));
+                if let Some(i) = params.iter().position(|p| &p.name == name) {
+                    arg_slots[i] = Some(&arg.value);
                 }
             }
         }
     }
-    for (slot, param) in slots.iter_mut().zip(params) {
-        if let (None, Some(default)) = (&slot, &param.default) {
-            *slot = Some((default, global.clone()));
-        }
-    }
+
     let mut call = global.child();
     for (name, value) in caller.specials() {
         call.bind(name, value); // inherit the caller's reaching $-context first
     }
-    for (param, slot) in params.iter().zip(&slots) {
-        let value = match slot {
-            Some((expr, s)) => eval_with_ctx(expr, s, ctx)?,
-            None => Value::Undef,
-        };
-        call.bind(param.name.as_str(), value);
+    // OpenSCAD binds in TWO phases — ALL defaults first (declaration order), THEN the passed args on top —
+    // so an argument always wins over a default regardless of param order. That ordering is load-bearing
+    // when a param NAME is DUPLICATED (BOSL2's `rounding_edge_mask` lists `r` twice, once defaultless): the
+    // unfilled second `r` writes `undef` in phase 1, and the explicit `r=2` overwrites it in phase 2. A
+    // single interleaved pass instead let that trailing `undef` clobber the real value → get_radius(undef).
+    // Phase 1 — defaults (eval'd in the library global) / undef for a defaultless unfilled param.
+    for (param, slot) in params.iter().zip(&arg_slots) {
+        if slot.is_none() {
+            let value = match &param.default {
+                Some(default) => eval_with_ctx(default, global, ctx)?,
+                None => Value::Undef,
+            };
+            call.bind(param.name.as_str(), value);
+        }
+    }
+    // Phase 2 — passed args (eval'd in the caller scope) override, in declaration order.
+    for (param, slot) in params.iter().zip(&arg_slots) {
+        if let Some(expr) = slot {
+            let value = eval_with_ctx(expr, caller, ctx)?;
+            call.bind(param.name.as_str(), value);
+        }
     }
     for (name, expr) in dollars {
         let value = eval_with_ctx(expr, caller, ctx)?;

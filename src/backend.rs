@@ -772,6 +772,16 @@ mod tests {
         assert!(
             (area("intersection() { square(4); translate([2, 2]) square(4); }") - 4.0).abs() < 1e-9
         ); // the overlap
+        // text() (J.4.3, bundled Liberation Sans): a glyph has real positive area…
+        assert!(area("text(\"L\", size = 10);") > 5.0);
+        // …empty text is a present-but-empty 2D leaf (no area)…
+        assert!(area("text(\"\", size = 10);").abs() < 1e-9);
+        // …two glyphs cover more than one (advance + a second outline)…
+        assert!(area("text(\"LL\", size = 10);") > area("text(\"L\", size = 10);") + 1.0);
+        // …and a glyph with a HOLE ('O') fills LESS than its bounding box — the even-odd rule cut the
+        // counter out (a solid box of the same extent would be much larger), proving holes resolve.
+        let o = area("text(\"O\", size = 10);");
+        assert!(o > 5.0 && o < 60.0, "O area {o} should be a ring, not a filled box");
     }
 
     // J.2.3/J.2.7 — the tree-walker lowers CSG booleans + transforms through the REAL Manifold backend

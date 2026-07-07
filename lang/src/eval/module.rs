@@ -12,7 +12,7 @@ use super::geo::GeoNode;
 use super::geo2d::{Contour, Geo, Shape2D};
 use super::scope::Scope;
 use super::value::Value;
-use super::{Ctx, eval_with_ctx, geometry};
+use super::{Ctx, eval_with_ctx, geometry, text};
 use crate::Mesh;
 use crate::geom::{Vec2, Vec3};
 use crate::parser::ModuleInstantiation;
@@ -68,6 +68,7 @@ pub(super) fn eval_module<'a>(
         "square" => Ok(poly2(eval_square(&positional, &named))),
         "circle" => Ok(poly2(eval_circle(&positional, &named, &child))),
         "polygon" => Ok(poly2(eval_polygon(&positional, &named))),
+        "text" => Ok(poly2(eval_text(&positional, &named, &child))),
         // import()/surface() reference a mesh FILE by a RUNTIME path — resolvable only by EXECUTING to here
         // (the path is an expression, not a static `<...>` token like use/include). Ask the caller's table
         // (M.3): its mesh if present, else an EMPTY placeholder + a recorded File need so the run keeps going
@@ -89,10 +90,7 @@ pub(super) fn eval_module<'a>(
         // KNOWN-but-deferred builtins — recognized so the error NAMES the feature + its task instead of a
         // misleading "typo?". These stay LOUD-deferred stubs: blow up naming the feature, never silently
         // empty. (`offset`, the extrudes, and `projection` are wired in eval_stmt as of J.3.3–J.3.6.)
-        "text" => Err(crate::Error::Unimplemented(
-            "text() is not yet implemented (J.4.3) — the 2D glyph outlines need a font stack (cosmic-text \
-             is the candidate). Deferred, never silently empty.",
-        )),
+        // `text` is a 2D primitive, dispatched above (→ glyph-outline contours); it never reaches here.
         // `minkowski` is intercepted in `eval_stmt` (like `hull`) → `GeoNode::Minkowski`; it never reaches
         // this stub. Kept out of the deferred list now that it's wired to Manifold's native sum (J.4.4).
         // Not a builtin primitive (sphere/cube/cylinder/polyhedron, square/circle/polygon), transform,
@@ -174,6 +172,34 @@ fn eval_circle(
     geometry::circle(r, fragments(r, fn_, fa, fs))
 }
 
+/// `text(t, size, font, halign, valign, spacing, direction, language, script, $fn)` → the glyph outlines as
+/// 2D contours (J.4.3), shaped by rustybuzz + outlined by ttf-parser over the bundled Liberation Sans (see
+/// [`super::text`]). OpenSCAD defaults: `size = 10`, `halign = "left"`, `valign = "baseline"`, `spacing = 1`.
+/// A missing/non-string `text` → no contours (a present-but-empty 2D leaf, like `circle(0)`).
+fn eval_text(
+    positional: &[Value],
+    named: &BTreeMap<String, Value>,
+    scope: &Scope,
+) -> Vec<Contour> {
+    let map = bind(
+        positional,
+        named,
+        &["text", "size", "font", "halign", "valign", "spacing", "direction", "language", "script"],
+    );
+    let params = text::TextParams {
+        text: get_string(&map, "text").unwrap_or_default(),
+        size: get_num(&map, "size").unwrap_or(10.0),
+        halign: get_string(&map, "halign").unwrap_or_else(|| "left".to_string()),
+        valign: get_string(&map, "valign").unwrap_or_else(|| "baseline".to_string()),
+        spacing: get_num(&map, "spacing").unwrap_or(1.0),
+        direction: get_string(&map, "direction").unwrap_or_default(),
+        language: get_string(&map, "language").unwrap_or_default(),
+        script: get_string(&map, "script").unwrap_or_default(),
+    };
+    let (fn_, fa, fs) = scope.fn_fa_fs();
+    text::text_contours(&params, fn_, fa, fs)
+}
+
 /// `polygon(points, paths, convexity)` → its contours (J.3.2). `points` is a list of 2-vectors; `paths`
 /// (optional) is a list of index loops into `points` (outer boundary + holes). Without `paths` the whole
 /// point list is one contour. Malformed entries drop (a non-2 point, a bad index), mirroring
@@ -239,6 +265,15 @@ fn get_radius(map: &BTreeMap<String, Value>, r_key: &str, d_key: &str) -> Option
 
 fn is_true(map: &BTreeMap<String, Value>, key: &str) -> bool {
     matches!(map.get(key), Some(Value::Bool(true)))
+}
+
+/// A bound STRING argument (`text`/`halign`/`font`/…), else `None` for absent or non-string — the caller
+/// supplies the OpenSCAD default. Used by `text()` (J.4.3).
+fn get_string(map: &BTreeMap<String, Value>, key: &str) -> Option<String> {
+    match map.get(key) {
+        Some(Value::Str(s)) => Some(s.to_string()),
+        _ => None,
+    }
 }
 
 /// The `import`/`surface` `file=` path — positional-leading or named (M.3). Both builtins take the file as

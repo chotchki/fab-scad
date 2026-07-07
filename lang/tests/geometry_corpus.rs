@@ -169,13 +169,19 @@ fn beyond_the_subset_is_loud() {
 
 #[test]
 fn deferred_builtins_name_their_feature() {
-    // text() stays a LOUD-deferred stub — the error NAMES the feature (+ its task), never a silent nothing
-    // and never a misleading "unknown module — a typo?". (import/surface left this club at M.3 for File
-    // NEEDs; minkowski() left it at J.4.4 — now wired to Manifold's native sum — see the backend volumes.)
+    // A still-deferred construct blows up NAMING itself + its follow-up, never a silent nothing or a
+    // misleading "unknown module — a typo?". The module-level holdouts left this club (import/surface →
+    // File NEEDs; text()/minkowski() → implemented); the current LOUD-defers are the 2D hull/minkowski
+    // paths (the CrossSection backend has no 2D hull op yet).
     assert!(
-        matches!(&err("text(\"hi\");"), Error::Unimplemented(m) if m.contains("text()")),
-        "expected a LOUD defer naming text(), got {:?}",
-        err("text(\"hi\");")
+        matches!(&err("hull() square(5);"), Error::Unimplemented(m) if m.contains("hull")),
+        "expected a LOUD defer naming hull, got {:?}",
+        err("hull() square(5);")
+    );
+    assert!(
+        matches!(&err("minkowski() square(5);"), Error::Unimplemented(m) if m.contains("minkowski")),
+        "expected a LOUD defer naming minkowski, got {:?}",
+        err("minkowski() square(5);")
     );
 }
 

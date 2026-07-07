@@ -28,6 +28,13 @@ thiserror = "2"
 # Evaluator/parse observability, treated exactly like a logger: the macros live here, the level
 # and subscriber are the linking binary's call. See the crate docs for the compile-out story.
 tracing = "0.1"
+# text() glyph shaping + outlines (J.4.3). rustybuzz is the pure-Rust harfbuzz port — it matches
+# OpenSCAD's own harfbuzz shaping (glyph selection, kerning, GPOS/GSUB) — and re-exports ttf-parser
+# for the glyph OUTLINE API (Béziers → our $fn-flattened 2D contours). Both pure Rust + wasm-clean +
+# DETERMINISTIC: no system fontconfig (banned — non-deterministic font lookup). The default font
+# (Liberation Sans, OpenSCAD's own default, SIL OFL) is bundled at src/eval/fonts/ and pinned, so text
+# is bit-identical every platform AND draws the same glyphs OpenSCAD does (oracle-matchable by residual).
+rustybuzz = "0.20"
 
 [dev-dependencies]
 # Property testing for the print/parse roundtrip (H.5.2) — seeded + reproducible (its own TestRng,

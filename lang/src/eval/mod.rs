@@ -20,6 +20,7 @@ pub(crate) mod io;
 mod loader;
 mod message;
 mod module;
+mod text;
 mod rng;
 mod ops;
 mod scope;

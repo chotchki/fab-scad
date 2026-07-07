@@ -272,7 +272,7 @@ fn ranges_are_first_class_values() {
 
 #[test]
 fn deferred_constructs_are_loud() {
-    assert!(matches!(ev_err("f(1)"), Error::Unimplemented(m) if m.contains("I.4"))); // unknown/builtin fn
+    assert!(matches!(ev_err("f(1)"), Error::Unknown(m) if m.contains("function `f`"))); // missing/typo fn
     // (function literals + calling a function VALUE now evaluate — I.2.3.3; let → I.3.1; list
     // comprehensions → I.3.2; assert / echo → I.5; member access → I.9.1 below.)
 }
@@ -455,7 +455,7 @@ fn math_builtins() {
     assert_eq!(ev("abs(x = -5)"), Value::Undef); // math builtins take positional args (named → undef)
     // a user function may SHADOW a builtin (resolution order).
     // (unimplemented/unknown functions stay LOUD until I.5's warn-and-undef.)
-    assert!(matches!(ev_err("nope_fn(1)"), Error::Unimplemented(m) if m.contains("I.4")));
+    assert!(matches!(ev_err("nope_fn(1)"), Error::Unknown(m) if m.contains("function `nope_fn`")));
 }
 
 #[test]
@@ -611,7 +611,8 @@ fn type_predicate_builtins() {
     assert_eq!(ev("version_num()"), num(20_210_100.0));
 
     // rands is a DELIBERATE loud defer (non-deterministic seedless; seeded needs boost's RNG bug-for-bug).
-    assert!(matches!(ev_err("rands(0, 1, 5)"), Error::Unimplemented(m) if m.contains("I.4")));
+    // Not wired as a builtin, so it falls through to the unknown-symbol path — loud, names the symbol.
+    assert!(matches!(ev_err("rands(0, 1, 5)"), Error::Unknown(m) if m.contains("function `rands`")));
 }
 
 #[test]
@@ -646,18 +647,26 @@ fn program_level_defers_are_loud() {
     // module DEFINITION and its INSTANTIATION both work (see module_corpus.rs); what's still loud here is
     // an UNKNOWN module (a typo / unimplemented builtin) and a RAW eval_program on `use`/`include` (the
     // loader resolves those via evaluate_file / evaluate_with_base — happy path in loader_corpus.rs).
+    // Unknown SYMBOLS (typo / missing builtin) → Error::Unknown, which NAMES the symbol.
     for (src, needle) in [
-        ("nope_module();", "user module"), // an unknown module name — loud (typo / unimplemented)
-        ("use <lib.scad>", "use/include"), // raw eval_program can't resolve it — loud
-        ("include <lib.scad>", "use/include"),
-        ("x = zz(1);", "I.4"), // an erroring assignment RHS (unknown fn) propagates out of eval_stmt
-        ("{ y = zz(1); }", "I.4"), // …and out of a block's inner statement
+        ("nope_module();", "module `nope_module`"), // an unknown module name — loud
+        ("x = zz(1);", "function `zz`"), // an erroring assignment RHS (unknown fn) propagates out of eval_stmt
+        ("{ y = zz(1); }", "function `zz`"), // …and out of a block's inner statement
     ] {
         let prog = parse(src).expect("parses");
         let err = eval_program(&prog, &Scope::new()).unwrap_err();
         assert!(
-            matches!(&err, Error::Unimplemented(m) if m.contains(needle)),
-            "expected Unimplemented(…{needle}…) for {src:?}, got {err:?}"
+            matches!(&err, Error::Unknown(m) if m.contains(needle)),
+            "expected Unknown(…{needle}…) for {src:?}, got {err:?}"
+        );
+    }
+    // A raw `eval_program` can't resolve `use`/`include` (the loader does) → still a deferred-path defer.
+    for src in ["use <lib.scad>", "include <lib.scad>"] {
+        let prog = parse(src).expect("parses");
+        let err = eval_program(&prog, &Scope::new()).unwrap_err();
+        assert!(
+            matches!(&err, Error::Unimplemented(m) if m.contains("use/include")),
+            "expected Unimplemented(…use/include…) for {src:?}, got {err:?}"
         );
     }
 }

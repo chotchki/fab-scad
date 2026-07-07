@@ -156,14 +156,14 @@ fn beyond_the_subset_is_loud() {
         err("sphere(1); cube(1);"),
         Error::Unimplemented(_)
     )); // implicit union
-    assert!(matches!(err("foo();"), Error::Unimplemented(_))); // unknown module
+    assert!(matches!(err("foo();"), Error::Unknown(m) if m.contains("module `foo`"))); // unknown module
     assert!(matches!(
         err("translate([1,0,0]) cube(1);"),
         Error::Unimplemented(_)
     )); // transform
     assert!(matches!(
         err("v = 1; sphere(bogus_fn(v));"),
-        Error::Unimplemented(_)
+        Error::Unknown(m) if m.contains("function `bogus_fn`")
     )); // an UNKNOWN function in an arg (builtin/known-function calls in args now work — I.4)
 }
 

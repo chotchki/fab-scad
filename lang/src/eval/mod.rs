@@ -659,11 +659,10 @@ fn dispatch_call<'a>(
             return Ok(());
         }
         if matches!(scope.lookup(name), Value::Undef) {
-            // not a user fn, not a builtin, not a bound function-value → an unimplemented builtin or a
-            // typo. LOUD for now (catches missing builtins); OpenSCAD's warn-and-undef is I.5.
-            return Err(crate::Error::Unimplemented(
-                "call to an unimplemented builtin or unknown function (I.4)",
-            ));
+            // not a user fn, not a builtin, not a bound function-value → a missing builtin or a typo.
+            // LOUD for now (catches missing builtins); OpenSCAD's warn-and-undef is I.5. Naming the
+            // symbol is what makes the corpus's "unknown function" cluster a per-symbol worklist (L.2).
+            return Err(crate::Error::Unknown(format!("function `{name}`")));
         }
     }
     tasks.push(Task::CallValue {

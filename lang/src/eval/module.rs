@@ -97,11 +97,10 @@ pub(super) fn eval_module<'a>(
             "minkowski() is not yet implemented (J.4.4) — Manifold lacks it and OpenSCAD's own manifold \
              backend farms it to CGAL; the approach is still open. Deferred, never silently wrong.",
         )),
-        _ => Err(crate::Error::Unimplemented(
-            "unknown module — not a builtin primitive (sphere/cube/cylinder/polyhedron, \
-             square/circle/polygon), transform, boolean, or a defined user module (a typo, or a builtin \
-             still deferred past the current subset)",
-        )),
+        // Not a builtin primitive (sphere/cube/cylinder/polyhedron, square/circle/polygon), transform,
+        // boolean, or a defined user module — a typo or a builtin still deferred past the current subset.
+        // Naming it turns the corpus's generic "unknown module" cluster into a per-symbol worklist (L.2).
+        other => Err(crate::Error::Unknown(format!("module `{other}`"))),
     }
 }
 

@@ -327,7 +327,7 @@ fn library_path_is_only_searched_after_the_local_dir() {
         .expect("with the lib path, pr() resolves");
     assert!(with_lib.tri_count() > 0, "sphere(4) renders");
     let err = evaluate_file(&root().join("use_via_libpath.scad"), &[]).unwrap_err();
-    assert!(matches!(err, Error::Unimplemented(_)), "got {err:?}");
+    assert!(matches!(&err, Error::Unknown(m) if m.contains("pr")), "got {err:?}");
 }
 
 #[test]
@@ -360,7 +360,7 @@ fn use_is_not_transitive() {
     // lib_uses_inner `use`s lib_inner; a file that `use`s lib_uses_inner sees lu_r() but NOT inner_r()
     // (`use` doesn't re-export). Reaching for inner_r() is an unknown function → LOUD.
     let err = evaluate_file(&root().join("use_nontransitive_reach.scad"), &[]).unwrap_err();
-    assert!(matches!(err, Error::Unimplemented(_)), "got {err:?}");
+    assert!(matches!(&err, Error::Unknown(m) if m.contains("inner_r")), "got {err:?}");
 }
 
 /// Write a chain of `count` files `chain_0..chain_{count-1}` under a fresh subdir: each links the next

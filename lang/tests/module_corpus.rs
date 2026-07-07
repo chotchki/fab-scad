@@ -143,7 +143,7 @@ fn runaway_module_recursion_is_loud() {
 fn unknown_module_is_loud() {
     assert!(matches!(
         evaluate_geometry("not_a_module();").unwrap_err(),
-        Error::Unimplemented(m) if m.contains("unknown module")
+        Error::Unknown(m) if m.contains("module `not_a_module`")
     ));
 }
 
@@ -174,7 +174,7 @@ fn statement_let_binds_children() {
 fn for_body_error_propagates() {
     assert!(matches!(
         evaluate_geometry("for (i = [0, 1]) not_a_module();").unwrap_err(),
-        Error::Unimplemented(m) if m.contains("unknown module")
+        Error::Unknown(m) if m.contains("module `not_a_module`")
     ));
 }
 

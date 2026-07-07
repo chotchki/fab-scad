@@ -40,4 +40,12 @@ pub enum Error {
     /// wrong (SPEC deferral doctrine; `text()`/`minkowski()`/`surface()` land here).
     #[error("not yet implemented: {0}")]
     Unimplemented(&'static str),
+
+    /// A call to a name we don't recognize — not a user function/module, not a builtin. The payload
+    /// NAMES the symbol (e.g. "function foo" / "module bar"). Distinct from `Unimplemented` (a KNOWN
+    /// construct we deliberately deferred): this is a missing builtin or a typo. OpenSCAD warns +
+    /// returns `undef` (I.5); we fail LOUD for now — and naming the symbol turns the BOSL2 corpus's
+    /// one generic "unknown function" cluster into a per-symbol burn-down worklist (L.2).
+    #[error("unknown {0}")]
+    Unknown(String),
 }

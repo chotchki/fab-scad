@@ -202,6 +202,9 @@ fn classify(e: &Error) -> Bucket {
         Error::Load(_) => Bucket::Load,
         Error::Lower(_) => Bucket::Lower,
         Error::Unimplemented(_) => Bucket::Unimplemented,
+        // A missing builtin / unknown module — a feature gap, same bucket as a deferred construct, but its
+        // message NAMES the symbol so the signature histogram clusters per-symbol (L.2.1).
+        Error::Unknown(_) => Bucket::Unimplemented,
         // `Error` is #[non_exhaustive]; a future variant lands in the catch-all until it earns a bucket.
         _ => Bucket::Eval,
     }

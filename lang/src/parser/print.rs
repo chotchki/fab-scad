@@ -11,9 +11,29 @@
 //! that path is the PARSER's (guarded) and `Drop`'s (non-recursive) to own; the printer only ever
 //! prints asts we built. If the customizer ever needs to emit deep exprs, make this iterative then.
 
+use std::cell::Cell;
+
 use super::ast::{
     Arg, BinOp, Expr, ExprKind, ModuleInstantiation, Parameter, Program, Stmt, StmtKind, UnOp,
 };
+
+thread_local! {
+    /// When set, [`write_expr`] renders a nested function literal in OpenSCAD's `str()`-of-a-function-
+    /// value format — BARE (`function(x) body`: no wrapping parens, no space after `function`) instead
+    /// of the canonical fully-parenthesized `(function (x) body)`. Set ONLY by [`function_value_repr`]
+    /// (the `str()` of a closure); the roundtrip `print`/`print_expr` path leaves it false so its output
+    /// stays unambiguous. Single-threaded evaluator, so a thread-local Cell is the whole story.
+    static VALUE_REPR: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Restores [`VALUE_REPR`] to false on scope exit — so a panic/overflow mid-render can't leak the mode
+/// into a later canonical print.
+struct ValueReprGuard;
+impl Drop for ValueReprGuard {
+    fn drop(&mut self) {
+        VALUE_REPR.with(|v| v.set(false));
+    }
+}
 
 /// Print a whole [`Program`] to canonical OpenSCAD source (one statement per line).
 #[must_use]
@@ -42,6 +62,8 @@ pub fn print_expr(e: &Expr) -> String {
 /// runtime value graph.
 #[must_use]
 pub fn function_value_repr(params: &[Parameter], body: &Expr) -> String {
+    VALUE_REPR.with(|v| v.set(true)); // render nested function literals BARE, OpenSCAD's `str()` format
+    let _guard = ValueReprGuard;
     let mut out = String::from("function(");
     write_params(&mut out, params);
     out.push_str(") ");
@@ -206,11 +228,20 @@ fn write_expr(out: &mut String, e: &Expr) {
             out.push(']');
         }
         ExprKind::FunctionLiteral { params, body } => {
-            out.push_str("(function (");
-            write_params(out, params);
-            out.push_str(") ");
-            write_expr(out, body);
-            out.push(')');
+            if VALUE_REPR.with(Cell::get) {
+                // OpenSCAD's `str()` of a function value renders nested literals bare — no wrapping
+                // parens, no space after `function` (`function(x) target_func(x)`).
+                out.push_str("function(");
+                write_params(out, params);
+                out.push_str(") ");
+                write_expr(out, body);
+            } else {
+                out.push_str("(function (");
+                write_params(out, params);
+                out.push_str(") ");
+                write_expr(out, body);
+                out.push(')');
+            }
         }
         ExprKind::Let { bindings, body } => {
             out.push_str("(let (");

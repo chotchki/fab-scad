@@ -734,6 +734,13 @@ fn str_of_a_function_value() {
     assert_eq!(ev(r"str(function() target_func(a))"), Value::string("function() target_func(a)"));
     // a captured value does NOT substitute into the rendering — it's the source `a`, not 3
     assert_eq!(ev("let(a = 3) str(function() f(a))"), Value::string("function() f(a)"));
+    // NESTED function literals render BARE too — no wrapping parens, no space after `function`
+    // (L.2.8g): OpenSCAD's `str()` format, vs the canonical printer's parenthesized `(function (x) …)`.
+    // This is what BOSL2's fnliterals `f_1arg`/`f_2arg`/… str-equality tests assert.
+    assert_eq!(
+        ev(r"str(function(a) (a == undef ? function(x) g(x) : function() g(a)))"),
+        Value::string("function(a) ((a == undef) ? function(x) g(x) : function() g(a))")
+    );
 }
 
 /// Letrec: a function literal bound to a NAME can call ITSELF by that name (verified vs the oracle — both

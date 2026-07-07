@@ -43,9 +43,17 @@ use fab_scad::corpus::{Bucket, check_worker, histogram, run_bosl2_corpus_isolate
 /// ALL defaults then args, so BOSL2's `rounding_edge_mask`/`fillet` (param `r` listed twice) no longer see
 /// `r=undef` — they now clear the `all_nonnegative` assert and block one step later on a module-body-local
 /// `make_path`, an OPEN nested-definition gap (L.2.8m)]. NB f_acos's `(r/π)*180` rad2deg was tried + reverted
-/// (regressed test_glued_circles's arc discretization; needs correctly-rounded acos — L.2.8i). Floored below
-/// 877 for timeout jitter.
-const PASS_FLOOR: usize = 875;
+/// (regressed test_glued_circles's arc discretization; needs correctly-rounded acos — L.2.8i).
+///
+/// 2026-07-07 (later): 877→887 (98.4%) — 4 assertion, 3 unimplemented, 7 timeout. L.2.8m: module-body-LOCAL
+/// function/module definitions +10 — a `function`/`module` defined INSIDE a body is now hoisted into that
+/// body scope (functions as name-stamped closures that CLOSE OVER the enclosing locals; modules onto a
+/// scope-local stack carrying their defining scope). Cleared every nested-def "unknown function/module":
+/// make_path (rounding_edge_mask, fillet), qrok (qr_factor), nullcheck (null_space), valid_lock/apply_lock
+/// (rabbit_clip), check_path_apply (apply), testvercmp/diversify (version_cmp), ghost_if (pco1810_neck),
+/// corner_shape (nema_stepper, slider). Unimplemented 13→3: only `parent_module` (a genuine missing builtin,
+/// L.2.2/L.2.4) + minkowski (deferred) remain. Floored below 887 for timeout jitter.
+const PASS_FLOOR: usize = 885;
 
 #[test]
 #[ignore = "minutes-long full BOSL2 sweep; run explicitly with --ignored"]

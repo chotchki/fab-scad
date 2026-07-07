@@ -63,6 +63,34 @@ fn module_call_binds_args() {
     assert_eq!(extent("module box(s, w, s) cube(s); box(3);"), 3.0); // positional fills the FIRST `s`
 }
 
+/// A `function`/`module` defined INSIDE a module body is scope-LOCAL (L.2.8m): visible within that body,
+/// and CLOSING OVER the body's locals — BOSL2's `rounding_edge_mask` reads a body `function make_path`
+/// that uses the body-local `steps`/`ang`; `test_version_cmp` has a nested MODULE call a sibling nested
+/// FUNCTION. Without hoisting these into the body scope they read as `unknown function`/`unknown module`.
+#[test]
+fn module_body_local_definitions() {
+    // a body-local function resolves and drives geometry
+    assert_eq!(extent("module m() { function sz() = 3; cube(sz()); } m();"), 3.0);
+    // …and it CLOSES OVER the enclosing body's locals (an assignment AND a param)
+    assert_eq!(
+        extent("module m(n) { s = n * 2; function d() = s; cube(d()); } m(2);"),
+        4.0
+    );
+    // a body-local MODULE resolves (and shadows nothing global here)
+    assert_eq!(extent("module outer() { module inner() cube(5); inner(); } outer();"), 5.0);
+    // the test_version_cmp shape: a nested MODULE calls a sibling nested FUNCTION that closes over the
+    // enclosing param — the nested module must close over the defining scope, not just the island global.
+    assert_eq!(
+        extent("module outer(n) { function f() = n; module inner() cube(f()); inner(); } outer(4);"),
+        4.0
+    );
+    // a body-local function does NOT leak to the file scope — calling it outside its module is unknown
+    assert!(matches!(
+        evaluate("module m() { function local_only() = 1; } x = local_only(); cube(x);"),
+        Err(Error::Unknown(msg)) if msg.contains("local_only")
+    ));
+}
+
 /// A module body can be a transform, a boolean, or a block of several children — the full statement
 /// vocabulary, producing real internal tree nodes.
 #[test]

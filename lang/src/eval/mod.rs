@@ -145,6 +145,16 @@ pub(super) struct Ctx<'a> {
     /// nested module calls each see their own children; `children()` pops during eval so a `children()`
     /// inside the rendered children refers to the ENCLOSING call, not this one.
     children_stack: RefCell<Vec<ChildrenFrame<'a>>>,
+    /// The STACK of scope-LOCAL module definitions (L.2.8m), each with the DEFINING scope it was hoisted
+    /// in: a `module f(){…}` inside a module body / block is visible only within that scope (can't go in the
+    /// per-file `islands`), AND its body must CLOSE OVER that scope — BOSL2's `testvercmp` calls a sibling
+    /// nested `function diversify`, which only exists in the enclosing body scope. Entering a block with
+    /// nested module defs pushes `(store, defining_scope)` (see [`eval_nodes`]); [`Ctx::resolve_module`]
+    /// checks the stack (innermost first) BEFORE the island and hands back the captured scope as the local
+    /// module's lexical base. Dynamically scoped for VISIBILITY (a nested module reaches a module CALLED
+    /// during the body), a v1 simplification — real code never names a local module the same as a global
+    /// one, so the dynamic reach never resolves the wrong def. Popped on body exit.
+    local_modules: RefCell<Vec<(loader::ModStore<'a>, Scope)>>,
     /// The evaluator's ONE advancing RNG for SEEDLESS `rands()` (I.2.8b). OpenSCAD draws every seedless
     /// call from a single global engine, so consecutive `rands()` DIFFER; a fresh engine per call would
     /// repeat and collapse BOSL2's random line/triangle to a degenerate case. Seeded once per evaluation
@@ -175,15 +185,32 @@ impl<'a> Ctx<'a> {
     /// it was called. `None` → no user module by that name here, so the call falls through to a builtin
     /// primitive (this is the fallthrough that turns `builtins.scad`'s `_cube`-body `cube` into the
     /// BUILTIN cube instead of the program's redefinition).
-    fn resolve_module(&self, island: usize, name: &str) -> Option<(loader::ModDef<'a>, usize)> {
+    fn resolve_module(
+        &self,
+        island: usize,
+        name: &str,
+    ) -> Option<(loader::ModDef<'a>, usize, Option<Scope>)> {
+        // Scope-LOCAL module defs (L.2.8m) win first, innermost scope out — a module-body `module f(){…}`
+        // shadows any file/`use` def of the same name within that body. Its home island stays the CURRENT
+        // island (textually part of that file, so its own calls resolve where it was written), and it
+        // carries its DEFINING scope as its lexical base (so its body sees sibling nested funcs/vars).
+        if let Some((def, base)) = self
+            .local_modules
+            .borrow()
+            .iter()
+            .rev()
+            .find_map(|(store, base)| store.get(name).map(|&def| (def, base.clone())))
+        {
+            return Some((def, island, Some(base)));
+        }
         let here = &self.islands[island];
         if let Some(&def) = here.modules.get(name) {
-            return Some((def, island));
+            return Some((def, island, None));
         }
         here.uses
             .iter()
             .rev()
-            .find_map(|&u| self.islands[u].modules.get(name).map(|&def| (def, u)))
+            .find_map(|&u| self.islands[u].modules.get(name).map(|&def| (def, u, None)))
     }
 
     /// Push a [`Message::Warning`] onto the ordered console log — the same buffer `echo` writes to, so
@@ -1108,6 +1135,7 @@ fn resolve_source(
         file_needs: RefCell::default(),
         module_depth: Cell::default(),
         children_stack: RefCell::default(),
+        local_modules: RefCell::default(),
         rand_stream: RefCell::new(rng::RandStream::new()),
     };
     // Build each `use`d file's constant scope (islands 1..n) — hoisting needs the `Ctx` (constants can
@@ -1251,7 +1279,34 @@ fn eval_nodes<'a>(
     island: usize,
 ) -> crate::Result<Vec<Geo>> {
     let hoisted = hoist_scope(stmts, scope, ctx)?;
-    eval_geometry(stmts, &hoisted, global, island, ctx)
+    // Scope-LOCAL module defs (L.2.8m) are visible for this block's eval only — push them WITH the defining
+    // (hoisted) scope so `resolve_module` finds them and their bodies close over the sibling nested
+    // funcs/vars; pop after (even on error). Skip the push when there are none (the common case).
+    let local_mods = collect_module_defs(stmts);
+    let pushed = !local_mods.is_empty();
+    if pushed {
+        ctx.local_modules
+            .borrow_mut()
+            .push((local_mods, hoisted.clone()));
+    }
+    let result = eval_geometry(stmts, &hoisted, global, island, ctx);
+    if pushed {
+        ctx.local_modules.borrow_mut().pop();
+    }
+    result
+}
+
+/// Collect the scope-LOCAL `module` definitions of a statement list (last-wins by name) — the module-side
+/// analogue of [`hoisted_bindings`]'s function handling. Kept a stmt-list pure pass; [`eval_nodes`] pushes
+/// the result for the block's eval so a body-local `module f(){…}` resolves (L.2.8m).
+fn collect_module_defs<'a>(stmts: &[&'a Stmt]) -> loader::ModStore<'a> {
+    let mut store = loader::ModStore::new();
+    for stmt in stmts {
+        if let StmtKind::ModuleDef { name, params, body } = &stmt.kind {
+            store.insert(name.as_str(), (params.as_slice(), body.as_ref()));
+        }
+    }
+    store
 }
 
 /// Hoist a statement list's assignments into a fresh working scope (a clone of `scope`): OpenSCAD's
@@ -1260,9 +1315,21 @@ fn eval_nodes<'a>(
 /// share. Hoisting into a FRESH scope (nothing pre-bound) is what keeps `a = b; b = 5` → `a` undef.
 fn hoist_scope<'a>(stmts: &[&'a Stmt], scope: &Scope, ctx: &Ctx<'a>) -> crate::Result<Scope> {
     let mut scope = scope.clone();
-    for (name, expr) in hoisted_assignments(stmts) {
-        let value = name_closure(eval_with_ctx(expr, &scope, ctx)?, name);
-        trace::bind('=', name, &value);
+    for item in hoisted_bindings(stmts) {
+        // sigil `=` for an assignment, `f` for a hoisted function def (so the trace tells them apart).
+        let (sigil, name, value) = match item {
+            HoistItem::Assign(name, expr) => {
+                ('=', name, name_closure(eval_with_ctx(expr, &scope, ctx)?, name))
+            }
+            // A module-body-LOCAL `function f(x)=…` becomes a closure VALUE in the body scope, captured
+            // AT THIS POINT so it sees the enclosing locals hoisted before it (BOSL2's `make_path` closes
+            // over `steps`/`ang`). `dispatch_call`'s function-value path then applies it; `self_name`
+            // gives it recursion.
+            HoistItem::Func(name, params, body) => {
+                ('f', name, function_def_closure(name, params, body, &scope, ctx))
+            }
+        };
+        trace::bind(sigil, name, &value);
         scope.bind(name.to_string(), value);
     }
     Ok(scope)
@@ -1546,6 +1613,7 @@ fn call_user_module<'a>(
     mi: &'a ModuleInstantiation,
     def: loader::ModDef<'a>,
     home: usize,
+    base: Option<Scope>,
     caller: &Scope,
     island: usize,
     ctx: &Ctx<'a>,
@@ -1560,8 +1628,10 @@ fn call_user_module<'a>(
     ctx.module_depth.set(depth + 1);
     // The body's lexical base is the module's HOME ISLAND global (its own file's constants + params), not
     // the caller's — the use-scope fix, matching functions. Home 0 is the root global, so this is a no-op
-    // for a root-defined module. Args, though, still evaluate in the CALLER's scope (below).
-    let home_global = ctx.island_globals.borrow()[home].clone();
+    // for a root-defined module. Args, though, still evaluate in the CALLER's scope (below). A scope-LOCAL
+    // module (L.2.8m) instead uses its captured DEFINING scope as the base, so its body closes over the
+    // enclosing body's nested funcs/vars (BOSL2's `testvercmp` → sibling `diversify`).
+    let home_global = base.unwrap_or_else(|| ctx.island_globals.borrow()[home].clone());
     let mut call = bind_module_scope(params, &mi.args, caller, &home_global, ctx)?;
     // `$children` = the call-site child count; the children themselves are stashed for `children()` to
     // render LATE, in the CALLER's scope AND island (I.2.5 / I.9.5). Lone-`;` empties are NOT children
@@ -1761,6 +1831,65 @@ fn hoisted_assignments<'a>(stmts: &[&'a Stmt]) -> Vec<(&'a str, &'a Expr)> {
     order
 }
 
+/// One hoisted binding of a scope: a variable ASSIGNMENT, or a nested `function` DEFINITION. Both land in
+/// the scope's variable namespace in our model — a module-body `function f(x)=…` binds a closure VALUE
+/// named `f` (see [`hoist_scope`]). (OpenSCAD keeps functions in a separate namespace; collapsing them here
+/// only misbehaves if a scope names a var AND a function the same, which real code doesn't.)
+enum HoistItem<'a> {
+    Assign(&'a str, &'a Expr),
+    Func(&'a str, &'a [Parameter], &'a Expr),
+}
+
+/// The hoisted binding order of a scope — its assignments AND nested `function` definitions, deduped by
+/// name in FIRST-occurrence order carrying the LAST definition (OpenSCAD whole-scope, last-wins). The
+/// generalization of [`hoisted_assignments`] the module-body path needs: a nested function must be bound
+/// IN TEXTUAL ORDER so it captures the enclosing locals hoisted before it and a later assignment can call
+/// it. PURE (no eval), so the order rules stay unit-testable. Top-level defs don't come through here —
+/// they're registered globally by [`build_ctx`]; this is for module bodies / blocks / comprehension scopes.
+fn hoisted_bindings<'a>(stmts: &[&'a Stmt]) -> Vec<HoistItem<'a>> {
+    let mut order: Vec<HoistItem<'a>> = Vec::new();
+    let mut index: BTreeMap<&'a str, usize> = BTreeMap::new();
+    for stmt in stmts {
+        let (name, item) = match &stmt.kind {
+            StmtKind::Assignment { name, value } => (name.as_str(), HoistItem::Assign(name, value)),
+            StmtKind::FunctionDef { name, params, body } => {
+                (name.as_str(), HoistItem::Func(name, params.as_slice(), body))
+            }
+            _ => continue,
+        };
+        if let Some(&i) = index.get(name) {
+            order[i] = item; // seen: last definition wins, first-occurrence position kept
+        } else {
+            index.insert(name, order.len());
+            order.push(item);
+        }
+    }
+    order
+}
+
+/// Build a NAMED-function closure `Value` from a nested `function` definition: register its params+body in
+/// the closure table, capture the (partially-hoisted) `scope` as its lexical env, and stamp its name for
+/// recursion (`self_name`) + `str()` rendering. The nested-def analogue of the `FunctionLiteral` eval arm.
+fn function_def_closure<'a>(
+    name: &str,
+    params: &'a [Parameter],
+    body: &'a Expr,
+    scope: &Scope,
+    ctx: &Ctx<'a>,
+) -> Value {
+    let closure_id = {
+        let mut closures = ctx.closures.borrow_mut();
+        closures.push((params, body));
+        closures.len() - 1
+    };
+    Value::Function {
+        closure_id,
+        env: scope.clone(),
+        self_name: Some(std::rc::Rc::from(name)),
+        repr: crate::parser::print::function_value_repr(params, body).into(),
+    }
+}
+
 /// Evaluate an `echo`'s arguments and push the formatted `ECHO:` content onto the message log — named
 /// args render `name = value`, positional just `value`, joined by `, ` (OpenSCAD's echo order). The
 /// value form is the shared [`fmt::format_value`] (strings QUOTED), so it's bug-for-bug with the oracle.
@@ -1869,6 +1998,7 @@ fn build_ctx(program: &Program) -> Ctx<'_> {
         file_needs: RefCell::default(),
         module_depth: Cell::default(),
         children_stack: RefCell::default(),
+        local_modules: RefCell::default(),
         rand_stream: RefCell::new(rng::RandStream::new()),
     }
 }
@@ -2104,8 +2234,8 @@ fn eval_stmt<'a>(
         StmtKind::Module(mi) => {
             trace::module(ctx.module_depth.get(), &mi.name);
             match ctx.resolve_module(island, mi.name.as_str()) {
-                Some((def, home)) => {
-                    nodes.push(call_user_module(mi, def, home, scope, island, ctx)?);
+                Some((def, home, base)) => {
+                    nodes.push(call_user_module(mi, def, home, base, scope, island, ctx)?);
                 }
                 None => nodes.push(module::eval_module(mi, scope, ctx)?),
             }

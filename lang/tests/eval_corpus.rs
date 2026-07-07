@@ -436,6 +436,14 @@ fn list_comprehensions() {
         ev("[for(i = 0; i < 2; i = i + 1, k = i) i]"),
         list(&[0.0, 1.0])
     ); // C-style update adds a new var
+    // C-style for binds init AND update SEQUENTIALLY within the clause (L.2.8e) — a later assignment
+    // sees the NEW value of an earlier one, `let`-style (OpenSCAD-verified). Regression for BOSL2's
+    // `_dp_distance_row` DP (skin method="distance"), which does `costs=…, newrow=…min(costs)…`.
+    assert_eq!(ev("[for(a = 1, b = a + 1; a <= 1; a = a + 1) b]"), list(&[2.0])); // init: b sees a=1
+    assert_eq!(
+        ev("[for(i = 0, x = 0, y = 0; i <= 2; x = i * 10, y = x + 1, i = i + 1) if (i == 2) each [x, y]]"),
+        list(&[10.0, 11.0]) // update: y sees the NEW x (=10), not the old (would give 1)
+    );
 }
 
 #[test]

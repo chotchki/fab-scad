@@ -886,10 +886,14 @@ fn lc_for_c<'a>(
     global: &Scope,
     ctx: &Ctx<'a>,
 ) -> crate::Result<Vec<Value>> {
+    // Init assignments bind SEQUENTIALLY (`let`-style): a later one sees the earlier ones, so
+    // `for(a=1, b=a+1; …)` gives `b==2`. Accumulate into a child scope as we go.
     let mut vars: Vec<(String, Value)> = Vec::new();
+    let mut init_scope = scope.child();
     for arg in init {
         let name = arg.name.as_deref().unwrap_or("_").to_string();
-        let value = eval_with_global(&arg.value, scope, global, ctx)?;
+        let value = eval_with_global(&arg.value, &init_scope, global, ctx)?;
+        init_scope.bind(name.clone(), value.clone());
         vars.push((name, value));
     }
     let mut out = Vec::new();
@@ -903,9 +907,14 @@ fn lc_for_c<'a>(
             break;
         }
         out.extend(eval_comprehension(body, &loop_scope, global, ctx)?);
+        // Update assignments also bind SEQUENTIALLY within the clause: `x=i*10, y=x+1` must let `y`
+        // see the NEW `x` (OpenSCAD-verified; BOSL2's `_dp_distance_row` DP does exactly this with
+        // `costs=…, newrow=…min(costs)…`). Bind each into `loop_scope` as we go so the next update sees
+        // it; `vars` carries the results to the next iteration.
         for arg in update {
             let name = arg.name.as_deref().unwrap_or("_");
             let value = eval_with_global(&arg.value, &loop_scope, global, ctx)?;
+            loop_scope.bind(name.to_string(), value.clone());
             match vars.iter_mut().find(|(n, _)| n == name) {
                 Some(entry) => entry.1 = value,
                 None => vars.push((name.to_string(), value)),

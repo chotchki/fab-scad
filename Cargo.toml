@@ -33,6 +33,21 @@ name = "corpus_repro"
 path = "src/bin/corpus_repro.rs"
 required-features = ["native"]
 
+# The models-harness isolation worker (L.3): evaluates ONE model file (include graph + `import()` meshes) and
+# prints its outcome, so the harness can KILL a runaway — the interpreter is slow enough on heavy BOSL2
+# geometry that ~half the real models blow a 10 s budget — instead of leaking a host thread per timeout.
+[[bin]]
+name = "models_worker"
+path = "src/bin/models_worker.rs"
+required-features = ["native"]
+
+# One-file differential repro (L.3 divergence hunt): runs ONE .scad through scad-rs + the oracle and prints
+# the mesh verdict (AGREE / genus X vs Y / residual). The reduce-and-diagnose tool for a flagged DIVERGE.
+[[bin]]
+name = "diff_repro"
+path = "src/bin/diff_repro.rs"
+required-features = ["native"]
+
 [workspace]
 members = ["geom", "gui", "jit", "lang", "web"]
 
@@ -77,6 +92,13 @@ reqwest = { version = "0.12", default-features = false, optional = true, feature
     "json",
     "rustls-tls",
 ] }
+
+# The models harness (L.3) subscribes to fab-lang's TRACE-level eval spans to PROFILE per builtin/module
+# (the intrinsic worklist L.4 cuts the JIT phase from) — the subscriber side, test-only, so the shipped
+# lib stays subscriber-agnostic + wasm never sees it. `registry` gives the span store the layer times.
+[dev-dependencies]
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["registry", "std"] }
 
 # The kernel per target (18.4): native gets the default `parallel` (TBB); wasm32 swaps to the
 # provisional `unstable-wasm-uu` backend (C++ via wasm-cxx-shim, single-threaded, no exceptions).

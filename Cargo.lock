@@ -2853,6 +2853,8 @@ dependencies = [
  "serde",
  "threemf",
  "toml",
+ "tracing",
+ "tracing-subscriber",
  "zip",
 ]
 

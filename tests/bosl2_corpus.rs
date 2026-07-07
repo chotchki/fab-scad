@@ -67,7 +67,18 @@ use fab_scad::corpus::{Bucket, check_worker, histogram, run_bosl2_corpus_isolate
 /// the exact-quadrant sin/cos) → `acos(-0.5)` is exactly 120, matching glibc's correctly-rounded value
 /// (oracle-faithful + deterministic); non-nice inputs stay on libm so glued_circles is untouched. Remaining
 /// 3 assertions: attachment-descriptor infra (parent_part, desc_dist) + vector-math ring_hook; plus the
-/// deferred minkowski and the L.2.7 hull/region timeouts. Floored below 890 for timeout jitter (±1-2 gears).
+/// deferred minkowski and the L.2.7 hull/region timeouts.
+///
+/// 2026-07-07 (children $-context): ASSERTION BUCKET → 0 (98.9%, 891 with 9 timeouts this run). L.2.8p:
+/// `children()` renders the call-site children in the CALLER's LEXICAL scope but with the CURRENT dynamic
+/// `$`-context OVERLAID — `$`-vars are dynamically scoped, so a child sees the `$`-vars set in the module
+/// body where `children()` is instantiated, not the caller's. BOSL2's `attachable()` sets `$parent_geom`/
+/// `$parent_parts` right before `children()`; without the overlay, `parent()`/`desc_dist`/`parent_part`/
+/// `ring_hook`'s hook-orient read a stale undef → a zero-size default geom. One fix cleared all 3 remaining
+/// assertions (parent_part, desc_dist, ring_hook). Every correctness/math divergence is now resolved — the
+/// ONLY non-timeout failure is the deferred minkowski. What's left is entirely L.2.7: the hull/region
+/// TIMEOUTS, which jitter 7-9 run-to-run (gears/regions) and are now the sole source of pass-count noise +
+/// the next priority. Floored well below 891 to ride that jitter (worst-case ~all-timeout ≈ 890).
 const PASS_FLOOR: usize = 888;
 
 #[test]

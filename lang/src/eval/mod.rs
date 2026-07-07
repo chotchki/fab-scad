@@ -1703,8 +1703,17 @@ fn eval_children<'a>(
             .collect(),
         _ => Vec::new(),
     };
-    // Children render in the CALLER's scope AND module island (both stashed on the frame, I.9.5).
-    let result = eval_nodes(&selected, ctx, &frame.scope, global, frame.island);
+    // Children render in the CALLER's LEXICAL scope (their call-site variables, late-bound) AND module
+    // island (both stashed on the frame, I.9.5) — but with the CURRENT dynamic `$`-context OVERLAID. `$`-vars
+    // are dynamically scoped, so a child sees the `$`-vars in effect where `children()` is INSTANTIATED, not
+    // where it was written: BOSL2's `attachable()` sets `$parent_geom`/`$parent_parts` in its body right
+    // before `children()`, and `parent()`/`attach()` inside the children must read those, not the caller's
+    // stale `undef`. Without the overlay, `desc_dist`/`parent_part` saw a zero-size default geom.
+    let mut child_scope = frame.scope.clone();
+    for (name, value) in scope.specials() {
+        child_scope.bind(name, value);
+    }
+    let result = eval_nodes(&selected, ctx, &child_scope, global, frame.island);
     ctx.children_stack.borrow_mut().push(frame); // restore for the caller's continuation
     Ok(union_of(result?, ctx))
 }

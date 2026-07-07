@@ -114,6 +114,30 @@ fn parent_module_reads_the_instantiation_stack() {
     assert!(evaluate("module m() { assert(is_undef(parent_module(5))); cube(1); } m();").is_ok());
 }
 
+/// `children()` renders the call-site children in the CALLER's lexical scope but with the CURRENT dynamic
+/// `$`-context OVERLAID — `$`-vars are dynamically scoped, so a child sees the `$`-vars set in the module
+/// body where `children()` is instantiated, not the caller's. BOSL2's `attachable()` sets `$parent_geom`
+/// this way for `parent()`/`desc_dist`/`parent_part` in the children; without the overlay they saw undef.
+#[test]
+fn children_see_the_current_dollar_context() {
+    // a `$`-var set in the module body reaches the child (clean eval = the child's assert held)
+    assert!(evaluate("module m() { $val = 42; children(); } m() assert($val == 42);").is_ok());
+    // …and it OVERRIDES the caller's `$`-value for the child
+    assert!(evaluate("$val = 1; module m() { $val = 9; children(); } m() assert($val == 9);").is_ok());
+    // TRANSITIVELY through a forwarding `children()` (the attachable shape: outer forwards through inner,
+    // which sets the `$`-var — the deepest child still sees it)
+    assert!(
+        evaluate(
+            "module inner() { $g = 7; children(); }
+             module outer() { inner() children(); }
+             outer() assert($g == 7);"
+        )
+        .is_ok()
+    );
+    // a plain (non-`$`) variable stays LEXICAL: the child sees the CALL-SITE's value, not the module's
+    assert!(evaluate("x = 5; module m() { x = 99; children(); } m() assert(x == 5);").is_ok());
+}
+
 /// A module body can be a transform, a boolean, or a block of several children — the full statement
 /// vocabulary, producing real internal tree nodes.
 #[test]

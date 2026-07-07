@@ -60,8 +60,15 @@ use fab_scad::corpus::{Bucket, check_worker, histogram, run_bosl2_corpus_isolate
 /// → test_rounding_angled_edge_mask/_corner_mask]. The whole "unknown function/module" CLASS is now gone —
 /// unimplemented is JUST the deferred minkowski (J.4.4). Remaining: 4 assertions (attachment-descriptor
 /// infra parent_part/desc_dist, correctly-rounded-acos f_acos, vector-math ring_hook) + the hull/region
-/// timeouts (L.2.7). Floored below 888 with room for the borderline-gears timeout jitter (±1-2).
-const PASS_FLOOR: usize = 886;
+/// timeouts (L.2.7).
+///
+/// 2026-07-07 (f_acos): 888→890 (98.8%) — 3 assertion, 1 unimplemented, 7 timeout. L.2.8i RESOLVED by
+/// SNAPPING acos/asin at the exact nice cosines/sines (`acos_degrees`/`asin_degrees`, inverse analogue of
+/// the exact-quadrant sin/cos) → `acos(-0.5)` is exactly 120, matching glibc's correctly-rounded value
+/// (oracle-faithful + deterministic); non-nice inputs stay on libm so glued_circles is untouched. Remaining
+/// 3 assertions: attachment-descriptor infra (parent_part, desc_dist) + vector-math ring_hook; plus the
+/// deferred minkowski and the L.2.7 hull/region timeouts. Floored below 890 for timeout jitter (±1-2 gears).
+const PASS_FLOOR: usize = 888;
 
 #[test]
 #[ignore = "minutes-long full BOSL2 sweep; run explicitly with --ignored"]

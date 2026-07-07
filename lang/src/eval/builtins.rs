@@ -104,8 +104,11 @@ pub(super) fn apply(name: &str, pos: &[Value]) -> Value {
         "sin" => num1(pos, trig::sin_degrees),
         "cos" => num1(pos, trig::cos_degrees),
         "tan" => num1(pos, |x| trig::sin_degrees(x) / trig::cos_degrees(x)),
-        "asin" => num1(pos, |x| x.asin().to_degrees()),
-        "acos" => num1(pos, |x| x.acos().to_degrees()),
+        // asin/acos snap to EXACT degrees at the nice sines/cosines (glibc's correctly-rounded value),
+        // else libm — so `acos(-0.5)` is exactly 120, not `120.0000…01` (BOSL2's exact-`==` f_acos). atan/
+        // atan2 stay on `to_degrees` (their nice angles are already exact here, and no test needs a snap).
+        "asin" => num1(pos, trig::asin_degrees),
+        "acos" => num1(pos, trig::acos_degrees),
         "atan" => num1(pos, |x| x.atan().to_degrees()),
         "atan2" => num2(pos, |y, x| y.atan2(x).to_degrees()),
         "floor" => num1(pos, f64::floor),

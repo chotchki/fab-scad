@@ -110,7 +110,7 @@ added 2026-07-05.
   Implementation note, we should determine whether an intrinsic matches based on its original AST. That will help survive reformats or code comment changes.
 - [x] L.1 - Pinned BOSL2 test suite through scad-rs; divergences triaged into named buckets
 - [ ] L.2 - Burn-down: fixes land as semantics/ tests; expect this to expose evaluator gaps — that's the point
-  - [ ] L.2.1 - L.2.1 - Name the divergences: sharpen the generic clusters into a per-symbol worklist
+  - [x] L.2.1 - L.2.1 - Name the divergences: sharpen the generic clusters into a per-symbol worklist
   - [ ] L.2.2 - L.2.2 - Missing builtins: implement the functions the corpus names
   - [ ] L.2.3 - L.2.3 - Missing modules: the unknown-module tests
   - [ ] L.2.4 - L.2.4 - Builtin correctness bugs: named singletons that return the wrong value

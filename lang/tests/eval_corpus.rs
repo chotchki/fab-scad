@@ -555,6 +555,26 @@ fn list_string_builtins() {
     );
     assert_eq!(ev(r#"search(2, [["a", 1], ["b", 2]], 1, 1)"#), list(&[1.0])); // column 1
     assert_eq!(ev("search(3, [[1, 2], [3, 4]])"), list(&[1.0])); // numeric ROW, column-0 match
+}
+
+/// `search`'s `num_returns=1` MISS asymmetry (verified vs the oracle 2026.06.12) — the fix that unblocked
+/// BOSL2's `list_remove` → `str_split` → screw-table chain. A LIST match keeps a miss as `[]` POSITIONALLY
+/// (so `list_remove`'s `sres[i] == []` aligns); a STRING match DROPS it (length shrinks). OpenSCAD quirk.
+#[test]
+fn search_num_returns_one_miss_asymmetry() {
+    let empty = || Value::num_list(Vec::new());
+    // list match: 0↛, 1→0, 2↛, 3↛ → misses kept as `[]`
+    assert_eq!(
+        ev("search([0, 1, 2, 3], [1], 1)"),
+        Value::list(vec![empty(), num(0.0), empty(), empty()])
+    );
+    // all miss → all `[]`, LENGTH preserved (what list_remove counts on)
+    assert_eq!(
+        ev("search([3, 6, 9, 12], [1], 1)"),
+        Value::list(vec![empty(), empty(), empty(), empty()])
+    );
+    // string match DROPS the miss (`e` vanishes)
+    assert_eq!(ev(r#"search("abe", "abcabc", 1)"#), list(&[0.0, 1.0]));
     assert_eq!(ev("search(1)"), Value::Undef); // missing the table arg → undef
     assert_eq!(ev("search(1, 5)"), list(&[])); // a non-list table yields no matches
     assert_eq!(ev("search(undef, [1, 2])"), Value::Undef); // a non-searchable find → undef

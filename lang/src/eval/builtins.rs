@@ -388,15 +388,20 @@ fn search(pos: &[Value]) -> Value {
     match find {
         // a numeric search is always a flat list of hit indices, capped by num_returns (0 = all).
         Value::Num(_) | Value::Bool(_) => build_vector(hits(find, &rows, num_returns, index_col)),
+        // A STRING match drops misses (`search("abe","abc",1)` = `[0,1]` — 'e' vanishes)…
         Value::Str(s) => {
             let keys: Vec<Value> = s.chars().map(|c| Value::string(c.to_string())).collect();
-            build_vector(per_key_search(&keys, &rows, num_returns, index_col))
+            build_vector(per_key_search(&keys, &rows, num_returns, index_col, false))
         }
+        // …but a LIST match KEEPS them as `[]` in place (`search([0,1,2,3],[1],1)` = `[[],0,[],[]]`).
+        // That asymmetry is an OpenSCAD quirk (verified vs the oracle), and BOSL2's `list_remove` leans on
+        // it — `if (sres[i] == [])` needs the misses positional. Dropping them broke list_remove → str_split.
         Value::NumList(_) | Value::List(_) => build_vector(per_key_search(
             &iter_values(find),
             &rows,
             num_returns,
             index_col,
+            true,
         )),
         _ => Value::Undef,
     }
@@ -417,19 +422,26 @@ fn hits(key: &Value, rows: &[Value], num_returns: usize, index_col: usize) -> Ve
     out
 }
 
-/// The per-key half of `search` for STRING/LIST `find`: `num_returns == 1` flattens each key's first
-/// hit (misses drop out); otherwise each key contributes a sub-list (misses → `[]`).
+/// The per-key half of `search` for STRING/LIST `find`. For `num_returns == 1` each key yields its FIRST
+/// hit as a scalar; a MISS either drops out (`keep_misses == false`, the string-match rule) or stays as `[]`
+/// in place (`keep_misses == true`, the list-match rule — the OpenSCAD asymmetry `list_remove` depends on).
+/// Otherwise (`num_returns != 1`) each key contributes a sub-list (misses → `[]`) regardless.
 fn per_key_search(
     keys: &[Value],
     rows: &[Value],
     num_returns: usize,
     index_col: usize,
+    keep_misses: bool,
 ) -> Vec<Value> {
     let mut out = Vec::new();
     for key in keys {
         let found = hits(key, rows, num_returns, index_col);
         if num_returns == 1 {
-            out.extend(found.into_iter().next()); // first hit, or nothing
+            match found.into_iter().next() {
+                Some(hit) => out.push(hit),
+                None if keep_misses => out.push(build_vector(Vec::new())), // `[]` kept positional
+                None => {}                                                 // miss dropped
+            }
         } else {
             out.push(build_vector(found));
         }

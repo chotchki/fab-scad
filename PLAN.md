@@ -121,6 +121,13 @@ added 2026-07-07.
   - [x] L.2.8 - L.2.8 - Recursive function-literals (letrec): a closure must see its own binding
   - [x] L.2.8a - L.2.8a - Island-global bootstrapping: a top-level constant's fn call sees the constants hoisted so far (modular_hose +5)
   - [x] L.2.8b - L.2.8b - Empty-statement $children: a lone `;` is not a child (screw/attachable family +5)
+  - [x] L.2.8c - L.2.8c - Seedless rands advances one per-eval stream (plane_intersection +2)
+  - [x] L.2.8d - L.2.8d - Unary minus recurses into nested lists (-matrix element-wise; rot_inverse/rot_resample +4)
+  - [x] L.2.8e - L.2.8e - C-style for binds init/update sequentially (skin distance + dependent-update DP idiom +7)
+  - [x] L.2.8f - L.2.8f - `each` splices into a guard/loop operand (`each if(c) list`; nurbs_curve +4)
+  - [x] L.2.8g - L.2.8g - str() renders nested function literals bare (OpenSCAD format; fnliterals f_1arg/f_2arg/f_3arg +2)
+  - [x] L.2.8h - L.2.8h - a `let` in a vector is transparent (splices iff body does; trapezoid corner paths +3)
+  - [ ] L.2.8i - L.2.8i - fnliterals f_acos/f_is_num: 1-ULP libm divergence in acos/asin (needs deterministic libm crate; ties to determinism doctrine #36)
 - [ ] L.3 - models/ tree end-to-end (teardrop/onion/screw_hole, corner_brace, Underdesk); benchmark corpus captured via the tracing layer on every run
 - [ ] L.4 - Exit review: divergences zero-or-documented, perf-vs-oracle published; rung 2/3 (intrinsics, JIT) phase cut FROM THIS DATA
 
@@ -163,4 +170,3 @@ Parked 2026-07-04 for the scad-rs pivot — the workflow tool works and stays in
 - **J.4.2.1 - import() eval + backend wiring (STL/3MF readers → Leaf)** — deferred from J.4.2.1 on 2026-07-06.
 - **J.4.2.2 - import() differential vs oracle (round-trip a known STL + 3MF)** — deferred from J.4.2.2 on 2026-07-06.
 - **surface() PNG heightmap load (deferred from M.5.2)** — added 2026-07-06.
-- **Corpus-found: str() of recursive function values overflows the host stack** — added 2026-07-07.

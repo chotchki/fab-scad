@@ -182,6 +182,11 @@ fn unary() {
     assert_eq!(ev("-5"), num(-5.0));
     assert_eq!(ev("-[1,2]"), list(&[-1.0, -2.0]));
     assert_eq!(ev("-\"a\""), Value::Undef);
+    // Unary minus recurses into NESTED lists (L.2.8d) — `-matrix` negates element-wise (OpenSCAD), not
+    // undef. Regression for BOSL2's rot_inverse: `-rot(90)` fed a downstream `hstack`, and undef there
+    // collapsed the inverse to a malformed 3-column matrix, tripping rot_resample's `is_matrix` assert.
+    assert_eq!(ev("-[[1,2],[3,4]]"), ev("[[-1,-2],[-3,-4]]"));
+    assert_eq!(ev("-[1,\"a\"]"), ev("[-1,undef]")); // non-numeric leaf → undef, matching -\"a\"
     assert_eq!(ev("+5"), num(5.0)); // no-op
     assert_eq!(ev("!true"), Value::Bool(false));
     assert_eq!(ev("!0"), Value::Bool(true)); // 0 is falsy

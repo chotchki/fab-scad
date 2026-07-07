@@ -110,6 +110,13 @@ pub fn apply_unary(op: UnOp, v: Value) -> Value {
         UnOp::Neg => match v {
             Value::Num(x) => Value::Num(-x),
             Value::NumList(xs) => Value::NumList(xs.iter().map(|e| -e).collect()),
+            // A heterogeneous/NESTED list (e.g. a matrix — a `List` of `NumList` rows) negates
+            // element-wise, recursing: OpenSCAD's `-[[a,b],[c,d]]` = `[[-a,-b],[-c,-d]]`. Without this a
+            // `-matrix` (e.g. `-rot(90)` in BOSL2's rot_inverse) collapsed to `undef` and poisoned the
+            // downstream matrix math. Non-numeric leaves fall through to `undef`, matching `-"x"`.
+            Value::List(items) => {
+                Value::List(items.iter().map(|e| apply_unary(UnOp::Neg, e.clone())).collect())
+            }
             _ => Value::Undef,
         },
         UnOp::Pos => v, // no-op (parser.y:469)

@@ -20,15 +20,16 @@ use std::path::{Path, PathBuf};
 use fab_scad::corpus::{Bucket, check_worker, histogram, run_bosl2_corpus_isolated, signatures};
 
 /// The pinned pass-count floor (the ratchet). Raise it as fixes land in the L.2 burn-down; a DROP means
-/// something that passed now fails — a regression the suite catches. Baseline 2026-07-06: 853/901 pass
-/// (94.7%) — 26 assertion, 11 unimplemented, 9 timeout, 1 crash. Evaluator fixes cleared 146 (`search` +25,
+/// something that passed now fails — a regression the suite catches. Baseline 2026-07-06: 857/901 pass
+/// (95.1%) — 22 assertion, 11 unimplemented, 9 timeout, 1 crash. Evaluator fixes cleared 150 (`search` +25,
 /// letrec +12, `rands` +27, function-value `str()` +58, range-indexing `r[0..2]` +12, island-global
 /// bootstrapping +5 [L.2.8a: a top-level constant's fn call sees the constants hoisted so far → the
 /// modular_hose `turtle([arc...])` cluster loads], empty-statement `$children` +5 [L.2.8b: a lone `;` is
 /// not a child → the screw()/attachable `$children==2` family], seedless-`rands` advance +2 [L.2.8c: one
-/// per-eval stream so consecutive `rands()` differ → plane_intersection's random line is non-degenerate]);
-/// the `expect_success=false` scorer fix corrected 21 more. Floored below 853 for timeout jitter.
-const PASS_FLOOR: usize = 846;
+/// per-eval stream so consecutive `rands()` differ → plane_intersection's random line is non-degenerate],
+/// unary-minus-on-matrix +4 [L.2.8d: `-[[…]]` negates element-wise not undef → rot_inverse/rot_resample]);
+/// the `expect_success=false` scorer fix corrected 21 more. Floored below 857 for timeout jitter.
+const PASS_FLOOR: usize = 850;
 
 #[test]
 #[ignore = "minutes-long full BOSL2 sweep; run explicitly with --ignored"]

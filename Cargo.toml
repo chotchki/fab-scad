@@ -48,6 +48,13 @@ name = "diff_repro"
 path = "src/bin/diff_repro.rs"
 required-features = ["native"]
 
+# Echo dump (L.3.4): prints a .scad's echo/warning output through scad-rs — the VALUE-level counterpart to
+# diff_repro, for bisecting a construction (e.g. why a VNF comes out empty) against OpenSCAD's echo.
+[[bin]]
+name = "echo_repro"
+path = "src/bin/echo_repro.rs"
+required-features = ["native"]
+
 [workspace]
 members = ["geom", "gui", "jit", "lang", "web"]
 

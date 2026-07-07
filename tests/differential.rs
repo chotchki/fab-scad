@@ -120,6 +120,18 @@ fn instantiation_modifiers_match_the_oracle() {
 }
 
 #[test]
+fn revolved_vnf_shapes_match_the_oracle() {
+    // The polyhedron/VNF leaf WELDS exact-coincident vertices (kernel `from_indexed`). A revolved VNF
+    // duplicates its 360° closure ring (section N == section 0 as distinct indices), which reads as a
+    // non-manifold OPEN seam → the whole leaf drops to empty without the weld. Surfaced by the L.3 sweep as
+    // the dominant divergence (L.3.4): chamfered/rounded `cyl` + `teardrop` rendered NOTHING.
+    agree_bosl2_body("cyl(d = 10, l = 20, chamfer = 1)");
+    agree_bosl2_body("cyl(d = 10, l = 20, rounding = 2)");
+    agree_bosl2_body("teardrop(d = 8, l = 12)");
+    agree_bosl2_body("rotate_sweep([[1, 0], [3, 0], [3, 5], [1, 5]], 360)"); // a bare revolved profile
+}
+
+#[test]
 fn assert_echo_passthrough_matches_the_oracle() {
     // `assert`/`echo` are passthrough — child geometry renders after the check/emit. Surfaced by the L.3 sweep:
     // BOSL2's `left()`/`fwd()` guard their `translate() children()` with a semicolon-less `assert`, so the

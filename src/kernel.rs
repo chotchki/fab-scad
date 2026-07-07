@@ -222,20 +222,47 @@ impl Solid {
         Ok(Solid::wrap(m))
     }
 
-    /// Build from an ALREADY-indexed mesh (3mf objects arrive this way — no weld needed; the
-    /// file's own topology is authoritative). Fails like `from_stl_bytes` if it isn't manifold.
+    /// Build from an ALREADY-indexed mesh (polyhedron/VNF leaves, 3mf objects). Fails like
+    /// [`Self::from_stl_bytes`] if it isn't manifold.
+    ///
+    /// WELDS exact-bit-coincident vertices to one index first. OpenSCAD's `polyhedron()` welds, and a
+    /// REVOLVED VNF — `rotate_sweep` / a chamfered or rounded `cyl` / `teardrop`, anything that closes a
+    /// 360° loop — DUPLICATES its seam ring (section N == section 0 as DISTINCT indices, bit-for-bit equal).
+    /// Manifold reads that as an OPEN seam (non-manifold) → the whole leaf drops to empty, which was the
+    /// dominant `models/`-sweep divergence (L.3.4): chamfered cylinders and teardrops rendered NOTHING.
+    /// Welding by EXACT f64 bits (not a tolerance) is the manifold-correct move — two bit-identical positions
+    /// ARE one point — and it's a no-op everywhere it must be: a 3mf's shared topology has no exact dups, and
+    /// a re-imported boolean-RESULT mesh's NEAR-coincident seam verts differ in the low bits so they stay
+    /// distinct (J.2.7.1 preserved — that's why the whole path stays f64, never an f32 downcast). A tri that
+    /// collapses to <3 distinct verts under the weld is degenerate (zero area) and dropped.
     pub fn from_indexed(verts: &[Vec3], tris: &[Tri]) -> Result<Self> {
         if verts.is_empty() || tris.is_empty() {
             return Err(anyhow!("indexed mesh is empty"));
         }
-        // f64 ALL THE WAY — MeshGL64 (not the f32 MeshGL), so a re-imported boolean-RESULT mesh keeps
-        // its near-coincident seam vertices distinct instead of merging them in f32 → non-manifold
-        // (J.2.7.1). The precision floor is now the OFF export's ~6 sig digits, never an f32 downcast.
-        let flat: Vec<f64> = verts.iter().flat_map(|v| v.to_array()).collect();
+        let mut map: HashMap<[u64; 3], u32> = HashMap::new();
+        let mut flat: Vec<f64> = Vec::with_capacity(verts.len() * 3);
+        let mut remap: Vec<u32> = Vec::with_capacity(verts.len());
+        for v in verts {
+            let a = v.to_array();
+            let key = [a[0].to_bits(), a[1].to_bits(), a[2].to_bits()];
+            let id = *map.entry(key).or_insert_with(|| {
+                flat.extend_from_slice(&a);
+                u32::try_from(flat.len() / 3 - 1).expect("vertex count fits u32")
+            });
+            remap.push(id);
+        }
         let idx: Vec<u64> = tris
             .iter()
-            .flat_map(|t| t.indices().map(u64::from))
+            .filter_map(|t| {
+                let [a, b, c] = t.indices().map(|i| remap[i as usize]);
+                // Drop tris the weld collapsed to a degenerate (a repeated vertex → zero area).
+                (a != b && b != c && a != c).then_some([u64::from(a), u64::from(b), u64::from(c)])
+            })
+            .flatten()
             .collect();
+        if idx.is_empty() {
+            return Err(anyhow!("mesh is degenerate after weld (no non-degenerate triangles)"));
+        }
         let m = Manifold::from_mesh_f64(&flat, 3, &idx)
             .map_err(|e| anyhow!("mesh is not a valid manifold: {e:?}"))?;
         Ok(Solid::wrap(m))

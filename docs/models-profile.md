@@ -184,6 +184,24 @@ after the side effect. Because `left`/`right`/`fwd`/`back` are ubiquitous, this 
 missing-geometry (empty-vs-solid) cause. `corner_brace` now AGREES with the oracle outright. Regression-tested
 in fab-lang `geometry_corpus` + fab-scad `differential` (incl. the bare BOSL2 `left(5) cube()` trigger).
 
+### Root cause of the DOMINANT class: revolved VNFs weren't welded (fixed 2026-07-07)
+
+The biggest of the three, from the post-fix compare (14 of the 19 remaining divergences). `dowels` rendered
+empty; reduced to `cyl(chamfer=1)` → empty (plain `cyl` fine). BOSL2 builds a chamfered/rounded `cyl` — and
+`teardrop`, and anything via `rotate_sweep` — as a VNF that it renders with `vnf_polyhedron`. Chased it down
+with `echo_repro` (new — dumps our echo so intermediates diff against OpenSCAD's): our `sweep`/`rotate_sweep`
+returns a VNF **bit-identical to the oracle's** (68 verts, 128 tris, same indices). So the value math is
+right — the bug was in RENDERING it. Our `from_indexed` (the polyhedron/VNF → Manifold leaf) did NO vertex
+weld, but a 360°-revolved VNF DUPLICATES its closure-seam ring (section N == section 0 as distinct indices,
+bit-for-bit equal: `v[0]==v[64]`, 68 verts → 64 unique). Manifold reads the un-welded duplicate as an OPEN
+seam (non-manifold) → the whole leaf drops to empty. OpenSCAD's `polyhedron()` welds; we didn't.
+
+Fix: `from_indexed` welds exact-bit-coincident verts (dropping any tri that collapses to degenerate), like
+`from_stl_bytes` already did for STL import. Exact bits, not a tolerance — a 3mf's shared topology has no
+exact dups (no-op) and a boolean-RESULT mesh's NEAR-coincident seam verts differ in the low bits so they stay
+distinct (J.2.7.1 preserved). `dowels`, `wire_holder2` (was missing all 12 bolt holes — the teardrop cutters
+rendered empty so nothing subtracted), and the whole chamfer/rounding/teardrop/`rotate_sweep` class now AGREE.
+
 ### The other levers
 
 - **Excluding dead experiments.** 9 of 51 live in `unused/` or are named `_test` / `_slice` / `second_approach`

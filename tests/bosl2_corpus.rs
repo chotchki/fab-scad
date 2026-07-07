@@ -73,6 +73,18 @@ fn bosl2_corpus_ratchet_and_report() {
         eprintln!("  {count:>4} × {:<13} {}", bucket.label(), detail);
     }
 
+    // Full failure roster (file::name\tbucket\tdetail) to a stable path — for slicing the generic
+    // `got==expected` long tail by the test NAME (which usually names the diverging function).
+    let roster: String = results
+        .iter()
+        .filter(|r| r.bucket != Bucket::Pass)
+        .map(|r| format!("{}\t{}\t{}\t{}\n", r.file, r.name, r.bucket.label(), r.detail))
+        .collect();
+    let roster_path = std::env::temp_dir().join("bosl2_fails.tsv");
+    if std::fs::write(&roster_path, roster).is_ok() {
+        eprintln!("\nfull failure roster → {}", roster_path.display());
+    }
+
     assert!(
         pass >= PASS_FLOOR,
         "BOSL2 corpus regressed: {pass} pass < floor {PASS_FLOOR} (raise the floor when fixes land, \

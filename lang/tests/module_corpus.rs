@@ -267,6 +267,23 @@ fn children_index_and_count() {
         ),
         GeoNode::Empty
     );
+    // A lone `;` (an EMPTY statement) is NOT a child — it neither counts toward `$children` nor is
+    // reachable via `children(i)` (oracle-verified: `union(){}; union(){};` → $children == 2, not 4).
+    // This is what BOSL2's `attachable(){ shape; union(){}; }` relies on: the terminating `;` after the
+    // empty-union attachments placeholder must NOT read as a third child (else attachable's `$children==2`
+    // assert fails — the whole screw() family). The count and `children(i)` both skip empties.
+    assert!(matches!(
+        d3(evaluate_geometry(
+            "module g() if ($children == 2) cube(1); g() { sphere(1, $fn = 8); union(){}; }"
+        )
+        .unwrap()),
+        GeoNode::Leaf(_) // the empty `union(){}` + its terminating `;` is ONE child, so $children == 2
+    ));
+    // `children(1)` skips the lone `;` at index 1 → picks the sphere, not nothing.
+    assert_eq!(
+        verts("module pick() children(1); pick() { cube(1); ; sphere(2, $fn = 8); }"),
+        sphere
+    );
 }
 
 /// `children()` LATE-binds: a `children()` inside the rendered children refers to the ENCLOSING call,

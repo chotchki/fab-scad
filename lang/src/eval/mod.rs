@@ -151,7 +151,11 @@ pub(super) struct Ctx<'a> {
 /// the CALLER's scope AND module ISLAND they evaluate in (OpenSCAD renders `children()` in the
 /// instantiation context — same lexical scope AND same module-resolution scope as the call site, I.9.5).
 struct ChildrenFrame<'a> {
-    stmts: &'a [Stmt],
+    /// The call-site children WITH lone-`;` empties filtered out — a `StmtKind::Empty` is not a child in
+    /// OpenSCAD (it neither counts toward `$children` nor is reachable via `children(i)`), so keeping it
+    /// here would misalign both. The filtered list is what BOSL2's `attachable(){ shape; union(){}; }`
+    /// needs to see as exactly 2 children (the terminating `;` after the empty union is not a third).
+    stmts: Vec<&'a Stmt>,
     scope: Scope,
     island: usize,
 }
@@ -1508,10 +1512,17 @@ fn call_user_module<'a>(
     let home_global = ctx.island_globals.borrow()[home].clone();
     let mut call = bind_module_scope(params, &mi.args, caller, &home_global, ctx)?;
     // `$children` = the call-site child count; the children themselves are stashed for `children()` to
-    // render LATE, in the CALLER's scope AND island (I.2.5 / I.9.5).
-    call.bind("$children", Value::Num(child_count(mi.children.len())));
+    // render LATE, in the CALLER's scope AND island (I.2.5 / I.9.5). Lone-`;` empties are NOT children
+    // (OpenSCAD-verified: `union(){}; union(){};` is $children == 2, not 4) — filter them once so the
+    // count and the `children(i)` index agree.
+    let child_stmts: Vec<&Stmt> = mi
+        .children
+        .iter()
+        .filter(|s| !matches!(s.kind, StmtKind::Empty))
+        .collect();
+    call.bind("$children", Value::Num(child_count(child_stmts.len())));
     ctx.children_stack.borrow_mut().push(ChildrenFrame {
-        stmts: mi.children.as_slice(),
+        stmts: child_stmts,
         scope: caller.clone(),
         island,
     });
@@ -1540,14 +1551,14 @@ fn eval_children<'a>(
         return Ok(Geo::D3(GeoNode::Empty)); // children() outside a module call → nothing
     };
     let selected: Vec<&Stmt> = match positional.first() {
-        None => frame.stmts.iter().collect(), // children() → all
+        None => frame.stmts.clone(), // children() → all
         Some(Value::Num(i)) => child_at(*i)
-            .and_then(|i| frame.stmts.get(i))
+            .and_then(|i| frame.stmts.get(i).copied())
             .into_iter()
             .collect(),
         Some(Value::NumList(xs)) => xs
             .iter()
-            .filter_map(|&i| child_at(i).and_then(|i| frame.stmts.get(i)))
+            .filter_map(|&i| child_at(i).and_then(|i| frame.stmts.get(i).copied()))
             .collect(),
         _ => Vec::new(),
     };

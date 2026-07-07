@@ -104,6 +104,22 @@ fn whole_scope_hoisting_matches_the_oracle() {
 }
 
 #[test]
+fn instantiation_modifiers_match_the_oracle() {
+    // The `* ! % #` modifiers (parsed into `Modifiers`, honored in `eval_stmt`). Surfaced by the L.3 models
+    // sweep: `*`-parked variants were rendering as REAL geometry, the top divergence-vs-oracle cause.
+    // `*` disable + `%` background drop a subtree from the exported mesh entirely:
+    agree("cube(10); *sphere(20);");
+    agree("cube(10); %sphere(20);");
+    // `#` highlight is a preview decoration with no effect on exported geometry:
+    agree("cube(10); #translate([20, 0, 0]) sphere(5, $fn = 16);");
+    // `!` root renders ONLY its subtree — ancestors (the outer translate) + siblings (the sphere) discarded,
+    // but the `!`-node's OWN transform is kept (this needs the backend, so it lives here not in fab-lang):
+    agree("translate([50, 0, 0]) !cube(10); sphere(20);"); // cube at origin, sphere gone
+    agree("!translate([5, 0, 0]) cube(10); sphere(20);"); // own translate kept → cube at [5,15]
+    agree("difference() { cube(30); !translate([5, 5, 5]) cube(10); }"); // ancestor difference dropped
+}
+
+#[test]
 fn primitives_and_expressions_match_the_oracle() {
     agree("sphere(10, $fn = 32);");
     agree("cube([10, 20, 30]);");

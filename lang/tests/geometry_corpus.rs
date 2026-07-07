@@ -297,3 +297,50 @@ fn polyhedron_out_of_range_index_warns_and_renders() {
         .expect("renders");
     assert_eq!(quad.mesh.tri_count(), 0); // the whole face dropped, not just the bad triangle
 }
+
+// ─────────────────── instantiation modifiers (`* ! % #`) — eval must honor OUTPUT-geometry ones ──────────
+// The parser records `! # % *` (ast.rs `Modifiers`); `eval_stmt` honors them. Surfaced by the L.3 models
+// sweep, where `*`-parked variants (`*alternate();`) rendered as REAL geometry — the top divergence cause
+// vs the oracle. These cover the cases whose result stays a single no-backend primitive; the transform-
+// keeping `!` + full oracle agreement live in the fab-scad `differential` suite.
+
+/// [min, max] over each axis across all vertices.
+fn bbox(m: &Mesh) -> ([f64; 3], [f64; 3]) {
+    let (mut lo, mut hi) = ([f64::INFINITY; 3], [f64::NEG_INFINITY; 3]);
+    for v in &m.verts {
+        for i in 0..3 {
+            lo[i] = lo[i].min(v[i]);
+            hi[i] = hi[i].max(v[i]);
+        }
+    }
+    (lo, hi)
+}
+
+#[test]
+fn star_disable_drops_the_subtree() {
+    // `*` renders nothing: the sphere (r=20) never reaches the mesh, so the bbox stays the bare cube's.
+    let m = mesh("cube(10); *sphere(20, $fn = 8);");
+    assert_eq!(m.vert_count(), mesh("cube(10);").vert_count());
+    assert_eq!(bbox(&m), ([0.0; 3], [10.0; 3]));
+}
+
+#[test]
+fn percent_background_excluded_from_output() {
+    // `%` is a preview-only ghost — F6 render / STL export omits it, so the mesh matches the bare cube.
+    assert_eq!(bbox(&mesh("cube(10); %sphere(20, $fn = 8);")), ([0.0; 3], [10.0; 3]));
+}
+
+#[test]
+fn hash_highlight_is_a_render_no_op() {
+    // `#` highlights in preview but changes nothing in the exported geometry.
+    assert_eq!(mesh("#cube(10);").vert_count(), mesh("cube(10);").vert_count());
+}
+
+#[test]
+fn bang_root_renders_only_its_subtree() {
+    // `!` renders ONLY its subtree — the ancestor `translate` AND the sibling `sphere` are discarded, so the
+    // cube lands at the ORIGIN (dropping the ancestor transform reduces it to a bare Leaf). Oracle-verified.
+    let m = mesh("translate([50, 0, 0]) !cube(10); sphere(20, $fn = 8);");
+    assert_eq!(m.vert_count(), 8, "only the cube's 8 verts — the sibling sphere is gone");
+    assert_eq!(bbox(&m), ([0.0; 3], [10.0; 3]), "cube at origin — the ancestor translate was dropped");
+}

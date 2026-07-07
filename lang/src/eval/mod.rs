@@ -128,6 +128,12 @@ pub(super) struct Ctx<'a> {
     islands: loader::Islands<'a>,
     closures: RefCell<Vec<(&'a [Parameter], &'a Expr)>>,
     messages: RefCell<Vec<Message>>,
+    /// The `!` ROOT modifier's captured subtrees (`control.cc`'s root-modifier). When any node is `!`-tagged,
+    /// OpenSCAD renders ONLY those subtrees — ancestors + siblings discarded — so [`eval_stmt`] diverts a
+    /// `!`-node's geometry HERE instead of into the local `nodes`, and [`run_stmts`] uses this as the whole
+    /// program output whenever it's non-empty. A shared buffer because `!` can sit arbitrarily deep in the
+    /// tree, not just at the top level. Empty in the overwhelmingly common no-`!` program.
+    root_override: RefCell<Vec<Geo>>,
     /// The caller-supplied mesh table an `import`/`surface` resolves its `file=` path against (M.3). `None`
     /// on the non-loader `build_ctx`/`default` paths — no table means every import is a need. Read-only
     /// during geometry eval.
@@ -1140,6 +1146,7 @@ fn resolve_source(
         islands,
         closures: RefCell::default(),
         messages: RefCell::default(),
+        root_override: RefCell::default(),
         files: Some(files),
         file_needs: RefCell::default(),
         module_depth: Cell::default(),
@@ -1267,11 +1274,15 @@ fn run_stmts<'a>(
     // `x = turtle([arc...])`, whose `arc` reads the library constant `_EPSILON`) must let that function
     // resolve island-0 constants DURING the hoist that builds them, not against the empty pre-publish global.
     let global = hoist_scope_publishing(&stmts, scope, ctx, 0)?;
-    // Top-level statements resolve modules against island 0 (the root file, I.9.5).
-    Ok(union_of(
-        eval_geometry(&stmts, &global, &global, 0, ctx)?,
-        ctx,
-    ))
+    // Clear any `!`-override residue from a prior resolution attempt (the loader re-runs on file-needs), then
+    // eval. Top-level statements resolve modules against island 0 (the root file, I.9.5).
+    ctx.root_override.borrow_mut().clear();
+    let nodes = eval_geometry(&stmts, &global, &global, 0, ctx)?;
+    // `!` ROOT modifier: if any subtree was `!`-tagged, the program renders ONLY those (ancestors + siblings
+    // discarded — `eval_stmt` diverted them into `root_override`). Otherwise the implicit union of top-level
+    // objects. `split_off(0)` drains the buffer so a re-run starts clean.
+    let root = ctx.root_override.borrow_mut().split_off(0);
+    Ok(union_of(if root.is_empty() { nodes } else { root }, ctx))
 }
 
 /// The geometry nodes a statement list produces, in order. Pass 1 HOISTS every assignment BEFORE any
@@ -2020,6 +2031,7 @@ fn build_ctx(program: &Program) -> Ctx<'_> {
         }],
         closures: RefCell::default(),
         messages: RefCell::default(),
+        root_override: RefCell::default(),
         // No file table on the raw AST path — an import/surface here becomes a need `eval_program` then
         // rejects LOUD (a silently-empty mesh is the thing the doctrine forbids).
         files: None,
@@ -2032,6 +2044,33 @@ fn build_ctx(program: &Program) -> Ctx<'_> {
     }
 }
 
+/// A statement's contribution to the geometry, honoring its instantiation MODIFIERS first. `*`/`%` (drop from
+/// output) are handled in the dispatch's disable/background arm; `!` (root) is handled HERE — it DIVERTS the
+/// node's geometry into `ctx.root_override` so the program renders only `!`-tagged subtrees ([`run_stmts`]),
+/// ancestors + siblings discarded. Everything else falls straight through to [`eval_stmt_dispatch`].
+fn eval_stmt<'a>(
+    stmt: &'a Stmt,
+    scope: &mut Scope,
+    global: &Scope,
+    island: usize,
+    ctx: &Ctx<'a>,
+    nodes: &mut Vec<Geo>,
+) -> crate::Result<()> {
+    if let StmtKind::Module(mi) = &stmt.kind
+        && mi.modifiers.root
+    {
+        // Eval the `!` node normally — its OWN transform + children apply (verified: `!translate() cube()`
+        // keeps the translate) — then divert the geometry it produced into the program-global root override,
+        // leaving `nodes` untouched so the ancestor transforms/booleans + sibling statements drop out.
+        let mark = nodes.len();
+        eval_stmt_dispatch(stmt, scope, global, island, ctx, nodes)?;
+        let captured: Vec<Geo> = nodes.split_off(mark);
+        ctx.root_override.borrow_mut().extend(captured);
+        return Ok(());
+    }
+    eval_stmt_dispatch(stmt, scope, global, island, ctx, nodes)
+}
+
 /// Statement recursion is bounded by the parser's `MAX_DEPTH`, so host recursion here can't overflow
 /// (unlike unbounded EXPRESSION recursion, which the explicit stack handles).
 #[allow(
@@ -2039,7 +2078,7 @@ fn build_ctx(program: &Program) -> Ctx<'_> {
     reason = "the statement dispatcher: one match arm per StmtKind / builtin module — splitting it would \
     scatter the geometry-tree construction across helpers that each re-take scope/global/island/ctx/nodes"
 )]
-fn eval_stmt<'a>(
+fn eval_stmt_dispatch<'a>(
     stmt: &'a Stmt,
     scope: &mut Scope,
     global: &Scope,
@@ -2068,6 +2107,15 @@ fn eval_stmt<'a>(
                 ctx,
             ));
         }
+        // MODIFIERS that drop a subtree from the OUTPUT (`parser` records them, `eval` must honor them, else
+        // they render as bare geometry): `*` DISABLE — OpenSCAD evaluates nothing under it (no geometry, no
+        // echo/assert side effects); `%` BACKGROUND — a preview-only ghost that F6-render / STL-export omits.
+        // Either way the subtree contributes NOTHING to the mesh, so short-circuit before any dispatch. This
+        // is the dominant way chotchki's models park variants (`*alternate();`) — without the gate every one
+        // rendered as REAL geometry, the top divergence cause in the L.3 sweep (docs/models-profile.md).
+        // (`#` highlight is preview-only decoration, no geometry effect → ignored; `!` root — "render ONLY
+        // this" — is a program-level filter, handled where the top-level nodes are assembled.)
+        StmtKind::Module(mi) if mi.modifiers.disable || mi.modifiers.background => {}
         // `echo`/`assert` at statement level are module instantiations, but they produce console
         // output, not geometry — handle them here (no node pushed) before the geometry dispatch. Their
         // geometry CHILDREN (`echo(x) cube();`) ride the module-children machinery (I.2.4 / J); rare.

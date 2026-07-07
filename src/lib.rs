@@ -13,6 +13,9 @@ pub mod auto_slice;
 pub mod backend;
 #[cfg(feature = "kernel")]
 pub mod bambu;
+// BOSL2 test corpus runner (K.1 tier 2): needs fab-lang (eval) + toml + std::fs — a native dev/CI tool.
+#[cfg(feature = "native")]
+pub mod corpus;
 pub mod cross_section;
 pub mod deps;
 #[cfg(all(feature = "native", feature = "kernel"))]

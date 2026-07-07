@@ -99,6 +99,8 @@ added 2026-07-05.
 - [x] J.6 - Unify fab-scad's geom::V3 ([f64;3] orientation helpers) + printer-domain [f64;3] into fab_lang::Vec3
 ## Phase K - scad-rs: differential harness + semantics corpus
 - [ ] K.1 - Harness v1: both engines, metric gate per model class, corpus tiers 1-3 wired in CI (OpenSCAD suite, BOSL2 tests, models/)
+  - [ ] K.1.1 - K.1.1 - BOSL2 test corpus tier: sweep the .scadtest suite through scad-rs
+  - [ ] K.1.2 - K.1.2 - Perf tier: scad-rs vs OpenSCAD full-pipeline wall-time on geometry
 - [ ] K.2 - semantics/ segmentation formalized: naming + provenance conventions; G.3/I tests migrated in
 - [ ] K.3 - ChaCha8-seeded grammar-directed program generator v0; seed logged per run; one-command failure replay
 - [ ] K.4 - Published artifacts per run: divergence report + the (initially empty) intrinsic matrix — the trend line starts before the intrinsics do
@@ -150,3 +152,4 @@ Parked 2026-07-04 for the scad-rs pivot — the workflow tool works and stays in
 - **J.4.2.1 - import() eval + backend wiring (STL/3MF readers → Leaf)** — deferred from J.4.2.1 on 2026-07-06.
 - **J.4.2.2 - import() differential vs oracle (round-trip a known STL + 3MF)** — deferred from J.4.2.2 on 2026-07-06.
 - **surface() PNG heightmap load (deferred from M.5.2)** — added 2026-07-06.
+- **Corpus-found: str() of recursive function values overflows the host stack** — added 2026-07-07.

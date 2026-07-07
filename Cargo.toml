@@ -18,6 +18,13 @@ name = "fab"
 path = "src/main.rs"
 required-features = ["native"]
 
+# The BOSL2 corpus isolation worker (K.1): runs ONE test script (stdin) so a stack-overflow abort takes down
+# only this process, not the parent sweep. Not a user-facing tool — the corpus harness spawns it.
+[[bin]]
+name = "corpus_worker"
+path = "src/bin/corpus_worker.rs"
+required-features = ["native"]
+
 [workspace]
 members = ["geom", "gui", "jit", "lang", "web"]
 

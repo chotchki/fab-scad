@@ -12,7 +12,7 @@
 mod ast;
 mod diag;
 mod expr;
-mod print;
+pub(crate) mod print;
 mod stmt;
 
 pub use ast::{

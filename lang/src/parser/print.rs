@@ -34,6 +34,21 @@ pub fn print_expr(e: &Expr) -> String {
     out
 }
 
+/// Render a function VALUE the way OpenSCAD's `str()` does: `function(params) body` — no wrapping parens and
+/// no space after `function` (unlike the canonical [`print_expr`] form `(function (…) …)`). It prints the
+/// closure's SOURCE, so a captured variable shows as its NAME, not its value (`function() target_func(a)`
+/// prints `a`). Pre-computed at closure creation + stored on the value (the eval `Ctx` isn't reachable from
+/// `str`), which also makes `str()` of a recursive closure finite — it renders the literal AST, never the
+/// runtime value graph.
+#[must_use]
+pub fn function_value_repr(params: &[Parameter], body: &Expr) -> String {
+    let mut out = String::from("function(");
+    write_params(&mut out, params);
+    out.push_str(") ");
+    write_expr(&mut out, body);
+    out
+}
+
 fn write_stmt(out: &mut String, s: &Stmt) {
     match &s.kind {
         StmtKind::Empty => out.push(';'),

@@ -391,7 +391,7 @@ fn eval_with_global<'a>(
             Task::CallValue { args, caller } => {
                 let callee = values.pop().unwrap_or(Value::Undef);
                 match &callee {
-                    Value::Function { closure_id, env, self_name } => {
+                    Value::Function { closure_id, env, self_name, .. } => {
                         let (params, body) = ctx.closures.borrow()[*closure_id];
                         // a closure's body is lexically scoped to its captured env, not the caller's. If it
                         // was defined with a name, re-inject NAME→itself so it can recurse (letrec) — our
@@ -548,6 +548,8 @@ fn eval_node<'a>(
                 closure_id,
                 env: scope.clone(),
                 self_name: None, // set when bound to a name (`g = function…`) — see `name_closure`
+                // OpenSCAD's `str()` rendering, computed here where the AST is in hand (str can't reach it).
+                repr: crate::parser::print::function_value_repr(params, body).into(),
             });
         }
         ExprKind::Let { bindings, body } => match bindings.split_first() {
@@ -934,10 +936,12 @@ fn name_closure(value: Value, name: &str) -> Value {
             closure_id,
             env,
             self_name: None,
+            repr,
         } => Value::Function {
             closure_id,
             env,
             self_name: Some(std::rc::Rc::from(name)),
+            repr,
         },
         other => other,
     }

@@ -491,7 +491,7 @@ fn list_string_builtins() {
     assert_eq!(ev(r#"str(["a", "b"])"#), str(r#"["a", "b"]"#)); // nested strings quoted
     assert_eq!(ev("str([0:2:6])"), str("[0 : 2 : 6]"));
     assert_eq!(ev("str()"), str("")); // no args → empty string
-    assert_eq!(ev("str(function(x) x)"), str("function ...")); // function form deferred to I.5
+    assert_eq!(ev("str(function(x) x)"), str("function(x) x")); // function value → its source (L.2.6)
 
     // chr — codepoints → string; sub-1 / non-scalar codepoints SKIPPED; string arg → undef.
     assert_eq!(ev("chr(65)"), str("A"));
@@ -667,6 +667,22 @@ fn function_values() {
     assert_eq!(ev("(function(x) x)()"), Value::Undef); // unfilled param → undef
     assert_eq!(ev("(function() $fn)($fn = 7)"), num(7.0)); // a $-arg injects into a closure call
     assert_eq!(ev("(function() $fn)()"), num(0.0)); // else the callee sees the reaching $fn (root 0)
+}
+
+/// `str()` of a function VALUE renders its SOURCE, OpenSCAD-style (verified vs oracle) — the fnliterals
+/// corpus (62 tests) asserts these exact strings. Prints the closure's params + body as written, so a
+/// captured variable shows as its NAME (`function() target_func(a)` — `a`, not its value). Rendering the
+/// literal AST (not the runtime value) also means `str()` of a recursive closure is finite (fixes #162).
+#[test]
+fn str_of_a_function_value() {
+    assert_eq!(ev(r"str(function(x) target_func(x))"), Value::string("function(x) target_func(x)"));
+    assert_eq!(
+        ev(r"str(function(x, y) target_func(x, y))"),
+        Value::string("function(x, y) target_func(x, y)")
+    );
+    assert_eq!(ev(r"str(function() target_func(a))"), Value::string("function() target_func(a)"));
+    // a captured value does NOT substitute into the rendering — it's the source `a`, not 3
+    assert_eq!(ev("let(a = 3) str(function() f(a))"), Value::string("function() f(a)"));
 }
 
 /// Letrec: a function literal bound to a NAME can call ITSELF by that name (verified vs the oracle — both

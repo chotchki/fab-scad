@@ -52,6 +52,9 @@ pub enum Value {
         /// letrec semantics (a shared-mutable context sees its own binding; we re-inject since our frames are
         /// copy-on-write). `None` for an anonymous literal (never bound to a name).
         self_name: Option<Rc<str>>,
+        /// OpenSCAD's `str()` rendering — the closure's SOURCE (`function(x) target_func(x)`), pre-computed
+        /// at creation because `str` can't reach the eval `Ctx`'s AST table. See `print::function_value_repr`.
+        repr: Rc<str>,
     },
 }
 

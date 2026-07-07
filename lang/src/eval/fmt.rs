@@ -28,9 +28,9 @@ pub(super) fn format_value(v: &Value) -> String {
             format_number(*step),
             format_number(*end)
         ),
-        // A function's exact echo text needs the closure AST (via `Ctx`, which the formatter doesn't
-        // hold) and is vanishingly rare in `str`/echo — a placeholder for now, pinned at I.5.
-        Value::Function { .. } => "function ...".to_string(),
+        // A function value renders as its SOURCE, OpenSCAD-style (`function(x) target_func(x)`) — pre-computed
+        // at closure creation (`print::function_value_repr`) since the formatter can't reach the closure AST.
+        Value::Function { repr, .. } => repr.to_string(),
     }
 }
 

@@ -328,11 +328,18 @@ fn oracle_file_outcome(root: &Path, library_paths: &[PathBuf]) -> Outcome {
         crate::openscad::Openscad::with_library_paths(library_paths)
     };
     let Ok(os) = os else { return Outcome::Rejected };
-    let out = root.with_extension("oracle-render.stl");
-    match os.render(root, &out, Duration::from_secs(30)) {
+    // Render to the OS temp dir, NOT next to the source: `<source>.oracle-render.stl` in the tree pollutes
+    // the repo (and the BOSL2 submodule) on every file-differential. A monotonic seq keeps the path unique
+    // under the harnesses' parallel pools; delete it after reading.
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let out = std::env::temp_dir().join(format!("fab-oracle-render-{seq}.stl"));
+    let outcome = match os.render(root, &out, Duration::from_secs(30)) {
         Ok(r) if r.ok => Solid::from_stl_file(&out).map_or(Outcome::Rejected, Outcome::Solid),
         _ => Outcome::Rejected,
-    }
+    };
+    let _ = std::fs::remove_file(&out); // best-effort cleanup
+    outcome
 }
 
 /// Every registered driver, fab-lang FIRST (the baseline). OpenSCAD is OPTIONAL — omitted when the

@@ -444,6 +444,12 @@ fn list_comprehensions() {
         ev("[for(i = 0, x = 0, y = 0; i <= 2; x = i * 10, y = x + 1, i = i + 1) if (i == 2) each [x, y]]"),
         list(&[10.0, 11.0]) // update: y sees the NEW x (=10), not the old (would give 1)
     );
+    // `each` SPLICES into a guard/loop operand (L.2.8f): `each if(cond) list` splices the list, not
+    // `[[list]]` (OpenSCAD-verified). Regression for BOSL2's `nurbs_curve`, whose sample vector is
+    // `[for(i) each if(!approx(...)) lerpn(...)]` — a nested result derailed the whole knot indexing.
+    assert_eq!(ev("[each if(true) [1, 2, 3]]"), list(&[1.0, 2.0, 3.0])); // spliced, not [[1,2,3]]
+    assert_eq!(ev("[each if(false) [1, 2, 3], 9]"), list(&[9.0])); // false guard → nothing
+    assert_eq!(ev("[for(i = [0, 1]) each if(true) [i, i + 10]]"), list(&[0.0, 10.0, 1.0, 11.0]));
 }
 
 #[test]

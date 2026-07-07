@@ -20,8 +20,8 @@ use std::path::{Path, PathBuf};
 use fab_scad::corpus::{Bucket, check_worker, histogram, run_bosl2_corpus_isolated, signatures};
 
 /// The pinned pass-count floor (the ratchet). Raise it as fixes land in the L.2 burn-down; a DROP means
-/// something that passed now fails — a regression the suite catches. Baseline 2026-07-06: 864/901 pass
-/// (95.9%) — 15 assertion, 11 unimplemented, 9 timeout, 1 crash. Evaluator fixes cleared 157 (`search` +25,
+/// something that passed now fails — a regression the suite catches. Baseline 2026-07-06: 868/901 pass
+/// (96.3%) — 11 assertion, 11 unimplemented, 9 timeout. Evaluator fixes cleared 161 (`search` +25,
 /// letrec +12, `rands` +27, function-value `str()` +58, range-indexing `r[0..2]` +12, island-global
 /// bootstrapping +5 [L.2.8a: a top-level constant's fn call sees the constants hoisted so far → the
 /// modular_hose `turtle([arc...])` cluster loads], empty-statement `$children` +5 [L.2.8b: a lone `;` is
@@ -29,9 +29,10 @@ use fab_scad::corpus::{Bucket, check_worker, histogram, run_bosl2_corpus_isolate
 /// per-eval stream so consecutive `rands()` differ → plane_intersection's random line is non-degenerate],
 /// unary-minus-on-matrix +4 [L.2.8d: `-[[…]]` negates element-wise not undef → rot_inverse/rot_resample],
 /// C-style-for sequential binding +7 [L.2.8e: `for(…;…;x=…,y=x…)` — a later update sees the earlier one →
-/// skin(method="distance")'s `_dp_distance_row` DP]); the `expect_success=false` scorer fix corrected 21
-/// more. Floored below 864 for timeout jitter.
-const PASS_FLOOR: usize = 857;
+/// skin(method="distance")'s `_dp_distance_row` DP], `each if`/`each for` splices +4 [L.2.8f:
+/// `each if(c) list` splices the list not `[[list]]` → nurbs_curve's `each if(…) lerpn(…)` sampling]);
+/// the `expect_success=false` scorer fix corrected 21 more. Floored below 868 for timeout jitter.
+const PASS_FLOOR: usize = 861;
 
 #[test]
 #[ignore = "minutes-long full BOSL2 sweep; run explicitly with --ignored"]

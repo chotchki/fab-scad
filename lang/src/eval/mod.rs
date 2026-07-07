@@ -830,7 +830,18 @@ fn eval_comprehension<'a>(
             update,
             body,
         } => lc_for_c(init, cond, update, body, scope, global, ctx),
-        ExprKind::LcEach(e) => Ok(iter_values(&eval_with_global(e, scope, global, ctx)?)),
+        // `each E` splices ONE level: for every value element `E` would contribute, iterate it in. `E`
+        // is itself a comprehension element, so evaluate it as one — `each if(c) X` / `each for(…) X`
+        // must distribute the splice INTO the guard/loop (OpenSCAD: `each if(true) [1,2,3]` → `[1,2,3]`,
+        // not `[[1,2,3]]`). Evaluating `E` as a plain expression (the old path) wrapped an `if`'s
+        // contribution in a vector, so `each` only peeled the wrapper and left the list nested.
+        ExprKind::LcEach(e) => {
+            let mut out = Vec::new();
+            for contribution in eval_comprehension(e, scope, global, ctx)? {
+                out.extend(iter_values(&contribution));
+            }
+            Ok(out)
+        }
         ExprKind::LcIf { cond, then, els } => {
             if eval_with_global(cond, scope, global, ctx)?.is_truthy() {
                 eval_comprehension(then, scope, global, ctx)

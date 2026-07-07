@@ -173,13 +173,21 @@ const FIXTURES: &[(&str, &str)] = &[
     // DEFAULT expression.
     (
         "lib_const.scad",
-        "LIBK = 6;\nfunction lk_r() = LIBK;\nmodule lk_box(s = LIBK) cube(s);\n",
+        "LIBK = 6;\nfunction lk_r() = LIBK;\nmodule lk_box(s = LIBK) cube(s);\n\
+         LK2 = lk_r();\nfunction lk_r2() = LK2;\n",
     ),
     (
         "use_const_fn.scad",
         "use <lib_const.scad>\nsphere(lk_r(), $fn = 8);\n",
     ),
     ("use_const_mod.scad", "use <lib_const.scad>\nlk_box();\n"),
+    // island-global bootstrapping: `LK2 = lk_r()` is a top-level CONSTANT whose RHS calls a same-file
+    // function that reads the file's own EARLIER constant `LIBK` — DURING the island-global build. The
+    // called function must see the constants bound so far (its home-island base), so `LK2 = 6` → lk_r2() = 6.
+    (
+        "use_const_build.scad",
+        "use <lib_const.scad>\nsphere(lk_r2(), $fn = 8);\n",
+    ),
     // the caller still does NOT see `LIBK` (use imports defs, not vars) — sphere(undef) empties.
     (
         "use_const_leak.scad",
@@ -258,6 +266,10 @@ fn loader_matches_the_inlined_equivalent() {
         ("use_const_fn.scad", vec![], "sphere(6, $fn = 8);"),
         // and a used MODULE's default `s = LIBK` reads it too → cube(6).
         ("use_const_mod.scad", vec![], "cube(6);"),
+        // island-global bootstrapping: a used file's constant `LK2 = lk_r()` calls a same-file function
+        // reading the file's EARLIER constant DURING the island build → lk_r2() = 6 (before the fix,
+        // `lk_r()` saw the not-yet-published island global → `LK2` undef → sphere(undef) empties).
+        ("use_const_build.scad", vec![], "sphere(6, $fn = 8);"),
         // the constant still does NOT leak to the caller (use imports defs, not vars) → sphere(undef).
         ("use_const_leak.scad", vec![], "sphere(undef, $fn = 8);"),
     ] {

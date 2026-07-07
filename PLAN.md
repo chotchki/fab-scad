@@ -108,6 +108,7 @@ added 2026-07-05.
 ## Phase L - scad-rs: the BOSL2 gauntlet (exit gate for the bet)
   Meta - END-STATE EXECUTION MODEL (chotchki 2026-07-05): THREE tiers forming a bit-identity chain. web ships interpreter + intrinsics (optimized_functions); desktop adds the Cranelift JIT (the browser can't JIT in-sandbox). Because intrinsics == interpreter (fast==slow) AND JIT == interpreter (fast==JIT, proven at I.8), web output == desktop output ALWAYS — the JIT is pure SPEED on desktop, never a divergent mesh. So L is NOT "JIT vs intrinsics" as competitors, they're complementary LAYERS: intrinsics are hand-written + wasm-safe (the browser's whole perf story, the load-bearing + harder half — a bit-identical reimpl each, and BOSL2 is a big surface), the JIT auto-sweeps the numeric long tail on desktop only. L becomes a COVERAGE ALLOCATION — which hot functions get hand-intrinsified (everywhere) vs left to the JIT (desktop) vs the interpreter (everywhere, slow) — driven by the aggregate-corpus profiling (backlog #93). "Is BOSL2 special" is the same question: does the gauntlet cluster into a few hot intrinsics, or spread into a broad tail the JIT handles? (Custom perf overrides = the hand-intrinsified tier.)
   Implementation note, we should determine whether an intrinsic matches based on its original AST. That will help survive reformats or code comment changes.
+added 2026-07-07.
 - [x] L.1 - Pinned BOSL2 test suite through scad-rs; divergences triaged into named buckets
 - [ ] L.2 - Burn-down: fixes land as semantics/ tests; expect this to expose evaluator gaps — that's the point
   - [x] L.2.1 - L.2.1 - Name the divergences: sharpen the generic clusters into a per-symbol worklist
@@ -118,6 +119,8 @@ added 2026-07-05.
   - [ ] L.2.6 - L.2.6 - The got==expected long tail: individual math divergences
   - [ ] L.2.7 - L.2.7 - Timeouts: the hull/region hangs
   - [x] L.2.8 - L.2.8 - Recursive function-literals (letrec): a closure must see its own binding
+  - [x] L.2.8a - L.2.8a - Island-global bootstrapping: a top-level constant's fn call sees the constants hoisted so far (modular_hose +5)
+  - [ ] L.2.8b - L.2.8b - Residual bare-asserts: screws (4, fails in test body not load) + skin/plane_intersection/parent_part singletons
 - [ ] L.3 - models/ tree end-to-end (teardrop/onion/screw_hole, corner_brace, Underdesk); benchmark corpus captured via the tracing layer on every run
 - [ ] L.4 - Exit review: divergences zero-or-documented, perf-vs-oracle published; rung 2/3 (intrinsics, JIT) phase cut FROM THIS DATA
 

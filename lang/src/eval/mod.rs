@@ -1134,15 +1134,21 @@ fn tagged_functions<'a>(
 
 /// Build island `i`'s CONSTANT scope: its top-level assignments hoisted (whole-scope, last-wins, in
 /// first-occurrence order) into a fresh `$fn`/`PI`-seeded scope — so a `use`d function/module body reads
-/// its own file's constants. Evaluated with `ctx` (constants can call functions). The island's own global
-/// isn't stored yet, so a constant that calls a function reading a LATER constant of the same island sees
-/// `undef` — the same whole-scope forward-reference rule the root global follows (`n = 1; n = n + 1;` →
-/// undef); real libraries define constants as literals or in dependency order.
+/// its own file's constants. Evaluated with `ctx` (constants can call functions). PUBLISHES the growing
+/// scope into `island_globals[i]` after each bind — so a constant whose RHS calls a same-island function
+/// lets that function read the constants bound SO FAR (its home-island lexical base). Without it the
+/// function resolves against the not-yet-stored island global (empty during the very hoist that builds
+/// it) → the constant reads `undef`. A constant reading a LATER same-island constant still sees `undef`
+/// (only constants bound BEFORE it are published) — the same whole-scope forward-reference rule the root
+/// global follows (`n = 1; n = n + 1;` → undef).
 fn build_island_global(island: usize, ctx: &Ctx<'_>) -> crate::Result<Scope> {
     let mut scope = Scope::new();
     for &(name, expr) in &ctx.islands[island].assignments {
         let value = name_closure(eval_with_ctx(expr, &scope, ctx)?, name);
         scope.bind(name.to_string(), value);
+        if let Some(slot) = ctx.island_globals.borrow_mut().get_mut(island) {
+            *slot = scope.clone();
+        }
     }
     Ok(scope)
 }
@@ -1161,13 +1167,12 @@ fn run_stmts<'a>(
     // The top-level hoisted scope IS the GLOBAL base for module bodies (a user module evaluates in
     // `global.child()` + its params — OpenSCAD's lexical hygiene). Hoist ONCE (not a pre-hoist +
     // re-hoist — that would let a forward reference see the pre-bound value, breaking `a = b; b = 5` →
-    // `a` is undef), then evaluate the geometry in that same scope.
-    let global = hoist_scope(&stmts, scope, ctx)?;
-    // The root file IS island 0 — publish its hoisted global so a root-defined function's body resolves
-    // against it (the home-island lookup in `dispatch_call`). Write-once, before any geometry evaluates.
-    if let Some(slot) = ctx.island_globals.borrow_mut().get_mut(0) {
-        *slot = global.clone();
-    }
+    // `a` is undef), then evaluate the geometry in that same scope. The root file IS island 0, so this
+    // hoist PUBLISHES the growing global into `island_globals[0]` after each bind (see
+    // [`hoist_scope_publishing`]) — a top-level `x = <lib-fn-using-a-constant>` (e.g.
+    // `x = turtle([arc...])`, whose `arc` reads the library constant `_EPSILON`) must let that function
+    // resolve island-0 constants DURING the hoist that builds them, not against the empty pre-publish global.
+    let global = hoist_scope_publishing(&stmts, scope, ctx, 0)?;
     // Top-level statements resolve modules against island 0 (the root file, I.9.5).
     Ok(union_of(
         eval_geometry(&stmts, &global, &global, 0, ctx)?,
@@ -1203,6 +1208,33 @@ fn hoist_scope<'a>(stmts: &[&'a Stmt], scope: &Scope, ctx: &Ctx<'a>) -> crate::R
         let value = name_closure(eval_with_ctx(expr, &scope, ctx)?, name);
         trace::bind('=', name, &value);
         scope.bind(name.to_string(), value);
+    }
+    Ok(scope)
+}
+
+/// Like [`hoist_scope`], but PUBLISH the growing scope into `island_globals[island]` after each bind —
+/// so a top-level constant whose RHS calls a same-island function (e.g. `x = turtle([arc...])`, whose
+/// `arc` reads the library constant `_EPSILON`) lets that function resolve the island's constants bound
+/// SO FAR (its home-island lexical base, the use-scope-hygiene lookup in [`dispatch_call`]). Without it
+/// the function resolves against the not-yet-published island global (empty during the hoist that builds
+/// it) → the constant reads `undef`, and BOSL2's arc asserts on the undef epsilon. Forward references
+/// still see `undef` (only constants bound BEFORE the caller are published) — the same whole-scope rule
+/// [`hoist_scope`] follows. Used for island 0 (the root) in [`run_stmts`]; the `use`d islands get the
+/// identical treatment in [`build_island_global`].
+fn hoist_scope_publishing<'a>(
+    stmts: &[&'a Stmt],
+    scope: &Scope,
+    ctx: &Ctx<'a>,
+    island: usize,
+) -> crate::Result<Scope> {
+    let mut scope = scope.clone();
+    for (name, expr) in hoisted_assignments(stmts) {
+        let value = name_closure(eval_with_ctx(expr, &scope, ctx)?, name);
+        trace::bind('=', name, &value);
+        scope.bind(name.to_string(), value);
+        if let Some(slot) = ctx.island_globals.borrow_mut().get_mut(island) {
+            *slot = scope.clone();
+        }
     }
     Ok(scope)
 }

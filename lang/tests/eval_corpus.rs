@@ -371,6 +371,21 @@ fn echo_and_assert_evaluate() {
 }
 
 #[test]
+fn a_top_level_constant_can_call_a_function_that_reads_another_global() {
+    // Island-global bootstrapping (L.2.8a). A top-level constant whose RHS CALLS a function must let
+    // that function resolve the OTHER top-level constants — DURING the hoist that builds them. The
+    // function body's lexical base is its home island's global (use-scope hygiene); for the root that
+    // global is what this very hoist produces, so it has to be published incrementally as it grows.
+    // Without it `E` is invisible to `f` mid-hoist → `x` reads undef (+ an "unknown variable" warning).
+    // This is the BOSL2 modular_hose cluster in miniature: `_modhose = [turtle([arc...])]` where BOSL2's
+    // `arc` reads the library constant `_EPSILON` — undef made turtle's arc assert, blocking the load.
+    let full = fab_lang::evaluate_full("E = 0.001;\nfunction f() = E;\nx = f();\necho(x);\n")
+        .expect("evaluates");
+    assert_eq!(full.echos(), ["0.001"]);
+    assert!(full.warnings().is_empty(), "no unknown-variable warning: {:?}", full.warnings());
+}
+
+#[test]
 fn list_comprehensions() {
     assert_eq!(ev("[for(i = [0:3]) i]"), list(&[0.0, 1.0, 2.0, 3.0])); // for over a range
     assert_eq!(ev("[for(i = [10, 20, 30]) i]"), list(&[10.0, 20.0, 30.0])); // for over a list

@@ -20,11 +20,13 @@ use std::path::{Path, PathBuf};
 use fab_scad::corpus::{Bucket, check_worker, histogram, run_bosl2_corpus_isolated, signatures};
 
 /// The pinned pass-count floor (the ratchet). Raise it as fixes land in the L.2 burn-down; a DROP means
-/// something that passed now fails — a regression the suite catches. Baseline 2026-07-06: 841/901 pass
-/// (93.3%) — 38 assertion, 11 unimplemented, 10 timeout, 1 crash. Evaluator fixes cleared 134 (`search` +25,
-/// letrec +12, `rands` +27, function-value `str()` +58, range-indexing `r[0..2]` +12); the
-/// `expect_success=false` scorer fix corrected 21 more. Floored below 841 for timeout jitter.
-const PASS_FLOOR: usize = 834;
+/// something that passed now fails — a regression the suite catches. Baseline 2026-07-06: 846/901 pass
+/// (93.9%) — 33 assertion, 11 unimplemented, 10 timeout, 1 crash. Evaluator fixes cleared 139 (`search` +25,
+/// letrec +12, `rands` +27, function-value `str()` +58, range-indexing `r[0..2]` +12, island-global
+/// bootstrapping +5 [L.2.8a: a top-level constant's fn call sees the constants hoisted so far → the
+/// modular_hose `turtle([arc...])` cluster loads]); the `expect_success=false` scorer fix corrected 21 more.
+/// Floored below 846 for timeout jitter.
+const PASS_FLOOR: usize = 839;
 
 #[test]
 #[ignore = "minutes-long full BOSL2 sweep; run explicitly with --ignored"]

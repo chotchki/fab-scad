@@ -38,7 +38,16 @@ fn main() {
 
 fn describe(o: Outcome) -> String {
     match o {
-        Outcome::Solid(s) => format!("solid vol={:.1} genus={}", s.volume(), s.genus()),
+        Outcome::Solid(s) => {
+            let bb = s.bbox().map_or_else(
+                || "bbox=?".to_string(),
+                |(lo, hi)| {
+                    let (l, h) = (lo.to_array(), hi.to_array());
+                    format!("bbox=[{:.2}x{:.2}x{:.2}]", h[0] - l[0], h[1] - l[1], h[2] - l[2])
+                },
+            );
+            format!("solid vol={:.1} genus={} {bb}", s.volume(), s.genus())
+        }
         Outcome::Empty => "empty".to_string(),
         Outcome::Rejected => "rejected".to_string(),
     }

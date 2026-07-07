@@ -142,6 +142,8 @@ added 2026-07-07.
   - [x] L.3.2 - L.3.2 - `* ! % #` instantiation modifiers honored in eval (the #1 divergence)
   - [x] L.3.3 - L.3.3 - assert/echo are passthrough: render child geometry (BOSL2 left/fwd fix)
   - [x] L.3.4 - L.3.4 - BOSL2 `sweep()`/VNF returns empty → chamfer/rounding/teardrop/rotate_sweep render nothing (14/19 divergences)
+  - [x] L.3.5 - L.3.5 - Manifold version parity: coincident-face genus divergences (ours 3.5.x vs OpenSCAD 3.4.1)
+  - [x] L.3.6 - L.3.6 - text() 100/72 DPI scale (was rendering glyphs 0.72× too small)
 - [ ] L.4 - Exit review: divergences zero-or-documented, perf-vs-oracle published; rung 2/3 (intrinsics, JIT) phase cut FROM THIS DATA
 
 ## Backlog (not yet phased)

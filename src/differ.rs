@@ -424,14 +424,27 @@ fn outcomes_agree(a: &Outcome, b: &Outcome, max_residual: f64) -> std::result::R
         (Outcome::Empty, Outcome::Empty) | (Outcome::Rejected, Outcome::Rejected) => Ok(()),
         (Outcome::Solid(x), Outcome::Solid(y)) => {
             if x.genus() != y.genus() {
-                return Err(format!("genus {} vs {}", x.genus(), y.genus()));
+                return Err(format!(
+                    "genus {} vs {} (vol {:.1} vs {:.1}, bbox {} vs {})",
+                    x.genus(),
+                    y.genus(),
+                    x.volume(),
+                    y.volume(),
+                    bbox_str(x),
+                    bbox_str(y)
+                ));
             }
             let resid = sym_diff_ratio(x, y);
             if resid < max_residual {
                 Ok(())
             } else {
                 Err(format!(
-                    "boolean residual {resid:.2e} exceeds {max_residual:.0e}"
+                    "boolean residual {resid:.2e} exceeds {max_residual:.0e} \
+                     (vol {:.1} vs {:.1}, bbox {} vs {})",
+                    x.volume(),
+                    y.volume(),
+                    bbox_str(x),
+                    bbox_str(y)
                 ))
             }
         }
@@ -441,6 +454,19 @@ fn outcomes_agree(a: &Outcome, b: &Outcome, max_residual: f64) -> std::result::R
             b.kind()
         )),
     }
+}
+
+/// A solid's bounding-box extents `[w×d×h]` — the debugging companion to genus/residual in a divergence
+/// message (a size mismatch, e.g. the text 100/72 DPI bug, shows here as a clean ratio instead of a raw
+/// volume number). `?` if the solid has no bbox (empty).
+fn bbox_str(s: &Solid) -> String {
+    s.bbox().map_or_else(
+        || "?".to_string(),
+        |(lo, hi)| {
+            let (l, h) = (lo.to_array(), hi.to_array());
+            format!("[{:.2}×{:.2}×{:.2}]", h[0] - l[0], h[1] - l[1], h[2] - l[2])
+        },
+    )
 }
 
 /// `vol((A−B) ∪ (B−A)) / vol(A)` — the symmetric-difference ratio (0 = identical solids).

@@ -120,6 +120,18 @@ fn instantiation_modifiers_match_the_oracle() {
 }
 
 #[test]
+fn text_size_matches_the_oracle() {
+    // text() glyph SIZE — the 100/72 DPI scale (L.3.6): OpenSCAD renders text through FreeType at 72 DPI
+    // while treating `size` as 100-unit, so glyphs are 100/72 larger than the naive size/units_per_em; we
+    // matched it. The bbox now agrees exactly with the oracle; the small RESIDUAL is Bézier curve-flattening
+    // granularity (not size), so a RELAXED gate. Same bundled Liberation Sans both sides (default font).
+    agree_within(
+        "linear_extrude(2) text(\"AB\", size = 10, halign = \"center\", valign = \"center\");",
+        6e-2,
+    );
+}
+
+#[test]
 fn revolved_vnf_shapes_match_the_oracle() {
     // The polyhedron/VNF leaf WELDS exact-coincident vertices (kernel `from_indexed`). A revolved VNF
     // duplicates its 360° closure ring (section N == section 0 as distinct indices), which reads as a

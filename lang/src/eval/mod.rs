@@ -774,14 +774,19 @@ fn push_call<'a>(
 /// Is this expression a list-comprehension element (spliced into the enclosing vector) rather than a
 /// plain element (appended as one)? `let` in a vector is a comprehension-`let`.
 fn is_comprehension(e: &Expr) -> bool {
-    matches!(
-        e.kind,
-        ExprKind::LcFor { .. }
-            | ExprKind::LcForC { .. }
-            | ExprKind::LcEach(_)
-            | ExprKind::LcIf { .. }
-            | ExprKind::Let { .. }
-    )
+    match &e.kind {
+        ExprKind::LcFor { .. } | ExprKind::LcForC { .. } | ExprKind::LcEach(_) | ExprKind::LcIf { .. } => {
+            true
+        }
+        // A `let` in a vector is TRANSPARENT: it splices IFF its body does. `[let(x=…) [a,b]]`
+        // contributes the vector as ONE element (`[[a,b]]`), while `[let(x=…) each L]` splices — OpenSCAD-
+        // verified. Unlike `if`/`for`/`each` (which route through `eval_comprehension`, adding a wrapper
+        // `splice_into` then removes), a bare `let` evaluates its body DIRECTLY, so the splice decision
+        // has to follow the body, not the `let` node. Without this, `(let(i) [pt])` in a path builder (e.g.
+        // BOSL2's trapezoid corners) unwrapped its single-point list and flattened the whole path.
+        ExprKind::Let { body, .. } => is_comprehension(body),
+        _ => false,
+    }
 }
 
 /// Splice a comprehension element's value into the vector accumulator: a list contributes its

@@ -450,6 +450,16 @@ fn list_comprehensions() {
     assert_eq!(ev("[each if(true) [1, 2, 3]]"), list(&[1.0, 2.0, 3.0])); // spliced, not [[1,2,3]]
     assert_eq!(ev("[each if(false) [1, 2, 3], 9]"), list(&[9.0])); // false guard → nothing
     assert_eq!(ev("[for(i = [0, 1]) each if(true) [i, i + 10]]"), list(&[0.0, 10.0, 1.0, 11.0]));
+    // A `let` in a vector is TRANSPARENT (L.2.8h): it splices IFF its body does. `[let(x) [a,b]]`
+    // contributes the vector as ONE element (a `let` is not an `each`), while `[let(x) each L]` splices —
+    // OpenSCAD-verified. Regression for BOSL2's trapezoid, whose corners are `(let(i) [base[i]])`: the
+    // single-point list must survive as one path point, not get flattened away.
+    assert_eq!(
+        ev("[(let(x = 5) [x, x + 1])]"),
+        Value::list(vec![list(&[5.0, 6.0])]) // [[5,6]], not [5,6]
+    );
+    assert_eq!(ev("[let(x = 5) [x, x + 1]]"), Value::list(vec![list(&[5.0, 6.0])])); // bare too
+    assert_eq!(ev("[let(x = 5) each [x, x + 1]]"), list(&[5.0, 6.0])); // `each` body → splices
 }
 
 #[test]

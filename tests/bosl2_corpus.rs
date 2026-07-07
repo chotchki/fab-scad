@@ -20,8 +20,8 @@ use std::path::{Path, PathBuf};
 use fab_scad::corpus::{Bucket, check_worker, histogram, run_bosl2_corpus_isolated, signatures};
 
 /// The pinned pass-count floor (the ratchet). Raise it as fixes land in the L.2 burn-down; a DROP means
-/// something that passed now fails — a regression the suite catches. Baseline 2026-07-06: 870/901 pass
-/// (96.6%) — 9 assertion, 11 unimplemented, 7 timeout. Evaluator fixes cleared 163 (`search` +25,
+/// something that passed now fails — a regression the suite catches. Baseline 2026-07-06: 873/901 pass
+/// (96.9%) — 8 assertion, 11 unimplemented, 8 timeout, 0 crash. Evaluator fixes cleared 166 (`search` +25,
 /// letrec +12, `rands` +27, function-value `str()` +58, range-indexing `r[0..2]` +12, island-global
 /// bootstrapping +5 [L.2.8a: a top-level constant's fn call sees the constants hoisted so far → the
 /// modular_hose `turtle([arc...])` cluster loads], empty-statement `$children` +5 [L.2.8b: a lone `;` is
@@ -30,9 +30,9 @@ use fab_scad::corpus::{Bucket, check_worker, histogram, run_bosl2_corpus_isolate
 /// unary-minus-on-matrix +4 [L.2.8d: `-[[…]]` negates element-wise not undef → rot_inverse/rot_resample],
 /// C-style-for sequential binding +7 [L.2.8e: `for(…;…;x=…,y=x…)` — a later update sees the earlier one →
 /// skin(method="distance")'s `_dp_distance_row` DP], `each if`/`each for` splices +4 [L.2.8f:
-/// `each if(c) list` splices the list not `[[list]]` → nurbs_curve's `each if(…) lerpn(…)` sampling], nested-fn `str()` bare +2 [L.2.8g: `str()` renders nested function literals bare like OpenSCAD, not the canonical `(function (x) …)` → fnliterals f_1arg/f_2arg/f_3arg]);
+/// `each if(c) list` splices the list not `[[list]]` → nurbs_curve's `each if(…) lerpn(…)` sampling], nested-fn `str()` bare +2 [L.2.8g: `str()` renders nested function literals bare like OpenSCAD, not the canonical `(function (x) …)` → fnliterals f_1arg/f_2arg/f_3arg], let-in-vector transparency +3 [L.2.8h: `[let(x) [a,b]]` contributes one element (splices only if the body does) → trapezoid corner paths]);
 /// the `expect_success=false` scorer fix corrected 21 more. Floored below 868 for timeout jitter.
-const PASS_FLOOR: usize = 863;
+const PASS_FLOOR: usize = 866;
 
 #[test]
 #[ignore = "minutes-long full BOSL2 sweep; run explicitly with --ignored"]

@@ -143,6 +143,9 @@ pub fn build_2d<B: GeometryBackend>(shape: &Shape2D, backend: &B) -> B::Shape {
         }
         // The 3D→2D bridge: lower the 3D child to a Solid, then flatten it to a region (J.3.6).
         Shape2D::Projection { cut, child } => backend.projection(&build(child, backend), *cut),
+        // `color()` on 2D carries the color on the tree only — the 2D kernel (CrossSection) has no color
+        // property, so the geometry passes straight through (the GUI reads the color off the `Shape2D` node).
+        Shape2D::Color { child, .. } => build_2d(child, backend),
     }
 }
 

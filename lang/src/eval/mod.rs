@@ -2277,13 +2277,17 @@ fn eval_stmt_dispatch<'a>(
                     color,
                     child: Box::new(node),
                 })),
-                (Geo::D2(_), Some(_)) => {
-                    return Err(crate::Error::Unimplemented(
-                        "color() on 2D geometry is not yet wired (Shape2D carries no color) — a J.3 \
-                         follow-up",
-                    ));
-                }
-                // invalid color → inherit: the child unchanged, either dimension.
+                // color() on a 2D shape TAGS the color onto the tree (a `Shape2D::Color` node) but changes no
+                // vertex — the 2D kernel (CrossSection) has no color property, so lowering passes the geometry
+                // through and the differential never sees it, while the GUI (Phase 5/7) can still read the
+                // color off the tree. Recording it rather than dropping it is chotchki's call — dropping means
+                // re-plumbing at the GUI. BOSL2's 2D examples lean on `color("red") <marker>` hard (erroring
+                // here was the single biggest BOSL2-example divergence, 343×).
+                (Geo::D2(shape), Some(color)) => nodes.push(Geo::D2(Shape2D::Color {
+                    color,
+                    child: Box::new(shape),
+                })),
+                // invalid color (unknown name / bad `c`) → inherit: the child unchanged, either dimension.
                 (child, None) => nodes.push(child),
             }
         }

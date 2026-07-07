@@ -120,6 +120,16 @@ fn instantiation_modifiers_match_the_oracle() {
 }
 
 #[test]
+fn color_on_2d_matches_the_oracle() {
+    // color() on a 2D shape TAGS the color (Shape2D::Color, for the GUI) but leaves the geometry untouched —
+    // so the extruded/compared solid matches the oracle. Surfaced by the BOSL2 example corpus (L.3.7): it was
+    // the single biggest bucket (343×), BOSL2's 2D examples using `color("red") <marker>` position dots.
+    agree("linear_extrude(2) color(\"red\") square(10);");
+    agree("linear_extrude(2) color(\"blue\") circle(5);");
+    agree("linear_extrude(1) { color(\"red\") circle(10); color(\"green\") translate([25, 0]) square(15); }");
+}
+
+#[test]
 fn text_size_matches_the_oracle() {
     // text() glyph SIZE — the 100/72 DPI scale (L.3.6): OpenSCAD renders text through FreeType at 72 DPI
     // while treating `size` as 100-unit, so glyphs are 100/72 larger than the naive size/units_per_em; we

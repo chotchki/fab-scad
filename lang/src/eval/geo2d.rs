@@ -19,7 +19,7 @@
 //! `projection` bridge modules are J.3.3 onward.
 
 use super::geo::GeoNode;
-use crate::geom::{Affine2, Vec2};
+use crate::geom::{Affine2, Rgba, Vec2};
 
 /// A closed 2D contour — a ring of points. One or more contours (an outer boundary plus holes) make a
 /// [`Shape2D::Polygon`], resolved by the backend's fill rule.
@@ -66,6 +66,16 @@ pub enum Shape2D {
         /// The 3D subtree being flattened.
         child: Box<GeoNode>,
     },
+    /// `color()` over a 2D subtree — records the display color WITHOUT touching the geometry. The 2D backend
+    /// (Manifold `CrossSection`) carries no vertex properties, so lowering passes the child through unchanged
+    /// and the boolean-residual differential never sees it; the color rides the TREE so the GUI (Phase 5/7)
+    /// can read it. The 3D analog is [`GeoNode::Color`], which the kernel DOES apply (Solids have properties).
+    Color {
+        /// The RGBA color.
+        color: Rgba,
+        /// The colored 2D subtree.
+        child: Box<Shape2D>,
+    },
 }
 
 impl Shape2D {
@@ -92,6 +102,7 @@ impl Shape2D {
                     fold(&mut kids.iter().filter_map(|c| walk(c, m)))
                 }
                 Shape2D::Offset { delta, child, .. } => walk(child, m).map(|x| x + delta.max(0.0)),
+                Shape2D::Color { child, .. } => walk(child, m), // color moves no point
                 Shape2D::Projection { .. } | Shape2D::Empty => None,
             }
         }

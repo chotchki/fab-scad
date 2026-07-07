@@ -393,15 +393,16 @@ fn hull_over_2d_is_loud() {
 }
 
 #[test]
-fn color_over_2d_is_loud() {
-    // A VALID color on a 2D child can't be tracked (Shape2D carries no color) — LOUD, never a silent
-    // drop that would diverge from OpenSCAD unnoticed.
-    assert!(matches!(
-        evaluate_geometry("color(\"red\") circle(3, $fn = 8);").unwrap_err(),
-        Error::Unimplemented(m) if m.contains("color") && m.contains("2D")
-    ));
-    // ...but an INVALID color inherits regardless of dimension → the 2D child passes through unchanged
-    // (no color to apply, matching OpenSCAD's -1 sentinel).
+fn color_over_2d_tags_the_color() {
+    // A VALID color on a 2D child is TAGGED onto the tree (`Shape2D::Color`, so the GUI can read it) but
+    // changes no geometry — the wrapped child is exactly the uncolored shape (L.3.8). It USED to error LOUD;
+    // recording the color beats dropping it (re-plumbing at the GUI) or silently diverging from OpenSCAD.
+    match d2("color(\"red\") circle(3, $fn = 8);") {
+        Shape2D::Color { child, .. } => assert_eq!(*child, d2("circle(3, $fn = 8);")),
+        other => panic!("color() on 2D should tag Shape2D::Color, got {other:?}"),
+    }
+    // ...but an INVALID color (unknown name) inherits regardless of dimension → the 2D child passes through
+    // UNWRAPPED (no color to record, matching OpenSCAD's -1 sentinel).
     assert_eq!(
         d2("color(\"notacolor\") circle(3, $fn = 8);"),
         d2("circle(3, $fn = 8);")

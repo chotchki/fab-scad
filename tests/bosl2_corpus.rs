@@ -20,11 +20,11 @@ use std::path::{Path, PathBuf};
 use fab_scad::corpus::{Bucket, check_worker, histogram, run_bosl2_corpus_isolated, signatures};
 
 /// The pinned pass-count floor (the ratchet). Raise it as fixes land in the L.2 burn-down; a DROP means
-/// something that passed now fails — a regression the suite catches. Baseline 2026-07-06: 829/901 pass
-/// (92.0%) — 51 assertion, 11 unimplemented, 9 timeout, 1 crash. Evaluator fixes cleared 122 (`search` +25,
-/// letrec +12, `rands` +27, function-value `str()` +58); the `expect_success=false` scorer fix corrected
-/// another 21 (we already rejected the bad input — the harness counted it backwards). Floored for jitter.
-const PASS_FLOOR: usize = 822;
+/// something that passed now fails — a regression the suite catches. Baseline 2026-07-06: 841/901 pass
+/// (93.3%) — 38 assertion, 11 unimplemented, 10 timeout, 1 crash. Evaluator fixes cleared 134 (`search` +25,
+/// letrec +12, `rands` +27, function-value `str()` +58, range-indexing `r[0..2]` +12); the
+/// `expect_success=false` scorer fix corrected 21 more. Floored below 841 for timeout jitter.
+const PASS_FLOOR: usize = 834;
 
 #[test]
 #[ignore = "minutes-long full BOSL2 sweep; run explicitly with --ignored"]

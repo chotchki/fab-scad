@@ -309,6 +309,14 @@ pub(crate) fn index(base: Value, index: &Value) -> Value {
             .chars()
             .nth(idx)
             .map_or(Value::Undef, |c| Value::string(c.to_string())),
+        // A RANGE indexes to its three fields — `r[0]=start`, `r[1]=step`, `r[2]=end` (OpenSCAD `RangeType`),
+        // anything else `undef`. BOSL2's `is_range(x)` leans on exactly this (`is_finite(x[0..2])`).
+        Value::Range { start, step, end } => match idx {
+            0 => Value::Num(start),
+            1 => Value::Num(step),
+            2 => Value::Num(end),
+            _ => Value::Undef,
+        },
         other => list_get(&other, idx),
     }
 }

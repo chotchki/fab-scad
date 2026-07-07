@@ -268,6 +268,13 @@ fn ranges_are_first_class_values() {
     assert_eq!(ev("[0:5] == [0:6]"), Value::Bool(false)); // different end
     assert_eq!(ev("[0:5] ? 1 : 2"), num(1.0)); // a range is truthy
     assert_eq!(ev("[0:5]").type_name(), "range");
+    // INDEXING a range → its three fields: `r[0]=start`, `r[1]=step`, `r[2]=end`, else undef (OpenSCAD
+    // `RangeType`, verified vs oracle). BOSL2's `is_range`/`typeof` rely on `is_finite(x[0..2])`.
+    assert_eq!(ev("[10:2:20][0]"), num(10.0));
+    assert_eq!(ev("[10:2:20][1]"), num(2.0));
+    assert_eq!(ev("[10:2:20][2]"), num(20.0));
+    assert_eq!(ev("[10:2:20][3]"), Value::Undef);
+    assert_eq!(ev("[1:3][1]"), num(1.0)); // implicit step 1
 }
 
 #[test]

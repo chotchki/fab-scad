@@ -120,9 +120,14 @@ rendered parts MATCHED OpenSCAD's mesh. Two root-cause fixes (below) moved it ha
 |---|---|---|---|
 | baseline | 59 / 31 / 21 | 8 / 51 | 14% |
 | + `* ! %` modifiers | 79 / 17 / 10 | 15 / 64 | 19% |
-| + `assert`/`echo` passthrough | 54 / 29 / 23 | **35 / 19** | **65%** |
+| + `assert`/`echo` passthrough | 54 / 29 / 23 | 35 / 19 | 65% |
+| + revolved-VNF weld | 54 / 29 / 23 | **42 / 12** | **78%** |
 
-Exact matches went **8 → 35**, divergences **51 → 19**. Note the coverage TRADE in the last row: fewer models
+Exact matches went **8 → 42** (5.25×), divergences **51 → 12** — three foundational fixes, all surfaced by the
+harness, none visible in the 99.8%-passing BOSL2 corpus. The remaining 12: 4 small residuals (≤9e-2, likely
+tessellation-phase, maybe acceptable), 5 genus mismatches (honeycomb 29-vs-60, Underdesk-laptop -17-vs-3, …),
+3 "empty vs REJECTED" (the oracle itself errors — weak signal, may not be real divergences). Note the coverage
+TRADE in the middle rows: fewer models
 fully render (54 vs 79) because the assert fix makes `left`/`fwd`/etc. do their REAL geometry — which is
 slower (more 10 s timeouts, the profile's whole point) and reaches DEEPER, exposing gaps the empty
 short-circuit used to hide (missing `.stl`/`.3mf`/`.svg` assets not vendored, 2D SVG import [deferred],

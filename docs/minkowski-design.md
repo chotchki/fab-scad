@@ -1,7 +1,41 @@
 # `minkowski()` on Manifold — design
 
-Status: **design** (J.4.4). No code yet. This is the research + design deliverable; implementation is a
-separate, phased task gated on the decisions in [§8](#8-open-decisions).
+Status: **LANDED** (J.4.4), 2026-07-07. `minkowski()` is wired to Manifold's NATIVE `minkowski_sum` — see
+the resolution below. This doc keeps the full research + design rationale (it's why the native path is the
+right one and how to reason about it); §7's hand-rolled tiers became the fallback-understanding, not the
+implementation.
+
+## Resolution — the native path (much less code than hand-rolling)
+
+The `manifold-csg` crate (which our `manifold3d` facade re-exports) shipped native `minkowski_sum` /
+`minkowski_difference` / `hull_pts` in 0.3.3 (2026-07-06), wrapping the Manifold C API's
+`manifold_minkowski_sum` (Manifold C++ PR #666's tiered hull+union). Because our `manifold3d` was already
+the same `manifold-csg` lineage, `cargo update` (within `^0.3`) was a **clean drop-in** — compiles, 161/161
+geometry tests green, no API migration. So the implementation is ~40 lines of wiring, not a tiered
+algorithm:
+
+- `Solid::minkowski_sum` (kernel.rs) forwards to Manifold's native op.
+- `GeoNode::Minkowski(Vec<GeoNode>)` (geo.rs) + the `minkowski()` eval arm (mod.rs, mirroring `hull()`; 2D
+  is LOUD-deferred to Clipper2 like 2D hull) + the backend fold (backend.rs) with the empty-ANNIHILATOR
+  rule (`A ⊕ ∅ = ∅`).
+- Validated: `minkowski(){ cube(10); cube(2); } == cube(12)` volume `1728` EXACTLY (box⊕box, oracle-free),
+  rounding grows a cube, and `test_cyl` (the last BOSL2 corpus gap) clears → **corpus 99.1%, 0 assertion /
+  0 unimplemented, only L.2.7 timeouts left.**
+
+**Determinism caveat (the open doctrine item, not minkowski-specific):** the native op inherits our Manifold
+build's parallelism. `manifold-csg`'s `parallel` feature (TBB) is **on by default** in our native build →
+non-deterministic reduction order (the `deterministic` mode is a build/param concern, NOT exposed in the C
+API we bind). Minkowski is validated by VOLUME-RESIDUAL not bit-exact, so its ORACLE match is fine — but the
+cross-platform DETERMINISM of *all* our native geometry (booleans included) rides the same `parallel`
+feature and is unverified. That is the real follow-up: build native with `parallel` OFF (single-threaded,
+`MANIFOLD_PAR=NONE`, matching wasm) and re-baseline, OR prove TBB reduction is deterministic. See [§5](#5-determinism--the-real-risk-and-where-it-bites).
+
+---
+
+## (original design rationale follows)
+
+Status: **design** (J.4.4). This was the research + design deliverable; the phased plan in §7 is superseded
+by the native drop-in above, kept for the reasoning.
 
 Sources are primary and adversarially verified (a 108-agent deep-research sweep, 2026-07-07) — GitHub issue
 threads read via the API, algorithm complexity from the peer-reviewed literature. Citations in

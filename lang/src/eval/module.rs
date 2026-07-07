@@ -93,10 +93,8 @@ pub(super) fn eval_module<'a>(
             "text() is not yet implemented (J.4.3) — the 2D glyph outlines need a font stack (cosmic-text \
              is the candidate). Deferred, never silently empty.",
         )),
-        "minkowski" => Err(crate::Error::Unimplemented(
-            "minkowski() is not yet implemented (J.4.4) — Manifold lacks it and OpenSCAD's own manifold \
-             backend farms it to CGAL; the approach is still open. Deferred, never silently wrong.",
-        )),
+        // `minkowski` is intercepted in `eval_stmt` (like `hull`) → `GeoNode::Minkowski`; it never reaches
+        // this stub. Kept out of the deferred list now that it's wired to Manifold's native sum (J.4.4).
         // Not a builtin primitive (sphere/cube/cylinder/polyhedron, square/circle/polygon), transform,
         // boolean, or a defined user module — a typo or a builtin still deferred past the current subset.
         // Naming it turns the corpus's generic "unknown module" cluster into a per-symbol worklist (L.2).

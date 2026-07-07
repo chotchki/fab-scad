@@ -169,22 +169,14 @@ fn beyond_the_subset_is_loud() {
 
 #[test]
 fn deferred_builtins_name_their_feature() {
-    // text/minkowski stay LOUD-deferred stubs — the error NAMES the feature (+ its task), never a silent
-    // nothing and never a misleading "unknown module — a typo?". (import/surface left this club at M.3:
-    // they now emit a File NEED instead of erroring — see resolve_needs.rs.)
-    for (src, feature) in [
-        ("text(\"hi\");", "text()"),
-        (
-            "minkowski() { cube(1); sphere(1, $fn = 8); }",
-            "minkowski()",
-        ),
-    ] {
-        assert!(
-            matches!(&err(src), Error::Unimplemented(m) if m.contains(feature)),
-            "{src}: expected a LOUD defer naming {feature}, got {:?}",
-            err(src)
-        );
-    }
+    // text() stays a LOUD-deferred stub — the error NAMES the feature (+ its task), never a silent nothing
+    // and never a misleading "unknown module — a typo?". (import/surface left this club at M.3 for File
+    // NEEDs; minkowski() left it at J.4.4 — now wired to Manifold's native sum — see the backend volumes.)
+    assert!(
+        matches!(&err("text(\"hi\");"), Error::Unimplemented(m) if m.contains("text()")),
+        "expected a LOUD defer naming text(), got {:?}",
+        err("text(\"hi\");")
+    );
 }
 
 #[test]

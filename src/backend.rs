@@ -38,6 +38,9 @@ pub trait GeometryBackend {
     /// Convex hull of the operands COMBINED (`hull()`) — N-ary, not a pairwise fold. An empty list, or
     /// all-empty operands, → the empty solid.
     fn hull(&self, solids: &[Self::Solid]) -> Self::Solid;
+    /// Minkowski sum of the operands (`minkowski()`) — an N-ary LEFT FOLD of the binary sum. Unlike hull,
+    /// empty is an ANNIHILATOR: `A ⊕ ∅ = ∅`, so ANY empty operand (or an empty list) → the empty solid.
+    fn minkowski(&self, solids: &[Self::Solid]) -> Self::Solid;
     /// An affine transform (OpenSCAD `multmatrix`, covering translate / rotate / scale / mirror).
     fn transform(&self, s: &Self::Solid, m: &Affine) -> Self::Solid;
     /// Set the solid's color (`color()`) — sets EVERY vertex, so outermost `color()` wins (J.2.9).
@@ -100,6 +103,10 @@ pub fn build<B: GeometryBackend>(node: &GeoNode, backend: &B) -> B::Solid {
         // hull is N-ary — the backend hulls the whole operand set at once (not a pairwise fold).
         GeoNode::Hull(kids) => {
             backend.hull(&kids.iter().map(|k| build(k, backend)).collect::<Vec<_>>())
+        }
+        // minkowski is an N-ary fold of the binary sum (J.4.4); the backend owns the empty-annihilator rule.
+        GeoNode::Minkowski(kids) => {
+            backend.minkowski(&kids.iter().map(|k| build(k, backend)).collect::<Vec<_>>())
         }
         // The 2D→3D bridge: lower the 2D child to a Shape, then sweep it into a Solid (J.3.4/J.3.5).
         GeoNode::Extrude { kind, child } => backend.extrude(&build_2d(child, backend), kind),
@@ -215,6 +222,17 @@ impl GeometryBackend for ManifoldBackend {
         // Hull the NON-empty operands combined; an empty operand contributes no vertices (all-empty → ∅).
         let present: Vec<crate::kernel::Solid> = solids.iter().flatten().cloned().collect();
         (!present.is_empty()).then(|| crate::kernel::Solid::batch_hull(&present))
+    }
+
+    fn minkowski(&self, solids: &[Self::Solid]) -> Self::Solid {
+        // ANY empty operand annihilates (`A ⊕ ∅ = ∅`), so bail to ∅ on an empty list or any `None`. Else
+        // left-fold the native `minkowski_sum` — one operand → itself, matching OpenSCAD's N-ary fold.
+        if solids.is_empty() || solids.iter().any(Option::is_none) {
+            return None;
+        }
+        let mut present = solids.iter().flatten().cloned();
+        let first = present.next()?;
+        Some(present.fold(first, |acc, s| acc.minkowski_sum(&s)))
     }
 
     fn transform(&self, s: &Self::Solid, m: &Affine) -> Self::Solid {
@@ -397,6 +415,17 @@ impl GeometryBackend for MockBackend {
             .iter()
             .filter(|s| !s.is_empty())
             .fold(Mesh::new(), |acc, s| append(&acc, &s.mesh));
+        let ops = solids.iter().map(|s| s.ops).sum::<u32>() + 1;
+        MockSolid { mesh, ops }
+    }
+
+    fn minkowski(&self, solids: &[Self::Solid]) -> Self::Solid {
+        // Mock can't sum geometry — but it honors the ANNIHILATOR algebra (any empty → empty) and appends
+        // the meshes + bumps ops, so the interface suite walks the dispatch under miri. Real op is Manifold.
+        if solids.is_empty() || solids.iter().any(MockSolid::is_empty) {
+            return MockSolid { mesh: Mesh::new(), ops: solids.iter().map(|s| s.ops).sum::<u32>() + 1 };
+        }
+        let mesh = solids.iter().fold(Mesh::new(), |acc, s| append(&acc, &s.mesh));
         let ops = solids.iter().map(|s| s.ops).sum::<u32>() + 1;
         MockSolid { mesh, ops }
     }
@@ -779,5 +808,12 @@ mod tests {
         assert!((vol("if (true) cube(2);") - 8.0).abs() < 1e-6);
         assert!((vol("if (false) cube(2);")).abs() < 1e-6); // empty
         assert!((vol("for (i = [0:2]) translate([i * 10, 0, 0]) cube(2);") - 24.0).abs() < 1e-6); // 3×8
+        // minkowski() (J.4.4, native Manifold sum). A single child folds to itself.
+        assert!((vol("minkowski() cube(10);") - 1000.0).abs() < 1e-6);
+        // Two AXIS-ALIGNED boxes: [0,10]³ ⊕ [0,2]³ = [0,12]³ EXACTLY → 12³ = 1728 (oracle-free, deterministic).
+        assert!((vol("minkowski() { cube(10); cube(2); }") - 1728.0).abs() < 1e-6);
+        // The dominant use — rounding a cube by a sphere probe GROWS it past the bare cube (topology differs
+        // from CGAL, so this is a shape check, not an exact-volume one; the residual harness owns exactness).
+        assert!(vol("minkowski() { cube(10); sphere(r = 1, $fn = 16); }") > 1000.0);
     }
 }

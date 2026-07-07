@@ -2109,6 +2109,22 @@ fn eval_stmt<'a>(
                 }
             }
         }
+        // `minkowski()` — the Minkowski sum of its children (J.4.4), lowered to a `GeoNode::Minkowski` the
+        // backend folds via Manifold's native `minkowski_sum`. 3D only for now; 2D minkowski (Clipper2's
+        // `MinkowskiSum`) is a follow-up, LOUD-deferred like 2D hull rather than silently wrong.
+        StmtKind::Module(mi) if mi.name == "minkowski" => {
+            let refs: Vec<&Stmt> = mi.children.iter().collect();
+            let children = eval_nodes(&refs, ctx, scope, global, island)?;
+            match partition_children(children, ctx) {
+                Children::D3(kids) => nodes.push(Geo::D3(GeoNode::Minkowski(kids))),
+                Children::D2(_) => {
+                    return Err(crate::Error::Unimplemented(
+                        "minkowski() over 2D children is not yet wired (Clipper2's MinkowskiSum, via the \
+                         CrossSection binding) — a J.3 follow-up",
+                    ));
+                }
+            }
+        }
         // `offset()` — grow/shrink a 2D outline (J.3.3). A FIXED-2D op: its child is coerced to 2D
         // ([`force_2d`] — a 3D child is ignored-with-warning, yielding empty). `r` (positional / `r=`) →
         // ROUNDED, `$fn`-faceted; else `delta=` → MITERED, or BEVELED with `chamfer = true`; `r` beats

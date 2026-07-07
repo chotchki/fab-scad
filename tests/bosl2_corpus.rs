@@ -79,7 +79,15 @@ use fab_scad::corpus::{Bucket, check_worker, histogram, run_bosl2_corpus_isolate
 /// ONLY non-timeout failure is the deferred minkowski. What's left is entirely L.2.7: the hull/region
 /// TIMEOUTS, which jitter 7-9 run-to-run (gears/regions) and are now the sole source of pass-count noise +
 /// the next priority. Floored well below 891 to ride that jitter (worst-case ~all-timeout ≈ 890).
-const PASS_FLOOR: usize = 888;
+///
+/// 2026-07-07 (minkowski): 891→893 (99.1%) — 0 assertion, 0 UNIMPLEMENTED, 8 timeout. J.4.4: `minkowski()`
+/// wired to Manifold's NATIVE `minkowski_sum` (manifold3d 0.3.3 clean drop-in; `GeoNode::Minkowski` folds it
+/// with the empty-annihilator rule) → test_cyl clears, the last non-timeout gap. EVERY correctness + feature
+/// test in the BOSL2 corpus now passes; the only failures left are the L.2.7 hull/region TIMEOUTS. OPEN
+/// doctrine follow-up: native geometry runs Manifold with TBB (`parallel` feature) = non-deterministic
+/// reduction; a single-threaded (`MANIFOLD_PAR=NONE`) build or verified-deterministic TBB is needed for
+/// doctrine #36. Floored below 893 for the timeout jitter.
+const PASS_FLOOR: usize = 890;
 
 #[test]
 #[ignore = "minutes-long full BOSL2 sweep; run explicitly with --ignored"]

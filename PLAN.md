@@ -93,7 +93,8 @@ added 2026-07-05.
     - [>] J.4.2.1 - J.4.2.1 - import() eval + backend wiring (STL/3MF readers → Leaf)
     - [>] J.4.2.2 - J.4.2.2 - import() differential vs oracle (round-trip a known STL + 3MF)
   - [x] J.4.3 - text() = LOUD deferred stub (never silently wrong); cosmic-text is the candidate — its own task
-  - [x] J.4.4 - minkowski()/surface() = LOUD deferred stubs (never silently wrong); minkowski approach still open
+  - [x] J.4.4 - minkowski() LANDED via Manifold's NATIVE `minkowski_sum` (manifold3d 0.3.3 clean drop-in — same manifold-csg lineage, no migration; wraps Manifold C++ PR #666's tiered hull+union). `GeoNode::Minkowski` folds the binary sum with the empty-ANNIHILATOR rule (A⊕∅=∅); 2D LOUD-deferred to Clipper2 like 2D hull. Validated: box⊕box=summed box (1728 exact, oracle-free) + volume-residual for the rounding case; test_cyl clears → corpus 99.1%, 0 assertion / 0 unimplemented. Research + design writeup: docs/minkowski-design.md. (surface() stays a LOUD-deferred stub.)
+  - [ ] J.4.5 - DETERMINISM: native geometry runs Manifold with TBB (`parallel` feature ON) = non-deterministic parallel reduction; wasm is single-threaded. Doctrine #36 needs bit-identical output cross-platform — build native with `parallel` OFF (`MANIFOLD_PAR=NONE`, matching wasm) + re-baseline, OR prove TBB reduction is deterministic. Surfaced by the minkowski research (manifold#666 CI: non-convex² broke Mac/Windows on non-CCW triangulation even with `deterministic=true`). Affects ALL geometry, not just minkowski.
 - [ ] J.5 - Content-addressed CSG cache: node hash = subtree + resolved params + reaching $-context; in-memory tier + hit-rate counters (the on-disk tier stays a storage decision)
 
 - [x] J.6 - Unify fab-scad's geom::V3 ([f64;3] orientation helpers) + printer-domain [f64;3] into fab_lang::Vec3

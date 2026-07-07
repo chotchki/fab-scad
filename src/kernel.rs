@@ -388,6 +388,15 @@ impl Solid {
         Solid::wrap(self.0.intersection(&other.0))
     }
 
+    /// Minkowski sum `self ⊕ other` (`minkowski()`, J.4.4) — Manifold's NATIVE `minkowski_sum` (elalish/
+    /// manifold PR #666: union of per-face convex hulls, with a convex⊕convex + convex⊕non-convex fast
+    /// path). Every point of `self` translated by every point of `other`; the dominant use is rounding /
+    /// offsetting a shape by a convex probe (sphere/box). Validated by VOLUME-RESIDUAL (`differ.rs`), not
+    /// bit-exact — a mesh Minkowski sum is topologically unlike CGAL's Nef result but shape-identical.
+    pub fn minkowski_sum(&self, other: &Solid) -> Solid {
+        Solid::wrap(self.0.minkowski_sum(&other.0))
+    }
+
     /// Union many solids at once (cheaper + more robust than folding `union`). Empty ⇒ empty solid.
     pub fn batch_union(solids: &[Solid]) -> Solid {
         let hs: Vec<Manifold> = solids.iter().map(|s| s.0.clone()).collect();

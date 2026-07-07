@@ -49,6 +49,9 @@ pub enum GeoNode {
     /// `hull()` — the convex hull of all children combined (N-ary, not a pairwise fold). Needs the
     /// backend (Manifold `batch_hull`); has no fab-lang mesh flattening (J.4.1).
     Hull(Vec<GeoNode>),
+    /// `minkowski()` — the Minkowski sum of all children (an N-ary fold of the binary sum; any empty child
+    /// annihilates). Needs the backend (Manifold native `minkowski_sum`, J.4.4); no fab-lang flattening.
+    Minkowski(Vec<GeoNode>),
     /// `linear_extrude` / `rotate_extrude` — sweep a 2D [`Shape2D`] into 3D (the 2D→3D dimension
     /// bridge). Needs the backend (Manifold `extrude` / `revolve`); no fab-lang flattening (J.3.4/J.3.5).
     Extrude {

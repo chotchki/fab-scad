@@ -1,8 +1,9 @@
 # M.3 — explicit-stack eval assembly — SPEC (DRAFT, for alignment)
 
-Status: **DRAFT** — chotchki to redline before any code. This is the "how" for the fix the M.2 assessment
-(`docs/heap-bounded-eval.md`) said is needed: get statement/geometry eval off the host stack so eval depth is
-memory-bound, the harnesses drop the 1 GiB reserve, and the wasm target stops being a stack-size gamble.
+Status: **ALIGNED** — chotchki decisions folded in 2026-07-07 (§Decisions). This is the "how" for the fix the
+M.2 assessment (`docs/heap-bounded-eval.md`) said is needed: get statement/geometry eval off the host stack so
+eval depth is memory-bound, the harnesses drop the 1 GiB reserve, and the wasm target stops being a stack-size
+gamble.
 
 ## The goal, stated as a contract
 
@@ -83,10 +84,12 @@ change).
    an EvalNodes for the stashed stmts with the stashed scope/island + a frame save/restore pair), but it's the
    subtlest control flow and needs its own test focus.
 
-3. **Module depth as the safety net becomes redundant — but keep it.** Once eval is memory-bound,
-   `MAX_MODULE_DEPTH` no longer prevents a crash (there's no crash to prevent). It still bounds runaway
-   recursion into a LOUD error rather than an OOM, so KEEP it as a policy limit — but its value can be revisited
-   (OpenSCAD's is higher). Decision for chotchki: keep 256, or raise it now that it's cheap?
+3. **Module depth DEMOTES from crash-guard to runaway-detector.** Once eval is memory-bound, the ONLY hard
+   limit left is heap/OOM (chotchki's Q2 — confirmed: post-M.3 there is no non-heap ceiling; Drop is iterative
+   too, so even tearing down a giant tree is fine). `MAX_MODULE_DEPTH` stops being load-bearing crash-safety and
+   becomes purely a runaway DETECTOR — it turns infinite recursion (`module r(){r();}`) into a fast LOUD error
+   instead of a slow crawl to OOM. KEEP one for that UX (OpenSCAD does, same reason), but it's now a policy
+   knob, not a safety wall. Raising it is safe post-M.3; a memory/step budget could replace it later.
 
 4. **`$`-context + island threading.** Each frame carries `scope` / `global` / `island`; user-module calls
    swap in the home-island global and a fresh param scope, transforms drop the child scope. All of that is
@@ -116,10 +119,11 @@ Do NOT big-bang the whole dispatcher. Proposed order:
 - **Leave it; rely on the guard + reserve.** Rejected — that's the status quo, and it makes the web target
   (the bet's #1 differentiator) a stack-size gamble. M.2 exists to say this isn't good enough.
 
-## Open questions for chotchki
+## Decisions (chotchki, 2026-07-07)
 
-1. Incremental-with-a-switch vs a clean cut — worth the temporary dual-path complexity, or convert in one PR
-   behind heavy differential coverage?
-2. `MAX_MODULE_DEPTH` — keep 256 as the policy limit, or raise it once crash-safety no longer depends on it?
-3. Is M.3 its own phase (it's sizeable), or does it stay the tail of Phase M? (Phase M can't formally exit with
-   an open box.)
+1. **Incremental, dual-path behind a switch → YES.** "This is where our test harness is going to save us" — land
+   the driver alongside the recursive code, convert arm-by-arm, and diff each increment against the recursive
+   path on the corpus + models. The differential is the safety net; lean on it rather than a big-bang cut.
+2. **`MAX_MODULE_DEPTH` demotes to a runaway-detector** (see hard-part #3 + Q2). Post-M.3 heap is the only limit,
+   so the guard is no longer crash-safety — keep a limit for the fast-LOUD-error UX, value revisitable/raisable.
+3. **M.3 stays IN Phase M** (the tail box), not its own phase — "we just add on to M."

@@ -10,7 +10,7 @@ use std::process::Command;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 
 use fab_scad::openscad::{self, Openscad};
 use fab_scad::{manifest, printers, project, slicing};
@@ -115,6 +115,14 @@ enum Commands {
         /// Output path (default: <dir>/out/<stem>.stl).
         #[arg(long)]
         out: Option<PathBuf>,
+        /// Geometry engine: `openscad` (the trusted oracle, default) or `scad-rs` (OUR pure-Rust evaluator +
+        /// Manifold kernel — dogfooding). `--engine scad-rs` never touches the OpenSCAD binary.
+        #[arg(long, value_enum, default_value_t = Engine::Openscad)]
+        engine: Engine,
+        /// With `--engine scad-rs`, ALSO render through OpenSCAD and report the boolean-residual/genus
+        /// divergence — so every real dogfood render doubles as a differential datapoint against the oracle.
+        #[arg(long)]
+        check: bool,
         /// Kill each render after this many seconds.
         #[arg(long, default_value_t = 120)]
         timeout: u64,
@@ -166,12 +174,17 @@ fn main() -> Result<()> {
             force,
             png,
             out,
+            engine,
+            check,
             timeout,
         } => {
             if all {
                 render_all_cmd(target, timeout, force)
             } else if let Some(target) = target {
-                render_cmd(&target, out, png, timeout)
+                match engine {
+                    Engine::Openscad => render_cmd(&target, out, png, timeout),
+                    Engine::ScadRs => render_scadrs_cmd(&target, out, check, timeout),
+                }
             } else {
                 render_focus_cmd(png, timeout) // no target → the focused project's parts (6.9)
             }
@@ -517,6 +530,67 @@ fn find_manifest(target: &Path) -> Result<PathBuf> {
         dir = d.parent();
     }
     bail!("no project.toml found above {}", target.display());
+}
+
+/// Which geometry engine `fab render` uses. OpenSCAD is the default + the trusted oracle; scad-rs is our own
+/// evaluator, exposed here for DOGFOODING (Q.1) — run real parts through our pipeline to generate the real
+/// usage samples the perf tier (N/O/P) should be cut from, not a fixed model set.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, ValueEnum)]
+enum Engine {
+    /// The OpenSCAD binary (the oracle; the default).
+    #[default]
+    Openscad,
+    /// scad-rs — our pure-Rust evaluator + Manifold kernel, no OpenSCAD.
+    #[value(name = "scad-rs")]
+    ScadRs,
+}
+
+/// The library search path scad-rs's loader resolves `<lib.scad>` against — the workspace `libs/` (BOSL2) +
+/// `scad-lib`, mirroring the `OPENSCADPATH` fab injects for the oracle (so `<BOSL2/std.scad>` /
+/// `<connectors.scad>` resolve identically). Same-dir includes resolve against the target's own parent inside
+/// the loader, so they need no entry here.
+fn scadrs_libs() -> Vec<PathBuf> {
+    find_root().map_or_else(Vec::new, |root| vec![root.join("libs"), root.join("scad-lib")])
+}
+
+/// `fab render --engine scad-rs` (Q.1 dogfooding) — render a `.scad` through OUR pipeline (fab-lang eval →
+/// Manifold kernel → STL), never the OpenSCAD binary. With `--check`, ALSO render through OpenSCAD and report
+/// the boolean-residual/genus divergence, so a real print doubles as a differential sample. Set
+/// `FAB_EVAL_CACHE=1` to exercise the eval-memo cache (N.2c) on real work.
+fn render_scadrs_cmd(target: &Path, out: Option<PathBuf>, check: bool, _timeout_secs: u64) -> Result<()> {
+    use fab_scad::backend::{ManifoldBackend, build_geo};
+    if !target.exists() {
+        bail!("no such file: {}", target.display());
+    }
+    let libs = scadrs_libs();
+    let stl = out.unwrap_or_else(|| default_out(target, "stl"));
+
+    let start = std::time::Instant::now();
+    let tree = fab_scad::import::resolve_geometry_file(target, &libs)
+        .with_context(|| format!("scad-rs eval of {}", target.display()))?;
+    let solid = build_geo(&tree, &ManifoldBackend)
+        .filter(|s| !s.is_empty())
+        .with_context(|| format!("scad-rs rendered EMPTY geometry (no faces) for {}", target.display()))?;
+    let ms = start.elapsed().as_millis();
+    std::fs::write(&stl, solid.to_stl_bytes())
+        .with_context(|| format!("writing {}", stl.display()))?;
+    println!(
+        "scad-rs  {} -> {}  (vol {:.3}, genus {}, {ms} ms)",
+        target.display(),
+        stl.display(),
+        solid.volume(),
+        solid.genus(),
+    );
+
+    if check {
+        // Reuse the differential: renders BOTH engines to `Solid` and agrees-or-explains (boolean residual +
+        // genus). A real render is now a correctness datapoint against the oracle.
+        match fab_scad::differ::diff_files(target, &libs) {
+            Ok(()) => println!("check    AGREES with OpenSCAD (within residual tolerance)"),
+            Err(detail) => println!("check    DIVERGES vs OpenSCAD: {detail}"),
+        }
+    }
+    Ok(())
 }
 
 fn render_cmd(target: &Path, out: Option<PathBuf>, png: bool, timeout_secs: u64) -> Result<()> {

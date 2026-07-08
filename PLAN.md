@@ -162,6 +162,8 @@ added 2026-07-07.
 ## Phase P - P - Cranelift JIT + CSG cache (desktop)
 - [ ] P.1 - P.1 - Cranelift JIT for the numeric long tail (desktop)
 - [ ] P.2 - P.2 - Content-addressed CSG cache
+## Phase Q - Dogfooding + hardening
+- [ ] Q.1 - Dogfood: fab render --engine scad-rs [--check] (eval→Manifold→STL, + oracle diff)
 
 ## Backlog (not yet phased)
 

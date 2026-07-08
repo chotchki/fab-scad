@@ -30,7 +30,7 @@ mask-intersections at level `k`. Total geometry work doubles with every cut you 
 
 ## Evidence — measured on the real configs
 
-`docs/blowup_bench.sh` stacks the projects' actual `partition()` configs (jigsaw cutpath,
+`scripts/blowup_bench.sh` stacks the projects' actual `partition()` configs (jigsaw cutpath,
 real cutsize/gap) to depth N around an inline leaf standing in for the frozen STL, and
 times each render through `fab render` (Manifold backend). The ratio is each render over
 the previous — the `2^N` signature is that ratio converging to **2.0** (each added cut
@@ -101,5 +101,5 @@ can't get there at all. This replaces the nested-`slice_part()` idiom.
 ## Reproduce
 
 ```sh
-bash docs/blowup_bench.sh      # ~2 min; renders nested stacks to depth 10 and times them
+bash scripts/blowup_bench.sh   # ~2 min; renders nested stacks to depth 10 and times them
 ```

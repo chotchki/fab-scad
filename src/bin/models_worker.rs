@@ -16,9 +16,10 @@ fn main() {
         PathBuf::from(args.next().expect("usage: models_worker <model.scad> [lib_dir ...]"));
     let libs: Vec<PathBuf> = args.map(PathBuf::from).collect();
 
-    // Eval on the big [`fab_scad::EVAL_STACK`]: statement/geometry eval assembly is still HOST-recursive
-    // (bounded by the module-depth × source-nesting guards, but ~½ GiB deep at those limits — M.2), and a
-    // stack overflow is an uncatchable process abort. A SO here aborts only this worker; the parent reclaims.
+    // Eval on [`fab_scad::EVAL_STACK`]: as of M.3 geometry eval is HEAP-bounded (the explicit-stack driver —
+    // no host recursion), so eval itself would be fine on the default stack; the reserve is now courtesy
+    // headroom for the native render path. Still spawned on its own thread so a stack overflow anywhere aborts
+    // only this worker and the parent harness reclaims the core.
     let out = std::thread::Builder::new()
         .name("model-eval".into())
         .stack_size(fab_scad::EVAL_STACK)

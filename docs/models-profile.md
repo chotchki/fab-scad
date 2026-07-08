@@ -1,8 +1,103 @@
 # The `models/` tree profile — where the interpreter actually spends its time
 
-Status: **first capture** (L.3), 2026-07-07. This is the profiling artifact the JIT/intrinsics tier (rung
-2/3, phase L.4) gets cut FROM — the baseline trend line, taken before a single intrinsic exists. Regenerate
-it any time with the harness below; the numbers are meant to move.
+Status: **first capture** (L.3), 2026-07-07; **release re-profile with an unbiased sampler** added N.1,
+2026-07-08 (the section directly below — it CORRECTS the tracing-era ms story and is the one to trust for
+"where does the time go"). This is the profiling artifact the JIT/intrinsics tier (rung 2/3, phase L.4) gets
+cut FROM — the baseline trend line, taken before a single intrinsic exists. Regenerate it any time; the
+numbers are meant to move.
+
+## Release sampling — the honest wall-time picture (N.1, 2026-07-08)
+
+The L.3 numbers below came from the tracing layer, which counts calls faithfully but INFLATES per-builtin ms
+(its own `Instant`+mutex per span dwarfs a 0.7 µs predicate — the doc's own caveat said so). N.1 answers the
+ms question the right way: an EXTERNAL sampler (`samply` at 2 kHz) that never touches the code, on a RELEASE
+build, symbolicated against the binary. It overturns two things.
+
+**First correction — the interpreter is MUCH faster on release than the L.3 headline implied.** That headline
+("28% of parts can't evaluate in 10 s", "`corner_brace` takes 7.4 s") was a DEBUG measurement, taken before
+the L.2.7 scope fix landed. On release `corner_brace` evaluates in **311 ms** — a 24× gap, all build profile —
+and isn't a slow model at all anymore. The honest release histogram (106 top-level models, 10 s budget):
+
+| build | rendered | TIMEOUT (>10 s) | error |
+|---|---|---|---|
+| debug (L.3) | 59 (53%) | 31 (28%) | 21 (19%) |
+| **release (N.1)** | **63 (59%)** | **19 (18%)** | **24 (23%)** |
+
+So it's 18% of real parts that blow 10 s on release, not 28% — still the number rung 2/3 has to move, but a
+smaller hill than the debug figure sold. (The +3 errors are the assert-passthrough fix reaching DEEPER into
+models that used to time out, surfacing unvendored `.stl`/`.svg` assets — visibility, not regression.)
+
+**Second correction, the big one — it is NOT builtin dispatch. It's ALLOCATION.** Sampling the three slowest
+release COMPLETERS (`pill_holder_combined_tray` 9.5 s, `under_sink_guide` 6 s, `garage_door` 4.5 s — different
+shapes, one comprehension-heavy, one boolean-heavy) gives a dead-consistent breakdown:
+
+| self-time bucket | pill_holder | under_sink | garage_door |
+|---|---|---|---|
+| `libsystem_malloc` (allocator) | 34.3% | 32.6% | 32.0% |
+| `libsystem_platform` (memmove/memset) | 15.9% | 17.5% | 16.6% |
+| **all allocation / memory traffic** | **58%** | **57%** | **57%** |
+| `builtins::apply` + `is_builtin` (DISPATCH) | 0.9% | ~0.8% | ~0.8% |
+
+**~57% of the interpreter's wall-time is `malloc`/`free`/`memmove` — and builtin dispatch, the thing the tracing
+profile fingered and the thing PLAN N.2 was written to fix, is under 1%.** The tracing layer wasn't lying, it
+was answering a different question: `is_num` really IS called 2.4 M times, but the FUNCTION is a single enum-tag
+match that costs nothing — the cost is the machinery every call drags with it (arg `Vec`s, `Value` clones,
+per-call scope frames), and that machinery is allocation. Count ≠ cost. This is the whole reason N.1 is a
+separate task from the L.3 tracing pass.
+
+### Where the allocation comes from (charged to the nearest semantic caller)
+
+| % of all samples | site | what allocates |
+|---|---|---|
+| ~26% | `eval_with_global` | the central dispatch loop: per-node arg `Vec`s, `Task` pushes, the `split_off` for builtin args, per-arg `scope.clone()` |
+| ~4.7% | `Scope::lookup_opt` | (inlining slop — `Value::clone` is an `Rc` bump, no copy; the real cost here is the deep dynamic-`$`-chain WALK, below) |
+| ~3.2% | `ValueList::drop` / `Value::drop` | tearing down list values |
+| ~3.2% | `Frame::drop` | dropping a call/`let` scope frame — its two `BTreeMap`s go node-by-node |
+| ~2.7% | `push_call` | building the per-call argument-source list |
+| ~2.1% | `Scope::bind` + `BTreeMap` insert/`VacantEntry` | binding a param allocates a `BTreeMap` node (+ COWs the frame if shared) |
+
+Roll the Scope machinery up — `lookup_opt` + `bind` + `Frame::drop` + the `BTreeMap` insert/iter/`dying_next`/
+`child`/`call_frame` entries — and it's **~19% of total time in the scope data structure alone.** The Scope is
+an `Rc<Frame>` chain where each frame carries two `BTreeMap<String, Value>` (lexical `vars` + dynamic
+`specials`). Every call/`let`/comprehension allocates a frame; every `bind` allocates a String-keyed node;
+every lookup walks the chain doing `BTreeMap::get` on `&str` keys — that's the **1.4% `memcmp`** sitting in the
+self list, string-comparing `"$fn"` and friends. And the L.2.7 fix (dynamic-`$`-chain by reference) that killed
+the per-call copy has a tail: the chain is now DEEP, so every `$fn`/`$fa` read BOSL2 does per circle/arc walks
+it to the root — `under_sink_guide`'s 6.3% `lookup_opt` is that walk.
+
+### The other thing the inclusive view shows — BOSL2's defensive-assert tax
+
+`check_assert` is **~39% INCLUSIVE** on `pill_holder`. That's not a bug, it's BOSL2: every library function
+re-validates its args (`assert(is_finite(x))`, `assert(is_vector(axis))`), and evaluating those condition
+EXPRESSIONS is real work. One slice of it IS a bug though — `check_assert` pretty-prints the condition back to
+source (`print_expr` → the `write_expr` at ~1.5% of allocation) to build the `[assert(…)]` failure locator, and
+it does so on EVERY assert INCLUDING the ones that pass with tracing off, then throws the string away. Guarding
+that behind `trace::on() || !passed` is free and removes ~1.5–2%.
+
+### What this means for N.2 / the rung-2/3 plan
+
+The lever the profile actually points at, in priority:
+
+1. **Kill per-call allocation.** The arg `split_off` `Vec` (one heap alloc per builtin call), the per-arg
+   `scope.clone()`, the `Task`/`values` stack growth in `eval_with_global`. This is the 26% site.
+2. **Re-represent the Scope frame.** Two `BTreeMap<String, Value>` per frame is the ~19%. A frame usually holds
+   a HANDFUL of bindings — a small `Vec<(key, Value)>` (linear scan beats `BTreeMap` at that size AND drops
+   cheaper), and/or INTERNED variable names so keys are integers not Strings (kills the `memcmp` and the String
+   allocation in `bind`, and ties straight into backlog I.1.4). Determinism is preserved either way — insertion
+   order is deterministic, and interning is a deterministic table.
+3. **The assert formatting freebie** above (~2%, one guard).
+
+Builtin-dispatch fast-pathing — N.2 as originally written — is a <1% change and should be re-scoped or dropped.
+`norm`/`cross` and the transcendentals remain a rung-2 intrinsic target for CORRECTNESS-parity speed, but they
+are not why the interpreter is slow. Reproduce any of this with `bash scripts/profile-model.sh <model.scad>`.
+
+### The caveat that survives
+
+Function-level attribution is solid; the LINE-level (`file:line`) didn't resolve — `line-tables-only` debuginfo
+plus aggressive inlining defeats `atos`'s line lookup, so the allocation "sites" are charged to the nearest
+named function, not the exact source line. For pinning the precise `.clone()`/`.split_off()` to fix, a
+`debug=2` build or a heaptrack-style allocation profiler is the follow-up. The MAGNITUDES (57% allocation,
+<1% dispatch, ~19% scope) are inlining-independent and are the signal.
 
 ## The harness
 
@@ -47,6 +142,11 @@ has to move, and it's why the bet needs the JIT tier at all — passing the BOSL
 this proves it isn't yet FAST enough to use.
 
 ## The finding — it's type predicates, not transcendental math
+
+> **Superseded on the COST question by N.1 (top of file).** The call COUNTS below are right and still useful
+> (`is_num` really is called 2.4 M times), but the implied conclusion "so predicate dispatch is the hot spot"
+> does NOT survive the unbiased sampler: dispatch is <1% of wall-time, allocation is 57%. Read this section as
+> "what the corpus calls a lot", not "where the time goes".
 
 Here's the part that overturns the working assumption. I expected the intrinsic worklist to be trig and
 `sqrt` — the classic "the interpreter is slow at math, hand-write the kernels" story. It is NOT. Deep-profiling

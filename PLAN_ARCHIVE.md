@@ -309,3 +309,13 @@
   - [x] M.6.2 - M.6.2 - Differential: import() STL matches the oracle
   - [x] M.6.3 - M.6.3 - Coverage close-out: verify functions-100 + lcov-DA-lines-100
 
+---
+
+## 2026-07-08
+
+## Phase M - M - Heap-bounded eval (last recursion removal)
+- [x] M.1 - M.1 - Iterative Drop for deep GeoNode/Shape2D/Value trees
+- [x] M.1b - M.1b - Value deep-list Drop: ValueList newtype (heap-bounded, no arithmetic-hot-path cost)
+- [x] M.2 - M.2 - Assess eval-assembly recursion + correct the reserve rationale (EVAL_STACK); fix split to M.3
+- [x] M.3 - M.3 - Explicit-stack eval assembly (remove host recursion; default + wasm stack)
+

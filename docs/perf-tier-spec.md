@@ -1,7 +1,7 @@
 # The perf tier — SPEC (what + why, for alignment)
 
-Status: **DRAFT for alignment**, 2026-07-07. Not a plan — the *shape* of the perf work, the contracts it must
-hold, and the open questions to settle before we phase it. The PLAN (phases M–P) is cut from this.
+Status: **ALIGNED**, 2026-07-07 (chotchki redlines integrated; §6 decisions locked, context-keying the one
+open edge). The *shape* of the perf work, the contracts it must hold. The PLAN (phases M–P) is cut from this.
 
 > **Positioning.** fab-scad is a DERIVATIVE work of OpenSCAD (the language + the reference behavior we test
 > against), BOSL2 (the library we run), and Manifold (the geometry kernel). All credit to those projects — this
@@ -77,9 +77,15 @@ where drift bites. The mechanism that makes it safe:
 - **Key the intrinsic to a normalized AST FINGERPRINT of the target function**, not its name (the "match on
   original AST" note). At library-load time, fingerprint each user function's parsed AST; if it matches a
   registered intrinsic's fingerprint, INSTALL the fast path. No match → interpret.
-- **A BOSL2 update that changes the body changes the AST changes the fingerprint ⇒ automatic, silent
-  fallback** to the (slower) interpreter on the new body. A cosmetic reformat (whitespace, comments) does NOT
-  change the AST, so the intrinsic SURVIVES it — exactly the property we want.
+- **A BOSL2 update that changes the body changes the AST changes the fingerprint ⇒ automatic fallback** to the
+  (slower) interpreter on the new body. A cosmetic reformat (whitespace, comments) does NOT change the AST, so
+  the intrinsic SURVIVES it — exactly the property we want.
+- **Optionally silent, always INSPECTABLE — an EXPLAIN-PLAN path** (chotchki). The fallback is silent by
+  DEFAULT (a submodule bump shouldn't spam), but every run can emit an execution plan: for a given program,
+  which functions took the intrinsic / JIT / interpreter path — and WHY a fast path missed ("fingerprint
+  changed since vX" vs "no intrinsic registered"). Like SQL's `EXPLAIN`: the dev sees exactly what got
+  accelerated, and a silently-lost intrinsic after a `git submodule update` is one command away from visible.
+  This is the observability companion to the resilience contract — graceful degradation you can still SEE.
 - **v1 fingerprint**: structural hash of the AST (operators, literals, call-names, control-flow shape) with
   local-var names included. A local RENAME breaks the match → falls back to slow → still correct. (v2:
   canonicalize local names — De Bruijn / positional — so a rename keeps the fast path. A refinement, not a
@@ -104,7 +110,9 @@ HOST stack today (expression eval is already explicit-stack; Frame `Drop` is alr
   what the explicit-stack CALLS already bound, or if only `Drop` is the real exposure.
 
 Why first, not later:
-- **wasm-lethal.** Browser stacks are tiny; a stack-overflow class can't ship in the bet's #1 differentiator.
+- **wasm-lethal — and it's the ORIGIN of the whole approach.** Browser stacks are tiny; a stack-overflow class
+  can't ship in the bet's #1 differentiator. Stack-overflow is exactly what drove the explicit-stack
+  expression evaluator in the first place — this is finishing that job, not opening a new one.
 - **kills the 1 GiB hacks** — the harnesses stop reserving a gig per eval thread.
 - **clean base for the fast-paths** — build them on the FINAL iterative structure, not rework them after.
 
@@ -120,7 +128,9 @@ eval-assembly needs the same treatment.
 - **Value memoization** (pure-function results, keyed on args + reaching $-context): attacks the ~10M
   redundant predicate/`len` calls the models-profile flagged, DIRECTLY. But it has real subtleties —
   $-context sensitivity, `rands`/`$t` non-determinism must be excluded from the cacheable set. Trickier;
-  DEFER behind the CSG cache and the dispatch fast-path (which may make it unnecessary).
+  DEFER behind the CSG cache and the dispatch fast-path (which may make it unnecessary). chotchki's read: this
+  is likely the TRICKIEST piece of the whole tier — the $-context sensitivity + non-determinism exclusion is
+  exactly where a value cache silently returns a stale-but-plausible answer.
 
 ## 5. Proposed phases (cut from the above — names/letters TBD with chotchki)
 
@@ -137,16 +147,22 @@ eval-assembly needs the same treatment.
    interpreter; the content-addressed CSG cache. Exit: JIT==interpreter on the corpus, cache hit-rate
    counters, the GUI re-render path measured.
 
-## 6. Open questions to settle before phasing
+## 6. Decisions (chotchki) + what stays open
 
-- **Fingerprint normalization depth** — exact AST (rename breaks → safe fallback) vs canonicalized locals
-  (rename survives). v1 exact; is v2 worth it, or do BOSL2 functions rename rarely enough to not matter?
-- **Where the intrinsic registry lives** — fab-lang (wasm-safe, so intrinsics ship to the browser) vs a
-  native-only crate. Intrinsics must be wasm-safe ⇒ fab-lang, pure-Rust, no OS.
-- **Profile on RELEASE, not debug** — the models-profile.md hot-list (predicates dominate) was DEBUG +
-  tracing-inflated. Re-profile a representative slow model in release (a real sampling profiler) before
-  picking the first intrinsics — the debug hot-list may not be the release hot-list.
-- **Is the dispatch fast-path enough?** If Phase N closes gaussian_rands to ~1.05×, do we even NEED library
-  intrinsics for parity — or is Phase O purely about EXCEEDING OpenSCAD (the moat) + the web?
-- **CSG cache invalidation** — the $-context is part of the key; confirm every geometry-affecting $-var is in
-  the reaching-context hash (miss one and the cache serves a stale mesh).
+- **Fingerprint depth → EXACT AST for v1.** A local rename breaks the match → safe fallback to the interpreter,
+  which emits the SAME errors the pinned body would — so being strict loses nothing. v2 (canonicalize locals —
+  De Bruijn / positional) only if BOSL2 renames turn out to churn the match in practice.
+- **Profile on RELEASE first → YES, agreed.** The models-profile.md hot-list (predicates dominate) was DEBUG +
+  tracing-inflated; re-profile a representative slow model in release with a real sampling profiler BEFORE
+  picking intrinsics (N.1). The release hot path may not be the debug one.
+- **Push the perf tier as far as it goes → YES; this is RESEARCH.** Not "stop at parity." Phase N may close
+  gaussian_rands on its own, but Phase O/P are worth pushing to EXCEED OpenSCAD (the moat) + serve the web —
+  we're in research territory for all of it, so explore the ceiling rather than declaring done at parity.
+- **Registry in fab-lang (wasm-safe) → YES, with a forward note.** Intrinsics must be pure-Rust + no-OS to ship
+  to the browser ⇒ fab-lang. But at some point the interpreter will likely need to be HOISTED OUT /
+  restructured so the JIT can dispatch into it cleanly — design the registry so that extraction is a move, not
+  a rewrite.
+- **CSG cache invalidation → the $-context is THE hard part** (still genuinely open). Every geometry-affecting
+  $-var must be in the key; the reaching-context hash is the major cache challenge — miss one and the cache
+  serves a stale-but-plausible mesh. Treat context-keying as the load-bearing design problem of P.2, not an
+  afterthought — it's the sharpest open edge in the whole tier.

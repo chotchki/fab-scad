@@ -155,6 +155,7 @@ added 2026-07-07.
 ## Phase O - O - Intrinsics tier (AST-fingerprint, wasm-safe)
 - [ ] O.1 - O.1 - AST-fingerprint intrinsic registry + auto-fallback + fast==slow harness
 - [ ] O.2 - O.2 - First hand-written BOSL2-function intrinsics from the release profile
+- [ ] O.3 - O.3 - EXPLAIN-PLAN: per-program execution-path report (intrinsic/JIT/interpreter)
 ## Phase P - P - Cranelift JIT + CSG cache (desktop)
 - [ ] P.1 - P.1 - Cranelift JIT for the numeric long tail (desktop)
 - [ ] P.2 - P.2 - Content-addressed CSG cache

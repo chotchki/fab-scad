@@ -525,7 +525,7 @@ fn collect_island<'a>(
                 // Top-level constants — kept in source order for whole-scope hoisting (last-wins on a
                 // repeated name is the hoister's job, so DON'T dedup here; a later assign must appear later).
                 StmtKind::Assignment { name, value } => {
-                    scope.assignments.push((name.as_str(), value));
+                    scope.assignments.push((&**name, value));
                 }
                 _ => {}
             },

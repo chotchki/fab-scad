@@ -96,7 +96,7 @@ pub fn customize(source: &str) -> crate::Result<Customizer> {
                 None => (None, None),
             };
             params.push(CustomParam {
-                name: name.clone(),
+                name: name.to_string(),
                 group,
                 description,
                 constraint,

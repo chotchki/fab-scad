@@ -40,6 +40,7 @@ pub use scope::Scope;
 pub use value::{RANGE_MAX, RangeIter, Value, range_iter, range_len};
 
 use std::cell::{Cell, RefCell};
+use std::rc::Rc;
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::Mesh;
@@ -351,7 +352,7 @@ enum Task<'a> {
     /// FIRST, then the args, so an argument wins over a default even when a param NAME is DUPLICATED (see
     /// [`bind_module_scope`] — same OpenSCAD two-phase rule, here for functions).
     Apply {
-        names: Vec<&'a str>,
+        names: Vec<Rc<str>>,
         provided: Vec<bool>,
         body: &'a Expr,
         base: Scope,
@@ -367,7 +368,7 @@ enum Task<'a> {
     /// evaluate the next `let` binding in that scope or (no bindings left) evaluate `body`. `let`
     /// bindings are SEQUENTIAL — a later one sees the earlier ones.
     LetStep {
-        name: &'a str,
+        name: Rc<str>,
         rest: &'a [Arg],
         body: &'a Expr,
         scope: Scope,
@@ -544,12 +545,12 @@ fn eval_with_global<'a>(
                 // default even when a param NAME repeats (a defaultless duplicate can't clobber a real arg).
                 for ((name, &prov), value) in names.iter().zip(&provided).zip(&vals) {
                     if !prov {
-                        call.bind(*name, value.clone());
+                        call.bind(Rc::clone(name), value.clone());
                     }
                 }
                 for ((name, prov), value) in names.iter().zip(provided).zip(vals) {
                     if prov {
-                        call.bind(*name, value);
+                        call.bind(Rc::clone(name), value);
                     }
                 }
                 tasks.push(Task::Eval(body, call));
@@ -566,7 +567,7 @@ fn eval_with_global<'a>(
                         let base = match self_name {
                             Some(name) => {
                                 let mut b = env.child();
-                                b.bind(name.to_string(), callee.clone());
+                                b.bind(Rc::clone(name), callee.clone());
                                 b
                             }
                             None => env.clone(),
@@ -602,14 +603,14 @@ fn eval_with_global<'a>(
                 body,
                 scope,
             } => {
-                let value = name_closure(values.pop().unwrap_or(Value::Undef), name);
-                trace::bind('l', name, &value);
+                let value = name_closure(values.pop().unwrap_or(Value::Undef), &name);
+                trace::bind('l', &name, &value);
                 let mut inner = scope.child();
                 inner.bind(name, value);
                 match rest.split_first() {
                     Some((next, remaining)) => {
                         tasks.push(Task::LetStep {
-                            name: next.name.as_deref().unwrap_or("_"),
+                            name: next.name.clone().unwrap_or_else(|| Rc::from("_")),
                             rest: remaining,
                             body,
                             scope: inner.clone(),
@@ -736,7 +737,7 @@ fn eval_node<'a>(
         ExprKind::Let { bindings, body } => match bindings.split_first() {
             Some((first, rest)) => {
                 tasks.push(Task::LetStep {
-                    name: first.name.as_deref().unwrap_or("_"),
+                    name: first.name.clone().unwrap_or_else(|| Rc::from("_")),
                     rest,
                     body,
                     scope: scope.clone(),
@@ -903,7 +904,7 @@ fn push_call<'a>(
     // param takes its default / undef. Kept separate from defaults so a DUPLICATE param name binds
     // arg-over-default in the two-phase `Task::Apply` (an unfilled second slot can't clobber a real arg).
     let mut arg_slots: Vec<Option<&'a Expr>> = vec![None; params.len()];
-    let mut dollars: Vec<(&'a str, &'a Expr)> = Vec::new(); // $-args → dynamic $-var injections
+    let mut dollars: Vec<(Rc<str>, &'a Expr)> = Vec::new(); // $-args → dynamic $-var injections
     let mut positional = 0;
     for arg in args {
         match &arg.name {
@@ -914,9 +915,9 @@ fn push_call<'a>(
                 positional += 1;
             }
             // a $-arg is a per-call dynamic override — injected into the call scope, not param-matched.
-            Some(name) if name.starts_with('$') => dollars.push((name.as_str(), &arg.value)),
+            Some(name) if name.starts_with('$') => dollars.push((Rc::clone(name), &arg.value)),
             Some(name) => {
-                if let Some(i) = params.iter().position(|p| &p.name == name) {
+                if let Some(i) = params.iter().position(|p| p.name == *name) {
                     arg_slots[i] = Some(&arg.value);
                 }
             }
@@ -925,8 +926,9 @@ fn push_call<'a>(
     // bind order: params first, then $-args (bound last → they override the inherited $-context). A param
     // filled by an arg is `provided`; a param on its default (or a defaultless-unfilled undef) is not.
     // `$`-args are always provided. `Task::Apply` binds the non-provided (defaults) before the provided.
-    let mut names: Vec<&'a str> = params.iter().map(|p| p.name.as_str()).collect();
-    names.extend(dollars.iter().map(|(name, _)| *name));
+    // Names are `Rc<str>` cloned from the AST (a refcount bump) so the per-call bind never allocates (N.2b).
+    let mut names: Vec<Rc<str>> = params.iter().map(|p| Rc::clone(&p.name)).collect();
+    names.extend(dollars.iter().map(|(name, _)| Rc::clone(name)));
     let mut provided: Vec<bool> = arg_slots.iter().map(Option::is_some).collect();
     provided.extend(std::iter::repeat_n(true, dollars.len()));
     tasks.push(Task::Apply {
@@ -1057,12 +1059,14 @@ fn lc_for<'a>(
     match bindings.split_first() {
         None => eval_comprehension(body, scope, global, ctx),
         Some((binding, rest)) => {
-            let var = binding.name.as_deref().unwrap_or("_");
+            // The loop var as an `Rc<str>` computed ONCE per binding, so the per-ITERATION bind is a refcount
+            // bump, not a fresh `String` (N.2b) — `lc_for` is the hottest bind path (64% of a real model).
+            let var: Rc<str> = binding.name.clone().unwrap_or_else(|| Rc::from("_"));
             let iterable = eval_with_global(&binding.value, scope, global, ctx)?;
             let mut out = Vec::new();
             for value in iter_values(&iterable) {
                 let mut inner = scope.child();
-                inner.bind(var, value);
+                inner.bind(Rc::clone(&var), value);
                 out.extend(lc_for(rest, body, &inner, global, ctx)?);
             }
             Ok(out)
@@ -1137,8 +1141,8 @@ fn comprehension_let_scope<'a>(
 ) -> crate::Result<Scope> {
     let mut s = scope.clone();
     for binding in bindings {
-        let name = binding.name.as_deref().unwrap_or("_");
-        let value = name_closure(eval_with_global(&binding.value, &s, global, ctx)?, name);
+        let name: Rc<str> = binding.name.clone().unwrap_or_else(|| Rc::from("_"));
+        let value = name_closure(eval_with_global(&binding.value, &s, global, ctx)?, &name);
         let mut next = s.child();
         next.bind(name, value);
         s = next;
@@ -1734,7 +1738,7 @@ fn bind_module_scope<'a>(
     // Which explicit-arg expr fills each param slot (positional by position, named by name). `None` = the
     // param took no arg → it falls to its default in phase 1.
     let mut arg_slots: Vec<Option<&'a Expr>> = vec![None; params.len()];
-    let mut dollars: Vec<(&'a str, &'a Expr)> = Vec::new();
+    let mut dollars: Vec<(Rc<str>, &'a Expr)> = Vec::new();
     let mut positional = 0;
     for arg in args {
         match &arg.name {
@@ -1744,9 +1748,9 @@ fn bind_module_scope<'a>(
                 }
                 positional += 1;
             }
-            Some(name) if name.starts_with('$') => dollars.push((name.as_str(), &arg.value)),
+            Some(name) if name.starts_with('$') => dollars.push((Rc::clone(name), &arg.value)),
             Some(name) => {
-                if let Some(i) = params.iter().position(|p| &p.name == name) {
+                if let Some(i) = params.iter().position(|p| p.name == *name) {
                     arg_slots[i] = Some(&arg.value);
                 }
             }
@@ -1768,14 +1772,14 @@ fn bind_module_scope<'a>(
                 Some(default) => eval_with_ctx(default, global, ctx)?,
                 None => Value::Undef,
             };
-            call.bind(param.name.as_str(), value);
+            call.bind(Rc::clone(&param.name), value);
         }
     }
     // Phase 2 — passed args (eval'd in the caller scope) override, in declaration order.
     for (param, slot) in params.iter().zip(&arg_slots) {
         if let Some(expr) = slot {
             let value = eval_with_ctx(expr, caller, ctx)?;
-            call.bind(param.name.as_str(), value);
+            call.bind(Rc::clone(&param.name), value);
         }
     }
     for (name, expr) in dollars {
@@ -1833,11 +1837,11 @@ fn hoisted_assignments<'a>(stmts: &[&'a Stmt]) -> Vec<(&'a str, &'a Expr)> {
     let mut index: BTreeMap<&'a str, usize> = BTreeMap::new();
     for stmt in stmts {
         if let StmtKind::Assignment { name, value } = &stmt.kind {
-            if let Some(&i) = index.get(name.as_str()) {
+            if let Some(&i) = index.get(&**name) {
                 order[i].1 = value; // seen: last expr wins, first-occurrence position kept
             } else {
-                index.insert(name.as_str(), order.len());
-                order.push((name.as_str(), value));
+                index.insert(&**name, order.len());
+                order.push((&**name, value));
             }
         }
     }
@@ -1864,7 +1868,7 @@ fn hoisted_bindings<'a>(stmts: &[&'a Stmt]) -> Vec<HoistItem<'a>> {
     let mut index: BTreeMap<&'a str, usize> = BTreeMap::new();
     for stmt in stmts {
         let (name, item) = match &stmt.kind {
-            StmtKind::Assignment { name, value } => (name.as_str(), HoistItem::Assign(name, value)),
+            StmtKind::Assignment { name, value } => (&**name, HoistItem::Assign(name, value)),
             StmtKind::FunctionDef { name, params, body } => {
                 (name.as_str(), HoistItem::Func(name, params.as_slice(), body))
             }

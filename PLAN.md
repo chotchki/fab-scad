@@ -150,7 +150,7 @@ added 2026-07-07.
 - [x] N.1 - N.1 - Re-profile a slow model on RELEASE with a sampling profiler
 - [ ] N.2 - N.2 - Cut eval allocation (profile-driven; builtin dispatch was <1%)
 - [x] N.2a - N.2a - Cheap allocation wins: assert-formatting freebie + eval_with_global per-call allocs
-- [ ] N.2b - N.2b - (deferred/optional) Intern var+$-names for the Scope lookup win — NOT a cache-key lever
+- [x] N.2b - N.2b - Intern var/$-names as Rc<str> in the AST LANDED: Parameter/Assignment/Arg.name → Rc<str>, bind clones a refcount not a String; slice_parts eval 8517→8210ms (~3.6%; cum N.2d+N.2b ~8%), corpus 901/901
 - [x] N.2c - N.2c - Eval-memo cache (the 82-92% lever) — reviewed design, ready to build
   - [x] N.2c.1 - N.2c step 1 — DynCtx: O(1) per-frame $-context identity in Scope
   - [ ] N.2c.2 - N.2c.2 - Program-level auto-off: make the eval cache safe to default ON

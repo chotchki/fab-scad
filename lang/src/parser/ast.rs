@@ -11,6 +11,7 @@
 //! deferred) is `lang/docs/grammar-inventory.md`.
 
 use core::ops::Range;
+use std::rc::Rc;
 
 /// A byte range into the original source.
 pub type Span = Range<usize>;
@@ -38,8 +39,8 @@ pub enum StmtKind {
     Empty,
     /// `name = expr;` (parser.y:227).
     Assignment {
-        /// The bound name.
-        name: String,
+        /// The bound name — an `Rc<str>` so hoisting it into a scope is a refcount bump, not a copy (N.2b).
+        name: Rc<str>,
         /// The value expression.
         value: Expr,
     },
@@ -91,8 +92,9 @@ pub enum StmtKind {
 /// parameter (dynamic-scope injection, e.g. `module m($fn = 8)`), so the name may begin with `$`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Parameter {
-    /// The parameter name (may begin with `$`).
-    pub name: String,
+    /// The parameter name (may begin with `$`). An `Rc<str>` so binding it per CALL is a refcount bump,
+    /// not a fresh `String` copy (N.2b) — the call-heavy hot path.
+    pub name: Rc<str>,
     /// The default-value expression, present iff the `id = expr` form was used.
     pub default: Option<Expr>,
     /// Byte span of the whole parameter.
@@ -134,8 +136,9 @@ pub struct Modifiers {
 /// `$`-args (`$fn = 8`) are just named args whose name begins with `$`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Arg {
-    /// The parameter name for a named argument; `None` for a positional one.
-    pub name: Option<String>,
+    /// The parameter name for a named argument; `None` for a positional one. An `Rc<str>` so a `let`/`for`
+    /// comprehension loop-var binding — the `lc_for` hot path — clones a refcount, not a `String` (N.2b).
+    pub name: Option<Rc<str>>,
     /// The argument value.
     pub value: Expr,
     /// Byte span of the whole argument.

@@ -106,7 +106,7 @@ fn assignment(i: &mut Tokens<'_, '_>, name: &str, depth: usize) -> ModalResult<S
     expect(i, TokenKind::Semi, "';' after an assignment")?;
     Ok(Stmt {
         kind: StmtKind::Assignment {
-            name: name.to_string(),
+            name: name.into(),
             value,
         },
         span: start..i.previous_token_end(),

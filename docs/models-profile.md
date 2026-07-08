@@ -125,6 +125,16 @@ The shape is the N.1 story, louder:
   the residual per-`bind` cost is the `String` KEY allocation (`name.into()` on every bind), unchanged here —
   that's N.2b (intern var names), the next scope lever.
 
+  **N.2b LANDED (2026-07-08):** the bind-source identifiers (`Parameter.name`, `Assignment.name`, `Arg.name`)
+  are now `Rc<str>` in the AST — allocated ONCE at parse, so the per-call param bind, the `lc_for` loop-var
+  bind (the 64% path), and the `let` bind clone a refcount instead of a fresh `String`. slice_parts eval
+  **8517 → ~8210 ms (~3.6%)**, corpus 901/901, clippy clean. Cumulative N.2d+N.2b: **8925 → 8210 ≈ 8%** off
+  the interpreter. No global intern table (per-decl `Rc<str>` suffices for the alloc win; lookup stays a
+  content compare — ptr-eq would need full interning, deferred). All numbers RELEASE (`cargo build --release`,
+  opt-level 3); the `line-tables-only` debuginfo the profiler adds is symbols-only, zero runtime effect
+  (verified: clean-release == debuginfo-release within noise). What's LEFT after N.2 is the O/P tier — the
+  `check_assert` 41% + the comprehension NumList construction (a JIT target), not more scope polishing.
+
 Two hypotheses this profile KILLED (record them so they don't get re-proposed):
 - **The eval-memo cache is not the lever here.** A/B `FAB_EVAL_CACHE=1`: 8925 ms → 8530 ms, **4.5%** — nowhere
   near its 82-92% redundancy CEILING. The cache memoizes function VALUES; slice_parts' cost is module

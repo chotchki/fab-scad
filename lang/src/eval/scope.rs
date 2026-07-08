@@ -33,9 +33,9 @@ use super::value::Value;
 #[derive(Debug, Clone)]
 enum VarMap {
     /// Few bindings — linear scan. The per-call / `let` / comprehension frame.
-    Small(Vec<(String, Value)>),
+    Small(Vec<(Rc<str>, Value)>),
     /// Many bindings — a `BTreeMap`. An island global (BOSL2: thousands of constants).
-    Large(BTreeMap<String, Value>),
+    Large(BTreeMap<Rc<str>, Value>),
 }
 
 /// Above this many bindings a [`VarMap`] spills `Small`→`Large`. ~16: below it a linear scan of short string
@@ -49,21 +49,23 @@ impl VarMap {
 
     fn get(&self, name: &str) -> Option<&Value> {
         match self {
-            VarMap::Small(v) => v.iter().find(|(k, _)| k == name).map(|(_, val)| val),
+            VarMap::Small(v) => v.iter().find(|(k, _)| k.as_ref() == name).map(|(_, val)| val),
             VarMap::Large(m) => m.get(name),
         }
     }
 
     /// Bind or REBIND `name` (last write wins — load-bearing for OpenSCAD's two-phase param binding, where
     /// phase-2 args overwrite phase-1 defaults). Scan-and-replace keeps `Small` keys unique; the `Small`→
-    /// `Large` spill fires only when a genuinely NEW key would push past [`SPILL`].
-    fn insert(&mut self, name: String, value: Value) {
+    /// `Large` spill fires only when a genuinely NEW key would push past [`SPILL`]. `name` arrives as an
+    /// `Rc<str>` so the hot per-call / per-iteration bind is a refcount BUMP, not a fresh `String` alloc
+    /// (N.2b): the AST holds each identifier's `Rc<str>` once, and bind clones it.
+    fn insert(&mut self, name: Rc<str>, value: Value) {
         match self {
             VarMap::Small(v) => {
-                if let Some(slot) = v.iter_mut().find(|(k, _)| *k == name) {
+                if let Some(slot) = v.iter_mut().find(|(k, _)| **k == *name) {
                     slot.1 = value;
                 } else if v.len() >= SPILL {
-                    let mut map: BTreeMap<String, Value> = std::mem::take(v).into_iter().collect();
+                    let mut map: BTreeMap<Rc<str>, Value> = std::mem::take(v).into_iter().collect();
                     map.insert(name, value);
                     *self = VarMap::Large(map);
                 } else {
@@ -85,7 +87,7 @@ impl VarMap {
 #[derive(Debug, Clone)]
 struct Frame {
     vars: VarMap,
-    specials: BTreeMap<String, Value>,
+    specials: BTreeMap<Rc<str>, Value>,
     /// LEXICAL parent — walked for regular (`vars`) lookups. A `let`/comprehension child shares its
     /// enclosing scope here; a CALL frame instead points at the callee's home global (hygiene).
     parent: Option<Rc<Frame>>,
@@ -150,11 +152,11 @@ impl Scope {
     #[must_use]
     pub fn new() -> Self {
         let mut specials = BTreeMap::new();
-        specials.insert("$fn".to_string(), Value::Num(0.0));
-        specials.insert("$fa".to_string(), Value::Num(12.0));
-        specials.insert("$fs".to_string(), Value::Num(2.0));
+        specials.insert(Rc::from("$fn"), Value::Num(0.0));
+        specials.insert(Rc::from("$fa"), Value::Num(12.0));
+        specials.insert(Rc::from("$fs"), Value::Num(2.0));
         let mut vars = VarMap::new();
-        vars.insert("PI".to_string(), Value::Num(std::f64::consts::PI));
+        vars.insert(Rc::from("PI"), Value::Num(std::f64::consts::PI));
         Self {
             frame: Rc::new(Frame {
                 vars,
@@ -241,7 +243,7 @@ impl Scope {
     /// Bind (or rebind) a name in the CURRENT frame — a `$`-name into `specials`, else `vars`. Copy-on-write:
     /// free while this frame is unshared, clones it once if a child/closure already holds it (so their view
     /// stays at capture time).
-    pub fn bind(&mut self, name: impl Into<String>, value: Value) {
+    pub fn bind(&mut self, name: impl Into<Rc<str>>, value: Value) {
         let name = name.into();
         let frame = Rc::make_mut(&mut self.frame);
         if name.starts_with('$') {
@@ -286,7 +288,7 @@ impl Scope {
     /// `specials` maps (a handful of `$`-vars), NOT the constant-laden `vars` — that split is what keeps
     /// this O(#`$`-vars) instead of O(scope-size) on the every-call hot path (the L.2.7 fix).
     #[must_use]
-    pub fn specials(&self) -> BTreeMap<String, Value> {
+    pub fn specials(&self) -> BTreeMap<Rc<str>, Value> {
         let mut out = BTreeMap::new();
         let mut frame = &self.frame;
         loop {

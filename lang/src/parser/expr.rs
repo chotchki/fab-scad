@@ -578,8 +578,8 @@ pub(crate) fn param_list(i: &mut Tokens<'_, '_>, depth: usize) -> ModalResult<Ve
 /// special-variable parameter, so both plain and `$`-idents are accepted.
 fn parameter(i: &mut Tokens<'_, '_>, depth: usize) -> ModalResult<Parameter> {
     let start = i.current_token_start();
-    let name = match peek_kind(i) {
-        Some(TokenKind::Ident(n) | TokenKind::DollarIdent(n)) => n.to_string(),
+    let name: std::rc::Rc<str> = match peek_kind(i) {
+        Some(TokenKind::Ident(n) | TokenKind::DollarIdent(n)) => n.into(),
         _ => return bail(i, "a parameter name"),
     };
     bump(i)?; // the name
@@ -606,7 +606,7 @@ fn argument(i: &mut Tokens<'_, '_>, depth: usize) -> ModalResult<Arg> {
         bump(i)?; // '='
         let value = expr(i, depth + 1)?;
         return Ok(Arg {
-            name: Some(name.to_string()),
+            name: Some(name.into()),
             value,
             span: start..i.previous_token_end(),
         });

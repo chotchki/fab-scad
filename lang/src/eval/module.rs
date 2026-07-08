@@ -33,7 +33,7 @@ pub(super) fn eval_args<'a>(
         match &arg.name {
             Some(name) if name.starts_with('$') => child.bind(name.clone(), value),
             Some(name) => {
-                named.insert(name.clone(), value);
+                named.insert(name.to_string(), value);
             }
             None => positional.push(value),
         }

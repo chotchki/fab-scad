@@ -788,6 +788,7 @@ fn resolve_ident(name: &str, scope: &Scope, ctx: &Ctx<'_>) -> Value {
         // one we haven't implemented, and the trace is how that surfaces during bring-up.
         trace::unbound_special(name);
     } else {
+        trace::unbound_var(name); // dev trace: surface WHERE a value went undef (root, not the distant assert)
         ctx.messages.borrow_mut().push(Message::Warning(format!(
             "Ignoring unknown variable '{name}'"
         )));

@@ -83,6 +83,17 @@ pub(super) fn unbound_special(name: &str) {
     }
 }
 
+/// Trace a regular (non-`$`) variable that resolved to NOTHING → `undef`. OpenSCAD warns "Ignoring unknown
+/// variable" and moves on, so a constant like BOSL2's `UP` silently becoming `undef` (e.g. a function default
+/// `axis=UP` evaluated in a scope/island that can't see it) is invisible until something downstream asserts on
+/// it. This surfaces the ROOT in the trace flow — the place a value went undef — instead of the distant
+/// assert. Fires alongside the user-facing warning; free when the trace is off.
+pub(super) fn unbound_var(name: &str) {
+    if on() {
+        eprintln!("+ [unbound] {name} => undef");
+    }
+}
+
 /// Trace a MODULE instantiation — geometry, not a value, so there's nothing to show a result for; the
 /// name marks entry so the value trace beneath it has a frame. `depth` indents by call nesting.
 pub(super) fn module(depth: usize, name: &str) {

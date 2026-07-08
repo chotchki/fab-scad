@@ -1,12 +1,17 @@
 # M.3 — explicit-stack eval assembly — SPEC
 
-Status: **ALIGNED + REVIEWED** — chotchki decisions folded in 2026-07-07 (§Decisions); a 4-lens adversarial
-design review (`m3-design-review` workflow) pressure-tested the encoding against the real code and CORRECTED two
-load-bearing errors — see §DECISION below, which is the AUTHORITATIVE implementation checklist (the prose above
-it is the pre-review reasoning, kept for context; where they disagree, §DECISION wins). This is the "how" for
-the fix the M.2 assessment (`docs/heap-bounded-eval.md`) said is needed: get statement/geometry eval off the
-host stack so eval depth is memory-bound, the harnesses drop the 1 GiB reserve, and the wasm target stops being
-a stack-size gamble.
+Status: **DONE** (2026-07-07). Shipped exactly as §DECISION specifies — the driver is `lang/src/eval/geo_stack.rs`,
+the recursive tree-walk is retired, `MAX_MODULE_DEPTH` raised 256 → 100 000 (past OpenSCAD's), `EVAL_STACK`
+dropped 1 GiB → 64 MiB. Validated bit-identical across the BOSL2 corpus + the models oracle-differential (A/B
+soak vs the recursive path) before the reference path was deleted, plus heap-bounded payoff tests on a 512 KiB
+stack. Outcome summary in `docs/heap-bounded-eval.md`.
+
+History: **ALIGNED + REVIEWED** — chotchki decisions folded in (§Decisions); a 4-lens adversarial design review
+(`m3-design-review` workflow) pressure-tested the encoding against the real code and CORRECTED two load-bearing
+errors — see §DECISION below, the AUTHORITATIVE implementation checklist (the prose above it is the pre-review
+reasoning; where they disagree, §DECISION wins). The "how" for the fix the M.2 assessment
+(`docs/heap-bounded-eval.md`) called for: get statement/geometry eval off the host stack so eval depth is
+memory-bound, the harnesses drop the 1 GiB reserve, and the wasm target stops being a stack-size gamble.
 
 ## The goal, stated as a contract
 

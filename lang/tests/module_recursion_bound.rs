@@ -1,14 +1,9 @@
-//! M.2 — statement/geometry eval assembly is HOST-recursive (unlike the explicit-stack EXPRESSION machine
-//! and, since M.1/M.1b, tree `Drop` — both heap-bounded). [`MAX_MODULE_DEPTH`] is the guard that turns a
-//! runaway recursive MODULE into a LOUD error instead of a silent stack crash. It is the safety mechanism the
-//! eval-thread reserve (`fab_scad::EVAL_STACK`, ~½ GiB — sized in M.2 against the guard-limit worst case) is
-//! paired with, UNTIL the M.3 explicit-stack conversion removes host recursion from the geometry pipeline and
-//! lets eval run on a default — and wasm-small — stack.
-//!
-//! These run on a BIG stack on purpose: 256 levels is tens of MiB deep in a debug build, so a default 2 MiB
-//! test thread overflows (~15 levels in) long BEFORE the guard is reached — which is exactly the M.2 finding.
-//! The guard only saves you when the stack can hold its whole depth, so the guard and the reserve are COUPLED;
-//! decoupling them is M.3's job.
+//! M.3 — statement/geometry eval runs on the explicit-stack driver, so it's HEAP-bounded (joining the
+//! expression machine + tree `Drop`). [`MAX_MODULE_DEPTH`] no longer guards a CRASH (there's no host recursion
+//! to overflow) — it's a runaway DETECTOR, turning an infinite recursive MODULE into a fast LOUD error before
+//! OOM. The payoff tests below run on a 512 KiB stack — a depth that needed tens of MiB pre-M.3 (M.2's finding)
+//! now lives on the heap work stack. Because we're heap-bounded and OpenSCAD's C++ tree-walker is not, we accept
+//! recursion deeper than OpenSCAD (which errors ~5–8 k).
 
 #![allow(clippy::unwrap_used, reason = "test harness: unwrap IS the assertion")]
 

@@ -54,17 +54,26 @@ guard converts a runaway into a LOUD error ONLY when the stack can hold its full
 the guard doesn't help at all — you overflow first. That coupling is the real problem, and the reason M.2
 cannot simply "drop the 1 GiB hacks": dropping the reserve today would REGRESS deep-program safety, not fix it.
 
-## M.3 — the real fix (deferred, deserves alignment)
+## M.3 — the real fix (DONE)
 
-Decoupling means removing host recursion from the geometry pipeline: convert `eval_stmt` / `eval_geometry` /
-`eval_nodes` / `call_user_module` / `eval_children` to an explicit work-stack, the same treatment the
-expression evaluator already got at Phase I. Then eval depth is memory-bound, the reserve drops to a default
-stack, and the wasm target stops being a stack-size gamble.
+Decoupling meant removing host recursion from the geometry pipeline: `eval_geometry` now runs on an explicit
+work-stack driver (`lang/src/eval/geo_stack.rs`), the same treatment the expression evaluator got at Phase I.
+The recursive tree-walk (`eval_stmt` / `eval_stmt_dispatch` / `call_user_module` / `eval_children` /
+`for_product` / `eval_nodes`) is retired. Eval depth is now memory-bound: a 10 000-deep recursive module
+evaluates on a **512 KiB stack** (`module_recursion_bound.rs`), where it needed ~32 MiB pre-M.3.
 
-That's a substantial change to the CORE evaluator (it threads scope, island, the children stack, and
-module-depth through mutually-recursive functions), so it's split out as M.3 rather than smuggled into M.2 —
-it's the kind of core rework worth aligning on before starting, like the perf tier got its own spec.
+It was built and aligned as its own spec (`docs/m3-explicit-eval-spec.md`), design-reviewed by a 4-lens
+adversarial pass (which caught two load-bearing encoding errors before any code), then landed incrementally —
+every arm converted behind a shim and gated on the differential, culminating in an A/B soak (driver vs the
+recursive path) that matched **bit-for-bit across the full BOSL2 corpus AND the models oracle-differential**
+before the reference path was deleted.
 
-**M.2 delivered:** this assessment, the corrected reserve rationale (`EVAL_STACK`, one authoritative constant
-in place of seven scattered "for Drop" comments), and a regression test pinning the guard
-(`module_recursion_bound.rs`). The reserve stays until M.3 removes the need for it.
+Consequences that fell out:
+- **`MAX_MODULE_DEPTH` demoted** from crash-safety to a runaway detector, and RAISED 256 → 100 000. The old 256
+  was ~20× stricter than OpenSCAD's own ~5–8 k module-recursion limit (a compat gap); now we accept recursion
+  **deeper than OpenSCAD** — it's host-stack-bound, we're heap-bounded. Same language, deeper limit.
+- **`EVAL_STACK` dropped 1 GiB → 64 MiB** — eval no longer needs any reserve (heap-bounded); the modest
+  remainder is courtesy headroom for the native Manifold render path, a separate subsystem.
+
+**M.2 delivered** the assessment above + the corrected reserve rationale + the guard regression test; **M.3**
+delivered the driver, the retirement, and these consequences. The wasm target is no longer a stack-size gamble.

@@ -25,6 +25,33 @@ fn on_big_stack<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T 
         .unwrap()
 }
 
+/// Run `f` on a deliberately SMALL 512 KiB stack — the recursive evaluator overflows a deep module here; the
+/// explicit-stack driver (M.3) does not.
+fn on_small_stack<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
+    std::thread::Builder::new()
+        .name("module-recursion-small".into())
+        .stack_size(512 * 1024)
+        .spawn(f)
+        .unwrap()
+        .join()
+        .unwrap()
+}
+
+/// THE M.3 PAYOFF (B1) — a deeply-recursive MODULE evaluates on a 512 KiB stack under the explicit-stack driver:
+/// the body runs on the heap-allocated work stack, not the host stack. The recursive path needs ~32 MiB (debug)
+/// for this same `r(200)` (M.2's measurement), so it would OVERFLOW here — which is exactly the exposure M.3
+/// closes. Skipped under `FAB_GEO_DRIVER=0` (that A/B run IS the recursive path this test would crash).
+#[test]
+fn deep_recursive_module_is_heap_bounded_under_the_driver() {
+    if std::env::var("FAB_GEO_DRIVER").as_deref() == Ok("0") {
+        return; // the recursive path overflows a 512 KiB stack — that's the M.2 exposure, not a regression
+    }
+    on_small_stack(|| {
+        let g = evaluate_geometry("module r(n) { if (n > 0) r(n - 1); else cube(1); } r(200);");
+        assert!(g.is_ok(), "deep recursion should eval heap-bounded: {:?}", g.err());
+    });
+}
+
 #[test]
 fn runaway_module_recursion_is_loud_not_a_crash() {
     // `module r() { r(); }` has no base case — the guard bails at MAX_MODULE_DEPTH and the error unwinds out

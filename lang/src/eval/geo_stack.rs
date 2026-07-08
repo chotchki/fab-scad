@@ -529,9 +529,97 @@ fn dispatch_module<'a>(
             group(work, Combinator::Union, child);
             Ok(())
         }
-        // children() / for / intersection_for / user-module call / builtin primitive → shim (increment 2).
-        _ => shim_stmt(stmt, scope, &global, island, ctx, results),
+        // B2/B3 — children() + for/intersection_for still shim (they manage the children frame / loop product).
+        "children" | "for" | "intersection_for" => {
+            shim_stmt(stmt, scope, &global, island, ctx, results)
+        }
+        // B1 — a module INSTANTIATION resolves against the CURRENT island: a USER module runs its body on the
+        // work stack (host recursion GONE — the payoff), everything else is a builtin PRIMITIVE (a synchronous
+        // leaf, or a LOUD unknown). Mirrors the recursive fallthrough (trace + resolve + call/eval).
+        _ => {
+            super::trace::module(ctx.module_depth.get(), name);
+            match ctx.resolve_module(island, name) {
+                Some((def, home, base)) => {
+                    push_user_module(mi, def, home, base, scope, island, work, results, ctx)
+                }
+                None => {
+                    results.push(module::eval_module(mi, &scope, ctx)?);
+                    Ok(())
+                }
+            }
+        }
     }
+}
+
+/// B1 — schedule a USER-module call on the work stack (the recursion-removing analogue of `call_user_module`).
+/// The setup is EAGER + ordering-sensitive (the depth guard, the `$children`/`$parent_modules` binds, the three
+/// `Ctx` frame pushes), exactly mirroring the recursive path; then it pushes bottom→top `PopModuleFrame{depth}`
+/// (CLEANUP — restores the frames on BOTH paths), the body's `Collect{Union}`, and the body `Stmt`. LIFO → the
+/// body runs, its 0-or-1 node unions to the module's result, then the frames pop. A `bind_module_scope` arg
+/// error returns before the frame pushes (leaking `module_depth`, harmless — the whole eval aborts, as it does
+/// recursively).
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the module-call context, mirroring call_user_module's threaded arguments"
+)]
+fn push_user_module<'a>(
+    mi: &'a crate::parser::ModuleInstantiation,
+    def: super::loader::ModDef<'a>,
+    home: usize,
+    base: Option<Scope>,
+    caller: Scope,
+    island: usize,
+    work: &mut Vec<GTask<'a>>,
+    results: &mut Vec<Geo>,
+    ctx: &Ctx<'a>,
+) -> crate::Result<()> {
+    let (params, body) = def;
+    let depth = ctx.module_depth.get();
+    if depth >= super::MAX_MODULE_DEPTH {
+        return Err(crate::Error::Unimplemented(
+            "user-module recursion too deep (the statement-eval depth guard — a runaway recursive module)",
+        ));
+    }
+    ctx.module_depth.set(depth + 1);
+    // The body's lexical base is the module's HOME ISLAND global (a scope-local module carries its captured
+    // defining scope as `base` instead); args, though, bind in the CALLER's scope.
+    let home_global = base.unwrap_or_else(|| ctx.island_globals.borrow()[home].clone());
+    let mut call = super::bind_module_scope(params, &mi.args, &caller, &home_global, ctx)?;
+    // `$children` = the call-site child count; the children are stashed for `children()` to render LATE in the
+    // CALLER's scope + island. Lone-`;` empties are not children (they'd misalign the count + `children(i)`).
+    let child_stmts: Vec<&Stmt> = mi
+        .children
+        .iter()
+        .filter(|s| !matches!(s.kind, StmtKind::Empty))
+        .collect();
+    call.bind("$children", Value::Num(super::child_count(child_stmts.len())));
+    ctx.children_stack.borrow_mut().push(super::ChildrenFrame {
+        stmts: child_stmts,
+        scope: caller,
+        island,
+    });
+    // `$parent_modules` = the ancestor count BEFORE pushing self; then push this module's name for
+    // `parent_module(n)` / `$parent_modules`.
+    call.bind(
+        "$parent_modules",
+        Value::Num(super::child_count(ctx.module_stack.borrow().len())),
+    );
+    ctx.module_stack.borrow_mut().push(&mi.name);
+    // Push bottom→top: the frame pop (CLEANUP), the body's union, the body itself. The body resolves ITS module
+    // calls against the DEFINITION island (`home`) with the home global.
+    let mark = results.len();
+    work.push(GTask::PopModuleFrame { depth });
+    work.push(GTask::Collect {
+        mark,
+        comb: Combinator::Union,
+    });
+    work.push(GTask::Stmt {
+        stmt: body,
+        scope: call,
+        global: home_global,
+        island: home,
+    });
+    Ok(())
 }
 
 /// The fallthrough SHIM: run ONE statement through the recursive `eval_stmt_dispatch` into a scratch vec, then

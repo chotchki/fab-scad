@@ -52,6 +52,23 @@ fn deep_recursive_module_is_heap_bounded_under_the_driver() {
     });
 }
 
+/// Recursion THROUGH a `for` loop is heap-bounded too (B3): the loop body runs on the work stack, not the host
+/// stack. Before B3 the `for` arm shimmed, so a recursion threaded through it still overflowed. On a 512 KiB
+/// stack under the driver it doesn't. (Only `r` recurses here — a `children()` wrapper would DOUBLE the
+/// module-depth per level and trip the 256 guard, a separate concern from stack-boundedness.)
+#[test]
+fn deep_recursion_through_for_is_heap_bounded() {
+    if std::env::var("FAB_GEO_DRIVER").as_deref() == Ok("0") {
+        return; // the recursive path overflows here — the M.2 exposure, not a regression
+    }
+    on_small_stack(|| {
+        let g = evaluate_geometry(
+            "module r(n) { if (n > 0) for (i = [0:0]) r(n - 1); else cube(1); } r(200);",
+        );
+        assert!(g.is_ok(), "deep for recursion should eval heap-bounded: {:?}", g.err());
+    });
+}
+
 #[test]
 fn runaway_module_recursion_is_loud_not_a_crash() {
     // `module r() { r(); }` has no base case — the guard bails at MAX_MODULE_DEPTH and the error unwinds out

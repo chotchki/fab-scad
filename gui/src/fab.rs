@@ -107,10 +107,22 @@ pub fn find_root() -> Option<PathBuf> {
 /// boundary the caller spawns this on. (The slice/export path still uses OpenSCAD — switched separately.)
 pub fn render_whole(root: Option<&Path>, source: &Path, out_dir: &Path) -> Result<PathBuf> {
     use fab_scad::backend::{ManifoldBackend, build_geo};
-    let wrap = preview_wrapper(source, out_dir)?;
+    // Wrap in `$preview = true; include <ABSOLUTE source>;` (so `$fn = $preview ? lo : hi` takes the fast
+    // path) but evaluate that wrapper against the SOURCE's OWN directory — NOT `out_dir`. scad-rs threads a
+    // single base dir for every `import()`, so a wrapper written into the temp `out_dir` made a relative
+    // `import("../FamilyLogo.svg")` resolve next to the temp file (→ ENOENT) instead of beside the model.
+    // `resolve_geometry_with_base` lets us pass the model's dir explicitly; the absolute `include` still
+    // resolves the source regardless. (The OpenSCAD slice path resolves imports per-containing-file, so it
+    // was never bitten — this is a scad-rs-only base-dir seam.)
+    let abs = source
+        .canonicalize()
+        .with_context(|| format!("resolving {}", source.display()))?;
+    let base = abs.parent().unwrap_or_else(|| Path::new("."));
+    let wrap_src = format!("$preview = true;\ninclude <{}>;\n", abs.display());
+    std::fs::create_dir_all(out_dir)?;
     let out = out_dir.join(format!("{}.stl", stem_of(source)));
     let libs = preview_libs(root);
-    let tree = fab_scad::import::resolve_geometry_file(&wrap, &libs)
+    let tree = fab_scad::import::resolve_geometry_with_base(&wrap_src, base, &libs)
         .with_context(|| format!("scad-rs eval of {}", source.display()))?;
     let solid = build_geo(&tree, &ManifoldBackend)
         .filter(|s| !s.is_empty())

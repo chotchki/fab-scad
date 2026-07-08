@@ -297,4 +297,29 @@ mod tests {
             other => panic!("expected a 2D polygon leaf, got {other:?}"),
         }
     }
+
+    #[test]
+    fn a_relative_import_in_an_included_file_resolves_against_the_base_dir() {
+        // The seam the GUI's live preview relies on (Q dogfood). render_whole wraps a model in
+        // `include <ABS model>` and evaluates it; the model's OWN relative `import("x.svg")` must resolve
+        // against the MODEL's dir (the base_dir we pass), NOT next to the temp wrapper. That regressed — a
+        // wrapper written into the temp out_dir sent `import("../FamilyLogo.svg")` to /var/…/T/ → ENOENT.
+        let dir = tmp().join(unique("relimport"));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("stamp.svg"),
+            r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"><rect x="1" y="1" width="8" height="8" fill="black"/></svg>"#,
+        )
+        .unwrap();
+        std::fs::write(dir.join("model.scad"), "import(\"stamp.svg\");\n").unwrap();
+        // Wrap-by-absolute-include (like render_whole), evaluated with the MODEL's dir as base_dir.
+        let abs = dir.join("model.scad").canonicalize().unwrap();
+        let wrap = format!("include <{}>;\n", abs.display());
+        match resolve_geometry_with_base(&wrap, &dir, &[]).expect("resolves") {
+            Geo::D2(fab_lang::Shape2D::Polygon(ref contours)) => {
+                assert_eq!(contours.len(), 1, "stamp.svg's rect imported → one contour");
+            }
+            other => panic!("expected the included import to resolve, got {other:?}"),
+        }
+    }
 }

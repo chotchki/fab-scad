@@ -38,3 +38,29 @@ fn block_mark_drain_takes_only_its_own_children() {
         d3("sphere(2, $fn = 8);"),
     );
 }
+
+/// A7 + INVARIANT 5 — the `!` root modifier diverts ONLY its subtree into the root override: ancestors +
+/// siblings are discarded and the tagged subtree renders UNtransformed. `CaptureRoot` drains exactly the
+/// `!`-node's result (mark-based), so the sibling cube + the enclosing translate vanish.
+#[test]
+fn root_modifier_diverts_only_its_subtree() {
+    assert_eq!(
+        d3("translate([10, 0, 0]) { cube(1); !sphere(2, $fn = 8); }"),
+        d3("sphere(2, $fn = 8);"),
+    );
+}
+
+/// A3/A5 + INVARIANT 4 — first-error-wins: the two-class drain runs the FIRST failing assert and DISCARDS every
+/// later work task, so the error is "first", never "second" (a re-dispatching drain would run the second
+/// assert → a different error).
+#[test]
+fn first_error_wins_the_drain_discards_the_rest() {
+    let err = evaluate_geometry("union() { assert(false, \"first\"); assert(false, \"second\"); }")
+        .unwrap_err();
+    let msg = format!("{err}");
+    assert!(msg.contains("first"), "expected the FIRST assert's error, got {msg:?}");
+    assert!(
+        !msg.contains("second"),
+        "the second assert must NOT run (the drain discards it): {msg:?}"
+    );
+}

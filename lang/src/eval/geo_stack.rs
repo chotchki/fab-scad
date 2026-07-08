@@ -4,49 +4,169 @@
 //! load-bearing corrections a 4-lens design review caught (arity-by-MARK not count; a two-class error DRAIN),
 //! and the increment plan live in `docs/m3-explicit-eval-spec.md` §DECISION.
 //!
-//! INCREMENT 1a (this file, so far): the driver SKELETON + the fallthrough SHIM. Every statement is still
-//! dispatched through the recursive [`eval_stmt`], so the driver is a transparent pass-through — the dual-path
-//! bridge that lets each dispatch arm convert to a native work-stack push (A1+) independently, each gated on the
-//! differential. Host recursion only actually disappears once the last recursive arm is converted.
+//! Converted so far (A2–A7): bare block, `if`, `let`, echo/assert passthrough, transforms, booleans, hull,
+//! minkowski, offset, the extrudes, projection, color, and the `*`/`%`/`!` modifiers. STILL shimmed to the
+//! recursive dispatch (increment 2): `call_user_module`, `children()`, and `for`/`intersection_for` — the arms
+//! that push/pop the `Ctx` module + children frames. The shim ([`shim_stmt`] → `eval_stmt_dispatch`) is a
+//! complete fallback, so the driver is always correct; converting an arm only moves it off the host stack.
 
+use std::collections::BTreeMap;
 use std::sync::OnceLock;
 
-use super::{Ctx, Geo, Scope, Stmt, eval_stmt};
+use super::geo::GeoNode;
+use super::geo2d::Shape2D;
+use super::{
+    Children, Ctx, ExtrudeKind, Geo, Join2D, Scope, Stmt, Value, boolean_of, check_assert,
+    emit_echo, eval_stmt_dispatch, eval_with_ctx, force_2d, force_3d, geo, module,
+    partition_children, transform_of, union_of,
+};
+use crate::geom::{Affine, Rgba};
 use crate::parser::StmtKind;
 
-/// Is the explicit-stack geometry driver the active eval path? Default ON — the driver (all-shim until arms
-/// convert) is behaviorally identical to the recursive path, so it is the tested path. `FAB_GEO_DRIVER=0` forces
-/// the recursive path for an A/B differential. Read once (the switch can't change mid-run).
+/// Is the explicit-stack geometry driver the active eval path? Default ON — the driver is behaviorally
+/// identical to the recursive path (unconverted arms shim to it), so it is the tested path. `FAB_GEO_DRIVER=0`
+/// forces the recursive path for an A/B differential. Read once (the switch can't change mid-run).
 pub(super) fn driver_enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
     *ON.get_or_init(|| std::env::var("FAB_GEO_DRIVER").map_or(true, |v| v != "0"))
 }
 
-/// A resolved N-ary/unary combinator a [`GTask::Collect`] applies to its drained child `Geo`s to build ONE node
-/// — the geometry analogue of the expression machine's `Apply` carrying bound arg values. Populated arm-by-arm
-/// as the dispatch converts (A2+).
-enum Combinator {
-    /// Union the children — a bare block / implicit group. `union_of` handles the null / one / many collapse
-    /// (`{}` → `Empty`, one → itself, many → `Union`) and the 2D/3D mixing resolution.
+/// Which CSG boolean — a name-free tag so [`Combinator`] carries no lifetime.
+#[derive(Clone, Copy)]
+enum BoolKind {
     Union,
+    Difference,
+    Intersection,
+}
+
+impl BoolKind {
+    fn name(self) -> &'static str {
+        match self {
+            BoolKind::Union => "union",
+            BoolKind::Difference => "difference",
+            BoolKind::Intersection => "intersection",
+        }
+    }
+}
+
+/// A RESOLVED unary/N-ary combinator a [`GTask::Collect`] applies to its drained child `Geo`s to build ONE node
+/// — the geometry analogue of the expression machine's `Apply` carrying bound arg values. Every variant reuses
+/// the SAME wrap helper the recursive dispatch uses, so the produced node is bit-identical. Args that don't
+/// depend on the evaluated children resolve EAGERLY at dispatch (the payloads here); `RotateExtrude` is the one
+/// that needs the child first (its segment count reads the profile's `max_x`), so it carries the raw args.
+enum Combinator {
+    /// Bare block / implicit group — `union_of` handles the null/one/many collapse + the 2D/3D mixing.
+    Union,
+    /// An affine transform wrapping the union of its children.
+    Transform(Affine),
+    /// A CSG boolean over its children (difference = first minus rest, etc.).
+    Boolean(BoolKind),
+    /// The convex hull of the children (3D only; 2D is LOUD-deferred).
+    Hull,
+    /// The Minkowski sum of the children (3D only; 2D is LOUD-deferred).
+    Minkowski,
+    /// `offset()` — grow/shrink the 2D outline of its (force-2D'd) child.
+    Offset { delta: f64, join: Join2D, segments: u32 },
+    /// `linear_extrude()` — sweep the (force-2D'd) child up +Z.
+    LinearExtrude(ExtrudeKind),
+    /// `rotate_extrude()` — revolve the (force-2D'd) child; the kind resolves in `apply` off the child's `max_x`.
+    RotateExtrude {
+        positional: Vec<Value>,
+        named: BTreeMap<String, Value>,
+        child_scope: Scope,
+    },
+    /// `projection()` — flatten the (force-3D'd) child to 2D (`cut` = slice at z=0, else shadow).
+    Projection { cut: bool },
+    /// `color()` — tag the child's subtree; `None` (invalid color) inherits (no node).
+    Color(Option<Rgba>),
 }
 
 impl Combinator {
     /// Apply this combinator to the child `Geo`s a [`GTask::Collect`] drained (in source order), producing ONE
-    /// node — reusing the same wrap helpers the recursive dispatch uses, so the result is bit-identical.
-    fn apply(self, children: Vec<Geo>, ctx: &Ctx<'_>) -> Geo {
-        match self {
-            Combinator::Union => super::union_of(children, ctx),
-        }
+    /// node. Fallible: 2D hull/minkowski are LOUD-deferred (same error text as the recursive dispatch).
+    fn apply(self, children: Vec<Geo>, ctx: &Ctx<'_>) -> crate::Result<Geo> {
+        Ok(match self {
+            Combinator::Union => union_of(children, ctx),
+            Combinator::Transform(matrix) => transform_of(matrix, union_of(children, ctx)),
+            Combinator::Boolean(kind) => boolean_of(kind.name(), children, ctx),
+            Combinator::Hull => match partition_children(children, ctx) {
+                Children::D3(kids) => Geo::D3(GeoNode::Hull(kids)),
+                Children::D2(_) => {
+                    return Err(crate::Error::Unimplemented(
+                        "hull() over 2D children is not yet wired (the 2D backend has no hull op) — a J.3 \
+                         follow-up",
+                    ));
+                }
+            },
+            Combinator::Minkowski => match partition_children(children, ctx) {
+                Children::D3(kids) => Geo::D3(GeoNode::Minkowski(kids)),
+                Children::D2(_) => {
+                    return Err(crate::Error::Unimplemented(
+                        "minkowski() over 2D children is not yet wired (Clipper2's MinkowskiSum, via the \
+                         CrossSection binding) — a J.3 follow-up",
+                    ));
+                }
+            },
+            Combinator::Offset {
+                delta,
+                join,
+                segments,
+            } => Geo::D2(Shape2D::Offset {
+                delta,
+                join,
+                segments,
+                child: Box::new(force_2d(union_of(children, ctx), ctx)),
+            }),
+            Combinator::LinearExtrude(kind) => Geo::D3(GeoNode::Extrude {
+                kind,
+                child: Box::new(force_2d(union_of(children, ctx), ctx)),
+            }),
+            Combinator::RotateExtrude {
+                positional,
+                named,
+                child_scope,
+            } => {
+                let shape = force_2d(union_of(children, ctx), ctx);
+                let kind = geo::resolve_rotate_extrude(
+                    &positional,
+                    &named,
+                    &child_scope,
+                    shape.max_x().unwrap_or(0.0),
+                );
+                Geo::D3(GeoNode::Extrude {
+                    kind,
+                    child: Box::new(shape),
+                })
+            }
+            Combinator::Projection { cut } => Geo::D2(Shape2D::Projection {
+                cut,
+                child: Box::new(force_3d(union_of(children, ctx), ctx)),
+            }),
+            Combinator::Color(color) => match (union_of(children, ctx), color) {
+                (Geo::D3(node), Some(color)) => Geo::D3(GeoNode::Color {
+                    color,
+                    child: Box::new(node),
+                }),
+                (Geo::D2(shape), Some(color)) => Geo::D2(Shape2D::Color {
+                    color,
+                    child: Box::new(shape),
+                }),
+                // invalid color → inherit: the child unchanged, either dimension.
+                (child, None) => child,
+            },
+        })
     }
 }
 
 /// One step on the geometry driver's work stack. WORK tasks may eval / emit / return `Err`; CLEANUP tasks are
 /// infallible ctx side-effects that MUST run on both the happy AND the error-drain path (LIFO), so the driver
 /// keys its error handling on this WORK/CLEANUP split, never on a name or a push/pop heuristic.
-#[allow(dead_code, reason = "M.3 increment 1a: only Stmt is constructed yet; the rest land with A1+ arms")]
+#[allow(
+    dead_code,
+    reason = "M.3 increment 2 constructs PopModuleFrame + RestoreChildrenFrame (call_user_module / children())"
+)]
 enum GTask<'a> {
-    /// WORK — dispatch ONE statement (increment 1a: always the shim → recursive `eval_stmt`).
+    /// WORK — dispatch ONE statement (native arm, or the shim for a still-recursive arm).
     Stmt {
         stmt: &'a Stmt,
         scope: Scope,
@@ -65,12 +185,12 @@ enum GTask<'a> {
         comb: Combinator,
     },
     /// WORK — drain `results.split_off(mark)` (exactly what this block pushed, 0-or-1 per child stmt) and apply
-    /// `comb`, pushing ONE `Geo`. (A2+.)
+    /// `comb`, pushing ONE `Geo`.
     Collect { mark: usize, comb: Combinator },
     /// WORK — the `!` root modifier: drain `results.split_off(mark)` INTO `ctx.root_override` (consumes), so the
-    /// parent's `Collect` legitimately sees zero there. Discarded on the error path. (A7.)
+    /// parent's `Collect` legitimately sees zero there. Discarded on the error path.
     CaptureRoot { mark: usize },
-    /// CLEANUP — pop a scope-local module store pushed by an `EvalNodes` that had local defs. (A2+.)
+    /// CLEANUP — pop a scope-local module store pushed by an `EvalNodes` that had local defs.
     PopLocalModules,
     /// CLEANUP — the three-frame user-module pop: restore `module_depth` from the pre-call SNAPSHOT (never a
     /// decrement — it's a `Cell`), then pop `module_stack` + `children_stack`. (Increment 2.)
@@ -82,8 +202,7 @@ enum GTask<'a> {
 
 /// The top-level geometry entry: drive a PRE-HOISTED statement list (as [`eval_geometry`](super::eval_geometry)
 /// is always called — `run_stmts` publishes the global, `eval_nodes` hoists the child scope) and return the RAW
-/// top nodes (the caller — `run_stmts` or a combinator — applies any union / root-override). Increment 1a: each
-/// statement shims to the recursive `eval_stmt`, so this is a transparent peer of the recursive loop.
+/// top nodes (the caller — `run_stmts` or a combinator — applies any union / root-override).
 pub(super) fn eval_geometry_driver<'a>(
     stmts: &[&'a Stmt],
     scope: &Scope,
@@ -111,11 +230,7 @@ pub(super) fn eval_geometry_driver<'a>(
 /// tasks still fire (balancing ctx), but DISCARDS every WORK task without executing it — reproducing the
 /// recursive path's "first `?` wins, no later side effect" (a re-dispatching drain would emit phantom echoes /
 /// run later asserts → a different error + message stream, observable today).
-fn drive<'a>(
-    mut work: Vec<GTask<'a>>,
-    results: &mut Vec<Geo>,
-    ctx: &Ctx<'a>,
-) -> crate::Result<()> {
+fn drive<'a>(mut work: Vec<GTask<'a>>, results: &mut Vec<Geo>, ctx: &Ctx<'a>) -> crate::Result<()> {
     let mut first_err: Option<crate::Error> = None;
     while let Some(task) = work.pop() {
         // CLEANUP — always run (happy path AND drain), then move on.
@@ -157,8 +272,7 @@ fn run_cleanup<'a>(task: GTask<'a>, ctx: &Ctx<'a>) {
     }
 }
 
-/// Dispatch one WORK task. Increment 1a: only [`GTask::Stmt`] is ever constructed, handled by the shim; the
-/// native expansions (`EvalNodes`/`Collect`/`CaptureRoot`) land as their dispatch arms convert (A1+).
+/// Dispatch one WORK task.
 fn dispatch_work<'a>(
     task: GTask<'a>,
     work: &mut Vec<GTask<'a>>,
@@ -215,11 +329,15 @@ fn dispatch_work<'a>(
         // order — and apply the combinator, pushing ONE node.
         GTask::Collect { mark, comb } => {
             let children = results.split_off(mark);
-            results.push(comb.apply(children, ctx));
+            results.push(comb.apply(children, ctx)?);
             Ok(())
         }
-        GTask::CaptureRoot { .. } => {
-            unimplemented!("M.3 A7: the `!` root modifier converts here")
+        // The `!` root subtree resolved above `mark`; consume it into the program-global root override (so an
+        // ancestor `Collect` sees zero there, and `run_stmts` renders ONLY the `!`-tagged subtrees).
+        GTask::CaptureRoot { mark } => {
+            let captured = results.split_off(mark);
+            ctx.root_override.borrow_mut().extend(captured);
+            Ok(())
         }
         GTask::PopLocalModules | GTask::PopModuleFrame { .. } | GTask::RestoreChildrenFrame(_) => {
             unreachable!("CLEANUP tasks are handled in the driver loop, not dispatch_work")
@@ -228,7 +346,7 @@ fn dispatch_work<'a>(
 }
 
 /// Dispatch ONE statement: a converted arm pushes native work-stack tasks; every still-recursive arm falls
-/// through to the [`shim_stmt`] bridge. Arms convert leaf → simple (A1+), each gated on the differential.
+/// through to the [`shim_stmt`] bridge.
 fn dispatch_stmt<'a>(
     stmt: &'a Stmt,
     scope: Scope,
@@ -250,15 +368,177 @@ fn dispatch_stmt<'a>(
             });
             Ok(())
         }
+        // A6 — `if (cond) A else B` contributes the TAKEN branch's geometry (the untaken branch is inert).
+        StmtKind::If { cond, then, els } => {
+            let branch = if eval_with_ctx(cond, &scope, ctx)?.is_truthy() {
+                then
+            } else {
+                els
+            };
+            work.push(GTask::EvalNodes {
+                stmts: branch.as_slice(),
+                scope,
+                global,
+                island,
+                comb: Combinator::Union,
+            });
+            Ok(())
+        }
+        StmtKind::Module(mi) => dispatch_module(stmt, mi, scope, global, island, work, results, ctx),
+        // Empty / function-def / module-def / assignment / (nested, LOUD) use-include — shim.
         _ => shim_stmt(stmt, scope, &global, island, ctx, results),
     }
 }
 
-/// The fallthrough SHIM: run ONE statement through the existing recursive `eval_stmt` into a scratch vec, then
-/// push its result(s) onto the shared result stack. A geometry statement produces 0 or 1 `Geo` (defs /
-/// assignments / disabled-`*%` / childless echo-assert push nothing; a `!`-node diverts into `root_override`
-/// inside `eval_stmt`, so the scratch stays empty for it). This is the dual-path bridge — behaviorally
-/// identical to the recursive `eval_geometry` loop, so an unconverted arm keeps the exact recursive semantics.
+/// Dispatch a module INSTANTIATION. The `!`/`*`/`%` modifiers are handled HERE (so the shim path calls
+/// `eval_stmt_dispatch`, which does NOT recheck them — each modifier is owned by exactly one place), then the
+/// name routes to a native combinator or falls through to the shim (children / for / user-module / primitive).
+#[allow(
+    clippy::too_many_arguments,
+    reason = "mirrors eval_stmt_dispatch's threaded context (stmt/scope/global/island/work/results/ctx)"
+)]
+fn dispatch_module<'a>(
+    stmt: &'a Stmt,
+    mi: &'a crate::parser::ModuleInstantiation,
+    scope: Scope,
+    global: Scope,
+    island: usize,
+    work: &mut Vec<GTask<'a>>,
+    results: &mut Vec<Geo>,
+    ctx: &Ctx<'a>,
+) -> crate::Result<()> {
+    // `!` ROOT — capture this subtree into the root override. Push `CaptureRoot` FIRST (bottom): the body's
+    // tasks (or the shim's synchronous push) land ABOVE the mark, then `CaptureRoot` drains exactly them.
+    if mi.modifiers.root {
+        work.push(GTask::CaptureRoot {
+            mark: results.len(),
+        });
+    }
+    // `*` DISABLE / `%` BACKGROUND — no geometry AND no side effects, before ANY name dispatch.
+    if mi.modifiers.disable || mi.modifiers.background {
+        return Ok(());
+    }
+    let name = mi.name.as_str();
+    // A block's worth of children as a `comb`-combined `EvalNodes` in `scope` — the shared shape of the
+    // transform / boolean / hull / offset / extrude / projection / color arms.
+    let group = |work: &mut Vec<GTask<'a>>, comb, scope| {
+        work.push(GTask::EvalNodes {
+            stmts: mi.children.as_slice(),
+            scope,
+            global: global.clone(),
+            island,
+            comb,
+        });
+    };
+    match name {
+        // A3 — echo/assert are PASSTHROUGH: the console side effect / hard check FIRST (can error), then the
+        // children render as an implicit union (iff any).
+        "echo" | "assert" => {
+            if name == "echo" {
+                emit_echo(&mi.args, &scope, &scope, ctx)?;
+            } else {
+                check_assert(&mi.args, &scope, &scope, ctx)?;
+            }
+            if !mi.children.is_empty() {
+                group(work, Combinator::Union, scope);
+            }
+            Ok(())
+        }
+        // A4 — an affine transform wraps the union of its children ($-args don't reach it → child scope dropped).
+        _ if geo::is_transform(name) => {
+            let (positional, named, _child_scope) = module::eval_args(mi, &scope, ctx)?;
+            let matrix = geo::transform_matrix(name, &positional, &named);
+            group(work, Combinator::Transform(matrix), scope);
+            Ok(())
+        }
+        // A5 — CSG booleans / hull / minkowski over the children.
+        _ if geo::is_boolean(name) => {
+            let kind = match name {
+                "difference" => BoolKind::Difference,
+                "intersection" => BoolKind::Intersection,
+                _ => BoolKind::Union,
+            };
+            group(work, Combinator::Boolean(kind), scope);
+            Ok(())
+        }
+        "hull" => {
+            group(work, Combinator::Hull, scope);
+            Ok(())
+        }
+        "minkowski" => {
+            group(work, Combinator::Minkowski, scope);
+            Ok(())
+        }
+        // A6 — the fixed-dimension bridges + color, each resolving its params eagerly off the child scope.
+        "offset" => {
+            let (positional, named, child_scope) = module::eval_args(mi, &scope, ctx)?;
+            let (delta, join, segments) = geo::resolve_offset(&positional, &named, &child_scope);
+            group(
+                work,
+                Combinator::Offset {
+                    delta,
+                    join,
+                    segments,
+                },
+                scope,
+            );
+            Ok(())
+        }
+        "linear_extrude" => {
+            let (positional, named, child_scope) = module::eval_args(mi, &scope, ctx)?;
+            let kind = geo::resolve_linear_extrude(&positional, &named, &child_scope);
+            group(work, Combinator::LinearExtrude(kind), scope);
+            Ok(())
+        }
+        "rotate_extrude" => {
+            // The segment count needs the profile's `max_x`, so resolve the kind in `apply` (after the child).
+            let (positional, named, child_scope) = module::eval_args(mi, &scope, ctx)?;
+            group(
+                work,
+                Combinator::RotateExtrude {
+                    positional,
+                    named,
+                    child_scope,
+                },
+                scope,
+            );
+            Ok(())
+        }
+        "projection" => {
+            let (positional, named, _child_scope) = module::eval_args(mi, &scope, ctx)?;
+            let cut = matches!(
+                named.get("cut").or_else(|| positional.first()),
+                Some(Value::Bool(true))
+            );
+            group(work, Combinator::Projection { cut }, scope);
+            Ok(())
+        }
+        "color" => {
+            let (positional, named, _child_scope) = module::eval_args(mi, &scope, ctx)?;
+            let color = geo::resolve_color(&positional, &named);
+            group(work, Combinator::Color(color), scope);
+            Ok(())
+        }
+        // A6 — `let(a=…) children` binds SEQUENTIALLY into a child scope, then the children render there.
+        "let" => {
+            let mut child = scope.child();
+            for arg in &mi.args {
+                let value = eval_with_ctx(&arg.value, &child, ctx)?;
+                child.bind(arg.name.as_deref().unwrap_or(""), value);
+            }
+            group(work, Combinator::Union, child);
+            Ok(())
+        }
+        // children() / for / intersection_for / user-module call / builtin primitive → shim (increment 2).
+        _ => shim_stmt(stmt, scope, &global, island, ctx, results),
+    }
+}
+
+/// The fallthrough SHIM: run ONE statement through the recursive `eval_stmt_dispatch` into a scratch vec, then
+/// push its result(s) onto the shared result stack. `eval_stmt_dispatch` (NOT `eval_stmt`) so the `!`/`*`/`%`
+/// modifiers — already handled by [`dispatch_module`] — are not double-applied. A statement produces 0 or 1
+/// `Geo`. This is the dual-path bridge — behaviorally identical to the recursive loop, so an unconverted arm
+/// keeps the exact recursive semantics.
 fn shim_stmt<'a>(
     stmt: &'a Stmt,
     scope: Scope,
@@ -267,14 +547,13 @@ fn shim_stmt<'a>(
     ctx: &Ctx<'a>,
     results: &mut Vec<Geo>,
 ) -> crate::Result<()> {
-    // Skip assignments the way eval_geometry does (they hoist; eval_stmt no-ops them anyway — this just avoids
-    // the call). Everything else dispatches recursively into a scratch vec.
+    // Skip assignments the way eval_geometry does (they hoist; the dispatcher no-ops them anyway).
     if matches!(stmt.kind, StmtKind::Assignment { .. }) {
         return Ok(());
     }
     let mut scope = scope;
     let mut scratch: Vec<Geo> = Vec::new();
-    eval_stmt(stmt, &mut scope, global, island, ctx, &mut scratch)?;
+    eval_stmt_dispatch(stmt, &mut scope, global, island, ctx, &mut scratch)?;
     results.extend(scratch);
     Ok(())
 }

@@ -16,12 +16,12 @@ fn main() {
         PathBuf::from(args.next().expect("usage: models_worker <model.scad> [lib_dir ...]"));
     let libs: Vec<PathBuf> = args.map(PathBuf::from).collect();
 
-    // Eval on a 1 GiB stack: the evaluator is heap-bounded for RECURSION, but dropping a deeply-nested
-    // CSG/value tree still walks the host stack past the default 8 MiB (a real model overflowed it), and a
-    // stack overflow is an uncatchable process abort — give it the headroom the parent's watchdog assumes.
+    // Eval on the big [`fab_scad::EVAL_STACK`]: statement/geometry eval assembly is still HOST-recursive
+    // (bounded by the module-depth × source-nesting guards, but ~½ GiB deep at those limits — M.2), and a
+    // stack overflow is an uncatchable process abort. A SO here aborts only this worker; the parent reclaims.
     let out = std::thread::Builder::new()
         .name("model-eval".into())
-        .stack_size(1 << 30)
+        .stack_size(fab_scad::EVAL_STACK)
         .spawn(move || {
             let start = std::time::Instant::now();
             let res = fab_scad::import::resolve_geometry_file(&model, &libs);

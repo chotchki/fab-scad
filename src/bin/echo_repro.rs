@@ -17,9 +17,9 @@ fn main() {
         .unwrap_or_else(|| std::path::Path::new("."))
         .to_path_buf();
 
-    // Big stack (deep-tree eval/Drop) — same reason as the other repro tools.
+    // Big stack: deep eval-assembly host recursion (see [`fab_scad::EVAL_STACK`]) — same as the other repro tools.
     let out = std::thread::Builder::new()
-        .stack_size(1 << 30)
+        .stack_size(fab_scad::EVAL_STACK)
         .spawn(move || match fab_lang::evaluate_geometry_with_base_full(&source, &base, &libs) {
             Ok((_, messages)) => messages
                 .iter()

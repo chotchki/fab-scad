@@ -149,7 +149,8 @@ added 2026-07-07.
 ## Phase M - M - Heap-bounded eval (last recursion removal)
 - [x] M.1 - M.1 - Iterative Drop for deep GeoNode/Shape2D/Value trees
 - [x] M.1b - M.1b - Value deep-list Drop: ValueList newtype (heap-bounded, no arithmetic-hot-path cost)
-- [ ] M.2 - M.2 - Assess + fix eval-assembly recursion; drop the 1 GiB stack hacks
+- [x] M.2 - M.2 - Assess eval-assembly recursion + correct the reserve rationale (EVAL_STACK); fix split to M.3
+- [ ] M.3 - M.3 - Explicit-stack eval assembly (remove host recursion; default + wasm stack)
 ## Phase N - N - Interpreter fast-paths (our builtins)
 - [ ] N.1 - N.1 - Re-profile a slow model on RELEASE with a sampling profiler
 - [ ] N.2 - N.2 - Fast-path builtin dispatch (unary predicates + len/concat)

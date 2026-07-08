@@ -157,7 +157,7 @@ fn bosl2_examples_vs_oracle() {
     std::thread::scope(|s| {
         for _ in 0..CONCURRENCY {
             std::thread::Builder::new()
-                .stack_size(1 << 30) // deep-tree eval/Drop, like the models harness
+                .stack_size(fab_scad::EVAL_STACK) // deep eval-assembly host recursion, like the models harness
                 .spawn_scoped(s, || loop {
                     let idx = next.fetch_add(1, Ordering::Relaxed);
                     if idx >= examples.len() {
@@ -216,7 +216,7 @@ fn compare_with_timeout(path: &Path, libs: &[PathBuf], budget: Duration) -> Resu
     let (tx, rx) = std::sync::mpsc::channel();
     let (p, l) = (path.to_path_buf(), libs.to_vec());
     std::thread::Builder::new()
-        .stack_size(1 << 30)
+        .stack_size(fab_scad::EVAL_STACK)
         .spawn(move || {
             let _ = tx.send(fab_scad::differ::diff_files(&p, &l));
         })

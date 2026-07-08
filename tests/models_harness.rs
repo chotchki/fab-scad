@@ -236,16 +236,16 @@ fn run_worker(worker: &str, model: &Path, libs: &[PathBuf], budget: Duration) ->
     }
 }
 
-/// Boolean-residual-compare ONE rendered model against the oracle, on a 1 GiB thread with a `budget`. The
-/// big stack matters: `diff_files` re-runs scad-rs IN-PROCESS, and the main test thread's default 8 MiB
-/// overflows dropping a deep tree (an early version SIGABRT'd the whole run here) — the worker + profile legs
-/// already eval on 1 GiB for the same reason. The oracle render inside is bounded by its own timeout; this
+/// Boolean-residual-compare ONE rendered model against the oracle, on a [`fab_scad::EVAL_STACK`] thread with a
+/// `budget`. The big stack matters: `diff_files` re-runs scad-rs IN-PROCESS, and deep eval-assembly host
+/// recursion overflows the main test thread's default (an early version SIGABRT'd the whole run here) — the
+/// worker + profile legs eval on the same reserve. The oracle render inside is bounded by its own timeout; this
 /// `budget` guards the scad-rs side + a slow oracle. A leaked thread on timeout dies at process exit.
 fn compare_one(model: PathBuf, libs: Vec<PathBuf>, budget: Duration) -> Result<(), String> {
     let (tx, rx) = mpsc::channel();
     thread::Builder::new()
         .name("compare".into())
-        .stack_size(1 << 30)
+        .stack_size(fab_scad::EVAL_STACK)
         .spawn(move || {
             let _ = tx.send(fab_scad::differ::diff_files(&model, &libs));
         })
@@ -413,7 +413,7 @@ fn models_profile_and_compare() {
         let libs_t = libs.clone();
         thread::Builder::new()
             .name("profile-eval".into())
-            .stack_size(1 << 30)
+            .stack_size(fab_scad::EVAL_STACK)
             .spawn(move || {
                 let _ = fab_scad::import::resolve_geometry_file(&t, &libs_t);
                 let _ = tx.send(());

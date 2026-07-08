@@ -13,9 +13,9 @@ fn main() {
     let file = PathBuf::from(args.next().expect("usage: diff_repro <file.scad> [lib_dir ...]"));
     let libs: Vec<PathBuf> = args.map(PathBuf::from).collect();
 
-    // Big stack (deep-tree Drop overflows the default 8 MiB) — same reason the models harness evals on 1 GiB.
+    // Big stack: deep eval-assembly host recursion (see [`fab_scad::EVAL_STACK`]) — Drop is iterative now (M.1).
     let out = std::thread::Builder::new()
-        .stack_size(1 << 30)
+        .stack_size(fab_scad::EVAL_STACK)
         .spawn(move || {
             // Per-engine volume + genus first (which direction the divergence goes — removing too much vs too
             // little), then the verdict.

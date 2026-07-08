@@ -45,6 +45,17 @@ pub mod slicing;
 #[cfg(feature = "native")]
 pub mod smoke;
 pub mod stl;
+
+/// The stack an eval thread must reserve. Statement/geometry eval assembly (`eval_stmt` → `eval_geometry` →
+/// `call_user_module` → children) is still HOST-recursive — unlike the expression machine (explicit stack,
+/// heap-bounded) and, since M.1/M.1b, unlike tree `Drop` (iterative). Its depth is BOUNDED by the two guards
+/// `MAX_MODULE_DEPTH` (256 nested user-module calls) × the parser's `MAX_DEPTH` (64 source-nesting levels),
+/// so it can't run away — but the guard-LIMIT worst case (a ~255-deep recursive module, each level nesting
+/// ~60 transforms) is a genuine ~15 K-frame host recursion that MEASURED at ~½ GiB in debug / ~130 MiB in
+/// release (M.2). So this reserve isn't for `Drop` (the old comments' claim — that's iterative now); it's what
+/// keeps DEEP eval-assembly from a SIGABRT until the explicit-stack conversion (M.3) removes host recursion
+/// from the geometry pipeline entirely and lets eval run on a default — and wasm-small — stack.
+pub const EVAL_STACK: usize = 1 << 30;
 // surface() heightmap → mesh (M.5.2, DAT-only): needs fab-lang (Mesh); called by the import reader.
 #[cfg(feature = "geometry")]
 pub mod surface;

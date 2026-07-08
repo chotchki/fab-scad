@@ -168,9 +168,9 @@ added 2026-07-07.
 - [x] Q.3 - Dogfood bug: BOSL2 constants (UP/CENTER/_EPSILON) undef in module defaults via transitive `use`
 - [ ] Q.4 - Q.4 - SVG (2D vector) import: import(&lt;file.svg&gt;) → Shape2D via usvg (the text() playbook)
   - [x] Q.4.1 - Q.4.1 - Widen the import seam to 2D-or-3D (Imported enum)
-  - [ ] Q.4.2 - Q.4.2 - usvg parser → contours (scale 25.4/72 @ dpi=72, Y-flip about size height)
-  - [ ] Q.4.3 - Q.4.3 - Oracle-match validation across the SVG corpus (differ); document v1 simplifications
-  - [ ] Q.4.4 - Q.4.4 - Tests + docs/svg-import-design.md + remindwall FamilyLogo end-to-end
+  - [x] Q.4.2 - Q.4.2 - usvg parser → contours (scale 25.4/72 @ dpi=72, Y-flip about size height)
+  - [x] Q.4.3 - Q.4.3 - Oracle-match validation across the SVG corpus (differ); document v1 simplifications
+  - [x] Q.4.4 - Q.4.4 - Tests + docs/svg-import-design.md + remindwall FamilyLogo end-to-end
 
 ## Backlog (not yet phased)
 

@@ -45,6 +45,10 @@ pub mod slicing;
 #[cfg(feature = "native")]
 pub mod smoke;
 pub mod stl;
+// SVG (2D vector) import (Q.4): usvg → contours, the fab-scad side of the 2D import path. kernel gate
+// (usvg lives there); reached only via `import`, which also needs kernel + native.
+#[cfg(feature = "kernel")]
+pub mod svg;
 
 /// A modest stack reserve for the render/eval harness threads. As of M.3, geometry EVAL is HEAP-bounded (the
 /// explicit-stack driver — no host recursion; proven at `module_recursion_bound.rs` on a 512 KiB stack), joining

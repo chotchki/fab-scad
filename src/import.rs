@@ -31,7 +31,10 @@ pub fn read_import(base_dir: &Path, raw: &str) -> Result<Imported, Error> {
     match ext.as_str() {
         "stl" => stl_mesh(&path).map(Imported::Mesh),
         "3mf" => threemf_mesh(&path).map(Imported::Mesh),
-        "svg" | "dxf" => loud(raw, "2D vector import (svg/dxf) is deferred — no 2D import path yet"),
+        "svg" => crate::svg::svg_contours(&path)
+            .map(Imported::Contours)
+            .map_err(|e| Error::Load(format!("{}: {e:#}", path.display()))),
+        "dxf" => loud(raw, "DXF (2D vector) import is deferred — SVG is the wired 2D path (Q.4)"),
         "off" => loud(raw, "OFF import is deferred — the OFF reader isn't wired"),
         "dat" => crate::surface::dat_mesh(&path)
             .map(Imported::Mesh)
@@ -269,5 +272,29 @@ mod tests {
         let missing = unique("absent.stl");
         let err = read_import(&tmp(), &missing).unwrap_err();
         assert!(format!("{err}").contains(&missing), "got {err}");
+    }
+
+    #[test]
+    fn svg_import_resolves_to_a_2d_polygon() {
+        // The Q.4 payoff end to end: a `.svg` import flows through the widened seam to a 2D leaf (NOT a 3D
+        // mesh). A 30×40 rect at 100×100 viewBox (unitless → 72-dpi); the reader Y-flips + scales, so the
+        // one contour has 4 corners spanning ~30·(25.4/72) mm in x.
+        let name = unique("stamp.svg");
+        std::fs::write(
+            tmp().join(&name),
+            r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><rect x="10" y="20" width="30" height="40" fill="black"/></svg>"#,
+        )
+        .unwrap();
+        let src = format!("import(\"{name}\");");
+        match resolve_geometry_with_base(&src, &tmp(), &[]).expect("resolves") {
+            Geo::D2(fab_lang::Shape2D::Polygon(ref contours)) => {
+                assert_eq!(contours.len(), 1, "one rect subpath → one contour");
+                assert_eq!(contours[0].len(), 4, "a rect is 4 corners");
+                let width = contours[0].iter().map(|p| p.x).fold(f64::MIN, f64::max)
+                    - contours[0].iter().map(|p| p.x).fold(f64::MAX, f64::min);
+                assert!((width - 30.0 * 25.4 / 72.0).abs() < 1e-6, "x span {width}");
+            }
+            other => panic!("expected a 2D polygon leaf, got {other:?}"),
+        }
     }
 }

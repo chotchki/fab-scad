@@ -64,7 +64,7 @@ members = ["geom", "gui", "jit", "lang", "web"]
 default = ["kernel", "native"]
 # `geometry` (fab-lang) too: the kernel now speaks the shared geom vocabulary (Vec3/Tri/Affine), so
 # Solid's mesh + transform APIs are typed. fab-lang is pure Rust — cheap to pull in alongside Manifold.
-kernel = ["geometry", "dep:manifold3d", "dep:threemf", "dep:zip", "dep:quick-xml"]
+kernel = ["geometry", "dep:manifold3d", "dep:threemf", "dep:zip", "dep:quick-xml", "dep:usvg"]
 # Everything that needs an OS (18.3): the OpenSCAD spawn, publish (blocking reqwest), project
 # scaffolding, the smoke sweep, and the CLI-only deps. `--no-default-features` is the wasm32-safe
 # core — pure geometry/slicing/spec logic, no process spawn, no network.
@@ -86,6 +86,12 @@ threemf = { version = "0.8.0", optional = true }
 # threemf's serde can't round-trip <m:basematerials> (namespace-prefix renames) — threemf_in
 # pull-parses the materials table itself, prefix-agnostic.
 quick-xml = { version = "0.39", optional = true }
+# SVG (2D vector) import (Q.4). usvg NORMALIZES an SVG document — resolves viewBox/units/transforms, expands
+# shapes (rect/circle/ellipse/line/polyline/polygon) + use/defs/styles into a flat tree of Bézier paths — so
+# the reader only owns flattening + the OpenSCAD scale/Y-flip affine. default-features=false drops the `text`
+# feature (fontdb + system-font lookup = non-deterministic, banned by doctrine #36); SVG <text> then imports
+# EMPTY, which is exactly what OpenSCAD's own SVG importer does with text.
+usvg = { version = "0.45", optional = true, default-features = false }
 # The geomsvc wire codec (worker postMessage envelope). Wire types are bincode-safe by
 # construction — no untagged enums (Num stays OUT of the wire).
 bincode = "1"

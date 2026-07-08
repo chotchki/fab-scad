@@ -136,6 +136,38 @@ as a hotspot, the fix is a precomputed per-frame `$`-context identity (a rolling
 `$`-context id maintained at frame creation, O(1) to read) and/or a lazily-cached content-hash on heavy list
 `Value`s (`under_sink_guide`'s 936-elem args). Not built until the profile demands it.
 
+## Built & validated — outcome (2026-07-08)
+
+Landed the reviewed design. It is **correct** and a **real win on the hot path**, but **default OFF**
+(`FAB_EVAL_CACHE=1` to opt in) because it does harm on a class of low-benefit models — do-no-harm wins.
+
+**Correctness — proven.** With the cache ON vs OFF the BOSL2 corpus is bit-identical: both 900/901, the SAME
+single failure (`test_gaussian_rands`, a pre-existing borderline timeout). Zero assertion divergences — the
+self-checking corpus would fail an assert on any wrong value. All the review's fences are in: closure env in
+the key (`Scope::frame_id`), O(1) `$`-context identity (`DynCtxNode`), the message/rand/closures/`parent_module`
+delta purity fence. (The A/B run also CAUGHT a real bug mid-build — the first pass regressed 3 tests on TIME,
+which is what surfaced the cost problem below.)
+
+**Perf — a win where redundancy meets expensive bodies, a loss where it doesn't.** Opt-in vs default, release:
+
+| model | cache ON | effect |
+|---|---|---|
+| pill_holder_smaller | 3.7 s vs 5.3 s | **+29%** |
+| garage_door | 3.5 s vs 4.9 s | **+28%** |
+| corner_brace | 238 ms vs 302 ms | **+21%** |
+| under_sink_guide | 7.4 s vs 6.3 s | **−17%** |
+
+**Why not default ON — the wall we hit.** `under_sink_guide` is call-heavy with big-list args and cheap bodies:
+the per-call GATE overhead alone (before any caching) is a net loss, and NO static or learned gate fixed it
+cleanly. Tried and REMOVED: a body-span static filter and a learned work-vs-key-size cost-weight — both added
+per-call overhead that RE-broke borderline corpus tests (`spheroid`) while barely denting the −17%, because
+the overhead is the gate itself, not the caching. What's left is the minimal `FAB_EVAL_CACHE_ARGCAP` gate
+(skip 300k-element `gaussian_rands`-class keys), which keeps the corpus clean.
+
+**The follow-up that makes default-ON safe:** a program-level AUTO-OFF — track running cost (key elements
+hashed) vs benefit (work a hit saves) and self-disable the cache for the rest of a program that shows
+net-negative. Bounded warmup overhead, then the bad models pay nothing. Filed as N.2c.2.
+
 ## Build order (reviewed — the `$`-context id lands BEFORE the gate)
 
 1. `RandStream::draws()` monotonic counter. ✅ (done)

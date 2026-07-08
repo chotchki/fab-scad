@@ -11,6 +11,7 @@
 //! I.1/I.4. Arithmetic/undef semantics are bug-for-bug OpenSCAD (`ops`).
 
 mod builtins;
+mod eval_cache;
 mod fmt;
 mod fragments;
 mod geo;
@@ -178,6 +179,15 @@ pub(super) struct Ctx<'a> {
     /// deliberately eval-order-stateful builtin (see [`rng::RandStream`]). Seeded `rands(…, seed=k)`
     /// bypasses this (a fresh engine → oracle-exact + pure).
     rand_stream: RefCell<rng::RandStream>,
+    /// The eval-memo cache (N.2c): user-function-call results keyed on (fn, env, args, reaching `$`-context).
+    /// Per-program (dies with the `Ctx`); off under `FAB_EVAL_CACHE=0`. See [`eval_cache`].
+    cache: eval_cache::CacheCell,
+    /// Monotone count of IMPURE READS a call's subtree performed — currently only `parent_module`, which
+    /// reads the module-instantiation stack (state NOT in the cache key + no message/rand delta to betray it).
+    /// The purity fence snapshots this before/after a call and DECLINES memoization if it moved, so any call
+    /// that (transitively) reads `parent_module` re-runs every time — closing the one wrong-hit class the
+    /// message/rand fence can't see. Transitive for free: a nested read bumps it, the outer call sees the delta.
+    impure_reads: std::cell::Cell<u64>,
 }
 
 /// One active module call's children context: the call-site child statements (borrowed from the AST) +
@@ -341,6 +351,21 @@ enum Task<'a> {
     /// without consuming it. Pushed BELOW a call's tasks so it fires the instant the return lands, before
     /// the caller reads it. Only ever pushed when the `FAB_TRACE` trace is on, so it's absent otherwise.
     TraceReturn { name: &'a str },
+    /// N.2c eval-memo: peek the top value (a memoizable call's just-produced result — like [`TraceReturn`],
+    /// pushed below the body so it fires the instant the result lands) and, IF the call's subtree left no
+    /// observable side effect (the `snap` counters are unmoved), store it under `key`. NEVER a `geo_stack`
+    /// cleanup task — it must not fire on the error path (an errored `?` abandons the whole task stack, so an
+    /// errored call is structurally uncacheable). Absent when the cache is off.
+    CacheStore { key: eval_cache::Key, snap: PuritySnap },
+}
+
+/// The side-effect counters snapshotted at a memoizable call's MISS; [`Task::CacheStore`] re-reads them when
+/// the body's value lands and stores only if NONE moved (the call was pure). See [`Ctx::impure_reads`].
+struct PuritySnap {
+    messages: usize,
+    draws: u64,
+    closures: usize,
+    impure_reads: u64,
 }
 
 /// Evaluate an expression to a [`Value`] on the explicit stack.
@@ -445,6 +470,34 @@ fn eval_with_global<'a>(
                 // `base` (the captured env) is load-bearing: a closure shares its body AST with siblings but
                 // captures a distinct env, so without it the count OVER-states the safe ceiling (review B1).
                 redundancy::record(body, &base, &vals, &caller);
+                // N.2c eval-memo: on a HIT, push the cached result and skip binding + body entirely (the whole
+                // point — the redundant subtree never runs). On a MISS, snapshot the side-effect counters and
+                // queue a `CacheStore` that memoizes the result IFF the subtree turns out pure.
+                // Gate the cache: enabled (opt-in) and args small enough to key cheaply (arg-cap — keeps a
+                // 300k-element `gaussian_rands` comprehension from paying a giant per-call key hash).
+                let store = if eval_cache::enabled() && eval_cache::worth_caching(&vals) {
+                    let key = eval_cache::Key::new(body, &base, &vals, &caller);
+                    let hit = ctx.cache.borrow_mut().get(&key);
+                    if let Some(v) = hit {
+                        values.push(v);
+                        continue;
+                    }
+                    Some((
+                        key,
+                        PuritySnap {
+                            messages: ctx.messages.borrow().len(),
+                            draws: ctx.rand_stream.borrow().draws(),
+                            closures: ctx.closures.borrow().len(),
+                            impure_reads: ctx.impure_reads.get(),
+                        },
+                    ))
+                } else {
+                    None
+                };
+                if let Some((key, snap)) = store {
+                    // Pushed BEFORE the body eval → fires (LIFO) once the result lands, like `TraceReturn`.
+                    tasks.push(Task::CacheStore { key, snap });
+                }
                 // The call scope is lexically a child of `base` (the callee's home global — hygiene) but
                 // DYNAMICALLY a child of `caller`, so it inherits the caller's reaching $-context by
                 // reference (no per-call $-copy — the L.2.7 fix). A call's own $-args (bound below) land in
@@ -489,6 +542,21 @@ fn eval_with_global<'a>(
             Task::TraceReturn { name } => {
                 if let Some(v) = values.last() {
                     trace::ret(name, v);
+                }
+            }
+            Task::CacheStore { key, snap } => {
+                // Peek the result (never consume — the caller reads it, like `TraceReturn`). Store ONLY if the
+                // body left NO observable side effect: unchanged message log, RNG draw count, closure table,
+                // and impure-read counter. An impure subtree (echo/warning, seedless `rands`, a created
+                // closure, a `parent_module` read) re-runs every time instead of serving a stale result.
+                if let Some(result) = values.last() {
+                    let pure = ctx.messages.borrow().len() == snap.messages
+                        && ctx.rand_stream.borrow().draws() == snap.draws
+                        && ctx.closures.borrow().len() == snap.closures
+                        && ctx.impure_reads.get() == snap.impure_reads;
+                    if pure {
+                        ctx.cache.borrow_mut().put(key, result.clone());
+                    }
                 }
             }
             Task::LetStep {
@@ -692,7 +760,10 @@ fn run_builtin(name: &str, args: &[Arg], values: &mut Vec<Value>, ctx: &Ctx<'_>)
     let result = if name == "rands" {
         builtins::rands(&values[start..], &mut ctx.rand_stream.borrow_mut())
     } else if name == "parent_module" {
-        // Reads the live module-instantiation name stack (control.cc) — stateful, like `rands`.
+        // Reads the live module-instantiation name stack (control.cc) — stateful, like `rands`. This read
+        // depends on the module-call context, which the eval-memo cache key does NOT capture, so mark the
+        // subtree impure: the fence then declines to memoize any call that (transitively) reads it (N.2c).
+        ctx.impure_reads.set(ctx.impure_reads.get() + 1);
         builtins::parent_module(&values[start..], &ctx.module_stack.borrow())
     } else {
         builtins::apply(name, &values[start..])
@@ -1170,6 +1241,8 @@ fn resolve_source(
         local_modules: RefCell::default(),
         module_stack: RefCell::default(),
         rand_stream: RefCell::new(rng::RandStream::new()),
+        cache: eval_cache::CacheCell::default(),
+        impure_reads: std::cell::Cell::new(0),
     };
     // Build each `use`d file's constant scope (islands 1..n) — hoisting needs the `Ctx` (constants can
     // call functions), which is why this runs AFTER construction, into the `RefCell`.
@@ -1891,6 +1964,8 @@ fn build_ctx(program: &Program) -> Ctx<'_> {
         local_modules: RefCell::default(),
         module_stack: RefCell::default(),
         rand_stream: RefCell::new(rng::RandStream::new()),
+        cache: eval_cache::CacheCell::default(),
+        impure_reads: std::cell::Cell::new(0),
     }
 }
 

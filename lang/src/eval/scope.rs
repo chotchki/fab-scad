@@ -38,6 +38,26 @@ struct Frame {
     /// the caller's reaching `$`-context BY REFERENCE — no per-call copy of the (BOSL2: 42-strong) `$`-set,
     /// which is the L.2.7 timeout fix (`specials()`-copy was O(#`$`-vars) on every call). See [`call_frame`].
     dynamic_parent: Option<Rc<Frame>>,
+    /// An O(1) IDENTITY for this frame's reaching `$`-context — the eval-memo cache key's `$`-context
+    /// component (N.2c). Inherited by Rc-clone when a frame adds no `$`-binding (the common case: a call
+    /// inherits its caller's context), replaced by a fresh node on any `$`-bind. Its POINTER is the identity;
+    /// see [`DynCtxNode`]. This is what lets the cache key a call's `$`-context WITHOUT the O(depth)
+    /// `specials()` walk B2 flagged — read it in O(1), share it across all calls under the same context.
+    dyn_ctx: Rc<DynCtxNode>,
+}
+
+/// An opaque IDENTITY for a reaching `$`-context (N.2c cache key). The Rc POINTER is the whole meaning: two
+/// frames holding the same `Rc<DynCtxNode>` share an identical reaching `$`-context (one was Rc-cloned from
+/// the other on inherit); a `$`-bind mints a fresh node, so a changed context is a distinct pointer. Pointer
+/// identity is EXACT and collision-free, and the cache HOLDS the `Rc` in its key so the address can't be
+/// recycled under a stale entry (the ABA hazard). Deliberately holds NO parent link: a deep `$`-override
+/// recursion (`module r(n){ $fn=n; r(n-1); }`) would otherwise build a chain that drops recursively and
+/// overflows — the M.1/L.2.7 class. `depth` keeps it non-ZST (so `Rc::new` yields distinct addresses) and is
+/// a debug aid only; two DISTINCT contexts that happen to share a depth are still distinct allocations.
+#[derive(Debug)]
+pub(super) struct DynCtxNode {
+    #[allow(dead_code, reason = "non-ZST guarantee + debug aid; identity is the Rc pointer, not this field")]
+    depth: u32,
 }
 
 /// ITERATIVE drop for the frame chain. Deep recursion (`f(n)=f(n-1)`) builds an N-deep `dynamic_parent`
@@ -85,6 +105,9 @@ impl Scope {
                 specials,
                 parent: None,
                 dynamic_parent: None,
+                // The root $-context: the `$fn`/`$fa`/`$fs` defaults above. Every scope descends from a root,
+                // so all default-context calls share THIS node (depth 0) → the cache keys them together.
+                dyn_ctx: Rc::new(DynCtxNode { depth: 0 }),
             }),
         }
     }
@@ -102,6 +125,10 @@ impl Scope {
                 specials: BTreeMap::new(),
                 parent: Some(Rc::clone(&lexical_base.frame)),
                 dynamic_parent: Some(Rc::clone(&caller.frame)),
+                // Inherit the CALLER's $-context identity (the callee reads the caller's reaching $-vars):
+                // an O(1) Rc-clone, and every call sharing the caller's context shares this node. A `$`-arg
+                // bound into this frame below then mints a fresh node via `bind`.
+                dyn_ctx: Rc::clone(&caller.frame.dyn_ctx),
             }),
         }
     }
@@ -163,9 +190,20 @@ impl Scope {
         let frame = Rc::make_mut(&mut self.frame);
         if name.starts_with('$') {
             frame.specials.insert(name, value);
+            // The reaching $-context just CHANGED → mint a fresh identity so the cache doesn't confuse this
+            // scope with its pre-bind self (or a sibling that never bound). A new allocation = a new pointer.
+            frame.dyn_ctx = Rc::new(DynCtxNode { depth: frame.dyn_ctx.depth + 1 });
         } else {
             frame.vars.insert(name, value);
         }
+    }
+
+    /// This scope's reaching-`$`-context identity (N.2c cache key). Cheap: an `Rc` clone. Two scopes returning
+    /// `Rc`s that [`Rc::ptr_eq`] have an identical reaching `$`-context; the cache holds this `Rc` so the
+    /// pointer stays valid (no ABA). See [`DynCtxNode`].
+    #[must_use]
+    pub(super) fn dyn_ctx(&self) -> Rc<DynCtxNode> {
+        Rc::clone(&self.frame.dyn_ctx)
     }
 
     /// Push a fresh empty child frame whose parent is this chain — one `Rc` clone. The unit of scope
@@ -180,6 +218,8 @@ impl Scope {
                 specials: BTreeMap::new(),
                 parent: Some(Rc::clone(&self.frame)),
                 dynamic_parent: Some(Rc::clone(&self.frame)),
+                // A `let`/comprehension child adds no `$`-binding of its own → inherit this scope's context.
+                dyn_ctx: Rc::clone(&self.frame.dyn_ctx),
             }),
         }
     }

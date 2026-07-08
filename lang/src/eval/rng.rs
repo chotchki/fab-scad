@@ -100,6 +100,11 @@ pub fn rands(min: f64, max: f64, count: usize, seed: Option<u32>) -> Vec<f64> {
 /// parallelism must draw in the fixed eval order, same as the buffered echo/warning log.
 pub(crate) struct RandStream {
     rng: Mt19937,
+    /// Monotonic count of values DRAWN — the impurity signal the eval-memo cache (N.2c) reads. A user
+    /// function whose evaluation advances this is NOT a pure function of its args (seedless `rands` depends
+    /// on stream position), so it can't be memoized; the cache snapshots this before/after a call and only
+    /// caches when it's unchanged. Never reset except by `new()` (a fresh per-eval stream starts at 0).
+    draws: u64,
 }
 
 impl Default for RandStream {
@@ -114,13 +119,21 @@ impl RandStream {
     pub(crate) fn new() -> Self {
         Self {
             rng: Mt19937::new(DEFAULT_SEED),
+            draws: 0,
         }
     }
 
     /// `count` draws in `[min, max)`, ADVANCING the stream so the next call continues the sequence.
     pub(crate) fn draw(&mut self, min: f64, max: f64, count: usize) -> Vec<f64> {
         let span = max - min;
+        self.draws += count as u64;
         (0..count).map(|_| min + span * self.rng.canonical()).collect()
+    }
+
+    /// The monotonic draw count — the cache's impurity probe (see the `draws` field).
+    #[allow(dead_code, reason = "consumed by the N.2c eval-cache purity fence, landing next")]
+    pub(crate) fn draws(&self) -> u64 {
+        self.draws
     }
 }
 

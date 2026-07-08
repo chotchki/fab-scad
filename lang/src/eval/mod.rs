@@ -441,8 +441,10 @@ fn eval_with_global<'a>(
             } => {
                 let vals = values.split_off(values.len().saturating_sub(names.len()));
                 // Dev probe (off unless FAB_REDUNDANCY=1): would an eval-memo cache pay? Key this call on
-                // (fn, args, reaching $-context) and count repeats — the cache's theoretical hit-rate ceiling.
-                redundancy::record(body, &vals, &caller);
+                // (fn, captured-env, args, reaching $-context) and count repeats — the cache's hit-rate ceiling.
+                // `base` (the captured env) is load-bearing: a closure shares its body AST with siblings but
+                // captures a distinct env, so without it the count OVER-states the safe ceiling (review B1).
+                redundancy::record(body, &base, &vals, &caller);
                 // The call scope is lexically a child of `base` (the callee's home global — hygiene) but
                 // DYNAMICALLY a child of `caller`, so it inherits the caller's reaching $-context by
                 // reference (no per-call $-copy — the L.2.7 fix). A call's own $-args (bound below) land in

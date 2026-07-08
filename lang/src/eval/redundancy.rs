@@ -86,13 +86,18 @@ fn hash64(seed: u64, f: impl FnOnce(&mut std::collections::hash_map::DefaultHash
     h.finish()
 }
 
-/// Record one user-function call: `body` identifies the function, `args` are its bound argument values (in
-/// order), `caller` carries the reaching `$`-context. Off unless `FAB_REDUNDANCY=1`.
-pub(super) fn record(body: &Expr, args: &[Value], caller: &Scope) {
+/// Record one user-function call: `body` identifies the function, `base` is its lexical base (the captured
+/// ENV for a closure, the stable home global for a named fn — see the closure-key blocker B1), `args` are its
+/// bound argument values (in order), `caller` carries the reaching `$`-context. Off unless `FAB_REDUNDANCY=1`.
+pub(super) fn record(body: &Expr, base: &Scope, args: &[Value], caller: &Scope) {
     if !enabled() {
         return;
     }
-    let fn_id = std::ptr::from_ref(body) as u64;
+    // fn IDENTITY is (body ptr, captured-env ptr): a closure shares the body AST with its siblings but
+    // captures a distinct env, so the env ptr is what keeps `adder(1)` and `adder(2)` from colliding. For a
+    // named fn the env is the stable home global (same ptr every call) → no effect. Without this, the ceiling
+    // OVER-counts unsafe closure hits (the review's B1).
+    let fn_id = (std::ptr::from_ref(body) as u64) ^ (base.frame_id() as u64).rotate_left(1);
     STATE.with(|s| {
         let mut guard = s.borrow_mut();
         let st = guard.get_or_insert_with(State::default);

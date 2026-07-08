@@ -106,6 +106,17 @@ impl Scope {
         }
     }
 
+    /// The identity of this scope's current frame — the `Rc<Frame>` pointer as an integer. Two scopes that
+    /// SHARE a frame (a clone, or a named function's re-fetched home global) compare equal; a closure's
+    /// distinct captured env compares distinct. Used as the captured-env component of the eval-memo cache key
+    /// (N.2c) — a closure's result depends on its capture, which is neither an arg nor a `$`-var, so the key
+    /// must carry this or two closures sharing a body would collide. Pointer identity is SAFE (never a false
+    /// match; at worst a missed share of two structurally-equal-but-distinct frames).
+    #[must_use]
+    pub(super) fn frame_id(&self) -> usize {
+        Rc::as_ptr(&self.frame) as usize
+    }
+
     /// Look up a variable, walking child→parent (inner SHADOWS outer). Unbound → `undef`.
     #[must_use]
     pub fn lookup(&self, name: &str) -> Value {

@@ -157,7 +157,7 @@ added 2026-07-07.
 - [x] N.2d - N.2d - Vec-frame Scope LANDED: adaptive VarMap (Vec small / BTreeMap-spill for island globals); slice_parts eval -4.6% (8925→8517ms), corpus 901/901 (cleared spheroid+gaussian_rands); residual per-bind String-key alloc → N.2b
 - [x] N.2e - N.2e - NumList COW buffer reuse LANDED (ceiling-verified): zip_reuse/map_reuse recycle a refcount-1 Rc<[f64]>; ~0% slice_parts (falsified the theory — its alloc is comprehension result-lists) but ~11% on vector-arithmetic-heavy; bit-identical, corpus 901/901
 ## Phase O - O - Intrinsics tier (AST-fingerprint, wasm-safe)
-- [ ] O.1 - O.1 - AST-fingerprint intrinsic registry + auto-fallback + fast==slow harness
+- [x] O.1 - O.1 - Intrinsic registry LANDED: AST-fingerprint gate (exact-match-or-interpret) + Task::Intrinsic dispatch + fast==slow harness; POC proves the chain, corpus 901/901
 - [ ] O.2 - O.2 - First hand-written BOSL2-function intrinsics from the release profile
 - [ ] O.3 - O.3 - EXPLAIN-PLAN: per-program execution-path report (intrinsic/JIT/interpreter)
 ## Phase P - P - Cranelift JIT + CSG cache (desktop)

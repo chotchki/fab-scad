@@ -19,6 +19,7 @@ mod geo2d;
 mod geo_drop;
 mod geo_stack;
 mod geometry;
+mod intrinsics;
 pub(crate) mod io;
 mod loader;
 mod message;
@@ -152,6 +153,10 @@ pub(super) struct Ctx<'a> {
     /// per-call-site function resolution — like modules' — stays deferred; functions aren't shadowed
     /// across files the way `builtins.scad` shadows modules, so the flat view holds for the corpus.)
     functions: BTreeMap<&'a str, (loader::FnDef<'a>, usize)>,
+    /// Registered INTRINSICS (O.1): function name → a native impl that replaces the interpreted body,
+    /// matched by AST FINGERPRINT once at build time (never per call), so it's never applied to a function
+    /// it wasn't verified against. Empty for the common program that defines nothing the registry covers.
+    intrinsics: BTreeMap<&'a str, intrinsics::Intrinsic>,
     /// Per-island CONSTANT scope: `island_globals[i]` is island `i`'s top-level assignments hoisted into a
     /// scope (whole-scope, last-wins), seeded with the `$fn`/`PI` defaults. Index 0 is the ROOT file's
     /// global (built by [`run_stmts`]); each `use` target's is built from its [`loader::Island`]
@@ -364,6 +369,10 @@ enum Task<'a> {
     CallValue { args: &'a [Arg], caller: Scope },
     /// Pop the builtin's argument values, split into positional/named, and apply the builtin `name`.
     Builtin { name: &'a str, args: &'a [Arg] },
+    /// Apply a registered INTRINSIC (O.1): pop its `nargs` positional arg values (evaluated by the preceding
+    /// `Eval` tasks, exactly like `Builtin`), call the native impl, push its result. Reached only for an
+    /// all-positional call to a function whose body fingerprint-matched the registry.
+    Intrinsic { func: intrinsics::Intrinsic, nargs: usize },
     /// Pop the just-evaluated binding value, bind it as `name` in a child of `scope`, then either
     /// evaluate the next `let` binding in that scope or (no bindings left) evaluate `body`. `let`
     /// bindings are SEQUENTIAL — a later one sees the earlier ones.
@@ -621,6 +630,13 @@ fn eval_with_global<'a>(
                 }
             }
             Task::Builtin { name, args } => run_builtin(name, args, &mut values, ctx),
+            Task::Intrinsic { func, nargs } => {
+                // Same shape as run_builtin: the args are the top `nargs` of the value stack.
+                let start = values.len().saturating_sub(nargs);
+                let result = func(&values[start..]);
+                values.truncate(start);
+                values.push(result);
+            }
             Task::PushUndef => values.push(Value::Undef),
             Task::ShortCircuit { op, rhs, scope } => {
                 let lhs = values.pop().unwrap_or(Value::Undef);
@@ -847,6 +863,19 @@ fn dispatch_call<'a>(
     if let ExprKind::Ident(name) = &callee.kind {
         // resolution order (OpenSCAD): a user function may shadow a builtin.
         if let Some(&((params, body), home)) = ctx.functions.get(name.as_str()) {
+            // O.1: a registered intrinsic replaces the interpreted body — but ONLY for an all-positional
+            // call (v1 ABI: the native fn takes a flat positional slice, so a named-arg call falls through
+            // to the interpreter below rather than needing post-eval rebinding). The fingerprint match that
+            // authorized this intrinsic happened once at `build_intrinsics`; here it's a name lookup.
+            if let Some(&func) = ctx.intrinsics.get(name.as_str())
+                && args.iter().all(|a| a.name.is_none())
+            {
+                tasks.push(Task::Intrinsic { func, nargs: args.len() });
+                for arg in args.iter().rev() {
+                    tasks.push(Task::Eval(&arg.value, scope.clone()));
+                }
+                return Ok(());
+            }
             // A call-path EVENT, not a span: the call's body evaluates across later loop iterations on
             // the explicit stack (no host recursion), so its subtree isn't scope-bounded here — the
             // event marks WHICH function was entered, the enclosing `eval_program` span times the whole.
@@ -1267,9 +1296,11 @@ fn resolve_source(
     let (exec, _defs) = loader::flatten(&loaded)?;
     let islands = loader::islands(&loaded);
     let functions = tagged_functions(&islands);
+    let intrinsics = build_intrinsics(&functions);
     let n = islands.len();
     let ctx = Ctx {
         functions,
+        intrinsics,
         // Island 0 (root) is filled by `run_stmts`; the rest are seeded empty and built just below.
         island_globals: RefCell::new(vec![Scope::new(); n]),
         islands,
@@ -1374,6 +1405,22 @@ fn tagged_functions<'a>(
         }
     }
     out
+}
+
+/// Resolve each defined function to a registered INTRINSIC (O.1) — the fingerprint gate, run ONCE here at
+/// ctx build so call-time dispatch is a cheap name lookup. A function whose `(params, body)` fingerprints to
+/// a registry entry gets a native impl; everything else (the vast majority) is absent → interpreted. Built
+/// from the SAME resolved `functions` map the interpreter dispatches against, so the body matched is the body
+/// that would run.
+fn build_intrinsics<'a>(
+    functions: &BTreeMap<&'a str, (loader::FnDef<'a>, usize)>,
+) -> BTreeMap<&'a str, intrinsics::Intrinsic> {
+    functions
+        .iter()
+        .filter_map(|(&name, &((params, body), _home))| {
+            intrinsics::lookup(name, params, body).map(|func| (name, func))
+        })
+        .collect()
 }
 
 /// Build island `i`'s CONSTANT scope: its top-level assignments hoisted (whole-scope, last-wins, in
@@ -2004,8 +2051,10 @@ fn build_ctx(program: &Program) -> Ctx<'_> {
     // program), used by nothing. Module resolution against island 0 is exactly the old global lookup.
     // The island's own function/assignment stores stay empty — island 0's global (constants) is the root
     // global that `run_stmts` hoists + publishes, not something built from `Island::assignments` here.
+    let intrinsics = build_intrinsics(&functions);
     Ctx {
         functions,
+        intrinsics,
         island_globals: RefCell::new(vec![Scope::new()]),
         islands: vec![loader::Island {
             modules,

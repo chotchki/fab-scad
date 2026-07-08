@@ -129,19 +129,28 @@ Two hypotheses this profile KILLED (record them so they don't get re-proposed):
 
 ### The OpenSCAD wall-time (an aside, but the motivating one)
 
-Full pipeline, both to STL, both release/native:
+Full pipeline, both to STL, both release/native, **both on the Manifold kernel** — OpenSCAD 2026.06.12's
+DEFAULT backend is already Manifold (confirmed: `--backend Manifold` = 8.95 s, identical to the default;
+`--backend CGAL` did NOT finish in 2 min, so CGAL is off the table for this model). So this IS apples-to-apples
+on the geometry kernel:
 
-| | eval (tree) | render (booleans) | full → STL |
-|---|---|---|---|
-| OpenSCAD | fast (C++) | dominant (CGAL) | **~8.8 s** (26.5 MB STL) |
-| scad-rs | **~9 s — the bottleneck** | ~0.6 s (Manifold) | **~9.7 s** (3.0 MB STL) |
+| | full → STL | STL size |
+|---|---|---|
+| OpenSCAD (Manifold) | **~8.9 s** | 26.5 MB |
+| scad-rs (Manifold) | **~9.7 s** | 3.0 MB |
 
-We're ~10% slower END TO END — but ALL of our time is the interpreter, while our Manifold backend does the
-booleans in ~0.6 s (CGAL is OpenSCAD's dominant cost). Our KERNEL already wins; our INTERPRETER loses. Cut
-eval meaningfully and we pass OpenSCAD on real models — the whole thesis for N.2d + the O/P intrinsic/JIT tier
-in one measurement. (The STL-size gap — 3 MB vs 26.5 MB — is Manifold merging coplanar faces far more
-aggressively than OpenSCAD's export; a `--check` confirmed volume + bbox match, only genus is off by the
-known Manifold-version delta, so it's not lost geometry.)
+Roughly even end to end — but the split is the story. OUR ~9.7 s is ~9 s interpreter + ~0.6 s Manifold render
+(on our tree); OpenSCAD's C++ eval is fast, so most of ITS ~8.9 s is Manifold rendering. So we spend on the
+INTERPRETER what OpenSCAD spends on RENDER. Cut eval meaningfully and we pass it — the thesis for N.2d + the
+O/P intrinsic/JIT tier.
+
+CONFOUND, stated honestly: the two engines emit different-COMPLEXITY meshes (26.5 MB vs 3.0 MB, ~8×), so this
+isn't a clean same-work race — OpenSCAD is feeding Manifold far more triangles (finer dovetail/sawtooth
+tessellation, or a `$fn`/path-discretization difference in BOSL2's `partition`), which inflates its render
+share. Manifold also merges coplanar faces, widening the export gap. Whether the 8× is pure tessellation
+density or partial missing detail on our side is unresolved — worth a triangle-count `--check` on slice_parts
+before quoting this as a clean win. The interpreter-is-our-bottleneck conclusion holds regardless (our ~9 s
+eval is measured directly, kernel-independent).
 
 ## Redundancy — would an eval-memo cache pay? (measured 2026-07-08)
 

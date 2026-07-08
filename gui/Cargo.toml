@@ -7,6 +7,9 @@ license = "GPL-2.0-or-later"
 
 [dependencies]
 fab-scad = { path = ".." }
+# Direct dep for the shared geometry types (Vec3/Dims) the auto-slice + planner APIs take — already a
+# transitive dep via fab-scad's geometry feature, named here so the GUI can construct them.
+fab-lang = { path = "../lang" }
 anyhow = "1"
 bevy = { version = "0.19", features = ["bevy_feathers", "bevy_picking", "mesh_picking"] }
 # Native Open dialog for the file/directory picker (5.3.1). Async variant integrates with Bevy's

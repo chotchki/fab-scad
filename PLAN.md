@@ -163,7 +163,8 @@ added 2026-07-07.
 - [ ] P.1 - P.1 - Cranelift JIT for the numeric long tail (desktop)
 - [ ] P.2 - P.2 - Content-addressed CSG cache
 ## Phase Q - Dogfooding + hardening
-- [ ] Q.1 - Dogfood: fab render --engine scad-rs [--check] (eval→Manifold→STL, + oracle diff)
+- [x] Q.1 - Dogfood: fab render --engine scad-rs [--check] (eval→Manifold→STL, + oracle diff)
+- [ ] Q.2 - Q.2 - GUI live preview via scad-rs: swap render_whole off OpenSCAD (edit-in-Zed → live 3D)
 
 ## Backlog (not yet phased)
 

@@ -15,6 +15,10 @@ use fab_scad::num::Num;
 use fab_scad::openscad::Openscad;
 use fab_scad::slicing;
 
+// The shared geometry types the planner/auto-slice/orient APIs take (J.6 unified everything on `fab_lang`'s
+// Vec3). Aliased `FVec3` so it doesn't collide with Bevy's `Vec3` used throughout the scene code.
+use fab_lang::{Dims, Vec3 as FVec3};
+
 use crate::stl::{self, StlMesh};
 
 const TIMEOUT: Duration = Duration::from_secs(120);
@@ -94,14 +98,34 @@ pub fn find_root() -> Option<PathBuf> {
     }
 }
 
-/// Render the source whole at PREVIEW quality, returning the STL.
+/// Render the source whole at PREVIEW quality via SCAD-RS (in-process — no OpenSCAD subprocess), returning
+/// the STL. Switched from the OpenSCAD binary as the live-preview loop's engine (Q.1 dogfooding): an edit now
+/// re-renders in pure Rust + Manifold in milliseconds, so the GUI's `watch_source` gives a genuinely live
+/// preview off `fab_scad`, not a subprocess round-trip. The `$preview = true` wrapper still makes
+/// `$fn = $preview ? low : high` models render at low detail — scad-rs honors `$preview` like any variable.
+/// The `Solid` is built AND consumed here (written to STL); it's `!Send` and never crosses the async-task
+/// boundary the caller spawns this on. (The slice/export path still uses OpenSCAD — switched separately.)
 pub fn render_whole(root: Option<&Path>, source: &Path, out_dir: &Path) -> Result<PathBuf> {
-    let oscad = Openscad::discover(root)?;
+    use fab_scad::backend::{ManifoldBackend, build_geo};
     let wrap = preview_wrapper(source, out_dir)?;
     let out = out_dir.join(format!("{}.stl", stem_of(source)));
-    let r = oscad.render(&wrap, &out, TIMEOUT)?;
-    ensure!(r.ok, "render of {} failed", source.display());
+    let libs = preview_libs(root);
+    let tree = fab_scad::import::resolve_geometry_file(&wrap, &libs)
+        .with_context(|| format!("scad-rs eval of {}", source.display()))?;
+    let solid = build_geo(&tree, &ManifoldBackend)
+        .filter(|s| !s.is_empty())
+        .with_context(|| format!("scad-rs rendered EMPTY geometry (no faces) for {}", source.display()))?;
+    std::fs::write(&out, solid.to_stl_bytes())
+        .with_context(|| format!("writing {}", out.display()))?;
     Ok(out)
+}
+
+/// The library search path scad-rs's loader resolves `<lib.scad>` against — the workspace `libs/` (BOSL2) +
+/// `scad-lib`, matching the `OPENSCADPATH` the oracle path uses. The preview wrapper's `include <ABSOLUTE
+/// source>` resolves the source file itself; the source's own same-dir includes resolve against its parent
+/// inside the loader, so they need no entry here.
+fn preview_libs(root: Option<&Path>) -> Vec<PathBuf> {
+    root.map(|r| vec![r.join("libs"), r.join("scad-lib")]).unwrap_or_default()
 }
 
 /// The preview STL `render_whole` writes for `source` (reused by the cross-section, no re-render).
@@ -152,7 +176,7 @@ pub fn print_layout_kernel(
         if mesh.positions.is_empty() {
             continue; // an empty slab (L-shaped gap) — nothing to print
         }
-        ups.push((piece, fab_scad::auto_orient::best_up(&to_tris(&mesh), &[])));
+        ups.push((piece, fab_scad::auto_orient::best_up(&to_tris(&mesh), &[]).to_array()));
     }
 
     // Pass 2: carve each piece with the onions, gated by the orientations just picked.
@@ -189,10 +213,12 @@ pub fn print_layout_kernel(
 }
 
 /// `StlMesh` positions (flat, 3 verts per tri) → `[[f64; 3]; 3]` triangles for the orientation math.
-fn to_tris(m: &StlMesh) -> Vec<[[f64; 3]; 3]> {
+fn to_tris(m: &StlMesh) -> Vec<[FVec3; 3]> {
     m.positions
         .chunks_exact(3)
-        .map(|t| std::array::from_fn(|i| [t[i][0] as f64, t[i][1] as f64, t[i][2] as f64]))
+        .map(|t| {
+            std::array::from_fn(|i| FVec3::new(t[i][0] as f64, t[i][1] as f64, t[i][2] as f64))
+        })
         .collect()
 }
 
@@ -215,7 +241,12 @@ pub fn auto_plan(
 ) -> Result<fab_scad::auto::AutoPlan> {
     use fab_scad::kernel::Solid;
     let base = Solid::from_stl_file(base_stl)?;
-    fab_scad::auto::plan(&base, min, max, bed)
+    fab_scad::auto::plan(
+        &base,
+        FVec3::from_array(min),
+        FVec3::from_array(max),
+        Dims::from_array(bed),
+    )
 }
 
 /// Slice the source at the given cuts — each `(axis, at)` with axis in `'x' | 'y' | 'z'` (preview
@@ -295,11 +326,11 @@ pub fn reslice_kernel(
     let laid: Vec<Solid> = pieces
         .iter()
         .map(|(i, s)| {
-            s.translate(
+            s.translate(FVec3::new(
                 i[0] as f64 * spread,
                 i[1] as f64 * spread,
                 i[2] as f64 * spread,
-            )
+            ))
         })
         .collect();
     let out = out_dir.join(format!("{}-sliced.stl", stem_of(source)));

@@ -49,6 +49,9 @@ use bevy::{
 
 mod fab;
 use fab_scad::stl;
+// The shared geometry types the auto-slice/planner APIs take (J.6 unified on `fab_lang`'s Vec3). Aliased
+// `FVec3` so it doesn't shadow Bevy's `Vec3`, which the scene code uses everywhere.
+use fab_lang::{Dims, Vec3 as FVec3};
 
 const SPREAD: f64 = 50.0;
 
@@ -2265,9 +2268,9 @@ fn poll_job(
                         bounds.0 = Some((min, max));
                         let bed = bed_size().unwrap_or([256.0; 3]);
                         let fits = fab_scad::auto_slice::auto_slice(
-                            [min.x as f64, min.y as f64, min.z as f64],
-                            [max.x as f64, max.y as f64, max.z as f64],
-                            bed,
+                            FVec3::new(min.x as f64, min.y as f64, min.z as f64),
+                            FVec3::new(max.x as f64, max.y as f64, max.z as f64),
+                            Dims::from_array(bed),
                         )
                         .is_empty();
                         if cuts.list.is_empty() && fits {
@@ -3767,7 +3770,7 @@ fn auto_slice_action(
         [min.x as f64, min.y as f64, min.z as f64],
         [max.x as f64, max.y as f64, max.z as f64],
     );
-    let planned = fab_scad::auto_slice::auto_slice(lo, hi, bed);
+    let planned = fab_scad::auto_slice::auto_slice(FVec3::from_array(lo), FVec3::from_array(hi), Dims::from_array(bed));
     if planned.is_empty() {
         status.0 = "model already fits the bed — no cuts needed".into();
         return;
@@ -3786,7 +3789,8 @@ fn auto_slice_action(
         .collect();
     cuts.active = 0;
     conns.list.clear(); // the old connectors referenced the replaced cut stack
-    let pieces = fab_scad::auto_slice::piece_count(lo, hi, bed);
+    let pieces =
+        fab_scad::auto_slice::piece_count(FVec3::from_array(lo), FVec3::from_array(hi), Dims::from_array(bed));
     status.0 = format!("auto-sliced: {} cut(s) → {pieces} piece(s)", planned.len());
     info!("{}", status.0);
 }
@@ -3816,7 +3820,7 @@ fn kick_auto_plan(
         [max.x as f64, max.y as f64, max.z as f64],
     );
     let bed = bed_size().unwrap_or([256.0; 3]);
-    if fab_scad::auto_slice::auto_slice(lo, hi, bed).is_empty() {
+    if fab_scad::auto_slice::auto_slice(FVec3::from_array(lo), FVec3::from_array(hi), Dims::from_array(bed)).is_empty() {
         return; // fits the bed — nothing to auto
     }
     let base_stl = fab::whole_stl(&src, &scene.tmp);

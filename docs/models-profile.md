@@ -99,6 +99,56 @@ named function, not the exact source line. For pinning the precise `.clone()`/`.
 `debug=2` build or a heaptrack-style allocation profiler is the follow-up. The MAGNITUDES (57% allocation,
 <1% dispatch, ~19% scope) are inlining-independent and are the signal.
 
+## Redundancy — would an eval-memo cache pay? (measured 2026-07-08)
+
+N.1 says WHERE the time goes (allocation). This asks a different question: how much of that work is
+REDUNDANT — the same function evaluated with the same inputs over and over, which a content-addressed cache
+(J.5 / P.2) would skip entirely. The `FAB_REDUNDANCY=1` probe (`redundancy.rs`) keys every user-function call
+two ways and counts repeats — the theoretical hit-rate CEILING a perfect cache could reach:
+
+- `(fn, args)` — ignores the reaching `$`-context, so it MERGES keys a correct cache would keep apart → a
+  strict UPPER bound (a correct cache can only do worse).
+- `(fn, args, ALL reaching $-vars)` — BOSL2 sets ~42 `$`-vars and a loop `$idx` changes per iteration, so this
+  OVER-specifies (a real cache keys on only the `$`-vars a fn actually READS) → a LOWER bound.
+
+The true ceiling is bracketed between them. Across five real slow models:
+
+| model | fn calls | redundancy (lower..upper) | avg key size | top-10 keys absorb |
+|---|---|---|---|---|
+| corner_brace | 149 K | **92.5 .. 96.8%** | 22 elems | 51% of calls |
+| garage_door | 3.36 M | **89.2 .. 99.2%** | 11 elems | 61% |
+| under_sink_guide | 157 K | **84.1 .. 90.1%** | 936 elems | 25% |
+| pill_holder_smaller | 3.03 M | **90.4 .. 92.2%** | 53 elems | 43% |
+| keyboard_tent | 774 K | **92.6 .. 97.6%** | 48 elems | 39% |
+
+**Every model is ≥84% redundant even on the pessimistic bound.** BOSL2's call graph re-derives the same
+sub-results constantly (defensive re-validation + shared helpers down deep call chains), so a memo cache could
+eliminate the large majority of function-call evaluation — and the 57% allocation that rides on it. And the
+CONCENTRATION is extreme: 10 keys absorb 25–61% of MILLIONS of calls, so a small bounded (LRU) cache captures
+most of the win — you don't need to remember everything.
+
+This is a BIGGER lever than making each call cheaper (N.2b's ~19% scope): N.2b shaves the cost of a call, the
+cache DELETES 84%+ of the calls. They compose — the residual misses still want a cheap scope, and interned
+names (N.2b) make the cache KEY cheap to hash — but the cache is the headline.
+
+### The correctness fence (why it's not free)
+
+The measurement counts ALL repeats; a CORRECT cache can only memoize a call whose result is a pure function of
+its key. Three fences:
+- **Impure subtrees bypass.** `rands()` advances a stream and `echo`/`assert(msg)` emit ordered side effects —
+  a call whose subtree touches those can't be served from cache (it'd freeze the RNG / drop the echo). In these
+  models that's a small discount (`rands` barely registered in the N.1 profile), but the cache MUST detect and
+  skip it, not memoize blindly.
+- **The key must be COMPLETE.** Args + every `$`-var the body transitively reads. Miss one and you serve a
+  stale result for a different context — silent geometry corruption, the worst failure. The gap between the
+  84% lower and 96% upper bound IS this: precise read-set tracking closes it; the safe fallback (all reaching
+  `$`-vars) sits at the lower bound and is still ≥84%.
+- **Big keys.** `under_sink_guide` averages 936 Value-elements/key (path/region args) — hashing that per
+  lookup isn't free, so the cache should either cap key size or accept that huge-arg calls pay their hash. The
+  work behind those keys is heavy though (list math), so it likely still nets out ahead.
+
+Reproduce with `FAB_REDUNDANCY=1 target/release/models_worker <model.scad> libs scad-lib`.
+
 ## The harness
 
 `tests/models_harness.rs` (`#[ignore]`, run on demand) sweeps every TOP-LEVEL model under `models/` —

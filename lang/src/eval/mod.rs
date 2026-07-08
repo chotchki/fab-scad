@@ -25,6 +25,7 @@ mod module;
 mod text;
 mod rng;
 mod ops;
+mod redundancy;
 mod scope;
 mod trace;
 mod trig;
@@ -439,6 +440,9 @@ fn eval_with_global<'a>(
                 caller,
             } => {
                 let vals = values.split_off(values.len().saturating_sub(names.len()));
+                // Dev probe (off unless FAB_REDUNDANCY=1): would an eval-memo cache pay? Key this call on
+                // (fn, args, reaching $-context) and count repeats — the cache's theoretical hit-rate ceiling.
+                redundancy::record(body, &vals, &caller);
                 // The call scope is lexically a child of `base` (the callee's home global — hygiene) but
                 // DYNAMICALLY a child of `caller`, so it inherits the caller's reaching $-context by
                 // reference (no per-call $-copy — the L.2.7 fix). A call's own $-args (bound below) land in
@@ -1173,7 +1177,9 @@ fn resolve_source(
             *slot = island_global;
         }
     }
+    redundancy::reset(); // dev probe: fresh count per run so the import fixpoint's partial runs don't bleed in
     let tree = run_stmts(exec.into_iter(), &ctx, &Scope::new())?;
+    redundancy::report(); // prints to stderr only under FAB_REDUNDANCY=1
     let needs = ctx.take_file_needs();
     if needs.is_empty() {
         Ok(Resolution::Complete {

@@ -1,9 +1,12 @@
-# M.3 — explicit-stack eval assembly — SPEC (DRAFT, for alignment)
+# M.3 — explicit-stack eval assembly — SPEC
 
-Status: **ALIGNED** — chotchki decisions folded in 2026-07-07 (§Decisions). This is the "how" for the fix the
-M.2 assessment (`docs/heap-bounded-eval.md`) said is needed: get statement/geometry eval off the host stack so
-eval depth is memory-bound, the harnesses drop the 1 GiB reserve, and the wasm target stops being a stack-size
-gamble.
+Status: **ALIGNED + REVIEWED** — chotchki decisions folded in 2026-07-07 (§Decisions); a 4-lens adversarial
+design review (`m3-design-review` workflow) pressure-tested the encoding against the real code and CORRECTED two
+load-bearing errors — see §DECISION below, which is the AUTHORITATIVE implementation checklist (the prose above
+it is the pre-review reasoning, kept for context; where they disagree, §DECISION wins). This is the "how" for
+the fix the M.2 assessment (`docs/heap-bounded-eval.md`) said is needed: get statement/geometry eval off the
+host stack so eval depth is memory-bound, the harnesses drop the 1 GiB reserve, and the wasm target stops being
+a stack-size gamble.
 
 ## The goal, stated as a contract
 
@@ -127,3 +130,141 @@ Do NOT big-bang the whole dispatcher. Proposed order:
 2. **`MAX_MODULE_DEPTH` demotes to a runaway-detector** (see hard-part #3 + Q2). Post-M.3 heap is the only limit,
    so the guard is no longer crash-safety — keep a limit for the fast-LOUD-error UX, value revisitable/raisable.
 3. **M.3 stays IN Phase M** (the tail box), not its own phase — "we just add on to M."
+
+---
+
+## DECISION — reviewed encoding (2026-07-07, `m3-design-review` — AUTHORITATIVE)
+
+Four adversarial reviews (error-unwind / children-latebinding / scope-order-root / mirror-exprmachine) trilaterated
+the SAME three corrections to the draft. Spec SHAPE confirmed (a PEER driver mirroring the expression machine,
+post-order push-continuation-then-children); encoding revised where flagged. Line refs are `lang/src/eval/mod.rs`.
+
+### Two peer drivers, two stacks — do NOT merge
+`run_geometry(root) -> Result<Vec<Geo>>` is a PEER of the expr driver, not a reuse: its own `Vec<GTask>` work
+stack + `Vec<Geo>` result stack. Geometry-node ARGS stay synchronous nested expr-machine runs (`eval_args`,
+`bind_module_scope`, the `if`-cond, the `for`-iterable) — host-recursion bounded by 1, not tree depth, so args are
+NOT the target surface. Do NOT unify Value/Geo into one stack. Result stack holds ONE `Geo` per push (NOT
+`Vec<Geo>` batches — batches reintroduce the arity ambiguity the mark exists to kill).
+
+### The GTask enum
+```rust
+enum GTask<'a> {
+    // pop → hoist EAGERLY (hoist_scope, non-publishing); push-if-any local mods; record mark=results.len();
+    // push Collect{mark,comb} FIRST, then child Stmt tasks in REVERSE source order, then PopLocalModules IFF pushed.
+    EvalNodes { stmts: &'a [&'a Stmt], scope: Scope, global: Scope, island: usize },
+    Stmt      { stmt: &'a Stmt, scope: Scope, global: Scope, island: usize },
+    Collect   { mark: usize, comb: Combinator },   // WORK: drains results.split_off(mark), applies comb, pushes ONE Geo
+    CaptureRoot { mark: usize },                    // WORK: `!` — drains split_off(mark) INTO ctx.root_override (consumes)
+    PopLocalModules,                                // CLEANUP
+    PopModuleFrame { depth: usize },                // CLEANUP: set(depth); module_stack.pop(); children_stack.pop()
+    RestoreChildrenFrame(ChildrenFrame<'a>),        // CLEANUP: re-PUSHES the owned frame
+}
+```
+`Combinator` carries RESOLVED data (Affine matrix, BoolKind, resolved offset/extrude params, `UserModule`) — the
+analogue of the expr machine's `Apply` carrying bound arg values; args eval in the caller scope BEFORE children.
+
+### CORRECTION 1 — arity by MARK, not static count (the draft's biggest error)
+A geometry `Stmt` pushes **0 OR 1** `Geo`: assignments/empties/defs no-op (@2102), `*`/`%` disabled push nothing
+(@2123), childless echo/assert push nothing (@2137), `!` DIVERTS (@2072). So N ≠ stmt count. Every `EvalNodes`
+records `mark = results.len()` AT POP TIME (after the eager hoist, so sibling/parent results already sit below);
+its `Collect` does `results.split_off(mark)` — exactly what THIS block pushed. A count-based pop steals the
+parent frame's Geo → silent CSG corruption. Marks are read at task-POP time, never at scheduling time.
+
+### CORRECTION 2 — two-class error drain, not "fire the pop-tasks"
+Key error handling on task CATEGORY, never a name/heuristic:
+- **WORK** = {EvalNodes, Stmt, Collect, CaptureRoot} — may eval/emit/`Err`.
+- **CLEANUP** = {PopLocalModules, PopModuleFrame, RestoreChildrenFrame} — pure ctx side-effects, infallible.
+
+Driver holds `first_err: Option<Error>`. Happy path: pop, dispatch; CLEANUP runs its side-effect inline. On the
+FIRST `Err` from a WORK task: capture once, enter DRAIN. DRAIN: keep popping; run CLEANUP side-effects inline in
+stack order (LIFO → innermost-first); DISCARD every WORK task WITHOUT executing (no handler re-entry, no expr
+eval, no `ctx.messages` write); stack empty → return `first_err`. This is first-error-wins for the Err VALUE **and
+the message stream** — a re-dispatching drain would emit phantom echoes + evaluate later asserts → a DIFFERENT
+error, observable TODAY. The expr driver's bare-`?`-and-drop is safe ONLY because it mutates no LIFO ctx
+(`ctx.closures` is append-only); the geometry machine can't inherit that shortcut.
+
+`PopModuleFrame` restores via the pre-call `depth` SNAPSHOT (read @1644 before the +1) → `module_depth.set(depth)`,
+NEVER `set(get()-1)` (`module_depth` is a `Cell`, @150 — a decrement mid-drain underflows `usize`). `PopLocalModules`
+is queued from an `EvalNodes` ONLY when that block actually pushed local modules (mirror `pushed` @1308).
+
+### CORRECTION 3 — child ORDER: reverse-push (mirror `VectorSplice` @578)
+`EvalNodes` pushes `Collect` FIRST (bottom), then child `Stmt`s in REVERSE source order, so they resolve
+front-to-back and land on the result stack in source order; `Collect` recovers via split_off. Forward push
+silently inverts every ordered combinator — `difference()` becomes last-minus-first. Same for `for`/`intersection_for`.
+
+### children() — dedicated path, NOT a generic combinator (increment 2)
+The `children` Stmt handler is eager up to the pop, then schedules: (1) eval the index arg in the CURRENT scope;
+(2) POP the frame off `children_stack` into a local (@1703 — the transient pop is what makes a nested `children()`
+bind to the ENCLOSING frame; skip it and `outer(){inner() children();}` infinitely regresses); (3) compute
+`selected`; (4) push bottom→top: `RestoreChildrenFrame(frame)`, `Collect{mark, Union}`, `EvalNodes{ selected,
+scope: Scope::call_frame(&frame.scope, current_scope), global: CURRENT global, island: frame.island }`. Three
+DISTINCT threaded fields: render scope = `call_frame(frame.scope, current)` (frame's scope LEXICAL parent, current
+scope the DYNAMIC `$`-overlay so `$parent_geom` reaches children); global = the CURRENT global (ChildrenFrame has
+NO global field — do NOT source it from frame/callee); island = `frame.island`. `RestoreChildrenFrame` is CLEANUP
+so it re-pushes on both paths, keeping `children_stack` balanced under error.
+
+### call_user_module — setup EAGER, three-frame pop as ONE CLEANUP (increment 2)
+Keep the setup eager + ordering-sensitive: bind `$children`, push `ChildrenFrame` (@1668), bind `$parent_modules`
+from `module_stack.len()` read BEFORE the self-push (@1676), `module_stack.push`, bump `module_depth`. THEN push
+bottom→top: `PopModuleFrame{depth}`, `Collect{mark, UserModule}`, `Stmt(body, call, home_global, home)` (the body
+is a single Stmt @1683, carrying home/home_global — asymmetric to the caller-scope stashed frame). Do NOT defer the
+module_stack push or the `$`-binds — they're ordering-sensitive reads that must precede the body.
+
+### `!` root modifier
+In the Stmt handler, a `Module` with `modifiers.root`: read `mark = results.len()`, push `CaptureRoot{mark}` FIRST,
+then the normal dispatch expansion on top. LIFO → subtree resolves + pushes its Geo, then CaptureRoot drains
+split_off(mark) into `root_override`, so the parent Collect's mark legitimately sees zero there (matching the
+untouched `nodes` today). CaptureRoot is WORK — discarded on error before the subtree resolves (mirrors the
+`?`-before-split_off @2071). `run_stmts`' `split_off(0)`/`is_empty` swap @1285 is unchanged.
+
+### for_product (increment 2)
+Keep the loop-var recursion on the host (source-bounded, pure expr evals). At the leaves, eagerly build the Vec of
+per-iteration child scopes, then push ONE `Collect{mark, Union|Intersection}` + N `EvalNodes` in REVERSE product
+order — the body eval MUST go through the work stack or `for(i=[0:254]) rec(255)` reopens the host-stack hole.
+
+### Scope threading
+Per-task `scope: Scope` BY VALUE is faithful — the `&mut scope` in eval_geometry/eval_stmt is vestigial (binds go
+into child scopes; assignments are hoisted, so siblings never observe each other's mutation). `Scope` is `Rc<Frame>`
+(cheap clone). Use `hoist_scope` (non-publishing) for blocks; `hoist_scope_publishing` stays ONLY at island roots
+(@1277) — a publishing hoist mid-block corrupts `island_globals`.
+
+## Increment plan (ordered, each step independently differential-testable)
+
+**Scaffolding first** (the mark / taxonomy / reverse / drain disciplines are STRUCTURAL — must exist before any arm):
+- **S1** — `GTask` / `Combinator` enums; `Vec<Geo>` result stack, one Geo per push.
+- **S2** — driver `run_geometry`: pop/dispatch, `first_err`, DRAIN mode, CLEANUP-on-both-paths, `split_off(mark)`
+  Collect, a reverse-push expansion helper. No arms yet.
+- **S3** — fallthrough SHIM: an unconverted `StmtKind` calls the existing recursive `eval_stmt` into a scratch
+  `Vec<Geo>` and pushes the results — the dual-path bridge that lets each arm convert independently.
+- **S4** — route `run_stmts`/`eval_nodes` through the driver behind an internal switch (env/cfg); wire the
+  differential to run switch-OFF vs switch-ON and compare whole-program output + message stream + Err string on
+  corpus + models. Green = scaffolding + shim are transparent.
+
+**Then arm conversions, leaf → simple** (each: flip one arm from shim to native push, re-run the differential):
+- **A1** — no-op + leaf arms (Empty/FunctionDef/ModuleDef/Assignment/disable+background = 0 push; builtin-primitive
+  `eval_module` = 0 or 1). Establishes the 0-or-1-push reality against the mark.
+- **A2** — bare `Block` → `EvalNodes + Collect{Union}`, `PopLocalModules` gated on local-mod presence.
+- **A3** — echo/assert passthrough → side-effect inline, then `EvalNodes+Collect{Union}` IFF children non-empty
+  (exercises childless-0-push + first-error-wins with no cleanup parked — simplest drain).
+- **A4** — Transform → `EvalNodes+Collect{Transform(matrix)}` (matrix resolved eagerly).
+- **A5** — Boolean (union/difference/intersection) + hull + minkowski — the REVERSE-push order gate.
+- **A6** — offset / linear_extrude / rotate_extrude / projection / color / `let`-stmt / `if` → single-child
+  `EvalNodes+Collect{...}` with eagerly-resolved params / branch selection.
+- **A7** — `!` root modifier → `CaptureRoot{mark}` before the dispatch expansion.
+
+Increment 1 EXCLUDES call_user_module, children(), for/intersection_for (increment 2: `PopModuleFrame`,
+`RestoreChildrenFrame`, eager product expansion, the `module_recursion_bound.rs` cases on a default stack).
+
+## Top-5 invariants to assert (from the highest-confidence findings)
+
+1. **Mark-drain arity** — `union(){ x=1; *cube(1); echo("h"); sphere(2); }` → the union's Collect drains exactly
+   ONE Geo; bit-identical to recursive.
+2. **Ordered-combinator source order** — `difference(){ cube(10); translate([5,0,0]) cube(10); }` bit-identical
+   (first-minus-rest, not last-minus-first); same for a >1-child union/hull.
+3. **Frame balance across error** — `module r(n){ if(n>0) r(n-1); else assert(false); } r(200);` → after the drain
+   `module_depth==0`, children/module stacks empty, no panic; plus late-bind non-regress
+   `module inner(){children();} module outer(){inner() children();} outer() cube();` → exactly one cube.
+4. **First-error-wins, no phantom side-effects** — `module a(){ assert(false,"first"); } union(){ a(); echo("leaked");
+   assert(false,"second"); }` → Err is "first", "leaked" NEVER appears in messages.
+5. **`!` root divert + error skip** — `translate([10,0,0]){ cube(1); !sphere(2); }` → output is the UNtransformed
+   sphere only; and `!union(){ cube(1); assert(false); }` → Err with `root_override` left empty.

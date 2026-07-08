@@ -99,6 +99,50 @@ named function, not the exact source line. For pinning the precise `.clone()`/`.
 `debug=2` build or a heaptrack-style allocation profiler is the follow-up. The MAGNITUDES (57% allocation,
 <1% dispatch, ~19% scope) are inlining-independent and are the signal.
 
+## A real model, and the OpenSCAD wall-time (slice_parts, Q dogfood, 2026-07-08)
+
+`models/wall_screen/slice_parts.scad` — remindwall's slicer, one of the nastier real models: NESTED
+`partition()` with dovetail/sawtooth cutpaths. Profiled the same way (release `models_worker`, 4 kHz),
+39 477 samples ≈ **9.9 s of pure eval**. Note what `models_worker` measures: it stops at the `Geo` TREE
+(`resolve_geometry_file`) and never lowers to Manifold — so this is the INTERPRETER describing the geometry,
+before a single boolean runs.
+
+The shape is the N.1 story, louder:
+- **55.3% allocation/memory-traffic** — MORE alloc-bound than the N.1 corpus model.
+- Hot subtree: `lc_for` 64% → `bind_module_scope` 56% → `eval_comprehension` 55% → `check_assert` 41% →
+  `hoist_scope` 38%. partition's path generation is comprehension-and-module-call heavy, wrapped in BOSL2's
+  per-function defensive asserts.
+- The concentrated, attackable allocation is the **per-frame `Scope` BTreeMap**: `Frame::drop` 3.6% +
+  `push_call` 3.0% + BTreeMap `IntoIter::dying` 2.6% + `VacantEntry::insert` 2.2% + `Scope::bind` 2.0% +
+  the rest of the BTreeMap/child/call_frame machinery ≈ **~15% of all allocation**, all of it in
+  allocate-a-BTreeMap-per-call, bind params, drop it. This is what N.2d (Vec-frame Scope) targets, and this
+  real model JUSTIFIES it (it was parked as "re-measure whether the residual scope cost earns it" — yes).
+
+Two hypotheses this profile KILLED (record them so they don't get re-proposed):
+- **The eval-memo cache is not the lever here.** A/B `FAB_EVAL_CACHE=1`: 8925 ms → 8530 ms, **4.5%** — nowhere
+  near its 82-92% redundancy CEILING. The cache memoizes function VALUES; slice_parts' cost is module
+  INSTANTIATION (geometry, not a memoizable value) + comprehension iteration + raw allocation. The cache pays
+  for the function-heavy BOSL2 corpus, NOT for geometry-generating models. Stays opt-in.
+- **Value-clone-on-lookup is NOT a deep copy.** `Scope::lookup_opt` does `value.clone()`, but `Value::List`
+  is `Rc<[Value]>` (and `NumList`/`Str` too), so clone is an O(1) refcount bump. The 55% allocation is the
+  Scope frames + result-Vec construction in comprehensions, not value copies.
+
+### The OpenSCAD wall-time (an aside, but the motivating one)
+
+Full pipeline, both to STL, both release/native:
+
+| | eval (tree) | render (booleans) | full → STL |
+|---|---|---|---|
+| OpenSCAD | fast (C++) | dominant (CGAL) | **~8.8 s** (26.5 MB STL) |
+| scad-rs | **~9 s — the bottleneck** | ~0.6 s (Manifold) | **~9.7 s** (3.0 MB STL) |
+
+We're ~10% slower END TO END — but ALL of our time is the interpreter, while our Manifold backend does the
+booleans in ~0.6 s (CGAL is OpenSCAD's dominant cost). Our KERNEL already wins; our INTERPRETER loses. Cut
+eval meaningfully and we pass OpenSCAD on real models — the whole thesis for N.2d + the O/P intrinsic/JIT tier
+in one measurement. (The STL-size gap — 3 MB vs 26.5 MB — is Manifold merging coplanar faces far more
+aggressively than OpenSCAD's export; a `--check` confirmed volume + bbox match, only genus is off by the
+known Manifold-version delta, so it's not lost geometry.)
+
 ## Redundancy — would an eval-memo cache pay? (measured 2026-07-08)
 
 N.1 says WHERE the time goes (allocation). This asks a different question: how much of that work is

@@ -204,3 +204,4 @@ Parked 2026-07-04 for the scad-rs pivot — the workflow tool works and stays in
 - **surface() PNG heightmap load (deferred from M.5.2)** — added 2026-07-06.
 - **SVG import: stroke-only (open/unfilled) paths — Clipper-offset by stroke-width/2** — added 2026-07-08.
 - **SVG import: per-element even-odd grouping (vs pooled) — union elements with nonzero** — added 2026-07-08.
+- **scad-rs import() base-dir is per-run, not per-containing-file (OpenSCAD divergence)** — added 2026-07-08.

@@ -147,8 +147,12 @@ added 2026-07-07.
   - [x] L.3.8 - L.3.8 - color() on 2D geometry tags the color (Shape2D::Color) — the 343× BOSL2-example bucket
 - [ ] L.4 - Exit review: divergences zero-or-documented, perf-vs-oracle published; rung 2/3 (intrinsics, JIT) phase cut FROM THIS DATA
 ## Phase N - N - Interpreter fast-paths (our builtins)
-- [ ] N.1 - N.1 - Re-profile a slow model on RELEASE with a sampling profiler
-- [ ] N.2 - N.2 - Fast-path builtin dispatch (unary predicates + len/concat)
+- [x] N.1 - N.1 - Re-profile a slow model on RELEASE with a sampling profiler
+- [ ] N.2 - N.2 - Cut eval allocation (profile-driven; builtin dispatch was <1%)
+- [x] N.2a - N.2a - Cheap allocation wins: assert-formatting freebie + eval_with_global per-call allocs
+- [ ] N.2b - N.2b - (deferred/optional) Intern var+$-names for the Scope lookup win — NOT a cache-key lever
+- [ ] N.2c - N.2c - Eval-memo cache on interned keys (the 84-92% lever)
+- [ ] N.2d - N.2d - Vec-frame Scope + re-profile whether the residual scope cost still earns it (conditional)
 ## Phase O - O - Intrinsics tier (AST-fingerprint, wasm-safe)
 - [ ] O.1 - O.1 - AST-fingerprint intrinsic registry + auto-fallback + fast==slow harness
 - [ ] O.2 - O.2 - First hand-written BOSL2-function intrinsics from the release profile

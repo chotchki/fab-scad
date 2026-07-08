@@ -17,7 +17,7 @@ use super::geo::GeoNode;
 use super::geo2d::Shape2D;
 use super::{
     Children, Ctx, ExtrudeKind, Geo, Join2D, Scope, Stmt, Value, boolean_of, check_assert,
-    emit_echo, eval_stmt_dispatch, eval_with_ctx, force_2d, force_3d, geo, module,
+    emit_echo, eval_stmt_dispatch, eval_with_ctx, force_2d, force_3d, geo, intersection_of, module,
     partition_children, transform_of, union_of,
 };
 use crate::geom::{Affine, Rgba};
@@ -57,6 +57,8 @@ impl BoolKind {
 enum Combinator {
     /// Bare block / implicit group — `union_of` handles the null/one/many collapse + the 2D/3D mixing.
     Union,
+    /// `intersection_for`'s per-iteration collapse — intersect the iterations.
+    Intersection,
     /// An affine transform wrapping the union of its children.
     Transform(Affine),
     /// A CSG boolean over its children (difference = first minus rest, etc.).
@@ -87,6 +89,7 @@ impl Combinator {
     fn apply(self, children: Vec<Geo>, ctx: &Ctx<'_>) -> crate::Result<Geo> {
         Ok(match self {
             Combinator::Union => union_of(children, ctx),
+            Combinator::Intersection => intersection_of(children, ctx),
             Combinator::Transform(matrix) => transform_of(matrix, union_of(children, ctx)),
             Combinator::Boolean(kind) => boolean_of(kind.name(), children, ctx),
             Combinator::Hull => match partition_children(children, ctx) {
@@ -161,10 +164,6 @@ impl Combinator {
 /// One step on the geometry driver's work stack. WORK tasks may eval / emit / return `Err`; CLEANUP tasks are
 /// infallible ctx side-effects that MUST run on both the happy AND the error-drain path (LIFO), so the driver
 /// keys its error handling on this WORK/CLEANUP split, never on a name or a push/pop heuristic.
-#[allow(
-    dead_code,
-    reason = "M.3 increment 2 constructs PopModuleFrame + RestoreChildrenFrame (call_user_module / children())"
-)]
 enum GTask<'a> {
     /// WORK — dispatch ONE statement (native arm, or the shim for a still-recursive arm).
     Stmt {
@@ -175,10 +174,10 @@ enum GTask<'a> {
     },
     /// WORK — expand a statement list under a fresh mark: hoist, push-if-any local modules, record
     /// `mark = results.len()`, push the paired `Collect{mark, comb}`, then the child `Stmt`s in REVERSE source
-    /// order (so they land in source order), then `PopLocalModules` iff pushed. `stmts` is the raw AST slice
-    /// (children are `Vec<Stmt>` in the AST, lifetime `'a`), collected to `&[&Stmt]` only for the hoist helpers.
+    /// order (so they land in source order), then `PopLocalModules` iff pushed. `stmts` is a ref list (a `Vec`
+    /// so `children()` can pass a SELECTED subset, and the recursive arms already `collect()` their children).
     EvalNodes {
-        stmts: &'a [Stmt],
+        stmts: Vec<&'a Stmt>,
         scope: Scope,
         global: Scope,
         island: usize,
@@ -297,9 +296,8 @@ fn dispatch_work<'a>(
             island,
             comb,
         } => {
-            let refs: Vec<&Stmt> = stmts.iter().collect();
-            let hoisted = super::hoist_scope(&refs, &scope, ctx)?;
-            let local_mods = super::collect_module_defs(&refs);
+            let hoisted = super::hoist_scope(&stmts, &scope, ctx)?;
+            let local_mods = super::collect_module_defs(&stmts);
             let pushed = !local_mods.is_empty();
             if pushed {
                 ctx.local_modules
@@ -311,7 +309,7 @@ fn dispatch_work<'a>(
             if pushed {
                 work.push(GTask::PopLocalModules);
             }
-            for stmt in stmts.iter().rev() {
+            for &stmt in stmts.iter().rev() {
                 // Assignments hoist (bound above); skip them exactly as `eval_geometry` does.
                 if matches!(stmt.kind, StmtKind::Assignment { .. }) {
                     continue;
@@ -360,7 +358,7 @@ fn dispatch_stmt<'a>(
         // A2 — a bare `{ … }` block groups its children into ONE implicit-union node in a fresh hoisted scope.
         StmtKind::Block(stmts) => {
             work.push(GTask::EvalNodes {
-                stmts: stmts.as_slice(),
+                stmts: stmts.iter().collect(),
                 scope,
                 global,
                 island,
@@ -376,7 +374,7 @@ fn dispatch_stmt<'a>(
                 els
             };
             work.push(GTask::EvalNodes {
-                stmts: branch.as_slice(),
+                stmts: branch.iter().collect(),
                 scope,
                 global,
                 island,
@@ -384,7 +382,7 @@ fn dispatch_stmt<'a>(
             });
             Ok(())
         }
-        StmtKind::Module(mi) => dispatch_module(stmt, mi, scope, global, island, work, results, ctx),
+        StmtKind::Module(mi) => dispatch_module(mi, scope, global, island, work, results, ctx),
         // Empty / function-def / module-def / assignment / (nested, LOUD) use-include — shim.
         _ => shim_stmt(stmt, scope, &global, island, ctx, results),
     }
@@ -398,7 +396,6 @@ fn dispatch_stmt<'a>(
     reason = "mirrors eval_stmt_dispatch's threaded context (stmt/scope/global/island/work/results/ctx)"
 )]
 fn dispatch_module<'a>(
-    stmt: &'a Stmt,
     mi: &'a crate::parser::ModuleInstantiation,
     scope: Scope,
     global: Scope,
@@ -423,7 +420,7 @@ fn dispatch_module<'a>(
     // transform / boolean / hull / offset / extrude / projection / color arms.
     let group = |work: &mut Vec<GTask<'a>>, comb, scope| {
         work.push(GTask::EvalNodes {
-            stmts: mi.children.as_slice(),
+            stmts: mi.children.iter().collect(),
             scope,
             global: global.clone(),
             island,
@@ -529,9 +526,68 @@ fn dispatch_module<'a>(
             group(work, Combinator::Union, child);
             Ok(())
         }
-        // B2/B3 — children() + for/intersection_for still shim (they manage the children frame / loop product).
-        "children" | "for" | "intersection_for" => {
-            shim_stmt(stmt, scope, &global, island, ctx, results)
+        // B2 — children() renders the current module call's stashed call-site children, LATE, in the caller's
+        // lexical scope + island with the CURRENT $-overlay. The frame is transiently POPPED (so a nested
+        // children() inside the rendered children binds to the ENCLOSING call) and RESTORED by a CLEANUP task
+        // after they resolve — balanced on the error path too (recursive restores before its `?`).
+        "children" => {
+            let (positional, _, _) = module::eval_args(mi, &scope, ctx)?;
+            let Some(frame) = ctx.children_stack.borrow_mut().pop() else {
+                results.push(Geo::D3(GeoNode::Empty)); // children() outside a module call → nothing
+                return Ok(());
+            };
+            let selected: Vec<&Stmt> = match positional.first() {
+                None => frame.stmts.clone(), // children() → all
+                Some(Value::Num(i)) => super::child_at(*i)
+                    .and_then(|i| frame.stmts.get(i).copied())
+                    .into_iter()
+                    .collect(),
+                Some(Value::NumList(xs)) => xs
+                    .iter()
+                    .filter_map(|&i| super::child_at(i).and_then(|i| frame.stmts.get(i).copied()))
+                    .collect(),
+                _ => Vec::new(),
+            };
+            // The caller's LEXICAL scope (frame.scope) with the CURRENT dynamic $-context overlaid (`call_frame`,
+            // by reference), the caller's module island, and the CURRENT global (where children() is written).
+            let caller_island = frame.island;
+            let child_scope = Scope::call_frame(&frame.scope, &scope);
+            work.push(GTask::RestoreChildrenFrame(frame));
+            work.push(GTask::EvalNodes {
+                stmts: selected,
+                scope: child_scope,
+                global: global.clone(),
+                island: caller_island,
+                comb: Combinator::Union,
+            });
+            Ok(())
+        }
+        // B3 — for / intersection_for: bind the loop var(s) over their range/vector (the loop-var recursion
+        // stays on the host — it's source-bounded, ~1-3 vars, pure expr evals), collecting the PER-ITERATION
+        // scopes; then push one `EvalNodes{children, Union}` per iteration (REVERSE product order → source
+        // order) under an outer `Collect` that unions (for) or intersects (intersection_for) the iterations.
+        // The body eval goes through the work stack, so a recursion inside the loop is heap-bounded.
+        "for" | "intersection_for" => {
+            let mut scopes: Vec<Scope> = Vec::new();
+            for_scopes(&mi.args, &scope, ctx, &mut scopes)?;
+            let outer = if name == "intersection_for" {
+                Combinator::Intersection
+            } else {
+                Combinator::Union
+            };
+            let child_refs: Vec<&Stmt> = mi.children.iter().collect();
+            let mark = results.len();
+            work.push(GTask::Collect { mark, comb: outer });
+            for iter_scope in scopes.into_iter().rev() {
+                work.push(GTask::EvalNodes {
+                    stmts: child_refs.clone(),
+                    scope: iter_scope,
+                    global: global.clone(),
+                    island,
+                    comb: Combinator::Union,
+                });
+            }
+            Ok(())
         }
         // B1 — a module INSTANTIATION resolves against the CURRENT island: a USER module runs its body on the
         // work stack (host recursion GONE — the payoff), everything else is a builtin PRIMITIVE (a synchronous
@@ -643,5 +699,30 @@ fn shim_stmt<'a>(
     let mut scratch: Vec<Geo> = Vec::new();
     eval_stmt_dispatch(stmt, &mut scope, global, island, ctx, &mut scratch)?;
     results.extend(scratch);
+    Ok(())
+}
+
+/// B3 — collect the PER-ITERATION scopes of a `for`/`intersection_for` (the Cartesian product of its loop
+/// vars), mirroring `for_product` but WITHOUT eval'ing the body — the driver schedules each iteration as its
+/// own `EvalNodes`. The recursion is loop-VAR-deep (source-bounded, ~1-3), NOT iteration-deep (the per-value
+/// loops are flat), so it stays safely on the host stack.
+fn for_scopes<'a>(
+    args: &'a [crate::parser::Arg],
+    scope: &Scope,
+    ctx: &Ctx<'a>,
+    out: &mut Vec<Scope>,
+) -> crate::Result<()> {
+    match args.split_first() {
+        None => out.push(scope.clone()), // all vars bound → one iteration scope
+        Some((arg, rest)) => {
+            let name = arg.name.as_deref().unwrap_or("");
+            let iterable = eval_with_ctx(&arg.value, scope, ctx)?;
+            for value in super::iterate_values(&iterable) {
+                let mut child = scope.clone();
+                child.bind(name, value);
+                for_scopes(rest, &child, ctx, out)?;
+            }
+        }
+    }
     Ok(())
 }

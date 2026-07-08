@@ -42,7 +42,9 @@ fn a_supplied_mesh_flows_through() {
     })
     .expect("resolves");
     match geo {
-        Geo::D3(GeoNode::Leaf(leaf)) => assert_eq!(leaf, mesh, "the imported mesh is the reader's"),
+        Geo::D3(GeoNode::Leaf(ref leaf)) => {
+            assert_eq!(*leaf, mesh, "the imported mesh is the reader's")
+        }
         other => panic!("expected a single 3D leaf, got {other:?}"),
     }
 }
@@ -90,7 +92,9 @@ fn a_bad_file_path_never_calls_the_reader() {
         })
         .expect("resolves");
         match geo {
-            Geo::D3(GeoNode::Leaf(leaf)) => assert_eq!(leaf.tri_count(), 0, "{src}: empty placeholder"),
+            Geo::D3(GeoNode::Leaf(ref leaf)) => {
+                assert_eq!(leaf.tri_count(), 0, "{src}: empty placeholder")
+            }
             other => panic!("{src}: expected an empty 3D leaf, got {other:?}"),
         }
     }
@@ -140,7 +144,7 @@ fn surface_center_translates_the_mesh_eval_side() {
     // [0,2]³ stands in for a heightmap — plain stays at [0,2], centered shifts to [−1,1].
     let mesh = a_mesh(); // cube(2), XY bounds [0, 2]
     let x_range = |geo: Geo| match geo {
-        Geo::D3(GeoNode::Leaf(m)) => {
+        Geo::D3(GeoNode::Leaf(ref m)) => {
             let lo = m.verts.iter().map(|v| v.x).fold(f64::INFINITY, f64::min);
             let hi = m.verts.iter().map(|v| v.x).fold(f64::NEG_INFINITY, f64::max);
             (lo, hi)

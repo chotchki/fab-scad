@@ -143,7 +143,7 @@ fn circle_shares_fn_parity_with_the_ring_math() {
     );
     // d = 2r; the count comes from $fn.
     match d2("circle(d = 10, $fn = 32);") {
-        Shape2D::Polygon(cs) => {
+        Shape2D::Polygon(ref cs) => {
             assert_eq!(cs.len(), 1);
             assert_eq!(cs[0].len(), 32);
             assert_eq!(cs[0][0], p(5.0, 0.0)); // first point on +x, radius 5
@@ -168,24 +168,24 @@ fn transforms_apply_the_2d_submatrix() {
     // translate([x, y, z]) drops z — the 2D affine's translation is [x, y]. Verified vs oracle: the SVG
     // bbox of `translate([3,4,99]) square(2)` is [3,5]×[4,6] (z ignored).
     match d2("translate([3, 4, 99]) square(2);") {
-        Shape2D::Transform { matrix, child } => {
+        Shape2D::Transform { ref matrix, ref child } => {
             let m = matrix.as_row_major(); // [a, b, c, d, e, f] → x' = a·x+b·y+c, y' = d·x+e·y+f
             assert_eq!([m[2], m[5]], [3.0, 4.0]); // translation, z-component gone
-            assert!(matches!(*child, Shape2D::Polygon(_)));
+            assert!(matches!(**child, Shape2D::Polygon(_)));
         }
         other => panic!("expected a 2D Transform, got {other:?}"),
     }
     // scale([2, 3]) → the diagonal 2×2. Oracle: scale([2,3]) square(1) → [0,2]×[0,3].
     assert!(matches!(
         d2("scale([2, 3]) square(1);"),
-        Shape2D::Transform { matrix, .. } if {
+        Shape2D::Transform { ref matrix, .. } if {
             let m = matrix.as_row_major();
             [m[0], m[4]] == [2.0, 3.0]
         }
     ));
     // rotate(90) about +Z on a 2D shape: (x, y) → (-y, x). Oracle: rotate(90) square([4,2]) → [-2,0]×[0,4].
     match d2("rotate(90) square([4, 2]);") {
-        Shape2D::Transform { matrix, .. } => {
+        Shape2D::Transform { ref matrix, .. } => {
             assert_eq!(matrix.apply(p(4.0, 0.0)), p(0.0, 4.0)); // +x maps to +y
             assert_eq!(matrix.apply(p(0.0, 2.0)), p(-2.0, 0.0)); // +y maps to -x
         }
@@ -199,21 +199,21 @@ fn transforms_apply_the_2d_submatrix() {
 fn booleans_and_union_build_shape2d_nodes() {
     // two 2D objects at the top level → an implicit 2D union.
     assert!(
-        matches!(d2("circle(5, $fn = 8); circle(3, $fn = 8);"), Shape2D::Union(c) if c.len() == 2)
+        matches!(d2("circle(5, $fn = 8); circle(3, $fn = 8);"), Shape2D::Union(ref c) if c.len() == 2)
     );
     // explicit booleans over 2D children → the matching Shape2D node.
     assert!(matches!(
         d2("difference() { circle(5, $fn = 8); circle(3, $fn = 8); }"),
-        Shape2D::Difference(c) if c.len() == 2
+        Shape2D::Difference(ref c) if c.len() == 2
     ));
     assert!(matches!(
         d2("intersection() { square(5); circle(3, $fn = 8); }"),
-        Shape2D::Intersection(c) if c.len() == 2
+        Shape2D::Intersection(ref c) if c.len() == 2
     ));
     // a transform over a 2D boolean nests correctly (both stay 2D).
     assert!(matches!(
         d2("translate([1, 0]) union() { square(2); circle(1, $fn = 8); }"),
-        Shape2D::Transform { child, .. } if matches!(*child, Shape2D::Union(ref c) if c.len() == 2)
+        Shape2D::Transform { ref child, .. } if matches!(**child, Shape2D::Union(ref c) if c.len() == 2)
     ));
 }
 
@@ -225,8 +225,8 @@ fn offset_resolves_r_delta_and_chamfer() {
     // `r` (positional) → ROUNDED, $fn-faceted (segments = the full-circle count, like `circle`).
     assert!(matches!(
         d2("offset(2, $fn = 64) square(5);"),
-        Shape2D::Offset { delta, join: Join2D::Round, segments, child }
-            if delta == 2.0 && segments == 64 && matches!(*child, Shape2D::Polygon(_))
+        Shape2D::Offset { delta, join: Join2D::Round, segments, ref child }
+            if delta == 2.0 && segments == 64 && matches!(**child, Shape2D::Polygon(_))
     ));
     // named `r` is the same rounded path.
     assert!(matches!(
@@ -262,7 +262,7 @@ fn offset_is_a_fixed_2d_op() {
     // dimension is fixed at 2D), yielding an empty 2D offset. Verified vs OpenSCAD 2026.06.12.
     assert!(matches!(
         d2("offset(2) cube(5);"),
-        Shape2D::Offset { child, .. } if matches!(*child, Shape2D::Empty)
+        Shape2D::Offset { ref child, .. } if matches!(**child, Shape2D::Empty)
     ));
     assert_eq!(
         warnings("offset(2) cube(5);"),
@@ -271,7 +271,7 @@ fn offset_is_a_fixed_2d_op() {
     // A NULL child (`{}`) → an empty 2D offset, SILENTLY (no "Ignoring" — nothing there to ignore).
     assert!(matches!(
         d2("offset(2) { }"),
-        Shape2D::Offset { child, .. } if matches!(*child, Shape2D::Empty)
+        Shape2D::Offset { ref child, .. } if matches!(**child, Shape2D::Empty)
     ));
     assert!(warnings("offset(2) { }").is_empty());
 }
@@ -337,7 +337,7 @@ fn mixing_warns_once_but_ignores_each_mismatched_child() {
         ]
     );
     // circle + square both survive → a 2D union of two.
-    assert!(matches!(d2(src), Shape2D::Union(c) if c.len() == 2));
+    assert!(matches!(d2(src), Shape2D::Union(ref c) if c.len() == 2));
 }
 
 #[test]
@@ -346,7 +346,7 @@ fn a_matching_child_after_a_mismatch_survives() {
     // x = 104 — the trailing 2D square is kept despite the 3D cube between them (per-child filtering,
     // not break-on-first).
     let src = "union() { circle(5, $fn = 8); cube(2); translate([100, 0, 0]) square(3); }";
-    assert!(matches!(d2(src), Shape2D::Union(c) if c.len() == 2));
+    assert!(matches!(d2(src), Shape2D::Union(ref c) if c.len() == 2));
     assert_eq!(warnings(src).len(), 2); // one Mixing + one Ignoring (the single 3D child)
 }
 
@@ -374,7 +374,7 @@ fn an_empty_block_is_dimension_neutral_and_drops_out() {
     // first operand), so the cube survives (6 facets). `{}` → `Empty` is dimension-neutral, distinct from
     // a present-empty `cube(0)`. No mixing warning fires (nothing to mix).
     match evaluate_geometry("difference() { { } cube(4, center = true); }").unwrap() {
-        Geo::D3(GeoNode::Difference(c)) => assert_eq!(c.len(), 1), // just the cube; the `{}` dropped
+        Geo::D3(GeoNode::Difference(ref c)) => assert_eq!(c.len(), 1), // just the cube; the `{}` dropped
         other => panic!("expected a 3D Difference of one, got {other:?}"),
     }
     assert!(warnings("difference() { { } cube(4, center = true); }").is_empty());
@@ -398,7 +398,7 @@ fn color_over_2d_tags_the_color() {
     // changes no geometry — the wrapped child is exactly the uncolored shape (L.3.8). It USED to error LOUD;
     // recording the color beats dropping it (re-plumbing at the GUI) or silently diverging from OpenSCAD.
     match d2("color(\"red\") circle(3, $fn = 8);") {
-        Shape2D::Color { child, .. } => assert_eq!(*child, d2("circle(3, $fn = 8);")),
+        Shape2D::Color { ref child, .. } => assert_eq!(**child, d2("circle(3, $fn = 8);")),
         other => panic!("color() on 2D should tag Shape2D::Color, got {other:?}"),
     }
     // ...but an INVALID color (unknown name) inherits regardless of dimension → the 2D child passes through
@@ -415,18 +415,18 @@ fn projection_builds_the_3d_to_2d_bridge() {
     // the 3D subtree.
     assert!(matches!(
         evaluate_geometry("projection() cube(2);").unwrap(),
-        Geo::D2(Shape2D::Projection { cut: false, child }) if matches!(*child, GeoNode::Leaf(_))
+        Geo::D2(Shape2D::Projection { cut: false, ref child }) if matches!(**child, GeoNode::Leaf(_))
     ));
     // `cut = true` rides the flag; a multi-object group collapses into one union node.
     assert!(matches!(
         evaluate_geometry("projection(cut = true) { cube(2); sphere(3, $fn = 8); }").unwrap(),
-        Geo::D2(Shape2D::Projection { cut: true, child }) if matches!(*child, GeoNode::Union(_))
+        Geo::D2(Shape2D::Projection { cut: true, ref child }) if matches!(**child, GeoNode::Union(_))
     ));
     // A 2D child is coerced OUT (force_3d) → an empty subtree, not a projection of a plane (OpenSCAD
     // warns `Ignoring 2D child object for 3D operation` + renders nothing).
     assert!(matches!(
         evaluate_geometry("projection() square(5);").unwrap(),
-        Geo::D2(Shape2D::Projection { child, .. }) if matches!(*child, GeoNode::Empty)
+        Geo::D2(Shape2D::Projection { ref child, .. }) if matches!(**child, GeoNode::Empty)
     ));
 }
 
@@ -449,7 +449,7 @@ fn rotate_extrude_builds_the_2d_to_3d_bridge() {
     // A 3D child is coerced out (force_2d) → an empty profile, not a revolve of a solid.
     assert!(matches!(
         evaluate_geometry("rotate_extrude() cube(2);").unwrap(),
-        Geo::D3(GeoNode::Extrude { child, .. }) if matches!(*child, Shape2D::Empty)
+        Geo::D3(GeoNode::Extrude { ref child, .. }) if matches!(**child, Shape2D::Empty)
     ));
     // A UNION profile: max_x walks BOTH children (two concentric rings) → the farther one (22) drives
     // the fragment count — proving the boolean arm of the walk.
@@ -471,10 +471,10 @@ fn linear_extrude_builds_the_2d_to_3d_bridge() {
     use fab_lang::ExtrudeKind;
     // linear_extrude wraps a 2D child in the GeoNode::Extrude bridge (a 3D result).
     match evaluate_geometry("linear_extrude(5) square(4);").unwrap() {
-        Geo::D3(GeoNode::Extrude { kind, child }) => {
-            assert!(matches!(*child, Shape2D::Polygon(_)));
+        Geo::D3(GeoNode::Extrude { ref kind, ref child }) => {
+            assert!(matches!(**child, Shape2D::Polygon(_)));
             assert!(matches!(
-                kind,
+                *kind,
                 ExtrudeKind::Linear { height, twist, center, .. } if height == 5.0 && twist == 0.0 && !center
             ));
         }
@@ -489,7 +489,7 @@ fn linear_extrude_builds_the_2d_to_3d_bridge() {
     // a 3D child is IGNORED (force_2d, no "Mixing") → an extrude of the empty region.
     assert!(matches!(
         evaluate_geometry("linear_extrude(5) cube(2);").unwrap(),
-        Geo::D3(GeoNode::Extrude { child, .. }) if matches!(*child, Shape2D::Empty)
+        Geo::D3(GeoNode::Extrude { ref child, .. }) if matches!(**child, Shape2D::Empty)
     ));
     // TWIST builds (J.3.4.1: negate + resample); the `$fn`-resolved facet count rides the kind.
     assert!(matches!(

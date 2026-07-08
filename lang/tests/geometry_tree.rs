@@ -40,17 +40,17 @@ fn empty_program_is_empty() {
 #[test]
 fn transform_wraps_its_child_with_the_matrix() {
     match d3(evaluate_geometry("translate([5, 2, 9]) cube(10);").unwrap()) {
-        GeoNode::Transform { matrix, child } => {
+        GeoNode::Transform { ref matrix, ref child } => {
             let m = matrix.as_row_major();
             assert_eq!([m[3], m[7], m[11]], [5.0, 2.0, 9.0]); // translation column
-            assert!(matches!(*child, GeoNode::Leaf(_)));
+            assert!(matches!(**child, GeoNode::Leaf(_)));
         }
         other => panic!("expected Transform, got {other:?}"),
     }
     // scale is a diagonal; multmatrix passes through; rotate(0) is identity.
     assert!(matches!(
         d3(evaluate_geometry("scale([2, 3, 4]) cube(1);").unwrap()),
-        GeoNode::Transform { matrix, .. } if {
+        GeoNode::Transform { ref matrix, .. } if {
             let m = matrix.as_row_major();
             [m[0], m[5], m[10]] == [2.0, 3.0, 4.0]
         }
@@ -60,7 +60,7 @@ fn transform_wraps_its_child_with_the_matrix() {
 #[test]
 fn multiple_objects_are_an_implicit_union() {
     match d3(evaluate_geometry("cube(10); sphere(5, $fn = 8);").unwrap()) {
-        GeoNode::Union(children) => assert_eq!(children.len(), 2),
+        GeoNode::Union(ref children) => assert_eq!(children.len(), 2),
         other => panic!("expected Union, got {other:?}"),
     }
     // ...and a CSG tree can't flatten without a backend — evaluate() is LOUD.
@@ -70,7 +70,7 @@ fn multiple_objects_are_an_implicit_union() {
 #[test]
 fn booleans_build_their_nodes_over_children() {
     let two = |src| match d3(evaluate_geometry(src).unwrap()) {
-        GeoNode::Difference(c) | GeoNode::Intersection(c) | GeoNode::Union(c) => c.len(),
+        GeoNode::Difference(ref c) | GeoNode::Intersection(ref c) | GeoNode::Union(ref c) => c.len(),
         other => panic!("expected a boolean node, got {other:?}"),
     };
     assert_eq!(two("difference() { cube(10); sphere(5, $fn = 8); }"), 2);
@@ -83,12 +83,12 @@ fn hull_builds_an_n_ary_node_over_children() {
     match d3(
         evaluate_geometry("hull() { cube(2); translate([5, 0, 0]) sphere(1, $fn = 8); }").unwrap(),
     ) {
-        GeoNode::Hull(children) => assert_eq!(children.len(), 2),
+        GeoNode::Hull(ref children) => assert_eq!(children.len(), 2),
         other => panic!("expected a Hull node, got {other:?}"),
     }
     // hull() of a single child is still a Hull (of one) — the backend hulls it to its convex hull.
     assert!(
-        matches!(d3(evaluate_geometry("hull() cube(2);").unwrap()), GeoNode::Hull(c) if c.len() == 1)
+        matches!(d3(evaluate_geometry("hull() cube(2);").unwrap()), GeoNode::Hull(ref c) if c.len() == 1)
     );
 }
 
@@ -97,8 +97,8 @@ fn nested_transform_over_a_boolean() {
     match d3(
         evaluate_geometry("translate([1, 0, 0]) union() { cube(2); sphere(1, $fn = 8); }").unwrap(),
     ) {
-        GeoNode::Transform { child, .. } => {
-            assert!(matches!(*child, GeoNode::Union(ref c) if c.len() == 2));
+        GeoNode::Transform { ref child, .. } => {
+            assert!(matches!(**child, GeoNode::Union(ref c) if c.len() == 2));
         }
         other => panic!("expected Transform, got {other:?}"),
     }
@@ -107,7 +107,7 @@ fn nested_transform_over_a_boolean() {
 #[test]
 fn bare_block_groups_its_children_into_a_union() {
     match d3(evaluate_geometry("{ cube(2); sphere(1, $fn = 8); }").unwrap()) {
-        GeoNode::Union(children) => assert_eq!(children.len(), 2),
+        GeoNode::Union(ref children) => assert_eq!(children.len(), 2),
         other => panic!("expected Union, got {other:?}"),
     }
 }
@@ -131,7 +131,7 @@ fn if_contributes_the_taken_branch() {
 #[test]
 fn for_iterates_and_unions() {
     let count = |src| match d3(evaluate_geometry(src).unwrap()) {
-        GeoNode::Union(c) | GeoNode::Intersection(c) => c.len(),
+        GeoNode::Union(ref c) | GeoNode::Intersection(ref c) => c.len(),
         other => panic!("expected a fold node, got {other:?}"),
     };
     assert_eq!(
@@ -165,25 +165,25 @@ fn for_iterates_and_unions() {
 fn color_wraps_its_subtree() {
     // A named color → GeoNode::Color with the resolved Rgba; child is the primitive.
     match d3(evaluate_geometry("color(\"red\") cube(10);").unwrap()) {
-        GeoNode::Color { color, child } => {
-            assert_eq!(color, Rgba::opaque(1.0, 0.0, 0.0));
-            assert!(matches!(*child, GeoNode::Leaf(_)));
+        GeoNode::Color { ref color, ref child } => {
+            assert_eq!(*color, Rgba::opaque(1.0, 0.0, 0.0));
+            assert!(matches!(**child, GeoNode::Leaf(_)));
         }
         other => panic!("expected Color, got {other:?}"),
     }
     // rgb vector + alpha override; hex; case-insensitive name.
     assert!(matches!(
         d3(evaluate_geometry("color([0, 1, 0], 0.5) cube(1);").unwrap()),
-        GeoNode::Color { color, .. } if color == Rgba::new(0.0, 1.0, 0.0, 0.5)
+        GeoNode::Color { ref color, .. } if *color == Rgba::new(0.0, 1.0, 0.0, 0.5)
     ));
     assert!(matches!(
         d3(evaluate_geometry("color(\"#0000ff\") sphere(1, $fn = 8);").unwrap()),
-        GeoNode::Color { color, .. } if color == Rgba::opaque(0.0, 0.0, 1.0)
+        GeoNode::Color { ref color, .. } if *color == Rgba::opaque(0.0, 0.0, 1.0)
     ));
     // color OVER a boolean: the whole difference is the colored subtree.
     assert!(matches!(
         d3(evaluate_geometry("color(\"red\") difference() { cube(10); sphere(6, $fn = 8); }").unwrap()),
-        GeoNode::Color { child, .. } if matches!(*child, GeoNode::Difference(_))
+        GeoNode::Color { ref child, .. } if matches!(**child, GeoNode::Difference(_))
     ));
     // INVALID color inherits — NO Color node, just the child (OpenSCAD's -1 sentinel).
     assert!(matches!(
@@ -198,8 +198,8 @@ fn color_wraps_its_subtree() {
     // nested: the OUTER node wraps the inner (the backend resolves outer-wins at J.2.9).
     assert!(matches!(
         d3(evaluate_geometry("color(\"red\") color(\"blue\") cube(1);").unwrap()),
-        GeoNode::Color { color, child }
-            if color == Rgba::opaque(1.0, 0.0, 0.0) && matches!(*child, GeoNode::Color { .. })
+        GeoNode::Color { ref color, ref child }
+            if *color == Rgba::opaque(1.0, 0.0, 0.0) && matches!(**child, GeoNode::Color { .. })
     ));
     // ...and a single colored primitive still flattens with no backend (color dropped from the mesh).
     assert!(evaluate("color(\"red\") cube(10);").unwrap().tri_count() > 0);

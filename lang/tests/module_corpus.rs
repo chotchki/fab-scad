@@ -148,12 +148,12 @@ fn module_body_is_full_geometry() {
     ));
     assert!(matches!(
         d3(evaluate_geometry("module two() { cube(1); sphere(1, $fn = 8); } two();").unwrap()),
-        GeoNode::Union(c) if c.len() == 2
+        GeoNode::Union(ref c) if c.len() == 2
     ));
     // instantiated twice → two objects → an implicit union at the top level.
     assert!(matches!(
         d3(evaluate_geometry("module u() cube(1); u(); translate([3, 0, 0]) u();").unwrap()),
-        GeoNode::Union(c) if c.len() == 2
+        GeoNode::Union(ref c) if c.len() == 2
     ));
 }
 
@@ -291,7 +291,7 @@ fn children_renders_call_site_children() {
     assert!(matches!(
         d3(evaluate_geometry("module m() children(); m() { cube(1); translate([5, 0, 0]) cube(1); }")
             .unwrap()),
-        GeoNode::Union(c) if c.len() == 2
+        GeoNode::Union(ref c) if c.len() == 2
     ));
     // `children()` OUTSIDE any module call → nothing.
     assert_eq!(
@@ -326,7 +326,7 @@ fn children_index_and_count() {
             "module pick() children([0, 2]); pick() { cube(1); sphere(1, $fn = 8); cube(2); }"
         )
         .unwrap()),
-        GeoNode::Union(c) if c.len() == 2
+        GeoNode::Union(ref c) if c.len() == 2
     ));
     // a non-index arg (a string) → nothing.
     assert_eq!(

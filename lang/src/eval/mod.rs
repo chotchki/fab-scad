@@ -15,6 +15,7 @@ mod fmt;
 mod fragments;
 mod geo;
 mod geo2d;
+mod geo_drop;
 mod geometry;
 pub(crate) mod io;
 mod loader;
@@ -1831,12 +1832,16 @@ fn iterate_values(v: &Value) -> Vec<Value> {
 /// Flatten a geometry tree WITHOUT a backend: `Empty` → an empty mesh, a single 3D `Leaf` → its mesh.
 /// Anything with a transform, a boolean, or ANY 2D geometry needs the Manifold backend (fab-scad), so it
 /// errors LOUD — callers reach for [`evaluate_geometry`](crate::evaluate_geometry) + a backend instead.
-pub(crate) fn mesh_of(tree: Geo) -> crate::Result<Mesh> {
-    match tree {
+pub(crate) fn mesh_of(mut tree: Geo) -> crate::Result<Mesh> {
+    // Match by `&mut` and `mem::replace` the pieces out — `GeoNode` now has an iterative `Drop` (M.1), so a
+    // by-value move out of it is E0509. Leaving `Empty` behind lets `tree` drop trivially here.
+    match &mut tree {
         Geo::D3(GeoNode::Empty) => Ok(Mesh::new()),
-        Geo::D3(GeoNode::Leaf(mesh)) => Ok(mesh),
+        Geo::D3(GeoNode::Leaf(mesh)) => Ok(std::mem::replace(mesh, Mesh::new())),
         // Color is a display property, not geometry — a colored PRIMITIVE still flattens with no backend.
-        Geo::D3(GeoNode::Color { child, .. }) => mesh_of(Geo::D3(*child)),
+        Geo::D3(GeoNode::Color { child, .. }) => {
+            mesh_of(Geo::D3(std::mem::replace(&mut **child, GeoNode::Empty)))
+        }
         Geo::D3(_) => Err(crate::Error::Unimplemented(
             "geometry with transforms or booleans needs a backend — use evaluate_geometry (J.2)",
         )),

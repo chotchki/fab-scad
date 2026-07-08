@@ -207,7 +207,7 @@ mod tests {
         // ...and end to end: import(file) is a single 3D leaf carrying that mesh.
         let src = format!("import(\"{name}\");");
         match resolve_geometry_with_base(&src, &tmp(), &[]).expect("resolves") {
-            Geo::D3(GeoNode::Leaf(leaf)) => assert_eq!(leaf, mesh),
+            Geo::D3(GeoNode::Leaf(ref leaf)) => assert_eq!(*leaf, mesh),
             other => panic!("expected a 3D leaf, got {other:?}"),
         }
     }

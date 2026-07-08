@@ -146,28 +146,35 @@ Two hypotheses this profile KILLED (record them so they don't get re-proposed):
 
 ### The OpenSCAD wall-time (an aside, but the motivating one)
 
-Full pipeline, both to STL, both release/native, **both on the Manifold kernel** — OpenSCAD 2026.06.12's
-DEFAULT backend is already Manifold (confirmed: `--backend Manifold` = 8.95 s, identical to the default;
-`--backend CGAL` did NOT finish in 2 min, so CGAL is off the table for this model). So this IS apples-to-apples
-on the geometry kernel:
+Both to STL, both release/native, **both on the Manifold kernel** — OpenSCAD 2026.06.12's DEFAULT backend is
+already Manifold (confirmed: `--backend Manifold` = 8.95 s, identical to the default; `--backend CGAL` did NOT
+finish in 2 min). So this IS apples-to-apples on the kernel. The eval/render SPLIT (measured directly:
+OpenSCAD eval-only = `.csg` export, which flattens the CSG tree WITHOUT rendering — the analog of our
+`models_worker`):
 
-| | full → STL | STL size |
-|---|---|---|
-| OpenSCAD (Manifold) | **~8.9 s** | 26.5 MB |
-| scad-rs (Manifold) | **~9.7 s** | 3.0 MB |
+| | eval only | render (≈full−eval) | full → STL | STL size |
+|---|---|---|---|---|
+| OpenSCAD (Manifold) | **~5.7 s** (.csg) | ~3.2 s | ~8.9 s | 26.5 MB |
+| scad-rs (Manifold) | **~8.2 s** | ~1.4 s | ~9.6 s | 3.0 MB |
 
-Roughly even end to end — but the split is the story. OUR ~9.7 s is ~9 s interpreter + ~0.6 s Manifold render
-(on our tree); OpenSCAD's C++ eval is fast, so most of ITS ~8.9 s is Manifold rendering. So we spend on the
-INTERPRETER what OpenSCAD spends on RENDER. Cut eval meaningfully and we pass it — the thesis for N.2d + the
-O/P intrinsic/JIT tier.
+The CORRECTION that matters (an earlier draft of this doc ASSUMED OpenSCAD's eval was ~1–2 s and its render
+dominated — WRONG, never measured): OpenSCAD's tree-walker eval is ~5.7 s. It is ALSO slow on this model.
+We're ~1.4× behind on EVAL (8.2 vs 5.7), and ~2× AHEAD on RENDER (1.4 vs 3.2). The interpreter gap is ~30%,
+NOT 8×.
 
-CONFOUND, stated honestly: the two engines emit different-COMPLEXITY meshes (26.5 MB vs 3.0 MB, ~8×), so this
-isn't a clean same-work race — OpenSCAD is feeding Manifold far more triangles (finer dovetail/sawtooth
-tessellation, or a `$fn`/path-discretization difference in BOSL2's `partition`), which inflates its render
-share. Manifold also merges coplanar faces, widening the export gap. Whether the 8× is pure tessellation
-density or partial missing detail on our side is unresolved — worth a triangle-count `--check` on slice_parts
-before quoting this as a clean win. The interpreter-is-our-bottleneck conclusion holds regardless (our ~9 s
-eval is measured directly, kernel-independent).
+Why ~1.4× on a non-JIT'd tree-walker? Almost certainly VALUE-BUFFER REUSE, not anything JIT-shaped.
+OpenSCAD's `VectorType` is C++ move-semantics + COW: `a + b` with `a` a refcount-1 temporary MUTATES `a`'s
+buffer in place, zero alloc. Our `Value::NumList` is an immutable `Rc<[f64]>` — every vector arithmetic op
+allocates a FRESH buffer. That's the 55%-allocation signature, and N.2b/N.2d did NOT touch it (they cut
+scope/name allocation, not ARITHMETIC-RESULT allocation). The untouched lever: COW-mutate a `NumList` when
+`Rc::get_mut` shows it's unique — mirroring OpenSCAD. A concrete N.2-family change, NOT the O/P JIT tier.
+So: JIT is for BEATING a tree-walker (the endgame); matching OpenSCAD needs ~30% eval, reachable by buffer
+reuse.
+
+CONFOUND, still honest: the engines emit ~8× different mesh complexity (26.5 vs 3.0 MB), so if OpenSCAD's
+finer tessellation is generated during EVAL (not just render), it produces more per second than 1.4×
+suggests. The `.csg` is 12.4 MB (a big tree) — a tree-size comparison to our Geo tree is the follow-up to
+make the eval race fully clean.
 
 ## Redundancy — would an eval-memo cache pay? (measured 2026-07-08)
 

@@ -162,15 +162,6 @@ added 2026-07-07.
 ## Phase P - P - Cranelift JIT + CSG cache (desktop)
 - [ ] P.1 - P.1 - Cranelift JIT for the numeric long tail (desktop)
 - [ ] P.2 - P.2 - Content-addressed CSG cache
-## Phase Q - Dogfooding + hardening
-- [x] Q.1 - Dogfood: fab render --engine scad-rs [--check] (eval→Manifold→STL, + oracle diff)
-- [x] Q.2 - Q.2 - GUI live preview via scad-rs: swap render_whole off OpenSCAD (edit-in-Zed → live 3D)
-- [x] Q.3 - Dogfood bug: BOSL2 constants (UP/CENTER/_EPSILON) undef in module defaults via transitive `use`
-- [ ] Q.4 - Q.4 - SVG (2D vector) import: import(&lt;file.svg&gt;) → Shape2D via usvg (the text() playbook)
-  - [x] Q.4.1 - Q.4.1 - Widen the import seam to 2D-or-3D (Imported enum)
-  - [x] Q.4.2 - Q.4.2 - usvg parser → contours (scale 25.4/72 @ dpi=72, Y-flip about size height)
-  - [x] Q.4.3 - Q.4.3 - Oracle-match validation across the SVG corpus (differ); document v1 simplifications
-  - [x] Q.4.4 - Q.4.4 - Tests + docs/svg-import-design.md + remindwall FamilyLogo end-to-end
 
 ## Backlog (not yet phased)
 
@@ -211,3 +202,5 @@ Parked 2026-07-04 for the scad-rs pivot — the workflow tool works and stays in
 - **J.4.2.1 - import() eval + backend wiring (STL/3MF readers → Leaf)** — deferred from J.4.2.1 on 2026-07-06.
 - **J.4.2.2 - import() differential vs oracle (round-trip a known STL + 3MF)** — deferred from J.4.2.2 on 2026-07-06.
 - **surface() PNG heightmap load (deferred from M.5.2)** — added 2026-07-06.
+- **SVG import: stroke-only (open/unfilled) paths — Clipper-offset by stroke-width/2** — added 2026-07-08.
+- **SVG import: per-element even-odd grouping (vs pooled) — union elements with nonzero** — added 2026-07-08.

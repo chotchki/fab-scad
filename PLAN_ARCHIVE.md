@@ -319,3 +319,17 @@
 - [x] M.2 - M.2 - Assess eval-assembly recursion + correct the reserve rationale (EVAL_STACK); fix split to M.3
 - [x] M.3 - M.3 - Explicit-stack eval assembly (remove host recursion; default + wasm stack)
 
+---
+
+## 2026-07-08
+
+## Phase Q - Dogfooding + hardening
+- [x] Q.1 - Dogfood: fab render --engine scad-rs [--check] (eval→Manifold→STL, + oracle diff)
+- [x] Q.2 - Q.2 - GUI live preview via scad-rs: swap render_whole off OpenSCAD (edit-in-Zed → live 3D)
+- [x] Q.3 - Dogfood bug: BOSL2 constants (UP/CENTER/_EPSILON) undef in module defaults via transitive `use`
+- [x] Q.4 - Q.4 - SVG import LANDED via usvg: import(x.svg) → even-odd Shape2D::Polygon; oracle-matched (8/8 icons + FamilyLogo bbox exact), unblocks remindwall
+  - [x] Q.4.1 - Q.4.1 - Widen the import seam to 2D-or-3D (Imported enum)
+  - [x] Q.4.2 - Q.4.2 - usvg parser → contours (scale 25.4/72 @ dpi=72, Y-flip about size height)
+  - [x] Q.4.3 - Q.4.3 - Oracle-match validation across the SVG corpus (differ); document v1 simplifications
+  - [x] Q.4.4 - Q.4.4 - Tests + docs/svg-import-design.md + remindwall FamilyLogo end-to-end
+

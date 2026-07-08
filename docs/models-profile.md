@@ -171,6 +171,21 @@ scope/name allocation, not ARITHMETIC-RESULT allocation). The untouched lever: C
 So: JIT is for BEATING a tree-walker (the endgame); matching OpenSCAD needs ~30% eval, reachable by buffer
 reuse.
 
+**N.2e VERIFIED (ceiling-first, 2026-07-08) — and it FALSIFIED the buffer-reuse-closes-the-gap theory for
+slice_parts.** Built the reuse (`zip_reuse`/`map_reuse` in `ops.rs`: COW-mutate a refcount-1 `Rc<[f64]>` in
+place). A/B via `git stash`:
+- slice_parts (our target): **~0%** (8210 → 8220, noise).
+- a vector-arithmetic-heavy synthetic (`[for(i=…) a + b*i - a]`): **204 → 182 ms, ~11%** — reuse fires + works.
+
+So slice_parts' allocation is NOT vector arithmetic — it's comprehension RESULT-LIST building (`build_vector`
+→ `Rc<[Value]>`) + scope. A result list is genuine OUTPUT; you can't reuse a buffer for a list you're
+constructing fresh. The slice_parts eval gap to OpenSCAD is interpreter per-element overhead on
+comprehension/list-building + `check_assert` (41%), which is the O/P INTRINSIC/JIT domain, NOT allocation
+micro-opts. N.2e was KEPT anyway (bit-identical, corpus 901/901, do-no-harm, a real ~11% for the
+matrix/transform/point-heavy BOSL2 code that's common elsewhere) — but it is explicitly NOT the slice_parts
+lever. This is the empirical close of the N.2 allocation tier: the remaining eval cost is interpretation, not
+allocation.
+
 CONFOUND, still honest: the engines emit ~8× different mesh complexity (26.5 vs 3.0 MB), so if OpenSCAD's
 finer tessellation is generated during EVAL (not just render), it produces more per second than 1.4×
 suggests. The `.csg` is 12.4 MB (a big tree) — a tree-size comparison to our Geo tree is the follow-up to

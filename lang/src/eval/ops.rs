@@ -24,8 +24,9 @@ pub fn apply_binary(op: BinOp, a: Value, b: Value) -> Value {
     match op {
         BinOp::Add => match (a, b) {
             (Num(x), Num(y)) => Num(x + y),
-            // The SIMD kernel: two contiguous `f64` vectors, element-wise (`zip_trunc` vectorizes).
-            (NumList(x), NumList(y)) => Value::NumList(zip_trunc(&x, &y, |x, y| x + y)),
+            // The SIMD kernel: two contiguous `f64` vectors, element-wise. `zip_reuse` recycles a
+            // refcount-1 operand's buffer (N.2e) — a hot path in BOSL2 point loops.
+            (NumList(x), NumList(y)) => Value::NumList(zip_reuse(x, y, |x, y| x + y)),
             // A nested/heterogeneous vector (a MATRIX, `[[..],[..]]`) recurses PER ROW down to the
             // NumList kernel above — so matrix `+` stays SIMD-friendly (rows are the hot loop, the outer
             // walk is just dispatch). OpenSCAD adds vectors element-wise regardless of nesting depth.
@@ -36,7 +37,7 @@ pub fn apply_binary(op: BinOp, a: Value, b: Value) -> Value {
         },
         BinOp::Sub => match (a, b) {
             (Num(x), Num(y)) => Num(x - y),
-            (NumList(x), NumList(y)) => Value::NumList(zip_trunc(&x, &y, |x, y| x - y)),
+            (NumList(x), NumList(y)) => Value::NumList(zip_reuse(x, y, |x, y| x - y)),
             (a, b) if list_len(&a).is_some() && list_len(&b).is_some() => {
                 elementwise(BinOp::Sub, &a, &b)
             }
@@ -45,7 +46,7 @@ pub fn apply_binary(op: BinOp, a: Value, b: Value) -> Value {
         BinOp::Mul => match (a, b) {
             (Num(x), Num(y)) => Num(x * y),
             (Num(s), NumList(v)) | (NumList(v), Num(s)) => {
-                Value::NumList(v.iter().map(|e| e * s).collect())
+                Value::NumList(map_reuse(v, |e| e * s))
             }
             // scalar × a NESTED / heterogeneous list broadcasts element-wise, RECURSIVELY (OpenSCAD's
             // `multvecnum` multiplies each entry via `*`, so `0*[[..],[..]]` = `[0*[..], 0*[..]]`).
@@ -65,8 +66,8 @@ pub fn apply_binary(op: BinOp, a: Value, b: Value) -> Value {
         },
         BinOp::Div => match (a, b) {
             (Num(x), Num(y)) => Num(x / y), // IEEE: 1/0 → inf, 0/0 → NaN
-            (NumList(v), Num(s)) => Value::NumList(v.iter().map(|e| e / s).collect()),
-            (Num(s), NumList(v)) => Value::NumList(v.iter().map(|e| s / e).collect()),
+            (NumList(v), Num(s)) => Value::NumList(map_reuse(v, |e| e / s)),
+            (Num(s), NumList(v)) => Value::NumList(map_reuse(v, |e| s / e)),
             // nested list ÷ scalar (and scalar ÷ nested list) recurse element-wise, like OpenSCAD's `/`.
             (List(v), Num(s)) => Value::list(
                 v.iter()
@@ -134,6 +135,44 @@ pub fn apply_unary(op: UnOp, v: Value) -> Value {
 /// Element-wise combine, truncating to the shorter operand (OpenSCAD's silent-truncate).
 fn zip_trunc(a: &[f64], b: &[f64], f: impl Fn(f64, f64) -> f64) -> Rc<[f64]> {
     a.iter().zip(b.iter()).map(|(&x, &y)| f(x, y)).collect()
+}
+
+/// Element-wise combine, REUSING a refcount-1 operand's buffer in place instead of allocating a fresh one
+/// (N.2e). This is the move/COW buffer reuse that keeps OpenSCAD's `VectorType` fast: in a BOSL2 path loop,
+/// `p + [dx, dy]` has a temporary operand whose `Rc<[f64]>` is unique here (owned, popped off the value
+/// stack), so we mutate it into the result rather than malloc. Bit-IDENTICAL to [`zip_trunc`] (same `f`,
+/// same element order); reuse is gated on the operand already being the result length (`== n`, the shorter),
+/// so a truncating op never leaves stale tail elements. Falls back to a fresh allocation when neither
+/// operand is uniquely owned (both are live variables — refcount ≥ 2).
+fn zip_reuse(mut a: Rc<[f64]>, mut b: Rc<[f64]>, f: impl Fn(f64, f64) -> f64) -> Rc<[f64]> {
+    let n = a.len().min(b.len());
+    // Reuse `a` (or `b`) only when it's ALREADY the result length `n` (the shorter), so a truncating op
+    // leaves no stale tail; `sa.iter_mut().zip(b)` then truncates to n — matching `zip_trunc`.
+    if a.len() == n && let Some(sa) = Rc::get_mut(&mut a) {
+        for (x, &y) in sa.iter_mut().zip(b.iter()) {
+            *x = f(*x, y);
+        }
+        return a;
+    }
+    if b.len() == n && let Some(sb) = Rc::get_mut(&mut b) {
+        for (y, &x) in sb.iter_mut().zip(a.iter()) {
+            *y = f(x, *y);
+        }
+        return b;
+    }
+    zip_trunc(&a, &b, f)
+}
+
+/// Map `f` over a vector, REUSING its buffer in place when uniquely owned (N.2e — `scalar * v`, `v / s`,
+/// `-v`). Bit-identical to `v.iter().map(f).collect()`.
+fn map_reuse(mut v: Rc<[f64]>, f: impl Fn(f64) -> f64) -> Rc<[f64]> {
+    if let Some(s) = Rc::get_mut(&mut v) {
+        for e in s.iter_mut() {
+            *e = f(*e);
+        }
+        return v;
+    }
+    v.iter().map(|&e| f(e)).collect()
 }
 
 /// Element-wise recursive `op` (`+`/`-`) over two VECTOR values, OpenSCAD's nesting-agnostic vector

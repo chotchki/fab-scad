@@ -1415,12 +1415,27 @@ fn tagged_functions<'a>(
 fn build_intrinsics<'a>(
     functions: &BTreeMap<&'a str, (loader::FnDef<'a>, usize)>,
 ) -> BTreeMap<&'a str, intrinsics::Intrinsic> {
-    functions
-        .iter()
-        .filter_map(|(&name, &((params, body), _home))| {
-            intrinsics::lookup(name, params, body).map(|func| (name, func))
-        })
-        .collect()
+    let explain = intrinsics::explain_on();
+    let mut out = BTreeMap::new();
+    for (&name, &((params, body), _home)) in functions {
+        // EXPLAIN report (O.3): under FAB_EXPLAIN, say whether each registry-covered function will fire
+        // natively (WIRED) or silently interprets because its body drifted from the intrinsic's reference
+        // (DRIFT) — the answer to "is my intrinsic actually getting used on this program?".
+        if explain {
+            match intrinsics::classify(name, params, body) {
+                intrinsics::Plan::Wired => eprintln!("+ [intrinsic WIRED] {name}"),
+                intrinsics::Plan::Drift => eprintln!(
+                    "+ [intrinsic DRIFT] {name} — defined, but its body differs from the intrinsic \
+                     reference → INTERPRETED (library drift, or a stale reference)"
+                ),
+                intrinsics::Plan::NotRegistered => {}
+            }
+        }
+        if let Some(func) = intrinsics::lookup(name, params, body) {
+            out.insert(name, func);
+        }
+    }
+    out
 }
 
 /// Build island `i`'s CONSTANT scope: its top-level assignments hoisted (whole-scope, last-wins, in

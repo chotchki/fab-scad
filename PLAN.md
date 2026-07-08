@@ -159,7 +159,7 @@ added 2026-07-07.
 ## Phase O - O - Intrinsics tier (AST-fingerprint, wasm-safe)
 - [x] O.1 - O.1 - Intrinsic registry LANDED: AST-fingerprint gate (exact-match-or-interpret) + Task::Intrinsic dispatch + fast==slow harness; POC proves the chain, corpus 901/901
 - [ ] O.2 - O.2 - First hand-written BOSL2-function intrinsics from the release profile
-- [ ] O.3 - O.3 - EXPLAIN-PLAN: per-program execution-path report (intrinsic/JIT/interpreter)
+- [x] O.3 - O.3 v1 - EXPLAIN report LANDED (FAB_EXPLAIN): per-function intrinsic plan WIRED/DRIFT/interpreted, so you can see if an intrinsic fires or silently interprets (library drift). Runtime fire-counts + JIT path ride with P.1
 ## Phase P - P - Cranelift JIT + CSG cache (desktop)
 - [ ] P.1 - P.1 - Cranelift JIT for the numeric long tail (desktop)
 - [ ] P.2 - P.2 - Content-addressed CSG cache

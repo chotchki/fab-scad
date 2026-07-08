@@ -106,6 +106,39 @@ pub(super) fn reference_of(name: &str) -> Option<&'static str> {
     REGISTRY.iter().find(|e| e.name == name).map(|e| e.reference)
 }
 
+/// How a defined function relates to the intrinsic registry — the EXPLAIN classification (O.3).
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum Plan {
+    /// An intrinsic is registered for this name AND the body fingerprint matches → native dispatch will fire.
+    Wired,
+    /// An intrinsic is registered for this NAME, but the defined body fingerprints DIFFERENTLY (a BOSL2
+    /// revision the intrinsic's reference doesn't match) → it silently INTERPRETS. The actionable case:
+    /// either the user's library drifted, or the intrinsic's reference source is stale and needs updating.
+    Drift,
+    /// No intrinsic registered for this name — the ordinary interpreted function (the vast majority).
+    NotRegistered,
+}
+
+/// Classify a defined function against the registry (O.3 EXPLAIN). Pure + testable; the `FAB_EXPLAIN`
+/// stderr report ([`super::build_intrinsics`]) is just this plus a print.
+#[must_use]
+pub(super) fn classify(name: &str, params: &[Parameter], body: &Expr) -> Plan {
+    if !REGISTRY.iter().any(|e| e.name == name) {
+        return Plan::NotRegistered;
+    }
+    if lookup(name, params, body).is_some() {
+        Plan::Wired
+    } else {
+        Plan::Drift
+    }
+}
+
+/// Is the `FAB_EXPLAIN` intrinsic-plan report on? Cached once (env read per ctx build would be silly).
+pub(super) fn explain_on() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("FAB_EXPLAIN").is_some())
+}
+
 /// A structural fingerprint of a function's `(params, body)`: a 64-bit hash over the AST SHAPE — variant
 /// discriminants, operators, literal bits (`f64` by `to_bits`, so `NaN`/`±0` are exact), names, and nesting
 /// — with SPANS EXCLUDED (a fingerprint is source-formatting-independent; only the structure counts). Two
@@ -432,5 +465,19 @@ mod tests {
         };
         let result = crate::eval::eval_with_ctx(call, &Scope::new(), &ctx).expect("evaluates");
         assert_eq!(result, Value::Num(49.0), "the intrinsic-dispatched call returns x*x");
+    }
+
+    #[test]
+    fn explain_classifies_wired_drift_and_unregistered() {
+        use super::Plan;
+        // WIRED: exact reference → will dispatch natively.
+        let (p, b) = parse_fn(reference_of("_fab_poc_sq").unwrap());
+        assert_eq!(super::classify("_fab_poc_sq", &p, &b), Plan::Wired);
+        // DRIFT: registered NAME, different body → interprets silently (the case EXPLAIN surfaces).
+        let (pd, bd) = parse_fn("function _fab_poc_sq(x) = x * x + 1;");
+        assert_eq!(super::classify("_fab_poc_sq", &pd, &bd), Plan::Drift);
+        // NotRegistered: an ordinary function.
+        let (pn, bn) = parse_fn("function ordinary(x) = x + 1;");
+        assert_eq!(super::classify("ordinary", &pn, &bn), Plan::NotRegistered);
     }
 }

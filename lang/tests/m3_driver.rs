@@ -1,7 +1,7 @@
-//! M.3 — invariants of the explicit-stack GEOMETRY driver (`docs/m3-explicit-eval-spec.md` §DECISION). The
-//! whole test suite ALSO runs through the driver by default (it's the default eval path — `FAB_GEO_DRIVER=0`
-//! forces the recursive path), so every existing geometry test doubles as a transparency check; these pin the
-//! driver-SPECIFIC properties the 4-lens design review flagged, arm by arm as the dispatch converts.
+//! M.3 — invariants of the explicit-stack GEOMETRY driver (`docs/m3-explicit-eval-spec.md` §DECISION), now the
+//! SOLE geometry evaluator (the recursive tree-walk was retired once the driver proved bit-identical across the
+//! corpus + the models oracle-differential). Every geometry test exercises it; these pin the driver-SPECIFIC
+//! properties the 4-lens design review flagged.
 
 #![allow(
     clippy::unwrap_used,

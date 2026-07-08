@@ -43,9 +43,6 @@ fn on_small_stack<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> 
 /// closes. Skipped under `FAB_GEO_DRIVER=0` (that A/B run IS the recursive path this test would crash).
 #[test]
 fn deep_recursive_module_is_heap_bounded_under_the_driver() {
-    if std::env::var("FAB_GEO_DRIVER").as_deref() == Ok("0") {
-        return; // the recursive path overflows a 512 KiB stack — that's the M.2 exposure, not a regression
-    }
     on_small_stack(|| {
         let g = evaluate_geometry("module r(n) { if (n > 0) r(n - 1); else cube(1); } r(200);");
         assert!(g.is_ok(), "deep recursion should eval heap-bounded: {:?}", g.err());
@@ -58,9 +55,6 @@ fn deep_recursive_module_is_heap_bounded_under_the_driver() {
 /// module-depth per level and trip the 256 guard, a separate concern from stack-boundedness.)
 #[test]
 fn deep_recursion_through_for_is_heap_bounded() {
-    if std::env::var("FAB_GEO_DRIVER").as_deref() == Ok("0") {
-        return; // the recursive path overflows here — the M.2 exposure, not a regression
-    }
     on_small_stack(|| {
         let g = evaluate_geometry(
             "module r(n) { if (n > 0) for (i = [0:0]) r(n - 1); else cube(1); } r(200);",

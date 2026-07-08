@@ -4,32 +4,22 @@
 //! load-bearing corrections a 4-lens design review caught (arity-by-MARK not count; a two-class error DRAIN),
 //! and the increment plan live in `docs/m3-explicit-eval-spec.md` §DECISION.
 //!
-//! Converted so far (A2–A7): bare block, `if`, `let`, echo/assert passthrough, transforms, booleans, hull,
-//! minkowski, offset, the extrudes, projection, color, and the `*`/`%`/`!` modifiers. STILL shimmed to the
-//! recursive dispatch (increment 2): `call_user_module`, `children()`, and `for`/`intersection_for` — the arms
-//! that push/pop the `Ctx` module + children frames. The shim ([`shim_stmt`] → `eval_stmt_dispatch`) is a
-//! complete fallback, so the driver is always correct; converting an arm only moves it off the host stack.
+//! Every geometry-eval arm dispatches HERE — bare block, `if`, `let`, echo/assert passthrough, transforms,
+//! booleans, hull, minkowski, offset, the extrudes, projection, color, the `*`/`%`/`!` modifiers, user-module
+//! calls, `children()`, and `for`/`intersection_for`. This is the SOLE geometry evaluator; the former recursive
+//! tree-walk was retired at M.3's finish once the driver proved bit-identical across the corpus + models.
 
 use std::collections::BTreeMap;
-use std::sync::OnceLock;
 
 use super::geo::GeoNode;
 use super::geo2d::Shape2D;
 use super::{
     Children, Ctx, ExtrudeKind, Geo, Join2D, Scope, Stmt, Value, boolean_of, check_assert,
-    emit_echo, eval_stmt_dispatch, eval_with_ctx, force_2d, force_3d, geo, intersection_of, module,
-    partition_children, transform_of, union_of,
+    emit_echo, eval_with_ctx, force_2d, force_3d, geo, intersection_of, module, partition_children,
+    transform_of, union_of,
 };
 use crate::geom::{Affine, Rgba};
 use crate::parser::StmtKind;
-
-/// Is the explicit-stack geometry driver the active eval path? Default ON — the driver is behaviorally
-/// identical to the recursive path (unconverted arms shim to it), so it is the tested path. `FAB_GEO_DRIVER=0`
-/// forces the recursive path for an A/B differential. Read once (the switch can't change mid-run).
-pub(super) fn driver_enabled() -> bool {
-    static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| std::env::var("FAB_GEO_DRIVER").map_or(true, |v| v != "0"))
-}
 
 /// Which CSG boolean — a name-free tag so [`Combinator`] carries no lifetime.
 #[derive(Clone, Copy)]
@@ -383,8 +373,17 @@ fn dispatch_stmt<'a>(
             Ok(())
         }
         StmtKind::Module(mi) => dispatch_module(mi, scope, global, island, work, results, ctx),
-        // Empty / function-def / module-def / assignment / (nested, LOUD) use-include — shim.
-        _ => shim_stmt(stmt, scope, &global, island, ctx, results),
+        // Definitions + empties + assignments produce NO geometry: functions/modules register at `build_ctx`
+        // (their own namespaces), and assignments are hoisted (bound before the geometry pass), so all four are
+        // no-ops here. A `use`/`include` reaching eval is LOUD — the loader resolves top-level ones away, so one
+        // here is either nested (not scanned) or a raw `eval_program` on an unloaded program.
+        StmtKind::Empty
+        | StmtKind::FunctionDef { .. }
+        | StmtKind::ModuleDef { .. }
+        | StmtKind::Assignment { .. } => Ok(()),
+        StmtKind::Use(_) | StmtKind::Include(_) => Err(crate::Error::Unimplemented(
+            "unresolved use/include (nested, or eval_program on an unloaded program — use evaluate_file/evaluate_with_base)",
+        )),
     }
 }
 
@@ -675,30 +674,6 @@ fn push_user_module<'a>(
         global: home_global,
         island: home,
     });
-    Ok(())
-}
-
-/// The fallthrough SHIM: run ONE statement through the recursive `eval_stmt_dispatch` into a scratch vec, then
-/// push its result(s) onto the shared result stack. `eval_stmt_dispatch` (NOT `eval_stmt`) so the `!`/`*`/`%`
-/// modifiers — already handled by [`dispatch_module`] — are not double-applied. A statement produces 0 or 1
-/// `Geo`. This is the dual-path bridge — behaviorally identical to the recursive loop, so an unconverted arm
-/// keeps the exact recursive semantics.
-fn shim_stmt<'a>(
-    stmt: &'a Stmt,
-    scope: Scope,
-    global: &Scope,
-    island: usize,
-    ctx: &Ctx<'a>,
-    results: &mut Vec<Geo>,
-) -> crate::Result<()> {
-    // Skip assignments the way eval_geometry does (they hoist; the dispatcher no-ops them anyway).
-    if matches!(stmt.kind, StmtKind::Assignment { .. }) {
-        return Ok(());
-    }
-    let mut scope = scope;
-    let mut scratch: Vec<Geo> = Vec::new();
-    eval_stmt_dispatch(stmt, &mut scope, global, island, ctx, &mut scratch)?;
-    results.extend(scratch);
     Ok(())
 }
 

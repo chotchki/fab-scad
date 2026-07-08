@@ -24,9 +24,22 @@ pub(super) fn driver_enabled() -> bool {
 
 /// A resolved N-ary/unary combinator a [`GTask::Collect`] applies to its drained child `Geo`s to build ONE node
 /// — the geometry analogue of the expression machine's `Apply` carrying bound arg values. Populated arm-by-arm
-/// as the dispatch converts (A1+); empty in increment 1a because every arm still shims.
-#[allow(dead_code, reason = "M.3 increment 1a: combinators land as each dispatch arm converts (A2+)")]
-enum Combinator {}
+/// as the dispatch converts (A2+).
+enum Combinator {
+    /// Union the children — a bare block / implicit group. `union_of` handles the null / one / many collapse
+    /// (`{}` → `Empty`, one → itself, many → `Union`) and the 2D/3D mixing resolution.
+    Union,
+}
+
+impl Combinator {
+    /// Apply this combinator to the child `Geo`s a [`GTask::Collect`] drained (in source order), producing ONE
+    /// node — reusing the same wrap helpers the recursive dispatch uses, so the result is bit-identical.
+    fn apply(self, children: Vec<Geo>, ctx: &Ctx<'_>) -> Geo {
+        match self {
+            Combinator::Union => super::union_of(children, ctx),
+        }
+    }
+}
 
 /// One step on the geometry driver's work stack. WORK tasks may eval / emit / return `Err`; CLEANUP tasks are
 /// infallible ctx side-effects that MUST run on both the happy AND the error-drain path (LIFO), so the driver
@@ -42,9 +55,10 @@ enum GTask<'a> {
     },
     /// WORK — expand a statement list under a fresh mark: hoist, push-if-any local modules, record
     /// `mark = results.len()`, push the paired `Collect{mark, comb}`, then the child `Stmt`s in REVERSE source
-    /// order (so they land in source order), then `PopLocalModules` iff pushed. (A2+.)
+    /// order (so they land in source order), then `PopLocalModules` iff pushed. `stmts` is the raw AST slice
+    /// (children are `Vec<Stmt>` in the AST, lifetime `'a`), collected to `&[&Stmt]` only for the hoist helpers.
     EvalNodes {
-        stmts: &'a [&'a Stmt],
+        stmts: &'a [Stmt],
         scope: Scope,
         global: Scope,
         island: usize,
@@ -147,7 +161,7 @@ fn run_cleanup<'a>(task: GTask<'a>, ctx: &Ctx<'a>) {
 /// native expansions (`EvalNodes`/`Collect`/`CaptureRoot`) land as their dispatch arms convert (A1+).
 fn dispatch_work<'a>(
     task: GTask<'a>,
-    _work: &mut Vec<GTask<'a>>,
+    work: &mut Vec<GTask<'a>>,
     results: &mut Vec<Geo>,
     ctx: &Ctx<'a>,
 ) -> crate::Result<()> {
@@ -157,13 +171,86 @@ fn dispatch_work<'a>(
             scope,
             global,
             island,
-        } => shim_stmt(stmt, scope, &global, island, ctx, results),
-        GTask::EvalNodes { .. } | GTask::Collect { .. } | GTask::CaptureRoot { .. } => {
-            unimplemented!("M.3 arm conversion (A1+) constructs these; increment 1a only shims")
+        } => dispatch_stmt(stmt, scope, global, island, work, results, ctx),
+        // Expand a child statement list under a fresh mark. Push order is bottom→top: the `Collect` (fires
+        // LAST, after every child + the local-module pop), then `PopLocalModules` iff this block pushed local
+        // defs (fires after the children that may reference them), then the child `Stmt`s in REVERSE source
+        // order (so they pop — and land on the result stack — in source order).
+        GTask::EvalNodes {
+            stmts,
+            scope,
+            global,
+            island,
+            comb,
+        } => {
+            let refs: Vec<&Stmt> = stmts.iter().collect();
+            let hoisted = super::hoist_scope(&refs, &scope, ctx)?;
+            let local_mods = super::collect_module_defs(&refs);
+            let pushed = !local_mods.is_empty();
+            if pushed {
+                ctx.local_modules
+                    .borrow_mut()
+                    .push((local_mods, hoisted.clone()));
+            }
+            let mark = results.len();
+            work.push(GTask::Collect { mark, comb });
+            if pushed {
+                work.push(GTask::PopLocalModules);
+            }
+            for stmt in stmts.iter().rev() {
+                // Assignments hoist (bound above); skip them exactly as `eval_geometry` does.
+                if matches!(stmt.kind, StmtKind::Assignment { .. }) {
+                    continue;
+                }
+                work.push(GTask::Stmt {
+                    stmt,
+                    scope: hoisted.clone(),
+                    global: global.clone(),
+                    island,
+                });
+            }
+            Ok(())
+        }
+        // Drain exactly what this block pushed — `results.split_off(mark)`, 0-or-1 per child stmt, in source
+        // order — and apply the combinator, pushing ONE node.
+        GTask::Collect { mark, comb } => {
+            let children = results.split_off(mark);
+            results.push(comb.apply(children, ctx));
+            Ok(())
+        }
+        GTask::CaptureRoot { .. } => {
+            unimplemented!("M.3 A7: the `!` root modifier converts here")
         }
         GTask::PopLocalModules | GTask::PopModuleFrame { .. } | GTask::RestoreChildrenFrame(_) => {
             unreachable!("CLEANUP tasks are handled in the driver loop, not dispatch_work")
         }
+    }
+}
+
+/// Dispatch ONE statement: a converted arm pushes native work-stack tasks; every still-recursive arm falls
+/// through to the [`shim_stmt`] bridge. Arms convert leaf → simple (A1+), each gated on the differential.
+fn dispatch_stmt<'a>(
+    stmt: &'a Stmt,
+    scope: Scope,
+    global: Scope,
+    island: usize,
+    work: &mut Vec<GTask<'a>>,
+    results: &mut Vec<Geo>,
+    ctx: &Ctx<'a>,
+) -> crate::Result<()> {
+    match &stmt.kind {
+        // A2 — a bare `{ … }` block groups its children into ONE implicit-union node in a fresh hoisted scope.
+        StmtKind::Block(stmts) => {
+            work.push(GTask::EvalNodes {
+                stmts: stmts.as_slice(),
+                scope,
+                global,
+                island,
+                comb: Combinator::Union,
+            });
+            Ok(())
+        }
+        _ => shim_stmt(stmt, scope, &global, island, ctx, results),
     }
 }
 

@@ -674,21 +674,25 @@ fn run_builtin(name: &str, args: &[Arg], values: &mut Vec<Value>, ctx: &Ctx<'_>)
     // OpenSCAD builtins declare NO parameter names: every argument — named or positional — is read by
     // SOURCE POSITION and any name ignored (`func.cc` reads `arguments[i].value`, never `.name`). BOSL2's
     // `search([v], list, num_returns_per_match=1, index_col_num=idx)` works ONLY because those trailing
-    // names sit at positions 2 and 3. The evaluated values are already on the stack in source order, so
-    // they pass straight through as one positional list — splitting the named ones off (as we used to)
-    // dropped them entirely, silently defaulting `search`'s `index_col_num` to 0.
-    let positional = values.split_off(values.len().saturating_sub(args.len()));
+    // names sit at positions 2 and 3. The evaluated values are already on the value stack in source order,
+    // so we BORROW them in place as the positional slice — no `split_off` of a throwaway Vec per call. A
+    // builtin call is the interpreter's hottest event (is_num/is_undef/len run into the millions on BOSL2),
+    // and the split-off 1-element Vec was a per-call heap alloc for nothing (N.2a). We read the slice, then
+    // truncate the stack back and push the result. (Splitting the NAMED args off — as an even-older cut
+    // did — dropped them entirely, silently defaulting `search`'s `index_col_num` to 0; we keep all of them.)
+    let start = values.len().saturating_sub(args.len());
     // `rands` is the one STATEFUL builtin: seedless draws advance the evaluator's `rand_stream` (I.2.8b),
     // so it's routed here where the `Ctx` is in scope rather than through the pure `builtins::apply`.
     let result = if name == "rands" {
-        builtins::rands(&positional, &mut ctx.rand_stream.borrow_mut())
+        builtins::rands(&values[start..], &mut ctx.rand_stream.borrow_mut())
     } else if name == "parent_module" {
         // Reads the live module-instantiation name stack (control.cc) — stateful, like `rands`.
-        builtins::parent_module(&positional, &ctx.module_stack.borrow())
+        builtins::parent_module(&values[start..], &ctx.module_stack.borrow())
     } else {
-        builtins::apply(name, &positional)
+        builtins::apply(name, &values[start..])
     };
-    trace::builtin(name, &positional, &result); // gated inside; shows `name(args) => result`
+    trace::builtin(name, &values[start..], &result); // gated inside; shows `name(args) => result`
+    values.truncate(start);
     values.push(result);
 }
 
@@ -1814,9 +1818,15 @@ fn check_assert<'a>(
     let condition = named_condition.or_else(|| positional.first().cloned());
     let message = named_message.or_else(|| positional.get(1).map(|(_, v)| v.clone()));
     let passed = matches!(&condition, Some((_, c)) if c.is_truthy());
-    // Pretty-print the condition back to source ONCE — shared by the trace line and (on failure) the
-    // error locator. A real assert always has a condition; `""` covers the degenerate `assert()`.
-    let cond_src = condition.map_or_else(String::new, |(e, _)| crate::parser::print_expr(e));
+    // Pretty-print the condition back to source ONLY when it's actually consumed — the trace line (off in
+    // release) or a FAILURE locator. BOSL2 is assert-DENSE and its asserts overwhelmingly PASS, so building
+    // this string on every passing assert with tracing off was pure churn (N.2a: `write_expr` showed up at
+    // ~1.5% of a real model's allocation, all of it thrown away). `""` covers the degenerate `assert()`.
+    let cond_src = if trace::on() || !passed {
+        condition.map_or_else(String::new, |(e, _)| crate::parser::print_expr(e))
+    } else {
+        String::new()
+    };
     trace::assert(passed, &cond_src); // gated inside (like bind/ret/module) — free when the trace is off
     if passed {
         return Ok(());

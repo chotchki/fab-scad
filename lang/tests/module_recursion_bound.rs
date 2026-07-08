@@ -63,6 +63,22 @@ fn deep_recursion_through_for_is_heap_bounded() {
     });
 }
 
+/// EXCEED OpenSCAD (the moat) — a recursion 10 000 deep evaluates fine, where OpenSCAD 2026.06.12 errors
+/// "Recursion detected calling module" by ~8 000 (its C++ tree-walker is host-stack-bound; ours is
+/// heap-bounded, so `MAX_MODULE_DEPTH` sits well above OpenSCAD's limit). Runs on a 512 KiB stack — the depth
+/// lives on the heap work stack, not the host stack. Same language, deeper limit.
+#[test]
+fn recursion_deeper_than_openscad_still_evaluates() {
+    on_small_stack(|| {
+        let g = evaluate_geometry("module r(n) { if (n > 0) r(n - 1); else cube(1); } r(10000);");
+        assert!(
+            g.is_ok(),
+            "10k-deep recursion should evaluate (OpenSCAD errors by ~8k): {:?}",
+            g.err()
+        );
+    });
+}
+
 #[test]
 fn runaway_module_recursion_is_loud_not_a_crash() {
     // `module r() { r(); }` has no base case — the guard bails at MAX_MODULE_DEPTH and the error unwinds out

@@ -262,10 +262,14 @@ impl<'a> Ctx<'a> {
     }
 }
 
-/// Max nested user-module call depth before we bail LOUD (OpenSCAD caps recursion similarly). Statement
-/// recursion is host-stack-bound — unlike the EXPRESSION machine (explicit stack, memory-bound) — so
-/// this guard is what keeps a `module m() { m(); }` from crashing the process.
-const MAX_MODULE_DEPTH: usize = 256;
+/// Max nested user-module call depth before we bail LOUD. Since M.3, statement/geometry eval is HEAP-bounded
+/// (the explicit-stack driver — no host recursion), so this is NO LONGER crash-safety; it's a runaway DETECTOR,
+/// turning an infinite `module m() { m(); }` into a fast LOUD error instead of a slow crawl to OOM. Set WELL
+/// ABOVE OpenSCAD's own module-recursion limit (empirically ~5–8 k on 2026.06.12, where it errors "Recursion
+/// detected") — because we're heap-bounded and OpenSCAD's C++ tree-walker is host-stack-bound, we accept
+/// recursion depths OpenSCAD refuses. (A children()/wrapper chain doubles the depth per level, so headroom
+/// matters for deep attachable chains.) A memory/step budget could replace this later.
+const MAX_MODULE_DEPTH: usize = 100_000;
 
 /// One step on the evaluator's explicit work-stack. Each `Eval` carries the [`Scope`] it evaluates
 /// in (an `Rc<Frame>` clone — cheap), so a call's body can evaluate in the callee's scope while the

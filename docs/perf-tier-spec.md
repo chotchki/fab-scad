@@ -32,7 +32,7 @@ implementation). Our Rust tree-walker matches it per-op. So:
 - **The architecture already welcomes it.** scad-rs was designed for a JIT from the start (the I.8 spike,
   interpreter↔JIT bit-identity already proven); adding one to a C++ tree-walker would be a large undertaking,
   so this is a natural fit HERE — and, like the rest, available upstream if it's ever wanted.
-- **The web target makes it LOAD-BEARING.** In the browser there's no native process to lean on — the
+- **The web target is a constraint in a few places.** In the browser there's no native process to lean on — the
   interpreter + wasm-safe intrinsics ARE the entire perf story. That's the bet's #1 differentiator (ONE
   implementation everywhere), so the intrinsics tier isn't optional there, it's the product.
 

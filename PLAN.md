@@ -146,6 +146,18 @@ added 2026-07-07.
   - [x] L.3.6 - L.3.6 - text() 100/72 DPI scale (was rendering glyphs 0.72× too small)
   - [x] L.3.8 - L.3.8 - color() on 2D geometry tags the color (Shape2D::Color) — the 343× BOSL2-example bucket
 - [ ] L.4 - Exit review: divergences zero-or-documented, perf-vs-oracle published; rung 2/3 (intrinsics, JIT) phase cut FROM THIS DATA
+## Phase M - M - Heap-bounded eval (last recursion removal)
+- [ ] M.1 - M.1 - Iterative Drop for deep GeoNode/Shape2D/Value trees
+- [ ] M.2 - M.2 - Assess + fix eval-assembly recursion; drop the 1 GiB stack hacks
+## Phase N - N - Interpreter fast-paths (our builtins)
+- [ ] N.1 - N.1 - Re-profile a slow model on RELEASE with a sampling profiler
+- [ ] N.2 - N.2 - Fast-path builtin dispatch (unary predicates + len/concat)
+## Phase O - O - Intrinsics tier (AST-fingerprint, wasm-safe)
+- [ ] O.1 - O.1 - AST-fingerprint intrinsic registry + auto-fallback + fast==slow harness
+- [ ] O.2 - O.2 - First hand-written BOSL2-function intrinsics from the release profile
+## Phase P - P - Cranelift JIT + CSG cache (desktop)
+- [ ] P.1 - P.1 - Cranelift JIT for the numeric long tail (desktop)
+- [ ] P.2 - P.2 - Content-addressed CSG cache
 
 ## Backlog (not yet phased)
 

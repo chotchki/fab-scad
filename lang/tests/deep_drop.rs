@@ -46,9 +46,6 @@ fn deep_shape2d_drop_is_heap_bounded() {
 }
 
 #[test]
-#[ignore = "M.1b: Value deep-list Drop still recurses — needs a ValueList newtype (Drop on Value itself \
-            E0509s the ops.rs arithmetic hot path). Deep-nested Value lists are rare in BOSL2 (it builds flat \
-            comprehensions), unlike the geometry trees; tracked separately."]
 fn deep_value_list_drop_is_heap_bounded() {
     on_small_stack(|| {
         let mut v = Value::Undef;

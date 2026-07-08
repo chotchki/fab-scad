@@ -148,7 +148,7 @@ added 2026-07-07.
 - [ ] L.4 - Exit review: divergences zero-or-documented, perf-vs-oracle published; rung 2/3 (intrinsics, JIT) phase cut FROM THIS DATA
 ## Phase M - M - Heap-bounded eval (last recursion removal)
 - [x] M.1 - M.1 - Iterative Drop for deep GeoNode/Shape2D/Value trees
-- [ ] M.1b - M.1b - Value deep-list Drop: ValueList newtype (heap-bounded, no arithmetic-hot-path cost)
+- [x] M.1b - M.1b - Value deep-list Drop: ValueList newtype (heap-bounded, no arithmetic-hot-path cost)
 - [ ] M.2 - M.2 - Assess + fix eval-assembly recursion; drop the 1 GiB stack hacks
 ## Phase N - N - Interpreter fast-paths (our builtins)
 - [ ] N.1 - N.1 - Re-profile a slow model on RELEASE with a sampling profiler

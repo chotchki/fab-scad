@@ -26,8 +26,10 @@ pub enum Value {
     Str(Rc<str>),
     /// A contiguous numeric list — the fast path for vector math (shared, immutable).
     NumList(Rc<[f64]>),
-    /// A general heterogeneous list: nested lists, mixed types (shared, immutable).
-    List(Rc<[Value]>),
+    /// A general heterogeneous list: nested lists, mixed types (shared, immutable). Wrapped in [`ValueList`]
+    /// so the deep-nesting iterative `Drop` lives on the PAYLOAD, not on `Value` — a `Drop` on `Value` itself
+    /// forbids the by-value field moves the arithmetic hot path (`ops.rs`) relies on (E0509). M.1b.
+    List(ValueList),
     /// A LAZY range `[start : step : end]` — a first-class value (assignable, iterable), NOT
     /// materialized. Iterate with [`range_iter`]. `Value.cc`/`RangeType`.
     Range {
@@ -58,6 +60,51 @@ pub enum Value {
     },
 }
 
+/// The payload of [`Value::List`] — a shared, heterogeneous `[Value]`. A newtype PURELY so its `Drop` can be
+/// iterative: a general list is the ONLY value that nests other values, so a runtime-deep `[[[…]]]` (a deep
+/// recursive comprehension) drops one host-stack frame per level and overflows — the same class M.1 killed for
+/// the geometry trees. `Drop` lives HERE, not on `Value`: a `Drop` on `Value` forbids the by-value field moves
+/// the arithmetic hot path (`ops.rs`) relies on (E0509). Derefs to `[Value]`, so every read site (`.iter()`,
+/// `.len()`, indexing) is transparent — cloning stays a cheap `Rc` bump.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ValueList(Rc<[Value]>);
+
+impl std::ops::Deref for ValueList {
+    type Target = [Value];
+    fn deref(&self) -> &[Value] {
+        &self.0
+    }
+}
+
+impl Drop for ValueList {
+    fn drop(&mut self) {
+        // Leaf fast path: an empty (or already-drained) payload needs no worklist — the common case.
+        if self.0.is_empty() {
+            return;
+        }
+        // Unlink every SOLELY-owned nested list into one flat worklist and drop iteratively (mirrors M.1's
+        // geo_drop + Frame::Drop). `Rc::get_mut` succeeds only at strong-count 1 — a SHARED payload is someone
+        // else's to keep, so we leave its nested lists alone and just let the `Rc` decrement. Taking each
+        // nested payload BEFORE its `Value::List` drops means that re-entrant `ValueList::drop` hits the empty
+        // fast path above — so nothing recurses past depth 1.
+        let mut work = vec![std::mem::take(&mut self.0)];
+        while let Some(mut rc) = work.pop() {
+            if let Some(slice) = Rc::get_mut(&mut rc) {
+                for v in slice {
+                    if let Value::List(inner) = v {
+                        let nested = std::mem::take(&mut inner.0);
+                        if !nested.is_empty() {
+                            work.push(nested);
+                        }
+                    }
+                }
+            }
+            // `rc` drops here: sole-owner payloads are now shallow (nested lists drained), shared ones just
+            // decrement their count. Either way, no recursive `Drop` chain down the nesting.
+        }
+    }
+}
+
 impl Value {
     /// A string value from anything convertible to a shared `str`.
     #[must_use]
@@ -74,7 +121,7 @@ impl Value {
     /// A general list value from anything convertible to a shared `[Value]`.
     #[must_use]
     pub fn list(xs: impl Into<Rc<[Value]>>) -> Self {
-        Value::List(xs.into())
+        Value::List(ValueList(xs.into()))
     }
 
     /// The OpenSCAD "truthiness" of this value (`Value.cc:294-309`): `undef`, `false`, `0`/`-0`, `""`,

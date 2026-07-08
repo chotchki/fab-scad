@@ -114,9 +114,12 @@ pub fn apply_unary(op: UnOp, v: Value) -> Value {
             // element-wise, recursing: OpenSCAD's `-[[a,b],[c,d]]` = `[[-a,-b],[-c,-d]]`. Without this a
             // `-matrix` (e.g. `-rot(90)` in BOSL2's rot_inverse) collapsed to `undef` and poisoned the
             // downstream matrix math. Non-numeric leaves fall through to `undef`, matching `-"x"`.
-            Value::List(items) => {
-                Value::List(items.iter().map(|e| apply_unary(UnOp::Neg, e.clone())).collect())
-            }
+            Value::List(items) => Value::list(
+                items
+                    .iter()
+                    .map(|e| apply_unary(UnOp::Neg, e.clone()))
+                    .collect::<Vec<_>>(),
+            ),
             _ => Value::Undef,
         },
         UnOp::Pos => v, // no-op (parser.y:469)

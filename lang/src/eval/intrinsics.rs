@@ -82,6 +82,19 @@ static REGISTRY: &[Entry] = &[
         reference: "function is_finite(x) = is_num(x) && !is_nan(0*x);",
         func: is_finite,
     },
+    // BOSL2 `last` (9.6% of user-fn calls) + `default` (2.5%) — the next two down the profile. Both call only
+    // builtins (`len`, `is_undef`), so the plain interpreter is their oracle. Verbatim from lists.scad /
+    // utility.scad.
+    Entry {
+        name: "last",
+        reference: "function last(list) = list[len(list)-1];",
+        func: last,
+    },
+    Entry {
+        name: "default",
+        reference: "function default(v,dflt=undef) = is_undef(v)? dflt : v;",
+        func: default,
+    },
 ];
 
 /// The POC intrinsic: `x * x`. Mirrors the interpreter's `Num * Num` (and `undef` for a non-number arg, as
@@ -125,6 +138,36 @@ fn is_nan(args: &[Value]) -> Value {
 /// which interprets the reference WITH `is_nan` defined (the dependency-aware oracle).
 fn is_finite(args: &[Value]) -> Value {
     Value::Bool(matches!(args.first(), Some(Value::Num(n)) if n.is_finite()))
+}
+
+/// BOSL2 `last(list) = list[len(list)-1]` — the final element. `len` is `undef` for anything but a
+/// list/string (numbers, ranges, `undef`), and `undef-1` then indexes to `undef`, so a non-indexable arg is
+/// `undef` here too; an EMPTY list gives `len 0 → index -1 → undef` (out of range), matching the interpreter.
+/// The length uses the SAME `count = n as f64` the `len` builtin does, so `list[n-1]` routes through the real
+/// [`super::ops::index`] with a bit-identical index.
+fn last(args: &[Value]) -> Value {
+    let list = args.first().cloned().unwrap_or(Value::Undef);
+    let n = match &list {
+        Value::NumList(xs) => xs.len(),
+        Value::List(xs) => xs.len(),
+        Value::Str(s) => s.chars().count(),
+        _ => return Value::Undef, // len(x) is undef → undef-1 → index(_, undef) → undef
+    };
+    #[allow(
+        clippy::cast_precision_loss,
+        reason = "matches the `len` builtin's `count(n) = n as f64`; a list past 2^52 elements is unreachable"
+    )]
+    super::ops::index(list, &Value::Num(n as f64 - 1.0))
+}
+
+/// BOSL2 `default(v, dflt=undef) = is_undef(v) ? dflt : v` — `v` unless it's `undef`, then the fallback. A
+/// 1-arg call leaves `dflt` at its `undef` default (so `default(undef)` is `undef`); the dispatch gate only
+/// routes all-positional calls here, so the slice is `[v]` or `[v, dflt]`.
+fn default(args: &[Value]) -> Value {
+    match args.first() {
+        None | Some(Value::Undef) => args.get(1).cloned().unwrap_or(Value::Undef),
+        Some(v) => v.clone(),
+    }
 }
 
 /// `name → (fingerprint, intrinsic)` for every registry entry, computed ONCE by parsing each `reference` and
@@ -464,6 +507,26 @@ mod tests {
         crate::eval::eval_with_ctx(body, &scope, &ctx).expect("reference body evaluates")
     }
 
+    /// Bit-level `Value` equality — the harness's notion of "bit-identical". `f64`s compare by `to_bits`, so
+    /// two `NaN`s (same bits) are EQUAL where `==` says `NaN != NaN`, and `0.0`/`-0.0` (different bits) are
+    /// DISTINCT where `==` says equal — exactly the determinism doctrine. Recurses into lists; other variants
+    /// fall back to `==` (they carry no float). Used wherever an intrinsic can RETURN a number (`last`/
+    /// `default`); the `Bool`-returning predicates are fine with plain `==`.
+    fn bit_eq(a: &Value, b: &Value) -> bool {
+        use Value::{List, Num, NumList, Range};
+        match (a, b) {
+            (Num(x), Num(y)) => x.to_bits() == y.to_bits(),
+            (NumList(x), NumList(y)) => {
+                x.len() == y.len() && x.iter().zip(y.iter()).all(|(p, q)| p.to_bits() == q.to_bits())
+            }
+            (List(x), List(y)) => x.len() == y.len() && x.iter().zip(y.iter()).all(|(p, q)| bit_eq(p, q)),
+            (Range { start: s1, step: t1, end: e1 }, Range { start: s2, step: t2, end: e2 }) => {
+                s1.to_bits() == s2.to_bits() && t1.to_bits() == t2.to_bits() && e1.to_bits() == e2.to_bits()
+            }
+            _ => a == b,
+        }
+    }
+
     /// The value battery the predicate intrinsics are proven against — one of every `Value` shape, with the
     /// float edges (`±0`, `±inf`, `NaN`) that `is_nan`/`is_finite` turn on, plus a `NaN`/`inf` INSIDE a list
     /// (the element-wise-`!=` corner that separates a naive scalar `is_nan` from the real `x!=x`).
@@ -486,6 +549,7 @@ mod tests {
             Value::num_list(vec![f64::NAN]),
             Value::num_list(vec![f64::INFINITY]),
             Value::list(vec![]),
+            Value::Range { start: 0.0, step: 1.0, end: 5.0 },
         ]
     }
 
@@ -656,6 +720,41 @@ mod tests {
             );
         }
         assert_eq!(func(&[]), interpret_with_deps(reference, &deps, &[]), "is_finite() diverged");
+    }
+
+    #[test]
+    fn last_matches_its_reference_bit_for_bit() {
+        // `last(list) = list[len(list)-1]` calls only builtins (`len`, index) → plain interpreter oracle. The
+        // battery hits every shape: a populated list/numlist (real last element), an EMPTY list (len 0 →
+        // index -1 → undef), a string (last char), and non-indexables (num/range/undef → undef).
+        let reference = reference_of("last").expect("registered");
+        let (params, body) = parse_fn(reference);
+        let func = lookup("last", &params, &body).expect("its own reference must register");
+        for input in value_battery() {
+            let one = [input.clone()];
+            assert!(bit_eq(&func(&one), &interpret(reference, &one)), "last({input:?}) diverged");
+        }
+        // A longer list, to prove it's the LAST element and not the first/second.
+        let long = [Value::list((0..7).map(|i| Value::Num(f64::from(i))).collect::<Vec<_>>())];
+        assert!(bit_eq(&func(&long), &interpret(reference, &long)), "last(0..6) diverged");
+    }
+
+    #[test]
+    fn default_matches_its_reference_bit_for_bit() {
+        // `default(v, dflt=undef) = is_undef(v) ? dflt : v` — two params, so prove BOTH the 1-arg (dflt takes
+        // its undef default) and 2-arg forms across the battery. `is_undef` is a builtin → plain oracle.
+        let reference = reference_of("default").expect("registered");
+        let (params, body) = parse_fn(reference);
+        let func = lookup("default", &params, &body).expect("its own reference must register");
+        let battery = value_battery();
+        for v in &battery {
+            let one = [v.clone()];
+            assert!(bit_eq(&func(&one), &interpret(reference, &one)), "default({v:?}) diverged");
+            for d in &battery {
+                let two = [v.clone(), d.clone()];
+                assert!(bit_eq(&func(&two), &interpret(reference, &two)), "default({v:?}, {d:?}) diverged");
+            }
+        }
     }
 
     #[test]

@@ -283,16 +283,26 @@ against the shipped BOSL2 (confirmed via `FAB_EXPLAIN`), both proven bit-identic
 verbatim reference — `is_finite` through the new dependency-aware oracle (interpret the reference WITH `is_nan`
 defined). Corpus 901/901 unchanged.
 
-| build | slice_parts eval (min of 5) |
-|---|---|
-| without `is_nan`/`is_finite` | 8253 ms |
-| **with** | **7216 ms** |
+| build | slice_parts eval (min of 5) | Δ |
+|---|---|---|
+| baseline (`is_def`/`is_str` only) | 8253 ms | — |
+| + `is_nan` + `is_finite` | 7216 ms | −12.6% |
+| + `last` + `default` | 6740 ms | −5.7% (incremental) |
 
-**−1037 ms, ~12.6%** — from two leaf predicates. The biggest single eval-perf lever landed (N.2d was −4.6%,
-N.2b −3.6%), and it confirms the intrinsic thesis over the memo thesis outright: same 99.8%-redundant workload,
-the cache got ~0%, the intrinsic got 12.6%. `last` (9.6%) and `is_vector` (6.4%, needs the optional-param +
-`_EPSILON` handling) are the next targets. Reproduce the profile with `FAB_PROFILE_FNS=1
-target/release/models_worker <model.scad> libs scad-lib`.
+**Cumulative −1513 ms, ~18.3%** off the pre-O.2 baseline, from four hand-written leaf intrinsics. Each was
+proven bit-identical to interpreting its verbatim reference (`last`/`default` through `bit_eq`, which compares
+`f64` by `to_bits` so a returned `NaN` matches a `NaN` — `==` gets that backwards — and `±0` stay distinct)
+and WIREs against the shipped BOSL2. `last(list)=list[len(list)-1]` routes through the real `len` semantics +
+`ops::index` (empty list → index −1 → undef, non-list → undef); `default(v,dflt=undef)` is a two-arm match.
+
+This confirms the intrinsic thesis over the memo thesis outright: same 99.8%-redundant workload, the cache got
+~0%, the intrinsics got 18.3%. Next is `is_vector` (6.4%) — the first NON-leaf: 5 params, a comprehension, a
+`norm`/`_EPSILON` clause, an `all_nonzero` sub-call, and an `assert()` INSIDE the expression that can raise —
+so it needs the intrinsic ABI to widen from `fn(&[Value]) -> Value` to a fallible `Result` (an intrinsic must
+be able to fail exactly where the interpreted body does). Below it the profile tapers into ≤2.5% functions
+(`_list_pattern`, `_is_liststr`, `point3d`, `reverse`, `is_consistent`, `approx`, `is_matrix`) — the point the
+per-call intrinsic lever starts to stall and the JIT tier (P.1) earns its turn. Reproduce the profile with
+`FAB_PROFILE_FNS=1 target/release/models_worker <model.scad> libs scad-lib`.
 
 ## The harness
 

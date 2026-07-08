@@ -1245,8 +1245,18 @@ fn resolve_source(
         cache: eval_cache::CacheCell::default(),
         impure_reads: std::cell::Cell::new(0),
     };
-    // Build each `use`d file's constant scope (islands 1..n) — hoisting needs the `Ctx` (constants can
-    // call functions), which is why this runs AFTER construction, into the `RefCell`.
+    // Hoist the ROOT (island 0) FIRST, THEN the `use`-island constant scopes. ORDER is load-bearing: the
+    // root's include-flattened functions (all of BOSL2's) are tagged home=0, so a `use`-island constant that
+    // calls one — monitor's `vnf = heightfield(...)` reaching into BOSL2 — resolves that function's body
+    // against `island_globals[0]`. Building the use-islands FIRST (the old order) left 0 empty there, so
+    // BOSL2's own constants (`UP`/`_EPSILON`/`CENTER`) read `undef` and silently poisoned the result until a
+    // distant `assert(is_vector(axis))` blew up (the remindwall transitive-`use` divergence).
+    // `hoist_scope_publishing` publishes into `island_globals[0]` as it binds; hoisting ONCE here (then
+    // [`eval_top`], NOT a second `run_stmts` hoist) avoids re-evaluating the ~hundreds of BOSL2 root constants
+    // twice — the double-build that tips a borderline model over its budget. (The reverse — a root constant
+    // calling a not-yet-built use-island function — stays a gap; a lazy/fixpoint island build is the general
+    // answer, but root-homed BOSL2 is the overwhelmingly common case.)
+    let global = hoist_scope_publishing(&exec, &Scope::new(), &ctx, 0)?;
     for i in 1..n {
         let island_global = build_island_global(i, &ctx)?;
         if let Some(slot) = ctx.island_globals.borrow_mut().get_mut(i) {
@@ -1254,7 +1264,7 @@ fn resolve_source(
         }
     }
     redundancy::reset(); // dev probe: fresh count per run so the import fixpoint's partial runs don't bleed in
-    let tree = run_stmts(exec.into_iter(), &ctx, &Scope::new())?;
+    let tree = eval_top(&exec, &global, &ctx)?;
     redundancy::report(); // prints to stderr only under FAB_REDUNDANCY=1
     let needs = ctx.take_file_needs();
     if needs.is_empty() {
@@ -1366,10 +1376,19 @@ fn run_stmts<'a>(
     // `x = turtle([arc...])`, whose `arc` reads the library constant `_EPSILON`) must let that function
     // resolve island-0 constants DURING the hoist that builds them, not against the empty pre-publish global.
     let global = hoist_scope_publishing(&stmts, scope, ctx, 0)?;
+    eval_top(&stmts, &global, ctx)
+}
+
+/// Evaluate the (already-HOISTED) root statement stream to the geometry tree. Split out of [`run_stmts`] so
+/// the loader path can hoist island 0 ONCE — BEFORE building the `use`-island globals that depend on it — and
+/// then eval here without a second hoist (Q.3: a `use`-island constant like monitor's `vnf = heightfield(...)`
+/// calls a root-homed BOSL2 function, which must resolve BOSL2's constants against a POPULATED
+/// `island_globals[0]`; building the root LAST left them `undef`).
+fn eval_top<'a>(stmts: &[&'a Stmt], global: &Scope, ctx: &Ctx<'a>) -> crate::Result<Geo> {
     // Clear any `!`-override residue from a prior resolution attempt (the loader re-runs on file-needs), then
     // eval. Top-level statements resolve modules against island 0 (the root file, I.9.5).
     ctx.root_override.borrow_mut().clear();
-    let nodes = eval_geometry(&stmts, &global, &global, 0, ctx)?;
+    let nodes = eval_geometry(stmts, global, global, 0, ctx)?;
     // `!` ROOT modifier: if any subtree was `!`-tagged, the program renders ONLY those (ancestors + siblings
     // discarded — `eval_stmt` diverted them into `root_override`). Otherwise the implicit union of top-level
     // objects. `split_off(0)` drains the buffer so a re-run starts clean.

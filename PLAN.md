@@ -151,7 +151,9 @@ added 2026-07-07.
 - [ ] N.2 - N.2 - Cut eval allocation (profile-driven; builtin dispatch was <1%)
 - [x] N.2a - N.2a - Cheap allocation wins: assert-formatting freebie + eval_with_global per-call allocs
 - [ ] N.2b - N.2b - (deferred/optional) Intern var+$-names for the Scope lookup win — NOT a cache-key lever
-- [ ] N.2c - N.2c - Eval-memo cache on interned keys (the 84-92% lever)
+- [x] N.2c - N.2c - Eval-memo cache (the 82-92% lever) — reviewed design, ready to build
+  - [x] N.2c.1 - N.2c step 1 — DynCtx: O(1) per-frame $-context identity in Scope
+  - [ ] N.2c.2 - N.2c.2 - Program-level auto-off: make the eval cache safe to default ON
 - [ ] N.2d - N.2d - Vec-frame Scope + re-profile whether the residual scope cost still earns it (conditional)
 ## Phase O - O - Intrinsics tier (AST-fingerprint, wasm-safe)
 - [ ] O.1 - O.1 - AST-fingerprint intrinsic registry + auto-fallback + fast==slow harness

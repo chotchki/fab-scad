@@ -15,8 +15,7 @@
 use std::path::{Path, PathBuf};
 
 use super::loader::{ProvidedSource, SourceMap};
-use super::{FileTable, Geo, Message, Resolution, SourceNeed, resolve_source};
-use crate::Mesh;
+use super::{FileTable, Geo, Imported, Message, Resolution, SourceNeed, resolve_source};
 use crate::parser::{Program, parse};
 
 /// An empty program — the stand-in a tolerated missing/broken `use`/`include` contributes (no statements,
@@ -54,7 +53,7 @@ pub(crate) fn drive<R>(
     mut mesh_reader: R,
 ) -> crate::Result<(Geo, Vec<Message>)>
 where
-    R: FnMut(&str) -> crate::Result<Mesh>,
+    R: FnMut(&str) -> crate::Result<Imported>,
 {
     let root_id = root_path.and_then(|p| std::fs::canonicalize(p).ok());
     let mut scad = SourceMap::new();
@@ -98,7 +97,7 @@ fn fulfill<R>(
     warnings: &mut Vec<Message>,
 ) -> crate::Result<()>
 where
-    R: FnMut(&str) -> crate::Result<Mesh>,
+    R: FnMut(&str) -> crate::Result<Imported>,
 {
     match need {
         SourceNeed::Scad { from_dir, raw } => {
@@ -142,8 +141,8 @@ where
             // No dedup guard needed: `Ctx::request_file` accumulates File needs in a `BTreeSet`, so each
             // `raw` surfaces at most once per round, and a fulfilled one never re-surfaces (the table has
             // it) — unlike `Scad`, where a diamond can name the same lib twice in one pass.
-            let mesh = mesh_reader(&raw)?;
-            files.insert(raw, mesh);
+            let imported = mesh_reader(&raw)?;
+            files.insert(raw, imported);
         }
     }
     Ok(())
@@ -156,7 +155,7 @@ where
 /// # Errors
 /// Always [`Error::Load`](crate::Error::Load): reaching this means an `import`/`surface` executed on an
 /// entry point that has no way to read the file.
-pub(super) fn no_import_reader(raw: &str) -> crate::Result<Mesh> {
+pub(super) fn no_import_reader(raw: &str) -> crate::Result<Imported> {
     Err(crate::Error::Load(format!(
         "import/surface references '{raw}', but this entry point supplies no mesh reader — evaluate \
          through resolve_geometry_* with a reader (the M.5 STL/3MF/heightmap backend)"

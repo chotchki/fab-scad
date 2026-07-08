@@ -48,11 +48,46 @@ use crate::parser::{
     Arg, BinOp, Expr, ExprKind, Parameter, Program, Stmt, StmtKind, UnOp,
 };
 
-/// The caller-supplied mesh table that fulfills `import`/`surface` [`SourceNeed::File`]s (M.3): the literal
-/// `file=` path a call named → the [`Mesh`] the caller read for it. fab-lang does ZERO IO, so it never
-/// reads these files itself — the impure caller (the M.4 shell, via M.5's STL/3MF/heightmap readers) reads
-/// them and hands the meshes back through this table, keyed by the EXACT `raw` string the need carried.
-pub type FileTable = BTreeMap<String, Mesh>;
+/// The caller-supplied table that fulfills `import`/`surface` [`SourceNeed::File`]s (M.3): the literal
+/// `file=` path a call named → the [`Imported`] payload the caller read for it. fab-lang does ZERO IO, so it
+/// never reads these files itself — the impure caller (the M.4 shell, via M.5's STL/3MF/SVG readers) reads
+/// them and hands the payloads back through this table, keyed by the EXACT `raw` string the need carried.
+pub type FileTable = BTreeMap<String, Imported>;
+
+/// A read `import()`/`surface()` file — dimension-TAGGED, because a `.stl`/`.3mf` is 3D but a `.svg`/`.dxf`
+/// is 2D, and the evaluator must wrap each as the RIGHT geometry leaf (a [`GeoNode::Leaf`] mesh vs a
+/// [`Shape2D::Polygon`] of contours). The impure reader (M.5, fab-scad side) decides dimension by EXTENSION
+/// and hands back the tagged payload; [`eval_module`](super::module) unwraps it at the `import`/`surface`
+/// dispatch. Widening the table off a bare `Mesh` is what lets 2D vector import (Q.4) exist at all.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Imported {
+    /// A 3D mesh — `.stl`/`.3mf`/`.off` and `surface()`'s `.dat`/`.png` heightmaps.
+    Mesh(Mesh),
+    /// 2D contours — `.svg`/`.dxf` vector art, an even-odd-filled [`Shape2D::Polygon`]. Outer boundary and
+    /// holes are all just contours in the one vec (the backend's fill rule resolves them), exactly like the
+    /// glyph outlines `text()` produces.
+    Contours(Vec<Contour>),
+}
+
+impl Imported {
+    /// An EMPTY placeholder of the dimension `raw`'s extension implies — the stand-in [`Ctx::request_file`]
+    /// returns on the FIRST fixpoint pass, before the caller has read the file. The dimension MATTERS even
+    /// for the empty: a `.svg` in a 2D context (`linear_extrude() import("logo.svg")`) must present as 2D,
+    /// or the run would dimension-error on the mixed tree and abort BEFORE the `File` need ever surfaces —
+    /// the fixpoint would never close. `.svg`/`.dxf` → empty 2D; everything else → empty 3D (mirroring the
+    /// reader's own extension demux, [`crate::eval::io`]'s fab-scad-side sibling).
+    fn empty_for(raw: &str) -> Self {
+        let ext = std::path::Path::new(raw)
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        match ext.as_str() {
+            "svg" | "dxf" => Imported::Contours(Vec::new()),
+            _ => Imported::Mesh(Mesh::new()),
+        }
+    }
+}
 
 /// A source the pure evaluator needs but can't produce — the caller reads it, adds it, and re-runs (the
 /// needs fixpoint). Two kinds, one per discovery phase: a `Scad` reference (a `use`/`include` target, found
@@ -245,21 +280,23 @@ impl<'a> Ctx<'a> {
         self.messages.borrow_mut().push(Message::Warning(message));
     }
 
-    /// Resolve an `import`/`surface` `file=` path to a [`Mesh`] (M.3): the caller-supplied mesh if the
-    /// [`FileTable`] has it, else an EMPTY placeholder — recording `raw` as a [`SourceNeed::File`] so the
-    /// caller can read it and re-run. A `None` path (an absent or non-string `file=`, e.g. `import(undef)`)
-    /// has nothing to name, so it's an empty result with no need — matching the oracle's warn-and-render on
-    /// a bad path (the warning TEXT is #94 / M.6). Never silently WRONG: a real missing file becomes a LOUD
-    /// need (or, on the no-table paths, a LOUD error downstream), not a quietly-empty mesh.
-    fn request_file(&self, raw: Option<String>) -> Mesh {
+    /// Resolve an `import`/`surface` `file=` path to an [`Imported`] payload (M.3): the caller-supplied one
+    /// if the [`FileTable`] has it, else an EMPTY placeholder of the extension's dimension ([`Imported::empty_for`])
+    /// — recording `raw` as a [`SourceNeed::File`] so the caller can read it and re-run. A `None` path (an
+    /// absent or non-string `file=`, e.g. `import(undef)`) has nothing to name, so it's an empty 3D result
+    /// with no need — matching the oracle's warn-and-render on a bad path (the warning TEXT is #94 / M.6).
+    /// Never silently WRONG: a real missing file becomes a LOUD need (or, on the no-table paths, a LOUD error
+    /// downstream), not a quietly-empty result.
+    fn request_file(&self, raw: Option<String>) -> Imported {
         let Some(raw) = raw else {
-            return Mesh::new();
+            return Imported::Mesh(Mesh::new());
         };
-        if let Some(mesh) = self.files.and_then(|t| t.get(&raw)) {
-            mesh.clone()
+        if let Some(imported) = self.files.and_then(|t| t.get(&raw)) {
+            imported.clone()
         } else {
+            let placeholder = Imported::empty_for(&raw);
             self.file_needs.borrow_mut().insert(raw);
-            Mesh::new()
+            placeholder
         }
     }
 
@@ -2077,7 +2114,7 @@ mod tests {
 
         // Supply the mesh → the run CLOSES (Complete). An empty placeholder mesh stands in for a read STL.
         let mut have = FileTable::new();
-        have.insert("a.stl".to_string(), crate::Mesh::new());
+        have.insert("a.stl".to_string(), super::Imported::Mesh(crate::Mesh::new()));
         let closed =
             resolve_source("import(\"a.stl\");", here, None, &no_scad, &have).expect("resolves");
         assert!(

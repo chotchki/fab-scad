@@ -12,15 +12,16 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use fab_lang::{Error, Geo, Mesh, Tri, Vec3};
+use fab_lang::{Error, Geo, Imported, Mesh, Tri, Vec3};
 
-/// Read an `import()`/`surface()` mesh file → a [`fab_lang::Mesh`] — the reader fab-lang's fixpoint hands
-/// each `File` need to. Every failure is an [`Error::Load`] so it travels the fixpoint as a LOUD stop, never
-/// a silently-empty result.
+/// Read an `import()`/`surface()` file → a dimension-tagged [`Imported`] — the reader fab-lang's fixpoint
+/// hands each `File` need to. Dispatch is by EXTENSION (OpenSCAD's own import demux): `.stl`/`.3mf`/`.dat`
+/// are 3D meshes, `.svg` is 2D vector art (Q.4). Every failure is an [`Error::Load`] so it travels the
+/// fixpoint as a LOUD stop, never a silently-empty result.
 ///
 /// # Errors
-/// [`Error::Load`] for a deferred/unknown extension, an unreadable file, or a malformed mesh.
-pub fn read_mesh(base_dir: &Path, raw: &str) -> Result<Mesh, Error> {
+/// [`Error::Load`] for a deferred/unknown extension, an unreadable file, or a malformed mesh/vector.
+pub fn read_import(base_dir: &Path, raw: &str) -> Result<Imported, Error> {
     let path = resolve(base_dir, raw);
     let ext = path
         .extension()
@@ -28,40 +29,41 @@ pub fn read_mesh(base_dir: &Path, raw: &str) -> Result<Mesh, Error> {
         .unwrap_or_default()
         .to_ascii_lowercase();
     match ext.as_str() {
-        "stl" => stl_mesh(&path),
-        "3mf" => threemf_mesh(&path),
+        "stl" => stl_mesh(&path).map(Imported::Mesh),
+        "3mf" => threemf_mesh(&path).map(Imported::Mesh),
         "svg" | "dxf" => loud(raw, "2D vector import (svg/dxf) is deferred — no 2D import path yet"),
         "off" => loud(raw, "OFF import is deferred — the OFF reader isn't wired"),
         "dat" => crate::surface::dat_mesh(&path)
+            .map(Imported::Mesh)
             .map_err(|e| Error::Load(format!("{}: {e:#}", path.display()))),
         "png" => loud(raw, "surface() PNG heightmap is deferred (backlog #159) — use a DAT file"),
-        _ => loud(raw, "unknown import extension — expected stl, 3mf, or dat"),
+        _ => loud(raw, "unknown import extension — expected stl, 3mf, svg, or dat"),
     }
 }
 
-/// Evaluate in-memory `source` to a geometry [`Geo`] tree, resolving `import`/`surface` meshes via
-/// [`read_mesh`] against `base_dir`. The native driver behind an unsaved-buffer render.
+/// Evaluate in-memory `source` to a geometry [`Geo`] tree, resolving `import`/`surface` files via
+/// [`read_import`] against `base_dir`. The native driver behind an unsaved-buffer render.
 ///
 /// # Errors
-/// As [`fab_lang::resolve_geometry_with_base`], plus any [`read_mesh`] failure.
+/// As [`fab_lang::resolve_geometry_with_base`], plus any [`read_import`] failure.
 pub fn resolve_geometry_with_base(
     source: &str,
     base_dir: &Path,
     library_paths: &[PathBuf],
 ) -> Result<Geo, Error> {
     fab_lang::resolve_geometry_with_base(source, base_dir, library_paths, |raw| {
-        read_mesh(base_dir, raw)
+        read_import(base_dir, raw)
     })
 }
 
 /// Evaluate a `.scad` FILE to a geometry [`Geo`] tree, resolving its `use`/`include` graph AND its
-/// `import`/`surface` meshes (via [`read_mesh`], relative to the file's own directory).
+/// `import`/`surface` files (via [`read_import`], relative to the file's own directory).
 ///
 /// # Errors
-/// As [`fab_lang::resolve_geometry_file`], plus any [`read_mesh`] failure.
+/// As [`fab_lang::resolve_geometry_file`], plus any [`read_import`] failure.
 pub fn resolve_geometry_file(path: &Path, library_paths: &[PathBuf]) -> Result<Geo, Error> {
     let base_dir = path.parent().unwrap_or(Path::new(".")).to_path_buf();
-    fab_lang::resolve_geometry_file(path, library_paths, |raw| read_mesh(&base_dir, raw))
+    fab_lang::resolve_geometry_file(path, library_paths, |raw| read_import(&base_dir, raw))
 }
 
 /// Join a relative `raw` onto `base_dir`; an absolute `raw` is used as-is (OpenSCAD `find_valid_path` for
@@ -76,7 +78,7 @@ fn resolve(base_dir: &Path, raw: &str) -> PathBuf {
 }
 
 /// The LOUD refusal for a deferred/unknown import — names the file + why, so it's never a silent empty.
-fn loud(raw: &str, why: &str) -> Result<Mesh, Error> {
+fn loud(raw: &str, why: &str) -> Result<Imported, Error> {
     Err(Error::Load(format!("import '{raw}': {why}")))
 }
 
@@ -150,7 +152,17 @@ mod tests {
 
     use fab_lang::{Geo, GeoNode};
 
-    use super::{read_mesh, resolve_geometry_with_base};
+    use fab_lang::Imported;
+
+    use super::{read_import, resolve_geometry_with_base};
+
+    /// Unwrap a 3D [`Imported`] payload to its mesh — every reader test here imports a mesh format.
+    fn mesh_of(imported: Imported) -> fab_lang::Mesh {
+        match imported {
+            Imported::Mesh(mesh) => mesh,
+            Imported::Contours(_) => panic!("expected a 3D mesh payload, got 2D contours"),
+        }
+    }
 
     /// The process temp dir (unit tests get no `CARGO_TARGET_TMPDIR` — that's integration-only).
     fn tmp() -> PathBuf {
@@ -193,14 +205,14 @@ mod tests {
 
     #[test]
     fn stl_import_dedups_the_soup_back_to_a_cube() {
-        // Write a cube as a binary STL (a 36-vertex triangle soup), import it, and confirm read_mesh welds
+        // Write a cube as a binary STL (a 36-vertex triangle soup), import it, and confirm read_import welds
         // the soup back to 8 unique corners + 12 faces.
         let (verts, tris) = cube_indexed();
         let bytes = crate::stl::binary_from_indexed(&verts, &tris);
         let name = unique("cube.stl");
         std::fs::write(tmp().join(&name), bytes).unwrap();
 
-        let mesh = read_mesh(&tmp(), &name).expect("stl imports");
+        let mesh = mesh_of(read_import(&tmp(), &name).expect("stl imports"));
         assert_eq!(mesh.vert_count(), 8, "8 unique corners after dedup");
         assert_eq!(mesh.tri_count(), 12, "12 faces");
 
@@ -223,7 +235,7 @@ mod tests {
         let path = tmp().join(&name);
         crate::kernel::Solid::write_3mf(&path, &[a, b]).unwrap();
 
-        let mesh = read_mesh(&tmp(), &name).expect("3mf imports");
+        let mesh = mesh_of(read_import(&tmp(), &name).expect("3mf imports"));
         assert_eq!(mesh.tri_count(), 24, "12 tris per cube, concatenated");
         // The second cube lives at x ∈ [20, 25] — proof the index offset kept its faces on its own verts.
         let max_x = mesh
@@ -246,7 +258,7 @@ mod tests {
             ("height.png", "PNG"),
             ("mystery.xyz", "unknown"),
         ] {
-            let err = read_mesh(&tmp(), raw).unwrap_err();
+            let err = read_import(&tmp(), raw).unwrap_err();
             assert!(
                 format!("{err}").contains(needle),
                 "{raw}: expected an error mentioning {needle:?}, got {err}"
@@ -255,7 +267,7 @@ mod tests {
         // A KNOWN extension whose file is absent still fails LOUD (the read errors) — a process-unique name
         // that was never written is guaranteed missing.
         let missing = unique("absent.stl");
-        let err = read_mesh(&tmp(), &missing).unwrap_err();
+        let err = read_import(&tmp(), &missing).unwrap_err();
         assert!(format!("{err}").contains(&missing), "got {err}");
     }
 }

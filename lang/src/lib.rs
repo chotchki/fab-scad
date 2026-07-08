@@ -49,7 +49,7 @@ mod webcolors;
 pub use customizer::{Constraint, CustomParam, Customizer, DropdownItem, customize};
 pub use error::{Error, Result};
 pub use eval::{
-    Contour, Evaluation, ExtrudeKind, FileTable, Geo, GeoNode, Join2D, Message, RANGE_MAX,
+    Contour, Evaluation, ExtrudeKind, FileTable, Geo, GeoNode, Imported, Join2D, Message, RANGE_MAX,
     RangeIter, Resolution, Scope, Shape2D, SourceNeed, Value, eval_expr, eval_program, fragments,
     range_iter, range_len,
 };
@@ -210,7 +210,7 @@ pub fn evaluate_geometry_with_base_full(
 /// Evaluate `source` to a geometry [`Geo`] tree, resolving `import`/`surface` meshes through `mesh_reader`
 /// (M.4) — the native driver over the whole needs fixpoint. `import`/`surface` paths are RUNTIME
 /// expressions, discovered only by executing; each one the run reaches is handed to `mesh_reader` (the
-/// literal `file=` path in → a [`Mesh`] out), which fab-scad backs with its STL/3MF/heightmap readers
+/// literal `file=` path in → a dimension-tagged [`Imported`] out), which fab-scad backs with its STL/3MF/SVG readers
 /// (M.5). fab-lang itself does ZERO IO — the `io` shell loops the pure inner step, reading `use`/`include`
 /// sources + calling `mesh_reader` for meshes, until the run closes. (An ASYNC wasm host that can't run a
 /// sync reader drives the same pure step directly, awaiting between rounds; that public seam lands with its
@@ -226,7 +226,7 @@ pub fn resolve_geometry_with_base<R>(
     mesh_reader: R,
 ) -> Result<Geo>
 where
-    R: FnMut(&str) -> Result<Mesh>,
+    R: FnMut(&str) -> Result<Imported>,
 {
     Ok(eval::io::drive(source, base_dir, None, library_paths, mesh_reader)?.0)
 }
@@ -242,7 +242,7 @@ pub fn resolve_geometry_file<R>(
     mesh_reader: R,
 ) -> Result<Geo>
 where
-    R: FnMut(&str) -> Result<Mesh>,
+    R: FnMut(&str) -> Result<Imported>,
 {
     let source = eval::io::read_source(path)?;
     let base_dir = path.parent().unwrap_or(Path::new("."));

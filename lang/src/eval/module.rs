@@ -12,7 +12,7 @@ use super::geo::GeoNode;
 use super::geo2d::{Contour, Geo, Shape2D};
 use super::scope::Scope;
 use super::value::Value;
-use super::{Ctx, eval_with_ctx, geometry, text};
+use super::{Ctx, Imported, eval_with_ctx, geometry, text};
 use crate::Mesh;
 use crate::geom::{Vec2, Vec3};
 use crate::parser::ModuleInstantiation;
@@ -69,17 +69,25 @@ pub(super) fn eval_module<'a>(
         "circle" => Ok(poly2(eval_circle(&positional, &named, &child))),
         "polygon" => Ok(poly2(eval_polygon(&positional, &named))),
         "text" => Ok(poly2(eval_text(&positional, &named, &child))),
-        // import()/surface() reference a mesh FILE by a RUNTIME path — resolvable only by EXECUTING to here
-        // (the path is an expression, not a static `<...>` token like use/include). Ask the caller's table
-        // (M.3): its mesh if present, else an EMPTY placeholder + a recorded File need so the run keeps going
-        // and surfaces the REST of its needs (a mesh rarely gates control flow → the caller usually closes
-        // the fixpoint in one more round). The STL/3MF/heightmap READER that fills the table is caller-side
-        // (M.5). A 3D leaf: the table is `raw → Mesh` (3D); 2D import (DXF/SVG) is a later refinement.
-        "import" => Ok(leaf3(ctx.request_file(file_arg(&positional, &named)))),
+        // import()/surface() reference a FILE by a RUNTIME path — resolvable only by EXECUTING to here (the
+        // path is an expression, not a static `<...>` token like use/include). Ask the caller's table (M.3):
+        // its payload if present, else an EMPTY placeholder + a recorded File need so the run keeps going and
+        // surfaces the REST of its needs (a file rarely gates control flow → the caller usually closes the
+        // fixpoint in one more round). The reader that fills the table is caller-side (M.5). The payload is
+        // dimension-TAGGED ([`Imported`]): a `.stl`/`.3mf` → a 3D mesh leaf, a `.svg`/`.dxf` → a 2D contour
+        // polygon (Q.4) — so `import` wraps whichever the reader (or the placeholder) decided by extension.
+        "import" => Ok(match ctx.request_file(file_arg(&positional, &named)) {
+            Imported::Mesh(mesh) => leaf3(mesh),
+            Imported::Contours(contours) => poly2(contours),
+        }),
         // surface() is import's heightmap sibling, plus `center` — a pure XY translate the path-only reader
-        // can't do, so it's applied HERE from the eval arg (M.5.2). (`invert` is PNG-only → deferred.)
+        // can't do, so it's applied HERE from the eval arg (M.5.2). (`invert` is PNG-only → deferred.) A
+        // heightmap is always 3D; a 2D payload here (a misnamed `.svg`) can't be a surface → empty, not wrong.
         "surface" => {
-            let mesh = ctx.request_file(file_arg(&positional, &named));
+            let mesh = match ctx.request_file(file_arg(&positional, &named)) {
+                Imported::Mesh(mesh) => mesh,
+                Imported::Contours(_) => Mesh::new(),
+            };
             let map = bind(&positional, &named, &["file", "center"]);
             Ok(leaf3(if is_true(&map, "center") {
                 center_xy(mesh)

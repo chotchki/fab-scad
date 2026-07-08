@@ -1,7 +1,7 @@
 //! M.3/M.4 — the `import`/`surface` needs fixpoint, from the NATIVE driver's side. `import`/`surface`
 //! reference a mesh file by a RUNTIME path (resolvable only by EXECUTING to the call, unlike `use`/`include`
 //! whose paths are literal tokens); fab-lang stays PURE and hands each one to a caller-supplied `mesh_reader`
-//! (path in → [`Mesh`] out) that fab-scad will back with real STL/3MF readers (M.5). The `io` shell loops
+//! (path in → a dimension-tagged [`Imported`] out) that fab-scad will back with real STL/3MF/SVG readers (M.5). The `io` shell loops
 //! the pure inner step, reading `use`/`include` sources + calling the reader for meshes, until the run
 //! closes. These tests pin the driver's contract; the pure need-surfacing itself is unit-tested in
 //! `eval::mod` (`resolve_source` is crate-private). A differential against real mesh files is M.5/M.6.
@@ -17,8 +17,8 @@ use std::cell::RefCell;
 use std::path::Path;
 
 use fab_lang::{
-    Error, Geo, GeoNode, Mesh, Scope, SourceNeed, evaluate, eval_program, evaluate_geometry, parse,
-    resolve_geometry_file, resolve_geometry_with_base,
+    Error, Geo, GeoNode, Imported, Mesh, Scope, SourceNeed, evaluate, eval_program,
+    evaluate_geometry, parse, resolve_geometry_file, resolve_geometry_with_base,
 };
 
 /// A real mesh to stand in for a read STL — `cube(2)` tessellated through our own engine.
@@ -26,8 +26,13 @@ fn a_mesh() -> Mesh {
     evaluate("cube(2);").expect("cube tessellates")
 }
 
+/// The same, tagged as the 3D [`Imported`] payload a mesh reader hands back.
+fn an_import() -> Imported {
+    Imported::Mesh(a_mesh())
+}
+
 /// Resolve in-memory `src` (CWD base, no library paths) with `reader` fulfilling File needs.
-fn resolve<R: FnMut(&str) -> Result<Mesh, Error>>(src: &str, reader: R) -> Result<Geo, Error> {
+fn resolve<R: FnMut(&str) -> Result<Imported, Error>>(src: &str, reader: R) -> Result<Geo, Error> {
     resolve_geometry_with_base(src, Path::new("."), &[], reader)
 }
 
@@ -38,7 +43,7 @@ fn a_supplied_mesh_flows_through() {
     let served = mesh.clone();
     let geo = resolve("import(\"a.stl\");", move |raw| {
         assert_eq!(raw, "a.stl", "reader gets the literal file= path");
-        Ok(served.clone())
+        Ok(Imported::Mesh(served.clone()))
     })
     .expect("resolves");
     match geo {
@@ -59,7 +64,7 @@ fn every_import_reaches_the_reader_in_one_round() {
         "import(\"a.stl\"); import(\"b.stl\"); surface(\"c.dat\"); import(\"a.stl\");",
         |raw| {
             calls.borrow_mut().push(raw.to_string());
-            Ok(a_mesh())
+            Ok(an_import())
         },
     )
     .expect("resolves");
@@ -88,7 +93,7 @@ fn a_bad_file_path_never_calls_the_reader() {
     for src in ["import(undef);", "import(5);", "import();"] {
         let geo = resolve(src, |_| {
             *calls.borrow_mut() += 1;
-            Ok(a_mesh())
+            Ok(an_import())
         })
         .expect("resolves");
         match geo {
@@ -110,7 +115,7 @@ fn resolve_geometry_file_reads_the_root_then_the_mesh() {
 
     let geo = resolve_geometry_file(&root, &[], |raw| {
         assert_eq!(raw, "part.stl");
-        Ok(a_mesh())
+        Ok(an_import())
     })
     .expect("resolves");
     assert!(matches!(geo, Geo::D3(GeoNode::Leaf(_))));
@@ -152,11 +157,14 @@ fn surface_center_translates_the_mesh_eval_side() {
         other => panic!("expected a 3D leaf, got {other:?}"),
     };
     let m1 = mesh.clone();
-    let (plo, phi) = x_range(resolve("surface(file=\"h.dat\");", move |_| Ok(m1.clone())).unwrap());
+    let (plo, phi) =
+        x_range(resolve("surface(file=\"h.dat\");", move |_| Ok(Imported::Mesh(m1.clone()))).unwrap());
     assert!(plo.abs() < 1e-9 && (phi - 2.0).abs() < 1e-9, "plain stays at [0,2], got [{plo},{phi}]");
     let m2 = mesh.clone();
     let (clo, chi) =
-        x_range(resolve("surface(file=\"h.dat\", center=true);", move |_| Ok(m2.clone())).unwrap());
+        x_range(resolve("surface(file=\"h.dat\", center=true);", move |_| {
+            Ok(Imported::Mesh(m2.clone()))
+        }).unwrap());
     assert!(
         (clo + 1.0).abs() < 1e-9 && (chi - 1.0).abs() < 1e-9,
         "center shifts XY bounds to the origin [−1,1], got [{clo},{chi}]"

@@ -16,7 +16,7 @@ use std::hash::{Hash, Hasher};
 use std::sync::OnceLock;
 
 use super::value::Value;
-use crate::parser::{Arg, Expr, ExprKind, Parameter};
+use crate::parser::{Arg, BinOp, Expr, ExprKind, Parameter};
 
 /// A hand-written native implementation of a specific user function. Receives the call's POSITIONAL argument
 /// VALUES (already evaluated, in source order) and returns the result — the same `Value` the interpreted body
@@ -43,10 +43,15 @@ struct Entry {
 /// (from `libs/BOSL2`); the fast==slow harness proves the native `func` bit-matches interpreting it, and
 /// `FAB_EXPLAIN` confirms it WIREs (vs DRIFTs) against the user's actual library.
 ///
-/// O.2 targets so far are LEAF predicates — bodies that call only OpenSCAD BUILTINS (`is_undef`,
-/// `is_string`), so the harness can interpret the reference with a default `Ctx`. Predicates that call OTHER
-/// BOSL2 functions (`is_finite` → `is_nan`, `is_vector` → `_EPSILON`) need a dependency-aware harness — the
-/// next O.2 step.
+/// Some references call only OpenSCAD BUILTINS (`is_undef`, `is_string`, `is_num`), so the harness interprets
+/// them with a default `Ctx`. Others call ANOTHER BOSL2 function — `is_finite` → `is_nan` — so their harness
+/// case interprets the reference with that dependency defined (the dependency-aware harness; see
+/// [`tests::interpret_with_deps`]). `is_vector` (→ `_EPSILON` + a loop + optional params) is the next step.
+///
+/// The O.2 targets are the top of the `FAB_PROFILE_FNS` call profile on `slice_parts` (docs/models-profile.md):
+/// `is_finite` (34.6% of user-fn calls) and `is_nan` (21.3%) alone are 56% of all calls, and both are hot
+/// BECAUSE every BOSL2 assert validates its inputs through them. Intrinsic-ing `is_finite` ALSO erases its
+/// `is_num`/`is_nan` sub-calls (the interpreted body dispatches them; the native body computes directly).
 static REGISTRY: &[Entry] = &[
     Entry {
         name: "_fab_poc_sq",
@@ -64,6 +69,18 @@ static REGISTRY: &[Entry] = &[
         name: "is_str",
         reference: "function is_str(x) = is_string(x);",
         func: is_str,
+    },
+    // BOSL2 `is_nan`/`is_finite` — the #1 and #2 hottest user functions on the model profile (56% of calls
+    // combined), the workhorses of BOSL2's input validation. Verbatim from libs/BOSL2/utility.scad.
+    Entry {
+        name: "is_nan",
+        reference: "function is_nan(x) = (x!=x);",
+        func: is_nan,
+    },
+    Entry {
+        name: "is_finite",
+        reference: "function is_finite(x) = is_num(x) && !is_nan(0*x);",
+        func: is_finite,
     },
 ];
 
@@ -85,6 +102,29 @@ fn is_def(args: &[Value]) -> Value {
 /// BOSL2 `is_str(x) = is_string(x)` — true iff `x` is a string.
 fn is_str(args: &[Value]) -> Value {
     Value::Bool(matches!(args.first(), Some(Value::Str(_))))
+}
+
+/// BOSL2 `is_nan(x) = (x!=x)` — a value equals itself EXCEPT `NaN`, so this is true iff `x` is `NaN`. The hot
+/// scalar path is native (`f64::is_nan`); any other type routes through the interpreter's own `!=` so the
+/// intrinsic can't diverge from `x!=x` on an exotic input (e.g. a `NaN` inside a list, where element-wise `!=`
+/// makes `[nan]!=[nan]` TRUE — a case the native scalar check would miss, but the op reproduces exactly).
+fn is_nan(args: &[Value]) -> Value {
+    match args.first() {
+        Some(Value::Num(n)) => Value::Bool(n.is_nan()),
+        other => {
+            let x = other.cloned().unwrap_or(Value::Undef);
+            super::ops::apply_binary(BinOp::Ne, x.clone(), x)
+        }
+    }
+}
+
+/// BOSL2 `is_finite(x) = is_num(x) && !is_nan(0*x)` — true iff `x` is a finite number. `0*x` is `NaN` when `x`
+/// is `±inf`/`NaN` and `0` when finite, so the whole expression collapses to `f64::is_finite` on a number and
+/// `false` on any non-number (the `is_num` short-circuit). Computing it directly erases the reference's
+/// `is_num`/`is_nan`/`*` sub-evaluation — the point of the intrinsic. Proven bit-identical by the harness,
+/// which interprets the reference WITH `is_nan` defined (the dependency-aware oracle).
+fn is_finite(args: &[Value]) -> Value {
+    Value::Bool(matches!(args.first(), Some(Value::Num(n)) if n.is_finite()))
 }
 
 /// `name → (fingerprint, intrinsic)` for every registry entry, computed ONCE by parsing each `reference` and
@@ -403,6 +443,52 @@ mod tests {
         eval_expr(&body, &scope).expect("reference body evaluates")
     }
 
+    /// The SLOW side for a reference that calls OTHER BOSL2 functions (the dependency-aware oracle). `deps` are
+    /// the verbatim source of those functions; they precede `target` in one program so its body can resolve
+    /// them. The built `Ctx` has its intrinsics table CLEARED, so the oracle is FULLY interpreted end-to-end
+    /// (a dep that happens to be a registered intrinsic doesn't shortcut — we're proving against the
+    /// interpreter, not against another intrinsic). `target` must be the LAST definition.
+    fn interpret_with_deps(target: &str, deps: &[&str], inputs: &[Value]) -> Value {
+        let src = format!("{}\n{target}", deps.join("\n"));
+        let program = parse(&src).expect("deps+target parse");
+        let mut ctx = build_ctx(&program);
+        ctx.intrinsics.clear(); // force full interpretation — no intrinsic shortcut even for the deps
+        let (params, body) = match &program.stmts.last().expect("has target").kind {
+            StmtKind::FunctionDef { params, body, .. } => (params, body),
+            other => panic!("target is not a function def: {other:?}"),
+        };
+        let mut scope = Scope::new();
+        for (p, v) in params.iter().zip(inputs) {
+            scope.bind(p.name.clone(), v.clone());
+        }
+        crate::eval::eval_with_ctx(body, &scope, &ctx).expect("reference body evaluates")
+    }
+
+    /// The value battery the predicate intrinsics are proven against — one of every `Value` shape, with the
+    /// float edges (`±0`, `±inf`, `NaN`) that `is_nan`/`is_finite` turn on, plus a `NaN`/`inf` INSIDE a list
+    /// (the element-wise-`!=` corner that separates a naive scalar `is_nan` from the real `x!=x`).
+    fn value_battery() -> Vec<Value> {
+        vec![
+            Value::Undef,
+            Value::Num(0.0),
+            Value::Num(-0.0),
+            Value::Num(3.5),
+            Value::Num(-42.0),
+            Value::Num(f64::INFINITY),
+            Value::Num(f64::NEG_INFINITY),
+            Value::Num(f64::NAN),
+            Value::Bool(true),
+            Value::Bool(false),
+            Value::string("hi"),
+            Value::string(""),
+            Value::list(vec![Value::Num(1.0), Value::Num(2.0)]),
+            Value::num_list(vec![1.0, 2.0, 3.0]),
+            Value::num_list(vec![f64::NAN]),
+            Value::num_list(vec![f64::INFINITY]),
+            Value::list(vec![]),
+        ]
+    }
+
     #[test]
     fn fingerprint_is_span_independent() {
         // Same STRUCTURE, different source formatting (whitespace/comments shift every span) → SAME
@@ -535,6 +621,41 @@ mod tests {
             // Zero args: the single param defaults to undef in both paths.
             assert_eq!(func(&[]), interpret(reference, &[]), "{name}() diverged");
         }
+    }
+
+    #[test]
+    fn is_nan_matches_its_reference_bit_for_bit() {
+        // `is_nan(x) = (x!=x)` — no deps, so the plain interpreter is the oracle. The list-with-NaN case is
+        // the one that matters: `[nan]!=[nan]` is TRUE (element-wise), so a scalar-only intrinsic would be
+        // wrong there — the intrinsic routes non-numbers through the real `!=`, and this proves it.
+        let reference = reference_of("is_nan").expect("registered");
+        let (params, body) = parse_fn(reference);
+        let func = lookup("is_nan", &params, &body).expect("its own reference must register");
+        for input in value_battery() {
+            let one = [input.clone()];
+            assert_eq!(func(&one), interpret(reference, &one), "is_nan({input:?}) diverged");
+        }
+        assert_eq!(func(&[]), interpret(reference, &[]), "is_nan() diverged");
+    }
+
+    #[test]
+    fn is_finite_matches_its_reference_bit_for_bit() {
+        // `is_finite(x) = is_num(x) && !is_nan(0*x)` calls `is_nan` — the dependency-aware oracle interprets
+        // the reference WITH `is_nan` defined (and intrinsics cleared, so `is_nan` interprets too). Proves the
+        // direct `f64::is_finite` collapse equals the full is_num/`0*x`/is_nan chain across every value shape.
+        let reference = reference_of("is_finite").expect("registered");
+        let (params, body) = parse_fn(reference);
+        let func = lookup("is_finite", &params, &body).expect("its own reference must register");
+        let deps = ["function is_nan(x) = (x!=x);"];
+        for input in value_battery() {
+            let one = [input.clone()];
+            assert_eq!(
+                func(&one),
+                interpret_with_deps(reference, &deps, &one),
+                "is_finite({input:?}) diverged"
+            );
+        }
+        assert_eq!(func(&[]), interpret_with_deps(reference, &deps, &[]), "is_finite() diverged");
     }
 
     #[test]

@@ -415,6 +415,7 @@ fn dispatch_module<'a>(
         return Ok(());
     }
     let name = mi.name.as_str();
+    super::fnprofile::record_module(name); // dev probe (FAB_PROFILE_FNS): per-name module-call counts
     // A block's worth of children as a `comb`-combined `EvalNodes` in `scope` — the shared shape of the
     // transform / boolean / hull / offset / extrude / projection / color arms.
     let group = |work: &mut Vec<GTask<'a>>, comb, scope| {

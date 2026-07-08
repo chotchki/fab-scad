@@ -241,6 +241,59 @@ its key. Three fences:
 
 Reproduce with `FAB_REDUNDANCY=1 target/release/models_worker <model.scad> libs scad-lib`.
 
+## Per-function call profile — aiming the intrinsics (O.2, 2026-07-08)
+
+The redundancy probe answers "how much repeats" but keys on the body POINTER, so it can't name WHICH functions
+to make cheap. The N.1 sampler can't either — every BOSL2 function evaluates through the SAME eval loop, so
+`samply` sees `lc_for`/`check_assert`/`bind_module_scope` (our Rust symbols) and CANNOT separate `is_vector`
+from `is_path`. So O.2 needed its own instrument: `FAB_PROFILE_FNS=1` (`fnprofile.rs`), a per-NAME call counter
+hooked at dispatch — user functions, builtins, modules, counted separately. On `slice_parts` (2.92 M
+user-function calls):
+
+| rank | user function | calls | % of fn calls |
+|---|---|---|---|
+| 1 | **is_finite** | 1.01 M | **34.6%** |
+| 2 | **is_nan** | 621 K | **21.3%** |
+| 3 | last | 280 K | 9.6% |
+| 4 | is_vector | 187 K | 6.4% |
+| 5 | default | 74 K | 2.5% |
+
+Two functions are **56% of every user-function call in the model**, and they're the workhorses of BOSL2's input
+validation — every `assert(is_finite(…))` / `is_vector(…)` guard bottoms out here. Under them the builtins tell
+the same story: `is_num` 1.12 M, `len` 889 K, `is_list` 816 K, `is_undef` 795 K — the type-predicate soup the
+N.1 profile predicted, now named. And it ties back to `check_assert` being 41% of eval self-time: asserts
+evaluate their condition through a nested eval loop, so that 41% IS these predicates.
+
+### Why intrinsics, and NOT the cache/tagging the redundancy section teased
+
+`slice_parts` measures **96.8 .. 99.8% redundant** — the highest ceiling in the table — yet the N.2c eval-memo
+cache delivered ~0% here. That looks like a contradiction until you read the avg key size: **12.4 Value-elems
+hashed per call**. To SERVE `is_nan(x)` from a cache you hash the key (~12 elems), probe a map, clone the
+result — and `is_nan` is ONE comparison. The memo bookkeeping COSTS MORE THAN THE COMPUTE. That's the general
+law for cheap leaf predicates: memoization (a cache, or tagging the value with "already validated") only pays
+when the work behind the key dwarfs the key's hash, and a type predicate is the opposite extreme. The intrinsic
+sidesteps it — it makes each call cheap with ZERO lookup, no key, no eviction, no `Rc`-aliasing fence.
+
+### The A/B (ceiling-first, same machine, min of 5)
+
+`is_nan` = `f64::is_nan` on a number (non-numbers route through the real `!=` so `[nan]!=[nan]` stays TRUE —
+the element-wise corner a naive scalar check gets wrong); `is_finite` = `f64::is_finite`, which ALSO erases its
+`is_num`/`is_nan`/`0*x` sub-calls (the interpreted body dispatches them; the native body doesn't). Both WIRE
+against the shipped BOSL2 (confirmed via `FAB_EXPLAIN`), both proven bit-identical to interpreting their
+verbatim reference — `is_finite` through the new dependency-aware oracle (interpret the reference WITH `is_nan`
+defined). Corpus 901/901 unchanged.
+
+| build | slice_parts eval (min of 5) |
+|---|---|
+| without `is_nan`/`is_finite` | 8253 ms |
+| **with** | **7216 ms** |
+
+**−1037 ms, ~12.6%** — from two leaf predicates. The biggest single eval-perf lever landed (N.2d was −4.6%,
+N.2b −3.6%), and it confirms the intrinsic thesis over the memo thesis outright: same 99.8%-redundant workload,
+the cache got ~0%, the intrinsic got 12.6%. `last` (9.6%) and `is_vector` (6.4%, needs the optional-param +
+`_EPSILON` handling) are the next targets. Reproduce the profile with `FAB_PROFILE_FNS=1
+target/release/models_worker <model.scad> libs scad-lib`.
+
 ## The harness
 
 `tests/models_harness.rs` (`#[ignore]`, run on demand) sweeps every TOP-LEVEL model under `models/` —

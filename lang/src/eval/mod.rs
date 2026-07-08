@@ -17,6 +17,7 @@ mod fragments;
 mod geo;
 mod geo2d;
 mod geo_drop;
+mod fnprofile;
 mod geo_stack;
 mod geometry;
 mod intrinsics;
@@ -880,6 +881,7 @@ fn dispatch_call<'a>(
             // the explicit stack (no host recursion), so its subtree isn't scope-bounded here — the
             // event marks WHICH function was entered, the enclosing `eval_program` span times the whole.
             tracing::trace!(function = name.as_str(), "call");
+            fnprofile::record_fn(name.as_str()); // dev probe (FAB_PROFILE_FNS): per-name call counts
             if trace::on() {
                 tasks.push(Task::TraceReturn { name }); // fires when the body's value lands (peek-only)
             }
@@ -892,6 +894,7 @@ fn dispatch_call<'a>(
         }
         if builtins::is_builtin(name) {
             // (no TraceReturn — `run_builtin` traces the builtin's args + result inline)
+            fnprofile::record_builtin(name); // dev probe (FAB_PROFILE_FNS): per-name call counts
             tasks.push(Task::Builtin { name, args });
             for arg in args.iter().rev() {
                 tasks.push(Task::Eval(&arg.value, scope.clone()));
@@ -1336,8 +1339,10 @@ fn resolve_source(
         }
     }
     redundancy::reset(); // dev probe: fresh count per run so the import fixpoint's partial runs don't bleed in
+    fnprofile::reset(); // dev probe: same — fresh per-name call counts per run (FAB_PROFILE_FNS)
     let tree = eval_top(&exec, &global, &ctx)?;
     redundancy::report(); // prints to stderr only under FAB_REDUNDANCY=1
+    fnprofile::report(); // prints to stderr only under FAB_PROFILE_FNS=1
     let needs = ctx.take_file_needs();
     if needs.is_empty() {
         Ok(Resolution::Complete {

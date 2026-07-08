@@ -1,13 +1,27 @@
 # fab-scad
 
-A Rust workflow tool that wraps OpenSCAD with the lifecycle it lacks — render, slice,
-output, publish — plus the shared SCAD toolkit my designs lean on. OpenSCAD is a great
-geometry engine with no workflow story; `fab-scad` IS the workflow, and it owns it (this
-repo is the superproject root).
+A from-scratch Rust reimplementation of the OpenSCAD language evaluator + geometry pipeline
+(over the Manifold kernel), plus the project workflow OpenSCAD lacks — render, slice, output,
+publish. The aim: run the same OpenSCAD + BOSL2 designs at native speed AND, eventually, in the
+browser — one implementation, everywhere — with results held to OpenSCAD's own output as the
+reference.
 
-**WIP.** The foundation (Phase 3) has landed: the `fab` binary, the OpenSCAD wrap, the
-minimal manifest, and the focus + scaffolding workflow. `SPEC.md` / `PLAN.md` live here at
-the root now. Next up is the linear slicer (Phase 4).
+**A derivative work, with full credit to the projects it stands on:**
+
+- **[OpenSCAD](https://openscad.org)** — the language, and the reference behavior every result is
+  tested against (it's the oracle in the differential harness).
+- **[BOSL2](https://github.com/BelfrySCAD/BOSL2)** — the library the designs run on (pinned in `libs/`).
+- **[Manifold](https://github.com/elalish/manifold)** — the geometry kernel (the same one OpenSCAD links).
+
+It exists for what it solves, and it's here to be taken from — the parser, the differential test
+harness, and (in progress) the performance tier are offered back upstream, license-matched (see below)
+so they flow with zero friction if those projects ever find value in them.
+
+**WIP, moving fast.** The evaluator runs the pinned BOSL2 test suite at 99.9% and renders real BOSL2
+designs, with a differential harness comparing every result against OpenSCAD to hold the line. In
+release it's already at rough speed parity with OpenSCAD on real models; the performance tier (the
+web story + a desktop JIT) is next — design in `docs/perf-tier-spec.md`. `SPEC.md` / `PLAN.md` live
+at the root; `docs/` holds the design writeups.
 
 ## Layout
 

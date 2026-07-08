@@ -118,6 +118,13 @@ The shape is the N.1 story, louder:
   allocate-a-BTreeMap-per-call, bind params, drop it. This is what N.2d (Vec-frame Scope) targets, and this
   real model JUSTIFIES it (it was parked as "re-measure whether the residual scope cost earns it" — yes).
 
+  **N.2d LANDED (2026-07-08):** the per-frame `vars` map is now adaptive — a flat `Vec` (linear scan) for the
+  small per-call/`let` frame, spilling to a `BTreeMap` past 16 entries for the thousand-constant island
+  globals. slice_parts eval **8925 → 8517 ms (~4.6%)**, corpus **901/901** (up from 899 — the ~4.6% cleared
+  the borderline spheroid + gaussian_rands timeouts). Modest because the map STRUCTURE was only part of it:
+  the residual per-`bind` cost is the `String` KEY allocation (`name.into()` on every bind), unchanged here —
+  that's N.2b (intern var names), the next scope lever.
+
 Two hypotheses this profile KILLED (record them so they don't get re-proposed):
 - **The eval-memo cache is not the lever here.** A/B `FAB_EVAL_CACHE=1`: 8925 ms → 8530 ms, **4.5%** — nowhere
   near its 82-92% redundancy CEILING. The cache memoizes function VALUES; slice_parts' cost is module

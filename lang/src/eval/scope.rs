@@ -13,13 +13,69 @@
 //! special-variable literals from `Builtins.cc`: `$fn=0`, `$fa=12`, `$fs=2`. Non-number `$`-vars
 //! resolve to `0.0` (OpenSCAD `toDouble`). They live at the ROOT frame and resolve through the chain.
 //!
-//! Frames are backed by `BTreeMap` for deterministic iteration order (SPEC determinism doctrine;
-//! `HashMap` is banned crate-wide anyway).
+//! The `$`-specials map is a `BTreeMap` (deterministic iteration for [`Scope::specials`]; `HashMap` is banned
+//! crate-wide anyway). The regular `vars` are an adaptive [`VarMap`] — a flat `Vec` while small (the per-call
+//! frame), spilling to a `BTreeMap` for the thousand-constant island globals (N.2d); `vars` is never iterated,
+//! so it owes no ordering.
 
 use std::collections::BTreeMap;
 use std::rc::Rc;
 
 use super::value::Value;
+
+/// A frame's regular (non-`$`) bindings. ADAPTIVE (N.2d): a flat `Vec` while small — the common per-call /
+/// `let` / comprehension frame holds a HANDFUL of bindings, and there a linear scan beats a `BTreeMap`'s
+/// node-per-insert allocation + tree-walk drop + tree-rebuild clone (the ~15% of allocation the `slice_parts`
+/// profile pinned to the per-frame map). SPILLS to a `BTreeMap` past [`SPILL`] entries, because a BOSL2
+/// island GLOBAL holds THOUSANDS of constants and a linear scan THERE would be catastrophic — the exact
+/// split this module's header warns about. `vars` is ONLY ever get/insert (never iterated — grep-confirmed),
+/// so order is irrelevant: the `Vec` needs no sorting, and inserts scan-and-replace to keep keys unique.
+#[derive(Debug, Clone)]
+enum VarMap {
+    /// Few bindings — linear scan. The per-call / `let` / comprehension frame.
+    Small(Vec<(String, Value)>),
+    /// Many bindings — a `BTreeMap`. An island global (BOSL2: thousands of constants).
+    Large(BTreeMap<String, Value>),
+}
+
+/// Above this many bindings a [`VarMap`] spills `Small`→`Large`. ~16: below it a linear scan of short string
+/// keys wins on the per-call frame; an island global blows past it once and stays a `BTreeMap` for O(log n).
+const SPILL: usize = 16;
+
+impl VarMap {
+    fn new() -> Self {
+        VarMap::Small(Vec::new())
+    }
+
+    fn get(&self, name: &str) -> Option<&Value> {
+        match self {
+            VarMap::Small(v) => v.iter().find(|(k, _)| k == name).map(|(_, val)| val),
+            VarMap::Large(m) => m.get(name),
+        }
+    }
+
+    /// Bind or REBIND `name` (last write wins — load-bearing for OpenSCAD's two-phase param binding, where
+    /// phase-2 args overwrite phase-1 defaults). Scan-and-replace keeps `Small` keys unique; the `Small`→
+    /// `Large` spill fires only when a genuinely NEW key would push past [`SPILL`].
+    fn insert(&mut self, name: String, value: Value) {
+        match self {
+            VarMap::Small(v) => {
+                if let Some(slot) = v.iter_mut().find(|(k, _)| *k == name) {
+                    slot.1 = value;
+                } else if v.len() >= SPILL {
+                    let mut map: BTreeMap<String, Value> = std::mem::take(v).into_iter().collect();
+                    map.insert(name, value);
+                    *self = VarMap::Large(map);
+                } else {
+                    v.push((name, value));
+                }
+            }
+            VarMap::Large(m) => {
+                m.insert(name, value);
+            }
+        }
+    }
+}
 
 /// One frame of bindings plus a link to the enclosing frame (`None` at the root). `$`-specials live in
 /// their OWN map, apart from the (often huge) lexical `vars`: every user call inherits the caller's reaching
@@ -28,7 +84,7 @@ use super::value::Value;
 /// O(scope-size), the L.2.7 timeout tax. Kept split, each bound/looked-up by its `$` prefix.
 #[derive(Debug, Clone)]
 struct Frame {
-    vars: BTreeMap<String, Value>,
+    vars: VarMap,
     specials: BTreeMap<String, Value>,
     /// LEXICAL parent — walked for regular (`vars`) lookups. A `let`/comprehension child shares its
     /// enclosing scope here; a CALL frame instead points at the callee's home global (hygiene).
@@ -97,7 +153,7 @@ impl Scope {
         specials.insert("$fn".to_string(), Value::Num(0.0));
         specials.insert("$fa".to_string(), Value::Num(12.0));
         specials.insert("$fs".to_string(), Value::Num(2.0));
-        let mut vars = BTreeMap::new();
+        let mut vars = VarMap::new();
         vars.insert("PI".to_string(), Value::Num(std::f64::consts::PI));
         Self {
             frame: Rc::new(Frame {
@@ -121,7 +177,7 @@ impl Scope {
     pub fn call_frame(lexical_base: &Scope, caller: &Scope) -> Self {
         Self {
             frame: Rc::new(Frame {
-                vars: BTreeMap::new(),
+                vars: VarMap::new(),
                 specials: BTreeMap::new(),
                 parent: Some(Rc::clone(&lexical_base.frame)),
                 dynamic_parent: Some(Rc::clone(&caller.frame)),
@@ -214,7 +270,7 @@ impl Scope {
         // frame for both) — only a `call_frame` splits them.
         Self {
             frame: Rc::new(Frame {
-                vars: BTreeMap::new(),
+                vars: VarMap::new(),
                 specials: BTreeMap::new(),
                 parent: Some(Rc::clone(&self.frame)),
                 dynamic_parent: Some(Rc::clone(&self.frame)),

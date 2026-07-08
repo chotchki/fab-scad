@@ -154,7 +154,7 @@ added 2026-07-07.
 - [x] N.2c - N.2c - Eval-memo cache (the 82-92% lever) — reviewed design, ready to build
   - [x] N.2c.1 - N.2c step 1 — DynCtx: O(1) per-frame $-context identity in Scope
   - [ ] N.2c.2 - N.2c.2 - Program-level auto-off: make the eval cache safe to default ON
-- [ ] N.2d - N.2d - Vec-frame Scope + re-profile whether the residual scope cost still earns it (conditional)
+- [x] N.2d - N.2d - Vec-frame Scope LANDED: adaptive VarMap (Vec small / BTreeMap-spill for island globals); slice_parts eval -4.6% (8925→8517ms), corpus 901/901 (cleared spheroid+gaussian_rands); residual per-bind String-key alloc → N.2b
 ## Phase O - O - Intrinsics tier (AST-fingerprint, wasm-safe)
 - [ ] O.1 - O.1 - AST-fingerprint intrinsic registry + auto-fallback + fast==slow harness
 - [ ] O.2 - O.2 - First hand-written BOSL2-function intrinsics from the release profile

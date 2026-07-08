@@ -38,14 +38,34 @@ struct Entry {
     func: Intrinsic,
 }
 
-/// The intrinsic registry (O.1 is the mechanism; O.2 fills this with the profile's hot BOSL2 functions).
-/// One POC entry proves the whole chain end to end — fingerprint match, dispatch, and the fast==slow harness.
-/// `_fab_poc_sq` is a synthetic name that can't collide with real code.
-static REGISTRY: &[Entry] = &[Entry {
-    name: "_fab_poc_sq",
-    reference: "function _fab_poc_sq(x) = x * x;",
-    func: poc_sq,
-}];
+/// The intrinsic registry. `_fab_poc_sq` is the O.1 mechanism POC (a synthetic, collision-proof name); the
+/// rest are O.2 — the profile's hot BOSL2 predicates. Each entry's `reference` is the VERBATIM BOSL2 source
+/// (from `libs/BOSL2`); the fast==slow harness proves the native `func` bit-matches interpreting it, and
+/// `FAB_EXPLAIN` confirms it WIREs (vs DRIFTs) against the user's actual library.
+///
+/// O.2 targets so far are LEAF predicates — bodies that call only OpenSCAD BUILTINS (`is_undef`,
+/// `is_string`), so the harness can interpret the reference with a default `Ctx`. Predicates that call OTHER
+/// BOSL2 functions (`is_finite` → `is_nan`, `is_vector` → `_EPSILON`) need a dependency-aware harness — the
+/// next O.2 step.
+static REGISTRY: &[Entry] = &[
+    Entry {
+        name: "_fab_poc_sq",
+        reference: "function _fab_poc_sq(x) = x * x;",
+        func: poc_sq,
+    },
+    // BOSL2 `is_def`/`is_str` — the two hottest LEAF predicates (called in nearly every optional-arg check
+    // and string guard). Verbatim from libs/BOSL2/builtins.scad.
+    Entry {
+        name: "is_def",
+        reference: "function is_def(x) = !is_undef(x);",
+        func: is_def,
+    },
+    Entry {
+        name: "is_str",
+        reference: "function is_str(x) = is_string(x);",
+        func: is_str,
+    },
+];
 
 /// The POC intrinsic: `x * x`. Mirrors the interpreter's `Num * Num` (and `undef` for a non-number arg, as
 /// `apply_binary` yields). Deliberately trivial — it exists to exercise the mechanism, not to be fast.
@@ -54,6 +74,17 @@ fn poc_sq(args: &[Value]) -> Value {
         [Value::Num(x)] => Value::Num(x * x),
         _ => Value::Undef,
     }
+}
+
+/// BOSL2 `is_def(x) = !is_undef(x)` — true iff `x` is anything but `undef`. Only the first positional arg
+/// binds to `x` (extras are ignored, per OpenSCAD); zero args → `x` is `undef` → `false`.
+fn is_def(args: &[Value]) -> Value {
+    Value::Bool(!matches!(args.first(), None | Some(Value::Undef)))
+}
+
+/// BOSL2 `is_str(x) = is_string(x)` — true iff `x` is a string.
+fn is_str(args: &[Value]) -> Value {
+    Value::Bool(matches!(args.first(), Some(Value::Str(_))))
 }
 
 /// `name → (fingerprint, intrinsic)` for every registry entry, computed ONCE by parsing each `reference` and
@@ -131,6 +162,15 @@ pub(super) fn classify(name: &str, params: &[Parameter], body: &Expr) -> Plan {
     } else {
         Plan::Drift
     }
+}
+
+/// The registered REFERENCE fingerprint for `name` — the hash a running function must match to WIRE — or
+/// `None` if no intrinsic is registered under that name. Feeds the EXPLAIN DRIFT diagnostic, which prints it
+/// next to the running function's own fingerprint so an author can SEE how the two differ (stale reference vs
+/// a genuinely different library version). See [`fingerprint`].
+#[must_use]
+pub(super) fn reference_fp(name: &str) -> Option<u64> {
+    table().iter().find(|(n, _, _)| *n == name).map(|(_, fp, _)| *fp)
 }
 
 /// Is the `FAB_EXPLAIN` intrinsic-plan report on? Cached once (env read per ctx build would be silly).
@@ -465,6 +505,36 @@ mod tests {
         };
         let result = crate::eval::eval_with_ctx(call, &Scope::new(), &ctx).expect("evaluates");
         assert_eq!(result, Value::Num(49.0), "the intrinsic-dispatched call returns x*x");
+    }
+
+    #[test]
+    fn leaf_predicate_intrinsics_match_their_references_bit_for_bit() {
+        // O.2: each real predicate intrinsic must equal interpreting its VERBATIM BOSL2 reference, across
+        // every value type. (These references call only builtins — is_undef/is_string — so `interpret`'s
+        // default Ctx can run them.)
+        let cases = [
+            Value::Undef,
+            Value::Num(3.0),
+            Value::Num(-0.0),
+            Value::Bool(false),
+            Value::string("hi"),
+            Value::list(vec![Value::Num(1.0), Value::Num(2.0)]),
+        ];
+        for name in ["is_def", "is_str"] {
+            let reference = reference_of(name).expect("registered");
+            let (params, body) = parse_fn(reference);
+            let func = lookup(name, &params, &body).expect("its own reference must register");
+            for input in &cases {
+                let one = [input.clone()];
+                assert_eq!(
+                    func(&one),
+                    interpret(reference, &one),
+                    "{name}({input:?}) diverged"
+                );
+            }
+            // Zero args: the single param defaults to undef in both paths.
+            assert_eq!(func(&[]), interpret(reference, &[]), "{name}() diverged");
+        }
     }
 
     #[test]

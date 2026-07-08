@@ -1422,11 +1422,18 @@ fn build_intrinsics<'a>(
         // natively (WIRED) or silently interprets because its body drifted from the intrinsic's reference
         // (DRIFT) — the answer to "is my intrinsic actually getting used on this program?".
         if explain {
+            // Print the fingerprints so an author can diagnose a DRIFT: `defined` is what the user's actual
+            // library hashes to; `reference` is what the intrinsic was written against. If they differ, EITHER
+            // paste `defined` as an updated reference (library moved) OR fix a stale reference. (chotchki's ask.)
             match intrinsics::classify(name, params, body) {
-                intrinsics::Plan::Wired => eprintln!("+ [intrinsic WIRED] {name}"),
+                intrinsics::Plan::Wired => {
+                    eprintln!("+ [intrinsic WIRED] {name} (fp {:#018x})", intrinsics::fingerprint(params, body));
+                }
                 intrinsics::Plan::Drift => eprintln!(
-                    "+ [intrinsic DRIFT] {name} — defined, but its body differs from the intrinsic \
-                     reference → INTERPRETED (library drift, or a stale reference)"
+                    "+ [intrinsic DRIFT] {name} — defined fp {:#018x} != reference fp {} → INTERPRETED \
+                     (library drift, or a stale reference)",
+                    intrinsics::fingerprint(params, body),
+                    intrinsics::reference_fp(name).map_or_else(|| "?".to_string(), |fp| format!("{fp:#018x}")),
                 ),
                 intrinsics::Plan::NotRegistered => {}
             }

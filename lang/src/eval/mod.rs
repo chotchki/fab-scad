@@ -16,6 +16,7 @@ mod fragments;
 mod geo;
 mod geo2d;
 mod geo_drop;
+mod geo_stack;
 mod geometry;
 pub(crate) mod io;
 mod loader;
@@ -1394,6 +1395,12 @@ fn eval_geometry<'a>(
     island: usize,
     ctx: &Ctx<'a>,
 ) -> crate::Result<Vec<Geo>> {
+    // M.3: the explicit-stack geometry driver is the default path (heap-bounded eval depth). It shims each
+    // still-recursive dispatch arm back through `eval_stmt`, so it is a transparent peer of the loop below until
+    // the arms convert (A1+). `FAB_GEO_DRIVER=0` forces this recursive loop for an A/B differential.
+    if geo_stack::driver_enabled() {
+        return geo_stack::eval_geometry_driver(stmts, scope, global, island, ctx);
+    }
     let mut scope = scope.clone();
     let mut nodes = Vec::new();
     for stmt in stmts {

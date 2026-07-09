@@ -55,6 +55,7 @@ pub use eval::{
     interpret_fn, range_iter, range_len,
 };
 pub use eval::jit_abi::{jit_math, jit_math_id};
+pub use eval::rng::RandStream;
 pub use geom::{Affine, Affine2, Dims, Rgba, Tri, Vec2, Vec3};
 pub use lexer::{Lexed, Token, TokenKind, decode_str, lex, num_value};
 pub use mesh::Mesh;

@@ -98,7 +98,7 @@ pub fn rands(min: f64, max: f64, count: usize, seed: Option<u32>) -> Vec<f64> {
 /// reset per evaluation (→ reproducible, bit-identical) but eval-order-STATEFUL within a run — the one
 /// deliberately-impure builtin (seedless `rands` is non-reproducible in OpenSCAD anyway). Any future
 /// parallelism must draw in the fixed eval order, same as the buffered echo/warning log.
-pub(crate) struct RandStream {
+pub struct RandStream {
     rng: Mt19937,
     /// Monotonic count of values DRAWN — the impurity signal the eval-memo cache (N.2c) reads. A user
     /// function whose evaluation advances this is NOT a pure function of its args (seedless `rands` depends
@@ -123,11 +123,21 @@ impl RandStream {
         }
     }
 
+    /// ONE draw in `[min, max)`, ADVANCING the stream (bumps `draws` by 1). The single source of truth for a
+    /// seedless draw — both the batch [`RandStream::draw`] and the JIT's [`jit_rand_next`] helper route through
+    /// it, so the draw SEQUENCE and the `draws` fence counter are bit-identical whether a `rands()` runs
+    /// interpreted or JIT'd (P.1.6 rung-D piece 1). Recomputing `max - min` per draw is deterministic, so it
+    /// equals the old batch's compute-span-once form value-for-value. `pub` so the native JIT's `jit_rand_next`
+    /// helper (in `fab-jit`, where the `unsafe` deref lives — this crate is `unsafe_code = forbid`) can advance
+    /// the woven stream through the SAME primitive.
+    pub fn next_one(&mut self, min: f64, max: f64) -> f64 {
+        self.draws += 1;
+        min + (max - min) * self.rng.canonical()
+    }
+
     /// `count` draws in `[min, max)`, ADVANCING the stream so the next call continues the sequence.
     pub(crate) fn draw(&mut self, min: f64, max: f64, count: usize) -> Vec<f64> {
-        let span = max - min;
-        self.draws += count as u64;
-        (0..count).map(|_| min + span * self.rng.canonical()).collect()
+        (0..count).map(|_| self.next_one(min, max)).collect()
     }
 
     /// The monotonic draw count — the cache's impurity probe (see the `draws` field).
@@ -136,6 +146,7 @@ impl RandStream {
         self.draws
     }
 }
+
 
 #[cfg(test)]
 #[allow(

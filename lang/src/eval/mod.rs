@@ -27,7 +27,7 @@ mod loader;
 mod message;
 mod module;
 mod text;
-mod rng;
+pub(crate) mod rng;
 mod ops;
 mod redundancy;
 mod scope;
@@ -153,9 +153,15 @@ pub trait NumericJit {
     /// (P.1.6 rung B): a [`Value::Num`] is a scalar, a [`Value::NumList`] a fixed-length vector; a
     /// non-scalarizable arg (a nested list, string, undef, range, function, or an over-long vector) → `None`.
     /// A [`JitOutcome`] carries the result's TYPE tag (P.1.4e) — the JIT return ABI is untyped `f64`, so the
-    /// compiled function reports whether that `f64` is a number or a boolean and the dispatch re-wraps it in
+    /// compiled function reports whether that `f64` is a number/boolean/vector and the dispatch re-wraps it in
     /// the matching [`Value`]. `None` means "not compiled / declined / raised" — the interpreter takes over.
-    fn call_numeric(&self, name: &str, args: &[Value]) -> Option<JitOutcome>;
+    ///
+    /// `rand` is the eval's live [`rng::RandStream`] woven in by pointer (P.1.6 rung-D piece 1): a JIT'd
+    /// SEEDLESS `rands()` advances it through [`jit_rand_next`], exactly as the interpreter would, so the draw
+    /// sequence stays bit-identical. The dispatch passes `Ctx::rand_stream`'s cell pointer; a body that never
+    /// calls `rands` leaves it untouched. It is a raw pointer (not `&mut`) because the native ABI carries it as
+    /// one, and the caller guarantees exclusive single-threaded access for the call's duration.
+    fn call_numeric(&self, name: &str, args: &[Value], rand: *mut core::ffi::c_void) -> Option<JitOutcome>;
 }
 
 /// A JIT-compiled call's result, TYPE-TAGGED (P.1.4e). The native return ABI is a single untyped `f64` (plus
@@ -745,8 +751,14 @@ fn eval_with_global<'a>(
                 // fixed-small vector; a non-scalarizable arg (nested list, string, over-long vector, …) makes
                 // it decline (`None`) and we interpret. A `Some(r)` is bit-identical to interpreting `body`,
                 // so this is pure speed. The registry decides membership + shape; no work when the hook is off.
+                // Weave the eval's live RandStream in by pointer (P.1.6 rung-D piece 1): a JIT'd seedless
+                // `rands()` advances it through `jit_rand_next`, in the same eval order the interpreter draws.
+                // `as_ptr()` hands out the cell's pointer WITHOUT a `borrow`, so no `RefMut` guard aliases the
+                // `&mut` the helper transiently makes — sound because the compiled function is the sole
+                // (single-threaded) accessor while it runs, and a non-rands body never dereferences it.
                 if let (Some(name), Some(j)) = (jit, ctx.jit.as_deref())
-                    && let Some(out) = j.call_numeric(name, &vals)
+                    && let Some(out) =
+                        j.call_numeric(name, &vals, ctx.rand_stream.as_ptr().cast::<core::ffi::c_void>())
                 {
                     // Re-tag the untyped native return into a `Value` (P.1.4e): a bool-returning function
                     // (a predicate, a comparison body) yields `Value::Bool`, not `Value::Num` — matching the
@@ -2588,9 +2600,15 @@ mod tests {
     /// it fell back to the interpreter. Any other function/arity → `None` (defer to the interpreter).
     struct MarkerJit;
     impl super::NumericJit for MarkerJit {
-        fn call_numeric(&self, name: &str, args: &[Value]) -> Option<super::JitOutcome> {
+        fn call_numeric(
+            &self,
+            name: &str,
+            args: &[Value],
+            _rand: *mut core::ffi::c_void,
+        ) -> Option<super::JitOutcome> {
             // Scalar `sq(x)` only — a NumList (or any non-Num) arg declines here, so the interpreter runs the
-            // real body (the rung-B mock stays scalar; the real registry handles vector shapes).
+            // real body (the rung-B mock stays scalar; the real registry handles vector shapes). The mock
+            // never draws, so it ignores the woven RandStream pointer.
             match (name, args) {
                 ("sq", [Value::Num(x)]) => Some(super::JitOutcome::Num(x * x + 1000.0)),
                 _ => None,

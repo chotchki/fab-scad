@@ -47,7 +47,7 @@ enum Ret {
 
 use fab_lang::{
     BinOp, Expr, ExprKind, JitConst, JitDef, JitOutcome, NumericJit, NumericJitFactory, Parameter,
-    UnOp, jit_math_id,
+    RandStream, UnOp, jit_math_id,
 };
 // Aliased: Cranelift's `Value` (an IR SSA value) is used pervasively below, so the scad-lang runtime value
 // (what the dispatch hands us to scalarize) rides under `ScadValue` to avoid the name clash.
@@ -154,6 +154,23 @@ extern "C" fn jit_fmax(a: f64, b: f64) -> f64 {
     a.max(b)
 }
 
+/// The seedless-`rands` helper (P.1.6 rung-D piece 1) — advances the WOVEN [`RandStream`] by ONE draw, through
+/// the SAME [`RandStream::next_one`] the interpreter's seedless path uses, so the draw sequence AND the `draws`
+/// fence counter stay bit-identical. A JIT'd `rands(min, max, count)` calls this `count` times in source order;
+/// the stream is `Ctx::rand_stream`, woven in by pointer through the ABI (a 2.5 KB MT19937 state can't ride a
+/// register, and the doctrine forbids SEEDING inside the JIT — only advancing the caller's live stream).
+///
+/// This is the SECOND (and only other) unsafe seam of the crate, after the compiled-fn-pointer call — confined
+/// and documented HERE. `stream` is a raw `*mut RandStream`; the caller (the eval dispatch → the compiled
+/// function) guarantees it is a live stream with EXCLUSIVE single-threaded access for the call's duration (the
+/// dispatch hands out `RefCell::as_ptr` and holds no `RefMut`, and native code is the sole accessor while it
+/// runs). A non-rands body never calls this, so an unused stream pointer is never dereferenced.
+extern "C" fn jit_rand_next(stream: *mut RandStream, min: f64, max: f64) -> f64 {
+    // SAFETY: per the contract above, `stream` is a live, exclusively-accessible `RandStream` for this call.
+    let stream = unsafe { &mut *stream };
+    stream.next_one(min, max)
+}
+
 /// A scalar math builtin (`sin`/`sqrt`/`abs`/…) an OpenSCAD `Call` compiles to (P.1.4b). Routed to
 /// [`fab_lang::jit_math`] — the SAME computation the interpreter's builtin does (OpenSCAD trig in degrees
 /// via our `trig`, not raw libm), so `fast == JIT` holds. `id` selects the op; a unary op ignores `b`.
@@ -215,16 +232,21 @@ impl CompiledFn {
         matches!(self.ret_ty, Ret::Bool)
     }
 
-    /// Call the compiled function with `params` (length == [`CompiledFn::arity`]) and a sink `out` buffer for a
-    /// vector return (P.1.6 rung C): a `Vec(n)` function writes its `n` elements into `out` (which MUST hold ≥
-    /// `n` slots) and the returned `f64` is a dummy; a `Num`/`Bool` function ignores `out` and returns via the
-    /// `f64`. Returns `None` when the body's inline `assert` FAILED — the JIT can't unwind, so it flags a status
-    /// byte and the caller falls back to the interpreter, which re-runs and raises the exact error.
+    /// Call the compiled function with `params` (length == [`CompiledFn::arity`]), a sink `out` buffer for a
+    /// vector return (P.1.6 rung C), and the woven `rand` [`RandStream`] pointer (P.1.6 rung-D piece 1). A
+    /// `Vec(n)` function writes its `n` elements into `out` (which MUST hold ≥ `n` slots) and the returned
+    /// `f64` is a dummy; a `Num`/`Bool` function ignores `out`. A seedless-`rands` body advances `*rand`; a
+    /// non-rands body never dereferences it (pass `null` freely). Returns `None` when the body's inline
+    /// `assert` FAILED — the JIT can't unwind, so it flags a status byte and the caller falls back.
     ///
     /// # Panics
     /// If `params.len()` != the function's arity, or `out` is too small for a `Vec(n)` return.
+    ///
+    /// # Safety
+    /// `rand` must be either null (for a body known not to draw) or a live, exclusively-accessible
+    /// `*mut RandStream` for the call's duration (see [`jit_rand_next`]).
     #[must_use]
-    pub fn call(&self, params: &[f64], out: &mut [f64]) -> Option<f64> {
+    pub unsafe fn call(&self, params: &[f64], out: &mut [f64], rand: *mut core::ffi::c_void) -> Option<f64> {
         assert_eq!(
             params.len(),
             self.arity,
@@ -236,15 +258,16 @@ impl CompiledFn {
             assert!(out.len() >= n, "CompiledFn::call out buffer too small: {} < {n}", out.len());
         }
         // THE unsafe seam of the whole crate. SAFETY: `code` is a finalized Cranelift function of signature
-        // `extern "C" fn(*const f64, *mut u8, *mut f64) -> f64` (built in `define_one`); the owning module
-        // keeps it mapped for as long as `self` is reachable. It READS `arity` f64s from the first pointer
-        // (`params` has exactly that many, asserted above), WRITES one byte through the second (our live local
-        // `raised`), and — only for a `Vec(n)` return — WRITES `n` f64s through the third (`out`, asserted ≥ n).
-        // A `Num`/`Bool` body never touches the third pointer. No unwinding crosses the boundary.
-        let f: unsafe extern "C" fn(*const f64, *mut u8, *mut f64) -> f64 =
+        // `extern "C" fn(*const f64, *mut u8, *mut f64, *mut RandStream) -> f64` (built in `define_one`); the
+        // owning module keeps it mapped for as long as `self` is reachable. It READS `arity` f64s from the
+        // first pointer (`params` has exactly that many, asserted above), WRITES one byte through the second
+        // (our live local `raised`), WRITES `n` f64s through the third only for a `Vec(n)` return (`out`,
+        // asserted ≥ n), and passes the fourth to `jit_rand_next` only on a seedless-`rands` body (caller's
+        // contract per the # Safety note). No unwinding crosses the boundary.
+        let f: unsafe extern "C" fn(*const f64, *mut u8, *mut f64, *mut core::ffi::c_void) -> f64 =
             unsafe { std::mem::transmute(self.code) };
         let mut raised: u8 = 0;
-        let result = unsafe { f(params.as_ptr(), &raw mut raised, out.as_mut_ptr()) };
+        let result = unsafe { f(params.as_ptr(), &raw mut raised, out.as_mut_ptr(), rand) };
         if raised == 0 { Some(result) } else { None }
     }
 }
@@ -267,13 +290,16 @@ impl JitFn {
 
     /// Call the compiled function with `params` (length must equal [`JitFn::arity`]). `None` if the body's
     /// inline `assert` failed (see [`CompiledFn::call`]). The standalone API is `Num`-only (it declines a bool
-    /// or vector return), so a 1-slot dummy out-buffer suffices — the compiled body never writes to it.
+    /// or vector return) AND declines a seedless-`rands` body (no stream to weave), so a 1-slot dummy
+    /// out-buffer and a NULL rand pointer suffice — the compiled body never touches either.
     ///
     /// # Panics
     /// If `params.len()` != the function's arity.
     #[must_use]
     pub fn call(&self, params: &[f64]) -> Option<f64> {
-        self.inner.call(params, &mut [0.0])
+        // SAFETY: `compile_function` declines a rands body, so this body never dereferences the null rand ptr;
+        // a `Num`-only body never writes the out-buffer either.
+        unsafe { self.inner.call(params, &mut [0.0], core::ptr::null_mut()) }
     }
 }
 
@@ -490,7 +516,18 @@ impl JitRegistry {
 /// specialization for that exact arg SHAPE. `None` means "not scalarizable / not compiled / declined / the
 /// inline assert raised" — the interpreter takes over in every case, which is correct for all of them.
 impl NumericJit for JitRegistry {
-    fn call_numeric(&self, name: &str, args: &[ScadValue]) -> Option<JitOutcome> {
+    #[allow(
+        clippy::not_unsafe_ptr_arg_deref,
+        reason = "the trait method stays SAFE because fab-lang (`unsafe_code = forbid`) must call it; `rand`'s \
+                  validity is the dispatch's documented contract (it passes `Ctx::rand_stream`'s live cell \
+                  pointer) and the actual deref is confined to `CompiledFn::call`'s unsafe seam"
+    )]
+    fn call_numeric(
+        &self,
+        name: &str,
+        args: &[ScadValue],
+        rand: *mut core::ffi::c_void,
+    ) -> Option<JitOutcome> {
         // Cheap membership check before any flatten work — most eligible calls are to non-JIT functions.
         if !self.defs.contains_key(name) {
             return None;
@@ -503,14 +540,19 @@ impl NumericJit for JitRegistry {
         let compiled = self.get_or_compile(name, &sig)?;
         // RE-TAG the untyped native return by the specialization's static shape (P.1.4e + rung C): a `Num` IS
         // the `f64`; a `Bool` predicate yields `0.0`/`1.0` → `Value::Bool`; a `Vec(n)` wrote its `n` elements to
-        // a sink buffer → `Value::NumList`. `None` from `call` = the inline assert raised → interpret (which
-        // re-runs and raises the exact error). The scalar path keeps its stack dummy out — no heap allocation.
+        // a sink buffer → `Value::NumList`. `None` from `call` = the inline assert raised → interpret. The
+        // scalar path keeps its stack dummy out — no heap allocation. `rand` is the eval's woven stream (P.1.6
+        // rung-D piece 1) — a seedless-`rands` body advances it; the dispatch guarantees it's live + exclusive.
+        // SAFETY: `rand` came from the dispatch's `Ctx::rand_stream` cell pointer, valid + single-threaded.
         match compiled.ret_ty {
-            Ret::Num => Some(JitOutcome::Num(compiled.call(&scratch, &mut [0.0])?)),
-            Ret::Bool => Some(JitOutcome::Bool(compiled.call(&scratch, &mut [0.0])? != 0.0)),
+            Ret::Num => Some(JitOutcome::Num(unsafe { compiled.call(&scratch, &mut [0.0], rand) }?)),
+            Ret::Bool => {
+                Some(JitOutcome::Bool(unsafe { compiled.call(&scratch, &mut [0.0], rand) }? != 0.0))
+            }
             Ret::Vec(n) => {
                 let mut out = vec![0.0; n];
-                compiled.call(&scratch, &mut out)?; // the f64 return is a dummy; the elements are in `out`
+                // the f64 return is a dummy; the elements are in `out`.
+                unsafe { compiled.call(&scratch, &mut out, rand) }?;
                 Some(JitOutcome::Vec(out))
             }
         }
@@ -602,6 +644,11 @@ pub fn compile_function(param_names: &[&str], body: &Expr) -> Result<JitFn, JitE
     // constant therefore declines. [`JitRegistry`] is the multi-function, globals-aware form.
     let no_defs = FnDefs::new();
     let no_globals = Globals::new();
+    // The standalone API has NO RandStream to weave (P.1.6 rung-D piece 1 is a registry feature), so a
+    // seedless-`rands` body must DECLINE here rather than have `JitFn::call`'s null stream pointer dereferenced.
+    if uses_rands(body) {
+        return Err(JitError::Unsupported("rands (standalone API has no RandStream; use JitRegistry)"));
+    }
     // The standalone differential passes plain `f64` args, so every parameter is a SCALAR shape.
     let params: Vec<(&str, ArgShape)> = param_names.iter().map(|&n| (n, ArgShape::Scalar)).collect();
     let (func_id, ret_ty) =
@@ -642,6 +689,7 @@ fn new_module() -> Result<JITModule, JitError> {
     jb.symbol("jit_fmin", jit_fmin as *const u8);
     jb.symbol("jit_fmax", jit_fmax as *const u8);
     jb.symbol("jit_math_call", jit_math_call as *const u8);
+    jb.symbol("jit_rand_next", jit_rand_next as *const u8);
     Ok(JITModule::new(jb))
 }
 
@@ -658,6 +706,8 @@ struct Helpers {
     fmax: FuncId,
     /// `jit_math_call(i32 id, f64, f64) -> f64` — a scalar math builtin dispatched by id (P.1.4b).
     math: FuncId,
+    /// `jit_rand_next(*mut RandStream, f64, f64) -> f64` — one seedless `rands` draw (P.1.6 rung-D piece 1).
+    rand_next: FuncId,
 }
 
 fn declare_helpers(module: &mut JITModule) -> Result<Helpers, JitError> {
@@ -678,7 +728,14 @@ fn declare_helpers(module: &mut JITModule) -> Result<Helpers, JitError> {
     math_sig.params.push(AbiParam::new(types::F64));
     math_sig.returns.push(AbiParam::new(types::F64));
     let math = module.declare_function("jit_math_call", Linkage::Import, &math_sig).map_err(cl)?;
-    Ok(Helpers { fmod, powf, fmin, fmax, math })
+    // `(*mut RandStream, f64, f64) -> f64` — the stream pointer rides the target pointer type.
+    let mut rand_sig = module.make_signature();
+    rand_sig.params.push(AbiParam::new(module.target_config().pointer_type()));
+    rand_sig.params.push(AbiParam::new(types::F64));
+    rand_sig.params.push(AbiParam::new(types::F64));
+    rand_sig.returns.push(AbiParam::new(types::F64));
+    let rand_next = module.declare_function("jit_rand_next", Linkage::Import, &rand_sig).map_err(cl)?;
+    Ok(Helpers { fmod, powf, fmin, fmax, math, rand_next })
 }
 
 /// Build the IR for one function specialized to `params` (each param's name + arg [`ArgShape`]) and declare +
@@ -706,9 +763,12 @@ fn define_one(
     let cl = |e: ModuleError| JitError::Cranelift(e.to_string());
     let ptr_ty = module.target_config().pointer_type();
     let mut ctx = module.make_context();
-    // Signature: `(params: *const f64, raised: *mut u8, out: *mut f64) -> f64`. `raised` is the assert-failure
-    // out-param (P.1.4) — a falsy inline `assert(cond)` writes 1 to it; the JIT can't unwind. `out` is the
-    // rung-C sink — a vector-returning body writes its fixed number of elements there.
+    // Signature: `(params: *const f64, raised: *mut u8, out: *mut f64, rand: *mut RandStream) -> f64`.
+    // `raised` is the assert-failure out-param (P.1.4) — a falsy inline `assert(cond)` writes 1 to it; the JIT
+    // can't unwind. `out` is the rung-C sink — a vector-returning body writes its fixed elements there. `rand`
+    // is the woven RandStream (P.1.6 rung-D piece 1) — a seedless `rands()` advances it; an untouched pointer
+    // for a non-rands body.
+    ctx.func.signature.params.push(AbiParam::new(ptr_ty));
     ctx.func.signature.params.push(AbiParam::new(ptr_ty));
     ctx.func.signature.params.push(AbiParam::new(ptr_ty));
     ctx.func.signature.params.push(AbiParam::new(ptr_ty));
@@ -725,12 +785,14 @@ fn define_one(
         let params_ptr = fb.block_params(block)[0];
         let raised_ptr = fb.block_params(block)[1];
         let out_ptr = fb.block_params(block)[2];
+        let rand_ptr = fb.block_params(block)[3];
 
         let fmod_ref = module.declare_func_in_func(helpers.fmod, fb.func);
         let powf_ref = module.declare_func_in_func(helpers.powf, fb.func);
         let fmin_ref = module.declare_func_in_func(helpers.fmin, fb.func);
         let fmax_ref = module.declare_func_in_func(helpers.fmax, fb.func);
         let math_ref = module.declare_func_in_func(helpers.math, fb.func);
+        let rand_next_ref = module.declare_func_in_func(helpers.rand_next, fb.func);
         // Flat param layout: walk params in order assigning f64 slots — a scalar takes 1, a vec-`n` takes `n`.
         // A scalar's flat ELEMENT offset goes in `index` (read lazily in the `Ident` arm as `offset * 8`
         // bytes); a vector's `n` slots are loaded now into a `Lowered::Vec` bound in `locals`, so the body sees
@@ -768,11 +830,13 @@ fn define_one(
             defs,
             globals,
             inlining: &inlining,
+            rand_ptr,
             fmod: fmod_ref,
             powf: powf_ref,
             fmin: fmin_ref,
             fmax: fmax_ref,
             math: math_ref,
+            rand_next: rand_next_ref,
         };
 
         // IR is built BEFORE declare/define — an Unsupported node returns here with the module untouched.
@@ -916,11 +980,15 @@ struct Lower<'a> {
     /// The function names currently being inlined, outermost first — recursion guard (a callee already here
     /// DECLINES) + depth bound. Grows one entry per inline.
     inlining: &'a [&'a str],
+    /// The woven `RandStream` pointer (the 4th ABI param) — a JIT'd seedless `rands()` passes it to
+    /// `jit_rand_next`. Untouched by a body that never draws (P.1.6 rung-D piece 1).
+    rand_ptr: Value,
     fmod: FuncRef,
     powf: FuncRef,
     fmin: FuncRef,
     fmax: FuncRef,
     math: FuncRef,
+    rand_next: FuncRef,
 }
 
 #[allow(
@@ -1149,6 +1217,11 @@ fn compile_expr(fb: &mut FunctionBuilder, expr: &Expr, lower: &Lower) -> Result<
             if matches!(name.as_str(), "len" | "norm" | "cross" | "min" | "max") {
                 return compile_vec_builtin(fb, name, args, lower);
             }
+            // (2.6) seedless `rands(min, max, count)` with a LITERAL count → `count` draws from the woven
+            // RandStream (P.1.6 rung-D piece 1). Also user-shadowable, so checked here after the inline.
+            if name.as_str() == "rands" {
+                return compile_seedless_rands(fb, args, lower);
+            }
             // (3) not inlinable.
             Err(JitError::Unsupported("call"))
         }
@@ -1223,6 +1296,83 @@ fn compile_expr(fb: &mut FunctionBuilder, expr: &Expr, lower: &Lower) -> Result<
         // Everything else DECLINES — named so the EXPLAIN coverage histogram (P.1.4) shows WHICH node kind
         // blocks each function, i.e. the absorption ceiling per subset feature we might add next.
         other => Err(JitError::Unsupported(kind_name(other))),
+    }
+}
+
+/// Seedless `rands(min, max, count)` with a LITERAL count → `count` sequential draws from the woven
+/// [`RandStream`] as a `Lowered::Vec` (P.1.6 rung-D piece 1). Mirrors `builtins::rands`'s SEEDLESS path: `min`
+/// and `max` must be numbers, `count` is the interpreter's `as_index` (finite, ≥ 0, TRUNCATED). Each draw is a
+/// [`jit_rand_next`] call advancing the shared stream, emitted in SOURCE order — so the stream advances exactly
+/// as the interpreter's `(0..count)` loop would, bit-identical.
+///
+/// DECLINES (→ the interpreter draws instead, advancing the stream identically, so a decline is always safe):
+/// a 4th `seed` arg (the seeded path is pure — a follow-on), a NON-literal count (dynamic length → rung-D
+/// piece 2), a count over the scalarize cap [`MAX_VEC_ARG`] (would bloat the IR), a negative / non-finite
+/// literal count (`as_index` → `undef`), a non-`Num` min|max, or any named arg.
+fn compile_seedless_rands(
+    fb: &mut FunctionBuilder,
+    args: &[fab_lang::Arg],
+    lower: &Lower,
+) -> Result<Lowered, JitError> {
+    // Seedless is EXACTLY 3 positional args; a 4th (seed) or a named arg declines.
+    if args.len() != 3 || args.iter().any(|a| a.name.is_some()) {
+        return Err(JitError::Unsupported("call"));
+    }
+    // count must be a compile-time literal the interpreter's `as_index` accepts (finite, ≥ 0), truncated.
+    let ExprKind::Num(n) = &args[2].value.kind else {
+        return Err(JitError::Unsupported("dynamic rands count")); // rung-D piece 2
+    };
+    if !n.is_finite() || *n < 0.0 {
+        return Err(JitError::Unsupported("rands count out of range")); // as_index → undef → decline
+    }
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "guarded finite && >= 0; matches the interpreter's `as_index` truncation to usize"
+    )]
+    let count = *n as usize;
+    if count > MAX_VEC_ARG {
+        return Err(JitError::Unsupported("rands count over the scalarize cap")); // interpret / rung-D piece 2
+    }
+    // min, max compiled ONCE (their own side effects, incl. a nested rands, happen here — before the draws,
+    // matching the interpreter evaluating the args before the builtin body). Non-`Num` → the interpreter's
+    // `rands` returns undef → decline.
+    let min = compile_expr(fb, &args[0].value, lower)?.num()?;
+    let max = compile_expr(fb, &args[1].value, lower)?.num()?;
+    let mut elems = Vec::with_capacity(count);
+    for _ in 0..count {
+        let call = fb.ins().call(lower.rand_next, &[lower.rand_ptr, min, max]);
+        elems.push(Lowered::Num(fb.inst_results(call)[0]));
+    }
+    Ok(Lowered::Vec(elems))
+}
+
+/// Whether `expr` (recursively) calls `rands` — the standalone [`compile_function`] guard (P.1.6 rung-D piece
+/// 1). That API weaves no `RandStream`, so a rands body must DECLINE rather than have `JitFn::call`'s null
+/// stream pointer dereferenced. Over-conservative (a seeded / dynamic-count rands would decline in the compiler
+/// anyway), but simple + safe. Comprehensions / ranges aren't walked — they decline before any draw is emitted.
+fn uses_rands(expr: &Expr) -> bool {
+    match &expr.kind {
+        ExprKind::Call { callee, args } => {
+            matches!(&callee.kind, ExprKind::Ident(n) if n.as_str() == "rands")
+                || uses_rands(callee)
+                || args.iter().any(|a| uses_rands(&a.value))
+        }
+        ExprKind::Unary { operand, .. } => uses_rands(operand),
+        ExprKind::Binary { lhs, rhs, .. } => uses_rands(lhs) || uses_rands(rhs),
+        ExprKind::Ternary { cond, then, els } => {
+            uses_rands(cond) || uses_rands(then) || uses_rands(els)
+        }
+        ExprKind::Index { base, index } => uses_rands(base) || uses_rands(index),
+        ExprKind::Member { base, .. } => uses_rands(base),
+        ExprKind::Vector(es) => es.iter().any(uses_rands),
+        ExprKind::Let { bindings, body } => {
+            bindings.iter().any(|b| uses_rands(&b.value)) || uses_rands(body)
+        }
+        ExprKind::Assert { args, body } => {
+            args.iter().any(|a| uses_rands(&a.value)) || body.as_deref().is_some_and(uses_rands)
+        }
+        _ => false,
     }
 }
 

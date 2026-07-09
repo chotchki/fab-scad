@@ -5,8 +5,18 @@
 
 use fab_jit::JitRegistry;
 use fab_lang::{
-    Expr, JitOutcome, NumericJit, Parameter, Program, StmtKind, Value, interpret_fn, parse,
+    Expr, JitOutcome, NumericJit, Parameter, Program, RandStream, StmtKind, Value, interpret_fn,
+    parse,
 };
+
+/// A fresh-stream `call_numeric` for tests: each call gets a NEW `RandStream::default()` (DEFAULT_SEED), so a
+/// seedless-`rands` body draws the SAME sequence `interpret_fn`'s fresh stream does — bit-identical (P.1.6
+/// rung-D piece 1). A non-rands body never dereferences the pointer.
+fn call_jit(reg: &JitRegistry, name: &str, vals: &[Value]) -> Option<JitOutcome> {
+    let mut stream = RandStream::default();
+    let ptr = std::ptr::from_mut(&mut stream).cast::<core::ffi::c_void>();
+    reg.call_numeric(name, vals, ptr)
+}
 
 /// Parse a multi-function program (kept alive by the caller so bodies can be borrowed from it).
 fn program(src: &str) -> Program {
@@ -104,7 +114,7 @@ fn registry_calls_are_bit_identical_to_the_interpreter() {
         ("horner", &[-3.75]),
     ];
     for (name, args) in cases {
-        let jit = reg.get(name).expect("compiled").call(args, &mut [0.0]).expect("no assert raised");
+        let jit = unsafe { reg.get(name).expect("compiled").call(args, &mut [0.0], core::ptr::null_mut()) }.expect("no assert raised");
         let slow = interp(&prog, name, args);
         assert_eq!(
             jit.to_bits(),
@@ -148,7 +158,7 @@ fn inlining_user_function_calls_is_bit_identical() {
         ("scale", &[-1.5]),
     ];
     for (name, args) in cases {
-        let jit = reg.get(name).expect("compiled").call(args, &mut [0.0]).expect("no assert raised");
+        let jit = unsafe { reg.get(name).expect("compiled").call(args, &mut [0.0], core::ptr::null_mut()) }.expect("no assert raised");
         let slow = interp(&prog, name, args);
         assert_eq!(
             jit.to_bits(),
@@ -185,7 +195,7 @@ fn inlining_binds_unfilled_params_to_defaults() {
         ("use_some", &[0.0]),
     ];
     for (name, args) in cases {
-        let jit = reg.get(name).expect("compiled").call(args, &mut [0.0]).expect("no assert raised");
+        let jit = unsafe { reg.get(name).expect("compiled").call(args, &mut [0.0], core::ptr::null_mut()) }.expect("no assert raised");
         let slow = interp(&prog, name, args);
         assert_eq!(jit.to_bits(), slow.to_bits(), "default {name}({args:?}): jit={jit} interp={slow}");
     }
@@ -235,7 +245,7 @@ fn references_top_level_constants_is_bit_identical() {
         ("golden", &[-4.5]),
     ];
     for (name, args) in cases {
-        let jit = reg.get(name).expect("compiled").call(args, &mut [0.0]).expect("no assert raised");
+        let jit = unsafe { reg.get(name).expect("compiled").call(args, &mut [0.0], core::ptr::null_mut()) }.expect("no assert raised");
         let slow = interp(&prog, name, args);
         assert_eq!(jit.to_bits(), slow.to_bits(), "global {name}({args:?}): jit={jit} interp={slow}");
     }
@@ -276,7 +286,7 @@ fn bool_returning_functions_are_type_tagged_and_bit_identical() {
     ];
     for &(name, arg) in cases {
         let compiled = reg.get(name).expect("compiled");
-        let jit = compiled.call(&[arg], &mut [0.0]).expect("no assert raised");
+        let jit = unsafe { compiled.call(&[arg], &mut [0.0], core::ptr::null_mut()) }.expect("no assert raised");
         let slow = interpret_fn(&prog, name, &[Value::Num(arg)]).expect("interprets");
         match slow {
             // A bool result: the JIT must be tagged bool, and its 0.0/1.0 must match the interpreter's truthiness.
@@ -341,7 +351,7 @@ fn scalarized_vectors_are_bit_identical() {
         ("xyz", &[0.0]),
     ];
     for (name, args) in cases {
-        let jit = reg.get(name).expect("compiled").call(args, &mut [0.0]).expect("no assert raised");
+        let jit = unsafe { reg.get(name).expect("compiled").call(args, &mut [0.0], core::ptr::null_mut()) }.expect("no assert raised");
         let slow = interp(&prog, name, args);
         assert_eq!(jit.to_bits(), slow.to_bits(), "vector {name}({args:?}): jit={jit} interp={slow}");
     }
@@ -352,10 +362,10 @@ fn vec_arg(xs: &[f64]) -> Value {
     Value::num_list(xs.to_vec())
 }
 
-/// Assert `reg.call_numeric(name, vals)` returns a NUMERIC result BITWISE-equal to the interpreter — the
+/// Assert `call_jit(reg, name, vals)` returns a NUMERIC result BITWISE-equal to the interpreter — the
 /// rung-B `fast == JIT` gate over the on-demand vector-arg path.
 fn assert_call_eq(reg: &JitRegistry, prog: &Program, name: &str, vals: &[Value]) {
-    let jit = match reg.call_numeric(name, vals) {
+    let jit = match call_jit(reg, name, vals) {
         Some(JitOutcome::Num(n)) => n,
         other => panic!("{name}{vals:?}: expected a JIT numeric result, got {other:?}"),
     };
@@ -369,7 +379,7 @@ fn assert_call_eq(reg: &JitRegistry, prog: &Program, name: &str, vals: &[Value])
 /// Assert `reg.call_numeric` returns a fixed VECTOR result (rung C) element-wise BITWISE-equal to the
 /// interpreter's `NumList`.
 fn assert_call_vec_eq(reg: &JitRegistry, prog: &Program, name: &str, vals: &[Value]) {
-    let jit = match reg.call_numeric(name, vals) {
+    let jit = match call_jit(reg, name, vals) {
         Some(JitOutcome::Vec(xs)) => xs,
         other => panic!("{name}{vals:?}: expected a JIT vector result, got {other:?}"),
     };
@@ -432,7 +442,7 @@ fn vector_arg_shapes_compile_on_demand() {
     assert_call_eq(&reg, &prog, "first", &[vec_arg(&[7.0])]); // vec-1 → 7
     assert_call_eq(&reg, &prog, "first", &[vec_arg(&[7.0, 8.0])]); // vec-2 → 7 (a THIRD shape of `first`)
     assert!(
-        reg.call_numeric("first", &[Value::Num(7.0)]).is_none(),
+        call_jit(&reg, "first", &[Value::Num(7.0)]).is_none(),
         "a scalar arg to a body that indexes it declines (distinct from the vec-1 shape)"
     );
 
@@ -582,6 +592,52 @@ fn min_max_are_bit_identical() {
 }
 
 #[test]
+fn seedless_rands_is_bit_identical() {
+    // P.1.6 rung-D piece 1: a JIT'd seedless `rands(min, max, count)` (LITERAL count) draws `count` values from
+    // the WOVEN RandStream through `jit_rand_next` — the SAME MT19937 primitive the interpreter uses. `call_jit`
+    // and `interpret_fn` each start a FRESH stream at DEFAULT_SEED, so the draws line up bit-for-bit. `two` is
+    // the ORDER guard: two separate single draws summed left-to-right must advance the stream identically.
+    let prog = program(
+        "function r3(lo, hi) = rands(lo, hi, 3);\
+         function scaled(lo, hi) = rands(lo, hi, 2) * 10;\
+         function r1(lo, hi) = rands(lo, hi, 1)[0];\
+         function noise(x) = x + rands(0, 1, 1)[0];\
+         function two(lo, hi) = rands(lo, hi, 1)[0] + rands(lo, hi, 1)[0];",
+    );
+    let reg = JitRegistry::build(
+        defs(&prog).iter().map(|&(n, p, b)| (n, p, b)),
+        consts(&prog).iter().map(|&(n, v)| (n, v)),
+    )
+    .expect("registry builds");
+
+    // A fixed-count rands returns a fixed vector → rung C; its all-scalar shape (lo, hi scalars) compiles.
+    assert!(reg.get("r3").is_some(), "fixed-count rands compiles (a rung-C vector return)");
+    assert_call_vec_eq(&reg, &prog, "r3", &[Value::Num(0.0), Value::Num(1.0)]);
+    assert_call_vec_eq(&reg, &prog, "r3", &[Value::Num(-5.0), Value::Num(5.0)]);
+    assert_call_vec_eq(&reg, &prog, "scaled", &[Value::Num(0.0), Value::Num(1.0)]); // rands(_,_,2)*10 → vec2
+    // Scalar draws (index 0 of a 1-draw).
+    assert_call_eq(&reg, &prog, "r1", &[Value::Num(0.0), Value::Num(1.0)]);
+    assert_call_eq(&reg, &prog, "noise", &[Value::Num(100.0)]);
+    // Two draws summed — the draw-ORDER guard.
+    assert_call_eq(&reg, &prog, "two", &[Value::Num(0.0), Value::Num(1.0)]);
+    assert_call_eq(&reg, &prog, "two", &[Value::Num(-1.0), Value::Num(1.0)]);
+
+    // A NON-literal count (dynamic → rung-D piece 2) and a SEEDED rands (a pure follow-on, not piece 1) both
+    // decline their whole function → the interpreter handles them.
+    let other = program(
+        "function dyn(n) = rands(0, 1, n);\
+         function seeded(x) = rands(0, 1, 2, 42);",
+    );
+    let other_reg = JitRegistry::build(
+        defs(&other).iter().map(|&(n, p, b)| (n, p, b)),
+        consts(&other).iter().map(|&(n, v)| (n, v)),
+    )
+    .expect("registry builds");
+    assert!(other_reg.get("dyn").is_none(), "a dynamic rands count declines (rung-D piece 2)");
+    assert!(other_reg.get("seeded").is_none(), "a seeded rands declines (pure follow-on)");
+}
+
+#[test]
 fn over_long_vector_arg_declines() {
     // A vector longer than MAX_VEC_ARG (16) is NOT scalarized — unrolling it would explode compile/code size,
     // and that dynamic-length case is rung D. call_numeric declines → the interpreter runs the body.
@@ -593,7 +649,7 @@ fn over_long_vector_arg_declines() {
     .expect("registry builds");
     let seventeen: Vec<f64> = (0..17).map(f64::from).collect();
     assert!(
-        reg.call_numeric("first", &[Value::num_list(seventeen)]).is_none(),
+        call_jit(&reg, "first", &[Value::num_list(seventeen)]).is_none(),
         "a 17-element vector arg exceeds the scalarization cap → declines"
     );
     // A 16-element arg is exactly at the cap → compiles + is bit-identical.
@@ -618,7 +674,7 @@ fn nothing_compiles_but_the_registry_holds_the_def() {
     assert_eq!(reg.len(), 0, "no all-scalar specialization compiled");
     assert!(reg.get("comp").is_none(), "the scalar shape declines (comprehension)");
     assert!(
-        reg.call_numeric("comp", &[Value::Num(3.0)]).is_none(),
+        call_jit(&reg, "comp", &[Value::Num(3.0)]).is_none(),
         "every shape of a comprehension body declines → interpret"
     );
 

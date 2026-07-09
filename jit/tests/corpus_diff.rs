@@ -12,7 +12,18 @@
 use std::path::{Path, PathBuf};
 
 use fab_jit::JitRegistry;
-use fab_lang::{Expr, FnOracle, JitOutcome, NumericJit, Parameter, Program, StmtKind, Value, parse};
+use fab_lang::{
+    Expr, FnOracle, JitOutcome, NumericJit, Parameter, Program, RandStream, StmtKind, Value, parse,
+};
+
+/// `call_numeric` with a FRESH `RandStream` per call (P.1.6 rung-D piece 1) — the oracle side draws from its
+/// own fresh stream, so a rands-touching function's JIT + interpreter draws line up. Almost every BOSL2
+/// numeric function that compiles is pure (no draw), leaving the pointer untouched.
+fn jit_call(registry: &JitRegistry, name: &str, vals: &[Value]) -> Option<JitOutcome> {
+    let mut stream = RandStream::default();
+    let ptr = std::ptr::from_mut(&mut stream).cast::<core::ffi::c_void>();
+    registry.call_numeric(name, vals, ptr)
+}
 
 /// The numeric corners the differential batteries draw from — signs, magnitudes, and the IEEE edges (±0,
 /// ±inf, NaN, π). Shared by the scalar [`input_battery`] and the rung-B [`vector_rows`] so both engines see
@@ -164,7 +175,7 @@ fn fast_equals_jit_over_the_bosl2_library() {
         }
         for args in input_battery(params.len()) {
             let vals: Vec<Value> = args[..params.len()].iter().map(|&v| Value::Num(v)).collect();
-            let jit = registry.call_numeric(name, &vals);
+            let jit = jit_call(&registry, name, &vals);
             let slow = oracle.call(name, &vals);
             // Agree if both raised (JIT `None` — an inline assert failed — and the oracle `Err`) OR both a value
             // with the SAME shape + identical bits. A mixed accept/raise, a shape mismatch, or differing bits
@@ -254,7 +265,7 @@ fn fast_equals_jit_over_bosl2_vector_arg_shapes() {
         // identical across a shape's rows, so only the first row compiles; the rest hit the memoized spec.
         for n in [2usize, 3, 4] {
             for row in vector_rows(arity, n, 8) {
-                let Some(jit) = registry.call_numeric(name, &row) else {
+                let Some(jit) = jit_call(&registry, name, &row) else {
                     continue; // declined-or-raised shape → the interpreter handles it, nothing to differential
                 };
                 // The JIT accepted this shape → it MUST match the interpreter, bits + type tag. A `Vec` return

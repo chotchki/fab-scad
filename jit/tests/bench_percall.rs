@@ -54,7 +54,7 @@ fn bench_one(reg: &JitRegistry, oracle: &FnOracle, name: &str, iters: u64) -> (u
     let mut acc_jit = 0.0f64;
     let t1 = Instant::now();
     for i in 0..iters {
-        acc_jit += compiled.call(&[arg(i)], &mut [0.0]).expect("no assert raised");
+        acc_jit += unsafe { compiled.call(&[arg(i)], &mut [0.0], core::ptr::null_mut()) }.expect("no assert raised");
     }
     let jit_ns = t1.elapsed().as_nanos();
 

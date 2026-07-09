@@ -107,13 +107,8 @@ fn fast_equals_jit_over_the_bosl2_library() {
     let defs = functions(&programs);
     let total = defs.len();
 
-    // Materialize the param-name slices into a holder that outlives the build (the registry keeps no AST
-    // borrows, but `build` needs `&[&str]` alive DURING the call).
-    let with_names: Vec<(&str, Vec<&str>, &Expr)> =
-        defs.iter().map(|(n, p, b)| (*n, p_names(p), *b)).collect();
-    let registry =
-        JitRegistry::build(with_names.iter().map(|(n, p, b)| (*n, p.as_slice(), *b)))
-            .expect("registry builds");
+    let registry = JitRegistry::build(defs.iter().map(|&(n, p, b)| (n, p, b)))
+        .expect("registry builds");
 
     // Every compiled function: JIT == interpreter, BITWISE, across the whole battery.
     let mut checked = 0usize;
@@ -142,9 +137,4 @@ fn fast_equals_jit_over_the_bosl2_library() {
         100.0 * compiled as f64 / total as f64
     );
     assert_eq!(checked, compiled, "every compiled function was differentialed");
-}
-
-/// The parameter names of `params` as `&str` — the shape [`JitRegistry::build`] eats.
-fn p_names(params: &[Parameter]) -> Vec<&str> {
-    params.iter().map(|p| p.name.as_ref()).collect()
 }

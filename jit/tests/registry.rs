@@ -4,20 +4,20 @@
 //! the standalone spike, now through the production cache.
 
 use fab_jit::JitRegistry;
-use fab_lang::{Expr, Program, StmtKind, Value, interpret_fn, parse};
+use fab_lang::{Expr, Parameter, Program, StmtKind, Value, interpret_fn, parse};
 
 /// Parse a multi-function program (kept alive by the caller so bodies can be borrowed from it).
 fn program(src: &str) -> Program {
     parse(src).expect("program parses")
 }
 
-/// Every `(name, param_names, body)` in `prog`, in source order — the shape [`JitRegistry::build`] eats.
-fn defs(prog: &Program) -> Vec<(&str, Vec<&str>, &Expr)> {
+/// Every `(name, params, body)` in `prog`, in source order — the shape [`JitRegistry::build`] eats.
+fn defs(prog: &Program) -> Vec<(&str, &[Parameter], &Expr)> {
     prog.stmts
         .iter()
         .filter_map(|s| match &s.kind {
             StmtKind::FunctionDef { name, params, body } => {
-                Some((name.as_ref(), params.iter().map(|p| p.name.as_ref()).collect(), body))
+                Some((name.as_str(), params.as_slice(), body))
             }
             _ => None,
         })
@@ -44,7 +44,7 @@ fn registry_compiles_numeric_declines_the_rest() {
          function pair(x) = [x, x];\
          function pick(v) = v[0];",
     );
-    let reg = JitRegistry::build(defs(&prog).iter().map(|(n, p, b)| (*n, p.as_slice(), *b)))
+    let reg = JitRegistry::build(defs(&prog).iter().map(|&(n, p, b)| (n, p, b)))
         .expect("registry builds");
 
     assert_eq!(reg.len(), 2, "exactly the two numeric functions compiled");
@@ -66,7 +66,7 @@ fn registry_calls_are_bit_identical_to_the_interpreter() {
          function lerp(a,b,t) = a + (b-a)*t;\
          function horner(x) = 1 + x*(2 + x*(3 + x*(4 + x*5)));",
     );
-    let reg = JitRegistry::build(defs(&prog).iter().map(|(n, p, b)| (*n, p.as_slice(), *b)))
+    let reg = JitRegistry::build(defs(&prog).iter().map(|&(n, p, b)| (n, p, b)))
         .expect("registry builds");
 
     // Every compiled function, called through the registry, matches the interpreter BITWISE (NaN/inf
@@ -108,7 +108,7 @@ fn inlining_user_function_calls_is_bit_identical() {
          function scale(x) = let(k = sq(x)) k + sq(k);\
          function fact(n) = n <= 1 ? 1 : n * fact(n - 1);",
     );
-    let reg = JitRegistry::build(defs(&prog).iter().map(|(n, p, b)| (*n, p.as_slice(), *b)))
+    let reg = JitRegistry::build(defs(&prog).iter().map(|&(n, p, b)| (n, p, b)))
         .expect("registry builds");
 
     assert!(reg.get("sumsq").is_some(), "sumsq inlines sq");
@@ -135,10 +135,40 @@ fn inlining_user_function_calls_is_bit_identical() {
 }
 
 #[test]
+fn inlining_binds_unfilled_params_to_defaults() {
+    // P.1.4c defaults: a SHORT inlined call binds the missing params to their defaults (compiled in the
+    // definition scope). `use_default` inlines `scaled(x)` with k defaulting to 2; `use_some` inlines
+    // `bump(x, 5)` with s defaulting to 10. Bit-identical to the interpreter, which applies the same defaults.
+    let prog = program(
+        "function scaled(x, k = 2) = x * k;\
+         function bump(x, d = 1, s = 10) = (x + d) * s;\
+         function use_default(x) = scaled(x);\
+         function use_some(x) = bump(x, 5);",
+    );
+    let reg = JitRegistry::build(defs(&prog).iter().map(|&(n, p, b)| (n, p, b)))
+        .expect("registry builds");
+
+    assert!(reg.get("use_default").is_some(), "inlines scaled with a defaulted k");
+    assert!(reg.get("use_some").is_some(), "inlines bump with a defaulted s");
+
+    let cases: &[(&str, &[f64])] = &[
+        ("use_default", &[3.0]), // scaled(3, k=2) = 6
+        ("use_default", &[-4.0]),
+        ("use_some", &[4.0]), // bump(4, 5, s=10) = 90
+        ("use_some", &[0.0]),
+    ];
+    for (name, args) in cases {
+        let jit = reg.get(name).expect("compiled").call(args).expect("no assert raised");
+        let slow = interp(&prog, name, args);
+        assert_eq!(jit.to_bits(), slow.to_bits(), "default {name}({args:?}): jit={jit} interp={slow}");
+    }
+}
+
+#[test]
 fn empty_registry_when_nothing_is_numeric() {
     // A program whose only function builds a list → an empty (valid) registry, everything interpreted.
     let prog = program("function only_list(x) = [x, x, x];");
-    let reg = JitRegistry::build(defs(&prog).iter().map(|(n, p, b)| (*n, p.as_slice(), *b)))
+    let reg = JitRegistry::build(defs(&prog).iter().map(|&(n, p, b)| (n, p, b)))
         .expect("registry builds even with nothing to compile");
     assert!(reg.is_empty(), "no numeric function → empty registry");
     assert_eq!(reg.len(), 0);

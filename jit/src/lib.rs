@@ -39,7 +39,9 @@ enum Ty {
     Bool,
 }
 
-use fab_lang::{BinOp, Expr, ExprKind, JitDef, NumericJit, NumericJitFactory, UnOp, jit_math_id};
+use fab_lang::{
+    BinOp, Expr, ExprKind, JitDef, NumericJit, NumericJitFactory, Parameter, UnOp, jit_math_id,
+};
 
 /// The `%` an OpenSCAD `%` compiles to — the EXACT op the interpreter runs (`ops.rs`: `x % y`, C
 /// `fmod` semantics, sign of the dividend). Routed as a call so the bits match, since Cranelift has no
@@ -179,11 +181,11 @@ impl JitRegistry {
     /// [`JitError::Cranelift`] only for a module-level failure (ISA/module setup, or the single
     /// `finalize_definitions`) — a per-function decline is swallowed, never surfaced as an error.
     pub fn build<'a>(
-        defs: impl IntoIterator<Item = (&'a str, &'a [&'a str], &'a Expr)>,
+        defs: impl IntoIterator<Item = (&'a str, &'a [Parameter], &'a Expr)>,
     ) -> Result<Self, JitError> {
         // Materialize the input so every function is visible to every other (a caller can INLINE any callee,
-        // including forward references). `fn_defs` maps name → (param names, body) for the inliner.
-        let entries: Vec<(&str, &[&str], &Expr)> = defs.into_iter().collect();
+        // including forward references). `fn_defs` maps name → (parameters, body) for the inliner.
+        let entries: Vec<(&str, &[Parameter], &Expr)> = defs.into_iter().collect();
         let fn_defs: FnDefs = entries.iter().map(|&(n, p, b)| (n, (p, b))).collect();
         let mut module = new_module()?;
         let helpers = declare_helpers(&mut module)?;
@@ -191,10 +193,13 @@ impl JitRegistry {
         // AFTER the single finalize. A unique export symbol per function (by index) avoids collisions.
         let mut pending: Vec<(String, FuncId, usize)> = Vec::new();
         let mut declined: BTreeMap<String, &'static str> = BTreeMap::new();
-        for (i, &(name, param_names, body)) in entries.iter().enumerate() {
+        for (i, &(name, params, body)) in entries.iter().enumerate() {
             let symbol = format!("scad_jit_{i}");
-            match define_one(&mut module, &symbol, param_names, body, &fn_defs, &helpers) {
-                Ok(func_id) => pending.push((name.to_string(), func_id, param_names.len())),
+            // `define_one` indexes the top-level params by NAME (they're always fully applied via the
+            // dispatch gate); defaults only matter for INLINED callees, which read them from `fn_defs`.
+            let param_names: Vec<&str> = params.iter().map(|p| p.name.as_ref()).collect();
+            match define_one(&mut module, &symbol, &param_names, body, &fn_defs, &helpers) {
+                Ok(func_id) => pending.push((name.to_string(), func_id, params.len())),
                 // Declined → the interpreter handles it; record the FIRST out-of-subset node that blocked it
                 // (the absorption-ceiling signal for the EXPLAIN histogram).
                 Err(JitError::Unsupported(reason)) => {
@@ -278,8 +283,7 @@ impl NumericJitFactory for JitFactory {
         if !enabled && !explain {
             return None; // neither running nor reporting → skip the compile entirely
         }
-        let registry =
-            JitRegistry::build(defs.iter().map(|d| (d.name, d.params.as_slice(), d.body))).ok()?;
+        let registry = JitRegistry::build(defs.iter().map(|d| (d.name, d.params, d.body))).ok()?;
         if explain {
             explain_coverage(defs, &registry);
         }
@@ -506,10 +510,11 @@ fn float_cc(op: BinOp) -> Option<FloatCC> {
 /// fresh map + a copied `Lower` pointing at it (no signature threading); `Lower` is `Copy`.
 type LetEnv<'a> = BTreeMap<&'a str, (Value, Ty)>;
 
-/// The program's user functions the JIT can INLINE: name → (parameter names, body). A call to one splices
-/// its body into the caller (fresh env binding its params to the arg values) — the whole-function absorption
-/// that makes the JIT reach BOSL2's call chains.
-type FnDefs<'a> = BTreeMap<&'a str, (&'a [&'a str], &'a Expr)>;
+/// The program's user functions the JIT can INLINE: name → (parameters, body). A call to one splices its
+/// body into the caller (fresh env binding its params to the arg values, an unfilled param to its default) —
+/// the whole-function absorption that makes the JIT reach BOSL2's call chains. Carries full `Parameter`s
+/// (name + default), not just names, so a SHORT call can bind the missing params to their defaults.
+type FnDefs<'a> = BTreeMap<&'a str, (&'a [Parameter], &'a Expr)>;
 
 /// Max inline nesting before a call DECLINES — a runaway guard for pathological non-recursive chains (and
 /// the coarse bound until step-3 real recursion). Deep enough for real BOSL2 numeric call chains.
@@ -675,15 +680,31 @@ fn compile_expr(fb: &mut FunctionBuilder, expr: &Expr, lower: &Lower) -> Result<
                 if lower.inlining.len() >= INLINE_LIMIT {
                     return Err(JitError::Unsupported("inline-depth-limit"));
                 }
-                if args.len() != cparams.len() || args.iter().any(|a| a.name.is_some()) {
+                // Positional only, no more args than params (extra positional args are dropped by OpenSCAD,
+                // but a JIT'd numeric callee never wants them — decline as unusual).
+                if args.len() > cparams.len() || args.iter().any(|a| a.name.is_some()) {
                     return Err(JitError::Unsupported("call"));
                 }
-                let mut callee_env = LetEnv::new();
-                for (&p, arg) in cparams.iter().zip(args) {
-                    let (v, ty) = compile_expr(fb, &arg.value, lower)?;
-                    callee_env.insert(p, (v, ty));
-                }
                 let empty_index = BTreeMap::new(); // callee params live in `callee_env`, not `params_ptr`
+                let empty_locals = LetEnv::new();
+                let mut callee_env = LetEnv::new();
+                for (i, p) in cparams.iter().enumerate() {
+                    let pname = p.name.as_ref();
+                    if let Some(arg) = args.get(i) {
+                        // A provided arg is compiled in the CALLER's env.
+                        let (v, ty) = compile_expr(fb, &arg.value, lower)?;
+                        callee_env.insert(pname, (v, ty));
+                    } else if let Some(default) = p.default.as_ref() {
+                        // Unfilled → its DEFAULT, compiled in the DEFINITION scope (no caller locals, no
+                        // sibling params) — matching the interpreter's documented default-eval simplification.
+                        let def_lower =
+                            Lower { index: &empty_index, locals: &empty_locals, ..*lower };
+                        let (v, ty) = compile_expr(fb, default, &def_lower)?;
+                        callee_env.insert(pname, (v, ty));
+                    }
+                    // else: no arg, no default → leave `pname` unbound; the body DECLINES if it uses it (the
+                    // interpreter would see `undef` there, which the numeric JIT can't represent anyway).
+                }
                 let mut stack = lower.inlining.to_vec();
                 stack.push(name.as_str());
                 let callee_lower =

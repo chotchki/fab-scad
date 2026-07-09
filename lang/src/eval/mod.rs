@@ -157,8 +157,9 @@ pub trait NumericJit {
 pub struct JitDef<'a> {
     /// The function's name (its registry key).
     pub name: &'a str,
-    /// The parameter names, in declaration order (the JIT reads arg `i` as `params[i]`).
-    pub params: Vec<&'a str>,
+    /// The parameters, in declaration order — names AND defaults, so the JIT can bind an unfilled param to
+    /// its default when INLINING a short call.
+    pub params: &'a [Parameter],
     /// The function body to compile.
     pub body: &'a Expr,
 }
@@ -1424,11 +1425,7 @@ fn resolve_source(
     let jit = jit_factory.and_then(|f| {
         let defs: Vec<JitDef<'_>> = functions
             .iter()
-            .map(|(name, (fndef, _home))| JitDef {
-                name,
-                params: fndef.0.iter().map(|p| p.name.as_ref()).collect(),
-                body: fndef.1,
-            })
+            .map(|(name, (fndef, _home))| JitDef { name, params: fndef.0, body: fndef.1 })
             .collect();
         f.compile(&defs)
     });

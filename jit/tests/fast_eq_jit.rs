@@ -43,7 +43,7 @@ fn assert_fast_eq_jit(src: &str, samples: &[&[f64]]) {
     let (names, body) = func(&prog);
     let jitted = compile_function(&names, body).expect("compiles to native code");
     for args in samples {
-        let jit = jitted.call(args);
+        let jit = jitted.call(args).expect("these functions have no inline assert to raise");
         let slow = interp(&names, body, args);
         assert_eq!(
             jit.to_bits(),
@@ -182,6 +182,36 @@ fn ternary_and_comparisons_fast_eq_jit() {
 }
 
 #[test]
+fn inline_assert_compiles_passes_and_raises() {
+    // P.1.4: `assert(cond) body` compiles — the JIT can't unwind, so a failed assert flags the `raised`
+    // out-param and `call` returns None; the caller then re-interprets to raise the real error. A pure
+    // (call-free) condition is what makes this compile at all; BOSL2's predicate-call conditions decline
+    // until P.1.4b, but the raise MECHANISM is proven here.
+    let prog = program("function f(x) = assert(x > 0) x * 2;");
+    let (names, body) = func(&prog);
+    let jitted = compile_function(&names, body).expect("assert-guarded body compiles");
+
+    // Condition PASSES → Some(body).
+    assert_eq!(jitted.call(&[5.0]), Some(10.0));
+    assert_eq!(jitted.call(&[0.5]), Some(1.0));
+    // Condition FAILS → None (the JIT flagged raised; the caller would re-interpret to raise).
+    assert_eq!(jitted.call(&[-1.0]), None);
+    assert_eq!(jitted.call(&[0.0]), None); // 0 > 0 is false
+    assert_eq!(jitted.call(&[f64::NAN]), None); // NaN > 0 is false (ordered) → assert fails
+
+    // And it matches the interpreter EXACTLY: Some(v) ↔ Ok(Num(v)), None ↔ Err (assertion failed).
+    for x in [-2.0, -0.0, 0.0, 1.0, 2.5, 100.0, f64::INFINITY, f64::NAN] {
+        let mut scope = Scope::new();
+        scope.bind(names[0], Value::Num(x));
+        let interp = match eval_expr(body, &scope) {
+            Ok(Value::Num(n)) => Some(n),
+            _ => None, // Err = the assert raised
+        };
+        assert_eq!(jitted.call(&[x]), interp, "assert-raise mismatch at x={x}");
+    }
+}
+
+#[test]
 fn speedup_benchmark() {
     // Measure the JIT vs the interpreter on a hot polynomial. Reported, not gated (timing is noisy on
     // shared CI) — but the loop also re-checks bit-identity, so a wrong JIT still fails here.
@@ -212,7 +242,7 @@ fn speedup_benchmark() {
     let t1 = Instant::now();
     for i in 0..iters {
         let x = f64::from(u32::try_from(i & 0xffff).unwrap_or(0)) * step;
-        acc_jit += jitted.call(&[x]);
+        acc_jit += jitted.call(&[x]).expect("no assert");
     }
     let jit_ns = t1.elapsed().as_nanos();
 
@@ -240,6 +270,6 @@ proptest! {
         let prog = program(&src);
         let (names, body) = func(&prog);
         let jitted = compile_function(&names, body).expect("compiles");
-        prop_assert_eq!(jitted.call(&[x]).to_bits(), interp(&names, body, &[x]).to_bits());
+        prop_assert_eq!(jitted.call(&[x]).expect("no assert").to_bits(), interp(&names, body, &[x]).to_bits());
     }
 }

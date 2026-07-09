@@ -95,7 +95,7 @@ fn registry_calls_are_bit_identical_to_the_interpreter() {
         ("horner", &[-3.75]),
     ];
     for (name, args) in cases {
-        let jit = reg.get(name).expect("compiled").call(args);
+        let jit = reg.get(name).expect("compiled").call(args).expect("no assert raised");
         let slow = interp(&prog, name, args);
         assert_eq!(
             jit.to_bits(),

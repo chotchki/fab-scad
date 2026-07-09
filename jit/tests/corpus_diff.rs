@@ -86,18 +86,17 @@ fn input_battery(arity: usize) -> Vec<Vec<f64>> {
 }
 
 /// Interpret a compilable function body STANDALONE with its params bound to `args` — the slow side of the
-/// differential. A compilable body references only params + literals, so a default `Ctx` (no functions)
-/// suffices; a `Num` result is expected (the body is pure arithmetic).
-fn interpret(params: &[Parameter], body: &Expr, args: &[f64]) -> f64 {
+/// differential. `Some(n)` for a number result; `None` when the body RAISES (an inline `assert` failed) or
+/// otherwise doesn't yield a number. A compilable body references only params + literals, so a default `Ctx`
+/// (no functions) suffices. The `None` case corresponds to the JIT's raise-`None` — both sides agree "raised".
+fn interpret(params: &[Parameter], body: &Expr, args: &[f64]) -> Option<f64> {
     let mut scope = Scope::new();
     for (p, &v) in params.iter().zip(args) {
         scope.bind(p.name.clone(), Value::Num(v));
     }
     match eval_expr(body, &scope) {
-        Ok(Value::Num(n)) => n,
-        // A compiled function that the interpreter DOESN'T yield a number for is a mismatch worth surfacing
-        // (the JIT returns f64 unconditionally) — NaN forces the bit-compare below to flag it.
-        _ => f64::NAN,
+        Ok(Value::Num(n)) => Some(n),
+        _ => None, // an assert failure (Err) or a non-number → the JIT returns None here too
     }
 }
 
@@ -123,13 +122,14 @@ fn fast_equals_jit_over_the_bosl2_library() {
         for args in input_battery(params.len()) {
             let jit = compiled.call(&args[..params.len()]);
             let slow = interpret(params, body, &args);
-            assert_eq!(
-                jit.to_bits(),
-                slow.to_bits(),
-                "fast != JIT for BOSL2 `{name}` at {args:?}: jit={jit} ({:#018x}) interp={slow} ({:#018x})",
-                jit.to_bits(),
-                slow.to_bits()
-            );
+            // Agree if both raised (`None` — an inline assert failed on both sides) OR both a number with
+            // identical bits. A mixed Some/None, or differing bits, is a real divergence.
+            let agree = match (jit, slow) {
+                (Some(a), Some(b)) => a.to_bits() == b.to_bits(),
+                (None, None) => true,
+                _ => false,
+            };
+            assert!(agree, "fast != JIT for BOSL2 `{name}` at {args:?}: jit={jit:?} interp={slow:?}");
         }
         checked += 1;
     }

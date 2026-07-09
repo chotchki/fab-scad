@@ -92,12 +92,15 @@ impl CompiledFn {
         self.arity
     }
 
-    /// Call the compiled function with `params` (its length must equal [`CompiledFn::arity`]).
+    /// Call the compiled function with `params` (its length must equal [`CompiledFn::arity`]). Returns
+    /// `None` when the body's inline `assert` FAILED — the JIT can't unwind, so it flags a status byte and
+    /// the caller falls back to the interpreter, which re-runs and raises the exact error (with its real
+    /// message). On the common path (no assert, or assert passes) it's `Some(result)`.
     ///
     /// # Panics
     /// If `params.len()` != the function's arity.
     #[must_use]
-    pub fn call(&self, params: &[f64]) -> f64 {
+    pub fn call(&self, params: &[f64]) -> Option<f64> {
         assert_eq!(
             params.len(),
             self.arity,
@@ -105,12 +108,16 @@ impl CompiledFn {
             params.len(),
             self.arity
         );
-        // THE unsafe seam of the whole crate. SAFETY: `code` is a finalized Cranelift function of
-        // signature `extern "C" fn(*const f64) -> f64` (built in `define_one`); the owning module keeps
-        // it mapped for as long as `self` is reachable; the function only READS `arity` f64s from the
-        // pointer, and `params` has exactly that many (asserted above), so the reads are in-bounds.
-        let f: unsafe extern "C" fn(*const f64) -> f64 = unsafe { std::mem::transmute(self.code) };
-        unsafe { f(params.as_ptr()) }
+        // THE unsafe seam of the whole crate. SAFETY: `code` is a finalized Cranelift function of signature
+        // `extern "C" fn(*const f64, *mut u8) -> f64` (built in `define_one`); the owning module keeps it
+        // mapped for as long as `self` is reachable; the function READS `arity` f64s from the first pointer
+        // (`params` has exactly that many, asserted above) and WRITES one byte through the second, which
+        // points at our live local `raised`. No unwinding crosses the boundary — an assert sets the byte.
+        let f: unsafe extern "C" fn(*const f64, *mut u8) -> f64 =
+            unsafe { std::mem::transmute(self.code) };
+        let mut raised: u8 = 0;
+        let result = unsafe { f(params.as_ptr(), &raw mut raised) };
+        if raised == 0 { Some(result) } else { None }
     }
 }
 
@@ -130,12 +137,13 @@ impl JitFn {
         self.inner.arity()
     }
 
-    /// Call the compiled function with `params` (length must equal [`JitFn::arity`]).
+    /// Call the compiled function with `params` (length must equal [`JitFn::arity`]). `None` if the body's
+    /// inline `assert` failed (see [`CompiledFn::call`]).
     ///
     /// # Panics
     /// If `params.len()` != the function's arity.
     #[must_use]
-    pub fn call(&self, params: &[f64]) -> f64 {
+    pub fn call(&self, params: &[f64]) -> Option<f64> {
         self.inner.call(params)
     }
 }
@@ -233,9 +241,12 @@ impl JitRegistry {
 /// mismatch declines rather than reading past the arg slice.
 impl NumericJit for JitRegistry {
     fn call_numeric(&self, name: &str, args: &[f64]) -> Option<f64> {
+        // `and_then`: a compiled function whose inline assert FAILED returns `None` → the interpreter runs
+        // the body and raises the exact error. So `None` here means BOTH "not compiled" and "compiled but
+        // raised" — either way the interpreter takes over, which is correct for both.
         self.get(name)
             .filter(|f| f.arity() == args.len())
-            .map(|f| f.call(args))
+            .and_then(|f| f.call(args))
     }
 }
 
@@ -371,6 +382,9 @@ fn define_one(
     let cl = |e: ModuleError| JitError::Cranelift(e.to_string());
     let ptr_ty = module.target_config().pointer_type();
     let mut ctx = module.make_context();
+    // Signature: `(params: *const f64, raised: *mut u8) -> f64`. `raised` is the assert-failure out-param
+    // (P.1.4) — an inline `assert(cond)` whose condition is falsy writes 1 to it; the JIT can't unwind.
+    ctx.func.signature.params.push(AbiParam::new(ptr_ty));
     ctx.func.signature.params.push(AbiParam::new(ptr_ty));
     ctx.func.signature.returns.push(AbiParam::new(types::F64));
 
@@ -382,14 +396,16 @@ fn define_one(
         fb.switch_to_block(block);
         fb.seal_block(block);
         let params_ptr = fb.block_params(block)[0];
+        let raised_ptr = fb.block_params(block)[1];
 
         let fmod_ref = module.declare_func_in_func(fmod_id, fb.func);
         let powf_ref = module.declare_func_in_func(powf_id, fb.func);
         let index: BTreeMap<&str, usize> =
             param_names.iter().enumerate().map(|(i, &n)| (n, i)).collect();
+        let lower = Lower { params_ptr, raised_ptr, index: &index, fmod: fmod_ref, powf: powf_ref };
 
         // IR is built BEFORE declare/define — an Unsupported node returns here with the module untouched.
-        let (result, ty) = compile_expr(&mut fb, body, params_ptr, &index, fmod_ref, powf_ref)?;
+        let (result, ty) = compile_expr(&mut fb, body, &lower)?;
         // The compiled function returns f64 (wrapped in `Value::Num` at dispatch), so a bool-valued body
         // (e.g. `x > 0`) must DECLINE — those are the interpreter's / intrinsic tier's job, not the JIT's.
         let result = require_num(result, ty)?;
@@ -440,32 +456,37 @@ fn float_cc(op: BinOp) -> Option<FloatCC> {
 /// Type discipline keeps it sound: arithmetic requires `Num` operands, a comparison yields `Bool`, a
 /// ternary's branches must AGREE in type, and `&&`/`||`/`!` operate on truthiness. A construct outside the
 /// subset (a call, an index, a free variable, a bitwise op, a mixed-type ternary) DECLINES.
-#[allow(
-    clippy::too_many_lines,
-    reason = "the per-ExprKind lowering — one arm per node kind; splitting scatters the shared fb/index"
-)]
-fn compile_expr(
-    fb: &mut FunctionBuilder,
-    expr: &Expr,
+/// The shared lowering context — everything [`compile_expr`] threads down besides the builder itself.
+/// Bundling keeps the recursive signature `(fb, expr, lower)` stable as the subset grows: the params
+/// pointer, the assert-failure out-param, the parameter index, and the math-helper `FuncRef`s.
+struct Lower<'a> {
     params_ptr: Value,
-    index: &BTreeMap<&str, usize>,
+    raised_ptr: Value,
+    index: &'a BTreeMap<&'a str, usize>,
     fmod: FuncRef,
     powf: FuncRef,
-) -> Result<(Value, Ty), JitError> {
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "the per-ExprKind lowering — one arm per node kind; splitting scatters the shared builder"
+)]
+fn compile_expr(fb: &mut FunctionBuilder, expr: &Expr, lower: &Lower) -> Result<(Value, Ty), JitError> {
     match &expr.kind {
         ExprKind::Num(n) => Ok((fb.ins().f64const(*n), Ty::Num)),
         ExprKind::Ident(name) => {
-            let i = index
+            let i = lower
+                .index
                 .get(name.as_str())
                 .ok_or(JitError::Unsupported("non-parameter identifier"))?;
             let offset =
                 i32::try_from(i * 8).map_err(|_| JitError::Unsupported("param offset overflow"))?;
-            let v = fb.ins().load(types::F64, MemFlagsData::trusted(), params_ptr, offset);
+            let v = fb.ins().load(types::F64, MemFlagsData::trusted(), lower.params_ptr, offset);
             // A parameter is always a number here — the dispatch gate only routes all-`Num` calls to the JIT.
             Ok((v, Ty::Num))
         }
         ExprKind::Unary { op, operand } => {
-            let (v, ty) = compile_expr(fb, operand, params_ptr, index, fmod, powf)?;
+            let (v, ty) = compile_expr(fb, operand, lower)?;
             match op {
                 UnOp::Neg => Ok((fb.ins().fneg(require_num(v, ty)?), Ty::Num)),
                 UnOp::Pos => Ok((require_num(v, ty)?, Ty::Num)),
@@ -478,8 +499,8 @@ fn compile_expr(
             }
         }
         ExprKind::Binary { op, lhs, rhs } => {
-            let (a, aty) = compile_expr(fb, lhs, params_ptr, index, fmod, powf)?;
-            let (b, bty) = compile_expr(fb, rhs, params_ptr, index, fmod, powf)?;
+            let (a, aty) = compile_expr(fb, lhs, lower)?;
+            let (b, bty) = compile_expr(fb, rhs, lower)?;
             // `&&`/`||`: the interpreter returns `Bool(truthy(a) OP truthy(b))`. Both operands are
             // side-effect-free here, so eager evaluation equals short-circuit — same bool, no float rounding.
             if matches!(op, BinOp::And | BinOp::Or) {
@@ -505,11 +526,11 @@ fn compile_expr(
                 BinOp::Mul => fb.ins().fmul(a, b),
                 BinOp::Div => fb.ins().fdiv(a, b),
                 BinOp::Mod => {
-                    let call = fb.ins().call(fmod, &[a, b]);
+                    let call = fb.ins().call(lower.fmod, &[a, b]);
                     fb.inst_results(call)[0]
                 }
                 BinOp::Pow => {
-                    let call = fb.ins().call(powf, &[a, b]);
+                    let call = fb.ins().call(lower.powf, &[a, b]);
                     fb.inst_results(call)[0]
                 }
                 _ => return Err(JitError::Unsupported("non-arithmetic binary op")),
@@ -520,14 +541,36 @@ fn compile_expr(
         // side-effect-free (pure arithmetic), so eager `select` is bit-identical: the untaken branch's
         // discarded NaN/inf can't affect the chosen result. Branches must agree in type.
         ExprKind::Ternary { cond, then, els } => {
-            let (cv, cty) = compile_expr(fb, cond, params_ptr, index, fmod, powf)?;
+            let (cv, cty) = compile_expr(fb, cond, lower)?;
             let c = truthy(fb, cv, cty);
-            let (tv, tty) = compile_expr(fb, then, params_ptr, index, fmod, powf)?;
-            let (ev, ety) = compile_expr(fb, els, params_ptr, index, fmod, powf)?;
+            let (tv, tty) = compile_expr(fb, then, lower)?;
+            let (ev, ety) = compile_expr(fb, els, lower)?;
             if tty != ety {
                 return Err(JitError::Unsupported("ternary branches differ in type"));
             }
             Ok((fb.ins().select(c, tv, ev), tty))
+        }
+        // `assert(cond) body` — a passthrough guard. Compile the CONDITION; if it's falsy, OR a 1 into the
+        // `raised` out-param, and the value is the guarded body. On failure the caller ignores our f64 and
+        // re-interprets to raise the exact error (message + locator), so computing the body eagerly is
+        // harmless. The condition is the first POSITIONAL arg; a named/absent condition, or a bodyless
+        // assert, DECLINES. (In practice the condition is usually a predicate CALL, which itself declines
+        // until P.1.4b — assert-raise is the prerequisite that unwraps the layer, not the coverage win.)
+        ExprKind::Assert { args, body } => {
+            let Some(body) = body.as_deref() else {
+                return Err(JitError::Unsupported("assert without a body value"));
+            };
+            let cond = match args.first() {
+                Some(arg) if arg.name.is_none() => &arg.value,
+                _ => return Err(JitError::Unsupported("assert without a positional condition")),
+            };
+            let (cv, cty) = compile_expr(fb, cond, lower)?;
+            let t = truthy(fb, cv, cty);
+            let failed = fb.ins().icmp_imm(IntCC::Equal, t, 0); // 1 iff the condition is falsy
+            let prev = fb.ins().load(types::I8, MemFlagsData::trusted(), lower.raised_ptr, 0);
+            let now = fb.ins().bor(prev, failed);
+            fb.ins().store(MemFlagsData::trusted(), now, lower.raised_ptr, 0);
+            compile_expr(fb, body, lower)
         }
         // Everything else DECLINES — named so the EXPLAIN coverage histogram (P.1.4) shows WHICH node kind
         // blocks each function, i.e. the absorption ceiling per subset feature we might add next.

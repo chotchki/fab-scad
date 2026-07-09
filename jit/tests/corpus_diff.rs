@@ -12,7 +12,7 @@
 use std::path::{Path, PathBuf};
 
 use fab_jit::JitRegistry;
-use fab_lang::{Expr, Parameter, Program, Scope, StmtKind, Value, eval_expr, parse};
+use fab_lang::{Expr, FnOracle, Parameter, Program, StmtKind, Value, parse};
 
 /// The shipped BOSL2 library dir (`<workspace>/libs/BOSL2`), relative to this crate.
 fn bosl2_dir() -> PathBuf {
@@ -56,6 +56,22 @@ fn functions(programs: &[Program]) -> Vec<(&str, &[Parameter], &Expr)> {
     by_name.into_iter().map(|(n, (p, b))| (n, p, b)).collect()
 }
 
+/// Collect every top-level CONSTANT `(name, value)` across the parsed programs, LAST-wins on a duplicate name
+/// (mirrors [`functions`] precedence). The globals half the registry + the oracle both eat (P.1.4): a numeric
+/// function that reads `_EPSILON`/`INF`/`PHI`/`NAN` resolves it by inlining the value-expr. Borrows from
+/// `programs`. Both sides of the differential are fed THIS SAME set, so no derivation mismatch can hide a bug.
+fn globals(programs: &[Program]) -> Vec<(&str, &Expr)> {
+    let mut by_name: std::collections::BTreeMap<&str, &Expr> = std::collections::BTreeMap::new();
+    for prog in programs {
+        for stmt in &prog.stmts {
+            if let StmtKind::Assignment { name, value } = &stmt.kind {
+                by_name.insert(name.as_ref(), value);
+            }
+        }
+    }
+    by_name.into_iter().collect()
+}
+
 /// A deterministic input battery of `arity` f64s per row — the IEEE corners plus a spread of magnitudes and
 /// signs, laid out so element `i` of each row differs from its neighbors (a bug that only bites when two args
 /// differ still gets caught). A fixed xorshift keeps it reproducible with no `rand` dep.
@@ -85,16 +101,14 @@ fn input_battery(arity: usize) -> Vec<Vec<f64>> {
     rows
 }
 
-/// Interpret a compilable function body STANDALONE with its params bound to `args` — the slow side of the
-/// differential. `Some(n)` for a number result; `None` when the body RAISES (an inline `assert` failed) or
-/// otherwise doesn't yield a number. A compilable body references only params + literals, so a default `Ctx`
-/// (no functions) suffices. The `None` case corresponds to the JIT's raise-`None` — both sides agree "raised".
-fn interpret(params: &[Parameter], body: &Expr, args: &[f64]) -> Option<f64> {
-    let mut scope = Scope::new();
-    for (p, &v) in params.iter().zip(args) {
-        scope.bind(p.name.clone(), Value::Num(v));
-    }
-    match eval_expr(body, &scope) {
+/// Interpret `name(args)` through the whole-library `oracle` — the slow side of the differential. `Some(n)`
+/// for a number result; `None` when the body RAISES (an inline `assert` failed) or otherwise doesn't yield a
+/// number. Unlike a standalone eval, the oracle resolves the callee's OWN calls (the chains the JIT inlines)
+/// and top-level constants (the globals the JIT inlines) — required now that the compiled subset reaches past
+/// leaf functions. The `None` case corresponds to the JIT's raise-`None` — both sides agree "raised".
+fn interpret(oracle: &FnOracle, name: &str, args: &[f64]) -> Option<f64> {
+    let vals: Vec<Value> = args.iter().map(|&v| Value::Num(v)).collect();
+    match oracle.call(name, &vals) {
         Ok(Value::Num(n)) => Some(n),
         _ => None, // an assert failure (Err) or a non-number → the JIT returns None here too
     }
@@ -105,18 +119,24 @@ fn fast_equals_jit_over_the_bosl2_library() {
     let programs = parse_library(&bosl2_dir());
     assert!(!programs.is_empty(), "expected to parse BOSL2 sources from {}", bosl2_dir().display());
     let defs = functions(&programs);
+    let consts = globals(&programs);
     let total = defs.len();
 
-    let registry = JitRegistry::build(defs.iter().map(|&(n, p, b)| (n, p, b)))
-        .expect("registry builds");
+    // Registry + oracle are fed the SAME functions + constants, so neither side can diverge on its inputs.
+    let registry =
+        JitRegistry::build(defs.iter().map(|&(n, p, b)| (n, p, b)), consts.iter().map(|&(n, v)| (n, v)))
+            .expect("registry builds");
+    // Build the interpreter oracle ONCE — it publishes every top-level constant, and republishing per
+    // (function × battery-row) would be quadratic over the library.
+    let oracle = FnOracle::new(&defs, &consts).expect("oracle builds");
 
     // Every compiled function: JIT == interpreter, BITWISE, across the whole battery.
     let mut checked = 0usize;
-    for (name, params, body) in &defs {
+    for (name, params, _body) in &defs {
         let Some(compiled) = registry.get(name) else { continue };
         for args in input_battery(params.len()) {
             let jit = compiled.call(&args[..params.len()]);
-            let slow = interpret(params, body, &args);
+            let slow = interpret(&oracle, name, &args[..params.len()]);
             // Agree if both raised (`None` — an inline assert failed on both sides) OR both a number with
             // identical bits. A mixed Some/None, or differing bits, is a real divergence.
             let agree = match (jit, slow) {
@@ -136,5 +156,17 @@ fn fast_equals_jit_over_the_bosl2_library() {
         "[jit-corpus] BOSL2: {compiled}/{total} functions compiled ({:.1}%), all {checked} bit-identical",
         100.0 * compiled as f64 / total as f64
     );
+    // The absorption ceiling: which node kind FIRST blocks each declined function, aggregated. Printed (not
+    // asserted) so the next subset feature to add is data-driven — the number P.1.4/P.1.5 chase down.
+    let mut hist: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
+    for &reason in registry.declined().values() {
+        *hist.entry(reason).or_default() += 1;
+    }
+    let mut rows: Vec<(&str, usize)> = hist.into_iter().collect();
+    rows.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(b.0)));
+    eprintln!("[jit-corpus] declined first-blocker histogram (absorption ceiling):");
+    for (reason, count) in rows {
+        eprintln!("[jit-corpus]   {count:>5}  {reason}");
+    }
     assert_eq!(checked, compiled, "every compiled function was differentialed");
 }

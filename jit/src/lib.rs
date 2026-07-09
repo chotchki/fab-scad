@@ -40,7 +40,8 @@ enum Ty {
 }
 
 use fab_lang::{
-    BinOp, Expr, ExprKind, JitDef, NumericJit, NumericJitFactory, Parameter, UnOp, jit_math_id,
+    BinOp, Expr, ExprKind, JitConst, JitDef, NumericJit, NumericJitFactory, Parameter, UnOp,
+    jit_math_id,
 };
 
 /// The `%` an OpenSCAD `%` compiles to — the EXACT op the interpreter runs (`ops.rs`: `x % y`, C
@@ -182,11 +183,14 @@ impl JitRegistry {
     /// `finalize_definitions`) — a per-function decline is swallowed, never surfaced as an error.
     pub fn build<'a>(
         defs: impl IntoIterator<Item = (&'a str, &'a [Parameter], &'a Expr)>,
+        consts: impl IntoIterator<Item = (&'a str, &'a Expr)>,
     ) -> Result<Self, JitError> {
         // Materialize the input so every function is visible to every other (a caller can INLINE any callee,
-        // including forward references). `fn_defs` maps name → (parameters, body) for the inliner.
+        // including forward references). `fn_defs` maps name → (parameters, body) for the inliner; `globals`
+        // maps a top-level constant's name → its value-expr for free-variable resolution (P.1.4 globals).
         let entries: Vec<(&str, &[Parameter], &Expr)> = defs.into_iter().collect();
         let fn_defs: FnDefs = entries.iter().map(|&(n, p, b)| (n, (p, b))).collect();
+        let globals: Globals = consts.into_iter().collect();
         let mut module = new_module()?;
         let helpers = declare_helpers(&mut module)?;
         // Declare + define each compilable function, remembering its FuncId to resolve the code pointer
@@ -198,7 +202,7 @@ impl JitRegistry {
             // `define_one` indexes the top-level params by NAME (they're always fully applied via the
             // dispatch gate); defaults only matter for INLINED callees, which read them from `fn_defs`.
             let param_names: Vec<&str> = params.iter().map(|p| p.name.as_ref()).collect();
-            match define_one(&mut module, &symbol, &param_names, body, &fn_defs, &helpers) {
+            match define_one(&mut module, &symbol, &param_names, body, &fn_defs, &globals, &helpers) {
                 Ok(func_id) => pending.push((name.to_string(), func_id, params.len())),
                 // Declined → the interpreter handles it; record the FIRST out-of-subset node that blocked it
                 // (the absorption-ceiling signal for the EXPLAIN histogram).
@@ -277,13 +281,17 @@ impl NumericJit for JitRegistry {
 pub struct JitFactory;
 
 impl NumericJitFactory for JitFactory {
-    fn compile(&self, defs: &[JitDef<'_>]) -> Option<Box<dyn NumericJit>> {
+    fn compile(&self, defs: &[JitDef<'_>], consts: &[JitConst<'_>]) -> Option<Box<dyn NumericJit>> {
         let enabled = std::env::var_os("FAB_JIT").as_deref() == Some(std::ffi::OsStr::new("1"));
         let explain = std::env::var_os("FAB_JIT_EXPLAIN").is_some();
         if !enabled && !explain {
             return None; // neither running nor reporting → skip the compile entirely
         }
-        let registry = JitRegistry::build(defs.iter().map(|d| (d.name, d.params, d.body))).ok()?;
+        let registry = JitRegistry::build(
+            defs.iter().map(|d| (d.name, d.params, d.body)),
+            consts.iter().map(|c| (c.name, c.value)),
+        )
+        .ok()?;
         if explain {
             explain_coverage(defs, &registry);
         }
@@ -337,10 +345,13 @@ fn explain_coverage(defs: &[JitDef<'_>], registry: &JitRegistry) {
 pub fn compile_function(param_names: &[&str], body: &Expr) -> Result<JitFn, JitError> {
     let mut module = new_module()?;
     let helpers = declare_helpers(&mut module)?;
-    // The standalone API compiles ONE function with no peers to inline (the differential harness uses it for
-    // self-contained bodies); a user-fn call therefore declines. [`JitRegistry`] is the multi-function form.
+    // The standalone API compiles ONE function with no peers to inline and no top-level constants (the
+    // differential harness uses it for self-contained bodies); a user-fn call OR a free-variable reference to a
+    // constant therefore declines. [`JitRegistry`] is the multi-function, globals-aware form.
     let no_defs = FnDefs::new();
-    let func_id = define_one(&mut module, "scad_jit_fn", param_names, body, &no_defs, &helpers)?;
+    let no_globals = Globals::new();
+    let func_id =
+        define_one(&mut module, "scad_jit_fn", param_names, body, &no_defs, &no_globals, &helpers)?;
     module
         .finalize_definitions()
         .map_err(|e| JitError::Cranelift(e.to_string()))?;
@@ -413,6 +424,7 @@ fn define_one(
     param_names: &[&str],
     body: &Expr,
     defs: &FnDefs,
+    globals: &Globals,
     helpers: &Helpers,
 ) -> Result<FuncId, JitError> {
     let cl = |e: ModuleError| JitError::Cranelift(e.to_string());
@@ -447,6 +459,7 @@ fn define_one(
             index: &index,
             locals: &locals,
             defs,
+            globals,
             inlining: &inlining,
             fmod: fmod_ref,
             powf: powf_ref,
@@ -516,6 +529,14 @@ type LetEnv<'a> = BTreeMap<&'a str, (Value, Ty)>;
 /// (name + default), not just names, so a SHORT call can bind the missing params to their defaults.
 type FnDefs<'a> = BTreeMap<&'a str, (&'a [Parameter], &'a Expr)>;
 
+/// The program's top-level CONSTANTS the JIT can inline: name → value expr (P.1.4 globals). A body's free
+/// variable that names one resolves by compiling the constant's value-expr IN AN EMPTY SCOPE — a
+/// self-contained numeric constant (`_EPSILON = 1e-9`, `INF = 1/0`, `PHI = (1+sqrt(5))/2`) inlines; one that
+/// references ANOTHER global declines (see the `Ident` arm). Every top-level assignment is here, numeric or
+/// not — a non-numeric one (a vector/string constant) simply makes its referrer DECLINE when its value-expr
+/// compiles, so no filtering is needed and the decline reason names the actual blocker.
+type Globals<'a> = BTreeMap<&'a str, &'a Expr>;
+
 /// Max inline nesting before a call DECLINES — a runaway guard for pathological non-recursive chains (and
 /// the coarse bound until step-3 real recursion). Deep enough for real BOSL2 numeric call chains.
 const INLINE_LIMIT: usize = 32;
@@ -532,6 +553,10 @@ struct Lower<'a> {
     locals: &'a LetEnv<'a>,
     /// Every user function available to inline (whole program). Immutable per compile.
     defs: &'a FnDefs<'a>,
+    /// The program's top-level constants (P.1.4 globals): a free variable naming one resolves by compiling its
+    /// value-expr. EMPTY when compiling a constant's own value-expr, so a constant referencing another global
+    /// declines (the safe match for the interpreter's whole-scope forward-reference rule) — see the `Ident` arm.
+    globals: &'a Globals<'a>,
     /// The function names currently being inlined, outermost first — recursion guard (a callee already here
     /// DECLINES) + depth bound. Grows one entry per inline.
     inlining: &'a [&'a str],
@@ -552,15 +577,36 @@ fn compile_expr(fb: &mut FunctionBuilder, expr: &Expr, lower: &Lower) -> Result<
             if let Some(&(v, ty)) = lower.locals.get(name.as_str()) {
                 return Ok((v, ty));
             }
-            let i = lower
-                .index
-                .get(name.as_str())
-                .ok_or(JitError::Unsupported("non-parameter identifier"))?;
-            let offset =
-                i32::try_from(i * 8).map_err(|_| JitError::Unsupported("param offset overflow"))?;
-            let v = fb.ins().load(types::F64, MemFlagsData::trusted(), lower.params_ptr, offset);
-            // A parameter is always a number here — the dispatch gate only routes all-`Num` calls to the JIT.
-            Ok((v, Ty::Num))
+            // Then a parameter (read from the params pointer). Shadows a like-named global.
+            if let Some(&i) = lower.index.get(name.as_str()) {
+                let offset = i32::try_from(i * 8)
+                    .map_err(|_| JitError::Unsupported("param offset overflow"))?;
+                let v = fb.ins().load(types::F64, MemFlagsData::trusted(), lower.params_ptr, offset);
+                // A parameter is always a number here — the dispatch gate only routes all-`Num` calls to the JIT.
+                return Ok((v, Ty::Num));
+            }
+            // A free variable may be a top-level CONSTANT (P.1.4 globals): resolve it by compiling its
+            // value-expr in an EMPTY scope — no params, no locals, and NO other globals. A self-contained
+            // numeric constant (`_EPSILON = 1e-9`, `INF = 1/0` → +inf, `PHI = (1+sqrt(5))/2`, `NAN = acos(2)`)
+            // inlines; one that references ANOTHER global hits the empty globals below and DECLINES. That
+            // decline is the safe match for the interpreter's whole-scope forward-reference rule (`A = B+1;
+            // B = 2;` gives `A = undef+1`, which a re-compiled value-expr would NOT reproduce) — so we never
+            // resolve a constant that reads another. Empty globals also make a cycle impossible, so no extra
+            // guard is needed; `defs`/`inlining` ride through, so a constant defined by a user-fn call still
+            // inlines.
+            if let Some(&gvalue) = lower.globals.get(name.as_str()) {
+                let empty_index = BTreeMap::new();
+                let empty_locals = LetEnv::new();
+                let empty_globals = Globals::new();
+                let glower = Lower {
+                    index: &empty_index,
+                    locals: &empty_locals,
+                    globals: &empty_globals,
+                    ..*lower
+                };
+                return compile_expr(fb, gvalue, &glower);
+            }
+            Err(JitError::Unsupported("non-parameter identifier"))
         }
         ExprKind::Unary { op, operand } => {
             let (v, ty) = compile_expr(fb, operand, lower)?;

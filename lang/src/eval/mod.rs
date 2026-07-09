@@ -164,6 +164,20 @@ pub struct JitDef<'a> {
     pub body: &'a Expr,
 }
 
+/// One top-level CONSTANT offered to the JIT factory (P.1.4 globals): its name and its value expression. A
+/// numeric function body that references a top-level constant — BOSL2's `_EPSILON`, `INF`, `PHI`, all over
+/// its math — resolves it by INLINING the constant's value-expr (`_EPSILON` → `1e-9`, `INF` → `1/0` = +inf),
+/// so the function COMPILES instead of declining on the free variable. The JIT compiles the value-expr in an
+/// EMPTY scope: a self-contained numeric constant inlines; one that references ANOTHER global (or a vector /
+/// string constant like `LEFT = [-1,0,0]`) makes the referrer DECLINE — harmless, so the factory is handed
+/// EVERY top-level assignment, unfiltered. Borrowed from the loaded program; the compiled result keeps no refs.
+pub struct JitConst<'a> {
+    /// The constant's name — the free variable a function body reads.
+    pub name: &'a str,
+    /// The value expression the reference resolves to.
+    pub value: &'a Expr,
+}
+
 /// Builds a [`NumericJit`] from a program's function set (P.1.2). Called ONCE per eval round, after the
 /// loader closes the `use`/`include` graph so every function is known. The native `fab-jit` crate
 /// implements this over Cranelift; `None` return means "nothing compiled, interpret everything". Kept a
@@ -171,8 +185,9 @@ pub struct JitDef<'a> {
 /// it accept defs of any lifetime. wasm passes no factory at all → [`Ctx::jit`] stays `None`.
 pub trait NumericJitFactory {
     /// Compile the numeric-subset functions in `defs` to a [`NumericJit`], or `None` if none compiled /
-    /// the JIT is disabled.
-    fn compile(&self, defs: &[JitDef<'_>]) -> Option<Box<dyn NumericJit>>;
+    /// the JIT is disabled. `consts` are the program's top-level constants (P.1.4 globals) — a function body
+    /// that reads one resolves it by inlining its value-expr instead of declining on the free variable.
+    fn compile(&self, defs: &[JitDef<'_>], consts: &[JitConst<'_>]) -> Option<Box<dyn NumericJit>>;
 }
 
 /// The evaluation context, borrowed from the `Program`:
@@ -478,27 +493,122 @@ pub fn eval_expr(root: &Expr, scope: &Scope) -> crate::Result<Value> {
 }
 
 /// Interpret a call to `program`'s function `name` with numeric `args` — the interpreter ORACLE the numeric
-/// JIT validates against (`fast == JIT`). Unlike [`eval_expr`], it builds the program's function store, so
-/// the body can call OTHER user functions (exactly the call chains the JIT inlines). Args bind to the
-/// leading parameters in order; unfilled params take their defaults / `undef` as in a normal call. Intended
-/// for the `fab-jit` differential — a single self-contained program (no `use`/`include` graph).
+/// JIT validates against (`fast == JIT`). Unlike [`eval_expr`], it builds the program's function store AND
+/// publishes its top-level CONSTANTS, so the body can call OTHER user functions AND read top-level constants
+/// (exactly the call chains + globals the JIT inlines). Args bind to the leading parameters in order; unfilled
+/// params take their defaults / `undef` as in a normal call. Intended for the `fab-jit` differential — a
+/// single self-contained program (no `use`/`include` graph). For a whole library (many parsed files), build a
+/// [`FnOracle`] once and reuse it.
 ///
 /// # Errors
 /// [`Error::Unknown`](crate::Error::Unknown) if no function named `name` is defined; any evaluation error
 /// from the body (e.g. an `assert` failure — the JIT's raise path corresponds to this).
 pub fn interpret_fn(program: &Program, name: &str, args: &[Value]) -> crate::Result<Value> {
-    let ctx = build_ctx(program);
-    let Some((params, body)) = program.stmts.iter().find_map(|s| match &s.kind {
-        StmtKind::FunctionDef { name: n, params, body } if n.as_str() == name => Some((params, body)),
-        _ => None,
-    }) else {
-        return Err(crate::Error::Unknown(format!("function `{name}`")));
-    };
-    let mut scope = Scope::new();
-    for (p, v) in params.iter().zip(args) {
-        scope.bind(p.name.clone(), v.clone());
+    let functions: Vec<(&str, &[Parameter], &Expr)> = program
+        .stmts
+        .iter()
+        .filter_map(|s| match &s.kind {
+            StmtKind::FunctionDef { name, params, body } => Some((name.as_str(), params.as_slice(), body)),
+            _ => None,
+        })
+        .collect();
+    let stmt_refs: Vec<&Stmt> = program.stmts.iter().collect();
+    let globals = hoisted_assignments(&stmt_refs);
+    FnOracle::new(&functions, &globals)?.call(name, args)
+}
+
+/// A build-ONCE interpreter oracle for the numeric-JIT differential (`fast == JIT`): construct it from a
+/// program's functions + top-level constants once, then interpret any function many times. The battery
+/// hammers each compiled function across dozens of input rows, and rebuilding the function store + republishing
+/// the constants per row — as [`interpret_fn`] does — is O(constants) each call, quadratic over a whole
+/// library. This pays that setup once. The constants are hoisted (whole-scope, last-wins, first-occurrence
+/// order) and PUBLISHED into island 0's global, so a called function's body resolves them — matching the JIT,
+/// which inlines each constant's value-expr. A constant whose RHS ERRORS under the interpreter is skipped (the
+/// flat cross-file merge the corpus differential feeds isn't a real single program; only self-contained
+/// NUMERIC constants ever feed a compiled function, and those never error), keeping the oracle robust without
+/// masking a numeric divergence — a compiled function only reads a constant the JIT could also compile.
+pub struct FnOracle<'a> {
+    ctx: Ctx<'a>,
+    /// The published top-level constant scope — the lexical base a function body binds its params onto.
+    global: Scope,
+    /// name → (params, body), for finding the function to interpret.
+    functions: BTreeMap<&'a str, (&'a [Parameter], &'a Expr)>,
+}
+
+impl<'a> FnOracle<'a> {
+    /// Build the oracle from borrowed functions + top-level constants (the exact shape [`JitDef`]/[`JitConst`]
+    /// carry, so both sides of the differential see identical inputs). Publishes the constants into island 0.
+    ///
+    /// # Errors
+    /// Never returns `Err` today (a constant whose RHS errors is skipped, not fatal); `Result` so a future
+    /// setup failure can surface LOUD rather than silently.
+    pub fn new(
+        functions: &[(&'a str, &'a [Parameter], &'a Expr)],
+        globals: &[(&'a str, &'a Expr)],
+    ) -> crate::Result<Self> {
+        let fn_map: BTreeMap<&str, (&[Parameter], &Expr)> =
+            functions.iter().map(|&(n, p, b)| (n, (p, b))).collect();
+        // The `Ctx` function store carries the home-island tag every function needs; a flat single-scope oracle
+        // homes them all at island 0 (its published global holds the constants).
+        let ctx_functions: BTreeMap<&str, (loader::FnDef, usize)> =
+            functions.iter().map(|&(n, p, b)| (n, ((p, b), 0usize))).collect();
+        let intrinsics = build_intrinsics(&ctx_functions);
+        let ctx = Ctx {
+            functions: ctx_functions,
+            intrinsics,
+            island_globals: RefCell::new(vec![Scope::new()]),
+            islands: vec![loader::Island {
+                modules: BTreeMap::new(),
+                functions: BTreeMap::new(),
+                assignments: Vec::new(),
+                uses: Vec::new(),
+            }],
+            closures: RefCell::default(),
+            messages: RefCell::default(),
+            root_override: RefCell::default(),
+            files: None,
+            file_needs: RefCell::default(),
+            module_depth: Cell::default(),
+            children_stack: RefCell::default(),
+            local_modules: RefCell::default(),
+            module_stack: RefCell::default(),
+            rand_stream: RefCell::new(rng::RandStream::new()),
+            cache: eval_cache::CacheCell::default(),
+            impure_reads: std::cell::Cell::new(0),
+            jit: None, // the oracle IS the interpreter baseline — never route it through the JIT
+        };
+        // Publish the constants into island 0's global (whole-scope, last-wins, first-occurrence order), so a
+        // called function's body resolves them (`dispatch_call` bases a call on `island_globals[home = 0]`).
+        // Publishing incrementally makes a forward/self-reference read `undef`, the interpreter's whole-scope
+        // rule. An RHS that errors under the flat merge is skipped (see the type doc).
+        let mut scope = Scope::new();
+        for &(name, expr) in globals {
+            if let Ok(v) = eval_with_ctx(expr, &scope, &ctx) {
+                scope.bind(name.to_string(), name_closure(v, name));
+                if let Some(slot) = ctx.island_globals.borrow_mut().get_mut(0) {
+                    *slot = scope.clone();
+                }
+            }
+        }
+        Ok(Self { ctx, global: scope, functions: fn_map })
     }
-    eval_with_ctx(body, &scope, &ctx)
+
+    /// Interpret `name(args)` — the slow side of the differential. Params bind onto the published constant
+    /// scope (shadowing a like-named constant), then the body evaluates with calls + constants resolving.
+    ///
+    /// # Errors
+    /// [`Error::Unknown`](crate::Error::Unknown) if `name` isn't defined; any body evaluation error (an
+    /// `assert` failure — the JIT's raise/`None` path corresponds to this).
+    pub fn call(&self, name: &str, args: &[Value]) -> crate::Result<Value> {
+        let Some(&(params, body)) = self.functions.get(name) else {
+            return Err(crate::Error::Unknown(format!("function `{name}`")));
+        };
+        let mut scope = self.global.clone();
+        for (p, v) in params.iter().zip(args) {
+            scope.bind(p.name.clone(), v.clone());
+        }
+        eval_with_ctx(body, &scope, &self.ctx)
+    }
 }
 
 /// Evaluate an expression with a function-store [`Ctx`] in scope (so calls resolve). At the top level
@@ -1427,7 +1537,14 @@ fn resolve_source(
             .iter()
             .map(|(name, (fndef, _home))| JitDef { name, params: fndef.0, body: fndef.1 })
             .collect();
-        f.compile(&defs)
+        // Top-level CONSTANTS the numeric subset can inline (P.1.4 globals): the root file's flat constant
+        // view (its `use`d islands' assignments, then the root's own — root wins, mirroring
+        // `tagged_functions`). A body reading `_EPSILON`/`INF`/`PHI` compiles the constant instead of declining.
+        let consts: Vec<JitConst<'_>> = tagged_globals(&islands)
+            .into_iter()
+            .map(|(name, value)| JitConst { name, value })
+            .collect();
+        f.compile(&defs, &consts)
     });
     let n = islands.len();
     let ctx = Ctx {
@@ -1540,6 +1657,27 @@ fn tagged_functions<'a>(
         }
         for (&name, &def) in &root.functions {
             out.insert(name, (def, 0));
+        }
+    }
+    out
+}
+
+/// The root file's flat CONSTANT view (name → value expr), the [`tagged_functions`] analogue for top-level
+/// assignments: island 0's `use`d islands' assignments FIRST (source order, later overwrites earlier), then
+/// island 0's OWN assignments overriding — the same local-over-use precedence. Handed to the JIT so a numeric
+/// function referencing a top-level constant resolves it (P.1.4 globals). Every assignment is included,
+/// numeric or not; a non-numeric one (a vector/string constant) just makes any referrer DECLINE when the JIT
+/// compiles its value-expr. `last`-wins within an island matches how [`build_island_global`] re-binds.
+fn tagged_globals<'a>(islands: &loader::Islands<'a>) -> BTreeMap<&'a str, &'a Expr> {
+    let mut out = BTreeMap::new();
+    if let Some(root) = islands.first() {
+        for &u in &root.uses {
+            for &(name, expr) in &islands[u].assignments {
+                out.insert(name, expr);
+            }
+        }
+        for &(name, expr) in &root.assignments {
+            out.insert(name, expr);
         }
     }
     out

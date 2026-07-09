@@ -24,6 +24,18 @@ fn defs(prog: &Program) -> Vec<(&str, &[Parameter], &Expr)> {
         .collect()
 }
 
+/// Every top-level `name = expr` constant in `prog` — the globals half [`JitRegistry::build`] eats (P.1.4).
+/// A numeric function that references one of these resolves it by inlining the value-expr.
+fn consts(prog: &Program) -> Vec<(&str, &Expr)> {
+    prog.stmts
+        .iter()
+        .filter_map(|s| match &s.kind {
+            StmtKind::Assignment { name, value } => Some((name.as_ref(), value)),
+            _ => None,
+        })
+        .collect()
+}
+
 /// The interpreter baseline for one function of `prog`, found by name — via the whole-program oracle so a
 /// body that calls OTHER user functions (the chains the JIT inlines) resolves them.
 fn interp(prog: &Program, name: &str, args: &[f64]) -> f64 {
@@ -44,7 +56,10 @@ fn registry_compiles_numeric_declines_the_rest() {
          function pair(x) = [x, x];\
          function pick(v) = v[0];",
     );
-    let reg = JitRegistry::build(defs(&prog).iter().map(|&(n, p, b)| (n, p, b)))
+    let reg = JitRegistry::build(
+        defs(&prog).iter().map(|&(n, p, b)| (n, p, b)),
+        consts(&prog).iter().map(|&(n, v)| (n, v)),
+    )
         .expect("registry builds");
 
     assert_eq!(reg.len(), 2, "exactly the two numeric functions compiled");
@@ -66,7 +81,10 @@ fn registry_calls_are_bit_identical_to_the_interpreter() {
          function lerp(a,b,t) = a + (b-a)*t;\
          function horner(x) = 1 + x*(2 + x*(3 + x*(4 + x*5)));",
     );
-    let reg = JitRegistry::build(defs(&prog).iter().map(|&(n, p, b)| (n, p, b)))
+    let reg = JitRegistry::build(
+        defs(&prog).iter().map(|&(n, p, b)| (n, p, b)),
+        consts(&prog).iter().map(|&(n, v)| (n, v)),
+    )
         .expect("registry builds");
 
     // Every compiled function, called through the registry, matches the interpreter BITWISE (NaN/inf
@@ -108,7 +126,10 @@ fn inlining_user_function_calls_is_bit_identical() {
          function scale(x) = let(k = sq(x)) k + sq(k);\
          function fact(n) = n <= 1 ? 1 : n * fact(n - 1);",
     );
-    let reg = JitRegistry::build(defs(&prog).iter().map(|&(n, p, b)| (n, p, b)))
+    let reg = JitRegistry::build(
+        defs(&prog).iter().map(|&(n, p, b)| (n, p, b)),
+        consts(&prog).iter().map(|&(n, v)| (n, v)),
+    )
         .expect("registry builds");
 
     assert!(reg.get("sumsq").is_some(), "sumsq inlines sq");
@@ -145,7 +166,10 @@ fn inlining_binds_unfilled_params_to_defaults() {
          function use_default(x) = scaled(x);\
          function use_some(x) = bump(x, 5);",
     );
-    let reg = JitRegistry::build(defs(&prog).iter().map(|&(n, p, b)| (n, p, b)))
+    let reg = JitRegistry::build(
+        defs(&prog).iter().map(|&(n, p, b)| (n, p, b)),
+        consts(&prog).iter().map(|&(n, v)| (n, v)),
+    )
         .expect("registry builds");
 
     assert!(reg.get("use_default").is_some(), "inlines scaled with a defaulted k");
@@ -165,10 +189,63 @@ fn inlining_binds_unfilled_params_to_defaults() {
 }
 
 #[test]
+fn references_top_level_constants_is_bit_identical() {
+    // P.1.4 globals: a numeric function that reads a top-level CONSTANT compiles by inlining the constant's
+    // value-expr — the self-contained BOSL2 shapes `_EPSILON = 1e-9`, `INF = 1/0` (+inf), `PHI = (1+sqrt(5))/2`.
+    // A constant referencing ANOTHER global (`B = A + 1`) makes its referrer DECLINE (the safe match for the
+    // interpreter's whole-scope forward-reference rule), and a vector constant declines the same way.
+    let prog = program(
+        "_EPS = 1e-9;\
+         INF = 1/0;\
+         PHI = (1 + sqrt(5)) / 2;\
+         DIR = [1, 0, 0];\
+         A = 1;\
+         B = A + 1;\
+         function near(x) = x < _EPS ? 0 : x;\
+         function cap(x) = x > INF ? INF : x;\
+         function golden(x) = x * PHI;\
+         function use_dir(x) = x + DIR;\
+         function use_chained(x) = x + B;",
+    );
+    let reg = JitRegistry::build(
+        defs(&prog).iter().map(|&(n, p, b)| (n, p, b)),
+        consts(&prog).iter().map(|&(n, v)| (n, v)),
+    )
+    .expect("registry builds");
+
+    assert!(reg.get("near").is_some(), "reads self-contained constant _EPS → compiled");
+    assert!(reg.get("cap").is_some(), "reads INF = 1/0 → compiled");
+    assert!(reg.get("golden").is_some(), "reads PHI = (1+sqrt(5))/2 → compiled");
+    assert!(reg.get("use_dir").is_none(), "reads a vector constant → declined");
+    assert!(
+        reg.get("use_chained").is_none(),
+        "reads B, a constant that references another global → declined"
+    );
+
+    let cases: &[(&str, &[f64])] = &[
+        ("near", &[1e-12]), // < _EPS → 0
+        ("near", &[5.0]),   // >= _EPS → 5
+        ("near", &[-1.0]),
+        ("cap", &[3.0]), // never > INF → x
+        ("cap", &[f64::INFINITY]),
+        ("golden", &[2.0]), // 2 * PHI
+        ("golden", &[-4.5]),
+    ];
+    for (name, args) in cases {
+        let jit = reg.get(name).expect("compiled").call(args).expect("no assert raised");
+        let slow = interp(&prog, name, args);
+        assert_eq!(jit.to_bits(), slow.to_bits(), "global {name}({args:?}): jit={jit} interp={slow}");
+    }
+}
+
+#[test]
 fn empty_registry_when_nothing_is_numeric() {
     // A program whose only function builds a list → an empty (valid) registry, everything interpreted.
     let prog = program("function only_list(x) = [x, x, x];");
-    let reg = JitRegistry::build(defs(&prog).iter().map(|&(n, p, b)| (n, p, b)))
+    let reg = JitRegistry::build(
+        defs(&prog).iter().map(|&(n, p, b)| (n, p, b)),
+        consts(&prog).iter().map(|&(n, v)| (n, v)),
+    )
         .expect("registry builds even with nothing to compile");
     assert!(reg.is_empty(), "no numeric function → empty registry");
     assert_eq!(reg.len(), 0);

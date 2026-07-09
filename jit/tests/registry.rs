@@ -802,6 +802,55 @@ fn const_fold_type_predicates_prune_dead_branches() {
 }
 
 #[test]
+fn const_fold_numbers_prune_and_bit_identical() {
+    // P.1.6 rung-D 2b.4 (ConstNum): a numeric LITERAL, `len` of a fixed vector, and const arithmetic fold at
+    // COMPILE TIME, so a numeric condition (`len(v) == 3`) collapses to a `ConstBool` that PRUNES a ternary's
+    // un-taken branch — even an un-JIT-able one. The fold is bit-identical: Rust `+ - * /` are Cranelift's exact
+    // IEEE ops, `%`/`^` route through the SAME `jit_fmod`/`jit_powf`, and `==` matches the ordered `fcmp`.
+    // NB: no `//` comments inside the source — the `\` line-continuations elide the newlines, so a comment
+    // would run to the end of the whole string. Fully-const nullary bodies fold to a literal; `dim{3,2}` are
+    // the len-dispatch proof (an un-JIT-able `str` branch pruned); `pick`/`isnan_lit` fold a const comparison.
+    let prog = program(
+        "function lit() = 2 * 3 + 1;\
+         function litmod() = 17 % 5;\
+         function litpow() = 2 ^ 10;\
+         function litneg() = -(3 - 5);\
+         function litdiv() = 7 / 2;\
+         function dim3(v) = len(v) == 3 ? v[0] + v[1] + v[2] : str(v);\
+         function dim2(v) = len(v) == 2 ? str(v) : v[0] * v[1] * v[2];\
+         function pick(x) = len([x, x, x]) == 3 ? x : -x;\
+         function isnan_lit() = is_num(0 / 0) ? 1 : 0;\
+         function isnum_lit() = is_num(5) ? 1 : 0;",
+    );
+    let reg = JitRegistry::build(
+        defs(&prog).iter().map(|&(n, p, b)| (n, p, b)),
+        consts(&prog).iter().map(|&(n, v)| (n, v)),
+    )
+    .expect("registry builds");
+
+    // The nullary all-const bodies fold to a literal and compile at BUILD (no args, no shape to wait for).
+    assert!(reg.get("lit").is_some(), "a fully-const body folds to a literal and compiles at build");
+    assert_call_eq(&reg, &prog, "lit", &[]); // 2*3+1 = 7
+    assert_call_eq(&reg, &prog, "litmod", &[]); // 17 % 5 = 2 (jit_fmod)
+    assert_call_eq(&reg, &prog, "litpow", &[]); // 2 ^ 10 = 1024 (jit_powf)
+    assert_call_eq(&reg, &prog, "litneg", &[]); // -(3-5) = 2 (const neg)
+    assert_call_eq(&reg, &prog, "litdiv", &[]); // 7/2 = 3.5
+
+    // len(v)==3 folds TRUE → prunes the un-JIT-able `str(v)`; the sum branch compiles on demand for the vec-3.
+    assert!(reg.get("dim3").is_none(), "the vector shape declines at build; compiles on demand");
+    assert_call_eq(&reg, &prog, "dim3", &[vec_arg(&[1.0, 2.0, 3.0])]); // len==3 → 6
+    // len(v)==2 folds FALSE for a vec-3 → prunes the un-JIT-able `str(v)` in the THEN branch; product compiles.
+    assert_call_eq(&reg, &prog, "dim2", &[vec_arg(&[2.0, 3.0, 4.0])]); // len==2 false → 24
+
+    // A const comparison over a fixed literal vector feeds the ternary (folds true → x, not -x).
+    assert_call_eq(&reg, &prog, "pick", &[Value::Num(5.0)]); // len([x,x,x])==3 → x = 5
+    assert_call_eq(&reg, &prog, "pick", &[Value::Num(-2.0)]); // → x = -2 (NOT +2)
+    // is_num of a const NaN (0/0) folds FALSE; is_num of a const number folds TRUE.
+    assert_call_eq(&reg, &prog, "isnan_lit", &[]); // is_num(NaN)=false → 0
+    assert_call_eq(&reg, &prog, "isnum_lit", &[]); // is_num(5)=true → 1
+}
+
+#[test]
 fn over_long_vector_arg_declines() {
     // A vector longer than MAX_VEC_ARG (16) is NOT scalarized — unrolling it would explode compile/code size,
     // and that dynamic-length case is rung D. call_numeric declines → the interpreter runs the body.

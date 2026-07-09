@@ -1116,6 +1116,8 @@ fn define_one(
         // path always flows here for the final `return_`.
         let (ret, ty) = match compile_expr(&mut fb, body, &lower)? {
             Lowered::Num(v) => (v, Ret::Num),
+            // A compile-time-const number RETURN (`function three() = 3;`, a folded body) → its `f64const`, tagged `Num`.
+            Lowered::ConstNum(c) => (fb.ins().f64const(c), Ret::Num),
             Lowered::Bool(v) => {
                 let one = fb.ins().f64const(1.0);
                 let zero = fb.ins().f64const(0.0);
@@ -1125,7 +1127,7 @@ fn define_one(
             Lowered::ConstBool(b) => (fb.ins().f64const(if b { 1.0 } else { 0.0 }), Ret::Bool),
             Lowered::Vec(elems) => {
                 for (i, e) in elems.iter().enumerate() {
-                    let x = e.num()?; // a nested element (matrix row) declines here — flat vectors only
+                    let x = e.num(&mut fb)?; // a nested element (matrix row) declines here — flat vectors only
                     let byte_off = i32::try_from(i * 8)
                         .map_err(|_| JitError::Unsupported("return offset overflow"))?;
                     fb.ins().store(MemFlagsData::trusted(), x, out_ptr, byte_off);
@@ -1182,12 +1184,12 @@ fn compile_comprehension(
     // a handle — a `let`-bound comprehension, a nested one) is read by `jit_vec_get`.
     let (iter, len) = match &binding.value.kind {
         ExprKind::Range { start, step, end } => {
-            let start_v = compile_expr(fb, start, lower)?.num()?;
+            let start_v = compile_expr(fb, start, lower)?.num(fb)?;
             let step_v = match step {
-                Some(s) => compile_expr(fb, s, lower)?.num()?,
+                Some(s) => compile_expr(fb, s, lower)?.num(fb)?,
                 None => fb.ins().f64const(1.0), // `[a:b]` defaults step to 1.0
             };
-            let end_v = compile_expr(fb, end, lower)?.num()?;
+            let end_v = compile_expr(fb, end, lower)?.num(fb)?;
             let call = fb.ins().call(lower.range_len, &[start_v, step_v, end_v]);
             (CompIter::Range { start: start_v, step: step_v }, fb.inst_results(call)[0])
         }
@@ -1257,7 +1259,7 @@ fn compile_comprehension(
     let mut locals = lower.locals.clone();
     locals.insert(name, Lowered::Num(value));
     let scoped = Lower { locals: &locals, ..*lower };
-    let elem = compile_expr(fb, lc_body, &scoped)?.num()?; // 2b.2: a SCALAR element (a vector/matrix declines)
+    let elem = compile_expr(fb, lc_body, &scoped)?.num(fb)?; // 2b.2: a SCALAR element (a vector/matrix declines)
     fb.ins().call(lower.vec_push, &[list, elem]);
     let one = fb.ins().iconst(types::I64, 1);
     let i_next = fb.ins().iadd(i, one);
@@ -1292,19 +1294,46 @@ enum Lowered {
     /// `dim==1 ? scalar : matrix` skips the matrix path). Materialized to a `Bool` (`i8` 0/1) only when it feeds a
     /// runtime op (`&&` with a runtime bool, a `select`, the function return).
     ConstBool(bool),
+    /// A COMPILE-TIME-constant number (P.1.6 rung-D 2b.4 const-folding) — a literal, `len` of a fixed vector, or
+    /// the result of folding const arithmetic. Kept unmaterialized so a comparison (`len(v) == 3`) can fold to a
+    /// [`Lowered::ConstBool`] that then PRUNES a ternary branch (length/dimension dispatch on a fixed vector).
+    /// Materialized to a `Num` (`fb.ins().f64const`) only when it feeds a runtime op — the fold uses Rust `f64`
+    /// ops that are bit-identical to the Cranelift IR ops / the `jit_fmod`/`jit_powf` helpers.
+    ConstNum(f64),
 }
 
 impl Lowered {
-    /// The single IR value of a `Num`, else DECLINE — an arithmetic/comparison operand, a math-builtin arg, or
-    /// a scalar function return that turned out to be a bool, a vector, or a dynamic list isn't in the subset.
-    fn num(&self) -> Result<Value, JitError> {
+    /// The single IR `f64` VALUE of a numeric `Lowered` — a `Num` already is one, a `ConstNum` MATERIALIZES to an
+    /// `f64const` (hence `fb`). A bool / vector / dynamic list DECLINES: an arithmetic/comparison operand, a
+    /// math-builtin arg, or a scalar return that turned out to be one of those isn't in the numeric subset.
+    fn num(&self, fb: &mut FunctionBuilder) -> Result<Value, JitError> {
         match self {
             Lowered::Num(v) => Ok(*v),
+            Lowered::ConstNum(c) => Ok(fb.ins().f64const(*c)),
             Lowered::Bool(_) | Lowered::ConstBool(_) => {
                 Err(JitError::Unsupported("a boolean where a number is required"))
             }
             Lowered::Vec(_) => Err(JitError::Unsupported("a vector where a number is required")),
             Lowered::DynList(_) => Err(JitError::Unsupported("a dynamic list where a number is required")),
+        }
+    }
+
+    /// The compile-time `f64` value if this is a [`Lowered::ConstNum`], else `None` — the fold gate (a numeric op
+    /// with two `const_num` operands folds; anything else materializes and runs at runtime).
+    fn const_num(&self) -> Option<f64> {
+        match self {
+            Lowered::ConstNum(c) => Some(*c),
+            _ => None,
+        }
+    }
+
+    /// MATERIALIZE a `ConstNum` to a runtime `Num` (an `f64const` IR value), leaving every other `Lowered`
+    /// untouched — used before running the runtime numeric-op path, so that path only ever sees `Num`/`Vec`/…,
+    /// never a `ConstNum`.
+    fn materialize_num(self, fb: &mut FunctionBuilder) -> Lowered {
+        match self {
+            Lowered::ConstNum(c) => Lowered::Num(fb.ins().f64const(c)),
+            other => other,
         }
     }
 }
@@ -1333,8 +1362,23 @@ fn truthy(fb: &mut FunctionBuilder, v: &Lowered) -> Result<Value, JitError> {
             let zero = fb.ins().f64const(0.0);
             Ok(fb.ins().fcmp(FloatCC::NotEqual, *n, zero))
         }
+        // A compile-time-const number folds its truthiness: `c != 0.0` in Rust IS the `une` semantics — `NaN`
+        // truthy, `±0` falsy — so this matches the `Num` runtime `fcmp NotEqual` bit-for-bit.
+        Lowered::ConstNum(c) => Ok(fb.ins().iconst(types::I8, i64::from(*c != 0.0))),
         Lowered::Vec(_) => Err(JitError::Unsupported("a vector as a truth condition")),
         Lowered::DynList(_) => Err(JitError::Unsupported("a dynamic list as a truth condition")),
+    }
+}
+
+/// The COMPILE-TIME truthiness of a `Lowered`, or `None` if it isn't compile-time-known — a `ConstBool` is its
+/// own value, a `ConstNum` is `c != 0.0` (the same `une` fold as [`truthy`]). Used to const-fold `&&`/`||` so a
+/// wholly-const logical expression stays a `ConstBool` and can still prune a wrapping ternary.
+#[allow(clippy::float_cmp, reason = "the `!= 0.0` une truthiness test — the exact `Num` runtime semantics")]
+fn const_truthy(v: &Lowered) -> Option<bool> {
+    match v {
+        Lowered::ConstBool(b) => Some(*b),
+        Lowered::ConstNum(c) => Some(*c != 0.0),
+        _ => None,
     }
 }
 
@@ -1351,6 +1395,23 @@ fn float_cc(op: BinOp) -> Option<FloatCC> {
         BinOp::Ne => FloatCC::NotEqual,
         _ => return None,
     })
+}
+
+/// CONST-FOLD a comparison of two compile-time numbers (P.1.6 rung-D 2b.4) — Rust's native f64 comparators map
+/// bit-for-bit onto [`float_cc`]'s Cranelift predicates: `< <= > >= ==` are ORDERED (any `NaN` → false, matching
+/// the ordered `FloatCC`s and the interpreter's `partial_cmp`), and `!=` is Rust's `!(x==y)` = UNORDERED not-equal
+/// (`NaN != NaN` → true, matching `FloatCC::NotEqual`/`une`). So the folded `ConstBool` equals the runtime `fcmp`.
+#[allow(clippy::float_cmp, reason = "exact IEEE compare IS the semantics — must match the interpreter's `==`")]
+fn const_fcmp(op: BinOp, x: f64, y: f64) -> bool {
+    match op {
+        BinOp::Lt => x < y,
+        BinOp::Le => x <= y,
+        BinOp::Gt => x > y,
+        BinOp::Ge => x >= y,
+        BinOp::Eq => x == y,
+        BinOp::Ne => x != y,
+        _ => unreachable!("const_fcmp is only reached behind float_cc"),
+    }
 }
 
 /// Recursively lower `expr` to a Cranelift value + its [`Lowered`] type. Left operand before right — but for pure
@@ -1431,7 +1492,10 @@ struct Lower<'a> {
 )]
 fn compile_expr(fb: &mut FunctionBuilder, expr: &Expr, lower: &Lower) -> Result<Lowered, JitError> {
     match &expr.kind {
-        ExprKind::Num(n) => Ok(Lowered::Num(fb.ins().f64const(*n))),
+        // A numeric literal stays COMPILE-TIME-const (P.1.6 rung-D 2b.4) so a comparison over it can fold to a
+        // `ConstBool` and PRUNE a ternary branch (`len(v) == 3 ? … : …`). Materialized to a `Num` the moment it
+        // feeds a runtime op — the fold path (Binary, below) keeps the runtime match from ever seeing a `ConstNum`.
+        ExprKind::Num(n) => Ok(Lowered::ConstNum(*n)),
         // A bool literal (`true`/`false`) → the `i8` 0/1 a `Bool` is (P.1.4e). Lets a predicate body like
         // `cond ? true : false` compile — the ternary's branches now agree as `Bool`.
         ExprKind::Bool(b) => Ok(Lowered::Bool(fb.ins().iconst(types::I8, i64::from(*b)))),
@@ -1478,7 +1542,7 @@ fn compile_expr(fb: &mut FunctionBuilder, expr: &Expr, lower: &Lower) -> Result<
                 // `-x` negates a number, or elementwise-negates a vector (the interpreter's `apply_unary`).
                 UnOp::Neg => neg_lowered(fb, v),
                 // Unary `+` is a Num-only passthrough (matches the prior scalar behavior).
-                UnOp::Pos => Ok(Lowered::Num(v.num()?)),
+                UnOp::Pos => Ok(Lowered::Num(v.num(fb)?)),
                 // `!x` = `!is_truthy(x)` → a Bool. `(truthy == 0)` inverts the 0/1 flag.
                 UnOp::Not => {
                     // Const-fold `!ConstBool` → `ConstBool` (P.1.6 rung-D 2b.4) so `!is_undef(x)` etc. stays
@@ -1498,10 +1562,11 @@ fn compile_expr(fb: &mut FunctionBuilder, expr: &Expr, lower: &Lower) -> Result<
             // `&&`/`||`: the interpreter returns `Bool(truthy(a) OP truthy(b))`. Both operands are
             // side-effect-free here, so eager evaluation equals short-circuit — same bool, no float rounding.
             if matches!(op, BinOp::And | BinOp::Or) {
-                // Const-fold when BOTH operands are compile-time bools (P.1.6 rung-D 2b.4) — keeps const-ness so
-                // a wrapping ternary can still prune. A mixed const/runtime pair materializes to a runtime `Bool`.
-                if let (Lowered::ConstBool(x), Lowered::ConstBool(y)) = (&a, &b) {
-                    let r = if matches!(op, BinOp::And) { *x && *y } else { *x || *y };
+                // Const-fold when BOTH operands have compile-time truthiness (a const bool OR a const number,
+                // P.1.6 rung-D 2b.4) — keeps const-ness so a wrapping ternary can still prune. A mixed
+                // const/runtime pair materializes to a runtime `Bool`.
+                if let (Some(x), Some(y)) = (const_truthy(&a), const_truthy(&b)) {
+                    let r = if matches!(op, BinOp::And) { x && y } else { x || y };
                     return Ok(Lowered::ConstBool(r));
                 }
                 let ta = truthy(fb, &a)?;
@@ -1516,9 +1581,34 @@ fn compile_expr(fb: &mut FunctionBuilder, expr: &Expr, lower: &Lower) -> Result<
             // A comparison: both operands must be numbers (the interpreter's `<` etc. on numbers; a vector
             // comparison isn't in the subset).
             if let Some(cc) = float_cc(*op) {
-                let (a, b) = (a.num()?, b.num()?);
+                // Const-fold two compile-time numbers → a `ConstBool` (`len(v) == 3` dispatch) that can PRUNE a
+                // wrapping ternary. `const_fcmp` is bit-identical to the runtime `fcmp` (same ordered/une split).
+                if let (Some(x), Some(y)) = (a.const_num(), b.const_num()) {
+                    return Ok(Lowered::ConstBool(const_fcmp(*op, x, y)));
+                }
+                let (a, b) = (a.num(fb)?, b.num(fb)?);
                 return Ok(Lowered::Bool(fb.ins().fcmp(cc, a, b)));
             }
+            // Const-fold scalar arithmetic of two compile-time numbers → a `ConstNum` (`2 * 3 + 1` collapses to a
+            // literal). Rust's `+ - * /` are the exact IEEE ops Cranelift's `fadd`/… emit (no FMA fusion), and `%`/
+            // `^` route through the SAME `jit_fmod`/`jit_powf` the runtime path calls — so the fold matches bit-for-bit.
+            if let (Some(x), Some(y)) = (a.const_num(), b.const_num()) {
+                let folded = match op {
+                    BinOp::Add => Some(x + y),
+                    BinOp::Sub => Some(x - y),
+                    BinOp::Mul => Some(x * y),
+                    BinOp::Div => Some(x / y),
+                    BinOp::Mod => Some(jit_fmod(x, y)),
+                    BinOp::Pow => Some(jit_powf(x, y)),
+                    _ => None,
+                };
+                if let Some(r) = folded {
+                    return Ok(Lowered::ConstNum(r));
+                }
+            }
+            // Not fully const: MATERIALIZE any `ConstNum` operand to a runtime `Num` so the arithmetic match below
+            // only ever sees `Num`/`Vec`/`Bool`/… — never a `ConstNum`.
+            let (a, b) = (a.materialize_num(fb), b.materialize_num(fb));
             // Arithmetic: scalar ⊙ scalar, or scalarized VECTOR ops (P.1.6 rung A). The vector cases mirror
             // `ops::apply_binary` EXACTLY: `+`/`−` elementwise, scalar `×`/`÷` scale, `vec × vec` = the 4-lane
             // dot product. Anything else (a matrix, a `%`/`^` on vectors, mismatched lengths) DECLINES.
@@ -1568,7 +1658,9 @@ fn compile_expr(fb: &mut FunctionBuilder, expr: &Expr, lower: &Lower) -> Result<
         // branch's discarded NaN/inf can't affect the chosen result). Branches must AGREE in shape.
         ExprKind::Ternary { cond, then, els } => {
             let cv = compile_expr(fb, cond, lower)?;
-            if let Lowered::ConstBool(b) = cv {
+            // A COMPILE-TIME-known condition (a const bool OR a const number, P.1.6 rung-D 2b.4) prunes — compile
+            // ONLY the taken branch, so a compile-time-dead un-JIT-able branch is never touched.
+            if let Some(b) = const_truthy(&cv) {
                 return compile_expr(fb, if b { then } else { els }, lower);
             }
             let c = truthy(fb, &cv)?;
@@ -1605,9 +1697,9 @@ fn compile_expr(fb: &mut FunctionBuilder, expr: &Expr, lower: &Lower) -> Result<
                 if args.len() != usize::from(arity) || args.iter().any(|a| a.name.is_some()) {
                     return Err(JitError::Unsupported("call"));
                 }
-                let a = compile_expr(fb, &args[0].value, lower)?.num()?;
+                let a = compile_expr(fb, &args[0].value, lower)?.num(fb)?;
                 let b = if arity == 2 {
-                    compile_expr(fb, &args[1].value, lower)?.num()?
+                    compile_expr(fb, &args[1].value, lower)?.num(fb)?
                 } else {
                     fb.ins().f64const(0.0) // a unary op ignores the second helper argument
                 };
@@ -1750,7 +1842,7 @@ fn compile_expr(fb: &mut FunctionBuilder, expr: &Expr, lower: &Lower) -> Result<
                     // usize`, in-range iff `< len`). An out-of-range index (-1) is the interpreter's `undef`;
                     // the JIT can't represent it, so it BAILS immediately (raised + return → the dispatch's
                     // `None` → interpret), like the budget bail. In-range → the element via `jit_vec_get`.
-                    let i_f = compile_expr(fb, index, lower)?.num()?;
+                    let i_f = compile_expr(fb, index, lower)?.num(fb)?;
                     let idx = {
                         let call = fb.ins().call(lower.vec_bound, &[handle, i_f]);
                         fb.inst_results(call)[0]
@@ -1810,6 +1902,8 @@ fn compile_type_predicate(fb: &mut FunctionBuilder, name: &str, arg: &Lowered) -
         "is_num" => match arg {
             // `is_num(NaN)` is FALSE (L.2.8n): `x == x` (ordered) is the runtime not-NaN test.
             Lowered::Num(x) => Lowered::Bool(fb.ins().fcmp(FloatCC::Equal, *x, *x)),
+            // A const number folds it: `!c.is_nan()` IS the ordered `c == c` (false only for `NaN`).
+            Lowered::ConstNum(c) => Lowered::ConstBool(!c.is_nan()),
             _ => Lowered::ConstBool(false),
         },
         _ => Lowered::ConstBool(false), // unreachable: the caller routes only the six predicates here
@@ -1837,8 +1931,8 @@ fn compile_seedless_rands(
     }
     // min, max compiled in source order (their own side effects, incl. a nested rands, happen here — BEFORE the
     // count + draws, matching the interpreter evaluating the args before the builtin body).
-    let min = compile_expr(fb, &args[0].value, lower)?.num()?;
-    let max = compile_expr(fb, &args[1].value, lower)?.num()?;
+    let min = compile_expr(fb, &args[0].value, lower)?.num(fb)?;
+    let max = compile_expr(fb, &args[1].value, lower)?.num(fb)?;
 
     // A small NON-NEGATIVE literal count → the scalarized fixed vector (no arena). A big / invalid / dynamic
     // count falls through to the draw loop.
@@ -1864,7 +1958,7 @@ fn compile_seedless_rands(
 
     // DYNAMIC (or big / invalid) count → a draw loop into a DynList (2b.3). `count` is compiled ONCE, here,
     // after min/max (a literal recompiles to a const — harmless). `jit_as_index` validates it (undef → -1).
-    let count_f = compile_expr(fb, &args[2].value, lower)?.num()?;
+    let count_f = compile_expr(fb, &args[2].value, lower)?.num(fb)?;
     let count = {
         let call = fb.ins().call(lower.as_index, &[count_f]);
         fb.inst_results(call)[0]
@@ -1981,14 +2075,16 @@ fn compile_vec_builtin(
                 return Err(JitError::Unsupported("call"));
             }
             match compile_expr(fb, &args[0].value, lower)? {
-                // A scalarized fixed vector's length is a COMPILE-TIME constant (rung B).
+                // A scalarized fixed vector's length is a COMPILE-TIME constant (rung B) — a `ConstNum`, so
+                // `len(v) == N` dimension dispatch folds to a `ConstBool` and PRUNES the wrong-dimension branch
+                // (P.1.6 rung-D 2b.4). That's the whole point: a `len(v)==3 ? … : …` compiles only the taken arm.
                 Lowered::Vec(elems) => {
                     #[allow(
                         clippy::cast_precision_loss,
                         reason = "a scalarized vector's length is tiny (<= MAX_VEC_ARG); f64 is exact"
                     )]
                     let n = elems.len() as f64;
-                    Ok(Lowered::Num(fb.ins().f64const(n)))
+                    Ok(Lowered::ConstNum(n))
                 }
                 // A DYNAMIC list's length is a runtime `jit_vec_len` (P.1.6 rung-D 2b.2). The i64 count is
                 // exact as f64 (budget-capped ≤ 1e6), converted with `fcvt_from_sint`.
@@ -2010,7 +2106,7 @@ fn compile_vec_builtin(
             // Sequential sum of squares — `fold(0.0, +)`, MATCHING `iter().map(|x| x*x).sum()` bit-for-bit.
             let mut acc = fb.ins().f64const(0.0);
             for e in &elems {
-                let x = e.num()?;
+                let x = e.num(fb)?;
                 let sq = fb.ins().fmul(x, x);
                 acc = fb.ins().fadd(acc, sq);
             }
@@ -2039,8 +2135,8 @@ fn compile_vec_builtin(
             match (a.as_slice(), b.as_slice()) {
                 // 3D cross → a VECTOR (`ops::cross`'s [a1·b2−a2·b1, a2·b0−a0·b2, a0·b1−a1·b0]).
                 ([a0, a1, a2], [b0, b1, b2]) => {
-                    let (a0, a1, a2) = (a0.num()?, a1.num()?, a2.num()?);
-                    let (b0, b1, b2) = (b0.num()?, b1.num()?, b2.num()?);
+                    let (a0, a1, a2) = (a0.num(fb)?, a1.num(fb)?, a2.num(fb)?);
+                    let (b0, b1, b2) = (b0.num(fb)?, b1.num(fb)?, b2.num(fb)?);
                     let x = sub_of_products(fb, a1, b2, a2, b1);
                     let y = sub_of_products(fb, a2, b0, a0, b2);
                     let z = sub_of_products(fb, a0, b1, a1, b0);
@@ -2048,7 +2144,7 @@ fn compile_vec_builtin(
                 }
                 // 2D cross → a SCALAR (`a0·b1 − a1·b0`).
                 ([a0, a1], [b0, b1]) => {
-                    let (a0, a1, b0, b1) = (a0.num()?, a1.num()?, b0.num()?, b1.num()?);
+                    let (a0, a1, b0, b1) = (a0.num(fb)?, a1.num(fb)?, b0.num(fb)?, b1.num(fb)?);
                     Ok(Lowered::Num(sub_of_products(fb, a0, b1, a1, b0)))
                 }
                 _ => Err(JitError::Unsupported("cross of non-2/3-vectors")),
@@ -2065,9 +2161,11 @@ fn compile_vec_builtin(
             let nums: Vec<Value> = if args.len() == 1 {
                 match compile_expr(fb, &args[0].value, lower)? {
                     Lowered::Vec(elems) => {
-                        elems.iter().map(Lowered::num).collect::<Result<Vec<_>, _>>()?
+                        elems.iter().map(|e| e.num(fb)).collect::<Result<Vec<_>, _>>()?
                     }
                     Lowered::Num(x) => vec![x],
+                    // `min(literal)` — one const scalar → `[c]`, materialized (the fold reduction runs at runtime).
+                    Lowered::ConstNum(c) => vec![fb.ins().f64const(c)],
                     Lowered::Bool(_) | Lowered::ConstBool(_) => {
                         return Err(JitError::Unsupported("min/max of a boolean"));
                     }
@@ -2077,7 +2175,7 @@ fn compile_vec_builtin(
             } else {
                 // 0 or ≥2 args: the `multi` branch — every arg is a plain number (a vector/bool → undef → decline).
                 args.iter()
-                    .map(|a| compile_expr(fb, &a.value, lower)?.num())
+                    .map(|a| compile_expr(fb, &a.value, lower)?.num(fb))
                     .collect::<Result<Vec<_>, _>>()?
             };
             let Some((&head, rest)) = nums.split_first() else {
@@ -2107,7 +2205,7 @@ fn vec_elementwise(
     a.iter()
         .zip(b)
         .map(|(x, y)| {
-            let (x, y) = (x.num()?, y.num()?);
+            let (x, y) = (x.num(fb)?, y.num(fb)?);
             let v = match op {
                 BinOp::Add => fb.ins().fadd(x, y),
                 BinOp::Sub => fb.ins().fsub(x, y),
@@ -2121,7 +2219,12 @@ fn vec_elementwise(
 /// Scale a scalarized vector by a scalar: `v[i] * s` — matching `map_reuse(v, |e| e * s)` for both `v*s` and
 /// `s*v` (float multiply is bit-commutative).
 fn vec_scale(fb: &mut FunctionBuilder, v: &[Lowered], s: Value) -> Result<Vec<Lowered>, JitError> {
-    v.iter().map(|e| Ok(Lowered::Num(fb.ins().fmul(e.num()?, s)))).collect()
+    v.iter()
+        .map(|e| {
+            let ev = e.num(fb)?; // materialize BEFORE `fb.ins()` — a nested `fb.ins(e.num(fb))` double-borrows `fb`
+            Ok(Lowered::Num(fb.ins().fmul(ev, s)))
+        })
+        .collect()
 }
 
 /// `v / s` (element / scalar, `vec_over_scalar`) or `s / v` (scalar / element) — matching `map_reuse(v, |e| e
@@ -2134,7 +2237,7 @@ fn vec_div(
 ) -> Result<Vec<Lowered>, JitError> {
     v.iter()
         .map(|e| {
-            let e = e.num()?;
+            let e = e.num(fb)?;
             let q = if vec_over_scalar { fb.ins().fdiv(e, s) } else { fb.ins().fdiv(s, e) };
             Ok(Lowered::Num(q))
         })
@@ -2148,7 +2251,8 @@ fn vec_dot(fb: &mut FunctionBuilder, a: &[Lowered], b: &[Lowered]) -> Result<Val
     let zero = fb.ins().f64const(0.0);
     let mut lanes = [zero; 4];
     for i in 0..a.len() {
-        let p = fb.ins().fmul(a[i].num()?, b[i].num()?);
+        let (ai, bi) = (a[i].num(fb)?, b[i].num(fb)?); // materialize BEFORE `fb.ins()` (nested double-borrow)
+        let p = fb.ins().fmul(ai, bi);
         lanes[i % 4] = fb.ins().fadd(lanes[i % 4], p);
     }
     let l01 = fb.ins().fadd(lanes[0], lanes[1]);
@@ -2161,6 +2265,9 @@ fn vec_dot(fb: &mut FunctionBuilder, a: &[Lowered], b: &[Lowered]) -> Result<Val
 fn neg_lowered(fb: &mut FunctionBuilder, v: Lowered) -> Result<Lowered, JitError> {
     match v {
         Lowered::Num(n) => Ok(Lowered::Num(fb.ins().fneg(n))),
+        // A const number negates AT COMPILE TIME — Rust `-c` flips the sign bit exactly like Cranelift `fneg`
+        // (NaN and ±0 included) — staying a `ConstNum` so a wrapping comparison/ternary can still fold.
+        Lowered::ConstNum(c) => Ok(Lowered::ConstNum(-c)),
         Lowered::Vec(elems) => {
             let out: Result<Vec<Lowered>, JitError> =
                 elems.into_iter().map(|e| neg_lowered(fb, e)).collect();
@@ -2181,6 +2288,10 @@ fn select_lowered(
     t: Lowered,
     e: Lowered,
 ) -> Result<Lowered, JitError> {
+    // The cond wasn't compile-time-known (else the ternary pruned), so the pick is a RUNTIME `select` — a const
+    // branch has to materialize to an IR value. Do it up front so the `Num`/`Vec` pairings below don't grow a
+    // `ConstNum` case (a `ConstNum ? : ConstNum` becomes `Num`/`Num` and selects normally).
+    let (t, e) = (t.materialize_num(fb), e.materialize_num(fb));
     match (t, e) {
         (Lowered::Num(t), Lowered::Num(e)) => Ok(Lowered::Num(fb.ins().select(c, t, e))),
         (Lowered::Vec(t), Lowered::Vec(e)) if t.len() == e.len() => {

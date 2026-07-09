@@ -164,9 +164,10 @@ added 2026-07-07.
 - [ ] P.1 - P.1 - Cranelift JIT for the numeric long tail (desktop)
   - [x] P.1.1 - P.1.1 - JIT registry + compile cache (one JITModule, keyed by fingerprint)
   - [x] P.1.2 - P.1.2 - Crate-boundary hook + dispatch integration
-  - [ ] P.1.3 - P.1.3 - fast==JIT differential over the corpus + EXPLAIN coverage
+  - [x] P.1.3 - P.1.3 - fast==JIT differential over the corpus + EXPLAIN coverage
   - [ ] P.1.4 - P.1.4 - Extend the numeric subset (ternary, comparisons, transcendental calls)
   - [ ] P.1.5 - P.1.5 - Measure + coverage report
+  - [ ] P.1.6 - P.1.6 - JIT list/vector ABI (scalarize A/B/C, sink-return D)
 - [ ] P.2 - P.2 - Content-addressed CSG cache
 
 ## Backlog (not yet phased)
@@ -212,3 +213,4 @@ Parked 2026-07-04 for the scad-rs pivot — the workflow tool works and stays in
 - **SVG import: per-element even-odd grouping (vs pooled) — union elements with nonzero** — added 2026-07-08.
 - **scad-rs import() base-dir is per-run, not per-containing-file (OpenSCAD divergence)** — added 2026-07-08.
 - **Fast-path named args: map named→positional before intrinsic/JIT dispatch** — added 2026-07-09.
+- **JIT-in-WASM may be viable — revisit the desktop-only-JIT assumption** — added 2026-07-09.

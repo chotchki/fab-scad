@@ -973,6 +973,40 @@ fn const_undef_len_of_scalar_prunes() {
 }
 
 #[test]
+fn const_undef_index_member_of_scalar_prunes() {
+    // P.1.6 rung-D 2c.3 (extended to access): `x[i]` and `x.axis` on a NON-vector are `undef`
+    // (`ops::index` / `ops::member`), so in a SCALAR specialization they fold to `ConstUndef` — reclaiming the
+    // `index of a non-vector` / `member access on a non-vector` blockers. A guard over the undef folds + prunes.
+    // `x[i]` still COMPILES `i` for its eval-order side effects (here just a literal). Bit-identical.
+    let prog = program(
+        "function idx(x) = is_undef(x[0]) ? 1 : 0;\
+         function idxc(x) = x[2] == 5 ? 100 : x;\
+         function mem(x) = is_undef(x.y) ? 1 : 0;\
+         function memc(x) = x.z > 0 ? x : -x;",
+    );
+    let reg = JitRegistry::build(
+        defs(&prog).iter().map(|&(n, p, b)| (n, p, b)),
+        consts(&prog).iter().map(|&(n, v)| (n, v)),
+    )
+    .expect("registry builds");
+
+    // The all-scalar spec compiles now — the undef fold prunes the branch the bad access used to block.
+    assert!(reg.get("idx").is_some(), "x[0] on a scalar folds undef → is_undef true → compiles");
+    assert!(reg.get("idxc").is_some(), "x[2]==5 (undef==5 → false) prunes → compiles");
+    assert!(reg.get("mem").is_some(), "x.y on a scalar folds undef → compiles");
+    assert!(reg.get("memc").is_some(), "x.z>0 (undef → falsy) prunes to -x → compiles");
+
+    for x in [7.0, -2.0, 0.0, -0.0] {
+        assert_call_eq(&reg, &prog, "idx", &[Value::Num(x)]); // is_undef(scalar[0]) → 1
+        assert_call_eq(&reg, &prog, "idxc", &[Value::Num(x)]); // scalar[2]==5 → false → x
+        assert_call_eq(&reg, &prog, "mem", &[Value::Num(x)]); // is_undef(scalar.y) → 1
+        assert_call_eq(&reg, &prog, "memc", &[Value::Num(x)]); // scalar.z>0 falsy → -x
+    }
+    // A VECTOR spec still indexes/members for REAL — `x[0]` in range is the element, not undef.
+    assert_call_eq(&reg, &prog, "idx", &[vec_arg(&[9.0, 8.0])]); // x[0]=9 → is_undef(9)=false → 0
+}
+
+#[test]
 fn matrix_product_is_bit_identical() {
     // P.1.6 rung-D 2c.2b: OpenSCAD's LINEAR-ALGEBRA `*` — mat×vec, vec×mat, mat×mat (and vec·vec) — each
     // reducing to the 4-lane `dot` (== `ops::dot`, so bit-identical). Shapes are compile-time known, so a

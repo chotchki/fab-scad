@@ -2048,7 +2048,14 @@ fn compile_expr(fb: &mut FunctionBuilder, expr: &Expr, lower: &Lower) -> Result<
                     let call = fb.ins().call(lower.vec_get, &[handle, idx]);
                     Ok(Lowered::Num(fb.inst_results(call)[0]))
                 }
-                _ => Err(JitError::Unsupported("index of a non-vector")),
+                // `x[i]` on a NON-list is `undef` (`ops::index`) regardless of `i` — the `index of a non-vector`
+                // blocker (2c.3). Fold to a compile-time `ConstUndef`, but FIRST compile `index` for its eval-
+                // order side effects: the interpreter evaluates it (eager operands), so a nested `rands` must
+                // still advance the stream (piece 1) and an inline assert must still fire. The result is discarded.
+                _ => {
+                    compile_expr(fb, index, lower)?;
+                    Ok(Lowered::ConstUndef)
+                }
             }
         }
         // `v.x`/`v.y`/`v.z` on a scalarized vector → element 0/1/2 (P.1.6 rung B). `ops::member` maps ONLY
@@ -2057,15 +2064,22 @@ fn compile_expr(fb: &mut FunctionBuilder, expr: &Expr, lower: &Lower) -> Result<
         // no float op, so bit-identical to the interpreter's `index(base, axis)`.
         ExprKind::Member { base, field } => {
             let Lowered::Vec(elems) = compile_expr(fb, base, lower)? else {
-                return Err(JitError::Unsupported("member access on a non-vector"));
+                // `.x`/`.y`/… on a NON-vector is `undef` (`ops::member` → `index(non-list, axis)` → undef) — a
+                // compile-time `ConstUndef` (2c.3), so a `member(scalar) == N ? …` folds instead of declining.
+                return Ok(Lowered::ConstUndef);
             };
             let idx = match field.as_str() {
                 "x" => 0,
                 "y" => 1,
                 "z" => 2,
-                _ => return Err(JitError::Unsupported("non-xyz member access")),
+                // A non-xyz field is `undef` (`ops::member` maps ONLY x/y/z) — fold.
+                _ => return Ok(Lowered::ConstUndef),
             };
-            elems.into_iter().nth(idx).ok_or(JitError::Unsupported("member axis out of range"))
+            // A `.z` on a too-short vector is `undef` too (the `nth` miss) — fold rather than decline.
+            match elems.into_iter().nth(idx) {
+                Some(e) => Ok(e),
+                None => Ok(Lowered::ConstUndef),
+            }
         }
         // Everything else DECLINES — named so the EXPLAIN coverage histogram (P.1.4) shows WHICH node kind
         // blocks each function, i.e. the absorption ceiling per subset feature we might add next.

@@ -261,12 +261,19 @@ because undef is non-orderable — NOT `false`, the one I'd have guessed wrong);
 The honest result: `len of a non-vector` is GONE from the histogram (all 364 now compile past the
 len), but net coverage is only +2 scalar / +1 vec (83→85 / 28→29) — because the histogram is
 FIRST-blocker, so those 364 mostly redistribute to their NEXT blocker rather than fully compiling.
-The fold IS the win (the ceiling's cleared); the reclaim is downstream-limited. New ceiling: `call`
-(285) and — tellingly — `index of a non-vector` (146→226), which is the SAME undef story (`scalar[i]`
-→ `undef` per `ops::index`). So the cheap follow-on is extending `ConstUndef` to Index (and `.x`/`.y`
-member access on a non-vector), with ONE nuance the `len` case dodges: still COMPILE the index expr
-for its eval-order side effects (a nested `rands` advances the stream) before folding the result to
-`ConstUndef`, or the seedless-`rands` weave desyncs.
+The fold IS the win (the ceiling's cleared); the reclaim is downstream-limited. New ceiling after
+`len`: `call` (285) and — tellingly — `index of a non-vector` (146→226), the SAME undef story.
+
+**Access-of-a-non-vector → undef** (done, P.1.6q). `x[i]` and `x.axis` on a non-list are `undef`
+(`ops::index` / `ops::member`), so both fold to `ConstUndef` — clearing `index of a non-vector` (226)
+AND `member access on a non-vector` (34). The Index case has the ONE nuance `len` dodges: the
+interpreter EVALUATES `i` (eager operands), so still COMPILE the index expr for its eval-order side
+effects (a nested `rands`' stream advance, an inline assert) before folding the result away — else the
+seedless-`rands` weave desyncs. Member folds all three of its undef cases (non-vector base, non-xyz
+field, out-of-range axis). Result: 86→91 scalar / 30→31 vec, and — the redistribution is the story —
+`comprehension over a non-range/non-dynlist` jumped 85→**302**, the new #1 ceiling. That's
+`[for(x = <fixed vector>) …]` (unroll a compile-time-known iterable) — the 2b.N rung, the clear next
+lever, with `call` (293) behind it.
 
 ## Known determinism edge — bail-after-partial-draw (for the hardening pass)
 

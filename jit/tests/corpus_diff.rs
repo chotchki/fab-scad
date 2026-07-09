@@ -257,6 +257,37 @@ fn vector_rows(arity: usize, n: usize, count: usize) -> Vec<Vec<Value>> {
         .collect()
 }
 
+/// Deterministic MATRIX-arg rows (P.1.6 rung-D 2c.2): `count` rows, each `arity` `rows`×`cols` matrices (a
+/// `List` of `NumList` rows), drawn from [`CORNERS`] by a per-shape xorshift. Seeded from `(arity, rows, cols)`
+/// for reproducibility — the nested arg the vector battery never produces, so the matrix-arg path (nested
+/// `ArgShape`, `load_arg`, the recursive `vec_*` arithmetic) gets the real BOSL2 differential, not just units.
+fn matrix_rows(arity: usize, rows: usize, cols: usize, count: usize) -> Vec<Vec<Value>> {
+    let mut state: u64 =
+        0x9E37_79B9_7F4A_7C15 ^ ((arity as u64) << 16) ^ ((rows as u64) << 8) ^ (cols as u64);
+    (0..count)
+        .map(|_| {
+            (0..arity)
+                .map(|_| {
+                    let m: Vec<Value> = (0..rows)
+                        .map(|_| {
+                            let xs: Vec<f64> = (0..cols)
+                                .map(|_| {
+                                    state ^= state << 13;
+                                    state ^= state >> 7;
+                                    state ^= state << 17;
+                                    CORNERS[(state as usize) % CORNERS.len()]
+                                })
+                                .collect();
+                            Value::num_list(xs)
+                        })
+                        .collect();
+                    Value::list(m)
+                })
+                .collect()
+        })
+        .collect()
+}
+
 #[test]
 fn fast_equals_jit_over_bosl2_vector_arg_shapes() {
     // P.1.6 rung B, END-TO-END over the REAL library: drive BOSL2 functions with VECTOR args through the
@@ -280,6 +311,10 @@ fn fast_equals_jit_over_bosl2_vector_arg_shapes() {
 
     let mut accepted = 0usize; // (function, shape, row) triples the JIT compiled + differentialed bit-identical
     let mut fns_with_vec_spec: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
+    // MATRIX-arg specs tracked separately (2c.2) so the report shows how many BOSL2 functions the nested-arg
+    // path newly reaches — the vector battery never feeds a matrix, so without this the matrix ABI is unmeasured.
+    let mut mat_accepted = 0usize;
+    let mut fns_with_mat_spec: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
     for (name, params, _body) in &defs {
         let arity = params.len();
         if arity == 0 {
@@ -293,31 +328,42 @@ fn fast_equals_jit_over_bosl2_vector_arg_shapes() {
                 let Some(jit) = jit_call(&registry, name, &row) else {
                     continue; // declined-or-raised shape → the interpreter handles it, nothing to differential
                 };
-                // The JIT accepted this shape → it MUST match the interpreter, bits + type tag. A `Vec` return
-                // (rung C) compares element-wise bitwise against a `NumList`.
+                // The JIT accepted this shape → it MUST match the interpreter, bits + type tag (`outcome_agrees`
+                // handles Num/Bool/Vec + the 2c.1 Nested arm). `Some(jit)` — a `None` would've `continue`d above.
                 let slow = oracle.call(name, &row);
-                let ok = match (&jit, &slow) {
-                    (JitOutcome::Num(a), Ok(Value::Num(b))) => a.to_bits() == b.to_bits(),
-                    (JitOutcome::Bool(a), Ok(Value::Bool(b))) => a == b,
-                    (JitOutcome::Vec(a), Ok(Value::NumList(b))) => {
-                        a.len() == b.len() && a.iter().zip(b.iter()).all(|(x, y)| x.to_bits() == y.to_bits())
-                    }
-                    // A vector-arg specialization that returns a nested (matrix) value (2c.1).
-                    (JitOutcome::Nested(a), Ok(b)) => value_bits_eq(a, b),
-                    _ => false,
-                };
                 assert!(
-                    ok,
+                    outcome_agrees(Some(&jit), &slow),
                     "rung-B fast != JIT for BOSL2 `{name}` shape vec{n} at {row:?}: jit={jit:?} interp={slow:?}"
                 );
                 accepted += 1;
                 fns_with_vec_spec.insert(name);
             }
         }
+        // MATRIX-arg shapes (2c.2): every param a small matrix. A function that wants scalars/vectors DECLINES
+        // the nested shape (skipped); the ones that index `m[i][j]`, transpose, or do elementwise matrix
+        // arithmetic ACCEPT — and MUST be bit-identical. This is the matrix-arg path's real BOSL2 gate.
+        for (rows, cols) in [(2usize, 2usize), (3, 3), (2, 3)] {
+            for row in matrix_rows(arity, rows, cols, 4) {
+                let Some(jit) = jit_call(&registry, name, &row) else {
+                    continue;
+                };
+                let slow = oracle.call(name, &row);
+                assert!(
+                    outcome_agrees(Some(&jit), &slow),
+                    "2c.2 fast != JIT for BOSL2 `{name}` shape mat{rows}x{cols} at {row:?}: jit={jit:?} interp={slow:?}"
+                );
+                mat_accepted += 1;
+                fns_with_mat_spec.insert(name);
+            }
+        }
     }
     eprintln!(
         "[jit-corpus-vec] {} BOSL2 functions gained a vector-arg specialization; {accepted} (fn,shape,row) triples differentialed bit-identical",
         fns_with_vec_spec.len()
+    );
+    eprintln!(
+        "[jit-corpus-mat] {} BOSL2 functions gained a matrix-arg specialization; {mat_accepted} (fn,shape,row) triples differentialed bit-identical",
+        fns_with_mat_spec.len()
     );
     assert!(accepted > 0, "rung B should compile a vector-arg specialization for at least one BOSL2 function");
 }

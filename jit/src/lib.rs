@@ -80,15 +80,19 @@ use fab_lang::Value as ScadValue;
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
 enum ArgShape {
     Scalar,
-    Vec(usize),
+    /// A list arg — a TREE of element shapes (P.1.6 rung-D 2c.2). A flat numeric vector is `Vec([Scalar; n])`; a
+    /// matrix is `Vec([Vec([Scalar; c]); r])`. The nesting is load-bearing in the cache key: `f([[1,2]])` and
+    /// `f([1,2])` flatten to the SAME 2 f64s but bind DIFFERENT-shaped `Lowered::Vec`s, so the shape distinguishes
+    /// which specialization to compile.
+    Vec(Vec<ArgShape>),
 }
 
 impl ArgShape {
-    /// How many `f64` slots this arg occupies in the flat call buffer.
+    /// How many `f64` LEAF slots this arg occupies in the flat call buffer (a matrix sums its rows).
     fn size(&self) -> usize {
         match self {
             ArgShape::Scalar => 1,
-            ArgShape::Vec(n) => *n,
+            ArgShape::Vec(children) => children.iter().map(ArgShape::size).sum(),
         }
     }
 }
@@ -102,49 +106,70 @@ type ShapeSig = Vec<ArgShape>;
 /// ABI, not scalarization.
 const MAX_VEC_ARG: usize = 16;
 
-/// Derive each arg's [`ArgShape`] and flatten its `f64`s into `flat` (cleared first), or `None` if any arg
-/// isn't scalarizable: a nested/mixed list (a matrix), a string / undef / range / function value, or a vector
-/// longer than [`MAX_VEC_ARG`]. `Num` → one element + `Scalar`; a `NumList` (or an all-`Num` `List`, which a
-/// freshly-built `[a,b]` can surface as before the value model normalizes it) → its elements + `Vec(len)`.
-/// `flat` is the registry's REUSED scratch, so the hot path pays no per-call flatten allocation.
+/// The total LEAF-scalar budget for one scalarized (possibly nested) arg (P.1.6 rung-D 2c.2). A matrix nests, so
+/// a per-level [`MAX_VEC_ARG`] alone would allow `16^depth` leaves — this caps the whole tree so IR unroll stays
+/// bounded. A 4×4 (16) or 8×8 (64) matrix fits; bigger DECLINES to the interpreter.
+const MAX_FLAT_ARG: usize = 64;
+
+/// Derive each arg's [`ArgShape`] and flatten its `f64` LEAVES into `flat` (cleared first), or `None` if any arg
+/// isn't scalarizable: a too-deep/too-wide list, a non-numeric leaf (string / undef / range / function), or a
+/// list level longer than [`MAX_VEC_ARG`] / a whole arg over [`MAX_FLAT_ARG`] leaves. A `Num` → one leaf +
+/// `Scalar`; a `NumList` → its elements + `Vec([Scalar; n])`; a NESTED `List` (a matrix) → its rows recursively
+/// (2c.2). `flat` is the registry's REUSED scratch, so the hot path pays no per-call flatten allocation.
 fn shape_and_flatten(args: &[ScadValue], flat: &mut Vec<f64>) -> Option<ShapeSig> {
     flat.clear();
     let mut sig = ShapeSig::with_capacity(args.len());
     for a in args {
-        match a {
-            ScadValue::Num(n) => {
-                flat.push(*n);
-                sig.push(ArgShape::Scalar);
-            }
-            ScadValue::NumList(xs) => {
-                if xs.len() > MAX_VEC_ARG {
-                    return None;
-                }
-                flat.extend_from_slice(xs);
-                sig.push(ArgShape::Vec(xs.len()));
-            }
-            ScadValue::List(items) => {
-                if items.len() > MAX_VEC_ARG {
-                    return None;
-                }
-                let start = flat.len();
-                for it in items.iter() {
-                    match it {
-                        ScadValue::Num(n) => flat.push(*n),
-                        // A nested or non-numeric element → not scalarizable; roll back this arg's f64s.
-                        _ => {
-                            flat.truncate(start);
-                            return None;
-                        }
-                    }
-                }
-                sig.push(ArgShape::Vec(items.len()));
-            }
-            // A string / undef / range / function value can't be a numeric JIT arg → decline the whole call.
-            _ => return None,
+        let start = flat.len();
+        let shape = shape_and_flatten_one(a, flat)?;
+        // Bound the IR unroll: a too-large (nested) arg declines, rolling back its leaves.
+        if shape.size() > MAX_FLAT_ARG {
+            flat.truncate(start);
+            return None;
         }
+        sig.push(shape);
     }
     Some(sig)
+}
+
+/// One arg's [`ArgShape`], pushing its leaf `f64`s to `flat` in row-major order — recursing into a nested `List`
+/// (a matrix) so `[[a,b],[c,d]]` flattens to `[a,b,c,d]` with shape `Vec([Vec([Scalar;2]);2])` (2c.2). A list
+/// level over [`MAX_VEC_ARG`] or a non-numeric leaf → `None` (rolling back that sublist's leaves). The whole-arg
+/// [`MAX_FLAT_ARG`] cap is enforced by the caller.
+fn shape_and_flatten_one(value: &ScadValue, flat: &mut Vec<f64>) -> Option<ArgShape> {
+    match value {
+        ScadValue::Num(n) => {
+            flat.push(*n);
+            Some(ArgShape::Scalar)
+        }
+        ScadValue::NumList(xs) => {
+            if xs.len() > MAX_VEC_ARG {
+                return None;
+            }
+            flat.extend_from_slice(xs);
+            Some(ArgShape::Vec(vec![ArgShape::Scalar; xs.len()]))
+        }
+        ScadValue::List(items) => {
+            if items.len() > MAX_VEC_ARG {
+                return None;
+            }
+            let start = flat.len();
+            let mut children = Vec::with_capacity(items.len());
+            for it in items.iter() {
+                match shape_and_flatten_one(it, flat) {
+                    Some(c) => children.push(c),
+                    // A non-numeric / too-big nested element → roll back this sublist's leaves + decline.
+                    None => {
+                        flat.truncate(start);
+                        return None;
+                    }
+                }
+            }
+            Some(ArgShape::Vec(children))
+        }
+        // A string / undef / range / function value can't be a numeric JIT arg → decline the whole call.
+        _ => None,
+    }
 }
 
 /// The `%` an OpenSCAD `%` compiles to — the EXACT op the interpreter runs (`ops.rs`: `x % y`, C
@@ -1101,17 +1126,11 @@ fn define_one(
                     index.insert(name, off);
                     off += 1;
                 }
-                ArgShape::Vec(n) => {
-                    let mut elems = Vec::with_capacity(*n);
-                    for k in 0..*n {
-                        let byte_off = i32::try_from((off + k) * 8)
-                            .map_err(|_| JitError::Unsupported("param offset overflow"))?;
-                        let v =
-                            fb.ins().load(types::F64, MemFlagsData::trusted(), params_ptr, byte_off);
-                        elems.push(Lowered::Num(v));
-                    }
-                    locals.insert(name, Lowered::Vec(elems));
-                    off += n;
+                ArgShape::Vec(_) => {
+                    // A vector/MATRIX param eagerly loads its leaves into a (possibly nested) `Lowered::Vec` so
+                    // the body sees a scalarized value (2c.2 recurses for a matrix). `load_arg` threads `off`.
+                    let lowered = load_arg(&mut fb, params_ptr, shape, &mut off)?;
+                    locals.insert(name, lowered);
                 }
             }
         }
@@ -1247,6 +1266,34 @@ fn rebuild_nested(shape: &VShape, flat: &[f64], cursor: &mut usize) -> ScadValue
                 Some(nums) => ScadValue::num_list(nums),
                 None => ScadValue::list(items),
             }
+        }
+    }
+}
+
+/// Eagerly load a vector/MATRIX param's leaf scalars from `params_ptr` into a (possibly nested) `Lowered::Vec`,
+/// threading the flat slot offset `off` (P.1.6 rung-D 2c.2). A `Scalar` loads one f64 at `*off * 8` bytes → a
+/// `Num`; a `Vec(children)` recurses → a nested `Lowered::Vec`, in the SAME row-major order `shape_and_flatten`
+/// wrote the leaves. Mirrors the arg's `ArgShape`, so `f([[1,2],[3,4]])` binds `[[Num,Num],[Num,Num]]`.
+fn load_arg(
+    fb: &mut FunctionBuilder,
+    params_ptr: Value,
+    shape: &ArgShape,
+    off: &mut usize,
+) -> Result<Lowered, JitError> {
+    match shape {
+        ArgShape::Scalar => {
+            let byte_off =
+                i32::try_from(*off * 8).map_err(|_| JitError::Unsupported("param offset overflow"))?;
+            let v = fb.ins().load(types::F64, MemFlagsData::trusted(), params_ptr, byte_off);
+            *off += 1;
+            Ok(Lowered::Num(v))
+        }
+        ArgShape::Vec(children) => {
+            let mut elems = Vec::with_capacity(children.len());
+            for c in children {
+                elems.push(load_arg(fb, params_ptr, c, off)?);
+            }
+            Ok(Lowered::Vec(elems))
         }
     }
 }
@@ -2295,8 +2342,9 @@ fn compile_vec_builtin(
 }
 
 /// Elementwise `a op b` on two equal-length scalarized vectors (`+`/`−`) — each lane an `fadd`/`fsub` in index
-/// order (order-independent per lane, so bit-identical to the interpreter's `zip_reuse`). A non-`Num` element
-/// (a nested vector — a matrix row) DECLINES: rung A arithmetic is FLAT vectors.
+/// order (order-independent per lane, so bit-identical to the interpreter's `zip_reuse`). RECURSES for a matrix
+/// (a nested `Vec` pair of equal length → elementwise on the rows, 2c.2); a Vec-vs-scalar or unequal-length
+/// element pair DECLINES (a shape mismatch the interpreter handles differently — safer to interpret).
 fn vec_elementwise(
     fb: &mut FunctionBuilder,
     op: BinOp,
@@ -2305,31 +2353,44 @@ fn vec_elementwise(
 ) -> Result<Vec<Lowered>, JitError> {
     a.iter()
         .zip(b)
-        .map(|(x, y)| {
-            let (x, y) = (x.num(fb)?, y.num(fb)?);
-            let v = match op {
-                BinOp::Add => fb.ins().fadd(x, y),
-                BinOp::Sub => fb.ins().fsub(x, y),
-                _ => return Err(JitError::Unsupported("non-elementwise vector op")),
-            };
-            Ok(Lowered::Num(v))
+        .map(|(x, y)| match (x, y) {
+            (Lowered::Vec(xs), Lowered::Vec(ys)) if xs.len() == ys.len() => {
+                Ok(Lowered::Vec(vec_elementwise(fb, op, xs, ys)?))
+            }
+            (Lowered::Vec(_), _) | (_, Lowered::Vec(_)) => {
+                Err(JitError::Unsupported("elementwise shape mismatch"))
+            }
+            _ => {
+                let (x, y) = (x.num(fb)?, y.num(fb)?);
+                let v = match op {
+                    BinOp::Add => fb.ins().fadd(x, y),
+                    BinOp::Sub => fb.ins().fsub(x, y),
+                    _ => return Err(JitError::Unsupported("non-elementwise vector op")),
+                };
+                Ok(Lowered::Num(v))
+            }
         })
         .collect()
 }
 
 /// Scale a scalarized vector by a scalar: `v[i] * s` — matching `map_reuse(v, |e| e * s)` for both `v*s` and
-/// `s*v` (float multiply is bit-commutative).
+/// `s*v` (float multiply is bit-commutative). RECURSES into a nested `Vec` (a matrix row) so `mat * scalar`
+/// scales every leaf (2c.2).
 fn vec_scale(fb: &mut FunctionBuilder, v: &[Lowered], s: Value) -> Result<Vec<Lowered>, JitError> {
     v.iter()
-        .map(|e| {
-            let ev = e.num(fb)?; // materialize BEFORE `fb.ins()` — a nested `fb.ins(e.num(fb))` double-borrows `fb`
-            Ok(Lowered::Num(fb.ins().fmul(ev, s)))
+        .map(|e| match e {
+            Lowered::Vec(row) => Ok(Lowered::Vec(vec_scale(fb, row, s)?)),
+            _ => {
+                let ev = e.num(fb)?; // materialize BEFORE `fb.ins()` — a nested `fb.ins(e.num(fb))` double-borrows `fb`
+                Ok(Lowered::Num(fb.ins().fmul(ev, s)))
+            }
         })
         .collect()
 }
 
 /// `v / s` (element / scalar, `vec_over_scalar`) or `s / v` (scalar / element) — matching `map_reuse(v, |e| e
-/// / s)` / `|e| s / e`. Division isn't commutative, so the operand order is load-bearing.
+/// / s)` / `|e| s / e`. Division isn't commutative, so the operand order is load-bearing. RECURSES into a nested
+/// `Vec` (a matrix row) so `mat / scalar` (and `scalar / mat`) divides every leaf (2c.2).
 fn vec_div(
     fb: &mut FunctionBuilder,
     v: &[Lowered],
@@ -2337,10 +2398,13 @@ fn vec_div(
     vec_over_scalar: bool,
 ) -> Result<Vec<Lowered>, JitError> {
     v.iter()
-        .map(|e| {
-            let e = e.num(fb)?;
-            let q = if vec_over_scalar { fb.ins().fdiv(e, s) } else { fb.ins().fdiv(s, e) };
-            Ok(Lowered::Num(q))
+        .map(|e| match e {
+            Lowered::Vec(row) => Ok(Lowered::Vec(vec_div(fb, row, s, vec_over_scalar)?)),
+            _ => {
+                let e = e.num(fb)?;
+                let q = if vec_over_scalar { fb.ins().fdiv(e, s) } else { fb.ins().fdiv(s, e) };
+                Ok(Lowered::Num(q))
+            }
         })
         .collect()
 }

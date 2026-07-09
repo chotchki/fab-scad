@@ -210,6 +210,53 @@ the push-helper sink; the budget guards its size.
 Start at **2b.1** (the machinery is the load-bearing risk; everything else is operand plumbing on
 top of it).
 
+## 2c — the matrix path (FIXED nesting)
+
+A separate branch from 2b's dynamic lists: nested vectors whose shape is COMPILE-TIME known — a
+`[[a,b],[c,d]]` literal, a matrix constructor, a matrix ARG. The surprise on opening it up: it was
+already half-supported. `Lowered::Vec` nests for free (it holds `Vec<Lowered>`, and a `Lowered` can
+be a `Vec`), the `Vector` literal arm builds the nested value, the `Index` arm returns `elems.nth(i)`
+which IS the nested row, and `len(fixed vec)` is the row count (a `ConstNum` since 2b.4). Only three
+seams DECLINED on nesting: the RETURN flatten, the ARITHMETIC, and the ARG side. So 2c is a short
+grind, not a rewrite.
+
+- **2c.1 — nested (matrix) RETURNS** (done, P.1.6m). The return flatten recurses: leaves stored
+  row-major into the sink, a `VShape` tree recording the nesting so the dispatch rebuilds the
+  interpreter's nested `Value` (`Ret::Nested{shape,leaves}` + `JitOutcome::Nested(Value)`). Bit-
+  identical BY CONSTRUCTION — `rebuild_nested` applies `build_vector`'s exact rule (all-`Num`
+  children → `NumList`, else `List`) at each level. The corpus differential grew a `Nested` arm
+  backed by `value_bits_eq` (a `to_bits`-strict, `NumList`/`List`-agnostic structural compare, so a
+  `NaN` matrix must match bit-for-bit). Unblocked the matrix CONSTRUCTORS (rotation/affine mats from
+  trig). `CompiledFn` went `Copy`→`Clone` to hold the `Rc<VShape>` (an O(1) refcount-bump clone).
+  Coverage 73→82 scalar, 25→28 vec / 520→576 triples.
+- **2c.2 — matrix ARGS + elementwise/scale arithmetic.** `ArgShape` becomes a TREE (`Vec(Vec<ArgShape>)`),
+  `shape_and_flatten` + param-load recurse, and `vec_elementwise`/`vec_scale`/`vec_div` recurse into
+  nested `Vec` elements (declining on element shape-mismatch). With 2c.1 returns + the existing index
+  arm this is transpose/submatrix/reshape + `mat±mat` / `mat*scalar`. A total-leaf cap (`MAX_FLAT_ARG`)
+  bounds the unroll.
+- **2c.2b — matrix PRODUCT** (deferred). OpenSCAD `*` on `mat*mat` / `mat*vec` / `vec*mat` is LINEAR
+  ALGEBRA, not elementwise — a sum-of-products whose REDUCTION ORDER must match `ops.rs` bit-for-bit.
+  These already decline safely today (`vec_dot`'s `.num()` on a row `Err`s), so 2c.2 leaves the
+  `(Mul,Vec,Vec)` routing alone; the product is its own careful rung.
+- **2c.3 — DYNAMIC vec-of-vec** (deferred, the 2b/2c crossover). A comprehension/`rands` producing a
+  runtime-length list of VECTORS needs a list-of-lists arena (2b's `JitArena` grows a nested tier).
+  This is gaussian_rands' matrix branch — the last piece of that end-to-end.
+
+## len of a non-vector — the ConstUndef fold (next lever)
+
+The declined histogram's top blocker after 2c.1 is `len of a non-vector` (364). In a SCALAR
+specialization we STATICALLY know the arg is a scalar, so `len(scalar)` is a compile-time-known
+`undef` — which means `len(x) == N` folds to `false` and PRUNES, exactly like the ConstBool/ConstNum
+folds. Add a `Lowered::ConstUndef` (a compile-time undef): `len(non-list)` → `ConstUndef`;
+`is_undef(ConstUndef)` → `ConstBool(true)`, the other type-predicates → `false`; comparisons fold to
+the interpreter's undef semantics (`undef==undef` true, `undef==x` false, ordered `<`/`>` false);
+`const_truthy(ConstUndef)` → `Some(false)` (undef is falsy, so `undef ? … : …` prunes to the else).
+A `ConstUndef` that must become a RUNTIME number (`len(x) + 1`) DECLINES (`.num()` → `Err`, like a
+bool) — it only folds in predicates/comparisons/ternary-conditions. Reclaims functions where a
+scalar-arg dimension check folds away; composes with every other fold. Measure the real reclaim (the
+histogram is FIRST-blocker, so a folded `len` may just expose the next blocker) but it's more of the
+same cheap shape-dispatch that's been paying off.
+
 ## Known determinism edge — bail-after-partial-draw (for the hardening pass)
 
 A JIT that BAILS (`raised` → the dispatch's `None`) *after* it has already drawn some seedless

@@ -901,6 +901,47 @@ fn matrix_return_is_bit_identical() {
 }
 
 #[test]
+fn matrix_arg_ops_are_bit_identical() {
+    // P.1.6 rung-D 2c.2: a MATRIX arg (a nested list) flattens to a nested `ArgShape` and binds a nested
+    // `Lowered::Vec`, so `m[i][j]` indexes it, a nested literal TRANSPOSES it, and `mat±mat` / `mat*scalar` /
+    // `mat/scalar` recurse elementwise. Matrix PRODUCT (`mat*mat`, linear-algebra `*`) stays DECLINED this rung
+    // (the reduction-order-sensitive piece is 2c.2b) — the JIT returns `None` for that shape → interpreter owns it.
+    let prog = program(
+        "function el(m) = m[1][0];\
+         function t(m) = [[m[0][0], m[1][0]], [m[0][1], m[1][1]]];\
+         function madd(a, b) = a + b;\
+         function msub(a, b) = a - b;\
+         function msc(m, k) = m * k;\
+         function mdiv(m, k) = m / k;\
+         function mmul(a, b) = a * b;",
+    );
+    let reg = JitRegistry::build(
+        defs(&prog).iter().map(|&(n, p, b)| (n, p, b)),
+        consts(&prog).iter().map(|&(n, v)| (n, v)),
+    )
+    .expect("registry builds");
+
+    // 2×2 matrix args (a nested `List` of `NumList` rows) — the shape 2c.2 newly scalarizes.
+    let m = || Value::list(vec![Value::num_list(vec![1.0, 2.0]), Value::num_list(vec![3.0, 4.0])]);
+    let n = || Value::list(vec![Value::num_list(vec![5.0, 6.0]), Value::num_list(vec![7.0, 8.0])]);
+
+    // A matrix arg indexed twice → a scalar (`m[1][0]` = 3).
+    assert_call_eq(&reg, &prog, "el", &[m()]);
+    // A matrix arg rebuilt transposed → a nested return (2c.1 × 2c.2 arg).
+    assert_call_nested_eq(&reg, &prog, "t", &[m()]);
+    // Elementwise matrix arithmetic (recursing the row vectors).
+    assert_call_nested_eq(&reg, &prog, "madd", &[m(), n()]);
+    assert_call_nested_eq(&reg, &prog, "msub", &[n(), m()]);
+    assert_call_nested_eq(&reg, &prog, "msc", &[m(), Value::Num(2.5)]);
+    assert_call_nested_eq(&reg, &prog, "mdiv", &[m(), Value::Num(4.0)]);
+    // Matrix PRODUCT is NOT this rung — the matrix shape declines, so the interpreter handles it.
+    assert!(
+        call_jit(&reg, "mmul", &[m(), n()]).is_none(),
+        "mat*mat (linear-algebra product) declines this rung (deferred to 2c.2b)"
+    );
+}
+
+#[test]
 fn over_long_vector_arg_declines() {
     // A vector longer than MAX_VEC_ARG (16) is NOT scalarized — unrolling it would explode compile/code size,
     // and that dynamic-length case is rung D. call_numeric declines → the interpreter runs the body.

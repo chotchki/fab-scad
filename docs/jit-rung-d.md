@@ -234,10 +234,13 @@ grind, not a rewrite.
   nested `Vec` elements (declining on element shape-mismatch). With 2c.1 returns + the existing index
   arm this is transpose/submatrix/reshape + `mat±mat` / `mat*scalar`. A total-leaf cap (`MAX_FLAT_ARG`)
   bounds the unroll.
-- **2c.2b — matrix PRODUCT** (deferred). OpenSCAD `*` on `mat*mat` / `mat*vec` / `vec*mat` is LINEAR
-  ALGEBRA, not elementwise — a sum-of-products whose REDUCTION ORDER must match `ops.rs` bit-for-bit.
-  These already decline safely today (`vec_dot`'s `.num()` on a row `Err`s), so 2c.2 leaves the
-  `(Mul,Vec,Vec)` routing alone; the product is its own careful rung.
+- **2c.2b — matrix PRODUCT** (done, P.1.6p). OpenSCAD `*` on `mat*mat` / `mat*vec` / `vec*mat` is
+  LINEAR ALGEBRA, not elementwise — a sum-of-products whose REDUCTION ORDER must match `ops.rs`. The
+  gift: the interpreter's `ops::dot` is the SAME 4-lane reduction (`lane[i%4] += a[i]*b[i]`, then
+  `(l0+l1)+(l2+l3)`) the JIT's `vec_dot` already emits, so every product reduces to `vec_dot` calls
+  and stays bit-identical for free. `vec_mat_product` dispatches by compile-time shape (`is_flat_vec`
+  / `is_matrix`); every rectangularity / dimension / empty check is static, so a non-conforming
+  operand (the interpreter's `undef`) DECLINES rather than miscompute. +1 scalar / +1 vec / +1 mat.
 - **2c.3 — DYNAMIC vec-of-vec** (deferred, the 2b/2c crossover). A comprehension/`rands` producing a
   runtime-length list of VECTORS needs a list-of-lists arena (2b's `JitArena` grows a nested tier).
   This is gaussian_rands' matrix branch — the last piece of that end-to-end.

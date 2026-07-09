@@ -1823,9 +1823,10 @@ fn compile_expr(fb: &mut FunctionBuilder, expr: &Expr, lower: &Lower) -> Result<
                 | (BinOp::Mul, Lowered::Vec(v), Lowered::Num(s)) => {
                     Ok(Lowered::Vec(vec_scale(fb, v, *s)?))
                 }
-                (BinOp::Mul, Lowered::Vec(x), Lowered::Vec(y)) if !x.is_empty() && x.len() == y.len() => {
-                    Ok(Lowered::Num(vec_dot(fb, x, y)?))
-                }
+                // `vec/mat * vec/mat` — the interpreter's LINEAR-ALGEBRA `*` (2c.2b): vec·vec dot, vec×mat,
+                // mat×vec, mat×mat. Dispatched by compile-time shape; a non-rectangular / empty / dimension-
+                // mismatched operand (the interpreter's `undef`) DECLINES inside `vec_mat_product`.
+                (BinOp::Mul, Lowered::Vec(x), Lowered::Vec(y)) => vec_mat_product(fb, x, y),
                 (BinOp::Div, Lowered::Vec(v), Lowered::Num(s)) => {
                     Ok(Lowered::Vec(vec_div(fb, v, *s, true)?))
                 }
@@ -2467,6 +2468,99 @@ fn vec_dot(fb: &mut FunctionBuilder, a: &[Lowered], b: &[Lowered]) -> Result<Val
     let l01 = fb.ins().fadd(lanes[0], lanes[1]);
     let l23 = fb.ins().fadd(lanes[2], lanes[3]);
     Ok(fb.ins().fadd(l01, l23))
+}
+
+/// True if every element of a scalarized vector is a SCALAR (a `Num`/`ConstNum`) — a FLAT vector, not a matrix
+/// row-list. `[]` is vacuously flat (an empty operand's product is `undef` anyway → declined by the length guards).
+fn is_flat_vec(v: &[Lowered]) -> bool {
+    v.iter().all(|e| matches!(e, Lowered::Num(_) | Lowered::ConstNum(_)))
+}
+
+/// True if `v` is a non-empty MATRIX — every element is itself a `Lowered::Vec` (a row). Mixed (some scalar, some
+/// vector) is neither flat nor a matrix and DECLINES (the interpreter treats such a ragged list as `undef` here).
+fn is_matrix(v: &[Lowered]) -> bool {
+    !v.is_empty() && v.iter().all(|e| matches!(e, Lowered::Vec(_)))
+}
+
+/// OpenSCAD `*` on two scalarized vectors/matrices (2c.2b), mirroring `ops::apply_binary`'s Mul cases EXACTLY:
+/// vec·vec (equal non-empty length) → the lane `dot` (a SCALAR); vec×mat, mat×vec, mat×mat → linear-algebra
+/// products, each reducing to inner `dot`s (so `vec_dot` == `ops::dot` keeps every product bit-identical). All
+/// shapes are compile-time known, so a non-rectangular / empty / dimension-mismatched operand (the interpreter's
+/// `undef`) DECLINES here rather than miscompute.
+fn vec_mat_product(fb: &mut FunctionBuilder, x: &[Lowered], y: &[Lowered]) -> Result<Lowered, JitError> {
+    match (is_flat_vec(x), is_flat_vec(y), is_matrix(x), is_matrix(y)) {
+        // vec · vec → dot (both non-empty + equal length; else `undef` → decline). Matches the interpreter's
+        // `(NumList, NumList) if !x.is_empty() && x.len()==y.len()` guard.
+        (true, true, _, _) => {
+            if x.is_empty() || x.len() != y.len() {
+                return Err(JitError::Unsupported("dot of empty or mismatched-length vectors"));
+            }
+            Ok(Lowered::Num(vec_dot(fb, x, y)?))
+        }
+        (true, false, _, true) => vec_times_mat(fb, x, y), // vec × mat
+        (false, true, true, _) => mat_times_vec(fb, x, y), // mat × vec
+        (false, false, true, true) => mat_times_mat(fb, x, y), // mat × mat
+        // ragged / mixed / non-conforming → the interpreter's `undef`; the JIT can't hold it, so decline.
+        _ => Err(JitError::Unsupported("unsupported vector/matrix product")),
+    }
+}
+
+/// Matrix × vector (2c.2b): `out[i] = dot(mat[i], vec)` — `ops::mat_times_vec`. Every row must be a numeric
+/// vector of `vec`'s length (rectangular), checked at COMPILE time; a mismatch / non-numeric row is `undef` →
+/// DECLINE. `vec_dot(row, vec)` keeps the arg order (a=row, b=vec) the interpreter's `dot(r, vec)` uses.
+fn mat_times_vec(fb: &mut FunctionBuilder, mat: &[Lowered], vec: &[Lowered]) -> Result<Lowered, JitError> {
+    let mut out = Vec::with_capacity(mat.len());
+    for row in mat {
+        let Lowered::Vec(r) = row else {
+            return Err(JitError::Unsupported("non-rectangular matrix in mat×vec"));
+        };
+        if r.len() != vec.len() {
+            return Err(JitError::Unsupported("mat×vec dimension mismatch"));
+        }
+        out.push(Lowered::Num(vec_dot(fb, r, vec)?));
+    }
+    Ok(Lowered::Vec(out))
+}
+
+/// Vector × matrix (2c.2b): `out[j] = dot(vec, col_j)`, `col_j = [mat[0][j], …, mat[k][j]]` — `ops::vec_times_mat`.
+/// Requires `vec.len() == mat.len()` (row count) and a rectangular numeric matrix; else `undef` → DECLINE. The
+/// column is gathered so the reduction reuses `vec_dot` (a=vec, b=col), matching the interpreter's `dot(vec, col)`.
+fn vec_times_mat(fb: &mut FunctionBuilder, vec: &[Lowered], mat: &[Lowered]) -> Result<Lowered, JitError> {
+    if vec.len() != mat.len() {
+        return Err(JitError::Unsupported("vec×mat dimension mismatch"));
+    }
+    let mut rows: Vec<&[Lowered]> = Vec::with_capacity(mat.len());
+    for row in mat {
+        let Lowered::Vec(r) = row else {
+            return Err(JitError::Unsupported("non-rectangular matrix in vec×mat"));
+        };
+        rows.push(r);
+    }
+    let cols = rows.first().map_or(0, |r| r.len());
+    if cols == 0 || rows.iter().any(|r| r.len() != cols) {
+        return Err(JitError::Unsupported("empty or non-rectangular matrix in vec×mat"));
+    }
+    let mut out = Vec::with_capacity(cols);
+    for j in 0..cols {
+        // Column j = [rows[0][j], rows[1][j], …] — one leaf per row, so `col.len() == vec.len()`.
+        let col: Vec<Lowered> = rows.iter().map(|r| r[j].clone()).collect();
+        out.push(Lowered::Num(vec_dot(fb, vec, &col)?));
+    }
+    Ok(Lowered::Vec(out))
+}
+
+/// Matrix × matrix (2c.2b): each LEFT row times the right matrix — `ops::mat_times_mat` folds it exactly this
+/// way (`vec_times_mat(a_row, b)`), so the result is a list of vectors (a matrix). A non-numeric / non-conforming
+/// row is `undef` → DECLINE (propagated from `vec_times_mat`).
+fn mat_times_mat(fb: &mut FunctionBuilder, a: &[Lowered], b: &[Lowered]) -> Result<Lowered, JitError> {
+    let mut out = Vec::with_capacity(a.len());
+    for row in a {
+        let Lowered::Vec(r) = row else {
+            return Err(JitError::Unsupported("non-rectangular left matrix in mat×mat"));
+        };
+        out.push(vec_times_mat(fb, r, b)?);
+    }
+    Ok(Lowered::Vec(out))
 }
 
 /// Negate a `Lowered` — a number `fneg`, a vector elementwise (recursing so a nested vector negates too),

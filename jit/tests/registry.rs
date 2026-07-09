@@ -904,8 +904,7 @@ fn matrix_return_is_bit_identical() {
 fn matrix_arg_ops_are_bit_identical() {
     // P.1.6 rung-D 2c.2: a MATRIX arg (a nested list) flattens to a nested `ArgShape` and binds a nested
     // `Lowered::Vec`, so `m[i][j]` indexes it, a nested literal TRANSPOSES it, and `mat±mat` / `mat*scalar` /
-    // `mat/scalar` recurse elementwise. Matrix PRODUCT (`mat*mat`, linear-algebra `*`) stays DECLINED this rung
-    // (the reduction-order-sensitive piece is 2c.2b) — the JIT returns `None` for that shape → interpreter owns it.
+    // `mat/scalar` recurse elementwise. (`mat*mat` is now the linear-algebra PRODUCT — 2c.2b — asserted below.)
     let prog = program(
         "function el(m) = m[1][0];\
          function t(m) = [[m[0][0], m[1][0]], [m[0][1], m[1][1]]];\
@@ -934,11 +933,8 @@ fn matrix_arg_ops_are_bit_identical() {
     assert_call_nested_eq(&reg, &prog, "msub", &[n(), m()]);
     assert_call_nested_eq(&reg, &prog, "msc", &[m(), Value::Num(2.5)]);
     assert_call_nested_eq(&reg, &prog, "mdiv", &[m(), Value::Num(4.0)]);
-    // Matrix PRODUCT is NOT this rung — the matrix shape declines, so the interpreter handles it.
-    assert!(
-        call_jit(&reg, "mmul", &[m(), n()]).is_none(),
-        "mat*mat (linear-algebra product) declines this rung (deferred to 2c.2b)"
-    );
+    // Matrix PRODUCT now computes (2c.2b landed) — `a * b` is the linear-algebra product, a nested result.
+    assert_call_nested_eq(&reg, &prog, "mmul", &[m(), n()]);
 }
 
 #[test]
@@ -974,6 +970,46 @@ fn const_undef_len_of_scalar_prunes() {
     }
     // The VECTOR spec of dimcheck still folds `len(vec)==3` to a REAL comparison (the ConstNum path, not undef).
     assert_call_eq(&reg, &prog, "dimcheck", &[vec_arg(&[10.0, 20.0, 30.0])]); // len==3 → x[0]=10
+}
+
+#[test]
+fn matrix_product_is_bit_identical() {
+    // P.1.6 rung-D 2c.2b: OpenSCAD's LINEAR-ALGEBRA `*` — mat×vec, vec×mat, mat×mat (and vec·vec) — each
+    // reducing to the 4-lane `dot` (== `ops::dot`, so bit-identical). Shapes are compile-time known, so a
+    // non-conforming operand (the interpreter's `undef`) DECLINES. Vector results come back flat (rung C), a
+    // matrix result nested (2c.1). NON-square exercises the column-gather + the rectangularity guards.
+    let prog = program(
+        "function mv(m, v) = m * v;\
+         function vm(v, m) = v * m;\
+         function mm(a, b) = a * b;\
+         function dotp(a, b) = a * b;",
+    );
+    let reg = JitRegistry::build(
+        defs(&prog).iter().map(|&(n, p, b)| (n, p, b)),
+        consts(&prog).iter().map(|&(n, v)| (n, v)),
+    )
+    .expect("registry builds");
+
+    let m22 = || Value::list(vec![Value::num_list(vec![1.0, 2.0]), Value::num_list(vec![3.0, 4.0])]);
+    let n22 = || Value::list(vec![Value::num_list(vec![5.0, 6.0]), Value::num_list(vec![7.0, 8.0])]);
+    let m23 =
+        || Value::list(vec![Value::num_list(vec![1.0, 2.0, 3.0]), Value::num_list(vec![4.0, 5.0, 6.0])]);
+
+    // mat × vec → a vector (`out[i] = dot(row_i, v)`), square + non-square (2×3 · vec3 → vec2).
+    assert_call_vec_eq(&reg, &prog, "mv", &[m22(), vec_arg(&[10.0, 20.0])]);
+    assert_call_vec_eq(&reg, &prog, "mv", &[m23(), vec_arg(&[1.0, 2.0, 3.0])]);
+    // vec × mat → a vector (`out[j] = dot(v, col_j)`), square + non-square (vec2 · 2×3 → vec3).
+    assert_call_vec_eq(&reg, &prog, "vm", &[vec_arg(&[10.0, 20.0]), m22()]);
+    assert_call_vec_eq(&reg, &prog, "vm", &[vec_arg(&[1.0, 2.0]), m23()]);
+    // mat × mat → a matrix (each left row × the right matrix) — a nested return.
+    assert_call_nested_eq(&reg, &prog, "mm", &[m22(), n22()]);
+    // vec · vec → a scalar dot (4 lanes exercise the full lane structure).
+    assert_call_eq(&reg, &prog, "dotp", &[vec_arg(&[1.0, 2.0, 3.0, 4.0]), vec_arg(&[5.0, 6.0, 7.0, 8.0])]);
+    // A non-conforming product (2×2 mat × vec3, dimension mismatch) is `undef` → DECLINES → interpreter owns it.
+    assert!(
+        call_jit(&reg, "mv", &[m22(), vec_arg(&[1.0, 2.0, 3.0])]).is_none(),
+        "2×2 mat × vec3 is undef (dimension mismatch) → declines this shape"
+    );
 }
 
 #[test]

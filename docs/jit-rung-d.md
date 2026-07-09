@@ -241,9 +241,19 @@ grind, not a rewrite.
   and stays bit-identical for free. `vec_mat_product` dispatches by compile-time shape (`is_flat_vec`
   / `is_matrix`); every rectangularity / dimension / empty check is static, so a non-conforming
   operand (the interpreter's `undef`) DECLINES rather than miscompute. +1 scalar / +1 vec / +1 mat.
-- **2c.3 — DYNAMIC vec-of-vec** (deferred, the 2b/2c crossover). A comprehension/`rands` producing a
-  runtime-length list of VECTORS needs a list-of-lists arena (2b's `JitArena` grows a nested tier).
-  This is gaussian_rands' matrix branch — the last piece of that end-to-end.
+- **2c.3 — DYNAMIC vec-of-vec** (done, P.1.6s). A comprehension whose BODY is a fixed-width numeric
+  vector → a runtime-length MATRIX. The arena did NOT need a nested tier: the flat `Vec<f64>` sink stays
+  flat (push W scalars/row, row-major), and the dispatch RESHAPES flat→n×W at the return via
+  `chunks(width)` → `List` of `NumList` rows (`Lowered::DynMat{handle,width}` + `Ret::DynMat{width}`).
+  Two semantic traps handled: `len(DynMat)` → `flat_len / width` (the ROW count, BEFORE the ConstUndef
+  `len` fold) and `is_list(DynMat)` → true. The 1-wide trap (`[for(i) [i]]` is `[[0],[1]]`, a matrix,
+  NOT flat `[0,1]`) keys the DynList-vs-DynMat choice on body NESTING, not element count. Determinism:
+  the body compiles once left-to-right and runs in the loop, so a body-`rands` draws ROW-MAJOR
+  (e0..eW-1 per row, rows in order) — the piece-1 weave extended, INDEPENDENTLY adversarially verified
+  bit-identical (drawing iterables, mixed cells, mid-row bail, NaN/±0) since the corpus battery can't
+  feed an internal body pattern. +0 corpus (capability built, unit+adversarially gated). This is the
+  dynamic sibling of 2b.N's unroll — gaussian_rands' matrix branch; the whole function needs more
+  (undef seed, a runtime-branch-with-bail) but the vec-of-vec capability it rests on is now in.
 
 ## 2c.3 — the ConstUndef fold (len of a non-vector) — DONE
 

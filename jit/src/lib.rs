@@ -53,6 +53,10 @@ enum Ret {
     /// `sink` (`*mut Vec<f64>`) via a loop; the `f64` return is a dummy and the dispatch reads the sink into a
     /// `Value::NumList`. Length isn't known at compile time (unlike `Vec(n)`), so there's no descriptor.
     DynVec,
+    /// A DYNAMIC-length MATRIX (P.1.6 rung-D 2c.3): the body pushed `width` scalars per row (row-major) into the
+    /// sink; the dispatch RESHAPES the flat buffer into a `List` of `width`-chunks (each a `NumList` row). Same
+    /// sink mechanism as `DynVec`, plus the compile-time `width` to un-flatten by.
+    DynMat { width: usize },
 }
 
 /// The nesting SHAPE of a fixed-vector return (P.1.6 rung-D 2c.1) — a tree mirroring the `Lowered::Vec` the body
@@ -777,6 +781,24 @@ impl NumericJit for JitRegistry {
                 };
                 Some(JitOutcome::Vec(result))
             }
+            Ret::DynMat { width } => {
+                // Like DynVec, but RESHAPE the flat sink into a `List` of `width`-chunks (2c.3). `None` = budget
+                // bail / assert → interpret.
+                unsafe { compiled.call(&scratch, &mut [0.0], rand, arena_ptr) }?;
+                let flat = if arena.result.is_null() {
+                    Vec::new()
+                } else {
+                    // SAFETY: as in `DynVec` — `arena.result` is the live boxed `Vec<f64>` the body filled.
+                    unsafe { std::mem::take(&mut *arena.result) }
+                };
+                // `width` scalars were pushed per row, so `flat.len()` is a multiple of `width`. Reshape row-major
+                // into a `Value::List` of `NumList` rows — the interpreter's nested matrix, bit-identical (its
+                // `PartialEq` even makes an empty `List` equal an empty `NumList`).
+                debug_assert!(flat.len() % width == 0, "DynMat flat len {} not a multiple of width {width}", flat.len());
+                let rows: Vec<ScadValue> =
+                    flat.chunks(*width).map(|row| ScadValue::num_list(row.to_vec())).collect();
+                Some(JitOutcome::Nested(ScadValue::list(rows)))
+            }
         }
     }
 }
@@ -1197,6 +1219,12 @@ fn define_one(
                 fb.ins().call(lower.set_result, &[lower.arena_ptr, handle]);
                 (fb.ins().f64const(0.0), Ret::DynVec) // the dispatch reads arena.result into a NumList
             }
+            // A dynamic MATRIX (2c.3) — flag the same flat sink; the dispatch reshapes it into a `List` of
+            // `width`-chunks (row-major). The `f64` return is a dummy, like `DynVec`.
+            Lowered::DynMat { handle, width } => {
+                fb.ins().call(lower.set_result, &[lower.arena_ptr, handle]);
+                (fb.ins().f64const(0.0), Ret::DynMat { width })
+            }
             // A body that evaluates to compile-time `undef` (a scalar-spec `len(scalar)`) — the JIT has no undef
             // return (`JitOutcome` is Num/Bool/Vec/Nested), so DECLINE; the interpreter returns the undef (2c.3).
             Lowered::ConstUndef => return Err(JitError::Unsupported("undef return")),
@@ -1440,16 +1468,47 @@ fn compile_comprehension(
     let mut locals = lower.locals.clone();
     locals.insert(name, Lowered::Num(value));
     let scoped = Lower { locals: &locals, ..*lower };
-    let elem = compile_expr(fb, lc_body, &scoped)?.num(fb)?; // 2b.2: a SCALAR element (a vector/matrix declines)
-    fb.ins().call(lower.vec_push, &[list, elem]);
+    // Compile the body ONCE (its IR runs every iteration). A SCALAR body pushes 1 element/row → a flat DynList
+    // (2b.2). A FIXED-WIDTH numeric-vector body `[a, b, c]` pushes W elements/row in row-major order → a DynMat
+    // (2c.3). Anything else (a nested/ragged vector, a dyn list per row) declines. `width` is compile-time-known
+    // (the body's shape is structural, the same every iteration), so it decides the return type after the loop.
+    let body = compile_expr(fb, lc_body, &scoped)?;
+    // `Some(W)` → the body is a fixed-width VECTOR row (→ DynMat, even W == 1: `[for(i) [i]]` is `[[0],[1],…]`,
+    // a matrix, NOT the flat `[0,1,…]`); `None` → a SCALAR row (→ flat DynList). The distinction is the body's
+    // NESTING, not its element count.
+    let row_width = match &body {
+        Lowered::Vec(elems)
+            if !elems.is_empty()
+                && elems.len() <= MAX_VEC_ARG
+                && elems.iter().all(|e| matches!(e, Lowered::Num(_) | Lowered::ConstNum(_))) =>
+        {
+            // A matrix row: push each of the W scalars IN ORDER (e0..eW-1) — the row-major layout the dispatch
+            // reshapes by, and the order a body-`rands` must draw in (piece 1 weave, one draw per element).
+            for e in elems {
+                let ev = e.num(fb)?;
+                fb.ins().call(lower.vec_push, &[list, ev]);
+            }
+            Some(elems.len())
+        }
+        // A scalar row: push 1. A nested/ragged/over-wide vector, a bool/dynlist/undef body → `num` Err → decline.
+        _ => {
+            let elem = body.num(fb)?;
+            fb.ins().call(lower.vec_push, &[list, elem]);
+            None
+        }
+    };
     let one = fb.ins().iconst(types::I64, 1);
     let i_next = fb.ins().iadd(i, one);
     fb.ins().jump(header, &[BlockArg::Value(i_next)]);
     fb.seal_block(header); // both predecessors (setup + body) are now declared
 
-    // exit: control CONTINUES; the comprehension's value is the materialized DynList's handle.
+    // exit: control CONTINUES; the comprehension's value is the materialized handle — a flat DynList (scalar
+    // body) or a DynMat carrying its row width (a fixed-width vector body, 2c.3), which the RETURN reshapes.
     fb.switch_to_block(exit);
-    Ok(Lowered::DynList(list))
+    match row_width {
+        Some(width) => Ok(Lowered::DynMat { handle: list, width }),
+        None => Ok(Lowered::DynList(list)),
+    }
 }
 
 /// A compiled sub-expression's value, SCALARIZED (P.1.6 rung A). `Num`/`Bool` are a single IR value; `Vec`
@@ -1488,6 +1547,13 @@ enum Lowered {
     /// `ops::order`), and `truthy` → `false` (undef is falsy) so `len(x) ? … : …` and `len(x)==N ? … : …`
     /// PRUNE. It has no numeric value, so feeding it a runtime numeric op DECLINES (`num` → `Err`, like a bool).
     ConstUndef,
+    /// A DYNAMIC-length MATRIX (P.1.6 rung-D 2c.3) — a comprehension whose body is a FIXED-WIDTH numeric vector,
+    /// `[for(i = …) [a, b, c]]`. Stored in the SAME flat arena `Vec<f64>` as [`Lowered::DynList`] (`handle`),
+    /// `width` (W) scalars pushed per row in row-major order; `width` is compile-time-known (the body's shape is
+    /// structural), the ROW COUNT runtime. Consumed by `len` (→ row count = flat_len / W), `is_list`, and the
+    /// RETURN (the dispatch reshapes the flat buffer into a `List` of `width`-chunks). Indexing / arithmetic ON a
+    /// DynMat is out of scope (declines) — it's a materialize-and-return value like `DynList`.
+    DynMat { handle: Value, width: usize },
 }
 
 impl Lowered {
@@ -1504,6 +1570,9 @@ impl Lowered {
             Lowered::Vec(_) => Err(JitError::Unsupported("a vector where a number is required")),
             Lowered::DynList(_) => Err(JitError::Unsupported("a dynamic list where a number is required")),
             Lowered::ConstUndef => Err(JitError::Unsupported("undef where a number is required")),
+            Lowered::DynMat { .. } => {
+                Err(JitError::Unsupported("a dynamic matrix where a number is required"))
+            }
         }
     }
 
@@ -1559,6 +1628,7 @@ fn truthy(fb: &mut FunctionBuilder, v: &Lowered) -> Result<Value, JitError> {
         Lowered::ConstUndef => Ok(fb.ins().iconst(types::I8, 0)),
         Lowered::Vec(_) => Err(JitError::Unsupported("a vector as a truth condition")),
         Lowered::DynList(_) => Err(JitError::Unsupported("a dynamic list as a truth condition")),
+        Lowered::DynMat { .. } => Err(JitError::Unsupported("a dynamic matrix as a truth condition")),
     }
 }
 
@@ -2129,7 +2199,9 @@ fn compile_type_predicate(fb: &mut FunctionBuilder, name: &str, arg: &Lowered) -
         "is_undef" => Lowered::ConstBool(matches!(arg, Lowered::ConstUndef)),
         "is_string" | "is_function" => Lowered::ConstBool(false),
         "is_bool" => Lowered::ConstBool(matches!(arg, Lowered::Bool(_) | Lowered::ConstBool(_))),
-        "is_list" => Lowered::ConstBool(matches!(arg, Lowered::Vec(_) | Lowered::DynList(_))),
+        "is_list" => {
+            Lowered::ConstBool(matches!(arg, Lowered::Vec(_) | Lowered::DynList(_) | Lowered::DynMat { .. }))
+        }
         "is_num" => match arg {
             // `is_num(NaN)` is FALSE (L.2.8n): `x == x` (ordered) is the runtime not-NaN test.
             Lowered::Num(x) => Lowered::Bool(fb.ins().fcmp(FloatCC::Equal, *x, *x)),
@@ -2324,6 +2396,19 @@ fn compile_vec_builtin(
                     let n_i = fb.inst_results(call)[0];
                     Ok(Lowered::Num(fb.ins().fcvt_from_sint(types::F64, n_i)))
                 }
+                // A dynamic MATRIX's length is its ROW COUNT (2c.3) — the flat element count / the row width. The
+                // flat count is a multiple of `width` (W pushes/row), so the signed i64 divide is exact.
+                Lowered::DynMat { handle, width } => {
+                    let call = fb.ins().call(lower.vec_len, &[handle]);
+                    let flat_i = fb.inst_results(call)[0];
+                    #[allow(
+                        clippy::cast_possible_wrap,
+                        reason = "width ∈ [1, MAX_VEC_ARG] — tiny, never wraps i64"
+                    )]
+                    let w = fb.ins().iconst(types::I64, width as i64);
+                    let rows_i = fb.ins().sdiv(flat_i, w);
+                    Ok(Lowered::Num(fb.ins().fcvt_from_sint(types::F64, rows_i)))
+                }
                 // `len` of a NON-list (a scalar / bool — in a scalar spec `len(scalar_param)`) is `undef` (2c.3):
                 // a compile-time `ConstUndef` so `len(x) == N` / `len(x) ? …` FOLD + prune instead of declining.
                 // (A string has a real length in OpenSCAD, but a string never reaches the JIT — it declines at the
@@ -2406,6 +2491,8 @@ fn compile_vec_builtin(
                     }
                     // min/max reducing a DYNAMIC list is a runtime fold (a loop) — a future rung; decline.
                     Lowered::DynList(_) => return Err(JitError::Unsupported("min/max of a dynamic list")),
+                    // min/max of a dynamic matrix isn't a numeric reduction (2c.3) — decline.
+                    Lowered::DynMat { .. } => return Err(JitError::Unsupported("min/max of a dynamic matrix")),
                     // `min(undef)` is `undef` (2c.3) — no numeric reduction to emit; decline.
                     Lowered::ConstUndef => return Err(JitError::Unsupported("min/max of undef")),
                 }
@@ -2623,6 +2710,8 @@ fn neg_lowered(fb: &mut FunctionBuilder, v: Lowered) -> Result<Lowered, JitError
         Lowered::Bool(_) | Lowered::ConstBool(_) => Err(JitError::Unsupported("negate a boolean")),
         // Elementwise-negating a DYNAMIC list is a runtime map (a loop) — a future rung (2b.4); decline.
         Lowered::DynList(_) => Err(JitError::Unsupported("negate a dynamic list")),
+        // Negating a dynamic matrix is a runtime map too (2c.3) — decline.
+        Lowered::DynMat { .. } => Err(JitError::Unsupported("negate a dynamic matrix")),
         // `-undef` is `undef` (`ops::apply_unary`) — stays a `ConstUndef` so a wrapping fold still sees it (2c.3).
         Lowered::ConstUndef => Ok(Lowered::ConstUndef),
     }

@@ -1046,6 +1046,46 @@ fn fixed_vector_comprehension_unrolls() {
 }
 
 #[test]
+fn dynamic_matrix_comprehension_is_bit_identical() {
+    // P.1.6 rung-D 2c.3: a comprehension whose body is a FIXED-WIDTH numeric vector, over a RUNTIME-length
+    // iterable (range / dyn list), materializes a dynamic MATRIX — W scalars pushed per row into the flat arena,
+    // reshaped into a `List` of `width`-chunks at the return. `m` is range→matrix; `dm` iterates a dyn list;
+    // `w1` is the 1-WIDE case (`[i]` → `[[0],[1],…]`, a matrix, NOT the flat `[0,1,…]`); `rows` = `len` (row
+    // count); `g` DRAWS per cell (row-major determinism). Empty (n<0) → `[]`; over-budget → bail (None).
+    let prog = program(
+        "function m(n) = [for (i = [0:n]) [i, i * i]];\
+         function dm(n) = [for (x = [for (j = [0:n]) j]) [x, x * 2]];\
+         function w1(n) = [for (i = [0:n]) [i]];\
+         function rows(n) = len([for (i = [0:n]) [i, i]]);\
+         function g(n) = [for (i = [0:n]) [rands(0, 1, 1)[0], rands(0, 1, 1)[0]]];",
+    );
+    let reg = JitRegistry::build(
+        defs(&prog).iter().map(|&(n, p, b)| (n, p, b)),
+        consts(&prog).iter().map(|&(n, v)| (n, v)),
+    )
+    .expect("registry builds");
+
+    // range → n×2 matrix, incl. a single row (n=0 → [[0,0]]) and EMPTY (n=-1 → [0:-1] → []).
+    for n in [-1.0, 0.0, 1.0, 3.0, 7.0] {
+        assert_call_nested_eq(&reg, &prog, "m", &[Value::Num(n)]);
+        assert_call_nested_eq(&reg, &prog, "w1", &[Value::Num(n)]); // the 1-wide-vs-scalar distinction
+        assert_call_eq(&reg, &prog, "rows", &[Value::Num(n)]); // len = row count (n+1, or 0)
+    }
+    // A dyn-list iterable feeding a matrix comprehension (comprehension over a comprehension).
+    assert_call_nested_eq(&reg, &prog, "dm", &[Value::Num(4.0)]);
+    // rands PER CELL — the JIT draws col0 then col1 per row, rows in order (the same fresh stream the
+    // interpreter walks), so the whole matrix is bit-identical. This is the piece-1 weave over a matrix.
+    for n in [0.0, 2.0, 5.0] {
+        assert_call_nested_eq(&reg, &prog, "g", &[Value::Num(n)]);
+    }
+    // Over-budget row count → BAIL → interpreter owns it (like the flat dynamic comprehension).
+    assert!(
+        call_jit(&reg, "m", &[Value::Num(2_000_000.0)]).is_none(),
+        "a matrix comprehension over 2M rows exceeds the budget → bails to the interpreter"
+    );
+}
+
+#[test]
 fn matrix_product_is_bit_identical() {
     // P.1.6 rung-D 2c.2b: OpenSCAD's LINEAR-ALGEBRA `*` — mat×vec, vec×mat, mat×mat (and vec·vec) — each
     // reducing to the 4-lane `dot` (== `ops::dot`, so bit-identical). Shapes are compile-time known, so a

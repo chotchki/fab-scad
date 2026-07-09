@@ -622,8 +622,8 @@ fn seedless_rands_is_bit_identical() {
     assert_call_eq(&reg, &prog, "two", &[Value::Num(0.0), Value::Num(1.0)]);
     assert_call_eq(&reg, &prog, "two", &[Value::Num(-1.0), Value::Num(1.0)]);
 
-    // A NON-literal count (dynamic → rung-D piece 2) and a SEEDED rands (a pure follow-on, not piece 1) both
-    // decline their whole function → the interpreter handles them.
+    // A NON-literal count now compiles to a draw LOOP (rung-D 2b.3, covered by its own test); a SEEDED rands
+    // (a pure follow-on, not the seedless weave) still declines → the interpreter handles it.
     let other = program(
         "function dyn(n) = rands(0, 1, n);\
          function seeded(x) = rands(0, 1, 2, 42);",
@@ -633,7 +633,7 @@ fn seedless_rands_is_bit_identical() {
         consts(&other).iter().map(|&(n, v)| (n, v)),
     )
     .expect("registry builds");
-    assert!(other_reg.get("dyn").is_none(), "a dynamic rands count declines (rung-D piece 2)");
+    assert!(other_reg.get("dyn").is_some(), "a dynamic rands count compiles to a draw loop (rung-D 2b.3)");
     assert!(other_reg.get("seeded").is_none(), "a seeded rands declines (pure follow-on)");
 }
 
@@ -737,6 +737,38 @@ fn dynamic_index_is_bit_identical() {
     assert!(
         call_jit(&reg, "oob", &[Value::Num(3.0)]).is_none(),
         "an out-of-range dynamic index bails to the interpreter (undef)"
+    );
+}
+
+#[test]
+fn dynamic_count_rands_is_bit_identical() {
+    // P.1.6 rung-D 2b.3: `rands(min, max, count)` with a RUNTIME count → a draw LOOP materializing a DynList
+    // (the gaussian_rands `nums = rands(0,1,dim*n*2)` shape). Each draw is `jit_rand_next` in loop order,
+    // advancing the woven stream exactly as the interpreter's `(0..count)` — bit-identical (both start a fresh
+    // DEFAULT_SEED stream). An undef/over-budget count bails.
+    let prog = program(
+        "function draws(n) = rands(0, 1, n);\
+         function sumdraws(n) = let(n2 = rands(0, 1, n)) [for (i = [0:n-1]) n2[i]];\
+         function gr_ish(n) = let(nums = rands(0, 1, 2*n)) [for (j = [0:n-1]) nums[2*j] + nums[2*j+1]];",
+    );
+    let reg = JitRegistry::build(
+        defs(&prog).iter().map(|&(n, p, b)| (n, p, b)),
+        consts(&prog).iter().map(|&(n, v)| (n, v)),
+    )
+    .expect("registry builds");
+
+    assert!(reg.get("draws").is_some(), "a dynamic-count rands compiles to a draw loop (rung 2b.3)");
+    assert_call_vec_eq(&reg, &prog, "draws", &[Value::Num(3.0)]); // 3 draws
+    assert_call_vec_eq(&reg, &prog, "draws", &[Value::Num(0.0)]); // 0 draws → []
+    assert_call_vec_eq(&reg, &prog, "draws", &[Value::Num(20.0)]); // > MAX_VEC_ARG → the loop path, not a fixed vec
+    assert_call_vec_eq(&reg, &prog, "sumdraws", &[Value::Num(4.0)]); // draw then index
+    // The gaussian_rands `rdata` core: pairs of draws summed over a materialized `nums`.
+    assert_call_vec_eq(&reg, &prog, "gr_ish", &[Value::Num(3.0)]); // 6 draws → 3 pair-sums
+    assert_call_vec_eq(&reg, &prog, "gr_ish", &[Value::Num(1.0)]);
+    // An over-budget count bails to the interpreter.
+    assert!(
+        call_jit(&reg, "draws", &[Value::Num(1_000_001.0)]).is_none(),
+        "an over-budget rands count bails (COMPREHENSION_BUDGET)"
     );
 }
 

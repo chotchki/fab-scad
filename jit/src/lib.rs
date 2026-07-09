@@ -270,6 +270,19 @@ extern "C" fn jit_range_len(start: f64, step: f64, end: f64) -> i64 {
     fab_lang::range_len(start, step, end) as i64
 }
 
+/// The interpreter's `as_index` on a count/index `n` (P.1.6 rung-D 2b.3) — `n.is_finite() && n >= 0.0` →
+/// `n as usize` (TRUNCATED, matching), else `-1` (the interpreter's `undef`). Used for a DYNAMIC-count
+/// `rands(min, max, count)`: a valid count drives the draw loop; `-1` → the JIT bails (undef). A count over
+/// [`COMPREHENSION_BUDGET`] is caught by the caller's budget check, so the `i64` doesn't need its own cap.
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "guarded finite && >= 0; `n as i64` saturates a huge count to i64::MAX (→ the budget bail)"
+)]
+extern "C" fn jit_as_index(n: f64) -> i64 {
+    if n.is_finite() && n >= 0.0 { n as i64 } else { -1 }
+}
+
 /// The seedless-`rands` helper (P.1.6 rung-D piece 1) — advances the WOVEN [`RandStream`] by ONE draw, through
 /// the SAME [`RandStream::next_one`] the interpreter's seedless path uses, so the draw sequence AND the `draws`
 /// fence counter stay bit-identical. A JIT'd `rands(min, max, count)` calls this `count` times in source order;
@@ -841,6 +854,7 @@ fn new_module() -> Result<JITModule, JitError> {
     jb.symbol("jit_math_call", jit_math_call as *const u8);
     jb.symbol("jit_rand_next", jit_rand_next as *const u8);
     jb.symbol("jit_range_len", jit_range_len as *const u8);
+    jb.symbol("jit_as_index", jit_as_index as *const u8);
     jb.symbol("jit_arena_new_list", jit_arena_new_list as *const u8);
     jb.symbol("jit_vec_push", jit_vec_push as *const u8);
     jb.symbol("jit_vec_len", jit_vec_len as *const u8);
@@ -867,6 +881,8 @@ struct Helpers {
     rand_next: FuncId,
     /// `jit_range_len(f64, f64, f64) -> i64` — a range's element count, the loop bound (P.1.6 rung-D piece 2).
     range_len: FuncId,
+    /// `jit_as_index(f64) -> i64` — a count/index validated (finite ≥ 0 → truncated, else -1) (2b.3).
+    as_index: FuncId,
     /// `jit_arena_new_list(*mut JitArena) -> *mut Vec<f64>` — allocate a fresh DynList (P.1.6 rung-D 2b.2).
     arena_new_list: FuncId,
     /// `jit_vec_push(*mut Vec<f64>, f64)` — push one element onto a DynList.
@@ -913,6 +929,11 @@ fn declare_helpers(module: &mut JITModule) -> Result<Helpers, JitError> {
     rlen_sig.params.push(AbiParam::new(types::F64));
     rlen_sig.returns.push(AbiParam::new(types::I64));
     let range_len = module.declare_function("jit_range_len", Linkage::Import, &rlen_sig).map_err(cl)?;
+    // `(f64) -> i64` — as_index (a count/index validated).
+    let mut aidx_sig = module.make_signature();
+    aidx_sig.params.push(AbiParam::new(types::F64));
+    aidx_sig.returns.push(AbiParam::new(types::I64));
+    let as_index = module.declare_function("jit_as_index", Linkage::Import, &aidx_sig).map_err(cl)?;
     // The dynamic-list helpers (2b.2), each built explicitly (a signature-building closure would hold a
     // `&module` borrow across `declare_function`'s `&mut`). `p` = the target pointer type.
     let p = module.target_config().pointer_type();
@@ -957,6 +978,7 @@ fn declare_helpers(module: &mut JITModule) -> Result<Helpers, JitError> {
         math,
         rand_next,
         range_len,
+        as_index,
         arena_new_list,
         vec_push,
         vec_len,
@@ -1023,6 +1045,7 @@ fn define_one(
         let math_ref = module.declare_func_in_func(helpers.math, fb.func);
         let rand_next_ref = module.declare_func_in_func(helpers.rand_next, fb.func);
         let range_len_ref = module.declare_func_in_func(helpers.range_len, fb.func);
+        let as_index_ref = module.declare_func_in_func(helpers.as_index, fb.func);
         let arena_new_list_ref = module.declare_func_in_func(helpers.arena_new_list, fb.func);
         let vec_push_ref = module.declare_func_in_func(helpers.vec_push, fb.func);
         let vec_len_ref = module.declare_func_in_func(helpers.vec_len, fb.func);
@@ -1075,6 +1098,7 @@ fn define_one(
             math: math_ref,
             rand_next: rand_next_ref,
             range_len: range_len_ref,
+            as_index: as_index_ref,
             arena_new_list: arena_new_list_ref,
             vec_push: vec_push_ref,
             vec_len: vec_len_ref,
@@ -1370,6 +1394,7 @@ struct Lower<'a> {
     math: FuncRef,
     rand_next: FuncRef,
     range_len: FuncRef,
+    as_index: FuncRef,
     arena_new_list: FuncRef,
     vec_push: FuncRef,
     vec_len: FuncRef,
@@ -1723,16 +1748,16 @@ fn compile_expr(fb: &mut FunctionBuilder, expr: &Expr, lower: &Lower) -> Result<
     }
 }
 
-/// Seedless `rands(min, max, count)` with a LITERAL count → `count` sequential draws from the woven
-/// [`RandStream`] as a `Lowered::Vec` (P.1.6 rung-D piece 1). Mirrors `builtins::rands`'s SEEDLESS path: `min`
-/// and `max` must be numbers, `count` is the interpreter's `as_index` (finite, ≥ 0, TRUNCATED). Each draw is a
-/// [`jit_rand_next`] call advancing the shared stream, emitted in SOURCE order — so the stream advances exactly
-/// as the interpreter's `(0..count)` loop would, bit-identical.
+/// Seedless `rands(min, max, count)` → `count` sequential draws from the woven [`RandStream`], each a
+/// [`jit_rand_next`] call advancing the shared stream in SOURCE order (so the stream advances exactly as the
+/// interpreter's `(0..count)` would, bit-identical). Mirrors `builtins::rands`'s SEEDLESS path: `min`/`max`
+/// must be numbers, `count` is `as_index` (finite, ≥ 0, truncated). Two shapes by count:
+/// - a SMALL LITERAL count (≤ [`MAX_VEC_ARG`]) → a scalarized [`Lowered::Vec`] (P.1.6 piece 1) — no memory.
+/// - a DYNAMIC or large count → a draw LOOP materializing a [`Lowered::DynList`] (rung-D 2b.3) — the
+///   `gaussian_rands` `nums = rands(0,1,dim*n*2)` shape. An `undef` count (`< 0` / non-finite) or one over
+///   [`COMPREHENSION_BUDGET`] BAILS to the interpreter (raised → `None`), always safe.
 ///
-/// DECLINES (→ the interpreter draws instead, advancing the stream identically, so a decline is always safe):
-/// a 4th `seed` arg (the seeded path is pure — a follow-on), a NON-literal count (dynamic length → rung-D
-/// piece 2), a count over the scalarize cap [`MAX_VEC_ARG`] (would bloat the IR), a negative / non-finite
-/// literal count (`as_index` → `undef`), a non-`Num` min|max, or any named arg.
+/// DECLINES: a 4th `seed` arg (seeded rands is pure — a follow-on), a non-`Num` min|max, or a named arg.
 fn compile_seedless_rands(
     fb: &mut FunctionBuilder,
     args: &[fab_lang::Arg],
@@ -1742,33 +1767,87 @@ fn compile_seedless_rands(
     if args.len() != 3 || args.iter().any(|a| a.name.is_some()) {
         return Err(JitError::Unsupported("call"));
     }
-    // count must be a compile-time literal the interpreter's `as_index` accepts (finite, ≥ 0), truncated.
-    let ExprKind::Num(n) = &args[2].value.kind else {
-        return Err(JitError::Unsupported("dynamic rands count")); // rung-D piece 2
-    };
-    if !n.is_finite() || *n < 0.0 {
-        return Err(JitError::Unsupported("rands count out of range")); // as_index → undef → decline
-    }
-    #[allow(
-        clippy::cast_possible_truncation,
-        clippy::cast_sign_loss,
-        reason = "guarded finite && >= 0; matches the interpreter's `as_index` truncation to usize"
-    )]
-    let count = *n as usize;
-    if count > MAX_VEC_ARG {
-        return Err(JitError::Unsupported("rands count over the scalarize cap")); // interpret / rung-D piece 2
-    }
-    // min, max compiled ONCE (their own side effects, incl. a nested rands, happen here — before the draws,
-    // matching the interpreter evaluating the args before the builtin body). Non-`Num` → the interpreter's
-    // `rands` returns undef → decline.
+    // min, max compiled in source order (their own side effects, incl. a nested rands, happen here — BEFORE the
+    // count + draws, matching the interpreter evaluating the args before the builtin body).
     let min = compile_expr(fb, &args[0].value, lower)?.num()?;
     let max = compile_expr(fb, &args[1].value, lower)?.num()?;
-    let mut elems = Vec::with_capacity(count);
-    for _ in 0..count {
-        let call = fb.ins().call(lower.rand_next, &[lower.rand_ptr, min, max]);
-        elems.push(Lowered::Num(fb.inst_results(call)[0]));
+
+    // A small NON-NEGATIVE literal count → the scalarized fixed vector (no arena). A big / invalid / dynamic
+    // count falls through to the draw loop.
+    if let ExprKind::Num(n) = &args[2].value.kind
+        && n.is_finite()
+        && *n >= 0.0
+    {
+        #[allow(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "guarded finite && >= 0; matches the interpreter's `as_index` truncation to usize"
+        )]
+        let count = *n as usize;
+        if count <= MAX_VEC_ARG {
+            let mut elems = Vec::with_capacity(count);
+            for _ in 0..count {
+                let call = fb.ins().call(lower.rand_next, &[lower.rand_ptr, min, max]);
+                elems.push(Lowered::Num(fb.inst_results(call)[0]));
+            }
+            return Ok(Lowered::Vec(elems));
+        }
     }
-    Ok(Lowered::Vec(elems))
+
+    // DYNAMIC (or big / invalid) count → a draw loop into a DynList (2b.3). `count` is compiled ONCE, here,
+    // after min/max (a literal recompiles to a const — harmless). `jit_as_index` validates it (undef → -1).
+    let count_f = compile_expr(fb, &args[2].value, lower)?.num()?;
+    let count = {
+        let call = fb.ins().call(lower.as_index, &[count_f]);
+        fb.inst_results(call)[0]
+    };
+    // Bail on an undef count (-1) OR over-budget — both → the interpreter (which yields undef or the big list).
+    let zero = fb.ins().iconst(types::I64, 0);
+    let neg = fb.ins().icmp(IntCC::SignedLessThan, count, zero);
+    let budget = fb.ins().iconst(types::I64, COMPREHENSION_BUDGET);
+    let over = fb.ins().icmp(IntCC::SignedGreaterThan, count, budget);
+    let bad = fb.ins().bor(neg, over);
+    let bail = fb.create_block();
+    let setup = fb.create_block();
+    fb.ins().brif(bad, bail, &[], setup, &[]);
+    fb.seal_block(bail);
+    fb.seal_block(setup);
+    fb.switch_to_block(bail);
+    let one_flag = fb.ins().iconst(types::I8, 1);
+    fb.ins().store(MemFlagsData::trusted(), one_flag, lower.raised_ptr, 0);
+    let bail_ret = fb.ins().f64const(0.0);
+    fb.ins().return_(&[bail_ret]);
+
+    // setup: the arena list + the draw loop (i = 0..count, each a jit_rand_next push).
+    fb.switch_to_block(setup);
+    let list = {
+        let call = fb.ins().call(lower.arena_new_list, &[lower.arena_ptr]);
+        fb.inst_results(call)[0]
+    };
+    let header = fb.create_block();
+    fb.append_block_param(header, types::I64);
+    let body_block = fb.create_block();
+    let exit = fb.create_block();
+    let zero_i = fb.ins().iconst(types::I64, 0);
+    fb.ins().jump(header, &[BlockArg::Value(zero_i)]);
+    fb.switch_to_block(header);
+    let i = fb.block_params(header)[0];
+    let cond = fb.ins().icmp(IntCC::SignedLessThan, i, count);
+    fb.ins().brif(cond, body_block, &[], exit, &[]);
+    fb.seal_block(body_block);
+    fb.seal_block(exit);
+    fb.switch_to_block(body_block);
+    let draw = {
+        let call = fb.ins().call(lower.rand_next, &[lower.rand_ptr, min, max]);
+        fb.inst_results(call)[0]
+    };
+    fb.ins().call(lower.vec_push, &[list, draw]);
+    let one = fb.ins().iconst(types::I64, 1);
+    let i_next = fb.ins().iadd(i, one);
+    fb.ins().jump(header, &[BlockArg::Value(i_next)]);
+    fb.seal_block(header);
+    fb.switch_to_block(exit);
+    Ok(Lowered::DynList(list))
 }
 
 /// Whether `expr` (recursively) needs the RUNTIME environment the standalone [`compile_function`] doesn't

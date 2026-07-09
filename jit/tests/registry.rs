@@ -676,6 +676,41 @@ fn comprehension_over_range_is_bit_identical() {
 }
 
 #[test]
+fn dynamic_list_operands_are_bit_identical() {
+    // P.1.6 rung-D 2b.2: DynList as a FIRST-CLASS value — materialized in the call arena, then bound to a
+    // `let`, measured by `len`, ITERATED by another comprehension, or composed inline. This is the
+    // gaussian_rands PIPELINE shape (a runtime list flowing through more list ops). Each bit-identical to the
+    // interpreter's `lc_for`.
+    let prog = program(
+        "function nested(n) = let(a = [for (i = [0:n]) i*i]) [for (x = a) x + 1];\
+         function double(n) = let(a = [for (i = [0:n]) i]) [for (x = a) x*2];\
+         function chain(n) = [for (y = [for (i = [0:n]) i+1]) y*y];\
+         function count_it(n) = len([for (i = [0:n]) i]);\
+         function ln_len(n) = let(a = [for (i = [0:n]) i*i]) len(a);\
+         function roots_of(n) = let(a = [for (i = [1:n]) i]) [for (x = a) sqrt(x)];",
+    );
+    let reg = JitRegistry::build(
+        defs(&prog).iter().map(|&(n, p, b)| (n, p, b)),
+        consts(&prog).iter().map(|&(n, v)| (n, v)),
+    )
+    .expect("registry builds");
+
+    assert!(reg.get("nested").is_some(), "a let-bound + iterated DynList compiles (rung 2b.2)");
+    // Let-bind a comprehension, iterate it → a new list.
+    assert_call_vec_eq(&reg, &prog, "nested", &[Value::Num(3.0)]); // a=[0,1,4,9] → [1,2,5,10]
+    assert_call_vec_eq(&reg, &prog, "nested", &[Value::Num(0.0)]); // a=[0] → [1]
+    assert_call_vec_eq(&reg, &prog, "nested", &[Value::Num(-1.0)]); // a=[] → []
+    assert_call_vec_eq(&reg, &prog, "double", &[Value::Num(5.0)]);
+    // A comprehension iterating an INLINE comprehension (nested, no let).
+    assert_call_vec_eq(&reg, &prog, "chain", &[Value::Num(4.0)]); // inner [1..5], outer squares
+    assert_call_vec_eq(&reg, &prog, "roots_of", &[Value::Num(6.0)]); // sqrt over a materialized list
+    // `len` of a DynList → a scalar (the intermediate list lives + dies in the arena).
+    assert_call_eq(&reg, &prog, "count_it", &[Value::Num(5.0)]); // len([0..5]) = 6
+    assert_call_eq(&reg, &prog, "count_it", &[Value::Num(0.0)]); // len([0]) = 1
+    assert_call_eq(&reg, &prog, "ln_len", &[Value::Num(9.0)]); // len of a let-bound list = 10
+}
+
+#[test]
 fn over_long_vector_arg_declines() {
     // A vector longer than MAX_VEC_ARG (16) is NOT scalarized — unrolling it would explode compile/code size,
     // and that dynamic-length case is rung D. call_numeric declines → the interpreter runs the body.

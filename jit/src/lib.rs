@@ -165,18 +165,78 @@ extern "C" fn jit_fmax(a: f64, b: f64) -> f64 {
 /// is always safe. A named knob so it's tunable once real corpus data lands (chotchki).
 const COMPREHENSION_BUDGET: i64 = 1_000_000;
 
-/// Push one value onto the JIT's dynamic-list SINK (P.1.6 rung-D piece 2) — the growable `Vec<f64>` a JIT'd
-/// comprehension materializes into, which the dispatch reads back as a `NumList`. THE crate's THIRD unsafe seam
-/// (after the fn-ptr call + [`jit_rand_next`]), confined + documented here.
+/// The dynamic-list ARENA for one JIT call (P.1.6 rung-D piece 2): it OWNS every `DynList` a comprehension
+/// materializes, so first-class dynamic lists (bind to a `let`, `len`, iterate, compose) have somewhere to
+/// live and a single owner to free. The dispatch (`call_numeric`) makes one per call and drops it after —
+/// freeing all lists — but FIRST takes the one flagged `result` out into the returned `NumList`.
 ///
-/// # Safety
-/// `sink` MUST be a live `*mut Vec<f64>` with EXCLUSIVE access for the call's duration — the dispatch owns it
-/// (`call_numeric` allocates it) and native code is the sole single-threaded accessor while the loop runs. A
-/// non-comprehension body never calls this, so an unused sink pointer is never dereferenced.
-extern "C" fn jit_vec_push(sink: *mut Vec<f64>, v: f64) {
-    // SAFETY: per the contract above, `sink` is a live, exclusively-accessible `Vec<f64>` for this call.
-    let sink = unsafe { &mut *sink };
-    sink.push(v);
+/// `lists` boxes each `Vec<f64>` so a list HANDLE (`*mut Vec<f64>`) stays valid as `lists` grows (the outer
+/// `Vec` reallocating moves the boxes, not the boxed `Vec<f64>`s the handles aim at). `result` is the handle a
+/// `DynVec`-returning body sets via [`jit_set_result`]; null until then.
+struct JitArena {
+    #[allow(
+        clippy::vec_box,
+        reason = "the Box is LOAD-BEARING: a DynList handle is a `*mut Vec<f64>` into `lists`, and it must \
+                  survive `lists` reallocating — the Box keeps the inner `Vec<f64>` put while the outer Vec moves"
+    )]
+    lists: Vec<Box<Vec<f64>>>,
+    result: *mut Vec<f64>,
+}
+
+impl JitArena {
+    fn new() -> Self {
+        JitArena { lists: Vec::new(), result: core::ptr::null_mut() }
+    }
+}
+
+/// The crate's THIRD unsafe seam (after the fn-ptr call + [`jit_rand_next`]) — the dynamic-list helpers, all
+/// confined here. Each takes a raw pointer the compiled function passes; the caller (dispatch → native code)
+/// guarantees a live, exclusively-accessed target for the call's duration (single-threaded, native code the
+/// sole accessor). A non-comprehension body calls none of them, so its unused arena pointer is never touched.
+///
+/// Allocate a fresh empty `DynList` in `arena` and return its handle. `# Safety`: `arena` is a live
+/// `*mut JitArena`.
+extern "C" fn jit_arena_new_list(arena: *mut JitArena) -> *mut Vec<f64> {
+    // SAFETY: `arena` is a live, exclusively-accessible `JitArena` (caller's contract).
+    let arena = unsafe { &mut *arena };
+    arena.lists.push(Box::new(Vec::new()));
+    // The boxed `Vec<f64>` never moves as `lists` grows, so this handle stays valid for the whole call.
+    &mut **arena.lists.last_mut().expect("just pushed")
+}
+
+/// Push one value onto a `DynList`. `# Safety`: `list` is a live handle from [`jit_arena_new_list`].
+extern "C" fn jit_vec_push(list: *mut Vec<f64>, v: f64) {
+    // SAFETY: `list` is a live, exclusively-accessible `Vec<f64>` (caller's contract).
+    unsafe { &mut *list }.push(v);
+}
+
+/// A `DynList`'s element count. `# Safety`: `list` is a live handle.
+#[allow(
+    clippy::cast_possible_wrap,
+    reason = "a JIT'd list is budget-capped at COMPREHENSION_BUDGET (1e6), far below i64::MAX"
+)]
+extern "C" fn jit_vec_len(list: *mut Vec<f64>) -> i64 {
+    // SAFETY: `list` is a live, exclusively-accessible `Vec<f64>` (caller's contract).
+    unsafe { &*list }.len() as i64
+}
+
+/// A `DynList`'s element `i` — the JIT only calls this for `0 <= i < len` (iteration), so it's always in-range.
+/// `# Safety`: `list` is a live handle AND `i` is in `0..list.len()` (the JIT's loop guarantees it).
+#[allow(
+    clippy::cast_sign_loss,
+    reason = "the JIT passes only 0 <= i < len (the loop induction var), so the cast is non-negative"
+)]
+extern "C" fn jit_vec_get(list: *mut Vec<f64>, i: i64) -> f64 {
+    // SAFETY: `list` is live and `i` is in-range (caller's contract) — an indexing bug is a JIT codegen bug.
+    let list = unsafe { &*list };
+    list[i as usize]
+}
+
+/// Flag `list` as the function's RETURN value; the dispatch reads it out into the `NumList`. `# Safety`:
+/// `arena` + `list` are live.
+extern "C" fn jit_set_result(arena: *mut JitArena, list: *mut Vec<f64>) {
+    // SAFETY: `arena` is a live, exclusively-accessible `JitArena` (caller's contract).
+    unsafe { &mut *arena }.result = list;
 }
 
 /// The element count of a range `[start:step:end]` (P.1.6 rung-D piece 2) — routed to the interpreter's EXACT
@@ -280,15 +340,15 @@ impl CompiledFn {
     ///
     /// # Safety
     /// `rand` must be either null (for a body known not to draw) or a live, exclusively-accessible
-    /// `*mut RandStream` for the call's duration (see [`jit_rand_next`]); likewise `sink` must be either null
-    /// (for a non-comprehension body) or a live, exclusively-accessible `*mut Vec<f64>` (see [`jit_vec_push`]).
+    /// `*mut RandStream` for the call's duration (see [`jit_rand_next`]); likewise `arena` must be either null
+    /// (for a body with no comprehension) or a live, exclusively-accessible `*mut JitArena` (see [`JitArena`]).
     #[must_use]
     pub unsafe fn call(
         &self,
         params: &[f64],
         out: &mut [f64],
         rand: *mut core::ffi::c_void,
-        sink: *mut core::ffi::c_void,
+        arena: *mut core::ffi::c_void,
     ) -> Option<f64> {
         assert_eq!(
             params.len(),
@@ -301,13 +361,13 @@ impl CompiledFn {
             assert!(out.len() >= n, "CompiledFn::call out buffer too small: {} < {n}", out.len());
         }
         // THE unsafe seam of the whole crate. SAFETY: `code` is a finalized Cranelift function of signature
-        // `extern "C" fn(*const f64, *mut u8, *mut f64, *mut RandStream, *mut Vec<f64>) -> f64` (built in
+        // `extern "C" fn(*const f64, *mut u8, *mut f64, *mut RandStream, *mut JitArena) -> f64` (built in
         // `define_one`); the owning module keeps it mapped as long as `self` is reachable. It READS `arity`
         // f64s from the first pointer (`params` has exactly that many, asserted), WRITES one byte through the
         // second (`raised`), WRITES `n` f64s through the third only for a `Vec(n)` return (`out`, asserted ≥ n),
-        // passes the fourth to `jit_rand_next` only on a seedless-`rands` body, and pushes to the fifth
-        // (`*mut Vec<f64>`) only on a `DynVec` comprehension body — the caller's contract per the # Safety note.
-        // No unwinding crosses the boundary.
+        // passes the fourth to `jit_rand_next` only on a seedless-`rands` body, and the fifth to the dynamic-list
+        // helpers only on a comprehension body — the caller's contract per the # Safety note. No unwinding
+        // crosses the boundary.
         let f: unsafe extern "C" fn(
             *const f64,
             *mut u8,
@@ -316,7 +376,7 @@ impl CompiledFn {
             *mut core::ffi::c_void,
         ) -> f64 = unsafe { std::mem::transmute(self.code) };
         let mut raised: u8 = 0;
-        let result = unsafe { f(params.as_ptr(), &raw mut raised, out.as_mut_ptr(), rand, sink) };
+        let result = unsafe { f(params.as_ptr(), &raw mut raised, out.as_mut_ptr(), rand, arena) };
         if raised == 0 { Some(result) } else { None }
     }
 }
@@ -347,7 +407,7 @@ impl JitFn {
     #[must_use]
     pub fn call(&self, params: &[f64]) -> Option<f64> {
         // SAFETY: `compile_function` declines a rands body AND is `Num`-only (no vec/comprehension), so this
-        // body never dereferences the null rand/sink pointers nor writes the out-buffer.
+        // body never dereferences the null rand/arena pointers nor writes the out-buffer.
         unsafe { self.inner.call(params, &mut [0.0], core::ptr::null_mut(), core::ptr::null_mut()) }
     }
 }
@@ -593,25 +653,36 @@ impl NumericJit for JitRegistry {
         // scalar path keeps its stack dummy out — no heap allocation. `rand` is the eval's woven stream (P.1.6
         // rung-D piece 1) — a seedless-`rands` body advances it; the dispatch guarantees it's live + exclusive.
         // SAFETY: `rand` came from the dispatch's `Ctx::rand_stream` cell pointer, valid + single-threaded.
-        let null = core::ptr::null_mut();
+        // The dynamic-list ARENA (P.1.6 rung-D 2b.2), created ONCE per call — even a SCALAR body may
+        // materialize an intermediate DynList (e.g. `len([for …])`), so every call gets a real (empty-until-
+        // used) arena; it's freed when this fn returns, AFTER a `DynVec` result is taken out of it.
+        let mut arena = JitArena::new();
+        let arena_ptr = std::ptr::from_mut(&mut arena).cast::<core::ffi::c_void>();
         match compiled.ret_ty {
-            Ret::Num => Some(JitOutcome::Num(unsafe { compiled.call(&scratch, &mut [0.0], rand, null) }?)),
-            Ret::Bool => {
-                Some(JitOutcome::Bool(unsafe { compiled.call(&scratch, &mut [0.0], rand, null) }? != 0.0))
+            Ret::Num => {
+                Some(JitOutcome::Num(unsafe { compiled.call(&scratch, &mut [0.0], rand, arena_ptr) }?))
             }
+            Ret::Bool => Some(JitOutcome::Bool(
+                unsafe { compiled.call(&scratch, &mut [0.0], rand, arena_ptr) }? != 0.0,
+            )),
             Ret::Vec(n) => {
                 let mut out = vec![0.0; n];
                 // the f64 return is a dummy; the elements are in `out`.
-                unsafe { compiled.call(&scratch, &mut out, rand, null) }?;
+                unsafe { compiled.call(&scratch, &mut out, rand, arena_ptr) }?;
                 Some(JitOutcome::Vec(out))
             }
             Ret::DynVec => {
-                // A comprehension (P.1.6 rung-D piece 2) pushes into this growable sink; the f64 return is a
-                // dummy. `None` here = the BUDGET bail (or an inline assert) flagged `raised` → interpret.
-                let mut sink: Vec<f64> = Vec::new();
-                let sink_ptr = std::ptr::from_mut(&mut sink).cast::<core::ffi::c_void>();
-                unsafe { compiled.call(&scratch, &mut [0.0], rand, sink_ptr) }?;
-                Some(JitOutcome::Vec(sink))
+                // `None` = the BUDGET bail (or an inline assert) flagged `raised` → interpret. On success the
+                // body flagged `arena.result` (via `jit_set_result`) — TAKE its Vec out before the arena drops.
+                unsafe { compiled.call(&scratch, &mut [0.0], rand, arena_ptr) }?;
+                let result = if arena.result.is_null() {
+                    Vec::new() // a DynVec body always sets a result; empty is a safe fallback
+                } else {
+                    // SAFETY: `arena.result` is a live arena list (a boxed `Vec<f64>` the body just filled);
+                    // taking it leaves an empty `Vec`, and the arena (still alive) frees it on drop.
+                    unsafe { std::mem::take(&mut *arena.result) }
+                };
+                Some(JitOutcome::Vec(result))
             }
         }
     }
@@ -702,10 +773,11 @@ pub fn compile_function(param_names: &[&str], body: &Expr) -> Result<JitFn, JitE
     // constant therefore declines. [`JitRegistry`] is the multi-function, globals-aware form.
     let no_defs = FnDefs::new();
     let no_globals = Globals::new();
-    // The standalone API has NO RandStream to weave (P.1.6 rung-D piece 1 is a registry feature), so a
-    // seedless-`rands` body must DECLINE here rather than have `JitFn::call`'s null stream pointer dereferenced.
-    if uses_rands(body) {
-        return Err(JitError::Unsupported("rands (standalone API has no RandStream; use JitRegistry)"));
+    // The standalone API weaves NO RandStream (piece 1) and NO JitArena (piece 2) — both are registry features
+    // — so a `rands` OR comprehension body must DECLINE here rather than have `JitFn::call`'s null stream/arena
+    // pointer dereferenced (even a SCALAR body that only uses an intermediate list, e.g. `len([for …])`).
+    if needs_runtime_env(body) {
+        return Err(JitError::Unsupported("rands/comprehension (standalone API is env-free; use JitRegistry)"));
     }
     // The standalone differential passes plain `f64` args, so every parameter is a SCALAR shape.
     let params: Vec<(&str, ArgShape)> = param_names.iter().map(|&n| (n, ArgShape::Scalar)).collect();
@@ -748,8 +820,12 @@ fn new_module() -> Result<JITModule, JitError> {
     jb.symbol("jit_fmax", jit_fmax as *const u8);
     jb.symbol("jit_math_call", jit_math_call as *const u8);
     jb.symbol("jit_rand_next", jit_rand_next as *const u8);
-    jb.symbol("jit_vec_push", jit_vec_push as *const u8);
     jb.symbol("jit_range_len", jit_range_len as *const u8);
+    jb.symbol("jit_arena_new_list", jit_arena_new_list as *const u8);
+    jb.symbol("jit_vec_push", jit_vec_push as *const u8);
+    jb.symbol("jit_vec_len", jit_vec_len as *const u8);
+    jb.symbol("jit_vec_get", jit_vec_get as *const u8);
+    jb.symbol("jit_set_result", jit_set_result as *const u8);
     Ok(JITModule::new(jb))
 }
 
@@ -768,10 +844,18 @@ struct Helpers {
     math: FuncId,
     /// `jit_rand_next(*mut RandStream, f64, f64) -> f64` — one seedless `rands` draw (P.1.6 rung-D piece 1).
     rand_next: FuncId,
-    /// `jit_vec_push(*mut Vec<f64>, f64)` — push one element onto the comprehension sink (P.1.6 rung-D piece 2).
-    vec_push: FuncId,
     /// `jit_range_len(f64, f64, f64) -> i64` — a range's element count, the loop bound (P.1.6 rung-D piece 2).
     range_len: FuncId,
+    /// `jit_arena_new_list(*mut JitArena) -> *mut Vec<f64>` — allocate a fresh DynList (P.1.6 rung-D 2b.2).
+    arena_new_list: FuncId,
+    /// `jit_vec_push(*mut Vec<f64>, f64)` — push one element onto a DynList.
+    vec_push: FuncId,
+    /// `jit_vec_len(*mut Vec<f64>) -> i64` — a DynList's length.
+    vec_len: FuncId,
+    /// `jit_vec_get(*mut Vec<f64>, i64) -> f64` — a DynList's element `i` (in-range by construction).
+    vec_get: FuncId,
+    /// `jit_set_result(*mut JitArena, *mut Vec<f64>)` — flag the DynList that is the function's return.
+    set_result: FuncId,
 }
 
 fn declare_helpers(module: &mut JITModule) -> Result<Helpers, JitError> {
@@ -799,11 +883,6 @@ fn declare_helpers(module: &mut JITModule) -> Result<Helpers, JitError> {
     rand_sig.params.push(AbiParam::new(types::F64));
     rand_sig.returns.push(AbiParam::new(types::F64));
     let rand_next = module.declare_function("jit_rand_next", Linkage::Import, &rand_sig).map_err(cl)?;
-    // `(*mut Vec<f64>, f64)` → nothing — the comprehension sink push.
-    let mut push_sig = module.make_signature();
-    push_sig.params.push(AbiParam::new(module.target_config().pointer_type()));
-    push_sig.params.push(AbiParam::new(types::F64));
-    let vec_push = module.declare_function("jit_vec_push", Linkage::Import, &push_sig).map_err(cl)?;
     // `(f64, f64, f64) -> i64` — the range length / loop bound.
     let mut rlen_sig = module.make_signature();
     rlen_sig.params.push(AbiParam::new(types::F64));
@@ -811,7 +890,50 @@ fn declare_helpers(module: &mut JITModule) -> Result<Helpers, JitError> {
     rlen_sig.params.push(AbiParam::new(types::F64));
     rlen_sig.returns.push(AbiParam::new(types::I64));
     let range_len = module.declare_function("jit_range_len", Linkage::Import, &rlen_sig).map_err(cl)?;
-    Ok(Helpers { fmod, powf, fmin, fmax, math, rand_next, vec_push, range_len })
+    // The dynamic-list helpers (2b.2), each built explicitly (a signature-building closure would hold a
+    // `&module` borrow across `declare_function`'s `&mut`). `p` = the target pointer type.
+    let p = module.target_config().pointer_type();
+    // `jit_arena_new_list(*mut JitArena) -> *mut Vec<f64>`.
+    let mut new_sig = module.make_signature();
+    new_sig.params.push(AbiParam::new(p));
+    new_sig.returns.push(AbiParam::new(p));
+    let arena_new_list =
+        module.declare_function("jit_arena_new_list", Linkage::Import, &new_sig).map_err(cl)?;
+    // `jit_vec_push(*mut Vec<f64>, f64)`.
+    let mut push_sig = module.make_signature();
+    push_sig.params.push(AbiParam::new(p));
+    push_sig.params.push(AbiParam::new(types::F64));
+    let vec_push = module.declare_function("jit_vec_push", Linkage::Import, &push_sig).map_err(cl)?;
+    // `jit_vec_len(*mut Vec<f64>) -> i64`.
+    let mut len_sig = module.make_signature();
+    len_sig.params.push(AbiParam::new(p));
+    len_sig.returns.push(AbiParam::new(types::I64));
+    let vec_len = module.declare_function("jit_vec_len", Linkage::Import, &len_sig).map_err(cl)?;
+    // `jit_vec_get(*mut Vec<f64>, i64) -> f64`.
+    let mut get_sig = module.make_signature();
+    get_sig.params.push(AbiParam::new(p));
+    get_sig.params.push(AbiParam::new(types::I64));
+    get_sig.returns.push(AbiParam::new(types::F64));
+    let vec_get = module.declare_function("jit_vec_get", Linkage::Import, &get_sig).map_err(cl)?;
+    // `jit_set_result(*mut JitArena, *mut Vec<f64>)`.
+    let mut res_sig = module.make_signature();
+    res_sig.params.push(AbiParam::new(p));
+    res_sig.params.push(AbiParam::new(p));
+    let set_result = module.declare_function("jit_set_result", Linkage::Import, &res_sig).map_err(cl)?;
+    Ok(Helpers {
+        fmod,
+        powf,
+        fmin,
+        fmax,
+        math,
+        rand_next,
+        range_len,
+        arena_new_list,
+        vec_push,
+        vec_len,
+        vec_get,
+        set_result,
+    })
 }
 
 /// Build the IR for one function specialized to `params` (each param's name + arg [`ArgShape`]) and declare +
@@ -862,7 +984,7 @@ fn define_one(
         let raised_ptr = fb.block_params(block)[1];
         let out_ptr = fb.block_params(block)[2];
         let rand_ptr = fb.block_params(block)[3];
-        let sink_ptr = fb.block_params(block)[4];
+        let arena_ptr = fb.block_params(block)[4];
 
         let fmod_ref = module.declare_func_in_func(helpers.fmod, fb.func);
         let powf_ref = module.declare_func_in_func(helpers.powf, fb.func);
@@ -870,8 +992,12 @@ fn define_one(
         let fmax_ref = module.declare_func_in_func(helpers.fmax, fb.func);
         let math_ref = module.declare_func_in_func(helpers.math, fb.func);
         let rand_next_ref = module.declare_func_in_func(helpers.rand_next, fb.func);
-        let vec_push_ref = module.declare_func_in_func(helpers.vec_push, fb.func);
         let range_len_ref = module.declare_func_in_func(helpers.range_len, fb.func);
+        let arena_new_list_ref = module.declare_func_in_func(helpers.arena_new_list, fb.func);
+        let vec_push_ref = module.declare_func_in_func(helpers.vec_push, fb.func);
+        let vec_len_ref = module.declare_func_in_func(helpers.vec_len, fb.func);
+        let vec_get_ref = module.declare_func_in_func(helpers.vec_get, fb.func);
+        let set_result_ref = module.declare_func_in_func(helpers.set_result, fb.func);
         // Flat param layout: walk params in order assigning f64 slots — a scalar takes 1, a vec-`n` takes `n`.
         // A scalar's flat ELEMENT offset goes in `index` (read lazily in the `Ident` arm as `offset * 8`
         // bytes); a vector's `n` slots are loaded now into a `Lowered::Vec` bound in `locals`, so the body sees
@@ -910,58 +1036,50 @@ fn define_one(
             globals,
             inlining: &inlining,
             rand_ptr,
-            sink_ptr,
+            arena_ptr,
             fmod: fmod_ref,
             powf: powf_ref,
             fmin: fmin_ref,
             fmax: fmax_ref,
             math: math_ref,
             rand_next: rand_next_ref,
-            vec_push: vec_push_ref,
             range_len: range_len_ref,
+            arena_new_list: arena_new_list_ref,
+            vec_push: vec_push_ref,
+            vec_len: vec_len_ref,
+            vec_get: vec_get_ref,
+            set_result: set_result_ref,
         };
 
-        // IR is built BEFORE declare/define — an Unsupported node returns here with the module untouched.
-        // A body that IS a COMPREHENSION (P.1.6 rung-D piece 2) materializes into the `sink` via a LOOP — it
-        // emits its OWN returns (a budget-bail + the loop exit), so no trailing return here. Otherwise: a
-        // NUMERIC body returns its f64 directly; a BOOL body (an i8 0/1) is returned as 0.0/1.0 and tagged so
-        // the dispatch wraps `Value::Bool` (P.1.4e); a fixed-shape VECTOR body (rung C) WRITES its elements to
-        // the `out` sink and returns a dummy, read back into a `NumList`. A NESTED vector (matrix) declines.
-        // `[for (…) …]` parses as a `Vector` holding ONE `LcFor` element (the comprehension IS the whole list).
-        // A mixed vector (`[a, for(…) b]`) or multiple comprehensions decline here (rung 2b.N).
-        let comprehension = match &body.kind {
-            ExprKind::Vector(elems) => match elems.as_slice() {
-                [single] => match &single.kind {
-                    ExprKind::LcFor { bindings, body: lc_body } => Some((bindings, lc_body)),
-                    _ => None,
-                },
-                _ => None,
-            },
-            _ => None,
-        };
-        let ty = if let Some((bindings, lc_body)) = comprehension {
-            compile_comprehension(&mut fb, bindings, lc_body, &lower)?
-        } else {
-            let (ret, ty) = match compile_expr(&mut fb, body, &lower)? {
-                Lowered::Num(v) => (v, Ret::Num),
-                Lowered::Bool(v) => {
-                    let one = fb.ins().f64const(1.0);
-                    let zero = fb.ins().f64const(0.0);
-                    (fb.ins().select(v, one, zero), Ret::Bool)
+        // IR is built BEFORE declare/define — an Unsupported node returns here with the module untouched. The
+        // body compiles to a `Lowered`, which the return tags: a NUMERIC body returns its f64 directly; a BOOL
+        // body (an i8 0/1) returns 0.0/1.0, tagged so the dispatch wraps `Value::Bool` (P.1.4e); a fixed-shape
+        // VECTOR body (rung C) WRITES its elements to the `out` sink; a DYNAMIC-list body (rung-D 2b.2) flags
+        // its arena handle as the result via `jit_set_result` — the dispatch reads it into a `NumList`. A NESTED
+        // vector (matrix) declines. `compile_comprehension` emits its own budget-bail `return_`, but the normal
+        // path always flows here for the final `return_`.
+        let (ret, ty) = match compile_expr(&mut fb, body, &lower)? {
+            Lowered::Num(v) => (v, Ret::Num),
+            Lowered::Bool(v) => {
+                let one = fb.ins().f64const(1.0);
+                let zero = fb.ins().f64const(0.0);
+                (fb.ins().select(v, one, zero), Ret::Bool)
+            }
+            Lowered::Vec(elems) => {
+                for (i, e) in elems.iter().enumerate() {
+                    let x = e.num()?; // a nested element (matrix row) declines here — flat vectors only
+                    let byte_off = i32::try_from(i * 8)
+                        .map_err(|_| JitError::Unsupported("return offset overflow"))?;
+                    fb.ins().store(MemFlagsData::trusted(), x, out_ptr, byte_off);
                 }
-                Lowered::Vec(elems) => {
-                    for (i, e) in elems.iter().enumerate() {
-                        let x = e.num()?; // a nested element (matrix row) declines here — flat vectors only
-                        let byte_off = i32::try_from(i * 8)
-                            .map_err(|_| JitError::Unsupported("return offset overflow"))?;
-                        fb.ins().store(MemFlagsData::trusted(), x, out_ptr, byte_off);
-                    }
-                    (fb.ins().f64const(0.0), Ret::Vec(elems.len())) // the f64 return is a dummy for a vec
-                }
-            };
-            fb.ins().return_(&[ret]);
-            ty
+                (fb.ins().f64const(0.0), Ret::Vec(elems.len())) // the f64 return is a dummy for a vec
+            }
+            Lowered::DynList(handle) => {
+                fb.ins().call(lower.set_result, &[lower.arena_ptr, handle]);
+                (fb.ins().f64const(0.0), Ret::DynVec) // the dispatch reads arena.result into a NumList
+            }
         };
+        fb.ins().return_(&[ret]);
         fb.finalize();
         ret_ty = ty;
     }
@@ -972,48 +1090,69 @@ fn define_one(
     Ok((func_id, ret_ty))
 }
 
-/// Compile a top-level comprehension body `[for (var = range) scalar_body]` to a LOOP that materializes each
-/// element into the `sink` (P.1.6 rung-D piece 2, rung 2b.1 — the first control flow in fab-jit). Emits the
-/// function's OWN returns (a budget-bail path + the loop-exit path), so `define_one` adds none. Returns
-/// [`Ret::DynVec`]; the dispatch reads the sink into a `Value::NumList`.
+/// The iterable of a comprehension binding, once analyzed (P.1.6 rung-D 2b.2): a RANGE (index-based value) or
+/// a DYNLIST (element via `jit_vec_get`). Both yield the loop bound `len` separately.
+enum CompIter {
+    Range { start: Value, step: Value },
+    Dyn { handle: Value },
+}
+
+/// Compile `[for (var = iterable) scalar_body]` to a LOOP that MATERIALIZES each element into a fresh DynList
+/// in the call's [`JitArena`], returning the list's handle as [`Lowered::DynList`] (P.1.6 rung-D piece 2). Now
+/// a SUB-EXPRESSION (2b.2) — control CONTINUES after the loop (no function return here), so a comprehension can
+/// be a `let` value, an iterable of another comprehension (composed), or the function result. The BUDGET bail
+/// is the one early `return_` (over-budget → `raised` → the dispatch's `None` → interpret).
 ///
-/// Bit-identity vs `eval::lc_for` + `RangeIter`: the loop bound is `jit_range_len` (the interpreter's EXACT
-/// `range_len` — the `step==0`/non-finite/direction → 0 logic + the `RANGE_MAX` cap); element `i`'s value is
-/// `start + (i as f64)*step` (`fcvt_from_sint` is exact for `i < RANGE_MAX < 2^53`, same operand order); the
-/// loop runs `i = 0..len` pushing in index order, matching `lc_for`'s `out.extend`. A count over
-/// [`COMPREHENSION_BUDGET`] BAILS to the interpreter (sets `raised` → the dispatch's `None`), which is always
-/// safe (the interpreter computes the same list). v1 (2b.1): a SINGLE binding over a RANGE, a SCALAR body — a
-/// list iterable / multi-binding / non-scalar body / filter declines (rung 2b.2+).
+/// Bit-identity vs `eval::lc_for` + `RangeIter`: the RANGE bound is `jit_range_len` (the interpreter's EXACT
+/// `range_len`); element `i`'s value is `start + (i as f64)*step` (`fcvt_from_sint` exact for `i < RANGE_MAX`,
+/// same operand order); a DYNLIST iterates `0..len` via `jit_vec_get` (in-range by construction). The loop
+/// pushes in index order, matching `lc_for`'s `out.extend`. v1 (2b.2): a SINGLE binding, a RANGE or a DYNLIST
+/// iterable, a SCALAR element — a fixed-vector iterable / multi-binding / non-scalar element / filter declines.
 fn compile_comprehension(
     fb: &mut FunctionBuilder,
     bindings: &[fab_lang::Arg],
     lc_body: &Expr,
     lower: &Lower,
-) -> Result<Ret, JitError> {
-    // 2b.1: exactly one binding, over a RANGE literal, with a name.
+) -> Result<Lowered, JitError> {
     let [binding] = bindings else {
-        return Err(JitError::Unsupported("multi-binding comprehension")); // rung 2b.2+
+        return Err(JitError::Unsupported("multi-binding comprehension")); // rung 2b.N
     };
     let name = binding.name.as_deref().ok_or(JitError::Unsupported("comprehension binding without a name"))?;
-    let ExprKind::Range { start, step, end } = &binding.value.kind else {
-        return Err(JitError::Unsupported("comprehension over a non-range")); // list iterable → 2b.2
-    };
-    // Range bounds — compiled ONCE, in source order (start, step, end), before the loop, matching the
-    // interpreter evaluating the range value before iterating. `[a:b]` defaults step to 1.0.
-    let start_v = compile_expr(fb, start, lower)?.num()?;
-    let step_v = match step {
-        Some(s) => compile_expr(fb, s, lower)?.num()?,
-        None => fb.ins().f64const(1.0),
-    };
-    let end_v = compile_expr(fb, end, lower)?.num()?;
 
-    // len = jit_range_len(start, step, end) — the interpreter's exact count (capped at RANGE_MAX).
-    let len = {
-        let call = fb.ins().call(lower.range_len, &[start_v, step_v, end_v]);
+    // The iterable is compiled ONCE, in source order, before the loop — matching the interpreter evaluating the
+    // range/list value before iterating. A RANGE gives an index-based value; a DYNLIST (a value that compiles to
+    // a handle — a `let`-bound comprehension, a nested one) is read by `jit_vec_get`.
+    let (iter, len) = match &binding.value.kind {
+        ExprKind::Range { start, step, end } => {
+            let start_v = compile_expr(fb, start, lower)?.num()?;
+            let step_v = match step {
+                Some(s) => compile_expr(fb, s, lower)?.num()?,
+                None => fb.ins().f64const(1.0), // `[a:b]` defaults step to 1.0
+            };
+            let end_v = compile_expr(fb, end, lower)?.num()?;
+            let call = fb.ins().call(lower.range_len, &[start_v, step_v, end_v]);
+            (CompIter::Range { start: start_v, step: step_v }, fb.inst_results(call)[0])
+        }
+        _ => match compile_expr(fb, &binding.value, lower)? {
+            Lowered::DynList(handle) => {
+                let call = fb.ins().call(lower.vec_len, &[handle]);
+                (CompIter::Dyn { handle }, fb.inst_results(call)[0])
+            }
+            // A fixed scalarized vector as an iterable (`[for(x=[1,2,3]) …]`) is rung 2b.N (unroll); a scalar
+            // isn't iterable → decline.
+            _ => return Err(JitError::Unsupported("comprehension over a non-range/non-dynlist")),
+        },
+    };
+
+    // The result DynList, allocated in the arena. (Before the budget check — a bail just leaves it empty; the
+    // arena frees it. The handle dominates every block below.)
+    let list = {
+        let call = fb.ins().call(lower.arena_new_list, &[lower.arena_ptr]);
         fb.inst_results(call)[0]
     };
-    // BUDGET bail: an over-budget count flags `raised` (like a failed assert) and returns → the dispatch's
-    // `None` → the interpreter runs the whole body. Checked BEFORE the loop, so no elements / draws happen.
+
+    // BUDGET bail: an over-budget count flags `raised` and returns → the dispatch's `None` → the interpreter
+    // runs the whole body. Checked BEFORE the loop, so no elements / draws happen first (piece-1 order-safe).
     let budget = fb.ins().iconst(types::I64, COMPREHENSION_BUDGET);
     let over = fb.ins().icmp(IntCC::SignedGreaterThan, len, budget);
     let bail = fb.create_block();
@@ -1044,26 +1183,32 @@ fn compile_comprehension(
     fb.seal_block(body_block); // its only predecessor (header) is now declared
     fb.seal_block(exit);
 
-    // body: value = start + (i as f64)*step; bind the loop var; compile the scalar element; push it.
+    // body: value = the iterable's element `i`; bind the loop var; compile the scalar element; push it.
     fb.switch_to_block(body_block);
-    let i_f = fb.ins().fcvt_from_sint(types::F64, i); // exact for 0 <= i < RANGE_MAX < 2^53
-    let scaled = fb.ins().fmul(i_f, step_v);
-    let value = fb.ins().fadd(start_v, scaled); // `start + (i as f64)*step`, the interpreter's operand order
+    let value = match iter {
+        CompIter::Range { start, step } => {
+            let i_f = fb.ins().fcvt_from_sint(types::F64, i); // exact for 0 <= i < RANGE_MAX < 2^53
+            let scaled = fb.ins().fmul(i_f, step);
+            fb.ins().fadd(start, scaled) // `start + (i as f64)*step`, the interpreter's operand order
+        }
+        CompIter::Dyn { handle } => {
+            let call = fb.ins().call(lower.vec_get, &[handle, i]); // 0 <= i < len → in-range
+            fb.inst_results(call)[0]
+        }
+    };
     let mut locals = lower.locals.clone();
     locals.insert(name, Lowered::Num(value));
     let scoped = Lower { locals: &locals, ..*lower };
-    let elem = compile_expr(fb, lc_body, &scoped)?.num()?; // 2b.1: a SCALAR element (a vector/matrix declines)
-    fb.ins().call(lower.vec_push, &[lower.sink_ptr, elem]);
+    let elem = compile_expr(fb, lc_body, &scoped)?.num()?; // 2b.2: a SCALAR element (a vector/matrix declines)
+    fb.ins().call(lower.vec_push, &[list, elem]);
     let one = fb.ins().iconst(types::I64, 1);
     let i_next = fb.ins().iadd(i, one);
     fb.ins().jump(header, &[BlockArg::Value(i_next)]);
     fb.seal_block(header); // both predecessors (setup + body) are now declared
 
-    // exit: the sink holds the result; return a dummy (the DynVec descriptor is on `Ret`).
+    // exit: control CONTINUES; the comprehension's value is the materialized DynList's handle.
     fb.switch_to_block(exit);
-    let exit_ret = fb.ins().f64const(0.0);
-    fb.ins().return_(&[exit_ret]);
-    Ok(Ret::DynVec)
+    Ok(Lowered::DynList(list))
 }
 
 /// A compiled sub-expression's value, SCALARIZED (P.1.6 rung A). `Num`/`Bool` are a single IR value; `Vec`
@@ -1078,16 +1223,22 @@ enum Lowered {
     Num(Value),
     Bool(Value),
     Vec(Vec<Lowered>),
+    /// A DYNAMIC-length list (P.1.6 rung-D 2b.2) — a runtime handle (`*mut Vec<f64>`, an IR pointer value) to a
+    /// `Vec<f64>` materialized in the call's [`JitArena`] by a comprehension. Unlike `Vec` (compile-time fixed
+    /// shape), its length lives at runtime; it's consumed by `len`, iteration (`[for(x = dynlist) …]`), and the
+    /// function RETURN (flagged as the result). Arbitrary dynamic INDEXING (`dynlist[i]`) is rung 2b.2b.
+    DynList(Value),
 }
 
 impl Lowered {
     /// The single IR value of a `Num`, else DECLINE — an arithmetic/comparison operand, a math-builtin arg, or
-    /// a scalar function return that turned out to be a bool or a vector isn't in the subset.
+    /// a scalar function return that turned out to be a bool, a vector, or a dynamic list isn't in the subset.
     fn num(&self) -> Result<Value, JitError> {
         match self {
             Lowered::Num(v) => Ok(*v),
             Lowered::Bool(_) => Err(JitError::Unsupported("a boolean where a number is required")),
             Lowered::Vec(_) => Err(JitError::Unsupported("a vector where a number is required")),
+            Lowered::DynList(_) => Err(JitError::Unsupported("a dynamic list where a number is required")),
         }
     }
 }
@@ -1105,6 +1256,7 @@ fn truthy(fb: &mut FunctionBuilder, v: &Lowered) -> Result<Value, JitError> {
             Ok(fb.ins().fcmp(FloatCC::NotEqual, *n, zero))
         }
         Lowered::Vec(_) => Err(JitError::Unsupported("a vector as a truth condition")),
+        Lowered::DynList(_) => Err(JitError::Unsupported("a dynamic list as a truth condition")),
     }
 }
 
@@ -1176,17 +1328,21 @@ struct Lower<'a> {
     /// The woven `RandStream` pointer (the 4th ABI param) — a JIT'd seedless `rands()` passes it to
     /// `jit_rand_next`. Untouched by a body that never draws (P.1.6 rung-D piece 1).
     rand_ptr: Value,
-    /// The dynamic-list SINK pointer (the 5th ABI param, `*mut Vec<f64>`) — a JIT'd comprehension pushes its
-    /// materialized elements here via `jit_vec_push` (P.1.6 rung-D piece 2). Untouched by a non-comprehension body.
-    sink_ptr: Value,
+    /// The dynamic-list ARENA pointer (the 5th ABI param, `*mut JitArena`) — a JIT'd comprehension allocates
+    /// its `DynList`(s) here (P.1.6 rung-D 2b.2). Untouched by a body with no comprehension.
+    arena_ptr: Value,
     fmod: FuncRef,
     powf: FuncRef,
     fmin: FuncRef,
     fmax: FuncRef,
     math: FuncRef,
     rand_next: FuncRef,
-    vec_push: FuncRef,
     range_len: FuncRef,
+    arena_new_list: FuncRef,
+    vec_push: FuncRef,
+    vec_len: FuncRef,
+    vec_get: FuncRef,
+    set_result: FuncRef,
 }
 
 #[allow(
@@ -1445,10 +1601,16 @@ fn compile_expr(fb: &mut FunctionBuilder, expr: &Expr, lower: &Lower) -> Result<
             fb.ins().store(MemFlagsData::trusted(), now, lower.raised_ptr, 0);
             compile_expr(fb, body, lower)
         }
-        // A vector LITERAL `[a, b, c]` → a scalarized `Lowered::Vec` of its compiled elements (P.1.6 rung A). A
-        // comprehension element (`[for …]`, `each …`) declines when its node compiles — a dynamic length the
-        // scalarized value can't hold, so the whole vector declines with that element's reason.
+        // A single-element `[for (…) …]` → a dynamic-length COMPREHENSION (P.1.6 rung-D 2b.2): materialize it
+        // into the arena, yielding a `Lowered::DynList`. Otherwise a vector LITERAL `[a, b, c]` → a scalarized
+        // `Lowered::Vec` of its compiled elements (rung A). A MIXED vector (a literal + a comprehension) or a
+        // multi-element comprehension list declines here (rung 2b.N).
         ExprKind::Vector(elems) => {
+            if let [single] = elems.as_slice()
+                && let ExprKind::LcFor { bindings, body: lc_body } = &single.kind
+            {
+                return compile_comprehension(fb, bindings, lc_body, lower);
+            }
             let lowered: Result<Vec<Lowered>, JitError> =
                 elems.iter().map(|e| compile_expr(fb, e, lower)).collect();
             Ok(Lowered::Vec(lowered?))
@@ -1545,30 +1707,37 @@ fn compile_seedless_rands(
     Ok(Lowered::Vec(elems))
 }
 
-/// Whether `expr` (recursively) calls `rands` — the standalone [`compile_function`] guard (P.1.6 rung-D piece
-/// 1). That API weaves no `RandStream`, so a rands body must DECLINE rather than have `JitFn::call`'s null
-/// stream pointer dereferenced. Over-conservative (a seeded / dynamic-count rands would decline in the compiler
-/// anyway), but simple + safe. Comprehensions / ranges aren't walked — they decline before any draw is emitted.
-fn uses_rands(expr: &Expr) -> bool {
+/// Whether `expr` (recursively) needs the RUNTIME environment the standalone [`compile_function`] doesn't
+/// provide — a `rands` call (no woven `RandStream`, P.1.6 piece 1) OR a comprehension (no `JitArena`, piece 2).
+/// Either would have `JitFn::call`'s NULL stream/arena pointer dereferenced, so the standalone API must
+/// DECLINE such a body. Over-conservative (a seeded rands / an over-budget comprehension would decline in the
+/// compiler anyway), but simple + safe. The registry path (which weaves both) has no such limit.
+fn needs_runtime_env(expr: &Expr) -> bool {
     match &expr.kind {
+        // Any comprehension node needs the arena.
+        ExprKind::LcFor { .. }
+        | ExprKind::LcForC { .. }
+        | ExprKind::LcEach(_)
+        | ExprKind::LcIf { .. } => true,
         ExprKind::Call { callee, args } => {
             matches!(&callee.kind, ExprKind::Ident(n) if n.as_str() == "rands")
-                || uses_rands(callee)
-                || args.iter().any(|a| uses_rands(&a.value))
+                || needs_runtime_env(callee)
+                || args.iter().any(|a| needs_runtime_env(&a.value))
         }
-        ExprKind::Unary { operand, .. } => uses_rands(operand),
-        ExprKind::Binary { lhs, rhs, .. } => uses_rands(lhs) || uses_rands(rhs),
+        ExprKind::Unary { operand, .. } => needs_runtime_env(operand),
+        ExprKind::Binary { lhs, rhs, .. } => needs_runtime_env(lhs) || needs_runtime_env(rhs),
         ExprKind::Ternary { cond, then, els } => {
-            uses_rands(cond) || uses_rands(then) || uses_rands(els)
+            needs_runtime_env(cond) || needs_runtime_env(then) || needs_runtime_env(els)
         }
-        ExprKind::Index { base, index } => uses_rands(base) || uses_rands(index),
-        ExprKind::Member { base, .. } => uses_rands(base),
-        ExprKind::Vector(es) => es.iter().any(uses_rands),
+        ExprKind::Index { base, index } => needs_runtime_env(base) || needs_runtime_env(index),
+        ExprKind::Member { base, .. } => needs_runtime_env(base),
+        ExprKind::Vector(es) => es.iter().any(needs_runtime_env),
         ExprKind::Let { bindings, body } => {
-            bindings.iter().any(|b| uses_rands(&b.value)) || uses_rands(body)
+            bindings.iter().any(|b| needs_runtime_env(&b.value)) || needs_runtime_env(body)
         }
         ExprKind::Assert { args, body } => {
-            args.iter().any(|a| uses_rands(&a.value)) || body.as_deref().is_some_and(uses_rands)
+            args.iter().any(|a| needs_runtime_env(&a.value))
+                || body.as_deref().is_some_and(needs_runtime_env)
         }
         _ => false,
     }
@@ -1600,15 +1769,25 @@ fn compile_vec_builtin(
             if args.len() != 1 {
                 return Err(JitError::Unsupported("call"));
             }
-            let Lowered::Vec(elems) = compile_expr(fb, &args[0].value, lower)? else {
-                return Err(JitError::Unsupported("len of a non-vector"));
-            };
-            #[allow(
-                clippy::cast_precision_loss,
-                reason = "a scalarized vector's length is tiny (<= MAX_VEC_ARG); f64 is exact"
-            )]
-            let n = elems.len() as f64;
-            Ok(Lowered::Num(fb.ins().f64const(n)))
+            match compile_expr(fb, &args[0].value, lower)? {
+                // A scalarized fixed vector's length is a COMPILE-TIME constant (rung B).
+                Lowered::Vec(elems) => {
+                    #[allow(
+                        clippy::cast_precision_loss,
+                        reason = "a scalarized vector's length is tiny (<= MAX_VEC_ARG); f64 is exact"
+                    )]
+                    let n = elems.len() as f64;
+                    Ok(Lowered::Num(fb.ins().f64const(n)))
+                }
+                // A DYNAMIC list's length is a runtime `jit_vec_len` (P.1.6 rung-D 2b.2). The i64 count is
+                // exact as f64 (budget-capped ≤ 1e6), converted with `fcvt_from_sint`.
+                Lowered::DynList(handle) => {
+                    let call = fb.ins().call(lower.vec_len, &[handle]);
+                    let n_i = fb.inst_results(call)[0];
+                    Ok(Lowered::Num(fb.ins().fcvt_from_sint(types::F64, n_i)))
+                }
+                _ => Err(JitError::Unsupported("len of a non-vector")),
+            }
         }
         "norm" => {
             if args.len() != 1 {
@@ -1679,6 +1858,8 @@ fn compile_vec_builtin(
                     }
                     Lowered::Num(x) => vec![x],
                     Lowered::Bool(_) => return Err(JitError::Unsupported("min/max of a boolean")),
+                    // min/max reducing a DYNAMIC list is a runtime fold (a loop) — a future rung; decline.
+                    Lowered::DynList(_) => return Err(JitError::Unsupported("min/max of a dynamic list")),
                 }
             } else {
                 // 0 or ≥2 args: the `multi` branch — every arg is a plain number (a vector/bool → undef → decline).
@@ -1773,6 +1954,8 @@ fn neg_lowered(fb: &mut FunctionBuilder, v: Lowered) -> Result<Lowered, JitError
             Ok(Lowered::Vec(out?))
         }
         Lowered::Bool(_) => Err(JitError::Unsupported("negate a boolean")),
+        // Elementwise-negating a DYNAMIC list is a runtime map (a loop) — a future rung (2b.4); decline.
+        Lowered::DynList(_) => Err(JitError::Unsupported("negate a dynamic list")),
     }
 }
 

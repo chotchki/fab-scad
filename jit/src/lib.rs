@@ -18,6 +18,7 @@
 
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
+use std::rc::Rc;
 
 use cranelift::codegen::ir::condcodes::{FloatCC, IntCC};
 use cranelift::codegen::ir::{BlockArg, FuncRef, Value};
@@ -38,15 +39,30 @@ use cranelift::prelude::{
 ///
 /// The Num-vs-Bool distinction is load-bearing (`Num(1.0) != Bool(true)` would diverge); the internal
 /// per-sub-expression type lives on [`Lowered`], not here — this is ONLY the whole function's return.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 enum Ret {
     Num,
     Bool,
     Vec(usize),
+    /// A fixed-shape NESTED vector — a matrix / list-of-vectors (P.1.6 rung-D 2c.1). The body wrote its
+    /// `leaves` flat leaf scalars to the sink in row-major order; the `shape` tree records the nesting so the
+    /// dispatch rebuilds the interpreter's nested `Value`. `Rc`-shared so cloning a [`CompiledFn`] out of the
+    /// cache is a refcount bump, not a tree copy. A body whose vector is FLAT stays [`Ret::Vec`] (the fast path).
+    Nested { shape: Rc<VShape>, leaves: usize },
     /// A DYNAMIC-length numeric list (P.1.6 rung-D piece 2): the compiled function materialized it into the
     /// `sink` (`*mut Vec<f64>`) via a loop; the `f64` return is a dummy and the dispatch reads the sink into a
     /// `Value::NumList`. Length isn't known at compile time (unlike `Vec(n)`), so there's no descriptor.
     DynVec,
+}
+
+/// The nesting SHAPE of a fixed-vector return (P.1.6 rung-D 2c.1) — a tree mirroring the `Lowered::Vec` the body
+/// returned. A `Leaf` pulls the next f64 from the flat sink buffer (in the order the body stored them); a `Nest`
+/// is a sublist. [`rebuild_nested`] walks it to reconstruct the interpreter's `Value`, applying `build_vector`'s
+/// exact rule at each level (all-`Num` children → `NumList`, else `List`) so the result is BIT-IDENTICAL.
+#[derive(Clone, PartialEq, Eq)]
+enum VShape {
+    Leaf,
+    Nest(Vec<VShape>),
 }
 
 use fab_lang::{
@@ -331,10 +347,10 @@ impl std::error::Error for JitError {}
 
 /// A finalized numeric function: `extern "C" fn(*const f64, *mut u8, *mut f64) -> f64` as a raw code pointer.
 /// The executable memory it points into is owned by the [`JitFn`] or [`JitRegistry`] that produced it — a
-/// `CompiledFn` is only valid for that owner's lifetime. `Copy` (a pointer + two words), so the registry can
-/// lift one out of its cache and call it AFTER releasing the `RefCell` borrow — the code stays mapped as long
-/// as the module (in the registry) is alive.
-#[derive(Clone, Copy)]
+/// `CompiledFn` is only valid for that owner's lifetime. Cheap `Clone` — a pointer, two words, and (for a
+/// nested return, 2c.1) an `Rc<VShape>` bump — so the registry can lift one out of its cache and call it AFTER
+/// releasing the `RefCell` borrow, the code staying mapped as long as the module (in the registry) is alive.
+#[derive(Clone)]
 pub struct CompiledFn {
     code: *const u8,
     /// The number of `f64` slots the compiled function reads from the params pointer — the FLAT element count
@@ -390,8 +406,19 @@ impl CompiledFn {
             params.len(),
             self.arity
         );
-        if let Ret::Vec(n) = self.ret_ty {
-            assert!(out.len() >= n, "CompiledFn::call out buffer too small: {} < {n}", out.len());
+        match &self.ret_ty {
+            Ret::Vec(n) => {
+                assert!(out.len() >= *n, "CompiledFn::call out buffer too small: {} < {n}", out.len());
+            }
+            // A nested (matrix) return writes its FLAT leaf count into the same sink (2c.1).
+            Ret::Nested { leaves, .. } => {
+                assert!(
+                    out.len() >= *leaves,
+                    "CompiledFn::call out buffer too small: {} < {leaves}",
+                    out.len()
+                );
+            }
+            _ => {}
         }
         // THE unsafe seam of the whole crate. SAFETY: `code` is a finalized Cranelift function of signature
         // `extern "C" fn(*const f64, *mut u8, *mut f64, *mut RandStream, *mut JitArena) -> f64` (built in
@@ -574,7 +601,7 @@ impl JitRegistry {
     fn get_or_compile(&self, name: &str, sig: &ShapeSig) -> Option<CompiledFn> {
         // Fast path: already compiled, or a memoized decline.
         if let Some(entry) = self.cache.borrow().get(name).and_then(|m| m.get(sig)) {
-            return *entry;
+            return entry.clone();
         }
         // Unknown function → nothing to compile (and nothing to memoize).
         let def = self.defs.get(name)?;
@@ -611,7 +638,7 @@ impl JitRegistry {
                 Err(_) => None,
             }
         };
-        self.cache.borrow_mut().entry(name.to_string()).or_default().insert(sig.clone(), compiled);
+        self.cache.borrow_mut().entry(name.to_string()).or_default().insert(sig.clone(), compiled.clone());
         compiled
     }
 
@@ -630,7 +657,7 @@ impl JitRegistry {
         let n = self.defs.get(name)?.params.len();
         let sig = vec![ArgShape::Scalar; n];
         let cache = self.cache.borrow();
-        cache.get(name).and_then(|m| m.get(&sig)).copied().flatten()
+        cache.get(name).and_then(|m| m.get(&sig)).cloned().flatten()
     }
 
     /// How many functions compiled their all-scalar shape at build — the coverage count (EXPLAIN report).
@@ -691,7 +718,7 @@ impl NumericJit for JitRegistry {
         // used) arena; it's freed when this fn returns, AFTER a `DynVec` result is taken out of it.
         let mut arena = JitArena::new();
         let arena_ptr = std::ptr::from_mut(&mut arena).cast::<core::ffi::c_void>();
-        match compiled.ret_ty {
+        match &compiled.ret_ty {
             Ret::Num => {
                 Some(JitOutcome::Num(unsafe { compiled.call(&scratch, &mut [0.0], rand, arena_ptr) }?))
             }
@@ -699,10 +726,18 @@ impl NumericJit for JitRegistry {
                 unsafe { compiled.call(&scratch, &mut [0.0], rand, arena_ptr) }? != 0.0,
             )),
             Ret::Vec(n) => {
-                let mut out = vec![0.0; n];
+                let mut out = vec![0.0; *n];
                 // the f64 return is a dummy; the elements are in `out`.
                 unsafe { compiled.call(&scratch, &mut out, rand, arena_ptr) }?;
                 Some(JitOutcome::Vec(out))
+            }
+            Ret::Nested { shape, leaves } => {
+                let mut out = vec![0.0; *leaves];
+                // the f64 return is a dummy; the FLAT leaves are in `out`, rebuilt into the nested value via the
+                // shape tree (2c.1). `None` = an inline assert raised → interpret.
+                unsafe { compiled.call(&scratch, &mut out, rand, arena_ptr) }?;
+                let mut cursor = 0usize;
+                Some(JitOutcome::Nested(rebuild_nested(shape, &out, &mut cursor)))
             }
             Ret::DynVec => {
                 // `None` = the BUDGET bail (or an inline assert) flagged `raised` → interpret. On success the
@@ -1126,13 +1161,18 @@ fn define_one(
             // A compile-time-const bool RETURN (a predicate body) → the literal `0.0`/`1.0`, tagged `Bool`.
             Lowered::ConstBool(b) => (fb.ins().f64const(if b { 1.0 } else { 0.0 }), Ret::Bool),
             Lowered::Vec(elems) => {
-                for (i, e) in elems.iter().enumerate() {
-                    let x = e.num(&mut fb)?; // a nested element (matrix row) declines here — flat vectors only
-                    let byte_off = i32::try_from(i * 8)
-                        .map_err(|_| JitError::Unsupported("return offset overflow"))?;
-                    fb.ins().store(MemFlagsData::trusted(), x, out_ptr, byte_off);
-                }
-                (fb.ins().f64const(0.0), Ret::Vec(elems.len())) // the f64 return is a dummy for a vec
+                // Flatten the (possibly NESTED) vector's leaf scalars into the sink in row-major order, building
+                // the shape tree as we go (2c.1). A FLAT vector (every child a leaf) keeps the `Ret::Vec(n)` fast
+                // path; a nested one (a matrix / list-of-vectors) carries its shape so the dispatch rebuilds it.
+                let mut off = 0usize;
+                let shape = store_return_vec(&mut fb, out_ptr, &elems, &mut off)?;
+                let ret = match &shape {
+                    VShape::Nest(children) if children.iter().all(|c| matches!(c, VShape::Leaf)) => {
+                        Ret::Vec(off)
+                    }
+                    _ => Ret::Nested { shape: Rc::new(shape), leaves: off },
+                };
+                (fb.ins().f64const(0.0), ret) // the f64 return is a dummy for a vector
             }
             Lowered::DynList(handle) => {
                 fb.ins().call(lower.set_result, &[lower.arena_ptr, handle]);
@@ -1148,6 +1188,67 @@ fn define_one(
     module.define_function(func_id, &mut ctx).map_err(cl)?;
     module.clear_context(&mut ctx);
     Ok((func_id, ret_ty))
+}
+
+/// Flatten a fixed vector's leaf scalars into the return sink `out_ptr` in row-major order, returning its shape
+/// tree (2c.1). Recurses into a nested `Lowered::Vec` (a matrix row); a leaf is a `Num`/`ConstNum` stored at the
+/// next f64 slot. A `Bool`/`ConstBool`/`DynList` leaf DECLINES (it can't ride the f64 sink) — the interpreter
+/// keeps those. `off` is the running leaf count (== the next slot index), threaded across the whole tree.
+fn store_return_vec(
+    fb: &mut FunctionBuilder,
+    out_ptr: Value,
+    elems: &[Lowered],
+    off: &mut usize,
+) -> Result<VShape, JitError> {
+    let mut children = Vec::with_capacity(elems.len());
+    for e in elems {
+        children.push(store_return_elem(fb, out_ptr, e, off)?);
+    }
+    Ok(VShape::Nest(children))
+}
+
+/// One element of a return vector (2c.1): a nested `Lowered::Vec` recurses into a `Nest`; anything else is a
+/// LEAF — `num` materializes a `Num`/`ConstNum` to an f64 and stores it (a `Bool`/`DynList` declines via `num`).
+fn store_return_elem(
+    fb: &mut FunctionBuilder,
+    out_ptr: Value,
+    e: &Lowered,
+    off: &mut usize,
+) -> Result<VShape, JitError> {
+    if let Lowered::Vec(sub) = e {
+        return store_return_vec(fb, out_ptr, sub, off);
+    }
+    let x = e.num(fb)?;
+    let byte_off = i32::try_from(*off * 8).map_err(|_| JitError::Unsupported("return offset overflow"))?;
+    fb.ins().store(MemFlagsData::trusted(), x, out_ptr, byte_off);
+    *off += 1;
+    Ok(VShape::Leaf)
+}
+
+/// Rebuild the interpreter's nested `Value` from the flat leaf buffer + the shape tree (2c.1). A `Leaf` consumes
+/// the next f64 as a `Num`; a `Nest` collects its children and applies `build_vector`'s EXACT rule — all-`Num`
+/// children → the `NumList` fast path, else a general `List`. The interpreter's `PartialEq` already makes the two
+/// list representations equal element-for-element, but matching the rule keeps the reconstructed value identical.
+fn rebuild_nested(shape: &VShape, flat: &[f64], cursor: &mut usize) -> ScadValue {
+    match shape {
+        VShape::Leaf => {
+            let v = flat[*cursor];
+            *cursor += 1;
+            ScadValue::Num(v)
+        }
+        VShape::Nest(children) => {
+            let items: Vec<ScadValue> =
+                children.iter().map(|c| rebuild_nested(c, flat, cursor)).collect();
+            match items
+                .iter()
+                .map(|v| if let ScadValue::Num(n) = v { Some(*n) } else { None })
+                .collect::<Option<Vec<f64>>>()
+            {
+                Some(nums) => ScadValue::num_list(nums),
+                None => ScadValue::list(items),
+            }
+        }
+    }
 }
 
 /// The iterable of a comprehension binding, once analyzed (P.1.6 rung-D 2b.2): a RANGE (index-based value) or

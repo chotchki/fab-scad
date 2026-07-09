@@ -179,6 +179,12 @@ pub enum JitOutcome {
     Bool(bool),
     /// A fixed-shape numeric vector (rung C) → [`Value::NumList`]. Owned — the JIT wrote it into a sink buffer.
     Vec(Vec<f64>),
+    /// A fixed-shape NESTED value — a matrix / list-of-vectors (P.1.6 rung-D 2c.1). The JIT wrote its flat leaf
+    /// scalars to the sink buffer and rebuilt the nesting from a compile-time shape tree, applying the SAME
+    /// `build_vector` rule (all-`Num` children → `NumList`, else `List`) the interpreter does — so the value is
+    /// bit-identical, and the dispatch just hands it through. Carries a fully-built [`Value`] rather than a flat
+    /// buffer because the nesting can't survive the flat-`f64` return ABI a [`JitOutcome::Vec`] rides.
+    Nested(Value),
 }
 
 /// One user function offered to the JIT factory: its name, its parameter names (in order), and its body
@@ -767,6 +773,8 @@ fn eval_with_global<'a>(
                         JitOutcome::Num(n) => Value::Num(n),
                         JitOutcome::Bool(b) => Value::Bool(b),
                         JitOutcome::Vec(xs) => Value::num_list(xs),
+                        // Already the reconstructed nested value (2c.1) — the JIT applied `build_vector`'s rule.
+                        JitOutcome::Nested(v) => v,
                     });
                     continue;
                 }

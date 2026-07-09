@@ -393,6 +393,19 @@ fn assert_call_vec_eq(reg: &JitRegistry, prog: &Program, name: &str, vals: &[Val
     }
 }
 
+/// Assert a fixed NESTED (matrix / list-of-vectors) return (2c.1) equals the interpreter's `Value`. The JIT
+/// flattens the leaves to the sink and rebuilds the tree from a compile-time shape descriptor, applying
+/// `build_vector`'s rule — so `Value`'s `PartialEq` (which makes a `NumList` equal a `List` of the same numbers)
+/// proves it. Finite-valued cases here; the corpus differential is the strict `to_bits` gate (NaN included).
+fn assert_call_nested_eq(reg: &JitRegistry, prog: &Program, name: &str, vals: &[Value]) {
+    let jit = match call_jit(reg, name, vals) {
+        Some(JitOutcome::Nested(v)) => v,
+        other => panic!("{name}{vals:?}: expected a JIT nested result, got {other:?}"),
+    };
+    let slow = interpret_fn(prog, name, vals).expect("interprets");
+    assert_eq!(jit, slow, "{name}{vals:?}: jit={jit:?} interp={slow:?}");
+}
+
 #[test]
 fn vector_arg_shapes_compile_on_demand() {
     // P.1.6 rung B: a function that takes a VECTOR parameter (indexed / member-accessed / dotted) declines
@@ -848,6 +861,43 @@ fn const_fold_numbers_prune_and_bit_identical() {
     // is_num of a const NaN (0/0) folds FALSE; is_num of a const number folds TRUE.
     assert_call_eq(&reg, &prog, "isnan_lit", &[]); // is_num(NaN)=false → 0
     assert_call_eq(&reg, &prog, "isnum_lit", &[]); // is_num(5)=true → 1
+}
+
+#[test]
+fn matrix_return_is_bit_identical() {
+    // P.1.6 rung-D 2c.1: a NESTED fixed-vector return — a matrix / list-of-vectors — flattens its leaf scalars
+    // row-major to the sink and rebuilds the interpreter's nested `Value` from a compile-time shape tree. `m2`
+    // is a plain matrix literal; `rmat` is the real BOSL2 shape (a matrix built from trig on a scalar arg);
+    // `ragged` exercises the general `List` fallback (unequal row lengths → not the all-`Num` `NumList` path);
+    // `deep` a 3-level nest; `pairs`/`scaled` build a matrix from a VECTOR arg (rung-B shape × the 2c.1 return).
+    let prog = program(
+        "function m2() = [[1, 2], [3, 4]];\
+         function rmat(a) = [[cos(a), -sin(a)], [sin(a), cos(a)]];\
+         function ragged() = [[1, 2], [3, 4, 5]];\
+         function deep() = [[[1, 2]], [[3, 4]]];\
+         function pairs(v) = [[v[0], v[1]], [v[1], v[0]]];\
+         function scaled(v, k) = [[v[0] * k, v[1] * k], [v[2] * k, v[0] * k]];",
+    );
+    let reg = JitRegistry::build(
+        defs(&prog).iter().map(|&(n, p, b)| (n, p, b)),
+        consts(&prog).iter().map(|&(n, v)| (n, v)),
+    )
+    .expect("registry builds");
+
+    // Nullary matrix literals compile at BUILD (no arg shape to wait for); nested compiles, doesn't decline.
+    assert!(reg.get("m2").is_some(), "a fixed matrix literal compiles at build (2c.1)");
+    assert!(reg.get("ragged").is_some(), "a ragged nested return compiles (the List fallback)");
+    assert!(reg.get("deep").is_some(), "a 3-level nested return compiles");
+    assert_call_nested_eq(&reg, &prog, "m2", &[]);
+    assert_call_nested_eq(&reg, &prog, "ragged", &[]);
+    assert_call_nested_eq(&reg, &prog, "deep", &[]);
+    // A matrix from a scalar arg (trig) — JIT and interpreter share the platform libm, so bit-identical to EACH
+    // OTHER (the 1-ULP-vs-OpenSCAD divergence is a separate, oracle-side concern).
+    assert_call_nested_eq(&reg, &prog, "rmat", &[Value::Num(30.0)]);
+    assert_call_nested_eq(&reg, &prog, "rmat", &[Value::Num(-127.5)]);
+    // A matrix from a VECTOR arg — compiles on demand for the vec-2 / vec-3 shape, returns the nested value.
+    assert_call_nested_eq(&reg, &prog, "pairs", &[vec_arg(&[7.0, 9.0])]);
+    assert_call_nested_eq(&reg, &prog, "scaled", &[vec_arg(&[2.0, 3.0, 4.0]), Value::Num(1.5)]);
 }
 
 #[test]

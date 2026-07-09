@@ -147,6 +147,29 @@ fn outcome_agrees(jit: Option<&JitOutcome>, slow: &fab_lang::Result<Value>) -> b
         (Some(JitOutcome::Vec(a)), Ok(Value::NumList(b))) => {
             a.len() == b.len() && a.iter().zip(b.iter()).all(|(x, y)| x.to_bits() == y.to_bits())
         }
+        // A fixed nested (matrix) return (2c.1) — the JIT already rebuilt the `Value`; compare it BIT-for-bit.
+        (Some(JitOutcome::Nested(a)), Ok(b)) => value_bits_eq(a, b),
+        _ => false,
+    }
+}
+
+/// BIT-level structural equality of two `Value`s for the matrix/nested differential (2c.1) — like `Value`'s own
+/// `PartialEq` but comparing `Num` leaves by `to_bits` (a `NaN` matrix must have IDENTICAL bits, STRICTER than
+/// IEEE `==` which reports `NaN != NaN`), and treating the `NumList`/`List` representations as the same vector
+/// (element-for-element). This is the never-silently-wrong gate for a reconstructed nested value.
+fn value_bits_eq(a: &Value, b: &Value) -> bool {
+    use fab_lang::Value::{Bool, List, Num, NumList};
+    match (a, b) {
+        (Num(x), Num(y)) => x.to_bits() == y.to_bits(),
+        (Bool(x), Bool(y)) => x == y,
+        (NumList(x), NumList(y)) => {
+            x.len() == y.len() && x.iter().zip(y.iter()).all(|(p, q)| p.to_bits() == q.to_bits())
+        }
+        (List(x), List(y)) => x.len() == y.len() && x.iter().zip(y.iter()).all(|(p, q)| value_bits_eq(p, q)),
+        (NumList(n), List(l)) | (List(l), NumList(n)) => {
+            n.len() == l.len()
+                && n.iter().zip(l.iter()).all(|(x, v)| matches!(v, Num(y) if x.to_bits() == y.to_bits()))
+        }
         _ => false,
     }
 }
@@ -279,6 +302,8 @@ fn fast_equals_jit_over_bosl2_vector_arg_shapes() {
                     (JitOutcome::Vec(a), Ok(Value::NumList(b))) => {
                         a.len() == b.len() && a.iter().zip(b.iter()).all(|(x, y)| x.to_bits() == y.to_bits())
                     }
+                    // A vector-arg specialization that returns a nested (matrix) value (2c.1).
+                    (JitOutcome::Nested(a), Ok(b)) => value_bits_eq(a, b),
                     _ => false,
                 };
                 assert!(

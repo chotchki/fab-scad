@@ -21,6 +21,7 @@ mod fnprofile;
 mod geo_stack;
 mod geometry;
 mod intrinsics;
+pub(crate) mod jit_abi;
 pub(crate) mod io;
 mod loader;
 mod message;

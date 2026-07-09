@@ -39,7 +39,7 @@ enum Ty {
     Bool,
 }
 
-use fab_lang::{BinOp, Expr, ExprKind, JitDef, NumericJit, NumericJitFactory, UnOp};
+use fab_lang::{BinOp, Expr, ExprKind, JitDef, NumericJit, NumericJitFactory, UnOp, jit_math_id};
 
 /// The `%` an OpenSCAD `%` compiles to — the EXACT op the interpreter runs (`ops.rs`: `x % y`, C
 /// `fmod` semantics, sign of the dividend). Routed as a call so the bits match, since Cranelift has no
@@ -52,6 +52,13 @@ extern "C" fn jit_fmod(a: f64, b: f64) -> f64 {
 /// (pow is a library transcendental, never a native instruction) so `fast == JIT` holds bit-for-bit.
 extern "C" fn jit_powf(a: f64, b: f64) -> f64 {
     a.powf(b)
+}
+
+/// A scalar math builtin (`sin`/`sqrt`/`abs`/…) an OpenSCAD `Call` compiles to (P.1.4b). Routed to
+/// [`fab_lang::jit_math`] — the SAME computation the interpreter's builtin does (OpenSCAD trig in degrees
+/// via our `trig`, not raw libm), so `fast == JIT` holds. `id` selects the op; a unary op ignores `b`.
+extern "C" fn jit_math_call(id: u32, a: f64, b: f64) -> f64 {
+    fab_lang::jit_math(id as u16, a, b)
 }
 
 /// Why a numeric function couldn't be JIT-compiled. The compiler DECLINES rather than guess — an
@@ -175,14 +182,14 @@ impl JitRegistry {
         defs: impl IntoIterator<Item = (&'a str, &'a [&'a str], &'a Expr)>,
     ) -> Result<Self, JitError> {
         let mut module = new_module()?;
-        let (fmod_id, powf_id) = declare_math(&mut module)?;
+        let helpers = declare_helpers(&mut module)?;
         // Declare + define each compilable function, remembering its FuncId to resolve the code pointer
         // AFTER the single finalize. A unique export symbol per function (by index) avoids collisions.
         let mut pending: Vec<(String, FuncId, usize)> = Vec::new();
         let mut declined: BTreeMap<String, &'static str> = BTreeMap::new();
         for (i, (name, param_names, body)) in defs.into_iter().enumerate() {
             let symbol = format!("scad_jit_{i}");
-            match define_one(&mut module, &symbol, param_names, body, fmod_id, powf_id) {
+            match define_one(&mut module, &symbol, param_names, body, &helpers) {
                 Ok(func_id) => pending.push((name.to_string(), func_id, param_names.len())),
                 // Declined → the interpreter handles it; record the FIRST out-of-subset node that blocked it
                 // (the absorption-ceiling signal for the EXPLAIN histogram).
@@ -321,8 +328,8 @@ fn explain_coverage(defs: &[JitDef<'_>], registry: &JitRegistry) {
 /// codegen failure.
 pub fn compile_function(param_names: &[&str], body: &Expr) -> Result<JitFn, JitError> {
     let mut module = new_module()?;
-    let (fmod_id, powf_id) = declare_math(&mut module)?;
-    let func_id = define_one(&mut module, "scad_jit_fn", param_names, body, fmod_id, powf_id)?;
+    let helpers = declare_helpers(&mut module)?;
+    let func_id = define_one(&mut module, "scad_jit_fn", param_names, body, &helpers)?;
     module
         .finalize_definitions()
         .map_err(|e| JitError::Cranelift(e.to_string()))?;
@@ -351,20 +358,38 @@ fn new_module() -> Result<JITModule, JitError> {
     let mut jb = JITBuilder::with_isa(isa, default_libcall_names());
     jb.symbol("jit_fmod", jit_fmod as *const u8);
     jb.symbol("jit_powf", jit_powf as *const u8);
+    jb.symbol("jit_math_call", jit_math_call as *const u8);
     Ok(JITModule::new(jb))
 }
 
-/// Declare the two external math routines (`(f64, f64) -> f64`) as imports in `module` — done ONCE per
-/// module, their `FuncId`s reused by every function compiled into it.
-fn declare_math(module: &mut JITModule) -> Result<(FuncId, FuncId), JitError> {
+/// The external helper routines declared as imports in `module` — done ONCE per module, their `FuncId`s
+/// reused by every function compiled into it.
+struct Helpers {
+    /// `jit_fmod(f64, f64) -> f64` — the `%` operator.
+    fmod: FuncId,
+    /// `jit_powf(f64, f64) -> f64` — the `^` operator.
+    powf: FuncId,
+    /// `jit_math_call(i32 id, f64, f64) -> f64` — a scalar math builtin dispatched by id (P.1.4b).
+    math: FuncId,
+}
+
+fn declare_helpers(module: &mut JITModule) -> Result<Helpers, JitError> {
     let cl = |e: ModuleError| JitError::Cranelift(e.to_string());
+    // `(f64, f64) -> f64` for fmod/powf.
+    let mut op_sig = module.make_signature();
+    op_sig.params.push(AbiParam::new(types::F64));
+    op_sig.params.push(AbiParam::new(types::F64));
+    op_sig.returns.push(AbiParam::new(types::F64));
+    let fmod = module.declare_function("jit_fmod", Linkage::Import, &op_sig).map_err(cl)?;
+    let powf = module.declare_function("jit_powf", Linkage::Import, &op_sig).map_err(cl)?;
+    // `(i32 id, f64, f64) -> f64` for the math dispatcher.
     let mut math_sig = module.make_signature();
+    math_sig.params.push(AbiParam::new(types::I32));
     math_sig.params.push(AbiParam::new(types::F64));
     math_sig.params.push(AbiParam::new(types::F64));
     math_sig.returns.push(AbiParam::new(types::F64));
-    let fmod_id = module.declare_function("jit_fmod", Linkage::Import, &math_sig).map_err(cl)?;
-    let powf_id = module.declare_function("jit_powf", Linkage::Import, &math_sig).map_err(cl)?;
-    Ok((fmod_id, powf_id))
+    let math = module.declare_function("jit_math_call", Linkage::Import, &math_sig).map_err(cl)?;
+    Ok(Helpers { fmod, powf, math })
 }
 
 /// Build the IR for one function and declare + define it in `module` under `symbol` (NOT finalized —
@@ -376,8 +401,7 @@ fn define_one(
     symbol: &str,
     param_names: &[&str],
     body: &Expr,
-    fmod_id: FuncId,
-    powf_id: FuncId,
+    helpers: &Helpers,
 ) -> Result<FuncId, JitError> {
     let cl = |e: ModuleError| JitError::Cranelift(e.to_string());
     let ptr_ty = module.target_config().pointer_type();
@@ -398,11 +422,19 @@ fn define_one(
         let params_ptr = fb.block_params(block)[0];
         let raised_ptr = fb.block_params(block)[1];
 
-        let fmod_ref = module.declare_func_in_func(fmod_id, fb.func);
-        let powf_ref = module.declare_func_in_func(powf_id, fb.func);
+        let fmod_ref = module.declare_func_in_func(helpers.fmod, fb.func);
+        let powf_ref = module.declare_func_in_func(helpers.powf, fb.func);
+        let math_ref = module.declare_func_in_func(helpers.math, fb.func);
         let index: BTreeMap<&str, usize> =
             param_names.iter().enumerate().map(|(i, &n)| (n, i)).collect();
-        let lower = Lower { params_ptr, raised_ptr, index: &index, fmod: fmod_ref, powf: powf_ref };
+        let lower = Lower {
+            params_ptr,
+            raised_ptr,
+            index: &index,
+            fmod: fmod_ref,
+            powf: powf_ref,
+            math: math_ref,
+        };
 
         // IR is built BEFORE declare/define — an Unsupported node returns here with the module untouched.
         let (result, ty) = compile_expr(&mut fb, body, &lower)?;
@@ -465,6 +497,7 @@ struct Lower<'a> {
     index: &'a BTreeMap<&'a str, usize>,
     fmod: FuncRef,
     powf: FuncRef,
+    math: FuncRef,
 }
 
 #[allow(
@@ -549,6 +582,32 @@ fn compile_expr(fb: &mut FunctionBuilder, expr: &Expr, lower: &Lower) -> Result<
                 return Err(JitError::Unsupported("ternary branches differ in type"));
             }
             Ok((fb.ins().select(c, tv, ev), tty))
+        }
+        // A scalar math builtin (`sin`/`sqrt`/`abs`/…) inlines to a call into OUR math (P.1.4b) — bit-identical
+        // to the interpreter's builtin (degrees, snapping) via `jit_math`. Anything else DECLINES: a user
+        // function (inlining is later infra), a non-math or variadic builtin, a dynamic/`(expr)()` callee, a
+        // named arg. A unary op passes a dummy 0.0 as the unused second helper argument.
+        ExprKind::Call { callee, args } => {
+            let ExprKind::Ident(name) = &callee.kind else {
+                return Err(JitError::Unsupported("call"));
+            };
+            let Some((id, arity)) = jit_math_id(name) else {
+                return Err(JitError::Unsupported("call"));
+            };
+            if args.len() != usize::from(arity) || args.iter().any(|a| a.name.is_some()) {
+                return Err(JitError::Unsupported("call"));
+            }
+            let (a0, a0ty) = compile_expr(fb, &args[0].value, lower)?;
+            let a = require_num(a0, a0ty)?;
+            let b = if arity == 2 {
+                let (b0, b0ty) = compile_expr(fb, &args[1].value, lower)?;
+                require_num(b0, b0ty)?
+            } else {
+                fb.ins().f64const(0.0)
+            };
+            let id_v = fb.ins().iconst(types::I32, i64::from(id));
+            let call = fb.ins().call(lower.math, &[id_v, a, b]);
+            Ok((fb.inst_results(call)[0], Ty::Num))
         }
         // `assert(cond) body` — a passthrough guard. Compile the CONDITION; if it's falsy, OR a 1 into the
         // `raised` out-param, and the value is the guarded body. On failure the caller ignores our f64 and

@@ -53,6 +53,7 @@ pub use eval::{
     NumericJit, NumericJitFactory, RANGE_MAX, RangeIter, Resolution, Scope, Shape2D, SourceNeed,
     Value, eval_expr, eval_program, fragments, range_iter, range_len,
 };
+pub use eval::jit_abi::{jit_math, jit_math_id};
 pub use geom::{Affine, Affine2, Dims, Rgba, Tri, Vec2, Vec3};
 pub use lexer::{Lexed, Token, TokenKind, decode_str, lex, num_value};
 pub use mesh::Mesh;

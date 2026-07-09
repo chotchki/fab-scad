@@ -136,7 +136,11 @@ fn two_parameter_functions() {
 #[test]
 fn unsupported_nodes_decline_cleanly() {
     // The compiler must DECLINE (not miscompile) anything outside the numeric subset.
-    let prog = program("function f(x) = sin(x);"); // a call — deferred to P.1.4b
+    let prog = program("function f(x) = helper(x);"); // a USER-fn call — inlining is later infra
+    let (names, body) = func(&prog);
+    assert!(compile_function(&names, body).is_err());
+
+    let prog = program("function f(v) = norm(v);"); // a non-scalar / variadic builtin → declines
     let (names, body) = func(&prog);
     assert!(compile_function(&names, body).is_err());
 
@@ -179,6 +183,28 @@ fn ternary_and_comparisons_fast_eq_jit() {
     assert_fast_eq_jit("function f(x) = !(x > 0) ? -1 : 1;", EDGE); // unary !
     // Nested ternary (chained clamp): lo/hi bounds.
     assert_fast_eq_jit("function f(x) = x < 0 ? 0 : (x > 10 ? 10 : x);", EDGE);
+}
+
+#[test]
+fn scalar_math_builtins_fast_eq_jit() {
+    // P.1.4b: `sqrt`/`sin`/`cos`/`abs`/… inline to a call into OUR math (degrees + snapping via trig.rs),
+    // NOT raw libm — so a JIT'd `sin(x)` is the SAME function the interpreter's builtin calls, bit-identical
+    // across the IEEE corners (including NaN/inf, where trig + the snap behave identically on both sides).
+    assert_fast_eq_jit("function f(x) = sqrt(x * x + 1);", EDGE);
+    assert_fast_eq_jit("function f(x) = abs(x) + sign(x);", EDGE);
+    assert_fast_eq_jit("function f(x) = floor(x) + ceil(x) + round(x);", EDGE);
+    assert_fast_eq_jit("function f(x) = sin(x) + cos(x);", EDGE); // DEGREES via trig.rs
+    assert_fast_eq_jit("function f(x) = tan(x);", EDGE);
+    assert_fast_eq_jit("function f(x) = asin(x) + acos(x);", EDGE); // exact-snap at nice values
+    assert_fast_eq_jit("function f(x) = atan(x);", EDGE);
+    assert_fast_eq_jit("function f(x) = ln(x) + log(x) + exp(x);", EDGE);
+    assert_fast_eq_jit("function f(a, b) = atan2(a, b);", TWO);
+    assert_fast_eq_jit("function f(a, b) = pow(a, b);", TWO);
+    // Nested + composed with the arithmetic/ternary subset — the point is WHOLE-function absorption.
+    assert_fast_eq_jit("function f(x) = x > 0 ? sqrt(x) : -sqrt(-x);", EDGE);
+    assert_fast_eq_jit("function hyp(a, b) = sqrt(a * a + b * b);", TWO);
+    // A guarded math body: assert + call + arithmetic all in one compiled function.
+    assert_fast_eq_jit("function f(x) = assert(x >= 0) sqrt(x);", &[&[0.0], &[4.0], &[100.0], &[2.0]]);
 }
 
 #[test]

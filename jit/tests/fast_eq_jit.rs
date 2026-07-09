@@ -19,7 +19,7 @@ fn program(src: &str) -> Program {
 fn func(prog: &Program) -> (Vec<&str>, &Expr) {
     match &prog.stmts[0].kind {
         StmtKind::FunctionDef { params, body, .. } => {
-            (params.iter().map(|p| p.name.as_str()).collect(), body)
+            (params.iter().map(|p| p.name.as_ref()).collect(), body)
         }
         other => panic!("expected a function def, got {other:?}"),
     }

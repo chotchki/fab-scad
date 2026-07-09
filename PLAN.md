@@ -158,10 +158,15 @@ added 2026-07-07.
 - [x] N.2e - N.2e - NumList COW buffer reuse LANDED (ceiling-verified): zip_reuse/map_reuse recycle a refcount-1 Rc<[f64]>; ~0% slice_parts (falsified the theory — its alloc is comprehension result-lists) but ~11% on vector-arithmetic-heavy; bit-identical, corpus 901/901
 ## Phase O - O - Intrinsics tier (AST-fingerprint, wasm-safe)
 - [x] O.1 - O.1 - Intrinsic registry LANDED: AST-fingerprint gate (exact-match-or-interpret) + Task::Intrinsic dispatch + fast==slow harness; POC proves the chain, corpus 901/901
-- [ ] O.2 - O.2 - First hand-written BOSL2-function intrinsics from the release profile
+- [x] O.2 - O.2 - First hand-written BOSL2-function intrinsics from the release profile
 - [x] O.3 - O.3 v1 - EXPLAIN report LANDED (FAB_EXPLAIN): per-function intrinsic plan WIRED/DRIFT/interpreted, so you can see if an intrinsic fires or silently interprets (library drift). Runtime fire-counts + JIT path ride with P.1
 ## Phase P - P - Cranelift JIT + CSG cache (desktop)
 - [ ] P.1 - P.1 - Cranelift JIT for the numeric long tail (desktop)
+  - [x] P.1.1 - P.1.1 - JIT registry + compile cache (one JITModule, keyed by fingerprint)
+  - [ ] P.1.2 - P.1.2 - Crate-boundary hook + dispatch integration
+  - [ ] P.1.3 - P.1.3 - fast==JIT differential over the corpus + EXPLAIN coverage
+  - [ ] P.1.4 - P.1.4 - Extend the numeric subset (ternary, comparisons, transcendental calls)
+  - [ ] P.1.5 - P.1.5 - Measure + coverage report
 - [ ] P.2 - P.2 - Content-addressed CSG cache
 
 ## Backlog (not yet phased)

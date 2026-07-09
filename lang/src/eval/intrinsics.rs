@@ -12,6 +12,14 @@
 //! This module is O.1 — the MECHANISM (fingerprint + registry + the never-wrong gate). The intrinsics
 //! themselves (the hand-written bodies for the profile's hot functions) are O.2.
 
+// Every intrinsic conforms to one fallible fn-pointer type (`Intrinsic`), because SOME functions have an
+// inline `assert` that must raise. The predicates that CAN'T fail still return `Ok(..)` to fit that shared
+// ABI — `unnecessary_wraps` fires on those, but the wrap is required by the type, not incidental.
+#![allow(
+    clippy::unnecessary_wraps,
+    reason = "the uniform fallible Intrinsic fn-pointer type; infallible impls wrap in Ok to conform"
+)]
+
 use std::hash::{Hash, Hasher};
 use std::sync::OnceLock;
 
@@ -20,11 +28,13 @@ use crate::parser::{Arg, BinOp, Expr, ExprKind, Parameter};
 
 /// A hand-written native implementation of a specific user function. Receives the call's POSITIONAL argument
 /// VALUES (already evaluated, in source order) and returns the result — the same `Value` the interpreted body
-/// would. PURE: a function of its args only (no scope, no `$`-vars); the dispatch gate ([`super`]) only
-/// routes all-positional calls here, so the ABI stays a flat slice. An intrinsic implements the WHOLE
-/// function for the arg shapes it accepts; it hardcodes the reference's parameter defaults (it matches that
-/// exact source), so a short positional call still gets the right answer.
-pub(super) type Intrinsic = fn(&[Value]) -> Value;
+/// would, or the same ERROR (a BOSL2 function with an inline `assert(…)` raises when the assert fails, so the
+/// ABI is fallible; the native reproduces the assert's CONTROL FLOW — it errors where the body errors — not
+/// its diagnostic string, which is a locator, not output). PURE: a function of its args only (no scope, no
+/// `$`-vars); the dispatch gate ([`super`]) only routes all-positional calls here, so the ABI stays a flat
+/// slice. An intrinsic implements the WHOLE function for the arg shapes it accepts; it hardcodes the
+/// reference's parameter defaults (it matches that exact source), so a short positional call still gets it.
+pub(super) type Intrinsic = fn(&[Value]) -> crate::Result<Value>;
 
 /// One registered intrinsic: the exact function it stands in for. `reference` is the VERBATIM source of that
 /// function (one `function name(params) = body;`) — the single source of truth: its fingerprint gates
@@ -95,40 +105,53 @@ static REGISTRY: &[Entry] = &[
         reference: "function default(v,dflt=undef) = is_undef(v)? dflt : v;",
         func: default,
     },
+    // `_is_liststr` (2.2%) — a pure leaf (calls only the `is_str` intrinsic + the `is_list` builtin), from
+    // strings.scad. `point3d` (1.8%) from coords.scad — the first intrinsic with an inline `assert` (raises on
+    // a non-list, exercising the fallible ABI) that also BUILDS a value.
+    Entry {
+        name: "_is_liststr",
+        reference: "function _is_liststr(s) = is_list(s) || is_str(s);",
+        func: is_liststr,
+    },
+    Entry {
+        name: "point3d",
+        reference: "function point3d(p, fill=0) = assert(is_list(p)) [for (i=[0:2]) (p[i]==undef)? fill : p[i]];",
+        func: point3d,
+    },
 ];
 
 /// The POC intrinsic: `x * x`. Mirrors the interpreter's `Num * Num` (and `undef` for a non-number arg, as
 /// `apply_binary` yields). Deliberately trivial — it exists to exercise the mechanism, not to be fast.
-fn poc_sq(args: &[Value]) -> Value {
-    match args {
+fn poc_sq(args: &[Value]) -> crate::Result<Value> {
+    Ok(match args {
         [Value::Num(x)] => Value::Num(x * x),
         _ => Value::Undef,
-    }
+    })
 }
 
 /// BOSL2 `is_def(x) = !is_undef(x)` — true iff `x` is anything but `undef`. Only the first positional arg
 /// binds to `x` (extras are ignored, per OpenSCAD); zero args → `x` is `undef` → `false`.
-fn is_def(args: &[Value]) -> Value {
-    Value::Bool(!matches!(args.first(), None | Some(Value::Undef)))
+fn is_def(args: &[Value]) -> crate::Result<Value> {
+    Ok(Value::Bool(!matches!(args.first(), None | Some(Value::Undef))))
 }
 
 /// BOSL2 `is_str(x) = is_string(x)` — true iff `x` is a string.
-fn is_str(args: &[Value]) -> Value {
-    Value::Bool(matches!(args.first(), Some(Value::Str(_))))
+fn is_str(args: &[Value]) -> crate::Result<Value> {
+    Ok(Value::Bool(matches!(args.first(), Some(Value::Str(_)))))
 }
 
 /// BOSL2 `is_nan(x) = (x!=x)` — a value equals itself EXCEPT `NaN`, so this is true iff `x` is `NaN`. The hot
 /// scalar path is native (`f64::is_nan`); any other type routes through the interpreter's own `!=` so the
 /// intrinsic can't diverge from `x!=x` on an exotic input (e.g. a `NaN` inside a list, where element-wise `!=`
 /// makes `[nan]!=[nan]` TRUE — a case the native scalar check would miss, but the op reproduces exactly).
-fn is_nan(args: &[Value]) -> Value {
-    match args.first() {
+fn is_nan(args: &[Value]) -> crate::Result<Value> {
+    Ok(match args.first() {
         Some(Value::Num(n)) => Value::Bool(n.is_nan()),
         other => {
             let x = other.cloned().unwrap_or(Value::Undef);
             super::ops::apply_binary(BinOp::Ne, x.clone(), x)
         }
-    }
+    })
 }
 
 /// BOSL2 `is_finite(x) = is_num(x) && !is_nan(0*x)` — true iff `x` is a finite number. `0*x` is `NaN` when `x`
@@ -136,8 +159,8 @@ fn is_nan(args: &[Value]) -> Value {
 /// `false` on any non-number (the `is_num` short-circuit). Computing it directly erases the reference's
 /// `is_num`/`is_nan`/`*` sub-evaluation — the point of the intrinsic. Proven bit-identical by the harness,
 /// which interprets the reference WITH `is_nan` defined (the dependency-aware oracle).
-fn is_finite(args: &[Value]) -> Value {
-    Value::Bool(matches!(args.first(), Some(Value::Num(n)) if n.is_finite()))
+fn is_finite(args: &[Value]) -> crate::Result<Value> {
+    Ok(Value::Bool(matches!(args.first(), Some(Value::Num(n)) if n.is_finite())))
 }
 
 /// BOSL2 `last(list) = list[len(list)-1]` — the final element. `len` is `undef` for anything but a
@@ -145,29 +168,62 @@ fn is_finite(args: &[Value]) -> Value {
 /// `undef` here too; an EMPTY list gives `len 0 → index -1 → undef` (out of range), matching the interpreter.
 /// The length uses the SAME `count = n as f64` the `len` builtin does, so `list[n-1]` routes through the real
 /// [`super::ops::index`] with a bit-identical index.
-fn last(args: &[Value]) -> Value {
+fn last(args: &[Value]) -> crate::Result<Value> {
     let list = args.first().cloned().unwrap_or(Value::Undef);
     let n = match &list {
         Value::NumList(xs) => xs.len(),
         Value::List(xs) => xs.len(),
         Value::Str(s) => s.chars().count(),
-        _ => return Value::Undef, // len(x) is undef → undef-1 → index(_, undef) → undef
+        _ => return Ok(Value::Undef), // len(x) is undef → undef-1 → index(_, undef) → undef
     };
     #[allow(
         clippy::cast_precision_loss,
         reason = "matches the `len` builtin's `count(n) = n as f64`; a list past 2^52 elements is unreachable"
     )]
-    super::ops::index(list, &Value::Num(n as f64 - 1.0))
+    Ok(super::ops::index(list, &Value::Num(n as f64 - 1.0)))
 }
 
 /// BOSL2 `default(v, dflt=undef) = is_undef(v) ? dflt : v` — `v` unless it's `undef`, then the fallback. A
 /// 1-arg call leaves `dflt` at its `undef` default (so `default(undef)` is `undef`); the dispatch gate only
 /// routes all-positional calls here, so the slice is `[v]` or `[v, dflt]`.
-fn default(args: &[Value]) -> Value {
-    match args.first() {
+fn default(args: &[Value]) -> crate::Result<Value> {
+    Ok(match args.first() {
         None | Some(Value::Undef) => args.get(1).cloned().unwrap_or(Value::Undef),
         Some(v) => v.clone(),
+    })
+}
+
+/// BOSL2 `_is_liststr(s) = is_list(s) || is_str(s)` — true iff `s` is a list (either representation) or a
+/// string. A pure leaf: `is_list` is true for `List`/`NumList`, `is_str` for `Str`.
+fn is_liststr(args: &[Value]) -> crate::Result<Value> {
+    Ok(Value::Bool(matches!(
+        args.first(),
+        Some(Value::List(_) | Value::NumList(_) | Value::Str(_))
+    )))
+}
+
+/// BOSL2 `point3d(p, fill=0) = assert(is_list(p)) [for (i=[0:2]) (p[i]==undef)? fill : p[i]]` — pad/truncate a
+/// point to 3 coords. A non-list RAISES (the inline assert; the message is a locator, so the harness matches
+/// on "both errored", not the text). Each coord replicates the reference ternary through the REAL `==`
+/// (`undef==undef` is true → an out-of-range slot takes `fill`) and `is_truthy`, then `build_vector` coalesces
+/// exactly as the interpreter does (all-numeric → `NumList`, else `List`). `fill` defaults to `0` (1-arg call).
+fn point3d(args: &[Value]) -> crate::Result<Value> {
+    let p = args.first().cloned().unwrap_or(Value::Undef);
+    if !matches!(p, Value::List(_) | Value::NumList(_)) {
+        return Err(crate::Error::Eval("assertion failed [assert(is_list(p))]".to_string()));
     }
+    let fill = args.get(1).cloned().unwrap_or(Value::Num(0.0));
+    let coords = (0..3)
+        .map(|i| {
+            let pi = super::ops::index(p.clone(), &Value::Num(f64::from(i)));
+            if super::ops::apply_binary(BinOp::Eq, pi.clone(), Value::Undef).is_truthy() {
+                fill.clone()
+            } else {
+                pi
+            }
+        })
+        .collect();
+    Ok(super::build_vector(coords))
 }
 
 /// `name → (fingerprint, intrinsic)` for every registry entry, computed ONCE by parsing each `reference` and
@@ -450,6 +506,7 @@ fn hash_opt(e: Option<&Expr>, h: &mut impl Hasher) {
 #[allow(
     clippy::expect_used,
     clippy::panic,
+    clippy::panic_in_result_fn,
     clippy::float_cmp,
     reason = "test harness: expect/panic ARE the assertions; intrinsics must bit-match, so == is exact"
 )]
@@ -476,14 +533,37 @@ mod tests {
     }
 
     /// The SLOW side of the harness: interpret a reference function's body with its params bound to
-    /// `inputs`, via `eval_expr` (a default `Ctx` — NO intrinsics, so this is the pure interpreter).
-    fn interpret(reference: &str, inputs: &[Value]) -> Value {
+    /// `inputs`, via `eval_expr` (a default `Ctx` — NO intrinsics, so this is the pure interpreter). Returns a
+    /// `Result` so an inline-`assert` reference (its failure IS the reference's behavior) compares against the
+    /// intrinsic's error, not a panic.
+    fn interpret(reference: &str, inputs: &[Value]) -> crate::Result<Value> {
         let (params, body) = parse_fn(reference);
         let mut scope = Scope::new();
-        for (p, v) in params.iter().zip(inputs) {
-            scope.bind(p.name.clone(), v.clone());
+        for (i, p) in params.iter().enumerate() {
+            // A provided arg fills the slot; an unprovided one takes the param's DEFAULT (else undef) — the
+            // real call path binds defaults, so an oracle that skipped them would run a short call with the
+            // wrong values (e.g. `point3d(p)` with `fill` unbound instead of `fill=0`).
+            let v = match inputs.get(i) {
+                Some(v) => v.clone(),
+                None => match &p.default {
+                    Some(d) => eval_expr(d, &scope)?,
+                    None => Value::Undef,
+                },
+            };
+            scope.bind(p.name.clone(), v);
         }
-        eval_expr(&body, &scope).expect("reference body evaluates")
+        eval_expr(&body, &scope)
+    }
+
+    /// Fast (intrinsic) and slow (interpreter) agree: both `Ok` with bit-identical values, or both `Err` (the
+    /// message is a diagnostic locator, not output — an intrinsic reproduces the assert's CONTROL FLOW, so
+    /// "both raised" is the match). A mixed `Ok`/`Err` is a real divergence.
+    fn same_result(fast: &crate::Result<Value>, slow: &crate::Result<Value>) -> bool {
+        match (fast, slow) {
+            (Ok(a), Ok(b)) => bit_eq(a, b),
+            (Err(_), Err(_)) => true,
+            _ => false,
+        }
     }
 
     /// The SLOW side for a reference that calls OTHER BOSL2 functions (the dependency-aware oracle). `deps` are
@@ -491,7 +571,7 @@ mod tests {
     /// them. The built `Ctx` has its intrinsics table CLEARED, so the oracle is FULLY interpreted end-to-end
     /// (a dep that happens to be a registered intrinsic doesn't shortcut — we're proving against the
     /// interpreter, not against another intrinsic). `target` must be the LAST definition.
-    fn interpret_with_deps(target: &str, deps: &[&str], inputs: &[Value]) -> Value {
+    fn interpret_with_deps(target: &str, deps: &[&str], inputs: &[Value]) -> crate::Result<Value> {
         let src = format!("{}\n{target}", deps.join("\n"));
         let program = parse(&src).expect("deps+target parse");
         let mut ctx = build_ctx(&program);
@@ -501,10 +581,17 @@ mod tests {
             other => panic!("target is not a function def: {other:?}"),
         };
         let mut scope = Scope::new();
-        for (p, v) in params.iter().zip(inputs) {
-            scope.bind(p.name.clone(), v.clone());
+        for (i, p) in params.iter().enumerate() {
+            let v = match inputs.get(i) {
+                Some(v) => v.clone(),
+                None => match &p.default {
+                    Some(d) => crate::eval::eval_with_ctx(d, &scope, &ctx)?,
+                    None => Value::Undef,
+                },
+            };
+            scope.bind(p.name.clone(), v);
         }
-        crate::eval::eval_with_ctx(body, &scope, &ctx).expect("reference body evaluates")
+        crate::eval::eval_with_ctx(body, &scope, &ctx)
     }
 
     /// Bit-level `Value` equality — the harness's notion of "bit-identical". `f64`s compare by `to_bits`, so
@@ -599,13 +686,14 @@ mod tests {
         let reference = reference_of("_fab_poc_sq").expect("POC registered");
         for x in [0.0, 1.0, -3.5, 2.5, 1e9, std::f64::consts::PI, -0.0] {
             let input = [Value::Num(x)];
-            let fast = poc_sq(&input);
-            let slow = interpret(reference, &input);
-            assert_eq!(fast, slow, "intrinsic vs interpreter diverged at x={x}: {fast:?} != {slow:?}");
+            assert!(
+                same_result(&poc_sq(&input), &interpret(reference, &input)),
+                "intrinsic vs interpreter diverged at x={x}"
+            );
         }
         // A non-number arg: the intrinsic must ALSO match the interpreter's undef (x*x on a string → undef).
         let bad = [Value::string("nope")];
-        assert_eq!(poc_sq(&bad), interpret(reference, &bad), "undef path must match too");
+        assert!(same_result(&poc_sq(&bad), &interpret(reference, &bad)), "undef path must match too");
     }
 
     #[test]
@@ -676,14 +764,10 @@ mod tests {
             let func = lookup(name, &params, &body).expect("its own reference must register");
             for input in &cases {
                 let one = [input.clone()];
-                assert_eq!(
-                    func(&one),
-                    interpret(reference, &one),
-                    "{name}({input:?}) diverged"
-                );
+                assert!(same_result(&func(&one), &interpret(reference, &one)), "{name}({input:?}) diverged");
             }
             // Zero args: the single param defaults to undef in both paths.
-            assert_eq!(func(&[]), interpret(reference, &[]), "{name}() diverged");
+            assert!(same_result(&func(&[]), &interpret(reference, &[])), "{name}() diverged");
         }
     }
 
@@ -697,9 +781,9 @@ mod tests {
         let func = lookup("is_nan", &params, &body).expect("its own reference must register");
         for input in value_battery() {
             let one = [input.clone()];
-            assert_eq!(func(&one), interpret(reference, &one), "is_nan({input:?}) diverged");
+            assert!(same_result(&func(&one), &interpret(reference, &one)), "is_nan({input:?}) diverged");
         }
-        assert_eq!(func(&[]), interpret(reference, &[]), "is_nan() diverged");
+        assert!(same_result(&func(&[]), &interpret(reference, &[])), "is_nan() diverged");
     }
 
     #[test]
@@ -713,13 +797,15 @@ mod tests {
         let deps = ["function is_nan(x) = (x!=x);"];
         for input in value_battery() {
             let one = [input.clone()];
-            assert_eq!(
-                func(&one),
-                interpret_with_deps(reference, &deps, &one),
+            assert!(
+                same_result(&func(&one), &interpret_with_deps(reference, &deps, &one)),
                 "is_finite({input:?}) diverged"
             );
         }
-        assert_eq!(func(&[]), interpret_with_deps(reference, &deps, &[]), "is_finite() diverged");
+        assert!(
+            same_result(&func(&[]), &interpret_with_deps(reference, &deps, &[])),
+            "is_finite() diverged"
+        );
     }
 
     #[test]
@@ -732,11 +818,11 @@ mod tests {
         let func = lookup("last", &params, &body).expect("its own reference must register");
         for input in value_battery() {
             let one = [input.clone()];
-            assert!(bit_eq(&func(&one), &interpret(reference, &one)), "last({input:?}) diverged");
+            assert!(same_result(&func(&one), &interpret(reference, &one)), "last({input:?}) diverged");
         }
         // A longer list, to prove it's the LAST element and not the first/second.
         let long = [Value::list((0..7).map(|i| Value::Num(f64::from(i))).collect::<Vec<_>>())];
-        assert!(bit_eq(&func(&long), &interpret(reference, &long)), "last(0..6) diverged");
+        assert!(same_result(&func(&long), &interpret(reference, &long)), "last(0..6) diverged");
     }
 
     #[test]
@@ -749,11 +835,59 @@ mod tests {
         let battery = value_battery();
         for v in &battery {
             let one = [v.clone()];
-            assert!(bit_eq(&func(&one), &interpret(reference, &one)), "default({v:?}) diverged");
+            assert!(same_result(&func(&one), &interpret(reference, &one)), "default({v:?}) diverged");
             for d in &battery {
                 let two = [v.clone(), d.clone()];
-                assert!(bit_eq(&func(&two), &interpret(reference, &two)), "default({v:?}, {d:?}) diverged");
+                assert!(same_result(&func(&two), &interpret(reference, &two)), "default({v:?}, {d:?}) diverged");
             }
+        }
+    }
+
+    #[test]
+    fn is_liststr_matches_its_reference_bit_for_bit() {
+        // `_is_liststr(s) = is_list(s) || is_str(s)` calls the `is_str` BOSL2 fn → dependency-aware oracle
+        // (is_list is a builtin). True for List/NumList/Str, false otherwise, across the whole battery.
+        let reference = reference_of("_is_liststr").expect("registered");
+        let (params, body) = parse_fn(reference);
+        let func = lookup("_is_liststr", &params, &body).expect("its own reference must register");
+        let deps = ["function is_str(x) = is_string(x);"];
+        for input in value_battery() {
+            let one = [input.clone()];
+            assert!(
+                same_result(&func(&one), &interpret_with_deps(reference, &deps, &one)),
+                "_is_liststr({input:?}) diverged"
+            );
+        }
+    }
+
+    #[test]
+    fn point3d_matches_its_reference_bit_for_bit() {
+        // `point3d` is the first asserting intrinsic: a non-list must ERROR on BOTH sides (same_result treats
+        // any two errors as matching), a list pads/truncates to 3 coords with `fill`. Proves the 1-arg
+        // (fill=0) and 2-arg forms, and the padding (short vector) / truncation (long) / out-of-range→fill
+        // paths — including the NumList-vs-List coalescing of the result.
+        let reference = reference_of("point3d").expect("registered");
+        let (params, body) = parse_fn(reference);
+        let func = lookup("point3d", &params, &body).expect("its own reference must register");
+        for input in value_battery() {
+            let one = [input.clone()];
+            assert!(same_result(&func(&one), &interpret(reference, &one)), "point3d({input:?}) diverged");
+        }
+        // Explicit shape cases: short (pad), exact, long (truncate), a heterogeneous list (List result), and a
+        // custom 2-arg fill. Each proves value AND the assert-passes path.
+        let shapes = [
+            vec![Value::Num(5.0)],
+            vec![Value::Num(1.0), Value::Num(2.0)],
+            vec![Value::Num(1.0), Value::Num(2.0), Value::Num(3.0)],
+            vec![Value::Num(1.0), Value::Num(2.0), Value::Num(3.0), Value::Num(4.0)],
+            vec![Value::Num(1.0), Value::string("x")],
+        ];
+        for s in shapes {
+            let p = Value::list(s);
+            let one = [p.clone()];
+            assert!(same_result(&func(&one), &interpret(reference, &one)), "point3d({p:?}) diverged");
+            let two = [p.clone(), Value::Num(-1.0)];
+            assert!(same_result(&func(&two), &interpret(reference, &two)), "point3d({p:?}, -1) diverged");
         }
     }
 

@@ -288,21 +288,26 @@ defined). Corpus 901/901 unchanged.
 | baseline (`is_def`/`is_str` only) | 8253 ms | — |
 | + `is_nan` + `is_finite` | 7216 ms | −12.6% |
 | + `last` + `default` | 6740 ms | −5.7% (incremental) |
+| + `_is_liststr` + `point3d` | 6559 ms | −4.7% (incremental) |
 
-**Cumulative −1513 ms, ~18.3%** off the pre-O.2 baseline, from four hand-written leaf intrinsics. Each was
-proven bit-identical to interpreting its verbatim reference (`last`/`default` through `bit_eq`, which compares
-`f64` by `to_bits` so a returned `NaN` matches a `NaN` — `==` gets that backwards — and `±0` stay distinct)
-and WIREs against the shipped BOSL2. `last(list)=list[len(list)-1]` routes through the real `len` semantics +
-`ops::index` (empty list → index −1 → undef, non-list → undef); `default(v,dflt=undef)` is a two-arm match.
+**Cumulative −1694 ms, ~20.5%** off the pre-O.2 baseline, from six hand-written intrinsics. Each is proven
+bit-identical to interpreting its verbatim reference (`bit_eq` compares `f64` by `to_bits` so a returned `NaN`
+matches a `NaN` — `==` gets that backwards — and `±0` stay distinct) and WIREs against the shipped BOSL2.
+
+`point3d` is the first intrinsic with an inline `assert()`, which forced (and got) the mechanism's next piece:
+the `Intrinsic` ABI widened from `fn(&[Value]) -> Value` to a fallible `fn(&[Value]) -> Result<Value>`, so a
+native impl RAISES exactly where the interpreted body's assert would (the harness matches on "both errored" —
+the assert message is a diagnostic locator, not output). This is load-bearing for the rest of the profile:
+`point3d`, `reverse`, `is_vector`, `is_matrix` — nearly every BOSL2 function validates inputs with an inline
+assert. The dependency-aware harness also grew a fix — it now binds parameter DEFAULTS for unprovided args
+(the real call path does), without which a short call like `point3d(p)` ran the oracle with `fill` unbound.
 
 This confirms the intrinsic thesis over the memo thesis outright: same 99.8%-redundant workload, the cache got
-~0%, the intrinsics got 18.3%. Next is `is_vector` (6.4%) — the first NON-leaf: 5 params, a comprehension, a
-`norm`/`_EPSILON` clause, an `all_nonzero` sub-call, and an `assert()` INSIDE the expression that can raise —
-so it needs the intrinsic ABI to widen from `fn(&[Value]) -> Value` to a fallible `Result` (an intrinsic must
-be able to fail exactly where the interpreted body does). Below it the profile tapers into ≤2.5% functions
-(`_list_pattern`, `_is_liststr`, `point3d`, `reverse`, `is_consistent`, `approx`, `is_matrix`) — the point the
-per-call intrinsic lever starts to stall and the JIT tier (P.1) earns its turn. Reproduce the profile with
-`FAB_PROFILE_FNS=1 target/release/models_worker <model.scad> libs scad-lib`.
+~0%, the intrinsics got 20.5%. Next is `is_vector` (6.4%) — the hardest remaining single target: 5 params, a
+comprehension, a `norm`/`_EPSILON` clause, and an `all_nonzero` sub-call that RECURSIVELY calls `is_vector`.
+Below it the profile tapers into ≤2.2% functions (`_list_pattern`, `reverse`, `is_consistent`, `approx`,
+`is_matrix`) — the point the per-call lever starts to stall and the JIT tier (P.1) earns its turn. Reproduce
+the profile with `FAB_PROFILE_FNS=1 target/release/models_worker <model.scad> libs scad-lib`.
 
 ## The harness
 

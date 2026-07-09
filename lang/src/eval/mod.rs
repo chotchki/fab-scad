@@ -632,9 +632,11 @@ fn eval_with_global<'a>(
             }
             Task::Builtin { name, args } => run_builtin(name, args, &mut values, ctx),
             Task::Intrinsic { func, nargs } => {
-                // Same shape as run_builtin: the args are the top `nargs` of the value stack.
+                // Same shape as run_builtin: the args are the top `nargs` of the value stack. Fallible — an
+                // intrinsic for a function with an inline `assert` raises exactly where the interpreted body
+                // would (the `?` aborts the whole eval, same as a failed interpreted assert).
                 let start = values.len().saturating_sub(nargs);
-                let result = func(&values[start..]);
+                let result = func(&values[start..])?;
                 values.truncate(start);
                 values.push(result);
             }

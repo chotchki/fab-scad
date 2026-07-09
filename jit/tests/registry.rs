@@ -467,6 +467,56 @@ fn vector_builtins_are_bit_identical() {
 }
 
 #[test]
+fn min_max_are_bit_identical() {
+    // P.1.6 rung B: min/max reduce one vector arg, one scalar, or several scalars via jit_fmin/jit_fmax — the
+    // interpreter's `f64::min`/`max` (IEEE minNum/maxNum: NaN is IGNORED, the non-NaN operand wins). That's
+    // exactly why they route through helper CALLS and not Cranelift `fmin`/`fmax` (which PROPAGATE NaN) — the
+    // NaN + signed-zero corners below are the guard that would fail on the native instruction.
+    let prog = program(
+        "function mx(a, b) = max(a, b);\
+         function mn(a, b) = min(a, b);\
+         function vmax(v) = max(v);\
+         function vmin(v) = min(v);\
+         function m1(x) = max(x);\
+         function clamp(x, lo, hi) = min(max(x, lo), hi);",
+    );
+    let reg = JitRegistry::build(
+        defs(&prog).iter().map(|&(n, p, b)| (n, p, b)),
+        consts(&prog).iter().map(|&(n, v)| (n, v)),
+    )
+    .expect("registry builds");
+
+    // Scalar 2-arg, incl. the corners that separate minNum from a NaN-propagating fmin: NaN in either slot,
+    // both NaN, signed zeros, an infinity, an equal pair.
+    for (a, b) in [
+        (1.0, 2.0),
+        (2.0, 1.0),
+        (-0.0, 0.0),
+        (0.0, -0.0),
+        (f64::NAN, 1.0),
+        (1.0, f64::NAN),
+        (f64::NAN, f64::NAN),
+        (f64::INFINITY, 1.0),
+        (-3.0, -3.0),
+    ] {
+        assert_call_eq(&reg, &prog, "mx", &[Value::Num(a), Value::Num(b)]);
+        assert_call_eq(&reg, &prog, "mn", &[Value::Num(a), Value::Num(b)]);
+    }
+    // One vector arg → REDUCE (fold left-to-right), incl. a NaN mid-list and signed zeros.
+    assert_call_eq(&reg, &prog, "vmax", &[vec_arg(&[3.0, 1.0, 4.0, 1.0, 5.0])]);
+    assert_call_eq(&reg, &prog, "vmin", &[vec_arg(&[3.0, 1.0, 4.0, 1.0, 5.0])]);
+    assert_call_eq(&reg, &prog, "vmax", &[vec_arg(&[1.0, f64::NAN, 2.0])]);
+    assert_call_eq(&reg, &prog, "vmin", &[vec_arg(&[1.0, f64::NAN, 2.0])]);
+    assert_call_eq(&reg, &prog, "vmax", &[vec_arg(&[-0.0, 0.0])]);
+    // A single scalar arg → itself.
+    assert_call_eq(&reg, &prog, "m1", &[Value::Num(7.0)]);
+    // The clamp idiom (nested max-then-min), all scalar — including the NaN pass-through.
+    for x in [-5.0, 0.0, 5.0, 15.0, f64::NAN] {
+        assert_call_eq(&reg, &prog, "clamp", &[Value::Num(x), Value::Num(0.0), Value::Num(10.0)]);
+    }
+}
+
+#[test]
 fn over_long_vector_arg_declines() {
     // A vector longer than MAX_VEC_ARG (16) is NOT scalarized — unrolling it would explode compile/code size,
     // and that dynamic-length case is rung D. call_numeric declines → the interpreter runs the body.

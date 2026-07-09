@@ -135,6 +135,20 @@ extern "C" fn jit_powf(a: f64, b: f64) -> f64 {
     a.powf(b)
 }
 
+/// `min(a, b)` — the interpreter's `a.min(b)` (`builtins::min_max`'s fold step). Routed as a CALL, NOT
+/// Cranelift's `fmin`: `fmin` PROPAGATES NaN (returns NaN if either operand is NaN), but `f64::min` IGNORES
+/// it (returns the non-NaN operand) — they diverge on NaN (and on signed zero). The call guarantees the
+/// interpreter's exact IEEE-minNum semantics, so `fast == JIT` holds.
+extern "C" fn jit_fmin(a: f64, b: f64) -> f64 {
+    a.min(b)
+}
+
+/// `max(a, b)` — the interpreter's `a.max(b)`. Routed as a call for the same reason as [`jit_fmin`]
+/// (`f64::max` is maxNum: ignores NaN; Cranelift `fmax` propagates it).
+extern "C" fn jit_fmax(a: f64, b: f64) -> f64 {
+    a.max(b)
+}
+
 /// A scalar math builtin (`sin`/`sqrt`/`abs`/…) an OpenSCAD `Call` compiles to (P.1.4b). Routed to
 /// [`fab_lang::jit_math`] — the SAME computation the interpreter's builtin does (OpenSCAD trig in degrees
 /// via our `trig`, not raw libm), so `fast == JIT` holds. `id` selects the op; a unary op ignores `b`.
@@ -610,6 +624,8 @@ fn new_module() -> Result<JITModule, JitError> {
     let mut jb = JITBuilder::with_isa(isa, default_libcall_names());
     jb.symbol("jit_fmod", jit_fmod as *const u8);
     jb.symbol("jit_powf", jit_powf as *const u8);
+    jb.symbol("jit_fmin", jit_fmin as *const u8);
+    jb.symbol("jit_fmax", jit_fmax as *const u8);
     jb.symbol("jit_math_call", jit_math_call as *const u8);
     Ok(JITModule::new(jb))
 }
@@ -621,19 +637,25 @@ struct Helpers {
     fmod: FuncId,
     /// `jit_powf(f64, f64) -> f64` — the `^` operator.
     powf: FuncId,
+    /// `jit_fmin(f64, f64) -> f64` — the `min` builtin's fold step (NaN-ignoring, unlike Cranelift `fmin`).
+    fmin: FuncId,
+    /// `jit_fmax(f64, f64) -> f64` — the `max` builtin's fold step.
+    fmax: FuncId,
     /// `jit_math_call(i32 id, f64, f64) -> f64` — a scalar math builtin dispatched by id (P.1.4b).
     math: FuncId,
 }
 
 fn declare_helpers(module: &mut JITModule) -> Result<Helpers, JitError> {
     let cl = |e: ModuleError| JitError::Cranelift(e.to_string());
-    // `(f64, f64) -> f64` for fmod/powf.
+    // `(f64, f64) -> f64` for fmod/powf/fmin/fmax.
     let mut op_sig = module.make_signature();
     op_sig.params.push(AbiParam::new(types::F64));
     op_sig.params.push(AbiParam::new(types::F64));
     op_sig.returns.push(AbiParam::new(types::F64));
     let fmod = module.declare_function("jit_fmod", Linkage::Import, &op_sig).map_err(cl)?;
     let powf = module.declare_function("jit_powf", Linkage::Import, &op_sig).map_err(cl)?;
+    let fmin = module.declare_function("jit_fmin", Linkage::Import, &op_sig).map_err(cl)?;
+    let fmax = module.declare_function("jit_fmax", Linkage::Import, &op_sig).map_err(cl)?;
     // `(i32 id, f64, f64) -> f64` for the math dispatcher.
     let mut math_sig = module.make_signature();
     math_sig.params.push(AbiParam::new(types::I32));
@@ -641,7 +663,7 @@ fn declare_helpers(module: &mut JITModule) -> Result<Helpers, JitError> {
     math_sig.params.push(AbiParam::new(types::F64));
     math_sig.returns.push(AbiParam::new(types::F64));
     let math = module.declare_function("jit_math_call", Linkage::Import, &math_sig).map_err(cl)?;
-    Ok(Helpers { fmod, powf, math })
+    Ok(Helpers { fmod, powf, fmin, fmax, math })
 }
 
 /// Build the IR for one function specialized to `params` (each param's name + arg [`ArgShape`]) and declare +
@@ -686,6 +708,8 @@ fn define_one(
 
         let fmod_ref = module.declare_func_in_func(helpers.fmod, fb.func);
         let powf_ref = module.declare_func_in_func(helpers.powf, fb.func);
+        let fmin_ref = module.declare_func_in_func(helpers.fmin, fb.func);
+        let fmax_ref = module.declare_func_in_func(helpers.fmax, fb.func);
         let math_ref = module.declare_func_in_func(helpers.math, fb.func);
         // Flat param layout: walk params in order assigning f64 slots — a scalar takes 1, a vec-`n` takes `n`.
         // A scalar's flat ELEMENT offset goes in `index` (read lazily in the `Ident` arm as `offset * 8`
@@ -726,6 +750,8 @@ fn define_one(
             inlining: &inlining,
             fmod: fmod_ref,
             powf: powf_ref,
+            fmin: fmin_ref,
+            fmax: fmax_ref,
             math: math_ref,
         };
 
@@ -863,6 +889,8 @@ struct Lower<'a> {
     inlining: &'a [&'a str],
     fmod: FuncRef,
     powf: FuncRef,
+    fmin: FuncRef,
+    fmax: FuncRef,
     math: FuncRef,
 }
 
@@ -1086,10 +1114,10 @@ fn compile_expr(fb: &mut FunctionBuilder, expr: &Expr, lower: &Lower) -> Result<
                     Lower { index: &empty_index, locals: &callee_env, inlining: &stack, ..*lower };
                 return compile_expr(fb, cbody, &callee_lower);
             }
-            // (2.5) a VECTOR builtin (`norm`/`len`/`cross`) over scalarized vector args (P.1.6 rung B). Checked
-            // AFTER the user-fn inline so a program's own redefinition WINS — matching the interpreter's
-            // user-function-first resolution (a builtin `norm` only fires when no user `norm` is in scope).
-            if matches!(name.as_str(), "len" | "norm" | "cross") {
+            // (2.5) a LIST/VECTOR builtin (`norm`/`len`/`cross`/`min`/`max`) over scalarized args (P.1.6 rung
+            // B). Checked AFTER the user-fn inline so a program's own redefinition WINS — matching the
+            // interpreter's user-function-first resolution (the builtin only fires when no user def shadows it).
+            if matches!(name.as_str(), "len" | "norm" | "cross" | "min" | "max") {
                 return compile_vec_builtin(fb, name, args, lower);
             }
             // (3) not inlinable.
@@ -1169,16 +1197,18 @@ fn compile_expr(fb: &mut FunctionBuilder, expr: &Expr, lower: &Lower) -> Result<
     }
 }
 
-/// A VECTOR builtin (`norm`/`len`/`cross`) over scalarized vector args (P.1.6 rung B). Each replicates
-/// [`super::builtins`]'s implementation EXACTLY so `fast == JIT` holds:
+/// A LIST/VECTOR builtin (`norm`/`len`/`cross`/`min`/`max`) over scalarized args (P.1.6 rung B). Each
+/// replicates [`super::builtins`]'s implementation EXACTLY so `fast == JIT` holds:
 /// - `len(v)` → the element count as an `f64` const (a scalarized vector's length is known at COMPILE time).
 /// - `norm(v)` → the interpreter's `iter().map(|x| x*x).sum().sqrt()` — a SEQUENTIAL `fold(0.0, +)`, NOT the
 ///   4-lane `dot` (which would diverge ≥4 elements), then `sqrt` through the shared math helper (== `.sqrt()`).
 /// - `cross(a,b)` → the 3D cross (a `Vec`, so it composes: `norm(cross(a,b))` fully scalarizes) or the 2D cross
 ///   (a scalar), each `fmul`/`fsub` in the interpreter's operand order.
+/// - `min`/`max` → the interpreter's `min_max`: reduce one vector arg, one scalar arg, or several scalar args
+///   with a SEQUENTIAL `fold(head, …)` through the `jit_fmin`/`jit_fmax` helper (NaN-ignoring, unlike native).
 ///
-/// A non-vector arg, a wrong arity, a named arg, or a cross of non-2/3-vectors DECLINES (the interpreter would
-/// yield `undef`, which the JIT can't represent).
+/// A non-numeric arg, a wrong arity, a named arg, a cross of non-2/3-vectors, or a `min`/`max` of nothing
+/// DECLINES (the interpreter would yield `undef`, which the JIT can't represent).
 fn compile_vec_builtin(
     fb: &mut FunctionBuilder,
     name: &str,
@@ -1257,7 +1287,40 @@ fn compile_vec_builtin(
                 _ => Err(JitError::Unsupported("cross of non-2/3-vectors")),
             }
         }
-        _ => Err(JitError::Unsupported("call")), // unreachable: the caller only routes len/norm/cross here
+        "min" | "max" => {
+            let is_min = name == "min";
+            let helper = if is_min { lower.fmin } else { lower.fmax };
+            // Gather the operands the interpreter's `min_max` would reduce (its arg handling, EXACTLY):
+            //   `min(v)`      one vector arg → its elements;
+            //   `min(x)`      one scalar arg → `[x]`;
+            //   `min(a,b,…)`  the `multi` branch → each arg MUST be a number, else `undef` (→ decline).
+            // A `min()` (no args) or an empty vector → `undef` (→ decline). A bool anywhere → non-number → decline.
+            let nums: Vec<Value> = if args.len() == 1 {
+                match compile_expr(fb, &args[0].value, lower)? {
+                    Lowered::Vec(elems) => {
+                        elems.iter().map(Lowered::num).collect::<Result<Vec<_>, _>>()?
+                    }
+                    Lowered::Num(x) => vec![x],
+                    Lowered::Bool(_) => return Err(JitError::Unsupported("min/max of a boolean")),
+                }
+            } else {
+                // 0 or ≥2 args: the `multi` branch — every arg is a plain number (a vector/bool → undef → decline).
+                args.iter()
+                    .map(|a| compile_expr(fb, &a.value, lower)?.num())
+                    .collect::<Result<Vec<_>, _>>()?
+            };
+            let Some((&head, rest)) = nums.split_first() else {
+                return Err(JitError::Unsupported("min/max of nothing")); // undef
+            };
+            // Sequential `fold(head, min/max)` — the interpreter's exact reduction order + operand order.
+            let mut acc = head;
+            for &x in rest {
+                let call = fb.ins().call(helper, &[acc, x]);
+                acc = fb.inst_results(call)[0];
+            }
+            Ok(Lowered::Num(acc))
+        }
+        _ => Err(JitError::Unsupported("call")), // unreachable: the caller only routes the handled names here
     }
 }
 

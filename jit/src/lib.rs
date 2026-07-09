@@ -232,6 +232,26 @@ extern "C" fn jit_vec_get(list: *mut Vec<f64>, i: i64) -> f64 {
     list[i as usize]
 }
 
+/// Bounds-resolve a DYNAMIC index into a DynList (P.1.6 rung-D 2b.2b), replicating `ops::index` EXACTLY: `i <
+/// 0` or non-finite → out-of-range; else `i as usize` (Rust's saturating truncation, matching the interpreter),
+/// in-range iff `< len`. Returns the floored index as `i64`, or `-1` for out-of-range — where the interpreter
+/// yields `undef`, which the JIT can't represent, so the caller BAILS to the interpreter. `# Safety`: `list` is
+/// a live handle.
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "guarded finite && >= 0; `i as usize` matches the interpreter's `as_index` truncation (saturating)"
+)]
+extern "C" fn jit_vec_bound(list: *mut Vec<f64>, i: f64) -> i64 {
+    if i < 0.0 || !i.is_finite() {
+        return -1; // the interpreter's `undef`
+    }
+    // SAFETY: `list` is a live, exclusively-accessible `Vec<f64>` (caller's contract).
+    let len = unsafe { &*list }.len();
+    let idx = i as usize;
+    if idx < len { idx as i64 } else { -1 }
+}
+
 /// Flag `list` as the function's RETURN value; the dispatch reads it out into the `NumList`. `# Safety`:
 /// `arena` + `list` are live.
 extern "C" fn jit_set_result(arena: *mut JitArena, list: *mut Vec<f64>) {
@@ -825,6 +845,7 @@ fn new_module() -> Result<JITModule, JitError> {
     jb.symbol("jit_vec_push", jit_vec_push as *const u8);
     jb.symbol("jit_vec_len", jit_vec_len as *const u8);
     jb.symbol("jit_vec_get", jit_vec_get as *const u8);
+    jb.symbol("jit_vec_bound", jit_vec_bound as *const u8);
     jb.symbol("jit_set_result", jit_set_result as *const u8);
     Ok(JITModule::new(jb))
 }
@@ -854,6 +875,8 @@ struct Helpers {
     vec_len: FuncId,
     /// `jit_vec_get(*mut Vec<f64>, i64) -> f64` — a DynList's element `i` (in-range by construction).
     vec_get: FuncId,
+    /// `jit_vec_bound(*mut Vec<f64>, f64) -> i64` — a dynamic index resolved + bounds-checked (2b.2b); -1 = undef.
+    vec_bound: FuncId,
     /// `jit_set_result(*mut JitArena, *mut Vec<f64>)` — flag the DynList that is the function's return.
     set_result: FuncId,
 }
@@ -915,6 +938,12 @@ fn declare_helpers(module: &mut JITModule) -> Result<Helpers, JitError> {
     get_sig.params.push(AbiParam::new(types::I64));
     get_sig.returns.push(AbiParam::new(types::F64));
     let vec_get = module.declare_function("jit_vec_get", Linkage::Import, &get_sig).map_err(cl)?;
+    // `jit_vec_bound(*mut Vec<f64>, f64) -> i64`.
+    let mut bound_sig = module.make_signature();
+    bound_sig.params.push(AbiParam::new(p));
+    bound_sig.params.push(AbiParam::new(types::F64));
+    bound_sig.returns.push(AbiParam::new(types::I64));
+    let vec_bound = module.declare_function("jit_vec_bound", Linkage::Import, &bound_sig).map_err(cl)?;
     // `jit_set_result(*mut JitArena, *mut Vec<f64>)`.
     let mut res_sig = module.make_signature();
     res_sig.params.push(AbiParam::new(p));
@@ -932,6 +961,7 @@ fn declare_helpers(module: &mut JITModule) -> Result<Helpers, JitError> {
         vec_push,
         vec_len,
         vec_get,
+        vec_bound,
         set_result,
     })
 }
@@ -997,6 +1027,7 @@ fn define_one(
         let vec_push_ref = module.declare_func_in_func(helpers.vec_push, fb.func);
         let vec_len_ref = module.declare_func_in_func(helpers.vec_len, fb.func);
         let vec_get_ref = module.declare_func_in_func(helpers.vec_get, fb.func);
+        let vec_bound_ref = module.declare_func_in_func(helpers.vec_bound, fb.func);
         let set_result_ref = module.declare_func_in_func(helpers.set_result, fb.func);
         // Flat param layout: walk params in order assigning f64 slots — a scalar takes 1, a vec-`n` takes `n`.
         // A scalar's flat ELEMENT offset goes in `index` (read lazily in the `Ident` arm as `offset * 8`
@@ -1048,6 +1079,7 @@ fn define_one(
             vec_push: vec_push_ref,
             vec_len: vec_len_ref,
             vec_get: vec_get_ref,
+            vec_bound: vec_bound_ref,
             set_result: set_result_ref,
         };
 
@@ -1342,6 +1374,7 @@ struct Lower<'a> {
     vec_push: FuncRef,
     vec_len: FuncRef,
     vec_get: FuncRef,
+    vec_bound: FuncRef,
     set_result: FuncRef,
 }
 
@@ -1615,27 +1648,58 @@ fn compile_expr(fb: &mut FunctionBuilder, expr: &Expr, lower: &Lower) -> Result<
                 elems.iter().map(|e| compile_expr(fb, e, lower)).collect();
             Ok(Lowered::Vec(lowered?))
         }
-        // `v[i]` with a STATIC (literal) index into a scalarized vector → the element (P.1.6 rung A). The
-        // interpreter floors a finite non-negative index (`i as usize`); an out-of-range / negative /
-        // non-finite / DYNAMIC index yields `undef` there, which the JIT can't represent → DECLINE.
+        // `base[index]`. A scalarized fixed vector with a STATIC (literal) index picks the element at compile
+        // time (P.1.6 rung A). A DYNAMIC list with a RUNTIME index (2b.2b) bounds-checks via `jit_vec_bound`
+        // and, on out-of-range (`undef` in the interpreter — unrepresentable here), BAILS to the interpreter.
         ExprKind::Index { base, index } => {
-            let Lowered::Vec(elems) = compile_expr(fb, base, lower)? else {
-                return Err(JitError::Unsupported("index of a non-vector"));
-            };
-            let ExprKind::Num(n) = &index.kind else {
-                return Err(JitError::Unsupported("dynamic index"));
-            };
-            if !n.is_finite() || *n < 0.0 {
-                return Err(JitError::Unsupported("index out of range"));
+            match compile_expr(fb, base, lower)? {
+                Lowered::Vec(elems) => {
+                    // Static index into a scalarized vector (rung A). A non-literal / negative / non-finite /
+                    // out-of-range index → `undef` there → DECLINE (a scalarized vector can't hold undef).
+                    let ExprKind::Num(n) = &index.kind else {
+                        return Err(JitError::Unsupported("dynamic index of a fixed vector"));
+                    };
+                    if !n.is_finite() || *n < 0.0 {
+                        return Err(JitError::Unsupported("index out of range"));
+                    }
+                    #[allow(
+                        clippy::cast_possible_truncation,
+                        clippy::cast_sign_loss,
+                        reason = "guarded finite && >= 0; matches the interpreter's `i as usize`, and an \
+                        out-of-range index falls through to the `nth` miss → decline"
+                    )]
+                    let idx = *n as usize;
+                    elems.into_iter().nth(idx).ok_or(JitError::Unsupported("index out of range"))
+                }
+                Lowered::DynList(handle) => {
+                    // A runtime index `i` into a DynList (2b.2b) — the gaussian_rands `nums[i]` shape. Resolve +
+                    // bounds-check with `jit_vec_bound` (== `ops::index`: `i<0`/non-finite → -1; else `i as
+                    // usize`, in-range iff `< len`). An out-of-range index (-1) is the interpreter's `undef`;
+                    // the JIT can't represent it, so it BAILS immediately (raised + return → the dispatch's
+                    // `None` → interpret), like the budget bail. In-range → the element via `jit_vec_get`.
+                    let i_f = compile_expr(fb, index, lower)?.num()?;
+                    let idx = {
+                        let call = fb.ins().call(lower.vec_bound, &[handle, i_f]);
+                        fb.inst_results(call)[0]
+                    };
+                    let zero_i = fb.ins().iconst(types::I64, 0);
+                    let out_of_range = fb.ins().icmp(IntCC::SignedLessThan, idx, zero_i); // idx == -1
+                    let bail = fb.create_block();
+                    let cont = fb.create_block();
+                    fb.ins().brif(out_of_range, bail, &[], cont, &[]);
+                    fb.seal_block(bail);
+                    fb.seal_block(cont);
+                    fb.switch_to_block(bail);
+                    let one_flag = fb.ins().iconst(types::I8, 1);
+                    fb.ins().store(MemFlagsData::trusted(), one_flag, lower.raised_ptr, 0);
+                    let bail_ret = fb.ins().f64const(0.0);
+                    fb.ins().return_(&[bail_ret]);
+                    fb.switch_to_block(cont);
+                    let call = fb.ins().call(lower.vec_get, &[handle, idx]);
+                    Ok(Lowered::Num(fb.inst_results(call)[0]))
+                }
+                _ => Err(JitError::Unsupported("index of a non-vector")),
             }
-            #[allow(
-                clippy::cast_possible_truncation,
-                clippy::cast_sign_loss,
-                reason = "guarded finite && >= 0; matches the interpreter's `i as usize`, and an out-of-range \
-                index falls through to the `nth` miss → decline"
-            )]
-            let idx = *n as usize;
-            elems.into_iter().nth(idx).ok_or(JitError::Unsupported("index out of range"))
         }
         // `v.x`/`v.y`/`v.z` on a scalarized vector → element 0/1/2 (P.1.6 rung B). `ops::member` maps ONLY
         // x/y/z to an index and EVERYTHING else to `undef`; a `.z` on a too-short vector is `undef` too. The

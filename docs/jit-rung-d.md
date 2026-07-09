@@ -209,3 +209,17 @@ the push-helper sink; the budget guards its size.
 
 Start at **2b.1** (the machinery is the load-bearing risk; everything else is operand plumbing on
 top of it).
+
+## Known determinism edge — bail-after-partial-draw (for the hardening pass)
+
+A JIT that BAILS (`raised` → the dispatch's `None`) *after* it has already drawn some seedless
+`rands` leaves the shared stream ADVANCED by those partial draws; the interpreter then re-runs the
+function from that advanced state, so its draws are shifted. The RESULT is still bit-identical — a
+bail is always an error/decline path (assert-fail, out-of-range index → `undef`, over-budget), and
+`undef`/error propagates regardless of the random values — but a program that CONTINUES past that
+error using later randoms could see shifted subsequent draws. It does NOT bite the real cases: the
+budget bail is checked BEFORE any draw; gaussian_rands' indices are in-range and its asserts pass;
+BOSL2's compiled functions don't draw-then-bail (the corpus differential confirms). The clean fix —
+snapshot the `RandStream` before a DRAWING function's call and restore it on `None` (cheap because
+only drawing functions, a compile-time-known flag, pay the ~2.5 KB clone) — is deferred to the
+determinism-hardening pass alongside the miri work. Flagging it here so it isn't lost.

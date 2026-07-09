@@ -711,6 +711,36 @@ fn dynamic_list_operands_are_bit_identical() {
 }
 
 #[test]
+fn dynamic_index_is_bit_identical() {
+    // P.1.6 rung-D 2b.2b: `dynlist[i]` with a RUNTIME index — the gaussian_rands `nums[2j]`/`nums[2j+1]` shape.
+    // In-range → the element (bit-identical to `ops::index`); an out-of-range / negative / non-finite index is
+    // `undef` in the interpreter, which the JIT can't represent, so it BAILS (raised → None → interpret).
+    let prog = program(
+        "function inb(n) = let(a = [for (i = [0:n]) i*i]) a[1];\
+         function copy(n) = let(a = [for (i = [0:n]) i]) [for (j = [0:n]) a[j]];\
+         function stride(n) = let(nums = [for (i = [0:2*n-1]) i*i]) [for (j = [0:n-1]) nums[2*j] + nums[2*j+1]];\
+         function oob(n) = let(a = [for (i = [0:n]) i]) a[n+5];",
+    );
+    let reg = JitRegistry::build(
+        defs(&prog).iter().map(|&(n, p, b)| (n, p, b)),
+        consts(&prog).iter().map(|&(n, v)| (n, v)),
+    )
+    .expect("registry builds");
+
+    assert!(reg.get("copy").is_some(), "indexing a DynList in a comprehension compiles (rung 2b.2b)");
+    assert_call_eq(&reg, &prog, "inb", &[Value::Num(4.0)]); // a=[0,1,4,9,16], a[1]=1
+    assert_call_vec_eq(&reg, &prog, "copy", &[Value::Num(5.0)]); // [0,1,2,3,4,5]
+    // The gaussian_rands index pattern: pairwise stride over a materialized list.
+    assert_call_vec_eq(&reg, &prog, "stride", &[Value::Num(3.0)]); // nums=[0,1,4,9,16,25] → [1,13,41]
+    assert_call_vec_eq(&reg, &prog, "stride", &[Value::Num(1.0)]);
+    // An out-of-range dynamic index → `undef` in the interpreter → the JIT bails.
+    assert!(
+        call_jit(&reg, "oob", &[Value::Num(3.0)]).is_none(),
+        "an out-of-range dynamic index bails to the interpreter (undef)"
+    );
+}
+
+#[test]
 fn over_long_vector_arg_declines() {
     // A vector longer than MAX_VEC_ARG (16) is NOT scalarized — unrolling it would explode compile/code size,
     // and that dynamic-length case is rung D. call_numeric declines → the interpreter runs the body.

@@ -50,8 +50,9 @@ fn interp(prog: &Program, name: &str, args: &[f64]) -> f64 {
 
 #[test]
 fn registry_compiles_numeric_declines_the_rest() {
-    // Two numeric functions compile; `pair` (a vector literal) and `pick` (indexing) are outside the
-    // numeric subset and must be DECLINED — absent from the registry, so the caller interprets them.
+    // Scalar-shape coverage: `sq`/`lerp` (scalar arithmetic) AND `pair` (a fixed vector RETURN, rung C)
+    // compile; `pick` indexes a SCALAR param, which declines its all-scalar shape (it would compile with a
+    // vector arg, but `get` is the scalar spec) — so the caller interprets it.
     let prog = program(
         "function sq(x) = x*x;\
          function lerp(a,b,t) = a + (b-a)*t;\
@@ -64,14 +65,14 @@ fn registry_compiles_numeric_declines_the_rest() {
     )
         .expect("registry builds");
 
-    assert_eq!(reg.len(), 2, "exactly the two numeric functions compiled");
+    assert_eq!(reg.len(), 3, "sq, lerp, and the vector-returning pair (rung C) compiled");
     assert!(reg.get("sq").is_some(), "sq is numeric → compiled");
     assert!(reg.get("lerp").is_some(), "lerp is numeric → compiled");
-    assert!(reg.get("pair").is_none(), "pair builds a vector → declined");
-    assert!(reg.get("pick").is_none(), "pick indexes → declined");
+    assert!(reg.get("pair").is_some(), "pair returns a fixed vector → compiled (rung C)");
+    assert!(reg.get("pick").is_none(), "pick indexes a scalar param → its scalar shape declines");
     assert_eq!(
         reg.compiled_names().collect::<Vec<_>>(),
-        ["lerp", "sq"],
+        ["lerp", "pair", "sq"],
         "coverage is name-sorted (BTreeMap)"
     );
 }
@@ -103,7 +104,7 @@ fn registry_calls_are_bit_identical_to_the_interpreter() {
         ("horner", &[-3.75]),
     ];
     for (name, args) in cases {
-        let jit = reg.get(name).expect("compiled").call(args).expect("no assert raised");
+        let jit = reg.get(name).expect("compiled").call(args, &mut [0.0]).expect("no assert raised");
         let slow = interp(&prog, name, args);
         assert_eq!(
             jit.to_bits(),
@@ -147,7 +148,7 @@ fn inlining_user_function_calls_is_bit_identical() {
         ("scale", &[-1.5]),
     ];
     for (name, args) in cases {
-        let jit = reg.get(name).expect("compiled").call(args).expect("no assert raised");
+        let jit = reg.get(name).expect("compiled").call(args, &mut [0.0]).expect("no assert raised");
         let slow = interp(&prog, name, args);
         assert_eq!(
             jit.to_bits(),
@@ -184,7 +185,7 @@ fn inlining_binds_unfilled_params_to_defaults() {
         ("use_some", &[0.0]),
     ];
     for (name, args) in cases {
-        let jit = reg.get(name).expect("compiled").call(args).expect("no assert raised");
+        let jit = reg.get(name).expect("compiled").call(args, &mut [0.0]).expect("no assert raised");
         let slow = interp(&prog, name, args);
         assert_eq!(jit.to_bits(), slow.to_bits(), "default {name}({args:?}): jit={jit} interp={slow}");
     }
@@ -234,7 +235,7 @@ fn references_top_level_constants_is_bit_identical() {
         ("golden", &[-4.5]),
     ];
     for (name, args) in cases {
-        let jit = reg.get(name).expect("compiled").call(args).expect("no assert raised");
+        let jit = reg.get(name).expect("compiled").call(args, &mut [0.0]).expect("no assert raised");
         let slow = interp(&prog, name, args);
         assert_eq!(jit.to_bits(), slow.to_bits(), "global {name}({args:?}): jit={jit} interp={slow}");
     }
@@ -275,7 +276,7 @@ fn bool_returning_functions_are_type_tagged_and_bit_identical() {
     ];
     for &(name, arg) in cases {
         let compiled = reg.get(name).expect("compiled");
-        let jit = compiled.call(&[arg]).expect("no assert raised");
+        let jit = compiled.call(&[arg], &mut [0.0]).expect("no assert raised");
         let slow = interpret_fn(&prog, name, &[Value::Num(arg)]).expect("interprets");
         match slow {
             // A bool result: the JIT must be tagged bool, and its 0.0/1.0 must match the interpreter's truthiness.
@@ -297,7 +298,7 @@ fn bool_returning_functions_are_type_tagged_and_bit_identical() {
 fn scalarized_vectors_are_bit_identical() {
     // P.1.6 rung A: a vector used INTERNALLY (a `[a,b,c]` literal, static index, elementwise / scale / dot
     // arithmetic) SCALARIZES — no memory — and reduces to a scalar. Bit-identical to the interpreter, incl. the
-    // 4-lane `dot` (`vec*vec`). A vector-RETURNING function still declines (rung C).
+    // 4-lane `dot` (`vec*vec`). A vector-RETURNING function compiles too now (rung C, differentialed separately).
     let prog = program(
         "function dot3(x) = let(v = [x, x*2, x*3], w = [1, 2, 3]) v * w;\
          function esum(x) = let(v = [x, x], w = [1, 2], s = v + w) s[0] + s[1];\
@@ -323,7 +324,7 @@ fn scalarized_vectors_are_bit_identical() {
     assert!(reg.get("xyz").is_some(), "member .x/.y/.z on a scalarized vector compiles (rung B)");
     assert!(reg.get("badmember").is_none(), "a non-xyz member (.w → undef) declines");
     assert!(reg.get("shortz").is_none(), "a .z on a too-short vector (→ undef) declines");
-    assert!(reg.get("mkvec").is_none(), "a vector-RETURNING body declines (rung C)");
+    assert!(reg.get("mkvec").is_some(), "a fixed vector-RETURNING body now compiles (rung C)");
 
     let cases: &[(&str, &[f64])] = &[
         ("dot3", &[3.0]), // 14*3 = 42
@@ -340,7 +341,7 @@ fn scalarized_vectors_are_bit_identical() {
         ("xyz", &[0.0]),
     ];
     for (name, args) in cases {
-        let jit = reg.get(name).expect("compiled").call(args).expect("no assert raised");
+        let jit = reg.get(name).expect("compiled").call(args, &mut [0.0]).expect("no assert raised");
         let slow = interp(&prog, name, args);
         assert_eq!(jit.to_bits(), slow.to_bits(), "vector {name}({args:?}): jit={jit} interp={slow}");
     }
@@ -363,6 +364,23 @@ fn assert_call_eq(reg: &JitRegistry, prog: &Program, name: &str, vals: &[Value])
         other => panic!("{name}{vals:?}: interpreter didn't yield a number: {other:?}"),
     };
     assert_eq!(jit.to_bits(), slow.to_bits(), "{name}{vals:?}: jit={jit} interp={slow}");
+}
+
+/// Assert `reg.call_numeric` returns a fixed VECTOR result (rung C) element-wise BITWISE-equal to the
+/// interpreter's `NumList`.
+fn assert_call_vec_eq(reg: &JitRegistry, prog: &Program, name: &str, vals: &[Value]) {
+    let jit = match reg.call_numeric(name, vals) {
+        Some(JitOutcome::Vec(xs)) => xs,
+        other => panic!("{name}{vals:?}: expected a JIT vector result, got {other:?}"),
+    };
+    let slow = match interpret_fn(prog, name, vals) {
+        Ok(Value::NumList(xs)) => xs,
+        other => panic!("{name}{vals:?}: interpreter didn't yield a NumList: {other:?}"),
+    };
+    assert_eq!(jit.len(), slow.len(), "{name}{vals:?}: length {} != {}", jit.len(), slow.len());
+    for (i, (a, b)) in jit.iter().zip(slow.iter()).enumerate() {
+        assert_eq!(a.to_bits(), b.to_bits(), "{name}{vals:?}[{i}]: jit={a} interp={b}");
+    }
 }
 
 #[test]
@@ -467,6 +485,53 @@ fn vector_builtins_are_bit_identical() {
 }
 
 #[test]
+fn vector_returns_are_bit_identical() {
+    // P.1.6 rung C: a function returning a FIXED-shape vector — the JIT writes its elements to a sink
+    // out-buffer, the dispatch reads them back into a NumList. Covers build-from-scalars, elementwise vec±vec,
+    // scalar scale/divide, negate, midpoint, and cross (3D → a vector return that previously declined). Each
+    // element bit-identical to the interpreter.
+    let prog = program(
+        "function mkpt(x, y, z) = [x, y, z];\
+         function addv(a, b) = a + b;\
+         function subv(a, b) = a - b;\
+         function scalev(v, k) = v * k;\
+         function halve(v) = v / 2;\
+         function negv(v) = -v;\
+         function cross3(a, b) = cross(a, b);\
+         function midpoint(a, b) = (a + b) / 2;",
+    );
+    let reg = JitRegistry::build(
+        defs(&prog).iter().map(|&(n, p, b)| (n, p, b)),
+        consts(&prog).iter().map(|&(n, v)| (n, v)),
+    )
+    .expect("registry builds");
+
+    // mkpt takes SCALARS and returns a vec3 — its all-scalar shape compiles (rung C, no vector arg needed).
+    assert!(reg.get("mkpt").is_some(), "a scalar→vector function compiles its scalar shape (rung C)");
+    assert_call_vec_eq(&reg, &prog, "mkpt", &[Value::Num(1.0), Value::Num(2.0), Value::Num(3.0)]);
+    assert_call_vec_eq(
+        &reg,
+        &prog,
+        "mkpt",
+        &[Value::Num(-0.0), Value::Num(f64::INFINITY), Value::Num(f64::NAN)], // ±0 / inf / NaN survive the sink
+    );
+
+    // Vector args IN (rung B), vector OUT (rung C).
+    let a3 = vec_arg(&[1.0, 2.0, 3.0]);
+    let b3 = vec_arg(&[4.0, 5.0, 6.0]);
+    assert_call_vec_eq(&reg, &prog, "addv", &[a3.clone(), b3.clone()]);
+    assert_call_vec_eq(&reg, &prog, "subv", &[a3.clone(), b3.clone()]);
+    assert_call_vec_eq(&reg, &prog, "scalev", &[a3.clone(), Value::Num(2.5)]);
+    assert_call_vec_eq(&reg, &prog, "halve", std::slice::from_ref(&a3));
+    assert_call_vec_eq(&reg, &prog, "negv", std::slice::from_ref(&a3));
+    assert_call_vec_eq(&reg, &prog, "cross3", &[a3.clone(), b3.clone()]); // 3D cross → a vector RETURN
+    assert_call_vec_eq(&reg, &prog, "midpoint", &[a3.clone(), b3.clone()]);
+    // A vec2 shape too — a DIFFERENT specialization of the same functions, on demand.
+    assert_call_vec_eq(&reg, &prog, "addv", &[vec_arg(&[1.5, 2.5]), vec_arg(&[0.5, 0.5])]);
+    assert_call_vec_eq(&reg, &prog, "negv", &[vec_arg(&[-7.0, 8.0])]);
+}
+
+#[test]
 fn min_max_are_bit_identical() {
     // P.1.6 rung B: min/max reduce one vector arg, one scalar, or several scalars via jit_fmin/jit_fmax — the
     // interpreter's `f64::min`/`max` (IEEE minNum/maxNum: NaN is IGNORED, the non-NaN operand wins). That's
@@ -538,12 +603,12 @@ fn over_long_vector_arg_declines() {
 
 #[test]
 fn nothing_compiles_but_the_registry_holds_the_def() {
-    // A program whose only function returns a vector → NOTHING compiles (a vector return is rung C, declined
-    // for any arg shape). Post-rung-B, `is_empty()` means "no functions at all", NOT "nothing compiled" — the
-    // registry retains the def so an on-demand VECTOR-arg shape could still compile (this one never will, but
-    // the registry can't know that cheaply). So: len()==0 (no scalar spec), get() is None, and call_numeric
-    // declines every shape — but the registry is not "empty".
-    let prog = program("function only_list(x) = [x, x, x];");
+    // A program whose only function is a COMPREHENSION → NOTHING compiles (a dynamic-length list is rung D, out
+    // of the scalarized subset for any arg shape). Post-rung-B, `is_empty()` means "no functions at all", NOT
+    // "nothing compiled" — the registry retains the def (a shape MIGHT compile; this one never will, but the
+    // registry can't know that cheaply). So: len()==0 (no scalar spec), get() None, call_numeric declines every
+    // shape — yet the registry is not "empty".
+    let prog = program("function comp(n) = [for (i = [0:n]) i*i];");
     let reg = JitRegistry::build(
         defs(&prog).iter().map(|&(n, p, b)| (n, p, b)),
         consts(&prog).iter().map(|&(n, v)| (n, v)),
@@ -551,10 +616,10 @@ fn nothing_compiles_but_the_registry_holds_the_def() {
         .expect("registry builds even with nothing to compile");
     assert!(!reg.is_empty(), "the def is retained for on-demand recompile");
     assert_eq!(reg.len(), 0, "no all-scalar specialization compiled");
-    assert!(reg.get("only_list").is_none(), "the scalar shape declines (vector return)");
+    assert!(reg.get("comp").is_none(), "the scalar shape declines (comprehension)");
     assert!(
-        reg.call_numeric("only_list", &[Value::Num(3.0)]).is_none(),
-        "every shape of a vector-returning body declines → interpret"
+        reg.call_numeric("comp", &[Value::Num(3.0)]).is_none(),
+        "every shape of a comprehension body declines → interpret"
     );
 
     // A TRULY empty program (no user functions) IS empty — the factory installs no hook.

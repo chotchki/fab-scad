@@ -28,16 +28,21 @@ use cranelift::prelude::{
     settings, types,
 };
 
-/// The runtime TYPE of a compiled sub-expression. Both are IR values, but the distinction is
-/// load-bearing: the interpreter's comparisons and `&&`/`||`/`!` produce a BOOL (`Value::Bool`), not a
-/// number, and a function that RETURNS a bool must NOT be JIT'd (the dispatch wraps the result in
-/// `Value::Num`, so a bool return would diverge). `Num` is an `f64`; `Bool` is an `i8` (0/1, the shape
-/// Cranelift's `fcmp`/`icmp` yield and `select` consumes). A bool only ever feeds a condition or another
-/// logical op — it can't be the function's return, nor an operand to arithmetic.
+/// The static RETURN shape of a compiled function — the descriptor the dispatch re-tags the untyped native
+/// return by (P.1.4e + P.1.6 rung C). The interpreter carries this in [`Value`] for free; it evaporates
+/// crossing `extern "C"`, so the compiled function reports it and the dispatch reconstructs the [`Value`]:
+/// - `Num` — the `f64` return IS the result.
+/// - `Bool` — the JIT computed an `i8` 0/1, returned as `0.0`/`1.0`; the dispatch wraps `Value::Bool`.
+/// - `Vec(n)` — a fixed-shape numeric vector (rung C); the function WROTE `n` `f64`s to the sink buffer and
+///   the `f64` return is a dummy, so the dispatch reads the buffer into a `Value::NumList`.
+///
+/// The Num-vs-Bool distinction is load-bearing (`Num(1.0) != Bool(true)` would diverge); the internal
+/// per-sub-expression type lives on [`Lowered`], not here — this is ONLY the whole function's return.
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Ty {
+enum Ret {
     Num,
     Bool,
+    Vec(usize),
 }
 
 use fab_lang::{
@@ -178,11 +183,11 @@ impl std::fmt::Display for JitError {
 
 impl std::error::Error for JitError {}
 
-/// A finalized numeric function: `fn(flat_params: &[f64]) -> f64` as a raw code pointer. The executable
-/// memory it points into is owned by the [`JitFn`] or [`JitRegistry`] that produced it — a `CompiledFn` is
-/// only valid for that owner's lifetime. `Copy` (a pointer + two words), so the registry can lift one out of
-/// its cache and call it AFTER releasing the `RefCell` borrow — the code stays mapped as long as the module
-/// (in the registry) is alive.
+/// A finalized numeric function: `extern "C" fn(*const f64, *mut u8, *mut f64) -> f64` as a raw code pointer.
+/// The executable memory it points into is owned by the [`JitFn`] or [`JitRegistry`] that produced it — a
+/// `CompiledFn` is only valid for that owner's lifetime. `Copy` (a pointer + two words), so the registry can
+/// lift one out of its cache and call it AFTER releasing the `RefCell` borrow — the code stays mapped as long
+/// as the module (in the registry) is alive.
 #[derive(Clone, Copy)]
 pub struct CompiledFn {
     code: *const u8,
@@ -190,10 +195,9 @@ pub struct CompiledFn {
     /// of this specialization's args (P.1.6 rung B): a scalar param is 1 slot, a vec-`n` param is `n`. For an
     /// all-scalar function this equals the parameter count (the pre-rung-B behavior).
     arity: usize,
-    /// The STATIC return type (P.1.4e) — the native ABI returns an untyped `f64`, so this says whether it's a
-    /// number or a boolean (`0.0`/`1.0`). Derived once at compile time from the body's [`Ty`]; the dispatch
-    /// re-tags the result into the matching [`fab_lang::Value`]. Extends to a vector descriptor with rung C.
-    ret_ty: Ty,
+    /// The STATIC return descriptor (P.1.4e + rung C): `Num`/`Bool` come back in the `f64` return; `Vec(n)` is
+    /// written to the sink out-buffer. The dispatch re-tags into the matching [`fab_lang::Value`].
+    ret_ty: Ret,
 }
 
 impl CompiledFn {
@@ -208,18 +212,19 @@ impl CompiledFn {
     /// type-aware. `false` for the numeric majority.
     #[must_use]
     pub fn returns_bool(&self) -> bool {
-        matches!(self.ret_ty, Ty::Bool)
+        matches!(self.ret_ty, Ret::Bool)
     }
 
-    /// Call the compiled function with `params` (its length must equal [`CompiledFn::arity`]). Returns
-    /// `None` when the body's inline `assert` FAILED — the JIT can't unwind, so it flags a status byte and
-    /// the caller falls back to the interpreter, which re-runs and raises the exact error (with its real
-    /// message). On the common path (no assert, or assert passes) it's `Some(result)`.
+    /// Call the compiled function with `params` (length == [`CompiledFn::arity`]) and a sink `out` buffer for a
+    /// vector return (P.1.6 rung C): a `Vec(n)` function writes its `n` elements into `out` (which MUST hold ≥
+    /// `n` slots) and the returned `f64` is a dummy; a `Num`/`Bool` function ignores `out` and returns via the
+    /// `f64`. Returns `None` when the body's inline `assert` FAILED — the JIT can't unwind, so it flags a status
+    /// byte and the caller falls back to the interpreter, which re-runs and raises the exact error.
     ///
     /// # Panics
-    /// If `params.len()` != the function's arity.
+    /// If `params.len()` != the function's arity, or `out` is too small for a `Vec(n)` return.
     #[must_use]
-    pub fn call(&self, params: &[f64]) -> Option<f64> {
+    pub fn call(&self, params: &[f64], out: &mut [f64]) -> Option<f64> {
         assert_eq!(
             params.len(),
             self.arity,
@@ -227,15 +232,19 @@ impl CompiledFn {
             params.len(),
             self.arity
         );
+        if let Ret::Vec(n) = self.ret_ty {
+            assert!(out.len() >= n, "CompiledFn::call out buffer too small: {} < {n}", out.len());
+        }
         // THE unsafe seam of the whole crate. SAFETY: `code` is a finalized Cranelift function of signature
-        // `extern "C" fn(*const f64, *mut u8) -> f64` (built in `define_one`); the owning module keeps it
-        // mapped for as long as `self` is reachable; the function READS `arity` f64s from the first pointer
-        // (`params` has exactly that many, asserted above) and WRITES one byte through the second, which
-        // points at our live local `raised`. No unwinding crosses the boundary — an assert sets the byte.
-        let f: unsafe extern "C" fn(*const f64, *mut u8) -> f64 =
+        // `extern "C" fn(*const f64, *mut u8, *mut f64) -> f64` (built in `define_one`); the owning module
+        // keeps it mapped for as long as `self` is reachable. It READS `arity` f64s from the first pointer
+        // (`params` has exactly that many, asserted above), WRITES one byte through the second (our live local
+        // `raised`), and — only for a `Vec(n)` return — WRITES `n` f64s through the third (`out`, asserted ≥ n).
+        // A `Num`/`Bool` body never touches the third pointer. No unwinding crosses the boundary.
+        let f: unsafe extern "C" fn(*const f64, *mut u8, *mut f64) -> f64 =
             unsafe { std::mem::transmute(self.code) };
         let mut raised: u8 = 0;
-        let result = unsafe { f(params.as_ptr(), &raw mut raised) };
+        let result = unsafe { f(params.as_ptr(), &raw mut raised, out.as_mut_ptr()) };
         if raised == 0 { Some(result) } else { None }
     }
 }
@@ -257,13 +266,14 @@ impl JitFn {
     }
 
     /// Call the compiled function with `params` (length must equal [`JitFn::arity`]). `None` if the body's
-    /// inline `assert` failed (see [`CompiledFn::call`]).
+    /// inline `assert` failed (see [`CompiledFn::call`]). The standalone API is `Num`-only (it declines a bool
+    /// or vector return), so a 1-slot dummy out-buffer suffices — the compiled body never writes to it.
     ///
     /// # Panics
     /// If `params.len()` != the function's arity.
     #[must_use]
     pub fn call(&self, params: &[f64]) -> Option<f64> {
-        self.inner.call(params)
+        self.inner.call(params, &mut [0.0])
     }
 }
 
@@ -349,7 +359,7 @@ impl JitRegistry {
             let globals: Globals = owned_globals.iter().map(|(n, v)| (n.as_str(), v)).collect();
             // Declare + define each function's all-scalar shape, remembering its FuncId to resolve the code
             // pointer AFTER the single finalize. `Vec(name, FuncId, flatlen, ret_ty)`.
-            let mut pending: Vec<(&str, FuncId, usize, Ty)> = Vec::new();
+            let mut pending: Vec<(&str, FuncId, usize, Ret)> = Vec::new();
             for (name, d) in &owned_defs {
                 let params: Vec<(&str, ArgShape)> =
                     d.params.iter().map(|p| (p.name.as_ref(), ArgShape::Scalar)).collect();
@@ -491,14 +501,19 @@ impl NumericJit for JitRegistry {
         // borrow across it is safe (a different `RefCell`), and the compiled fn then reads `scratch` directly.
         let sig = shape_and_flatten(args, &mut scratch)?;
         let compiled = self.get_or_compile(name, &sig)?;
-        // RE-TAG the untyped native `f64` by the specialization's static return type (P.1.4e): a bool-returning
-        // predicate yields `0.0`/`1.0` the dispatch must wrap in `Value::Bool`. `None` from `call` = the inline
-        // assert raised → interpret (which re-runs and raises the exact error).
-        let raw = compiled.call(&scratch)?;
-        Some(match compiled.ret_ty {
-            Ty::Num => JitOutcome::Num(raw),
-            Ty::Bool => JitOutcome::Bool(raw != 0.0),
-        })
+        // RE-TAG the untyped native return by the specialization's static shape (P.1.4e + rung C): a `Num` IS
+        // the `f64`; a `Bool` predicate yields `0.0`/`1.0` → `Value::Bool`; a `Vec(n)` wrote its `n` elements to
+        // a sink buffer → `Value::NumList`. `None` from `call` = the inline assert raised → interpret (which
+        // re-runs and raises the exact error). The scalar path keeps its stack dummy out — no heap allocation.
+        match compiled.ret_ty {
+            Ret::Num => Some(JitOutcome::Num(compiled.call(&scratch, &mut [0.0])?)),
+            Ret::Bool => Some(JitOutcome::Bool(compiled.call(&scratch, &mut [0.0])? != 0.0)),
+            Ret::Vec(n) => {
+                let mut out = vec![0.0; n];
+                compiled.call(&scratch, &mut out)?; // the f64 return is a dummy; the elements are in `out`
+                Some(JitOutcome::Vec(out))
+            }
+        }
     }
 }
 
@@ -591,10 +606,10 @@ pub fn compile_function(param_names: &[&str], body: &Expr) -> Result<JitFn, JitE
     let params: Vec<(&str, ArgShape)> = param_names.iter().map(|&n| (n, ArgShape::Scalar)).collect();
     let (func_id, ret_ty) =
         define_one(&mut module, "scad_jit_fn", &params, body, &no_defs, &no_globals, &helpers)?;
-    // The standalone API is f64-only (the fast==JIT differential compares raw f64s); a bool-returning body is
-    // the registry path's job (it carries the type tag), so DECLINE it here to keep the contract.
-    if matches!(ret_ty, Ty::Bool) {
-        return Err(JitError::Unsupported("bool-returning body (standalone API is f64-only; use JitRegistry)"));
+    // The standalone API is f64-only (the fast==JIT differential compares raw f64s); a bool- OR vector-returning
+    // body is the registry path's job (it carries the tag + the sink buffer), so DECLINE it here.
+    if !matches!(ret_ty, Ret::Num) {
+        return Err(JitError::Unsupported("non-numeric return (standalone API is f64-only; use JitRegistry)"));
     }
     module
         .finalize_definitions()
@@ -668,15 +683,17 @@ fn declare_helpers(module: &mut JITModule) -> Result<Helpers, JitError> {
 
 /// Build the IR for one function specialized to `params` (each param's name + arg [`ArgShape`]) and declare +
 /// define it in `module` under `symbol` (NOT finalized — the caller finalizes once). Returns the `FuncId` (to
-/// resolve the code pointer after finalize) AND the body's static return [`Ty`] — a bool-returning body is
-/// returned as `0.0`/`1.0` and the caller tags the function so the dispatch wraps `Value::Bool` (P.1.4e).
+/// resolve the code pointer after finalize) AND the body's static return [`Ret`] — a bool-returning body is
+/// returned as `0.0`/`1.0`, a vector body writes to the sink; the caller tags the function so the dispatch
+/// reconstructs the matching `Value` (P.1.4e + rung C).
 ///
-/// The native ABI is `(flat_params: *const f64, raised: *mut u8) -> f64`: params are FLATTENED into the first
-/// pointer — a scalar param is one slot, a vec-`n` param is `n` contiguous slots (P.1.6 rung B). A scalar is
-/// read lazily by its flat offset; a vector param is loaded up-front into a scalarized [`Lowered::Vec`] and
-/// bound in the initial locals, so from there it's handled exactly like a rung-A internal vector. On
-/// [`JitError::Unsupported`] nothing is added to the module (IR is built before declare/define), so a declined
-/// function leaves the module clean for the next one.
+/// The native ABI is `(flat_params: *const f64, raised: *mut u8, out: *mut f64) -> f64`: params are FLATTENED
+/// into the first pointer — a scalar param is one slot, a vec-`n` param is `n` contiguous slots (P.1.6 rung B).
+/// A scalar is read lazily by its flat offset; a vector param is loaded up-front into a scalarized
+/// [`Lowered::Vec`] and bound in the initial locals, so from there it's handled exactly like a rung-A internal
+/// vector. A `Num`/`Bool` body returns via the `f64`; a fixed-shape VECTOR body (rung C) writes its elements to
+/// the `out` sink and the `f64` is a dummy. On [`JitError::Unsupported`] nothing is added to the module (IR is
+/// built before declare/define), so a declined function leaves the module clean for the next one.
 fn define_one(
     module: &mut JITModule,
     symbol: &str,
@@ -685,12 +702,14 @@ fn define_one(
     defs: &FnDefs,
     globals: &Globals,
     helpers: &Helpers,
-) -> Result<(FuncId, Ty), JitError> {
+) -> Result<(FuncId, Ret), JitError> {
     let cl = |e: ModuleError| JitError::Cranelift(e.to_string());
     let ptr_ty = module.target_config().pointer_type();
     let mut ctx = module.make_context();
-    // Signature: `(params: *const f64, raised: *mut u8) -> f64`. `raised` is the assert-failure out-param
-    // (P.1.4) — an inline `assert(cond)` whose condition is falsy writes 1 to it; the JIT can't unwind.
+    // Signature: `(params: *const f64, raised: *mut u8, out: *mut f64) -> f64`. `raised` is the assert-failure
+    // out-param (P.1.4) — a falsy inline `assert(cond)` writes 1 to it; the JIT can't unwind. `out` is the
+    // rung-C sink — a vector-returning body writes its fixed number of elements there.
+    ctx.func.signature.params.push(AbiParam::new(ptr_ty));
     ctx.func.signature.params.push(AbiParam::new(ptr_ty));
     ctx.func.signature.params.push(AbiParam::new(ptr_ty));
     ctx.func.signature.returns.push(AbiParam::new(types::F64));
@@ -705,6 +724,7 @@ fn define_one(
         fb.seal_block(block);
         let params_ptr = fb.block_params(block)[0];
         let raised_ptr = fb.block_params(block)[1];
+        let out_ptr = fb.block_params(block)[2];
 
         let fmod_ref = module.declare_func_in_func(helpers.fmod, fb.func);
         let powf_ref = module.declare_func_in_func(helpers.powf, fb.func);
@@ -757,17 +777,26 @@ fn define_one(
 
         // IR is built BEFORE declare/define — an Unsupported node returns here with the module untouched.
         // A NUMERIC body returns its f64 directly; a BOOL body (a predicate / comparison / bool literal — the
-        // JIT computes it as an i8 0/1) is returned as 0.0/1.0, and the caller tags the function so the dispatch
-        // wraps `Value::Bool` (P.1.4e). A VECTOR-returning body declines for now — the fixed-size out-buffer is
-        // rung C; rung A only compiles functions that use vectors INTERNALLY and reduce to a scalar/bool.
+        // JIT computes it as an i8 0/1) is returned as 0.0/1.0, and the caller tags it so the dispatch wraps
+        // `Value::Bool` (P.1.4e). A fixed-shape VECTOR body (rung C) WRITES its elements to the `out` sink and
+        // returns a dummy f64; the caller reads `out` back into a `Value::NumList`. A NESTED vector (a matrix)
+        // declines — rung C is FLAT vectors (`e.num()` fails on a nested element).
         let (ret, ty) = match compile_expr(&mut fb, body, &lower)? {
-            Lowered::Num(v) => (v, Ty::Num),
+            Lowered::Num(v) => (v, Ret::Num),
             Lowered::Bool(v) => {
                 let one = fb.ins().f64const(1.0);
                 let zero = fb.ins().f64const(0.0);
-                (fb.ins().select(v, one, zero), Ty::Bool)
+                (fb.ins().select(v, one, zero), Ret::Bool)
             }
-            Lowered::Vec(_) => return Err(JitError::Unsupported("vector return (rung C)")),
+            Lowered::Vec(elems) => {
+                for (i, e) in elems.iter().enumerate() {
+                    let x = e.num()?; // a nested element (matrix row) declines here — flat vectors only
+                    let byte_off = i32::try_from(i * 8)
+                        .map_err(|_| JitError::Unsupported("return offset overflow"))?;
+                    fb.ins().store(MemFlagsData::trusted(), x, out_ptr, byte_off);
+                }
+                (fb.ins().f64const(0.0), Ret::Vec(elems.len())) // the f64 return is a dummy for a vec
+            }
         };
         fb.ins().return_(&[ret]);
         fb.finalize();
@@ -837,7 +866,7 @@ fn float_cc(op: BinOp) -> Option<FloatCC> {
     })
 }
 
-/// Recursively lower `expr` to a Cranelift value + its [`Ty`]. Left operand before right — but for pure
+/// Recursively lower `expr` to a Cranelift value + its [`Lowered`] type. Left operand before right — but for pure
 /// numeric ops the operand ORDER doesn't affect the result bits (the operation is the same `fadd(a, b)`
 /// either way); what matters is that we emit the operation itself, never a fused or reordered variant.
 /// The AST is `MAX_DEPTH`-bounded by the parser, so this recursion can't overflow.

@@ -121,19 +121,20 @@ fn input_battery(arity: usize) -> Vec<Vec<f64>> {
     rows
 }
 
-/// Interpret `name(args)` through the whole-library `oracle` — the slow side of the differential, as
-/// `(value, is_bool)`. A numeric result is `(n, false)`; a BOOLEAN result (a predicate / comparison body,
-/// P.1.4e) is `(0.0/1.0, true)` so it compares against the JIT's `0.0`/`1.0` return AND its type tag. `None`
-/// when the body RAISES (an inline `assert` failed) or yields neither. Unlike a standalone eval, the oracle
-/// resolves the callee's OWN calls (the chains the JIT inlines) and top-level constants (the globals it
-/// inlines) — required now that the compiled subset reaches past leaf functions. `None` mirrors the JIT's
-/// raise-`None`.
-fn interpret(oracle: &FnOracle, name: &str, args: &[f64]) -> Option<(f64, bool)> {
-    let vals: Vec<Value> = args.iter().map(|&v| Value::Num(v)).collect();
-    match oracle.call(name, &vals) {
-        Ok(Value::Num(n)) => Some((n, false)),
-        Ok(Value::Bool(b)) => Some((if b { 1.0 } else { 0.0 }, true)),
-        _ => None, // an assert failure (Err) or a non-number/bool → the JIT returns None here too
+/// Whether the JIT outcome and the interpreter's result AGREE — the differential's verdict, shape-aware. Both
+/// raising (JIT `None`, oracle `Err`) agrees; a `Num`/`Bool`/`Vec` result must match the oracle's
+/// `Num`/`Bool`/`NumList` bit-for-bit (and element-count for a vector). Anything else — a mixed accept/raise, a
+/// shape mismatch, differing bits — diverges. The oracle resolves the callee's own calls + top-level constants
+/// (the chains/globals the JIT inlines), so both sides see the same program.
+fn outcome_agrees(jit: Option<&JitOutcome>, slow: &fab_lang::Result<Value>) -> bool {
+    match (jit, slow) {
+        (None, Err(_)) => true, // both raised (an inline assert failed on both sides)
+        (Some(JitOutcome::Num(a)), Ok(Value::Num(b))) => a.to_bits() == b.to_bits(),
+        (Some(JitOutcome::Bool(a)), Ok(Value::Bool(b))) => a == b,
+        (Some(JitOutcome::Vec(a)), Ok(Value::NumList(b))) => {
+            a.len() == b.len() && a.iter().zip(b.iter()).all(|(x, y)| x.to_bits() == y.to_bits())
+        }
+        _ => false,
     }
 }
 
@@ -153,22 +154,22 @@ fn fast_equals_jit_over_the_bosl2_library() {
     // (function × battery-row) would be quadratic over the library.
     let oracle = FnOracle::new(&defs, &consts).expect("oracle builds");
 
-    // Every compiled function: JIT == interpreter, BITWISE, across the whole battery.
+    // Every compiled function: JIT == interpreter, BITWISE, across the whole battery. Dispatched through
+    // `call_numeric` (all-`Num` args → the all-scalar spec) so a `Num`/`Bool`/`Vec` return (rung C) is handled
+    // uniformly with its sink buffer — the same path the interpreter's eval loop takes.
     let mut checked = 0usize;
     for (name, params, _body) in &defs {
-        let Some(compiled) = registry.get(name) else { continue };
+        if registry.get(name).is_none() {
+            continue; // no all-scalar specialization → the interpreter's job
+        }
         for args in input_battery(params.len()) {
-            // Pair the JIT's raw f64 with its static type tag, so a Num-vs-Bool mismatch fails too (not just
-            // differing bits) — the untyped ABI must reconstruct the interpreter's Value type exactly.
-            let jit = compiled.call(&args[..params.len()]).map(|f| (f, compiled.returns_bool()));
-            let slow = interpret(&oracle, name, &args[..params.len()]);
-            // Agree if both raised (`None` — an inline assert failed on both sides) OR both a value with the
-            // SAME type tag and identical bits. A mixed Some/None, a type mismatch, or differing bits diverges.
-            let agree = match (jit, slow) {
-                (Some((a, at)), Some((b, bt))) => at == bt && a.to_bits() == b.to_bits(),
-                (None, None) => true,
-                _ => false,
-            };
+            let vals: Vec<Value> = args[..params.len()].iter().map(|&v| Value::Num(v)).collect();
+            let jit = registry.call_numeric(name, &vals);
+            let slow = oracle.call(name, &vals);
+            // Agree if both raised (JIT `None` — an inline assert failed — and the oracle `Err`) OR both a value
+            // with the SAME shape + identical bits. A mixed accept/raise, a shape mismatch, or differing bits
+            // diverges. (A JIT `None` also covers a non-scalarizable return the interpreter shouldn't produce here.)
+            let agree = outcome_agrees(jit.as_ref(), &slow);
             assert!(agree, "fast != JIT for BOSL2 `{name}` at {args:?}: jit={jit:?} interp={slow:?}");
         }
         checked += 1;
@@ -256,11 +257,15 @@ fn fast_equals_jit_over_bosl2_vector_arg_shapes() {
                 let Some(jit) = registry.call_numeric(name, &row) else {
                     continue; // declined-or-raised shape → the interpreter handles it, nothing to differential
                 };
-                // The JIT accepted this shape → it MUST match the interpreter, bits + type tag.
+                // The JIT accepted this shape → it MUST match the interpreter, bits + type tag. A `Vec` return
+                // (rung C) compares element-wise bitwise against a `NumList`.
                 let slow = oracle.call(name, &row);
-                let ok = match (jit, &slow) {
+                let ok = match (&jit, &slow) {
                     (JitOutcome::Num(a), Ok(Value::Num(b))) => a.to_bits() == b.to_bits(),
-                    (JitOutcome::Bool(a), Ok(Value::Bool(b))) => a == *b,
+                    (JitOutcome::Bool(a), Ok(Value::Bool(b))) => a == b,
+                    (JitOutcome::Vec(a), Ok(Value::NumList(b))) => {
+                        a.len() == b.len() && a.iter().zip(b.iter()).all(|(x, y)| x.to_bits() == y.to_bits())
+                    }
                     _ => false,
                 };
                 assert!(

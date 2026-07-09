@@ -159,18 +159,20 @@ pub trait NumericJit {
 }
 
 /// A JIT-compiled call's result, TYPE-TAGGED (P.1.4e). The native return ABI is a single untyped `f64` (plus
-/// the raise out-byte); this reconstructs the tag that [`Value`] carries for free in the interpreter but that
-/// evaporates crossing `extern "C"`, so the dispatch wraps a `Num` result in [`Value::Num`] and a `Bool`
-/// result (a comparison / `&&`/`||`/`!` / bool literal — the JIT computes these as an `i8`, returned as
-/// `0.0`/`1.0`) in [`Value::Bool`]. Returning a `Num` where the interpreter yields a `Bool` (or vice-versa)
-/// would DIVERGE (`Num(1.0) != Bool(true)`), so the tag is load-bearing, not cosmetic. Extends to a vector
-/// descriptor when the ABI grows an out-buffer.
-#[derive(Debug, Clone, Copy, PartialEq)]
+/// the raise out-byte, plus — for a vector result — a sink buffer the JIT writes); this reconstructs the tag
+/// that [`Value`] carries for free in the interpreter but that evaporates crossing `extern "C"`, so the
+/// dispatch wraps a `Num` result in [`Value::Num`], a `Bool` (a comparison / `&&`/`||`/`!` / bool literal —
+/// the JIT computes these as an `i8`, returned as `0.0`/`1.0`) in [`Value::Bool`], and a `Vec` (a fixed-shape
+/// vector return, P.1.6 rung C) in [`Value::NumList`]. Returning the wrong tag would DIVERGE (`Num(1.0) !=
+/// Bool(true)`), so the tag is load-bearing, not cosmetic.
+#[derive(Debug, Clone, PartialEq)]
 pub enum JitOutcome {
     /// A numeric result → [`Value::Num`].
     Num(f64),
     /// A boolean result → [`Value::Bool`].
     Bool(bool),
+    /// A fixed-shape numeric vector (rung C) → [`Value::NumList`]. Owned — the JIT wrote it into a sink buffer.
+    Vec(Vec<f64>),
 }
 
 /// One user function offered to the JIT factory: its name, its parameter names (in order), and its body
@@ -752,6 +754,7 @@ fn eval_with_global<'a>(
                     values.push(match out {
                         JitOutcome::Num(n) => Value::Num(n),
                         JitOutcome::Bool(b) => Value::Bool(b),
+                        JitOutcome::Vec(xs) => Value::num_list(xs),
                     });
                     continue;
                 }

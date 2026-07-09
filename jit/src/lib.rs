@@ -427,10 +427,12 @@ fn define_one(
         let math_ref = module.declare_func_in_func(helpers.math, fb.func);
         let index: BTreeMap<&str, usize> =
             param_names.iter().enumerate().map(|(i, &n)| (n, i)).collect();
+        let locals = LetEnv::new(); // no let-bindings in scope at the function's top level
         let lower = Lower {
             params_ptr,
             raised_ptr,
             index: &index,
+            locals: &locals,
             fmod: fmod_ref,
             powf: powf_ref,
             math: math_ref,
@@ -488,13 +490,21 @@ fn float_cc(op: BinOp) -> Option<FloatCC> {
 /// Type discipline keeps it sound: arithmetic requires `Num` operands, a comparison yields `Bool`, a
 /// ternary's branches must AGREE in type, and `&&`/`||`/`!` operate on truthiness. A construct outside the
 /// subset (a call, an index, a free variable, a bitwise op, a mixed-type ternary) DECLINES.
+/// In-scope LOCAL bindings — `let`-bound names (and, later, inlined-call params) → their compiled IR value +
+/// type. Checked before the parameter `index`. Carried by-reference in [`Lower`] so entering a `let` just
+/// makes a fresh map + a copied `Lower` pointing at it (no signature threading); `Lower` is `Copy`.
+type LetEnv<'a> = BTreeMap<&'a str, (Value, Ty)>;
+
 /// The shared lowering context — everything [`compile_expr`] threads down besides the builder itself.
-/// Bundling keeps the recursive signature `(fb, expr, lower)` stable as the subset grows: the params
-/// pointer, the assert-failure out-param, the parameter index, and the math-helper `FuncRef`s.
+/// Carried by value (it's `Copy`) so a scope that adds bindings just spreads a new one: `Lower { locals:
+/// &inner, ..*lower }`. Holds the params pointer, the assert-failure out-param, the parameter index, the
+/// in-scope `let` locals, and the helper `FuncRef`s.
+#[derive(Clone, Copy)]
 struct Lower<'a> {
     params_ptr: Value,
     raised_ptr: Value,
     index: &'a BTreeMap<&'a str, usize>,
+    locals: &'a LetEnv<'a>,
     fmod: FuncRef,
     powf: FuncRef,
     math: FuncRef,
@@ -508,6 +518,10 @@ fn compile_expr(fb: &mut FunctionBuilder, expr: &Expr, lower: &Lower) -> Result<
     match &expr.kind {
         ExprKind::Num(n) => Ok((fb.ins().f64const(*n), Ty::Num)),
         ExprKind::Ident(name) => {
+            // A `let`-bound local (or inlined-call param) shadows a parameter — check the env first.
+            if let Some(&(v, ty)) = lower.locals.get(name.as_str()) {
+                return Ok((v, ty));
+            }
             let i = lower
                 .index
                 .get(name.as_str())
@@ -582,6 +596,23 @@ fn compile_expr(fb: &mut FunctionBuilder, expr: &Expr, lower: &Lower) -> Result<
                 return Err(JitError::Unsupported("ternary branches differ in type"));
             }
             Ok((fb.ins().select(c, tv, ev), tty))
+        }
+        // `let(x=e1, y=e2) body` — SEQUENTIAL bindings (a later one sees earlier ones), then the body in the
+        // extended env. A binding is single-assignment, so it's just a name → its compiled IR value/type;
+        // no store, no slot. The body sees every binding. (Unlocks the 24.8% `let` blocker.)
+        ExprKind::Let { bindings, body } => {
+            let mut locals = lower.locals.clone();
+            for b in bindings {
+                let name = b
+                    .name
+                    .as_deref()
+                    .ok_or(JitError::Unsupported("let binding without a name"))?;
+                let scoped = Lower { locals: &locals, ..*lower };
+                let (v, ty) = compile_expr(fb, &b.value, &scoped)?;
+                locals.insert(name, (v, ty));
+            }
+            let scoped = Lower { locals: &locals, ..*lower };
+            compile_expr(fb, body, &scoped)
         }
         // A scalar math builtin (`sin`/`sqrt`/`abs`/…) inlines to a call into OUR math (P.1.4b) — bit-identical
         // to the interpreter's builtin (degrees, snapping) via `jit_math`. Anything else DECLINES: a user

@@ -186,6 +186,20 @@ fn ternary_and_comparisons_fast_eq_jit() {
 }
 
 #[test]
+fn let_bindings_fast_eq_jit() {
+    // P.1.4c step 1: `let(x=e) body` — sequential single-assignment locals, bit-identical. A later binding
+    // sees earlier ones; the body sees all. Composes with arithmetic/ternary/calls (whole-function absorption).
+    assert_fast_eq_jit("function f(x) = let(y = x * x) y + 1;", EDGE);
+    assert_fast_eq_jit("function f(x) = let(a = x + 1, b = a * a) a + b;", EDGE); // b sees a
+    assert_fast_eq_jit("function f(x) = let(y = x*x) let(z = y*y) z - y;", EDGE); // nested
+    assert_fast_eq_jit("function f(x) = let(s = sin(x), c = cos(x)) s*s + c*c;", EDGE); // let + calls
+    assert_fast_eq_jit("function f(x) = let(a = abs(x)) a > 5 ? a : 0;", EDGE); // let + comparison + ternary
+    assert_fast_eq_jit("function hyp(a, b) = let(s = a*a + b*b) sqrt(s);", TWO);
+    // A let shadowing a parameter — the local wins inside its scope.
+    assert_fast_eq_jit("function f(x) = let(x = x + 10) x * 2;", EDGE);
+}
+
+#[test]
 fn scalar_math_builtins_fast_eq_jit() {
     // P.1.4b: `sqrt`/`sin`/`cos`/`abs`/… inline to a call into OUR math (degrees + snapping via trig.rs),
     // NOT raw libm — so a JIT'd `sin(x)` is the SAME function the interpreter's builtin calls, bit-identical

@@ -1,0 +1,150 @@
+//! P.1.3 — `fast == JIT` over the REAL BOSL2 library. The end-to-end never-silently-wrong gate: every
+//! numeric-subset function the JIT compiles from the shipped `libs/BOSL2` MUST return bit-identical results
+//! to interpreting its body, across a battery of inputs (IEEE corners included). A single flipped bit here —
+//! an auto-FMA slipping in, a reordered accumulation, an `%`/`^` routed to a differently-rounding library —
+//! fails the build, so the JIT can never silently diverge from the interpreter on a function it accepts.
+//!
+//! A compilable body references ONLY parameters and number literals (the compiler DECLINES any call, ternary,
+//! index, or free variable), so each compiled function interprets STANDALONE — no dependency harness needed,
+//! unlike the intrinsic tier. This scans the whole library, compiles what fits the subset, and differentials
+//! each; it also reports the COVERAGE (how many functions compiled vs declined) — the number P.1.4 grows.
+
+use std::path::{Path, PathBuf};
+
+use fab_jit::JitRegistry;
+use fab_lang::{Expr, Parameter, Program, Scope, StmtKind, Value, eval_expr, parse};
+
+/// The shipped BOSL2 library dir (`<workspace>/libs/BOSL2`), relative to this crate.
+fn bosl2_dir() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../libs/BOSL2")
+}
+
+/// Every `.scad` source under `dir`, parsed. Kept alive by the caller so function bodies borrow from them.
+/// A file that doesn't parse is skipped (the differential is about the functions we CAN compile, not lexing).
+fn parse_library(dir: &Path) -> Vec<Program> {
+    let mut programs = Vec::new();
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&d) else { continue };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if path.extension().is_some_and(|e| e == "scad")
+                && let Ok(src) = std::fs::read_to_string(&path)
+                && let Ok(prog) = parse(&src)
+            {
+                programs.push(prog);
+            }
+        }
+    }
+    programs
+}
+
+/// Collect `(name, params, body)` for every top-level function def across the parsed programs, LAST-wins on a
+/// duplicate name (the loader's precedence). Borrows from `programs`.
+fn functions(programs: &[Program]) -> Vec<(&str, &[Parameter], &Expr)> {
+    let mut by_name: std::collections::BTreeMap<&str, (&[Parameter], &Expr)> =
+        std::collections::BTreeMap::new();
+    for prog in programs {
+        for stmt in &prog.stmts {
+            if let StmtKind::FunctionDef { name, params, body } = &stmt.kind {
+                by_name.insert(name.as_ref(), (params.as_slice(), body));
+            }
+        }
+    }
+    by_name.into_iter().map(|(n, (p, b))| (n, p, b)).collect()
+}
+
+/// A deterministic input battery of `arity` f64s per row — the IEEE corners plus a spread of magnitudes and
+/// signs, laid out so element `i` of each row differs from its neighbors (a bug that only bites when two args
+/// differ still gets caught). A fixed xorshift keeps it reproducible with no `rand` dep.
+fn input_battery(arity: usize) -> Vec<Vec<f64>> {
+    let corners = [
+        0.0, -0.0, 1.0, -1.0, 2.0, 0.5, -0.5, 3.5, -3.75, 100.0, -100.0, 1e8, 1e-8, 123.456,
+        f64::INFINITY, f64::NEG_INFINITY, f64::NAN, std::f64::consts::PI,
+    ];
+    let mut rows = Vec::new();
+    // Uniform rows: every arg the same corner (exercises x==y paths like x-x, x/x, x%x).
+    for &c in &corners {
+        rows.push(vec![c; arity.max(1)]);
+    }
+    // Mixed rows: a fixed xorshift walks the corner table so args in a row differ.
+    let mut state: u64 = 0x9E37_79B9_7F4A_7C15;
+    for _ in 0..64 {
+        let row = (0..arity.max(1))
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                corners[(state as usize) % corners.len()]
+            })
+            .collect();
+        rows.push(row);
+    }
+    rows
+}
+
+/// Interpret a compilable function body STANDALONE with its params bound to `args` — the slow side of the
+/// differential. A compilable body references only params + literals, so a default `Ctx` (no functions)
+/// suffices; a `Num` result is expected (the body is pure arithmetic).
+fn interpret(params: &[Parameter], body: &Expr, args: &[f64]) -> f64 {
+    let mut scope = Scope::new();
+    for (p, &v) in params.iter().zip(args) {
+        scope.bind(p.name.clone(), Value::Num(v));
+    }
+    match eval_expr(body, &scope) {
+        Ok(Value::Num(n)) => n,
+        // A compiled function that the interpreter DOESN'T yield a number for is a mismatch worth surfacing
+        // (the JIT returns f64 unconditionally) — NaN forces the bit-compare below to flag it.
+        _ => f64::NAN,
+    }
+}
+
+#[test]
+fn fast_equals_jit_over_the_bosl2_library() {
+    let programs = parse_library(&bosl2_dir());
+    assert!(!programs.is_empty(), "expected to parse BOSL2 sources from {}", bosl2_dir().display());
+    let defs = functions(&programs);
+    let total = defs.len();
+
+    // Materialize the param-name slices into a holder that outlives the build (the registry keeps no AST
+    // borrows, but `build` needs `&[&str]` alive DURING the call).
+    let with_names: Vec<(&str, Vec<&str>, &Expr)> =
+        defs.iter().map(|(n, p, b)| (*n, p_names(p), *b)).collect();
+    let registry =
+        JitRegistry::build(with_names.iter().map(|(n, p, b)| (*n, p.as_slice(), *b)))
+            .expect("registry builds");
+
+    // Every compiled function: JIT == interpreter, BITWISE, across the whole battery.
+    let mut checked = 0usize;
+    for (name, params, body) in &defs {
+        let Some(compiled) = registry.get(name) else { continue };
+        for args in input_battery(params.len()) {
+            let jit = compiled.call(&args[..params.len()]);
+            let slow = interpret(params, body, &args);
+            assert_eq!(
+                jit.to_bits(),
+                slow.to_bits(),
+                "fast != JIT for BOSL2 `{name}` at {args:?}: jit={jit} ({:#018x}) interp={slow} ({:#018x})",
+                jit.to_bits(),
+                slow.to_bits()
+            );
+        }
+        checked += 1;
+    }
+
+    // Coverage: how much of the real library the current numeric subset reaches. Printed (not asserted) —
+    // it's the number P.1.4 (ternary/comparisons/transcendental calls) grows. `--nocapture` to see it.
+    let compiled = registry.len();
+    eprintln!(
+        "[jit-corpus] BOSL2: {compiled}/{total} functions compiled ({:.1}%), all {checked} bit-identical",
+        100.0 * compiled as f64 / total as f64
+    );
+    assert_eq!(checked, compiled, "every compiled function was differentialed");
+}
+
+/// The parameter names of `params` as `&str` — the shape [`JitRegistry::build`] eats.
+fn p_names(params: &[Parameter]) -> Vec<&str> {
+    params.iter().map(|p| p.name.as_ref()).collect()
+}

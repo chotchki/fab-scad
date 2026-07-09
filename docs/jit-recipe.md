@@ -64,3 +64,31 @@ speedup on hot numerics is large (~189x). What it does NOT settle — and Phase 
 the JIT is native-only (the wasm/browser target still runs the interpreter, so a JIT'd path is a
 second implementation to keep in sync), and that per-function compile latency + the leaked `JITModule`
 per function need a real caching/pooling story before this is more than a spike.
+
+## Production (P.1)
+
+The spike is now wired into the evaluator. The gaps it named are closed:
+
+- **Registry, not a leak (P.1.1).** `JitRegistry` compiles every numeric-subset function of a program into
+  ONE `JITModule`, finalized once, name-keyed. Unlike the intrinsic tier there's no fingerprint gate — the
+  JIT compiles the ACTUAL body, so there's no reference to match; a non-numeric body is DECLINED and
+  interpreted.
+- **Wasm-clean hook (P.1.2).** The interpreter dispatches through a `NumericJit` trait defined in fab-lang
+  (no Cranelift there — the crate stays `unsafe_code = forbid` + wasm-clean); the native `fab-jit` crate
+  implements it. A user-function call takes the JIT ONLY when it's all-positional, arity-exact, and every
+  arg is a `Num` (the `Task::Apply` fast path with an all-`Num` guard); a vector arg, named arg, or registry
+  miss falls back to the interpreted body. `NumericJitFactory` threads through the geometry entries
+  (`resolve_geometry_* → drive → resolve_source`), which builds the registry once the `use`/`include` graph
+  closes and OWNS it in `Ctx`.
+- **fast == JIT over the real library (P.1.3).** `jit/tests/corpus_diff.rs` compiles every numeric-subset
+  function from the shipped `libs/BOSL2` and asserts the JIT is BITWISE-equal to interpreting it, across an
+  IEEE-corner battery. This is the end-to-end never-silently-wrong gate — the sibling of the intrinsic
+  tier's fast==slow. `FAB_JIT_EXPLAIN=1` prints the coverage (which functions compiled vs declined).
+
+**Coverage is the current bottleneck, not correctness.** Under the spike's subset (`+ - * / % ^`, literals,
+params, unary) only **3/1349** BOSL2 functions compile (0.4% on a real model's loaded set) — the rest use a
+ternary, a comparison, or call another function (BOSL2's input-validation style). So the JIT is a proven,
+bit-identical accelerator that barely fires yet. It's **opt-in under `FAB_JIT=1`** (off by default — a new
+eval path stays dark until it earns the default), and the flip waits on **P.1.4** growing the subset
+(ternary + comparisons + transcendental CALLS routed to our own math per rule 3) so it reaches the
+`gaussian_rands`-class numeric comprehensions that motivated the tier.

@@ -223,15 +223,38 @@ pub struct JitFactory;
 
 impl NumericJitFactory for JitFactory {
     fn compile(&self, defs: &[JitDef<'_>]) -> Option<Box<dyn NumericJit>> {
-        if std::env::var_os("FAB_JIT").as_deref() != Some(std::ffi::OsStr::new("1")) {
-            return None;
+        let enabled = std::env::var_os("FAB_JIT").as_deref() == Some(std::ffi::OsStr::new("1"));
+        let explain = std::env::var_os("FAB_JIT_EXPLAIN").is_some();
+        if !enabled && !explain {
+            return None; // neither running nor reporting → skip the compile entirely
         }
         let registry =
             JitRegistry::build(defs.iter().map(|d| (d.name, d.params.as_slice(), d.body))).ok()?;
-        if registry.is_empty() {
+        if explain {
+            explain_coverage(defs, &registry);
+        }
+        // EXPLAIN can run with the JIT OFF (report-only) — return the hook ONLY when actually enabled.
+        if !enabled || registry.is_empty() {
             return None;
         }
         Some(Box::new(registry))
+    }
+}
+
+/// The `FAB_JIT_EXPLAIN` coverage report (P.1.3) — the JIT sibling of the intrinsic tier's `FAB_EXPLAIN`.
+/// Which of the program's functions the numeric subset COMPILED (native dispatch) vs DECLINED (interpreted),
+/// to stderr. The declined count is the headroom `P.1.4` (ternary/comparisons/transcendental calls) reclaims.
+fn explain_coverage(defs: &[JitDef<'_>], registry: &JitRegistry) {
+    let total = defs.len();
+    let compiled = registry.len();
+    #[allow(
+        clippy::cast_precision_loss,
+        reason = "a coverage percentage in a dev-only stderr report; a 2^52-function program is unreachable"
+    )]
+    let pct = 100.0 * compiled as f64 / total.max(1) as f64;
+    eprintln!("\n[jit-explain] === numeric-JIT coverage === {compiled}/{total} functions compiled ({pct:.1}%)");
+    for name in registry.compiled_names() {
+        eprintln!("[jit-explain]   + compiled  {name}");
     }
 }
 

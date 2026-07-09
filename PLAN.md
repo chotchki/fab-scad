@@ -163,7 +163,7 @@ added 2026-07-07.
 ## Phase P - P - Cranelift JIT + CSG cache (desktop)
 - [ ] P.1 - P.1 - Cranelift JIT for the numeric long tail (desktop)
   - [x] P.1.1 - P.1.1 - JIT registry + compile cache (one JITModule, keyed by fingerprint)
-  - [ ] P.1.2 - P.1.2 - Crate-boundary hook + dispatch integration
+  - [x] P.1.2 - P.1.2 - Crate-boundary hook + dispatch integration
   - [ ] P.1.3 - P.1.3 - fast==JIT differential over the corpus + EXPLAIN coverage
   - [ ] P.1.4 - P.1.4 - Extend the numeric subset (ternary, comparisons, transcendental calls)
   - [ ] P.1.5 - P.1.5 - Measure + coverage report

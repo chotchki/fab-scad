@@ -135,6 +135,21 @@ pub enum Resolution {
     },
 }
 
+/// A desktop-only numeric JIT hook (P.1.2). The interpreter offers a user-function call to this BEFORE
+/// interpreting the body, but ONLY when the call is all-positional, arity-exact, and every argument
+/// evaluated to a number. If a compiled version of `name` with matching arity exists, the impl returns
+/// its `f64` result; otherwise `None` and the interpreter runs the real body.
+///
+/// Defined here so the eval loop can dispatch to it, but the crate stays wasm-clean: the trait carries no
+/// Cranelift, and the native `fab-jit` crate implements it over its compiled `JitRegistry`. The contract
+/// is `fast == JIT` — a `Some(r)` MUST be bit-identical to interpreting the body (the JIT crate's
+/// differential proves it), so routing a call here can only change SPEED, never the result. wasm builds
+/// (which can't JIT in-sandbox) simply leave [`Ctx::jit`] `None` and interpret everything.
+pub trait NumericJit {
+    /// The compiled result of `name(args)` if one is registered for this exact arity, else `None`.
+    fn call_numeric(&self, name: &str, args: &[f64]) -> Option<f64>;
+}
+
 /// The evaluation context, borrowed from the `Program`:
 /// - `functions`: the user-function store (name → params + body). Functions live in their OWN
 ///   namespace (separate from variables), so a call resolves by name — which is why recursion and
@@ -230,6 +245,12 @@ pub(super) struct Ctx<'a> {
     /// that (transitively) reads `parent_module` re-runs every time — closing the one wrong-hit class the
     /// message/rand fence can't see. Transitive for free: a nested read bumps it, the outer call sees the delta.
     impure_reads: std::cell::Cell<u64>,
+    /// The desktop numeric-JIT hook (P.1.2), or `None` (wasm, or a program with nothing compiled). When
+    /// present, an eligible user-function call ([`Task::Apply`] with a `jit` name + all-`Num` args) is
+    /// offered to it before the body is interpreted; a `Some` result is bit-identical to interpreting, so
+    /// this only ever changes speed. Injected by the native shell at the eval entry; `None` everywhere the
+    /// interpreter is the whole story (raw-AST eval, wasm).
+    jit: Option<&'a dyn NumericJit>,
 }
 
 /// One active module call's children context: the call-site child statements (borrowed from the AST) +
@@ -363,6 +384,11 @@ enum Task<'a> {
         body: &'a Expr,
         base: Scope,
         caller: Scope,
+        /// The function's NAME when this call is numeric-JIT-eligible (all-positional, exact arity), else
+        /// `None` (a closure, a defaulted/named/variadic call). When `Some` AND every evaluated arg is a
+        /// `Num`, [`Ctx::jit`] gets first refusal before the body is interpreted (P.1.2). Only a shape
+        /// hint — the JIT still checks its own registry and the runtime `all-Num` guard.
+        jit: Option<&'a str>,
     },
     /// Pop an evaluated CALLEE; if it's a [`Value::Function`], invoke it (its body evaluates in the
     /// captured env). Anything else → `undef` (calling a non-function). The dynamic-callee path:
@@ -511,8 +537,22 @@ fn eval_with_global<'a>(
                 body,
                 base,
                 caller,
+                jit,
             } => {
                 let vals = values.split_off(values.len().saturating_sub(names.len()));
+                // Numeric-JIT fast path (P.1.2): a compiled numeric function, offered the call BEFORE any
+                // interpretation, IFF this call is JIT-eligible (`jit` name set at dispatch) AND every
+                // evaluated arg is a plain `Num` (the compiled body is all-`f64`; a vector arg — BOSL2's
+                // numeric fns are often scalar-or-vector polymorphic — falls through to the interpreter).
+                // A `Some(r)` is bit-identical to interpreting `body`, so this is pure speed. The registry
+                // decides membership + arity (returns `None` to defer); no wasted work when the hook is off.
+                if let (Some(name), Some(j)) = (jit, ctx.jit)
+                    && let Some(nums) = all_nums(&vals)
+                    && let Some(r) = j.call_numeric(name, &nums)
+                {
+                    values.push(Value::Num(r));
+                    continue;
+                }
                 // Dev probe (off unless FAB_REDUNDANCY=1): would an eval-memo cache pay? Key this call on
                 // (fn, captured-env, args, reaching $-context) and count repeats — the cache's hit-rate ceiling.
                 // `base` (the captured env) is load-bearing: a closure shares its body AST with siblings but
@@ -582,7 +622,8 @@ fn eval_with_global<'a>(
                             }
                             None => env.clone(),
                         };
-                        push_call(params, body, args, &caller, &base, &mut tasks);
+                        // A closure has no static name to look up in the JIT registry → never JIT-eligible.
+                        push_call(params, body, args, &caller, &base, None, &mut tasks);
                     }
                     _ => values.push(Value::Undef), // calling a non-function → undef
                 }
@@ -891,7 +932,12 @@ fn dispatch_call<'a>(
             // the caller's `global` — the use-scope fix. For a root-defined function home is 0 (the root
             // global), so this is a no-op there; for a `use`d function it swaps in the library's constants.
             let base = ctx.island_globals.borrow()[home].clone();
-            push_call(params, body, args, scope, &base, tasks);
+            // JIT-eligible when a hook is present AND the call is all-positional (no named/`$`-args): then
+            // `names.len()` equals the compiled arity, so `Task::Apply`'s all-`Num` guard can offer it to
+            // the JIT. A `None` hook (wasm / raw-AST) or a named call passes the name as `None` → interpret.
+            let jit = (ctx.jit.is_some() && args.iter().all(|a| a.name.is_none()))
+                .then_some(name.as_str());
+            push_call(params, body, args, scope, &base, jit, tasks);
             return Ok(());
         }
         if builtins::is_builtin(name) {
@@ -926,12 +972,26 @@ fn dispatch_call<'a>(
 /// are dropped). Two documented first-cut simplifications: `$`-arg injection is I.2.2, and defaults
 /// evaluate in the definition scope, not the partially-bound call scope (so a default can't reference
 /// an earlier param — rare; defaults are usually constants).
+/// The `f64`s of `vals` iff EVERY value is a plain `Num`, else `None` — the numeric-JIT type guard. A
+/// single non-`Num` (a vector, `undef`, a string) means the compiled all-`f64` function doesn't apply, so
+/// the call falls back to the interpreted body. Allocates a small `Vec` (arity-sized) per eligible call;
+/// a stack buffer for the common low-arity case is a later micro-opt.
+fn all_nums(vals: &[Value]) -> Option<Vec<f64>> {
+    vals.iter()
+        .map(|v| match v {
+            Value::Num(n) => Some(*n),
+            _ => None,
+        })
+        .collect()
+}
+
 fn push_call<'a>(
     params: &'a [Parameter],
     body: &'a Expr,
     args: &'a [Arg],
     caller: &Scope,
     base: &Scope,
+    jit: Option<&'a str>,
     tasks: &mut Vec<Task<'a>>,
 ) {
     // Which explicit-arg expr fills each param slot (positional by position, named by name). `None` = the
@@ -965,12 +1025,17 @@ fn push_call<'a>(
     names.extend(dollars.iter().map(|(name, _)| Rc::clone(name)));
     let mut provided: Vec<bool> = arg_slots.iter().map(Option::is_some).collect();
     provided.extend(std::iter::repeat_n(true, dollars.len()));
+    // A `$`-arg appends names beyond the params, so `names.len()` would no longer equal the compiled
+    // function's arity — clear the JIT hint in that (rare) case so an eligible call is only ever an
+    // all-positional one. The caller already passes `None` for closures; this guards the dollar path.
+    let jit = if dollars.is_empty() { jit } else { None };
     tasks.push(Task::Apply {
         names,
         provided,
         body,
         base: base.clone(),
         caller: caller.clone(),
+        jit,
     });
     // push evals so the popped run is [params.., dollars..]: dollars first (deeper → on top), then
     // params reversed (param 0 evaluates first, lands at the bottom of the run). An arg evaluates in the
@@ -1321,6 +1386,7 @@ fn resolve_source(
         rand_stream: RefCell::new(rng::RandStream::new()),
         cache: eval_cache::CacheCell::default(),
         impure_reads: std::cell::Cell::new(0),
+        jit: None, // native shell injects the JIT after building it (P.1.2b); the loader path stays interp
     };
     // Hoist the ROOT (island 0) FIRST, THEN the `use`-island constant scopes. ORDER is load-bearing: the
     // root's include-flattened functions (all of BOSL2's) are tagged home=0, so a `use`-island constant that
@@ -2105,6 +2171,7 @@ fn build_ctx(program: &Program) -> Ctx<'_> {
         rand_stream: RefCell::new(rng::RandStream::new()),
         cache: eval_cache::CacheCell::default(),
         impure_reads: std::cell::Cell::new(0),
+        jit: None, // the raw-AST path (no loader) is interpreter-only; the JIT rides the loader entry
     }
 }
 
@@ -2277,6 +2344,71 @@ mod tests {
             eval_last("function f(x) = x; y = f(x = 1, z = 9);"),
             Value::Num(1.0)
         ); // unknown named dropped
+    }
+
+    /// A mock [`NumericJit`] that "compiles" `sq(x) = x*x` — but returns `x*x + 1000`, a WRONG value on
+    /// purpose. A real intrinsic/JIT is bit-identical (unobservable); the marker makes the mock's firing
+    /// VISIBLE, so a `1000+`-shifted result proves the call took the JIT path, and a plain result proves
+    /// it fell back to the interpreter. Any other function/arity → `None` (defer to the interpreter).
+    struct MarkerJit;
+    impl super::NumericJit for MarkerJit {
+        fn call_numeric(&self, name: &str, args: &[f64]) -> Option<f64> {
+            match (name, args) {
+                ("sq", [x]) => Some(x * x + 1000.0),
+                _ => None,
+            }
+        }
+    }
+
+    /// [`eval_last`] with a numeric-JIT hook injected into the ctx.
+    fn eval_last_jit(src: &str, jit: &dyn super::NumericJit) -> Value {
+        let prog = parse(src).expect("parses");
+        let mut ctx = build_ctx(&prog);
+        ctx.jit = Some(jit);
+        let mut scope = Scope::new();
+        let mut last = Value::Undef;
+        for stmt in &prog.stmts {
+            if let StmtKind::Assignment { name, value } = &stmt.kind {
+                if let Some(slot) = ctx.island_globals.borrow_mut().get_mut(0) {
+                    *slot = scope.clone();
+                }
+                last = eval_with_ctx(value, &scope, &ctx).expect("evaluates");
+                scope.bind(name.clone(), last.clone());
+            }
+        }
+        last
+    }
+
+    #[test]
+    fn numeric_jit_dispatches_eligible_calls_and_falls_back_otherwise() {
+        let jit = MarkerJit;
+        // (1) all-positional + all-Num → the JIT fires: 5*5 + 1000 marker.
+        assert_eq!(
+            eval_last_jit("function sq(x) = x*x; y = sq(5);", &jit),
+            Value::Num(1025.0),
+            "an eligible numeric call takes the JIT path"
+        );
+        // (2) a NON-number arg (a vector) → the all-Num guard fails → interpreter runs x*x = dot = 5.
+        assert_eq!(
+            eval_last_jit("function sq(x) = x*x; y = sq([1,2]);", &jit),
+            Value::Num(5.0),
+            "a vector arg falls back to the interpreted body (no marker)"
+        );
+        // (3) a NAMED arg → not JIT-eligible (dispatch passes jit=None) → interpreter runs → 25. This is
+        // the BOSL2-loves-named-args gap: the fast path is declined, correctness is preserved. (follow-on)
+        assert_eq!(
+            eval_last_jit("function sq(x) = x*x; y = sq(x = 5);", &jit),
+            Value::Num(25.0),
+            "a named-arg call falls back to the interpreter (no marker)"
+        );
+        // (4) a function the registry doesn't know → call_numeric returns None → interpreter runs → 27.
+        assert_eq!(
+            eval_last_jit("function cube(x) = x*x*x; y = cube(3);", &jit),
+            Value::Num(27.0),
+            "a registry miss falls back to the interpreter"
+        );
+        // (5) no hook at all (the wasm/raw path) → everything interprets → 25.
+        assert_eq!(eval_last("function sq(x) = x*x; y = sq(5);"), Value::Num(25.0));
     }
 
     #[test]

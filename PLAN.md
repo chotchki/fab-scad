@@ -211,3 +211,4 @@ Parked 2026-07-04 for the scad-rs pivot — the workflow tool works and stays in
 - **SVG import: stroke-only (open/unfilled) paths — Clipper-offset by stroke-width/2** — added 2026-07-08.
 - **SVG import: per-element even-odd grouping (vs pooled) — union elements with nonzero** — added 2026-07-08.
 - **scad-rs import() base-dir is per-run, not per-containing-file (OpenSCAD divergence)** — added 2026-07-08.
+- **Fast-path named args: map named→positional before intrinsic/JIT dispatch** — added 2026-07-09.

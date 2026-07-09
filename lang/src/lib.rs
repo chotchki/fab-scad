@@ -49,9 +49,9 @@ mod webcolors;
 pub use customizer::{Constraint, CustomParam, Customizer, DropdownItem, customize};
 pub use error::{Error, Result};
 pub use eval::{
-    Contour, Evaluation, ExtrudeKind, FileTable, Geo, GeoNode, Imported, Join2D, Message, RANGE_MAX,
-    RangeIter, Resolution, Scope, Shape2D, SourceNeed, Value, eval_expr, eval_program, fragments,
-    range_iter, range_len,
+    Contour, Evaluation, ExtrudeKind, FileTable, Geo, GeoNode, Imported, Join2D, Message,
+    NumericJit, RANGE_MAX, RangeIter, Resolution, Scope, Shape2D, SourceNeed, Value, eval_expr,
+    eval_program, fragments, range_iter, range_len,
 };
 pub use geom::{Affine, Affine2, Dims, Rgba, Tri, Vec2, Vec3};
 pub use lexer::{Lexed, Token, TokenKind, decode_str, lex, num_value};

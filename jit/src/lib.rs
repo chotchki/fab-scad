@@ -492,17 +492,18 @@ fn define_one(
         };
 
         // IR is built BEFORE declare/define — an Unsupported node returns here with the module untouched.
-        let (result, ty) = compile_expr(&mut fb, body, &lower)?;
         // A NUMERIC body returns its f64 directly; a BOOL body (a predicate / comparison / bool literal — the
         // JIT computes it as an i8 0/1) is returned as 0.0/1.0, and the caller tags the function so the dispatch
-        // wraps `Value::Bool` (P.1.4e). The untyped f64 ABI can't carry the tag, so the static `ty` rides back.
-        let ret = match ty {
-            Ty::Num => result,
-            Ty::Bool => {
+        // wraps `Value::Bool` (P.1.4e). A VECTOR-returning body declines for now — the fixed-size out-buffer is
+        // rung C; rung A only compiles functions that use vectors INTERNALLY and reduce to a scalar/bool.
+        let (ret, ty) = match compile_expr(&mut fb, body, &lower)? {
+            Lowered::Num(v) => (v, Ty::Num),
+            Lowered::Bool(v) => {
                 let one = fb.ins().f64const(1.0);
                 let zero = fb.ins().f64const(0.0);
-                fb.ins().select(result, one, zero)
+                (fb.ins().select(v, one, zero), Ty::Bool)
             }
+            Lowered::Vec(_) => return Err(JitError::Unsupported("vector return (rung C)")),
         };
         fb.ins().return_(&[ret]);
         fb.finalize();
@@ -515,17 +516,45 @@ fn define_one(
     Ok((func_id, ret_ty))
 }
 
+/// A compiled sub-expression's value, SCALARIZED (P.1.6 rung A). `Num`/`Bool` are a single IR value; `Vec`
+/// is a FIXED-size vector carried as its element `Lowered`s at COMPILE time — a `[a,b,c]` literal, a vector
+/// argument, or the result of elementwise / dot / scale arithmetic. A scalarized vector never touches memory:
+/// a STATIC index picks an element, a dot UNROLLS the lane reduction, so a vector that stays statically-shaped
+/// and statically-indexed fully scalarizes. A runtime-shaped / runtime-indexed vector DECLINES (that's rung
+/// D's dynamic-list ABI). Nested (a matrix — `Vec` of `Vec`) is representable but rung A's arithmetic requires
+/// FLAT vectors (`Num` elements); a matrix operand declines.
+#[derive(Clone)]
+enum Lowered {
+    Num(Value),
+    Bool(Value),
+    Vec(Vec<Lowered>),
+}
+
+impl Lowered {
+    /// The single IR value of a `Num`, else DECLINE — an arithmetic/comparison operand, a math-builtin arg, or
+    /// a scalar function return that turned out to be a bool or a vector isn't in the subset.
+    fn num(&self) -> Result<Value, JitError> {
+        match self {
+            Lowered::Num(v) => Ok(*v),
+            Lowered::Bool(_) => Err(JitError::Unsupported("a boolean where a number is required")),
+            Lowered::Vec(_) => Err(JitError::Unsupported("a vector where a number is required")),
+        }
+    }
+}
+
 /// Reduce a compiled sub-expression to its TRUTHINESS as an `i8` (0/1) — the interpreter's
 /// `Value::is_truthy`. A `Bool` already IS that. A `Num` is truthy iff `!= 0.0` with `NaN` TRUTHY and
 /// `±0` falsy — exactly `fcmp NotEqual` (`une`: unordered, so `NaN != 0` is true; `-0.0 != 0.0` is
-/// false). This is what a ternary condition and `&&`/`||`/`!` test.
-fn truthy(fb: &mut FunctionBuilder, v: Value, ty: Ty) -> Value {
-    match ty {
-        Ty::Bool => v,
-        Ty::Num => {
+/// false). This is what a ternary condition and `&&`/`||`/`!` test. A `Vec` DECLINES (a list's truthiness is
+/// its non-emptiness — a compile-time constant here, but rare enough as a condition to leave for later).
+fn truthy(fb: &mut FunctionBuilder, v: &Lowered) -> Result<Value, JitError> {
+    match v {
+        Lowered::Bool(b) => Ok(*b),
+        Lowered::Num(n) => {
             let zero = fb.ins().f64const(0.0);
-            fb.ins().fcmp(FloatCC::NotEqual, v, zero)
+            Ok(fb.ins().fcmp(FloatCC::NotEqual, *n, zero))
         }
+        Lowered::Vec(_) => Err(JitError::Unsupported("a vector as a truth condition")),
     }
 }
 
@@ -552,10 +581,10 @@ fn float_cc(op: BinOp) -> Option<FloatCC> {
 /// Type discipline keeps it sound: arithmetic requires `Num` operands, a comparison yields `Bool`, a
 /// ternary's branches must AGREE in type, and `&&`/`||`/`!` operate on truthiness. A construct outside the
 /// subset (a call, an index, a free variable, a bitwise op, a mixed-type ternary) DECLINES.
-/// In-scope LOCAL bindings — `let`-bound names and inlined-call params → their compiled IR value + type.
+/// In-scope LOCAL bindings — `let`-bound names and inlined-call params → their compiled [`Lowered`] value.
 /// Checked before the parameter `index`. Carried by-reference in [`Lower`] so entering a `let` just makes a
 /// fresh map + a copied `Lower` pointing at it (no signature threading); `Lower` is `Copy`.
-type LetEnv<'a> = BTreeMap<&'a str, (Value, Ty)>;
+type LetEnv<'a> = BTreeMap<&'a str, Lowered>;
 
 /// The program's user functions the JIT can INLINE: name → (parameters, body). A call to one splices its
 /// body into the caller (fresh env binding its params to the arg values, an unfilled param to its default) —
@@ -603,16 +632,17 @@ struct Lower<'a> {
     clippy::too_many_lines,
     reason = "the per-ExprKind lowering — one arm per node kind; splitting scatters the shared builder"
 )]
-fn compile_expr(fb: &mut FunctionBuilder, expr: &Expr, lower: &Lower) -> Result<(Value, Ty), JitError> {
+fn compile_expr(fb: &mut FunctionBuilder, expr: &Expr, lower: &Lower) -> Result<Lowered, JitError> {
     match &expr.kind {
-        ExprKind::Num(n) => Ok((fb.ins().f64const(*n), Ty::Num)),
+        ExprKind::Num(n) => Ok(Lowered::Num(fb.ins().f64const(*n))),
         // A bool literal (`true`/`false`) → the `i8` 0/1 a `Bool` is (P.1.4e). Lets a predicate body like
         // `cond ? true : false` compile — the ternary's branches now agree as `Bool`.
-        ExprKind::Bool(b) => Ok((fb.ins().iconst(types::I8, i64::from(*b)), Ty::Bool)),
+        ExprKind::Bool(b) => Ok(Lowered::Bool(fb.ins().iconst(types::I8, i64::from(*b)))),
         ExprKind::Ident(name) => {
-            // A `let`-bound local (or inlined-call param) shadows a parameter — check the env first.
-            if let Some(&(v, ty)) = lower.locals.get(name.as_str()) {
-                return Ok((v, ty));
+            // A `let`-bound local (or inlined-call param) shadows a parameter — check the env first. It may be
+            // a scalarized vector (a `let(v = [a,b,c])`), so clone the whole `Lowered`.
+            if let Some(v) = lower.locals.get(name.as_str()) {
+                return Ok(v.clone());
             }
             // Then a parameter (read from the params pointer). Shadows a like-named global.
             if let Some(&i) = lower.index.get(name.as_str()) {
@@ -620,7 +650,7 @@ fn compile_expr(fb: &mut FunctionBuilder, expr: &Expr, lower: &Lower) -> Result<
                     .map_err(|_| JitError::Unsupported("param offset overflow"))?;
                 let v = fb.ins().load(types::F64, MemFlagsData::trusted(), lower.params_ptr, offset);
                 // A parameter is always a number here — the dispatch gate only routes all-`Num` calls to the JIT.
-                return Ok((v, Ty::Num));
+                return Ok(Lowered::Num(v));
             }
             // A free variable may be a top-level CONSTANT (P.1.4 globals): resolve it by compiling its
             // value-expr in an EMPTY scope — no params, no locals, and NO other globals. A self-contained
@@ -646,69 +676,95 @@ fn compile_expr(fb: &mut FunctionBuilder, expr: &Expr, lower: &Lower) -> Result<
             Err(JitError::Unsupported("non-parameter identifier"))
         }
         ExprKind::Unary { op, operand } => {
-            let (v, ty) = compile_expr(fb, operand, lower)?;
+            let v = compile_expr(fb, operand, lower)?;
             match op {
-                UnOp::Neg => Ok((fb.ins().fneg(require_num(v, ty)?), Ty::Num)),
-                UnOp::Pos => Ok((require_num(v, ty)?, Ty::Num)),
+                // `-x` negates a number, or elementwise-negates a vector (the interpreter's `apply_unary`).
+                UnOp::Neg => neg_lowered(fb, v),
+                // Unary `+` is a Num-only passthrough (matches the prior scalar behavior).
+                UnOp::Pos => Ok(Lowered::Num(v.num()?)),
                 // `!x` = `!is_truthy(x)` → a Bool. `(truthy == 0)` inverts the 0/1 flag.
                 UnOp::Not => {
-                    let t = truthy(fb, v, ty);
-                    Ok((fb.ins().icmp_imm(IntCC::Equal, t, 0), Ty::Bool))
+                    let t = truthy(fb, &v)?;
+                    Ok(Lowered::Bool(fb.ins().icmp_imm(IntCC::Equal, t, 0)))
                 }
                 UnOp::BitNot => Err(JitError::Unsupported("bitwise-not")),
             }
         }
         ExprKind::Binary { op, lhs, rhs } => {
-            let (a, aty) = compile_expr(fb, lhs, lower)?;
-            let (b, bty) = compile_expr(fb, rhs, lower)?;
+            let a = compile_expr(fb, lhs, lower)?;
+            let b = compile_expr(fb, rhs, lower)?;
             // `&&`/`||`: the interpreter returns `Bool(truthy(a) OP truthy(b))`. Both operands are
             // side-effect-free here, so eager evaluation equals short-circuit — same bool, no float rounding.
             if matches!(op, BinOp::And | BinOp::Or) {
-                let ta = truthy(fb, a, aty);
-                let tb = truthy(fb, b, bty);
+                let ta = truthy(fb, &a)?;
+                let tb = truthy(fb, &b)?;
                 let r = if matches!(op, BinOp::And) {
                     fb.ins().band(ta, tb)
                 } else {
                     fb.ins().bor(ta, tb)
                 };
-                return Ok((r, Ty::Bool));
+                return Ok(Lowered::Bool(r));
             }
-            // A comparison: both operands must be numbers (the interpreter's `<` etc. on numbers).
+            // A comparison: both operands must be numbers (the interpreter's `<` etc. on numbers; a vector
+            // comparison isn't in the subset).
             if let Some(cc) = float_cc(*op) {
-                let (a, b) = (require_num(a, aty)?, require_num(b, bty)?);
-                return Ok((fb.ins().fcmp(cc, a, b), Ty::Bool));
+                let (a, b) = (a.num()?, b.num()?);
+                return Ok(Lowered::Bool(fb.ins().fcmp(cc, a, b)));
             }
-            // Arithmetic: both operands numbers → a number.
-            let (a, b) = (require_num(a, aty)?, require_num(b, bty)?);
-            let v = match op {
-                BinOp::Add => fb.ins().fadd(a, b),
-                BinOp::Sub => fb.ins().fsub(a, b),
-                BinOp::Mul => fb.ins().fmul(a, b),
-                BinOp::Div => fb.ins().fdiv(a, b),
-                BinOp::Mod => {
-                    let call = fb.ins().call(lower.fmod, &[a, b]);
-                    fb.inst_results(call)[0]
+            // Arithmetic: scalar ⊙ scalar, or scalarized VECTOR ops (P.1.6 rung A). The vector cases mirror
+            // `ops::apply_binary` EXACTLY: `+`/`−` elementwise, scalar `×`/`÷` scale, `vec × vec` = the 4-lane
+            // dot product. Anything else (a matrix, a `%`/`^` on vectors, mismatched lengths) DECLINES.
+            match (op, &a, &b) {
+                (_, Lowered::Num(x), Lowered::Num(y)) => {
+                    let (x, y) = (*x, *y);
+                    let v = match op {
+                        BinOp::Add => fb.ins().fadd(x, y),
+                        BinOp::Sub => fb.ins().fsub(x, y),
+                        BinOp::Mul => fb.ins().fmul(x, y),
+                        BinOp::Div => fb.ins().fdiv(x, y),
+                        BinOp::Mod => {
+                            let call = fb.ins().call(lower.fmod, &[x, y]);
+                            fb.inst_results(call)[0]
+                        }
+                        BinOp::Pow => {
+                            let call = fb.ins().call(lower.powf, &[x, y]);
+                            fb.inst_results(call)[0]
+                        }
+                        _ => return Err(JitError::Unsupported("non-arithmetic binary op")),
+                    };
+                    Ok(Lowered::Num(v))
                 }
-                BinOp::Pow => {
-                    let call = fb.ins().call(lower.powf, &[a, b]);
-                    fb.inst_results(call)[0]
+                (BinOp::Add | BinOp::Sub, Lowered::Vec(x), Lowered::Vec(y)) if x.len() == y.len() => {
+                    Ok(Lowered::Vec(vec_elementwise(fb, *op, x, y)?))
                 }
-                _ => return Err(JitError::Unsupported("non-arithmetic binary op")),
-            };
-            Ok((v, Ty::Num))
+                (BinOp::Mul, Lowered::Num(s), Lowered::Vec(v))
+                | (BinOp::Mul, Lowered::Vec(v), Lowered::Num(s)) => {
+                    Ok(Lowered::Vec(vec_scale(fb, v, *s)?))
+                }
+                (BinOp::Mul, Lowered::Vec(x), Lowered::Vec(y)) if !x.is_empty() && x.len() == y.len() => {
+                    Ok(Lowered::Num(vec_dot(fb, x, y)?))
+                }
+                (BinOp::Div, Lowered::Vec(v), Lowered::Num(s)) => {
+                    Ok(Lowered::Vec(vec_div(fb, v, *s, true)?))
+                }
+                (BinOp::Div, Lowered::Num(s), Lowered::Vec(v)) => {
+                    Ok(Lowered::Vec(vec_div(fb, v, *s, false)?))
+                }
+                _ => Err(JitError::Unsupported("unsupported operand types for arithmetic")),
+            }
         }
         // `c ? then : els` — the interpreter evaluates ONLY the taken branch, but both branches are
         // side-effect-free (pure arithmetic), so eager `select` is bit-identical: the untaken branch's
         // discarded NaN/inf can't affect the chosen result. Branches must agree in type.
         ExprKind::Ternary { cond, then, els } => {
-            let (cv, cty) = compile_expr(fb, cond, lower)?;
-            let c = truthy(fb, cv, cty);
-            let (tv, tty) = compile_expr(fb, then, lower)?;
-            let (ev, ety) = compile_expr(fb, els, lower)?;
-            if tty != ety {
-                return Err(JitError::Unsupported("ternary branches differ in type"));
-            }
-            Ok((fb.ins().select(c, tv, ev), tty))
+            let cv = compile_expr(fb, cond, lower)?;
+            let c = truthy(fb, &cv)?;
+            let tv = compile_expr(fb, then, lower)?;
+            let ev = compile_expr(fb, els, lower)?;
+            // Branches must AGREE in shape (both Num, both Bool, or both same-length Vec) — a `select` per
+            // element for a vector. A shape mismatch (incl. differing vector lengths) DECLINES: the interpreter
+            // would pick one at runtime, which a scalarized value can't represent.
+            select_lowered(fb, c, tv, ev)
         }
         // `let(x=e1, y=e2) body` — SEQUENTIAL bindings (a later one sees earlier ones), then the body in the
         // extended env. A binding is single-assignment, so it's just a name → its compiled IR value/type;
@@ -721,8 +777,8 @@ fn compile_expr(fb: &mut FunctionBuilder, expr: &Expr, lower: &Lower) -> Result<
                     .as_deref()
                     .ok_or(JitError::Unsupported("let binding without a name"))?;
                 let scoped = Lower { locals: &locals, ..*lower };
-                let (v, ty) = compile_expr(fb, &b.value, &scoped)?;
-                locals.insert(name, (v, ty));
+                let v = compile_expr(fb, &b.value, &scoped)?;
+                locals.insert(name, v);
             }
             let scoped = Lower { locals: &locals, ..*lower };
             compile_expr(fb, body, &scoped)
@@ -739,17 +795,15 @@ fn compile_expr(fb: &mut FunctionBuilder, expr: &Expr, lower: &Lower) -> Result<
                 if args.len() != usize::from(arity) || args.iter().any(|a| a.name.is_some()) {
                     return Err(JitError::Unsupported("call"));
                 }
-                let (a0, a0ty) = compile_expr(fb, &args[0].value, lower)?;
-                let a = require_num(a0, a0ty)?;
+                let a = compile_expr(fb, &args[0].value, lower)?.num()?;
                 let b = if arity == 2 {
-                    let (b0, b0ty) = compile_expr(fb, &args[1].value, lower)?;
-                    require_num(b0, b0ty)?
+                    compile_expr(fb, &args[1].value, lower)?.num()?
                 } else {
                     fb.ins().f64const(0.0) // a unary op ignores the second helper argument
                 };
                 let id_v = fb.ins().iconst(types::I32, i64::from(id));
                 let call = fb.ins().call(lower.math, &[id_v, a, b]);
-                return Ok((fb.inst_results(call)[0], Ty::Num));
+                return Ok(Lowered::Num(fb.inst_results(call)[0]));
             }
             // (2) user function → INLINE. Its body compiles into the caller with its params bound to the arg
             // VALUES (compiled in the CALLER's env), in a FRESH env (lexical: the callee sees only its own
@@ -774,16 +828,16 @@ fn compile_expr(fb: &mut FunctionBuilder, expr: &Expr, lower: &Lower) -> Result<
                 for (i, p) in cparams.iter().enumerate() {
                     let pname = p.name.as_ref();
                     if let Some(arg) = args.get(i) {
-                        // A provided arg is compiled in the CALLER's env.
-                        let (v, ty) = compile_expr(fb, &arg.value, lower)?;
-                        callee_env.insert(pname, (v, ty));
+                        // A provided arg is compiled in the CALLER's env (may be a scalarized vector).
+                        let v = compile_expr(fb, &arg.value, lower)?;
+                        callee_env.insert(pname, v);
                     } else if let Some(default) = p.default.as_ref() {
                         // Unfilled → its DEFAULT, compiled in the DEFINITION scope (no caller locals, no
                         // sibling params) — matching the interpreter's documented default-eval simplification.
                         let def_lower =
                             Lower { index: &empty_index, locals: &empty_locals, ..*lower };
-                        let (v, ty) = compile_expr(fb, default, &def_lower)?;
-                        callee_env.insert(pname, (v, ty));
+                        let v = compile_expr(fb, default, &def_lower)?;
+                        callee_env.insert(pname, v);
                     }
                     // else: no arg, no default → leave `pname` unbound; the body DECLINES if it uses it (the
                     // interpreter would see `undef` there, which the numeric JIT can't represent anyway).
@@ -811,17 +865,143 @@ fn compile_expr(fb: &mut FunctionBuilder, expr: &Expr, lower: &Lower) -> Result<
                 Some(arg) if arg.name.is_none() => &arg.value,
                 _ => return Err(JitError::Unsupported("assert without a positional condition")),
             };
-            let (cv, cty) = compile_expr(fb, cond, lower)?;
-            let t = truthy(fb, cv, cty);
+            let cv = compile_expr(fb, cond, lower)?;
+            let t = truthy(fb, &cv)?;
             let failed = fb.ins().icmp_imm(IntCC::Equal, t, 0); // 1 iff the condition is falsy
             let prev = fb.ins().load(types::I8, MemFlagsData::trusted(), lower.raised_ptr, 0);
             let now = fb.ins().bor(prev, failed);
             fb.ins().store(MemFlagsData::trusted(), now, lower.raised_ptr, 0);
             compile_expr(fb, body, lower)
         }
+        // A vector LITERAL `[a, b, c]` → a scalarized `Lowered::Vec` of its compiled elements (P.1.6 rung A). A
+        // comprehension element (`[for …]`, `each …`) declines when its node compiles — a dynamic length the
+        // scalarized value can't hold, so the whole vector declines with that element's reason.
+        ExprKind::Vector(elems) => {
+            let lowered: Result<Vec<Lowered>, JitError> =
+                elems.iter().map(|e| compile_expr(fb, e, lower)).collect();
+            Ok(Lowered::Vec(lowered?))
+        }
+        // `v[i]` with a STATIC (literal) index into a scalarized vector → the element (P.1.6 rung A). The
+        // interpreter floors a finite non-negative index (`i as usize`); an out-of-range / negative /
+        // non-finite / DYNAMIC index yields `undef` there, which the JIT can't represent → DECLINE.
+        ExprKind::Index { base, index } => {
+            let Lowered::Vec(elems) = compile_expr(fb, base, lower)? else {
+                return Err(JitError::Unsupported("index of a non-vector"));
+            };
+            let ExprKind::Num(n) = &index.kind else {
+                return Err(JitError::Unsupported("dynamic index"));
+            };
+            if !n.is_finite() || *n < 0.0 {
+                return Err(JitError::Unsupported("index out of range"));
+            }
+            #[allow(
+                clippy::cast_possible_truncation,
+                clippy::cast_sign_loss,
+                reason = "guarded finite && >= 0; matches the interpreter's `i as usize`, and an out-of-range \
+                index falls through to the `nth` miss → decline"
+            )]
+            let idx = *n as usize;
+            elems.into_iter().nth(idx).ok_or(JitError::Unsupported("index out of range"))
+        }
         // Everything else DECLINES — named so the EXPLAIN coverage histogram (P.1.4) shows WHICH node kind
         // blocks each function, i.e. the absorption ceiling per subset feature we might add next.
         other => Err(JitError::Unsupported(kind_name(other))),
+    }
+}
+
+/// Elementwise `a op b` on two equal-length scalarized vectors (`+`/`−`) — each lane an `fadd`/`fsub` in index
+/// order (order-independent per lane, so bit-identical to the interpreter's `zip_reuse`). A non-`Num` element
+/// (a nested vector — a matrix row) DECLINES: rung A arithmetic is FLAT vectors.
+fn vec_elementwise(
+    fb: &mut FunctionBuilder,
+    op: BinOp,
+    a: &[Lowered],
+    b: &[Lowered],
+) -> Result<Vec<Lowered>, JitError> {
+    a.iter()
+        .zip(b)
+        .map(|(x, y)| {
+            let (x, y) = (x.num()?, y.num()?);
+            let v = match op {
+                BinOp::Add => fb.ins().fadd(x, y),
+                BinOp::Sub => fb.ins().fsub(x, y),
+                _ => return Err(JitError::Unsupported("non-elementwise vector op")),
+            };
+            Ok(Lowered::Num(v))
+        })
+        .collect()
+}
+
+/// Scale a scalarized vector by a scalar: `v[i] * s` — matching `map_reuse(v, |e| e * s)` for both `v*s` and
+/// `s*v` (float multiply is bit-commutative).
+fn vec_scale(fb: &mut FunctionBuilder, v: &[Lowered], s: Value) -> Result<Vec<Lowered>, JitError> {
+    v.iter().map(|e| Ok(Lowered::Num(fb.ins().fmul(e.num()?, s)))).collect()
+}
+
+/// `v / s` (element / scalar, `vec_over_scalar`) or `s / v` (scalar / element) — matching `map_reuse(v, |e| e
+/// / s)` / `|e| s / e`. Division isn't commutative, so the operand order is load-bearing.
+fn vec_div(
+    fb: &mut FunctionBuilder,
+    v: &[Lowered],
+    s: Value,
+    vec_over_scalar: bool,
+) -> Result<Vec<Lowered>, JitError> {
+    v.iter()
+        .map(|e| {
+            let e = e.num()?;
+            let q = if vec_over_scalar { fb.ins().fdiv(e, s) } else { fb.ins().fdiv(s, e) };
+            Ok(Lowered::Num(q))
+        })
+        .collect()
+}
+
+/// Dot product of two equal-length scalarized vectors, replicating [`ops::dot`]'s 4-lane reduction EXACTLY:
+/// `lane[i % 4] += a[i] * b[i]` in index order, then `(l0 + l1) + (l2 + l3)`. That fixed lane structure is
+/// what makes `vec * vec` bit-identical (a naive left-fold would diverge ≥4 elements).
+fn vec_dot(fb: &mut FunctionBuilder, a: &[Lowered], b: &[Lowered]) -> Result<Value, JitError> {
+    let zero = fb.ins().f64const(0.0);
+    let mut lanes = [zero; 4];
+    for i in 0..a.len() {
+        let p = fb.ins().fmul(a[i].num()?, b[i].num()?);
+        lanes[i % 4] = fb.ins().fadd(lanes[i % 4], p);
+    }
+    let l01 = fb.ins().fadd(lanes[0], lanes[1]);
+    let l23 = fb.ins().fadd(lanes[2], lanes[3]);
+    Ok(fb.ins().fadd(l01, l23))
+}
+
+/// Negate a `Lowered` — a number `fneg`, a vector elementwise (recursing so a nested vector negates too),
+/// matching `ops::apply_unary`. A bool DECLINES (`-true` isn't in the subset).
+fn neg_lowered(fb: &mut FunctionBuilder, v: Lowered) -> Result<Lowered, JitError> {
+    match v {
+        Lowered::Num(n) => Ok(Lowered::Num(fb.ins().fneg(n))),
+        Lowered::Vec(elems) => {
+            let out: Result<Vec<Lowered>, JitError> =
+                elems.into_iter().map(|e| neg_lowered(fb, e)).collect();
+            Ok(Lowered::Vec(out?))
+        }
+        Lowered::Bool(_) => Err(JitError::Unsupported("negate a boolean")),
+    }
+}
+
+/// A `select` per the condition, SHAPE-matched: `Num`/`Bool` pick one IR value; two same-length vectors
+/// select elementwise (recursing); any other pairing (differing kinds or vector lengths) DECLINES, since a
+/// scalarized value can't hold a runtime-chosen shape.
+fn select_lowered(
+    fb: &mut FunctionBuilder,
+    c: Value,
+    t: Lowered,
+    e: Lowered,
+) -> Result<Lowered, JitError> {
+    match (t, e) {
+        (Lowered::Num(t), Lowered::Num(e)) => Ok(Lowered::Num(fb.ins().select(c, t, e))),
+        (Lowered::Bool(t), Lowered::Bool(e)) => Ok(Lowered::Bool(fb.ins().select(c, t, e))),
+        (Lowered::Vec(t), Lowered::Vec(e)) if t.len() == e.len() => {
+            let out: Result<Vec<Lowered>, JitError> =
+                t.into_iter().zip(e).map(|(t, e)| select_lowered(fb, c, t, e)).collect();
+            Ok(Lowered::Vec(out?))
+        }
+        _ => Err(JitError::Unsupported("ternary branches differ in type")),
     }
 }
 
@@ -832,9 +1012,7 @@ fn compile_expr(fb: &mut FunctionBuilder, expr: &Expr, lower: &Lower) -> Result<
 fn kind_name(kind: &ExprKind) -> &'static str {
     match kind {
         ExprKind::Call { .. } => "call",
-        ExprKind::Index { .. } => "index",
         ExprKind::Member { .. } => "member-access",
-        ExprKind::Vector(_) => "vector-literal",
         ExprKind::Range { .. } => "range",
         ExprKind::Let { .. } => "let-binding",
         ExprKind::FunctionLiteral { .. } => "function-literal",
@@ -845,17 +1023,10 @@ fn kind_name(kind: &ExprKind) -> &'static str {
         ExprKind::Echo { .. } => "echo",
         ExprKind::Str(_) => "string-literal",
         ExprKind::Undef => "undef-literal",
-        // The handled kinds don't reach here; name them defensively rather than wildcard.
+        // The handled kinds don't reach here; name them defensively rather than wildcard. `Vector`/`Index` are
+        // handled (P.1.6 rung A) — they decline with a SPECIFIC reason inside their arm, never via this path.
         ExprKind::Num(_) | ExprKind::Bool(_) | ExprKind::Ident(_) | ExprKind::Unary { .. }
-        | ExprKind::Binary { .. } | ExprKind::Ternary { .. } => "unhandled-in-subset",
-    }
-}
-
-/// A compiled sub-expression that MUST be a number (arithmetic operand, comparison operand, function
-/// return). A `Bool` there is outside the subset → DECLINE (e.g. `true + 1`, or a bool-returning body).
-fn require_num(v: Value, ty: Ty) -> Result<Value, JitError> {
-    match ty {
-        Ty::Num => Ok(v),
-        Ty::Bool => Err(JitError::Unsupported("a boolean where a number is required")),
+        | ExprKind::Binary { .. } | ExprKind::Ternary { .. } | ExprKind::Vector(_)
+        | ExprKind::Index { .. } => "unhandled-in-subset",
     }
 }

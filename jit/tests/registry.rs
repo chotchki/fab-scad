@@ -292,6 +292,50 @@ fn bool_returning_functions_are_type_tagged_and_bit_identical() {
 }
 
 #[test]
+fn scalarized_vectors_are_bit_identical() {
+    // P.1.6 rung A: a vector used INTERNALLY (a `[a,b,c]` literal, static index, elementwise / scale / dot
+    // arithmetic) SCALARIZES — no memory — and reduces to a scalar. Bit-identical to the interpreter, incl. the
+    // 4-lane `dot` (`vec*vec`). A vector-RETURNING function still declines (rung C).
+    let prog = program(
+        "function dot3(x) = let(v = [x, x*2, x*3], w = [1, 2, 3]) v * w;\
+         function esum(x) = let(v = [x, x], w = [1, 2], s = v + w) s[0] + s[1];\
+         function scaled(x) = let(v = [x, x] * 3) v[0] + v[1];\
+         function mid(x) = let(p = [x, x + 1, x + 2]) (p[0] + p[2]) / 2;\
+         function dot5(x) = [x, x, x, x, x] * [1, 2, 3, 4, 5];\
+         function mkvec(x) = [x, x + 1, x + 2];",
+    );
+    let reg = JitRegistry::build(
+        defs(&prog).iter().map(|&(n, p, b)| (n, p, b)),
+        consts(&prog).iter().map(|&(n, v)| (n, v)),
+    )
+    .expect("registry builds");
+
+    assert!(reg.get("dot3").is_some(), "dot product → scalar compiles");
+    assert!(reg.get("esum").is_some(), "elementwise add + index compiles");
+    assert!(reg.get("scaled").is_some(), "scalar scale + index compiles");
+    assert!(reg.get("mid").is_some(), "static index compiles");
+    assert!(reg.get("dot5").is_some(), "a 5-element dot (exercises the 4-lane remainder) compiles");
+    assert!(reg.get("mkvec").is_none(), "a vector-RETURNING body declines (rung C)");
+
+    let cases: &[(&str, &[f64])] = &[
+        ("dot3", &[3.0]), // 14*3 = 42
+        ("dot3", &[-1.5]),
+        ("dot3", &[0.0]),
+        ("esum", &[4.0]), // (4+1)+(4+2) = 11
+        ("scaled", &[2.5]), // 6*2.5 = 15
+        ("mid", &[7.0]),  // 7+1 = 8
+        ("dot5", &[2.0]), // (1+2+3+4+5)*2 = 30 — but via the 4-lane reduction
+        ("dot5", &[-3.25]),
+        ("dot5", &[1e8]),
+    ];
+    for (name, args) in cases {
+        let jit = reg.get(name).expect("compiled").call(args).expect("no assert raised");
+        let slow = interp(&prog, name, args);
+        assert_eq!(jit.to_bits(), slow.to_bits(), "vector {name}({args:?}): jit={jit} interp={slow}");
+    }
+}
+
+#[test]
 fn empty_registry_when_nothing_is_numeric() {
     // A program whose only function builds a list → an empty (valid) registry, everything interpreted.
     let prog = program("function only_list(x) = [x, x, x];");

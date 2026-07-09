@@ -114,7 +114,7 @@ fn registry_calls_are_bit_identical_to_the_interpreter() {
         ("horner", &[-3.75]),
     ];
     for (name, args) in cases {
-        let jit = unsafe { reg.get(name).expect("compiled").call(args, &mut [0.0], core::ptr::null_mut()) }.expect("no assert raised");
+        let jit = unsafe { reg.get(name).expect("compiled").call(args, &mut [0.0], core::ptr::null_mut(), core::ptr::null_mut()) }.expect("no assert raised");
         let slow = interp(&prog, name, args);
         assert_eq!(
             jit.to_bits(),
@@ -158,7 +158,7 @@ fn inlining_user_function_calls_is_bit_identical() {
         ("scale", &[-1.5]),
     ];
     for (name, args) in cases {
-        let jit = unsafe { reg.get(name).expect("compiled").call(args, &mut [0.0], core::ptr::null_mut()) }.expect("no assert raised");
+        let jit = unsafe { reg.get(name).expect("compiled").call(args, &mut [0.0], core::ptr::null_mut(), core::ptr::null_mut()) }.expect("no assert raised");
         let slow = interp(&prog, name, args);
         assert_eq!(
             jit.to_bits(),
@@ -195,7 +195,7 @@ fn inlining_binds_unfilled_params_to_defaults() {
         ("use_some", &[0.0]),
     ];
     for (name, args) in cases {
-        let jit = unsafe { reg.get(name).expect("compiled").call(args, &mut [0.0], core::ptr::null_mut()) }.expect("no assert raised");
+        let jit = unsafe { reg.get(name).expect("compiled").call(args, &mut [0.0], core::ptr::null_mut(), core::ptr::null_mut()) }.expect("no assert raised");
         let slow = interp(&prog, name, args);
         assert_eq!(jit.to_bits(), slow.to_bits(), "default {name}({args:?}): jit={jit} interp={slow}");
     }
@@ -245,7 +245,7 @@ fn references_top_level_constants_is_bit_identical() {
         ("golden", &[-4.5]),
     ];
     for (name, args) in cases {
-        let jit = unsafe { reg.get(name).expect("compiled").call(args, &mut [0.0], core::ptr::null_mut()) }.expect("no assert raised");
+        let jit = unsafe { reg.get(name).expect("compiled").call(args, &mut [0.0], core::ptr::null_mut(), core::ptr::null_mut()) }.expect("no assert raised");
         let slow = interp(&prog, name, args);
         assert_eq!(jit.to_bits(), slow.to_bits(), "global {name}({args:?}): jit={jit} interp={slow}");
     }
@@ -286,7 +286,7 @@ fn bool_returning_functions_are_type_tagged_and_bit_identical() {
     ];
     for &(name, arg) in cases {
         let compiled = reg.get(name).expect("compiled");
-        let jit = unsafe { compiled.call(&[arg], &mut [0.0], core::ptr::null_mut()) }.expect("no assert raised");
+        let jit = unsafe { compiled.call(&[arg], &mut [0.0], core::ptr::null_mut(), core::ptr::null_mut()) }.expect("no assert raised");
         let slow = interpret_fn(&prog, name, &[Value::Num(arg)]).expect("interprets");
         match slow {
             // A bool result: the JIT must be tagged bool, and its 0.0/1.0 must match the interpreter's truthiness.
@@ -351,7 +351,7 @@ fn scalarized_vectors_are_bit_identical() {
         ("xyz", &[0.0]),
     ];
     for (name, args) in cases {
-        let jit = unsafe { reg.get(name).expect("compiled").call(args, &mut [0.0], core::ptr::null_mut()) }.expect("no assert raised");
+        let jit = unsafe { reg.get(name).expect("compiled").call(args, &mut [0.0], core::ptr::null_mut(), core::ptr::null_mut()) }.expect("no assert raised");
         let slow = interp(&prog, name, args);
         assert_eq!(jit.to_bits(), slow.to_bits(), "vector {name}({args:?}): jit={jit} interp={slow}");
     }
@@ -638,6 +638,44 @@ fn seedless_rands_is_bit_identical() {
 }
 
 #[test]
+fn comprehension_over_range_is_bit_identical() {
+    // P.1.6 rung-D piece 2 (2b.1): a `[for (i = range) scalar_body]` function body compiles to a LOOP — the
+    // FIRST control flow in fab-jit — that materializes each element into the sink → a NumList. Bit-identical
+    // to the interpreter's `lc_for` + `RangeIter`: index-based value `start + (i as f64)*step`, inclusive end,
+    // empty on a wrong-direction range, a fractional step with no drift.
+    let prog = program(
+        "function squares(n) = [for (i = [0:n]) i*i];\
+         function scaled(n, k) = [for (i = [0:n]) i*k];\
+         function stepped(a, b) = [for (i = [a:2:b]) i];\
+         function shifted(n) = [for (i = [1:n]) i + i*i];\
+         function roots(n) = [for (i = [0:n]) sqrt(i)];\
+         function frac(n) = [for (i = [0:0.5:n]) i];",
+    );
+    let reg = JitRegistry::build(
+        defs(&prog).iter().map(|&(n, p, b)| (n, p, b)),
+        consts(&prog).iter().map(|&(n, v)| (n, v)),
+    )
+    .expect("registry builds");
+
+    assert!(reg.get("squares").is_some(), "a range comprehension compiles to a loop (rung 2b.1)");
+    assert_call_vec_eq(&reg, &prog, "squares", &[Value::Num(5.0)]); // [0,1,4,9,16,25]
+    assert_call_vec_eq(&reg, &prog, "squares", &[Value::Num(0.0)]); // [0]
+    assert_call_vec_eq(&reg, &prog, "squares", &[Value::Num(-1.0)]); // [] — wrong-direction / empty range
+    assert_call_vec_eq(&reg, &prog, "scaled", &[Value::Num(4.0), Value::Num(2.5)]);
+    assert_call_vec_eq(&reg, &prog, "stepped", &[Value::Num(1.0), Value::Num(9.0)]); // [1,3,5,7,9]
+    assert_call_vec_eq(&reg, &prog, "stepped", &[Value::Num(0.0), Value::Num(-5.0)]); // [] wrong direction
+    assert_call_vec_eq(&reg, &prog, "shifted", &[Value::Num(4.0)]);
+    assert_call_vec_eq(&reg, &prog, "roots", &[Value::Num(6.0)]); // sqrt() in the loop body
+    assert_call_vec_eq(&reg, &prog, "frac", &[Value::Num(2.0)]); // [0,0.5,1,1.5,2] — fractional step, no drift
+
+    // BUDGET bail: an over-budget count flags `raised` → None → the interpreter handles it (always safe).
+    assert!(
+        call_jit(&reg, "squares", &[Value::Num(1_000_001.0)]).is_none(),
+        "an over-budget comprehension bails to the interpreter (COMPREHENSION_BUDGET)"
+    );
+}
+
+#[test]
 fn over_long_vector_arg_declines() {
     // A vector longer than MAX_VEC_ARG (16) is NOT scalarized — unrolling it would explode compile/code size,
     // and that dynamic-length case is rung D. call_numeric declines → the interpreter runs the body.
@@ -659,12 +697,12 @@ fn over_long_vector_arg_declines() {
 
 #[test]
 fn nothing_compiles_but_the_registry_holds_the_def() {
-    // A program whose only function is a COMPREHENSION → NOTHING compiles (a dynamic-length list is rung D, out
-    // of the scalarized subset for any arg shape). Post-rung-B, `is_empty()` means "no functions at all", NOT
-    // "nothing compiled" — the registry retains the def (a shape MIGHT compile; this one never will, but the
-    // registry can't know that cheaply). So: len()==0 (no scalar spec), get() None, call_numeric declines every
-    // shape — yet the registry is not "empty".
-    let prog = program("function comp(n) = [for (i = [0:n]) i*i];");
+    // A program whose only function returns a STRING → NOTHING compiles (`str` is out of the numeric subset for
+    // any arg shape, and unlike a comprehension no future rung reaches it). Post-rung-B, `is_empty()` means "no
+    // functions at all", NOT "nothing compiled" — the registry retains the def (a shape MIGHT compile; this one
+    // never will, but the registry can't know that cheaply). So: len()==0 (no scalar spec), get() None,
+    // call_numeric declines every shape — yet the registry is not "empty".
+    let prog = program("function s(x) = str(x);");
     let reg = JitRegistry::build(
         defs(&prog).iter().map(|&(n, p, b)| (n, p, b)),
         consts(&prog).iter().map(|&(n, v)| (n, v)),
@@ -672,10 +710,10 @@ fn nothing_compiles_but_the_registry_holds_the_def() {
         .expect("registry builds even with nothing to compile");
     assert!(!reg.is_empty(), "the def is retained for on-demand recompile");
     assert_eq!(reg.len(), 0, "no all-scalar specialization compiled");
-    assert!(reg.get("comp").is_none(), "the scalar shape declines (comprehension)");
+    assert!(reg.get("s").is_none(), "the scalar shape declines (string builtin)");
     assert!(
-        call_jit(&reg, "comp", &[Value::Num(3.0)]).is_none(),
-        "every shape of a comprehension body declines → interpret"
+        call_jit(&reg, "s", &[Value::Num(3.0)]).is_none(),
+        "every shape of a string-returning body declines → interpret"
     );
 
     // A TRULY empty program (no user functions) IS empty — the factory installs no hook.

@@ -132,14 +132,16 @@ fn input_battery(arity: usize) -> Vec<Vec<f64>> {
     rows
 }
 
-/// Whether the JIT outcome and the interpreter's result AGREE — the differential's verdict, shape-aware. Both
-/// raising (JIT `None`, oracle `Err`) agrees; a `Num`/`Bool`/`Vec` result must match the oracle's
-/// `Num`/`Bool`/`NumList` bit-for-bit (and element-count for a vector). Anything else — a mixed accept/raise, a
-/// shape mismatch, differing bits — diverges. The oracle resolves the callee's own calls + top-level constants
+/// Whether the JIT outcome and the interpreter's result AGREE — the differential's verdict, shape-aware. The
+/// load-bearing gate: whenever the JIT ACCEPTS a call (`Some`), it must match the oracle bit-for-bit —
+/// `Num`/`Bool`/`Vec` vs `Num`/`Bool`/`NumList` (and element-count for a vector). A JIT `None` is ALWAYS fine:
+/// it declined / an inline assert raised / a comprehension exceeded the budget (P.1.6 rung-D piece 2) → the
+/// interpreter owns that call, whatever it produces, so there's nothing to diverge on. A `Some` against an
+/// oracle `Err` or a shape mismatch DIVERGES. The oracle resolves the callee's own calls + top-level constants
 /// (the chains/globals the JIT inlines), so both sides see the same program.
 fn outcome_agrees(jit: Option<&JitOutcome>, slow: &fab_lang::Result<Value>) -> bool {
     match (jit, slow) {
-        (None, Err(_)) => true, // both raised (an inline assert failed on both sides)
+        (None, _) => true, // JIT declined / raised / budget-bailed → the interpreter owns this call
         (Some(JitOutcome::Num(a)), Ok(Value::Num(b))) => a.to_bits() == b.to_bits(),
         (Some(JitOutcome::Bool(a)), Ok(Value::Bool(b))) => a == b,
         (Some(JitOutcome::Vec(a)), Ok(Value::NumList(b))) => {

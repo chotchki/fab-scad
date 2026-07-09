@@ -114,7 +114,7 @@ fn tier_ladder_is_nan() {
     acc = 0;
     let t = Instant::now();
     for i in 0..iters {
-        if unsafe { compiled.call(&[arg(i)], &mut [0.0], core::ptr::null_mut()) } == Some(1.0) {
+        if unsafe { compiled.call(&[arg(i)], &mut [0.0], core::ptr::null_mut(), core::ptr::null_mut()) } == Some(1.0) {
             acc += 1;
         }
     }

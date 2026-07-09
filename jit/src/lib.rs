@@ -2004,19 +2004,42 @@ fn compile_expr(fb: &mut FunctionBuilder, expr: &Expr, lower: &Lower) -> Result<
                 if lower.inlining.len() >= INLINE_LIMIT {
                     return Err(JitError::Unsupported("inline-depth-limit"));
                 }
-                // Positional only, no more args than params (extra positional args are dropped by OpenSCAD,
-                // but a JIT'd numeric callee never wants them — decline as unusual).
-                if args.len() > cparams.len() || args.iter().any(|a| a.name.is_some()) {
-                    return Err(JitError::Unsupported("call"));
+                // Bind ARG SLOTS exactly as the interpreter's `push_call`: a POSITIONAL arg fills the next slot
+                // left-to-right; a NAMED arg binds by param name (overriding a positional at that slot). A
+                // `$`-arg (a dynamic override), an EXTRA positional, or an UNMATCHED named arg → DECLINE — the
+                // interpreter DROPS the latter two WITHOUT evaluating them, so declining sidesteps that eval-
+                // order subtlety and is safe (the interpreter owns the call). Slots compile in PARAM order below
+                // — the interpreter's eval order — so a nested `rands` draws the same sequence whatever the
+                // call-site arg order (P.1.6: named args, the `call` blocker's cheap slice).
+                let mut arg_slots: Vec<Option<&Expr>> = vec![None; cparams.len()];
+                let mut positional = 0usize;
+                for arg in args {
+                    match &arg.name {
+                        None => {
+                            let slot = arg_slots
+                                .get_mut(positional)
+                                .ok_or(JitError::Unsupported("extra positional arg"))?;
+                            *slot = Some(&arg.value);
+                            positional += 1;
+                        }
+                        Some(n) if n.starts_with('$') => return Err(JitError::Unsupported("$-arg")),
+                        Some(n) => {
+                            let i = cparams
+                                .iter()
+                                .position(|p| p.name.as_ref() == n.as_ref())
+                                .ok_or(JitError::Unsupported("unmatched named arg"))?;
+                            arg_slots[i] = Some(&arg.value);
+                        }
+                    }
                 }
                 let empty_index = BTreeMap::new(); // callee params live in `callee_env`, not `params_ptr`
                 let empty_locals = LetEnv::new();
                 let mut callee_env = LetEnv::new();
                 for (i, p) in cparams.iter().enumerate() {
                     let pname = p.name.as_ref();
-                    if let Some(arg) = args.get(i) {
-                        // A provided arg is compiled in the CALLER's env (may be a scalarized vector).
-                        let v = compile_expr(fb, &arg.value, lower)?;
+                    if let Some(expr) = arg_slots[i] {
+                        // A provided arg (positional OR named) is compiled in the CALLER's env (may be a vector).
+                        let v = compile_expr(fb, expr, lower)?;
                         callee_env.insert(pname, v);
                     } else if let Some(default) = p.default.as_ref() {
                         // Unfilled → its DEFAULT, compiled in the DEFINITION scope (no caller locals, no

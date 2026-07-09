@@ -1046,6 +1046,39 @@ fn fixed_vector_comprehension_unrolls() {
 }
 
 #[test]
+fn named_arg_calls_inline_bit_identical() {
+    // P.1.6: a call with NAMED args inlines — args bind by param name (a named arg overrides a positional at
+    // the same slot), and slots compile in PARAM order (the interpreter's `push_call` eval order), so the result
+    // is bit-identical whatever the call-site arg order. `usenamed`: all named, OUT of source order. `usemix`:
+    // positional + named. `usedfl`: a named arg fills one param, leaving an earlier one on its DEFAULT. A `$`-arg
+    // (dynamic override) DECLINES.
+    let prog = program(
+        "function lerp(a, b, t) = a + (b - a) * t;\
+         function usenamed(x) = lerp(t = 0.25, a = 0, b = x);\
+         function usemix(x) = lerp(0, x, t = 0.5);\
+         function scaled(x, k = 2) = x * k;\
+         function usedfl(x) = scaled(k = 3, x = x);\
+         function dollar(x) = lerp(0, x, $t = 0.5);",
+    );
+    let reg = JitRegistry::build(
+        defs(&prog).iter().map(|&(n, p, b)| (n, p, b)),
+        consts(&prog).iter().map(|&(n, v)| (n, v)),
+    )
+    .expect("registry builds");
+
+    assert!(reg.get("usenamed").is_some(), "an all-named call (out of order) inlines");
+    assert!(reg.get("usemix").is_some(), "a positional + named call inlines");
+    assert!(reg.get("usedfl").is_some(), "a named arg + a defaulted param inlines");
+    assert!(reg.get("dollar").is_none(), "a $-arg (dynamic override) declines");
+
+    for x in [4.0, -2.5, 0.0, 1e6] {
+        assert_call_eq(&reg, &prog, "usenamed", &[Value::Num(x)]); // lerp(0, x, 0.25) = 0.25x
+        assert_call_eq(&reg, &prog, "usemix", &[Value::Num(x)]); // lerp(0, x, 0.5) = 0.5x
+        assert_call_eq(&reg, &prog, "usedfl", &[Value::Num(x)]); // scaled(x, 3) = 3x
+    }
+}
+
+#[test]
 fn dynamic_matrix_comprehension_is_bit_identical() {
     // P.1.6 rung-D 2c.3: a comprehension whose body is a FIXED-WIDTH numeric vector, over a RUNTIME-length
     // iterable (range / dyn list), materializes a dynamic MATRIX — W scalars pushed per row into the flat arena,

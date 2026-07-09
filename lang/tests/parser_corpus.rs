@@ -90,7 +90,7 @@ fn sx(e: &Expr) -> String {
 fn sp(p: &Parameter) -> String {
     match &p.default {
         Some(d) => format!("{}={}", p.name, sx(d)),
-        None => p.name.clone(),
+        None => p.name.to_string(),
     }
 }
 
@@ -420,11 +420,11 @@ fn module_and_function_defs_parse() {
     };
     assert_eq!(name, "box");
     assert_eq!(params.len(), 3);
-    assert_eq!(params[0].name, "w");
+    assert_eq!(&*params[0].name, "w");
     assert!(params[0].default.is_none());
-    assert_eq!(params[1].name, "h");
+    assert_eq!(&*params[1].name, "h");
     assert!(params[1].default.is_some());
-    assert_eq!(params[2].name, "$fn"); // special-variable parameter
+    assert_eq!(&*params[2].name, "$fn"); // special-variable parameter
     assert!(matches!(body.kind, StmtKind::Block(_)));
 
     // empty params + single-statement (non-block) body.

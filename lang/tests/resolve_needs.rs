@@ -33,7 +33,7 @@ fn an_import() -> Imported {
 
 /// Resolve in-memory `src` (CWD base, no library paths) with `reader` fulfilling File needs.
 fn resolve<R: FnMut(&str) -> Result<Imported, Error>>(src: &str, reader: R) -> Result<Geo, Error> {
-    resolve_geometry_with_base(src, Path::new("."), &[], reader)
+    resolve_geometry_with_base(src, Path::new("."), &[], None, reader)
 }
 
 #[test]
@@ -113,7 +113,7 @@ fn resolve_geometry_file_reads_the_root_then_the_mesh() {
     let root = dir.join("imports_one.scad");
     std::fs::write(&root, "import(\"part.stl\");\n").expect("write root");
 
-    let geo = resolve_geometry_file(&root, &[], |raw| {
+    let geo = resolve_geometry_file(&root, &[], None, |raw| {
         assert_eq!(raw, "part.stl");
         Ok(an_import())
     })

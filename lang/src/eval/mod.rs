@@ -137,9 +137,10 @@ pub enum Resolution {
 }
 
 /// A desktop-only numeric JIT hook (P.1.2). The interpreter offers a user-function call to this BEFORE
-/// interpreting the body, but ONLY when the call is all-positional, arity-exact, and every argument
-/// evaluated to a number. If a compiled version of `name` with matching arity exists, the impl returns
-/// its `f64` result; otherwise `None` and the interpreter runs the real body.
+/// interpreting the body, but ONLY when the call is all-positional and arity-exact (a named arg sets
+/// `jit=None` at dispatch). The hook itself decides whether the ARGUMENTS are scalarizable — a number or a
+/// fixed-small numeric vector (P.1.6 rung B) — and DECLINES (`None`) anything it can't compile for this
+/// arg shape; the interpreter then runs the real body.
 ///
 /// Defined here so the eval loop can dispatch to it, but the crate stays wasm-clean: the trait carries no
 /// Cranelift, and the native `fab-jit` crate implements it over its compiled `JitRegistry`. The contract
@@ -147,12 +148,14 @@ pub enum Resolution {
 /// differential proves it), so routing a call here can only change SPEED, never the result. wasm builds
 /// (which can't JIT in-sandbox) simply leave [`Ctx::jit`] `None` and interpret everything.
 pub trait NumericJit {
-    /// The compiled result of `name(args)` if one is registered for this exact arity, else `None`. A
-    /// [`JitOutcome`] carries the result's TYPE tag (P.1.4e) — the JIT return ABI is untyped `f64`, so the
+    /// The compiled result of `name(args)` if a specialization for this arg SHAPE is registered (or compiles
+    /// on demand), else `None`. The hook receives the evaluated [`Value`] args and scalarizes them itself
+    /// (P.1.6 rung B): a [`Value::Num`] is a scalar, a [`Value::NumList`] a fixed-length vector; a
+    /// non-scalarizable arg (a nested list, string, undef, range, function, or an over-long vector) → `None`.
+    /// A [`JitOutcome`] carries the result's TYPE tag (P.1.4e) — the JIT return ABI is untyped `f64`, so the
     /// compiled function reports whether that `f64` is a number or a boolean and the dispatch re-wraps it in
-    /// the matching [`Value`]. `None` means BOTH "not compiled" and "compiled but raised" — the interpreter
-    /// takes over either way.
-    fn call_numeric(&self, name: &str, args: &[f64]) -> Option<JitOutcome>;
+    /// the matching [`Value`]. `None` means "not compiled / declined / raised" — the interpreter takes over.
+    fn call_numeric(&self, name: &str, args: &[Value]) -> Option<JitOutcome>;
 }
 
 /// A JIT-compiled call's result, TYPE-TAGGED (P.1.4e). The native return ABI is a single untyped `f64` (plus
@@ -305,11 +308,12 @@ pub(super) struct Ctx<'a> {
     /// message/rand fence can't see. Transitive for free: a nested read bumps it, the outer call sees the delta.
     impure_reads: std::cell::Cell<u64>,
     /// The desktop numeric-JIT hook (P.1.2), or `None` (wasm, or a program with nothing compiled). Built
-    /// ONCE at setup by the caller-supplied [`NumericJitFactory`] and OWNED here (the compiled registry
-    /// retains no AST borrows, so a `Box<dyn NumericJit>` needs no `'a`). When present, an eligible
-    /// user-function call ([`Task::Apply`] with a `jit` name + all-`Num` args) is offered to it before the
-    /// body is interpreted; a `Some` result is bit-identical to interpreting, so this only ever changes
-    /// speed. `None` everywhere the interpreter is the whole story (raw-AST eval, wasm, no factory).
+    /// ONCE at setup by the caller-supplied [`NumericJitFactory`] and OWNED here — the registry CLONES the
+    /// AST it needs (P.1.6 rung B on-demand recompile), so a `Box<dyn NumericJit>` still needs no `'a`. When
+    /// present, an eligible user-function call ([`Task::Apply`] with a `jit` name — all-positional) is offered
+    /// to it before the body is interpreted; the hook scalarizes the args and declines what it can't compile.
+    /// A `Some` result is bit-identical to interpreting, so this only ever changes speed. `None` everywhere
+    /// the interpreter is the whole story (raw-AST eval, wasm, no factory).
     jit: Option<Box<dyn NumericJit>>,
 }
 
@@ -734,14 +738,13 @@ fn eval_with_global<'a>(
             } => {
                 let vals = values.split_off(values.len().saturating_sub(names.len()));
                 // Numeric-JIT fast path (P.1.2): a compiled numeric function, offered the call BEFORE any
-                // interpretation, IFF this call is JIT-eligible (`jit` name set at dispatch) AND every
-                // evaluated arg is a plain `Num` (the compiled body is all-`f64`; a vector arg — BOSL2's
-                // numeric fns are often scalar-or-vector polymorphic — falls through to the interpreter).
-                // A `Some(r)` is bit-identical to interpreting `body`, so this is pure speed. The registry
-                // decides membership + arity (returns `None` to defer); no wasted work when the hook is off.
+                // interpretation, IFF this call is JIT-eligible (`jit` name set at dispatch — all-positional).
+                // The hook SCALARIZES the args itself (P.1.6 rung B): a `Num` is a scalar, a `NumList` a
+                // fixed-small vector; a non-scalarizable arg (nested list, string, over-long vector, …) makes
+                // it decline (`None`) and we interpret. A `Some(r)` is bit-identical to interpreting `body`,
+                // so this is pure speed. The registry decides membership + shape; no work when the hook is off.
                 if let (Some(name), Some(j)) = (jit, ctx.jit.as_deref())
-                    && let Some(nums) = all_nums(&vals)
-                    && let Some(out) = j.call_numeric(name, &nums)
+                    && let Some(out) = j.call_numeric(name, &vals)
                 {
                     // Re-tag the untyped native return into a `Value` (P.1.4e): a bool-returning function
                     // (a predicate, a comparison body) yields `Value::Bool`, not `Value::Num` — matching the
@@ -1171,19 +1174,6 @@ fn dispatch_call<'a>(
 /// are dropped). Two documented first-cut simplifications: `$`-arg injection is I.2.2, and defaults
 /// evaluate in the definition scope, not the partially-bound call scope (so a default can't reference
 /// an earlier param — rare; defaults are usually constants).
-/// The `f64`s of `vals` iff EVERY value is a plain `Num`, else `None` — the numeric-JIT type guard. A
-/// single non-`Num` (a vector, `undef`, a string) means the compiled all-`f64` function doesn't apply, so
-/// the call falls back to the interpreted body. Allocates a small `Vec` (arity-sized) per eligible call;
-/// a stack buffer for the common low-arity case is a later micro-opt.
-fn all_nums(vals: &[Value]) -> Option<Vec<f64>> {
-    vals.iter()
-        .map(|v| match v {
-            Value::Num(n) => Some(*n),
-            _ => None,
-        })
-        .collect()
-}
-
 fn push_call<'a>(
     params: &'a [Parameter],
     body: &'a Expr,
@@ -2595,9 +2585,11 @@ mod tests {
     /// it fell back to the interpreter. Any other function/arity → `None` (defer to the interpreter).
     struct MarkerJit;
     impl super::NumericJit for MarkerJit {
-        fn call_numeric(&self, name: &str, args: &[f64]) -> Option<super::JitOutcome> {
+        fn call_numeric(&self, name: &str, args: &[Value]) -> Option<super::JitOutcome> {
+            // Scalar `sq(x)` only — a NumList (or any non-Num) arg declines here, so the interpreter runs the
+            // real body (the rung-B mock stays scalar; the real registry handles vector shapes).
             match (name, args) {
-                ("sq", [x]) => Some(super::JitOutcome::Num(x * x + 1000.0)),
+                ("sq", [Value::Num(x)]) => Some(super::JitOutcome::Num(x * x + 1000.0)),
                 _ => None,
             }
         }
@@ -2630,11 +2622,11 @@ mod tests {
             Value::Num(1025.0),
             "an eligible numeric call takes the JIT path"
         );
-        // (2) a NON-number arg (a vector) → the all-Num guard fails → interpreter runs x*x = dot = 5.
+        // (2) a NON-number arg (a vector) → the mock declines this shape → interpreter runs x*x = dot = 5.
         assert_eq!(
             eval_last_jit("function sq(x) = x*x; y = sq([1,2]);", Box::new(MarkerJit)),
             Value::Num(5.0),
-            "a vector arg falls back to the interpreted body (no marker)"
+            "a vector arg the mock doesn't handle falls back to the interpreted body (no marker)"
         );
         // (3) a NAMED arg → not JIT-eligible (dispatch passes jit=None) → interpreter runs → 25. This is
         // the BOSL2-loves-named-args gap: the fast path is declined, correctness is preserved. (follow-on)

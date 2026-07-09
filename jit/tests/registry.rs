@@ -4,7 +4,9 @@
 //! the standalone spike, now through the production cache.
 
 use fab_jit::JitRegistry;
-use fab_lang::{Expr, Parameter, Program, StmtKind, Value, interpret_fn, parse};
+use fab_lang::{
+    Expr, JitOutcome, NumericJit, Parameter, Program, StmtKind, Value, interpret_fn, parse,
+};
 
 /// Parse a multi-function program (kept alive by the caller so bodies can be borrowed from it).
 fn program(src: &str) -> Program {
@@ -302,6 +304,9 @@ fn scalarized_vectors_are_bit_identical() {
          function scaled(x) = let(v = [x, x] * 3) v[0] + v[1];\
          function mid(x) = let(p = [x, x + 1, x + 2]) (p[0] + p[2]) / 2;\
          function dot5(x) = [x, x, x, x, x] * [1, 2, 3, 4, 5];\
+         function xyz(x) = let(p = [x, x + 1, x + 2]) p.x + p.y * p.z;\
+         function badmember(x) = let(p = [x, x]) p.w;\
+         function shortz(x) = let(p = [x, x]) p.z;\
          function mkvec(x) = [x, x + 1, x + 2];",
     );
     let reg = JitRegistry::build(
@@ -315,6 +320,9 @@ fn scalarized_vectors_are_bit_identical() {
     assert!(reg.get("scaled").is_some(), "scalar scale + index compiles");
     assert!(reg.get("mid").is_some(), "static index compiles");
     assert!(reg.get("dot5").is_some(), "a 5-element dot (exercises the 4-lane remainder) compiles");
+    assert!(reg.get("xyz").is_some(), "member .x/.y/.z on a scalarized vector compiles (rung B)");
+    assert!(reg.get("badmember").is_none(), "a non-xyz member (.w → undef) declines");
+    assert!(reg.get("shortz").is_none(), "a .z on a too-short vector (→ undef) declines");
     assert!(reg.get("mkvec").is_none(), "a vector-RETURNING body declines (rung C)");
 
     let cases: &[(&str, &[f64])] = &[
@@ -327,6 +335,9 @@ fn scalarized_vectors_are_bit_identical() {
         ("dot5", &[2.0]), // (1+2+3+4+5)*2 = 30 — but via the 4-lane reduction
         ("dot5", &[-3.25]),
         ("dot5", &[1e8]),
+        ("xyz", &[3.0]), // 3 + 4*5 = 23
+        ("xyz", &[-2.5]),
+        ("xyz", &[0.0]),
     ];
     for (name, args) in cases {
         let jit = reg.get(name).expect("compiled").call(args).expect("no assert raised");
@@ -335,15 +346,129 @@ fn scalarized_vectors_are_bit_identical() {
     }
 }
 
+/// A `Value::NumList` from a slice of `f64`s — a scalarizable vector arg.
+fn vec_arg(xs: &[f64]) -> Value {
+    Value::num_list(xs.to_vec())
+}
+
+/// Assert `reg.call_numeric(name, vals)` returns a NUMERIC result BITWISE-equal to the interpreter — the
+/// rung-B `fast == JIT` gate over the on-demand vector-arg path.
+fn assert_call_eq(reg: &JitRegistry, prog: &Program, name: &str, vals: &[Value]) {
+    let jit = match reg.call_numeric(name, vals) {
+        Some(JitOutcome::Num(n)) => n,
+        other => panic!("{name}{vals:?}: expected a JIT numeric result, got {other:?}"),
+    };
+    let slow = match interpret_fn(prog, name, vals) {
+        Ok(Value::Num(n)) => n,
+        other => panic!("{name}{vals:?}: interpreter didn't yield a number: {other:?}"),
+    };
+    assert_eq!(jit.to_bits(), slow.to_bits(), "{name}{vals:?}: jit={jit} interp={slow}");
+}
+
 #[test]
-fn empty_registry_when_nothing_is_numeric() {
-    // A program whose only function builds a list → an empty (valid) registry, everything interpreted.
+fn vector_arg_shapes_compile_on_demand() {
+    // P.1.6 rung B: a function that takes a VECTOR parameter (indexed / member-accessed / dotted) declines
+    // its all-scalar shape at build, then compiles ON DEMAND for the exact arg shape it's first called with.
+    // Each on-demand compile is a fresh define+finalize into the already-finalized module — so this test also
+    // proves Cranelift's INCREMENTAL finalize (a later batch leaves earlier code pointers valid). Every
+    // result is bit-identical to the interpreter.
+    let prog = program(
+        "function nrm2(v) = v[0]*v[0] + v[1]*v[1] + v[2]*v[2];\
+         function mag(p) = sqrt(p.x*p.x + p.y*p.y + p.z*p.z);\
+         function dot(a, b) = a * b;\
+         function saxpy(s, v) = s*v[0] + v[1];\
+         function first(v) = v[0];\
+         function sq(x) = x*x;",
+    );
+    let reg = JitRegistry::build(
+        defs(&prog).iter().map(|&(n, p, b)| (n, p, b)),
+        consts(&prog).iter().map(|&(n, v)| (n, v)),
+    )
+    .expect("registry builds");
+
+    // At build, the pure-scalar shapes compile: `sq` (x*x) and `dot` (a*b — scalar multiply is fine). The
+    // INDEXING / MEMBER functions DECLINE their scalar shape (you can't index a scalar) and wait for a vector
+    // shape. `dot` gets BOTH — a scalar spec now, a vec*vec DOT spec on demand below.
+    assert_eq!(reg.len(), 2, "the two pure-scalar shapes compiled at build (sq, dot)");
+    assert!(reg.get("sq").is_some(), "the scalar control is pre-compiled");
+    assert!(reg.get("dot").is_some(), "dot's scalar shape (a*b) pre-compiles too");
+    assert!(reg.get("nrm2").is_none(), "an indexing function's SCALAR shape declines");
+    assert!(reg.get("first").is_none());
+
+    // On-demand vector shapes — index, member (.x/.y/.z), dot (vec*vec, incl. the 5-elem 4-lane remainder),
+    // and mixed scalar+vector args. Each triggers a fresh compile; all bit-identical.
+    assert_call_eq(&reg, &prog, "nrm2", &[vec_arg(&[3.0, 4.0, 12.0])]); // 169
+    assert_call_eq(&reg, &prog, "nrm2", &[vec_arg(&[-1.5, 0.0, 2.0])]);
+    assert_call_eq(&reg, &prog, "mag", &[vec_arg(&[3.0, 4.0, 12.0])]); // 13
+    assert_call_eq(&reg, &prog, "dot", &[vec_arg(&[1.0, 2.0, 3.0]), vec_arg(&[4.0, 5.0, 6.0])]); // 32
+    assert_call_eq(
+        &reg,
+        &prog,
+        "dot",
+        &[vec_arg(&[1.0, 2.0, 3.0, 4.0, 5.0]), vec_arg(&[5.0, 4.0, 3.0, 2.0, 1.0])], // 5-elem 4-lane
+    );
+    assert_call_eq(&reg, &prog, "saxpy", &[Value::Num(2.0), vec_arg(&[3.0, 4.0])]); // 10
+
+    // Scalar-vs-vec-1 are DISTINCT shapes, never conflated: `first([7])` compiles + returns 7; `first(7)`
+    // (a scalar indexed) DECLINES for its shape → the interpreter takes over (call_numeric None).
+    assert_call_eq(&reg, &prog, "first", &[vec_arg(&[7.0])]); // vec-1 → 7
+    assert_call_eq(&reg, &prog, "first", &[vec_arg(&[7.0, 8.0])]); // vec-2 → 7 (a THIRD shape of `first`)
+    assert!(
+        reg.call_numeric("first", &[Value::Num(7.0)]).is_none(),
+        "a scalar arg to a body that indexes it declines (distinct from the vec-1 shape)"
+    );
+
+    // The scalar control still works through the same registry after all the on-demand compiles.
+    assert_call_eq(&reg, &prog, "sq", &[Value::Num(6.0)]); // 36
+}
+
+#[test]
+fn over_long_vector_arg_declines() {
+    // A vector longer than MAX_VEC_ARG (16) is NOT scalarized — unrolling it would explode compile/code size,
+    // and that dynamic-length case is rung D. call_numeric declines → the interpreter runs the body.
+    let prog = program("function first(v) = v[0];");
+    let reg = JitRegistry::build(
+        defs(&prog).iter().map(|&(n, p, b)| (n, p, b)),
+        consts(&prog).iter().map(|&(n, v)| (n, v)),
+    )
+    .expect("registry builds");
+    let seventeen: Vec<f64> = (0..17).map(f64::from).collect();
+    assert!(
+        reg.call_numeric("first", &[Value::num_list(seventeen)]).is_none(),
+        "a 17-element vector arg exceeds the scalarization cap → declines"
+    );
+    // A 16-element arg is exactly at the cap → compiles + is bit-identical.
+    let sixteen: Vec<f64> = (0..16).map(|i| f64::from(i) + 0.5).collect();
+    assert_call_eq(&reg, &prog, "first", &[Value::num_list(sixteen)]);
+}
+
+#[test]
+fn nothing_compiles_but_the_registry_holds_the_def() {
+    // A program whose only function returns a vector → NOTHING compiles (a vector return is rung C, declined
+    // for any arg shape). Post-rung-B, `is_empty()` means "no functions at all", NOT "nothing compiled" — the
+    // registry retains the def so an on-demand VECTOR-arg shape could still compile (this one never will, but
+    // the registry can't know that cheaply). So: len()==0 (no scalar spec), get() is None, and call_numeric
+    // declines every shape — but the registry is not "empty".
     let prog = program("function only_list(x) = [x, x, x];");
     let reg = JitRegistry::build(
         defs(&prog).iter().map(|&(n, p, b)| (n, p, b)),
         consts(&prog).iter().map(|&(n, v)| (n, v)),
     )
         .expect("registry builds even with nothing to compile");
-    assert!(reg.is_empty(), "no numeric function → empty registry");
-    assert_eq!(reg.len(), 0);
+    assert!(!reg.is_empty(), "the def is retained for on-demand recompile");
+    assert_eq!(reg.len(), 0, "no all-scalar specialization compiled");
+    assert!(reg.get("only_list").is_none(), "the scalar shape declines (vector return)");
+    assert!(
+        reg.call_numeric("only_list", &[Value::Num(3.0)]).is_none(),
+        "every shape of a vector-returning body declines → interpret"
+    );
+
+    // A TRULY empty program (no user functions) IS empty — the factory installs no hook.
+    let none = program("x = 1;");
+    let reg = JitRegistry::build(
+        defs(&none).iter().map(|&(n, p, b)| (n, p, b)),
+        consts(&none).iter().map(|&(n, v)| (n, v)),
+    )
+        .expect("registry builds");
+    assert!(reg.is_empty(), "no user functions → truly empty");
 }

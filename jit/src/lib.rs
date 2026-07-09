@@ -16,6 +16,7 @@
 //! and the caller falls back to the interpreter. [`JitRegistry`] compiles many such functions into ONE
 //! module (the spike leaked a module per function — the doc's #1 production gap).
 
+use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
 
 use cranelift::codegen::ir::condcodes::{FloatCC, IntCC};
@@ -43,6 +44,83 @@ use fab_lang::{
     BinOp, Expr, ExprKind, JitConst, JitDef, JitOutcome, NumericJit, NumericJitFactory, Parameter,
     UnOp, jit_math_id,
 };
+// Aliased: Cranelift's `Value` (an IR SSA value) is used pervasively below, so the scad-lang runtime value
+// (what the dispatch hands us to scalarize) rides under `ScadValue` to avoid the name clash.
+use fab_lang::Value as ScadValue;
+
+/// The runtime SHAPE of one call argument — what an on-demand specialization is keyed on (P.1.6 rung B). A
+/// `Scalar` is one `f64`; a `Vec(n)` is `n` contiguous `f64`s flattened into the call buffer. The tag is
+/// load-bearing, not just a length: `f(1.0)` (scalar param, body `x*2`) and `f([1.0])` (vec-1 param, body
+/// `x[0]`) are the SAME 1-element buffer but DIFFERENT bodies — a bare length couldn't tell them apart.
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
+enum ArgShape {
+    Scalar,
+    Vec(usize),
+}
+
+impl ArgShape {
+    /// How many `f64` slots this arg occupies in the flat call buffer.
+    fn size(&self) -> usize {
+        match self {
+            ArgShape::Scalar => 1,
+            ArgShape::Vec(n) => *n,
+        }
+    }
+}
+
+/// One argument list's full shape — the on-demand cache key (per function name).
+type ShapeSig = Vec<ArgShape>;
+
+/// The longest numeric vector rung B will SCALARIZE into a call. A vec2/3/4 point (or a flattened ≤4×4
+/// matrix) fits; a longer list — a comprehension result, `gaussian_rands`' 300k — DECLINES, because unrolling
+/// it into IR would explode compile time + code size, and that dynamic-length case is rung D's sink-return
+/// ABI, not scalarization.
+const MAX_VEC_ARG: usize = 16;
+
+/// Derive each arg's [`ArgShape`] and flatten its `f64`s into `flat` (cleared first), or `None` if any arg
+/// isn't scalarizable: a nested/mixed list (a matrix), a string / undef / range / function value, or a vector
+/// longer than [`MAX_VEC_ARG`]. `Num` → one element + `Scalar`; a `NumList` (or an all-`Num` `List`, which a
+/// freshly-built `[a,b]` can surface as before the value model normalizes it) → its elements + `Vec(len)`.
+/// `flat` is the registry's REUSED scratch, so the hot path pays no per-call flatten allocation.
+fn shape_and_flatten(args: &[ScadValue], flat: &mut Vec<f64>) -> Option<ShapeSig> {
+    flat.clear();
+    let mut sig = ShapeSig::with_capacity(args.len());
+    for a in args {
+        match a {
+            ScadValue::Num(n) => {
+                flat.push(*n);
+                sig.push(ArgShape::Scalar);
+            }
+            ScadValue::NumList(xs) => {
+                if xs.len() > MAX_VEC_ARG {
+                    return None;
+                }
+                flat.extend_from_slice(xs);
+                sig.push(ArgShape::Vec(xs.len()));
+            }
+            ScadValue::List(items) => {
+                if items.len() > MAX_VEC_ARG {
+                    return None;
+                }
+                let start = flat.len();
+                for it in items.iter() {
+                    match it {
+                        ScadValue::Num(n) => flat.push(*n),
+                        // A nested or non-numeric element → not scalarizable; roll back this arg's f64s.
+                        _ => {
+                            flat.truncate(start);
+                            return None;
+                        }
+                    }
+                }
+                sig.push(ArgShape::Vec(items.len()));
+            }
+            // A string / undef / range / function value can't be a numeric JIT arg → decline the whole call.
+            _ => return None,
+        }
+    }
+    Some(sig)
+}
 
 /// The `%` an OpenSCAD `%` compiles to — the EXACT op the interpreter runs (`ops.rs`: `x % y`, C
 /// `fmod` semantics, sign of the dividend). Routed as a call so the bits match, since Cranelift has no
@@ -86,16 +164,21 @@ impl std::fmt::Display for JitError {
 
 impl std::error::Error for JitError {}
 
-/// A finalized numeric function: `fn(params: &[f64]) -> f64` as a raw code pointer. The executable
-/// memory it points into is owned by the [`JitFn`] or [`JitRegistry`] that produced it — a `CompiledFn`
-/// is only valid for that owner's lifetime, which the borrow checker enforces (registry entries are
-/// returned by reference).
+/// A finalized numeric function: `fn(flat_params: &[f64]) -> f64` as a raw code pointer. The executable
+/// memory it points into is owned by the [`JitFn`] or [`JitRegistry`] that produced it — a `CompiledFn` is
+/// only valid for that owner's lifetime. `Copy` (a pointer + two words), so the registry can lift one out of
+/// its cache and call it AFTER releasing the `RefCell` borrow — the code stays mapped as long as the module
+/// (in the registry) is alive.
+#[derive(Clone, Copy)]
 pub struct CompiledFn {
     code: *const u8,
+    /// The number of `f64` slots the compiled function reads from the params pointer — the FLAT element count
+    /// of this specialization's args (P.1.6 rung B): a scalar param is 1 slot, a vec-`n` param is `n`. For an
+    /// all-scalar function this equals the parameter count (the pre-rung-B behavior).
     arity: usize,
     /// The STATIC return type (P.1.4e) — the native ABI returns an untyped `f64`, so this says whether it's a
     /// number or a boolean (`0.0`/`1.0`). Derived once at compile time from the body's [`Ty`]; the dispatch
-    /// re-tags the result into the matching [`fab_lang::Value`]. Extends to a vector descriptor with the ABI.
+    /// re-tags the result into the matching [`fab_lang::Value`]. Extends to a vector descriptor with rung C.
     ret_ty: Ty,
 }
 
@@ -170,117 +253,235 @@ impl JitFn {
     }
 }
 
-/// A cache of many numeric functions compiled into ONE [`JITModule`] and finalized together — the
-/// production form of the spike (which leaked a module per function). Built from a program's user
-/// functions: each is TRIED, the numeric-subset ones are kept (keyed by name), the rest declined and
-/// left to the interpreter. Lookup is by function name (a program's function store is name-keyed, like
-/// the intrinsic registry). The module is kept mapped for the registry's lifetime.
+/// One user function's compile inputs, OWNED (P.1.6 rung B). The registry CLONES these at build so it can
+/// RECOMPILE a function for a new arg SHAPE on demand — the interpreter's AST is borrowed only during
+/// `build`, which keeps `Box<dyn NumericJit>` `'static` (Ctx.jit needs no lifetime). `Expr`/`Parameter` are
+/// `Clone`; the clone is one-time per program.
+struct OwnedDef {
+    params: Vec<Parameter>,
+    body: Expr,
+}
+
+/// The compiled-function store: a program's user functions compiled into ONE [`JITModule`], with a
+/// per-`(name, arg-shape)` specialization cache (P.1.6 rung B). The all-SCALAR shape of every function is
+/// pre-compiled at `build` (the hot path stays warm + feeds the EXPLAIN report); a VECTOR-arg shape is
+/// compiled LAZILY on first sight during eval and memoized. Because [`JITModule`] finalizes incrementally, a
+/// later on-demand `define`+`finalize` leaves every earlier code pointer valid.
+///
+/// The `RefCell`s carry the interior mutability the lazy path needs behind `NumericJit`'s `&self`: the module
+/// (to define new specializations), the cache (to memoize them), and a reused flatten scratch. A JIT'd body
+/// is pure native math and never re-enters the interpreter, so a compiled function can't recursively call
+/// back into `call_numeric` — no `RefCell` is ever borrowed twice.
 pub struct JitRegistry {
-    _module: JITModule,
-    fns: BTreeMap<String, CompiledFn>,
-    /// Functions that DIDN'T compile → the first out-of-subset node kind that blocked them ([`kind_name`]).
-    /// The absorption ceiling: aggregated, it says which subset feature (calls, indexing, comprehensions)
-    /// would unlock the most whole functions. Surfaced by the `FAB_JIT_EXPLAIN` coverage histogram.
+    /// The one module every specialization compiles into. `RefCell` because rung B defines new shapes through
+    /// `&self` during eval.
+    module: RefCell<JITModule>,
+    /// The external math helpers, declared once at build; their `FuncId`s are module-stable and reused by
+    /// every specialization (scalar and on-demand alike).
+    helpers: Helpers,
+    /// Every user function, OWNED, for on-demand recompile + inlining. Name-keyed.
+    defs: BTreeMap<String, OwnedDef>,
+    /// Top-level constants, OWNED (P.1.4 globals): a free variable resolves by compiling its value-expr.
+    globals: BTreeMap<String, Expr>,
+    /// name → (arg-shape → the compiled specialization, or `None` if that shape DECLINES). The all-scalar
+    /// shape is pre-filled at build; a vector shape is compiled + memoized on first sight. `None` memoizes a
+    /// decline, so a declining shape compiles at most once (never re-attempted per call).
+    cache: RefCell<BTreeMap<String, BTreeMap<ShapeSig, Option<CompiledFn>>>>,
+    /// Reused flatten scratch — the current call's arg `f64`s. Single-threaded, so one buffer avoids a
+    /// per-call allocation on the hot path.
+    scratch: RefCell<Vec<f64>>,
+    /// Monotone counter for a unique export symbol per specialization (Cranelift needs distinct symbols).
+    next_symbol: Cell<usize>,
+    /// Build-time decline reasons for the ALL-SCALAR shape (name → first out-of-subset blocker) — the
+    /// absorption-ceiling histogram for `FAB_JIT_EXPLAIN`. Vector shapes compile on demand and aren't here.
     declined: BTreeMap<String, &'static str>,
+    /// How many functions compiled their all-scalar shape at build — the EXPLAIN coverage count.
+    scalar_compiled: usize,
 }
 
 impl JitRegistry {
-    /// Compile every numeric-subset function in `defs` into one module. Each entry is `(name,
-    /// param_names, body)`; a function outside the subset (or a codegen failure) is SKIPPED, not fatal —
-    /// the registry holds only what compiled, and the caller interprets the rest. An empty result (no
-    /// function compiled) is a valid, empty registry.
+    /// Own every function in `defs` + constant in `consts`, then PRE-COMPILE each function's all-SCALAR
+    /// specialization into one module (the hot path + the EXPLAIN coverage signal). A function outside the
+    /// numeric subset for all-scalar args is recorded as declined, not fatal — and MAY still compile later for
+    /// a vector-arg shape (rung B, on demand). An empty `defs` is a valid, empty registry.
     ///
     /// # Errors
-    /// [`JitError::Cranelift`] only for a module-level failure (ISA/module setup, or the single
+    /// [`JitError::Cranelift`] only for a module-level failure (ISA/module setup, or the single build-time
     /// `finalize_definitions`) — a per-function decline is swallowed, never surfaced as an error.
     pub fn build<'a>(
         defs: impl IntoIterator<Item = (&'a str, &'a [Parameter], &'a Expr)>,
         consts: impl IntoIterator<Item = (&'a str, &'a Expr)>,
     ) -> Result<Self, JitError> {
-        // Materialize the input so every function is visible to every other (a caller can INLINE any callee,
-        // including forward references). `fn_defs` maps name → (parameters, body) for the inliner; `globals`
-        // maps a top-level constant's name → its value-expr for free-variable resolution (P.1.4 globals).
-        let entries: Vec<(&str, &[Parameter], &Expr)> = defs.into_iter().collect();
-        let fn_defs: FnDefs = entries.iter().map(|&(n, p, b)| (n, (p, b))).collect();
-        let globals: Globals = consts.into_iter().collect();
+        // Own the AST up front so the registry can recompile any function for a new arg shape later.
+        let owned_defs: BTreeMap<String, OwnedDef> = defs
+            .into_iter()
+            .map(|(n, p, b)| (n.to_string(), OwnedDef { params: p.to_vec(), body: b.clone() }))
+            .collect();
+        let owned_globals: BTreeMap<String, Expr> =
+            consts.into_iter().map(|(n, v)| (n.to_string(), v.clone())).collect();
+
         let mut module = new_module()?;
         let helpers = declare_helpers(&mut module)?;
-        // Declare + define each compilable function, remembering its FuncId to resolve the code pointer
-        // AFTER the single finalize. A unique export symbol per function (by index) avoids collisions.
-        let mut pending: Vec<(String, FuncId, usize, Ty)> = Vec::new();
+
+        let mut cache: BTreeMap<String, BTreeMap<ShapeSig, Option<CompiledFn>>> = BTreeMap::new();
         let mut declined: BTreeMap<String, &'static str> = BTreeMap::new();
-        for (i, &(name, params, body)) in entries.iter().enumerate() {
-            let symbol = format!("scad_jit_{i}");
-            // `define_one` indexes the top-level params by NAME (they're always fully applied via the
-            // dispatch gate); defaults only matter for INLINED callees, which read them from `fn_defs`.
-            let param_names: Vec<&str> = params.iter().map(|p| p.name.as_ref()).collect();
-            match define_one(&mut module, &symbol, &param_names, body, &fn_defs, &globals, &helpers) {
-                Ok((func_id, ret_ty)) => pending.push((name.to_string(), func_id, params.len(), ret_ty)),
-                // Declined → the interpreter handles it; record the FIRST out-of-subset node that blocked it
-                // (the absorption-ceiling signal for the EXPLAIN histogram).
-                Err(JitError::Unsupported(reason)) => {
-                    declined.insert(name.to_string(), reason);
+        let mut scalar_compiled = 0usize;
+        let mut next_symbol = 0usize;
+        {
+            // Borrow-maps over the OWNED AST for the compiler (every function visible to every other, so a
+            // caller can inline any callee incl. a forward reference). Built once for the whole build pass.
+            let fn_defs: FnDefs =
+                owned_defs.iter().map(|(n, d)| (n.as_str(), (d.params.as_slice(), &d.body))).collect();
+            let globals: Globals = owned_globals.iter().map(|(n, v)| (n.as_str(), v)).collect();
+            // Declare + define each function's all-scalar shape, remembering its FuncId to resolve the code
+            // pointer AFTER the single finalize. `Vec(name, FuncId, flatlen, ret_ty)`.
+            let mut pending: Vec<(&str, FuncId, usize, Ty)> = Vec::new();
+            for (name, d) in &owned_defs {
+                let params: Vec<(&str, ArgShape)> =
+                    d.params.iter().map(|p| (p.name.as_ref(), ArgShape::Scalar)).collect();
+                let symbol = format!("scad_jit_{next_symbol}");
+                next_symbol += 1;
+                match define_one(&mut module, &symbol, &params, &d.body, &fn_defs, &globals, &helpers) {
+                    // all-scalar flatlen == parameter count.
+                    Ok((func_id, ret_ty)) => pending.push((name, func_id, d.params.len(), ret_ty)),
+                    Err(JitError::Unsupported(reason)) => {
+                        declined.insert(name.clone(), reason);
+                    }
+                    Err(e) => return Err(e), // a real codegen failure — surface it
                 }
-                Err(e) => return Err(e), // a real codegen failure — surface it
+            }
+            module.finalize_definitions().map_err(|e| JitError::Cranelift(e.to_string()))?;
+            for (name, func_id, flatlen, ret_ty) in pending {
+                let code = module.get_finalized_function(func_id);
+                let sig = vec![ArgShape::Scalar; flatlen];
+                cache
+                    .entry(name.to_string())
+                    .or_default()
+                    .insert(sig, Some(CompiledFn { code, arity: flatlen, ret_ty }));
+                scalar_compiled += 1;
             }
         }
-        module
-            .finalize_definitions()
-            .map_err(|e| JitError::Cranelift(e.to_string()))?;
-        let fns = pending
-            .into_iter()
-            .map(|(name, func_id, arity, ret_ty)| {
-                let code = module.get_finalized_function(func_id);
-                (name, CompiledFn { code, arity, ret_ty })
-            })
-            .collect();
-        Ok(JitRegistry { _module: module, fns, declined })
+
+        Ok(JitRegistry {
+            module: RefCell::new(module),
+            helpers,
+            defs: owned_defs,
+            globals: owned_globals,
+            cache: RefCell::new(cache),
+            scratch: RefCell::new(Vec::new()),
+            next_symbol: Cell::new(next_symbol),
+            declined,
+            scalar_compiled,
+        })
     }
 
-    /// Per-function decline reasons (name → the first out-of-subset node kind) — the absorption ceiling.
+    /// The specialization for `(name, sig)` — from the cache, or COMPILED on demand and memoized (P.1.6 rung
+    /// B). `None` if `name` is unknown OR this arg shape DECLINES (the body leaves the numeric subset for these
+    /// shapes); a decline memoizes as `None`, so a shape compiles at most once. The returned [`CompiledFn`] is
+    /// `Copy`, lifted out from behind the cache borrow — the code stays mapped for the registry's life.
+    fn get_or_compile(&self, name: &str, sig: &ShapeSig) -> Option<CompiledFn> {
+        // Fast path: already compiled, or a memoized decline.
+        if let Some(entry) = self.cache.borrow().get(name).and_then(|m| m.get(sig)) {
+            return *entry;
+        }
+        // Unknown function → nothing to compile (and nothing to memoize).
+        let def = self.defs.get(name)?;
+        // Compile this shape now. Build the param-shape list + the borrow-maps over the owned AST (only paid
+        // on a cache MISS — a rare event, once per never-before-seen shape).
+        let params: Vec<(&str, ArgShape)> = def
+            .params
+            .iter()
+            .enumerate()
+            .map(|(i, p)| (p.name.as_ref(), sig.get(i).cloned().unwrap_or(ArgShape::Scalar)))
+            .collect();
+        let flatlen: usize = sig.iter().map(ArgShape::size).sum();
+        let symbol = {
+            let n = self.next_symbol.get();
+            self.next_symbol.set(n + 1);
+            format!("scad_jit_{n}")
+        };
+        let fn_defs: FnDefs =
+            self.defs.iter().map(|(n, d)| (n.as_str(), (d.params.as_slice(), &d.body))).collect();
+        let globals: Globals = self.globals.iter().map(|(n, v)| (n.as_str(), v)).collect();
+        let compiled = {
+            let mut module = self.module.borrow_mut();
+            match define_one(&mut module, &symbol, &params, &def.body, &fn_defs, &globals, &self.helpers) {
+                Ok((func_id, ret_ty)) => match module.finalize_definitions() {
+                    Ok(()) => Some(CompiledFn {
+                        code: module.get_finalized_function(func_id),
+                        arity: flatlen,
+                        ret_ty,
+                    }),
+                    // A finalize failure is unexpected mid-eval; decline this shape (interpret) rather than panic.
+                    Err(_) => None,
+                },
+                // Out of the numeric subset for this shape (or a codegen failure) → memoize the decline.
+                Err(_) => None,
+            }
+        };
+        self.cache.borrow_mut().entry(name.to_string()).or_default().insert(sig.clone(), compiled);
+        compiled
+    }
+
+    /// Per-function decline reasons for the ALL-SCALAR shape (name → the first out-of-subset node kind) — the
+    /// build-time absorption ceiling. Vector-arg shapes compile on demand, so some names here still gain a
+    /// specialization at runtime (rung B); this is the conservative scalar view the EXPLAIN report shows.
     #[must_use]
     pub fn declined(&self) -> &BTreeMap<String, &'static str> {
         &self.declined
     }
 
-    /// The compiled function named `name`, if one was compiled (else the caller interprets).
+    /// The pre-compiled all-SCALAR specialization named `name`, if it compiled (else `None`). The stable
+    /// name-keyed lookup the scalar tests + EXPLAIN use; vector shapes go through [`get_or_compile`].
     #[must_use]
-    pub fn get(&self, name: &str) -> Option<&CompiledFn> {
-        self.fns.get(name)
+    pub fn get(&self, name: &str) -> Option<CompiledFn> {
+        let n = self.defs.get(name)?.params.len();
+        let sig = vec![ArgShape::Scalar; n];
+        let cache = self.cache.borrow();
+        cache.get(name).and_then(|m| m.get(&sig)).copied().flatten()
     }
 
-    /// How many functions compiled — the coverage count (feeds the EXPLAIN report).
+    /// How many functions compiled their all-scalar shape at build — the coverage count (EXPLAIN report).
     #[must_use]
     pub fn len(&self) -> usize {
-        self.fns.len()
+        self.scalar_compiled
     }
 
-    /// Whether nothing compiled (a program with no numeric-subset functions).
+    /// Whether there are NO functions to JIT at all (an empty program). Unlike the pre-rung-B registry, a
+    /// non-empty registry is kept even if nothing compiled all-scalar — a vector-arg shape may still compile
+    /// on demand, so the hook stays installed whenever there's a function it could specialize.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.fns.is_empty()
+        self.defs.is_empty()
     }
 
-    /// The names of the compiled functions, sorted — for the FAB_EXPLAIN coverage report.
+    /// The names whose all-SCALAR shape compiled, sorted — for the FAB_EXPLAIN coverage report.
     pub fn compiled_names(&self) -> impl Iterator<Item = &str> {
-        self.fns.keys().map(String::as_str)
+        self.defs.keys().map(String::as_str).filter(|n| self.get(n).is_some())
     }
 }
 
-/// The dispatch hook the interpreter calls (P.1.2). A compiled function named `name` with matching arity
-/// runs as native code; anything else returns `None` and the interpreter runs the body. The arity filter
-/// is defensive — the dispatch gate already guarantees `args.len()` equals the compiled arity, but a
-/// mismatch declines rather than reading past the arg slice.
+/// The dispatch hook the interpreter calls (P.1.2). The hook SCALARIZES the evaluated args itself (P.1.6 rung
+/// B) — a `Num` is a scalar, a `NumList` a fixed-small vector — then runs (or on-demand compiles) the
+/// specialization for that exact arg SHAPE. `None` means "not scalarizable / not compiled / declined / the
+/// inline assert raised" — the interpreter takes over in every case, which is correct for all of them.
 impl NumericJit for JitRegistry {
-    fn call_numeric(&self, name: &str, args: &[f64]) -> Option<JitOutcome> {
-        // A compiled function whose inline assert FAILED returns `None` → the interpreter runs the body and
-        // raises the exact error. So `None` here means BOTH "not compiled" and "compiled but raised" — either
-        // way the interpreter takes over, which is correct for both. On a value, RE-TAG the untyped `f64` by
-        // the function's static return type (P.1.4e): a bool-returning predicate yields `0.0`/`1.0` that the
-        // dispatch must wrap in `Value::Bool`, not `Value::Num`.
-        let f = self.get(name).filter(|f| f.arity() == args.len())?;
-        let raw = f.call(args)?;
-        Some(match f.ret_ty {
+    fn call_numeric(&self, name: &str, args: &[ScadValue]) -> Option<JitOutcome> {
+        // Cheap membership check before any flatten work — most eligible calls are to non-JIT functions.
+        if !self.defs.contains_key(name) {
+            return None;
+        }
+        let mut scratch = self.scratch.borrow_mut();
+        // Derive the arg shape + flatten the f64s into scratch. `None` → a non-scalarizable arg (nested list,
+        // string, over-long vector) → interpret. `get_or_compile` doesn't touch `scratch`, so holding this
+        // borrow across it is safe (a different `RefCell`), and the compiled fn then reads `scratch` directly.
+        let sig = shape_and_flatten(args, &mut scratch)?;
+        let compiled = self.get_or_compile(name, &sig)?;
+        // RE-TAG the untyped native `f64` by the specialization's static return type (P.1.4e): a bool-returning
+        // predicate yields `0.0`/`1.0` the dispatch must wrap in `Value::Bool`. `None` from `call` = the inline
+        // assert raised → interpret (which re-runs and raises the exact error).
+        let raw = compiled.call(&scratch)?;
+        Some(match compiled.ret_ty {
             Ty::Num => JitOutcome::Num(raw),
             Ty::Bool => JitOutcome::Bool(raw != 0.0),
         })
@@ -293,8 +494,9 @@ impl NumericJit for JitRegistry {
 /// OPT-IN under `FAB_JIT=1` for now — the interpreter is the bit-identical baseline and the doctrine is
 /// never-silently-wrong, so a NEW eval path stays off by default until P.1.3's end-to-end fast==JIT
 /// differential proves it byte-for-byte on the corpus/models; then the default flips ON. Unset / any other
-/// value → `None` (pure interpreter). An empty registry (nothing in the numeric subset compiled) also
-/// returns `None`, so `Ctx.jit` carries a hook only when it can actually pay.
+/// value → `None` (pure interpreter). An empty registry (a program with NO user functions) also returns
+/// `None`; a non-empty one keeps the hook even if nothing compiled all-scalar — a vector-arg shape may still
+/// compile on demand (P.1.6 rung B).
 pub struct JitFactory;
 
 impl NumericJitFactory for JitFactory {
@@ -349,6 +551,10 @@ fn explain_coverage(defs: &[JitDef<'_>], registry: &JitRegistry) {
         let share = 100.0 * *count as f64 / declined_total.max(1) as f64;
         eprintln!("[jit-explain]     {count:>5}  {share:5.1}%  {reason}");
     }
+    // This is the ALL-SCALAR view: a function blocked by `index of a non-vector` / `member access on a
+    // non-vector` here still gains a specialization when CALLED with a vector arg (P.1.6 rung B, compiled on
+    // demand and not counted above). The scalar histogram is the conservative floor.
+    eprintln!("[jit-explain]   (vector-arg specializations compile on demand at runtime — not in the counts above)");
 }
 
 /// Compile a single numeric function body (over `param_names`, in order) to native code, owning its own
@@ -367,8 +573,10 @@ pub fn compile_function(param_names: &[&str], body: &Expr) -> Result<JitFn, JitE
     // constant therefore declines. [`JitRegistry`] is the multi-function, globals-aware form.
     let no_defs = FnDefs::new();
     let no_globals = Globals::new();
+    // The standalone differential passes plain `f64` args, so every parameter is a SCALAR shape.
+    let params: Vec<(&str, ArgShape)> = param_names.iter().map(|&n| (n, ArgShape::Scalar)).collect();
     let (func_id, ret_ty) =
-        define_one(&mut module, "scad_jit_fn", param_names, body, &no_defs, &no_globals, &helpers)?;
+        define_one(&mut module, "scad_jit_fn", &params, body, &no_defs, &no_globals, &helpers)?;
     // The standalone API is f64-only (the fast==JIT differential compares raw f64s); a bool-returning body is
     // the registry path's job (it carries the type tag), so DECLINE it here to keep the contract.
     if matches!(ret_ty, Ty::Bool) {
@@ -436,16 +644,21 @@ fn declare_helpers(module: &mut JITModule) -> Result<Helpers, JitError> {
     Ok(Helpers { fmod, powf, math })
 }
 
-/// Build the IR for one function and declare + define it in `module` under `symbol` (NOT finalized —
-/// the caller finalizes the whole module once). Returns the `FuncId` (to resolve the code pointer after
-/// finalize) AND the body's static return [`Ty`] — a bool-returning body is returned as `0.0`/`1.0` and the
-/// caller tags the function so the dispatch wraps `Value::Bool` (P.1.4e). On [`JitError::Unsupported`] nothing
-/// is added to the module (the IR is built before the declare/define), so a declined function leaves the
-/// module clean for the next one.
+/// Build the IR for one function specialized to `params` (each param's name + arg [`ArgShape`]) and declare +
+/// define it in `module` under `symbol` (NOT finalized — the caller finalizes once). Returns the `FuncId` (to
+/// resolve the code pointer after finalize) AND the body's static return [`Ty`] — a bool-returning body is
+/// returned as `0.0`/`1.0` and the caller tags the function so the dispatch wraps `Value::Bool` (P.1.4e).
+///
+/// The native ABI is `(flat_params: *const f64, raised: *mut u8) -> f64`: params are FLATTENED into the first
+/// pointer — a scalar param is one slot, a vec-`n` param is `n` contiguous slots (P.1.6 rung B). A scalar is
+/// read lazily by its flat offset; a vector param is loaded up-front into a scalarized [`Lowered::Vec`] and
+/// bound in the initial locals, so from there it's handled exactly like a rung-A internal vector. On
+/// [`JitError::Unsupported`] nothing is added to the module (IR is built before declare/define), so a declined
+/// function leaves the module clean for the next one.
 fn define_one(
     module: &mut JITModule,
     symbol: &str,
-    param_names: &[&str],
+    params: &[(&str, ArgShape)],
     body: &Expr,
     defs: &FnDefs,
     globals: &Globals,
@@ -474,9 +687,34 @@ fn define_one(
         let fmod_ref = module.declare_func_in_func(helpers.fmod, fb.func);
         let powf_ref = module.declare_func_in_func(helpers.powf, fb.func);
         let math_ref = module.declare_func_in_func(helpers.math, fb.func);
-        let index: BTreeMap<&str, usize> =
-            param_names.iter().enumerate().map(|(i, &n)| (n, i)).collect();
-        let locals = LetEnv::new(); // no let-bindings in scope at the function's top level
+        // Flat param layout: walk params in order assigning f64 slots — a scalar takes 1, a vec-`n` takes `n`.
+        // A scalar's flat ELEMENT offset goes in `index` (read lazily in the `Ident` arm as `offset * 8`
+        // bytes); a vector's `n` slots are loaded now into a `Lowered::Vec` bound in `locals`, so the body sees
+        // a scalarized vector. For an all-scalar function the offsets are 0,1,2,… — identical to the pre-rung-B
+        // param-index layout, so nothing changes for the scalar majority.
+        let mut index: BTreeMap<&str, usize> = BTreeMap::new();
+        let mut locals = LetEnv::new(); // seeded below with the vector params; then let-bindings extend it
+        let mut off = 0usize;
+        for (name, shape) in params {
+            match shape {
+                ArgShape::Scalar => {
+                    index.insert(name, off);
+                    off += 1;
+                }
+                ArgShape::Vec(n) => {
+                    let mut elems = Vec::with_capacity(*n);
+                    for k in 0..*n {
+                        let byte_off = i32::try_from((off + k) * 8)
+                            .map_err(|_| JitError::Unsupported("param offset overflow"))?;
+                        let v =
+                            fb.ins().load(types::F64, MemFlagsData::trusted(), params_ptr, byte_off);
+                        elems.push(Lowered::Num(v));
+                    }
+                    locals.insert(name, Lowered::Vec(elems));
+                    off += n;
+                }
+            }
+        }
         let inlining: [&str; 0] = []; // nothing being inlined at the top level
         let lower = Lower {
             params_ptr,
@@ -903,6 +1141,22 @@ fn compile_expr(fb: &mut FunctionBuilder, expr: &Expr, lower: &Lower) -> Result<
             let idx = *n as usize;
             elems.into_iter().nth(idx).ok_or(JitError::Unsupported("index out of range"))
         }
+        // `v.x`/`v.y`/`v.z` on a scalarized vector → element 0/1/2 (P.1.6 rung B). `ops::member` maps ONLY
+        // x/y/z to an index and EVERYTHING else to `undef`; a `.z` on a too-short vector is `undef` too. The
+        // JIT can't represent `undef`, so a non-xyz field OR an out-of-range axis DECLINES — same element,
+        // no float op, so bit-identical to the interpreter's `index(base, axis)`.
+        ExprKind::Member { base, field } => {
+            let Lowered::Vec(elems) = compile_expr(fb, base, lower)? else {
+                return Err(JitError::Unsupported("member access on a non-vector"));
+            };
+            let idx = match field.as_str() {
+                "x" => 0,
+                "y" => 1,
+                "z" => 2,
+                _ => return Err(JitError::Unsupported("non-xyz member access")),
+            };
+            elems.into_iter().nth(idx).ok_or(JitError::Unsupported("member axis out of range"))
+        }
         // Everything else DECLINES — named so the EXPLAIN coverage histogram (P.1.4) shows WHICH node kind
         // blocks each function, i.e. the absorption ceiling per subset feature we might add next.
         other => Err(JitError::Unsupported(kind_name(other))),
@@ -1012,7 +1266,6 @@ fn select_lowered(
 fn kind_name(kind: &ExprKind) -> &'static str {
     match kind {
         ExprKind::Call { .. } => "call",
-        ExprKind::Member { .. } => "member-access",
         ExprKind::Range { .. } => "range",
         ExprKind::Let { .. } => "let-binding",
         ExprKind::FunctionLiteral { .. } => "function-literal",
@@ -1023,10 +1276,11 @@ fn kind_name(kind: &ExprKind) -> &'static str {
         ExprKind::Echo { .. } => "echo",
         ExprKind::Str(_) => "string-literal",
         ExprKind::Undef => "undef-literal",
-        // The handled kinds don't reach here; name them defensively rather than wildcard. `Vector`/`Index` are
-        // handled (P.1.6 rung A) — they decline with a SPECIFIC reason inside their arm, never via this path.
+        // The handled kinds don't reach here; name them defensively rather than wildcard. `Vector`/`Index`
+        // (rung A) + `Member` (rung B) are handled — they decline with a SPECIFIC reason inside their arm,
+        // never via this path.
         ExprKind::Num(_) | ExprKind::Bool(_) | ExprKind::Ident(_) | ExprKind::Unary { .. }
         | ExprKind::Binary { .. } | ExprKind::Ternary { .. } | ExprKind::Vector(_)
-        | ExprKind::Index { .. } => "unhandled-in-subset",
+        | ExprKind::Index { .. } | ExprKind::Member { .. } => "unhandled-in-subset",
     }
 }

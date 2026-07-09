@@ -70,6 +70,19 @@ const ONE: &[&[f64]] = &[
     &[-0.0],
 ];
 
+// Two-parameter samples for the comparison/max cases: ordered pairs, equal pairs, and NaN/inf mixes.
+const TWO: &[&[f64]] = &[
+    &[1.0, 2.0],
+    &[2.0, 1.0],
+    &[3.0, 3.0],
+    &[-1.0, 1.0],
+    &[0.0, -0.0],
+    &[f64::NAN, 1.0],
+    &[1.0, f64::NAN],
+    &[f64::INFINITY, 1.0],
+    &[-5.0, -5.0],
+];
+
 #[test]
 fn polynomial_horner() {
     // The classic hot numeric function — a Horner-form polynomial (nested mul+add, the shape an
@@ -123,17 +136,49 @@ fn two_parameter_functions() {
 #[test]
 fn unsupported_nodes_decline_cleanly() {
     // The compiler must DECLINE (not miscompile) anything outside the numeric subset.
-    let prog = program("function f(x) = sin(x);"); // a call — deferred
-    let (names, body) = func(&prog);
-    assert!(compile_function(&names, body).is_err());
-
-    let prog = program("function f(x) = x > 0 ? x : -x;"); // ternary + comparison
+    let prog = program("function f(x) = sin(x);"); // a call — deferred to P.1.4b
     let (names, body) = func(&prog);
     assert!(compile_function(&names, body).is_err());
 
     let prog = program("function f(x) = x + y;"); // free variable y
     let (names, body) = func(&prog);
     assert!(compile_function(&names, body).is_err());
+
+    let prog = program("function f(x) = x > 0;"); // a BOOL-valued body → declines (dispatch wraps as Num)
+    let (names, body) = func(&prog);
+    assert!(compile_function(&names, body).is_err());
+}
+
+// A battery reaching the IEEE corners the comparison/ternary paths turn on (±0, ±inf, NaN, ordering).
+const EDGE: &[&[f64]] = &[
+    &[0.0],
+    &[-0.0],
+    &[1.0],
+    &[-1.0],
+    &[3.5],
+    &[-3.5],
+    &[1e300],
+    &[f64::INFINITY],
+    &[f64::NEG_INFINITY],
+    &[f64::NAN],
+];
+
+#[test]
+fn ternary_and_comparisons_fast_eq_jit() {
+    // P.1.4a: comparisons (ORDERED `< <= > >= ==`, UNORDERED `!=`) + a ternary that SELECTS numbers, all
+    // bit-identical to the interpreter across the IEEE corners — NaN (unordered → false branch), ±0, ±inf.
+    assert_fast_eq_jit("function f(x) = x > 0 ? x : -x;", EDGE); // abs-like
+    assert_fast_eq_jit("function f(x) = x < 0 ? -x : x;", EDGE);
+    assert_fast_eq_jit("function f(x) = x >= 1 ? x*x : x + 1;", EDGE);
+    assert_fast_eq_jit("function f(x) = x <= 0 ? 0 : x;", EDGE); // clamp-low
+    assert_fast_eq_jit("function f(x) = x == 0 ? 1 : 1/x;", EDGE); // untaken 1/0=inf discarded
+    assert_fast_eq_jit("function f(x) = x != x ? 0 : x;", EDGE); // NaN-detect (x!=x is unordered-true)
+    assert_fast_eq_jit("function f(a, b) = a > b ? a : b;", TWO); // max
+    assert_fast_eq_jit("function f(a, b) = a > 0 && b > 0 ? a + b : 0;", TWO); // &&
+    assert_fast_eq_jit("function f(a, b) = a > 0 || b > 0 ? 1 : -1;", TWO); // ||
+    assert_fast_eq_jit("function f(x) = !(x > 0) ? -1 : 1;", EDGE); // unary !
+    // Nested ternary (chained clamp): lo/hi bounds.
+    assert_fast_eq_jit("function f(x) = x < 0 ? 0 : (x > 10 ? 10 : x);", EDGE);
 }
 
 #[test]

@@ -18,6 +18,7 @@
 
 use std::collections::BTreeMap;
 
+use cranelift::codegen::ir::condcodes::{FloatCC, IntCC};
 use cranelift::codegen::ir::{FuncRef, Value};
 use cranelift::jit::{JITBuilder, JITModule};
 use cranelift::module::{FuncId, Linkage, Module, ModuleError, default_libcall_names};
@@ -25,6 +26,18 @@ use cranelift::prelude::{
     AbiParam, Configurable, FunctionBuilder, FunctionBuilderContext, InstBuilder, MemFlagsData,
     settings, types,
 };
+
+/// The runtime TYPE of a compiled sub-expression. Both are IR values, but the distinction is
+/// load-bearing: the interpreter's comparisons and `&&`/`||`/`!` produce a BOOL (`Value::Bool`), not a
+/// number, and a function that RETURNS a bool must NOT be JIT'd (the dispatch wraps the result in
+/// `Value::Num`, so a bool return would diverge). `Num` is an `f64`; `Bool` is an `i8` (0/1, the shape
+/// Cranelift's `fcmp`/`icmp` yield and `select` consumes). A bool only ever feeds a condition or another
+/// logical op — it can't be the function's return, nor an operand to arithmetic.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Ty {
+    Num,
+    Bool,
+}
 
 use fab_lang::{BinOp, Expr, ExprKind, JitDef, NumericJit, NumericJitFactory, UnOp};
 
@@ -347,7 +360,10 @@ fn define_one(
             param_names.iter().enumerate().map(|(i, &n)| (n, i)).collect();
 
         // IR is built BEFORE declare/define — an Unsupported node returns here with the module untouched.
-        let result = compile_expr(&mut fb, body, params_ptr, &index, fmod_ref, powf_ref)?;
+        let (result, ty) = compile_expr(&mut fb, body, params_ptr, &index, fmod_ref, powf_ref)?;
+        // The compiled function returns f64 (wrapped in `Value::Num` at dispatch), so a bool-valued body
+        // (e.g. `x > 0`) must DECLINE — those are the interpreter's / intrinsic tier's job, not the JIT's.
+        let result = require_num(result, ty)?;
         fb.ins().return_(&[result]);
         fb.finalize();
     }
@@ -358,10 +374,47 @@ fn define_one(
     Ok(func_id)
 }
 
-/// Recursively lower `expr` to a Cranelift `f64` value. Left operand before right — but for pure
-/// numeric ops the operand ORDER doesn't affect the result bits (the operation is the same
-/// `fadd(a, b)` either way); what matters is that we emit the operation itself, never a fused or
-/// reordered variant. The AST is `MAX_DEPTH`-bounded by the parser, so this recursion can't overflow.
+/// Reduce a compiled sub-expression to its TRUTHINESS as an `i8` (0/1) — the interpreter's
+/// `Value::is_truthy`. A `Bool` already IS that. A `Num` is truthy iff `!= 0.0` with `NaN` TRUTHY and
+/// `±0` falsy — exactly `fcmp NotEqual` (`une`: unordered, so `NaN != 0` is true; `-0.0 != 0.0` is
+/// false). This is what a ternary condition and `&&`/`||`/`!` test.
+fn truthy(fb: &mut FunctionBuilder, v: Value, ty: Ty) -> Value {
+    match ty {
+        Ty::Bool => v,
+        Ty::Num => {
+            let zero = fb.ins().f64const(0.0);
+            fb.ins().fcmp(FloatCC::NotEqual, v, zero)
+        }
+    }
+}
+
+/// The Cranelift float condition for an ORDERED comparison operator, matching the interpreter EXACTLY:
+/// `<`/`<=`/`>`/`>=`/`==` go through `partial_cmp` (`NaN` → false), i.e. the ORDERED predicates; `!=` is
+/// the interpreter's `x != y` (`NaN != NaN` is TRUE), i.e. UNORDERED not-equal. Any non-comparison op → `None`.
+fn float_cc(op: BinOp) -> Option<FloatCC> {
+    Some(match op {
+        BinOp::Lt => FloatCC::LessThan,
+        BinOp::Le => FloatCC::LessThanOrEqual,
+        BinOp::Gt => FloatCC::GreaterThan,
+        BinOp::Ge => FloatCC::GreaterThanOrEqual,
+        BinOp::Eq => FloatCC::Equal,
+        BinOp::Ne => FloatCC::NotEqual,
+        _ => return None,
+    })
+}
+
+/// Recursively lower `expr` to a Cranelift value + its [`Ty`]. Left operand before right — but for pure
+/// numeric ops the operand ORDER doesn't affect the result bits (the operation is the same `fadd(a, b)`
+/// either way); what matters is that we emit the operation itself, never a fused or reordered variant.
+/// The AST is `MAX_DEPTH`-bounded by the parser, so this recursion can't overflow.
+///
+/// Type discipline keeps it sound: arithmetic requires `Num` operands, a comparison yields `Bool`, a
+/// ternary's branches must AGREE in type, and `&&`/`||`/`!` operate on truthiness. A construct outside the
+/// subset (a call, an index, a free variable, a bitwise op, a mixed-type ternary) DECLINES.
+#[allow(
+    clippy::too_many_lines,
+    reason = "the per-ExprKind lowering — one arm per node kind; splitting scatters the shared fb/index"
+)]
 fn compile_expr(
     fb: &mut FunctionBuilder,
     expr: &Expr,
@@ -369,46 +422,93 @@ fn compile_expr(
     index: &BTreeMap<&str, usize>,
     fmod: FuncRef,
     powf: FuncRef,
-) -> Result<Value, JitError> {
+) -> Result<(Value, Ty), JitError> {
     match &expr.kind {
-        ExprKind::Num(n) => Ok(fb.ins().f64const(*n)),
+        ExprKind::Num(n) => Ok((fb.ins().f64const(*n), Ty::Num)),
         ExprKind::Ident(name) => {
             let i = index
                 .get(name.as_str())
                 .ok_or(JitError::Unsupported("non-parameter identifier"))?;
             let offset =
                 i32::try_from(i * 8).map_err(|_| JitError::Unsupported("param offset overflow"))?;
-            Ok(fb
-                .ins()
-                .load(types::F64, MemFlagsData::trusted(), params_ptr, offset))
+            let v = fb.ins().load(types::F64, MemFlagsData::trusted(), params_ptr, offset);
+            // A parameter is always a number here — the dispatch gate only routes all-`Num` calls to the JIT.
+            Ok((v, Ty::Num))
         }
         ExprKind::Unary { op, operand } => {
-            let v = compile_expr(fb, operand, params_ptr, index, fmod, powf)?;
+            let (v, ty) = compile_expr(fb, operand, params_ptr, index, fmod, powf)?;
             match op {
-                UnOp::Neg => Ok(fb.ins().fneg(v)),
-                UnOp::Pos => Ok(v),
-                UnOp::Not | UnOp::BitNot => Err(JitError::Unsupported("non-arithmetic unary op")),
+                UnOp::Neg => Ok((fb.ins().fneg(require_num(v, ty)?), Ty::Num)),
+                UnOp::Pos => Ok((require_num(v, ty)?, Ty::Num)),
+                // `!x` = `!is_truthy(x)` → a Bool. `(truthy == 0)` inverts the 0/1 flag.
+                UnOp::Not => {
+                    let t = truthy(fb, v, ty);
+                    Ok((fb.ins().icmp_imm(IntCC::Equal, t, 0), Ty::Bool))
+                }
+                UnOp::BitNot => Err(JitError::Unsupported("bitwise-not")),
             }
         }
         ExprKind::Binary { op, lhs, rhs } => {
-            let a = compile_expr(fb, lhs, params_ptr, index, fmod, powf)?;
-            let b = compile_expr(fb, rhs, params_ptr, index, fmod, powf)?;
-            match op {
-                BinOp::Add => Ok(fb.ins().fadd(a, b)),
-                BinOp::Sub => Ok(fb.ins().fsub(a, b)),
-                BinOp::Mul => Ok(fb.ins().fmul(a, b)),
-                BinOp::Div => Ok(fb.ins().fdiv(a, b)),
+            let (a, aty) = compile_expr(fb, lhs, params_ptr, index, fmod, powf)?;
+            let (b, bty) = compile_expr(fb, rhs, params_ptr, index, fmod, powf)?;
+            // `&&`/`||`: the interpreter returns `Bool(truthy(a) OP truthy(b))`. Both operands are
+            // side-effect-free here, so eager evaluation equals short-circuit — same bool, no float rounding.
+            if matches!(op, BinOp::And | BinOp::Or) {
+                let ta = truthy(fb, a, aty);
+                let tb = truthy(fb, b, bty);
+                let r = if matches!(op, BinOp::And) {
+                    fb.ins().band(ta, tb)
+                } else {
+                    fb.ins().bor(ta, tb)
+                };
+                return Ok((r, Ty::Bool));
+            }
+            // A comparison: both operands must be numbers (the interpreter's `<` etc. on numbers).
+            if let Some(cc) = float_cc(*op) {
+                let (a, b) = (require_num(a, aty)?, require_num(b, bty)?);
+                return Ok((fb.ins().fcmp(cc, a, b), Ty::Bool));
+            }
+            // Arithmetic: both operands numbers → a number.
+            let (a, b) = (require_num(a, aty)?, require_num(b, bty)?);
+            let v = match op {
+                BinOp::Add => fb.ins().fadd(a, b),
+                BinOp::Sub => fb.ins().fsub(a, b),
+                BinOp::Mul => fb.ins().fmul(a, b),
+                BinOp::Div => fb.ins().fdiv(a, b),
                 BinOp::Mod => {
                     let call = fb.ins().call(fmod, &[a, b]);
-                    Ok(fb.inst_results(call)[0])
+                    fb.inst_results(call)[0]
                 }
                 BinOp::Pow => {
                     let call = fb.ins().call(powf, &[a, b]);
-                    Ok(fb.inst_results(call)[0])
+                    fb.inst_results(call)[0]
                 }
-                _ => Err(JitError::Unsupported("non-arithmetic binary op")),
+                _ => return Err(JitError::Unsupported("non-arithmetic binary op")),
+            };
+            Ok((v, Ty::Num))
+        }
+        // `c ? then : els` — the interpreter evaluates ONLY the taken branch, but both branches are
+        // side-effect-free (pure arithmetic), so eager `select` is bit-identical: the untaken branch's
+        // discarded NaN/inf can't affect the chosen result. Branches must agree in type.
+        ExprKind::Ternary { cond, then, els } => {
+            let (cv, cty) = compile_expr(fb, cond, params_ptr, index, fmod, powf)?;
+            let c = truthy(fb, cv, cty);
+            let (tv, tty) = compile_expr(fb, then, params_ptr, index, fmod, powf)?;
+            let (ev, ety) = compile_expr(fb, els, params_ptr, index, fmod, powf)?;
+            if tty != ety {
+                return Err(JitError::Unsupported("ternary branches differ in type"));
             }
+            Ok((fb.ins().select(c, tv, ev), tty))
         }
         _ => Err(JitError::Unsupported("unsupported expression node")),
+    }
+}
+
+/// A compiled sub-expression that MUST be a number (arithmetic operand, comparison operand, function
+/// return). A `Bool` there is outside the subset → DECLINE (e.g. `true + 1`, or a bool-returning body).
+fn require_num(v: Value, ty: Ty) -> Result<Value, JitError> {
+    match ty {
+        Ty::Num => Ok(v),
+        Ty::Bool => Err(JitError::Unsupported("a boolean where a number is required")),
     }
 }

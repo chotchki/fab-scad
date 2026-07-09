@@ -148,6 +148,10 @@ impl JitFn {
 pub struct JitRegistry {
     _module: JITModule,
     fns: BTreeMap<String, CompiledFn>,
+    /// Functions that DIDN'T compile → the first out-of-subset node kind that blocked them ([`kind_name`]).
+    /// The absorption ceiling: aggregated, it says which subset feature (calls, indexing, comprehensions)
+    /// would unlock the most whole functions. Surfaced by the `FAB_JIT_EXPLAIN` coverage histogram.
+    declined: BTreeMap<String, &'static str>,
 }
 
 impl JitRegistry {
@@ -167,11 +171,16 @@ impl JitRegistry {
         // Declare + define each compilable function, remembering its FuncId to resolve the code pointer
         // AFTER the single finalize. A unique export symbol per function (by index) avoids collisions.
         let mut pending: Vec<(String, FuncId, usize)> = Vec::new();
+        let mut declined: BTreeMap<String, &'static str> = BTreeMap::new();
         for (i, (name, param_names, body)) in defs.into_iter().enumerate() {
             let symbol = format!("scad_jit_{i}");
             match define_one(&mut module, &symbol, param_names, body, fmod_id, powf_id) {
                 Ok(func_id) => pending.push((name.to_string(), func_id, param_names.len())),
-                Err(JitError::Unsupported(_)) => {} // declined → interpreter handles it
+                // Declined → the interpreter handles it; record the FIRST out-of-subset node that blocked it
+                // (the absorption-ceiling signal for the EXPLAIN histogram).
+                Err(JitError::Unsupported(reason)) => {
+                    declined.insert(name.to_string(), reason);
+                }
                 Err(e) => return Err(e), // a real codegen failure — surface it
             }
         }
@@ -185,7 +194,13 @@ impl JitRegistry {
                 (name, CompiledFn { code, arity })
             })
             .collect();
-        Ok(JitRegistry { _module: module, fns })
+        Ok(JitRegistry { _module: module, fns, declined })
+    }
+
+    /// Per-function decline reasons (name → the first out-of-subset node kind) — the absorption ceiling.
+    #[must_use]
+    pub fn declined(&self) -> &BTreeMap<String, &'static str> {
+        &self.declined
     }
 
     /// The compiled function named `name`, if one was compiled (else the caller interprets).
@@ -257,17 +272,31 @@ impl NumericJitFactory for JitFactory {
 /// The `FAB_JIT_EXPLAIN` coverage report (P.1.3) — the JIT sibling of the intrinsic tier's `FAB_EXPLAIN`.
 /// Which of the program's functions the numeric subset COMPILED (native dispatch) vs DECLINED (interpreted),
 /// to stderr. The declined count is the headroom `P.1.4` (ternary/comparisons/transcendental calls) reclaims.
+#[allow(
+    clippy::cast_precision_loss,
+    reason = "coverage/histogram percentages in a dev-only stderr report; a 2^52-function program is unreachable"
+)]
 fn explain_coverage(defs: &[JitDef<'_>], registry: &JitRegistry) {
     let total = defs.len();
     let compiled = registry.len();
-    #[allow(
-        clippy::cast_precision_loss,
-        reason = "a coverage percentage in a dev-only stderr report; a 2^52-function program is unreachable"
-    )]
     let pct = 100.0 * compiled as f64 / total.max(1) as f64;
     eprintln!("\n[jit-explain] === numeric-JIT coverage === {compiled}/{total} functions compiled ({pct:.1}%)");
     for name in registry.compiled_names() {
         eprintln!("[jit-explain]   + compiled  {name}");
+    }
+    // The absorption ceiling: which node kind blocks each declined function, aggregated. The biggest bucket
+    // is the subset feature (usually `call`) that would unlock the most WHOLE functions if added next.
+    let mut histogram: BTreeMap<&'static str, usize> = BTreeMap::new();
+    for reason in registry.declined().values() {
+        *histogram.entry(reason).or_default() += 1;
+    }
+    let mut rows: Vec<(&&'static str, &usize)> = histogram.iter().collect();
+    rows.sort_unstable_by(|a, b| b.1.cmp(a.1).then(a.0.cmp(b.0)));
+    let declined_total = registry.declined().len();
+    eprintln!("[jit-explain]   {declined_total} declined — first-blocker histogram (the absorption ceiling):");
+    for (reason, count) in rows {
+        let share = 100.0 * *count as f64 / declined_total.max(1) as f64;
+        eprintln!("[jit-explain]     {count:>5}  {share:5.1}%  {reason}");
     }
 }
 
@@ -500,7 +529,36 @@ fn compile_expr(
             }
             Ok((fb.ins().select(c, tv, ev), tty))
         }
-        _ => Err(JitError::Unsupported("unsupported expression node")),
+        // Everything else DECLINES — named so the EXPLAIN coverage histogram (P.1.4) shows WHICH node kind
+        // blocks each function, i.e. the absorption ceiling per subset feature we might add next.
+        other => Err(JitError::Unsupported(kind_name(other))),
+    }
+}
+
+/// A short, stable name for an out-of-subset expression node — the DECLINE reason surfaced in the coverage
+/// report. Grouped so the histogram reads as an absorption ceiling: `call` (the big one — builtin + user-fn
+/// calls, P.1.4b), `index`/`member`, `comprehension`, `let`, and the non-numeric literals. Exhaustive so a
+/// new `ExprKind` names itself here rather than hiding in a wildcard bucket.
+fn kind_name(kind: &ExprKind) -> &'static str {
+    match kind {
+        ExprKind::Call { .. } => "call",
+        ExprKind::Index { .. } => "index",
+        ExprKind::Member { .. } => "member-access",
+        ExprKind::Vector(_) => "vector-literal",
+        ExprKind::Range { .. } => "range",
+        ExprKind::Let { .. } => "let-binding",
+        ExprKind::FunctionLiteral { .. } => "function-literal",
+        ExprKind::LcFor { .. } | ExprKind::LcForC { .. } | ExprKind::LcEach(_) | ExprKind::LcIf { .. } => {
+            "comprehension"
+        }
+        ExprKind::Assert { .. } => "assert",
+        ExprKind::Echo { .. } => "echo",
+        ExprKind::Str(_) => "string-literal",
+        ExprKind::Bool(_) => "bool-literal",
+        ExprKind::Undef => "undef-literal",
+        // The handled kinds don't reach here; name them defensively rather than wildcard.
+        ExprKind::Num(_) | ExprKind::Ident(_) | ExprKind::Unary { .. } | ExprKind::Binary { .. }
+        | ExprKind::Ternary { .. } => "unhandled-in-subset",
     }
 }
 

@@ -1007,6 +1007,45 @@ fn const_undef_index_member_of_scalar_prunes() {
 }
 
 #[test]
+fn fixed_vector_comprehension_unrolls() {
+    // P.1.6 rung-D 2b.N: `[for(x = <fixed vector>) body]` UNROLLS at compile time (length known) — no arena, a
+    // fixed `Lowered::Vec` result. `sq` maps a LITERAL; `sqv` maps a vec PARAM; `pairs`' body is a vector → a
+    // MATRIX (2c.1); `rowsum` iterates a matrix param's ROWS; `filt` (a FILTER) has runtime length → its `LcIf`
+    // body isn't a compiled node → DECLINES. A `rands` in the body would draw once per element, in order.
+    let prog = program(
+        "function sq() = [for (x = [1, 2, 3, 4]) x * x];\
+         function sqv(v) = [for (x = v) x * x];\
+         function pairs() = [for (x = [1, 2, 3]) [x, x * x]];\
+         function rowsum(m) = [for (r = m) r[0] + r[1]];\
+         function filt(v) = [for (x = v) if (x > 0) x];",
+    );
+    let reg = JitRegistry::build(
+        defs(&prog).iter().map(|&(n, p, b)| (n, p, b)),
+        consts(&prog).iter().map(|&(n, v)| (n, v)),
+    )
+    .expect("registry builds");
+
+    // Nullary literal comprehensions unroll + compile at BUILD.
+    assert!(reg.get("sq").is_some(), "comprehension over a literal unrolls at build");
+    assert!(reg.get("pairs").is_some(), "a vector-body comprehension → a matrix");
+    assert_call_vec_eq(&reg, &prog, "sq", &[]); // [1, 4, 9, 16]
+    assert_call_vec_eq(&reg, &prog, "sqv", &[vec_arg(&[2.0, 3.0, 5.0])]); // [4, 9, 25]
+    assert_call_nested_eq(&reg, &prog, "pairs", &[]); // [[1,1],[2,4],[3,9]]
+    // Iterate a MATRIX param's rows (2c.2 arg × 2b.N unroll).
+    let m = Value::list(vec![
+        Value::num_list(vec![1.0, 2.0]),
+        Value::num_list(vec![3.0, 4.0]),
+        Value::num_list(vec![5.0, 6.0]),
+    ]);
+    assert_call_vec_eq(&reg, &prog, "rowsum", &[m]); // [3, 7, 11]
+    // A FILTER (`if`) makes the length runtime-dependent → NOT a fixed unroll → declines this rung.
+    assert!(
+        call_jit(&reg, "filt", &[vec_arg(&[-1.0, 2.0, -3.0])]).is_none(),
+        "a filtered comprehension has runtime length → declines (not the fixed unroll)"
+    );
+}
+
+#[test]
 fn matrix_product_is_bit_identical() {
     // P.1.6 rung-D 2c.2b: OpenSCAD's LINEAR-ALGEBRA `*` — mat×vec, vec×mat, mat×mat (and vec·vec) — each
     // reducing to the 4-lane `dot` (== `ops::dot`, so bit-identical). Shapes are compile-time known, so a

@@ -275,6 +275,19 @@ field, out-of-range axis). Result: 86→91 scalar / 30→31 vec, and — the red
 `[for(x = <fixed vector>) …]` (unroll a compile-time-known iterable) — the 2b.N rung, the clear next
 lever, with `call` (293) behind it.
 
+## 2b.N — fixed-vector comprehension unroll (done, P.1.6r)
+
+`[for(x = <compile-time-fixed vector>) body]` UNROLLS: bind `x` to each known element in source order,
+compile `body` per iteration, collect a fixed `Lowered::Vec` — no arena/loop (the length is known), one
+level up from the arg-scalarize. The result composes for free: a scalar body → a flat vector, a vector
+body → a MATRIX (2c.1 return), and iterating a matrix param's rows works (2c.2 arg × the unroll).
+Eval-order-faithful — a `rands` in the body draws once per element, in order. A FILTER / `each` declines
+naturally (its `LcIf`/`LcEach` body isn't a compiled `ExprKind`); the iterable is capped at `MAX_VEC_ARG`
+so the unroll can't explode IR. The win is on the VECTOR/MATRIX side (the iterable is a vec/matrix arg),
+invisible to the scalar count: 91 scalar held, but vec 31→36 / matrix 26→33, +204 differentialed triples
+— the biggest single-rung vector jump yet. `call` (293) is now the #1 ceiling; the dynamic vec-of-vec
+(2c.3, gaussian_rands' matrix branch) is the arena-tier sibling of this unroll.
+
 ## Known determinism edge — bail-after-partial-draw (for the hardening pass)
 
 A JIT that BAILS (`raised` → the dispatch's `None`) *after* it has already drawn some seedless

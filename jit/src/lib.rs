@@ -1319,6 +1319,33 @@ enum CompIter {
 /// same operand order); a DYNLIST iterates `0..len` via `jit_vec_get` (in-range by construction). The loop
 /// pushes in index order, matching `lc_for`'s `out.extend`. v1 (2b.2): a SINGLE binding, a RANGE or a DYNLIST
 /// iterable, a SCALAR element — a fixed-vector iterable / multi-binding / non-scalar element / filter declines.
+/// UNROLL a comprehension over a COMPILE-TIME-fixed vector — `[for(x = [e0, e1, …]) body]` (rung 2b.N). Bind `x`
+/// to each element in source order, compile `body` per iteration, and collect a fixed `Lowered::Vec` (the length
+/// is known, so no arena/loop — like the arg-scalarize, one level up). The body may itself be a vector → a MATRIX
+/// (2c.1 handles the nested result); a `rands` in the body draws once per element, IN ORDER, matching the
+/// interpreter. A FILTER / `each` body declines naturally (its `LcIf`/`LcEach` isn't a compiled `ExprKind`). The
+/// iterable is capped at [`MAX_VEC_ARG`] so the unroll can't explode IR — a longer one falls back to the interpreter.
+fn unroll_fixed_comprehension(
+    fb: &mut FunctionBuilder,
+    name: &str,
+    elems: Vec<Lowered>,
+    lc_body: &Expr,
+    lower: &Lower,
+) -> Result<Lowered, JitError> {
+    if elems.len() > MAX_VEC_ARG {
+        return Err(JitError::Unsupported("comprehension over an over-long fixed vector"));
+    }
+    let mut out = Vec::with_capacity(elems.len());
+    for e in elems {
+        // Bind the loop var to THIS element in a fresh scope (lexical: the body sees the caller's env + `x`).
+        let mut locals = lower.locals.clone();
+        locals.insert(name, e);
+        let scoped = Lower { locals: &locals, ..*lower };
+        out.push(compile_expr(fb, lc_body, &scoped)?);
+    }
+    Ok(Lowered::Vec(out))
+}
+
 fn compile_comprehension(
     fb: &mut FunctionBuilder,
     bindings: &[fab_lang::Arg],
@@ -1349,8 +1376,11 @@ fn compile_comprehension(
                 let call = fb.ins().call(lower.vec_len, &[handle]);
                 (CompIter::Dyn { handle }, fb.inst_results(call)[0])
             }
-            // A fixed scalarized vector as an iterable (`[for(x=[1,2,3]) …]`) is rung 2b.N (unroll); a scalar
-            // isn't iterable → decline.
+            // A FIXED scalarized vector iterable (`[for(x = [1,2,3]) …]`, `[for(x = vec_param) …]`) — rung 2b.N:
+            // UNROLL at compile time (length is known), no arena/loop, returning a fixed `Lowered::Vec`. Returns
+            // EARLY (the loop machinery below is only for the runtime-length Range/DynList cases).
+            Lowered::Vec(elems) => return unroll_fixed_comprehension(fb, name, elems, lc_body, lower),
+            // A scalar / bool / undef isn't iterable → decline.
             _ => return Err(JitError::Unsupported("comprehension over a non-range/non-dynlist")),
         },
     };

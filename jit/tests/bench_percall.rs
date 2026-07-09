@@ -34,7 +34,7 @@ fn defs(prog: &Program) -> Vec<(&str, &[Parameter], &Expr)> {
 
 /// Time the JIT vs the real interpreter dispatch on `name` over `iters` calls of one f64 arg, re-checking
 /// bit-identity each step (a divergent JIT fails the accumulator compare). Returns `(interp_ns, jit_ns)`.
-fn bench_one(prog: &Program, reg: &JitRegistry, oracle: &FnOracle, name: &str, iters: u64) -> (u128, u128) {
+fn bench_one(reg: &JitRegistry, oracle: &FnOracle, name: &str, iters: u64) -> (u128, u128) {
     let compiled = reg.get(name).expect("function compiled");
     // Vary the argument each iteration (no cache/branch-predictor freebie); a bounded ramp keeps it finite.
     let arg = |i: u64| f64::from(u32::try_from(i & 0xffff).unwrap_or(0)) * 0.001 - 32.0;
@@ -80,7 +80,7 @@ fn per_call_speedup_vs_real_dispatch() {
     let iters = 1_000_000u64;
     eprintln!("\n[jit-bench] per-call: JIT vs the real interpreter dispatch, {iters} calls each");
     for name in ["poly", "dist", "wave", "clamp"] {
-        let (interp_ns, jit_ns) = bench_one(&prog, &reg, &oracle, name, iters);
+        let (interp_ns, jit_ns) = bench_one(&reg, &oracle, name, iters);
         let speedup = interp_ns as f64 / jit_ns.max(1) as f64;
         let interp_per = interp_ns as f64 / iters as f64;
         let jit_per = jit_ns as f64 / iters as f64;

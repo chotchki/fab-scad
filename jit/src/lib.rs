@@ -1121,6 +1121,8 @@ fn define_one(
                 let zero = fb.ins().f64const(0.0);
                 (fb.ins().select(v, one, zero), Ret::Bool)
             }
+            // A compile-time-const bool RETURN (a predicate body) → the literal `0.0`/`1.0`, tagged `Bool`.
+            Lowered::ConstBool(b) => (fb.ins().f64const(if b { 1.0 } else { 0.0 }), Ret::Bool),
             Lowered::Vec(elems) => {
                 for (i, e) in elems.iter().enumerate() {
                     let x = e.num()?; // a nested element (matrix row) declines here — flat vectors only
@@ -1284,6 +1286,12 @@ enum Lowered {
     /// shape), its length lives at runtime; it's consumed by `len`, iteration (`[for(x = dynlist) …]`), and the
     /// function RETURN (flagged as the result). Arbitrary dynamic INDEXING (`dynlist[i]`) is rung 2b.2b.
     DynList(Value),
+    /// A COMPILE-TIME-constant boolean (P.1.6 rung-D 2b.4 const-folding) — a type predicate whose answer is known
+    /// per specialization (`is_undef(x)` → `false`, `is_list(Vec)` → `true`, …). Kept unmaterialized so a ternary
+    /// with a `ConstBool` condition PRUNES the un-taken branch (never compiles it — that's how a compile-time-dead
+    /// `dim==1 ? scalar : matrix` skips the matrix path). Materialized to a `Bool` (`i8` 0/1) only when it feeds a
+    /// runtime op (`&&` with a runtime bool, a `select`, the function return).
+    ConstBool(bool),
 }
 
 impl Lowered {
@@ -1292,10 +1300,23 @@ impl Lowered {
     fn num(&self) -> Result<Value, JitError> {
         match self {
             Lowered::Num(v) => Ok(*v),
-            Lowered::Bool(_) => Err(JitError::Unsupported("a boolean where a number is required")),
+            Lowered::Bool(_) | Lowered::ConstBool(_) => {
+                Err(JitError::Unsupported("a boolean where a number is required"))
+            }
             Lowered::Vec(_) => Err(JitError::Unsupported("a vector where a number is required")),
             Lowered::DynList(_) => Err(JitError::Unsupported("a dynamic list where a number is required")),
         }
+    }
+}
+
+/// Materialize a possibly-const BOOLEAN to its `i8` (0/1) IR value — a `Bool` already is one, a `ConstBool`
+/// becomes an `iconst` (P.1.6 rung-D 2b.4). For when a const bool must feed a runtime op (a `select`, a
+/// short-circuit with a runtime operand, the function return). A non-bool `Lowered` → `None`.
+fn bool_ir(fb: &mut FunctionBuilder, v: &Lowered) -> Option<Value> {
+    match v {
+        Lowered::Bool(b) => Some(*b),
+        Lowered::ConstBool(b) => Some(fb.ins().iconst(types::I8, i64::from(*b))),
+        _ => None,
     }
 }
 
@@ -1307,6 +1328,7 @@ impl Lowered {
 fn truthy(fb: &mut FunctionBuilder, v: &Lowered) -> Result<Value, JitError> {
     match v {
         Lowered::Bool(b) => Ok(*b),
+        Lowered::ConstBool(b) => Ok(fb.ins().iconst(types::I8, i64::from(*b))),
         Lowered::Num(n) => {
             let zero = fb.ins().f64const(0.0);
             Ok(fb.ins().fcmp(FloatCC::NotEqual, *n, zero))
@@ -1459,6 +1481,11 @@ fn compile_expr(fb: &mut FunctionBuilder, expr: &Expr, lower: &Lower) -> Result<
                 UnOp::Pos => Ok(Lowered::Num(v.num()?)),
                 // `!x` = `!is_truthy(x)` → a Bool. `(truthy == 0)` inverts the 0/1 flag.
                 UnOp::Not => {
+                    // Const-fold `!ConstBool` → `ConstBool` (P.1.6 rung-D 2b.4) so `!is_undef(x)` etc. stays
+                    // compile-time for a wrapping ternary; a runtime bool inverts the 0/1 flag.
+                    if let Lowered::ConstBool(b) = v {
+                        return Ok(Lowered::ConstBool(!b));
+                    }
                     let t = truthy(fb, &v)?;
                     Ok(Lowered::Bool(fb.ins().icmp_imm(IntCC::Equal, t, 0)))
                 }
@@ -1471,6 +1498,12 @@ fn compile_expr(fb: &mut FunctionBuilder, expr: &Expr, lower: &Lower) -> Result<
             // `&&`/`||`: the interpreter returns `Bool(truthy(a) OP truthy(b))`. Both operands are
             // side-effect-free here, so eager evaluation equals short-circuit — same bool, no float rounding.
             if matches!(op, BinOp::And | BinOp::Or) {
+                // Const-fold when BOTH operands are compile-time bools (P.1.6 rung-D 2b.4) — keeps const-ness so
+                // a wrapping ternary can still prune. A mixed const/runtime pair materializes to a runtime `Bool`.
+                if let (Lowered::ConstBool(x), Lowered::ConstBool(y)) = (&a, &b) {
+                    let r = if matches!(op, BinOp::And) { *x && *y } else { *x || *y };
+                    return Ok(Lowered::ConstBool(r));
+                }
                 let ta = truthy(fb, &a)?;
                 let tb = truthy(fb, &b)?;
                 let r = if matches!(op, BinOp::And) {
@@ -1528,17 +1561,19 @@ fn compile_expr(fb: &mut FunctionBuilder, expr: &Expr, lower: &Lower) -> Result<
                 _ => Err(JitError::Unsupported("unsupported operand types for arithmetic")),
             }
         }
-        // `c ? then : els` — the interpreter evaluates ONLY the taken branch, but both branches are
-        // side-effect-free (pure arithmetic), so eager `select` is bit-identical: the untaken branch's
-        // discarded NaN/inf can't affect the chosen result. Branches must agree in type.
+        // `c ? then : els`. A COMPILE-TIME-known condition (P.1.6 rung-D 2b.4) PRUNES the un-taken branch —
+        // compiling ONLY the taken one, so a compile-time-dead branch (an un-JIT-able `dim==1 ? scalar : matrix`
+        // matrix path) is never touched. Otherwise EAGER `select`: the interpreter evaluates only the taken
+        // branch, but both are side-effect-free arithmetic here, so eager select is bit-identical (the untaken
+        // branch's discarded NaN/inf can't affect the chosen result). Branches must AGREE in shape.
         ExprKind::Ternary { cond, then, els } => {
             let cv = compile_expr(fb, cond, lower)?;
+            if let Lowered::ConstBool(b) = cv {
+                return compile_expr(fb, if b { then } else { els }, lower);
+            }
             let c = truthy(fb, &cv)?;
             let tv = compile_expr(fb, then, lower)?;
             let ev = compile_expr(fb, els, lower)?;
-            // Branches must AGREE in shape (both Num, both Bool, or both same-length Vec) — a `select` per
-            // element for a vector. A shape mismatch (incl. differing vector lengths) DECLINES: the interpreter
-            // would pick one at runtime, which a scalarized value can't represent.
             select_lowered(fb, c, tv, ev)
         }
         // `let(x=e1, y=e2) body` — SEQUENTIAL bindings (a later one sees earlier ones), then the body in the
@@ -1633,6 +1668,19 @@ fn compile_expr(fb: &mut FunctionBuilder, expr: &Expr, lower: &Lower) -> Result<
             // RandStream (P.1.6 rung-D piece 1). Also user-shadowable, so checked here after the inline.
             if name.as_str() == "rands" {
                 return compile_seedless_rands(fb, args, lower);
+            }
+            // (2.7) a TYPE PREDICATE (`is_undef`/`is_num`/…) → mostly a COMPILE-TIME `ConstBool` from the arg's
+            // Lowered TYPE (P.1.6 rung-D 2b.4 const-folding). Const-folding a predicate lets a ternary PRUNE the
+            // un-taken branch — the point of the whole feature. User-shadowable, so after the inline.
+            if matches!(
+                name.as_str(),
+                "is_undef" | "is_bool" | "is_num" | "is_string" | "is_list" | "is_function"
+            ) {
+                if args.len() != 1 || args.iter().any(|a| a.name.is_some()) {
+                    return Err(JitError::Unsupported("call"));
+                }
+                let arg = compile_expr(fb, &args[0].value, lower)?;
+                return Ok(compile_type_predicate(fb, name, &arg));
             }
             // (3) not inlinable.
             Err(JitError::Unsupported("call"))
@@ -1745,6 +1793,26 @@ fn compile_expr(fb: &mut FunctionBuilder, expr: &Expr, lower: &Lower) -> Result<
         // Everything else DECLINES — named so the EXPLAIN coverage histogram (P.1.4) shows WHICH node kind
         // blocks each function, i.e. the absorption ceiling per subset feature we might add next.
         other => Err(JitError::Unsupported(kind_name(other))),
+    }
+}
+
+/// A type PREDICATE (`is_undef`/`is_bool`/`is_num`/`is_string`/`is_list`/`is_function`) on a compiled arg
+/// (P.1.6 rung-D 2b.4). Mostly a COMPILE-TIME [`Lowered::ConstBool`] read off the arg's Lowered TYPE (known per
+/// specialization) — the JIT never holds an `undef`/string/function value, so those are always `false`; a
+/// `Vec`/`DynList` IS a list, a `Bool`/`ConstBool` IS a bool. The ONE runtime case is `is_num` on a `Num`: the
+/// interpreter's `type==NUMBER && !isnan`, so `is_num(x) = x == x` (ORDERED equal — false for `NaN`, per L.2.8n).
+fn compile_type_predicate(fb: &mut FunctionBuilder, name: &str, arg: &Lowered) -> Lowered {
+    match name {
+        // The JIT never represents `undef` / strings / function values, so these are compile-time false.
+        "is_undef" | "is_string" | "is_function" => Lowered::ConstBool(false),
+        "is_bool" => Lowered::ConstBool(matches!(arg, Lowered::Bool(_) | Lowered::ConstBool(_))),
+        "is_list" => Lowered::ConstBool(matches!(arg, Lowered::Vec(_) | Lowered::DynList(_))),
+        "is_num" => match arg {
+            // `is_num(NaN)` is FALSE (L.2.8n): `x == x` (ordered) is the runtime not-NaN test.
+            Lowered::Num(x) => Lowered::Bool(fb.ins().fcmp(FloatCC::Equal, *x, *x)),
+            _ => Lowered::ConstBool(false),
+        },
+        _ => Lowered::ConstBool(false), // unreachable: the caller routes only the six predicates here
     }
 }
 
@@ -2000,7 +2068,9 @@ fn compile_vec_builtin(
                         elems.iter().map(Lowered::num).collect::<Result<Vec<_>, _>>()?
                     }
                     Lowered::Num(x) => vec![x],
-                    Lowered::Bool(_) => return Err(JitError::Unsupported("min/max of a boolean")),
+                    Lowered::Bool(_) | Lowered::ConstBool(_) => {
+                        return Err(JitError::Unsupported("min/max of a boolean"));
+                    }
                     // min/max reducing a DYNAMIC list is a runtime fold (a loop) — a future rung; decline.
                     Lowered::DynList(_) => return Err(JitError::Unsupported("min/max of a dynamic list")),
                 }
@@ -2096,7 +2166,7 @@ fn neg_lowered(fb: &mut FunctionBuilder, v: Lowered) -> Result<Lowered, JitError
                 elems.into_iter().map(|e| neg_lowered(fb, e)).collect();
             Ok(Lowered::Vec(out?))
         }
-        Lowered::Bool(_) => Err(JitError::Unsupported("negate a boolean")),
+        Lowered::Bool(_) | Lowered::ConstBool(_) => Err(JitError::Unsupported("negate a boolean")),
         // Elementwise-negating a DYNAMIC list is a runtime map (a loop) — a future rung (2b.4); decline.
         Lowered::DynList(_) => Err(JitError::Unsupported("negate a dynamic list")),
     }
@@ -2113,11 +2183,17 @@ fn select_lowered(
 ) -> Result<Lowered, JitError> {
     match (t, e) {
         (Lowered::Num(t), Lowered::Num(e)) => Ok(Lowered::Num(fb.ins().select(c, t, e))),
-        (Lowered::Bool(t), Lowered::Bool(e)) => Ok(Lowered::Bool(fb.ins().select(c, t, e))),
         (Lowered::Vec(t), Lowered::Vec(e)) if t.len() == e.len() => {
             let out: Result<Vec<Lowered>, JitError> =
                 t.into_iter().zip(e).map(|(t, e)| select_lowered(fb, c, t, e)).collect();
             Ok(Lowered::Vec(out?))
+        }
+        // Two BOOLEAN branches (either `Bool` or a const-folded `ConstBool`, P.1.6 rung-D 2b.4) — materialize
+        // both to `i8` and `select`. The runtime cond wasn't compile-time-known (else the ternary pruned), so a
+        // runtime pick is correct.
+        (t @ (Lowered::Bool(_) | Lowered::ConstBool(_)), e @ (Lowered::Bool(_) | Lowered::ConstBool(_))) => {
+            let (tv, ev) = (bool_ir(fb, &t).expect("t is a bool"), bool_ir(fb, &e).expect("e is a bool"));
+            Ok(Lowered::Bool(fb.ins().select(c, tv, ev)))
         }
         _ => Err(JitError::Unsupported("ternary branches differ in type")),
     }

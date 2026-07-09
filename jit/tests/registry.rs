@@ -773,6 +773,35 @@ fn dynamic_count_rands_is_bit_identical() {
 }
 
 #[test]
+fn const_fold_type_predicates_prune_dead_branches() {
+    // P.1.6 rung-D 2b.4: a type predicate folds to a COMPILE-TIME bool, so a ternary PRUNES the un-taken branch
+    // — even an un-JIT-able one. `guarded` is the proof: its `str(x)` branch can't JIT, but `is_undef(x)` is
+    // compile-time FALSE (the JIT never holds `undef`), so that branch is pruned and the function compiles.
+    let prog = program(
+        "function guarded(x) = is_undef(x) ? str(x) : x*x;\
+         function deflt(x) = is_undef(x) ? 99 : x + 1;\
+         function listcheck(x) = is_list(x) ? 0 : x*3;\
+         function isnum_rt(x) = is_num(x) ? x : -1;\
+         function vlen(v) = is_list(v) ? len(v) : 0;",
+    );
+    let reg = JitRegistry::build(
+        defs(&prog).iter().map(|&(n, p, b)| (n, p, b)),
+        consts(&prog).iter().map(|&(n, v)| (n, v)),
+    )
+    .expect("registry builds");
+
+    assert!(reg.get("guarded").is_some(), "an un-JIT-able branch pruned by a const predicate compiles (2b.4)");
+    assert_call_eq(&reg, &prog, "guarded", &[Value::Num(5.0)]); // is_undef false → x*x = 25
+    assert_call_eq(&reg, &prog, "deflt", &[Value::Num(7.0)]); // is_undef false → x+1 = 8
+    assert_call_eq(&reg, &prog, "listcheck", &[Value::Num(4.0)]); // is_list(Num) false → x*3 = 12
+    // `is_num` on a Num is RUNTIME (the NaN check), so both branches compile (eager select), NaN-correct.
+    assert_call_eq(&reg, &prog, "isnum_rt", &[Value::Num(3.0)]); // is_num(3)=true → 3
+    assert_call_eq(&reg, &prog, "isnum_rt", &[Value::Num(f64::NAN)]); // is_num(NaN)=false → -1
+    // is_list of a VECTOR arg folds to TRUE → prunes to `len(v)`.
+    assert_call_eq(&reg, &prog, "vlen", &[Value::num_list(vec![1.0, 2.0, 3.0])]); // is_list(vec)=true → 3
+}
+
+#[test]
 fn over_long_vector_arg_declines() {
     // A vector longer than MAX_VEC_ARG (16) is NOT scalarized — unrolling it would explode compile/code size,
     // and that dynamic-length case is rung D. call_numeric declines → the interpreter runs the body.

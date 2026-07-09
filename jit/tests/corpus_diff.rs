@@ -101,16 +101,19 @@ fn input_battery(arity: usize) -> Vec<Vec<f64>> {
     rows
 }
 
-/// Interpret `name(args)` through the whole-library `oracle` — the slow side of the differential. `Some(n)`
-/// for a number result; `None` when the body RAISES (an inline `assert` failed) or otherwise doesn't yield a
-/// number. Unlike a standalone eval, the oracle resolves the callee's OWN calls (the chains the JIT inlines)
-/// and top-level constants (the globals the JIT inlines) — required now that the compiled subset reaches past
-/// leaf functions. The `None` case corresponds to the JIT's raise-`None` — both sides agree "raised".
-fn interpret(oracle: &FnOracle, name: &str, args: &[f64]) -> Option<f64> {
+/// Interpret `name(args)` through the whole-library `oracle` — the slow side of the differential, as
+/// `(value, is_bool)`. A numeric result is `(n, false)`; a BOOLEAN result (a predicate / comparison body,
+/// P.1.4e) is `(0.0/1.0, true)` so it compares against the JIT's `0.0`/`1.0` return AND its type tag. `None`
+/// when the body RAISES (an inline `assert` failed) or yields neither. Unlike a standalone eval, the oracle
+/// resolves the callee's OWN calls (the chains the JIT inlines) and top-level constants (the globals it
+/// inlines) — required now that the compiled subset reaches past leaf functions. `None` mirrors the JIT's
+/// raise-`None`.
+fn interpret(oracle: &FnOracle, name: &str, args: &[f64]) -> Option<(f64, bool)> {
     let vals: Vec<Value> = args.iter().map(|&v| Value::Num(v)).collect();
     match oracle.call(name, &vals) {
-        Ok(Value::Num(n)) => Some(n),
-        _ => None, // an assert failure (Err) or a non-number → the JIT returns None here too
+        Ok(Value::Num(n)) => Some((n, false)),
+        Ok(Value::Bool(b)) => Some((if b { 1.0 } else { 0.0 }, true)),
+        _ => None, // an assert failure (Err) or a non-number/bool → the JIT returns None here too
     }
 }
 
@@ -135,12 +138,14 @@ fn fast_equals_jit_over_the_bosl2_library() {
     for (name, params, _body) in &defs {
         let Some(compiled) = registry.get(name) else { continue };
         for args in input_battery(params.len()) {
-            let jit = compiled.call(&args[..params.len()]);
+            // Pair the JIT's raw f64 with its static type tag, so a Num-vs-Bool mismatch fails too (not just
+            // differing bits) — the untyped ABI must reconstruct the interpreter's Value type exactly.
+            let jit = compiled.call(&args[..params.len()]).map(|f| (f, compiled.returns_bool()));
             let slow = interpret(&oracle, name, &args[..params.len()]);
-            // Agree if both raised (`None` — an inline assert failed on both sides) OR both a number with
-            // identical bits. A mixed Some/None, or differing bits, is a real divergence.
+            // Agree if both raised (`None` — an inline assert failed on both sides) OR both a value with the
+            // SAME type tag and identical bits. A mixed Some/None, a type mismatch, or differing bits diverges.
             let agree = match (jit, slow) {
-                (Some(a), Some(b)) => a.to_bits() == b.to_bits(),
+                (Some((a, at)), Some((b, bt))) => at == bt && a.to_bits() == b.to_bits(),
                 (None, None) => true,
                 _ => false,
             };

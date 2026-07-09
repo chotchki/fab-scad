@@ -239,6 +239,59 @@ fn references_top_level_constants_is_bit_identical() {
 }
 
 #[test]
+fn bool_returning_functions_are_type_tagged_and_bit_identical() {
+    // P.1.4e: a predicate / comparison body compiles and returns a BOOL — the untyped f64 ABI carries a
+    // static return tag (`returns_bool`) so the dispatch wraps `Value::Bool`, not `Value::Num`. A bool literal
+    // (`true`/`false`) now compiles too, so a `cond ? true : false` body works. A numeric body stays tagged num.
+    let prog = program(
+        "function positive(x) = x > 0;\
+         function between(x) = x > 0 && x < 10;\
+         function flag(x) = x > 5 ? true : false;\
+         function sq(x) = x * x;",
+    );
+    let reg = JitRegistry::build(
+        defs(&prog).iter().map(|&(n, p, b)| (n, p, b)),
+        consts(&prog).iter().map(|&(n, v)| (n, v)),
+    )
+    .expect("registry builds");
+
+    assert!(reg.get("positive").unwrap().returns_bool(), "a comparison body → bool");
+    assert!(reg.get("between").unwrap().returns_bool(), "an && body → bool");
+    assert!(reg.get("flag").unwrap().returns_bool(), "a bool-literal ternary → bool");
+    assert!(!reg.get("sq").unwrap().returns_bool(), "an arithmetic body → num");
+
+    let cases: &[(&str, f64)] = &[
+        ("positive", 3.0),
+        ("positive", -1.0),
+        ("positive", 0.0), // 0 is not > 0 → false
+        ("between", 5.0),
+        ("between", -1.0),
+        ("between", 10.0), // 10 is not < 10 → false
+        ("flag", 6.0),
+        ("flag", 2.0),
+        ("sq", 4.0),
+    ];
+    for &(name, arg) in cases {
+        let compiled = reg.get(name).expect("compiled");
+        let jit = compiled.call(&[arg]).expect("no assert raised");
+        let slow = interpret_fn(&prog, name, &[Value::Num(arg)]).expect("interprets");
+        match slow {
+            // A bool result: the JIT must be tagged bool, and its 0.0/1.0 must match the interpreter's truthiness.
+            Value::Bool(b) => {
+                assert!(compiled.returns_bool(), "{name}: interp bool but jit tagged num");
+                assert_eq!(jit, if b { 1.0 } else { 0.0 }, "{name}({arg}) bool value mismatch");
+            }
+            // A number result: the JIT must be tagged num, bit-identical.
+            Value::Num(n) => {
+                assert!(!compiled.returns_bool(), "{name}: interp num but jit tagged bool");
+                assert_eq!(jit.to_bits(), n.to_bits(), "{name}({arg}) num bits mismatch");
+            }
+            other => panic!("interpreter yielded neither num nor bool: {other:?}"),
+        }
+    }
+}
+
+#[test]
 fn empty_registry_when_nothing_is_numeric() {
     // A program whose only function builds a list → an empty (valid) registry, everything interpreted.
     let prog = program("function only_list(x) = [x, x, x];");

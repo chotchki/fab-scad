@@ -147,8 +147,27 @@ pub enum Resolution {
 /// differential proves it), so routing a call here can only change SPEED, never the result. wasm builds
 /// (which can't JIT in-sandbox) simply leave [`Ctx::jit`] `None` and interpret everything.
 pub trait NumericJit {
-    /// The compiled result of `name(args)` if one is registered for this exact arity, else `None`.
-    fn call_numeric(&self, name: &str, args: &[f64]) -> Option<f64>;
+    /// The compiled result of `name(args)` if one is registered for this exact arity, else `None`. A
+    /// [`JitOutcome`] carries the result's TYPE tag (P.1.4e) — the JIT return ABI is untyped `f64`, so the
+    /// compiled function reports whether that `f64` is a number or a boolean and the dispatch re-wraps it in
+    /// the matching [`Value`]. `None` means BOTH "not compiled" and "compiled but raised" — the interpreter
+    /// takes over either way.
+    fn call_numeric(&self, name: &str, args: &[f64]) -> Option<JitOutcome>;
+}
+
+/// A JIT-compiled call's result, TYPE-TAGGED (P.1.4e). The native return ABI is a single untyped `f64` (plus
+/// the raise out-byte); this reconstructs the tag that [`Value`] carries for free in the interpreter but that
+/// evaporates crossing `extern "C"`, so the dispatch wraps a `Num` result in [`Value::Num`] and a `Bool`
+/// result (a comparison / `&&`/`||`/`!` / bool literal — the JIT computes these as an `i8`, returned as
+/// `0.0`/`1.0`) in [`Value::Bool`]. Returning a `Num` where the interpreter yields a `Bool` (or vice-versa)
+/// would DIVERGE (`Num(1.0) != Bool(true)`), so the tag is load-bearing, not cosmetic. Extends to a vector
+/// descriptor when the ABI grows an out-buffer.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum JitOutcome {
+    /// A numeric result → [`Value::Num`].
+    Num(f64),
+    /// A boolean result → [`Value::Bool`].
+    Bool(bool),
 }
 
 /// One user function offered to the JIT factory: its name, its parameter names (in order), and its body
@@ -708,9 +727,15 @@ fn eval_with_global<'a>(
                 // decides membership + arity (returns `None` to defer); no wasted work when the hook is off.
                 if let (Some(name), Some(j)) = (jit, ctx.jit.as_deref())
                     && let Some(nums) = all_nums(&vals)
-                    && let Some(r) = j.call_numeric(name, &nums)
+                    && let Some(out) = j.call_numeric(name, &nums)
                 {
-                    values.push(Value::Num(r));
+                    // Re-tag the untyped native return into a `Value` (P.1.4e): a bool-returning function
+                    // (a predicate, a comparison body) yields `Value::Bool`, not `Value::Num` — matching the
+                    // interpreter, which the JIT crate's differential proves bit-for-bit.
+                    values.push(match out {
+                        JitOutcome::Num(n) => Value::Num(n),
+                        JitOutcome::Bool(b) => Value::Bool(b),
+                    });
                     continue;
                 }
                 // Dev probe (off unless FAB_REDUNDANCY=1): would an eval-memo cache pay? Key this call on
@@ -2556,9 +2581,9 @@ mod tests {
     /// it fell back to the interpreter. Any other function/arity → `None` (defer to the interpreter).
     struct MarkerJit;
     impl super::NumericJit for MarkerJit {
-        fn call_numeric(&self, name: &str, args: &[f64]) -> Option<f64> {
+        fn call_numeric(&self, name: &str, args: &[f64]) -> Option<super::JitOutcome> {
             match (name, args) {
-                ("sq", [x]) => Some(x * x + 1000.0),
+                ("sq", [x]) => Some(super::JitOutcome::Num(x * x + 1000.0)),
                 _ => None,
             }
         }

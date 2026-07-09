@@ -40,8 +40,8 @@ enum Ty {
 }
 
 use fab_lang::{
-    BinOp, Expr, ExprKind, JitConst, JitDef, NumericJit, NumericJitFactory, Parameter, UnOp,
-    jit_math_id,
+    BinOp, Expr, ExprKind, JitConst, JitDef, JitOutcome, NumericJit, NumericJitFactory, Parameter,
+    UnOp, jit_math_id,
 };
 
 /// The `%` an OpenSCAD `%` compiles to — the EXACT op the interpreter runs (`ops.rs`: `x % y`, C
@@ -93,6 +93,10 @@ impl std::error::Error for JitError {}
 pub struct CompiledFn {
     code: *const u8,
     arity: usize,
+    /// The STATIC return type (P.1.4e) — the native ABI returns an untyped `f64`, so this says whether it's a
+    /// number or a boolean (`0.0`/`1.0`). Derived once at compile time from the body's [`Ty`]; the dispatch
+    /// re-tags the result into the matching [`fab_lang::Value`]. Extends to a vector descriptor with the ABI.
+    ret_ty: Ty,
 }
 
 impl CompiledFn {
@@ -100,6 +104,14 @@ impl CompiledFn {
     #[must_use]
     pub fn arity(&self) -> usize {
         self.arity
+    }
+
+    /// Whether this function returns a BOOLEAN (a predicate / comparison / bool literal) rather than a number
+    /// (P.1.4e) — the dispatch wraps its `0.0`/`1.0` result in `Value::Bool`, and the differential compares
+    /// type-aware. `false` for the numeric majority.
+    #[must_use]
+    pub fn returns_bool(&self) -> bool {
+        matches!(self.ret_ty, Ty::Bool)
     }
 
     /// Call the compiled function with `params` (its length must equal [`CompiledFn::arity`]). Returns
@@ -195,7 +207,7 @@ impl JitRegistry {
         let helpers = declare_helpers(&mut module)?;
         // Declare + define each compilable function, remembering its FuncId to resolve the code pointer
         // AFTER the single finalize. A unique export symbol per function (by index) avoids collisions.
-        let mut pending: Vec<(String, FuncId, usize)> = Vec::new();
+        let mut pending: Vec<(String, FuncId, usize, Ty)> = Vec::new();
         let mut declined: BTreeMap<String, &'static str> = BTreeMap::new();
         for (i, &(name, params, body)) in entries.iter().enumerate() {
             let symbol = format!("scad_jit_{i}");
@@ -203,7 +215,7 @@ impl JitRegistry {
             // dispatch gate); defaults only matter for INLINED callees, which read them from `fn_defs`.
             let param_names: Vec<&str> = params.iter().map(|p| p.name.as_ref()).collect();
             match define_one(&mut module, &symbol, &param_names, body, &fn_defs, &globals, &helpers) {
-                Ok(func_id) => pending.push((name.to_string(), func_id, params.len())),
+                Ok((func_id, ret_ty)) => pending.push((name.to_string(), func_id, params.len(), ret_ty)),
                 // Declined → the interpreter handles it; record the FIRST out-of-subset node that blocked it
                 // (the absorption-ceiling signal for the EXPLAIN histogram).
                 Err(JitError::Unsupported(reason)) => {
@@ -217,9 +229,9 @@ impl JitRegistry {
             .map_err(|e| JitError::Cranelift(e.to_string()))?;
         let fns = pending
             .into_iter()
-            .map(|(name, func_id, arity)| {
+            .map(|(name, func_id, arity, ret_ty)| {
                 let code = module.get_finalized_function(func_id);
-                (name, CompiledFn { code, arity })
+                (name, CompiledFn { code, arity, ret_ty })
             })
             .collect();
         Ok(JitRegistry { _module: module, fns, declined })
@@ -260,13 +272,18 @@ impl JitRegistry {
 /// is defensive — the dispatch gate already guarantees `args.len()` equals the compiled arity, but a
 /// mismatch declines rather than reading past the arg slice.
 impl NumericJit for JitRegistry {
-    fn call_numeric(&self, name: &str, args: &[f64]) -> Option<f64> {
-        // `and_then`: a compiled function whose inline assert FAILED returns `None` → the interpreter runs
-        // the body and raises the exact error. So `None` here means BOTH "not compiled" and "compiled but
-        // raised" — either way the interpreter takes over, which is correct for both.
-        self.get(name)
-            .filter(|f| f.arity() == args.len())
-            .and_then(|f| f.call(args))
+    fn call_numeric(&self, name: &str, args: &[f64]) -> Option<JitOutcome> {
+        // A compiled function whose inline assert FAILED returns `None` → the interpreter runs the body and
+        // raises the exact error. So `None` here means BOTH "not compiled" and "compiled but raised" — either
+        // way the interpreter takes over, which is correct for both. On a value, RE-TAG the untyped `f64` by
+        // the function's static return type (P.1.4e): a bool-returning predicate yields `0.0`/`1.0` that the
+        // dispatch must wrap in `Value::Bool`, not `Value::Num`.
+        let f = self.get(name).filter(|f| f.arity() == args.len())?;
+        let raw = f.call(args)?;
+        Some(match f.ret_ty {
+            Ty::Num => JitOutcome::Num(raw),
+            Ty::Bool => JitOutcome::Bool(raw != 0.0),
+        })
     }
 }
 
@@ -350,15 +367,20 @@ pub fn compile_function(param_names: &[&str], body: &Expr) -> Result<JitFn, JitE
     // constant therefore declines. [`JitRegistry`] is the multi-function, globals-aware form.
     let no_defs = FnDefs::new();
     let no_globals = Globals::new();
-    let func_id =
+    let (func_id, ret_ty) =
         define_one(&mut module, "scad_jit_fn", param_names, body, &no_defs, &no_globals, &helpers)?;
+    // The standalone API is f64-only (the fast==JIT differential compares raw f64s); a bool-returning body is
+    // the registry path's job (it carries the type tag), so DECLINE it here to keep the contract.
+    if matches!(ret_ty, Ty::Bool) {
+        return Err(JitError::Unsupported("bool-returning body (standalone API is f64-only; use JitRegistry)"));
+    }
     module
         .finalize_definitions()
         .map_err(|e| JitError::Cranelift(e.to_string()))?;
     let code = module.get_finalized_function(func_id);
     Ok(JitFn {
         _module: module,
-        inner: CompiledFn { code, arity: param_names.len() },
+        inner: CompiledFn { code, arity: param_names.len(), ret_ty },
     })
 }
 
@@ -415,9 +437,11 @@ fn declare_helpers(module: &mut JITModule) -> Result<Helpers, JitError> {
 }
 
 /// Build the IR for one function and declare + define it in `module` under `symbol` (NOT finalized —
-/// the caller finalizes the whole module once). Returns the `FuncId` to resolve the code pointer after
-/// finalize. On [`JitError::Unsupported`] nothing is added to the module (the IR is built before the
-/// declare/define), so a declined function leaves the module clean for the next one.
+/// the caller finalizes the whole module once). Returns the `FuncId` (to resolve the code pointer after
+/// finalize) AND the body's static return [`Ty`] — a bool-returning body is returned as `0.0`/`1.0` and the
+/// caller tags the function so the dispatch wraps `Value::Bool` (P.1.4e). On [`JitError::Unsupported`] nothing
+/// is added to the module (the IR is built before the declare/define), so a declined function leaves the
+/// module clean for the next one.
 fn define_one(
     module: &mut JITModule,
     symbol: &str,
@@ -426,7 +450,7 @@ fn define_one(
     defs: &FnDefs,
     globals: &Globals,
     helpers: &Helpers,
-) -> Result<FuncId, JitError> {
+) -> Result<(FuncId, Ty), JitError> {
     let cl = |e: ModuleError| JitError::Cranelift(e.to_string());
     let ptr_ty = module.target_config().pointer_type();
     let mut ctx = module.make_context();
@@ -437,6 +461,7 @@ fn define_one(
     ctx.func.signature.returns.push(AbiParam::new(types::F64));
 
     let mut fbctx = FunctionBuilderContext::new();
+    let ret_ty;
     {
         let mut fb = FunctionBuilder::new(&mut ctx.func, &mut fbctx);
         let block = fb.create_block();
@@ -468,17 +493,26 @@ fn define_one(
 
         // IR is built BEFORE declare/define — an Unsupported node returns here with the module untouched.
         let (result, ty) = compile_expr(&mut fb, body, &lower)?;
-        // The compiled function returns f64 (wrapped in `Value::Num` at dispatch), so a bool-valued body
-        // (e.g. `x > 0`) must DECLINE — those are the interpreter's / intrinsic tier's job, not the JIT's.
-        let result = require_num(result, ty)?;
-        fb.ins().return_(&[result]);
+        // A NUMERIC body returns its f64 directly; a BOOL body (a predicate / comparison / bool literal — the
+        // JIT computes it as an i8 0/1) is returned as 0.0/1.0, and the caller tags the function so the dispatch
+        // wraps `Value::Bool` (P.1.4e). The untyped f64 ABI can't carry the tag, so the static `ty` rides back.
+        let ret = match ty {
+            Ty::Num => result,
+            Ty::Bool => {
+                let one = fb.ins().f64const(1.0);
+                let zero = fb.ins().f64const(0.0);
+                fb.ins().select(result, one, zero)
+            }
+        };
+        fb.ins().return_(&[ret]);
         fb.finalize();
+        ret_ty = ty;
     }
 
     let func_id = module.declare_function(symbol, Linkage::Export, &ctx.func.signature).map_err(cl)?;
     module.define_function(func_id, &mut ctx).map_err(cl)?;
     module.clear_context(&mut ctx);
-    Ok(func_id)
+    Ok((func_id, ret_ty))
 }
 
 /// Reduce a compiled sub-expression to its TRUTHINESS as an `i8` (0/1) — the interpreter's
@@ -572,6 +606,9 @@ struct Lower<'a> {
 fn compile_expr(fb: &mut FunctionBuilder, expr: &Expr, lower: &Lower) -> Result<(Value, Ty), JitError> {
     match &expr.kind {
         ExprKind::Num(n) => Ok((fb.ins().f64const(*n), Ty::Num)),
+        // A bool literal (`true`/`false`) → the `i8` 0/1 a `Bool` is (P.1.4e). Lets a predicate body like
+        // `cond ? true : false` compile — the ternary's branches now agree as `Bool`.
+        ExprKind::Bool(b) => Ok((fb.ins().iconst(types::I8, i64::from(*b)), Ty::Bool)),
         ExprKind::Ident(name) => {
             // A `let`-bound local (or inlined-call param) shadows a parameter — check the env first.
             if let Some(&(v, ty)) = lower.locals.get(name.as_str()) {
@@ -807,11 +844,10 @@ fn kind_name(kind: &ExprKind) -> &'static str {
         ExprKind::Assert { .. } => "assert",
         ExprKind::Echo { .. } => "echo",
         ExprKind::Str(_) => "string-literal",
-        ExprKind::Bool(_) => "bool-literal",
         ExprKind::Undef => "undef-literal",
         // The handled kinds don't reach here; name them defensively rather than wildcard.
-        ExprKind::Num(_) | ExprKind::Ident(_) | ExprKind::Unary { .. } | ExprKind::Binary { .. }
-        | ExprKind::Ternary { .. } => "unhandled-in-subset",
+        ExprKind::Num(_) | ExprKind::Bool(_) | ExprKind::Ident(_) | ExprKind::Unary { .. }
+        | ExprKind::Binary { .. } | ExprKind::Ternary { .. } => "unhandled-in-subset",
     }
 }
 

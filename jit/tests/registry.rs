@@ -4,7 +4,7 @@
 //! the standalone spike, now through the production cache.
 
 use fab_jit::JitRegistry;
-use fab_lang::{Expr, Program, Scope, StmtKind, Value, eval_expr, parse};
+use fab_lang::{Expr, Program, StmtKind, Value, interpret_fn, parse};
 
 /// Parse a multi-function program (kept alive by the caller so bodies can be borrowed from it).
 fn program(src: &str) -> Program {
@@ -24,23 +24,11 @@ fn defs(prog: &Program) -> Vec<(&str, Vec<&str>, &Expr)> {
         .collect()
 }
 
-/// The interpreter baseline for one function of `prog`, found by name.
+/// The interpreter baseline for one function of `prog`, found by name — via the whole-program oracle so a
+/// body that calls OTHER user functions (the chains the JIT inlines) resolves them.
 fn interp(prog: &Program, name: &str, args: &[f64]) -> f64 {
-    let (params, body) = prog
-        .stmts
-        .iter()
-        .find_map(|s| match &s.kind {
-            StmtKind::FunctionDef { name: n, params, body } if &**n == name => {
-                Some((params, body))
-            }
-            _ => None,
-        })
-        .expect("function is defined");
-    let mut scope = Scope::new();
-    for (p, &v) in params.iter().zip(args) {
-        scope.bind(p.name.clone(), Value::Num(v));
-    }
-    match eval_expr(body, &scope) {
+    let vals: Vec<Value> = args.iter().map(|&v| Value::Num(v)).collect();
+    match interpret_fn(prog, name, &vals) {
         Ok(Value::Num(n)) => n,
         other => panic!("interpreter didn't yield a number: {other:?}"),
     }
@@ -103,6 +91,45 @@ fn registry_calls_are_bit_identical_to_the_interpreter() {
             "registry {name}({args:?}): jit={jit} ({:#018x}) interp={slow} ({:#018x})",
             jit.to_bits(),
             slow.to_bits()
+        );
+    }
+}
+
+#[test]
+fn inlining_user_function_calls_is_bit_identical() {
+    // P.1.4c step 2: a call to a user function INLINES its body. sumsq inlines sq (twice); dist inlines both
+    // sumsq and sqrt(builtin) — a whole call CHAIN absorbed into one compiled function. A recursive function
+    // (fact) and its caller DECLINE (step-3 territory), so they're absent, but the non-recursive callers
+    // compile and match the interpreter bit-for-bit.
+    let prog = program(
+        "function sq(x) = x*x;\
+         function sumsq(a, b) = sq(a) + sq(b);\
+         function dist(a, b) = sqrt(sumsq(a, b));\
+         function scale(x) = let(k = sq(x)) k + sq(k);\
+         function fact(n) = n <= 1 ? 1 : n * fact(n - 1);",
+    );
+    let reg = JitRegistry::build(defs(&prog).iter().map(|(n, p, b)| (*n, p.as_slice(), *b)))
+        .expect("registry builds");
+
+    assert!(reg.get("sumsq").is_some(), "sumsq inlines sq");
+    assert!(reg.get("dist").is_some(), "dist inlines sumsq + sqrt");
+    assert!(reg.get("scale").is_some(), "scale inlines sq under a let");
+    assert!(reg.get("fact").is_none(), "a recursive function declines (step 3)");
+
+    let cases: &[(&str, &[f64])] = &[
+        ("sumsq", &[3.0, 4.0]),
+        ("dist", &[3.0, 4.0]),   // 5.0
+        ("dist", &[-1.0, -1.0]), // sqrt(2)
+        ("scale", &[2.0]),       // k=4 → 4 + 16 = 20
+        ("scale", &[-1.5]),
+    ];
+    for (name, args) in cases {
+        let jit = reg.get(name).expect("compiled").call(args).expect("no assert raised");
+        let slow = interp(&prog, name, args);
+        assert_eq!(
+            jit.to_bits(),
+            slow.to_bits(),
+            "inlined {name}({args:?}): jit={jit} interp={slow}"
         );
     }
 }

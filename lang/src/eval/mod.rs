@@ -476,6 +476,30 @@ pub fn eval_expr(root: &Expr, scope: &Scope) -> crate::Result<Value> {
     eval_with_ctx(root, scope, &Ctx::default())
 }
 
+/// Interpret a call to `program`'s function `name` with numeric `args` — the interpreter ORACLE the numeric
+/// JIT validates against (`fast == JIT`). Unlike [`eval_expr`], it builds the program's function store, so
+/// the body can call OTHER user functions (exactly the call chains the JIT inlines). Args bind to the
+/// leading parameters in order; unfilled params take their defaults / `undef` as in a normal call. Intended
+/// for the `fab-jit` differential — a single self-contained program (no `use`/`include` graph).
+///
+/// # Errors
+/// [`Error::Unknown`](crate::Error::Unknown) if no function named `name` is defined; any evaluation error
+/// from the body (e.g. an `assert` failure — the JIT's raise path corresponds to this).
+pub fn interpret_fn(program: &Program, name: &str, args: &[Value]) -> crate::Result<Value> {
+    let ctx = build_ctx(program);
+    let Some((params, body)) = program.stmts.iter().find_map(|s| match &s.kind {
+        StmtKind::FunctionDef { name: n, params, body } if n.as_str() == name => Some((params, body)),
+        _ => None,
+    }) else {
+        return Err(crate::Error::Unknown(format!("function `{name}`")));
+    };
+    let mut scope = Scope::new();
+    for (p, v) in params.iter().zip(args) {
+        scope.bind(p.name.clone(), v.clone());
+    }
+    eval_with_ctx(body, &scope, &ctx)
+}
+
 /// Evaluate an expression with a function-store [`Ctx`] in scope (so calls resolve). At the top level
 /// the lexical `global` (the base for function bodies) IS the eval scope.
 pub(super) fn eval_with_ctx<'a>(

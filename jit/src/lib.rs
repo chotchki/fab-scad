@@ -181,15 +181,19 @@ impl JitRegistry {
     pub fn build<'a>(
         defs: impl IntoIterator<Item = (&'a str, &'a [&'a str], &'a Expr)>,
     ) -> Result<Self, JitError> {
+        // Materialize the input so every function is visible to every other (a caller can INLINE any callee,
+        // including forward references). `fn_defs` maps name → (param names, body) for the inliner.
+        let entries: Vec<(&str, &[&str], &Expr)> = defs.into_iter().collect();
+        let fn_defs: FnDefs = entries.iter().map(|&(n, p, b)| (n, (p, b))).collect();
         let mut module = new_module()?;
         let helpers = declare_helpers(&mut module)?;
         // Declare + define each compilable function, remembering its FuncId to resolve the code pointer
         // AFTER the single finalize. A unique export symbol per function (by index) avoids collisions.
         let mut pending: Vec<(String, FuncId, usize)> = Vec::new();
         let mut declined: BTreeMap<String, &'static str> = BTreeMap::new();
-        for (i, (name, param_names, body)) in defs.into_iter().enumerate() {
+        for (i, &(name, param_names, body)) in entries.iter().enumerate() {
             let symbol = format!("scad_jit_{i}");
-            match define_one(&mut module, &symbol, param_names, body, &helpers) {
+            match define_one(&mut module, &symbol, param_names, body, &fn_defs, &helpers) {
                 Ok(func_id) => pending.push((name.to_string(), func_id, param_names.len())),
                 // Declined → the interpreter handles it; record the FIRST out-of-subset node that blocked it
                 // (the absorption-ceiling signal for the EXPLAIN histogram).
@@ -329,7 +333,10 @@ fn explain_coverage(defs: &[JitDef<'_>], registry: &JitRegistry) {
 pub fn compile_function(param_names: &[&str], body: &Expr) -> Result<JitFn, JitError> {
     let mut module = new_module()?;
     let helpers = declare_helpers(&mut module)?;
-    let func_id = define_one(&mut module, "scad_jit_fn", param_names, body, &helpers)?;
+    // The standalone API compiles ONE function with no peers to inline (the differential harness uses it for
+    // self-contained bodies); a user-fn call therefore declines. [`JitRegistry`] is the multi-function form.
+    let no_defs = FnDefs::new();
+    let func_id = define_one(&mut module, "scad_jit_fn", param_names, body, &no_defs, &helpers)?;
     module
         .finalize_definitions()
         .map_err(|e| JitError::Cranelift(e.to_string()))?;
@@ -401,6 +408,7 @@ fn define_one(
     symbol: &str,
     param_names: &[&str],
     body: &Expr,
+    defs: &FnDefs,
     helpers: &Helpers,
 ) -> Result<FuncId, JitError> {
     let cl = |e: ModuleError| JitError::Cranelift(e.to_string());
@@ -428,11 +436,14 @@ fn define_one(
         let index: BTreeMap<&str, usize> =
             param_names.iter().enumerate().map(|(i, &n)| (n, i)).collect();
         let locals = LetEnv::new(); // no let-bindings in scope at the function's top level
+        let inlining: [&str; 0] = []; // nothing being inlined at the top level
         let lower = Lower {
             params_ptr,
             raised_ptr,
             index: &index,
             locals: &locals,
+            defs,
+            inlining: &inlining,
             fmod: fmod_ref,
             powf: powf_ref,
             math: math_ref,
@@ -490,10 +501,19 @@ fn float_cc(op: BinOp) -> Option<FloatCC> {
 /// Type discipline keeps it sound: arithmetic requires `Num` operands, a comparison yields `Bool`, a
 /// ternary's branches must AGREE in type, and `&&`/`||`/`!` operate on truthiness. A construct outside the
 /// subset (a call, an index, a free variable, a bitwise op, a mixed-type ternary) DECLINES.
-/// In-scope LOCAL bindings — `let`-bound names (and, later, inlined-call params) → their compiled IR value +
-/// type. Checked before the parameter `index`. Carried by-reference in [`Lower`] so entering a `let` just
-/// makes a fresh map + a copied `Lower` pointing at it (no signature threading); `Lower` is `Copy`.
+/// In-scope LOCAL bindings — `let`-bound names and inlined-call params → their compiled IR value + type.
+/// Checked before the parameter `index`. Carried by-reference in [`Lower`] so entering a `let` just makes a
+/// fresh map + a copied `Lower` pointing at it (no signature threading); `Lower` is `Copy`.
 type LetEnv<'a> = BTreeMap<&'a str, (Value, Ty)>;
+
+/// The program's user functions the JIT can INLINE: name → (parameter names, body). A call to one splices
+/// its body into the caller (fresh env binding its params to the arg values) — the whole-function absorption
+/// that makes the JIT reach BOSL2's call chains.
+type FnDefs<'a> = BTreeMap<&'a str, (&'a [&'a str], &'a Expr)>;
+
+/// Max inline nesting before a call DECLINES — a runaway guard for pathological non-recursive chains (and
+/// the coarse bound until step-3 real recursion). Deep enough for real BOSL2 numeric call chains.
+const INLINE_LIMIT: usize = 32;
 
 /// The shared lowering context — everything [`compile_expr`] threads down besides the builder itself.
 /// Carried by value (it's `Copy`) so a scope that adds bindings just spreads a new one: `Lower { locals:
@@ -505,6 +525,11 @@ struct Lower<'a> {
     raised_ptr: Value,
     index: &'a BTreeMap<&'a str, usize>,
     locals: &'a LetEnv<'a>,
+    /// Every user function available to inline (whole program). Immutable per compile.
+    defs: &'a FnDefs<'a>,
+    /// The function names currently being inlined, outermost first — recursion guard (a callee already here
+    /// DECLINES) + depth bound. Grows one entry per inline.
+    inlining: &'a [&'a str],
     fmod: FuncRef,
     powf: FuncRef,
     math: FuncRef,
@@ -614,31 +639,59 @@ fn compile_expr(fb: &mut FunctionBuilder, expr: &Expr, lower: &Lower) -> Result<
             let scoped = Lower { locals: &locals, ..*lower };
             compile_expr(fb, body, &scoped)
         }
-        // A scalar math builtin (`sin`/`sqrt`/`abs`/…) inlines to a call into OUR math (P.1.4b) — bit-identical
-        // to the interpreter's builtin (degrees, snapping) via `jit_math`. Anything else DECLINES: a user
-        // function (inlining is later infra), a non-math or variadic builtin, a dynamic/`(expr)()` callee, a
-        // named arg. A unary op passes a dummy 0.0 as the unused second helper argument.
+        // A call resolves in three ways: (1) a scalar math builtin → a call into OUR math (P.1.4b), (2) a USER
+        // function → INLINE its body (step 2), (3) else DECLINE (a non-math/variadic builtin, a dynamic
+        // `(expr)()` callee, an undefined name, a named arg).
         ExprKind::Call { callee, args } => {
             let ExprKind::Ident(name) = &callee.kind else {
                 return Err(JitError::Unsupported("call"));
             };
-            let Some((id, arity)) = jit_math_id(name) else {
-                return Err(JitError::Unsupported("call"));
-            };
-            if args.len() != usize::from(arity) || args.iter().any(|a| a.name.is_some()) {
-                return Err(JitError::Unsupported("call"));
+            // (1) scalar math builtin, bit-identical to the interpreter (degrees + snapping) via `jit_math`.
+            if let Some((id, arity)) = jit_math_id(name) {
+                if args.len() != usize::from(arity) || args.iter().any(|a| a.name.is_some()) {
+                    return Err(JitError::Unsupported("call"));
+                }
+                let (a0, a0ty) = compile_expr(fb, &args[0].value, lower)?;
+                let a = require_num(a0, a0ty)?;
+                let b = if arity == 2 {
+                    let (b0, b0ty) = compile_expr(fb, &args[1].value, lower)?;
+                    require_num(b0, b0ty)?
+                } else {
+                    fb.ins().f64const(0.0) // a unary op ignores the second helper argument
+                };
+                let id_v = fb.ins().iconst(types::I32, i64::from(id));
+                let call = fb.ins().call(lower.math, &[id_v, a, b]);
+                return Ok((fb.inst_results(call)[0], Ty::Num));
             }
-            let (a0, a0ty) = compile_expr(fb, &args[0].value, lower)?;
-            let a = require_num(a0, a0ty)?;
-            let b = if arity == 2 {
-                let (b0, b0ty) = compile_expr(fb, &args[1].value, lower)?;
-                require_num(b0, b0ty)?
-            } else {
-                fb.ins().f64const(0.0)
-            };
-            let id_v = fb.ins().iconst(types::I32, i64::from(id));
-            let call = fb.ins().call(lower.math, &[id_v, a, b]);
-            Ok((fb.inst_results(call)[0], Ty::Num))
+            // (2) user function → INLINE. Its body compiles into the caller with its params bound to the arg
+            // VALUES (compiled in the CALLER's env), in a FRESH env (lexical: the callee sees only its own
+            // params + let-locals, not the caller's). Recursion (callee already on the inline stack) and a
+            // runaway depth DECLINE — step-3 real recursion is the follow-on. Exact positional arity only for
+            // now (defaults + a free-var/global reference are the next inlining steps).
+            if let Some(&(cparams, cbody)) = lower.defs.get(name.as_str()) {
+                if lower.inlining.contains(&name.as_str()) {
+                    return Err(JitError::Unsupported("recursion"));
+                }
+                if lower.inlining.len() >= INLINE_LIMIT {
+                    return Err(JitError::Unsupported("inline-depth-limit"));
+                }
+                if args.len() != cparams.len() || args.iter().any(|a| a.name.is_some()) {
+                    return Err(JitError::Unsupported("call"));
+                }
+                let mut callee_env = LetEnv::new();
+                for (&p, arg) in cparams.iter().zip(args) {
+                    let (v, ty) = compile_expr(fb, &arg.value, lower)?;
+                    callee_env.insert(p, (v, ty));
+                }
+                let empty_index = BTreeMap::new(); // callee params live in `callee_env`, not `params_ptr`
+                let mut stack = lower.inlining.to_vec();
+                stack.push(name.as_str());
+                let callee_lower =
+                    Lower { index: &empty_index, locals: &callee_env, inlining: &stack, ..*lower };
+                return compile_expr(fb, cbody, &callee_lower);
+            }
+            // (3) not inlinable.
+            Err(JitError::Unsupported("call"))
         }
         // `assert(cond) body` — a passthrough guard. Compile the CONDITION; if it's falsy, OR a 1 into the
         // `raised` out-param, and the value is the guarded body. On failure the caller ignores our f64 and

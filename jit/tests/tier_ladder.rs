@@ -38,7 +38,7 @@ fn func(prog: &Program) -> (&str, &[Parameter], &Expr) {
 /// The i-th argument: mostly finite (is_nan → false), one in seven a NaN (is_nan → true), so the accumulator
 /// is non-trivial and DCE can't fold it away.
 fn arg(i: u64) -> f64 {
-    if i % 7 == 0 { f64::NAN } else { f64::from(u32::try_from(i & 0xffff).unwrap_or(0)) }
+    if i.is_multiple_of(7) { f64::NAN } else { f64::from(u32::try_from(i & 0xffff).unwrap_or(0)) }
 }
 
 /// Time OpenSCAD evaluating `is_nan` over an `n`-element comprehension (per-element = `(t_n − t_small)/(n −
@@ -83,8 +83,7 @@ fn tier_ladder_is_nan() {
     // The three in-process tiers, all running the same `is_nan`.
     let oracle = FnOracle::new(&[(name, params, body)], &[]).expect("oracle builds");
     let intrinsic = bench_intrinsic(name, params, body).expect("is_nan has an O.2 intrinsic");
-    let reg = JitRegistry::build([(name, params, body)].into_iter(), std::iter::empty())
-        .expect("registry builds");
+    let reg = JitRegistry::build([(name, params, body)], std::iter::empty()).expect("registry builds");
     let compiled = reg.get(name).expect("is_nan compiles in the JIT");
 
     let iters = 2_000_000u64;

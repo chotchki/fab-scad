@@ -242,20 +242,28 @@ grind, not a rewrite.
   runtime-length list of VECTORS needs a list-of-lists arena (2b's `JitArena` grows a nested tier).
   This is gaussian_rands' matrix branch — the last piece of that end-to-end.
 
-## len of a non-vector — the ConstUndef fold (next lever)
+## 2c.3 — the ConstUndef fold (len of a non-vector) — DONE
 
-The declined histogram's top blocker after 2c.1 is `len of a non-vector` (364). In a SCALAR
-specialization we STATICALLY know the arg is a scalar, so `len(scalar)` is a compile-time-known
-`undef` — which means `len(x) == N` folds to `false` and PRUNES, exactly like the ConstBool/ConstNum
-folds. Add a `Lowered::ConstUndef` (a compile-time undef): `len(non-list)` → `ConstUndef`;
-`is_undef(ConstUndef)` → `ConstBool(true)`, the other type-predicates → `false`; comparisons fold to
-the interpreter's undef semantics (`undef==undef` true, `undef==x` false, ordered `<`/`>` false);
-`const_truthy(ConstUndef)` → `Some(false)` (undef is falsy, so `undef ? … : …` prunes to the else).
-A `ConstUndef` that must become a RUNTIME number (`len(x) + 1`) DECLINES (`.num()` → `Err`, like a
-bool) — it only folds in predicates/comparisons/ternary-conditions. Reclaims functions where a
-scalar-arg dimension check folds away; composes with every other fold. Measure the real reclaim (the
-histogram is FIRST-blocker, so a folded `len` may just expose the next blocker) but it's more of the
-same cheap shape-dispatch that's been paying off.
+`len of a non-vector` was the top blocker after 2c.1 (364). In a SCALAR specialization we STATICALLY
+know the arg is a scalar, so `len(scalar)` is a compile-time-known `undef` — `len(x) == N` folds to
+`false` and PRUNES, exactly like the ConstBool/ConstNum folds. `Lowered::ConstUndef` (a compile-time
+undef): `len(non-list)` → `ConstUndef`; `is_undef(ConstUndef)` → `true`, the other type-predicates →
+`false`; comparisons fold to the interpreter's EXACT undef semantics (`ops.rs`: `==`/`!=` give a bool
+via `Value::eq`, so `undef==undef` true and `undef==other` false; an ORDERED `<`/`>` is `undef`
+because undef is non-orderable — NOT `false`, the one I'd have guessed wrong); `const_truthy` →
+`Some(false)` (undef is falsy, so `undef ? … : …` prunes to the else); `!undef` folds to `true`. A
+`ConstUndef` that must become a RUNTIME number (`len(x)+1`) or a RETURN value DECLINES (no undef in
+`JitOutcome`) — it only folds in predicates/comparisons/ternary-conditions.
+
+The honest result: `len of a non-vector` is GONE from the histogram (all 364 now compile past the
+len), but net coverage is only +2 scalar / +1 vec (83→85 / 28→29) — because the histogram is
+FIRST-blocker, so those 364 mostly redistribute to their NEXT blocker rather than fully compiling.
+The fold IS the win (the ceiling's cleared); the reclaim is downstream-limited. New ceiling: `call`
+(285) and — tellingly — `index of a non-vector` (146→226), which is the SAME undef story (`scalar[i]`
+→ `undef` per `ops::index`). So the cheap follow-on is extending `ConstUndef` to Index (and `.x`/`.y`
+member access on a non-vector), with ONE nuance the `len` case dodges: still COMPILE the index expr
+for its eval-order side effects (a nested `rands` advances the stream) before folding the result to
+`ConstUndef`, or the seedless-`rands` weave desyncs.
 
 ## Known determinism edge — bail-after-partial-draw (for the hardening pass)
 

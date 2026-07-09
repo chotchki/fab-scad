@@ -942,6 +942,41 @@ fn matrix_arg_ops_are_bit_identical() {
 }
 
 #[test]
+fn const_undef_len_of_scalar_prunes() {
+    // P.1.6 rung-D 2c.3 (ConstUndef): in a SCALAR specialization `len(scalar)` is a compile-time `undef`, so a
+    // dimension guard over it FOLDS + PRUNES the un-JIT-able branch — reclaiming the `len of a non-vector`
+    // blocker. `dimcheck`: `len(x)==3` (undef==3 → false) prunes the `x[0]` THEN (an un-indexable scalar) → x.
+    // `isu`: `is_undef(len(scalar))` → true → 1. `pos`: `len(x)>0` (undef>0 → undef → falsy) prunes to `-x`.
+    // `notlen`: `!(len(x)==2)` → `!false` → true → x. Each equals the interpreter, which computes the same undef.
+    let prog = program(
+        "function dimcheck(x) = len(x) == 3 ? x[0] : x;\
+         function isu(x) = is_undef(len(x)) ? 1 : 0;\
+         function pos(x) = len(x) > 0 ? x : -x;\
+         function notlen(x) = !(len(x) == 2) ? x : -x;",
+    );
+    let reg = JitRegistry::build(
+        defs(&prog).iter().map(|&(n, p, b)| (n, p, b)),
+        consts(&prog).iter().map(|&(n, v)| (n, v)),
+    )
+    .expect("registry builds");
+
+    // The all-scalar spec COMPILES now — the undef fold prunes the branch that used to block it.
+    assert!(reg.get("dimcheck").is_some(), "len(scalar)==3 folds false → prunes x[0] → scalar spec compiles");
+    assert!(reg.get("isu").is_some(), "is_undef(len(scalar)) folds true");
+    assert!(reg.get("pos").is_some(), "len(scalar)>0 → undef → falsy → prunes to -x");
+    assert!(reg.get("notlen").is_some(), "!(len(scalar)==2) folds true");
+
+    for x in [5.0, -3.0, 0.0, -0.0, 1e9] {
+        assert_call_eq(&reg, &prog, "dimcheck", &[Value::Num(x)]); // len(scalar)!=3 → x
+        assert_call_eq(&reg, &prog, "isu", &[Value::Num(x)]); // is_undef(undef) → 1
+        assert_call_eq(&reg, &prog, "pos", &[Value::Num(x)]); // undef>0 falsy → -x
+        assert_call_eq(&reg, &prog, "notlen", &[Value::Num(x)]); // !(undef==2) → x
+    }
+    // The VECTOR spec of dimcheck still folds `len(vec)==3` to a REAL comparison (the ConstNum path, not undef).
+    assert_call_eq(&reg, &prog, "dimcheck", &[vec_arg(&[10.0, 20.0, 30.0])]); // len==3 → x[0]=10
+}
+
+#[test]
 fn over_long_vector_arg_declines() {
     // A vector longer than MAX_VEC_ARG (16) is NOT scalarized — unrolling it would explode compile/code size,
     // and that dynamic-length case is rung D. call_numeric declines → the interpreter runs the body.

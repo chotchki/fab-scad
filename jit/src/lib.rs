@@ -1197,6 +1197,9 @@ fn define_one(
                 fb.ins().call(lower.set_result, &[lower.arena_ptr, handle]);
                 (fb.ins().f64const(0.0), Ret::DynVec) // the dispatch reads arena.result into a NumList
             }
+            // A body that evaluates to compile-time `undef` (a scalar-spec `len(scalar)`) — the JIT has no undef
+            // return (`JitOutcome` is Num/Bool/Vec/Nested), so DECLINE; the interpreter returns the undef (2c.3).
+            Lowered::ConstUndef => return Err(JitError::Unsupported("undef return")),
         };
         fb.ins().return_(&[ret]);
         fb.finalize();
@@ -1448,6 +1451,13 @@ enum Lowered {
     /// Materialized to a `Num` (`fb.ins().f64const`) only when it feeds a runtime op — the fold uses Rust `f64`
     /// ops that are bit-identical to the Cranelift IR ops / the `jit_fmod`/`jit_powf` helpers.
     ConstNum(f64),
+    /// A COMPILE-TIME-known `undef` (P.1.6 rung-D 2c.3 const-folding) — chiefly `len` of a NON-list (in a scalar
+    /// specialization `len(scalar)` is statically `undef`), the `len of a non-vector` blocker. Folds like its
+    /// siblings: `is_undef` → `true`, the other type predicates → `false`, `==`/`!=` → a `ConstBool` (undef
+    /// equals only undef), an ORDERED comparison → another `ConstUndef` (undef is non-orderable → undef, per
+    /// `ops::order`), and `truthy` → `false` (undef is falsy) so `len(x) ? … : …` and `len(x)==N ? … : …`
+    /// PRUNE. It has no numeric value, so feeding it a runtime numeric op DECLINES (`num` → `Err`, like a bool).
+    ConstUndef,
 }
 
 impl Lowered {
@@ -1463,6 +1473,7 @@ impl Lowered {
             }
             Lowered::Vec(_) => Err(JitError::Unsupported("a vector where a number is required")),
             Lowered::DynList(_) => Err(JitError::Unsupported("a dynamic list where a number is required")),
+            Lowered::ConstUndef => Err(JitError::Unsupported("undef where a number is required")),
         }
     }
 
@@ -1513,6 +1524,9 @@ fn truthy(fb: &mut FunctionBuilder, v: &Lowered) -> Result<Value, JitError> {
         // A compile-time-const number folds its truthiness: `c != 0.0` in Rust IS the `une` semantics — `NaN`
         // truthy, `±0` falsy — so this matches the `Num` runtime `fcmp NotEqual` bit-for-bit.
         Lowered::ConstNum(c) => Ok(fb.ins().iconst(types::I8, i64::from(*c != 0.0))),
+        // `undef` is FALSY (`Value::is_truthy`) → a const `0`. So `len(scalar) && x` / a runtime `undef ? …`
+        // materializes to a false flag, matching the interpreter (2c.3).
+        Lowered::ConstUndef => Ok(fb.ins().iconst(types::I8, 0)),
         Lowered::Vec(_) => Err(JitError::Unsupported("a vector as a truth condition")),
         Lowered::DynList(_) => Err(JitError::Unsupported("a dynamic list as a truth condition")),
     }
@@ -1526,6 +1540,8 @@ fn const_truthy(v: &Lowered) -> Option<bool> {
     match v {
         Lowered::ConstBool(b) => Some(*b),
         Lowered::ConstNum(c) => Some(*c != 0.0),
+        // `undef` is FALSY (2c.3) — so a `len(scalar) ? … : …` / `len(x)==N ? …` dispatch prunes to the ELSE.
+        Lowered::ConstUndef => Some(false),
         _ => None,
     }
 }
@@ -1559,6 +1575,19 @@ fn const_fcmp(op: BinOp, x: f64, y: f64) -> bool {
         BinOp::Eq => x == y,
         BinOp::Ne => x != y,
         _ => unreachable!("const_fcmp is only reached behind float_cc"),
+    }
+}
+
+/// CONST-FOLD a comparison where at least one operand is a compile-time `undef` (2c.3). `==`/`!=` yield a
+/// `ConstBool` — `undef` equals ONLY `undef` (`Value::eq`: `(Undef,Undef)` true, every cross-type pair false),
+/// so `==` is true iff BOTH are undef; an ORDERED `<`/`<=`/`>`/`>=` yields `undef` again (undef is non-orderable,
+/// so `ops::order` returns `Undef`), staying a `ConstUndef` a wrapping `truthy`/ternary then treats as falsy.
+fn fold_undef_cmp(op: BinOp, a: &Lowered, b: &Lowered) -> Lowered {
+    let both_undef = matches!(a, Lowered::ConstUndef) && matches!(b, Lowered::ConstUndef);
+    match op {
+        BinOp::Eq => Lowered::ConstBool(both_undef),
+        BinOp::Ne => Lowered::ConstBool(!both_undef),
+        _ => Lowered::ConstUndef, // an ordered comparison of undef is itself undef
     }
 }
 
@@ -1693,10 +1722,11 @@ fn compile_expr(fb: &mut FunctionBuilder, expr: &Expr, lower: &Lower) -> Result<
                 UnOp::Pos => Ok(Lowered::Num(v.num(fb)?)),
                 // `!x` = `!is_truthy(x)` → a Bool. `(truthy == 0)` inverts the 0/1 flag.
                 UnOp::Not => {
-                    // Const-fold `!ConstBool` → `ConstBool` (P.1.6 rung-D 2b.4) so `!is_undef(x)` etc. stays
-                    // compile-time for a wrapping ternary; a runtime bool inverts the 0/1 flag.
-                    if let Lowered::ConstBool(b) = v {
-                        return Ok(Lowered::ConstBool(!b));
+                    // Const-fold `!x` for ANY compile-time-truthy `x` — a `ConstBool`, `ConstNum`, or `ConstUndef`
+                    // (`!undef` = `true`, undef being falsy) → a `ConstBool` (2b.4 + 2c.3), so `!is_undef(x)` /
+                    // `!(len(x)==N)` stays compile-time for a wrapping ternary; a runtime bool inverts the 0/1 flag.
+                    if let Some(t) = const_truthy(&v) {
+                        return Ok(Lowered::ConstBool(!t));
                     }
                     let t = truthy(fb, &v)?;
                     Ok(Lowered::Bool(fb.ins().icmp_imm(IntCC::Equal, t, 0)))
@@ -1729,6 +1759,12 @@ fn compile_expr(fb: &mut FunctionBuilder, expr: &Expr, lower: &Lower) -> Result<
             // A comparison: both operands must be numbers (the interpreter's `<` etc. on numbers; a vector
             // comparison isn't in the subset).
             if let Some(cc) = float_cc(*op) {
+                // An `undef` operand (2c.3, a `len(scalar)`): the interpreter's undef comparison — `==`/`!=` give
+                // a BOOL (undef equals ONLY undef), an ORDERED `<`/`>`/… gives UNDEF (non-orderable). Fold both,
+                // so `len(x)==N` (scalar `x`) prunes and `len(x)<N` propagates undef into a pruning ternary.
+                if matches!(a, Lowered::ConstUndef) || matches!(b, Lowered::ConstUndef) {
+                    return Ok(fold_undef_cmp(*op, &a, &b));
+                }
                 // Const-fold two compile-time numbers → a `ConstBool` (`len(v) == 3` dispatch) that can PRUNE a
                 // wrapping ternary. `const_fcmp` is bit-identical to the runtime `fcmp` (same ordered/une split).
                 if let (Some(x), Some(y)) = (a.const_num(), b.const_num()) {
@@ -2043,8 +2079,10 @@ fn compile_expr(fb: &mut FunctionBuilder, expr: &Expr, lower: &Lower) -> Result<
 /// interpreter's `type==NUMBER && !isnan`, so `is_num(x) = x == x` (ORDERED equal — false for `NaN`, per L.2.8n).
 fn compile_type_predicate(fb: &mut FunctionBuilder, name: &str, arg: &Lowered) -> Lowered {
     match name {
-        // The JIT never represents `undef` / strings / function values, so these are compile-time false.
-        "is_undef" | "is_string" | "is_function" => Lowered::ConstBool(false),
+        // A compile-time `ConstUndef` (a `len(non-list)`, 2c.3) makes `is_undef` TRUE; every other `Lowered` is a
+        // representable value → false. The JIT never represents strings / function values → those stay false.
+        "is_undef" => Lowered::ConstBool(matches!(arg, Lowered::ConstUndef)),
+        "is_string" | "is_function" => Lowered::ConstBool(false),
         "is_bool" => Lowered::ConstBool(matches!(arg, Lowered::Bool(_) | Lowered::ConstBool(_))),
         "is_list" => Lowered::ConstBool(matches!(arg, Lowered::Vec(_) | Lowered::DynList(_))),
         "is_num" => match arg {
@@ -2241,7 +2279,11 @@ fn compile_vec_builtin(
                     let n_i = fb.inst_results(call)[0];
                     Ok(Lowered::Num(fb.ins().fcvt_from_sint(types::F64, n_i)))
                 }
-                _ => Err(JitError::Unsupported("len of a non-vector")),
+                // `len` of a NON-list (a scalar / bool — in a scalar spec `len(scalar_param)`) is `undef` (2c.3):
+                // a compile-time `ConstUndef` so `len(x) == N` / `len(x) ? …` FOLD + prune instead of declining.
+                // (A string has a real length in OpenSCAD, but a string never reaches the JIT — it declines at the
+                // arg boundary — so every non-list `Lowered` here is genuinely undef-length.)
+                _ => Ok(Lowered::ConstUndef),
             }
         }
         "norm" => {
@@ -2319,6 +2361,8 @@ fn compile_vec_builtin(
                     }
                     // min/max reducing a DYNAMIC list is a runtime fold (a loop) — a future rung; decline.
                     Lowered::DynList(_) => return Err(JitError::Unsupported("min/max of a dynamic list")),
+                    // `min(undef)` is `undef` (2c.3) — no numeric reduction to emit; decline.
+                    Lowered::ConstUndef => return Err(JitError::Unsupported("min/max of undef")),
                 }
             } else {
                 // 0 or ≥2 args: the `multi` branch — every arg is a plain number (a vector/bool → undef → decline).
@@ -2441,6 +2485,8 @@ fn neg_lowered(fb: &mut FunctionBuilder, v: Lowered) -> Result<Lowered, JitError
         Lowered::Bool(_) | Lowered::ConstBool(_) => Err(JitError::Unsupported("negate a boolean")),
         // Elementwise-negating a DYNAMIC list is a runtime map (a loop) — a future rung (2b.4); decline.
         Lowered::DynList(_) => Err(JitError::Unsupported("negate a dynamic list")),
+        // `-undef` is `undef` (`ops::apply_unary`) — stays a `ConstUndef` so a wrapping fold still sees it (2c.3).
+        Lowered::ConstUndef => Ok(Lowered::ConstUndef),
     }
 }
 

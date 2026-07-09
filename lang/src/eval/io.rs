@@ -15,7 +15,9 @@
 use std::path::{Path, PathBuf};
 
 use super::loader::{ProvidedSource, SourceMap};
-use super::{FileTable, Geo, Imported, Message, Resolution, SourceNeed, resolve_source};
+use super::{
+    FileTable, Geo, Imported, Message, NumericJitFactory, Resolution, SourceNeed, resolve_source,
+};
 use crate::parser::{Program, parse};
 
 /// An empty program — the stand-in a tolerated missing/broken `use`/`include` contributes (no statements,
@@ -50,6 +52,7 @@ pub(crate) fn drive<R>(
     base_dir: &Path,
     root_path: Option<&Path>,
     library_paths: &[PathBuf],
+    jit_factory: Option<&dyn NumericJitFactory>,
     mut mesh_reader: R,
 ) -> crate::Result<(Geo, Vec<Message>)>
 where
@@ -62,7 +65,7 @@ where
     // echoes — so we accumulate them across rounds and prepend them to the eval messages when the run closes.
     let mut warnings: Vec<Message> = Vec::new();
     loop {
-        match resolve_source(source, base_dir, root_id.as_deref(), &scad, &files)? {
+        match resolve_source(source, base_dir, root_id.as_deref(), &scad, &files, jit_factory)? {
             Resolution::Complete { geo, messages } => {
                 warnings.extend(messages);
                 return Ok((geo, warnings));

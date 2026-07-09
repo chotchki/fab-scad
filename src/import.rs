@@ -54,9 +54,25 @@ pub fn resolve_geometry_with_base(
     base_dir: &Path,
     library_paths: &[PathBuf],
 ) -> Result<Geo, Error> {
-    fab_lang::resolve_geometry_with_base(source, base_dir, library_paths, |raw| {
+    fab_lang::resolve_geometry_with_base(source, base_dir, library_paths, jit_factory(), |raw| {
         read_import(base_dir, raw)
     })
+}
+
+/// The desktop numeric-JIT factory the eval entry threads into `Ctx` (P.1) — `Some` on a `jit` build (which
+/// `native` implies), `None` on a lean/miri build so cranelift is never a dependency there. The JIT is a
+/// pure native accelerator: `fast == JIT` is bit-identical, so its presence only changes speed. `FAB_JIT=0`
+/// disables it at runtime (inside the factory) for A/B measurement.
+fn jit_factory() -> Option<&'static dyn fab_lang::NumericJitFactory> {
+    #[cfg(feature = "jit")]
+    {
+        static FACTORY: fab_jit::JitFactory = fab_jit::JitFactory;
+        Some(&FACTORY)
+    }
+    #[cfg(not(feature = "jit"))]
+    {
+        None
+    }
 }
 
 /// Evaluate a `.scad` FILE to a geometry [`Geo`] tree, resolving its `use`/`include` graph AND its
@@ -66,7 +82,9 @@ pub fn resolve_geometry_with_base(
 /// As [`fab_lang::resolve_geometry_file`], plus any [`read_import`] failure.
 pub fn resolve_geometry_file(path: &Path, library_paths: &[PathBuf]) -> Result<Geo, Error> {
     let base_dir = path.parent().unwrap_or(Path::new(".")).to_path_buf();
-    fab_lang::resolve_geometry_file(path, library_paths, |raw| read_import(&base_dir, raw))
+    fab_lang::resolve_geometry_file(path, library_paths, jit_factory(), |raw| {
+        read_import(&base_dir, raw)
+    })
 }
 
 /// Join a relative `raw` onto `base_dir`; an absolute `raw` is used as-is (OpenSCAD `find_valid_path` for

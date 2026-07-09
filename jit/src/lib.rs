@@ -26,7 +26,7 @@ use cranelift::prelude::{
     settings, types,
 };
 
-use fab_lang::{BinOp, Expr, ExprKind, UnOp};
+use fab_lang::{BinOp, Expr, ExprKind, JitDef, NumericJit, NumericJitFactory, UnOp};
 
 /// The `%` an OpenSCAD `%` compiles to — the EXACT op the interpreter runs (`ops.rs`: `x % y`, C
 /// `fmod` semantics, sign of the dividend). Routed as a call so the bits match, since Cranelift has no
@@ -196,6 +196,42 @@ impl JitRegistry {
     /// The names of the compiled functions, sorted — for the FAB_EXPLAIN coverage report.
     pub fn compiled_names(&self) -> impl Iterator<Item = &str> {
         self.fns.keys().map(String::as_str)
+    }
+}
+
+/// The dispatch hook the interpreter calls (P.1.2). A compiled function named `name` with matching arity
+/// runs as native code; anything else returns `None` and the interpreter runs the body. The arity filter
+/// is defensive — the dispatch gate already guarantees `args.len()` equals the compiled arity, but a
+/// mismatch declines rather than reading past the arg slice.
+impl NumericJit for JitRegistry {
+    fn call_numeric(&self, name: &str, args: &[f64]) -> Option<f64> {
+        self.get(name)
+            .filter(|f| f.arity() == args.len())
+            .map(|f| f.call(args))
+    }
+}
+
+/// The factory the native shell hands to the eval entry (P.1.2b): given a program's function defs, compile
+/// the numeric-subset ones into a [`JitRegistry`].
+///
+/// OPT-IN under `FAB_JIT=1` for now — the interpreter is the bit-identical baseline and the doctrine is
+/// never-silently-wrong, so a NEW eval path stays off by default until P.1.3's end-to-end fast==JIT
+/// differential proves it byte-for-byte on the corpus/models; then the default flips ON. Unset / any other
+/// value → `None` (pure interpreter). An empty registry (nothing in the numeric subset compiled) also
+/// returns `None`, so `Ctx.jit` carries a hook only when it can actually pay.
+pub struct JitFactory;
+
+impl NumericJitFactory for JitFactory {
+    fn compile(&self, defs: &[JitDef<'_>]) -> Option<Box<dyn NumericJit>> {
+        if std::env::var_os("FAB_JIT").as_deref() != Some(std::ffi::OsStr::new("1")) {
+            return None;
+        }
+        let registry =
+            JitRegistry::build(defs.iter().map(|d| (d.name, d.params.as_slice(), d.body))).ok()?;
+        if registry.is_empty() {
+            return None;
+        }
+        Some(Box::new(registry))
     }
 }
 

@@ -49,9 +49,9 @@ mod webcolors;
 pub use customizer::{Constraint, CustomParam, Customizer, DropdownItem, customize};
 pub use error::{Error, Result};
 pub use eval::{
-    Contour, Evaluation, ExtrudeKind, FileTable, Geo, GeoNode, Imported, Join2D, Message,
-    NumericJit, RANGE_MAX, RangeIter, Resolution, Scope, Shape2D, SourceNeed, Value, eval_expr,
-    eval_program, fragments, range_iter, range_len,
+    Contour, Evaluation, ExtrudeKind, FileTable, Geo, GeoNode, Imported, JitDef, Join2D, Message,
+    NumericJit, NumericJitFactory, RANGE_MAX, RangeIter, Resolution, Scope, Shape2D, SourceNeed,
+    Value, eval_expr, eval_program, fragments, range_iter, range_len,
 };
 pub use geom::{Affine, Affine2, Dims, Rgba, Tri, Vec2, Vec3};
 pub use lexer::{Lexed, Token, TokenKind, decode_str, lex, num_value};
@@ -223,12 +223,13 @@ pub fn resolve_geometry_with_base<R>(
     source: &str,
     base_dir: &Path,
     library_paths: &[PathBuf],
+    jit_factory: Option<&dyn NumericJitFactory>,
     mesh_reader: R,
 ) -> Result<Geo>
 where
     R: FnMut(&str) -> Result<Imported>,
 {
-    Ok(eval::io::drive(source, base_dir, None, library_paths, mesh_reader)?.0)
+    Ok(eval::io::drive(source, base_dir, None, library_paths, jit_factory, mesh_reader)?.0)
 }
 
 /// Like [`resolve_geometry_with_base`], but for a `.scad` FILE — resolving its `use`/`include` graph AND
@@ -239,6 +240,7 @@ where
 pub fn resolve_geometry_file<R>(
     path: &Path,
     library_paths: &[PathBuf],
+    jit_factory: Option<&dyn NumericJitFactory>,
     mesh_reader: R,
 ) -> Result<Geo>
 where
@@ -246,7 +248,7 @@ where
 {
     let source = eval::io::read_source(path)?;
     let base_dir = path.parent().unwrap_or(Path::new("."));
-    Ok(eval::io::drive(&source, base_dir, Some(path), library_paths, mesh_reader)?.0)
+    Ok(eval::io::drive(&source, base_dir, Some(path), library_paths, jit_factory, mesh_reader)?.0)
 }
 
 #[cfg(test)]

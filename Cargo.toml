@@ -71,12 +71,17 @@ kernel = ["geometry", "dep:manifold3d", "dep:threemf", "dep:zip", "dep:quick-xml
 # fab-lang (the scad-rs evaluator) ALONE — the geometry backend + its miri interface test need `Mesh`
 # without the OS-heavy native deps (reqwest/clap/rayon choke miri). `native` implies it.
 geometry = ["dep:fab-lang"]
-native = ["dep:reqwest", "dep:clap", "dep:rayon", "geometry"]
+# The desktop Cranelift JIT (P.1) — pulls fab-jit (cranelift) alongside the evaluator. Its OWN feature (not
+# folded into `geometry`) so the lean/miri geometry build never compiles cranelift; `native` implies it.
+jit = ["geometry", "dep:fab-jit"]
+native = ["dep:reqwest", "dep:clap", "dep:rayon", "jit", "geometry"]
 
 [dependencies]
 # scad-rs, our OpenSCAD reimplementation — the differential harness's OTHER engine (G.3.7). Pure
 # Rust + wasm-clean, but only the native differ uses it for now, so gate it behind `native`.
 fab-lang = { path = "lang", optional = true }
+# The desktop numeric JIT (P.1) — native-only (cranelift can't JIT in-wasm), so gated behind `jit`/`native`.
+fab-jit = { path = "jit", optional = true }
 clap = { version = "4", features = ["derive"], optional = true }
 anyhow = "1"
 serde = { version = "1", features = ["derive"] }

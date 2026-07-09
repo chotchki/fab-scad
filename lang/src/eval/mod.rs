@@ -150,6 +150,29 @@ pub trait NumericJit {
     fn call_numeric(&self, name: &str, args: &[f64]) -> Option<f64>;
 }
 
+/// One user function offered to the JIT factory: its name, its parameter names (in order), and its body
+/// AST. The wasm-clean hand-off shape — the factory ([`NumericJitFactory`]) compiles the numeric-subset
+/// ones and ignores the rest. Borrowed from the loaded program; the compiled result retains no AST refs.
+pub struct JitDef<'a> {
+    /// The function's name (its registry key).
+    pub name: &'a str,
+    /// The parameter names, in declaration order (the JIT reads arg `i` as `params[i]`).
+    pub params: Vec<&'a str>,
+    /// The function body to compile.
+    pub body: &'a Expr,
+}
+
+/// Builds a [`NumericJit`] from a program's function set (P.1.2). Called ONCE per eval round, after the
+/// loader closes the `use`/`include` graph so every function is known. The native `fab-jit` crate
+/// implements this over Cranelift; `None` return means "nothing compiled, interpret everything". Kept a
+/// trait (not a closure) so the crate boundary carries no Cranelift and the method's elided lifetime lets
+/// it accept defs of any lifetime. wasm passes no factory at all → [`Ctx::jit`] stays `None`.
+pub trait NumericJitFactory {
+    /// Compile the numeric-subset functions in `defs` to a [`NumericJit`], or `None` if none compiled /
+    /// the JIT is disabled.
+    fn compile(&self, defs: &[JitDef<'_>]) -> Option<Box<dyn NumericJit>>;
+}
+
 /// The evaluation context, borrowed from the `Program`:
 /// - `functions`: the user-function store (name → params + body). Functions live in their OWN
 ///   namespace (separate from variables), so a call resolves by name — which is why recursion and
@@ -245,12 +268,13 @@ pub(super) struct Ctx<'a> {
     /// that (transitively) reads `parent_module` re-runs every time — closing the one wrong-hit class the
     /// message/rand fence can't see. Transitive for free: a nested read bumps it, the outer call sees the delta.
     impure_reads: std::cell::Cell<u64>,
-    /// The desktop numeric-JIT hook (P.1.2), or `None` (wasm, or a program with nothing compiled). When
-    /// present, an eligible user-function call ([`Task::Apply`] with a `jit` name + all-`Num` args) is
-    /// offered to it before the body is interpreted; a `Some` result is bit-identical to interpreting, so
-    /// this only ever changes speed. Injected by the native shell at the eval entry; `None` everywhere the
-    /// interpreter is the whole story (raw-AST eval, wasm).
-    jit: Option<&'a dyn NumericJit>,
+    /// The desktop numeric-JIT hook (P.1.2), or `None` (wasm, or a program with nothing compiled). Built
+    /// ONCE at setup by the caller-supplied [`NumericJitFactory`] and OWNED here (the compiled registry
+    /// retains no AST borrows, so a `Box<dyn NumericJit>` needs no `'a`). When present, an eligible
+    /// user-function call ([`Task::Apply`] with a `jit` name + all-`Num` args) is offered to it before the
+    /// body is interpreted; a `Some` result is bit-identical to interpreting, so this only ever changes
+    /// speed. `None` everywhere the interpreter is the whole story (raw-AST eval, wasm, no factory).
+    jit: Option<Box<dyn NumericJit>>,
 }
 
 /// One active module call's children context: the call-site child statements (borrowed from the AST) +
@@ -546,7 +570,7 @@ fn eval_with_global<'a>(
                 // numeric fns are often scalar-or-vector polymorphic — falls through to the interpreter).
                 // A `Some(r)` is bit-identical to interpreting `body`, so this is pure speed. The registry
                 // decides membership + arity (returns `None` to defer); no wasted work when the hook is off.
-                if let (Some(name), Some(j)) = (jit, ctx.jit)
+                if let (Some(name), Some(j)) = (jit, ctx.jit.as_deref())
                     && let Some(nums) = all_nums(&vals)
                     && let Some(r) = j.call_numeric(name, &nums)
                 {
@@ -1341,6 +1365,7 @@ fn resolve_source(
     root_id: Option<&std::path::Path>,
     scad_sources: &loader::SourceMap,
     files: &FileTable,
+    jit_factory: Option<&dyn NumericJitFactory>,
 ) -> crate::Result<Resolution> {
     let _span = tracing::trace_span!("eval_program").entered();
     // Phase 1 (STATIC): close the `use`/`include` graph. A reference not yet in the source table surfaces as
@@ -1367,10 +1392,26 @@ fn resolve_source(
     let islands = loader::islands(&loaded);
     let functions = tagged_functions(&islands);
     let intrinsics = build_intrinsics(&functions);
+    // Build the numeric-JIT registry ONCE, now the graph is closed and every function is known (P.1.2b).
+    // The factory (native fab-jit) compiles the numeric-subset bodies and returns a `NumericJit`; `None`
+    // when there's no factory (wasm / raw path) or nothing compiled. Done here, borrowing `functions`
+    // before it moves into the `Ctx`.
+    let jit = jit_factory.and_then(|f| {
+        let defs: Vec<JitDef<'_>> = functions
+            .iter()
+            .map(|(name, (fndef, _home))| JitDef {
+                name,
+                params: fndef.0.iter().map(|p| p.name.as_ref()).collect(),
+                body: fndef.1,
+            })
+            .collect();
+        f.compile(&defs)
+    });
     let n = islands.len();
     let ctx = Ctx {
         functions,
         intrinsics,
+        jit,
         // Island 0 (root) is filled by `run_stmts`; the rest are seeded empty and built just below.
         island_globals: RefCell::new(vec![Scope::new(); n]),
         islands,
@@ -1386,7 +1427,6 @@ fn resolve_source(
         rand_stream: RefCell::new(rng::RandStream::new()),
         cache: eval_cache::CacheCell::default(),
         impure_reads: std::cell::Cell::new(0),
-        jit: None, // native shell injects the JIT after building it (P.1.2b); the loader path stays interp
     };
     // Hoist the ROOT (island 0) FIRST, THEN the `use`-island constant scopes. ORDER is load-bearing: the
     // root's include-flattened functions (all of BOSL2's) are tagged home=0, so a `use`-island constant that
@@ -1440,7 +1480,10 @@ pub(crate) fn evaluate_source(
     root_path: Option<&std::path::Path>,
     library_paths: &[std::path::PathBuf],
 ) -> crate::Result<(Geo, Vec<Message>)> {
-    io::drive(source, base_dir, root_path, library_paths, io::no_import_reader)
+    // The no-import spine (tests + the pure-geometry `evaluate*` sugar) is interpreter-only — its callers
+    // are fab-lang-internal and can't build a JIT. The desktop JIT rides the import-capable
+    // `resolve_geometry_*` entries the native shell drives models through.
+    io::drive(source, base_dir, root_path, library_paths, None, io::no_import_reader)
 }
 
 /// The LOUD error the raw-AST path ([`eval_program`]) raises when `import`/`surface` executed with no file
@@ -2238,7 +2281,7 @@ mod tests {
         };
 
         // Phase 1: an unloaded `use` surfaces a Scad need — BEFORE eval (the program can't run yet).
-        let scad = resolve_source("use <lib.scad>\ncube(1);", here, None, &no_scad, &no_files)
+        let scad = resolve_source("use <lib.scad>\ncube(1);", here, None, &no_scad, &no_files, None)
             .expect("resolves");
         assert!(
             matches!(&scad, Resolution::Incomplete { needs } if needs == &[scad_need("lib.scad")]),
@@ -2253,6 +2296,7 @@ mod tests {
             None,
             &no_scad,
             &no_files,
+            None,
         )
         .expect("resolves");
         assert!(
@@ -2264,8 +2308,8 @@ mod tests {
         // Supply the mesh → the run CLOSES (Complete). An empty placeholder mesh stands in for a read STL.
         let mut have = FileTable::new();
         have.insert("a.stl".to_string(), super::Imported::Mesh(crate::Mesh::new()));
-        let closed =
-            resolve_source("import(\"a.stl\");", here, None, &no_scad, &have).expect("resolves");
+        let closed = resolve_source("import(\"a.stl\");", here, None, &no_scad, &have, None)
+            .expect("resolves");
         assert!(
             matches!(&closed, Resolution::Complete { .. }),
             "expected Complete, got {closed:?}"
@@ -2361,7 +2405,7 @@ mod tests {
     }
 
     /// [`eval_last`] with a numeric-JIT hook injected into the ctx.
-    fn eval_last_jit(src: &str, jit: &dyn super::NumericJit) -> Value {
+    fn eval_last_jit(src: &str, jit: Box<dyn super::NumericJit>) -> Value {
         let prog = parse(src).expect("parses");
         let mut ctx = build_ctx(&prog);
         ctx.jit = Some(jit);
@@ -2381,29 +2425,28 @@ mod tests {
 
     #[test]
     fn numeric_jit_dispatches_eligible_calls_and_falls_back_otherwise() {
-        let jit = MarkerJit;
         // (1) all-positional + all-Num → the JIT fires: 5*5 + 1000 marker.
         assert_eq!(
-            eval_last_jit("function sq(x) = x*x; y = sq(5);", &jit),
+            eval_last_jit("function sq(x) = x*x; y = sq(5);", Box::new(MarkerJit)),
             Value::Num(1025.0),
             "an eligible numeric call takes the JIT path"
         );
         // (2) a NON-number arg (a vector) → the all-Num guard fails → interpreter runs x*x = dot = 5.
         assert_eq!(
-            eval_last_jit("function sq(x) = x*x; y = sq([1,2]);", &jit),
+            eval_last_jit("function sq(x) = x*x; y = sq([1,2]);", Box::new(MarkerJit)),
             Value::Num(5.0),
             "a vector arg falls back to the interpreted body (no marker)"
         );
         // (3) a NAMED arg → not JIT-eligible (dispatch passes jit=None) → interpreter runs → 25. This is
         // the BOSL2-loves-named-args gap: the fast path is declined, correctness is preserved. (follow-on)
         assert_eq!(
-            eval_last_jit("function sq(x) = x*x; y = sq(x = 5);", &jit),
+            eval_last_jit("function sq(x) = x*x; y = sq(x = 5);", Box::new(MarkerJit)),
             Value::Num(25.0),
             "a named-arg call falls back to the interpreter (no marker)"
         );
         // (4) a function the registry doesn't know → call_numeric returns None → interpreter runs → 27.
         assert_eq!(
-            eval_last_jit("function cube(x) = x*x*x; y = cube(3);", &jit),
+            eval_last_jit("function cube(x) = x*x*x; y = cube(3);", Box::new(MarkerJit)),
             Value::Num(27.0),
             "a registry miss falls back to the interpreter"
         );

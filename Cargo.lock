@@ -2852,6 +2852,7 @@ dependencies = [
  "anyhow",
  "bincode",
  "clap",
+ "fab-jit",
  "fab-lang",
  "manifold3d",
  "quick-xml",

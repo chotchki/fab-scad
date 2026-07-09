@@ -630,6 +630,20 @@ impl<'a> FnOracle<'a> {
     }
 }
 
+/// Illustration/bench seam (P.1.5): the native INTRINSIC registered for a function's exact `(name, params,
+/// body)`, or `None`. It's the very fn-pointer [`Task::Intrinsic`] dispatches — exposed so a benchmark can
+/// time the intrinsic tier in isolation, the same way the JIT registry's `CompiledFn` is timed. Not for
+/// production use (the interpreter reaches intrinsics through the fingerprint gate at `build_ctx`).
+#[doc(hidden)]
+#[must_use]
+pub fn bench_intrinsic(
+    name: &str,
+    params: &[Parameter],
+    body: &Expr,
+) -> Option<fn(&[Value]) -> crate::Result<Value>> {
+    intrinsics::lookup(name, params, body)
+}
+
 /// Evaluate an expression with a function-store [`Ctx`] in scope (so calls resolve). At the top level
 /// the lexical `global` (the base for function bodies) IS the eval scope.
 pub(super) fn eval_with_ctx<'a>(

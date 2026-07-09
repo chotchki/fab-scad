@@ -1021,9 +1021,9 @@ fn compile_expr(fb: &mut FunctionBuilder, expr: &Expr, lower: &Lower) -> Result<
             let scoped = Lower { locals: &locals, ..*lower };
             compile_expr(fb, body, &scoped)
         }
-        // A call resolves in three ways: (1) a scalar math builtin → a call into OUR math (P.1.4b), (2) a USER
-        // function → INLINE its body (step 2), (3) else DECLINE (a non-math/variadic builtin, a dynamic
-        // `(expr)()` callee, an undefined name, a named arg).
+        // A call resolves in four ways: (1) a scalar math builtin → a call into OUR math (P.1.4b), (2) a USER
+        // function → INLINE its body, (2.5) a VECTOR builtin (norm/len/cross) over scalarized vectors (rung B),
+        // (3) else DECLINE (a variadic/list builtin, a dynamic `(expr)()` callee, an undefined name, a named arg).
         ExprKind::Call { callee, args } => {
             let ExprKind::Ident(name) = &callee.kind else {
                 return Err(JitError::Unsupported("call"));
@@ -1085,6 +1085,12 @@ fn compile_expr(fb: &mut FunctionBuilder, expr: &Expr, lower: &Lower) -> Result<
                 let callee_lower =
                     Lower { index: &empty_index, locals: &callee_env, inlining: &stack, ..*lower };
                 return compile_expr(fb, cbody, &callee_lower);
+            }
+            // (2.5) a VECTOR builtin (`norm`/`len`/`cross`) over scalarized vector args (P.1.6 rung B). Checked
+            // AFTER the user-fn inline so a program's own redefinition WINS — matching the interpreter's
+            // user-function-first resolution (a builtin `norm` only fires when no user `norm` is in scope).
+            if matches!(name.as_str(), "len" | "norm" | "cross") {
+                return compile_vec_builtin(fb, name, args, lower);
             }
             // (3) not inlinable.
             Err(JitError::Unsupported("call"))
@@ -1160,6 +1166,98 @@ fn compile_expr(fb: &mut FunctionBuilder, expr: &Expr, lower: &Lower) -> Result<
         // Everything else DECLINES — named so the EXPLAIN coverage histogram (P.1.4) shows WHICH node kind
         // blocks each function, i.e. the absorption ceiling per subset feature we might add next.
         other => Err(JitError::Unsupported(kind_name(other))),
+    }
+}
+
+/// A VECTOR builtin (`norm`/`len`/`cross`) over scalarized vector args (P.1.6 rung B). Each replicates
+/// [`super::builtins`]'s implementation EXACTLY so `fast == JIT` holds:
+/// - `len(v)` → the element count as an `f64` const (a scalarized vector's length is known at COMPILE time).
+/// - `norm(v)` → the interpreter's `iter().map(|x| x*x).sum().sqrt()` — a SEQUENTIAL `fold(0.0, +)`, NOT the
+///   4-lane `dot` (which would diverge ≥4 elements), then `sqrt` through the shared math helper (== `.sqrt()`).
+/// - `cross(a,b)` → the 3D cross (a `Vec`, so it composes: `norm(cross(a,b))` fully scalarizes) or the 2D cross
+///   (a scalar), each `fmul`/`fsub` in the interpreter's operand order.
+///
+/// A non-vector arg, a wrong arity, a named arg, or a cross of non-2/3-vectors DECLINES (the interpreter would
+/// yield `undef`, which the JIT can't represent).
+fn compile_vec_builtin(
+    fb: &mut FunctionBuilder,
+    name: &str,
+    args: &[fab_lang::Arg],
+    lower: &Lower,
+) -> Result<Lowered, JitError> {
+    if args.iter().any(|a| a.name.is_some()) {
+        return Err(JitError::Unsupported("call")); // builtins take positional args here
+    }
+    match name {
+        "len" => {
+            if args.len() != 1 {
+                return Err(JitError::Unsupported("call"));
+            }
+            let Lowered::Vec(elems) = compile_expr(fb, &args[0].value, lower)? else {
+                return Err(JitError::Unsupported("len of a non-vector"));
+            };
+            #[allow(
+                clippy::cast_precision_loss,
+                reason = "a scalarized vector's length is tiny (<= MAX_VEC_ARG); f64 is exact"
+            )]
+            let n = elems.len() as f64;
+            Ok(Lowered::Num(fb.ins().f64const(n)))
+        }
+        "norm" => {
+            if args.len() != 1 {
+                return Err(JitError::Unsupported("call"));
+            }
+            let Lowered::Vec(elems) = compile_expr(fb, &args[0].value, lower)? else {
+                return Err(JitError::Unsupported("norm of a non-vector"));
+            };
+            // Sequential sum of squares — `fold(0.0, +)`, MATCHING `iter().map(|x| x*x).sum()` bit-for-bit.
+            let mut acc = fb.ins().f64const(0.0);
+            for e in &elems {
+                let x = e.num()?;
+                let sq = fb.ins().fmul(x, x);
+                acc = fb.ins().fadd(acc, sq);
+            }
+            // `sqrt` through the SAME helper the scalar `sqrt()` builtin uses, so it's the interpreter's `.sqrt()`.
+            let (sqrt_id, _) = jit_math_id("sqrt").ok_or(JitError::Unsupported("call"))?;
+            let id_v = fb.ins().iconst(types::I32, i64::from(sqrt_id));
+            let zero = fb.ins().f64const(0.0); // the helper's unused second arg
+            let call = fb.ins().call(lower.math, &[id_v, acc, zero]);
+            Ok(Lowered::Num(fb.inst_results(call)[0]))
+        }
+        "cross" => {
+            if args.len() != 2 {
+                return Err(JitError::Unsupported("call"));
+            }
+            let (Lowered::Vec(a), Lowered::Vec(b)) =
+                (compile_expr(fb, &args[0].value, lower)?, compile_expr(fb, &args[1].value, lower)?)
+            else {
+                return Err(JitError::Unsupported("cross of a non-vector"));
+            };
+            // `x*y - z*w` = `fsub(fmul(x,y), fmul(z,w))`, in the interpreter's exact operand order.
+            let sub_of_products = |fb: &mut FunctionBuilder, x, y, z, w| {
+                let p1 = fb.ins().fmul(x, y);
+                let p2 = fb.ins().fmul(z, w);
+                fb.ins().fsub(p1, p2)
+            };
+            match (a.as_slice(), b.as_slice()) {
+                // 3D cross → a VECTOR (`ops::cross`'s [a1·b2−a2·b1, a2·b0−a0·b2, a0·b1−a1·b0]).
+                ([a0, a1, a2], [b0, b1, b2]) => {
+                    let (a0, a1, a2) = (a0.num()?, a1.num()?, a2.num()?);
+                    let (b0, b1, b2) = (b0.num()?, b1.num()?, b2.num()?);
+                    let x = sub_of_products(fb, a1, b2, a2, b1);
+                    let y = sub_of_products(fb, a2, b0, a0, b2);
+                    let z = sub_of_products(fb, a0, b1, a1, b0);
+                    Ok(Lowered::Vec(vec![Lowered::Num(x), Lowered::Num(y), Lowered::Num(z)]))
+                }
+                // 2D cross → a SCALAR (`a0·b1 − a1·b0`).
+                ([a0, a1], [b0, b1]) => {
+                    let (a0, a1, b0, b1) = (a0.num()?, a1.num()?, b0.num()?, b1.num()?);
+                    Ok(Lowered::Num(sub_of_products(fb, a0, b1, a1, b0)))
+                }
+                _ => Err(JitError::Unsupported("cross of non-2/3-vectors")),
+            }
+        }
+        _ => Err(JitError::Unsupported("call")), // unreachable: the caller only routes len/norm/cross here
     }
 }
 

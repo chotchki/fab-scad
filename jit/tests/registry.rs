@@ -423,6 +423,50 @@ fn vector_arg_shapes_compile_on_demand() {
 }
 
 #[test]
+fn vector_builtins_are_bit_identical() {
+    // P.1.6 rung B builtins: `norm`/`len`/`cross` over scalarized vector args, each replicating the
+    // interpreter's exact computation. `nrm_cross` composes a 3D cross (a Vec) INTO norm — fully scalarized,
+    // no memory. `mag5` is the load-bearing guard: a 5-element norm where the interpreter's SEQUENTIAL sum of
+    // squares would diverge from a 4-lane `dot` reduction, so a bit-identical result proves norm is the
+    // left-fold, not the dot.
+    let prog = program(
+        "function mag(v) = norm(v);\
+         function mag5(v) = norm(v);\
+         function count(v) = len(v);\
+         function cross2(a, b) = cross(a, b);\
+         function nrm_cross(a, b) = norm(cross(a, b));\
+         function unit0(v) = v[0] / norm(v);",
+    );
+    let reg = JitRegistry::build(
+        defs(&prog).iter().map(|&(n, p, b)| (n, p, b)),
+        consts(&prog).iter().map(|&(n, v)| (n, v)),
+    )
+    .expect("registry builds");
+
+    assert_call_eq(&reg, &prog, "mag", &[vec_arg(&[3.0, 4.0, 12.0])]); // 13
+    assert_call_eq(&reg, &prog, "mag", &[vec_arg(&[0.0, 0.0])]); // 0
+    // The 4-lane-vs-left-fold guard: sums of squares whose ORDER changes the rounding.
+    assert_call_eq(&reg, &prog, "mag5", &[vec_arg(&[1e8, 1.0, 2.0, 3.0, 4.0])]);
+    assert_call_eq(&reg, &prog, "mag5", &[vec_arg(&[-1.5, 2.25, 0.0, 1e-8, 7.0])]);
+    assert_call_eq(&reg, &prog, "count", &[vec_arg(&[9.0, 9.0, 9.0])]); // 3
+    assert_call_eq(&reg, &prog, "count", &[vec_arg(&[1.0, 2.0])]); // 2
+    assert_call_eq(&reg, &prog, "cross2", &[vec_arg(&[1.0, 2.0]), vec_arg(&[3.0, 4.0])]); // -2
+    assert_call_eq(&reg, &prog, "nrm_cross", &[vec_arg(&[1.0, 0.0, 0.0]), vec_arg(&[0.0, 1.0, 0.0])]); // 1
+    assert_call_eq(&reg, &prog, "nrm_cross", &[vec_arg(&[1.0, 2.0, 3.0]), vec_arg(&[4.0, 5.0, 6.0])]);
+    assert_call_eq(&reg, &prog, "unit0", &[vec_arg(&[3.0, 4.0])]); // 3/5
+
+    // A user redefinition of a builtin WINS (interpreter resolves user functions first): here `norm` is a
+    // user function returning a constant, so the JIT must inline THAT, not the builtin.
+    let shadow = program("function norm(v) = 42; function f(v) = norm(v) + v[0];");
+    let reg2 = JitRegistry::build(
+        defs(&shadow).iter().map(|&(n, p, b)| (n, p, b)),
+        consts(&shadow).iter().map(|&(n, v)| (n, v)),
+    )
+    .expect("registry builds");
+    assert_call_eq(&reg2, &shadow, "f", &[vec_arg(&[5.0, 6.0])]); // 42 + 5 = 47 (user norm, not builtin)
+}
+
+#[test]
 fn over_long_vector_arg_declines() {
     // A vector longer than MAX_VEC_ARG (16) is NOT scalarized — unrolling it would explode compile/code size,
     // and that dynamic-length case is rung D. call_numeric declines → the interpreter runs the body.

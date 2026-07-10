@@ -97,6 +97,10 @@ added 2026-07-05.
   - [ ] J.4.5 - DETERMINISM: native geometry runs Manifold with TBB (`parallel` feature ON) = non-deterministic parallel reduction; wasm is single-threaded. Doctrine #36 needs bit-identical output cross-platform — build native with `parallel` OFF (`MANIFOLD_PAR=NONE`, matching wasm) + re-baseline, OR prove TBB reduction is deterministic. Surfaced by the minkowski research (manifold#666 CI: non-convex² broke Mac/Windows on non-CCW triangulation even with `deterministic=true`). Affects ALL geometry, not just minkowski.
 - [ ] J.5 - Content-addressed CSG cache: node hash = subtree + resolved params + reaching $-context; in-memory tier + hit-rate counters (the on-disk tier stays a storage decision)
 
+  - [x] J.5.1 - Module-redundancy probe: measure the CSG cache-hit ceiling
+  - [ ] J.5.2 - Module memo rung 2a: naive full-$-context (body, params, all-$ctx) → Geo, ~42% safe
+  - [ ] J.5.2b - Module memo rung 2b: read-set-precise $-context (key only $-vars each module reads), chase 42%→~99%
+  - [ ] J.5.3 - Correctness gate: cache-on==off differential + exclusion validation tests
 - [x] J.6 - Unify fab-scad's geom::V3 ([f64;3] orientation helpers) + printer-domain [f64;3] into fab_lang::Vec3
 ## Phase K - scad-rs: differential harness + semantics corpus
 - [ ] K.1 - Harness v1: both engines, metric gate per model class, corpus tiers 1-3 wired in CI (OpenSCAD suite, BOSL2 tests, models/)

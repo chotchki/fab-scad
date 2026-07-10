@@ -661,6 +661,11 @@ fn push_user_module<'a>(
         Value::Num(super::child_count(ctx.module_stack.borrow().len())),
     );
     ctx.module_stack.borrow_mut().push(&mi.name);
+    // Dev probe (off unless FAB_CSG_REDUNDANCY=1, J.5.1): would a content-addressed module memo pay? Key this
+    // instantiation on (body, home base, resolved params, reaching $-context) — the fully-bound `call` frame
+    // carries the params + $-context — and count repeats vs distinct. The reading gates whether J.5.2 is worth
+    // building (redundancy the cache eats) or `slice_parts` is a combinatorial blowup (nothing to hit).
+    super::mod_redundancy::record(std::ptr::from_ref(body).cast::<()>(), &home_global, mi.name.as_str(), params, &call);
     // Push bottom→top: the frame pop (CLEANUP), the body's union, the body itself. The body resolves ITS module
     // calls against the DEFINITION island (`home`) with the home global.
     let mark = results.len();

@@ -25,6 +25,7 @@ pub(crate) mod jit_abi;
 pub(crate) mod io;
 mod loader;
 mod message;
+mod mod_redundancy;
 mod module;
 mod text;
 pub(crate) mod rng;
@@ -1653,9 +1654,11 @@ fn resolve_source(
         }
     }
     redundancy::reset(); // dev probe: fresh count per run so the import fixpoint's partial runs don't bleed in
+    mod_redundancy::reset(); // dev probe (J.5.1): fresh module-call ceiling per run (FAB_CSG_REDUNDANCY)
     fnprofile::reset(); // dev probe: same — fresh per-name call counts per run (FAB_PROFILE_FNS)
     let tree = eval_top(&exec, &global, &ctx)?;
     redundancy::report(); // prints to stderr only under FAB_REDUNDANCY=1
+    mod_redundancy::report(); // prints to stderr only under FAB_CSG_REDUNDANCY=1
     fnprofile::report(); // prints to stderr only under FAB_PROFILE_FNS=1
     let needs = ctx.take_file_needs();
     if needs.is_empty() {

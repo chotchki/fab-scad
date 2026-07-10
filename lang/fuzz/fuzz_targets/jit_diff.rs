@@ -15,7 +15,7 @@
 
 use libfuzzer_sys::fuzz_target;
 
-use fab_lang::{Scope, StmtKind, Value, eval_expr, parse};
+use fab_lang::{Scope, StmtKind, Value, eval_expr, parse, tier_eq};
 
 /// True if `src` contains a run of >= 12 consecutive digits — an absurd literal no real program has, and the
 /// signature of the JIT-compile OOM class (a 60-digit literal in a wide nested list).
@@ -112,13 +112,6 @@ fuzz_target!(|data: &[u8]| {
     };
 
     for args in sample_args(names.len(), data) {
-        // QUARANTINE NaN inputs (Q.6): `(-NaN)*(-NaN)` diverges — the JIT's `fmul` canonicalizes the NaN
-        // sign bit (→ 0x7ff8…) where the interpreter's `f64::mul` preserves it (→ 0xfff8…). That's a KNOWN,
-        // filed bit-identity bug; skip NaN args so the campaign keeps finding OTHER divergence classes until
-        // the canonical-NaN convention is decided + both tiers made to agree. Remove this once Q.6 lands.
-        if args.iter().any(|a| a.is_nan()) {
-            continue;
-        }
         // JIT `None` = a raised inline assert or a non-numeric result — the interpreter side is then
         // Err/non-Num too, so there's nothing to compare. Only Some(number) is asserted.
         let Some(jit) = jitted.call(&args) else {
@@ -129,9 +122,12 @@ fuzz_target!(|data: &[u8]| {
             scope.bind(*name, Value::Num(v));
         }
         if let Ok(Value::Num(slow)) = eval_expr(body, &scope) {
-            assert_eq!(
-                jit.to_bits(),
-                slow.to_bits(),
+            // `tier_eq` (doctrine #36): bitwise for every value that carries information, NaN as a class.
+            // NaN args are back IN the battery (the Q.6 quarantine is gone) — `(-NaN)*(-NaN)` no longer trips
+            // this, because a NaN sign/payload split is not a tier divergence (it's unobservable + optimizer-
+            // /ISA-nondeterministic). Any FINITE or ±inf divergence — the classes worth catching — still fires.
+            assert!(
+                tier_eq(jit, slow),
                 "interp != JIT for `{src}` at {args:?}: jit={jit} ({:#018x}) interp={slow} ({:#018x})",
                 jit.to_bits(),
                 slow.to_bits(),

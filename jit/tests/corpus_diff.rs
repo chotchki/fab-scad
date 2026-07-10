@@ -14,6 +14,7 @@ use std::path::{Path, PathBuf};
 use fab_jit::JitRegistry;
 use fab_lang::{
     Expr, FnOracle, JitOutcome, NumericJit, Parameter, Program, RandStream, StmtKind, Value, parse,
+    tier_eq,
 };
 
 /// `call_numeric` with a FRESH `RandStream` per call (P.1.6 rung-D piece 1) — the oracle side draws from its
@@ -144,13 +145,10 @@ fn input_battery(arity: usize) -> Vec<Vec<f64>> {
 fn outcome_agrees(jit: Option<&JitOutcome>, slow: &fab_lang::Result<Value>) -> bool {
     match (jit, slow) {
         (None, _) => true, // JIT declined / raised / budget-bailed → the interpreter owns this call
-        (Some(JitOutcome::Num(a)), Ok(Value::Num(b))) => a.to_bits() == b.to_bits(),
+        (Some(JitOutcome::Num(a)), Ok(Value::Num(b))) => tier_eq(*a, *b),
         (Some(JitOutcome::Bool(a)), Ok(Value::Bool(b))) => a == b,
         (Some(JitOutcome::Vec(a)), Ok(Value::NumList(b))) => {
-            a.len() == b.len()
-                && a.iter()
-                    .zip(b.iter())
-                    .all(|(x, y)| x.to_bits() == y.to_bits())
+            a.len() == b.len() && a.iter().zip(b.iter()).all(|(x, y)| tier_eq(*x, *y))
         }
         // A fixed nested (matrix) return (2c.1) — the JIT already rebuilt the `Value`; compare it BIT-for-bit.
         (Some(JitOutcome::Nested(a)), Ok(b)) => value_bits_eq(a, b),
@@ -158,20 +156,18 @@ fn outcome_agrees(jit: Option<&JitOutcome>, slow: &fab_lang::Result<Value>) -> b
     }
 }
 
-/// BIT-level structural equality of two `Value`s for the matrix/nested differential (2c.1) — like `Value`'s own
-/// `PartialEq` but comparing `Num` leaves by `to_bits` (a `NaN` matrix must have IDENTICAL bits, STRICTER than
-/// IEEE `==` which reports `NaN != NaN`), and treating the `NumList`/`List` representations as the same vector
-/// (element-for-element). This is the never-silently-wrong gate for a reconstructed nested value.
+/// Structural tier-equality of two `Value`s for the matrix/nested differential (2c.1) — like `Value`'s own
+/// `PartialEq` but comparing `Num` leaves by [`tier_eq`] (STRICTER than IEEE `==` on signed zero — `-0.0` ≠
+/// `0.0` — yet treating NaN as a class, per doctrine #36 / Q.6), and treating the `NumList`/`List`
+/// representations as the same vector (element-for-element). The never-silently-wrong gate for a
+/// reconstructed nested value.
 fn value_bits_eq(a: &Value, b: &Value) -> bool {
     use fab_lang::Value::{Bool, List, Num, NumList};
     match (a, b) {
-        (Num(x), Num(y)) => x.to_bits() == y.to_bits(),
+        (Num(x), Num(y)) => tier_eq(*x, *y),
         (Bool(x), Bool(y)) => x == y,
         (NumList(x), NumList(y)) => {
-            x.len() == y.len()
-                && x.iter()
-                    .zip(y.iter())
-                    .all(|(p, q)| p.to_bits() == q.to_bits())
+            x.len() == y.len() && x.iter().zip(y.iter()).all(|(p, q)| tier_eq(*p, *q))
         }
         (List(x), List(y)) => {
             x.len() == y.len() && x.iter().zip(y.iter()).all(|(p, q)| value_bits_eq(p, q))
@@ -180,7 +176,7 @@ fn value_bits_eq(a: &Value, b: &Value) -> bool {
             n.len() == l.len()
                 && n.iter()
                     .zip(l.iter())
-                    .all(|(x, v)| matches!(v, Num(y) if x.to_bits() == y.to_bits()))
+                    .all(|(x, v)| matches!(v, Num(y) if tier_eq(*x, *y)))
         }
         _ => false,
     }

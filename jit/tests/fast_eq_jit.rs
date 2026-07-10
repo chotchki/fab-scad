@@ -6,7 +6,7 @@
 use std::time::Instant;
 
 use fab_jit::compile_function;
-use fab_lang::{Expr, Program, Scope, StmtKind, Value, eval_expr, parse};
+use fab_lang::{Expr, Program, Scope, StmtKind, Value, eval_expr, parse, tier_eq};
 use proptest::prelude::*;
 
 /// Parse `function f(...) = EXPR;` and hand back the parsed program (kept alive by the caller so the
@@ -37,7 +37,9 @@ fn interp(names: &[&str], body: &Expr, args: &[f64]) -> f64 {
     }
 }
 
-/// Assert the JIT and the interpreter agree BITWISE on every sample (NaN payloads included).
+/// Assert the JIT and the interpreter agree per doctrine #36 on every sample — `tier_eq`: bitwise for every
+/// value that carries information (finite, ±inf, signed zero), NaN as a class (any NaN ≡ any NaN, payload
+/// UNSPECIFIED — see Q.6 + the `neg_squared_nan` regression below).
 fn assert_fast_eq_jit(src: &str, samples: &[&[f64]]) {
     let prog = program(src);
     let (names, body) = func(&prog);
@@ -47,9 +49,8 @@ fn assert_fast_eq_jit(src: &str, samples: &[&[f64]]) {
             .call(args)
             .expect("these functions have no inline assert to raise");
         let slow = interp(&names, body, args);
-        assert_eq!(
-            jit.to_bits(),
-            slow.to_bits(),
+        assert!(
+            tier_eq(jit, slow),
             "fast != JIT for {src} at {args:?}: jit={jit} ({:#018x}) interp={slow} ({:#018x})",
             jit.to_bits(),
             slow.to_bits()
@@ -318,6 +319,26 @@ proptest! {
         let prog = program(&src);
         let (names, body) = func(&prog);
         let jitted = compile_function(&names, body).expect("compiles");
-        prop_assert_eq!(jitted.call(&[x]).expect("no assert").to_bits(), interp(&names, body, &[x]).to_bits());
+        prop_assert!(tier_eq(jitted.call(&[x]).expect("no assert"), interp(&names, body, &[x])));
+    }
+}
+
+#[test]
+fn neg_squared_nan_is_nan_class() {
+    // Q.6 regression — the `jit_diff` fuzzer's first real find. `(-s)*(-s)` at `s = NaN` DIVERGES in bits:
+    // the interpreter faithfully computes `-s` (sign flip → `0xfff8…`) then `NaN*NaN` preserving that sign,
+    // while Cranelift's optimizer rewrites `(-s)*(-s)` → `s*s` (real-exact) and never sets the sign
+    // (→ `0x7ff8…`). Both are NaN, so `tier_eq` ACCEPTS them (payload unspecified). The bits genuinely
+    // differ — asserted here so the doctrine is pinned, not hidden: if a future change made this bit-equal
+    // that'd be fine too, but the point is a NaN sign/payload split is NOT a tier divergence.
+    let prog = program("function f(s) = (-s)*(-s);");
+    let (names, body) = func(&prog);
+    let jitted = compile_function(&names, body).expect("compiles");
+    for x in [f64::NAN, -f64::NAN] {
+        let jit = jitted.call(&[x]).expect("no assert");
+        let slow = interp(&names, body, &[x]);
+        assert!(jit.is_nan() && slow.is_nan(), "both should be NaN");
+        assert_ne!(jit.to_bits(), slow.to_bits(), "the known bit split (the whole point)");
+        assert!(tier_eq(jit, slow), "tier_eq treats the two NaN as equal");
     }
 }

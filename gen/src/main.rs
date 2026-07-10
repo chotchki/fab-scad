@@ -16,7 +16,7 @@ use std::io::{BufWriter, Write};
 use std::path::PathBuf;
 use std::time::Instant;
 
-use fab_lang::{Error, Scope, StmtKind, Value, eval_expr, parse};
+use fab_lang::{Error, Scope, StmtKind, Value, eval_expr, parse, tier_eq};
 
 struct Args {
     count: u32,
@@ -182,8 +182,10 @@ fn jit_label(src: &str) -> &'static str {
                 scope.bind(*name, Value::Num(v));
             }
             if let Ok(Value::Num(s)) = eval_expr(body, &scope)
-                && j.to_bits() != s.to_bits()
+                && !tier_eq(j, s)
             {
+                // `tier_eq` (doctrine #36): bitwise for information-carrying values, NaN as a class. A
+                // `(-NaN)²`-shaped body no longer labels MISMATCH — only a real finite/±inf divergence does.
                 return "MISMATCH";
             }
         }

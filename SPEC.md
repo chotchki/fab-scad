@@ -243,6 +243,21 @@ it all — test reproduction is trivial by construction. Two layers, because Rus
   construction; (2) chunk width is a CONSTANT (4 lanes) regardless of hardware — wider SIMD
   processes fixed-width chunks, so native AVX, wasm SIMD128 and plain scalar all produce
   identical bits. Lane width is a throughput knob, never a semantics knob.
+- **NaN bit-identity is CLASS equality, not PATTERN equality (the one carve-out to "bit-identical"
+  — Q.6):** every finite value, both infinities, and signed zero compare BITWISE (`-0.0 ≠ 0.0` —
+  the sign is information); a NaN compares equal to any other NaN, its sign/payload UNSPECIFIED.
+  This has to be the rule for two independent reasons. A NaN payload is UNOBSERVABLE — every NaN
+  prints `nan` (both signs, no `-nan`, same as OpenSCAD), no builtin exposes the bits, comparisons
+  are payload-blind — so no program output can ever depend on it. And it is NONDETERMINISTIC to
+  produce — x86 and ARM propagate NaN sign/payload by different hardware rules, and Cranelift's
+  optimizer legally rewrites `(-x)*(-x)` → `x*x` (real-exact, but drops the sign the interpreter's
+  `-x` sets). Chasing a stable NaN bit pattern would mean either killing JIT optimization or
+  canonicalizing every float result on every tier — absurd cost for a value that carries nothing.
+  So `fab_lang::tier_eq` is the ONE definition of "the tiers agree," and every differential check
+  (the `fast_eq_jit` proptest, the `corpus_diff` harness, the `jit_diff` fuzzer, the generator's
+  label) routes scalar leaves through it. Earned, not assumed: the `jit_diff` fuzzer FOUND the
+  `(-NaN)²` split a bounded proptest had missed — the carve-out is the honest reading of what
+  bit-identity CAN mean under IEEE-754, written down the moment the fuzzer proved it necessary.
 
 ## Testing + verification
 

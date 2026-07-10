@@ -64,6 +64,25 @@ pub use parser::{
     StmtKind, UnOp, parse, print, print_expr,
 };
 
+/// Tier-equality for doctrine #36 (`interp` == `intrinsics` == `JIT`, and cross-platform): two `f64`
+/// results from different execution tiers AGREE iff they carry the same information — identical bits for
+/// every finite value, both infinities, and signed zero, but NaN compares as a CLASS (any NaN ≡ any NaN),
+/// its sign/payload UNSPECIFIED.
+///
+/// Why NaN is a class, not a bit pattern (Q.6): a NaN payload is UNOBSERVABLE — every NaN prints `nan`
+/// (both signs, no `-nan`; matching OpenSCAD), no builtin exposes the bits, and comparisons are
+/// payload-blind — so no program output can depend on it. It is also nondeterministic to produce: x86 and
+/// ARM propagate NaN sign/payload by different hardware rules, AND Cranelift's optimizer legally rewrites
+/// `(-x)*(-x)` → `x*x` (real-exact, but drops the sign the interpreter's `-x` sets). A stable NaN bit
+/// pattern is therefore neither reachable across platforms nor meaningful; class equality is the strongest
+/// form of bit-identity IEEE-754 permits for NaN. This is THE comparison every differential check — the
+/// JIT `fast_eq_jit` proptest, the `corpus_diff` harness, the `jit_diff` fuzzer, the generator's label —
+/// must route scalar leaves through, so none drifts back to a bit compare that flakes on `(-NaN)²`.
+#[must_use]
+pub fn tier_eq(a: f64, b: f64) -> bool {
+    a.to_bits() == b.to_bits() || (a.is_nan() && b.is_nan())
+}
+
 use std::path::{Path, PathBuf};
 
 /// Evaluate OpenSCAD source to a triangle [`Mesh`] — the end-to-end tracer-bullet spine.
@@ -290,7 +309,30 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{Error, evaluate};
+    use super::{Error, evaluate, tier_eq};
+
+    #[test]
+    fn tier_eq_is_bitwise_for_information_and_class_for_nan() {
+        // Everything that carries information compares BITWISE — including the two things naive `==` gets
+        // wrong: `-0.0` and `0.0` are DISTINCT (different bits), and `inf`/`-inf` are exact.
+        assert!(tier_eq(1.5, 1.5));
+        assert!(!tier_eq(0.0, -0.0)); // signed zero is information (stricter than IEEE `==`)
+        assert!(tier_eq(f64::INFINITY, f64::INFINITY));
+        assert!(!tier_eq(f64::INFINITY, f64::NEG_INFINITY));
+        assert!(!tier_eq(1.0, 1.0 + f64::EPSILON));
+
+        // NaN is a CLASS: any NaN ≡ any NaN, whatever the sign/payload — the exact `(-NaN)²` case (Q.6)
+        // where the JIT yields `0x7ff8…` and the interpreter `0xfff8…`. Both are NaN → agree.
+        let pos = f64::from_bits(0x7ff8_0000_0000_0000);
+        let neg = f64::from_bits(0xfff8_0000_0000_0000);
+        let payload = f64::from_bits(0x7ff8_0000_dead_beef);
+        assert!(tier_eq(pos, neg));
+        assert!(tier_eq(neg, payload));
+        assert!(tier_eq(f64::NAN, neg));
+        // ...but a NaN never equals a real number.
+        assert!(!tier_eq(f64::NAN, 0.0));
+        assert!(!tier_eq(f64::NAN, f64::INFINITY));
+    }
 
     #[test]
     fn evaluate_produces_a_mesh() {

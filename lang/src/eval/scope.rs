@@ -216,14 +216,18 @@ impl Scope {
     pub fn lookup_opt(&self, name: &str) -> Option<Value> {
         // `$`-names live in `specials` and follow the DYNAMIC chain; everything else is in `vars` on the
         // LEXICAL chain. Route by prefix, then walk that chain child→parent (inner shadows outer).
+        let mut frame = &self.frame;
         if name.starts_with('$') {
-            let value = self.lookup_special_raw(name);
-            // J.5.2b: a `$`-read while a module body records is that body's dependency — capture it (near-free
-            // when no recorder is active, one `Cell` read). The regular-var branch never records ($-only key).
-            super::read_set::record(name, value.as_ref());
-            value
+            loop {
+                if let Some(value) = frame.specials.get(name) {
+                    return Some(value.clone());
+                }
+                match &frame.dynamic_parent {
+                    Some(parent) => frame = parent,
+                    None => return None,
+                }
+            }
         } else {
-            let mut frame = &self.frame;
             loop {
                 if let Some(value) = frame.vars.get(name) {
                     return Some(value.clone());
@@ -232,21 +236,6 @@ impl Scope {
                     Some(parent) => frame = parent,
                     None => return None,
                 }
-            }
-        }
-    }
-
-    /// Walk the DYNAMIC chain for a `$`-name WITHOUT recording it (the read-set validation path — see
-    /// [`read_set::agrees`](super::read_set::agrees) — must not pollute an enclosing body's recorder).
-    pub(super) fn lookup_special_raw(&self, name: &str) -> Option<Value> {
-        let mut frame = &self.frame;
-        loop {
-            if let Some(value) = frame.specials.get(name) {
-                return Some(value.clone());
-            }
-            match &frame.dynamic_parent {
-                Some(parent) => frame = parent,
-                None => return None,
             }
         }
     }

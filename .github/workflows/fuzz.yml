@@ -37,16 +37,19 @@ jobs:
         working-directory: lang
         run: cargo fuzz run lex -- -max_total_time=120 -rss_limit_mb=2048
       # The evaluator (miri can't be its checker here — this + ASan is): parse → eval → geometry → mesh,
-      # exercising the value machinery + both iterative Drops. A per-unit -timeout flags a runaway program
-      # (the evaluator caps ranges/recursion, but a pathological input can still be slow).
+      # exercising the value machinery + both iterative Drops. The eval target sets FAB_EVAL_BUDGET (Q.5) so a
+      # runaway comprehension can't hang; -max_len keeps exec/s high (real programs are small — huge inputs
+      # are slow garbage that adds no coverage), -timeout is the belt.
       - name: fuzz eval
         working-directory: lang
-        run: cargo fuzz run eval -- -max_total_time=300 -rss_limit_mb=2048 -timeout=10
+        run: cargo fuzz run eval -- -max_total_time=300 -rss_limit_mb=2048 -max_len=4096 -timeout=10
       # The JIT vs the interpreter, BITWISE — the only tool that executes the JIT's native code (miri/Kani
       # can't). A divergence is a doctrine-#36 violation, a crash under ASan is a memory bug in the JIT seam.
+      # No in-target size guard (Q.7 made compile crash-proof — a deep body DECLINES, never overflows); -max_len
+      # is the THROUGHPUT knob (a numeric function is small, so a large input is slow garbage, not coverage).
       - name: fuzz jit_diff
         working-directory: lang
-        run: cargo fuzz run jit_diff -- -max_total_time=300 -rss_limit_mb=2048 -timeout=10
+        run: cargo fuzz run jit_diff -- -max_total_time=300 -rss_limit_mb=2048 -max_len=4096 -timeout=10
       # Minimize the accumulated corpus to a coverage-minimal set + publish it, so the next run (and
       # anyone reproducing locally) starts from the best-known corpus.
       - name: minimize corpus

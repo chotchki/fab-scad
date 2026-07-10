@@ -17,23 +17,6 @@ use libfuzzer_sys::fuzz_target;
 
 use fab_lang::{Scope, StmtKind, Value, eval_expr, parse, tier_eq};
 
-/// True if `src` contains a run of >= 12 consecutive digits — an absurd literal no real program has, and the
-/// signature of the JIT-compile OOM class (a 60-digit literal in a wide nested list).
-fn has_huge_literal(src: &str) -> bool {
-    let mut run = 0u32;
-    for b in src.bytes() {
-        if b.is_ascii_digit() {
-            run += 1;
-            if run >= 12 {
-                return true;
-            }
-        } else {
-            run = 0;
-        }
-    }
-    false
-}
-
 /// f64 arg batteries derived from the fuzzer bytes PLUS the fixed IEEE corners (0, ±1, div-by-zero → inf,
 /// 0/0 → nan, big/small) — the corners `fast_eq_jit` pins, so the campaign starts already probing them.
 fn sample_args(arity: usize, data: &[u8]) -> Vec<Vec<f64>> {
@@ -73,23 +56,14 @@ fn sample_args(arity: usize, data: &[u8]) -> Vec<Vec<f64>> {
 }
 
 fuzz_target!(|data: &[u8]| {
-    // Skip pathologically-large inputs: a huge deeply-nested numeric body makes the JIT compiler expand to
-    // an out-of-memory unit (a resource-exhaustion class, NOT a bit-identity divergence — see Q.5/TROPHIES).
-    // Real BOSL2 functions + any reasonable generated body are well under this, so the cap costs no coverage
-    // of the property under test (interp == JIT) while keeping the campaign (and the nightly CI job) alive.
-    if data.len() > 4096 {
-        return;
-    }
+    // No input-side guards: Q.7 fixed the compile-complexity crash AT THE ROOT (a `MAX_LOWER_DEPTH` cap in
+    // `fab-jit`'s `compile_expr`, so a deep operator chain DECLINES instead of overflowing the stack), and the
+    // parser already depth-bounds bracket-nesting + unary runs. So a pathological body now declines in µs
+    // rather than aborting — the old 4KB + huge-literal skips (stopgaps for that bug) are GONE, restoring full
+    // input-space coverage of the interp==JIT property.
     let Ok(src) = std::str::from_utf8(data) else {
         return;
     };
-    // Skip inputs carrying an absurd numeric literal (a >=12-digit run): compiling a body full of giant
-    // literals + wide nested lists can OOM the JIT's analysis BEFORE it declines the (non-numeric) body — a
-    // compile-complexity-budget gap (Q.5), not a bit-identity divergence. Real code never has such literals,
-    // so this costs no coverage of interp==JIT.
-    if has_huge_literal(src) {
-        return;
-    }
     let Ok(prog) = parse(src) else {
         return;
     };

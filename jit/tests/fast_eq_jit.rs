@@ -156,6 +156,27 @@ fn unsupported_nodes_decline_cleanly() {
     assert!(compile_function(&names, body).is_err());
 }
 
+#[test]
+fn deep_operator_chain_declines_not_overflows() {
+    // Q.7 regression: a left-assoc operator chain (`x+x+…`) parses ITERATIVELY, so it slips past the parser's
+    // nesting `MAX_DEPTH` into an arbitrarily deep AST — and `compile_expr` recurses on it. Before the
+    // `MAX_LOWER_DEPTH` cap this overflowed the stack (~1500-deep → SIGABRT); now it DECLINES cleanly (the
+    // interpreter, explicit-stack, still evaluates it). The test running to completion IS the proof it no
+    // longer aborts the process.
+    let deep = format!("function f(x) = {};", vec!["x"; 4000].join("+")); // ~4000-deep, was a crash
+    let prog = program(&deep);
+    let (names, body) = func(&prog);
+    assert!(
+        compile_function(&names, body).is_err(),
+        "a past-limit chain must DECLINE, not compile (and above all not overflow)"
+    );
+
+    // A chain WELL under the limit still compiles + stays bit-identical — the cap costs no real coverage (the
+    // whole BOSL2 corpus tops out at depth 21, far under `MAX_LOWER_DEPTH`).
+    let ok = format!("function f(x) = {};", vec!["x"; 40].join("+"));
+    assert_fast_eq_jit(&ok, &[&[1.0], &[-2.5], &[0.0]]);
+}
+
 // A battery reaching the IEEE corners the comparison/ternary paths turn on (±0, ±inf, NaN, ordering).
 const EDGE: &[&[f64]] = &[
     &[0.0],

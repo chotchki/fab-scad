@@ -1314,6 +1314,7 @@ fn define_one(
             defs,
             globals,
             inlining: &inlining,
+            depth: 0,
             rand_ptr,
             arena_ptr,
             fmod: fmod_ref,
@@ -1931,6 +1932,16 @@ type Globals<'a> = BTreeMap<&'a str, &'a Expr>;
 /// the coarse bound until step-3 real recursion). Deep enough for real BOSL2 numeric call chains.
 const INLINE_LIMIT: usize = 32;
 
+/// Max AST-structural depth [`compile_expr`] recurses before a body DECLINES (Q.7) — the compile-complexity
+/// guard that stops a pathological deep expression (a left-assoc chain `x+x+…`, the one shape the parser
+/// DOESN'T depth-bound — it parses iteratively) from overflowing the recursion. Calibrated from measurement,
+/// not guessed: the WHOLE BOSL2 corpus tops out at depth 21, and the recursion overflows a 2MB stack at
+/// ~160 in a debug build (frames are fat there; ~1500 in release). 64 sits 3× ABOVE any real body and ~2.5×
+/// BELOW the worst-case (debug) overflow — so it costs zero real coverage yet the crash is unreachable on
+/// any build. A body deeper than 64 (absurd for numeric code) simply declines to the interpreter, which
+/// evaluates it fine on its explicit stack.
+const MAX_LOWER_DEPTH: u32 = 64;
+
 /// The shared lowering context — everything [`compile_expr`] threads down besides the builder itself.
 /// Carried by value (it's `Copy`) so a scope that adds bindings just spreads a new one: `Lower { locals:
 /// &inner, ..*lower }`. Holds the params pointer, the assert-failure out-param, the parameter index, the
@@ -1950,6 +1961,13 @@ struct Lower<'a> {
     /// The function names currently being inlined, outermost first — recursion guard (a callee already here
     /// DECLINES) + depth bound. Grows one entry per inline.
     inlining: &'a [&'a str],
+    /// AST-structural recursion depth of [`compile_expr`] (Q.7). The parser does NOT bound this — a
+    /// left-assoc operator chain (`x+x+…`) or a unary run (`----x`) parses ITERATIVELY into an arbitrarily
+    /// deep tree WITHOUT tripping its nesting `MAX_DEPTH`, so `compile_expr` (which recurses on the AST)
+    /// would blow the stack (~1500-deep on a 2MB thread → SIGABRT) where the explicit-stack INTERPRETER
+    /// survives. Bounded by [`MAX_LOWER_DEPTH`]: past it the body DECLINES (a clean `JitError`, interpreter
+    /// owns it), never overflows. Incremented at each `compile_expr` entry.
+    depth: u32,
     /// The woven `RandStream` pointer (the 4th ABI param) — a JIT'd seedless `rands()` passes it to
     /// `jit_rand_next`. Untouched by a body that never draws (P.1.6 rung-D piece 1).
     rand_ptr: Value,
@@ -1977,6 +1995,21 @@ struct Lower<'a> {
     reason = "the per-ExprKind lowering — one arm per node kind; splitting scatters the shared builder"
 )]
 fn compile_expr(fb: &mut FunctionBuilder, expr: &Expr, lower: &Lower) -> Result<Lowered, JitError> {
+    // Q.7 compile-complexity guard: the parser does NOT bound AST depth for an operator chain / unary run
+    // (both parse iteratively), so a pathological body would overflow this very recursion. DECLINE past the
+    // limit — a clean `JitError` the interpreter (explicit-stack) then owns — instead of a stack abort. The
+    // `deeper` shadow makes every recursive `compile_expr` below (including the `..*lower` scoped copies for
+    // `let`/inline/global) carry the incremented count for free.
+    if lower.depth >= MAX_LOWER_DEPTH {
+        return Err(JitError::Unsupported(
+            "expression nested past the JIT depth limit",
+        ));
+    }
+    let deeper = Lower {
+        depth: lower.depth + 1,
+        ..*lower
+    };
+    let lower = &deeper;
     match &expr.kind {
         // A numeric literal stays COMPILE-TIME-const (P.1.6 rung-D 2b.4) so a comparison over it can fold to a
         // `ConstBool` and PRUNE a ternary branch (`len(v) == 3 ? … : …`). Materialized to a `Num` the moment it

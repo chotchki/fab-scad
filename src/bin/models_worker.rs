@@ -28,7 +28,18 @@ fn main() {
             let res = fab_scad::import::resolve_geometry_file(&model, &libs);
             let ms = start.elapsed().as_millis();
             match res {
-                Ok(_) => format!("OK\t{ms}"),
+                Ok(geo) => {
+                    // A/B fingerprint (FAB_GEO_FINGERPRINT=1): a deterministic hash of the resolved geometry
+                    // tree — the Debug form is stable (shortest round-trip f64), so cache-on == cache-off is a
+                    // string-hash equality across two runs. Off by default; costs one Debug walk when on.
+                    if std::env::var_os("FAB_GEO_FINGERPRINT").is_some() {
+                        use std::hash::{Hash, Hasher};
+                        let mut h = std::collections::hash_map::DefaultHasher::new();
+                        format!("{geo:?}").hash(&mut h);
+                        eprintln!("FINGERPRINT\t{:016x}", h.finish());
+                    }
+                    format!("OK\t{ms}")
+                }
                 Err(e) => format!(
                     "ERR\t{ms}\t{}",
                     format!("{e}").lines().next().unwrap_or_default()

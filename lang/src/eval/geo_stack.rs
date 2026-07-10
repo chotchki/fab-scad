@@ -179,6 +179,14 @@ enum GTask<'a> {
     /// WORK — the `!` root modifier: drain `results.split_off(mark)` INTO `ctx.root_override` (consumes), so the
     /// parent's `Collect` legitimately sees zero there. Discarded on the error path.
     CaptureRoot { mark: usize },
+    /// WORK — J.5.2a CSG memo: peek the just-produced module node (`results.last()`, like the eval cache's
+    /// `CacheStore` — pushed below the body's `Collect` so it fires the instant the node lands) and store it
+    /// under `key` IFF the body left NO observable side effect (the `snap` counters are unmoved). WORK, never
+    /// CLEANUP: it must not fire on the error drain (an errored body is structurally uncacheable).
+    CacheStoreModule {
+        key: super::mod_cache::ModKey,
+        snap: super::PuritySnap,
+    },
     /// CLEANUP — pop a scope-local module store pushed by an `EvalNodes` that had local defs.
     PopLocalModules,
     /// CLEANUP — the three-frame user-module pop: restore `module_depth` from the pre-call SNAPSHOT (never a
@@ -325,6 +333,30 @@ fn dispatch_work<'a>(
         GTask::CaptureRoot { mark } => {
             let captured = results.split_off(mark);
             ctx.root_override.borrow_mut().extend(captured);
+            Ok(())
+        }
+        // J.5.2a — memoize the module's node IFF its body was pure. Peek (never consume — the parent's `Collect`
+        // reads it). An impure subtree (echo/warning, seedless `rands`, `parent_module`) re-runs every time
+        // instead of serving a stale node; `$children == 0` (the eligibility gate) already fenced the children
+        // hazard. This mirrors the eval cache's `Task::CacheStore` on the geometry side.
+        GTask::CacheStoreModule { key, snap } => {
+            if let Some(geo) = results.last() {
+                // Purity for a MODULE is narrower than for a function: the output is a `Geo` (mesh/transform/
+                // boolean), NEVER a closure — so a closure created + used + discarded inside the body can't
+                // reach the cached node (the function cache declines on `closures` only because a fn can RETURN
+                // one). BOSL2 leaves mint function-literals constantly, so keying on `closures` here declined ~87%
+                // of stores for zero correctness gain. What DOES matter: echo/warning output (messages), seedless
+                // `rands` draw order (draws), and `parent_module` reads (impure_reads) — a hit that skips those
+                // diverges the observable stream / returns a context-dependent node not in the key.
+                let msg_moved = ctx.messages.borrow().len() != snap.messages;
+                let draws_moved = ctx.rand_stream.borrow().draws() != snap.draws;
+                let impure_moved = ctx.impure_reads.get() != snap.impure_reads;
+                if msg_moved || draws_moved || impure_moved {
+                    ctx.mod_cache.borrow_mut().note_decline(msg_moved, draws_moved, impure_moved);
+                } else {
+                    ctx.mod_cache.borrow_mut().put(key, geo.clone());
+                }
+            }
             Ok(())
         }
         GTask::PopLocalModules | GTask::PopModuleFrame { .. } | GTask::RestoreChildrenFrame(_) => {
@@ -636,7 +668,7 @@ fn push_user_module<'a>(
             "user-module recursion too deep (the statement-eval depth guard — a runaway recursive module)",
         ));
     }
-    ctx.module_depth.set(depth + 1);
+    let body_ptr = std::ptr::from_ref(body).cast::<()>();
     // The body's lexical base is the module's HOME ISLAND global (a scope-local module carries its captured
     // defining scope as `base` instead); args, though, bind in the CALLER's scope.
     let home_global = base.unwrap_or_else(|| ctx.island_globals.borrow()[home].clone());
@@ -648,28 +680,64 @@ fn push_user_module<'a>(
         .iter()
         .filter(|s| !matches!(s.kind, StmtKind::Empty))
         .collect();
+    let childless = child_stmts.is_empty();
     call.bind("$children", Value::Num(super::child_count(child_stmts.len())));
+    // `$parent_modules` = the ancestor count BEFORE pushing self (bound now so it's in the memo key + readable
+    // by the body); the module-name push happens on the MISS path below, next to the children frame.
+    call.bind(
+        "$parent_modules",
+        Value::Num(super::child_count(ctx.module_stack.borrow().len())),
+    );
+    // Dev probe (off unless FAB_CSG_REDUNDANCY=1, J.5.1): the fully-bound `call` frame carries the params +
+    // reaching $-context; count repeats vs distinct to gauge the memo ceiling.
+    super::mod_redundancy::record(body_ptr, &home_global, mi.name.as_str(), params, &call);
+    // J.5.2a — the CSG memo. Eligible ONLY when child-less: a module that renders `children()` depends on its
+    // call-site children (NOT in the key), but `$children == 0` ⇒ `children()` renders nothing ⇒ the result is
+    // a pure function of (body, home, params, reaching $-context). On a HIT, push the cached `Geo` and skip the
+    // body, the frames, AND the depth bump — the redundant subtree never runs (the whole point). On a MISS,
+    // snapshot the purity counters + queue a `CacheStoreModule` that memoizes the node IFF the body was pure.
+    let store = if childless && super::mod_cache::enabled() {
+        let param_vals: Vec<Value> = params.iter().map(|p| call.lookup(&p.name)).collect();
+        let specials = call.specials();
+        if super::mod_cache::worth_caching(&param_vals, &specials) {
+            let key = super::mod_cache::ModKey::new(body_ptr, &home_global, &param_vals, &specials);
+            if let Some(geo) = ctx.mod_cache.borrow_mut().get(&key) {
+                results.push(geo);
+                return Ok(());
+            }
+            Some((
+                key,
+                super::PuritySnap {
+                    messages: ctx.messages.borrow().len(),
+                    draws: ctx.rand_stream.borrow().draws(),
+                    closures: ctx.closures.borrow().len(),
+                    impure_reads: ctx.impure_reads.get(),
+                },
+            ))
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    // MISS (or ineligible): the full three-frame setup + body. The depth bump lands HERE (a hit is not a
+    // recursion level). The children are stashed for `children()`; the module name pushed for `parent_module`.
+    ctx.module_depth.set(depth + 1);
     ctx.children_stack.borrow_mut().push(super::ChildrenFrame {
         stmts: child_stmts,
         scope: caller,
         island,
     });
-    // `$parent_modules` = the ancestor count BEFORE pushing self; then push this module's name for
-    // `parent_module(n)` / `$parent_modules`.
-    call.bind(
-        "$parent_modules",
-        Value::Num(super::child_count(ctx.module_stack.borrow().len())),
-    );
     ctx.module_stack.borrow_mut().push(&mi.name);
-    // Dev probe (off unless FAB_CSG_REDUNDANCY=1, J.5.1): would a content-addressed module memo pay? Key this
-    // instantiation on (body, home base, resolved params, reaching $-context) — the fully-bound `call` frame
-    // carries the params + $-context — and count repeats vs distinct. The reading gates whether J.5.2 is worth
-    // building (redundancy the cache eats) or `slice_parts` is a combinatorial blowup (nothing to hit).
-    super::mod_redundancy::record(std::ptr::from_ref(body).cast::<()>(), &home_global, mi.name.as_str(), params, &call);
-    // Push bottom→top: the frame pop (CLEANUP), the body's union, the body itself. The body resolves ITS module
-    // calls against the DEFINITION island (`home`) with the home global.
+    // Push bottom→top: the frame pop (CLEANUP), the memo store (WORK — skipped on the error drain, so an errored
+    // body never stores a partial node), the body's union, the body itself. LIFO → body runs, its node lands via
+    // Collect at `mark`, `CacheStoreModule` peeks it, then the frames pop. The body resolves ITS module calls
+    // against the DEFINITION island (`home`) with the home global.
     let mark = results.len();
     work.push(GTask::PopModuleFrame { depth });
+    if let Some((key, snap)) = store {
+        work.push(GTask::CacheStoreModule { key, snap });
+    }
     work.push(GTask::Collect {
         mark,
         comb: Combinator::Union,

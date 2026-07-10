@@ -128,8 +128,9 @@ impl PartialEq for Key {
 }
 impl Eq for Key {}
 
-/// Hash a `Value` BIT-EXACTLY (matches [`value_bits_eq`]).
-fn hash_value_bits<H: Hasher>(v: &Value, h: &mut H) {
+/// Hash a `Value` BIT-EXACTLY (matches [`value_bits_eq`]). Shared with the CSG-memo cache
+/// ([`mod_cache`](super::mod_cache)) so both caches key `Value`s by the identical bit-exact rule.
+pub(super) fn hash_value_bits<H: Hasher>(v: &Value, h: &mut H) {
     std::mem::discriminant(v).hash(h);
     match v {
         Value::Undef => {}
@@ -161,8 +162,8 @@ fn hash_value_bits<H: Hasher>(v: &Value, h: &mut H) {
 }
 
 /// Bit-exact `Value` equality for the key (`+0`≠`-0`, `NaN`==`NaN`) — stricter than `Value::==`, so it never
-/// yields a wrong hit.
-fn value_bits_eq(a: &Value, b: &Value) -> bool {
+/// yields a wrong hit. Shared with the CSG-memo cache ([`mod_cache`](super::mod_cache)).
+pub(super) fn value_bits_eq(a: &Value, b: &Value) -> bool {
     match (a, b) {
         (Value::Undef, Value::Undef) => true,
         (Value::Bool(x), Value::Bool(y)) => x == y,

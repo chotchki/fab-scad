@@ -25,6 +25,7 @@ pub(crate) mod jit_abi;
 pub(crate) mod io;
 mod loader;
 mod message;
+mod mod_cache;
 mod mod_redundancy;
 mod module;
 mod text;
@@ -316,6 +317,9 @@ pub(super) struct Ctx<'a> {
     /// The eval-memo cache (N.2c): user-function-call results keyed on (fn, env, args, reaching `$`-context).
     /// Per-program (dies with the `Ctx`); off under `FAB_EVAL_CACHE=0`. See [`eval_cache`].
     cache: eval_cache::CacheCell,
+    /// The CSG-memo cache (J.5.2a): a child-less user-module call's produced `Geo` subtree keyed on
+    /// (body, home, params, reaching `$`-context). Per-program; off under `FAB_CSG_CACHE=0`. See [`mod_cache`].
+    mod_cache: mod_cache::CacheCell,
     /// Monotone count of IMPURE READS a call's subtree performed — currently only `parent_module`, which
     /// reads the module-instantiation stack (state NOT in the cache key + no message/rand delta to betray it).
     /// The purity fence snapshots this before/after a call and DECLINES memoization if it moved, so any call
@@ -612,6 +616,7 @@ impl<'a> FnOracle<'a> {
             module_stack: RefCell::default(),
             rand_stream: RefCell::new(rng::RandStream::new()),
             cache: eval_cache::CacheCell::default(),
+            mod_cache: mod_cache::CacheCell::default(),
             impure_reads: std::cell::Cell::new(0),
             jit: None, // the oracle IS the interpreter baseline — never route it through the JIT
         };
@@ -1633,6 +1638,7 @@ fn resolve_source(
         module_stack: RefCell::default(),
         rand_stream: RefCell::new(rng::RandStream::new()),
         cache: eval_cache::CacheCell::default(),
+        mod_cache: mod_cache::CacheCell::default(),
         impure_reads: std::cell::Cell::new(0),
     };
     // Hoist the ROOT (island 0) FIRST, THEN the `use`-island constant scopes. ORDER is load-bearing: the
@@ -1659,6 +1665,7 @@ fn resolve_source(
     let tree = eval_top(&exec, &global, &ctx)?;
     redundancy::report(); // prints to stderr only under FAB_REDUNDANCY=1
     mod_redundancy::report(); // prints to stderr only under FAB_CSG_REDUNDANCY=1
+    ctx.mod_cache.borrow().report(); // realized CSG-cache hit-rate — prints only under FAB_CSG_CACHE=1
     fnprofile::report(); // prints to stderr only under FAB_PROFILE_FNS=1
     let needs = ctx.take_file_needs();
     if needs.is_empty() {
@@ -2354,33 +2361,55 @@ fn check_assert<'a>(
     global: &Scope,
     ctx: &Ctx<'a>,
 ) -> crate::Result<()> {
-    // Keep each condition's EXPR alongside its value: on failure we pretty-print the condition back to
-    // source (`print_expr`) as a `[assert(…)]` locator. BOSL2's asserts are usually message-less, so
-    // without this a failure is a blank "assertion failed" — the printed condition is grep-able straight
-    // into the library (e.g. `assert(is_finite(r) && !approx(r,0))` → one hit in shapes3d.scad). It's
-    // reconstructed from the AST, so it needs no retained source (true file:line is a separate feature).
-    let mut positional: Vec<(&Expr, Value)> = Vec::new();
-    let mut named_condition = None;
-    let mut named_message = None;
+    // Split the condition from the message SLOT. OpenSCAD evaluates BOTH eagerly, in source order, and fires
+    // any WARNING the message triggers even on a PASS (verified: `assert(true, some_undef_var)` warns "Ignoring
+    // unknown variable"), so we do too — bug-for-bug on the console stream. `condition` keeps its EXPR so a
+    // failure pretty-prints it (`print_expr`) as a grep-able `[assert(…)]` locator (BOSL2's asserts are usually
+    // message-LESS). Named `condition`/`message` beat the positional slots (params are `condition`, `message`).
+    let mut cond_expr: Option<&Expr> = None;
+    let mut msg_expr: Option<&Expr> = None;
+    let mut positional = 0;
     for arg in args {
-        let value = eval_with_global(&arg.value, scope, global, ctx)?;
         match arg.name.as_deref() {
-            None => positional.push((&arg.value, value)),
-            Some("condition") => named_condition = Some((&arg.value, value)),
-            Some("message") => named_message = Some(value),
+            Some("condition") => cond_expr = Some(&arg.value),
+            Some("message") => msg_expr = Some(&arg.value),
             Some(_) => {} // unknown named arg — dropped, as OpenSCAD arg-matching does
+            None => {
+                match positional {
+                    0 if cond_expr.is_none() => cond_expr = Some(&arg.value),
+                    1 if msg_expr.is_none() => msg_expr = Some(&arg.value),
+                    _ => {} // assert takes at most (condition, message); extras dropped
+                }
+                positional += 1;
+            }
         }
     }
-    // A named `condition`/`message` beats the positional slot (params are `condition`, then `message`).
-    let condition = named_condition.or_else(|| positional.first().cloned());
-    let message = named_message.or_else(|| positional.get(1).map(|(_, v)| v.clone()));
-    let passed = matches!(&condition, Some((_, c)) if c.is_truthy());
+    let cond_val = match cond_expr {
+        Some(e) => Some(eval_with_global(e, scope, global, ctx)?),
+        None => None,
+    };
+    // Evaluate the message EAGERLY (OpenSCAD does — its warnings must fire on a pass), but ROLL BACK impure_reads
+    // around it: the message VALUE is discarded on a pass and eval ABORTS on a fail, so a `parent_module` read
+    // in it (BOSL2's `no_children`/`req_children` name themselves via `parent_module(1)` in the message) can
+    // never reach a cached geometry — yet the raw counter bump would wrongly fence the CSG memo (J.5.2a) off
+    // every 98%-redundant leaf. `parent_module` emits NO console output, so suppressing its fence bit changes
+    // nothing observable; message/rand-draw deltas (a warning, a `rands` draw) STAY — those ARE observable and
+    // must still decline a memo whose hit would drop them.
+    let message = match msg_expr {
+        Some(e) => {
+            let impure_before = ctx.impure_reads.get();
+            let value = eval_with_global(e, scope, global, ctx)?;
+            ctx.impure_reads.set(impure_before);
+            Some(value)
+        }
+        None => None,
+    };
+    let passed = matches!(&cond_val, Some(c) if c.is_truthy());
     // Pretty-print the condition back to source ONLY when it's actually consumed — the trace line (off in
     // release) or a FAILURE locator. BOSL2 is assert-DENSE and its asserts overwhelmingly PASS, so building
-    // this string on every passing assert with tracing off was pure churn (N.2a: `write_expr` showed up at
-    // ~1.5% of a real model's allocation, all of it thrown away). `""` covers the degenerate `assert()`.
+    // this string on every passing assert with tracing off was pure churn (N.2a). `""` covers `assert()`.
     let cond_src = if trace::on() || !passed {
-        condition.map_or_else(String::new, |(e, _)| crate::parser::print_expr(e))
+        cond_expr.map_or_else(String::new, |e| crate::parser::print_expr(e))
     } else {
         String::new()
     };
@@ -2443,6 +2472,7 @@ fn build_ctx(program: &Program) -> Ctx<'_> {
         module_stack: RefCell::default(),
         rand_stream: RefCell::new(rng::RandStream::new()),
         cache: eval_cache::CacheCell::default(),
+        mod_cache: mod_cache::CacheCell::default(),
         impure_reads: std::cell::Cell::new(0),
         jit: None, // the raw-AST path (no loader) is interpreter-only; the JIT rides the loader entry
     }

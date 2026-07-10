@@ -18,6 +18,10 @@ libfuzzer-sys = "0.4"
 [dependencies.fab-lang]
 path = ".."
 
+# The `jit_diff` target compiles a numeric function to native code and diffs it against the interpreter.
+[dependencies.fab-jit]
+path = "../../jit"
+
 [[bin]]
 name = "parse"
 path = "fuzz_targets/parse.rs"
@@ -28,6 +32,22 @@ bench = false
 [[bin]]
 name = "lex"
 path = "fuzz_targets/lex.rs"
+test = false
+doc = false
+bench = false
+
+# Fuzz the evaluator (parse → eval → geometry → mesh): the whole value machinery + both iterative Drops.
+[[bin]]
+name = "eval"
+path = "fuzz_targets/eval.rs"
+test = false
+doc = false
+bench = false
+
+# Fuzz the JIT for bit-identity with the interpreter — the only tool that executes the JIT's native code.
+[[bin]]
+name = "jit_diff"
+path = "fuzz_targets/jit_diff.rs"
 test = false
 doc = false
 bench = false

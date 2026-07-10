@@ -29,12 +29,23 @@ jobs:
       - name: fuzz lex
         working-directory: lang
         run: cargo fuzz run lex -- -max_total_time=120 -rss_limit_mb=2048
+      # The evaluator (miri can't be its checker here — this + ASan is): parse → eval → geometry → mesh,
+      # exercising the value machinery + both iterative Drops. A per-unit -timeout flags a runaway program
+      # (the evaluator caps ranges/recursion, but a pathological input can still be slow).
+      - name: fuzz eval
+        working-directory: lang
+        run: cargo fuzz run eval -- -max_total_time=300 -rss_limit_mb=2048 -timeout=10
+      # The JIT vs the interpreter, BITWISE — the only tool that executes the JIT's native code (miri/Kani
+      # can't). A divergence is a doctrine-#36 violation, a crash under ASan is a memory bug in the JIT seam.
+      - name: fuzz jit_diff
+        working-directory: lang
+        run: cargo fuzz run jit_diff -- -max_total_time=300 -rss_limit_mb=2048 -timeout=10
       # Minimize the accumulated corpus to a coverage-minimal set + publish it, so the next run (and
       # anyone reproducing locally) starts from the best-known corpus.
       - name: minimize corpus
         if: always()
         working-directory: lang
-        run: cargo fuzz cmin parse && cargo fuzz cmin lex
+        run: cargo fuzz cmin parse && cargo fuzz cmin lex && cargo fuzz cmin eval && cargo fuzz cmin jit_diff
       - name: upload minimized corpus
         if: always()
         uses: actions/upload-artifact@v4

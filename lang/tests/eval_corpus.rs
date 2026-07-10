@@ -386,6 +386,41 @@ fn echo_and_assert_evaluate() {
 }
 
 #[test]
+fn comprehension_frame_reuse_preserves_closure_capture() {
+    // N.2: `lc_for` REUSES one child frame across iterations (bind is `Rc::make_mut`) rather than allocating a
+    // fresh `Rc<Frame>` each iteration — a ~15% real-model win. The invariant that keeps it SOUND: a body that
+    // CAPTURES the loop-var frame (a closure, a nested comprehension) must still see ITS OWN iteration's value,
+    // because `make_mut` clones the frame the instant it's shared. If a future change reused the frame
+    // UNCONDITIONALLY, these would collapse to the last value ([3,3,3,3]) — this is the guard.
+    // Each closure captures its own `i`:
+    assert!(
+        fab_lang::evaluate(
+            "funcs = [for(i = [0:3]) function() i]; \
+             assert([for(f = funcs) f()] == [0, 1, 2, 3]); cube(1);"
+        )
+        .is_ok(),
+        "closures in a comprehension must each keep their own loop-var value"
+    );
+    // A captured closure called AFTER the loop, with its OWN arg — the frame was cloned at capture, not reused:
+    assert!(
+        fab_lang::evaluate(
+            "fs = [for(i = [1:3]) function(x) x + i]; \
+             assert(fs[0](10) == 11 && fs[1](10) == 12 && fs[2](10) == 13); cube(1);"
+        )
+        .is_ok(),
+        "a stored closure must hold its capture-time loop-var value"
+    );
+    // Nested comprehension — the inner loop's frame reuse must not corrupt the outer loop var:
+    assert!(
+        fab_lang::evaluate(
+            "assert([for(i = [0:2]) [for(j = [0:2]) i * 10 + j]] == [[0,1,2],[10,11,12],[20,21,22]]); cube(1);"
+        )
+        .is_ok(),
+        "nested comprehension: inner frame reuse must not corrupt the outer loop var"
+    );
+}
+
+#[test]
 fn a_top_level_constant_can_call_a_function_that_reads_another_global() {
     // Island-global bootstrapping (L.2.8a). A top-level constant whose RHS CALLS a function must let
     // that function resolve the OTHER top-level constants — DURING the hoist that builds them. The

@@ -1375,8 +1375,13 @@ fn lc_for<'a>(
             let var: Rc<str> = binding.name.clone().unwrap_or_else(|| Rc::from("_"));
             let iterable = eval_with_global(&binding.value, scope, global, ctx)?;
             let mut out = Vec::new();
+            // ONE child frame, REUSED across iterations (N.2): `bind` is `Rc::make_mut`, so it rebinds the loop
+            // var IN PLACE while the frame is uniquely held (the common case — a value-producing body captures
+            // nothing), and CLONES it the instant a closure/escaping child holds the frame (each captured
+            // iteration then keeps its OWN loop-var value — bit-identical to a fresh frame per iteration). This
+            // kills the per-iteration `Rc<Frame>` alloc+drop that dominates comprehension-heavy models.
+            let mut inner = scope.child();
             for value in iter_values(&iterable) {
-                let mut inner = scope.child();
                 inner.bind(Rc::clone(&var), value);
                 out.extend(lc_for(rest, body, &inner, global, ctx)?);
             }

@@ -159,7 +159,10 @@ fn poc_sq(args: &[Value]) -> crate::Result<Value> {
 /// BOSL2 `is_def(x) = !is_undef(x)` — true iff `x` is anything but `undef`. Only the first positional arg
 /// binds to `x` (extras are ignored, per OpenSCAD); zero args → `x` is `undef` → `false`.
 fn is_def(args: &[Value]) -> crate::Result<Value> {
-    Ok(Value::Bool(!matches!(args.first(), None | Some(Value::Undef))))
+    Ok(Value::Bool(!matches!(
+        args.first(),
+        None | Some(Value::Undef)
+    )))
 }
 
 /// BOSL2 `is_str(x) = is_string(x)` — true iff `x` is a string.
@@ -187,7 +190,9 @@ fn is_nan(args: &[Value]) -> crate::Result<Value> {
 /// `is_num`/`is_nan`/`*` sub-evaluation — the point of the intrinsic. Proven bit-identical by the harness,
 /// which interprets the reference WITH `is_nan` defined (the dependency-aware oracle).
 fn is_finite(args: &[Value]) -> crate::Result<Value> {
-    Ok(Value::Bool(matches!(args.first(), Some(Value::Num(n)) if n.is_finite())))
+    Ok(Value::Bool(
+        matches!(args.first(), Some(Value::Num(n)) if n.is_finite()),
+    ))
 }
 
 /// BOSL2 `last(list) = list[len(list)-1]` — the final element. `len` is `undef` for anything but a
@@ -237,7 +242,9 @@ fn is_liststr(args: &[Value]) -> crate::Result<Value> {
 fn point3d(args: &[Value]) -> crate::Result<Value> {
     let p = args.first().cloned().unwrap_or(Value::Undef);
     if !matches!(p, Value::List(_) | Value::NumList(_)) {
-        return Err(crate::Error::Eval("assertion failed [assert(is_list(p))]".to_string()));
+        return Err(crate::Error::Eval(
+            "assertion failed [assert(is_list(p))]".to_string(),
+        ));
     }
     let fill = args.get(1).cloned().unwrap_or(Value::Num(0.0));
     let coords = (0..3)
@@ -301,7 +308,9 @@ fn select(args: &[Value]) -> crate::Result<Value> {
     } else {
         // end given — the two-index form.
         if !sel_is_finite(&start) {
-            return Err(select_assert("When `end` is given, `start` parameter should be a number."));
+            return Err(select_assert(
+                "When `end` is given, `start` parameter should be a number.",
+            ));
         }
         if !sel_is_finite(&end) {
             return Err(select_assert("Invalid end parameter."));
@@ -382,7 +391,10 @@ fn sel_is_vector(v: &Value) -> bool {
     match v {
         Value::NumList(xs) => !xs.is_empty() && xs.iter().all(|x| x.is_finite()),
         Value::List(xs) => {
-            !xs.is_empty() && xs.iter().all(|e| matches!(e, Value::Num(n) if n.is_finite()))
+            !xs.is_empty()
+                && xs
+                    .iter()
+                    .all(|e| matches!(e, Value::Num(n) if n.is_finite()))
         }
         _ => false,
     }
@@ -434,7 +446,10 @@ fn reference_fingerprint(reference: &str) -> Option<u64> {
     if let StmtKind::FunctionDef { params, body, .. } = stmt.kind {
         Some(fingerprint(&params, &body))
     } else {
-        debug_assert!(false, "intrinsic reference is not a single function def: {reference}");
+        debug_assert!(
+            false,
+            "intrinsic reference is not a single function def: {reference}"
+        );
         None
     }
 }
@@ -455,7 +470,10 @@ pub(super) fn lookup(name: &str, params: &[Parameter], body: &Expr) -> Option<In
 /// Test-only access to a registry entry's reference source, for the fast==slow harness.
 #[cfg(test)]
 pub(super) fn reference_of(name: &str) -> Option<&'static str> {
-    REGISTRY.iter().find(|e| e.name == name).map(|e| e.reference)
+    REGISTRY
+        .iter()
+        .find(|e| e.name == name)
+        .map(|e| e.reference)
 }
 
 /// How a defined function relates to the intrinsic registry — the EXPLAIN classification (O.3).
@@ -491,7 +509,10 @@ pub(super) fn classify(name: &str, params: &[Parameter], body: &Expr) -> Plan {
 /// a genuinely different library version). See [`fingerprint`].
 #[must_use]
 pub(super) fn reference_fp(name: &str) -> Option<u64> {
-    table().iter().find(|(n, _, _)| *n == name).map(|(_, fp, _)| *fp)
+    table()
+        .iter()
+        .find(|(n, _, _)| *n == name)
+        .map(|(_, fp, _)| *fp)
 }
 
 /// Is the `FAB_EXPLAIN` intrinsic-plan report on? Cached once (env read per ctx build would be silly).
@@ -653,7 +674,12 @@ fn hash_expr(e: &Expr, h: &mut impl Hasher) {
             hash_args(bindings, h);
             hash_expr(body, h);
         }
-        ExprKind::LcForC { init, cond, update, body } => {
+        ExprKind::LcForC {
+            init,
+            cond,
+            update,
+            body,
+        } => {
             18u8.hash(h);
             hash_args(init, h);
             hash_expr(cond, h);
@@ -786,11 +812,29 @@ mod tests {
         match (a, b) {
             (Num(x), Num(y)) => x.to_bits() == y.to_bits(),
             (NumList(x), NumList(y)) => {
-                x.len() == y.len() && x.iter().zip(y.iter()).all(|(p, q)| p.to_bits() == q.to_bits())
+                x.len() == y.len()
+                    && x.iter()
+                        .zip(y.iter())
+                        .all(|(p, q)| p.to_bits() == q.to_bits())
             }
-            (List(x), List(y)) => x.len() == y.len() && x.iter().zip(y.iter()).all(|(p, q)| bit_eq(p, q)),
-            (Range { start: s1, step: t1, end: e1 }, Range { start: s2, step: t2, end: e2 }) => {
-                s1.to_bits() == s2.to_bits() && t1.to_bits() == t2.to_bits() && e1.to_bits() == e2.to_bits()
+            (List(x), List(y)) => {
+                x.len() == y.len() && x.iter().zip(y.iter()).all(|(p, q)| bit_eq(p, q))
+            }
+            (
+                Range {
+                    start: s1,
+                    step: t1,
+                    end: e1,
+                },
+                Range {
+                    start: s2,
+                    step: t2,
+                    end: e2,
+                },
+            ) => {
+                s1.to_bits() == s2.to_bits()
+                    && t1.to_bits() == t2.to_bits()
+                    && e1.to_bits() == e2.to_bits()
             }
             _ => a == b,
         }
@@ -818,7 +862,11 @@ mod tests {
             Value::num_list(vec![f64::NAN]),
             Value::num_list(vec![f64::INFINITY]),
             Value::list(vec![]),
-            Value::Range { start: 0.0, step: 1.0, end: 5.0 },
+            Value::Range {
+                start: 0.0,
+                step: 1.0,
+                end: 5.0,
+            },
         ]
     }
 
@@ -840,7 +888,11 @@ mod tests {
         assert_ne!(base, fp("function f(x) = x - 1;"), "operator change");
         assert_ne!(base, fp("function f(y) = y + 1;"), "param rename");
         assert_ne!(base, fp("function f(x, y) = x + 1;"), "arity change");
-        assert_ne!(base, fp("function f(x) = x + 1.0000001;"), "epsilon literal change");
+        assert_ne!(
+            base,
+            fp("function f(x) = x + 1.0000001;"),
+            "epsilon literal change"
+        );
     }
 
     #[test]
@@ -857,7 +909,10 @@ mod tests {
         // all feed the hash; a change deep inside flips the fingerprint (no shallow-only hashing).
         let a = fp("function g(n) = [for (i = [0:n]) let(j = i*2) [i, j > 3 ? j : 0]];");
         let b = fp("function g(n) = [for (i = [0:n]) let(j = i*2) [i, j > 4 ? j : 0]];");
-        assert_ne!(a, b, "a literal buried in a nested comprehension must still register");
+        assert_ne!(
+            a, b,
+            "a literal buried in a nested comprehension must still register"
+        );
     }
 
     #[test]
@@ -875,7 +930,10 @@ mod tests {
         }
         // A non-number arg: the intrinsic must ALSO match the interpreter's undef (x*x on a string → undef).
         let bad = [Value::string("nope")];
-        assert!(same_result(&poc_sq(&bad), &interpret(reference, &bad)), "undef path must match too");
+        assert!(
+            same_result(&poc_sq(&bad), &interpret(reference, &bad)),
+            "undef path must match too"
+        );
     }
 
     #[test]
@@ -883,15 +941,27 @@ mod tests {
         // Never silently wrong: the intrinsic registers for the EXACT reference, and misses on any
         // perturbation (different body) or a name mismatch → the interpreter runs the real body instead.
         let (p, b) = parse_fn(reference_of("_fab_poc_sq").unwrap());
-        assert!(lookup("_fab_poc_sq", &p, &b).is_some(), "the exact reference must register");
+        assert!(
+            lookup("_fab_poc_sq", &p, &b).is_some(),
+            "the exact reference must register"
+        );
 
         let (p2, b2) = parse_fn("function _fab_poc_sq(x) = x + x;");
-        assert!(lookup("_fab_poc_sq", &p2, &b2).is_none(), "a changed body must NOT match");
+        assert!(
+            lookup("_fab_poc_sq", &p2, &b2).is_none(),
+            "a changed body must NOT match"
+        );
 
         let (p3, b3) = parse_fn("function _fab_poc_sq(x, y) = x * x;");
-        assert!(lookup("_fab_poc_sq", &p3, &b3).is_none(), "a changed arity must NOT match");
+        assert!(
+            lookup("_fab_poc_sq", &p3, &b3).is_none(),
+            "a changed arity must NOT match"
+        );
 
-        assert!(lookup("some_other_name", &p, &b).is_none(), "same body, wrong name → no match");
+        assert!(
+            lookup("some_other_name", &p, &b).is_none(),
+            "same body, wrong name → no match"
+        );
     }
 
     #[test]
@@ -901,12 +971,16 @@ mod tests {
         // program with a perturbed body does NOT — it stays interpreted.
         let matched = parse("function _fab_poc_sq(x) = x * x;").expect("parses");
         assert!(
-            build_ctx(&matched, crate::Config::default()).intrinsics.contains_key("_fab_poc_sq"),
+            build_ctx(&matched, crate::Config::default())
+                .intrinsics
+                .contains_key("_fab_poc_sq"),
             "the exact reference must be wired as an intrinsic"
         );
         let perturbed = parse("function _fab_poc_sq(x) = x * x + 1;").expect("parses");
         assert!(
-            !build_ctx(&perturbed, crate::Config::default()).intrinsics.contains_key("_fab_poc_sq"),
+            !build_ctx(&perturbed, crate::Config::default())
+                .intrinsics
+                .contains_key("_fab_poc_sq"),
             "a perturbed body must fall back to the interpreter (no intrinsic wired)"
         );
     }
@@ -917,14 +991,19 @@ mod tests {
         // reference; its call's RHS is evaluated with the built ctx, so `dispatch_call` routes the
         // all-positional call to the native `poc_sq` → 7*7 = 49. (The corpus proves the arm doesn't break
         // anything; this proves it RUNS — nothing in BOSL2 fingerprints to the POC, so only this hits it.)
-        let program = parse("function _fab_poc_sq(x) = x * x; z = _fab_poc_sq(7);").expect("parses");
+        let program =
+            parse("function _fab_poc_sq(x) = x * x; z = _fab_poc_sq(7);").expect("parses");
         let ctx = build_ctx(&program, crate::Config::default());
         let call = match &program.stmts[1].kind {
             StmtKind::Assignment { value, .. } => value,
             other => panic!("expected an assignment, got {other:?}"),
         };
         let result = crate::eval::eval_with_ctx(call, &Scope::new(), &ctx).expect("evaluates");
-        assert_eq!(result, Value::Num(49.0), "the intrinsic-dispatched call returns x*x");
+        assert_eq!(
+            result,
+            Value::Num(49.0),
+            "the intrinsic-dispatched call returns x*x"
+        );
     }
 
     #[test]
@@ -946,10 +1025,16 @@ mod tests {
             let func = lookup(name, &params, &body).expect("its own reference must register");
             for input in &cases {
                 let one = [input.clone()];
-                assert!(same_result(&func(&one), &interpret(reference, &one)), "{name}({input:?}) diverged");
+                assert!(
+                    same_result(&func(&one), &interpret(reference, &one)),
+                    "{name}({input:?}) diverged"
+                );
             }
             // Zero args: the single param defaults to undef in both paths.
-            assert!(same_result(&func(&[]), &interpret(reference, &[])), "{name}() diverged");
+            assert!(
+                same_result(&func(&[]), &interpret(reference, &[])),
+                "{name}() diverged"
+            );
         }
     }
 
@@ -963,9 +1048,15 @@ mod tests {
         let func = lookup("is_nan", &params, &body).expect("its own reference must register");
         for input in value_battery() {
             let one = [input.clone()];
-            assert!(same_result(&func(&one), &interpret(reference, &one)), "is_nan({input:?}) diverged");
+            assert!(
+                same_result(&func(&one), &interpret(reference, &one)),
+                "is_nan({input:?}) diverged"
+            );
         }
-        assert!(same_result(&func(&[]), &interpret(reference, &[])), "is_nan() diverged");
+        assert!(
+            same_result(&func(&[]), &interpret(reference, &[])),
+            "is_nan() diverged"
+        );
     }
 
     #[test]
@@ -1000,11 +1091,19 @@ mod tests {
         let func = lookup("last", &params, &body).expect("its own reference must register");
         for input in value_battery() {
             let one = [input.clone()];
-            assert!(same_result(&func(&one), &interpret(reference, &one)), "last({input:?}) diverged");
+            assert!(
+                same_result(&func(&one), &interpret(reference, &one)),
+                "last({input:?}) diverged"
+            );
         }
         // A longer list, to prove it's the LAST element and not the first/second.
-        let long = [Value::list((0..7).map(|i| Value::Num(f64::from(i))).collect::<Vec<_>>())];
-        assert!(same_result(&func(&long), &interpret(reference, &long)), "last(0..6) diverged");
+        let long = [Value::list(
+            (0..7).map(|i| Value::Num(f64::from(i))).collect::<Vec<_>>(),
+        )];
+        assert!(
+            same_result(&func(&long), &interpret(reference, &long)),
+            "last(0..6) diverged"
+        );
     }
 
     #[test]
@@ -1017,10 +1116,16 @@ mod tests {
         let battery = value_battery();
         for v in &battery {
             let one = [v.clone()];
-            assert!(same_result(&func(&one), &interpret(reference, &one)), "default({v:?}) diverged");
+            assert!(
+                same_result(&func(&one), &interpret(reference, &one)),
+                "default({v:?}) diverged"
+            );
             for d in &battery {
                 let two = [v.clone(), d.clone()];
-                assert!(same_result(&func(&two), &interpret(reference, &two)), "default({v:?}, {d:?}) diverged");
+                assert!(
+                    same_result(&func(&two), &interpret(reference, &two)),
+                    "default({v:?}, {d:?}) diverged"
+                );
             }
         }
     }
@@ -1053,7 +1158,10 @@ mod tests {
         let func = lookup("point3d", &params, &body).expect("its own reference must register");
         for input in value_battery() {
             let one = [input.clone()];
-            assert!(same_result(&func(&one), &interpret(reference, &one)), "point3d({input:?}) diverged");
+            assert!(
+                same_result(&func(&one), &interpret(reference, &one)),
+                "point3d({input:?}) diverged"
+            );
         }
         // Explicit shape cases: short (pad), exact, long (truncate), a heterogeneous list (List result), and a
         // custom 2-arg fill. Each proves value AND the assert-passes path.
@@ -1061,15 +1169,26 @@ mod tests {
             vec![Value::Num(5.0)],
             vec![Value::Num(1.0), Value::Num(2.0)],
             vec![Value::Num(1.0), Value::Num(2.0), Value::Num(3.0)],
-            vec![Value::Num(1.0), Value::Num(2.0), Value::Num(3.0), Value::Num(4.0)],
+            vec![
+                Value::Num(1.0),
+                Value::Num(2.0),
+                Value::Num(3.0),
+                Value::Num(4.0),
+            ],
             vec![Value::Num(1.0), Value::string("x")],
         ];
         for s in shapes {
             let p = Value::list(s);
             let one = [p.clone()];
-            assert!(same_result(&func(&one), &interpret(reference, &one)), "point3d({p:?}) diverged");
+            assert!(
+                same_result(&func(&one), &interpret(reference, &one)),
+                "point3d({p:?}) diverged"
+            );
             let two = [p.clone(), Value::Num(-1.0)];
-            assert!(same_result(&func(&two), &interpret(reference, &two)), "point3d({p:?}, -1) diverged");
+            assert!(
+                same_result(&func(&two), &interpret(reference, &two)),
+                "point3d({p:?}, -1) diverged"
+            );
         }
     }
 
@@ -1140,8 +1259,14 @@ mod tests {
             vec![l7.clone(), rng(0., 2., 6.)],
             // BAD non-num start → assert #2 raises: non-num elem, nested, inf/nan elem, non-finite range,
             // string/bool/undef.
-            vec![l7.clone(), Value::list(vec![Value::Num(1.0), Value::string("a")])],
-            vec![l7.clone(), Value::list(vec![Value::num_list(vec![1.0, 2.0])])],
+            vec![
+                l7.clone(),
+                Value::list(vec![Value::Num(1.0), Value::string("a")]),
+            ],
+            vec![
+                l7.clone(),
+                Value::list(vec![Value::num_list(vec![1.0, 2.0])]),
+            ],
             vec![l7.clone(), n(&[1., inf])],
             vec![l7.clone(), n(&[nan, 2.])],
             vec![l7.clone(), rng(0., 1., inf)],
@@ -1177,7 +1302,10 @@ mod tests {
 
         for inputs in &cases {
             assert!(
-                same_result(&func(inputs), &interpret_with_deps(reference, &deps, inputs)),
+                same_result(
+                    &func(inputs),
+                    &interpret_with_deps(reference, &deps, inputs)
+                ),
                 "select diverged on {inputs:?}"
             );
         }

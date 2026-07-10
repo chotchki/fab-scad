@@ -327,13 +327,19 @@ fn star_disable_drops_the_subtree() {
 #[test]
 fn percent_background_excluded_from_output() {
     // `%` is a preview-only ghost — F6 render / STL export omits it, so the mesh matches the bare cube.
-    assert_eq!(bbox(&mesh("cube(10); %sphere(20, $fn = 8);")), ([0.0; 3], [10.0; 3]));
+    assert_eq!(
+        bbox(&mesh("cube(10); %sphere(20, $fn = 8);")),
+        ([0.0; 3], [10.0; 3])
+    );
 }
 
 #[test]
 fn hash_highlight_is_a_render_no_op() {
     // `#` highlights in preview but changes nothing in the exported geometry.
-    assert_eq!(mesh("#cube(10);").vert_count(), mesh("cube(10);").vert_count());
+    assert_eq!(
+        mesh("#cube(10);").vert_count(),
+        mesh("cube(10);").vert_count()
+    );
 }
 
 #[test]
@@ -341,8 +347,16 @@ fn bang_root_renders_only_its_subtree() {
     // `!` renders ONLY its subtree — the ancestor `translate` AND the sibling `sphere` are discarded, so the
     // cube lands at the ORIGIN (dropping the ancestor transform reduces it to a bare Leaf). Oracle-verified.
     let m = mesh("translate([50, 0, 0]) !cube(10); sphere(20, $fn = 8);");
-    assert_eq!(m.vert_count(), 8, "only the cube's 8 verts — the sibling sphere is gone");
-    assert_eq!(bbox(&m), ([0.0; 3], [10.0; 3]), "cube at origin — the ancestor translate was dropped");
+    assert_eq!(
+        m.vert_count(),
+        8,
+        "only the cube's 8 verts — the sibling sphere is gone"
+    );
+    assert_eq!(
+        bbox(&m),
+        ([0.0; 3], [10.0; 3]),
+        "cube at origin — the ancestor translate was dropped"
+    );
 }
 
 #[test]

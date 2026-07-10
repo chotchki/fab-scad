@@ -519,7 +519,7 @@ pub(super) fn rands(pos: &[Value], stream: &mut super::rng::RandStream) -> Value
     };
     let draws = match seed {
         Some(s) => super::rng::rands(min, max, count, Some(s)), // seeded → fresh engine, oracle-exact
-        None => stream.draw(min, max, count),                   // seedless → advance the eval's stream
+        None => stream.draw(min, max, count), // seedless → advance the eval's stream
     };
     Value::num_list(draws)
 }

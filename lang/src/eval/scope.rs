@@ -49,7 +49,10 @@ impl VarMap {
 
     fn get(&self, name: &str) -> Option<&Value> {
         match self {
-            VarMap::Small(v) => v.iter().find(|(k, _)| k.as_ref() == name).map(|(_, val)| val),
+            VarMap::Small(v) => v
+                .iter()
+                .find(|(k, _)| k.as_ref() == name)
+                .map(|(_, val)| val),
             VarMap::Large(m) => m.get(name),
         }
     }
@@ -114,7 +117,10 @@ struct Frame {
 /// a debug aid only; two DISTINCT contexts that happen to share a depth are still distinct allocations.
 #[derive(Debug)]
 pub(super) struct DynCtxNode {
-    #[allow(dead_code, reason = "non-ZST guarantee + debug aid; identity is the Rc pointer, not this field")]
+    #[allow(
+        dead_code,
+        reason = "non-ZST guarantee + debug aid; identity is the Rc pointer, not this field"
+    )]
     depth: u32,
 }
 
@@ -250,7 +256,9 @@ impl Scope {
             frame.specials.insert(name, value);
             // The reaching $-context just CHANGED → mint a fresh identity so the cache doesn't confuse this
             // scope with its pre-bind self (or a sibling that never bound). A new allocation = a new pointer.
-            frame.dyn_ctx = Rc::new(DynCtxNode { depth: frame.dyn_ctx.depth + 1 });
+            frame.dyn_ctx = Rc::new(DynCtxNode {
+                depth: frame.dyn_ctx.depth + 1,
+            });
         } else {
             frame.vars.insert(name, value);
         }

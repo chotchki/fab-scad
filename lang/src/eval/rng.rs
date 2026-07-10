@@ -141,12 +141,14 @@ impl RandStream {
     }
 
     /// The monotonic draw count — the cache's impurity probe (see the `draws` field).
-    #[allow(dead_code, reason = "consumed by the N.2c eval-cache purity fence, landing next")]
+    #[allow(
+        dead_code,
+        reason = "consumed by the N.2c eval-cache purity fence, landing next"
+    )]
     pub(crate) fn draws(&self) -> u64 {
         self.draws
     }
 }
-
 
 #[cfg(test)]
 #[allow(
@@ -160,14 +162,20 @@ mod tests {
     #[test]
     fn matches_the_oracle() {
         let a = rands(0.0, 1.0, 3, Some(42));
-        assert_eq!(format!("{:.6} {:.6} {:.6}", a[0], a[1], a[2]), "0.796543 0.183435 0.779691");
+        assert_eq!(
+            format!("{:.6} {:.6} {:.6}", a[0], a[1], a[2]),
+            "0.796543 0.183435 0.779691"
+        );
         let b = rands(0.0, 10.0, 4, Some(42));
         assert_eq!(
             format!("{:.5} {:.5} {:.5} {:.5}", b[0], b[1], b[2], b[3]),
             "7.96543 1.83435 7.79691 5.96850"
         );
         let c = rands(-1.0, 1.0, 3, Some(3));
-        assert_eq!(format!("{:.6} {:.6} {:.6}", c[0], c[1], c[2]), "-0.858550 0.679898 -0.757343");
+        assert_eq!(
+            format!("{:.6} {:.6} {:.6}", c[0], c[1], c[2]),
+            "-0.858550 0.679898 -0.757343"
+        );
     }
 
     #[test]

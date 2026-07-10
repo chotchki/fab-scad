@@ -29,7 +29,9 @@ fn func(prog: &Program) -> (&str, &[Parameter], &Expr) {
     prog.stmts
         .iter()
         .find_map(|s| match &s.kind {
-            StmtKind::FunctionDef { name, params, body } => Some((name.as_str(), params.as_slice(), body)),
+            StmtKind::FunctionDef { name, params, body } => {
+                Some((name.as_str(), params.as_slice(), body))
+            }
             _ => None,
         })
         .expect("a function def")
@@ -38,7 +40,11 @@ fn func(prog: &Program) -> (&str, &[Parameter], &Expr) {
 /// The i-th argument: mostly finite (is_nan → false), one in seven a NaN (is_nan → true), so the accumulator
 /// is non-trivial and DCE can't fold it away.
 fn arg(i: u64) -> f64 {
-    if i.is_multiple_of(7) { f64::NAN } else { f64::from(u32::try_from(i & 0xffff).unwrap_or(0)) }
+    if i.is_multiple_of(7) {
+        f64::NAN
+    } else {
+        f64::from(u32::try_from(i & 0xffff).unwrap_or(0))
+    }
 }
 
 /// Time OpenSCAD evaluating `is_nan` over an `n`-element comprehension (per-element = `(t_n − t_small)/(n −
@@ -62,8 +68,17 @@ fn openscad_ns_per_call(dir: &Path) -> Option<f64> {
         let mut best = u128::MAX;
         for _ in 0..3 {
             let t = Instant::now();
-            let r = Command::new(OPENSCAD).arg("-o").arg(&out).arg(&scad).output().expect("run openscad");
-            assert!(r.status.success(), "openscad failed: {}", String::from_utf8_lossy(&r.stderr));
+            let r = Command::new(OPENSCAD)
+                .arg("-o")
+                .arg(&out)
+                .arg(&scad)
+                .output()
+                .expect("run openscad");
+            assert!(
+                r.status.success(),
+                "openscad failed: {}",
+                String::from_utf8_lossy(&r.stderr)
+            );
             best = best.min(t.elapsed().as_nanos());
         }
         best
@@ -75,7 +90,10 @@ fn openscad_ns_per_call(dir: &Path) -> Option<f64> {
 }
 
 #[test]
-#[allow(clippy::cast_precision_loss, reason = "ns→ratio in a dev-only stderr illustration")]
+#[allow(
+    clippy::cast_precision_loss,
+    reason = "ns→ratio in a dev-only stderr illustration"
+)]
 fn tier_ladder_is_nan() {
     let prog = program("function is_nan(x) = (x != x);");
     let (name, params, body) = func(&prog);
@@ -83,7 +101,8 @@ fn tier_ladder_is_nan() {
     // The three in-process tiers, all running the same `is_nan`.
     let oracle = FnOracle::new(&[(name, params, body)], &[]).expect("oracle builds");
     let intrinsic = bench_intrinsic(name, params, body).expect("is_nan has an O.2 intrinsic");
-    let reg = JitRegistry::build([(name, params, body)], std::iter::empty()).expect("registry builds");
+    let reg =
+        JitRegistry::build([(name, params, body)], std::iter::empty()).expect("registry builds");
     let compiled = reg.get(name).expect("is_nan compiles in the JIT");
 
     let iters = 2_000_000u64;
@@ -114,7 +133,15 @@ fn tier_ladder_is_nan() {
     acc = 0;
     let t = Instant::now();
     for i in 0..iters {
-        if unsafe { compiled.call(&[arg(i)], &mut [0.0], core::ptr::null_mut(), core::ptr::null_mut()) } == Some(1.0) {
+        if unsafe {
+            compiled.call(
+                &[arg(i)],
+                &mut [0.0],
+                core::ptr::null_mut(),
+                core::ptr::null_mut(),
+            )
+        } == Some(1.0)
+        {
             acc += 1;
         }
     }
@@ -122,16 +149,25 @@ fn tier_ladder_is_nan() {
     let c_jit = acc;
 
     // Correctness gate: the three tiers MUST agree on the count (a wrong tier fails here, not just times).
-    assert_eq!(c_interp, c_intrinsic, "interp vs intrinsic disagree on is_nan count");
+    assert_eq!(
+        c_interp, c_intrinsic,
+        "interp vs intrinsic disagree on is_nan count"
+    );
     assert_eq!(c_interp, c_jit, "interp vs JIT disagree on is_nan count");
 
     let scratch = std::env::temp_dir();
     let openscad_ns = openscad_ns_per_call(&scratch);
 
-    eprintln!("\n[tier-ladder] is_nan(x) = (x != x)   ({iters} calls/tier, {} NaN)", c_interp);
+    eprintln!(
+        "\n[tier-ladder] is_nan(x) = (x != x)   ({iters} calls/tier, {} NaN)",
+        c_interp
+    );
     let base = openscad_ns.unwrap_or(interp_ns);
     let row = |label: &str, ns: f64| {
-        eprintln!("[tier-ladder]   {label:<22} {ns:8.1} ns/call   {:6.1}x vs OpenSCAD", base / ns.max(1e-9));
+        eprintln!(
+            "[tier-ladder]   {label:<22} {ns:8.1} ns/call   {:6.1}x vs OpenSCAD",
+            base / ns.max(1e-9)
+        );
     };
     match openscad_ns {
         Some(ns) => row("OpenSCAD (C++)", ns),

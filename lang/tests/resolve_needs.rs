@@ -17,7 +17,7 @@ use std::cell::RefCell;
 use std::path::Path;
 
 use fab_lang::{
-    Error, Geo, GeoNode, Imported, Mesh, Scope, SourceNeed, evaluate, eval_program,
+    Error, Geo, GeoNode, Imported, Mesh, Scope, SourceNeed, eval_program, evaluate,
     evaluate_geometry, parse, resolve_geometry_file, resolve_geometry_with_base,
 };
 
@@ -33,7 +33,14 @@ fn an_import() -> Imported {
 
 /// Resolve in-memory `src` (CWD base, no library paths) with `reader` fulfilling File needs.
 fn resolve<R: FnMut(&str) -> Result<Imported, Error>>(src: &str, reader: R) -> Result<Geo, Error> {
-    resolve_geometry_with_base(src, Path::new("."), &[], None, fab_lang::Config::default(), reader)
+    resolve_geometry_with_base(
+        src,
+        Path::new("."),
+        &[],
+        None,
+        fab_lang::Config::default(),
+        reader,
+    )
 }
 
 #[test]
@@ -151,20 +158,33 @@ fn surface_center_translates_the_mesh_eval_side() {
     let x_range = |geo: Geo| match geo {
         Geo::D3(GeoNode::Leaf(ref m)) => {
             let lo = m.verts.iter().map(|v| v.x).fold(f64::INFINITY, f64::min);
-            let hi = m.verts.iter().map(|v| v.x).fold(f64::NEG_INFINITY, f64::max);
+            let hi = m
+                .verts
+                .iter()
+                .map(|v| v.x)
+                .fold(f64::NEG_INFINITY, f64::max);
             (lo, hi)
         }
         other => panic!("expected a 3D leaf, got {other:?}"),
     };
     let m1 = mesh.clone();
-    let (plo, phi) =
-        x_range(resolve("surface(file=\"h.dat\");", move |_| Ok(Imported::Mesh(m1.clone()))).unwrap());
-    assert!(plo.abs() < 1e-9 && (phi - 2.0).abs() < 1e-9, "plain stays at [0,2], got [{plo},{phi}]");
+    let (plo, phi) = x_range(
+        resolve("surface(file=\"h.dat\");", move |_| {
+            Ok(Imported::Mesh(m1.clone()))
+        })
+        .unwrap(),
+    );
+    assert!(
+        plo.abs() < 1e-9 && (phi - 2.0).abs() < 1e-9,
+        "plain stays at [0,2], got [{plo},{phi}]"
+    );
     let m2 = mesh.clone();
-    let (clo, chi) =
-        x_range(resolve("surface(file=\"h.dat\", center=true);", move |_| {
+    let (clo, chi) = x_range(
+        resolve("surface(file=\"h.dat\", center=true);", move |_| {
             Ok(Imported::Mesh(m2.clone()))
-        }).unwrap());
+        })
+        .unwrap(),
+    );
     assert!(
         (clo + 1.0).abs() < 1e-9 && (chi - 1.0).abs() < 1e-9,
         "center shifts XY bounds to the origin [−1,1], got [{clo},{chi}]"

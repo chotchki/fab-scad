@@ -549,4 +549,3 @@ fn scan(program: &Program) -> Vec<(usize, String, RefKind)> {
         })
         .collect()
 }
-

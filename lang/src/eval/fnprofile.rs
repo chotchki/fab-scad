@@ -60,7 +60,12 @@ pub(super) fn record_fn(name: &str) {
     if !enabled() {
         return;
     }
-    STATE.with(|s| bump(&mut s.borrow_mut().get_or_insert_with(State::default).funcs, name));
+    STATE.with(|s| {
+        bump(
+            &mut s.borrow_mut().get_or_insert_with(State::default).funcs,
+            name,
+        )
+    });
 }
 
 /// Record one builtin call by name (already native — shows what the fns bottom out in).
@@ -68,7 +73,12 @@ pub(super) fn record_builtin(name: &str) {
     if !enabled() {
         return;
     }
-    STATE.with(|s| bump(&mut s.borrow_mut().get_or_insert_with(State::default).builtins, name));
+    STATE.with(|s| {
+        bump(
+            &mut s.borrow_mut().get_or_insert_with(State::default).builtins,
+            name,
+        )
+    });
 }
 
 /// Record one module instantiation by name.
@@ -76,7 +86,12 @@ pub(super) fn record_module(name: &str) {
     if !enabled() {
         return;
     }
-    STATE.with(|s| bump(&mut s.borrow_mut().get_or_insert_with(State::default).modules, name));
+    STATE.with(|s| {
+        bump(
+            &mut s.borrow_mut().get_or_insert_with(State::default).modules,
+            name,
+        )
+    });
 }
 
 /// Print the top entries of one kind, sorted by descending call count (ties broken by name for a stable
@@ -121,7 +136,11 @@ pub(super) fn report() {
         let Some(st) = s.borrow_mut().take() else {
             return;
         };
-        print_section("user functions (intrinsic targets)", &st.funcs, REPORT_LIMIT);
+        print_section(
+            "user functions (intrinsic targets)",
+            &st.funcs,
+            REPORT_LIMIT,
+        );
         print_section("builtins", &st.builtins, REPORT_LIMIT);
         print_section("modules", &st.modules, REPORT_LIMIT);
     });

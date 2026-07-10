@@ -45,9 +45,7 @@ pub fn apply_binary(op: BinOp, a: Value, b: Value) -> Value {
         },
         BinOp::Mul => match (a, b) {
             (Num(x), Num(y)) => Num(x * y),
-            (Num(s), NumList(v)) | (NumList(v), Num(s)) => {
-                Value::NumList(map_reuse(v, |e| e * s))
-            }
+            (Num(s), NumList(v)) | (NumList(v), Num(s)) => Value::NumList(map_reuse(v, |e| e * s)),
             // scalar × a NESTED / heterogeneous list broadcasts element-wise, RECURSIVELY (OpenSCAD's
             // `multvecnum` multiplies each entry via `*`, so `0*[[..],[..]]` = `[0*[..], 0*[..]]`).
             (Num(s), List(v)) | (List(v), Num(s)) => Value::list(
@@ -148,13 +146,17 @@ fn zip_reuse(mut a: Rc<[f64]>, mut b: Rc<[f64]>, f: impl Fn(f64, f64) -> f64) ->
     let n = a.len().min(b.len());
     // Reuse `a` (or `b`) only when it's ALREADY the result length `n` (the shorter), so a truncating op
     // leaves no stale tail; `sa.iter_mut().zip(b)` then truncates to n — matching `zip_trunc`.
-    if a.len() == n && let Some(sa) = Rc::get_mut(&mut a) {
+    if a.len() == n
+        && let Some(sa) = Rc::get_mut(&mut a)
+    {
         for (x, &y) in sa.iter_mut().zip(b.iter()) {
             *x = f(*x, y);
         }
         return a;
     }
-    if b.len() == n && let Some(sb) = Rc::get_mut(&mut b) {
+    if b.len() == n
+        && let Some(sb) = Rc::get_mut(&mut b)
+    {
         for (y, &x) in sb.iter_mut().zip(a.iter()) {
             *y = f(x, *y);
         }

@@ -43,7 +43,9 @@ fn assert_fast_eq_jit(src: &str, samples: &[&[f64]]) {
     let (names, body) = func(&prog);
     let jitted = compile_function(&names, body).expect("compiles to native code");
     for args in samples {
-        let jit = jitted.call(args).expect("these functions have no inline assert to raise");
+        let jit = jitted
+            .call(args)
+            .expect("these functions have no inline assert to raise");
         let slow = interp(&names, body, args);
         assert_eq!(
             jit.to_bits(),
@@ -192,7 +194,10 @@ fn let_bindings_fast_eq_jit() {
     assert_fast_eq_jit("function f(x) = let(y = x * x) y + 1;", EDGE);
     assert_fast_eq_jit("function f(x) = let(a = x + 1, b = a * a) a + b;", EDGE); // b sees a
     assert_fast_eq_jit("function f(x) = let(y = x*x) let(z = y*y) z - y;", EDGE); // nested
-    assert_fast_eq_jit("function f(x) = let(s = sin(x), c = cos(x)) s*s + c*c;", EDGE); // let + calls
+    assert_fast_eq_jit(
+        "function f(x) = let(s = sin(x), c = cos(x)) s*s + c*c;",
+        EDGE,
+    ); // let + calls
     assert_fast_eq_jit("function f(x) = let(a = abs(x)) a > 5 ? a : 0;", EDGE); // let + comparison + ternary
     assert_fast_eq_jit("function hyp(a, b) = let(s = a*a + b*b) sqrt(s);", TWO);
     // A let shadowing a parameter — the local wins inside its scope.
@@ -218,7 +223,10 @@ fn scalar_math_builtins_fast_eq_jit() {
     assert_fast_eq_jit("function f(x) = x > 0 ? sqrt(x) : -sqrt(-x);", EDGE);
     assert_fast_eq_jit("function hyp(a, b) = sqrt(a * a + b * b);", TWO);
     // A guarded math body: assert + call + arithmetic all in one compiled function.
-    assert_fast_eq_jit("function f(x) = assert(x >= 0) sqrt(x);", &[&[0.0], &[4.0], &[100.0], &[2.0]]);
+    assert_fast_eq_jit(
+        "function f(x) = assert(x >= 0) sqrt(x);",
+        &[&[0.0], &[4.0], &[100.0], &[2.0]],
+    );
 }
 
 #[test]

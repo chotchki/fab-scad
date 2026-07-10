@@ -28,7 +28,11 @@ fn block_mark_drain_takes_only_its_own_children() {
     // side effect, `sphere` is the lone real child.
     match d3("cube(5); { x = 1; *cube(1); echo(\"h\"); sphere(2, $fn = 8); }") {
         GeoNode::Union(ref kids) => {
-            assert_eq!(kids.len(), 2, "the cube sibling + the block's single sphere")
+            assert_eq!(
+                kids.len(),
+                2,
+                "the cube sibling + the block's single sphere"
+            )
         }
         other => panic!("expected a top-level Union of 2, got {other:?}"),
     }
@@ -58,7 +62,10 @@ fn first_error_wins_the_drain_discards_the_rest() {
     let err = evaluate_geometry("union() { assert(false, \"first\"); assert(false, \"second\"); }")
         .unwrap_err();
     let msg = format!("{err}");
-    assert!(msg.contains("first"), "expected the FIRST assert's error, got {msg:?}");
+    assert!(
+        msg.contains("first"),
+        "expected the FIRST assert's error, got {msg:?}"
+    );
     assert!(
         !msg.contains("second"),
         "the second assert must NOT run (the drain discards it): {msg:?}"

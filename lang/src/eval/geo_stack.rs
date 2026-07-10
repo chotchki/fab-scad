@@ -58,7 +58,11 @@ enum Combinator {
     /// The Minkowski sum of the children (3D only; 2D is LOUD-deferred).
     Minkowski,
     /// `offset()` — grow/shrink the 2D outline of its (force-2D'd) child.
-    Offset { delta: f64, join: Join2D, segments: u32 },
+    Offset {
+        delta: f64,
+        join: Join2D,
+        segments: u32,
+    },
     /// `linear_extrude()` — sweep the (force-2D'd) child up +Z.
     LinearExtrude(ExtrudeKind),
     /// `rotate_extrude()` — revolve the (force-2D'd) child; the kind resolves in `apply` off the child's `max_x`.
@@ -352,7 +356,9 @@ fn dispatch_work<'a>(
                 let draws_moved = ctx.rand_stream.borrow().draws() != snap.draws;
                 let impure_moved = ctx.impure_reads.get() != snap.impure_reads;
                 if msg_moved || draws_moved || impure_moved {
-                    ctx.mod_cache.borrow_mut().note_decline(msg_moved, draws_moved, impure_moved);
+                    ctx.mod_cache
+                        .borrow_mut()
+                        .note_decline(msg_moved, draws_moved, impure_moved);
                 } else {
                     ctx.mod_cache.borrow_mut().put(key, geo.clone());
                 }
@@ -681,7 +687,10 @@ fn push_user_module<'a>(
         .filter(|s| !matches!(s.kind, StmtKind::Empty))
         .collect();
     let childless = child_stmts.is_empty();
-    call.bind("$children", Value::Num(super::child_count(child_stmts.len())));
+    call.bind(
+        "$children",
+        Value::Num(super::child_count(child_stmts.len())),
+    );
     // `$parent_modules` = the ancestor count BEFORE pushing self (bound now so it's in the memo key + readable
     // by the body); the module-name push happens on the MISS path below, next to the children frame.
     call.bind(

@@ -70,18 +70,26 @@ fn module_call_binds_args() {
 #[test]
 fn module_body_local_definitions() {
     // a body-local function resolves and drives geometry
-    assert_eq!(extent("module m() { function sz() = 3; cube(sz()); } m();"), 3.0);
+    assert_eq!(
+        extent("module m() { function sz() = 3; cube(sz()); } m();"),
+        3.0
+    );
     // …and it CLOSES OVER the enclosing body's locals (an assignment AND a param)
     assert_eq!(
         extent("module m(n) { s = n * 2; function d() = s; cube(d()); } m(2);"),
         4.0
     );
     // a body-local MODULE resolves (and shadows nothing global here)
-    assert_eq!(extent("module outer() { module inner() cube(5); inner(); } outer();"), 5.0);
+    assert_eq!(
+        extent("module outer() { module inner() cube(5); inner(); } outer();"),
+        5.0
+    );
     // the test_version_cmp shape: a nested MODULE calls a sibling nested FUNCTION that closes over the
     // enclosing param — the nested module must close over the defining scope, not just the island global.
     assert_eq!(
-        extent("module outer(n) { function f() = n; module inner() cube(f()); inner(); } outer(4);"),
+        extent(
+            "module outer(n) { function f() = n; module inner() cube(f()); inner(); } outer(4);"
+        ),
         4.0
     );
     // a body-local function does NOT leak to the file scope — calling it outside its module is unknown
@@ -123,7 +131,9 @@ fn children_see_the_current_dollar_context() {
     // a `$`-var set in the module body reaches the child (clean eval = the child's assert held)
     assert!(evaluate("module m() { $val = 42; children(); } m() assert($val == 42);").is_ok());
     // …and it OVERRIDES the caller's `$`-value for the child
-    assert!(evaluate("$val = 1; module m() { $val = 9; children(); } m() assert($val == 9);").is_ok());
+    assert!(
+        evaluate("$val = 1; module m() { $val = 9; children(); } m() assert($val == 9);").is_ok()
+    );
     // TRANSITIVELY through a forwarding `children()` (the attachable shape: outer forwards through inner,
     // which sets the `$`-var — the deepest child still sees it)
     assert!(

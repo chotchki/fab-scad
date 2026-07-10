@@ -48,7 +48,10 @@ enum Ret {
     /// `leaves` flat leaf scalars to the sink in row-major order; the `shape` tree records the nesting so the
     /// dispatch rebuilds the interpreter's nested `Value`. `Rc`-shared so cloning a [`CompiledFn`] out of the
     /// cache is a refcount bump, not a tree copy. A body whose vector is FLAT stays [`Ret::Vec`] (the fast path).
-    Nested { shape: Rc<VShape>, leaves: usize },
+    Nested {
+        shape: Rc<VShape>,
+        leaves: usize,
+    },
     /// A DYNAMIC-length numeric list (P.1.6 rung-D piece 2): the compiled function materialized it into the
     /// `sink` (`*mut Vec<f64>`) via a loop; the `f64` return is a dummy and the dispatch reads the sink into a
     /// `Value::NumList`. Length isn't known at compile time (unlike `Vec(n)`), so there's no descriptor.
@@ -56,7 +59,9 @@ enum Ret {
     /// A DYNAMIC-length MATRIX (P.1.6 rung-D 2c.3): the body pushed `width` scalars per row (row-major) into the
     /// sink; the dispatch RESHAPES the flat buffer into a `List` of `width`-chunks (each a `NumList` row). Same
     /// sink mechanism as `DynVec`, plus the compile-time `width` to un-flatten by.
-    DynMat { width: usize },
+    DynMat {
+        width: usize,
+    },
 }
 
 /// The nesting SHAPE of a fixed-vector return (P.1.6 rung-D 2c.1) — a tree mirroring the `Lowered::Vec` the body
@@ -230,7 +235,10 @@ struct JitArena {
 
 impl JitArena {
     fn new() -> Self {
-        JitArena { lists: Vec::new(), result: core::ptr::null_mut() }
+        JitArena {
+            lists: Vec::new(),
+            result: core::ptr::null_mut(),
+        }
     }
 }
 
@@ -325,7 +333,11 @@ extern "C" fn jit_range_len(start: f64, step: f64, end: f64) -> i64 {
     reason = "guarded finite && >= 0; `n as i64` saturates a huge count to i64::MAX (→ the budget bail)"
 )]
 extern "C" fn jit_as_index(n: f64) -> i64 {
-    if n.is_finite() && n >= 0.0 { n as i64 } else { -1 }
+    if n.is_finite() && n >= 0.0 {
+        n as i64
+    } else {
+        -1
+    }
 }
 
 /// The seedless-`rands` helper (P.1.6 rung-D piece 1) — advances the WOVEN [`RandStream`] by ONE draw, through
@@ -437,7 +449,11 @@ impl CompiledFn {
         );
         match &self.ret_ty {
             Ret::Vec(n) => {
-                assert!(out.len() >= *n, "CompiledFn::call out buffer too small: {} < {n}", out.len());
+                assert!(
+                    out.len() >= *n,
+                    "CompiledFn::call out buffer too small: {} < {n}",
+                    out.len()
+                );
             }
             // A nested (matrix) return writes its FLAT leaf count into the same sink (2c.1).
             Ret::Nested { leaves, .. } => {
@@ -465,7 +481,15 @@ impl CompiledFn {
             *mut core::ffi::c_void,
         ) -> f64 = unsafe { std::mem::transmute(self.code) };
         let mut raised: u8 = 0;
-        let result = unsafe { f(params.as_ptr(), &raw mut raised, out.as_mut_ptr(), rand, arena) };
+        let result = unsafe {
+            f(
+                params.as_ptr(),
+                &raw mut raised,
+                out.as_mut_ptr(),
+                rand,
+                arena,
+            )
+        };
         if raised == 0 { Some(result) } else { None }
     }
 }
@@ -497,7 +521,14 @@ impl JitFn {
     pub fn call(&self, params: &[f64]) -> Option<f64> {
         // SAFETY: `compile_function` declines a rands body AND is `Num`-only (no vec/comprehension), so this
         // body never dereferences the null rand/arena pointers nor writes the out-buffer.
-        unsafe { self.inner.call(params, &mut [0.0], core::ptr::null_mut(), core::ptr::null_mut()) }
+        unsafe {
+            self.inner.call(
+                params,
+                &mut [0.0],
+                core::ptr::null_mut(),
+                core::ptr::null_mut(),
+            )
+        }
     }
 }
 
@@ -563,10 +594,20 @@ impl JitRegistry {
         // Own the AST up front so the registry can recompile any function for a new arg shape later.
         let owned_defs: BTreeMap<String, OwnedDef> = defs
             .into_iter()
-            .map(|(n, p, b)| (n.to_string(), OwnedDef { params: p.to_vec(), body: b.clone() }))
+            .map(|(n, p, b)| {
+                (
+                    n.to_string(),
+                    OwnedDef {
+                        params: p.to_vec(),
+                        body: b.clone(),
+                    },
+                )
+            })
             .collect();
-        let owned_globals: BTreeMap<String, Expr> =
-            consts.into_iter().map(|(n, v)| (n.to_string(), v.clone())).collect();
+        let owned_globals: BTreeMap<String, Expr> = consts
+            .into_iter()
+            .map(|(n, v)| (n.to_string(), v.clone()))
+            .collect();
 
         let mut module = new_module()?;
         let helpers = declare_helpers(&mut module)?;
@@ -578,18 +619,31 @@ impl JitRegistry {
         {
             // Borrow-maps over the OWNED AST for the compiler (every function visible to every other, so a
             // caller can inline any callee incl. a forward reference). Built once for the whole build pass.
-            let fn_defs: FnDefs =
-                owned_defs.iter().map(|(n, d)| (n.as_str(), (d.params.as_slice(), &d.body))).collect();
+            let fn_defs: FnDefs = owned_defs
+                .iter()
+                .map(|(n, d)| (n.as_str(), (d.params.as_slice(), &d.body)))
+                .collect();
             let globals: Globals = owned_globals.iter().map(|(n, v)| (n.as_str(), v)).collect();
             // Declare + define each function's all-scalar shape, remembering its FuncId to resolve the code
             // pointer AFTER the single finalize. `Vec(name, FuncId, flatlen, ret_ty)`.
             let mut pending: Vec<(&str, FuncId, usize, Ret)> = Vec::new();
             for (name, d) in &owned_defs {
-                let params: Vec<(&str, ArgShape)> =
-                    d.params.iter().map(|p| (p.name.as_ref(), ArgShape::Scalar)).collect();
+                let params: Vec<(&str, ArgShape)> = d
+                    .params
+                    .iter()
+                    .map(|p| (p.name.as_ref(), ArgShape::Scalar))
+                    .collect();
                 let symbol = format!("scad_jit_{next_symbol}");
                 next_symbol += 1;
-                match define_one(&mut module, &symbol, &params, &d.body, &fn_defs, &globals, &helpers) {
+                match define_one(
+                    &mut module,
+                    &symbol,
+                    &params,
+                    &d.body,
+                    &fn_defs,
+                    &globals,
+                    &helpers,
+                ) {
                     // all-scalar flatlen == parameter count.
                     Ok((func_id, ret_ty)) => pending.push((name, func_id, d.params.len(), ret_ty)),
                     Err(JitError::Unsupported(reason)) => {
@@ -598,14 +652,20 @@ impl JitRegistry {
                     Err(e) => return Err(e), // a real codegen failure — surface it
                 }
             }
-            module.finalize_definitions().map_err(|e| JitError::Cranelift(e.to_string()))?;
+            module
+                .finalize_definitions()
+                .map_err(|e| JitError::Cranelift(e.to_string()))?;
             for (name, func_id, flatlen, ret_ty) in pending {
                 let code = module.get_finalized_function(func_id);
                 let sig = vec![ArgShape::Scalar; flatlen];
-                cache
-                    .entry(name.to_string())
-                    .or_default()
-                    .insert(sig, Some(CompiledFn { code, arity: flatlen, ret_ty }));
+                cache.entry(name.to_string()).or_default().insert(
+                    sig,
+                    Some(CompiledFn {
+                        code,
+                        arity: flatlen,
+                        ret_ty,
+                    }),
+                );
                 scalar_compiled += 1;
             }
         }
@@ -640,7 +700,12 @@ impl JitRegistry {
             .params
             .iter()
             .enumerate()
-            .map(|(i, p)| (p.name.as_ref(), sig.get(i).cloned().unwrap_or(ArgShape::Scalar)))
+            .map(|(i, p)| {
+                (
+                    p.name.as_ref(),
+                    sig.get(i).cloned().unwrap_or(ArgShape::Scalar),
+                )
+            })
             .collect();
         let flatlen: usize = sig.iter().map(ArgShape::size).sum();
         let symbol = {
@@ -648,12 +713,23 @@ impl JitRegistry {
             self.next_symbol.set(n + 1);
             format!("scad_jit_{n}")
         };
-        let fn_defs: FnDefs =
-            self.defs.iter().map(|(n, d)| (n.as_str(), (d.params.as_slice(), &d.body))).collect();
+        let fn_defs: FnDefs = self
+            .defs
+            .iter()
+            .map(|(n, d)| (n.as_str(), (d.params.as_slice(), &d.body)))
+            .collect();
         let globals: Globals = self.globals.iter().map(|(n, v)| (n.as_str(), v)).collect();
         let compiled = {
             let mut module = self.module.borrow_mut();
-            match define_one(&mut module, &symbol, &params, &def.body, &fn_defs, &globals, &self.helpers) {
+            match define_one(
+                &mut module,
+                &symbol,
+                &params,
+                &def.body,
+                &fn_defs,
+                &globals,
+                &self.helpers,
+            ) {
                 Ok((func_id, ret_ty)) => match module.finalize_definitions() {
                     Ok(()) => Some(CompiledFn {
                         code: module.get_finalized_function(func_id),
@@ -667,7 +743,11 @@ impl JitRegistry {
                 Err(_) => None,
             }
         };
-        self.cache.borrow_mut().entry(name.to_string()).or_default().insert(sig.clone(), compiled.clone());
+        self.cache
+            .borrow_mut()
+            .entry(name.to_string())
+            .or_default()
+            .insert(sig.clone(), compiled.clone());
         compiled
     }
 
@@ -705,7 +785,10 @@ impl JitRegistry {
 
     /// The names whose all-SCALAR shape compiled, sorted — for the FAB_EXPLAIN coverage report.
     pub fn compiled_names(&self) -> impl Iterator<Item = &str> {
-        self.defs.keys().map(String::as_str).filter(|n| self.get(n).is_some())
+        self.defs
+            .keys()
+            .map(String::as_str)
+            .filter(|n| self.get(n).is_some())
     }
 }
 
@@ -748,9 +831,9 @@ impl NumericJit for JitRegistry {
         let mut arena = JitArena::new();
         let arena_ptr = std::ptr::from_mut(&mut arena).cast::<core::ffi::c_void>();
         match &compiled.ret_ty {
-            Ret::Num => {
-                Some(JitOutcome::Num(unsafe { compiled.call(&scratch, &mut [0.0], rand, arena_ptr) }?))
-            }
+            Ret::Num => Some(JitOutcome::Num(unsafe {
+                compiled.call(&scratch, &mut [0.0], rand, arena_ptr)
+            }?)),
             Ret::Bool => Some(JitOutcome::Bool(
                 unsafe { compiled.call(&scratch, &mut [0.0], rand, arena_ptr) }? != 0.0,
             )),
@@ -794,9 +877,15 @@ impl NumericJit for JitRegistry {
                 // `width` scalars were pushed per row, so `flat.len()` is a multiple of `width`. Reshape row-major
                 // into a `Value::List` of `NumList` rows — the interpreter's nested matrix, bit-identical (its
                 // `PartialEq` even makes an empty `List` equal an empty `NumList`).
-                debug_assert!(flat.len() % width == 0, "DynMat flat len {} not a multiple of width {width}", flat.len());
-                let rows: Vec<ScadValue> =
-                    flat.chunks(*width).map(|row| ScadValue::num_list(row.to_vec())).collect();
+                debug_assert!(
+                    flat.len() % width == 0,
+                    "DynMat flat len {} not a multiple of width {width}",
+                    flat.len()
+                );
+                let rows: Vec<ScadValue> = flat
+                    .chunks(*width)
+                    .map(|row| ScadValue::num_list(row.to_vec()))
+                    .collect();
                 Some(JitOutcome::Nested(ScadValue::list(rows)))
             }
         }
@@ -855,7 +944,9 @@ fn explain_coverage(defs: &[JitDef<'_>], registry: &JitRegistry) {
     let total = defs.len();
     let compiled = registry.len();
     let pct = 100.0 * compiled as f64 / total.max(1) as f64;
-    eprintln!("\n[jit-explain] === numeric-JIT coverage === {compiled}/{total} functions compiled ({pct:.1}%)");
+    eprintln!(
+        "\n[jit-explain] === numeric-JIT coverage === {compiled}/{total} functions compiled ({pct:.1}%)"
+    );
     for name in registry.compiled_names() {
         eprintln!("[jit-explain]   + compiled  {name}");
     }
@@ -868,7 +959,9 @@ fn explain_coverage(defs: &[JitDef<'_>], registry: &JitRegistry) {
     let mut rows: Vec<(&&'static str, &usize)> = histogram.iter().collect();
     rows.sort_unstable_by(|a, b| b.1.cmp(a.1).then(a.0.cmp(b.0)));
     let declined_total = registry.declined().len();
-    eprintln!("[jit-explain]   {declined_total} declined — first-blocker histogram (the absorption ceiling):");
+    eprintln!(
+        "[jit-explain]   {declined_total} declined — first-blocker histogram (the absorption ceiling):"
+    );
     for (reason, count) in rows {
         let share = 100.0 * *count as f64 / declined_total.max(1) as f64;
         eprintln!("[jit-explain]     {count:>5}  {share:5.1}%  {reason}");
@@ -876,7 +969,9 @@ fn explain_coverage(defs: &[JitDef<'_>], registry: &JitRegistry) {
     // This is the ALL-SCALAR view: a function blocked by `index of a non-vector` / `member access on a
     // non-vector` here still gains a specialization when CALLED with a vector arg (P.1.6 rung B, compiled on
     // demand and not counted above). The scalar histogram is the conservative floor.
-    eprintln!("[jit-explain]   (vector-arg specializations compile on demand at runtime — not in the counts above)");
+    eprintln!(
+        "[jit-explain]   (vector-arg specializations compile on demand at runtime — not in the counts above)"
+    );
 }
 
 /// Compile a single numeric function body (over `param_names`, in order) to native code, owning its own
@@ -899,16 +994,28 @@ pub fn compile_function(param_names: &[&str], body: &Expr) -> Result<JitFn, JitE
     // — so a `rands` OR comprehension body must DECLINE here rather than have `JitFn::call`'s null stream/arena
     // pointer dereferenced (even a SCALAR body that only uses an intermediate list, e.g. `len([for …])`).
     if needs_runtime_env(body) {
-        return Err(JitError::Unsupported("rands/comprehension (standalone API is env-free; use JitRegistry)"));
+        return Err(JitError::Unsupported(
+            "rands/comprehension (standalone API is env-free; use JitRegistry)",
+        ));
     }
     // The standalone differential passes plain `f64` args, so every parameter is a SCALAR shape.
-    let params: Vec<(&str, ArgShape)> = param_names.iter().map(|&n| (n, ArgShape::Scalar)).collect();
-    let (func_id, ret_ty) =
-        define_one(&mut module, "scad_jit_fn", &params, body, &no_defs, &no_globals, &helpers)?;
+    let params: Vec<(&str, ArgShape)> =
+        param_names.iter().map(|&n| (n, ArgShape::Scalar)).collect();
+    let (func_id, ret_ty) = define_one(
+        &mut module,
+        "scad_jit_fn",
+        &params,
+        body,
+        &no_defs,
+        &no_globals,
+        &helpers,
+    )?;
     // The standalone API is f64-only (the fast==JIT differential compares raw f64s); a bool- OR vector-returning
     // body is the registry path's job (it carries the tag + the sink buffer), so DECLINE it here.
     if !matches!(ret_ty, Ret::Num) {
-        return Err(JitError::Unsupported("non-numeric return (standalone API is f64-only; use JitRegistry)"));
+        return Err(JitError::Unsupported(
+            "non-numeric return (standalone API is f64-only; use JitRegistry)",
+        ));
     }
     module
         .finalize_definitions()
@@ -916,7 +1023,11 @@ pub fn compile_function(param_names: &[&str], body: &Expr) -> Result<JitFn, JitE
     let code = module.get_finalized_function(func_id);
     Ok(JitFn {
         _module: module,
-        inner: CompiledFn { code, arity: param_names.len(), ret_ty },
+        inner: CompiledFn {
+            code,
+            arity: param_names.len(),
+            ret_ty,
+        },
     })
 }
 
@@ -926,7 +1037,9 @@ pub fn compile_function(param_names: &[&str], body: &Expr) -> Result<JitFn, JitE
 fn new_module() -> Result<JITModule, JitError> {
     let mut flags = settings::builder();
     let set = |flags: &mut settings::Builder, k, v| {
-        flags.set(k, v).map_err(|e| JitError::Cranelift(e.to_string()))
+        flags
+            .set(k, v)
+            .map_err(|e| JitError::Cranelift(e.to_string()))
     };
     set(&mut flags, "opt_level", "speed")?;
     set(&mut flags, "use_colocated_libcalls", "false")?;
@@ -993,36 +1106,54 @@ fn declare_helpers(module: &mut JITModule) -> Result<Helpers, JitError> {
     op_sig.params.push(AbiParam::new(types::F64));
     op_sig.params.push(AbiParam::new(types::F64));
     op_sig.returns.push(AbiParam::new(types::F64));
-    let fmod = module.declare_function("jit_fmod", Linkage::Import, &op_sig).map_err(cl)?;
-    let powf = module.declare_function("jit_powf", Linkage::Import, &op_sig).map_err(cl)?;
-    let fmin = module.declare_function("jit_fmin", Linkage::Import, &op_sig).map_err(cl)?;
-    let fmax = module.declare_function("jit_fmax", Linkage::Import, &op_sig).map_err(cl)?;
+    let fmod = module
+        .declare_function("jit_fmod", Linkage::Import, &op_sig)
+        .map_err(cl)?;
+    let powf = module
+        .declare_function("jit_powf", Linkage::Import, &op_sig)
+        .map_err(cl)?;
+    let fmin = module
+        .declare_function("jit_fmin", Linkage::Import, &op_sig)
+        .map_err(cl)?;
+    let fmax = module
+        .declare_function("jit_fmax", Linkage::Import, &op_sig)
+        .map_err(cl)?;
     // `(i32 id, f64, f64) -> f64` for the math dispatcher.
     let mut math_sig = module.make_signature();
     math_sig.params.push(AbiParam::new(types::I32));
     math_sig.params.push(AbiParam::new(types::F64));
     math_sig.params.push(AbiParam::new(types::F64));
     math_sig.returns.push(AbiParam::new(types::F64));
-    let math = module.declare_function("jit_math_call", Linkage::Import, &math_sig).map_err(cl)?;
+    let math = module
+        .declare_function("jit_math_call", Linkage::Import, &math_sig)
+        .map_err(cl)?;
     // `(*mut RandStream, f64, f64) -> f64` — the stream pointer rides the target pointer type.
     let mut rand_sig = module.make_signature();
-    rand_sig.params.push(AbiParam::new(module.target_config().pointer_type()));
+    rand_sig
+        .params
+        .push(AbiParam::new(module.target_config().pointer_type()));
     rand_sig.params.push(AbiParam::new(types::F64));
     rand_sig.params.push(AbiParam::new(types::F64));
     rand_sig.returns.push(AbiParam::new(types::F64));
-    let rand_next = module.declare_function("jit_rand_next", Linkage::Import, &rand_sig).map_err(cl)?;
+    let rand_next = module
+        .declare_function("jit_rand_next", Linkage::Import, &rand_sig)
+        .map_err(cl)?;
     // `(f64, f64, f64) -> i64` — the range length / loop bound.
     let mut rlen_sig = module.make_signature();
     rlen_sig.params.push(AbiParam::new(types::F64));
     rlen_sig.params.push(AbiParam::new(types::F64));
     rlen_sig.params.push(AbiParam::new(types::F64));
     rlen_sig.returns.push(AbiParam::new(types::I64));
-    let range_len = module.declare_function("jit_range_len", Linkage::Import, &rlen_sig).map_err(cl)?;
+    let range_len = module
+        .declare_function("jit_range_len", Linkage::Import, &rlen_sig)
+        .map_err(cl)?;
     // `(f64) -> i64` — as_index (a count/index validated).
     let mut aidx_sig = module.make_signature();
     aidx_sig.params.push(AbiParam::new(types::F64));
     aidx_sig.returns.push(AbiParam::new(types::I64));
-    let as_index = module.declare_function("jit_as_index", Linkage::Import, &aidx_sig).map_err(cl)?;
+    let as_index = module
+        .declare_function("jit_as_index", Linkage::Import, &aidx_sig)
+        .map_err(cl)?;
     // The dynamic-list helpers (2b.2), each built explicitly (a signature-building closure would hold a
     // `&module` borrow across `declare_function`'s `&mut`). `p` = the target pointer type.
     let p = module.target_config().pointer_type();
@@ -1030,35 +1161,46 @@ fn declare_helpers(module: &mut JITModule) -> Result<Helpers, JitError> {
     let mut new_sig = module.make_signature();
     new_sig.params.push(AbiParam::new(p));
     new_sig.returns.push(AbiParam::new(p));
-    let arena_new_list =
-        module.declare_function("jit_arena_new_list", Linkage::Import, &new_sig).map_err(cl)?;
+    let arena_new_list = module
+        .declare_function("jit_arena_new_list", Linkage::Import, &new_sig)
+        .map_err(cl)?;
     // `jit_vec_push(*mut Vec<f64>, f64)`.
     let mut push_sig = module.make_signature();
     push_sig.params.push(AbiParam::new(p));
     push_sig.params.push(AbiParam::new(types::F64));
-    let vec_push = module.declare_function("jit_vec_push", Linkage::Import, &push_sig).map_err(cl)?;
+    let vec_push = module
+        .declare_function("jit_vec_push", Linkage::Import, &push_sig)
+        .map_err(cl)?;
     // `jit_vec_len(*mut Vec<f64>) -> i64`.
     let mut len_sig = module.make_signature();
     len_sig.params.push(AbiParam::new(p));
     len_sig.returns.push(AbiParam::new(types::I64));
-    let vec_len = module.declare_function("jit_vec_len", Linkage::Import, &len_sig).map_err(cl)?;
+    let vec_len = module
+        .declare_function("jit_vec_len", Linkage::Import, &len_sig)
+        .map_err(cl)?;
     // `jit_vec_get(*mut Vec<f64>, i64) -> f64`.
     let mut get_sig = module.make_signature();
     get_sig.params.push(AbiParam::new(p));
     get_sig.params.push(AbiParam::new(types::I64));
     get_sig.returns.push(AbiParam::new(types::F64));
-    let vec_get = module.declare_function("jit_vec_get", Linkage::Import, &get_sig).map_err(cl)?;
+    let vec_get = module
+        .declare_function("jit_vec_get", Linkage::Import, &get_sig)
+        .map_err(cl)?;
     // `jit_vec_bound(*mut Vec<f64>, f64) -> i64`.
     let mut bound_sig = module.make_signature();
     bound_sig.params.push(AbiParam::new(p));
     bound_sig.params.push(AbiParam::new(types::F64));
     bound_sig.returns.push(AbiParam::new(types::I64));
-    let vec_bound = module.declare_function("jit_vec_bound", Linkage::Import, &bound_sig).map_err(cl)?;
+    let vec_bound = module
+        .declare_function("jit_vec_bound", Linkage::Import, &bound_sig)
+        .map_err(cl)?;
     // `jit_set_result(*mut JitArena, *mut Vec<f64>)`.
     let mut res_sig = module.make_signature();
     res_sig.params.push(AbiParam::new(p));
     res_sig.params.push(AbiParam::new(p));
-    let set_result = module.declare_function("jit_set_result", Linkage::Import, &res_sig).map_err(cl)?;
+    let set_result = module
+        .declare_function("jit_set_result", Linkage::Import, &res_sig)
+        .map_err(cl)?;
     Ok(Helpers {
         fmod,
         powf,
@@ -1215,10 +1357,15 @@ fn define_one(
                 let mut off = 0usize;
                 let shape = store_return_vec(&mut fb, out_ptr, &elems, &mut off)?;
                 let ret = match &shape {
-                    VShape::Nest(children) if children.iter().all(|c| matches!(c, VShape::Leaf)) => {
+                    VShape::Nest(children)
+                        if children.iter().all(|c| matches!(c, VShape::Leaf)) =>
+                    {
                         Ret::Vec(off)
                     }
-                    _ => Ret::Nested { shape: Rc::new(shape), leaves: off },
+                    _ => Ret::Nested {
+                        shape: Rc::new(shape),
+                        leaves: off,
+                    },
                 };
                 (fb.ins().f64const(0.0), ret) // the f64 return is a dummy for a vector
             }
@@ -1241,7 +1388,9 @@ fn define_one(
         ret_ty = ty;
     }
 
-    let func_id = module.declare_function(symbol, Linkage::Export, &ctx.func.signature).map_err(cl)?;
+    let func_id = module
+        .declare_function(symbol, Linkage::Export, &ctx.func.signature)
+        .map_err(cl)?;
     module.define_function(func_id, &mut ctx).map_err(cl)?;
     module.clear_context(&mut ctx);
     Ok((func_id, ret_ty))
@@ -1276,8 +1425,10 @@ fn store_return_elem(
         return store_return_vec(fb, out_ptr, sub, off);
     }
     let x = e.num(fb)?;
-    let byte_off = i32::try_from(*off * 8).map_err(|_| JitError::Unsupported("return offset overflow"))?;
-    fb.ins().store(MemFlagsData::trusted(), x, out_ptr, byte_off);
+    let byte_off =
+        i32::try_from(*off * 8).map_err(|_| JitError::Unsupported("return offset overflow"))?;
+    fb.ins()
+        .store(MemFlagsData::trusted(), x, out_ptr, byte_off);
     *off += 1;
     Ok(VShape::Leaf)
 }
@@ -1294,11 +1445,19 @@ fn rebuild_nested(shape: &VShape, flat: &[f64], cursor: &mut usize) -> ScadValue
             ScadValue::Num(v)
         }
         VShape::Nest(children) => {
-            let items: Vec<ScadValue> =
-                children.iter().map(|c| rebuild_nested(c, flat, cursor)).collect();
+            let items: Vec<ScadValue> = children
+                .iter()
+                .map(|c| rebuild_nested(c, flat, cursor))
+                .collect();
             match items
                 .iter()
-                .map(|v| if let ScadValue::Num(n) = v { Some(*n) } else { None })
+                .map(|v| {
+                    if let ScadValue::Num(n) = v {
+                        Some(*n)
+                    } else {
+                        None
+                    }
+                })
                 .collect::<Option<Vec<f64>>>()
             {
                 Some(nums) => ScadValue::num_list(nums),
@@ -1320,9 +1479,11 @@ fn load_arg(
 ) -> Result<Lowered, JitError> {
     match shape {
         ArgShape::Scalar => {
-            let byte_off =
-                i32::try_from(*off * 8).map_err(|_| JitError::Unsupported("param offset overflow"))?;
-            let v = fb.ins().load(types::F64, MemFlagsData::trusted(), params_ptr, byte_off);
+            let byte_off = i32::try_from(*off * 8)
+                .map_err(|_| JitError::Unsupported("param offset overflow"))?;
+            let v = fb
+                .ins()
+                .load(types::F64, MemFlagsData::trusted(), params_ptr, byte_off);
             *off += 1;
             Ok(Lowered::Num(v))
         }
@@ -1368,14 +1529,19 @@ fn unroll_fixed_comprehension(
     lower: &Lower,
 ) -> Result<Lowered, JitError> {
     if elems.len() > MAX_VEC_ARG {
-        return Err(JitError::Unsupported("comprehension over an over-long fixed vector"));
+        return Err(JitError::Unsupported(
+            "comprehension over an over-long fixed vector",
+        ));
     }
     let mut out = Vec::with_capacity(elems.len());
     for e in elems {
         // Bind the loop var to THIS element in a fresh scope (lexical: the body sees the caller's env + `x`).
         let mut locals = lower.locals.clone();
         locals.insert(name, e);
-        let scoped = Lower { locals: &locals, ..*lower };
+        let scoped = Lower {
+            locals: &locals,
+            ..*lower
+        };
         out.push(compile_expr(fb, lc_body, &scoped)?);
     }
     Ok(Lowered::Vec(out))
@@ -1390,7 +1556,9 @@ fn compile_comprehension(
     let [binding] = bindings else {
         return Err(JitError::Unsupported("multi-binding comprehension")); // rung 2b.N
     };
-    let name = binding.name.as_deref().ok_or(JitError::Unsupported("comprehension binding without a name"))?;
+    let name = binding.name.as_deref().ok_or(JitError::Unsupported(
+        "comprehension binding without a name",
+    ))?;
 
     // The iterable is compiled ONCE, in source order, before the loop — matching the interpreter evaluating the
     // range/list value before iterating. A RANGE gives an index-based value; a DYNLIST (a value that compiles to
@@ -1404,7 +1572,13 @@ fn compile_comprehension(
             };
             let end_v = compile_expr(fb, end, lower)?.num(fb)?;
             let call = fb.ins().call(lower.range_len, &[start_v, step_v, end_v]);
-            (CompIter::Range { start: start_v, step: step_v }, fb.inst_results(call)[0])
+            (
+                CompIter::Range {
+                    start: start_v,
+                    step: step_v,
+                },
+                fb.inst_results(call)[0],
+            )
         }
         _ => match compile_expr(fb, &binding.value, lower)? {
             Lowered::DynList(handle) => {
@@ -1414,9 +1588,15 @@ fn compile_comprehension(
             // A FIXED scalarized vector iterable (`[for(x = [1,2,3]) …]`, `[for(x = vec_param) …]`) — rung 2b.N:
             // UNROLL at compile time (length is known), no arena/loop, returning a fixed `Lowered::Vec`. Returns
             // EARLY (the loop machinery below is only for the runtime-length Range/DynList cases).
-            Lowered::Vec(elems) => return unroll_fixed_comprehension(fb, name, elems, lc_body, lower),
+            Lowered::Vec(elems) => {
+                return unroll_fixed_comprehension(fb, name, elems, lc_body, lower);
+            }
             // A scalar / bool / undef isn't iterable → decline.
-            _ => return Err(JitError::Unsupported("comprehension over a non-range/non-dynlist")),
+            _ => {
+                return Err(JitError::Unsupported(
+                    "comprehension over a non-range/non-dynlist",
+                ));
+            }
         },
     };
 
@@ -1438,7 +1618,8 @@ fn compile_comprehension(
     fb.seal_block(setup);
     fb.switch_to_block(bail);
     let one_flag = fb.ins().iconst(types::I8, 1);
-    fb.ins().store(MemFlagsData::trusted(), one_flag, lower.raised_ptr, 0);
+    fb.ins()
+        .store(MemFlagsData::trusted(), one_flag, lower.raised_ptr, 0);
     let bail_ret = fb.ins().f64const(0.0);
     fb.ins().return_(&[bail_ret]);
 
@@ -1474,7 +1655,10 @@ fn compile_comprehension(
     };
     let mut locals = lower.locals.clone();
     locals.insert(name, Lowered::Num(value));
-    let scoped = Lower { locals: &locals, ..*lower };
+    let scoped = Lower {
+        locals: &locals,
+        ..*lower
+    };
     // Compile the body ONCE (its IR runs every iteration). A SCALAR body pushes 1 element/row → a flat DynList
     // (2b.2). A FIXED-WIDTH numeric-vector body `[a, b, c]` pushes W elements/row in row-major order → a DynMat
     // (2c.3). Anything else (a nested/ragged vector, a dyn list per row) declines. `width` is compile-time-known
@@ -1487,7 +1671,9 @@ fn compile_comprehension(
         Lowered::Vec(elems)
             if !elems.is_empty()
                 && elems.len() <= MAX_VEC_ARG
-                && elems.iter().all(|e| matches!(e, Lowered::Num(_) | Lowered::ConstNum(_))) =>
+                && elems
+                    .iter()
+                    .all(|e| matches!(e, Lowered::Num(_) | Lowered::ConstNum(_))) =>
         {
             // A matrix row: push each of the W scalars IN ORDER (e0..eW-1) — the row-major layout the dispatch
             // reshapes by, and the order a body-`rands` must draw in (piece 1 weave, one draw per element).
@@ -1513,7 +1699,10 @@ fn compile_comprehension(
     // body) or a DynMat carrying its row width (a fixed-width vector body, 2c.3), which the RETURN reshapes.
     fb.switch_to_block(exit);
     match row_width {
-        Some(width) => Ok(Lowered::DynMat { handle: list, width }),
+        Some(width) => Ok(Lowered::DynMat {
+            handle: list,
+            width,
+        }),
         None => Ok(Lowered::DynList(list)),
     }
 }
@@ -1560,7 +1749,10 @@ enum Lowered {
     /// structural), the ROW COUNT runtime. Consumed by `len` (→ row count = flat_len / W), `is_list`, and the
     /// RETURN (the dispatch reshapes the flat buffer into a `List` of `width`-chunks). Indexing / arithmetic ON a
     /// DynMat is out of scope (declines) — it's a materialize-and-return value like `DynList`.
-    DynMat { handle: Value, width: usize },
+    DynMat {
+        handle: Value,
+        width: usize,
+    },
 }
 
 impl Lowered {
@@ -1571,15 +1763,17 @@ impl Lowered {
         match self {
             Lowered::Num(v) => Ok(*v),
             Lowered::ConstNum(c) => Ok(fb.ins().f64const(*c)),
-            Lowered::Bool(_) | Lowered::ConstBool(_) => {
-                Err(JitError::Unsupported("a boolean where a number is required"))
-            }
+            Lowered::Bool(_) | Lowered::ConstBool(_) => Err(JitError::Unsupported(
+                "a boolean where a number is required",
+            )),
             Lowered::Vec(_) => Err(JitError::Unsupported("a vector where a number is required")),
-            Lowered::DynList(_) => Err(JitError::Unsupported("a dynamic list where a number is required")),
+            Lowered::DynList(_) => Err(JitError::Unsupported(
+                "a dynamic list where a number is required",
+            )),
             Lowered::ConstUndef => Err(JitError::Unsupported("undef where a number is required")),
-            Lowered::DynMat { .. } => {
-                Err(JitError::Unsupported("a dynamic matrix where a number is required"))
-            }
+            Lowered::DynMat { .. } => Err(JitError::Unsupported(
+                "a dynamic matrix where a number is required",
+            )),
         }
     }
 
@@ -1635,14 +1829,19 @@ fn truthy(fb: &mut FunctionBuilder, v: &Lowered) -> Result<Value, JitError> {
         Lowered::ConstUndef => Ok(fb.ins().iconst(types::I8, 0)),
         Lowered::Vec(_) => Err(JitError::Unsupported("a vector as a truth condition")),
         Lowered::DynList(_) => Err(JitError::Unsupported("a dynamic list as a truth condition")),
-        Lowered::DynMat { .. } => Err(JitError::Unsupported("a dynamic matrix as a truth condition")),
+        Lowered::DynMat { .. } => Err(JitError::Unsupported(
+            "a dynamic matrix as a truth condition",
+        )),
     }
 }
 
 /// The COMPILE-TIME truthiness of a `Lowered`, or `None` if it isn't compile-time-known — a `ConstBool` is its
 /// own value, a `ConstNum` is `c != 0.0` (the same `une` fold as [`truthy`]). Used to const-fold `&&`/`||` so a
 /// wholly-const logical expression stays a `ConstBool` and can still prune a wrapping ternary.
-#[allow(clippy::float_cmp, reason = "the `!= 0.0` une truthiness test — the exact `Num` runtime semantics")]
+#[allow(
+    clippy::float_cmp,
+    reason = "the `!= 0.0` une truthiness test — the exact `Num` runtime semantics"
+)]
 fn const_truthy(v: &Lowered) -> Option<bool> {
     match v {
         Lowered::ConstBool(b) => Some(*b),
@@ -1672,7 +1871,10 @@ fn float_cc(op: BinOp) -> Option<FloatCC> {
 /// bit-for-bit onto [`float_cc`]'s Cranelift predicates: `< <= > >= ==` are ORDERED (any `NaN` → false, matching
 /// the ordered `FloatCC`s and the interpreter's `partial_cmp`), and `!=` is Rust's `!(x==y)` = UNORDERED not-equal
 /// (`NaN != NaN` → true, matching `FloatCC::NotEqual`/`une`). So the folded `ConstBool` equals the runtime `fcmp`.
-#[allow(clippy::float_cmp, reason = "exact IEEE compare IS the semantics — must match the interpreter's `==`")]
+#[allow(
+    clippy::float_cmp,
+    reason = "exact IEEE compare IS the semantics — must match the interpreter's `==`"
+)]
 fn const_fcmp(op: BinOp, x: f64, y: f64) -> bool {
     match op {
         BinOp::Lt => x < y,
@@ -1793,7 +1995,12 @@ fn compile_expr(fb: &mut FunctionBuilder, expr: &Expr, lower: &Lower) -> Result<
             if let Some(&i) = lower.index.get(name.as_str()) {
                 let offset = i32::try_from(i * 8)
                     .map_err(|_| JitError::Unsupported("param offset overflow"))?;
-                let v = fb.ins().load(types::F64, MemFlagsData::trusted(), lower.params_ptr, offset);
+                let v = fb.ins().load(
+                    types::F64,
+                    MemFlagsData::trusted(),
+                    lower.params_ptr,
+                    offset,
+                );
                 // A parameter is always a number here — the dispatch gate only routes all-`Num` calls to the JIT.
                 return Ok(Lowered::Num(v));
             }
@@ -1851,7 +2058,11 @@ fn compile_expr(fb: &mut FunctionBuilder, expr: &Expr, lower: &Lower) -> Result<
                 // P.1.6 rung-D 2b.4) — keeps const-ness so a wrapping ternary can still prune. A mixed
                 // const/runtime pair materializes to a runtime `Bool`.
                 if let (Some(x), Some(y)) = (const_truthy(&a), const_truthy(&b)) {
-                    let r = if matches!(op, BinOp::And) { x && y } else { x || y };
+                    let r = if matches!(op, BinOp::And) {
+                        x && y
+                    } else {
+                        x || y
+                    };
                     return Ok(Lowered::ConstBool(r));
                 }
                 let ta = truthy(fb, &a)?;
@@ -1923,7 +2134,9 @@ fn compile_expr(fb: &mut FunctionBuilder, expr: &Expr, lower: &Lower) -> Result<
                     };
                     Ok(Lowered::Num(v))
                 }
-                (BinOp::Add | BinOp::Sub, Lowered::Vec(x), Lowered::Vec(y)) if x.len() == y.len() => {
+                (BinOp::Add | BinOp::Sub, Lowered::Vec(x), Lowered::Vec(y))
+                    if x.len() == y.len() =>
+                {
                     Ok(Lowered::Vec(vec_elementwise(fb, *op, x, y)?))
                 }
                 (BinOp::Mul, Lowered::Num(s), Lowered::Vec(v))
@@ -1940,7 +2153,9 @@ fn compile_expr(fb: &mut FunctionBuilder, expr: &Expr, lower: &Lower) -> Result<
                 (BinOp::Div, Lowered::Num(s), Lowered::Vec(v)) => {
                     Ok(Lowered::Vec(vec_div(fb, v, *s, false)?))
                 }
-                _ => Err(JitError::Unsupported("unsupported operand types for arithmetic")),
+                _ => Err(JitError::Unsupported(
+                    "unsupported operand types for arithmetic",
+                )),
             }
         }
         // `c ? then : els`. A COMPILE-TIME-known condition (P.1.6 rung-D 2b.4) PRUNES the un-taken branch —
@@ -1970,11 +2185,17 @@ fn compile_expr(fb: &mut FunctionBuilder, expr: &Expr, lower: &Lower) -> Result<
                     .name
                     .as_deref()
                     .ok_or(JitError::Unsupported("let binding without a name"))?;
-                let scoped = Lower { locals: &locals, ..*lower };
+                let scoped = Lower {
+                    locals: &locals,
+                    ..*lower
+                };
                 let v = compile_expr(fb, &b.value, &scoped)?;
                 locals.insert(name, v);
             }
-            let scoped = Lower { locals: &locals, ..*lower };
+            let scoped = Lower {
+                locals: &locals,
+                ..*lower
+            };
             compile_expr(fb, body, &scoped)
         }
         // A call resolves in four ways: (1) a scalar math builtin → a call into OUR math (P.1.4b), (2) a USER
@@ -2029,7 +2250,9 @@ fn compile_expr(fb: &mut FunctionBuilder, expr: &Expr, lower: &Lower) -> Result<
                             *slot = Some(&arg.value);
                             positional += 1;
                         }
-                        Some(n) if n.starts_with('$') => return Err(JitError::Unsupported("$-arg")),
+                        Some(n) if n.starts_with('$') => {
+                            return Err(JitError::Unsupported("$-arg"));
+                        }
                         Some(n) => {
                             let i = cparams
                                 .iter()
@@ -2051,8 +2274,11 @@ fn compile_expr(fb: &mut FunctionBuilder, expr: &Expr, lower: &Lower) -> Result<
                     } else if let Some(default) = p.default.as_ref() {
                         // Unfilled → its DEFAULT, compiled in the DEFINITION scope (no caller locals, no
                         // sibling params) — matching the interpreter's documented default-eval simplification.
-                        let def_lower =
-                            Lower { index: &empty_index, locals: &empty_locals, ..*lower };
+                        let def_lower = Lower {
+                            index: &empty_index,
+                            locals: &empty_locals,
+                            ..*lower
+                        };
                         let v = compile_expr(fb, default, &def_lower)?;
                         callee_env.insert(pname, v);
                     }
@@ -2061,8 +2287,12 @@ fn compile_expr(fb: &mut FunctionBuilder, expr: &Expr, lower: &Lower) -> Result<
                 }
                 let mut stack = lower.inlining.to_vec();
                 stack.push(name.as_str());
-                let callee_lower =
-                    Lower { index: &empty_index, locals: &callee_env, inlining: &stack, ..*lower };
+                let callee_lower = Lower {
+                    index: &empty_index,
+                    locals: &callee_env,
+                    inlining: &stack,
+                    ..*lower
+                };
                 return compile_expr(fb, cbody, &callee_lower);
             }
             // (2.5) a LIST/VECTOR builtin (`norm`/`len`/`cross`/`min`/`max`) over scalarized args (P.1.6 rung
@@ -2104,14 +2334,21 @@ fn compile_expr(fb: &mut FunctionBuilder, expr: &Expr, lower: &Lower) -> Result<
             };
             let cond = match args.first() {
                 Some(arg) if arg.name.is_none() => &arg.value,
-                _ => return Err(JitError::Unsupported("assert without a positional condition")),
+                _ => {
+                    return Err(JitError::Unsupported(
+                        "assert without a positional condition",
+                    ));
+                }
             };
             let cv = compile_expr(fb, cond, lower)?;
             let t = truthy(fb, &cv)?;
             let failed = fb.ins().icmp_imm(IntCC::Equal, t, 0); // 1 iff the condition is falsy
-            let prev = fb.ins().load(types::I8, MemFlagsData::trusted(), lower.raised_ptr, 0);
+            let prev = fb
+                .ins()
+                .load(types::I8, MemFlagsData::trusted(), lower.raised_ptr, 0);
             let now = fb.ins().bor(prev, failed);
-            fb.ins().store(MemFlagsData::trusted(), now, lower.raised_ptr, 0);
+            fb.ins()
+                .store(MemFlagsData::trusted(), now, lower.raised_ptr, 0);
             compile_expr(fb, body, lower)
         }
         // A single-element `[for (…) …]` → a dynamic-length COMPREHENSION (P.1.6 rung-D 2b.2): materialize it
@@ -2120,7 +2357,10 @@ fn compile_expr(fb: &mut FunctionBuilder, expr: &Expr, lower: &Lower) -> Result<
         // multi-element comprehension list declines here (rung 2b.N).
         ExprKind::Vector(elems) => {
             if let [single] = elems.as_slice()
-                && let ExprKind::LcFor { bindings, body: lc_body } = &single.kind
+                && let ExprKind::LcFor {
+                    bindings,
+                    body: lc_body,
+                } = &single.kind
             {
                 return compile_comprehension(fb, bindings, lc_body, lower);
             }
@@ -2149,7 +2389,10 @@ fn compile_expr(fb: &mut FunctionBuilder, expr: &Expr, lower: &Lower) -> Result<
                         out-of-range index falls through to the `nth` miss → decline"
                     )]
                     let idx = *n as usize;
-                    elems.into_iter().nth(idx).ok_or(JitError::Unsupported("index out of range"))
+                    elems
+                        .into_iter()
+                        .nth(idx)
+                        .ok_or(JitError::Unsupported("index out of range"))
                 }
                 Lowered::DynList(handle) => {
                     // A runtime index `i` into a DynList (2b.2b) — the gaussian_rands `nums[i]` shape. Resolve +
@@ -2171,7 +2414,8 @@ fn compile_expr(fb: &mut FunctionBuilder, expr: &Expr, lower: &Lower) -> Result<
                     fb.seal_block(cont);
                     fb.switch_to_block(bail);
                     let one_flag = fb.ins().iconst(types::I8, 1);
-                    fb.ins().store(MemFlagsData::trusted(), one_flag, lower.raised_ptr, 0);
+                    fb.ins()
+                        .store(MemFlagsData::trusted(), one_flag, lower.raised_ptr, 0);
                     let bail_ret = fb.ins().f64const(0.0);
                     fb.ins().return_(&[bail_ret]);
                     fb.switch_to_block(cont);
@@ -2229,9 +2473,10 @@ fn compile_type_predicate(fb: &mut FunctionBuilder, name: &str, arg: &Lowered) -
         "is_undef" => Lowered::ConstBool(matches!(arg, Lowered::ConstUndef)),
         "is_string" | "is_function" => Lowered::ConstBool(false),
         "is_bool" => Lowered::ConstBool(matches!(arg, Lowered::Bool(_) | Lowered::ConstBool(_))),
-        "is_list" => {
-            Lowered::ConstBool(matches!(arg, Lowered::Vec(_) | Lowered::DynList(_) | Lowered::DynMat { .. }))
-        }
+        "is_list" => Lowered::ConstBool(matches!(
+            arg,
+            Lowered::Vec(_) | Lowered::DynList(_) | Lowered::DynMat { .. }
+        )),
         "is_num" => match arg {
             // `is_num(NaN)` is FALSE (L.2.8n): `x == x` (ordered) is the runtime not-NaN test.
             Lowered::Num(x) => Lowered::Bool(fb.ins().fcmp(FloatCC::Equal, *x, *x)),
@@ -2309,7 +2554,8 @@ fn compile_seedless_rands(
     fb.seal_block(setup);
     fb.switch_to_block(bail);
     let one_flag = fb.ins().iconst(types::I8, 1);
-    fb.ins().store(MemFlagsData::trusted(), one_flag, lower.raised_ptr, 0);
+    fb.ins()
+        .store(MemFlagsData::trusted(), one_flag, lower.raised_ptr, 0);
     let bail_ret = fb.ins().f64const(0.0);
     fb.ins().return_(&[bail_ret]);
 
@@ -2471,9 +2717,10 @@ fn compile_vec_builtin(
             if args.len() != 2 {
                 return Err(JitError::Unsupported("call"));
             }
-            let (Lowered::Vec(a), Lowered::Vec(b)) =
-                (compile_expr(fb, &args[0].value, lower)?, compile_expr(fb, &args[1].value, lower)?)
-            else {
+            let (Lowered::Vec(a), Lowered::Vec(b)) = (
+                compile_expr(fb, &args[0].value, lower)?,
+                compile_expr(fb, &args[1].value, lower)?,
+            ) else {
                 return Err(JitError::Unsupported("cross of a non-vector"));
             };
             // `x*y - z*w` = `fsub(fmul(x,y), fmul(z,w))`, in the interpreter's exact operand order.
@@ -2490,7 +2737,11 @@ fn compile_vec_builtin(
                     let x = sub_of_products(fb, a1, b2, a2, b1);
                     let y = sub_of_products(fb, a2, b0, a0, b2);
                     let z = sub_of_products(fb, a0, b1, a1, b0);
-                    Ok(Lowered::Vec(vec![Lowered::Num(x), Lowered::Num(y), Lowered::Num(z)]))
+                    Ok(Lowered::Vec(vec![
+                        Lowered::Num(x),
+                        Lowered::Num(y),
+                        Lowered::Num(z),
+                    ]))
                 }
                 // 2D cross → a SCALAR (`a0·b1 − a1·b0`).
                 ([a0, a1], [b0, b1]) => {
@@ -2510,9 +2761,10 @@ fn compile_vec_builtin(
             // A `min()` (no args) or an empty vector → `undef` (→ decline). A bool anywhere → non-number → decline.
             let nums: Vec<Value> = if args.len() == 1 {
                 match compile_expr(fb, &args[0].value, lower)? {
-                    Lowered::Vec(elems) => {
-                        elems.iter().map(|e| e.num(fb)).collect::<Result<Vec<_>, _>>()?
-                    }
+                    Lowered::Vec(elems) => elems
+                        .iter()
+                        .map(|e| e.num(fb))
+                        .collect::<Result<Vec<_>, _>>()?,
                     Lowered::Num(x) => vec![x],
                     // `min(literal)` — one const scalar → `[c]`, materialized (the fold reduction runs at runtime).
                     Lowered::ConstNum(c) => vec![fb.ins().f64const(c)],
@@ -2520,9 +2772,13 @@ fn compile_vec_builtin(
                         return Err(JitError::Unsupported("min/max of a boolean"));
                     }
                     // min/max reducing a DYNAMIC list is a runtime fold (a loop) — a future rung; decline.
-                    Lowered::DynList(_) => return Err(JitError::Unsupported("min/max of a dynamic list")),
+                    Lowered::DynList(_) => {
+                        return Err(JitError::Unsupported("min/max of a dynamic list"));
+                    }
                     // min/max of a dynamic matrix isn't a numeric reduction (2c.3) — decline.
-                    Lowered::DynMat { .. } => return Err(JitError::Unsupported("min/max of a dynamic matrix")),
+                    Lowered::DynMat { .. } => {
+                        return Err(JitError::Unsupported("min/max of a dynamic matrix"));
+                    }
                     // `min(undef)` is `undef` (2c.3) — no numeric reduction to emit; decline.
                     Lowered::ConstUndef => return Err(JitError::Unsupported("min/max of undef")),
                 }
@@ -2608,7 +2864,11 @@ fn vec_div(
             Lowered::Vec(row) => Ok(Lowered::Vec(vec_div(fb, row, s, vec_over_scalar)?)),
             _ => {
                 let e = e.num(fb)?;
-                let q = if vec_over_scalar { fb.ins().fdiv(e, s) } else { fb.ins().fdiv(s, e) };
+                let q = if vec_over_scalar {
+                    fb.ins().fdiv(e, s)
+                } else {
+                    fb.ins().fdiv(s, e)
+                };
                 Ok(Lowered::Num(q))
             }
         })
@@ -2634,7 +2894,8 @@ fn vec_dot(fb: &mut FunctionBuilder, a: &[Lowered], b: &[Lowered]) -> Result<Val
 /// True if every element of a scalarized vector is a SCALAR (a `Num`/`ConstNum`) — a FLAT vector, not a matrix
 /// row-list. `[]` is vacuously flat (an empty operand's product is `undef` anyway → declined by the length guards).
 fn is_flat_vec(v: &[Lowered]) -> bool {
-    v.iter().all(|e| matches!(e, Lowered::Num(_) | Lowered::ConstNum(_)))
+    v.iter()
+        .all(|e| matches!(e, Lowered::Num(_) | Lowered::ConstNum(_)))
 }
 
 /// True if `v` is a non-empty MATRIX — every element is itself a `Lowered::Vec` (a row). Mixed (some scalar, some
@@ -2648,13 +2909,19 @@ fn is_matrix(v: &[Lowered]) -> bool {
 /// products, each reducing to inner `dot`s (so `vec_dot` == `ops::dot` keeps every product bit-identical). All
 /// shapes are compile-time known, so a non-rectangular / empty / dimension-mismatched operand (the interpreter's
 /// `undef`) DECLINES here rather than miscompute.
-fn vec_mat_product(fb: &mut FunctionBuilder, x: &[Lowered], y: &[Lowered]) -> Result<Lowered, JitError> {
+fn vec_mat_product(
+    fb: &mut FunctionBuilder,
+    x: &[Lowered],
+    y: &[Lowered],
+) -> Result<Lowered, JitError> {
     match (is_flat_vec(x), is_flat_vec(y), is_matrix(x), is_matrix(y)) {
         // vec · vec → dot (both non-empty + equal length; else `undef` → decline). Matches the interpreter's
         // `(NumList, NumList) if !x.is_empty() && x.len()==y.len()` guard.
         (true, true, _, _) => {
             if x.is_empty() || x.len() != y.len() {
-                return Err(JitError::Unsupported("dot of empty or mismatched-length vectors"));
+                return Err(JitError::Unsupported(
+                    "dot of empty or mismatched-length vectors",
+                ));
             }
             Ok(Lowered::Num(vec_dot(fb, x, y)?))
         }
@@ -2669,7 +2936,11 @@ fn vec_mat_product(fb: &mut FunctionBuilder, x: &[Lowered], y: &[Lowered]) -> Re
 /// Matrix × vector (2c.2b): `out[i] = dot(mat[i], vec)` — `ops::mat_times_vec`. Every row must be a numeric
 /// vector of `vec`'s length (rectangular), checked at COMPILE time; a mismatch / non-numeric row is `undef` →
 /// DECLINE. `vec_dot(row, vec)` keeps the arg order (a=row, b=vec) the interpreter's `dot(r, vec)` uses.
-fn mat_times_vec(fb: &mut FunctionBuilder, mat: &[Lowered], vec: &[Lowered]) -> Result<Lowered, JitError> {
+fn mat_times_vec(
+    fb: &mut FunctionBuilder,
+    mat: &[Lowered],
+    vec: &[Lowered],
+) -> Result<Lowered, JitError> {
     let mut out = Vec::with_capacity(mat.len());
     for row in mat {
         let Lowered::Vec(r) = row else {
@@ -2686,7 +2957,11 @@ fn mat_times_vec(fb: &mut FunctionBuilder, mat: &[Lowered], vec: &[Lowered]) -> 
 /// Vector × matrix (2c.2b): `out[j] = dot(vec, col_j)`, `col_j = [mat[0][j], …, mat[k][j]]` — `ops::vec_times_mat`.
 /// Requires `vec.len() == mat.len()` (row count) and a rectangular numeric matrix; else `undef` → DECLINE. The
 /// column is gathered so the reduction reuses `vec_dot` (a=vec, b=col), matching the interpreter's `dot(vec, col)`.
-fn vec_times_mat(fb: &mut FunctionBuilder, vec: &[Lowered], mat: &[Lowered]) -> Result<Lowered, JitError> {
+fn vec_times_mat(
+    fb: &mut FunctionBuilder,
+    vec: &[Lowered],
+    mat: &[Lowered],
+) -> Result<Lowered, JitError> {
     if vec.len() != mat.len() {
         return Err(JitError::Unsupported("vec×mat dimension mismatch"));
     }
@@ -2699,7 +2974,9 @@ fn vec_times_mat(fb: &mut FunctionBuilder, vec: &[Lowered], mat: &[Lowered]) -> 
     }
     let cols = rows.first().map_or(0, |r| r.len());
     if cols == 0 || rows.iter().any(|r| r.len() != cols) {
-        return Err(JitError::Unsupported("empty or non-rectangular matrix in vec×mat"));
+        return Err(JitError::Unsupported(
+            "empty or non-rectangular matrix in vec×mat",
+        ));
     }
     let mut out = Vec::with_capacity(cols);
     for j in 0..cols {
@@ -2713,11 +2990,17 @@ fn vec_times_mat(fb: &mut FunctionBuilder, vec: &[Lowered], mat: &[Lowered]) -> 
 /// Matrix × matrix (2c.2b): each LEFT row times the right matrix — `ops::mat_times_mat` folds it exactly this
 /// way (`vec_times_mat(a_row, b)`), so the result is a list of vectors (a matrix). A non-numeric / non-conforming
 /// row is `undef` → DECLINE (propagated from `vec_times_mat`).
-fn mat_times_mat(fb: &mut FunctionBuilder, a: &[Lowered], b: &[Lowered]) -> Result<Lowered, JitError> {
+fn mat_times_mat(
+    fb: &mut FunctionBuilder,
+    a: &[Lowered],
+    b: &[Lowered],
+) -> Result<Lowered, JitError> {
     let mut out = Vec::with_capacity(a.len());
     for row in a {
         let Lowered::Vec(r) = row else {
-            return Err(JitError::Unsupported("non-rectangular left matrix in mat×mat"));
+            return Err(JitError::Unsupported(
+                "non-rectangular left matrix in mat×mat",
+            ));
         };
         out.push(vec_times_mat(fb, r, b)?);
     }
@@ -2763,15 +3046,24 @@ fn select_lowered(
     match (t, e) {
         (Lowered::Num(t), Lowered::Num(e)) => Ok(Lowered::Num(fb.ins().select(c, t, e))),
         (Lowered::Vec(t), Lowered::Vec(e)) if t.len() == e.len() => {
-            let out: Result<Vec<Lowered>, JitError> =
-                t.into_iter().zip(e).map(|(t, e)| select_lowered(fb, c, t, e)).collect();
+            let out: Result<Vec<Lowered>, JitError> = t
+                .into_iter()
+                .zip(e)
+                .map(|(t, e)| select_lowered(fb, c, t, e))
+                .collect();
             Ok(Lowered::Vec(out?))
         }
         // Two BOOLEAN branches (either `Bool` or a const-folded `ConstBool`, P.1.6 rung-D 2b.4) — materialize
         // both to `i8` and `select`. The runtime cond wasn't compile-time-known (else the ternary pruned), so a
         // runtime pick is correct.
-        (t @ (Lowered::Bool(_) | Lowered::ConstBool(_)), e @ (Lowered::Bool(_) | Lowered::ConstBool(_))) => {
-            let (tv, ev) = (bool_ir(fb, &t).expect("t is a bool"), bool_ir(fb, &e).expect("e is a bool"));
+        (
+            t @ (Lowered::Bool(_) | Lowered::ConstBool(_)),
+            e @ (Lowered::Bool(_) | Lowered::ConstBool(_)),
+        ) => {
+            let (tv, ev) = (
+                bool_ir(fb, &t).expect("t is a bool"),
+                bool_ir(fb, &e).expect("e is a bool"),
+            );
             Ok(Lowered::Bool(fb.ins().select(c, tv, ev)))
         }
         _ => Err(JitError::Unsupported("ternary branches differ in type")),
@@ -2788,9 +3080,10 @@ fn kind_name(kind: &ExprKind) -> &'static str {
         ExprKind::Range { .. } => "range",
         ExprKind::Let { .. } => "let-binding",
         ExprKind::FunctionLiteral { .. } => "function-literal",
-        ExprKind::LcFor { .. } | ExprKind::LcForC { .. } | ExprKind::LcEach(_) | ExprKind::LcIf { .. } => {
-            "comprehension"
-        }
+        ExprKind::LcFor { .. }
+        | ExprKind::LcForC { .. }
+        | ExprKind::LcEach(_)
+        | ExprKind::LcIf { .. } => "comprehension",
         ExprKind::Assert { .. } => "assert",
         ExprKind::Echo { .. } => "echo",
         ExprKind::Str(_) => "string-literal",
@@ -2798,8 +3091,14 @@ fn kind_name(kind: &ExprKind) -> &'static str {
         // The handled kinds don't reach here; name them defensively rather than wildcard. `Vector`/`Index`
         // (rung A) + `Member` (rung B) are handled — they decline with a SPECIFIC reason inside their arm,
         // never via this path.
-        ExprKind::Num(_) | ExprKind::Bool(_) | ExprKind::Ident(_) | ExprKind::Unary { .. }
-        | ExprKind::Binary { .. } | ExprKind::Ternary { .. } | ExprKind::Vector(_)
-        | ExprKind::Index { .. } | ExprKind::Member { .. } => "unhandled-in-subset",
+        ExprKind::Num(_)
+        | ExprKind::Bool(_)
+        | ExprKind::Ident(_)
+        | ExprKind::Unary { .. }
+        | ExprKind::Binary { .. }
+        | ExprKind::Ternary { .. }
+        | ExprKind::Vector(_)
+        | ExprKind::Index { .. }
+        | ExprKind::Member { .. } => "unhandled-in-subset",
     }
 }

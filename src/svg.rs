@@ -138,7 +138,13 @@ fn flatten_quad(p0: (f64, f64), c: (f64, f64), p1: (f64, f64), out: &mut Contour
 }
 
 /// Push the interior + end points of a cubic Bézier (the start is already the contour's last point).
-fn flatten_cubic(p0: (f64, f64), c1: (f64, f64), c2: (f64, f64), p1: (f64, f64), out: &mut Contour) {
+fn flatten_cubic(
+    p0: (f64, f64),
+    c1: (f64, f64),
+    c2: (f64, f64),
+    p1: (f64, f64),
+    out: &mut Contour,
+) {
     for i in 1..=BEZIER_SEGMENTS {
         let t = f64::from(i) / f64::from(BEZIER_SEGMENTS);
         let mt = 1.0 - t;
@@ -171,15 +177,18 @@ mod tests {
 
     /// Write `svg` to a process-unique temp file and import it.
     fn contours_of(name: &str, svg: &str) -> Vec<fab_lang::Contour> {
-        let path =
-            std::env::temp_dir().join(format!("fab_svg_{}_{name}.svg", std::process::id()));
+        let path = std::env::temp_dir().join(format!("fab_svg_{}_{name}.svg", std::process::id()));
         std::fs::write(&path, svg).unwrap();
         svg_contours(&path).expect("svg imports")
     }
 
     fn bounds(contours: &[fab_lang::Contour]) -> (f64, f64, f64, f64) {
-        let (mut lo_x, mut hi_x, mut lo_y, mut hi_y) =
-            (f64::INFINITY, f64::NEG_INFINITY, f64::INFINITY, f64::NEG_INFINITY);
+        let (mut lo_x, mut hi_x, mut lo_y, mut hi_y) = (
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+        );
         for c in contours {
             for p in c {
                 lo_x = lo_x.min(p.x);
@@ -201,11 +210,27 @@ mod tests {
         );
         let (lo_x, hi_x, lo_y, hi_y) = bounds(&c);
         let s = 25.4 / 72.0;
-        assert!((lo_x - 10.0 * s).abs() < 1e-6, "x min {lo_x} vs {}", 10.0 * s);
-        assert!((hi_x - 40.0 * s).abs() < 1e-6, "x max {hi_x} vs {}", 40.0 * s);
+        assert!(
+            (lo_x - 10.0 * s).abs() < 1e-6,
+            "x min {lo_x} vs {}",
+            10.0 * s
+        );
+        assert!(
+            (hi_x - 40.0 * s).abs() < 1e-6,
+            "x max {hi_x} vs {}",
+            40.0 * s
+        );
         // SVG y∈[20,60] flips about 100 → [40,80], then ·s.
-        assert!((lo_y - 40.0 * s).abs() < 1e-6, "y min {lo_y} vs {}", 40.0 * s);
-        assert!((hi_y - 80.0 * s).abs() < 1e-6, "y max {hi_y} vs {}", 80.0 * s);
+        assert!(
+            (lo_y - 40.0 * s).abs() < 1e-6,
+            "y min {lo_y} vs {}",
+            40.0 * s
+        );
+        assert!(
+            (hi_y - 80.0 * s).abs() < 1e-6,
+            "y max {hi_y} vs {}",
+            80.0 * s
+        );
     }
 
     #[test]
@@ -225,8 +250,11 @@ mod tests {
     #[test]
     fn empty_svg_is_empty_not_an_error() {
         assert!(
-            contours_of("empty", r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"/>"#)
-                .is_empty(),
+            contours_of(
+                "empty",
+                r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"/>"#
+            )
+            .is_empty(),
             "no paths → no contours (a present-but-empty 2D leaf)"
         );
     }
@@ -240,9 +268,21 @@ mod tests {
             r#"<svg xmlns="http://www.w3.org/2000/svg" width="40mm" height="40mm" viewBox="0 0 40 40"><circle cx="20" cy="20" r="10" fill="black"/></svg>"#,
         );
         assert_eq!(c.len(), 1, "one subpath → one contour");
-        assert!(c[0].len() >= 40, "a flattened circle has many points, got {}", c[0].len());
+        assert!(
+            c[0].len() >= 40,
+            "a flattened circle has many points, got {}",
+            c[0].len()
+        );
         let (lo_x, hi_x, lo_y, hi_y) = bounds(&c);
-        assert!((hi_x - lo_x - 20.0).abs() < 0.2, "≈20 mm wide, got {}", hi_x - lo_x);
-        assert!((hi_y - lo_y - 20.0).abs() < 0.2, "≈20 mm tall, got {}", hi_y - lo_y);
+        assert!(
+            (hi_x - lo_x - 20.0).abs() < 0.2,
+            "≈20 mm wide, got {}",
+            hi_x - lo_x
+        );
+        assert!(
+            (hi_y - lo_y - 20.0).abs() < 0.2,
+            "≈20 mm tall, got {}",
+            hi_y - lo_y
+        );
     }
 }

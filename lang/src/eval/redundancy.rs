@@ -34,7 +34,7 @@ struct State {
     total: u64,
     no_ctx: HashMap<u64, u64>,   // key(fn,args)            -> occurrences
     with_ctx: HashMap<u64, u64>, // key(fn,args,$-context)  -> occurrences
-    key_elems: u64,              // total Value elements hashed — the key-SIZE a real cache would pay to hash
+    key_elems: u64, // total Value elements hashed — the key-SIZE a real cache would pay to hash
 }
 
 thread_local! {

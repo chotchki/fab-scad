@@ -10,7 +10,10 @@ use std::path::PathBuf;
 
 fn main() {
     let mut args = std::env::args().skip(1);
-    let file = PathBuf::from(args.next().expect("usage: diff_repro <file.scad> [lib_dir ...]"));
+    let file = PathBuf::from(
+        args.next()
+            .expect("usage: diff_repro <file.scad> [lib_dir ...]"),
+    );
     let libs: Vec<PathBuf> = args.map(PathBuf::from).collect();
 
     // Big stack: deep eval-assembly host recursion (see [`fab_scad::EVAL_STACK`]) — Drop is iterative now (M.1).
@@ -43,7 +46,12 @@ fn describe(o: Outcome) -> String {
                 || "bbox=?".to_string(),
                 |(lo, hi)| {
                     let (l, h) = (lo.to_array(), hi.to_array());
-                    format!("bbox=[{:.2}x{:.2}x{:.2}]", h[0] - l[0], h[1] - l[1], h[2] - l[2])
+                    format!(
+                        "bbox=[{:.2}x{:.2}x{:.2}]",
+                        h[0] - l[0],
+                        h[1] - l[1],
+                        h[2] - l[2]
+                    )
                 },
             );
             format!("solid vol={:.1} genus={} {bb}", s.volume(), s.genus())

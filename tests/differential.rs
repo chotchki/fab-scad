@@ -126,7 +126,9 @@ fn color_on_2d_matches_the_oracle() {
     // the single biggest bucket (343×), BOSL2's 2D examples using `color("red") <marker>` position dots.
     agree("linear_extrude(2) color(\"red\") square(10);");
     agree("linear_extrude(2) color(\"blue\") circle(5);");
-    agree("linear_extrude(1) { color(\"red\") circle(10); color(\"green\") translate([25, 0]) square(15); }");
+    agree(
+        "linear_extrude(1) { color(\"red\") circle(10); color(\"green\") translate([25, 0]) square(15); }",
+    );
 }
 
 #[test]
@@ -161,7 +163,9 @@ fn assert_echo_passthrough_matches_the_oracle() {
     agree("assert(true) translate([5, 0, 0]) cube(10);");
     agree("echo(\"x\") cube(10);");
     agree_bosl2_body("left(5) cube([10, 10, 10])"); // the real trigger — a bare BOSL2 named transform
-    agree_bosl2_body("diff() cuboid([40, 25, 80]) { tag(\"remove\") left(5) cuboid([10, 10, 90]); }");
+    agree_bosl2_body(
+        "diff() cuboid([40, 25, 80]) { tag(\"remove\") left(5) cuboid([10, 10, 90]); }",
+    );
 }
 
 #[test]
@@ -515,11 +519,18 @@ fn surface_dat_matches_the_oracle() {
         .join("differential")
         .join("surface_dat");
     std::fs::create_dir_all(&base).unwrap();
-    std::fs::write(base.join("bump.dat"), "0 0 0 0\n0 5 5 0\n0 5 5 0\n0 0 0 0\n").unwrap();
+    std::fs::write(
+        base.join("bump.dat"),
+        "0 0 0 0\n0 5 5 0\n0 5 5 0\n0 0 0 0\n",
+    )
+    .unwrap();
 
     for (name, body) in [
         ("plain.scad", "surface(file=\"bump.dat\");\n"),
-        ("centered.scad", "surface(file=\"bump.dat\", center=true);\n"),
+        (
+            "centered.scad",
+            "surface(file=\"bump.dat\", center=true);\n",
+        ),
     ] {
         let root = base.join(name);
         std::fs::write(&root, body).unwrap();
@@ -542,7 +553,10 @@ fn a_missing_use_warns_and_renders_like_the_oracle() {
     // missing lib, so the render is well-defined; both engines must land the same cube.
     agree_graph(
         "missing_use",
-        &[("model.scad", "use <nonexistent.scad>\ncube([10, 20, 30]);\n")],
+        &[(
+            "model.scad",
+            "use <nonexistent.scad>\ncube([10, 20, 30]);\n",
+        )],
         "model.scad",
         &[],
     );

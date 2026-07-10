@@ -426,9 +426,14 @@ impl GeometryBackend for MockBackend {
         // Mock can't sum geometry — but it honors the ANNIHILATOR algebra (any empty → empty) and appends
         // the meshes + bumps ops, so the interface suite walks the dispatch under miri. Real op is Manifold.
         if solids.is_empty() || solids.iter().any(MockSolid::is_empty) {
-            return MockSolid { mesh: Mesh::new(), ops: solids.iter().map(|s| s.ops).sum::<u32>() + 1 };
+            return MockSolid {
+                mesh: Mesh::new(),
+                ops: solids.iter().map(|s| s.ops).sum::<u32>() + 1,
+            };
         }
-        let mesh = solids.iter().fold(Mesh::new(), |acc, s| append(&acc, &s.mesh));
+        let mesh = solids
+            .iter()
+            .fold(Mesh::new(), |acc, s| append(&acc, &s.mesh));
         let ops = solids.iter().map(|s| s.ops).sum::<u32>() + 1;
         MockSolid { mesh, ops }
     }
@@ -784,7 +789,10 @@ mod tests {
         // …and a glyph with a HOLE ('O') fills LESS than its bounding box — the even-odd rule cut the
         // counter out (a solid box of the same extent would be much larger), proving holes resolve.
         let o = area("text(\"O\", size = 10);");
-        assert!(o > 5.0 && o < 60.0, "O area {o} should be a ring, not a filled box");
+        assert!(
+            o > 5.0 && o < 60.0,
+            "O area {o} should be a ring, not a filled box"
+        );
     }
 
     // J.2.3/J.2.7 — the tree-walker lowers CSG booleans + transforms through the REAL Manifold backend

@@ -40,7 +40,11 @@ fn on_small_stack<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> 
 fn deep_recursive_module_is_heap_bounded_under_the_driver() {
     on_small_stack(|| {
         let g = evaluate_geometry("module r(n) { if (n > 0) r(n - 1); else cube(1); } r(200);");
-        assert!(g.is_ok(), "deep recursion should eval heap-bounded: {:?}", g.err());
+        assert!(
+            g.is_ok(),
+            "deep recursion should eval heap-bounded: {:?}",
+            g.err()
+        );
     });
 }
 
@@ -54,7 +58,11 @@ fn deep_recursion_through_for_is_heap_bounded() {
         let g = evaluate_geometry(
             "module r(n) { if (n > 0) for (i = [0:0]) r(n - 1); else cube(1); } r(200);",
         );
-        assert!(g.is_ok(), "deep for recursion should eval heap-bounded: {:?}", g.err());
+        assert!(
+            g.is_ok(),
+            "deep for recursion should eval heap-bounded: {:?}",
+            g.err()
+        );
     });
 }
 
@@ -92,5 +100,8 @@ fn legal_finite_recursion_still_evaluates() {
     let ok = on_big_stack(|| {
         evaluate_geometry("module r(n) { if (n > 0) r(n - 1); else cube(1); } r(200);")
     });
-    assert!(ok.is_ok(), "legal 200-deep recursion should evaluate: {ok:?}");
+    assert!(
+        ok.is_ok(),
+        "legal 200-deep recursion should evaluate: {ok:?}"
+    );
 }

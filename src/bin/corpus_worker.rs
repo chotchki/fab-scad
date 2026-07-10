@@ -9,6 +9,9 @@ fn main() -> anyhow::Result<()> {
     let mut args = std::env::args().skip(1);
     let bosl2_dir = args.next().unwrap_or_else(|| ".".to_string());
     let start: usize = args.next().and_then(|s| s.parse().ok()).unwrap_or(0);
-    let end: usize = args.next().and_then(|s| s.parse().ok()).unwrap_or(usize::MAX);
+    let end: usize = args
+        .next()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(usize::MAX);
     fab_scad::corpus::worker_main(Path::new(&bosl2_dir), start, end)
 }

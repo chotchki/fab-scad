@@ -73,13 +73,23 @@ fn registry_compiles_numeric_declines_the_rest() {
         defs(&prog).iter().map(|&(n, p, b)| (n, p, b)),
         consts(&prog).iter().map(|&(n, v)| (n, v)),
     )
-        .expect("registry builds");
+    .expect("registry builds");
 
-    assert_eq!(reg.len(), 3, "sq, lerp, and the vector-returning pair (rung C) compiled");
+    assert_eq!(
+        reg.len(),
+        3,
+        "sq, lerp, and the vector-returning pair (rung C) compiled"
+    );
     assert!(reg.get("sq").is_some(), "sq is numeric → compiled");
     assert!(reg.get("lerp").is_some(), "lerp is numeric → compiled");
-    assert!(reg.get("pair").is_some(), "pair returns a fixed vector → compiled (rung C)");
-    assert!(reg.get("pick").is_none(), "pick indexes a scalar param → its scalar shape declines");
+    assert!(
+        reg.get("pair").is_some(),
+        "pair returns a fixed vector → compiled (rung C)"
+    );
+    assert!(
+        reg.get("pick").is_none(),
+        "pick indexes a scalar param → its scalar shape declines"
+    );
     assert_eq!(
         reg.compiled_names().collect::<Vec<_>>(),
         ["lerp", "pair", "sq"],
@@ -98,7 +108,7 @@ fn registry_calls_are_bit_identical_to_the_interpreter() {
         defs(&prog).iter().map(|&(n, p, b)| (n, p, b)),
         consts(&prog).iter().map(|&(n, v)| (n, v)),
     )
-        .expect("registry builds");
+    .expect("registry builds");
 
     // Every compiled function, called through the registry, matches the interpreter BITWISE (NaN/inf
     // corners included) — the never-silently-wrong gate carried through the cache.
@@ -114,7 +124,15 @@ fn registry_calls_are_bit_identical_to_the_interpreter() {
         ("horner", &[-3.75]),
     ];
     for (name, args) in cases {
-        let jit = unsafe { reg.get(name).expect("compiled").call(args, &mut [0.0], core::ptr::null_mut(), core::ptr::null_mut()) }.expect("no assert raised");
+        let jit = unsafe {
+            reg.get(name).expect("compiled").call(
+                args,
+                &mut [0.0],
+                core::ptr::null_mut(),
+                core::ptr::null_mut(),
+            )
+        }
+        .expect("no assert raised");
         let slow = interp(&prog, name, args);
         assert_eq!(
             jit.to_bits(),
@@ -143,12 +161,15 @@ fn inlining_user_function_calls_is_bit_identical() {
         defs(&prog).iter().map(|&(n, p, b)| (n, p, b)),
         consts(&prog).iter().map(|&(n, v)| (n, v)),
     )
-        .expect("registry builds");
+    .expect("registry builds");
 
     assert!(reg.get("sumsq").is_some(), "sumsq inlines sq");
     assert!(reg.get("dist").is_some(), "dist inlines sumsq + sqrt");
     assert!(reg.get("scale").is_some(), "scale inlines sq under a let");
-    assert!(reg.get("fact").is_none(), "a recursive function declines (step 3)");
+    assert!(
+        reg.get("fact").is_none(),
+        "a recursive function declines (step 3)"
+    );
 
     let cases: &[(&str, &[f64])] = &[
         ("sumsq", &[3.0, 4.0]),
@@ -158,7 +179,15 @@ fn inlining_user_function_calls_is_bit_identical() {
         ("scale", &[-1.5]),
     ];
     for (name, args) in cases {
-        let jit = unsafe { reg.get(name).expect("compiled").call(args, &mut [0.0], core::ptr::null_mut(), core::ptr::null_mut()) }.expect("no assert raised");
+        let jit = unsafe {
+            reg.get(name).expect("compiled").call(
+                args,
+                &mut [0.0],
+                core::ptr::null_mut(),
+                core::ptr::null_mut(),
+            )
+        }
+        .expect("no assert raised");
         let slow = interp(&prog, name, args);
         assert_eq!(
             jit.to_bits(),
@@ -183,10 +212,16 @@ fn inlining_binds_unfilled_params_to_defaults() {
         defs(&prog).iter().map(|&(n, p, b)| (n, p, b)),
         consts(&prog).iter().map(|&(n, v)| (n, v)),
     )
-        .expect("registry builds");
+    .expect("registry builds");
 
-    assert!(reg.get("use_default").is_some(), "inlines scaled with a defaulted k");
-    assert!(reg.get("use_some").is_some(), "inlines bump with a defaulted s");
+    assert!(
+        reg.get("use_default").is_some(),
+        "inlines scaled with a defaulted k"
+    );
+    assert!(
+        reg.get("use_some").is_some(),
+        "inlines bump with a defaulted s"
+    );
 
     let cases: &[(&str, &[f64])] = &[
         ("use_default", &[3.0]), // scaled(3, k=2) = 6
@@ -195,9 +230,21 @@ fn inlining_binds_unfilled_params_to_defaults() {
         ("use_some", &[0.0]),
     ];
     for (name, args) in cases {
-        let jit = unsafe { reg.get(name).expect("compiled").call(args, &mut [0.0], core::ptr::null_mut(), core::ptr::null_mut()) }.expect("no assert raised");
+        let jit = unsafe {
+            reg.get(name).expect("compiled").call(
+                args,
+                &mut [0.0],
+                core::ptr::null_mut(),
+                core::ptr::null_mut(),
+            )
+        }
+        .expect("no assert raised");
         let slow = interp(&prog, name, args);
-        assert_eq!(jit.to_bits(), slow.to_bits(), "default {name}({args:?}): jit={jit} interp={slow}");
+        assert_eq!(
+            jit.to_bits(),
+            slow.to_bits(),
+            "default {name}({args:?}): jit={jit} interp={slow}"
+        );
     }
 }
 
@@ -226,10 +273,19 @@ fn references_top_level_constants_is_bit_identical() {
     )
     .expect("registry builds");
 
-    assert!(reg.get("near").is_some(), "reads self-contained constant _EPS → compiled");
+    assert!(
+        reg.get("near").is_some(),
+        "reads self-contained constant _EPS → compiled"
+    );
     assert!(reg.get("cap").is_some(), "reads INF = 1/0 → compiled");
-    assert!(reg.get("golden").is_some(), "reads PHI = (1+sqrt(5))/2 → compiled");
-    assert!(reg.get("use_dir").is_none(), "reads a vector constant → declined");
+    assert!(
+        reg.get("golden").is_some(),
+        "reads PHI = (1+sqrt(5))/2 → compiled"
+    );
+    assert!(
+        reg.get("use_dir").is_none(),
+        "reads a vector constant → declined"
+    );
     assert!(
         reg.get("use_chained").is_none(),
         "reads B, a constant that references another global → declined"
@@ -245,9 +301,21 @@ fn references_top_level_constants_is_bit_identical() {
         ("golden", &[-4.5]),
     ];
     for (name, args) in cases {
-        let jit = unsafe { reg.get(name).expect("compiled").call(args, &mut [0.0], core::ptr::null_mut(), core::ptr::null_mut()) }.expect("no assert raised");
+        let jit = unsafe {
+            reg.get(name).expect("compiled").call(
+                args,
+                &mut [0.0],
+                core::ptr::null_mut(),
+                core::ptr::null_mut(),
+            )
+        }
+        .expect("no assert raised");
         let slow = interp(&prog, name, args);
-        assert_eq!(jit.to_bits(), slow.to_bits(), "global {name}({args:?}): jit={jit} interp={slow}");
+        assert_eq!(
+            jit.to_bits(),
+            slow.to_bits(),
+            "global {name}({args:?}): jit={jit} interp={slow}"
+        );
     }
 }
 
@@ -268,10 +336,22 @@ fn bool_returning_functions_are_type_tagged_and_bit_identical() {
     )
     .expect("registry builds");
 
-    assert!(reg.get("positive").unwrap().returns_bool(), "a comparison body → bool");
-    assert!(reg.get("between").unwrap().returns_bool(), "an && body → bool");
-    assert!(reg.get("flag").unwrap().returns_bool(), "a bool-literal ternary → bool");
-    assert!(!reg.get("sq").unwrap().returns_bool(), "an arithmetic body → num");
+    assert!(
+        reg.get("positive").unwrap().returns_bool(),
+        "a comparison body → bool"
+    );
+    assert!(
+        reg.get("between").unwrap().returns_bool(),
+        "an && body → bool"
+    );
+    assert!(
+        reg.get("flag").unwrap().returns_bool(),
+        "a bool-literal ternary → bool"
+    );
+    assert!(
+        !reg.get("sq").unwrap().returns_bool(),
+        "an arithmetic body → num"
+    );
 
     let cases: &[(&str, f64)] = &[
         ("positive", 3.0),
@@ -286,18 +366,40 @@ fn bool_returning_functions_are_type_tagged_and_bit_identical() {
     ];
     for &(name, arg) in cases {
         let compiled = reg.get(name).expect("compiled");
-        let jit = unsafe { compiled.call(&[arg], &mut [0.0], core::ptr::null_mut(), core::ptr::null_mut()) }.expect("no assert raised");
+        let jit = unsafe {
+            compiled.call(
+                &[arg],
+                &mut [0.0],
+                core::ptr::null_mut(),
+                core::ptr::null_mut(),
+            )
+        }
+        .expect("no assert raised");
         let slow = interpret_fn(&prog, name, &[Value::Num(arg)]).expect("interprets");
         match slow {
             // A bool result: the JIT must be tagged bool, and its 0.0/1.0 must match the interpreter's truthiness.
             Value::Bool(b) => {
-                assert!(compiled.returns_bool(), "{name}: interp bool but jit tagged num");
-                assert_eq!(jit, if b { 1.0 } else { 0.0 }, "{name}({arg}) bool value mismatch");
+                assert!(
+                    compiled.returns_bool(),
+                    "{name}: interp bool but jit tagged num"
+                );
+                assert_eq!(
+                    jit,
+                    if b { 1.0 } else { 0.0 },
+                    "{name}({arg}) bool value mismatch"
+                );
             }
             // A number result: the JIT must be tagged num, bit-identical.
             Value::Num(n) => {
-                assert!(!compiled.returns_bool(), "{name}: interp num but jit tagged bool");
-                assert_eq!(jit.to_bits(), n.to_bits(), "{name}({arg}) num bits mismatch");
+                assert!(
+                    !compiled.returns_bool(),
+                    "{name}: interp num but jit tagged bool"
+                );
+                assert_eq!(
+                    jit.to_bits(),
+                    n.to_bits(),
+                    "{name}({arg}) num bits mismatch"
+                );
             }
             other => panic!("interpreter yielded neither num nor bool: {other:?}"),
         }
@@ -327,23 +429,41 @@ fn scalarized_vectors_are_bit_identical() {
     .expect("registry builds");
 
     assert!(reg.get("dot3").is_some(), "dot product → scalar compiles");
-    assert!(reg.get("esum").is_some(), "elementwise add + index compiles");
+    assert!(
+        reg.get("esum").is_some(),
+        "elementwise add + index compiles"
+    );
     assert!(reg.get("scaled").is_some(), "scalar scale + index compiles");
     assert!(reg.get("mid").is_some(), "static index compiles");
-    assert!(reg.get("dot5").is_some(), "a 5-element dot (exercises the 4-lane remainder) compiles");
-    assert!(reg.get("xyz").is_some(), "member .x/.y/.z on a scalarized vector compiles (rung B)");
-    assert!(reg.get("badmember").is_none(), "a non-xyz member (.w → undef) declines");
-    assert!(reg.get("shortz").is_none(), "a .z on a too-short vector (→ undef) declines");
-    assert!(reg.get("mkvec").is_some(), "a fixed vector-RETURNING body now compiles (rung C)");
+    assert!(
+        reg.get("dot5").is_some(),
+        "a 5-element dot (exercises the 4-lane remainder) compiles"
+    );
+    assert!(
+        reg.get("xyz").is_some(),
+        "member .x/.y/.z on a scalarized vector compiles (rung B)"
+    );
+    assert!(
+        reg.get("badmember").is_none(),
+        "a non-xyz member (.w → undef) declines"
+    );
+    assert!(
+        reg.get("shortz").is_none(),
+        "a .z on a too-short vector (→ undef) declines"
+    );
+    assert!(
+        reg.get("mkvec").is_some(),
+        "a fixed vector-RETURNING body now compiles (rung C)"
+    );
 
     let cases: &[(&str, &[f64])] = &[
         ("dot3", &[3.0]), // 14*3 = 42
         ("dot3", &[-1.5]),
         ("dot3", &[0.0]),
-        ("esum", &[4.0]), // (4+1)+(4+2) = 11
+        ("esum", &[4.0]),   // (4+1)+(4+2) = 11
         ("scaled", &[2.5]), // 6*2.5 = 15
-        ("mid", &[7.0]),  // 7+1 = 8
-        ("dot5", &[2.0]), // (1+2+3+4+5)*2 = 30 — but via the 4-lane reduction
+        ("mid", &[7.0]),    // 7+1 = 8
+        ("dot5", &[2.0]),   // (1+2+3+4+5)*2 = 30 — but via the 4-lane reduction
         ("dot5", &[-3.25]),
         ("dot5", &[1e8]),
         ("xyz", &[3.0]), // 3 + 4*5 = 23
@@ -351,9 +471,21 @@ fn scalarized_vectors_are_bit_identical() {
         ("xyz", &[0.0]),
     ];
     for (name, args) in cases {
-        let jit = unsafe { reg.get(name).expect("compiled").call(args, &mut [0.0], core::ptr::null_mut(), core::ptr::null_mut()) }.expect("no assert raised");
+        let jit = unsafe {
+            reg.get(name).expect("compiled").call(
+                args,
+                &mut [0.0],
+                core::ptr::null_mut(),
+                core::ptr::null_mut(),
+            )
+        }
+        .expect("no assert raised");
         let slow = interp(&prog, name, args);
-        assert_eq!(jit.to_bits(), slow.to_bits(), "vector {name}({args:?}): jit={jit} interp={slow}");
+        assert_eq!(
+            jit.to_bits(),
+            slow.to_bits(),
+            "vector {name}({args:?}): jit={jit} interp={slow}"
+        );
     }
 }
 
@@ -373,7 +505,11 @@ fn assert_call_eq(reg: &JitRegistry, prog: &Program, name: &str, vals: &[Value])
         Ok(Value::Num(n)) => n,
         other => panic!("{name}{vals:?}: interpreter didn't yield a number: {other:?}"),
     };
-    assert_eq!(jit.to_bits(), slow.to_bits(), "{name}{vals:?}: jit={jit} interp={slow}");
+    assert_eq!(
+        jit.to_bits(),
+        slow.to_bits(),
+        "{name}{vals:?}: jit={jit} interp={slow}"
+    );
 }
 
 /// Assert `reg.call_numeric` returns a fixed VECTOR result (rung C) element-wise BITWISE-equal to the
@@ -387,9 +523,19 @@ fn assert_call_vec_eq(reg: &JitRegistry, prog: &Program, name: &str, vals: &[Val
         Ok(Value::NumList(xs)) => xs,
         other => panic!("{name}{vals:?}: interpreter didn't yield a NumList: {other:?}"),
     };
-    assert_eq!(jit.len(), slow.len(), "{name}{vals:?}: length {} != {}", jit.len(), slow.len());
+    assert_eq!(
+        jit.len(),
+        slow.len(),
+        "{name}{vals:?}: length {} != {}",
+        jit.len(),
+        slow.len()
+    );
     for (i, (a, b)) in jit.iter().zip(slow.iter()).enumerate() {
-        assert_eq!(a.to_bits(), b.to_bits(), "{name}{vals:?}[{i}]: jit={a} interp={b}");
+        assert_eq!(
+            a.to_bits(),
+            b.to_bits(),
+            "{name}{vals:?}[{i}]: jit={a} interp={b}"
+        );
     }
 }
 
@@ -430,10 +576,23 @@ fn vector_arg_shapes_compile_on_demand() {
     // At build, the pure-scalar shapes compile: `sq` (x*x) and `dot` (a*b — scalar multiply is fine). The
     // INDEXING / MEMBER functions DECLINE their scalar shape (you can't index a scalar) and wait for a vector
     // shape. `dot` gets BOTH — a scalar spec now, a vec*vec DOT spec on demand below.
-    assert_eq!(reg.len(), 2, "the two pure-scalar shapes compiled at build (sq, dot)");
-    assert!(reg.get("sq").is_some(), "the scalar control is pre-compiled");
-    assert!(reg.get("dot").is_some(), "dot's scalar shape (a*b) pre-compiles too");
-    assert!(reg.get("nrm2").is_none(), "an indexing function's SCALAR shape declines");
+    assert_eq!(
+        reg.len(),
+        2,
+        "the two pure-scalar shapes compiled at build (sq, dot)"
+    );
+    assert!(
+        reg.get("sq").is_some(),
+        "the scalar control is pre-compiled"
+    );
+    assert!(
+        reg.get("dot").is_some(),
+        "dot's scalar shape (a*b) pre-compiles too"
+    );
+    assert!(
+        reg.get("nrm2").is_none(),
+        "an indexing function's SCALAR shape declines"
+    );
     assert!(reg.get("first").is_none());
 
     // On-demand vector shapes — index, member (.x/.y/.z), dot (vec*vec, incl. the 5-elem 4-lane remainder),
@@ -441,14 +600,27 @@ fn vector_arg_shapes_compile_on_demand() {
     assert_call_eq(&reg, &prog, "nrm2", &[vec_arg(&[3.0, 4.0, 12.0])]); // 169
     assert_call_eq(&reg, &prog, "nrm2", &[vec_arg(&[-1.5, 0.0, 2.0])]);
     assert_call_eq(&reg, &prog, "mag", &[vec_arg(&[3.0, 4.0, 12.0])]); // 13
-    assert_call_eq(&reg, &prog, "dot", &[vec_arg(&[1.0, 2.0, 3.0]), vec_arg(&[4.0, 5.0, 6.0])]); // 32
     assert_call_eq(
         &reg,
         &prog,
         "dot",
-        &[vec_arg(&[1.0, 2.0, 3.0, 4.0, 5.0]), vec_arg(&[5.0, 4.0, 3.0, 2.0, 1.0])], // 5-elem 4-lane
+        &[vec_arg(&[1.0, 2.0, 3.0]), vec_arg(&[4.0, 5.0, 6.0])],
+    ); // 32
+    assert_call_eq(
+        &reg,
+        &prog,
+        "dot",
+        &[
+            vec_arg(&[1.0, 2.0, 3.0, 4.0, 5.0]),
+            vec_arg(&[5.0, 4.0, 3.0, 2.0, 1.0]),
+        ], // 5-elem 4-lane
     );
-    assert_call_eq(&reg, &prog, "saxpy", &[Value::Num(2.0), vec_arg(&[3.0, 4.0])]); // 10
+    assert_call_eq(
+        &reg,
+        &prog,
+        "saxpy",
+        &[Value::Num(2.0), vec_arg(&[3.0, 4.0])],
+    ); // 10
 
     // Scalar-vs-vec-1 are DISTINCT shapes, never conflated: `first([7])` compiles + returns 7; `first(7)`
     // (a scalar indexed) DECLINES for its shape → the interpreter takes over (call_numeric None).
@@ -488,12 +660,32 @@ fn vector_builtins_are_bit_identical() {
     assert_call_eq(&reg, &prog, "mag", &[vec_arg(&[0.0, 0.0])]); // 0
     // The 4-lane-vs-left-fold guard: sums of squares whose ORDER changes the rounding.
     assert_call_eq(&reg, &prog, "mag5", &[vec_arg(&[1e8, 1.0, 2.0, 3.0, 4.0])]);
-    assert_call_eq(&reg, &prog, "mag5", &[vec_arg(&[-1.5, 2.25, 0.0, 1e-8, 7.0])]);
+    assert_call_eq(
+        &reg,
+        &prog,
+        "mag5",
+        &[vec_arg(&[-1.5, 2.25, 0.0, 1e-8, 7.0])],
+    );
     assert_call_eq(&reg, &prog, "count", &[vec_arg(&[9.0, 9.0, 9.0])]); // 3
     assert_call_eq(&reg, &prog, "count", &[vec_arg(&[1.0, 2.0])]); // 2
-    assert_call_eq(&reg, &prog, "cross2", &[vec_arg(&[1.0, 2.0]), vec_arg(&[3.0, 4.0])]); // -2
-    assert_call_eq(&reg, &prog, "nrm_cross", &[vec_arg(&[1.0, 0.0, 0.0]), vec_arg(&[0.0, 1.0, 0.0])]); // 1
-    assert_call_eq(&reg, &prog, "nrm_cross", &[vec_arg(&[1.0, 2.0, 3.0]), vec_arg(&[4.0, 5.0, 6.0])]);
+    assert_call_eq(
+        &reg,
+        &prog,
+        "cross2",
+        &[vec_arg(&[1.0, 2.0]), vec_arg(&[3.0, 4.0])],
+    ); // -2
+    assert_call_eq(
+        &reg,
+        &prog,
+        "nrm_cross",
+        &[vec_arg(&[1.0, 0.0, 0.0]), vec_arg(&[0.0, 1.0, 0.0])],
+    ); // 1
+    assert_call_eq(
+        &reg,
+        &prog,
+        "nrm_cross",
+        &[vec_arg(&[1.0, 2.0, 3.0]), vec_arg(&[4.0, 5.0, 6.0])],
+    );
     assert_call_eq(&reg, &prog, "unit0", &[vec_arg(&[3.0, 4.0])]); // 3/5
 
     // A user redefinition of a builtin WINS (interpreter resolves user functions first): here `norm` is a
@@ -530,13 +722,25 @@ fn vector_returns_are_bit_identical() {
     .expect("registry builds");
 
     // mkpt takes SCALARS and returns a vec3 — its all-scalar shape compiles (rung C, no vector arg needed).
-    assert!(reg.get("mkpt").is_some(), "a scalar→vector function compiles its scalar shape (rung C)");
-    assert_call_vec_eq(&reg, &prog, "mkpt", &[Value::Num(1.0), Value::Num(2.0), Value::Num(3.0)]);
+    assert!(
+        reg.get("mkpt").is_some(),
+        "a scalar→vector function compiles its scalar shape (rung C)"
+    );
     assert_call_vec_eq(
         &reg,
         &prog,
         "mkpt",
-        &[Value::Num(-0.0), Value::Num(f64::INFINITY), Value::Num(f64::NAN)], // ±0 / inf / NaN survive the sink
+        &[Value::Num(1.0), Value::Num(2.0), Value::Num(3.0)],
+    );
+    assert_call_vec_eq(
+        &reg,
+        &prog,
+        "mkpt",
+        &[
+            Value::Num(-0.0),
+            Value::Num(f64::INFINITY),
+            Value::Num(f64::NAN),
+        ], // ±0 / inf / NaN survive the sink
     );
 
     // Vector args IN (rung B), vector OUT (rung C).
@@ -550,7 +754,12 @@ fn vector_returns_are_bit_identical() {
     assert_call_vec_eq(&reg, &prog, "cross3", &[a3.clone(), b3.clone()]); // 3D cross → a vector RETURN
     assert_call_vec_eq(&reg, &prog, "midpoint", &[a3.clone(), b3.clone()]);
     // A vec2 shape too — a DIFFERENT specialization of the same functions, on demand.
-    assert_call_vec_eq(&reg, &prog, "addv", &[vec_arg(&[1.5, 2.5]), vec_arg(&[0.5, 0.5])]);
+    assert_call_vec_eq(
+        &reg,
+        &prog,
+        "addv",
+        &[vec_arg(&[1.5, 2.5]), vec_arg(&[0.5, 0.5])],
+    );
     assert_call_vec_eq(&reg, &prog, "negv", &[vec_arg(&[-7.0, 8.0])]);
 }
 
@@ -600,7 +809,12 @@ fn min_max_are_bit_identical() {
     assert_call_eq(&reg, &prog, "m1", &[Value::Num(7.0)]);
     // The clamp idiom (nested max-then-min), all scalar — including the NaN pass-through.
     for x in [-5.0, 0.0, 5.0, 15.0, f64::NAN] {
-        assert_call_eq(&reg, &prog, "clamp", &[Value::Num(x), Value::Num(0.0), Value::Num(10.0)]);
+        assert_call_eq(
+            &reg,
+            &prog,
+            "clamp",
+            &[Value::Num(x), Value::Num(0.0), Value::Num(10.0)],
+        );
     }
 }
 
@@ -624,7 +838,10 @@ fn seedless_rands_is_bit_identical() {
     .expect("registry builds");
 
     // A fixed-count rands returns a fixed vector → rung C; its all-scalar shape (lo, hi scalars) compiles.
-    assert!(reg.get("r3").is_some(), "fixed-count rands compiles (a rung-C vector return)");
+    assert!(
+        reg.get("r3").is_some(),
+        "fixed-count rands compiles (a rung-C vector return)"
+    );
     assert_call_vec_eq(&reg, &prog, "r3", &[Value::Num(0.0), Value::Num(1.0)]);
     assert_call_vec_eq(&reg, &prog, "r3", &[Value::Num(-5.0), Value::Num(5.0)]);
     assert_call_vec_eq(&reg, &prog, "scaled", &[Value::Num(0.0), Value::Num(1.0)]); // rands(_,_,2)*10 → vec2
@@ -646,8 +863,14 @@ fn seedless_rands_is_bit_identical() {
         consts(&other).iter().map(|&(n, v)| (n, v)),
     )
     .expect("registry builds");
-    assert!(other_reg.get("dyn").is_some(), "a dynamic rands count compiles to a draw loop (rung-D 2b.3)");
-    assert!(other_reg.get("seeded").is_none(), "a seeded rands declines (pure follow-on)");
+    assert!(
+        other_reg.get("dyn").is_some(),
+        "a dynamic rands count compiles to a draw loop (rung-D 2b.3)"
+    );
+    assert!(
+        other_reg.get("seeded").is_none(),
+        "a seeded rands declines (pure follow-on)"
+    );
 }
 
 #[test]
@@ -670,7 +893,10 @@ fn comprehension_over_range_is_bit_identical() {
     )
     .expect("registry builds");
 
-    assert!(reg.get("squares").is_some(), "a range comprehension compiles to a loop (rung 2b.1)");
+    assert!(
+        reg.get("squares").is_some(),
+        "a range comprehension compiles to a loop (rung 2b.1)"
+    );
     assert_call_vec_eq(&reg, &prog, "squares", &[Value::Num(5.0)]); // [0,1,4,9,16,25]
     assert_call_vec_eq(&reg, &prog, "squares", &[Value::Num(0.0)]); // [0]
     assert_call_vec_eq(&reg, &prog, "squares", &[Value::Num(-1.0)]); // [] — wrong-direction / empty range
@@ -708,7 +934,10 @@ fn dynamic_list_operands_are_bit_identical() {
     )
     .expect("registry builds");
 
-    assert!(reg.get("nested").is_some(), "a let-bound + iterated DynList compiles (rung 2b.2)");
+    assert!(
+        reg.get("nested").is_some(),
+        "a let-bound + iterated DynList compiles (rung 2b.2)"
+    );
     // Let-bind a comprehension, iterate it → a new list.
     assert_call_vec_eq(&reg, &prog, "nested", &[Value::Num(3.0)]); // a=[0,1,4,9] → [1,2,5,10]
     assert_call_vec_eq(&reg, &prog, "nested", &[Value::Num(0.0)]); // a=[0] → [1]
@@ -740,7 +969,10 @@ fn dynamic_index_is_bit_identical() {
     )
     .expect("registry builds");
 
-    assert!(reg.get("copy").is_some(), "indexing a DynList in a comprehension compiles (rung 2b.2b)");
+    assert!(
+        reg.get("copy").is_some(),
+        "indexing a DynList in a comprehension compiles (rung 2b.2b)"
+    );
     assert_call_eq(&reg, &prog, "inb", &[Value::Num(4.0)]); // a=[0,1,4,9,16], a[1]=1
     assert_call_vec_eq(&reg, &prog, "copy", &[Value::Num(5.0)]); // [0,1,2,3,4,5]
     // The gaussian_rands index pattern: pairwise stride over a materialized list.
@@ -770,7 +1002,10 @@ fn dynamic_count_rands_is_bit_identical() {
     )
     .expect("registry builds");
 
-    assert!(reg.get("draws").is_some(), "a dynamic-count rands compiles to a draw loop (rung 2b.3)");
+    assert!(
+        reg.get("draws").is_some(),
+        "a dynamic-count rands compiles to a draw loop (rung 2b.3)"
+    );
     assert_call_vec_eq(&reg, &prog, "draws", &[Value::Num(3.0)]); // 3 draws
     assert_call_vec_eq(&reg, &prog, "draws", &[Value::Num(0.0)]); // 0 draws → []
     assert_call_vec_eq(&reg, &prog, "draws", &[Value::Num(20.0)]); // > MAX_VEC_ARG → the loop path, not a fixed vec
@@ -803,7 +1038,10 @@ fn const_fold_type_predicates_prune_dead_branches() {
     )
     .expect("registry builds");
 
-    assert!(reg.get("guarded").is_some(), "an un-JIT-able branch pruned by a const predicate compiles (2b.4)");
+    assert!(
+        reg.get("guarded").is_some(),
+        "an un-JIT-able branch pruned by a const predicate compiles (2b.4)"
+    );
     assert_call_eq(&reg, &prog, "guarded", &[Value::Num(5.0)]); // is_undef false → x*x = 25
     assert_call_eq(&reg, &prog, "deflt", &[Value::Num(7.0)]); // is_undef false → x+1 = 8
     assert_call_eq(&reg, &prog, "listcheck", &[Value::Num(4.0)]); // is_list(Num) false → x*3 = 12
@@ -842,7 +1080,10 @@ fn const_fold_numbers_prune_and_bit_identical() {
     .expect("registry builds");
 
     // The nullary all-const bodies fold to a literal and compile at BUILD (no args, no shape to wait for).
-    assert!(reg.get("lit").is_some(), "a fully-const body folds to a literal and compiles at build");
+    assert!(
+        reg.get("lit").is_some(),
+        "a fully-const body folds to a literal and compiles at build"
+    );
     assert_call_eq(&reg, &prog, "lit", &[]); // 2*3+1 = 7
     assert_call_eq(&reg, &prog, "litmod", &[]); // 17 % 5 = 2 (jit_fmod)
     assert_call_eq(&reg, &prog, "litpow", &[]); // 2 ^ 10 = 1024 (jit_powf)
@@ -850,7 +1091,10 @@ fn const_fold_numbers_prune_and_bit_identical() {
     assert_call_eq(&reg, &prog, "litdiv", &[]); // 7/2 = 3.5
 
     // len(v)==3 folds TRUE → prunes the un-JIT-able `str(v)`; the sum branch compiles on demand for the vec-3.
-    assert!(reg.get("dim3").is_none(), "the vector shape declines at build; compiles on demand");
+    assert!(
+        reg.get("dim3").is_none(),
+        "the vector shape declines at build; compiles on demand"
+    );
     assert_call_eq(&reg, &prog, "dim3", &[vec_arg(&[1.0, 2.0, 3.0])]); // len==3 → 6
     // len(v)==2 folds FALSE for a vec-3 → prunes the un-JIT-able `str(v)` in the THEN branch; product compiles.
     assert_call_eq(&reg, &prog, "dim2", &[vec_arg(&[2.0, 3.0, 4.0])]); // len==2 false → 24
@@ -885,9 +1129,18 @@ fn matrix_return_is_bit_identical() {
     .expect("registry builds");
 
     // Nullary matrix literals compile at BUILD (no arg shape to wait for); nested compiles, doesn't decline.
-    assert!(reg.get("m2").is_some(), "a fixed matrix literal compiles at build (2c.1)");
-    assert!(reg.get("ragged").is_some(), "a ragged nested return compiles (the List fallback)");
-    assert!(reg.get("deep").is_some(), "a 3-level nested return compiles");
+    assert!(
+        reg.get("m2").is_some(),
+        "a fixed matrix literal compiles at build (2c.1)"
+    );
+    assert!(
+        reg.get("ragged").is_some(),
+        "a ragged nested return compiles (the List fallback)"
+    );
+    assert!(
+        reg.get("deep").is_some(),
+        "a 3-level nested return compiles"
+    );
     assert_call_nested_eq(&reg, &prog, "m2", &[]);
     assert_call_nested_eq(&reg, &prog, "ragged", &[]);
     assert_call_nested_eq(&reg, &prog, "deep", &[]);
@@ -897,7 +1150,12 @@ fn matrix_return_is_bit_identical() {
     assert_call_nested_eq(&reg, &prog, "rmat", &[Value::Num(-127.5)]);
     // A matrix from a VECTOR arg — compiles on demand for the vec-2 / vec-3 shape, returns the nested value.
     assert_call_nested_eq(&reg, &prog, "pairs", &[vec_arg(&[7.0, 9.0])]);
-    assert_call_nested_eq(&reg, &prog, "scaled", &[vec_arg(&[2.0, 3.0, 4.0]), Value::Num(1.5)]);
+    assert_call_nested_eq(
+        &reg,
+        &prog,
+        "scaled",
+        &[vec_arg(&[2.0, 3.0, 4.0]), Value::Num(1.5)],
+    );
 }
 
 #[test]
@@ -921,8 +1179,18 @@ fn matrix_arg_ops_are_bit_identical() {
     .expect("registry builds");
 
     // 2×2 matrix args (a nested `List` of `NumList` rows) — the shape 2c.2 newly scalarizes.
-    let m = || Value::list(vec![Value::num_list(vec![1.0, 2.0]), Value::num_list(vec![3.0, 4.0])]);
-    let n = || Value::list(vec![Value::num_list(vec![5.0, 6.0]), Value::num_list(vec![7.0, 8.0])]);
+    let m = || {
+        Value::list(vec![
+            Value::num_list(vec![1.0, 2.0]),
+            Value::num_list(vec![3.0, 4.0]),
+        ])
+    };
+    let n = || {
+        Value::list(vec![
+            Value::num_list(vec![5.0, 6.0]),
+            Value::num_list(vec![7.0, 8.0]),
+        ])
+    };
 
     // A matrix arg indexed twice → a scalar (`m[1][0]` = 3).
     assert_call_eq(&reg, &prog, "el", &[m()]);
@@ -957,9 +1225,15 @@ fn const_undef_len_of_scalar_prunes() {
     .expect("registry builds");
 
     // The all-scalar spec COMPILES now — the undef fold prunes the branch that used to block it.
-    assert!(reg.get("dimcheck").is_some(), "len(scalar)==3 folds false → prunes x[0] → scalar spec compiles");
+    assert!(
+        reg.get("dimcheck").is_some(),
+        "len(scalar)==3 folds false → prunes x[0] → scalar spec compiles"
+    );
     assert!(reg.get("isu").is_some(), "is_undef(len(scalar)) folds true");
-    assert!(reg.get("pos").is_some(), "len(scalar)>0 → undef → falsy → prunes to -x");
+    assert!(
+        reg.get("pos").is_some(),
+        "len(scalar)>0 → undef → falsy → prunes to -x"
+    );
     assert!(reg.get("notlen").is_some(), "!(len(scalar)==2) folds true");
 
     for x in [5.0, -3.0, 0.0, -0.0, 1e9] {
@@ -991,10 +1265,22 @@ fn const_undef_index_member_of_scalar_prunes() {
     .expect("registry builds");
 
     // The all-scalar spec compiles now — the undef fold prunes the branch the bad access used to block.
-    assert!(reg.get("idx").is_some(), "x[0] on a scalar folds undef → is_undef true → compiles");
-    assert!(reg.get("idxc").is_some(), "x[2]==5 (undef==5 → false) prunes → compiles");
-    assert!(reg.get("mem").is_some(), "x.y on a scalar folds undef → compiles");
-    assert!(reg.get("memc").is_some(), "x.z>0 (undef → falsy) prunes to -x → compiles");
+    assert!(
+        reg.get("idx").is_some(),
+        "x[0] on a scalar folds undef → is_undef true → compiles"
+    );
+    assert!(
+        reg.get("idxc").is_some(),
+        "x[2]==5 (undef==5 → false) prunes → compiles"
+    );
+    assert!(
+        reg.get("mem").is_some(),
+        "x.y on a scalar folds undef → compiles"
+    );
+    assert!(
+        reg.get("memc").is_some(),
+        "x.z>0 (undef → falsy) prunes to -x → compiles"
+    );
 
     for x in [7.0, -2.0, 0.0, -0.0] {
         assert_call_eq(&reg, &prog, "idx", &[Value::Num(x)]); // is_undef(scalar[0]) → 1
@@ -1026,8 +1312,14 @@ fn fixed_vector_comprehension_unrolls() {
     .expect("registry builds");
 
     // Nullary literal comprehensions unroll + compile at BUILD.
-    assert!(reg.get("sq").is_some(), "comprehension over a literal unrolls at build");
-    assert!(reg.get("pairs").is_some(), "a vector-body comprehension → a matrix");
+    assert!(
+        reg.get("sq").is_some(),
+        "comprehension over a literal unrolls at build"
+    );
+    assert!(
+        reg.get("pairs").is_some(),
+        "a vector-body comprehension → a matrix"
+    );
     assert_call_vec_eq(&reg, &prog, "sq", &[]); // [1, 4, 9, 16]
     assert_call_vec_eq(&reg, &prog, "sqv", &[vec_arg(&[2.0, 3.0, 5.0])]); // [4, 9, 25]
     assert_call_nested_eq(&reg, &prog, "pairs", &[]); // [[1,1],[2,4],[3,9]]
@@ -1066,10 +1358,22 @@ fn named_arg_calls_inline_bit_identical() {
     )
     .expect("registry builds");
 
-    assert!(reg.get("usenamed").is_some(), "an all-named call (out of order) inlines");
-    assert!(reg.get("usemix").is_some(), "a positional + named call inlines");
-    assert!(reg.get("usedfl").is_some(), "a named arg + a defaulted param inlines");
-    assert!(reg.get("dollar").is_none(), "a $-arg (dynamic override) declines");
+    assert!(
+        reg.get("usenamed").is_some(),
+        "an all-named call (out of order) inlines"
+    );
+    assert!(
+        reg.get("usemix").is_some(),
+        "a positional + named call inlines"
+    );
+    assert!(
+        reg.get("usedfl").is_some(),
+        "a named arg + a defaulted param inlines"
+    );
+    assert!(
+        reg.get("dollar").is_none(),
+        "a $-arg (dynamic override) declines"
+    );
 
     for x in [4.0, -2.5, 0.0, 1e6] {
         assert_call_eq(&reg, &prog, "usenamed", &[Value::Num(x)]); // lerp(0, x, 0.25) = 0.25x
@@ -1136,10 +1440,24 @@ fn matrix_product_is_bit_identical() {
     )
     .expect("registry builds");
 
-    let m22 = || Value::list(vec![Value::num_list(vec![1.0, 2.0]), Value::num_list(vec![3.0, 4.0])]);
-    let n22 = || Value::list(vec![Value::num_list(vec![5.0, 6.0]), Value::num_list(vec![7.0, 8.0])]);
-    let m23 =
-        || Value::list(vec![Value::num_list(vec![1.0, 2.0, 3.0]), Value::num_list(vec![4.0, 5.0, 6.0])]);
+    let m22 = || {
+        Value::list(vec![
+            Value::num_list(vec![1.0, 2.0]),
+            Value::num_list(vec![3.0, 4.0]),
+        ])
+    };
+    let n22 = || {
+        Value::list(vec![
+            Value::num_list(vec![5.0, 6.0]),
+            Value::num_list(vec![7.0, 8.0]),
+        ])
+    };
+    let m23 = || {
+        Value::list(vec![
+            Value::num_list(vec![1.0, 2.0, 3.0]),
+            Value::num_list(vec![4.0, 5.0, 6.0]),
+        ])
+    };
 
     // mat × vec → a vector (`out[i] = dot(row_i, v)`), square + non-square (2×3 · vec3 → vec2).
     assert_call_vec_eq(&reg, &prog, "mv", &[m22(), vec_arg(&[10.0, 20.0])]);
@@ -1150,7 +1468,15 @@ fn matrix_product_is_bit_identical() {
     // mat × mat → a matrix (each left row × the right matrix) — a nested return.
     assert_call_nested_eq(&reg, &prog, "mm", &[m22(), n22()]);
     // vec · vec → a scalar dot (4 lanes exercise the full lane structure).
-    assert_call_eq(&reg, &prog, "dotp", &[vec_arg(&[1.0, 2.0, 3.0, 4.0]), vec_arg(&[5.0, 6.0, 7.0, 8.0])]);
+    assert_call_eq(
+        &reg,
+        &prog,
+        "dotp",
+        &[
+            vec_arg(&[1.0, 2.0, 3.0, 4.0]),
+            vec_arg(&[5.0, 6.0, 7.0, 8.0]),
+        ],
+    );
     // A non-conforming product (2×2 mat × vec3, dimension mismatch) is `undef` → DECLINES → interpreter owns it.
     assert!(
         call_jit(&reg, "mv", &[m22(), vec_arg(&[1.0, 2.0, 3.0])]).is_none(),
@@ -1190,10 +1516,16 @@ fn nothing_compiles_but_the_registry_holds_the_def() {
         defs(&prog).iter().map(|&(n, p, b)| (n, p, b)),
         consts(&prog).iter().map(|&(n, v)| (n, v)),
     )
-        .expect("registry builds even with nothing to compile");
-    assert!(!reg.is_empty(), "the def is retained for on-demand recompile");
+    .expect("registry builds even with nothing to compile");
+    assert!(
+        !reg.is_empty(),
+        "the def is retained for on-demand recompile"
+    );
     assert_eq!(reg.len(), 0, "no all-scalar specialization compiled");
-    assert!(reg.get("s").is_none(), "the scalar shape declines (string builtin)");
+    assert!(
+        reg.get("s").is_none(),
+        "the scalar shape declines (string builtin)"
+    );
     assert!(
         call_jit(&reg, "s", &[Value::Num(3.0)]).is_none(),
         "every shape of a string-returning body declines → interpret"
@@ -1205,6 +1537,6 @@ fn nothing_compiles_but_the_registry_holds_the_def() {
         defs(&none).iter().map(|&(n, p, b)| (n, p, b)),
         consts(&none).iter().map(|&(n, v)| (n, v)),
     )
-        .expect("registry builds");
+    .expect("registry builds");
     assert!(reg.is_empty(), "no user functions → truly empty");
 }

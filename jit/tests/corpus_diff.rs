@@ -60,7 +60,9 @@ fn parse_library(dir: &Path) -> Vec<Program> {
     let mut programs = Vec::new();
     let mut stack = vec![dir.to_path_buf()];
     while let Some(d) = stack.pop() {
-        let Ok(entries) = std::fs::read_dir(&d) else { continue };
+        let Ok(entries) = std::fs::read_dir(&d) else {
+            continue;
+        };
         for entry in entries.flatten() {
             let path = entry.path();
             if path.is_dir() {
@@ -145,7 +147,10 @@ fn outcome_agrees(jit: Option<&JitOutcome>, slow: &fab_lang::Result<Value>) -> b
         (Some(JitOutcome::Num(a)), Ok(Value::Num(b))) => a.to_bits() == b.to_bits(),
         (Some(JitOutcome::Bool(a)), Ok(Value::Bool(b))) => a == b,
         (Some(JitOutcome::Vec(a)), Ok(Value::NumList(b))) => {
-            a.len() == b.len() && a.iter().zip(b.iter()).all(|(x, y)| x.to_bits() == y.to_bits())
+            a.len() == b.len()
+                && a.iter()
+                    .zip(b.iter())
+                    .all(|(x, y)| x.to_bits() == y.to_bits())
         }
         // A fixed nested (matrix) return (2c.1) — the JIT already rebuilt the `Value`; compare it BIT-for-bit.
         (Some(JitOutcome::Nested(a)), Ok(b)) => value_bits_eq(a, b),
@@ -163,12 +168,19 @@ fn value_bits_eq(a: &Value, b: &Value) -> bool {
         (Num(x), Num(y)) => x.to_bits() == y.to_bits(),
         (Bool(x), Bool(y)) => x == y,
         (NumList(x), NumList(y)) => {
-            x.len() == y.len() && x.iter().zip(y.iter()).all(|(p, q)| p.to_bits() == q.to_bits())
+            x.len() == y.len()
+                && x.iter()
+                    .zip(y.iter())
+                    .all(|(p, q)| p.to_bits() == q.to_bits())
         }
-        (List(x), List(y)) => x.len() == y.len() && x.iter().zip(y.iter()).all(|(p, q)| value_bits_eq(p, q)),
+        (List(x), List(y)) => {
+            x.len() == y.len() && x.iter().zip(y.iter()).all(|(p, q)| value_bits_eq(p, q))
+        }
         (NumList(n), List(l)) | (List(l), NumList(n)) => {
             n.len() == l.len()
-                && n.iter().zip(l.iter()).all(|(x, v)| matches!(v, Num(y) if x.to_bits() == y.to_bits()))
+                && n.iter()
+                    .zip(l.iter())
+                    .all(|(x, v)| matches!(v, Num(y) if x.to_bits() == y.to_bits()))
         }
         _ => false,
     }
@@ -177,15 +189,21 @@ fn value_bits_eq(a: &Value, b: &Value) -> bool {
 #[test]
 fn fast_equals_jit_over_the_bosl2_library() {
     let programs = parse_library(&bosl2_dir());
-    assert!(!programs.is_empty(), "expected to parse BOSL2 sources from {}", bosl2_dir().display());
+    assert!(
+        !programs.is_empty(),
+        "expected to parse BOSL2 sources from {}",
+        bosl2_dir().display()
+    );
     let defs = functions(&programs);
     let consts = globals(&programs);
     let total = defs.len();
 
     // Registry + oracle are fed the SAME functions + constants, so neither side can diverge on its inputs.
-    let registry =
-        JitRegistry::build(defs.iter().map(|&(n, p, b)| (n, p, b)), consts.iter().map(|&(n, v)| (n, v)))
-            .expect("registry builds");
+    let registry = JitRegistry::build(
+        defs.iter().map(|&(n, p, b)| (n, p, b)),
+        consts.iter().map(|&(n, v)| (n, v)),
+    )
+    .expect("registry builds");
     // Build the interpreter oracle ONCE — it publishes every top-level constant, and republishing per
     // (function × battery-row) would be quadratic over the library.
     let oracle = FnOracle::new(&defs, &consts).expect("oracle builds");
@@ -199,14 +217,20 @@ fn fast_equals_jit_over_the_bosl2_library() {
             continue; // no all-scalar specialization → the interpreter's job
         }
         for args in input_battery(params.len()) {
-            let vals: Vec<Value> = args[..params.len()].iter().map(|&v| Value::Num(v)).collect();
+            let vals: Vec<Value> = args[..params.len()]
+                .iter()
+                .map(|&v| Value::Num(v))
+                .collect();
             let jit = jit_call(&registry, name, &vals);
             let slow = oracle.call(name, &vals);
             // Agree if both raised (JIT `None` — an inline assert failed — and the oracle `Err`) OR both a value
             // with the SAME shape + identical bits. A mixed accept/raise, a shape mismatch, or differing bits
             // diverges. (A JIT `None` also covers a non-scalarizable return the interpreter shouldn't produce here.)
             let agree = outcome_agrees(jit.as_ref(), &slow);
-            assert!(agree, "fast != JIT for BOSL2 `{name}` at {args:?}: jit={jit:?} interp={slow:?}");
+            assert!(
+                agree,
+                "fast != JIT for BOSL2 `{name}` at {args:?}: jit={jit:?} interp={slow:?}"
+            );
         }
         checked += 1;
     }
@@ -230,7 +254,10 @@ fn fast_equals_jit_over_the_bosl2_library() {
     for (reason, count) in rows {
         eprintln!("[jit-corpus]   {count:>5}  {reason}");
     }
-    assert_eq!(checked, compiled, "every compiled function was differentialed");
+    assert_eq!(
+        checked, compiled,
+        "every compiled function was differentialed"
+    );
 }
 
 /// Deterministic VECTOR-arg rows: `count` rows, each `arity` `NumList`s of length `n`, drawn from [`CORNERS`]
@@ -301,12 +328,18 @@ fn fast_equals_jit_over_bosl2_vector_arg_shapes() {
     // condition compiles from the SAME expression the interpreter evaluates, and the scalar corpus already
     // proves the raise mechanism; the gate here is the load-bearing one: every shape the JIT ACCEPTS is exact.
     let programs = parse_library(&bosl2_dir());
-    assert!(!programs.is_empty(), "expected to parse BOSL2 sources from {}", bosl2_dir().display());
+    assert!(
+        !programs.is_empty(),
+        "expected to parse BOSL2 sources from {}",
+        bosl2_dir().display()
+    );
     let defs = functions(&programs);
     let consts = globals(&programs);
-    let registry =
-        JitRegistry::build(defs.iter().map(|&(n, p, b)| (n, p, b)), consts.iter().map(|&(n, v)| (n, v)))
-            .expect("registry builds");
+    let registry = JitRegistry::build(
+        defs.iter().map(|&(n, p, b)| (n, p, b)),
+        consts.iter().map(|&(n, v)| (n, v)),
+    )
+    .expect("registry builds");
     let oracle = FnOracle::new(&defs, &consts).expect("oracle builds");
 
     let mut accepted = 0usize; // (function, shape, row) triples the JIT compiled + differentialed bit-identical
@@ -365,5 +398,8 @@ fn fast_equals_jit_over_bosl2_vector_arg_shapes() {
         "[jit-corpus-mat] {} BOSL2 functions gained a matrix-arg specialization; {mat_accepted} (fn,shape,row) triples differentialed bit-identical",
         fns_with_mat_spec.len()
     );
-    assert!(accepted > 0, "rung B should compile a vector-arg specialization for at least one BOSL2 function");
+    assert!(
+        accepted > 0,
+        "rung B should compile a vector-arg specialization for at least one BOSL2 function"
+    );
 }

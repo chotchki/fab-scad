@@ -261,7 +261,9 @@ impl Solid {
             .flatten()
             .collect();
         if idx.is_empty() {
-            return Err(anyhow!("mesh is degenerate after weld (no non-degenerate triangles)"));
+            return Err(anyhow!(
+                "mesh is degenerate after weld (no non-degenerate triangles)"
+            ));
         }
         let m = Manifold::from_mesh_f64(&flat, 3, &idx)
             .map_err(|e| anyhow!("mesh is not a valid manifold: {e:?}"))?;

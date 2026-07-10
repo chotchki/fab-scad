@@ -12,8 +12,10 @@ use std::path::PathBuf;
 
 fn main() {
     let mut args = std::env::args().skip(1);
-    let model =
-        PathBuf::from(args.next().expect("usage: models_worker <model.scad> [lib_dir ...]"));
+    let model = PathBuf::from(
+        args.next()
+            .expect("usage: models_worker <model.scad> [lib_dir ...]"),
+    );
     let libs: Vec<PathBuf> = args.map(PathBuf::from).collect();
 
     // Eval on [`fab_scad::EVAL_STACK`]: as of M.3 geometry eval is HEAP-bounded (the explicit-stack driver —
@@ -25,7 +27,11 @@ fn main() {
         .stack_size(fab_scad::EVAL_STACK)
         .spawn(move || {
             let start = std::time::Instant::now();
-            let res = fab_scad::import::resolve_geometry_file(&model, &libs, fab_lang::Config::from_env());
+            let res = fab_scad::import::resolve_geometry_file(
+                &model,
+                &libs,
+                fab_lang::Config::from_env(),
+            );
             let ms = start.elapsed().as_millis();
             match res {
                 Ok(geo) => {

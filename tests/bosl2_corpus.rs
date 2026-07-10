@@ -131,9 +131,18 @@ fn bosl2_corpus_ratchet_and_report() {
         Bucket::Lower,
         Bucket::Parse,
     ] {
-        let samples: Vec<_> = results.iter().filter(|r| r.bucket == bucket).take(6).collect();
+        let samples: Vec<_> = results
+            .iter()
+            .filter(|r| r.bucket == bucket)
+            .take(6)
+            .collect();
         if !samples.is_empty() {
-            eprintln!("--- {} (first {} of {}) ---", bucket.label(), samples.len(), hist.get(&bucket).copied().unwrap_or(0));
+            eprintln!(
+                "--- {} (first {} of {}) ---",
+                bucket.label(),
+                samples.len(),
+                hist.get(&bucket).copied().unwrap_or(0)
+            );
             for r in samples {
                 eprintln!("  {}::{}: {}", r.file, r.name, r.detail);
             }
@@ -151,7 +160,15 @@ fn bosl2_corpus_ratchet_and_report() {
     let roster: String = results
         .iter()
         .filter(|r| r.bucket != Bucket::Pass)
-        .map(|r| format!("{}\t{}\t{}\t{}\n", r.file, r.name, r.bucket.label(), r.detail))
+        .map(|r| {
+            format!(
+                "{}\t{}\t{}\t{}\n",
+                r.file,
+                r.name,
+                r.bucket.label(),
+                r.detail
+            )
+        })
         .collect();
     let roster_path = std::env::temp_dir().join("bosl2_fails.tsv");
     if std::fs::write(&roster_path, roster).is_ok() {

@@ -67,5 +67,8 @@ fn env_on(name: &str) -> bool {
 
 /// A `FAB_*` unsigned tuning cap, parse-or-default.
 fn env_usize(name: &str, default: usize) -> usize {
-    std::env::var(name).ok().and_then(|s| s.parse().ok()).unwrap_or(default)
+    std::env::var(name)
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(default)
 }

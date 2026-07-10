@@ -72,7 +72,9 @@ fn main() -> anyhow::Result<()> {
         if case.expect_success {
             println!("(expect_success = true — a clean eval is the PASS)");
         } else {
-            println!("(expect_success = false — an eval ERROR is the PASS; clean eval means the guard is missing)");
+            println!(
+                "(expect_success = false — an eval ERROR is the PASS; clean eval means the guard is missing)"
+            );
         }
         if dump_script {
             println!("--- script ---\n{}\n--- /script ---", case.script);

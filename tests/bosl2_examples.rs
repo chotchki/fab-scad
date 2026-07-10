@@ -16,8 +16,8 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use fab_scad::openscad::find_bin;
@@ -64,12 +64,18 @@ fn extract_examples(bosl2: &Path) -> Vec<Example> {
         .collect();
     files.sort();
     for path in &files {
-        let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or_default().to_string();
+        let stem = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or_default()
+            .to_string();
         // std.scad is just includes; version/constants have no geometry examples worth wrapping.
         if stem == "std" {
             continue;
         }
-        let Ok(src) = std::fs::read_to_string(path) else { continue };
+        let Ok(src) = std::fs::read_to_string(path) else {
+            continue;
+        };
         let lines: Vec<&str> = src.lines().collect();
         let mut i = 0;
         while i < lines.len() {
@@ -135,7 +141,9 @@ fn bosl2_examples_vs_oracle() {
         return;
     }
     if find_bin().is_none() {
-        eprintln!("note: OpenSCAD not found — example corpus skipped (it's an oracle differential)");
+        eprintln!(
+            "note: OpenSCAD not found — example corpus skipped (it's an oracle differential)"
+        );
         return;
     }
     let libs = vec![manifest.join("libs")];
@@ -150,7 +158,8 @@ fn bosl2_examples_vs_oracle() {
     );
 
     // AGREE / DIVERGE(reason) / TIMEOUT — per example, filled by the pool.
-    let slots: Vec<Mutex<Option<Result<(), String>>>> = examples.iter().map(|_| Mutex::new(None)).collect();
+    let slots: Vec<Mutex<Option<Result<(), String>>>> =
+        examples.iter().map(|_| Mutex::new(None)).collect();
     let next = AtomicUsize::new(0);
     let done = AtomicUsize::new(0);
     let total = examples.len();
@@ -158,20 +167,26 @@ fn bosl2_examples_vs_oracle() {
         for _ in 0..CONCURRENCY {
             std::thread::Builder::new()
                 .stack_size(fab_scad::EVAL_STACK) // deep eval-assembly host recursion, like the models harness
-                .spawn_scoped(s, || loop {
-                    let idx = next.fetch_add(1, Ordering::Relaxed);
-                    if idx >= examples.len() {
-                        break;
+                .spawn_scoped(s, || {
+                    loop {
+                        let idx = next.fetch_add(1, Ordering::Relaxed);
+                        if idx >= examples.len() {
+                            break;
+                        }
+                        let ex = &examples[idx];
+                        let path = tmp.join(format!("{idx}.scad"));
+                        std::fs::write(&path, wrap(ex)).unwrap();
+                        let outcome = compare_with_timeout(&path, &libs, BUDGET);
+                        let n = done.fetch_add(1, Ordering::Relaxed) + 1;
+                        if let Err(why) = &outcome {
+                            eprintln!(
+                                "  [{n:>4}/{total}] DIVERGE {} :: {}",
+                                ex.origin,
+                                first_line(why)
+                            );
+                        }
+                        *slots[idx].lock().unwrap() = Some(outcome);
                     }
-                    let ex = &examples[idx];
-                    let path = tmp.join(format!("{idx}.scad"));
-                    std::fs::write(&path, wrap(ex)).unwrap();
-                    let outcome = compare_with_timeout(&path, &libs, BUDGET);
-                    let n = done.fetch_add(1, Ordering::Relaxed) + 1;
-                    if let Err(why) = &outcome {
-                        eprintln!("  [{n:>4}/{total}] DIVERGE {} :: {}", ex.origin, first_line(why));
-                    }
-                    *slots[idx].lock().unwrap() = Some(outcome);
                 })
                 .unwrap();
         }
@@ -185,13 +200,18 @@ fn bosl2_examples_vs_oracle() {
 
     let agree = results.iter().filter(|(_, r)| r.is_ok()).count();
     let diverge = total - agree;
-    eprintln!("\n=== BOSL2 examples: {agree}/{total} agree with the oracle ({diverge} diverge) ===");
+    eprintln!(
+        "\n=== BOSL2 examples: {agree}/{total} agree with the oracle ({diverge} diverge) ==="
+    );
 
     // Bucket divergences by their normalized first line (numbers stripped) so a systemic cause clusters.
     let mut by_reason: BTreeMap<String, Vec<&str>> = BTreeMap::new();
     for (ex, r) in &results {
         if let Err(why) = r {
-            by_reason.entry(normalize(first_line(why))).or_default().push(&ex.origin);
+            by_reason
+                .entry(normalize(first_line(why)))
+                .or_default()
+                .push(&ex.origin);
         }
     }
     eprintln!("\n=== divergence buckets (most common first) ===");
@@ -207,7 +227,10 @@ fn bosl2_examples_vs_oracle() {
         }
     }
 
-    assert!(agree > 0, "no BOSL2 examples agreed — the harness is broken");
+    assert!(
+        agree > 0,
+        "no BOSL2 examples agreed — the harness is broken"
+    );
 }
 
 /// Compare on a fresh big-stack thread with a wall-clock budget; a leaked thread on timeout dies at process

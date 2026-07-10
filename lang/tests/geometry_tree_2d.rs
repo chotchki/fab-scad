@@ -168,7 +168,10 @@ fn transforms_apply_the_2d_submatrix() {
     // translate([x, y, z]) drops z — the 2D affine's translation is [x, y]. Verified vs oracle: the SVG
     // bbox of `translate([3,4,99]) square(2)` is [3,5]×[4,6] (z ignored).
     match d2("translate([3, 4, 99]) square(2);") {
-        Shape2D::Transform { ref matrix, ref child } => {
+        Shape2D::Transform {
+            ref matrix,
+            ref child,
+        } => {
             let m = matrix.as_row_major(); // [a, b, c, d, e, f] → x' = a·x+b·y+c, y' = d·x+e·y+f
             assert_eq!([m[2], m[5]], [3.0, 4.0]); // translation, z-component gone
             assert!(matches!(**child, Shape2D::Polygon(_)));
@@ -471,7 +474,10 @@ fn linear_extrude_builds_the_2d_to_3d_bridge() {
     use fab_lang::ExtrudeKind;
     // linear_extrude wraps a 2D child in the GeoNode::Extrude bridge (a 3D result).
     match evaluate_geometry("linear_extrude(5) square(4);").unwrap() {
-        Geo::D3(GeoNode::Extrude { ref kind, ref child }) => {
+        Geo::D3(GeoNode::Extrude {
+            ref kind,
+            ref child,
+        }) => {
             assert!(matches!(**child, Shape2D::Polygon(_)));
             assert!(matches!(
                 *kind,

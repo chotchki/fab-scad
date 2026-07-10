@@ -41,10 +41,10 @@ use std::time::{Duration, Instant};
 use fab_scad::openscad::find_bin;
 use tracing::field::{Field, Visit};
 use tracing::span::{Attributes, Id};
+use tracing_subscriber::Registry;
 use tracing_subscriber::layer::{Context, Layer};
 use tracing_subscriber::prelude::*;
 use tracing_subscriber::registry::LookupSpan;
-use tracing_subscriber::Registry;
 
 /// Per-model watchdog: real models eval in ≪1 s, so 10 s only ever catches a runaway — and the TIMEOUT list
 /// is itself a headline finding (the models that most need the JIT tier). Bounds the sweep's wall-time too.
@@ -101,10 +101,16 @@ where
     fn on_new_span(&self, attrs: &Attributes<'_>, id: &Id, ctx: Context<'_, S>) {
         let Some(span) = ctx.span(id) else { return };
         let span_name = span.name();
-        let mut visitor = KeyVisitor { span: span_name, key: None };
+        let mut visitor = KeyVisitor {
+            span: span_name,
+            key: None,
+        };
         attrs.record(&mut visitor);
         let key = visitor.key.unwrap_or_else(|| span_name.to_string());
-        span.extensions_mut().insert(Timing { key, last_enter: None });
+        span.extensions_mut().insert(Timing {
+            key,
+            last_enter: None,
+        });
     }
     fn on_enter(&self, id: &Id, ctx: Context<'_, S>) {
         if let Some(span) = ctx.span(id)
@@ -116,8 +122,12 @@ where
     fn on_exit(&self, id: &Id, ctx: Context<'_, S>) {
         let Some(span) = ctx.span(id) else { return };
         let mut ext = span.extensions_mut();
-        let Some(t) = ext.get_mut::<Timing>() else { return };
-        let Some(start) = t.last_enter.take() else { return };
+        let Some(t) = ext.get_mut::<Timing>() else {
+            return;
+        };
+        let Some(start) = t.last_enter.take() else {
+            return;
+        };
         let (dur, key) = (start.elapsed(), t.key.clone());
         drop(ext);
         let mut p = self.profile.lock().unwrap();
@@ -146,7 +156,10 @@ fn model_files() -> Vec<PathBuf> {
     // Drop build outputs (`out/`) and abandoned experiments (`unused/`) — both unambiguous dead-code markers,
     // so they don't count against the correctness baseline. Other dead models (`_test`/`_slice`/`second_approach`)
     // are a judgment call left to a model-cleanup pass.
-    out.retain(|p| !p.components().any(|c| matches!(c.as_os_str().to_str(), Some("out" | "unused"))));
+    out.retain(|p| {
+        !p.components()
+            .any(|c| matches!(c.as_os_str().to_str(), Some("out" | "unused")))
+    });
     let included = included_basenames(&out);
     out.retain(|p| {
         let base = p.file_name().and_then(|n| n.to_str()).unwrap_or_default();
@@ -157,7 +170,9 @@ fn model_files() -> Vec<PathBuf> {
 }
 
 fn collect_scad(dir: &Path, out: &mut Vec<PathBuf>) {
-    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
     for entry in entries.filter_map(Result::ok) {
         let path = entry.path();
         if path.is_dir() {
@@ -172,7 +187,9 @@ fn collect_scad(dir: &Path, out: &mut Vec<PathBuf>) {
 fn included_basenames(files: &[PathBuf]) -> std::collections::BTreeSet<String> {
     let mut set = std::collections::BTreeSet::new();
     for f in files {
-        let Ok(src) = std::fs::read_to_string(f) else { continue };
+        let Ok(src) = std::fs::read_to_string(f) else {
+            continue;
+        };
         for line in src.lines() {
             let t = line.trim_start();
             if !(t.starts_with("include") || t.starts_with("use")) {
@@ -303,22 +320,28 @@ fn models_profile_and_compare() {
     let total = files.len();
     thread::scope(|s| {
         for _ in 0..CONCURRENCY {
-            s.spawn(|| loop {
-                let i = next.fetch_add(1, Ordering::Relaxed);
-                if i >= files.len() {
-                    break;
+            s.spawn(|| {
+                loop {
+                    let i = next.fetch_add(1, Ordering::Relaxed);
+                    if i >= files.len() {
+                        break;
+                    }
+                    let path = &files[i];
+                    let rel = path
+                        .strip_prefix(&manifest)
+                        .unwrap_or(path)
+                        .display()
+                        .to_string();
+                    let outcome = run_worker(worker, path, &libs, SWEEP_BUDGET);
+                    let tag = match &outcome {
+                        Outcome::Rendered(ms) => format!("{ms} ms"),
+                        Outcome::Timeout => "TIMEOUT".to_string(),
+                        Outcome::Failed(d) => format!("ERR: {d}"),
+                    };
+                    let n = done.fetch_add(1, Ordering::Relaxed) + 1;
+                    eprintln!("  [{n:>3}/{total}] {rel} → {tag}");
+                    *slots[i].lock().unwrap() = Some(outcome);
                 }
-                let path = &files[i];
-                let rel = path.strip_prefix(&manifest).unwrap_or(path).display().to_string();
-                let outcome = run_worker(worker, path, &libs, SWEEP_BUDGET);
-                let tag = match &outcome {
-                    Outcome::Rendered(ms) => format!("{ms} ms"),
-                    Outcome::Timeout => "TIMEOUT".to_string(),
-                    Outcome::Failed(d) => format!("ERR: {d}"),
-                };
-                let n = done.fetch_add(1, Ordering::Relaxed) + 1;
-                eprintln!("  [{n:>3}/{total}] {rel} → {tag}");
-                *slots[i].lock().unwrap() = Some(outcome);
             });
         }
     });
@@ -326,14 +349,27 @@ fn models_profile_and_compare() {
         .iter()
         .zip(slots)
         .map(|(path, slot)| {
-            let rel = path.strip_prefix(&manifest).unwrap_or(path).display().to_string();
+            let rel = path
+                .strip_prefix(&manifest)
+                .unwrap_or(path)
+                .display()
+                .to_string();
             (rel, slot.into_inner().unwrap().expect("every slot filled"))
         })
         .collect();
 
-    let rendered = results.iter().filter(|(_, o)| matches!(o, Outcome::Rendered(_))).count();
-    let timed_out = results.iter().filter(|(_, o)| matches!(o, Outcome::Timeout)).count();
-    let failed = results.iter().filter(|(_, o)| matches!(o, Outcome::Failed(_))).count();
+    let rendered = results
+        .iter()
+        .filter(|(_, o)| matches!(o, Outcome::Rendered(_)))
+        .count();
+    let timed_out = results
+        .iter()
+        .filter(|(_, o)| matches!(o, Outcome::Timeout))
+        .count();
+    let failed = results
+        .iter()
+        .filter(|(_, o)| matches!(o, Outcome::Failed(_)))
+        .count();
     eprintln!(
         "\n=== render distribution: {rendered} ok / {timed_out} timeout / {failed} error  (of {}) ===",
         results.len()
@@ -362,14 +398,23 @@ fn models_profile_and_compare() {
     // even measure per-builtin yet).
     let mut completers: Vec<(&String, u128)> = results
         .iter()
-        .filter_map(|(rel, o)| if let Outcome::Rendered(ms) = o { Some((rel, *ms)) } else { None })
+        .filter_map(|(rel, o)| {
+            if let Outcome::Rendered(ms) = o {
+                Some((rel, *ms))
+            } else {
+                None
+            }
+        })
         .collect();
     completers.sort_by_key(|(_, ms)| std::cmp::Reverse(*ms));
     eprintln!("\n=== slowest RENDERED models (deep-profile targets) ===");
     for (rel, ms) in completers.iter().take(12) {
         eprintln!("  {ms:>7} ms  {rel}");
     }
-    eprintln!("\n=== TIMEOUT models (>{}s — the JIT/intrinsics prime targets) ===", SWEEP_BUDGET.as_secs());
+    eprintln!(
+        "\n=== TIMEOUT models (>{}s — the JIT/intrinsics prime targets) ===",
+        SWEEP_BUDGET.as_secs()
+    );
     for (rel, o) in &results {
         if matches!(o, Outcome::Timeout) {
             eprintln!("  {rel}");
@@ -396,7 +441,11 @@ fn models_profile_and_compare() {
 
     // ── DEEP PROFILE (in-process, per-builtin) ─────────────────────────────────────────────────────────────
     // Re-run the slowest COMPLETERS under the tracing layer to see WHICH builtins/modules the time goes to.
-    let targets: Vec<PathBuf> = completers.iter().take(PROFILE_TOP_N).map(|(rel, _)| manifest.join(rel)).collect();
+    let targets: Vec<PathBuf> = completers
+        .iter()
+        .take(PROFILE_TOP_N)
+        .map(|(rel, _)| manifest.join(rel))
+        .collect();
     let profiler = Profiler::default();
     let profile = profiler.profile.clone();
     // GLOBAL subscriber: each target profiles on its own big-stack thread; a global subscriber is the one every
@@ -404,9 +453,16 @@ fn models_profile_and_compare() {
     // processes — invisible here — and the compare leg runs strictly after we snapshot the profile below).
     tracing::subscriber::set_global_default(Registry::default().with(profiler))
         .expect("set global tracing subscriber");
-    eprintln!("\n=== deep-profiling the {} slowest completers (per-builtin) ===", targets.len());
+    eprintln!(
+        "\n=== deep-profiling the {} slowest completers (per-builtin) ===",
+        targets.len()
+    );
     for target in &targets {
-        let rel = target.strip_prefix(&manifest).unwrap_or(target).display().to_string();
+        let rel = target
+            .strip_prefix(&manifest)
+            .unwrap_or(target)
+            .display()
+            .to_string();
         eprintln!("  profiling {rel}");
         let (tx, rx) = mpsc::channel();
         let t = target.clone();
@@ -415,7 +471,11 @@ fn models_profile_and_compare() {
             .name("profile-eval".into())
             .stack_size(fab_scad::EVAL_STACK)
             .spawn(move || {
-                let _ = fab_scad::import::resolve_geometry_file(&t, &libs_t, fab_lang::Config::from_env());
+                let _ = fab_scad::import::resolve_geometry_file(
+                    &t,
+                    &libs_t,
+                    fab_lang::Config::from_env(),
+                );
                 let _ = tx.send(());
             })
             .expect("spawn profile thread");
@@ -423,25 +483,51 @@ fn models_profile_and_compare() {
     }
 
     let profile = profile.lock().unwrap();
-    let mut ranked: Vec<(&String, u64, Duration)> = profile.iter().map(|(k, &(n, d))| (k, n, d)).collect();
+    let mut ranked: Vec<(&String, u64, Duration)> =
+        profile.iter().map(|(k, &(n, d))| (k, n, d)).collect();
     ranked.sort_by_key(|&(_, _, d)| std::cmp::Reverse(d));
     // BUILTINS are LEAF spans → SELF-time: the real intrinsic worklist (the math/vector ops a JIT replaces).
-    eprintln!("\n=== hot BUILTINS (leaf self-time — the intrinsic worklist) — total ms × calls ===");
-    for (key, n, d) in ranked.iter().filter(|(k, ..)| k.starts_with("builtin:")).take(25) {
-        eprintln!("  {:<26} {:>8} ms  ×{n}", key.trim_start_matches("builtin:"), d.as_millis());
+    eprintln!(
+        "\n=== hot BUILTINS (leaf self-time — the intrinsic worklist) — total ms × calls ==="
+    );
+    for (key, n, d) in ranked
+        .iter()
+        .filter(|(k, ..)| k.starts_with("builtin:"))
+        .take(25)
+    {
+        eprintln!(
+            "  {:<26} {:>8} ms  ×{n}",
+            key.trim_start_matches("builtin:"),
+            d.as_millis()
+        );
     }
     // MODULES are INCLUSIVE of their subtree — cost CONCENTRATION, not self-time.
-    eprintln!("\n=== hot MODULES (inclusive subtree time — cost concentration) — total ms × calls ===");
-    for (key, n, d) in ranked.iter().filter(|(k, ..)| k.starts_with("module:")).take(15) {
-        eprintln!("  {:<26} {:>8} ms  ×{n}", key.trim_start_matches("module:"), d.as_millis());
+    eprintln!(
+        "\n=== hot MODULES (inclusive subtree time — cost concentration) — total ms × calls ==="
+    );
+    for (key, n, d) in ranked
+        .iter()
+        .filter(|(k, ..)| k.starts_with("module:"))
+        .take(15)
+    {
+        eprintln!(
+            "  {:<26} {:>8} ms  ×{n}",
+            key.trim_start_matches("module:"),
+            d.as_millis()
+        );
     }
     drop(profile);
 
     // ── COMPARE (opt-in) ───────────────────────────────────────────────────────────────────────────────────
     if std::env::var_os("MODELS_COMPARE").is_none() {
-        eprintln!("\n(compare leg skipped — set MODELS_COMPARE=1 to run rendered models vs the oracle)");
+        eprintln!(
+            "\n(compare leg skipped — set MODELS_COMPARE=1 to run rendered models vs the oracle)"
+        );
     } else if let Some(bin) = find_bin() {
-        eprintln!("\n=== compare vs oracle ({}) — boolean residual per rendered model ===", bin.display());
+        eprintln!(
+            "\n=== compare vs oracle ({}) — boolean residual per rendered model ===",
+            bin.display()
+        );
         let (mut compared, mut diverged) = (0, 0);
         for (rel, o) in &results {
             if !matches!(o, Outcome::Rendered(_)) {
@@ -451,11 +537,16 @@ fn models_profile_and_compare() {
                 Ok(()) => compared += 1,
                 Err(why) => {
                     diverged += 1;
-                    eprintln!("  DIVERGE {rel}: {}", why.lines().next().unwrap_or_default());
+                    eprintln!(
+                        "  DIVERGE {rel}: {}",
+                        why.lines().next().unwrap_or_default()
+                    );
                 }
             }
         }
-        eprintln!("compared {compared} models; {diverged} diverged (residual over gate or oracle error)");
+        eprintln!(
+            "compared {compared} models; {diverged} diverged (residual over gate or oracle error)"
+        );
     } else {
         eprintln!("\n(compare leg requested but OpenSCAD binary not found — skipped)");
     }

@@ -46,7 +46,10 @@ fn enabled() -> bool {
 fn roll_every() -> u64 {
     static R: OnceLock<u64> = OnceLock::new();
     *R.get_or_init(|| {
-        std::env::var("FAB_CSG_REDUNDANCY_ROLL").ok().and_then(|s| s.parse().ok()).unwrap_or(50_000)
+        std::env::var("FAB_CSG_REDUNDANCY_ROLL")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(50_000)
     })
 }
 
@@ -61,10 +64,10 @@ struct ModStat {
 #[derive(Default)]
 struct State {
     total: u64,
-    no_ctx: HashMap<u64, u64>,       // key(module, params)              -> occurrences (UPPER-bound bracket)
-    with_ctx: HashMap<u64, u64>,     // key(module, params, $-context)   -> occurrences (LOWER-bound bracket)
+    no_ctx: HashMap<u64, u64>, // key(module, params)              -> occurrences (UPPER-bound bracket)
+    with_ctx: HashMap<u64, u64>, // key(module, params, $-context)   -> occurrences (LOWER-bound bracket)
     per_module: HashMap<u64, ModStat>, // by body ptr -> its call/redundancy split
-    key_elems: u64,                  // total Value elements hashed — the key-SIZE a real cache would pay
+    key_elems: u64, // total Value elements hashed — the key-SIZE a real cache would pay
 }
 
 thread_local! {
@@ -122,7 +125,13 @@ fn hash64(seed: u64, f: impl FnOnce(&mut std::collections::hash_map::DefaultHash
 /// disambiguator the eval cache holds so two look-alike defs don't collide), `name` is for the report, `params`
 /// are the module's declared parameters, and `call` is the fully-bound call frame — its `specials()` are the
 /// reaching `$`-context and each `param.name` looks up its RESOLVED value. Off unless `FAB_CSG_REDUNDANCY=1`.
-pub(super) fn record(body: *const (), home: &Scope, name: &str, params: &[Parameter], call: &Scope) {
+pub(super) fn record(
+    body: *const (),
+    home: &Scope,
+    name: &str,
+    params: &[Parameter],
+    call: &Scope,
+) {
     if !enabled() {
         return;
     }
@@ -201,7 +210,9 @@ fn print_report(st: &State, label: &str) {
     let red_ctx = 100.0 * (1.0 - distinct_ctx / total);
     let avg_key = st.key_elems as f64 / total;
 
-    eprintln!("\n[mod-redundancy] === CSG-memo cache ceiling ({label}: user-module instantiations) ===");
+    eprintln!(
+        "\n[mod-redundancy] === CSG-memo cache ceiling ({label}: user-module instantiations) ==="
+    );
     eprintln!("[mod-redundancy] total instantiations:   {}", st.total);
     eprintln!(
         "[mod-redundancy] distinct (mod,params):     {}  -> redundancy {red_no:.1}%  (UPPER bound on any cache)",
@@ -211,17 +222,26 @@ fn print_report(st: &State, label: &str) {
         "[mod-redundancy] distinct (mod,params,$ctx): {}  -> redundancy {red_ctx:.1}%  (LOWER bound — $ctx over-specified)",
         st.with_ctx.len()
     );
-    eprintln!("[mod-redundancy] true cache-hit ceiling is BRACKETED: [{red_ctx:.1}% .. {red_no:.1}%]");
-    eprintln!("[mod-redundancy] avg key size:            {avg_key:.1} Value-elements hashed / call");
+    eprintln!(
+        "[mod-redundancy] true cache-hit ceiling is BRACKETED: [{red_ctx:.1}% .. {red_no:.1}%]"
+    );
+    eprintln!(
+        "[mod-redundancy] avg key size:            {avg_key:.1} Value-elements hashed / call"
+    );
 
     // The blowup discriminator, per module: sort by REDUNDANT calls (total - distinct$ctx) — the calls a cache
     // would eliminate. A module with distinct ≈ total is a BLOWUP (nothing to hit); distinct ≪ total is the win.
     let mut mods: Vec<&ModStat> = st.per_module.values().collect();
     mods.sort_unstable_by_key(|m| std::cmp::Reverse(m.total - m.distinct_ctx.len() as u64));
-    eprintln!("[mod-redundancy] top modules by REDUNDANT calls (total / distinct$ctx / redundancy%):");
+    eprintln!(
+        "[mod-redundancy] top modules by REDUNDANT calls (total / distinct$ctx / redundancy%):"
+    );
     for m in mods.iter().take(15) {
         let d = m.distinct_ctx.len() as u64;
         let pct = 100.0 * (1.0 - d as f64 / m.total as f64);
-        eprintln!("[mod-redundancy]   {:<28} {:>9} / {:>9} / {:>5.1}%", m.name, m.total, d, pct);
+        eprintln!(
+            "[mod-redundancy]   {:<28} {:>9} / {:>9} / {:>5.1}%",
+            m.name, m.total, d, pct
+        );
     }
 }

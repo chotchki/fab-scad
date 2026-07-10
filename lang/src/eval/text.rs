@@ -67,7 +67,9 @@ pub(super) fn text_contours(p: &TextParams, fn_: f64, fa: f64, fs: f64) -> Vec<C
     let curve_segs = if fn_ >= 3.0 {
         ((fn_ / 8.0).ceil() as u32).max(2)
     } else {
-        super::fragments::fragments(p.size, fn_, fa, fs).div_ceil(4).clamp(3, 16)
+        super::fragments::fragments(p.size, fn_, fa, fs)
+            .div_ceil(4)
+            .clamp(3, 16)
     };
 
     // Shape: guess script/direction/language from the text, then honor an explicit `direction=`.
@@ -162,7 +164,10 @@ impl OutlineCollector {
 
     /// Font-space point → the placed, scaled `Vec2`.
     fn place(&self, x: f64, y: f64) -> Vec2 {
-        Vec2::new(self.origin_x + x * self.scale, self.origin_y + y * self.scale)
+        Vec2::new(
+            self.origin_x + x * self.scale,
+            self.origin_y + y * self.scale,
+        )
     }
 
     fn finish(mut self) -> Vec<Contour> {

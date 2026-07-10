@@ -26,7 +26,9 @@ fn defs(prog: &Program) -> Vec<(&str, &[Parameter], &Expr)> {
     prog.stmts
         .iter()
         .filter_map(|s| match &s.kind {
-            StmtKind::FunctionDef { name, params, body } => Some((name.as_str(), params.as_slice(), body)),
+            StmtKind::FunctionDef { name, params, body } => {
+                Some((name.as_str(), params.as_slice(), body))
+            }
             _ => None,
         })
         .collect()
@@ -43,7 +45,10 @@ fn bench_one(reg: &JitRegistry, oracle: &FnOracle, name: &str, iters: u64) -> (u
     let mut acc_interp = 0.0f64;
     let t0 = Instant::now();
     for i in 0..iters {
-        match oracle.call(name, &[Value::Num(arg(i))]).expect("interprets") {
+        match oracle
+            .call(name, &[Value::Num(arg(i))])
+            .expect("interprets")
+        {
             Value::Num(n) => acc_interp += n,
             other => panic!("{name}: interpreter didn't yield a number: {other:?}"),
         }
@@ -54,16 +59,31 @@ fn bench_one(reg: &JitRegistry, oracle: &FnOracle, name: &str, iters: u64) -> (u
     let mut acc_jit = 0.0f64;
     let t1 = Instant::now();
     for i in 0..iters {
-        acc_jit += unsafe { compiled.call(&[arg(i)], &mut [0.0], core::ptr::null_mut(), core::ptr::null_mut()) }.expect("no assert raised");
+        acc_jit += unsafe {
+            compiled.call(
+                &[arg(i)],
+                &mut [0.0],
+                core::ptr::null_mut(),
+                core::ptr::null_mut(),
+            )
+        }
+        .expect("no assert raised");
     }
     let jit_ns = t1.elapsed().as_nanos();
 
-    assert_eq!(acc_interp.to_bits(), acc_jit.to_bits(), "{name}: JIT diverged from the interpreter in-bench");
+    assert_eq!(
+        acc_interp.to_bits(),
+        acc_jit.to_bits(),
+        "{name}: JIT diverged from the interpreter in-bench"
+    );
     (interp_ns, jit_ns)
 }
 
 #[test]
-#[allow(clippy::cast_precision_loss, reason = "ns→ratio in a dev-only stderr timing report")]
+#[allow(
+    clippy::cast_precision_loss,
+    reason = "ns→ratio in a dev-only stderr timing report"
+)]
 fn per_call_speedup_vs_real_dispatch() {
     // Four shapes spanning the compiled numeric subset: pure arithmetic (Horner), a `sqrt` builtin (distance),
     // degree-trig (the transcendental hot path `gaussian_rands` exemplifies), and a ternary clamp (branchy).
@@ -73,8 +93,11 @@ fn per_call_speedup_vs_real_dispatch() {
          function wave(x) = sin(x) + cos(2*x);\
          function clamp(x) = x < 0 ? 0 : (x > 100 ? 100 : x);",
     );
-    let reg = JitRegistry::build(defs(&prog).iter().map(|&(n, p, b)| (n, p, b)), std::iter::empty())
-        .expect("registry builds");
+    let reg = JitRegistry::build(
+        defs(&prog).iter().map(|&(n, p, b)| (n, p, b)),
+        std::iter::empty(),
+    )
+    .expect("registry builds");
     let oracle = FnOracle::new(&defs(&prog), &[]).expect("oracle builds");
 
     let iters = 1_000_000u64;

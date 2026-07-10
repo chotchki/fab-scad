@@ -14,26 +14,26 @@ mod builtins;
 mod config;
 mod eval_cache;
 mod fmt;
+mod fnprofile;
 mod fragments;
 mod geo;
 mod geo2d;
 mod geo_drop;
-mod fnprofile;
 mod geo_stack;
 mod geometry;
 mod intrinsics;
-pub(crate) mod jit_abi;
 pub(crate) mod io;
+pub(crate) mod jit_abi;
 mod loader;
 mod message;
 mod mod_cache;
 mod mod_redundancy;
 mod module;
-mod text;
-pub(crate) mod rng;
 mod ops;
 mod redundancy;
+pub(crate) mod rng;
 mod scope;
+mod text;
 mod trace;
 mod trig;
 mod value;
@@ -47,14 +47,12 @@ pub use scope::Scope;
 pub use value::{RANGE_MAX, RangeIter, Value, range_iter, range_len};
 
 use std::cell::{Cell, RefCell};
-use std::rc::Rc;
 use std::collections::{BTreeMap, BTreeSet};
+use std::rc::Rc;
 
 use crate::Mesh;
 use crate::geom::{Affine, Affine2};
-use crate::parser::{
-    Arg, BinOp, Expr, ExprKind, Parameter, Program, Stmt, StmtKind, UnOp,
-};
+use crate::parser::{Arg, BinOp, Expr, ExprKind, Parameter, Program, Stmt, StmtKind, UnOp};
 
 /// The caller-supplied table that fulfills `import`/`surface` [`SourceNeed::File`]s (M.3): the literal
 /// `file=` path a call named → the [`Imported`] payload the caller read for it. fab-lang does ZERO IO, so it
@@ -165,7 +163,12 @@ pub trait NumericJit {
     /// sequence stays bit-identical. The dispatch passes `Ctx::rand_stream`'s cell pointer; a body that never
     /// calls `rands` leaves it untouched. It is a raw pointer (not `&mut`) because the native ABI carries it as
     /// one, and the caller guarantees exclusive single-threaded access for the call's duration.
-    fn call_numeric(&self, name: &str, args: &[Value], rand: *mut core::ffi::c_void) -> Option<JitOutcome>;
+    fn call_numeric(
+        &self,
+        name: &str,
+        args: &[Value],
+        rand: *mut core::ffi::c_void,
+    ) -> Option<JitOutcome>;
 }
 
 /// A JIT-compiled call's result, TYPE-TAGGED (P.1.4e). The native return ABI is a single untyped `f64` (plus
@@ -494,7 +497,10 @@ enum Task<'a> {
     /// Apply a registered INTRINSIC (O.1): pop its `nargs` positional arg values (evaluated by the preceding
     /// `Eval` tasks, exactly like `Builtin`), call the native impl, push its result. Reached only for an
     /// all-positional call to a function whose body fingerprint-matched the registry.
-    Intrinsic { func: intrinsics::Intrinsic, nargs: usize },
+    Intrinsic {
+        func: intrinsics::Intrinsic,
+        nargs: usize,
+    },
     /// Pop the just-evaluated binding value, bind it as `name` in a child of `scope`, then either
     /// evaluate the next `let` binding in that scope or (no bindings left) evaluate `body`. `let`
     /// bindings are SEQUENTIAL — a later one sees the earlier ones.
@@ -525,7 +531,10 @@ enum Task<'a> {
     /// observable side effect (the `snap` counters are unmoved), store it under `key`. NEVER a `geo_stack`
     /// cleanup task — it must not fire on the error path (an errored `?` abandons the whole task stack, so an
     /// errored call is structurally uncacheable). Absent when the cache is off.
-    CacheStore { key: eval_cache::Key, snap: PuritySnap },
+    CacheStore {
+        key: eval_cache::Key,
+        snap: PuritySnap,
+    },
 }
 
 /// The side-effect counters snapshotted at a memoizable call's MISS; [`Task::CacheStore`] re-reads them when
@@ -562,7 +571,9 @@ pub fn interpret_fn(program: &Program, name: &str, args: &[Value]) -> crate::Res
         .stmts
         .iter()
         .filter_map(|s| match &s.kind {
-            StmtKind::FunctionDef { name, params, body } => Some((name.as_str(), params.as_slice(), body)),
+            StmtKind::FunctionDef { name, params, body } => {
+                Some((name.as_str(), params.as_slice(), body))
+            }
             _ => None,
         })
         .collect();
@@ -604,8 +615,10 @@ impl<'a> FnOracle<'a> {
             functions.iter().map(|&(n, p, b)| (n, (p, b))).collect();
         // The `Ctx` function store carries the home-island tag every function needs; a flat single-scope oracle
         // homes them all at island 0 (its published global holds the constants).
-        let ctx_functions: BTreeMap<&str, (loader::FnDef, usize)> =
-            functions.iter().map(|&(n, p, b)| (n, ((p, b), 0usize))).collect();
+        let ctx_functions: BTreeMap<&str, (loader::FnDef, usize)> = functions
+            .iter()
+            .map(|&(n, p, b)| (n, ((p, b), 0usize)))
+            .collect();
         let intrinsics = build_intrinsics(&ctx_functions);
         let ctx = Ctx {
             functions: ctx_functions,
@@ -647,7 +660,11 @@ impl<'a> FnOracle<'a> {
                 }
             }
         }
-        Ok(Self { ctx, global: scope, functions: fn_map })
+        Ok(Self {
+            ctx,
+            global: scope,
+            functions: fn_map,
+        })
     }
 
     /// Interpret `name(args)` — the slow side of the differential. Params bind onto the published constant
@@ -783,8 +800,11 @@ fn eval_with_global<'a>(
                 // `&mut` the helper transiently makes — sound because the compiled function is the sole
                 // (single-threaded) accessor while it runs, and a non-rands body never dereferences it.
                 if let (Some(name), Some(j)) = (jit, ctx.jit.as_deref())
-                    && let Some(out) =
-                        j.call_numeric(name, &vals, ctx.rand_stream.as_ptr().cast::<core::ffi::c_void>())
+                    && let Some(out) = j.call_numeric(
+                        name,
+                        &vals,
+                        ctx.rand_stream.as_ptr().cast::<core::ffi::c_void>(),
+                    )
                 {
                     // Re-tag the untyped native return into a `Value` (P.1.4e): a bool-returning function
                     // (a predicate, a comparison body) yields `Value::Bool`, not `Value::Num` — matching the
@@ -808,7 +828,9 @@ fn eval_with_global<'a>(
                 // queue a `CacheStore` that memoizes the result IFF the subtree turns out pure.
                 // Gate the cache: enabled (opt-in) and args small enough to key cheaply (arg-cap — keeps a
                 // 300k-element `gaussian_rands` comprehension from paying a giant per-call key hash).
-                let store = if ctx.config.eval_cache && eval_cache::worth_caching(&vals, ctx.config.eval_cache_argcap) {
+                let store = if ctx.config.eval_cache
+                    && eval_cache::worth_caching(&vals, ctx.config.eval_cache_argcap)
+                {
                     let key = eval_cache::Key::new(body, &base, &vals, &caller);
                     let hit = ctx.cache.borrow_mut().get(&key);
                     if let Some(v) = hit {
@@ -853,7 +875,12 @@ fn eval_with_global<'a>(
             Task::CallValue { args, caller } => {
                 let callee = values.pop().unwrap_or(Value::Undef);
                 match &callee {
-                    Value::Function { closure_id, env, self_name, .. } => {
+                    Value::Function {
+                        closure_id,
+                        env,
+                        self_name,
+                        ..
+                    } => {
                         let (params, body) = ctx.closures.borrow()[*closure_id];
                         // a closure's body is lexically scoped to its captured env, not the caller's. If it
                         // was defined with a name, re-inject NAME→itself so it can recurse (letrec) — our
@@ -1160,7 +1187,10 @@ fn dispatch_call<'a>(
             if let Some(&func) = ctx.intrinsics.get(name.as_str())
                 && args.iter().all(|a| a.name.is_none())
             {
-                tasks.push(Task::Intrinsic { func, nargs: args.len() });
+                tasks.push(Task::Intrinsic {
+                    func,
+                    nargs: args.len(),
+                });
                 for arg in args.iter().rev() {
                     tasks.push(Task::Eval(&arg.value, scope.clone()));
                 }
@@ -1289,9 +1319,10 @@ fn push_call<'a>(
 /// plain element (appended as one)? `let` in a vector is a comprehension-`let`.
 fn is_comprehension(e: &Expr) -> bool {
     match &e.kind {
-        ExprKind::LcFor { .. } | ExprKind::LcForC { .. } | ExprKind::LcEach(_) | ExprKind::LcIf { .. } => {
-            true
-        }
+        ExprKind::LcFor { .. }
+        | ExprKind::LcForC { .. }
+        | ExprKind::LcEach(_)
+        | ExprKind::LcIf { .. } => true,
         // A `let` in a vector is TRANSPARENT: it splices IFF its body does. `[let(x=…) [a,b]]`
         // contributes the vector as ONE element (`[[a,b]]`), while `[let(x=…) each L]` splices — OpenSCAD-
         // verified. Unlike `if`/`for`/`each` (which route through `eval_comprehension`, adding a wrapper
@@ -1623,7 +1654,11 @@ fn resolve_source(
     let jit = jit_factory.and_then(|f| {
         let defs: Vec<JitDef<'_>> = functions
             .iter()
-            .map(|(name, (fndef, _home))| JitDef { name, params: fndef.0, body: fndef.1 })
+            .map(|(name, (fndef, _home))| JitDef {
+                name,
+                params: fndef.0,
+                body: fndef.1,
+            })
             .collect();
         // Top-level CONSTANTS the numeric subset can inline (P.1.4 globals): the root file's flat constant
         // view (its `use`d islands' assignments, then the root's own — root wins, mirroring
@@ -1720,7 +1755,15 @@ pub(crate) fn evaluate_source(
     // The no-import spine (tests + the pure-geometry `evaluate*` sugar) is interpreter-only — its callers
     // are fab-lang-internal and can't build a JIT. The desktop JIT rides the import-capable
     // `resolve_geometry_*` entries the native shell drives models through.
-    io::drive(source, base_dir, root_path, library_paths, None, config, io::no_import_reader)
+    io::drive(
+        source,
+        base_dir,
+        root_path,
+        library_paths,
+        None,
+        config,
+        io::no_import_reader,
+    )
 }
 
 /// The LOUD error the raw-AST path ([`eval_program`]) raises when `import`/`surface` executed with no file
@@ -1801,13 +1844,17 @@ fn build_intrinsics<'a>(
             // paste `defined` as an updated reference (library moved) OR fix a stale reference. (chotchki's ask.)
             match intrinsics::classify(name, params, body) {
                 intrinsics::Plan::Wired => {
-                    eprintln!("+ [intrinsic WIRED] {name} (fp {:#018x})", intrinsics::fingerprint(params, body));
+                    eprintln!(
+                        "+ [intrinsic WIRED] {name} (fp {:#018x})",
+                        intrinsics::fingerprint(params, body)
+                    );
                 }
                 intrinsics::Plan::Drift => eprintln!(
                     "+ [intrinsic DRIFT] {name} — defined fp {:#018x} != reference fp {} → INTERPRETED \
                      (library drift, or a stale reference)",
                     intrinsics::fingerprint(params, body),
-                    intrinsics::reference_fp(name).map_or_else(|| "?".to_string(), |fp| format!("{fp:#018x}")),
+                    intrinsics::reference_fp(name)
+                        .map_or_else(|| "?".to_string(), |fp| format!("{fp:#018x}")),
                 ),
                 intrinsics::Plan::NotRegistered => {}
             }
@@ -1880,7 +1927,6 @@ fn eval_top<'a>(stmts: &[&'a Stmt], global: &Scope, ctx: &Ctx<'a>) -> crate::Res
     Ok(union_of(if root.is_empty() { nodes } else { root }, ctx))
 }
 
-
 /// Collect the scope-LOCAL `module` definitions of a statement list (last-wins by name) — the module-side
 /// analogue of [`hoisted_bindings`]'s function handling. Kept a stmt-list pure pass; [`eval_nodes`] pushes
 /// the result for the block's eval so a body-local `module f(){…}` resolves (L.2.8m).
@@ -1903,16 +1949,20 @@ fn hoist_scope<'a>(stmts: &[&'a Stmt], scope: &Scope, ctx: &Ctx<'a>) -> crate::R
     for item in hoisted_bindings(stmts) {
         // sigil `=` for an assignment, `f` for a hoisted function def (so the trace tells them apart).
         let (sigil, name, value) = match item {
-            HoistItem::Assign(name, expr) => {
-                ('=', name, name_closure(eval_with_ctx(expr, &scope, ctx)?, name))
-            }
+            HoistItem::Assign(name, expr) => (
+                '=',
+                name,
+                name_closure(eval_with_ctx(expr, &scope, ctx)?, name),
+            ),
             // A module-body-LOCAL `function f(x)=…` becomes a closure VALUE in the body scope, captured
             // AT THIS POINT so it sees the enclosing locals hoisted before it (BOSL2's `make_path` closes
             // over `steps`/`ang`). `dispatch_call`'s function-value path then applies it; `self_name`
             // gives it recursion.
-            HoistItem::Func(name, params, body) => {
-                ('f', name, function_def_closure(name, params, body, &scope, ctx))
-            }
+            HoistItem::Func(name, params, body) => (
+                'f',
+                name,
+                function_def_closure(name, params, body, &scope, ctx),
+            ),
         };
         trace::bind(sigil, name, &value);
         scope.bind(name.to_string(), value);
@@ -2146,7 +2196,6 @@ fn force_3d(child: Geo, ctx: &Ctx) -> GeoNode {
     }
 }
 
-
 /// A child count as a `Num` — the child list is tiny, so the `usize → f64` widening is exact.
 #[allow(
     clippy::cast_precision_loss,
@@ -2312,9 +2361,10 @@ fn hoisted_bindings<'a>(stmts: &[&'a Stmt]) -> Vec<HoistItem<'a>> {
     for stmt in stmts {
         let (name, item) = match &stmt.kind {
             StmtKind::Assignment { name, value } => (&**name, HoistItem::Assign(name, value)),
-            StmtKind::FunctionDef { name, params, body } => {
-                (name.as_str(), HoistItem::Func(name, params.as_slice(), body))
-            }
+            StmtKind::FunctionDef { name, params, body } => (
+                name.as_str(),
+                HoistItem::Func(name, params.as_slice(), body),
+            ),
             _ => continue,
         };
         if let Some(&i) = index.get(name) {
@@ -2563,8 +2613,16 @@ mod tests {
         };
 
         // Phase 1: an unloaded `use` surfaces a Scad need — BEFORE eval (the program can't run yet).
-        let scad = resolve_source("use <lib.scad>\ncube(1);", here, None, &no_scad, &no_files, None, crate::Config::default())
-            .expect("resolves");
+        let scad = resolve_source(
+            "use <lib.scad>\ncube(1);",
+            here,
+            None,
+            &no_scad,
+            &no_files,
+            None,
+            crate::Config::default(),
+        )
+        .expect("resolves");
         assert!(
             matches!(&scad, Resolution::Incomplete { needs } if needs == &[scad_need("lib.scad")]),
             "expected a Scad need, got {scad:?}"
@@ -2590,9 +2648,20 @@ mod tests {
 
         // Supply the mesh → the run CLOSES (Complete). An empty placeholder mesh stands in for a read STL.
         let mut have = FileTable::new();
-        have.insert("a.stl".to_string(), super::Imported::Mesh(crate::Mesh::new()));
-        let closed = resolve_source("import(\"a.stl\");", here, None, &no_scad, &have, None, crate::Config::default())
-            .expect("resolves");
+        have.insert(
+            "a.stl".to_string(),
+            super::Imported::Mesh(crate::Mesh::new()),
+        );
+        let closed = resolve_source(
+            "import(\"a.stl\");",
+            here,
+            None,
+            &no_scad,
+            &have,
+            None,
+            crate::Config::default(),
+        )
+        .expect("resolves");
         assert!(
             matches!(&closed, Resolution::Complete { .. }),
             "expected Complete, got {closed:?}"
@@ -2737,12 +2806,18 @@ mod tests {
         );
         // (4) a function the registry doesn't know → call_numeric returns None → interpreter runs → 27.
         assert_eq!(
-            eval_last_jit("function cube(x) = x*x*x; y = cube(3);", Box::new(MarkerJit)),
+            eval_last_jit(
+                "function cube(x) = x*x*x; y = cube(3);",
+                Box::new(MarkerJit)
+            ),
             Value::Num(27.0),
             "a registry miss falls back to the interpreter"
         );
         // (5) no hook at all (the wasm/raw path) → everything interprets → 25.
-        assert_eq!(eval_last("function sq(x) = x*x; y = sq(5);"), Value::Num(25.0));
+        assert_eq!(
+            eval_last("function sq(x) = x*x; y = sq(5);"),
+            Value::Num(25.0)
+        );
     }
 
     #[test]

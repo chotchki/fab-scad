@@ -184,15 +184,21 @@ fn eval_circle(
 /// 2D contours (J.4.3), shaped by rustybuzz + outlined by ttf-parser over the bundled Liberation Sans (see
 /// [`super::text`]). OpenSCAD defaults: `size = 10`, `halign = "left"`, `valign = "baseline"`, `spacing = 1`.
 /// A missing/non-string `text` → no contours (a present-but-empty 2D leaf, like `circle(0)`).
-fn eval_text(
-    positional: &[Value],
-    named: &BTreeMap<String, Value>,
-    scope: &Scope,
-) -> Vec<Contour> {
+fn eval_text(positional: &[Value], named: &BTreeMap<String, Value>, scope: &Scope) -> Vec<Contour> {
     let map = bind(
         positional,
         named,
-        &["text", "size", "font", "halign", "valign", "spacing", "direction", "language", "script"],
+        &[
+            "text",
+            "size",
+            "font",
+            "halign",
+            "valign",
+            "spacing",
+            "direction",
+            "language",
+            "script",
+        ],
     );
     let params = text::TextParams {
         text: get_string(&map, "text").unwrap_or_default(),

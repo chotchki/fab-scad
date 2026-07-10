@@ -35,7 +35,10 @@ fn parse_dat(text: &str) -> Result<Vec<Vec<f64>>> {
         if t.is_empty() || t.starts_with('#') || t.starts_with('!') {
             continue;
         }
-        let row: Vec<f64> = t.split_whitespace().filter_map(|tok| tok.parse().ok()).collect();
+        let row: Vec<f64> = t
+            .split_whitespace()
+            .filter_map(|tok| tok.parse().ok())
+            .collect();
         if !row.is_empty() {
             rows.push(row);
         }
@@ -106,12 +109,7 @@ fn tessellate(grid: &[Vec<f64>]) -> Mesh {
             tris.push(Tri::new(c, d, m));
             tris.push(Tri::new(d, a, m));
             // BASE: the same cell flat at base_z, reversed → down (−z) normals.
-            let (a2, b2, c2, d2) = (
-                bot(x, y),
-                bot(x + 1, y),
-                bot(x + 1, y + 1),
-                bot(x, y + 1),
-            );
+            let (a2, b2, c2, d2) = (bot(x, y), bot(x + 1, y), bot(x + 1, y + 1), bot(x, y + 1));
             tris.push(Tri::new(a2, c2, b2));
             tris.push(Tri::new(a2, d2, c2));
         }
@@ -170,12 +168,22 @@ mod tests {
         assert_eq!(m.tri_count(), 40);
         // the center bump lifts one grid vert to z = 9, the base sits at min − 1 = −1.
         let zs: Vec<f64> = m.verts.iter().map(|v| v.z).collect();
-        assert!(zs.iter().any(|&z| (z - 9.0).abs() < 1e-9), "the bump survives");
-        assert!(zs.iter().any(|&z| (z + 1.0).abs() < 1e-9), "base at min − 1");
+        assert!(
+            zs.iter().any(|&z| (z - 9.0).abs() < 1e-9),
+            "the bump survives"
+        );
+        assert!(
+            zs.iter().any(|&z| (z + 1.0).abs() < 1e-9),
+            "base at min − 1"
+        );
     }
 
     #[test]
     fn a_degenerate_grid_is_empty() {
-        assert_eq!(tessellate(&[vec![1.0, 2.0, 3.0]]).tri_count(), 0, "1 row → no cells");
+        assert_eq!(
+            tessellate(&[vec![1.0, 2.0, 3.0]]).tri_count(),
+            0,
+            "1 row → no cells"
+        );
     }
 }

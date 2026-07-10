@@ -106,7 +106,7 @@ pub fn find_root() -> Option<PathBuf> {
 /// The `Solid` is built AND consumed here (written to STL); it's `!Send` and never crosses the async-task
 /// boundary the caller spawns this on. (The slice/export path still uses OpenSCAD — switched separately.)
 pub fn render_whole(root: Option<&Path>, source: &Path, out_dir: &Path) -> Result<PathBuf> {
-    use fab_scad::backend::{ManifoldBackend, build_geo};
+    use fab_scad::backend::{build_geo, ManifoldBackend};
     // Wrap in `$preview = true; include <ABSOLUTE source>;` (so `$fn = $preview ? lo : hi` takes the fast
     // path) but evaluate that wrapper against the SOURCE's OWN directory — NOT `out_dir`. scad-rs threads a
     // single base dir for every `import()`, so a wrapper written into the temp `out_dir` made a relative
@@ -122,11 +122,21 @@ pub fn render_whole(root: Option<&Path>, source: &Path, out_dir: &Path) -> Resul
     std::fs::create_dir_all(out_dir)?;
     let out = out_dir.join(format!("{}.stl", stem_of(source)));
     let libs = preview_libs(root);
-    let tree = fab_scad::import::resolve_geometry_with_base(&wrap_src, base, &libs, fab_lang::Config::from_env())
-        .with_context(|| format!("scad-rs eval of {}", source.display()))?;
+    let tree = fab_scad::import::resolve_geometry_with_base(
+        &wrap_src,
+        base,
+        &libs,
+        fab_lang::Config::from_env(),
+    )
+    .with_context(|| format!("scad-rs eval of {}", source.display()))?;
     let solid = build_geo(&tree, &ManifoldBackend)
         .filter(|s| !s.is_empty())
-        .with_context(|| format!("scad-rs rendered EMPTY geometry (no faces) for {}", source.display()))?;
+        .with_context(|| {
+            format!(
+                "scad-rs rendered EMPTY geometry (no faces) for {}",
+                source.display()
+            )
+        })?;
     std::fs::write(&out, solid.to_stl_bytes())
         .with_context(|| format!("writing {}", out.display()))?;
     Ok(out)
@@ -137,7 +147,8 @@ pub fn render_whole(root: Option<&Path>, source: &Path, out_dir: &Path) -> Resul
 /// source>` resolves the source file itself; the source's own same-dir includes resolve against its parent
 /// inside the loader, so they need no entry here.
 fn preview_libs(root: Option<&Path>) -> Vec<PathBuf> {
-    root.map(|r| vec![r.join("libs"), r.join("scad-lib")]).unwrap_or_default()
+    root.map(|r| vec![r.join("libs"), r.join("scad-lib")])
+        .unwrap_or_default()
 }
 
 /// The preview STL `render_whole` writes for `source` (reused by the cross-section, no re-render).
@@ -188,7 +199,10 @@ pub fn print_layout_kernel(
         if mesh.positions.is_empty() {
             continue; // an empty slab (L-shaped gap) — nothing to print
         }
-        ups.push((piece, fab_scad::auto_orient::best_up(&to_tris(&mesh), &[]).to_array()));
+        ups.push((
+            piece,
+            fab_scad::auto_orient::best_up(&to_tris(&mesh), &[]).to_array(),
+        ));
     }
 
     // Pass 2: carve each piece with the onions, gated by the orientations just picked.

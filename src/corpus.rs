@@ -199,7 +199,11 @@ pub fn run_script(script: &str, tests_dir: &Path) -> (Bucket, u128, String) {
     match result {
         Ok(_) => (Bucket::Pass, ms, String::new()),
         Err(e) => {
-            let first = format!("{e}").lines().next().unwrap_or_default().to_string();
+            let first = format!("{e}")
+                .lines()
+                .next()
+                .unwrap_or_default()
+                .to_string();
             (classify(&e), ms, first)
         }
     }
@@ -316,7 +320,9 @@ fn run_range(
             .stderr(Stdio::null())
             .spawn();
         let Ok(mut child) = spawned else {
-            out.extend((next..hi).map(|i| (i, (Bucket::Crash, 0, "worker spawn failed".to_string()))));
+            out.extend(
+                (next..hi).map(|i| (i, (Bucket::Crash, 0, "worker spawn failed".to_string()))),
+            );
             break;
         };
 
@@ -324,7 +330,10 @@ fn run_range(
         let (tx, rx) = mpsc::channel();
         let reader = child.stdout.take().map(|stdout| {
             std::thread::spawn(move || {
-                for line in BufReader::new(stdout).lines().map_while(std::result::Result::ok) {
+                for line in BufReader::new(stdout)
+                    .lines()
+                    .map_while(std::result::Result::ok)
+                {
                     if tx.send(line).is_err() {
                         break;
                     }
@@ -364,9 +373,17 @@ fn run_range(
         let offender = highest.map_or(next, |h| h + 1);
         if offender < hi {
             let outcome = if timed_out {
-                (Bucket::Timeout, PER_TEST_TIMEOUT.as_millis(), "exceeded per-test budget".to_string())
+                (
+                    Bucket::Timeout,
+                    PER_TEST_TIMEOUT.as_millis(),
+                    "exceeded per-test budget".to_string(),
+                )
             } else {
-                (Bucket::Crash, 0, "worker aborted (stack overflow?)".to_string())
+                (
+                    Bucket::Crash,
+                    0,
+                    "worker aborted (stack overflow?)".to_string(),
+                )
             };
             out.push((offender, outcome));
         }
@@ -421,11 +438,13 @@ pub fn histogram(results: &[TestResult]) -> std::collections::BTreeMap<Bucket, u
 /// highest-leverage fixes: knock one out and the pass count jumps. Sorted by count descending, then label.
 #[must_use]
 pub fn signatures(results: &[TestResult]) -> Vec<(Bucket, String, usize)> {
-    let mut map: std::collections::BTreeMap<(Bucket, String), usize> = std::collections::BTreeMap::new();
+    let mut map: std::collections::BTreeMap<(Bucket, String), usize> =
+        std::collections::BTreeMap::new();
     for r in results.iter().filter(|r| r.bucket != Bucket::Pass) {
         *map.entry((r.bucket, r.detail.clone())).or_insert(0) += 1;
     }
-    let mut v: Vec<(Bucket, String, usize)> = map.into_iter().map(|((b, d), n)| (b, d, n)).collect();
+    let mut v: Vec<(Bucket, String, usize)> =
+        map.into_iter().map(|((b, d), n)| (b, d, n)).collect();
     v.sort_by(|a, b| b.2.cmp(&a.2).then(a.0.cmp(&b.0)));
     v
 }

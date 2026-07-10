@@ -102,7 +102,11 @@ impl PartialEq for Key {
             && self.env.frame_id() == o.env.frame_id()
             && Rc::ptr_eq(&self.dyn_ctx, &o.dyn_ctx)
             && self.args.len() == o.args.len()
-            && self.args.iter().zip(&o.args).all(|(a, b)| value_bits_eq(a, b))
+            && self
+                .args
+                .iter()
+                .zip(&o.args)
+                .all(|(a, b)| value_bits_eq(a, b))
     }
 }
 impl Eq for Key {}
@@ -133,7 +137,11 @@ pub(super) fn hash_value_bits<H: Hasher>(v: &Value, h: &mut H) {
         }
         // A closure arg: identity is (closure_id, self_name) — closure_id carries its env + params, self_name
         // pins a tagged/untagged pair of the same id apart. NEVER Value::== (no Function arm).
-        Value::Function { closure_id, self_name, .. } => {
+        Value::Function {
+            closure_id,
+            self_name,
+            ..
+        } => {
             closure_id.hash(h);
             self_name.hash(h);
         }
@@ -149,18 +157,41 @@ pub(super) fn value_bits_eq(a: &Value, b: &Value) -> bool {
         (Value::Num(x), Value::Num(y)) => x.to_bits() == y.to_bits(),
         (Value::Str(x), Value::Str(y)) => x == y,
         (Value::NumList(x), Value::NumList(y)) => {
-            x.len() == y.len() && x.iter().zip(y.iter()).all(|(a, b)| a.to_bits() == b.to_bits())
+            x.len() == y.len()
+                && x.iter()
+                    .zip(y.iter())
+                    .all(|(a, b)| a.to_bits() == b.to_bits())
         }
         (Value::List(x), Value::List(y)) => {
             x.len() == y.len() && x.iter().zip(y.iter()).all(|(a, b)| value_bits_eq(a, b))
         }
         (
-            Value::Range { start: s1, step: t1, end: e1 },
-            Value::Range { start: s2, step: t2, end: e2 },
-        ) => s1.to_bits() == s2.to_bits() && t1.to_bits() == t2.to_bits() && e1.to_bits() == e2.to_bits(),
+            Value::Range {
+                start: s1,
+                step: t1,
+                end: e1,
+            },
+            Value::Range {
+                start: s2,
+                step: t2,
+                end: e2,
+            },
+        ) => {
+            s1.to_bits() == s2.to_bits()
+                && t1.to_bits() == t2.to_bits()
+                && e1.to_bits() == e2.to_bits()
+        }
         (
-            Value::Function { closure_id: c1, self_name: n1, .. },
-            Value::Function { closure_id: c2, self_name: n2, .. },
+            Value::Function {
+                closure_id: c1,
+                self_name: n1,
+                ..
+            },
+            Value::Function {
+                closure_id: c2,
+                self_name: n2,
+                ..
+            },
         ) => c1 == c2 && n1 == n2,
         _ => false,
     }
@@ -176,7 +207,10 @@ pub(super) struct Cache {
 
 impl Default for Cache {
     fn default() -> Self {
-        Self { hot: HashMap::default(), cold: HashMap::default() }
+        Self {
+            hot: HashMap::default(),
+            cold: HashMap::default(),
+        }
     }
 }
 

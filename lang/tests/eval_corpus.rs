@@ -432,7 +432,11 @@ fn a_top_level_constant_can_call_a_function_that_reads_another_global() {
     let full = fab_lang::evaluate_full("E = 0.001;\nfunction f() = E;\nx = f();\necho(x);\n")
         .expect("evaluates");
     assert_eq!(full.echos(), ["0.001"]);
-    assert!(full.warnings().is_empty(), "no unknown-variable warning: {:?}", full.warnings());
+    assert!(
+        full.warnings().is_empty(),
+        "no unknown-variable warning: {:?}",
+        full.warnings()
+    );
 }
 
 #[test]
@@ -484,9 +488,14 @@ fn list_comprehensions() {
     // C-style for binds init AND update SEQUENTIALLY within the clause (L.2.8e) — a later assignment
     // sees the NEW value of an earlier one, `let`-style (OpenSCAD-verified). Regression for BOSL2's
     // `_dp_distance_row` DP (skin method="distance"), which does `costs=…, newrow=…min(costs)…`.
-    assert_eq!(ev("[for(a = 1, b = a + 1; a <= 1; a = a + 1) b]"), list(&[2.0])); // init: b sees a=1
     assert_eq!(
-        ev("[for(i = 0, x = 0, y = 0; i <= 2; x = i * 10, y = x + 1, i = i + 1) if (i == 2) each [x, y]]"),
+        ev("[for(a = 1, b = a + 1; a <= 1; a = a + 1) b]"),
+        list(&[2.0])
+    ); // init: b sees a=1
+    assert_eq!(
+        ev(
+            "[for(i = 0, x = 0, y = 0; i <= 2; x = i * 10, y = x + 1, i = i + 1) if (i == 2) each [x, y]]"
+        ),
         list(&[10.0, 11.0]) // update: y sees the NEW x (=10), not the old (would give 1)
     );
     // `each` SPLICES into a guard/loop operand (L.2.8f): `each if(cond) list` splices the list, not
@@ -494,7 +503,10 @@ fn list_comprehensions() {
     // `[for(i) each if(!approx(...)) lerpn(...)]` — a nested result derailed the whole knot indexing.
     assert_eq!(ev("[each if(true) [1, 2, 3]]"), list(&[1.0, 2.0, 3.0])); // spliced, not [[1,2,3]]
     assert_eq!(ev("[each if(false) [1, 2, 3], 9]"), list(&[9.0])); // false guard → nothing
-    assert_eq!(ev("[for(i = [0, 1]) each if(true) [i, i + 10]]"), list(&[0.0, 10.0, 1.0, 11.0]));
+    assert_eq!(
+        ev("[for(i = [0, 1]) each if(true) [i, i + 10]]"),
+        list(&[0.0, 10.0, 1.0, 11.0])
+    );
     // A `let` in a vector is TRANSPARENT (L.2.8h): it splices IFF its body does. `[let(x) [a,b]]`
     // contributes the vector as ONE element (a `let` is not an `each`), while `[let(x) each L]` splices —
     // OpenSCAD-verified. Regression for BOSL2's trapezoid, whose corners are `(let(i) [base[i]])`: the
@@ -503,7 +515,10 @@ fn list_comprehensions() {
         ev("[(let(x = 5) [x, x + 1])]"),
         Value::list(vec![list(&[5.0, 6.0])]) // [[5,6]], not [5,6]
     );
-    assert_eq!(ev("[let(x = 5) [x, x + 1]]"), Value::list(vec![list(&[5.0, 6.0])])); // bare too
+    assert_eq!(
+        ev("[let(x = 5) [x, x + 1]]"),
+        Value::list(vec![list(&[5.0, 6.0])])
+    ); // bare too
     assert_eq!(ev("[let(x = 5) each [x, x + 1]]"), list(&[5.0, 6.0])); // `each` body → splices
 }
 
@@ -682,7 +697,9 @@ fn search_num_returns_one_miss_asymmetry() {
     // args (`num_returns_per_match`, `index_col_num`) resolve positionally. BOSL2's `in_list(v,list,idx)`
     // lives on this: `search([v], rows, num_returns_per_match=1, index_col_num=1)` must search COLUMN 1.
     assert_eq!(
-        ev(r#"search(["bar"], [[2,"foo"],[4,"bar"],[3,"baz"]], num_returns_per_match=1, index_col_num=1)"#),
+        ev(
+            r#"search(["bar"], [[2,"foo"],[4,"bar"],[3,"baz"]], num_returns_per_match=1, index_col_num=1)"#
+        ),
         Value::list(vec![num(1.0)]) // "bar" is row 1's column 1 → first-hit index 1
     );
     // Positional-ONLY, taken literally: a name does NOT rescue an out-of-order arg. `index_col_num=1`
@@ -804,14 +821,23 @@ fn function_values() {
 /// literal AST (not the runtime value) also means `str()` of a recursive closure is finite (fixes #162).
 #[test]
 fn str_of_a_function_value() {
-    assert_eq!(ev(r"str(function(x) target_func(x))"), Value::string("function(x) target_func(x)"));
+    assert_eq!(
+        ev(r"str(function(x) target_func(x))"),
+        Value::string("function(x) target_func(x)")
+    );
     assert_eq!(
         ev(r"str(function(x, y) target_func(x, y))"),
         Value::string("function(x, y) target_func(x, y)")
     );
-    assert_eq!(ev(r"str(function() target_func(a))"), Value::string("function() target_func(a)"));
+    assert_eq!(
+        ev(r"str(function() target_func(a))"),
+        Value::string("function() target_func(a)")
+    );
     // a captured value does NOT substitute into the rendering — it's the source `a`, not 3
-    assert_eq!(ev("let(a = 3) str(function() f(a))"), Value::string("function() f(a)"));
+    assert_eq!(
+        ev("let(a = 3) str(function() f(a))"),
+        Value::string("function() f(a)")
+    );
     // NESTED function literals render BARE too — no wrapping parens, no space after `function`
     // (L.2.8g): OpenSCAD's `str()` format, vs the canonical printer's parenthesized `(function (x) …)`.
     // This is what BOSL2's fnliterals `f_1arg`/`f_2arg`/… str-equality tests assert.
@@ -827,9 +853,15 @@ fn str_of_a_function_value() {
 /// fnliterals' partial applications).
 #[test]
 fn recursive_function_literals() {
-    assert_eq!(ev("let(g = function(m) m <= 0 ? 0 : m + g(m - 1)) g(5)"), num(15.0));
+    assert_eq!(
+        ev("let(g = function(m) m <= 0 ? 0 : m + g(m - 1)) g(5)"),
+        num(15.0)
+    );
     // deep recursion (proves it's a real fixpoint, not one-level): sum 1..100
-    assert_eq!(ev("let(s = function(m) m <= 0 ? 0 : m + s(m - 1)) s(100)"), num(5050.0));
+    assert_eq!(
+        ev("let(s = function(m) m <= 0 ? 0 : m + s(m - 1)) s(100)"),
+        num(5050.0)
+    );
     // an ANONYMOUS literal has no self-name → an unbound inner call is undef, not itself
     assert_eq!(ev("(function(m) m)(7)"), num(7.0));
 }

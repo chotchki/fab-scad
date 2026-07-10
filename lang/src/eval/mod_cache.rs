@@ -52,7 +52,11 @@ const GEN_CAP: usize = 1 << 15;
 /// Shallow key size: top-level element count over the resolved params + reaching `$`-context, against `cap`
 /// ([`Config::csg_cache_keycap`]). `specials()` is BOSL2's ~42 `$`-vars; a param or `$`-var holding a huge list
 /// makes the per-call key hash a loss the body-skip may not repay. O(#params + #$-vars), short-circuits at cap.
-pub(super) fn worth_caching(params: &[Value], specials: &BTreeMap<Rc<str>, Value>, cap: usize) -> bool {
+pub(super) fn worth_caching(
+    params: &[Value],
+    specials: &BTreeMap<Rc<str>, Value>,
+    cap: usize,
+) -> bool {
     let mut total = 0usize;
     for v in params.iter().chain(specials.values()) {
         total += match v {
@@ -93,7 +97,10 @@ impl ModKey {
             body: body as usize,
             home: home.frame_id(),
             params: params.to_vec().into_boxed_slice(),
-            dctx: specials.iter().map(|(k, v)| (Rc::clone(k), v.clone())).collect(),
+            dctx: specials
+                .iter()
+                .map(|(k, v)| (Rc::clone(k), v.clone()))
+                .collect(),
         }
     }
 }
@@ -117,7 +124,11 @@ impl PartialEq for ModKey {
         self.body == o.body
             && self.home == o.home
             && self.params.len() == o.params.len()
-            && self.params.iter().zip(&o.params).all(|(a, b)| value_bits_eq(a, b))
+            && self
+                .params
+                .iter()
+                .zip(&o.params)
+                .all(|(a, b)| value_bits_eq(a, b))
             && self.dctx.len() == o.dctx.len()
             && self
                 .dctx
@@ -243,7 +254,10 @@ mod tests {
     /// A/B differential is exactly this toggle). In-memory, CWD base, no libs — the module-cache mechanics
     /// don't need BOSL2 (that's the model sweep's job).
     fn run(src: &str, on: bool) -> (Geo, Vec<Message>) {
-        let cfg = Config { csg_cache: on, ..Config::default() };
+        let cfg = Config {
+            csg_cache: on,
+            ..Config::default()
+        };
         super::super::evaluate_source(src, std::path::Path::new("."), None, &[], cfg).unwrap()
     }
 
@@ -280,7 +294,11 @@ mod tests {
             "module e(){ echo(\"x\"); cube(1); } union(){ e(); translate([2,0,0]) e(); }",
         ];
         for src in programs {
-            assert_eq!(geo(src, false), geo(src, true), "cache changed geometry:\n{src}");
+            assert_eq!(
+                geo(src, false),
+                geo(src, true),
+                "cache changed geometry:\n{src}"
+            );
         }
     }
 
@@ -290,13 +308,21 @@ mod tests {
     /// never cached). Pinned directly (not just via the A/B loop) since it's the correctness crux.
     #[test]
     fn different_children_never_collide() {
-        let both = geo("module w(){ children(); } union(){ w(){ cube(1); } w(){ sphere(1,$fn=8); } }", true);
+        let both = geo(
+            "module w(){ children(); } union(){ w(){ cube(1); } w(){ sphere(1,$fn=8); } }",
+            true,
+        );
         match &both {
             Geo::D3(super::super::GeoNode::Union(kids)) => {
                 assert_eq!(kids.len(), 2, "both wraps must render — no dedup");
-                assert_ne!(kids[0], kids[1], "a cube and a sphere, NOT the same shape twice (a wrong hit)");
+                assert_ne!(
+                    kids[0], kids[1],
+                    "a cube and a sphere, NOT the same shape twice (a wrong hit)"
+                );
             }
-            other => panic!("expected a top-level union of the two wrapped children, got {other:?}"),
+            other => {
+                panic!("expected a top-level union of the two wrapped children, got {other:?}")
+            }
         }
     }
 
@@ -313,6 +339,10 @@ mod tests {
                 .count()
         };
         assert_eq!(echoes(false), echoes(true), "cache changed the echo count");
-        assert_eq!(echoes(true), 3, "each of the 3 calls must echo — no dedup on a hit");
+        assert_eq!(
+            echoes(true),
+            3,
+            "each of the 3 calls must echo — no dedup on a hit"
+        );
     }
 }

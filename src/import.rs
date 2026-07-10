@@ -34,13 +34,22 @@ pub fn read_import(base_dir: &Path, raw: &str) -> Result<Imported, Error> {
         "svg" => crate::svg::svg_contours(&path)
             .map(Imported::Contours)
             .map_err(|e| Error::Load(format!("{}: {e:#}", path.display()))),
-        "dxf" => loud(raw, "DXF (2D vector) import is deferred — SVG is the wired 2D path (Q.4)"),
+        "dxf" => loud(
+            raw,
+            "DXF (2D vector) import is deferred — SVG is the wired 2D path (Q.4)",
+        ),
         "off" => loud(raw, "OFF import is deferred — the OFF reader isn't wired"),
         "dat" => crate::surface::dat_mesh(&path)
             .map(Imported::Mesh)
             .map_err(|e| Error::Load(format!("{}: {e:#}", path.display()))),
-        "png" => loud(raw, "surface() PNG heightmap is deferred (backlog #159) — use a DAT file"),
-        _ => loud(raw, "unknown import extension — expected stl, 3mf, svg, or dat"),
+        "png" => loud(
+            raw,
+            "surface() PNG heightmap is deferred (backlog #159) — use a DAT file",
+        ),
+        _ => loud(
+            raw,
+            "unknown import extension — expected stl, 3mf, svg, or dat",
+        ),
     }
 }
 
@@ -55,9 +64,14 @@ pub fn resolve_geometry_with_base(
     library_paths: &[PathBuf],
     config: fab_lang::Config,
 ) -> Result<Geo, Error> {
-    fab_lang::resolve_geometry_with_base(source, base_dir, library_paths, jit_factory(), config, |raw| {
-        read_import(base_dir, raw)
-    })
+    fab_lang::resolve_geometry_with_base(
+        source,
+        base_dir,
+        library_paths,
+        jit_factory(),
+        config,
+        |raw| read_import(base_dir, raw),
+    )
 }
 
 /// The desktop numeric-JIT factory the eval entry threads into `Ctx` (P.1) — `Some` on a `jit` build (which
@@ -244,7 +258,9 @@ mod tests {
 
         // ...and end to end: import(file) is a single 3D leaf carrying that mesh.
         let src = format!("import(\"{name}\");");
-        match resolve_geometry_with_base(&src, &tmp(), &[], fab_lang::Config::default()).expect("resolves") {
+        match resolve_geometry_with_base(&src, &tmp(), &[], fab_lang::Config::default())
+            .expect("resolves")
+        {
             Geo::D3(GeoNode::Leaf(ref leaf)) => assert_eq!(*leaf, mesh),
             other => panic!("expected a 3D leaf, got {other:?}"),
         }
@@ -264,12 +280,11 @@ mod tests {
         let mesh = mesh_of(read_import(&tmp(), &name).expect("3mf imports"));
         assert_eq!(mesh.tri_count(), 24, "12 tris per cube, concatenated");
         // The second cube lives at x ∈ [20, 25] — proof the index offset kept its faces on its own verts.
-        let max_x = mesh
-            .verts
-            .iter()
-            .map(|v| v.x)
-            .fold(f64::MIN, f64::max);
-        assert!(max_x >= 24.9, "second cube's verts survived the offset, max_x = {max_x}");
+        let max_x = mesh.verts.iter().map(|v| v.x).fold(f64::MIN, f64::max);
+        assert!(
+            max_x >= 24.9,
+            "second cube's verts survived the offset, max_x = {max_x}"
+        );
     }
 
     #[test]
@@ -309,7 +324,9 @@ mod tests {
         )
         .unwrap();
         let src = format!("import(\"{name}\");");
-        match resolve_geometry_with_base(&src, &tmp(), &[], fab_lang::Config::default()).expect("resolves") {
+        match resolve_geometry_with_base(&src, &tmp(), &[], fab_lang::Config::default())
+            .expect("resolves")
+        {
             Geo::D2(fab_lang::Shape2D::Polygon(ref contours)) => {
                 assert_eq!(contours.len(), 1, "one rect subpath → one contour");
                 assert_eq!(contours[0].len(), 4, "a rect is 4 corners");
@@ -338,7 +355,9 @@ mod tests {
         // Wrap-by-absolute-include (like render_whole), evaluated with the MODEL's dir as base_dir.
         let abs = dir.join("model.scad").canonicalize().unwrap();
         let wrap = format!("include <{}>;\n", abs.display());
-        match resolve_geometry_with_base(&wrap, &dir, &[], fab_lang::Config::default()).expect("resolves") {
+        match resolve_geometry_with_base(&wrap, &dir, &[], fab_lang::Config::default())
+            .expect("resolves")
+        {
             Geo::D2(fab_lang::Shape2D::Polygon(ref contours)) => {
                 assert_eq!(contours.len(), 1, "stamp.svg's rect imported → one contour");
             }

@@ -550,14 +550,21 @@ enum Engine {
 /// `<connectors.scad>` resolve identically). Same-dir includes resolve against the target's own parent inside
 /// the loader, so they need no entry here.
 fn scadrs_libs() -> Vec<PathBuf> {
-    find_root().map_or_else(Vec::new, |root| vec![root.join("libs"), root.join("scad-lib")])
+    find_root().map_or_else(Vec::new, |root| {
+        vec![root.join("libs"), root.join("scad-lib")]
+    })
 }
 
 /// `fab render --engine scad-rs` (Q.1 dogfooding) — render a `.scad` through OUR pipeline (fab-lang eval →
 /// Manifold kernel → STL), never the OpenSCAD binary. With `--check`, ALSO render through OpenSCAD and report
 /// the boolean-residual/genus divergence, so a real print doubles as a differential sample. Set
 /// `FAB_EVAL_CACHE=1` to exercise the eval-memo cache (N.2c) on real work.
-fn render_scadrs_cmd(target: &Path, out: Option<PathBuf>, check: bool, _timeout_secs: u64) -> Result<()> {
+fn render_scadrs_cmd(
+    target: &Path,
+    out: Option<PathBuf>,
+    check: bool,
+    _timeout_secs: u64,
+) -> Result<()> {
     use fab_scad::backend::{ManifoldBackend, build_geo};
     if !target.exists() {
         bail!("no such file: {}", target.display());
@@ -570,7 +577,12 @@ fn render_scadrs_cmd(target: &Path, out: Option<PathBuf>, check: bool, _timeout_
         .with_context(|| format!("scad-rs eval of {}", target.display()))?;
     let solid = build_geo(&tree, &ManifoldBackend)
         .filter(|s| !s.is_empty())
-        .with_context(|| format!("scad-rs rendered EMPTY geometry (no faces) for {}", target.display()))?;
+        .with_context(|| {
+            format!(
+                "scad-rs rendered EMPTY geometry (no faces) for {}",
+                target.display()
+            )
+        })?;
     let ms = start.elapsed().as_millis();
     std::fs::write(&stl, solid.to_stl_bytes())
         .with_context(|| format!("writing {}", stl.display()))?;

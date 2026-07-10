@@ -40,7 +40,10 @@ fn empty_program_is_empty() {
 #[test]
 fn transform_wraps_its_child_with_the_matrix() {
     match d3(evaluate_geometry("translate([5, 2, 9]) cube(10);").unwrap()) {
-        GeoNode::Transform { ref matrix, ref child } => {
+        GeoNode::Transform {
+            ref matrix,
+            ref child,
+        } => {
             let m = matrix.as_row_major();
             assert_eq!([m[3], m[7], m[11]], [5.0, 2.0, 9.0]); // translation column
             assert!(matches!(**child, GeoNode::Leaf(_)));
@@ -70,7 +73,9 @@ fn multiple_objects_are_an_implicit_union() {
 #[test]
 fn booleans_build_their_nodes_over_children() {
     let two = |src| match d3(evaluate_geometry(src).unwrap()) {
-        GeoNode::Difference(ref c) | GeoNode::Intersection(ref c) | GeoNode::Union(ref c) => c.len(),
+        GeoNode::Difference(ref c) | GeoNode::Intersection(ref c) | GeoNode::Union(ref c) => {
+            c.len()
+        }
         other => panic!("expected a boolean node, got {other:?}"),
     };
     assert_eq!(two("difference() { cube(10); sphere(5, $fn = 8); }"), 2);
@@ -165,7 +170,10 @@ fn for_iterates_and_unions() {
 fn color_wraps_its_subtree() {
     // A named color → GeoNode::Color with the resolved Rgba; child is the primitive.
     match d3(evaluate_geometry("color(\"red\") cube(10);").unwrap()) {
-        GeoNode::Color { ref color, ref child } => {
+        GeoNode::Color {
+            ref color,
+            ref child,
+        } => {
             assert_eq!(*color, Rgba::opaque(1.0, 0.0, 0.0));
             assert!(matches!(**child, GeoNode::Leaf(_)));
         }

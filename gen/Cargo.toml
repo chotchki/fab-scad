@@ -1,0 +1,22 @@
+# K.3 — the grammar-directed SCAD program generator. Emits VALID-by-construction programs (seed → program,
+# reproducibly) and labels each through the evaluator (+ the JIT bit-identity check) — the ML-training corpus
+# producer + differential-oracle harness. Separate crate so its rand/JIT deps stay out of the core evaluator.
+[package]
+name = "fab-gen"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+# MT19937 (fab-lang's own RandStream) is the seed source — same portable/deterministic PRNG the evaluator
+# uses, so a generator seed replays bit-identically on every platform. No new rand dependency.
+fab-lang = { path = "../lang" }
+# The interp==JIT label: compile a generated numeric function to native code and diff it against the interpreter.
+fab-jit = { path = "../jit" }
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "scad-gen"
+path = "src/main.rs"

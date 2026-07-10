@@ -123,6 +123,17 @@ impl RandStream {
         }
     }
 
+    /// A fresh stream at an EXPLICIT seed — the reproducible entry point for out-of-crate consumers (the K.3
+    /// program generator seeds one per program, so a seed replays its exact program). Same MT19937 recurrence
+    /// as [`Self::new`], just seeded by the caller instead of the fixed `DEFAULT_SEED`.
+    #[must_use]
+    pub fn seeded(seed: u32) -> Self {
+        Self {
+            rng: Mt19937::new(seed),
+            draws: 0,
+        }
+    }
+
     /// ONE draw in `[min, max)`, ADVANCING the stream (bumps `draws` by 1). The single source of truth for a
     /// seedless draw — both the batch [`RandStream::draw`] and the JIT's [`jit_rand_next`] helper route through
     /// it, so the draw SEQUENCE and the `draws` fence counter are bit-identical whether a `rands()` runs

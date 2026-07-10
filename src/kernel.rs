@@ -543,6 +543,84 @@ impl Solid {
         out
     }
 
+    /// Split into connected components — one Solid per maximal set of triangles joined through
+    /// shared vertices. A presliced part (many disjoint slabs unioned into one manifold) splits into
+    /// its individual slabs; a single connected solid comes back unchanged. The reason (T.2a): the
+    /// print pipeline orients each piece with `auto_orient::best_up` and packs it — but scoring a
+    /// whole presliced blob picks ONE meaningless build-up (the uniform-45° dogfood bug), so the
+    /// blob has to break into printable pieces FIRST.
+    ///
+    /// manifold3d 0.3.1 exposes no `Decompose()`, so this is a hand-rolled union-find over the
+    /// exported mesh. Components come back sorted by their bbox-min corner then triangle count — a
+    /// GEOMETRIC key, so the split is stable run-to-run even where Manifold reorders the mesh
+    /// internally (S.4 same-platform mesh nondeterminism), which keeps a per-component orientation
+    /// override pinned to the same slab across a re-render.
+    pub fn components(&self) -> Vec<Solid> {
+        let (v, stride, idx) = self.0.to_mesh_f64();
+        if idx.is_empty() {
+            return Vec::new();
+        }
+        let nverts = v.len() / stride;
+        // Union-find over vertex indices; the root is always the MIN index in the set.
+        fn find(p: &mut [u32], mut x: u32) -> u32 {
+            while p[x as usize] != x {
+                p[x as usize] = p[p[x as usize] as usize]; // path halving
+                x = p[x as usize];
+            }
+            x
+        }
+        fn union(p: &mut [u32], a: u32, b: u32) {
+            let (ra, rb) = (find(p, a), find(p, b));
+            if ra != rb {
+                p[ra.max(rb) as usize] = ra.min(rb);
+            }
+        }
+        let mut parent: Vec<u32> = (0..nverts as u32).collect();
+        for t in idx.chunks_exact(3) {
+            union(&mut parent, t[0] as u32, t[1] as u32);
+            union(&mut parent, t[1] as u32, t[2] as u32);
+        }
+        // Group the triangles by component root.
+        let mut groups: HashMap<u32, Vec<[u64; 3]>> = HashMap::new();
+        for t in idx.chunks_exact(3) {
+            let root = find(&mut parent, t[0] as u32);
+            groups.entry(root).or_default().push([t[0], t[1], t[2]]);
+        }
+        // One component ⇒ hand back the original solid untouched (skip a lossy mesh round-trip).
+        if groups.len() == 1 {
+            return vec![self.clone()];
+        }
+        // Rebuild a Solid per group, remapping each to a compact local vertex buffer.
+        let mut solids: Vec<Solid> = groups
+            .into_values()
+            .filter_map(|tris| {
+                let mut remap: HashMap<u64, u64> = HashMap::new();
+                let mut lv: Vec<f64> = Vec::new();
+                let mut li: Vec<u64> = Vec::with_capacity(tris.len() * 3);
+                for t in &tris {
+                    for &vi in t {
+                        let ni = *remap.entry(vi).or_insert_with(|| {
+                            let b = vi as usize * stride;
+                            lv.extend_from_slice(&v[b..b + 3]);
+                            (lv.len() / 3 - 1) as u64
+                        });
+                        li.push(ni);
+                    }
+                }
+                Manifold::from_mesh_f64(&lv, 3, &li).ok().map(Solid::wrap)
+            })
+            .collect();
+        // Geometric, S.4-stable order: bbox-min corner (x,y,z lexicographic) then triangle count.
+        solids.sort_by(|a, b| {
+            let key = |s: &Solid| s.bbox().map_or([f64::INFINITY; 3], |(m, _)| m.to_array());
+            key(a)
+                .partial_cmp(&key(b))
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then(a.num_tri().cmp(&b.num_tri()))
+        });
+        solids
+    }
+
     // --- half-space cuts (the slicer primitives, 11.4) -------------------------------------------
 
     /// Split by the plane `normal·p = offset` into `(positive, negative)` — the positive half is the
@@ -1080,6 +1158,35 @@ mod tests {
         }
         // The middle piece of a single-axis onion floater bug can't recur here — each cell is built
         // by clipping the SAME base, so nothing from a neighbour cell leaks in.
+    }
+
+    #[test]
+    fn components_split_a_disjoint_union_deterministically() {
+        // Two cubes 100mm apart, unioned into one manifold (the presliced-blob shape). components()
+        // must break them back into two valid solids, ordered by bbox-min X (the +100 cube last).
+        let a = Solid::cube(10.0, 10.0, 10.0, true);
+        let b = Solid::cube(10.0, 10.0, 10.0, true).translate(Vec3::new(100.0, 0.0, 0.0));
+        let blob = a.union(&b);
+        let comps = blob.components();
+        assert_eq!(comps.len(), 2, "disjoint union splits into two");
+        for c in &comps {
+            c.check().unwrap();
+            let (min, max) = c.bbox().unwrap();
+            assert!((max[0] - min[0] - 10.0).abs() < 1e-4, "each is a 10mm cube");
+        }
+        // Geometric ordering: the origin cube (min.x ≈ -5) before the +100 cube (min.x ≈ 95).
+        assert!(comps[0].bbox().unwrap().0[0] < comps[1].bbox().unwrap().0[0]);
+
+        // A single connected solid is one component (and comes back intact — the fast path).
+        let one = Solid::cube(10.0, 10.0, 10.0, true).components();
+        assert_eq!(one.len(), 1);
+        assert_eq!(one[0].num_tri(), Solid::cube(10.0, 10.0, 10.0, true).num_tri());
+
+        // Empty in, empty out.
+        assert!(Solid::cube(1.0, 1.0, 1.0, true)
+            .difference(&Solid::cube(2.0, 2.0, 2.0, true))
+            .components()
+            .is_empty());
     }
 
     #[test]

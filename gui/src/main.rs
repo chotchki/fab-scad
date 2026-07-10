@@ -286,21 +286,26 @@ struct XSection(Option<Vec<Vec<[f32; 2]>>>);
 /// clicking a piece's face sets a MANUAL override (recorded in `manual` so a re-render keeps it).
 /// Threaded into `reslice` so the slice gates its onions on how each piece actually prints. Empty =
 /// every piece defaults to +Z (the pre-orientation behaviour).
+/// A printable piece's identity: its slab multi-index + its connected-COMPONENT index within that
+/// slab (0 when the slab is a single solid; a presliced blob splits into comps 0..N — T.2a). Every
+/// per-piece orientation keys off this so each component orients on its own.
+type PieceKey = ([usize; 3], usize);
+
 #[derive(Resource, Default)]
 struct Orient {
-    map: HashMap<[usize; 3], [f32; 3]>,
-    manual: HashSet<[usize; 3]>,
+    map: HashMap<PieceKey, [f32; 3]>,
+    manual: HashSet<PieceKey>,
 }
 
 impl Orient {
-    /// Record a user-chosen build-up for `piece` (model space, normalised by the caller).
-    fn set_manual(&mut self, piece: [usize; 3], up: [f32; 3]) {
-        self.map.insert(piece, up);
-        self.manual.insert(piece);
+    /// Record a user-chosen build-up for `key` (model space, normalised by the caller).
+    fn set_manual(&mut self, key: PieceKey, up: [f32; 3]) {
+        self.map.insert(key, up);
+        self.manual.insert(key);
     }
     /// This piece's build-up, falling back to `auto` (the auto-pick) when unset.
-    fn up_or(&self, piece: [usize; 3], auto: [f32; 3]) -> [f32; 3] {
-        self.map.get(&piece).copied().unwrap_or(auto)
+    fn up_or(&self, key: PieceKey, auto: [f32; 3]) -> [f32; 3] {
+        self.map.get(&key).copied().unwrap_or(auto)
     }
 }
 
@@ -345,10 +350,10 @@ struct PrevCam(Option<(f32, f32, f32, Vec3)>);
 #[derive(Resource, Default)]
 struct Feas(Vec<bool>);
 
-/// One laid-out piece in the print-orientation preview (its slab multi-index, for the click→orient
-/// pick). Despawned when the preview closes.
+/// One laid-out piece in the print-orientation preview (its slab + component key, for the
+/// click→orient pick). Despawned when the preview closes.
 #[derive(Component)]
-struct PrintPiece([usize; 3]);
+struct PrintPiece(PieceKey);
 
 /// The 3D point of a `(pos_a, pos_b)` on a cut plane: `at` along the axis, pos in the two non-axis
 /// dims (ascending) — the inverse of the connector projection.
@@ -1955,14 +1960,17 @@ fn request_reslice(
     );
 }
 
-/// The auto-picked (eventually manual) per-piece orientations as `fab::Orient3` for `reslice`. Empty
-/// until the print-orientation preview runs and seeds the map — then every slice honours them.
+/// The auto-picked (eventually manual) orientations as `fab::Orient3` for `reslice`. Empty until the
+/// print-orientation preview runs and seeds the map — then every slice honours them. The slice
+/// codegen gates onions / teardrops per SLAB, so this projects the per-component map to slab-level
+/// via component 0 (a multi-component slab is presliced ⇒ no connectors ⇒ this gates nothing).
 fn orient_inputs(orient: &Orient) -> Vec<fab::Orient3> {
     orient
         .map
         .iter()
-        .map(|(&piece, &up)| fab::Orient3 {
-            piece,
+        .filter(|((_, comp), _)| *comp == 0)
+        .map(|((piece, _), up)| fab::Orient3 {
+            piece: *piece,
             up: [up[0] as f64, up[1] as f64, up[2] as f64],
         })
         .collect()
@@ -2476,7 +2484,7 @@ fn poll_print_job(
     orient.map.clear();
     orient.manual.clear();
     for pp in &pieces {
-        orient.map.insert(pp.piece, pp.up);
+        orient.map.insert((pp.piece, pp.comp), pp.up);
     }
     let n = pieces.len();
     cache.0 = Some(pieces);
@@ -2559,7 +2567,7 @@ fn sync_orientation(
     let (mut bb_x, mut bb_y, mut bb_z) = (0.0_f32, 0.0_f32, 0.0_f32);
     let mut placed: Vec<(usize, Quat, Vec3)> = Vec::new(); // (piece index, rotation, translation)
     for (i, pp) in pieces.iter().enumerate() {
-        let up = Vec3::from_array(orient.up_or(pp.piece, pp.up)).normalize_or_zero();
+        let up = Vec3::from_array(orient.up_or((pp.piece, pp.comp), pp.up)).normalize_or_zero();
         let rot = if up == Vec3::ZERO {
             Quat::IDENTITY
         } else {
@@ -2596,7 +2604,7 @@ fn sync_orientation(
                 rotation: rot,
                 ..default()
             },
-            PrintPiece(pieces[i].piece),
+            PrintPiece((pieces[i].piece, pieces[i].comp)),
         ));
     }
     // Frame the laid-out block — including a tall tilted piece (account for height, raise the target).
@@ -3218,7 +3226,7 @@ fn run_script(
         }
         Action::Orient(piece, up) => {
             if runner.timer == 1 {
-                orient.set_manual(piece, Vec3::from_array(up).normalize_or_zero().to_array());
+                orient.set_manual((piece, 0), Vec3::from_array(up).normalize_or_zero().to_array());
             }
             runner.timer >= 3 // let relayout + feasibility catch up
         }
@@ -4042,7 +4050,7 @@ fn export_plates_action(
     let ups: Vec<[f64; 3]> = list
         .iter()
         .map(|pp| {
-            let u = orient.up_or(pp.piece, pp.up);
+            let u = orient.up_or((pp.piece, pp.comp), pp.up);
             [u[0] as f64, u[1] as f64, u[2] as f64]
         })
         .collect();

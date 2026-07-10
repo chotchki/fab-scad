@@ -4,6 +4,7 @@
 //! `$fn = $preview ? low : high` render fast (nail_cure: 2.4s vs 43s at full $fn). Final,
 //! full-quality output is `fab`'s job; the GUI just needs a quick, responsive preview.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -156,11 +157,13 @@ pub fn whole_stl(source: &Path, out_dir: &Path) -> PathBuf {
     out_dir.join(format!("{}.stl", stem_of(source)))
 }
 
-/// One piece, rendered + auto-oriented for the print-orientation preview: its slab multi-index, mesh
-/// (WITH its joints carved — peg/socket), and the least-support build-up (`auto_orient::best_up`).
-/// Empty slabs are dropped upstream.
+/// One printable piece for the print-orientation preview: its slab multi-index, its
+/// connected-COMPONENT index within that slab (0 when the slab is one solid; >0 splits a presliced
+/// blob into its real pieces — T.2a), the mesh (WITH its joints carved — peg/socket), and the
+/// least-support build-up (`auto_orient::best_up`). Empty slabs are dropped upstream.
 pub struct PiecePrint {
     pub piece: [usize; 3],
+    pub comp: usize,
     pub mesh: StlMesh,
     pub up: [f32; 3],
 }
@@ -191,51 +194,65 @@ pub fn print_layout_kernel(
     }
     let base = Solid::from_stl_file(&base_stl)?;
 
-    // Pass 1: BARE slice (no connectors) → least-support orientation per non-empty piece. (Axis-
-    // aligned cuts only today, so the cut-face normals are already in `best_up`'s base set — none.)
-    let mut ups: Vec<([usize; 3], [f64; 3])> = Vec::new();
+    // Pass 1: BARE slice (no connectors) → least-support orientation per non-empty piece. Each slab
+    // is split into its CONNECTED COMPONENTS first: a presliced part is one uncut slab holding many
+    // disjoint sub-solids (BOSL2 `partition`), and scoring the whole blob picks one meaningless 45°
+    // build-up (T.1) — so orient each component on its own. (Axis-aligned cuts only today, so the
+    // cut-face normals are already in `best_up`'s base set — none.)
+    let mut ups: HashMap<([usize; 3], usize), [f64; 3]> = HashMap::new();
     for (piece, solid) in slicing::slice_solid(&cuts_to_spec(cuts), &base)? {
-        let mesh = stl::load_stl_bytes(&solid.to_stl_bytes())?;
-        if mesh.positions.is_empty() {
-            continue; // an empty slab (L-shaped gap) — nothing to print
+        for (comp, csolid) in solid.components().into_iter().enumerate() {
+            let mesh = stl::load_stl_bytes(&csolid.to_stl_bytes())?;
+            if mesh.positions.is_empty() {
+                continue; // a degenerate component — nothing to print
+            }
+            ups.insert(
+                (piece, comp),
+                fab_scad::auto_orient::best_up(&to_tris(&mesh), &[]).to_array(),
+            );
         }
-        ups.push((
-            piece,
-            fab_scad::auto_orient::best_up(&to_tris(&mesh), &[]).to_array(),
-        ));
     }
 
-    // Pass 2: carve each piece with the onions, gated by the orientations just picked.
+    // Pass 2: carve each slab with the onions, gated by its per-SLAB orientation (the first
+    // component's build-up — connectors only exist in the cut case, where a slab is a single
+    // component, so this is that component's own up). Then re-split into components for the pieces.
     let mut spec = cuts_to_spec(cuts);
     spec.connector = to_connectors(connectors);
-    spec.orient = ups
-        .iter()
-        .map(|&(piece, up)| PieceOrient {
-            piece,
-            up: [Num::Float(up[0]), Num::Float(up[1]), Num::Float(up[2])],
-        })
-        .collect();
+    spec.orient = slab_orients(&ups);
 
     let mut out = Vec::new();
     for (piece, solid) in slicing::slice_solid(&spec, &base)? {
-        let mesh = stl::load_stl_bytes(&solid.to_stl_bytes())?;
-        if mesh.positions.is_empty() {
-            continue;
+        for (comp, csolid) in solid.components().into_iter().enumerate() {
+            let mesh = stl::load_stl_bytes(&csolid.to_stl_bytes())?;
+            if mesh.positions.is_empty() {
+                continue;
+            }
+            // The build-up this component was oriented to in pass 1 (default +Z if a connector diff
+            // dropped a bare component that reappears carved — shouldn't happen with axis cuts).
+            let up = ups.get(&(piece, comp)).copied().unwrap_or([0.0, 0.0, 1.0]);
+            out.push(PiecePrint {
+                piece,
+                comp,
+                mesh,
+                up: [up[0] as f32, up[1] as f32, up[2] as f32],
+            });
         }
-        // The build-up this piece was oriented to in pass 1 (default +Z if a connector diff dropped
-        // a bare piece that reappears carved — shouldn't happen with axis-aligned cuts).
-        let up = ups
-            .iter()
-            .find(|(p, _)| *p == piece)
-            .map(|(_, u)| *u)
-            .unwrap_or([0.0, 0.0, 1.0]);
-        out.push(PiecePrint {
-            piece,
-            mesh,
-            up: [up[0] as f32, up[1] as f32, up[2] as f32],
-        });
     }
     Ok(out)
+}
+
+/// Project the per-(slab, component) build-ups down to ONE build-up per SLAB for the slice codegen
+/// (`slicing`'s onion gating + bolt teardrop read `[slicing.orient]` by slab index). Uses each
+/// slab's component 0 — a multi-component slab only occurs presliced (no connectors), where this
+/// gates nothing; a single-component slab (the cut case) is exactly that component's own build-up.
+fn slab_orients(ups: &HashMap<([usize; 3], usize), [f64; 3]>) -> Vec<PieceOrient> {
+    ups.iter()
+        .filter(|((_, comp), _)| *comp == 0)
+        .map(|((piece, _), up)| PieceOrient {
+            piece: *piece,
+            up: [Num::Float(up[0]), Num::Float(up[1]), Num::Float(up[2])],
+        })
+        .collect()
 }
 
 /// `StlMesh` positions (flat, 3 verts per tri) → `[[f64; 3]; 3]` triangles for the orientation math.
@@ -431,7 +448,6 @@ fn stem_of(p: &Path) -> String {
 /// A preview `StlMesh` (triangle soup) → an indexed `bambu::Mesh`, deduping shared vertices by exact
 /// bits (the kernel emits bit-identical coords for shared verts, so the weld is exact).
 fn stlmesh_to_bambu(m: &StlMesh) -> bambu::Mesh {
-    use std::collections::HashMap;
     let mut map: HashMap<[u32; 3], u32> = HashMap::new();
     let mut verts: Vec<[f64; 3]> = Vec::new();
     let mut tris: Vec<[u32; 3]> = Vec::new();
@@ -554,6 +570,41 @@ mod tests {
             "second reslice re-rendered the base (cache miss)"
         );
 
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn print_layout_splits_a_presliced_blob_into_flat_pieces() {
+        // T.2a regression: a "presliced" part is many disjoint solids unioned into one (BOSL2
+        // `partition` with spread). With no cuts, slice_solid hands back the whole blob as ONE
+        // slab — so print_layout_kernel must split it into connected components and orient EACH,
+        // else best_up scores the blob and every piece tilts ~45° (the dogfood bug). Two cubes
+        // 60mm apart stand in for the blob; pre-seed the base STL so no render is needed.
+        use fab_scad::kernel::Solid;
+        let tmp = std::env::temp_dir().join(format!("gui_presliced_{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let src = tmp.join("twin.scad"); // need not exist — the cached STL short-circuits the render
+        let blob = Solid::cube(20.0, 20.0, 20.0, true)
+            .union(&Solid::cube(20.0, 20.0, 20.0, true).translate(FVec3::new(60.0, 0.0, 0.0)));
+        std::fs::write(whole_stl(&src, &tmp), blob.to_stl_bytes()).unwrap();
+
+        let pieces = print_layout_kernel(None, &src, &[], &[], &tmp).expect("print layout");
+        assert_eq!(pieces.len(), 2, "the blob splits into its two components");
+        // The two share the slab index [0,0,0] but get distinct component indices.
+        assert_eq!(pieces[0].piece, [0, 0, 0]);
+        let comps: std::collections::HashSet<usize> = pieces.iter().map(|p| p.comp).collect();
+        assert_eq!(comps, [0, 1].into_iter().collect(), "distinct comp ids 0 and 1");
+        // Each cube lies FLAT: its build-up is an axis (a component ≈ ±1), never a 45° tilt (≈0.707).
+        for p in &pieces {
+            let m = p.up.iter().map(|c| c.abs()).fold(0.0_f32, f32::max);
+            assert!(
+                m > 0.99,
+                "piece {:?}/{} up {:?} is a 45° tilt, not flat",
+                p.piece,
+                p.comp,
+                p.up
+            );
+        }
         let _ = std::fs::remove_dir_all(&tmp);
     }
 

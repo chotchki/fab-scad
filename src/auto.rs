@@ -255,25 +255,32 @@ pub fn make_planned<W: std::io::Write + std::io::Seek>(
             .collect()
     };
 
-    // Bare slice → least-support orientation per piece.
+    use std::collections::HashMap;
+
+    // Bare slice → least-support orientation per CONNECTED COMPONENT of each slab. A presliced part
+    // is one uncut slab of many disjoint sub-solids (BOSL2 `partition`); scoring the whole blob
+    // picks one meaningless 45° up (T.2a), so split each slab and orient every component on its own.
     let bare = Slicing {
         printer: None,
         cut: make_cut(),
         connector: vec![],
         orient: vec![],
     };
-    let mut ups: Vec<([usize; 3], [f64; 3])> = Vec::new();
+    let mut ups: HashMap<([usize; 3], usize), [f64; 3]> = HashMap::new();
     for (piece, solid) in crate::slicing::slice_solid(&bare, &base)? {
-        // best_up now speaks Vec3 (mesh tris are [Vec3;3]); keep the [usize;3]→[f64;3] up map as arrays.
-        let up = crate::auto_orient::best_up(&solid.tris(), &[]);
-        ups.push((piece, up.to_array()));
+        for (comp, csolid) in solid.components().into_iter().enumerate() {
+            let up = crate::auto_orient::best_up(&csolid.tris(), &[]);
+            ups.insert((piece, comp), up.to_array());
+        }
     }
 
-    // Carved slice, gated by those orientations.
+    // Carved slice, gated by the per-SLAB orientation (each slab's component 0 — connectors only
+    // exist in the cut case, where a slab is a single component, so that IS the piece's own up).
     let orient = ups
         .iter()
-        .map(|&(piece, up)| PieceOrient {
-            piece,
+        .filter(|((_, comp), _)| *comp == 0)
+        .map(|((piece, _), up)| PieceOrient {
+            piece: *piece,
             up: [Num::Float(up[0]), Num::Float(up[1]), Num::Float(up[2])],
         })
         .collect();
@@ -288,24 +295,20 @@ pub fn make_planned<W: std::io::Write + std::io::Seek>(
         bail!("slice produced no pieces");
     }
 
-    // Orient (best_up) + pack + export.
-    let to_place: Vec<PieceToPlace> = pieces
-        .iter()
-        .map(|(piece, solid)| {
-            let up = ups
-                .iter()
-                .find(|(p, _)| p == piece)
-                .map(|(_, u)| *u)
-                .unwrap_or([0.0, 0.0, 1.0]);
-            let (v, t) = solid.to_indexed();
+    // Orient (best_up per component) + co-pack + export.
+    let mut to_place: Vec<PieceToPlace> = Vec::new();
+    for (piece, solid) in &pieces {
+        for (comp, csolid) in solid.components().into_iter().enumerate() {
+            let up = ups.get(&(*piece, comp)).copied().unwrap_or([0.0, 0.0, 1.0]);
+            let (v, t) = csolid.to_indexed();
             let verts = v.iter().map(|p| p.to_array()).collect();
             let tris = t.iter().map(|f| f.indices()).collect();
-            PieceToPlace {
+            to_place.push(PieceToPlace {
                 mesh: bambu::Mesh { verts, tris },
                 up,
-            }
-        })
-        .collect();
+            });
+        }
+    }
     bambu::export_plates_to(out, to_place, [bed[0], bed[1]], gap)
 }
 

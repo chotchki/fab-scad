@@ -233,3 +233,86 @@ fn clone_key(k: &ModKey) -> ModKey {
 
 /// The cache handle stored in `Ctx` — a `RefCell` because the geometry driver borrows it mutably per call.
 pub(super) type CacheCell = RefCell<ModCache>;
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, reason = "unit test: unwrap IS the assertion")]
+mod tests {
+    use super::super::{Config, Geo, Message};
+
+    /// Eval `src` to its geometry tree + messages with the CSG cache forced `on` (everything else off — the
+    /// A/B differential is exactly this toggle). In-memory, CWD base, no libs — the module-cache mechanics
+    /// don't need BOSL2 (that's the model sweep's job).
+    fn run(src: &str, on: bool) -> (Geo, Vec<Message>) {
+        let cfg = Config { csg_cache: on, ..Config::default() };
+        super::super::evaluate_source(src, std::path::Path::new("."), None, &[], cfg).unwrap()
+    }
+
+    fn geo(src: &str, on: bool) -> Geo {
+        run(src, on).0
+    }
+
+    /// THE gate: cache-on == cache-off geometry, across every path the memo touches — child-less leaves
+    /// (cacheable, repeated → hits), `$`-context variation via `$`-args (distinct keys, no collision), nested
+    /// + recursive modules, booleans/transforms/`for` (wrappers riding cached leaves), and the IMPURE /
+    /// caller-dependent paths the fence + the `$children==0` gate must NOT serve stale (rands, echo, children).
+    /// A wrong hit would make `on` diverge from `off`; `assert_eq` catches it.
+    #[test]
+    fn cache_on_equals_cache_off() {
+        let programs = [
+            // repeated child-less leaf → the redundant hit the cache exists for
+            "module leaf(r){ sphere(r,$fn=8); } union(){ for(i=[0:4]) translate([i*3,0,0]) leaf(2); }",
+            // same leaf, DIFFERENT reaching $fn (via $-arg) → distinct keys, must not collide to one shape
+            "module leaf(r){ sphere(r); } union(){ leaf(2,$fn=8); leaf(2,$fn=16); leaf(2,$fn=8); }",
+            // nested modules, the outer repeated
+            "module o(){ i(); } module i(){ cube(1); } union(){ o(); translate([2,0,0]) o(); }",
+            // recursion (each depth a distinct key; a sibling subtree repeats → hits)
+            "module rec(n){ if(n>0){ cube(1); translate([2,0,0]) rec(n-1); } } rec(4);",
+            // booleans over repeated leaves
+            "module leaf(r){ sphere(r,$fn=8); } difference(){ leaf(3); leaf(2); leaf(2); }",
+            "module leaf(r){ cube(r,center=true); } intersection(){ leaf(3); leaf(2); }",
+            // IMPURE: seedless rands advances per call → three DIFFERENT spheres; the draws-fence must decline
+            // so `on` reproduces the advancing sequence, not one stale sphere thrice.
+            "module r(){ sphere(rands(1,2,1)[0],$fn=8); } union(){ r(); r(); r(); }",
+            // CALLER-DEPENDENT: same module, same (args,$ctx), DIFFERENT children — the $children==0 gate keeps
+            // these off the cache, so the union is cube+sphere, never cube+cube.
+            "module w(){ children(); } union(){ w(){ cube(1); } w(){ sphere(1,$fn=8); } }",
+            // echo side effect inside a repeated module (messages-fence declines)
+            "module e(){ echo(\"x\"); cube(1); } union(){ e(); translate([2,0,0]) e(); }",
+        ];
+        for src in programs {
+            assert_eq!(geo(src, false), geo(src, true), "cache changed geometry:\n{src}");
+        }
+    }
+
+    /// The load-bearing wrong-hit: a child-RENDERING module keyed only on (args, $ctx) would serve the first
+    /// call's children to the second. Two `w(){…}` calls with identical args but different children must stay
+    /// distinct — the `$children==0` eligibility gate is what prevents the collision (both have $children=1 →
+    /// never cached). Pinned directly (not just via the A/B loop) since it's the correctness crux.
+    #[test]
+    fn different_children_never_collide() {
+        let both = geo("module w(){ children(); } union(){ w(){ cube(1); } w(){ sphere(1,$fn=8); } }", true);
+        match &both {
+            Geo::D3(super::super::GeoNode::Union(kids)) => {
+                assert_eq!(kids.len(), 2, "both wraps must render — no dedup");
+                assert_ne!(kids[0], kids[1], "a cube and a sphere, NOT the same shape twice (a wrong hit)");
+            }
+            other => panic!("expected a top-level union of the two wrapped children, got {other:?}"),
+        }
+    }
+
+    /// A repeated echoing module must echo EVERY call with the cache on (a hit that skipped the body would
+    /// drop the echo → a divergent console stream). Count is cache-invariant AND equals the call count.
+    #[test]
+    fn echoing_module_emits_every_call() {
+        let src = "module e(){ echo(\"ping\"); } union(){ e(); e(); e(); }";
+        let echoes = |on: bool| {
+            run(src, on)
+                .1
+                .iter()
+                .filter(|m| matches!(m, Message::Echo(s) if s.contains("ping")))
+                .count()
+        };
+        assert_eq!(echoes(false), echoes(true), "cache changed the echo count");
+        assert_eq!(echoes(true), 3, "each of the 3 calls must echo — no dedup on a hit");
+    }
+}

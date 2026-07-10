@@ -341,6 +341,14 @@ pub(super) struct Ctx<'a> {
     /// that (transitively) reads `parent_module` re-runs every time — closing the one wrong-hit class the
     /// message/rand fence can't see. Transitive for free: a nested read bumps it, the outer call sees the delta.
     impure_reads: std::cell::Cell<u64>,
+    /// Running count of deterministic EVAL-STEPS this evaluation has burned — the Q.5 resource budget's
+    /// accumulator, charged at the stack machine's per-task chokepoint + the `each`-splice path. Checked
+    /// against [`Config::eval_budget`](Config); when a bound is set and this exceeds it, [`Ctx::charge`]
+    /// fails LOUD ([`Error::Eval`](crate::Error::Eval)) instead of letting an untrusted input burn 10s/2GB.
+    /// A `Cell` (single-threaded interior mutability), same as [`impure_reads`](Self::impure_reads); starts
+    /// at 0. No-op when the budget is `None` (the default), so the trusted path pays only one predictable
+    /// not-taken branch per task.
+    eval_steps: std::cell::Cell<u64>,
     /// The desktop numeric-JIT hook (P.1.2), or `None` (wasm, or a program with nothing compiled). Built
     /// ONCE at setup by the caller-supplied [`NumericJitFactory`] and OWNED here — the registry CLONES the
     /// AST it needs (P.1.6 rung B on-demand recompile), so a `Box<dyn NumericJit>` still needs no `'a`. When
@@ -365,6 +373,43 @@ struct ChildrenFrame<'a> {
 }
 
 impl<'a> Ctx<'a> {
+    /// Charge `n` eval-steps against the Q.5 resource budget; fail LOUD once the running total exceeds
+    /// [`Config::eval_budget`](Config). A NO-OP when the budget is `None` (the default) — one not-taken
+    /// branch, so the trusted/unbounded path pays nothing measurable. The count is DETERMINISTIC (eval-steps,
+    /// never wall-time), so a bounded `(program, budget)` fails at the exact same step on every machine — the
+    /// reproducibility doctrine #36 + the fuzzers depend on. `saturating_add` so a pathological charge can't
+    /// wrap the counter past the bound.
+    #[inline]
+    fn charge(&self, n: u64) -> crate::Result<()> {
+        if let Some(budget) = self.config.eval_budget {
+            let used = self.eval_steps.get().saturating_add(n);
+            self.eval_steps.set(used);
+            if used > budget {
+                return Err(crate::Error::Eval(format!(
+                    "eval budget exceeded: {used} steps > {budget} (untrusted-input resource limit; raise \
+                     FAB_EVAL_BUDGET or Config::eval_budget)"
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    /// Charge the iteration COUNT of `iterable` up front — BEFORE [`iter_values`] materializes it into a
+    /// `Vec` — so a giant range/list is rejected before its (RANGE_MAX-bounded, but still large) allocation,
+    /// not merely as the loop walks it. The count is exactly the length `iter_values` would yield (a range's
+    /// is `RANGE_MAX`-capped like its iterator). No-op when the budget is `None`. Pairs with the per-task
+    /// charge: this bounds the loop's SIZE + its up-front alloc, the task charge bounds each body's WORK.
+    fn charge_iterable(&self, iterable: &Value) -> crate::Result<()> {
+        let n = match iterable {
+            Value::NumList(xs) => xs.len() as u64,
+            Value::List(xs) => xs.len() as u64,
+            Value::Range { start, step, end } => range_len(*start, *step, *end).min(RANGE_MAX),
+            Value::Str(s) => s.chars().count() as u64,
+            _ => 1, // a scalar iterates as a single element (iter_values' `other` arm)
+        };
+        self.charge(n)
+    }
+
     /// Resolve a MODULE name against `island`'s lexical scope (I.9.5): the island's OWN defs first (a
     /// local/`include` def always beats a `use`-imported one), then each `use`d island in reverse source
     /// order (textually-last `use` wins). Returns the def PLUS its home island — the body must evaluate
@@ -645,6 +690,7 @@ impl<'a> FnOracle<'a> {
             // The oracle is the pure-interpreter baseline (jit: None above) — no accelerators.
             config: Config::default(),
             impure_reads: std::cell::Cell::new(0),
+            eval_steps: std::cell::Cell::new(0),
             jit: None, // the oracle IS the interpreter baseline — never route it through the JIT
         };
         // Publish the constants into island 0's global (whole-scope, last-wins, first-occurrence order), so a
@@ -729,6 +775,11 @@ fn eval_with_global<'a>(
     let mut tasks: Vec<Task<'a>> = vec![Task::Eval(root, scope.clone())];
     let mut values: Vec<Value> = Vec::new();
     while let Some(task) = tasks.pop() {
+        // Q.5 resource budget: one charge per task — the universal chokepoint. Every expression eval and
+        // every comprehension trip pushes/pops tasks here (a per-element comprehension body is its own
+        // `eval_with_global` → ≥1 task → ≥1 charge), so a nested/runaway comprehension that would burn
+        // 10s/2GB trips the budget in bounded steps instead. No-op unless a bound is set (default None).
+        ctx.charge(1)?;
         match task {
             Task::Eval(e, s) => eval_node(e, &s, &global, ctx, &mut tasks, &mut values)?,
             Task::Binary(op) => {
@@ -1391,6 +1442,10 @@ fn eval_comprehension<'a>(
             let mut inner = Vec::new();
             eval_comprehension(e, scope, global, ctx, &mut inner)?;
             for contribution in inner {
+                // Q.5: `each <range/list>` splices bulk elements with NO per-element eval (unlike a plain
+                // body), so the task-loop charge would miss them — charge the splice count up front so a
+                // giant `each [0:9e9]` is bounded like a `for` loop is.
+                ctx.charge_iterable(&contribution)?;
                 out.extend(iter_values(&contribution));
             }
             Ok(())
@@ -1435,6 +1490,9 @@ fn lc_for<'a>(
             // bump, not a fresh `String` (N.2b) — `lc_for` is the hottest bind path (64% of a real model).
             let var: Rc<str> = binding.name.clone().unwrap_or_else(|| Rc::from("_"));
             let iterable = eval_with_global(&binding.value, scope, global, ctx)?;
+            // Q.5: charge the loop's element count BEFORE `iter_values` materializes the (RANGE_MAX-bounded)
+            // range into a Vec — so `for(i=[0:9e9])` is rejected up front under a budget, not after the alloc.
+            ctx.charge_iterable(&iterable)?;
             // ONE child frame, REUSED across iterations (N.2): `bind` is `Rc::make_mut`, so it rebinds the loop
             // var IN PLACE while the frame is uniquely held (the common case — a value-producing body captures
             // nothing), and CLONES it the instant a closure/escaping child holds the frame (each captured
@@ -1693,6 +1751,7 @@ fn resolve_source(
         mod_cache: mod_cache::CacheCell::default(),
         config,
         impure_reads: std::cell::Cell::new(0),
+        eval_steps: std::cell::Cell::new(0),
     };
     // Hoist the ROOT (island 0) FIRST, THEN the `use`-island constant scopes. ORDER is load-bearing: the
     // root's include-flattened functions (all of BOSL2's) are tagged home=0, so a `use`-island constant that
@@ -2546,6 +2605,7 @@ fn build_ctx(program: &Program, config: Config) -> Ctx<'_> {
         mod_cache: mod_cache::CacheCell::default(),
         config,
         impure_reads: std::cell::Cell::new(0),
+        eval_steps: std::cell::Cell::new(0),
         jit: None, // the raw-AST path (no loader) is interpreter-only; the JIT rides the loader entry
     }
 }
@@ -2687,6 +2747,91 @@ mod tests {
             }
         }
         last
+    }
+
+    /// Like [`eval_last`] but with an explicit Q.5 `eval_budget` and the eval `Result` PROPAGATED (not
+    /// `expect`ed), so a budget-exceeded error is observable. The budget counter lives on the fresh `Ctx`, so
+    /// each call starts at 0 — a given `(src, budget)` is reproducible.
+    fn eval_budgeted(src: &str, budget: Option<u64>) -> crate::Result<Value> {
+        let prog = parse(src).expect("parses");
+        let cfg = crate::Config {
+            eval_budget: budget,
+            ..crate::Config::default()
+        };
+        let ctx = build_ctx(&prog, cfg);
+        let mut scope = Scope::new();
+        let mut last = Value::Undef;
+        for stmt in &prog.stmts {
+            if let StmtKind::Assignment { name, value } = &stmt.kind {
+                if let Some(slot) = ctx.island_globals.borrow_mut().get_mut(0) {
+                    *slot = scope.clone();
+                }
+                last = eval_with_ctx(value, &scope, &ctx)?;
+                scope.bind(name.clone(), last.clone());
+            }
+        }
+        Ok(last)
+    }
+
+    /// A budget of `None` (the default) is UNLIMITED — a big-but-bounded comprehension evaluates fine, exactly
+    /// as it does today. The DoS guard must never touch the trusted path.
+    #[test]
+    fn budget_none_is_unlimited() {
+        let v = eval_budgeted("x = len([for (i = [0:200000]) i * 2]);", None).expect("no budget");
+        assert_eq!(v, Value::Num(200_001.0));
+    }
+
+    /// The exact eval trophy (TROPHIES.md): `[for(i=[0:9e9]) i]` builds a RANGE_MAX-capped 10M-element list
+    /// (>10s / lots of RAM) — but under a budget it's rejected UP FRONT (charge_iterable charges the ~1e7
+    /// count before `iter_values` even allocates), LOUD, not a hang.
+    #[test]
+    fn budget_stops_the_range_comprehension_trophy() {
+        let err = eval_budgeted("x = [for (i = [0:9e9]) i];", Some(1_000)).unwrap_err();
+        match err {
+            crate::Error::Eval(m) => assert!(m.contains("budget exceeded"), "got {m}"),
+            other => panic!("expected Error::Eval, got {other:?}"),
+        }
+    }
+
+    /// The class a PER-LOOP cap (`RANGE_MAX`) misses: nested comprehensions each under the cap but MULTIPLYING
+    /// past it. The global counter bounds the TOTAL, so the product trips even though neither loop alone would.
+    #[test]
+    fn budget_stops_nested_comprehension() {
+        let err = eval_budgeted(
+            "x = [for (i = [0:1000000]) for (j = [0:1000000]) 0];",
+            Some(3_000_000),
+        )
+        .unwrap_err();
+        assert!(matches!(err, crate::Error::Eval(_)), "got {err:?}");
+    }
+
+    /// `each <huge range>` splices in bulk with no per-element eval — charged up front like a `for`, so it's
+    /// bounded too (the second charge site).
+    #[test]
+    fn budget_stops_each_splice() {
+        let err = eval_budgeted("x = [each [0:9e9]];", Some(1_000)).unwrap_err();
+        assert!(matches!(err, crate::Error::Eval(_)), "got {err:?}");
+    }
+
+    /// A program WITHIN budget yields exactly the unbounded result — the bound only ever converts a
+    /// would-be-huge success into an error, never perturbs a within-budget value.
+    #[test]
+    fn budget_within_bound_matches_unbounded() {
+        let src = "x = 2 + 3 * 4 - 1;";
+        let bounded = eval_budgeted(src, Some(10_000)).expect("within budget");
+        let unbounded = eval_budgeted(src, None).expect("unbounded");
+        assert_eq!(bounded, unbounded);
+        assert_eq!(bounded, Value::Num(13.0));
+    }
+
+    /// Deterministic: the SAME `(program, budget)` fails identically every run — the count is eval-steps, not
+    /// wall-time, so the error message (which carries the step total) is byte-identical across runs.
+    #[test]
+    fn budget_failure_is_reproducible() {
+        let src = "x = [for (i = [0:1000000]) for (j = [0:1000000]) 0];";
+        let a = eval_budgeted(src, Some(2_500_000)).unwrap_err();
+        let b = eval_budgeted(src, Some(2_500_000)).unwrap_err();
+        assert_eq!(format!("{a}"), format!("{b}"));
     }
 
     /// The `set -x` trace (`super::trace`), forced on so its output paths + the evaluator's hooks all run.

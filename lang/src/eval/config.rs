@@ -27,6 +27,19 @@ pub struct Config {
     /// Skip memoizing a module call whose (params + reaching `$`-context) key exceeds this shallow element
     /// count. `FAB_CSG_CACHE_KEYCAP` (default 2048).
     pub csg_cache_keycap: usize,
+    /// The eval RESOURCE budget (Q.5): the max number of deterministic eval-steps a single evaluation may
+    /// burn before it fails LOUD with an [`Error::Eval`](crate::Error::Eval), or `None` for UNLIMITED (the
+    /// default — exact OpenSCAD parity, so no legitimate model ever trips it). `FAB_EVAL_BUDGET`.
+    ///
+    /// This is the ONE field that can change OUTPUT (the others are pure speed/where-it-runs knobs — see the
+    /// module doc): a bound turns a would-be-huge success into an error. But it does so DETERMINISTICALLY —
+    /// the step count is eval-steps, NOT wall-time, so the same `(program, budget)` fails at the same point
+    /// on every machine (the reproducibility the differential harness + doctrine #36 require). At the `None`
+    /// default it never fires, so the A/B differential contract (toggling caches/JIT never changes output)
+    /// still holds on the baseline. The UNTRUSTED entry points — the fuzz targets now, the web playground
+    /// later — set an explicit bound where the untrusted input actually enters; trusted CLI/desktop stays
+    /// unbounded (Ctrl-C, like OpenSCAD).
+    pub eval_budget: Option<u64>,
 }
 
 impl Default for Config {
@@ -39,6 +52,7 @@ impl Default for Config {
             eval_cache_argcap: 256,
             csg_cache: false,
             csg_cache_keycap: 2048,
+            eval_budget: None, // UNLIMITED — OpenSCAD parity; the untrusted paths opt into a bound
         }
     }
 }
@@ -56,6 +70,7 @@ impl Config {
             eval_cache_argcap: env_usize("FAB_EVAL_CACHE_ARGCAP", d.eval_cache_argcap),
             csg_cache: env_on("FAB_CSG_CACHE"),
             csg_cache_keycap: env_usize("FAB_CSG_CACHE_KEYCAP", d.csg_cache_keycap),
+            eval_budget: env_u64_opt("FAB_EVAL_BUDGET"),
         }
     }
 }
@@ -71,4 +86,11 @@ fn env_usize(name: &str, default: usize) -> usize {
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(default)
+}
+
+/// An OPTIONAL `FAB_*` u64 limit: `Some(n)` iff the var is set to a parseable non-negative integer, else
+/// `None` (unset OR unparseable → unlimited). The budget is opt-in, so a missing/garbage var means "no cap",
+/// never a silent default cap.
+fn env_u64_opt(name: &str) -> Option<u64> {
+    std::env::var(name).ok().and_then(|s| s.parse().ok())
 }

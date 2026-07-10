@@ -1056,7 +1056,8 @@ fn eval_node<'a>(
         | ExprKind::LcIf { .. } => {
             // a comprehension element evaluates to its CONTRIBUTION list (spliced by the enclosing
             // VectorSplice). Only reached as a vector element (parser invariant).
-            let contribution = eval_comprehension(e, scope, global, ctx)?;
+            let mut contribution = Vec::new();
+            eval_comprehension(e, scope, global, ctx, &mut contribution)?;
             values.push(build_vector(contribution));
         }
     }
@@ -1319,42 +1320,50 @@ fn eval_comprehension<'a>(
     scope: &Scope,
     global: &Scope,
     ctx: &Ctx<'a>,
-) -> crate::Result<Vec<Value>> {
+    out: &mut Vec<Value>,
+) -> crate::Result<()> {
     match &elem.kind {
-        ExprKind::LcFor { bindings, body } => lc_for(bindings, body, scope, global, ctx),
+        ExprKind::LcFor { bindings, body } => lc_for(bindings, body, scope, global, ctx, out),
         ExprKind::LcForC {
             init,
             cond,
             update,
             body,
-        } => lc_for_c(init, cond, update, body, scope, global, ctx),
+        } => lc_for_c(init, cond, update, body, scope, global, ctx, out),
         // `each E` splices ONE level: for every value element `E` would contribute, iterate it in. `E`
         // is itself a comprehension element, so evaluate it as one — `each if(c) X` / `each for(…) X`
         // must distribute the splice INTO the guard/loop (OpenSCAD: `each if(true) [1,2,3]` → `[1,2,3]`,
         // not `[[1,2,3]]`). Evaluating `E` as a plain expression (the old path) wrapped an `if`'s
-        // contribution in a vector, so `each` only peeled the wrapper and left the list nested.
+        // contribution in a vector, so `each` only peeled the wrapper and left the list nested. The temp
+        // `inner` is per-`each` (we splice its elements), not per-element.
         ExprKind::LcEach(e) => {
-            let mut out = Vec::new();
-            for contribution in eval_comprehension(e, scope, global, ctx)? {
+            let mut inner = Vec::new();
+            eval_comprehension(e, scope, global, ctx, &mut inner)?;
+            for contribution in inner {
                 out.extend(iter_values(&contribution));
             }
-            Ok(out)
+            Ok(())
         }
         ExprKind::LcIf { cond, then, els } => {
             if eval_with_global(cond, scope, global, ctx)?.is_truthy() {
-                eval_comprehension(then, scope, global, ctx)
+                eval_comprehension(then, scope, global, ctx, out)
             } else {
                 match els {
-                    Some(e) => eval_comprehension(e, scope, global, ctx),
-                    None => Ok(Vec::new()),
+                    Some(e) => eval_comprehension(e, scope, global, ctx, out),
+                    None => Ok(()),
                 }
             }
         }
         ExprKind::Let { bindings, body } => {
             let inner = comprehension_let_scope(bindings, scope, global, ctx)?;
-            eval_comprehension(body, &inner, global, ctx)
+            eval_comprehension(body, &inner, global, ctx, out)
         }
-        _ => Ok(vec![eval_with_global(elem, scope, global, ctx)?]), // a plain element → [value]
+        // A plain element → PUSH its value directly (N.2): no per-element `vec![…]`, which was one tiny heap
+        // alloc PER comprehension element (millions in a real model) that `out.extend` then copied + dropped.
+        _ => {
+            out.push(eval_with_global(elem, scope, global, ctx)?);
+            Ok(())
+        }
     }
 }
 
@@ -1366,26 +1375,27 @@ fn lc_for<'a>(
     scope: &Scope,
     global: &Scope,
     ctx: &Ctx<'a>,
-) -> crate::Result<Vec<Value>> {
+    out: &mut Vec<Value>,
+) -> crate::Result<()> {
     match bindings.split_first() {
-        None => eval_comprehension(body, scope, global, ctx),
+        None => eval_comprehension(body, scope, global, ctx, out),
         Some((binding, rest)) => {
             // The loop var as an `Rc<str>` computed ONCE per binding, so the per-ITERATION bind is a refcount
             // bump, not a fresh `String` (N.2b) — `lc_for` is the hottest bind path (64% of a real model).
             let var: Rc<str> = binding.name.clone().unwrap_or_else(|| Rc::from("_"));
             let iterable = eval_with_global(&binding.value, scope, global, ctx)?;
-            let mut out = Vec::new();
             // ONE child frame, REUSED across iterations (N.2): `bind` is `Rc::make_mut`, so it rebinds the loop
             // var IN PLACE while the frame is uniquely held (the common case — a value-producing body captures
             // nothing), and CLONES it the instant a closure/escaping child holds the frame (each captured
             // iteration then keeps its OWN loop-var value — bit-identical to a fresh frame per iteration). This
-            // kills the per-iteration `Rc<Frame>` alloc+drop that dominates comprehension-heavy models.
+            // kills the per-iteration `Rc<Frame>` alloc+drop that dominates comprehension-heavy models. Results
+            // PUSH straight into the caller's `out` accumulator — no per-level result `Vec` (N.2).
             let mut inner = scope.child();
             for value in iter_values(&iterable) {
                 inner.bind(Rc::clone(&var), value);
-                out.extend(lc_for(rest, body, &inner, global, ctx)?);
+                lc_for(rest, body, &inner, global, ctx, out)?;
             }
-            Ok(out)
+            Ok(())
         }
     }
 }
@@ -1401,7 +1411,8 @@ fn lc_for_c<'a>(
     scope: &Scope,
     global: &Scope,
     ctx: &Ctx<'a>,
-) -> crate::Result<Vec<Value>> {
+    out: &mut Vec<Value>,
+) -> crate::Result<()> {
     // Init assignments bind SEQUENTIALLY (`let`-style): a later one sees the earlier ones, so
     // `for(a=1, b=a+1; …)` gives `b==2`. Accumulate into a child scope as we go.
     let mut vars: Vec<(String, Value)> = Vec::new();
@@ -1412,7 +1423,6 @@ fn lc_for_c<'a>(
         init_scope.bind(name.clone(), value.clone());
         vars.push((name, value));
     }
-    let mut out = Vec::new();
     let mut iterations = 0u64;
     loop {
         let mut loop_scope = scope.child();
@@ -1422,7 +1432,7 @@ fn lc_for_c<'a>(
         if !eval_with_global(cond, &loop_scope, global, ctx)?.is_truthy() {
             break;
         }
-        out.extend(eval_comprehension(body, &loop_scope, global, ctx)?);
+        eval_comprehension(body, &loop_scope, global, ctx, out)?;
         // Update assignments also bind SEQUENTIALLY within the clause: `x=i*10, y=x+1` must let `y`
         // see the NEW `x` (OpenSCAD-verified; BOSL2's `_dp_distance_row` DP does exactly this with
         // `costs=…, newrow=…min(costs)…`). Bind each into `loop_scope` as we go so the next update sees
@@ -1444,7 +1454,7 @@ fn lc_for_c<'a>(
             break;
         }
     }
-    Ok(out)
+    Ok(())
 }
 
 /// Bind a comprehension `let`'s bindings SEQUENTIALLY (a later one sees the earlier), returning the

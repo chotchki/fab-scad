@@ -32,6 +32,7 @@ mod module;
 mod text;
 pub(crate) mod rng;
 mod ops;
+mod read_set;
 mod redundancy;
 mod scope;
 mod trace;

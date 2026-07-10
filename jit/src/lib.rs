@@ -815,8 +815,15 @@ impl NumericJit for JitRegistry {
 pub struct JitFactory;
 
 impl NumericJitFactory for JitFactory {
-    fn compile(&self, defs: &[JitDef<'_>], consts: &[JitConst<'_>]) -> Option<Box<dyn NumericJit>> {
-        let enabled = std::env::var_os("FAB_JIT").as_deref() == Some(std::ffi::OsStr::new("1"));
+    fn compile(
+        &self,
+        defs: &[JitDef<'_>],
+        consts: &[JitConst<'_>],
+        enabled: bool,
+    ) -> Option<Box<dyn NumericJit>> {
+        // `enabled` is the caller's authoritative RUN gate (`Config::jit`, from `FAB_JIT` on the CLI path) —
+        // no env sniff here. `FAB_JIT_EXPLAIN` stays a report-only probe: it may compile-for-coverage even when
+        // the JIT won't run, but then returns `None` (interpret everything) below.
         let explain = std::env::var_os("FAB_JIT_EXPLAIN").is_some();
         if !enabled && !explain {
             return None; // neither running nor reporting → skip the compile entirely

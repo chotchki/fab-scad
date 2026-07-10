@@ -574,7 +574,7 @@ mod tests {
     fn interpret_with_deps(target: &str, deps: &[&str], inputs: &[Value]) -> crate::Result<Value> {
         let src = format!("{}\n{target}", deps.join("\n"));
         let program = parse(&src).expect("deps+target parse");
-        let mut ctx = build_ctx(&program);
+        let mut ctx = build_ctx(&program, crate::Config::default());
         ctx.intrinsics.clear(); // force full interpretation — no intrinsic shortcut even for the deps
         let (params, body) = match &program.stmts.last().expect("has target").kind {
             StmtKind::FunctionDef { params, body, .. } => (params, body),
@@ -719,12 +719,12 @@ mod tests {
         // program with a perturbed body does NOT — it stays interpreted.
         let matched = parse("function _fab_poc_sq(x) = x * x;").expect("parses");
         assert!(
-            build_ctx(&matched).intrinsics.contains_key("_fab_poc_sq"),
+            build_ctx(&matched, crate::Config::default()).intrinsics.contains_key("_fab_poc_sq"),
             "the exact reference must be wired as an intrinsic"
         );
         let perturbed = parse("function _fab_poc_sq(x) = x * x + 1;").expect("parses");
         assert!(
-            !build_ctx(&perturbed).intrinsics.contains_key("_fab_poc_sq"),
+            !build_ctx(&perturbed, crate::Config::default()).intrinsics.contains_key("_fab_poc_sq"),
             "a perturbed body must fall back to the interpreter (no intrinsic wired)"
         );
     }
@@ -736,7 +736,7 @@ mod tests {
         // all-positional call to the native `poc_sq` → 7*7 = 49. (The corpus proves the arm doesn't break
         // anything; this proves it RUNS — nothing in BOSL2 fingerprints to the POC, so only this hits it.)
         let program = parse("function _fab_poc_sq(x) = x * x; z = _fab_poc_sq(7);").expect("parses");
-        let ctx = build_ctx(&program);
+        let ctx = build_ctx(&program, crate::Config::default());
         let call = match &program.stmts[1].kind {
             StmtKind::Assignment { value, .. } => value,
             other => panic!("expected an assignment, got {other:?}"),

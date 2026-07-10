@@ -53,16 +53,17 @@ pub fn resolve_geometry_with_base(
     source: &str,
     base_dir: &Path,
     library_paths: &[PathBuf],
+    config: fab_lang::Config,
 ) -> Result<Geo, Error> {
-    fab_lang::resolve_geometry_with_base(source, base_dir, library_paths, jit_factory(), |raw| {
+    fab_lang::resolve_geometry_with_base(source, base_dir, library_paths, jit_factory(), config, |raw| {
         read_import(base_dir, raw)
     })
 }
 
 /// The desktop numeric-JIT factory the eval entry threads into `Ctx` (P.1) — `Some` on a `jit` build (which
 /// `native` implies), `None` on a lean/miri build so cranelift is never a dependency there. The JIT is a
-/// pure native accelerator: `fast == JIT` is bit-identical, so its presence only changes speed. `FAB_JIT=0`
-/// disables it at runtime (inside the factory) for A/B measurement.
+/// pure native accelerator: `fast == JIT` is bit-identical, so its presence only changes speed. The RUN gate is
+/// now [`fab_lang::Config::jit`] (the caller's `config`, from `FAB_JIT` on the CLI path), passed to `compile`.
 fn jit_factory() -> Option<&'static dyn fab_lang::NumericJitFactory> {
     #[cfg(feature = "jit")]
     {
@@ -80,9 +81,13 @@ fn jit_factory() -> Option<&'static dyn fab_lang::NumericJitFactory> {
 ///
 /// # Errors
 /// As [`fab_lang::resolve_geometry_file`], plus any [`read_import`] failure.
-pub fn resolve_geometry_file(path: &Path, library_paths: &[PathBuf]) -> Result<Geo, Error> {
+pub fn resolve_geometry_file(
+    path: &Path,
+    library_paths: &[PathBuf],
+    config: fab_lang::Config,
+) -> Result<Geo, Error> {
     let base_dir = path.parent().unwrap_or(Path::new(".")).to_path_buf();
-    fab_lang::resolve_geometry_file(path, library_paths, jit_factory(), |raw| {
+    fab_lang::resolve_geometry_file(path, library_paths, jit_factory(), config, |raw| {
         read_import(&base_dir, raw)
     })
 }
@@ -239,7 +244,7 @@ mod tests {
 
         // ...and end to end: import(file) is a single 3D leaf carrying that mesh.
         let src = format!("import(\"{name}\");");
-        match resolve_geometry_with_base(&src, &tmp(), &[]).expect("resolves") {
+        match resolve_geometry_with_base(&src, &tmp(), &[], fab_lang::Config::default()).expect("resolves") {
             Geo::D3(GeoNode::Leaf(ref leaf)) => assert_eq!(*leaf, mesh),
             other => panic!("expected a 3D leaf, got {other:?}"),
         }
@@ -304,7 +309,7 @@ mod tests {
         )
         .unwrap();
         let src = format!("import(\"{name}\");");
-        match resolve_geometry_with_base(&src, &tmp(), &[]).expect("resolves") {
+        match resolve_geometry_with_base(&src, &tmp(), &[], fab_lang::Config::default()).expect("resolves") {
             Geo::D2(fab_lang::Shape2D::Polygon(ref contours)) => {
                 assert_eq!(contours.len(), 1, "one rect subpath → one contour");
                 assert_eq!(contours[0].len(), 4, "a rect is 4 corners");
@@ -333,7 +338,7 @@ mod tests {
         // Wrap-by-absolute-include (like render_whole), evaluated with the MODEL's dir as base_dir.
         let abs = dir.join("model.scad").canonicalize().unwrap();
         let wrap = format!("include <{}>;\n", abs.display());
-        match resolve_geometry_with_base(&wrap, &dir, &[]).expect("resolves") {
+        match resolve_geometry_with_base(&wrap, &dir, &[], fab_lang::Config::default()).expect("resolves") {
             Geo::D2(fab_lang::Shape2D::Polygon(ref contours)) => {
                 assert_eq!(contours.len(), 1, "stamp.svg's rect imported → one contour");
             }

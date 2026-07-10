@@ -696,10 +696,10 @@ fn push_user_module<'a>(
     // a pure function of (body, home, params, reaching $-context). On a HIT, push the cached `Geo` and skip the
     // body, the frames, AND the depth bump — the redundant subtree never runs (the whole point). On a MISS,
     // snapshot the purity counters + queue a `CacheStoreModule` that memoizes the node IFF the body was pure.
-    let store = if childless && super::mod_cache::enabled() {
+    let store = if childless && ctx.config.csg_cache {
         let param_vals: Vec<Value> = params.iter().map(|p| call.lookup(&p.name)).collect();
         let specials = call.specials();
-        if super::mod_cache::worth_caching(&param_vals, &specials) {
+        if super::mod_cache::worth_caching(&param_vals, &specials, ctx.config.csg_cache_keycap) {
             let key = super::mod_cache::ModKey::new(body_ptr, &home_global, &param_vals, &specials);
             if let Some(geo) = ctx.mod_cache.borrow_mut().get(&key) {
                 results.push(geo);

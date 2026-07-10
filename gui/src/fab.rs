@@ -122,7 +122,7 @@ pub fn render_whole(root: Option<&Path>, source: &Path, out_dir: &Path) -> Resul
     std::fs::create_dir_all(out_dir)?;
     let out = out_dir.join(format!("{}.stl", stem_of(source)));
     let libs = preview_libs(root);
-    let tree = fab_scad::import::resolve_geometry_with_base(&wrap_src, base, &libs)
+    let tree = fab_scad::import::resolve_geometry_with_base(&wrap_src, base, &libs, fab_lang::Config::from_env())
         .with_context(|| format!("scad-rs eval of {}", source.display()))?;
     let solid = build_geo(&tree, &ManifoldBackend)
         .filter(|s| !s.is_empty())

@@ -566,7 +566,7 @@ fn render_scadrs_cmd(target: &Path, out: Option<PathBuf>, check: bool, _timeout_
     let stl = out.unwrap_or_else(|| default_out(target, "stl"));
 
     let start = std::time::Instant::now();
-    let tree = fab_scad::import::resolve_geometry_file(target, &libs)
+    let tree = fab_scad::import::resolve_geometry_file(target, &libs, fab_lang::Config::from_env())
         .with_context(|| format!("scad-rs eval of {}", target.display()))?;
     let solid = build_geo(&tree, &ManifoldBackend)
         .filter(|s| !s.is_empty())

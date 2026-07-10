@@ -53,6 +53,7 @@ pub(crate) fn drive<R>(
     root_path: Option<&Path>,
     library_paths: &[PathBuf],
     jit_factory: Option<&dyn NumericJitFactory>,
+    config: super::Config,
     mut mesh_reader: R,
 ) -> crate::Result<(Geo, Vec<Message>)>
 where
@@ -65,7 +66,7 @@ where
     // echoes — so we accumulate them across rounds and prepend them to the eval messages when the run closes.
     let mut warnings: Vec<Message> = Vec::new();
     loop {
-        match resolve_source(source, base_dir, root_id.as_deref(), &scad, &files, jit_factory)? {
+        match resolve_source(source, base_dir, root_id.as_deref(), &scad, &files, jit_factory, config)? {
             Resolution::Complete { geo, messages } => {
                 warnings.extend(messages);
                 return Ok((geo, warnings));

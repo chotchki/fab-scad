@@ -415,7 +415,7 @@ fn models_profile_and_compare() {
             .name("profile-eval".into())
             .stack_size(fab_scad::EVAL_STACK)
             .spawn(move || {
-                let _ = fab_scad::import::resolve_geometry_file(&t, &libs_t);
+                let _ = fab_scad::import::resolve_geometry_file(&t, &libs_t, fab_lang::Config::from_env());
                 let _ = tx.send(());
             })
             .expect("spawn profile thread");

@@ -30,44 +30,23 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::hash::{BuildHasherDefault, Hash, Hasher};
 use std::rc::Rc;
-use std::sync::OnceLock;
 
 use crate::parser::Expr;
 
 use super::scope::{DynCtxNode, Scope};
 use super::value::Value;
 
-/// Is the cache on? Default OFF, opt-in with `FAB_EVAL_CACHE=1`. It is CORRECT (bit-identical to no-cache
-/// across the BOSL2 corpus) and a real win where redundancy is high with expensive bodies (+18–27% on the hot
-/// models), but on low-benefit call-heavy models the per-call GATE overhead alone is a net loss (~-16% on
-/// under_sink_guide) — do-no-harm says don't inflict that by default. The follow-up that makes default-ON safe
-/// is a program-level AUTO-OFF (self-disable when the running cost/benefit shows net-negative). The A/B
-/// differential (cache on == off) still runs by toggling this, mirroring M.3's `FAB_GEO_DRIVER`.
-pub(super) fn enabled() -> bool {
-    static E: OnceLock<bool> = OnceLock::new();
-    *E.get_or_init(|| std::env::var_os("FAB_EVAL_CACHE").as_deref() == Some(std::ffi::OsStr::new("1")))
-}
-
 /// Per-generation entry cap. Two generations (hot/cold) bound the cache to ~2× this — a rotate-not-scan LRU
 /// approximation (review: unbounded risks OOM + cancels the drop-cost saving). The concentration is high
 /// (10 keys = 22–61% of calls), so a modest cap captures most of the win.
 const GEN_CAP: usize = 1 << 16;
 
-/// Skip caching a call whose args are too BIG to be worth keying (review: cost-weight the memo). Cloning +
-/// bit-hashing a huge list arg on every call is overhead the body-skip may never repay — it's exactly what
-/// tips low-redundancy stress tests (`gaussian_rands`' 300k-element comprehension, high-`$fn` vertex math)
-/// over their budget while the redundant SMALL-key calls (the 82–92% win) sail through. Shallow element count
-/// (top-level list/string lengths, O(#args)); over the cap → don't cache. Tune with `FAB_EVAL_CACHE_ARGCAP`.
-fn arg_cap() -> usize {
-    static C: OnceLock<usize> = OnceLock::new();
-    *C.get_or_init(|| {
-        std::env::var("FAB_EVAL_CACHE_ARGCAP").ok().and_then(|s| s.parse().ok()).unwrap_or(256)
-    })
-}
-
-/// Is this call's argument list small enough to be worth memoizing? See [`arg_cap`].
-pub(super) fn worth_caching(args: &[Value]) -> bool {
-    let cap = arg_cap();
+/// Is this call's argument list small enough to be worth memoizing? `cap` is [`Config::eval_cache_argcap`]:
+/// cloning + bit-hashing a huge list arg on every call is overhead the body-skip may never repay (it's what
+/// tips low-redundancy stress tests — `gaussian_rands`' 300k-element comprehension, high-`$fn` vertex math —
+/// over budget while the redundant SMALL-key calls sail through). Shallow element count (top-level list/string
+/// lengths, O(#args)); over the cap → don't cache.
+pub(super) fn worth_caching(args: &[Value], cap: usize) -> bool {
     let mut total = 0usize;
     for v in args {
         total += match v {

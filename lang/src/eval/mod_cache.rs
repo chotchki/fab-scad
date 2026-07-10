@@ -33,43 +33,26 @@
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
-use std::ffi::OsStr;
 use std::hash::{BuildHasherDefault, Hash, Hasher};
 use std::rc::Rc;
-use std::sync::OnceLock;
 
 use super::Geo;
 use super::eval_cache::{hash_value_bits, value_bits_eq};
 use super::scope::Scope;
 use super::value::Value;
 
-/// Is the cache on? Default OFF, opt-in with `FAB_CSG_CACHE=1`. Correctness is bit-identical to no-cache (the
-/// A/B differential toggles this, mirroring `FAB_EVAL_CACHE` / `FAB_GEO_DRIVER`); the per-call key-hash is
-/// do-no-harm overhead on a low-redundancy model, so default-ON waits on a program-level auto-off (as N.2c's).
-pub(super) fn enabled() -> bool {
-    static E: OnceLock<bool> = OnceLock::new();
-    *E.get_or_init(|| std::env::var_os("FAB_CSG_CACHE").as_deref() == Some(OsStr::new("1")))
-}
+/// The gate ([`Config::csg_cache`]) is bit-identical to no-cache (the A/B differential toggles it); the per-call
+/// key-hash is do-no-harm overhead on a low-redundancy model, so default-ON waits on a program-level auto-off
+/// (as N.2c's). Enabled/cap now live in [`Config`], read off `ctx.config` at the call site — not a local gate.
 
 /// Per-generation entry cap — two generations (hot/cold) bound the cache to ~2× this, a rotate-not-scan LRU
 /// approximation (same as [`eval_cache`]). A `Geo` subtree can be large, so this caps the tree, not just keys.
 const GEN_CAP: usize = 1 << 15;
 
-/// Skip caching a call whose key is too BIG to be worth hashing every lookup. `specials()` is BOSL2's ~42
-/// `$`-vars; a param or `$`-var holding a huge list makes the per-call key hash a loss the body-skip may not
-/// repay. Shallow element count over params + `$`-context; over the cap → don't cache. Tune with
-/// `FAB_CSG_CACHE_KEYCAP`.
-fn key_cap() -> usize {
-    static C: OnceLock<usize> = OnceLock::new();
-    *C.get_or_init(|| {
-        std::env::var("FAB_CSG_CACHE_KEYCAP").ok().and_then(|s| s.parse().ok()).unwrap_or(2048)
-    })
-}
-
-/// Shallow key size: top-level element count over the resolved params + reaching `$`-context. O(#params +
-/// #$-vars) with an O(list-len) peek at each — cheap, and it short-circuits over the cap.
-pub(super) fn worth_caching(params: &[Value], specials: &BTreeMap<Rc<str>, Value>) -> bool {
-    let cap = key_cap();
+/// Shallow key size: top-level element count over the resolved params + reaching `$`-context, against `cap`
+/// ([`Config::csg_cache_keycap`]). `specials()` is BOSL2's ~42 `$`-vars; a param or `$`-var holding a huge list
+/// makes the per-call key hash a loss the body-skip may not repay. O(#params + #$-vars), short-circuits at cap.
+pub(super) fn worth_caching(params: &[Value], specials: &BTreeMap<Rc<str>, Value>, cap: usize) -> bool {
     let mut total = 0usize;
     for v in params.iter().chain(specials.values()) {
         total += match v {
@@ -208,11 +191,9 @@ impl ModCache {
         self.declined_impure += u64::from(impure);
     }
 
-    /// Print the realized hit-rate to stderr when the cache is on. Called after the top-level geometry eval.
+    /// Print the realized hit-rate to stderr. The caller gates this on `ctx.config.csg_cache` (only meaningful
+    /// when the cache ran).
     pub(super) fn report(&self) {
-        if !enabled() {
-            return;
-        }
         let lookups = self.hits + self.misses;
         if lookups == 0 {
             eprintln!("[csg-cache] no child-less module lookups (nothing eligible)");

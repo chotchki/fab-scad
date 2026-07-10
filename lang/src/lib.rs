@@ -49,10 +49,10 @@ mod webcolors;
 pub use customizer::{Constraint, CustomParam, Customizer, DropdownItem, customize};
 pub use error::{Error, Result};
 pub use eval::{
-    Contour, Evaluation, ExtrudeKind, FileTable, FnOracle, Geo, GeoNode, Imported, JitConst, JitDef,
-    JitOutcome, Join2D, Message, NumericJit, NumericJitFactory, RANGE_MAX, RangeIter, Resolution,
-    Scope, Shape2D, SourceNeed, Value, bench_intrinsic, eval_expr, eval_program, fragments,
-    interpret_fn, range_iter, range_len,
+    Config, Contour, Evaluation, ExtrudeKind, FileTable, FnOracle, Geo, GeoNode, Imported, JitConst,
+    JitDef, JitOutcome, Join2D, Message, NumericJit, NumericJitFactory, RANGE_MAX, RangeIter,
+    Resolution, Scope, Shape2D, SourceNeed, Value, bench_intrinsic, eval_expr, eval_program,
+    fragments, interpret_fn, range_iter, range_len,
 };
 pub use eval::jit_abi::{jit_math, jit_math_id};
 pub use eval::rng::RandStream;
@@ -112,7 +112,7 @@ pub fn evaluate_file_full(path: &Path, library_paths: &[PathBuf]) -> Result<Eval
     // The including-file dir. An empty parent (a bare `foo.scad`) resolves relative to CWD via the
     // loader's canonicalize, so no special-casing is needed beyond the parent-less root (`.`).
     let base_dir = path.parent().unwrap_or(Path::new("."));
-    let (tree, messages) = eval::evaluate_source(&source, base_dir, Some(path), library_paths)?;
+    let (tree, messages) = eval::evaluate_source(&source, base_dir, Some(path), library_paths, Config::from_env())?;
     Ok(Evaluation {
         mesh: eval::mesh_of(tree)?,
         messages,
@@ -143,7 +143,7 @@ pub fn evaluate_with_base_full(
     base_dir: &Path,
     library_paths: &[PathBuf],
 ) -> Result<Evaluation> {
-    let (tree, messages) = eval::evaluate_source(source, base_dir, None, library_paths)?;
+    let (tree, messages) = eval::evaluate_source(source, base_dir, None, library_paths, Config::from_env())?;
     Ok(Evaluation {
         mesh: eval::mesh_of(tree)?,
         messages,
@@ -168,7 +168,7 @@ pub fn evaluate_geometry(source: &str) -> Result<Geo> {
 pub fn evaluate_geometry_file(path: &Path, library_paths: &[PathBuf]) -> Result<Geo> {
     let source = eval::io::read_source(path)?;
     let base_dir = path.parent().unwrap_or(Path::new("."));
-    Ok(eval::evaluate_source(&source, base_dir, Some(path), library_paths)?.0)
+    Ok(eval::evaluate_source(&source, base_dir, Some(path), library_paths, Config::from_env())?.0)
 }
 
 /// Like [`evaluate_geometry`], but resolving `use`/`include` against `base_dir` (a GUI's unsaved buffer).
@@ -180,7 +180,7 @@ pub fn evaluate_geometry_with_base(
     base_dir: &Path,
     library_paths: &[PathBuf],
 ) -> Result<Geo> {
-    Ok(eval::evaluate_source(source, base_dir, None, library_paths)?.0)
+    Ok(eval::evaluate_source(source, base_dir, None, library_paths, Config::from_env())?.0)
 }
 
 /// Like [`evaluate_geometry`], but returns the geometry tree PLUS the ordered `echo`/warning
@@ -192,7 +192,7 @@ pub fn evaluate_geometry_with_base(
 /// # Errors
 /// As [`evaluate_geometry`].
 pub fn evaluate_geometry_full(source: &str) -> Result<(Geo, Vec<Message>)> {
-    eval::evaluate_source(source, Path::new("."), None, &[])
+    eval::evaluate_source(source, Path::new("."), None, &[], Config::from_env())
 }
 
 /// Like [`evaluate_geometry_with_base`], but ALSO returns the ordered `echo`/warning [`Message`]s — the
@@ -207,7 +207,7 @@ pub fn evaluate_geometry_with_base_full(
     base_dir: &Path,
     library_paths: &[PathBuf],
 ) -> Result<(Geo, Vec<Message>)> {
-    eval::evaluate_source(source, base_dir, None, library_paths)
+    eval::evaluate_source(source, base_dir, None, library_paths, Config::from_env())
 }
 
 /// Evaluate `source` to a geometry [`Geo`] tree, resolving `import`/`surface` meshes through `mesh_reader`
@@ -227,12 +227,13 @@ pub fn resolve_geometry_with_base<R>(
     base_dir: &Path,
     library_paths: &[PathBuf],
     jit_factory: Option<&dyn NumericJitFactory>,
+    config: Config,
     mesh_reader: R,
 ) -> Result<Geo>
 where
     R: FnMut(&str) -> Result<Imported>,
 {
-    Ok(eval::io::drive(source, base_dir, None, library_paths, jit_factory, mesh_reader)?.0)
+    Ok(eval::io::drive(source, base_dir, None, library_paths, jit_factory, config, mesh_reader)?.0)
 }
 
 /// Like [`resolve_geometry_with_base`], but for a `.scad` FILE — resolving its `use`/`include` graph AND
@@ -244,6 +245,7 @@ pub fn resolve_geometry_file<R>(
     path: &Path,
     library_paths: &[PathBuf],
     jit_factory: Option<&dyn NumericJitFactory>,
+    config: Config,
     mesh_reader: R,
 ) -> Result<Geo>
 where
@@ -251,7 +253,7 @@ where
 {
     let source = eval::io::read_source(path)?;
     let base_dir = path.parent().unwrap_or(Path::new("."));
-    Ok(eval::io::drive(&source, base_dir, Some(path), library_paths, jit_factory, mesh_reader)?.0)
+    Ok(eval::io::drive(&source, base_dir, Some(path), library_paths, jit_factory, config, mesh_reader)?.0)
 }
 
 #[cfg(test)]

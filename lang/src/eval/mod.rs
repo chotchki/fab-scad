@@ -11,6 +11,7 @@
 //! I.1/I.4. Arithmetic/undef semantics are bug-for-bug OpenSCAD (`ops`).
 
 mod builtins;
+mod config;
 mod eval_cache;
 mod fmt;
 mod fragments;
@@ -37,6 +38,7 @@ mod trace;
 mod trig;
 mod value;
 
+pub use config::Config;
 pub use fragments::fragments;
 pub use geo::GeoNode;
 pub use geo2d::{Contour, ExtrudeKind, Geo, Join2D, Shape2D};
@@ -222,10 +224,17 @@ pub struct JitConst<'a> {
 /// trait (not a closure) so the crate boundary carries no Cranelift and the method's elided lifetime lets
 /// it accept defs of any lifetime. wasm passes no factory at all → [`Ctx::jit`] stays `None`.
 pub trait NumericJitFactory {
-    /// Compile the numeric-subset functions in `defs` to a [`NumericJit`], or `None` if none compiled /
-    /// the JIT is disabled. `consts` are the program's top-level constants (P.1.4 globals) — a function body
-    /// that reads one resolves it by inlining its value-expr instead of declining on the free variable.
-    fn compile(&self, defs: &[JitDef<'_>], consts: &[JitConst<'_>]) -> Option<Box<dyn NumericJit>>;
+    /// Compile the numeric-subset functions in `defs` to a [`NumericJit`], or `None` if none compiled / the
+    /// JIT is disabled. `enabled` is the RUN gate ([`Config::jit`]) — the caller's authoritative on/off, so the
+    /// factory no longer sniffs its own env; a factory MAY still compile-for-coverage when `enabled` is false
+    /// (its own report-only probe) but must return `None` there. `consts` are the program's top-level constants
+    /// (P.1.4 globals) — a body reading one inlines its value-expr instead of declining on the free variable.
+    fn compile(
+        &self,
+        defs: &[JitDef<'_>],
+        consts: &[JitConst<'_>],
+        enabled: bool,
+    ) -> Option<Box<dyn NumericJit>>;
 }
 
 /// The evaluation context, borrowed from the `Program`:
@@ -318,8 +327,11 @@ pub(super) struct Ctx<'a> {
     /// Per-program (dies with the `Ctx`); off under `FAB_EVAL_CACHE=0`. See [`eval_cache`].
     cache: eval_cache::CacheCell,
     /// The CSG-memo cache (J.5.2a): a child-less user-module call's produced `Geo` subtree keyed on
-    /// (body, home, params, reaching `$`-context). Per-program; off under `FAB_CSG_CACHE=0`. See [`mod_cache`].
+    /// (body, home, params, reaching `$`-context). Per-program; gated by [`config`](Self::config). See [`mod_cache`].
     mod_cache: mod_cache::CacheCell,
+    /// The execution knobs — JIT + the two memo caches (their gates + tuning caps). One place, threaded from the
+    /// entry (env-read or embedder-set) instead of a dozen per-module `OnceLock`s. See [`Config`].
+    config: Config,
     /// Monotone count of IMPURE READS a call's subtree performed — currently only `parent_module`, which
     /// reads the module-instantiation stack (state NOT in the cache key + no message/rand delta to betray it).
     /// The purity fence snapshots this before/after a call and DECLINES memoization if it moved, so any call
@@ -617,6 +629,8 @@ impl<'a> FnOracle<'a> {
             rand_stream: RefCell::new(rng::RandStream::new()),
             cache: eval_cache::CacheCell::default(),
             mod_cache: mod_cache::CacheCell::default(),
+            // The oracle is the pure-interpreter baseline (jit: None above) — no accelerators.
+            config: Config::default(),
             impure_reads: std::cell::Cell::new(0),
             jit: None, // the oracle IS the interpreter baseline — never route it through the JIT
         };
@@ -794,7 +808,7 @@ fn eval_with_global<'a>(
                 // queue a `CacheStore` that memoizes the result IFF the subtree turns out pure.
                 // Gate the cache: enabled (opt-in) and args small enough to key cheaply (arg-cap — keeps a
                 // 300k-element `gaussian_rands` comprehension from paying a giant per-call key hash).
-                let store = if eval_cache::enabled() && eval_cache::worth_caching(&vals) {
+                let store = if ctx.config.eval_cache && eval_cache::worth_caching(&vals, ctx.config.eval_cache_argcap) {
                     let key = eval_cache::Key::new(body, &base, &vals, &caller);
                     let hit = ctx.cache.borrow_mut().get(&key);
                     if let Some(v) = hit {
@@ -1542,7 +1556,7 @@ pub fn eval_program(program: &Program, scope: &Scope) -> crate::Result<Mesh> {
     // nests under it, so a subscriber can attribute cost to `builtin`/`module` children. TRACE level →
     // free with no subscriber, compiled out in release under `release_max_level_off`.
     let _span = tracing::trace_span!("eval_program").entered();
-    let ctx = build_ctx(program);
+    let ctx = build_ctx(program, Config::from_env());
     let tree = run_stmts(program.stmts.iter(), &ctx, scope)?;
     // The raw AST path has no file table (`build_ctx` sets `files: None`), so an `import`/`surface` here
     // can't be fulfilled — fail LOUD naming the files rather than return a silently-empty mesh. Real import
@@ -1575,6 +1589,7 @@ fn resolve_source(
     scad_sources: &loader::SourceMap,
     files: &FileTable,
     jit_factory: Option<&dyn NumericJitFactory>,
+    config: Config,
 ) -> crate::Result<Resolution> {
     let _span = tracing::trace_span!("eval_program").entered();
     // Phase 1 (STATIC): close the `use`/`include` graph. A reference not yet in the source table surfaces as
@@ -1617,7 +1632,9 @@ fn resolve_source(
             .into_iter()
             .map(|(name, value)| JitConst { name, value })
             .collect();
-        f.compile(&defs, &consts)
+        // `config.jit` is the RUN gate (was the jit crate's own `FAB_JIT` read); the factory keeps its
+        // report-only EXPLAIN probe, so it may still compile-for-coverage when this is false.
+        f.compile(&defs, &consts, config.jit)
     });
     let n = islands.len();
     let ctx = Ctx {
@@ -1639,6 +1656,7 @@ fn resolve_source(
         rand_stream: RefCell::new(rng::RandStream::new()),
         cache: eval_cache::CacheCell::default(),
         mod_cache: mod_cache::CacheCell::default(),
+        config,
         impure_reads: std::cell::Cell::new(0),
     };
     // Hoist the ROOT (island 0) FIRST, THEN the `use`-island constant scopes. ORDER is load-bearing: the
@@ -1665,7 +1683,9 @@ fn resolve_source(
     let tree = eval_top(&exec, &global, &ctx)?;
     redundancy::report(); // prints to stderr only under FAB_REDUNDANCY=1
     mod_redundancy::report(); // prints to stderr only under FAB_CSG_REDUNDANCY=1
-    ctx.mod_cache.borrow().report(); // realized CSG-cache hit-rate — prints only under FAB_CSG_CACHE=1
+    if ctx.config.csg_cache {
+        ctx.mod_cache.borrow().report(); // realized CSG-cache hit-rate
+    }
     fnprofile::report(); // prints to stderr only under FAB_PROFILE_FNS=1
     let needs = ctx.take_file_needs();
     if needs.is_empty() {
@@ -1695,11 +1715,12 @@ pub(crate) fn evaluate_source(
     base_dir: &std::path::Path,
     root_path: Option<&std::path::Path>,
     library_paths: &[std::path::PathBuf],
+    config: Config,
 ) -> crate::Result<(Geo, Vec<Message>)> {
     // The no-import spine (tests + the pure-geometry `evaluate*` sugar) is interpreter-only — its callers
     // are fab-lang-internal and can't build a JIT. The desktop JIT rides the import-capable
     // `resolve_geometry_*` entries the native shell drives models through.
-    io::drive(source, base_dir, root_path, library_paths, None, io::no_import_reader)
+    io::drive(source, base_dir, root_path, library_paths, None, config, io::no_import_reader)
 }
 
 /// The LOUD error the raw-AST path ([`eval_program`]) raises when `import`/`surface` executed with no file
@@ -2428,7 +2449,7 @@ fn check_assert<'a>(
 /// Collect user function definitions into the [`Ctx`] store (their own namespace). A pre-pass over the
 /// whole program, so a call can resolve a function defined anywhere (whole-program visibility, like
 /// OpenSCAD); a duplicate name — last definition wins (`BTreeMap::insert`).
-fn build_ctx(program: &Program) -> Ctx<'_> {
+fn build_ctx(program: &Program, config: Config) -> Ctx<'_> {
     let mut functions = BTreeMap::new();
     let mut modules = BTreeMap::new();
     for stmt in &program.stmts {
@@ -2473,6 +2494,7 @@ fn build_ctx(program: &Program) -> Ctx<'_> {
         rand_stream: RefCell::new(rng::RandStream::new()),
         cache: eval_cache::CacheCell::default(),
         mod_cache: mod_cache::CacheCell::default(),
+        config,
         impure_reads: std::cell::Cell::new(0),
         jit: None, // the raw-AST path (no loader) is interpreter-only; the JIT rides the loader entry
     }
@@ -2541,7 +2563,7 @@ mod tests {
         };
 
         // Phase 1: an unloaded `use` surfaces a Scad need — BEFORE eval (the program can't run yet).
-        let scad = resolve_source("use <lib.scad>\ncube(1);", here, None, &no_scad, &no_files, None)
+        let scad = resolve_source("use <lib.scad>\ncube(1);", here, None, &no_scad, &no_files, None, crate::Config::default())
             .expect("resolves");
         assert!(
             matches!(&scad, Resolution::Incomplete { needs } if needs == &[scad_need("lib.scad")]),
@@ -2557,6 +2579,7 @@ mod tests {
             &no_scad,
             &no_files,
             None,
+            crate::Config::default(),
         )
         .expect("resolves");
         assert!(
@@ -2568,7 +2591,7 @@ mod tests {
         // Supply the mesh → the run CLOSES (Complete). An empty placeholder mesh stands in for a read STL.
         let mut have = FileTable::new();
         have.insert("a.stl".to_string(), super::Imported::Mesh(crate::Mesh::new()));
-        let closed = resolve_source("import(\"a.stl\");", here, None, &no_scad, &have, None)
+        let closed = resolve_source("import(\"a.stl\");", here, None, &no_scad, &have, None, crate::Config::default())
             .expect("resolves");
         assert!(
             matches!(&closed, Resolution::Complete { .. }),
@@ -2580,7 +2603,7 @@ mod tests {
     /// — with the program's function store in scope. The end-to-end call test harness.
     fn eval_last(src: &str) -> Value {
         let prog = parse(src).expect("parses");
-        let ctx = build_ctx(&prog);
+        let ctx = build_ctx(&prog, crate::Config::default());
         let mut scope = Scope::new();
         let mut last = Value::Undef;
         for stmt in &prog.stmts {
@@ -2675,7 +2698,7 @@ mod tests {
     /// [`eval_last`] with a numeric-JIT hook injected into the ctx.
     fn eval_last_jit(src: &str, jit: Box<dyn super::NumericJit>) -> Value {
         let prog = parse(src).expect("parses");
-        let mut ctx = build_ctx(&prog);
+        let mut ctx = build_ctx(&prog, crate::Config::default());
         ctx.jit = Some(jit);
         let mut scope = Scope::new();
         let mut last = Value::Undef;

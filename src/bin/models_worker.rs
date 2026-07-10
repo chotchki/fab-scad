@@ -25,7 +25,7 @@ fn main() {
         .stack_size(fab_scad::EVAL_STACK)
         .spawn(move || {
             let start = std::time::Instant::now();
-            let res = fab_scad::import::resolve_geometry_file(&model, &libs);
+            let res = fab_scad::import::resolve_geometry_file(&model, &libs, fab_lang::Config::from_env());
             let ms = start.elapsed().as_millis();
             match res {
                 Ok(geo) => {

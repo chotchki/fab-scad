@@ -22,7 +22,8 @@ pub struct Config {
     /// hashing every lookup. `FAB_EVAL_CACHE_ARGCAP` (default 256).
     pub eval_cache_argcap: usize,
     /// Memoize a child-less user-MODULE call's `Geo` subtree — the content-addressed CSG cache (J.5.2a).
-    /// `FAB_CSG_CACHE`.
+    /// Defaults OFF in [`Config::default`] (the baseline) but **ON in [`Config::from_env`]** (the app path) —
+    /// it's bit-identity-validated + pure-win; `FAB_CSG_CACHE=0` disables.
     pub csg_cache: bool,
     /// Skip memoizing a module call whose (params + reaching `$`-context) key exceeds this shallow element
     /// count. `FAB_CSG_CACHE_KEYCAP` (default 2048).
@@ -58,9 +59,16 @@ impl Default for Config {
 }
 
 impl Config {
-    /// Read the `FAB_*` env gates — the CLI/harness entry (`evaluate*` sugar + the models worker). The
-    /// execution flags are strict `=1` (a NEW eval path stays off unless explicitly enabled), matching the
-    /// per-module gates this replaces; the caps parse-or-default.
+    /// Read the `FAB_*` env gates — the CLI/harness/GUI entry (`evaluate*` sugar + the models worker). Unlike
+    /// [`Config::default`] (the all-off CONSERVATIVE baseline the oracle + differential tests run on), this is
+    /// the APP-FACING config, so the SAFE-and-USEFUL accelerator defaults ON here:
+    /// - `csg_cache` defaults **ON** — it's bit-identity-validated (the cache-on==off differential, N.2c) and a
+    ///   pure win (a hit skips redundant CSG, a miss costs a key hash), so a forgetful desktop run gets it for
+    ///   free. `FAB_CSG_CACHE=0` disables it (debugging the cache itself).
+    /// - `jit` stays OPT-IN (`FAB_JIT=1`): bit-identical, but net-neutral-to-SLOWER on real geometry-dominated
+    ///   models + per-model compile overhead, so defaulting it on would work AGAINST speed.
+    /// - `eval_cache` stays OPT-IN (`FAB_EVAL_CACHE=1`): NOT yet proven safe to default on (N.2c.2) — a
+    ///   side-effecting call can wrong-hit, so it's off until that lands.
     #[must_use]
     pub fn from_env() -> Self {
         let d = Self::default();
@@ -68,7 +76,7 @@ impl Config {
             jit: env_on("FAB_JIT"),
             eval_cache: env_on("FAB_EVAL_CACHE"),
             eval_cache_argcap: env_usize("FAB_EVAL_CACHE_ARGCAP", d.eval_cache_argcap),
-            csg_cache: env_on("FAB_CSG_CACHE"),
+            csg_cache: env_override("FAB_CSG_CACHE", true),
             csg_cache_keycap: env_usize("FAB_CSG_CACHE_KEYCAP", d.csg_cache_keycap),
             eval_budget: env_u64_opt("FAB_EVAL_BUDGET"),
         }
@@ -78,6 +86,16 @@ impl Config {
 /// A strict `FAB_*=1` gate (any other value / unset → off).
 fn env_on(name: &str) -> bool {
     std::env::var_os(name).as_deref() == Some(std::ffi::OsStr::new("1"))
+}
+
+/// A `FAB_*` gate with an explicit `default` when UNSET — `=1` forces on, `=0` forces off, anything else (or
+/// unset) takes `default`. For a knob that defaults ON in the app path but must stay disable-able (`=0`).
+fn env_override(name: &str, default: bool) -> bool {
+    match std::env::var_os(name).as_deref().and_then(|s| s.to_str()) {
+        Some("1") => true,
+        Some("0") => false,
+        _ => default,
+    }
 }
 
 /// A `FAB_*` unsigned tuning cap, parse-or-default.
@@ -93,4 +111,25 @@ fn env_usize(name: &str, default: usize) -> usize {
 /// never a silent default cap.
 fn env_u64_opt(name: &str) -> Option<u64> {
     std::env::var(name).ok().and_then(|s| s.parse().ok())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Config, env_override};
+
+    /// The CONSERVATIVE baseline is untouched — `Config::default` stays all-off, because the oracle +
+    /// differential harness run on it (flipping a default here would silently change what "the baseline" is).
+    #[test]
+    fn default_is_the_all_off_baseline() {
+        let d = Config::default();
+        assert!(!d.jit && !d.eval_cache && !d.csg_cache && d.eval_budget.is_none());
+    }
+
+    /// `env_override` takes the DEFAULT when the var is unset — the load-bearing branch that makes
+    /// `from_env` default `csg_cache` ON in the app path without any env set.
+    #[test]
+    fn env_override_unset_takes_default() {
+        assert!(env_override("FAB_A_KNOB_THAT_IS_NEVER_SET_XZ", true));
+        assert!(!env_override("FAB_A_KNOB_THAT_IS_NEVER_SET_XZ", false));
+    }
 }

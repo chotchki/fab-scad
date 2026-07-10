@@ -54,7 +54,7 @@ pub use eval::{
     Config, Contour, Evaluation, ExtrudeKind, FileTable, FnOracle, Geo, GeoNode, Imported,
     JitConst, JitDef, JitOutcome, Join2D, Message, NumericJit, NumericJitFactory, RANGE_MAX,
     RangeIter, Resolution, Scope, Shape2D, SourceNeed, Value, bench_intrinsic, eval_expr,
-    eval_program, fragments, interpret_fn, range_iter, range_len,
+    eval_program, evaluate_geometry_metered, fragments, interpret_fn, range_iter, range_len,
 };
 pub use geom::{Affine, Affine2, Dims, Rgba, Tri, Vec2, Vec3};
 pub use lexer::{Lexed, Token, TokenKind, decode_str, lex, num_value};

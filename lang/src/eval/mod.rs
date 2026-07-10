@@ -1657,6 +1657,33 @@ pub fn eval_program(program: &Program, scope: &Scope) -> crate::Result<Mesh> {
     mesh_of(tree)
 }
 
+/// Evaluate a SELF-CONTAINED program to its geometry tree AND its deterministic eval-COST — the R.1 perf
+/// success-function primitive. The cost is the Q.5 `eval_steps` counter (stack-machine steps + comprehension
+/// materialization): a machine-INDEPENDENT proxy for INTERPRETER work — NOT geometry-kernel cost, since the
+/// `Geo` tree isn't tessellated here (that axis is native-only + non-deterministic, J.4.5, so it's the
+/// OpenSCAD-differential's job, R.2). Runs under `budget` so a pathological input is BOUNDED: a budget-hit
+/// returns `Err` with `steps ≈ budget`, which is exactly the TOP of the worst-case ranking. The step count
+/// comes back even on `Err` (the ranking wants it regardless). No import resolution — a program that names
+/// `import`/`use`/`surface` fails LOUD like [`eval_program`]; the grammar emits self-contained programs, so
+/// that path is unreached in practice.
+#[must_use]
+pub fn evaluate_geometry_metered(program: &Program, budget: u64) -> (crate::Result<Geo>, u64) {
+    let config = Config {
+        eval_budget: Some(budget),
+        ..Config::default()
+    };
+    let ctx = build_ctx(program, config);
+    let result = run_stmts(program.stmts.iter(), &ctx, &Scope::new()).and_then(|tree| {
+        let needs = ctx.take_file_needs();
+        if needs.is_empty() {
+            Ok(tree)
+        } else {
+            Err(unresolved_files(&needs))
+        }
+    });
+    (result, ctx.eval_steps.get())
+}
+
 /// Resolve `source` against caller-supplied source tables to a [`Resolution`] — the PURE inner step of the
 /// needs fixpoint (M.4). ZERO IO: it consults `scad_sources` (the `use`/`include` graph the shell has read
 /// so far) and `files` (the `import`/`surface` meshes) and NAMES what's still missing. Three outcomes,
@@ -2832,6 +2859,28 @@ mod tests {
         let a = eval_budgeted(src, Some(2_500_000)).unwrap_err();
         let b = eval_budgeted(src, Some(2_500_000)).unwrap_err();
         assert_eq!(format!("{a}"), format!("{b}"));
+    }
+
+    /// R.1.1 — the perf success-function metric: `evaluate_geometry_metered` returns a deterministic
+    /// eval-COST that (a) is MONOTONE (heavier interpreter work costs strictly more), (b) is REPRODUCIBLE
+    /// (same program → same cost), and (c) is BUDGET-BOUNDED (a pathological input caps at the budget, so it
+    /// ranks at the TOP of the worst-case list instead of hanging the measurement).
+    #[test]
+    fn metered_cost_is_monotone_deterministic_and_bounded() {
+        let cost = |src: &str, budget: u64| {
+            let prog = parse(src).expect("parses");
+            super::evaluate_geometry_metered(&prog, budget).1
+        };
+        // Monotone: a 10k-element comprehension costs strictly more than a 100-element one.
+        let small = cost("x = len([for (i = [0:100]) i]);", 50_000_000);
+        let big = cost("x = len([for (i = [0:10000]) i]);", 50_000_000);
+        assert!(big > small, "bigger comprehension must cost more: {big} vs {small}");
+        // Deterministic: same program, same cost.
+        assert_eq!(big, cost("x = len([for (i = [0:10000]) i]);", 50_000_000));
+        // Bounded: a past-budget program caps at ~budget — above any completing program's cost, so it sorts
+        // to the top of the ranking rather than running away.
+        let capped = cost("x = [for (i = [0:9e9]) i];", 10_000);
+        assert!(capped >= 10_000 && capped > big, "budget-hit caps high (worst-case rank): {capped}");
     }
 
     /// The `set -x` trace (`super::trace`), forced on so its output paths + the evaluator's hooks all run.

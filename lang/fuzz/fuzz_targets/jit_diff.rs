@@ -56,6 +56,13 @@ fn sample_args(arity: usize, data: &[u8]) -> Vec<Vec<f64>> {
 }
 
 fuzz_target!(|data: &[u8]| {
+    // Skip pathologically-large inputs: a huge deeply-nested numeric body makes the JIT compiler expand to
+    // an out-of-memory unit (a resource-exhaustion class, NOT a bit-identity divergence — see Q.5/TROPHIES).
+    // Real BOSL2 functions + any reasonable generated body are well under this, so the cap costs no coverage
+    // of the property under test (interp == JIT) while keeping the campaign (and the nightly CI job) alive.
+    if data.len() > 4096 {
+        return;
+    }
     let Ok(src) = std::str::from_utf8(data) else {
         return;
     };

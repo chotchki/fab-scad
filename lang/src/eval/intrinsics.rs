@@ -118,6 +118,33 @@ static REGISTRY: &[Entry] = &[
         reference: "function point3d(p, fill=0) = assert(is_list(p)) [for (i=[0:2]) (p[i]==undef)? fill : p[i]];",
         func: point3d,
     },
+    // BOSL2 `select` (lists.scad) — the WRAPAROUND list indexer, the single hottest function in the path/list
+    // layer: 86% of the ipad_holder_decorative_front profile's user-fn calls (5.8M at $fn=20), hammered by
+    // the O(n²) `path_merge_collinear`/`path_sweep2d` inner loops. The first MULTI-BRANCH intrinsic — scalar
+    // index / vector-or-range gather / two-index slice, THREE assert raise-sites, string-OR-list input — and
+    // it earns its complexity: every op routes through the interpreter's own primitives (`%`/`+` via
+    // `apply_binary`, `ops::index`, `range_iter`, `build_vector`), so it's bit-identical by construction.
+    // Verbatim from lists.scad.
+    Entry {
+        name: "select",
+        reference: "function select(list, start, end) = \
+            assert( is_list(list) || is_string(list), \"Invalid list.\") \
+            let(l=len(list)) \
+            l==0 \
+              ? [] \
+              : end==undef \
+                  ? is_num(start) \
+                      ? list[ (start%l+l)%l ] \
+                      : assert( start==[] || is_vector(start) || is_range(start), \"Invalid start parameter\") \
+                        [for (i=start) list[ (i%l+l)%l ] ] \
+                  : assert(is_finite(start), \"When `end` is given, `start` parameter should be a number.\") \
+                    assert(is_finite(end), \"Invalid end parameter.\") \
+                    let( s = (start%l+l)%l, e = (end%l+l)%l ) \
+                    (s <= e) \
+                      ? [ for (i = [s:1:e])   list[i] ] \
+                      : [ for (i = [s:1:l-1]) list[i], for (i = [0:1:e])   list[i] ] ;",
+        func: select,
+    },
 ];
 
 /// The POC intrinsic: `x * x`. Mirrors the interpreter's `Num * Num` (and `undef` for a non-number arg, as
@@ -224,6 +251,161 @@ fn point3d(args: &[Value]) -> crate::Result<Value> {
         })
         .collect();
     Ok(super::build_vector(coords))
+}
+
+/// BOSL2 `select(list, start, end)` — one or more items with WRAPAROUND indexing (`(i%l+l)%l`), the hottest
+/// function in BOSL2's path/list layer. Bit-identical BY CONSTRUCTION: every operation routes through the
+/// interpreter's OWN primitives — the wrap math via [`super::ops::apply_binary`]'s `%`/`+`, indexing via
+/// [`super::ops::index`], range iteration via [`super::value::range_iter`], element iteration via
+/// [`super::iter_values`], and result coalescing via [`super::build_vector`] (all-`Num` → `NumList`, else
+/// `List`) — so no float-modulo/index/coalesce semantics are re-derived. The win is skipping the per-call
+/// function/scope machinery plus the `is_num`/`is_vector`/`is_range`/`is_finite`/`len` sub-dispatch the
+/// interpreted body pays on EVERY call. Reproduces all three assert raise-sites: (1) a non-list/string
+/// `list`; (2) a non-num single `start` that isn't `[]`/a vector/a range; (3) a non-finite `start`/`end` in
+/// the two-index form. The BOSL2 predicates reduce, in our value model, to: `is_num` = a NON-NaN `Num`
+/// (`func.cc` excludes NaN, so `select(l, nan)` takes the else branch and RAISES); `is_vector` = a non-empty
+/// list of all FINITE `Num`s (BOSL2's `[for(vi=v) if(!is_finite(vi)) 0]==[]`); `is_range` = a `Range` with
+/// all-finite fields; `is_finite` = a finite `Num`.
+fn select(args: &[Value]) -> crate::Result<Value> {
+    use super::ops::index;
+    let list = args.first().cloned().unwrap_or(Value::Undef);
+    // assert( is_list(list) || is_string(list), "Invalid list." )
+    if !matches!(list, Value::NumList(_) | Value::List(_) | Value::Str(_)) {
+        return Err(select_assert("Invalid list."));
+    }
+    let l = sel_len(&list); // len(list) as f64 — element count, or CHAR count for a string
+    if l == 0.0 {
+        return Ok(super::build_vector(Vec::new())); // l==0 ? []   (the `[]` literal is an empty NumList)
+    }
+    let lv = Value::Num(l);
+    let start = args.get(1).cloned().unwrap_or(Value::Undef);
+    let end = args.get(2).cloned().unwrap_or(Value::Undef);
+
+    if matches!(end, Value::Undef) {
+        // end==undef — the single-`start` form.
+        if sel_is_num(&start) {
+            // list[ (start%l+l)%l ]
+            Ok(index(list, &wrap(start, &lv)))
+        } else {
+            // assert( start==[] || is_vector(start) || is_range(start), "Invalid start parameter" )
+            if !(sel_is_empty_list(&start) || sel_is_vector(&start) || sel_is_range(&start)) {
+                return Err(select_assert("Invalid start parameter"));
+            }
+            // [for (i=start) list[ (i%l+l)%l ]]
+            let out = super::iter_values(&start)
+                .into_iter()
+                .map(|i| index(list.clone(), &wrap(i, &lv)))
+                .collect();
+            Ok(super::build_vector(out))
+        }
+    } else {
+        // end given — the two-index form.
+        if !sel_is_finite(&start) {
+            return Err(select_assert("When `end` is given, `start` parameter should be a number."));
+        }
+        if !sel_is_finite(&end) {
+            return Err(select_assert("Invalid end parameter."));
+        }
+        let s = wrap(start, &lv);
+        let e = wrap(end, &lv);
+        let (sn, en) = (sel_f64(&s), sel_f64(&e));
+        let mut out = Vec::new();
+        // (s <= e) via the interpreter's own `<=`; `s`/`e` are finite here (asserts passed), so it's a plain
+        // numeric compare.
+        if super::ops::apply_binary(BinOp::Le, s, e).is_truthy() {
+            // [ for (i=[s:1:e]) list[i] ]
+            for i in super::value::range_iter(sn, 1.0, en) {
+                out.push(index(list.clone(), &Value::Num(i)));
+            }
+        } else {
+            // [ for (i=[s:1:l-1]) list[i], for (i=[0:1:e]) list[i] ] — the wraparound: tail then head, one list
+            for i in super::value::range_iter(sn, 1.0, l - 1.0) {
+                out.push(index(list.clone(), &Value::Num(i)));
+            }
+            for i in super::value::range_iter(0.0, 1.0, en) {
+                out.push(index(list.clone(), &Value::Num(i)));
+            }
+        }
+        Ok(super::build_vector(out))
+    }
+}
+
+/// `(i % l + l) % l` via the interpreter's OWN `%`/`+` ([`super::ops::apply_binary`]) — the wrapped index is
+/// then bit-identical to what the interpreted body computes, with no re-derived float-modulo semantics.
+fn wrap(i: Value, l: &Value) -> Value {
+    use super::ops::apply_binary;
+    let m = apply_binary(BinOp::Mod, i, l.clone());
+    let plus = apply_binary(BinOp::Add, m, l.clone());
+    apply_binary(BinOp::Mod, plus, l.clone())
+}
+
+/// `len(list)` as the `f64` the `len` builtin yields — element count, or CHAR count for a string.
+#[allow(
+    clippy::cast_precision_loss,
+    reason = "matches the `len` builtin's `count(n) = n as f64`; a list past 2^52 elements is unreachable"
+)]
+fn sel_len(v: &Value) -> f64 {
+    let n = match v {
+        Value::NumList(xs) => xs.len(),
+        Value::List(xs) => xs.len(),
+        Value::Str(s) => s.chars().count(),
+        _ => 0, // unreachable: `list` is asserted list-or-string above
+    };
+    n as f64
+}
+
+/// OpenSCAD `is_num` — a `Num` that is NOT NaN (`func.cc` guards `type()==NUMBER && !isnan`).
+fn sel_is_num(v: &Value) -> bool {
+    matches!(v, Value::Num(n) if !n.is_nan())
+}
+
+/// BOSL2 `is_finite` — a FINITE `Num` (`is_num(x) && !is_nan(0*x)` collapses to `f64::is_finite`).
+fn sel_is_finite(v: &Value) -> bool {
+    matches!(v, Value::Num(n) if n.is_finite())
+}
+
+/// `start == []` — an empty list in EITHER representation (`[]` is an empty `NumList`, and the two list
+/// reprs compare equal element-for-element, so an empty `List` matches too).
+fn sel_is_empty_list(v: &Value) -> bool {
+    match v {
+        Value::NumList(xs) => xs.is_empty(),
+        Value::List(xs) => xs.is_empty(),
+        _ => false,
+    }
+}
+
+/// BOSL2 `is_vector` at DEFAULT args — a NON-EMPTY list whose every element is a FINITE number
+/// (`is_list(v) && len(v)>0 && []==[for(vi=v) if(!is_finite(vi)) 0]`; the `length`/`zero`/`all_nonzero`
+/// clauses all short-circuit true on their `undef`/`false` defaults). Content-based, not repr-based, so it's
+/// exact even for a heterogeneous `List` that happens to hold only finite numbers.
+fn sel_is_vector(v: &Value) -> bool {
+    match v {
+        Value::NumList(xs) => !xs.is_empty() && xs.iter().all(|x| x.is_finite()),
+        Value::List(xs) => {
+            !xs.is_empty() && xs.iter().all(|e| matches!(e, Value::Num(n) if n.is_finite()))
+        }
+        _ => false,
+    }
+}
+
+/// BOSL2 `is_range` — a `Range` whose three fields are all finite (`!is_list(x) && is_finite(x[0]) &&
+/// is_finite(x[1]) && is_finite(x[2])`; only a `Range` indexes to numbers at 0/1/2, so nothing else qualifies).
+fn sel_is_range(v: &Value) -> bool {
+    matches!(v, Value::Range { start, step, end } if start.is_finite() && step.is_finite() && end.is_finite())
+}
+
+/// The `f64` of a `Num` — used on the wrap results (always numbers here); `NaN` for anything else (unreached).
+fn sel_f64(v: &Value) -> f64 {
+    match v {
+        Value::Num(n) => *n,
+        _ => f64::NAN,
+    }
+}
+
+/// A `select` assert failure. The message is a diagnostic LOCATOR (the fast==slow harness matches on
+/// "both raised", not on text), so it reproduces the reference's assert CONTROL FLOW, not its exact string.
+fn select_assert(msg: &str) -> crate::Error {
+    crate::Error::Eval(format!("assert failed: {msg}"))
 }
 
 /// `name → (fingerprint, intrinsic)` for every registry entry, computed ONCE by parsing each `reference` and
@@ -888,6 +1070,116 @@ mod tests {
             assert!(same_result(&func(&one), &interpret(reference, &one)), "point3d({p:?}) diverged");
             let two = [p.clone(), Value::Num(-1.0)];
             assert!(same_result(&func(&two), &interpret(reference, &two)), "point3d({p:?}, -1) diverged");
+        }
+    }
+
+    #[test]
+    fn select_matches_its_reference_bit_for_bit() {
+        // `select` is the first MULTI-BRANCH intrinsic — scalar index / vector-or-range gather / two-index
+        // slice, three assert raise-sites, list-OR-string input. The dependency-aware oracle interprets the
+        // verbatim reference WITH the real BOSL2 predicate chain defined (is_vector → is_finite → is_nan,
+        // is_range) and intrinsics cleared, so the native `func` is proven against the FULLY-interpreted body.
+        // `_EPSILON`/`norm`/`all_nonzero` are inert at is_vector's default args (short-circuited), so they need
+        // no definition — an unknown `_EPSILON` resolves to undef and is never read.
+        let reference = reference_of("select").expect("registered");
+        let (params, body) = parse_fn(reference);
+        let func = lookup("select", &params, &body).expect("its own reference must register");
+        let deps = [
+            "function is_nan(x) = (x!=x);",
+            "function is_finite(x) = is_num(x) && !is_nan(0*x);",
+            "function is_range(x) = !is_list(x) && is_finite(x[0]) && is_finite(x[1]) && is_finite(x[2]) ;",
+            "function is_vector(v, length, zero, all_nonzero=false, eps=_EPSILON) = \
+                is_list(v) && len(v)>0 && []==[for(vi=v) if(!is_finite(vi)) 0] \
+                && (is_undef(length) || (assert(is_num(length))len(v)==length)) \
+                && (is_undef(zero) || ((norm(v) >= eps) == !zero)) \
+                && (!all_nonzero || all_nonzero(v)) ;",
+        ];
+
+        let n = |xs: &[f64]| Value::num_list(xs.to_vec());
+        let l7 = n(&[3., 4., 5., 6., 7., 8., 9.]); // the lists.scad doc example
+        let hetero = Value::list(vec![
+            Value::Num(1.0),
+            Value::string("a"),
+            Value::num_list(vec![2.0, 3.0]),
+        ]);
+        let s = Value::string("hello");
+        let rng = |start: f64, step: f64, end: f64| Value::Range { start, step, end };
+
+        let inf = f64::INFINITY;
+        let nan = f64::NAN;
+        let cases: Vec<Vec<Value>> = vec![
+            // assert #1: a non-list/string `list` raises (both sides).
+            vec![Value::Num(5.0), Value::Num(0.0)],
+            vec![Value::Undef, Value::Num(0.0)],
+            vec![rng(0., 1., 5.), Value::Num(0.0)],
+            // l==0 → [] (list AND string), single- and two-arg.
+            vec![n(&[]), Value::Num(2.0)],
+            vec![Value::string(""), Value::Num(0.0)],
+            vec![n(&[]), Value::Num(2.0), Value::Num(4.0)],
+            // scalar start — wraparound, negatives, out-of-range, fractional (truncates), ±inf.
+            vec![l7.clone(), Value::Num(5.0)],
+            vec![l7.clone(), Value::Num(0.0)],
+            vec![l7.clone(), Value::Num(6.0)],
+            vec![l7.clone(), Value::Num(7.0)], // == l → wraps to 0
+            vec![l7.clone(), Value::Num(-2.0)],
+            vec![l7.clone(), Value::Num(-1.0)],
+            vec![l7.clone(), Value::Num(100.0)],
+            vec![l7.clone(), Value::Num(-100.0)],
+            vec![l7.clone(), Value::Num(3.5)],
+            vec![l7.clone(), Value::Num(inf)], // is_num TRUE (not NaN) → wrap→nan→index undef
+            vec![l7.clone(), Value::Num(-inf)],
+            // NaN start: is_num is FALSE for NaN → else branch → assert #2 raises.
+            vec![l7.clone(), Value::Num(nan)],
+            // vector start — gather with wraparound, and the empty vector → [].
+            vec![l7.clone(), n(&[1., 3.])],
+            vec![l7.clone(), n(&[3., 1.])],
+            vec![l7.clone(), n(&[-1., -2.])],
+            vec![l7.clone(), n(&[])],
+            // range start.
+            vec![l7.clone(), rng(1., 1., 3.)],
+            vec![l7.clone(), rng(0., 2., 6.)],
+            // BAD non-num start → assert #2 raises: non-num elem, nested, inf/nan elem, non-finite range,
+            // string/bool/undef.
+            vec![l7.clone(), Value::list(vec![Value::Num(1.0), Value::string("a")])],
+            vec![l7.clone(), Value::list(vec![Value::num_list(vec![1.0, 2.0])])],
+            vec![l7.clone(), n(&[1., inf])],
+            vec![l7.clone(), n(&[nan, 2.])],
+            vec![l7.clone(), rng(0., 1., inf)],
+            vec![l7.clone(), Value::string("x")],
+            vec![l7.clone(), Value::Bool(true)],
+            vec![l7.clone(), Value::Undef],
+            // two-index form — the doc examples + s>e wraparound + fractional bounds.
+            vec![l7.clone(), Value::Num(5.0), Value::Num(6.0)],
+            vec![l7.clone(), Value::Num(5.0), Value::Num(8.0)],
+            vec![l7.clone(), Value::Num(5.0), Value::Num(2.0)],
+            vec![l7.clone(), Value::Num(-3.0), Value::Num(-1.0)],
+            vec![l7.clone(), Value::Num(3.0), Value::Num(3.0)],
+            vec![l7.clone(), Value::Num(0.0), Value::Num(0.0)],
+            vec![l7.clone(), Value::Num(6.0), Value::Num(0.0)],
+            vec![l7.clone(), Value::Num(2.5), Value::Num(5.5)],
+            // two-index non-finite → assert #3 raises (a non-num or inf/nan bound).
+            vec![l7.clone(), Value::Num(inf), Value::Num(2.0)],
+            vec![l7.clone(), Value::Num(2.0), Value::Num(nan)],
+            vec![l7.clone(), Value::Num(2.0), Value::string("x")],
+            vec![l7.clone(), Value::string("x"), Value::Num(2.0)],
+            // heterogeneous List as `list` — element access, gather, slice (List result).
+            vec![hetero.clone(), Value::Num(1.0)],
+            vec![hetero.clone(), Value::Num(2.0)],
+            vec![hetero.clone(), n(&[0., 2.])],
+            vec![hetero.clone(), Value::Num(0.0), Value::Num(2.0)],
+            // string as `list` — single char, gather + slice (List-of-Str result).
+            vec![s.clone(), Value::Num(1.0)],
+            vec![s.clone(), Value::Num(-1.0)],
+            vec![s.clone(), n(&[0., 4.])],
+            vec![s.clone(), Value::Num(1.0), Value::Num(3.0)],
+            vec![s.clone(), Value::Num(3.0), Value::Num(1.0)],
+        ];
+
+        for inputs in &cases {
+            assert!(
+                same_result(&func(inputs), &interpret_with_deps(reference, &deps, inputs)),
+                "select diverged on {inputs:?}"
+            );
         }
     }
 

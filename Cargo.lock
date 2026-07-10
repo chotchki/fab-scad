@@ -2805,6 +2805,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "fab-gen"
+version = "0.1.0"
+dependencies = [
+ "fab-jit",
+ "fab-lang",
+]
+
+[[package]]
 name = "fab-geom"
 version = "0.1.0"
 dependencies = [

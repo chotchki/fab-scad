@@ -62,6 +62,25 @@ pub(super) fn worth_caching(args: &[Value], cap: usize) -> bool {
     true
 }
 
+/// The per-call cache-gate WORK — the `cap`-bounded element count `worth_caching` scans + the hasher would
+/// hash (its own scan stops at `cap`, so an uncacheable big-arg call costs ~`cap`, not its full size). The
+/// auto-off's COST signal (N.2c.2), accumulated only during warmup.
+pub(super) fn key_work(args: &[Value], cap: usize) -> u64 {
+    let mut total = 0usize;
+    for v in args {
+        total += match v {
+            Value::NumList(xs) => xs.len(),
+            Value::List(xs) => xs.len(),
+            Value::Str(s) => s.len(),
+            _ => 1,
+        };
+        if total >= cap {
+            return cap as u64;
+        }
+    }
+    total as u64
+}
+
 type FixedHasher = BuildHasherDefault<std::collections::hash_map::DefaultHasher>;
 
 /// The exact memo key. `env`/`dyn_ctx` are HELD (their `Rc`s pin the pointers we compare by — no ABA).
@@ -197,12 +216,44 @@ pub(super) fn value_bits_eq(a: &Value, b: &Value) -> bool {
     }
 }
 
+/// N.2c.2 program-level AUTO-OFF state. The cache is CORRECT everywhere (bit-identical) but net-NEGATIVE on
+/// call-heavy / big-key / cheap-body models (`under_sink_guide`: ~8k-element keys, mostly uncacheable, so the
+/// per-call gate scan costs more than the cheap bodies it might skip). Rather than a per-call cost-weight (the
+/// design doc tried that — it FAILED, because the weighing overhead IS the cost), run for a bounded WARMUP,
+/// then decide ONCE: [`Live`](Self::Live) keeps caching, [`Off`](Self::Off) drops the gate to a single branch
+/// for the rest of the program. So a bad model pays the overhead for only [`WARMUP_PROBES`] calls.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum CacheState {
+    /// Sampling cost vs benefit; still caching. Flips to `Live`/`Off` at the window's end.
+    Warmup,
+    /// The cache is paying its way — cache normally, no more accounting.
+    Live,
+    /// Net-negative for THIS program — skip the gate entirely (the auto-off's whole point).
+    Off,
+}
+
+/// Cache-gate probes to sample before the auto-off decides. Bounded so a net-negative program's warmup penalty
+/// is ~this-many calls' worth of gate cost, then zero. Big enough to be representative of a uniform call graph.
+const WARMUP_PROBES: u32 = 2048;
+
+/// Min warmup HIT-RATE (per-1000) for the cache to stay LIVE. Below it, the per-call gate cost isn't repaid
+/// by enough body-skips — the `under_sink_guide` class (~124‰ hits, cheap bodies, the −17% loser) → auto-OFF;
+/// above it (`pill_holder` ~412‰) the cache is a clear win. Hit-rate (not a key-size cost-weight) is the
+/// dominant, OUTLIER-ROBUST signal: the arg-cap already bounds per-key hash cost, and a work-average is
+/// skewed by a few giant-arg calls that may fall outside the warmup window (they do for `under_sink`).
+const MIN_HIT_PERMILLE: u64 = 250;
+
 /// A two-generation bounded memo. `get` promotes a cold hit to hot; when hot fills, hot rotates to cold and a
 /// fresh hot starts — evicting the older generation without an O(n) scan. Lookup-only in the sense that no
-/// value is ever produced by iterating the maps; eviction changes hit/miss, never output.
+/// value is ever produced by iterating the maps; eviction changes hit/miss, never output. Carries the N.2c.2
+/// auto-off state + warmup counters.
 pub(super) struct Cache {
     hot: HashMap<Key, Value, FixedHasher>,
     cold: HashMap<Key, Value, FixedHasher>,
+    state: CacheState,
+    w_probes: u32,
+    w_hits: u32,
+    w_work: u64,
 }
 
 impl Default for Cache {
@@ -210,6 +261,10 @@ impl Default for Cache {
         Self {
             hot: HashMap::default(),
             cold: HashMap::default(),
+            state: CacheState::Warmup,
+            w_probes: 0,
+            w_hits: 0,
+            w_work: 0,
         }
     }
 }
@@ -233,6 +288,39 @@ impl Cache {
         self.insert_hot(key, val);
     }
 
+    /// The auto-off state (N.2c.2) — the gate reads it to decide whether to even try. `Copy`.
+    pub(super) fn state(&self) -> CacheState {
+        self.state
+    }
+
+    /// Record one WARMUP cache-gate sample and, at the window's end, DECIDE. `work` = elements this call's key
+    /// scanned/hashed (cost); `hit` = it was a cache hit (benefit). Called only while [`CacheState::Warmup`]
+    /// (the gate checks `state` first), so `Live`/`Off` pay nothing. The decision: keep the cache LIVE iff the
+    /// hits' benefit (`hits * HIT_BENEFIT`) covers the elements hashed; otherwise it's net cost for THIS
+    /// program → `Off`, and every later call skips the gate at a single branch.
+    pub(super) fn note(&mut self, hit: bool, work: u64) {
+        self.w_probes += 1;
+        self.w_work = self.w_work.saturating_add(work);
+        self.w_hits += u32::from(hit);
+        if self.w_probes >= WARMUP_PROBES {
+            self.state = if u64::from(self.w_hits) * 1000 >= u64::from(self.w_probes) * MIN_HIT_PERMILLE {
+                CacheState::Live
+            } else {
+                CacheState::Off
+            };
+            if std::env::var_os("FAB_CACHE_DEBUG").is_some() {
+                eprintln!(
+                    "[cache-autooff] probes={} hits={} ({}‰) work={} -> {}",
+                    self.w_probes,
+                    self.w_hits,
+                    u64::from(self.w_hits) * 1000 / u64::from(self.w_probes),
+                    self.w_work,
+                    if self.state == CacheState::Live { "LIVE" } else { "OFF" },
+                );
+            }
+        }
+    }
+
     fn insert_hot(&mut self, key: Key, val: Value) {
         if self.hot.len() >= GEN_CAP {
             self.cold = std::mem::take(&mut self.hot); // rotate generations (evict the older)
@@ -254,3 +342,38 @@ fn clone_key(k: &Key) -> Key {
 
 /// The cache handle stored in `Ctx` — a `RefCell` because eval borrows it mutably on every call.
 pub(super) type CacheCell = RefCell<Cache>;
+
+#[cfg(test)]
+mod tests {
+    use super::{Cache, CacheState, MIN_HIT_PERMILLE, WARMUP_PROBES};
+
+    /// N.2c.2 auto-off: after the warmup window, a LOW-hit-rate program disables (the `under_sink_guide`
+    /// class) while a HIGH-hit-rate one stays LIVE (the `pill_holder` class); before the window closes it's
+    /// still Warmup.
+    #[test]
+    fn auto_off_decides_on_hit_rate_at_window_close() {
+        // Just under the window → still sampling.
+        let mut c = Cache::default();
+        for _ in 0..WARMUP_PROBES - 1 {
+            c.note(true, 8);
+        }
+        assert_eq!(c.state(), CacheState::Warmup);
+
+        // ~12% hit-rate (below the ~25% threshold) → OFF.
+        let mut c = Cache::default();
+        for i in 0..WARMUP_PROBES {
+            c.note(i % 8 == 0, 8); // 1-in-8 hits = 125‰
+        }
+        assert_eq!(c.state(), CacheState::Off);
+
+        // 50% hit-rate → LIVE.
+        let mut c = Cache::default();
+        for i in 0..WARMUP_PROBES {
+            c.note(i % 2 == 0, 8);
+        }
+        assert_eq!(c.state(), CacheState::Live);
+
+        // The threshold sits between those two rates.
+        assert!((125..500).contains(&(MIN_HIT_PERMILLE as u32)));
+    }
+}

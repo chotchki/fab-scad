@@ -877,13 +877,27 @@ fn eval_with_global<'a>(
                 // N.2c eval-memo: on a HIT, push the cached result and skip binding + body entirely (the whole
                 // point — the redundant subtree never runs). On a MISS, snapshot the side-effect counters and
                 // queue a `CacheStore` that memoizes the result IFF the subtree turns out pure.
-                // Gate the cache: enabled (opt-in) and args small enough to key cheaply (arg-cap — keeps a
-                // 300k-element `gaussian_rands` comprehension from paying a giant per-call key hash).
-                let store = if ctx.config.eval_cache
-                    && eval_cache::worth_caching(&vals, ctx.config.eval_cache_argcap)
-                {
+                // Gate the cache: enabled (config) AND not auto-OFF (N.2c.2 — a net-negative program disables
+                // the whole gate after a bounded warmup, so this collapses to a single `state` read + branch)
+                // AND args small enough to key cheaply (arg-cap — keeps a 300k-element `gaussian_rands`
+                // comprehension from a giant per-call key hash). During WARMUP the gate also SAMPLES cost
+                // (`key_work` scanned) vs benefit (a hit) so the auto-off can decide.
+                let cache_state = ctx.config.eval_cache.then(|| ctx.cache.borrow().state());
+                let warming = cache_state == Some(eval_cache::CacheState::Warmup);
+                let cacheable = matches!(
+                    cache_state,
+                    Some(eval_cache::CacheState::Warmup | eval_cache::CacheState::Live)
+                ) && eval_cache::worth_caching(&vals, ctx.config.eval_cache_argcap);
+                let store = if cacheable {
                     let key = eval_cache::Key::new(body, &base, &vals, &caller);
-                    let hit = ctx.cache.borrow_mut().get(&key);
+                    let hit = {
+                        let mut c = ctx.cache.borrow_mut();
+                        let h = c.get(&key);
+                        if warming {
+                            c.note(h.is_some(), eval_cache::key_work(&vals, ctx.config.eval_cache_argcap));
+                        }
+                        h
+                    };
                     if let Some(v) = hit {
                         values.push(v);
                         continue;
@@ -898,6 +912,14 @@ fn eval_with_global<'a>(
                         },
                     ))
                 } else {
+                    // An uncacheable call (big args) still PAID the gate scan — charge it to the warmup so a
+                    // mostly-uncacheable program (the `under_sink_guide` class) auto-disables.
+                    if warming {
+                        ctx.cache.borrow_mut().note(
+                            false,
+                            eval_cache::key_work(&vals, ctx.config.eval_cache_argcap),
+                        );
+                    }
                     None
                 };
                 if let Some((key, snap)) = store {

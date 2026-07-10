@@ -17,10 +17,17 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive # BOSL2 — the seed corpus for eval/jit_diff is sliced from it
       - uses: dtolnay/rust-toolchain@nightly
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-fuzz
+      # Seed the eval/jit_diff corpora from ~1300 real BOSL2 function defs before fuzzing — starts the
+      # campaign on dense, valid numeric/list bodies (took jit_diff coverage ~1k → ~13k on the first run)
+      # instead of rediscovering SCAD syntax from raw bytes. No-op for parse/lex (their corpora are curated).
+      - name: seed fuzz corpora from BOSL2
+        run: cargo run -p fab-lang --example seed_fuzz_from_bosl2
       # A crash makes `cargo fuzz run` exit non-zero → the job FAILS → the reproducer is uploaded and
       # goes into TROPHIES.md as a regression test. Budgets are per-target wall-clock.
       - name: fuzz parse

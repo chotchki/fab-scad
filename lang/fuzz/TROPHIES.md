@@ -24,4 +24,6 @@ land here as the nightly campaign accrues runtime.
 
 | Date | Target | Class | Reproducer (minimized) | Regression test | Fix |
 |------|--------|-------|------------------------|-----------------|-----|
-| — | — | — | — | — | — |
+| 2026-07-09 | eval | timeout (bounded-slow, NOT a memory bug) | `x=[for(i=[0:9e9])0];` — a range whose length is capped at `RANGE_MAX` (10M), so eval builds a 10-million-element list in >10s | _pending_ | _pending — needs a GLOBAL eval budget (Q.5); a single 10M comprehension is under any per-range cap yet still 10s, and a low global cap would break real high-`$fn` geometry, so the limit is a design call, not a mechanical fix_ |
+
+**Note on the first eval finding:** this is a *timeout*, not a crash/UB — the input TERMINATES (the `RANGE_MAX` guard bounds it), it's just slow. It's real for the untrusted-input / ML-corpus goal (a program that eats 10s kills throughput) but distinct from the "no panic/overflow" memory line, which held. The eval campaign now runs in libFuzzer FORK mode with `-ignore_timeouts`, so this class is quarantined to `artifacts/` and the campaign keeps hunting genuine crashes. Fix tracked as Q.5 (global eval iteration budget).

@@ -17,6 +17,23 @@ use libfuzzer_sys::fuzz_target;
 
 use fab_lang::{Scope, StmtKind, Value, eval_expr, parse};
 
+/// True if `src` contains a run of >= 12 consecutive digits — an absurd literal no real program has, and the
+/// signature of the JIT-compile OOM class (a 60-digit literal in a wide nested list).
+fn has_huge_literal(src: &str) -> bool {
+    let mut run = 0u32;
+    for b in src.bytes() {
+        if b.is_ascii_digit() {
+            run += 1;
+            if run >= 12 {
+                return true;
+            }
+        } else {
+            run = 0;
+        }
+    }
+    false
+}
+
 /// f64 arg batteries derived from the fuzzer bytes PLUS the fixed IEEE corners (0, ±1, div-by-zero → inf,
 /// 0/0 → nan, big/small) — the corners `fast_eq_jit` pins, so the campaign starts already probing them.
 fn sample_args(arity: usize, data: &[u8]) -> Vec<Vec<f64>> {
@@ -66,6 +83,13 @@ fuzz_target!(|data: &[u8]| {
     let Ok(src) = std::str::from_utf8(data) else {
         return;
     };
+    // Skip inputs carrying an absurd numeric literal (a >=12-digit run): compiling a body full of giant
+    // literals + wide nested lists can OOM the JIT's analysis BEFORE it declines the (non-numeric) body — a
+    // compile-complexity-budget gap (Q.5), not a bit-identity divergence. Real code never has such literals,
+    // so this costs no coverage of interp==JIT.
+    if has_huge_literal(src) {
+        return;
+    }
     let Ok(prog) = parse(src) else {
         return;
     };

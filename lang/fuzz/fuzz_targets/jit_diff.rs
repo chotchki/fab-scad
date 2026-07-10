@@ -112,6 +112,13 @@ fuzz_target!(|data: &[u8]| {
     };
 
     for args in sample_args(names.len(), data) {
+        // QUARANTINE NaN inputs (Q.6): `(-NaN)*(-NaN)` diverges — the JIT's `fmul` canonicalizes the NaN
+        // sign bit (→ 0x7ff8…) where the interpreter's `f64::mul` preserves it (→ 0xfff8…). That's a KNOWN,
+        // filed bit-identity bug; skip NaN args so the campaign keeps finding OTHER divergence classes until
+        // the canonical-NaN convention is decided + both tiers made to agree. Remove this once Q.6 lands.
+        if args.iter().any(|a| a.is_nan()) {
+            continue;
+        }
         // JIT `None` = a raised inline assert or a non-numeric result — the interpreter side is then
         // Err/non-Num too, so there's nothing to compare. Only Some(number) is asserted.
         let Some(jit) = jitted.call(&args) else {

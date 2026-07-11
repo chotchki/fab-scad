@@ -163,6 +163,9 @@ pub fn whole_stl(source: &Path, out_dir: &Path) -> PathBuf {
 /// as `render_whole`; the split is `backend::build_geo_parts`. Each part Solid is built AND consumed
 /// here (written to STL) — none crosses the async boundary (`!Send`). Empty parts are dropped; the
 /// returned order is authored order (index `i` in the filename tracks it).
+// Committed ahead of its consumer: the T.2b scene orchestration (poll_job spawning N part `Model`
+// entities off these STLs) lands next; exercised now by `render_parts_splits_top_level_into_separate_stls`.
+#[allow(dead_code)]
 pub fn render_parts(
     root: Option<&Path>,
     source: &Path,

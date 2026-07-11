@@ -14,6 +14,15 @@ const BED_EPS: f64 = 0.6;
 /// How much a flat bed footprint discounts the score (only breaks near-ties — it must not let a
 /// big-overhang orientation win on contact alone).
 const BED_REWARD: f64 = 0.1;
+/// PREFER-FLAT budget: how much overhang a piece may carry and still be laid FLAT rather than
+/// tilted. A candidate whose overhang is within this fraction of the piece's total surface area of
+/// the least-overhang candidate counts as "flat-acceptable" and competes on bed contact — so a
+/// stable flat face beats a precarious 45° tilt that only shaves a little support (the structured
+/// cut-piece case — frame corners, walls — where the naive least-overhang pick stands them on a
+/// corner). Only a genuinely overhang-heavy piece (no orientation under budget) still tilts.
+/// Tunable like [`SUPPORT_ANGLE`]; `FAB_ORIENT_DEBUG=1` dumps per-candidate overhang/contact so the
+/// budget can be set from real pieces.
+pub const FLAT_BUDGET_FRAC: f64 = 0.15;
 
 /// Candidate build-ups, in a FIXED order (so ties resolve deterministically; +Z wins first): the 6
 /// axis-aligned ups, four 45° tilts of +Z toward each horizontal axis, then the piece's incident
@@ -89,10 +98,7 @@ pub fn best_up(tris: &[[Vec3; 3]], cut_normals: &[Vec3]) -> Vec3 {
     if tris.is_empty() {
         return Vec3::new(0.0, 0.0, 1.0);
     }
-    // "Same overhang" tolerance: a hair of the total surface area — absorbs float noise and genuine
-    // ties without letting a real overhang buy its way to a more stable face.
     let total: f64 = tris.iter().map(tri_area).sum();
-    let tol = 1e-3 * total + 1e-9;
     let scored: Vec<(Vec3, f64, f64)> = candidates(cut_normals)
         .into_iter()
         .map(|u| {
@@ -101,17 +107,41 @@ pub fn best_up(tris: &[[Vec3; 3]], cut_normals: &[Vec3]) -> Vec3 {
         })
         .collect();
     let min_over = scored.iter().map(|s| s.1).fold(f64::INFINITY, f64::min);
-    scored
+    // PREFER-FLAT: admit every orientation whose overhang is within a support BUDGET of the best
+    // (float-noise tolerance + [`FLAT_BUDGET_FRAC`] of the surface area), then lay the FLATTEST of
+    // them down (max bed contact) — so a stable flat face wins over a 45° tilt that only shaves a
+    // little overhang. Only when nothing is under budget does the piece genuinely tilt.
+    let budget = min_over + FLAT_BUDGET_FRAC * total + 1e-9;
+    let winner = scored
         .iter()
         .enumerate()
-        .filter(|(_, s)| s.1 <= min_over + tol)
+        .filter(|(_, s)| s.1 <= budget)
         // Max contact; on a contact tie, the earliest candidate (smaller index) wins.
         .max_by(|a, b| {
             a.1.2
                 .partial_cmp(&b.1.2)
                 .unwrap_or(std::cmp::Ordering::Equal)
                 .then(b.0.cmp(&a.0))
-        })
+        });
+    #[cfg(not(target_arch = "wasm32"))]
+    if std::env::var_os("FAB_ORIENT_DEBUG").is_some() {
+        let w = winner.map(|(i, _)| i).unwrap_or(usize::MAX);
+        eprintln!(
+            "[orient] tris={} area={total:.0} min_over={min_over:.1} budget={budget:.1} -> {:?}",
+            tris.len(),
+            winner.map(|(_, s)| s.0)
+        );
+        for (i, s) in scored.iter().enumerate() {
+            eprintln!(
+                "  {} {:?} overhang={:.1} contact={:.1}",
+                if i == w { "*" } else { " " },
+                s.0,
+                s.1,
+                s.2
+            );
+        }
+    }
+    winner
         .map(|(_, s)| s.0)
         .unwrap_or(Vec3::new(0.0, 0.0, 1.0))
 }
@@ -174,6 +204,47 @@ mod tests {
         assert!(
             overhang_score(&tris, up) < 0.5,
             "chosen up should have ~no overhang"
+        );
+    }
+
+    // A quad in the plane z=`z` spanning [x0,x1]×[y0,y1], wound so its normal is -Z (downward).
+    fn quad_down(x0: f64, y0: f64, x1: f64, y1: f64, z: f64) -> [[Vec3; 3]; 2] {
+        let p = [
+            Vec3::new(x0, y0, z),
+            Vec3::new(x0, y1, z),
+            Vec3::new(x1, y1, z),
+            Vec3::new(x1, y0, z),
+        ];
+        [[p[0], p[1], p[2]], [p[0], p[2], p[3]]]
+    }
+
+    #[test]
+    fn prefer_flat_keeps_a_small_ceiling_overhang_on_the_bed() {
+        // T.3: a big flat face (lots of bed contact) with a SMALL downward ceiling overhang above it
+        // — the structured cut-piece case (a slab with an interior overhang). Least-overhang ALONE
+        // flees the flat face: any orientation where the ceiling isn't downward has ZERO overhang,
+        // so the naive pick stands the piece off its big face onto an edge to save a sliver of
+        // support. Prefer-flat instead accepts the small overhang (under budget) to keep the large,
+        // stable face on the bed.
+        let mut tris: Vec<[Vec3; 3]> = Vec::new();
+        tris.extend(quad_down(0.0, 0.0, 10.0, 10.0, 0.0)); // 10×10 bed face (contact when up=+Z)
+        tris.extend(quad_down(4.0, 4.0, 6.0, 6.0, 5.0)); // 2×2 ceiling above it (overhang when up=+Z)
+
+        let up = best_up(&tris, &[]);
+        assert_eq!(
+            up,
+            Vec3::new(0.0, 0.0, 1.0),
+            "a small ceiling overhang must not lift the big face off the bed"
+        );
+        // Prove prefer-flat OVERRODE least-overhang: the chosen flat up genuinely carries overhang,
+        // yet a zero-overhang orientation existed (-Z) — so pure min-overhang would NOT have picked it.
+        assert!(
+            areas(&tris, up).0 > 0.0,
+            "the chosen flat orientation does carry the small overhang"
+        );
+        assert!(
+            areas(&tris, Vec3::new(0.0, 0.0, -1.0)).0 < areas(&tris, up).0,
+            "a lower-overhang orientation existed but prefer-flat kept the flat face down"
         );
     }
 

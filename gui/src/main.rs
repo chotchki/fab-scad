@@ -46,6 +46,7 @@ use bevy::{
     window::ExitCondition,
     winit::WinitPlugin,
 };
+use bevy_egui::{egui, EguiContexts, EguiPlugin, EguiPrimaryContextPass};
 
 mod fab;
 use fab_scad::stl;
@@ -594,6 +595,7 @@ fn run_windowed(scene: SceneCfg) {
             DefaultPlugins.set(assets_dir()),
             FeathersPlugins,
             MeshPickingPlugin,
+            EguiPlugin::default(),
         ))
         .insert_resource(UiTheme(create_dark_theme()))
         .insert_resource(ClearColor(Color::srgb(0.10, 0.10, 0.12)))
@@ -672,7 +674,21 @@ fn run_windowed(scene: SceneCfg) {
         )
         // After `orbit` so the corner axis gizmo reads THIS frame's orbit state (no swim/flicker).
         .add_systems(Update, draw_axis_gizmo.after(orbit))
+        // U.1.1 de-risk: a minimal egui panel rendering alongside the feathers UI + Bevy 3D, to
+        // prove the bevy_egui 0.41 ↔ Bevy 0.19 integration before porting the real panels (U.1.2).
+        .add_systems(EguiPrimaryContextPass, egui_probe)
         .run();
+}
+
+/// U.1.1 integration probe — a throwaway egui window confirming bevy_egui renders over the 3D
+/// viewport + feathers UI. Removed once the real panels land (U.1.2).
+fn egui_probe(mut contexts: EguiContexts) {
+    let Ok(ctx) = contexts.ctx_mut() else {
+        return;
+    };
+    egui::Window::new("egui").show(ctx, |ui| {
+        ui.label("bevy_egui 0.41 alive over Bevy 0.19");
+    });
 }
 
 #[derive(Component)]

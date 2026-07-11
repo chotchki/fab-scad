@@ -15,3 +15,4 @@ bevy = { version = "0.19", features = ["bevy_feathers", "bevy_picking", "mesh_pi
 # Native Open dialog for the file/directory picker (5.3.1). Async variant integrates with Bevy's
 # task pool; on macOS it dispatches the panel to the main thread internally.
 rfd = "0.17"
+bevy_egui = "0.41"

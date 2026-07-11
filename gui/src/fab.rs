@@ -157,6 +157,56 @@ pub fn whole_stl(source: &Path, out_dir: &Path) -> PathBuf {
     out_dir.join(format!("{}.stl", stem_of(source)))
 }
 
+/// Render the source into its TOP-LEVEL PARTS (T.2b) — one preview STL per implicit-union child at
+/// the model root (the `wall_sliced()` / `frame_sliced()` / … calls), written to `{stem}-part{i}.stl`
+/// beside `render_whole`'s output, each paired with its bbox. Same `$preview` wrapper + own-dir eval
+/// as `render_whole`; the split is `backend::build_geo_parts`. Each part Solid is built AND consumed
+/// here (written to STL) — none crosses the async boundary (`!Send`). Empty parts are dropped; the
+/// returned order is authored order (index `i` in the filename tracks it).
+pub fn render_parts(
+    root: Option<&Path>,
+    source: &Path,
+    out_dir: &Path,
+) -> Result<Vec<(PathBuf, (FVec3, FVec3))>> {
+    use fab_scad::backend::{build_geo_parts, ManifoldBackend};
+    let abs = source
+        .canonicalize()
+        .with_context(|| format!("resolving {}", source.display()))?;
+    let base = abs.parent().unwrap_or_else(|| Path::new("."));
+    let wrap_src = format!("$preview = true;\ninclude <{}>;\n", abs.display());
+    std::fs::create_dir_all(out_dir)?;
+    let libs = preview_libs(root);
+    let tree = fab_scad::import::resolve_geometry_with_base(
+        &wrap_src,
+        base,
+        &libs,
+        fab_lang::Config::from_env(),
+    )
+    .with_context(|| format!("scad-rs eval of {}", source.display()))?;
+    let stem = stem_of(source);
+    let mut out = Vec::new();
+    // ManifoldBackend's Solid is `Option<Solid>` (the empty algebra is `None`) — flatten drops empty
+    // parts, then guard the rare Some(empty) too.
+    for (i, solid) in build_geo_parts(&tree, &ManifoldBackend)
+        .into_iter()
+        .flatten()
+        .filter(|s| !s.is_empty())
+        .enumerate()
+    {
+        let Some(bbox) = solid.bbox() else { continue };
+        let path = out_dir.join(format!("{stem}-part{i}.stl"));
+        std::fs::write(&path, solid.to_stl_bytes())
+            .with_context(|| format!("writing {}", path.display()))?;
+        out.push((path, bbox));
+    }
+    ensure!(
+        !out.is_empty(),
+        "scad-rs rendered EMPTY geometry (no parts) for {}",
+        source.display()
+    );
+    Ok(out)
+}
+
 /// One printable piece for the print-orientation preview: its slab multi-index, its
 /// connected-COMPONENT index within that slab (0 when the slab is one solid; >0 splits a presliced
 /// blob into its real pieces — T.2a), the mesh (WITH its joints carved — peg/socket), and the
@@ -570,6 +620,28 @@ mod tests {
             "second reslice re-rendered the base (cache miss)"
         );
 
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn render_parts_splits_top_level_into_separate_stls() {
+        // T.2b keystone at the GUI edge: two top-level cubes → two independent part STLs at their
+        // authored positions (no libs, so root = None evaluates the cubes directly).
+        let tmp = std::env::temp_dir().join(format!("gui_parts_{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let src = tmp.join("twin.scad");
+        std::fs::write(&src, "cube([10,10,10]); translate([40,0,0]) cube([10,10,10]);").unwrap();
+
+        let parts = render_parts(None, &src, &tmp).expect("render parts");
+        assert_eq!(parts.len(), 2, "two top-level cubes → two part STLs");
+        assert!(parts.iter().all(|(p, _)| p.exists()), "each part STL written");
+        // The two parts keep their authored X positions (0..10 and 40..50), proving they're the
+        // distinct top-level items, not one merged solid.
+        let xs: Vec<f64> = parts.iter().map(|(_, (min, _))| min.x).collect();
+        assert!(
+            xs.iter().any(|&x| x.abs() < 1.0) && xs.iter().any(|&x| (x - 40.0).abs() < 1.0),
+            "parts at authored positions: {xs:?}"
+        );
         let _ = std::fs::remove_dir_all(&tmp);
     }
 

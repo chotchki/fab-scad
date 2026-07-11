@@ -1,0 +1,529 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>fab-gui — workflow tabs design mock (U.3)</title>
+<!--
+  Design mock for U.3 — the app-wide workflow tabs (Model / Parts / Orientation / Export).
+  Rendered in the app's egui-dark skin at panel proportions. Source of truth is PLAN.md (U.3);
+  this is the visual companion. Open in any browser; follows your OS light/dark preference.
+-->
+<style>
+  * { margin: 0; padding: 0; }
+</style>
+<style>
+  :root {
+    --ground: #eef0f4; --surface: #ffffff; --surface-2: #f7f8fa;
+    --ink: #1a1c22; --muted: #5b6070; --faint: #868b9c; --hair: #e1e3ea;
+    --accent: #1f9d57; --accent-soft: #e4f4ea; --blue: #2f6fb0;
+    --amber: #b9791b; --amber-soft: #f6ecd8;
+
+    /* the app skin — fixed dark in both themes (it reproduces a dark native app) */
+    --eg-ground: #16161d; --eg-panel: #242430; --eg-bar: #1b1b24;
+    --eg-widget: #383844; --eg-line: #34343f; --eg-text: #c9cad4; --eg-dim: #8b8c9a;
+    --eg-blue: #5a8fd0; --eg-green: #78dc8c; --eg-red: #e68282; --eg-amber: #e0a860;
+
+    --mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+    --sans: system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --ground: #101017; --surface: #1a1a22; --surface-2: #16161d;
+      --ink: #e7e8ec; --muted: #9a9eb0; --faint: #71748a; --hair: #2a2a34;
+      --accent: #78dc8c; --accent-soft: #1a2c22; --blue: #6a9fd8;
+      --amber: #e0a860; --amber-soft: #2c2518;
+    }
+  }
+  :root[data-theme="dark"] {
+    --ground: #101017; --surface: #1a1a22; --surface-2: #16161d;
+    --ink: #e7e8ec; --muted: #9a9eb0; --faint: #71748a; --hair: #2a2a34;
+    --accent: #78dc8c; --accent-soft: #1a2c22; --blue: #6a9fd8; --amber: #e0a860; --amber-soft: #2c2518;
+  }
+  :root[data-theme="light"] {
+    --ground: #eef0f4; --surface: #ffffff; --surface-2: #f7f8fa;
+    --ink: #1a1c22; --muted: #5b6070; --faint: #868b9c; --hair: #e1e3ea;
+    --accent: #1f9d57; --accent-soft: #e4f4ea; --blue: #2f6fb0; --amber: #b9791b; --amber-soft: #f6ecd8;
+  }
+
+  * { box-sizing: border-box; }
+  body { margin: 0; }
+  .wrap {
+    font-family: var(--sans); background: var(--ground); color: var(--ink);
+    line-height: 1.5; padding: clamp(20px,5vw,60px) clamp(16px,5vw,52px) 72px;
+    -webkit-font-smoothing: antialiased;
+  }
+  .col { max-width: 1080px; margin: 0 auto; }
+
+  .eyebrow { font-family: var(--mono); font-size: 12px; letter-spacing: .14em;
+    text-transform: uppercase; color: var(--accent); margin: 0 0 10px; }
+  h1 { font-size: clamp(30px,5vw,46px); line-height: 1.05; margin: 0 0 14px;
+    letter-spacing: -.02em; text-wrap: balance; font-weight: 680; }
+  h1 .sub { color: var(--muted); font-weight: 400; }
+  .lede { font-size: 17px; color: var(--muted); max-width: 64ch; margin: 0 0 22px; }
+
+  .decisions { display: flex; flex-wrap: wrap; gap: 10px; }
+  .chip { display: inline-flex; align-items: baseline; gap: 8px; background: var(--surface);
+    border: 1px solid var(--hair); border-radius: 7px; padding: 8px 13px; font-size: 13.5px; }
+  .chip b { font-weight: 620; }
+  .chip .k { font-family: var(--mono); font-size: 10.5px; letter-spacing: .08em;
+    text-transform: uppercase; color: var(--accent); }
+
+  section { margin-top: 54px; }
+  .sec-head { display: flex; align-items: baseline; gap: 14px; margin-bottom: 6px; }
+  .sec-num { font-family: var(--mono); font-size: 12px; color: var(--faint); letter-spacing: .1em; }
+  h2 { font-size: 21px; margin: 0; letter-spacing: -.01em; font-weight: 640; }
+  .sec-note { color: var(--muted); font-size: 14.5px; margin: 4px 0 24px; max-width: 68ch; }
+
+  /* ---- DAG ---- */
+  .dag { display: flex; align-items: stretch; overflow-x: auto; padding: 6px 2px 14px; }
+  .node { flex: 1 1 0; min-width: 150px; background: var(--surface); border: 1px solid var(--hair);
+    border-radius: 10px; padding: 13px 15px; }
+  .node.wide { flex: 1.5 1 0; }
+  .node .stage { font-family: var(--mono); font-size: 11px; letter-spacing: .1em;
+    text-transform: uppercase; color: var(--accent); font-weight: 600; }
+  .node .what { font-weight: 620; font-size: 15px; margin: 3px 0 2px; }
+  .node .holds { font-size: 12.5px; color: var(--muted); font-family: var(--mono); }
+  .node .nest { margin-top: 8px; padding-top: 8px; border-top: 1px dashed var(--hair);
+    font-size: 11.5px; color: var(--faint); font-family: var(--mono); }
+  .node .nest b { color: var(--muted); }
+  .edge { flex: 0 0 auto; align-self: center; display: flex; flex-direction: column;
+    align-items: center; padding: 0 8px; }
+  .edge .op { font-family: var(--mono); font-size: 10.5px; color: var(--muted); margin-bottom: 2px; }
+  .edge .arr { font-size: 18px; line-height: 1; color: var(--accent); }
+
+  /* ---- app frame ---- */
+  .app { background: var(--eg-ground); border: 1px solid var(--eg-line); border-radius: 11px;
+    overflow: hidden; box-shadow: 0 14px 40px -18px rgba(0,0,0,.5); margin-bottom: 8px; }
+  .titlebar { display: flex; align-items: center; gap: 7px; padding: 8px 12px; background: var(--eg-bar);
+    border-bottom: 1px solid var(--eg-line); }
+  .dotmac { width: 11px; height: 11px; border-radius: 50%; }
+  .titlebar .name { margin-left: 8px; font-size: 11.5px; color: var(--eg-dim); font-family: var(--mono); }
+  .app-tabs { display: flex; gap: 2px; background: var(--eg-bar); padding: 0 8px; }
+  .app-tab { padding: 9px 18px 8px; font-size: 12.5px; color: var(--eg-dim); position: relative;
+    border-radius: 7px 7px 0 0; font-weight: 550; white-space: nowrap; }
+  .app-tab.on { color: #f0f1f6; background: var(--eg-ground); }
+  .app-tab.on::after { content: ""; position: absolute; left: 10px; right: 10px; bottom: 0;
+    height: 2px; background: var(--eg-green); border-radius: 2px; }
+  .app-tab.greyed { color: #55566a; }
+  .app-tab .num { font-family: var(--mono); font-size: 10px; opacity: .6; margin-right: 5px; }
+  .app-tab .dot { position: absolute; top: 6px; right: 8px; width: 5px; height: 5px;
+    border-radius: 50%; background: var(--eg-amber); box-shadow: 0 0 0 2px var(--eg-bar); }
+  .app-tab.rendering { color: #f0f1f6; }
+  .app-tab .spin { position: absolute; top: 7px; right: 7px; width: 9px; height: 9px;
+    border-radius: 50%; border: 2px solid var(--eg-line); border-top-color: var(--eg-blue);
+    animation: spin .8s linear infinite; }
+  .app-status { display: flex; align-items: center; justify-content: space-between; gap: 10px;
+    padding: 5px 12px; background: var(--eg-bar); border-top: 1px solid var(--eg-line);
+    font-family: var(--mono); font-size: 10.5px; color: var(--eg-dim); }
+  .app-status .sb-l { color: var(--eg-text); }
+  .app-status.run .sb-l { color: var(--eg-blue); }
+  .app-status .sb-r { font-variant-numeric: tabular-nums; }
+  .sb-spin { display: inline-block; width: 9px; height: 9px; margin-right: 6px; border-radius: 50%;
+    border: 2px solid var(--eg-line); border-top-color: var(--eg-blue); vertical-align: -1px;
+    animation: spin .8s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  @media (prefers-reduced-motion: reduce) { .sb-spin, .app-tab .spin { animation: none; } }
+
+  .app-body { display: flex; height: 300px; }
+  .app-side { flex: 0 0 42%; background: var(--eg-panel); border-right: 1px solid var(--eg-line);
+    padding: 12px 12px; overflow: auto; }
+  .app-side.editor { flex-basis: 50%; font-family: var(--mono); font-size: 11.5px; padding: 0; background: #191921; }
+  .app-view { flex: 1 1 0; position: relative; overflow: hidden;
+    background: radial-gradient(120% 90% at 50% 20%, #20202b 0%, var(--eg-ground) 70%); }
+
+  .side-h { font-size: 11px; font-family: var(--mono); letter-spacing: .08em; text-transform: uppercase;
+    color: var(--eg-dim); margin: 2px 2px 8px; }
+  .eg-btn { display: block; width: 100%; text-align: left; padding: 5px 9px; background: var(--eg-widget);
+    border: 1px solid var(--eg-line); border-radius: 5px; color: var(--eg-text); font-size: 12px;
+    margin: 5px 0; font-family: var(--sans); }
+  .eg-btn.green { color: #0e1a12; background: var(--eg-green); border-color: var(--eg-green); font-weight: 600; }
+  .eg-btn.disabled { color: #55566a; background: #2a2a34; border-style: dashed; }
+  .eg-sep { height: 1px; background: var(--eg-line); margin: 9px 0; }
+  .eg-label { color: var(--eg-dim); font-size: 11px; margin: 8px 2px 4px; }
+  .eg-hint { color: var(--eg-dim); font-size: 11px; font-style: italic; margin: 5px 2px; line-height: 1.4; }
+  .eg-status { font-size: 11.5px; color: var(--eg-dim); margin: 8px 2px 2px; }
+  .eg-status.run { color: var(--eg-blue); }
+
+  .filerow { padding: 4px 8px; border-radius: 4px; font-size: 12px; margin: 2px 0; color: var(--eg-text); }
+  .filerow.sel { background: #35507a; color: #eef3fb; }
+
+  /* editor */
+  .ed-tabbar { display: flex; background: #14141b; border-bottom: 1px solid var(--eg-line); }
+  .ed-file { padding: 6px 12px; font-size: 11px; color: var(--eg-dim); background: #14141b;
+    border-right: 1px solid var(--eg-line); position: relative; }
+  .ed-file.on { color: var(--eg-text); background: #191921; }
+  .ed-file.on::after { content: ""; position: absolute; left: 8px; right: 8px; bottom: 0;
+    height: 2px; background: var(--eg-green); }
+  .ed-file.plus { color: var(--eg-green); font-weight: 600; padding: 6px 11px; }
+  .ed-body { padding: 8px 4px; display: flex; }
+  .ed-ln { color: #4a4b5c; text-align: right; padding-right: 10px; user-select: none;
+    border-right: 1px solid var(--eg-line); min-width: 26px; }
+  .ed-code { padding-left: 12px; white-space: pre; }
+  .ed-ln div, .ed-code div { line-height: 1.55; }
+  .t-key { color: #c98fd0; } .t-fn { color: #7fb0e6; } .t-num { color: #d0a878; }
+  .t-com { color: #5c6270; } .t-str { color: #98c88a; }
+
+  /* parts drill-down tree */
+  .tree { font-size: 12px; }
+  .tw-part { display: flex; align-items: center; gap: 5px; padding: 3px 2px; }
+  .tw-part.active { color: var(--eg-green); font-weight: 640; }
+  .tw-part .pc { margin-left: auto; color: var(--eg-dim); font-weight: 400; font-size: 10.5px; }
+  .tw-tri { width: 9px; font-size: 9px; color: var(--eg-dim); }
+  .tw-cuts { margin: 2px 0 2px 10px; padding-left: 8px; border-left: 1px solid var(--eg-line); }
+  .tw-cut { display: flex; align-items: center; gap: 5px; padding: 3px 2px; color: var(--eg-text); }
+  .tw-cut.sel { color: #dce8f8; }
+  .tw-cut .dv { font-family: var(--mono); font-variant-numeric: tabular-nums; padding: 0 5px;
+    background: #1c1c26; border: 1px solid var(--eg-line); border-radius: 3px; font-size: 10.5px; }
+  .tw-conn { margin: 3px 0 5px 22px; padding: 6px 8px; background: #1c1c26;
+    border: 1px solid var(--eg-line); border-radius: 5px; }
+  .tw-conn .cl { font-size: 10px; color: var(--eg-dim); font-family: var(--mono);
+    text-transform: uppercase; letter-spacing: .06em; margin-bottom: 4px; }
+  .seg { display: flex; gap: 3px; margin: 3px 0; }
+  .seg .opt { flex: 1 1 0; text-align: center; padding: 3px 2px; font-size: 10.5px; border-radius: 4px;
+    background: var(--eg-widget); border: 1px solid var(--eg-line); color: var(--eg-dim); }
+  .seg .opt.on { background: #35507a; color: #eef3fb; border-color: #40608e; }
+  .add-planes { display: flex; gap: 4px; margin: 5px 0 2px 10px; }
+  .add-planes .mini { flex: 1 1 0; text-align: center; padding: 3px; font-size: 10.5px;
+    font-family: var(--mono); background: var(--eg-widget); border: 1px solid var(--eg-line);
+    border-radius: 4px; color: var(--eg-dim); }
+
+  .piece-row { display: flex; align-items: center; gap: 6px; font-size: 11.5px; margin: 4px 0;
+    padding: 4px 7px; border-radius: 4px; background: #1c1c26; border: 1px solid var(--eg-line); }
+  .piece-row .st { margin-left: auto; font-family: var(--mono); font-size: 10px; }
+  .st.flat { color: var(--eg-green); } .st.auto { color: var(--eg-amber); }
+  .metric { font-family: var(--mono); font-size: 11.5px; color: var(--eg-text); margin: 5px 2px; }
+  .metric b { color: var(--eg-green); }
+
+  /* fake 3D viewport bits */
+  .floor { position: absolute; left: 50%; bottom: 8%; width: 150%; height: 62%;
+    transform: translateX(-50%) perspective(320px) rotateX(64deg);
+    background-image: linear-gradient(var(--eg-line) 1px, transparent 1px),
+      linear-gradient(90deg, var(--eg-line) 1px, transparent 1px);
+    background-size: 22px 22px; opacity: .28; }
+  .stage3d { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+    flex-direction: column; gap: 4px; }
+  .cyl { width: 62px; height: 74px; border-radius: 50% / 15px; border: 1px solid var(--eg-green);
+    background: linear-gradient(90deg,#25412f,#3a5a48 45%,#25412f); }
+  .cyl.short { height: 30px; }
+  .cyl.lying { width: 74px; height: 30px; border-radius: 15px / 50%; }
+  .gap { height: 9px; }
+  .bed { width: 62%; height: 38%; border: 1px solid #3a5a72; border-radius: 3px; background: #1a2230aa;
+    display: grid; gap: 5px; padding: 6px; position: relative; z-index: 2; }
+  .bed.two { display: flex; gap: 8px; background: transparent; border: none; padding: 0; }
+  .bed .b { flex: 1 1 0; border: 1px dashed #3a5a72; border-radius: 3px; background: #141a26;
+    position: relative; }
+  .bed .b i { position: absolute; background: #2c4a38; border: 1px solid var(--eg-green);
+    border-radius: 2px; opacity: .9; }
+  .gizmo { position: absolute; left: 12px; bottom: 12px; }
+  .badge3d { position: absolute; top: 10px; right: 12px; font-family: var(--mono); font-size: 10px;
+    color: var(--eg-dim); background: #00000055; padding: 3px 7px; border-radius: 4px;
+    border: 1px solid var(--eg-line); }
+
+  .caption { font-size: 13.5px; color: var(--muted); margin: 10px 2px 30px; max-width: 76ch; }
+  .caption b { color: var(--ink); font-weight: 620; }
+  .caption code { font-family: var(--mono); font-size: 12.5px; color: var(--ink); }
+
+  /* entry points */
+  .entries { display: grid; gap: 16px; grid-template-columns: 1fr; }
+  @media (min-width: 720px) { .entries { grid-template-columns: 1fr 1fr; } }
+  .entry { background: var(--surface); border: 1px solid var(--hair); border-radius: 12px; padding: 18px 20px; }
+  .entry h3 { margin: 0 0 4px; font-size: 15px; }
+  .entry h3 .plat { font-family: var(--mono); font-size: 10.5px; text-transform: uppercase;
+    letter-spacing: .1em; padding: 2px 7px; border-radius: 4px; margin-left: 8px; vertical-align: 1px; }
+  .plat.web { color: var(--blue); background: color-mix(in srgb, var(--blue) 14%, transparent); }
+  .plat.desk { color: var(--accent); background: var(--accent-soft); }
+  .entry p { margin: 6px 0 12px; font-size: 13.5px; color: var(--muted); }
+  .mini-tabs { display: flex; gap: 2px; background: var(--eg-bar); border: 1px solid var(--eg-line);
+    border-radius: 7px; padding: 6px; }
+  .mini-tabs .app-tab { padding: 6px 10px; font-size: 11px; border-radius: 5px; }
+  .mini-tabs .app-tab.on { background: var(--eg-ground); }
+  .mini-tabs .app-tab.on::after { left: 8px; right: 8px; }
+
+  /* notes */
+  .notes { display: grid; gap: 14px; grid-template-columns: 1fr; }
+  @media (min-width: 680px) { .notes { grid-template-columns: 1fr 1fr; } }
+  .note { background: var(--surface); border: 1px solid var(--hair); border-radius: 10px; padding: 16px 18px; }
+  .note h3 { margin: 0 0 6px; font-size: 14px; }
+  .note h3 .tag { font-family: var(--mono); font-size: 10px; text-transform: uppercase; letter-spacing: .1em;
+    padding: 2px 6px; border-radius: 4px; margin-left: 8px; vertical-align: 1px; }
+  .tag.now { color: var(--accent); background: var(--accent-soft); }
+  .tag.later { color: var(--amber); background: var(--amber-soft); }
+  .tag.fork { color: var(--blue); background: color-mix(in srgb, var(--blue) 14%, transparent); }
+  .note p { margin: 0; font-size: 13.5px; color: var(--muted); }
+  .note code { font-family: var(--mono); font-size: 12.5px; color: var(--ink); }
+
+  .foot { margin-top: 48px; padding-top: 18px; border-top: 1px solid var(--hair);
+    font-size: 12.5px; color: var(--faint); font-family: var(--mono); }
+</style>
+
+</head>
+<body>
+<div class="wrap"><div class="col">
+
+  <p class="eyebrow">fab-gui · task 57 · design pitch · v4</p>
+  <h1>Workflow tabs <span class="sub">— app-wide, editor-first</span></h1>
+  <p class="lede">Full-width tabs across the top of the window, each owning the whole app. The 3D view is persistent and changes per stage; Connectors is no longer top-level — it drills down inside Parts. Two entry points: desktop opens on the picker, web presupplies the model and lands you in the editor.</p>
+
+  <div class="decisions">
+    <span class="chip"><span class="k">layout</span> <b>Top tabs, app-wide</b></span>
+    <span class="chip"><span class="k">model</span> <b>Editor · files-as-tabs · ＋ reopens folder</b></span>
+    <span class="chip"><span class="k">parts</span> <b>Left drill:</b> part → cut → connector</span>
+    <span class="chip"><span class="k">entry</span> <b>Web lands in editor · desktop in picker</b></span>
+  </div>
+
+  <!-- 01 · DAG -->
+  <section>
+    <div class="sec-head"><span class="sec-num">01</span><h2>Four stages, one nested</h2></div>
+    <p class="sec-note">The top-level flow is four tabs. Connectors collapses into Parts as a sub-stage — the Parts left panel drills part → cut → connector — so the top bar stays short. Edges are still refresh dependencies: editing upstream re-derives downstream, and only downstream.</p>
+    <div class="dag">
+      <div class="node">
+        <div class="stage">Model</div><div class="what">Edit source</div>
+        <div class="holds">.scad + unsliced 3D</div>
+        <div class="nest"><b>output:</b> active file only</div>
+      </div>
+      <div class="edge"><span class="op">render</span><span class="arr">→</span></div>
+      <div class="node wide">
+        <div class="stage">Parts</div><div class="what">Cut + connect</div>
+        <div class="holds">parts → cuts</div>
+        <div class="nest"><b>drill:</b> cut ⤷ connectors (onion/bolt)</div>
+      </div>
+      <div class="edge"><span class="op">slice</span><span class="arr">→</span></div>
+      <div class="node">
+        <div class="stage">Orientation</div><div class="what">Seat on plates</div>
+        <div class="holds">per-piece up-vec</div>
+      </div>
+      <div class="edge"><span class="op">pack</span><span class="arr">→</span></div>
+      <div class="node">
+        <div class="stage">Export</div><div class="what">Output</div>
+        <div class="holds">3MF · publish</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 02 · the four tabs as app frames -->
+  <section>
+    <div class="sec-head"><span class="sec-num">02</span><h2>Each tab is the whole window</h2></div>
+    <p class="sec-note">Rendered in the app's egui-dark skin. Left = the stage's controls; right = the persistent 3D view, showing what that stage produces (unsliced → sliced → seated → packed). Same window chrome, same tab bar throughout.</p>
+
+    <!-- MODEL -->
+    <div class="app">
+      <div class="titlebar">
+        <span class="dotmac" style="background:#e6685f"></span><span class="dotmac" style="background:#e0a860"></span><span class="dotmac" style="background:#78dc8c"></span>
+        <span class="name">fab-gui — logan_lunchbox.scad</span>
+      </div>
+      <div class="app-tabs">
+        <div class="app-tab on"><span class="num">1</span>Model</div>
+        <div class="app-tab"><span class="num">2</span>Parts</div>
+        <div class="app-tab"><span class="num">3</span>Orientation</div>
+        <div class="app-tab"><span class="num">4</span>Export</div>
+      </div>
+      <div class="app-body">
+        <div class="app-side editor">
+          <div class="ed-tabbar"><span class="ed-file on">logan_lunchbox.scad</span><span class="ed-file">lid.scad</span><span class="ed-file plus">＋</span></div>
+          <div class="ed-body">
+            <div class="ed-ln"><div>1</div><div>2</div><div>3</div><div>4</div><div>5</div><div>6</div><div>7</div></div>
+            <div class="ed-code"><div><span class="t-com">// two-part lunchbox</span></div><div><span class="t-key">$fn</span> = <span class="t-num">64</span>;</div><div><span class="t-key">module</span> <span class="t-fn">cyl_part</span>() {</div><div>  <span class="t-fn">cylinder</span>(h=<span class="t-num">40</span>, r=<span class="t-num">12</span>);</div><div>}</div><div><span class="t-fn">cyl_part</span>();</div><div><span class="t-fn">right</span>(<span class="t-num">30</span>) <span class="t-fn">cyl_part</span>();</div></div>
+          </div>
+        </div>
+        <div class="app-view">
+          <div class="floor"></div>
+          <div class="stage3d"><div class="cyl"></div></div>
+          <div class="badge3d">unsliced · live preview</div>
+          <svg class="gizmo" width="42" height="42" viewBox="0 0 42 42"><line x1="8" y1="34" x2="34" y2="34" stroke="#e6685f" stroke-width="2"/><line x1="8" y1="34" x2="8" y2="8" stroke="#78dc8c" stroke-width="2"/><line x1="8" y1="34" x2="22" y2="22" stroke="#5a8fd0" stroke-width="2"/></svg>
+        </div>
+      </div>
+      <div class="app-status"><span class="sb-l">✓ rendered · logan_lunchbox.scad</span><span class="sb-r">2 parts · unsliced</span></div>
+    </div>
+    <p class="caption"><b>Model</b> — launch picks a folder, then a file; it opens as a tab over the editor. The <code>＋</code> tab to the right reopens that folder to add another file. Open as many as you like — but only the <b>active</b> file tab renders here and flows downstream into Parts → Orientation → Export, so switching it re-drives the whole pipeline.</p>
+
+    <!-- PARTS -->
+    <div class="app">
+      <div class="titlebar">
+        <span class="dotmac" style="background:#e6685f"></span><span class="dotmac" style="background:#e0a860"></span><span class="dotmac" style="background:#78dc8c"></span>
+        <span class="name">fab-gui — Parts</span>
+      </div>
+      <div class="app-tabs">
+        <div class="app-tab"><span class="num">1</span>Model</div>
+        <div class="app-tab on"><span class="num">2</span>Parts</div>
+        <div class="app-tab"><span class="num">3</span>Orientation</div>
+        <div class="app-tab"><span class="num">4</span>Export</div>
+      </div>
+      <div class="app-body">
+        <div class="app-side">
+          <div class="side-h">parts · cuts · connectors</div>
+          <div class="tree">
+            <div class="tw-part active"><span class="tw-tri">▼</span> cyl·1 <span class="pc">2 pcs</span></div>
+            <div class="tw-cuts">
+              <div class="tw-cut sel"><span class="tw-tri">▼</span> Z cut @ <span class="dv">12.5</span></div>
+              <div class="tw-conn">
+                <div class="cl">connectors — this cut</div>
+                <div class="seg"><div class="opt on">Onion</div><div class="opt">Bolt</div></div>
+                <div class="seg"><div class="opt on">Auto-place</div><div class="opt">Clear</div></div>
+              </div>
+              <div class="tw-cut"><span class="tw-tri">▸</span> Z cut @ <span class="dv">40.0</span></div>
+              <div class="add-planes"><span class="mini">+X</span><span class="mini">+Y</span><span class="mini">+Z</span></div>
+            </div>
+            <div class="tw-part"><span class="tw-tri">▸</span> right·2 <span class="pc">1 pc</span></div>
+          </div>
+          <div class="eg-sep"></div>
+          <button class="eg-btn">Auto-slice</button>
+          <button class="eg-btn">Explode</button>
+          <div class="eg-status">sliced · 2 parts · 3 pieces</div>
+        </div>
+        <div class="app-view">
+          <div class="floor"></div>
+          <div class="stage3d"><div class="cyl short"></div><div class="gap"></div><div class="cyl short"></div></div>
+          <div class="badge3d">sliced · cut planes shown</div>
+          <svg class="gizmo" width="42" height="42" viewBox="0 0 42 42"><line x1="8" y1="34" x2="34" y2="34" stroke="#e6685f" stroke-width="2"/><line x1="8" y1="34" x2="8" y2="8" stroke="#78dc8c" stroke-width="2"/><line x1="8" y1="34" x2="22" y2="22" stroke="#5a8fd0" stroke-width="2"/></svg>
+        </div>
+      </div>
+      <div class="app-status"><span class="sb-l">✓ sliced · cyl·1</span><span class="sb-r">2 parts · 3 pieces</span></div>
+    </div>
+    <p class="caption"><b>Parts</b> — the workhorse. Left panel is a three-level drill: pick a part (green = active), expand its cuts, expand a cut to edit <em>its</em> connectors inline. Connectors never leaves this tab. The 3D shows the sliced result with cut-plane overlays.</p>
+
+    <!-- ORIENTATION -->
+    <div class="app">
+      <div class="titlebar">
+        <span class="dotmac" style="background:#e6685f"></span><span class="dotmac" style="background:#e0a860"></span><span class="dotmac" style="background:#78dc8c"></span>
+        <span class="name">fab-gui — Orientation</span>
+      </div>
+      <div class="app-tabs">
+        <div class="app-tab"><span class="num">1</span>Model</div>
+        <div class="app-tab"><span class="num">2</span>Parts</div>
+        <div class="app-tab on"><span class="num">3</span>Orientation</div>
+        <div class="app-tab"><span class="num">4</span>Export</div>
+      </div>
+      <div class="app-body">
+        <div class="app-side">
+          <div class="side-h">print orientation</div>
+          <div class="eg-hint">click a piece in the view to set which face prints down</div>
+          <div class="piece-row">cyl·1 · pc 1 <span class="st flat">flat ✓</span></div>
+          <div class="piece-row">cyl·1 · pc 2 <span class="st auto">auto</span></div>
+          <div class="piece-row">right·2 <span class="st flat">flat ✓</span></div>
+          <div class="eg-sep"></div>
+          <div class="metric"><b>3</b> pieces · <b>2</b> seated flat</div>
+        </div>
+        <div class="app-view">
+          <div class="bed"><div class="floor" style="opacity:.18"></div></div>
+          <div class="stage3d" style="flex-direction:row; gap:14px;"><div class="cyl lying"></div><div class="cyl lying" style="width:40px"></div></div>
+          <div class="badge3d">seated on bed</div>
+          <svg class="gizmo" width="42" height="42" viewBox="0 0 42 42"><line x1="8" y1="34" x2="34" y2="34" stroke="#e6685f" stroke-width="2"/><line x1="8" y1="34" x2="8" y2="8" stroke="#78dc8c" stroke-width="2"/><line x1="8" y1="34" x2="22" y2="22" stroke="#5a8fd0" stroke-width="2"/></svg>
+        </div>
+      </div>
+      <div class="app-status"><span class="sb-l">✓ seated on bed</span><span class="sb-r">3 pieces · 2 flat</span></div>
+    </div>
+    <p class="caption"><b>Orientation</b> — every printable piece across all parts, seated on the bed. Click a piece to set its print-down face; the list flags which are flat vs. still auto-placed. This is today's Print mode, promoted to its own tab.</p>
+
+    <!-- EXPORT -->
+    <div class="app">
+      <div class="titlebar">
+        <span class="dotmac" style="background:#e6685f"></span><span class="dotmac" style="background:#e0a860"></span><span class="dotmac" style="background:#78dc8c"></span>
+        <span class="name">fab-gui — Export</span>
+      </div>
+      <div class="app-tabs">
+        <div class="app-tab"><span class="num">1</span>Model</div>
+        <div class="app-tab"><span class="num">2</span>Parts</div>
+        <div class="app-tab"><span class="num">3</span>Orientation</div>
+        <div class="app-tab on"><span class="num">4</span>Export</div>
+      </div>
+      <div class="app-body">
+        <div class="app-side">
+          <div class="side-h">co-packed plates</div>
+          <div class="metric"><b>2</b> plates · <b>3</b> pieces · fits 256×256</div>
+          <div class="eg-sep"></div>
+          <button class="eg-btn green">Export plates (3MF)</button>
+          <button class="eg-btn">Publish → hotchkiss.io</button>
+          <div class="eg-status">ready</div>
+        </div>
+        <div class="app-view" style="background:var(--eg-ground)">
+          <div class="stage3d">
+            <div class="bed two" style="width:70%; height:56%;">
+              <div class="b"><i style="left:12%;top:16%;width:42%;height:34%"></i><i style="left:58%;top:22%;width:30%;height:46%"></i><i style="left:18%;top:56%;width:34%;height:30%"></i></div>
+              <div class="b"><i style="left:22%;top:24%;width:54%;height:50%"></i></div>
+            </div>
+          </div>
+          <div class="badge3d">plate 1 · plate 2</div>
+        </div>
+      </div>
+      <div class="app-status"><span class="sb-l">✓ packed</span><span class="sb-r">2 plates · fits 256×256</span></div>
+    </div>
+    <p class="caption"><b>Export</b> — the co-packed bed layout, then the two output actions: write plates as 3MF, or publish the model to hotchkiss.io. Merges today's "Export plates" (Print mode) with the top-level "Publish".</p>
+  </section>
+
+  <!-- 03 · feedback -->
+  <section>
+    <div class="sec-head"><span class="sec-num">03</span><h2>Two feedback channels</h2></div>
+    <p class="sec-note">At-a-glance on the tabs; detail on the bottom bar. An invalidated tab carries an amber dot; the tab that's actively rendering shows motion (a spinner). The bottom status bar — traditional, app-wide — spells out exactly what's running. The reactive standard: no modal spinners, no rebuild buttons; work just happens and the chrome reports it.</p>
+    <div class="app" style="margin-bottom:0;">
+      <div class="app-tabs">
+        <div class="app-tab"><span class="num">1</span>Model</div>
+        <div class="app-tab rendering on"><span class="num">2</span>Parts<span class="spin"></span></div>
+        <div class="app-tab"><span class="num">3</span>Orientation<span class="dot"></span></div>
+        <div class="app-tab"><span class="num">4</span>Export<span class="dot"></span></div>
+      </div>
+      <div class="app-body" style="height:78px; align-items:center; justify-content:center; background:var(--eg-ground);">
+        <span style="font-family:var(--mono); font-size:11px; color:var(--eg-dim); text-align:center; padding:0 16px; line-height:1.5;">nudged a cut in Parts → Parts re-slices (spinner), Orientation + Export go stale (amber dots), Model stays clean</span>
+      </div>
+      <div class="app-status run"><span class="sb-l"><span class="sb-spin"></span>reslicing cyl·1 — piece 2 of 3…</span><span class="sb-r">Parts · rendering</span></div>
+    </div>
+  </section>
+
+  <!-- 04 · entry points -->
+  <section>
+    <div class="sec-head"><span class="sec-num">04</span><h2>Two entry points, one tab bar</h2></div>
+    <p class="sec-note">The web build can't browse the user's filesystem — the model is baked in. So the Model tab's <em>picker</em> greys out and the editor becomes the landing surface. Desktop keeps the full picker. Same four tabs either way; only the picker's availability changes.</p>
+    <div class="entries">
+      <div class="entry">
+        <h3>Desktop <span class="plat desk">native</span></h3>
+        <p>Launch → pick folder → pick file. Files open as tabs over the editor; the ＋ tab reopens that folder to add more. The active file drives the pipeline.</p>
+        <div class="mini-tabs">
+          <div class="app-tab on">Model</div><div class="app-tab">Parts</div>
+          <div class="app-tab">Orientation</div><div class="app-tab">Export</div>
+        </div>
+        <div class="ed-tabbar" style="margin-top:10px; border:1px solid var(--eg-line); border-radius:6px; overflow:hidden;">
+          <span class="ed-file on">logan_lunchbox.scad</span><span class="ed-file">lid.scad</span><span class="ed-file plus">＋</span>
+        </div>
+      </div>
+      <div class="entry">
+        <h3>Web <span class="plat web">wasm</span></h3>
+        <p>Model is presupplied — one file, no filesystem to browse. It opens straight in the editor; no ＋ tab, because there's no folder to reopen.</p>
+        <div class="mini-tabs">
+          <div class="app-tab on">Model</div><div class="app-tab">Parts</div>
+          <div class="app-tab">Orientation</div><div class="app-tab">Export</div>
+        </div>
+        <div class="ed-tabbar" style="margin-top:10px; border:1px solid var(--eg-line); border-radius:6px; overflow:hidden;">
+          <span class="ed-file on">presupplied.scad</span>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 05 · scope -->
+  <section>
+    <div class="sec-head"><span class="sec-num">05</span><h2>Scope — now vs later</h2></div>
+    <div class="notes">
+      <div class="note">
+        <h3>Top tab bar + per-tab body <span class="tag now">now</span></h3>
+        <p>A single app-wide <code>Tab</code> resource drives a full-width bar; each tab swaps the side panel's contents and what the 3D view renders. Replaces the derived <code>PanelMode</code>.</p>
+      </div>
+      <div class="note">
+        <h3>Code editor in Model <span class="tag now">now</span></h3>
+        <p>egui's multiline text edit + a re-render-on-change hook. The unsliced preview is just the current render path pointed at the edited buffer.</p>
+      </div>
+      <div class="note">
+        <h3>Model = one tab, files as inner tabs <span class="tag now">now</span></h3>
+        <p>Settled: a single <b>Model</b> tab. Opened files are inner tabs (VS Code-style) with a ＋ that reopens the folder browser. Reuses the existing <code>FileList</code>/<code>SwitchFile</code> machinery — the active file already is the downstream driver.</p>
+      </div>
+      <div class="note">
+        <h3>Wizard affordances <span class="tag later">later</span></h3>
+        <p>Free tabs now — no step-gating, validation, or completion checks. The DAG staleness dots (amber, on stale downstream tabs) are the only guidance in v1.</p>
+      </div>
+    </div>
+  </section>
+
+  <p class="foot">// app-wide top tabs · model = editor + file-tabs (＋ reopens folder) · connectors nested in parts · feedback = tab dots + tab motion + bottom status bar · v4</p>
+
+</div></div>
+</body>
+</html>

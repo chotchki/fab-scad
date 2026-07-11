@@ -1,5 +1,5 @@
 //! fab-gui — the slicing GUI (Phase 5.1). A Bevy 0.19 viewport over a model, with the printer
-//! bed for reference and a Feathers control panel. A STACK of cut planes (each draggable in 3D
+//! bed for reference and an egui control panel. A STACK of cut planes (each draggable in 3D
 //! and toggleable on/off) drives `fab` in-process (the shared `fab_scad` lib) ON A BACKGROUND
 //! THREAD; Re-slice swaps in the result. The cut stack is the unit a DAG cache will key on:
 //! a slice is a pure function of (source, enabled cuts). Modes:
@@ -16,33 +16,20 @@ use bevy::{
     app::ScheduleRunnerPlugin,
     asset::{AssetPlugin, RenderAssetUsages},
     camera::{visibility::RenderLayers, RenderTarget},
-    feathers::{
-        controls::{
-            ButtonVariant, FeathersButton, FeathersListRow, FeathersListView, FeathersNumberInput,
-            NumberFormat, NumberInputValue, UpdateNumberInput,
-        },
-        dark_theme::create_dark_theme,
-        theme::{ThemeBackgroundColor, ThemedText, UiTheme},
-        tokens, FeathersPlugins,
-    },
     image::Image,
     input::mouse::{MouseMotion, MouseScrollUnit, MouseWheel},
     mesh::Indices,
     picking::{
         events::{Click, Drag, DragEnd, DragStart, Pointer},
-        hover::HoverMap,
         mesh_picking::MeshPickingPlugin,
-        pointer::{PointerButton, PointerId},
+        pointer::PointerButton,
     },
     prelude::*,
     render::{
         render_resource::{PrimitiveTopology, TextureFormat, TextureUsages},
         view::screenshot::{save_to_disk, Screenshot},
     },
-    scene::{Scene, SceneList}, // the bsn traits — shadow the prelude's `Scene` asset struct
     tasks::{block_on, futures_lite::future, AsyncComputeTaskPool, Task},
-    text::{FontSize, FontSource, TextFont},
-    ui_widgets::{Activate, ValueChange},
     window::ExitCondition,
     winit::WinitPlugin,
 };
@@ -428,60 +415,39 @@ struct SliceInBackground(bool);
 /// or a burst of connector edits into ONE rebuild instead of one per frame.
 const AUTOSLICE_DEBOUNCE: f32 = 0.35;
 
-/// The bundled Material Icons font (gui/assets/fonts), for button glyphs (trash, etc.).
-#[derive(Resource)]
-struct IconFont(Handle<Font>);
-
-/// Material Symbols codepoints used on buttons (subset baked into gui/assets/fonts).
-const ICON_DELETE: &str = "\u{e872}"; // trash can
-const ICON_ADD: &str = "\u{e145}"; // plus
-const ICON_ON: &str = "\u{e8f4}"; // eye (visible)
-const ICON_OFF: &str = "\u{e8f5}"; // eye-off (hidden)
-const ICON_CONN: &str = "\u{f35a}"; // plug_connect — open this cut's connector editor
-
-/// Marks the panel's status text so a system can update it.
-#[derive(Component, Clone, Default)]
-struct StatusLabel;
-/// The Explode/Collapse view-toggle button and its caption (relabelled to match the state).
-#[derive(Component, Clone, Default)]
-struct ViewToggleButton;
-#[derive(Component, Clone, Default)]
-struct ViewToggleLabel;
 /// A 3D marker (small sphere) for a placed connector, by its index in the `Conns` list.
 #[derive(Component)]
 struct ConnMarker(usize);
-/// The whole panel's root entity — despawned + rebuilt when the cut structure changes.
-#[derive(Component, Clone, Default)]
-struct PanelRoot;
-/// A cut row in a plane card, tagged with the cut index it shows (for targeted text updates).
-#[derive(Component, Clone, Default, Reflect)]
-#[reflect(Component)]
-struct RowFor(usize);
-/// The position number-input on a cut row, tagged with the cut index (for value push-back).
-#[derive(Component, Clone, Default, Reflect)]
-#[reflect(Component)]
-struct FieldFor(usize);
-/// Marks a button caption that should render in the bundled icon font.
-#[derive(Component, Clone, Default)]
-struct IconText;
-/// Set once the icon font has been applied to an IconText caption.
-#[derive(Component)]
-struct IconApplied;
 
-/// The panel's structural signature: the cut stack (axis + enabled per cut), the file-list shape
-/// (count + active index), and the modal layout. The panel rebuilds when any change (cut
-/// add/remove/rotate/toggle, a new Open, a file switch, entering/leaving a sub-mode);
-/// position-only cut edits update rows in place instead.
-type PanelSignature = (
-    Vec<(Axis, bool)>,
-    usize,
-    Option<usize>,
-    PanelMode,
-    ActiveConn,
-);
+/// A panel button command that a heavy action system handles (U.1.2): the egui panel is
+/// immediate-mode, so a click that needs params beyond the panel's own resources writes one of
+/// these instead of mutating in place. The matching `*_action` system reads it.
+#[derive(Message, Clone, Copy, PartialEq, Eq)]
+enum PanelCmd {
+    EditOpenscad,
+    AutoSlice,
+    ToggleView,
+    Publish,
+    Export,
+}
 
+/// Panel → seam outputs, written by `panel_ui` each frame and read by the 3D systems: `over_ui`
+/// yields the camera orbit when the pointer is on the panel; `width_px` insets the 3D viewport to
+/// the right of the panel. Bundled into one resource so `panel_ui` stays under Bevy's 16-param cap.
 #[derive(Resource, Default)]
-struct PanelSig(Option<PanelSignature>);
+struct PanelSeam {
+    over_ui: bool,
+    width_px: f32,
+}
+
+/// The panel's outbound message writers, bundled so `panel_ui` spends ONE system param on all
+/// three (Bevy caps a system at 16 params).
+#[derive(SystemParam)]
+struct PanelWriters<'w> {
+    switch: MessageWriter<'w, SwitchFile>,
+    autoplace: MessageWriter<'w, AutoPlace>,
+    cmd: MessageWriter<'w, PanelCmd>,
+}
 
 /// Which modal layout the panel shows. Derived from the editor/print resources — the sub-modes are
 /// mutually exclusive (`enforce_exclusive_modes`), so at most one is active; the panel shows ONLY
@@ -504,9 +470,6 @@ fn panel_mode(edit: &EditCut, print: &PrintView) -> PanelMode {
         PanelMode::View
     }
 }
-/// A brief attention flash (seconds remaining), drawn as a fading outline.
-#[derive(Component)]
-struct Nudge(f32);
 
 /// A cut-plane overlay, tied to its cut in the stack by index. Tracks its axis so the plane mesh
 /// can be rebuilt when the cut is rotated.
@@ -580,24 +543,15 @@ fn assets_dir() -> AssetPlugin {
     }
 }
 
-/// Load the bundled icon font (Startup, before the panel first builds).
-fn load_icons(asset_server: Res<AssetServer>, mut commands: Commands) {
-    commands.insert_resource(IconFont(
-        asset_server.load("fonts/MaterialSymbols-subset.ttf"),
-    ));
-}
-
 // ---- windowed -------------------------------------------------------------------------
 
 fn run_windowed(scene: SceneCfg) {
     App::new()
         .add_plugins((
             DefaultPlugins.set(assets_dir()),
-            FeathersPlugins,
             MeshPickingPlugin,
             EguiPlugin::default(),
         ))
-        .insert_resource(UiTheme(create_dark_theme()))
         .insert_resource(ClearColor(Color::srgb(0.10, 0.10, 0.12)))
         .insert_resource(scene)
         .init_resource::<Job>()
@@ -624,18 +578,19 @@ fn run_windowed(scene: SceneCfg) {
         .init_resource::<SlicedMesh>()
         .init_resource::<SliceInBackground>()
         .init_resource::<DisplaySpread>()
-        .init_resource::<PanelSig>()
+        .init_resource::<PanelSeam>()
         .insert_resource(Status("rendering".into()))
         .add_message::<ReSlice>()
         .add_message::<AutoPlace>()
         .add_message::<SwitchFile>()
+        .add_message::<PanelCmd>()
         .add_observer(on_drag_start)
         .add_observer(on_drag)
         .add_observer(on_drag_end)
         .add_observer(on_click)
         .add_observer(place_on_profile_click)
         .add_observer(orient_piece_on_click)
-        .add_systems(Startup, (setup_windowed, load_icons))
+        .add_systems(Startup, setup_windowed)
         .add_systems(
             Update,
             (
@@ -647,19 +602,23 @@ fn run_windowed(scene: SceneCfg) {
                 (kick_auto_plan, poll_auto_plan).chain().after(poll_job),
                 poll_publish,
                 (poll_open_dialog, apply_switch_file, watch_source),
-                update_status,
                 sync_overlays,
                 sync_overlay_visuals,
                 sync_dim_labels,
-                update_view_label,
                 sync_conn_markers,
                 edit_mode,
                 draw_profile,
-                (push_fields, sync_selected, apply_icon_font, rebuild_panel).chain(),
-                nudge_buttons,
                 auto_reslice,
                 revert_on_edit,
-                (auto_scale, split_viewport, seat_bed, loading_pulse),
+                (auto_scale, split_viewport, seat_bed),
+                // The panel's button commands (heavy actions the egui `panel_ui` writes as PanelCmd).
+                (
+                    toggle_view,
+                    publish_action,
+                    edit_in_openscad_action,
+                    auto_slice_action,
+                    export_plates_action,
+                ),
                 (
                     enforce_exclusive_modes,
                     apply_view_visibility,
@@ -674,21 +633,229 @@ fn run_windowed(scene: SceneCfg) {
         )
         // After `orbit` so the corner axis gizmo reads THIS frame's orbit state (no swim/flicker).
         .add_systems(Update, draw_axis_gizmo.after(orbit))
-        // U.1.1 de-risk: a minimal egui panel rendering alongside the feathers UI + Bevy 3D, to
-        // prove the bevy_egui 0.41 ↔ Bevy 0.19 integration before porting the real panels (U.1.2).
-        .add_systems(EguiPrimaryContextPass, egui_probe)
+        .add_systems(EguiPrimaryContextPass, panel_ui)
         .run();
 }
 
-/// U.1.1 integration probe — a throwaway egui window confirming bevy_egui renders over the 3D
-/// viewport + feathers UI. Removed once the real panels land (U.1.2).
-fn egui_probe(mut contexts: EguiContexts) {
+/// The whole control panel (U.1.2), immediate-mode: a left egui SidePanel that reads + mutates the
+/// SAME ECS resources the feathers panel did, one mode at a time (View / Connectors / Print, via
+/// `panel_mode`). Cheap edits mutate in place; a heavy action (needing params beyond the panel's
+/// own) writes a `PanelCmd` its dedicated system handles. Writes `PanelSeam` after drawing so
+/// `orbit` yields the pointer over the panel and `split_viewport` insets the 3D camera beside it.
+// TODO(U.1.2): the Material Symbols icon font — text labels ("+"/"on"/"off"/"del"/"conn") for now.
+#[allow(clippy::too_many_arguments)]
+fn panel_ui(
+    mut contexts: EguiContexts,
+    mut cuts: ResMut<Cuts>,
+    mut conns: ResMut<Conns>,
+    mut active: ResMut<ActiveConn>,
+    mut edit: ResMut<EditCut>,
+    mut print: ResMut<PrintView>,
+    files: Res<FileList>,
+    status: Res<Status>,
+    bounds: Res<ModelBounds>,
+    dspread: Res<DisplaySpread>,
+    job: Res<Job>,
+    mut open_dialog: ResMut<OpenDialog>,
+    mut writers: PanelWriters,
+    mut seam: ResMut<PanelSeam>,
+) {
     let Ok(ctx) = contexts.ctx_mut() else {
         return;
     };
-    egui::Window::new("egui").show(ctx, |ui| {
-        ui.label("bevy_egui 0.41 alive over Bevy 0.19");
-    });
+    let mode = panel_mode(&edit, &print);
+    let mut to_remove: Option<usize> = None; // a delete defers past the row loop (index stability)
+    // egui 0.35 panels show INTO a Ui, not the Context — wrap the viewport in a background-layer Ui
+    // first (the bevy_egui side_panel pattern) so the panel overlays the 3D view.
+    let mut viewport = egui::Ui::new(
+        ctx.clone(),
+        egui::Id::new("panel_viewport"),
+        egui::UiBuilder::new()
+            .layer_id(egui::LayerId::background())
+            .max_rect(ctx.viewport_rect()),
+    );
+    let panel = egui::Panel::left("panel")
+        .resizable(true)
+        .default_size(220.0)
+        .show(&mut viewport, |ui| {
+            ui.heading("fab-gui");
+            ui.separator();
+            match mode {
+                PanelMode::View => {
+                    if ui.button("Open…").clicked() && open_dialog.0.is_none() {
+                        open_dialog.0 = Some(AsyncComputeTaskPool::get().spawn(async move {
+                            rfd::AsyncFileDialog::new()
+                                .pick_folder()
+                                .await
+                                .map(|h| h.path().to_path_buf())
+                        }));
+                    }
+                    ui.label(format!("files ({})", files.files.len()));
+                    egui::ScrollArea::vertical()
+                        .max_height(160.0)
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| {
+                            for (i, path) in files.files.iter().enumerate() {
+                                let name = path
+                                    .file_name()
+                                    .map(|s| s.to_string_lossy().into_owned())
+                                    .unwrap_or_else(|| "?".into());
+                                if ui.selectable_label(files.active == Some(i), name).clicked() {
+                                    writers.switch.write(SwitchFile(i));
+                                }
+                            }
+                        });
+                    if ui.button("Edit in OpenSCAD").clicked() {
+                        writers.cmd.write(PanelCmd::EditOpenscad);
+                    }
+                    ui.separator();
+                    for axis in [Axis::X, Axis::Y, Axis::Z] {
+                        ui.horizontal(|ui| {
+                            ui.label(format!("{} plane", axis.label()));
+                            if ui.button("+").clicked() {
+                                if let Some((mn, mx)) = bounds.0 {
+                                    let at = comp((mn + mx) * 0.5, axis.index());
+                                    cuts.list.push(CutDef {
+                                        axis,
+                                        at,
+                                        enabled: true,
+                                    });
+                                    cuts.active = cuts.list.len() - 1;
+                                }
+                            }
+                        });
+                        let idxs: Vec<usize> = cuts
+                            .list
+                            .iter()
+                            .enumerate()
+                            .filter(|(_, c)| c.axis == axis)
+                            .map(|(i, _)| i)
+                            .collect();
+                        for idx in idxs {
+                            ui.horizontal(|ui| {
+                                if idx == cuts.active {
+                                    ui.label("▶");
+                                }
+                                let mut at = cuts.list[idx].at;
+                                if ui.add(egui::DragValue::new(&mut at).speed(0.5)).changed() {
+                                    cuts.list[idx].at = clamp_to_bounds(at, axis, &bounds);
+                                    cuts.active = idx;
+                                }
+                                let en = cuts.list[idx].enabled;
+                                if ui
+                                    .selectable_label(en, if en { "on" } else { "off" })
+                                    .clicked()
+                                {
+                                    cuts.list[idx].enabled = !en;
+                                }
+                                if ui
+                                    .button(egui::RichText::new("del").color(
+                                        egui::Color32::from_rgb(230, 130, 130),
+                                    ))
+                                    .clicked()
+                                {
+                                    to_remove = Some(idx);
+                                }
+                                let editing = edit.0 == Some(idx);
+                                if ui.selectable_label(editing, "conn").clicked() {
+                                    edit.0 = if editing { None } else { Some(idx) };
+                                }
+                            });
+                        }
+                    }
+                    ui.separator();
+                    if ui.button("Auto-slice").clicked() {
+                        writers.cmd.write(PanelCmd::AutoSlice);
+                    }
+                    // Status — pulses blue while a background render/slice runs (the reactive standard).
+                    if job.0.is_some() {
+                        let p = ((ui.input(|i| i.time) * 5.0).sin() * 0.5 + 0.5) as f32;
+                        let col = egui::Color32::from_rgb(
+                            (115.0 + 115.0 * p) as u8,
+                            (165.0 + 75.0 * p) as u8,
+                            255,
+                        );
+                        ui.colored_label(col, status.0.as_str());
+                        ui.ctx().request_repaint();
+                    } else {
+                        ui.label(status.0.as_str());
+                    }
+                    if ui
+                        .button(if dspread.0 > 0.0 { "Assemble" } else { "Explode" })
+                        .clicked()
+                    {
+                        writers.cmd.write(PanelCmd::ToggleView);
+                    }
+                    if ui.button("Print view").clicked() {
+                        print.0 = true;
+                    }
+                    if ui.button("Publish").clicked() {
+                        writers.cmd.write(PanelCmd::Publish);
+                    }
+                }
+                PanelMode::Connectors(i) => {
+                    let header = match cuts.list.get(i) {
+                        Some(c) => {
+                            let pos = if c.at.fract() == 0.0 {
+                                format!("{}", c.at as i64)
+                            } else {
+                                format!("{:.1}", c.at)
+                            };
+                            format!("Connectors: {} cut @ {}", c.axis.label(), pos)
+                        }
+                        None => "Connectors".to_string(),
+                    };
+                    ui.label(header);
+                    ui.horizontal(|ui| {
+                        if ui
+                            .selectable_label(active.kind == fab::ConnKind::Onion, "Onion")
+                            .clicked()
+                        {
+                            active.kind = fab::ConnKind::Onion;
+                        }
+                        if ui
+                            .selectable_label(active.kind == fab::ConnKind::Bolt, "Bolt")
+                            .clicked()
+                        {
+                            active.kind = fab::ConnKind::Bolt;
+                        }
+                    });
+                    if active.kind == fab::ConnKind::Bolt {
+                        ui.horizontal(|ui| {
+                            for s in [Screw::M3, Screw::M4, Screw::M5] {
+                                if ui.selectable_label(active.screw == s, s.label()).clicked() {
+                                    active.screw = s;
+                                }
+                            }
+                        });
+                    }
+                    if ui.button("Auto-place").clicked() {
+                        writers.autoplace.write(AutoPlace);
+                    }
+                    if ui.button("Clear connectors").clicked() {
+                        conns.list.retain(|c| c.cut != i);
+                    }
+                    if ui.button("Done").clicked() {
+                        edit.0 = None;
+                    }
+                }
+                PanelMode::Print => {
+                    ui.label("Print orientation");
+                    ui.label("click a piece to set which way it prints");
+                    if ui.button("Export plates").clicked() {
+                        writers.cmd.write(PanelCmd::Export);
+                    }
+                    if ui.button("Done").clicked() {
+                        print.0 = false;
+                    }
+                }
+            }
+        });
+    if let Some(idx) = to_remove {
+        remove_cut(&mut cuts, &mut conns, idx);
+    }
+    seam.width_px = panel.response.rect.width() * ctx.pixels_per_point();
+    seam.over_ui = ctx.egui_wants_pointer_input() || ctx.is_pointer_over_egui();
 }
 
 #[derive(Component)]
@@ -762,18 +929,14 @@ fn orbit(
     mut wheel: MessageReader<MouseWheel>,
     dragging: Res<DraggingCut>,
     edit: Res<EditCut>,
-    hover: Res<HoverMap>,
-    ui_nodes: Query<(), With<Node>>,
+    seam: Res<PanelSeam>,
 ) {
-    // The wheel is shared: the ScrollArea observer scrolls the file list off the picking event, but
-    // orbit reads the raw MouseWheel — so without this, scrolling the panel ALSO zooms the camera.
-    // Yield the whole gesture (wheel + drag) whenever the pointer is over a UI node.
-    let over_ui = hover
-        .get(&PointerId::Mouse)
-        .is_some_and(|hits| hits.keys().any(|e| ui_nodes.contains(*e)));
-    if dragging.0 || edit.0.is_some() || over_ui {
+    // Yield the whole gesture (wheel + drag) when the pointer is over the egui panel or a widget
+    // wants it (`panel_ui` sets `seam.over_ui` from egui's wants_pointer_input / is_pointer_over_area),
+    // so scrolling the file list doesn't ALSO zoom the camera.
+    if dragging.0 || edit.0.is_some() || seam.over_ui {
         // A cut plane has the pointer, the connector editor holds a fixed face-on view, or the
-        // pointer is over the panel (the list owns the wheel there).
+        // pointer is over the panel (egui owns the wheel there).
         motion.clear();
         wheel.clear();
         return;
@@ -876,18 +1039,13 @@ fn on_click(
     ev: On<Pointer<Click>>,
     planes: Query<&CutPlaneViz>,
     dspread: Res<DisplaySpread>,
-    buttons: Query<Entity, With<ViewToggleButton>>,
     mut cuts: ResMut<Cuts>,
-    mut commands: Commands,
 ) {
     let Ok(cpv) = planes.get(ev.entity) else {
         return;
     };
-    if dspread.0 > 0.0 {
-        for e in &buttons {
-            commands.entity(e).insert(Nudge(0.7));
-        }
-    } else {
+    // In the read-only exploded view a plane click does nothing; in editing it selects the cut.
+    if dspread.0 == 0.0 {
         cuts.active = cpv.idx;
     }
 }
@@ -1168,13 +1326,16 @@ fn do_auto_place(
 /// The Explode/Collapse button: collapse to the uncut model, or explode the last sliced result —
 /// auto-slicing first if the cuts changed (or were never sliced), so it works without Re-slice.
 fn toggle_view(
-    _ev: On<Activate>,
+    mut ev: MessageReader<PanelCmd>,
     whole: Res<WholeMesh>,
     sliced: Res<SlicedMesh>,
     mut dspread: ResMut<DisplaySpread>,
     mut reslice_w: MessageWriter<ReSlice>,
     mut models: Query<&mut Mesh3d, With<Model>>,
 ) {
+    if !ev.read().any(|c| *c == PanelCmd::ToggleView) {
+        return;
+    }
     if dspread.0 > 0.0 {
         // Collapse → the uncut model.
         if let Some(h) = whole.0.clone() {
@@ -1280,65 +1441,6 @@ fn auto_reslice(
         orient_inputs(&orient),
     );
     *sliced_h = Some(h);
-}
-
-/// Relabel the toggle button to the action it performs from the current view.
-fn update_view_label(dspread: Res<DisplaySpread>, mut q: Query<&mut Text, With<ViewToggleLabel>>) {
-    if !dspread.is_changed() {
-        return;
-    }
-    let label = if dspread.0 > 0.0 {
-        "Collapse"
-    } else {
-        "Explode"
-    };
-    for mut t in &mut q {
-        *t = Text::new(label);
-    }
-}
-
-/// Loading feedback (the DAG success criterion): while a render/slice job runs, DISABLE the panel
-/// buttons (feathers dims a `InteractionDisabled` button) and PULSE the status line — so a background
-/// rebuild reads as "recomputing", not frozen. The disable is idempotent + rebuild-safe: it toggles
-/// only buttons in the wrong state, so a panel rebuilt mid-job still comes up disabled.
-fn loading_pulse(
-    time: Res<Time>,
-    job: Res<Job>,
-    to_disable: Query<
-        Entity,
-        (
-            With<bevy::ui_widgets::Button>,
-            Without<bevy::ui::InteractionDisabled>,
-        ),
-    >,
-    to_enable: Query<
-        Entity,
-        (
-            With<bevy::ui_widgets::Button>,
-            With<bevy::ui::InteractionDisabled>,
-        ),
-    >,
-    mut status_c: Query<&mut TextColor, With<StatusLabel>>,
-    mut commands: Commands,
-) {
-    let busy = job.0.is_some();
-    if busy {
-        for e in &to_disable {
-            commands.entity(e).insert(bevy::ui::InteractionDisabled);
-        }
-    } else {
-        for e in &to_enable {
-            commands.entity(e).remove::<bevy::ui::InteractionDisabled>();
-        }
-    }
-    for mut c in &mut status_c {
-        c.0 = if busy {
-            let t = (time.elapsed_secs() * 5.0).sin() * 0.5 + 0.5; // 0..1
-            Color::srgb(0.45 + 0.45 * t, 0.65 + 0.3 * t, 1.0) // pulsing blue
-        } else {
-            Color::srgb(0.9, 0.9, 0.95)
-        };
-    }
 }
 
 /// Keep one sphere marker per placed connector: respawn the set when the count changes, and each
@@ -1536,23 +1638,6 @@ fn draw_profile(
                 gizmos.line(center - right, center + right, bolt_col);
                 gizmos.line(center - up, center + up, bolt_col);
             }
-        }
-    }
-}
-
-/// Fade out the attention flash on nudged buttons (drawn as an outline).
-fn nudge_buttons(time: Res<Time>, mut q: Query<(Entity, &mut Nudge)>, mut commands: Commands) {
-    for (e, mut n) in &mut q {
-        n.0 -= time.delta_secs();
-        if n.0 <= 0.0 {
-            commands.entity(e).remove::<Nudge>().remove::<Outline>();
-        } else {
-            let a = (n.0 / 0.7).clamp(0.0, 1.0);
-            commands.entity(e).insert(Outline {
-                width: Val::Px(3.0),
-                offset: Val::Px(2.0),
-                color: Color::srgba(1.0, 0.8, 0.2, a),
-            });
         }
     }
 }
@@ -1861,24 +1946,16 @@ fn auto_scale(
 /// Inset the 3D camera's viewport to the area RIGHT of the panel, so the model auto-frames in the
 /// visible region instead of centering behind the floating panel. Keyed off the panel's rendered
 /// width (it tracks the file list) and the camera's target size, so it follows resize + panel growth.
-fn split_viewport(
-    panel: Query<&bevy::ui::ComputedNode, With<PanelRoot>>,
-    mut cam: Query<&mut Camera, With<Camera3d>>,
-) {
-    let (Ok(panel), Ok(mut camera)) = (panel.single(), cam.single_mut()) else {
+fn split_viewport(seam: Res<PanelSeam>, mut cam: Query<&mut Camera, With<Camera3d>>) {
+    let Ok(mut camera) = cam.single_mut() else {
         return;
     };
     let Some(target) = camera.physical_target_size() else {
         return;
     };
-    // ComputedNode::size() is physical px; the panel sits at left:8 (logical), so its right edge is
-    // 8*scale + width. Leave a small gap after it.
-    let scale = if panel.inverse_scale_factor > 0.0 {
-        1.0 / panel.inverse_scale_factor
-    } else {
-        1.0
-    };
-    let x0 = ((16.0 * scale + panel.size().x).round() as u32).min(target.x.saturating_sub(1));
+    // `panel_ui` writes the panel's right edge in physical px (egui SidePanel is flush to the window
+    // left, so its width IS the inset); leave a small gap after it.
+    let x0 = ((seam.width_px + 6.0).round() as u32).min(target.x.saturating_sub(1));
     let pos = UVec2::new(x0, 0);
     let size = UVec2::new(target.x - x0, target.y.max(1));
     // Viewport isn't PartialEq — compare the fields we set to skip redundant writes.
@@ -2031,7 +2108,6 @@ struct ModelState<'w> {
     bounds: ResMut<'w, ModelBounds>,
     whole: ResMut<'w, WholeMesh>,
     sliced: ResMut<'w, SlicedMesh>,
-    panel_sig: ResMut<'w, PanelSig>,
     watch: ResMut<'w, Watch>,
 }
 
@@ -2053,7 +2129,6 @@ impl ModelState<'_> {
         *self.bounds = ModelBounds::default();
         *self.whole = WholeMesh::default();
         *self.sliced = SlicedMesh::default();
-        *self.panel_sig = PanelSig::default();
         *self.watch = Watch::default();
     }
 }
@@ -2314,15 +2389,6 @@ fn poll_job(
             error!("{e}");
             status.0 = format!("error: {e}");
         }
-    }
-}
-
-fn update_status(status: Res<Status>, mut q: Query<&mut Text, With<StatusLabel>>) {
-    if !status.is_changed() {
-        return;
-    }
-    for mut t in &mut q {
-        *t = Text::new(status.0.clone());
     }
 }
 
@@ -2722,8 +2788,7 @@ fn run_screenshot(scene: SceneCfg, png: PathBuf) {
         .add_plugins(ScheduleRunnerPlugin::run_loop(
             std::time::Duration::from_secs_f64(1.0 / 60.0),
         ))
-        .add_plugins(FeathersPlugins)
-        .insert_resource(UiTheme(create_dark_theme()))
+        .add_plugins(EguiPlugin::default())
         .insert_resource(ClearColor(Color::srgb(0.10, 0.10, 0.12)))
         .insert_resource(scene)
         .insert_resource(ScreenshotPng(png))
@@ -2741,22 +2806,16 @@ fn run_screenshot(scene: SceneCfg, png: PathBuf) {
         .init_resource::<SlicedMesh>()
         .init_resource::<SliceInBackground>()
         .init_resource::<DisplaySpread>()
-        .init_resource::<PanelSig>()
+        .init_resource::<Job>()
+        .init_resource::<PanelSeam>()
         .insert_resource(Status("rendering".into()))
         .add_message::<ReSlice>()
         .add_message::<AutoPlace>()
         .add_message::<SwitchFile>()
-        .add_systems(Startup, (setup_offscreen, load_icons))
-        .add_systems(
-            Update,
-            (
-                capture_then_exit,
-                (push_fields, sync_selected, apply_icon_font, rebuild_panel).chain(),
-                update_status,
-                split_viewport,
-                seat_bed,
-            ),
-        )
+        .add_message::<PanelCmd>()
+        .add_systems(Startup, setup_offscreen)
+        .add_systems(Update, (capture_then_exit, split_viewport, seat_bed))
+        .add_systems(EguiPrimaryContextPass, panel_ui)
         .run();
 }
 
@@ -2994,8 +3053,7 @@ fn run_scripted(scene: SceneCfg, actions: Vec<Action>) {
         .add_plugins(ScheduleRunnerPlugin::run_loop(
             std::time::Duration::from_secs_f64(1.0 / 60.0),
         ))
-        .add_plugins(FeathersPlugins)
-        .insert_resource(UiTheme(create_dark_theme()))
+        .add_plugins(EguiPlugin::default())
         .insert_resource(ClearColor(Color::srgb(0.10, 0.10, 0.12)))
         .insert_resource(scene)
         .init_resource::<Job>()
@@ -3018,7 +3076,7 @@ fn run_scripted(scene: SceneCfg, actions: Vec<Action>) {
         .init_resource::<SlicedMesh>()
         .init_resource::<SliceInBackground>()
         .init_resource::<DisplaySpread>()
-        .init_resource::<PanelSig>()
+        .init_resource::<PanelSeam>()
         .insert_resource(Status("rendering".into()))
         .insert_resource(ScriptRunner {
             actions,
@@ -3028,7 +3086,8 @@ fn run_scripted(scene: SceneCfg, actions: Vec<Action>) {
         .add_message::<ReSlice>()
         .add_message::<AutoPlace>()
         .add_message::<SwitchFile>()
-        .add_systems(Startup, (setup_script, load_icons))
+        .add_message::<PanelCmd>()
+        .add_systems(Startup, setup_script)
         .add_systems(
             Update,
             (
@@ -3036,15 +3095,12 @@ fn run_scripted(scene: SceneCfg, actions: Vec<Action>) {
                 poll_job,
                 apply_switch_file,
                 watch_source,
-                update_status,
                 sync_overlays,
                 sync_overlay_visuals,
                 sync_dim_labels,
-                update_view_label,
                 sync_conn_markers,
                 edit_mode,
                 draw_profile,
-                (push_fields, sync_selected, apply_icon_font, rebuild_panel).chain(),
                 auto_reslice,
                 revert_on_edit,
                 (
@@ -3058,11 +3114,11 @@ fn run_scripted(scene: SceneCfg, actions: Vec<Action>) {
                     do_auto_place,
                     split_viewport,
                     seat_bed,
-                    loading_pulse,
                 ),
                 run_script,
             ),
         )
+        .add_systems(EguiPrimaryContextPass, panel_ui)
         .run();
 }
 
@@ -3437,267 +3493,18 @@ fn bed_size() -> Option<[f64; 3]> {
     }
 }
 
-// ---- Feathers UI: plane-grouped cards -------------------------------------------------
-
-/// One plane card: a header (plane name + per-plane "+cut") and a list of that plane's cuts.
-fn plane_card(cuts: &Cuts, axis: Axis) -> impl Scene + 'static {
-    let rows: Vec<_> = cuts
-        .list
-        .iter()
-        .enumerate()
-        .filter(|(_, c)| c.axis == axis)
-        .map(|(idx, c)| {
-            // Per-row actions, each a move-closure capturing this cut's index.
-            let toggle = move |_: On<Activate>, mut cuts: ResMut<Cuts>| {
-                if let Some(c) = cuts.list.get_mut(idx) {
-                    c.enabled = !c.enabled;
-                }
-            };
-            let del = move |_: On<Activate>, mut cuts: ResMut<Cuts>, mut conns: ResMut<Conns>| {
-                remove_cut(&mut cuts, &mut conns, idx);
-            };
-            // Type a position → set the cut + select it.
-            let edit = move |ev: On<ValueChange<f32>>, bounds: Res<ModelBounds>, mut cuts: ResMut<Cuts>| {
-                if idx < cuts.list.len() {
-                    let ax = cuts.list[idx].axis;
-                    cuts.list[idx].at = clamp_to_bounds(ev.value, ax, &bounds);
-                    cuts.active = idx;
-                }
-            };
-            // Open/close this cut's 2D connector editor.
-            let open_conn = move |_: On<Activate>, mut ec: ResMut<EditCut>| {
-                ec.0 = if ec.0 == Some(idx) { None } else { Some(idx) };
-            };
-            let eye = if c.enabled { ICON_ON } else { ICON_OFF };
-            // On = blue (Primary), off = grey (Normal) — state as colour; eye/eye-off icon too.
-            let on_variant = if c.enabled { ButtonVariant::Primary } else { ButtonVariant::Normal };
-            bsn! {
-                @FeathersListRow
-                RowFor(idx)
-                Children [
-                    (@FeathersNumberInput { @number_format: NumberFormat::F32 } FieldFor(idx) on(edit)),
-                    (
-                        @FeathersButton { @variant: {on_variant}, @caption: bsn!{
-                            Text(eye) IconText
-                        } }
-                        on(toggle)
-                    ),
-                    (
-                        @FeathersButton { @caption: bsn!{
-                            Text(ICON_DELETE)
-                            IconText
-                            TextColor({Color::srgb(0.95, 0.5, 0.5)})
-                        } }
-                        on(del)
-                    ),
-                    (
-                        @FeathersButton { @caption: bsn!{ Text(ICON_CONN) IconText } }
-                        on(open_conn)
-                    ),
-                ]
-            }
-        })
-        .collect();
-    // Per-plane add: a move-closure capturing this card's axis.
-    let add = move |_: On<Activate>, mut cuts: ResMut<Cuts>, bounds: Res<ModelBounds>| {
-        if let Some((mn, mx)) = bounds.0 {
-            let at = comp((mn + mx) * 0.5, axis.index());
-            cuts.list.push(CutDef {
-                axis,
-                at,
-                enabled: true,
-            });
-            cuts.active = cuts.list.len() - 1;
-        }
-    };
-    bsn! {
-        Node {
-            flex_direction: FlexDirection::Column,
-            row_gap: px(3),
-            padding: UiRect::all(px(4)),
-        }
-        Children [
-            (
-                Node {
-                    flex_direction: FlexDirection::Row,
-                    column_gap: px(8),
-                    justify_content: JustifyContent::SpaceBetween,
-                }
-                Children [
-                    (Text(format!("{} plane", axis.label())) ThemedText),
-                    (
-                        @FeathersButton { @variant: {ButtonVariant::Primary}, @caption: bsn!{
-                            Text(ICON_ADD) IconText
-                        } }
-                        on(add)
-                    ),
-                ]
-            ),
-            (@FeathersListView { @rows: { Box::new(rows) as Box<dyn SceneList> } }),
-        ]
-    }
-}
-
-/// The file list (5.3.2): one clickable row per `.scad` the picker found, the active one lit
-/// Primary. A click writes `SwitchFile(i)` → `apply_switch_file` swaps the source + re-renders.
-/// Empty (nothing opened yet) collapses to just the header.
-fn file_card(files: &FileList) -> impl Scene + 'static {
-    let rows: Vec<_> = files
-        .files
-        .iter()
-        .enumerate()
-        .map(|(i, path)| {
-            let label = path
-                .file_name()
-                .map(|s| s.to_string_lossy().into_owned())
-                .unwrap_or_else(|| "?".into());
-            let variant =
-                if files.active == Some(i) { ButtonVariant::Primary } else { ButtonVariant::Normal };
-            let pick = move |_: On<Activate>, mut w: MessageWriter<SwitchFile>| {
-                w.write(SwitchFile(i));
-            };
-            bsn! {
-                @FeathersListRow
-                Children [
-                    (
-                        @FeathersButton { @variant: {variant}, @caption: bsn!{ Text(label) ThemedText } }
-                        on(pick)
-                    ),
-                ]
-            }
-        })
-        .collect();
-    bsn! {
-        // flex_grow + min_height:0 make this card claim the panel's leftover height and shrink
-        // below its content, so the ListView's inner ScrollArea (overflow: scroll_y) actually
-        // engages instead of the whole list expanding past the window.
-        Node {
-            flex_direction: FlexDirection::Column,
-            flex_grow: 1.0,
-            min_height: px(0),
-            row_gap: px(3),
-            padding: UiRect::all(px(4)),
-        }
-        Children [
-            (Text(format!("files ({})", files.files.len())) ThemedText),
-            // Patch the ListView's own Node (field-merge, keeps its scrollbar gutter) to fill and
-            // bound this card — the ScrollArea can only scroll once its ancestor height is capped.
-            (
-                @FeathersListView { @rows: { Box::new(rows) as Box<dyn SceneList> } }
-                Node { flex_grow: 1.0, min_height: px(0) }
-            ),
-        ]
-    }
-}
-
-/// The whole panel: a pinned title, then ONE mode section (the file list + cut cards in View, or the
-/// connector-editor / print-preview controls in a sub-mode). The bounded root (top+bottom anchored)
-/// keeps it in the window; the View section flex-grows so the file list scrolls.
-fn build_panel(
-    cuts: &Cuts,
-    files: &FileList,
-    mode: PanelMode,
-    active: ActiveConn,
-) -> impl Scene + 'static {
-    let section: Box<dyn SceneList> = match mode {
-        PanelMode::View => Box::new(vec![view_section(cuts, files)]),
-        PanelMode::Connectors(i) => Box::new(vec![connector_section(cuts, i, active)]),
-        PanelMode::Print => Box::new(vec![print_section()]),
-    };
-    bsn! {
-        Node {
-            position_type: PositionType::Absolute,
-            top: px(8),
-            left: px(8),
-            // Anchor bottom too so the panel is bounded to the window height — the View section's
-            // file list flex-grows into the leftover space and scrolls instead of running off-screen.
-            bottom: px(8),
-            flex_direction: FlexDirection::Column,
-            row_gap: px(6),
-            padding: UiRect::all(px(8)),
-            min_width: px(220),
-        }
-        PanelRoot
-        ThemeBackgroundColor(tokens::WINDOW_BG)
-        Children [
-            (Text("fab-gui") ThemedText),
-            { section }
-        ]
-    }
-}
-
-/// View mode: Open + the file list, the X/Y/Z cut cards, and the slice / explode / print controls.
-/// (Auto-place lives in the connector editor — it only ever worked with a cut's editor open.)
-fn view_section(cuts: &Cuts, files: &FileList) -> impl Scene + 'static {
-    let cards: Vec<_> = [Axis::X, Axis::Y, Axis::Z]
-        .into_iter()
-        .map(|a| plane_card(cuts, a))
-        .collect();
-    let files_card = file_card(files);
-    bsn! {
-        // flex_grow so the file list (inside) can claim the panel's leftover height and scroll.
-        Node { flex_direction: FlexDirection::Column, flex_grow: 1.0, min_height: px(0), row_gap: px(6) }
-        Children [
-            // Open a project directory → its .scad files fill the list below (5.3.1). Async pick on
-            // the task pool so the native panel never freezes the render loop.
-            (
-                @FeathersButton { @variant: {ButtonVariant::Primary}, @caption: bsn!{ Text("Open…") ThemedText } }
-                on(|_: On<Activate>, mut dlg: ResMut<OpenDialog>| {
-                    if dlg.0.is_none() {
-                        dlg.0 = Some(AsyncComputeTaskPool::get().spawn(async move {
-                            rfd::AsyncFileDialog::new()
-                                .pick_folder()
-                                .await
-                                .map(|h| h.path().to_path_buf())
-                        }));
-                    }
-                })
-            ),
-            { Box::new(vec![files_card]) as Box<dyn SceneList> },
-            // Jump to OpenSCAD to edit the active source; the file-watch reloads on save.
-            (
-                @FeathersButton { @caption: bsn!{ Text("Edit in OpenSCAD") ThemedText } }
-                on(edit_in_openscad_action)
-            ),
-            (
-                Node { flex_direction: FlexDirection::Column, row_gap: px(6) }
-                Children [ { Box::new(cards) as Box<dyn SceneList> } ]
-            ),
-            // Auto-slice: partition the model to fit the bed (fab_scad::auto_slice), replacing the
-            // cut stack with the plan. The reactive loop reslices from there; you refine by hand.
-            (
-                @FeathersButton { @variant: {ButtonVariant::Primary}, @caption: bsn!{ Text("Auto-slice") ThemedText } }
-                on(auto_slice_action)
-            ),
-            (Text("rendering") ThemedText StatusLabel),
-            // No Re-slice button — edits invalidate and rebuild in the background (auto_reslice).
-            (
-                @FeathersButton { @caption: bsn!{ Text("Explode") ThemedText ViewToggleLabel } }
-                ViewToggleButton
-                on(toggle_view)
-            ),
-            (
-                @FeathersButton { @caption: bsn!{ Text("Print view") ThemedText } }
-                on(|_: On<Activate>, mut pv: ResMut<PrintView>| { pv.0 = true; })
-            ),
-            // Publish to hotchkiss.io (needs $HIO_API_KEY). Renders cover + preview + full off-thread.
-            (
-                @FeathersButton { @caption: bsn!{ Text("Publish") ThemedText } }
-                on(publish_action)
-            ),
-        ]
-    }
-}
-
 /// Publish the active model to hotchkiss.io off-thread: render the cover + low-`$fn` preview + full
 /// STL and upload them via `fab_scad::publish::publish_model`, reusing the CLI's exact path. Auth +
 /// base URL come from `$HIO_API_KEY` / `$HIO_URL`; title/description from the project.toml.
 fn publish_action(
-    _: On<Activate>,
+    mut ev: MessageReader<PanelCmd>,
     scene: Res<SceneCfg>,
     mut job: ResMut<PublishJob>,
     mut status: ResMut<Status>,
 ) {
+    if !ev.read().any(|c| *c == PanelCmd::Publish) {
+        return;
+    }
     if job.0.is_some() {
         status.0 = "already publishing…".into();
         return;
@@ -3764,7 +3571,14 @@ fn poll_publish(mut job: ResMut<PublishJob>, mut status: ResMut<Status>) {
 
 /// Open the active `.scad` source in the OpenSCAD GUI (detached) so you can edit it; the file-watch
 /// re-renders here on save.
-fn edit_in_openscad_action(_: On<Activate>, scene: Res<SceneCfg>, mut status: ResMut<Status>) {
+fn edit_in_openscad_action(
+    mut ev: MessageReader<PanelCmd>,
+    scene: Res<SceneCfg>,
+    mut status: ResMut<Status>,
+) {
+    if !ev.read().any(|c| *c == PanelCmd::EditOpenscad) {
+        return;
+    }
     let Some(src) = scene.source.clone() else {
         status.0 = "no .scad source to edit".into();
         return;
@@ -3779,12 +3593,15 @@ fn edit_in_openscad_action(_: On<Activate>, scene: Res<SceneCfg>, mut status: Re
 /// `fab_scad::auto_slice`'s plan (equal division on each overflowing axis), clear connectors (they
 /// referenced the old cuts), and let the reactive loop reslice. The seed you then refine by hand.
 fn auto_slice_action(
-    _: On<Activate>,
+    mut ev: MessageReader<PanelCmd>,
     bounds: Res<ModelBounds>,
     mut cuts: ResMut<Cuts>,
     mut conns: ResMut<Conns>,
     mut status: ResMut<Status>,
 ) {
+    if !ev.read().any(|c| *c == PanelCmd::AutoSlice) {
+        return;
+    }
     let Some((min, max)) = bounds.0 else {
         status.0 = "no model loaded yet".into();
         return;
@@ -3929,121 +3746,6 @@ fn poll_auto_plan(
     }
 }
 
-/// Connector-editor mode: which cut you're editing, the active connector type (Onion/Bolt + screw
-/// for new placements), Auto-place, Clear (drop this cut's connectors), and Done. The 2D
-/// cross-section is drawn in the viewport; picking is on it.
-fn connector_section(cuts: &Cuts, i: usize, active: ActiveConn) -> impl Scene + 'static {
-    let header = match cuts.list.get(i) {
-        Some(c) => {
-            let at = c.at;
-            let pos = if at.fract() == 0.0 {
-                format!("{}", at as i64)
-            } else {
-                format!("{at:.1}")
-            };
-            format!("Connectors: {} cut @ {}", c.axis.label(), pos)
-        }
-        None => "Connectors".to_string(),
-    };
-    let clear = move |_: On<Activate>, mut conns: ResMut<Conns>| {
-        conns.list.retain(|c| c.cut != i);
-    };
-    let onion_v = if active.kind == fab::ConnKind::Onion {
-        ButtonVariant::Primary
-    } else {
-        ButtonVariant::Normal
-    };
-    let bolt_v = if active.kind == fab::ConnKind::Bolt {
-        ButtonVariant::Primary
-    } else {
-        ButtonVariant::Normal
-    };
-    // Screw picker — only when Bolt is the active kind. One closure site keeps the button type
-    // uniform, so the vec is homogeneous (empty for onion, three buttons for bolt).
-    let screw_btns: Vec<_> = if active.kind == fab::ConnKind::Bolt {
-        [Screw::M3, Screw::M4, Screw::M5]
-            .into_iter()
-            .map(|s| {
-                let v = if s == active.screw {
-                    ButtonVariant::Primary
-                } else {
-                    ButtonVariant::Normal
-                };
-                let label = s.label(); // bsn's Text(..) won't parse a method call inline
-                let set = move |_: On<Activate>, mut ac: ResMut<ActiveConn>| {
-                    ac.screw = s;
-                };
-                bsn! {
-                    @FeathersButton { @variant: {v}, @caption: bsn!{ Text(label) ThemedText } }
-                    on(set)
-                }
-            })
-            .collect()
-    } else {
-        Vec::new()
-    };
-    bsn! {
-        Node { flex_direction: FlexDirection::Column, row_gap: px(6) }
-        Children [
-            (Text(header) ThemedText),
-            // Active-type toggle: what new placements (manual + Auto-place) become.
-            (
-                Node { flex_direction: FlexDirection::Row, column_gap: px(6) }
-                Children [
-                    (
-                        @FeathersButton { @variant: {onion_v}, @caption: bsn!{ Text("Onion") ThemedText } }
-                        on(|_: On<Activate>, mut ac: ResMut<ActiveConn>| {
-                            ac.kind = fab::ConnKind::Onion;
-                        })
-                    ),
-                    (
-                        @FeathersButton { @variant: {bolt_v}, @caption: bsn!{ Text("Bolt") ThemedText } }
-                        on(|_: On<Activate>, mut ac: ResMut<ActiveConn>| {
-                            ac.kind = fab::ConnKind::Bolt;
-                        })
-                    ),
-                ]
-            ),
-            (
-                Node { flex_direction: FlexDirection::Row, column_gap: px(6) }
-                Children [ { Box::new(screw_btns) as Box<dyn SceneList> } ]
-            ),
-            (
-                @FeathersButton { @variant: {ButtonVariant::Primary}, @caption: bsn!{ Text("Auto-place") ThemedText } }
-                on(|_: On<Activate>, mut w: MessageWriter<AutoPlace>| { w.write(AutoPlace); })
-            ),
-            (
-                @FeathersButton { @caption: bsn!{ Text("Clear connectors") ThemedText } }
-                on(clear)
-            ),
-            (
-                @FeathersButton { @caption: bsn!{ Text("Done") ThemedText } }
-                on(|_: On<Activate>, mut ec: ResMut<EditCut>| { ec.0 = None; })
-            ),
-        ]
-    }
-}
-
-/// Print-preview mode: a hint + Done. Per-piece build-up is set by clicking pieces in the viewport
-/// (`orient_piece_on_click`), so there are no per-piece panel controls.
-fn print_section() -> impl Scene + 'static {
-    bsn! {
-        Node { flex_direction: FlexDirection::Column, row_gap: px(6) }
-        Children [
-            (Text("Print orientation") ThemedText),
-            (Text("click a piece to set which way it prints") ThemedText),
-            (
-                @FeathersButton { @variant: {ButtonVariant::Primary}, @caption: bsn!{ Text("Export plates") ThemedText } }
-                on(export_plates_action)
-            ),
-            (
-                @FeathersButton { @caption: bsn!{ Text("Done") ThemedText } }
-                on(|_: On<Activate>, mut pv: ResMut<PrintView>| { pv.0 = false; })
-            ),
-        ]
-    }
-}
-
 /// Between-piece + edge spacing left on the export plates (mm).
 const PLATE_GAP: f64 = 5.0;
 
@@ -4052,12 +3754,15 @@ const PLATE_GAP: f64 = 5.0;
 /// + fill so you can see how tight it packed. The bed comes from the loaded scene, so it must match
 /// the printer the project opens on (Bambu bins pieces to plates by position).
 fn export_plates_action(
-    _: On<Activate>,
+    mut ev: MessageReader<PanelCmd>,
     pieces: Res<PrintPieces>,
     orient: Res<Orient>,
     scene: Res<SceneCfg>,
     mut status: ResMut<Status>,
 ) {
+    if !ev.read().any(|c| *c == PanelCmd::Export) {
+        return;
+    }
     let Some(list) = pieces.0.as_ref().filter(|l| !l.is_empty()) else {
         status.0 = "no pieces to export — slice first".into();
         return;
@@ -4090,97 +3795,6 @@ fn export_plates_action(
             info!("{}", status.0);
         }
         Err(e) => status.0 = format!("export failed: {e:#}"),
-    }
-}
-
-/// Rebuild the whole panel when the cut STRUCTURE changes (a cut added/removed/rotated → the
-/// per-cut axis sequence differs). Value-only edits leave it alone; update_rows refreshes those.
-fn rebuild_panel(
-    cuts: Res<Cuts>,
-    files: Res<FileList>,
-    edit: Res<EditCut>,
-    print: Res<PrintView>,
-    active: Res<ActiveConn>,
-    mut sig: ResMut<PanelSig>,
-    roots: Query<Entity, With<PanelRoot>>,
-    mut commands: Commands,
-) {
-    let cur = (
-        cuts.list
-            .iter()
-            .map(|c| (c.axis, c.enabled))
-            .collect::<Vec<_>>(),
-        files.files.len(),
-        files.active,
-        panel_mode(&edit, &print),
-        *active,
-    );
-    if sig.0.as_ref() == Some(&cur) {
-        return;
-    }
-    sig.0 = Some(cur);
-    for e in &roots {
-        commands.entity(e).despawn();
-    }
-    commands.queue(|world: &mut World| {
-        let mode = panel_mode(world.resource::<EditCut>(), world.resource::<PrintView>());
-        let active = *world.resource::<ActiveConn>();
-        let scene = build_panel(
-            world.resource::<Cuts>(),
-            world.resource::<FileList>(),
-            mode,
-            active,
-        );
-        if let Err(e) = world.spawn_scene(scene) {
-            error!("panel spawn failed: {e:?}");
-        }
-    });
-}
-
-/// Push each cut's position into its row field, so dragging a plane updates the number you see.
-/// The widget ignores the push while the field is focused, so it never fights typing.
-fn push_fields(cuts: Res<Cuts>, fields: Query<(Entity, &FieldFor)>, mut commands: Commands) {
-    // Every frame (not gated on cuts change) so a field spawned by a panel rebuild also inits;
-    // the widget no-ops if the value is unchanged and ignores the push while focused.
-    for (e, ff) in &fields {
-        if let Some(c) = cuts.list.get(ff.0) {
-            commands.trigger(UpdateNumberInput {
-                entity: e,
-                value: NumberInputValue::F32(c.at),
-            });
-        }
-    }
-}
-
-/// Highlight the active cut's row (and only it) via `Selected`. Idempotent — only touches rows
-/// whose state is wrong — so it's cheap to run every frame and survives panel rebuilds.
-fn sync_selected(
-    cuts: Res<Cuts>,
-    rows: Query<(Entity, &RowFor, Has<bevy::ui::Selected>)>,
-    mut commands: Commands,
-) {
-    for (e, rf, selected) in &rows {
-        let should = rf.0 == cuts.active;
-        if should && !selected {
-            commands.entity(e).insert(bevy::ui::Selected);
-        } else if !should && selected {
-            commands.entity(e).remove::<bevy::ui::Selected>();
-        }
-    }
-}
-
-/// Render `IconText` captions in the bundled icon font — set the real TextFont once it differs
-/// from the theme default (idempotent, so it catches freshly-spawned rows after a panel rebuild).
-#[allow(clippy::type_complexity)] // a Bevy query filter — not worth a type alias
-fn apply_icon_font(
-    icon: Res<IconFont>,
-    mut q: Query<(Entity, &mut TextFont), (With<IconText>, Without<IconApplied>)>,
-    mut commands: Commands,
-) {
-    for (e, mut tf) in &mut q {
-        tf.font = FontSource::Handle(icon.0.clone());
-        tf.font_size = FontSize::Px(16.0);
-        commands.entity(e).insert(IconApplied);
     }
 }
 

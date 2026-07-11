@@ -59,6 +59,12 @@ struct SceneCfg {
 #[derive(Component)]
 struct Model;
 
+/// Tags a displayed model entity with its part index (into [`Parts`]). The mesh-swap systems
+/// (explode/collapse/edit-revert/reslice) filter on it so an edit to one part swaps only THAT
+/// part's mesh, never the others (T.2b). One part → always `PartId(0)`.
+#[derive(Component, Clone, Copy)]
+struct PartId(usize);
+
 /// Marks the printer-bed slab, so `seat_bed` can drop it to the model's Z-floor (the model's native
 /// coords may put its bottom below z=0; move the bed to meet it rather than shift the model — which
 /// would desync the cut positions from the source the slicer re-renders).
@@ -308,6 +314,11 @@ struct Part {
     orient: Orient,
     bounds: ModelBounds,
     auto_planned: AutoPlanned,
+    // Display state — was three global resources (WholeMesh/SlicedMesh/DisplaySpread) when the scene
+    // held ONE model; now per-part so N parts each explode/collapse on their own (T.2b).
+    whole: Option<Handle<Mesh>>,  // the uncut mesh — revert from exploded without re-rendering
+    sliced: Option<Handle<Mesh>>, // the last sliced (exploded) mesh — re-show without re-slicing
+    spread: f32,                  // 0 = uncut/editing, >0 = exploded (fan distance)
 }
 
 /// The model's parts. INVARIANT: always non-empty — `[ActivePart]` indexes the one the panel edits.
@@ -414,19 +425,6 @@ struct ModelBounds(Option<(Vec3, Vec3)>);
 /// True while a cut plane is being dragged, so the camera orbit yields to it.
 #[derive(Resource, Default)]
 struct DraggingCut(bool);
-
-/// The uncut model's mesh, kept so editing can revert from the exploded view without re-rendering.
-#[derive(Resource, Default)]
-struct WholeMesh(Option<Handle<Mesh>>);
-
-/// Spread applied to the currently-displayed mesh: 0 = uncut (editing), >0 = exploded result.
-/// Overlays track it: at `cut.at` when 0, fanned into the piece gaps when >0.
-#[derive(Resource, Default)]
-struct DisplaySpread(f32);
-
-/// The last sliced (exploded) mesh, so the view toggle can re-show it without re-slicing.
-#[derive(Resource, Default)]
-struct SlicedMesh(Option<Handle<Mesh>>);
 
 /// True while the in-flight slice was kicked by `auto_reslice` (a background rebuild), so `poll_job`
 /// refreshes the pieces WITHOUT jumping the view to exploded — vs an explicit slice, which shows them.
@@ -593,10 +591,7 @@ fn run_windowed(scene: SceneCfg) {
         .init_resource::<FileList>()
         .init_resource::<OpenDialog>()
         .init_resource::<Watch>()
-        .init_resource::<WholeMesh>()
-        .init_resource::<SlicedMesh>()
         .init_resource::<SliceInBackground>()
-        .init_resource::<DisplaySpread>()
         .init_resource::<PanelSeam>()
         .insert_resource(Status("rendering".into()))
         .add_message::<ReSlice>()
@@ -672,7 +667,6 @@ fn panel_ui(
     mut print: ResMut<PrintView>,
     files: Res<FileList>,
     status: Res<Status>,
-    dspread: Res<DisplaySpread>,
     job: Res<Job>,
     mut open_dialog: ResMut<OpenDialog>,
     mut writers: PanelWriters,
@@ -683,6 +677,7 @@ fn panel_ui(
     };
     // T.2b: the panel edits the ACTIVE part's state (one Part today; N after Increment B).
     let part = &mut parts.0[active_part.0];
+    let spread = part.spread; // captured before the field-splitting borrows below
     let cuts = &mut part.cuts;
     let conns = &mut part.conns;
     let bounds = &part.bounds;
@@ -804,7 +799,7 @@ fn panel_ui(
                         ui.label(status.0.as_str());
                     }
                     if ui
-                        .button(if dspread.0 > 0.0 { "Assemble" } else { "Explode" })
+                        .button(if spread > 0.0 { "Assemble" } else { "Explode" })
                         .clicked()
                     {
                         writers.cmd.write(PanelCmd::ToggleView);
@@ -1002,20 +997,19 @@ fn orbit(
 fn on_drag_start(
     ev: On<Pointer<DragStart>>,
     planes: Query<&CutPlaneViz>,
-    dspread: Res<DisplaySpread>,
     mut parts: ResMut<Parts>,
     active_part: Res<ActivePart>,
     mut dragging: ResMut<DraggingCut>,
 ) {
-    let cuts = &mut parts.0[active_part.0].cuts;
     if ev.event.button != PointerButton::Primary {
         return;
     }
-    if dspread.0 > 0.0 {
+    let part = &mut parts.0[active_part.0];
+    if part.spread > 0.0 {
         return; // exploded view is read-only — leave the drag to orbit the camera
     }
     if let Ok(cpv) = planes.get(ev.entity) {
-        cuts.active = cpv.idx;
+        part.cuts.active = cpv.idx;
         dragging.0 = true;
     }
 }
@@ -1066,17 +1060,16 @@ fn on_drag_end(_ev: On<Pointer<DragEnd>>, mut dragging: ResMut<DraggingCut>) {
 fn on_click(
     ev: On<Pointer<Click>>,
     planes: Query<&CutPlaneViz>,
-    dspread: Res<DisplaySpread>,
     mut parts: ResMut<Parts>,
     active_part: Res<ActivePart>,
 ) {
-    let cuts = &mut parts.0[active_part.0].cuts;
+    let part = &mut parts.0[active_part.0];
     let Ok(cpv) = planes.get(ev.entity) else {
         return;
     };
     // In the read-only exploded view a plane click does nothing; in editing it selects the cut.
-    if dspread.0 == 0.0 {
-        cuts.active = cpv.idx;
+    if part.spread == 0.0 {
+        part.cuts.active = cpv.idx;
     }
 }
 
@@ -1363,33 +1356,40 @@ fn do_auto_place(
 /// auto-slicing first if the cuts changed (or were never sliced), so it works without Re-slice.
 fn toggle_view(
     mut ev: MessageReader<PanelCmd>,
-    whole: Res<WholeMesh>,
-    sliced: Res<SlicedMesh>,
-    mut dspread: ResMut<DisplaySpread>,
+    mut parts: ResMut<Parts>,
+    active_part: Res<ActivePart>,
     mut reslice_w: MessageWriter<ReSlice>,
-    mut models: Query<&mut Mesh3d, With<Model>>,
+    mut models: Query<(&mut Mesh3d, &PartId), With<Model>>,
 ) {
     if !ev.read().any(|c| *c == PanelCmd::ToggleView) {
         return;
     }
-    if dspread.0 > 0.0 {
+    let ap = active_part.0;
+    let part = &mut parts.0[ap];
+    if part.spread > 0.0 {
         // Collapse → the uncut model.
-        if let Some(h) = whole.0.clone() {
-            for mut m in &mut models {
-                m.0 = h.clone();
-            }
-            dspread.0 = 0.0;
+        if let Some(h) = part.whole.clone() {
+            swap_part_mesh(&mut models, ap, &h);
+            part.spread = 0.0;
         }
-    } else if let Some(h) = sliced.0.clone() {
+    } else if let Some(h) = part.sliced.clone() {
         // Explode the sliced pieces — `auto_reslice` keeps them fresh in the background, and a
-        // pending rebuild refreshes them in place when it lands (poll_job, dspread > 0).
-        for mut m in &mut models {
-            m.0 = h.clone();
-        }
-        dspread.0 = SPREAD as f32;
+        // pending rebuild refreshes them in place when it lands (poll_job, spread > 0).
+        swap_part_mesh(&mut models, ap, &h);
+        part.spread = SPREAD as f32;
     } else {
         // Nothing sliced yet — kick one explicitly; poll_job explodes it when it arrives.
         reslice_w.write(ReSlice);
+    }
+}
+
+/// Point part `ap`'s displayed model entity(ies) at mesh `h`, leaving every OTHER part's mesh
+/// untouched — the per-part explode/collapse/revert primitive (T.2b).
+fn swap_part_mesh(models: &mut Query<(&mut Mesh3d, &PartId), With<Model>>, ap: usize, h: &Handle<Mesh>) {
+    for (mut m, pid) in models {
+        if pid.0 == ap {
+            m.0 = h.clone();
+        }
     }
 }
 
@@ -1489,7 +1489,6 @@ fn auto_reslice(
 fn sync_conn_markers(
     parts: Res<Parts>,
     active_part: Res<ActivePart>,
-    dspread: Res<DisplaySpread>,
     print: Res<PrintView>,
     mut last: Local<usize>,
     existing: Query<Entity, With<ConnMarker>>,
@@ -1527,7 +1526,7 @@ fn sync_conn_markers(
     }
     // Show a marker only in the collapsed assembled view, and only for a connector on an ENABLED
     // cut — one on a disabled cut isn't in the slice, so showing it (teal/clean) would mislead.
-    let live = dspread.0 == 0.0 && !print.0;
+    let live = part.spread == 0.0 && !print.0;
     for (m, mut tf, mut vis) in &mut markers {
         let point = live
             .then(|| conns.list.get(m.0))
@@ -1552,22 +1551,18 @@ fn sync_conn_markers(
 fn edit_mode(
     edit: Res<EditCut>,
     print: Res<PrintView>,
-    parts: Res<Parts>,
+    mut parts: ResMut<Parts>,
     active_part: Res<ActivePart>,
     cfg: Res<SceneCfg>,
-    whole: Res<WholeMesh>,
     mut xsection: ResMut<XSection>,
-    mut dspread: ResMut<DisplaySpread>,
-    mut models: Query<&mut Mesh3d, With<Model>>,
+    mut models: Query<(&mut Mesh3d, &PartId), With<Model>>,
     mut cam: Query<(&mut Transform, &mut Orbit)>,
     mut status: ResMut<Status>,
 ) {
-    let part = &parts.0[active_part.0];
-    let cuts = &part.cuts;
-    let bounds = &part.bounds;
     if !edit.is_changed() {
         return;
     }
+    let ap = active_part.0;
     let Some(i) = edit.0 else {
         xsection.0 = None;
         if !print.0 {
@@ -1576,35 +1571,37 @@ fn edit_mode(
         return;
     };
     // Edit on the collapsed whole model so the profile + the cut plane overlay line up.
-    dspread.0 = 0.0;
-    if let Some(h) = whole.0.clone() {
-        for mut m in &mut models {
-            m.0 = h.clone();
-        }
+    let whole = {
+        let part = &mut parts.0[ap];
+        part.spread = 0.0;
+        part.whole.clone()
+    };
+    if let Some(h) = whole {
+        swap_part_mesh(&mut models, ap, &h);
     }
-    let (Some(c), Some(src)) = (cuts.list.get(i), cfg.source.clone()) else {
+    let part = &parts.0[ap];
+    let (Some(c), Some(src)) = (part.cuts.list.get(i), cfg.source.clone()) else {
         xsection.0 = None;
         return;
     };
+    let (axis, at) = (c.axis, c.at); // copy out so the `part` borrow can drop before the cam block
+    let bounds = part.bounds.0;
     // Face the camera square onto the cut (Z avoids the up=Z gimbal with a near-top-down pitch).
     // Set the transform here directly — `orbit` yields while editing, so it won't apply it for us.
     if let Ok((mut t, mut o)) = cam.single_mut() {
         use std::f32::consts::FRAC_PI_2;
-        (o.yaw, o.pitch) = match c.axis {
+        (o.yaw, o.pitch) = match axis {
             Axis::X => (0.0, 0.0),
             Axis::Y => (FRAC_PI_2, 0.0),
             Axis::Z => (-FRAC_PI_2, FRAC_PI_2 - 0.01),
         };
         // Look at the cut's centre: model centre in the non-axis dims, `at` along the axis.
-        let center = bounds
-            .0
-            .map(|(mn, mx)| (mn + mx) * 0.5)
-            .unwrap_or(Vec3::ZERO);
-        o.target = with_comp(center, c.axis.index(), c.at);
+        let center = bounds.map(|(mn, mx)| (mn + mx) * 0.5).unwrap_or(Vec3::ZERO);
+        o.target = with_comp(center, axis.index(), at);
         *t = orbit_transform(o.yaw, o.pitch, o.radius, o.target);
     }
     let stl = fab::whole_stl(&src, &cfg.tmp);
-    match fab::cross_section(&stl, c.axis.index(), c.at as f64) {
+    match fab::cross_section(&stl, axis.index(), at as f64) {
         Ok(loops) => {
             xsection.0 = Some(
                 loops
@@ -1612,7 +1609,7 @@ fn edit_mode(
                     .map(|l| l.into_iter().map(|[a, b]| [a as f32, b as f32]).collect())
                     .collect(),
             );
-            status.0 = format!("editing connectors on {} cut", c.axis.label());
+            status.0 = format!("editing connectors on {} cut", axis.label());
         }
         Err(e) => {
             status.0 = format!("cross-section failed: {e}");
@@ -1726,7 +1723,6 @@ fn sync_overlays(
 fn sync_overlay_visuals(
     parts: Res<Parts>,
     active_part: Res<ActivePart>,
-    dspread: Res<DisplaySpread>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut overlays: Query<(
@@ -1736,13 +1732,13 @@ fn sync_overlay_visuals(
         &MeshMaterial3d<StandardMaterial>,
     )>,
 ) {
-    let part = &parts.0[active_part.0];
-    let cuts = &part.cuts;
-    let bounds = &part.bounds;
-    if !parts.is_changed() && !dspread.is_changed() {
+    if !parts.is_changed() {
         return;
     }
-    let Some((min, max)) = bounds.0 else {
+    let part = &parts.0[active_part.0];
+    let cuts = &part.cuts;
+    let spread = part.spread; // spread now lives in Part → parts.is_changed() covers it
+    let Some((min, max)) = part.bounds.0 else {
         return;
     };
     for (mut cpv, mut tf, mut mesh3d, mat) in &mut overlays {
@@ -1754,7 +1750,7 @@ fn sync_overlay_visuals(
             cpv.axis = c.axis;
             mesh3d.0 = meshes.add(plane_cuboid(c.axis, min, max));
         }
-        tf.translation = cut_center(&cuts, idx, min, max, dspread.0);
+        tf.translation = cut_center(&cuts, idx, min, max, spread);
         if let Some(mut m) = materials.get_mut(&mat.0) {
             m.base_color = cut_color(idx == cuts.active, c.enabled);
         }
@@ -1980,23 +1976,29 @@ fn draw_axis_gizmo(cam: Query<(&Orbit, &Projection), With<Camera3d>>, mut gizmos
 }
 
 /// On a change of what's displayed, frame it: centre on the (possibly exploded) bounds + fit.
+/// Keyed on a `Local` snapshot of (spread, bounds) — fires on explode/collapse (spread moves) and on
+/// the first render (bounds land), but NOT on a cut drag (which changes neither), so the camera
+/// doesn't yank while you're dragging a plane. `spread` used to be its own resource whose
+/// change-detection was this narrow signal; folding it into `Part` widened `parts.is_changed()` to
+/// every edit, so the snapshot restores the old narrowness.
 fn auto_scale(
-    dspread: Res<DisplaySpread>,
     parts: Res<Parts>,
     active_part: Res<ActivePart>,
     mut cams: Query<&mut Orbit>,
+    mut last: Local<Option<(f32, Vec3, Vec3)>>,
 ) {
-    if !dspread.is_changed() {
-        return;
-    }
     let part = &parts.0[active_part.0];
     let cuts = &part.cuts;
-    let bounds = &part.bounds;
-    let Some((min, max)) = bounds.0 else {
+    let Some((min, max)) = part.bounds.0 else {
         return;
     };
+    let key = (part.spread, min, max);
+    if *last == Some(key) {
+        return; // neither the explode distance nor the bounds moved — don't re-frame
+    }
+    *last = Some(key);
     let enabled = cuts.list.iter().filter(|c| c.enabled).count() as f32;
-    let extra = enabled * dspread.0; // exploded fans pieces this much further along X
+    let extra = enabled * part.spread; // exploded fans pieces this much further along X
     let span = ((max.x - min.x) + extra).max(max.y - min.y).max(80.0);
     for mut o in &mut cams {
         o.target = Vec3::new(
@@ -2038,21 +2040,24 @@ fn split_viewport(seam: Res<PanelSeam>, mut cam: Query<&mut Camera, With<Camera3
 }
 
 /// Revert to the uncut model the moment a cut is edited, so editing is always on the intact part.
+/// Acts on the ACTIVE part — the only one the panel/drag can edit — swapping just its mesh.
 fn revert_on_edit(
-    parts: Res<Parts>,
-    whole: Res<WholeMesh>,
-    mut dspread: ResMut<DisplaySpread>,
-    mut models: Query<&mut Mesh3d, With<Model>>,
+    mut parts: ResMut<Parts>,
+    active_part: Res<ActivePart>,
+    mut models: Query<(&mut Mesh3d, &PartId), With<Model>>,
 ) {
-    if dspread.0 == 0.0 || !parts.is_changed() {
+    if !parts.is_changed() {
         return;
     }
-    if let Some(h) = whole.0.clone() {
-        for mut m in &mut models {
-            m.0 = h.clone();
-        }
+    let ap = active_part.0;
+    let part = &mut parts.0[ap];
+    if part.spread == 0.0 {
+        return;
     }
-    dspread.0 = 0.0;
+    if let Some(h) = part.whole.clone() {
+        swap_part_mesh(&mut models, ap, &h);
+    }
+    part.spread = 0.0;
 }
 
 fn cut_color(active: bool, enabled: bool) -> Color {
@@ -2172,16 +2177,14 @@ struct ModelState<'w> {
     print_job: ResMut<'w, PrintJob>,
     print_pieces: ResMut<'w, PrintPieces>,
     feas: ResMut<'w, Feas>,
-    whole: ResMut<'w, WholeMesh>,
-    sliced: ResMut<'w, SlicedMesh>,
     watch: ResMut<'w, Watch>,
 }
 
 impl ModelState<'_> {
     /// Reset to a clean slate for a freshly-loaded source: no cuts/connectors/orientations, bounds
-    /// cleared so `poll_job` re-seeds the first cut, modes exited, cached meshes dropped, any
-    /// in-flight print job cancelled, panel signature invalidated (forces a rebuild), and the watch
-    /// disarmed so `watch_source` records the new file's mtime instead of re-triggering.
+    /// cleared so `poll_job` re-seeds the first cut, modes exited, cached meshes dropped (the whole/
+    /// sliced handles live in `Part` now, so resetting `Parts` drops them), any in-flight print job
+    /// cancelled, and the watch disarmed so `watch_source` records the new file's mtime.
     fn reset(&mut self) {
         *self.parts = Parts(vec![Part::default()]);
         self.active.0 = 0;
@@ -2191,8 +2194,6 @@ impl ModelState<'_> {
         *self.print_job = PrintJob::default();
         *self.print_pieces = PrintPieces::default();
         *self.feas = Feas::default();
-        *self.whole = WholeMesh::default();
-        *self.sliced = SlicedMesh::default();
         *self.watch = Watch::default();
     }
 }
@@ -2374,18 +2375,15 @@ fn poll_job(
     mut status: ResMut<Status>,
     mut parts: ResMut<Parts>,
     active_part: Res<ActivePart>,
-    mut whole: ResMut<WholeMesh>,
-    mut sliced: ResMut<SlicedMesh>,
-    mut dspread: ResMut<DisplaySpread>,
     bg: Res<SliceInBackground>,
-    models: Query<Entity, With<Model>>,
+    models: Query<(Entity, &PartId), With<Model>>,
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
-    let part = &mut parts.0[active_part.0];
-    let bounds = &mut part.bounds;
-    let cuts = &mut part.cuts;
+    // The reslice job always belongs to the ACTIVE part (auto_reslice keys on its cuts); the whole
+    // render belongs to the freshly-loaded active part too. So both land on `ap`.
+    let ap = active_part.0;
     let Some((is_reslice, task)) = job.0.as_mut() else {
         return;
     };
@@ -2397,41 +2395,40 @@ fn poll_job(
     match result {
         Ok(stl) => {
             let (mesh, aabb) = mesh_and_bounds(&mut meshes, &stl);
+            let part = &mut parts.0[ap];
             if is_reslice {
-                sliced.0 = Some(mesh.clone()); // bank it so the view toggle can re-show it
-                                               // A BACKGROUND rebuild refreshes the display only if the user is already exploded;
-                                               // an explicit slice (or a background one while exploded) shows the fanned pieces.
+                part.sliced = Some(mesh.clone()); // bank it so the view toggle can re-show it
+                                                  // A BACKGROUND rebuild refreshes the display only if the user is already exploded;
+                                                  // an explicit slice (or a background one while exploded) shows the fanned pieces.
                 let show = !bg.0;
-                if show || dspread.0 > 0.0 {
-                    for e in &models {
-                        commands.entity(e).despawn();
-                    }
+                if show || part.spread > 0.0 {
+                    despawn_part_models(&mut commands, &models, ap);
                     commands.spawn((
                         Mesh3d(mesh),
                         MeshMaterial3d(part_material(&mut materials)),
                         Model,
+                        PartId(ap),
                     ));
                     if show {
-                        dspread.0 = SPREAD as f32;
+                        part.spread = SPREAD as f32;
                     }
                 }
             } else {
-                for e in &models {
-                    commands.entity(e).despawn();
-                }
+                despawn_part_models(&mut commands, &models, ap);
                 commands.spawn((
                     Mesh3d(mesh.clone()),
                     MeshMaterial3d(part_material(&mut materials)),
                     Model,
+                    PartId(ap),
                 ));
-                whole.0 = Some(mesh); // remember the uncut mesh, so editing can revert to it
-                dspread.0 = 0.0;
+                part.whole = Some(mesh); // remember the uncut mesh, so editing can revert to it
+                part.spread = 0.0;
                 // First whole render fixes the bounds. A model that FITS the bed gets a manual
                 // centre-cut starting point; one that OVERFLOWS is left empty for auto-on-open
                 // (kick_auto_plan) to slice + connect.
-                if bounds.0.is_none() {
+                if part.bounds.0.is_none() {
                     if let Some((min, max)) = aabb {
-                        bounds.0 = Some((min, max));
+                        part.bounds.0 = Some((min, max));
                         let bed = bed_size().unwrap_or([256.0; 3]);
                         let fits = fab_scad::auto_slice::auto_slice(
                             FVec3::new(min.x as f64, min.y as f64, min.z as f64),
@@ -2439,13 +2436,13 @@ fn poll_job(
                             Dims::from_array(bed),
                         )
                         .is_empty();
-                        if cuts.list.is_empty() && fits {
-                            cuts.list.push(CutDef {
+                        if part.cuts.list.is_empty() && fits {
+                            part.cuts.list.push(CutDef {
                                 axis: Axis::X,
                                 at: (min.x + max.x) * 0.5,
                                 enabled: true,
                             });
-                            cuts.active = 0;
+                            part.cuts.active = 0;
                         }
                     }
                 }
@@ -2455,6 +2452,19 @@ fn poll_job(
         Err(e) => {
             error!("{e}");
             status.0 = format!("error: {e}");
+        }
+    }
+}
+
+/// Despawn only part `ap`'s displayed model entity(ies), leaving the other parts on screen (T.2b).
+fn despawn_part_models(
+    commands: &mut Commands,
+    models: &Query<(Entity, &PartId), With<Model>>,
+    ap: usize,
+) {
+    for (e, pid) in models {
+        if pid.0 == ap {
+            commands.entity(e).despawn();
         }
     }
 }
@@ -2881,10 +2891,7 @@ fn run_screenshot(scene: SceneCfg, png: PathBuf) {
         .init_resource::<PrintView>()
         .init_resource::<XSection>()
         .init_resource::<DraggingCut>()
-        .init_resource::<WholeMesh>()
-        .init_resource::<SlicedMesh>()
         .init_resource::<SliceInBackground>()
-        .init_resource::<DisplaySpread>()
         .init_resource::<Job>()
         .init_resource::<PanelSeam>()
         .insert_resource(Status("rendering".into()))
@@ -2914,6 +2921,7 @@ fn setup_offscreen(
         Mesh3d(display),
         MeshMaterial3d(part_material(&mut materials)),
         Model,
+        PartId(0),
     ));
 
     // Offscreen render target the camera draws into and we screenshot.
@@ -3149,10 +3157,7 @@ fn run_scripted(scene: SceneCfg, actions: Vec<Action>) {
         .init_resource::<FileList>()
         .init_resource::<OpenDialog>()
         .init_resource::<Watch>()
-        .init_resource::<WholeMesh>()
-        .init_resource::<SlicedMesh>()
         .init_resource::<SliceInBackground>()
-        .init_resource::<DisplaySpread>()
         .init_resource::<PanelSeam>()
         .insert_resource(Status("rendering".into()))
         .insert_resource(ScriptRunner {

@@ -3471,6 +3471,8 @@ enum Action {
     Touch(PathBuf), // bump <path>'s mtime (rewrite same bytes) → exercise watch_source reload
     Part(usize),   // make top-level part <i> the active one (T.2b multi-part switch)
     Export,        // export the print-oriented pieces to a Bambu .3mf (co-pack all parts, T.2b.4)
+    Tab(Tab),      // switch the active workflow tab: model|parts|orientation|export (U.3.8)
+    EditText(String), // append a snippet to the editor buffer → debounced buffer re-render (U.3.8)
 }
 
 #[derive(Resource)]
@@ -3519,6 +3521,17 @@ fn parse_script(s: &str) -> Vec<Action> {
                 "edit" => it.next()?.parse().ok().map(Action::Edit),
                 "part" => it.next()?.parse().ok().map(Action::Part),
                 "export" => Some(Action::Export),
+                "tab" => match it.next()? {
+                    "model" => Some(Action::Tab(Tab::Model)),
+                    "parts" => Some(Action::Tab(Tab::Parts)),
+                    "orientation" => Some(Action::Tab(Tab::Orientation)),
+                    "export" => Some(Action::Tab(Tab::Export)),
+                    _ => None,
+                },
+                "edittext" => {
+                    let snippet = it.collect::<Vec<_>>().join(" ");
+                    (!snippet.is_empty()).then_some(Action::EditText(snippet))
+                }
                 "printview" => Some(Action::PrintView),
                 "autoplace" => Some(Action::AutoPlace),
                 "orient" => {
@@ -3598,6 +3611,7 @@ fn run_scripted(scene: SceneCfg, actions: Vec<Action>) {
                 poll_job,
                 apply_switch_file,
                 watch_source,
+                preview_edited_buffer,
                 sync_overlays,
                 sync_overlay_visuals,
                 sync_dim_labels,
@@ -3702,6 +3716,8 @@ fn run_script(
         ResMut<FileList>,
         MessageWriter<SwitchFile>,
         ResMut<ActiveConn>,
+        ResMut<EditorBuf>,
+        Res<Time>,
     ),
 ) {
     // The part-switch action rebinds what "active" means, so handle it BEFORE the active-part borrow
@@ -3885,6 +3901,26 @@ fn run_script(
                 cmd_w.write(PanelCmd::Export); // export_plates_action co-packs all parts inline
             }
             runner.timer >= 3 // let the inline export write + status update
+        }
+        Action::Tab(t) => {
+            if runner.timer == 1 {
+                *tab = t; // sync_tab_modes maps it onto the print/edit flags next frame (U.3.8)
+            }
+            runner.timer >= 3
+        }
+        Action::EditText(snippet) => {
+            if runner.timer == 1 {
+                *tab = Tab::Model;
+                // Append the snippet as a fresh top-level STATEMENT (auto-terminated — the `;` that
+                // would end it is the script's own action delimiter, so the verb supplies it).
+                sw.3.text.push('\n');
+                sw.3.text.push_str(&snippet);
+                sw.3.text.push(';');
+                sw.3.dirty = true;
+                sw.3.edited_at = Some(sw.4.elapsed_secs_f64());
+            }
+            // preview_edited_buffer fires past the debounce + kicks a render — wait for it to land.
+            runner.timer > 60 && job.0.is_none()
         }
     };
     if done {
@@ -4363,6 +4399,23 @@ fn export_plates_action(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_script_reads_tab_and_edittext_verbs() {
+        // U.3.8: the tab switch + the editor-edit verb (the snippet keeps its inner spaces).
+        let acts = parse_script("tab parts; edittext cube([8, 8, 8]); tab model");
+        assert!(matches!(
+            acts.as_slice(),
+            [Action::Tab(Tab::Parts), Action::EditText(s), Action::Tab(Tab::Model)]
+            if s.as_str() == "cube([8, 8, 8])"
+        ));
+    }
+
+    #[test]
+    fn parse_script_rejects_unknown_tab_and_bare_edittext() {
+        // An unknown tab name and an argument-less `edittext` are dropped (filter_map), never panic.
+        assert!(parse_script("tab bogus; edittext").is_empty());
+    }
 
     #[test]
     fn drag_ray_maps_to_axis_coordinate() {

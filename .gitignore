@@ -39,3 +39,6 @@ spikes/wasm-gui/web/*
 
 # cargo-mutants working dir (periodic gate; results reviewed, not committed)
 /mutants.out/
+
+# fab-gui live-editor preview temp (U.3.2) — written beside the edited .scad, transient
+.fab-preview-*.scad

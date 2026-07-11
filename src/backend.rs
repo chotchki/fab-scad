@@ -89,6 +89,26 @@ pub fn build_geo<B: GeometryBackend>(geo: &Geo, backend: &B) -> B::Solid {
     }
 }
 
+/// Split a [`Geo`] result into its TOP-LEVEL PARTS — one backend solid per implicit-union child at
+/// the root (T.2b). A model's top-level statements are implicitly unioned, so a `Geo::D3(Union(kids))`
+/// root yields one part per top-level item (the `wall_sliced()` / `frame_sliced()` / … calls); each
+/// part slices + orients + packs on its own, then all co-pack. Any other root — a lone statement, a
+/// transform, a leaf, a 2D result — is ONE part.
+///
+/// LIMIT: the implicit top-level union and an EXPLICIT `union(){…}` written as the sole top-level
+/// statement lower to the same `Union` node, so this splits BOTH — a wrap-everything-in-`union()`
+/// model over-splits. Top-level module calls (the presliced legacy class) are the target; restructure
+/// if the split is unwanted. Building a part per child (vs one merged solid) is the whole point: the
+/// parts are then sliced/oriented independently, which a single `build_geo` merge would foreclose.
+pub fn build_geo_parts<B: GeometryBackend>(geo: &Geo, backend: &B) -> Vec<B::Solid> {
+    match geo {
+        Geo::D3(GeoNode::Union(kids)) if kids.len() > 1 => {
+            kids.iter().map(|k| build(k, backend)).collect()
+        }
+        _ => vec![build_geo(geo, backend)],
+    }
+}
+
 /// Lower a fab-lang CSG tree ([`GeoNode`], J.2) to a backend solid — the geometry lowering. This is
 /// the integration seam: fab-lang builds the backend-agnostic tree, the backend does the real CSG.
 /// Recursion is bounded by the tree depth (the parser's `MAX_DEPTH`), so it can't overflow the stack.
@@ -588,7 +608,22 @@ impl GeometryBackend for MockBackend {
 
 #[cfg(test)]
 mod tests {
-    use super::{GeometryBackend, MockBackend};
+    use super::{build_geo_parts, GeometryBackend, MockBackend};
+
+    #[test]
+    fn build_geo_parts_splits_top_level_items() {
+        // Two top-level statements are implicitly unioned → two independent parts (T.2b keystone).
+        let geo = fab_lang::evaluate_geometry("cube(10); translate([50,0,0]) sphere(6,$fn=16);")
+            .expect("evaluates");
+        let parts = build_geo_parts(&geo, &MockBackend);
+        assert_eq!(parts.len(), 2, "two top-level items → two parts");
+        for p in &parts {
+            assert!(!MockBackend.is_empty(p), "each part carries geometry");
+        }
+        // A lone top-level item is ONE part — not split into its internal pieces.
+        let one = fab_lang::evaluate_geometry("cube(10);").expect("evaluates");
+        assert_eq!(build_geo_parts(&one, &MockBackend).len(), 1, "single item → one part");
+    }
 
     /// Drive the WHOLE op surface of a backend and assert the invariants that hold for ANY correct
     /// backend (the exact geometry is the backend's business; the sanitizers are the real oracle). Run

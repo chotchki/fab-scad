@@ -289,10 +289,17 @@ struct XSection(Option<Vec<Vec<[f32; 2]>>>);
 /// clicking a piece's face sets a MANUAL override (recorded in `manual` so a re-render keeps it).
 /// Threaded into `reslice` so the slice gates its onions on how each piece actually prints. Empty =
 /// every piece defaults to +Z (the pre-orientation behaviour).
-/// A printable piece's identity: its slab multi-index + its connected-COMPONENT index within that
-/// slab (0 when the slab is a single solid; a presliced blob splits into comps 0..N — T.2a). Every
-/// per-piece orientation keys off this so each component orients on its own.
+/// A printable piece's identity WITHIN one part: its slab multi-index + its connected-COMPONENT
+/// index within that slab (0 when the slab is a single solid; a presliced blob splits into comps
+/// 0..N — T.2a). Every per-piece orientation in a part's [`Orient`] map keys off this so each
+/// component orients on its own.
 type PieceKey = ([usize; 3], usize);
+
+/// A laid-out print piece's identity ACROSS parts (T.2b co-pack): its part index + its per-part
+/// [`PieceKey`]. The `(slab, comp)` key collides across parts (every part has a slab `[0,0,0]`), so
+/// the part prefix routes each laid-out piece back to `parts.0[part].orient` — the authoritative
+/// per-part store stays keyed by [`PieceKey`], the part index is a routing prefix, not a map dimension.
+type PrintId = (usize, [usize; 3], usize);
 
 #[derive(Default)]
 struct Orient {
@@ -347,13 +354,15 @@ struct PrintView(bool);
 
 /// The in-flight print-layout render (off-thread): renders + auto-orients every piece. Yields the
 /// pieces (mesh + multi-index + build-up) on success, else an error string.
+/// (T.2b co-pack) each piece is tagged with its PART index — the job fans `print_layout_kernel`
+/// over every top-level part and concatenates, so one preview holds all parts' pieces.
 #[derive(Resource, Default)]
-struct PrintJob(Option<Task<Result<Vec<fab::PiecePrint>, String>>>);
+struct PrintJob(Option<Task<Result<Vec<(usize, fab::PiecePrint)>, String>>>);
 
-/// The last print-layout's rendered pieces, kept so a manual re-orient re-lays-out from the cached
-/// meshes (no re-render). Cleared when the preview closes.
+/// The last print-layout's rendered pieces (part index + piece), kept so a manual re-orient
+/// re-lays-out from the cached meshes (no re-render). Cleared when the preview closes.
 #[derive(Resource, Default)]
-struct PrintPieces(Option<Vec<fab::PiecePrint>>);
+struct PrintPieces(Option<Vec<(usize, fab::PiecePrint)>>);
 
 /// The in-flight auto-plan job (auto-slice + onion auto-place, off-thread) — auto-on-open's worker.
 #[derive(Resource, Default)]
@@ -381,10 +390,11 @@ struct PrevCam(Option<(f32, f32, f32, Vec3)>);
 #[derive(Resource, Default)]
 struct Feas(Vec<bool>);
 
-/// One laid-out piece in the print-orientation preview (its slab + component key, for the
-/// click→orient pick). Despawned when the preview closes.
+/// One laid-out piece in the print-orientation preview, tagged with its cross-part [`PrintId`]
+/// (part + slab + comp) so a click→orient pick routes to the right part's orient. Despawned when
+/// the preview closes.
 #[derive(Component)]
-struct PrintPiece(PieceKey);
+struct PrintPiece(PrintId);
 
 /// The 3D point of a `(pos_a, pos_b)` on a cut plane: `at` along the axis, pos in the two non-axis
 /// dims (ascending) — the inverse of the connector projection.
@@ -2636,18 +2646,13 @@ fn enter_exit_print(
     print: Res<PrintView>,
     edit: Res<EditCut>,
     mut was_on: Local<bool>,
-    cfg: Res<SceneCfg>,
     parts: Res<Parts>,
-    active_part: Res<ActivePart>,
     mut job: ResMut<PrintJob>,
     mut cache: ResMut<PrintPieces>,
     mut status: ResMut<Status>,
     pieces: Query<Entity, With<PrintPiece>>,
     mut commands: Commands,
 ) {
-    let part = &parts.0[active_part.0];
-    let cuts = &part.cuts;
-    let conns = &part.conns;
     if print.0 == *was_on {
         return; // no transition (and not the initial add) — nothing to do
     }
@@ -2655,13 +2660,19 @@ fn enter_exit_print(
     if print.0 {
         cache.0 = None; // cuts may have moved — wait for a fresh render before laying out
         if job.0.is_none() {
-            kick_print_job(
-                &mut job,
-                &mut status,
-                &cfg,
-                cuts.enabled_cuts(),
-                resolve_conns(&cuts, &conns),
-            );
+            // CO-PACK (T.2b.4): gather EVERY part's slice spec so the job lays out + packs them all.
+            let specs: Vec<PartPrintSpec> = parts
+                .0
+                .iter()
+                .enumerate()
+                .map(|(i, p)| PartPrintSpec {
+                    part: i,
+                    base_stl: p.base_stl.clone(),
+                    cuts: p.cuts.enabled_cuts(),
+                    conns: resolve_conns(&p.cuts, &p.conns),
+                })
+                .collect();
+            kick_print_job(&mut job, &mut status, specs);
         }
     } else {
         for e in &pieces {
@@ -2747,29 +2758,36 @@ fn manage_view_camera(
     *was_hijack = hijack;
 }
 
-/// Spawn the per-piece render + auto-orient on the compute pool (the OpenSCAD work is off-thread,
-/// so the UI stays live while the plate lays out). Carries the connectors so the preview pieces show
-/// their joints.
-fn kick_print_job(
-    job: &mut PrintJob,
-    status: &mut Status,
-    cfg: &SceneCfg,
+/// One part's inputs for the co-pack print layout (T.2b.4). All owned + Send — moved into the
+/// off-thread job, which slices each part off its own cached STL (no Solid crosses the boundary).
+struct PartPrintSpec {
+    part: usize,
+    base_stl: PathBuf,
     cuts: Vec<(char, f64)>,
     conns: Vec<fab::Conn>,
-) {
-    let Some(src) = cfg.source.clone() else {
-        status.0 = "no .scad source".into();
-        return;
-    };
-    if cuts.is_empty() {
-        status.0 = "no enabled cuts".into();
+}
+
+/// Spawn the per-piece render + auto-orient on the compute pool (off-thread, so the UI stays live
+/// while the plate lays out). CO-PACK (T.2b.4): fans `print_layout_kernel` over EVERY part's spec
+/// and concatenates the pieces, each tagged with its part index, so one preview holds all parts.
+fn kick_print_job(job: &mut PrintJob, status: &mut Status, specs: Vec<PartPrintSpec>) {
+    if specs.iter().all(|s| s.base_stl.as_os_str().is_empty()) {
+        status.0 = "nothing to print".into();
         return;
     }
-    let (root, tmp) = (cfg.root.clone(), cfg.tmp.clone());
     let task = AsyncComputeTaskPool::get().spawn(async move {
-        // In-process via the Manifold kernel (11.12): base rendered once, both passes off the cache.
-        fab::print_layout_kernel(root.as_deref(), &src, &cuts, &conns, &tmp)
-            .map_err(|e| format!("{e:#}"))
+        // In-process via the Manifold kernel (11.12): each part sliced off its cached base, both
+        // passes off that base. Pieces from all parts concatenate, tagged with the part index.
+        let mut all: Vec<(usize, fab::PiecePrint)> = Vec::new();
+        for s in &specs {
+            if s.base_stl.as_os_str().is_empty() {
+                continue; // an un-rendered part — skip it
+            }
+            let pieces = fab::print_layout_kernel(&s.base_stl, &s.cuts, &s.conns)
+                .map_err(|e| format!("{e:#}"))?;
+            all.extend(pieces.into_iter().map(|pp| (s.part, pp)));
+        }
+        Ok(all)
     });
     job.0 = Some(task);
     status.0 = "orienting pieces".into();
@@ -2782,11 +2800,9 @@ fn kick_print_job(
 fn poll_print_job(
     mut job: ResMut<PrintJob>,
     mut parts: ResMut<Parts>,
-    active_part: Res<ActivePart>,
     mut cache: ResMut<PrintPieces>,
     mut status: ResMut<Status>,
 ) {
-    let orient = &mut parts.0[active_part.0].orient;
     let Some(task) = job.0.as_mut() else {
         return;
     };
@@ -2802,10 +2818,17 @@ fn poll_print_job(
             return;
         }
     };
-    orient.map.clear();
-    orient.manual.clear();
-    for pp in &pieces {
-        orient.map.insert((pp.piece, pp.comp), pp.up);
+    // A fresh render is a fresh auto-pick across ALL parts — clear every part's orient, then seed
+    // each piece's build-up into ITS OWN part's map ((slab,comp) collides across parts, so route by
+    // part index) (T.2b.4 co-pack).
+    for p in &mut parts.0 {
+        p.orient.map.clear();
+        p.orient.manual.clear();
+    }
+    for (part, pp) in &pieces {
+        if let Some(p) = parts.0.get_mut(*part) {
+            p.orient.map.insert((pp.piece, pp.comp), pp.up);
+        }
     }
     let n = pieces.len();
     cache.0 = Some(pieces);
@@ -2890,8 +2913,10 @@ fn sync_orientation(
     let (mut cx, mut cy, mut row_h) = (0.0_f32, 0.0_f32, 0.0_f32);
     let (mut bb_x, mut bb_y, mut bb_z) = (0.0_f32, 0.0_f32, 0.0_f32);
     let mut placed: Vec<(usize, Quat, Vec3)> = Vec::new(); // (piece index, rotation, translation)
-    for (i, pp) in pieces.iter().enumerate() {
-        let up = Vec3::from_array(orient.up_or((pp.piece, pp.comp), pp.up)).normalize_or_zero();
+    for (i, (pidx, pp)) in pieces.iter().enumerate() {
+        // Each piece resolves its build-up against ITS OWN part's orient (co-pack, T.2b.4).
+        let up = Vec3::from_array(parts.0[*pidx].orient.up_or((pp.piece, pp.comp), pp.up))
+            .normalize_or_zero();
         let rot = if up == Vec3::ZERO {
             Quat::IDENTITY
         } else {
@@ -2921,14 +2946,14 @@ fn sync_orientation(
             ..default()
         });
         commands.spawn((
-            Mesh3d(meshes.add(build_mesh(&pieces[i].mesh))),
+            Mesh3d(meshes.add(build_mesh(&pieces[i].1.mesh))),
             MeshMaterial3d(mat),
             Transform {
                 translation: t + shift,
                 rotation: rot,
                 ..default()
             },
-            PrintPiece((pieces[i].piece, pieces[i].comp)),
+            PrintPiece((pieces[i].0, pieces[i].1.piece, pieces[i].1.comp)),
         ));
     }
     // Frame the laid-out block — including a tall tilted piece (account for height, raise the target).
@@ -2956,7 +2981,6 @@ fn orient_piece_on_click(
     print: Res<PrintView>,
     pieces: Query<(&PrintPiece, &Transform)>,
     mut parts: ResMut<Parts>,
-    active_part: Res<ActivePart>,
 ) {
     if !print.0 || ev.event.button != PointerButton::Primary {
         return;
@@ -2965,9 +2989,12 @@ fn orient_piece_on_click(
         return;
     };
     let up_model = -(tf.rotation.inverse() * world_n);
-    parts.0[active_part.0]
-        .orient
-        .set_manual(pp.0, up_model.normalize_or_zero().to_array());
+    // The PrintId carries the part index — route the manual override to THAT part's orient (co-pack).
+    let (part, slab, comp) = pp.0;
+    if let Some(p) = parts.0.get_mut(part) {
+        p.orient
+            .set_manual((slab, comp), up_model.normalize_or_zero().to_array());
+    }
 }
 
 /// Colour each connector marker by kind + feasibility: amber = a bolt (explicit); teal = an onion
@@ -3212,6 +3239,7 @@ enum Action {
     Open(PathBuf), // switch the active source to <path> (a dir → its .scad; a file → itself)
     Touch(PathBuf), // bump <path>'s mtime (rewrite same bytes) → exercise watch_source reload
     Part(usize),   // make top-level part <i> the active one (T.2b multi-part switch)
+    Export,        // export the print-oriented pieces to a Bambu .3mf (co-pack all parts, T.2b.4)
 }
 
 #[derive(Resource)]
@@ -3259,6 +3287,7 @@ fn parse_script(s: &str) -> Vec<Action> {
                 }
                 "edit" => it.next()?.parse().ok().map(Action::Edit),
                 "part" => it.next()?.parse().ok().map(Action::Part),
+                "export" => Some(Action::Export),
                 "printview" => Some(Action::PrintView),
                 "autoplace" => Some(Action::AutoPlace),
                 "orient" => {
@@ -3355,6 +3384,7 @@ fn run_scripted(scene: SceneCfg, actions: Vec<Action>) {
                     do_auto_place,
                     split_viewport,
                     seat_bed,
+                    export_plates_action, // the `export` script verb → co-pack .3mf (T.2b.4)
                 ),
                 run_script,
             ),
@@ -3422,6 +3452,7 @@ fn run_script(
     xsection: Res<XSection>,
     mut reslice_w: MessageWriter<ReSlice>,
     mut autoplace_w: MessageWriter<AutoPlace>,
+    mut cmd_w: MessageWriter<PanelCmd>,
     mut commands: Commands,
     mut exit: MessageWriter<AppExit>,
     // Bundled: Bevy caps a system at 16 params, and a tuple counts as one.
@@ -3596,6 +3627,12 @@ fn run_script(
         }
         // Handled by the early-return block above (before the active-part borrow); never reached here.
         Action::Part(_) => true,
+        Action::Export => {
+            if runner.timer == 1 {
+                cmd_w.write(PanelCmd::Export); // export_plates_action co-packs all parts inline
+            }
+            runner.timer >= 3 // let the inline export write + status update
+        }
     };
     if done {
         runner.idx += 1;
@@ -4026,23 +4063,24 @@ fn export_plates_action(
     mut ev: MessageReader<PanelCmd>,
     pieces: Res<PrintPieces>,
     parts: Res<Parts>,
-    active_part: Res<ActivePart>,
     scene: Res<SceneCfg>,
     mut status: ResMut<Status>,
 ) {
     if !ev.read().any(|c| *c == PanelCmd::Export) {
         return;
     }
-    let orient = &parts.0[active_part.0].orient;
     let Some(list) = pieces.0.as_ref().filter(|l| !l.is_empty()) else {
         status.0 = "no pieces to export — slice first".into();
         return;
     };
-    // Resolve each piece's build-up: the manual override if set, else the auto-pick.
+    // Co-pack ALL parts' pieces (T.2b.4): each piece's build-up resolves against ITS OWN part's
+    // orient (manual override if set, else the auto-pick); bambu bin-packs the flat list onto shared
+    // plates, re-seating every piece so cross-part model positions don't matter.
+    let refs: Vec<&fab::PiecePrint> = list.iter().map(|(_, pp)| pp).collect();
     let ups: Vec<[f64; 3]> = list
         .iter()
-        .map(|pp| {
-            let u = orient.up_or((pp.piece, pp.comp), pp.up);
+        .map(|(part, pp)| {
+            let u = parts.0[*part].orient.up_or((pp.piece, pp.comp), pp.up);
             [u[0] as f64, u[1] as f64, u[2] as f64]
         })
         .collect();
@@ -4054,7 +4092,7 @@ fn export_plates_action(
         None => scene.tmp.join("plates.3mf"),
     };
     let bed = [scene.bed[0] as f64, scene.bed[1] as f64];
-    match fab::export_plates(list, &ups, bed, PLATE_GAP, &out) {
+    match fab::export_plates(&refs, &ups, bed, PLATE_GAP, &out) {
         Ok(sum) => {
             status.0 = format!(
                 "exported {} piece(s) on {} plate(s), {}% full → {}",

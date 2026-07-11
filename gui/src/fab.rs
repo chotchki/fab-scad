@@ -152,11 +152,6 @@ fn preview_libs(root: Option<&Path>) -> Vec<PathBuf> {
         .unwrap_or_default()
 }
 
-/// The preview STL `render_whole` writes for `source` (reused by the cross-section, no re-render).
-pub fn whole_stl(source: &Path, out_dir: &Path) -> PathBuf {
-    out_dir.join(format!("{}.stl", stem_of(source)))
-}
-
 /// Render the source into its TOP-LEVEL PARTS (T.2b) — one preview STL per implicit-union child at
 /// the model root (the `wall_sliced()` / `frame_sliced()` / … calls), written to `{stem}-part{i}.stl`
 /// beside `render_whole`'s output, each paired with its bbox. Same `$preview` wrapper + own-dir eval
@@ -230,20 +225,16 @@ pub struct PiecePrint {
 /// leave. A `Solid` is `!Send` and never crosses the task boundary — the compiler enforces it. See
 /// `docs/manifold-thread-safety.md`.
 pub fn print_layout_kernel(
-    root: Option<&Path>,
-    source: &Path,
+    part_stl: &Path,
     cuts: &[(char, f64)],
     connectors: &[Conn],
-    out_dir: &Path,
 ) -> Result<Vec<PiecePrint>> {
     use fab_scad::kernel::Solid;
 
-    // Cache the base: render the whole model once (front-door), reuse across both passes.
-    let base_stl = whole_stl(source, out_dir);
-    if !base_stl.exists() {
-        render_whole(root, source, out_dir)?;
-    }
-    let base = Solid::from_stl_file(&base_stl)?;
+    // Slice off this PART's cached whole STL (`render_parts` wrote it on load) — one part per call,
+    // so the GUI fans this over every top-level part and co-packs the pieces (T.2b.4). Both passes
+    // reuse the one loaded base.
+    let base = Solid::from_stl_file(part_stl)?;
 
     // Pass 1: BARE slice (no connectors) → least-support orientation per non-empty piece. Each slab
     // is split into its CONNECTED COMPONENTS first: a presliced part is one uncut slab holding many
@@ -511,7 +502,7 @@ fn stlmesh_to_bambu(m: &StlMesh) -> bambu::Mesh {
 /// the fewest `bed`-sized plates, `gap` mm apart. Pure mesh work — no `Solid` — so the caller can run
 /// it wherever; it's cheap enough to call inline on a click.
 pub fn export_plates(
-    pieces: &[PiecePrint],
+    pieces: &[&PiecePrint],
     ups: &[[f64; 3]],
     bed: [f64; 2],
     gap: f64,
@@ -626,12 +617,12 @@ mod tests {
         use fab_scad::kernel::Solid;
         let tmp = std::env::temp_dir().join(format!("gui_presliced_{}", std::process::id()));
         std::fs::create_dir_all(&tmp).unwrap();
-        let src = tmp.join("twin.scad"); // need not exist — the cached STL short-circuits the render
+        let part_stl = tmp.join("twin-part0.stl"); // the part's cached whole STL (render_parts output)
         let blob = Solid::cube(20.0, 20.0, 20.0, true)
             .union(&Solid::cube(20.0, 20.0, 20.0, true).translate(FVec3::new(60.0, 0.0, 0.0)));
-        std::fs::write(whole_stl(&src, &tmp), blob.to_stl_bytes()).unwrap();
+        std::fs::write(&part_stl, blob.to_stl_bytes()).unwrap();
 
-        let pieces = print_layout_kernel(None, &src, &[], &[], &tmp).expect("print layout");
+        let pieces = print_layout_kernel(&part_stl, &[], &[]).expect("print layout");
         assert_eq!(pieces.len(), 2, "the blob splits into its two components");
         // The two share the slab index [0,0,0] but get distinct component indices.
         assert_eq!(pieces[0].piece, [0, 0, 0]);
@@ -658,10 +649,12 @@ mod tests {
         std::fs::create_dir_all(&tmp).unwrap();
         let src = tmp.join("box.scad");
         std::fs::write(&src, "cube([60,40,30], center=true);").unwrap();
+        // The part's whole STL is the load-time render (render_parts writes one per part; a single-
+        // object model renders as ONE part). print_layout_kernel slices straight off it.
+        let base = render_whole(None, &src, &tmp).expect("render base");
 
         // One X cut → two pieces; both lay out with a unit build-up and real geometry.
-        let pieces =
-            print_layout_kernel(None, &src, &[('x', 0.0)], &[], &tmp).expect("print layout");
+        let pieces = print_layout_kernel(&base, &[('x', 0.0)], &[]).expect("print layout");
         assert_eq!(pieces.len(), 2, "one cut on a box makes two pieces");
         for p in &pieces {
             assert!(
@@ -676,10 +669,7 @@ mod tests {
                 p.up
             );
         }
-        assert!(
-            whole_stl(&src, &tmp).exists(),
-            "base STL cached (front-door rendered once)"
-        );
+        assert!(base.exists(), "base STL present");
 
         let _ = std::fs::remove_dir_all(&tmp);
     }

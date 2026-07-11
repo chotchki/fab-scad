@@ -494,7 +494,6 @@ struct ConnMarker(usize);
 /// these instead of mutating in place. The matching `*_action` system reads it.
 #[derive(Message, Clone, Copy, PartialEq, Eq)]
 enum PanelCmd {
-    EditOpenscad,
     AutoSlice,
     ToggleView,
     Publish,
@@ -690,7 +689,6 @@ fn run_windowed(scene: SceneCfg) {
                 (
                     toggle_view,
                     publish_action,
-                    edit_in_openscad_action,
                     auto_slice_action,
                     export_plates_action,
                 ),
@@ -742,13 +740,17 @@ fn panel_ui(
     // A delete defers past the row loop (index stability), tagged with the PART it belongs to (T.2b).
     let mut to_remove: Option<(usize, usize)> = None;
     // egui 0.35 panels show INTO a Ui, not the Context — wrap the viewport in a background-layer Ui
-    // first (the bevy_egui side_panel pattern) so the panels overlay the 3D view.
+    // first (the bevy_egui side_panel pattern) so the panels overlay the 3D view. Anchor it at the
+    // window ORIGIN with the full viewport size: a HiDPI window's derived viewport rect can come back
+    // offset, which insets the whole UI (the left/top black margin) — pin min to zero (U.3.2 fill).
+    let screen = ctx.viewport_rect();
+    let full = egui::Rect::from_min_size(egui::Pos2::ZERO, screen.size());
     let mut viewport = egui::Ui::new(
         ctx.clone(),
         egui::Id::new("panel_viewport"),
         egui::UiBuilder::new()
             .layer_id(egui::LayerId::background())
-            .max_rect(ctx.viewport_rect()),
+            .max_rect(full),
     );
     // TOP BAR (U.3): the app-wide workflow tabs — Model → Parts → Orientation → Export. Sets the
     // active `Tab` (the source of truth the left panel routes on); the ACTIVE tab reads green + bold.
@@ -829,26 +831,27 @@ fn panel_ui(
                         {
                             editor.dirty = false;
                         }
-                        if ui.button("Edit in OpenSCAD").clicked() {
-                            writers.cmd.write(PanelCmd::EditOpenscad);
-                        }
                         if editor.dirty {
                             ui.colored_label(egui::Color32::from_rgb(224, 168, 96), "● unsaved");
                         }
                     });
                     // The code editor — its buffer IS the render source (debounced preview, U.3.2).
-                    egui::ScrollArea::vertical().show(ui, |ui| {
-                        let resp = ui.add(
-                            egui::TextEdit::multiline(&mut editor.text)
-                                .code_editor()
-                                .desired_width(f32::INFINITY)
-                                .desired_rows(24),
-                        );
-                        if resp.changed() {
-                            editor.dirty = true;
-                            editor.edited_at = Some(time.elapsed_secs_f64());
-                        }
-                    });
+                    // `auto_shrink` off + sizing to the remaining space so it FILLS the panel, not just
+                    // the text height (else a short file leaves the panel half-empty).
+                    egui::ScrollArea::vertical()
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| {
+                            let resp = ui.add_sized(
+                                ui.available_size(),
+                                egui::TextEdit::multiline(&mut editor.text)
+                                    .code_editor()
+                                    .desired_width(f32::INFINITY),
+                            );
+                            if resp.changed() {
+                                editor.dirty = true;
+                                editor.edited_at = Some(time.elapsed_secs_f64());
+                            }
+                        });
                 }
                 Tab::Parts => {
                     // ACCORDION (T.2b): one collapsing section per top-level part. Expanding or
@@ -969,6 +972,8 @@ fn panel_ui(
                     // The co-pack plate preview lands in U.3.5.
                 }
             }
+            // Fill the panel to full height on every tab so its frame reaches the status bar (U.3.2).
+            ui.add_space(ui.available_height());
         });
     if let Some((p, idx)) = to_remove {
         if let Some(part) = parts.0.get_mut(p) {
@@ -4157,24 +4162,6 @@ fn poll_publish(mut job: ResMut<PublishJob>, mut status: ResMut<Status>) {
 
 /// Open the active `.scad` source in the OpenSCAD GUI (detached) so you can edit it; the file-watch
 /// re-renders here on save.
-fn edit_in_openscad_action(
-    mut ev: MessageReader<PanelCmd>,
-    scene: Res<SceneCfg>,
-    mut status: ResMut<Status>,
-) {
-    if !ev.read().any(|c| *c == PanelCmd::EditOpenscad) {
-        return;
-    }
-    let Some(src) = scene.source.clone() else {
-        status.0 = "no .scad source to edit".into();
-        return;
-    };
-    match fab::open_in_openscad(scene.root.as_deref(), &src) {
-        Ok(()) => status.0 = format!("opened {} in OpenSCAD", src.display()),
-        Err(e) => status.0 = format!("couldn't launch OpenSCAD: {e:#}"),
-    }
-}
-
 /// Auto-slice the loaded model to fit the printer bed: replace the cut stack with
 /// `fab_scad::auto_slice`'s plan (equal division on each overflowing axis), clear connectors (they
 /// referenced the old cuts), and let the reactive loop reslice. The seed you then refine by hand.

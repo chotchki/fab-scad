@@ -591,30 +591,6 @@ pub fn export_plates(
     bambu::export_plates(out, to_place, bed, gap)
 }
 
-/// Open `source` in the OpenSCAD GUI (detached, non-blocking) — the same binary fab renders with
-/// (`$OPENSCAD` / the macOS .app / `$PATH`). Sets `OPENSCADPATH` from `root` so the model's includes
-/// (scad-lib, BOSL2) resolve. Closes the dogfooding loop: edit + save in OpenSCAD, and the GUI's
-/// file-watch re-renders. Errors only if OpenSCAD can't be found or the spawn fails.
-pub fn open_in_openscad(root: Option<&Path>, source: &Path) -> Result<()> {
-    let bin = fab_scad::openscad::find_bin()
-        .context("OpenSCAD not found — set $OPENSCAD or install it")?;
-    let mut cmd = std::process::Command::new(&bin);
-    cmd.arg(source); // no -o → OpenSCAD opens the editor GUI rather than rendering headless
-    if let Some(r) = root {
-        cmd.env(
-            "OPENSCADPATH",
-            format!(
-                "{}:{}",
-                r.join("libs").display(),
-                r.join("scad-lib").display()
-            ),
-        );
-    }
-    cmd.spawn()
-        .with_context(|| format!("launching OpenSCAD ({})", bin.display()))?;
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

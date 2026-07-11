@@ -111,9 +111,12 @@ struct Watch {
 /// A finished render/slice job's payload (T.2b). A whole render produces ALL top-level parts at once
 /// (`fab::render_parts`); a reslice touches exactly ONE part off its cached STL.
 enum JobResult {
-    /// Every top-level part's whole STL. `fresh` = a new source (replace the parts list); else a
-    /// reload of the SAME source (refresh geometry in place, keep each part's cuts/connectors).
-    Rendered { fresh: bool, parts: Vec<PathBuf> },
+    /// Every top-level part's whole STL + its provenance name. `fresh` = a new source (replace the
+    /// parts list); else a reload of the SAME source (refresh geometry in place, keep cuts/connectors).
+    Rendered {
+        fresh: bool,
+        parts: Vec<(PathBuf, Option<String>)>,
+    },
     /// One part's sliced STL — the part index it belongs to (its `Model` entity carries `PartId`).
     Resliced { part: usize, stl: PathBuf },
 }
@@ -337,6 +340,7 @@ struct Part {
     spread: f32,                  // 0 = uncut/editing, >0 = exploded (fan distance)
     base_stl: PathBuf,            // this part's whole STL (`render_parts` output) — reslice/edit/plan source
     sliced_hash: Option<u64>,     // `slice_hash` of the inputs last resliced — per-part so editing A never reslices B
+    name: Option<String>,         // the top-level module/function that produced this part (T.2b provenance); None = anonymous
 }
 
 /// The model's parts. INVARIANT: always non-empty — `[ActivePart]` indexes the one the panel edits.
@@ -751,8 +755,8 @@ fn panel_ui(
                         let is_active = active_part.0 == i;
                         let pcs = piece_estimate(&parts.0[i].cuts);
                         let label = format!(
-                            "Part {} · {} pc{}",
-                            i + 1,
+                            "{} · {} pc{}",
+                            part_label(&parts.0[i].name, i),
                             pcs,
                             if pcs == 1 { "" } else { "s" }
                         );
@@ -954,6 +958,22 @@ fn part_cut_editor(
         }
     }
     touched
+}
+
+/// The accordion label for part `i`: its provenance name (the top-level module/function that made
+/// it) capped to a stable width + an ordinal suffix — `wall_sliced·1`, `frame·2` — or a generic
+/// `Part N` when the part is anonymous (a bare block / an ambiguous split). The suffix keeps labels
+/// short + uniform and disambiguates two parts from the SAME module (T.2b).
+fn part_label(name: &Option<String>, i: usize) -> String {
+    const CAP: usize = 12; // chars, before the ·ordinal — keeps the accordion column tidy
+    match name {
+        Some(n) if n.chars().count() > CAP => {
+            let short: String = n.chars().take(CAP - 1).collect();
+            format!("{short}…·{}", i + 1)
+        }
+        Some(n) => format!("{n}·{}", i + 1),
+        None => format!("Part {}", i + 1),
+    }
 }
 
 /// A rough printable-piece count for a part's cut stack — the product over axes of (enabled cuts on
@@ -2425,7 +2445,7 @@ fn kick_render(job: &mut Job, status: &mut Status, cfg: &SceneCfg, fresh: bool) 
         fab::render_parts(root.as_deref(), &src, &tmp)
             .map(|v| JobResult::Rendered {
                 fresh,
-                parts: v.into_iter().map(|(p, _bbox)| p).collect(),
+                parts: v.into_iter().map(|(p, _bbox, name)| (p, name)).collect(),
             })
             .map_err(|e| format!("{e:#}"))
     });
@@ -2489,13 +2509,15 @@ fn poll_job(
                 let new: Vec<Part> = paths
                     .iter()
                     .enumerate()
-                    .map(|(i, path)| build_part(&mut commands, &mut meshes, &mut materials, i, path))
+                    .map(|(i, (path, name))| {
+                        build_part(&mut commands, &mut meshes, &mut materials, i, path, name.clone())
+                    })
                     .collect();
                 *parts = Parts(new);
                 active_part.0 = 0;
             } else {
                 // Reload of the SAME source: refresh each part's geometry, KEEP its cuts/connectors.
-                for (i, path) in paths.iter().enumerate() {
+                for (i, (path, name)) in paths.iter().enumerate() {
                     refresh_part(
                         &mut commands,
                         &mut meshes,
@@ -2504,6 +2526,7 @@ fn poll_job(
                         &mut parts.0[i],
                         i,
                         path,
+                        name.clone(),
                     );
                 }
             }
@@ -2547,6 +2570,7 @@ fn build_part(
     materials: &mut Assets<StandardMaterial>,
     i: usize,
     path: &Path,
+    name: Option<String>,
 ) -> Part {
     let (mesh, aabb) = mesh_and_bounds(meshes, path);
     commands.spawn((
@@ -2558,6 +2582,7 @@ fn build_part(
     let mut part = Part {
         base_stl: path.to_path_buf(),
         whole: Some(mesh),
+        name,
         ..default()
     };
     if let Some((min, max)) = aabb {
@@ -2570,6 +2595,7 @@ fn build_part(
 /// Refresh part `i`'s geometry on a RELOAD (the source was re-saved) without dropping its cuts:
 /// repoint the whole mesh + base STL, respawn its `Model` showing the fresh intact part, and clear
 /// its slice cache so a still-exploded part reslices off the new geometry.
+#[allow(clippy::too_many_arguments)]
 fn refresh_part(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
@@ -2578,6 +2604,7 @@ fn refresh_part(
     part: &mut Part,
     i: usize,
     path: &Path,
+    name: Option<String>,
 ) {
     let (mesh, aabb) = mesh_and_bounds(meshes, path);
     despawn_part_models(commands, models, i);
@@ -2589,6 +2616,7 @@ fn refresh_part(
     ));
     part.base_stl = path.to_path_buf();
     part.whole = Some(mesh);
+    part.name = name;
     part.spread = 0.0; // reload drops back to the intact model
     part.sliced = None;
     part.sliced_hash = None; // force a reslice off the new geometry if the part has cuts

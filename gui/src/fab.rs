@@ -159,11 +159,15 @@ fn preview_libs(root: Option<&Path>) -> Vec<PathBuf> {
 /// here (written to STL) — none crosses the async boundary (`!Send`). Empty parts are dropped; the
 /// returned order is authored order (index `i` in the filename tracks it). The GUI's `kick_render`
 /// consumes this: `poll_job` seeds one `Part` + one `Model` entity per returned STL.
+/// One rendered top-level part: its whole STL path, its `(min, max)` bbox, and its provenance name
+/// (the top-level module/function that produced it, or `None` when anonymous / ambiguous) — T.2b.
+pub type PartRender = (PathBuf, (FVec3, FVec3), Option<String>);
+
 pub fn render_parts(
     root: Option<&Path>,
     source: &Path,
     out_dir: &Path,
-) -> Result<Vec<(PathBuf, (FVec3, FVec3))>> {
+) -> Result<Vec<PartRender>> {
     use fab_scad::backend::{build_geo_parts, ManifoldBackend};
     let abs = source
         .canonicalize()
@@ -200,7 +204,19 @@ pub fn render_parts(
         "scad-rs rendered EMPTY geometry (no parts) for {}",
         source.display()
     );
-    Ok(out)
+    // Attach provenance names, but ONLY when the AST-derived count matches the actual part split —
+    // otherwise the alignment is ambiguous and labels stay generic (a wrong name is worse than none).
+    let names = part_names(source);
+    let names = if names.len() == out.len() {
+        names
+    } else {
+        vec![None; out.len()]
+    };
+    Ok(out
+        .into_iter()
+        .zip(names)
+        .map(|((path, bbox), name)| (path, bbox, name))
+        .collect())
 }
 
 /// One printable piece for the print-orientation preview: its slab multi-index, its
@@ -476,6 +492,62 @@ fn stem_of(p: &Path) -> String {
         .unwrap_or_else(|| "part".into())
 }
 
+/// Builtin module names that WRAP a single geometry child (transforms, CSG ops, grouping) — the
+/// naming walk descends past these to reach the user-level module that named the part (T.2b).
+fn is_wrapper_module(name: &str) -> bool {
+    matches!(
+        name,
+        "translate"
+            | "rotate"
+            | "scale"
+            | "mirror"
+            | "multmatrix"
+            | "union"
+            | "color"
+            | "hull"
+            | "minkowski"
+            | "offset"
+            | "render"
+            | "let"
+            | "for"
+    )
+}
+
+/// The originating module/function NAME for each top-level part (T.2b provenance) — a STATIC walk of
+/// the source AST, no evaluator involvement. Per geometry-bearing top-level statement (in source
+/// order) it descends past single-child builtin wrappers (`translate() wall_sliced()` → "wall_sliced";
+/// a bare `cube()` → "cube"); a block / `if` at top level is unnamed (`None`). The GUI applies these
+/// ONLY when the count matches the actual part split — a wrong name is worse than a generic label, and
+/// the alignment can drift on dropped-empties / `union(){…}` over-splits.
+pub fn part_names(source: &Path) -> Vec<Option<String>> {
+    let Ok(text) = std::fs::read_to_string(source) else {
+        return Vec::new();
+    };
+    let Ok(prog) = fab_lang::parse(&text) else {
+        return Vec::new();
+    };
+    prog.stmts
+        .iter()
+        .filter_map(|s| match &s.kind {
+            // A module call: descend single-child wrappers to the first non-wrapper name.
+            fab_lang::StmtKind::Module(mi) => {
+                let mut cur = mi;
+                while is_wrapper_module(&cur.name) && cur.children.len() == 1 {
+                    match &cur.children[0].kind {
+                        fab_lang::StmtKind::Module(inner) => cur = inner,
+                        _ => break,
+                    }
+                }
+                Some(Some(cur.name.clone()))
+            }
+            // A bare block / `if` produces geometry but has no single name.
+            fab_lang::StmtKind::Block(_) | fab_lang::StmtKind::If { .. } => Some(None),
+            // Assignments, module/function defs, use/include, empty — no geometry.
+            _ => None,
+        })
+        .collect()
+}
+
 /// A preview `StlMesh` (triangle soup) → an indexed `bambu::Mesh`, deduping shared vertices by exact
 /// bits (the kernel emits bit-identical coords for shared verts, so the weld is exact).
 fn stlmesh_to_bambu(m: &StlMesh) -> bambu::Mesh {
@@ -596,13 +668,20 @@ mod tests {
 
         let parts = render_parts(None, &src, &tmp).expect("render parts");
         assert_eq!(parts.len(), 2, "two top-level cubes → two part STLs");
-        assert!(parts.iter().all(|(p, _)| p.exists()), "each part STL written");
+        assert!(parts.iter().all(|(p, _, _)| p.exists()), "each part STL written");
         // The two parts keep their authored X positions (0..10 and 40..50), proving they're the
         // distinct top-level items, not one merged solid.
-        let xs: Vec<f64> = parts.iter().map(|(_, (min, _))| min.x).collect();
+        let xs: Vec<f64> = parts.iter().map(|(_, (min, _), _)| min.x).collect();
         assert!(
             xs.iter().any(|&x| x.abs() < 1.0) && xs.iter().any(|&x| (x - 40.0).abs() < 1.0),
             "parts at authored positions: {xs:?}"
+        );
+        // Provenance (T.2b): both parts name to "cube" — the second descends past `translate`.
+        let names: Vec<Option<&str>> = parts.iter().map(|(_, _, n)| n.as_deref()).collect();
+        assert_eq!(
+            names,
+            vec![Some("cube"), Some("cube")],
+            "top-level module names, wrapper-descended"
         );
         let _ = std::fs::remove_dir_all(&tmp);
     }

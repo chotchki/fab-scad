@@ -477,12 +477,15 @@ enum PanelCmd {
 }
 
 /// Panel → seam outputs, written by `panel_ui` each frame and read by the 3D systems: `over_ui`
-/// yields the camera orbit when the pointer is on the panel; `width_px` insets the 3D viewport to
-/// the right of the panel. Bundled into one resource so `panel_ui` stays under Bevy's 16-param cap.
+/// yields the camera orbit when the pointer is on a panel; `width_px`/`top_px`/`bottom_px` inset the
+/// 3D viewport inside the left panel + top tab bar + bottom status bar (U.3). Bundled into one
+/// resource so `panel_ui` stays under Bevy's 16-param cap.
 #[derive(Resource, Default)]
 struct PanelSeam {
     over_ui: bool,
     width_px: f32,
+    top_px: f32,
+    bottom_px: f32,
 }
 
 /// The panel's outbound message writers, bundled so `panel_ui` spends ONE system param on all
@@ -494,26 +497,27 @@ struct PanelWriters<'w> {
     cmd: MessageWriter<'w, PanelCmd>,
 }
 
-/// Which modal layout the panel shows. Derived from the editor/print resources — the sub-modes are
-/// mutually exclusive (`enforce_exclusive_modes`), so at most one is active; the panel shows ONLY
-/// that mode's controls (full-focus), never a pile of buttons that don't apply.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum PanelMode {
-    View,              // assembled model: file list, cut cards, slice/explode/print controls
-    Connectors(usize), // the 2D connector editor for cut i
-    Print,             // the print-orientation preview
+/// Which top-level workflow tab is active (U.3). App-wide source of truth: the top tab bar sets it,
+/// the left panel routes its content on it, and `sync_tab_modes` maps it onto the print/editor flags
+/// the camera + visibility systems already react to. Model → Parts → Orientation → Export mirrors the
+/// slice pipeline (source → cut → seat → pack); see docs/workflow-tabs-mockup.html.
+#[derive(Resource, Clone, Copy, PartialEq, Eq, Default)]
+enum Tab {
+    #[default]
+    Model,
+    Parts,
+    Orientation,
+    Export,
 }
 
-/// The active panel mode from the editor + print resources. `enforce_exclusive_modes` guarantees
-/// they're never both set; the editor wins the tie regardless.
-fn panel_mode(edit: &EditCut, print: &PrintView) -> PanelMode {
-    if let Some(i) = edit.0 {
-        PanelMode::Connectors(i)
-    } else if print.0 {
-        PanelMode::Print
-    } else {
-        PanelMode::View
-    }
+impl Tab {
+    /// The four tabs in pipeline order with their bar labels.
+    const ALL: [(Tab, &'static str); 4] = [
+        (Tab::Model, "Model"),
+        (Tab::Parts, "Parts"),
+        (Tab::Orientation, "Orientation"),
+        (Tab::Export, "Export"),
+    ];
 }
 
 /// A cut-plane overlay, tied to its cut in the stack by index. Tracks its axis so the plane mesh
@@ -610,6 +614,7 @@ fn run_windowed(scene: SceneCfg) {
         .init_resource::<PrintPieces>()
         .init_resource::<AutoJob>()
         .init_resource::<PublishJob>()
+        .init_resource::<Tab>()
         .init_resource::<PrevCam>()
         .init_resource::<Feas>()
         .init_resource::<DraggingCut>()
@@ -659,6 +664,7 @@ fn run_windowed(scene: SceneCfg) {
                     export_plates_action,
                 ),
                 (
+                    sync_tab_modes,
                     enforce_exclusive_modes,
                     apply_view_visibility,
                     manage_view_camera,
@@ -676,12 +682,12 @@ fn run_windowed(scene: SceneCfg) {
         .run();
 }
 
-/// The whole control panel (U.1.2), immediate-mode: a left egui SidePanel that reads + mutates the
-/// SAME ECS resources the feathers panel did, one mode at a time (View / Connectors / Print, via
-/// `panel_mode`). Cheap edits mutate in place; a heavy action (needing params beyond the panel's
-/// own) writes a `PanelCmd` its dedicated system handles. Writes `PanelSeam` after drawing so
-/// `orbit` yields the pointer over the panel and `split_viewport` insets the 3D camera beside it.
-// TODO(U.1.2): the Material Symbols icon font — text labels ("+"/"on"/"off"/"del"/"conn") for now.
+/// The whole control panel (U.3), immediate-mode: an app-wide top tab bar + bottom status bar +
+/// a left egui panel whose contents route on the active `Tab` (Model / Parts / Orientation / Export).
+/// Cheap edits mutate in place; a heavy action (needing params beyond the panel's own) writes a
+/// `PanelCmd` its dedicated system handles. Writes `PanelSeam` after drawing so `orbit` yields the
+/// pointer over the panels and `split_viewport` insets the 3D camera inside all three bars.
+// TODO(U.2): the Material Symbols icon font — text labels ("+"/"on"/"off"/"del"/"conn") for now.
 #[allow(clippy::too_many_arguments)]
 fn panel_ui(
     mut contexts: EguiContexts,
@@ -689,7 +695,7 @@ fn panel_ui(
     mut active_part: ResMut<ActivePart>,
     mut active: ResMut<ActiveConn>,
     mut edit: ResMut<EditCut>,
-    mut print: ResMut<PrintView>,
+    mut tab: ResMut<Tab>,
     files: Res<FileList>,
     status: Res<Status>,
     job: Res<Job>,
@@ -700,11 +706,10 @@ fn panel_ui(
     let Ok(ctx) = contexts.ctx_mut() else {
         return;
     };
-    let mode = panel_mode(&edit, &print);
     // A delete defers past the row loop (index stability), tagged with the PART it belongs to (T.2b).
     let mut to_remove: Option<(usize, usize)> = None;
     // egui 0.35 panels show INTO a Ui, not the Context — wrap the viewport in a background-layer Ui
-    // first (the bevy_egui side_panel pattern) so the panel overlays the 3D view.
+    // first (the bevy_egui side_panel pattern) so the panels overlay the 3D view.
     let mut viewport = egui::Ui::new(
         ctx.clone(),
         egui::Id::new("panel_viewport"),
@@ -712,14 +717,46 @@ fn panel_ui(
             .layer_id(egui::LayerId::background())
             .max_rect(ctx.viewport_rect()),
     );
+    // TOP BAR (U.3): the app-wide workflow tabs — Model → Parts → Orientation → Export. Sets the
+    // active `Tab` (the source of truth the left panel routes on); the ACTIVE tab reads green + bold.
+    let top = egui::Panel::top("topbar").show(&mut viewport, |ui| {
+        ui.horizontal(|ui| {
+            ui.heading("fab-gui");
+            ui.separator();
+            for (t, label) in Tab::ALL {
+                let on = *tab == t;
+                let text = if on {
+                    egui::RichText::new(label)
+                        .color(egui::Color32::from_rgb(120, 220, 140))
+                        .strong()
+                } else {
+                    egui::RichText::new(label)
+                };
+                if ui.selectable_label(on, text).clicked() {
+                    *tab = t;
+                }
+            }
+        });
+    });
+    // BOTTOM BAR (U.3): the traditional status line — pulses blue while a background render/slice runs.
+    let bottom = egui::Panel::bottom("statusbar").show(&mut viewport, |ui| {
+        if job.0.is_some() {
+            let p = ((ui.input(|i| i.time) * 5.0).sin() * 0.5 + 0.5) as f32;
+            let col =
+                egui::Color32::from_rgb((115.0 + 115.0 * p) as u8, (165.0 + 75.0 * p) as u8, 255);
+            ui.colored_label(col, status.0.as_str());
+            ui.ctx().request_repaint();
+        } else {
+            ui.label(status.0.as_str());
+        }
+    });
+    // LEFT PANEL (U.3): the active tab's controls.
     let panel = egui::Panel::left("panel")
         .resizable(true)
         .default_size(220.0)
         .show(&mut viewport, |ui| {
-            ui.heading("fab-gui");
-            ui.separator();
-            match mode {
-                PanelMode::View => {
+            match *tab {
+                Tab::Model => {
                     if ui.button("Open…").clicked() && open_dialog.0.is_none() {
                         open_dialog.0 = Some(AsyncComputeTaskPool::get().spawn(async move {
                             rfd::AsyncFileDialog::new()
@@ -746,7 +783,9 @@ fn panel_ui(
                     if ui.button("Edit in OpenSCAD").clicked() {
                         writers.cmd.write(PanelCmd::EditOpenscad);
                     }
-                    ui.separator();
+                    // Editor + file inner-tabs + unsliced preview land in U.3.2.
+                }
+                Tab::Parts => {
                     // ACCORDION (T.2b): one collapsing section per top-level part. Expanding or
                     // touching a part makes it ACTIVE — the slice systems, cut-plane overlays, and
                     // connector editor all follow `ActivePart`, so an edit reslices the right part.
@@ -791,19 +830,6 @@ fn panel_ui(
                     if ui.button("Auto-slice").clicked() {
                         writers.cmd.write(PanelCmd::AutoSlice);
                     }
-                    // Status — pulses blue while a background render/slice runs (the reactive standard).
-                    if job.0.is_some() {
-                        let p = ((ui.input(|i| i.time) * 5.0).sin() * 0.5 + 0.5) as f32;
-                        let col = egui::Color32::from_rgb(
-                            (115.0 + 115.0 * p) as u8,
-                            (165.0 + 75.0 * p) as u8,
-                            255,
-                        );
-                        ui.colored_label(col, status.0.as_str());
-                        ui.ctx().request_repaint();
-                    } else {
-                        ui.label(status.0.as_str());
-                    }
                     let spread = parts.0[active_part.0].spread; // active part's explode state
                     if ui
                         .button(if spread > 0.0 { "Assemble" } else { "Explode" })
@@ -811,69 +837,71 @@ fn panel_ui(
                     {
                         writers.cmd.write(PanelCmd::ToggleView);
                     }
-                    if ui.button("Print view").clicked() {
-                        print.0 = true;
+                    // CONNECTOR DRILL: toggling a cut's `conn` sets edit.0 = Some(cut) — show that
+                    // cut's connector controls inline (folds in the old Connectors mode). The full
+                    // nested part → cut → connector drill is U.3.3.
+                    if let Some(i) = edit.0 {
+                        ui.separator();
+                        let ap = active_part.0;
+                        let header = match parts.0[ap].cuts.list.get(i) {
+                            Some(c) => {
+                                let pos = if c.at.fract() == 0.0 {
+                                    format!("{}", c.at as i64)
+                                } else {
+                                    format!("{:.1}", c.at)
+                                };
+                                format!("Connectors: {} cut @ {}", c.axis.label(), pos)
+                            }
+                            None => "Connectors".to_string(),
+                        };
+                        ui.label(header);
+                        ui.horizontal(|ui| {
+                            if ui
+                                .selectable_label(active.kind == fab::ConnKind::Onion, "Onion")
+                                .clicked()
+                            {
+                                active.kind = fab::ConnKind::Onion;
+                            }
+                            if ui
+                                .selectable_label(active.kind == fab::ConnKind::Bolt, "Bolt")
+                                .clicked()
+                            {
+                                active.kind = fab::ConnKind::Bolt;
+                            }
+                        });
+                        if active.kind == fab::ConnKind::Bolt {
+                            ui.horizontal(|ui| {
+                                for s in [Screw::M3, Screw::M4, Screw::M5] {
+                                    if ui.selectable_label(active.screw == s, s.label()).clicked() {
+                                        active.screw = s;
+                                    }
+                                }
+                            });
+                        }
+                        if ui.button("Auto-place").clicked() {
+                            writers.autoplace.write(AutoPlace);
+                        }
+                        if ui.button("Clear connectors").clicked() {
+                            parts.0[ap].conns.list.retain(|c| c.cut != i);
+                        }
+                        if ui.button("Done").clicked() {
+                            edit.0 = None;
+                        }
+                    }
+                }
+                Tab::Orientation => {
+                    ui.label("Print orientation");
+                    ui.label("click a piece to set which way it prints");
+                    // The per-piece flat/auto list lands in U.3.4.
+                }
+                Tab::Export => {
+                    if ui.button("Export plates").clicked() {
+                        writers.cmd.write(PanelCmd::Export);
                     }
                     if ui.button("Publish").clicked() {
                         writers.cmd.write(PanelCmd::Publish);
                     }
-                }
-                PanelMode::Connectors(i) => {
-                    let ap = active_part.0;
-                    let header = match parts.0[ap].cuts.list.get(i) {
-                        Some(c) => {
-                            let pos = if c.at.fract() == 0.0 {
-                                format!("{}", c.at as i64)
-                            } else {
-                                format!("{:.1}", c.at)
-                            };
-                            format!("Connectors: {} cut @ {}", c.axis.label(), pos)
-                        }
-                        None => "Connectors".to_string(),
-                    };
-                    ui.label(header);
-                    ui.horizontal(|ui| {
-                        if ui
-                            .selectable_label(active.kind == fab::ConnKind::Onion, "Onion")
-                            .clicked()
-                        {
-                            active.kind = fab::ConnKind::Onion;
-                        }
-                        if ui
-                            .selectable_label(active.kind == fab::ConnKind::Bolt, "Bolt")
-                            .clicked()
-                        {
-                            active.kind = fab::ConnKind::Bolt;
-                        }
-                    });
-                    if active.kind == fab::ConnKind::Bolt {
-                        ui.horizontal(|ui| {
-                            for s in [Screw::M3, Screw::M4, Screw::M5] {
-                                if ui.selectable_label(active.screw == s, s.label()).clicked() {
-                                    active.screw = s;
-                                }
-                            }
-                        });
-                    }
-                    if ui.button("Auto-place").clicked() {
-                        writers.autoplace.write(AutoPlace);
-                    }
-                    if ui.button("Clear connectors").clicked() {
-                        parts.0[ap].conns.list.retain(|c| c.cut != i);
-                    }
-                    if ui.button("Done").clicked() {
-                        edit.0 = None;
-                    }
-                }
-                PanelMode::Print => {
-                    ui.label("Print orientation");
-                    ui.label("click a piece to set which way it prints");
-                    if ui.button("Export plates").clicked() {
-                        writers.cmd.write(PanelCmd::Export);
-                    }
-                    if ui.button("Done").clicked() {
-                        print.0 = false;
-                    }
+                    // The co-pack plate preview lands in U.3.5.
                 }
             }
         });
@@ -883,6 +911,8 @@ fn panel_ui(
         }
     }
     seam.width_px = panel.response.rect.width() * ctx.pixels_per_point();
+    seam.top_px = top.response.rect.height() * ctx.pixels_per_point();
+    seam.bottom_px = bottom.response.rect.height() * ctx.pixels_per_point();
     seam.over_ui = ctx.egui_wants_pointer_input() || ctx.is_pointer_over_egui();
 }
 
@@ -2122,11 +2152,14 @@ fn split_viewport(seam: Res<PanelSeam>, mut cam: Query<&mut Camera, With<Camera3
     let Some(target) = camera.physical_target_size() else {
         return;
     };
-    // `panel_ui` writes the panel's right edge in physical px (egui SidePanel is flush to the window
-    // left, so its width IS the inset); leave a small gap after it.
+    // `panel_ui` writes each panel edge in physical px: the left panel's width, plus the top tab bar
+    // + bottom status bar heights (U.3). Inset the 3D viewport inside all three so no bar occludes
+    // it; leave a small gap after the left panel.
     let x0 = ((seam.width_px + 6.0).round() as u32).min(target.x.saturating_sub(1));
-    let pos = UVec2::new(x0, 0);
-    let size = UVec2::new(target.x - x0, target.y.max(1));
+    let y0 = (seam.top_px.round() as u32).min(target.y.saturating_sub(1));
+    let bottom = seam.bottom_px.round() as u32;
+    let pos = UVec2::new(x0, y0);
+    let size = UVec2::new(target.x - x0, target.y.saturating_sub(y0 + bottom).max(1));
     // Viewport isn't PartialEq — compare the fields we set to skip redundant writes.
     let unchanged = camera
         .viewport
@@ -2759,6 +2792,20 @@ fn enforce_exclusive_modes(mut edit: ResMut<EditCut>, mut print: ResMut<PrintVie
     }
 }
 
+/// Map the active `Tab` onto the print/editor flags the reactive systems already react to (U.3).
+/// Orientation + Export both show the laid-out print pieces, so both hold `print.0` — Export needs the
+/// pieces alive to co-pack them. Connector editing (`edit.0`) only belongs to the Parts tab; leaving
+/// Parts closes it. Guarded writes so change-detection fires only on a real transition.
+fn sync_tab_modes(tab: Res<Tab>, mut print: ResMut<PrintView>, mut edit: ResMut<EditCut>) {
+    let want_print = matches!(*tab, Tab::Orientation | Tab::Export);
+    if print.0 != want_print {
+        print.0 = want_print;
+    }
+    if *tab != Tab::Parts && edit.0.is_some() {
+        edit.0 = None;
+    }
+}
+
 /// Save the orbit camera while in normal view and hand it back when a hijacking mode (2D editor,
 /// print preview) closes — so leaving a mode restores the pan/orbit/zoom you had, not the mode's
 /// view. Writes the transform directly on restore (like `edit_mode` does), so it doesn't depend on
@@ -3101,6 +3148,7 @@ fn run_screenshot(scene: SceneCfg, png: PathBuf) {
         .init_resource::<ActiveConn>()
         .init_resource::<EditCut>()
         .init_resource::<PrintView>()
+        .init_resource::<Tab>()
         .init_resource::<XSection>()
         .init_resource::<DraggingCut>()
         .init_resource::<SliceInBackground>()
@@ -3368,6 +3416,7 @@ fn run_scripted(scene: SceneCfg, actions: Vec<Action>) {
         .init_resource::<PrintView>()
         .init_resource::<PrintJob>()
         .init_resource::<PrintPieces>()
+        .init_resource::<Tab>()
         .init_resource::<PrevCam>()
         .init_resource::<Feas>()
         .init_resource::<FileList>()
@@ -3402,6 +3451,7 @@ fn run_scripted(scene: SceneCfg, actions: Vec<Action>) {
                 auto_reslice,
                 revert_on_edit,
                 (
+                    sync_tab_modes,
                     enforce_exclusive_modes,
                     apply_view_visibility,
                     manage_view_camera,
@@ -3475,7 +3525,7 @@ fn run_script(
     job: Res<Job>,
     target: Res<RenderTargetImage>,
     mut edit_cut: ResMut<EditCut>,
-    mut print: ResMut<PrintView>,
+    mut tab: ResMut<Tab>,
     print_job: Res<PrintJob>,
     xsection: Res<XSection>,
     mut reslice_w: MessageWriter<ReSlice>,
@@ -3602,19 +3652,26 @@ fn run_script(
         }
         Action::Edit(i) => {
             if runner.timer == 1 {
+                *tab = Tab::Parts; // connector editing lives in Parts; else sync_tab_modes clears it
                 edit_cut.0 = if edit_cut.0 == Some(i) { None } else { Some(i) };
             }
             runner.timer >= 10 // give the cross-section render + profile build time
         }
         Action::PrintView => {
             if runner.timer == 1 {
-                print.0 = !print.0;
+                // Orientation drives print.0 via sync_tab_modes — toggle the tab, not the flag.
+                *tab = if *tab == Tab::Orientation {
+                    Tab::Model
+                } else {
+                    Tab::Orientation
+                };
             }
             // enter_exit_print kicks the render next frame; wait for the off-thread layout to land.
             runner.timer > 3 && print_job.0.is_none()
         }
         Action::Orient(piece, up) => {
             if runner.timer == 1 {
+                *tab = Tab::Orientation;
                 orient.set_manual((piece, 0), Vec3::from_array(up).normalize_or_zero().to_array());
             }
             runner.timer >= 3 // let relayout + feasibility catch up
@@ -3657,6 +3714,7 @@ fn run_script(
         Action::Part(_) => true,
         Action::Export => {
             if runner.timer == 1 {
+                *tab = Tab::Export; // keeps print.0 on (want_print) so the laid-out pieces survive
                 cmd_w.write(PanelCmd::Export); // export_plates_action co-packs all parts inline
             }
             runner.timer >= 3 // let the inline export write + status update

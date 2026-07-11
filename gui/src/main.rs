@@ -108,10 +108,19 @@ struct Watch {
     closure: Vec<PathBuf>,
 }
 
-/// The in-flight render/slice (off the main thread): `(was_reslice, task)`. The task yields
-/// `Ok(stl)` when done, else an error string.
+/// A finished render/slice job's payload (T.2b). A whole render produces ALL top-level parts at once
+/// (`fab::render_parts`); a reslice touches exactly ONE part off its cached STL.
+enum JobResult {
+    /// Every top-level part's whole STL. `fresh` = a new source (replace the parts list); else a
+    /// reload of the SAME source (refresh geometry in place, keep each part's cuts/connectors).
+    Rendered { fresh: bool, parts: Vec<PathBuf> },
+    /// One part's sliced STL — the part index it belongs to (its `Model` entity carries `PartId`).
+    Resliced { part: usize, stl: PathBuf },
+}
+
+/// The in-flight render/slice (off the main thread). Yields a [`JobResult`] on success, else an error.
 #[derive(Resource, Default)]
-struct Job(Option<(bool, Task<Result<PathBuf, String>>)>);
+struct Job(Option<Task<Result<JobResult, String>>>);
 
 /// One-line status shown in the panel (e.g. "slicing", "ready").
 #[derive(Resource)]
@@ -319,6 +328,8 @@ struct Part {
     whole: Option<Handle<Mesh>>,  // the uncut mesh — revert from exploded without re-rendering
     sliced: Option<Handle<Mesh>>, // the last sliced (exploded) mesh — re-show without re-slicing
     spread: f32,                  // 0 = uncut/editing, >0 = exploded (fan distance)
+    base_stl: PathBuf,            // this part's whole STL (`render_parts` output) — reslice/edit/plan source
+    sliced_hash: Option<u64>,     // `slice_hash` of the inputs last resliced — per-part so editing A never reslices B
 }
 
 /// The model's parts. INVARIANT: always non-empty — `[ActivePart]` indexes the one the panel edits.
@@ -936,8 +947,8 @@ fn setup_windowed(
     // Seed the camera-restore slot with the startup pose, so a mode entered before the first
     // normal-view frame still has something to hand back (manage_view_camera).
     commands.insert_resource(PrevCam(Some((-0.7, 0.5, radius, Vec3::ZERO))));
-    // Render the model off-thread; poll_job seeds the first cut when bounds land.
-    kick_job(&mut job, &mut status, &scene, false, vec![], vec![], vec![]);
+    // Render the model's parts off-thread; poll_job seeds each part + its first cut when bounds land.
+    kick_render(&mut job, &mut status, &scene, true);
 }
 
 fn orbit(
@@ -1435,51 +1446,44 @@ fn auto_reslice(
     time: Res<Time>,
     mut settle: Local<f32>,
     mut prev: Local<Option<u64>>,
-    mut sliced_h: Local<Option<u64>>,
     mut job: ResMut<Job>,
     mut bg: ResMut<SliceInBackground>,
-    parts: Res<Parts>,
+    mut parts: ResMut<Parts>,
     active_part: Res<ActivePart>,
     cfg: Res<SceneCfg>,
     mut status: ResMut<Status>,
 ) {
-    let part = &parts.0[active_part.0];
-    let bounds = &part.bounds;
-    let cuts = &part.cuts;
-    let conns = &part.conns;
-    let orient = &part.orient;
-    if bounds.0.is_none() {
+    let ap = active_part.0;
+    let part = &parts.0[ap];
+    if part.bounds.0.is_none() {
         return;
     }
-    let h = slice_hash(cuts, conns, orient);
+    // The slice-hash is compared against THIS part's own `sliced_hash` — editing part A never
+    // reslices part B, and switching parts re-slices only if that part's inputs actually differ.
+    let h = slice_hash(&part.cuts, &part.conns, &part.orient);
     if *prev != Some(h) {
         *settle = 0.0; // inputs moved this frame → re-arm the debounce
         *prev = Some(h);
     } else {
         *settle += time.delta_secs();
     }
-    if *sliced_h == Some(h) || job.0.is_some() {
+    if part.sliced_hash == Some(h) || job.0.is_some() {
         return; // already sliced these exact inputs, or a job is running
     }
     if *settle < AUTOSLICE_DEBOUNCE {
         return; // still settling
     }
-    let xs = cuts.enabled_cuts();
+    let xs = part.cuts.enabled_cuts();
     if xs.is_empty() {
-        *sliced_h = Some(h); // nothing enabled to slice — treat as done
+        parts.0[ap].sliced_hash = Some(h); // nothing enabled to slice — treat as done
         return;
     }
+    let conns = resolve_conns(&part.cuts, &part.conns);
+    let orient = orient_inputs(&part.orient);
+    let base = part.base_stl.clone();
     bg.0 = true; // background rebuild → poll_job won't jump the view to exploded
-    kick_job(
-        &mut job,
-        &mut status,
-        &cfg,
-        true,
-        xs,
-        resolve_conns(&cuts, &conns),
-        orient_inputs(&orient),
-    );
-    *sliced_h = Some(h);
+    kick_reslice(&mut job, &mut status, &cfg, ap, base, xs, conns, orient);
+    parts.0[ap].sliced_hash = Some(h);
 }
 
 /// Keep one sphere marker per placed connector: respawn the set when the count changes, and each
@@ -1553,7 +1557,6 @@ fn edit_mode(
     print: Res<PrintView>,
     mut parts: ResMut<Parts>,
     active_part: Res<ActivePart>,
-    cfg: Res<SceneCfg>,
     mut xsection: ResMut<XSection>,
     mut models: Query<(&mut Mesh3d, &PartId), With<Model>>,
     mut cam: Query<(&mut Transform, &mut Orbit)>,
@@ -1580,12 +1583,13 @@ fn edit_mode(
         swap_part_mesh(&mut models, ap, &h);
     }
     let part = &parts.0[ap];
-    let (Some(c), Some(src)) = (part.cuts.list.get(i), cfg.source.clone()) else {
+    let Some(c) = part.cuts.list.get(i) else {
         xsection.0 = None;
         return;
     };
     let (axis, at) = (c.axis, c.at); // copy out so the `part` borrow can drop before the cam block
     let bounds = part.bounds.0;
+    let base_stl = part.base_stl.clone(); // this part's whole STL — the cross-section source
     // Face the camera square onto the cut (Z avoids the up=Z gimbal with a near-top-down pitch).
     // Set the transform here directly — `orbit` yields while editing, so it won't apply it for us.
     if let Ok((mut t, mut o)) = cam.single_mut() {
@@ -1600,8 +1604,7 @@ fn edit_mode(
         o.target = with_comp(center, axis.index(), at);
         *t = orbit_transform(o.yaw, o.pitch, o.radius, o.target);
     }
-    let stl = fab::whole_stl(&src, &cfg.tmp);
-    match fab::cross_section(&stl, axis.index(), at as f64) {
+    match fab::cross_section(&base_stl, axis.index(), at as f64) {
         Ok(loops) => {
             xsection.0 = Some(
                 loops
@@ -2105,25 +2108,18 @@ fn request_reslice(
         info!("busy — ignoring re-slice");
         return;
     }
-    let part = &parts.0[active_part.0];
-    let cuts = &part.cuts;
-    let conns = &part.conns;
-    let orient = &part.orient;
-    let xs = cuts.enabled_cuts();
+    let ap = active_part.0;
+    let part = &parts.0[ap];
+    let xs = part.cuts.enabled_cuts();
     if xs.is_empty() {
         status.0 = "no enabled cuts".into();
         return;
     }
+    let conns = resolve_conns(&part.cuts, &part.conns);
+    let orient = orient_inputs(&part.orient);
+    let base = part.base_stl.clone();
     bg.0 = false; // explicit → poll_job jumps to the exploded view when it lands
-    kick_job(
-        &mut job,
-        &mut status,
-        &cfg,
-        true,
-        xs,
-        resolve_conns(&cuts, &conns),
-        orient_inputs(&orient),
-    );
+    kick_reslice(&mut job, &mut status, &cfg, ap, base, xs, conns, orient);
 }
 
 /// The auto-picked (eventually manual) orientations as `fab::Orient3` for `reslice`. Empty until the
@@ -2219,7 +2215,7 @@ fn apply_switch_file(
     files.active = Some(i);
     scene.source = Some(path.clone());
     state.reset();
-    kick_job(&mut job, &mut status, &scene, false, vec![], vec![], vec![]);
+    kick_render(&mut job, &mut status, &scene, true);
     info!("open: {}", path.display());
 }
 
@@ -2285,7 +2281,8 @@ fn watch_source(
                 src.display(),
                 watch.closure.len().saturating_sub(1)
             );
-            kick_job(&mut job, &mut status, &scene, false, vec![], vec![], vec![]);
+            // Reload (fresh = false): refresh geometry in place, keep each part's cuts/connectors.
+            kick_render(&mut job, &mut status, &scene, false);
         }
         _ => {}
     }
@@ -2334,117 +2331,124 @@ fn collect_scads(dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
-/// Spawn the render/slice on the async compute pool (blocking OpenSCAD work, off-thread).
-#[allow(clippy::too_many_arguments)]
-fn kick_job(
-    job: &mut Job,
-    status: &mut Status,
-    cfg: &SceneCfg,
-    reslice: bool,
-    cuts: Vec<(char, f64)>,
-    conns: Vec<fab::Conn>,
-    orient: Vec<fab::Orient3>,
-) {
+/// Spawn a WHOLE render of every top-level part on the async compute pool (T.2b) — `render_parts`
+/// splits the model into its implicit-union children, one STL each. `fresh` distinguishes a new
+/// source (replace the parts list) from a reload of the same one (refresh geometry, keep edits).
+fn kick_render(job: &mut Job, status: &mut Status, cfg: &SceneCfg, fresh: bool) {
     let Some(src) = cfg.source.clone() else {
         status.0 = "no .scad source".into();
         return;
     };
     let (root, tmp) = (cfg.root.clone(), cfg.tmp.clone());
     let task = AsyncComputeTaskPool::get().spawn(async move {
-        if reslice {
-            // In-process kernel slice off the cached base (Track C 11.10) — no per-edit spawn. The
-            // Solid lives and dies inside reslice_kernel; only the STL path returns (Solid is !Send).
-            fab::reslice_kernel(root.as_deref(), &src, &cuts, &conns, &orient, SPREAD, &tmp)
-                .map_err(|e| format!("{e:#}"))
-        } else {
-            fab::render_whole(root.as_deref(), &src, &tmp).map_err(|e| format!("{e:#}"))
-        }
+        // Each part Solid is built AND consumed inside render_parts (written to STL) — none crosses
+        // this async boundary; only the STL paths return (Solid is !Send).
+        fab::render_parts(root.as_deref(), &src, &tmp)
+            .map(|v| JobResult::Rendered {
+                fresh,
+                parts: v.into_iter().map(|(p, _bbox)| p).collect(),
+            })
+            .map_err(|e| format!("{e:#}"))
     });
-    job.0 = Some((reslice, task));
-    status.0 = if reslice {
-        "slicing".into()
-    } else {
-        "rendering".into()
-    };
+    job.0 = Some(task);
+    status.0 = "rendering".into();
 }
 
-/// Poll the in-flight job; when it finishes, swap in the new mesh (and seed the first cut once).
+/// Spawn a per-part reslice off `part_stl` (part `part`'s cached whole STL) on the async compute
+/// pool (T.2b). Only that part's geometry is touched; its `Model` entity (tagged `PartId(part)`) is
+/// the one `poll_job` swaps when the slice lands. The Solid lives + dies inside the kernel (!Send).
+#[allow(clippy::too_many_arguments)]
+fn kick_reslice(
+    job: &mut Job,
+    status: &mut Status,
+    cfg: &SceneCfg,
+    part: usize,
+    part_stl: PathBuf,
+    cuts: Vec<(char, f64)>,
+    conns: Vec<fab::Conn>,
+    orient: Vec<fab::Orient3>,
+) {
+    let tmp = cfg.tmp.clone();
+    let task = AsyncComputeTaskPool::get().spawn(async move {
+        fab::reslice_part_kernel(&part_stl, &cuts, &conns, &orient, SPREAD, &tmp)
+            .map(|stl| JobResult::Resliced { part, stl })
+            .map_err(|e| format!("{e:#}"))
+    });
+    job.0 = Some(task);
+    status.0 = "slicing".into();
+}
+
+/// Poll the in-flight job; when it lands, apply it (T.2b). A whole render seeds/refreshes ALL parts
+/// and their `Model` entities; a reslice swaps exactly one part's mesh.
 #[allow(clippy::too_many_arguments)] // a Bevy system — params are dependencies, not a smell
 fn poll_job(
     mut job: ResMut<Job>,
     mut status: ResMut<Status>,
     mut parts: ResMut<Parts>,
-    active_part: Res<ActivePart>,
+    mut active_part: ResMut<ActivePart>,
     bg: Res<SliceInBackground>,
     models: Query<(Entity, &PartId), With<Model>>,
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
-    // The reslice job always belongs to the ACTIVE part (auto_reslice keys on its cuts); the whole
-    // render belongs to the freshly-loaded active part too. So both land on `ap`.
-    let ap = active_part.0;
-    let Some((is_reslice, task)) = job.0.as_mut() else {
+    let Some(task) = job.0.as_mut() else {
         return;
     };
-    let is_reslice = *is_reslice;
     let Some(result) = block_on(future::poll_once(task)) else {
         return;
     };
     job.0 = None;
     match result {
-        Ok(stl) => {
-            let (mesh, aabb) = mesh_and_bounds(&mut meshes, &stl);
-            let part = &mut parts.0[ap];
-            if is_reslice {
-                part.sliced = Some(mesh.clone()); // bank it so the view toggle can re-show it
-                                                  // A BACKGROUND rebuild refreshes the display only if the user is already exploded;
-                                                  // an explicit slice (or a background one while exploded) shows the fanned pieces.
-                let show = !bg.0;
-                if show || part.spread > 0.0 {
-                    despawn_part_models(&mut commands, &models, ap);
-                    commands.spawn((
-                        Mesh3d(mesh),
-                        MeshMaterial3d(part_material(&mut materials)),
-                        Model,
-                        PartId(ap),
-                    ));
-                    if show {
-                        part.spread = SPREAD as f32;
-                    }
+        Ok(JobResult::Rendered { fresh, parts: paths }) => {
+            // A structural change (the model's part COUNT moved) forces a full rebuild even on a
+            // reload — the old Part↔entity mapping no longer holds.
+            if fresh || paths.len() != parts.0.len() {
+                for (e, _) in &models {
+                    commands.entity(e).despawn();
                 }
+                let new: Vec<Part> = paths
+                    .iter()
+                    .enumerate()
+                    .map(|(i, path)| build_part(&mut commands, &mut meshes, &mut materials, i, path))
+                    .collect();
+                *parts = Parts(new);
+                active_part.0 = 0;
             } else {
-                despawn_part_models(&mut commands, &models, ap);
+                // Reload of the SAME source: refresh each part's geometry, KEEP its cuts/connectors.
+                for (i, path) in paths.iter().enumerate() {
+                    refresh_part(
+                        &mut commands,
+                        &mut meshes,
+                        &mut materials,
+                        &models,
+                        &mut parts.0[i],
+                        i,
+                        path,
+                    );
+                }
+            }
+            status.0 = "ready".into();
+        }
+        Ok(JobResult::Resliced { part, stl }) => {
+            let (mesh, _) = mesh_and_bounds(&mut meshes, &stl);
+            let Some(p) = parts.0.get_mut(part) else {
+                return; // the part went away under us (a reload changed the count) — drop the slice
+            };
+            p.sliced = Some(mesh.clone()); // bank it so the view toggle can re-show it
+                                           // A BACKGROUND rebuild refreshes the display only if already exploded; an explicit
+                                           // slice (or a background one while exploded) shows the fanned pieces.
+            let show = !bg.0;
+            if show || p.spread > 0.0 {
+                despawn_part_models(&mut commands, &models, part);
                 commands.spawn((
-                    Mesh3d(mesh.clone()),
+                    Mesh3d(mesh),
                     MeshMaterial3d(part_material(&mut materials)),
                     Model,
-                    PartId(ap),
+                    PartId(part),
                 ));
-                part.whole = Some(mesh); // remember the uncut mesh, so editing can revert to it
-                part.spread = 0.0;
-                // First whole render fixes the bounds. A model that FITS the bed gets a manual
-                // centre-cut starting point; one that OVERFLOWS is left empty for auto-on-open
-                // (kick_auto_plan) to slice + connect.
-                if part.bounds.0.is_none() {
-                    if let Some((min, max)) = aabb {
-                        part.bounds.0 = Some((min, max));
-                        let bed = bed_size().unwrap_or([256.0; 3]);
-                        let fits = fab_scad::auto_slice::auto_slice(
-                            FVec3::new(min.x as f64, min.y as f64, min.z as f64),
-                            FVec3::new(max.x as f64, max.y as f64, max.z as f64),
-                            Dims::from_array(bed),
-                        )
-                        .is_empty();
-                        if part.cuts.list.is_empty() && fits {
-                            part.cuts.list.push(CutDef {
-                                axis: Axis::X,
-                                at: (min.x + max.x) * 0.5,
-                                enabled: true,
-                            });
-                            part.cuts.active = 0;
-                        }
-                    }
+                if show {
+                    p.spread = SPREAD as f32;
                 }
             }
             status.0 = "ready".into();
@@ -2453,6 +2457,90 @@ fn poll_job(
             error!("{e}");
             status.0 = format!("error: {e}");
         }
+    }
+}
+
+/// Build a fresh [`Part`] for top-level part `i` from its whole STL — spawn its `Model` entity
+/// (tagged `PartId(i)`), fix its bounds, and seed a centre cut if it fits the bed.
+fn build_part(
+    commands: &mut Commands,
+    meshes: &mut Assets<Mesh>,
+    materials: &mut Assets<StandardMaterial>,
+    i: usize,
+    path: &Path,
+) -> Part {
+    let (mesh, aabb) = mesh_and_bounds(meshes, path);
+    commands.spawn((
+        Mesh3d(mesh.clone()),
+        MeshMaterial3d(part_material(materials)),
+        Model,
+        PartId(i),
+    ));
+    let mut part = Part {
+        base_stl: path.to_path_buf(),
+        whole: Some(mesh),
+        ..default()
+    };
+    if let Some((min, max)) = aabb {
+        part.bounds.0 = Some((min, max));
+        seed_center_cut(&mut part, min, max);
+    }
+    part
+}
+
+/// Refresh part `i`'s geometry on a RELOAD (the source was re-saved) without dropping its cuts:
+/// repoint the whole mesh + base STL, respawn its `Model` showing the fresh intact part, and clear
+/// its slice cache so a still-exploded part reslices off the new geometry.
+fn refresh_part(
+    commands: &mut Commands,
+    meshes: &mut Assets<Mesh>,
+    materials: &mut Assets<StandardMaterial>,
+    models: &Query<(Entity, &PartId), With<Model>>,
+    part: &mut Part,
+    i: usize,
+    path: &Path,
+) {
+    let (mesh, aabb) = mesh_and_bounds(meshes, path);
+    despawn_part_models(commands, models, i);
+    commands.spawn((
+        Mesh3d(mesh.clone()),
+        MeshMaterial3d(part_material(materials)),
+        Model,
+        PartId(i),
+    ));
+    part.base_stl = path.to_path_buf();
+    part.whole = Some(mesh);
+    part.spread = 0.0; // reload drops back to the intact model
+    part.sliced = None;
+    part.sliced_hash = None; // force a reslice off the new geometry if the part has cuts
+    if part.bounds.0.is_none() {
+        if let Some((min, max)) = aabb {
+            part.bounds.0 = Some((min, max));
+            seed_center_cut(part, min, max);
+        }
+    }
+}
+
+/// Seed part `p` with a single centre cut on X — its manual starting point — but only if it FITS
+/// the bed and has no cuts yet. A too-big part is left empty for `kick_auto_plan` to slice + connect.
+fn seed_center_cut(p: &mut Part, min: Vec3, max: Vec3) {
+    if !p.cuts.list.is_empty() {
+        return;
+    }
+    let bed = bed_size().unwrap_or([256.0; 3]);
+    let fits = fab_scad::auto_slice::auto_slice(
+        FVec3::new(min.x as f64, min.y as f64, min.z as f64),
+        FVec3::new(max.x as f64, max.y as f64, max.z as f64),
+        Dims::from_array(bed),
+    )
+    .is_empty();
+    if fits {
+        p.cuts.list.push(CutDef {
+            axis: Axis::X,
+            at: (min.x + max.x) * 0.5,
+            enabled: true,
+        });
+        p.cuts.active = 0;
     }
 }
 
@@ -3246,7 +3334,7 @@ fn setup_script(
     ));
     commands.insert_resource(PrevCam(Some((-0.7, 0.5, radius, Vec3::ZERO))));
     commands.insert_resource(RenderTargetImage(target));
-    kick_job(&mut job, &mut status, &scene, false, vec![], vec![], vec![]);
+    kick_render(&mut job, &mut status, &scene, true);
 }
 
 /// Step the script: each action drives the real systems, waiting on async work to settle.
@@ -3768,8 +3856,8 @@ fn kick_auto_plan(
     {
         return; // fits the bed — nothing to auto
     }
-    let base_stl = fab::whole_stl(&src, &scene.tmp);
-    if !base_stl.exists() {
+    let base_stl = part.base_stl.clone(); // this part's whole STL (render_parts output)
+    if base_stl.as_os_str().is_empty() || !base_stl.exists() {
         return; // base not rendered to disk yet
     }
     planned.0 = Some(src.clone()); // fire once per source

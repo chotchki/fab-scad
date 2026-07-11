@@ -162,10 +162,8 @@ pub fn whole_stl(source: &Path, out_dir: &Path) -> PathBuf {
 /// beside `render_whole`'s output, each paired with its bbox. Same `$preview` wrapper + own-dir eval
 /// as `render_whole`; the split is `backend::build_geo_parts`. Each part Solid is built AND consumed
 /// here (written to STL) — none crosses the async boundary (`!Send`). Empty parts are dropped; the
-/// returned order is authored order (index `i` in the filename tracks it).
-// Committed ahead of its consumer: the T.2b scene orchestration (poll_job spawning N part `Model`
-// entities off these STLs) lands next; exercised now by `render_parts_splits_top_level_into_separate_stls`.
-#[allow(dead_code)]
+/// returned order is authored order (index `i` in the filename tracks it). The GUI's `kick_render`
+/// consumes this: `poll_job` seeds one `Part` + one `Model` entity per returned STL.
 pub fn render_parts(
     root: Option<&Path>,
     source: &Path,
@@ -377,17 +375,13 @@ pub fn reslice(
     slicing::slice_part(&oscad, &wrap, &spec, spread, out_dir, TIMEOUT)
 }
 
-/// Reslice IN-PROCESS via the Manifold kernel (Track C 11.10) — the reactive hot path. OpenSCAD
-/// renders the base mesh only on a CACHE MISS (`whole_stl` absent); every cut/connector/orientation
-/// edit after that is a pure in-process slice off the cached base, no spawn. Same signature +
-/// merged-STL output as `reslice`, so `poll_job` is unchanged.
-///
-/// Thread-safety: the `Solid` is built AND consumed here; only the output STL PATH leaves this
-/// function. A `Solid` is `!Send` and never crosses the task boundary — the compiler enforces it.
-/// See `docs/manifold-thread-safety.md`.
-pub fn reslice_kernel(
-    root: Option<&Path>,
-    source: &Path,
+/// Reslice ONE part IN-PROCESS via the Manifold kernel (Track C 11.10, T.2b) — the reactive hot
+/// path. `render_parts` already wrote every part's `{stem}-part{i}.stl` on load, so the base is
+/// right there; slicing part A off it never re-renders or touches part B. Output lands at
+/// `{part_stem}-sliced.stl` (unique per part). !Send discipline: the Solid is built AND consumed
+/// here — only the STL path leaves the function, never crossing the async-task boundary.
+pub fn reslice_part_kernel(
+    part_stl: &Path,
     cuts: &[(char, f64)],
     connectors: &[Conn],
     orient: &[Orient3],
@@ -395,14 +389,7 @@ pub fn reslice_kernel(
     out_dir: &Path,
 ) -> Result<PathBuf> {
     use fab_scad::kernel::Solid;
-
-    // Cache the base: render the whole model once; reuse it across every reslice.
-    let base_stl = whole_stl(source, out_dir);
-    if !base_stl.exists() {
-        render_whole(root, source, out_dir)?;
-    }
-    let base = Solid::from_stl_file(&base_stl)?;
-
+    let base = Solid::from_stl_file(part_stl)?;
     let cut = cuts
         .iter()
         .map(|&(axis, at)| Cut {
@@ -416,7 +403,6 @@ pub fn reslice_kernel(
         connector: to_connectors(connectors),
         orient: to_orient(orient),
     };
-
     let pieces = slicing::slice_solid(&spec, &base)?;
     ensure!(!pieces.is_empty(), "slice produced no pieces");
     let laid: Vec<Solid> = pieces
@@ -429,7 +415,8 @@ pub fn reslice_kernel(
             ))
         })
         .collect();
-    let out = out_dir.join(format!("{}-sliced.stl", stem_of(source)));
+    let stem = part_stl.file_stem().map(|s| s.to_string_lossy()).unwrap_or_default();
+    let out = out_dir.join(format!("{stem}-sliced.stl"));
     Solid::batch_union(&laid).write_stl(&out)?;
     Ok(out)
 }
@@ -571,11 +558,15 @@ mod tests {
 
     #[test]
     #[ignore = "needs OpenSCAD; run with --ignored"]
-    fn reslice_kernel_caches_the_base() {
+    fn reslice_part_kernel_slices_off_a_prerendered_base() {
         let tmp = std::env::temp_dir().join(format!("gui_reslice_{}", std::process::id()));
         std::fs::create_dir_all(&tmp).unwrap();
         let src = tmp.join("box.scad");
         std::fs::write(&src, "cube([60,40,30], center=true);").unwrap();
+
+        // The part STL is the load-time render (render_parts writes one per part; a single-object
+        // model renders as ONE part). reslice_part_kernel slices straight off it — no re-render.
+        let base = render_whole(None, &src, &tmp).expect("render base");
 
         let conns = [Conn {
             cut: 0,
@@ -584,44 +575,21 @@ mod tests {
             kind: ConnKind::Onion,
             screw: "M3",
         }];
-        // Two-axis cut + onion — the floater case — sliced in-process off the cached base.
-        let out = reslice_kernel(
-            None,
-            &src,
-            &[('x', 0.0), ('y', 0.0)],
-            &conns,
-            &[],
-            40.0,
-            &tmp,
-        )
-        .expect("first reslice");
-        let base = whole_stl(&src, &tmp);
-        assert!(
-            base.exists(),
-            "base STL should be cached after the first reslice"
-        );
+        // Two-axis cut + onion — the floater case — sliced in-process off the pre-rendered base.
+        let out = reslice_part_kernel(&base, &[('x', 0.0), ('y', 0.0)], &conns, &[], 40.0, &tmp)
+            .expect("first reslice");
         assert!(
             !stl::load_stl(&out).unwrap().positions.is_empty(),
             "sliced mesh has geometry"
         );
 
-        // A second reslice (different cut) must NOT re-render the base — that's the reactivity win.
+        // A second reslice (different cut) must NOT touch the base STL — the reactivity win: the
+        // base is rendered once at load and every edit slices off it in place.
         let mtime0 = std::fs::metadata(&base).unwrap().modified().unwrap();
-        reslice_kernel(
-            None,
-            &src,
-            &[('x', 5.0), ('y', 0.0)],
-            &conns,
-            &[],
-            40.0,
-            &tmp,
-        )
-        .expect("second reslice");
+        reslice_part_kernel(&base, &[('x', 5.0), ('y', 0.0)], &conns, &[], 40.0, &tmp)
+            .expect("second reslice");
         let mtime1 = std::fs::metadata(&base).unwrap().modified().unwrap();
-        assert_eq!(
-            mtime0, mtime1,
-            "second reslice re-rendered the base (cache miss)"
-        );
+        assert_eq!(mtime0, mtime1, "second reslice rewrote the base STL");
 
         let _ = std::fs::remove_dir_all(&tmp);
     }

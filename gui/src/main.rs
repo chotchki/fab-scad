@@ -163,7 +163,7 @@ struct CutDef {
 
 /// The ordered cut stack + which cut the drag edits. A slice is a pure function of
 /// (source, enabled cuts) — the node a DAG cache will key on.
-#[derive(Resource, Default)]
+#[derive(Default)]
 struct Cuts {
     list: Vec<CutDef>,
     active: usize,
@@ -237,7 +237,7 @@ struct PlacedConn {
 }
 
 /// The placed connectors (manual face-pick). Like the cut stack, a pure input to the slice.
-#[derive(Resource, Default)]
+#[derive(Default)]
 struct Conns {
     list: Vec<PlacedConn>,
 }
@@ -279,7 +279,7 @@ struct XSection(Option<Vec<Vec<[f32; 2]>>>);
 /// per-piece orientation keys off this so each component orients on its own.
 type PieceKey = ([usize; 3], usize);
 
-#[derive(Resource, Default)]
+#[derive(Default)]
 struct Orient {
     map: HashMap<PieceKey, [f32; 3]>,
     manual: HashSet<PieceKey>,
@@ -296,6 +296,27 @@ impl Orient {
         self.map.get(&key).copied().unwrap_or(auto)
     }
 }
+
+/// One independent top-level part of the model (T.2b): its own cut stack, connectors, per-piece
+/// orientations, model bbox, and auto-plan-done flag. The whole per-model state that USED to be five
+/// global resources now lives here, one bundle per part. Increment A keeps exactly ONE Part so
+/// behaviour is unchanged; Increment B builds N (one per `build_geo_parts` top-level item).
+#[derive(Default)]
+struct Part {
+    cuts: Cuts,
+    conns: Conns,
+    orient: Orient,
+    bounds: ModelBounds,
+    auto_planned: AutoPlanned,
+}
+
+/// The model's parts. INVARIANT: always non-empty — `[ActivePart]` indexes the one the panel edits.
+#[derive(Resource, Default)]
+struct Parts(Vec<Part>);
+
+/// Which part the panel + slice systems currently act on (index into [`Parts`]). Always valid.
+#[derive(Resource, Default)]
+struct ActivePart(usize);
 
 /// Whether the print-orientation preview is showing: the model + cut planes hide, and every piece
 /// is laid out on the bed rotated to its print-up. A workflow MODE, like the connector editor.
@@ -317,8 +338,8 @@ struct PrintPieces(Option<Vec<fab::PiecePrint>>);
 struct AutoJob(Option<Task<Result<fab_scad::auto::AutoPlan, String>>>);
 
 /// The source already auto-planned on open, so it fires ONCE per fresh too-big model — not every
-/// frame, and not again after you clear the cuts by hand.
-#[derive(Resource, Default)]
+/// frame, and not again after you clear the cuts by hand. Per-part ([`Part::auto_planned`]).
+#[derive(Default)]
 struct AutoPlanned(Option<PathBuf>);
 
 /// The in-flight publish job (render artifacts + upload to hotchkiss.io, off-thread). Yields the
@@ -385,8 +406,9 @@ fn with_comp(mut v: Vec3, i: usize, val: f32) -> Vec3 {
     v
 }
 
-/// The whole model's AABB (min, max), set once on the first render — maps drag/positions.
-#[derive(Resource, Default)]
+/// The whole model's AABB (min, max), set once on the first render — maps drag/positions. Per-part
+/// ([`Part::bounds`]).
+#[derive(Default)]
 struct ModelBounds(Option<(Vec3, Vec3)>);
 
 /// True while a cut plane is being dragged, so the camera orbit yields to it.
@@ -555,21 +577,18 @@ fn run_windowed(scene: SceneCfg) {
         .insert_resource(ClearColor(Color::srgb(0.10, 0.10, 0.12)))
         .insert_resource(scene)
         .init_resource::<Job>()
-        .init_resource::<Cuts>()
-        .init_resource::<Conns>()
+        .insert_resource(Parts(vec![Part::default()]))
+        .init_resource::<ActivePart>()
         .init_resource::<ActiveConn>()
         .init_resource::<EditCut>()
         .init_resource::<XSection>()
-        .init_resource::<Orient>()
         .init_resource::<PrintView>()
         .init_resource::<PrintJob>()
         .init_resource::<PrintPieces>()
         .init_resource::<AutoJob>()
-        .init_resource::<AutoPlanned>()
         .init_resource::<PublishJob>()
         .init_resource::<PrevCam>()
         .init_resource::<Feas>()
-        .init_resource::<ModelBounds>()
         .init_resource::<DraggingCut>()
         .init_resource::<FileList>()
         .init_resource::<OpenDialog>()
@@ -646,14 +665,13 @@ fn run_windowed(scene: SceneCfg) {
 #[allow(clippy::too_many_arguments)]
 fn panel_ui(
     mut contexts: EguiContexts,
-    mut cuts: ResMut<Cuts>,
-    mut conns: ResMut<Conns>,
+    mut parts: ResMut<Parts>,
+    active_part: Res<ActivePart>,
     mut active: ResMut<ActiveConn>,
     mut edit: ResMut<EditCut>,
     mut print: ResMut<PrintView>,
     files: Res<FileList>,
     status: Res<Status>,
-    bounds: Res<ModelBounds>,
     dspread: Res<DisplaySpread>,
     job: Res<Job>,
     mut open_dialog: ResMut<OpenDialog>,
@@ -663,6 +681,11 @@ fn panel_ui(
     let Ok(ctx) = contexts.ctx_mut() else {
         return;
     };
+    // T.2b: the panel edits the ACTIVE part's state (one Part today; N after Increment B).
+    let part = &mut parts.0[active_part.0];
+    let cuts = &mut part.cuts;
+    let conns = &mut part.conns;
+    let bounds = &part.bounds;
     let mode = panel_mode(&edit, &print);
     let mut to_remove: Option<usize> = None; // a delete defers past the row loop (index stability)
     // egui 0.35 panels show INTO a Ui, not the Context — wrap the viewport in a background-layer Ui
@@ -852,7 +875,7 @@ fn panel_ui(
             }
         });
     if let Some(idx) = to_remove {
-        remove_cut(&mut cuts, &mut conns, idx);
+        remove_cut(cuts, conns, idx);
     }
     seam.width_px = panel.response.rect.width() * ctx.pixels_per_point();
     seam.over_ui = ctx.egui_wants_pointer_input() || ctx.is_pointer_over_egui();
@@ -980,9 +1003,11 @@ fn on_drag_start(
     ev: On<Pointer<DragStart>>,
     planes: Query<&CutPlaneViz>,
     dspread: Res<DisplaySpread>,
-    mut cuts: ResMut<Cuts>,
+    mut parts: ResMut<Parts>,
+    active_part: Res<ActivePart>,
     mut dragging: ResMut<DraggingCut>,
 ) {
+    let cuts = &mut parts.0[active_part.0].cuts;
     if ev.event.button != PointerButton::Primary {
         return;
     }
@@ -1001,13 +1026,16 @@ fn on_drag(
     ev: On<Pointer<Drag>>,
     planes: Query<(), With<CutPlaneViz>>,
     dragging: Res<DraggingCut>,
-    bounds: Res<ModelBounds>,
+    mut parts: ResMut<Parts>,
+    active_part: Res<ActivePart>,
     cam: Query<(&Camera, &GlobalTransform), With<Camera3d>>,
-    mut cuts: ResMut<Cuts>,
 ) {
     if !dragging.0 || !planes.contains(ev.entity) {
         return;
     }
+    let part = &mut parts.0[active_part.0];
+    let bounds = &part.bounds;
+    let cuts = &mut part.cuts;
     let Some((min, max)) = bounds.0 else {
         return;
     };
@@ -1039,8 +1067,10 @@ fn on_click(
     ev: On<Pointer<Click>>,
     planes: Query<&CutPlaneViz>,
     dspread: Res<DisplaySpread>,
-    mut cuts: ResMut<Cuts>,
+    mut parts: ResMut<Parts>,
+    active_part: Res<ActivePart>,
 ) {
+    let cuts = &mut parts.0[active_part.0].cuts;
     let Ok(cpv) = planes.get(ev.entity) else {
         return;
     };
@@ -1216,13 +1246,16 @@ fn place_on_profile_click(
     ev: On<Pointer<Click>>,
     editing: Res<EditCut>,
     planes: Query<&CutPlaneViz>,
-    cuts: Res<Cuts>,
-    bounds: Res<ModelBounds>,
+    mut parts: ResMut<Parts>,
+    active_part: Res<ActivePart>,
     xsection: Res<XSection>,
     active: Res<ActiveConn>,
-    mut conns: ResMut<Conns>,
     mut status: ResMut<Status>,
 ) {
+    let part = &mut parts.0[active_part.0];
+    let cuts = &part.cuts;
+    let bounds = &part.bounds;
+    let conns = &mut part.conns;
     let Some(i) = editing.0 else {
         return;
     };
@@ -1235,7 +1268,7 @@ fn place_on_profile_click(
     let others: Vec<usize> = (0..3).filter(|&a| a != c.axis.index()).collect();
     let pos = [comp(hit, others[0]), comp(hit, others[1])];
     let size = auto_size(&xsection, &cuts, &bounds, i, pos);
-    status.0 = toggle_connector(&mut conns, i, pos, size, active.kind, active.screw).into();
+    status.0 = toggle_connector(conns, i, pos, size, active.kind, active.screw).into();
 }
 
 /// Auto-place connectors across the OPEN cut's cross-section (#41): a grid of wall-fitting onions
@@ -1246,15 +1279,18 @@ fn do_auto_place(
     mut ev: MessageReader<AutoPlace>,
     edit: Res<EditCut>,
     xsection: Res<XSection>,
-    cuts: Res<Cuts>,
-    bounds: Res<ModelBounds>,
+    mut parts: ResMut<Parts>,
     active: Res<ActiveConn>,
-    mut conns: ResMut<Conns>,
+    active_part: Res<ActivePart>,
     mut status: ResMut<Status>,
 ) {
     if ev.read().count() == 0 {
         return;
     }
+    let part = &mut parts.0[active_part.0];
+    let cuts = &part.cuts;
+    let bounds = &part.bounds;
+    let conns = &mut part.conns;
     let (Some(i), Some(loops)) = (edit.0, xsection.0.as_ref()) else {
         status.0 = "open a cut's connector editor to auto-place".into();
         return;
@@ -1402,17 +1438,20 @@ fn auto_reslice(
     mut sliced_h: Local<Option<u64>>,
     mut job: ResMut<Job>,
     mut bg: ResMut<SliceInBackground>,
-    bounds: Res<ModelBounds>,
+    parts: Res<Parts>,
+    active_part: Res<ActivePart>,
     cfg: Res<SceneCfg>,
-    cuts: Res<Cuts>,
-    conns: Res<Conns>,
-    orient: Res<Orient>,
     mut status: ResMut<Status>,
 ) {
+    let part = &parts.0[active_part.0];
+    let bounds = &part.bounds;
+    let cuts = &part.cuts;
+    let conns = &part.conns;
+    let orient = &part.orient;
     if bounds.0.is_none() {
         return;
     }
-    let h = slice_hash(&cuts, &conns, &orient);
+    let h = slice_hash(cuts, conns, orient);
     if *prev != Some(h) {
         *settle = 0.0; // inputs moved this frame → re-arm the debounce
         *prev = Some(h);
@@ -1448,8 +1487,8 @@ fn auto_reslice(
 /// Hidden in the exploded view, since the pieces (and their pockets) have fanned apart.
 #[allow(clippy::too_many_arguments)]
 fn sync_conn_markers(
-    conns: Res<Conns>,
-    cuts: Res<Cuts>,
+    parts: Res<Parts>,
+    active_part: Res<ActivePart>,
     dspread: Res<DisplaySpread>,
     print: Res<PrintView>,
     mut last: Local<usize>,
@@ -1459,6 +1498,9 @@ fn sync_conn_markers(
     mut mats: ResMut<Assets<StandardMaterial>>,
     mut commands: Commands,
 ) {
+    let part = &parts.0[active_part.0];
+    let conns = &part.conns;
+    let cuts = &part.cuts;
     if conns.list.len() != *last {
         *last = conns.list.len();
         for e in &existing {
@@ -1510,16 +1552,19 @@ fn sync_conn_markers(
 fn edit_mode(
     edit: Res<EditCut>,
     print: Res<PrintView>,
-    cuts: Res<Cuts>,
+    parts: Res<Parts>,
+    active_part: Res<ActivePart>,
     cfg: Res<SceneCfg>,
     whole: Res<WholeMesh>,
     mut xsection: ResMut<XSection>,
     mut dspread: ResMut<DisplaySpread>,
     mut models: Query<&mut Mesh3d, With<Model>>,
     mut cam: Query<(&mut Transform, &mut Orbit)>,
-    bounds: Res<ModelBounds>,
     mut status: ResMut<Status>,
 ) {
+    let part = &parts.0[active_part.0];
+    let cuts = &part.cuts;
+    let bounds = &part.bounds;
     if !edit.is_changed() {
         return;
     }
@@ -1582,10 +1627,13 @@ fn edit_mode(
 fn draw_profile(
     xsection: Res<XSection>,
     edit: Res<EditCut>,
-    cuts: Res<Cuts>,
-    conns: Res<Conns>,
+    parts: Res<Parts>,
+    active_part: Res<ActivePart>,
     mut gizmos: Gizmos,
 ) {
+    let part = &parts.0[active_part.0];
+    let cuts = &part.cuts;
+    let conns = &part.conns;
     let (Some(loops), Some(i)) = (&xsection.0, edit.0) else {
         return;
     };
@@ -1646,15 +1694,18 @@ fn draw_profile(
 /// shift, so despawn all + respawn fresh; positions/colours are then refreshed by
 /// sync_overlay_visuals. (Runs on every cut change, but only rebuilds on a count change.)
 fn sync_overlays(
-    cuts: Res<Cuts>,
-    bounds: Res<ModelBounds>,
+    parts: Res<Parts>,
+    active_part: Res<ActivePart>,
     existing: Query<Entity, With<CutPlaneViz>>,
     mut last: Local<usize>,
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
-    if !cuts.is_changed() || *last == cuts.list.len() {
+    let part = &parts.0[active_part.0];
+    let cuts = &part.cuts;
+    let bounds = &part.bounds;
+    if !parts.is_changed() || *last == cuts.list.len() {
         return;
     }
     let Some((min, max)) = bounds.0 else {
@@ -1673,8 +1724,8 @@ fn sync_overlays(
 /// at `cut.at` when editing, fanned into the piece gaps when exploded. The plane mesh is rebuilt
 /// (thin along the cut axis) only when the cut is rotated.
 fn sync_overlay_visuals(
-    cuts: Res<Cuts>,
-    bounds: Res<ModelBounds>,
+    parts: Res<Parts>,
+    active_part: Res<ActivePart>,
     dspread: Res<DisplaySpread>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
@@ -1685,7 +1736,10 @@ fn sync_overlay_visuals(
         &MeshMaterial3d<StandardMaterial>,
     )>,
 ) {
-    if !cuts.is_changed() && !dspread.is_changed() {
+    let part = &parts.0[active_part.0];
+    let cuts = &part.cuts;
+    let bounds = &part.bounds;
+    if !parts.is_changed() && !dspread.is_changed() {
         return;
     }
     let Some((min, max)) = bounds.0 else {
@@ -1755,10 +1809,15 @@ fn plane_cuboid(axis: Axis, min: Vec3, max: Vec3) -> Cuboid {
 
 /// Drop the bed slab so its top meets the model's Z-floor — the model rests on the bed instead of
 /// dipping below it (its native coords needn't put the bottom at z=0). Runs when the bounds change.
-fn seat_bed(bounds: Res<ModelBounds>, mut beds: Query<&mut Transform, With<Bed>>) {
-    if !bounds.is_changed() {
+fn seat_bed(
+    parts: Res<Parts>,
+    active_part: Res<ActivePart>,
+    mut beds: Query<&mut Transform, With<Bed>>,
+) {
+    if !parts.is_changed() {
         return;
     }
+    let bounds = &parts.0[active_part.0].bounds;
     let Some((min, _)) = bounds.0 else {
         return;
     };
@@ -1773,8 +1832,8 @@ fn seat_bed(bounds: Res<ModelBounds>, mut beds: Query<&mut Transform, With<Bed>>
 /// the 3D camera only — the old "scatter" was the UI camera ghosting each leader, not the extra axes.
 #[allow(clippy::too_many_arguments)]
 fn sync_dim_labels(
-    cuts: Res<Cuts>,
-    bounds: Res<ModelBounds>,
+    parts: Res<Parts>,
+    active_part: Res<ActivePart>,
     print: Res<PrintView>,
     cam: Query<(&Camera, &GlobalTransform), With<Camera3d>>,
     existing: Query<&DimLabel>,
@@ -1782,6 +1841,9 @@ fn sync_dim_labels(
     mut commands: Commands,
     mut gizmos: Gizmos,
 ) {
+    let part = &parts.0[active_part.0];
+    let cuts = &part.cuts;
+    let bounds = &part.bounds;
     if print.0 {
         // The print preview lays pieces out apart — the assembled-part width labels don't apply.
         for (_, _, _, mut vis) in &mut labels {
@@ -1920,13 +1982,16 @@ fn draw_axis_gizmo(cam: Query<(&Orbit, &Projection), With<Camera3d>>, mut gizmos
 /// On a change of what's displayed, frame it: centre on the (possibly exploded) bounds + fit.
 fn auto_scale(
     dspread: Res<DisplaySpread>,
-    cuts: Res<Cuts>,
-    bounds: Res<ModelBounds>,
+    parts: Res<Parts>,
+    active_part: Res<ActivePart>,
     mut cams: Query<&mut Orbit>,
 ) {
     if !dspread.is_changed() {
         return;
     }
+    let part = &parts.0[active_part.0];
+    let cuts = &part.cuts;
+    let bounds = &part.bounds;
     let Some((min, max)) = bounds.0 else {
         return;
     };
@@ -1974,12 +2039,12 @@ fn split_viewport(seam: Res<PanelSeam>, mut cam: Query<&mut Camera, With<Camera3
 
 /// Revert to the uncut model the moment a cut is edited, so editing is always on the intact part.
 fn revert_on_edit(
-    cuts: Res<Cuts>,
+    parts: Res<Parts>,
     whole: Res<WholeMesh>,
     mut dspread: ResMut<DisplaySpread>,
     mut models: Query<&mut Mesh3d, With<Model>>,
 ) {
-    if dspread.0 == 0.0 || !cuts.is_changed() {
+    if dspread.0 == 0.0 || !parts.is_changed() {
         return;
     }
     if let Some(h) = whole.0.clone() {
@@ -2025,9 +2090,8 @@ fn request_reslice(
     mut status: ResMut<Status>,
     mut bg: ResMut<SliceInBackground>,
     cfg: Res<SceneCfg>,
-    cuts: Res<Cuts>,
-    conns: Res<Conns>,
-    orient: Res<Orient>,
+    parts: Res<Parts>,
+    active_part: Res<ActivePart>,
 ) {
     if ev.read().count() == 0 {
         return;
@@ -2036,6 +2100,10 @@ fn request_reslice(
         info!("busy — ignoring re-slice");
         return;
     }
+    let part = &parts.0[active_part.0];
+    let cuts = &part.cuts;
+    let conns = &part.conns;
+    let orient = &part.orient;
     let xs = cuts.enabled_cuts();
     if xs.is_empty() {
         status.0 = "no enabled cuts".into();
@@ -2096,16 +2164,14 @@ fn resolve_conns(cuts: &Cuts, conns: &Conns) -> Vec<fab::Conn> {
 /// pure function of the current source + user edits — stale the instant a different `.scad` loads.
 #[derive(SystemParam)]
 struct ModelState<'w> {
-    cuts: ResMut<'w, Cuts>,
-    conns: ResMut<'w, Conns>,
+    parts: ResMut<'w, Parts>,
+    active: ResMut<'w, ActivePart>,
     edit_cut: ResMut<'w, EditCut>,
     xsection: ResMut<'w, XSection>,
-    orient: ResMut<'w, Orient>,
     print: ResMut<'w, PrintView>,
     print_job: ResMut<'w, PrintJob>,
     print_pieces: ResMut<'w, PrintPieces>,
     feas: ResMut<'w, Feas>,
-    bounds: ResMut<'w, ModelBounds>,
     whole: ResMut<'w, WholeMesh>,
     sliced: ResMut<'w, SlicedMesh>,
     watch: ResMut<'w, Watch>,
@@ -2117,16 +2183,14 @@ impl ModelState<'_> {
     /// in-flight print job cancelled, panel signature invalidated (forces a rebuild), and the watch
     /// disarmed so `watch_source` records the new file's mtime instead of re-triggering.
     fn reset(&mut self) {
-        *self.cuts = Cuts::default();
-        *self.conns = Conns::default();
+        *self.parts = Parts(vec![Part::default()]);
+        self.active.0 = 0;
         *self.edit_cut = EditCut::default();
         *self.xsection = XSection::default();
-        *self.orient = Orient::default();
         *self.print = PrintView::default();
         *self.print_job = PrintJob::default();
         *self.print_pieces = PrintPieces::default();
         *self.feas = Feas::default();
-        *self.bounds = ModelBounds::default();
         *self.whole = WholeMesh::default();
         *self.sliced = SlicedMesh::default();
         *self.watch = Watch::default();
@@ -2308,8 +2372,8 @@ fn kick_job(
 fn poll_job(
     mut job: ResMut<Job>,
     mut status: ResMut<Status>,
-    mut bounds: ResMut<ModelBounds>,
-    mut cuts: ResMut<Cuts>,
+    mut parts: ResMut<Parts>,
+    active_part: Res<ActivePart>,
     mut whole: ResMut<WholeMesh>,
     mut sliced: ResMut<SlicedMesh>,
     mut dspread: ResMut<DisplaySpread>,
@@ -2319,6 +2383,9 @@ fn poll_job(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
+    let part = &mut parts.0[active_part.0];
+    let bounds = &mut part.bounds;
+    let cuts = &mut part.cuts;
     let Some((is_reslice, task)) = job.0.as_mut() else {
         return;
     };
@@ -2403,14 +2470,17 @@ fn enter_exit_print(
     edit: Res<EditCut>,
     mut was_on: Local<bool>,
     cfg: Res<SceneCfg>,
-    cuts: Res<Cuts>,
-    conns: Res<Conns>,
+    parts: Res<Parts>,
+    active_part: Res<ActivePart>,
     mut job: ResMut<PrintJob>,
     mut cache: ResMut<PrintPieces>,
     mut status: ResMut<Status>,
     pieces: Query<Entity, With<PrintPiece>>,
     mut commands: Commands,
 ) {
+    let part = &parts.0[active_part.0];
+    let cuts = &part.cuts;
+    let conns = &part.conns;
     if print.0 == *was_on {
         return; // no transition (and not the initial add) — nothing to do
     }
@@ -2544,10 +2614,12 @@ fn kick_print_job(
 /// preview is the reset gesture). `relayout_pieces` does the actual layout from here.
 fn poll_print_job(
     mut job: ResMut<PrintJob>,
-    mut orient: ResMut<Orient>,
+    mut parts: ResMut<Parts>,
+    active_part: Res<ActivePart>,
     mut cache: ResMut<PrintPieces>,
     mut status: ResMut<Status>,
 ) {
+    let orient = &mut parts.0[active_part.0].orient;
     let Some(task) = job.0.as_mut() else {
         return;
     };
@@ -2584,9 +2656,8 @@ fn poll_print_job(
 #[allow(clippy::too_many_arguments)]
 fn sync_orientation(
     print: Res<PrintView>,
-    cuts: Res<Cuts>,
-    conns: Res<Conns>,
-    orient: Res<Orient>,
+    parts: Res<Parts>,
+    active_part: Res<ActivePart>,
     cache: Res<PrintPieces>,
     cfg: Res<SceneCfg>,
     mut feas: ResMut<Feas>,
@@ -2597,9 +2668,13 @@ fn sync_orientation(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
-    if !(cuts.is_changed() || conns.is_changed() || orient.is_changed() || cache.is_changed()) {
+    if !(parts.is_changed() || cache.is_changed()) {
         return;
     }
+    let part = &parts.0[active_part.0];
+    let cuts = &part.cuts;
+    let conns = &part.conns;
+    let orient = &part.orient;
 
     // Feasibility: resolve placed connectors to the enabled-cut indexing (tracking their source
     // index), run the SAME gate the slice applies, write flags back aligned with `Conns::list`.
@@ -2713,7 +2788,8 @@ fn orient_piece_on_click(
     ev: On<Pointer<Click>>,
     print: Res<PrintView>,
     pieces: Query<(&PrintPiece, &Transform)>,
-    mut orient: ResMut<Orient>,
+    mut parts: ResMut<Parts>,
+    active_part: Res<ActivePart>,
 ) {
     if !print.0 || ev.event.button != PointerButton::Primary {
         return;
@@ -2722,7 +2798,9 @@ fn orient_piece_on_click(
         return;
     };
     let up_model = -(tf.rotation.inverse() * world_n);
-    orient.set_manual(pp.0, up_model.normalize_or_zero().to_array());
+    parts.0[active_part.0]
+        .orient
+        .set_manual(pp.0, up_model.normalize_or_zero().to_array());
 }
 
 /// Colour each connector marker by kind + feasibility: amber = a bolt (explicit); teal = an onion
@@ -2730,10 +2808,12 @@ fn orient_piece_on_click(
 /// orientations. Live feedback in the assembled/exploded view.
 fn color_conn_markers(
     feas: Res<Feas>,
-    conns: Res<Conns>,
+    parts: Res<Parts>,
+    active_part: Res<ActivePart>,
     markers: Query<(&ConnMarker, &MeshMaterial3d<StandardMaterial>)>,
     mut mats: ResMut<Assets<StandardMaterial>>,
 ) {
+    let conns = &parts.0[active_part.0].conns;
     for (m, mat) in &markers {
         let want = match conns.list.get(m.0).map(|c| c.kind) {
             Some(fab::ConnKind::Bolt) => Color::srgb(0.95, 0.70, 0.20), // amber = bolt
@@ -2794,13 +2874,12 @@ fn run_screenshot(scene: SceneCfg, png: PathBuf) {
         .insert_resource(ScreenshotPng(png))
         .init_resource::<FileList>()
         .init_resource::<OpenDialog>()
-        .init_resource::<Cuts>()
-        .init_resource::<Conns>()
+        .insert_resource(Parts(vec![Part::default()]))
+        .init_resource::<ActivePart>()
         .init_resource::<ActiveConn>()
         .init_resource::<EditCut>()
         .init_resource::<PrintView>()
         .init_resource::<XSection>()
-        .init_resource::<ModelBounds>()
         .init_resource::<DraggingCut>()
         .init_resource::<WholeMesh>()
         .init_resource::<SlicedMesh>()
@@ -3057,18 +3136,16 @@ fn run_scripted(scene: SceneCfg, actions: Vec<Action>) {
         .insert_resource(ClearColor(Color::srgb(0.10, 0.10, 0.12)))
         .insert_resource(scene)
         .init_resource::<Job>()
-        .init_resource::<Cuts>()
-        .init_resource::<Conns>()
+        .insert_resource(Parts(vec![Part::default()]))
+        .init_resource::<ActivePart>()
         .init_resource::<ActiveConn>()
         .init_resource::<EditCut>()
         .init_resource::<XSection>()
-        .init_resource::<Orient>()
         .init_resource::<PrintView>()
         .init_resource::<PrintJob>()
         .init_resource::<PrintPieces>()
         .init_resource::<PrevCam>()
         .init_resource::<Feas>()
-        .init_resource::<ModelBounds>()
         .init_resource::<FileList>()
         .init_resource::<OpenDialog>()
         .init_resource::<Watch>()
@@ -3171,14 +3248,12 @@ fn setup_script(
 #[allow(clippy::too_many_arguments)]
 fn run_script(
     mut runner: ResMut<ScriptRunner>,
-    bounds: Res<ModelBounds>,
+    mut parts: ResMut<Parts>,
+    active_part: Res<ActivePart>,
     job: Res<Job>,
     target: Res<RenderTargetImage>,
-    mut cuts: ResMut<Cuts>,
-    mut conns: ResMut<Conns>,
     mut edit_cut: ResMut<EditCut>,
     mut print: ResMut<PrintView>,
-    mut orient: ResMut<Orient>,
     print_job: Res<PrintJob>,
     xsection: Res<XSection>,
     mut reslice_w: MessageWriter<ReSlice>,
@@ -3192,6 +3267,11 @@ fn run_script(
         ResMut<ActiveConn>,
     ),
 ) {
+    let part = &mut parts.0[active_part.0];
+    let bounds = &part.bounds;
+    let cuts = &mut part.cuts;
+    let conns = &mut part.conns;
+    let orient = &mut part.orient;
     if bounds.0.is_none() {
         return; // wait for the initial render (model + bounds + first cut)
     }
@@ -3273,7 +3353,7 @@ fn run_script(
         Action::Conn(i, a, b) => {
             if runner.timer == 1 {
                 let size = auto_size(&xsection, &cuts, &bounds, i, [a, b]);
-                toggle_connector(&mut conns, i, [a, b], size, sw.2.kind, sw.2.screw);
+                toggle_connector(conns, i, [a, b], size, sw.2.kind, sw.2.screw);
             }
             runner.timer >= 2
         }
@@ -3594,14 +3674,17 @@ fn edit_in_openscad_action(
 /// referenced the old cuts), and let the reactive loop reslice. The seed you then refine by hand.
 fn auto_slice_action(
     mut ev: MessageReader<PanelCmd>,
-    bounds: Res<ModelBounds>,
-    mut cuts: ResMut<Cuts>,
-    mut conns: ResMut<Conns>,
+    mut parts: ResMut<Parts>,
+    active_part: Res<ActivePart>,
     mut status: ResMut<Status>,
 ) {
     if !ev.read().any(|c| *c == PanelCmd::AutoSlice) {
         return;
     }
+    let part = &mut parts.0[active_part.0];
+    let bounds = &part.bounds;
+    let cuts = &mut part.cuts;
+    let conns = &mut part.conns;
     let Some((min, max)) = bounds.0 else {
         status.0 = "no model loaded yet".into();
         return;
@@ -3647,16 +3730,19 @@ fn auto_slice_action(
 /// auto-plan (auto-slice + onion auto-place, off-thread) — ONCE per source. Fits-the-bed models,
 /// already-planned sources, and ones that already have cuts are left alone.
 fn kick_auto_plan(
-    bounds: Res<ModelBounds>,
-    cuts: Res<Cuts>,
+    mut parts: ResMut<Parts>,
+    active_part: Res<ActivePart>,
     scene: Res<SceneCfg>,
-    mut planned: ResMut<AutoPlanned>,
     mut job: ResMut<AutoJob>,
     mut status: ResMut<Status>,
 ) {
     if job.0.is_some() {
         return; // one already in flight
     }
+    let part = &mut parts.0[active_part.0];
+    let bounds = &part.bounds;
+    let cuts = &part.cuts;
+    let planned = &mut part.auto_planned;
     let (Some((min, max)), Some(src)) = (bounds.0, scene.source.clone()) else {
         return;
     };
@@ -3693,10 +3779,13 @@ fn kick_auto_plan(
 /// Land the auto-plan: seed the cut stack + connectors from it, and the reactive loop reslices.
 fn poll_auto_plan(
     mut job: ResMut<AutoJob>,
-    mut cuts: ResMut<Cuts>,
-    mut conns: ResMut<Conns>,
+    mut parts: ResMut<Parts>,
+    active_part: Res<ActivePart>,
     mut status: ResMut<Status>,
 ) {
+    let part = &mut parts.0[active_part.0];
+    let cuts = &mut part.cuts;
+    let conns = &mut part.conns;
     let Some(task) = job.0.as_mut() else {
         return;
     };
@@ -3756,13 +3845,15 @@ const PLATE_GAP: f64 = 5.0;
 fn export_plates_action(
     mut ev: MessageReader<PanelCmd>,
     pieces: Res<PrintPieces>,
-    orient: Res<Orient>,
+    parts: Res<Parts>,
+    active_part: Res<ActivePart>,
     scene: Res<SceneCfg>,
     mut status: ResMut<Status>,
 ) {
     if !ev.read().any(|c| *c == PanelCmd::Export) {
         return;
     }
+    let orient = &parts.0[active_part.0].orient;
     let Some(list) = pieces.0.as_ref().filter(|l| !l.is_empty()) else {
         status.0 = "no pieces to export — slice first".into();
         return;

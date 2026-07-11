@@ -672,7 +672,7 @@ fn run_windowed(scene: SceneCfg) {
 fn panel_ui(
     mut contexts: EguiContexts,
     mut parts: ResMut<Parts>,
-    active_part: Res<ActivePart>,
+    mut active_part: ResMut<ActivePart>,
     mut active: ResMut<ActiveConn>,
     mut edit: ResMut<EditCut>,
     mut print: ResMut<PrintView>,
@@ -686,14 +686,9 @@ fn panel_ui(
     let Ok(ctx) = contexts.ctx_mut() else {
         return;
     };
-    // T.2b: the panel edits the ACTIVE part's state (one Part today; N after Increment B).
-    let part = &mut parts.0[active_part.0];
-    let spread = part.spread; // captured before the field-splitting borrows below
-    let cuts = &mut part.cuts;
-    let conns = &mut part.conns;
-    let bounds = &part.bounds;
     let mode = panel_mode(&edit, &print);
-    let mut to_remove: Option<usize> = None; // a delete defers past the row loop (index stability)
+    // A delete defers past the row loop (index stability), tagged with the PART it belongs to (T.2b).
+    let mut to_remove: Option<(usize, usize)> = None;
     // egui 0.35 panels show INTO a Ui, not the Context — wrap the viewport in a background-layer Ui
     // first (the bevy_egui side_panel pattern) so the panel overlays the 3D view.
     let mut viewport = egui::Ui::new(
@@ -738,58 +733,44 @@ fn panel_ui(
                         writers.cmd.write(PanelCmd::EditOpenscad);
                     }
                     ui.separator();
-                    for axis in [Axis::X, Axis::Y, Axis::Z] {
-                        ui.horizontal(|ui| {
-                            ui.label(format!("{} plane", axis.label()));
-                            if ui.button("+").clicked() {
-                                if let Some((mn, mx)) = bounds.0 {
-                                    let at = comp((mn + mx) * 0.5, axis.index());
-                                    cuts.list.push(CutDef {
-                                        axis,
-                                        at,
-                                        enabled: true,
-                                    });
-                                    cuts.active = cuts.list.len() - 1;
-                                }
-                            }
-                        });
-                        let idxs: Vec<usize> = cuts
-                            .list
-                            .iter()
-                            .enumerate()
-                            .filter(|(_, c)| c.axis == axis)
-                            .map(|(i, _)| i)
-                            .collect();
-                        for idx in idxs {
-                            ui.horizontal(|ui| {
-                                if idx == cuts.active {
-                                    ui.label("▶");
-                                }
-                                let mut at = cuts.list[idx].at;
-                                if ui.add(egui::DragValue::new(&mut at).speed(0.5)).changed() {
-                                    cuts.list[idx].at = clamp_to_bounds(at, axis, &bounds);
-                                    cuts.active = idx;
-                                }
-                                let en = cuts.list[idx].enabled;
-                                if ui
-                                    .selectable_label(en, if en { "on" } else { "off" })
-                                    .clicked()
-                                {
-                                    cuts.list[idx].enabled = !en;
-                                }
-                                if ui
-                                    .button(egui::RichText::new("del").color(
-                                        egui::Color32::from_rgb(230, 130, 130),
-                                    ))
-                                    .clicked()
-                                {
-                                    to_remove = Some(idx);
-                                }
-                                let editing = edit.0 == Some(idx);
-                                if ui.selectable_label(editing, "conn").clicked() {
-                                    edit.0 = if editing { None } else { Some(idx) };
-                                }
+                    // ACCORDION (T.2b): one collapsing section per top-level part. Expanding or
+                    // touching a part makes it ACTIVE — the slice systems, cut-plane overlays, and
+                    // connector editor all follow `ActivePart`, so an edit reslices the right part.
+                    let n = parts.0.len();
+                    for i in 0..n {
+                        let is_active = active_part.0 == i;
+                        let pcs = piece_estimate(&parts.0[i].cuts);
+                        let label = format!(
+                            "Part {} · {} pc{}",
+                            i + 1,
+                            pcs,
+                            if pcs == 1 { "" } else { "s" }
+                        );
+                        // The ACTIVE part reads green + bold — a clear marker that doesn't collide
+                        // with egui's collapse triangle the way a "▶" prefix did.
+                        let header = if is_active {
+                            egui::RichText::new(label)
+                                .color(egui::Color32::from_rgb(120, 220, 140))
+                                .strong()
+                        } else {
+                            egui::RichText::new(label)
+                        };
+                        let mut select = false;
+                        let resp = egui::CollapsingHeader::new(header)
+                            .id_salt(("part", i))
+                            .default_open(is_active)
+                            .show(ui, |ui| {
+                                select |= part_cut_editor(
+                                    ui,
+                                    &mut parts.0[i],
+                                    i,
+                                    &mut edit,
+                                    &mut to_remove,
+                                );
                             });
+                        if select || resp.header_response.clicked() {
+                            active_part.0 = i;
+                            parts.set_changed(); // a pure selection must refresh the active-part visuals
                         }
                     }
                     ui.separator();
@@ -809,6 +790,7 @@ fn panel_ui(
                     } else {
                         ui.label(status.0.as_str());
                     }
+                    let spread = parts.0[active_part.0].spread; // active part's explode state
                     if ui
                         .button(if spread > 0.0 { "Assemble" } else { "Explode" })
                         .clicked()
@@ -823,7 +805,8 @@ fn panel_ui(
                     }
                 }
                 PanelMode::Connectors(i) => {
-                    let header = match cuts.list.get(i) {
+                    let ap = active_part.0;
+                    let header = match parts.0[ap].cuts.list.get(i) {
                         Some(c) => {
                             let pos = if c.at.fract() == 0.0 {
                                 format!("{}", c.at as i64)
@@ -862,7 +845,7 @@ fn panel_ui(
                         writers.autoplace.write(AutoPlace);
                     }
                     if ui.button("Clear connectors").clicked() {
-                        conns.list.retain(|c| c.cut != i);
+                        parts.0[ap].conns.list.retain(|c| c.cut != i);
                     }
                     if ui.button("Done").clicked() {
                         edit.0 = None;
@@ -880,11 +863,97 @@ fn panel_ui(
                 }
             }
         });
-    if let Some(idx) = to_remove {
-        remove_cut(cuts, conns, idx);
+    if let Some((p, idx)) = to_remove {
+        if let Some(part) = parts.0.get_mut(p) {
+            remove_cut(&mut part.cuts, &mut part.conns, idx);
+        }
     }
     seam.width_px = panel.response.rect.width() * ctx.pixels_per_point();
     seam.over_ui = ctx.egui_wants_pointer_input() || ctx.is_pointer_over_egui();
+}
+
+/// Render one part's cut cards (X/Y/Z add buttons + per-cut rows) into `ui`, mutating `part`'s cut
+/// stack in place. Returns `true` if the user TOUCHED anything, so the caller makes this part active
+/// and the reactive slice follows the edit. `part_idx` tags a deferred delete with its owner.
+fn part_cut_editor(
+    ui: &mut egui::Ui,
+    part: &mut Part,
+    part_idx: usize,
+    edit: &mut EditCut,
+    to_remove: &mut Option<(usize, usize)>,
+) -> bool {
+    let mut touched = false;
+    let bounds0 = part.bounds.0;
+    for axis in [Axis::X, Axis::Y, Axis::Z] {
+        ui.horizontal(|ui| {
+            ui.label(format!("{} plane", axis.label()));
+            if ui.button("+").clicked() {
+                if let Some((mn, mx)) = bounds0 {
+                    let at = comp((mn + mx) * 0.5, axis.index());
+                    part.cuts.list.push(CutDef {
+                        axis,
+                        at,
+                        enabled: true,
+                    });
+                    part.cuts.active = part.cuts.list.len() - 1;
+                    touched = true;
+                }
+            }
+        });
+        let idxs: Vec<usize> = part
+            .cuts
+            .list
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| c.axis == axis)
+            .map(|(i, _)| i)
+            .collect();
+        for idx in idxs {
+            ui.horizontal(|ui| {
+                if idx == part.cuts.active {
+                    ui.label("▶");
+                }
+                let mut at = part.cuts.list[idx].at;
+                if ui.add(egui::DragValue::new(&mut at).speed(0.5)).changed() {
+                    let clamped = clamp_to_bounds(at, axis, &part.bounds);
+                    part.cuts.list[idx].at = clamped;
+                    part.cuts.active = idx;
+                    touched = true;
+                }
+                let en = part.cuts.list[idx].enabled;
+                if ui
+                    .selectable_label(en, if en { "on" } else { "off" })
+                    .clicked()
+                {
+                    part.cuts.list[idx].enabled = !en;
+                    touched = true;
+                }
+                if ui
+                    .button(egui::RichText::new("del").color(egui::Color32::from_rgb(230, 130, 130)))
+                    .clicked()
+                {
+                    *to_remove = Some((part_idx, idx));
+                    touched = true;
+                }
+                let editing = edit.0 == Some(idx);
+                if ui.selectable_label(editing, "conn").clicked() {
+                    edit.0 = if editing { None } else { Some(idx) };
+                    touched = true;
+                }
+            });
+        }
+    }
+    touched
+}
+
+/// A rough printable-piece count for a part's cut stack — the product over axes of (enabled cuts on
+/// that axis + 1). Ignores connected-components (a presliced blob reads as 1 until sliced), so it's
+/// a fast accordion label, not the exact plate count.
+fn piece_estimate(cuts: &Cuts) -> usize {
+    [Axis::X, Axis::Y, Axis::Z]
+        .iter()
+        .map(|&ax| cuts.list.iter().filter(|c| c.enabled && c.axis == ax).count() + 1)
+        .product()
 }
 
 #[derive(Component)]
@@ -3142,6 +3211,7 @@ enum Action {
     ConnType(fab::ConnKind), // set the active connector kind for new placements (onion|bolt)
     Open(PathBuf), // switch the active source to <path> (a dir → its .scad; a file → itself)
     Touch(PathBuf), // bump <path>'s mtime (rewrite same bytes) → exercise watch_source reload
+    Part(usize),   // make top-level part <i> the active one (T.2b multi-part switch)
 }
 
 #[derive(Resource)]
@@ -3188,6 +3258,7 @@ fn parse_script(s: &str) -> Vec<Action> {
                     Some(Action::Conn(i, a, b))
                 }
                 "edit" => it.next()?.parse().ok().map(Action::Edit),
+                "part" => it.next()?.parse().ok().map(Action::Part),
                 "printview" => Some(Action::PrintView),
                 "autoplace" => Some(Action::AutoPlace),
                 "orient" => {
@@ -3342,7 +3413,7 @@ fn setup_script(
 fn run_script(
     mut runner: ResMut<ScriptRunner>,
     mut parts: ResMut<Parts>,
-    active_part: Res<ActivePart>,
+    mut active_part: ResMut<ActivePart>,
     job: Res<Job>,
     target: Res<RenderTargetImage>,
     mut edit_cut: ResMut<EditCut>,
@@ -3360,6 +3431,20 @@ fn run_script(
         ResMut<ActiveConn>,
     ),
 ) {
+    // The part-switch action rebinds what "active" means, so handle it BEFORE the active-part borrow
+    // below — set the index + mark parts changed so the display systems refresh onto the new part.
+    if let Some(Action::Part(i)) = runner.actions.get(runner.idx).cloned() {
+        runner.timer += 1;
+        if runner.timer == 1 && i < parts.0.len() {
+            active_part.0 = i;
+            parts.set_changed();
+        }
+        if runner.timer >= 2 {
+            runner.idx += 1;
+            runner.timer = 0;
+        }
+        return;
+    }
     let part = &mut parts.0[active_part.0];
     let bounds = &part.bounds;
     let cuts = &mut part.cuts;
@@ -3509,6 +3594,8 @@ fn run_script(
             // never fires, job stays idle and this still ends — the log grep is the real assertion.
             runner.timer >= 90 && job.0.is_none()
         }
+        // Handled by the early-return block above (before the active-part borrow); never reached here.
+        Action::Part(_) => true,
     };
     if done {
         runner.idx += 1;

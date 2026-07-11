@@ -43,6 +43,10 @@ use fab_lang::{Dims, Vec3 as FVec3};
 
 const SPREAD: f64 = 50.0;
 
+/// Idle seconds after the last editor keystroke before the buffer re-renders (U.3.2). Long enough
+/// that typing doesn't kick a render mid-word, short enough to feel live.
+const EDIT_DEBOUNCE: f64 = 0.5;
+
 /// Scene inputs shared by both modes.
 #[derive(Resource, Clone)]
 struct SceneCfg {
@@ -106,6 +110,27 @@ struct OpenDialog(Option<Task<Option<PathBuf>>>);
 struct Watch {
     mtime: Option<std::time::SystemTime>,
     closure: Vec<PathBuf>,
+}
+
+/// The Model-tab code editor's live buffer (U.3.2): the active file's text, edited in place. The
+/// buffer — NOT the file on disk — is the render source; `preview_edited_buffer` writes it to a
+/// hidden temp beside the real file (so relative includes resolve) and re-renders after a debounce.
+/// `dirty` gates the explicit Save; `edited_at` (Bevy elapsed secs at the last keystroke) drives it.
+#[derive(Resource, Default)]
+struct EditorBuf {
+    text: String,
+    path: PathBuf,
+    dirty: bool,
+    edited_at: Option<f64>,
+}
+
+/// Load `path`'s text into the editor buffer, clean (not dirty, no pending edit). Used on the initial
+/// launch seed and on every file switch, so the editor always shows the active file's on-disk text.
+fn read_into_editor(editor: &mut EditorBuf, path: &Path) {
+    editor.path = path.to_path_buf();
+    editor.text = std::fs::read_to_string(path).unwrap_or_default();
+    editor.dirty = false;
+    editor.edited_at = None;
 }
 
 /// A finished render/slice job's payload (T.2b). A whole render produces ALL top-level parts at once
@@ -335,12 +360,12 @@ struct Part {
     auto_planned: AutoPlanned,
     // Display state — was three global resources (WholeMesh/SlicedMesh/DisplaySpread) when the scene
     // held ONE model; now per-part so N parts each explode/collapse on their own (T.2b).
-    whole: Option<Handle<Mesh>>,  // the uncut mesh — revert from exploded without re-rendering
+    whole: Option<Handle<Mesh>>, // the uncut mesh — revert from exploded without re-rendering
     sliced: Option<Handle<Mesh>>, // the last sliced (exploded) mesh — re-show without re-slicing
-    spread: f32,                  // 0 = uncut/editing, >0 = exploded (fan distance)
-    base_stl: PathBuf,            // this part's whole STL (`render_parts` output) — reslice/edit/plan source
-    sliced_hash: Option<u64>,     // `slice_hash` of the inputs last resliced — per-part so editing A never reslices B
-    name: Option<String>,         // the top-level module/function that produced this part (T.2b provenance); None = anonymous
+    spread: f32,                 // 0 = uncut/editing, >0 = exploded (fan distance)
+    base_stl: PathBuf, // this part's whole STL (`render_parts` output) — reslice/edit/plan source
+    sliced_hash: Option<u64>, // `slice_hash` of the inputs last resliced — per-part so editing A never reslices B
+    name: Option<String>, // the top-level module/function that produced this part (T.2b provenance); None = anonymous
 }
 
 /// The model's parts. INVARIANT: always non-empty — `[ActivePart]` indexes the one the panel edits.
@@ -615,6 +640,7 @@ fn run_windowed(scene: SceneCfg) {
         .init_resource::<AutoJob>()
         .init_resource::<PublishJob>()
         .init_resource::<Tab>()
+        .init_resource::<EditorBuf>()
         .init_resource::<PrevCam>()
         .init_resource::<Feas>()
         .init_resource::<DraggingCut>()
@@ -645,7 +671,12 @@ fn run_windowed(scene: SceneCfg) {
                 // lands and seeds cuts + connectors (poll). After poll_job so bounds are set.
                 (kick_auto_plan, poll_auto_plan).chain().after(poll_job),
                 poll_publish,
-                (poll_open_dialog, apply_switch_file, watch_source),
+                (
+                    poll_open_dialog,
+                    apply_switch_file,
+                    watch_source,
+                    preview_edited_buffer,
+                ),
                 sync_overlays,
                 sync_overlay_visuals,
                 sync_dim_labels,
@@ -700,6 +731,8 @@ fn panel_ui(
     status: Res<Status>,
     job: Res<Job>,
     mut open_dialog: ResMut<OpenDialog>,
+    mut editor: ResMut<EditorBuf>,
+    time: Res<Time>,
     mut writers: PanelWriters,
     mut seam: ResMut<PanelSeam>,
 ) {
@@ -757,33 +790,65 @@ fn panel_ui(
         .show(&mut viewport, |ui| {
             match *tab {
                 Tab::Model => {
-                    if ui.button("Open…").clicked() && open_dialog.0.is_none() {
-                        open_dialog.0 = Some(AsyncComputeTaskPool::get().spawn(async move {
-                            rfd::AsyncFileDialog::new()
-                                .pick_folder()
-                                .await
-                                .map(|h| h.path().to_path_buf())
-                        }));
-                    }
-                    ui.label(format!("files ({})", files.files.len()));
-                    egui::ScrollArea::vertical()
-                        .max_height(160.0)
-                        .auto_shrink([false, false])
-                        .show(ui, |ui| {
-                            for (i, path) in files.files.iter().enumerate() {
-                                let name = path
-                                    .file_name()
-                                    .map(|s| s.to_string_lossy().into_owned())
-                                    .unwrap_or_else(|| "?".into());
-                                if ui.selectable_label(files.active == Some(i), name).clicked() {
-                                    writers.switch.write(SwitchFile(i));
-                                }
+                    // FILE TABS (U.3.2): the open files as tabs + a ＋ that reopens the folder picker.
+                    ui.horizontal_wrapped(|ui| {
+                        for (i, path) in files.files.iter().enumerate() {
+                            let name = path
+                                .file_name()
+                                .map(|s| s.to_string_lossy().into_owned())
+                                .unwrap_or_else(|| "?".into());
+                            let on = files.active == Some(i);
+                            let text = if on {
+                                egui::RichText::new(name)
+                                    .color(egui::Color32::from_rgb(120, 220, 140))
+                                    .strong()
+                            } else {
+                                egui::RichText::new(name)
+                            };
+                            if ui.selectable_label(on, text).clicked() {
+                                writers.switch.write(SwitchFile(i));
                             }
-                        });
-                    if ui.button("Edit in OpenSCAD").clicked() {
-                        writers.cmd.write(PanelCmd::EditOpenscad);
-                    }
-                    // Editor + file inner-tabs + unsliced preview land in U.3.2.
+                        }
+                        if ui.button("＋").clicked() && open_dialog.0.is_none() {
+                            open_dialog.0 = Some(AsyncComputeTaskPool::get().spawn(async move {
+                                rfd::AsyncFileDialog::new()
+                                    .pick_folder()
+                                    .await
+                                    .map(|h| h.path().to_path_buf())
+                            }));
+                        }
+                    });
+                    ui.separator();
+                    // Save (explicit, desktop) + jump to OpenSCAD. The buffer renders live; the file
+                    // on disk only changes here.
+                    ui.horizontal(|ui| {
+                        if ui
+                            .add_enabled(editor.dirty, egui::Button::new("Save"))
+                            .clicked()
+                            && std::fs::write(&editor.path, editor.text.as_bytes()).is_ok()
+                        {
+                            editor.dirty = false;
+                        }
+                        if ui.button("Edit in OpenSCAD").clicked() {
+                            writers.cmd.write(PanelCmd::EditOpenscad);
+                        }
+                        if editor.dirty {
+                            ui.colored_label(egui::Color32::from_rgb(224, 168, 96), "● unsaved");
+                        }
+                    });
+                    // The code editor — its buffer IS the render source (debounced preview, U.3.2).
+                    egui::ScrollArea::vertical().show(ui, |ui| {
+                        let resp = ui.add(
+                            egui::TextEdit::multiline(&mut editor.text)
+                                .code_editor()
+                                .desired_width(f32::INFINITY)
+                                .desired_rows(24),
+                        );
+                        if resp.changed() {
+                            editor.dirty = true;
+                            editor.edited_at = Some(time.elapsed_secs_f64());
+                        }
+                    });
                 }
                 Tab::Parts => {
                     // ACCORDION (T.2b): one collapsing section per top-level part. Expanding or
@@ -973,7 +1038,9 @@ fn part_cut_editor(
                     touched = true;
                 }
                 if ui
-                    .button(egui::RichText::new("del").color(egui::Color32::from_rgb(230, 130, 130)))
+                    .button(
+                        egui::RichText::new("del").color(egui::Color32::from_rgb(230, 130, 130)),
+                    )
                     .clicked()
                 {
                     *to_remove = Some((part_idx, idx));
@@ -1012,7 +1079,13 @@ fn part_label(name: &Option<String>, i: usize) -> String {
 fn piece_estimate(cuts: &Cuts) -> usize {
     [Axis::X, Axis::Y, Axis::Z]
         .iter()
-        .map(|&ax| cuts.list.iter().filter(|c| c.enabled && c.axis == ax).count() + 1)
+        .map(|&ax| {
+            cuts.list
+                .iter()
+                .filter(|c| c.enabled && c.axis == ax)
+                .count()
+                + 1
+        })
         .product()
 }
 
@@ -1024,6 +1097,7 @@ struct Orbit {
     target: Vec3, // look-at point; right-drag pans it
 }
 
+#[allow(clippy::too_many_arguments)] // a Bevy startup system — params are dependencies, not a smell
 fn setup_windowed(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
@@ -1032,8 +1106,16 @@ fn setup_windowed(
     mut job: ResMut<Job>,
     mut status: ResMut<Status>,
     mut gizmo_cfg: ResMut<GizmoConfigStore>,
+    mut editor: ResMut<EditorBuf>,
+    mut files: ResMut<FileList>,
 ) {
     spawn_environment(&mut commands, &mut meshes, &mut materials, &scene);
+    // Seed the file-tab + editor from the launch source (U.3.2): a folder pick repopulates both.
+    if let Some(src) = scene.source.clone() {
+        read_into_editor(&mut editor, &src);
+        files.files = vec![src];
+        files.active = Some(0);
+    }
     let radius = scene.bed[0].max(scene.bed[1]).max(80.0);
     // Two cameras: a full-window UI camera (draws the panel + clears the dark bg) and the 3D camera,
     // whose viewport `split_viewport` insets to the right of the panel so the model centres in the
@@ -1525,7 +1607,11 @@ fn toggle_view(
 
 /// Point part `ap`'s displayed model entity(ies) at mesh `h`, leaving every OTHER part's mesh
 /// untouched — the per-part explode/collapse/revert primitive (T.2b).
-fn swap_part_mesh(models: &mut Query<(&mut Mesh3d, &PartId), With<Model>>, ap: usize, h: &Handle<Mesh>) {
+fn swap_part_mesh(
+    models: &mut Query<(&mut Mesh3d, &PartId), With<Model>>,
+    ap: usize,
+    h: &Handle<Mesh>,
+) {
     for (mut m, pid) in models {
         if pid.0 == ap {
             m.0 = h.clone();
@@ -1719,8 +1805,8 @@ fn edit_mode(
     let (axis, at) = (c.axis, c.at); // copy out so the `part` borrow can drop before the cam block
     let bounds = part.bounds.0;
     let base_stl = part.base_stl.clone(); // this part's whole STL — the cross-section source
-    // Face the camera square onto the cut (Z avoids the up=Z gimbal with a near-top-down pitch).
-    // Set the transform here directly — `orbit` yields while editing, so it won't apply it for us.
+                                          // Face the camera square onto the cut (Z avoids the up=Z gimbal with a near-top-down pitch).
+                                          // Set the transform here directly — `orbit` yields while editing, so it won't apply it for us.
     if let Ok((mut t, mut o)) = cam.single_mut() {
         use std::f32::consts::FRAC_PI_2;
         (o.yaw, o.pitch) = match axis {
@@ -2335,6 +2421,7 @@ fn apply_switch_file(
     mut scene: ResMut<SceneCfg>,
     mut job: ResMut<Job>,
     mut status: ResMut<Status>,
+    mut editor: ResMut<EditorBuf>,
     mut state: ModelState,
 ) {
     // Coalesce: only the last switch requested this frame matters.
@@ -2346,6 +2433,7 @@ fn apply_switch_file(
     };
     files.active = Some(i);
     scene.source = Some(path.clone());
+    read_into_editor(&mut editor, &path); // the new file's disk text becomes the editor buffer (U.3.2)
     state.reset();
     kick_render(&mut job, &mut status, &scene, true);
     info!("open: {}", path.display());
@@ -2457,6 +2545,8 @@ fn collect_scads(dir: &Path, out: &mut Vec<PathBuf>) {
         } else if p
             .extension()
             .is_some_and(|x| x.eq_ignore_ascii_case("scad"))
+            && !name.starts_with('.')
+        // hidden files aren't source — this also hides the editor's `.fab-preview-*.scad` (U.3.2)
         {
             out.push(p);
         }
@@ -2471,6 +2561,15 @@ fn kick_render(job: &mut Job, status: &mut Status, cfg: &SceneCfg, fresh: bool) 
         status.0 = "no .scad source".into();
         return;
     };
+    kick_render_from(job, status, cfg, &src, fresh);
+}
+
+/// Whole-render an EXPLICIT source path (U.3.2) — `cfg` still supplies root/tmp, but the content +
+/// include base come from `src`, not `cfg.source`. The editor buffer's preview renders its hidden
+/// temp this way WITHOUT repointing `cfg.source`, so `watch_source` keeps watching the real file and
+/// never fights the preview.
+fn kick_render_from(job: &mut Job, status: &mut Status, cfg: &SceneCfg, src: &Path, fresh: bool) {
+    let src = src.to_path_buf();
     let (root, tmp) = (cfg.root.clone(), cfg.tmp.clone());
     let task = AsyncComputeTaskPool::get().spawn(async move {
         // Each part Solid is built AND consumed inside render_parts (written to STL) — none crosses
@@ -2484,6 +2583,40 @@ fn kick_render(job: &mut Job, status: &mut Status, cfg: &SceneCfg, fresh: bool) 
     });
     job.0 = Some(task);
     status.0 = "rendering".into();
+}
+
+/// Debounced live preview (U.3.2): once the editor buffer has sat un-touched for `EDIT_DEBOUNCE` and
+/// no render is in flight, write it to a hidden temp beside the real file (so relative `include`s
+/// resolve) and whole-render it (`fresh = false` — keep each part's cuts/connectors). The buffer,
+/// not the disk file, is the truth; the disk file only changes on an explicit Save.
+fn preview_edited_buffer(
+    mut editor: ResMut<EditorBuf>,
+    scene: Res<SceneCfg>,
+    mut job: ResMut<Job>,
+    mut status: ResMut<Status>,
+    time: Res<Time>,
+) {
+    let Some(t) = editor.edited_at else {
+        return;
+    };
+    if job.0.is_some() || time.elapsed_secs_f64() - t < EDIT_DEBOUNCE {
+        return; // still typing, or a render's already running — retry next idle frame
+    }
+    editor.edited_at = None;
+    let Some(dir) = editor.path.parent() else {
+        return;
+    };
+    let stem = editor
+        .path
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "preview".into());
+    let preview = dir.join(format!(".fab-preview-{stem}.scad"));
+    if std::fs::write(&preview, editor.text.as_bytes()).is_err() {
+        status.0 = "preview write failed".into();
+        return;
+    }
+    kick_render_from(&mut job, &mut status, &scene, &preview, false);
 }
 
 /// Spawn a per-part reslice off `part_stl` (part `part`'s cached whole STL) on the async compute
@@ -2532,7 +2665,10 @@ fn poll_job(
     };
     job.0 = None;
     match result {
-        Ok(JobResult::Rendered { fresh, parts: paths }) => {
+        Ok(JobResult::Rendered {
+            fresh,
+            parts: paths,
+        }) => {
             // A structural change (the model's part COUNT moved) forces a full rebuild even on a
             // reload — the old Part↔entity mapping no longer holds.
             if fresh || paths.len() != parts.0.len() {
@@ -2543,7 +2679,14 @@ fn poll_job(
                     .iter()
                     .enumerate()
                     .map(|(i, (path, name))| {
-                        build_part(&mut commands, &mut meshes, &mut materials, i, path, name.clone())
+                        build_part(
+                            &mut commands,
+                            &mut meshes,
+                            &mut materials,
+                            i,
+                            path,
+                            name.clone(),
+                        )
                     })
                     .collect();
                 *parts = Parts(new);
@@ -2754,6 +2897,7 @@ fn enter_exit_print(
 fn apply_view_visibility(
     edit: Res<EditCut>,
     print: Res<PrintView>,
+    tab: Res<Tab>,
     mut models: Query<&mut Visibility, (With<Model>, Without<CutPlaneViz>)>,
     mut planes: Query<&mut Visibility, (With<CutPlaneViz>, Without<Model>)>,
 ) {
@@ -2767,7 +2911,9 @@ fn apply_view_visibility(
             *v = model_vis;
         }
     }
-    let plane_vis = if print.0 {
+    // Cut planes stay hidden in the print preview AND on the Model tab — the editor shows the
+    // UNSLICED model (U.3.2); the cut overlays belong to the Parts tab.
+    let plane_vis = if print.0 || *tab == Tab::Model {
         Visibility::Hidden
     } else {
         Visibility::Inherited
@@ -3149,6 +3295,7 @@ fn run_screenshot(scene: SceneCfg, png: PathBuf) {
         .init_resource::<EditCut>()
         .init_resource::<PrintView>()
         .init_resource::<Tab>()
+        .init_resource::<EditorBuf>()
         .init_resource::<XSection>()
         .init_resource::<DraggingCut>()
         .init_resource::<SliceInBackground>()
@@ -3165,6 +3312,7 @@ fn run_screenshot(scene: SceneCfg, png: PathBuf) {
         .run();
 }
 
+#[allow(clippy::too_many_arguments)] // a Bevy startup system — params are dependencies, not a smell
 fn setup_offscreen(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
@@ -3172,8 +3320,15 @@ fn setup_offscreen(
     mut images: ResMut<Assets<Image>>,
     scene: Res<SceneCfg>,
     png: Res<ScreenshotPng>,
+    mut editor: ResMut<EditorBuf>,
+    mut files: ResMut<FileList>,
 ) {
     spawn_environment(&mut commands, &mut meshes, &mut materials, &scene);
+    if let Some(src) = scene.source.clone() {
+        read_into_editor(&mut editor, &src);
+        files.files = vec![src];
+        files.active = Some(0);
+    }
     // Synchronous here — no UI to freeze. Render whole for bounds + the cut plane, then
     // (if asked) slice at the chosen cut so the PNG verifies an off-center cut.
     let display = setup_offscreen_model(&mut commands, &mut meshes, &mut materials, &scene);
@@ -3417,6 +3572,7 @@ fn run_scripted(scene: SceneCfg, actions: Vec<Action>) {
         .init_resource::<PrintJob>()
         .init_resource::<PrintPieces>()
         .init_resource::<Tab>()
+        .init_resource::<EditorBuf>()
         .init_resource::<PrevCam>()
         .init_resource::<Feas>()
         .init_resource::<FileList>()
@@ -3471,6 +3627,7 @@ fn run_scripted(scene: SceneCfg, actions: Vec<Action>) {
         .run();
 }
 
+#[allow(clippy::too_many_arguments)] // a Bevy startup system — params are dependencies, not a smell
 fn setup_script(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
@@ -3479,8 +3636,15 @@ fn setup_script(
     scene: Res<SceneCfg>,
     mut job: ResMut<Job>,
     mut status: ResMut<Status>,
+    mut editor: ResMut<EditorBuf>,
+    mut files: ResMut<FileList>,
 ) {
     spawn_environment(&mut commands, &mut meshes, &mut materials, &scene);
+    if let Some(src) = scene.source.clone() {
+        read_into_editor(&mut editor, &src);
+        files.files = vec![src];
+        files.active = Some(0);
+    }
     let (w, h) = (960u32, 720u32);
     let mut img = Image::new_target_texture(w, h, TextureFormat::Rgba8UnormSrgb, None);
     img.texture_descriptor.usage |= TextureUsages::COPY_SRC;
@@ -3672,7 +3836,10 @@ fn run_script(
         Action::Orient(piece, up) => {
             if runner.timer == 1 {
                 *tab = Tab::Orientation;
-                orient.set_manual((piece, 0), Vec3::from_array(up).normalize_or_zero().to_array());
+                orient.set_manual(
+                    (piece, 0),
+                    Vec3::from_array(up).normalize_or_zero().to_array(),
+                );
             }
             runner.timer >= 3 // let relayout + feasibility catch up
         }

@@ -141,9 +141,7 @@ pub fn best_up(tris: &[[Vec3; 3]], cut_normals: &[Vec3]) -> Vec3 {
             );
         }
     }
-    winner
-        .map(|(_, s)| s.0)
-        .unwrap_or(Vec3::new(0.0, 0.0, 1.0))
+    winner.map(|(_, s)| s.0).unwrap_or(Vec3::new(0.0, 0.0, 1.0))
 }
 
 #[cfg(test)]

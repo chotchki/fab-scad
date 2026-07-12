@@ -894,7 +894,10 @@ fn eval_with_global<'a>(
                         let mut c = ctx.cache.borrow_mut();
                         let h = c.get(&key);
                         if warming {
-                            c.note(h.is_some(), eval_cache::key_work(&vals, ctx.config.eval_cache_argcap));
+                            c.note(
+                                h.is_some(),
+                                eval_cache::key_work(&vals, ctx.config.eval_cache_argcap),
+                            );
                         }
                         h
                     };
@@ -2896,13 +2899,19 @@ mod tests {
         // Monotone: a 10k-element comprehension costs strictly more than a 100-element one.
         let small = cost("x = len([for (i = [0:100]) i]);", 50_000_000);
         let big = cost("x = len([for (i = [0:10000]) i]);", 50_000_000);
-        assert!(big > small, "bigger comprehension must cost more: {big} vs {small}");
+        assert!(
+            big > small,
+            "bigger comprehension must cost more: {big} vs {small}"
+        );
         // Deterministic: same program, same cost.
         assert_eq!(big, cost("x = len([for (i = [0:10000]) i]);", 50_000_000));
         // Bounded: a past-budget program caps at ~budget — above any completing program's cost, so it sorts
         // to the top of the ranking rather than running away.
         let capped = cost("x = [for (i = [0:9e9]) i];", 10_000);
-        assert!(capped >= 10_000 && capped > big, "budget-hit caps high (worst-case rank): {capped}");
+        assert!(
+            capped >= 10_000 && capped > big,
+            "budget-hit caps high (worst-case rank): {capped}"
+        );
     }
 
     /// The `set -x` trace (`super::trace`), forced on so its output paths + the evaluator's hooks all run.

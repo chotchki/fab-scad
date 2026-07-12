@@ -608,7 +608,7 @@ impl GeometryBackend for MockBackend {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_geo_parts, GeometryBackend, MockBackend};
+    use super::{GeometryBackend, MockBackend, build_geo_parts};
 
     #[test]
     fn build_geo_parts_splits_top_level_items() {
@@ -622,7 +622,11 @@ mod tests {
         }
         // A lone top-level item is ONE part — not split into its internal pieces.
         let one = fab_lang::evaluate_geometry("cube(10);").expect("evaluates");
-        assert_eq!(build_geo_parts(&one, &MockBackend).len(), 1, "single item → one part");
+        assert_eq!(
+            build_geo_parts(&one, &MockBackend).len(),
+            1,
+            "single item → one part"
+        );
     }
 
     /// Drive the WHOLE op surface of a backend and assert the invariants that hold for ANY correct

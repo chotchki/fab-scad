@@ -27,7 +27,9 @@ fn main() {
         if path.extension().is_none_or(|e| e != "scad") {
             continue;
         }
-        let Ok(src) = fs::read_to_string(&path) else { continue };
+        let Ok(src) = fs::read_to_string(&path) else {
+            continue;
+        };
         let Ok(prog) = parse(&src) else { continue };
         files += 1;
         let stem = path.file_stem().expect("file stem").to_string_lossy();
@@ -41,5 +43,7 @@ fn main() {
             }
         }
     }
-    eprintln!("seeded {defs} function defs from {files} BOSL2 files → corpus/eval + corpus/jit_diff");
+    eprintln!(
+        "seeded {defs} function defs from {files} BOSL2 files → corpus/eval + corpus/jit_diff"
+    );
 }

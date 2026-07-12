@@ -1180,13 +1180,18 @@ mod tests {
         // A single connected solid is one component (and comes back intact — the fast path).
         let one = Solid::cube(10.0, 10.0, 10.0, true).components();
         assert_eq!(one.len(), 1);
-        assert_eq!(one[0].num_tri(), Solid::cube(10.0, 10.0, 10.0, true).num_tri());
+        assert_eq!(
+            one[0].num_tri(),
+            Solid::cube(10.0, 10.0, 10.0, true).num_tri()
+        );
 
         // Empty in, empty out.
-        assert!(Solid::cube(1.0, 1.0, 1.0, true)
-            .difference(&Solid::cube(2.0, 2.0, 2.0, true))
-            .components()
-            .is_empty());
+        assert!(
+            Solid::cube(1.0, 1.0, 1.0, true)
+                .difference(&Solid::cube(2.0, 2.0, 2.0, true))
+                .components()
+                .is_empty()
+        );
     }
 
     #[test]

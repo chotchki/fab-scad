@@ -132,7 +132,13 @@ struct Label {
 /// signal and needs no Manifold backend; the metered path is the raw-AST driver, exact for the self-contained
 /// programs the grammar emits (no `use`/`include`/`import`). Parses ONCE, reused for eval + the JIT diff.
 fn label(src: &str) -> Label {
-    let first_line = |e: &Error| format!("{e}").lines().next().unwrap_or_default().to_string();
+    let first_line = |e: &Error| {
+        format!("{e}")
+            .lines()
+            .next()
+            .unwrap_or_default()
+            .to_string()
+    };
     let prog = match parse(src) {
         Ok(p) => p,
         Err(e) => {
@@ -324,11 +330,15 @@ impl Stats {
             c[0].0,
         ));
         s.push_str("histogram (eval_steps, decade buckets):\n");
-        let edges = ["<10", "<100", "<1k", "<10k", "<100k", "<1M", "<10M", "<100M", ">=100M"];
+        let edges = [
+            "<10", "<100", "<1k", "<10k", "<100k", "<1M", "<10M", "<100M", ">=100M",
+        ];
         for (edge, count) in edges.iter().zip(buckets) {
             s.push_str(&format!("  {edge:>7}  {count}\n"));
         }
-        s.push_str(&format!("\ntop {top_n} worst-case (replay: scad-gen --replay <seed>):\n"));
+        s.push_str(&format!(
+            "\ntop {top_n} worst-case (replay: scad-gen --replay <seed>):\n"
+        ));
         for &(cost, seed) in c.iter().take(top_n) {
             s.push_str(&format!("  seed {seed:<10}  cost {cost}\n"));
         }
@@ -365,21 +375,37 @@ mod tests {
     fn cost_is_deterministic_and_monotone() {
         let light = label("x = 1 + 2;").cost;
         let heavy = label("x = [for (i = [0:200]) i * i];").cost;
-        assert!(heavy > light, "heavier program costs more: {heavy} vs {light}");
-        assert_eq!(heavy, label("x = [for (i = [0:200]) i * i];").cost, "cost is reproducible");
+        assert!(
+            heavy > light,
+            "heavier program costs more: {heavy} vs {light}"
+        );
+        assert_eq!(
+            heavy,
+            label("x = [for (i = [0:200]) i * i];").cost,
+            "cost is reproducible"
+        );
     }
 
     /// R.1.3 — the report ranks worst-case FIRST and reports the true max.
     #[test]
     fn perf_report_ranks_worst_case_first() {
         let mut s = Stats::default();
-        let lbl = |cost| Label { status: "ok", ms: 0, cost, jit: "n/a", err: None };
+        let lbl = |cost| Label {
+            status: "ok",
+            ms: 0,
+            cost,
+            jit: "n/a",
+            err: None,
+        };
         s.record(&lbl(10), 1);
         s.record(&lbl(9999), 2); // the worst case, seed 2
         s.record(&lbl(500), 3);
         let r = s.perf_report(3);
         assert!(r.contains("max 9999"), "report:\n{r}");
         let (i2, i3) = (r.find("seed 2").unwrap(), r.find("seed 3").unwrap());
-        assert!(i2 < i3, "the worst case (seed 2) must rank before seed 3:\n{r}");
+        assert!(
+            i2 < i3,
+            "the worst case (seed 2) must rank before seed 3:\n{r}"
+        );
     }
 }

@@ -359,7 +359,11 @@ fn neg_squared_nan_is_nan_class() {
         let jit = jitted.call(&[x]).expect("no assert");
         let slow = interp(&names, body, &[x]);
         assert!(jit.is_nan() && slow.is_nan(), "both should be NaN");
-        assert_ne!(jit.to_bits(), slow.to_bits(), "the known bit split (the whole point)");
+        assert_ne!(
+            jit.to_bits(),
+            slow.to_bits(),
+            "the known bit split (the whole point)"
+        );
         assert!(tier_eq(jit, slow), "tier_eq treats the two NaN as equal");
     }
 }

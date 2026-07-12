@@ -303,11 +303,12 @@ impl Cache {
         self.w_work = self.w_work.saturating_add(work);
         self.w_hits += u32::from(hit);
         if self.w_probes >= WARMUP_PROBES {
-            self.state = if u64::from(self.w_hits) * 1000 >= u64::from(self.w_probes) * MIN_HIT_PERMILLE {
-                CacheState::Live
-            } else {
-                CacheState::Off
-            };
+            self.state =
+                if u64::from(self.w_hits) * 1000 >= u64::from(self.w_probes) * MIN_HIT_PERMILLE {
+                    CacheState::Live
+                } else {
+                    CacheState::Off
+                };
             if std::env::var_os("FAB_CACHE_DEBUG").is_some() {
                 eprintln!(
                     "[cache-autooff] probes={} hits={} ({}‰) work={} -> {}",
@@ -315,7 +316,11 @@ impl Cache {
                     self.w_hits,
                     u64::from(self.w_hits) * 1000 / u64::from(self.w_probes),
                     self.w_work,
-                    if self.state == CacheState::Live { "LIVE" } else { "OFF" },
+                    if self.state == CacheState::Live {
+                        "LIVE"
+                    } else {
+                        "OFF"
+                    },
                 );
             }
         }

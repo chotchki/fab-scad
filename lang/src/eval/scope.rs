@@ -228,20 +228,14 @@ impl Scope {
                 if let Some(value) = frame.specials.get(name) {
                     return Some(value.clone());
                 }
-                match &frame.dynamic_parent {
-                    Some(parent) => frame = parent,
-                    None => return None,
-                }
+                frame = frame.dynamic_parent.as_ref()?;
             }
         } else {
             loop {
                 if let Some(value) = frame.vars.get(name) {
                     return Some(value.clone());
                 }
-                match &frame.parent {
-                    Some(parent) => frame = parent,
-                    None => return None,
-                }
+                frame = frame.parent.as_ref()?;
             }
         }
     }

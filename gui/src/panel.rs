@@ -1,0 +1,391 @@
+//! The egui control panel (the only egui UI outside the mode builders).
+
+use crate::*;
+
+/// The panel's outbound message writers, bundled so `panel_ui` spends ONE system param on all
+/// three (Bevy caps a system at 16 params).
+#[derive(SystemParam)]
+pub(crate) struct PanelWriters<'w> {
+    pub(crate) switch: MessageWriter<'w, SwitchFile>,
+    pub(crate) autoplace: MessageWriter<'w, AutoPlace>,
+    pub(crate) cmd: MessageWriter<'w, PanelCmd>,
+}
+
+/// The whole control panel (U.3), immediate-mode: an app-wide top tab bar + bottom status bar +
+/// a left egui panel whose contents route on the active `Tab` (Model / Parts / Orientation / Export).
+/// Cheap edits mutate in place; a heavy action (needing params beyond the panel's own) writes a
+/// `PanelCmd` its dedicated system handles. Writes `PanelSeam` after drawing so `orbit` yields the
+/// pointer over the panels and `split_viewport` insets the 3D camera inside all three bars.
+// TODO(U.2): the Material Symbols icon font — text labels ("+"/"on"/"off"/"del"/"conn") for now.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn panel_ui(
+    mut contexts: EguiContexts,
+    mut parts: ResMut<Parts>,
+    mut active_part: ResMut<ActivePart>,
+    mut active: ResMut<ActiveConn>,
+    mut edit: ResMut<EditCut>,
+    mut tab: ResMut<Tab>,
+    files: Res<FileList>,
+    status: Res<Status>,
+    job: Res<Job>,
+    mut open_dialog: ResMut<OpenDialog>,
+    mut editor: ResMut<EditorBuf>,
+    time: Res<Time>,
+    mut writers: PanelWriters,
+    mut seam: ResMut<PanelSeam>,
+) {
+    let Ok(ctx) = contexts.ctx_mut() else {
+        return;
+    };
+    // A delete defers past the row loop (index stability), tagged with the PART it belongs to (T.2b).
+    let mut to_remove: Option<(usize, usize)> = None;
+    // egui 0.35 panels show INTO a Ui, not the Context — wrap the viewport in a background-layer Ui
+    // first (the bevy_egui side_panel pattern) so the panels overlay the 3D view.
+    let mut viewport = egui::Ui::new(
+        ctx.clone(),
+        egui::Id::new("panel_viewport"),
+        egui::UiBuilder::new()
+            .layer_id(egui::LayerId::background())
+            .max_rect(ctx.viewport_rect()),
+    );
+    // TOP BAR (U.3): the app-wide workflow tabs — Model → Parts → Orientation → Export. Sets the
+    // active `Tab` (the source of truth the left panel routes on); the ACTIVE tab reads green + bold.
+    let top = egui::Panel::top("topbar").show(&mut viewport, |ui| {
+        ui.horizontal(|ui| {
+            ui.heading("fab-gui");
+            ui.separator();
+            for (t, label) in Tab::ALL {
+                let on = *tab == t;
+                let text = if on {
+                    egui::RichText::new(label)
+                        .color(egui::Color32::from_rgb(120, 220, 140))
+                        .strong()
+                } else {
+                    egui::RichText::new(label)
+                };
+                if ui.selectable_label(on, text).clicked() {
+                    *tab = t;
+                }
+            }
+        });
+    });
+    // BOTTOM BAR (U.3): the traditional status line — pulses blue while a background render/slice runs.
+    let bottom = egui::Panel::bottom("statusbar").show(&mut viewport, |ui| {
+        if job.0.is_some() {
+            let p = ((ui.input(|i| i.time) * 5.0).sin() * 0.5 + 0.5) as f32;
+            let col =
+                egui::Color32::from_rgb((115.0 + 115.0 * p) as u8, (165.0 + 75.0 * p) as u8, 255);
+            ui.colored_label(col, status.0.as_str());
+            ui.ctx().request_repaint();
+        } else {
+            ui.label(status.0.as_str());
+        }
+    });
+    // LEFT PANEL (U.3): the active tab's controls.
+    let panel = egui::Panel::left("panel")
+        .resizable(true)
+        .default_size(220.0)
+        .show(&mut viewport, |ui| {
+            match *tab {
+                Tab::Model => {
+                    // FILE TABS (U.3.2): the open files as tabs + a ＋ that reopens the folder picker.
+                    ui.horizontal_wrapped(|ui| {
+                        for (i, path) in files.files.iter().enumerate() {
+                            let name = path
+                                .file_name()
+                                .map(|s| s.to_string_lossy().into_owned())
+                                .unwrap_or_else(|| "?".into());
+                            let on = files.active == Some(i);
+                            let text = if on {
+                                egui::RichText::new(name)
+                                    .color(egui::Color32::from_rgb(120, 220, 140))
+                                    .strong()
+                            } else {
+                                egui::RichText::new(name)
+                            };
+                            if ui.selectable_label(on, text).clicked() {
+                                writers.switch.write(SwitchFile(i));
+                            }
+                        }
+                        if ui.button("＋").clicked() && open_dialog.0.is_none() {
+                            open_dialog.0 = Some(AsyncComputeTaskPool::get().spawn(async move {
+                                rfd::AsyncFileDialog::new()
+                                    .pick_folder()
+                                    .await
+                                    .map(|h| h.path().to_path_buf())
+                            }));
+                        }
+                    });
+                    ui.separator();
+                    // Save (explicit, desktop) + jump to OpenSCAD. The buffer renders live; the file
+                    // on disk only changes here.
+                    ui.horizontal(|ui| {
+                        if ui
+                            .add_enabled(editor.dirty, egui::Button::new("Save"))
+                            .clicked()
+                            && std::fs::write(&editor.path, editor.text.as_bytes()).is_ok()
+                        {
+                            editor.dirty = false;
+                        }
+                        if editor.dirty {
+                            ui.colored_label(egui::Color32::from_rgb(224, 168, 96), "● unsaved");
+                        }
+                    });
+                    // The code editor — its buffer IS the render source (debounced preview, U.3.2).
+                    // `auto_shrink` off + sizing to the remaining space so it FILLS the panel, not just
+                    // the text height (else a short file leaves the panel half-empty).
+                    egui::ScrollArea::vertical()
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| {
+                            let resp = ui.add_sized(
+                                ui.available_size(),
+                                egui::TextEdit::multiline(&mut editor.text)
+                                    .code_editor()
+                                    .desired_width(f32::INFINITY),
+                            );
+                            if resp.changed() {
+                                editor.dirty = true;
+                                editor.edited_at = Some(time.elapsed_secs_f64());
+                            }
+                        });
+                }
+                Tab::Parts => {
+                    // ACCORDION (T.2b): one collapsing section per top-level part. Expanding or
+                    // touching a part makes it ACTIVE — the slice systems, cut-plane overlays, and
+                    // connector editor all follow `ActivePart`, so an edit reslices the right part.
+                    let n = parts.0.len();
+                    for i in 0..n {
+                        let is_active = active_part.0 == i;
+                        let pcs = piece_estimate(&parts.0[i].cuts);
+                        let label = format!(
+                            "{} · {} pc{}",
+                            part_label(&parts.0[i].name, i),
+                            pcs,
+                            if pcs == 1 { "" } else { "s" }
+                        );
+                        // The ACTIVE part reads green + bold — a clear marker that doesn't collide
+                        // with egui's collapse triangle the way a "▶" prefix did.
+                        let header = if is_active {
+                            egui::RichText::new(label)
+                                .color(egui::Color32::from_rgb(120, 220, 140))
+                                .strong()
+                        } else {
+                            egui::RichText::new(label)
+                        };
+                        let mut select = false;
+                        let resp = egui::CollapsingHeader::new(header)
+                            .id_salt(("part", i))
+                            .default_open(is_active)
+                            .show(ui, |ui| {
+                                select |= part_cut_editor(
+                                    ui,
+                                    &mut parts.0[i],
+                                    i,
+                                    &mut edit,
+                                    &mut to_remove,
+                                );
+                            });
+                        if select || resp.header_response.clicked() {
+                            active_part.0 = i;
+                            parts.set_changed(); // a pure selection must refresh the active-part visuals
+                        }
+                    }
+                    ui.separator();
+                    if ui.button("Auto-slice").clicked() {
+                        writers.cmd.write(PanelCmd::AutoSlice);
+                    }
+                    let spread = parts.0[active_part.0].spread; // active part's explode state
+                    if ui
+                        .button(if spread > 0.0 { "Assemble" } else { "Explode" })
+                        .clicked()
+                    {
+                        writers.cmd.write(PanelCmd::ToggleView);
+                    }
+                    // CONNECTOR DRILL: toggling a cut's `conn` sets edit.0 = Some(cut) — show that
+                    // cut's connector controls inline (folds in the old Connectors mode). The full
+                    // nested part → cut → connector drill is U.3.3.
+                    if let Some(i) = edit.0 {
+                        ui.separator();
+                        let ap = active_part.0;
+                        let header = match parts.0[ap].cuts.list.get(i) {
+                            Some(c) => {
+                                let pos = if c.at.fract() == 0.0 {
+                                    format!("{}", c.at as i64)
+                                } else {
+                                    format!("{:.1}", c.at)
+                                };
+                                format!("Connectors: {} cut @ {}", c.axis.label(), pos)
+                            }
+                            None => "Connectors".to_string(),
+                        };
+                        ui.label(header);
+                        ui.horizontal(|ui| {
+                            if ui
+                                .selectable_label(active.kind == fab::ConnKind::Onion, "Onion")
+                                .clicked()
+                            {
+                                active.kind = fab::ConnKind::Onion;
+                            }
+                            if ui
+                                .selectable_label(active.kind == fab::ConnKind::Bolt, "Bolt")
+                                .clicked()
+                            {
+                                active.kind = fab::ConnKind::Bolt;
+                            }
+                        });
+                        if active.kind == fab::ConnKind::Bolt {
+                            ui.horizontal(|ui| {
+                                for s in [Screw::M3, Screw::M4, Screw::M5] {
+                                    if ui.selectable_label(active.screw == s, s.label()).clicked() {
+                                        active.screw = s;
+                                    }
+                                }
+                            });
+                        }
+                        if ui.button("Auto-place").clicked() {
+                            writers.autoplace.write(AutoPlace);
+                        }
+                        if ui.button("Clear connectors").clicked() {
+                            parts.0[ap].conns.list.retain(|c| c.cut != i);
+                        }
+                        if ui.button("Done").clicked() {
+                            edit.0 = None;
+                        }
+                    }
+                }
+                Tab::Orientation => {
+                    ui.label("Print orientation");
+                    ui.label("click a piece to set which way it prints");
+                    // The per-piece flat/auto list lands in U.3.4.
+                }
+                Tab::Export => {
+                    if ui.button("Export plates").clicked() {
+                        writers.cmd.write(PanelCmd::Export);
+                    }
+                    if ui.button("Publish").clicked() {
+                        writers.cmd.write(PanelCmd::Publish);
+                    }
+                    // The co-pack plate preview lands in U.3.5.
+                }
+            }
+            // Fill the panel to full height on every tab so its frame reaches the status bar (U.3.2).
+            ui.add_space(ui.available_height());
+        });
+    if let Some((p, idx)) = to_remove {
+        if let Some(part) = parts.0.get_mut(p) {
+            remove_cut(&mut part.cuts, &mut part.conns, idx);
+        }
+    }
+    seam.width_px = panel.response.rect.width() * ctx.pixels_per_point();
+    seam.top_px = top.response.rect.height() * ctx.pixels_per_point();
+    seam.bottom_px = bottom.response.rect.height() * ctx.pixels_per_point();
+    seam.over_ui = ctx.egui_wants_pointer_input() || ctx.is_pointer_over_egui();
+}
+
+/// Render one part's cut cards (X/Y/Z add buttons + per-cut rows) into `ui`, mutating `part`'s cut
+/// stack in place. Returns `true` if the user TOUCHED anything, so the caller makes this part active
+/// and the reactive slice follows the edit. `part_idx` tags a deferred delete with its owner.
+pub(crate) fn part_cut_editor(
+    ui: &mut egui::Ui,
+    part: &mut Part,
+    part_idx: usize,
+    edit: &mut EditCut,
+    to_remove: &mut Option<(usize, usize)>,
+) -> bool {
+    let mut touched = false;
+    let bounds0 = part.bounds.0;
+    for axis in [Axis::X, Axis::Y, Axis::Z] {
+        ui.horizontal(|ui| {
+            ui.label(format!("{} plane", axis.label()));
+            if ui.button("+").clicked() {
+                if let Some((mn, mx)) = bounds0 {
+                    let at = comp((mn + mx) * 0.5, axis.index());
+                    part.cuts.list.push(CutDef {
+                        axis,
+                        at,
+                        enabled: true,
+                    });
+                    part.cuts.active = part.cuts.list.len() - 1;
+                    touched = true;
+                }
+            }
+        });
+        let idxs: Vec<usize> = part
+            .cuts
+            .list
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| c.axis == axis)
+            .map(|(i, _)| i)
+            .collect();
+        for idx in idxs {
+            ui.horizontal(|ui| {
+                if idx == part.cuts.active {
+                    ui.label("▶");
+                }
+                let mut at = part.cuts.list[idx].at;
+                if ui.add(egui::DragValue::new(&mut at).speed(0.5)).changed() {
+                    let clamped = clamp_to_bounds(at, axis, &part.bounds);
+                    part.cuts.list[idx].at = clamped;
+                    part.cuts.active = idx;
+                    touched = true;
+                }
+                let en = part.cuts.list[idx].enabled;
+                if ui
+                    .selectable_label(en, if en { "on" } else { "off" })
+                    .clicked()
+                {
+                    part.cuts.list[idx].enabled = !en;
+                    touched = true;
+                }
+                if ui
+                    .button(
+                        egui::RichText::new("del").color(egui::Color32::from_rgb(230, 130, 130)),
+                    )
+                    .clicked()
+                {
+                    *to_remove = Some((part_idx, idx));
+                    touched = true;
+                }
+                let editing = edit.0 == Some(idx);
+                if ui.selectable_label(editing, "conn").clicked() {
+                    edit.0 = if editing { None } else { Some(idx) };
+                    touched = true;
+                }
+            });
+        }
+    }
+    touched
+}
+
+/// The accordion label for part `i`: its provenance name (the top-level module/function that made
+/// it) capped to a stable width + an ordinal suffix — `wall_sliced·1`, `frame·2` — or a generic
+/// `Part N` when the part is anonymous (a bare block / an ambiguous split). The suffix keeps labels
+/// short + uniform and disambiguates two parts from the SAME module (T.2b).
+pub(crate) fn part_label(name: &Option<String>, i: usize) -> String {
+    const CAP: usize = 12; // chars, before the ·ordinal — keeps the accordion column tidy
+    match name {
+        Some(n) if n.chars().count() > CAP => {
+            let short: String = n.chars().take(CAP - 1).collect();
+            format!("{short}…·{}", i + 1)
+        }
+        Some(n) => format!("{n}·{}", i + 1),
+        None => format!("Part {}", i + 1),
+    }
+}
+
+/// A rough printable-piece count for a part's cut stack — the product over axes of (enabled cuts on
+/// that axis + 1). Ignores connected-components (a presliced blob reads as 1 until sliced), so it's
+/// a fast accordion label, not the exact plate count.
+pub(crate) fn piece_estimate(cuts: &Cuts) -> usize {
+    [Axis::X, Axis::Y, Axis::Z]
+        .iter()
+        .map(|&ax| {
+            cuts.list
+                .iter()
+                .filter(|c| c.enabled && c.axis == ax)
+                .count()
+                + 1
+        })
+        .product()
+}

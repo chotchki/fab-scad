@@ -225,7 +225,7 @@ added 2026-07-07.
   - [x] U.3.8 - U.3.8 - Harness + tests: script verbs (tab-switch, editor-edit), screenshot each tab, full gui verify
   - [x] U.3.9 - U.3.9 - panel-inset layout bug: egui layer offset by seam on HiDPI window (egui context rect ↔ split_viewport 3D-camera inset collision); root-cause via bevy_egui-0.41 source + real-window diag, fix + verify on 2× display
   - [x] U.3.10 - U.3.10 - real-window screenshot harness: windowed `--shot <path>` captures the TRUE winit/HiDPI window surface at a settled frame (+ camera/egui-context ownership dump, self-exit) — the offscreen harness renders a different pipeline and is blind to windowed-only wiring bugs
-- [ ] U.4 - U.4 - gui module split: break gui/src/main.rs (4.6k lines) into cohesive modules (behavior-preserving moves, no logic changes)
+- [x] U.4 - U.4 - gui module split: break gui/src/main.rs (4.6k lines) into cohesive modules (behavior-preserving moves, no logic changes)
 ## Phase V - V - Multi-part parallelism (per-part render/slice/pack on independent worker threads; Solids stay thread-local, mesh data crosses)
 - [ ] V.1 - V.1 - per-part parallelism: render/slice/print-layout each part on its own worker thread
 
@@ -274,3 +274,4 @@ Parked 2026-07-04 for the scad-rs pivot — the workflow tool works and stays in
 - **Fast-path named args: map named→positional before intrinsic/JIT dispatch** — added 2026-07-09.
 - **JIT-in-WASM may be viable — revisit the desktop-only-JIT assumption** — added 2026-07-09.
 - **Module memo rung 2b: read-set-precise $-context (key only $-vars each module reads), chase 42%→~99%** — deferred from J.5.2b on 2026-07-10.
+- **gui module imports: tighten `use crate::*` globs (U.4 refactor artifact) to explicit imports, then prune the uniform pub(crate) to the real cross-module surface** — added 2026-07-12.

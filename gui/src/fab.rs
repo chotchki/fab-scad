@@ -163,11 +163,7 @@ fn preview_libs(root: Option<&Path>) -> Vec<PathBuf> {
 /// (the top-level module/function that produced it, or `None` when anonymous / ambiguous) — T.2b.
 pub type PartRender = (PathBuf, (FVec3, FVec3), Option<String>);
 
-pub fn render_parts(
-    root: Option<&Path>,
-    source: &Path,
-    out_dir: &Path,
-) -> Result<Vec<PartRender>> {
+pub fn render_parts(root: Option<&Path>, source: &Path, out_dir: &Path) -> Result<Vec<PartRender>> {
     use fab_scad::backend::{build_geo_parts, ManifoldBackend};
     let abs = source
         .canonicalize()
@@ -422,7 +418,10 @@ pub fn reslice_part_kernel(
             ))
         })
         .collect();
-    let stem = part_stl.file_stem().map(|s| s.to_string_lossy()).unwrap_or_default();
+    let stem = part_stl
+        .file_stem()
+        .map(|s| s.to_string_lossy())
+        .unwrap_or_default();
     let out = out_dir.join(format!("{stem}-sliced.stl"));
     Solid::batch_union(&laid).write_stl(&out)?;
     Ok(out)
@@ -640,11 +639,18 @@ mod tests {
         let tmp = std::env::temp_dir().join(format!("gui_parts_{}", std::process::id()));
         std::fs::create_dir_all(&tmp).unwrap();
         let src = tmp.join("twin.scad");
-        std::fs::write(&src, "cube([10,10,10]); translate([40,0,0]) cube([10,10,10]);").unwrap();
+        std::fs::write(
+            &src,
+            "cube([10,10,10]); translate([40,0,0]) cube([10,10,10]);",
+        )
+        .unwrap();
 
         let parts = render_parts(None, &src, &tmp).expect("render parts");
         assert_eq!(parts.len(), 2, "two top-level cubes → two part STLs");
-        assert!(parts.iter().all(|(p, _, _)| p.exists()), "each part STL written");
+        assert!(
+            parts.iter().all(|(p, _, _)| p.exists()),
+            "each part STL written"
+        );
         // The two parts keep their authored X positions (0..10 and 40..50), proving they're the
         // distinct top-level items, not one merged solid.
         let xs: Vec<f64> = parts.iter().map(|(_, (min, _), _)| min.x).collect();
@@ -682,7 +688,11 @@ mod tests {
         // The two share the slab index [0,0,0] but get distinct component indices.
         assert_eq!(pieces[0].piece, [0, 0, 0]);
         let comps: std::collections::HashSet<usize> = pieces.iter().map(|p| p.comp).collect();
-        assert_eq!(comps, [0, 1].into_iter().collect(), "distinct comp ids 0 and 1");
+        assert_eq!(
+            comps,
+            [0, 1].into_iter().collect(),
+            "distinct comp ids 0 and 1"
+        );
         // Each cube lies FLAT: its build-up is an axis (a component ≈ ±1), never a 45° tilt (≈0.707).
         for p in &pieces {
             let m = p.up.iter().map(|c| c.abs()).fold(0.0_f32, f32::max);

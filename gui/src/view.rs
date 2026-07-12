@@ -10,6 +10,9 @@ pub(crate) struct Orbit {
     pub(crate) target: Vec3, // look-at point; right-drag pans it
 }
 
+// A Bevy system's params ARE its dependencies; the wheel-gate needs cam + input + three state
+// resources + the window, one past clippy's default arg cap.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn orbit(
     mut cam: Query<(&mut Transform, &mut Orbit)>,
     buttons: Res<ButtonInput<MouseButton>>,
@@ -18,13 +21,26 @@ pub(crate) fn orbit(
     dragging: Res<DraggingCut>,
     edit: Res<EditCut>,
     seam: Res<PanelSeam>,
+    windows: Query<&Window>,
 ) {
-    // Yield the whole gesture (wheel + drag) when the pointer is over the egui panel or a widget
-    // wants it (`panel_ui` sets `seam.over_ui` from egui's wants_pointer_input / is_pointer_over_area),
-    // so scrolling the file list doesn't ALSO zoom the camera.
-    if dragging.0 || edit.0.is_some() || seam.over_ui {
-        // A cut plane has the pointer, the connector editor holds a fixed face-on view, or the
-        // pointer is over the panel (egui owns the wheel there).
+    // Is the cursor over the egui panel? `seam.over_ui` can't answer that reliably: egui's
+    // `is_pointer_over_egui()` returns false over our BACKGROUND-layer panels (they shrink a SEPARATE
+    // viewport Ui, never egui's root_ui, so its available-rect stays the whole window → the check is
+    // false everywhere over the panel, and a wheel-scroll leaks straight to the camera). Gate on the
+    // panel RECT instead — the same physical-px seam bands `split_viewport` insets the 3D camera by
+    // (view.rs:186). Stable frame-to-frame, so the PostUpdate→Update seam lag is harmless. Keep the
+    // `seam.over_ui` term too: it still catches an ACTIVE egui drag (scrollbar/text) that strays out.
+    let over_panel = windows.single().is_ok_and(|w| {
+        w.physical_cursor_position().is_some_and(|c| {
+            c.x <= seam.width_px + 6.0
+                || c.y <= seam.top_px
+                || c.y >= w.physical_height() as f32 - seam.bottom_px
+        })
+    });
+    // Yield the whole gesture (wheel + drag) when a cut plane has the pointer, the connector editor
+    // holds a fixed face-on view, or the pointer is over the panel — so scrolling the editor / file
+    // list doesn't ALSO zoom the camera.
+    if dragging.0 || edit.0.is_some() || seam.over_ui || over_panel {
         motion.clear();
         wheel.clear();
         return;

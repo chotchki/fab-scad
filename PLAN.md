@@ -215,6 +215,7 @@ added 2026-07-07.
   - [x] U.1.3 - U.1.3 - delete feathers: UI builders + retained-mode reconciliation systems + drop the feature
   - [x] U.1.4 - U.1.4 - harness modes (windowed/screenshot/scripted) render egui + full gui verify (test + clippy)
 - [ ] U.2 - U.2 - egui panel polish: Material Symbols icons + active-row alignment + optional Nudge flash
+  - [ ] U.2.1 - build.rs Material Symbols font pipeline: manifest-keyed download+cache+subset+cache; committed subset = CI/offline fallback; egui set_fonts registration
 - [ ] U.3 - U.3 - Workflow tabs: app-wide top-tab restructure (Model/Parts/Orientation/Export) — see docs/workflow-tabs-mockup.html
   - [x] U.3.1 - U.3.1 - Top-tab shell + bottom status bar: app-wide Tab resource, full-width bar, route existing blocks, retire derived PanelMode
   - [x] U.3.2 - U.3.2 - Model tab: egui editor from debounced buffer + explicit desktop Save + unsliced 3D + file inner-tabs with ＋-reopens-folder (reuse FileList/SwitchFile); active file drives downstream
@@ -226,6 +227,10 @@ added 2026-07-07.
   - [x] U.3.8 - U.3.8 - Harness + tests: script verbs (tab-switch, editor-edit), screenshot each tab, full gui verify
   - [x] U.3.9 - U.3.9 - panel-inset layout bug: egui layer offset by seam on HiDPI window (egui context rect ↔ split_viewport 3D-camera inset collision); root-cause via bevy_egui-0.41 source + real-window diag, fix + verify on 2× display
   - [x] U.3.10 - U.3.10 - real-window screenshot harness: windowed `--shot <path>` captures the TRUE winit/HiDPI window surface at a settled frame (+ camera/egui-context ownership dump, self-exit) — the offscreen harness renders a different pipeline and is blind to windowed-only wiring bugs
+  - [ ] U.3.11 - GUI integration tests: script-driven state assertions (ScheduleRunner harness → drive tab/addcut/edit/autoplace → assert edit.0/cuts/conns/active_part/Tab)
+  - [ ] U.3.12 - Dogfood fixes: Parts Auto-slice/Explode no-op + Model-editor scroll zooms 3D view + ＋ file-tab glyph (Material Symbols)
+  - [ ] U.3.13 - Model tab: SCAD syntax highlighting in the code editor (egui layouter / LayoutJob)
+  - [ ] U.3.14 - Config-driven Parts: GUI ↔ project.toml [slicing] shared with the CLI — load-if-present / auto-derive-if-absent, save-on-edit, reset-to-auto (both cuts+connectors), complete derive for all parts, Explode→view-toggle
 - [x] U.4 - U.4 - gui module split: break gui/src/main.rs (4.6k lines) into cohesive modules (behavior-preserving moves, no logic changes)
 ## Phase V - V - Multi-part parallelism (per-part render/slice/pack on independent worker threads; Solids stay thread-local, mesh data crosses)
 - [ ] V.1 - V.1 - per-part parallelism: render/slice/print-layout each part on its own worker thread
@@ -276,3 +281,4 @@ Parked 2026-07-04 for the scad-rs pivot — the workflow tool works and stays in
 - **JIT-in-WASM may be viable — revisit the desktop-only-JIT assumption** — added 2026-07-09.
 - **Module memo rung 2b: read-set-precise $-context (key only $-vars each module reads), chase 42%→~99%** — deferred from J.5.2b on 2026-07-10.
 - **gui module imports: tighten `use crate::*` globs (U.4 refactor artifact) to explicit imports, then prune the uniform pub(crate) to the real cross-module surface** — added 2026-07-12.
+- **Evaluate grcov swap: line-level coverage exclusion (GRCOV_EXCL_LINE) → parser/lexer gate back to 100%** — added 2026-07-12.

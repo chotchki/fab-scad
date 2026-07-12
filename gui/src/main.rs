@@ -50,6 +50,8 @@ mod screenshot;
 mod script;
 mod state;
 mod view;
+#[cfg(test)]
+mod harness_tests; // U.3.11 — headless script-driven state-assertion tests for the Parts drill
 #[allow(unused_imports)]
 // each module re-exports its whole surface; the builders below use most of it
 pub(crate) use {
@@ -191,7 +193,7 @@ fn run_windowed(scene: SceneCfg, shot: Option<PathBuf>) {
         // After `orbit` so the corner axis gizmo reads THIS frame's orbit state (no swim/flicker).
         .add_systems(Update, draw_axis_gizmo.after(orbit))
         .add_systems(Update, window_shot)
-        .add_systems(EguiPrimaryContextPass, panel_ui)
+        .add_systems(EguiPrimaryContextPass, (install_fonts, panel_ui).chain())
         .run();
 }
 
@@ -240,7 +242,7 @@ fn run_screenshot(scene: SceneCfg, png: PathBuf) {
         .add_message::<PanelCmd>()
         .add_systems(Startup, setup_offscreen)
         .add_systems(Update, (capture_then_exit, split_viewport, seat_bed))
-        .add_systems(EguiPrimaryContextPass, panel_ui)
+        .add_systems(EguiPrimaryContextPass, (install_fonts, panel_ui).chain())
         .run();
 }
 
@@ -330,6 +332,6 @@ fn run_scripted(scene: SceneCfg, actions: Vec<Action>) {
                 run_script,
             ),
         )
-        .add_systems(EguiPrimaryContextPass, panel_ui)
+        .add_systems(EguiPrimaryContextPass, (install_fonts, panel_ui).chain())
         .run();
 }

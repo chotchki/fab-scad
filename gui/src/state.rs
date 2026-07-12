@@ -409,7 +409,7 @@ pub(crate) struct PanelSeam {
 /// the left panel routes its content on it, and `sync_tab_modes` maps it onto the print/editor flags
 /// the camera + visibility systems already react to. Model → Parts → Orientation → Export mirrors the
 /// slice pipeline (source → cut → seat → pack); see docs/workflow-tabs-mockup.html.
-#[derive(Resource, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Resource, Clone, Copy, PartialEq, Eq, Default, Debug)]
 pub(crate) enum Tab {
     #[default]
     Model,

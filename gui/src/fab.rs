@@ -444,7 +444,7 @@ pub fn conn_feasibility(
 /// The two connector kinds the GUI places (both consumed by the slicer): Onion = support-free
 /// peg/socket, auto-sized from the cross-section; Bolt = heat-set pocket + machine screw across the
 /// cut. An onion that can't print support-free downgrades to a bolt in the slice regardless.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ConnKind {
     Onion,
     Bolt,

@@ -1,0 +1,11 @@
+# W.7 — nextest runs test binaries in parallel (the whole point; cargo test serializes them).
+# The one hazard: tests that shell out to the OpenSCAD ORACLE binary. Under full 546-test load a
+# cold oracle spawn lost a race once (flaky fail, clean solo + on re-run) — so oracle tests get
+# their own single-threaded group instead of retries. Retries would paper over a REAL divergence,
+# and a differential test's whole job is to fail loudly.
+[test-groups]
+oracle = { max-threads = 1 }
+
+[[profile.default.overrides]]
+filter = 'test(oracle)'
+test-group = 'oracle'

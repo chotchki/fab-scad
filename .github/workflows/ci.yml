@@ -14,29 +14,33 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt, llvm-tools-preview
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest,cargo-llvm-cov
       - run: cargo fmt --all -- --check
-      - run: cargo clippy --all-targets -- -D warnings
-      - run: cargo build --verbose
-      - run: cargo test --verbose
-      # scad-rs (fab-lang) lane. The language crate is NOT a workspace default member, so the
-      # steps above (which resolve to fab-scad) never touch it — it needs its own -p steps. Kept
-      # separate on purpose: fab-lang carries the pedantic + missing_docs ratchet the older crates
-      # don't, so its lint gate can't ride the shared clippy run. fmt --all above already covers it.
+      # --workspace on EVERY cargo step (W.7): in a root-package workspace, bare `cargo clippy/test`
+      # resolves to fab-scad ONLY — gen/geom/gui/jit/lang/web silently skipped this gate for months.
+      # One flag, the whole tree gates; the old per-crate -p test lanes were the workaround and are gone.
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo build --workspace --verbose
+      # nextest schedules test BINARIES in parallel — `cargo test` runs them strictly one at a time,
+      # which serialized ~20 integration suites. Doctests don't run under nextest; the --doc pass
+      # behind it keeps them gated.
+      - run: cargo nextest run --workspace
+      - run: cargo test --workspace --doc
+      # scad-rs (fab-lang) ratchet lane: pedantic + missing_docs + the determinism bans already ride
+      # the workspace clippy above; this pass adds --all-features (`trace`) so the observability
+      # wiring stays lint-clean too. Its tests ride the workspace nextest run (trace only un-gates
+      # spans, it changes no behavior) — the old duplicate `cargo test -p fab-lang` is gone.
       - run: cargo clippy -p fab-lang --all-targets --all-features -- -D warnings
-      - run: cargo test -p fab-lang --verbose
       # Parser/lexer coverage gate: 100% LINE + FUNCTION coverage. A DELIBERATE exception scoped to
       # the language crate (chotchki) — NOT a blanket workspace policy; lexers/parsers earn it because
       # an unexercised branch there is a silent mis-tokenization. Region coverage is intentionally NOT
       # gated: infallible-in-context `?` error arms and test-side matches!/assert failure arms are
       # structurally unreachable, so 100% regions would ban idiomatic `?`/`matches!`.
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-llvm-cov
       - run: cargo llvm-cov -p fab-lang --fail-under-lines 100 --fail-under-functions 100
-      # fab-jit (I.8): the Cranelift JIT spike. Native-only + not a workspace default member, so its
-      # own -p steps. The test suite IS the fast==JIT bit-identity gate (+ the speedup benchmark).
-      - run: cargo clippy -p fab-jit --all-targets -- -D warnings
-      - run: cargo test -p fab-jit
+      # fab-jit (I.8) rides the workspace lint + nextest steps; its suite IS the fast==JIT
+      # bit-identity gate (+ the speedup benchmark).
 
   # Kani proofs on the evaluator kernels (I.7): panic-freedom on the exact loop that runs untrusted
   # SCAD — range termination, stack pop/pop discipline, tessellation index bounds, guarded shifts. A

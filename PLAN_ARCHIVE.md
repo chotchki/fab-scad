@@ -333,3 +333,16 @@
   - [x] Q.4.3 - Q.4.3 - Oracle-match validation across the SVG corpus (differ); document v1 simplifications
   - [x] Q.4.4 - Q.4.4 - Tests + docs/svg-import-design.md + remindwall FamilyLogo end-to-end
 
+---
+
+## 2026-07-12
+
+## Phase W - W - workspace hygiene: rustfmt/clippy burn-down to the existing -D warnings CI gates (branch is 277 commits ahead of origin — the gates never ran)
+- [x] W.1 - W.1 - rustfmt sweep: cargo fmt --all (18 drifted files) → `cargo fmt --all -- --check` green
+- [x] W.2 - W.2 - clippy mechanical tier: cargo clippy --fix per crate + hand tail (doc backticks/doc-valid-idents, semicolons, type_complexity aliases, too_many_args, if-let, inline format args, derive, sort_unstable, must_use msg) across lang/gui/web
+- [x] W.3 - W.3 - determinism-policy sites: 17 HashMap + 2 HashSet in eval_cache/mod_cache/mod_redundancy/redundancy → IndexMap/BTreeMap per-site; N.2c hazard = gate overhead, so perf sanity-check after the swap
+- [x] W.4 - W.4 - no-panic doctrine sites: geo_stack unreachable×2 + mod_cache panic×1 → typed paths; seed_fuzz_from_bosl2 example → Result main (no bare expect)
+- [x] W.5 - W.5 - precision casts: u64/usize→f64 stats ratios (13 sites, same 4 cache files) → one ratio helper with a reasoned allow; eval_cache:377 u64→u32 truncation read + fix or justify
+- [x] W.6 - W.6 - exit gate: run the ci.yml lane commands verbatim locally — fmt --check, clippy -D warnings (root + fab-lang --all-features + fab-jit), tests — all green, zero allows without reasons
+- [x] W.7 - W.7 - test-lane segmentation: default `cargo test` = seconds (unit + smoke); heavy suites (bosl2_scout, conformance, eval/geometry corpus, models_harness e2e) → #[ignore = "corpus lane"] + a dedicated CI lane running --ignored under [profile.test] opt-level 2; kill the fab-lang double-run (root --workspace already includes lang — ci.yml's "not a default member" comment is stale); consider cargo-nextest for per-test timings
+

@@ -24,7 +24,10 @@ const HI: Vec3 = Vec3::splat(50.0);
 fn seeded_part(cuts: Vec<CutDef>) -> Part {
     Part {
         bounds: ModelBounds(Some((LO, HI))),
-        cuts: Cuts { list: cuts, active: 0 },
+        cuts: Cuts {
+            list: cuts,
+            active: 0,
+        },
         ..default()
     }
 }
@@ -66,7 +69,12 @@ fn harness() -> App {
         })
         .add_systems(
             Update,
-            (run_script, sync_tab_modes, enforce_exclusive_modes, do_auto_place),
+            (
+                run_script,
+                sync_tab_modes,
+                enforce_exclusive_modes,
+                do_auto_place,
+            ),
         );
     app
 }
@@ -143,10 +151,16 @@ fn edit_opens_then_toggles_closed() {
 #[test]
 fn conntype_switches_active_kind() {
     let app = drive("conntype bolt");
-    assert_eq!(app.world().resource::<ActiveConn>().kind, fab::ConnKind::Bolt);
+    assert_eq!(
+        app.world().resource::<ActiveConn>().kind,
+        fab::ConnKind::Bolt
+    );
 
     let back = drive("conntype bolt; conntype onion");
-    assert_eq!(back.world().resource::<ActiveConn>().kind, fab::ConnKind::Onion);
+    assert_eq!(
+        back.world().resource::<ActiveConn>().kind,
+        fab::ConnKind::Onion
+    );
 }
 
 // ── S4 — autoplace populates Conns for the edited cut (seeds XSection) ─────────────────────────────
@@ -154,11 +168,19 @@ fn conntype_switches_active_kind() {
 fn autoplace_populates_conns_for_edited_cut() {
     let app = drive_seeded("edit 0; autoplace", |w| {
         // A cut-plane profile in the cut's two non-axis dims (an X cut → (Y,Z) coords).
-        let square = vec![vec![[-40.0, -40.0], [40.0, -40.0], [40.0, 40.0], [-40.0, 40.0]]];
+        let square = vec![vec![
+            [-40.0, -40.0],
+            [40.0, -40.0],
+            [40.0, 40.0],
+            [-40.0, 40.0],
+        ]];
         w.resource_mut::<XSection>().0 = Some(square);
     });
     let conns = &active(&app).conns.list;
-    assert!(!conns.is_empty(), "auto_place should fit >=1 onion in an 80x80 face");
+    assert!(
+        !conns.is_empty(),
+        "auto_place should fit >=1 onion in an 80x80 face"
+    );
     assert!(conns.iter().all(|c| c.cut == 0)); // all on the edited cut
     assert!(conns.iter().all(|c| c.kind == fab::ConnKind::Onion)); // default ActiveConn kind
 }
@@ -219,7 +241,10 @@ fn part_switch_routes_edits_to_the_active_part() {
 #[test]
 fn part_switch_out_of_range_is_ignored() {
     let app = drive_seeded("part 5", |w| {
-        w.insert_resource(Parts(vec![seeded_part(vec![x_cut(0.0)]), seeded_part(vec![])]));
+        w.insert_resource(Parts(vec![
+            seeded_part(vec![x_cut(0.0)]),
+            seeded_part(vec![]),
+        ]));
     });
     assert_eq!(app.world().resource::<ActivePart>().0, 0); // i<len false → no change
 }
@@ -317,7 +342,7 @@ fn wheel_then_radius(app: &mut App, cam: Entity) -> f32 {
         x: 0.0,
         y: 1.0,
         window: Entity::PLACEHOLDER, // orbit ignores the source window
-        phase: TouchPhase::Moved, // a real mouse wheel is always Moved
+        phase: TouchPhase::Moved,    // a real mouse wheel is always Moved
     });
     app.update();
     app.world().entity(cam).get::<Orbit>().unwrap().radius
@@ -333,7 +358,10 @@ fn wheel_over_panel_does_not_zoom() {
 fn wheel_over_viewport_zooms() {
     let (mut app, cam) = orbit_app(Some((500.0, 400.0)), seam(200.0)); // cursor over the 3D view
     let r = wheel_then_radius(&mut app, cam);
-    assert!(r < 100.0, "wheel over the 3D view should zoom in (radius {r} should be < 100)");
+    assert!(
+        r < 100.0,
+        "wheel over the 3D view should zoom in (radius {r} should be < 100)"
+    );
 }
 
 #[test]

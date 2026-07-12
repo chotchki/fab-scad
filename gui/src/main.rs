@@ -42,6 +42,8 @@ pub(crate) use std::path::{Path, PathBuf};
 pub(crate) use fab_lang::{Dims, Vec3 as FVec3};
 
 mod cuts;
+#[cfg(test)]
+mod harness_tests;
 mod jobs;
 mod panel;
 mod print;
@@ -49,9 +51,7 @@ mod scene;
 mod screenshot;
 mod script;
 mod state;
-mod view;
-#[cfg(test)]
-mod harness_tests; // U.3.11 — headless script-driven state-assertion tests for the Parts drill
+mod view; // U.3.11 — headless script-driven state-assertion tests for the Parts drill
 #[allow(unused_imports)]
 // each module re-exports its whole surface; the builders below use most of it
 pub(crate) use {

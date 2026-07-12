@@ -5,6 +5,7 @@
 //! a slice is a pure function of (source, enabled cuts). Modes:
 //!
 //!   cargo run -p fab-gui -- part.scad                       # windowed: orbit, drag cuts, Re-slice
+//!   cargo run -p fab-gui -- part.scad --shot out.png        # windowed self-verify: REAL window capture
 //!   cargo run -p fab-gui -- part.scad --screenshot out.png  # headless render to PNG (self-verify)
 //!   cargo run -p fab-gui -- part.scad --script "addcut 30; reslice; shot a.png"  # scripted harness
 
@@ -33,7 +34,9 @@ use bevy::{
     window::ExitCondition,
     winit::WinitPlugin,
 };
-use bevy_egui::{egui, EguiContexts, EguiPlugin, EguiPrimaryContextPass};
+use bevy_egui::{
+    egui, EguiContexts, EguiGlobalSettings, EguiPlugin, EguiPrimaryContextPass, PrimaryEguiContext,
+};
 
 mod fab;
 use fab_scad::stl;
@@ -58,6 +61,13 @@ struct SceneCfg {
     reslice_on_start: bool, // screenshot --reslice: display the sliced result
     cut_pct: f32,           // screenshot --cut <0..100>: where along X to cut
 }
+
+/// Windowed self-verify (U.3.10): `--shot <path>` captures the REAL window surface at a settled
+/// frame, then exits. The offscreen harness renders through its own camera set at scale 1.0, so
+/// it can't see windowed-only wiring bugs (HiDPI, the egui-context/camera lottery of U.3.9) —
+/// this path sees exactly what the user sees.
+#[derive(Resource, Default)]
+struct WindowShot(Option<PathBuf>);
 
 /// Marks the displayed model entity, so re-slice can swap it out.
 #[derive(Component)]
@@ -580,7 +590,7 @@ fn main() {
     } else if let Some(png) = flag_value(&args, "--screenshot") {
         run_screenshot(cfg, PathBuf::from(png));
     } else {
-        run_windowed(cfg);
+        run_windowed(cfg, flag_value(&args, "--shot").map(PathBuf::from));
     }
 }
 
@@ -618,7 +628,7 @@ fn assets_dir() -> AssetPlugin {
 
 // ---- windowed -------------------------------------------------------------------------
 
-fn run_windowed(scene: SceneCfg) {
+fn run_windowed(scene: SceneCfg, shot: Option<PathBuf>) {
     App::new()
         .add_plugins((
             DefaultPlugins.set(assets_dir()),
@@ -627,6 +637,13 @@ fn run_windowed(scene: SceneCfg) {
         ))
         .insert_resource(ClearColor(Color::srgb(0.10, 0.10, 0.12)))
         .insert_resource(scene)
+        .insert_resource(WindowShot(shot))
+        // U.3.9: we pin the primary egui context to the full-window Camera2d ourselves (see
+        // setup_windowed). Auto-create picks the "first found" camera — an archetype-order lottery.
+        .insert_resource(EguiGlobalSettings {
+            auto_create_primary_context: false,
+            ..default()
+        })
         .init_resource::<Job>()
         .insert_resource(Parts(vec![Part::default()]))
         .init_resource::<ActivePart>()
@@ -707,6 +724,7 @@ fn run_windowed(scene: SceneCfg) {
         )
         // After `orbit` so the corner axis gizmo reads THIS frame's orbit state (no swim/flicker).
         .add_systems(Update, draw_axis_gizmo.after(orbit))
+        .add_systems(Update, window_shot)
         .add_systems(EguiPrimaryContextPass, panel_ui)
         .run();
 }
@@ -740,17 +758,13 @@ fn panel_ui(
     // A delete defers past the row loop (index stability), tagged with the PART it belongs to (T.2b).
     let mut to_remove: Option<(usize, usize)> = None;
     // egui 0.35 panels show INTO a Ui, not the Context — wrap the viewport in a background-layer Ui
-    // first (the bevy_egui side_panel pattern) so the panels overlay the 3D view. Anchor it at the
-    // window ORIGIN with the full viewport size: a HiDPI window's derived viewport rect can come back
-    // offset, which insets the whole UI (the left/top black margin) — pin min to zero (U.3.2 fill).
-    let screen = ctx.viewport_rect();
-    let full = egui::Rect::from_min_size(egui::Pos2::ZERO, screen.size());
+    // first (the bevy_egui side_panel pattern) so the panels overlay the 3D view.
     let mut viewport = egui::Ui::new(
         ctx.clone(),
         egui::Id::new("panel_viewport"),
         egui::UiBuilder::new()
             .layer_id(egui::LayerId::background())
-            .max_rect(full),
+            .max_rect(ctx.viewport_rect()),
     );
     // TOP BAR (U.3): the app-wide workflow tabs — Model → Parts → Orientation → Export. Sets the
     // active `Tab` (the source of truth the left panel routes on); the ACTIVE tab reads green + bold.
@@ -1136,6 +1150,12 @@ fn setup_windowed(
             ..default()
         },
         bevy::ui::IsDefaultUiCamera,
+        // U.3.9: the primary egui context lives HERE, explicitly. Auto-created, bevy_egui attaches
+        // it to the "first found" camera — a registration-order lottery that can (and did) land on
+        // the Camera3d, whose `split_viewport`-inset viewport becomes egui's screen_rect: the whole
+        // UI then draws inset by one seam (the left/top black margin). egui's rect must derive from
+        // a camera that always covers the window.
+        PrimaryEguiContext,
     ));
     commands.spawn((
         Camera3d::default(),
@@ -2265,6 +2285,59 @@ fn split_viewport(seam: Res<PanelSeam>, mut cam: Query<&mut Camera, With<Camera3
     }
 }
 
+/// `--shot` (U.3.10): at a SETTLED frame (90 — frame-1 samples race the HiDPI scale handshake)
+/// dump the Window's ground truth + every camera's order/viewport/egui-context ownership (WHICH
+/// camera hosts the primary context was the whole of bug U.3.9), capture the real window, then
+/// exit a second later so the async PNG save flushes and a scripted run self-terminates.
+#[allow(clippy::type_complexity)] // a diag query — the tuple IS the report
+fn window_shot(
+    mut n: Local<u32>,
+    mut commands: Commands,
+    shot: Res<WindowShot>,
+    windows: Query<&Window>,
+    cams: Query<(
+        Entity,
+        &Camera,
+        Has<bevy_egui::EguiContext>,
+        Has<bevy_egui::PrimaryEguiContext>,
+        Has<Camera2d>,
+        Has<Camera3d>,
+    )>,
+    mut exit: MessageWriter<AppExit>,
+) {
+    let Some(path) = shot.0.as_ref() else {
+        return;
+    };
+    *n += 1;
+    if *n == 150 {
+        exit.write(AppExit::Success);
+    }
+    if *n != 90 {
+        return;
+    }
+    for w in &windows {
+        eprintln!(
+            "WIN DIAG physical={}x{} logical={}x{} scale={}",
+            w.physical_width(),
+            w.physical_height(),
+            w.width(),
+            w.height(),
+            w.scale_factor()
+        );
+    }
+    for (e, cam, ctx, primary, is2d, is3d) in &cams {
+        eprintln!(
+            "CAM DIAG {e} order={} 2d={is2d} 3d={is3d} egui_ctx={ctx} primary={primary} viewport={:?} target={:?}",
+            cam.order,
+            cam.physical_viewport_rect(),
+            cam.physical_target_size(),
+        );
+    }
+    commands
+        .spawn(Screenshot::primary_window())
+        .observe(save_to_disk(path.clone()));
+}
+
 /// Revert to the uncut model the moment a cut is edited, so editing is always on the intact part.
 /// Acts on the ACTIVE part — the only one the panel/drag can edit — swapping just its mesh.
 fn revert_on_edit(
@@ -3289,6 +3362,11 @@ fn run_screenshot(scene: SceneCfg, png: PathBuf) {
             std::time::Duration::from_secs_f64(1.0 / 60.0),
         ))
         .add_plugins(EguiPlugin::default())
+        // U.3.9: explicit primary context (see run_windowed) — no auto-attach lottery.
+        .insert_resource(EguiGlobalSettings {
+            auto_create_primary_context: false,
+            ..default()
+        })
         .insert_resource(ClearColor(Color::srgb(0.10, 0.10, 0.12)))
         .insert_resource(scene)
         .insert_resource(ScreenshotPng(png))
@@ -3354,17 +3432,23 @@ fn setup_offscreen(
     commands.spawn((
         Camera2d,
         Camera {
-            order: 0,
+            // Mirror the windowed layering (U.3.9): 3D renders first (order 0, clears the target),
+            // the egui/UI camera last with no clear. The egui pass runs inside its HOST camera's
+            // graph, so the host must render after the 3D or floating egui elements over the 3D
+            // viewport get overdrawn — a divergence the offscreen harness would never show.
+            order: 1,
+            clear_color: bevy::camera::ClearColorConfig::None,
             ..default()
         },
         RenderTarget::Image(target.clone().into()),
         bevy::ui::IsDefaultUiCamera,
+        // U.3.9: explicit primary context — never the viewport-inset Camera3d (see setup_windowed).
+        PrimaryEguiContext,
     ));
     commands.spawn((
         Camera3d::default(),
         Camera {
-            order: 1,
-            clear_color: bevy::camera::ClearColorConfig::None,
+            order: 0,
             ..default()
         },
         RenderTarget::Image(target.clone().into()),
@@ -3578,6 +3662,11 @@ fn run_scripted(scene: SceneCfg, actions: Vec<Action>) {
             std::time::Duration::from_secs_f64(1.0 / 60.0),
         ))
         .add_plugins(EguiPlugin::default())
+        // U.3.9: explicit primary context (see run_windowed) — no auto-attach lottery.
+        .insert_resource(EguiGlobalSettings {
+            auto_create_primary_context: false,
+            ..default()
+        })
         .insert_resource(ClearColor(Color::srgb(0.10, 0.10, 0.12)))
         .insert_resource(scene)
         .init_resource::<Job>()
@@ -3672,17 +3761,23 @@ fn setup_script(
     commands.spawn((
         Camera2d,
         Camera {
-            order: 0,
+            // Mirror the windowed layering (U.3.9): 3D renders first (order 0, clears the target),
+            // the egui/UI camera last with no clear. The egui pass runs inside its HOST camera's
+            // graph, so the host must render after the 3D or floating egui elements over the 3D
+            // viewport get overdrawn — a divergence the offscreen harness would never show.
+            order: 1,
+            clear_color: bevy::camera::ClearColorConfig::None,
             ..default()
         },
         RenderTarget::Image(target.clone().into()),
         bevy::ui::IsDefaultUiCamera,
+        // U.3.9: explicit primary context — never the viewport-inset Camera3d (see setup_windowed).
+        PrimaryEguiContext,
     ));
     commands.spawn((
         Camera3d::default(),
         Camera {
-            order: 1,
-            clear_color: bevy::camera::ClearColorConfig::None,
+            order: 0,
             ..default()
         },
         RenderTarget::Image(target.clone().into()),

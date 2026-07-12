@@ -107,7 +107,7 @@ added 2026-07-05.
   - [x] K.1.1 - K.1.1 - BOSL2 test corpus tier: sweep the .scadtest suite through scad-rs
   - [ ] K.1.2 - K.1.2 - Perf tier: scad-rs vs OpenSCAD full-pipeline wall-time on geometry
 - [ ] K.2 - semantics/ segmentation formalized: naming + provenance conventions; G.3/I tests migrated in
-- [ ] K.3 - ChaCha8-seeded grammar-directed program generator v0; seed logged per run; one-command failure replay
+- [x] K.3 - ChaCha8-seeded grammar-directed program generator v0; seed logged per run; one-command failure replay
 - [ ] K.4 - Published artifacts per run: divergence report + the (initially empty) intrinsic matrix — the trend line starts before the intrinsics do
 
 ## Phase L - scad-rs: the BOSL2 gauntlet (exit gate for the bet)
@@ -158,6 +158,10 @@ added 2026-07-07.
 - [x] N.2c - N.2c - Eval-memo cache (the 82-92% lever) — reviewed design, ready to build
   - [x] N.2c.1 - N.2c step 1 — DynCtx: O(1) per-frame $-context identity in Scope
   - [ ] N.2c.2 - N.2c.2 - Program-level auto-off: make the eval cache safe to default ON
+    - [x] N.2c.2.1 - N.2c.2.1 - baseline: reproduce the release cache-on/off split (under_sink_guide ~-17%, pill_holder/corner_brace +win) via fab render --engine scad-rs, FAB_EVAL_CACHE 0 vs 1
+    - [x] N.2c.2.2 - N.2c.2.2 - implement bounded-warmup program-level auto-off: measure key-cost vs hit-benefit over a fixed warmup window, one-time disable flag for net-negative programs (per-call cost → single branch once disabled)
+    - [ ] N.2c.2.3 - N.2c.2.3 - flip eval_cache/csg default ON — BLOCKED on N.2c.3 (csg-cache deep-recursion hang). Auto-off (N.2c.2.2) done + validated; the flip is reverted until the csg pathology is fixed, then re-flip with the FULL suite as the gate (not just --lib)
+  - [ ] N.2c.3 - N.2c.3 - csg-cache + deep-recursion pathology: FAB_CSG_CACHE=1 makes deep/infinite module recursion ~200x slower to reach MAX_MODULE_DEPTH (runaway_module_recursion hangs). Per-level gate cost dwarfs trivial bodies. BLOCKS defaulting caches on (N.2c.2.3). Likely: guard-check before cache gate, or skip csg gate under deep recursion
 - [x] N.2d - N.2d - Vec-frame Scope LANDED: adaptive VarMap (Vec small / BTreeMap-spill for island globals); slice_parts eval -4.6% (8925→8517ms), corpus 901/901 (cleared spheroid+gaussian_rands); residual per-bind String-key alloc → N.2b
 - [x] N.2e - N.2e - NumList COW buffer reuse LANDED (ceiling-verified): zip_reuse/map_reuse recycle a refcount-1 Rc<[f64]>; ~0% slice_parts (falsified the theory — its alloc is comprehension result-lists) but ~11% on vector-arithmetic-heavy; bit-identical, corpus 901/901
 ## Phase O - O - Intrinsics tier (AST-fingerprint, wasm-safe)
@@ -173,6 +177,57 @@ added 2026-07-07.
   - [ ] P.1.5 - P.1.5 - Measure + coverage report
   - [ ] P.1.6 - P.1.6 - JIT list/vector ABI (scalarize A/B/C, sink-return D)
 - [ ] P.2 - P.2 - Content-addressed CSG cache
+## Phase Q - Fuzzing the evaluator + JIT (miri/Kani can't execute native code — fuzzing runs it, ASan checks it)
+- [x] Q.1 - Q.1 - eval fuzz target: parse→eval→geometry→mesh under ASan (the interpreter miri-substitute)
+- [x] Q.2 - Q.2 - jit_diff fuzz target: interp vs JIT bit-identity, executes the JIT unsafe seam under ASan
+- [x] Q.3 - Q.3 - wire eval + jit_diff into the fuzz.yml nightly campaign (corpus persist + crash upload)
+- [x] Q.4 - Q.4 - overnight campaign run + triage; any crash → minimize + TROPHIES.md
+- [x] Q.5 - Q.5 - global eval iteration/time budget (untrusted-input DoS hardening; a single 10M-element comprehension is bounded but 10s)
+- [x] Q.6 - Q.6 - fix JIT/interp NaN divergence: resolved as NaN-CLASS convention (fab_lang::tier_eq). Real cause = Cranelift folding (-s)*(-s)→s*s, not fmul canonicalization; NaN payload unobservable + ISA-nondeterministic so waived. Doctrine #36 refined in SPEC.md.
+- [x] Q.7 - Q.7 - JIT compile-complexity budget (fab-jit): bound the lowering's IR growth so compile_function declines a pathological body cheaply instead of OOMing
+## Phase R - R - Generator + success-function search (perf + correctness fitness)
+- [x] R.1 - R.1 - v0 perf success function: generate → rank programs by deterministic eval-cost → worst-case report
+  - [x] R.1.1 - R.1.1 - surface a deterministic eval-cost metric (eval_steps) from fab_lang — a metered-eval entry that returns (result, steps)
+  - [x] R.1.2 - R.1.2 - scad-gen: capture per-program eval-cost into the manifest (cost field), rank, expose a worst-case list
+  - [x] R.1.3 - R.1.3 - perf report artifact (eval-cost histogram + top-N worst-case seeds) + a smoke test
+- [ ] R.2 - R.2 - correctness differential: scad-rs vs OpenSCAD reference (success = divergence) — values/echo first, geometry gated on J.4.5 determinism
+- [ ] R.3 - R.3 - v1 closed loop: score-guided search (evolve seeds/grammar-choices toward high-scoring inputs) — sampling → guided search
+## Phase S - S - Cross-platform determinism (J.4.5): Manifold parallel determinism holds same-platform; verify cross-platform, then re-baseline
+- [x] S.1 - S.1 - test A: native run-to-run determinism (MANIFOLD_PAR=ON, boolean-heavy models) — PASSED: 18 renders / 2 models, bit-identical every time
+- [x] S.2 - S.2 - test B: native MANIFOLD_PAR=ON vs a PAR=OFF rebuild — confirm parallel ≡ serial output bit-for-bit
+- [ ] S.3 - S.3 - test C: native (arm64) vs wasm cross-platform check — DEFERRED (needs a headless wasm mesh harness that doesn't exist yet; wasm is browser-only wasm32-uu). Predicted outcome: polyhedra match, curved primitives diverge on libm → collapses into libm-transcendental-divergence (fix = libm crate), NOT a Manifold issue
+- [ ] S.4 - S.4 - REOPENED: Manifold is run-to-run NON-deterministic on complex non-convex meshes, same-platform (garage_door: 3 runs → 3 STL hashes, identical vol/genus). Test A/S.1 only proved simple convex booleans. Root: per-SimpleBoolean internal parallelism. Confirm via garage_door PAR=OFF rebuild; fix = MANIFOLD_PAR=NONE or Manifold deterministic mode
+## Phase T - T - Slice/plate pipeline: multi-part models + print-orientation
+- [x] T.1 - T.1 - BUG (dogfood): sliced plate pieces land ~45° from the bed in the print-orientation view instead of lying flat. Hypothesis: auto-orient/plate-placement using the wrong up-vector (slice-plane frame leaking into the bed frame)
+- [x] T.2 - T.2 - treat separate TOP-LEVEL items as DISTINCT slice/place targets (partition the root union's children into independent parts, each sliced + oriented + packed on its own) — solves legacy presliced parts. The big one.
+- [x] T.2a - T.2a - CC print-pipeline fix (kernel connected-components + per-component best_up); subsumes T.1
+- [x] T.2b - T.2b - structural parts (build_geo_parts) + egui multi-part tabbed UI; co-pack shared plates
+  - [x] T.2b.1 - T.2b.1 - lib keystone: build_geo_parts (split root Union into N part Solids) + per-part fab.rs pipeline
+  - [x] T.2b.2 - T.2b.2 - GUI state model → per-part: Parts vec + ActivePart, part_id on entities, slice_hash/poll/sync
+  - [x] T.2b.3 - T.2b.3 - multi-part tabbed UI (part switcher + per-part editing) — the design work
+  - [x] T.2b.4 - T.2b.4 - co-pack all parts onto shared plates + full verify (headless screenshot/script + tests)
+- [x] T.3 - T.3 - best_up prefer-flat policy: stop tilting structured pieces to 45° over a stable flat face
+## Phase U - U - GUI: feathers → egui migration (unblocks rich-text, tabs, resizable panels)
+- [x] U.1 - U.1 - egui migration: feathers → bevy_egui 0.41 (Bevy 3D stays); panel layer only
+  - [x] U.1.1 - U.1.1 - bevy_egui integration: dep + EguiPlugin + minimal SidePanel rendering alongside Bevy 3D
+  - [x] U.1.2 - U.1.2 - port all panels (view/connectors/print) to egui immediate-mode + rewire the 2 seams + icon font
+  - [x] U.1.3 - U.1.3 - delete feathers: UI builders + retained-mode reconciliation systems + drop the feature
+  - [x] U.1.4 - U.1.4 - harness modes (windowed/screenshot/scripted) render egui + full gui verify (test + clippy)
+- [ ] U.2 - U.2 - egui panel polish: Material Symbols icons + active-row alignment + optional Nudge flash
+- [ ] U.3 - U.3 - Workflow tabs: app-wide top-tab restructure (Model/Parts/Orientation/Export) — see docs/workflow-tabs-mockup.html
+  - [x] U.3.1 - U.3.1 - Top-tab shell + bottom status bar: app-wide Tab resource, full-width bar, route existing blocks, retire derived PanelMode
+  - [x] U.3.2 - U.3.2 - Model tab: egui editor from debounced buffer + explicit desktop Save + unsliced 3D + file inner-tabs with ＋-reopens-folder (reuse FileList/SwitchFile); active file drives downstream
+  - [ ] U.3.3 - U.3.3 - Parts tab: left-panel 3-level drill part→cut→connectors inline; fold today's Connectors mode in
+  - [ ] U.3.4 - U.3.4 - Orientation tab: promote Print mode; per-piece flat/auto list across all parts
+  - [ ] U.3.5 - U.3.5 - Export tab: co-pack preview + Export 3MF + Publish merged
+  - [ ] U.3.6 - U.3.6 - Entry-point gating: web (single presupplied file, no ＋, editor landing) vs desktop (full picker + ＋); platform gate
+  - [ ] U.3.7 - U.3.7 - Feedback: per-node DAG dirty flags → amber tab dots (stale) + spinner motion on rendering tab + bottom status-bar detail; background jobs clear
+  - [x] U.3.8 - U.3.8 - Harness + tests: script verbs (tab-switch, editor-edit), screenshot each tab, full gui verify
+  - [x] U.3.9 - U.3.9 - panel-inset layout bug: egui layer offset by seam on HiDPI window (egui context rect ↔ split_viewport 3D-camera inset collision); root-cause via bevy_egui-0.41 source + real-window diag, fix + verify on 2× display
+  - [x] U.3.10 - U.3.10 - real-window screenshot harness: windowed `--shot <path>` captures the TRUE winit/HiDPI window surface at a settled frame (+ camera/egui-context ownership dump, self-exit) — the offscreen harness renders a different pipeline and is blind to windowed-only wiring bugs
+- [ ] U.4 - U.4 - gui module split: break gui/src/main.rs (4.6k lines) into cohesive modules (behavior-preserving moves, no logic changes)
+## Phase V - V - Multi-part parallelism (per-part render/slice/pack on independent worker threads; Solids stay thread-local, mesh data crosses)
+- [ ] V.1 - V.1 - per-part parallelism: render/slice/print-layout each part on its own worker thread
 
 ## Backlog (not yet phased)
 

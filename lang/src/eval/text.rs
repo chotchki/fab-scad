@@ -45,6 +45,12 @@ pub(super) struct TextParams {
     reason = "curve_segs is a small bounded positive segment count derived from $fn (>= 3 here)"
 )]
 pub(super) fn text_contours(p: &TextParams, fn_: f64, fa: f64, fs: f64) -> Vec<Contour> {
+    // OpenSCAD renders text through FreeType at 72 DPI while treating `size` as a 100-unit measure, so its
+    // glyphs come out an extra 100/72 larger than the naive `size / units_per_em` (an `I` at size=100 is
+    // 95.55 mm tall, not the 68.8 mm the em ratio gives — `size` is effectively a point size, not the em
+    // height). Match the oracle: the ratio is a constant 1.3888… across sizes (verified), i.e. exactly
+    // 100/72. A legacy OpenSCAD quirk, NOT a metric of the font (units_per_em is a true 2048 here).
+    const OPENSCAD_DPI_SCALE: f64 = 100.0 / 72.0;
     if p.text.is_empty() {
         return Vec::new();
     }
@@ -55,12 +61,6 @@ pub(super) fn text_contours(p: &TextParams, fn_: f64, fa: f64, fs: f64) -> Vec<C
         return Vec::new();
     };
     let upem = f64::from(ttf.units_per_em());
-    // OpenSCAD renders text through FreeType at 72 DPI while treating `size` as a 100-unit measure, so its
-    // glyphs come out an extra 100/72 larger than the naive `size / units_per_em` (an `I` at size=100 is
-    // 95.55 mm tall, not the 68.8 mm the em ratio gives — `size` is effectively a point size, not the em
-    // height). Match the oracle: the ratio is a constant 1.3888… across sizes (verified), i.e. exactly
-    // 100/72. A legacy OpenSCAD quirk, NOT a metric of the font (units_per_em is a true 2048 here).
-    const OPENSCAD_DPI_SCALE: f64 = 100.0 / 72.0;
     let scale = p.size / upem * OPENSCAD_DPI_SCALE;
     // Segments PER Bézier: a glyph curve is a small arc, so `$fn/8` (min 2) tracks the circle-fragment feel;
     // no `$fn` → the fragment count for a `size`-radius arc, capped, so curviness follows `$fa`/`$fs` too.

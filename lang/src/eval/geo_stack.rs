@@ -269,6 +269,9 @@ fn run_cleanup<'a>(task: GTask<'a>, ctx: &Ctx<'a>) {
         GTask::RestoreChildrenFrame(frame) => {
             ctx.children_stack.borrow_mut().push(frame);
         }
+        // The driver loop partitions CLEANUP from WORK before routing; a WORK task here is a driver
+        // bug — loud beats silently no-opping in the error drain.
+        #[allow(clippy::unreachable, reason = "structurally unreachable — see comment")]
         _ => unreachable!("run_cleanup only reached for CLEANUP tasks"),
     }
 }
@@ -365,6 +368,9 @@ fn dispatch_work<'a>(
             }
             Ok(())
         }
+        // Mirror of run_cleanup's guard: the driver routes CLEANUP tasks before this dispatch, so a
+        // cleanup arm here is a driver bug — loud beats returning a fabricated Err.
+        #[allow(clippy::unreachable, reason = "structurally unreachable — see comment")]
         GTask::PopLocalModules | GTask::PopModuleFrame { .. } | GTask::RestoreChildrenFrame(_) => {
             unreachable!("CLEANUP tasks are handled in the driver loop, not dispatch_work")
         }
@@ -431,6 +437,14 @@ fn dispatch_stmt<'a>(
 #[allow(
     clippy::too_many_arguments,
     reason = "mirrors eval_stmt_dispatch's threaded context (stmt/scope/global/island/work/results/ctx)"
+)]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one arm per module combinator — the dispatch match IS the routing table"
+)]
+#[allow(
+    clippy::needless_pass_by_value,
+    reason = "GTasks store owned Scopes; callers hand this an owned clone, so by-value is the honest shape"
 )]
 fn dispatch_module<'a>(
     mi: &'a crate::parser::ModuleInstantiation,
@@ -632,14 +646,11 @@ fn dispatch_module<'a>(
         // leaf, or a LOUD unknown). Mirrors the recursive fallthrough (trace + resolve + call/eval).
         _ => {
             super::trace::module(ctx.module_depth.get(), name);
-            match ctx.resolve_module(island, name) {
-                Some((def, home, base)) => {
-                    push_user_module(mi, def, home, base, scope, island, work, results, ctx)
-                }
-                None => {
-                    results.push(module::eval_module(mi, &scope, ctx)?);
-                    Ok(())
-                }
+            if let Some((def, home, base)) = ctx.resolve_module(island, name) {
+                push_user_module(mi, def, home, base, scope, island, work, results, ctx)
+            } else {
+                results.push(module::eval_module(mi, &scope, ctx)?);
+                Ok(())
             }
         }
     }

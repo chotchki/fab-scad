@@ -299,7 +299,7 @@ impl Stats {
     /// toward genuine worst-cases.
     fn perf_report(&self, top_n: usize) -> String {
         let mut c = self.costs.clone();
-        c.sort_unstable_by(|a, b| b.0.cmp(&a.0)); // descending by cost
+        c.sort_unstable_by_key(|e| std::cmp::Reverse(e.0)); // descending by cost
         let n = c.len();
         if n == 0 {
             return "# perf report\n\n(no programs)\n".to_string();

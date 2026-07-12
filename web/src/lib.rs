@@ -274,9 +274,12 @@ type PickResult = Option<Result<(String, Vec<u8>), String>>;
 #[derive(Resource, Default)]
 struct PickTask(Option<Task<PickResult>>);
 
+/// A finished .scad → STL render: (source name, STL bytes) or the error string.
+type RenderOut = Result<(String, Vec<u8>), String>;
+
 /// The .scad → STL hop, split from PickTask so the panel can say WHOSE render is running.
 #[derive(Resource, Default)]
-struct RenderTask(Option<Task<Result<(String, Vec<u8>), String>>>);
+struct RenderTask(Option<Task<RenderOut>>);
 
 /// One in-flight geometry-service call + what to do with its answer. Single-flight: buttons
 /// no-op (with a status note) while a call is out.
@@ -657,6 +660,7 @@ fn setup_ui(world: &mut World) {
 /// Cycle the printer preset: update the bed, persist the pick, and — reactive standard, no
 /// apply button — re-plan whatever's loaded through the service (live pulse). Also keeps the
 /// button caption honest, including on the first frame.
+#[allow(clippy::too_many_arguments)] // a Bevy system — params are dependencies, not an API
 fn cycle_printer(
     mut act: ResMut<Actions>,
     mut bed: ResMut<Bed>,
@@ -838,7 +842,7 @@ fn poll_render_task(
 
 /// Drain the geometry service and apply the answer per purpose. This is where every heavy
 /// result lands: analyzed models, sliced pieces, packed exports, section profiles.
-#[allow(clippy::too_many_arguments)] // a system-params relay, not an API
+#[allow(clippy::too_many_arguments, clippy::type_complexity)] // a system-params relay, not an API
 fn poll_geom(
     mut geom: ResMut<GeomCall>,
     mut busy: ResMut<Busy>,
@@ -998,7 +1002,7 @@ fn poll_geom(
 
 /// Show an analyzed part: per-object meshes (colors kept), cut planes from the plan, camera
 /// framed, status told. Pure display — all geometry already happened in the service.
-#[allow(clippy::too_many_arguments)] // a poll_geom helper, not an API
+#[allow(clippy::too_many_arguments, clippy::type_complexity)] // a poll_geom helper, not an API
 fn present_display(
     name: &str,
     objects: Vec<GeomObject>,

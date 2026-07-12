@@ -170,7 +170,8 @@ pub(crate) fn setup_script(
 }
 
 /// Step the script: each action drives the real systems, waiting on async work to settle.
-#[allow(clippy::too_many_arguments)]
+// The tuple param below bundles overflow params (Bevy caps a system at 16) — hence type_complexity.
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub(crate) fn run_script(
     mut runner: ResMut<ScriptRunner>,
     mut parts: ResMut<Parts>,
@@ -226,7 +227,7 @@ pub(crate) fn run_script(
         Action::Cut(v) => {
             if runner.timer == 1 {
                 let a = cuts.active;
-                let v = clamp_to_bounds(v, cuts.active_axis(), &bounds);
+                let v = clamp_to_bounds(v, cuts.active_axis(), bounds);
                 if let Some(c) = cuts.list.get_mut(a) {
                     c.at = v;
                 }
@@ -236,7 +237,7 @@ pub(crate) fn run_script(
         Action::AddCut(v) => {
             if runner.timer == 1 {
                 let axis = cuts.active_axis();
-                let at = clamp_to_bounds(v, axis, &bounds);
+                let at = clamp_to_bounds(v, axis, bounds);
                 cuts.list.push(CutDef {
                     axis,
                     at,
@@ -294,7 +295,7 @@ pub(crate) fn run_script(
         Action::Wait(n) => runner.timer >= n,
         Action::Conn(i, a, b) => {
             if runner.timer == 1 {
-                let size = auto_size(&xsection, &cuts, &bounds, i, [a, b]);
+                let size = auto_size(&xsection, cuts, bounds, i, [a, b]);
                 toggle_connector(conns, i, [a, b], size, sw.2.kind, sw.2.screw);
             }
             runner.timer >= 2

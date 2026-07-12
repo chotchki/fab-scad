@@ -737,13 +737,13 @@ impl<'a> FnOracle<'a> {
 /// production use (the interpreter reaches intrinsics through the fingerprint gate at `build_ctx`).
 #[doc(hidden)]
 #[must_use]
-pub fn bench_intrinsic(
-    name: &str,
-    params: &[Parameter],
-    body: &Expr,
-) -> Option<fn(&[Value]) -> crate::Result<Value>> {
+pub fn bench_intrinsic(name: &str, params: &[Parameter], body: &Expr) -> Option<IntrinsicFn> {
     intrinsics::lookup(name, params, body)
 }
+
+/// The intrinsic tier's entry shape: the call's evaluated args in, value out — the very fn pointer
+/// [`Task::Intrinsic`] dispatches.
+pub type IntrinsicFn = fn(&[Value]) -> crate::Result<Value>;
 
 /// Evaluate an expression with a function-store [`Ctx`] in scope (so calls resolve). At the top level
 /// the lexical `global` (the base for function bodies) IS the eval scope.
@@ -1537,6 +1537,10 @@ fn lc_for<'a>(
 /// C-style `for (init; cond; update) body`: the loop variables live in a flat map (each iteration a
 /// fresh `scope.child()`, so no chain accumulation), `cond`/`update` see the current values, and
 /// `update` MERGES into them (unmentioned vars persist). Capped at `RANGE_MAX` iterations.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "threaded eval context (init/cond/update/body + scope/global/ctx/out) — same shape as dispatch_module"
+)]
 fn lc_for_c<'a>(
     init: &'a [Arg],
     cond: &'a Expr,
@@ -1691,7 +1695,7 @@ pub fn eval_program(program: &Program, scope: &Scope) -> crate::Result<Mesh> {
 /// comes back even on `Err` (the ranking wants it regardless). No import resolution — a program that names
 /// `import`/`use`/`surface` fails LOUD like [`eval_program`]; the grammar emits self-contained programs, so
 /// that path is unreached in practice.
-#[must_use]
+#[must_use = "the step count comes back even on Err — the ranking reads it"]
 pub fn evaluate_geometry_metered(program: &Program, budget: u64) -> (crate::Result<Geo>, u64) {
     let config = Config {
         eval_budget: Some(budget),
@@ -2591,7 +2595,7 @@ fn check_assert<'a>(
     // release) or a FAILURE locator. BOSL2 is assert-DENSE and its asserts overwhelmingly PASS, so building
     // this string on every passing assert with tracing off was pure churn (N.2a). `""` covers `assert()`.
     let cond_src = if trace::on() || !passed {
-        cond_expr.map_or_else(String::new, |e| crate::parser::print_expr(e))
+        cond_expr.map_or_else(String::new, crate::parser::print_expr)
     } else {
         String::new()
     };
@@ -2826,7 +2830,7 @@ mod tests {
     }
 
     /// A budget of `None` (the default) is UNLIMITED — a big-but-bounded comprehension evaluates fine, exactly
-    /// as it does today. The DoS guard must never touch the trusted path.
+    /// as it does today. The `DoS` guard must never touch the trusted path.
     #[test]
     fn budget_none_is_unlimited() {
         let v = eval_budgeted("x = len([for (i = [0:200000]) i * 2]);", None).expect("no budget");
@@ -2834,7 +2838,7 @@ mod tests {
     }
 
     /// The exact eval trophy (TROPHIES.md): `[for(i=[0:9e9]) i]` builds a RANGE_MAX-capped 10M-element list
-    /// (>10s / lots of RAM) — but under a budget it's rejected UP FRONT (charge_iterable charges the ~1e7
+    /// (>10s / lots of RAM) — but under a budget it's rejected UP FRONT (`charge_iterable` charges the ~1e7
     /// count before `iter_values` even allocates), LOUD, not a hang.
     #[test]
     fn budget_stops_the_range_comprehension_trophy() {

@@ -2,17 +2,20 @@
 
 use crate::*;
 
+/// Rendered print pieces, each tagged with its PART index (T.2b co-pack — one preview holds all
+/// parts' pieces).
+pub(crate) type PartPieces = Vec<(usize, fab::PiecePrint)>;
+
 /// The in-flight print-layout render (off-thread): renders + auto-orients every piece. Yields the
-/// pieces (mesh + multi-index + build-up) on success, else an error string.
-/// (T.2b co-pack) each piece is tagged with its PART index — the job fans `print_layout_kernel`
-/// over every top-level part and concatenates, so one preview holds all parts' pieces.
+/// pieces (mesh + multi-index + build-up) on success, else an error string. The job fans
+/// `print_layout_kernel` over every top-level part and concatenates.
 #[derive(Resource, Default)]
-pub(crate) struct PrintJob(pub(crate) Option<Task<Result<Vec<(usize, fab::PiecePrint)>, String>>>);
+pub(crate) struct PrintJob(pub(crate) Option<Task<Result<PartPieces, String>>>);
 
 /// The last print-layout's rendered pieces (part index + piece), kept so a manual re-orient
 /// re-lays-out from the cached meshes (no re-render). Cleared when the preview closes.
 #[derive(Resource, Default)]
-pub(crate) struct PrintPieces(pub(crate) Option<Vec<(usize, fab::PiecePrint)>>);
+pub(crate) struct PrintPieces(pub(crate) Option<PartPieces>);
 
 /// One laid-out piece in the print-orientation preview, tagged with its cross-part [`PrintId`]
 /// (part + slab + comp) so a click→orient pick routes to the right part's orient. Despawned when
@@ -196,7 +199,7 @@ pub(crate) fn sync_orientation(
         }
     }
     let mut flags = vec![true; conns.list.len()];
-    match fab::conn_feasibility(&cuts.enabled_cuts(), &resolved, &orient_inputs(&orient)) {
+    match fab::conn_feasibility(&cuts.enabled_cuts(), &resolved, &orient_inputs(orient)) {
         Ok(f) => {
             for (k, ok) in f.into_iter().enumerate() {
                 flags[src[k]] = ok;
@@ -325,9 +328,9 @@ pub(crate) fn rotated_bounds(positions: &[[f32; 3]], rot: Quat) -> (Vec3, Vec3) 
 pub(crate) const PLATE_GAP: f64 = 5.0;
 
 /// Export the print-oriented pieces as a Bambu multi-plate project `.3mf` next to the source. Runs
-/// inline — a handful of piece meshes to a zip is quick — and the status line reports the plate count
-/// + fill so you can see how tight it packed. The bed comes from the loaded scene, so it must match
-/// the printer the project opens on (Bambu bins pieces to plates by position).
+/// inline — a handful of piece meshes to a zip is quick — and the status line reports the plate
+/// count + fill so you can see how tight it packed. The bed comes from the loaded scene, so it must
+/// match the printer the project opens on (Bambu bins pieces to plates by position).
 pub(crate) fn export_plates_action(
     mut ev: MessageReader<PanelCmd>,
     pieces: Res<PrintPieces>,

@@ -66,7 +66,7 @@ impl Config {
     /// NOTE (N.2c.2.3): both caches WERE briefly defaulted ON here for forgetful-fast dogfooding, but that
     /// exposed a real csg-cache pathology — csg-on makes DEEP/infinite module recursion ~200× slower to reach
     /// the `MAX_MODULE_DEPTH` guard (`runaway_module_recursion` hangs). So the default-on flip is REVERTED
-    /// pending that fix; the caches remain opt-in + correct. eval_cache's auto-off (N.2c.2.2) is orthogonal +
+    /// pending that fix; the caches remain opt-in + correct. `eval_cache`'s auto-off (N.2c.2.2) is orthogonal +
     /// stays.
     #[must_use]
     pub fn from_env() -> Self {

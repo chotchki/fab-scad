@@ -229,12 +229,13 @@ added 2026-07-07.
 ## Phase V - V - Multi-part parallelism (per-part render/slice/pack on independent worker threads; Solids stay thread-local, mesh data crosses)
 - [ ] V.1 - V.1 - per-part parallelism: render/slice/print-layout each part on its own worker thread
 ## Phase W - W - workspace hygiene: rustfmt/clippy burn-down to the existing -D warnings CI gates (branch is 277 commits ahead of origin — the gates never ran)
-- [ ] W.1 - W.1 - rustfmt sweep: cargo fmt --all (18 drifted files) → `cargo fmt --all -- --check` green
+- [x] W.1 - W.1 - rustfmt sweep: cargo fmt --all (18 drifted files) → `cargo fmt --all -- --check` green
 - [ ] W.2 - W.2 - clippy mechanical tier: cargo clippy --fix per crate + hand tail (doc backticks/doc-valid-idents, semicolons, type_complexity aliases, too_many_args, if-let, inline format args, derive, sort_unstable, must_use msg) across lang/gui/web
 - [ ] W.3 - W.3 - determinism-policy sites: 17 HashMap + 2 HashSet in eval_cache/mod_cache/mod_redundancy/redundancy → IndexMap/BTreeMap per-site; N.2c hazard = gate overhead, so perf sanity-check after the swap
 - [ ] W.4 - W.4 - no-panic doctrine sites: geo_stack unreachable×2 + mod_cache panic×1 → typed paths; seed_fuzz_from_bosl2 example → Result main (no bare expect)
 - [ ] W.5 - W.5 - precision casts: u64/usize→f64 stats ratios (13 sites, same 4 cache files) → one ratio helper with a reasoned allow; eval_cache:377 u64→u32 truncation read + fix or justify
 - [ ] W.6 - W.6 - exit gate: run the ci.yml lane commands verbatim locally — fmt --check, clippy -D warnings (root + fab-lang --all-features + fab-jit), tests — all green, zero allows without reasons
+- [ ] W.7 - W.7 - test-lane segmentation: default `cargo test` = seconds (unit + smoke); heavy suites (bosl2_scout, conformance, eval/geometry corpus, models_harness e2e) → #[ignore = "corpus lane"] + a dedicated CI lane running --ignored under [profile.test] opt-level 2; kill the fab-lang double-run (root --workspace already includes lang — ci.yml's "not a default member" comment is stale); consider cargo-nextest for per-test timings
 
 ## Backlog (not yet phased)
 

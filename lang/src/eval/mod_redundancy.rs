@@ -27,7 +27,7 @@
 //! bucket) still shows its accumulating ratio before the parent harness kills it.
 
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet};
 use std::hash::{Hash, Hasher};
 use std::sync::OnceLock;
 
@@ -58,15 +58,17 @@ fn roll_every() -> u64 {
 struct ModStat {
     name: String,
     total: u64,
-    distinct_ctx: HashSet<u64>, // distinct (module, params, $-context) keys seen for THIS module
+    distinct_ctx: BTreeSet<u64>, // distinct (module, params, $-context) keys seen for THIS module
 }
 
 #[derive(Default)]
 struct State {
     total: u64,
-    no_ctx: HashMap<u64, u64>, // key(module, params)              -> occurrences (UPPER-bound bracket)
-    with_ctx: HashMap<u64, u64>, // key(module, params, $-context)   -> occurrences (LOWER-bound bracket)
-    per_module: HashMap<u64, ModStat>, // by body ptr -> its call/redundancy split
+    no_ctx: BTreeMap<u64, u64>, // key(module, params)              -> occurrences (UPPER-bound bracket)
+    with_ctx: BTreeMap<u64, u64>, // key(module, params, $-context)   -> occurrences (LOWER-bound bracket)
+    // by body ptr -> its call/redundancy split. BTreeMap so the report's tie ROWS come out in a stable
+    // order (a HashMap here made equal-redundancy modules print in random order).
+    per_module: BTreeMap<u64, ModStat>,
     key_elems: u64, // total Value elements hashed — the key-SIZE a real cache would pay
 }
 
@@ -202,6 +204,10 @@ pub(super) fn report() {
 }
 
 /// Render the bracket + the per-module culprit table. Shared by the rolling and final passes.
+#[allow(
+    clippy::cast_precision_loss,
+    reason = "probe counters rendered as stderr percentages — call counts never approach 2^52"
+)]
 fn print_report(st: &State, label: &str) {
     let total = st.total as f64;
     let distinct_no = st.no_ctx.len() as f64;

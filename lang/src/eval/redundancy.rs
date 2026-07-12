@@ -15,7 +15,7 @@
 //! the body-`Expr` pointer (stable per definition, no name threading). Report to stderr via [`report`].
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::hash::{Hash, Hasher};
 use std::sync::OnceLock;
 
@@ -32,8 +32,8 @@ fn enabled() -> bool {
 #[derive(Default)]
 struct State {
     total: u64,
-    no_ctx: HashMap<u64, u64>,   // key(fn,args)            -> occurrences
-    with_ctx: HashMap<u64, u64>, // key(fn,args,$-context)  -> occurrences
+    no_ctx: BTreeMap<u64, u64>,   // key(fn,args)            -> occurrences
+    with_ctx: BTreeMap<u64, u64>, // key(fn,args,$-context)  -> occurrences
     key_elems: u64, // total Value elements hashed — the key-SIZE a real cache would pay to hash
 }
 
@@ -130,6 +130,10 @@ pub(super) fn record(body: &Expr, base: &Scope, args: &[Value], caller: &Scope) 
 
 /// Print the redundancy report to stderr (once, when enabled) and clear state. Called after the top-level
 /// eval completes. A no-op when the probe is off or saw no calls.
+#[allow(
+    clippy::cast_precision_loss,
+    reason = "probe counters rendered as stderr percentages — call counts never approach 2^52"
+)]
 pub(super) fn report() {
     if !enabled() {
         return;
@@ -167,8 +171,7 @@ pub(super) fn report() {
             red_ctx
         );
         eprintln!(
-            "[redundancy] true cache-hit ceiling is BRACKETED: [{:.1}% .. {:.1}%]",
-            red_ctx, red_no
+            "[redundancy] true cache-hit ceiling is BRACKETED: [{red_ctx:.1}% .. {red_no:.1}%]"
         );
         eprintln!("[redundancy] avg key size:            {avg_key:.1} Value-elements hashed / call");
         eprintln!(

@@ -1,6 +1,6 @@
 //! Seed the `eval` + `jit_diff` fuzz corpora from BOSL2: parse every `libs/BOSL2/*.scad` file and slice
 //! each top-level `function` def (by its AST span) into a one-def corpus file. Run from the repo root:
-//!   cargo run -p fab-lang --example seed_fuzz_from_bosl2
+//!   cargo run -p fab-lang --example `seed_fuzz_from_bosl2`
 //!
 //! Why per-DEF, not per-file: `jit_diff` requires `stmts.first()` to BE a function def, and a whole BOSL2
 //! file leads with its include-guard assignment — so a per-def seed is what actually reaches the JIT. It's
@@ -14,16 +14,18 @@ use std::path::Path;
 
 use fab_lang::{StmtKind, parse};
 
-fn main() {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     let bosl2 = Path::new("libs/BOSL2");
     let out_eval = Path::new("lang/fuzz/corpus/eval");
     let out_jit = Path::new("lang/fuzz/corpus/jit_diff");
-    fs::create_dir_all(out_eval).expect("create corpus/eval");
-    fs::create_dir_all(out_jit).expect("create corpus/jit_diff");
+    fs::create_dir_all(out_eval)?;
+    fs::create_dir_all(out_jit)?;
 
     let (mut files, mut defs) = (0u32, 0u32);
-    for entry in fs::read_dir(bosl2).expect("read libs/BOSL2 (submodule checked out?)") {
-        let path = entry.expect("dir entry").path();
+    for entry in
+        fs::read_dir(bosl2).map_err(|e| format!("read libs/BOSL2 (submodule checked out?): {e}"))?
+    {
+        let path = entry?.path();
         if path.extension().is_none_or(|e| e != "scad") {
             continue;
         }
@@ -32,13 +34,16 @@ fn main() {
         };
         let Ok(prog) = parse(&src) else { continue };
         files += 1;
-        let stem = path.file_stem().expect("file stem").to_string_lossy();
+        let stem = path
+            .file_stem()
+            .ok_or("a .scad path always has a file stem")?
+            .to_string_lossy();
         for (i, stmt) in prog.stmts.iter().enumerate() {
             if matches!(stmt.kind, StmtKind::FunctionDef { .. }) {
                 let snippet = &src[stmt.span.clone()];
                 let name = format!("bosl2_{stem}_{i}");
-                fs::write(out_jit.join(&name), snippet).expect("write jit_diff seed");
-                fs::write(out_eval.join(&name), snippet).expect("write eval seed");
+                fs::write(out_jit.join(&name), snippet)?;
+                fs::write(out_eval.join(&name), snippet)?;
                 defs += 1;
             }
         }
@@ -46,4 +51,5 @@ fn main() {
     eprintln!(
         "seeded {defs} function defs from {files} BOSL2 files → corpus/eval + corpus/jit_diff"
     );
+    Ok(())
 }

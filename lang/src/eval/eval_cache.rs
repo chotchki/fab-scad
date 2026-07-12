@@ -27,7 +27,6 @@
 //! and `parent_module` (which bumps `impure_reads`) — transitively, for free.
 
 use std::cell::RefCell;
-use std::collections::HashMap;
 use std::hash::{BuildHasherDefault, Hash, Hasher};
 use std::rc::Rc;
 
@@ -82,6 +81,16 @@ pub(super) fn key_work(args: &[Value], cap: usize) -> u64 {
 }
 
 type FixedHasher = BuildHasherDefault<std::collections::hash_map::DefaultHasher>;
+
+/// Fixed-hasher map for the memo generations: an unseeded `DefaultHasher` makes the layout
+/// run-reproducible, and the maps are lookup-only (no value is ever produced by iterating them), so the
+/// `HashMap` ban's order hazard cannot reach output. `BTreeMap` would tax the per-call gate path — exactly
+/// the overhead N.2c.2 measured as the cache's break-even.
+#[allow(
+    clippy::disallowed_types,
+    reason = "fixed hasher + lookup-only (never iterated for output); BTreeMap taxes the N.2c gate path"
+)]
+type FixedMap<K, V> = std::collections::HashMap<K, V, FixedHasher>;
 
 /// The exact memo key. `env`/`dyn_ctx` are HELD (their `Rc`s pin the pointers we compare by — no ABA).
 pub(super) struct Key {
@@ -248,8 +257,8 @@ const MIN_HIT_PERMILLE: u64 = 250;
 /// value is ever produced by iterating the maps; eviction changes hit/miss, never output. Carries the N.2c.2
 /// auto-off state + warmup counters.
 pub(super) struct Cache {
-    hot: HashMap<Key, Value, FixedHasher>,
-    cold: HashMap<Key, Value, FixedHasher>,
+    hot: FixedMap<Key, Value>,
+    cold: FixedMap<Key, Value>,
     state: CacheState,
     w_probes: u32,
     w_hits: u32,
@@ -259,8 +268,8 @@ pub(super) struct Cache {
 impl Default for Cache {
     fn default() -> Self {
         Self {
-            hot: HashMap::default(),
-            cold: HashMap::default(),
+            hot: FixedMap::default(),
+            cold: FixedMap::default(),
             state: CacheState::Warmup,
             w_probes: 0,
             w_hits: 0,
@@ -379,6 +388,6 @@ mod tests {
         assert_eq!(c.state(), CacheState::Live);
 
         // The threshold sits between those two rates.
-        assert!((125..500).contains(&(MIN_HIT_PERMILLE as u32)));
+        assert!((125..500).contains(&MIN_HIT_PERMILLE));
     }
 }

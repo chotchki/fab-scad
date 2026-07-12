@@ -315,7 +315,7 @@ pub(crate) fn place_on_profile_click(
     };
     let others: Vec<usize> = (0..3).filter(|&a| a != c.axis.index()).collect();
     let pos = [comp(hit, others[0]), comp(hit, others[1])];
-    let size = auto_size(&xsection, &cuts, &bounds, i, pos);
+    let size = auto_size(&xsection, cuts, bounds, i, pos);
     status.0 = toggle_connector(conns, i, pos, size, active.kind, active.screw).into();
 }
 
@@ -357,7 +357,7 @@ pub(crate) fn do_auto_place(
         cap_dir_2d(axis),
         ONION_TIP,
     );
-    let cap = axial_cap(&cuts, i, &bounds);
+    let cap = axial_cap(cuts, i, bounds);
 
     // Corner clearance: an onion near where ANOTHER cut crosses this one straddles the intersection
     // — the messy jigsaw case. Project each PERPENDICULAR enabled cut into this cross-section's 2D
@@ -457,7 +457,7 @@ pub(crate) fn sync_conn_markers(
             .then(|| conns.list.get(m.0))
             .flatten()
             .filter(|pc| cuts.list.get(pc.cut).is_some_and(|c| c.enabled))
-            .and_then(|pc| conn_point(&cuts, pc));
+            .and_then(|pc| conn_point(cuts, pc));
         match point {
             Some(p) => {
                 tf.translation = p;
@@ -674,7 +674,7 @@ pub(crate) fn sync_overlay_visuals(
             cpv.axis = c.axis;
             mesh3d.0 = meshes.add(plane_cuboid(c.axis, min, max));
         }
-        tf.translation = cut_center(&cuts, idx, min, max, spread);
+        tf.translation = cut_center(cuts, idx, min, max, spread);
         if let Some(mut m) = materials.get_mut(&mat.0) {
             m.base_color = cut_color(idx == cuts.active, c.enabled);
         }

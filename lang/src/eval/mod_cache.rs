@@ -2,7 +2,7 @@
 //! redundant nested-partition rebuild runs ONCE. The geometry sibling of the N.2c eval cache
 //! ([`eval_cache`](super::eval_cache)) — that one memoizes FUNCTION values keyed on (fn, env, args, $-ctx);
 //! this one memoizes a whole `Geo` at the user-module boundary (`geo_stack::push_user_module`), the redundancy
-//! the value cache can't see (measured [`mod_redundancy`](super::mod_redundancy): slice_parts is 99.4% redundant
+//! the value cache can't see (measured [`mod_redundancy`](super::mod_redundancy): `slice_parts` is 99.4% redundant
 //! in (module,params), ~42% with the full reaching $-context). It is correctness-CRITICAL — a wrong hit is a
 //! silently wrong mesh — so the key is EXACT (bit-compared) and the eligibility fence is conservative.
 //!
@@ -28,11 +28,11 @@
 //!
 //! ## Purity fence (in the `CacheStoreModule` handler, `geo_stack`)
 //! Store only if the body left NO observable side effect — the SAME snapshot [`eval_cache`] uses
-//! (messages / rand-draws / closures / impure_reads). Catches echo/assert, seedless `rands`, `parent_module`,
+//! (messages / rand-draws / closures / `impure_reads`). Catches echo/assert, seedless `rands`, `parent_module`,
 //! transitively. `$children == 0` already fenced the children hazard, so no extra counter is needed here.
 
 use std::cell::RefCell;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::hash::{BuildHasherDefault, Hash, Hasher};
 use std::rc::Rc;
 
@@ -41,9 +41,9 @@ use super::eval_cache::{hash_value_bits, value_bits_eq};
 use super::scope::Scope;
 use super::value::Value;
 
-/// The gate ([`Config::csg_cache`]) is bit-identical to no-cache (the A/B differential toggles it); the per-call
-/// key-hash is do-no-harm overhead on a low-redundancy model, so default-ON waits on a program-level auto-off
-/// (as N.2c's). Enabled/cap now live in [`Config`], read off `ctx.config` at the call site — not a local gate.
+// The gate (`Config::csg_cache`) is bit-identical to no-cache (the A/B differential toggles it); the per-call
+// key-hash is do-no-harm overhead on a low-redundancy model, so default-ON waits on a program-level auto-off
+// (as N.2c's). Enabled/cap now live in `Config`, read off `ctx.config` at the call site — not a local gate.
 
 /// Per-generation entry cap — two generations (hot/cold) bound the cache to ~2× this, a rotate-not-scan LRU
 /// approximation (same as [`eval_cache`]). A `Geo` subtree can be large, so this caps the tree, not just keys.
@@ -73,6 +73,15 @@ pub(super) fn worth_caching(
 }
 
 type FixedHasher = BuildHasherDefault<std::collections::hash_map::DefaultHasher>;
+
+/// Fixed-hasher map for the memo generations — same rationale as [`eval_cache`]'s `FixedMap`:
+/// run-reproducible layout, lookup-only (never iterated for output), and the per-call gate path is
+/// too hot for `BTreeMap`.
+#[allow(
+    clippy::disallowed_types,
+    reason = "fixed hasher + lookup-only (never iterated for output); BTreeMap taxes the gate path"
+)]
+type FixedMap<K, V> = std::collections::HashMap<K, V, FixedHasher>;
 
 /// The exact CSG-memo key. `params`/`dctx` are owned snapshots (bit-compared), so no ABA on the AST-outlives-
 /// cache pointers we key `body`/`home` by.
@@ -143,9 +152,10 @@ impl Eq for ModKey {}
 /// a full hot rotates to cold and a fresh hot starts — eviction without an O(n) scan. `hits`/`misses`/`stores`
 /// are the realized hit-rate counters (the redundancy probe measured the CEILING; these measure REALITY, gated
 /// print via [`report`]).
+#[derive(Default)]
 pub(super) struct ModCache {
-    hot: HashMap<ModKey, Geo, FixedHasher>,
-    cold: HashMap<ModKey, Geo, FixedHasher>,
+    hot: FixedMap<ModKey, Geo>,
+    cold: FixedMap<ModKey, Geo>,
     hits: u64,
     misses: u64,
     stores: u64,
@@ -153,21 +163,6 @@ pub(super) struct ModCache {
     declined_msg: u64,
     declined_draws: u64,
     declined_impure: u64,
-}
-
-impl Default for ModCache {
-    fn default() -> Self {
-        Self {
-            hot: HashMap::default(),
-            cold: HashMap::default(),
-            hits: 0,
-            misses: 0,
-            stores: 0,
-            declined_msg: 0,
-            declined_draws: 0,
-            declined_impure: 0,
-        }
-    }
 }
 
 impl ModCache {
@@ -204,6 +199,10 @@ impl ModCache {
 
     /// Print the realized hit-rate to stderr. The caller gates this on `ctx.config.csg_cache` (only meaningful
     /// when the cache ran).
+    #[allow(
+        clippy::cast_precision_loss,
+        reason = "hit/miss counters rendered as a stderr percentage — call counts never approach 2^52"
+    )]
     pub(super) fn report(&self) {
         let lookups = self.hits + self.misses;
         if lookups == 0 {
@@ -266,10 +265,10 @@ mod tests {
     }
 
     /// THE gate: cache-on == cache-off geometry, across every path the memo touches — child-less leaves
-    /// (cacheable, repeated → hits), `$`-context variation via `$`-args (distinct keys, no collision), nested
-    /// + recursive modules, booleans/transforms/`for` (wrappers riding cached leaves), and the IMPURE /
-    /// caller-dependent paths the fence + the `$children==0` gate must NOT serve stale (rands, echo, children).
-    /// A wrong hit would make `on` diverge from `off`; `assert_eq` catches it.
+    /// (cacheable, repeated → hits), `$`-context variation via `$`-args (distinct keys, no collision),
+    /// nested + recursive modules, booleans/transforms/`for` (wrappers riding cached leaves), and the
+    /// IMPURE / caller-dependent paths the fence + the `$children==0` gate must NOT serve stale (rands,
+    /// echo, children). A wrong hit would make `on` diverge from `off`; `assert_eq` catches it.
     #[test]
     fn cache_on_equals_cache_off() {
         let programs = [
@@ -307,6 +306,10 @@ mod tests {
     /// distinct — the `$children==0` eligibility gate is what prevents the collision (both have $children=1 →
     /// never cached). Pinned directly (not just via the A/B loop) since it's the correctness crux.
     #[test]
+    #[allow(
+        clippy::panic,
+        reason = "test assertion — the panic message carries the mismatched Geo shape"
+    )]
     fn different_children_never_collide() {
         let both = geo(
             "module w(){ children(); } union(){ w(){ cube(1); } w(){ sphere(1,$fn=8); } }",

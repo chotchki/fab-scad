@@ -64,7 +64,7 @@ pub(super) fn record_fn(name: &str) {
         bump(
             &mut s.borrow_mut().get_or_insert_with(State::default).funcs,
             name,
-        )
+        );
     });
 }
 
@@ -77,7 +77,7 @@ pub(super) fn record_builtin(name: &str) {
         bump(
             &mut s.borrow_mut().get_or_insert_with(State::default).builtins,
             name,
-        )
+        );
     });
 }
 
@@ -90,7 +90,7 @@ pub(super) fn record_module(name: &str) {
         bump(
             &mut s.borrow_mut().get_or_insert_with(State::default).modules,
             name,
-        )
+        );
     });
 }
 

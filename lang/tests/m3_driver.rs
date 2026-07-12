@@ -32,7 +32,7 @@ fn block_mark_drain_takes_only_its_own_children() {
                 kids.len(),
                 2,
                 "the cube sibling + the block's single sphere"
-            )
+            );
         }
         other => panic!("expected a top-level Union of 2, got {other:?}"),
     }
@@ -44,7 +44,7 @@ fn block_mark_drain_takes_only_its_own_children() {
 }
 
 /// A7 + INVARIANT 5 — the `!` root modifier diverts ONLY its subtree into the root override: ancestors +
-/// siblings are discarded and the tagged subtree renders UNtransformed. `CaptureRoot` drains exactly the
+/// siblings are discarded and the tagged subtree renders `UNtransformed`. `CaptureRoot` drains exactly the
 /// `!`-node's result (mark-based), so the sibling cube + the enclosing translate vanish.
 #[test]
 fn root_modifier_diverts_only_its_subtree() {

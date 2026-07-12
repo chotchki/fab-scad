@@ -55,7 +55,7 @@ fn a_supplied_mesh_flows_through() {
     .expect("resolves");
     match geo {
         Geo::D3(GeoNode::Leaf(ref leaf)) => {
-            assert_eq!(*leaf, mesh, "the imported mesh is the reader's")
+            assert_eq!(*leaf, mesh, "the imported mesh is the reader's");
         }
         other => panic!("expected a single 3D leaf, got {other:?}"),
     }
@@ -105,7 +105,7 @@ fn a_bad_file_path_never_calls_the_reader() {
         .expect("resolves");
         match geo {
             Geo::D3(GeoNode::Leaf(ref leaf)) => {
-                assert_eq!(leaf.tri_count(), 0, "{src}: empty placeholder")
+                assert_eq!(leaf.tri_count(), 0, "{src}: empty placeholder");
             }
             other => panic!("{src}: expected an empty 3D leaf, got {other:?}"),
         }

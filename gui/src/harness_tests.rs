@@ -414,3 +414,42 @@ fn reset_to_auto_wipes_cuts_conns_and_rearms_derive() {
         "reset re-arms kick_auto_plan to re-derive"
     );
 }
+
+// ── revert_on_edit (U.3.15 flicker fix) — spurious Parts change must NOT collapse an explode ───────
+#[test]
+fn revert_on_edit_ignores_spurious_change_but_reverts_a_real_edit() {
+    let mut app = App::new();
+    app.add_plugins(MinimalPlugins)
+        .init_resource::<ActivePart>()
+        .insert_resource(Parts(vec![{
+            let mut p = seeded_part(vec![x_cut(0.0)]);
+            p.whole = Some(Handle::default());
+            p.spread = 10.0; // exploded
+            p
+        }]))
+        .add_systems(Update, revert_on_edit);
+    app.world_mut()
+        .spawn((Mesh3d(Handle::default()), PartId(0), Model));
+
+    app.update(); // establish the slice-input baseline
+                  // Spuriously mark Parts changed (exactly what panel_ui / kick_auto_plan do every frame) — no edit.
+    let _ = app.world_mut().resource_mut::<Parts>();
+    app.update();
+    assert_eq!(
+        app.world().resource::<Parts>().0[0].spread,
+        10.0,
+        "a spurious Parts change must NOT collapse the explode (the flicker bug)"
+    );
+
+    // A real edit — add a cut, moving the slice-input hash.
+    app.world_mut().resource_mut::<Parts>().0[0]
+        .cuts
+        .list
+        .push(x_cut(20.0));
+    app.update();
+    assert_eq!(
+        app.world().resource::<Parts>().0[0].spread,
+        0.0,
+        "a real cut edit reverts the explode to the intact model"
+    );
+}

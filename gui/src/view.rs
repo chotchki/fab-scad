@@ -224,19 +224,26 @@ pub(crate) fn revert_on_edit(
     mut parts: ResMut<Parts>,
     active_part: Res<ActivePart>,
     mut models: Query<(&mut Mesh3d, &PartId), With<Model>>,
+    mut seen: Local<Option<(usize, u64)>>,
 ) {
-    if !parts.is_changed() {
-        return;
-    }
+    // Key on the ACTIVE part's actual slice inputs, NOT `parts.is_changed()`: that flag fires EVERY
+    // frame because `panel_ui` (drawing the drill) and `kick_auto_plan` `&mut`-deref `Parts`, so it
+    // would collapse an explode one frame after it opens (the dogfood "flicker then revert"). A real
+    // edit is when THIS part's cut/connector/orient hash moves — a part-switch or a spurious
+    // change-detection tick must not revert.
     let ap = active_part.0;
-    let part = &mut parts.0[ap];
-    if part.spread == 0.0 {
-        return;
+    let part = &parts.0[ap];
+    let h = slice_hash(&part.cuts, &part.conns, &part.orient);
+    let edited = matches!(*seen, Some((p, prev)) if p == ap && prev != h);
+    *seen = Some((ap, h));
+    if !edited || part.spread == 0.0 {
+        return; // no real edit (part-switch / first frame / same inputs), or not exploded
     }
-    if let Some(h) = part.whole.clone() {
-        swap_part_mesh(&mut models, ap, &h);
+    let whole = part.whole.clone();
+    if let Some(handle) = whole {
+        swap_part_mesh(&mut models, ap, &handle);
     }
-    part.spread = 0.0;
+    parts.0[ap].spread = 0.0;
 }
 
 /// Model + cut-plane visibility, derived authoritatively from the active view mode every frame, so

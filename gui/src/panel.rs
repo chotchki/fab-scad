@@ -49,6 +49,16 @@ pub(crate) struct PanelWriters<'w> {
     pub(crate) cmd: MessageWriter<'w, PanelCmd>,
 }
 
+/// The read-only display inputs the tabs render, bundled so `panel_ui` stays under Bevy's 16-param cap
+/// (U.3). Grew as the Orientation/Export tabs (`print_pieces`, `copack`), the platform gate
+/// (`platform`), and the pipeline feedback (`pipeline`) landed.
+#[derive(SystemParam)]
+pub(crate) struct PanelView<'w> {
+    pub(crate) print_pieces: Res<'w, PrintPieces>,
+    pub(crate) copack: Res<'w, CoPack>,
+    pub(crate) platform: Res<'w, Platform>,
+}
+
 /// The whole control panel (U.3), immediate-mode: an app-wide top tab bar + bottom status bar +
 /// a left egui panel whose contents route on the active `Tab` (Model / Parts / Orientation / Export).
 /// Cheap edits mutate in place; a heavy action (needing params beyond the panel's own) writes a
@@ -69,8 +79,7 @@ pub(crate) fn panel_ui(
     mut open_dialog: ResMut<OpenDialog>,
     mut editor: ResMut<EditorBuf>,
     time: Res<Time>,
-    print_pieces: Res<PrintPieces>,
-    copack: Res<CoPack>,
+    view: PanelView,
     mut writers: PanelWriters,
     mut seam: ResMut<PanelSeam>,
 ) {
@@ -149,7 +158,12 @@ pub(crate) fn panel_ui(
                                 writers.switch.write(SwitchFile(i));
                             }
                         }
-                        if ui.button(icons::ADD).clicked() && open_dialog.0.is_none() {
+                        // The ＋ opens a folder picker — DESKTOP only (U.3.6). On web there's one
+                        // presupplied file and no folder access, so the picker is hidden entirely.
+                        if view.platform.shows_picker()
+                            && ui.button(icons::ADD).clicked()
+                            && open_dialog.0.is_none()
+                        {
                             open_dialog.0 = Some(AsyncComputeTaskPool::get().spawn(async move {
                                 rfd::AsyncFileDialog::new()
                                     .pick_folder()
@@ -308,7 +322,7 @@ pub(crate) fn panel_ui(
                     // orientation set) vs auto (still the least-support auto-pick). The mode + 3D
                     // click-to-orient already run while this tab is up; this is the readout + per-piece
                     // reset. `PrintPieces` is None until the first slice lands.
-                    match print_pieces.0.as_ref() {
+                    match view.print_pieces.0.as_ref() {
                         None => {
                             ui.label(
                                 egui::RichText::new("slice a part first — no pieces yet")
@@ -384,12 +398,12 @@ pub(crate) fn panel_ui(
                     // The co-pack preview metric (U.3.5): `estimate_copack` keeps this live as pieces +
                     // orientations change — no button to compute it. Then the two output actions.
                     ui.label(egui::RichText::new("co-packed plates").small().weak());
-                    match &copack.summary {
+                    match &view.copack.summary {
                         Some(s) => {
                             ui.label(
                                 egui::RichText::new(format!(
                                     "{} plates · {} pieces · fits {:.0}×{:.0}",
-                                    s.plates, s.pieces, copack.bed[0], copack.bed[1]
+                                    s.plates, s.pieces, view.copack.bed[0], view.copack.bed[1]
                                 ))
                                 .strong(),
                             );

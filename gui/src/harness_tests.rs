@@ -224,6 +224,14 @@ fn orientation_tab_raises_print_view() {
 }
 
 #[test]
+fn platform_gates_the_file_picker() {
+    // U.3.6: desktop shows the ＋/folder picker; web (one presupplied file, no fs access) hides it.
+    assert!(Platform::Desktop.shows_picker());
+    assert!(!Platform::Web.shows_picker());
+    assert_eq!(Platform::default(), Platform::Desktop); // native build → desktop
+}
+
+#[test]
 fn orient_reset_drops_the_manual_override_back_to_auto() {
     // The Orientation tab's per-piece "reset to auto" (U.3.4): drop the manual key so `up_or` falls
     // back to the auto-pick and the list re-flags the piece as auto.

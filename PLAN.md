@@ -222,7 +222,7 @@ added 2026-07-07.
   - [x] U.3.3 - U.3.3 - Parts tab: left-panel 3-level drill part→cut→connectors inline; fold today's Connectors mode in
   - [x] U.3.4 - U.3.4 - Orientation tab: promote Print mode; per-piece flat/auto list across all parts
   - [x] U.3.5 - U.3.5 - Export tab: co-pack preview + Export 3MF + Publish merged
-  - [ ] U.3.6 - U.3.6 - Entry-point gating: web (single presupplied file, no ＋, editor landing) vs desktop (full picker + ＋); platform gate
+  - [x] U.3.6 - U.3.6 - Entry-point gating: web (single presupplied file, no ＋, editor landing) vs desktop (full picker + ＋); platform gate
   - [ ] U.3.7 - U.3.7 - Feedback: per-node DAG dirty flags → amber tab dots (stale) + spinner motion on rendering tab + bottom status-bar detail; background jobs clear
   - [x] U.3.8 - U.3.8 - Harness + tests: script verbs (tab-switch, editor-edit), screenshot each tab, full gui verify
   - [x] U.3.9 - U.3.9 - panel-inset layout bug: egui layer offset by seam on HiDPI window (egui context rect ↔ split_viewport 3D-camera inset collision); root-cause via bevy_egui-0.41 source + real-window diag, fix + verify on 2× display

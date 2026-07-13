@@ -337,6 +337,33 @@ pub(crate) struct ActivePart(pub(crate) usize);
 #[derive(Resource, Default)]
 pub(crate) struct SaveBaseline(pub(crate) Option<u64>);
 
+/// Which entry-point environment the GUI runs in (U.3.6). `Desktop` = the full folder picker + the
+/// ＋ file tab (open anything); `Web` = a single presupplied file, no picker (wasm has no folder
+/// access), landing straight on the editor. Defaults from the build target — a test overrides it to
+/// exercise the web path on desktop (the web host in ../hotchkiss-io serves the wasm build).
+#[derive(Resource, Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Platform {
+    Desktop,
+    Web,
+}
+
+impl Default for Platform {
+    fn default() -> Self {
+        if cfg!(target_arch = "wasm32") {
+            Platform::Web
+        } else {
+            Platform::Desktop
+        }
+    }
+}
+
+impl Platform {
+    /// Whether to show the folder picker + ＋ (desktop only — web has one presupplied file).
+    pub(crate) fn shows_picker(self) -> bool {
+        matches!(self, Platform::Desktop)
+    }
+}
+
 /// The co-pack preview summary (U.3.5): the plate/piece count + fill of packing the current print
 /// pieces onto the bed, recomputed by `estimate_copack` when pieces or orientations change, read by the
 /// Export tab. `bed` is cached alongside so the panel shows `fits WxH` without another system param.

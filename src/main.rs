@@ -75,13 +75,19 @@ enum Commands {
         /// Also write a PNG thumbnail.
         #[arg(long)]
         png: bool,
-        /// Export a multi-object 3mf (pieces as SEPARATE objects on a plate) instead of a merged STL.
+        /// Export a multi-object 3mf, pieces bin-packed onto the printer bed, instead of a merged STL.
         #[arg(long = "3mf")]
         threemf: bool,
         /// Slice in-process via the Manifold kernel (Track C) instead of the OpenSCAD codegen path.
         /// OpenSCAD still renders the base mesh once; slicing + connectors run in-process.
         #[arg(long)]
         kernel: bool,
+        /// Printer whose bed the --3mf plate targets (default: [slicing].printer, else printers.toml's default).
+        #[arg(long)]
+        printer: Option<String>,
+        /// Gap between pieces bin-packed on the --3mf plate, mm.
+        #[arg(long, default_value_t = 5.0)]
+        gap: f64,
     },
     /// Make a printable Bambu multi-plate project from a model in ONE shot: render, auto-slice,
     /// auto-connect, orient, pack, export. The headless twin of the GUI's auto-open (Track C 14.3).
@@ -161,7 +167,9 @@ fn main() -> Result<()> {
             png,
             threemf,
             kernel,
-        } => slice_cmd(&target, spread, out, png, threemf, kernel),
+            printer,
+            gap,
+        } => slice_cmd(&target, spread, out, png, threemf, kernel, printer, gap),
         Commands::Make {
             target,
             printer,
@@ -423,6 +431,7 @@ fn make_cmd(_: &Path, _: Option<String>, _: Option<PathBuf>, _: f64) -> Result<(
     bail!("fab make needs the `kernel` feature (built without it)")
 }
 
+#[allow(clippy::too_many_arguments)] // a CLI verb — every arg is a distinct user-facing flag
 fn slice_cmd(
     target: &Path,
     spread: f64,
@@ -430,6 +439,8 @@ fn slice_cmd(
     png: bool,
     threemf: bool,
     kernel: bool,
+    printer: Option<String>,
+    gap: f64,
 ) -> Result<()> {
     if !target.exists() {
         bail!("no such file: {}", target.display());
@@ -441,6 +452,23 @@ fn slice_cmd(
         .slicing
         .as_ref()
         .with_context(|| format!("no [slicing] spec in {}", manifest_path.display()))?;
+
+    // U.3.14 Phase E — the --3mf plate targets a printer bed: --printer > [slicing].printer > default.
+    // `None` = STL output (no bed). Resolved once here; the kernel slice paths pack onto it.
+    let plate = if threemf {
+        let root_pb = root
+            .clone()
+            .context("--3mf needs a workspace root (printers.toml) above the target")?;
+        let profiles = printers::load(&root_pb.join("printers.toml"))?;
+        let pr = printers::select(&profiles, printer.as_deref().or(spec.printer.as_deref()))?;
+        println!(
+            "  printer {} ({:.0}×{:.0}mm bed)",
+            pr.name, pr.bed[0], pr.bed[1]
+        );
+        Some(([pr.bed[0], pr.bed[1]], gap))
+    } else {
+        None
+    };
 
     // U.3.14 Phase D — per-part slicing. A `[[slicing.part]]` spec addresses each `build_geo_parts`
     // part individually; it XORs with the flat whole-model `[slicing]` (a spec carrying BOTH is
@@ -467,7 +495,7 @@ fn slice_cmd(
                 if threemf { "3mf" } else { "stl" }
             );
             let produced =
-                slicing::slice_model_parts(target, &scadrs_libs(), spec, spread, &outdir, threemf)?;
+                slicing::slice_model_parts(target, &scadrs_libs(), spec, spread, &outdir, plate)?;
             let final_out = match out {
                 Some(o) => {
                     std::fs::copy(&produced, &o)
@@ -504,9 +532,8 @@ fn slice_cmd(
                 target.display(),
                 if threemf { "3mf" } else { "stl" }
             );
-            let produced = slicing::slice_part_kernel(
-                &oscad, target, spec, spread, &outdir, timeout, threemf,
-            )?;
+            let produced =
+                slicing::slice_part_kernel(&oscad, target, spec, spread, &outdir, timeout, plate)?;
             let final_out = match out {
                 Some(o) => {
                     std::fs::copy(&produced, &o)

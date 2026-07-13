@@ -204,9 +204,10 @@ pub fn slice_part_3mf(
 }
 
 /// Slice IN-PROCESS via the Manifold kernel (Track C 11.9) instead of the scad driver. OpenSCAD is
-/// still the front-door — it renders the base model to a mesh ONCE — then import, slice, connectors
-/// and export all happen in-process (no per-piece spawn). `as_3mf` writes pieces as separate objects
-/// on a plate; otherwise a single merged STL. `spread` fans each piece by its slab index × spread.
+/// still the front-door — it renders the base model to a mesh ONCE — then import, slice, connectors and
+/// export all happen in-process (no per-piece spawn). `plate = Some((bed, gap))` bin-packs the pieces
+/// onto `bed`-sized plates and writes a Bambu 3mf (U.3.14 Phase E); `None` fans each piece by its slab
+/// index × `spread` and writes one merged STL.
 #[cfg(all(feature = "kernel", feature = "native"))]
 pub fn slice_part_kernel(
     oscad: &Openscad,
@@ -215,7 +216,7 @@ pub fn slice_part_kernel(
     spread: f64,
     out_dir: &Path,
     timeout: Duration,
-    as_3mf: bool,
+    plate: Option<([f64; 2], f64)>,
 ) -> Result<PathBuf> {
     std::fs::create_dir_all(out_dir).with_context(|| format!("creating {}", out_dir.display()))?;
     let stem = source
@@ -235,36 +236,74 @@ pub fn slice_part_kernel(
     if pieces.is_empty() {
         bail!("slice produced no pieces");
     }
-    // Fan each piece by its slab multi-index × spread (0 = assembled in place).
-    let laid: Vec<Solid> = pieces
-        .iter()
-        .map(|(idx, s)| {
-            s.translate(Vec3::new(
-                idx[0] as f64 * spread,
-                idx[1] as f64 * spread,
-                idx[2] as f64 * spread,
-            ))
-        })
-        .collect();
 
-    if as_3mf {
-        let out = out_dir.join(format!("{stem}.3mf"));
-        Solid::write_3mf(&out, &laid)?;
-        Ok(out)
-    } else {
-        let out = out_dir.join(format!("{stem}-sliced.stl"));
-        Solid::batch_union(&laid).write_stl(&out)?;
-        Ok(out)
+    match plate {
+        Some((bed, gap)) => {
+            let mut to_place = Vec::new();
+            collect_plate_pieces(&pieces, spec, &mut to_place);
+            let out = out_dir.join(format!("{stem}.3mf"));
+            crate::bambu::export_plates(&out, to_place, bed, gap)?;
+            Ok(out)
+        }
+        None => {
+            // Fan each piece by its slab multi-index × spread (0 = assembled in place), merge to one STL.
+            let laid: Vec<Solid> = pieces
+                .iter()
+                .map(|(idx, s)| {
+                    s.translate(Vec3::new(
+                        idx[0] as f64 * spread,
+                        idx[1] as f64 * spread,
+                        idx[2] as f64 * spread,
+                    ))
+                })
+                .collect();
+            let out = out_dir.join(format!("{stem}-sliced.stl"));
+            Solid::batch_union(&laid).write_stl(&out)?;
+            Ok(out)
+        }
     }
 }
+
+/// Slice pieces → [`bambu::PieceToPlace`](crate::bambu::PieceToPlace) for the bed-packer (U.3.14 Phase
+/// E): each piece splits into its connected COMPONENTS (a presliced blob is many disjoint sub-solids —
+/// pack each on its own), and each takes its build-up from `spec`'s per-piece orientation (a manual
+/// override, else +Z as-modeled — `fab slice` HONORS the spec, it does not auto-orient; that's `fab
+/// make`'s job).
+#[cfg(all(feature = "kernel", feature = "native"))]
+fn collect_plate_pieces(
+    pieces: &[([usize; 3], Solid)],
+    spec: &Slicing,
+    to_place: &mut Vec<crate::bambu::PieceToPlace>,
+) {
+    for (slab, solid) in pieces {
+        let up = piece_up(spec, *slab).to_array();
+        for csolid in solid.components() {
+            let (v, t) = csolid.to_indexed();
+            to_place.push(crate::bambu::PieceToPlace {
+                mesh: crate::bambu::Mesh {
+                    verts: v.iter().map(|p| p.to_array()).collect(),
+                    tris: t.iter().map(|f| f.indices()).collect(),
+                },
+                up,
+            });
+        }
+    }
+}
+
+/// One part's slice output for the co-pack: its part-local spec (drives per-piece orientation) + the
+/// `(slab-index, solid)` pieces it cut into. Kept per part so the 3mf path orients each piece by ITS
+/// part's own spec, not the model's.
+#[cfg(all(feature = "kernel", feature = "native"))]
+type PartPieces = (Slicing, Vec<([usize; 3], Solid)>);
 
 /// PER-PART slice IN-PROCESS (U.3.14 Phase D) — the CLI twin of the GUI's per-part Parts workflow. The
 /// split needs the evaluated tree (not one OpenSCAD-rendered whole mesh), so this is the scad-rs eval
 /// path: evaluate `source` → [`build_geo_parts`] → bind each `[[slicing.part]]` block to a part via
 /// [`resolve_part`] → `slice_solid` that part with its OWN cuts/connectors. A part with no block stays
-/// whole (one piece). Pieces fan by their slab index × `spread`; output is a merged STL or a 3mf plate,
-/// same shape as [`slice_part_kernel`]. An unresolvable block is a hard error (a silent mis-slice is
-/// worse); a name that misses but resolves by index WARNS.
+/// whole (one piece). `plate = Some((bed, gap))` bin-packs the pieces onto `bed`-sized plates (a 3mf,
+/// Phase E); `None` fans each by its slab index × `spread` to one merged STL — same shape as
+/// [`slice_part_kernel`]. An unresolvable block is a hard error (a silent mis-slice is worse); a name
+/// that misses but resolves by index WARNS.
 #[cfg(all(feature = "kernel", feature = "native"))]
 pub fn slice_model_parts(
     source: &Path,
@@ -272,7 +311,7 @@ pub fn slice_model_parts(
     spec: &Slicing,
     spread: f64,
     out_dir: &Path,
-    as_3mf: bool,
+    plate: Option<([f64; 2], f64)>,
 ) -> Result<PathBuf> {
     use crate::backend::{ManifoldBackend, build_geo_parts, part_names, resolve_part};
 
@@ -327,9 +366,9 @@ pub fn slice_model_parts(
         block_of[i] = Some(ps);
     }
 
-    // Slice each part with its own block (part-local cuts/connectors/orient), or keep it whole. Fan the
-    // pieces by their slab multi-index × spread (0 = assembled in place), pooled across all parts.
-    let mut laid: Vec<Solid> = Vec::new();
+    // Slice each part with its own block (part-local cuts/connectors/orient), or keep it whole. Keep
+    // each part's (spec, pieces) so the 3mf path can orient every piece by ITS OWN part's spec.
+    let mut sliced: Vec<PartPieces> = Vec::new();
     for (i, part) in parts.iter().enumerate() {
         match block_of[i] {
             Some(ps) => {
@@ -340,7 +379,34 @@ pub fn slice_model_parts(
                     orient: ps.orient.clone(),
                     parts: vec![],
                 };
-                for (idx, s) in slice_solid(&part_spec, part)? {
+                let pieces = slice_solid(&part_spec, part)?;
+                sliced.push((part_spec, pieces));
+            }
+            // No block → the whole part is one piece (slab origin), sliced with an empty spec.
+            None => sliced.push((
+                Slicing::default(),
+                vec![([0, 0, 0], part.transform(&Affine::IDENTITY))],
+            )),
+        }
+    }
+
+    match plate {
+        Some((bed, gap)) => {
+            // Bed-pack: orient each piece (per component) by its part's spec, co-pack all parts' pieces.
+            let mut to_place = Vec::new();
+            for (part_spec, pieces) in &sliced {
+                collect_plate_pieces(pieces, part_spec, &mut to_place);
+            }
+            anyhow::ensure!(!to_place.is_empty(), "slice produced no pieces");
+            let out = out_dir.join(format!("{stem}.3mf"));
+            crate::bambu::export_plates(&out, to_place, bed, gap)?;
+            Ok(out)
+        }
+        None => {
+            // Merged STL: fan each piece by its slab multi-index × spread, pooled across all parts.
+            let mut laid: Vec<Solid> = Vec::new();
+            for (_, pieces) in &sliced {
+                for (idx, s) in pieces {
                     laid.push(s.translate(Vec3::new(
                         idx[0] as f64 * spread,
                         idx[1] as f64 * spread,
@@ -348,19 +414,11 @@ pub fn slice_model_parts(
                     )));
                 }
             }
-            None => laid.push(part.transform(&Affine::IDENTITY)), // no block → the whole part, one piece
+            anyhow::ensure!(!laid.is_empty(), "slice produced no pieces");
+            let out = out_dir.join(format!("{stem}-sliced.stl"));
+            Solid::batch_union(&laid).write_stl(&out)?;
+            Ok(out)
         }
-    }
-    anyhow::ensure!(!laid.is_empty(), "slice produced no pieces");
-
-    if as_3mf {
-        let out = out_dir.join(format!("{stem}.3mf"));
-        Solid::write_3mf(&out, &laid)?;
-        Ok(out)
-    } else {
-        let out = out_dir.join(format!("{stem}-sliced.stl"));
-        Solid::batch_union(&laid).write_stl(&out)?;
-        Ok(out)
     }
 }
 
@@ -866,11 +924,28 @@ mod tests {
             connector: vec![],
             orient: vec![],
         }]);
-        let out = slice_model_parts(&src, &[], &spec, 0.0, &dir.join("out"), false).unwrap();
+        let out = slice_model_parts(&src, &[], &spec, 0.0, &dir.join("out"), None).unwrap();
         assert!(out.exists(), "produced a sliced STL");
+        assert_eq!(out.extension().unwrap(), "stl");
         assert!(
             std::fs::metadata(&out).unwrap().len() > 100,
             "non-trivial STL"
+        );
+
+        // --3mf plate: same parts bin-packed onto a bed → a 3mf (Phase E). 256mm bed fits both pieces.
+        let out3mf = slice_model_parts(
+            &src,
+            &[],
+            &spec,
+            0.0,
+            &dir.join("out"),
+            Some(([256.0, 256.0], 5.0)),
+        )
+        .unwrap();
+        assert_eq!(out3mf.extension().unwrap(), "3mf");
+        assert!(
+            std::fs::metadata(&out3mf).unwrap().len() > 100,
+            "non-trivial 3mf"
         );
 
         // An unresolvable block (bad name AND out-of-range index) is a HARD error — never a silent skip.
@@ -884,7 +959,7 @@ mod tests {
             connector: vec![],
             orient: vec![],
         }]);
-        assert!(slice_model_parts(&src, &[], &bad, 0.0, &dir.join("out"), false).is_err());
+        assert!(slice_model_parts(&src, &[], &bad, 0.0, &dir.join("out"), None).is_err());
         std::fs::remove_dir_all(&dir).ok();
     }
 

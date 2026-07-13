@@ -235,7 +235,7 @@ added 2026-07-07.
     - [x] U.3.14.2 - Phase B — inverse bridge (manifest→GUI: Cut→CutDef, Connector→PlacedConn reversing enabled↔stack idx, PieceOrient→Orient) + GUI load hook in poll_job (before auto-plan stands down)
     - [x] U.3.14.3 - Phase C — GUI save: debounced format-preserving autosave (toml_edit) writing [[slicing.part]], migrate-on-save strips flat fields, baseline-seeded so bare open never churns the file
     - [x] U.3.14.4 - Phase D — CLI part-aware slice: slice_model_parts (build_geo_parts + resolve_part bind + per-part slice_solid), XOR-bail on flat+per-part mix, legacy flat unchanged, bind-by-index+warn on name miss
-    - [ ] U.3.14.5 - Phase E — printer wiring: read Slicing.printer (dead field today) + --printer on Slice subcommand, precedence CLI>spec>default
+    - [x] U.3.14.5 - Phase E — printer wiring: read Slicing.printer (dead field today) + --printer on Slice subcommand, precedence CLI>spec>default
     - [ ] U.3.14.6 - Phase G — slicer honors (slab, comp) orientation [chotchki D2]: re-key slice_solid/piece_up from [usize;3] slab to PieceKey=(slab,comp) so a manually-oriented component orients in the actual sliced geometry (GUI reslice + CLI slice)
   - [ ] U.3.15 - Reactive Parts UX (no config dep): complete+consistent auto-derive for ALL parts (fit-to-bed cuts + auto-placed connectors), Explode→persistent view toggle, Reset-to-auto (cuts+connectors)
 - [x] U.4 - U.4 - gui module split: break gui/src/main.rs (4.6k lines) into cohesive modules (behavior-preserving moves, no logic changes)

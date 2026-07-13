@@ -337,6 +337,25 @@ pub(crate) struct ActivePart(pub(crate) usize);
 #[derive(Resource, Default)]
 pub(crate) struct SaveBaseline(pub(crate) Option<u64>);
 
+/// Per-node pipeline feedback (U.3.7): which workflow STAGES are stale (their output is behind their
+/// input) + whether a background job runs. The tab bar reads `dirty` for amber dots and `busy` for a
+/// spinner; the status bar pulses on `busy`. The DAG is Model(source) → Parts(geometry) →
+/// Orientation(sliced+laid pieces) → Export(packed plates); a stage is dirty when an upstream input
+/// changed since it last computed. `geo_of`/`layout_of` are the "last-computed-for" hashes the
+/// completion systems (`poll_job`, `poll_print_job`) stamp; `sync_pipeline` derives `dirty` from them.
+#[derive(Resource, Default)]
+pub(crate) struct Pipeline {
+    /// Source hash of the geometry currently displayed — stamped by `poll_job` on a render result.
+    /// `None` until the first render (a not-yet-computed stage reads CLEAN, not stale).
+    pub(crate) geo_of: Option<u64>,
+    /// All-parts slice-config hash the current print layout was built from — stamped by `poll_print_job`.
+    pub(crate) layout_of: Option<u64>,
+    /// Per [`Tab`] (Model, Parts, Orientation, Export): this stage's output is behind its input.
+    pub(crate) dirty: [bool; 4],
+    /// Any background job (render / reslice / plan / print) in flight → the tab-bar spinner + pulse.
+    pub(crate) busy: bool,
+}
+
 /// Which entry-point environment the GUI runs in (U.3.6). `Desktop` = the full folder picker + the
 /// ＋ file tab (open anything); `Web` = a single presupplied file, no picker (wasm has no folder
 /// access), landing straight on the editor. Defaults from the build target — a test overrides it to
@@ -477,6 +496,15 @@ impl Tab {
         (Tab::Orientation, "Orientation"),
         (Tab::Export, "Export"),
     ];
+    /// Pipeline-order index — indexes [`Pipeline::dirty`] (Model 0 → Export 3).
+    pub(crate) fn index(self) -> usize {
+        match self {
+            Tab::Model => 0,
+            Tab::Parts => 1,
+            Tab::Orientation => 2,
+            Tab::Export => 3,
+        }
+    }
 }
 
 /// The auto-picked (eventually manual) orientations as `fab::Orient3` for `reslice`. Empty until the

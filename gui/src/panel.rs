@@ -57,6 +57,7 @@ pub(crate) struct PanelView<'w> {
     pub(crate) print_pieces: Res<'w, PrintPieces>,
     pub(crate) copack: Res<'w, CoPack>,
     pub(crate) platform: Res<'w, Platform>,
+    pub(crate) pipeline: Res<'w, Pipeline>,
 }
 
 /// The whole control panel (U.3), immediate-mode: an app-wide top tab bar + bottom status bar +
@@ -75,7 +76,6 @@ pub(crate) fn panel_ui(
     mut tab: ResMut<Tab>,
     files: Res<FileList>,
     status: Res<Status>,
-    job: Res<Job>,
     mut open_dialog: ResMut<OpenDialog>,
     mut editor: ResMut<EditorBuf>,
     time: Res<Time>,
@@ -117,12 +117,21 @@ pub(crate) fn panel_ui(
                 if ui.selectable_label(on, text).clicked() {
                     *tab = t;
                 }
+                // Per-node feedback (U.3.7): this stage's output is behind its input → an amber dot,
+                // upgraded to a spinner while a background job is catching it up.
+                if view.pipeline.dirty[t.index()] {
+                    if view.pipeline.busy {
+                        ui.add(egui::Spinner::new().size(12.0));
+                    } else {
+                        ui.colored_label(egui::Color32::from_rgb(224, 168, 96), "●");
+                    }
+                }
             }
         });
     });
-    // BOTTOM BAR (U.3): the traditional status line — pulses blue while a background render/slice runs.
+    // BOTTOM BAR (U.3): the traditional status line — pulses blue while any background job runs.
     let bottom = egui::Panel::bottom("statusbar").show(&mut viewport, |ui| {
-        if job.0.is_some() {
+        if view.pipeline.busy {
             let p = ((ui.input(|i| i.time) * 5.0).sin() * 0.5 + 0.5) as f32;
             let col =
                 egui::Color32::from_rgb((115.0 + 115.0 * p) as u8, (165.0 + 75.0 * p) as u8, 255);

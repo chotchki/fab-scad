@@ -125,6 +125,7 @@ fn run_windowed(scene: SceneCfg, shot: Option<PathBuf>) {
         .init_resource::<PrintPieces>()
         .init_resource::<CoPack>()
         .init_resource::<Platform>()
+        .init_resource::<Pipeline>()
         .init_resource::<AutoJob>()
         .init_resource::<PublishJob>()
         .init_resource::<Tab>()
@@ -192,6 +193,7 @@ fn run_windowed(scene: SceneCfg, shot: Option<PathBuf>) {
                     color_conn_markers,
                     do_auto_place,
                     estimate_copack, // U.3.5 — reactive co-pack metric for the Export tab
+                    sync_pipeline,   // U.3.7 — per-node stale flags + busy for the tab-bar feedback
                 ),
             ),
         )
@@ -243,6 +245,7 @@ fn run_screenshot(scene: SceneCfg, png: PathBuf) {
         .init_resource::<PrintPieces>()
         .init_resource::<CoPack>()
         .init_resource::<Platform>()
+        .init_resource::<Pipeline>()
         .insert_resource(Status("rendering".into()))
         .add_message::<ReSlice>()
         .add_message::<AutoPlace>()
@@ -289,6 +292,7 @@ fn run_scripted(scene: SceneCfg, actions: Vec<Action>) {
         .init_resource::<PrintPieces>()
         .init_resource::<CoPack>()
         .init_resource::<Platform>()
+        .init_resource::<Pipeline>()
         .init_resource::<Tab>()
         .init_resource::<EditorBuf>()
         .init_resource::<PrevCam>()

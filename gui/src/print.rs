@@ -117,6 +117,7 @@ pub(crate) fn poll_print_job(
     mut parts: ResMut<Parts>,
     mut cache: ResMut<PrintPieces>,
     mut status: ResMut<Status>,
+    mut pipeline: ResMut<Pipeline>,
 ) {
     let Some(task) = job.0.as_mut() else {
         return;
@@ -147,6 +148,9 @@ pub(crate) fn poll_print_job(
     }
     let n = pieces.len();
     cache.0 = Some(pieces);
+    // The print layout now matches the current slice config — clear the Orientation/Export stale flag
+    // (U.3.7). (Orientation changes don't count: sync_orientation / estimate_copack apply them live.)
+    pipeline.layout_of = Some(jobs::slice_config_hash(&parts.0));
     status.0 = format!(
         "{n} piece{}: click a face to set print-down",
         if n == 1 { "" } else { "s" }

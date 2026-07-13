@@ -224,6 +224,25 @@ fn orientation_tab_raises_print_view() {
 }
 
 #[test]
+fn pipeline_dirty_propagates_downstream() {
+    // U.3.7 per-node stale derivation (Model, Parts, Orientation, Export):
+    // nothing computed yet → all clean (not-yet-run reads clean, not stale).
+    assert_eq!(jobs::derive_dirty(None, None, 1, 2), [false; 4]);
+    // source drifted off the rendered geometry → Model + Parts stale, propagating to Orient + Export.
+    assert_eq!(
+        jobs::derive_dirty(Some(1), Some(9), 2, 9),
+        [true, true, true, true]
+    );
+    // geometry current but the slice config drifted → only Orientation + Export stale.
+    assert_eq!(
+        jobs::derive_dirty(Some(1), Some(9), 1, 8),
+        [false, false, true, true]
+    );
+    // everything matches → all clean.
+    assert_eq!(jobs::derive_dirty(Some(1), Some(9), 1, 9), [false; 4]);
+}
+
+#[test]
 fn platform_gates_the_file_picker() {
     // U.3.6: desktop shows the ＋/folder picker; web (one presupplied file, no fs access) hides it.
     assert!(Platform::Desktop.shows_picker());

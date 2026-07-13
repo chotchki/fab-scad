@@ -59,6 +59,62 @@ pub(crate) fn slice_hash(cuts: &Cuts, conns: &Conns, orient: &Orient) -> u64 {
     h.finish()
 }
 
+/// Hash any `Hash` value to a `u64` — the pipeline-feedback change detector (U.3.7).
+fn hash_one<T: std::hash::Hash>(v: &T) -> u64 {
+    use std::hash::Hasher;
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    v.hash(&mut h);
+    h.finish()
+}
+
+/// A content hash of EVERY part's SLICE inputs — enabled cuts + connectors, but NOT orientation. A cut
+/// or connector change means the print pieces need re-slicing (Orientation/Export behind); an ORIENT
+/// change is applied live by `sync_orientation` / `estimate_copack`, so it must NOT read as stale.
+/// Reuses `slice_hash` with an empty orient (its orient section then contributes nothing). Stamped into
+/// [`Pipeline::layout_of`] by `poll_print_job`.
+pub(crate) fn slice_config_hash(parts: &[Part]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let empty = Orient::default();
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    for p in parts {
+        slice_hash(&p.cuts, &p.conns, &empty).hash(&mut h);
+    }
+    h.finish()
+}
+
+/// Derive the per-node pipeline feedback (U.3.7): a stage is DIRTY when its input hash drifted off the
+/// hash it last computed for — `geo_of` (source→geometry, stamped by [`poll_job`]) drives Model+Parts,
+/// `layout_of` (config→print layout, stamped by [`poll_print_job`]) drives Orientation+Export, and
+/// geometry-dirty propagates downstream. A stage that hasn't computed yet (`None`) reads CLEAN, so tabs
+/// aren't amber before first use. `busy` is any background job in flight (render/reslice/plan/print).
+pub(crate) fn sync_pipeline(
+    editor: Res<EditorBuf>,
+    parts: Res<Parts>,
+    job: Res<Job>,
+    auto: Res<AutoJob>,
+    print_job: Res<PrintJob>,
+    mut pipe: ResMut<Pipeline>,
+) {
+    let src = hash_one(&editor.text);
+    let cfg = slice_config_hash(&parts.0);
+    pipe.dirty = derive_dirty(pipe.geo_of, pipe.layout_of, src, cfg);
+    pipe.busy = job.0.is_some() || auto.0.is_some() || print_job.0.is_some();
+}
+
+/// Per-[`Tab`](crate::Tab) stale flags from the stored vs current input hashes (the testable core of
+/// [`sync_pipeline`]). Model + Parts key on source→geometry; Orientation + Export on config→layout,
+/// with geometry-dirty propagating down. A stage that never computed (`None`) is CLEAN, not stale.
+pub(crate) fn derive_dirty(
+    geo_of: Option<u64>,
+    layout_of: Option<u64>,
+    src: u64,
+    cfg: u64,
+) -> [bool; 4] {
+    let geo_dirty = geo_of.is_some_and(|h| h != src);
+    let layout_dirty = geo_dirty || layout_of.is_some_and(|h| h != cfg);
+    [geo_dirty, geo_dirty, layout_dirty, layout_dirty]
+}
+
 /// The reactive core (the DAG success criterion): when the slice inputs change, rebuild in the
 /// BACKGROUND after a short settle — no Re-slice button. `prev` debounces (reset the clock while the
 /// inputs move frame-to-frame, e.g. a cut drag); `sliced_h` records what was last sliced so identical
@@ -462,6 +518,8 @@ pub(crate) fn poll_job(
     mut parts: ResMut<Parts>,
     mut active_part: ResMut<ActivePart>,
     mut save_baseline: ResMut<SaveBaseline>,
+    mut pipeline: ResMut<Pipeline>,
+    editor: Res<EditorBuf>,
     cfg: Res<SceneCfg>,
     bg: Res<SliceInBackground>,
     models: Query<(Entity, &PartId), With<Model>>,
@@ -531,6 +589,9 @@ pub(crate) fn poll_job(
                 }
             }
             status.0 = "ready".into();
+            // The displayed geometry now matches the current source — clear the Model/Parts stale flag
+            // (U.3.7). `sync_pipeline` compares the live source hash against this each frame.
+            pipeline.geo_of = Some(hash_one(&editor.text));
         }
         Ok(JobResult::Resliced { part, stl }) => {
             let (mesh, _) = mesh_and_bounds(&mut meshes, &stl);

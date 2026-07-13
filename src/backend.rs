@@ -162,10 +162,16 @@ fn is_wrapper_module(name: &str) -> bool {
 /// `render_parts` and the CLI per-part slice ([`resolve_part`] binds a `[[slicing.part]]` block to one
 /// of these by name+nth).
 pub fn part_names(source: &Path) -> Vec<Option<String>> {
-    let Ok(text) = std::fs::read_to_string(source) else {
-        return Vec::new();
-    };
-    let Ok(prog) = fab_lang::parse(&text) else {
+    match std::fs::read_to_string(source) {
+        Ok(text) => part_names_of(&text),
+        Err(_) => Vec::new(),
+    }
+}
+
+/// The AST walk behind [`part_names`], on already-read source — the pure, IO-free core (so its test
+/// runs under miri, which can't touch the filesystem).
+fn part_names_of(text: &str) -> Vec<Option<String>> {
+    let Ok(prog) = fab_lang::parse(text) else {
         return Vec::new();
     };
     prog.stmts
@@ -689,25 +695,16 @@ impl GeometryBackend for MockBackend {
 
 #[cfg(test)]
 mod tests {
-    use super::{GeometryBackend, MockBackend, build_geo_parts, part_names};
+    use super::{GeometryBackend, MockBackend, build_geo_parts, part_names_of};
 
     #[test]
     fn part_names_descend_wrappers_and_flag_anonymous() {
-        let dir = std::env::temp_dir().join("fab_part_names_test");
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let src = dir.join("m.scad");
         // a module DEF (no geometry), a wrapped call, a bare primitive, an anonymous `if` block.
-        std::fs::write(
-            &src,
-            "module wall() { cube(1); }\ntranslate([0,0,0]) wall();\ncube(2);\nif (true) { sphere(1); }\n",
-        )
-        .unwrap();
+        let src = "module wall() { cube(1); }\ntranslate([0,0,0]) wall();\ncube(2);\nif (true) { sphere(1); }\n";
         assert_eq!(
-            part_names(&src),
+            part_names_of(src),
             vec![Some("wall".to_string()), Some("cube".to_string()), None]
         );
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

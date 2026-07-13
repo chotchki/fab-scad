@@ -45,6 +45,7 @@ mod config;
 mod cuts;
 #[cfg(test)]
 mod harness_tests;
+mod highlight;
 mod jobs;
 mod panel;
 mod print;

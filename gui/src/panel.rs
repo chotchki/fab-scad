@@ -179,11 +179,24 @@ pub(crate) fn panel_ui(
                     egui::ScrollArea::vertical()
                         .auto_shrink([false, false])
                         .show(ui, |ui| {
+                            // SCAD syntax highlighting (U.3.13): a layouter that lexes the buffer and
+                            // paints each token by kind (fab-lang's own lexer → colors track the grammar).
+                            let mut layouter =
+                                |ui: &egui::Ui, buf: &dyn egui::TextBuffer, _w: f32| {
+                                    let font = egui::TextStyle::Monospace.resolve(ui.style());
+                                    let job = crate::highlight::scad_job(
+                                        buf.as_str(),
+                                        font,
+                                        ui.visuals().text_color(),
+                                    );
+                                    ui.fonts_mut(|f| f.layout_job(job))
+                                };
                             let resp = ui.add_sized(
                                 ui.available_size(),
                                 egui::TextEdit::multiline(&mut editor.text)
                                     .code_editor()
-                                    .desired_width(f32::INFINITY),
+                                    .desired_width(f32::INFINITY)
+                                    .layouter(&mut layouter),
                             );
                             if resp.changed() {
                                 editor.dirty = true;

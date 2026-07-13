@@ -229,7 +229,7 @@ added 2026-07-07.
   - [x] U.3.10 - U.3.10 - real-window screenshot harness: windowed `--shot <path>` captures the TRUE winit/HiDPI window surface at a settled frame (+ camera/egui-context ownership dump, self-exit) — the offscreen harness renders a different pipeline and is blind to windowed-only wiring bugs
   - [x] U.3.11 - GUI integration tests: script-driven state assertions (ScheduleRunner harness → drive tab/addcut/edit/autoplace → assert edit.0/cuts/conns/active_part/Tab)
   - [x] U.3.12 - Dogfood fixes: Parts Auto-slice/Explode no-op + Model-editor scroll zooms 3D view + ＋ file-tab glyph (Material Symbols)
-  - [ ] U.3.13 - Model tab: SCAD syntax highlighting in the code editor (egui layouter / LayoutJob)
+  - [x] U.3.13 - Model tab: SCAD syntax highlighting in the code editor (egui layouter / LayoutJob)
   - [x] U.3.14 - Config-driven Parts: GUI ↔ project.toml [slicing] shared with the CLI — load-if-present / auto-derive-if-absent, save-on-edit, reset-to-auto (both cuts+connectors), complete derive for all parts, Explode→view-toggle
     - [x] U.3.14.1 - Phase A — manifest schema types (Slicing.parts, PartSlicing, PartKey{name,nth,index}, PieceOrient.comp) + shared resolve_part in backend; flat back-compat + serde round-trip tests
     - [x] U.3.14.2 - Phase B — inverse bridge (manifest→GUI: Cut→CutDef, Connector→PlacedConn reversing enabled↔stack idx, PieceOrient→Orient) + GUI load hook in poll_job (before auto-plan stands down)

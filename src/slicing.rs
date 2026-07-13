@@ -100,11 +100,14 @@ fn slab_index(sorted_cuts: &[f64], coord: f64) -> usize {
     sorted_cuts.iter().filter(|&&x| x < coord - 1e-6).count()
 }
 
-/// A piece's build-up: a manual override from the spec, else +Z (auto-orient fills this in #42/D).
-fn piece_up(s: &Slicing, mi: [usize; 3]) -> Vec3 {
-    s.orient
-        .iter()
-        .find(|p| p.piece == mi)
+/// A piece's build-up, keyed by (slab, connected-COMPONENT) — U.3.14 Phase G. A component-specific
+/// override wins (a presliced blob's comp `k` orients on its own); else the slab-level orient (comp 0)
+/// applies to every component of that slab; else +Z (as-modeled). The onion/bolt carve queries comp 0
+/// (a cut slab is one component), the 3mf co-pack queries each real component.
+fn piece_up(s: &Slicing, mi: [usize; 3], comp: usize) -> Vec3 {
+    let at = |c: usize| s.orient.iter().find(|p| p.piece == mi && p.comp == c);
+    at(comp)
+        .or_else(|| at(0))
         .map(|p| Vec3::new(p.up[0].f(), p.up[1].f(), p.up[2].f()).normalize())
         .unwrap_or(Vec3::new(0.0, 0.0, 1.0))
 }
@@ -128,7 +131,8 @@ fn onion_resolution(s: &Slicing, by_axis: &[Vec<f64>; 3], c: &Connector) -> Resu
     lo[others[1]] = slab_index(&by_axis[others[1]], c.pos[1].f());
     let mut up = lo;
     up[axis] = k + 1;
-    Ok(onion_axis(piece_up(s, lo), piece_up(s, up)))
+    // The onion joins two CUT slabs — each a single component — so gate on comp 0.
+    Ok(onion_axis(piece_up(s, lo, 0), piece_up(s, up, 0)))
 }
 
 /// Freeze `source` to a mesh, generate the slicer driver from `spec`, render the pieces.
@@ -276,8 +280,10 @@ fn collect_plate_pieces(
     to_place: &mut Vec<crate::bambu::PieceToPlace>,
 ) {
     for (slab, solid) in pieces {
-        let up = piece_up(spec, *slab).to_array();
-        for csolid in solid.components() {
+        for (comp, csolid) in solid.components().into_iter().enumerate() {
+            // Phase G: each component orients by its OWN (slab, comp) build-up — a per-component manual
+            // override wins over the slab default, so a presliced blob's parts each lay flat on their own.
+            let up = piece_up(spec, *slab, comp).to_array();
             let (v, t) = csolid.to_indexed();
             to_place.push(crate::bambu::PieceToPlace {
                 mesh: crate::bambu::Mesh {
@@ -812,7 +818,7 @@ pub fn slice_solid(s: &Slicing, base: &Solid) -> Result<Vec<([usize; 3], Solid)>
                         // Teardrop the hole when THIS piece prints it >45° off vertical (the build-up's
                         // component ⟂ the bolt axis), so the ceiling self-supports; aim the peak at the
                         // build-up via a full basis. A near-vertical hole needs none → plain cylinder.
-                        let up = piece_up(s, piece);
+                        let up = piece_up(s, piece, 0); // a bolt sits on a cut slab (one component)
                         let peak = up - (*axis * up.dot(*axis));
                         let teardrop = peak.length() > 0.707;
                         let bolt = Solid::bolt_clearance(
@@ -890,6 +896,34 @@ mod tests {
             "{d}"
         );
         assert!(d.contains("module _part()"), "{d}");
+    }
+
+    #[test]
+    fn piece_up_prefers_component_then_slab_then_z() {
+        use crate::manifest::PieceOrient;
+        use crate::num::Num;
+        let f = |x: f64| Num::Float(x);
+        let s = Slicing {
+            printer: None,
+            cut: vec![],
+            connector: vec![],
+            orient: vec![
+                PieceOrient {
+                    piece: [0, 0, 0],
+                    comp: 0,
+                    up: [f(0.0), f(1.0), f(0.0)],
+                }, // slab default: +Y
+                PieceOrient {
+                    piece: [0, 0, 0],
+                    comp: 2,
+                    up: [f(1.0), f(0.0), f(0.0)],
+                }, // comp 2 override: +X
+            ],
+            parts: vec![],
+        };
+        assert_eq!(piece_up(&s, [0, 0, 0], 2).to_array(), [1.0, 0.0, 0.0]); // comp-specific wins
+        assert_eq!(piece_up(&s, [0, 0, 0], 1).to_array(), [0.0, 1.0, 0.0]); // no comp 1 → slab default
+        assert_eq!(piece_up(&s, [9, 9, 9], 0).to_array(), [0.0, 0.0, 1.0]); // no orient → +Z
     }
 
     #[cfg(all(feature = "kernel", feature = "native"))]

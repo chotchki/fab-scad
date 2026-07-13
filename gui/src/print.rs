@@ -6,6 +6,10 @@ use crate::*;
 /// parts' pieces).
 pub(crate) type PartPieces = Vec<(usize, fab::PiecePrint)>;
 
+/// Query filter for everything the preview spawns into the scene — the piece meshes and their
+/// per-plate bed slabs — so a relayout or a preview-close despawns both in one sweep.
+type PreviewSpawn = Or<(With<PrintPiece>, With<PrintPlate>)>;
+
 /// The in-flight print-layout render (off-thread): renders + auto-orients every piece. Yields the
 /// pieces (mesh + multi-index + build-up) on success, else an error string. The job fans
 /// `print_layout_kernel` over every top-level part and concatenates.
@@ -36,13 +40,23 @@ pub(crate) fn enter_exit_print(
     mut job: ResMut<PrintJob>,
     mut cache: ResMut<PrintPieces>,
     mut status: ResMut<Status>,
-    pieces: Query<Entity, With<PrintPiece>>,
+    preview_ents: Query<Entity, PreviewSpawn>,
+    mut beds: Query<&mut Visibility, With<Bed>>,
     mut commands: Commands,
 ) {
     if print.0 == *was_on {
         return; // no transition (and not the initial add) — nothing to do
     }
     *was_on = print.0;
+    // The single startup bed is one slab at the origin; the preview shows a GRID of per-plate slabs
+    // (`sync_orientation`) instead, so hide the startup bed while the preview owns the floor.
+    for mut v in &mut beds {
+        *v = if print.0 {
+            Visibility::Hidden
+        } else {
+            Visibility::Inherited
+        };
+    }
     if print.0 {
         cache.0 = None; // cuts may have moved — wait for a fresh render before laying out
         if job.0.is_none() {
@@ -61,7 +75,7 @@ pub(crate) fn enter_exit_print(
             kick_print_job(&mut job, &mut status, specs);
         }
     } else {
-        for e in &pieces {
+        for e in &preview_ents {
             commands.entity(e).despawn();
         }
         cache.0 = None;
@@ -170,7 +184,7 @@ pub(crate) fn sync_orientation(
     cache: Res<PrintPieces>,
     cfg: Res<SceneCfg>,
     mut feas: ResMut<Feas>,
-    existing: Query<Entity, With<PrintPiece>>,
+    existing: Query<Entity, PreviewSpawn>,
     mut cams: Query<&mut Orbit>,
     mut status: ResMut<Status>,
     mut commands: Commands,
@@ -224,15 +238,23 @@ pub(crate) fn sync_orientation(
     for e in &existing {
         commands.entity(e).despawn();
     }
+    if pieces.is_empty() {
+        status.0 = "no pieces to lay out".into(); // nothing rendered — skip the pack (empty → NaN grid)
+        return;
+    }
 
-    // Pass 1: shelf-pack from the origin (walk a row left→right, wrap at the bed width), each piece
-    // rotated to its build-up. Translation lands the rotated min-corner at the cursor, on z=0.
-    let gap = 6.0_f32;
-    let bw = cfg.bed[0];
-    let (mut cx, mut cy, mut row_h) = (0.0_f32, 0.0_f32, 0.0_f32);
-    let (mut bb_x, mut bb_y, mut bb_z) = (0.0_f32, 0.0_f32, 0.0_f32);
-    let mut placed: Vec<(usize, Quat, Vec3)> = Vec::new(); // (piece index, rotation, translation)
-    for (i, (pidx, pp)) in pieces.iter().enumerate() {
+    // Pass 1: rotate each piece to its build-up (+Z) and measure its footprint, then bin-pack onto the
+    // fewest bed-sized plates with the SHARED packer + grid the `.3mf` export uses (`pack::pack` +
+    // `pack::plate_origin`) — so the preview shows exactly the plate count + arrangement the export
+    // writes and the panel's "N plates" text reports, not a private single-bed shelf-pack that only
+    // ever drew one plate in a straight line.
+    let bed = [cfg.bed[0] as f64, cfg.bed[1] as f64]; // PACK within the usable bed
+    let plate_f = [cfg.plate[0], cfg.plate[1]]; // GRID/slab = the real plate size (matches the export)
+    let plate = [plate_f[0] as f64, plate_f[1] as f64];
+    let mut rots: Vec<Quat> = Vec::with_capacity(pieces.len());
+    let mut foots: Vec<fab_scad::pack::Footprint> = Vec::with_capacity(pieces.len());
+    let mut bb_z = 0.0_f32; // tallest tilted piece — frame for it
+    for (pidx, pp) in pieces {
         // Each piece resolves its build-up against ITS OWN part's orient (co-pack, T.2b.4).
         let up = Vec3::from_array(parts.0[*pidx].orient.up_or((pp.piece, pp.comp), pp.up))
             .normalize_or_zero();
@@ -242,25 +264,77 @@ pub(crate) fn sync_orientation(
             Quat::from_rotation_arc(up, Vec3::Z)
         };
         let (rmin, rmax) = rotated_bounds(&pp.mesh.positions, rot);
-        let (w, h) = (rmax.x - rmin.x, rmax.y - rmin.y);
-        if cx > 0.0 && cx + w > bw {
-            cx = 0.0;
-            cy += row_h + gap;
-            row_h = 0.0;
+        bb_z = bb_z.max(rmax.z - rmin.z);
+        rots.push(rot);
+        foots.push(fab_scad::pack::Footprint {
+            w: (rmax.x - rmin.x) as f64,
+            h: (rmax.y - rmin.y) as f64,
+        });
+    }
+    let placements = match fab_scad::pack::pack(&foots, bed, PLATE_GAP) {
+        Ok(p) => p,
+        Err(e) => {
+            // A piece can't fit the bed in either orientation — the export would fail the same way;
+            // say so and leave the floor empty (the pieces despawned above) rather than draw a lie.
+            status.0 = format!("can't pack for print: {e:#}");
+            return;
         }
-        placed.push((i, rot, Vec3::new(cx - rmin.x, cy - rmin.y, -rmin.z)));
-        bb_x = bb_x.max(cx + w);
-        bb_y = bb_y.max(cy + h);
-        bb_z = bb_z.max(rmax.z - rmin.z); // a tilted piece stands tall — frame for it too
-        cx += w + gap;
-        row_h = row_h.max(h);
+    };
+    let plate_n = fab_scad::pack::plate_count(&placements);
+    let cols = fab_scad::pack::grid_cols(plate_n);
+
+    // Centre the whole plate grid on the origin: its cells span [0, X] × [-Y, bed] (columns advance
+    // +X, rows descend into -Y), so shift by minus the grid-AABB centre for a tidy, framed layout.
+    let (mut gx0, mut gx1, mut gy0, mut gy1) = (f64::INFINITY, f64::NEG_INFINITY, f64::INFINITY, f64::NEG_INFINITY);
+    for p in 0..plate_n {
+        let [ox, oy] = fab_scad::pack::plate_origin(p, cols, plate);
+        gx0 = gx0.min(ox);
+        gx1 = gx1.max(ox + plate[0]);
+        gy0 = gy0.min(oy);
+        gy1 = gy1.max(oy + plate[1]);
+    }
+    let shift = Vec3::new(-((gx0 + gx1) * 0.5) as f32, -((gy0 + gy1) * 0.5) as f32, 0.0);
+
+    // Pass 2a: spawn one bed slab per packed plate at its (centred) grid cell.
+    let plate_mat = materials.add(StandardMaterial {
+        base_color: theme::BED_SLATE,
+        ..default()
+    });
+    for p in 0..plate_n {
+        let [ox, oy] = fab_scad::pack::plate_origin(p, cols, plate);
+        commands.spawn((
+            Mesh3d(meshes.add(Cuboid::new(plate_f[0], plate_f[1], 1.0))),
+            MeshMaterial3d(plate_mat.clone()),
+            Transform::from_xyz(
+                (ox + plate[0] * 0.5) as f32 + shift.x,
+                (oy + plate[1] * 0.5) as f32 + shift.y,
+                -0.5,
+            ),
+            PrintPlate,
+        ));
     }
 
-    // Pass 2: centre the block on the bed origin (like a slicer auto-arrange) and spawn.
-    let shift = Vec3::new(-bb_x * 0.5, -bb_y * 0.5, 0.0);
-    for &(i, rot, t) in &placed {
+    // Pass 2b: place each piece at its plate cell + in-plate offset, applying the packer's 90° swap
+    // when it rotated the footprint to landscape (matches `bambu::export_plates_to`'s re-seat), seated
+    // on z=0.
+    for (i, pl) in placements.iter().enumerate() {
+        let rot = if pl.rotated {
+            Quat::from_rotation_z(std::f32::consts::FRAC_PI_2) * rots[i]
+        } else {
+            rots[i]
+        };
+        let (qmin, _) = rotated_bounds(&pieces[i].1.mesh.positions, rot);
+        let [ox, oy] = fab_scad::pack::plate_origin(pl.plate, cols, plate);
+        let t = Vec3::new(
+            (ox + pl.x) as f32 + shift.x - qmin.x,
+            (oy + pl.y) as f32 + shift.y - qmin.y,
+            -qmin.z,
+        );
+        // HSL rainbow, retuned for the navy well: +25° phase steers pieces off the blue wedge (so a
+        // blue piece never sinks into the #0f182d bg) and lightness 0.62 keeps them bright; 47° stride
+        // still separates N pieces.
         let mat = materials.add(StandardMaterial {
-            base_color: Color::hsl((i as f32 * 47.0) % 360.0, 0.55, 0.55),
+            base_color: Color::hsl((i as f32 * 47.0 + 25.0) % 360.0, 0.58, 0.62),
             perceptual_roughness: 0.7,
             ..default()
         });
@@ -268,27 +342,38 @@ pub(crate) fn sync_orientation(
             Mesh3d(meshes.add(build_mesh(&pieces[i].1.mesh))),
             MeshMaterial3d(mat),
             Transform {
-                translation: t + shift,
+                translation: t,
                 rotation: rot,
                 ..default()
             },
             PrintPiece((pieces[i].0, pieces[i].1.piece, pieces[i].1.comp)),
         ));
     }
-    // Frame the laid-out block — including a tall tilted piece (account for height, raise the target).
-    let span = bb_x.max(bb_y).max(bb_z).max(80.0);
-    for mut o in &mut cams {
-        o.target = Vec3::new(0.0, 0.0, bb_z * 0.4);
-        o.radius = span * 1.3;
+    // Frame the whole grid ONLY when the pieces are freshly (re)laid — the cache changed (preview
+    // entered / re-rendered), NOT every `parts` tick. `parts` is dirtied every frame (panel_ui derefs
+    // it), so re-framing on it would stomp a wheel-zoom (which writes o.radius) the very next frame:
+    // orbit still works (yaw/pitch untouched) but zoom snaps back and the view "fights" you. A manual
+    // re-orient re-packs the pieces but must not yank the camera.
+    if cache.is_changed() {
+        let span = ((gx1 - gx0) as f32).max((gy1 - gy0) as f32).max(bb_z).max(80.0);
+        for mut o in &mut cams {
+            o.target = Vec3::new(0.0, 0.0, bb_z * 0.4);
+            o.radius = span * 1.3;
+        }
     }
     let n = pieces.len();
+    let pl = if plate_n == 1 {
+        "1 plate".to_string()
+    } else {
+        format!("{plate_n} plates")
+    };
     status.0 = if down > 0 {
         format!(
-            "{n} pieces, {down} onion{} -> bolt (this orientation)",
+            "{n} pieces on {pl}, {down} onion{} -> bolt (this orientation)",
             if down == 1 { "" } else { "s" }
         )
     } else {
-        format!("{n} pieces oriented, onions print clean")
+        format!("{n} pieces on {pl}, onions print clean")
     };
 }
 
@@ -367,11 +452,13 @@ pub(crate) fn export_plates_action(
         }
         None => scene.tmp.join("plates.3mf"),
     };
-    let bed = [scene.bed[0] as f64, scene.bed[1] as f64];
-    match fab::export_plates(&refs, &ups, bed, PLATE_GAP, &out) {
+    let bed = [scene.bed[0] as f64, scene.bed[1] as f64]; // pack within the usable bed
+    let plate = [scene.plate[0] as f64, scene.plate[1] as f64]; // tile on the real plate grid
+    let preset = default_bambu_preset(); // names the presets so BambuStudio imports prompt-free
+    match fab::export_plates(&refs, &ups, bed, plate, PLATE_GAP, preset.as_ref(), &out) {
         Ok(sum) => {
             status.0 = format!(
-                "exported {} piece(s) on {} plate(s), {}% full → {}",
+                "exported {} piece(s) on {} plate(s), {}% full -> {}",
                 sum.pieces,
                 sum.plates,
                 (sum.fill * 100.0).round() as i32,

@@ -572,7 +572,7 @@ pub(crate) fn draw_profile(
     }
     // Connector footprints on the cut plane, coloured + shaped by kind (matches the 3D markers).
     let onion_col = Color::srgb(0.30, 0.85, 0.70); // teal
-    let bolt_col = Color::srgb(0.95, 0.70, 0.20); // amber
+    let bolt_col = theme::BOLT_MARKER; // div-grey (amber vanished on the gold model / navy well)
     let rot = Quat::from_rotation_arc(Vec3::Z, c.axis.unit());
     for pc in conns.list.iter().filter(|pc| pc.cut == i) {
         let center = profile_point(c.axis, c.at, pc.pos);
@@ -879,7 +879,7 @@ pub(crate) fn closest_on_axis(p0: Vec3, axis: Vec3, ray_o: Vec3, ray_d: Vec3) ->
     (b * e - d) / denom
 }
 
-/// Colour each connector marker by kind + feasibility: amber = a bolt (explicit); teal = an onion
+/// Colour each connector marker by kind + feasibility: div-grey = a bolt (explicit); teal = an onion
 /// that prints support-free; red = an onion that can't and downgrades to a bolt under the current
 /// orientations. Live feedback in the assembled/exploded view.
 pub(crate) fn color_conn_markers(
@@ -892,7 +892,7 @@ pub(crate) fn color_conn_markers(
     let conns = &parts.0[active_part.0].conns;
     for (m, mat) in &markers {
         let want = match conns.list.get(m.0).map(|c| c.kind) {
-            Some(fab::ConnKind::Bolt) => Color::srgb(0.95, 0.70, 0.20), // amber = bolt
+            Some(fab::ConnKind::Bolt) => theme::BOLT_MARKER, // div-grey = bolt (reads on gold + navy)
             _ if feas.0.get(m.0).copied().unwrap_or(true) => Color::srgb(0.30, 0.85, 0.70), // teal onion
             _ => Color::srgb(0.95, 0.35, 0.25), // red = onion that downgrades to a bolt
         };

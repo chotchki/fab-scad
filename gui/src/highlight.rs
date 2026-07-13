@@ -49,18 +49,20 @@ pub(crate) fn scad_job(text: &str, font: egui::FontId, default: egui::Color32) -
     job
 }
 
-/// A token's editor color: keywords blue, comments green, strings orange, numbers pale-green, special
-/// vars (`$fn`) yellow, `use`/`include` magenta; everything else (idents, operators, punctuation) the
-/// `default` text color.
+/// A token's editor color (GitHub-light, for the white editor well): keywords red, comments grey,
+/// strings + numbers blue, special vars (`$fn`) orange, `use`/`include` purple; everything else
+/// (idents, operators, punctuation) the `default` text color (navy).
 fn color_for(kind: &fab_lang::TokenKind, default: egui::Color32) -> egui::Color32 {
     use egui::Color32;
     use fab_lang::TokenKind as T;
+    // GitHub-light — the editor well is white now, so the old VS Code Dark+ palette would be
+    // near-invisible. A functional-coding exception (like the gizmo colors), kept local to this module.
     match kind {
-        T::LineComment(_) | T::BlockComment(_) => Color32::from_rgb(106, 153, 85),
-        T::Str(_) => Color32::from_rgb(206, 145, 120),
-        T::Num(_) => Color32::from_rgb(181, 206, 168),
-        T::DollarIdent(_) => Color32::from_rgb(220, 220, 170),
-        T::Use(_) | T::Include(_) => Color32::from_rgb(197, 134, 192),
+        T::LineComment(_) | T::BlockComment(_) => Color32::from_rgb(110, 119, 129), // #6e7781
+        T::Str(_) => Color32::from_rgb(10, 48, 105),                                // #0a3069
+        T::Num(_) => Color32::from_rgb(5, 80, 174),                                 // #0550ae
+        T::DollarIdent(_) => Color32::from_rgb(149, 56, 0),                         // #953800
+        T::Use(_) | T::Include(_) => Color32::from_rgb(130, 80, 223),               // #8250df
         T::Module
         | T::Function
         | T::If
@@ -72,7 +74,7 @@ fn color_for(kind: &fab_lang::TokenKind, default: egui::Color32) -> egui::Color3
         | T::Each
         | T::True
         | T::False
-        | T::Undef => Color32::from_rgb(86, 156, 214),
+        | T::Undef => Color32::from_rgb(207, 34, 46), // #cf222e
         _ => default,
     }
 }
@@ -95,18 +97,18 @@ mod tests {
     fn colors_keyword_comment_string_and_leaves_idents_default() {
         let text = "module m() { echo(\"hi\"); } // note";
         let job = scad_job(text, egui::FontId::monospace(12.0), Color32::WHITE);
-        assert_eq!(color_at(&job, 0), Color32::from_rgb(86, 156, 214)); // `module` → blue
+        assert_eq!(color_at(&job, 0), Color32::from_rgb(207, 34, 46)); // `module` → red
         assert_eq!(
             color_at(&job, text.find("echo").unwrap()),
-            Color32::from_rgb(86, 156, 214) // `echo` keyword → blue
+            Color32::from_rgb(207, 34, 46) // `echo` keyword → red
         );
         assert_eq!(
             color_at(&job, text.find('"').unwrap() + 1),
-            Color32::from_rgb(206, 145, 120) // inside "hi" → orange
+            Color32::from_rgb(10, 48, 105) // inside "hi" → blue
         );
         assert_eq!(
             color_at(&job, text.find("//").unwrap()),
-            Color32::from_rgb(106, 153, 85) // comment → green
+            Color32::from_rgb(110, 119, 129) // comment → grey
         );
         assert_eq!(
             color_at(&job, text.find(" m(").unwrap() + 1),

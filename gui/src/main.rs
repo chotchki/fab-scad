@@ -53,6 +53,7 @@ mod scene;
 mod screenshot;
 mod script;
 mod state;
+mod theme; // W.1 — central egui Visuals/Style + fonts + the 3D palette, ported from hotchkiss.io
 mod view; // U.3.11 — headless script-driven state-assertion tests for the Parts drill
 #[allow(unused_imports)]
 // each module re-exports its whole surface; the builders below use most of it
@@ -66,7 +67,7 @@ mod fab;
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let bed = bed_size().unwrap_or([256.0; 3]);
+    let (bed, plate) = bed_size().unwrap_or(([256.0; 3], [256.0; 3]));
     let cfg = SceneCfg {
         source: args
             .iter()
@@ -74,6 +75,7 @@ fn main() {
             .map(PathBuf::from),
         stl: args.iter().find(|a| a.ends_with(".stl")).map(PathBuf::from),
         bed: [bed[0] as f32, bed[1] as f32],
+        plate: [plate[0] as f32, plate[1] as f32],
         root: fab::find_root(),
         tmp: std::env::temp_dir().join("fab-gui"),
         reslice_on_start: args.iter().any(|a| a == "--reslice"),
@@ -105,7 +107,7 @@ fn run_windowed(scene: SceneCfg, shot: Option<PathBuf>) {
             MeshPickingPlugin,
             EguiPlugin::default(),
         ))
-        .insert_resource(ClearColor(Color::srgb(0.10, 0.10, 0.12)))
+        .insert_resource(ClearColor(theme::VIEWPORT))
         .insert_resource(scene)
         .insert_resource(WindowShot(shot))
         // U.3.9: we pin the primary egui context to the full-window Camera2d ourselves (see
@@ -129,6 +131,7 @@ fn run_windowed(scene: SceneCfg, shot: Option<PathBuf>) {
         .init_resource::<AutoJob>()
         .init_resource::<PublishJob>()
         .init_resource::<Tab>()
+        .init_resource::<theme::ThemeReady>()
         .init_resource::<EditorBuf>()
         .init_resource::<PrevCam>()
         .init_resource::<Feas>()
@@ -200,7 +203,10 @@ fn run_windowed(scene: SceneCfg, shot: Option<PathBuf>) {
         // After `orbit` so the corner axis gizmo reads THIS frame's orbit state (no swim/flicker).
         .add_systems(Update, draw_axis_gizmo.after(orbit))
         .add_systems(Update, window_shot)
-        .add_systems(EguiPrimaryContextPass, (install_fonts, panel_ui).chain())
+        .add_systems(
+            EguiPrimaryContextPass,
+            (theme::install_theme, panel_ui.run_if(theme::theme_ready)).chain(),
+        )
         .run();
 }
 
@@ -225,7 +231,7 @@ fn run_screenshot(scene: SceneCfg, png: PathBuf) {
             auto_create_primary_context: false,
             ..default()
         })
-        .insert_resource(ClearColor(Color::srgb(0.10, 0.10, 0.12)))
+        .insert_resource(ClearColor(theme::VIEWPORT))
         .insert_resource(scene)
         .insert_resource(ScreenshotPng(png))
         .init_resource::<FileList>()
@@ -236,6 +242,7 @@ fn run_screenshot(scene: SceneCfg, png: PathBuf) {
         .init_resource::<EditCut>()
         .init_resource::<PrintView>()
         .init_resource::<Tab>()
+        .init_resource::<theme::ThemeReady>()
         .init_resource::<EditorBuf>()
         .init_resource::<XSection>()
         .init_resource::<DraggingCut>()
@@ -253,7 +260,10 @@ fn run_screenshot(scene: SceneCfg, png: PathBuf) {
         .add_message::<PanelCmd>()
         .add_systems(Startup, setup_offscreen)
         .add_systems(Update, (capture_then_exit, split_viewport, seat_bed))
-        .add_systems(EguiPrimaryContextPass, (install_fonts, panel_ui).chain())
+        .add_systems(
+            EguiPrimaryContextPass,
+            (theme::install_theme, panel_ui.run_if(theme::theme_ready)).chain(),
+        )
         .run();
 }
 
@@ -279,7 +289,7 @@ fn run_scripted(scene: SceneCfg, actions: Vec<Action>) {
             auto_create_primary_context: false,
             ..default()
         })
-        .insert_resource(ClearColor(Color::srgb(0.10, 0.10, 0.12)))
+        .insert_resource(ClearColor(theme::VIEWPORT))
         .insert_resource(scene)
         .init_resource::<Job>()
         .insert_resource(Parts(vec![Part::default()]))
@@ -292,8 +302,10 @@ fn run_scripted(scene: SceneCfg, actions: Vec<Action>) {
         .init_resource::<PrintPieces>()
         .init_resource::<CoPack>()
         .init_resource::<Platform>()
+        .init_resource::<AutoJob>() // sync_pipeline reads it for the busy/loading feedback
         .init_resource::<Pipeline>()
         .init_resource::<Tab>()
+        .init_resource::<theme::ThemeReady>()
         .init_resource::<EditorBuf>()
         .init_resource::<PrevCam>()
         .init_resource::<Feas>()
@@ -344,9 +356,13 @@ fn run_scripted(scene: SceneCfg, actions: Vec<Action>) {
                     seat_bed,
                     export_plates_action, // the `export` script verb → co-pack .3mf (T.2b.4)
                 ),
+                sync_pipeline, // U.3.7 feedback: keep the offscreen harness faithful to run_windowed
                 run_script,
             ),
         )
-        .add_systems(EguiPrimaryContextPass, (install_fonts, panel_ui).chain())
+        .add_systems(
+            EguiPrimaryContextPass,
+            (theme::install_theme, panel_ui.run_if(theme::theme_ready)).chain(),
+        )
         .run();
 }

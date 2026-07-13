@@ -9,37 +9,6 @@ mod icons {
     include!(concat!(env!("OUT_DIR"), "/icon_glyphs.rs"));
 }
 
-/// Install the bundled Material Symbols subset as a LOWEST-priority fallback on both font families, so
-/// icon codepoints (the cut chevron, and the U.2 button glyphs) resolve inside any label while text
-/// keeps the default font. Runs ONCE — `add_font` persists in the egui context (U.2.1).
-pub(crate) fn install_fonts(mut contexts: EguiContexts, mut done: Local<bool>) {
-    if *done {
-        return;
-    }
-    let Ok(ctx) = contexts.ctx_mut() else {
-        return;
-    };
-    use egui::epaint::text::{FontPriority, InsertFontFamily};
-    ctx.add_font(egui::epaint::text::FontInsert::new(
-        "material-symbols",
-        egui::FontData::from_static(include_bytes!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/assets/fonts/MaterialSymbols-subset.ttf"
-        ))),
-        vec![
-            InsertFontFamily {
-                family: egui::FontFamily::Proportional,
-                priority: FontPriority::Lowest,
-            },
-            InsertFontFamily {
-                family: egui::FontFamily::Monospace,
-                priority: FontPriority::Lowest,
-            },
-        ],
-    ));
-    *done = true;
-}
-
 /// The panel's outbound message writers, bundled so `panel_ui` spends ONE system param on all
 /// three (Bevy caps a system at 16 params).
 #[derive(SystemParam)]
@@ -98,52 +67,78 @@ pub(crate) fn panel_ui(
             .layer_id(egui::LayerId::background())
             .max_rect(ctx.viewport_rect()),
     );
-    // TOP BAR (U.3): the app-wide workflow tabs — Model → Parts → Orientation → Export. Sets the
-    // active `Tab` (the source of truth the left panel routes on); the ACTIVE tab reads green + bold.
-    let top = egui::Panel::top("topbar").show(&mut viewport, |ui| {
-        ui.horizontal(|ui| {
-            ui.heading("fab-gui");
-            ui.separator();
-            for (t, label) in Tab::ALL {
-                let on = *tab == t;
-                let text = if on {
-                    egui::RichText::new(label)
-                        .color(egui::Color32::from_rgb(120, 220, 140))
-                        .strong()
-                } else {
-                    egui::RichText::new(label)
-                };
-                if ui.selectable_label(on, text).clicked() {
-                    *tab = t;
-                }
-                // Per-node feedback (U.3.7): this stage's output is behind its input → an amber dot,
-                // upgraded to a spinner while a background job is catching it up.
-                if view.pipeline.dirty[t.index()] {
-                    if view.pipeline.busy {
-                        ui.add(egui::Spinner::new().size(12.0));
-                    } else {
-                        ui.colored_label(egui::Color32::from_rgb(224, 168, 96), "●");
+    // Heavy navy-bordered div-grey card, 8px pad — the site's chrome surface. Every bar/panel uses it.
+    let panel_frame = || {
+        egui::Frame::new()
+            .fill(theme::DIV_GREY)
+            .stroke(egui::Stroke::new(2.0, theme::NAVY))
+            .inner_margin(egui::Margin::same(8))
+    };
+    // TOP BAR (U.3): the workflow tabs — Model → Parts → Orientation → Export. Each is a navy pill (the
+    // site's nav); the ACTIVE one is gold-lettered with a gold underline (the retired green is gone).
+    let top = egui::Panel::top("topbar")
+        .frame(panel_frame())
+        .show(&mut viewport, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(theme::chrome("fab-gui", 22.0).color(theme::NAVY));
+                // the site's serif voice — a Quattrocento tagline beside the wordmark
+                ui.label(
+                    egui::RichText::new("slice · orient · pack")
+                        .font(theme::quattro(13.0))
+                        .color(theme::TEXT_MUTED),
+                );
+                ui.separator();
+                for (t, label) in Tab::ALL {
+                    let on = *tab == t;
+                    let caption = theme::chrome(label, 15.0)
+                        .color(if on { theme::GOLD } else { theme::DIV_GREY });
+                    let resp = ui.add(egui::Button::new(caption).fill(theme::NAVY));
+                    if on {
+                        // the site's signature: a gold underline on the active tab
+                        ui.painter().hline(
+                            resp.rect.x_range(),
+                            resp.rect.bottom() - 1.0,
+                            egui::Stroke::new(2.0, theme::GOLD),
+                        );
                     }
+                    if resp.clicked() {
+                        *tab = t;
+                    }
+                    // Per-node feedback (U.3.7): a gold spinner while THIS stage computes (fires on the
+                    // first render too), else a GOLD_DIM stale dot when its output is behind its input.
+                    if view.pipeline.loading[t.index()] {
+                        ui.add(egui::Spinner::new().size(12.0).color(theme::GOLD));
+                    } else if view.pipeline.dirty[t.index()] {
+                        // icons::DOT (Material Symbols), NOT a raw bullet — the font stack would tofu it.
+                        ui.colored_label(theme::GOLD_DIM, icons::DOT);
+                    }
+                }
+            });
+        });
+    // BOTTOM BAR (U.3): the status line — a gold spinner + navy activity label while a job runs (the
+    // pipeline's ACCURATE activity, never the possibly-stale imperative `Status`); the imperative
+    // status shows only when idle (the last result / error / "ready").
+    let bottom = egui::Panel::bottom("statusbar")
+        .frame(panel_frame())
+        .show(&mut viewport, |ui| {
+            match &view.pipeline.activity {
+                Some(activity) if view.pipeline.busy => {
+                    ui.horizontal(|ui| {
+                        ui.add(egui::Spinner::new().size(14.0).color(theme::GOLD));
+                        ui.colored_label(theme::NAVY, activity.as_str());
+                    });
+                    ui.ctx().request_repaint();
+                }
+                _ => {
+                    ui.label(status.0.as_str());
                 }
             }
         });
-    });
-    // BOTTOM BAR (U.3): the traditional status line — pulses blue while any background job runs.
-    let bottom = egui::Panel::bottom("statusbar").show(&mut viewport, |ui| {
-        if view.pipeline.busy {
-            let p = ((ui.input(|i| i.time) * 5.0).sin() * 0.5 + 0.5) as f32;
-            let col =
-                egui::Color32::from_rgb((115.0 + 115.0 * p) as u8, (165.0 + 75.0 * p) as u8, 255);
-            ui.colored_label(col, status.0.as_str());
-            ui.ctx().request_repaint();
-        } else {
-            ui.label(status.0.as_str());
-        }
-    });
     // LEFT PANEL (U.3): the active tab's controls.
     let panel = egui::Panel::left("panel")
         .resizable(true)
         .default_size(220.0)
+        .frame(panel_frame())
         .show(&mut viewport, |ui| {
             match *tab {
                 Tab::Model => {
@@ -155,14 +150,9 @@ pub(crate) fn panel_ui(
                                 .map(|s| s.to_string_lossy().into_owned())
                                 .unwrap_or_else(|| "?".into());
                             let on = files.active == Some(i);
-                            let text = if on {
-                                egui::RichText::new(name)
-                                    .color(egui::Color32::from_rgb(120, 220, 140))
-                                    .strong()
-                            } else {
-                                egui::RichText::new(name)
-                            };
-                            if ui.selectable_label(on, text).clicked() {
+                            // Selected file = navy text on the gold selection pill (selection.bg_fill);
+                            // filenames stay mixed-case (readouts, not chrome). No green, no fake-bold.
+                            if ui.selectable_label(on, name).clicked() {
                                 writers.switch.write(SwitchFile(i));
                             }
                         }
@@ -199,13 +189,20 @@ pub(crate) fn panel_ui(
                             editor.dirty = false;
                         }
                         if editor.dirty {
-                            ui.colored_label(egui::Color32::from_rgb(224, 168, 96), "● unsaved");
+                            ui.colored_label(
+                                theme::GOLD_DIM,
+                                format!("{} unsaved", icons::DOT), // icons::DOT — a raw bullet is tofu
+                            );
                         }
                     });
                     // The code editor — its buffer IS the render source (debounced preview, U.3.2).
                     // `auto_shrink` off + sizing to the remaining space so it FILLS the panel, not just
-                    // the text height (else a short file leaves the panel half-empty).
-                    egui::ScrollArea::vertical()
+                    // the text height (else a short file leaves the panel half-empty). `both()` (not
+                    // `vertical()`) so a long line SCROLLS horizontally inside the editor instead of
+                    // pushing the resizable panel wider — the code editor scrolls, never wraps
+                    // (highlight::scad_job), and without a horizontal bar the over-wide galley set the
+                    // panel's min width and a drag-narrow snapped straight back.
+                    egui::ScrollArea::both()
                         .auto_shrink([false, false])
                         .show(ui, |ui| {
                             // SCAD syntax highlighting (U.3.13): a layouter that lexes the buffer and
@@ -220,11 +217,17 @@ pub(crate) fn panel_ui(
                                     );
                                     ui.fonts_mut(|f| f.layout_job(job))
                                 };
-                            let resp = ui.add_sized(
-                                ui.available_size(),
+                            // `ui.add` (NOT `add_sized`): add_sized centres/justifies its child, which
+                            // scrolls a long line to its MIDDLE on open — a code editor must sit at
+                            // column 0 and scroll right from there. `desired_rows` fills the panel
+                            // height so a short file doesn't leave it half-empty (what add_sized gave).
+                            let row_h = ui.text_style_height(&egui::TextStyle::Monospace);
+                            let rows = (ui.available_height() / row_h).floor().max(1.0) as usize;
+                            let resp = ui.add(
                                 egui::TextEdit::multiline(&mut editor.text)
                                     .code_editor()
                                     .desired_width(f32::INFINITY)
+                                    .desired_rows(rows)
                                     .layouter(&mut layouter),
                             );
                             if resp.changed() {
@@ -247,22 +250,18 @@ pub(crate) fn panel_ui(
                     let mut autoplace_req = false;
                     for i in 0..n {
                         let is_active = active_part.0 == i;
-                        let pcs = piece_estimate(&parts.0[i].cuts);
+                        // max with the part's component count so a PRESLICED part (0 cuts, N disjoint
+                        // pieces) reads "N pcs", not "1 pc" — piece_estimate alone ignores components.
+                        let pcs = piece_estimate(&parts.0[i].cuts).max(parts.0[i].pieces);
                         let label = format!(
                             "{} · {} pc{}",
                             part_label(&parts.0[i].name, i),
                             pcs,
                             if pcs == 1 { "" } else { "s" }
                         );
-                        // The ACTIVE part reads green + bold — a clear marker that doesn't collide
-                        // with egui's collapse triangle the way a "▶" prefix did.
-                        let header = if is_active {
-                            egui::RichText::new(label)
-                                .color(egui::Color32::from_rgb(120, 220, 140))
-                                .strong()
-                        } else {
-                            egui::RichText::new(label)
-                        };
+                        // Oswald caps header (chrome). Active cue = a painted gold left-rule +
+                        // default-open; NO green, NO fake-bold (Oswald is 400 only).
+                        let header = theme::chrome(&label, 15.0).color(theme::NAVY);
                         let mut select = false;
                         let resp = egui::CollapsingHeader::new(header)
                             .id_salt(("part", i))
@@ -279,6 +278,12 @@ pub(crate) fn panel_ui(
                                     &mut autoplace_req,
                                 );
                             });
+                        if is_active {
+                            // gold left-rule marks the active part (matches the active-cut rule)
+                            let r = resp.header_response.rect;
+                            ui.painter()
+                                .vline(r.left(), r.y_range(), egui::Stroke::new(2.0, theme::GOLD));
+                        }
                         if select || resp.header_response.clicked() {
                             active_part.0 = i;
                             parts.set_changed(); // a pure selection must refresh the active-part visuals
@@ -315,8 +320,13 @@ pub(crate) fn panel_ui(
                     {
                         writers.cmd.write(PanelCmd::ToggleView);
                     }
-                    // Slice summary (mockup's eg-status): part count + estimated piece total.
-                    let total: usize = parts.0.iter().map(|p| piece_estimate(&p.cuts)).sum();
+                    // Slice summary (mockup's eg-status): part count + estimated piece total (each
+                    // part's cut estimate, floored by its presliced component count — see the header).
+                    let total: usize = parts
+                        .0
+                        .iter()
+                        .map(|p| piece_estimate(&p.cuts).max(p.pieces))
+                        .sum();
                     ui.label(
                         egui::RichText::new(format!(
                             "{n} part{} · {total} pieces",
@@ -382,17 +392,19 @@ pub(crate) fn panel_ui(
                                                     reset_orient = Some((*part, key));
                                                 }
                                                 ui.label(
-                                                    egui::RichText::new("flat ✓")
-                                                        .monospace()
-                                                        .color(egui::Color32::from_rgb(
-                                                            120, 220, 140,
-                                                        )),
+                                                    egui::RichText::new(format!(
+                                                        "flat {}",
+                                                        icons::CHECK
+                                                    ))
+                                                    .monospace()
+                                                    .color(theme::NAVY)
+                                                    .strong(),
                                                 );
                                             } else {
                                                 ui.label(
-                                                    egui::RichText::new("auto").monospace().color(
-                                                        egui::Color32::from_rgb(224, 168, 96),
-                                                    ),
+                                                    egui::RichText::new("auto")
+                                                        .monospace()
+                                                        .color(theme::GOLD_DIM),
                                                 );
                                             }
                                         },
@@ -443,10 +455,27 @@ pub(crate) fn panel_ui(
                         }
                     }
                     ui.separator();
-                    if ui.button("Export plates (3MF)").clicked() {
+                    // CTA buttons: gold fill + navy Oswald caption (the site's accent button).
+                    if ui
+                        .add(
+                            egui::Button::new(
+                                theme::chrome("Export plates (3MF)", 14.0).color(theme::NAVY),
+                            )
+                            .fill(theme::GOLD),
+                        )
+                        .clicked()
+                    {
                         writers.cmd.write(PanelCmd::Export);
                     }
-                    if ui.button("Publish → hotchkiss.io").clicked() {
+                    if ui
+                        .add(
+                            egui::Button::new(
+                                theme::chrome("Publish -> hotchkiss.io", 14.0).color(theme::NAVY),
+                            )
+                            .fill(theme::GOLD),
+                        )
+                        .clicked()
+                    {
                         writers.cmd.write(PanelCmd::Publish);
                     }
                 }
@@ -500,7 +529,7 @@ pub(crate) fn part_cut_editor(
         let axis = part.cuts.list[idx].axis;
         let editing = is_active_part && edit.0 == Some(idx);
         let is_cut_active = idx == part.cuts.active;
-        ui.horizontal(|ui| {
+        let cut_row = ui.horizontal(|ui| {
             // Expand this cut's connectors (and enter the 2D face-on editor — both ride `edit`). A real
             // Material Symbols glyph from the build.rs-managed icon font: chevron_right when collapsed,
             // expand_more when open (U.2.1). Frameless clickable label = a bare chevron, per the mockup.
@@ -518,11 +547,10 @@ pub(crate) fn part_cut_editor(
                 touched = true;
             }
             let name = format!("{} cut @", axis.label());
-            // Active row reads green + bold — the app-wide active accent (tabs / files / parts), U.2.
+            // Active row = navy + weight (a readout, not chrome — stays mixed-case Ubuntu-Light); the
+            // gold accent is the painted left-rule below, matching the active-part header.
             ui.label(if is_cut_active {
-                egui::RichText::new(name)
-                    .color(egui::Color32::from_rgb(120, 220, 140))
-                    .strong()
+                egui::RichText::new(name).color(theme::NAVY).strong()
             } else {
                 egui::RichText::new(name)
             });
@@ -543,10 +571,7 @@ pub(crate) fn part_cut_editor(
                 touched = true;
             }
             if ui
-                .button(
-                    egui::RichText::new(icons::DELETE)
-                        .color(egui::Color32::from_rgb(230, 130, 130)),
-                )
+                .button(egui::RichText::new(icons::DELETE).color(theme::DANGER))
                 .on_hover_text("delete cut")
                 .clicked()
             {
@@ -554,6 +579,14 @@ pub(crate) fn part_cut_editor(
                 touched = true;
             }
         });
+        if is_cut_active {
+            // gold left-rule marks the active cut (matches the active-part header rule)
+            ui.painter().vline(
+                cut_row.response.rect.left(),
+                cut_row.response.rect.y_range(),
+                egui::Stroke::new(2.0, theme::GOLD),
+            );
+        }
         // CONNECTORS — inline under the expanded cut (the old Connectors mode, now nested). Sets the
         // active connector TYPE + does auto-place / clear for THIS cut; click-to-place lives in the
         // 2D editor on the same `edit` state.

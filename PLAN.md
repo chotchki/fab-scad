@@ -1,4 +1,4 @@
-<!-- plan-bridge:phase-high-water=W -->
+<!-- plan-bridge:phase-high-water=BT -->
 # PLAN
 
 PIVOTED 2026-07-04: scad-rs — a GPL Rust implementation of the OpenSCAD language over the
@@ -209,41 +209,34 @@ added 2026-07-07.
   - [x] T.2b.3 - T.2b.3 - multi-part tabbed UI (part switcher + per-part editing) — the design work
   - [x] T.2b.4 - T.2b.4 - co-pack all parts onto shared plates + full verify (headless screenshot/script + tests)
 - [x] T.3 - T.3 - best_up prefer-flat policy: stop tilting structured pieces to 45° over a stable flat face
-## Phase U - U - GUI: feathers → egui migration (unblocks rich-text, tabs, resizable panels)
-- [x] U.1 - U.1 - egui migration: feathers → bevy_egui 0.41 (Bevy 3D stays); panel layer only
-  - [x] U.1.1 - U.1.1 - bevy_egui integration: dep + EguiPlugin + minimal SidePanel rendering alongside Bevy 3D
-  - [x] U.1.2 - U.1.2 - port all panels (view/connectors/print) to egui immediate-mode + rewire the 2 seams + icon font
-  - [x] U.1.3 - U.1.3 - delete feathers: UI builders + retained-mode reconciliation systems + drop the feature
-  - [x] U.1.4 - U.1.4 - harness modes (windowed/screenshot/scripted) render egui + full gui verify (test + clippy)
-- [x] U.2 - U.2 - egui panel polish: Material Symbols icons + active-row alignment + optional Nudge flash
-  - [x] U.2.1 - build.rs Material Symbols font pipeline: manifest-keyed download+cache+subset+cache; committed subset = CI/offline fallback; egui set_fonts registration
-- [ ] U.3 - U.3 - Workflow tabs: app-wide top-tab restructure (Model/Parts/Orientation/Export) — see docs/workflow-tabs-mockup.html
-  - [x] U.3.1 - U.3.1 - Top-tab shell + bottom status bar: app-wide Tab resource, full-width bar, route existing blocks, retire derived PanelMode
-  - [x] U.3.2 - U.3.2 - Model tab: egui editor from debounced buffer + explicit desktop Save + unsliced 3D + file inner-tabs with ＋-reopens-folder (reuse FileList/SwitchFile); active file drives downstream
-  - [x] U.3.3 - U.3.3 - Parts tab: left-panel 3-level drill part→cut→connectors inline; fold today's Connectors mode in
-  - [x] U.3.4 - U.3.4 - Orientation tab: promote Print mode; per-piece flat/auto list across all parts
-  - [x] U.3.5 - U.3.5 - Export tab: co-pack preview + Export 3MF + Publish merged
-  - [x] U.3.6 - U.3.6 - Entry-point gating: web (single presupplied file, no ＋, editor landing) vs desktop (full picker + ＋); platform gate
-  - [x] U.3.7 - U.3.7 - Feedback: per-node DAG dirty flags → amber tab dots (stale) + spinner motion on rendering tab + bottom status-bar detail; background jobs clear
-  - [x] U.3.8 - U.3.8 - Harness + tests: script verbs (tab-switch, editor-edit), screenshot each tab, full gui verify
-  - [x] U.3.9 - U.3.9 - panel-inset layout bug: egui layer offset by seam on HiDPI window (egui context rect ↔ split_viewport 3D-camera inset collision); root-cause via bevy_egui-0.41 source + real-window diag, fix + verify on 2× display
-  - [x] U.3.10 - U.3.10 - real-window screenshot harness: windowed `--shot <path>` captures the TRUE winit/HiDPI window surface at a settled frame (+ camera/egui-context ownership dump, self-exit) — the offscreen harness renders a different pipeline and is blind to windowed-only wiring bugs
-  - [x] U.3.11 - GUI integration tests: script-driven state assertions (ScheduleRunner harness → drive tab/addcut/edit/autoplace → assert edit.0/cuts/conns/active_part/Tab)
-  - [x] U.3.12 - Dogfood fixes: Parts Auto-slice/Explode no-op + Model-editor scroll zooms 3D view + ＋ file-tab glyph (Material Symbols)
-  - [x] U.3.13 - Model tab: SCAD syntax highlighting in the code editor (egui layouter / LayoutJob)
-  - [x] U.3.14 - Config-driven Parts: GUI ↔ project.toml [slicing] shared with the CLI — load-if-present / auto-derive-if-absent, save-on-edit, reset-to-auto (both cuts+connectors), complete derive for all parts, Explode→view-toggle
-    - [x] U.3.14.1 - Phase A — manifest schema types (Slicing.parts, PartSlicing, PartKey{name,nth,index}, PieceOrient.comp) + shared resolve_part in backend; flat back-compat + serde round-trip tests
-    - [x] U.3.14.2 - Phase B — inverse bridge (manifest→GUI: Cut→CutDef, Connector→PlacedConn reversing enabled↔stack idx, PieceOrient→Orient) + GUI load hook in poll_job (before auto-plan stands down)
-    - [x] U.3.14.3 - Phase C — GUI save: debounced format-preserving autosave (toml_edit) writing [[slicing.part]], migrate-on-save strips flat fields, baseline-seeded so bare open never churns the file
-    - [x] U.3.14.4 - Phase D — CLI part-aware slice: slice_model_parts (build_geo_parts + resolve_part bind + per-part slice_solid), XOR-bail on flat+per-part mix, legacy flat unchanged, bind-by-index+warn on name miss
-    - [x] U.3.14.5 - Phase E — printer wiring: read Slicing.printer (dead field today) + --printer on Slice subcommand, precedence CLI>spec>default
-    - [x] U.3.14.6 - Phase G — slicer honors (slab, comp) orientation [chotchki D2]: re-key slice_solid/piece_up from [usize;3] slab to PieceKey=(slab,comp) so a manually-oriented component orients in the actual sliced geometry (GUI reslice + CLI slice)
-  - [x] U.3.15 - Reactive Parts UX (no config dep): complete+consistent auto-derive for ALL parts (fit-to-bed cuts + auto-placed connectors), Explode→persistent view toggle, Reset-to-auto (cuts+connectors)
-- [x] U.4 - U.4 - gui module split: break gui/src/main.rs (4.6k lines) into cohesive modules (behavior-preserving moves, no logic changes)
 ## Phase V - V - Multi-part parallelism (per-part render/slice/pack on independent worker threads; Solids stay thread-local, mesh data crosses)
 - [ ] V.1 - V.1 - per-part parallelism: render/slice/print-layout each part on its own worker thread
+## Phase W - Release polish (theme match → standalone .app → wasm on hotchkiss.io)
+- [x] W.1 - Theme match to hotchkiss.io — restyle fab-gui to the site's navy+gold-on-grey, flat + heavily-bordered, Oswald-uppercase identity (today it's stock egui dark, no central theme)
+  - [x] W.1.1 - Design spec: palette + fonts + egui Visuals + 3D-viewport mapping decided (light-vs-dark viewport resolved) — via design workflow
+  - [x] W.1.2 - theme.rs palette module: named color consts (navy/gold/greys/danger); hoist the scattered inline accent literals (green/amber/red) into it
+  - [x] W.1.3 - Central egui Style/Visuals: an install_theme hook (panel/window fill, text, per-state widget visuals, gold selection, 4px rounding, heavy navy borders, shadows OFF)
+  - [x] W.1.4 - Fonts: EXTEND the build.rs pipeline (pinned Google-Fonts fetch → Latin-subset → commit-as-cache, same sha256/stamp discipline as the icon subset) for Oswald + Quattrocento; load + wire chrome(uppercase)/body/serif roles
+  - [x] W.1.5 - 3D palette: ClearColor + model/bed/pieces/gizmo/connector colors remapped on-brand, functional cut-plane/axis coding preserved
+  - [x] W.1.6 - Editor syntax palette (highlight.rs) reconciled to the panel background (light vs kept-dark)
+  - [x] W.1.7 - Verify: build + offscreen screenshots of every surface (Model/Parts/Orientation/Export) + chotchki sign-off
+- [ ] W.2 - Standalone .app builds consistently — audit packaging/, make a one-command reproducible bundle, resume release-native.yml (mac DMG + Windows NSIS). See Backlog "Resume the native channel"
+- [ ] W.3 - Web = fab-gui on wasm, RETIRE fab-web (one codebase, desktop+web similar UX). scad-rs+Manifold-wasm, NO OpenSCAD-wasm, site owns the chrome. B (not the eframe exit C); accepts ~8 MiB brotli (fab-web's current baseline). Spike-first, validated-before-deleted.
+  - [ ] W.3.1 - Compile gate: gui `[lib] crate-type=[cdylib,rlib]`; split fab-scad per-target (wasm = kernel-only default-features=false, native = +native) so native drops cranelift/reqwest/clap/rayon; add the wasm dep block; cfg-gate openscad/publish uses; mirror fab-web's bevy feature diet. `cargo build --target wasm32-unknown-unknown -p fab-gui` LINKS.
+  - [ ] W.3.2 - egui-on-wasm SMOKE (the #1 unknown): UI-only fab-gui on the `#fab-web` canvas in a real browser (`#[wasm_bindgen(start)]` + panic hook), no geometry — verify bevy_egui 0.41 panels/input/clipboard/file surfaces render on a real frame. fab-web can't vouch for this (it shipped feathers).
+  - [ ] W.3.3 - wasm host surface: canvas bind + fit-to-parent, data-base/data-inset-top + query-param + localStorage config (lifted from fab-web), rfd `.read()`-bytes open + Blob download; Platform-gate the desktop-only systems (autosave/watch/Save/publish/current_exe).
+  - [ ] W.3.4 - Kernel OFF the main thread: adopt fab-web's fab-geom Worker seam (worker_rpc + geom_worker + geom crate + geom-worker.js); convert render/reslice/cross_section/auto_plan from the `std::fs` STL-file DAG to in-memory STL-byte passing (geomsg envelope). Fixes the single-thread freeze + isolates the `-fno-exceptions` bad_alloc trap.
+  - [ ] W.3.5 - .scad front-end = scad-rs in the geom worker (DECIDED: no OpenSCAD-wasm on web — drops 2.26 MB, accepts scad-rs coverage as the web fidelity bet).
+  - [ ] W.3.6 - Build + ship pipeline: fab-gui release workflow (wasm-bindgen → wasm-opt -Oz → brotli, per-file manifest, headless-Chrome boot gate; pins: LLVM-21, binaryen v130, wasm-bindgen-cli lockstep); retarget hotchkiss-io build.rs + three_d.rs headers/names fab_web_*→fab-gui; site owns the chrome (header + back-nav, canvas insets below).
+  - [ ] W.3.6a - Web BOOT LOADER: a themed navy/gold splash (spinner + download progress if the fetch streams) shown while the ~8 MiB wasm downloads + inits, removed on an app-ready signal. chotchki's explicit condition for accepting the ~8 MiB size — never a blank page during load. Fits [[gui-reactive-standard]].
+  - [ ] W.3.7 - Measure + verify: record actual fab-gui-on-wasm brotli size vs 8,520,774; green the headless-Chrome boot gate; parity-check web UX vs desktop.
+  - [ ] W.3.8 - Retire fab-web: delete `web/` (fold/keep `geom/` as the shared kernel worker) ONLY after W.3.7 is green — validated-before-deleted.
 
 ## Backlog (not yet phased)
+
+- **Interlocking cut profiles for THIN-walled parts (dovetail/finger/jigsaw)** — surfaced 2026-07-13 dogfooding window_light_blocker whole-mode. The GUI slicer makes FLAT planar cuts + onion/bolt connectors, but a thin frame wall can't fit an onion (needs a sphere of material) OR a bolt (needs a screw hole + head clearance) — so a cut through a thin member has no way to join. The maker answer is to make the CUT ITSELF interlock: a 2D join profile (dovetail/finger/jigsaw) swept in the cut plane, so the interlock lives in-plane and needs no thickness (exactly what the model's own `partition_mask(cutpath="jigsaw")` export mode does). Feature: give GUI cuts an optional interlocking profile (sized to the local wall, both halves stay manifold), auto-picking dovetail for thin cross-sections and reserving onion/bolt for thick structural joins. OPEN design: GUI-generates-its-own-profile vs recognize/reuse the author's partition joints; auto thin→dovetail / thick→onion vs a per-cut choice. Related [[connector-design-intent]].
+
+- **Presliced parts → separate top-level Parts (Option B)** — deferred from U.3.19. We shipped Option A (skip auto-slice when every component fits, keeping the `part = top-level source statement` invariant; presliced blob = 1 part · N pieces). B would promote each disconnected connected-component to its OWN Part (Part 1..N × 1 pc) — more literal "separate parts", but the investigation flagged real costs: breaks `part_names` provenance (N components vs 1 module name → count-mismatch nulls all names), runs union-find on EVERY model, and over-splits a legitimately-multi-body single part (base+lid you meant to join with GUI connectors). Revisit only if dogfooding shows the 1-part·N-pcs representation is genuinely worse than an N-parts tree.
 
 Parked 2026-07-04 for the scad-rs pivot — the workflow tool works and stays in service; these resume when G stabilizes:
 

@@ -128,7 +128,7 @@ pub(crate) fn spawn_environment(
     commands.spawn((
         Mesh3d(meshes.add(Cuboid::new(cfg.bed[0], cfg.bed[1], 1.0))),
         MeshMaterial3d(materials.add(StandardMaterial {
-            base_color: Color::srgb(0.18, 0.18, 0.22),
+            base_color: theme::BED_SLATE,
             ..default()
         })),
         Transform::from_xyz(0.0, 0.0, -0.5),
@@ -187,7 +187,7 @@ pub(crate) fn load_model(meshes: &mut Assets<Mesh>, stl: Option<&Path>) -> Handl
 
 pub(crate) fn part_material(materials: &mut Assets<StandardMaterial>) -> Handle<StandardMaterial> {
     materials.add(StandardMaterial {
-        base_color: Color::srgb(0.90, 0.74, 0.20),
+        base_color: theme::MODEL_GOLD,
         perceptual_roughness: 0.7,
         ..default()
     })
@@ -204,19 +204,31 @@ pub(crate) fn build_mesh(s: &stl::StlMesh) -> Mesh {
     .with_inserted_indices(Indices::U32((0..n).collect()))
 }
 
-/// The default printer's bed, read from fab-scad's printers.toml via the shared lib.
-pub(crate) fn bed_size() -> Option<[f64; 3]> {
+/// The default printer, read from the nearest printers.toml (walking up from CWD) via the shared lib.
+fn load_default_printer() -> Option<fab_scad::printers::Printer> {
     let mut dir = std::env::current_dir().ok()?;
     loop {
         let toml = dir.join("printers.toml");
         if toml.exists() {
             let printers = fab_scad::printers::load(&toml).ok()?;
-            return fab_scad::printers::select(&printers, None)
-                .ok()
-                .map(|p| p.bed);
+            return fab_scad::printers::select(&printers, None).ok().cloned();
         }
         if !dir.pop() {
             return None;
         }
     }
+}
+
+/// The default printer's `(usable bed, real plate size)`. `bed` is what pieces pack within (extruder
+/// reach); `plate` is the real plate size the Bambu export grid/`printable_area` uses (= `bed` unless
+/// printers.toml sets a larger `plate`, e.g. the H2D 350).
+pub(crate) fn bed_size() -> Option<([f64; 3], [f64; 3])> {
+    load_default_printer().map(|p| (p.bed, p.plate))
+}
+
+/// The default printer's Bambu preset ids (printer/process/filament names) for a prompt-free `.3mf`
+/// import — `None` when printers.toml has no `[printer.bambu]` block (the writer falls back to a
+/// minimal config that still loads the plates but shows the "customized presets" prompt).
+pub(crate) fn default_bambu_preset() -> Option<fab_scad::printers::BambuPreset> {
+    load_default_printer().and_then(|p| p.bambu)
 }

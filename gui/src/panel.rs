@@ -69,6 +69,7 @@ pub(crate) fn panel_ui(
     mut open_dialog: ResMut<OpenDialog>,
     mut editor: ResMut<EditorBuf>,
     time: Res<Time>,
+    print_pieces: Res<PrintPieces>,
     mut writers: PanelWriters,
     mut seam: ResMut<PanelSeam>,
 ) {
@@ -77,6 +78,8 @@ pub(crate) fn panel_ui(
     };
     // A delete defers past the row loop (index stability), tagged with the PART it belongs to (T.2b).
     let mut to_remove: Option<(usize, usize)> = None;
+    // A per-piece "reset to auto" (U.3.4) likewise defers past the Orientation list's `parts` borrow.
+    let mut reset_orient: Option<(usize, PieceKey)> = None;
     // egui 0.35 panels show INTO a Ui, not the Context — wrap the viewport in a background-layer Ui
     // first (the bevy_egui side_panel pattern) so the panels overlay the 3D view.
     let mut viewport = egui::Ui::new(
@@ -278,9 +281,90 @@ pub(crate) fn panel_ui(
                     );
                 }
                 Tab::Orientation => {
-                    ui.label("Print orientation");
-                    ui.label("click a piece to set which way it prints");
-                    // The per-piece flat/auto list lands in U.3.4.
+                    ui.label(egui::RichText::new("print orientation").small().weak());
+                    ui.label(
+                        egui::RichText::new(
+                            "click a piece in the view to set which face prints down",
+                        )
+                        .small()
+                        .weak(),
+                    );
+                    ui.separator();
+                    // Every printable piece across ALL parts (co-pack), each flagged flat (a manual
+                    // orientation set) vs auto (still the least-support auto-pick). The mode + 3D
+                    // click-to-orient already run while this tab is up; this is the readout + per-piece
+                    // reset. `PrintPieces` is None until the first slice lands.
+                    match print_pieces.0.as_ref() {
+                        None => {
+                            ui.label(
+                                egui::RichText::new("slice a part first — no pieces yet")
+                                    .small()
+                                    .weak(),
+                            );
+                        }
+                        Some(pieces) => {
+                            let mut flat = 0usize;
+                            let mut nth: std::collections::HashMap<usize, usize> =
+                                std::collections::HashMap::new();
+                            for (part, pp) in pieces {
+                                let Some(p) = parts.0.get(*part) else {
+                                    continue;
+                                };
+                                let key = (pp.piece, pp.comp);
+                                let manual = p.orient.manual.contains(&key);
+                                if manual {
+                                    flat += 1;
+                                }
+                                let n = {
+                                    let c = nth.entry(*part).or_insert(0);
+                                    *c += 1;
+                                    *c
+                                };
+                                let label = format!("{} · pc {}", part_label(&p.name, *part), n);
+                                ui.horizontal(|ui| {
+                                    ui.label(label);
+                                    ui.with_layout(
+                                        egui::Layout::right_to_left(egui::Align::Center),
+                                        |ui| {
+                                            if manual {
+                                                // manual → seated flat; a click resets it to the auto-pick.
+                                                if ui
+                                                    .small_button("↺")
+                                                    .on_hover_text("reset to auto")
+                                                    .clicked()
+                                                {
+                                                    reset_orient = Some((*part, key));
+                                                }
+                                                ui.label(
+                                                    egui::RichText::new("flat ✓")
+                                                        .monospace()
+                                                        .color(egui::Color32::from_rgb(
+                                                            120, 220, 140,
+                                                        )),
+                                                );
+                                            } else {
+                                                ui.label(
+                                                    egui::RichText::new("auto").monospace().color(
+                                                        egui::Color32::from_rgb(224, 168, 96),
+                                                    ),
+                                                );
+                                            }
+                                        },
+                                    );
+                                });
+                            }
+                            ui.separator();
+                            ui.label(
+                                egui::RichText::new(format!(
+                                    "{} pieces · {} seated flat",
+                                    pieces.len(),
+                                    flat
+                                ))
+                                .small()
+                                .weak(),
+                            );
+                        }
+                    }
                 }
                 Tab::Export => {
                     if ui.button("Export plates").clicked() {
@@ -299,6 +383,12 @@ pub(crate) fn panel_ui(
         if let Some(part) = parts.0.get_mut(p) {
             remove_cut(&mut part.cuts, &mut part.conns, idx);
         }
+    }
+    if let Some((part, key)) = reset_orient {
+        if let Some(p) = parts.0.get_mut(part) {
+            p.orient.reset(key);
+        }
+        parts.set_changed(); // re-seat this piece at the auto-pick (sync_orientation guards on is_changed)
     }
     seam.width_px = panel.response.rect.width() * ctx.pixels_per_point();
     seam.top_px = top.response.rect.height() * ctx.pixels_per_point();

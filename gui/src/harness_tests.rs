@@ -223,6 +223,20 @@ fn orientation_tab_raises_print_view() {
     assert!(app.world().resource::<PrintView>().0); // want_print
 }
 
+#[test]
+fn orient_reset_drops_the_manual_override_back_to_auto() {
+    // The Orientation tab's per-piece "reset to auto" (U.3.4): drop the manual key so `up_or` falls
+    // back to the auto-pick and the list re-flags the piece as auto.
+    let mut o = Orient::default();
+    let key = ([0, 1, 0], 2);
+    o.set_manual(key, [1.0, 0.0, 0.0]);
+    assert!(o.manual.contains(&key));
+    assert_eq!(o.up_or(key, [0.0, 0.0, 1.0]), [1.0, 0.0, 0.0]); // manual override wins
+    o.reset(key);
+    assert!(!o.manual.contains(&key));
+    assert_eq!(o.up_or(key, [0.0, 0.0, 1.0]), [0.0, 0.0, 1.0]); // back to the auto fallback
+}
+
 // ── S8 — part selects the active part and routes subsequent edits to it ───────────────────────────
 #[test]
 fn part_switch_routes_edits_to_the_active_part() {

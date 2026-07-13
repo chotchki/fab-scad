@@ -292,6 +292,13 @@ impl Orient {
     pub(crate) fn up_or(&self, key: PieceKey, auto: [f32; 3]) -> [f32; 3] {
         self.map.get(&key).copied().unwrap_or(auto)
     }
+    /// Drop `key`'s override so the piece falls back to its auto-pick (the per-piece "reset to auto",
+    /// U.3.4): out of `manual` re-flags it as auto in the list, out of `map` makes [`up_or`](Self::up_or)
+    /// return the caller's auto fallback. A re-layout (`parts.set_changed()`) then re-seats it.
+    pub(crate) fn reset(&mut self, key: PieceKey) {
+        self.map.remove(&key);
+        self.manual.remove(&key);
+    }
 }
 
 /// One independent top-level part of the model (T.2b): its own cut stack, connectors, per-piece

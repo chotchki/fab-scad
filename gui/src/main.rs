@@ -236,6 +236,7 @@ fn run_screenshot(scene: SceneCfg, png: PathBuf) {
         .init_resource::<SliceInBackground>()
         .init_resource::<Job>()
         .init_resource::<PanelSeam>()
+        .init_resource::<PrintPieces>()
         .insert_resource(Status("rendering".into()))
         .add_message::<ReSlice>()
         .add_message::<AutoPlace>()

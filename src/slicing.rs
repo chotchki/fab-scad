@@ -246,7 +246,7 @@ pub fn slice_part_kernel(
             let mut to_place = Vec::new();
             collect_plate_pieces(&pieces, spec, &mut to_place);
             let out = out_dir.join(format!("{stem}.3mf"));
-            crate::bambu::export_plates(&out, to_place, bed, gap)?;
+            crate::bambu::export_plates(&out, to_place, bed, bed, gap, None)?;
             Ok(out)
         }
         None => {
@@ -405,7 +405,7 @@ pub fn slice_model_parts(
             }
             anyhow::ensure!(!to_place.is_empty(), "slice produced no pieces");
             let out = out_dir.join(format!("{stem}.3mf"));
-            crate::bambu::export_plates(&out, to_place, bed, gap)?;
+            crate::bambu::export_plates(&out, to_place, bed, bed, gap, None)?;
             Ok(out)
         }
         None => {

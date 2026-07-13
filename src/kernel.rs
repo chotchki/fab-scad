@@ -580,19 +580,102 @@ impl Solid {
             union(&mut parent, t[0] as u32, t[1] as u32);
             union(&mut parent, t[1] as u32, t[2] as u32);
         }
-        // Group the triangles by component root.
+        // Group the triangles by component root — each group is one MESH SHELL.
         let mut groups: HashMap<u32, Vec<[u64; 3]>> = HashMap::new();
         for t in idx.chunks_exact(3) {
             let root = find(&mut parent, t[0] as u32);
             groups.entry(root).or_default().push([t[0], t[1], t[2]]);
         }
-        // One component ⇒ hand back the original solid untouched (skip a lossy mesh round-trip).
+        // One shell ⇒ hand back the original solid untouched (skip a lossy mesh round-trip).
         if groups.len() == 1 {
             return vec![self.clone()];
         }
-        // Rebuild a Solid per group, remapping each to a compact local vertex buffer.
-        let mut solids: Vec<Solid> = groups
+        // A shell is either an OUTER boundary (positive signed volume) or an internal CAVITY — a fully
+        // enclosed void (a captured magnet pocket: inward-facing normals ⇒ NEGATIVE signed volume). A
+        // cavity shares no vertices with its host's outer shell, so the vertex union-find split it out,
+        // but it is NOT a separate printable piece: it belongs to — and must stay CARVED INTO — the
+        // solid that encloses it (splitting it off both spawns a phantom piece AND erases the pocket
+        // from the host). Classify each shell by signed volume, then fold every cavity's triangles into
+        // the smallest outer shell whose bbox contains it, so a solid-with-void comes back as ONE piece.
+        struct Shell {
+            tris: Vec<[u64; 3]>,
+            vol: f64,
+            min: [f64; 3],
+            max: [f64; 3],
+        }
+        let pt = |vi: u64| {
+            let b = vi as usize * stride;
+            [v[b], v[b + 1], v[b + 2]]
+        };
+        let shells: Vec<Shell> = groups
             .into_values()
+            .map(|tris| {
+                let (mut vol, mut min, mut max) =
+                    (0.0_f64, [f64::INFINITY; 3], [f64::NEG_INFINITY; 3]);
+                for t in &tris {
+                    let (a, b, c) = (pt(t[0]), pt(t[1]), pt(t[2]));
+                    // signed volume of tetra (origin, a, b, c) = a·(b×c)/6 — sums to the shell's
+                    // oriented volume, positive for an outward boundary, negative for an inward cavity.
+                    let cr = [
+                        b[1] * c[2] - b[2] * c[1],
+                        b[2] * c[0] - b[0] * c[2],
+                        b[0] * c[1] - b[1] * c[0],
+                    ];
+                    vol += (a[0] * cr[0] + a[1] * cr[1] + a[2] * cr[2]) / 6.0;
+                    for p in [a, b, c] {
+                        for k in 0..3 {
+                            min[k] = min[k].min(p[k]);
+                            max[k] = max[k].max(p[k]);
+                        }
+                    }
+                }
+                Shell { tris, vol, min, max }
+            })
+            .collect();
+        // Outer shells (vol ≥ 0) seed the pieces; each cavity (vol < 0) folds into its enclosing outer.
+        let mut pieces: Vec<Vec<[u64; 3]>> = Vec::new();
+        let mut outer_bbox: Vec<([f64; 3], [f64; 3])> = Vec::new();
+        for s in &shells {
+            if s.vol >= 0.0 {
+                pieces.push(s.tris.clone());
+                outer_bbox.push((s.min, s.max));
+            }
+        }
+        const EPS: f64 = 1e-6;
+        let bbox_vol =
+            |b: &([f64; 3], [f64; 3])| (b.1[0] - b.0[0]) * (b.1[1] - b.0[1]) * (b.1[2] - b.0[2]);
+        for s in &shells {
+            if s.vol >= 0.0 {
+                continue; // an outer shell — already a piece
+            }
+            // The smallest-bbox outer shell that fully contains this cavity (nesting-robust: a cavity
+            // inside a small island inside a big void attaches to the island, not the outer wall).
+            let parent = (0..pieces.len())
+                .filter(|&k| {
+                    let (omin, omax) = outer_bbox[k];
+                    (0..3).all(|d| omin[d] <= s.min[d] + EPS && omax[d] + EPS >= s.max[d])
+                })
+                .min_by(|&a, &b| {
+                    bbox_vol(&outer_bbox[a])
+                        .partial_cmp(&bbox_vol(&outer_bbox[b]))
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                });
+            match parent {
+                Some(k) => pieces[k].extend_from_slice(&s.tris),
+                // Unenclosed cavity (shouldn't happen for a valid solid) — keep it rather than lose it.
+                None => {
+                    pieces.push(s.tris.clone());
+                    outer_bbox.push((s.min, s.max));
+                }
+            }
+        }
+        // After merging, a single piece == the whole original solid: return it untouched (lossless).
+        if pieces.len() == 1 {
+            return vec![self.clone()];
+        }
+        // Rebuild a Solid per piece, remapping each to a compact local vertex buffer.
+        let mut solids: Vec<Solid> = pieces
+            .into_iter()
             .filter_map(|tris| {
                 let mut remap: HashMap<u64, u64> = HashMap::new();
                 let mut lv: Vec<f64> = Vec::new();
@@ -1191,6 +1274,33 @@ mod tests {
                 .difference(&Solid::cube(2.0, 2.0, 2.0, true))
                 .components()
                 .is_empty()
+        );
+    }
+
+    #[test]
+    fn components_keeps_an_enclosed_cavity_with_its_host() {
+        // A fully-enclosed void (a captured magnet pocket) is a separate MESH SHELL sharing no
+        // vertices with the outer shell — the raw union-find would split it into a phantom
+        // inverted-normal solid AND erase the pocket from the host (window_light_blocker dogfood).
+        // components() must fold the cavity back into the host: ONE piece, cavity intact.
+        let hollow = Solid::cube(20.0, 20.0, 20.0, true).difference(&Solid::sphere(6.0, 32));
+        let comps = hollow.components();
+        assert_eq!(comps.len(), 1, "solid-with-void is ONE component, not outer+cavity");
+        comps[0].check().unwrap();
+        let v = comps[0].volume();
+        // cube 8000 − sphere(r6) ≈ 8000 − 885 ≈ 7115; NOT the solid cube (8000, pocket erased).
+        assert!((7000.0..7200.0).contains(&v), "cavity survives, got vol {v}");
+
+        // A disjoint piece FLOATING inside a void is a real separate piece (nested-shell parity): a
+        // hollow shell with a smaller solid ball rattling inside → 2 components (shell + ball).
+        let ball = Solid::sphere(2.0, 24);
+        let nested = Solid::cube(20.0, 20.0, 20.0, true)
+            .difference(&Solid::sphere(6.0, 32))
+            .union(&ball);
+        assert_eq!(
+            nested.components().len(),
+            2,
+            "a solid island inside the void stays its own piece; only the cavity merges"
         );
     }
 

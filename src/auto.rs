@@ -312,7 +312,8 @@ pub fn make_planned<W: std::io::Write + std::io::Seek>(
             });
         }
     }
-    bambu::export_plates_to(out, to_place, [bed[0], bed[1]], gap)
+    // plate == bed here (this path has no separate real-plate-size); the grid tiles on the usable bed.
+    bambu::export_plates_to(out, to_place, [bed[0], bed[1]], [bed[0], bed[1]], gap, None)
 }
 
 #[cfg(test)]

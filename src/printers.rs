@@ -21,10 +21,36 @@ struct PrintersFile {
     #[serde(default)]
     printer: Vec<PrinterRaw>,
 }
+/// Bambu preset identifiers for a printer, so the exported multi-plate `.3mf`'s `project_settings.config`
+/// names EXISTING BambuStudio presets — else BambuStudio prompts to import "customized filament/printer
+/// presets". Optional per printer (a `[printer.bambu]` sub-table in printers.toml); the exact strings
+/// come from a real "Save Project" export. When absent, the writer emits a minimal config (which loads
+/// the plates but with that import prompt).
+#[derive(Debug, Clone, Deserialize)]
+pub struct BambuPreset {
+    pub model: String,      // printer_model, e.g. "Bambu Lab H2D"
+    pub printer_id: String, // printer_settings_id
+    pub process_id: String, // print_settings_id
+    #[serde(default)]
+    pub filaments: Vec<String>, // filament_settings_id (one per used slot)
+    #[serde(default)]
+    pub nozzles: Vec<String>, // nozzle_diameter
+    #[serde(default)]
+    pub bed_type: Option<String>, // curr_bed_type
+}
+
 #[derive(Debug, Deserialize)]
 struct PrinterRaw {
     name: String,
     bed: [Num; 3],
+    /// The REAL printer plate size (the Bambu `printable_area`), when it's LARGER than the usable
+    /// `bed` — e.g. the H2D's plate is 350 wide but only 325 is reachable by extruder 1. Drives the
+    /// multi-plate `.3mf` grid + config so BambuStudio's plate size matches ours (no "custom bed"
+    /// prompt); packing still fits pieces within `bed`. Optional; defaults to `bed`.
+    #[serde(default)]
+    plate: Option<[Num; 3]>,
+    #[serde(default)]
+    bambu: Option<BambuPreset>,
     #[serde(default)]
     default: bool,
 }
@@ -33,7 +59,11 @@ struct PrinterRaw {
 #[derive(Debug, Clone)]
 pub struct Printer {
     pub name: String,
-    pub bed: [f64; 3], // x, y, z in mm
+    pub bed: [f64; 3], // x, y, z in mm — the USABLE area (pieces are packed to fit within this)
+    /// The real plate size for the Bambu export grid/`printable_area` (≥ `bed`; = `bed` if unset).
+    pub plate: [f64; 3],
+    /// Bambu preset ids for a prompt-free `.3mf` import (None → minimal config + the import prompt).
+    pub bambu: Option<BambuPreset>,
     pub is_default: bool,
 }
 
@@ -44,10 +74,19 @@ pub fn load(path: &Path) -> Result<Vec<Printer>> {
         toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
     Ok(f.printer
         .into_iter()
-        .map(|p| Printer {
-            name: p.name,
-            bed: [p.bed[0].f(), p.bed[1].f(), p.bed[2].f()],
-            is_default: p.default,
+        .map(|p| {
+            let bed = [p.bed[0].f(), p.bed[1].f(), p.bed[2].f()];
+            let plate = p
+                .plate
+                .map(|a| [a[0].f(), a[1].f(), a[2].f()])
+                .unwrap_or(bed);
+            Printer {
+                name: p.name,
+                bed,
+                plate,
+                bambu: p.bambu,
+                is_default: p.default,
+            }
         })
         .collect())
 }
@@ -265,10 +304,15 @@ mod tests {
         let printers: Vec<Printer> = f
             .printer
             .into_iter()
-            .map(|p| Printer {
-                name: p.name,
-                bed: [p.bed[0].f(), p.bed[1].f(), p.bed[2].f()],
-                is_default: p.default,
+            .map(|p| {
+                let bed = [p.bed[0].f(), p.bed[1].f(), p.bed[2].f()];
+                Printer {
+                    name: p.name,
+                    bed,
+                    plate: p.plate.map(|a| [a[0].f(), a[1].f(), a[2].f()]).unwrap_or(bed),
+                    bambu: p.bambu,
+                    is_default: p.default,
+                }
             })
             .collect();
         assert_eq!(printers.len(), 2);

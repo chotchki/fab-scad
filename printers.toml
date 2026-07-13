@@ -3,8 +3,20 @@
 
 [[printer]]
 name = "H2D"
-bed = [325, 320, 320]    # x, y, z in mm (usable build volume)
+bed = [325, 320, 320]    # x, y, z in mm (usable build volume — extruder-1 reach; pieces pack within this)
+plate = [350, 320, 320]  # the REAL plate size (Bambu printable_area) — drives the multi-plate .3mf grid
 default = true
+
+# Bambu preset ids so an exported multi-plate .3mf loads in BambuStudio WITHOUT the "import customized
+# filament/printer presets" prompt. Copy these verbatim from a real "Save Project" export for your
+# machine (Metadata/project_settings.config). Omit the whole block to fall back to a minimal config.
+[printer.bambu]
+model = "Bambu Lab H2D"
+printer_id = "Bambu Lab H2D 0.8 nozzle"
+process_id = "0.40mm Standard @BBL H2D 0.8 nozzle"
+filaments = ["Bambu PLA Matte @BBL H2D 0.8 nozzle", "Generic PLA @BBL H2D"]
+nozzles = ["0.8", "0.8"]
+bed_type = "Supertack Plate"
 
 [[printer]]
 name = "H2C"

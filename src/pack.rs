@@ -34,6 +34,28 @@ pub fn plate_count(ps: &[Placement]) -> usize {
     ps.iter().map(|p| p.plate + 1).max().unwrap_or(0)
 }
 
+/// Near-square column count for tiling `n` plates in a grid — `round(sqrt n)`, bumped up one when
+/// `sqrt n` rounds down. Mirrors BambuStudio's `compute_colum_count`, so the GUI preview grid, the
+/// co-pack summary, and the written `.3mf` tile plates identically (one source of truth — the whole
+/// point is that the preview matches the exported project). 1→1, 2→2, 3→2, 5→3, 10→4.
+pub fn grid_cols(n: usize) -> usize {
+    if n == 0 {
+        return 1;
+    }
+    let v = (n as f64).sqrt();
+    let r = v.round();
+    if v > r { r as usize + 1 } else { r as usize }
+}
+
+/// World-space min-corner of plate `p` in the near-square plate grid: columns advance +X, rows
+/// descend into -Y, a 20% gap between cells (stride = `bed * 1.2`), plate 0's corner at the origin.
+/// `cols` comes from [`grid_cols`]. This is the tiling BambuStudio bins pieces against, so the 3mf
+/// writer and the GUI preview both place plate `p` at exactly this origin.
+pub fn plate_origin(p: usize, cols: usize, bed: [f64; 2]) -> [f64; 2] {
+    let (col, row) = (p % cols, p / cols);
+    [col as f64 * bed[0] * 1.2, -(row as f64) * bed[1] * 1.2]
+}
+
 /// Pack `items` onto the fewest `bed` = `[width_x, depth_y]` (mm) plates, allowing 90° rotation and
 /// leaving `gap` mm of spacing between pieces. Returns a `Placement` per item, index-aligned with
 /// `items`. Errors if any single item can't fit one bed even alone.
@@ -197,6 +219,32 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn grid_cols_matches_bambu_grid() {
+        for (n, cols) in [
+            (1, 1),
+            (2, 2),
+            (3, 2),
+            (4, 2),
+            (5, 3),
+            (6, 3),
+            (9, 3),
+            (10, 4),
+            (16, 4),
+        ] {
+            assert_eq!(grid_cols(n), cols, "n={n}");
+        }
+    }
+
+    #[test]
+    fn plates_descend_into_negative_y() {
+        // Row 1 (plate index = cols) sits a full stride into -Y; the column advances +X.
+        let cols = grid_cols(4); // 2
+        assert_eq!(plate_origin(0, cols, [256.0, 256.0]), [0.0, 0.0]);
+        assert_eq!(plate_origin(1, cols, [256.0, 256.0]), [256.0 * 1.2, 0.0]);
+        assert_eq!(plate_origin(2, cols, [256.0, 256.0]), [0.0, -256.0 * 1.2]);
     }
 
     #[test]

@@ -1,28 +1,39 @@
 //! Bambu Studio / OrcaSlicer multi-plate project `.3mf` writer (Track C follow-on, Phase 12).
 //!
-//! A Bambu project `.3mf` is an OPC zip, and two facts (verified against the BambuStudio source —
+//! A Bambu project `.3mf` is an OPC zip, and three facts (verified against the BambuStudio source —
 //! see the research notes) make or break it:
 //!
 //!   1. **The recognition gate is one string.** `3D/3dmodel.model` MUST carry
 //!      `<metadata name="Application">` whose value starts with `BambuStudio-`. Miss it and the
-//!      importer opens the file as plain geometry and silently DROPS every plate + setting — you get
-//!      one un-plated blob. That string is the whole difference between a project and an import.
+//!      importer opens the file as plain geometry. NECESSARY but NOT sufficient (fact 3).
 //!   2. **Plate membership is POSITIONAL, not declared.** BambuStudio bins each piece to a plate by
 //!      bounding-box intersection with that plate's world rectangle — it does NOT trust the
 //!      `<model_instance>` list to place pieces. So each piece is physically placed at its plate's
 //!      cell in Bambu's global grid (stride = bed * 1.2, rows descend into -Y, plate 0 at the world
 //!      origin). We still write the `<model_instance>` records (the importer needs them for plate
 //!      count + bookkeeping) and keep them consistent with the geometry.
+//!   3. **Plates load ONLY when `load_config` is true — which needs `project_settings.config`.** The
+//!      Application gate makes BambuStudio RECOGNIZE the file; but it reconstructs the declared plates
+//!      only inside a load-config path that it force-clears unless the archive carries a parseable
+//!      `Metadata/project_settings.config`. Without it the `<plate>` blocks are DISCARDED and every
+//!      piece bins onto the single default plate (the U.3.21 dogfood: an "un-plated blob"). We emit a
+//!      minimal-but-non-empty config; its `printable_area` = the REAL plate size (which the grid also
+//!      tiles on) so BambuStudio's plate size == ours AND matches the printer preset (no "custom bed"
+//!      prompt). Pieces are packed within the possibly-SMALLER usable bed (extruder reach) — that only
+//!      shifts a piece within its cell, not the grid. See the `bambu-3mf-multiplate` memory.
 //!
-//! Minimal viable project = 4 zip entries: `[Content_Types].xml`, `_rels/.rels`, `3D/3dmodel.model`,
-//! `Metadata/model_settings.config`. No gcode, no thumbnails — Bambu re-slices on open.
+//! Minimal viable project = 5 zip entries: `[Content_Types].xml`, `_rels/.rels`, `3D/3dmodel.model`,
+//! `Metadata/model_settings.config`, `Metadata/project_settings.config`. No gcode/thumbnails — Bambu
+//! re-slices on open. (Real BambuStudio exports carry ~30 entries + a 569-key config; not needed to
+//! reconstruct plates.)
 
 use std::io::{Seek, Write};
 use std::path::Path;
 
 use anyhow::{Context, Result, ensure};
 
-use crate::pack::{self, Footprint};
+use crate::pack::{self, Footprint, grid_cols, plate_origin};
+use crate::printers::BambuPreset;
 use fab_lang::Vec3;
 
 /// An indexed triangle mesh: vertices and 0-based triangle indices into them.
@@ -45,33 +56,64 @@ fn translate_xf(x: f64, y: f64, z: f64) -> String {
     format!("1 0 0 0 1 0 0 0 1 {x} {y} {z}")
 }
 
-/// BambuStudio's near-square plate-grid column count (mirrors `compute_colum_count`): `round(sqrt n)`,
-/// bumped up one when `sqrt n` rounds down. 1→1, 2→2, 3→2, 5→3, 10→4.
-fn column_count(n: usize) -> usize {
-    if n == 0 {
-        return 1;
+/// The `Metadata/project_settings.config` — a DynamicPrintConfig whose mere presence flips
+/// BambuStudio's `load_config` true (so it reconstructs the declared plates). `printable_area` = the
+/// real `plate_size` (= the plate grid). With a `preset` (from printers.toml) it also NAMES the
+/// printer/process/filament presets so a matching BambuStudio installation imports without the
+/// "customized filament/printer presets" prompt; without one, a minimal config still loads the plates.
+fn project_settings_config(plate_size: [f64; 2], preset: Option<&BambuPreset>) -> String {
+    let [bw, bd] = plate_size;
+    let arr = |v: &[String]| {
+        let items: Vec<String> = v.iter().map(|s| format!("\"{s}\"")).collect();
+        format!("[{}]", items.join(", "))
+    };
+    let mut kv: Vec<(String, String)> = vec![
+        ("version".into(), "\"02.00.00.00\"".into()),
+        ("from".into(), "\"project\"".into()),
+        ("name".into(), "\"project_settings\"".into()),
+        ("printer_technology".into(), "\"FFF\"".into()),
+    ];
+    if let Some(p) = preset {
+        kv.push(("printer_model".into(), format!("\"{}\"", p.model)));
+        kv.push(("printer_settings_id".into(), format!("\"{}\"", p.printer_id)));
+        kv.push(("print_settings_id".into(), format!("\"{}\"", p.process_id)));
+        if !p.filaments.is_empty() {
+            kv.push(("filament_settings_id".into(), arr(&p.filaments)));
+        }
+        if !p.nozzles.is_empty() {
+            kv.push(("nozzle_diameter".into(), arr(&p.nozzles)));
+        }
+        if let Some(bt) = &p.bed_type {
+            kv.push(("curr_bed_type".into(), format!("\"{bt}\"")));
+        }
     }
-    let v = (n as f64).sqrt();
-    let r = v.round();
-    if v > r { r as usize + 1 } else { r as usize }
+    kv.push((
+        "printable_area".into(),
+        format!("[\"0x0\", \"{bw:.0}x0\", \"{bw:.0}x{bd:.0}\", \"0x{bd:.0}\"]"),
+    ));
+    kv.push(("bed_exclude_area".into(), "[]".into()));
+    let body: Vec<String> = kv.iter().map(|(k, v)| format!("\"{k}\": {v}")).collect();
+    format!("{{\n{}\n}}\n", body.join(",\n"))
 }
 
-/// World-space min-corner of plate `p` in Bambu's global grid. Plates tile a near-square grid in ONE
-/// shared coordinate space with a 20% gap (stride = bed * 1.2); rows descend into -Y; plate 0's
-/// corner is the world origin.
-fn plate_origin(p: usize, cols: usize, bed: [f64; 2]) -> [f64; 2] {
-    let (col, row) = (p % cols, p / cols);
-    [col as f64 * bed[0] * 1.2, -(row as f64) * bed[1] * 1.2]
-}
+// The plate-grid tiling (`grid_cols` + `plate_origin`) lives in `crate::pack` — one source of truth
+// so the 3mf writer here, the co-pack summary, and the GUI's 3D preview all place plates identically.
 
 /// Write `plates` as a Bambu multi-plate project `.3mf` at `path`. Each element is one plate; its
-/// pieces are positioned within that plate's bed by their `at`. `bed` is the printer bed `[x, y]` in
-/// mm (e.g. `[256.0, 256.0]` for an X1C) — it sets both the plate-grid stride AND the coordinate
-/// frame Bambu bins pieces against, so it MUST match the printer the project opens on.
-pub fn write_project(path: &Path, plates: &[Vec<Placed>], bed: [f64; 2]) -> Result<()> {
+/// pieces are positioned within that plate's cell by their `at`. `plate_size` is the REAL printer
+/// plate `[x, y]` in mm (the `printable_area`, e.g. `[350, 320]` for an H2D) — it sets the plate-grid
+/// stride AND the config's `printable_area`, so it MUST match the printer the project opens on (that's
+/// what makes BambuStudio's plate size == ours). Pieces are packed to fit the (possibly smaller)
+/// USABLE bed upstream; that only affects their `at` within the cell, not the grid.
+pub fn write_project(
+    path: &Path,
+    plates: &[Vec<Placed>],
+    plate_size: [f64; 2],
+    preset: Option<&BambuPreset>,
+) -> Result<()> {
     let file =
         std::fs::File::create(path).with_context(|| format!("creating 3mf {}", path.display()))?;
-    write_project_to(file, plates, bed)
+    write_project_to(file, plates, plate_size, preset)
 }
 
 /// The writer-generic twin of [`write_project`] — the browser build streams the project into a
@@ -79,9 +121,10 @@ pub fn write_project(path: &Path, plates: &[Vec<Placed>], bed: [f64; 2]) -> Resu
 pub fn write_project_to<W: Write + Seek>(
     out: W,
     plates: &[Vec<Placed>],
-    bed: [f64; 2],
+    plate_size: [f64; 2],
+    preset: Option<&BambuPreset>,
 ) -> Result<()> {
-    let cols = column_count(plates.len());
+    let cols = grid_cols(plates.len());
 
     // 3D/3dmodel.model — two-level objects (mesh + wrapper) and one build item per piece. Only the
     // `Application` (gate) + `3mfVersion` metadata are load-bearing.
@@ -98,7 +141,7 @@ pub fn write_project_to<W: Write + Seek>(
 
     let mut gi = 0usize; // global piece index, 0-based (object ids are 1-based, so 2*gi+1 / +2)
     for (pi, plate) in plates.iter().enumerate() {
-        let [ox, oy] = plate_origin(pi, cols, bed);
+        let [ox, oy] = plate_origin(pi, cols, plate_size);
         let mut instances = String::new();
         for placed in plate {
             let (mesh_id, wrap_id) = (2 * gi + 1, 2 * gi + 2);
@@ -172,6 +215,12 @@ pub fn write_project_to<W: Write + Seek>(
  <Relationship Target=\"/3D/3dmodel.model\" Id=\"rel-1\" Type=\"http://schemas.microsoft.com/3dmanufacturing/2013/01/3dmodel\"/>\n\
 </Relationships>\n";
 
+    // FACT 3 (the one the Application gate alone doesn't cover): BambuStudio only RECONSTRUCTS the
+    // declared plates when `load_config` is true, and it force-clears load_config unless the archive
+    // carries a parseable `Metadata/project_settings.config`. That config also NAMES the presets (from
+    // `preset`), so a matching install imports without the "customized presets" prompt.
+    let project_config = project_settings_config(plate_size, preset);
+
     let mut zip = zip::ZipWriter::new(out);
     let opts =
         zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
@@ -180,6 +229,7 @@ pub fn write_project_to<W: Write + Seek>(
         ("_rels/.rels", RELS),
         ("3D/3dmodel.model", model.as_str()),
         ("Metadata/model_settings.config", settings.as_str()),
+        ("Metadata/project_settings.config", project_config.as_str()),
     ] {
         zip.start_file(name, opts)
             .with_context(|| format!("zip entry {name}"))?;
@@ -208,18 +258,22 @@ pub struct ExportSummary {
 }
 
 /// Lay out `pieces` and write a Bambu multi-plate project to `path`: orient each to its build-up
-/// (+Z), seat it on the bed (min z = 0), pack the footprints onto the fewest `bed` = `[x, y]` mm
-/// plates (leaving `gap` mm between pieces), and emit the `.3mf`. Mesh-based end to end — no `Solid`,
-/// so it runs happily on a worker thread. Errors if a piece can't fit the bed.
+/// (+Z), seat it on the bed (min z = 0), PACK the footprints onto the fewest `bed` = `[x, y]` mm
+/// plates (the USABLE/reachable area — leaving `gap` mm between pieces), tile those plates on the
+/// `plate` = `[x, y]` mm grid (the REAL printable_area BambuStudio opens against — `plate` ≥ `bed`),
+/// and emit the `.3mf`. Mesh-based end to end — no `Solid`, so it runs happily on a worker thread.
+/// Errors if a piece can't fit the bed. (`plate` == `bed` when the printer has no larger plate.)
 pub fn export_plates(
     path: &Path,
     pieces: Vec<PieceToPlace>,
     bed: [f64; 2],
+    plate: [f64; 2],
     gap: f64,
+    preset: Option<&BambuPreset>,
 ) -> Result<ExportSummary> {
     let file =
         std::fs::File::create(path).with_context(|| format!("creating 3mf {}", path.display()))?;
-    export_plates_to(file, pieces, bed, gap)
+    export_plates_to(file, pieces, bed, plate, gap, preset)
 }
 
 /// The writer-generic twin of [`export_plates`] — same layout/pack/emit, any `Write + Seek` sink.
@@ -227,7 +281,9 @@ pub fn export_plates_to<W: Write + Seek>(
     out: W,
     pieces: Vec<PieceToPlace>,
     bed: [f64; 2],
+    plate: [f64; 2],
     gap: f64,
+    preset: Option<&BambuPreset>,
 ) -> Result<ExportSummary> {
     ensure!(!pieces.is_empty(), "no pieces to export");
 
@@ -280,7 +336,7 @@ pub fn export_plates_to<W: Write + Seek>(
         });
     }
 
-    write_project_to(out, &plates, bed)?;
+    write_project_to(out, &plates, plate, preset)?; // grid/config = plate; pieces packed to `bed`
     Ok(ExportSummary {
         plates: plate_n,
         pieces: pieces.len(),
@@ -395,32 +451,6 @@ mod tests {
     }
 
     #[test]
-    fn column_count_matches_bambu_grid() {
-        for (n, cols) in [
-            (1, 1),
-            (2, 2),
-            (3, 2),
-            (4, 2),
-            (5, 3),
-            (6, 3),
-            (9, 3),
-            (10, 4),
-            (16, 4),
-        ] {
-            assert_eq!(column_count(n), cols, "n={n}");
-        }
-    }
-
-    #[test]
-    fn plates_descend_into_negative_y() {
-        // Row 1 (plate index = cols) sits a full stride into -Y; column advances +X.
-        let cols = column_count(4); // 2
-        assert_eq!(plate_origin(0, cols, [256.0, 256.0]), [0.0, 0.0]);
-        assert_eq!(plate_origin(1, cols, [256.0, 256.0]), [256.0 * 1.2, 0.0]);
-        assert_eq!(plate_origin(2, cols, [256.0, 256.0]), [0.0, -256.0 * 1.2]);
-    }
-
-    #[test]
     fn writes_a_valid_two_plate_project() {
         let tmp = std::env::temp_dir().join(format!("bambu_{}.3mf", std::process::id()));
         let plates = vec![
@@ -433,7 +463,7 @@ mod tests {
                 at: [20.0, 20.0],
             }],
         ];
-        write_project(&tmp, &plates, [256.0, 256.0]).unwrap();
+        write_project(&tmp, &plates, [256.0, 256.0], None).unwrap();
 
         // Re-open the zip and pull the two XML entries back out.
         let f = std::fs::File::open(&tmp).unwrap();
@@ -444,6 +474,7 @@ mod tests {
             "_rels/.rels",
             "3D/3dmodel.model",
             "Metadata/model_settings.config",
+            "Metadata/project_settings.config",
         ] {
             assert!(
                 names.iter().any(|n| n == want),
@@ -477,6 +508,18 @@ mod tests {
             settings.matches("<model_instance>").count(),
             2,
             "one instance per plate"
+        );
+
+        // FACT 3: the project config is present + non-empty, and its printable_area == the packed bed
+        // (so BambuStudio's plate stride matches ours). This is what keeps load_config true → plates.
+        let project = read(&mut zip, "Metadata/project_settings.config");
+        assert!(
+            project.contains("\"printer_technology\": \"FFF\""),
+            "project config missing/incomplete"
+        );
+        assert!(
+            project.contains("\"256x0\"") && project.contains("\"256x256\""),
+            "printable_area must match the 256 bed, got:\n{project}"
         );
 
         let _ = std::fs::remove_file(&tmp);
@@ -513,7 +556,7 @@ mod tests {
                 up: [1.0, 0.0, 0.0],
             },
         ];
-        let sum = export_plates(&tmp, pieces, [256.0, 256.0], 3.0).unwrap();
+        let sum = export_plates(&tmp, pieces, [256.0, 256.0], [256.0, 256.0], 3.0, None).unwrap();
         assert_eq!(sum.pieces, 2);
         assert_eq!(sum.plates, 1, "two 1mm cubes fit one 256 bed");
         assert!(sum.fill > 0.0);
@@ -601,7 +644,7 @@ mod tests {
             });
         }
         let tmp = std::env::temp_dir().join(format!("bambu_cells_{}.3mf", std::process::id()));
-        let sum = export_plates(&tmp, pieces, bed, 5.0).unwrap();
+        let sum = export_plates(&tmp, pieces, bed, bed, 5.0, None).unwrap();
         assert_eq!(sum.plates, 3, "three bed-filling slabs need three plates");
 
         let f = std::fs::File::open(&tmp).unwrap();
@@ -613,7 +656,7 @@ mod tests {
             .read_to_string(&mut model)
             .unwrap();
 
-        let cols = column_count(3);
+        let cols = grid_cols(3);
         let mut plates_hit = std::collections::HashSet::new();
         for line in model.lines().filter(|l| l.contains("<item ")) {
             let xf = line

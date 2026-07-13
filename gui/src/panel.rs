@@ -65,7 +65,6 @@ pub(crate) struct PanelView<'w> {
 /// Cheap edits mutate in place; a heavy action (needing params beyond the panel's own) writes a
 /// `PanelCmd` its dedicated system handles. Writes `PanelSeam` after drawing so `orbit` yields the
 /// pointer over the panels and `split_viewport` insets the 3D camera inside all three bars.
-// TODO(U.2): the Material Symbols icon font — text labels ("+"/"on"/"off"/"del"/"conn") for now.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn panel_ui(
     mut contexts: EguiContexts,
@@ -186,7 +185,8 @@ pub(crate) fn panel_ui(
                     // on disk only changes here.
                     ui.horizontal(|ui| {
                         if ui
-                            .add_enabled(editor.dirty, egui::Button::new("Save"))
+                            .add_enabled(editor.dirty, egui::Button::new(icons::SAVE))
+                            .on_hover_text("save to disk")
                             .clicked()
                             && std::fs::write(&editor.path, editor.text.as_bytes()).is_ok()
                         {
@@ -292,7 +292,10 @@ pub(crate) fn panel_ui(
                     };
                     // Reset-to-auto: throw away this part's cuts+connectors and re-derive the full plan
                     // (fit-to-bed cuts + auto-placed connectors, or WHOLE if it fits).
-                    if ui.button("Reset to auto").clicked() {
+                    if ui
+                        .button(format!("{}  Reset to auto", icons::RESTART))
+                        .clicked()
+                    {
                         writers.cmd.write(PanelCmd::AutoSlice);
                     }
                     // Explode is a per-part VIEW toggle, enabled only when the part has pieces to fan —
@@ -366,7 +369,7 @@ pub(crate) fn panel_ui(
                                             if manual {
                                                 // manual → seated flat; a click resets it to the auto-pick.
                                                 if ui
-                                                    .small_button("↺")
+                                                    .small_button(icons::RESTART)
                                                     .on_hover_text("reset to auto")
                                                     .clicked()
                                                 {
@@ -509,8 +512,11 @@ pub(crate) fn part_cut_editor(
                 touched = true;
             }
             let name = format!("{} cut @", axis.label());
+            // Active row reads green + bold — the app-wide active accent (tabs / files / parts), U.2.
             ui.label(if is_cut_active {
-                egui::RichText::new(name).strong()
+                egui::RichText::new(name)
+                    .color(egui::Color32::from_rgb(120, 220, 140))
+                    .strong()
             } else {
                 egui::RichText::new(name)
             });
@@ -521,15 +527,21 @@ pub(crate) fn part_cut_editor(
                 touched = true;
             }
             let en = part.cuts.list[idx].enabled;
+            // Eye / eye-off = the cut's in/out of the slice (U.2 icon swap; hover names it).
             if ui
-                .selectable_label(en, if en { "on" } else { "off" })
+                .selectable_label(en, if en { icons::EYE } else { icons::EYE_OFF })
+                .on_hover_text(if en { "in the slice" } else { "disabled" })
                 .clicked()
             {
                 part.cuts.list[idx].enabled = !en;
                 touched = true;
             }
             if ui
-                .button(egui::RichText::new("del").color(egui::Color32::from_rgb(230, 130, 130)))
+                .button(
+                    egui::RichText::new(icons::DELETE)
+                        .color(egui::Color32::from_rgb(230, 130, 130)),
+                )
+                .on_hover_text("delete cut")
                 .clicked()
             {
                 *to_remove = Some((part_idx, idx));
@@ -580,7 +592,10 @@ pub(crate) fn part_cut_editor(
     // the v4 mockup. A new plane drops at the part's mid-span on that axis.
     ui.horizontal(|ui| {
         for axis in [Axis::X, Axis::Y, Axis::Z] {
-            if ui.button(format!("+{}", axis.label())).clicked() {
+            if ui
+                .button(format!("{} {}", icons::ADD, axis.label()))
+                .clicked()
+            {
                 if let Some((mn, mx)) = part.bounds.0 {
                     let at = comp((mn + mx) * 0.5, axis.index());
                     part.cuts.list.push(CutDef {

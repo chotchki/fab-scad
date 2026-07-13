@@ -214,7 +214,7 @@ added 2026-07-07.
   - [x] U.1.2 - U.1.2 - port all panels (view/connectors/print) to egui immediate-mode + rewire the 2 seams + icon font
   - [x] U.1.3 - U.1.3 - delete feathers: UI builders + retained-mode reconciliation systems + drop the feature
   - [x] U.1.4 - U.1.4 - harness modes (windowed/screenshot/scripted) render egui + full gui verify (test + clippy)
-- [ ] U.2 - U.2 - egui panel polish: Material Symbols icons + active-row alignment + optional Nudge flash
+- [x] U.2 - U.2 - egui panel polish: Material Symbols icons + active-row alignment + optional Nudge flash
   - [x] U.2.1 - build.rs Material Symbols font pipeline: manifest-keyed download+cache+subset+cache; committed subset = CI/offline fallback; egui set_fonts registration
 - [ ] U.3 - U.3 - Workflow tabs: app-wide top-tab restructure (Model/Parts/Orientation/Export) — see docs/workflow-tabs-mockup.html
   - [x] U.3.1 - U.3.1 - Top-tab shell + bottom status bar: app-wide Tab resource, full-width bar, route existing blocks, retire derived PanelMode

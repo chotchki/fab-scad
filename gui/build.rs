@@ -23,6 +23,8 @@ const MANIFEST: &[(&str, u32)] = &[
     ("PLUG_CONNECT", 0xf35a),  // connector
     ("CHEVRON_RIGHT", 0xe5cc), // cut collapsed
     ("EXPAND_MORE", 0xe5cf),   // cut expanded
+    ("SAVE", 0xe161),          // save (floppy)
+    ("RESTART", 0xe5d5),       // refresh / reset-to-auto
 ];
 
 /// Upstream Material Symbols Outlined variable font, PINNED to a commit SHA + content sha256

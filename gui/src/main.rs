@@ -41,6 +41,7 @@ pub(crate) use std::path::{Path, PathBuf};
 // `FVec3` so it doesn't shadow Bevy's `Vec3`, which the scene code uses everywhere.
 pub(crate) use fab_lang::{Dims, Vec3 as FVec3};
 
+mod config;
 mod cuts;
 #[cfg(test)]
 mod harness_tests;

@@ -189,7 +189,7 @@ impl Cuts {
 }
 
 /// Machine-screw size for bolt connectors; `label` is the manifest / BOSL2 string.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum Screw {
     M3,
     M4,

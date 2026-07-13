@@ -421,6 +421,7 @@ pub(crate) fn poll_job(
     mut status: ResMut<Status>,
     mut parts: ResMut<Parts>,
     mut active_part: ResMut<ActivePart>,
+    cfg: Res<SceneCfg>,
     bg: Res<SliceInBackground>,
     models: Query<(Entity, &PartId), With<Model>>,
     mut commands: Commands,
@@ -445,7 +446,7 @@ pub(crate) fn poll_job(
                 for (e, _) in &models {
                     commands.entity(e).despawn();
                 }
-                let new: Vec<Part> = paths
+                let mut new: Vec<Part> = paths
                     .iter()
                     .enumerate()
                     .map(|(i, (path, name))| {
@@ -459,6 +460,14 @@ pub(crate) fn poll_job(
                         )
                     })
                     .collect();
+                // Load any per-part slicing config (U.3.14 Phase B) BEFORE `new` goes live: a part
+                // whose block set cuts makes `kick_auto_plan` stand down, so config wins over auto-
+                // derive. No config (or a flat/legacy `[slicing]`) → every part auto-derives as before.
+                if let Some(src) = &cfg.source {
+                    if let Ok(m) = fab_scad::manifest::Manifest::load_near(src) {
+                        config::apply_slicing_config(&mut new, &m);
+                    }
+                }
                 *parts = Parts(new);
                 active_part.0 = 0;
             } else {

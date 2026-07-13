@@ -288,6 +288,30 @@ pub fn export_plates_to<W: Write + Seek>(
     })
 }
 
+/// The plate-count / fill SUMMARY of packing `pieces` onto `bed`, WITHOUT laying out the meshes or
+/// writing a 3mf — the cheap reactive twin of [`export_plates`] for the GUI's co-pack preview (U.3.5).
+/// Same orient→footprint→bin-pack as the real export, so its `plates`/`fill` match what an export
+/// would produce; it just skips the mesh transform + serialization.
+pub fn pack_summary(pieces: &[PieceToPlace], bed: [f64; 2], gap: f64) -> Result<ExportSummary> {
+    ensure!(!pieces.is_empty(), "no pieces to pack");
+    let mut foots: Vec<Footprint> = Vec::with_capacity(pieces.len());
+    for p in pieces {
+        let r = rot_up_to_z(p.up);
+        let verts: Vec<[f64; 3]> = p.mesh.verts.iter().map(|&v| matvec(r, v)).collect();
+        let (min, max) = bbox(&verts).context("piece has no vertices")?;
+        foots.push(Footprint {
+            w: max[0] - min[0],
+            h: max[1] - min[1],
+        });
+    }
+    let placements = pack::pack(&foots, bed, gap)?;
+    Ok(ExportSummary {
+        plates: pack::plate_count(&placements),
+        pieces: pieces.len(),
+        fill: pack::fill_ratio(&foots, &placements, bed),
+    })
+}
+
 /// Axis-aligned bounding box of a vertex set (`None` if empty).
 fn bbox(verts: &[[f64; 3]]) -> Option<([f64; 3], [f64; 3])> {
     if verts.is_empty() {
@@ -512,6 +536,25 @@ mod tests {
         assert_eq!(settings.matches("<plate>").count(), 1, "one shared plate");
 
         let _ = std::fs::remove_file(&tmp);
+    }
+
+    #[test]
+    fn pack_summary_matches_export_without_writing() {
+        // Same two cubes as the export test — pack_summary reports the SAME plate count, no file IO.
+        let pieces = vec![
+            PieceToPlace {
+                mesh: unit_cube(),
+                up: [0.0, 0.0, 1.0],
+            },
+            PieceToPlace {
+                mesh: unit_cube(),
+                up: [1.0, 0.0, 0.0],
+            },
+        ];
+        let sum = pack_summary(&pieces, [256.0, 256.0], 3.0).unwrap();
+        assert_eq!((sum.pieces, sum.plates), (2, 1));
+        assert!(sum.fill > 0.0);
+        assert!(pack_summary(&[], [256.0, 256.0], 3.0).is_err()); // empty → error, not panic
     }
 
     /// A 200×200 slab authored with min-corner at the origin (fills most of a 256 bed → one per plate).

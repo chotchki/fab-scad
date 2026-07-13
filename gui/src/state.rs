@@ -337,6 +337,16 @@ pub(crate) struct ActivePart(pub(crate) usize);
 #[derive(Resource, Default)]
 pub(crate) struct SaveBaseline(pub(crate) Option<u64>);
 
+/// The co-pack preview summary (U.3.5): the plate/piece count + fill of packing the current print
+/// pieces onto the bed, recomputed by `estimate_copack` when pieces or orientations change, read by the
+/// Export tab. `bed` is cached alongside so the panel shows `fits WxH` without another system param.
+/// `summary` is `None` until pieces exist and a pack lands (or when a piece can't fit the bed).
+#[derive(Resource, Default)]
+pub(crate) struct CoPack {
+    pub(crate) summary: Option<fab_scad::bambu::ExportSummary>,
+    pub(crate) bed: [f32; 2],
+}
+
 /// Whether the print-orientation preview is showing: the model + cut planes hide, and every piece
 /// is laid out on the bed rotated to its print-up. A workflow MODE, like the connector editor.
 #[derive(Resource, Default)]

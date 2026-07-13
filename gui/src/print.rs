@@ -378,3 +378,37 @@ pub(crate) fn export_plates_action(
         Err(e) => status.0 = format!("export failed: {e:#}"),
     }
 }
+
+/// Reactively recompute the co-pack preview summary (U.3.5) whenever the print pieces or their
+/// orientations change — the Export tab's `plates · pieces · fits WxH` metric, no button. Cheap: a
+/// footprint-only bin-pack (`fab::copack_summary`), no 3mf written. Clears the summary when there are
+/// no pieces (or none fit the bed). Guards stale part indices — it runs on ANY `parts` change, which
+/// can briefly precede `PrintPieces` being rebuilt.
+pub(crate) fn estimate_copack(
+    pieces: Res<PrintPieces>,
+    parts: Res<Parts>,
+    scene: Res<SceneCfg>,
+    mut copack: ResMut<CoPack>,
+) {
+    if !pieces.is_changed() && !parts.is_changed() {
+        return;
+    }
+    copack.bed = scene.bed;
+    let Some(list) = pieces.0.as_ref().filter(|l| !l.is_empty()) else {
+        copack.summary = None;
+        return;
+    };
+    // Co-pack ALL parts' pieces, each build-up resolved against its OWN part's orient. Skip a piece
+    // whose part index is momentarily out of range (PrintPieces stale vs a just-changed Parts).
+    let (refs, ups): (Vec<&fab::PiecePrint>, Vec<[f64; 3]>) = list
+        .iter()
+        .filter_map(|(part, pp)| {
+            parts.0.get(*part).map(|p| {
+                let u = p.orient.up_or((pp.piece, pp.comp), pp.up);
+                (pp, [u[0] as f64, u[1] as f64, u[2] as f64])
+            })
+        })
+        .unzip();
+    let bed = [scene.bed[0] as f64, scene.bed[1] as f64];
+    copack.summary = fab::copack_summary(&refs, &ups, bed, PLATE_GAP).ok();
+}

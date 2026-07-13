@@ -122,6 +122,7 @@ fn run_windowed(scene: SceneCfg, shot: Option<PathBuf>) {
         .init_resource::<PrintView>()
         .init_resource::<PrintJob>()
         .init_resource::<PrintPieces>()
+        .init_resource::<CoPack>()
         .init_resource::<AutoJob>()
         .init_resource::<PublishJob>()
         .init_resource::<Tab>()
@@ -188,6 +189,7 @@ fn run_windowed(scene: SceneCfg, shot: Option<PathBuf>) {
                     (poll_print_job, sync_orientation).chain(),
                     color_conn_markers,
                     do_auto_place,
+                    estimate_copack, // U.3.5 — reactive co-pack metric for the Export tab
                 ),
             ),
         )
@@ -237,6 +239,7 @@ fn run_screenshot(scene: SceneCfg, png: PathBuf) {
         .init_resource::<Job>()
         .init_resource::<PanelSeam>()
         .init_resource::<PrintPieces>()
+        .init_resource::<CoPack>()
         .insert_resource(Status("rendering".into()))
         .add_message::<ReSlice>()
         .add_message::<AutoPlace>()
@@ -281,6 +284,7 @@ fn run_scripted(scene: SceneCfg, actions: Vec<Action>) {
         .init_resource::<PrintView>()
         .init_resource::<PrintJob>()
         .init_resource::<PrintPieces>()
+        .init_resource::<CoPack>()
         .init_resource::<Tab>()
         .init_resource::<EditorBuf>()
         .init_resource::<PrevCam>()

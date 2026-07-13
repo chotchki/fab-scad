@@ -221,7 +221,7 @@ added 2026-07-07.
   - [x] U.3.2 - U.3.2 - Model tab: egui editor from debounced buffer + explicit desktop Save + unsliced 3D + file inner-tabs with ＋-reopens-folder (reuse FileList/SwitchFile); active file drives downstream
   - [x] U.3.3 - U.3.3 - Parts tab: left-panel 3-level drill part→cut→connectors inline; fold today's Connectors mode in
   - [x] U.3.4 - U.3.4 - Orientation tab: promote Print mode; per-piece flat/auto list across all parts
-  - [ ] U.3.5 - U.3.5 - Export tab: co-pack preview + Export 3MF + Publish merged
+  - [x] U.3.5 - U.3.5 - Export tab: co-pack preview + Export 3MF + Publish merged
   - [ ] U.3.6 - U.3.6 - Entry-point gating: web (single presupplied file, no ＋, editor landing) vs desktop (full picker + ＋); platform gate
   - [ ] U.3.7 - U.3.7 - Feedback: per-node DAG dirty flags → amber tab dots (stale) + spinner motion on rendering tab + bottom status-bar detail; background jobs clear
   - [x] U.3.8 - U.3.8 - Harness + tests: script verbs (tab-switch, editor-edit), screenshot each tab, full gui verify

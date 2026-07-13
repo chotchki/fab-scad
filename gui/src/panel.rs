@@ -70,6 +70,7 @@ pub(crate) fn panel_ui(
     mut editor: ResMut<EditorBuf>,
     time: Res<Time>,
     print_pieces: Res<PrintPieces>,
+    copack: Res<CoPack>,
     mut writers: PanelWriters,
     mut seam: ResMut<PanelSeam>,
 ) {
@@ -367,13 +368,42 @@ pub(crate) fn panel_ui(
                     }
                 }
                 Tab::Export => {
-                    if ui.button("Export plates").clicked() {
+                    // The co-pack preview metric (U.3.5): `estimate_copack` keeps this live as pieces +
+                    // orientations change — no button to compute it. Then the two output actions.
+                    ui.label(egui::RichText::new("co-packed plates").small().weak());
+                    match &copack.summary {
+                        Some(s) => {
+                            ui.label(
+                                egui::RichText::new(format!(
+                                    "{} plates · {} pieces · fits {:.0}×{:.0}",
+                                    s.plates, s.pieces, copack.bed[0], copack.bed[1]
+                                ))
+                                .strong(),
+                            );
+                            ui.label(
+                                egui::RichText::new(format!(
+                                    "{}% full",
+                                    (s.fill * 100.0).round() as i32
+                                ))
+                                .small()
+                                .weak(),
+                            );
+                        }
+                        None => {
+                            ui.label(
+                                egui::RichText::new("slice a part first — nothing to pack yet")
+                                    .small()
+                                    .weak(),
+                            );
+                        }
+                    }
+                    ui.separator();
+                    if ui.button("Export plates (3MF)").clicked() {
                         writers.cmd.write(PanelCmd::Export);
                     }
-                    if ui.button("Publish").clicked() {
+                    if ui.button("Publish → hotchkiss.io").clicked() {
                         writers.cmd.write(PanelCmd::Publish);
                     }
-                    // The co-pack plate preview lands in U.3.5.
                 }
             }
             // Fill the panel to full height on every tab so its frame reaches the status bar (U.3.2).

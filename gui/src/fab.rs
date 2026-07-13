@@ -539,6 +539,26 @@ pub fn export_plates(
     bambu::export_plates(out, to_place, bed, gap)
 }
 
+/// Plate-count / fill summary of co-packing `pieces` (U.3.5) — the cheap reactive twin of
+/// [`export_plates`]: same orient→footprint→bin-pack, but it writes no 3mf, so the panel can show a
+/// live `plates · pieces · fits WxH` metric as orientations change.
+pub fn copack_summary(
+    pieces: &[&PiecePrint],
+    ups: &[[f64; 3]],
+    bed: [f64; 2],
+    gap: f64,
+) -> Result<bambu::ExportSummary> {
+    let to_place: Vec<PieceToPlace> = pieces
+        .iter()
+        .zip(ups)
+        .map(|(pp, &up)| PieceToPlace {
+            mesh: stlmesh_to_bambu(&pp.mesh),
+            up,
+        })
+        .collect();
+    bambu::pack_summary(&to_place, bed, gap)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

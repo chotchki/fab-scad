@@ -5,17 +5,51 @@ edition = "2024"
 description = "Bevy GUI for fab-scad: set cut planes, place connectors, preview piece-vs-bed"
 license = "GPL-2.0-or-later"
 
+# cdylib = the wasm module (W.3); rlib so the native bin (src/main.rs) links the same app.
+[lib]
+crate-type = ["cdylib", "rlib"]
+
 [dependencies]
-fab-scad = { path = ".." }
-# Direct dep for the shared geometry types (Vec3/Dims) the auto-slice + planner APIs take — already a
-# transitive dep via fab-scad's geometry feature, named here so the GUI can construct them.
+# Shared geometry types (Vec3/Dims) the auto-slice + planner APIs take — pure Rust, both targets.
 fab-lang = { path = "../lang" }
 anyhow = "1"
 bevy = { version = "0.19", features = ["bevy_picking", "mesh_picking"] }
-# Native Open dialog for the file/directory picker (5.3.1). Async variant integrates with Bevy's
-# task pool; on macOS it dispatches the panel to the main thread internally.
+# File open: native dialog on desktop, <input type=file> on wasm (rfd covers both).
 rfd = "0.17"
 bevy_egui = "0.41"
-# Format-preserving project.toml writes (U.3.14 Phase C autosave): only the [slicing] table is
-# rebuilt, [project]/[[part]]/comments stay byte-for-byte. `serde` feature = serialize Slicing directly.
+
+# --- native only ---
+# The in-process kernel + native geometry (openscad/publish/reqwest/rayon/JIT) and the
+# format-preserving project.toml autosave (toml_edit). On wasm the kernel lives in the geom
+# worker (W.3.4) and there's no filesystem, so neither is linked.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 toml_edit = { version = "0.22", features = ["serde"] }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies.fab-scad]
+path = ".."
+features = ["kernel", "native"]
+
+# --- wasm only ---
+# Kernel-FREE base: geometry runs in the fab-geom worker (W.3.4); this crate links the wire
+# types + pure helpers. Plus the browser host surface (canvas / config / file / download).
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+fab-scad = { path = "..", default-features = false }
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+console_error_panic_hook = "0.1"
+js-sys = "0.3"
+web-sys = { version = "0.3", features = [
+    "Window",
+    "Location",
+    "Document",
+    "Element",
+    "Blob",
+    "Url",
+    "HtmlAnchorElement",
+    "Response",
+    "Storage",
+    "Worker",
+    "WorkerOptions",
+    "WorkerType",
+    "MessageEvent",
+] }

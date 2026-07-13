@@ -166,15 +166,21 @@ pub(crate) fn panel_ui(
                                 writers.switch.write(SwitchFile(i));
                             }
                         }
-                        // The ＋ opens a folder picker — DESKTOP only (U.3.6). On web there's one
-                        // presupplied file and no folder access, so the picker is hidden entirely.
+                        // The ＋ opens a .scad file picker — DESKTOP only (U.3.6). On web there's one
+                        // presupplied file and no fs access, so the picker is hidden entirely. The
+                        // picked file's FOLDER becomes the tab set (its siblings), that file active —
+                        // so you open the model you're looking at, not just its containing directory.
                         if view.platform.shows_picker()
-                            && ui.button(icons::ADD).clicked()
+                            && ui
+                                .button(icons::ADD)
+                                .on_hover_text("open a .scad model")
+                                .clicked()
                             && open_dialog.0.is_none()
                         {
                             open_dialog.0 = Some(AsyncComputeTaskPool::get().spawn(async move {
                                 rfd::AsyncFileDialog::new()
-                                    .pick_folder()
+                                    .add_filter("OpenSCAD source", &["scad"])
+                                    .pick_file()
                                     .await
                                     .map(|h| h.path().to_path_buf())
                             }));

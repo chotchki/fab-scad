@@ -299,8 +299,8 @@ pub(crate) fn apply_switch_file(
     info!("open: {}", path.display());
 }
 
-/// Drain the native folder pick: on a chosen directory, list its `.scad` files and switch to the
-/// first; on cancel, nothing. The dialog future was spawned by the Open button.
+/// Drain the native `.scad` file pick: expand the chosen file's FOLDER into the tab set (its sibling
+/// `.scad`) and switch to the picked file; on cancel, nothing. The dialog future was spawned by the ＋.
 pub(crate) fn poll_open_dialog(
     mut dlg: ResMut<OpenDialog>,
     mut files: ResMut<FileList>,
@@ -314,16 +314,19 @@ pub(crate) fn poll_open_dialog(
         return; // dialog still open
     };
     dlg.0 = None;
-    let Some(dir) = result else {
+    let Some(picked) = result else {
         return; // cancelled
     };
-    let scads = scad_files(&dir);
+    // Open the picked model's folder as tabs (both flat + `src/`-nested layouts), that file active.
+    let dir = picked.parent().unwrap_or(picked.as_path());
+    let scads = scad_files(dir);
     if scads.is_empty() {
         status.0 = format!("no .scad under {}", dir.display());
         return;
     }
+    let active = scads.iter().position(|p| p == &picked).unwrap_or(0);
     files.files = scads;
-    switch.write(SwitchFile(0));
+    switch.write(SwitchFile(active));
 }
 
 /// Auto-reload (5.3.3): if the active source's mtime advanced since its last load, re-render the

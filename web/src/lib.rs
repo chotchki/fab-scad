@@ -14,7 +14,7 @@ use bevy::picking::mesh_picking::MeshPickingPlugin;
 use bevy::picking::pointer::PointerId;
 use bevy::prelude::*;
 use bevy::render::mesh::{Indices, PrimitiveTopology};
-use bevy::tasks::{block_on, futures_lite::future, AsyncComputeTaskPool, Task};
+use bevy::tasks::{AsyncComputeTaskPool, Task, block_on, futures_lite::future};
 
 use fab_scad::geomsg::{GeomObject, PlanOut, Request, Response, WireConn};
 use fab_scad::stl;
@@ -69,7 +69,7 @@ pub fn run() {
     ));
 
     {
-        use bevy::feathers::{dark_theme::create_dark_theme, theme::UiTheme, FeathersPlugins};
+        use bevy::feathers::{FeathersPlugins, dark_theme::create_dark_theme, theme::UiTheme};
         app.add_plugins(FeathersPlugins)
             .insert_resource(UiTheme(create_dark_theme()));
     }

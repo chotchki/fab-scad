@@ -9,8 +9,8 @@ use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
+use wasm_bindgen::prelude::*;
 
 pub struct Rpc {
     pending: Rc<RefCell<HashMap<u32, js_sys::Function>>>,

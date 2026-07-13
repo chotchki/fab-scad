@@ -473,7 +473,7 @@ fn revert_on_edit_ignores_spurious_change_but_reverts_a_real_edit() {
         .spawn((Mesh3d(Handle::default()), PartId(0), Model));
 
     app.update(); // establish the slice-input baseline
-                  // Spuriously mark Parts changed (exactly what panel_ui / kick_auto_plan do every frame) — no edit.
+    // Spuriously mark Parts changed (exactly what panel_ui / kick_auto_plan do every frame) — no edit.
     let _ = app.world_mut().resource_mut::<Parts>();
     app.update();
     assert_eq!(

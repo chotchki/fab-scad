@@ -565,10 +565,10 @@ pub(crate) fn poll_job(
                 // Load any per-part slicing config (U.3.14 Phase B) BEFORE `new` goes live: a part
                 // whose block set cuts makes `kick_auto_plan` stand down, so config wins over auto-
                 // derive. No config (or a flat/legacy `[slicing]`) → every part auto-derives as before.
-                if let Some(src) = &cfg.source {
-                    if let Ok(m) = fab_scad::manifest::Manifest::load_near(src) {
-                        config::apply_slicing_config(&mut new, &m);
-                    }
+                if let Some(src) = &cfg.source
+                    && let Ok(m) = fab_scad::manifest::Manifest::load_near(src)
+                {
+                    config::apply_slicing_config(&mut new, &m);
                 }
                 // Seed the autosave baseline to the config as it stands on disk (loaded blocks, or
                 // empty when none) — `autosave_config` writes only once the live config drifts off this
@@ -602,8 +602,8 @@ pub(crate) fn poll_job(
                 return; // the part went away under us (a reload changed the count) — drop the slice
             };
             p.sliced = Some(mesh.clone()); // bank it so the view toggle can re-show it
-                                           // A BACKGROUND rebuild refreshes the display only if already exploded; an explicit
-                                           // slice (or a background one while exploded) shows the fanned pieces.
+            // A BACKGROUND rebuild refreshes the display only if already exploded; an explicit
+            // slice (or a background one while exploded) shows the fanned pieces.
             let show = !bg.0;
             if show || p.spread > 0.0 {
                 despawn_part_models(&mut commands, &models, part);
@@ -685,10 +685,10 @@ pub(crate) fn refresh_part(
     part.spread = 0.0; // reload drops back to the intact model
     part.sliced = None;
     part.sliced_hash = None; // force a reslice off the new geometry if the part has cuts
-    if part.bounds.0.is_none() {
-        if let Some((min, max)) = aabb {
-            part.bounds.0 = Some((min, max));
-        }
+    if part.bounds.0.is_none()
+        && let Some((min, max)) = aabb
+    {
+        part.bounds.0 = Some((min, max));
     }
 }
 

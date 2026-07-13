@@ -13,7 +13,7 @@ mod web {
     use std::cell::RefCell;
     use std::rc::Rc;
 
-    use anyhow::{anyhow, Result};
+    use anyhow::{Result, anyhow};
     use fab_scad::geomsg::{self, Request, Response};
     use wasm_bindgen::prelude::*;
     use wasm_bindgen_futures::JsFuture;

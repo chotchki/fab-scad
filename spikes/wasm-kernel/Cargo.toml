@@ -1,7 +1,7 @@
 [package]
 name = "wasm-kernel-spike"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 description = "18.4 spike: the Manifold kernel (unstable-wasm-uu) under wasm-bindgen in a browser"
 license = "MIT"
 

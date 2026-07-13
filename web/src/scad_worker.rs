@@ -8,7 +8,7 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use bevy::log::info;
 use js_sys::{Object, Reflect, Uint8Array};
 use wasm_bindgen::prelude::*;

@@ -511,8 +511,8 @@ pub(crate) fn edit_mode(
     let (axis, at) = (c.axis, c.at); // copy out so the `part` borrow can drop before the cam block
     let bounds = part.bounds.0;
     let base_stl = part.base_stl.clone(); // this part's whole STL — the cross-section source
-                                          // Face the camera square onto the cut (Z avoids the up=Z gimbal with a near-top-down pitch).
-                                          // Set the transform here directly — `orbit` yields while editing, so it won't apply it for us.
+    // Face the camera square onto the cut (Z avoids the up=Z gimbal with a near-top-down pitch).
+    // Set the transform here directly — `orbit` yields while editing, so it won't apply it for us.
     if let Ok((mut t, mut o)) = cam.single_mut() {
         use std::f32::consts::FRAC_PI_2;
         (o.yaw, o.pitch) = match axis {
@@ -896,10 +896,10 @@ pub(crate) fn color_conn_markers(
             _ if feas.0.get(m.0).copied().unwrap_or(true) => Color::srgb(0.30, 0.85, 0.70), // teal onion
             _ => Color::srgb(0.95, 0.35, 0.25), // red = onion that downgrades to a bolt
         };
-        if let Some(mut material) = mats.get_mut(&mat.0) {
-            if material.base_color != want {
-                material.base_color = want;
-            }
+        if let Some(mut material) = mats.get_mut(&mat.0)
+            && material.base_color != want
+        {
+            material.base_color = want;
         }
     }
 }

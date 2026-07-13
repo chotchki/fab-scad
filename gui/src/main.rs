@@ -13,7 +13,7 @@ pub(crate) use bevy::ecs::system::SystemParam;
 pub(crate) use bevy::{
     app::ScheduleRunnerPlugin,
     asset::{AssetPlugin, RenderAssetUsages},
-    camera::{visibility::RenderLayers, RenderTarget},
+    camera::{RenderTarget, visibility::RenderLayers},
     image::Image,
     input::mouse::{MouseMotion, MouseScrollUnit, MouseWheel},
     mesh::Indices,
@@ -25,14 +25,14 @@ pub(crate) use bevy::{
     prelude::*,
     render::{
         render_resource::{PrimitiveTopology, TextureFormat, TextureUsages},
-        view::screenshot::{save_to_disk, Screenshot},
+        view::screenshot::{Screenshot, save_to_disk},
     },
-    tasks::{block_on, futures_lite::future, AsyncComputeTaskPool, Task},
+    tasks::{AsyncComputeTaskPool, Task, block_on, futures_lite::future},
     window::ExitCondition,
     winit::WinitPlugin,
 };
 pub(crate) use bevy_egui::{
-    egui, EguiContexts, EguiGlobalSettings, EguiPlugin, EguiPrimaryContextPass, PrimaryEguiContext,
+    EguiContexts, EguiGlobalSettings, EguiPlugin, EguiPrimaryContextPass, PrimaryEguiContext, egui,
 };
 pub(crate) use fab_scad::stl;
 pub(crate) use std::collections::{HashMap, HashSet};

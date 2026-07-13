@@ -454,10 +454,10 @@ pub(crate) fn panel_ui(
             // Fill the panel to full height on every tab so its frame reaches the status bar (U.3.2).
             ui.add_space(ui.available_height());
         });
-    if let Some((p, idx)) = to_remove {
-        if let Some(part) = parts.0.get_mut(p) {
-            remove_cut(&mut part.cuts, &mut part.conns, idx);
-        }
+    if let Some((p, idx)) = to_remove
+        && let Some(part) = parts.0.get_mut(p)
+    {
+        remove_cut(&mut part.cuts, &mut part.conns, idx);
     }
     if let Some((part, key)) = reset_orient {
         if let Some(p) = parts.0.get_mut(part) {
@@ -601,17 +601,16 @@ pub(crate) fn part_cut_editor(
             if ui
                 .button(format!("{} {}", icons::ADD, axis.label()))
                 .clicked()
+                && let Some((mn, mx)) = part.bounds.0
             {
-                if let Some((mn, mx)) = part.bounds.0 {
-                    let at = comp((mn + mx) * 0.5, axis.index());
-                    part.cuts.list.push(CutDef {
-                        axis,
-                        at,
-                        enabled: true,
-                    });
-                    part.cuts.active = part.cuts.list.len() - 1;
-                    touched = true;
-                }
+                let at = comp((mn + mx) * 0.5, axis.index());
+                part.cuts.list.push(CutDef {
+                    axis,
+                    at,
+                    enabled: true,
+                });
+                part.cuts.active = part.cuts.list.len() - 1;
+                touched = true;
             }
         }
     });

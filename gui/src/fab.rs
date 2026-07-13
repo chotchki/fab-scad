@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use anyhow::{ensure, Context, Result};
+use anyhow::{Context, Result, ensure};
 
 use fab_scad::bambu::{self, PieceToPlace};
 use fab_scad::manifest::{Connector, Cut, PieceOrient, Slicing};
@@ -109,7 +109,7 @@ pub fn find_root() -> Option<PathBuf> {
 /// The `Solid` is built AND consumed here (written to STL); it's `!Send` and never crosses the async-task
 /// boundary the caller spawns this on. (The slice/export path still uses OpenSCAD — switched separately.)
 pub fn render_whole(root: Option<&Path>, source: &Path, out_dir: &Path) -> Result<PathBuf> {
-    use fab_scad::backend::{build_geo, ManifoldBackend};
+    use fab_scad::backend::{ManifoldBackend, build_geo};
     // Wrap in `$preview = true; include <ABSOLUTE source>;` (so `$fn = $preview ? lo : hi` takes the fast
     // path) but evaluate that wrapper against the SOURCE's OWN directory — NOT `out_dir`. scad-rs threads a
     // single base dir for every `import()`, so a wrapper written into the temp `out_dir` made a relative
@@ -166,7 +166,7 @@ fn preview_libs(root: Option<&Path>) -> Vec<PathBuf> {
 pub type PartRender = (PathBuf, (FVec3, FVec3), Option<String>);
 
 pub fn render_parts(root: Option<&Path>, source: &Path, out_dir: &Path) -> Result<Vec<PartRender>> {
-    use fab_scad::backend::{build_geo_parts, ManifoldBackend};
+    use fab_scad::backend::{ManifoldBackend, build_geo_parts};
     let abs = source
         .canonicalize()
         .with_context(|| format!("resolving {}", source.display()))?;

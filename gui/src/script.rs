@@ -250,11 +250,11 @@ pub(crate) fn run_script(
         Action::SetAxis(ax) => {
             if runner.timer == 1 {
                 let a = cuts.active;
-                if let Some((min, max)) = bounds.0 {
-                    if let Some(c) = cuts.list.get_mut(a) {
-                        c.axis = ax;
-                        c.at = comp((min + max) * 0.5, ax.index());
-                    }
+                if let Some((min, max)) = bounds.0
+                    && let Some(c) = cuts.list.get_mut(a)
+                {
+                    c.axis = ax;
+                    c.at = comp((min + max) * 0.5, ax.index());
                 }
             }
             runner.timer >= 2

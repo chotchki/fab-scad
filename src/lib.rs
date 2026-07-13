@@ -3,8 +3,13 @@
 //! the `fab` CLI (src/main.rs) and the Bevy GUI (gui/), so the slicing-spec and printer types
 //! have ONE definition, not a mirror per front-end.
 
+// Print planning + slicing: all need geometry, and auto/auto_slice call the kernel — so they're
+// gated (NOT ungated) to keep the no-default-features build wasm-safe. auto_orient is pure geom math.
+#[cfg(feature = "kernel")]
 pub mod auto;
+#[cfg(feature = "geometry")]
 pub mod auto_orient;
+#[cfg(feature = "kernel")]
 pub mod auto_slice;
 // The geometry backend trait (J.1): the CSG op vocabulary the geometry lowering targets, with a mock
 // (miri-tested) + the real Manifold impl (ASAN-tested). Needs only fab-lang's Mesh, hence `geometry`
@@ -41,6 +46,7 @@ pub mod printers;
 pub mod project;
 #[cfg(feature = "native")]
 pub mod publish;
+#[cfg(feature = "kernel")]
 pub mod slicing;
 #[cfg(feature = "native")]
 pub mod smoke;

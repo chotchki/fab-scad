@@ -52,7 +52,8 @@ features = ["kernel", "native"]
 # Kernel-FREE base: geometry runs in the fab-geom worker (W.3.4); this crate links the wire
 # types + pure helpers. Plus the browser host surface (canvas / config / file / download).
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-fab-scad = { path = "..", default-features = false }
+# geometry (pure Rust: shared types + auto_orient + the backend trait) — wasm-safe, no kernel/C++.
+fab-scad = { path = "..", default-features = false, features = ["geometry"] }
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
 console_error_panic_hook = "0.1"

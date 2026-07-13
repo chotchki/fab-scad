@@ -3027,6 +3027,7 @@ dependencies = [
  "fab-lang",
  "fab-scad",
  "rfd",
+ "toml_edit 0.22.27",
 ]
 
 [[package]]

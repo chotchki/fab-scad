@@ -323,6 +323,13 @@ pub(crate) struct Parts(pub(crate) Vec<Part>);
 #[derive(Resource, Default)]
 pub(crate) struct ActivePart(pub(crate) usize);
 
+/// Autosave baseline (U.3.14 Phase C): the [`config::config_hash`](crate::config::config_hash) of the
+/// slicing config last written to (or loaded from) `project.toml`. `poll_job` seeds it on a fresh
+/// render; `autosave_config` writes + advances it only when the live config drifts off it — so a bare
+/// open never churns the file, and each edit persists exactly once. `None` until the first render.
+#[derive(Resource, Default)]
+pub(crate) struct SaveBaseline(pub(crate) Option<u64>);
+
 /// Whether the print-orientation preview is showing: the model + cut planes hide, and every piece
 /// is laid out on the bed rotated to its print-up. A workflow MODE, like the connector editor.
 #[derive(Resource, Default)]

@@ -55,16 +55,17 @@ pub struct Part {
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
 pub struct Slicing {
     /// Printer whose bed the pieces target (defaults to printers.toml's default).
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub printer: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub cut: Vec<Cut>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub connector: Vec<Connector>,
     /// Manual per-piece print-orientation overrides (sparse). A piece is the slab multi-index
     /// `[ix,iy,iz]` from the sorted enabled cuts per axis; `up` is its build direction (the model
     /// direction that points +Z on the bed). Un-listed pieces derive +Z (or the auto-pick). The
     /// onion's cap axis is DERIVED from these per joint, never stored — see connector-orientation.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub orient: Vec<PieceOrient>,
     /// Per-part slicing (U.3.14). Each block addresses ONE `build_geo_parts` part by `key`; the flat
     /// `cut`/`connector`/`orient` above are the WHOLE-MODEL spec (back-compat + legacy CLI). XOR with
@@ -80,11 +81,11 @@ pub struct Slicing {
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
 pub struct PartSlicing {
     pub key: PartKey,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub cut: Vec<Cut>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub connector: Vec<Connector>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub orient: Vec<PieceOrient>,
 }
 
@@ -124,10 +125,13 @@ pub struct Connector {
     pub cut: usize,
     #[serde(rename = "type")]
     pub kind: String, // "bolt" (heat-set + bolt) | "onion" (support-free; replaced pin/dowel)
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub screw: Option<String>,
     #[serde(default)]
     pub pos: [Num; 2],
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub through: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub size: Option<f64>, // onion joint diameter (auto-sized from the cross-section)
 }
 

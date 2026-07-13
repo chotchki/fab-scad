@@ -16,3 +16,6 @@ bevy = { version = "0.19", features = ["bevy_picking", "mesh_picking"] }
 # task pool; on macOS it dispatches the panel to the main thread internally.
 rfd = "0.17"
 bevy_egui = "0.41"
+# Format-preserving project.toml writes (U.3.14 Phase C autosave): only the [slicing] table is
+# rebuilt, [project]/[[part]]/comments stay byte-for-byte. `serde` feature = serialize Slicing directly.
+toml_edit = { version = "0.22", features = ["serde"] }

@@ -122,13 +122,13 @@ struct Bed {
 
 /// Startup order: deep-link param > localStorage > the fleet default. NOT my printer anymore.
 fn startup_printer() -> Bed {
-    if let Some(n) = bed_override() {
-        if (10.0..=2000.0).contains(&n) {
-            return Bed {
-                name: "custom".into(),
-                dims: [n, n, n],
-            };
-        }
+    if let Some(n) = bed_override()
+        && (10.0..=2000.0).contains(&n)
+    {
+        return Bed {
+            name: "custom".into(),
+            dims: [n, n, n],
+        };
     }
     #[cfg(target_arch = "wasm32")]
     if let Some(b) = load_saved_bed() {

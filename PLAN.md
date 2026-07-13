@@ -10,6 +10,7 @@ dead. Cardinal rule unchanged: nothing deleted before it's archived AND validate
 Driven by `claude-plan-bridge` (FORMATv2). Hand-authored; run
 `claude-plan-bridge baseline` after a rewrite to resync the state file.
 -->
+## Phase BT - U.2 Nudge flash — per-row confirmation flash on value change
 ## Phase I - scad-rs: evaluator core
   Meta - Cranelift is the NATIVE JIT rung (chotchki's find: VERY approachable, and it's determinism-friendly — no auto-FMA, transcendentals stay CALLS to our own math, so the fixed-accumulation doctrine survives). NOT a replacement for the interpreter: the wasm/browser target can't JIT in-sandbox (the bet's #1 differentiator needs ONE implementation everywhere), and the interpreter is the bit-identical baseline the JIT validates against (fast==slow extends to fast==JIT). Spiked at I.8 (one hot function, prove bit-identical); the JIT-vs-intrinsics PROMOTE decision lands at Phase L with data.
 added 2026-07-06.

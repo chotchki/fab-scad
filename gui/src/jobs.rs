@@ -18,7 +18,9 @@ pub(crate) struct Watch {
 
 /// The in-flight auto-plan job (auto-slice + onion auto-place, off-thread) — auto-on-open's worker.
 #[derive(Resource, Default)]
-pub(crate) struct AutoJob(pub(crate) Option<Task<Result<fab_scad::auto::AutoPlan, String>>>);
+pub(crate) struct AutoJob(
+    pub(crate) Option<(usize, Task<Result<fab_scad::auto::AutoPlan, String>>)>,
+);
 
 /// The in-flight publish job (render artifacts + upload to hotchkiss.io, off-thread). Yields the
 /// published page URL or an error string.
@@ -531,7 +533,8 @@ pub(crate) fn build_part(
     };
     if let Some((min, max)) = aabb {
         part.bounds.0 = Some((min, max));
-        seed_center_cut(&mut part, min, max);
+        // No seed cut: kick_auto_plan derives overflowing parts (fit-to-bed + connectors) and leaves
+        // fitting parts WHOLE (U.3.15). A part that fits the bed doesn't need slicing.
     }
     part
 }
@@ -567,31 +570,7 @@ pub(crate) fn refresh_part(
     if part.bounds.0.is_none() {
         if let Some((min, max)) = aabb {
             part.bounds.0 = Some((min, max));
-            seed_center_cut(part, min, max);
         }
-    }
-}
-
-/// Seed part `p` with a single centre cut on X — its manual starting point — but only if it FITS
-/// the bed and has no cuts yet. A too-big part is left empty for `kick_auto_plan` to slice + connect.
-pub(crate) fn seed_center_cut(p: &mut Part, min: Vec3, max: Vec3) {
-    if !p.cuts.list.is_empty() {
-        return;
-    }
-    let bed = bed_size().unwrap_or([256.0; 3]);
-    let fits = fab_scad::auto_slice::auto_slice(
-        FVec3::new(min.x as f64, min.y as f64, min.z as f64),
-        FVec3::new(max.x as f64, max.y as f64, max.z as f64),
-        Dims::from_array(bed),
-    )
-    .is_empty();
-    if fits {
-        p.cuts.list.push(CutDef {
-            axis: Axis::X,
-            at: (min.x + max.x) * 0.5,
-            enabled: true,
-        });
-        p.cuts.active = 0;
     }
 }
 
@@ -686,9 +665,10 @@ pub(crate) fn poll_publish(mut job: ResMut<PublishJob>, mut status: ResMut<Statu
 
 /// Open the active `.scad` source in the OpenSCAD GUI (detached) so you can edit it; the file-watch
 /// re-renders here on save.
-/// Auto-slice the loaded model to fit the printer bed: replace the cut stack with
-/// `fab_scad::auto_slice`'s plan (equal division on each overflowing axis), clear connectors (they
-/// referenced the old cuts), and let the reactive loop reslice. The seed you then refine by hand.
+/// "Reset to auto" (the `PanelCmd::AutoSlice` button): wipe the active part's cuts + connectors and
+/// re-arm `kick_auto_plan` to re-derive the FULL plan — fit-to-bed cuts + auto-placed connectors, or
+/// WHOLE if the part fits. The reactive loop reslices. (U.3.15: the old action re-derived cuts only
+/// and dropped connectors; this restores them.)
 pub(crate) fn auto_slice_action(
     mut ev: MessageReader<PanelCmd>,
     mut parts: ResMut<Parts>,
@@ -699,56 +679,19 @@ pub(crate) fn auto_slice_action(
         return;
     }
     let part = &mut parts.0[active_part.0];
-    let bounds = &part.bounds;
-    let cuts = &mut part.cuts;
-    let conns = &mut part.conns;
-    let Some((min, max)) = bounds.0 else {
-        status.0 = "no model loaded yet".into();
-        return;
-    };
-    let bed = bed_size().unwrap_or([256.0; 3]);
-    let (lo, hi) = (
-        [min.x as f64, min.y as f64, min.z as f64],
-        [max.x as f64, max.y as f64, max.z as f64],
-    );
-    let planned = fab_scad::auto_slice::auto_slice(
-        FVec3::from_array(lo),
-        FVec3::from_array(hi),
-        Dims::from_array(bed),
-    );
-    if planned.is_empty() {
-        status.0 = "model already fits the bed — no cuts needed".into();
-        return;
-    }
-    cuts.list = planned
-        .iter()
-        .map(|c| CutDef {
-            axis: match c.axis {
-                0 => Axis::X,
-                1 => Axis::Y,
-                _ => Axis::Z,
-            },
-            at: c.at as f32,
-            enabled: true,
-        })
-        .collect();
-    cuts.active = 0;
-    conns.list.clear(); // the old connectors referenced the replaced cut stack
-    let pieces = fab_scad::auto_slice::piece_count(
-        FVec3::from_array(lo),
-        FVec3::from_array(hi),
-        Dims::from_array(bed),
-    );
-    status.0 = format!("auto-sliced: {} cut(s) → {pieces} piece(s)", planned.len());
-    info!("{}", status.0);
+    part.cuts.list.clear();
+    part.conns.list.clear();
+    part.auto_planned.0 = None; // re-arm kick_auto_plan to re-derive cuts + connectors
+    status.0 = "reset to auto — re-deriving…".into();
 }
 
-/// Auto-on-open: when a fresh model that OVERFLOWS the bed finishes its whole render, kick the
-/// auto-plan (auto-slice + onion auto-place, off-thread) — ONCE per source. Fits-the-bed models,
-/// already-planned sources, and ones that already have cuts are left alone.
+/// Auto-derive on open: EVERY part that overflows the bed auto-plans (fit-to-bed cuts + onion
+/// auto-place, off-thread) — ONE part at a time (`AutoJob` is single-slot). A part that FITS the bed
+/// stays WHOLE (no cuts) and is marked planned so it's not re-checked. Once per source per part;
+/// parts that already have cuts are left alone. (U.3.15: was active-part-only, so parts ≥1 never
+/// derived until you clicked into them.)
 pub(crate) fn kick_auto_plan(
     mut parts: ResMut<Parts>,
-    active_part: Res<ActivePart>,
     scene: Res<SceneCfg>,
     mut job: ResMut<AutoJob>,
     mut status: ResMut<Status>,
@@ -756,60 +699,65 @@ pub(crate) fn kick_auto_plan(
     if job.0.is_some() {
         return; // one already in flight
     }
-    let part = &mut parts.0[active_part.0];
-    let bounds = &part.bounds;
-    let cuts = &part.cuts;
-    let planned = &mut part.auto_planned;
-    let (Some((min, max)), Some(src)) = (bounds.0, scene.source.clone()) else {
+    let Some(src) = scene.source.clone() else {
         return;
     };
-    if planned.0.as_deref() == Some(src.as_path()) || !cuts.list.is_empty() {
-        return; // already planned this source, or it already has cuts
-    }
-    let (lo, hi) = (
-        [min.x as f64, min.y as f64, min.z as f64],
-        [max.x as f64, max.y as f64, max.z as f64],
-    );
     let bed = bed_size().unwrap_or([256.0; 3]);
-    if fab_scad::auto_slice::auto_slice(
-        FVec3::from_array(lo),
-        FVec3::from_array(hi),
-        Dims::from_array(bed),
-    )
-    .is_empty()
-    {
-        return; // fits the bed — nothing to auto
+    for i in 0..parts.0.len() {
+        let part = &mut parts.0[i];
+        if part.auto_planned.0.as_deref() == Some(src.as_path()) || !part.cuts.list.is_empty() {
+            continue; // already planned this source, or already has cuts
+        }
+        let Some((min, max)) = part.bounds.0 else {
+            continue; // not built yet — try next frame
+        };
+        let (lo, hi) = (
+            [min.x as f64, min.y as f64, min.z as f64],
+            [max.x as f64, max.y as f64, max.z as f64],
+        );
+        if fab_scad::auto_slice::auto_slice(
+            FVec3::from_array(lo),
+            FVec3::from_array(hi),
+            Dims::from_array(bed),
+        )
+        .is_empty()
+        {
+            part.auto_planned.0 = Some(src.clone()); // fits the bed → stays whole, stop re-checking
+            continue;
+        }
+        let base_stl = part.base_stl.clone(); // this part's whole STL (render_parts output)
+        if base_stl.as_os_str().is_empty() || !base_stl.exists() {
+            continue; // this part's base not rendered to disk yet — try next frame
+        }
+        part.auto_planned.0 = Some(src.clone()); // fire once per source
+        let task = AsyncComputeTaskPool::get().spawn(async move {
+            // In-process cross-sections — the base Solid lives + dies inside fab::auto_plan (!Send).
+            fab::auto_plan(&base_stl, lo, hi, bed).map_err(|e| format!("{e:#}"))
+        });
+        job.0 = Some((i, task));
+        status.0 = format!("auto-planning part {}…", i + 1);
+        return; // one at a time
     }
-    let base_stl = part.base_stl.clone(); // this part's whole STL (render_parts output)
-    if base_stl.as_os_str().is_empty() || !base_stl.exists() {
-        return; // base not rendered to disk yet
-    }
-    planned.0 = Some(src.clone()); // fire once per source
-    let task = AsyncComputeTaskPool::get().spawn(async move {
-        // In-process cross-sections — the base Solid lives + dies inside fab::auto_plan (!Send).
-        fab::auto_plan(&base_stl, lo, hi, bed).map_err(|e| format!("{e:#}"))
-    });
-    job.0 = Some(task);
-    status.0 = "auto-planning…".into();
 }
 
-/// Land the auto-plan: seed the cut stack + connectors from it, and the reactive loop reslices.
+/// Land the auto-plan onto the part it was kicked for: seed that part's cut stack + connectors, and
+/// the reactive loop reslices.
 pub(crate) fn poll_auto_plan(
     mut job: ResMut<AutoJob>,
     mut parts: ResMut<Parts>,
-    active_part: Res<ActivePart>,
     mut status: ResMut<Status>,
 ) {
-    let part = &mut parts.0[active_part.0];
-    let cuts = &mut part.cuts;
-    let conns = &mut part.conns;
-    let Some(task) = job.0.as_mut() else {
+    let Some((i, task)) = job.0.as_mut() else {
         return;
     };
+    let i = *i;
     let Some(result) = block_on(future::poll_once(task)) else {
         return;
     };
     job.0 = None;
+    let part = &mut parts.0[i];
+    let cuts = &mut part.cuts;
+    let conns = &mut part.conns;
     match result {
         Ok(plan) => {
             cuts.list = plan
@@ -842,7 +790,8 @@ pub(crate) fn poll_auto_plan(
                 })
                 .collect();
             status.0 = format!(
-                "auto-planned: {} cut(s), {} connector(s)",
+                "auto-planned part {}: {} cut(s), {} connector(s)",
+                i + 1,
                 cuts.list.len(),
                 conns.list.len()
             );

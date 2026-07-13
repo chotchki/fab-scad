@@ -244,12 +244,24 @@ pub(crate) fn panel_ui(
                         writers.autoplace.write(AutoPlace);
                     }
                     ui.separator();
-                    if ui.button("Auto-slice").clicked() {
+                    // Slicing itself is reactive (background reslice on cut changes) — these are the
+                    // only two Parts actions, and each ALWAYS has an effect: no dead buttons (U.3.15).
+                    let (has_cuts, spread) = {
+                        let p = &parts.0[active_part.0];
+                        (p.cuts.list.iter().any(|c| c.enabled), p.spread)
+                    };
+                    // Reset-to-auto: throw away this part's cuts+connectors and re-derive the full plan
+                    // (fit-to-bed cuts + auto-placed connectors, or WHOLE if it fits).
+                    if ui.button("Reset to auto").clicked() {
                         writers.cmd.write(PanelCmd::AutoSlice);
                     }
-                    let spread = parts.0[active_part.0].spread; // active part's explode state
+                    // Explode is a per-part VIEW toggle, enabled only when the part has pieces to fan —
+                    // a part that fits the bed is whole, so there's nothing to explode.
                     if ui
-                        .button(if spread > 0.0 { "Assemble" } else { "Explode" })
+                        .add_enabled(
+                            has_cuts,
+                            egui::Button::new(if spread > 0.0 { "Assemble" } else { "Explode" }),
+                        )
                         .clicked()
                     {
                         writers.cmd.write(PanelCmd::ToggleView);

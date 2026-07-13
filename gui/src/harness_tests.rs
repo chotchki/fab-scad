@@ -382,3 +382,35 @@ fn active_egui_drag_gates_the_wheel_anywhere() {
     let (mut app, cam) = orbit_app(Some((500.0, 400.0)), s);
     assert_eq!(wheel_then_radius(&mut app, cam), 100.0);
 }
+
+// ── Reset-to-auto (U.3.15) — wipes the active part's cuts + connectors and re-arms the derive ──────
+#[test]
+fn reset_to_auto_wipes_cuts_conns_and_rearms_derive() {
+    let mut app = App::new();
+    app.add_plugins(MinimalPlugins)
+        .add_message::<PanelCmd>()
+        .init_resource::<ActivePart>()
+        .insert_resource(Status("x".into()))
+        .insert_resource(Parts(vec![{
+            let mut p = seeded_part(vec![x_cut(-10.0), x_cut(10.0)]);
+            p.conns.list.push(PlacedConn {
+                cut: 0,
+                pos: [1.0, 1.0],
+                size: 6.0,
+                kind: fab::ConnKind::Onion,
+                screw: Screw::M3,
+            });
+            p.auto_planned.0 = Some(std::path::PathBuf::from("m.scad")); // pretend already derived
+            p
+        }]))
+        .add_systems(Update, auto_slice_action);
+    app.world_mut().write_message(PanelCmd::AutoSlice); // the "Reset to auto" button
+    app.update();
+    let p = &app.world().resource::<Parts>().0[0];
+    assert!(p.cuts.list.is_empty(), "reset clears cuts");
+    assert!(p.conns.list.is_empty(), "reset clears connectors");
+    assert!(
+        p.auto_planned.0.is_none(),
+        "reset re-arms kick_auto_plan to re-derive"
+    );
+}

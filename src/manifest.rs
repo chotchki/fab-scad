@@ -52,7 +52,7 @@ pub struct Part {
 
 /// The slicing spec: how to split a part into printable pieces. Edited by the GUI (5.1),
 /// consumed by `fab slice` (5.2), applied via `slicer.scad` / `connectors.scad`.
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
 pub struct Slicing {
     /// Printer whose bed the pieces target (defaults to printers.toml's default).
     pub printer: Option<String>,
@@ -66,13 +66,49 @@ pub struct Slicing {
     /// onion's cap axis is DERIVED from these per joint, never stored — see connector-orientation.
     #[serde(default)]
     pub orient: Vec<PieceOrient>,
+    /// Per-part slicing (U.3.14). Each block addresses ONE `build_geo_parts` part by `key`; the flat
+    /// `cut`/`connector`/`orient` above are the WHOLE-MODEL spec (back-compat + legacy CLI). XOR with
+    /// `part` — a spec carrying BOTH is an error (`slice_cmd` bails); the GUI migrates flat→per-part on
+    /// its first write, so its output is never a mix.
+    #[serde(default, rename = "part")]
+    pub parts: Vec<PartSlicing>,
+}
+
+/// One `build_geo_parts` part's slicing (U.3.14): the same shape as the flat `Slicing`, but its
+/// `cut`/`connector`/`orient` indices are PART-LOCAL — each resolves against this block's own vectors,
+/// exactly what `reslice_part_kernel` / `make_planned` already feed `slice_solid`.
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+pub struct PartSlicing {
+    pub key: PartKey,
+    #[serde(default)]
+    pub cut: Vec<Cut>,
+    #[serde(default)]
+    pub connector: Vec<Connector>,
+    #[serde(default)]
+    pub orient: Vec<PieceOrient>,
+}
+
+/// Binds a `[[slicing.part]]` block to a `build_geo_parts` part. `name` + `nth` is the primary key
+/// (survives a reorder); `index` is the authored-order fallback (survives a name going anonymous — a
+/// part-count mismatch nulls EVERY provenance name at once). See `backend::resolve_part`.
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+pub struct PartKey {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub nth: usize, // 0-based ordinal among parts sharing `name`
+    pub index: usize, // authored index at save time — the fallback bind
 }
 
 /// A manual print-orientation override for one piece (#40).
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct PieceOrient {
     pub piece: [usize; 3], // slab multi-index [ix, iy, iz]
-    pub up: [Num; 3],      // build-up direction in model space (unit)
+    /// Connected-component within the slab; 0 = whole slab (back-compat). U.3.14 keys orientation by
+    /// (slab, comp) so a manually-oriented component of a presliced blob orients in the sliced output.
+    #[serde(default)]
+    pub comp: usize,
+    pub up: [Num; 3], // build-up direction in model space (unit)
 }
 
 /// One slab cut: a plane perpendicular to `axis` at coordinate `at` (model space).
@@ -145,7 +181,7 @@ impl Manifest {
 
 #[cfg(test)]
 mod tests {
-    use super::Manifest;
+    use super::{Manifest, PartKey};
 
     #[test]
     fn parses_a_project_with_parts() {
@@ -172,5 +208,72 @@ mod tests {
         let m: Manifest = toml::from_str("[project]\nname = \"dowels\"\n").unwrap();
         assert!(m.part.is_empty());
         assert_eq!(m.title(), "dowels");
+    }
+
+    // ── U.3.14 per-part slicing schema ───────────────────────────────────────────────────────────
+    #[test]
+    fn parses_per_part_slicing() {
+        let toml = r#"
+[project]
+name = "x"
+[slicing]
+printer = "bambu"
+[[slicing.part]]
+key = { name = "wall", nth = 0, index = 1 }
+cut = [ { axis = "z", at = 40.0 } ]
+connector = [ { cut = 0, type = "onion", pos = [10.0, 5.0], size = 12.0 } ]
+orient = [ { piece = [0, 0, 1], comp = 2, up = [0.0, 0.0, 1.0] } ]
+"#;
+        let s = toml::from_str::<Manifest>(toml).unwrap().slicing.unwrap();
+        assert_eq!(s.printer.as_deref(), Some("bambu"));
+        assert!(s.cut.is_empty()); // no FLAT cut — it's all per-part
+        assert_eq!(s.parts.len(), 1);
+        let p = &s.parts[0];
+        assert_eq!(p.key.name.as_deref(), Some("wall"));
+        assert_eq!(p.key.index, 1);
+        assert_eq!(p.cut[0].axis, "z");
+        assert_eq!(p.connector[0].cut, 0);
+        assert_eq!(p.orient[0].piece, [0, 0, 1]);
+        assert_eq!(p.orient[0].comp, 2); // component index round-trips
+    }
+
+    #[test]
+    fn legacy_flat_slicing_parses_with_no_parts() {
+        let toml = "[project]\nname = \"x\"\n[slicing]\ncut = [ { axis = \"x\", at = 0.0 } ]\n";
+        let s = toml::from_str::<Manifest>(toml).unwrap().slicing.unwrap();
+        assert_eq!(s.cut.len(), 1); // flat cut still parses
+        assert!(s.parts.is_empty()); // no [[slicing.part]] → whole-model back-compat
+    }
+
+    #[test]
+    fn orient_comp_defaults_to_zero() {
+        let s = toml::from_str::<Manifest>(
+            "[project]\nname=\"x\"\n[slicing]\norient=[{piece=[0,0,0],up=[0.0,0.0,1.0]}]\n",
+        )
+        .unwrap()
+        .slicing
+        .unwrap();
+        assert_eq!(s.orient[0].comp, 0); // omitted comp → whole slab
+    }
+
+    #[test]
+    fn resolve_part_binds_by_name_then_index() {
+        use crate::backend::resolve_part;
+        let key = |name: Option<&str>, nth, index| PartKey {
+            name: name.map(String::from),
+            nth,
+            index,
+        };
+        let names = vec![
+            Some("wall".to_string()),
+            Some("frame".to_string()),
+            Some("wall".to_string()),
+        ];
+        assert_eq!(resolve_part(&names, &key(Some("wall"), 1, 99)), Some(2)); // 2nd "wall" by nth
+        assert_eq!(resolve_part(&names, &key(Some("gone"), 0, 1)), Some(1)); // name miss → index
+        assert_eq!(resolve_part(&names, &key(None, 0, 0)), Some(0)); // no name → index
+        assert_eq!(resolve_part(&names, &key(Some("gone"), 0, 9)), None); // no name, index past end
+        let anon = vec![None, None]; // count-mismatch nulled every name → index-only
+        assert_eq!(resolve_part(&anon, &key(Some("wall"), 0, 1)), Some(1));
     }
 }

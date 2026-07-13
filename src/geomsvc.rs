@@ -121,6 +121,7 @@ fn spec(cuts: &[(char, f64)], connectors: Vec<Connector>) -> Slicing {
             .collect(),
         connector: connectors,
         orient: vec![],
+        parts: vec![],
     }
 }
 

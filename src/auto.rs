@@ -265,6 +265,7 @@ pub fn make_planned<W: std::io::Write + std::io::Seek>(
         cut: make_cut(),
         connector: vec![],
         orient: vec![],
+        parts: vec![],
     };
     let mut ups: HashMap<([usize; 3], usize), [f64; 3]> = HashMap::new();
     for (piece, solid) in crate::slicing::slice_solid(&bare, &base)? {
@@ -281,6 +282,7 @@ pub fn make_planned<W: std::io::Write + std::io::Seek>(
         .filter(|((_, comp), _)| *comp == 0)
         .map(|((piece, _), up)| PieceOrient {
             piece: *piece,
+            comp: 0,
             up: [Num::Float(up[0]), Num::Float(up[1]), Num::Float(up[2])],
         })
         .collect();
@@ -289,6 +291,7 @@ pub fn make_planned<W: std::io::Write + std::io::Seek>(
         cut: make_cut(),
         connector: connectors,
         orient,
+        parts: vec![],
     };
     let pieces = crate::slicing::slice_solid(&spec, &base)?;
     if pieces.is_empty() {

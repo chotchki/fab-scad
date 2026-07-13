@@ -39,6 +39,7 @@ fn cuts_to_spec(cuts: &[(char, f64)]) -> Slicing {
         cut,
         connector: vec![],
         orient: vec![],
+        parts: vec![],
     }
 }
 
@@ -77,6 +78,7 @@ fn to_orient(orient: &[Orient3]) -> Vec<PieceOrient> {
         .iter()
         .map(|o| PieceOrient {
             piece: o.piece,
+            comp: 0,
             up: [
                 Num::Float(o.up[0]),
                 Num::Float(o.up[1]),
@@ -304,6 +306,7 @@ fn slab_orients(ups: &HashMap<([usize; 3], usize), [f64; 3]>) -> Vec<PieceOrient
         .filter(|((_, comp), _)| *comp == 0)
         .map(|((piece, _), up)| PieceOrient {
             piece: *piece,
+            comp: 0,
             up: [Num::Float(up[0]), Num::Float(up[1]), Num::Float(up[2])],
         })
         .collect()
@@ -374,6 +377,7 @@ pub fn reslice(
         cut,
         connector: to_connectors(connectors),
         orient: to_orient(orient),
+        parts: vec![],
     };
     slicing::slice_part(&oscad, &wrap, &spec, spread, out_dir, TIMEOUT)
 }
@@ -405,6 +409,7 @@ pub fn reslice_part_kernel(
         cut,
         connector: to_connectors(connectors),
         orient: to_orient(orient),
+        parts: vec![],
     };
     let pieces = slicing::slice_solid(&spec, &base)?;
     ensure!(!pieces.is_empty(), "slice produced no pieces");

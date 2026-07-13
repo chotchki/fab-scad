@@ -109,6 +109,27 @@ pub fn build_geo_parts<B: GeometryBackend>(geo: &Geo, backend: &B) -> Vec<B::Sol
     }
 }
 
+/// Bind a `[[slicing.part]]` block's [`PartKey`](crate::manifest::PartKey) to a `build_geo_parts` part
+/// index (U.3.14). `name` + `nth` is the primary key — it survives a reorder; `index` is the
+/// authored-order fallback — it survives a name going anonymous (a part-count mismatch nulls EVERY
+/// provenance name at once, so the fallback is all that's left). `names` MUST already carry that
+/// count-match null. Returns `None` only when neither a matching name nor the index resolves — the GUI
+/// warns + skips, the CLI bails (a silent mis-slice is worse than either).
+pub fn resolve_part(names: &[Option<String>], key: &crate::manifest::PartKey) -> Option<usize> {
+    if let Some(name) = &key.name {
+        let mut nth = 0;
+        for (i, n) in names.iter().enumerate() {
+            if n.as_deref() == Some(name.as_str()) {
+                if nth == key.nth {
+                    return Some(i);
+                }
+                nth += 1;
+            }
+        }
+    }
+    (key.index < names.len()).then_some(key.index)
+}
+
 /// Lower a fab-lang CSG tree ([`GeoNode`], J.2) to a backend solid — the geometry lowering. This is
 /// the integration seam: fab-lang builds the backend-agnostic tree, the backend does the real CSG.
 /// Recursion is bounded by the tree depth (the parser's `MAX_DEPTH`), so it can't overflow the stack.

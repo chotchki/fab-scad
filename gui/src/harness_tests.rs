@@ -243,6 +243,41 @@ fn pipeline_dirty_propagates_downstream() {
 }
 
 #[test]
+fn pipeline_loading_lights_the_computing_stage() {
+    // Spinner-badge core: geometry work → Model+Parts; layout work → Orientation+Export; both → all;
+    // idle → none (unlike `dirty`, this fires on the FIRST compute, before anything is stale).
+    assert_eq!(jobs::derive_loading(false, false), [false; 4]);
+    assert_eq!(
+        jobs::derive_loading(true, false),
+        [true, true, false, false]
+    );
+    assert_eq!(
+        jobs::derive_loading(false, true),
+        [false, false, true, true]
+    );
+    assert_eq!(jobs::derive_loading(true, true), [true; 4]);
+}
+
+#[test]
+fn status_activity_names_what_is_running() {
+    // The pulse label can never read a stale "ready": idle → None; a geometry job → generic rebuild;
+    // the print layout → orienting; an auto-plan is most specific and WINS (names its 1-based part).
+    assert_eq!(jobs::busy_activity(None, false, false), None);
+    assert_eq!(
+        jobs::busy_activity(None, true, false).as_deref(),
+        Some("rebuilding geometry…")
+    );
+    assert_eq!(
+        jobs::busy_activity(None, false, true).as_deref(),
+        Some("orienting pieces…")
+    );
+    assert_eq!(
+        jobs::busy_activity(Some(1), true, true).as_deref(),
+        Some("auto-planning part 2…") // 0-based index → 1-based label, and it beats the others
+    );
+}
+
+#[test]
 fn platform_gates_the_file_picker() {
     // U.3.6: desktop shows the ＋/folder picker; web (one presupplied file, no fs access) hides it.
     assert!(Platform::Desktop.shows_picker());

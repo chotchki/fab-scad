@@ -333,20 +333,45 @@ pub fn cross_section(stl: &Path, axis: usize, at: f64) -> Result<Vec<Vec<[f64; 2
 /// Auto-plan cuts + onion connectors for a too-big model — loads the base solid from the rendered
 /// STL and runs the in-process planner ([`fab_scad::auto::plan`], no per-cut OpenSCAD spawn). The
 /// Solid lives + dies here (it's !Send); only the plain-data plan crosses back.
+/// Auto-derive a fit-to-bed plan for a part, AND report its printable-piece (connected-component)
+/// count. A PRESLICED part is many DISJOINT components (BOSL2 `partition` spreads them 12mm apart);
+/// if EVERY component already fits the bed the part needs NO cuts — the print pipeline (T.2a) fans the
+/// uncut blob into its pieces. Auto-slicing the whole SPREAD-OUT bbox would double-slice an
+/// already-sliced model, so this returns an empty plan in that case. Only a part that's ONE
+/// component (or has a component the bed can't hold) gets an actual cut plan.
 pub fn auto_plan(
     base_stl: &Path,
     min: [f64; 3],
     max: [f64; 3],
     bed: [f64; 3],
-) -> Result<fab_scad::auto::AutoPlan> {
+) -> Result<(fab_scad::auto::AutoPlan, usize)> {
     use fab_scad::kernel::Solid;
     let base = Solid::from_stl_file(base_stl)?;
-    fab_scad::auto::plan(
+    let comps = base.components();
+    let pieces = comps.len().max(1);
+    // Presliced-and-already-fits → no cuts (an empty/degenerate component reads as "fits").
+    if comps.len() > 1
+        && comps.iter().all(|c| {
+            c.bbox().is_none_or(|(mn, mx)| {
+                fab_scad::auto_slice::auto_slice(mn, mx, Dims::from_array(bed)).is_empty()
+            })
+        })
+    {
+        return Ok((
+            fab_scad::auto::AutoPlan {
+                cuts: Vec::new(),
+                connectors: Vec::new(),
+            },
+            pieces,
+        ));
+    }
+    let plan = fab_scad::auto::plan(
         &base,
         FVec3::from_array(min),
         FVec3::from_array(max),
         Dims::from_array(bed),
-    )
+    )?;
+    Ok((plan, pieces))
 }
 
 /// Slice the source at the given cuts — each `(axis, at)` with axis in `'x' | 'y' | 'z'` (preview
@@ -525,7 +550,9 @@ pub fn export_plates(
     pieces: &[&PiecePrint],
     ups: &[[f64; 3]],
     bed: [f64; 2],
+    plate: [f64; 2],
     gap: f64,
+    preset: Option<&fab_scad::printers::BambuPreset>,
     out: &Path,
 ) -> Result<bambu::ExportSummary> {
     let to_place: Vec<PieceToPlace> = pieces
@@ -536,7 +563,7 @@ pub fn export_plates(
             up,
         })
         .collect();
-    bambu::export_plates(out, to_place, bed, gap)
+    bambu::export_plates(out, to_place, bed, plate, gap, preset)
 }
 
 /// Plate-count / fill summary of co-packing `pieces` (U.3.5) — the cheap reactive twin of
@@ -673,6 +700,50 @@ mod tests {
                 p.up
             );
         }
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn auto_plan_skips_a_presliced_blob_whose_pieces_fit() {
+        // Option A: a presliced part (disjoint components) whose components EACH fit the bed needs NO
+        // cuts — auto-slicing the whole SPREAD-OUT bbox would double-slice an already-sliced model.
+        // Two 200mm cubes 500mm apart: whole bbox (700mm in X) overflows a 256 bed, each cube fits.
+        use fab_scad::kernel::Solid;
+        let tmp = std::env::temp_dir().join(format!("gui_autoplan_{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let bed = [256.0, 256.0, 256.0];
+
+        let presliced = tmp.join("presliced-part0.stl");
+        let blob = Solid::cube(200.0, 200.0, 200.0, true).union(
+            &Solid::cube(200.0, 200.0, 200.0, true).translate(FVec3::new(500.0, 0.0, 0.0)),
+        );
+        std::fs::write(&presliced, blob.to_stl_bytes()).unwrap();
+        let (plan, pieces) = auto_plan(
+            &presliced,
+            [-100.0, -100.0, -100.0],
+            [600.0, 100.0, 100.0],
+            bed,
+        )
+        .unwrap();
+        assert!(
+            plan.cuts.is_empty(),
+            "presliced-and-fits → no cuts, got {:?}",
+            plan.cuts
+        );
+        assert_eq!(pieces, 2, "two disjoint components");
+
+        // A single CONNECTED oversized part still gets a real cut plan (the gate is component-aware,
+        // not a blanket skip).
+        let big = tmp.join("big-part0.stl");
+        std::fs::write(&big, Solid::cube(700.0, 200.0, 200.0, true).to_stl_bytes()).unwrap();
+        let (plan2, pieces2) =
+            auto_plan(&big, [-350.0, -100.0, -100.0], [350.0, 100.0, 100.0], bed).unwrap();
+        assert!(
+            !plan2.cuts.is_empty(),
+            "one connected 700mm part still slices to fit the bed"
+        );
+        assert_eq!(pieces2, 1, "one connected component");
+
         let _ = std::fs::remove_dir_all(&tmp);
     }
 

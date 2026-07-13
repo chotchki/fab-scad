@@ -16,11 +16,13 @@ pub(crate) struct Watch {
     pub(crate) closure: Vec<PathBuf>,
 }
 
+/// An off-thread auto-plan's payload: the fit-to-bed cut/connector plan + the part's component count.
+type AutoPlanResult = Result<(fab_scad::auto::AutoPlan, usize), String>;
+
 /// The in-flight auto-plan job (auto-slice + onion auto-place, off-thread) — auto-on-open's worker.
+/// Carries the target part index alongside the task.
 #[derive(Resource, Default)]
-pub(crate) struct AutoJob(
-    pub(crate) Option<(usize, Task<Result<fab_scad::auto::AutoPlan, String>>)>,
-);
+pub(crate) struct AutoJob(pub(crate) Option<(usize, Task<AutoPlanResult>)>);
 
 /// The in-flight publish job (render artifacts + upload to hotchkiss.io, off-thread). Yields the
 /// published page URL or an error string.
@@ -98,7 +100,38 @@ pub(crate) fn sync_pipeline(
     let src = hash_one(&editor.text);
     let cfg = slice_config_hash(&parts.0);
     pipe.dirty = derive_dirty(pipe.geo_of, pipe.layout_of, src, cfg);
-    pipe.busy = job.0.is_some() || auto.0.is_some() || print_job.0.is_some();
+    // Which stage a job feeds: render/reslice AND auto-plan produce GEOMETRY (Model+Parts); the print
+    // job produces the LAYOUT (Orientation+Export) — mirroring `derive_dirty`'s geo/layout split.
+    let auto_part = auto.0.as_ref().map(|(i, _)| *i);
+    let geo = job.0.is_some() || auto_part.is_some();
+    let layout = print_job.0.is_some();
+    pipe.busy = geo || layout;
+    pipe.loading = derive_loading(geo, layout);
+    pipe.activity = busy_activity(auto_part, job.0.is_some(), layout);
+}
+
+/// Per-[`Tab`](crate::Tab) "computing now" flags (the testable core of the spinner badge). Geometry
+/// work (render / reslice / auto-plan) lights Model + Parts; layout work (print) lights Orientation +
+/// Export — the same geo/layout split as [`derive_dirty`], but keyed on IN-FLIGHT jobs so it fires on
+/// the first compute too (when nothing is yet "dirty").
+pub(crate) fn derive_loading(geo: bool, layout: bool) -> [bool; 4] {
+    [geo, geo, layout, layout]
+}
+
+/// The accurate status label for what's running (the testable core of the status-bar pulse). Prefers
+/// the most specific: an auto-plan names its part; else a geometry job; else the print layout; `None`
+/// when idle. The status bar shows this while busy so the pulse can never read a stale terminal
+/// status like "ready" mid-render.
+pub(crate) fn busy_activity(auto_part: Option<usize>, geo_job: bool, print: bool) -> Option<String> {
+    if let Some(i) = auto_part {
+        Some(format!("auto-planning part {}…", i + 1))
+    } else if geo_job {
+        Some("rebuilding geometry…".into())
+    } else if print {
+        Some("orienting pieces…".into())
+    } else {
+        None
+    }
 }
 
 /// Per-[`Tab`](crate::Tab) stale flags from the stored vs current input hashes (the testable core of
@@ -612,6 +645,10 @@ pub(crate) fn poll_job(
                     MeshMaterial3d(part_material(&mut materials)),
                     Model,
                     PartId(part),
+                    // The solid Model must be TRANSPARENT to picking: a no-Pickable mesh blocks the
+                    // ray, and the cut planes sit INSIDE it — so a drag would land on the Model, never
+                    // the plane. Nothing picks the Model (drag/click → CutPlaneViz, orient → PrintPiece).
+                    Pickable::IGNORE,
                 ));
                 if show {
                     p.spread = SPREAD as f32;
@@ -642,6 +679,7 @@ pub(crate) fn build_part(
         MeshMaterial3d(part_material(materials)),
         Model,
         PartId(i),
+        Pickable::IGNORE, // pick-transparent so a cut-plane drag reaches the plane behind the solid
     ));
     let mut part = Part {
         base_stl: path.to_path_buf(),
@@ -678,6 +716,7 @@ pub(crate) fn refresh_part(
         MeshMaterial3d(part_material(materials)),
         Model,
         PartId(i),
+        Pickable::IGNORE, // pick-transparent so a cut-plane drag reaches the plane behind the solid
     ));
     part.base_stl = path.to_path_buf();
     part.whole = Some(mesh);
@@ -774,7 +813,7 @@ pub(crate) fn poll_publish(mut job: ResMut<PublishJob>, mut status: ResMut<Statu
     job.0 = None;
     match result {
         Ok(url) => {
-            status.0 = format!("published → {url}");
+            status.0 = format!("published -> {url}");
             info!("{}", status.0);
         }
         Err(e) => status.0 = format!("publish failed: {e}"),
@@ -820,7 +859,7 @@ pub(crate) fn kick_auto_plan(
     let Some(src) = scene.source.clone() else {
         return;
     };
-    let bed = bed_size().unwrap_or([256.0; 3]);
+    let (bed, _) = bed_size().unwrap_or(([256.0; 3], [256.0; 3])); // pieces fit the USABLE bed
     for i in 0..parts.0.len() {
         let part = &mut parts.0[i];
         if part.auto_planned.0.as_deref() == Some(src.as_path()) || !part.cuts.list.is_empty() {
@@ -873,48 +912,53 @@ pub(crate) fn poll_auto_plan(
         return;
     };
     job.0 = None;
+    // Destructure the result BEFORE borrowing the part, so `part.pieces` can be stamped alongside the
+    // cut/connector writes without fighting the cuts/conns reborrows.
+    let (plan, pieces) = match result {
+        Ok(v) => v,
+        Err(e) => {
+            status.0 = format!("auto-plan failed: {e:#}");
+            return;
+        }
+    };
     let part = &mut parts.0[i];
+    part.pieces = pieces; // the part's connected-component count (drives the "N pcs" header)
     let cuts = &mut part.cuts;
     let conns = &mut part.conns;
-    match result {
-        Ok(plan) => {
-            cuts.list = plan
-                .cuts
-                .iter()
-                .map(|&(ax, at)| CutDef {
-                    axis: match ax {
-                        'y' => Axis::Y,
-                        'z' => Axis::Z,
-                        _ => Axis::X,
-                    },
-                    at: at as f32,
-                    enabled: true,
-                })
-                .collect();
-            cuts.active = 0;
-            conns.list = plan
-                .connectors
-                .iter()
-                .map(|c| PlacedConn {
-                    cut: c.cut,
-                    pos: [c.pos[0].f() as f32, c.pos[1].f() as f32],
-                    size: c.size.unwrap_or(6.0) as f32,
-                    kind: if c.kind == "bolt" {
-                        fab::ConnKind::Bolt
-                    } else {
-                        fab::ConnKind::Onion
-                    },
-                    screw: Screw::M3,
-                })
-                .collect();
-            status.0 = format!(
-                "auto-planned part {}: {} cut(s), {} connector(s)",
-                i + 1,
-                cuts.list.len(),
-                conns.list.len()
-            );
-            info!("{}", status.0);
-        }
-        Err(e) => status.0 = format!("auto-plan failed: {e:#}"),
-    }
+    cuts.list = plan
+        .cuts
+        .iter()
+        .map(|&(ax, at)| CutDef {
+            axis: match ax {
+                'y' => Axis::Y,
+                'z' => Axis::Z,
+                _ => Axis::X,
+            },
+            at: at as f32,
+            enabled: true,
+        })
+        .collect();
+    cuts.active = 0;
+    conns.list = plan
+        .connectors
+        .iter()
+        .map(|c| PlacedConn {
+            cut: c.cut,
+            pos: [c.pos[0].f() as f32, c.pos[1].f() as f32],
+            size: c.size.unwrap_or(6.0) as f32,
+            kind: if c.kind == "bolt" {
+                fab::ConnKind::Bolt
+            } else {
+                fab::ConnKind::Onion
+            },
+            screw: Screw::M3,
+        })
+        .collect();
+    status.0 = format!(
+        "auto-planned part {}: {} cut(s), {} connector(s)",
+        i + 1,
+        cuts.list.len(),
+        conns.list.len()
+    );
+    info!("{}", status.0);
 }

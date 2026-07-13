@@ -99,6 +99,7 @@ pub(crate) fn setup_offscreen(
         MeshMaterial3d(part_material(&mut materials)),
         Model,
         PartId(0),
+        Pickable::IGNORE, // uniform with the windowed Model spawns (a Model never blocks picking)
     ));
 
     // Offscreen render target the camera draws into and we screenshot.

@@ -9,7 +9,8 @@ pub(crate) const SPREAD: f64 = 50.0;
 pub(crate) struct SceneCfg {
     pub(crate) source: Option<PathBuf>, // .scad source (sliceable, preferred)
     pub(crate) stl: Option<PathBuf>,    // .stl to display directly (when there's no source)
-    pub(crate) bed: [f32; 2],
+    pub(crate) bed: [f32; 2],   // usable area — pieces pack within this (extruder reach)
+    pub(crate) plate: [f32; 2], // real plate size for the Bambu export grid/printable_area (≥ bed)
     pub(crate) root: Option<PathBuf>, // workspace root, for OPENSCADPATH
     pub(crate) tmp: PathBuf,          // scratch dir for rendered/sliced STLs
     pub(crate) reslice_on_start: bool, // screenshot --reslice: display the sliced result
@@ -31,6 +32,13 @@ pub(crate) struct PartId(pub(crate) usize);
 /// would desync the cut positions from the source the slicer re-renders).
 #[derive(Component)]
 pub(crate) struct Bed;
+
+/// One plate slab in the print-orientation preview — a bed-sized floor tile at its cell in the
+/// near-square plate grid (`pack::plate_origin`). `sync_orientation` spawns one per packed plate so
+/// the preview shows the SAME grid the `.3mf` export writes; despawned with the pieces when the
+/// preview relays out or closes. The single startup [`Bed`] hides while these are up.
+#[derive(Component)]
+pub(crate) struct PrintPlate;
 
 /// Button → "re-slice the source and swap the mesh".
 #[derive(Message)]
@@ -311,6 +319,11 @@ pub(crate) struct Part {
     pub(crate) conns: Conns,
     pub(crate) orient: Orient,
     pub(crate) bounds: ModelBounds,
+    /// Printable-piece (connected-component) count of this part's WHOLE geometry, stamped by
+    /// `poll_auto_plan` (0 = not computed yet). A PRESLICED part is ONE part made of many disjoint
+    /// pieces; the accordion header maxes this against the cut estimate so a 6-piece presliced blob
+    /// reads "6 pcs", not "1 pc" (T.2a).
+    pub(crate) pieces: usize,
     pub(crate) auto_planned: AutoPlanned,
     // Display state — was three global resources (WholeMesh/SlicedMesh/DisplaySpread) when the scene
     // held ONE model; now per-part so N parts each explode/collapse on their own (T.2b).
@@ -338,11 +351,12 @@ pub(crate) struct ActivePart(pub(crate) usize);
 pub(crate) struct SaveBaseline(pub(crate) Option<u64>);
 
 /// Per-node pipeline feedback (U.3.7): which workflow STAGES are stale (their output is behind their
-/// input) + whether a background job runs. The tab bar reads `dirty` for amber dots and `busy` for a
-/// spinner; the status bar pulses on `busy`. The DAG is Model(source) → Parts(geometry) →
-/// Orientation(sliced+laid pieces) → Export(packed plates); a stage is dirty when an upstream input
-/// changed since it last computed. `geo_of`/`layout_of` are the "last-computed-for" hashes the
-/// completion systems (`poll_job`, `poll_print_job`) stamp; `sync_pipeline` derives `dirty` from them.
+/// input), which are actively COMPUTING right now, and an accurate label for what's running. The tab
+/// bar shows a spinner on a `loading` stage and an amber dot on a `dirty`-but-idle one; the status bar
+/// pulses `activity` while busy (so it never lies "ready" mid-render). The DAG is Model(source) →
+/// Parts(geometry) → Orientation(sliced+laid pieces) → Export(packed plates); a stage is dirty when an
+/// upstream input changed since it last computed. `geo_of`/`layout_of` are the "last-computed-for"
+/// hashes the completion systems (`poll_job`, `poll_print_job`) stamp; `sync_pipeline` derives the rest.
 #[derive(Resource, Default)]
 pub(crate) struct Pipeline {
     /// Source hash of the geometry currently displayed — stamped by `poll_job` on a render result.
@@ -352,8 +366,16 @@ pub(crate) struct Pipeline {
     pub(crate) layout_of: Option<u64>,
     /// Per [`Tab`] (Model, Parts, Orientation, Export): this stage's output is behind its input.
     pub(crate) dirty: [bool; 4],
-    /// Any background job (render / reslice / plan / print) in flight → the tab-bar spinner + pulse.
+    /// Per [`Tab`]: this stage's geometry/layout is being COMPUTED right now (a job for it is in
+    /// flight). Unlike `dirty` this fires on the FIRST compute too (a fresh model has no stale stage
+    /// but is very much loading) — the spinner badge derives from this, not `dirty`.
+    pub(crate) loading: [bool; 4],
+    /// Any background job (render / reslice / plan / print) in flight → the status-bar pulse.
     pub(crate) busy: bool,
+    /// An accurate one-line label for what's running (`"rebuilding geometry…"`, `"auto-planning part
+    /// 2…"`, `"orienting pieces…"`), or `None` when idle. The status bar shows THIS while `busy`
+    /// instead of the last imperative `Status` string, so the pulse can never read a stale "ready".
+    pub(crate) activity: Option<String>,
 }
 
 /// Which entry-point environment the GUI runs in (U.3.6). `Desktop` = the full folder picker + the

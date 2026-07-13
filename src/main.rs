@@ -442,6 +442,47 @@ fn slice_cmd(
         .as_ref()
         .with_context(|| format!("no [slicing] spec in {}", manifest_path.display()))?;
 
+    // U.3.14 Phase D — per-part slicing. A `[[slicing.part]]` spec addresses each `build_geo_parts`
+    // part individually; it XORs with the flat whole-model `[slicing]` (a spec carrying BOTH is
+    // ambiguous). It's the in-process kernel path — the split needs the evaluated tree, not one
+    // OpenSCAD-rendered whole mesh — so route here BEFORE discovering OpenSCAD (per-part needs none).
+    if !spec.parts.is_empty() {
+        let has_flat =
+            !spec.cut.is_empty() || !spec.connector.is_empty() || !spec.orient.is_empty();
+        if has_flat {
+            bail!(
+                "slicing spec in {} mixes flat [slicing] cuts and [[slicing.part]] blocks — use one",
+                manifest_path.display()
+            );
+        }
+        #[cfg(all(feature = "kernel", feature = "native"))]
+        {
+            let outdir = target
+                .parent()
+                .unwrap_or_else(|| Path::new("."))
+                .join("out");
+            println!(
+                "slice {} (per-part -> {})",
+                target.display(),
+                if threemf { "3mf" } else { "stl" }
+            );
+            let produced =
+                slicing::slice_model_parts(target, &scadrs_libs(), spec, spread, &outdir, threemf)?;
+            let final_out = match out {
+                Some(o) => {
+                    std::fs::copy(&produced, &o)
+                        .with_context(|| format!("writing {}", o.display()))?;
+                    o
+                }
+                None => produced,
+            };
+            println!("  -> {}", final_out.display());
+            return Ok(());
+        }
+        #[cfg(not(all(feature = "kernel", feature = "native")))]
+        bail!("per-part slicing ([[slicing.part]]) needs the `kernel` feature (built without it)");
+    }
+
     let oscad = Openscad::discover(root.as_deref())?;
     let timeout = Duration::from_secs(120);
     let outdir = target

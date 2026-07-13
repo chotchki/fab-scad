@@ -12,7 +12,7 @@ use anyhow::{Context, Result, bail};
 
 #[cfg(feature = "kernel")]
 use crate::kernel::Solid;
-use crate::manifest::{Connector, Slicing};
+use crate::manifest::{Connector, PartSlicing, Slicing};
 #[cfg(feature = "native")]
 use crate::openscad::Openscad;
 use fab_lang::{Affine, Vec3};
@@ -246,6 +246,112 @@ pub fn slice_part_kernel(
             ))
         })
         .collect();
+
+    if as_3mf {
+        let out = out_dir.join(format!("{stem}.3mf"));
+        Solid::write_3mf(&out, &laid)?;
+        Ok(out)
+    } else {
+        let out = out_dir.join(format!("{stem}-sliced.stl"));
+        Solid::batch_union(&laid).write_stl(&out)?;
+        Ok(out)
+    }
+}
+
+/// PER-PART slice IN-PROCESS (U.3.14 Phase D) — the CLI twin of the GUI's per-part Parts workflow. The
+/// split needs the evaluated tree (not one OpenSCAD-rendered whole mesh), so this is the scad-rs eval
+/// path: evaluate `source` → [`build_geo_parts`] → bind each `[[slicing.part]]` block to a part via
+/// [`resolve_part`] → `slice_solid` that part with its OWN cuts/connectors. A part with no block stays
+/// whole (one piece). Pieces fan by their slab index × `spread`; output is a merged STL or a 3mf plate,
+/// same shape as [`slice_part_kernel`]. An unresolvable block is a hard error (a silent mis-slice is
+/// worse); a name that misses but resolves by index WARNS.
+#[cfg(all(feature = "kernel", feature = "native"))]
+pub fn slice_model_parts(
+    source: &Path,
+    libs: &[PathBuf],
+    spec: &Slicing,
+    spread: f64,
+    out_dir: &Path,
+    as_3mf: bool,
+) -> Result<PathBuf> {
+    use crate::backend::{ManifoldBackend, build_geo_parts, part_names, resolve_part};
+
+    std::fs::create_dir_all(out_dir).with_context(|| format!("creating {}", out_dir.display()))?;
+    let stem = source
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "part".into());
+
+    // Evaluate + split, exactly as the GUI's `render_parts` does (ManifoldBackend's solid is
+    // `Option<Solid>` — the empty algebra — so flatten drops empties, then guard the rare Some(empty)).
+    let tree = crate::import::resolve_geometry_file(source, libs, fab_lang::Config::from_env())
+        .map_err(|e| anyhow::anyhow!("scad-rs eval of {}: {e}", source.display()))?;
+    let parts: Vec<Solid> = build_geo_parts(&tree, &ManifoldBackend)
+        .into_iter()
+        .flatten()
+        .filter(|s| !s.is_empty())
+        .collect();
+    anyhow::ensure!(
+        !parts.is_empty(),
+        "scad-rs rendered EMPTY geometry (no parts) for {}",
+        source.display()
+    );
+
+    // Provenance names, applied ONLY when the count matches the split (else the bind is ambiguous —
+    // resolve_part then falls back to index against the nulled names).
+    let names = part_names(source);
+    let names = if names.len() == parts.len() {
+        names
+    } else {
+        vec![None; parts.len()]
+    };
+
+    // Bind each block to a part index. Unresolvable → bail; name-miss-resolved-by-index → warn.
+    let mut block_of: Vec<Option<&PartSlicing>> = vec![None; parts.len()];
+    for ps in &spec.parts {
+        let i = resolve_part(&names, &ps.key).with_context(|| {
+            format!(
+                "[[slicing.part]] key {:?} matches no part in {}",
+                ps.key,
+                source.display()
+            )
+        })?;
+        if let Some(name) = &ps.key.name {
+            let bound_by_name = names.get(i).and_then(|n| n.as_deref()) == Some(name.as_str());
+            if !bound_by_name {
+                eprintln!(
+                    "warning: slicing part '{name}' not found by name — bound to part {i} by index"
+                );
+            }
+        }
+        block_of[i] = Some(ps);
+    }
+
+    // Slice each part with its own block (part-local cuts/connectors/orient), or keep it whole. Fan the
+    // pieces by their slab multi-index × spread (0 = assembled in place), pooled across all parts.
+    let mut laid: Vec<Solid> = Vec::new();
+    for (i, part) in parts.iter().enumerate() {
+        match block_of[i] {
+            Some(ps) => {
+                let part_spec = Slicing {
+                    printer: None,
+                    cut: ps.cut.clone(),
+                    connector: ps.connector.clone(),
+                    orient: ps.orient.clone(),
+                    parts: vec![],
+                };
+                for (idx, s) in slice_solid(&part_spec, part)? {
+                    laid.push(s.translate(Vec3::new(
+                        idx[0] as f64 * spread,
+                        idx[1] as f64 * spread,
+                        idx[2] as f64 * spread,
+                    )));
+                }
+            }
+            None => laid.push(part.transform(&Affine::IDENTITY)), // no block → the whole part, one piece
+        }
+    }
+    anyhow::ensure!(!laid.is_empty(), "slice produced no pieces");
 
     if as_3mf {
         let out = out_dir.join(format!("{stem}.3mf"));
@@ -726,6 +832,60 @@ mod tests {
             "{d}"
         );
         assert!(d.contains("module _part()"), "{d}");
+    }
+
+    #[cfg(all(feature = "kernel", feature = "native"))]
+    #[test]
+    fn slice_model_parts_cuts_the_bound_part_and_keeps_the_rest_whole() {
+        use crate::manifest::{Cut, PartKey, PartSlicing};
+        use crate::num::Num;
+        let dir = std::env::temp_dir().join("fab_slice_model_parts_test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let src = dir.join("m.scad");
+        // Two top-level parts (implicit union → 2 parts): a tall box to cut, a small cube left whole.
+        std::fs::write(&src, "cube([20,20,60]);\ntranslate([50,0,0]) cube(10);\n").unwrap();
+
+        let block = |parts| Slicing {
+            printer: None,
+            cut: vec![],
+            connector: vec![],
+            orient: vec![],
+            parts,
+        };
+        let spec = block(vec![PartSlicing {
+            key: PartKey {
+                name: None,
+                nth: 0,
+                index: 0, // bind part 0 (the tall box) by index
+            },
+            cut: vec![Cut {
+                axis: "z".into(),
+                at: Num::Float(30.0), // midway → 2 pieces
+            }],
+            connector: vec![],
+            orient: vec![],
+        }]);
+        let out = slice_model_parts(&src, &[], &spec, 0.0, &dir.join("out"), false).unwrap();
+        assert!(out.exists(), "produced a sliced STL");
+        assert!(
+            std::fs::metadata(&out).unwrap().len() > 100,
+            "non-trivial STL"
+        );
+
+        // An unresolvable block (bad name AND out-of-range index) is a HARD error — never a silent skip.
+        let bad = block(vec![PartSlicing {
+            key: PartKey {
+                name: Some("nope".into()),
+                nth: 0,
+                index: 99,
+            },
+            cut: vec![],
+            connector: vec![],
+            orient: vec![],
+        }]);
+        assert!(slice_model_parts(&src, &[], &bad, 0.0, &dir.join("out"), false).is_err());
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[cfg(feature = "kernel")]

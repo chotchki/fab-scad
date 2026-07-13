@@ -9,6 +9,8 @@
 //! solid is empty-aware, and the ops encode the empty CSG algebra — ∅∪x = x, ∅−x = ∅, x−∅ = x,
 //! ∅∩x = ∅ — so a lowered CSG tree behaves the same whether a subtree collapsed to nothing or not.
 
+use std::path::Path;
+
 use fab_lang::{
     Affine, Affine2, ExtrudeKind, Geo, GeoNode, Join2D, Mesh, Rgba, Shape2D, Tri, Vec2, Vec3,
 };
@@ -128,6 +130,64 @@ pub fn resolve_part(names: &[Option<String>], key: &crate::manifest::PartKey) ->
         }
     }
     (key.index < names.len()).then_some(key.index)
+}
+
+/// Builtin module names that WRAP a single geometry child (transforms, CSG ops, grouping) — the naming
+/// walk descends past these to reach the user-level module that named the part (T.2b).
+fn is_wrapper_module(name: &str) -> bool {
+    matches!(
+        name,
+        "translate"
+            | "rotate"
+            | "scale"
+            | "mirror"
+            | "multmatrix"
+            | "union"
+            | "color"
+            | "hull"
+            | "minkowski"
+            | "offset"
+            | "render"
+            | "let"
+            | "for"
+    )
+}
+
+/// The originating module/function NAME for each top-level part (T.2b provenance) — a STATIC walk of
+/// the source AST, no evaluator involvement. Per geometry-bearing top-level statement (in source order)
+/// it descends past single-child builtin wrappers (`translate() wall_sliced()` → "wall_sliced"; a bare
+/// `cube()` → "cube"); a block / `if` at top level is unnamed (`None`). Callers apply these ONLY when
+/// the count matches the actual `build_geo_parts` split — a wrong name is worse than a generic label,
+/// and the alignment can drift on dropped-empties / `union(){…}` over-splits. Shared by the GUI's
+/// `render_parts` and the CLI per-part slice ([`resolve_part`] binds a `[[slicing.part]]` block to one
+/// of these by name+nth).
+pub fn part_names(source: &Path) -> Vec<Option<String>> {
+    let Ok(text) = std::fs::read_to_string(source) else {
+        return Vec::new();
+    };
+    let Ok(prog) = fab_lang::parse(&text) else {
+        return Vec::new();
+    };
+    prog.stmts
+        .iter()
+        .filter_map(|s| match &s.kind {
+            // A module call: descend single-child wrappers to the first non-wrapper name.
+            fab_lang::StmtKind::Module(mi) => {
+                let mut cur = mi;
+                while is_wrapper_module(&cur.name) && cur.children.len() == 1 {
+                    match &cur.children[0].kind {
+                        fab_lang::StmtKind::Module(inner) => cur = inner,
+                        _ => break,
+                    }
+                }
+                Some(Some(cur.name.clone()))
+            }
+            // A bare block / `if` produces geometry but has no single name.
+            fab_lang::StmtKind::Block(_) | fab_lang::StmtKind::If { .. } => Some(None),
+            // Assignments, module/function defs, use/include, empty — no geometry.
+            _ => None,
+        })
+        .collect()
 }
 
 /// Lower a fab-lang CSG tree ([`GeoNode`], J.2) to a backend solid — the geometry lowering. This is
@@ -629,7 +689,26 @@ impl GeometryBackend for MockBackend {
 
 #[cfg(test)]
 mod tests {
-    use super::{GeometryBackend, MockBackend, build_geo_parts};
+    use super::{GeometryBackend, MockBackend, build_geo_parts, part_names};
+
+    #[test]
+    fn part_names_descend_wrappers_and_flag_anonymous() {
+        let dir = std::env::temp_dir().join("fab_part_names_test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let src = dir.join("m.scad");
+        // a module DEF (no geometry), a wrapped call, a bare primitive, an anonymous `if` block.
+        std::fs::write(
+            &src,
+            "module wall() { cube(1); }\ntranslate([0,0,0]) wall();\ncube(2);\nif (true) { sphere(1); }\n",
+        )
+        .unwrap();
+        assert_eq!(
+            part_names(&src),
+            vec![Some("wall".to_string()), Some("cube".to_string()), None]
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
 
     #[test]
     fn build_geo_parts_splits_top_level_items() {

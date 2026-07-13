@@ -204,7 +204,7 @@ pub fn render_parts(root: Option<&Path>, source: &Path, out_dir: &Path) -> Resul
     );
     // Attach provenance names, but ONLY when the AST-derived count matches the actual part split —
     // otherwise the alignment is ambiguous and labels stay generic (a wrong name is worse than none).
-    let names = part_names(source);
+    let names = fab_scad::backend::part_names(source);
     let names = if names.len() == out.len() {
         names
     } else {
@@ -494,62 +494,6 @@ fn stem_of(p: &Path) -> String {
     p.file_stem()
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_else(|| "part".into())
-}
-
-/// Builtin module names that WRAP a single geometry child (transforms, CSG ops, grouping) — the
-/// naming walk descends past these to reach the user-level module that named the part (T.2b).
-fn is_wrapper_module(name: &str) -> bool {
-    matches!(
-        name,
-        "translate"
-            | "rotate"
-            | "scale"
-            | "mirror"
-            | "multmatrix"
-            | "union"
-            | "color"
-            | "hull"
-            | "minkowski"
-            | "offset"
-            | "render"
-            | "let"
-            | "for"
-    )
-}
-
-/// The originating module/function NAME for each top-level part (T.2b provenance) — a STATIC walk of
-/// the source AST, no evaluator involvement. Per geometry-bearing top-level statement (in source
-/// order) it descends past single-child builtin wrappers (`translate() wall_sliced()` → "wall_sliced";
-/// a bare `cube()` → "cube"); a block / `if` at top level is unnamed (`None`). The GUI applies these
-/// ONLY when the count matches the actual part split — a wrong name is worse than a generic label, and
-/// the alignment can drift on dropped-empties / `union(){…}` over-splits.
-pub fn part_names(source: &Path) -> Vec<Option<String>> {
-    let Ok(text) = std::fs::read_to_string(source) else {
-        return Vec::new();
-    };
-    let Ok(prog) = fab_lang::parse(&text) else {
-        return Vec::new();
-    };
-    prog.stmts
-        .iter()
-        .filter_map(|s| match &s.kind {
-            // A module call: descend single-child wrappers to the first non-wrapper name.
-            fab_lang::StmtKind::Module(mi) => {
-                let mut cur = mi;
-                while is_wrapper_module(&cur.name) && cur.children.len() == 1 {
-                    match &cur.children[0].kind {
-                        fab_lang::StmtKind::Module(inner) => cur = inner,
-                        _ => break,
-                    }
-                }
-                Some(Some(cur.name.clone()))
-            }
-            // A bare block / `if` produces geometry but has no single name.
-            fab_lang::StmtKind::Block(_) | fab_lang::StmtKind::If { .. } => Some(None),
-            // Assignments, module/function defs, use/include, empty — no geometry.
-            _ => None,
-        })
-        .collect()
 }
 
 /// A preview `StlMesh` (triangle soup) → an indexed `bambu::Mesh`, deduping shared vertices by exact

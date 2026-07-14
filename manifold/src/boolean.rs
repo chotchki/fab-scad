@@ -19,5 +19,6 @@
 //! The perturbation INPUTS those consume (`face_normal`/`epsilon`/`tolerance`, the `for_vert` orbit)
 //! live on [`crate::mesh::Mesh`]. Next: M.1.1 broad phase → M.1.2 boolean3 cascade.
 
+pub mod collider;
 pub mod predicates;
 pub mod vocab;

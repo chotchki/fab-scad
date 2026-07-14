@@ -324,6 +324,13 @@ impl Box3 {
             && self.max.y >= o.min.y
             && self.max.z >= o.min.z
     }
+    /// Does a point fall within this box's XY extent, IGNORING z (`common.h`
+    /// `DoesOverlap(vec3)` — "projected in z")? The z-raycast winding query in the boolean uses this:
+    /// a vertex "hits" a face box iff it's under/over it in the XY plane.
+    #[inline]
+    pub fn does_overlap_point_xy(self, p: Vec3) -> bool {
+        p.x <= self.max.x && p.x >= self.min.x && p.y <= self.max.y && p.y >= self.min.y
+    }
     /// Finite bounds?
     #[inline]
     pub fn is_finite(self) -> bool {

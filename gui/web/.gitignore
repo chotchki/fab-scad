@@ -1,0 +1,4 @@
+# wasm-bindgen output (generated from the cdylib) — index.html is the only source-controlled file here.
+fab_gui.js
+fab_gui_bg.wasm
+fab_gui.d.ts

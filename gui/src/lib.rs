@@ -120,11 +120,34 @@ fn flag_value(args: &[String], flag: &str) -> Option<String> {
         .cloned()
 }
 
+/// wasm entry (W.3.5): the browser calls this on module load. Binds Bevy to the page's
+/// `<canvas id="fab-web">` (via [`window_plugin`]) and boots the SAME windowed app as desktop over an
+/// EMPTY scene — geometry lands when the W.3.6 Worker fills the `GeomPool` stub. The panic hook routes
+/// Rust panics to the console (a bare wasm trap is otherwise opaque). This is the egui-on-wasm smoke.
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen::prelude::wasm_bindgen(start)]
+pub fn start() {
+    console_error_panic_hook::set_once();
+    run_windowed(
+        SceneCfg {
+            source: None,
+            stl: None,
+            bed: [256.0, 256.0],
+            plate: [256.0, 256.0],
+            root: None,
+            tmp: PathBuf::from("/tmp/fab-gui"),
+            reslice_on_start: false,
+            cut_pct: 50.0,
+        },
+        None,
+    );
+}
+
 // ---- windowed -------------------------------------------------------------------------
 fn run_windowed(scene: SceneCfg, shot: Option<PathBuf>) {
     App::new()
         .add_plugins((
-            DefaultPlugins.set(assets_dir()),
+            DefaultPlugins.set(assets_dir()).set(window_plugin()),
             MeshPickingPlugin,
             EguiPlugin::default(),
         ))

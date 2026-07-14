@@ -1,0 +1,20 @@
+<!-- fab-gui wasm SMOKE loader (W.3.5) — standalone (the hotchkiss.io page owns the real chrome at
+     W.3.7). Two load-bearing pieces, per fab-web's contract:
+       1. <canvas id="fab-web"> MUST exist before init() — the app binds to it (window_plugin); missing
+          = panic. Its parent is full-page here, and fit_canvas_to_parent tracks it.
+       2. init().catch swallows winit's control-flow exception (App::run exits via a JS throw that
+          would otherwise read as a crash). -->
+<!doctype html>
+<meta charset="utf-8">
+<title>fab-gui — wasm smoke (W.3.5)</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #0f182d; } /* navy viewport, pre-boot */
+  canvas { display: block; width: 100%; height: 100%; }
+</style>
+<canvas id="fab-web"></canvas>
+<script type="module">
+  import init from './fab_gui.js';
+  init().catch((e) => {
+    if (!`${e}`.includes('Using exceptions for control flow')) console.error('INIT ERROR:', e);
+  });
+</script>

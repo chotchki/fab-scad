@@ -1,0 +1,23 @@
+# fab-manifold determinism door (SPEC_manifold-rs.md, Pillar 2). Platform libm (`f64::sin`-etc) is
+# 1-ULP-divergent AND cross-platform nondeterministic, so bit-identity native==wasm collapses if any
+# transcendental takes the hardware path. EVERY transcendental MUST route through `src/mathf.rs`, which
+# calls the `libm` crate (not banned) — so mathf is exempt by construction and everything else is caught.
+# `mul_add` is banned OUTRIGHT (FMA contracts to 1 rounding on aarch64, 2 on wasm — the #1 hazard, and
+# Rust does NOT auto-contract). `sqrt`/`floor`/`ceil`/`round`/`trunc` stay hardware-legal (IEEE-exact).
+# Escaping a ban needs `#[allow(clippy::disallowed_methods, reason = "…")]` (reason forced by lints).
+disallowed-methods = [
+    { path = "f64::sin", reason = "route through mathf (libm) — platform libm breaks native==wasm bit-identity" },
+    { path = "f64::cos", reason = "route through mathf (libm)" },
+    { path = "f64::tan", reason = "route through mathf (libm)" },
+    { path = "f64::asin", reason = "route through mathf (libm)" },
+    { path = "f64::acos", reason = "route through mathf (libm)" },
+    { path = "f64::atan", reason = "route through mathf (libm)" },
+    { path = "f64::atan2", reason = "route through mathf (libm)" },
+    { path = "f64::exp", reason = "route through mathf (libm)" },
+    { path = "f64::ln", reason = "route through mathf (libm)" },
+    { path = "f64::log", reason = "route through mathf (libm)" },
+    { path = "f64::powf", reason = "route through mathf (libm)" },
+    { path = "f64::cbrt", reason = "route through mathf (libm)" },
+    { path = "f64::hypot", reason = "route through mathf (libm)" },
+    { path = "f64::mul_add", reason = "FMA contracts differently aarch64 (1 rounding) vs wasm (2) — NEVER use it" },
+]

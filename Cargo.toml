@@ -56,7 +56,7 @@ path = "src/bin/echo_repro.rs"
 required-features = ["native"]
 
 [workspace]
-members = ["gen", "geom", "gui", "jit", "lang", "web"]
+members = ["gen", "geom", "gui", "jit", "lang", "manifold", "web"]
 
 [features]
 # The in-process Manifold geometry kernel (Track C). Default-on so the normal build + tests

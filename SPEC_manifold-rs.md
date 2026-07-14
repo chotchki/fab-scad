@@ -21,6 +21,16 @@ defects — a non-total-order comparator + a global mesh-id counter — [[onetbb
 language + LTO; the C++ toolchain gone; and possibly `Solid: Send` for free (the `!Send` hazard is a
 `csg_tree` lazy-mutation artifact that immutable Rust leaves dissolve — [[manifold-kernel-threading]]).
 
+## The crate
+
+A NEW workspace member: **`fab-manifold`** in `manifold/` (matching the `fab-lang`/`fab-jit`/`fab-geom`
+convention). Pure Rust, no C++. `fab-scad`'s `kernel.rs` becomes a thin wrapper over it (or is replaced
+outright at R.X). It's segmented from `fab-scad` deliberately — a self-contained kernel with its OWN
+test suite is the whole discipline here: the port is only as good as the oracle that gates it, so the
+crate is BUILT test-first (the differential harness + invariant checks land in R0 BEFORE the first
+boolean). Feature-gated: `oracle` (links `manifold3d` for the C++ differential, off by default at the
+finish), `par` (rayon; off → deterministic serial, the wasm-safe default).
+
 ## The bounded surface
 
 The ENTIRE port target is `src/kernel.rs` — a closed set. `backend.rs` and everything downstream reach
@@ -79,7 +89,7 @@ native anyway; determinism is by-construction), threads behind the nightly flag 
 
 ## Pillar 2 — portable deterministic math
 
-**Transcendentals: adopt `libm`** (pure-Rust MUSL port), behind a single `kernel/src/mathf.rs` seam
+**Transcendentals: adopt `libm`** (pure-Rust MUSL port), behind a single `manifold/src/mathf.rs` seam
 with a CI deny-lint forbidding `f64::sin`-etc outside it. The kernel's own transcendental traffic is
 TINY — fab-lang tessellates primitives and hands the kernel finished vertex soup, so facet trig is not
 the kernel's job; the real surface is `rotate` (sin/cos), `offset` round-joins (sin/cos/atan2), plus

@@ -1,0 +1,32 @@
+[package]
+name = "fab-manifold"
+version = "0.1.0"
+edition = "2024"
+description = "Pure-Rust reimplementation of the Manifold geometry kernel — deterministic native==wasm (SPEC_manifold-rs.md)"
+license = "GPL-2.0-or-later"
+
+[dependencies]
+# Pillar 2 — portable transcendentals, bit-identical native==wasm. EVERY sin/cos/etc goes through
+# src/mathf.rs (which calls libm); direct `f64::sin` is clippy-banned (clippy.toml) to force it.
+libm = "0.2"
+
+[features]
+default = []
+# Pillar 1 — the deterministic parallel layer. OFF = serial (the wasm-safe default, bit-identical to
+# native). Threaded-wasm additionally needs nightly `-Zbuild-std` + `+atomics` (gated at the app level).
+par = ["dep:rayon"]
+# The C++ Manifold DIFFERENTIAL ORACLE (the R0..R.X scaffold). Links manifold3d for the KernelDriver's
+# CppKernel; OFF by default, and DROPPED at R.X (the finish line). Native-only (needs the C++ toolchain).
+oracle = ["dep:manifold3d"]
+
+[dependencies.rayon]
+version = "1"
+optional = true
+
+[dependencies.manifold3d]
+version = "0.3.1"
+optional = true
+
+[dev-dependencies]
+# Port-tests-first: proptest drives the structure-aware CSG-tree fuzzer (Manifold's manifold_fuzz).
+proptest = "1"

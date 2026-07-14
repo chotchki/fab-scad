@@ -28,6 +28,8 @@ pub trait KernelDriver {
     fn volume(s: &Self::Solid) -> f64;
     /// Surface area.
     fn surface_area(s: &Self::Solid) -> f64;
+    /// Topological genus (exact integer backstop).
+    fn genus(s: &Self::Solid) -> i32;
     /// Axis-aligned bounding box.
     fn bbox(s: &Self::Solid) -> Box3;
 }
@@ -53,6 +55,9 @@ impl KernelDriver for RustKernel {
     fn surface_area(s: &Mesh) -> f64 {
         s.surface_area()
     }
+    fn genus(s: &Mesh) -> i32 {
+        crate::check::genus(s)
+    }
     fn bbox(s: &Mesh) -> Box3 {
         s.b_box
     }
@@ -77,6 +82,9 @@ impl KernelDriver for CppKernel {
     }
     fn surface_area(s: &manifold3d::Manifold) -> f64 {
         s.surface_area()
+    }
+    fn genus(s: &manifold3d::Manifold) -> i32 {
+        s.genus()
     }
     fn bbox(s: &manifold3d::Manifold) -> Box3 {
         let bb = s.bounding_box().expect("finite bounding box");
@@ -116,6 +124,7 @@ pub struct Divergence {
 struct Props {
     volume: f64,
     area: f64,
+    genus: i32,
     bbox: Box3,
 }
 
@@ -124,6 +133,7 @@ fn props<K: KernelDriver>(mesh: &MeshGl) -> Result<Props, String> {
     Ok(Props {
         volume: K::volume(&s),
         area: K::surface_area(&s),
+        genus: K::genus(&s),
         bbox: K::bbox(&s),
     })
 }
@@ -142,6 +152,16 @@ pub fn differential(mesh: &MeshGl, rel_tol: f64) -> Result<Vec<Divergence>, Stri
     };
 
     let mut divs = Vec::new();
+    // genus is an exact integer — compare it before the f64 `check` closure borrows `divs`.
+    if r.genus != c.genus {
+        divs.push(Divergence {
+            metric: "genus".to_string(),
+            rust: r.genus as f64,
+            cpp: c.genus as f64,
+            abs: (r.genus - c.genus).unsigned_abs() as f64,
+            rel: f64::INFINITY,
+        });
+    }
     let mut check = |metric: &str, rust: f64, cpp: f64| {
         let abs = (rust - cpp).abs();
         let rel = abs / cpp.abs().max(1e-12);

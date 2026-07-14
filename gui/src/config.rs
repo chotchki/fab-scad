@@ -96,18 +96,87 @@ fn load_into_part(part: &mut Part, ps: &PartSlicing) {
 /// WARNS + is skipped (best-effort, the reactive standard). A flat/empty `[slicing]` is a no-op —
 /// auto-derive handles those parts.
 pub(crate) fn apply_slicing_config(parts: &mut [Part], m: &Manifest) {
-    let Some(slicing) = &m.slicing else {
-        return;
-    };
-    if slicing.parts.is_empty() {
+    if let Some(slicing) = &m.slicing {
+        apply_blocks(parts, &slicing.parts);
+    }
+}
+
+/// Apply parsed per-part slicing blocks to freshly-built parts — the shared core of the legacy
+/// `project.toml` load and the [`fab:config`](read_config_block) block load. Each block binds via
+/// `resolve_part` (name+nth, index fallback); an unresolvable block WARNS + is skipped (best-effort).
+pub(crate) fn apply_blocks(parts: &mut [Part], blocks: &[PartSlicing]) {
+    if blocks.is_empty() {
         return;
     }
     let names: Vec<Option<String>> = parts.iter().map(|p| p.name.clone()).collect();
-    for ps in &slicing.parts {
+    for ps in blocks {
         match fab_scad::backend::resolve_part(&names, &ps.key) {
             Some(i) => load_into_part(&mut parts[i], ps),
             None => warn!("slicing config: no part matches {:?} — skipped", ps.key),
         }
+    }
+}
+
+// ── the fab:config block (W.3.8): per-part slicing config as JSON in a .scad line-comment ─────────────
+// ONE persistence mechanism, both targets: the browser has no filesystem, so config rides INERT in the
+// source (baked into the downloaded .scad); desktop writes the SAME block, retiring the toml_edit
+// autosave. A comment is ignored by scad-rs/OpenSCAD, so the model renders identically with or without it.
+
+/// The marker prefix; the rest of the line is the config JSON. Versioned so a future schema can migrate.
+const CONFIG_MARKER: &str = "// fab:config v1 ";
+
+/// The `fab:config` block for the live parts — a single line `// fab:config v1 {json}` — or `None` when
+/// nothing's worth persisting (every part auto-derives). Appended to a model's source at the bottom.
+pub(crate) fn config_block(parts: &[Part]) -> Option<String> {
+    let blocks = slicing_blocks(parts);
+    if blocks.is_empty() {
+        return None;
+    }
+    Some(format!("{CONFIG_MARKER}{}", serde_json::to_string(&blocks).ok()?))
+}
+
+/// Read a `fab:config` block out of source `text` — the per-part slicing config, or `None` if absent or
+/// malformed (a stray/corrupt block is ignored, never fatal — those parts auto-derive).
+pub(crate) fn read_config_block(text: &str) -> Option<Vec<PartSlicing>> {
+    let payload = text
+        .lines()
+        .find_map(|l| l.trim_start().strip_prefix(CONFIG_MARKER))?;
+    serde_json::from_str(payload.trim()).ok()
+}
+
+/// `text` with any `fab:config` block line removed + trailing blank lines trimmed — the clean model
+/// source (what the user edits + what the evaluator sees; the block is re-appended only on persist).
+pub(crate) fn strip_config_block(text: &str) -> String {
+    let trailing_nl = text.ends_with('\n');
+    let mut lines: Vec<&str> = text
+        .lines()
+        .filter(|l| !l.trim_start().starts_with("// fab:config"))
+        .collect();
+    while lines.last().is_some_and(|l| l.trim().is_empty()) {
+        lines.pop();
+    }
+    let mut s = lines.join("\n");
+    if trailing_nl && !s.is_empty() {
+        s.push('\n');
+    }
+    s
+}
+
+/// Append (or replace) a model's `fab:config` block — strip any existing block, then add the fresh one
+/// with a blank-line separator. This is what desktop Save writes to the `.scad` and web download bakes
+/// into the bytes. No config to persist → just the clean model.
+pub(crate) fn with_config_block(model: &str, parts: &[Part]) -> String {
+    let clean = strip_config_block(model);
+    match config_block(parts) {
+        Some(block) => {
+            let sep = if clean.is_empty() || clean.ends_with('\n') {
+                ""
+            } else {
+                "\n"
+            };
+            format!("{clean}{sep}\n{block}\n")
+        }
+        None => clean,
     }
 }
 
@@ -531,5 +600,56 @@ mod tests {
         assert_eq!(s.parts.len(), 1);
         assert_eq!(s.parts[0].cut[0].axis, "y");
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // ── the fab:config block (W.3.8) ───────────────────────────────────────────────────────────────
+    #[test]
+    fn fab_config_block_round_trips_through_the_scad_buffer() {
+        // parts → block in the .scad → read back → apply → same config. The ONE persistence path, both
+        // platforms (the browser bakes this block into the downloaded .scad; desktop writes the same).
+        let parts = vec![
+            part_with(
+                Some("wall"),
+                &[(Axis::Z, 40.0, true)],
+                &[(0, fab::ConnKind::Bolt)],
+            ),
+            part_with(Some("frame"), &[(Axis::X, 10.0, true)], &[]),
+        ];
+        let model = "cube([60,40,30]);\n";
+        let saved = with_config_block(model, &parts);
+        assert!(saved.starts_with(model), "model source untouched above the block");
+        assert!(saved.contains("// fab:config v1 "));
+
+        let blocks = read_config_block(&saved).expect("block reads back");
+        let mut fresh = vec![part_named("wall"), part_named("frame")];
+        apply_blocks(&mut fresh, &blocks);
+        assert_eq!(fresh[0].cuts.list[0].at, 40.0);
+        assert_eq!(fresh[0].conns.list[0].kind, fab::ConnKind::Bolt);
+        assert_eq!(fresh[1].cuts.list[0].axis, Axis::X);
+
+        assert_eq!(strip_config_block(&saved), model, "strip gives back the clean model");
+    }
+
+    #[test]
+    fn no_config_writes_no_block_and_reads_none() {
+        let parts = vec![part_named("wall")]; // auto-derive → nothing to persist
+        assert!(config_block(&parts).is_none());
+        let model = "cube(1);\n";
+        assert_eq!(with_config_block(model, &parts), model);
+        assert!(read_config_block(model).is_none());
+    }
+
+    #[test]
+    fn resaving_replaces_the_block_never_stacks_it() {
+        let a = vec![part_with(Some("p"), &[(Axis::Z, 40.0, true)], &[])];
+        let b = vec![part_with(Some("p"), &[(Axis::Z, 41.0, true)], &[])];
+        let once = with_config_block("cube(1);\n", &a);
+        let twice = with_config_block(&once, &b); // re-save with moved cut
+        assert_eq!(
+            twice.matches("// fab:config").count(),
+            1,
+            "one block, not two"
+        );
+        assert_eq!(read_config_block(&twice).unwrap()[0].cut[0].at.f(), 41.0);
     }
 }

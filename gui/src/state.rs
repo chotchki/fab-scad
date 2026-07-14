@@ -88,17 +88,29 @@ pub(crate) fn read_into_editor(editor: &mut EditorBuf, path: &Path) {
     editor.edited_at = None;
 }
 
-/// A finished render/slice job's payload (T.2b). A whole render produces ALL top-level parts at once
-/// (`fab::render_parts`); a reslice touches exactly ONE part off its cached STL.
+/// A finished render/slice job's payload (T.2b). A whole render mints ALL top-level parts' base solids
+/// in the geometry service (W.3.3); a reslice reads ONE held base and hands back the sliced STL bytes.
 pub(crate) enum JobResult {
-    /// Every top-level part's whole STL + its provenance name. `fresh` = a new source (replace the
-    /// parts list); else a reload of the SAME source (refresh geometry in place, keep cuts/connectors).
+    /// Every rendered top-level part (minted handle + display STL + bbox + provenance). `fresh` = a new
+    /// source (replace the parts list); else a reload of the SAME source (refresh geometry in place,
+    /// keeping each part's cuts/connectors) — the old handles are freed either way (`poll_job`).
     Rendered {
         fresh: bool,
-        parts: Vec<(PathBuf, Option<String>)>,
+        parts: Vec<RenderedPart>,
     },
-    /// One part's sliced STL — the part index it belongs to (its `Model` entity carries `PartId`).
-    Resliced { part: usize, stl: PathBuf },
+    /// One part's sliced STL BYTES — the part index it belongs to (its `Model` entity carries `PartId`).
+    Resliced { part: usize, stl: Vec<u8> },
+}
+
+/// One rendered top-level part off the wire: its minted base handle, display STL bytes, world-space
+/// bbox, and provenance name. `poll_job` builds a `Part` + `Model` entity from each (mesh from bytes,
+/// bounds from min/max) — no disk round-trip.
+pub(crate) struct RenderedPart {
+    pub(crate) base: SolidId,
+    pub(crate) stl: Vec<u8>,
+    pub(crate) min: [f64; 3],
+    pub(crate) max: [f64; 3],
+    pub(crate) name: Option<String>,
 }
 
 /// The in-flight render/slice (off the main thread). Yields a [`JobResult`] on success, else an error.
@@ -330,7 +342,10 @@ pub(crate) struct Part {
     pub(crate) whole: Option<Handle<Mesh>>, // the uncut mesh — revert from exploded without re-rendering
     pub(crate) sliced: Option<Handle<Mesh>>, // the last sliced (exploded) mesh — re-show without re-slicing
     pub(crate) spread: f32,                  // 0 = uncut/editing, >0 = exploded (fan distance)
-    pub(crate) base_stl: PathBuf, // this part's whole STL (`render_parts` output) — reslice/edit/plan source
+    /// This part's whole base solid, HELD in the geometry service (W.3.3) and addressed by handle —
+    /// the reslice/edit/plan/section source. `None` until the render lands. The `!Send` Solid never
+    /// leaves the service; this plain id is all the GUI keeps (replacing the old on-disk `base_stl`).
+    pub(crate) base: Option<SolidId>,
     pub(crate) sliced_hash: Option<u64>, // `slice_hash` of the inputs last resliced — per-part so editing A never reslices B
     pub(crate) name: Option<String>, // the top-level module/function that produced this part (T.2b provenance); None = anonymous
 }

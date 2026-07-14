@@ -35,6 +35,10 @@ pub(crate) use bevy_egui::{
     EguiContexts, EguiGlobalSettings, EguiPlugin, EguiPrimaryContextPass, PrimaryEguiContext, egui,
 };
 pub(crate) use fab_scad::stl;
+// The geometry-service WIRE types (W.3): ungated (no kernel), so they name the seam on BOTH targets.
+// `SolidId` is the base-solid handle a `Part` holds; the rest are the request/response envelope the
+// task bodies drive `GeomPool` with. The Solid itself lives in the service, never here.
+pub(crate) use fab_scad::geomsg::{Request, Response, SolidId, Source, WireConn};
 pub(crate) use std::collections::{HashMap, HashSet};
 pub(crate) use std::path::{Path, PathBuf};
 // The shared geometry types the auto-slice/planner APIs take (J.6 unified on `fab_lang`'s Vec3). Aliased
@@ -65,9 +69,12 @@ pub(crate) use state::Axis;
 
 mod fab;
 // The native geometry-service transport (W.3.3) — a pool of kernel threads. Uses fab_scad::geomsvc
-// (kernel), so native-only; the wasm Worker transport lands at W.3.6.
+// (kernel), so native-only; the wasm Worker transport lands at W.3.6. `GeomPool` is the cloneable
+// Bevy Resource every render/slice/plan/section op routes through — the ONE geometry path.
 #[cfg(not(target_arch = "wasm32"))]
 pub mod geom;
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) use geom::GeomPool;
 
 /// Native entry: parse args + dispatch to the windowed / screenshot / scripted app builder. The wasm
 /// build enters through a `#[wasm_bindgen(start)]` on the canvas instead (W.3.2), not here.
@@ -115,6 +122,9 @@ fn run_windowed(scene: SceneCfg, shot: Option<PathBuf>) {
         ))
         .insert_resource(ClearColor(theme::VIEWPORT))
         .insert_resource(scene)
+        // The geometry service (W.3.3): one kernel-thread shard to start. Every render/slice/plan/
+        // section op routes through it — Solids stay on this thread, only bytes/handles cross.
+        .insert_resource(GeomPool::new(1))
         .insert_resource(WindowShot(shot))
         // U.3.9: we pin the primary egui context to the full-window Camera2d ourselves (see
         // setup_windowed). Auto-create picks the "first found" camera — an archetype-order lottery.
@@ -239,6 +249,7 @@ fn run_screenshot(scene: SceneCfg, png: PathBuf) {
         })
         .insert_resource(ClearColor(theme::VIEWPORT))
         .insert_resource(scene)
+        .insert_resource(GeomPool::new(1)) // the geometry service (W.3.3); setup_offscreen renders through it
         .insert_resource(ScreenshotPng(png))
         .init_resource::<FileList>()
         .init_resource::<OpenDialog>()
@@ -297,6 +308,7 @@ fn run_scripted(scene: SceneCfg, actions: Vec<Action>) {
         })
         .insert_resource(ClearColor(theme::VIEWPORT))
         .insert_resource(scene)
+        .insert_resource(GeomPool::new(1)) // the geometry service (W.3.3); setup_script + the poll loop drive it
         .init_resource::<Job>()
         .insert_resource(Parts(vec![Part::default()]))
         .init_resource::<ActivePart>()

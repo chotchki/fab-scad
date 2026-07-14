@@ -736,4 +736,96 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&tmp);
     }
+
+    // Print-layout + auto-plan seam behaviour, exercised by MINTING a blob straight into the store (no
+    // .scad render — so these run under kernel-WITHOUT-native too, i.e. the wasm worker config). They
+    // guard the two tricky compositions the fab-gui wrapper used to own before the seam swallowed them.
+
+    #[test]
+    fn print_layout_splits_a_presliced_blob_into_flat_pieces() {
+        // T.2a regression: a "presliced" part is many disjoint solids unioned into one. With no cuts
+        // slice_solid hands back the whole blob as ONE slab — so print_layout_svc must split it into
+        // connected components and orient EACH, else best_up scores the blob and every piece tilts
+        // ~45° (the dogfood bug). Two cubes 60mm apart stand in for the blob.
+        let mut store = SolidStore::new(0);
+        let blob = Solid::cube(20.0, 20.0, 20.0, true)
+            .union(&Solid::cube(20.0, 20.0, 20.0, true).translate(Vec3::new(60.0, 0.0, 0.0)));
+        let id = store.mint(blob);
+        let Response::LaidOut { pieces } = handle_with_store(
+            &mut store,
+            Request::PrintLayout {
+                base: id,
+                cuts: vec![],
+                connectors: vec![],
+            },
+        ) else {
+            panic!("print layout failed")
+        };
+        assert_eq!(pieces.len(), 2, "the blob splits into its two components");
+        assert!(
+            pieces.iter().all(|p| p.piece == [0, 0, 0]),
+            "one slab, split by connected component"
+        );
+        let comps: HashMap<usize, ()> = pieces.iter().map(|p| (p.comp, ())).collect();
+        assert_eq!(comps.len(), 2, "distinct comp ids 0 and 1");
+        for p in &pieces {
+            let m = p.up.iter().map(|c| c.abs()).fold(0.0_f32, f32::max);
+            assert!(
+                m > 0.99,
+                "piece {:?}/{} up {:?} is a 45° tilt, not flat",
+                p.piece,
+                p.comp,
+                p.up
+            );
+        }
+    }
+
+    #[test]
+    fn auto_plan_skips_a_presliced_blob_whose_pieces_fit() {
+        // A presliced part (disjoint components) whose components EACH fit the bed needs NO cuts —
+        // auto-slicing the whole SPREAD-OUT bbox would double-slice an already-sliced model. Two 200mm
+        // cubes 500mm apart: the whole bbox (700mm in X) overflows a 256 bed, each cube fits.
+        let mut store = SolidStore::new(0);
+        let bed = [256.0, 256.0, 256.0];
+        let blob = Solid::cube(200.0, 200.0, 200.0, true)
+            .union(&Solid::cube(200.0, 200.0, 200.0, true).translate(Vec3::new(500.0, 0.0, 0.0)));
+        let id = store.mint(blob);
+        let Response::Planned { cuts, pieces, .. } = handle_with_store(
+            &mut store,
+            Request::AutoPlan {
+                base: id,
+                min: [-100.0, -100.0, -100.0],
+                max: [600.0, 100.0, 100.0],
+                bed,
+            },
+        ) else {
+            panic!("auto-plan failed")
+        };
+        assert!(cuts.is_empty(), "presliced-and-fits → no cuts, got {cuts:?}");
+        assert_eq!(pieces, 2, "two disjoint components");
+
+        // A single CONNECTED oversized part still gets a real cut plan (component-aware, not a blanket
+        // skip).
+        let big = store.mint(Solid::cube(700.0, 200.0, 200.0, true));
+        let Response::Planned {
+            cuts: cuts2,
+            pieces: pieces2,
+            ..
+        } = handle_with_store(
+            &mut store,
+            Request::AutoPlan {
+                base: big,
+                min: [-350.0, -100.0, -100.0],
+                max: [350.0, 100.0, 100.0],
+                bed,
+            },
+        ) else {
+            panic!("auto-plan (connected) failed")
+        };
+        assert!(
+            !cuts2.is_empty(),
+            "one connected 700mm part still slices to fit the bed"
+        );
+        assert_eq!(pieces2, 1, "one connected component");
+    }
 }

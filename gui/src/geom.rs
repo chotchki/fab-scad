@@ -10,6 +10,7 @@
 //! transport; the `SubprocessTransport` follow-up (and the wasm Worker) get true isolation.
 
 use anyhow::{Context, Result, anyhow};
+use bevy::prelude::Resource;
 
 use fab_scad::geomsg::{Request, Response};
 use fab_scad::geomsvc::{SolidStore, handle_with_store};
@@ -17,7 +18,9 @@ use fab_scad::geomsvc::{SolidStore, handle_with_store};
 type Reply = async_channel::Sender<Response>;
 
 /// One shard: a dedicated thread owning a `SolidStore`, fed `Request`s over a channel, replying
-/// per-request over a fresh oneshot.
+/// per-request over a fresh oneshot. `Clone` shares the send end (the thread + store are the shared
+/// resource behind it) so the pool can hand a cheap handle to every async task body.
+#[derive(Clone)]
 struct Shard {
     tx: async_channel::Sender<(Request, Reply)>,
 }
@@ -57,7 +60,10 @@ impl Shard {
     }
 }
 
-/// The native transport: a pool of shards addressed by handle shard.
+/// The native transport: a pool of shards addressed by handle shard. A cloneable Bevy `Resource` —
+/// clones share the shard threads (they're behind the `async_channel` send ends), so a system holds
+/// `Res<GeomPool>` and every spawned task body moves its own cheap clone in.
+#[derive(Resource, Clone)]
 pub struct GeomPool {
     shards: Vec<Shard>,
 }

@@ -84,6 +84,7 @@ pub(crate) fn setup_offscreen(
     png: Res<ScreenshotPng>,
     mut editor: ResMut<EditorBuf>,
     mut files: ResMut<FileList>,
+    pool: Res<GeomPool>,
 ) {
     spawn_environment(&mut commands, &mut meshes, &mut materials, &scene);
     if let Some(src) = scene.source.clone() {
@@ -93,7 +94,7 @@ pub(crate) fn setup_offscreen(
     }
     // Synchronous here — no UI to freeze. Render whole for bounds + the cut plane, then
     // (if asked) slice at the chosen cut so the PNG verifies an off-center cut.
-    let display = setup_offscreen_model(&mut commands, &mut meshes, &mut materials, &scene);
+    let display = setup_offscreen_model(&mut commands, &mut meshes, &mut materials, &scene, &pool);
     commands.spawn((
         Mesh3d(display),
         MeshMaterial3d(part_material(&mut materials)),
@@ -143,48 +144,72 @@ pub(crate) fn setup_offscreen(
     });
 }
 
-/// Headless model prep: render whole (→ bounds + cut plane), optionally slice at the cut.
-/// Returns the mesh handle to display.
+/// Headless model prep: render whole (→ bounds + cut plane), optionally slice at the cut. Routes both
+/// ops through the geometry service (W.3.3) — blocking, since there's no UI to freeze — and returns
+/// the mesh handle to display.
 pub(crate) fn setup_offscreen_model(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<StandardMaterial>,
     scene: &SceneCfg,
+    pool: &GeomPool,
 ) -> Handle<Mesh> {
     let Some(src) = scene.source.as_deref() else {
         return load_model(meshes, scene.stl.as_deref());
     };
-    let whole = match fab::render_whole(scene.root.as_deref(), src, &scene.tmp) {
-        Ok(p) => p,
+    // Render WHOLE through the service: mints a base handle we then reslice off. block_on drives the
+    // reply here while the kernel thread runs it.
+    let root = scene.root.as_ref().map(|r| r.to_string_lossy().into_owned());
+    let (base, min, max, whole_mesh) = match block_on(pool.call(Request::RenderWhole {
+        source: Source::Path(src.to_string_lossy().into_owned()),
+        root,
+    })) {
+        Ok(Response::Rendered { id, stl, min, max }) => {
+            (id, min, max, mesh_from_bytes(meshes, &stl))
+        }
+        Ok(Response::Failed { error }) => {
+            error!("{error}");
+            return load_model(meshes, None);
+        }
+        Ok(_) => {
+            error!("render: unexpected service response");
+            return load_model(meshes, None);
+        }
         Err(e) => {
             error!("{e:#}");
             return load_model(meshes, None);
         }
     };
-    let (whole_mesh, aabb) = mesh_and_bounds(meshes, &whole);
-    let mut cut_x = 0.0;
-    if let Some((min, max)) = aabb {
-        cut_x = min.x + (scene.cut_pct / 100.0) * (max.x - min.x);
-        let cut = CutDef {
-            axis: Axis::X,
-            at: cut_x,
-            enabled: true,
-        };
-        spawn_cut_plane(commands, meshes, materials, min, max, &cut, 0);
-    }
+    let (mn, mx) = (
+        Vec3::new(min[0] as f32, min[1] as f32, min[2] as f32),
+        Vec3::new(max[0] as f32, max[1] as f32, max[2] as f32),
+    );
+    let cut_x = mn.x + (scene.cut_pct / 100.0) * (mx.x - mn.x);
+    let cut = CutDef {
+        axis: Axis::X,
+        at: cut_x,
+        enabled: true,
+    };
+    spawn_cut_plane(commands, meshes, materials, mn, mx, &cut, 0);
     if !scene.reslice_on_start {
         return whole_mesh;
     }
-    match fab::reslice(
-        scene.root.as_deref(),
-        src,
-        &[('x', cut_x as f64)],
-        &[],
-        &[],
-        SPREAD,
-        &scene.tmp,
-    ) {
-        Ok(sliced) => load_model(meshes, Some(&sliced)),
+    match block_on(pool.call(Request::Reslice {
+        base,
+        cuts: vec![('x', cut_x as f64)],
+        connectors: vec![],
+        orient: vec![],
+        spread: SPREAD,
+    })) {
+        Ok(Response::Resliced { stl }) => mesh_from_bytes(meshes, &stl),
+        Ok(Response::Failed { error }) => {
+            error!("{error}");
+            whole_mesh
+        }
+        Ok(_) => {
+            error!("reslice: unexpected service response");
+            whole_mesh
+        }
         Err(e) => {
             error!("{e:#}");
             whole_mesh

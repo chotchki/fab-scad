@@ -482,6 +482,7 @@ pub(crate) fn edit_mode(
     mut models: Query<(&mut Mesh3d, &PartId), With<Model>>,
     mut cam: Query<(&mut Transform, &mut Orbit)>,
     mut status: ResMut<Status>,
+    pool: Res<GeomPool>,
 ) {
     if !edit.is_changed() {
         return;
@@ -510,7 +511,7 @@ pub(crate) fn edit_mode(
     };
     let (axis, at) = (c.axis, c.at); // copy out so the `part` borrow can drop before the cam block
     let bounds = part.bounds.0;
-    let base_stl = part.base_stl.clone(); // this part's whole STL — the cross-section source
+    let base = part.base; // this part's held base solid — the cross-section source
     // Face the camera square onto the cut (Z avoids the up=Z gimbal with a near-top-down pitch).
     // Set the transform here directly — `orbit` yields while editing, so it won't apply it for us.
     if let Ok((mut t, mut o)) = cam.single_mut() {
@@ -525,8 +526,20 @@ pub(crate) fn edit_mode(
         o.target = with_comp(center, axis.index(), at);
         *t = orbit_transform(o.yaw, o.pitch, o.radius, o.target);
     }
-    match fab::cross_section(&base_stl, axis.index(), at as f64) {
-        Ok(loops) => {
+    // Cross-section off the HELD base through the service (W.3.3) — blocking, but fast (no re-render;
+    // the Solid stays on its shard). block_on drives the reply here while the shard thread progresses.
+    let result = match base {
+        Some(base) => block_on(pool.call(Request::CrossSection {
+            base,
+            axis: axis.index(),
+            at: at as f64,
+        })),
+        None => Ok(Response::Failed {
+            error: "not rendered yet".into(),
+        }),
+    };
+    match result {
+        Ok(Response::Sectioned { loops }) => {
             xsection.0 = Some(
                 loops
                     .into_iter()
@@ -535,8 +548,16 @@ pub(crate) fn edit_mode(
             );
             status.0 = format!("editing connectors on {} cut", axis.label());
         }
+        Ok(Response::Failed { error }) => {
+            status.0 = format!("cross-section failed: {error}");
+            xsection.0 = None;
+        }
+        Ok(_) => {
+            status.0 = "cross-section: unexpected service response".into();
+            xsection.0 = None;
+        }
         Err(e) => {
-            status.0 = format!("cross-section failed: {e}");
+            status.0 = format!("cross-section failed: {e:#}");
             xsection.0 = None;
         }
     }

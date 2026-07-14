@@ -121,6 +121,7 @@ pub(crate) fn setup_script(
     mut status: ResMut<Status>,
     mut editor: ResMut<EditorBuf>,
     mut files: ResMut<FileList>,
+    pool: Res<GeomPool>,
 ) {
     spawn_environment(&mut commands, &mut meshes, &mut materials, &scene);
     if let Some(src) = scene.source.clone() {
@@ -166,7 +167,7 @@ pub(crate) fn setup_script(
     ));
     commands.insert_resource(PrevCam(Some((-0.7, 0.5, radius, Vec3::ZERO))));
     commands.insert_resource(RenderTargetImage(target));
-    kick_render(&mut job, &mut status, &scene, true);
+    kick_render(&pool, &mut job, &mut status, &scene, true);
 }
 
 /// Step the script: each action drives the real systems, waiting on async work to settle.

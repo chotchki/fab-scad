@@ -38,6 +38,7 @@ pub(crate) fn setup_windowed(
     mut gizmo_cfg: ResMut<GizmoConfigStore>,
     mut editor: ResMut<EditorBuf>,
     mut files: ResMut<FileList>,
+    pool: Res<GeomPool>,
 ) {
     spawn_environment(&mut commands, &mut meshes, &mut materials, &scene);
     // Seed the file-tab + editor from the launch source (U.3.2): a folder pick repopulates both.
@@ -95,7 +96,7 @@ pub(crate) fn setup_windowed(
     // normal-view frame still has something to hand back (manage_view_camera).
     commands.insert_resource(PrevCam(Some((-0.7, 0.5, radius, Vec3::ZERO))));
     // Render the model's parts off-thread; poll_job seeds each part + its first cut when bounds land.
-    kick_render(&mut job, &mut status, &scene, true);
+    kick_render(&pool, &mut job, &mut status, &scene, true);
 }
 
 /// Drop the bed slab so its top meets the model's Z-floor — the model rests on the bed instead of
@@ -163,6 +164,19 @@ pub(crate) fn mesh_and_bounds(
         Err(e) => {
             error!("loading {}: {e:#}", stl.display());
             (meshes.add(Cuboid::new(60.0, 40.0, 30.0)), None)
+        }
+    }
+}
+
+/// Build a mesh from in-memory STL bytes (the geometry service's render/reslice output, W.3.3) —
+/// the byte twin of [`mesh_and_bounds`], with no disk round-trip. Bounds come from the wire bbox, so
+/// this returns only the handle. A parse failure falls back to a placeholder box (and logs).
+pub(crate) fn mesh_from_bytes(meshes: &mut Assets<Mesh>, bytes: &[u8]) -> Handle<Mesh> {
+    match stl::load_stl_bytes(bytes) {
+        Ok(s) => meshes.add(build_mesh(&s)),
+        Err(e) => {
+            error!("parsing service STL ({} bytes): {e:#}", bytes.len());
+            meshes.add(Cuboid::new(60.0, 40.0, 30.0))
         }
     }
 }

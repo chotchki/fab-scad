@@ -16,8 +16,9 @@ pub(crate) struct Watch {
     pub(crate) closure: Vec<PathBuf>,
 }
 
-/// An off-thread auto-plan's payload: the fit-to-bed cut/connector plan + the part's component count.
-type AutoPlanResult = Result<(fab_scad::auto::AutoPlan, usize), String>;
+/// An off-thread auto-plan's payload: the fit-to-bed cuts + WIRE connectors + the part's component
+/// count, straight off the service's `Planned` response (W.3.3).
+type AutoPlanResult = Result<(Vec<(char, f64)>, Vec<WireConn>, usize), String>;
 
 /// The in-flight auto-plan job (auto-slice + onion auto-place, off-thread) — auto-on-open's worker.
 /// Carries the target part index alongside the task.
@@ -162,7 +163,7 @@ pub(crate) fn auto_reslice(
     mut bg: ResMut<SliceInBackground>,
     mut parts: ResMut<Parts>,
     active_part: Res<ActivePart>,
-    cfg: Res<SceneCfg>,
+    pool: Res<GeomPool>,
     mut status: ResMut<Status>,
 ) {
     let ap = active_part.0;
@@ -190,11 +191,13 @@ pub(crate) fn auto_reslice(
         parts.0[ap].sliced_hash = Some(h); // nothing enabled to slice — treat as done
         return;
     }
+    let Some(base) = part.base else {
+        return; // no held base yet (render still in flight) — retry once it lands
+    };
     let conns = resolve_conns(&part.cuts, &part.conns);
     let orient = orient_inputs(&part.orient);
-    let base = part.base_stl.clone();
     bg.0 = true; // background rebuild → poll_job won't jump the view to exploded
-    kick_reslice(&mut job, &mut status, &cfg, ap, base, xs, conns, orient);
+    kick_reslice(&pool, &mut job, &mut status, ap, base, xs, conns, orient);
     parts.0[ap].sliced_hash = Some(h);
 }
 
@@ -246,7 +249,7 @@ pub(crate) fn request_reslice(
     mut job: ResMut<Job>,
     mut status: ResMut<Status>,
     mut bg: ResMut<SliceInBackground>,
-    cfg: Res<SceneCfg>,
+    pool: Res<GeomPool>,
     parts: Res<Parts>,
     active_part: Res<ActivePart>,
 ) {
@@ -264,11 +267,14 @@ pub(crate) fn request_reslice(
         status.0 = "no enabled cuts".into();
         return;
     }
+    let Some(base) = part.base else {
+        status.0 = "not rendered yet".into();
+        return;
+    };
     let conns = resolve_conns(&part.cuts, &part.conns);
     let orient = orient_inputs(&part.orient);
-    let base = part.base_stl.clone();
     bg.0 = false; // explicit → poll_job jumps to the exploded view when it lands
-    kick_reslice(&mut job, &mut status, &cfg, ap, base, xs, conns, orient);
+    kick_reslice(&pool, &mut job, &mut status, ap, base, xs, conns, orient);
 }
 
 /// The model-derived resources, bundled so `apply_switch_file` can wipe them in one system param
@@ -315,6 +321,7 @@ pub(crate) fn apply_switch_file(
     mut job: ResMut<Job>,
     mut status: ResMut<Status>,
     mut editor: ResMut<EditorBuf>,
+    pool: Res<GeomPool>,
     mut state: ModelState,
 ) {
     // Coalesce: only the last switch requested this frame matters.
@@ -327,8 +334,10 @@ pub(crate) fn apply_switch_file(
     files.active = Some(i);
     scene.source = Some(path.clone());
     read_into_editor(&mut editor, &path); // the new file's disk text becomes the editor buffer (U.3.2)
+    // Drop the outgoing model's held base solids before wiping — a file switch abandons them.
+    free_bases(&pool, state.parts.0.iter().filter_map(|p| p.base).collect());
     state.reset();
-    kick_render(&mut job, &mut status, &scene, true);
+    kick_render(&pool, &mut job, &mut status, &scene, true);
     info!("open: {}", path.display());
 }
 
@@ -370,6 +379,7 @@ pub(crate) fn watch_source(
     mut watch: ResMut<Watch>,
     mut job: ResMut<Job>,
     mut status: ResMut<Status>,
+    pool: Res<GeomPool>,
 ) {
     let Some(src) = scene.source.as_deref() else {
         return;
@@ -398,7 +408,7 @@ pub(crate) fn watch_source(
                 watch.closure.len().saturating_sub(1)
             );
             // Reload (fresh = false): refresh geometry in place, keep each part's cuts/connectors.
-            kick_render(&mut job, &mut status, &scene, false);
+            kick_render(&pool, &mut job, &mut status, &scene, false);
         }
         _ => {}
     }
@@ -449,15 +459,31 @@ pub(crate) fn collect_scads(dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
-/// Spawn a WHOLE render of every top-level part on the async compute pool (T.2b) — `render_parts`
-/// splits the model into its implicit-union children, one STL each. `fresh` distinguishes a new
-/// source (replace the parts list) from a reload of the same one (refresh geometry, keep edits).
-pub(crate) fn kick_render(job: &mut Job, status: &mut Status, cfg: &SceneCfg, fresh: bool) {
+/// Fire-and-forget: tell the geometry service to drop these held base solids (W.3.3). Detached so a
+/// frame never blocks on the reply — freeing is a cheap map removal, and a missed free only costs a
+/// bounded-store eviction (an op on an evicted handle self-heals as a re-render). No-op when empty.
+fn free_bases(pool: &GeomPool, ids: Vec<SolidId>) {
+    if ids.is_empty() {
+        return;
+    }
+    let pool = pool.clone();
+    AsyncComputeTaskPool::get()
+        .spawn(async move {
+            let _ = pool.call(Request::Free { ids }).await;
+        })
+        .detach();
+}
+
+/// Spawn a WHOLE render of every top-level part through the geometry service (T.2b, W.3.3) — the
+/// service splits the model into its implicit-union children and MINTS a base handle per part. `fresh`
+/// distinguishes a new source (replace the parts list) from a reload of the same one (refresh geometry,
+/// keep edits).
+pub(crate) fn kick_render(pool: &GeomPool, job: &mut Job, status: &mut Status, cfg: &SceneCfg, fresh: bool) {
     let Some(src) = cfg.source.clone() else {
         status.0 = "no .scad source".into();
         return;
     };
-    kick_render_from(job, status, cfg, &src, fresh);
+    kick_render_from(pool, job, status, cfg, &src, fresh);
 }
 
 /// Whole-render an EXPLICIT source path (U.3.2) — `cfg` still supplies root/tmp, but the content +
@@ -465,23 +491,37 @@ pub(crate) fn kick_render(job: &mut Job, status: &mut Status, cfg: &SceneCfg, fr
 /// temp this way WITHOUT repointing `cfg.source`, so `watch_source` keeps watching the real file and
 /// never fights the preview.
 pub(crate) fn kick_render_from(
+    pool: &GeomPool,
     job: &mut Job,
     status: &mut Status,
     cfg: &SceneCfg,
     src: &Path,
     fresh: bool,
 ) {
-    let src = src.to_path_buf();
-    let (root, tmp) = (cfg.root.clone(), cfg.tmp.clone());
+    let pool = pool.clone();
+    let source = Source::Path(src.to_string_lossy().into_owned());
+    let root = cfg.root.as_ref().map(|r| r.to_string_lossy().into_owned());
     let task = AsyncComputeTaskPool::get().spawn(async move {
-        // Each part Solid is built AND consumed inside render_parts (written to STL) — none crosses
-        // this async boundary; only the STL paths return (Solid is !Send).
-        fab::render_parts(root.as_deref(), &src, &tmp)
-            .map(|v| JobResult::Rendered {
+        // The service builds + HOLDS each part Solid (!Send stays on its thread); only the minted
+        // handle + display STL bytes + bbox travel back here.
+        match pool.call(Request::RenderParts { source, root }).await {
+            Ok(Response::PartsRendered { parts }) => Ok(JobResult::Rendered {
                 fresh,
-                parts: v.into_iter().map(|(p, _bbox, name)| (p, name)).collect(),
-            })
-            .map_err(|e| format!("{e:#}"))
+                parts: parts
+                    .into_iter()
+                    .map(|w| RenderedPart {
+                        base: w.id,
+                        stl: w.stl,
+                        min: w.min,
+                        max: w.max,
+                        name: w.name,
+                    })
+                    .collect(),
+            }),
+            Ok(Response::Failed { error }) => Err(error),
+            Ok(_) => Err("render: unexpected service response".to_string()),
+            Err(e) => Err(format!("{e:#}")),
+        }
     });
     job.0 = Some(task);
     status.0 = "rendering".into();
@@ -497,6 +537,7 @@ pub(crate) fn preview_edited_buffer(
     mut job: ResMut<Job>,
     mut status: ResMut<Status>,
     time: Res<Time>,
+    pool: Res<GeomPool>,
 ) {
     let Some(t) = editor.edited_at else {
         return;
@@ -518,28 +559,42 @@ pub(crate) fn preview_edited_buffer(
         status.0 = "preview write failed".into();
         return;
     }
-    kick_render_from(&mut job, &mut status, &scene, &preview, false);
+    kick_render_from(&pool, &mut job, &mut status, &scene, &preview, false);
 }
 
-/// Spawn a per-part reslice off `part_stl` (part `part`'s cached whole STL) on the async compute
-/// pool (T.2b). Only that part's geometry is touched; its `Model` entity (tagged `PartId(part)`) is
-/// the one `poll_job` swaps when the slice lands. The Solid lives + dies inside the kernel (!Send).
+/// Spawn a per-part reslice off part `part`'s HELD base handle through the geometry service (T.2b,
+/// W.3.3). Only that part's geometry is touched; its `Model` entity (tagged `PartId(part)`) is the
+/// one `poll_job` swaps when the sliced STL bytes land. The Solid never leaves the service (!Send).
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn kick_reslice(
+    pool: &GeomPool,
     job: &mut Job,
     status: &mut Status,
-    cfg: &SceneCfg,
     part: usize,
-    part_stl: PathBuf,
+    base: SolidId,
     cuts: Vec<(char, f64)>,
     conns: Vec<fab::Conn>,
     orient: Vec<fab::Orient3>,
 ) {
-    let tmp = cfg.tmp.clone();
+    let pool = pool.clone();
+    let connectors = fab::to_wire_conns(&conns);
+    let orient = fab::to_wire_orient(&orient);
     let task = AsyncComputeTaskPool::get().spawn(async move {
-        fab::reslice_part_kernel(&part_stl, &cuts, &conns, &orient, SPREAD, &tmp)
-            .map(|stl| JobResult::Resliced { part, stl })
-            .map_err(|e| format!("{e:#}"))
+        match pool
+            .call(Request::Reslice {
+                base,
+                cuts,
+                connectors,
+                orient,
+                spread: SPREAD,
+            })
+            .await
+        {
+            Ok(Response::Resliced { stl }) => Ok(JobResult::Resliced { part, stl }),
+            Ok(Response::Failed { error }) => Err(error),
+            Ok(_) => Err("reslice: unexpected service response".to_string()),
+            Err(e) => Err(format!("{e:#}")),
+        }
     });
     job.0 = Some(task);
     status.0 = "slicing".into();
@@ -558,6 +613,7 @@ pub(crate) fn poll_job(
     editor: Res<EditorBuf>,
     cfg: Res<SceneCfg>,
     bg: Res<SliceInBackground>,
+    pool: Res<GeomPool>,
     models: Query<(Entity, &PartId), With<Model>>,
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
@@ -573,25 +629,30 @@ pub(crate) fn poll_job(
     match result {
         Ok(JobResult::Rendered {
             fresh,
-            parts: paths,
+            parts: rendered,
         }) => {
             // A structural change (the model's part COUNT moved) forces a full rebuild even on a
             // reload — the old Part↔entity mapping no longer holds.
-            if fresh || paths.len() != parts.0.len() {
+            if fresh || rendered.len() != parts.0.len() {
+                // The outgoing parts' held base solids are abandoned — free them on the service.
+                free_bases(&pool, parts.0.iter().filter_map(|p| p.base).collect());
                 for (e, _) in &models {
                     commands.entity(e).despawn();
                 }
-                let mut new: Vec<Part> = paths
+                let mut new: Vec<Part> = rendered
                     .iter()
                     .enumerate()
-                    .map(|(i, (path, name))| {
+                    .map(|(i, r)| {
                         build_part(
                             &mut commands,
                             &mut meshes,
                             &mut materials,
                             i,
-                            path,
-                            name.clone(),
+                            r.base,
+                            &r.stl,
+                            r.min,
+                            r.max,
+                            r.name.clone(),
                         )
                     })
                     .collect();
@@ -610,8 +671,10 @@ pub(crate) fn poll_job(
                 *parts = Parts(new);
                 active_part.0 = 0;
             } else {
-                // Reload of the SAME source: refresh each part's geometry, KEEP its cuts/connectors.
-                for (i, (path, name)) in paths.iter().enumerate() {
+                // Reload of the SAME source: the render minted fresh handles for every part — free the
+                // old ones, then refresh each part's geometry in place, KEEPING its cuts/connectors.
+                free_bases(&pool, parts.0.iter().filter_map(|p| p.base).collect());
+                for (i, r) in rendered.iter().enumerate() {
                     refresh_part(
                         &mut commands,
                         &mut meshes,
@@ -619,8 +682,11 @@ pub(crate) fn poll_job(
                         &models,
                         &mut parts.0[i],
                         i,
-                        path,
-                        name.clone(),
+                        r.base,
+                        &r.stl,
+                        r.min,
+                        r.max,
+                        r.name.clone(),
                     );
                 }
             }
@@ -630,7 +696,7 @@ pub(crate) fn poll_job(
             pipeline.geo_of = Some(hash_one(&editor.text));
         }
         Ok(JobResult::Resliced { part, stl }) => {
-            let (mesh, _) = mesh_and_bounds(&mut meshes, &stl);
+            let mesh = mesh_from_bytes(&mut meshes, &stl);
             let Some(p) = parts.0.get_mut(part) else {
                 return; // the part went away under us (a reload changed the count) — drop the slice
             };
@@ -663,17 +729,26 @@ pub(crate) fn poll_job(
     }
 }
 
-/// Build a fresh [`Part`] for top-level part `i` from its whole STL — spawn its `Model` entity
-/// (tagged `PartId(i)`), fix its bounds, and seed a centre cut if it fits the bed.
+/// A wire `[f64; 3]` bbox corner → Bevy `Vec3`.
+fn vec3_of(p: [f64; 3]) -> Vec3 {
+    Vec3::new(p[0] as f32, p[1] as f32, p[2] as f32)
+}
+
+/// Build a fresh [`Part`] for top-level part `i` from its rendered STL bytes + minted base handle —
+/// spawn its `Model` entity (tagged `PartId(i)`) and fix its bounds off the wire bbox.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn build_part(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<StandardMaterial>,
     i: usize,
-    path: &Path,
+    base: SolidId,
+    stl: &[u8],
+    min: [f64; 3],
+    max: [f64; 3],
     name: Option<String>,
 ) -> Part {
-    let (mesh, aabb) = mesh_and_bounds(meshes, path);
+    let mesh = mesh_from_bytes(meshes, stl);
     commands.spawn((
         Mesh3d(mesh.clone()),
         MeshMaterial3d(part_material(materials)),
@@ -682,16 +757,14 @@ pub(crate) fn build_part(
         Pickable::IGNORE, // pick-transparent so a cut-plane drag reaches the plane behind the solid
     ));
     let mut part = Part {
-        base_stl: path.to_path_buf(),
+        base: Some(base),
         whole: Some(mesh),
         name,
         ..default()
     };
-    if let Some((min, max)) = aabb {
-        part.bounds.0 = Some((min, max));
-        // No seed cut: kick_auto_plan derives overflowing parts (fit-to-bed + connectors) and leaves
-        // fitting parts WHOLE (U.3.15). A part that fits the bed doesn't need slicing.
-    }
+    // Bounds come straight off the wire bbox (the service guarantees it). No seed cut: kick_auto_plan
+    // derives overflowing parts (fit-to-bed + connectors) and leaves fitting parts WHOLE (U.3.15).
+    part.bounds.0 = Some((vec3_of(min), vec3_of(max)));
     part
 }
 
@@ -706,10 +779,13 @@ pub(crate) fn refresh_part(
     models: &Query<(Entity, &PartId), With<Model>>,
     part: &mut Part,
     i: usize,
-    path: &Path,
+    base: SolidId,
+    stl: &[u8],
+    min: [f64; 3],
+    max: [f64; 3],
     name: Option<String>,
 ) {
-    let (mesh, aabb) = mesh_and_bounds(meshes, path);
+    let mesh = mesh_from_bytes(meshes, stl);
     despawn_part_models(commands, models, i);
     commands.spawn((
         Mesh3d(mesh.clone()),
@@ -718,16 +794,16 @@ pub(crate) fn refresh_part(
         PartId(i),
         Pickable::IGNORE, // pick-transparent so a cut-plane drag reaches the plane behind the solid
     ));
-    part.base_stl = path.to_path_buf();
+    part.base = Some(base);
     part.whole = Some(mesh);
     part.name = name;
     part.spread = 0.0; // reload drops back to the intact model
     part.sliced = None;
     part.sliced_hash = None; // force a reslice off the new geometry if the part has cuts
-    if part.bounds.0.is_none()
-        && let Some((min, max)) = aabb
-    {
-        part.bounds.0 = Some((min, max));
+    // A reload keeps the ORIGINAL bbox (moving it would desync the cut positions from the source the
+    // slicer re-renders); only seed it if this is the first geometry the part has seen.
+    if part.bounds.0.is_none() {
+        part.bounds.0 = Some((vec3_of(min), vec3_of(max)));
     }
 }
 
@@ -852,6 +928,7 @@ pub(crate) fn kick_auto_plan(
     scene: Res<SceneCfg>,
     mut job: ResMut<AutoJob>,
     mut status: ResMut<Status>,
+    pool: Res<GeomPool>,
 ) {
     if job.0.is_some() {
         return; // one already in flight
@@ -882,14 +959,31 @@ pub(crate) fn kick_auto_plan(
             part.auto_planned.0 = Some(src.clone()); // fits the bed → stays whole, stop re-checking
             continue;
         }
-        let base_stl = part.base_stl.clone(); // this part's whole STL (render_parts output)
-        if base_stl.as_os_str().is_empty() || !base_stl.exists() {
-            continue; // this part's base not rendered to disk yet — try next frame
-        }
+        let Some(base) = part.base else {
+            continue; // this part's base not rendered yet (no held handle) — try next frame
+        };
         part.auto_planned.0 = Some(src.clone()); // fire once per source
+        let pool = pool.clone();
         let task = AsyncComputeTaskPool::get().spawn(async move {
-            // In-process cross-sections — the base Solid lives + dies inside fab::auto_plan (!Send).
-            fab::auto_plan(&base_stl, lo, hi, bed).map_err(|e| format!("{e:#}"))
+            // The base Solid stays held on its shard; only the plain-data plan crosses back.
+            match pool
+                .call(Request::AutoPlan {
+                    base,
+                    min: lo,
+                    max: hi,
+                    bed,
+                })
+                .await
+            {
+                Ok(Response::Planned {
+                    cuts,
+                    connectors,
+                    pieces,
+                }) => Ok((cuts, connectors, pieces)),
+                Ok(Response::Failed { error }) => Err(error),
+                Ok(_) => Err("auto-plan: unexpected service response".to_string()),
+                Err(e) => Err(format!("{e:#}")),
+            }
         });
         job.0 = Some((i, task));
         status.0 = format!("auto-planning part {}…", i + 1);
@@ -914,7 +1008,7 @@ pub(crate) fn poll_auto_plan(
     job.0 = None;
     // Destructure the result BEFORE borrowing the part, so `part.pieces` can be stamped alongside the
     // cut/connector writes without fighting the cuts/conns reborrows.
-    let (plan, pieces) = match result {
+    let (cuts_plan, conns_plan, pieces) = match result {
         Ok(v) => v,
         Err(e) => {
             status.0 = format!("auto-plan failed: {e:#}");
@@ -925,8 +1019,7 @@ pub(crate) fn poll_auto_plan(
     part.pieces = pieces; // the part's connected-component count (drives the "N pcs" header)
     let cuts = &mut part.cuts;
     let conns = &mut part.conns;
-    cuts.list = plan
-        .cuts
+    cuts.list = cuts_plan
         .iter()
         .map(|&(ax, at)| CutDef {
             axis: match ax {
@@ -939,12 +1032,11 @@ pub(crate) fn poll_auto_plan(
         })
         .collect();
     cuts.active = 0;
-    conns.list = plan
-        .connectors
+    conns.list = conns_plan
         .iter()
         .map(|c| PlacedConn {
             cut: c.cut,
-            pos: [c.pos[0].f() as f32, c.pos[1].f() as f32],
+            pos: [c.pos[0] as f32, c.pos[1] as f32],
             size: c.size.unwrap_or(6.0) as f32,
             kind: if c.kind == "bolt" {
                 fab::ConnKind::Bolt

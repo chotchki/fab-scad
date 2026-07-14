@@ -40,6 +40,7 @@ pub(crate) fn enter_exit_print(
     mut job: ResMut<PrintJob>,
     mut cache: ResMut<PrintPieces>,
     mut status: ResMut<Status>,
+    pool: Res<GeomPool>,
     preview_ents: Query<Entity, PreviewSpawn>,
     mut beds: Query<&mut Visibility, With<Bed>>,
     mut commands: Commands,
@@ -67,12 +68,12 @@ pub(crate) fn enter_exit_print(
                 .enumerate()
                 .map(|(i, p)| PartPrintSpec {
                     part: i,
-                    base_stl: p.base_stl.clone(),
+                    base: p.base,
                     cuts: p.cuts.enabled_cuts(),
                     conns: resolve_conns(&p.cuts, &p.conns),
                 })
                 .collect();
-            kick_print_job(&mut job, &mut status, specs);
+            kick_print_job(&pool, &mut job, &mut status, specs);
         }
     } else {
         for e in &preview_ents {
@@ -88,10 +89,10 @@ pub(crate) fn enter_exit_print(
 }
 
 /// One part's inputs for the co-pack print layout (T.2b.4). All owned + Send — moved into the
-/// off-thread job, which slices each part off its own cached STL (no Solid crosses the boundary).
+/// off-thread job, which lays each part out off its HELD base handle (no Solid crosses the boundary).
 pub(crate) struct PartPrintSpec {
     pub(crate) part: usize,
-    pub(crate) base_stl: PathBuf,
+    pub(crate) base: Option<SolidId>,
     pub(crate) cuts: Vec<(char, f64)>,
     pub(crate) conns: Vec<fab::Conn>,
 }
@@ -99,22 +100,53 @@ pub(crate) struct PartPrintSpec {
 /// Spawn the per-piece render + auto-orient on the compute pool (off-thread, so the UI stays live
 /// while the plate lays out). CO-PACK (T.2b.4): fans `print_layout_kernel` over EVERY part's spec
 /// and concatenates the pieces, each tagged with its part index, so one preview holds all parts.
-pub(crate) fn kick_print_job(job: &mut PrintJob, status: &mut Status, specs: Vec<PartPrintSpec>) {
-    if specs.iter().all(|s| s.base_stl.as_os_str().is_empty()) {
+pub(crate) fn kick_print_job(
+    pool: &GeomPool,
+    job: &mut PrintJob,
+    status: &mut Status,
+    specs: Vec<PartPrintSpec>,
+) {
+    if specs.iter().all(|s| s.base.is_none()) {
         status.0 = "nothing to print".into();
         return;
     }
+    let pool = pool.clone();
     let task = AsyncComputeTaskPool::get().spawn(async move {
-        // In-process via the Manifold kernel (11.12): each part sliced off its cached base, both
-        // passes off that base. Pieces from all parts concatenate, tagged with the part index.
+        // Through the geometry service (W.3.3): each part laid out off its HELD base, both passes on
+        // that base. Pieces from all parts concatenate, tagged with the part index; only STL bytes +
+        // orientations cross back (the Solid never leaves the service).
         let mut all: Vec<(usize, fab::PiecePrint)> = Vec::new();
         for s in &specs {
-            if s.base_stl.as_os_str().is_empty() {
+            let Some(base) = s.base else {
                 continue; // an un-rendered part — skip it
+            };
+            let connectors = fab::to_wire_conns(&s.conns);
+            match pool
+                .call(Request::PrintLayout {
+                    base,
+                    cuts: s.cuts.clone(),
+                    connectors,
+                })
+                .await
+            {
+                Ok(Response::LaidOut { pieces }) => {
+                    for wp in pieces {
+                        let mesh = stl::load_stl_bytes(&wp.stl).map_err(|e| format!("{e:#}"))?;
+                        all.push((
+                            s.part,
+                            fab::PiecePrint {
+                                piece: wp.piece,
+                                comp: wp.comp,
+                                mesh,
+                                up: wp.up,
+                            },
+                        ));
+                    }
+                }
+                Ok(Response::Failed { error }) => return Err(error),
+                Ok(_) => return Err("print layout: unexpected service response".to_string()),
+                Err(e) => return Err(format!("{e:#}")),
             }
-            let pieces = fab::print_layout_kernel(&s.base_stl, &s.cuts, &s.conns)
-                .map_err(|e| format!("{e:#}"))?;
-            all.extend(pieces.into_iter().map(|pp| (s.part, pp)));
         }
         Ok(all)
     });

@@ -24,6 +24,21 @@ if [[ "$profile" == "release" ]] && command -v wasm-opt >/dev/null; then
   wasm-opt -Oz -o gui/web/fab_gui_bg.wasm gui/web/fab_gui_bg.wasm
 fi
 
+# The geometry Worker (W.3.6): the kernel-only fab-geom wasm (Manifold via wasm-cxx-shim) in its own
+# Web Worker. Needs LLVM-21 for the C++ build — prepend it (override with LLVM_BIN=… on other setups).
+LLVM_BIN="${LLVM_BIN:-/opt/homebrew/opt/llvm@21/bin}"
+echo "building fab-geom worker (manifold-wasm, LLVM-21)…"
+PATH="$LLVM_BIN:$PATH" cargo build -p fab-geom --release --target wasm32-unknown-unknown
+mkdir -p gui/web/geom
+wasm-bindgen --target web --no-typescript --out-name fab_geom --out-dir gui/web/geom \
+  "target/wasm32-unknown-unknown/$dir/fab_geom.wasm"
+if [[ "$profile" == "release" ]] && command -v wasm-opt >/dev/null; then
+  wasm-opt -Oz --enable-reference-types --enable-bulk-memory \
+    -o gui/web/geom/fab_geom_bg.wasm gui/web/geom/fab_geom_bg.wasm
+fi
+cp packaging/web/geom-worker.js gui/web/geom/
+
 sz=$(du -h gui/web/fab_gui_bg.wasm | cut -f1)
-echo "built -> gui/web/fab_gui.js + fab_gui_bg.wasm ($sz)"
+gsz=$(du -h gui/web/geom/fab_geom_bg.wasm | cut -f1)
+echo "built -> gui/web/fab_gui.js + fab_gui_bg.wasm ($sz) + geom/fab_geom_bg.wasm ($gsz)"
 echo "serve:  python3 -m http.server --directory gui/web 8080   # then open http://localhost:8080"

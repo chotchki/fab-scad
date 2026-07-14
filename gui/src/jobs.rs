@@ -503,12 +503,49 @@ pub(crate) fn kick_render_from(
     src: &Path,
     fresh: bool,
 ) {
-    let pool = pool.clone();
     let source = Source::Path(src.to_string_lossy().into_owned());
     let root = cfg.root.as_ref().map(|r| r.to_string_lossy().into_owned());
+    spawn_render(pool, job, status, source, root, fresh);
+}
+
+/// Whole-render from in-memory source BYTES (W.3.6, wasm) — the browser has no fs, so the render
+/// source is the editor buffer, sent as `Source::Bytes`. NO-INCLUDE only until the lib closure is
+/// wired (geomsvc Stage 2).
+#[cfg(target_arch = "wasm32")]
+pub(crate) fn kick_render_bytes(
+    pool: &GeomPool,
+    job: &mut Job,
+    status: &mut Status,
+    main: Vec<u8>,
+    fresh: bool,
+) {
+    spawn_render(
+        pool,
+        job,
+        status,
+        Source::Bytes {
+            main,
+            libs: vec![],
+        },
+        None,
+        fresh,
+    );
+}
+
+/// The shared render task-spawn (T.2b, W.3.3): fire `RenderParts` at the service and bank the minted
+/// handles + display STL bytes + bboxes as a [`JobResult::Rendered`]. The service builds + HOLDS each
+/// part Solid (!Send stays on its shard); only bytes cross back. Source is `Path` (native fs) or
+/// `Bytes` (wasm) — the one call the two front doors share.
+fn spawn_render(
+    pool: &GeomPool,
+    job: &mut Job,
+    status: &mut Status,
+    source: Source,
+    root: Option<String>,
+    fresh: bool,
+) {
+    let pool = pool.clone();
     let task = AsyncComputeTaskPool::get().spawn(async move {
-        // The service builds + HOLDS each part Solid (!Send stays on its thread); only the minted
-        // handle + display STL bytes + bbox travel back here.
         match pool.call(Request::RenderParts { source, root }).await {
             Ok(Response::PartsRendered { parts }) => Ok(JobResult::Rendered {
                 fresh,
@@ -551,20 +588,37 @@ pub(crate) fn preview_edited_buffer(
         return; // still typing, or a render's already running — retry next idle frame
     }
     editor.edited_at = None;
-    let Some(dir) = editor.path.parent() else {
-        return;
-    };
-    let stem = editor
-        .path
-        .file_stem()
-        .map(|s| s.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "preview".into());
-    let preview = dir.join(format!(".fab-preview-{stem}.scad"));
-    if std::fs::write(&preview, editor.text.as_bytes()).is_err() {
-        status.0 = "preview write failed".into();
-        return;
+    // wasm: no fs — the buffer IS the source, sent as Source::Bytes to the geom Worker (W.3.6).
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = &scene;
+        kick_render_bytes(
+            &pool,
+            &mut job,
+            &mut status,
+            editor.text.as_bytes().to_vec(),
+            false,
+        );
     }
-    kick_render_from(&pool, &mut job, &mut status, &scene, &preview, false);
+    // native: write the buffer to a hidden temp beside the real file (so relative `include`s resolve)
+    // and render that path.
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let Some(dir) = editor.path.parent() else {
+            return;
+        };
+        let stem = editor
+            .path
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "preview".into());
+        let preview = dir.join(format!(".fab-preview-{stem}.scad"));
+        if std::fs::write(&preview, editor.text.as_bytes()).is_err() {
+            status.0 = "preview write failed".into();
+            return;
+        }
+        kick_render_from(&pool, &mut job, &mut status, &scene, &preview, false);
+    }
 }
 
 /// Spawn a per-part reslice off part `part`'s HELD base handle through the geometry service (T.2b,

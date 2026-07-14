@@ -77,12 +77,14 @@ mod fab;
 pub mod geom;
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) use geom::GeomPool;
-// wasm's transport is the W.3.6 Web Worker; until it's wired, a stub GeomPool (same API, ops Fail)
-// keeps the render/slice systems compiling + running on wasm as UI + empty scene.
+// wasm's transport (W.3.6): GeomPool talks to the fab-geom Web Worker over postMessage (worker_rpc),
+// the transport twin of the native kernel-thread pool — same app systems, a canvas-vs-thread swap.
 #[cfg(target_arch = "wasm32")]
-pub mod geom_stub;
+mod worker_rpc;
 #[cfg(target_arch = "wasm32")]
-pub(crate) use geom_stub::GeomPool;
+pub mod geom_wasm;
+#[cfg(target_arch = "wasm32")]
+pub(crate) use geom_wasm::GeomPool;
 
 /// Native entry: parse args + dispatch to the windowed / screenshot / scripted app builder. The wasm
 /// build enters through a `#[wasm_bindgen(start)]` on the canvas instead (W.3.2), not here.

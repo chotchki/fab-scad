@@ -1,4 +1,7 @@
-# wasm-bindgen output (generated from the cdylib) — index.html is the only source-controlled file here.
+# wasm-bindgen output (generated from the cdylib) — index.html + build-wasm.sh are the only
+# source-controlled files here. geom/ is the generated worker bundle (geom-worker.js is copied from
+# packaging/web/ by build-wasm.sh).
 fab_gui.js
 fab_gui_bg.wasm
 fab_gui.d.ts
+geom/

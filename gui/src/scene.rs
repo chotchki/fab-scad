@@ -50,6 +50,17 @@ pub(crate) fn window_plugin() -> WindowPlugin {
     }
 }
 
+/// A NO-INCLUDE demo the wasm smoke renders (W.3.6) — pure CSG, so Stage-1 bytes-eval handles it (no
+/// lib closure). Seeded into the editor buffer when the web app boots without a source.
+#[cfg(target_arch = "wasm32")]
+const WEB_DEMO: &str = "\
+// fab-gui on the web — a box with a bored hole (CSG, no includes)\n\
+$fn = $preview ? 24 : 64;\n\
+difference() {\n\
+  cube([60, 40, 30], center = true);\n\
+  translate([0, 0, 6]) cylinder(h = 24, r = 12, center = true);\n\
+}\n";
+
 #[allow(clippy::too_many_arguments)] // a Bevy startup system — params are dependencies, not a smell
 pub(crate) fn setup_windowed(
     mut commands: Commands,
@@ -69,6 +80,13 @@ pub(crate) fn setup_windowed(
         read_into_editor(&mut editor, &src);
         files.files = vec![src];
         files.active = Some(0);
+    }
+    // wasm smoke (W.3.6): no launch file → seed a NO-INCLUDE demo into the editor buffer and arm the
+    // debounced preview, so the geom Worker renders it (the browser's source is the buffer, not a path).
+    #[cfg(target_arch = "wasm32")]
+    if scene.source.is_none() {
+        editor.text = WEB_DEMO.to_string();
+        editor.edited_at = Some(0.0);
     }
     let radius = scene.bed[0].max(scene.bed[1]).max(80.0);
     // Two cameras: a full-window UI camera (draws the panel + clears the dark bg) and the 3D camera,

@@ -14,12 +14,18 @@
 // default and gone at R.X.)
 #![forbid(unsafe_code)]
 
-pub mod mathf; // Pillar 2: the libm seam — every transcendental routes through here.
-pub mod mesh; // the halfedge `Impl` (the mesh spine); MeshGL <-> Impl, IsManifold.
-pub mod boolean; // the robustness core: boolean3 + boolean_result + face_op + edge_op.
-pub mod polygon; // the robust 2D triangulator the boolean reassembly leans on.
-pub mod check; // Oracle B: the manifold-invariant checker (test.h port), reference-free.
-pub mod par; // Pillar 1: the deterministic parallel seam (serial when `par` is off).
+// the robustness core: boolean3 + boolean_result + face_op + edge_op.
+pub mod boolean;
+// Oracle B: the manifold-invariant checker (test.h port), reference-free.
+pub mod check;
+// Pillar 2: the libm seam — every transcendental routes through here.
+pub mod mathf;
+// the halfedge `Impl` (the mesh spine); MeshGL <-> Impl, IsManifold.
+pub mod mesh;
+// Pillar 1: the deterministic parallel seam (serial when `par` is off).
+pub mod par;
+// the robust 2D triangulator the boolean reassembly leans on.
+pub mod polygon;
 
 /// The C++ Manifold differential oracle (Oracle A) — a `KernelDriver` trait with a Rust and a C++
 /// backend, plus the triangulation-independent boolean-residual metric. Scaffolds R0..R.X; gone at

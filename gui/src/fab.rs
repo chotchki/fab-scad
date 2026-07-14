@@ -12,9 +12,9 @@ use anyhow::Result;
 
 use fab_scad::bambu::{self, PieceToPlace};
 use fab_scad::geomsg::{WireConn, WireOrient};
+use fab_scad::feasibility;
 use fab_scad::manifest::{Connector, Cut, PieceOrient, Slicing};
 use fab_scad::num::Num;
-use fab_scad::slicing;
 
 use crate::stl::StlMesh;
 
@@ -158,7 +158,7 @@ pub fn conn_feasibility(
     let mut spec = cuts_to_spec(cuts);
     spec.connector = to_connectors(connectors);
     spec.orient = to_orient(orient);
-    slicing::onion_feasibility(&spec)
+    feasibility::onion_feasibility(&spec)
 }
 
 /// The two connector kinds the GUI places (both consumed by the slicer): Onion = support-free

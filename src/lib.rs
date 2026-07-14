@@ -25,6 +25,10 @@ pub mod bambu;
 pub mod corpus;
 pub mod cross_section;
 pub mod deps;
+// Pure onion-joint feasibility + slab math (W.3.4) — no Solid, so it rides `geometry` (reachable on
+// the wasm app for the live joint-downgrade flag). Extracted from `slicing`; the kernel slicer reuses it.
+#[cfg(feature = "geometry")]
+pub mod feasibility;
 #[cfg(all(feature = "native", feature = "kernel"))]
 pub mod differ;
 pub mod geomsg;

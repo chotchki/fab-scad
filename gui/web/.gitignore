@@ -5,3 +5,4 @@ fab_gui.js
 fab_gui_bg.wasm
 fab_gui.d.ts
 geom/
+libs.json

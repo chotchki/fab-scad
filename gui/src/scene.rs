@@ -50,16 +50,15 @@ pub(crate) fn window_plugin() -> WindowPlugin {
     }
 }
 
-/// A NO-INCLUDE demo the wasm smoke renders (W.3.6) — pure CSG, so Stage-1 bytes-eval handles it (no
-/// lib closure). Seeded into the editor buffer when the web app boots without a source.
+/// The demo the wasm app renders when it boots without a source (W.3.6). INCLUDEs the packed demo lib
+/// (`fabdemo.scad`) so it exercises the Stage-2 lib-closure fetch — the app pulls fabdemo.scad from
+/// libs.json and hands it to the worker, proving real include-using models render on the web.
 #[cfg(target_arch = "wasm32")]
 const WEB_DEMO: &str = "\
-// fab-gui on the web — a box with a bored hole (CSG, no includes)\n\
+// fab-gui on the web — a bracket from the demo library (exercises the include-closure fetch)\n\
 $fn = $preview ? 24 : 64;\n\
-difference() {\n\
-  cube([60, 40, 30], center = true);\n\
-  translate([0, 0, 6]) cylinder(h = 24, r = 12, center = true);\n\
-}\n";
+include <fabdemo.scad>\n\
+fab_bracket();\n";
 
 #[allow(clippy::too_many_arguments)] // a Bevy startup system — params are dependencies, not a smell
 pub(crate) fn setup_windowed(

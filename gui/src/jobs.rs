@@ -509,8 +509,8 @@ pub(crate) fn kick_render_from(
 }
 
 /// Whole-render from in-memory source BYTES (W.3.6, wasm) — the browser has no fs, so the render
-/// source is the editor buffer, sent as `Source::Bytes`. NO-INCLUDE only until the lib closure is
-/// wired (geomsvc Stage 2).
+/// source is the editor buffer, sent as `Source::Bytes`. First gathers the model's include CLOSURE
+/// from the packed lib tree (fetched once) so `use`/`include` (BOSL2, scad-lib) resolve on the worker.
 #[cfg(target_arch = "wasm32")]
 pub(crate) fn kick_render_bytes(
     pool: &GeomPool,
@@ -519,17 +519,21 @@ pub(crate) fn kick_render_bytes(
     main: Vec<u8>,
     fresh: bool,
 ) {
-    spawn_render(
-        pool,
-        job,
-        status,
-        Source::Bytes {
-            main,
-            libs: vec![],
-        },
-        None,
-        fresh,
-    );
+    let pool = pool.clone();
+    let task = AsyncComputeTaskPool::get().spawn(async move {
+        let main_str = String::from_utf8_lossy(&main).into_owned();
+        let libs = crate::lib_fetch::lib_closure(&main_str).await;
+        render_result(
+            pool.call(Request::RenderParts {
+                source: Source::Bytes { main, libs },
+                root: None,
+            })
+            .await,
+            fresh,
+        )
+    });
+    job.0 = Some(task);
+    status.0 = "rendering".into();
 }
 
 /// The shared render task-spawn (T.2b, W.3.3): fire `RenderParts` at the service and bank the minted
@@ -545,28 +549,33 @@ fn spawn_render(
     fresh: bool,
 ) {
     let pool = pool.clone();
-    let task = AsyncComputeTaskPool::get().spawn(async move {
-        match pool.call(Request::RenderParts { source, root }).await {
-            Ok(Response::PartsRendered { parts }) => Ok(JobResult::Rendered {
-                fresh,
-                parts: parts
-                    .into_iter()
-                    .map(|w| RenderedPart {
-                        base: w.id,
-                        stl: w.stl,
-                        min: w.min,
-                        max: w.max,
-                        name: w.name,
-                    })
-                    .collect(),
-            }),
-            Ok(Response::Failed { error }) => Err(error),
-            Ok(_) => Err("render: unexpected service response".to_string()),
-            Err(e) => Err(format!("{e:#}")),
-        }
-    });
+    let task = AsyncComputeTaskPool::get()
+        .spawn(async move { render_result(pool.call(Request::RenderParts { source, root }).await, fresh) });
     job.0 = Some(task);
     status.0 = "rendering".into();
+}
+
+/// Map a `RenderParts` service reply to a [`JobResult`] (or an error string) — shared by the native
+/// (Path) and wasm (Bytes) render front doors.
+fn render_result(resp: anyhow::Result<Response>, fresh: bool) -> Result<JobResult, String> {
+    match resp {
+        Ok(Response::PartsRendered { parts }) => Ok(JobResult::Rendered {
+            fresh,
+            parts: parts
+                .into_iter()
+                .map(|w| RenderedPart {
+                    base: w.id,
+                    stl: w.stl,
+                    min: w.min,
+                    max: w.max,
+                    name: w.name,
+                })
+                .collect(),
+        }),
+        Ok(Response::Failed { error }) => Err(error),
+        Ok(_) => Err("render: unexpected service response".to_string()),
+        Err(e) => Err(format!("{e:#}")),
+    }
 }
 
 /// Debounced live preview (U.3.2): once the editor buffer has sat un-touched for `EDIT_DEBOUNCE` and

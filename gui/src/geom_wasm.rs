@@ -23,8 +23,8 @@ thread_local! {
 }
 
 /// Where the bundle's members live — the page declares it via `<canvas id="fab-web" data-base=…>`;
-/// document-relative by default. The geom worker + its wasm live under `{base}geom/`.
-fn bundle_base() -> String {
+/// document-relative by default. The geom worker + its wasm live under `{base}geom/`, libs.json at `{base}`.
+pub(crate) fn bundle_base() -> String {
     web_sys::window()
         .and_then(|w| w.document())
         .and_then(|d| d.get_element_by_id("fab-web"))

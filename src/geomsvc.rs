@@ -2,7 +2,7 @@
 //! the web app needs behind one seam. Runs in the fab-geom worker on wasm, on a task pool
 //! natively. Solids never cross the boundary (the !Send contract): bytes in, bytes out.
 
-use anyhow::{Context, Result, anyhow, bail, ensure};
+use anyhow::{Context, Result, anyhow, ensure};
 use std::collections::HashMap;
 
 use crate::auto_orient;
@@ -283,16 +283,45 @@ fn rotated_union(objects: &[GeomObject]) -> Result<Solid> {
 // --- fab-gui ops (W.3): base solids MINTED into / READ from the store. Render is fs-coupled (the
 // scad-rs `import` loader), hence native-gated; the wasm source-bytes eval lands at W.3.6. ---
 
-/// Eval the source at PREVIEW quality against its own dir (the `$preview=true; include <abs>;` wrapper
-/// takes `$fn = $preview ? lo : hi`'s fast path). Native only — `import` is the fs loader.
-#[cfg(feature = "native")]
+/// Eval the source at PREVIEW quality (the `$preview=true` wrapper takes `$fn=$preview?lo:hi`'s fast
+/// path). `Source::Path` uses the native fs loader (`crate::import`, which is JIT-coupled → native);
+/// `Source::Bytes` evals IN-MEMORY via `fab_lang` directly — no fs, no JIT — the fs-less wasm-worker
+/// render path (W.3.6). Returns the tree + the source PATH when there is one (bytes have none → `None`,
+/// so provenance names are skipped downstream).
+#[cfg(feature = "kernel")]
 fn eval_preview(
     source: &Source,
     root: Option<&str>,
-) -> Result<(fab_lang::Geo, std::path::PathBuf)> {
-    let Source::Path(path) = source else {
-        bail!("render from source bytes not yet wired (W.3.6); native uses Source::Path");
-    };
+) -> Result<(fab_lang::Geo, Option<std::path::PathBuf>)> {
+    match source {
+        Source::Path(path) => eval_path(path, root),
+        Source::Bytes { main, .. } => {
+            // The wasm worker has no fs. NO-INCLUDE sources only for now — the lib closure (`libs`) +
+            // import()/surface() resolution from bytes land at Stage 2.
+            let _ = root;
+            let src = String::from_utf8_lossy(main);
+            let wrap = format!("$preview = true;\n{src}\n");
+            let tree = fab_lang::resolve_geometry_with_base(
+                &wrap,
+                std::path::Path::new("."),
+                &[],
+                None, // no JIT on the wasm worker — interp only (the web execution tier)
+                fab_lang::Config::from_env(),
+                |raw| {
+                    Err(fab_lang::Error::Load(format!(
+                        "import(\"{raw}\") is not supported on the wasm worker yet"
+                    )))
+                },
+            )
+            .context("scad-rs eval of source bytes")?;
+            Ok((tree, None))
+        }
+    }
+}
+
+/// `Source::Path` eval — native fs loader (canonicalize + `include <abs>` + the workspace lib search).
+#[cfg(all(feature = "kernel", feature = "native"))]
+fn eval_path(path: &str, root: Option<&str>) -> Result<(fab_lang::Geo, Option<std::path::PathBuf>)> {
     let src = std::path::PathBuf::from(path);
     let abs = src
         .canonicalize()
@@ -315,10 +344,19 @@ fn eval_preview(
         fab_lang::Config::from_env(),
     )
     .with_context(|| format!("scad-rs eval of {path}"))?;
-    Ok((tree, src))
+    Ok((tree, Some(src)))
 }
 
-#[cfg(feature = "native")]
+/// wasm worker: no fs, so a `Source::Path` render can't resolve — the app sends `Source::Bytes` there.
+#[cfg(all(feature = "kernel", not(feature = "native")))]
+fn eval_path(
+    _path: &str,
+    _root: Option<&str>,
+) -> Result<(fab_lang::Geo, Option<std::path::PathBuf>)> {
+    anyhow::bail!("Path source needs the native fs loader; the wasm worker renders from Source::Bytes")
+}
+
+#[cfg(feature = "kernel")]
 fn render_whole_svc(store: &mut SolidStore, source: &Source, root: Option<&str>) -> Result<Response> {
     use crate::backend::{ManifoldBackend, build_geo};
     let (tree, _src) = eval_preview(source, root)?;
@@ -336,9 +374,9 @@ fn render_whole_svc(store: &mut SolidStore, source: &Source, root: Option<&str>)
     })
 }
 
-#[cfg(feature = "native")]
+#[cfg(feature = "kernel")]
 fn render_parts_svc(store: &mut SolidStore, source: &Source, root: Option<&str>) -> Result<Response> {
-    use crate::backend::{ManifoldBackend, build_geo_parts, part_names};
+    use crate::backend::{ManifoldBackend, build_geo_parts};
     let (tree, src) = eval_preview(source, root)?;
     let mut staged: Vec<(SolidId, Vec<u8>, [f64; 3], [f64; 3])> = Vec::new();
     for solid in build_geo_parts(&tree, &ManifoldBackend)
@@ -354,13 +392,7 @@ fn render_parts_svc(store: &mut SolidStore, source: &Source, root: Option<&str>)
         staged.push((id, stl, mn.to_array(), mx.to_array()));
     }
     ensure!(!staged.is_empty(), "scad-rs rendered EMPTY geometry (no parts)");
-    // Provenance names only when the AST count matches the split (else a wrong label is worse than none).
-    let names = part_names(&src);
-    let names = if names.len() == staged.len() {
-        names
-    } else {
-        vec![None; staged.len()]
-    };
+    let names = part_names_for(&src, staged.len());
     Ok(Response::PartsRendered {
         parts: staged
             .into_iter()
@@ -376,13 +408,19 @@ fn render_parts_svc(store: &mut SolidStore, source: &Source, root: Option<&str>)
     })
 }
 
-#[cfg(not(feature = "native"))]
-fn render_whole_svc(_: &mut SolidStore, _: &Source, _: Option<&str>) -> Result<Response> {
-    bail!("RenderWhole needs the native fs loader; wasm source-bytes eval is W.3.6")
-}
-#[cfg(not(feature = "native"))]
-fn render_parts_svc(_: &mut SolidStore, _: &Source, _: Option<&str>) -> Result<Response> {
-    bail!("RenderParts needs the native fs loader; wasm source-bytes eval is W.3.6")
+/// Per-part provenance names, but ONLY from a real source file (native fs) whose AST count matches the
+/// split (a wrong label is worse than none). `Source::Bytes` (the wasm worker) has no path → all `None`.
+#[cfg(feature = "kernel")]
+fn part_names_for(src: &Option<std::path::PathBuf>, n: usize) -> Vec<Option<String>> {
+    #[cfg(feature = "native")]
+    if let Some(p) = src {
+        let names = crate::backend::part_names(p);
+        if names.len() == n {
+            return names;
+        }
+    }
+    let _ = src;
+    vec![None; n]
 }
 
 fn reslice_svc(
@@ -827,5 +865,54 @@ mod tests {
             "one connected 700mm part still slices to fit the bed"
         );
         assert_eq!(pieces2, 1, "one connected component");
+    }
+
+    #[test]
+    fn render_whole_from_source_bytes_no_fs() {
+        // W.3.6 keystone: the fs-less wasm-worker render path. Eval a NO-INCLUDE .scad straight from
+        // bytes (what the browser sends via Source::Bytes) — no path, no fs, no JIT — and prove
+        // RenderWhole mints a solid with the right bbox. Runs under kernel-WITHOUT-native too (this is
+        // exactly the geom worker's config), so it guards the branch the browser actually exercises.
+        let mut store = SolidStore::new(0);
+        let Response::Rendered {
+            id, stl, min, max, ..
+        } = handle_with_store(
+            &mut store,
+            Request::RenderWhole {
+                source: Source::Bytes {
+                    main: b"cube([60,40,30], center=true);".to_vec(),
+                    libs: vec![],
+                },
+                root: None,
+            },
+        ) else {
+            panic!("render from source bytes failed")
+        };
+        assert!(stl.len() > 100, "cube STL has geometry");
+        assert_eq!(id.shard, 0, "handle carries the store's shard");
+        // 60×40×30 centered → bbox ≈ [-30,-20,-15]..[30,20,15].
+        assert!(
+            (max[0] - 30.0).abs() < 0.01 && (min[2] + 15.0).abs() < 0.01,
+            "unexpected bbox {min:?}..{max:?}"
+        );
+
+        // The minted base is REUSED by a reslice off the held handle — the stateful flow the worker's
+        // persistent store serves.
+        assert!(
+            matches!(
+                handle_with_store(
+                    &mut store,
+                    Request::Reslice {
+                        base: id,
+                        cuts: vec![('x', 0.0)],
+                        connectors: vec![],
+                        orient: vec![],
+                        spread: 40.0,
+                    }
+                ),
+                Response::Resliced { .. }
+            ),
+            "reslice reads the bytes-rendered base"
+        );
     }
 }

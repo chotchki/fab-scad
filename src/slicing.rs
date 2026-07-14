@@ -13,7 +13,10 @@ use anyhow::{Context, Result, bail};
 #[cfg(feature = "kernel")]
 use crate::kernel::Solid;
 use crate::feasibility::{OnionAxis, axes_sorted, onion_resolution, piece_up};
-use crate::manifest::{Connector, PartSlicing, Slicing};
+use crate::manifest::{Connector, Slicing};
+// PartSlicing feeds only `slice_model_parts` (native OpenSCAD codegen) — unused on the wasm worker.
+#[cfg(feature = "native")]
+use crate::manifest::PartSlicing;
 #[cfg(feature = "native")]
 use crate::openscad::Openscad;
 use fab_lang::{Affine, Vec3};

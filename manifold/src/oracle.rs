@@ -266,4 +266,73 @@ mod tests {
             assert!(divs.is_empty(), "r={r}: {divs:#?}");
         }
     }
+
+    // =====================================================================================
+    // GATE K.0 (M.0.6) — the R0 exit gate. On identical buffers, the Rust spine must:
+    //   (1) accept the mesh as manifold (rust IsManifold == the C++ kernel accepting it),
+    //   (2) agree with C++ on volume/area/genus/bbox to a tight tolerance (breaks the
+    //       invariant-circularity: `volume`/`genus` are TRUSTWORTHY because they're
+    //       calibrated against C++ here, before check.rs asserts on them),
+    //   (3) round-trip idempotently (MeshGl→Mesh→MeshGl→Mesh preserves volume bit-exact).
+    // The corpus spans genus 0 AND genus 1, primitives AND boolean results.
+    // =====================================================================================
+    #[test]
+    fn k0_gate() {
+        // A block with a square tunnel bored through Z — genus 1, to exercise the genus backstop
+        // past the trivial genus-0 primitives.
+        let tunnel_block = manifold3d::Manifold::cube(10.0, 10.0, 10.0, true)
+            .difference(&manifold3d::Manifold::cube(4.0, 4.0, 20.0, true));
+        assert_eq!(
+            CppKernel::genus(&tunnel_block),
+            1,
+            "test geometry sanity: the tunnel block should be genus 1"
+        );
+
+        let corpus: Vec<(&str, manifold3d::Manifold)> = vec![
+            ("sphere-32", manifold3d::Manifold::sphere(8.0, 32)),
+            ("sphere-128", manifold3d::Manifold::sphere(8.0, 128)),
+            (
+                "cylinder",
+                manifold3d::Manifold::cylinder(15.0, 4.0, 9.0, 60, true),
+            ),
+            ("box", manifold3d::Manifold::cube(2.0, 3.0, 5.0, true)),
+            (
+                "sphere ∪ box",
+                manifold3d::Manifold::sphere(6.0, 48)
+                    .union(&manifold3d::Manifold::cube(8.0, 8.0, 8.0, true)),
+            ),
+            ("tunnel-block (genus 1)", tunnel_block),
+        ];
+
+        for (name, solid) in &corpus {
+            let mesh = cpp_to_mesh_gl(solid);
+
+            // (1) validity agreement.
+            let rust = RustKernel::ingest(&mesh)
+                .unwrap_or_else(|e| panic!("K.0 [{name}]: rust rejected a C++-valid mesh: {e}"));
+            assert!(rust.is_manifold(), "K.0 [{name}]: rust mesh not manifold");
+
+            // (2) property agreement vs C++ (volume/area/genus/bbox), tight tolerance.
+            let divs = differential(&mesh, 1e-9).unwrap();
+            assert!(
+                divs.is_empty(),
+                "K.0 [{name}]: divergences vs C++: {divs:#?}"
+            );
+
+            // (3) round-trip idempotence — our own re-ingest preserves geometry to the bit.
+            let reingested = Mesh::from_mesh_gl(&rust.to_mesh_gl());
+            assert_eq!(
+                rust.volume().to_bits(),
+                reingested.volume().to_bits(),
+                "K.0 [{name}]: round-trip changed the volume"
+            );
+
+            eprintln!(
+                "K.0 [{name}]: {} tris, vol={:.6}, genus={} — rust==cpp ✓",
+                rust.num_tri(),
+                rust.volume(),
+                crate::check::genus(&rust),
+            );
+        }
+    }
 }

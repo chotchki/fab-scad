@@ -45,12 +45,15 @@ everywhere now).
   the `geom/` worker + its wasm, and `libs.json`. Document-relative if omitted, but the site should set
   it explicitly so the app and its lazily-fetched worker agree even under a rewritten path. MUST end in
   `/` (the app appends one if not).
-- **`data-inset-top`** *(optional, px)* — how much vertical space the site's own fixed header occupies.
-  The app insets its top tab-bar below it so the site chrome and the app chrome don't collide. Absent →
-  `0` (the app owns the full viewport, e.g. the standalone `index.reference.html`).
+- **`data-inset-top`** *(reserved, px)* — declared for a host that wants the app to inset its own top
+  chrome under an OVERLAY header. The app does NOT read it today; the preferred framing sizes the canvas
+  PARENT to sit below the site header (see below), so the app never needs to inset itself. Kept in the
+  contract so an overlay-chrome host has a hook when one implements the app-side inset.
 
 The canvas PARENT sizes the app: `fit_canvas_to_parent` tracks the parent's box, so the site controls
-layout by sizing the wrapper, not the canvas. Give the parent a real height (the app fills it).
+layout by sizing the wrapper, not the canvas. The clean frame is a flex column — a fixed site header,
+then a `flex:1` stage holding the canvas (give it `min-height:0`); the app fills the stage, its tab-bar
+landing directly under the header with no overlap and no inset attribute.
 
 ### 2. Load the module
 
@@ -99,9 +102,9 @@ The full app — Model / Parts / Orientation / Export tabs + the 3D viewport —
 
 ### 2. Reads its config from the canvas `data-*`
 
-`data-base` (member root) and `data-inset-top` (chrome inset) — that's the whole config surface for v1.
-Query params (`?demo`, `?model=`) and `localStorage` (last file, camera) are the natural next knobs but
-are OUT of scope until the site asks for them; the contract stays small on purpose.
+`data-base` (member root) is the whole config surface the app reads today (`data-inset-top` is reserved,
+above). Query params (`?demo`, `?model=`) and `localStorage` (last file, camera) are the natural next
+knobs but are OUT of scope until the site asks for them; the contract stays small on purpose.
 
 ### 3. Emits three signals
 

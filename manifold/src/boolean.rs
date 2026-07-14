@@ -10,4 +10,14 @@
 //!
 //! SERIAL through R3 (the C++ reference stays exactly comparable); [`crate::par`] swaps in at R4.
 //!
-//! TODO(M.1.1).
+//! M.1.0 landed the FOUNDATIONS:
+//! - [`predicates`] — the symbolic-perturbation primitives (`shadows`/`interpolate`/`intersect`/`ccw`/
+//!   `get_axis_aligned_projection`/…), ported verbatim, no FMA.
+//! - [`vocab`] — the value-style records the assembly passes around (`Halfedge`/`TriRef`/`TmpEdge`/
+//!   `Intersections`).
+//!
+//! The perturbation INPUTS those consume (`face_normal`/`epsilon`/`tolerance`, the `for_vert` orbit)
+//! live on [`crate::mesh::Mesh`]. Next: M.1.1 broad phase → M.1.2 boolean3 cascade.
+
+pub mod predicates;
+pub mod vocab;

@@ -49,7 +49,7 @@ pub struct Halfedge {
 
 /// The half-edge mesh — Manifold's `Impl`. Position + connectivity + bounds; the boolean core (R1+)
 /// grows this.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct Mesh {
     /// Vertex positions (Manifold `vertPos_`).
     pub vert_pos: Vec<Vec3>,
@@ -63,6 +63,31 @@ pub struct Mesh {
     pub props_extra: Vec<f64>,
     /// Axis-aligned bounding box (Manifold `bBox_`).
     pub b_box: Box3,
+    /// Per-triangle face normals (Manifold `faceNormal_`) — the perturbation vectors the boolean's
+    /// symbolic tie-break reads. Empty until [`Mesh::calculate_face_normals`] runs.
+    pub face_normal: Vec<Vec3>,
+    /// The mesh's length-scale epsilon (Manifold `epsilon_`); `-1` = unset. Set by [`Mesh::set_epsilon`].
+    pub epsilon: f64,
+    /// The merge/collinearity tolerance (Manifold `tolerance_`); `-1` = unset. Monotone-nondecreasing
+    /// under [`Mesh::set_epsilon`] (it only ever `max`es up, never shrinks a user-supplied tolerance).
+    pub tolerance: f64,
+}
+
+impl Default for Mesh {
+    fn default() -> Self {
+        // `epsilon`/`tolerance` default to Manifold's `-1` "unset" sentinel, NOT `0.0` — a real
+        // computed epsilon is always `>= 0`, so `-1` is an unambiguous "SetEpsilon hasn't run".
+        Self {
+            vert_pos: Vec::new(),
+            halfedge: Vec::new(),
+            num_prop: 0,
+            props_extra: Vec::new(),
+            b_box: Box3::default(),
+            face_normal: Vec::new(),
+            epsilon: -1.0,
+            tolerance: -1.0,
+        }
+    }
 }
 
 impl Mesh {
@@ -295,10 +320,9 @@ impl Mesh {
 
         let mut mesh = Mesh {
             vert_pos,
-            halfedge: Vec::new(),
             num_prop: m.num_prop,
             props_extra,
-            b_box: Box3::default(),
+            ..Default::default()
         };
         mesh.create_halfedges(&tri_verts);
         mesh.calculate_bbox();
@@ -329,6 +353,60 @@ impl Mesh {
             vert_properties,
             tri_verts,
         }
+    }
+
+    // --- Perturbation inputs (R1) — the data the boolean's symbolic tie-break consumes. ---
+
+    /// Visit every out-going half-edge of the vertex that `he` starts at, in fan order (Manifold's
+    /// `Impl::ForVert`): `current = next(pair(current))` until it cycles back to `he`, which is the
+    /// LAST half-edge visited. Requires a fully-paired (manifold) one-ring — an unpaired `-1` pair
+    /// walks off the mesh.
+    pub fn for_vert(&self, he: i32, mut func: impl FnMut(i32)) {
+        let mut current = he;
+        loop {
+            current = next_halfedge(self.pair(current));
+            func(current);
+            if current == he {
+                break;
+            }
+        }
+    }
+
+    /// Compute per-triangle face normals into [`Mesh::face_normal`] — the perturbation vectors. This is
+    /// the face-normal loop of Manifold's `SetNormalsAndCoplanar` (the coplanar-ID flooding it also does
+    /// is deferred to M.1.4). `normalize(cross(b − a, c − a))` where `(a,b,c)` are the triangle's verts;
+    /// a degenerate (zero-area) triangle normalizes to NaN and snaps to `(0,0,1)` verbatim; a removed
+    /// triangle (`start < 0`) keeps the `(0,0,0)` default.
+    pub fn calculate_face_normals(&mut self) {
+        let num_tri = self.num_tri();
+        self.face_normal = vec![Vec3::ZERO; num_tri];
+        for tri in 0..num_tri as i32 {
+            if self.start(3 * tri) < 0 {
+                continue;
+            }
+            let v = self.vert_pos[self.start(3 * tri) as usize];
+            let n = (self.vert_pos[self.end(3 * tri) as usize] - v)
+                .cross(self.vert_pos[self.end(3 * tri + 1) as usize] - v);
+            let mut normal = n.normalize();
+            if normal.x.is_nan() {
+                normal = Vec3::new(0.0, 0.0, 1.0);
+            }
+            self.face_normal[tri as usize] = normal;
+        }
+    }
+
+    /// Set `epsilon`/`tolerance` from the bounding box (Manifold `Impl::SetEpsilon`). `epsilon =
+    /// MaxEpsilon(min_epsilon, bBox)`; `tolerance` only ever grows (`max` against its prior value), so a
+    /// user-supplied tolerance is never shrunk below what the geometry demands. `use_single` folds in
+    /// the `f32` epsilon for a single-precision kernel — ours is `f64`, so callers pass `false`.
+    /// Requires [`Mesh::calculate_bbox`] to have run.
+    pub fn set_epsilon(&mut self, min_epsilon: f64, use_single: bool) {
+        self.epsilon = crate::boolean::predicates::max_epsilon(min_epsilon, self.b_box);
+        let mut min_tol = self.epsilon;
+        if use_single {
+            min_tol = min_tol.max(f32::EPSILON as f64 * self.b_box.scale());
+        }
+        self.tolerance = self.tolerance.max(min_tol);
     }
 }
 
@@ -609,5 +687,99 @@ mod tests {
                 .count()
                 >= 1
         );
+    }
+
+    // --- Perturbation inputs (R1 / M.1.0). ---
+
+    #[test]
+    fn unit_epsilon_and_tolerance() {
+        let mut mesh = Mesh::from_mesh_gl(&unit_cube());
+        // Fresh mesh: the -1 "unset" sentinel.
+        assert_eq!(mesh.epsilon, -1.0);
+        assert_eq!(mesh.tolerance, -1.0);
+        // Scale of [0,1]³ is 1 ⇒ epsilon = kPrecision·1 = 1e-12; tolerance grows to match (was -1).
+        mesh.set_epsilon(-1.0, false);
+        assert_eq!(mesh.epsilon, crate::boolean::predicates::K_PRECISION);
+        assert_eq!(mesh.tolerance, crate::boolean::predicates::K_PRECISION);
+        // A previously-set larger tolerance is NOT shrunk by a later set_epsilon.
+        mesh.tolerance = 0.5;
+        mesh.set_epsilon(-1.0, false);
+        assert_eq!(mesh.tolerance, 0.5);
+    }
+
+    #[test]
+    fn cube_face_normals_are_axis_aligned() {
+        let mut mesh = Mesh::from_mesh_gl(&unit_cube());
+        mesh.calculate_face_normals();
+        assert_eq!(mesh.face_normal.len(), 12);
+        // Every face of an axis-aligned cube has a unit ±axis normal, and the pair of tris on each
+        // face agree. The fixture's face order is -Z,-Z,+Z,+Z,-Y,-Y,+Y,+Y,-X,-X,+X,+X.
+        let expect = [
+            Vec3::new(0.0, 0.0, -1.0),
+            Vec3::new(0.0, 0.0, 1.0),
+            Vec3::new(0.0, -1.0, 0.0),
+            Vec3::new(0.0, 1.0, 0.0),
+            Vec3::new(-1.0, 0.0, 0.0),
+            Vec3::new(1.0, 0.0, 0.0),
+        ];
+        for (tri, n) in mesh.face_normal.iter().enumerate() {
+            assert_eq!(*n, expect[tri / 2], "tri {tri}");
+        }
+    }
+
+    #[test]
+    fn degenerate_face_normal_snaps_to_z() {
+        // A single zero-area (collinear) triangle: cross = 0, normalize = NaN ⇒ snaps to (0,0,1).
+        let mut mesh = Mesh {
+            vert_pos: vec![
+                Vec3::new(0.0, 0.0, 0.0),
+                Vec3::new(1.0, 0.0, 0.0),
+                Vec3::new(2.0, 0.0, 0.0),
+            ],
+            ..Default::default()
+        };
+        mesh.create_halfedges(&[[0, 1, 2]]);
+        mesh.calculate_face_normals();
+        assert_eq!(mesh.face_normal, vec![Vec3::new(0.0, 0.0, 1.0)]);
+    }
+
+    #[test]
+    fn for_vert_orbits_the_one_ring() {
+        // A closed octahedron gives every vertex a clean 4-edge fan. Walk vertex 0's ring and confirm
+        // ForVert visits exactly the out-going half-edges (all starting at 0), each once, including the
+        // seed half-edge last.
+        let mut mesh = Mesh {
+            vert_pos: vec![
+                Vec3::new(0.0, 0.0, 1.0),  // 0 top
+                Vec3::new(1.0, 0.0, 0.0),  // 1
+                Vec3::new(0.0, 1.0, 0.0),  // 2
+                Vec3::new(-1.0, 0.0, 0.0), // 3
+                Vec3::new(0.0, -1.0, 0.0), // 4
+                Vec3::new(0.0, 0.0, -1.0), // 5 bottom
+            ],
+            ..Default::default()
+        };
+        #[rustfmt::skip]
+        let tris = [
+            [0u32, 1, 2], [0, 2, 3], [0, 3, 4], [0, 4, 1], // top fan
+            [5, 2, 1], [5, 3, 2], [5, 4, 3], [5, 1, 4],     // bottom fan
+        ];
+        mesh.create_halfedges(&tris);
+        assert!(mesh.is_manifold());
+        // Seed = the first half-edge starting at vertex 0.
+        let seed = (0..mesh.halfedge.len() as i32)
+            .find(|&e| mesh.start(e) == 0)
+            .unwrap();
+        let mut visited = Vec::new();
+        mesh.for_vert(seed, |e| visited.push(e));
+        // Vertex 0 touches 4 top triangles ⇒ 4 out-going half-edges.
+        assert_eq!(visited.len(), 4);
+        assert!(visited.iter().all(|&e| mesh.start(e) == 0));
+        assert_eq!(*visited.last().unwrap(), seed); // seed is visited last
+        // No repeats.
+        let mut uniq = visited.clone();
+        uniq.sort_unstable();
+        uniq.dedup();
+        assert_eq!(uniq.len(), 4);
     }
 }

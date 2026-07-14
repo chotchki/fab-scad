@@ -292,6 +292,14 @@ impl Box3 {
     pub fn center(self) -> Vec3 {
         0.5 * (self.max + self.min)
     }
+    /// The absolute-largest coordinate of any contained point (`common.h` `Box::Scale`) — the length
+    /// scale the epsilon/tolerance model is measured against. `max(|min|, |max|)` componentwise, then
+    /// the largest of x/y/z, matching the C++ reduction order.
+    #[inline]
+    pub fn scale(self) -> f64 {
+        let abs_max = self.min.cabs().cmax(self.max.cabs());
+        abs_max.x.max(abs_max.y.max(abs_max.z))
+    }
     /// Expand in place to include a point.
     #[inline]
     pub fn union_point(&mut self, p: Vec3) {

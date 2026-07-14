@@ -18,6 +18,8 @@
 pub mod boolean;
 // Oracle B: the manifold-invariant checker (test.h port), reference-free.
 pub mod check;
+// The internal linalg (linalg.h subset) — vec2/3/4, mat3x4, Box; op order matches the C++ oracle.
+pub mod linalg;
 // Pillar 2: the libm seam — every transcendental routes through here.
 pub mod mathf;
 // the halfedge `Impl` (the mesh spine); MeshGL <-> Impl, IsManifold.

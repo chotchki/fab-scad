@@ -9,42 +9,27 @@
 //! REPRESENTATION vs Manifold: Manifold's `Halfedges` is an SoA that DERIVES `endVert` from the next
 //! half-edge in the triangle (`End(e) = Start(NextHalfedge(e))`). We mirror that exactly — a half-edge
 //! stores only `(start_vert, paired_halfedge, prop_vert)`, and `end(e)` derives — so `CheckHalfedges`
-//! transliterates 1:1 and the future boolean port reads `Start/End/Pair/Prop` unchanged. Faces are 3
-//! consecutive half-edges (`3·tri + i`), CCW from outside.
+//! transliterates 1:1 and the boolean port reads `Start/End/Pair/Prop` unchanged. Faces are 3
+//! consecutive half-edges ([`TriId::halfedge`]), CCW from outside; `NextHalfedge`/`PrevHalfedge` live on
+//! [`HalfedgeId`].
 //!
-//! M.0.5 SCOPE (documented gaps, all LOUD-deferred, never silently wrong):
-//! - Edge pairing is the deterministic clean-mesh pairing (each `a→b` ↔ the one `b→a`). Manifold's
-//!   `CreateHalfedges` additionally does opposed-triangle REMOVAL (degenerate duplicates that only
-//!   booleans produce) — deferred to R1 (M.1.1), where it becomes geometry-affecting.
-//! - MeshGL's 1:1 vert model is kept (`prop_vert == vert`); Manifold's internal geometry/property-vert
-//!   DEDUP (UV-seam splitting) is an R3 property/color concern.
-//! - `epsilon`/`tolerance`/`face_normal` (boolean + normals machinery) are not computed yet.
+//! TYPED INDICES: every index is a [`VertId`]/[`HalfedgeId`]/[`TriId`] ([`crate::mesh_ids`]), NOT a raw
+//! `i32` — so a vertex can't be passed where a half-edge is expected. Zero runtime cost
+//! (`#[repr(transparent)]`), so the K.0 output stays bit-identical.
 
 use crate::linalg::{Box3, Vec3};
-
-/// Cycle to the next half-edge within a triangle (`3·tri + i` → `3·tri + (i+1)%3`). Manifold's
-/// `NextHalfedge`.
-#[inline]
-pub fn next_halfedge(current: i32) -> i32 {
-    current + if current % 3 == 2 { -2 } else { 1 }
-}
-
-/// Cycle to the previous half-edge within a triangle. Manifold's `PrevHalfedge`.
-#[inline]
-pub fn prev_halfedge(current: i32) -> i32 {
-    current + if current % 3 == 0 { 2 } else { -1 }
-}
+use crate::mesh_ids::{HalfedgeId, TriId, VertId};
 
 /// A single half-edge. `end` is DERIVED (see the module doc), so only these three fields are stored;
-/// `-1` is the removed/unpaired sentinel (matches Manifold's `int` sentinels).
+/// [`VertId::NONE`]/[`HalfedgeId::NONE`] (`-1`) is the removed/unpaired sentinel.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Halfedge {
-    /// The vertex this half-edge starts at (index into `vert_pos`), or `-1` if removed.
-    pub start_vert: i32,
-    /// The opposite half-edge (index into `halfedge`), or `-1` if unpaired.
-    pub paired_halfedge: i32,
-    /// The property-vertex index (== `start_vert` in the 1:1 MeshGL model).
-    pub prop_vert: i32,
+    /// The vertex this half-edge starts at, or [`VertId::NONE`] if removed.
+    pub start_vert: VertId,
+    /// The opposite half-edge, or [`HalfedgeId::NONE`] if unpaired.
+    pub paired_halfedge: HalfedgeId,
+    /// The property-vertex (== `start_vert` in the 1:1 MeshGL model).
+    pub prop_vert: VertId,
 }
 
 /// The half-edge mesh — Manifold's `Impl`. Position + connectivity + bounds; the boolean core (R1+)
@@ -120,30 +105,42 @@ impl Mesh {
         self.halfedge.is_empty()
     }
 
+    /// Every half-edge id, in order — `0..halfedge.len()` typed.
+    #[inline]
+    pub fn halfedge_ids(&self) -> impl Iterator<Item = HalfedgeId> {
+        (0..self.halfedge.len()).map(HalfedgeId::from_usize)
+    }
+
     // --- Half-edge accessors, mirroring Manifold's `Halfedges` (end is DERIVED). ---
+
+    /// Position of vertex `v`.
+    #[inline]
+    pub fn pos(&self, v: VertId) -> Vec3 {
+        self.vert_pos[v.u()]
+    }
 
     /// Start vertex of half-edge `e`.
     #[inline]
-    pub fn start(&self, e: i32) -> i32 {
-        self.halfedge[e as usize].start_vert
+    pub fn start(&self, e: HalfedgeId) -> VertId {
+        self.halfedge[e.u()].start_vert
     }
 
     /// End vertex of half-edge `e` — the start of the NEXT half-edge in the triangle (derived).
     #[inline]
-    pub fn end(&self, e: i32) -> i32 {
-        self.start(next_halfedge(e))
+    pub fn end(&self, e: HalfedgeId) -> VertId {
+        self.start(e.next())
     }
 
-    /// Paired (opposite) half-edge of `e`, or `-1`.
+    /// Paired (opposite) half-edge of `e`, or [`HalfedgeId::NONE`].
     #[inline]
-    pub fn pair(&self, e: i32) -> i32 {
-        self.halfedge[e as usize].paired_halfedge
+    pub fn pair(&self, e: HalfedgeId) -> HalfedgeId {
+        self.halfedge[e.u()].paired_halfedge
     }
 
     /// Property vertex of half-edge `e`.
     #[inline]
-    pub fn prop(&self, e: i32) -> i32 {
-        self.halfedge[e as usize].prop_vert
+    pub fn prop(&self, e: HalfedgeId) -> VertId {
+        self.halfedge[e.u()].prop_vert
     }
 
     // --- Mutators the boolean assembly writes through (Manifold's `Halfedges::Set*`). The result mesh's
@@ -152,20 +149,20 @@ impl Mesh {
 
     /// Set the start vertex of half-edge `e`.
     #[inline]
-    pub fn set_start(&mut self, e: i32, v: i32) {
-        self.halfedge[e as usize].start_vert = v;
+    pub fn set_start(&mut self, e: HalfedgeId, v: VertId) {
+        self.halfedge[e.u()].start_vert = v;
     }
 
     /// Set the paired half-edge of `e`.
     #[inline]
-    pub fn set_pair(&mut self, e: i32, p: i32) {
-        self.halfedge[e as usize].paired_halfedge = p;
+    pub fn set_pair(&mut self, e: HalfedgeId, p: HalfedgeId) {
+        self.halfedge[e.u()].paired_halfedge = p;
     }
 
     /// Set the property vertex of `e`.
     #[inline]
-    pub fn set_prop(&mut self, e: i32, p: i32) {
-        self.halfedge[e as usize].prop_vert = p;
+    pub fn set_prop(&mut self, e: HalfedgeId, p: VertId) {
+        self.halfedge[e.u()].prop_vert = p;
     }
 
     /// Drop vertices referenced by no half-edge, COMPACTING `vert_pos` and reindexing the half-edges
@@ -178,25 +175,25 @@ impl Mesh {
         let n = self.num_vert();
         let mut keep = vec![false; n];
         for h in &self.halfedge {
-            if h.start_vert >= 0 {
-                keep[h.start_vert as usize] = true;
+            if h.start_vert.is_some() {
+                keep[h.start_vert.u()] = true;
             }
         }
-        let mut remap = vec![-1i32; n];
+        let mut remap = vec![VertId::NONE; n];
         let mut new_pos = Vec::new();
         for (old, &k) in keep.iter().enumerate() {
             if k {
-                remap[old] = new_pos.len() as i32;
+                remap[old] = VertId::from_usize(new_pos.len());
                 new_pos.push(self.vert_pos[old]);
             }
         }
         for h in &mut self.halfedge {
-            if h.start_vert >= 0 {
-                h.start_vert = remap[h.start_vert as usize];
+            if h.start_vert.is_some() {
+                h.start_vert = remap[h.start_vert.u()];
             }
             // prop_vert == start_vert in the 1:1 MeshGL model, so it remaps the same way.
-            if h.prop_vert >= 0 && (h.prop_vert as usize) < n {
-                h.prop_vert = remap[h.prop_vert as usize];
+            if h.prop_vert.is_some() && h.prop_vert.u() < n {
+                h.prop_vert = remap[h.prop_vert.u()];
             }
         }
         self.vert_pos = new_pos;
@@ -206,7 +203,7 @@ impl Mesh {
     ///
     /// Deterministic clean-mesh pairing: group the two directed half-edges of every undirected edge
     /// `{min,max}` and link them. A manifold edge has exactly one `a→b` and one `b→a` → unique pairing;
-    /// anything else (boundary, >2 incident, same-direction duplicate) is left `-1`, which
+    /// anything else (boundary, >2 incident, same-direction duplicate) is left `NONE`, which
     /// [`Mesh::is_manifold`] then rejects. (Opposed-triangle removal is R1 — see the module doc.)
     pub fn create_halfedges(&mut self, tri_verts: &[[u32; 3]]) {
         use std::collections::BTreeMap;
@@ -214,14 +211,14 @@ impl Mesh {
         let num_he = 3 * tri_verts.len();
         let mut he = Vec::with_capacity(num_he);
         // (start, end) of each half-edge, kept locally for keying — `end` isn't stored on Halfedge.
-        let mut ends = Vec::with_capacity(num_he);
+        let mut ends: Vec<VertId> = Vec::with_capacity(num_he);
         for tri in tri_verts {
             for i in 0..3 {
-                let start = tri[i] as i32;
-                let end = tri[(i + 1) % 3] as i32;
+                let start = VertId::new(tri[i] as i32);
+                let end = VertId::new(tri[(i + 1) % 3] as i32);
                 he.push(Halfedge {
                     start_vert: start,
-                    paired_halfedge: -1,
+                    paired_halfedge: HalfedgeId::NONE,
                     prop_vert: start,
                 });
                 ends.push(end);
@@ -229,7 +226,7 @@ impl Mesh {
         }
 
         // Group half-edge indices by undirected-edge key. BTreeMap = deterministic iteration.
-        let mut groups: BTreeMap<(i32, i32), Vec<usize>> = BTreeMap::new();
+        let mut groups: BTreeMap<(VertId, VertId), Vec<usize>> = BTreeMap::new();
         for (idx, h) in he.iter().enumerate() {
             let (a, b) = (h.start_vert, ends[idx]);
             let key = if a < b { (a, b) } else { (b, a) };
@@ -241,8 +238,8 @@ impl Mesh {
                 // Only a genuine reverse pair (opposite directions) links; a same-direction
                 // duplicate is non-manifold and stays unpaired.
                 if he[e0].start_vert == ends[e1] && ends[e0] == he[e1].start_vert {
-                    he[e0].paired_halfedge = e1 as i32;
-                    he[e1].paired_halfedge = e0 as i32;
+                    he[e0].paired_halfedge = HalfedgeId::from_usize(e1);
+                    he[e1].paired_halfedge = HalfedgeId::from_usize(e0);
                 }
             }
         }
@@ -274,25 +271,23 @@ impl Mesh {
         if !self.halfedge.len().is_multiple_of(3) {
             return false;
         }
-        (0..self.halfedge.len() as i32).all(|e| self.check_halfedge(e))
+        self.halfedge_ids().all(|e| self.check_halfedge(e))
     }
 
     /// The per-half-edge manifold predicate (Manifold `CheckHalfedges`): a removed triple is fine;
     /// otherwise the pair must be mutual and reverse each other (`start == End(pair)`, `end ==
     /// Start(pair)`, `start != end`).
-    fn check_halfedge(&self, edge: i32) -> bool {
+    fn check_halfedge(&self, edge: HalfedgeId) -> bool {
         let start = self.start(edge);
         let end = self.end(edge);
         let pair = self.pair(edge);
-        if start == -1 && end == -1 && pair == -1 {
+        if start.is_none() && end.is_none() && pair.is_none() {
             return true;
         }
-        if self.start(next_halfedge(edge)) == -1
-            || self.start(next_halfedge(next_halfedge(edge))) == -1
-        {
+        if self.start(edge.next()).is_none() || self.start(edge.next().next()).is_none() {
             return false;
         }
-        if pair == -1 {
+        if pair.is_none() {
             return false;
         }
         let mut good = true;
@@ -311,10 +306,11 @@ impl Mesh {
         }
         let mut value = 0.0;
         let mut comp = 0.0;
-        for tri in 0..self.num_tri() as i32 {
-            let v = self.vert_pos[self.start(3 * tri) as usize];
-            let e1 = self.vert_pos[self.start(3 * tri + 1) as usize] - v;
-            let e2 = self.vert_pos[self.start(3 * tri + 2) as usize] - v;
+        for tri in 0..self.num_tri() {
+            let t = TriId::from_usize(tri);
+            let v = self.pos(self.start(t.halfedge(0)));
+            let e1 = self.pos(self.start(t.halfedge(1))) - v;
+            let e2 = self.pos(self.start(t.halfedge(2))) - v;
             let value1 = e1.cross(e2).dot(v) / 6.0;
             let t = value + value1;
             comp += (value - t) + value1;
@@ -331,10 +327,11 @@ impl Mesh {
         }
         let mut value = 0.0;
         let mut comp = 0.0;
-        for tri in 0..self.num_tri() as i32 {
-            let v = self.vert_pos[self.start(3 * tri) as usize];
-            let e1 = self.vert_pos[self.start(3 * tri + 1) as usize] - v;
-            let e2 = self.vert_pos[self.start(3 * tri + 2) as usize] - v;
+        for tri in 0..self.num_tri() {
+            let t = TriId::from_usize(tri);
+            let v = self.pos(self.start(t.halfedge(0)));
+            let e1 = self.pos(self.start(t.halfedge(1))) - v;
+            let e2 = self.pos(self.start(t.halfedge(2))) - v;
             let value1 = e1.cross(e2).length() / 2.0;
             let t = value + value1;
             comp += (value - t) + value1;
@@ -404,10 +401,11 @@ impl Mesh {
             }
         }
         let mut tri_verts = Vec::with_capacity(self.num_tri() * 3);
-        for tri in 0..self.num_tri() as i32 {
-            tri_verts.push(self.start(3 * tri) as u32);
-            tri_verts.push(self.start(3 * tri + 1) as u32);
-            tri_verts.push(self.start(3 * tri + 2) as u32);
+        for tri in 0..self.num_tri() {
+            let t = TriId::from_usize(tri);
+            for i in 0..3 {
+                tri_verts.push(self.start(t.halfedge(i)).raw() as u32);
+            }
         }
         MeshGl {
             num_prop: self.num_prop,
@@ -420,12 +418,12 @@ impl Mesh {
 
     /// Visit every out-going half-edge of the vertex that `he` starts at, in fan order (Manifold's
     /// `Impl::ForVert`): `current = next(pair(current))` until it cycles back to `he`, which is the
-    /// LAST half-edge visited. Requires a fully-paired (manifold) one-ring — an unpaired `-1` pair
+    /// LAST half-edge visited. Requires a fully-paired (manifold) one-ring — an unpaired `NONE` pair
     /// walks off the mesh.
-    pub fn for_vert(&self, he: i32, mut func: impl FnMut(i32)) {
+    pub fn for_vert(&self, he: HalfedgeId, mut func: impl FnMut(HalfedgeId)) {
         let mut current = he;
         loop {
-            current = next_halfedge(self.pair(current));
+            current = self.pair(current).next();
             func(current);
             if current == he {
                 break;
@@ -437,22 +435,22 @@ impl Mesh {
     /// the face-normal loop of Manifold's `SetNormalsAndCoplanar` (the coplanar-ID flooding it also does
     /// is deferred to M.1.4). `normalize(cross(b − a, c − a))` where `(a,b,c)` are the triangle's verts;
     /// a degenerate (zero-area) triangle normalizes to NaN and snaps to `(0,0,1)` verbatim; a removed
-    /// triangle (`start < 0`) keeps the `(0,0,0)` default.
+    /// triangle (`start` NONE) keeps the `(0,0,0)` default.
     pub fn calculate_face_normals(&mut self) {
         let num_tri = self.num_tri();
         self.face_normal = vec![Vec3::ZERO; num_tri];
-        for tri in 0..num_tri as i32 {
-            if self.start(3 * tri) < 0 {
+        for tri in 0..num_tri {
+            let t = TriId::from_usize(tri);
+            if self.start(t.halfedge(0)).is_none() {
                 continue;
             }
-            let v = self.vert_pos[self.start(3 * tri) as usize];
-            let n = (self.vert_pos[self.end(3 * tri) as usize] - v)
-                .cross(self.vert_pos[self.end(3 * tri + 1) as usize] - v);
+            let v = self.pos(self.start(t.halfedge(0)));
+            let n = (self.pos(self.end(t.halfedge(0))) - v).cross(self.pos(self.end(t.halfedge(1))) - v);
             let mut normal = n.normalize();
             if normal.x.is_nan() {
                 normal = Vec3::new(0.0, 0.0, 1.0);
             }
-            self.face_normal[tri as usize] = normal;
+            self.face_normal[tri] = normal;
         }
     }
 
@@ -467,19 +465,22 @@ impl Mesh {
     pub fn calculate_vert_normals(&mut self) {
         let num_vert = self.num_vert();
         self.vert_normal = vec![Vec3::ZERO; num_vert];
-        // The smallest half-edge index starting at each vertex — a deterministic ForVert seed
-        // (Manifold's atomic vertHalfedgeMap min-reduction, serialized).
-        let mut vert_halfedge = vec![i32::MAX; num_vert];
-        for i in 0..self.halfedge.len() as i32 {
-            let v = self.start(i);
-            if v >= 0 && i < vert_halfedge[v as usize] {
-                vert_halfedge[v as usize] = i;
+        // The smallest half-edge id starting at each vertex — a deterministic ForVert seed (Manifold's
+        // atomic vertHalfedgeMap min-reduction, serialized). `None` = not yet referenced.
+        let mut vert_halfedge: Vec<Option<HalfedgeId>> = vec![None; num_vert];
+        for e in self.halfedge_ids() {
+            let v = self.start(e);
+            if v.is_some() {
+                let slot = &mut vert_halfedge[v.u()];
+                if slot.is_none_or(|cur| e < cur) {
+                    *slot = Some(e);
+                }
             }
         }
-        for (vert, &first_edge) in vert_halfedge.iter().enumerate() {
-            if first_edge == i32::MAX {
+        for (vert, &first) in vert_halfedge.iter().enumerate() {
+            let Some(first_edge) = first else {
                 continue; // not referenced ⇒ stays (0,0,0)
-            }
+            };
             // Collect the one-ring first (keeps the borrow of `self` inside for_vert from tangling
             // with the per-edge reads below).
             let mut ring = Vec::new();
@@ -488,11 +489,9 @@ impl Mesh {
             for edge in ring {
                 let tv0 = self.start(edge);
                 let tv1 = self.end(edge);
-                let tv2 = self.end(next_halfedge(edge));
-                let curr_edge =
-                    (self.vert_pos[tv1 as usize] - self.vert_pos[tv0 as usize]).normalize();
-                let prev_edge =
-                    (self.vert_pos[tv0 as usize] - self.vert_pos[tv2 as usize]).normalize();
+                let tv2 = self.end(edge.next());
+                let curr_edge = (self.pos(tv1) - self.pos(tv0)).normalize();
+                let prev_edge = (self.pos(tv0) - self.pos(tv2)).normalize();
                 // A degenerate incident triangle (zero-length edge ⇒ NaN) is excluded.
                 if !curr_edge.x.is_finite() || !prev_edge.x.is_finite() {
                     continue;
@@ -505,7 +504,7 @@ impl Mesh {
                 } else {
                     crate::mathf::acos(dot)
                 };
-                normal += phi * self.face_normal[(edge / 3) as usize];
+                normal += phi * self.face_normal[edge.tri().u()];
             }
             self.vert_normal[vert] = crate::boolean::predicates::safe_normalize(normal);
         }
@@ -595,7 +594,7 @@ mod tests {
         assert_eq!(mesh.num_edge(), 18); // Euler: V−E+F = 8−18+12 = 2 ✓
         assert!(mesh.is_manifold());
         // every half-edge is paired on a closed manifold
-        assert!(mesh.halfedge.iter().all(|h| h.paired_halfedge >= 0));
+        assert!(mesh.halfedge.iter().all(|h| h.paired_halfedge.is_some()));
     }
 
     #[test]
@@ -712,20 +711,6 @@ mod tests {
     }
 
     #[test]
-    fn next_prev_halfedge_cycle_within_triangle() {
-        // Within triangle 0 (half-edges 0,1,2): next cycles 0→1→2→0, prev the reverse.
-        assert_eq!(next_halfedge(0), 1);
-        assert_eq!(next_halfedge(1), 2);
-        assert_eq!(next_halfedge(2), 0);
-        assert_eq!(prev_halfedge(0), 2);
-        assert_eq!(prev_halfedge(1), 0);
-        assert_eq!(prev_halfedge(2), 1);
-        // triangle 1 (3,4,5)
-        assert_eq!(next_halfedge(5), 3);
-        assert_eq!(prev_halfedge(3), 5);
-    }
-
-    #[test]
     fn bbox_from_cube() {
         let mesh = Mesh::from_mesh_gl(&unit_cube());
         assert_eq!(mesh.b_box.min, Vec3::new(0.0, 0.0, 0.0));
@@ -737,8 +722,8 @@ mod tests {
     fn accessors_and_meshgl_counts() {
         let mesh = Mesh::from_mesh_gl(&unit_cube());
         // prop() accessor: position-only ⇒ prop_vert == start_vert.
-        assert_eq!(mesh.prop(0), mesh.start(0));
-        assert_eq!(mesh.prop(17), mesh.start(17));
+        assert_eq!(mesh.prop(HalfedgeId::new(0)), mesh.start(HalfedgeId::new(0)));
+        assert_eq!(mesh.prop(HalfedgeId::new(17)), mesh.start(HalfedgeId::new(17)));
         // MeshGl count helpers.
         let gl = mesh.to_mesh_gl();
         assert_eq!(gl.num_vert(), 8);
@@ -748,9 +733,9 @@ mod tests {
     #[test]
     fn is_manifold_hand_built_edge_cases() {
         let he = |s: i32, p: i32| Halfedge {
-            start_vert: s,
-            paired_halfedge: p,
-            prop_vert: s,
+            start_vert: VertId::new(s),
+            paired_halfedge: HalfedgeId::new(p),
+            prop_vert: VertId::new(s),
         };
         // Half-edge count not a multiple of 3 → not manifold.
         let two = Mesh {
@@ -759,7 +744,7 @@ mod tests {
         };
         assert!(!two.is_manifold());
 
-        // A fully-removed triple (all -1) is vacuously manifold (the removed-half-edge branch).
+        // A fully-removed triple (all NONE) is vacuously manifold (the removed-half-edge branch).
         let removed = Mesh {
             halfedge: vec![he(-1, -1), he(-1, -1), he(-1, -1)],
             ..Default::default()
@@ -799,7 +784,7 @@ mod tests {
         assert!(
             m.halfedge
                 .iter()
-                .filter(|h| h.start_vert == 0 && h.paired_halfedge < 0)
+                .filter(|h| h.start_vert == VertId::new(0) && h.paired_halfedge.is_none())
                 .count()
                 >= 1
         );
@@ -883,14 +868,15 @@ mod tests {
         mesh.create_halfedges(&tris);
         assert!(mesh.is_manifold());
         // Seed = the first half-edge starting at vertex 0.
-        let seed = (0..mesh.halfedge.len() as i32)
-            .find(|&e| mesh.start(e) == 0)
+        let seed = mesh
+            .halfedge_ids()
+            .find(|&e| mesh.start(e) == VertId::new(0))
             .unwrap();
         let mut visited = Vec::new();
         mesh.for_vert(seed, |e| visited.push(e));
         // Vertex 0 touches 4 top triangles ⇒ 4 out-going half-edges.
         assert_eq!(visited.len(), 4);
-        assert!(visited.iter().all(|&e| mesh.start(e) == 0));
+        assert!(visited.iter().all(|&e| mesh.start(e) == VertId::new(0)));
         assert_eq!(*visited.last().unwrap(), seed); // seed is visited last
         // No repeats.
         let mut uniq = visited.clone();

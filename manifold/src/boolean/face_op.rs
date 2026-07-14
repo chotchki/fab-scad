@@ -10,10 +10,15 @@
 //! test), and only routes `numEdge > 4` through the full `TriangulateIdxHalfedges`/`HalfedgeTriangulation`
 //! machinery. We collapse all three into ONE path: `AssembleHalfedges` → project → ear-clip
 //! ([`crate::boolean::polygon`]) → a generalized `WriteLocalTriangles` that pairs interior diagonals by
-//! reverse-edge matching and records boundary edges in `contour2Tri` for cross-face stitching. The tri
+//! reverse-edge matching and records boundary edges in `contour2tri` for cross-face stitching. The tri
 //! and quad fast paths are just the 1- and 2-triangle cases of this, so the unified path subsumes them.
 //! Legit because the gate metric is the triangulation-INDEPENDENT residual — the exact diagonal CHOICE
 //! doesn't change the covered solid.
+//!
+//! INDEX SPACES: `face_halfedges` is a SEPARATE array from the output mesh's `halfedge`, so a position
+//! into it is a local BUFFER index (`i32`), not a mesh [`HalfedgeId`]. The typed ids appear where this
+//! writes the OUTPUT mesh (`out.set_start(HalfedgeId, VertId)`), which is where a swap would actually
+//! corrupt geometry.
 //!
 //! DEFERRED (not needed for GATE-A's order-independent gates): `ReorderHalfedges` (pure within-face
 //! canonicalization, for run-to-run bit determinism) and provenance (`triRef`/`WriteTriRefs`).
@@ -25,19 +30,20 @@ use crate::boolean::predicates::get_axis_aligned_projection;
 use crate::boolean::vocab::Halfedge;
 use crate::linalg::Vec2;
 use crate::mesh::Mesh;
+use crate::mesh_ids::{HalfedgeId, TriId, VertId};
 
 /// Assemble the half-edges `hes[first..last]` into vertex loops (`face_op.cpp` `AssembleHalfedges`).
 /// Each vert must appear as `startVert` and as `endVert` the same number of times. Loop entries are
-/// GLOBAL half-edge indices (`start_idx + local`), matching the C++ `startHalfedgeIdx` form so they
-/// double as `contour2Tri` keys downstream.
+/// GLOBAL buffer indices (`start_idx + local`), matching the C++ `startHalfedgeIdx` form so they double
+/// as `contour2tri` keys downstream.
 ///
 /// The C++ uses a `std::multimap<int,int>` keyed by `startVert`: `begin()` seeds each loop from the
 /// smallest-key first-inserted edge, `find(endVert)` continues it, `erase` consumes. We mirror that
-/// with a `BTreeMap<startVert, VecDeque<local>>` — smallest key via the ordered map, insertion order
-/// via the deque (FIFO), `pop_front` = `find`+`erase`.
+/// with a `BTreeMap<VertId, VecDeque<local>>` — smallest key via the ordered map, insertion order via
+/// the deque (FIFO), `pop_front` = `find`+`erase`.
 fn assemble_halfedges(hes: &[Halfedge], first: usize, last: usize, start_idx: i32) -> Vec<Vec<i32>> {
     let n = last - first;
-    let mut vert_edge: BTreeMap<i32, VecDeque<usize>> = BTreeMap::new();
+    let mut vert_edge: BTreeMap<VertId, VecDeque<usize>> = BTreeMap::new();
     for local in 0..n {
         vert_edge
             .entry(hes[first + local].start_vert)
@@ -74,48 +80,59 @@ fn assemble_halfedges(hes: &[Halfedge], first: usize, last: usize, start_idx: i3
     polys
 }
 
-/// Emit `tris` (triples of GLOBAL `face_halfedges` indices — each names a polygon corner) as output
-/// half-edges starting at `3 * first_tri`, pairing interior diagonals within the face and recording
+/// One edge of a locally-emitted triangle: the start/end corner LABELS (buffer indices into
+/// `face_halfedges`) and the OUTPUT mesh half-edge they were written to.
+#[derive(Clone, Copy)]
+struct LocalEdge {
+    start: i32,
+    end: i32,
+    out: HalfedgeId,
+}
+
+/// Emit `tris` (triples of GLOBAL `face_halfedges` buffer indices — each names a polygon corner) as
+/// output half-edges starting at `first_tri`, pairing interior diagonals within the face and recording
 /// boundary edges into `contour2tri` (`face_op.cpp` `WriteLocalTriangles`, generalized past 2 tris).
 fn write_local_triangles(
     out: &mut Mesh,
-    contour2tri: &mut [i32],
+    contour2tri: &mut [HalfedgeId],
     hes: &[Halfedge],
     first_tri: usize,
     tris: &[[i32; 3]],
 ) {
-    let first_out = 3 * first_tri as i32;
-    // Each local edge: [start-corner-label, end-corner-label, output half-edge index].
-    let mut local_edges: Vec<[i32; 3]> = Vec::with_capacity(tris.len() * 3);
+    let first_out = TriId::from_usize(first_tri).first_halfedge();
+    let mut local_edges: Vec<LocalEdge> = Vec::with_capacity(tris.len() * 3);
     let mut num_edge = 0i32;
     for tri in tris {
         for i in 0..3 {
-            let out_idx = first_out + num_edge;
+            let out_idx = first_out.offset(num_edge);
             let start = tri[i];
             let end = tri[(i + 1) % 3];
-            local_edges.push([start, end, out_idx]);
+            local_edges.push(LocalEdge {
+                start,
+                end,
+                out: out_idx,
+            });
             out.set_start(out_idx, hes[start as usize].start_vert);
             out.set_prop(out_idx, hes[start as usize].prop_vert);
-            out.set_pair(out_idx, -1);
+            out.set_pair(out_idx, HalfedgeId::NONE);
             num_edge += 1;
         }
     }
 
     // Interior diagonals occur twice (once per adjacent triangle, reversed) → pair them; a boundary edge
     // occurs once → stash it in contour2tri for the later cross-face stitch.
-    for i in 0..local_edges.len() {
-        let e = local_edges[i];
-        let mut pair = -1i32;
+    for e in &local_edges {
+        let mut pair = HalfedgeId::NONE;
         for cand in &local_edges {
-            if cand[0] == e[1] && cand[1] == e[0] {
-                pair = cand[2];
+            if cand.start == e.end && cand.end == e.start {
+                pair = cand.out;
                 break;
             }
         }
-        if pair >= 0 {
-            out.set_pair(e[2], pair);
+        if pair.is_some() {
+            out.set_pair(e.out, pair);
         } else {
-            contour2tri[e[0] as usize] = e[2];
+            contour2tri[e.start as usize] = e.out;
         }
     }
 }
@@ -141,15 +158,11 @@ pub fn face2tri(out: &mut Mesh, face_edge: &[i32], face_halfedges: &[Halfedge], 
         let num_edge = last - first;
         let mut tris: Vec<[i32; 3]> = Vec::new();
         if num_edge >= 3 {
-            debug_assert!(num_edge >= 3, "face has fewer than three edges");
             let projection = get_axis_aligned_projection(face_normal_in[face]);
             for loop_edges in assemble_halfedges(face_halfedges, first, last, face_edge[face]) {
                 let pts: Vec<Vec2> = loop_edges
                     .iter()
-                    .map(|&ge| {
-                        projection
-                            .apply(out.vert_pos[face_halfedges[ge as usize].start_vert as usize])
-                    })
+                    .map(|&ge| projection.apply(out.pos(face_halfedges[ge as usize].start_vert)))
                     .collect();
                 for [a, b, c] in triangulate_simple(&pts, epsilon) {
                     tris.push([loop_edges[a], loop_edges[b], loop_edges[c]]);
@@ -164,14 +177,14 @@ pub fn face2tri(out: &mut Mesh, face_edge: &[i32], face_halfedges: &[Halfedge], 
     // Size the output half-edge array and the per-triangle normals.
     out.halfedge = vec![
         crate::mesh::Halfedge {
-            start_vert: -1,
-            paired_halfedge: -1,
-            prop_vert: -1,
+            start_vert: VertId::NONE,
+            paired_halfedge: HalfedgeId::NONE,
+            prop_vert: VertId::NONE,
         };
         3 * total_tris
     ];
     let mut tri_normal = vec![crate::linalg::Vec3::ZERO; total_tris];
-    let mut contour2tri = vec![-1i32; face_halfedges.len()];
+    let mut contour2tri = vec![HalfedgeId::NONE; face_halfedges.len()];
 
     // Pass 2: write each face's triangles (with intra-face pairing + boundary recording) and normals.
     for face in 0..num_face {
@@ -186,17 +199,17 @@ pub fn face2tri(out: &mut Mesh, face_edge: &[i32], face_halfedges: &[Halfedge], 
     }
 
     // Cross-face stitch: pair each boundary output half-edge with the triangulated half-edge of the
-    // face-half-edge's reverse (its `paired_halfedge`), via `contour2tri`.
+    // face-half-edge's reverse (its `paired_halfedge`, a buffer index), via `contour2tri`.
     for edge in 0..face_halfedges.len() {
         let tri_edge = contour2tri[edge];
-        if tri_edge < 0 {
+        if tri_edge.is_none() {
             continue;
         }
         let pair = face_halfedges[edge].paired_halfedge;
-        if pair < 0 {
+        if pair.is_none() {
             continue;
         }
-        let pair_tri = contour2tri[pair as usize];
+        let pair_tri = contour2tri[pair.u()];
         out.set_pair(tri_edge, pair_tri);
     }
 
@@ -208,20 +221,21 @@ mod tests {
     use super::*;
     use crate::linalg::Vec3;
 
-    /// Build a value-form half-edge with an explicit end (the assembly's `face_halfedges` form).
+    /// Build a value-form half-edge with an explicit end (the assembly's `face_halfedges` form). A
+    /// negative `pair` becomes [`HalfedgeId::NONE`].
     fn he(start: i32, end: i32, pair: i32) -> Halfedge {
         Halfedge {
-            start_vert: start,
-            end_vert: end,
-            paired_halfedge: pair,
-            prop_vert: start,
+            start_vert: VertId::new(start),
+            end_vert: VertId::new(end),
+            paired_halfedge: HalfedgeId::new(pair),
+            prop_vert: VertId::new(start),
         }
     }
 
     #[test]
     fn assemble_single_triangle_loop() {
         // Three half-edges forming one CCW loop 0→1→2→0. AssembleHalfedges returns one loop of the three
-        // GLOBAL indices in traversal order.
+        // GLOBAL buffer indices in traversal order.
         let hes = [he(0, 1, -1), he(1, 2, -1), he(2, 0, -1)];
         let loops = assemble_halfedges(&hes, 0, 3, 0);
         assert_eq!(loops.len(), 1);
@@ -254,17 +268,15 @@ mod tests {
         // simplest non-trivial case.
         //
         // face_halfedges: face 0 = [0→1, 1→2, 2→0]; face 1 = [0→2, 2→3, 3→0].
-        // The reverse pair is face0's (2→0) ↔ face1's (0→2): indices 2 and 3.
-        let mut fhes = [
+        // The reverse pair is face0's (2→0) ↔ face1's (0→2): buffer indices 2 and 3.
+        let fhes = [
             he(0, 1, -1),
             he(1, 2, -1),
-            he(2, 0, 3), // paired with index 3
-            he(0, 2, 2), // paired with index 2
+            he(2, 0, 3), // paired with buffer index 3
+            he(0, 2, 2), // paired with buffer index 2
             he(2, 3, -1),
             he(3, 0, -1),
         ];
-        // (pairing already encoded above)
-        let _ = &mut fhes;
         let face_edge = [0i32, 3, 6];
 
         let mut out = Mesh {
@@ -286,9 +298,13 @@ mod tests {
         assert_eq!(out.face_normal.len(), 2);
         // The shared edge got stitched: exactly one interior pairing across the two triangles (the 0↔2
         // diagonal), so both triangles carry a valid pair on that edge.
-        let paired: usize = out.halfedge.iter().filter(|h| h.paired_halfedge >= 0).count();
+        let paired: usize = out
+            .halfedge
+            .iter()
+            .filter(|h| h.paired_halfedge.is_some())
+            .count();
         assert_eq!(paired, 2, "the shared 0↔2 edge pairs both ways");
         // Every output start vert is one of the 4 input verts.
-        assert!(out.halfedge.iter().all(|h| (0..4).contains(&h.start_vert)));
+        assert!(out.halfedge.iter().all(|h| (0..4).contains(&h.start_vert.raw())));
     }
 }

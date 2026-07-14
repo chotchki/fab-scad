@@ -465,7 +465,8 @@ mod tests {
 
         // (p-params, q-params) as (ox,oy,oz,sx,sy,sz) — all chosen so no coordinate coincides across the
         // pair (general position), and every pair genuinely overlaps.
-        let configs: &[((f64, f64, f64, f64, f64, f64), (f64, f64, f64, f64, f64, f64))] = &[
+        type BoxParams = (f64, f64, f64, f64, f64, f64);
+        let configs: &[(BoxParams, BoxParams)] = &[
             ((0.0, 0.0, 0.0, 1.0, 1.0, 1.0), (0.3, 0.4, 0.5, 1.0, 1.0, 1.0)),
             ((0.0, 0.0, 0.0, 1.0, 1.0, 1.0), (0.5, 0.3, 0.7, 2.0, 2.0, 2.0)),
             ((0.0, 0.0, 0.0, 3.0, 2.0, 1.0), (1.3, 0.7, -0.4, 1.0, 1.0, 2.0)),

@@ -6,6 +6,12 @@
 //! vertices, the polygon faces (`AppendPartialEdges`/`AppendNewEdges`/`AppendWholeEdges`), then
 //! retriangulation ([`crate::boolean::face_op::face2tri`]). Ported from `Result()` and its helpers.
 //!
+//! TYPES vs the C++ `int` soup: remaps that map a source vertex to an OUTPUT vertex (`vP2R`/`v12R`/…)
+//! are `Vec<VertId>`; the inclusion arrays (`i03`/`i12`/…) stay `Vec<i32>` — their values are winding
+//! COUNTS, not ids. Faces key `edgesNew` as `(TriId, TriId)`, cut edges key `edgesP` as [`HalfedgeId`].
+//! The per-result-face index (`facePQ2R`, `faceEdge`, `facePtrR`) is a local i32 space (offsets into the
+//! `face_halfedges` buffer), left raw.
+//!
 //! GATE-A MINIMAL PIPELINE — the provenance + cleanup tail is deferred (none of it changes the covered
 //! solid, which is all the residual/is_manifold/genus/volume gates measure):
 //! - SKIPPED: `MapTriRef`/`UpdateReference`/`CreateProperties` (color/UV provenance), `SimplifyTopology`
@@ -15,9 +21,8 @@
 //! - `RemoveUnreferencedVerts` KEPT but as a compaction (see [`crate::mesh::Mesh::remove_unreferenced_verts`]),
 //!   so `genus` — which counts `vert_pos.len()` — stays exact without `SortGeometry`.
 //!
-//! Container discipline: `edgesP`/`edgesQ` are keyed by forward-halfedge index, `edgesNew` by
-//! `(faceP, faceQ)` — `BTreeMap` NOT HashMap, because the iteration order is load-bearing (it sequences
-//! the output half-edges written per face).
+//! Container discipline: `edgesP`/`edgesQ`/`edgesNew` are `BTreeMap` NOT HashMap, because the iteration
+//! order is load-bearing (it sequences the output half-edges written per face).
 
 use std::collections::BTreeMap;
 
@@ -28,6 +33,7 @@ use crate::boolean::predicates::fmax;
 use crate::boolean::vocab::Halfedge as VHalfedge;
 use crate::linalg::{Box3, Vec3};
 use crate::mesh::Mesh;
+use crate::mesh_ids::{HalfedgeId, TriId, VertId};
 
 /// A cut-edge point awaiting pairing (`boolean_result.cpp` `EdgePos`). Sorted by `(edge_pos,
 /// collision_id)` — `collision_id` deterministically breaks position ties (the fix for the C++'s prior
@@ -35,7 +41,7 @@ use crate::mesh::Mesh;
 #[derive(Clone, Copy, Debug)]
 struct EdgePos {
     edge_pos: f64,
-    vert: i32,
+    vert: VertId,
     collision_id: i32,
     is_start: bool,
 }
@@ -61,14 +67,14 @@ fn component(v: Vec3, i: usize) -> f64 {
     }
 }
 
-/// `exclusive_scan` with the `AbsSum(a, b) = a + |b|` operator (`boolean_result.cpp`). Returns the scan
-/// (`out[k] = init + Σ_{j<k}|input[j]|`) and the final accumulator (`= AbsSum(out.back(), input.back())`
-/// — the running vertex count after this block).
-fn exclusive_scan_abssum(input: &[i32], init: i32) -> (Vec<i32>, i32) {
+/// `exclusive_scan` with the `AbsSum(a, b) = a + |b|` operator (`boolean_result.cpp`). Returns the
+/// per-source-vertex remap (`out[k] = VertId(init + Σ_{j<k}|input[j]|)`) and the final accumulator
+/// (`= AbsSum(out.back(), input.back())` — the running output-vertex count after this block).
+fn exclusive_scan_abssum(input: &[i32], init: i32) -> (Vec<VertId>, i32) {
     let mut out = Vec::with_capacity(input.len());
     let mut acc = init;
     for &v in input {
-        out.push(acc);
+        out.push(VertId::new(acc));
         acc += v.abs();
     }
     (out, acc)
@@ -77,11 +83,11 @@ fn exclusive_scan_abssum(input: &[i32], init: i32) -> (Vec<i32>, i32) {
 /// Fill the output vertex positions, duplicating each source vert `|inclusion|` times starting at its
 /// remap index (`boolean_result.cpp` `DuplicateVerts`). `inclusion`/`remap`/`src` are all indexed by the
 /// source vertex; a `0`-inclusion vert writes nothing.
-fn duplicate_verts(vert_pos_r: &mut [Vec3], inclusion: &[i32], remap: &[i32], src: &[Vec3]) {
+fn duplicate_verts(vert_pos_r: &mut [Vec3], inclusion: &[i32], remap: &[VertId], src: &[Vec3]) {
     for vert in 0..src.len() {
         let n = inclusion[vert].abs();
         for i in 0..n {
-            vert_pos_r[(remap[vert] + i) as usize] = src[vert];
+            vert_pos_r[remap[vert].offset(i).u()] = src[vert];
         }
     }
 }
@@ -96,23 +102,23 @@ fn duplicate_verts(vert_pos_r: &mut [Vec3], inclusion: &[i32], remap: &[i32], sr
 /// matter — reproduced directly here.
 #[allow(clippy::too_many_arguments)]
 fn add_new_edge_verts(
-    edges_p: &mut BTreeMap<i32, Vec<EdgePos>>,
-    edges_new: &mut BTreeMap<(i32, i32), Vec<EdgePos>>,
+    edges_p: &mut BTreeMap<HalfedgeId, Vec<EdgePos>>,
+    edges_new: &mut BTreeMap<(TriId, TriId), Vec<EdgePos>>,
     p1q2: &[[i32; 2]],
     i12: &[i32],
-    v12r: &[i32],
+    v12r: &[VertId],
     halfedge_p: &Mesh,
     forward: bool,
     offset: usize,
 ) {
     for i in 0..p1q2.len() {
-        let edge_p = p1q2[i][if forward { 0 } else { 1 }];
-        let face_q = p1q2[i][if forward { 1 } else { 0 }];
+        let edge_p = HalfedgeId::new(p1q2[i][if forward { 0 } else { 1 }]);
+        let face_q = TriId::new(p1q2[i][if forward { 1 } else { 0 }]);
         let vert = v12r[i];
         let inclusion = i12[i];
 
-        let mut key_right = (halfedge_p.pair(edge_p) / 3, face_q);
-        let mut key_left = (edge_p / 3, face_q);
+        let mut key_right = (halfedge_p.pair(edge_p).tri(), face_q);
+        let mut key_left = (edge_p.tri(), face_q);
         if !forward {
             core::mem::swap(&mut key_right.0, &mut key_right.1);
             core::mem::swap(&mut key_left.0, &mut key_left.1);
@@ -126,7 +132,7 @@ fn add_new_edge_verts(
         for j in 0..n {
             edges_p.entry(edge_p).or_default().push(EdgePos {
                 edge_pos: 0.0,
-                vert: vert + j,
+                vert: vert.offset(j),
                 collision_id: cid,
                 is_start: is_start[0],
             });
@@ -134,7 +140,7 @@ fn add_new_edge_verts(
         for j in 0..n {
             edges_new.entry(key_right).or_default().push(EdgePos {
                 edge_pos: 0.0,
-                vert: vert + j,
+                vert: vert.offset(j),
                 collision_id: cid,
                 is_start: is_start[1],
             });
@@ -142,7 +148,7 @@ fn add_new_edge_verts(
         for j in 0..n {
             edges_new.entry(key_left).or_default().push(EdgePos {
                 edge_pos: 0.0,
-                vert: vert + j,
+                vert: vert.offset(j),
                 collision_id: cid,
                 is_start: is_start[2],
             });
@@ -168,7 +174,7 @@ fn pair_up(edge_pos: &mut Vec<EdgePos>, mut f: impl FnMut(VHalfedge)) {
         f(VHalfedge {
             start_vert: starts[i].vert,
             end_vert: ends[i].vert,
-            paired_halfedge: -1,
+            paired_halfedge: HalfedgeId::NONE,
             prop_vert: starts[i].vert,
         });
     }
@@ -176,7 +182,8 @@ fn pair_up(edge_pos: &mut Vec<EdgePos>, mut f: impl FnMut(VHalfedge)) {
 
 /// The two-halfedge emit shared by `AppendPartialEdges`/`AppendNewEdges`: advance the write cursor for
 /// the left and right result faces, write the forward edge to `face_left` and its reverse to
-/// `face_right`, cross-linking their pairs.
+/// `face_right`, cross-linking their pairs. `face_left`/`face_right` are result-face indices; the write
+/// cursors hold `face_halfedges` BUFFER indices.
 fn emit_paired(
     face_halfedges: &mut [VHalfedge],
     face_ptr_r: &mut [i32],
@@ -189,11 +196,11 @@ fn emit_paired(
     let backward_edge = face_ptr_r[face_right as usize];
     face_ptr_r[face_right as usize] += 1;
 
-    e.paired_halfedge = backward_edge;
+    e.paired_halfedge = HalfedgeId::new(backward_edge);
     face_halfedges[forward_edge as usize] = e;
 
     core::mem::swap(&mut e.start_vert, &mut e.end_vert);
-    e.paired_halfedge = forward_edge;
+    e.paired_halfedge = HalfedgeId::new(forward_edge);
     face_halfedges[backward_edge as usize] = e;
 }
 
@@ -206,10 +213,10 @@ fn append_partial_edges(
     face_halfedges: &mut [VHalfedge],
     whole_halfedge_p: &mut [bool],
     face_ptr_r: &mut [i32],
-    edges_p: &BTreeMap<i32, Vec<EdgePos>>,
+    edges_p: &BTreeMap<HalfedgeId, Vec<EdgePos>>,
     in_p: &Mesh,
     i03: &[i32],
-    v_p2r: &[i32],
+    v_p2r: &[VertId],
     face_p2r: &[i32],
 ) {
     for (&edge_p, edge_pos_ref) in edges_p {
@@ -217,43 +224,43 @@ fn append_partial_edges(
         edge_pos_p.sort_by(EdgePos::order);
 
         let pair_p = in_p.pair(edge_p);
-        whole_halfedge_p[edge_p as usize] = false;
-        whole_halfedge_p[pair_p as usize] = false;
+        whole_halfedge_p[edge_p.u()] = false;
+        whole_halfedge_p[pair_p.u()] = false;
 
         let v_start = in_p.start(edge_p);
         let v_end = in_p.end(edge_p);
-        let edge_vec = in_p.vert_pos[v_end as usize] - in_p.vert_pos[v_start as usize];
+        let edge_vec = in_p.pos(v_end) - in_p.pos(v_start);
 
         for e in &mut edge_pos_p {
-            e.edge_pos = out.vert_pos[e.vert as usize].dot(edge_vec);
+            e.edge_pos = out.pos(e.vert).dot(edge_vec);
         }
 
-        let mut inclusion = i03[v_start as usize];
+        let mut inclusion = i03[v_start.u()];
         let mut ep = EdgePos {
-            edge_pos: out.vert_pos[v_p2r[v_start as usize] as usize].dot(edge_vec),
-            vert: v_p2r[v_start as usize],
+            edge_pos: out.pos(v_p2r[v_start.u()]).dot(edge_vec),
+            vert: v_p2r[v_start.u()],
             collision_id: i32::MAX,
             is_start: inclusion > 0,
         };
         for _ in 0..inclusion.abs() {
             edge_pos_p.push(ep);
-            ep.vert += 1;
+            ep.vert.advance();
         }
 
-        inclusion = i03[v_end as usize];
+        inclusion = i03[v_end.u()];
         ep = EdgePos {
-            edge_pos: out.vert_pos[v_p2r[v_end as usize] as usize].dot(edge_vec),
-            vert: v_p2r[v_end as usize],
+            edge_pos: out.pos(v_p2r[v_end.u()]).dot(edge_vec),
+            vert: v_p2r[v_end.u()],
             collision_id: i32::MAX,
             is_start: inclusion < 0,
         };
         for _ in 0..inclusion.abs() {
             edge_pos_p.push(ep);
-            ep.vert += 1;
+            ep.vert.advance();
         }
 
-        let face_left = face_p2r[(edge_p / 3) as usize];
-        let face_right = face_p2r[(pair_p / 3) as usize];
+        let face_left = face_p2r[edge_p.tri().u()];
+        let face_right = face_p2r[pair_p.tri().u()];
 
         pair_up(&mut edge_pos_p, |e| {
             emit_paired(face_halfedges, face_ptr_r, face_left, face_right, e)
@@ -268,7 +275,7 @@ fn append_new_edges(
     out: &Mesh,
     face_halfedges: &mut [VHalfedge],
     face_ptr_r: &mut [i32],
-    edges_new: &BTreeMap<(i32, i32), Vec<EdgePos>>,
+    edges_new: &BTreeMap<(TriId, TriId), Vec<EdgePos>>,
     face_pq2r: &[i32],
     num_face_p: usize,
 ) {
@@ -278,7 +285,7 @@ fn append_new_edges(
 
         let mut bbox = Box3::default();
         for e in &edge_pos {
-            bbox.union_point(out.vert_pos[e.vert as usize]);
+            bbox.union_point(out.pos(e.vert));
         }
         let size = bbox.size();
         let dim = if size.x > size.y && size.x > size.z {
@@ -289,11 +296,11 @@ fn append_new_edges(
             2
         };
         for e in &mut edge_pos {
-            e.edge_pos = component(out.vert_pos[e.vert as usize], dim);
+            e.edge_pos = component(out.pos(e.vert), dim);
         }
 
-        let face_left = face_pq2r[face_p as usize];
-        let face_right = face_pq2r[num_face_p + face_q as usize];
+        let face_left = face_pq2r[face_p.u()];
+        let face_right = face_pq2r[num_face_p + face_q.u()];
 
         pair_up(&mut edge_pos, |e| {
             emit_paired(face_halfedges, face_ptr_r, face_left, face_right, e)
@@ -304,18 +311,17 @@ fn append_new_edges(
 /// Emit the whole (uncut) edges, duplicated per inclusion (`boolean_result.cpp` `DuplicateHalfedges` via
 /// `AppendWholeEdges`). Each uncut edge is processed once from its forward half-edge, emitting both
 /// output half-edges directly with their pairing.
-#[allow(clippy::too_many_arguments)]
 fn append_whole_edges(
     face_halfedges: &mut [VHalfedge],
     face_ptr_r: &mut [i32],
     in_p: &Mesh,
     whole_halfedge_p: &[bool],
     i03: &[i32],
-    v_p2r: &[i32],
+    v_p2r: &[VertId],
     face_p2r: &[i32],
 ) {
-    for idx in 0..in_p.halfedge.len() as i32 {
-        if !whole_halfedge_p[idx as usize] {
+    for idx in in_p.halfedge_ids() {
+        if !whole_halfedge_p[idx.u()] {
             continue;
         }
         let mut start_vert = in_p.start(idx);
@@ -323,20 +329,20 @@ fn append_whole_edges(
         if start_vert >= end_vert {
             continue;
         }
-        let inclusion = i03[start_vert as usize];
+        let inclusion = i03[start_vert.u()];
         if inclusion == 0 {
             continue;
         }
         if inclusion < 0 {
             core::mem::swap(&mut start_vert, &mut end_vert);
         }
-        start_vert = v_p2r[start_vert as usize];
-        end_vert = v_p2r[end_vert as usize];
+        start_vert = v_p2r[start_vert.u()];
+        end_vert = v_p2r[end_vert.u()];
         let prop_vert = in_p.prop(idx);
         let pair = in_p.pair(idx);
         let pair_prop_vert = in_p.prop(pair);
-        let new_face = face_p2r[(idx / 3) as usize];
-        let face_right = face_p2r[(pair / 3) as usize];
+        let new_face = face_p2r[idx.tri().u()];
+        let face_right = face_p2r[pair.tri().u()];
 
         for _ in 0..inclusion.abs() {
             let forward_edge = face_ptr_r[new_face as usize];
@@ -347,17 +353,17 @@ fn append_whole_edges(
             face_halfedges[forward_edge as usize] = VHalfedge {
                 start_vert,
                 end_vert,
-                paired_halfedge: backward_edge,
+                paired_halfedge: HalfedgeId::new(backward_edge),
                 prop_vert,
             };
             face_halfedges[backward_edge as usize] = VHalfedge {
                 start_vert: end_vert,
                 end_vert: start_vert,
-                paired_halfedge: forward_edge,
+                paired_halfedge: HalfedgeId::new(forward_edge),
                 prop_vert: pair_prop_vert,
             };
-            start_vert += 1;
-            end_vert += 1;
+            start_vert.advance();
+            end_vert.advance();
         }
     }
 }
@@ -384,34 +390,36 @@ fn size_output(
     let mut sides = vec![0i32; num_tri_p + num_tri_q];
 
     // CountVerts: each face collects |inclusion| of each of its 3 corner verts.
-    for i in 0..num_tri_p {
+    for (i, side) in sides.iter_mut().enumerate().take(num_tri_p) {
+        let t = TriId::from_usize(i);
         for j in 0..3 {
-            sides[i] += i03[in_p.start(3 * i as i32 + j) as usize].abs();
+            *side += i03[in_p.start(t.halfedge(j)).u()].abs();
         }
     }
     for i in 0..num_tri_q {
+        let t = TriId::from_usize(i);
         for j in 0..3 {
-            sides[num_tri_p + i] += i30[in_q.start(3 * i as i32 + j) as usize].abs();
+            sides[num_tri_p + i] += i30[in_q.start(t.halfedge(j)).u()].abs();
         }
     }
 
     // CountNewVerts<false> over p1q2: edgeP = pq[0] (P edge), faceQ = pq[1] (Q face).
     for idx in 0..p1q2.len() {
-        let edge_p = p1q2[idx][0];
-        let face_q = p1q2[idx][1];
+        let edge_p = HalfedgeId::new(p1q2[idx][0]);
+        let face_q = p1q2[idx][1] as usize;
         let incl = i12[idx].abs();
-        sides[num_tri_p + face_q as usize] += incl;
-        sides[(edge_p / 3) as usize] += incl;
-        sides[(in_p.pair(edge_p) / 3) as usize] += incl;
+        sides[num_tri_p + face_q] += incl;
+        sides[edge_p.tri().u()] += incl;
+        sides[in_p.pair(edge_p).tri().u()] += incl;
     }
     // CountNewVerts<true> over p2q1: edgeP = pq[1] (Q edge), faceQ = pq[0] (P face); counts swap roles.
     for idx in 0..p2q1.len() {
-        let edge_q = p2q1[idx][1];
-        let face_p = p2q1[idx][0];
+        let edge_q = HalfedgeId::new(p2q1[idx][1]);
+        let face_p = p2q1[idx][0] as usize;
         let incl = i21[idx].abs();
-        sides[face_p as usize] += incl;
-        sides[num_tri_p + (edge_q / 3) as usize] += incl;
-        sides[num_tri_p + (in_q.pair(edge_q) / 3) as usize] += incl;
+        sides[face_p] += incl;
+        sides[num_tri_p + edge_q.tri().u()] += incl;
+        sides[num_tri_p + in_q.pair(edge_q).tri().u()] += incl;
     }
 
     // facePQ2R[f] = number of kept faces strictly before f = f's new result index (when kept).
@@ -527,9 +535,9 @@ fn result(b3: &Boolean3, in_p: &Mesh, in_q: &Mesh, op: OpType) -> Mesh {
     duplicate_verts(&mut out.vert_pos, &i21, &v21r, &b3.xv21.v12);
 
     // Level 3: new-edge verts into the per-edge and per-face-pair maps.
-    let mut edges_p: BTreeMap<i32, Vec<EdgePos>> = BTreeMap::new();
-    let mut edges_q: BTreeMap<i32, Vec<EdgePos>> = BTreeMap::new();
-    let mut edges_new: BTreeMap<(i32, i32), Vec<EdgePos>> = BTreeMap::new();
+    let mut edges_p: BTreeMap<HalfedgeId, Vec<EdgePos>> = BTreeMap::new();
+    let mut edges_q: BTreeMap<HalfedgeId, Vec<EdgePos>> = BTreeMap::new();
+    let mut edges_new: BTreeMap<(TriId, TriId), Vec<EdgePos>> = BTreeMap::new();
     add_new_edge_verts(&mut edges_p, &mut edges_new, &b3.xv12.p1q2, &i12, &v12r, in_p, true, 0);
     add_new_edge_verts(
         &mut edges_q,
@@ -562,10 +570,10 @@ fn result(b3: &Boolean3, in_p: &Mesh, in_q: &Mesh, op: OpType) -> Mesh {
     let total_he = *face_edge.last().unwrap() as usize;
     let mut face_halfedges = vec![
         VHalfedge {
-            start_vert: -1,
-            end_vert: -1,
-            paired_halfedge: -1,
-            prop_vert: -1,
+            start_vert: VertId::NONE,
+            end_vert: VertId::NONE,
+            paired_halfedge: HalfedgeId::NONE,
+            prop_vert: VertId::NONE,
         };
         total_he
     ];

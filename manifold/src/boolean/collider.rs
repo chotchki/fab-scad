@@ -16,9 +16,15 @@
 //! Two query modes, matching `Box::DoesOverlap`'s two overloads: a `Box3` query (edge box vs face box)
 //! and a `Vec3` point query (XY-projected — the z-raycast winding). An empty (inverted-infinity) box
 //! query — what a REVERSE half-edge produces — is skipped wholesale, verbatim to the C++ early-out.
+//!
+//! The collider itself is DELIBERATELY index-agnostic: [`Collider::collisions`] collides abstract
+//! leaf/query indices (`i32`), and the CALLER assigns their meaning (a query is an edge here, a vert
+//! there) by wrapping into the typed ids at the callback boundary. Typing the broad phase would be
+//! false precision — it doesn't know or care what the boxes represent.
 
 use crate::linalg::{Box3, Vec3};
 use crate::mesh::Mesh;
+use crate::mesh_ids::{HalfedgeId, TriId};
 
 /// A broad-phase query — either a `Box3` (box-vs-box overlap) or a `Vec3` (point projected into the
 /// leaf's XY extent). Unifies the two `Box::DoesOverlap` overloads so [`Collider::collisions`] is one
@@ -72,16 +78,16 @@ impl Collider {
 
     /// Build over a mesh's per-face boxes — the way a boolean builds `inQ.collider_` (`GetFaceBoxMorton`
     /// minus the Morton sort). Each face box is the union of its three vertices; a removed face
-    /// (`pair(3·face) < 0`) keeps the empty default so it collides with nothing.
+    /// (`pair(first_halfedge)` is NONE) keeps the empty default so it collides with nothing.
     pub fn from_mesh(mesh: &Mesh) -> Self {
         let mut leaf_box = vec![Box3::default(); mesh.num_tri()];
-        for face in 0..mesh.num_tri() as i32 {
-            if mesh.pair(3 * face) < 0 {
+        for (face, bx) in leaf_box.iter_mut().enumerate() {
+            let t = TriId::from_usize(face);
+            if mesh.pair(t.halfedge(0)).is_none() {
                 continue;
             }
             for i in 0..3 {
-                leaf_box[face as usize]
-                    .union_point(mesh.vert_pos[mesh.start(3 * face + i) as usize]);
+                bx.union_point(mesh.pos(mesh.start(t.halfedge(i))));
             }
         }
         Self { leaf_box }
@@ -91,6 +97,7 @@ impl Collider {
     /// `query_fn(i)`; skip an empty box query; otherwise call `record(i, leaf)` for every leaf box it
     /// overlaps. When `self_collision`, the `i == leaf` self-pair is skipped (only meaningful when the
     /// queries ARE the leaves; the boolean always passes `false`). Leaves are scanned in natural order.
+    /// Indices are raw `i32` — the caller assigns their meaning.
     pub fn collisions<Q: ColliderQuery>(
         &self,
         n: usize,
@@ -117,11 +124,11 @@ impl Collider {
 /// default for a reverse half-edge — the exact `f(i)` lambda `Intersect12_` builds. A reverse edge's
 /// empty box is skipped by [`Collider::collisions`], so each undirected edge is queried once.
 #[inline]
-pub fn edge_query_box(mesh: &Mesh, edge: i32) -> Box3 {
+pub fn edge_query_box(mesh: &Mesh, edge: HalfedgeId) -> Box3 {
     let start = mesh.start(edge);
     let end = mesh.end(edge);
     if start < end {
-        Box3::from_points(mesh.vert_pos[start as usize], mesh.vert_pos[end as usize])
+        Box3::from_points(mesh.pos(start), mesh.pos(end))
     } else {
         Box3::default()
     }
@@ -130,6 +137,7 @@ pub fn edge_query_box(mesh: &Mesh, edge: i32) -> Box3 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mesh_ids::VertId;
 
     /// A unit cube at a given origin, as a fresh manifold `Mesh`.
     fn cube_at(ox: f64, oy: f64, oz: f64) -> Mesh {
@@ -173,9 +181,9 @@ mod tests {
 
     #[test]
     fn removed_face_gets_empty_box() {
-        // Hand-break a face: mark its first half-edge's pair as -1 so from_mesh skips it.
+        // Hand-break a face: mark its first half-edge's pair as NONE so from_mesh skips it.
         let mut mesh = cube_at(0.0, 0.0, 0.0);
-        mesh.halfedge[0].paired_halfedge = -1;
+        mesh.halfedge[0].paired_halfedge = HalfedgeId::NONE;
         let c = Collider::from_mesh(&mesh);
         assert!(!c.leaf_box[0].is_finite()); // empty (inverted-infinity)
         // An empty leaf box overlaps no query.
@@ -187,10 +195,12 @@ mod tests {
     fn edge_query_skips_reverse_and_empties() {
         let mesh = cube_at(0.0, 0.0, 0.0);
         // A forward half-edge (start < end) yields a finite box; a reverse one yields empty.
-        let fwd = (0..mesh.halfedge.len() as i32)
+        let fwd = mesh
+            .halfedge_ids()
             .find(|&e| mesh.start(e) < mesh.end(e))
             .unwrap();
-        let rev = (0..mesh.halfedge.len() as i32)
+        let rev = mesh
+            .halfedge_ids()
             .find(|&e| mesh.start(e) > mesh.end(e))
             .unwrap();
         assert!(edge_query_box(&mesh, fwd).is_finite());
@@ -208,7 +218,7 @@ mod tests {
         collider.collisions(
             p.halfedge.len(),
             false,
-            |e| edge_query_box(&p, e),
+            |e| edge_query_box(&p, HalfedgeId::new(e)),
             |edge, face| pairs.push((edge, face)),
         );
         assert!(
@@ -217,7 +227,8 @@ mod tests {
         );
         // Every recorded query index is a FORWARD edge of p (reverse edges are empty → skipped).
         for &(edge, face) in &pairs {
-            assert!(p.start(edge) < p.end(edge), "edge {edge} should be forward");
+            let e = HalfedgeId::new(edge);
+            assert!(p.start(e) < p.end(e), "edge {edge} should be forward");
             assert!((0..12).contains(&face));
         }
 
@@ -228,7 +239,7 @@ mod tests {
         far_collider.collisions(
             p.halfedge.len(),
             false,
-            |e| edge_query_box(&p, e),
+            |e| edge_query_box(&p, HalfedgeId::new(e)),
             |_, _| far_pairs += 1,
         );
         assert_eq!(far_pairs, 0);
@@ -263,6 +274,8 @@ mod tests {
             hits_outside, 0,
             "a point outside the XY footprint hits nothing"
         );
+        // (VertId is used by callers to label point-query indices; keep the import exercised.)
+        let _ = VertId::new(0);
     }
 
     #[test]

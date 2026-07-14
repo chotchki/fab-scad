@@ -6,24 +6,31 @@
 //! [`crate::mesh::Halfedge`] is the stored element that DERIVES `end` from the next half-edge — same
 //! concept, different representation. The C++ carries both under one name; we keep them in separate
 //! modules so which one a signature means is unambiguous.
+//!
+//! Indices are typed ([`crate::mesh_ids`]). The exception is [`Intersections::p1q2`], which stays a raw
+//! `[i32; 2]`: it packs an edge and a face in one array and the cascade selects between them with a
+//! runtime `[index]`/`[1-index]` (the C++ forward/reverse symmetry) — a typed struct would break that,
+//! so it's typed at the point of USE instead. [`TriRef`] also stays raw `i32`: its fields are a mesh
+//! INSTANCE id and user/coplanar tags, a different namespace from the mesh index spaces.
 
 use core::cmp::Ordering;
 
 use crate::linalg::Vec3;
 use crate::mesh::Mesh;
+use crate::mesh_ids::{HalfedgeId, VertId};
 
 /// A value-style half-edge (`shared.h` `struct Halfedge`) — `end_vert` stored, not derived. Emitted by
 /// the boolean assembly before the pieces become a manifold spine.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Halfedge {
     /// Start vertex.
-    pub start_vert: i32,
+    pub start_vert: VertId,
     /// End vertex (stored, unlike the spine's derived end).
-    pub end_vert: i32,
-    /// The opposite half-edge, or `-1`.
-    pub paired_halfedge: i32,
+    pub end_vert: VertId,
+    /// The opposite half-edge, or [`HalfedgeId::NONE`].
+    pub paired_halfedge: HalfedgeId,
     /// The property vertex.
-    pub prop_vert: i32,
+    pub prop_vert: VertId,
 }
 
 impl Halfedge {
@@ -44,7 +51,9 @@ impl Halfedge {
 }
 
 /// Provenance of an output triangle (`shared.h` `TriRef`) — which input mesh/face it came from, threaded
-/// through the boolean so properties (UVs, colours) and coplanar-merge decisions can be reapplied.
+/// through the boolean so properties (UVs, colours) and coplanar-merge decisions can be reapplied. Its
+/// fields are a different id namespace from the mesh index spaces (a mesh INSTANCE id, user/coplanar
+/// tags), so they stay raw `i32`.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct TriRef {
     /// The mesh-instance ID this triangle belongs to.
@@ -76,18 +85,18 @@ impl TriRef {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct TmpEdge {
     /// Lower-indexed endpoint.
-    pub first: i32,
+    pub first: VertId,
     /// Higher-indexed endpoint.
-    pub second: i32,
-    /// The half-edge this edge was created from (`-1` marks the reverse half, dropped by
+    pub second: VertId,
+    /// The half-edge this edge was created from ([`HalfedgeId::NONE`] marks the reverse half, dropped by
     /// [`create_tmp_edges`]).
-    pub halfedge_idx: i32,
+    pub halfedge_idx: HalfedgeId,
 }
 
 impl TmpEdge {
     /// Build from a directed `(start, end)` half-edge, sorting the endpoints so `first <= second`.
     #[inline]
-    pub fn new(start: i32, end: i32, idx: i32) -> Self {
+    pub fn new(start: VertId, end: VertId, idx: HalfedgeId) -> Self {
         Self {
             first: start.min(end),
             second: start.max(end),
@@ -104,20 +113,21 @@ impl TmpEdge {
 }
 
 /// One forward `TmpEdge` per undirected edge of `mesh` (`shared.h` `CreateTmpEdges`): build a temp edge
-/// for every half-edge, tagging the reverse halves `-1`, then drop them — leaving exactly `numEdge =
+/// for every half-edge, tagging the reverse halves `NONE`, then drop them — leaving exactly `numEdge =
 /// halfedge/2` forward edges. Panics (debug) if the mesh isn't oriented (the count wouldn't halve).
 pub fn create_tmp_edges(mesh: &Mesh) -> Vec<TmpEdge> {
-    let mut edges: Vec<TmpEdge> = (0..mesh.halfedge.len() as i32)
+    let mut edges: Vec<TmpEdge> = mesh
+        .halfedge_ids()
         .map(|idx| {
             let is_forward = mesh.start(idx) < mesh.end(idx);
             TmpEdge::new(
                 mesh.start(idx),
                 mesh.end(idx),
-                if is_forward { idx } else { -1 },
+                if is_forward { idx } else { HalfedgeId::NONE },
             )
         })
         .collect();
-    edges.retain(|e| e.halfedge_idx >= 0);
+    edges.retain(|e| e.halfedge_idx.is_some());
     debug_assert_eq!(
         edges.len(),
         mesh.halfedge.len() / 2,
@@ -129,9 +139,12 @@ pub fn create_tmp_edges(mesh: &Mesh) -> Vec<TmpEdge> {
 /// The intersection records of one direction of the boolean (`boolean3.h` `Intersections`). In forward
 /// mode: intersections of edges of P with faces of Q; the three arrays are parallel (one entry per
 /// intersection). Reverse mode swaps the roles (`p1q2 → p2q1`, etc.).
+///
+/// `p1q2` stays a raw `[i32; 2]` = `[edge, face]`: the cascade picks edge-or-face with a runtime
+/// `[index]` that flips between the forward and reverse passes, so it's typed at the point of use.
 #[derive(Clone, Debug, Default)]
 pub struct Intersections {
-    /// Each `[edgeP, faceQ]` (forward) sparse index pair.
+    /// Each `[edgeP, faceQ]` (forward) sparse index pair — an edge id and a face id, raw (see above).
     pub p1q2: Vec<[i32; 2]>,
     /// The winding-number-type `X` value for each pair.
     pub x12: Vec<i32>,
@@ -143,27 +156,28 @@ pub struct Intersections {
 mod tests {
     use super::*;
     use crate::mesh::Mesh;
+    use crate::mesh_ids::TriId;
 
     #[test]
     fn halfedge_is_forward_and_order() {
         let fwd = Halfedge {
-            start_vert: 1,
-            end_vert: 4,
-            paired_halfedge: 7,
-            prop_vert: 1,
+            start_vert: VertId::new(1),
+            end_vert: VertId::new(4),
+            paired_halfedge: HalfedgeId::new(7),
+            prop_vert: VertId::new(1),
         };
         let rev = Halfedge {
-            start_vert: 4,
-            end_vert: 1,
-            paired_halfedge: -1,
-            prop_vert: 4,
+            start_vert: VertId::new(4),
+            end_vert: VertId::new(1),
+            paired_halfedge: HalfedgeId::NONE,
+            prop_vert: VertId::new(4),
         };
         assert!(fwd.is_forward());
         assert!(!rev.is_forward());
         assert_eq!(Halfedge::order(&fwd, &rev), Ordering::Less); // (1,4) < (4,1)
         // Order ignores pair/prop: same (start,end), different pair ⇒ Equal by order, != by Eq.
         let same_verts = Halfedge {
-            paired_halfedge: 99,
+            paired_halfedge: HalfedgeId::new(99),
             ..fwd
         };
         assert_eq!(Halfedge::order(&fwd, &same_verts), Ordering::Equal);
@@ -194,11 +208,14 @@ mod tests {
 
     #[test]
     fn tmp_edge_sorts_endpoints_and_orders() {
-        let e = TmpEdge::new(5, 2, 11);
-        assert_eq!((e.first, e.second, e.halfedge_idx), (2, 5, 11));
-        let f = TmpEdge::new(2, 5, 11); // same undirected edge, forward
+        let e = TmpEdge::new(VertId::new(5), VertId::new(2), HalfedgeId::new(11));
+        assert_eq!(
+            (e.first, e.second, e.halfedge_idx),
+            (VertId::new(2), VertId::new(5), HalfedgeId::new(11))
+        );
+        let f = TmpEdge::new(VertId::new(2), VertId::new(5), HalfedgeId::new(11)); // same undirected edge
         assert_eq!(e, f);
-        let g = TmpEdge::new(3, 9, 4);
+        let g = TmpEdge::new(VertId::new(3), VertId::new(9), HalfedgeId::new(4));
         assert_eq!(TmpEdge::order(&e, &g), Ordering::Less); // (2,5) < (3,9)
     }
 
@@ -221,7 +238,7 @@ mod tests {
         assert_eq!(edges.len(), 6);
         // Every temp edge is forward-tagged (a real half-edge index) and canonical (first <= second).
         for e in &edges {
-            assert!(e.halfedge_idx >= 0);
+            assert!(e.halfedge_idx.is_some());
             assert!(e.first <= e.second);
         }
     }
@@ -230,5 +247,7 @@ mod tests {
     fn intersections_default_is_empty() {
         let i = Intersections::default();
         assert!(i.p1q2.is_empty() && i.x12.is_empty() && i.v12.is_empty());
+        // TriId is part of the id vocabulary the assembly uses to key faces.
+        assert_eq!(TriId::new(2).halfedge(0), HalfedgeId::new(6));
     }
 }

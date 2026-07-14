@@ -24,6 +24,8 @@ pub mod linalg;
 pub mod mathf;
 // the halfedge `Impl` (the mesh spine); MeshGL <-> Impl, IsManifold.
 pub mod mesh;
+// typed mesh indices (VertId/HalfedgeId/TriId) — the misuse-resistance layer over raw i32.
+pub mod mesh_ids;
 // Pillar 1: the deterministic parallel seam (serial when `par` is off).
 pub mod par;
 // the robust 2D triangulator the boolean reassembly leans on.

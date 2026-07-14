@@ -53,14 +53,12 @@ kernel is statically linked — and the fonts are baked in, so the `.app` has NO
 dependency: fully self-contained. Verified: the bundled `fab-gui cube.scad --screenshot` rendered the
 full themed UI + the model from inside the `.app` (Oswald/Quattrocento + the navy/gold theme + the kernel
 all resolve from the bundle). **App icon added** — a navy/gold isometric box, source `packaging/macos/
-icon.svg` → `make-icon.sh` (headless-Chrome render → `sips` → `iconutil`) → `fab-scad.icns`, wired via
-`Packager.toml`'s `icons`.
+icon.svg` → `make-icon.sh` renders a 1024 master (headless Chrome) then packs BOTH `fab-scad.icns`
+(macOS, `sips`+`iconutil`) and `fab-scad.ico` (Windows, ImageMagick multi-size), wired in `Packager.toml`'s
+`icons` (cargo-packager picks per platform).
 
 ## Known gaps before a real release
 
-- **Windows .ico** — the `icons` entry is macOS-only (`.icns`); NSIS needs an `.ico`. Generate one from
-  the same `icon.svg` before the Windows/winget resume (`make-icon.sh` is macOS-tool-only, so the .ico
-  path needs ImageMagick or equivalent).
 - CFBundleVersion is a build timestamp — pin in CI for reproducibility.
 - ~3k absolute source paths embedded in the binary (standard Rust debug metadata) —
   `--remap-path-prefix` if we care.

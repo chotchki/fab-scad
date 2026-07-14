@@ -8,8 +8,9 @@ version = "0.1.0"
 out-dir = "target/packager"
 binaries-dir = "target/release"
 formats = ["app", "dmg"]
-# App icon (navy/gold isometric box). Regenerate from packaging/macos/icon.svg via make-icon.sh.
-icons = ["packaging/macos/fab-scad.icns"]
+# App icon (navy/gold isometric box) — .icns for macOS, .ico for the Windows NSIS build; cargo-packager
+# picks per platform. Regenerate both from packaging/macos/icon.svg via make-icon.sh.
+icons = ["packaging/macos/fab-scad.icns", "packaging/macos/fab-scad.ico"]
 
 [[binaries]]
 path = "fab-gui"

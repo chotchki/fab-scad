@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Render icon.svg → a macOS .icns (all iconset sizes), committed as packaging/macos/fab-scad.icns.
-# Headless Chrome renders the SVG (sips can't rasterize SVG); sips downscales the 1024 master into the
-# .iconset; iconutil packs it. Re-run after editing icon.svg.
+# Render icon.svg → the macOS .icns AND the Windows .ico (both committed here). Headless Chrome renders
+# the SVG to a 1024 master (sips can't rasterize SVG); sips + iconutil pack the .icns, ImageMagick packs
+# the multi-size .ico. macOS-only tooling (sips/iconutil) — run it on a Mac. Re-run after editing icon.svg.
 set -euo pipefail
 cd "$(dirname "$0")"
 CHROME="${CHROME:-/Applications/Google Chrome.app/Contents/MacOS/Google Chrome}"
@@ -23,3 +23,8 @@ gen icon_512x512.png 512;   gen icon_512x512@2x.png 1024
 
 iconutil -c icns "$set" -o fab-scad.icns
 echo "wrote packaging/macos/fab-scad.icns ($(du -h fab-scad.icns | cut -f1))"
+
+# Windows .ico — a multi-size icon (the standard Windows set) from the same master, alpha preserved.
+MAGICK="${MAGICK:-magick}"
+"$MAGICK" "$work/icon-1024.png" -define icon:auto-resize=256,128,64,48,32,24,16 fab-scad.ico
+echo "wrote packaging/macos/fab-scad.ico ($(du -h fab-scad.ico | cut -f1))"

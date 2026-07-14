@@ -1,18 +1,13 @@
-//! U.3.14 Phase B — the manifest→GUI inverse bridge. Reads a `project.toml`'s per-part
-//! `[[slicing.part]]` config into the live `Part` state on load, the EXACT inverse of the GUI→manifest
-//! forward bridge (`fab::to_connectors` / `to_orient` / `cuts_to_spec`), so a save (Phase C) then
-//! reload round-trips. A part with loaded cuts makes `kick_auto_plan` stand down, so config wins over
-//! auto-derive; a part with no block (or a flat/legacy `[slicing]`) is left to auto-derive.
-
-// Path + anyhow are used only by the native fs autosave (`save_slicing_config`); the load/hash bridge
-// below is pure and wasm-safe.
-#[cfg(not(target_arch = "wasm32"))]
-use std::path::Path;
-#[cfg(not(target_arch = "wasm32"))]
-use anyhow::{Context, Result};
+//! The slicing-config persistence bridge (W.3.8). Per-part cuts/connectors/orient round-trip through a
+//! trailing `fab:config` comment block in the `.scad` buffer itself — ONE mechanism both platforms share
+//! (desktop bakes it on Save, web on download). `slicing_blocks` + `config_block` are the write side;
+//! `read_config_block` + `apply_blocks` the read side (the EXACT inverse of the GUI→manifest forward
+//! bridge `fab::to_connectors` / `to_orient` / `cuts_to_spec`). A part with loaded cuts makes
+//! `kick_auto_plan` stand down, so config wins over auto-derive; a part with no block auto-derives.
+//! (This retired the U.3.14 `project.toml`/toml_edit autosave — the block is fs-less, so it works on wasm.)
 
 use crate::*;
-use fab_scad::manifest::{Connector, Cut as MCut, Manifest, PartKey, PartSlicing, PieceOrient};
+use fab_scad::manifest::{Connector, Cut as MCut, PartKey, PartSlicing, PieceOrient};
 use fab_scad::num::Num;
 
 /// manifest axis string → GUI [`Axis`] (first char; defaults Z, matching the slicer's fallback).
@@ -90,20 +85,10 @@ fn load_into_part(part: &mut Part, ps: &PartSlicing) {
     part.orient = orient_to_store(&ps.orient);
 }
 
-/// Apply a manifest's per-part slicing config to freshly-built parts, BEFORE auto-derive runs (a part
-/// with loaded cuts makes `kick_auto_plan` stand down, so config wins). Each block binds via
+/// Apply parsed per-part slicing blocks to freshly-built parts, BEFORE auto-derive runs (a part with
+/// loaded cuts makes `kick_auto_plan` stand down, so config wins). Each block binds via
 /// [`resolve_part`](fab_scad::backend::resolve_part) (name+nth, index fallback); an unresolvable block
-/// WARNS + is skipped (best-effort, the reactive standard). A flat/empty `[slicing]` is a no-op —
-/// auto-derive handles those parts.
-pub(crate) fn apply_slicing_config(parts: &mut [Part], m: &Manifest) {
-    if let Some(slicing) = &m.slicing {
-        apply_blocks(parts, &slicing.parts);
-    }
-}
-
-/// Apply parsed per-part slicing blocks to freshly-built parts — the shared core of the legacy
-/// `project.toml` load and the [`fab:config`](read_config_block) block load. Each block binds via
-/// `resolve_part` (name+nth, index fallback); an unresolvable block WARNS + is skipped (best-effort).
+/// WARNS + is skipped (best-effort, the reactive standard). Empty blocks → auto-derive handles the parts.
 pub(crate) fn apply_blocks(parts: &mut [Part], blocks: &[PartSlicing]) {
     if blocks.is_empty() {
         return;
@@ -187,12 +172,12 @@ pub(crate) fn with_config_block(model: &str, parts: &[Part]) -> String {
     }
 }
 
-// ── save (Phase C): GUI → project.toml ───────────────────────────────────────────────────────────
+// ── the persist side: live parts → serialisable blocks ─────────────────────────────────────────────
 
 /// Assemble the per-part slicing blocks from the live parts — the WRITE side of the round-trip. Each
-/// non-empty part becomes one `[[slicing.part]]`, keyed so [`apply_slicing_config`] binds it back to
-/// the same part (name+nth survives a reorder, index is the fallback). An empty part (no enabled cuts,
-/// no connectors, no manual orient) produces NO block — it auto-derives on reload.
+/// non-empty part becomes one block, keyed so [`apply_blocks`] binds it back to the same part
+/// (name+nth survives a reorder, index is the fallback). An empty part (no enabled cuts, no
+/// connectors, no manual orient) produces NO block — it auto-derives on reload.
 pub(crate) fn slicing_blocks(parts: &[Part]) -> Vec<PartSlicing> {
     parts
         .iter()
@@ -291,83 +276,6 @@ fn placed_to_connector(pc: &PlacedConn, cut: usize) -> Connector {
     }
 }
 
-/// A content hash of EXACTLY the persisted slicing config — what [`slicing_blocks`] would write,
-/// quantised like the slice-hash so float jitter never churns it. The autosave baseline keys on this:
-/// a bare open (live config == what's on disk) never writes; an edit moves it and triggers one save.
-pub(crate) fn config_hash(parts: &[Part]) -> u64 {
-    use std::hash::{Hash, Hasher};
-    let mut h = std::collections::hash_map::DefaultHasher::new();
-    let q = |x: f64| (x * 1000.0).round() as i64;
-    for ps in slicing_blocks(parts) {
-        ps.key.name.hash(&mut h);
-        ps.key.nth.hash(&mut h);
-        ps.key.index.hash(&mut h);
-        for c in &ps.cut {
-            c.axis.hash(&mut h);
-            q(c.at.f()).hash(&mut h);
-        }
-        for c in &ps.connector {
-            c.cut.hash(&mut h);
-            c.kind.hash(&mut h);
-            c.screw.hash(&mut h);
-            q(c.pos[0].f()).hash(&mut h);
-            q(c.pos[1].f()).hash(&mut h);
-            c.size.map(q).hash(&mut h);
-        }
-        for o in &ps.orient {
-            o.piece.hash(&mut h);
-            o.comp.hash(&mut h);
-            o.up.iter().for_each(|u| q(u.f()).hash(&mut h));
-        }
-    }
-    h.finish()
-}
-
-/// Write the live per-part config into `source`'s nearest `project.toml`, PRESERVING the rest of the
-/// file — toml_edit keeps [project]/[[part]]/comments byte-for-byte, only the `[slicing]` table is
-/// rebuilt. Migrate-on-save: just `[[slicing.part]]` blocks are written, the flat `[slicing]`
-/// cut/connector/orient are dropped (skip-if-empty on the struct), so the output never mixes the two
-/// (the manifest's flat-XOR-per-part rule). No project.toml above `source` → no-op (a loose `.scad`
-/// has nowhere to persist).
-// Native-only: toml_edit + fs autosave to project.toml. On wasm there's no filesystem — config
-// persistence rides a `fab:config` block in the .scad buffer instead (W.3.8).
-#[cfg(not(target_arch = "wasm32"))]
-pub(crate) fn save_slicing_config(parts: &[Part], source: &Path) -> Result<()> {
-    let Ok(path) = Manifest::find(source) else {
-        return Ok(()); // no project.toml → nothing to persist
-    };
-    let text =
-        std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
-    let mut doc: toml_edit::DocumentMut = text
-        .parse()
-        .with_context(|| format!("parsing {}", path.display()))?;
-
-    // Get-or-create the [slicing] table, PRESERVING an existing printer (Phase E owns it — model state,
-    // not part state). Drop the flat cut/connector/orient (migrate-on-save → per-part only, the XOR).
-    if !doc.contains_key("slicing") {
-        doc["slicing"] = toml_edit::Item::Table(toml_edit::Table::new());
-    }
-    let slicing = doc["slicing"]
-        .as_table_mut()
-        .context("`slicing` in project.toml is not a table")?;
-    slicing.remove("cut");
-    slicing.remove("connector");
-    slicing.remove("orient");
-
-    // One `[[slicing.part]]` header block per part (readable for hand-edits), nested cut/connector as
-    // inline arrays. serde renders a Vec as an inline array, so build the array-of-tables ourselves.
-    let mut arr = toml_edit::ArrayOfTables::new();
-    for ps in slicing_blocks(parts) {
-        let block = toml_edit::ser::to_document(&ps).context("serialising part")?;
-        arr.push(block.as_table().clone());
-    }
-    slicing["part"] = toml_edit::Item::ArrayOfTables(arr);
-
-    std::fs::write(&path, doc.to_string())
-        .with_context(|| format!("writing {}", path.display()))?;
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -382,45 +290,31 @@ mod tests {
     #[test]
     fn loads_a_per_part_block_into_the_right_part() {
         let mut parts = vec![part_named("wall"), part_named("frame")];
-        let m = Manifest {
-            project: fab_scad::manifest::Project {
-                name: "x".into(),
-                title: None,
+        let blocks = vec![PartSlicing {
+            key: PartKey {
+                name: Some("frame".into()),
+                nth: 0,
+                index: 1,
             },
-            part: vec![],
-            publish: None,
-            slicing: Some(fab_scad::manifest::Slicing {
-                printer: None,
-                cut: vec![],
-                connector: vec![],
-                orient: vec![],
-                parts: vec![PartSlicing {
-                    key: PartKey {
-                        name: Some("frame".into()),
-                        nth: 0,
-                        index: 1,
-                    },
-                    cut: vec![MCut {
-                        axis: "z".into(),
-                        at: Num::Float(40.0),
-                    }],
-                    connector: vec![Connector {
-                        cut: 0,
-                        kind: "bolt".into(),
-                        screw: Some("M5".into()),
-                        pos: [Num::Float(3.0), Num::Float(5.0)],
-                        through: None,
-                        size: None,
-                    }],
-                    orient: vec![PieceOrient {
-                        piece: [0, 0, 1],
-                        comp: 2,
-                        up: [Num::Float(0.0), Num::Float(0.0), Num::Float(1.0)],
-                    }],
-                }],
-            }),
-        };
-        apply_slicing_config(&mut parts, &m);
+            cut: vec![MCut {
+                axis: "z".into(),
+                at: Num::Float(40.0),
+            }],
+            connector: vec![Connector {
+                cut: 0,
+                kind: "bolt".into(),
+                screw: Some("M5".into()),
+                pos: [Num::Float(3.0), Num::Float(5.0)],
+                through: None,
+                size: None,
+            }],
+            orient: vec![PieceOrient {
+                piece: [0, 0, 1],
+                comp: 2,
+                up: [Num::Float(0.0), Num::Float(0.0), Num::Float(1.0)],
+            }],
+        }];
+        apply_blocks(&mut parts, &blocks);
 
         // part 0 (wall) had no block → untouched.
         assert!(parts[0].cuts.list.is_empty());
@@ -440,42 +334,28 @@ mod tests {
     #[test]
     fn out_of_range_connector_is_dropped() {
         let mut parts = vec![part_named("wall")];
-        let m = Manifest {
-            project: fab_scad::manifest::Project {
-                name: "x".into(),
-                title: None,
+        let blocks = vec![PartSlicing {
+            key: PartKey {
+                name: None,
+                nth: 0,
+                index: 0,
             },
-            part: vec![],
-            publish: None,
-            slicing: Some(fab_scad::manifest::Slicing {
-                printer: None,
-                cut: vec![],
-                connector: vec![],
-                orient: vec![],
-                parts: vec![PartSlicing {
-                    key: PartKey {
-                        name: None,
-                        nth: 0,
-                        index: 0,
-                    },
-                    cut: vec![], // no cuts → any connector.cut is out of range
-                    connector: vec![Connector {
-                        cut: 0,
-                        kind: "onion".into(),
-                        screw: None,
-                        pos: [Num::Float(0.0), Num::Float(0.0)],
-                        through: None,
-                        size: Some(9.0),
-                    }],
-                    orient: vec![],
-                }],
-            }),
-        };
-        apply_slicing_config(&mut parts, &m);
+            cut: vec![], // no cuts → any connector.cut is out of range
+            connector: vec![Connector {
+                cut: 0,
+                kind: "onion".into(),
+                screw: None,
+                pos: [Num::Float(0.0), Num::Float(0.0)],
+                through: None,
+                size: Some(9.0),
+            }],
+            orient: vec![],
+        }];
+        apply_blocks(&mut parts, &blocks);
         assert!(parts[0].conns.list.is_empty()); // cut 0 out of range (0 cuts) → dropped
     }
 
-    // ── save (Phase C) ───────────────────────────────────────────────────────────────────────────
+    // ── slicing_blocks (the persist side) ─────────────────────────────────────────────────────────
     fn part_with(
         name: Option<&str>,
         cuts: &[(Axis, f32, bool)],
@@ -538,75 +418,6 @@ mod tests {
         assert_eq!(blocks[0].connector.len(), 1); // the conn on the disabled cut is dropped
         assert_eq!(blocks[0].connector[0].cut, 1); // stack idx 2 → enabled idx 1
         assert_eq!(blocks[0].connector[0].screw.as_deref(), Some("M5"));
-    }
-
-    #[test]
-    fn config_hash_reacts_to_a_cut_move() {
-        let a = vec![part_with(Some("p"), &[(Axis::Z, 40.0, true)], &[])];
-        let b = vec![part_with(Some("p"), &[(Axis::Z, 41.0, true)], &[])];
-        assert_ne!(config_hash(&a), config_hash(&b));
-        assert_eq!(config_hash(&a), config_hash(&a)); // stable across calls
-    }
-
-    #[test]
-    fn save_writes_per_part_blocks_and_preserves_the_rest() {
-        let dir = std::env::temp_dir().join("fab_gui_cfg_save_rt");
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let toml_path = dir.join("project.toml");
-        std::fs::write(
-            &toml_path,
-            "[project]\nname = \"demo\" # keep me\n\n[[part]]\nsrc = \"m.scad\"\n",
-        )
-        .unwrap();
-        let src = dir.join("m.scad");
-        std::fs::write(&src, "cube(1);").unwrap();
-
-        let parts = vec![part_with(
-            Some("wall"),
-            &[(Axis::Z, 40.0, true)],
-            &[(0, fab::ConnKind::Bolt)],
-        )];
-        save_slicing_config(&parts, &src).unwrap();
-
-        let written = std::fs::read_to_string(&toml_path).unwrap();
-        assert!(
-            written.contains("# keep me"),
-            "preserves the project comment"
-        );
-        assert!(written.contains("[[slicing.part]]"));
-
-        let s = Manifest::load(&toml_path).unwrap().slicing.unwrap();
-        assert!(s.cut.is_empty()); // no flat cut — per-part only
-        assert_eq!(s.parts.len(), 1);
-        assert_eq!(s.parts[0].cut[0].axis, "z");
-        assert_eq!(s.parts[0].connector[0].kind, "bolt");
-        assert_eq!(s.parts[0].key.name.as_deref(), Some("wall"));
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    #[test]
-    fn save_migrates_flat_slicing_to_per_part() {
-        let dir = std::env::temp_dir().join("fab_gui_cfg_save_migrate");
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let toml_path = dir.join("project.toml");
-        std::fs::write(
-            &toml_path,
-            "[project]\nname = \"demo\"\n\n[slicing]\ncut = [ { axis = \"x\", at = 0.0 } ]\n",
-        )
-        .unwrap();
-        let src = dir.join("m.scad");
-        std::fs::write(&src, "cube(1);").unwrap();
-
-        let parts = vec![part_with(Some("wall"), &[(Axis::Y, 12.0, true)], &[])];
-        save_slicing_config(&parts, &src).unwrap();
-
-        let s = Manifest::load(&toml_path).unwrap().slicing.unwrap();
-        assert!(s.cut.is_empty(), "flat cut stripped on migrate");
-        assert_eq!(s.parts.len(), 1);
-        assert_eq!(s.parts[0].cut[0].axis, "y");
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     // ── the fab:config block (W.3.8) ───────────────────────────────────────────────────────────────

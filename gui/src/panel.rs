@@ -186,13 +186,20 @@ pub(crate) fn panel_ui(
                     });
                     ui.separator();
                     // Save (explicit, desktop) + jump to OpenSCAD. The buffer renders live; the file
-                    // on disk only changes here.
+                    // on disk only changes here. On save the live slicing config is BAKED into the
+                    // .scad as a trailing `fab:config` comment block (W.3.8) — the one persistence
+                    // mechanism both platforms share (web downloads the same bytes). `with_config_block`
+                    // strips any prior block first, so re-saving replaces, never stacks.
                     ui.horizontal(|ui| {
                         if ui
                             .add_enabled(editor.dirty, egui::Button::new(icons::SAVE))
                             .on_hover_text("save to disk")
                             .clicked()
-                            && std::fs::write(&editor.path, editor.text.as_bytes()).is_ok()
+                            && std::fs::write(
+                                &editor.path,
+                                config::with_config_block(&editor.text, &parts.0),
+                            )
+                            .is_ok()
                         {
                             editor.dirty = false;
                         }

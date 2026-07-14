@@ -201,50 +201,8 @@ pub(crate) fn auto_reslice(
     parts.0[ap].sliced_hash = Some(h);
 }
 
-/// How long the slicing config must sit unchanged before autosave writes it (Phase C). Longer than a
-/// drag or a keystroke burst, so a run of edits persists once, not once per frame.
-const AUTOSAVE_DEBOUNCE: f32 = 1.5;
-
-/// Debounced background autosave (U.3.14 Phase C — the reactive standard, no Save button): when the
-/// live slicing config drifts off the [`SaveBaseline`] and settles, write it to `project.toml` and
-/// advance the baseline. A bare open sits AT the baseline (`poll_job` seeded it from disk) → never
-/// writes; an edit moves the hash → one write once the edits stop. A write error warns but still
-/// advances the baseline, so a persistent failure (unwritable file) doesn't retry-storm every frame.
-pub(crate) fn autosave_config(
-    time: Res<Time>,
-    parts: Res<Parts>,
-    cfg: Res<SceneCfg>,
-    mut baseline: ResMut<SaveBaseline>,
-    mut settle: Local<f32>,
-    mut prev: Local<Option<u64>>,
-) {
-    let Some(src) = cfg.source.clone() else {
-        return; // no source → no project.toml to persist to
-    };
-    let Some(base) = baseline.0 else {
-        return; // not seeded yet (before the first render)
-    };
-    let h = config::config_hash(&parts.0);
-    if *prev != Some(h) {
-        *settle = 0.0; // config moved this frame → re-arm the debounce
-        *prev = Some(h);
-    } else {
-        *settle += time.delta_secs();
-    }
-    if h == base || *settle < AUTOSAVE_DEBOUNCE {
-        return; // matches disk, or still settling
-    }
-    // The write is fs + toml_edit — desktop only. On wasm there's no project.toml (config persists in
-    // the .scad buffer, W.3.8), so skip the write but still advance the baseline.
-    #[cfg(not(target_arch = "wasm32"))]
-    match config::save_slicing_config(&parts.0, &src) {
-        Ok(()) => info!("autosaved slicing config"),
-        Err(e) => warn!("autosave slicing config: {e:#}"),
-    }
-    #[cfg(target_arch = "wasm32")]
-    let _ = &src;
-    baseline.0 = Some(h); // advance regardless — a failed write shouldn't retry-storm
-}
+// (W.3.8: the reactive `project.toml`/toml_edit autosave retired — config now persists in the .scad's
+// `fab:config` block on Save/download, one mechanism both platforms. See `config::with_config_block`.)
 
 // ---- slicing job ----------------------------------------------------------------------
 /// Explicit `ReSlice` (the scripted harness; Explode when there's no slice yet) → slice NOW and
@@ -326,6 +284,7 @@ pub(crate) fn apply_switch_file(
     mut job: ResMut<Job>,
     mut status: ResMut<Status>,
     mut editor: ResMut<EditorBuf>,
+    mut pending_config: ResMut<PendingConfig>,
     pool: Res<GeomPool>,
     mut state: ModelState,
 ) {
@@ -338,7 +297,9 @@ pub(crate) fn apply_switch_file(
     };
     files.active = Some(i);
     scene.source = Some(path.clone());
-    read_into_editor(&mut editor, &path); // the new file's disk text becomes the editor buffer (U.3.2)
+    // The new file's disk text (minus its fab:config block, W.3.8) becomes the editor buffer; the
+    // stashed block applies in poll_job once the fresh parts are built.
+    pending_config.0 = read_into_editor(&mut editor, &path);
     // Drop the outgoing model's held base solids before wiping — a file switch abandons them.
     free_bases(&pool, state.parts.0.iter().filter_map(|p| p.base).collect());
     state.reset();
@@ -676,10 +637,9 @@ pub(crate) fn poll_job(
     mut status: ResMut<Status>,
     mut parts: ResMut<Parts>,
     mut active_part: ResMut<ActivePart>,
-    mut save_baseline: ResMut<SaveBaseline>,
+    mut pending_config: ResMut<PendingConfig>,
     mut pipeline: ResMut<Pipeline>,
     editor: Res<EditorBuf>,
-    cfg: Res<SceneCfg>,
     bg: Res<SliceInBackground>,
     pool: Res<GeomPool>,
     models: Query<(Entity, &PartId), With<Model>>,
@@ -724,18 +684,13 @@ pub(crate) fn poll_job(
                         )
                     })
                     .collect();
-                // Load any per-part slicing config (U.3.14 Phase B) BEFORE `new` goes live: a part
-                // whose block set cuts makes `kick_auto_plan` stand down, so config wins over auto-
-                // derive. No config (or a flat/legacy `[slicing]`) → every part auto-derives as before.
-                if let Some(src) = &cfg.source
-                    && let Ok(m) = fab_scad::manifest::Manifest::load_near(src)
-                {
-                    config::apply_slicing_config(&mut new, &m);
+                // Apply the source's fab:config block BEFORE `new` goes live (a part whose block set
+                // cuts makes `kick_auto_plan` stand down, so config wins over auto-derive, W.3.8). The
+                // block was stashed at load (both platforms); no block → every part auto-derives. The
+                // legacy project.toml load is GONE — the .scad block is the one config mechanism.
+                if let Some(blocks) = pending_config.0.take() {
+                    config::apply_blocks(&mut new, &blocks);
                 }
-                // Seed the autosave baseline to the config as it stands on disk (loaded blocks, or
-                // empty when none) — `autosave_config` writes only once the live config drifts off this
-                // (Phase C). A config-less model auto-derives, drifts, and persists that derive once.
-                save_baseline.0 = Some(config::config_hash(&new));
                 *parts = Parts(new);
                 active_part.0 = 0;
             } else {

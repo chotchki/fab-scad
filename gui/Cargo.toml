@@ -41,11 +41,10 @@ rfd = "0.17"
 bevy_egui = "0.41"
 
 # --- native only ---
-# The in-process kernel + native geometry (openscad/publish/reqwest/rayon/JIT) and the
-# format-preserving project.toml autosave (toml_edit). On wasm the kernel lives in the geom
-# worker (W.3.4) and there's no filesystem, so neither is linked.
+# The in-process kernel + native geometry (openscad/publish/reqwest/rayon/JIT). On wasm the kernel
+# lives in the geom worker (W.3.4) so it isn't linked. (Slicing config no longer autosaves to
+# project.toml — it rides a `fab:config` block in the .scad buffer now, W.3.8, so toml_edit is gone.)
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-toml_edit = { version = "0.22", features = ["serde"] }
 # The native geometry-service transport's request/reply channels (W.3.3).
 async-channel = "2"
 

@@ -2881,7 +2881,7 @@ dependencies = [
  "fab-scad",
  "js-sys",
  "rfd",
- "toml_edit 0.22.27",
+ "serde_json",
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",

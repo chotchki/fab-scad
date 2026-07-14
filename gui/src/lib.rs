@@ -192,7 +192,7 @@ fn run_windowed(scene: SceneCfg, shot: Option<PathBuf>) {
         .init_resource::<OpenDialog>()
         .init_resource::<Watch>()
         .init_resource::<SliceInBackground>()
-        .init_resource::<SaveBaseline>()
+        .init_resource::<PendingConfig>()
         .init_resource::<PanelSeam>()
         .insert_resource(Status("rendering".into()))
         .add_message::<ReSlice>()
@@ -228,7 +228,7 @@ fn run_windowed(scene: SceneCfg, shot: Option<PathBuf>) {
                 sync_conn_markers,
                 edit_mode,
                 draw_profile,
-                (auto_reslice, revert_on_edit, autosave_config),
+                (auto_reslice, revert_on_edit),
                 (auto_scale, split_viewport, seat_bed),
                 // The panel's button commands (heavy actions the egui `panel_ui` writes as PanelCmd).
                 (
@@ -301,6 +301,7 @@ fn run_screenshot(scene: SceneCfg, png: PathBuf) {
         .init_resource::<DraggingCut>()
         .init_resource::<SliceInBackground>()
         .init_resource::<Job>()
+        .init_resource::<PendingConfig>()
         .init_resource::<PanelSeam>()
         .init_resource::<PrintPieces>()
         .init_resource::<CoPack>()
@@ -367,7 +368,7 @@ fn run_scripted(scene: SceneCfg, actions: Vec<Action>) {
         .init_resource::<OpenDialog>()
         .init_resource::<Watch>()
         .init_resource::<SliceInBackground>()
-        .init_resource::<SaveBaseline>()
+        .init_resource::<PendingConfig>()
         .init_resource::<PanelSeam>()
         .insert_resource(Status("rendering".into()))
         .insert_resource(ScriptRunner {

@@ -71,12 +71,14 @@ pub(crate) fn setup_windowed(
     mut gizmo_cfg: ResMut<GizmoConfigStore>,
     mut editor: ResMut<EditorBuf>,
     mut files: ResMut<FileList>,
+    mut pending_config: ResMut<PendingConfig>,
     pool: Res<GeomPool>,
 ) {
     spawn_environment(&mut commands, &mut meshes, &mut materials, &scene);
-    // Seed the file-tab + editor from the launch source (U.3.2): a folder pick repopulates both.
+    // Seed the file-tab + editor from the launch source (U.3.2): a folder pick repopulates both. The
+    // source's fab:config block (W.3.8) is stripped from the buffer + stashed for poll_job to apply.
     if let Some(src) = scene.source.clone() {
-        read_into_editor(&mut editor, &src);
+        pending_config.0 = read_into_editor(&mut editor, &src);
         files.files = vec![src];
         files.active = Some(0);
     }

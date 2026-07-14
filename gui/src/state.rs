@@ -79,14 +79,28 @@ pub(crate) struct EditorBuf {
     pub(crate) edited_at: Option<f64>,
 }
 
-/// Load `path`'s text into the editor buffer, clean (not dirty, no pending edit). Used on the initial
-/// launch seed and on every file switch, so the editor always shows the active file's on-disk text.
-pub(crate) fn read_into_editor(editor: &mut EditorBuf, path: &Path) {
+/// Load `path`'s text into the editor buffer, EXTRACTING its `fab:config` block (W.3.8): the block is
+/// stripped from the buffer (the editor shows the clean model — chotchki's call) and its parsed config
+/// RETURNED for the caller to stash into [`PendingConfig`] + apply once the parts are built. Clean (not
+/// dirty, no pending edit). Used on the launch seed + every file switch.
+pub(crate) fn read_into_editor(
+    editor: &mut EditorBuf,
+    path: &Path,
+) -> Option<Vec<fab_scad::manifest::PartSlicing>> {
     editor.path = path.to_path_buf();
-    editor.text = std::fs::read_to_string(path).unwrap_or_default();
+    let raw = std::fs::read_to_string(path).unwrap_or_default();
+    let cfg = config::read_config_block(&raw);
+    editor.text = config::strip_config_block(&raw);
     editor.dirty = false;
     editor.edited_at = None;
+    cfg
 }
+
+/// Per-part slicing config parsed from a freshly-loaded source's `fab:config` block (W.3.8), waiting for
+/// `poll_job` to apply it once the parts are built (the block loads BEFORE the render that makes the
+/// parts). `read_into_editor` fills it; `poll_job` takes it. `None` = no block → parts auto-derive.
+#[derive(Resource, Default)]
+pub(crate) struct PendingConfig(pub(crate) Option<Vec<fab_scad::manifest::PartSlicing>>);
 
 /// A finished render/slice job's payload (T.2b). A whole render mints ALL top-level parts' base solids
 /// in the geometry service (W.3.3); a reslice reads ONE held base and hands back the sliced STL bytes.
@@ -357,13 +371,6 @@ pub(crate) struct Parts(pub(crate) Vec<Part>);
 /// Which part the panel + slice systems currently act on (index into [`Parts`]). Always valid.
 #[derive(Resource, Default)]
 pub(crate) struct ActivePart(pub(crate) usize);
-
-/// Autosave baseline (U.3.14 Phase C): the [`config::config_hash`](crate::config::config_hash) of the
-/// slicing config last written to (or loaded from) `project.toml`. `poll_job` seeds it on a fresh
-/// render; `autosave_config` writes + advances it only when the live config drifts off it — so a bare
-/// open never churns the file, and each edit persists exactly once. `None` until the first render.
-#[derive(Resource, Default)]
-pub(crate) struct SaveBaseline(pub(crate) Option<u64>);
 
 /// Per-node pipeline feedback (U.3.7): which workflow STAGES are stale (their output is behind their
 /// input), which are actively COMPUTING right now, and an accurate label for what's running. The tab

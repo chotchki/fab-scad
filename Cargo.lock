@@ -2873,6 +2873,7 @@ name = "fab-gui"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-channel",
  "bevy",
  "bevy_egui",
  "console_error_panic_hook",

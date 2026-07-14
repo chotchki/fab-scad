@@ -43,6 +43,8 @@ bevy_egui = "0.41"
 # worker (W.3.4) and there's no filesystem, so neither is linked.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 toml_edit = { version = "0.22", features = ["serde"] }
+# The native geometry-service transport's request/reply channels (W.3.3).
+async-channel = "2"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies.fab-scad]
 path = ".."

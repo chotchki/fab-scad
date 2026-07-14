@@ -64,6 +64,10 @@ pub(crate) use {
 pub(crate) use state::Axis;
 
 mod fab;
+// The native geometry-service transport (W.3.3) — a pool of kernel threads. Uses fab_scad::geomsvc
+// (kernel), so native-only; the wasm Worker transport lands at W.3.6.
+#[cfg(not(target_arch = "wasm32"))]
+pub mod geom;
 
 /// Native entry: parse args + dispatch to the windowed / screenshot / scripted app builder. The wasm
 /// build enters through a `#[wasm_bindgen(start)]` on the canvas instead (W.3.2), not here.

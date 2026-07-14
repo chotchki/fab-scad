@@ -234,10 +234,15 @@ pub(crate) fn autosave_config(
     if h == base || *settle < AUTOSAVE_DEBOUNCE {
         return; // matches disk, or still settling
     }
+    // The write is fs + toml_edit — desktop only. On wasm there's no project.toml (config persists in
+    // the .scad buffer, W.3.8), so skip the write but still advance the baseline.
+    #[cfg(not(target_arch = "wasm32"))]
     match config::save_slicing_config(&parts.0, &src) {
         Ok(()) => info!("autosaved slicing config"),
         Err(e) => warn!("autosave slicing config: {e:#}"),
     }
+    #[cfg(target_arch = "wasm32")]
+    let _ = &src;
     baseline.0 = Some(h); // advance regardless — a failed write shouldn't retry-storm
 }
 
@@ -822,7 +827,9 @@ pub(crate) fn despawn_part_models(
 
 /// Publish the active model to hotchkiss.io off-thread: render the cover + low-`$fn` preview + full
 /// STL and upload them via `fab_scad::publish::publish_model`, reusing the CLI's exact path. Auth +
-/// base URL come from `$HIO_API_KEY` / `$HIO_URL`; title/description from the project.toml.
+/// base URL come from `$HIO_API_KEY` / `$HIO_URL`; title/description from the project.toml. Desktop
+/// only — it shells out to OpenSCAD + uploads over blocking reqwest (the wasm stub just says so).
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn publish_action(
     mut ev: MessageReader<PanelCmd>,
     scene: Res<SceneCfg>,
@@ -878,6 +885,14 @@ pub(crate) fn publish_action(
     status.0 = "publishing…".into();
 }
 
+/// wasm has no OpenSCAD subprocess or blocking HTTP — publish is a desktop feature (say so, don't spawn).
+#[cfg(target_arch = "wasm32")]
+pub(crate) fn publish_action(mut ev: MessageReader<PanelCmd>, mut status: ResMut<Status>) {
+    if ev.read().any(|c| *c == PanelCmd::Publish) {
+        status.0 = "publish is desktop-only".into();
+    }
+}
+
 /// Land the publish job: show the URL, or the error.
 pub(crate) fn poll_publish(mut job: ResMut<PublishJob>, mut status: ResMut<Status>) {
     let Some(task) = job.0.as_mut() else {
@@ -922,7 +937,9 @@ pub(crate) fn auto_slice_action(
 /// auto-place, off-thread) — ONE part at a time (`AutoJob` is single-slot). A part that FITS the bed
 /// stays WHOLE (no cuts) and is marked planned so it's not re-checked. Once per source per part;
 /// parts that already have cuts are left alone. (U.3.15: was active-part-only, so parts ≥1 never
-/// derived until you clicked into them.)
+/// derived until you clicked into them.) The bed-overflow pre-check uses `auto_slice` (kernel), so
+/// this is native; on wasm auto-plan lands with the W.3.6 Worker (empty scene until then).
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn kick_auto_plan(
     mut parts: ResMut<Parts>,
     scene: Res<SceneCfg>,
@@ -990,6 +1007,12 @@ pub(crate) fn kick_auto_plan(
         return; // one at a time
     }
 }
+
+/// wasm has no `auto_slice` (kernel) for the bed-overflow pre-check — auto-plan arrives with the
+/// W.3.6 Worker; until then the model just opens whole (empty scene). `poll_auto_plan` no-ops (AutoJob
+/// stays empty).
+#[cfg(target_arch = "wasm32")]
+pub(crate) fn kick_auto_plan() {}
 
 /// Land the auto-plan onto the part it was kicked for: seed that part's cut stack + connectors, and
 /// the reactive loop reslices.

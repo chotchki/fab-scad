@@ -42,7 +42,9 @@ pub(crate) use fab_scad::geomsg::{Request, Response, SolidId, Source, WireConn};
 pub(crate) use std::collections::{HashMap, HashSet};
 pub(crate) use std::path::{Path, PathBuf};
 // The shared geometry types the auto-slice/planner APIs take (J.6 unified on `fab_lang`'s Vec3). Aliased
-// `FVec3` so it doesn't shadow Bevy's `Vec3`, which the scene code uses everywhere.
+// `FVec3` so it doesn't shadow Bevy's `Vec3`, which the scene code uses everywhere. Native-only: the sole
+// user is `kick_auto_plan`'s bed-overflow pre-check (auto_slice), which is desktop-side (W.3.4).
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) use fab_lang::{Dims, Vec3 as FVec3};
 
 mod config;
@@ -75,6 +77,12 @@ mod fab;
 pub mod geom;
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) use geom::GeomPool;
+// wasm's transport is the W.3.6 Web Worker; until it's wired, a stub GeomPool (same API, ops Fail)
+// keeps the render/slice systems compiling + running on wasm as UI + empty scene.
+#[cfg(target_arch = "wasm32")]
+pub mod geom_stub;
+#[cfg(target_arch = "wasm32")]
+pub(crate) use geom_stub::GeomPool;
 
 /// Native entry: parse args + dispatch to the windowed / screenshot / scripted app builder. The wasm
 /// build enters through a `#[wasm_bindgen(start)]` on the canvas instead (W.3.2), not here.

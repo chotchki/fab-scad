@@ -4,8 +4,11 @@
 //! reload round-trips. A part with loaded cuts makes `kick_auto_plan` stand down, so config wins over
 //! auto-derive; a part with no block (or a flat/legacy `[slicing]`) is left to auto-derive.
 
+// Path + anyhow are used only by the native fs autosave (`save_slicing_config`); the load/hash bridge
+// below is pure and wasm-safe.
+#[cfg(not(target_arch = "wasm32"))]
 use std::path::Path;
-
+#[cfg(not(target_arch = "wasm32"))]
 use anyhow::{Context, Result};
 
 use crate::*;
@@ -250,6 +253,9 @@ pub(crate) fn config_hash(parts: &[Part]) -> u64 {
 /// cut/connector/orient are dropped (skip-if-empty on the struct), so the output never mixes the two
 /// (the manifest's flat-XOR-per-part rule). No project.toml above `source` → no-op (a loose `.scad`
 /// has nowhere to persist).
+// Native-only: toml_edit + fs autosave to project.toml. On wasm there's no filesystem — config
+// persistence rides a `fab:config` block in the .scad buffer instead (W.3.8).
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn save_slicing_config(parts: &[Part], source: &Path) -> Result<()> {
     let Ok(path) = Manifest::find(source) else {
         return Ok(()); // no project.toml → nothing to persist

@@ -35,6 +35,8 @@ pub(crate) struct PanelView<'w> {
 /// `PanelCmd` its dedicated system handles. Writes `PanelSeam` after drawing so `orbit` yields the
 /// pointer over the panels and `split_viewport` insets the 3D camera inside all three bars.
 #[allow(clippy::too_many_arguments)]
+// On wasm the desktop-only file picker is gated out, so `open_dialog` is read but never written there.
+#[cfg_attr(target_arch = "wasm32", allow(unused_mut))]
 pub(crate) fn panel_ui(
     mut contexts: EguiContexts,
     mut parts: ResMut<Parts>,
@@ -167,13 +169,19 @@ pub(crate) fn panel_ui(
                                 .clicked()
                             && open_dialog.0.is_none()
                         {
-                            open_dialog.0 = Some(AsyncComputeTaskPool::get().spawn(async move {
-                                rfd::AsyncFileDialog::new()
-                                    .add_filter("OpenSCAD source", &["scad"])
-                                    .pick_file()
-                                    .await
-                                    .map(|h| h.path().to_path_buf())
-                            }));
+                            // rfd's pick_file→path() is desktop-only; on wasm file-open is an
+                            // <input type=file> byte read (W.3.4 host surface) and the picker's hidden
+                            // anyway (shows_picker() == false), so this branch never runs there.
+                            #[cfg(not(target_arch = "wasm32"))]
+                            {
+                                open_dialog.0 = Some(AsyncComputeTaskPool::get().spawn(async move {
+                                    rfd::AsyncFileDialog::new()
+                                        .add_filter("OpenSCAD source", &["scad"])
+                                        .pick_file()
+                                        .await
+                                        .map(|h| h.path().to_path_buf())
+                                }));
+                            }
                         }
                     });
                     ui.separator();

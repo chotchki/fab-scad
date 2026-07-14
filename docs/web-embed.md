@@ -137,6 +137,9 @@ mechanism as the Tailwind CLI fetch, one tar.gz because the bundle is many files
   site pin is a one-line bump). Pushing the tag runs `.github/workflows/release-web.yml`.
 - **Asset**: `https://github.com/chotchki/fab-scad/releases/download/web-vX.Y.Z/fab-gui-X.Y.Z.tar.gz`
 - **Arch-independent** (wasm), one asset per release.
+- **Size** (first fab-gui build, W.3.7): the app is **8.69 MiB brotli** (47.4 MB raw, wasm-opt `-Oz`)
+  plus a 2.83 MB geom worker — comparable to fab-web's 8.13 MiB, and it DROPS the separate OpenSCAD
+  module fab-web shipped. The ~8 MiB is the accepted cost; the host's boot splash covers the download.
 
 ### Archive layout (extract straight into a version-keyed dir)
 

@@ -19,6 +19,20 @@
 //! The perturbation INPUTS those consume (`face_normal`/`epsilon`/`tolerance`, the `for_vert` orbit)
 //! live on [`crate::mesh::Mesh`]. Next: M.1.1 broad phase → M.1.2 boolean3 cascade.
 
+pub mod boolean3;
 pub mod collider;
+pub mod disjoint_sets;
 pub mod predicates;
 pub mod vocab;
+
+/// The boolean operation (`manifold.h` `OpType`). Only `Add` (union) is exercised by the R1 tracer;
+/// `Subtract`/`Intersect` fall out of the same `boolean3` with `expandP = false`, ported in R2.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum OpType {
+    /// Union — the R1 tracer op. `expandP = true`: symbolic-perturbation expands BOTH inputs.
+    Add,
+    /// Difference (A − B). `expandP = false`.
+    Subtract,
+    /// Intersection (A ∩ B). `expandP = false`.
+    Intersect,
+}

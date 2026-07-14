@@ -66,6 +66,10 @@ pub struct Mesh {
     /// Per-triangle face normals (Manifold `faceNormal_`) — the perturbation vectors the boolean's
     /// symbolic tie-break reads. Empty until [`Mesh::calculate_face_normals`] runs.
     pub face_normal: Vec<Vec3>,
+    /// Per-vertex angle-weighted pseudo-normals (Manifold `vertNormal_`) — the other perturbation
+    /// input, consulted by `Shadow01` at exact-coordinate ties. Empty until
+    /// [`Mesh::calculate_vert_normals`] runs.
+    pub vert_normal: Vec<Vec3>,
     /// The mesh's length-scale epsilon (Manifold `epsilon_`); `-1` = unset. Set by [`Mesh::set_epsilon`].
     pub epsilon: f64,
     /// The merge/collinearity tolerance (Manifold `tolerance_`); `-1` = unset. Monotone-nondecreasing
@@ -84,6 +88,7 @@ impl Default for Mesh {
             props_extra: Vec::new(),
             b_box: Box3::default(),
             face_normal: Vec::new(),
+            vert_normal: Vec::new(),
             epsilon: -1.0,
             tolerance: -1.0,
         }
@@ -392,6 +397,61 @@ impl Mesh {
                 normal = Vec3::new(0.0, 0.0, 1.0);
             }
             self.face_normal[tri as usize] = normal;
+        }
+    }
+
+    /// Compute per-vertex angle-weighted pseudo-normals into [`Mesh::vert_normal`] (Manifold's
+    /// `CalculateVertNormals`). Each incident triangle contributes its face normal weighted by the
+    /// interior ANGLE `phi` at the vertex, then the sum is `SafeNormalize`d. The angle is
+    /// `acos(-dot(prevEdge, currEdge))` over the vertex's [`Mesh::for_vert`] ring, and — critically —
+    /// it uses [`crate::mathf::acos`] (Manifold's own `math::acos`), NOT platform `f64::acos`. That's
+    /// why this is bit-exact vs the C++ oracle WITHOUT the `libm` crate: the C++ kernel already uses a
+    /// deterministic acos, and `mathf` is its transliteration. Requires [`Mesh::calculate_face_normals`]
+    /// to have run. Degenerate incident edges are excluded; an unreferenced vertex gets `(0,0,0)`.
+    pub fn calculate_vert_normals(&mut self) {
+        let num_vert = self.num_vert();
+        self.vert_normal = vec![Vec3::ZERO; num_vert];
+        // The smallest half-edge index starting at each vertex — a deterministic ForVert seed
+        // (Manifold's atomic vertHalfedgeMap min-reduction, serialized).
+        let mut vert_halfedge = vec![i32::MAX; num_vert];
+        for i in 0..self.halfedge.len() as i32 {
+            let v = self.start(i);
+            if v >= 0 && i < vert_halfedge[v as usize] {
+                vert_halfedge[v as usize] = i;
+            }
+        }
+        for (vert, &first_edge) in vert_halfedge.iter().enumerate() {
+            if first_edge == i32::MAX {
+                continue; // not referenced ⇒ stays (0,0,0)
+            }
+            // Collect the one-ring first (keeps the borrow of `self` inside for_vert from tangling
+            // with the per-edge reads below).
+            let mut ring = Vec::new();
+            self.for_vert(first_edge, |e| ring.push(e));
+            let mut normal = Vec3::ZERO;
+            for edge in ring {
+                let tv0 = self.start(edge);
+                let tv1 = self.end(edge);
+                let tv2 = self.end(next_halfedge(edge));
+                let curr_edge =
+                    (self.vert_pos[tv1 as usize] - self.vert_pos[tv0 as usize]).normalize();
+                let prev_edge =
+                    (self.vert_pos[tv0 as usize] - self.vert_pos[tv2 as usize]).normalize();
+                // A degenerate incident triangle (zero-length edge ⇒ NaN) is excluded.
+                if !curr_edge.x.is_finite() || !prev_edge.x.is_finite() {
+                    continue;
+                }
+                let dot = -prev_edge.dot(curr_edge);
+                let phi = if dot >= 1.0 {
+                    0.0
+                } else if dot <= -1.0 {
+                    crate::mathf::PI
+                } else {
+                    crate::mathf::acos(dot)
+                };
+                normal += phi * self.face_normal[(edge / 3) as usize];
+            }
+            self.vert_normal[vert] = crate::boolean::predicates::safe_normalize(normal);
         }
     }
 

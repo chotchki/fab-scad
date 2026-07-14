@@ -336,6 +336,178 @@ mod tests {
         }
     }
 
+    /// A unit cube at an offset, fully prepared for a Rust boolean (halfedges, bbox, epsilon, both
+    /// normal fields) — the GATE-A input fixture.
+    fn prepared_cube(ox: f64, oy: f64, oz: f64) -> Mesh {
+        #[rustfmt::skip]
+        let base = [
+            0.0,0.0,0.0, 1.0,0.0,0.0, 1.0,1.0,0.0, 0.0,1.0,0.0,
+            0.0,0.0,1.0, 1.0,0.0,1.0, 1.0,1.0,1.0, 0.0,1.0,1.0,
+        ];
+        let mut verts = Vec::new();
+        for c in base.chunks_exact(3) {
+            verts.push(c[0] + ox);
+            verts.push(c[1] + oy);
+            verts.push(c[2] + oz);
+        }
+        #[rustfmt::skip]
+        let tris = vec![
+            0,2,1, 0,3,2, 4,5,6, 4,6,7,
+            0,1,5, 0,5,4, 2,3,7, 2,7,6,
+            0,4,7, 0,7,3, 1,2,6, 1,6,5,
+        ];
+        let mut mesh = Mesh::from_mesh_gl(&MeshGl {
+            num_prop: 3,
+            vert_properties: verts,
+            tri_verts: tris,
+        });
+        mesh.set_epsilon(-1.0, false);
+        mesh.calculate_face_normals();
+        mesh.calculate_vert_normals();
+        mesh
+    }
+
+    // =====================================================================================
+    // ★ GATE-A (M.1.3) — the R1 tracer boolean go/no-go. An OFFSET (general-position) cube∪cube:
+    //   the Rust union must be a watertight, genus-0 solid whose volume tracks C++, AND the
+    //   triangulation-INDEPENDENT boolean residual `vol((A−B) ∪ (B−A)) / vol(A)` (computed by the C++
+    //   oracle, so it tolerates each engine's own triangulation) must be < 1e-5. Clean ⇒ the four-table
+    //   intersection core + the assembly are PROVEN against the reference kernel.
+    // =====================================================================================
+    #[test]
+    fn gate_a_offset_cube_union_residual_vs_cpp() {
+        use crate::boolean::OpType;
+        use crate::boolean::boolean_result::boolean;
+
+        // General position: the offset shares no coordinate between the two meshes, so no cross-mesh
+        // `p == q` tie fires and the perturbation normals stay inert — the pure-f64 core is under test.
+        let p = prepared_cube(0.0, 0.0, 0.0);
+        let q = prepared_cube(0.3, 0.4, 0.5);
+
+        // Rust union → watertight, genus 0.
+        let a = boolean(&p, &q, OpType::Add);
+        assert!(a.is_manifold(), "GATE-A: rust union is not a manifold");
+        assert_eq!(crate::check::genus(&a), 0, "GATE-A: rust union genus != 0");
+
+        // C++ union of the same inputs.
+        let p_cpp = CppKernel::ingest(&p.to_mesh_gl()).unwrap();
+        let q_cpp = CppKernel::ingest(&q.to_mesh_gl()).unwrap();
+        let b_cpp = p_cpp.union(&q_cpp);
+
+        // Scalar differential: volume + genus agree tightly.
+        let a_vol = a.volume();
+        let b_vol = b_cpp.volume();
+        assert!(
+            (a_vol - b_vol).abs() / b_vol.abs() < 1e-9,
+            "GATE-A: volume diverges — rust {a_vol}, cpp {b_vol}"
+        );
+        assert_eq!(
+            crate::check::genus(&a),
+            b_cpp.genus(),
+            "GATE-A: genus diverges from C++"
+        );
+
+        // THE GATE: the triangulation-independent residual, via the C++ oracle. A and B are the same
+        // solid triangulated differently, so both symmetric differences are ~empty.
+        let a_cpp = CppKernel::ingest(&a.to_mesh_gl())
+            .expect("GATE-A: C++ rejects the rust union as non-manifold");
+        let a_minus_b = a_cpp.difference(&b_cpp);
+        let b_minus_a = b_cpp.difference(&a_cpp);
+        let sym = a_minus_b.union(&b_minus_a);
+        let residual = sym.volume() / a_cpp.volume();
+        assert!(
+            residual < 1e-5,
+            "GATE-A: boolean residual {residual:.3e} >= 1e-5 — the core diverges from C++"
+        );
+        eprintln!(
+            "GATE-A ✓ offset cube∪cube: {} tris, rust vol={a_vol:.9}, cpp vol={b_vol:.9}, residual={residual:.3e}",
+            a.num_tri()
+        );
+    }
+
+    /// An axis-aligned box of size `(sx,sy,sz)` at `(ox,oy,oz)`, prepared for a Rust boolean.
+    fn prepared_box(ox: f64, oy: f64, oz: f64, sx: f64, sy: f64, sz: f64) -> Mesh {
+        #[rustfmt::skip]
+        let unit = [
+            (0.0,0.0,0.0),(1.0,0.0,0.0),(1.0,1.0,0.0),(0.0,1.0,0.0),
+            (0.0,0.0,1.0),(1.0,0.0,1.0),(1.0,1.0,1.0),(0.0,1.0,1.0),
+        ];
+        let mut verts = Vec::new();
+        for &(x, y, z) in &unit {
+            verts.push(x * sx + ox);
+            verts.push(y * sy + oy);
+            verts.push(z * sz + oz);
+        }
+        #[rustfmt::skip]
+        let tris = vec![
+            0,2,1, 0,3,2, 4,5,6, 4,6,7,
+            0,1,5, 0,5,4, 2,3,7, 2,7,6,
+            0,4,7, 0,7,3, 1,2,6, 1,6,5,
+        ];
+        let mut mesh = Mesh::from_mesh_gl(&MeshGl {
+            num_prop: 3,
+            vert_properties: verts,
+            tri_verts: tris,
+        });
+        mesh.set_epsilon(-1.0, false);
+        mesh.calculate_face_normals();
+        mesh.calculate_vert_normals();
+        mesh
+    }
+
+    /// GATE-A robustness sweep: several general-position box∪box configs (varied sizes + offsets, so cut
+    /// faces are non-convex polygons the ear-clip must handle), each held to the residual gate. Guards
+    /// against the primary GATE-A passing by luck of one offset.
+    #[test]
+    fn gate_a_union_sweep_residual_vs_cpp() {
+        use crate::boolean::OpType;
+        use crate::boolean::boolean_result::boolean;
+
+        // (p-params, q-params) as (ox,oy,oz,sx,sy,sz) — all chosen so no coordinate coincides across the
+        // pair (general position), and every pair genuinely overlaps.
+        let configs: &[((f64, f64, f64, f64, f64, f64), (f64, f64, f64, f64, f64, f64))] = &[
+            ((0.0, 0.0, 0.0, 1.0, 1.0, 1.0), (0.3, 0.4, 0.5, 1.0, 1.0, 1.0)),
+            ((0.0, 0.0, 0.0, 1.0, 1.0, 1.0), (0.5, 0.3, 0.7, 2.0, 2.0, 2.0)),
+            ((0.0, 0.0, 0.0, 3.0, 2.0, 1.0), (1.3, 0.7, -0.4, 1.0, 1.0, 2.0)),
+            ((0.0, 0.0, 0.0, 2.0, 3.0, 4.0), (-0.6, 1.1, 1.7, 3.0, 1.0, 1.0)),
+        ];
+
+        for (i, &(pp, qp)) in configs.iter().enumerate() {
+            let p = prepared_box(pp.0, pp.1, pp.2, pp.3, pp.4, pp.5);
+            let q = prepared_box(qp.0, qp.1, qp.2, qp.3, qp.4, qp.5);
+            let a = boolean(&p, &q, OpType::Add);
+            assert!(a.is_manifold(), "GATE-A sweep [{i}]: rust union not manifold");
+
+            let p_cpp = CppKernel::ingest(&p.to_mesh_gl()).unwrap();
+            let q_cpp = CppKernel::ingest(&q.to_mesh_gl()).unwrap();
+            let b_cpp = p_cpp.union(&q_cpp);
+
+            let a_vol = a.volume();
+            let b_vol = b_cpp.volume();
+            assert!(
+                (a_vol - b_vol).abs() / b_vol.abs() < 1e-9,
+                "GATE-A sweep [{i}]: volume rust {a_vol} vs cpp {b_vol}"
+            );
+            assert_eq!(
+                crate::check::genus(&a),
+                b_cpp.genus(),
+                "GATE-A sweep [{i}]: genus diverges"
+            );
+
+            let a_cpp = CppKernel::ingest(&a.to_mesh_gl())
+                .unwrap_or_else(|e| panic!("GATE-A sweep [{i}]: cpp rejects rust union: {e}"));
+            let sym = a_cpp
+                .difference(&b_cpp)
+                .union(&b_cpp.difference(&a_cpp));
+            let residual = sym.volume() / a_cpp.volume();
+            assert!(
+                residual < 1e-5,
+                "GATE-A sweep [{i}]: residual {residual:.3e} >= 1e-5"
+            );
+            eprintln!("GATE-A sweep [{i}] ✓ vol={a_vol:.6}, residual={residual:.3e}");
+        }
+    }
+
     /// Exercises the divergence-REPORTING machinery (the paths that only fire when the kernels
     /// disagree — normally dormant because the port is faithful).
     #[test]

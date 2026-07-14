@@ -16,7 +16,9 @@ pub mod auto_slice;
 // (NOT `native`) so miri can run the mock without the OS-heavy native deps.
 #[cfg(feature = "geometry")]
 pub mod backend;
-#[cfg(feature = "kernel")]
+// The Bambu `.3mf` writer — mesh-only (no Solid), so it rides `mesh-io` not `kernel`, reachable on
+// the wasm app for in-process co-pack + export (W.3.4). `kernel` implies `mesh-io`, so native is unchanged.
+#[cfg(feature = "mesh-io")]
 pub mod bambu;
 // BOSL2 test corpus runner (K.1 tier 2): needs fab-lang (eval) + toml + std::fs — a native dev/CI tool.
 #[cfg(feature = "native")]

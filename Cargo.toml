@@ -64,7 +64,11 @@ members = ["gen", "geom", "gui", "jit", "lang", "web"]
 default = ["kernel", "native"]
 # `geometry` (fab-lang) too: the kernel now speaks the shared geom vocabulary (Vec3/Tri/Affine), so
 # Solid's mesh + transform APIs are typed. fab-lang is pure Rust — cheap to pull in alongside Manifold.
-kernel = ["geometry", "dep:manifold3d", "dep:threemf", "dep:zip", "dep:quick-xml", "dep:usvg"]
+kernel = ["geometry", "mesh-io", "dep:manifold3d", "dep:threemf", "dep:quick-xml", "dep:usvg"]
+# The Bambu `.3mf` WRITER (`bambu`): an OPC zip of hand-written XML + indexed meshes — mesh-only, no
+# Solid, no C++ kernel. Split out of `kernel` (W.3.4) so the wasm fab-gui app can co-pack + export
+# in-process without the Manifold toolchain, while the miri-lean `geometry` build stays zip-free.
+mesh-io = ["geometry", "dep:zip"]
 # Everything that needs an OS (18.3): the OpenSCAD spawn, publish (blocking reqwest), project
 # scaffolding, the smoke sweep, and the CLI-only deps. `--no-default-features` is the wasm32-safe
 # core — pure geometry/slicing/spec logic, no process spawn, no network.

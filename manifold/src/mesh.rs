@@ -1,9 +1,544 @@
-//! The mesh spine — Manifold's `Impl` (a half-edge mesh).
+//! The mesh spine — Manifold's `Manifold::Impl`, here `Mesh` (a half-edge mesh).
 //!
 //! The structure everything mutates: vertices, the half-edge connectivity (`CreateHalfedges`), the
-//! per-mesh tolerance/epsilon, and the property (color) channels threaded through booleans. Round-trips
-//! to/from `MeshGL` (the flat vert+index+property buffer fab-scad's `to_mesh_f64`/`from_mesh_f64` speak,
-//! stride 3=xyz / 7=xyz+RGBA), and answers `IsManifold` (the validity gate). No booleans here — this is
-//! the spine the boolean reassembly writes onto.
+//! bounding box, and the property (color) channels threaded through booleans. Round-trips to/from
+//! `MeshGl` (the flat vert + index + property buffer). Answers `is_manifold` (the validity gate) and
+//! `volume`/`surface_area` (the K.0 differential targets). No booleans here — this is the spine the
+//! boolean reassembly writes onto (R1+).
 //!
-//! TODO(M.0.5).
+//! REPRESENTATION vs Manifold: Manifold's `Halfedges` is an SoA that DERIVES `endVert` from the next
+//! half-edge in the triangle (`End(e) = Start(NextHalfedge(e))`). We mirror that exactly — a half-edge
+//! stores only `(start_vert, paired_halfedge, prop_vert)`, and `end(e)` derives — so `CheckHalfedges`
+//! transliterates 1:1 and the future boolean port reads `Start/End/Pair/Prop` unchanged. Faces are 3
+//! consecutive half-edges (`3·tri + i`), CCW from outside.
+//!
+//! M.0.5 SCOPE (documented gaps, all LOUD-deferred, never silently wrong):
+//! - Edge pairing is the deterministic clean-mesh pairing (each `a→b` ↔ the one `b→a`). Manifold's
+//!   `CreateHalfedges` additionally does opposed-triangle REMOVAL (degenerate duplicates that only
+//!   booleans produce) — deferred to R1 (M.1.1), where it becomes geometry-affecting.
+//! - MeshGL's 1:1 vert model is kept (`prop_vert == vert`); Manifold's internal geometry/property-vert
+//!   DEDUP (UV-seam splitting) is an R3 property/color concern.
+//! - `epsilon`/`tolerance`/`face_normal` (boolean + normals machinery) are not computed yet.
+
+use crate::linalg::{Box3, Vec3};
+
+/// Cycle to the next half-edge within a triangle (`3·tri + i` → `3·tri + (i+1)%3`). Manifold's
+/// `NextHalfedge`.
+#[inline]
+pub fn next_halfedge(current: i32) -> i32 {
+    current + if current % 3 == 2 { -2 } else { 1 }
+}
+
+/// Cycle to the previous half-edge within a triangle. Manifold's `PrevHalfedge`.
+#[inline]
+pub fn prev_halfedge(current: i32) -> i32 {
+    current + if current % 3 == 0 { 2 } else { -1 }
+}
+
+/// A single half-edge. `end` is DERIVED (see the module doc), so only these three fields are stored;
+/// `-1` is the removed/unpaired sentinel (matches Manifold's `int` sentinels).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Halfedge {
+    /// The vertex this half-edge starts at (index into `vert_pos`), or `-1` if removed.
+    pub start_vert: i32,
+    /// The opposite half-edge (index into `halfedge`), or `-1` if unpaired.
+    pub paired_halfedge: i32,
+    /// The property-vertex index (== `start_vert` in the 1:1 MeshGL model).
+    pub prop_vert: i32,
+}
+
+/// The half-edge mesh — Manifold's `Impl`. Position + connectivity + bounds; the boolean core (R1+)
+/// grows this.
+#[derive(Clone, Debug, Default)]
+pub struct Mesh {
+    /// Vertex positions (Manifold `vertPos_`).
+    pub vert_pos: Vec<Vec3>,
+    /// The half-edges, 3 per triangle (Manifold `halfedge_`).
+    pub halfedge: Vec<Halfedge>,
+    /// Properties per vertex, `>= 3` (position is the first 3, NOT stored here — `vert_pos` holds it);
+    /// `num_prop == 3` means position-only.
+    pub num_prop: usize,
+    /// The EXTRA (non-position) properties, interleaved with stride `num_prop - 3`, one row per vert.
+    /// Empty when `num_prop == 3`. Carried verbatim for the round-trip.
+    pub props_extra: Vec<f64>,
+    /// Axis-aligned bounding box (Manifold `bBox_`).
+    pub b_box: Box3,
+}
+
+impl Mesh {
+    /// Number of triangles (`halfedge.len() / 3`).
+    #[inline]
+    pub fn num_tri(&self) -> usize {
+        self.halfedge.len() / 3
+    }
+
+    /// Number of vertices.
+    #[inline]
+    pub fn num_vert(&self) -> usize {
+        self.vert_pos.len()
+    }
+
+    /// Number of undirected edges (`halfedge.len() / 2`).
+    #[inline]
+    pub fn num_edge(&self) -> usize {
+        self.halfedge.len() / 2
+    }
+
+    /// Empty mesh (no half-edges)?
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.halfedge.is_empty()
+    }
+
+    // --- Half-edge accessors, mirroring Manifold's `Halfedges` (end is DERIVED). ---
+
+    /// Start vertex of half-edge `e`.
+    #[inline]
+    pub fn start(&self, e: i32) -> i32 {
+        self.halfedge[e as usize].start_vert
+    }
+
+    /// End vertex of half-edge `e` — the start of the NEXT half-edge in the triangle (derived).
+    #[inline]
+    pub fn end(&self, e: i32) -> i32 {
+        self.start(next_halfedge(e))
+    }
+
+    /// Paired (opposite) half-edge of `e`, or `-1`.
+    #[inline]
+    pub fn pair(&self, e: i32) -> i32 {
+        self.halfedge[e as usize].paired_halfedge
+    }
+
+    /// Property vertex of half-edge `e`.
+    #[inline]
+    pub fn prop(&self, e: i32) -> i32 {
+        self.halfedge[e as usize].prop_vert
+    }
+
+    /// Build the half-edge connectivity from triangle vertex indices, pairing opposite half-edges.
+    ///
+    /// Deterministic clean-mesh pairing: group the two directed half-edges of every undirected edge
+    /// `{min,max}` and link them. A manifold edge has exactly one `a→b` and one `b→a` → unique pairing;
+    /// anything else (boundary, >2 incident, same-direction duplicate) is left `-1`, which
+    /// [`Mesh::is_manifold`] then rejects. (Opposed-triangle removal is R1 — see the module doc.)
+    pub fn create_halfedges(&mut self, tri_verts: &[[u32; 3]]) {
+        use std::collections::BTreeMap;
+
+        let num_he = 3 * tri_verts.len();
+        let mut he = Vec::with_capacity(num_he);
+        // (start, end) of each half-edge, kept locally for keying — `end` isn't stored on Halfedge.
+        let mut ends = Vec::with_capacity(num_he);
+        for tri in tri_verts {
+            for i in 0..3 {
+                let start = tri[i] as i32;
+                let end = tri[(i + 1) % 3] as i32;
+                he.push(Halfedge {
+                    start_vert: start,
+                    paired_halfedge: -1,
+                    prop_vert: start,
+                });
+                ends.push(end);
+            }
+        }
+
+        // Group half-edge indices by undirected-edge key. BTreeMap = deterministic iteration.
+        let mut groups: BTreeMap<(i32, i32), Vec<usize>> = BTreeMap::new();
+        for (idx, h) in he.iter().enumerate() {
+            let (a, b) = (h.start_vert, ends[idx]);
+            let key = if a < b { (a, b) } else { (b, a) };
+            groups.entry(key).or_default().push(idx);
+        }
+        for idxs in groups.values() {
+            if idxs.len() == 2 {
+                let (e0, e1) = (idxs[0], idxs[1]);
+                // Only a genuine reverse pair (opposite directions) links; a same-direction
+                // duplicate is non-manifold and stays unpaired.
+                if he[e0].start_vert == ends[e1] && ends[e0] == he[e1].start_vert {
+                    he[e0].paired_halfedge = e1 as i32;
+                    he[e1].paired_halfedge = e0 as i32;
+                }
+            }
+        }
+        self.halfedge = he;
+    }
+
+    /// Recompute the bounding box from `vert_pos`, ignoring verts whose x is NaN (Manifold
+    /// `CalculateBBox`, whose reduce skips `isnan(a.x)`).
+    pub fn calculate_bbox(&mut self) {
+        let mut min = Vec3::splat(f64::INFINITY);
+        let mut max = Vec3::splat(f64::NEG_INFINITY);
+        for &p in &self.vert_pos {
+            if p.x.is_nan() {
+                continue;
+            }
+            min = min.cmin(p);
+            max = max.cmax(p);
+        }
+        self.b_box = Box3 { min, max };
+    }
+
+    /// Is this an oriented manifold with consistent data structures? (Manifold `IsManifold`.)
+    /// Empty is manifold; a non-multiple-of-3 half-edge count is not; else every half-edge passes
+    /// the [`Mesh::check_halfedge`] pair-consistency predicate.
+    pub fn is_manifold(&self) -> bool {
+        if self.halfedge.is_empty() {
+            return true;
+        }
+        if !self.halfedge.len().is_multiple_of(3) {
+            return false;
+        }
+        (0..self.halfedge.len() as i32).all(|e| self.check_halfedge(e))
+    }
+
+    /// The per-half-edge manifold predicate (Manifold `CheckHalfedges`): a removed triple is fine;
+    /// otherwise the pair must be mutual and reverse each other (`start == End(pair)`, `end ==
+    /// Start(pair)`, `start != end`).
+    fn check_halfedge(&self, edge: i32) -> bool {
+        let start = self.start(edge);
+        let end = self.end(edge);
+        let pair = self.pair(edge);
+        if start == -1 && end == -1 && pair == -1 {
+            return true;
+        }
+        if self.start(next_halfedge(edge)) == -1
+            || self.start(next_halfedge(next_halfedge(edge))) == -1
+        {
+            return false;
+        }
+        if pair == -1 {
+            return false;
+        }
+        let mut good = true;
+        good &= self.pair(pair) == edge;
+        good &= start != end;
+        good &= start == self.end(pair);
+        good &= end == self.start(pair);
+        good
+    }
+
+    /// Signed volume via the divergence theorem, Kahan-summed for determinism (Manifold
+    /// `GetProperty(Volume)`): per triangle `dot(cross(v1 − v0, v2 − v0), v0) / 6`, compensated sum.
+    pub fn volume(&self) -> f64 {
+        if self.is_empty() {
+            return 0.0;
+        }
+        let mut value = 0.0;
+        let mut comp = 0.0;
+        for tri in 0..self.num_tri() as i32 {
+            let v = self.vert_pos[self.start(3 * tri) as usize];
+            let e1 = self.vert_pos[self.start(3 * tri + 1) as usize] - v;
+            let e2 = self.vert_pos[self.start(3 * tri + 2) as usize] - v;
+            let value1 = e1.cross(e2).dot(v) / 6.0;
+            let t = value + value1;
+            comp += (value - t) + value1;
+            value = t;
+        }
+        value + comp
+    }
+
+    /// Surface area, Kahan-summed (Manifold `GetProperty(SurfaceArea)`): per triangle
+    /// `length(cross(v1 − v0, v2 − v0)) / 2`.
+    pub fn surface_area(&self) -> f64 {
+        if self.is_empty() {
+            return 0.0;
+        }
+        let mut value = 0.0;
+        let mut comp = 0.0;
+        for tri in 0..self.num_tri() as i32 {
+            let v = self.vert_pos[self.start(3 * tri) as usize];
+            let e1 = self.vert_pos[self.start(3 * tri + 1) as usize] - v;
+            let e2 = self.vert_pos[self.start(3 * tri + 2) as usize] - v;
+            let value1 = e1.cross(e2).length() / 2.0;
+            let t = value + value1;
+            comp += (value - t) + value1;
+            value = t;
+        }
+        value + comp
+    }
+
+    /// Ingest a `MeshGl` (flat buffers) into the spine: extract positions, carry extra properties,
+    /// build connectivity, compute the bbox. Panics if `num_prop < 3` or the buffers are ragged.
+    pub fn from_mesh_gl(m: &MeshGl) -> Mesh {
+        assert!(
+            m.num_prop >= 3,
+            "MeshGl.num_prop must be >= 3 (got {})",
+            m.num_prop
+        );
+        assert!(
+            m.vert_properties.len().is_multiple_of(m.num_prop),
+            "vert_properties not a multiple of num_prop"
+        );
+        assert!(
+            m.tri_verts.len().is_multiple_of(3),
+            "tri_verts not a multiple of 3"
+        );
+
+        let n_vert = m.vert_properties.len() / m.num_prop;
+        let extra = m.num_prop - 3;
+        let mut vert_pos = Vec::with_capacity(n_vert);
+        let mut props_extra = Vec::with_capacity(n_vert * extra);
+        for v in 0..n_vert {
+            let o = v * m.num_prop;
+            vert_pos.push(Vec3::new(
+                m.vert_properties[o],
+                m.vert_properties[o + 1],
+                m.vert_properties[o + 2],
+            ));
+            props_extra.extend_from_slice(&m.vert_properties[o + 3..o + m.num_prop]);
+        }
+        let tri_verts: Vec<[u32; 3]> = m
+            .tri_verts
+            .chunks_exact(3)
+            .map(|c| [c[0], c[1], c[2]])
+            .collect();
+
+        let mut mesh = Mesh {
+            vert_pos,
+            halfedge: Vec::new(),
+            num_prop: m.num_prop,
+            props_extra,
+            b_box: Box3::default(),
+        };
+        mesh.create_halfedges(&tri_verts);
+        mesh.calculate_bbox();
+        mesh
+    }
+
+    /// Export the spine back to a `MeshGl`: re-interleave position + extra properties, and emit each
+    /// triangle's three start vertices. The inverse of [`Mesh::from_mesh_gl`] for a well-formed mesh.
+    pub fn to_mesh_gl(&self) -> MeshGl {
+        let extra = self.num_prop - 3;
+        let mut vert_properties = Vec::with_capacity(self.num_vert() * self.num_prop);
+        for (v, p) in self.vert_pos.iter().enumerate() {
+            vert_properties.push(p.x);
+            vert_properties.push(p.y);
+            vert_properties.push(p.z);
+            if extra > 0 {
+                vert_properties.extend_from_slice(&self.props_extra[v * extra..(v + 1) * extra]);
+            }
+        }
+        let mut tri_verts = Vec::with_capacity(self.num_tri() * 3);
+        for tri in 0..self.num_tri() as i32 {
+            tri_verts.push(self.start(3 * tri) as u32);
+            tri_verts.push(self.start(3 * tri + 1) as u32);
+            tri_verts.push(self.start(3 * tri + 2) as u32);
+        }
+        MeshGl {
+            num_prop: self.num_prop,
+            vert_properties,
+            tri_verts,
+        }
+    }
+}
+
+/// The flat interchange buffer — Manifold's `MeshGL64` core (double precision, the format the kernel
+/// works in). `num_prop >= 3`, first three properties are x,y,z; `tri_verts` is stride-3 CCW indices.
+/// The optional merge/run/faceID/tangent channels are R3+ concerns and omitted here.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MeshGl {
+    /// Properties per vertex, `>= 3` (first three are position).
+    pub num_prop: usize,
+    /// Interleaved vertex properties, stride `num_prop` (`vertProperties`).
+    pub vert_properties: Vec<f64>,
+    /// Triangle corner indices, stride 3, CCW from outside (`triVerts`).
+    pub tri_verts: Vec<u32>,
+}
+
+impl MeshGl {
+    /// Number of vertices.
+    #[inline]
+    pub fn num_vert(&self) -> usize {
+        self.vert_properties.len() / self.num_prop
+    }
+
+    /// Number of triangles.
+    #[inline]
+    pub fn num_tri(&self) -> usize {
+        self.tri_verts.len() / 3
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The standard axis-aligned unit cube `[0,1]³`: 8 verts, 12 outward-CCW triangles, volume 1.
+    fn unit_cube() -> MeshGl {
+        #[rustfmt::skip]
+        let verts = vec![
+            0.0, 0.0, 0.0, // 0
+            1.0, 0.0, 0.0, // 1
+            1.0, 1.0, 0.0, // 2
+            0.0, 1.0, 0.0, // 3
+            0.0, 0.0, 1.0, // 4
+            1.0, 0.0, 1.0, // 5
+            1.0, 1.0, 1.0, // 6
+            0.0, 1.0, 1.0, // 7
+        ];
+        #[rustfmt::skip]
+        let tris = vec![
+            0, 2, 1,  0, 3, 2, // -Z
+            4, 5, 6,  4, 6, 7, // +Z
+            0, 1, 5,  0, 5, 4, // -Y
+            2, 3, 7,  2, 7, 6, // +Y
+            0, 4, 7,  0, 7, 3, // -X
+            1, 2, 6,  1, 6, 5, // +X
+        ];
+        MeshGl {
+            num_prop: 3,
+            vert_properties: verts,
+            tri_verts: tris,
+        }
+    }
+
+    #[test]
+    fn cube_ingests_and_is_manifold() {
+        let mesh = Mesh::from_mesh_gl(&unit_cube());
+        assert_eq!(mesh.num_vert(), 8);
+        assert_eq!(mesh.num_tri(), 12);
+        assert_eq!(mesh.halfedge.len(), 36);
+        assert_eq!(mesh.num_edge(), 18); // Euler: V−E+F = 8−18+12 = 2 ✓
+        assert!(mesh.is_manifold());
+        // every half-edge is paired on a closed manifold
+        assert!(mesh.halfedge.iter().all(|h| h.paired_halfedge >= 0));
+    }
+
+    #[test]
+    fn cube_volume_and_area_exact() {
+        let mesh = Mesh::from_mesh_gl(&unit_cube());
+        // outward winding ⇒ +1 exactly (the sign check: inward winding would give -1).
+        assert_eq!(mesh.volume(), 1.0);
+        // 6 faces × 1.0 = 6.0.
+        assert_eq!(mesh.surface_area(), 6.0);
+    }
+
+    #[test]
+    fn cube_volume_scales_and_translates() {
+        // A 2× cube offset far from origin: analytic volume 8, area 24, independent of position
+        // (divergence theorem). Area stays EXACT — it uses only coordinate differences, where the
+        // offset cancels. Volume does NOT: `dot(cross(e1,e2), v0)` multiplies the large v0 (~300) and
+        // cancels, so the result is ~8 minus a few ULP (7.999999999999972 here). That FP value is the
+        // ALGORITHM's, which Manifold's C++ shares bit-for-bit — this is precisely why the K.0 gate
+        // (M.0.6) compares against the C++ engine, not against the analytic 8.
+        let base = unit_cube();
+        let verts: Vec<f64> = base
+            .vert_properties
+            .iter()
+            .enumerate()
+            .map(|(i, &c)| c * 2.0 + [100.0, 200.0, 300.0][i % 3])
+            .collect();
+        let mesh = Mesh::from_mesh_gl(&MeshGl {
+            num_prop: 3,
+            vert_properties: verts,
+            tri_verts: base.tri_verts,
+        });
+        assert!(
+            (mesh.volume() - 8.0).abs() < 1e-9,
+            "volume {} !~ 8",
+            mesh.volume()
+        );
+        assert_eq!(mesh.surface_area(), 24.0); // exact: differences only
+    }
+
+    #[test]
+    fn mesh_gl_round_trips() {
+        let cube = unit_cube();
+        let mesh = Mesh::from_mesh_gl(&cube);
+        let out = mesh.to_mesh_gl();
+        assert_eq!(out, cube); // exact identity for a well-formed position-only mesh
+    }
+
+    #[test]
+    fn round_trips_with_extra_properties() {
+        // num_prop = 7 (xyz + RGBA): the extra props must survive the round-trip verbatim.
+        let mut vp = Vec::new();
+        for v in 0..8 {
+            let base = [
+                [0.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [1.0, 1.0, 0.0],
+                [0.0, 1.0, 0.0],
+                [0.0, 0.0, 1.0],
+                [1.0, 0.0, 1.0],
+                [1.0, 1.0, 1.0],
+                [0.0, 1.0, 1.0],
+            ][v];
+            vp.extend_from_slice(&base);
+            vp.extend_from_slice(&[0.1 * v as f64, 0.2, 0.3, 1.0]); // RGBA
+        }
+        let cube = unit_cube();
+        let m = MeshGl {
+            num_prop: 7,
+            vert_properties: vp,
+            tri_verts: cube.tri_verts,
+        };
+        let mesh = Mesh::from_mesh_gl(&m);
+        assert_eq!(mesh.num_prop, 7);
+        assert_eq!(mesh.props_extra.len(), 8 * 4);
+        assert_eq!(mesh.volume(), 1.0); // positions still the unit cube
+        assert_eq!(mesh.to_mesh_gl(), m);
+    }
+
+    #[test]
+    fn open_mesh_is_not_manifold() {
+        // A single triangle has 3 boundary edges, all unpaired.
+        let m = MeshGl {
+            num_prop: 3,
+            vert_properties: vec![0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+            tri_verts: vec![0, 1, 2],
+        };
+        let mesh = Mesh::from_mesh_gl(&m);
+        assert!(!mesh.is_manifold());
+    }
+
+    #[test]
+    fn non_manifold_edge_is_rejected() {
+        // Three triangles sharing edge 0–1 (a "fin"): edge {0,1} has 3 incident half-edges, so the
+        // clean pairing leaves them unpaired → not manifold.
+        let m = MeshGl {
+            num_prop: 3,
+            vert_properties: vec![
+                0.0, 0.0, 0.0, // 0
+                1.0, 0.0, 0.0, // 1
+                0.0, 1.0, 0.0, // 2
+                0.0, 0.0, 1.0, // 3
+                0.0, -1.0, 0.0, // 4
+            ],
+            tri_verts: vec![0, 1, 2, 0, 1, 3, 0, 1, 4],
+        };
+        let mesh = Mesh::from_mesh_gl(&m);
+        assert!(!mesh.is_manifold());
+    }
+
+    #[test]
+    fn empty_mesh_is_manifold_with_zero_volume() {
+        let mesh = Mesh::default();
+        assert!(mesh.is_empty());
+        assert!(mesh.is_manifold());
+        assert_eq!(mesh.volume(), 0.0);
+        assert_eq!(mesh.surface_area(), 0.0);
+    }
+
+    #[test]
+    fn next_prev_halfedge_cycle_within_triangle() {
+        // Within triangle 0 (half-edges 0,1,2): next cycles 0→1→2→0, prev the reverse.
+        assert_eq!(next_halfedge(0), 1);
+        assert_eq!(next_halfedge(1), 2);
+        assert_eq!(next_halfedge(2), 0);
+        assert_eq!(prev_halfedge(0), 2);
+        assert_eq!(prev_halfedge(1), 0);
+        assert_eq!(prev_halfedge(2), 1);
+        // triangle 1 (3,4,5)
+        assert_eq!(next_halfedge(5), 3);
+        assert_eq!(prev_halfedge(3), 5);
+    }
+
+    #[test]
+    fn bbox_from_cube() {
+        let mesh = Mesh::from_mesh_gl(&unit_cube());
+        assert_eq!(mesh.b_box.min, Vec3::new(0.0, 0.0, 0.0));
+        assert_eq!(mesh.b_box.max, Vec3::new(1.0, 1.0, 1.0));
+        assert_eq!(mesh.b_box.size(), Vec3::new(1.0, 1.0, 1.0));
+    }
+}

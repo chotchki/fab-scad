@@ -137,9 +137,16 @@ pub(crate) fn config_block(parts: &[Part]) -> Option<String> {
 
 /// Read a `fab:config` block out of source `text` — the per-part slicing config, or `None` if absent or
 /// malformed (a stray/corrupt block is ignored, never fatal — those parts auto-derive).
+///
+/// CONTRACT: `text` is ONE .scad's own source — the editing BUFFER (the main/open file), never resolved
+/// `include`/`use` content. An include is a reference *line*; the lib's bytes (and any `fab:config` block
+/// inside a lib that was itself edited in fab-gui) are NEVER spliced into the buffer, so they can't leak
+/// in as this model's config. As belt-and-suspenders we read the LAST block (our own append position at
+/// the file's bottom), so a file's own trailing metadata always wins over anything above it.
 pub(crate) fn read_config_block(text: &str) -> Option<Vec<PartSlicing>> {
     let payload = text
         .lines()
+        .rev()
         .find_map(|l| l.trim_start().strip_prefix(CONFIG_MARKER))?;
     serde_json::from_str(payload.trim()).ok()
 }
@@ -628,6 +635,22 @@ mod tests {
         assert_eq!(fresh[1].cuts.list[0].axis, Axis::X);
 
         assert_eq!(strip_config_block(&saved), model, "strip gives back the clean model");
+    }
+
+    #[test]
+    fn an_included_libs_config_block_does_not_leak_in() {
+        // chotchki's flag: a model that INCLUDEs a lib must not pick up the lib's fab:config. The
+        // include is a reference LINE — the lib's content (block and all) is never in the main buffer,
+        // so a model with only an include line + no own block reads NONE (auto-derives).
+        let model = "include <widget.scad>\nuse <helpers.scad>\nwidget();\n";
+        assert!(read_config_block(model).is_none());
+
+        // And if a lib's block ever DID appear above the model's OWN (a hypothetical splice), the file's
+        // own trailing block still wins — we read the bottom-most, our append position.
+        let lib_block = config_block(&[part_with(Some("lib"), &[(Axis::Z, 9.0, true)], &[])]).unwrap();
+        let own_block = config_block(&[part_with(Some("me"), &[(Axis::X, 3.0, true)], &[])]).unwrap();
+        let spliced = format!("{lib_block}\nwidget();\n{own_block}\n");
+        assert_eq!(read_config_block(&spliced).unwrap()[0].cut[0].axis, "x");
     }
 
     #[test]

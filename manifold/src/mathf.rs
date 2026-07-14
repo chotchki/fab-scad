@@ -610,12 +610,12 @@ pub fn sind(x: f64) -> f64 {
     }
     let (rem, quo) = libm::remquo(x.abs(), 90.0);
     let xr = radians(rem);
+    // `rem_euclid(4)` ∈ 0..=3, so `_` IS the quadrant-3 case (folding it in avoids a dead arm).
     match quo.rem_euclid(4) {
         0 => sin(xr),
         1 => cos(xr),
         2 => -sin(xr),
-        3 => -cos(xr),
-        _ => 0.0,
+        _ => -cos(xr),
     }
 }
 
@@ -679,62 +679,163 @@ mod tests {
     /// faithful. The AUTHORITATIVE gate (bit-match vs the C++ Manifold oracle) is K.0 (M.0.6) —
     /// if this ever splits from libm, that's exactly the divergence the SPEC predicted, and the
     /// oracle decides who's right.
+    // `ours == theirs` bitwise, with any-NaN ≡ any-NaN (the tier_eq rule). Asserted INLINE (fail-fast)
+    // rather than counted, so there's no unexecuted "increment on mismatch" branch to leave uncovered.
+    fn same_bits(a: f64, b: f64) -> bool {
+        a.to_bits() == b.to_bits() || (a.is_nan() && b.is_nan())
+    }
+
     #[test]
     fn matches_libm_bitwise_over_sweep() {
-        let mut mism = 0u64;
         let mut i = -100_000i64;
         while i <= 100_000 {
             let x = i as f64 * 1e-4; // sweep [-10, 10] step 1e-4
-            let pairs = [
+            for (ours, theirs, name) in [
                 (sin(x), libm::sin(x), "sin"),
                 (cos(x), libm::cos(x), "cos"),
                 (tan(x), libm::tan(x), "tan"),
                 (atan(x), libm::atan(x), "atan"),
-            ];
-            for (ours, theirs, name) in pairs {
-                if ours.to_bits() != theirs.to_bits() && !(ours.is_nan() && theirs.is_nan()) {
-                    if mism < 8 {
-                        eprintln!("{name}({x}): ours={ours:?} libm={theirs:?}");
-                    }
-                    mism += 1;
-                }
+            ] {
+                assert!(
+                    same_bits(ours, theirs),
+                    "{name}({x}): ours={ours:?} libm={theirs:?}"
+                );
             }
             i += 1;
         }
-        assert_eq!(mism, 0, "{mism} bitwise mismatches vs libm");
     }
 
     #[test]
     fn matches_libm_inverse_and_atan2() {
-        let bits_ne = |a: f64, b: f64| a.to_bits() != b.to_bits() && !(a.is_nan() && b.is_nan());
-        let (mut m_acos, mut m_asin, mut m_atan2) = (0u64, 0u64, 0u64);
         let mut i = -10_000i64;
         while i <= 10_000 {
             let x = i as f64 * 1e-4; // [-1, 1] for asin/acos
             // acos: musl e_acos — must match the libm crate's port bitwise.
-            if bits_ne(acos(x), libm::acos(x)) {
-                m_acos += 1;
-            }
-            // asin: Manifold routes it through `HALF_PI - acos` (math.h), so it does NOT match
-            // libm's DIRECT asin — the correct independent reference is `HALF_PI - libm::acos`.
-            if bits_ne(asin(x), HALF_PI - libm::acos(x)) {
-                m_asin += 1;
-            }
+            assert!(same_bits(acos(x), libm::acos(x)), "acos({x})");
+            // asin: Manifold routes it through `HALF_PI - acos` (math.h), so it does NOT match libm's
+            // DIRECT asin — the correct independent reference is `HALF_PI - libm::acos`.
+            assert!(same_bits(asin(x), HALF_PI - libm::acos(x)), "asin({x})");
             i += 1;
         }
         // atan2 over a grid of quadrants (incl. axes) — musl atan2, must match libm bitwise.
         for yi in -50..=50 {
             for xi in -50..=50 {
                 let (y, x) = (yi as f64 * 0.1, xi as f64 * 0.1);
-                if bits_ne(atan2(y, x), libm::atan2(y, x)) {
-                    m_atan2 += 1;
-                }
+                assert!(same_bits(atan2(y, x), libm::atan2(y, x)), "atan2({y},{x})");
             }
         }
-        assert_eq!(
-            (m_acos, m_asin, m_atan2),
-            (0, 0, 0),
-            "bitwise mismatches vs libm: acos={m_acos} asin={m_asin} atan2={m_atan2}"
-        );
+    }
+
+    #[test]
+    fn covers_reduction_and_special_paths() {
+        let bits_eq = same_bits;
+
+        // Quadrant fast-paths (±1/±2/±3/±4, both signs), the EXACT-π/2-multiple `break`-to-medium
+        // cases (π/2, π, 3π/2, 2π), the medium 3-step reduction with its ±1 correction, and its DEEP
+        // 3rd refinement step (2915.397982531328 is within 2^-54 of 1856·π/2). Up to ~1.6e6 our
+        // reduction is musl's, so it matches the libm crate BITWISE.
+        for &x in &[
+            1.7_f64,
+            -1.7, // ±1
+            2.5,
+            -2.5, // ±2
+            5.5,
+            -5.5, // ±3
+            7.0,
+            -7.0, // ±4
+            HALF_PI,
+            PI,
+            3.0 * HALF_PI,
+            TWO_PI, // exact-multiple breaks (193/224/238)
+            8.0,
+            9.0,
+            11.0,
+            14.0,
+            16.0,
+            50.0,               // medium range
+            8.63937979737193,   // forces the n−1 quadrant correction (272-275)
+            13.351768777756622, // forces the n+1 quadrant correction (277-280)
+            100.0,
+            -100.0,
+            1000.0,
+            123456.0,
+            1_000_000.0,
+            1_600_000.0,
+            2915.397982531328, // forces the 3rd reduction step
+        ] {
+            assert!(bits_eq(sin(x), libm::sin(x)), "sin({x})");
+            assert!(bits_eq(cos(x), libm::cos(x)), "cos({x})");
+            assert!(bits_eq(tan(x), libm::tan(x)), "tan({x})");
+        }
+
+        // rem_pio2's inf/NaN arm is UNREACHABLE through sin/cos/tan (they pre-check `ix>=0x7ff00000`),
+        // so cover it by calling the reducer directly — it must return 0 with NaN residuals.
+        let mut yb = [0.0_f64; 2];
+        assert_eq!(rem_pio2(f64::INFINITY, &mut yb), 0);
+        assert!(yb[0].is_nan() && yb[1].is_nan());
+
+        // Huge args (|x| >= 2^20·π/2): our reduction is `remquo` — MATCHING Manifold's math.h (the C++
+        // oracle), which deliberately differs from libm's payne-hanek there, so we only sanity-check.
+        for &x in &[1e7_f64, -1e7, 1e15, 1e20] {
+            assert!(sin(x).is_finite() && sin(x).abs() <= 1.0, "sin huge {x}");
+            assert!(cos(x).is_finite() && cos(x).abs() <= 1.0, "cos huge {x}");
+            assert!(tan(x).is_finite(), "tan huge {x}");
+        }
+
+        // Non-finite inputs → NaN (the `ix >= 0x7ff00000` `x - x` paths).
+        for &nf in &[f64::INFINITY, f64::NEG_INFINITY, f64::NAN] {
+            assert!(sin(nf).is_nan());
+            assert!(cos(nf).is_nan());
+            assert!(tan(nf).is_nan());
+        }
+
+        // atan huge branch (|x| >= 2^66) + NaN.
+        assert!(bits_eq(atan(1e20), libm::atan(1e20)));
+        assert!(bits_eq(atan(-1e20), libm::atan(-1e20)));
+        assert!(atan(f64::NAN).is_nan());
+
+        // acos boundaries + interior + out-of-domain → NaN.
+        for &x in &[-1.0_f64, 1.0, 0.7, -0.3, 0.999_999] {
+            assert!(bits_eq(acos(x), libm::acos(x)), "acos({x})");
+        }
+        assert!(acos(2.0).is_nan());
+        assert!(acos(-2.0).is_nan());
+
+        // atan2 across every quadrant, axis, and infinity combination.
+        let vals = [0.0_f64, -0.0, 1.0, -1.0, f64::INFINITY, f64::NEG_INFINITY];
+        for &y in &vals {
+            for &x in &vals {
+                assert!(bits_eq(atan2(y, x), libm::atan2(y, x)), "atan2({y},{x})");
+            }
+        }
+        assert!(atan2(f64::NAN, 1.0).is_nan());
+        assert!(atan2(1.0, f64::NAN).is_nan());
+        // |y/x| < 2^-64 with x < 0 → the underflow-to-±π short-circuit (z = 0 branch).
+        assert!(bits_eq(atan2(1.0, -1e30), libm::atan2(1.0, -1e30)));
+        assert!(bits_eq(atan2(-1.0, -1e30), libm::atan2(-1.0, -1e30)));
+        // |y/x| > 2^64 → ±π/2.
+        assert!(bits_eq(atan2(1e30, 1.0), libm::atan2(1e30, 1.0)));
+
+        // degrees is radians' inverse; smoothstep clamps + interpolates.
+        assert_eq!(degrees(0.0), 0.0);
+        assert!((degrees(PI) - 180.0).abs() < 1e-12);
+        assert!((radians(degrees(1.234)) - 1.234).abs() < 1e-12);
+        assert_eq!(smoothstep(0.0, 1.0, 0.5), 0.5);
+        assert_eq!(smoothstep(0.0, 1.0, -3.0), 0.0); // clamp below
+        assert_eq!(smoothstep(0.0, 1.0, 4.0), 1.0); // clamp above
+        assert!(smoothstep(2.0, 6.0, 3.0) > 0.0 && smoothstep(2.0, 6.0, 3.0) < 0.5);
+
+        // sind/cosd: all four quadrant arms (30°→arm0, 100°→1, 200°→2, 250°→3 = the `_` arm),
+        // negatives, non-finite. Compared to sin-of-the-angle (robust to which internal arm runs).
+        assert!(bits_eq(cosd(45.0), sind(135.0)));
+        assert_eq!(sind(-30.0), -sind(30.0));
+        for &deg in &[30.0_f64, 100.0, 200.0, 250.0, 350.0] {
+            assert!(
+                (sind(deg) - libm::sin(radians(deg))).abs() < 1e-12,
+                "sind({deg})"
+            );
+        }
+        assert!(sind(f64::INFINITY).is_nan());
+        assert!(cosd(f64::NAN).is_nan());
     }
 }

@@ -168,4 +168,20 @@ mod tests {
             },
         );
     }
+
+    #[test]
+    fn dangling_vertex_makes_euler_odd() {
+        // A cube (χ=2) plus ONE isolated vertex that no triangle references: V→9, so χ=9−18+12=3
+        // (odd). is_manifold stays true (half-edges unchanged) and the verts are finite, so this is
+        // the one way to reach `strictly`'s Euler-parity guard — a real corruption mode (dangling vert)
+        // the intermediate check must catch.
+        let mut m = unit_cube();
+        m.vert_pos.push(crate::linalg::Vec3::new(9.0, 9.0, 9.0));
+        assert!(finite(&m));
+        assert!(m.is_manifold());
+        assert_eq!(euler_characteristic(&m), 3);
+        assert!(!euler_consistent(&m));
+        let err = strictly(&m).unwrap_err();
+        assert!(err.contains("odd Euler characteristic"), "got: {err}");
+    }
 }

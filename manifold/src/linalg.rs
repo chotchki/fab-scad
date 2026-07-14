@@ -425,4 +425,63 @@ mod tests {
         assert_eq!(a, [1.5, -2.5, 3.5]);
         assert_eq!(Vec3::from(a), v);
     }
+
+    #[test]
+    fn covers_all_vec_and_box_ops() {
+        // Vec2 / Vec4 dot (Vec3 dot is covered above).
+        assert_eq!(Vec2::new(1.0, 2.0).dot(Vec2::new(3.0, 4.0)), 11.0);
+        assert_eq!(Vec4::new(1.0, 2.0, 3.0, 4.0).dot(Vec4::splat(1.0)), 10.0);
+
+        // Componentwise vec*vec, vec/vec, scalar*vec, vec/scalar, neg, cabs, is_finite.
+        let a = Vec3::new(2.0, -3.0, 4.0);
+        let b = Vec3::new(5.0, 2.0, -1.0);
+        assert_eq!(a * b, Vec3::new(10.0, -6.0, -4.0));
+        assert_eq!(
+            Vec3::new(6.0, 8.0, 10.0) / Vec3::new(2.0, 4.0, 5.0),
+            Vec3::new(3.0, 2.0, 2.0)
+        );
+        assert_eq!(3.0 * a, Vec3::new(6.0, -9.0, 12.0)); // f64 * Vec
+        assert_eq!(a / 2.0, Vec3::new(1.0, -1.5, 2.0));
+        assert_eq!(-a, Vec3::new(-2.0, 3.0, -4.0));
+        assert_eq!(a.cabs(), Vec3::new(2.0, 3.0, 4.0));
+        assert!(a.is_finite());
+        assert!(!Vec3::new(f64::NAN, 0.0, 0.0).is_finite());
+        assert!(!Vec3::new(0.0, f64::INFINITY, 0.0).is_finite());
+
+        // Assign ops.
+        let mut c = a;
+        c += b;
+        assert_eq!(c, Vec3::new(7.0, -1.0, 3.0));
+        c -= b;
+        assert_eq!(c, a);
+        c *= Vec3::splat(2.0);
+        assert_eq!(c, Vec3::new(4.0, -6.0, 8.0));
+
+        // Vec4 ⟷ Vec3 bridges + array round-trip for the other widths.
+        let v4 = Vec4::from_vec3(Vec3::new(1.0, 2.0, 3.0), 4.0);
+        assert_eq!(v4, Vec4::new(1.0, 2.0, 3.0, 4.0));
+        assert_eq!(v4.xyz(), Vec3::new(1.0, 2.0, 3.0));
+        let p = Vec2::new(1.5, -2.5);
+        assert_eq!(p + Vec2::new(0.5, 0.5), Vec2::new(2.0, -2.0));
+        let arr2: [f64; 2] = p.into();
+        assert_eq!(arr2, [1.5, -2.5]);
+        assert_eq!(Vec2::from(arr2), p);
+        let arr4: [f64; 4] = v4.into();
+        assert_eq!(Vec4::from(arr4), v4);
+
+        // Box3: from_points, center, union, overlaps (both verdicts), is_finite.
+        let bx = Box3::from_points(Vec3::new(3.0, 0.0, 0.0), Vec3::new(-1.0, 5.0, 2.0));
+        assert_eq!(bx.min, Vec3::new(-1.0, 0.0, 0.0));
+        assert_eq!(bx.max, Vec3::new(3.0, 5.0, 2.0));
+        assert_eq!(bx.center(), Vec3::new(1.0, 2.5, 1.0));
+        assert!(bx.is_finite());
+        assert!(!Box3::default().is_finite()); // inverted-infinity empty box
+        let near = Box3::from_points(Vec3::ZERO, Vec3::splat(1.0));
+        let far = Box3::from_points(Vec3::splat(100.0), Vec3::splat(101.0));
+        assert!(bx.overlaps(near));
+        assert!(!bx.overlaps(far));
+        let u = bx.union(far);
+        assert_eq!(u.min, Vec3::new(-1.0, 0.0, 0.0));
+        assert_eq!(u.max, Vec3::splat(101.0));
+    }
 }

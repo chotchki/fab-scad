@@ -308,8 +308,8 @@ mod tests {
             let mesh = cpp_to_mesh_gl(solid);
 
             // (1) validity agreement.
-            let rust = RustKernel::ingest(&mesh)
-                .unwrap_or_else(|e| panic!("K.0 [{name}]: rust rejected a C++-valid mesh: {e}"));
+            let rust =
+                RustKernel::ingest(&mesh).expect("K.0: rust rejected a C++-valid corpus mesh");
             assert!(rust.is_manifold(), "K.0 [{name}]: rust mesh not manifold");
 
             // (2) property agreement vs C++ (volume/area/genus/bbox), tight tolerance.
@@ -334,5 +334,100 @@ mod tests {
                 crate::check::genus(&rust),
             );
         }
+    }
+
+    /// Exercises the divergence-REPORTING machinery (the paths that only fire when the kernels
+    /// disagree — normally dormant because the port is faithful).
+    #[test]
+    fn differential_reports_divergences_and_rejects() {
+        // Kernel labels.
+        assert_eq!(RustKernel::name(), "rust(fab-manifold)");
+        assert_eq!(CppKernel::name(), "cpp(manifold3d)");
+
+        // rel_tol = -1 ⇒ every finite metric "diverges" (rel ≥ 0 > -1): forces the check-closure push
+        // + Divergence construction for volume/area/bbox.
+        let cube = cpp_to_mesh_gl(&manifold3d::Manifold::cube(2.0, 3.0, 5.0, false));
+        let all = differential(&cube, -1.0).unwrap();
+        assert!(all.iter().any(|d| d.metric == "volume"));
+        assert!(all.iter().any(|d| d.metric.starts_with("bbox")));
+        let d = &all[0];
+        assert!(d.abs >= 0.0 && d.rel >= 0.0 && !format!("{d:?}").is_empty());
+
+        // A REAL divergence the harness must catch: a unit cube with two DANGLING vertices (indexed by
+        // no triangle). Rust keeps them → χ=10−18+12=4 → genus −1, and a bbox that swallows them; C++
+        // drops unreferenced verts → genus 0, cube bbox. So genus AND bbox diverge (volume agrees).
+        #[rustfmt::skip]
+        let mut vp = vec![
+            0.0,0.0,0.0, 1.0,0.0,0.0, 1.0,1.0,0.0, 0.0,1.0,0.0,
+            0.0,0.0,1.0, 1.0,0.0,1.0, 1.0,1.0,1.0, 0.0,1.0,1.0,
+        ];
+        vp.extend_from_slice(&[50.0, 50.0, 50.0, 60.0, 60.0, 60.0]); // two dangling verts
+        #[rustfmt::skip]
+        let cube_tris = vec![
+            0,2,1, 0,3,2, 4,5,6, 4,6,7, 0,1,5, 0,5,4,
+            2,3,7, 2,7,6, 0,4,7, 0,7,3, 1,2,6, 1,6,5,
+        ];
+        let dangling = MeshGl {
+            num_prop: 3,
+            vert_properties: vp,
+            tri_verts: cube_tris,
+        };
+        let divs = differential(&dangling, 1e-9).unwrap();
+        assert!(
+            divs.iter().any(|d| d.metric == "genus"),
+            "expected a genus divergence: {divs:#?}"
+        );
+
+        // Reject paths: a mesh with an out-of-range index — BOTH kernels reject (rust: unpaired →
+        // not manifold; cpp: from_mesh_f64 fails) → the both-reject arm returns Ok(empty).
+        let bad_index = MeshGl {
+            num_prop: 3,
+            vert_properties: vec![0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+            tri_verts: vec![0, 1, 99],
+        };
+        assert!(RustKernel::ingest(&bad_index).is_err());
+        assert!(CppKernel::ingest(&bad_index).is_err());
+        assert!(differential(&bad_index, 1e-9).unwrap().is_empty());
+
+        // Asymmetric validity — the two kernels DISAGREE, which the differential surfaces as an Err.
+        // Both are REAL, meaningful cases:
+        //   (a) rust's ingest is topology-only, so a NaN-vertex mesh (valid pairing, invalid geometry)
+        //       is accepted by rust but rejected by C++ → "rust accepted, cpp rejected".
+        #[rustfmt::skip]
+        let mut nan_vp = vec![
+            0.0,0.0,0.0, 1.0,0.0,0.0, 1.0,1.0,0.0, 0.0,1.0,0.0,
+            0.0,0.0,1.0, 1.0,0.0,1.0, 1.0,1.0,1.0, 0.0,1.0,1.0,
+        ];
+        nan_vp[0] = f64::NAN;
+        #[rustfmt::skip]
+        let cube_tris = vec![
+            0u32,2,1, 0,3,2, 4,5,6, 4,6,7, 0,1,5, 0,5,4,
+            2,3,7, 2,7,6, 0,4,7, 0,7,3, 1,2,6, 1,6,5,
+        ];
+        let nan_mesh = MeshGl {
+            num_prop: 3,
+            vert_properties: nan_vp,
+            tri_verts: cube_tris.clone(),
+        };
+        let e = differential(&nan_mesh, 1e-9).unwrap_err();
+        assert!(e.contains("rust accepted"), "got: {e}");
+
+        //   (b) the mirror — an opposed-triangle "flap" appended to a valid cube: C++'s CreateHalfedges
+        //       REMOVES the degenerate pair and accepts, but our clean-pairing (opposed-tri removal is
+        //       the M.0.5 gap deferred to R1) sees broken pairing and rejects → "cpp accepted".
+        #[rustfmt::skip]
+        let flap_vp = vec![
+            0.0,0.0,0.0, 1.0,0.0,0.0, 1.0,1.0,0.0, 0.0,1.0,0.0,
+            0.0,0.0,1.0, 1.0,0.0,1.0, 1.0,1.0,1.0, 0.0,1.0,1.0,
+        ];
+        let mut flap_tris = cube_tris;
+        flap_tris.extend_from_slice(&[0, 1, 2, 0, 2, 1]); // coincident opposed pair
+        let flap = MeshGl {
+            num_prop: 3,
+            vert_properties: flap_vp,
+            tri_verts: flap_tris,
+        };
+        let e = differential(&flap, 1e-9).unwrap_err();
+        assert!(e.contains("cpp accepted"), "got: {e}");
     }
 }

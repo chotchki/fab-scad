@@ -223,4 +223,14 @@ mod tests {
         }
         assert_eq!(s.to_bits(), acc.to_bits());
     }
+
+    #[test]
+    fn for_each_visits_every_element() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let sum = AtomicUsize::new(0);
+        for_each(&[1usize, 2, 3, 4, 5], |&x| {
+            sum.fetch_add(x, Ordering::Relaxed);
+        });
+        assert_eq!(sum.load(Ordering::Relaxed), 15);
+    }
 }

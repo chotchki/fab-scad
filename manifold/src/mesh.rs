@@ -433,11 +433,8 @@ mod tests {
             vert_properties: verts,
             tri_verts: base.tri_verts,
         });
-        assert!(
-            (mesh.volume() - 8.0).abs() < 1e-9,
-            "volume {} !~ 8",
-            mesh.volume()
-        );
+        let v = mesh.volume();
+        assert!((v - 8.0).abs() < 1e-9, "volume {v} !~ 8");
         assert_eq!(mesh.surface_area(), 24.0); // exact: differences only
     }
 
@@ -540,5 +537,77 @@ mod tests {
         assert_eq!(mesh.b_box.min, Vec3::new(0.0, 0.0, 0.0));
         assert_eq!(mesh.b_box.max, Vec3::new(1.0, 1.0, 1.0));
         assert_eq!(mesh.b_box.size(), Vec3::new(1.0, 1.0, 1.0));
+    }
+
+    #[test]
+    fn accessors_and_meshgl_counts() {
+        let mesh = Mesh::from_mesh_gl(&unit_cube());
+        // prop() accessor: position-only ⇒ prop_vert == start_vert.
+        assert_eq!(mesh.prop(0), mesh.start(0));
+        assert_eq!(mesh.prop(17), mesh.start(17));
+        // MeshGl count helpers.
+        let gl = mesh.to_mesh_gl();
+        assert_eq!(gl.num_vert(), 8);
+        assert_eq!(gl.num_tri(), 12);
+    }
+
+    #[test]
+    fn is_manifold_hand_built_edge_cases() {
+        let he = |s: i32, p: i32| Halfedge {
+            start_vert: s,
+            paired_halfedge: p,
+            prop_vert: s,
+        };
+        // Half-edge count not a multiple of 3 → not manifold.
+        let two = Mesh {
+            halfedge: vec![he(0, 1), he(1, 0)],
+            ..Default::default()
+        };
+        assert!(!two.is_manifold());
+
+        // A fully-removed triple (all -1) is vacuously manifold (the removed-half-edge branch).
+        let removed = Mesh {
+            halfedge: vec![he(-1, -1), he(-1, -1), he(-1, -1)],
+            ..Default::default()
+        };
+        assert!(removed.is_manifold());
+
+        // A live half-edge whose next-in-triangle is removed → not manifold (returns before it would
+        // dereference the dangling pair index, so no panic).
+        let dangling = Mesh {
+            halfedge: vec![he(0, 5), he(-1, -1), he(2, 4)],
+            ..Default::default()
+        };
+        assert!(!dangling.is_manifold());
+    }
+
+    #[test]
+    fn calculate_bbox_skips_nan_verts() {
+        let mut m = Mesh::from_mesh_gl(&unit_cube());
+        m.vert_pos.push(Vec3::new(f64::NAN, 50.0, 50.0)); // NaN x → skipped (Manifold's isnan(a.x))
+        m.calculate_bbox();
+        // the NaN vert is ignored; the bbox stays the unit cube's.
+        assert_eq!(m.b_box.min, Vec3::new(0.0, 0.0, 0.0));
+        assert_eq!(m.b_box.max, Vec3::new(1.0, 1.0, 1.0));
+    }
+
+    #[test]
+    fn same_direction_duplicate_edge_is_unpaired() {
+        // Two triangles share the DIRECTED edge 0→1 (not a reverse pair), so the len-2 group fails the
+        // reverse check and both stay unpaired → not manifold.
+        let m = Mesh::from_mesh_gl(&MeshGl {
+            num_prop: 3,
+            vert_properties: vec![0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+            tri_verts: vec![0, 1, 2, 0, 1, 3],
+        });
+        assert!(!m.is_manifold());
+        // the shared 0→1 half-edges never linked
+        assert!(
+            m.halfedge
+                .iter()
+                .filter(|h| h.start_vert == 0 && h.paired_halfedge < 0)
+                .count()
+                >= 1
+        );
     }
 }

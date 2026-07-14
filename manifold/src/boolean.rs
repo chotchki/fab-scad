@@ -20,8 +20,11 @@
 //! live on [`crate::mesh::Mesh`]. Next: M.1.1 broad phase → M.1.2 boolean3 cascade.
 
 pub mod boolean3;
+pub mod boolean_result;
 pub mod collider;
 pub mod disjoint_sets;
+pub mod face_op;
+pub mod polygon;
 pub mod predicates;
 pub mod vocab;
 

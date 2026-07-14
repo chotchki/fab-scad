@@ -146,6 +146,62 @@ impl Mesh {
         self.halfedge[e as usize].prop_vert
     }
 
+    // --- Mutators the boolean assembly writes through (Manifold's `Halfedges::Set*`). The result mesh's
+    // `halfedge` is pre-sized, then `Face2Tri` fills start/prop/pair per output half-edge. `end` stays
+    // derived, so writing the three starts of a triangle in CCW order fixes its ends for free. ---
+
+    /// Set the start vertex of half-edge `e`.
+    #[inline]
+    pub fn set_start(&mut self, e: i32, v: i32) {
+        self.halfedge[e as usize].start_vert = v;
+    }
+
+    /// Set the paired half-edge of `e`.
+    #[inline]
+    pub fn set_pair(&mut self, e: i32, p: i32) {
+        self.halfedge[e as usize].paired_halfedge = p;
+    }
+
+    /// Set the property vertex of `e`.
+    #[inline]
+    pub fn set_prop(&mut self, e: i32, p: i32) {
+        self.halfedge[e as usize].prop_vert = p;
+    }
+
+    /// Drop vertices referenced by no half-edge, COMPACTING `vert_pos` and reindexing the half-edges
+    /// (Manifold's `RemoveUnreferencedVerts` only NaNs them in place, leaning on the later `SortGeometry`
+    /// to compact — we skip `SortGeometry` for GATE-A, so we compact here directly). Same final vertex
+    /// SET; the order is arbitrary either way (we also skip the Morton reindex), which the
+    /// order-independent gates (`volume`/`genus`/residual/`is_manifold`) don't care about. Keeps
+    /// [`crate::check::genus`] exact — it counts `vert_pos.len()`, so a stray dangling vert would skew χ.
+    pub fn remove_unreferenced_verts(&mut self) {
+        let n = self.num_vert();
+        let mut keep = vec![false; n];
+        for h in &self.halfedge {
+            if h.start_vert >= 0 {
+                keep[h.start_vert as usize] = true;
+            }
+        }
+        let mut remap = vec![-1i32; n];
+        let mut new_pos = Vec::new();
+        for (old, &k) in keep.iter().enumerate() {
+            if k {
+                remap[old] = new_pos.len() as i32;
+                new_pos.push(self.vert_pos[old]);
+            }
+        }
+        for h in &mut self.halfedge {
+            if h.start_vert >= 0 {
+                h.start_vert = remap[h.start_vert as usize];
+            }
+            // prop_vert == start_vert in the 1:1 MeshGL model, so it remaps the same way.
+            if h.prop_vert >= 0 && (h.prop_vert as usize) < n {
+                h.prop_vert = remap[h.prop_vert as usize];
+            }
+        }
+        self.vert_pos = new_pos;
+    }
+
     /// Build the half-edge connectivity from triangle vertex indices, pairing opposite half-edges.
     ///
     /// Deterministic clean-mesh pairing: group the two directed half-edges of every undirected edge

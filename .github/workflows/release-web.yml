@@ -1,7 +1,8 @@
-# The web channel (18.8): build the fab-web wasm bundle and attach it to a GitHub release —
-# the artifact hotchkiss-io's build.rs fetches (contract: docs/web-bundle.md).
-# Tag `web-vX.Y.Z` → prerelease with fab-web-X.Y.Z.tar.gz. Manual dispatch → CI artifact only.
-# Payload: the web/ crate (fab-web). NOTE: no submodules on checkout — the wasm build needs none.
+# The web channel (W.3.7): build the fab-gui wasm bundle and attach it to a GitHub release —
+# the artifact hotchkiss-io's build.rs fetches (contract: docs/web-embed.md).
+# Tag `web-vX.Y.Z` → prerelease with fab-gui-X.Y.Z.tar.gz. Manual dispatch → CI artifact only.
+# Payload: the ONE fab-gui app (desktop + web from one codebase, W.3) + the fab-geom kernel worker.
+# The fab-web payload + the OpenSCAD side-module are GONE — scad-rs+Manifold render everywhere now.
 name: release-web
 
 on:
@@ -24,7 +25,7 @@ jobs:
         with:
           targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
-      # The Manifold kernel's wasm-uu build needs LLVM 20+ with wasm-ld; ubuntu-24.04 ships 18.
+      # The Manifold kernel's wasm-uu build (fab-geom worker) needs LLVM 20+ with wasm-ld; ubuntu ships 18.
       - name: Install LLVM 21 + lld + libc++
         run: |
           wget -qO- https://apt.llvm.org/llvm.sh | sudo bash -s -- 21
@@ -39,9 +40,11 @@ jobs:
           curl -sL https://github.com/WebAssembly/binaryen/releases/download/version_130/binaryen-version_130-x86_64-linux.tar.gz | tar xz
           echo "$PWD/binaryen-version_130/bin" >> "$GITHUB_PATH"
           sudo apt-get update && sudo apt-get install -y brotli
-      - name: Build the wasm app
-        run: cargo build -p fab-web -p fab-geom --release --target wasm32-unknown-unknown
-      - name: Stage the bundle (web-bundle.md contract)
+      # fab-gui (--lib = the cdylib; the native bin is skipped) is pure-Rust wasm; fab-geom carries the
+      # C++ Manifold kernel and needs the LLVM 21 above. One invocation, both crates.
+      - name: Build the wasm app + geom worker
+        run: cargo build --release --target wasm32-unknown-unknown -p fab-gui --lib -p fab-geom
+      - name: Stage the bundle (docs/web-embed.md contract)
         run: |
           set -euo pipefail
           case "$GITHUB_REF" in
@@ -49,17 +52,19 @@ jobs:
             *) VERSION="dev-${GITHUB_SHA::7}" ;;
           esac
           echo "VERSION=$VERSION" >> "$GITHUB_ENV"
-          STAGE=target/fab-web/stage && mkdir -p "$STAGE"
-          wasm-bindgen --target web --no-typescript --out-name fab_web --out-dir "$STAGE" \
-            target/wasm32-unknown-unknown/release/fab_web.wasm
+          STAGE=target/fab-gui/stage && mkdir -p "$STAGE"
+
+          # The app: cdylib → wasm-bindgen (ES module) → wasm-opt -Oz → brotli/gzip.
+          wasm-bindgen --target web --no-typescript --out-name fab_gui --out-dir "$STAGE" \
+            target/wasm32-unknown-unknown/release/fab_gui.wasm
           # Explicit feature flags defend against any binaryen too old to read the feature section.
           wasm-opt -Oz --enable-reference-types --enable-bulk-memory \
-            -o "$STAGE/fab_web_bg.wasm.opt" "$STAGE/fab_web_bg.wasm"
-          mv "$STAGE/fab_web_bg.wasm.opt" "$STAGE/fab_web_bg.wasm"
-          brotli -q 11 -k "$STAGE/fab_web_bg.wasm"
-          gzip -9 -k "$STAGE/fab_web_bg.wasm"
-          cp packaging/web/index.reference.html "$STAGE/"
-          # Geometry worker (C.2): kernel-only wasm in its own worker.
+            -o "$STAGE/fab_gui_bg.wasm.opt" "$STAGE/fab_gui_bg.wasm"
+          mv "$STAGE/fab_gui_bg.wasm.opt" "$STAGE/fab_gui_bg.wasm"
+          brotli -q 11 -kf "$STAGE/fab_gui_bg.wasm"
+          gzip -9 -kf "$STAGE/fab_gui_bg.wasm"
+
+          # The geometry worker (W.3.6): the kernel-only fab-geom wasm in its own Web Worker.
           mkdir -p "$STAGE/geom"
           wasm-bindgen --target web --no-typescript --out-name fab_geom --out-dir "$STAGE/geom" \
             target/wasm32-unknown-unknown/release/fab_geom.wasm
@@ -67,17 +72,17 @@ jobs:
             -o "$STAGE/geom/fab_geom_bg.wasm.opt" "$STAGE/geom/fab_geom_bg.wasm"
           mv "$STAGE/geom/fab_geom_bg.wasm.opt" "$STAGE/geom/fab_geom_bg.wasm"
           brotli -q 11 -kf "$STAGE/geom/fab_geom_bg.wasm"
+          gzip -9 -kf "$STAGE/geom/fab_geom_bg.wasm"
           cp packaging/web/geom-worker.js "$STAGE/geom/"
-          # OpenSCAD side-module (Phase B): pinned official build + our worker + baked lib pins
-          # (BOSL2 @ submodule tag, scad-lib @ this commit). Lazily fetched; GPL module UNMODIFIED.
-          OSC_SHA="10e0937dd2627116a1f7ab6fb1ed75762b66572f21f4e5054c7dc00526cdd1ff"
-          curl -sL -o /tmp/osc.zip "https://files.openscad.org/snapshots/OpenSCAD-2026.07.01-WebAssembly-web.zip"
-          echo "$OSC_SHA  /tmp/osc.zip" | shasum -a 256 -c - >/dev/null
-          mkdir -p "$STAGE/openscad"
-          unzip -o -q /tmp/osc.zip -d "$STAGE/openscad"
-          cp packaging/web/openscad-worker.js packaging/web/OPENSCAD-NOTICE.txt "$STAGE/openscad/"
-          python3 packaging/web/pack_libs.py "$STAGE/openscad/libs.json"
-          brotli -q 11 -kf "$STAGE/openscad/openscad.wasm"
+
+          # The scad LIB PACK: BOSL2 + scad-lib + the web demo, one JSON the app fetches once and
+          # computes each model's include closure from (served at the bundle root).
+          python3 packaging/web/pack_scad_libs.py "$STAGE/libs.json"
+
+          # The reference loader (a crib for the host — the site owns the real document).
+          cp gui/web/index.html "$STAGE/index.reference.html"
+
+          # Contract manifest: version + entry + per-file sha256 (the site asserts it at build time).
           python3 - "$STAGE" "$VERSION" <<'EOF'
           import hashlib, json, os, sys
           stage, version = sys.argv[1], sys.argv[2]
@@ -86,53 +91,54 @@ jobs:
               for n in sorted(names):
                   rel = os.path.relpath(os.path.join(root, n), stage)
                   sha[rel] = hashlib.sha256(open(os.path.join(root, n), "rb").read()).hexdigest()
-          json.dump({"version": version, "entry": "fab_web.js", "wasm": "fab_web_bg.wasm", "sha256": sha},
+          json.dump({"version": version, "entry": "fab_gui.js", "wasm": "fab_gui_bg.wasm", "sha256": sha},
                     open(os.path.join(stage, "manifest.json"), "w"), indent=1)
           EOF
-          mkdir -p target/fab-web/out
-          tar -czf "target/fab-web/out/fab-web-${VERSION}.tar.gz" -C "$STAGE" .
-          ls -la target/fab-web/out/
-      # BOOT GATE (the web-v0.1.0 lesson: never release an artifact nobody executed). Serve the
-      # exact staged bundle, load ?demo in headless Chrome, fail on any panic/RuntimeError and
-      # require the demo model to report loaded.
+
+          mkdir -p target/fab-gui/out
+          tar -czf "target/fab-gui/out/fab-gui-${VERSION}.tar.gz" -C "$STAGE" .
+          ls -la "$STAGE" "target/fab-gui/out/"
+          echo "app wasm (brotli): $(du -h "$STAGE/fab_gui_bg.wasm.br" | cut -f1)"
+      # BOOT GATE (the web-v0.1.0 lesson: never release an artifact nobody executed). Serve the exact
+      # staged bundle, boot fab-gui in headless Chrome, fail on any panic/RuntimeError, and require the
+      # sourceless-boot DEMO to render end-to-end THROUGH the geom worker (the whole point of the bundle).
       - name: Boot the bundle in Chrome
         run: |
-          STAGE=target/fab-web/stage
-          cp packaging/web/index.reference.html "$STAGE/index.html"
+          STAGE=target/fab-gui/stage
+          cp "$STAGE/index.reference.html" "$STAGE/index.html"
           (cd "$STAGE" && python3 -m http.server 8899 &>/dev/null &)
           sleep 1
-          # REAL time, not --virtual-time-budget: since C.2 the demo plans through the
-          # fab-geom worker, and virtual time races real worker threads (the A-phase lesson,
-          # relearned the hard way when this gate broke on 0.11.0). Chrome stays up; we poll.
+          # SwiftShader software WebGL2 for bevy (no GPU on the runner). REAL wall-clock poll, not
+          # --virtual-time-budget: the demo renders through the geom WORKER, and virtual time races real
+          # worker threads (the fab-web A-phase lesson). Chrome stays up; we poll the console.
           google-chrome --headless=new --no-sandbox --enable-logging=stderr \
+            --enable-unsafe-swiftshader --use-gl=angle --use-angle=swiftshader-webgl \
             --window-size=1000,700 \
-            "http://127.0.0.1:8899/index.html?demo&bed=40" 2> /tmp/console.log &
+            "http://127.0.0.1:8899/index.html" 2> /tmp/console.log &
           CHROME=$!
-          for i in $(seq 1 30); do
+          for i in $(seq 1 45); do
             sleep 2
-            grep -qE "auto-plan: [1-9]" /tmp/console.log && break
+            grep -qE "fab-gui render complete: [1-9]" /tmp/console.log && break
             grep -qE "RuntimeError|panicked|could not grow" /tmp/console.log && break
           done
           kill $CHROME 2>/dev/null || true
           if grep -qE "RuntimeError|panicked|could not grow" /tmp/console.log; then
             echo "::error::bundle failed to boot"; grep -E "RuntimeError|panicked|could not grow" /tmp/console.log | head -5; exit 1
           fi
-          grep -q "loaded demo.stl" /tmp/console.log || { echo "::error::demo model never loaded"; tail -20 /tmp/console.log; exit 1; }
-          # The KERNEL gate: the 45mm demo on a 40mm bed must produce a real auto-plan in-browser
-          # (through the geometry WORKER — this line proves the whole geom/ chain).
-          grep -qE "auto-plan: [1-9]" /tmp/console.log || { echo "::error::kernel never planned"; tail -20 /tmp/console.log; exit 1; }
-          echo "boot gate: OK (bundle boots + kernel plans)"
+          grep -qE "fab-gui render complete: [1-9]" /tmp/console.log \
+            || { echo "::error::demo never rendered through the geom worker"; tail -30 /tmp/console.log; exit 1; }
+          echo "boot gate: OK (bundle boots + kernel renders the demo)"
       - uses: actions/upload-artifact@v4
         with:
-          name: fab-web-${{ env.VERSION }}
-          path: target/fab-web/out/*.tar.gz
+          name: fab-gui-${{ env.VERSION }}
+          path: target/fab-gui/out/*.tar.gz
           if-no-files-found: error
       - name: Release (tags only)
         if: startsWith(github.ref, 'refs/tags/web-v')
         uses: softprops/action-gh-release@v2
         with:
           prerelease: true
-          files: target/fab-web/out/*.tar.gz
+          files: target/fab-gui/out/*.tar.gz
           body: |
-            fab-web bundle — the wasm app hotchkiss-io bakes into its special page.
-            Contract: docs/web-bundle.md (ES-module glue + wasm + .br/.gz + manifest.json).
+            fab-gui bundle — the wasm app hotchkiss-io bakes into its /3d/editor page.
+            Contract: docs/web-embed.md (ES-module glue + wasm + .br/.gz + geom worker + libs.json + manifest.json).

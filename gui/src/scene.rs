@@ -28,16 +28,16 @@ pub(crate) fn assets_dir() -> AssetPlugin {
 }
 
 /// The primary-window config the windowed app runs under (W.3.5). On wasm it binds Bevy to the page's
-/// `<canvas id="fab-web">` and tracks its parent's size (the hosting document owns layout); on desktop
+/// `<canvas id="fab-gui">` and tracks its parent's size (the hosting document owns layout); on desktop
 /// it's the default OS window. Same builder, both targets — a canvas swap, not a second app.
 pub(crate) fn window_plugin() -> WindowPlugin {
     #[cfg(target_arch = "wasm32")]
     {
         WindowPlugin {
             primary_window: Some(Window {
-                // The page provides <canvas id="fab-web"> BEFORE init() — missing = panic (see
-                // gui/web/index.html). fit_canvas_to_parent tracks the parent's size.
-                canvas: Some("#fab-web".into()),
+                // The page provides <canvas id="fab-gui"> BEFORE init() — missing = panic (see
+                // gui/web/index.html + docs/web-embed.md). fit_canvas_to_parent tracks the parent's size.
+                canvas: Some("#fab-gui".into()),
                 fit_canvas_to_parent: true,
                 ..default()
             }),

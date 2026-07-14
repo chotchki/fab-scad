@@ -729,6 +729,10 @@ pub(crate) fn poll_job(
                 }
             }
             status.0 = "ready".into();
+            // A distinct, greppable signal that geometry rendered end-to-end (on wasm this rode the geom
+            // Worker round-trip) — the release boot gate waits for it to prove the bundle isn't
+            // dead-on-arrival (release-web.yml). Bevy's LogPlugin routes it to the browser console.
+            info!("fab-gui render complete: {} part(s)", parts.0.len());
             // The displayed geometry now matches the current source — clear the Model/Parts stale flag
             // (U.3.7). `sync_pipeline` compares the live source hash against this each frame.
             pipeline.geo_of = Some(hash_one(&editor.text));

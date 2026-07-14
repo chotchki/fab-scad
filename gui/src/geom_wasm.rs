@@ -22,12 +22,12 @@ thread_local! {
     static WORKER: RefCell<Option<(web_sys::Worker, Rc<Rpc>)>> = const { RefCell::new(None) };
 }
 
-/// Where the bundle's members live — the page declares it via `<canvas id="fab-web" data-base=…>`;
+/// Where the bundle's members live — the page declares it via `<canvas id="fab-gui" data-base=…>`;
 /// document-relative by default. The geom worker + its wasm live under `{base}geom/`, libs.json at `{base}`.
 pub(crate) fn bundle_base() -> String {
     web_sys::window()
         .and_then(|w| w.document())
-        .and_then(|d| d.get_element_by_id("fab-web"))
+        .and_then(|d| d.get_element_by_id("fab-gui"))
         .and_then(|c| c.get_attribute("data-base"))
         .map(|mut b| {
             if !b.ends_with('/') {

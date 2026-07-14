@@ -257,7 +257,13 @@ fn run_windowed(scene: SceneCfg, shot: Option<PathBuf>) {
         .add_systems(Update, window_shot)
         .add_systems(
             EguiPrimaryContextPass,
-            (theme::install_theme, panel_ui.run_if(theme::theme_ready)).chain(),
+            (
+                theme::install_theme,
+                panel_ui.run_if(theme::theme_ready),
+                // The host's splash-removal cue, fired once the themed UI is up (docs/web-embed.md).
+                signal_ready.run_if(theme::theme_ready),
+            )
+                .chain(),
         )
         .run();
 }

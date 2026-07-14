@@ -78,4 +78,7 @@ web-sys = { version = "0.3", features = [
     "WorkerType",
     "MessageEvent",
     "Event",
+    # `fab-gui:ready` splash-removal signal (W.3.7): a CustomEvent dispatched on the document.
+    "CustomEvent",
+    "EventTarget",
 ] }

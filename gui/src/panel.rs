@@ -701,3 +701,20 @@ pub(crate) fn piece_estimate(cuts: &Cuts) -> usize {
         })
         .product()
 }
+
+/// Fire `fab-gui:ready` — a `document` CustomEvent — ONCE, when the first themed egui frame is up: the
+/// host page's cue to remove its boot splash (docs/web-embed.md). Runs right after `panel_ui` in the
+/// egui pass, so by the time it fires the tool UI has been submitted for the frame. No-op on desktop —
+/// there's no host page to tell. The `Local` latches it to a single dispatch for the app's lifetime.
+pub(crate) fn signal_ready(mut fired: Local<bool>, mut contexts: EguiContexts) {
+    if *fired || contexts.ctx_mut().is_err() {
+        return; // egui context not up yet — wait for a real painted frame
+    }
+    *fired = true;
+    #[cfg(target_arch = "wasm32")]
+    if let Some(doc) = web_sys::window().and_then(|w| w.document()) {
+        if let Ok(ev) = web_sys::CustomEvent::new("fab-gui:ready") {
+            let _ = doc.dispatch_event(&ev);
+        }
+    }
+}

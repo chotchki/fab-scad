@@ -190,6 +190,9 @@ pub fn differential(mesh: &MeshGl, rel_tol: f64) -> Result<Vec<Divergence>, Stri
 mod tests {
     use super::*;
 
+    /// A prepared box's params: `(ox, oy, oz, sx, sy, sz)`. Shared by the GATE-A/B config sweeps.
+    type BoxParams = (f64, f64, f64, f64, f64, f64);
+
     /// The M.0.3 identity-op green light: a hand-built unit cube, bit-EXACT volume/area vs C++ (small
     /// integer coords ⇒ no FP cancellation ⇒ literally equal), bbox exact.
     #[test]
@@ -465,7 +468,6 @@ mod tests {
 
         // (p-params, q-params) as (ox,oy,oz,sx,sy,sz) — all chosen so no coordinate coincides across the
         // pair (general position), and every pair genuinely overlaps.
-        type BoxParams = (f64, f64, f64, f64, f64, f64);
         let configs: &[(BoxParams, BoxParams)] = &[
             ((0.0, 0.0, 0.0, 1.0, 1.0, 1.0), (0.3, 0.4, 0.5, 1.0, 1.0, 1.0)),
             ((0.0, 0.0, 0.0, 1.0, 1.0, 1.0), (0.5, 0.3, 0.7, 2.0, 2.0, 2.0)),
@@ -507,6 +509,98 @@ mod tests {
             );
             eprintln!("GATE-A sweep [{i}] ✓ vol={a_vol:.6}, residual={residual:.3e}");
         }
+    }
+
+    // =====================================================================================
+    // ★ GATE-B (M.1.4) — the COINCIDENT case. Unlike GATE-A's general position, these box∪box configs
+    //   SHARE coordinate planes, so `Shadows`'s `p == q` fires and the symbolic-perturbation normals are
+    //   consulted for the first time. Each must produce a watertight solid matching C++ to residual
+    //   < 1e-5 (the shared-coordinate tie-break bit-matching the reference), plus the analytic volume.
+    // =====================================================================================
+    #[test]
+    fn gate_b_coincident_cube_union_residual_vs_cpp() {
+        use crate::boolean::OpType;
+        use crate::boolean::boolean_result::boolean;
+
+        // (q-params, analytic union volume, label). P is always the unit cube [0,1]³. Each Q shares ≥1
+        // coordinate plane with P (values in {0,1}), so p==q fires on those axes.
+        let configs: &[(BoxParams, f64, &str)] = &[
+            // shares the y,z planes {0,1}; x-overlap → union box [0,1.5]×[0,1]×[0,1].
+            ((0.5, 0.0, 0.0, 1.0, 1.0, 1.0), 1.5, "shared y,z planes"),
+            // shares the z planes {0,1}; x,y offset → union prism, XY area 1.75, height 1.
+            ((0.5, 0.5, 0.0, 1.0, 1.0, 1.0), 1.75, "shared z plane"),
+            // face-TOUCHING at x=1 (fully coincident shared face) → union box [0,2]×[0,1]×[0,1].
+            ((1.0, 0.0, 0.0, 1.0, 1.0, 1.0), 2.0, "face-touching"),
+            // shares the x,y planes {0,1}; z-overlap → union box [0,1]×[0,1]×[0,1.5].
+            ((0.0, 0.0, 0.5, 1.0, 1.0, 1.0), 1.5, "shared x,y planes"),
+            // shares the x,z planes {0,1}; y-overlap → union box [0,1]×[0,1.5]×[0,1].
+            ((0.0, 0.5, 0.0, 1.0, 1.0, 1.0), 1.5, "shared x,z planes"),
+            // Q wholly INSIDE P, sharing the origin corner planes x=y=z=0 → union = P, vol 1.
+            ((0.0, 0.0, 0.0, 0.5, 0.5, 0.5), 1.0, "contained at corner"),
+        ];
+
+        for (i, &(qp, expected_vol, label)) in configs.iter().enumerate() {
+            let p = prepared_box(0.0, 0.0, 0.0, 1.0, 1.0, 1.0);
+            let q = prepared_box(qp.0, qp.1, qp.2, qp.3, qp.4, qp.5);
+            let a = boolean(&p, &q, OpType::Add);
+
+            assert!(a.is_manifold(), "GATE-B [{i}] ({label}): rust union not manifold");
+            let a_vol = a.volume();
+            assert!(
+                (a_vol - expected_vol).abs() < 1e-9,
+                "GATE-B [{i}] ({label}): volume {a_vol} != analytic {expected_vol}"
+            );
+
+            let p_cpp = CppKernel::ingest(&p.to_mesh_gl()).unwrap();
+            let q_cpp = CppKernel::ingest(&q.to_mesh_gl()).unwrap();
+            let b_cpp = p_cpp.union(&q_cpp);
+            assert_eq!(
+                crate::check::genus(&a),
+                b_cpp.genus(),
+                "GATE-B [{i}] ({label}): genus diverges from C++"
+            );
+
+            let a_cpp = CppKernel::ingest(&a.to_mesh_gl())
+                .unwrap_or_else(|e| panic!("GATE-B [{i}] ({label}): cpp rejects rust union: {e}"));
+            let sym = a_cpp.difference(&b_cpp).union(&b_cpp.difference(&a_cpp));
+            let residual = sym.volume() / a_cpp.volume();
+            assert!(
+                residual < 1e-5,
+                "GATE-B [{i}] ({label}): residual {residual:.3e} >= 1e-5 — coincident tie-break diverges"
+            );
+            eprintln!("GATE-B [{i}] ✓ ({label}): vol={a_vol:.6}, residual={residual:.3e}");
+        }
+    }
+
+    /// The FULLY-COPLANAR extreme, beyond GATE-B's face-sharing scope: identical cubes, where EVERY
+    /// face of P coincides with a face of Q. The R1 tracer has no coplanar-face merge (`edge_op`/
+    /// `SimplifyTopology` is deferred to R2/M.2), so it currently doubles the coincident faces → genus
+    /// −1 (χ=4, two components) instead of the clean genus-0 cube C++ produces (12 tris). This is NOT a
+    /// tie-break bug — the partial-coincidence GATE-B cases all pass residual-0, so the cascade is
+    /// correct; it's the missing cleanup. The edge_op TRIPWIRE, confirmed fired.
+    ///
+    /// `#[ignore]`d until edge_op lands; the assertions ARE the R2 acceptance criterion, so un-ignoring
+    /// this test is the check that R2 fixed it.
+    #[test]
+    #[ignore = "needs edge_op / SimplifyTopology coplanar-face merge (R2/M.2) — the M.1.6 tripwire"]
+    fn identical_cubes_need_coplanar_merge_r2() {
+        use crate::boolean::OpType;
+        use crate::boolean::boolean_result::boolean;
+
+        let p = prepared_box(0.0, 0.0, 0.0, 1.0, 1.0, 1.0);
+        let q = prepared_box(0.0, 0.0, 0.0, 1.0, 1.0, 1.0);
+        let a = boolean(&p, &q, OpType::Add);
+
+        assert!(a.is_manifold(), "identical union not manifold");
+        assert_eq!(crate::check::genus(&a), 0, "identical union should be genus 0 (one cube)");
+        assert!((a.volume() - 1.0).abs() < 1e-9, "identical union volume should be 1");
+
+        let b_cpp = CppKernel::ingest(&p.to_mesh_gl())
+            .unwrap()
+            .union(&CppKernel::ingest(&q.to_mesh_gl()).unwrap());
+        let a_cpp = CppKernel::ingest(&a.to_mesh_gl()).unwrap();
+        let sym = a_cpp.difference(&b_cpp).union(&b_cpp.difference(&a_cpp));
+        assert!(sym.volume() / a_cpp.volume() < 1e-5, "identical union residual dirty");
     }
 
     /// Exercises the divergence-REPORTING machinery (the paths that only fire when the kernels

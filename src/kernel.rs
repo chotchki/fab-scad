@@ -543,156 +543,96 @@ impl Solid {
         out
     }
 
-    /// Split into connected components — one Solid per maximal set of triangles joined through
-    /// shared vertices. A presliced part (many disjoint slabs unioned into one manifold) splits into
-    /// its individual slabs; a single connected solid comes back unchanged. The reason (T.2a): the
-    /// print pipeline orients each piece with `auto_orient::best_up` and packs it — but scoring a
-    /// whole presliced blob picks ONE meaningless build-up (the uniform-45° dogfood bug), so the
-    /// blob has to break into printable pieces FIRST.
+    /// Split into connected components — one Solid per maximal connected solid BODY, with its enclosed
+    /// voids (magnet pockets, cable channels) kept CARVED IN. A presliced part (many disjoint slabs
+    /// unioned into one manifold) splits into its individual slabs; a single connected solid — even one
+    /// riddled with internal cavities — comes back as ONE piece. The reason (T.2a): the print pipeline
+    /// orients each piece with `auto_orient::best_up` and packs it, but scoring a whole presliced blob
+    /// picks ONE meaningless build-up (the uniform-45° dogfood bug), so the blob has to break into
+    /// printable pieces FIRST.
     ///
-    /// manifold3d 0.3.1 exposes no `Decompose()`, so this is a hand-rolled union-find over the
-    /// exported mesh. Components come back sorted by their bbox-min corner then triangle count — a
-    /// GEOMETRIC key, so the split is stable run-to-run even where Manifold reorders the mesh
-    /// internally (S.4 same-platform mesh nondeterminism), which keeps a per-component orientation
-    /// override pinned to the same slab across a re-render.
+    /// Backed by Manifold's native `Decompose()` (manifold-csg ≥ 0.3.3). Decompose splits into
+    /// topologically disconnected manifolds — but a solid-with-void surfaces as an OUTER body (positive
+    /// volume) PLUS each void as a separate INVERTED shell (negative volume), so we re-fold every void
+    /// into the body that geometrically encloses it. Every returned solid is a real, checked 2-manifold.
+    /// The old path was a hand-rolled union-find over the exported mesh; it over-segmented on the
+    /// coincident-but-distinct verts Manifold leaves along boolean seams, rebuilt OPEN shells, and
+    /// SILENTLY dropped every NotManifold fragment — window_light_blocker (1 body + 88 magnet pockets)
+    /// came back as ZERO components, so the whole model collapsed to one un-decomposable plate with the
+    /// pockets extracted (W.4). Components come back sorted by bbox-min corner then triangle count — a
+    /// GEOMETRIC key stable across Manifold's internal mesh reordering (S.4), so a per-component
+    /// orientation override stays pinned to the same slab across a re-render.
     pub fn components(&self) -> Vec<Solid> {
-        let (v, stride, idx) = self.0.to_mesh_f64();
-        if idx.is_empty() {
+        if self.is_empty() {
             return Vec::new();
         }
-        let nverts = v.len() / stride;
-        // Union-find over vertex indices; the root is always the MIN index in the set.
-        fn find(p: &mut [u32], mut x: u32) -> u32 {
-            while p[x as usize] != x {
-                p[x as usize] = p[p[x as usize] as usize]; // path halving
-                x = p[x as usize];
-            }
-            x
-        }
-        fn union(p: &mut [u32], a: u32, b: u32) {
-            let (ra, rb) = (find(p, a), find(p, b));
-            if ra != rb {
-                p[ra.max(rb) as usize] = ra.min(rb);
-            }
-        }
-        let mut parent: Vec<u32> = (0..nverts as u32).collect();
-        for t in idx.chunks_exact(3) {
-            union(&mut parent, t[0] as u32, t[1] as u32);
-            union(&mut parent, t[1] as u32, t[2] as u32);
-        }
-        // Group the triangles by component root — each group is one MESH SHELL.
-        let mut groups: HashMap<u32, Vec<[u64; 3]>> = HashMap::new();
-        for t in idx.chunks_exact(3) {
-            let root = find(&mut parent, t[0] as u32);
-            groups.entry(root).or_default().push([t[0], t[1], t[2]]);
-        }
-        // One shell ⇒ hand back the original solid untouched (skip a lossy mesh round-trip).
-        if groups.len() == 1 {
+        // A real body has positive signed volume; a void surfaces as an inverted (negative) shell.
+        let (bodies, cavities): (Vec<Solid>, Vec<Solid>) = self
+            .0
+            .decompose()
+            .into_iter()
+            .map(Solid::wrap)
+            .partition(|s| s.volume() >= 0.0);
+        tracing::debug!(
+            bodies = bodies.len(),
+            cavities = cavities.len(),
+            "components: native decompose"
+        );
+        // One body (with any number of voids inside it) IS the whole solid — hand it back untouched,
+        // voids intact, num_tri preserved (no round-trip). This is the overwhelmingly common case: a
+        // single part, and every cut CELL of a sheet.
+        if bodies.len() <= 1 {
             return vec![self.clone()];
         }
-        // A shell is either an OUTER boundary (positive signed volume) or an internal CAVITY — a fully
-        // enclosed void (a captured magnet pocket: inward-facing normals ⇒ NEGATIVE signed volume). A
-        // cavity shares no vertices with its host's outer shell, so the vertex union-find split it out,
-        // but it is NOT a separate printable piece: it belongs to — and must stay CARVED INTO — the
-        // solid that encloses it (splitting it off both spawns a phantom piece AND erases the pocket
-        // from the host). Classify each shell by signed volume, then fold every cavity's triangles into
-        // the smallest outer shell whose bbox contains it, so a solid-with-void comes back as ONE piece.
-        struct Shell {
-            tris: Vec<[u64; 3]>,
-            vol: f64,
-            min: [f64; 3],
-            max: [f64; 3],
-        }
-        let pt = |vi: u64| {
-            let b = vi as usize * stride;
-            [v[b], v[b + 1], v[b + 2]]
-        };
-        let shells: Vec<Shell> = groups
-            .into_values()
-            .map(|tris| {
-                let (mut vol, mut min, mut max) =
-                    (0.0_f64, [f64::INFINITY; 3], [f64::NEG_INFINITY; 3]);
-                for t in &tris {
-                    let (a, b, c) = (pt(t[0]), pt(t[1]), pt(t[2]));
-                    // signed volume of tetra (origin, a, b, c) = a·(b×c)/6 — sums to the shell's
-                    // oriented volume, positive for an outward boundary, negative for an inward cavity.
-                    let cr = [
-                        b[1] * c[2] - b[2] * c[1],
-                        b[2] * c[0] - b[0] * c[2],
-                        b[0] * c[1] - b[1] * c[0],
-                    ];
-                    vol += (a[0] * cr[0] + a[1] * cr[1] + a[2] * cr[2]) / 6.0;
-                    for p in [a, b, c] {
-                        for k in 0..3 {
-                            min[k] = min[k].min(p[k]);
-                            max[k] = max[k].max(p[k]);
-                        }
-                    }
-                }
-                Shell { tris, vol, min, max }
-            })
-            .collect();
-        // Outer shells (vol ≥ 0) seed the pieces; each cavity (vol < 0) folds into its enclosing outer.
-        let mut pieces: Vec<Vec<[u64; 3]>> = Vec::new();
-        let mut outer_bbox: Vec<([f64; 3], [f64; 3])> = Vec::new();
-        for s in &shells {
-            if s.vol >= 0.0 {
-                pieces.push(s.tris.clone());
-                outer_bbox.push((s.min, s.max));
-            }
-        }
+        // Many disjoint bodies. With NO voids there's no nesting (disjoint manifolds can't overlap), so
+        // the decomposed bodies ARE the pieces. Otherwise carve: each piece = the original restricted to
+        // that body's region, minus any SMALLER body nested inside it (an island floating in this body's
+        // void). Difference with a disjoint solid is a safe no-op, so selecting nests by bbox is fine.
         const EPS: f64 = 1e-6;
+        let boxes: Vec<([f64; 3], [f64; 3])> = bodies
+            .iter()
+            .map(|s| s.bbox().map_or(([0.0; 3], [0.0; 3]), |(a, b)| (a.to_array(), b.to_array())))
+            .collect();
         let bbox_vol =
             |b: &([f64; 3], [f64; 3])| (b.1[0] - b.0[0]) * (b.1[1] - b.0[1]) * (b.1[2] - b.0[2]);
-        for s in &shells {
-            if s.vol >= 0.0 {
-                continue; // an outer shell — already a piece
-            }
-            // The smallest-bbox outer shell that fully contains this cavity (nesting-robust: a cavity
-            // inside a small island inside a big void attaches to the island, not the outer wall).
-            let parent = (0..pieces.len())
-                .filter(|&k| {
-                    let (omin, omax) = outer_bbox[k];
-                    (0..3).all(|d| omin[d] <= s.min[d] + EPS && omax[d] + EPS >= s.max[d])
-                })
-                .min_by(|&a, &b| {
-                    bbox_vol(&outer_bbox[a])
-                        .partial_cmp(&bbox_vol(&outer_bbox[b]))
-                        .unwrap_or(std::cmp::Ordering::Equal)
-                });
-            match parent {
-                Some(k) => pieces[k].extend_from_slice(&s.tris),
-                // Unenclosed cavity (shouldn't happen for a valid solid) — keep it rather than lose it.
-                None => {
-                    pieces.push(s.tris.clone());
-                    outer_bbox.push((s.min, s.max));
-                }
-            }
-        }
-        // After merging, a single piece == the whole original solid: return it untouched (lossless).
-        if pieces.len() == 1 {
-            return vec![self.clone()];
-        }
-        // Rebuild a Solid per piece, remapping each to a compact local vertex buffer.
-        let mut solids: Vec<Solid> = pieces
-            .into_iter()
-            .filter_map(|tris| {
-                let mut remap: HashMap<u64, u64> = HashMap::new();
-                let mut lv: Vec<f64> = Vec::new();
-                let mut li: Vec<u64> = Vec::with_capacity(tris.len() * 3);
-                for t in &tris {
-                    for &vi in t {
-                        let ni = *remap.entry(vi).or_insert_with(|| {
-                            let b = vi as usize * stride;
-                            lv.extend_from_slice(&v[b..b + 3]);
-                            (lv.len() / 3 - 1) as u64
-                        });
-                        li.push(ni);
+        let inside = |inner: &([f64; 3], [f64; 3]), outer: &([f64; 3], [f64; 3])| {
+            (0..3).all(|d| outer.0[d] <= inner.0[d] + EPS && outer.1[d] + EPS >= inner.1[d])
+        };
+        let mut solids: Vec<Solid> = if cavities.is_empty() {
+            bodies
+        } else {
+            bodies
+                .iter()
+                .enumerate()
+                .map(|(i, body)| {
+                    let mut piece = self.intersection(body);
+                    for (j, other) in bodies.iter().enumerate() {
+                        if i != j
+                            && inside(&boxes[j], &boxes[i])
+                            && bbox_vol(&boxes[j]) < bbox_vol(&boxes[i])
+                        {
+                            piece = piece.difference(other);
+                        }
                     }
-                }
-                Manifold::from_mesh_f64(&lv, 3, &li).ok().map(Solid::wrap)
-            })
-            .collect();
+                    piece
+                })
+                .collect()
+        };
+        // LOUD on a non-manifold result — never silently drop a piece again (chotchki's rule); an empty
+        // carve (a body fully consumed by a nested subtraction) is expected, so quietly drop only those.
+        solids.retain(|s| {
+            if s.is_empty() {
+                return false;
+            }
+            if !s.is_manifold() {
+                tracing::warn!(
+                    vol = s.volume(),
+                    tris = s.num_tri(),
+                    "components() produced a NON-MANIFOLD piece — keeping it, but this is a bug"
+                );
+            }
+            true
+        });
         // Geometric, S.4-stable order: bbox-min corner (x,y,z lexicographic) then triangle count.
         solids.sort_by(|a, b| {
             let key = |s: &Solid| s.bbox().map_or([f64::INFINITY; 3], |(m, _)| m.to_array());
@@ -1302,6 +1242,48 @@ mod tests {
             2,
             "a solid island inside the void stays its own piece; only the cavity merges"
         );
+    }
+
+    #[test]
+    fn components_folds_a_grid_of_enclosed_pockets_into_one_body() {
+        // The window_light_blocker failure class (W.4): a plate riddled with fully-enclosed pockets
+        // (magnet voids that never reach a face). The old union-find over-segmented on boolean-seam
+        // verts and dropped every rebuilt-open shell → ZERO components. Native decompose folds each
+        // void back into the body → ONE piece, pockets carved.
+        let mut plate = Solid::cube(60.0, 60.0, 6.0, true);
+        for gx in -2..=2 {
+            for gy in -2..=2 {
+                // r1.6 ball centred in the 6mm-thick plate (spans z=-1.6..1.6 ⊂ -3..3) → fully enclosed.
+                let pocket = Solid::sphere(1.6, 24)
+                    .translate(Vec3::new(f64::from(gx) * 10.0, f64::from(gy) * 10.0, 0.0));
+                plate = plate.difference(&pocket);
+            }
+        }
+        let comps = plate.components();
+        assert_eq!(comps.len(), 1, "plate + 25 enclosed pockets is ONE body");
+        comps[0].check().unwrap();
+        // The single piece IS the whole solid, pockets carved (volume well below the solid 21600).
+        assert!((comps[0].volume() - plate.volume()).abs() < 1.0);
+        assert!(plate.volume() < 21_600.0 - 300.0, "the pockets stay hollow");
+    }
+
+    #[test]
+    fn components_carves_two_disjoint_bodies_that_each_have_a_pocket() {
+        // The multi-body-WITH-cavities carve path (new in W.4): two disjoint plates, each with its own
+        // enclosed pocket, unioned into one manifold. Must split into two pieces, each keeping its own
+        // void — not fold both voids into one body, not drop a piece.
+        let one = Solid::cube(20.0, 20.0, 8.0, true).difference(&Solid::sphere(2.0, 24));
+        let two = one.translate(Vec3::new(100.0, 0.0, 0.0));
+        let blob = one.union(&two);
+        let comps = blob.components();
+        assert_eq!(comps.len(), 2, "two disjoint hollow plates → two pieces");
+        for c in &comps {
+            c.check().unwrap();
+            // each keeps its pocket: a solid 20×20×8 cube is 3200; the void drops it below that.
+            assert!(c.volume() < 3200.0 - 20.0, "the pocket survives in each piece");
+            assert!(c.volume() > 3000.0, "only ONE pocket per piece (not both folded in)");
+        }
+        assert!(comps[0].bbox().unwrap().0[0] < comps[1].bbox().unwrap().0[0], "sorted by bbox-min X");
     }
 
     #[test]

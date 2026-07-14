@@ -90,6 +90,9 @@ clap = { version = "4", features = ["derive"], optional = true }
 anyhow = "1"
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
+# Structured logging facade (both targets, wasm-safe). Kernel geometry ops log diagnostics at DEBUG and
+# shout at WARN on a non-manifold result — near-zero without a subscriber; fab-lang already uses it.
+tracing = "0.1"
 rayon = { version = "1", optional = true }
 threemf = { version = "0.8.0", optional = true }
 # threemf's serde can't round-trip <m:basematerials> (namespace-prefix renames) — threemf_in
@@ -119,7 +122,6 @@ reqwest = { version = "0.12", default-features = false, optional = true, feature
 # (the intrinsic worklist L.4 cuts the JIT phase from) — the subscriber side, test-only, so the shipped
 # lib stays subscriber-agnostic + wasm never sees it. `registry` gives the span store the layer times.
 [dev-dependencies]
-tracing = "0.1"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["registry", "std"] }
 
 # The kernel per target (18.4): native gets the default `parallel` (TBB); wasm32 swaps to the

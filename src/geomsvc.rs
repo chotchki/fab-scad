@@ -306,7 +306,7 @@ fn eval_preview(
             let _ = root;
             let src = String::from_utf8_lossy(main);
             let wrap = format!("$preview = true;\n{src}\n");
-            let sources: std::collections::HashMap<std::path::PathBuf, String> = libs
+            let sources: std::collections::BTreeMap<std::path::PathBuf, String> = libs
                 .iter()
                 .filter_map(|(p, b)| {
                     Some((
@@ -396,6 +396,10 @@ fn render_whole_svc(
     })
 }
 
+/// A rendered part staged for the wire response: its held `SolidId`, STL bytes, and bbox min/max.
+#[cfg(feature = "kernel")]
+type StagedPart = (SolidId, Vec<u8>, [f64; 3], [f64; 3]);
+
 #[cfg(feature = "kernel")]
 fn render_parts_svc(
     store: &mut SolidStore,
@@ -404,7 +408,7 @@ fn render_parts_svc(
 ) -> Result<Response> {
     use crate::backend::{ManifoldBackend, build_geo_parts};
     let (tree, src) = eval_preview(source, root)?;
-    let mut staged: Vec<(SolidId, Vec<u8>, [f64; 3], [f64; 3])> = Vec::new();
+    let mut staged: Vec<StagedPart> = Vec::new();
     for solid in build_geo_parts(&tree, &ManifoldBackend)
         .into_iter()
         .flatten()

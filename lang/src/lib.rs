@@ -288,7 +288,7 @@ where
 /// As [`resolve_geometry_with_base`], minus the fs-specific ones (no disk is touched).
 pub fn resolve_geometry_from_sources<R>(
     source: &str,
-    sources: &std::collections::HashMap<PathBuf, String>,
+    sources: &std::collections::BTreeMap<PathBuf, String>,
     jit_factory: Option<&dyn NumericJitFactory>,
     config: Config,
     mesh_reader: R,

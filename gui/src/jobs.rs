@@ -281,6 +281,7 @@ impl ModelState<'_> {
 /// Apply a pending file switch: point `SceneCfg.source` at file `i`, wipe the old model's state,
 /// kick a fresh whole render. Row clicks, the picker landing, and the `open` script verb all funnel
 /// here via `SwitchFile`.
+#[allow(clippy::too_many_arguments)] // a Bevy system — params are dependencies, not a smell
 pub(crate) fn apply_switch_file(
     mut ev: MessageReader<SwitchFile>,
     mut files: ResMut<FileList>,

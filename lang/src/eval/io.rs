@@ -107,7 +107,7 @@ where
 /// evaluation error. (A malformed USED/INCLUDED lib is tolerated, like native.)
 pub(crate) fn drive_from_map<R>(
     source: &str,
-    sources: &std::collections::HashMap<PathBuf, String>,
+    sources: &std::collections::BTreeMap<PathBuf, String>,
     jit_factory: Option<&dyn NumericJitFactory>,
     config: super::Config,
     mut mesh_reader: R,
@@ -141,11 +141,12 @@ where
     }
 }
 
-/// [`fulfill`]'s fs-free twin: a `Scad` reference resolves against the virtual `sources` map (from_dir
-/// first, then the lib root — both lexically normalized), a `File` reference goes to `mesh_reader`.
+/// [`fulfill`]'s fs-free twin: a `Scad` reference resolves against the virtual `sources` map
+/// (`from_dir` first, then the lib root — both lexically normalized), a `File` reference goes to
+/// `mesh_reader`.
 fn fulfill_from_map<R>(
     need: SourceNeed,
-    sources: &std::collections::HashMap<PathBuf, String>,
+    sources: &std::collections::BTreeMap<PathBuf, String>,
     mesh_reader: &mut R,
     scad: &mut SourceMap,
     files: &mut FileTable,

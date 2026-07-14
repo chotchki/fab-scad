@@ -2909,6 +2909,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "fab-manifold"
+version = "0.1.0"
+dependencies = [
+ "libm",
+ "manifold3d",
+ "proptest",
+ "rayon",
+]
+
+[[package]]
 name = "fab-scad"
 version = "0.1.0"
 dependencies = [

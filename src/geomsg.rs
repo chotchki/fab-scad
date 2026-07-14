@@ -63,6 +63,53 @@ pub struct PlanOut {
     pub connectors: Vec<WireConn>,
 }
 
+/// A base solid held IN the service, addressed across the byte boundary by an opaque, shard-tagged
+/// id. The `!Send` `Solid` never crosses — this plain-data handle does. `shard` routes the request to
+/// the execution context that owns the solid (W.3: pool of threads native / Workers wasm; N=1 to start).
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub struct SolidId {
+    pub shard: u16,
+    pub idx: u32,
+}
+
+/// One rendered top-level PART: its minted handle, display STL, bbox, and provenance name (T.2b).
+#[derive(Serialize, Deserialize, Clone)]
+pub struct WirePart {
+    pub id: SolidId,
+    pub stl: Vec<u8>,
+    pub min: [f64; 3],
+    pub max: [f64; 3],
+    pub name: Option<String>,
+}
+
+/// One printable piece: slab multi-index, connected-component index within the slab, mesh STL, and
+/// the least-support build-up direction.
+#[derive(Serialize, Deserialize, Clone)]
+pub struct WirePiece {
+    pub piece: [usize; 3],
+    pub comp: usize,
+    pub stl: Vec<u8>,
+    pub up: [f32; 3],
+}
+
+/// A per-piece print orientation for the slice codegen (`[slicing.orient]`).
+#[derive(Serialize, Deserialize, Clone, Copy)]
+pub struct WireOrient {
+    pub piece: [usize; 3],
+    pub up: [f64; 3],
+}
+
+/// The source a render evaluates. `Path` (native fs loader) is what desktop sends today; `Bytes`
+/// carries the main file + its import/lib closure in-memory for the fs-less wasm Worker (wired at W.3.6).
+#[derive(Serialize, Deserialize, Clone)]
+pub enum Source {
+    Path(String),
+    Bytes {
+        main: Vec<u8>,
+        libs: Vec<(String, Vec<u8>)>,
+    },
+}
+
 #[derive(Serialize, Deserialize)]
 pub enum Request {
     /// Parse an upload (.stl or .3mf by `name`), weld, rotate-to-fit, auto-plan.
@@ -92,6 +139,37 @@ pub enum Request {
         axis: usize,
         at: f64,
     },
+
+    // --- fab-gui ops (W.3): base solids held by handle; only these touch a Solid. ---
+    /// Render the source WHOLE at preview quality → mints 1 handle.
+    RenderWhole { source: Source, root: Option<String> },
+    /// Render the source into TOP-LEVEL parts (T.2b) → mints N handles.
+    RenderParts { source: Source, root: Option<String> },
+    /// Slice one part off its held base → the (spread, unioned) preview STL. Reads `base`.
+    Reslice {
+        base: SolidId,
+        cuts: Vec<(char, f64)>,
+        connectors: Vec<WireConn>,
+        orient: Vec<WireOrient>,
+        spread: f64,
+    },
+    /// The cut's 2D profile off the held base (connector editor). Reads `base`.
+    CrossSection { base: SolidId, axis: usize, at: f64 },
+    /// Fit-to-bed cut plan + onion connectors off the held base. Reads `base`.
+    AutoPlan {
+        base: SolidId,
+        min: [f64; 3],
+        max: [f64; 3],
+        bed: [f64; 3],
+    },
+    /// Two-pass print layout (bare→orient, carved→pieces) off the held base. Reads `base`.
+    PrintLayout {
+        base: SolidId,
+        cuts: Vec<(char, f64)>,
+        connectors: Vec<WireConn>,
+    },
+    /// Drop held base solids (reload / file-switch / part-count change).
+    Free { ids: Vec<SolidId> },
 }
 
 #[derive(Serialize, Deserialize)]
@@ -120,6 +198,30 @@ pub enum Response {
     Sectioned {
         loops: Vec<Vec<[f64; 2]>>,
     },
+
+    // --- fab-gui ops (W.3) ---
+    Rendered {
+        id: SolidId,
+        stl: Vec<u8>,
+        min: [f64; 3],
+        max: [f64; 3],
+    },
+    PartsRendered {
+        parts: Vec<WirePart>,
+    },
+    Resliced {
+        stl: Vec<u8>,
+    },
+    Planned {
+        cuts: Vec<(char, f64)>,
+        connectors: Vec<WireConn>,
+        pieces: usize,
+    },
+    LaidOut {
+        pieces: Vec<WirePiece>,
+    },
+    Freed,
+
     Failed {
         error: String,
     },

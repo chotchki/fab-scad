@@ -2,18 +2,84 @@
 //! the web app needs behind one seam. Runs in the fab-geom worker on wasm, on a task pool
 //! natively. Solids never cross the boundary (the !Send contract): bytes in, bytes out.
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow, bail, ensure};
+use std::collections::HashMap;
 
+use crate::auto_orient;
 use crate::geomsg::*;
 use crate::kernel::Solid;
-use crate::manifest::{Connector, Cut, Slicing};
+use crate::manifest::{Connector, Cut, PieceOrient, Slicing};
 use crate::num::Num;
 use crate::{auto, auto_slice, slicing, stl, threemf_in};
 use fab_lang::{Affine, Dims, Tri, Vec3};
 
-/// The service: never panics outward, never errors the transport — failures are a Response.
+/// Base solids held by the service, addressed by [`SolidId`] — the stateful home the `!Send` `Solid`
+/// never leaves (bytes/handles cross, the Solid stays). ONE store per execution context (kernel thread
+/// natively, Worker on wasm); its `shard` tags every id it mints so the pool routes ops back to it.
+// `mint` (+ shard/next/cap) is exercised by the render arms, which are native-only until the wasm
+// source-bytes render lands (W.3.6) — so in the kernel-without-native (wasm worker) config they read
+// as dead until then. Silence ONLY that config, not native.
+#[cfg_attr(not(feature = "native"), allow(dead_code))]
+pub struct SolidStore {
+    shard: u16,
+    next: u32,
+    cap: usize,
+    map: HashMap<SolidId, Solid>,
+}
+
+impl SolidStore {
+    pub fn new(shard: u16) -> Self {
+        Self {
+            shard,
+            next: 0,
+            cap: 64,
+            map: HashMap::new(),
+        }
+    }
+
+    /// Register a base solid, returning its handle. Bounded: a missed `Free` evicts the oldest rather
+    /// than growing without limit (an op on an evicted id returns `Failed` → the GUI re-renders).
+    #[cfg_attr(not(feature = "native"), allow(dead_code))]
+    fn mint(&mut self, s: Solid) -> SolidId {
+        let id = SolidId {
+            shard: self.shard,
+            idx: self.next,
+        };
+        self.next += 1;
+        self.map.insert(id, s);
+        while self.map.len() > self.cap {
+            if let Some(old) = self.map.keys().min_by_key(|k| k.idx).copied() {
+                self.map.remove(&old);
+            } else {
+                break;
+            }
+        }
+        id
+    }
+
+    /// Read a held base (RETAIN — reads never free). Unknown id → error → `Failed{"unknown handle"}`.
+    fn get(&self, id: SolidId) -> Result<&Solid> {
+        self.map
+            .get(&id)
+            .ok_or_else(|| anyhow!("unknown handle {}:{}", id.shard, id.idx))
+    }
+
+    fn free(&mut self, ids: &[SolidId]) {
+        for id in ids {
+            self.map.remove(id);
+        }
+    }
+}
+
+/// Compat entry for the STATELESS arms (fab-web's upload flow) — a throwaway store the 4 original arms
+/// ignore. The stateful fab-gui ops go through [`handle_with_store`] on a persistent store.
 pub fn handle(req: Request) -> Response {
-    let run = || -> Result<Response> {
+    handle_with_store(&mut SolidStore::new(0), req)
+}
+
+/// The service: never panics outward, never errors the transport — failures are a Response.
+pub fn handle_with_store(store: &mut SolidStore, req: Request) -> Response {
+    let run = |store: &mut SolidStore| -> Result<Response> {
         match req {
             Request::Analyze { name, bytes, bed } => analyze(&name, &bytes, Dims::from_array(bed)),
             Request::Slice {
@@ -32,9 +98,36 @@ pub fn handle(req: Request) -> Response {
             Request::Section { objects, axis, at } => Ok(Response::Sectioned {
                 loops: rotated_union(&objects)?.cross_section(axis, at),
             }),
+            Request::RenderWhole { source, root } => render_whole_svc(store, &source, root.as_deref()),
+            Request::RenderParts { source, root } => render_parts_svc(store, &source, root.as_deref()),
+            Request::Reslice {
+                base,
+                cuts,
+                connectors,
+                orient,
+                spread,
+            } => reslice_svc(store, base, &cuts, &connectors, &orient, spread),
+            Request::CrossSection { base, axis, at } => Ok(Response::Sectioned {
+                loops: store.get(base)?.cross_section(axis, at),
+            }),
+            Request::AutoPlan {
+                base,
+                min,
+                max,
+                bed,
+            } => auto_plan_svc(store, base, min, max, bed),
+            Request::PrintLayout {
+                base,
+                cuts,
+                connectors,
+            } => print_layout_svc(store, base, &cuts, &connectors),
+            Request::Free { ids } => {
+                store.free(&ids);
+                Ok(Response::Freed)
+            }
         }
     };
-    run().unwrap_or_else(|e| Response::Failed {
+    run(store).unwrap_or_else(|e| Response::Failed {
         error: format!("{e:#}"),
     })
 }
@@ -187,6 +280,271 @@ fn rotated_union(objects: &[GeomObject]) -> Result<Solid> {
     })
 }
 
+// --- fab-gui ops (W.3): base solids MINTED into / READ from the store. Render is fs-coupled (the
+// scad-rs `import` loader), hence native-gated; the wasm source-bytes eval lands at W.3.6. ---
+
+/// Eval the source at PREVIEW quality against its own dir (the `$preview=true; include <abs>;` wrapper
+/// takes `$fn = $preview ? lo : hi`'s fast path). Native only — `import` is the fs loader.
+#[cfg(feature = "native")]
+fn eval_preview(
+    source: &Source,
+    root: Option<&str>,
+) -> Result<(fab_lang::Geo, std::path::PathBuf)> {
+    let Source::Path(path) = source else {
+        bail!("render from source bytes not yet wired (W.3.6); native uses Source::Path");
+    };
+    let src = std::path::PathBuf::from(path);
+    let abs = src
+        .canonicalize()
+        .with_context(|| format!("resolving {path}"))?;
+    let base = abs
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."))
+        .to_path_buf();
+    let wrap = format!("$preview = true;\ninclude <{}>;\n", abs.display());
+    let libs: Vec<std::path::PathBuf> = root
+        .map(|r| {
+            let r = std::path::Path::new(r);
+            vec![r.join("libs"), r.join("scad-lib")]
+        })
+        .unwrap_or_default();
+    let tree = crate::import::resolve_geometry_with_base(
+        &wrap,
+        &base,
+        &libs,
+        fab_lang::Config::from_env(),
+    )
+    .with_context(|| format!("scad-rs eval of {path}"))?;
+    Ok((tree, src))
+}
+
+#[cfg(feature = "native")]
+fn render_whole_svc(store: &mut SolidStore, source: &Source, root: Option<&str>) -> Result<Response> {
+    use crate::backend::{ManifoldBackend, build_geo};
+    let (tree, _src) = eval_preview(source, root)?;
+    let solid = build_geo(&tree, &ManifoldBackend)
+        .filter(|s| !s.is_empty())
+        .context("scad-rs rendered EMPTY geometry (no faces)")?;
+    let (mn, mx) = solid.bbox().context("rendered solid has no bbox")?;
+    let stl = solid.to_stl_bytes();
+    let id = store.mint(solid);
+    Ok(Response::Rendered {
+        id,
+        stl,
+        min: mn.to_array(),
+        max: mx.to_array(),
+    })
+}
+
+#[cfg(feature = "native")]
+fn render_parts_svc(store: &mut SolidStore, source: &Source, root: Option<&str>) -> Result<Response> {
+    use crate::backend::{ManifoldBackend, build_geo_parts, part_names};
+    let (tree, src) = eval_preview(source, root)?;
+    let mut staged: Vec<(SolidId, Vec<u8>, [f64; 3], [f64; 3])> = Vec::new();
+    for solid in build_geo_parts(&tree, &ManifoldBackend)
+        .into_iter()
+        .flatten()
+        .filter(|s| !s.is_empty())
+    {
+        let Some((mn, mx)) = solid.bbox() else {
+            continue;
+        };
+        let stl = solid.to_stl_bytes();
+        let id = store.mint(solid);
+        staged.push((id, stl, mn.to_array(), mx.to_array()));
+    }
+    ensure!(!staged.is_empty(), "scad-rs rendered EMPTY geometry (no parts)");
+    // Provenance names only when the AST count matches the split (else a wrong label is worse than none).
+    let names = part_names(&src);
+    let names = if names.len() == staged.len() {
+        names
+    } else {
+        vec![None; staged.len()]
+    };
+    Ok(Response::PartsRendered {
+        parts: staged
+            .into_iter()
+            .zip(names)
+            .map(|((id, stl, min, max), name)| WirePart {
+                id,
+                stl,
+                min,
+                max,
+                name,
+            })
+            .collect(),
+    })
+}
+
+#[cfg(not(feature = "native"))]
+fn render_whole_svc(_: &mut SolidStore, _: &Source, _: Option<&str>) -> Result<Response> {
+    bail!("RenderWhole needs the native fs loader; wasm source-bytes eval is W.3.6")
+}
+#[cfg(not(feature = "native"))]
+fn render_parts_svc(_: &mut SolidStore, _: &Source, _: Option<&str>) -> Result<Response> {
+    bail!("RenderParts needs the native fs loader; wasm source-bytes eval is W.3.6")
+}
+
+fn reslice_svc(
+    store: &SolidStore,
+    base: SolidId,
+    cuts: &[(char, f64)],
+    connectors: &[WireConn],
+    orient: &[WireOrient],
+    spread: f64,
+) -> Result<Response> {
+    let solid = store.get(base)?;
+    let mut spec = cuts_spec(cuts);
+    spec.connector = connectors.iter().map(Connector::from).collect();
+    spec.orient = orient_spec(orient);
+    let pieces = slicing::slice_solid(&spec, solid)?;
+    ensure!(!pieces.is_empty(), "slice produced no pieces");
+    let laid: Vec<Solid> = pieces
+        .iter()
+        .map(|(i, s)| {
+            s.translate(Vec3::new(
+                i[0] as f64 * spread,
+                i[1] as f64 * spread,
+                i[2] as f64 * spread,
+            ))
+        })
+        .collect();
+    Ok(Response::Resliced {
+        stl: Solid::batch_union(&laid).to_stl_bytes(),
+    })
+}
+
+fn auto_plan_svc(
+    store: &SolidStore,
+    base: SolidId,
+    min: [f64; 3],
+    max: [f64; 3],
+    bed: [f64; 3],
+) -> Result<Response> {
+    let solid = store.get(base)?;
+    let comps = solid.components();
+    let pieces = comps.len().max(1);
+    // Presliced-and-already-fits → no cuts (double-slicing the spread-out bbox would re-cut a
+    // pre-sliced model). Otherwise the real fit-to-bed plan.
+    let plan = if comps.len() > 1
+        && comps.iter().all(|c| {
+            c.bbox()
+                .is_none_or(|(mn, mx)| auto_slice::auto_slice(mn, mx, Dims::from_array(bed)).is_empty())
+        }) {
+        auto::AutoPlan {
+            cuts: Vec::new(),
+            connectors: Vec::new(),
+        }
+    } else {
+        auto::plan(
+            solid,
+            Vec3::from_array(min),
+            Vec3::from_array(max),
+            Dims::from_array(bed),
+        )?
+    };
+    Ok(Response::Planned {
+        cuts: plan.cuts,
+        connectors: plan.connectors.iter().map(WireConn::from).collect(),
+        pieces,
+    })
+}
+
+fn print_layout_svc(
+    store: &SolidStore,
+    base: SolidId,
+    cuts: &[(char, f64)],
+    connectors: &[WireConn],
+) -> Result<Response> {
+    let solid = store.get(base)?;
+    // Pass 1: BARE slice → least-support build-up per (slab, connected-component). A presliced blob is
+    // one uncut slab of many disjoint sub-solids, so orient each component on its own (T.1/T.2a).
+    let mut ups: HashMap<([usize; 3], usize), [f64; 3]> = HashMap::new();
+    for (piece, cell) in slicing::slice_solid(&cuts_spec(cuts), solid)? {
+        for (comp, csolid) in cell.components().into_iter().enumerate() {
+            let mesh = stl::load_stl_bytes(&csolid.to_stl_bytes())?;
+            if mesh.positions.is_empty() {
+                continue;
+            }
+            ups.insert(
+                (piece, comp),
+                auto_orient::best_up(&mesh_tris(&mesh), &[]).to_array(),
+            );
+        }
+    }
+    // Pass 2: carve with the onions, gated by each slab's build-up; re-split into pieces.
+    let mut spec = cuts_spec(cuts);
+    spec.connector = connectors.iter().map(Connector::from).collect();
+    spec.orient = slab_orients(&ups);
+    let mut out = Vec::new();
+    for (piece, cell) in slicing::slice_solid(&spec, solid)? {
+        for (comp, csolid) in cell.components().into_iter().enumerate() {
+            let bytes = csolid.to_stl_bytes();
+            let mesh = stl::load_stl_bytes(&bytes)?;
+            if mesh.positions.is_empty() {
+                continue;
+            }
+            let up = ups.get(&(piece, comp)).copied().unwrap_or([0.0, 0.0, 1.0]);
+            out.push(WirePiece {
+                piece,
+                comp,
+                stl: bytes,
+                up: [up[0] as f32, up[1] as f32, up[2] as f32],
+            });
+        }
+    }
+    Ok(Response::LaidOut { pieces: out })
+}
+
+/// A cuts-only `[slicing]` spec — the shared base for the per-piece render + orientation sweep.
+fn cuts_spec(cuts: &[(char, f64)]) -> Slicing {
+    Slicing {
+        printer: None,
+        cut: cuts
+            .iter()
+            .map(|&(axis, at)| Cut {
+                axis: axis.to_string(),
+                at: Num::Float(at),
+            })
+            .collect(),
+        connector: vec![],
+        orient: vec![],
+        parts: vec![],
+    }
+}
+
+/// Wire orientations → manifest `[slicing.orient]`.
+fn orient_spec(orient: &[WireOrient]) -> Vec<PieceOrient> {
+    orient
+        .iter()
+        .map(|o| PieceOrient {
+            piece: o.piece,
+            comp: 0,
+            up: [Num::Float(o.up[0]), Num::Float(o.up[1]), Num::Float(o.up[2])],
+        })
+        .collect()
+}
+
+/// Project per-(slab, component) build-ups to ONE per SLAB (component 0) for the slice codegen.
+fn slab_orients(ups: &HashMap<([usize; 3], usize), [f64; 3]>) -> Vec<PieceOrient> {
+    ups.iter()
+        .filter(|((_, comp), _)| *comp == 0)
+        .map(|((piece, _), up)| PieceOrient {
+            piece: *piece,
+            comp: 0,
+            up: [Num::Float(up[0]), Num::Float(up[1]), Num::Float(up[2])],
+        })
+        .collect()
+}
+
+/// `StlMesh` positions (flat, 3 verts/tri) → `[Vec3; 3]` triangles for the orientation math.
+fn mesh_tris(m: &stl::StlMesh) -> Vec<[Vec3; 3]> {
+    m.positions
+        .chunks_exact(3)
+        .map(|t| std::array::from_fn(|i| Vec3::new(t[i][0] as f64, t[i][1] as f64, t[i][2] as f64)))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -213,6 +571,12 @@ mod tests {
             Response::Sliced { .. } => "Sliced",
             Response::Exported { .. } => "Exported",
             Response::Sectioned { .. } => "Sectioned",
+            Response::Rendered { .. } => "Rendered",
+            Response::PartsRendered { .. } => "PartsRendered",
+            Response::Resliced { .. } => "Resliced",
+            Response::Planned { .. } => "Planned",
+            Response::LaidOut { .. } => "LaidOut",
+            Response::Freed => "Freed",
             Response::Failed { .. } => "Failed",
         }
     }
@@ -292,5 +656,84 @@ mod tests {
             bed: [40.0; 3],
         });
         assert!(matches!(r, Response::Failed { .. }));
+    }
+
+    // The stateful fab-gui path (W.3): render MINTS a handle, reads REUSE it, Free drops it, and an op
+    // on a freed handle self-heals as Failed. Render is native (the fs loader), so gate it.
+    #[cfg(feature = "native")]
+    #[test]
+    fn render_mints_a_handle_reused_by_reslice_then_freed() {
+        let tmp = std::env::temp_dir().join(format!("geomsvc_handle_{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let src = tmp.join("box.scad");
+        std::fs::write(&src, "cube([60,40,30], center=true);").unwrap();
+
+        let mut store = SolidStore::new(0);
+        let Response::PartsRendered { parts } = handle_with_store(
+            &mut store,
+            Request::RenderParts {
+                source: Source::Path(src.to_string_lossy().into_owned()),
+                root: None,
+            },
+        ) else {
+            panic!("render failed")
+        };
+        assert_eq!(parts.len(), 1, "one cube → one part");
+        let id = parts[0].id;
+        assert_eq!(id.shard, 0, "handle carries the store's shard");
+
+        // Reslice reads the HELD base — through the codec, like the worker sees it — no re-render.
+        let req = decode_request(&encode_request(&Request::Reslice {
+            base: id,
+            cuts: vec![('x', 0.0)],
+            connectors: vec![],
+            orient: vec![],
+            spread: 40.0,
+        }))
+        .unwrap();
+        let Response::Resliced { stl } = handle_with_store(&mut store, req) else {
+            panic!("reslice failed")
+        };
+        assert!(stl.len() > 100, "sliced STL has geometry");
+
+        // A second reslice reuses the SAME handle — retained, not consumed.
+        assert!(
+            matches!(
+                handle_with_store(
+                    &mut store,
+                    Request::Reslice {
+                        base: id,
+                        cuts: vec![('y', 0.0)],
+                        connectors: vec![],
+                        orient: vec![],
+                        spread: 40.0,
+                    }
+                ),
+                Response::Resliced { .. }
+            ),
+            "the base handle is retained across reslices"
+        );
+
+        // Free drops it; an op on the freed id self-heals as Failed (→ the GUI re-renders).
+        assert!(matches!(
+            handle_with_store(&mut store, Request::Free { ids: vec![id] }),
+            Response::Freed
+        ));
+        assert!(
+            matches!(
+                handle_with_store(
+                    &mut store,
+                    Request::CrossSection {
+                        base: id,
+                        axis: 2,
+                        at: 0.0,
+                    }
+                ),
+                Response::Failed { .. }
+            ),
+            "an op on a freed handle → Failed"
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }

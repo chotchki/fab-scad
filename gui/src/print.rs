@@ -317,7 +317,12 @@ pub(crate) fn sync_orientation(
 
     // Centre the whole plate grid on the origin: its cells span [0, X] × [-Y, bed] (columns advance
     // +X, rows descend into -Y), so shift by minus the grid-AABB centre for a tidy, framed layout.
-    let (mut gx0, mut gx1, mut gy0, mut gy1) = (f64::INFINITY, f64::NEG_INFINITY, f64::INFINITY, f64::NEG_INFINITY);
+    let (mut gx0, mut gx1, mut gy0, mut gy1) = (
+        f64::INFINITY,
+        f64::NEG_INFINITY,
+        f64::INFINITY,
+        f64::NEG_INFINITY,
+    );
     for p in 0..plate_n {
         let [ox, oy] = fab_scad::pack::plate_origin(p, cols, plate);
         gx0 = gx0.min(ox);
@@ -325,7 +330,11 @@ pub(crate) fn sync_orientation(
         gy0 = gy0.min(oy);
         gy1 = gy1.max(oy + plate[1]);
     }
-    let shift = Vec3::new(-((gx0 + gx1) * 0.5) as f32, -((gy0 + gy1) * 0.5) as f32, 0.0);
+    let shift = Vec3::new(
+        -((gx0 + gx1) * 0.5) as f32,
+        -((gy0 + gy1) * 0.5) as f32,
+        0.0,
+    );
 
     // Pass 2a: spawn one bed slab per packed plate at its (centred) grid cell.
     let plate_mat = materials.add(StandardMaterial {
@@ -387,7 +396,10 @@ pub(crate) fn sync_orientation(
     // orbit still works (yaw/pitch untouched) but zoom snaps back and the view "fights" you. A manual
     // re-orient re-packs the pieces but must not yank the camera.
     if cache.is_changed() {
-        let span = ((gx1 - gx0) as f32).max((gy1 - gy0) as f32).max(bb_z).max(80.0);
+        let span = ((gx1 - gx0) as f32)
+            .max((gy1 - gy0) as f32)
+            .max(bb_z)
+            .max(80.0);
         for mut o in &mut cams {
             o.target = Vec3::new(0.0, 0.0, bb_z * 0.4);
             o.radius = span * 1.3;

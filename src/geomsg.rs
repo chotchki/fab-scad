@@ -142,9 +142,15 @@ pub enum Request {
 
     // --- fab-gui ops (W.3): base solids held by handle; only these touch a Solid. ---
     /// Render the source WHOLE at preview quality → mints 1 handle.
-    RenderWhole { source: Source, root: Option<String> },
+    RenderWhole {
+        source: Source,
+        root: Option<String>,
+    },
     /// Render the source into TOP-LEVEL parts (T.2b) → mints N handles.
-    RenderParts { source: Source, root: Option<String> },
+    RenderParts {
+        source: Source,
+        root: Option<String>,
+    },
     /// Slice one part off its held base → the (spread, unioned) preview STL. Reads `base`.
     Reslice {
         base: SolidId,

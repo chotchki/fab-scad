@@ -123,7 +123,11 @@ pub(crate) fn derive_loading(geo: bool, layout: bool) -> [bool; 4] {
 /// the most specific: an auto-plan names its part; else a geometry job; else the print layout; `None`
 /// when idle. The status bar shows this while busy so the pulse can never read a stale terminal
 /// status like "ready" mid-render.
-pub(crate) fn busy_activity(auto_part: Option<usize>, geo_job: bool, print: bool) -> Option<String> {
+pub(crate) fn busy_activity(
+    auto_part: Option<usize>,
+    geo_job: bool,
+    print: bool,
+) -> Option<String> {
     if let Some(i) = auto_part {
         Some(format!("auto-planning part {}…", i + 1))
     } else if geo_job {
@@ -444,7 +448,13 @@ fn free_bases(pool: &GeomPool, ids: Vec<SolidId>) {
 /// service splits the model into its implicit-union children and MINTS a base handle per part. `fresh`
 /// distinguishes a new source (replace the parts list) from a reload of the same one (refresh geometry,
 /// keep edits).
-pub(crate) fn kick_render(pool: &GeomPool, job: &mut Job, status: &mut Status, cfg: &SceneCfg, fresh: bool) {
+pub(crate) fn kick_render(
+    pool: &GeomPool,
+    job: &mut Job,
+    status: &mut Status,
+    cfg: &SceneCfg,
+    fresh: bool,
+) {
     let Some(src) = cfg.source.clone() else {
         status.0 = "no .scad source".into();
         return;
@@ -510,8 +520,12 @@ fn spawn_render(
     fresh: bool,
 ) {
     let pool = pool.clone();
-    let task = AsyncComputeTaskPool::get()
-        .spawn(async move { render_result(pool.call(Request::RenderParts { source, root }).await, fresh) });
+    let task = AsyncComputeTaskPool::get().spawn(async move {
+        render_result(
+            pool.call(Request::RenderParts { source, root }).await,
+            fresh,
+        )
+    });
     job.0 = Some(task);
     status.0 = "rendering".into();
 }

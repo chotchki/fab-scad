@@ -98,8 +98,12 @@ pub fn handle_with_store(store: &mut SolidStore, req: Request) -> Response {
             Request::Section { objects, axis, at } => Ok(Response::Sectioned {
                 loops: rotated_union(&objects)?.cross_section(axis, at),
             }),
-            Request::RenderWhole { source, root } => render_whole_svc(store, &source, root.as_deref()),
-            Request::RenderParts { source, root } => render_parts_svc(store, &source, root.as_deref()),
+            Request::RenderWhole { source, root } => {
+                render_whole_svc(store, &source, root.as_deref())
+            }
+            Request::RenderParts { source, root } => {
+                render_parts_svc(store, &source, root.as_deref())
+            }
             Request::Reslice {
                 base,
                 cuts,
@@ -304,7 +308,12 @@ fn eval_preview(
             let wrap = format!("$preview = true;\n{src}\n");
             let sources: std::collections::HashMap<std::path::PathBuf, String> = libs
                 .iter()
-                .filter_map(|(p, b)| Some((std::path::PathBuf::from(p), String::from_utf8(b.clone()).ok()?)))
+                .filter_map(|(p, b)| {
+                    Some((
+                        std::path::PathBuf::from(p),
+                        String::from_utf8(b.clone()).ok()?,
+                    ))
+                })
                 .collect();
             let tree = fab_lang::resolve_geometry_from_sources(
                 &wrap,
@@ -325,7 +334,10 @@ fn eval_preview(
 
 /// `Source::Path` eval — native fs loader (canonicalize + `include <abs>` + the workspace lib search).
 #[cfg(all(feature = "kernel", feature = "native"))]
-fn eval_path(path: &str, root: Option<&str>) -> Result<(fab_lang::Geo, Option<std::path::PathBuf>)> {
+fn eval_path(
+    path: &str,
+    root: Option<&str>,
+) -> Result<(fab_lang::Geo, Option<std::path::PathBuf>)> {
     let src = std::path::PathBuf::from(path);
     let abs = src
         .canonicalize()
@@ -357,11 +369,17 @@ fn eval_path(
     _path: &str,
     _root: Option<&str>,
 ) -> Result<(fab_lang::Geo, Option<std::path::PathBuf>)> {
-    anyhow::bail!("Path source needs the native fs loader; the wasm worker renders from Source::Bytes")
+    anyhow::bail!(
+        "Path source needs the native fs loader; the wasm worker renders from Source::Bytes"
+    )
 }
 
 #[cfg(feature = "kernel")]
-fn render_whole_svc(store: &mut SolidStore, source: &Source, root: Option<&str>) -> Result<Response> {
+fn render_whole_svc(
+    store: &mut SolidStore,
+    source: &Source,
+    root: Option<&str>,
+) -> Result<Response> {
     use crate::backend::{ManifoldBackend, build_geo};
     let (tree, _src) = eval_preview(source, root)?;
     let solid = build_geo(&tree, &ManifoldBackend)
@@ -379,7 +397,11 @@ fn render_whole_svc(store: &mut SolidStore, source: &Source, root: Option<&str>)
 }
 
 #[cfg(feature = "kernel")]
-fn render_parts_svc(store: &mut SolidStore, source: &Source, root: Option<&str>) -> Result<Response> {
+fn render_parts_svc(
+    store: &mut SolidStore,
+    source: &Source,
+    root: Option<&str>,
+) -> Result<Response> {
     use crate::backend::{ManifoldBackend, build_geo_parts};
     let (tree, src) = eval_preview(source, root)?;
     let mut staged: Vec<(SolidId, Vec<u8>, [f64; 3], [f64; 3])> = Vec::new();
@@ -395,7 +417,10 @@ fn render_parts_svc(store: &mut SolidStore, source: &Source, root: Option<&str>)
         let id = store.mint(solid);
         staged.push((id, stl, mn.to_array(), mx.to_array()));
     }
-    ensure!(!staged.is_empty(), "scad-rs rendered EMPTY geometry (no parts)");
+    ensure!(
+        !staged.is_empty(),
+        "scad-rs rendered EMPTY geometry (no parts)"
+    );
     let names = part_names_for(&src, staged.len());
     Ok(Response::PartsRendered {
         parts: staged
@@ -470,8 +495,9 @@ fn auto_plan_svc(
     // pre-sliced model). Otherwise the real fit-to-bed plan.
     let plan = if comps.len() > 1
         && comps.iter().all(|c| {
-            c.bbox()
-                .is_none_or(|(mn, mx)| auto_slice::auto_slice(mn, mx, Dims::from_array(bed)).is_empty())
+            c.bbox().is_none_or(|(mn, mx)| {
+                auto_slice::auto_slice(mn, mx, Dims::from_array(bed)).is_empty()
+            })
         }) {
         auto::AutoPlan {
             cuts: Vec::new(),
@@ -562,7 +588,11 @@ fn orient_spec(orient: &[WireOrient]) -> Vec<PieceOrient> {
         .map(|o| PieceOrient {
             piece: o.piece,
             comp: 0,
-            up: [Num::Float(o.up[0]), Num::Float(o.up[1]), Num::Float(o.up[2])],
+            up: [
+                Num::Float(o.up[0]),
+                Num::Float(o.up[1]),
+                Num::Float(o.up[2]),
+            ],
         })
         .collect()
 }
@@ -843,7 +873,10 @@ mod tests {
         ) else {
             panic!("auto-plan failed")
         };
-        assert!(cuts.is_empty(), "presliced-and-fits → no cuts, got {cuts:?}");
+        assert!(
+            cuts.is_empty(),
+            "presliced-and-fits → no cuts, got {cuts:?}"
+        );
         assert_eq!(pieces, 2, "two disjoint components");
 
         // A single CONNECTED oversized part still gets a real cut plan (component-aware, not a blanket
@@ -861,7 +894,8 @@ mod tests {
                 max: [350.0, 100.0, 100.0],
                 bed,
             },
-        ) else {
+        )
+        else {
             panic!("auto-plan (connected) failed")
         };
         assert!(
@@ -889,7 +923,8 @@ mod tests {
                 },
                 root: None,
             },
-        ) else {
+        )
+        else {
             panic!("render from source bytes failed")
         };
         assert!(stl.len() > 100, "cube STL has geometry");

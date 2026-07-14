@@ -162,7 +162,10 @@ mod tests {
     fn closure_walks_transitively_from_dir_and_lib_root() {
         // main → widget.scad (lib-root) → BOSL2/std.scad (lib-root) → vectors.scad (from_dir-relative).
         let mut pack = HashMap::new();
-        pack.insert("widget.scad".into(), "include <BOSL2/std.scad>\nmodule widget(){}".into());
+        pack.insert(
+            "widget.scad".into(),
+            "include <BOSL2/std.scad>\nmodule widget(){}".into(),
+        );
         pack.insert("BOSL2/std.scad".into(), "include <vectors.scad>".into());
         pack.insert("BOSL2/vectors.scad".into(), "// leaf".into());
         pack.insert("unused.scad".into(), "// not referenced".into());

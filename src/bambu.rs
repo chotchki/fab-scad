@@ -75,7 +75,10 @@ fn project_settings_config(plate_size: [f64; 2], preset: Option<&BambuPreset>) -
     ];
     if let Some(p) = preset {
         kv.push(("printer_model".into(), format!("\"{}\"", p.model)));
-        kv.push(("printer_settings_id".into(), format!("\"{}\"", p.printer_id)));
+        kv.push((
+            "printer_settings_id".into(),
+            format!("\"{}\"", p.printer_id),
+        ));
         kv.push(("print_settings_id".into(), format!("\"{}\"", p.process_id)));
         if !p.filaments.is_empty() {
             kv.push(("filament_settings_id".into(), arr(&p.filaments)));

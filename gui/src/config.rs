@@ -117,7 +117,10 @@ pub(crate) fn config_block(parts: &[Part]) -> Option<String> {
     if blocks.is_empty() {
         return None;
     }
-    Some(format!("{CONFIG_MARKER}{}", serde_json::to_string(&blocks).ok()?))
+    Some(format!(
+        "{CONFIG_MARKER}{}",
+        serde_json::to_string(&blocks).ok()?
+    ))
 }
 
 /// Read a `fab:config` block out of source `text` — the per-part slicing config, or `None` if absent or
@@ -435,7 +438,10 @@ mod tests {
         ];
         let model = "cube([60,40,30]);\n";
         let saved = with_config_block(model, &parts);
-        assert!(saved.starts_with(model), "model source untouched above the block");
+        assert!(
+            saved.starts_with(model),
+            "model source untouched above the block"
+        );
         assert!(saved.contains("// fab:config v1 "));
 
         let blocks = read_config_block(&saved).expect("block reads back");
@@ -445,7 +451,11 @@ mod tests {
         assert_eq!(fresh[0].conns.list[0].kind, fab::ConnKind::Bolt);
         assert_eq!(fresh[1].cuts.list[0].axis, Axis::X);
 
-        assert_eq!(strip_config_block(&saved), model, "strip gives back the clean model");
+        assert_eq!(
+            strip_config_block(&saved),
+            model,
+            "strip gives back the clean model"
+        );
     }
 
     #[test]
@@ -458,8 +468,10 @@ mod tests {
 
         // And if a lib's block ever DID appear above the model's OWN (a hypothetical splice), the file's
         // own trailing block still wins — we read the bottom-most, our append position.
-        let lib_block = config_block(&[part_with(Some("lib"), &[(Axis::Z, 9.0, true)], &[])]).unwrap();
-        let own_block = config_block(&[part_with(Some("me"), &[(Axis::X, 3.0, true)], &[])]).unwrap();
+        let lib_block =
+            config_block(&[part_with(Some("lib"), &[(Axis::Z, 9.0, true)], &[])]).unwrap();
+        let own_block =
+            config_block(&[part_with(Some("me"), &[(Axis::X, 3.0, true)], &[])]).unwrap();
         let spliced = format!("{lib_block}\nwidget();\n{own_block}\n");
         assert_eq!(read_config_block(&spliced).unwrap()[0].cut[0].axis, "x");
     }

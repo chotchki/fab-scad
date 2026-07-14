@@ -591,7 +591,10 @@ impl Solid {
         const EPS: f64 = 1e-6;
         let boxes: Vec<([f64; 3], [f64; 3])> = bodies
             .iter()
-            .map(|s| s.bbox().map_or(([0.0; 3], [0.0; 3]), |(a, b)| (a.to_array(), b.to_array())))
+            .map(|s| {
+                s.bbox()
+                    .map_or(([0.0; 3], [0.0; 3]), |(a, b)| (a.to_array(), b.to_array()))
+            })
             .collect();
         let bbox_vol =
             |b: &([f64; 3], [f64; 3])| (b.1[0] - b.0[0]) * (b.1[1] - b.0[1]) * (b.1[2] - b.0[2]);
@@ -1225,11 +1228,18 @@ mod tests {
         // components() must fold the cavity back into the host: ONE piece, cavity intact.
         let hollow = Solid::cube(20.0, 20.0, 20.0, true).difference(&Solid::sphere(6.0, 32));
         let comps = hollow.components();
-        assert_eq!(comps.len(), 1, "solid-with-void is ONE component, not outer+cavity");
+        assert_eq!(
+            comps.len(),
+            1,
+            "solid-with-void is ONE component, not outer+cavity"
+        );
         comps[0].check().unwrap();
         let v = comps[0].volume();
         // cube 8000 − sphere(r6) ≈ 8000 − 885 ≈ 7115; NOT the solid cube (8000, pocket erased).
-        assert!((7000.0..7200.0).contains(&v), "cavity survives, got vol {v}");
+        assert!(
+            (7000.0..7200.0).contains(&v),
+            "cavity survives, got vol {v}"
+        );
 
         // A disjoint piece FLOATING inside a void is a real separate piece (nested-shell parity): a
         // hollow shell with a smaller solid ball rattling inside → 2 components (shell + ball).
@@ -1254,8 +1264,11 @@ mod tests {
         for gx in -2..=2 {
             for gy in -2..=2 {
                 // r1.6 ball centred in the 6mm-thick plate (spans z=-1.6..1.6 ⊂ -3..3) → fully enclosed.
-                let pocket = Solid::sphere(1.6, 24)
-                    .translate(Vec3::new(f64::from(gx) * 10.0, f64::from(gy) * 10.0, 0.0));
+                let pocket = Solid::sphere(1.6, 24).translate(Vec3::new(
+                    f64::from(gx) * 10.0,
+                    f64::from(gy) * 10.0,
+                    0.0,
+                ));
                 plate = plate.difference(&pocket);
             }
         }
@@ -1280,10 +1293,19 @@ mod tests {
         for c in &comps {
             c.check().unwrap();
             // each keeps its pocket: a solid 20×20×8 cube is 3200; the void drops it below that.
-            assert!(c.volume() < 3200.0 - 20.0, "the pocket survives in each piece");
-            assert!(c.volume() > 3000.0, "only ONE pocket per piece (not both folded in)");
+            assert!(
+                c.volume() < 3200.0 - 20.0,
+                "the pocket survives in each piece"
+            );
+            assert!(
+                c.volume() > 3000.0,
+                "only ONE pocket per piece (not both folded in)"
+            );
         }
-        assert!(comps[0].bbox().unwrap().0[0] < comps[1].bbox().unwrap().0[0], "sorted by bbox-min X");
+        assert!(
+            comps[0].bbox().unwrap().0[0] < comps[1].bbox().unwrap().0[0],
+            "sorted by bbox-min X"
+        );
     }
 
     #[test]

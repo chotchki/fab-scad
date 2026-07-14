@@ -309,7 +309,10 @@ mod tests {
                 Printer {
                     name: p.name,
                     bed,
-                    plate: p.plate.map(|a| [a[0].f(), a[1].f(), a[2].f()]).unwrap_or(bed),
+                    plate: p
+                        .plate
+                        .map(|a| [a[0].f(), a[1].f(), a[2].f()])
+                        .unwrap_or(bed),
                     bambu: p.bambu,
                     is_default: p.default,
                 }

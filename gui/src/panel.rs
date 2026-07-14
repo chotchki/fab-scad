@@ -92,8 +92,11 @@ pub(crate) fn panel_ui(
                 ui.separator();
                 for (t, label) in Tab::ALL {
                     let on = *tab == t;
-                    let caption = theme::chrome(label, 15.0)
-                        .color(if on { theme::GOLD } else { theme::DIV_GREY });
+                    let caption = theme::chrome(label, 15.0).color(if on {
+                        theme::GOLD
+                    } else {
+                        theme::DIV_GREY
+                    });
                     let resp = ui.add(egui::Button::new(caption).fill(theme::NAVY));
                     if on {
                         // the site's signature: a gold underline on the active tab
@@ -122,18 +125,16 @@ pub(crate) fn panel_ui(
     // status shows only when idle (the last result / error / "ready").
     let bottom = egui::Panel::bottom("statusbar")
         .frame(panel_frame())
-        .show(&mut viewport, |ui| {
-            match &view.pipeline.activity {
-                Some(activity) if view.pipeline.busy => {
-                    ui.horizontal(|ui| {
-                        ui.add(egui::Spinner::new().size(14.0).color(theme::GOLD));
-                        ui.colored_label(theme::NAVY, activity.as_str());
-                    });
-                    ui.ctx().request_repaint();
-                }
-                _ => {
-                    ui.label(status.0.as_str());
-                }
+        .show(&mut viewport, |ui| match &view.pipeline.activity {
+            Some(activity) if view.pipeline.busy => {
+                ui.horizontal(|ui| {
+                    ui.add(egui::Spinner::new().size(14.0).color(theme::GOLD));
+                    ui.colored_label(theme::NAVY, activity.as_str());
+                });
+                ui.ctx().request_repaint();
+            }
+            _ => {
+                ui.label(status.0.as_str());
             }
         });
     // LEFT PANEL (U.3): the active tab's controls.
@@ -174,13 +175,14 @@ pub(crate) fn panel_ui(
                             // anyway (shows_picker() == false), so this branch never runs there.
                             #[cfg(not(target_arch = "wasm32"))]
                             {
-                                open_dialog.0 = Some(AsyncComputeTaskPool::get().spawn(async move {
-                                    rfd::AsyncFileDialog::new()
-                                        .add_filter("OpenSCAD source", &["scad"])
-                                        .pick_file()
-                                        .await
-                                        .map(|h| h.path().to_path_buf())
-                                }));
+                                open_dialog.0 =
+                                    Some(AsyncComputeTaskPool::get().spawn(async move {
+                                        rfd::AsyncFileDialog::new()
+                                            .add_filter("OpenSCAD source", &["scad"])
+                                            .pick_file()
+                                            .await
+                                            .map(|h| h.path().to_path_buf())
+                                    }));
                             }
                         }
                     });
@@ -296,8 +298,11 @@ pub(crate) fn panel_ui(
                         if is_active {
                             // gold left-rule marks the active part (matches the active-cut rule)
                             let r = resp.header_response.rect;
-                            ui.painter()
-                                .vline(r.left(), r.y_range(), egui::Stroke::new(2.0, theme::GOLD));
+                            ui.painter().vline(
+                                r.left(),
+                                r.y_range(),
+                                egui::Stroke::new(2.0, theme::GOLD),
+                            );
                         }
                         if select || resp.header_response.clicked() {
                             active_part.0 = i;

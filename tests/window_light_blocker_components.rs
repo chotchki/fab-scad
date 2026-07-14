@@ -24,12 +24,21 @@ fn whole_model_is_one_connected_body_with_pockets_intact() {
     let geo = fab_scad::import::resolve_geometry_file(&model, &libs, fab_lang::Config::from_env())
         .expect("render the whole model");
     let solid = build_geo(&geo, &ManifoldBackend).expect("non-empty geometry");
-    assert!(solid.is_manifold(), "the rendered whole must be a valid 2-manifold");
+    assert!(
+        solid.is_manifold(),
+        "the rendered whole must be a valid 2-manifold"
+    );
 
     let comps = solid.components();
     // The bug returned 0; the whole sheet is one connected body (the pockets are voids, not pieces).
-    assert_eq!(comps.len(), 1, "one connected body, not zero (or 88 pulled-out pockets)");
-    comps[0].check().expect("the component is a valid 2-manifold");
+    assert_eq!(
+        comps.len(),
+        1,
+        "one connected body, not zero (or 88 pulled-out pockets)"
+    );
+    comps[0]
+        .check()
+        .expect("the component is a valid 2-manifold");
     // The piece keeps every pocket carved — same volume as the whole (voids intact, not filled in).
     assert!(
         (comps[0].volume() - solid.volume()).abs() < 1.0,

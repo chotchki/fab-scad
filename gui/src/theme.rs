@@ -91,26 +91,37 @@ fn install_ui_fonts(ctx: &egui::Context) {
         "/assets/fonts/Quattrocento-subset.ttf"
     ));
     let mut defs = egui::FontDefinitions::default(); // keeps Ubuntu-Light=Proportional, Hack=Monospace
-    defs.font_data
-        .insert("material-symbols".into(), Arc::new(egui::FontData::from_static(MS)));
-    defs.font_data
-        .insert("oswald".into(), Arc::new(egui::FontData::from_static(OSWALD)));
-    defs.font_data
-        .insert("quattrocento".into(), Arc::new(egui::FontData::from_static(QUATTRO)));
+    defs.font_data.insert(
+        "material-symbols".into(),
+        Arc::new(egui::FontData::from_static(MS)),
+    );
+    defs.font_data.insert(
+        "oswald".into(),
+        Arc::new(egui::FontData::from_static(OSWALD)),
+    );
+    defs.font_data.insert(
+        "quattrocento".into(),
+        Arc::new(egui::FontData::from_static(QUATTRO)),
+    );
 
     // Icon subset: lowest-priority fallback on the built-in families.
     for fam in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
-        defs.families.entry(fam).or_default().push("material-symbols".into());
+        defs.families
+            .entry(fam)
+            .or_default()
+            .push("material-symbols".into());
     }
     // Oswald / Quattrocento: primary, then the full Proportional fallback chain (Ubuntu-Light + emoji +
     // the icon subset we just appended) so any glyph they lack still resolves rather than tofu-ing.
     let prop = defs.families[&egui::FontFamily::Proportional].clone();
     let mut oswald = vec!["oswald".to_string()];
     oswald.extend(prop.clone());
-    defs.families.insert(egui::FontFamily::Name("oswald".into()), oswald);
+    defs.families
+        .insert(egui::FontFamily::Name("oswald".into()), oswald);
     let mut quattro = vec!["quattrocento".to_string()];
     quattro.extend(prop);
-    defs.families.insert(egui::FontFamily::Name("quattrocento".into()), quattro);
+    defs.families
+        .insert(egui::FontFamily::Name("quattrocento".into()), quattro);
 
     ctx.set_fonts(defs);
 }
@@ -120,14 +131,15 @@ fn install_ui_fonts(ctx: &egui::Context) {
 /// navy w/ gold ring, press fills gold.
 fn brand_visuals() -> egui::Visuals {
     let r4 = egui::CornerRadius::same(4);
-    let wv = |bg: Color32, weak: Color32, bs: egui::Stroke, fs: egui::Stroke, exp: f32| WidgetVisuals {
-        bg_fill: bg,
-        weak_bg_fill: weak,
-        bg_stroke: bs,
-        fg_stroke: fs,
-        corner_radius: r4,
-        expansion: exp,
-    };
+    let wv =
+        |bg: Color32, weak: Color32, bs: egui::Stroke, fs: egui::Stroke, exp: f32| WidgetVisuals {
+            bg_fill: bg,
+            weak_bg_fill: weak,
+            bg_stroke: bs,
+            fg_stroke: fs,
+            corner_radius: r4,
+            expansion: exp,
+        };
     let mut v = egui::Visuals::light();
     v.dark_mode = false;
     v.override_text_color = None; // per-widget fg_stroke carries navy, so hover-gold can differ

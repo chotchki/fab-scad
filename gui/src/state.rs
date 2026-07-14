@@ -9,12 +9,12 @@ pub(crate) const SPREAD: f64 = 50.0;
 pub(crate) struct SceneCfg {
     pub(crate) source: Option<PathBuf>, // .scad source (sliceable, preferred)
     pub(crate) stl: Option<PathBuf>,    // .stl to display directly (when there's no source)
-    pub(crate) bed: [f32; 2],   // usable area — pieces pack within this (extruder reach)
+    pub(crate) bed: [f32; 2],           // usable area — pieces pack within this (extruder reach)
     pub(crate) plate: [f32; 2], // real plate size for the Bambu export grid/printable_area (≥ bed)
     pub(crate) root: Option<PathBuf>, // workspace root, for OPENSCADPATH
-    pub(crate) tmp: PathBuf,          // scratch dir for rendered/sliced STLs
+    pub(crate) tmp: PathBuf,    // scratch dir for rendered/sliced STLs
     pub(crate) reslice_on_start: bool, // screenshot --reslice: display the sliced result
-    pub(crate) cut_pct: f32,          // screenshot --cut <0..100>: where along X to cut
+    pub(crate) cut_pct: f32,    // screenshot --cut <0..100>: where along X to cut
 }
 
 /// Marks the displayed model entity, so re-slice can swap it out.

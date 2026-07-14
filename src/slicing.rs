@@ -10,9 +10,9 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 
+use crate::feasibility::{OnionAxis, axes_sorted, onion_resolution, piece_up};
 #[cfg(feature = "kernel")]
 use crate::kernel::Solid;
-use crate::feasibility::{OnionAxis, axes_sorted, onion_resolution, piece_up};
 use crate::manifest::{Connector, Slicing};
 // PartSlicing feeds only `slice_model_parts` (native OpenSCAD codegen) — unused on the wasm worker.
 #[cfg(feature = "native")]

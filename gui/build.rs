@@ -30,8 +30,8 @@ const MANIFEST: &[(&str, u32)] = &[
     ("EXPAND_MORE", 0xe5cf),   // cut expanded
     ("SAVE", 0xe161),          // save (floppy)
     ("RESTART", 0xe5d5),       // refresh / reset-to-auto
-    ("DOT", 0xe061),           // fiber_manual_record — filled status dot (stale-tab badge + unsaved)
-    ("CHECK", 0xe668),         // check — affirmative tick ("flat ✓" → flat CHECK)
+    ("DOT", 0xe061), // fiber_manual_record — filled status dot (stale-tab badge + unsaved)
+    ("CHECK", 0xe668), // check — affirmative tick ("flat ✓" → flat CHECK)
 ];
 
 /// Latin subset for the UI text fonts: Basic Latin + Latin-1 + the typographic marks the app renders
@@ -44,7 +44,12 @@ const LATIN: &str = "U+0020-00FF,U+2013-2014,U+2018-2019,U+201C-201D,U+2026,U+20
 /// Material Symbols Outlined variable font (google/material-design-icons @ pinned commit).
 const MS_URL: &str = "https://raw.githubusercontent.com/google/material-design-icons/819d78680a849ceef4c78f863d8753e3160b7c89/variablefont/MaterialSymbolsOutlined%5BFILL%2CGRAD%2Copsz%2Cwght%5D.ttf";
 const MS_SHA256: &str = "e67c84976868d2016a4bb5e4daacd03d92e0c58c935ccd7091fe3b6230761552";
-const MS_AXES: &[(&str, &str)] = &[("FILL", "0"), ("wght", "400"), ("GRAD", "0"), ("opsz", "24")];
+const MS_AXES: &[(&str, &str)] = &[
+    ("FILL", "0"),
+    ("wght", "400"),
+    ("GRAD", "0"),
+    ("opsz", "24"),
+];
 
 /// Oswald variable font — instanced to Regular (wght=400). Oswald ships variable-only upstream, so we
 /// instance like the icon font. (google/fonts @ pinned commit; OFL-1.1.)

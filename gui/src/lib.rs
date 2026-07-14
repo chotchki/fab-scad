@@ -50,12 +50,12 @@ pub(crate) use fab_lang::{Dims, Vec3 as FVec3};
 mod config;
 mod cuts;
 // Web lib-closure delivery (W.3.6 Stage 2) — pure scan/normalize/BFS (native-tested) + the wasm fetch.
-#[cfg(any(target_arch = "wasm32", test))]
-mod lib_fetch;
 #[cfg(test)]
 mod harness_tests;
 mod highlight;
 mod jobs;
+#[cfg(any(target_arch = "wasm32", test))]
+mod lib_fetch;
 mod panel;
 mod print;
 mod scene;
@@ -83,9 +83,9 @@ pub(crate) use geom::GeomPool;
 // wasm's transport (W.3.6): GeomPool talks to the fab-geom Web Worker over postMessage (worker_rpc),
 // the transport twin of the native kernel-thread pool — same app systems, a canvas-vs-thread swap.
 #[cfg(target_arch = "wasm32")]
-mod worker_rpc;
-#[cfg(target_arch = "wasm32")]
 pub mod geom_wasm;
+#[cfg(target_arch = "wasm32")]
+mod worker_rpc;
 #[cfg(target_arch = "wasm32")]
 pub(crate) use geom_wasm::GeomPool;
 

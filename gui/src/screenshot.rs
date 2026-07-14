@@ -159,7 +159,10 @@ pub(crate) fn setup_offscreen_model(
     };
     // Render WHOLE through the service: mints a base handle we then reslice off. block_on drives the
     // reply here while the kernel thread runs it.
-    let root = scene.root.as_ref().map(|r| r.to_string_lossy().into_owned());
+    let root = scene
+        .root
+        .as_ref()
+        .map(|r| r.to_string_lossy().into_owned());
     let (base, min, max, whole_mesh) = match block_on(pool.call(Request::RenderWhole {
         source: Source::Path(src.to_string_lossy().into_owned()),
         root,

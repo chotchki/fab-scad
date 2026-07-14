@@ -11,8 +11,8 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 
 use fab_scad::bambu::{self, PieceToPlace};
-use fab_scad::geomsg::{WireConn, WireOrient};
 use fab_scad::feasibility;
+use fab_scad::geomsg::{WireConn, WireOrient};
 use fab_scad::manifest::{Connector, Cut, PieceOrient, Slicing};
 use fab_scad::num::Num;
 

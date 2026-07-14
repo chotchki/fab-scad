@@ -1,4 +1,10 @@
-# fab-web bundle contract (18.8)
+# fab-web bundle contract (18.8) — SUPERSEDED
+
+> **SUPERSEDED by [`web-embed.md`](web-embed.md) (W.3.7).** fab-web is retired; the web bundle is now
+> the ONE **fab-gui** app (desktop + web, one codebase), and the OpenSCAD side-module is gone. The
+> release mechanism, tag scheme (`web-vX.Y.Z`), and hotchkiss-io fetch shape are unchanged — only the
+> payload + asset names (`fab_web_*` → `fab_gui_*`). Read `web-embed.md` for the live contract; this
+> file is kept as the fab-web-era record until `web/` is deleted (W.3.11).
 
 The interface between fab-scad releases and hotchkiss-io's build. Shape deliberately mirrors
 hotchkiss-io's Tailwind CLI fetch (pinned version const → GitHub release asset URL →

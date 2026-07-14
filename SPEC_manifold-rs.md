@@ -37,7 +37,7 @@ by volume-residual, not bit-exact). Transforms (`translate`/`rotate` degrees-Eul
 (`split_by_plane` preferred over `trim_by_plane`, `decompose`, `slice_to_cross_section`, `project`,
 `slice_at_z`). 2D→3D (`extrude_with_options`, `revolve`, `CrossSection::extrude`).
 
-**2D — PORT** (native `boolean2`, see Dependencies): booleans, `from_polygons` (Positive fill) +
+**2D — PORT** (via a 2D boolean engine, see Dependencies): booleans, `from_polygons` (Positive fill) +
 even-odd variant, `offset` (Round/Miter/Square; chamfer→jtSquare, miter_limit 2.0), `area`,
 `to_polygons`, `transform` (2×3), `hull_simple_polygon` (critical path — the teardrop/wedge).
 
@@ -111,16 +111,17 @@ equalities, both satisfied).
 
 | Dep | Decision | Why |
 | --- | --- | --- |
-| **2D boolean engine** | Port Manifold's OWN native `boolean2` — NOT i_overlay, NOT Clipper2 | v3.5 ALREADY DELETED Clipper2; 2D is now a native sweep-line (`boolean2*` + `tree2d`, ~2.1K) reusing the SAME `polygon.cpp` triangulator + `collider` BVH as 3D → one determinism story, one oracle. i_overlay's integer model would diverge from the C++ oracle exactly like exact predicates do. i_overlay is the documented FALLBACK if boolean2 proves too costly. |
+| **2D boolean engine** `[OPEN]` | **The linked Manifold v3.5.1 USES Clipper2** (chotchki was right; the scoping agent mis-read a newer upstream master). `cross_section.cpp` `#include "clipper2/clipper.h"`, `cliptype_of_op` → `C2::ClipType::{Union,Difference,Intersection}`, offset via `clipper.offset.h`; the build links `libClipper2.a`. CrossSection is a thin re-export of Clipper2. (`tree2d.cpp` is only `polygon.cpp`'s triangulation helper, NOT a 2D boolean.) So the real choice: **(a) PORT Clipper2** (~10–15K, bit-faithful, and ALREADY deterministic — Clipper2 works in scaled INTEGER coords, no float-assoc hazard) vs **(b) adopt `i_overlay`** (pure-Rust, integer→deterministic, far smaller) validated by AREA-residual — algorithm-independent, exactly the way minkowski is validated by volume-residual, NOT bit-differential. **Recommend (b):** 2D determinism is by integer-coords either way, so porting all of Clipper2 just to bit-match an oracle we can instead AREA-match is poor ROI. Verify i_overlay's robustness on the offset/round-join path first. |
 | **libm** | Adopt (pinned) | Pillar 2. |
 | **Predicates crate** | NONE | Pillar 2 — port the tolerance model. |
 | **Parallel** | rayon + wasm-bindgen-rayon | Pillar 1. |
 | **Vec / linalg** | glam-f64 or hand-rolled | Mechanical; must match rounding (no FMA) or the differential drifts 1 ULP. |
 
-`[OPEN]` **Verify which C++ version is actually linked** (`manifold-csg-sys 3.5.103` vs upstream 3.5.1
-master) and whether `boolean2` had landed by then — it doesn't change the PORT target (we reimplement
-the latest `boolean2` regardless), but it decides whether the 2D C++ oracle has `boolean2` to diff
-against.
+**RESOLVED (2026-07-14):** the linked version is `manifold-csg-sys 3.5.103` → Manifold **v3.5.1**, and
+its CrossSection is **Clipper2** (verified in the built `manifold-src`, not a clone). So the 2D C++
+oracle is Clipper2's output; whichever engine we pick (i_overlay recommended), it validates by 2D
+area-residual against Clipper2-via-Manifold. If we ever want a bit-exact 2D oracle we'd port Clipper2
+itself — the recommendation is not to.
 
 ## Phasing
 
@@ -135,7 +136,7 @@ the go/no-go and should be funded as its OWN decision** (below).
 | **R2 — full robustness core** | difference/intersection (fall out of boolean3's op param) + edge_op cleanup + polygon hardening + the nasty-model corpus. | ~1.1K | **K.5 (acceptance set):** `boolean_test` + `boolean_complex_test` + all 17 nasty `.obj` (self_intersect/Havocglass/Cray) → `Status==NoError`, 0 divergence, 24h ASan campaign 0 trophies. |
 | **R3 — 3D completion** | constructors (+Decompose), manifold.cpp (split/trim/slice/project), Volume/Area/Genus, csg_tree FLATTENED (~200 LOC eager — dissolves `!Send`), quickhull, minkowski, transforms, color/set_properties. | ~2.6K | fab-scad's ENTIRE `Solid` surface green vs C++ on the `models/` sweep (~55 real projects). `properties_test` = the BOSL2 color gate. |
 | **R4 — deterministic parallel** | swap `par::` in for the serial reference; total-order comparators, fixed-shape reductions, deterministic ids. | ~600 | **K.D:** bit-identical Seq==Par==wasm on the full corpus, run1==run2. The pillar-1 proof C++ CAN'T pass. |
-| **R5 — 2D subsystem** | boolean2 + sweep + tree2d + offset + cross_section, reusing polygon.cpp + collider. | ~2.1K | **K.6:** `cross_section_test` + `boolean2_test`, 2D area-residual <1e-5, offset area-by-area vs OpenSCAD. |
+| **R5 — 2D subsystem** | 2D boolean engine (i_overlay recommended, else port Clipper2) + offset + the CrossSection wrapper + the 2D↔3D bridges (extrude/revolve caps), reusing the 3D triangulator. | ~1–2K glue (engine is a dep, not ported) | **K.6:** `cross_section_test` ported, 2D **area-residual** <1e-5 vs Clipper2-via-Manifold, offset area-by-area vs OpenSCAD (the 78.2548 canary). |
 | **R6 — libm verify** | verify the libm+predicate discipline (established R0) throughout. | — | native==wasm bit-for-bit, full corpus. |
 | **R.X — cut C++** | freeze `oracle_goldens.json` (vol/area/genus/bbox/status) + own byte-exact `mesh_snapshots/`, flip to golden-mode, `--no-default-features` off `kernel`. | — | suite green with C++ GONE. **The finish line.** |
 
@@ -204,8 +205,11 @@ it isn't, we stop at R1.
 3. **Do we WANT `Solid: Send`?** csg_tree flattening dissolves `!Send` for free, but
    [[manifold-kernel-threading]] deliberately crosses threads with mesh data, not Solids. Take the
    simplification and revisit the threading doctrine, or keep `!Send` as a guardrail?
-4. **2D: commit to porting native `boolean2`, or keep i_overlay as a real hedge?** Recommend boolean2
-   (oracle-faithful + shared triangulator); needs the version-verification first.
+4. **2D: adopt `i_overlay` + area-oracle, or port Clipper2 for bit-faithfulness?** (Version check
+   RESOLVED — linked v3.5.1 = Clipper2, so this is a real fork, not the earlier "boolean2".) Recommend
+   i_overlay: 2D determinism is by integer-coords either way, and area-residual validates it exactly the
+   way volume-residual validates minkowski — porting all of Clipper2 to bit-match is poor ROI. Verify
+   i_overlay's offset/round-join robustness first.
 5. **C++ retirement — DELETE, or keep it CI-only-linkable as a permanent oracle?** Freeze goldens then
    cut, vs keep `manifold3d` behind an off-by-default `oracle` feature for future regression diffs (at
    the cost of not fully dropping the C++ toolchain from CI). Which finish line?

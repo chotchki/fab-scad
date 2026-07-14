@@ -95,6 +95,124 @@ where
     }
 }
 
+/// Drive the needs fixpoint from an IN-MEMORY source map — the fs-FREE twin of [`drive`] for the wasm
+/// host (the browser has no filesystem; the geom worker renders from bytes, W.3.6 Stage 2). A
+/// `use`/`include` resolves against `sources` — a virtual lib tree keyed by NORMALIZED relative path
+/// ("BOSL2/std.scad", "BOSL2/vectors.scad", …) — instead of `library_paths` + disk. Missing/broken
+/// libraries are TOLERATED exactly as native (warn + empty program), so a stray include still renders.
+/// `import`/`surface` meshes still go through `mesh_reader`.
+///
+/// # Errors
+/// [`Error::Parse`](crate::Error::Parse) for a malformed ROOT source, a `mesh_reader` failure, or any
+/// evaluation error. (A malformed USED/INCLUDED lib is tolerated, like native.)
+pub(crate) fn drive_from_map<R>(
+    source: &str,
+    sources: &std::collections::HashMap<PathBuf, String>,
+    jit_factory: Option<&dyn NumericJitFactory>,
+    config: super::Config,
+    mut mesh_reader: R,
+) -> crate::Result<(Geo, Vec<Message>)>
+where
+    R: FnMut(&str) -> crate::Result<Imported>,
+{
+    let base_dir = Path::new(""); // virtual root — the `main` string has no path of its own
+    let mut scad = SourceMap::new();
+    let mut files = FileTable::new();
+    let mut warnings: Vec<Message> = Vec::new();
+    loop {
+        match resolve_source(source, base_dir, None, &scad, &files, jit_factory, config)? {
+            Resolution::Complete { geo, messages } => {
+                warnings.extend(messages);
+                return Ok((geo, warnings));
+            }
+            Resolution::Incomplete { needs } => {
+                for need in needs {
+                    fulfill_from_map(
+                        need,
+                        sources,
+                        &mut mesh_reader,
+                        &mut scad,
+                        &mut files,
+                        &mut warnings,
+                    )?;
+                }
+            }
+        }
+    }
+}
+
+/// [`fulfill`]'s fs-free twin: a `Scad` reference resolves against the virtual `sources` map (from_dir
+/// first, then the lib root — both lexically normalized), a `File` reference goes to `mesh_reader`.
+fn fulfill_from_map<R>(
+    need: SourceNeed,
+    sources: &std::collections::HashMap<PathBuf, String>,
+    mesh_reader: &mut R,
+    scad: &mut SourceMap,
+    files: &mut FileTable,
+    warnings: &mut Vec<Message>,
+) -> crate::Result<()>
+where
+    R: FnMut(&str) -> crate::Result<Imported>,
+{
+    match need {
+        SourceNeed::Scad { from_dir, raw } => {
+            let key = (from_dir.clone(), raw.clone());
+            if scad.contains_key(&key) {
+                return Ok(());
+            }
+            // Mirror `resolve`'s order without a filesystem: relative to the requesting file's dir
+            // first, then the lib root — the first normalized path present in the map wins.
+            let id = normalize_lexical(&from_dir.join(&raw))
+                .filter(|p| sources.contains_key(p))
+                .or_else(|| normalize_lexical(Path::new(&raw)).filter(|p| sources.contains_key(p)));
+            let Some(id) = id else {
+                // TOLERANT (M.6.1), same as native: a missing library → warn + an EMPTY program so the
+                // graph closes and the run renders on.
+                warnings.push(Message::Warning(format!("Can't open library '{raw}'.")));
+                scad.insert(
+                    key,
+                    ProvidedSource {
+                        id: from_dir.join(&raw),
+                        dir: from_dir,
+                        program: empty_program(),
+                    },
+                );
+                return Ok(());
+            };
+            let text = &sources[&id];
+            let dir = id.parent().unwrap_or(Path::new("")).to_path_buf();
+            let program = parse(text).unwrap_or_else(|_| {
+                warnings.push(Message::Warning(format!("Failed to parse '{raw}'.")));
+                empty_program()
+            });
+            scad.insert(key, ProvidedSource { id, dir, program });
+        }
+        SourceNeed::File { raw } => {
+            let imported = mesh_reader(&raw)?;
+            files.insert(raw, imported);
+        }
+    }
+    Ok(())
+}
+
+/// Lexical (no-fs) path normalization: drop `.` components and resolve `..` against the accumulated
+/// path — the map key a `use`/`include` reference maps to. `None` if `..` escapes the root (an
+/// unresolvable reference). Absolute components can't appear in a lib-relative reference.
+fn normalize_lexical(p: &Path) -> Option<PathBuf> {
+    let mut out: Vec<std::ffi::OsString> = Vec::new();
+    for c in p.components() {
+        match c {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                out.pop()?;
+            }
+            std::path::Component::Normal(s) => out.push(s.to_os_string()),
+            std::path::Component::RootDir | std::path::Component::Prefix(_) => return None,
+        }
+    }
+    Some(out.iter().collect())
+}
+
 /// Fulfill one [`SourceNeed`] into its table: a `Scad` reference is resolved (`find_valid_path`), read, and
 /// parsed ONCE (cache the AST so the resolver clones it, not re-lexes a big library each pass); a `File`
 /// reference is handed to `mesh_reader`. An already-present key is a duplicate reference in the same round —

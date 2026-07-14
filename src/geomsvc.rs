@@ -295,16 +295,20 @@ fn eval_preview(
 ) -> Result<(fab_lang::Geo, Option<std::path::PathBuf>)> {
     match source {
         Source::Path(path) => eval_path(path, root),
-        Source::Bytes { main, .. } => {
-            // The wasm worker has no fs. NO-INCLUDE sources only for now — the lib closure (`libs`) +
-            // import()/surface() resolution from bytes land at Stage 2.
+        Source::Bytes { main, libs } => {
+            // The wasm worker has no fs — `use`/`include` resolve against the IN-MEMORY lib closure the
+            // app gathered (W.3.6 Stage 2), keyed by normalized relative path. Empty = a no-include
+            // model. import()/surface() from bytes still isn't wired.
             let _ = root;
             let src = String::from_utf8_lossy(main);
             let wrap = format!("$preview = true;\n{src}\n");
-            let tree = fab_lang::resolve_geometry_with_base(
+            let sources: std::collections::HashMap<std::path::PathBuf, String> = libs
+                .iter()
+                .filter_map(|(p, b)| Some((std::path::PathBuf::from(p), String::from_utf8(b.clone()).ok()?)))
+                .collect();
+            let tree = fab_lang::resolve_geometry_from_sources(
                 &wrap,
-                std::path::Path::new("."),
-                &[],
+                &sources,
                 None, // no JIT on the wasm worker — interp only (the web execution tier)
                 fab_lang::Config::from_env(),
                 |raw| {
@@ -913,6 +917,34 @@ mod tests {
                 Response::Resliced { .. }
             ),
             "reslice reads the bytes-rendered base"
+        );
+    }
+
+    #[test]
+    fn render_from_source_bytes_resolves_an_include_from_the_lib_map() {
+        // W.3.6 Stage 2: a model that INCLUDEs a lib renders on the fs-less worker, resolving the
+        // include from the in-memory lib map (what the app gathers + sends in Source::Bytes.libs).
+        // Proves REAL (include-using) models work, not just no-include ones.
+        let mut store = SolidStore::new(0);
+        let main = b"include <lib/box.scad>;\nmybox(50, 30, 20);".to_vec();
+        let lib = b"module mybox(x, y, z) { cube([x, y, z], center = true); }".to_vec();
+        let Response::Rendered { stl, min, max, .. } = handle_with_store(
+            &mut store,
+            Request::RenderWhole {
+                source: Source::Bytes {
+                    main,
+                    libs: vec![("lib/box.scad".to_string(), lib)],
+                },
+                root: None,
+            },
+        ) else {
+            panic!("render with an include failed")
+        };
+        assert!(stl.len() > 100, "the included module produced geometry");
+        // mybox(50,30,20) → cube centered → bbox ≈ [-25,-15,-10]..[25,15,10].
+        assert!(
+            (max[0] - 25.0).abs() < 0.01 && (min[1] + 15.0).abs() < 0.01,
+            "unexpected bbox {min:?}..{max:?}"
         );
     }
 }

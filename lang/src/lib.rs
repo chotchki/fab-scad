@@ -278,6 +278,27 @@ where
     .0)
 }
 
+/// Like [`resolve_geometry_with_base`], but resolves `use`/`include` from an IN-MEMORY source MAP
+/// instead of the filesystem — the wasm/browser entry (W.3.6 Stage 2). `sources` is a virtual lib tree
+/// keyed by NORMALIZED relative path ("BOSL2/std.scad", …); there is no disk and no `library_paths`.
+/// `import`/`surface` meshes still flow through `mesh_reader`. Missing libraries are tolerated (warn +
+/// render on), exactly as the fs loader.
+///
+/// # Errors
+/// As [`resolve_geometry_with_base`], minus the fs-specific ones (no disk is touched).
+pub fn resolve_geometry_from_sources<R>(
+    source: &str,
+    sources: &std::collections::HashMap<PathBuf, String>,
+    jit_factory: Option<&dyn NumericJitFactory>,
+    config: Config,
+    mesh_reader: R,
+) -> Result<Geo>
+where
+    R: FnMut(&str) -> Result<Imported>,
+{
+    Ok(eval::io::drive_from_map(source, sources, jit_factory, config, mesh_reader)?.0)
+}
+
 /// Like [`resolve_geometry_with_base`], but for a `.scad` FILE — resolving its `use`/`include` graph AND
 /// its `import`/`surface` meshes (through `mesh_reader`). The root file is read here.
 ///

@@ -8,6 +8,8 @@ version = "0.1.0"
 out-dir = "target/packager"
 binaries-dir = "target/release"
 formats = ["app", "dmg"]
+# App icon (navy/gold isometric box). Regenerate from packaging/macos/icon.svg via make-icon.sh.
+icons = ["packaging/macos/fab-scad.icns"]
 
 [[binaries]]
 path = "fab-gui"

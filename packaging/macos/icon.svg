@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="1024" height="1024">
+  <!-- fab-scad app icon: the hotchkiss navy/gold identity, an isometric box (the printed-part
+       output the slicer produces). Source of the .icns — regenerate with make-icon.sh. -->
+  <rect x="0" y="0" width="24" height="24" rx="5.2" fill="#1a2b4a"/>
+  <g fill="none" stroke="#ffc935" stroke-width="1.25" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M12 3 L20.5 7.5 L20.5 16.5 L12 21 L3.5 16.5 L3.5 7.5 Z"/>
+    <path d="M3.5 7.5 L12 12 M20.5 7.5 L12 12 M12 12 L12 21"/>
+  </g>
+</svg>

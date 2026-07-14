@@ -45,9 +45,22 @@ only MSIX requires Authenticode).
   notarized upstream since ~2025). Detect-and-guide stays: `Openscad::discover` probes, the
   doctor explains. Pin a minimum snapshot when the GUI grows an install prompt.
 
+## Re-verified 2026-07-14 (W.2, post-fab-gui)
+
+Still works after the whole fab-gui rebuild (bevy diet, egui flip, the theme + `include_bytes!` fonts,
+the static Manifold/TBB kernel). `otool -L target/release/fab-gui` lists **zero non-system dylibs** — the
+kernel is statically linked — and the fonts are baked in, so the `.app` has NO runtime dylib or asset
+dependency: fully self-contained. Verified: the bundled `fab-gui cube.scad --screenshot` rendered the
+full themed UI + the model from inside the `.app` (Oswald/Quattrocento + the navy/gold theme + the kernel
+all resolve from the bundle). **App icon added** — a navy/gold isometric box, source `packaging/macos/
+icon.svg` → `make-icon.sh` (headless-Chrome render → `sips` → `iconutil`) → `fab-scad.icns`, wired via
+`Packager.toml`'s `icons`.
+
 ## Known gaps before a real release
 
-- No app icon (`icons` unset → generic); add an .icns/.ico set.
+- **Windows .ico** — the `icons` entry is macOS-only (`.icns`); NSIS needs an `.ico`. Generate one from
+  the same `icon.svg` before the Windows/winget resume (`make-icon.sh` is macOS-tool-only, so the .ico
+  path needs ImageMagick or equivalent).
 - CFBundleVersion is a build timestamp — pin in CI for reproducibility.
 - ~3k absolute source paths embedded in the binary (standard Rust debug metadata) —
   `--remap-path-prefix` if we care.

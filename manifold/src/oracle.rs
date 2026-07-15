@@ -1902,6 +1902,48 @@ mod tests {
         eprintln!("M.5.3 ✓ revolve (2D→3D) matches C++ (solid divergence)");
     }
 
+    /// M.5.3 — the SLICE bridge (3D→2D at a plane) vs C++. Extrude to a solid, slice at mid-height in both
+    /// engines, area-match the 2D cross-sections (box → square, tube → ring). The Rust marching-triangles
+    /// trace vs C++'s Slice on independently-triangulated boxes ⇒ area-residual.
+    #[test]
+    fn m5_3_slice_vs_cpp() {
+        use crate::cross_section::CrossSection;
+        use crate::linalg::Vec2;
+
+        let sq = |x: f64, y: f64, s: f64| -> Vec<Vec2> {
+            vec![Vec2::new(x, y), Vec2::new(x + s, y), Vec2::new(x + s, y + s), Vec2::new(x, y + s)]
+        };
+        let cpp_cs = |polys: &[Vec<Vec2>]| -> manifold3d::CrossSection {
+            let cp: Vec<Vec<[f64; 2]>> =
+                polys.iter().map(|c| c.iter().map(|p| [p.x, p.y]).collect()).collect();
+            manifold3d::CrossSection::from_polygons(&cp)
+        };
+        let poly_area = |polys: &[Vec<[f64; 2]>]| -> f64 {
+            polys
+                .iter()
+                .map(|c| {
+                    let n = c.len();
+                    0.5 * (0..n)
+                        .map(|i| c[i][0] * c[(i + 1) % n][1] - c[(i + 1) % n][0] * c[i][1])
+                        .sum::<f64>()
+                })
+                .sum()
+        };
+
+        let ring = CrossSection::from_polygons(&[sq(0.0, 0.0, 10.0)])
+            .difference(&CrossSection::from_polygons(&[sq(4.0, 4.0, 2.0)]));
+        let ring_polys = ring.contours.iter().map(|c| c.to_vec()).collect::<Vec<_>>();
+
+        for (label, polys) in [("box", vec![sq(0.0, 0.0, 3.0)]), ("tube", ring_polys)] {
+            let rust_area = CrossSection::from_polygons(&polys).extrude(4.0).slice_at_z(2.0).area();
+            let cpp_cut = manifold3d::Manifold::extrude(&cpp_cs(&polys), 4.0).slice_at_z(2.0);
+            let cpp_area = poly_area(&cpp_cut).abs();
+            let resid = (rust_area - cpp_area).abs() / cpp_area.max(1e-9);
+            assert!(resid < 1e-5, "{label}: slice area rust {rust_area} cpp {cpp_area} (resid {resid:.3e})");
+        }
+        eprintln!("M.5.3 ✓ slice (3D→2D) matches C++");
+    }
+
     /// M.2.3 — the KEYHOLE integration test: a bar punched all the way through a box (difference) leaves a
     /// square HOLE in the box's top and bottom faces, so `Face2Tri` must triangulate a holed polygon (an
     /// outer loop + an interior CW hole loop) via `CutKeyhole`. Without the keyhole path those faces fill

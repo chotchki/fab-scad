@@ -211,6 +211,64 @@ impl Mesh {
         }
         CrossSection::from_polygons(&polys)
     }
+
+    /// The 2D cross-section of the mesh at the plane `z = height` (Manifold `Slice`). Marching-triangles
+    /// contour trace: for each triangle straddling the plane (`min_z ≤ height < max_z`), walk the
+    /// below→above edge crossings across paired triangles until the contour closes. A `BTreeSet` of
+    /// crossing triangles makes the contour order (and the trace) deterministic (native==wasm, run-to-run).
+    pub fn slice_at_z(&self, height: f64) -> CrossSection {
+        use crate::mesh_ids::HalfedgeId;
+        let z = |he: usize| self.pos(self.start(HalfedgeId::from_usize(he))).z;
+
+        let mut crossing = std::collections::BTreeSet::new();
+        for tri in 0..self.num_tri() {
+            let (mut lo, mut hi) = (f64::INFINITY, f64::NEG_INFINITY);
+            for j in 0..3 {
+                let zj = z(3 * tri + j);
+                lo = lo.min(zj);
+                hi = hi.max(zj);
+            }
+            if lo <= height && hi > height {
+                crossing.insert(tri);
+            }
+        }
+
+        let mut polys: Vec<Vec<Vec2>> = Vec::new();
+        while let Some(&start_tri) = crossing.iter().next() {
+            let mut poly: Vec<Vec2> = Vec::new();
+            // Entry corner: the vert above the plane whose next vert is at/below it.
+            let mut k = 0;
+            for j in 0..3 {
+                if z(3 * start_tri + j) > height && z(3 * start_tri + (j + 1) % 3) <= height {
+                    k = (j + 1) % 3;
+                    break;
+                }
+            }
+            let mut tri = start_tri;
+            loop {
+                crossing.remove(&tri);
+                // Advance k to the below→above ("up") edge, then record its crossing point.
+                if z(3 * tri + (k + 1) % 3) <= height {
+                    k = (k + 1) % 3;
+                }
+                let up = HalfedgeId::from_usize(3 * tri + k);
+                let below = self.pos(self.start(up));
+                let above = self.pos(self.end(up));
+                let a = (height - below.z) / (above.z - below.z);
+                let cross = below + (above - below) * a;
+                poly.push(Vec2::new(cross.x, cross.y));
+                // Cross into the paired triangle.
+                let pair = self.pair(up).u();
+                tri = pair / 3;
+                k = (pair % 3 + 1) % 3;
+                if tri == start_tri {
+                    break;
+                }
+            }
+            polys.push(poly);
+        }
+        CrossSection::from_polygons(&polys)
+    }
 }
 
 #[cfg(test)]
@@ -294,6 +352,20 @@ mod tests {
             .difference(&CrossSection::from_polygons(&[square(4.0, 4.0, 2.0)]));
         let shadow = ring.extrude(1.0).project();
         assert!((shadow.area() - 96.0).abs() < 1e-9, "tube footprint area {} != 96", shadow.area());
+    }
+
+    #[test]
+    fn slice_box_and_tube() {
+        // A 2×2×3 box sliced at z=1.5 → a 2×2 square, area 4.
+        let box3 = CrossSection::from_polygons(&[square(0.0, 0.0, 2.0)]).extrude(3.0);
+        assert!((box3.slice_at_z(1.5).area() - 4.0).abs() < 1e-9, "box slice != 4");
+        // A tube sliced mid-height → a ring (hole survives), area 96.
+        let tube = CrossSection::from_polygons(&[square(0.0, 0.0, 10.0)])
+            .difference(&CrossSection::from_polygons(&[square(4.0, 4.0, 2.0)]))
+            .extrude(2.0);
+        let cut = tube.slice_at_z(1.0);
+        assert!((cut.area() - 96.0).abs() < 1e-9, "tube slice area {} != 96", cut.area());
+        assert_eq!(cut.num_contour(), 2, "ring slice = outer + hole");
     }
 
     #[test]

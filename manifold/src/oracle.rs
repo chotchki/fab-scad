@@ -1790,6 +1790,44 @@ mod tests {
         eprintln!("M.5.2 ✓ round-offset area matches Clipper2 across {} cases", cases.len());
     }
 
+    /// M.5.3 — the EXTRUDE bridge (2D→3D) vs C++. Build the same 2D region in both engines, extrude to a
+    /// height, and solid-diverge the 3D results. The Rust extrude reuses our 3D triangulator for the caps,
+    /// so the produced solid flows through the byte-exact 3D pipeline; C++ uses Clipper2 + its own
+    /// triangulator — hence a triangulation-independent solid comparison (volume + genus + MC point-in).
+    #[test]
+    fn m5_3_extrude_vs_cpp() {
+        use crate::cross_section::CrossSection;
+        use crate::linalg::Vec2;
+
+        let sq = |x: f64, y: f64, s: f64| -> Vec<Vec2> {
+            vec![Vec2::new(x, y), Vec2::new(x + s, y), Vec2::new(x + s, y + s), Vec2::new(x, y + s)]
+        };
+        let to_cpp_cs = |polys: &[Vec<Vec2>]| -> manifold3d::CrossSection {
+            let cp: Vec<Vec<[f64; 2]>> =
+                polys.iter().map(|c| c.iter().map(|p| [p.x, p.y]).collect()).collect();
+            manifold3d::CrossSection::from_polygons(&cp)
+        };
+
+        // A plain square and a holed ring (genus-1 extrusion) — different topologies.
+        let square_polys = vec![sq(0.0, 0.0, 3.0)];
+        let ring = CrossSection::from_polygons(&[sq(0.0, 0.0, 10.0)])
+            .difference(&CrossSection::from_polygons(&[sq(4.0, 4.0, 2.0)]));
+        let ring_polys = ring.contours.iter().map(|c| c.to_vec()).collect::<Vec<_>>();
+
+        for (label, polys, height, seed) in [
+            ("square", &square_polys, 4.0, 0x5e_11u64),
+            ("ring", &ring_polys, 2.0, 0x5e_22u64),
+        ] {
+            let rust = CrossSection::from_polygons(polys).extrude(height);
+            let cpp = manifold3d::Manifold::extrude(&to_cpp_cs(polys), height);
+            let cpp_mesh = Mesh::from_mesh_gl(&cpp_to_mesh_gl(&cpp));
+            if let Some(r) = solid_divergence(&rust, &cpp_mesh, 4000, seed, 1e-6) {
+                panic!("{label}: extrude diverges from C++: {r}");
+            }
+        }
+        eprintln!("M.5.3 ✓ extrude (2D→3D) matches C++ (solid divergence)");
+    }
+
     /// M.2.3 — the KEYHOLE integration test: a bar punched all the way through a box (difference) leaves a
     /// square HOLE in the box's top and bottom faces, so `Face2Tri` must triangulate a holed polygon (an
     /// outer loop + an interior CW hole loop) via `CutKeyhole`. Without the keyhole path those faces fill

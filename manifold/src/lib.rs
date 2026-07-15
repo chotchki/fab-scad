@@ -21,6 +21,8 @@ pub mod check;
 // R5 — the 2D `CrossSection` subsystem, over the i_overlay 2D boolean engine (area-residual gated, NOT
 // bit-exact — the one layer where the verbatim thesis relaxes; SPEC [OPEN #4]).
 pub mod cross_section;
+// R5 — the 2D↔3D bridges (Extrude/Revolve/Project/Slice); unblocks M.3.8.
+pub mod bridge;
 // The internal linalg (linalg.h subset) — vec2/3/4, mat3x4, Box; op order matches the C++ oracle.
 pub mod linalg;
 // Pillar 2: the libm seam — every transcendental routes through here.

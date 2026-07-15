@@ -6,26 +6,16 @@
 //! away, turning correct-but-unclean folds into exact-genus manifolds, WITHOUT moving the
 //! non-intersecting input geometry (every mutation stays within tolerance, and only NEW verts collapse).
 //!
-//! ## Scope: the provenance-free stages ship now; colinear + swap follow provenance (M.2.2.1)
+//! ## Scope: the full five-stage SimplifyTopology
 //!
 //! Manifold's `SimplifyTopology` is `CleanupTopology` (`SplitPinchedVerts` + `DedupeEdges`) +
-//! `CollapseShortEdges` + `CollapseColinearEdges` + `SwapDegenerates` + `CalculateVertNormals`. Three of
-//! those are provenance-free and WIRED now: `SplitPinchedVerts`, `DedupeEdges`, `CollapseShortEdges` (the
-//! short-edge collapse is GEOMETRIC — edge length + CCW inversion). They already meet the R2 genus
-//! acceptance (identical cubes → genus 0) and are volume-exact on the folds.
-//!
-//! [`CollapseColinearEdges`] and [`swap_degenerates`] are PORTED but not yet wired — both need the
-//! per-triangle `triRef`/coplanar-ID provenance (M.2.2.1, now in progress). CollapseColinearEdges is
-//! gated on it directly (its whole flag is `SameFace(triRef)`), and SwapDegenerates is UNSAFE without it:
-//! in the C++ order colinear-collapse runs FIRST and removes the collinear-vert slivers, so
-//! SwapDegenerates only sees genuine degenerates — run without it, it mis-collapses REAL geometry
-//! (measured: −1.16e-3 volume on a rotated fold; swap OFF is bit-identical to C++). So they wire together
-//! once `triRef` exists.
-//!
-//! The one place `CollapseEdge` reads `triRef` (the `!shortEdge` colinear-restriction block) is
-//! unreachable in the boolean scope, where `tolerance == epsilon` forces `shortEdge` true; it is
-//! transliterated minus the `triRef` restriction (every face reads as the same face → restriction
-//! skipped, inversion guard kept) and documented at its site.
+//! `CollapseShortEdges` + `CollapseColinearEdges` + `SwapDegenerates` + `CalculateVertNormals`, ALL wired
+//! here. The short-edge collapse is geometric (edge length + CCW inversion); `CollapseColinearEdges` and
+//! the collapse's colinear-restriction are gated on the per-triangle `tri_ref` coplanar-ID (`same_face`),
+//! threaded through the boolean by M.2.2.1. `CollapseColinearEdges` runs BEFORE `SwapDegenerates` and is
+//! load-bearing for it: it removes the collinear-vert slivers that would otherwise make `SwapDegenerates`
+//! mis-collapse real geometry (measured −1.16e-3 volume on a rotated fold when it ran without — the
+//! whole reason `tri_ref` had to come first).
 //!
 //! ## Faithfulness notes (deviations, all output-invariant for the gates)
 //!
@@ -63,7 +53,6 @@ fn tri_of(edge: HalfedgeId) -> [HalfedgeId; 3] {
 /// Is edge `v0→v1` the strictly-longest of the triangle `v0,v1,v2`? (`edge_op.cpp` `Is01Longest`) —
 /// squared lengths, no `sqrt`.
 #[inline]
-#[allow(dead_code)] // wired with CollapseColinearEdges once M.2.2.1 provenance lands
 fn is01_longest(v0: Vec2, v1: Vec2, v2: Vec2) -> bool {
     let e = [v1 - v0, v2 - v1, v0 - v2];
     let l = [e[0].dot(e[0]), e[1].dot(e[1]), e[2].dot(e[2])];
@@ -181,13 +170,9 @@ fn remove_if_folded(mesh: &mut Mesh, edge: HalfedgeId) {
 
 /// Collapse `edge` by removing its `startVert` and replacing it with `endVert` — returns `false` if the
 /// edge cannot be collapsed (`edge_op.cpp` `CollapseEdge`). May split the mesh topologically (via
-/// [`form_loop`]) if the collapse would otherwise create a 4-manifold edge.
-///
-/// PROVENANCE: the `!short_edge` block's `triRef` colinear-restriction (C++ lines that `return false`
-/// when the collapse crosses a face boundary or a sharp edge) is skipped — we have no `triRef`, so every
-/// face reads as the same face and only the geometric inversion guard remains. In the boolean scope
-/// (`tolerance == epsilon`) `short_edge` is always true when this is called, so the block is inert; it's
-/// kept as a faithful-minus-`triRef` transliteration for the general case (full fidelity = M.2.2.1).
+/// [`form_loop`]) if the collapse would otherwise create a 4-manifold edge. The `!short_edge` block reads
+/// the per-triangle `tri_ref` to restrict the collapse to genuinely colinear edges (not across face
+/// boundaries or sharp edges) — the provenance threaded through the boolean (M.2.2.1) makes this exact.
 fn collapse_edge(
     mesh: &mut Mesh,
     edge: HalfedgeId,
@@ -225,13 +210,32 @@ fn collapse_edge(
     let mut current;
     if !short_edge {
         current = start;
+        let mut ref_check = mesh.tri_ref[pair.tri().u()];
         let mut p_last = mesh.pos(mesh.start(tri1edge[2]));
         while current != tri1edge[0] {
             current = current.next();
             let p_next = mesh.pos(mesh.end(current));
             let tri = current.tri();
+            let r = mesh.tri_ref[tri.u()];
             let projection = get_axis_aligned_projection(mesh.face_normal[tri.u()]);
-            // (triRef SameFace colinear-restriction skipped — see the fn doc.)
+            // Don't collapse if the edge isn't redundant (the ring may have changed since flagging).
+            if !r.same_face(ref_check) {
+                let old_ref = ref_check;
+                ref_check = mesh.tri_ref[edge.tri().u()];
+                if !r.same_face(ref_check) {
+                    return false;
+                }
+                // Restrict the collapse to COLINEAR edges when it separates faces or the edge is sharp,
+                // so no large shift is introduced parallel to the tangent plane.
+                if (r.mesh_id != old_ref.mesh_id
+                    || r.face_id != old_ref.face_id
+                    || mesh.face_normal[pair.tri().u()].dot(mesh.face_normal[tri.u()]) < -0.5)
+                    && ccw(projection.apply(p_last), projection.apply(p_old), projection.apply(p_new), tol)
+                        != 0
+                {
+                    return false;
+                }
+            }
             // Don't collapse the edge if it would invert a triangle.
             if ccw(
                 projection.apply(p_next),
@@ -289,7 +293,6 @@ fn collapse_edge(
 /// `SwapEdge` lambda). Copies the neighbour's face normal (the swapped triangle becomes a subset of it);
 /// `triRef`/property updates are skipped (provenance/position-only). If the swap would recreate an
 /// existing edge, [`form_loop`] splits instead.
-#[allow(dead_code)] // wired with CollapseColinearEdges once M.2.2.1 provenance lands
 fn swap_edge(mesh: &mut Mesh, tri0edge: [HalfedgeId; 3], tri1edge: [HalfedgeId; 3]) {
     // The 0-verts are swapped to the opposite 2-verts.
     let v0 = mesh.start(tri0edge[2]);
@@ -307,7 +310,8 @@ fn swap_edge(mesh: &mut Mesh, tri0edge: [HalfedgeId; 3], tri1edge: [HalfedgeId; 
     let tri0 = tri0edge[0].tri();
     let tri1 = tri1edge[0].tri();
     mesh.face_normal[tri0.u()] = mesh.face_normal[tri1.u()];
-    // (triRef copy + property interpolation skipped — provenance / NumProp() == 0.)
+    mesh.tri_ref[tri0.u()] = mesh.tri_ref[tri1.u()];
+    // (property interpolation skipped — NumProp() == 0.)
 
     // If the new edge already exists, duplicate the verts and split the mesh.
     let mut current = mesh.pair(tri1edge[0]);
@@ -326,7 +330,7 @@ fn swap_edge(mesh: &mut Mesh, tri0edge: [HalfedgeId; 3], tri1edge: [HalfedgeId; 
 /// Swap the long edge of a degenerate triangle, cascading via an explicit stack (`edge_op.cpp`
 /// `RecursiveEdgeSwap` — despite the name, the recursion is the `edgeSwapStack` in [`swap_degenerates`]).
 /// `visited`/`tag` break infinite cycles. Reads only geometry + face normals (provenance-free).
-#[allow(dead_code, clippy::too_many_arguments)] // wired at M.2.2.1
+#[allow(clippy::too_many_arguments)]
 fn recursive_edge_swap(
     mesh: &mut Mesh,
     edge: HalfedgeId,
@@ -513,10 +517,11 @@ fn dedupe_edge(mesh: &mut Mesh, edge: HalfedgeId) {
 /// non-manifold verts where multiple fan-cycles share one vertex (`edge_op.cpp` `SplitPinchedVerts`,
 /// serial branch). Each vertex fan is processed once; a second fan on an already-seen vertex gets a
 /// fresh duplicate vert.
-fn split_pinched_verts(mesh: &mut Mesh) {
+fn split_pinched_verts(mesh: &mut Mesh) -> usize {
     let nb_edges = mesh.halfedge.len();
     let mut vert_processed = vec![false; mesh.num_vert()];
     let mut halfedge_processed = vec![false; nb_edges];
+    let mut splits = 0;
     for i in 0..nb_edges {
         if halfedge_processed[i] {
             continue;
@@ -532,6 +537,7 @@ fn split_pinched_verts(mesh: &mut Mesh) {
             let p = mesh.pos(vert);
             mesh.vert_pos.push(p);
             let new_vert = VertId::from_usize(mesh.num_vert() - 1);
+            splits += 1;
             for e in ring {
                 halfedge_processed[e.u()] = true;
                 mesh.set_start(e, new_vert);
@@ -545,6 +551,7 @@ fn split_pinched_verts(mesh: &mut Mesh) {
             }
         }
     }
+    splits
 }
 
 /// Find the duplicate half-edges to split — for each vertex fan, all out-edges sharing an end-vert keep
@@ -602,17 +609,20 @@ fn find_duplicate_edges(mesh: &Mesh, nb_edges: usize) -> Vec<HalfedgeId> {
 /// Remove duplicate edges (more than one triangle-pair sharing an edge) by splitting them, until none
 /// remain (`edge_op.cpp` `DedupeEdges`). Each split may create new duplicates, so it loops to a
 /// fixed point.
-fn dedupe_edges(mesh: &mut Mesh) {
+fn dedupe_edges(mesh: &mut Mesh) -> usize {
+    let mut total = 0;
     loop {
         let nb_edges = mesh.halfedge.len();
         let duplicates = find_duplicate_edges(mesh, nb_edges);
         if duplicates.is_empty() {
             break;
         }
+        total += duplicates.len();
         for i in duplicates {
             dedupe_edge(mesh, i);
         }
     }
+    total
 }
 
 /// The short-edge flag (`edge_op.cpp` `CollapseShortEdges`'s `shortEdge` lambda): a paired edge touching
@@ -644,7 +654,7 @@ fn short_edge_pred(mesh: &Mesh, edge: HalfedgeId, first_new_vert: i32, tol: f64)
 /// `CollapseShortEdges`). Flag-all-then-collapse (the serial `FlagStore`): the flagging reads the clean
 /// post-dedupe mesh, then each flagged edge is collapsed in ascending order (already-collapsed edges are
 /// no-ops via the `pair < 0` guard). In a boolean (`first_new_vert > 0`) the bound is `tolerance`.
-fn collapse_short_edges(mesh: &mut Mesh, first_new_vert: i32) {
+fn collapse_short_edges(mesh: &mut Mesh, first_new_vert: i32) -> usize {
     let nb_edges = mesh.halfedge.len();
     let tol = if first_new_vert == 0 {
         mesh.epsilon
@@ -661,16 +671,78 @@ fn collapse_short_edges(mesh: &mut Mesh, first_new_vert: i32) {
     }
 
     let mut scratch = Vec::new();
+    let mut collapsed = 0;
     for hi in flagged {
-        collapse_edge(mesh, hi, &mut scratch, tol, first_new_vert);
+        if collapse_edge(mesh, hi, &mut scratch, tol, first_new_vert) {
+            collapsed += 1;
+        }
         scratch.clear();
     }
+    collapsed
+}
+
+/// The colinear-edge flag (`edge_op.cpp` `CollapseColinearEdges`'s `colinearEdge` lambda): a paired edge
+/// whose `startVert` is NEW and whose entire one-ring belongs to at most TWO coplanar faces (by
+/// `tri_ref.same_face` — the GLOBAL coplanar-ID test, not a local geometric one, so it can't stack
+/// errors as verts move). Such a vert is interior to a flat region and safe to remove.
+fn colinear_edge_pred(mesh: &Mesh, edge: HalfedgeId, first_new_vert: i32) -> bool {
+    let pair = mesh.pair(edge);
+    if pair.is_none() || mesh.start(edge).raw() < first_new_vert {
+        return false;
+    }
+    let ref0 = mesh.tri_ref[edge.tri().u()];
+    let mut current = pair.next();
+    let mut ref1 = mesh.tri_ref[current.tri().u()];
+    let mut ref1_updated = !ref0.same_face(ref1);
+    while current != edge {
+        current = mesh.pair(current).next();
+        let r = mesh.tri_ref[current.tri().u()];
+        if !r.same_face(ref0) && !r.same_face(ref1) {
+            if !ref1_updated {
+                ref1 = r;
+                ref1_updated = true;
+            } else {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+/// Collapse colinear edges until none remain (`edge_op.cpp` `CollapseColinearEdges`). Each round flags
+/// every colinear edge (verts interior to a coplanar face — [`colinear_edge_pred`]) then collapses them;
+/// a collapse can expose new ones, so it loops to a fixed point. Collapses run with `first_new_vert = 0`
+/// (the 2-arg `CollapseEdge`) even though flagging respects the passed `first_new_vert` — verbatim.
+fn collapse_colinear_edges(mesh: &mut Mesh, first_new_vert: i32) -> usize {
+    let nb_edges = mesh.halfedge.len();
+    let mut scratch = Vec::new();
+    let mut total = 0;
+    loop {
+        let mut flagged = Vec::new();
+        for i in 0..nb_edges {
+            let hi = HalfedgeId::from_usize(i);
+            if colinear_edge_pred(mesh, hi, first_new_vert) {
+                flagged.push(hi);
+            }
+        }
+        let mut num_flagged = 0;
+        for hi in flagged {
+            if collapse_edge(mesh, hi, &mut scratch, -1.0, 0) {
+                num_flagged += 1;
+            }
+            scratch.clear();
+        }
+        total += num_flagged;
+        if num_flagged == 0 {
+            break;
+        }
+    }
+    total
 }
 
 /// The swappable-edge flag (`edge_op.cpp` `SwapDegenerates`'s `swappableEdge` lambda): a paired edge, at
 /// least one endpoint new, that is the long edge of a degenerate (CW/collinear) triangle whose neighbour
 /// is also degenerate or shares the long edge.
-#[allow(dead_code)] // wired with CollapseColinearEdges once M.2.2.1 provenance lands
 fn swappable_edge_pred(mesh: &Mesh, edge: HalfedgeId, first_new_vert: i32) -> bool {
     let pair = mesh.pair(edge);
     if pair.is_none() {
@@ -707,8 +779,7 @@ fn swappable_edge_pred(mesh: &Mesh, edge: HalfedgeId, first_new_vert: i32) -> bo
 /// Perform edge swaps on the long edges of degenerate triangles (`edge_op.cpp` `SwapDegenerates`).
 /// Flag-all-then-process; each flagged edge seeds a fresh `tag` and drains its cascade stack before the
 /// next. `visited` is sized to the (post-collapse-stage) half-edge count, which no swap grows.
-#[allow(dead_code)] // wired with CollapseColinearEdges once M.2.2.1 provenance lands
-fn swap_degenerates(mesh: &mut Mesh, first_new_vert: i32) {
+fn swap_degenerates(mesh: &mut Mesh, first_new_vert: i32) -> usize {
     let nb_edges = mesh.halfedge.len();
 
     let mut flagged = Vec::new();
@@ -719,6 +790,7 @@ fn swap_degenerates(mesh: &mut Mesh, first_new_vert: i32) {
         }
     }
 
+    let num_flagged = flagged.len();
     let mut edge_swap_stack: Vec<HalfedgeId> = Vec::new();
     let mut visited = vec![-1i32; mesh.halfedge.len()];
     let mut tag = 0i32;
@@ -730,6 +802,7 @@ fn swap_degenerates(mesh: &mut Mesh, first_new_vert: i32) {
             recursive_edge_swap(mesh, last, &mut tag, &mut visited, &mut edge_swap_stack, &mut scratch);
         }
     }
+    num_flagged
 }
 
 /// Simplify the boolean's output topology: the four provenance-free stages of Manifold's
@@ -746,22 +819,32 @@ pub fn simplify_topology(mesh: &mut Mesh, first_new_vert: i32) {
     // push in the surgery is a no-op, and rebuild it clean at the end.
     mesh.vert_normal.clear();
 
+    let tris_before = mesh.num_tri();
+
     // CleanupTopology: split pinched verts, then dedupe 4-manifold edges.
-    split_pinched_verts(mesh);
-    dedupe_edges(mesh);
+    let pinched = split_pinched_verts(mesh);
+    let deduped = dedupe_edges(mesh);
 
     // Collapse edges shorter than tolerance.
-    collapse_short_edges(mesh, first_new_vert);
+    let short = collapse_short_edges(mesh, first_new_vert);
+    // Collapse colinear edges — verts interior to a coplanar face (the global `tri_ref.same_face` test).
+    // MUST run before SwapDegenerates: it removes the collinear-vert slivers that would otherwise make
+    // SwapDegenerates mis-collapse real geometry.
+    let colinear = collapse_colinear_edges(mesh, first_new_vert);
+    // Swap the long edges of the remaining degenerate triangles.
+    let swapped = swap_degenerates(mesh, first_new_vert);
 
-    // CollapseColinearEdges and SwapDegenerates are BOTH DEFERRED to M.2.2.1. CollapseColinearEdges is
-    // provenance-bound directly (its colinear test is `SameFace(triRef)`), and — proven empirically —
-    // SwapDegenerates is UNSAFE without it: in the C++ order colinear-collapse runs first, so
-    // SwapDegenerates only ever sees the genuine degenerates it's meant to fix; run WITHOUT it, it
-    // encounters the collinear-vert slivers C++ has already removed and mis-collapses REAL geometry
-    // (measured: −1.16e-3 volume on a rotated-cube fold, deleting 2 non-degenerate triangles — with swap
-    // OFF the same fold is bit-identical to C++). The safe subset above already meets the R2 genus
-    // acceptance (identical cubes → genus 0) and is volume-exact on the folds; genus-0 for the general
-    // rotated fold needs the deferred pair. See [`swap_degenerates`] — the port is done, just unwired.
+    tracing::debug!(
+        target: "manifold::simplify",
+        first_new_vert,
+        tris_before,
+        pinched,
+        deduped,
+        short,
+        colinear,
+        swapped,
+        "simplify_topology stages",
+    );
 
     // Compact: drop the marked-removed triangles + NaN/unreferenced verts, reindexing connectivity
     // (C++ defers this to SortGeometry/Finish; we skip SortGeometry so we compact here). faceNormal is

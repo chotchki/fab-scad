@@ -619,6 +619,55 @@ impl Mesh {
         }
     }
 
+    /// Canonicalize the within-triangle half-edge order (Manifold's `ReorderHalfedges`), run AFTER
+    /// `Face2Tri` and BEFORE `SimplifyTopology`. C++ adds a face's half-edges in nondeterministic
+    /// (parallel) order and reorders here for determinism; ours is deterministic but a DIFFERENT order,
+    /// so we apply the same canonicalization — otherwise the collapse cascade in `SimplifyTopology`
+    /// visits edges in a different sequence and gets stuck at a worse (higher-genus) fixed point than C++.
+    ///
+    /// Step 1 rotates each triangle's three half-edges so the one with the smallest `start` vertex is
+    /// first (cyclic order preserved — `end` stays derived). Step 2 repairs each pair pointer by finding,
+    /// in the opposite face, the half-edge whose `end` equals this one's `start`. Per-triangle data
+    /// (`face_normal`/`tri_ref`) is untouched — the triangle INDEX doesn't move, only its internal order.
+    pub fn reorder_halfedges(&mut self) {
+        let num_tri = self.num_tri();
+        // Step 1: rotate within each face so the smallest start vertex leads.
+        for tri in 0..num_tri {
+            let base = 3 * tri;
+            let face = [self.halfedge[base], self.halfedge[base + 1], self.halfedge[base + 2]];
+            if face[0].start_vert.is_none() {
+                continue;
+            }
+            let mut index = 0;
+            for i in [1usize, 2] {
+                if face[i].start_vert < face[index].start_vert {
+                    index = i;
+                }
+            }
+            for i in 0..3 {
+                self.halfedge[base + i] = face[(index + i) % 3];
+            }
+        }
+        // Step 2: repair pair pointers (the pair's within-face position changed under step 1).
+        for tri in 0..num_tri {
+            for i in 0..3 {
+                let curr = HalfedgeId::from_usize(3 * tri + i);
+                let start_vert = self.start(curr);
+                if start_vert.is_none() {
+                    continue;
+                }
+                let opposite_face = self.pair(curr).tri();
+                let mut index = -1i32;
+                for j in 0..3 {
+                    if start_vert == self.end(opposite_face.halfedge(j)) {
+                        index = j as i32;
+                    }
+                }
+                self.set_pair(curr, opposite_face.halfedge(index as usize));
+            }
+        }
+    }
+
     /// Stamp this mesh as a fresh ORIGINAL (Manifold's `InitializeOriginal`): reserve a unique
     /// mesh-instance ID and give every triangle a [`TriRef`] `{mesh_id, original_id: mesh_id, face_id:
     /// -1, coplanar_id: -1}`. The `coplanar_id` is a placeholder here (C++ reads uninitialized memory,

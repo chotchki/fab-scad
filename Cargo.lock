@@ -2916,6 +2916,8 @@ dependencies = [
  "manifold3d",
  "proptest",
  "rayon",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

@@ -30,6 +30,9 @@ pub mod mesh_ids;
 pub mod par;
 // the robust 2D triangulator the boolean reassembly leans on.
 pub mod polygon;
+// Morton-code geometry reindex — the boolean's final canonicalization (`SortGeometry`), so a chained
+// op's intermediate order matches C++ bit-for-bit.
+pub mod sort;
 
 /// The C++ Manifold differential oracle (Oracle A) — a `KernelDriver` trait with a Rust and a C++
 /// backend, plus the triangulation-independent boolean-residual metric. Scaffolds R0..R.X; gone at

@@ -9,6 +9,9 @@ license = "GPL-2.0-or-later"
 # Pillar 2 — portable transcendentals, bit-identical native==wasm. EVERY sin/cos/etc goes through
 # src/mathf.rs (which calls libm); direct `f64::sin` is clippy-banned (clippy.toml) to force it.
 libm = "0.2"
+# Structured diagnostics (verbatim-port debugging: per-stage collapse counts, differential divergence).
+# Compiled out at release log levels; the workspace already standardises on `tracing`.
+tracing = "0.1"
 
 [features]
 default = []
@@ -30,3 +33,6 @@ optional = true
 [dev-dependencies]
 # Port-tests-first: proptest drives the structure-aware CSG-tree fuzzer (Manifold's manifold_fuzz).
 proptest = "1"
+# Test-time tracing subscriber (RUST_LOG-driven) so the differential debug harness can surface per-stage
+# collapse counts + fold divergence without hand-edited eprintln.
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "env-filter", "std"] }

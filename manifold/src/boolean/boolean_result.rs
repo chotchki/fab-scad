@@ -731,6 +731,11 @@ fn result(b3: &Boolean3, in_p: &Mesh, in_q: &Mesh, op: OpType) -> Mesh {
     let epsilon = out.epsilon;
     face2tri(&mut out, &face_edge, &face_halfedges, &halfedge_ref, epsilon);
 
+    // Canonicalize within-face half-edge order (Manifold runs this BEFORE SimplifyTopology) so the
+    // collapse cascade visits edges in the same sequence C++ does — without it the surgery gets stuck at
+    // a higher-genus fixed point on near-degenerate folds.
+    out.reorder_halfedges();
+
     // Map each output triangle's temporary `{0|1, srcTri}` ref to the real source `TriRef`
     // (`triRefP/Q[srcTri]`, Q offset above P), so `simplify_topology`'s `CollapseColinearEdges` can read
     // the coplanar-face IDs.
@@ -744,6 +749,10 @@ fn result(b3: &Boolean3, in_p: &Mesh, in_q: &Mesh, op: OpType) -> Mesh {
     crate::boolean::edge_op::simplify_topology(&mut out, n_pv + n_qv);
 
     out.calculate_bbox();
+    // Canonicalize vertex + triangle order by Morton code (Manifold's `SortGeometry`) — makes a CHAINED
+    // op's intermediate byte-identical to C++'s, so a fold stays bit-identical instead of amplifying
+    // order-dependent tie-breaks into a divergent result.
+    out.sort_geometry();
     out
 }
 

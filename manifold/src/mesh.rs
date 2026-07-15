@@ -165,6 +165,25 @@ impl Mesh {
         self.halfedge[e.u()].prop_vert = p;
     }
 
+    /// Set the END vertex of `e` — since `end` is derived (`= Start(next(e))`), this writes the START of
+    /// the next half-edge in the triangle (Manifold's `Halfedges::SetEnd`). The topology-surgery in
+    /// [`crate::boolean::edge_op`] leans on this heavily (edge collapse/swap repoint verts by their ends).
+    #[inline]
+    pub fn set_end(&mut self, e: HalfedgeId, v: VertId) {
+        self.set_start(e.next(), v);
+    }
+
+    /// Set all three fields of half-edge `e` at once (Manifold's `Halfedges::Set`). `edge_op` uses this
+    /// to MARK a half-edge removed (`Set(e, NONE, NONE, …)`), the collapse/dedup sentinel.
+    #[inline]
+    pub fn set_halfedge(&mut self, e: HalfedgeId, start: VertId, pair: HalfedgeId, prop: VertId) {
+        self.halfedge[e.u()] = Halfedge {
+            start_vert: start,
+            paired_halfedge: pair,
+            prop_vert: prop,
+        };
+    }
+
     /// Drop vertices referenced by no half-edge, COMPACTING `vert_pos` and reindexing the half-edges
     /// (Manifold's `RemoveUnreferencedVerts` only NaNs them in place, leaning on the later `SortGeometry`
     /// to compact — we skip `SortGeometry` for GATE-A, so we compact here directly). Same final vertex
@@ -197,6 +216,58 @@ impl Mesh {
             }
         }
         self.vert_pos = new_pos;
+    }
+
+    /// Drop triangles the topology-surgery marked removed, compacting `halfedge` + `face_normal` and
+    /// reindexing every surviving pair pointer ([`crate::boolean::edge_op`] cleanup tail). Manifold marks
+    /// a removed triangle by setting all three of its half-edges to the `NONE` sentinel (`vertPos` NaN'd
+    /// separately) and defers compaction to a later `SortGeometry`/`Finish`; we skip `SortGeometry`, so we
+    /// compact here. A triangle is dead iff its first half-edge's `start` is `NONE` (Manifold marks the
+    /// whole triple together). The collapse/dedup passes keep the survivors' pairs pointing only at other
+    /// survivors, so the reindexed pairing stays a valid manifold; a `NONE` pair is carried through.
+    pub fn remove_dead_triangles(&mut self) {
+        let old_len = self.halfedge.len();
+        let num_tri = old_len / 3;
+        // old half-edge index → new (NONE for a dead triangle's half-edges).
+        let mut he_remap = vec![HalfedgeId::NONE; old_len];
+        let mut next = 0i32;
+        for tri in 0..num_tri {
+            if self.halfedge[3 * tri].start_vert.is_none() {
+                continue; // dead triangle
+            }
+            for i in 0..3 {
+                he_remap[3 * tri + i] = HalfedgeId::new(next + i as i32);
+            }
+            next += 3;
+        }
+        let has_normals = !self.face_normal.is_empty();
+        let mut new_he = Vec::with_capacity(next as usize);
+        let mut new_fn = Vec::with_capacity(next as usize / 3);
+        for tri in 0..num_tri {
+            if self.halfedge[3 * tri].start_vert.is_none() {
+                continue;
+            }
+            for i in 0..3 {
+                let h = self.halfedge[3 * tri + i];
+                let pair = if h.paired_halfedge.is_none() {
+                    HalfedgeId::NONE
+                } else {
+                    he_remap[h.paired_halfedge.u()]
+                };
+                new_he.push(Halfedge {
+                    start_vert: h.start_vert,
+                    paired_halfedge: pair,
+                    prop_vert: h.prop_vert,
+                });
+            }
+            if has_normals {
+                new_fn.push(self.face_normal[tri]);
+            }
+        }
+        self.halfedge = new_he;
+        if has_normals {
+            self.face_normal = new_fn;
+        }
     }
 
     /// Build the half-edge connectivity from triangle vertex indices, pairing opposite half-edges.

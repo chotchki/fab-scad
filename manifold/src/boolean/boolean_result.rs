@@ -626,12 +626,19 @@ fn result(b3: &Boolean3, in_p: &Mesh, in_q: &Mesh, op: OpType) -> Mesh {
         &face_pq2r[num_tri_p..],
     );
 
-    // Level 6: retriangulate the polygon faces into the final half-edge mesh.
+    // Level 6: retriangulate the polygon faces into the final half-edge mesh. `face2tri` leaves
+    // `out.face_normal` per-TRIANGLE (each triangle carries its polygon face's normal), which
+    // `simplify_topology` reads and carries through the surgery.
     let epsilon = out.epsilon;
     face2tri(&mut out, &face_edge, &face_halfedges, epsilon);
 
-    // Cleanup tail (GATE-A subset): compact dangling verts (keeps genus exact), recompute the bbox.
-    out.remove_unreferenced_verts();
+    // R2 cleanup (`SimplifyTopology`): collapse the coincident/degenerate structure the intersection
+    // assembly leaves at seams — turning the correct-but-unclean fold into an exact-genus manifold
+    // WITHOUT moving the non-intersecting input geometry. New intersection verts begin at `n_pv + n_qv`
+    // (retained P + retained Q); only those may collapse. Also compacts the marked-removed geometry (it
+    // subsumes the old GATE-A `remove_unreferenced_verts`) and rebuilds the vertex normals.
+    crate::boolean::edge_op::simplify_topology(&mut out, n_pv + n_qv);
+
     out.calculate_bbox();
     out
 }

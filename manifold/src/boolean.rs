@@ -23,6 +23,7 @@ pub mod boolean3;
 pub mod boolean_result;
 pub mod collider;
 pub mod disjoint_sets;
+pub mod edge_op;
 pub mod face_op;
 pub mod polygon;
 pub mod predicates;

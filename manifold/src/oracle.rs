@@ -579,10 +579,10 @@ mod tests {
     /// tie-break bug — the partial-coincidence GATE-B cases all pass residual-0, so the cascade is
     /// correct; it's the missing cleanup. The edge_op TRIPWIRE, confirmed fired.
     ///
-    /// `#[ignore]`d until edge_op lands; the assertions ARE the R2 acceptance criterion, so un-ignoring
-    /// this test is the check that R2 fixed it.
+    /// R2 acceptance, now GREEN: `edge_op::simplify_topology`'s provenance-free subset (SplitPinchedVerts
+    /// + DedupeEdges + CollapseShortEdges) collapses the doubled coincident faces to the clean genus-0
+    /// cube. (The un-ignore is the check that R2 fixed the M.1.6 tripwire.)
     #[test]
-    #[ignore = "needs edge_op / SimplifyTopology coplanar-face merge (R2/M.2) — the M.1.6 tripwire"]
     fn identical_cubes_need_coplanar_merge_r2() {
         use crate::boolean::OpType;
         use crate::boolean::boolean_result::boolean;

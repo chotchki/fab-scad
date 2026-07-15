@@ -112,7 +112,10 @@ impl Mesh {
     /// deterministic; half-edge `start`/`prop` are remapped to the new indices.
     fn sort_verts(&mut self) {
         let num_vert = self.num_vert();
-        let vert_morton: Vec<u32> = (0..num_vert).map(|v| morton_code(self.vert_pos[v], self.b_box)).collect();
+        // Per-vertex Morton code — an independent pure function of (position, bbox), so it maps through
+        // the order-preserving `par::` seam (par == seq by construction). M.4.
+        let bbox = self.b_box;
+        let vert_morton: Vec<u32> = crate::par::map_collect(&self.vert_pos, |&p| morton_code(p, bbox));
 
         // new -> old permutation, sorted by Morton code with the ORIGINAL INDEX as a total-order
         // tiebreak (M.4.2). Distinct verts sharing a 30-bit-quantized Morton code would otherwise tie,
@@ -154,19 +157,24 @@ impl Mesh {
     /// `halfedge` with pair pointers translated through the face permutation (`ReindexFace`).
     fn sort_faces(&mut self) {
         let old_num_tri = self.num_tri();
-        let mut face_morton = vec![K_NO_CODE; old_num_tri];
-        for (face, code) in face_morton.iter_mut().enumerate() {
-            let t = TriId::from_usize(face);
-            // A removed tri has an unpaired first half-edge — leave it at kNoCode to sort to the end.
-            if self.pair(t.first_halfedge()).is_none() {
-                continue;
-            }
-            let center = (self.pos(self.start(t.halfedge(0)))
-                + self.pos(self.start(t.halfedge(1)))
-                + self.pos(self.start(t.halfedge(2))))
-                / 3.0;
-            *code = morton_code(center, self.b_box);
-        }
+        // Per-face centroid Morton code — independent per face (a removed tri stays `kNoCode`), so it maps
+        // through the `par::` seam (order-preserving ⇒ par == seq). M.4. Block-scoped immutable reborrow.
+        let face_morton: Vec<u32> = {
+            let this = &*self;
+            let bbox = this.b_box;
+            crate::par::map_collect(&(0..old_num_tri).collect::<Vec<_>>(), |&face| {
+                let t = TriId::from_usize(face);
+                // A removed tri has an unpaired first half-edge — leave it at kNoCode to sort last.
+                if this.pair(t.first_halfedge()).is_none() {
+                    return K_NO_CODE;
+                }
+                let center = (this.pos(this.start(t.halfedge(0)))
+                    + this.pos(this.start(t.halfedge(1)))
+                    + this.pos(this.start(t.halfedge(2))))
+                    / 3.0;
+                morton_code(center, bbox)
+            })
+        };
 
         // Original-index tiebreak for total order (M.4.2) — same rationale as `sort_verts`.
         let mut new2old: Vec<usize> = (0..old_num_tri).collect();

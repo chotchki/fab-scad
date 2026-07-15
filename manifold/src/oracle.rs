@@ -1696,6 +1696,65 @@ mod tests {
         eprintln!("M.3.4b.8 ✓ negateNormals matches C++ (∫normal dA per channel)");
     }
 
+    /// M.5.1 — the 2D `CrossSection` AREA-RESIDUAL gate vs Clipper2-via-Manifold. Our i_overlay-backed
+    /// CrossSection and C++'s Clipper2 are DIFFERENT engines, so we don't bit-match — we match AREA (the
+    /// algorithm-independent gate, exactly like minkowski's volume-residual). Across a corpus of
+    /// union/difference/intersection cases (incl. holes + a tilted polygon), `|area_rust − area_cpp|`
+    /// must be < 1e-5 relative.
+    #[test]
+    fn m5_1_cross_section_area_vs_cpp() {
+        use crate::cross_section::CrossSection;
+        use crate::linalg::Vec2;
+
+        let sq = |x: f64, y: f64, s: f64| -> Vec<Vec2> {
+            vec![Vec2::new(x, y), Vec2::new(x + s, y), Vec2::new(x + s, y + s), Vec2::new(x, y + s)]
+        };
+        // A CCW diamond (tilted square) of "radius" r centred at c.
+        let diamond = |cx: f64, cy: f64, r: f64| -> Vec<Vec2> {
+            vec![
+                Vec2::new(cx + r, cy),
+                Vec2::new(cx, cy + r),
+                Vec2::new(cx - r, cy),
+                Vec2::new(cx, cy - r),
+            ]
+        };
+        let to_cpp = |polys: &[Vec<Vec2>]| -> manifold3d::CrossSection {
+            let cp: Vec<Vec<[f64; 2]>> =
+                polys.iter().map(|c| c.iter().map(|p| [p.x, p.y]).collect()).collect();
+            manifold3d::CrossSection::from_polygons(&cp)
+        };
+
+        type Polys = Vec<Vec<Vec2>>;
+        let cases: Vec<(&str, Polys, Polys)> = vec![
+            ("overlap squares", vec![sq(0.0, 0.0, 2.0)], vec![sq(1.0, 1.0, 2.0)]),
+            ("holed vs square", vec![sq(0.0, 0.0, 10.0)], vec![sq(4.0, 4.0, 2.0)]),
+            ("square vs diamond", vec![sq(0.0, 0.0, 4.0)], vec![diamond(2.0, 2.0, 3.0)]),
+            ("disjoint", vec![sq(0.0, 0.0, 1.0)], vec![sq(9.0, 9.0, 1.0)]),
+            (
+                "two-piece subject",
+                vec![sq(0.0, 0.0, 2.0), sq(5.0, 0.0, 2.0)],
+                vec![sq(1.0, 1.0, 5.0)],
+            ),
+        ];
+
+        for (label, subj, clip) in &cases {
+            let (rs, rc) = (CrossSection::from_polygons(subj), CrossSection::from_polygons(clip));
+            let (cs, cc) = (to_cpp(subj), to_cpp(clip));
+            for (op, r_area, c_area) in [
+                ("union", rs.union(&rc).area(), cs.union(&cc).area()),
+                ("difference", rs.difference(&rc).area(), cs.difference(&cc).area()),
+                ("intersection", rs.intersection(&rc).area(), cs.intersection(&cc).area()),
+            ] {
+                let resid = (r_area - c_area).abs() / c_area.abs().max(1e-9);
+                assert!(
+                    resid < 1e-5,
+                    "{label}/{op}: area rust {r_area} cpp {c_area} (residual {resid:.3e})"
+                );
+            }
+        }
+        eprintln!("M.5.1 ✓ CrossSection area-residual < 1e-5 vs Clipper2 across {} cases", cases.len());
+    }
+
     /// M.2.3 — the KEYHOLE integration test: a bar punched all the way through a box (difference) leaves a
     /// square HOLE in the box's top and bottom faces, so `Face2Tri` must triangulate a holed polygon (an
     /// outer loop + an interior CW hole loop) via `CutKeyhole`. Without the keyhole path those faces fill

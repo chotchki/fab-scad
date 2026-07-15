@@ -15,6 +15,9 @@ tracing = "0.1"
 # Typed geometry errors (`status::Error`). The eager ops surface failure as `Result`, NOT the C++
 # lazy-CSG `status_` field — see `status.rs`. Workspace already standardises on `thiserror` v2.
 thiserror = "2"
+# R5 — the 2D boolean engine. Manifold's 2D IS Clipper2; we adopt i_overlay (pure-Rust, integer-coords ⇒
+# deterministic + wasm-clean) and validate by AREA-residual, NOT bit-match (SPEC [OPEN #4], M.5.0 spike).
+i_overlay = "7.0.2"
 
 [features]
 default = []
@@ -34,7 +37,6 @@ version = "0.3.1"
 optional = true
 
 [dev-dependencies]
-i_overlay = "7.0.2"
 # Test-time tracing subscriber (RUST_LOG-driven) so the differential debug harness can surface per-stage
 # collapse counts + fold divergence without hand-edited eprintln.
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "env-filter", "std"] }

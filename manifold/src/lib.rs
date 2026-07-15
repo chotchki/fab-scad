@@ -18,6 +18,9 @@
 pub mod boolean;
 // Oracle B: the manifold-invariant checker (test.h port), reference-free.
 pub mod check;
+// R5 — the 2D `CrossSection` subsystem, over the i_overlay 2D boolean engine (area-residual gated, NOT
+// bit-exact — the one layer where the verbatim thesis relaxes; SPEC [OPEN #4]).
+pub mod cross_section;
 // The internal linalg (linalg.h subset) — vec2/3/4, mat3x4, Box; op order matches the C++ oracle.
 pub mod linalg;
 // Pillar 2: the libm seam — every transcendental routes through here.

@@ -464,6 +464,53 @@ impl Mesh {
         self.vert_pos.iter().all(|p| p.is_finite())
     }
 
+    /// The axis-aligned box primitive (`Manifold::Cube`, M.3.5): the canonical unit `Shape::Cube`
+    /// (8 verts, 12 tris — verbatim vertex + triangle ORDER from `impl.cpp`) scaled by `size` and, if
+    /// `center`, shifted so its centroid is the origin. Runs the full primitive constructor sequence
+    /// (`CreateHalfedges` → `InitializeOriginal` → `CalculateBBox` → `SetEpsilon` → `SortGeometry` →
+    /// `SetNormalsAndCoplanar`), so the result is boolean-ready and Morton-canonical like every C++
+    /// primitive. A negative or zero-length `size` is `Err(InvalidConstruction)` (C++ returns
+    /// `Invalid()`); used internally by [`Mesh::split_by_plane`]/[`Mesh::trim_by_plane`] to build the
+    /// cutting half-space.
+    pub fn cube(size: Vec3, center: bool) -> Result<Mesh, Error> {
+        if size.x < 0.0 || size.y < 0.0 || size.z < 0.0 || size.length() == 0.0 {
+            return Err(Error::InvalidConstruction);
+        }
+        // Canonical `Shape::Cube` — corners in 000,001,010,011,100,101,110,111 order.
+        #[rustfmt::skip]
+        let base = [
+            Vec3::new(0.0, 0.0, 0.0), Vec3::new(0.0, 0.0, 1.0),
+            Vec3::new(0.0, 1.0, 0.0), Vec3::new(0.0, 1.0, 1.0),
+            Vec3::new(1.0, 0.0, 0.0), Vec3::new(1.0, 0.0, 1.0),
+            Vec3::new(1.0, 1.0, 0.0), Vec3::new(1.0, 1.0, 1.0),
+        ];
+        #[rustfmt::skip]
+        let tris: [[u32; 3]; 12] = [
+            [1, 0, 4], [2, 4, 0], [1, 3, 0], [3, 1, 5],
+            [3, 2, 0], [3, 7, 2], [5, 4, 6], [5, 1, 4],
+            [6, 4, 2], [7, 6, 2], [7, 3, 5], [7, 5, 6],
+        ];
+        // m = scale(size) with translation (center ? -size/2 : 0); `v = m * vec4(v, 1)`.
+        let m = Mat3x4 {
+            x: Vec3::new(size.x, 0.0, 0.0),
+            y: Vec3::new(0.0, size.y, 0.0),
+            z: Vec3::new(0.0, 0.0, size.z),
+            w: if center { size * -0.5 } else { Vec3::ZERO },
+        };
+        let mut mesh = Mesh {
+            vert_pos: base.iter().map(|&v| m.transform_point(v)).collect(),
+            num_prop: 3,
+            ..Default::default()
+        };
+        mesh.create_halfedges(&tris);
+        mesh.initialize_original();
+        mesh.calculate_bbox();
+        mesh.set_epsilon(-1.0, false);
+        mesh.sort_geometry();
+        mesh.set_normals_and_coplanar();
+        Ok(mesh)
+    }
+
     /// Ingest a `MeshGl` (flat buffers) into the spine: extract positions, carry extra properties,
     /// build connectivity, compute the bbox. Panics if `num_prop < 3` or the buffers are ragged.
     pub fn from_mesh_gl(m: &MeshGl) -> Mesh {
@@ -1170,6 +1217,33 @@ mod tests {
         assert_eq!(stripped.num_prop, 3);
         assert!(stripped.props_extra.is_empty());
         assert_eq!(stripped.to_mesh_gl(), unit_cube());
+    }
+
+    /// M.3.5 — the `cube` primitive: centered/uncentered, volume = size product, manifold + genus 0,
+    /// and the invalid-size guard.
+    #[test]
+    fn cube_primitive_geometry_and_guards() {
+        let v3 = Vec3::new;
+        // Centered 2-cube → [-1,1]³, volume 8.
+        let c = Mesh::cube(Vec3::splat(2.0), true).unwrap();
+        assert!(c.is_manifold());
+        assert_eq!(c.num_tri(), 12);
+        assert_eq!(c.num_vert(), 8);
+        assert!((c.volume() - 8.0).abs() < 1e-12, "vol {}", c.volume());
+        assert_eq!(crate::check::genus(&c), 0);
+        assert_eq!(c.bounding_box().min, v3(-1.0, -1.0, -1.0));
+        assert_eq!(c.bounding_box().max, v3(1.0, 1.0, 1.0));
+
+        // Uncentered non-uniform box → [0,2]×[0,3]×[0,4], volume 24.
+        let b = Mesh::cube(v3(2.0, 3.0, 4.0), false).unwrap();
+        assert!(b.is_manifold());
+        assert!((b.volume() - 24.0).abs() < 1e-12, "vol {}", b.volume());
+        assert_eq!(b.bounding_box().min, v3(0.0, 0.0, 0.0));
+        assert_eq!(b.bounding_box().max, v3(2.0, 3.0, 4.0));
+
+        // Invalid sizes → InvalidConstruction (C++ Invalid()).
+        assert_eq!(Mesh::cube(v3(-1.0, 1.0, 1.0), true).unwrap_err(), Error::InvalidConstruction);
+        assert_eq!(Mesh::cube(Vec3::ZERO, false).unwrap_err(), Error::InvalidConstruction);
     }
 
     #[test]

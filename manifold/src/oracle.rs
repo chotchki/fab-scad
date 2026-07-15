@@ -1398,17 +1398,18 @@ mod tests {
     }
 
     /// M.3.7 — Minkowski sum (`Mesh::minkowski_sum`, the tiered hull+union port) held to the solid
-    /// oracle vs C++ `minkowski_sum`. TIER 0 (convex×convex) only: box⊕box and octahedron⊕box (a
-    /// non-axis-aligned convex operand, so the hull-of-vertex-sums is non-trivial). Both operands are
-    /// built Rust-side and the SAME geometry ingested into C++, so the comparison is apples-to-apples.
-    /// The gate is volume-residual (algorithm-independent — Minkowski triangulation is never
-    /// byte-identical), leaning on `solid_divergence`'s volume + genus + point-in-mesh.
-    ///
-    /// Tier 1/2 (nonconvex) are implemented but NOT gated here: they union overlapping swept-face
-    /// hulls, and the boolean's coplanar-merge infinite-loops on some such unions (an R2 boolean
-    /// robustness gap — see `minkowski.rs` module doc + the deferred plan item).
+    /// oracle vs C++ `minkowski_sum`, across all three tiers: Tier 0 (convex×convex — box⊕box,
+    /// octahedron⊕box), Tier 1 (nonconvex×convex — a corner-notched cube dilated by a cube), Tier 2
+    /// (nonconvex×nonconvex — two corner-notched cubes). Both operands are built Rust-side and the
+    /// SAME geometry ingested into C++, so the comparison is apples-to-apples. The gate is
+    /// volume-residual (algorithm-independent — Minkowski triangulation is never byte-identical),
+    /// leaning on `solid_divergence`'s volume + genus + point-in-mesh. Tier 1/2 exercise the
+    /// swept-face-hull union path that M.3.9 (the coplanar-merge fix) unblocked.
     #[test]
     fn m3_7_minkowski_vs_cpp() {
+        use crate::boolean::OpType;
+        use crate::boolean::boolean_result::boolean;
+
         let cube_a = prepared_box(0.0, 0.0, 0.0, 6.0, 6.0, 6.0); // convex
         let cube_b = prepared_box(-1.0, -1.0, -1.0, 2.0, 2.0, 2.0); // [-1,1]³ convex, holds origin
         // An octahedron (hull of the 6 axis points, scaled) — a convex, non-box operand.
@@ -1423,9 +1424,26 @@ mod tests {
         .unwrap();
         assert!(octa.is_convex(), "octahedron must be convex");
 
+        // Concave operands: a cube with a corner cube bitten out.
+        let concave_a = boolean(
+            &prepared_box(0.0, 0.0, 0.0, 6.0, 6.0, 6.0),
+            &prepared_box(3.0, 3.0, 3.0, 4.0, 4.0, 4.0), // removes the [3,6]³ corner
+            OpType::Subtract,
+        );
+        assert!(!concave_a.is_convex());
+        let concave_b = boolean(
+            &prepared_box(0.0, 0.0, 0.0, 4.0, 4.0, 4.0),
+            &prepared_box(2.0, 2.0, 2.0, 3.0, 3.0, 3.0), // removes the [2,4]³ corner
+            OpType::Subtract,
+        );
+        assert!(!concave_b.is_convex());
+        let tool = prepared_box(-0.5, -0.5, -0.5, 1.0, 1.0, 1.0); // small convex dilation tool
+
         let cases: Vec<(&str, &Mesh, &Mesh)> = vec![
-            ("cube⊕cube", &cube_a, &cube_b),
-            ("octa⊕cube", &octa, &cube_b),
+            ("t0 cube⊕cube", &cube_a, &cube_b),
+            ("t0 octa⊕cube", &octa, &cube_b),
+            ("t1 concave⊕cube", &concave_a, &tool),
+            ("t2 concave⊕concave", &concave_a, &concave_b),
         ];
 
         for (i, (label, a, b)) in cases.iter().enumerate() {
@@ -1440,7 +1458,7 @@ mod tests {
                 panic!("{label}: minkowski diverges from C++: {r}");
             }
         }
-        eprintln!("M.3.7 ✓ minkowski (tier 0 convex×convex) matches C++");
+        eprintln!("M.3.7 ✓ minkowski (tiers 0/1/2) matches C++ across {} cases", cases.len());
     }
 
     /// M.2.3 — the KEYHOLE integration test: a bar punched all the way through a box (difference) leaves a

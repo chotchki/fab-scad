@@ -25,12 +25,9 @@
 //! - **Inset/difference deferred.** Only `minkowski_sum` (dilate) ships here; `MinkowskiDifference`
 //!   (erode, `inset = true`) is a later box — no stub, no caller yet.
 //!
-//! LIMITATION (Tier 1/2): the swept-face hulls this generates overlap on shared coordinate planes,
-//! and the boolean's coplanar-merge INFINITE-LOOPS on some such unions (a robustness gap in the R2
-//! boolean core, NOT in this code — the identical geometry built with a different triangulation
-//! unions fine). Reproduce: `prepared_box` concave `[0,6]³ ∖ [3,6]³` ⊕ `[-0.5,0.5]³` tool hangs in a
-//! 20-tri ∪ 20-tri union. So only Tier 0 (convex×convex) is gated + wired; Tier 1/2 are correct but
-//! blocked on that fix, and have no caller yet.
+//! All three tiers are gated vs C++ `minkowski_sum` (`m3_7_minkowski_vs_cpp`). Tier 1/2 were briefly
+//! blocked by a boolean coplanar-merge infinite loop the swept-face-hull unions triggered — that was
+//! a port bug in the ear-clip (`ring`'s dropped re-anchor), fixed in M.3.9.
 
 use crate::boolean::OpType;
 use crate::boolean::boolean_result::boolean;
@@ -188,11 +185,8 @@ mod tests {
 
     #[test]
     fn tier1_nonconvex_convex_dilates() {
-        // Tier 1: dilate a concave solid ([0,6]³ minus the [0,3]³ octant) by a small cube.
-        // NOTE: Tier 1 unions overlapping swept-face hulls; on inputs whose sweeps land on shared
-        // coordinate planes the boolean's coplanar-merge can infinite-loop (a boolean robustness gap,
-        // captured as a deferred item). These `Mesh::cube` inputs avoid that, so this exercises the
-        // Tier-1 path end-to-end.
+        // Tier 1: dilate a concave solid ([0,6]³ minus the [0,3]³ octant) by a small cube. Exercises
+        // the swept-face-hull union path end-to-end (the C++ differential lives in the oracle suite).
         let big = Mesh::cube(Vec3::splat(6.0), false).unwrap();
         let notch = Mesh::cube(Vec3::splat(3.0), false).unwrap();
         let concave = boolean(&big, &notch, OpType::Subtract);

@@ -1021,6 +1021,88 @@ mod tests {
         }
     }
 
+    // =====================================================================================
+    // ★ R2 (M.2.1) — difference + intersection. The op param (c1/c2/c3 + invertQ) was ported in the
+    //   M.1.3 assembly but never exercised (only Add was gated). Offset cubes: P−Q and P∩Q must be
+    //   watertight, analytic-volume, and match C++ on the triangulation-robust solid oracle.
+    // =====================================================================================
+    #[test]
+    fn r2_offset_difference_intersection_vs_cpp() {
+        use crate::boolean::OpType;
+        use crate::boolean::boolean_result::boolean;
+
+        let p = prepared_box(0.0, 0.0, 0.0, 1.0, 1.0, 1.0);
+        let q = prepared_box(0.3, 0.4, 0.5, 1.0, 1.0, 1.0);
+        let p_cpp = CppKernel::ingest(&p.to_mesh_gl()).unwrap();
+        let q_cpp = CppKernel::ingest(&q.to_mesh_gl()).unwrap();
+        // overlap = [0.3,1]×[0.4,1]×[0.5,1] = 0.7·0.6·0.5 = 0.21.
+
+        // Subtract: P − Q = 1 − 0.21 = 0.79.
+        let sub = boolean(&p, &q, OpType::Subtract);
+        assert!(sub.is_manifold(), "P−Q is not manifold");
+        assert!((sub.volume() - 0.79).abs() < 1e-9, "P−Q volume {} != 0.79", sub.volume());
+        let sub_b = Mesh::from_mesh_gl(&cpp_to_mesh_gl(&p_cpp.difference(&q_cpp)));
+        if let Some(r) = solid_divergence(&sub, &sub_b, 5000, 0xD1FF) {
+            panic!("P−Q diverges from C++: {r}");
+        }
+
+        // Intersect: P ∩ Q = 0.21.
+        let int = boolean(&p, &q, OpType::Intersect);
+        assert!(int.is_manifold(), "P∩Q is not manifold");
+        assert!((int.volume() - 0.21).abs() < 1e-9, "P∩Q volume {} != 0.21", int.volume());
+        let int_b = Mesh::from_mesh_gl(&cpp_to_mesh_gl(&p_cpp.intersection(&q_cpp)));
+        if let Some(r) = solid_divergence(&int, &int_b, 5000, 0x1417) {
+            panic!("P∩Q diverges from C++: {r}");
+        }
+        eprintln!("R2 ✓ P−Q (vol {:.4}) + P∩Q (vol {:.4}) match C++", sub.volume(), int.volume());
+    }
+
+    /// R2 sweep: difference + intersection across several general-position box pairs (varied sizes +
+    /// offsets, all genuinely overlapping so results are non-empty), each held to the solid oracle vs
+    /// C++. Guards the op param (invertQ face-flip for Subtract, the c1/c2/c3 inclusion transforms)
+    /// against config-specific bugs the single offset case can't reach.
+    #[test]
+    fn r2_diff_intersect_sweep_vs_cpp() {
+        use crate::boolean::OpType;
+        use crate::boolean::boolean_result::boolean;
+
+        let configs: &[(BoxParams, BoxParams)] = &[
+            ((0.0, 0.0, 0.0, 1.0, 1.0, 1.0), (0.3, 0.4, 0.5, 1.0, 1.0, 1.0)),
+            ((0.0, 0.0, 0.0, 2.0, 1.0, 1.0), (0.5, 0.3, -0.2, 1.0, 2.0, 1.0)),
+            ((0.0, 0.0, 0.0, 3.0, 2.0, 1.0), (1.3, 0.7, -0.4, 1.0, 1.0, 2.0)),
+            ((0.0, 0.0, 0.0, 2.0, 3.0, 2.0), (0.6, 1.1, 0.7, 3.0, 1.0, 1.0)),
+        ];
+
+        for (i, &(pp, qp)) in configs.iter().enumerate() {
+            let p = prepared_box(pp.0, pp.1, pp.2, pp.3, pp.4, pp.5);
+            let q = prepared_box(qp.0, qp.1, qp.2, qp.3, qp.4, qp.5);
+            let p_cpp = CppKernel::ingest(&p.to_mesh_gl()).unwrap();
+            let q_cpp = CppKernel::ingest(&q.to_mesh_gl()).unwrap();
+
+            for op in [OpType::Subtract, OpType::Intersect] {
+                let a = boolean(&p, &q, op);
+                assert!(a.is_manifold(), "R2 sweep [{i}] {op:?}: not manifold");
+                let b_cpp = match op {
+                    OpType::Subtract => p_cpp.difference(&q_cpp),
+                    OpType::Intersect => p_cpp.intersection(&q_cpp),
+                    OpType::Add => unreachable!(),
+                };
+                let bvol = b_cpp.volume();
+                assert!(!a.is_empty() && bvol > 1e-6, "R2 sweep [{i}] {op:?}: empty result");
+                assert!(
+                    (a.volume() - bvol).abs() / bvol.abs().max(1e-9) < 1e-9,
+                    "R2 sweep [{i}] {op:?}: volume {} vs cpp {bvol}",
+                    a.volume()
+                );
+                let b = Mesh::from_mesh_gl(&cpp_to_mesh_gl(&b_cpp));
+                if let Some(r) = solid_divergence(&a, &b, 4000, 0x5A5A + i as u64) {
+                    panic!("R2 sweep [{i}] {op:?} diverges from C++: {r}");
+                }
+            }
+        }
+        eprintln!("R2 ✓ difference + intersection sweep ({} configs) match C++", configs.len());
+    }
+
     /// Exercises the divergence-REPORTING machinery (the paths that only fire when the kernels
     /// disagree — normally dormant because the port is faithful).
     #[test]

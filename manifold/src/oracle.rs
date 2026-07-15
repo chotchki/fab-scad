@@ -603,6 +603,111 @@ mod tests {
         assert!(sym.volume() / a_cpp.volume() < 1e-5, "identical union residual dirty");
     }
 
+    /// A tiny deterministic PRNG (PCG-style LCG) — the thesis sweep is reproducible with zero deps
+    /// (proptest drives the continuous fuzzer in M.1.5; here we just want a fixed, replayable stream).
+    struct Lcg(u64);
+    impl Lcg {
+        fn new(seed: u64) -> Self {
+            Lcg(seed ^ 0x9E37_79B9_7F4A_7C15)
+        }
+        fn next_u32(&mut self) -> u32 {
+            self.0 = self
+                .0
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (self.0 >> 33) as u32
+        }
+        fn range(&mut self, lo: f64, hi: f64) -> f64 {
+            lo + (self.next_u32() as f64 / u32::MAX as f64) * (hi - lo)
+        }
+    }
+
+    /// Re-prepare an intermediate union result for the next boolean (bbox + epsilon + both normal
+    /// fields), mirroring a fresh input. `boolean` leaves face_normal but not vert_normal.
+    fn prepare(mesh: &mut Mesh) {
+        mesh.calculate_bbox();
+        mesh.set_epsilon(-1.0, false);
+        mesh.calculate_face_normals();
+        mesh.calculate_vert_normals();
+    }
+
+    // =====================================================================================
+    // ★ M.1.6 THESIS (R1 exit) — random multi-cube FOLD-unions vs C++. Beyond the fixed GATE-A/B
+    //   configs, this hits the boolean on its OWN output (each fold step unions the running result with
+    //   another cube) across a seeded sweep of continuous-random boxes (general position — exact
+    //   coincidence measure-zero, so the R2-deferred coplanar case never fires). Every result must be a
+    //   watertight solid matching C++ to residual < 1e-5 and volume to 1e-9. CLEAN ⇒ the R1 tracer
+    //   thesis holds. (The cargo-fuzz/ASan 1h continuous run + polygon_fuzz port are the M.1.5 tail.)
+    // =====================================================================================
+    #[test]
+    fn thesis_random_cube_fold_unions_vs_cpp() {
+        use crate::boolean::OpType;
+        use crate::boolean::boolean_result::boolean;
+
+        let mut rng = Lcg::new(0x00F1_A5C0_FFEE);
+        // 120 standing trials (~0.4s); a one-off 600-trial × 8-cube stress ran clean during M.1.6.
+        let trials = 120;
+        for trial in 0..trials {
+            let n = 2 + (rng.next_u32() % 5) as usize; // 2..=6 cubes
+
+            // Continuous-random boxes: origins cluster in [0,2.5), sizes in [0.8,2.5) so unions overlap.
+            let rmeshes: Vec<Mesh> = (0..n)
+                .map(|_| {
+                    prepared_box(
+                        rng.range(0.0, 2.5),
+                        rng.range(0.0, 2.5),
+                        rng.range(0.0, 2.5),
+                        rng.range(0.8, 2.5),
+                        rng.range(0.8, 2.5),
+                        rng.range(0.8, 2.5),
+                    )
+                })
+                .collect();
+            let gls: Vec<MeshGl> = rmeshes.iter().map(|m| m.to_mesh_gl()).collect();
+
+            // Rust fold-union, re-preparing each intermediate.
+            let mut acc = rmeshes[0].clone();
+            for c in &rmeshes[1..] {
+                acc = boolean(&acc, c, OpType::Add);
+                if acc.is_empty() {
+                    break;
+                }
+                assert!(
+                    acc.is_manifold(),
+                    "THESIS trial {trial} (n={n}): an intermediate union is not manifold"
+                );
+                prepare(&mut acc);
+            }
+
+            // C++ fold-union in the same order.
+            let mut ccpp = CppKernel::ingest(&gls[0]).unwrap();
+            for g in &gls[1..] {
+                ccpp = ccpp.union(&CppKernel::ingest(g).unwrap());
+            }
+
+            // Watertight, volume-matched, residual-clean.
+            assert!(
+                acc.is_manifold(),
+                "THESIS trial {trial} (n={n}): final union not manifold"
+            );
+            let rvol = acc.volume();
+            let cvol = ccpp.volume();
+            assert!(
+                (rvol - cvol).abs() / cvol.abs().max(1e-9) < 1e-9,
+                "THESIS trial {trial} (n={n}): volume rust {rvol} vs cpp {cvol}"
+            );
+            let a_cpp = CppKernel::ingest(&acc.to_mesh_gl())
+                .unwrap_or_else(|e| panic!("THESIS trial {trial} (n={n}): cpp rejects rust union: {e}"));
+            let sym = a_cpp.difference(&ccpp).union(&ccpp.difference(&a_cpp));
+            let residual = sym.volume() / a_cpp.volume().max(1e-12);
+            assert!(
+                residual < 1e-5,
+                "THESIS trial {trial} (n={n}): residual {residual:.3e} >= 1e-5"
+            );
+        }
+        eprintln!("THESIS ✓ {trials} random multi-cube fold-unions — watertight, residual-clean vs C++");
+    }
+
     /// Exercises the divergence-REPORTING machinery (the paths that only fire when the kernels
     /// disagree — normally dormant because the port is faithful).
     #[test]

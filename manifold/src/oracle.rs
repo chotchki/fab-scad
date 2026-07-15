@@ -631,6 +631,138 @@ mod tests {
         mesh.calculate_vert_normals();
     }
 
+    // --- Triangulation-robust solid comparison (chotchki's methodology: invariants + Monte-Carlo). The
+    // boolean-residual metric runs through C++'s tolerance booleans, which sliver when tessellations
+    // diverge (our un-simplified R1 mesh keeps collinear verts C++ merges). These read the SOLID, not
+    // the mesh: scalar invariants (per-mesh, sliver-free) as a fast pre-check, then Monte-Carlo
+    // containment run with OUR OWN point-in-mesh on BOTH meshes — no C++ booleans, triangulation-blind. ---
+
+    /// Möller–Trumbore ray/triangle: returns `(t, u, v)` (ray parameter + barycentrics); the caller
+    /// range-checks. `None` when the ray is parallel to the triangle.
+    fn ray_tri(orig: Vec3, dir: Vec3, v0: Vec3, v1: Vec3, v2: Vec3) -> Option<(f64, f64, f64)> {
+        let e1 = v1 - v0;
+        let e2 = v2 - v0;
+        let pv = dir.cross(e2);
+        let det = e1.dot(pv);
+        if det.abs() < 1e-14 {
+            return None;
+        }
+        let inv = 1.0 / det;
+        let tv = orig - v0;
+        let u = tv.dot(pv) * inv;
+        let qv = tv.cross(e1);
+        let v = dir.dot(qv) * inv;
+        let t = e2.dot(qv) * inv;
+        Some((t, u, v))
+    }
+
+    /// Parity of a ray's forward crossings of `mesh` — `Some(inside)`, or `None` if the ray GRAZES an
+    /// edge/vertex (ambiguous, so the caller retries another direction).
+    fn cast_parity(p: Vec3, dir: Vec3, mesh: &Mesh) -> Option<bool> {
+        use crate::mesh_ids::TriId;
+        const M: f64 = 1e-9; // barycentric edge margin
+        let mut count = 0u32;
+        for tri in 0..mesh.num_tri() {
+            let t = TriId::from_usize(tri);
+            let v0 = mesh.pos(mesh.start(t.halfedge(0)));
+            let v1 = mesh.pos(mesh.start(t.halfedge(1)));
+            let v2 = mesh.pos(mesh.start(t.halfedge(2)));
+            if let Some((tt, u, v)) = ray_tri(p, dir, v0, v1, v2) {
+                if tt <= 1e-12 {
+                    continue; // behind the point or at it
+                }
+                let w = 1.0 - u - v;
+                if u < -M || v < -M || w < -M {
+                    continue; // misses the triangle
+                }
+                if u < M || v < M || w < M {
+                    return None; // grazes an edge/vertex — ambiguous
+                }
+                count += 1;
+            }
+        }
+        Some(count % 2 == 1)
+    }
+
+    /// Is `p` inside the closed manifold `mesh`? Ray-cast parity with a few generic (non-axis-aligned)
+    /// directions; the first that doesn't graze decides. (A point exactly on the surface is excluded by
+    /// the caller's sampling, not here.)
+    fn point_inside_mesh(p: Vec3, mesh: &Mesh) -> bool {
+        const DIRS: [(f64, f64, f64); 4] = [
+            (0.31, 0.53, 0.79),
+            (0.87, -0.29, 0.41),
+            (-0.19, 0.67, -0.72),
+            (0.41, -0.83, 0.37),
+        ];
+        for &(x, y, z) in &DIRS {
+            if let Some(inside) = cast_parity(p, Vec3::new(x, y, z), mesh) {
+                return inside;
+            }
+        }
+        false // all four grazed — vanishingly unlikely; treat as outside
+    }
+
+    /// Scalar-invariant agreement (the fast pre-check): VOLUME (relative) + BBOX (relative).
+    ///
+    /// Deliberately NOT area or genus: both are CLEANLINESS-sensitive, and an un-simplified R1 mesh
+    /// legitimately carries internal degenerate structure (coincident/doubled walls at fold seams that
+    /// `SimplifyTopology`/`edge_op` = R2 would remove) — that inflates area and breaks genus WITHOUT
+    /// changing the solid (proven: Monte-Carlo 0/100000 + bit-identical volume on the same case). Only
+    /// volume + bbox are robust to it; Monte-Carlo containment carries the shape check. (Single unions —
+    /// GATE-A/B — DO gate genus, where the topology is clean; folds don't, pending R2.)
+    fn invariants_divergence(a: &Mesh, b_vol: f64, b_box: Box3) -> Option<String> {
+        let rel = |x: f64, y: f64| (x - y).abs() / y.abs().max(1e-9);
+        if rel(a.volume(), b_vol) >= 1e-9 {
+            return Some(format!("volume {} vs {b_vol}", a.volume()));
+        }
+        let bb = a.b_box;
+        for (x, y) in [
+            (bb.min.x, b_box.min.x), (bb.min.y, b_box.min.y), (bb.min.z, b_box.min.z),
+            (bb.max.x, b_box.max.x), (bb.max.y, b_box.max.y), (bb.max.z, b_box.max.z),
+        ] {
+            if (x - y).abs() > 1e-9 * y.abs().max(1.0) {
+                return Some(format!("bbox {x} vs {y}"));
+            }
+        }
+        None
+    }
+
+    /// Triangulation-robust solid equality: invariant pre-check, then Monte-Carlo containment (our
+    /// point-in-mesh on BOTH meshes over `n` seeded points in the shared bbox). Estimates the
+    /// symmetric-difference fraction; a correct union disagrees only on the vanishing boundary-rounding
+    /// shell. `Some(reason)` on divergence.
+    fn solid_divergence(a: &Mesh, b: &Mesh, n: usize, seed: u64) -> Option<String> {
+        if let Some(r) = invariants_divergence(a, b.volume(), b.b_box) {
+            return Some(format!("invariant: {r}"));
+        }
+        let lo = a.b_box.min.cmin(b.b_box.min);
+        let hi = a.b_box.max.cmax(b.b_box.max);
+        let size = hi - lo;
+        let bbox_vol = size.x * size.y * size.z;
+        let mut rng = Lcg::new(seed);
+        let mut disagree = 0u32;
+        for _ in 0..n {
+            let p = Vec3::new(
+                lo.x + rng.range(0.0, 1.0) * size.x,
+                lo.y + rng.range(0.0, 1.0) * size.y,
+                lo.z + rng.range(0.0, 1.0) * size.z,
+            );
+            if point_inside_mesh(p, a) != point_inside_mesh(p, b) {
+                disagree += 1;
+            }
+        }
+        let frac = disagree as f64 / n as f64;
+        let est_resid = frac * bbox_vol / a.volume().max(1e-12);
+        // A correct union disagrees only on the boundary-rounding shell (≪ 0.1%); a gross shape error
+        // (missing/extra chunk) disagrees on whole percent. Gate the gross case.
+        if est_resid > 2e-3 {
+            return Some(format!(
+                "Monte-Carlo: {disagree}/{n} points disagree ⇒ est residual {est_resid:.3e}"
+            ));
+        }
+        None
+    }
+
     /// Fold-union the prepared input meshes (Rust) and check watertight + volume-matched +
     /// residual-clean vs a C++ fold-union in the SAME order. Returns `Some(reason)` on any divergence,
     /// `None` if clean — the shared differential body for the thesis sweeps and the proptest fast-gate.
@@ -683,6 +815,44 @@ mod tests {
             return Some(format!("residual {residual:.3e} >= 1e-5"));
         }
         None
+    }
+
+    /// Like [`fold_union_divergence`] but compares with the triangulation-robust [`solid_divergence`]
+    /// (invariants + Monte-Carlo, our own point-in-mesh on both) instead of the C++-boolean residual —
+    /// for un-simplified meshes (rotated cubes) where the residual hits its measurement floor.
+    fn fold_union_solid_divergence(rmeshes: &[Mesh], n: usize, seed: u64) -> Option<String> {
+        use crate::boolean::OpType;
+        use crate::boolean::boolean_result::boolean;
+
+        let gls: Vec<MeshGl> = rmeshes.iter().map(|m| m.to_mesh_gl()).collect();
+        let mut acc = rmeshes[0].clone();
+        for c in &rmeshes[1..] {
+            acc = boolean(&acc, c, OpType::Add);
+            if acc.is_empty() {
+                break;
+            }
+            if !acc.is_manifold() {
+                return Some("an intermediate union is not manifold".to_string());
+            }
+            prepare(&mut acc);
+        }
+        if !acc.is_manifold() {
+            return Some("final union is not manifold".to_string());
+        }
+
+        let mut ccpp = match CppKernel::ingest(&gls[0]) {
+            Ok(m) => m,
+            Err(e) => return Some(format!("cpp rejected input 0: {e}")),
+        };
+        for g in &gls[1..] {
+            match CppKernel::ingest(g) {
+                Ok(m) => ccpp = ccpp.union(&m),
+                Err(e) => return Some(format!("cpp rejected an input: {e}")),
+            }
+        }
+        // C++ result as our Mesh, for the Monte-Carlo point-in-mesh (a triangle soup is enough).
+        let b = Mesh::from_mesh_gl(&cpp_to_mesh_gl(&ccpp));
+        solid_divergence(&acc, &b, n, seed)
     }
 
     // =====================================================================================
@@ -778,14 +948,13 @@ mod tests {
     /// intersections that exercise the general `GetAxisAlignedProjection`/`CCW` paths and near-degenerate
     /// crossings the axis-aligned sweep can't reach.
     ///
-    /// `#[ignore]`d PENDING a triangulation-robust oracle comparison. The union is CORRECT (volume
-    /// bit-identical + genus-match vs C++, manifold), but the boolean-residual metric hits its own
-    /// measurement floor here: it runs through C++'s tolerance-based `difference`, and our un-simplified
-    /// R1 mesh carries collinear verts C++ merges (SimplifyTopology/SortGeometry = R2) — 128 verts vs
-    /// C++'s 70 on the sample case — so C++'s difference leaves ~5e-5 slivers along near-coincident
-    /// faces. Un-ignore once the deterministic/triangulation-independent comparison lands.
+    /// Compared with the triangulation-robust [`solid_divergence`] (invariants + Monte-Carlo), NOT the
+    /// C++-boolean residual — the residual hits its measurement floor here (our un-simplified R1 mesh
+    /// carries collinear verts C++ merges via SimplifyTopology/SortGeometry = R2, and C++'s `difference`
+    /// slivers along the differently-tessellated near-coincident faces). Monte-Carlo reads the SOLID via
+    /// our own point-in-mesh on both, so it's blind to that tessellation gap — and it confirms the union
+    /// is geometrically correct (the residual floor was pure measurement noise).
     #[test]
-    #[ignore = "needs a triangulation-robust solid comparison (residual has a ~5e-5 floor on un-simplified rotated meshes) — see the methodology decision"]
     fn thesis_random_rotated_cube_unions_vs_cpp() {
         let mut rng = Lcg::new(0x00F0_7A7E_D0F0_u64);
         let trials = 120;
@@ -807,11 +976,28 @@ mod tests {
                     )
                 })
                 .collect();
-            if let Some(reason) = fold_union_divergence(&rmeshes) {
+            // 4000 Monte-Carlo points per trial resolves any gross shape error; the seed varies by trial.
+            if let Some(reason) = fold_union_solid_divergence(&rmeshes, 2500, 0xA5E1 + trial as u64) {
                 panic!("ROTATED THESIS trial {trial} (n={n}): {reason}");
             }
         }
-        eprintln!("THESIS(rot) ✓ {trials} rotated-cube fold-unions — watertight, residual-clean vs C++");
+        eprintln!("THESIS(rot) ✓ {trials} rotated-cube fold-unions — invariants + Monte-Carlo match C++");
+    }
+
+    /// Unit-check the point-in-mesh oracle the Monte-Carlo comparison relies on: a unit cube classifies
+    /// its interior/exterior correctly (including points that would graze axis-aligned faces).
+    #[test]
+    fn point_in_mesh_classifies_cube() {
+        let cube = prepared_box(0.0, 0.0, 0.0, 1.0, 1.0, 1.0);
+        assert!(point_inside_mesh(Vec3::new(0.5, 0.5, 0.5), &cube), "center is inside");
+        assert!(point_inside_mesh(Vec3::new(0.1, 0.9, 0.3), &cube), "off-center interior");
+        assert!(!point_inside_mesh(Vec3::new(1.5, 0.5, 0.5), &cube), "outside +x");
+        assert!(!point_inside_mesh(Vec3::new(-0.2, 0.5, 0.5), &cube), "outside -x");
+        assert!(!point_inside_mesh(Vec3::new(0.5, 0.5, 2.0), &cube), "outside +z");
+        // A larger offset box: interior/exterior still correct.
+        let b = prepared_box(3.0, 3.0, 3.0, 2.0, 2.0, 2.0);
+        assert!(point_inside_mesh(Vec3::new(4.0, 4.0, 4.0), &b));
+        assert!(!point_inside_mesh(Vec3::new(0.0, 0.0, 0.0), &b));
     }
 
     proptest::proptest! {

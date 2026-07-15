@@ -252,7 +252,11 @@ impl Mat3x4 {
     /// The linear (3×3) part — the first three columns (`mat3(transform)` in Manifold).
     #[inline]
     pub fn linear(self) -> Mat3 {
-        Mat3 { x: self.x, y: self.y, z: self.z }
+        Mat3 {
+            x: self.x,
+            y: self.y,
+            z: self.z,
+        }
     }
 
     /// Are all 12 entries finite? (`la::all(la::isfinite(transform))`.)
@@ -264,7 +268,10 @@ impl Mat3x4 {
     /// Pure translation (`CsgNode::Translate`): identity basis, translation `t`.
     #[inline]
     pub fn translate(t: Vec3) -> Mat3x4 {
-        Mat3x4 { w: t, ..Mat3x4::IDENTITY }
+        Mat3x4 {
+            w: t,
+            ..Mat3x4::IDENTITY
+        }
     }
 
     /// Per-axis scale (`CsgNode::Scale`): diagonal basis `v`, zero translation.
@@ -303,7 +310,12 @@ impl Mat3x4 {
             z: Vec3::new(0.0, 0.0, 1.0),
         };
         let linear = r_z.mul_mat3(r_y).mul_mat3(r_x);
-        Mat3x4 { x: linear.x, y: linear.y, z: linear.z, w: Vec3::ZERO }
+        Mat3x4 {
+            x: linear.x,
+            y: linear.y,
+            z: linear.z,
+            w: Vec3::ZERO,
+        }
     }
 }
 
@@ -496,6 +508,185 @@ impl Box3 {
     }
 }
 
+/// Axis-aligned 2D bounding rectangle (common.h `Rect`) — `Box3`'s 2D sibling, the `CrossSection`
+/// bounds type (M.5.4). Default is the INVERTED-infinity empty rect, so the first `union_point` sets
+/// both bounds; note that per the C++, the empty default is CONTAINED by every rect and overlaps
+/// nothing (the ∞/−∞ comparisons resolve that way by construction).
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct Rect {
+    /// Minimum corner.
+    pub min: Vec2,
+    /// Maximum corner.
+    pub max: Vec2,
+}
+
+impl Default for Rect {
+    fn default() -> Self {
+        Self {
+            min: Vec2::splat(f64::INFINITY),
+            max: Vec2::splat(f64::NEG_INFINITY),
+        }
+    }
+}
+
+impl Rect {
+    /// A rectangle that contains the two given points.
+    #[inline]
+    pub fn from_points(a: Vec2, b: Vec2) -> Self {
+        Self {
+            min: a.cmin(b),
+            max: a.cmax(b),
+        }
+    }
+    /// Dimensions (`max - min`).
+    #[inline]
+    pub fn size(self) -> Vec2 {
+        self.max - self.min
+    }
+    /// Area (`size.x · size.y`).
+    #[inline]
+    pub fn area(self) -> f64 {
+        let sz = self.size();
+        sz.x * sz.y
+    }
+    /// The absolute-largest coordinate of any contained point (`Rect::Scale`) — the 2D length scale.
+    #[inline]
+    pub fn scale(self) -> f64 {
+        let abs_max = self.min.cabs().cmax(self.max.cabs());
+        abs_max.x.max(abs_max.y)
+    }
+    /// Center (`0.5 * (max + min)`).
+    #[inline]
+    pub fn center(self) -> Vec2 {
+        0.5 * (self.max + self.min)
+    }
+    /// Does this rectangle contain (border inclusive) the given point?
+    #[inline]
+    pub fn contains_point(self, p: Vec2) -> bool {
+        p.x >= self.min.x && p.y >= self.min.y && self.max.x >= p.x && self.max.y >= p.y
+    }
+    /// Does this rectangle contain (equality inclusive) the given rectangle?
+    #[inline]
+    pub fn contains_rect(self, r: Rect) -> bool {
+        r.min.x >= self.min.x
+            && r.min.y >= self.min.y
+            && self.max.x >= r.max.x
+            && self.max.y >= r.max.y
+    }
+    /// Does this rectangle overlap the one given (equality inclusive)?
+    #[inline]
+    pub fn does_overlap(self, r: Rect) -> bool {
+        self.min.x <= r.max.x
+            && self.min.y <= r.max.y
+            && self.max.x >= r.min.x
+            && self.max.y >= r.min.y
+    }
+    /// Empty (containing no space)? `max.y <= min.y || max.x <= min.x`, so a degenerate line is empty.
+    #[inline]
+    pub fn is_empty(self) -> bool {
+        self.max.y <= self.min.y || self.max.x <= self.min.x
+    }
+    /// Finite bounds?
+    #[inline]
+    pub fn is_finite(self) -> bool {
+        self.min.is_finite() && self.max.is_finite()
+    }
+    /// Expand in place to include a point.
+    #[inline]
+    pub fn union_point(&mut self, p: Vec2) {
+        self.min = self.min.cmin(p);
+        self.max = self.max.cmax(p);
+    }
+    /// Union with another rectangle.
+    #[inline]
+    pub fn union(self, o: Self) -> Self {
+        Self {
+            min: self.min.cmin(o.min),
+            max: self.max.cmax(o.max),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 2D affine transform. Manifold's `mat2x3` = `mat<double,2,3>` — COLUMN-MAJOR, 3 columns of Vec2
+// (columns x,y are the linear part, w is the translation) — the CrossSection transform vocabulary.
+// ---------------------------------------------------------------------------
+
+/// 2D affine transform `mat<double,2,3>`: 3 Vec2 columns, column-major (matches Manifold `mat2x3`).
+#[derive(Clone, Copy, PartialEq, Debug)]
+#[repr(C)]
+pub struct Mat2x3 {
+    /// First basis column.
+    pub x: Vec2,
+    /// Second basis column.
+    pub y: Vec2,
+    /// Translation column.
+    pub w: Vec2,
+}
+
+impl Mat2x3 {
+    /// The identity affine (basis = I, translation = 0).
+    pub const IDENTITY: Self = Self {
+        x: Vec2::new(1.0, 0.0),
+        y: Vec2::new(0.0, 1.0),
+        w: Vec2::ZERO,
+    };
+
+    /// Transform a point (implicitly homogeneous, `w = 1`): `x·p.x + y·p.y + w`, left-to-right.
+    #[inline]
+    pub fn transform_point(self, p: Vec2) -> Vec2 {
+        self.x * p.x + self.y * p.y + self.w
+    }
+
+    /// Determinant of the linear (2×2) part — negative means the transform mirrors (flips winding).
+    #[inline]
+    pub fn det_linear(self) -> f64 {
+        self.x.x * self.y.y - self.y.x * self.x.y
+    }
+
+    /// Affine composition `self ∘ rhs` (apply `rhs` first): the C++ `m * Mat3(transform_)` chain.
+    #[inline]
+    pub fn compose(self, rhs: Mat2x3) -> Mat2x3 {
+        Mat2x3 {
+            x: self.x * rhs.x.x + self.y * rhs.x.y,
+            y: self.x * rhs.y.x + self.y * rhs.y.y,
+            w: self.x * rhs.w.x + self.y * rhs.w.y + self.w,
+        }
+    }
+
+    /// Pure translation (`CrossSection::Translate`'s matrix).
+    #[inline]
+    pub fn translate(v: Vec2) -> Mat2x3 {
+        Mat2x3 {
+            w: v,
+            ..Mat2x3::IDENTITY
+        }
+    }
+
+    /// Z-axis rotation by `degrees` (`CrossSection::Rotate`'s matrix) — `sind`/`cosd`, so quadrant
+    /// angles are exact.
+    #[inline]
+    pub fn rotate_degrees(degrees: f64) -> Mat2x3 {
+        let s = crate::mathf::sind(degrees);
+        let c = crate::mathf::cosd(degrees);
+        Mat2x3 {
+            x: Vec2::new(c, s),
+            y: Vec2::new(-s, c),
+            w: Vec2::ZERO,
+        }
+    }
+
+    /// Per-axis scale (`CrossSection::Scale`'s matrix).
+    #[inline]
+    pub fn scale(v: Vec2) -> Mat2x3 {
+        Mat2x3 {
+            x: Vec2::new(v.x, 0.0),
+            y: Vec2::new(0.0, v.y),
+            w: Vec2::ZERO,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -540,17 +731,31 @@ mod tests {
     #[test]
     fn mat3_determinant_normal_transform_spectral_norm() {
         // A non-uniform scale diag(2,3,4).
-        let s = Mat3 { x: Vec3::new(2.0, 0.0, 0.0), y: Vec3::new(0.0, 3.0, 0.0), z: Vec3::new(0.0, 0.0, 4.0) };
+        let s = Mat3 {
+            x: Vec3::new(2.0, 0.0, 0.0),
+            y: Vec3::new(0.0, 3.0, 0.0),
+            z: Vec3::new(0.0, 0.0, 4.0),
+        };
         assert_eq!(s.determinant(), 24.0);
         // Normal transform = inverse-transpose = diag(1/2, 1/3, 1/4).
         let nt = s.normal_transform();
         assert!((nt.mul_vec(Vec3::new(1.0, 0.0, 0.0)) - Vec3::new(0.5, 0.0, 0.0)).length() < 1e-12);
-        assert!((nt.mul_vec(Vec3::new(0.0, 0.0, 1.0)) - Vec3::new(0.0, 0.0, 0.25)).length() < 1e-12);
+        assert!(
+            (nt.mul_vec(Vec3::new(0.0, 0.0, 1.0)) - Vec3::new(0.0, 0.0, 0.25)).length() < 1e-12
+        );
         // Spectral norm (largest singular value) of a diagonal = the largest |entry| = 4.
-        assert!((s.spectral_norm() - 4.0).abs() < 1e-9, "spectral_norm {} != 4", s.spectral_norm());
+        assert!(
+            (s.spectral_norm() - 4.0).abs() < 1e-9,
+            "spectral_norm {} != 4",
+            s.spectral_norm()
+        );
 
         // A pure rotation (orthogonal) has spectral norm 1 and is its own inverse-transpose.
-        let rot = Mat3 { x: Vec3::new(0.0, 1.0, 0.0), y: Vec3::new(-1.0, 0.0, 0.0), z: Vec3::new(0.0, 0.0, 1.0) };
+        let rot = Mat3 {
+            x: Vec3::new(0.0, 1.0, 0.0),
+            y: Vec3::new(-1.0, 0.0, 0.0),
+            z: Vec3::new(0.0, 0.0, 1.0),
+        };
         assert_eq!(rot.determinant(), 1.0);
         assert!((rot.spectral_norm() - 1.0).abs() < 1e-9);
         // NormalTransform(rot) == rot for an orthogonal matrix.
@@ -592,8 +797,14 @@ mod tests {
         let p = v3(1.0, 0.0, 0.0);
 
         // Builders in isolation.
-        assert_eq!(Mat3x4::translate(v3(10., 20., 30.)).transform_point(p), v3(11., 20., 30.));
-        assert_eq!(Mat3x4::scale(v3(2., 3., 4.)).transform_point(p), v3(2., 0., 0.));
+        assert_eq!(
+            Mat3x4::translate(v3(10., 20., 30.)).transform_point(p),
+            v3(11., 20., 30.)
+        );
+        assert_eq!(
+            Mat3x4::scale(v3(2., 3., 4.)).transform_point(p),
+            v3(2., 0., 0.)
+        );
 
         // 90° about z maps +x → +y (column-major rZ). Uses mathf sind/cosd, so exact at 90°.
         let rz90 = Mat3x4::rotate(0., 0., 90.);
@@ -604,8 +815,14 @@ mod tests {
         let composed = Mat3x4::translate(v3(10., 20., 30.)) * Mat3x4::scale(v3(2., 3., 4.));
         assert_eq!(composed.transform_point(v3(1., 1., 1.)), v3(12., 23., 34.));
         // Identity is the composition unit both ways.
-        assert_eq!((Mat3x4::IDENTITY * composed).transform_point(p), composed.transform_point(p));
-        assert_eq!((composed * Mat3x4::IDENTITY).transform_point(p), composed.transform_point(p));
+        assert_eq!(
+            (Mat3x4::IDENTITY * composed).transform_point(p),
+            composed.transform_point(p)
+        );
+        assert_eq!(
+            (composed * Mat3x4::IDENTITY).transform_point(p),
+            composed.transform_point(p)
+        );
 
         // Mat3 matrix product agrees with applying the two rotations in sequence.
         let a = Mat3x4::rotate(0., 0., 90.).linear();

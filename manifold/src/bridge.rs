@@ -36,11 +36,15 @@ impl CrossSection {
             }
         }
 
-        // Cap triangulation over the bottom verts (idx 0..n_cross), with the contour scale's epsilon.
-        let scale = self
-            .bounds()
-            .map(|(min, max)| (max.x - min.x).abs().max((max.y - min.y).abs()))
-            .unwrap_or(1.0);
+        // Cap triangulation over the bottom verts (idx 0..n_cross), with the contour scale's
+        // epsilon. Guard on verts, not bounds: an EMPTY cross-section's bounds are the
+        // all-encompassing rect (the ported C++ quirk), whose size overflows.
+        let scale = if self.num_vert() == 0 {
+            1.0
+        } else {
+            let s = self.bounds().size();
+            s.x.abs().max(s.y.abs())
+        };
         let eps = 1e-12 * scale.max(1.0);
         let mut idx: i32 = 0;
         let polys: Vec<Vec<PolyVert>> = self
@@ -82,7 +86,11 @@ impl CrossSection {
             tris.push([t[0] as u32 + nc, t[1] as u32 + nc, t[2] as u32 + nc]);
         }
 
-        let mut mesh = Mesh { vert_pos, num_prop: 0, ..Default::default() };
+        let mut mesh = Mesh {
+            vert_pos,
+            num_prop: 0,
+            ..Default::default()
+        };
         mesh.create_halfedges(&tris);
         mesh.initialize_original();
         mesh.calculate_bbox();
@@ -148,10 +156,18 @@ impl CrossSection {
             for poly_vert in 0..pn {
                 let start_i = vert_pos.len() as i64;
                 let curr = poly[poly_vert];
-                let prev = poly[if poly_vert == 0 { pn - 1 } else { poly_vert - 1 }];
+                let prev = poly[if poly_vert == 0 {
+                    pn - 1
+                } else {
+                    poly_vert - 1
+                }];
                 // Where the PREVIOUS polyVert's ring starts (wrapping to the last vert when poly_vert==0).
                 let prev_start = start_i
-                    + if poly_vert == 0 { n_axis + n_slices * n_pos } else { 0 }
+                    + if poly_vert == 0 {
+                        n_axis + n_slices * n_pos
+                    } else {
+                        0
+                    }
                     + if prev.x == 0.0 { -1 } else { -n_slices };
                 for slice in 0..n_slices {
                     let phi = slice as f64 * d_phi;
@@ -166,18 +182,38 @@ impl CrossSection {
                     // Full revolution ⇒ emit for every slice; slice 0 wraps to the last slice.
                     let last = if slice == 0 { n_div } else { slice } - 1;
                     if curr.x > 0.0 {
-                        let third = if prev.x == 0.0 { prev_start } else { prev_start + last };
-                        tris.push([(start_i + slice) as u32, (start_i + last) as u32, third as u32]);
+                        let third = if prev.x == 0.0 {
+                            prev_start
+                        } else {
+                            prev_start + last
+                        };
+                        tris.push([
+                            (start_i + slice) as u32,
+                            (start_i + last) as u32,
+                            third as u32,
+                        ]);
                     }
                     if prev.x > 0.0 {
-                        let third = if curr.x == 0.0 { start_i } else { start_i + slice };
-                        tris.push([(prev_start + last) as u32, (prev_start + slice) as u32, third as u32]);
+                        let third = if curr.x == 0.0 {
+                            start_i
+                        } else {
+                            start_i + slice
+                        };
+                        tris.push([
+                            (prev_start + last) as u32,
+                            (prev_start + slice) as u32,
+                            third as u32,
+                        ]);
                     }
                 }
             }
         }
 
-        let mut mesh = Mesh { vert_pos, num_prop: 0, ..Default::default() };
+        let mut mesh = Mesh {
+            vert_pos,
+            num_prop: 0,
+            ..Default::default()
+        };
         mesh.create_halfedges(&tris);
         mesh.initialize_original();
         mesh.calculate_bbox();
@@ -193,8 +229,9 @@ impl Mesh {
     /// triangle projects to a 2D triangle (oriented CCW); the whole batch feeds ONE i_overlay Positive-fill
     /// pass, so overlapping projections union into the outline (a downward-facing tri and its upward
     /// partner cover the same 2D region ⇒ they merge). Degenerate (edge-on) triangles project to zero area
-    /// and drop out.
-    pub fn project(&self) -> CrossSection {
+    /// and drop out. Errs (`NonFiniteVertex`) on a mesh carrying non-finite positions — `from_mesh_gl`'s
+    /// ingest is topology-only, so such meshes exist; the 2D boundary rejects them (M.5.4.5).
+    pub fn project(&self) -> Result<CrossSection, crate::status::Error> {
         let mut polys: Vec<Vec<Vec2>> = Vec::with_capacity(self.num_tri());
         for tri in 0..self.num_tri() {
             let t = TriId::from_usize(tri);
@@ -207,7 +244,11 @@ impl Mesh {
             if a2.abs() < 1e-12 {
                 continue;
             }
-            polys.push(if a2 < 0.0 { vec![p[0], p[2], p[1]] } else { p.to_vec() });
+            polys.push(if a2 < 0.0 {
+                vec![p[0], p[2], p[1]]
+            } else {
+                p.to_vec()
+            });
         }
         CrossSection::from_polygons(&polys)
     }
@@ -216,7 +257,7 @@ impl Mesh {
     /// contour trace: for each triangle straddling the plane (`min_z ≤ height < max_z`), walk the
     /// below→above edge crossings across paired triangles until the contour closes. A `BTreeSet` of
     /// crossing triangles makes the contour order (and the trace) deterministic (native==wasm, run-to-run).
-    pub fn slice_at_z(&self, height: f64) -> CrossSection {
+    pub fn slice_at_z(&self, height: f64) -> Result<CrossSection, crate::status::Error> {
         use crate::mesh_ids::HalfedgeId;
         let z = |he: usize| self.pos(self.start(HalfedgeId::from_usize(he))).z;
 
@@ -288,23 +329,37 @@ mod tests {
     #[test]
     fn extrude_square_is_a_box() {
         // A 2×2 square extruded to height 3 → a 2×2×3 box, volume 12, genus 0, watertight.
-        let cs = CrossSection::from_polygons(&[square(0.0, 0.0, 2.0)]);
+        let cs = CrossSection::from_polygons(&[square(0.0, 0.0, 2.0)]).unwrap();
         let solid = cs.extrude(3.0);
-        assert!(solid.is_manifold(), "extruded box must be a watertight manifold");
+        assert!(
+            solid.is_manifold(),
+            "extruded box must be a watertight manifold"
+        );
         assert_eq!(crate::check::genus(&solid), 0, "a box is genus 0");
-        assert!((solid.volume() - 12.0).abs() < 1e-9, "extrude volume {} != 12", solid.volume());
+        assert!(
+            (solid.volume() - 12.0).abs() < 1e-9,
+            "extrude volume {} != 12",
+            solid.volume()
+        );
     }
 
     #[test]
     fn extrude_holed_is_a_tube() {
         // A 10×10 square with a 2×2 hole, extruded to height 1 → a tube: volume (100−4)·1 = 96, genus 1.
-        let outer = CrossSection::from_polygons(&[square(0.0, 0.0, 10.0)]);
-        let inner = CrossSection::from_polygons(&[square(4.0, 4.0, 2.0)]);
+        let outer = CrossSection::from_polygons(&[square(0.0, 0.0, 10.0)]).unwrap();
+        let inner = CrossSection::from_polygons(&[square(4.0, 4.0, 2.0)]).unwrap();
         let ring = outer.difference(&inner);
         assert_eq!(ring.num_contour(), 2, "ring = outer + hole");
         let tube = ring.extrude(1.0);
-        assert!(tube.is_manifold(), "holed extrude must be a watertight manifold");
-        assert!((tube.volume() - 96.0).abs() < 1e-9, "tube volume {} != 96", tube.volume());
+        assert!(
+            tube.is_manifold(),
+            "holed extrude must be a watertight manifold"
+        );
+        assert!(
+            (tube.volume() - 96.0).abs() < 1e-9,
+            "tube volume {} != 96",
+            tube.volume()
+        );
         assert_eq!(crate::check::genus(&tube), 1, "a tube is genus 1");
     }
 
@@ -312,8 +367,13 @@ mod tests {
     fn revolve_square_is_a_cylinder() {
         // Revolve the unit square [0,1]×[0,1] (touching the Y-axis at x=0) → a solid cylinder radius 1,
         // height 1. Exercises the on-axis vertex reuse. Volume ≈ π (inscribed N-gon for N segments).
-        let cyl = CrossSection::from_polygons(&[square(0.0, 0.0, 1.0)]).revolve(128);
-        assert!(cyl.is_manifold(), "revolved cylinder must be a watertight manifold");
+        let cyl = CrossSection::from_polygons(&[square(0.0, 0.0, 1.0)])
+            .unwrap()
+            .revolve(128);
+        assert!(
+            cyl.is_manifold(),
+            "revolved cylinder must be a watertight manifold"
+        );
         assert_eq!(crate::check::genus(&cyl), 0, "a solid cylinder is genus 0");
         assert!(
             (cyl.volume() - core::f64::consts::PI).abs() < 1e-2,
@@ -326,9 +386,15 @@ mod tests {
     fn revolve_offset_square_is_a_torus_tube() {
         // Revolve a square at x∈[1,2] (off the axis) → an annular cylinder (tube), inner r=1, outer r=2,
         // height 1 → genus 1. Volume ≈ π(2²−1²)·1 = 3π.
-        let ring = CrossSection::from_polygons(&[square(1.0, 0.0, 1.0)]).revolve(128);
+        let ring = CrossSection::from_polygons(&[square(1.0, 0.0, 1.0)])
+            .unwrap()
+            .revolve(128);
         assert!(ring.is_manifold(), "off-axis revolve must be manifold");
-        assert_eq!(crate::check::genus(&ring), 1, "an annular cylinder is genus 1");
+        assert_eq!(
+            crate::check::genus(&ring),
+            1,
+            "an annular cylinder is genus 1"
+        );
         assert!(
             (ring.volume() - 3.0 * core::f64::consts::PI).abs() < 3e-2,
             "tube volume {} vs ~3π",
@@ -340,38 +406,62 @@ mod tests {
     fn project_box_is_its_footprint() {
         // A 2×2×3 box projected onto XY → its 2×2 base square, area 4. Vertical walls project to lines
         // (zero area) and drop; the caps give the footprint.
-        let box3 = CrossSection::from_polygons(&[square(0.0, 0.0, 2.0)]).extrude(3.0);
-        let shadow = box3.project();
-        assert!((shadow.area() - 4.0).abs() < 1e-9, "box footprint area {} != 4", shadow.area());
+        let box3 = CrossSection::from_polygons(&[square(0.0, 0.0, 2.0)])
+            .unwrap()
+            .extrude(3.0);
+        let shadow = box3.project().unwrap();
+        assert!(
+            (shadow.area() - 4.0).abs() < 1e-9,
+            "box footprint area {} != 4",
+            shadow.area()
+        );
     }
 
     #[test]
     fn project_tube_keeps_hole() {
         // A tube projected → a ring (the hole survives in the silhouette), area 96.
         let ring = CrossSection::from_polygons(&[square(0.0, 0.0, 10.0)])
-            .difference(&CrossSection::from_polygons(&[square(4.0, 4.0, 2.0)]));
-        let shadow = ring.extrude(1.0).project();
-        assert!((shadow.area() - 96.0).abs() < 1e-9, "tube footprint area {} != 96", shadow.area());
+            .unwrap()
+            .difference(&CrossSection::from_polygons(&[square(4.0, 4.0, 2.0)]).unwrap());
+        let shadow = ring.extrude(1.0).project().unwrap();
+        assert!(
+            (shadow.area() - 96.0).abs() < 1e-9,
+            "tube footprint area {} != 96",
+            shadow.area()
+        );
     }
 
     #[test]
     fn slice_box_and_tube() {
         // A 2×2×3 box sliced at z=1.5 → a 2×2 square, area 4.
-        let box3 = CrossSection::from_polygons(&[square(0.0, 0.0, 2.0)]).extrude(3.0);
-        assert!((box3.slice_at_z(1.5).area() - 4.0).abs() < 1e-9, "box slice != 4");
+        let box3 = CrossSection::from_polygons(&[square(0.0, 0.0, 2.0)])
+            .unwrap()
+            .extrude(3.0);
+        assert!(
+            (box3.slice_at_z(1.5).unwrap().area() - 4.0).abs() < 1e-9,
+            "box slice != 4"
+        );
         // A tube sliced mid-height → a ring (hole survives), area 96.
         let tube = CrossSection::from_polygons(&[square(0.0, 0.0, 10.0)])
-            .difference(&CrossSection::from_polygons(&[square(4.0, 4.0, 2.0)]))
+            .unwrap()
+            .difference(&CrossSection::from_polygons(&[square(4.0, 4.0, 2.0)]).unwrap())
             .extrude(2.0);
-        let cut = tube.slice_at_z(1.0);
-        assert!((cut.area() - 96.0).abs() < 1e-9, "tube slice area {} != 96", cut.area());
+        let cut = tube.slice_at_z(1.0).unwrap();
+        assert!(
+            (cut.area() - 96.0).abs() < 1e-9,
+            "tube slice area {} != 96",
+            cut.area()
+        );
         assert_eq!(cut.num_contour(), 2, "ring slice = outer + hole");
     }
 
     #[test]
     fn extrude_degenerate_is_empty() {
-        assert!(CrossSection::new().extrude(1.0).is_empty(), "empty cross-section ⇒ empty");
-        let sq = CrossSection::from_polygons(&[square(0.0, 0.0, 1.0)]);
+        assert!(
+            CrossSection::new().extrude(1.0).is_empty(),
+            "empty cross-section ⇒ empty"
+        );
+        let sq = CrossSection::from_polygons(&[square(0.0, 0.0, 1.0)]).unwrap();
         assert!(sq.extrude(0.0).is_empty(), "height 0 ⇒ empty");
     }
 }

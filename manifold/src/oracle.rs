@@ -75,17 +75,25 @@ impl KernelDriver for CppKernel {
         // MeshGL64 indices are u64; ours are u32.
         let tris: Vec<u64> = mesh.tri_verts.iter().map(|&i| i as u64).collect();
         if mesh.merge_from_vert.is_empty() {
-            return manifold3d::Manifold::from_mesh_f64(&mesh.vert_properties, mesh.num_prop, &tris)
-                .map_err(|e| format!("cpp: {e:?}"));
+            return manifold3d::Manifold::from_mesh_f64(
+                &mesh.vert_properties,
+                mesh.num_prop,
+                &tris,
+            )
+            .map_err(|e| format!("cpp: {e:?}"));
         }
         // Property-seam mesh: pass the merge-vectors so C++ re-shares the coincident prop-vert rows
         // (M.3.4b.7 — validates our merge encoding is C++-compatible).
         let mf: Vec<u64> = mesh.merge_from_vert.iter().map(|&i| i as u64).collect();
         let mt: Vec<u64> = mesh.merge_to_vert.iter().map(|&i| i as u64).collect();
         let opts = manifold3d::MeshGL64Options::new().merge_vertices(&mf, &mt);
-        let meshgl =
-            manifold3d::MeshGL64::new_with_options(&mesh.vert_properties, mesh.num_prop, &tris, opts)
-                .map_err(|e| format!("cpp meshgl: {e:?}"))?;
+        let meshgl = manifold3d::MeshGL64::new_with_options(
+            &mesh.vert_properties,
+            mesh.num_prop,
+            &tris,
+            opts,
+        )
+        .map_err(|e| format!("cpp meshgl: {e:?}"))?;
         manifold3d::Manifold::from_meshgl64(&meshgl).map_err(|e| format!("cpp: {e:?}"))
     }
     fn volume(s: &manifold3d::Manifold) -> f64 {
@@ -237,7 +245,8 @@ mod tests {
         let mesh = MeshGl {
             num_prop: 3,
             vert_properties: verts,
-            tri_verts: tris, ..Default::default()
+            tri_verts: tris,
+            ..Default::default()
         };
 
         let rs = RustKernel::ingest(&mesh).unwrap();
@@ -389,7 +398,8 @@ mod tests {
         let mut mesh = Mesh::from_mesh_gl(&MeshGl {
             num_prop: 3,
             vert_properties: verts,
-            tri_verts: tris, ..Default::default()
+            tri_verts: tris,
+            ..Default::default()
         });
         mesh.set_epsilon(-1.0, false);
         mesh.initialize_original();
@@ -477,7 +487,8 @@ mod tests {
         let mut mesh = Mesh::from_mesh_gl(&MeshGl {
             num_prop: 3,
             vert_properties: verts,
-            tri_verts: tris, ..Default::default()
+            tri_verts: tris,
+            ..Default::default()
         });
         mesh.set_epsilon(-1.0, false);
         mesh.initialize_original();
@@ -496,17 +507,32 @@ mod tests {
         // (p-params, q-params) as (ox,oy,oz,sx,sy,sz) — all chosen so no coordinate coincides across the
         // pair (general position), and every pair genuinely overlaps.
         let configs: &[(BoxParams, BoxParams)] = &[
-            ((0.0, 0.0, 0.0, 1.0, 1.0, 1.0), (0.3, 0.4, 0.5, 1.0, 1.0, 1.0)),
-            ((0.0, 0.0, 0.0, 1.0, 1.0, 1.0), (0.5, 0.3, 0.7, 2.0, 2.0, 2.0)),
-            ((0.0, 0.0, 0.0, 3.0, 2.0, 1.0), (1.3, 0.7, -0.4, 1.0, 1.0, 2.0)),
-            ((0.0, 0.0, 0.0, 2.0, 3.0, 4.0), (-0.6, 1.1, 1.7, 3.0, 1.0, 1.0)),
+            (
+                (0.0, 0.0, 0.0, 1.0, 1.0, 1.0),
+                (0.3, 0.4, 0.5, 1.0, 1.0, 1.0),
+            ),
+            (
+                (0.0, 0.0, 0.0, 1.0, 1.0, 1.0),
+                (0.5, 0.3, 0.7, 2.0, 2.0, 2.0),
+            ),
+            (
+                (0.0, 0.0, 0.0, 3.0, 2.0, 1.0),
+                (1.3, 0.7, -0.4, 1.0, 1.0, 2.0),
+            ),
+            (
+                (0.0, 0.0, 0.0, 2.0, 3.0, 4.0),
+                (-0.6, 1.1, 1.7, 3.0, 1.0, 1.0),
+            ),
         ];
 
         for (i, &(pp, qp)) in configs.iter().enumerate() {
             let p = prepared_box(pp.0, pp.1, pp.2, pp.3, pp.4, pp.5);
             let q = prepared_box(qp.0, qp.1, qp.2, qp.3, qp.4, qp.5);
             let a = boolean(&p, &q, OpType::Add);
-            assert!(a.is_manifold(), "GATE-A sweep [{i}]: rust union not manifold");
+            assert!(
+                a.is_manifold(),
+                "GATE-A sweep [{i}]: rust union not manifold"
+            );
 
             let p_cpp = CppKernel::ingest(&p.to_mesh_gl()).unwrap();
             let q_cpp = CppKernel::ingest(&q.to_mesh_gl()).unwrap();
@@ -526,9 +552,7 @@ mod tests {
 
             let a_cpp = CppKernel::ingest(&a.to_mesh_gl())
                 .unwrap_or_else(|e| panic!("GATE-A sweep [{i}]: cpp rejects rust union: {e}"));
-            let sym = a_cpp
-                .difference(&b_cpp)
-                .union(&b_cpp.difference(&a_cpp));
+            let sym = a_cpp.difference(&b_cpp).union(&b_cpp.difference(&a_cpp));
             let residual = sym.volume() / a_cpp.volume();
             assert!(
                 residual < 1e-5,
@@ -571,7 +595,10 @@ mod tests {
             let q = prepared_box(qp.0, qp.1, qp.2, qp.3, qp.4, qp.5);
             let a = boolean(&p, &q, OpType::Add);
 
-            assert!(a.is_manifold(), "GATE-B [{i}] ({label}): rust union not manifold");
+            assert!(
+                a.is_manifold(),
+                "GATE-B [{i}] ({label}): rust union not manifold"
+            );
             let a_vol = a.volume();
             assert!(
                 (a_vol - expected_vol).abs() < 1e-9,
@@ -606,9 +633,9 @@ mod tests {
     /// tie-break bug — the partial-coincidence GATE-B cases all pass residual-0, so the cascade is
     /// correct; it's the missing cleanup. The edge_op TRIPWIRE, confirmed fired.
     ///
-    /// R2 acceptance, now GREEN: `edge_op::simplify_topology`'s provenance-free subset (SplitPinchedVerts
-    /// + DedupeEdges + CollapseShortEdges) collapses the doubled coincident faces to the clean genus-0
-    /// cube. (The un-ignore is the check that R2 fixed the M.1.6 tripwire.)
+    /// R2 acceptance, now GREEN: `edge_op::simplify_topology`'s provenance-free subset
+    /// (SplitPinchedVerts + DedupeEdges + CollapseShortEdges) collapses the doubled coincident faces
+    /// to the clean genus-0 cube. (The un-ignore is the check that R2 fixed the M.1.6 tripwire.)
     #[test]
     fn identical_cubes_need_coplanar_merge_r2() {
         use crate::boolean::OpType;
@@ -619,15 +646,25 @@ mod tests {
         let a = boolean(&p, &q, OpType::Add);
 
         assert!(a.is_manifold(), "identical union not manifold");
-        assert_eq!(crate::check::genus(&a), 0, "identical union should be genus 0 (one cube)");
-        assert!((a.volume() - 1.0).abs() < 1e-9, "identical union volume should be 1");
+        assert_eq!(
+            crate::check::genus(&a),
+            0,
+            "identical union should be genus 0 (one cube)"
+        );
+        assert!(
+            (a.volume() - 1.0).abs() < 1e-9,
+            "identical union volume should be 1"
+        );
 
         let b_cpp = CppKernel::ingest(&p.to_mesh_gl())
             .unwrap()
             .union(&CppKernel::ingest(&q.to_mesh_gl()).unwrap());
         let a_cpp = CppKernel::ingest(&a.to_mesh_gl()).unwrap();
         let sym = a_cpp.difference(&b_cpp).union(&b_cpp.difference(&a_cpp));
-        assert!(sym.volume() / a_cpp.volume() < 1e-5, "identical union residual dirty");
+        assert!(
+            sym.volume() / a_cpp.volume() < 1e-5,
+            "identical union residual dirty"
+        );
     }
 
     /// A tiny deterministic PRNG (PCG-style LCG) — the thesis sweep is reproducible with zero deps
@@ -719,7 +756,12 @@ mod tests {
                 _ => {}
             }
         }
-        MeshGl { num_prop: 3, vert_properties, tri_verts, ..Default::default() }
+        MeshGl {
+            num_prop: 3,
+            vert_properties,
+            tri_verts,
+            ..Default::default()
+        }
     }
 
     // --- Triangulation-robust solid comparison (chotchki's methodology: invariants + Monte-Carlo). The
@@ -808,8 +850,12 @@ mod tests {
         }
         let bb = a.b_box;
         for (x, y) in [
-            (bb.min.x, b_box.min.x), (bb.min.y, b_box.min.y), (bb.min.z, b_box.min.z),
-            (bb.max.x, b_box.max.x), (bb.max.y, b_box.max.y), (bb.max.z, b_box.max.z),
+            (bb.min.x, b_box.min.x),
+            (bb.min.y, b_box.min.y),
+            (bb.min.z, b_box.min.z),
+            (bb.max.x, b_box.max.x),
+            (bb.max.y, b_box.max.y),
+            (bb.max.z, b_box.max.z),
         ] {
             if (x - y).abs() > 1e-9 * y.abs().max(1.0) {
                 return Some(format!("bbox {x} vs {y}"));
@@ -871,7 +917,12 @@ mod tests {
     /// residual reads its measurement floor (~1e-4) even though volume matches to 1e-9 and the SOLIDS are
     /// identical. The invariant check here keeps the tight 1e-9 volume gate; Monte-Carlo carries the shape
     /// check with no C++ booleans. (Same reasoning the rotated thesis already used — see its doc.)
-    fn fold_union_solid_divergence(rmeshes: &[Mesh], n: usize, seed: u64, vol_tol: f64) -> Option<String> {
+    fn fold_union_solid_divergence(
+        rmeshes: &[Mesh],
+        n: usize,
+        seed: u64,
+        vol_tol: f64,
+    ) -> Option<String> {
         use crate::boolean::OpType;
         use crate::boolean::boolean_result::boolean;
 
@@ -953,11 +1004,15 @@ mod tests {
                     )
                 })
                 .collect();
-            if let Some(reason) = fold_union_solid_divergence(&rmeshes, 2500, 0xA5C0 + trial as u64, 1e-9) {
+            if let Some(reason) =
+                fold_union_solid_divergence(&rmeshes, 2500, 0xA5C0 + trial as u64, 1e-9)
+            {
                 panic!("THESIS trial {trial} (n={n}): {reason}");
             }
         }
-        eprintln!("THESIS ✓ {trials} random multi-cube fold-unions — watertight, solid-clean vs C++");
+        eprintln!(
+            "THESIS ✓ {trials} random multi-cube fold-unions — watertight, solid-clean vs C++"
+        );
     }
 
     /// A unit cube SCALED, ROTATED by ZYX-Euler angles, then TRANSLATED — a general-position solid with
@@ -1007,7 +1062,8 @@ mod tests {
         let mut mesh = Mesh::from_mesh_gl(&MeshGl {
             num_prop: 3,
             vert_properties: verts,
-            tri_verts: tris, ..Default::default()
+            tri_verts: tris,
+            ..Default::default()
         });
         mesh.set_epsilon(-1.0, false);
         mesh.initialize_original();
@@ -1055,11 +1111,15 @@ mod tests {
             // loops (zero-volume internal walls → wrong genus) and inverted CW loops (→ volume drift). The
             // multi-loop keyhole EarClip (M.2.3) fixed both. So the gate is the TIGHT 1e-9 volume + the
             // genus-match now baked into solid_divergence.
-            if let Some(reason) = fold_union_solid_divergence(&rmeshes, 2500, 0xA5E1 + trial as u64, 1e-9) {
+            if let Some(reason) =
+                fold_union_solid_divergence(&rmeshes, 2500, 0xA5E1 + trial as u64, 1e-9)
+            {
                 panic!("ROTATED THESIS trial {trial} (n={n}): {reason}");
             }
         }
-        eprintln!("THESIS(rot) ✓ {trials} rotated-cube fold-unions — invariants + Monte-Carlo match C++");
+        eprintln!(
+            "THESIS(rot) ✓ {trials} rotated-cube fold-unions — invariants + Monte-Carlo match C++"
+        );
     }
 
     proptest::proptest! {
@@ -1129,7 +1189,11 @@ mod tests {
         let pairs = [
             ("Havocglass8_left.obj", "Havocglass8_right.obj", 4000),
             ("Cray_left.obj", "Cray_right.obj", 4000),
-            ("Generic_Twin_7863.1.t0_left.obj", "Generic_Twin_7863.1.t0_right.obj", 4000),
+            (
+                "Generic_Twin_7863.1.t0_left.obj",
+                "Generic_Twin_7863.1.t0_right.obj",
+                4000,
+            ),
             ("self_intersectA.obj", "self_intersectB.obj", 800),
         ];
         for (l, r, mc) in pairs {
@@ -1156,7 +1220,11 @@ mod tests {
             if let Some(reason) = solid_divergence(&res, &b, mc, 0x0B5E, 1e-9) {
                 panic!("NASTY {l} ∪ {r}: {reason}");
             }
-            eprintln!("nasty ✓ {l} ∪ {r}: vol {:.5} ntri {}", res.volume(), res.num_tri());
+            eprintln!(
+                "nasty ✓ {l} ∪ {r}: vol {:.5} ntri {}",
+                res.volume(),
+                res.num_tri()
+            );
         }
     }
 
@@ -1176,7 +1244,10 @@ mod tests {
             eprintln!("big twin: models dir not found — skipping");
             return;
         };
-        let (l, r) = ("Generic_Twin_7081.1.t0_left.obj", "Generic_Twin_7081.1.t0_right.obj");
+        let (l, r) = (
+            "Generic_Twin_7081.1.t0_left.obj",
+            "Generic_Twin_7081.1.t0_right.obj",
+        );
         let gl_l = load_obj(&dir.join(l));
         let gl_r = load_obj(&dir.join(r));
         let mut ml = Mesh::from_mesh_gl(&gl_l);
@@ -1196,7 +1267,12 @@ mod tests {
         if let Some(reason) = solid_divergence(&res, &b, 4000, 0x0B5E, 2e-2) {
             panic!("BIG TWIN {l} ∪ {r}: {reason}");
         }
-        eprintln!("big twin ✓ {l} ∪ {r}: vol {:.5} ntri {} (cpp {})", res.volume(), res.num_tri(), b.num_tri());
+        eprintln!(
+            "big twin ✓ {l} ∪ {r}: vol {:.5} ntri {} (cpp {})",
+            res.volume(),
+            res.num_tri(),
+            b.num_tri()
+        );
     }
 
     /// Unit-check the point-in-mesh oracle the Monte-Carlo comparison relies on: a unit cube classifies
@@ -1204,11 +1280,26 @@ mod tests {
     #[test]
     fn point_in_mesh_classifies_cube() {
         let cube = prepared_box(0.0, 0.0, 0.0, 1.0, 1.0, 1.0);
-        assert!(point_inside_mesh(Vec3::new(0.5, 0.5, 0.5), &cube), "center is inside");
-        assert!(point_inside_mesh(Vec3::new(0.1, 0.9, 0.3), &cube), "off-center interior");
-        assert!(!point_inside_mesh(Vec3::new(1.5, 0.5, 0.5), &cube), "outside +x");
-        assert!(!point_inside_mesh(Vec3::new(-0.2, 0.5, 0.5), &cube), "outside -x");
-        assert!(!point_inside_mesh(Vec3::new(0.5, 0.5, 2.0), &cube), "outside +z");
+        assert!(
+            point_inside_mesh(Vec3::new(0.5, 0.5, 0.5), &cube),
+            "center is inside"
+        );
+        assert!(
+            point_inside_mesh(Vec3::new(0.1, 0.9, 0.3), &cube),
+            "off-center interior"
+        );
+        assert!(
+            !point_inside_mesh(Vec3::new(1.5, 0.5, 0.5), &cube),
+            "outside +x"
+        );
+        assert!(
+            !point_inside_mesh(Vec3::new(-0.2, 0.5, 0.5), &cube),
+            "outside -x"
+        );
+        assert!(
+            !point_inside_mesh(Vec3::new(0.5, 0.5, 2.0), &cube),
+            "outside +z"
+        );
         // A larger offset box: interior/exterior still correct.
         let b = prepared_box(3.0, 3.0, 3.0, 2.0, 2.0, 2.0);
         assert!(point_inside_mesh(Vec3::new(4.0, 4.0, 4.0), &b));
@@ -1263,7 +1354,11 @@ mod tests {
         // Subtract: P − Q = 1 − 0.21 = 0.79.
         let sub = boolean(&p, &q, OpType::Subtract);
         assert!(sub.is_manifold(), "P−Q is not manifold");
-        assert!((sub.volume() - 0.79).abs() < 1e-9, "P−Q volume {} != 0.79", sub.volume());
+        assert!(
+            (sub.volume() - 0.79).abs() < 1e-9,
+            "P−Q volume {} != 0.79",
+            sub.volume()
+        );
         let sub_b = Mesh::from_mesh_gl(&cpp_to_mesh_gl(&p_cpp.difference(&q_cpp)));
         if let Some(r) = solid_divergence(&sub, &sub_b, 5000, 0xD1FF, 1e-9) {
             panic!("P−Q diverges from C++: {r}");
@@ -1272,12 +1367,20 @@ mod tests {
         // Intersect: P ∩ Q = 0.21.
         let int = boolean(&p, &q, OpType::Intersect);
         assert!(int.is_manifold(), "P∩Q is not manifold");
-        assert!((int.volume() - 0.21).abs() < 1e-9, "P∩Q volume {} != 0.21", int.volume());
+        assert!(
+            (int.volume() - 0.21).abs() < 1e-9,
+            "P∩Q volume {} != 0.21",
+            int.volume()
+        );
         let int_b = Mesh::from_mesh_gl(&cpp_to_mesh_gl(&p_cpp.intersection(&q_cpp)));
         if let Some(r) = solid_divergence(&int, &int_b, 5000, 0x1417, 1e-9) {
             panic!("P∩Q diverges from C++: {r}");
         }
-        eprintln!("R2 ✓ P−Q (vol {:.4}) + P∩Q (vol {:.4}) match C++", sub.volume(), int.volume());
+        eprintln!(
+            "R2 ✓ P−Q (vol {:.4}) + P∩Q (vol {:.4}) match C++",
+            sub.volume(),
+            int.volume()
+        );
     }
 
     /// M.3.5 — `split_by_plane` / `trim_by_plane` vs C++. Split a box by axis-aligned AND tilted planes
@@ -1329,7 +1432,10 @@ mod tests {
                 panic!("{label}: trim diverges from C++ +side: {r}");
             }
         }
-        eprintln!("M.3.5 ✓ split/trim by plane match C++ across {} planes", cases.len());
+        eprintln!(
+            "M.3.5 ✓ split/trim by plane match C++ across {} planes",
+            cases.len()
+        );
     }
 
     /// M.3.6 — convex hull (`Mesh::hull_of_points`, the QuickHull port) held to the solid oracle vs
@@ -1413,7 +1519,11 @@ mod tests {
             let rust_hull = Mesh::hull_of_points(&rust_pts).unwrap();
             assert!(rust_hull.is_manifold(), "{label}: rust hull not manifold");
             assert!(rust_hull.volume() > 0.0, "{label}: rust hull has no volume");
-            assert_eq!(RustKernel::genus(&rust_hull), 0, "{label}: a convex hull is genus 0");
+            assert_eq!(
+                RustKernel::genus(&rust_hull),
+                0,
+                "{label}: a convex hull is genus 0"
+            );
 
             let cpp = manifold3d::Manifold::hull_pts(pts.as_slice());
             let cpp_hull = Mesh::from_mesh_gl(&cpp_to_mesh_gl(&cpp));
@@ -1421,7 +1531,10 @@ mod tests {
                 panic!("{label}: hull diverges from C++: {r}");
             }
         }
-        eprintln!("M.3.6 ✓ convex hull matches C++ across {} clouds", cases.len());
+        eprintln!(
+            "M.3.6 ✓ convex hull matches C++ across {} clouds",
+            cases.len()
+        );
     }
 
     /// M.3.7 — Minkowski sum (`Mesh::minkowski_sum`, the tiered hull+union port) held to the solid
@@ -1485,7 +1598,10 @@ mod tests {
                 panic!("{label}: minkowski diverges from C++: {r}");
             }
         }
-        eprintln!("M.3.7 ✓ minkowski (tiers 0/1/2) matches C++ across {} cases", cases.len());
+        eprintln!(
+            "M.3.7 ✓ minkowski (tiers 0/1/2) matches C++ across {} cases",
+            cases.len()
+        );
     }
 
     /// M.3.4b — `CreateProperties` differential vs C++. Colour cube `A`'s vertices by their POSITION
@@ -1501,8 +1617,9 @@ mod tests {
         use crate::mesh_ids::TriId;
 
         // Colour A by position, so a channel swap / drop / mis-interpolation shifts the integral.
-        let a = prepared_cube(0.0, 0.0, 0.0)
-            .set_properties(4, |new, pos, _| new.copy_from_slice(&[pos.x, pos.y, pos.z, 1.0]));
+        let a = prepared_cube(0.0, 0.0, 0.0).set_properties(4, |new, pos, _| {
+            new.copy_from_slice(&[pos.x, pos.y, pos.z, 1.0])
+        });
         let b = prepared_cube(0.5, 0.5, 0.5);
 
         // Rust difference — carries properties through CreateProperties + the prop maintenance.
@@ -1517,7 +1634,11 @@ mod tests {
         assert_eq!(cpp_gl.num_prop, 7, "C++ output carries position + 4 extras");
 
         // Geometry sanity: properties don't change collapse/swap DECISIONS, so the triangulation matches.
-        assert_eq!(rust.num_tri(), cpp_gl.num_tri(), "tri count diverges from C++");
+        assert_eq!(
+            rust.num_tri(),
+            cpp_gl.num_tri(),
+            "tri count diverges from C++"
+        );
 
         // ∫ prop dA per channel (area-weighted), triangulation-independent.
         let integral_rust = {
@@ -1528,7 +1649,10 @@ mod tests {
                 let p: Vec<Vec3> = hes.iter().map(|&h| rust.pos(rust.start(h))).collect();
                 let area = 0.5 * (p[1] - p[0]).cross(p[2] - p[0]).length();
                 for (c, acc_c) in acc.iter_mut().enumerate() {
-                    let mean = hes.iter().map(|&h| rust.properties[rust.prop(h).u() * 4 + c]).sum::<f64>()
+                    let mean = hes
+                        .iter()
+                        .map(|&h| rust.properties[rust.prop(h).u() * 4 + c])
+                        .sum::<f64>()
                         / 3.0;
                     *acc_c += area * mean;
                 }
@@ -1546,11 +1670,16 @@ mod tests {
             };
             let mut acc = [0.0f64; 4];
             for t in 0..cpp_gl.num_tri() {
-                let idx: Vec<usize> = (0..3).map(|i| cpp_gl.tri_verts[3 * t + i] as usize).collect();
+                let idx: Vec<usize> = (0..3)
+                    .map(|i| cpp_gl.tri_verts[3 * t + i] as usize)
+                    .collect();
                 let p: Vec<Vec3> = idx.iter().map(|&v| pos(v)).collect();
                 let area = 0.5 * (p[1] - p[0]).cross(p[2] - p[0]).length();
                 for (c, acc_c) in acc.iter_mut().enumerate() {
-                    let mean = idx.iter().map(|&v| cpp_gl.vert_properties[v * np + 3 + c]).sum::<f64>()
+                    let mean = idx
+                        .iter()
+                        .map(|&v| cpp_gl.vert_properties[v * np + 3 + c])
+                        .sum::<f64>()
                         / 3.0;
                     *acc_c += area * mean;
                 }
@@ -1577,15 +1706,19 @@ mod tests {
         use crate::boolean::OpType;
         use crate::boolean::boolean_result::boolean;
 
-        let a = prepared_cube(0.0, 0.0, 0.0)
-            .set_properties(4, |new, pos, _| new.copy_from_slice(&[pos.x, pos.y, pos.z, 1.0]));
+        let a = prepared_cube(0.0, 0.0, 0.0).set_properties(4, |new, pos, _| {
+            new.copy_from_slice(&[pos.x, pos.y, pos.z, 1.0])
+        });
         let b = prepared_cube(0.5, 0.5, 0.5);
 
         // Direction 1 — our merge-encoded output is C++-INGESTIBLE: colour A−B in Rust, serialize WITH
         // merge-vectors, and confirm C++ reconstructs the same solid from them.
         let rust = boolean(&a, &b, OpType::Subtract);
         let gl = rust.to_mesh_gl();
-        assert!(!gl.merge_from_vert.is_empty(), "seam-split output must carry merge-vectors");
+        assert!(
+            !gl.merge_from_vert.is_empty(),
+            "seam-split output must carry merge-vectors"
+        );
         let cpp = CppKernel::ingest(&gl).expect("C++ must accept our merge-encoded mesh");
         let rv = rust.volume();
         assert!(
@@ -1593,7 +1726,11 @@ mod tests {
             "volume after C++ re-ingest: rust {rv} cpp {}",
             cpp.volume()
         );
-        assert_eq!(RustKernel::genus(&rust), cpp.genus(), "genus mismatch after C++ re-ingest");
+        assert_eq!(
+            RustKernel::genus(&rust),
+            cpp.genus(),
+            "genus mismatch after C++ re-ingest"
+        );
 
         // Direction 2 — we can INGEST C++'s merge-vectors: run the coloured difference in C++, pull its
         // MeshGL64 (WITH merge-vectors), and re-import into our kernel → a valid coloured manifold.
@@ -1601,9 +1738,15 @@ mod tests {
         let b_cpp = CppKernel::ingest(&b.to_mesh_gl()).unwrap();
         let cpp_out = a_cpp.difference(&b_cpp);
         let cpp_gl = cpp_to_mesh_gl_with_merge(&cpp_out);
-        assert!(!cpp_gl.merge_from_vert.is_empty(), "C++'s coloured output must carry merge-vectors");
+        assert!(
+            !cpp_gl.merge_from_vert.is_empty(),
+            "C++'s coloured output must carry merge-vectors"
+        );
         let re = Mesh::from_mesh_gl(&cpp_gl);
-        assert!(re.is_manifold(), "re-importing C++'s merge-encoded output must be manifold");
+        assert!(
+            re.is_manifold(),
+            "re-importing C++'s merge-encoded output must be manifold"
+        );
         assert!(
             (re.volume() - cpp_out.volume()).abs() / cpp_out.volume().abs() < 1e-9,
             "volume after ingesting C++'s merge-vectors"
@@ -1627,7 +1770,9 @@ mod tests {
         let a = prepared_cube(0.0, 0.0, 0.0);
         let b = prepared_cube(0.5, 0.5, 0.5);
         let a_cpp = CppKernel::ingest(&a.to_mesh_gl()).unwrap();
-        let b_cpp = CppKernel::ingest(&b.to_mesh_gl()).unwrap().calculate_normals(0, 180.0);
+        let b_cpp = CppKernel::ingest(&b.to_mesh_gl())
+            .unwrap()
+            .calculate_normals(0, 180.0);
 
         // Re-import C++'s normal-carrying B, prep it, and FLAG hasNormals (mirroring what C++ carries).
         let b_gl = cpp_to_mesh_gl_with_merge(&b_cpp);
@@ -1649,10 +1794,16 @@ mod tests {
             for t in 0..rust_out.num_tri() {
                 let tri = TriId::from_usize(t);
                 let hes = [tri.halfedge(0), tri.halfedge(1), tri.halfedge(2)];
-                let p: Vec<Vec3> = hes.iter().map(|&h| rust_out.pos(rust_out.start(h))).collect();
+                let p: Vec<Vec3> = hes
+                    .iter()
+                    .map(|&h| rust_out.pos(rust_out.start(h)))
+                    .collect();
                 let area = 0.5 * (p[1] - p[0]).cross(p[2] - p[0]).length();
                 for (c, acc_c) in acc.iter_mut().enumerate() {
-                    let mean = hes.iter().map(|&h| rust_out.properties[rust_out.prop(h).u() * 3 + c]).sum::<f64>()
+                    let mean = hes
+                        .iter()
+                        .map(|&h| rust_out.properties[rust_out.prop(h).u() * 3 + c])
+                        .sum::<f64>()
                         / 3.0;
                     *acc_c += area * mean;
                 }
@@ -1670,11 +1821,16 @@ mod tests {
             };
             let mut acc = [0.0f64; 3];
             for t in 0..cpp_gl.num_tri() {
-                let idx: Vec<usize> = (0..3).map(|i| cpp_gl.tri_verts[3 * t + i] as usize).collect();
+                let idx: Vec<usize> = (0..3)
+                    .map(|i| cpp_gl.tri_verts[3 * t + i] as usize)
+                    .collect();
                 let p: Vec<Vec3> = idx.iter().map(|&v| pos(v)).collect();
                 let area = 0.5 * (p[1] - p[0]).cross(p[2] - p[0]).length();
                 for (c, acc_c) in acc.iter_mut().enumerate() {
-                    let mean = idx.iter().map(|&v| cpp_gl.vert_properties[v * np + 3 + c]).sum::<f64>()
+                    let mean = idx
+                        .iter()
+                        .map(|&v| cpp_gl.vert_properties[v * np + 3 + c])
+                        .sum::<f64>()
                         / 3.0;
                     *acc_c += area * mean;
                 }
@@ -1707,7 +1863,12 @@ mod tests {
         use crate::linalg::Vec2;
 
         let sq = |x: f64, y: f64, s: f64| -> Vec<Vec2> {
-            vec![Vec2::new(x, y), Vec2::new(x + s, y), Vec2::new(x + s, y + s), Vec2::new(x, y + s)]
+            vec![
+                Vec2::new(x, y),
+                Vec2::new(x + s, y),
+                Vec2::new(x + s, y + s),
+                Vec2::new(x, y + s),
+            ]
         };
         // A CCW diamond (tilted square) of "radius" r centred at c.
         let diamond = |cx: f64, cy: f64, r: f64| -> Vec<Vec2> {
@@ -1719,16 +1880,30 @@ mod tests {
             ]
         };
         let to_cpp = |polys: &[Vec<Vec2>]| -> manifold3d::CrossSection {
-            let cp: Vec<Vec<[f64; 2]>> =
-                polys.iter().map(|c| c.iter().map(|p| [p.x, p.y]).collect()).collect();
+            let cp: Vec<Vec<[f64; 2]>> = polys
+                .iter()
+                .map(|c| c.iter().map(|p| [p.x, p.y]).collect())
+                .collect();
             manifold3d::CrossSection::from_polygons(&cp)
         };
 
         type Polys = Vec<Vec<Vec2>>;
         let cases: Vec<(&str, Polys, Polys)> = vec![
-            ("overlap squares", vec![sq(0.0, 0.0, 2.0)], vec![sq(1.0, 1.0, 2.0)]),
-            ("holed vs square", vec![sq(0.0, 0.0, 10.0)], vec![sq(4.0, 4.0, 2.0)]),
-            ("square vs diamond", vec![sq(0.0, 0.0, 4.0)], vec![diamond(2.0, 2.0, 3.0)]),
+            (
+                "overlap squares",
+                vec![sq(0.0, 0.0, 2.0)],
+                vec![sq(1.0, 1.0, 2.0)],
+            ),
+            (
+                "holed vs square",
+                vec![sq(0.0, 0.0, 10.0)],
+                vec![sq(4.0, 4.0, 2.0)],
+            ),
+            (
+                "square vs diamond",
+                vec![sq(0.0, 0.0, 4.0)],
+                vec![diamond(2.0, 2.0, 3.0)],
+            ),
             ("disjoint", vec![sq(0.0, 0.0, 1.0)], vec![sq(9.0, 9.0, 1.0)]),
             (
                 "two-piece subject",
@@ -1738,12 +1913,23 @@ mod tests {
         ];
 
         for (label, subj, clip) in &cases {
-            let (rs, rc) = (CrossSection::from_polygons(subj), CrossSection::from_polygons(clip));
+            let (rs, rc) = (
+                CrossSection::from_polygons(subj).unwrap(),
+                CrossSection::from_polygons(clip).unwrap(),
+            );
             let (cs, cc) = (to_cpp(subj), to_cpp(clip));
             for (op, r_area, c_area) in [
                 ("union", rs.union(&rc).area(), cs.union(&cc).area()),
-                ("difference", rs.difference(&rc).area(), cs.difference(&cc).area()),
-                ("intersection", rs.intersection(&rc).area(), cs.intersection(&cc).area()),
+                (
+                    "difference",
+                    rs.difference(&rc).area(),
+                    cs.difference(&cc).area(),
+                ),
+                (
+                    "intersection",
+                    rs.intersection(&rc).area(),
+                    cs.intersection(&cc).area(),
+                ),
             ] {
                 let resid = (r_area - c_area).abs() / c_area.abs().max(1e-9);
                 assert!(
@@ -1752,42 +1938,65 @@ mod tests {
                 );
             }
         }
-        eprintln!("M.5.1 ✓ CrossSection area-residual < 1e-5 vs Clipper2 across {} cases", cases.len());
+        eprintln!(
+            "M.5.1 ✓ CrossSection area-residual < 1e-5 vs Clipper2 across {} cases",
+            cases.len()
+        );
     }
 
-    /// M.5.2 — the OFFSET (round-join) area gate vs Clipper2. Round is the OpenSCAD `offset(r)` path where
-    /// both i_overlay and Clipper2 polygonize toward the true arc, so a fine `circular_segments` makes the
-    /// areas converge. Miter/Square are NOT gated (documented corner-geometry divergence). Tolerance is
-    /// looser than the boolean gate (1e-3) — the residual is the arc-polygonization difference between two
-    /// engines, not a correctness gap.
+    /// M.5.2 — the OFFSET (round-join) area gate vs Clipper2, kept as a regression floor. Historical
+    /// note: this gate predates M.5.4.1's verbatim Clipper2 offset walk — the full all-join sweep
+    /// (Square/Miter/Bevel region-matched at 1e-5, the old "NOT gated" carve-out closed) lives in
+    /// `m5_4_offset_vs_cpp`. Tolerance here stays 1e-3: arc polygonization may differ by ±1 step
+    /// between engines (see the `offset_polygons` deviation note).
     #[test]
     fn m5_2_offset_round_area_vs_cpp() {
         use crate::cross_section::{CrossSection, JoinType};
         use crate::linalg::Vec2;
 
         let sq = |x: f64, y: f64, s: f64| -> Vec<Vec2> {
-            vec![Vec2::new(x, y), Vec2::new(x + s, y), Vec2::new(x + s, y + s), Vec2::new(x, y + s)]
+            vec![
+                Vec2::new(x, y),
+                Vec2::new(x + s, y),
+                Vec2::new(x + s, y + s),
+                Vec2::new(x, y + s),
+            ]
         };
         let to_cpp = |polys: &[Vec<Vec2>]| -> manifold3d::CrossSection {
-            let cp: Vec<Vec<[f64; 2]>> =
-                polys.iter().map(|c| c.iter().map(|p| [p.x, p.y]).collect()).collect();
+            let cp: Vec<Vec<[f64; 2]>> = polys
+                .iter()
+                .map(|c| c.iter().map(|p| [p.x, p.y]).collect())
+                .collect();
             manifold3d::CrossSection::from_polygons(&cp)
         };
 
         let segments = 128;
         let cases: Vec<(&str, Vec<Vec<Vec2>>, f64)> = vec![
             ("grow square", vec![sq(0.0, 0.0, 4.0)], 1.0),
-            ("grow L-shape", vec![sq(0.0, 0.0, 4.0), sq(4.0, 0.0, 2.0)], 0.7),
+            (
+                "grow L-shape",
+                vec![sq(0.0, 0.0, 4.0), sq(4.0, 0.0, 2.0)],
+                0.7,
+            ),
             ("shrink square", vec![sq(0.0, 0.0, 10.0)], -1.5),
         ];
         for (label, polys, delta) in &cases {
-            let r = CrossSection::from_polygons(polys).offset(*delta, JoinType::Round, 2.0, segments);
+            let r = CrossSection::from_polygons(polys)
+                .unwrap()
+                .offset(*delta, JoinType::Round, 2.0, segments)
+                .unwrap();
             let c = to_cpp(polys).offset(*delta, manifold3d::JoinType::Round, 2.0, segments);
             let (ra, ca) = (r.area(), c.area());
             let resid = (ra - ca).abs() / ca.abs().max(1e-9);
-            assert!(resid < 1e-3, "{label}: round-offset area rust {ra} cpp {ca} (residual {resid:.3e})");
+            assert!(
+                resid < 1e-3,
+                "{label}: round-offset area rust {ra} cpp {ca} (residual {resid:.3e})"
+            );
         }
-        eprintln!("M.5.2 ✓ round-offset area matches Clipper2 across {} cases", cases.len());
+        eprintln!(
+            "M.5.2 ✓ round-offset area matches Clipper2 across {} cases",
+            cases.len()
+        );
     }
 
     /// M.5.3 — the EXTRUDE bridge (2D→3D) vs C++. Build the same 2D region in both engines, extrude to a
@@ -1800,25 +2009,33 @@ mod tests {
         use crate::linalg::Vec2;
 
         let sq = |x: f64, y: f64, s: f64| -> Vec<Vec2> {
-            vec![Vec2::new(x, y), Vec2::new(x + s, y), Vec2::new(x + s, y + s), Vec2::new(x, y + s)]
+            vec![
+                Vec2::new(x, y),
+                Vec2::new(x + s, y),
+                Vec2::new(x + s, y + s),
+                Vec2::new(x, y + s),
+            ]
         };
         let to_cpp_cs = |polys: &[Vec<Vec2>]| -> manifold3d::CrossSection {
-            let cp: Vec<Vec<[f64; 2]>> =
-                polys.iter().map(|c| c.iter().map(|p| [p.x, p.y]).collect()).collect();
+            let cp: Vec<Vec<[f64; 2]>> = polys
+                .iter()
+                .map(|c| c.iter().map(|p| [p.x, p.y]).collect())
+                .collect();
             manifold3d::CrossSection::from_polygons(&cp)
         };
 
         // A plain square and a holed ring (genus-1 extrusion) — different topologies.
         let square_polys = vec![sq(0.0, 0.0, 3.0)];
         let ring = CrossSection::from_polygons(&[sq(0.0, 0.0, 10.0)])
-            .difference(&CrossSection::from_polygons(&[sq(4.0, 4.0, 2.0)]));
+            .unwrap()
+            .difference(&CrossSection::from_polygons(&[sq(4.0, 4.0, 2.0)]).unwrap());
         let ring_polys = ring.contours.iter().map(|c| c.to_vec()).collect::<Vec<_>>();
 
         for (label, polys, height, seed) in [
             ("square", &square_polys, 4.0, 0x5e_11u64),
             ("ring", &ring_polys, 2.0, 0x5e_22u64),
         ] {
-            let rust = CrossSection::from_polygons(polys).extrude(height);
+            let rust = CrossSection::from_polygons(polys).unwrap().extrude(height);
             let cpp = manifold3d::Manifold::extrude(&to_cpp_cs(polys), height);
             let cpp_mesh = Mesh::from_mesh_gl(&cpp_to_mesh_gl(&cpp));
             if let Some(r) = solid_divergence(&rust, &cpp_mesh, 4000, seed, 1e-6) {
@@ -1836,11 +2053,18 @@ mod tests {
         use crate::linalg::Vec2;
 
         let sq = |x: f64, y: f64, s: f64| -> Vec<Vec2> {
-            vec![Vec2::new(x, y), Vec2::new(x + s, y), Vec2::new(x + s, y + s), Vec2::new(x, y + s)]
+            vec![
+                Vec2::new(x, y),
+                Vec2::new(x + s, y),
+                Vec2::new(x + s, y + s),
+                Vec2::new(x, y + s),
+            ]
         };
         let cpp_cs = |polys: &[Vec<Vec2>]| -> manifold3d::CrossSection {
-            let cp: Vec<Vec<[f64; 2]>> =
-                polys.iter().map(|c| c.iter().map(|p| [p.x, p.y]).collect()).collect();
+            let cp: Vec<Vec<[f64; 2]>> = polys
+                .iter()
+                .map(|c| c.iter().map(|p| [p.x, p.y]).collect())
+                .collect();
             manifold3d::CrossSection::from_polygons(&cp)
         };
         let poly_area = |polys: &[Vec<[f64; 2]>]| -> f64 {
@@ -1856,15 +2080,24 @@ mod tests {
         };
 
         let ring = CrossSection::from_polygons(&[sq(0.0, 0.0, 10.0)])
-            .difference(&CrossSection::from_polygons(&[sq(4.0, 4.0, 2.0)]));
+            .unwrap()
+            .difference(&CrossSection::from_polygons(&[sq(4.0, 4.0, 2.0)]).unwrap());
         let ring_polys = ring.contours.iter().map(|c| c.to_vec()).collect::<Vec<_>>();
 
         for (label, polys) in [("box", vec![sq(0.0, 0.0, 3.0)]), ("tube", ring_polys)] {
-            let rust_area = CrossSection::from_polygons(&polys).extrude(2.0).project().area();
+            let rust_area = CrossSection::from_polygons(&polys)
+                .unwrap()
+                .extrude(2.0)
+                .project()
+                .unwrap()
+                .area();
             let cpp_shadow = manifold3d::Manifold::extrude(&cpp_cs(&polys), 2.0).project();
             let cpp_area = poly_area(&cpp_shadow).abs();
             let resid = (rust_area - cpp_area).abs() / cpp_area.max(1e-9);
-            assert!(resid < 1e-5, "{label}: project area rust {rust_area} cpp {cpp_area} (resid {resid:.3e})");
+            assert!(
+                resid < 1e-5,
+                "{label}: project area rust {rust_area} cpp {cpp_area} (resid {resid:.3e})"
+            );
         }
         eprintln!("M.5.3 ✓ project (3D→2D) footprint matches C++");
     }
@@ -1879,11 +2112,18 @@ mod tests {
         use crate::linalg::Vec2;
 
         let sq = |x: f64, y: f64, s: f64| -> Vec<Vec2> {
-            vec![Vec2::new(x, y), Vec2::new(x + s, y), Vec2::new(x + s, y + s), Vec2::new(x, y + s)]
+            vec![
+                Vec2::new(x, y),
+                Vec2::new(x + s, y),
+                Vec2::new(x + s, y + s),
+                Vec2::new(x, y + s),
+            ]
         };
         let to_cpp_cs = |polys: &[Vec<Vec2>]| -> manifold3d::CrossSection {
-            let cp: Vec<Vec<[f64; 2]>> =
-                polys.iter().map(|c| c.iter().map(|p| [p.x, p.y]).collect()).collect();
+            let cp: Vec<Vec<[f64; 2]>> = polys
+                .iter()
+                .map(|c| c.iter().map(|p| [p.x, p.y]).collect())
+                .collect();
             manifold3d::CrossSection::from_polygons(&cp)
         };
 
@@ -1892,7 +2132,9 @@ mod tests {
             ("on-axis cylinder", vec![sq(0.0, 0.0, 1.0)], 0x5e_33u64),
             ("off-axis tube", vec![sq(1.0, 0.0, 1.0)], 0x5e_44u64),
         ] {
-            let rust = CrossSection::from_polygons(&polys).revolve(segments);
+            let rust = CrossSection::from_polygons(&polys)
+                .unwrap()
+                .revolve(segments);
             let cpp = manifold3d::Manifold::revolve(&to_cpp_cs(&polys), segments, 360.0);
             let cpp_mesh = Mesh::from_mesh_gl(&cpp_to_mesh_gl(&cpp));
             if let Some(r) = solid_divergence(&rust, &cpp_mesh, 4000, seed, 1e-6) {
@@ -1911,11 +2153,18 @@ mod tests {
         use crate::linalg::Vec2;
 
         let sq = |x: f64, y: f64, s: f64| -> Vec<Vec2> {
-            vec![Vec2::new(x, y), Vec2::new(x + s, y), Vec2::new(x + s, y + s), Vec2::new(x, y + s)]
+            vec![
+                Vec2::new(x, y),
+                Vec2::new(x + s, y),
+                Vec2::new(x + s, y + s),
+                Vec2::new(x, y + s),
+            ]
         };
         let cpp_cs = |polys: &[Vec<Vec2>]| -> manifold3d::CrossSection {
-            let cp: Vec<Vec<[f64; 2]>> =
-                polys.iter().map(|c| c.iter().map(|p| [p.x, p.y]).collect()).collect();
+            let cp: Vec<Vec<[f64; 2]>> = polys
+                .iter()
+                .map(|c| c.iter().map(|p| [p.x, p.y]).collect())
+                .collect();
             manifold3d::CrossSection::from_polygons(&cp)
         };
         let poly_area = |polys: &[Vec<[f64; 2]>]| -> f64 {
@@ -1931,17 +2180,462 @@ mod tests {
         };
 
         let ring = CrossSection::from_polygons(&[sq(0.0, 0.0, 10.0)])
-            .difference(&CrossSection::from_polygons(&[sq(4.0, 4.0, 2.0)]));
+            .unwrap()
+            .difference(&CrossSection::from_polygons(&[sq(4.0, 4.0, 2.0)]).unwrap());
         let ring_polys = ring.contours.iter().map(|c| c.to_vec()).collect::<Vec<_>>();
 
         for (label, polys) in [("box", vec![sq(0.0, 0.0, 3.0)]), ("tube", ring_polys)] {
-            let rust_area = CrossSection::from_polygons(&polys).extrude(4.0).slice_at_z(2.0).area();
+            let rust_area = CrossSection::from_polygons(&polys)
+                .unwrap()
+                .extrude(4.0)
+                .slice_at_z(2.0)
+                .unwrap()
+                .area();
             let cpp_cut = manifold3d::Manifold::extrude(&cpp_cs(&polys), 4.0).slice_at_z(2.0);
             let cpp_area = poly_area(&cpp_cut).abs();
             let resid = (rust_area - cpp_area).abs() / cpp_area.max(1e-9);
-            assert!(resid < 1e-5, "{label}: slice area rust {rust_area} cpp {cpp_area} (resid {resid:.3e})");
+            assert!(
+                resid < 1e-5,
+                "{label}: slice area rust {rust_area} cpp {cpp_area} (resid {resid:.3e})"
+            );
         }
         eprintln!("M.5.3 ✓ slice (3D→2D) matches C++");
+    }
+
+    /// M.5.4 — 2D REGION equality vs Clipper2-via-Manifold, by symmetric difference: re-ingest the
+    /// C++ result into our engine and require `area(ours − theirs) + area(theirs − ours)` ≈ 0.
+    /// Strictly stronger than the area-residual (equal areas of different regions fail here);
+    /// still algorithm-independent, per the 2D layer's relaxed thesis.
+    #[cfg(test)]
+    fn region_match(
+        label: &str,
+        ours: &crate::cross_section::CrossSection,
+        cpp: &manifold3d::CrossSection,
+        rel_tol: f64,
+    ) {
+        use crate::cross_section::CrossSection;
+        use crate::linalg::Vec2;
+        let theirs = CrossSection::from_polygons(
+            &cpp.to_polygons()
+                .iter()
+                .map(|c| c.iter().map(|p| Vec2::new(p[0], p[1])).collect())
+                .collect::<Vec<_>>(),
+        );
+        let theirs = theirs.unwrap();
+        let sym = ours.difference(&theirs).area() + theirs.difference(ours).area();
+        let scale = ours.area().abs().max(theirs.area().abs()).max(1e-9);
+        assert!(
+            sym / scale < rel_tol,
+            "{label}: symmetric-difference {sym:.3e} on scale {scale:.3} (rel {:.3e} ≥ {rel_tol:.0e})",
+            sym / scale
+        );
+    }
+
+    /// M.5.4 — the K.6 SURFACE sweep: every M.5.4.2 API differentially vs Clipper2-via-Manifold.
+    /// Constructors, transforms, mirror, warp, hull, batch booleans, compose, decompose, fill
+    /// rules — each result region-matched (symmetric difference < 1e-5 relative; flat geometry
+    /// lands ~1e-9, the bound is K.6's).
+    #[test]
+    fn m5_4_surface_vs_cpp() {
+        use crate::cross_section::{CrossSection, FillRule};
+        use crate::linalg::{Mat2x3, Vec2};
+
+        let to_cpp = |cs: &CrossSection| manifold3d::CrossSection::from_polygons(&cs.to_polygons());
+
+        // Constructors — vertex counts must agree exactly (same construction, same trig).
+        let sq = CrossSection::square(Vec2::new(3.0, 7.0), false).unwrap();
+        region_match(
+            "square",
+            &sq,
+            &manifold3d::CrossSection::square(3.0, 7.0, false),
+            1e-5,
+        );
+        let sqc = CrossSection::square(Vec2::new(3.0, 7.0), true).unwrap();
+        region_match(
+            "square centered",
+            &sqc,
+            &manifold3d::CrossSection::square(3.0, 7.0, true),
+            1e-5,
+        );
+        let circ = CrossSection::circle(7.0, 64).unwrap();
+        let circ_cpp = manifold3d::CrossSection::circle(7.0, 64);
+        assert_eq!(circ.num_vert(), circ_cpp.num_vert(), "circle vert count");
+        region_match("circle", &circ, &circ_cpp, 1e-5);
+
+        // The transform-sweep base: a holed L (two squares union, minus an interior square).
+        let base = CrossSection::square(Vec2::new(6.0, 3.0), false)
+            .unwrap()
+            .union(&CrossSection::square(Vec2::new(3.0, 8.0), false).unwrap())
+            .difference(
+                &CrossSection::from_polygons(&[vec![
+                    Vec2::new(1.0, 1.0),
+                    Vec2::new(2.0, 1.0),
+                    Vec2::new(2.0, 2.0),
+                    Vec2::new(1.0, 2.0),
+                ]])
+                .unwrap(),
+            );
+        let base_cpp = to_cpp(&base);
+
+        region_match(
+            "translate",
+            &base.translate(Vec2::new(4.5, -2.25)).unwrap(),
+            &base_cpp.translate(4.5, -2.25),
+            1e-5,
+        );
+        region_match(
+            "rotate 30°",
+            &base.rotate(30.0).unwrap(),
+            &base_cpp.rotate(30.0),
+            1e-5,
+        );
+        region_match(
+            "scale (2,3)",
+            &base.scale(Vec2::new(2.0, 3.0)).unwrap(),
+            &base_cpp.scale(2.0, 3.0),
+            1e-5,
+        );
+        region_match(
+            "mirror (1,1)",
+            &base.mirror(Vec2::new(1.0, 1.0)).unwrap(),
+            &base_cpp.mirror(1.0, 1.0),
+            1e-5,
+        );
+        let m = Mat2x3::translate(Vec2::new(1.0, 2.0))
+            .compose(Mat2x3::rotate_degrees(15.0).compose(Mat2x3::scale(Vec2::new(1.5, 0.75))));
+        region_match(
+            "transform (composed)",
+            &base.transform(m).unwrap(),
+            &base_cpp.transform(&[m.x.x, m.x.y, m.y.x, m.y.y, m.w.x, m.w.y]),
+            1e-5,
+        );
+        region_match(
+            "warp (bend)",
+            &base
+                .warp(|p| {
+                    p.y += 0.1 * p.x * p.x;
+                })
+                .unwrap(),
+            &base_cpp.warp(|x, y| [x, y + 0.1 * x * x]),
+            1e-5,
+        );
+
+        // Hull — of a holed boolean result and of a raw point set.
+        region_match("hull", &base.hull(), &base_cpp.hull(), 1e-5);
+        let cloud = [
+            Vec2::new(0.0, 0.0),
+            Vec2::new(9.0, 1.0),
+            Vec2::new(7.0, 8.0),
+            Vec2::new(2.0, 6.5),
+            Vec2::new(4.0, 3.0),
+        ];
+        let cloud_cpp: Vec<[f64; 2]> = cloud.iter().map(|p| [p.x, p.y]).collect();
+        region_match(
+            "hull of points",
+            &CrossSection::hull_of_points(&cloud).unwrap(),
+            &manifold3d::CrossSection::hull_simple_polygon(&cloud_cpp),
+            1e-5,
+        );
+
+        // Batch booleans + compose — head-vs-pooled-clips semantics on overlapping operands.
+        let parts = [
+            CrossSection::square(Vec2::new(10.0, 10.0), false).unwrap(),
+            CrossSection::circle(3.0, 24)
+                .unwrap()
+                .translate(Vec2::new(2.0, 2.0))
+                .unwrap(),
+            CrossSection::circle(4.0, 24)
+                .unwrap()
+                .translate(Vec2::new(9.0, 9.0))
+                .unwrap(),
+        ];
+        let parts_cpp: Vec<manifold3d::CrossSection> = parts.iter().map(to_cpp).collect();
+        for (op, op_cpp, label) in [
+            (
+                crate::boolean::OpType::Add,
+                manifold3d::OpType::Add,
+                "batch add",
+            ),
+            (
+                crate::boolean::OpType::Subtract,
+                manifold3d::OpType::Subtract,
+                "batch subtract",
+            ),
+            (
+                crate::boolean::OpType::Intersect,
+                manifold3d::OpType::Intersect,
+                "batch intersect",
+            ),
+        ] {
+            region_match(
+                label,
+                &CrossSection::batch_boolean(&parts, op),
+                &manifold3d::CrossSection::batch_boolean(&parts_cpp, op_cpp),
+                1e-5,
+            );
+        }
+        region_match(
+            "compose",
+            &CrossSection::compose(&parts),
+            &manifold3d::CrossSection::compose(&parts_cpp),
+            1e-5,
+        );
+
+        // Decompose — components paired by min-x (our sweep order vs the C++ reversed-PolyTree
+        // order is a documented deviation), then region-matched.
+        let ring = |x: f64| {
+            CrossSection::square(Vec2::new(4.0, 4.0), false)
+                .unwrap()
+                .difference(
+                    &CrossSection::from_polygons(&[vec![
+                        Vec2::new(1.0, 1.0),
+                        Vec2::new(3.0, 1.0),
+                        Vec2::new(3.0, 3.0),
+                        Vec2::new(1.0, 3.0),
+                    ]])
+                    .unwrap(),
+                )
+                .translate(Vec2::new(x, 0.0))
+                .unwrap()
+        };
+        let two = ring(0.0).union(&ring(10.0));
+        let mut ours = two.decompose();
+        assert_eq!(ours.len(), 2, "decompose component count");
+        let cpp_parts = to_cpp(&two).decompose();
+        assert_eq!(cpp_parts.len(), 2, "C++ decompose component count");
+        let min_x = |cs: &CrossSection| cs.bounds().min.x;
+        ours.sort_by(|a, b| min_x(a).total_cmp(&min_x(b)));
+        let mut cpp_sorted: Vec<(f64, &manifold3d::CrossSection)> = cpp_parts
+            .iter()
+            .map(|c| {
+                let mx = c
+                    .to_polygons()
+                    .iter()
+                    .flatten()
+                    .map(|p| p[0])
+                    .fold(f64::INFINITY, f64::min);
+                (mx, c)
+            })
+            .collect();
+        cpp_sorted.sort_by(|a, b| a.0.total_cmp(&b.0));
+        for (i, (our, (_, cpp))) in ours.iter().zip(&cpp_sorted).enumerate() {
+            assert_eq!(our.num_contour(), 2, "component {i} = outer + hole");
+            region_match(&format!("decompose[{i}]"), our, cpp, 1e-5);
+        }
+
+        // Fill rules on the self-intersecting cross_section_test polygon.
+        let bowtie = vec![
+            Vec2::new(-7.0, 13.0),
+            Vec2::new(-7.0, 12.0),
+            Vec2::new(-5.0, 9.0),
+            Vec2::new(-5.0, 8.1),
+            Vec2::new(-4.8, 8.0),
+        ];
+        let bowtie_cpp: Vec<[f64; 2]> = bowtie.iter().map(|p| [p.x, p.y]).collect();
+        for (rule, rule_cpp, label) in [
+            (
+                FillRule::Positive,
+                manifold3d::FillRule::Positive,
+                "fill positive",
+            ),
+            (
+                FillRule::Negative,
+                manifold3d::FillRule::Negative,
+                "fill negative",
+            ),
+            (
+                FillRule::EvenOdd,
+                manifold3d::FillRule::EvenOdd,
+                "fill even-odd",
+            ),
+            (
+                FillRule::NonZero,
+                manifold3d::FillRule::NonZero,
+                "fill non-zero",
+            ),
+        ] {
+            region_match(
+                label,
+                &CrossSection::from_polygons_with(core::slice::from_ref(&bowtie), rule).unwrap(),
+                &manifold3d::CrossSection::from_polygons_with_fill_rule(
+                    core::slice::from_ref(&bowtie_cpp),
+                    rule_cpp,
+                ),
+                1e-5,
+            );
+        }
+
+        eprintln!(
+            "M.5.4 ✓ 2D surface sweep region-matches C++ (constructors/transforms/hull/batch/decompose/fill rules)"
+        );
+    }
+
+    /// M.5.4 — the K.6 OFFSET sweep vs Clipper2: all four join types × grow/shrink × shapes
+    /// (convex, L, plus-sign, holed ring), region-matched. Flat joins (Square/Miter/Bevel) gate at
+    /// 1e-5 (the ported walk reproduces Clipper2's corner geometry — measured ~1e-9); Round gates
+    /// at 1e-3 because the two engines may polygonize an arc with ±1 step (Clipper2 decodes the
+    /// segment count through an acos∘cos round-trip; we take n directly — the `offset_polygons`
+    /// deviation note). Includes the OpenSCAD 78.2548 jtSquare canary against BOTH engines.
+    #[test]
+    fn m5_4_offset_vs_cpp() {
+        use crate::cross_section::{CrossSection, JoinType};
+        use crate::linalg::Vec2;
+
+        let to_cpp = |cs: &CrossSection| manifold3d::CrossSection::from_polygons(&cs.to_polygons());
+
+        let l_shape = CrossSection::square(Vec2::new(8.0, 3.0), false)
+            .unwrap()
+            .union(&CrossSection::square(Vec2::new(3.0, 8.0), false).unwrap());
+        let plus = CrossSection::square(Vec2::new(30.0, 50.0), true)
+            .unwrap()
+            .union(&CrossSection::square(Vec2::new(50.0, 30.0), true).unwrap());
+        let ring = CrossSection::square(Vec2::new(20.0, 20.0), false)
+            .unwrap()
+            .difference(
+                &CrossSection::square(Vec2::new(8.0, 8.0), false)
+                    .unwrap()
+                    .translate(Vec2::new(6.0, 6.0))
+                    .unwrap(),
+            );
+        let shapes: [(&str, &CrossSection, f64); 4] = [
+            (
+                "square",
+                &CrossSection::square(Vec2::new(6.0, 6.0), false).unwrap(),
+                1.5,
+            ),
+            ("L-shape", &l_shape, 1.0),
+            ("plus-sign", &plus, 6.0),
+            ("holed ring", &ring, 1.2),
+        ];
+        let joins = [
+            (
+                JoinType::Square,
+                manifold3d::JoinType::Square,
+                "square",
+                1e-5,
+            ),
+            (JoinType::Miter, manifold3d::JoinType::Miter, "miter", 1e-5),
+            (JoinType::Bevel, manifold3d::JoinType::Bevel, "bevel", 1e-5),
+            (JoinType::Round, manifold3d::JoinType::Round, "round", 1e-3),
+        ];
+        for (shape_label, shape, delta) in &shapes {
+            let cpp = to_cpp(shape);
+            for (join, join_cpp, join_label, tol) in joins {
+                for d in [*delta, -*delta] {
+                    let ours = shape.offset(d, join, 2.0, 32).unwrap();
+                    let theirs = cpp.offset(d, join_cpp, 2.0, 32);
+                    region_match(
+                        &format!("{shape_label}/{join_label}/δ={d}"),
+                        &ours,
+                        &theirs,
+                        tol,
+                    );
+                }
+            }
+            // A miter limit above the 90°-corner ratio threshold (√2) vs one below is covered by
+            // the default limit 2 (miters) — also sweep limit 1 (squares everything).
+            let ours = shape.offset(*delta, JoinType::Miter, 1.0, 0).unwrap();
+            let theirs = cpp.offset(*delta, manifold3d::JoinType::Miter, 1.0, 0);
+            region_match(
+                &format!("{shape_label}/miter-limit-1"),
+                &ours,
+                &theirs,
+                1e-5,
+            );
+        }
+
+        // THE CANARY: OpenSCAD `offset(delta = 2, chamfer = true) square(5);` → 78.2548 in BOTH
+        // engines (chamfer maps to jtSquare — kernel.rs pinned this against OpenSCAD 2026.06.12).
+        let sq5 = CrossSection::square(Vec2::new(5.0, 5.0), false).unwrap();
+        let ours = sq5.offset(2.0, JoinType::Square, 2.0, 0).unwrap();
+        let theirs = to_cpp(&sq5).offset(2.0, manifold3d::JoinType::Square, 2.0, 0);
+        assert!(
+            (ours.area() - 78.2548).abs() < 1e-3,
+            "rust canary: {}",
+            ours.area()
+        );
+        assert!(
+            (theirs.area() - 78.2548).abs() < 1e-3,
+            "cpp canary: {}",
+            theirs.area()
+        );
+        region_match("canary", &ours, &theirs, 1e-5);
+
+        eprintln!(
+            "M.5.4 ✓ offset sweep (4 joins × ± deltas × 4 shapes) region-matches C++; 78.2548 canary holds in both engines"
+        );
+    }
+
+    /// M.5.4 — K.6's 3D leg: the M.3.8 bridges over 2D-op OUTPUTS, solid-clean vs C++ where a 3D
+    /// output results (extrude of an offset, extrude of a batch union, revolve of an offset
+    /// profile).
+    #[test]
+    fn m5_4_bridges_of_2d_ops_vs_cpp() {
+        use crate::cross_section::{CrossSection, JoinType, OpType};
+        use crate::linalg::Vec2;
+
+        let to_cpp = |cs: &CrossSection| manifold3d::CrossSection::from_polygons(&cs.to_polygons());
+        let check = |label: &str, rust: &Mesh, cpp: &manifold3d::Manifold, seed: u64| {
+            let cpp_mesh = Mesh::from_mesh_gl(&cpp_to_mesh_gl(cpp));
+            if let Some(r) = solid_divergence(rust, &cpp_mesh, 4000, seed, 1e-6) {
+                panic!("{label}: diverges from C++: {r}");
+            }
+        };
+
+        // Extrude of a square-join offset (flat geometry ⇒ identical 2D regions in).
+        let grown = CrossSection::square(Vec2::new(6.0, 6.0), false)
+            .unwrap()
+            .offset(1.5, JoinType::Square, 2.0, 0)
+            .unwrap();
+        check(
+            "extrude(offset square-join)",
+            &grown.extrude(4.0),
+            &manifold3d::Manifold::extrude(&to_cpp(&grown), 4.0),
+            0x54_01,
+        );
+
+        // Extrude of a batch union (overlapping circle + squares).
+        let batch = CrossSection::batch_boolean(
+            &[
+                CrossSection::square(Vec2::new(10.0, 10.0), false).unwrap(),
+                CrossSection::circle(4.0, 32)
+                    .unwrap()
+                    .translate(Vec2::new(10.0, 5.0))
+                    .unwrap(),
+                CrossSection::square(Vec2::new(4.0, 4.0), false)
+                    .unwrap()
+                    .translate(Vec2::new(-2.0, 3.0))
+                    .unwrap(),
+            ],
+            OpType::Add,
+        );
+        check(
+            "extrude(batch union)",
+            &batch.extrude(2.5),
+            &manifold3d::Manifold::extrude(&to_cpp(&batch), 2.5),
+            0x54_02,
+        );
+
+        // Revolve of an offset profile kept off-axis (x ≥ 0.5). DYADIC coords on purpose (0.5, not
+        // 0.4): the C++ CrossSection INGEST quantizes on a binary grid, shifting any non-dyadic
+        // coordinate ~1.5e-9 absolute (measured: 0.4 → 0.39999999850988388) — under the 2D layer's
+        // noise floor but over solid_divergence's 1e-9 bbox gate, which is calibrated for identical
+        // inputs. Dyadic extremes survive both engines' grids bit-exact, so the tight gate stands;
+        // non-dyadic parity is what the 2D region gates (1e-5) are for.
+        let profile = CrossSection::square(Vec2::new(2.0, 3.0), false)
+            .unwrap()
+            .offset(0.5, JoinType::Square, 2.0, 0)
+            .unwrap()
+            .translate(Vec2::new(1.0, 0.0))
+            .unwrap();
+        check(
+            "revolve(offset profile)",
+            &profile.revolve(48),
+            &manifold3d::Manifold::revolve(&to_cpp(&profile), 48, 360.0),
+            0x54_03,
+        );
+
+        eprintln!("M.5.4 ✓ bridges over 2D-op outputs solid-clean vs C++ (extrude ×2, revolve)");
     }
 
     /// M.2.3 — the KEYHOLE integration test: a bar punched all the way through a box (difference) leaves a
@@ -1959,9 +2653,16 @@ mod tests {
         let bar = prepared_box(3.0, 3.0, -1.0, 4.0, 4.0, 12.0);
         let res = boolean(&block, &bar, OpType::Subtract);
 
-        assert!(res.is_manifold(), "tunnel result is not manifold — keyhole face failed");
+        assert!(
+            res.is_manifold(),
+            "tunnel result is not manifold — keyhole face failed"
+        );
         // Volume = 10³ − (4·4·10 tunnel through the block) = 1000 − 160 = 840.
-        assert!((res.volume() - 840.0).abs() < 1e-9, "tunnel volume {} != 840", res.volume());
+        assert!(
+            (res.volume() - 840.0).abs() < 1e-9,
+            "tunnel volume {} != 840",
+            res.volume()
+        );
         assert_eq!(RustKernel::genus(&res), 1, "a through-tunnel is genus 1");
 
         let block_cpp = CppKernel::ingest(&block.to_mesh_gl()).unwrap();
@@ -1971,7 +2672,12 @@ mod tests {
         if let Some(r) = solid_divergence(&res, &b, 6000, 0x7011, 1e-9) {
             panic!("tunnel difference diverges from C++: {r}");
         }
-        eprintln!("M.2.3 ✓ keyhole tunnel: vol {:.1} genus {} ({} tri)", res.volume(), RustKernel::genus(&res), res.num_tri());
+        eprintln!(
+            "M.2.3 ✓ keyhole tunnel: vol {:.1} genus {} ({} tri)",
+            res.volume(),
+            RustKernel::genus(&res),
+            res.num_tri()
+        );
     }
 
     /// R2 sweep: difference + intersection across several general-position box pairs (varied sizes +
@@ -1984,10 +2690,22 @@ mod tests {
         use crate::boolean::boolean_result::boolean;
 
         let configs: &[(BoxParams, BoxParams)] = &[
-            ((0.0, 0.0, 0.0, 1.0, 1.0, 1.0), (0.3, 0.4, 0.5, 1.0, 1.0, 1.0)),
-            ((0.0, 0.0, 0.0, 2.0, 1.0, 1.0), (0.5, 0.3, -0.2, 1.0, 2.0, 1.0)),
-            ((0.0, 0.0, 0.0, 3.0, 2.0, 1.0), (1.3, 0.7, -0.4, 1.0, 1.0, 2.0)),
-            ((0.0, 0.0, 0.0, 2.0, 3.0, 2.0), (0.6, 1.1, 0.7, 3.0, 1.0, 1.0)),
+            (
+                (0.0, 0.0, 0.0, 1.0, 1.0, 1.0),
+                (0.3, 0.4, 0.5, 1.0, 1.0, 1.0),
+            ),
+            (
+                (0.0, 0.0, 0.0, 2.0, 1.0, 1.0),
+                (0.5, 0.3, -0.2, 1.0, 2.0, 1.0),
+            ),
+            (
+                (0.0, 0.0, 0.0, 3.0, 2.0, 1.0),
+                (1.3, 0.7, -0.4, 1.0, 1.0, 2.0),
+            ),
+            (
+                (0.0, 0.0, 0.0, 2.0, 3.0, 2.0),
+                (0.6, 1.1, 0.7, 3.0, 1.0, 1.0),
+            ),
         ];
 
         for (i, &(pp, qp)) in configs.iter().enumerate() {
@@ -2005,7 +2723,10 @@ mod tests {
                     OpType::Add => unreachable!(),
                 };
                 let bvol = b_cpp.volume();
-                assert!(!a.is_empty() && bvol > 1e-6, "R2 sweep [{i}] {op:?}: empty result");
+                assert!(
+                    !a.is_empty() && bvol > 1e-6,
+                    "R2 sweep [{i}] {op:?}: empty result"
+                );
                 assert!(
                     (a.volume() - bvol).abs() / bvol.abs().max(1e-9) < 1e-9,
                     "R2 sweep [{i}] {op:?}: volume {} vs cpp {bvol}",
@@ -2017,7 +2738,10 @@ mod tests {
                 }
             }
         }
-        eprintln!("R2 ✓ difference + intersection sweep ({} configs) match C++", configs.len());
+        eprintln!(
+            "R2 ✓ difference + intersection sweep ({} configs) match C++",
+            configs.len()
+        );
     }
 
     /// Exercises the divergence-REPORTING machinery (the paths that only fire when the kernels
@@ -2054,7 +2778,8 @@ mod tests {
         let dangling = MeshGl {
             num_prop: 3,
             vert_properties: vp,
-            tri_verts: cube_tris, ..Default::default()
+            tri_verts: cube_tris,
+            ..Default::default()
         };
         let divs = differential(&dangling, 1e-9).unwrap();
         assert!(
@@ -2067,7 +2792,8 @@ mod tests {
         let bad_index = MeshGl {
             num_prop: 3,
             vert_properties: vec![0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
-            tri_verts: vec![0, 1, 99], ..Default::default()
+            tri_verts: vec![0, 1, 99],
+            ..Default::default()
         };
         assert!(RustKernel::ingest(&bad_index).is_err());
         assert!(CppKernel::ingest(&bad_index).is_err());
@@ -2091,7 +2817,8 @@ mod tests {
         let nan_mesh = MeshGl {
             num_prop: 3,
             vert_properties: nan_vp,
-            tri_verts: cube_tris.clone(), ..Default::default()
+            tri_verts: cube_tris.clone(),
+            ..Default::default()
         };
         let e = differential(&nan_mesh, 1e-9).unwrap_err();
         assert!(e.contains("rust accepted"), "got: {e}");
@@ -2109,7 +2836,8 @@ mod tests {
         let flap = MeshGl {
             num_prop: 3,
             vert_properties: flap_vp,
-            tri_verts: flap_tris, ..Default::default()
+            tri_verts: flap_tris,
+            ..Default::default()
         };
         let e = differential(&flap, 1e-9).unwrap_err();
         assert!(e.contains("cpp accepted"), "got: {e}");

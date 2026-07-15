@@ -1461,6 +1461,87 @@ mod tests {
         eprintln!("M.3.7 ✓ minkowski (tiers 0/1/2) matches C++ across {} cases", cases.len());
     }
 
+    /// M.3.4b — `CreateProperties` differential vs C++. Colour cube `A`'s vertices by their POSITION
+    /// (`rgba = (x, y, z, 1)`), then `A − B` (B is the uncoloured cutter) in BOTH engines. The property
+    /// field is compared triangulation-INDEPENDENTLY via the area-weighted surface integral `∫ prop dA`
+    /// per RGBA channel — the algorithm-independent gate (like the volume residual), so it tolerates each
+    /// engine's own triangulation while still pinning the interpolated values. Position-only geometry is
+    /// gated elsewhere; THIS proves the properties carry across the boolean seam identically to C++.
+    #[test]
+    fn m3_4b_properties_vs_cpp() {
+        use crate::boolean::OpType;
+        use crate::boolean::boolean_result::boolean;
+        use crate::mesh_ids::TriId;
+
+        // Colour A by position, so a channel swap / drop / mis-interpolation shifts the integral.
+        let a = prepared_cube(0.0, 0.0, 0.0)
+            .set_properties(4, |new, pos, _| new.copy_from_slice(&[pos.x, pos.y, pos.z, 1.0]));
+        let b = prepared_cube(0.5, 0.5, 0.5);
+
+        // Rust difference — carries properties through CreateProperties + the prop maintenance.
+        let rust = boolean(&a, &b, OpType::Subtract);
+        assert!(rust.is_manifold(), "coloured difference must be manifold");
+        assert_eq!(rust.num_prop, 4, "numProp_ = max(4, 0)");
+
+        // C++ difference of the same operands (A ingested with its 7-wide interchange properties).
+        let a_cpp = CppKernel::ingest(&a.to_mesh_gl()).unwrap();
+        let b_cpp = CppKernel::ingest(&b.to_mesh_gl()).unwrap();
+        let cpp_gl = cpp_to_mesh_gl(&a_cpp.difference(&b_cpp));
+        assert_eq!(cpp_gl.num_prop, 7, "C++ output carries position + 4 extras");
+
+        // Geometry sanity: properties don't change collapse/swap DECISIONS, so the triangulation matches.
+        assert_eq!(rust.num_tri(), cpp_gl.num_tri(), "tri count diverges from C++");
+
+        // ∫ prop dA per channel (area-weighted), triangulation-independent.
+        let integral_rust = {
+            let mut acc = [0.0f64; 4];
+            for t in 0..rust.num_tri() {
+                let tri = TriId::from_usize(t);
+                let hes = [tri.halfedge(0), tri.halfedge(1), tri.halfedge(2)];
+                let p: Vec<Vec3> = hes.iter().map(|&h| rust.pos(rust.start(h))).collect();
+                let area = 0.5 * (p[1] - p[0]).cross(p[2] - p[0]).length();
+                for (c, acc_c) in acc.iter_mut().enumerate() {
+                    let mean = hes.iter().map(|&h| rust.properties[rust.prop(h).u() * 4 + c]).sum::<f64>()
+                        / 3.0;
+                    *acc_c += area * mean;
+                }
+            }
+            acc
+        };
+        let integral_cpp = {
+            let np = cpp_gl.num_prop;
+            let pos = |v: usize| {
+                Vec3::new(
+                    cpp_gl.vert_properties[v * np],
+                    cpp_gl.vert_properties[v * np + 1],
+                    cpp_gl.vert_properties[v * np + 2],
+                )
+            };
+            let mut acc = [0.0f64; 4];
+            for t in 0..cpp_gl.num_tri() {
+                let idx: Vec<usize> = (0..3).map(|i| cpp_gl.tri_verts[3 * t + i] as usize).collect();
+                let p: Vec<Vec3> = idx.iter().map(|&v| pos(v)).collect();
+                let area = 0.5 * (p[1] - p[0]).cross(p[2] - p[0]).length();
+                for (c, acc_c) in acc.iter_mut().enumerate() {
+                    let mean = idx.iter().map(|&v| cpp_gl.vert_properties[v * np + 3 + c]).sum::<f64>()
+                        / 3.0;
+                    *acc_c += area * mean;
+                }
+            }
+            acc
+        };
+
+        for c in 0..4 {
+            let (r, cp) = (integral_rust[c], integral_cpp[c]);
+            let rel = (r - cp).abs() / cp.abs().max(1e-9);
+            assert!(
+                rel < 1e-6,
+                "channel {c}: ∫prop dA diverges — rust {r}, cpp {cp} (rel {rel:.3e})"
+            );
+        }
+        eprintln!("M.3.4b ✓ CreateProperties matches C++ (∫prop dA per RGBA channel)");
+    }
+
     /// M.2.3 — the KEYHOLE integration test: a bar punched all the way through a box (difference) leaves a
     /// square HOLE in the box's top and bottom faces, so `Face2Tri` must triangulate a holed polygon (an
     /// outer loop + an interior CW hole loop) via `CutKeyhole`. Without the keyhole path those faces fill

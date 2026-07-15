@@ -114,9 +114,13 @@ impl Mesh {
         let num_vert = self.num_vert();
         let vert_morton: Vec<u32> = (0..num_vert).map(|v| morton_code(self.vert_pos[v], self.b_box)).collect();
 
-        // new -> old permutation, stable-sorted by Morton code.
+        // new -> old permutation, sorted by Morton code with the ORIGINAL INDEX as a total-order
+        // tiebreak (M.4.2). Distinct verts sharing a 30-bit-quantized Morton code would otherwise tie,
+        // and THIS is the canonical order fed to chained booleans — so the tiebreak must be explicit, not
+        // an implicit reliance on stable-sort, before this can become a parallel (unstable) sort. It's a
+        // no-op on the current output (stable-sort already breaks ties by ascending index).
         let mut new2old: Vec<usize> = (0..num_vert).collect();
-        new2old.sort_by(|&a, &b| vert_morton[a].cmp(&vert_morton[b]));
+        new2old.sort_by(|&a, &b| vert_morton[a].cmp(&vert_morton[b]).then(a.cmp(&b)));
 
         // old -> new (the halfedge remap).
         let mut old2new = vec![0usize; num_vert];
@@ -164,8 +168,9 @@ impl Mesh {
             *code = morton_code(center, self.b_box);
         }
 
+        // Original-index tiebreak for total order (M.4.2) — same rationale as `sort_verts`.
         let mut new2old: Vec<usize> = (0..old_num_tri).collect();
-        new2old.sort_by(|&a, &b| face_morton[a].cmp(&face_morton[b]));
+        new2old.sort_by(|&a, &b| face_morton[a].cmp(&face_morton[b]).then(a.cmp(&b)));
         let keep = new2old.iter().take_while(|&&old| face_morton[old] != K_NO_CODE).count();
         new2old.truncate(keep);
 

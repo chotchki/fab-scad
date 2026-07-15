@@ -286,9 +286,12 @@ impl Collider {
     /// sort lives entirely in `leaf2face`.
     fn build(leaf_box: Vec<Box3>, morton: &[u32]) -> Self {
         let num_leaves = leaf_box.len();
-        // new (sorted) -> old (face) permutation, stable so equal-Morton runs keep face order.
+        // new (sorted) -> old (face) permutation, with the leaf index as an explicit total-order
+        // tiebreak (M.4.2) so equal-Morton runs are ordered deterministically even under an unstable
+        // parallel sort. Set-invariant here (the BVH collision SET is independent of leaf order), so this
+        // is hygiene — but it makes the whole sort surface parallel-safe. No-op on the current output.
         let mut leaf2face: Vec<i32> = (0..num_leaves as i32).collect();
-        leaf2face.sort_by(|&a, &b| morton[a as usize].cmp(&morton[b as usize]));
+        leaf2face.sort_by(|&a, &b| morton[a as usize].cmp(&morton[b as usize]).then(a.cmp(&b)));
 
         let mut c = Self {
             leaf_box,

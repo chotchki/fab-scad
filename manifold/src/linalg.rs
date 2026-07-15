@@ -248,6 +248,80 @@ impl Mat3x4 {
     pub fn transform_dir(self, v: Vec3) -> Vec3 {
         self.mul_vec4(Vec4::from_vec3(v, 0.0))
     }
+
+    /// The linear (3×3) part — the first three columns (`mat3(transform)` in Manifold).
+    #[inline]
+    pub fn linear(self) -> Mat3 {
+        Mat3 { x: self.x, y: self.y, z: self.z }
+    }
+
+    /// Are all 12 entries finite? (`la::all(la::isfinite(transform))`.)
+    #[inline]
+    pub fn is_finite(self) -> bool {
+        self.x.is_finite() && self.y.is_finite() && self.z.is_finite() && self.w.is_finite()
+    }
+}
+
+/// Linear `mat<double,3,3>`: 3 Vec3 columns, column-major (Manifold `mat3`). Used by the transform
+/// normal/winding/epsilon math — the affine [`Mat3x4`]'s linear part.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct Mat3 {
+    /// First basis column.
+    pub x: Vec3,
+    /// Second basis column.
+    pub y: Vec3,
+    /// Third basis column.
+    pub z: Vec3,
+}
+
+impl Mat3 {
+    /// Matrix·vector (`M * v`, column-major): `x·v.x + y·v.y + z·v.z`.
+    #[inline]
+    pub fn mul_vec(self, v: Vec3) -> Vec3 {
+        self.x * v.x + self.y * v.y + self.z * v.z
+    }
+
+    /// Determinant `a·(b×c)` of the columns — sign gives handedness (negative ⇒ the transform mirrors).
+    #[inline]
+    pub fn determinant(self) -> f64 {
+        self.x.dot(self.y.cross(self.z))
+    }
+
+    /// The normal transform `inverse(transpose(M))` (`shared.h` `NormalTransform`), by which face/vertex
+    /// normals transform. For columns `a,b,c` this is the columns `(b×c, c×a, a×b) / det` — the exact
+    /// inverse-transpose without a general matrix inverse (verified on rotations and scales).
+    #[inline]
+    pub fn normal_transform(self) -> Mat3 {
+        let (a, b, c) = (self.x, self.y, self.z);
+        let inv_det = 1.0 / a.dot(b.cross(c));
+        Mat3 {
+            x: b.cross(c) * inv_det,
+            y: c.cross(a) * inv_det,
+            z: a.cross(b) * inv_det,
+        }
+    }
+
+    /// The spectral norm = the largest singular value (`svd.h` `SpectralNorm` = `SVD(A).S[0][0]`), used
+    /// ONLY to scale a transformed mesh's epsilon. Manifold computes it via an iterative Jacobi SVD; we
+    /// use deterministic power iteration on `MᵀM` (fixed 32 iters + IEEE `sqrt`, so native≡wasm) — the
+    /// result may differ from C++'s in the last ULPs, but epsilon is a tolerance that never enters the
+    /// output geometry, only downstream merge decisions, so it is not part of the geometry fingerprint.
+    pub fn spectral_norm(self) -> f64 {
+        let mtm = |v: Vec3| {
+            let mv = self.mul_vec(v);
+            Vec3::new(self.x.dot(mv), self.y.dot(mv), self.z.dot(mv))
+        };
+        let mut v = Vec3::new(1.0, 1.0, 1.0);
+        for _ in 0..32 {
+            let w = mtm(v);
+            let n2 = w.dot(w);
+            if n2 == 0.0 {
+                return 0.0;
+            }
+            v = w * (1.0 / n2.sqrt());
+        }
+        mtm(v).dot(v).max(0.0).sqrt()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -387,6 +461,28 @@ mod tests {
             Vec3::new(0.0, 0.0, 1.0),
         );
         assert_eq!(v0.dot(v1.cross(v2)) / 6.0, 1.0 / 6.0);
+    }
+
+    #[test]
+    fn mat3_determinant_normal_transform_spectral_norm() {
+        // A non-uniform scale diag(2,3,4).
+        let s = Mat3 { x: Vec3::new(2.0, 0.0, 0.0), y: Vec3::new(0.0, 3.0, 0.0), z: Vec3::new(0.0, 0.0, 4.0) };
+        assert_eq!(s.determinant(), 24.0);
+        // Normal transform = inverse-transpose = diag(1/2, 1/3, 1/4).
+        let nt = s.normal_transform();
+        assert!((nt.mul_vec(Vec3::new(1.0, 0.0, 0.0)) - Vec3::new(0.5, 0.0, 0.0)).length() < 1e-12);
+        assert!((nt.mul_vec(Vec3::new(0.0, 0.0, 1.0)) - Vec3::new(0.0, 0.0, 0.25)).length() < 1e-12);
+        // Spectral norm (largest singular value) of a diagonal = the largest |entry| = 4.
+        assert!((s.spectral_norm() - 4.0).abs() < 1e-9, "spectral_norm {} != 4", s.spectral_norm());
+
+        // A pure rotation (orthogonal) has spectral norm 1 and is its own inverse-transpose.
+        let rot = Mat3 { x: Vec3::new(0.0, 1.0, 0.0), y: Vec3::new(-1.0, 0.0, 0.0), z: Vec3::new(0.0, 0.0, 1.0) };
+        assert_eq!(rot.determinant(), 1.0);
+        assert!((rot.spectral_norm() - 1.0).abs() < 1e-9);
+        // NormalTransform(rot) == rot for an orthogonal matrix.
+        for v in [Vec3::new(1.0, 0.0, 0.0), Vec3::new(0.3, -0.7, 0.5)] {
+            assert!((rot.normal_transform().mul_vec(v) - rot.mul_vec(v)).length() < 1e-12);
+        }
     }
 
     #[test]

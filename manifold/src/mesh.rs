@@ -20,7 +20,7 @@
 use std::sync::atomic::{AtomicI32, Ordering};
 
 use crate::boolean::vocab::TriRef;
-use crate::linalg::{Box3, Vec3};
+use crate::linalg::{Box3, Mat3x4, Vec3};
 use crate::mesh_ids::{HalfedgeId, TriId, VertId};
 
 /// The global mesh-instance ID counter (Manifold's `Impl::meshIDCounter_`, starting at 1). Each freshly
@@ -778,6 +778,81 @@ impl Mesh {
         }
         self.tolerance = self.tolerance.max(min_tol);
     }
+
+    /// Apply an affine transform (`Manifold::Impl::Transform`, M.3.1). Positions map through `m`; face +
+    /// vertex normals through the inverse-transpose ([`Mat3::normal_transform`]); a MIRROR (negative
+    /// linear determinant) flips every triangle's winding ([`Mesh::flip_tris`]) so the surface stays
+    /// outward-oriented. The bbox is recomputed and epsilon scaled by the spectral norm. Topology
+    /// (halfedge order) is preserved — no re-sort. Identity is a cheap clone; a non-finite `m` yields the
+    /// empty mesh (Manifold's `NonFiniteVertex` early-out — status carried at M.3.2).
+    pub fn transform(&self, m: Mat3x4) -> Mesh {
+        if m == Mat3x4::IDENTITY {
+            return self.clone();
+        }
+        if !m.is_finite() {
+            return Mesh::default();
+        }
+        let linear = m.linear();
+        let normal_t = linear.normal_transform();
+        // `TransformNormals`: normalize, and a degenerate (NaN) normal collapses to zero.
+        let sn = |v: Vec3| {
+            let u = normal_t.mul_vec(v).normalize();
+            if u.x.is_nan() { Vec3::ZERO } else { u }
+        };
+
+        let mut result = self.clone();
+        for p in &mut result.vert_pos {
+            *p = m.transform_point(*p);
+        }
+        for n in &mut result.face_normal {
+            *n = sn(*n);
+        }
+        for n in &mut result.vert_normal {
+            *n = sn(*n);
+        }
+        if linear.determinant() < 0.0 {
+            result.flip_tris();
+        }
+        result.calculate_bbox();
+        // Scale epsilon by the 3×3 spectral norm, then re-floor against the new bbox (`SetEpsilon`).
+        result.epsilon *= linear.spectral_norm();
+        result.set_epsilon(result.epsilon, false);
+        result
+    }
+
+    /// Reverse the winding of every triangle in place (`mesh_fixes.h` `FlipTris`) — used by a mirror
+    /// transform to keep normals pointing outward. Each triangle's three half-edges are rewritten in
+    /// reversed order (each new start is the old edge's END), with every pair pointer remapped through
+    /// [`flip_halfedge`] to follow its now-flipped neighbour.
+    fn flip_tris(&mut self) {
+        let num_tri = self.num_tri();
+        let old = self.halfedge.clone();
+        for t in 0..num_tri {
+            let base = 3 * t;
+            // New slot i is sourced from old slot [2,1,0][i] with start/end swapped.
+            let src = [base + 2, base + 1, base];
+            for (i, &s) in src.iter().enumerate() {
+                // End of half-edge `s` = start of the next half-edge in its (same) triangle.
+                let end_vert = old[base + (s - base + 1) % 3].start_vert;
+                self.halfedge[base + i] = Halfedge {
+                    start_vert: end_vert,
+                    paired_halfedge: flip_halfedge(old[s].paired_halfedge),
+                    prop_vert: end_vert,
+                };
+            }
+        }
+    }
+}
+
+/// Remap a half-edge index to its position after its triangle is winding-flipped (`mesh_fixes.h`
+/// `FlipHalfedge` = `3·(h/3) + (2 − h%3)`). The unpaired sentinel is preserved.
+#[inline]
+fn flip_halfedge(h: HalfedgeId) -> HalfedgeId {
+    if h.is_none() {
+        return h;
+    }
+    let u = h.u();
+    HalfedgeId::from_usize(3 * (u / 3) + (2 - u % 3))
 }
 
 /// The flat interchange buffer — Manifold's `MeshGL64` core (double precision, the format the kernel
@@ -838,6 +913,45 @@ mod tests {
             vert_properties: verts,
             tri_verts: tris,
         }
+    }
+
+    /// M.3.1 — `transform`: translate/scale/rotate preserve manifoldness + scale volume by |det|; a
+    /// MIRROR (det<0) must flip winding so the signed volume stays POSITIVE (the flip_tris gate).
+    #[test]
+    fn transform_moves_scales_and_mirrors() {
+        let cube = Mesh::from_mesh_gl(&unit_cube()); // [0,1]³, volume 1
+        let v3 = Vec3::new;
+
+        // Translate: shape unchanged, bbox shifted.
+        let t = Mat3x4 { x: v3(1., 0., 0.), y: v3(0., 1., 0.), z: v3(0., 0., 1.), w: v3(10., 20., 30.) };
+        let moved = cube.transform(t);
+        assert!(moved.is_manifold());
+        assert!((moved.volume() - 1.0).abs() < 1e-12);
+        assert_eq!(moved.b_box.min, v3(10., 20., 30.));
+        assert_eq!(moved.b_box.max, v3(11., 21., 31.));
+
+        // Non-uniform scale: volume ×|det| = 2·3·4 = 24.
+        let s = Mat3x4 { x: v3(2., 0., 0.), y: v3(0., 3., 0.), z: v3(0., 0., 4.), w: Vec3::ZERO };
+        let scaled = cube.transform(s);
+        assert!(scaled.is_manifold());
+        assert!((scaled.volume() - 24.0).abs() < 1e-12);
+
+        // Mirror (det = −1): volume stays 1 AND POSITIVE — without the winding flip the signed volume
+        // would be −1. Proves flip_tris re-oriented the surface + kept it manifold.
+        let mirror = Mat3x4 { x: v3(-1., 0., 0.), y: v3(0., 1., 0.), z: v3(0., 0., 1.), w: Vec3::ZERO };
+        let mirrored = cube.transform(mirror);
+        assert!(mirrored.is_manifold(), "mirror must stay manifold (flip_tris pairing)");
+        assert!((mirrored.volume() - 1.0).abs() < 1e-12, "mirror volume {} != 1", mirrored.volume());
+        assert_eq!(crate::check::genus(&mirrored), 0);
+
+        // 90° rotation about z.
+        let rot = Mat3x4 { x: v3(0., 1., 0.), y: v3(-1., 0., 0.), z: v3(0., 0., 1.), w: Vec3::ZERO };
+        let rotated = cube.transform(rot);
+        assert!(rotated.is_manifold());
+        assert!((rotated.volume() - 1.0).abs() < 1e-12);
+
+        // Identity is an exact clone.
+        assert_eq!(cube.transform(Mat3x4::IDENTITY).volume(), cube.volume());
     }
 
     #[test]

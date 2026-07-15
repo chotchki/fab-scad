@@ -673,8 +673,8 @@ mod tests {
             tri_verts: tris,
         });
         mesh.set_epsilon(-1.0, false);
-        mesh.calculate_face_normals();
-        mesh.calculate_vert_normals();
+        mesh.initialize_original();
+        mesh.set_normals_and_coplanar();
         mesh
     }
 

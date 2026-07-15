@@ -17,8 +17,28 @@
 //! `i32` — so a vertex can't be passed where a half-edge is expected. Zero runtime cost
 //! (`#[repr(transparent)]`), so the K.0 output stays bit-identical.
 
+use std::sync::atomic::{AtomicI32, Ordering};
+
+use crate::boolean::vocab::TriRef;
 use crate::linalg::{Box3, Vec3};
 use crate::mesh_ids::{HalfedgeId, TriId, VertId};
+
+/// The global mesh-instance ID counter (Manifold's `Impl::meshIDCounter_`, starting at 1). Each freshly
+/// constructed original reserves a unique ID via [`reserve_ids`]; the boolean offsets Q's IDs above P's
+/// by the counter's current value. Only ID EQUALITY matters (for `TriRef::same_face`), so the absolute
+/// values — and any cross-test interleaving of this shared counter — never affect the geometry.
+static MESH_ID_COUNTER: AtomicI32 = AtomicI32::new(1);
+
+/// Reserve `n` consecutive mesh-instance IDs, returning the first (Manifold's `ReserveIDs`).
+pub fn reserve_ids(n: i32) -> i32 {
+    MESH_ID_COUNTER.fetch_add(n, Ordering::Relaxed)
+}
+
+/// The current mesh-instance ID counter value — the boolean's `offsetQ` (Manifold reads `meshIDCounter_`
+/// directly), which shifts Q's IDs above every ID reserved so far so P/Q never collide.
+pub fn mesh_id_counter() -> i32 {
+    MESH_ID_COUNTER.load(Ordering::Relaxed)
+}
 
 /// A single half-edge. `end` is DERIVED (see the module doc), so only these three fields are stored;
 /// [`VertId::NONE`]/[`HalfedgeId::NONE`] (`-1`) is the removed/unpaired sentinel.
@@ -60,6 +80,14 @@ pub struct Mesh {
     /// The merge/collinearity tolerance (Manifold `tolerance_`); `-1` = unset. Monotone-nondecreasing
     /// under [`Mesh::set_epsilon`] (it only ever `max`es up, never shrinks a user-supplied tolerance).
     pub tolerance: f64,
+    /// This mesh's ORIGINAL mesh-instance ID (Manifold `meshRelation_.originalID`); `-1` until
+    /// [`Mesh::initialize_original`] runs. Not the per-triangle id — see [`Mesh::tri_ref`].
+    pub mesh_id: i32,
+    /// Per-triangle provenance (Manifold `meshRelation_.triRef`) — which input mesh/coplanar-face each
+    /// output triangle came from. Empty until [`Mesh::initialize_original`]; the coplanar-group IDs are
+    /// filled by [`Mesh::set_normals_and_coplanar`], and the boolean threads it through so
+    /// [`crate::boolean::edge_op`]'s `CollapseColinearEdges` knows which edges are safe to collapse.
+    pub tri_ref: Vec<TriRef>,
 }
 
 impl Default for Mesh {
@@ -76,6 +104,8 @@ impl Default for Mesh {
             vert_normal: Vec::new(),
             epsilon: -1.0,
             tolerance: -1.0,
+            mesh_id: -1,
+            tri_ref: Vec::new(),
         }
     }
 }
@@ -579,6 +609,103 @@ impl Mesh {
             }
             self.vert_normal[vert] = crate::boolean::predicates::safe_normalize(normal);
         }
+    }
+
+    /// Stamp this mesh as a fresh ORIGINAL (Manifold's `InitializeOriginal`): reserve a unique
+    /// mesh-instance ID and give every triangle a [`TriRef`] `{mesh_id, original_id: mesh_id, face_id:
+    /// -1, coplanar_id: -1}`. The `coplanar_id` is a placeholder here (C++ reads uninitialized memory,
+    /// then overwrites it) — [`Mesh::set_normals_and_coplanar`] fills it. Call once per raw-geometry
+    /// input; the boolean PROPAGATES `tri_ref` to its output, so an intermediate result is never
+    /// re-initialized (that would erase the per-triangle provenance the fold relies on).
+    pub fn initialize_original(&mut self) {
+        let mesh_id = reserve_ids(1);
+        self.mesh_id = mesh_id;
+        self.tri_ref = vec![
+            TriRef {
+                mesh_id,
+                original_id: mesh_id,
+                face_id: -1,
+                coplanar_id: -1,
+            };
+            self.num_tri()
+        ];
+    }
+
+    /// Compute face normals AND flood the coplanar-group IDs (Manifold's `SetNormalsAndCoplanar`), then
+    /// the vertex normals. Requires [`Mesh::initialize_original`] (for `tri_ref`) and
+    /// [`Mesh::set_epsilon`] (for `tolerance`, the coplanarity threshold) to have run.
+    ///
+    /// The flood processes triangles LARGEST-area first (a `stable_sort` on squared area, descending), so
+    /// the biggest triangle of each flat region seeds it. A seed claims `coplanar_id = its own index`,
+    /// then a stack-based traversal spreads that ID to every adjacent triangle whose far vertex lies
+    /// within `tolerance` of the seed plane — SNAPPING each coplanar triangle's normal to the seed's
+    /// exact normal (so a whole flat face shares one normal, byte-for-byte). This global (non-local)
+    /// definition of "coplanar" is what keeps `CollapseColinearEdges` from stacking errors as verts move.
+    pub fn set_normals_and_coplanar(&mut self) {
+        let num_tri = self.num_tri();
+        self.face_normal = vec![Vec3::ZERO; num_tri];
+
+        // (area², tri) per triangle — the normal is computed here too; a removed/degenerate tri gets 0.
+        let mut tri_priority: Vec<(f64, usize)> = Vec::with_capacity(num_tri);
+        for tri in 0..num_tri {
+            self.tri_ref[tri].coplanar_id = -1;
+            let t = TriId::from_usize(tri);
+            if self.start(t.halfedge(0)).is_none() {
+                tri_priority.push((0.0, tri));
+                continue;
+            }
+            let v = self.pos(self.start(t.halfedge(0)));
+            let n = (self.pos(self.end(t.halfedge(0))) - v).cross(self.pos(self.end(t.halfedge(1))) - v);
+            let mut normal = n.normalize();
+            if normal.x.is_nan() {
+                normal = Vec3::new(0.0, 0.0, 1.0);
+            }
+            self.face_normal[tri] = normal;
+            tri_priority.push((n.length2(), tri));
+        }
+
+        // Largest area first (stable, descending) — the seed of each coplanar region is its biggest tri.
+        tri_priority.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(core::cmp::Ordering::Equal));
+
+        let mut interior: Vec<HalfedgeId> = Vec::new();
+        for &(_, seed_tri) in &tri_priority {
+            if self.tri_ref[seed_tri].coplanar_id >= 0 {
+                continue;
+            }
+            self.tri_ref[seed_tri].coplanar_id = seed_tri as i32;
+            let t = TriId::from_usize(seed_tri);
+            if self.start(t.halfedge(0)).is_none() {
+                continue;
+            }
+            let base = self.pos(self.start(t.halfedge(0)));
+            let normal = self.face_normal[seed_tri];
+            interior.clear();
+            interior.push(t.halfedge(0));
+            interior.push(t.halfedge(1));
+            interior.push(t.halfedge(2));
+            while let Some(&back) = interior.last() {
+                let h = self.pair(back).next();
+                interior.pop();
+                if self.tri_ref[h.tri().u()].coplanar_id >= 0 {
+                    continue;
+                }
+                let v = self.pos(self.end(h));
+                if (v - base).dot(normal).abs() < self.tolerance {
+                    let tri = h.tri().u();
+                    self.tri_ref[tri].coplanar_id = seed_tri as i32;
+                    self.face_normal[tri] = normal;
+                    // Stack bookkeeping (verbatim): don't double-push the edge we just arrived across.
+                    if interior.is_empty() || h != self.pair(*interior.last().unwrap()) {
+                        interior.push(h);
+                    } else {
+                        interior.pop();
+                    }
+                    interior.push(h.next());
+                }
+            }
+        }
+
+        self.calculate_vert_normals();
     }
 
     /// Set `epsilon`/`tolerance` from the bounding box (Manifold `Impl::SetEpsilon`). `epsilon =

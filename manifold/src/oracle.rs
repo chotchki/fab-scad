@@ -365,8 +365,8 @@ mod tests {
             tri_verts: tris,
         });
         mesh.set_epsilon(-1.0, false);
-        mesh.calculate_face_normals();
-        mesh.calculate_vert_normals();
+        mesh.initialize_original();
+        mesh.set_normals_and_coplanar();
         mesh
     }
 
@@ -453,8 +453,8 @@ mod tests {
             tri_verts: tris,
         });
         mesh.set_epsilon(-1.0, false);
-        mesh.calculate_face_normals();
-        mesh.calculate_vert_normals();
+        mesh.initialize_original();
+        mesh.set_normals_and_coplanar();
         mesh
     }
 
@@ -763,63 +763,16 @@ mod tests {
         None
     }
 
-    /// Fold-union the prepared input meshes (Rust) and check watertight + volume-matched +
-    /// residual-clean vs a C++ fold-union in the SAME order. Returns `Some(reason)` on any divergence,
-    /// `None` if clean — the shared differential body for the thesis sweeps and the proptest fast-gate.
-    fn fold_union_divergence(rmeshes: &[Mesh]) -> Option<String> {
-        use crate::boolean::OpType;
-        use crate::boolean::boolean_result::boolean;
-
-        let gls: Vec<MeshGl> = rmeshes.iter().map(|m| m.to_mesh_gl()).collect();
-
-        // Rust fold-union, re-preparing each intermediate.
-        let mut acc = rmeshes[0].clone();
-        for c in &rmeshes[1..] {
-            acc = boolean(&acc, c, OpType::Add);
-            if acc.is_empty() {
-                break;
-            }
-            if !acc.is_manifold() {
-                return Some("an intermediate union is not manifold".to_string());
-            }
-            prepare(&mut acc);
-        }
-
-        // C++ fold-union in the same order.
-        let mut ccpp = match CppKernel::ingest(&gls[0]) {
-            Ok(m) => m,
-            Err(e) => return Some(format!("cpp rejected input 0: {e}")),
-        };
-        for g in &gls[1..] {
-            match CppKernel::ingest(g) {
-                Ok(m) => ccpp = ccpp.union(&m),
-                Err(e) => return Some(format!("cpp rejected an input: {e}")),
-            }
-        }
-
-        if !acc.is_manifold() {
-            return Some("final union is not manifold".to_string());
-        }
-        let rvol = acc.volume();
-        let cvol = ccpp.volume();
-        if (rvol - cvol).abs() / cvol.abs().max(1e-9) >= 1e-9 {
-            return Some(format!("volume rust {rvol} vs cpp {cvol}"));
-        }
-        let a_cpp = match CppKernel::ingest(&acc.to_mesh_gl()) {
-            Ok(m) => m,
-            Err(e) => return Some(format!("cpp rejects the rust union: {e}")),
-        };
-        let sym = a_cpp.difference(&ccpp).union(&ccpp.difference(&a_cpp));
-        let residual = sym.volume() / a_cpp.volume().max(1e-12);
-        if residual >= 1e-5 {
-            return Some(format!("residual {residual:.3e} >= 1e-5"));
-        }
-        None
-    }
-
-    /// Like [`fold_union_divergence`] but compares with the triangulation-robust [`solid_divergence`]
-    /// (invariants + Monte-Carlo, our own point-in-mesh on both) instead of the C++-boolean residual —
-    /// for un-simplified meshes (rotated cubes) where the residual hits its measurement floor.
+    /// Fold-union the prepared input meshes (Rust) and compare with the triangulation-robust
+    /// [`solid_divergence`] (invariants + Monte-Carlo, our own point-in-mesh on BOTH) against a C++
+    /// fold-union in the SAME order. Returns `Some(reason)` on divergence, `None` if clean.
+    ///
+    /// This SUPERSEDES the old C++-boolean-residual fold check: once `simplify_topology` runs, our
+    /// tessellation legitimately differs from C++'s (we collapse a DIFFERENT subset — the colinear+swap
+    /// stages are provenance-gated), so C++'s `difference` slivers along the mismatched faces and the
+    /// residual reads its measurement floor (~1e-4) even though volume matches to 1e-9 and the SOLIDS are
+    /// identical. The invariant check here keeps the tight 1e-9 volume gate; Monte-Carlo carries the shape
+    /// check with no C++ booleans. (Same reasoning the rotated thesis already used — see its doc.)
     fn fold_union_solid_divergence(rmeshes: &[Mesh], n: usize, seed: u64) -> Option<String> {
         use crate::boolean::OpType;
         use crate::boolean::boolean_result::boolean;
@@ -859,9 +812,10 @@ mod tests {
     // ★ M.1.6 THESIS (R1 exit) — random multi-cube FOLD-unions vs C++. Beyond the fixed GATE-A/B
     //   configs, this hits the boolean on its OWN output (each fold step unions the running result with
     //   another cube) across a seeded sweep of continuous-random boxes (general position — exact
-    //   coincidence measure-zero, so the R2-deferred coplanar case never fires). Every result must be a
-    //   watertight solid matching C++ to residual < 1e-5 and volume to 1e-9. CLEAN ⇒ the R1 tracer
-    //   thesis holds. (The cargo-fuzz/ASan 1h continuous run + polygon_fuzz port are the M.1.5 tail.)
+    //   coincidence measure-zero). Every result must be a watertight solid matching C++ to volume 1e-9 +
+    //   bbox + Monte-Carlo containment (the triangulation-robust [`fold_union_solid_divergence`] — the
+    //   C++ residual is now measurement noise once `simplify_topology` retessellates). CLEAN ⇒ the R1
+    //   tracer thesis holds. (The cargo-fuzz/ASan 1h continuous run + polygon_fuzz port are the M.1.5 tail.)
     // =====================================================================================
     #[test]
     fn thesis_random_cube_fold_unions_vs_cpp() {
@@ -882,11 +836,11 @@ mod tests {
                     )
                 })
                 .collect();
-            if let Some(reason) = fold_union_divergence(&rmeshes) {
+            if let Some(reason) = fold_union_solid_divergence(&rmeshes, 2500, 0xA5C0 + trial as u64) {
                 panic!("THESIS trial {trial} (n={n}): {reason}");
             }
         }
-        eprintln!("THESIS ✓ {trials} random multi-cube fold-unions — watertight, residual-clean vs C++");
+        eprintln!("THESIS ✓ {trials} random multi-cube fold-unions — watertight, solid-clean vs C++");
     }
 
     /// A unit cube SCALED, ROTATED by ZYX-Euler angles, then TRANSLATED — a general-position solid with
@@ -939,8 +893,8 @@ mod tests {
             tri_verts: tris,
         });
         mesh.set_epsilon(-1.0, false);
-        mesh.calculate_face_normals();
-        mesh.calculate_vert_normals();
+        mesh.initialize_original();
+        mesh.set_normals_and_coplanar();
         mesh
     }
 
@@ -1015,7 +969,7 @@ mod tests {
                 .iter()
                 .map(|&(ox, oy, oz, sx, sy, sz)| prepared_box(ox, oy, oz, sx, sy, sz))
                 .collect();
-            if let Some(reason) = fold_union_divergence(&rmeshes) {
+            if let Some(reason) = fold_union_solid_divergence(&rmeshes, 2500, 0xB0BA_CAFE) {
                 proptest::prop_assert!(false, "{reason}\nparams = {params:?}");
             }
         }

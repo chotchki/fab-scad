@@ -182,4 +182,54 @@ mod tests {
         assert_eq!(tris.len(), n - 2);
         assert!((tri_area_sum(&poly, &tris) - shoelace(&poly)).abs() < 1e-9);
     }
+
+    proptest::proptest! {
+        // polygon_fuzz (M.1.5) — the ear-clip is the one NON-verbatim component, so it gets the
+        // structure-aware fuzzer. Star-shaped polygons (points sorted by angle → always simple; random
+        // radii → reflex verts + near-degenerate slivers) must always triangulate into n-2 triangles
+        // that TILE the polygon exactly with no grossly-inverted triangle.
+        #![proptest_config(proptest::prelude::ProptestConfig::with_cases(4096))]
+        #[test]
+        fn ear_clip_tiles_any_star_polygon(
+            // (angular WEIGHT in [1, 1.8], radius). Cumulative weights → angles: the bounded ratio
+            // makes every angular gap < π by CONSTRUCTION (max gap = maxW/ΣW ≤ 1.8/(n+0.8) < 0.5 for
+            // n ≥ 3), so the origin is strictly interior ⇒ a genuinely SIMPLE star polygon, with ZERO
+            // rejection. Random radii create reflex verts + near-degenerate slivers. (A filter-and-reject
+            // approach blew proptest's global-reject cap; a non-simple input is outside the ear-clip's
+            // contract, so we never generate one.)
+            spec in proptest::collection::vec((1.0f64..1.8, 0.15f64..2.0), 3..=16)
+        ) {
+            let total: f64 = spec.iter().map(|&(w, _)| w).sum();
+            let mut acc = 0.0;
+            let poly: Vec<Vec2> = spec
+                .iter()
+                .map(|&(w, r)| {
+                    let a = acc / total * 2.0 * crate::mathf::PI;
+                    acc += w;
+                    Vec2::new(r * crate::mathf::cos(a), r * crate::mathf::sin(a))
+                })
+                .collect();
+            let n = poly.len();
+            let area = shoelace(&poly); // > 0 (angle-sorted ⇒ CCW)
+            proptest::prop_assume!(area > 1e-6);
+
+            let tris = triangulate_simple(&poly, 1e-12);
+            proptest::prop_assert_eq!(tris.len(), n - 2, "wrong triangle count for {}-gon", n);
+
+            // Tiles the polygon exactly (signed tri areas sum to the shoelace area).
+            let tol = 1e-9 * area;
+            proptest::prop_assert!(
+                (tri_area_sum(&poly, &tris) - area).abs() < tol,
+                "triangulation does not tile the polygon (area {} vs {})",
+                tri_area_sum(&poly, &tris), area
+            );
+            // No grossly-inverted triangle (a tiny negative sliver is tolerated).
+            for t in &tris {
+                proptest::prop_assert!(
+                    area2(poly[t[0]], poly[t[1]], poly[t[2]]) > -tol,
+                    "inverted triangle {:?}", t
+                );
+            }
+        }
+    }
 }

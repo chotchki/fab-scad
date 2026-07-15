@@ -103,6 +103,7 @@ pub fn cpp_to_mesh_gl(m: &manifold3d::Manifold) -> MeshGl {
         num_prop,
         vert_properties,
         tri_verts: tri_u64.iter().map(|&i| i as u32).collect(),
+        ..Default::default()
     }
 }
 
@@ -210,7 +211,7 @@ mod tests {
         let mesh = MeshGl {
             num_prop: 3,
             vert_properties: verts,
-            tri_verts: tris,
+            tri_verts: tris, ..Default::default()
         };
 
         let rs = RustKernel::ingest(&mesh).unwrap();
@@ -362,7 +363,7 @@ mod tests {
         let mut mesh = Mesh::from_mesh_gl(&MeshGl {
             num_prop: 3,
             vert_properties: verts,
-            tri_verts: tris,
+            tri_verts: tris, ..Default::default()
         });
         mesh.set_epsilon(-1.0, false);
         mesh.initialize_original();
@@ -450,7 +451,7 @@ mod tests {
         let mut mesh = Mesh::from_mesh_gl(&MeshGl {
             num_prop: 3,
             vert_properties: verts,
-            tri_verts: tris,
+            tri_verts: tris, ..Default::default()
         });
         mesh.set_epsilon(-1.0, false);
         mesh.initialize_original();
@@ -692,7 +693,7 @@ mod tests {
                 _ => {}
             }
         }
-        MeshGl { num_prop: 3, vert_properties, tri_verts }
+        MeshGl { num_prop: 3, vert_properties, tri_verts, ..Default::default() }
     }
 
     // --- Triangulation-robust solid comparison (chotchki's methodology: invariants + Monte-Carlo). The
@@ -980,7 +981,7 @@ mod tests {
         let mut mesh = Mesh::from_mesh_gl(&MeshGl {
             num_prop: 3,
             vert_properties: verts,
-            tri_verts: tris,
+            tri_verts: tris, ..Default::default()
         });
         mesh.set_epsilon(-1.0, false);
         mesh.initialize_original();
@@ -1652,7 +1653,7 @@ mod tests {
         let dangling = MeshGl {
             num_prop: 3,
             vert_properties: vp,
-            tri_verts: cube_tris,
+            tri_verts: cube_tris, ..Default::default()
         };
         let divs = differential(&dangling, 1e-9).unwrap();
         assert!(
@@ -1665,7 +1666,7 @@ mod tests {
         let bad_index = MeshGl {
             num_prop: 3,
             vert_properties: vec![0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
-            tri_verts: vec![0, 1, 99],
+            tri_verts: vec![0, 1, 99], ..Default::default()
         };
         assert!(RustKernel::ingest(&bad_index).is_err());
         assert!(CppKernel::ingest(&bad_index).is_err());
@@ -1689,7 +1690,7 @@ mod tests {
         let nan_mesh = MeshGl {
             num_prop: 3,
             vert_properties: nan_vp,
-            tri_verts: cube_tris.clone(),
+            tri_verts: cube_tris.clone(), ..Default::default()
         };
         let e = differential(&nan_mesh, 1e-9).unwrap_err();
         assert!(e.contains("rust accepted"), "got: {e}");
@@ -1707,7 +1708,7 @@ mod tests {
         let flap = MeshGl {
             num_prop: 3,
             vert_properties: flap_vp,
-            tri_verts: flap_tris,
+            tri_verts: flap_tris, ..Default::default()
         };
         let e = differential(&flap, 1e-9).unwrap_err();
         assert!(e.contains("cpp accepted"), "got: {e}");

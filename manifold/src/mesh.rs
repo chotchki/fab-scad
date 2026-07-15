@@ -553,15 +553,19 @@ impl Mesh {
             m.tri_verts.len().is_multiple_of(3),
             "tri_verts not a multiple of 3"
         );
+        assert_eq!(
+            m.merge_from_vert.len(),
+            m.merge_to_vert.len(),
+            "mergeFromVert / mergeToVert length mismatch"
+        );
 
         // MeshGl carries position IN `num_prop` (>= 3); our `Mesh::num_prop` is the C++ `numProp_` count
-        // with position EXCLUDED. 1:1 ingest for now — the faithful position-dedup that splits prop-verts
-        // from geometric verts (mirroring C++'s merge-vector/coincident-vert quotient) is M.3.4b.2.
-        let n_vert = m.vert_properties.len() / m.num_prop;
+        // with position EXCLUDED. Each ROW is a prop-vertex; positions/properties are indexed by row.
+        let n_row = m.vert_properties.len() / m.num_prop;
         let num_prop = m.num_prop - 3;
-        let mut vert_pos = Vec::with_capacity(n_vert);
-        let mut properties = Vec::with_capacity(n_vert * num_prop);
-        for v in 0..n_vert {
+        let mut vert_pos = Vec::with_capacity(n_row);
+        let mut properties = Vec::with_capacity(n_row * num_prop);
+        for v in 0..n_row {
             let o = v * m.num_prop;
             vert_pos.push(Vec3::new(
                 m.vert_properties[o],
@@ -570,19 +574,47 @@ impl Mesh {
             ));
             properties.extend_from_slice(&m.vert_properties[o + 3..o + m.num_prop]);
         }
-        let tri_verts: Vec<[u32; 3]> = m
+
+        if m.merge_from_vert.is_empty() {
+            // No seams: every row is its own geometric vert (the 1:1 case — position-only and
+            // freshly-coloured meshes). `tri_verts` reference rows directly.
+            let tri_verts: Vec<[u32; 3]> =
+                m.tri_verts.chunks_exact(3).map(|c| [c[0], c[1], c[2]]).collect();
+            let mut mesh = Mesh { vert_pos, num_prop, properties, ..Default::default() };
+            mesh.create_halfedges(&tri_verts);
+            mesh.calculate_bbox();
+            return mesh;
+        }
+
+        // Merge-vector ingest (Manifold `Impl` ctor): `prop2vert[from] = to` folds coincident prop-vert
+        // ROWS into a shared GEOMETRIC vert, so a seam-split property mesh re-shares into a manifold.
+        // Half-edges pair on the merged geometric verts; each corner's `prop_vert` keeps its own row.
+        let mut prop2vert: Vec<u32> = (0..n_row as u32).collect();
+        for (&from, &to) in m.merge_from_vert.iter().zip(&m.merge_to_vert) {
+            prop2vert[from as usize] = to;
+        }
+        let tri_geo: Vec<[u32; 3]> = m
             .tri_verts
             .chunks_exact(3)
-            .map(|c| [c[0], c[1], c[2]])
+            .map(|c| {
+                [
+                    prop2vert[c[0] as usize],
+                    prop2vert[c[1] as usize],
+                    prop2vert[c[2] as usize],
+                ]
+            })
             .collect();
-
-        let mut mesh = Mesh {
-            vert_pos,
-            num_prop,
-            properties,
-            ..Default::default()
-        };
-        mesh.create_halfedges(&tri_verts);
+        let mut mesh = Mesh { vert_pos, num_prop, properties, ..Default::default() };
+        mesh.create_halfedges(&tri_geo);
+        // create_halfedges set prop_vert = start (the merged geo vert); overwrite with the ORIGINAL row.
+        for (tri, c) in m.tri_verts.chunks_exact(3).enumerate() {
+            for (i, &row) in c.iter().enumerate() {
+                mesh.set_prop(HalfedgeId::from_usize(3 * tri + i), VertId::new(row as i32));
+            }
+        }
+        // Drop the now-unreferenced duplicate positions (the non-canonical rows). With `num_prop > 0`
+        // this leaves `prop_vert` / `properties` alone (C++ defers prop compaction to CompactProps).
+        mesh.remove_unreferenced_verts();
         mesh.calculate_bbox();
         mesh
     }
@@ -608,38 +640,52 @@ impl Mesh {
                     tri_verts.push(self.start(t.halfedge(i)).raw() as u32);
                 }
             }
-            return MeshGl { num_prop: 3, vert_properties, tri_verts };
+            return MeshGl { num_prop: 3, vert_properties, tri_verts, ..Default::default() };
         }
 
-        // Decoupled emit: one interchange row per PROP-vert (Manifold `GetMeshGL`). Each row's position
-        // comes from the geometric vert that prop-vert belongs to (found by scanning half-edges — a
-        // prop-vert and its geometric vert are joined at every corner that uses it); its extras come from
-        // `properties`. `tri_verts` reference PROP-verts. Coincident prop-verts (a seam) become distinct
-        // rows sharing a position — faithful to MeshGL, but NOT re-mergeable without the mergeFromVert/To
-        // vectors (M.3.4b.7), so a chained re-ingest of this output isn't manifold yet.
-        let n_pv = self.num_prop_vert();
-        let mut prop2vert = vec![VertId::NONE; n_pv];
-        for h in &self.halfedge {
-            if h.prop_vert.is_some() && h.start_vert.is_some() {
-                prop2vert[h.prop_vert.u()] = h.start_vert;
-            }
-        }
-        let mut vert_properties = Vec::with_capacity(n_pv * mesh_gl_prop);
-        for (pv, &gv) in prop2vert.iter().enumerate() {
-            let p = if gv.is_some() { self.vert_pos[gv.u()] } else { Vec3::ZERO };
-            vert_properties.push(p.x);
-            vert_properties.push(p.y);
-            vert_properties.push(p.z);
-            vert_properties.extend_from_slice(&self.properties[pv * num_prop..(pv + 1) * num_prop]);
-        }
+        // Decoupled emit (Manifold `GetMeshGL` 620-683): one interchange row per distinct
+        // (GEOMETRIC-vert, prop-vert) PAIR — NOT per prop-vert, because a single prop-vert can be shared
+        // across MANY geometric verts (e.g. the zero-property row from an uncoloured operand), so its
+        // position is ambiguous; the pair fixes it. Rows are deduped by prop WITHIN each geometric vert's
+        // bin; `merge_from_vert`/`merge_to_vert` link the rows of the SAME geometric vert (a colour/UV
+        // seam) so a re-import re-shares them into a manifold, while rows at DIFFERENT geometric verts
+        // stay distinct.
+        let mut vert_prop_pair: Vec<Vec<(u32, u32)>> = vec![Vec::new(); self.num_vert()];
+        let mut vert2row = vec![u32::MAX; self.num_vert()];
+        let mut vert_properties: Vec<f64> = Vec::new();
         let mut tri_verts = Vec::with_capacity(self.num_tri() * 3);
+        let mut merge_from_vert = Vec::new();
+        let mut merge_to_vert = Vec::new();
         for tri in 0..self.num_tri() {
             let t = TriId::from_usize(tri);
             for i in 0..3 {
-                tri_verts.push(self.prop(t.halfedge(i)).raw() as u32);
+                let he = t.halfedge(i);
+                let vert = self.start(he).u();
+                let prop = self.prop(he).raw() as u32;
+                if let Some(&(_, row)) =
+                    vert_prop_pair[vert].iter().find(|(p, _)| *p == prop)
+                {
+                    tri_verts.push(row);
+                    continue;
+                }
+                let row = (vert_properties.len() / mesh_gl_prop) as u32;
+                tri_verts.push(row);
+                vert_prop_pair[vert].push((prop, row));
+                let p = self.vert_pos[vert];
+                vert_properties.push(p.x);
+                vert_properties.push(p.y);
+                vert_properties.push(p.z);
+                let pv = prop as usize;
+                vert_properties.extend_from_slice(&self.properties[pv * num_prop..(pv + 1) * num_prop]);
+                if vert2row[vert] == u32::MAX {
+                    vert2row[vert] = row;
+                } else {
+                    merge_from_vert.push(row);
+                    merge_to_vert.push(vert2row[vert]);
+                }
             }
         }
-        MeshGl { num_prop: mesh_gl_prop, vert_properties, tri_verts }
+        MeshGl { num_prop: mesh_gl_prop, vert_properties, tri_verts, merge_from_vert, merge_to_vert }
     }
 
     // --- Perturbation inputs (R1) — the data the boolean's symbolic tie-break consumes. ---
@@ -1182,8 +1228,11 @@ fn flip_halfedge(h: HalfedgeId) -> HalfedgeId {
 
 /// The flat interchange buffer — Manifold's `MeshGL64` core (double precision, the format the kernel
 /// works in). `num_prop >= 3`, first three properties are x,y,z; `tri_verts` is stride-3 CCW indices.
-/// The optional merge/run/faceID/tangent channels are R3+ concerns and omitted here.
-#[derive(Clone, Debug, PartialEq)]
+/// Each ROW is a PROP-vertex; `merge_from_vert`/`merge_to_vert` mark rows that are geometrically the same
+/// vertex (a UV/colour seam) so a re-import re-shares them into a manifold — the round-trip channel a
+/// property-carrying boolean output needs (M.3.4b.7). Empty merge vectors ⟹ every row is its own
+/// geometric vert (the common 1:1 case). Run/faceID/tangent channels are still omitted (R3+).
+#[derive(Clone, Debug, PartialEq, Default)]
 pub struct MeshGl {
     /// Properties per vertex, `>= 3` (first three are position).
     pub num_prop: usize,
@@ -1191,6 +1240,11 @@ pub struct MeshGl {
     pub vert_properties: Vec<f64>,
     /// Triangle corner indices, stride 3, CCW from outside (`triVerts`).
     pub tri_verts: Vec<u32>,
+    /// Rows to merge FROM (`mergeFromVert`) — same length as `merge_to_vert`. `prop2vert[from] = to`
+    /// on ingest folds these into their geometric vert.
+    pub merge_from_vert: Vec<u32>,
+    /// Rows to merge TO (`mergeToVert`) — the canonical geometric representative of each merged row.
+    pub merge_to_vert: Vec<u32>,
 }
 
 impl MeshGl {
@@ -1237,6 +1291,7 @@ mod tests {
             num_prop: 3,
             vert_properties: verts,
             tri_verts: tris,
+            ..Default::default()
         }
     }
 
@@ -1310,7 +1365,7 @@ mod tests {
         for &idx in &uc.tri_verts {
             tris.push(idx + 8);
         }
-        let mesh = Mesh::from_mesh_gl(&MeshGl { num_prop: 3, vert_properties: verts, tri_verts: tris });
+        let mesh = Mesh::from_mesh_gl(&MeshGl { num_prop: 3, vert_properties: verts, tri_verts: tris, ..Default::default() });
         assert!(mesh.is_manifold());
         assert_eq!(mesh.num_tri(), 24);
 
@@ -1471,7 +1526,7 @@ mod tests {
         let mesh = Mesh::from_mesh_gl(&MeshGl {
             num_prop: 3,
             vert_properties: verts,
-            tri_verts: base.tri_verts,
+            tri_verts: base.tri_verts, ..Default::default()
         });
         let v = mesh.volume();
         assert!((v - 8.0).abs() < 1e-9, "volume {v} !~ 8");
@@ -1508,13 +1563,33 @@ mod tests {
         let m = MeshGl {
             num_prop: 7,
             vert_properties: vp,
-            tri_verts: cube.tri_verts,
+            tri_verts: cube.tri_verts, ..Default::default()
         };
         let mesh = Mesh::from_mesh_gl(&m);
         assert_eq!(mesh.num_prop, 4); // Impl `numProp_` = interchange 7 − 3 position channels
         assert_eq!(mesh.properties.len(), 8 * 4);
         assert_eq!(mesh.volume(), 1.0); // positions still the unit cube
-        assert_eq!(mesh.to_mesh_gl(), m);
+
+        // `to_mesh_gl` emits one row per (vert, prop) PAIR in triangle-traversal order (as C++ `GetMeshGL`
+        // does), so it's not byte-identical to `m` — verify the round-trip preserves geometry + the RGBA
+        // rows as a bit-exact SET instead.
+        let gl = mesh.to_mesh_gl();
+        assert_eq!(gl.num_prop, 7);
+        assert!(gl.merge_from_vert.is_empty(), "no coincident verts ⟹ no merge-vectors");
+        let re = Mesh::from_mesh_gl(&gl);
+        assert_eq!(re.num_prop, 4);
+        assert_eq!(re.num_vert(), 8);
+        assert!((re.volume() - 1.0).abs() < 1e-12);
+        let bits = |m: &Mesh| {
+            let mut rows: Vec<[u64; 4]> = m
+                .properties
+                .chunks_exact(4)
+                .map(|r| [r[0].to_bits(), r[1].to_bits(), r[2].to_bits(), r[3].to_bits()])
+                .collect();
+            rows.sort_unstable();
+            rows
+        };
+        assert_eq!(bits(&mesh), bits(&re), "the RGBA rows survive the round-trip as a set");
     }
 
     #[test]
@@ -1523,7 +1598,7 @@ mod tests {
         let m = MeshGl {
             num_prop: 3,
             vert_properties: vec![0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
-            tri_verts: vec![0, 1, 2],
+            tri_verts: vec![0, 1, 2], ..Default::default()
         };
         let mesh = Mesh::from_mesh_gl(&m);
         assert!(!mesh.is_manifold());
@@ -1542,7 +1617,7 @@ mod tests {
                 0.0, 0.0, 1.0, // 3
                 0.0, -1.0, 0.0, // 4
             ],
-            tri_verts: vec![0, 1, 2, 0, 1, 3, 0, 1, 4],
+            tri_verts: vec![0, 1, 2, 0, 1, 3, 0, 1, 4], ..Default::default()
         };
         let mesh = Mesh::from_mesh_gl(&m);
         assert!(!mesh.is_manifold());
@@ -1624,7 +1699,7 @@ mod tests {
         let m = Mesh::from_mesh_gl(&MeshGl {
             num_prop: 3,
             vert_properties: vec![0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
-            tri_verts: vec![0, 1, 2, 0, 1, 3],
+            tri_verts: vec![0, 1, 2, 0, 1, 3], ..Default::default()
         });
         assert!(!m.is_manifold());
         // the shared 0→1 half-edges never linked

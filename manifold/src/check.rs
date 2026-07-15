@@ -100,7 +100,7 @@ mod tests {
         Mesh::from_mesh_gl(&MeshGl {
             num_prop: 3,
             vert_properties: verts,
-            tri_verts: tris,
+            tri_verts: tris, ..Default::default()
         })
     }
 
@@ -137,7 +137,7 @@ mod tests {
         let m = Mesh::from_mesh_gl(&MeshGl {
             num_prop: 3,
             vert_properties: vec![0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
-            tri_verts: vec![0, 1, 2],
+            tri_verts: vec![0, 1, 2], ..Default::default()
         });
         assert!(strictly(&m).is_err());
     }
@@ -147,7 +147,7 @@ mod tests {
         let bad = Mesh::from_mesh_gl(&MeshGl {
             num_prop: 3,
             vert_properties: vec![0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
-            tri_verts: vec![0, 1, 2],
+            tri_verts: vec![0, 1, 2], ..Default::default()
         });
         // flag off: no-op even on a broken mesh.
         intermediate_check(&bad, KernelParams::default());
@@ -159,7 +159,7 @@ mod tests {
         let bad = Mesh::from_mesh_gl(&MeshGl {
             num_prop: 3,
             vert_properties: vec![0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
-            tri_verts: vec![0, 1, 2],
+            tri_verts: vec![0, 1, 2], ..Default::default()
         });
         intermediate_check(
             &bad,

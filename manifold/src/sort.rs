@@ -236,7 +236,7 @@ mod tests {
             0,2,1, 0,3,2, 4,5,6, 4,6,7, 0,1,5, 0,5,4,
             2,3,7, 2,7,6, 0,4,7, 0,7,3, 1,2,6, 1,6,5,
         ];
-        let mut a = Mesh::from_mesh_gl(&MeshGl { num_prop: 3, vert_properties: verts.clone(), tri_verts: tris.clone() });
+        let mut a = Mesh::from_mesh_gl(&MeshGl { num_prop: 3, vert_properties: verts.clone(), tri_verts: tris.clone(), ..Default::default() });
         let vol_before = a.volume();
         a.calculate_bbox();
         a.sort_geometry();

@@ -974,7 +974,7 @@ mod tests {
         let mut mesh = Mesh::from_mesh_gl(&MeshGl {
             num_prop: 3,
             vert_properties: verts,
-            tri_verts: tris,
+            tri_verts: tris, ..Default::default()
         });
         mesh.set_epsilon(-1.0, false);
         mesh.initialize_original();
@@ -1035,7 +1035,60 @@ mod tests {
         assert!(saw_zero, "the cut faces from B carry zero properties");
     }
 
-    /// M.4 pull-forward — the deterministic PARALLEL narrow phase: a multi-cube fold must be BYTE-identical
+    /// M.3.4b.7 — a property-carrying boolean output SURVIVES a MeshGL serialization round-trip. The
+    /// seam-split prop-verts become coincident interchange rows tagged by merge-vectors; re-import folds
+    /// them back into a manifold with the properties intact. Then CHAINED: the re-imported coloured mesh
+    /// feeds a FURTHER boolean and still carries colour. (Native chaining never round-trips, so this gates
+    /// the SERIALIZATION path — save/load, cross-subsystem hand-off.)
+    #[test]
+    fn colored_output_survives_mesh_gl_round_trip() {
+        let a = cube(0.0, 0.0, 0.0)
+            .set_properties(4, |new, pos, _| new.copy_from_slice(&[pos.x, pos.y, pos.z, 1.0]));
+        let b = cube(0.5, 0.5, 0.5);
+        let out = boolean(&a, &b, OpType::Subtract);
+        assert!(out.num_prop_vert() > out.num_vert(), "the seam must split some prop-verts");
+
+        // Serialize (with merge-vectors) and re-import.
+        let gl = out.to_mesh_gl();
+        assert!(!gl.merge_from_vert.is_empty(), "a seam-split output must carry merge-vectors");
+        let re = Mesh::from_mesh_gl(&gl);
+        assert!(re.is_manifold(), "merge-vectors must re-share the seam into a manifold");
+        assert!((re.volume() - out.volume()).abs() < 1e-9, "round-trip preserves volume");
+        assert_eq!(re.num_prop, 4);
+        assert_eq!(re.num_vert(), out.num_vert(), "geometric vert count preserved");
+
+        // Colour still tracks position (or is zero from B) on every corner of the re-imported mesh.
+        for tri in 0..re.num_tri() {
+            let t = TriId::from_usize(tri);
+            for i in 0..3 {
+                let he = t.halfedge(i);
+                let pos = re.pos(re.start(he));
+                let row = &re.properties[re.prop(he).u() * 4..re.prop(he).u() * 4 + 4];
+                let is_zero = row.iter().all(|&x| x == 0.0);
+                assert!(
+                    is_zero
+                        || ((row[0] - pos.x).abs() < 1e-6
+                            && (row[1] - pos.y).abs() < 1e-6
+                            && (row[2] - pos.z).abs() < 1e-6
+                            && (row[3] - 1.0).abs() < 1e-6),
+                    "round-trip corrupted a colour: row {row:?} vs pos {pos:?}"
+                );
+            }
+        }
+
+        // Chained: re-prep the re-imported mesh and run a FURTHER boolean — colour carries on.
+        let mut re = re;
+        re.set_epsilon(-1.0, false);
+        re.initialize_original();
+        re.set_normals_and_coplanar();
+        let c = cube(0.25, 0.25, 0.25);
+        let chained = boolean(&re, &c, OpType::Subtract);
+        assert!(chained.is_manifold(), "chained boolean on a re-imported coloured mesh must be manifold");
+        assert_eq!(chained.num_prop, 4);
+        assert!(!chained.properties.is_empty(), "chained output still carries colour");
+    }
+
+/// M.4 pull-forward — the deterministic PARALLEL narrow phase: a multi-cube fold must be BYTE-identical
     /// across two independent runs. With `--features par` this proves rayon SCHEDULING can't perturb the
     /// output: `intersect12`/`winding03` map over queries via `par::map_collect` (index-preserving) + the
     /// existing `stable_sort`, so thread interleaving is invisible. Serial (default) it's a trivial pass;
@@ -1089,7 +1142,7 @@ mod tests {
         let mut mesh = Mesh::from_mesh_gl(&MeshGl {
             num_prop: 3,
             vert_properties: verts,
-            tri_verts: tris,
+            tri_verts: tris, ..Default::default()
         });
         mesh.set_epsilon(-1.0, false);
         mesh.initialize_original();

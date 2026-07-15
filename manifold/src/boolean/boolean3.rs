@@ -558,7 +558,7 @@ mod tests {
         let mut mesh = Mesh::from_mesh_gl(&MeshGl {
             num_prop: 3,
             vert_properties: verts,
-            tri_verts: tris,
+            tri_verts: tris, ..Default::default()
         });
         mesh.set_epsilon(-1.0, false);
         mesh.calculate_face_normals();

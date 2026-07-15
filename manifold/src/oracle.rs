@@ -631,6 +631,64 @@ mod tests {
         mesh.calculate_vert_normals();
     }
 
+    /// Fold-union `params` as boxes (Rust) and check watertight + volume-matched + residual-clean vs a
+    /// C++ fold-union in the SAME order. Returns `Some(reason)` on any divergence, `None` if clean — the
+    /// shared differential body for both the deterministic thesis sweep and the proptest fast-gate.
+    fn fold_union_divergence(params: &[BoxParams]) -> Option<String> {
+        use crate::boolean::OpType;
+        use crate::boolean::boolean_result::boolean;
+
+        let rmeshes: Vec<Mesh> = params
+            .iter()
+            .map(|&(ox, oy, oz, sx, sy, sz)| prepared_box(ox, oy, oz, sx, sy, sz))
+            .collect();
+        let gls: Vec<MeshGl> = rmeshes.iter().map(|m| m.to_mesh_gl()).collect();
+
+        // Rust fold-union, re-preparing each intermediate.
+        let mut acc = rmeshes[0].clone();
+        for c in &rmeshes[1..] {
+            acc = boolean(&acc, c, OpType::Add);
+            if acc.is_empty() {
+                break;
+            }
+            if !acc.is_manifold() {
+                return Some("an intermediate union is not manifold".to_string());
+            }
+            prepare(&mut acc);
+        }
+
+        // C++ fold-union in the same order.
+        let mut ccpp = match CppKernel::ingest(&gls[0]) {
+            Ok(m) => m,
+            Err(e) => return Some(format!("cpp rejected input 0: {e}")),
+        };
+        for g in &gls[1..] {
+            match CppKernel::ingest(g) {
+                Ok(m) => ccpp = ccpp.union(&m),
+                Err(e) => return Some(format!("cpp rejected an input: {e}")),
+            }
+        }
+
+        if !acc.is_manifold() {
+            return Some("final union is not manifold".to_string());
+        }
+        let rvol = acc.volume();
+        let cvol = ccpp.volume();
+        if (rvol - cvol).abs() / cvol.abs().max(1e-9) >= 1e-9 {
+            return Some(format!("volume rust {rvol} vs cpp {cvol}"));
+        }
+        let a_cpp = match CppKernel::ingest(&acc.to_mesh_gl()) {
+            Ok(m) => m,
+            Err(e) => return Some(format!("cpp rejects the rust union: {e}")),
+        };
+        let sym = a_cpp.difference(&ccpp).union(&ccpp.difference(&a_cpp));
+        let residual = sym.volume() / a_cpp.volume().max(1e-12);
+        if residual >= 1e-5 {
+            return Some(format!("residual {residual:.3e} >= 1e-5"));
+        }
+        None
+    }
+
     // =====================================================================================
     // ★ M.1.6 THESIS (R1 exit) — random multi-cube FOLD-unions vs C++. Beyond the fixed GATE-A/B
     //   configs, this hits the boolean on its OWN output (each fold step unions the running result with
@@ -641,19 +699,14 @@ mod tests {
     // =====================================================================================
     #[test]
     fn thesis_random_cube_fold_unions_vs_cpp() {
-        use crate::boolean::OpType;
-        use crate::boolean::boolean_result::boolean;
-
         let mut rng = Lcg::new(0x00F1_A5C0_FFEE);
         // 120 standing trials (~0.4s); a one-off 600-trial × 8-cube stress ran clean during M.1.6.
         let trials = 120;
         for trial in 0..trials {
             let n = 2 + (rng.next_u32() % 5) as usize; // 2..=6 cubes
-
-            // Continuous-random boxes: origins cluster in [0,2.5), sizes in [0.8,2.5) so unions overlap.
-            let rmeshes: Vec<Mesh> = (0..n)
+            let params: Vec<BoxParams> = (0..n)
                 .map(|_| {
-                    prepared_box(
+                    (
                         rng.range(0.0, 2.5),
                         rng.range(0.0, 2.5),
                         rng.range(0.0, 2.5),
@@ -663,49 +716,28 @@ mod tests {
                     )
                 })
                 .collect();
-            let gls: Vec<MeshGl> = rmeshes.iter().map(|m| m.to_mesh_gl()).collect();
-
-            // Rust fold-union, re-preparing each intermediate.
-            let mut acc = rmeshes[0].clone();
-            for c in &rmeshes[1..] {
-                acc = boolean(&acc, c, OpType::Add);
-                if acc.is_empty() {
-                    break;
-                }
-                assert!(
-                    acc.is_manifold(),
-                    "THESIS trial {trial} (n={n}): an intermediate union is not manifold"
-                );
-                prepare(&mut acc);
+            if let Some(reason) = fold_union_divergence(&params) {
+                panic!("THESIS trial {trial} (n={n}): {reason}\nparams = {params:?}");
             }
-
-            // C++ fold-union in the same order.
-            let mut ccpp = CppKernel::ingest(&gls[0]).unwrap();
-            for g in &gls[1..] {
-                ccpp = ccpp.union(&CppKernel::ingest(g).unwrap());
-            }
-
-            // Watertight, volume-matched, residual-clean.
-            assert!(
-                acc.is_manifold(),
-                "THESIS trial {trial} (n={n}): final union not manifold"
-            );
-            let rvol = acc.volume();
-            let cvol = ccpp.volume();
-            assert!(
-                (rvol - cvol).abs() / cvol.abs().max(1e-9) < 1e-9,
-                "THESIS trial {trial} (n={n}): volume rust {rvol} vs cpp {cvol}"
-            );
-            let a_cpp = CppKernel::ingest(&acc.to_mesh_gl())
-                .unwrap_or_else(|e| panic!("THESIS trial {trial} (n={n}): cpp rejects rust union: {e}"));
-            let sym = a_cpp.difference(&ccpp).union(&ccpp.difference(&a_cpp));
-            let residual = sym.volume() / a_cpp.volume().max(1e-12);
-            assert!(
-                residual < 1e-5,
-                "THESIS trial {trial} (n={n}): residual {residual:.3e} >= 1e-5"
-            );
         }
         eprintln!("THESIS ✓ {trials} random multi-cube fold-unions — watertight, residual-clean vs C++");
+    }
+
+    proptest::proptest! {
+        // M.1.5 proptest FAST-GATE — the shrinking counterpart to the deterministic thesis sweep: on a
+        // regression, proptest minimizes to the smallest diverging box set. 64 cases (~1s vs C++).
+        #![proptest_config(proptest::prelude::ProptestConfig::with_cases(64))]
+        #[test]
+        fn prop_cube_fold_unions_match_cpp(
+            params in proptest::collection::vec(
+                (0.0f64..2.5, 0.0f64..2.5, 0.0f64..2.5, 0.8f64..2.5, 0.8f64..2.5, 0.8f64..2.5),
+                2..=6,
+            )
+        ) {
+            if let Some(reason) = fold_union_divergence(&params) {
+                proptest::prop_assert!(false, "{reason}\nparams = {params:?}");
+            }
+        }
     }
 
     /// Exercises the divergence-REPORTING machinery (the paths that only fire when the kernels

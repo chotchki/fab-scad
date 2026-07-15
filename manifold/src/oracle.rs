@@ -799,6 +799,13 @@ mod tests {
         if let Some(r) = invariants_divergence(a, b.volume(), b.b_box, vol_tol) {
             return Some(format!("invariant: {r}"));
         }
+        // Genus (handle count) is a topological invariant a filled-over hole or a spurious internal wall
+        // would break even when volume matches — the exact defect M.2.3's keyhole path fixed. Cheap, so
+        // check it on every differential.
+        let (ga, gb) = (RustKernel::genus(a), RustKernel::genus(b));
+        if ga != gb {
+            return Some(format!("genus {ga} vs {gb}"));
+        }
         let lo = a.b_box.min.cmin(b.b_box.min);
         let hi = a.b_box.max.cmax(b.b_box.max);
         let size = hi - lo;
@@ -1014,19 +1021,63 @@ mod tests {
                     )
                 })
                 .collect();
-            // 4000 Monte-Carlo points per trial resolves any gross shape error; the seed varies by trial.
-            // 112/120 rotated folds are byte-identical to C++ (SortGeometry + the Delaunay-cost EarClip).
-            // The residual ~8 are near-degenerate cases where our SIMPLIFY collapse-ORDER diverges from
-            // C++ (proven NOT triangulation: forcing a different ear-clip start changes nothing, and the
-            // genus residual is invariant to the ear-clip). All 120 are Monte-Carlo-clean (correct SOLID);
-            // the divergence is un-canonical INTERNAL tessellation that volume() picks up. Gated on
-            // Monte-Carlo + a 2e-2 volume sanity here; matching C++'s collapse cascade bit-for-bit on the
-            // near-degenerate tail is the determinism phase (tighten to 1e-9 then).
-            if let Some(reason) = fold_union_solid_divergence(&rmeshes, 2500, 0xA5E1 + trial as u64, 2e-2) {
+            // M.2.2.3 CLOSED (commit for M.2.3 keyhole): all 120 rotated folds are now byte-identical to
+            // C++ in volume (rel < 1e-12) AND genus-matched AND Monte-Carlo-clean. The residual ~8 vol
+            // outliers + ~30 genus mismatches the earlier passes chased as "SimplifyTopology collapse-order
+            // divergence" were actually FILLED-OVER HOLES — the old per-loop Face2Tri filled interior hole
+            // loops (zero-volume internal walls → wrong genus) and inverted CW loops (→ volume drift). The
+            // multi-loop keyhole EarClip (M.2.3) fixed both. So the gate is the TIGHT 1e-9 volume + the
+            // genus-match now baked into solid_divergence.
+            if let Some(reason) = fold_union_solid_divergence(&rmeshes, 2500, 0xA5E1 + trial as u64, 1e-9) {
                 panic!("ROTATED THESIS trial {trial} (n={n}): {reason}");
             }
         }
         eprintln!("THESIS(rot) ✓ {trials} rotated-cube fold-unions — invariants + Monte-Carlo match C++");
+    }
+
+    proptest::proptest! {
+        // M.2.2.3 / M.2.3 — the KEYHOLE fuzzer at the BOOLEAN level. A [0,10]³ block minus 1..=2 bars,
+        // each piercing all the way THROUGH a random axis at a strictly-interior cross-section, so every
+        // bar punches a genus-adding hole through two opposite faces — exactly the holed-face case the
+        // multi-loop keyhole EarClip must triangulate. Held to the full solid oracle (1e-9 volume +
+        // genus-match + Monte-Carlo) vs C++, so a keyhole regression (filled hole → genus break, inverted
+        // CW loop → volume drift) is caught, not just hoped-for from the fixed rotated-fold sweep.
+        #![proptest_config(proptest::prelude::ProptestConfig::with_cases(256))]
+        #[test]
+        fn keyhole_boolean_holes_match_cpp(
+            // (axis 0=x/1=y/2=z, cross-coord u, cross-coord v, width u, width v), strictly interior.
+            bars in proptest::collection::vec(
+                (0usize..3, 1.0f64..7.0, 1.0f64..7.0, 0.8f64..2.0, 0.8f64..2.0),
+                1..=2,
+            )
+        ) {
+            use crate::boolean::OpType;
+            use crate::boolean::boolean_result::boolean;
+
+            // A bar that pierces `axis` through [0,10], cross-section (u,v)+(wu,wv) in the other two axes.
+            let make_bar = |axis: usize, u: f64, v: f64, wu: f64, wv: f64| match axis {
+                0 => prepared_box(-1.0, u, v, 12.0, wu, wv), // through x
+                1 => prepared_box(u, -1.0, v, wu, 12.0, wv), // through y
+                _ => prepared_box(u, v, -1.0, wu, wv, 12.0), // through z
+            };
+
+            let mut acc = prepared_box(0.0, 0.0, 0.0, 10.0, 10.0, 10.0);
+            let mut ccpp = CppKernel::ingest(&acc.to_mesh_gl()).unwrap();
+            for &(axis, u, v, wu, wv) in &bars {
+                let bar = make_bar(axis, u, v, wu, wv);
+                acc = boolean(&acc, &bar, OpType::Subtract);
+                proptest::prop_assert!(acc.is_manifold(), "holed result not manifold: bars {:?}", bars);
+                prepare(&mut acc);
+                ccpp = ccpp.difference(&CppKernel::ingest(&bar.to_mesh_gl()).unwrap());
+            }
+            // Sanity: the fuzzer actually produced at least one tunnel (a genus-adding hole).
+            proptest::prop_assert!(ccpp.genus() >= 1, "no hole produced (bars {:?})", bars);
+
+            let b = Mesh::from_mesh_gl(&cpp_to_mesh_gl(&ccpp));
+            if let Some(reason) = solid_divergence(&acc, &b, 3000, 0x4011, 1e-9) {
+                proptest::prop_assert!(false, "keyhole boolean diverges from C++: {reason}\nbars {:?}", bars);
+            }
+        }
     }
 
     /// M.2.4 — the NASTY corpus: Manifold's own hard test models (self-intersecting / thin /
@@ -1074,9 +1125,8 @@ mod tests {
                 .unwrap_or_else(|e| panic!("{l}: cpp ingest {e}"))
                 .union(&CppKernel::ingest(&gl_r).unwrap_or_else(|e| panic!("{r}: cpp ingest {e}")));
             let b = Mesh::from_mesh_gl(&cpp_to_mesh_gl(&cpp));
-            // Solid oracle at the R2 determinism tolerance (byte-identity on the nasty corpus is a
-            // determinism-close-out goal; correctness = Monte-Carlo-clean).
-            if let Some(reason) = solid_divergence(&res, &b, mc, 0x0B5E, 2e-2) {
+            // Solid oracle at the tight 1e-9 volume + genus-match + Monte-Carlo (M.2.2.3).
+            if let Some(reason) = solid_divergence(&res, &b, mc, 0x0B5E, 1e-9) {
                 panic!("NASTY {l} ∪ {r}: {reason}");
             }
             eprintln!("nasty ✓ {l} ∪ {r}: vol {:.5} ntri {}", res.volume(), res.num_tri());

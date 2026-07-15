@@ -428,8 +428,8 @@ impl QuickHull {
     /// component `i/2` of extreme point `i`).
     fn get_scale(&self, extreme_values_input: [usize; 6]) -> f64 {
         let mut s = 0.0;
-        for i in 0..6 {
-            let p = self.original_vertex_data[extreme_values_input[i]];
+        for (i, &ev) in extreme_values_input.iter().enumerate() {
+            let p = self.original_vertex_data[ev];
             let component = match i / 2 {
                 0 => p.x,
                 1 => p.y,
@@ -791,13 +791,13 @@ impl QuickHull {
                 let face_index = self.visible_faces[k];
                 let half_edges_mesh = self.mesh.get_half_edge_indices_of_face(&self.mesh.faces[face_index]);
                 let horizon_bits = self.mesh.faces[face_index].horizon_edges_on_current_iteration;
-                for j in 0..3usize {
+                for (j, &hem) in half_edges_mesh.iter().enumerate() {
                     if (horizon_bits & (1 << j)) == 0 {
                         if disable_counter < horizon_edge_count * 2 {
-                            self.new_halfedge_indices.push(half_edges_mesh[j] as usize);
+                            self.new_halfedge_indices.push(hem as usize);
                             disable_counter += 1;
                         } else {
-                            self.mesh.disable_halfedge(half_edges_mesh[j] as usize);
+                            self.mesh.disable_halfedge(hem as usize);
                         }
                     }
                 }

@@ -189,6 +189,65 @@ pub fn get_axis_aligned_projection(normal: Vec3) -> Projection {
     Projection { r0, r1 }
 }
 
+/// Barycentric coordinates of `v` w.r.t. triangle `tri_pos` (`shared.h` `GetBarycentric`). `tolerance`
+/// SNAPS: a `v` within it of a vertex returns exactly `1` in that slot, within it of an edge returns
+/// exactly `0` — the exact-equality `CreateProperties` keys its on-vert / on-edge prop-vert dedup off
+/// of. Handles the degenerate point / line triangles the boolean can hand it. Verbatim transliteration;
+/// the C++ `mat3`/`vec3` component indexing becomes `[Vec3; 3]` / `[f64; 3]` locals (`Next3` = `(i+1)%3`).
+pub fn get_barycentric(v: Vec3, tri_pos: [Vec3; 3], tolerance: f64) -> Vec3 {
+    let edges = [
+        tri_pos[2] - tri_pos[1],
+        tri_pos[0] - tri_pos[2],
+        tri_pos[1] - tri_pos[0],
+    ];
+    let d2 = [edges[0].dot(edges[0]), edges[1].dot(edges[1]), edges[2].dot(edges[2])];
+    let long_side = if d2[0] > d2[1] && d2[0] > d2[2] {
+        0
+    } else if d2[1] > d2[2] {
+        1
+    } else {
+        2
+    };
+    let cross_p = edges[0].cross(edges[1]);
+    let area2 = cross_p.dot(cross_p);
+    let tol2 = tolerance * tolerance;
+
+    let mut uvw = [0.0_f64; 3];
+    for i in 0..3 {
+        let dv = v - tri_pos[i];
+        if dv.dot(dv) < tol2 {
+            // Return exactly equal if within tolerance of vert.
+            uvw[i] = 1.0;
+            return Vec3::new(uvw[0], uvw[1], uvw[2]);
+        }
+    }
+
+    if d2[long_side] < tol2 {
+        // point
+        Vec3::new(1.0, 0.0, 0.0)
+    } else if area2 > d2[long_side] * tol2 {
+        // triangle
+        for i in 0..3 {
+            let j = (i + 1) % 3; // Next3
+            let cross_pv = edges[i].cross(v - tri_pos[j]);
+            let area2v = cross_pv.dot(cross_pv);
+            // Return exactly equal if within tolerance of edge.
+            uvw[i] = if area2v < d2[i] * tol2 { 0.0 } else { cross_pv.dot(cross_p) };
+        }
+        let uvw = Vec3::new(uvw[0], uvw[1], uvw[2]);
+        uvw / (uvw.x + uvw.y + uvw.z)
+    } else {
+        // line
+        let next_v = (long_side + 1) % 3;
+        let alpha = (v - tri_pos[next_v]).dot(edges[long_side]) / d2[long_side];
+        uvw[long_side] = 0.0;
+        uvw[next_v] = 1.0 - alpha;
+        let last_v = (next_v + 1) % 3;
+        uvw[last_v] = alpha;
+        Vec3::new(uvw[0], uvw[1], uvw[2])
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -29,7 +29,7 @@ use std::collections::BTreeMap;
 use crate::boolean::OpType;
 use crate::boolean::boolean3::Boolean3;
 use crate::boolean::face_op::face2tri;
-use crate::boolean::predicates::fmax;
+use crate::boolean::predicates::{fmax, get_barycentric};
 use crate::boolean::vocab::{Halfedge as VHalfedge, TriRef};
 use crate::linalg::{Box3, Vec3};
 use crate::mesh::{Mesh, mesh_id_counter};
@@ -518,6 +518,170 @@ fn size_output(
     (face_edge, face_pq2r)
 }
 
+/// `Next3`/`Prev3` (`utils.h`): the next / previous corner within a triangle (`(i+1)%3` / `(i+2)%3`).
+#[inline]
+fn next3(i: usize) -> usize {
+    (i + 1) % 3
+}
+#[inline]
+fn prev3(i: usize) -> usize {
+    (i + 2) % 3
+}
+
+/// Component `i` (0=x,1=y,2=z) of a [`Vec3`] — C++ `vec3::operator[]`, which our `Vec3` lacks.
+#[inline]
+fn comp(v: Vec3, i: usize) -> f64 {
+    match i {
+        0 => v.x,
+        1 => v.y,
+        _ => v.z,
+    }
+}
+
+/// `CreateProperties` (`boolean_result.cpp:571-687`): barycentric-interpolate each input mesh's extra
+/// properties (UV / colour / …) onto the boolean's output vertices, MANUFACTURING the decoupled
+/// prop-verts (a fresh [`Mesh::properties`] row per distinct `(source-face, on-vert | on-edge | interior)`
+/// key) so a coloured subtree keeps its properties across the seam. Reads `out.tri_ref` in its TEMP
+/// `{0|1, srcTri}` form — so it MUST run after `face2tri`/`reorder_halfedges` but BEFORE
+/// [`update_reference`] swaps in the real source refs (mirrors C++ Result 947→950). No-op when both
+/// inputs are position-only (`num_prop == 0`).
+///
+/// DEVIATION (documented, LOUD): the `negateNormals` branch — which flips Q's world-frame vertex
+/// NORMALS (properties slots 0..2) under `Subtract` — is hardwired OFF. It gates on
+/// `Impl::TriHasNormals`, the per-mesh-instance `hasNormals` provenance our `Mesh` doesn't track. So
+/// this is EXACT for colour / UV / any non-normal property (the fab-scad use case + the M.3.4b.6 gate),
+/// and diverges ONLY for a mesh carrying world-frame vertex normals AS properties through
+/// difference/intersection — its own box if that ever lands.
+fn create_properties(out: &mut Mesh, in_p: &Mesh, in_q: &Mesh, _invert_q: bool) {
+    let num_prop_p = in_p.num_prop;
+    let num_prop_q = in_q.num_prop;
+    let num_prop = num_prop_p.max(num_prop_q);
+    out.num_prop = num_prop;
+    if num_prop == 0 {
+        return;
+    }
+
+    let num_tri = out.num_tri();
+    // Barycentric coords per output half-edge (Manifold `bary`), against each corner's SOURCE triangle.
+    let mut bary = vec![Vec3::ZERO; out.halfedge.len()];
+    for tri in 0..num_tri {
+        let ref_pq = out.tri_ref[tri];
+        if out.start(HalfedgeId::from_usize(3 * tri)).is_none() {
+            continue;
+        }
+        let tri_pq = ref_pq.face_id as usize;
+        let pq = ref_pq.mesh_id == 0;
+        let src = if pq { in_p } else { in_q };
+        let mut tri_pos = [Vec3::ZERO; 3];
+        for (j, tp) in tri_pos.iter_mut().enumerate() {
+            *tp = src.pos(src.start(HalfedgeId::from_usize(3 * tri_pq + j)));
+        }
+        for i in 0..3 {
+            let vert = out.start(HalfedgeId::from_usize(3 * tri + i));
+            bary[3 * tri + i] = get_barycentric(out.pos(vert), tri_pos, out.epsilon);
+        }
+    }
+
+    let id_miss_prop = out.num_vert() as i32;
+    // Per output-vert bins of `((key.x, key.z, key.w), idx)`; the `+ 1` bin is `propIdx[idMissProp]`.
+    let mut prop_idx: Vec<Vec<([i32; 3], i32)>> = vec![Vec::new(); out.num_vert() + 1];
+    // `[0]` indexed by inQ prop-verts, `[1]` by inP prop-verts (mirrors C++'s swapped sizing).
+    let mut prop_miss_idx: [Vec<i32>; 2] =
+        [vec![-1; in_q.num_prop_vert()], vec![-1; in_p.num_prop_vert()]];
+
+    let mut properties: Vec<f64> = Vec::with_capacity(out.num_vert() * num_prop);
+    let mut idx: i32 = 0;
+
+    for tri in 0..num_tri {
+        // Skip collapsed triangles.
+        if out.start(HalfedgeId::from_usize(3 * tri)).is_none() {
+            continue;
+        }
+        let r = out.tri_ref[tri];
+        let pq = r.mesh_id == 0;
+        let old_num_prop = if pq { num_prop_p } else { num_prop_q };
+        let src = if pq { in_p } else { in_q };
+        let face_id = r.face_id as usize;
+
+        for i in 0..3 {
+            let he = HalfedgeId::from_usize(3 * tri + i);
+            let vert = out.start(he);
+            let uvw = bary[3 * tri + i];
+
+            // ivec4 key(PQ, idMissProp, -1, -1).
+            let mut key = [pq as i32, id_miss_prop, -1i32, -1i32];
+            if old_num_prop > 0 {
+                let mut edge: i32 = -2;
+                for j in 0..3 {
+                    if comp(uvw, j) == 1.0 {
+                        // On a retained vert, the propVert must also match.
+                        key[2] = src.prop(HalfedgeId::from_usize(3 * face_id + j)).raw();
+                        edge = -1;
+                        break;
+                    }
+                    if comp(uvw, j) == 0.0 {
+                        edge = j as i32;
+                    }
+                }
+                if edge >= 0 {
+                    // On an edge, both propVerts must match.
+                    let e = edge as usize;
+                    let p0 = src.prop(HalfedgeId::from_usize(3 * face_id + next3(e))).raw();
+                    let p1 = src.prop(HalfedgeId::from_usize(3 * face_id + prev3(e))).raw();
+                    key[1] = vert.raw();
+                    key[2] = p0.min(p1);
+                    key[3] = p0.max(p1);
+                } else if edge == -2 {
+                    key[1] = vert.raw();
+                }
+            }
+
+            if key[1] == id_miss_prop && key[2] >= 0 {
+                // Only key.x/key.z matter.
+                let entry = &mut prop_miss_idx[key[0] as usize][key[2] as usize];
+                if *entry >= 0 {
+                    out.set_prop(he, VertId::new(*entry));
+                    continue;
+                }
+                *entry = idx;
+            } else {
+                let bin = &mut prop_idx[key[1] as usize];
+                let mut b_found = false;
+                for b in bin.iter() {
+                    if b.0 == [key[0], key[2], key[3]] {
+                        b_found = true;
+                        out.set_prop(he, VertId::new(b.1));
+                        break;
+                    }
+                }
+                if b_found {
+                    continue;
+                }
+                bin.push(([key[0], key[2], key[3]], idx));
+            }
+
+            out.set_prop(he, VertId::new(idx));
+            idx += 1;
+            for p in 0..num_prop {
+                if p < old_num_prop {
+                    let mut old_props = [0.0f64; 3];
+                    for (j, op) in old_props.iter_mut().enumerate() {
+                        let pv = src.prop(HalfedgeId::from_usize(3 * face_id + j)).u();
+                        *op = src.properties[old_num_prop * pv + p];
+                    }
+                    // la::dot(uvw, oldProps). negateNormals branch omitted (see fn doc).
+                    let val = uvw.dot(Vec3::new(old_props[0], old_props[1], old_props[2]));
+                    properties.push(val);
+                } else {
+                    properties.push(0.0);
+                }
+            }
+        }
+    }
+
+    out.properties = properties;
+}
+
 /// Map each output triangle's TEMPORARY provenance ref (`{0|1, srcTri}`) to the source triangle's real
 /// [`TriRef`] (`boolean_result.cpp` `UpdateReference` + `MapTriRef`). `mesh_id == 0` reads P's `tri_ref`,
 /// else Q's — with Q's `mesh_id` shifted up by `offsetQ = meshIDCounter` (every ID reserved so far), so
@@ -753,6 +917,11 @@ fn result(b3: &Boolean3, in_p: &Mesh, in_q: &Mesh, op: OpType) -> Mesh {
     // collapse cascade visits edges in the same sequence C++ does — without it the surgery gets stuck at
     // a higher-genus fixed point on near-degenerate folds.
     out.reorder_halfedges();
+
+    // Barycentric-interpolate the inputs' extra properties onto the output verts (Manifold Result 947),
+    // manufacturing the decoupled prop-verts. MUST read `out.tri_ref` in its TEMP `{0|1, srcTri}` form,
+    // so it runs BEFORE `update_reference` below. No-op when both inputs are position-only.
+    create_properties(&mut out, in_p, in_q, invert_q);
 
     // Map each output triangle's temporary `{0|1, srcTri}` ref to the real source `TriRef`
     // (`triRefP/Q[srcTri]`, Q offset above P), so `simplify_topology`'s `CollapseColinearEdges` can read

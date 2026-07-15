@@ -546,6 +546,18 @@ pub fn boolean(in_p: &Mesh, in_q: &Mesh, op: OpType) -> Mesh {
     result(&b3, in_p, in_q, op)
 }
 
+/// Split `in_p` by the closed cutter `in_q` (`Manifold::Split`): ONE `Boolean3(Subtract)` shared across
+/// both extractions — `Result(Intersect)` is the piece INSIDE the cutter, `Result(Subtract)` the piece
+/// OUTSIDE. Sharing the narrow phase (both ops need `expand_p == false`, since neither is `Add`) is the
+/// C++ trick that halves the cut cost vs two independent booleans. The two results are exactly what a
+/// separate `boolean(p, q, Intersect)` + `boolean(p, q, Subtract)` would produce.
+pub fn split(in_p: &Mesh, in_q: &Mesh) -> (Mesh, Mesh) {
+    let b3 = Boolean3::new(in_p, in_q, OpType::Subtract);
+    let inside = result(&b3, in_p, in_q, OpType::Intersect);
+    let outside = result(&b3, in_p, in_q, OpType::Subtract);
+    (inside, outside)
+}
+
 /// Assemble the result mesh from the intersection tables (`boolean_result.cpp` `Boolean3::Result`, the
 /// GATE-A minimal pipeline — see the module doc for what's deferred).
 fn result(b3: &Boolean3, in_p: &Mesh, in_q: &Mesh, op: OpType) -> Mesh {

@@ -1253,6 +1253,58 @@ mod tests {
         eprintln!("R2 ✓ P−Q (vol {:.4}) + P∩Q (vol {:.4}) match C++", sub.volume(), int.volume());
     }
 
+    /// M.3.5 — `split_by_plane` / `trim_by_plane` vs C++. Split a box by axis-aligned AND tilted planes
+    /// (the tilted ones exercise the `Halfspace` rotation + the folded transform), holding each piece to
+    /// the solid oracle, plus conservation (`+side` + `−side` == whole) and `trim == split`'s positive
+    /// side. This is the M.3.5 gate: the whole cut path — `Cube` primitive, transform builders, folded
+    /// `Halfspace`, shared-`Boolean3` `Split` — end-to-end against the C++ reference.
+    #[test]
+    fn m3_5_split_trim_by_plane_vs_cpp() {
+        let block = prepared_box(0.0, 0.0, 0.0, 10.0, 10.0, 10.0); // [0,10]³, volume 1000
+        let block_cpp = CppKernel::ingest(&block.to_mesh_gl()).unwrap();
+
+        // (normal, offset, label). Axis-aligned (no rotation) + tilted (rotation exercised).
+        let cases: &[([f64; 3], f64, &str)] = &[
+            ([1.0, 0.0, 0.0], 4.0, "x=4"),
+            ([0.0, 0.0, 1.0], 7.0, "z=7"),
+            ([1.0, 1.0, 0.0], 8.0, "tilted-xy"),
+            ([1.0, 2.0, 3.0], 8.0, "tilted-xyz"),
+        ];
+
+        for (i, &(n, off, label)) in cases.iter().enumerate() {
+            let normal = Vec3::new(n[0], n[1], n[2]);
+            let seed = 0x5717 + (i as u64) * 3;
+
+            let (pos, neg) = block.split_by_plane(normal, off);
+            assert!(pos.is_manifold(), "{label}: +side not manifold");
+            assert!(neg.is_manifold(), "{label}: -side not manifold");
+            // Conservation: the two pieces reconstitute the whole.
+            assert!(
+                (pos.volume() + neg.volume() - 1000.0).abs() < 1e-6,
+                "{label}: pos {} + neg {} != 1000",
+                pos.volume(),
+                neg.volume()
+            );
+
+            let (pos_c, neg_c) = block_cpp.split_by_plane(n, off);
+            let pos_b = Mesh::from_mesh_gl(&cpp_to_mesh_gl(&pos_c));
+            let neg_b = Mesh::from_mesh_gl(&cpp_to_mesh_gl(&neg_c));
+            if let Some(r) = solid_divergence(&pos, &pos_b, 4000, seed, 1e-9) {
+                panic!("{label}: +side diverges from C++: {r}");
+            }
+            if let Some(r) = solid_divergence(&neg, &neg_b, 4000, seed + 1, 1e-9) {
+                panic!("{label}: -side diverges from C++: {r}");
+            }
+
+            // trim_by_plane is exactly split's positive side (single Intersect boolean).
+            let trim = block.trim_by_plane(normal, off);
+            if let Some(r) = solid_divergence(&trim, &pos_b, 4000, seed + 2, 1e-9) {
+                panic!("{label}: trim diverges from C++ +side: {r}");
+            }
+        }
+        eprintln!("M.3.5 ✓ split/trim by plane match C++ across {} planes", cases.len());
+    }
+
     /// M.2.3 — the KEYHOLE integration test: a bar punched all the way through a box (difference) leaves a
     /// square HOLE in the box's top and bottom faces, so `Face2Tri` must triangulate a holed polygon (an
     /// outer loop + an interior CW hole loop) via `CutKeyhole`. Without the keyhole path those faces fill

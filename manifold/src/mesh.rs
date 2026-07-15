@@ -1017,6 +1017,53 @@ impl Mesh {
         }
         meshes
     }
+
+    /// The big cutting cuboid covering the `+normal` side of the plane `dot(x, n̂) = origin_offset`
+    /// (`Halfspace` in `manifold.cpp`, used by split/trim). A unit-ish `Cube(2, centered)` slab is scaled
+    /// to `size` (large enough to enclose `b_box` past the plane), pushed to `origin_offset` along +x, and
+    /// rotated so +x aligns with `n̂`. The four Translate/Scale/Rotate steps are FOLDED into one matrix
+    /// (`Mat3x4 *`) and applied by a single [`Mesh::transform`], exactly as the lazy C++ composes them —
+    /// so epsilon scales by the product's spectral norm, not each factor's. `asin`/`atan2` go through
+    /// [`crate::mathf`] (native==wasm). Caller guarantees a non-empty (finite-bbox) mesh, so both the cube
+    /// and the transform are valid — the `expect`s document that invariant.
+    fn half_space(b_box: Box3, normal: Vec3, origin_offset: f64) -> Mesh {
+        let normal = normal.normalize();
+        // Base +x slab: Cube(2, centered) translated to [0,2]×[-1,1]×[-1,1].
+        let cutter = Mesh::cube(Vec3::splat(2.0), true).expect("size 2 cube is valid");
+        let size = (b_box.center() - normal * origin_offset).length() + 0.5 * b_box.size().length();
+        let y_deg = crate::mathf::degrees(-crate::mathf::asin(normal.z));
+        let z_deg = crate::mathf::degrees(crate::mathf::atan2(normal.y, normal.x));
+        // Fold: Rotate ∘ Translate(offset) ∘ Scale(size) ∘ Translate(1,0,0), then transform once.
+        let m = Mat3x4::rotate(0.0, y_deg, z_deg)
+            * Mat3x4::translate(Vec3::new(origin_offset, 0.0, 0.0))
+            * Mat3x4::scale(Vec3::splat(size))
+            * Mat3x4::translate(Vec3::new(1.0, 0.0, 0.0));
+        cutter.transform(m).expect("finite half-space transform")
+    }
+
+    /// Split by the plane `dot(x, n̂) = origin_offset` (`Manifold::SplitByPlane`, M.3.5), returning
+    /// `(positive_side, negative_side)` — the pieces on the `+normal` and `−normal` sides. Builds the
+    /// [`Mesh::half_space`] cutter from this mesh's own bbox, then one shared-`Boolean3`
+    /// [`crate::boolean::boolean_result::split`]. An empty mesh yields two empties (verbatim early-out).
+    /// `self` must be boolean-ready (epsilon/normals/`tri_ref` set).
+    pub fn split_by_plane(&self, normal: Vec3, origin_offset: f64) -> (Mesh, Mesh) {
+        if self.is_empty() {
+            return (Mesh::default(), Mesh::default());
+        }
+        let cutter = Mesh::half_space(self.b_box, normal, origin_offset);
+        crate::boolean::boolean_result::split(self, &cutter)
+    }
+
+    /// Trim to the `+normal` side of the plane (`Manifold::TrimByPlane`, M.3.5) — `self ∩ half_space`,
+    /// i.e. exactly [`Mesh::split_by_plane`]'s first result but computed with a single Intersect boolean.
+    /// An empty mesh stays empty. `self` must be boolean-ready.
+    pub fn trim_by_plane(&self, normal: Vec3, origin_offset: f64) -> Mesh {
+        if self.is_empty() {
+            return Mesh::default();
+        }
+        let cutter = Mesh::half_space(self.b_box, normal, origin_offset);
+        crate::boolean::boolean_result::boolean(self, &cutter, crate::boolean::OpType::Intersect)
+    }
 }
 
 /// Remap a half-edge index to its position after its triangle is winding-flipped (`mesh_fixes.h`

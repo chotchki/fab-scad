@@ -91,6 +91,101 @@ impl CrossSection {
         mesh.set_normals_and_coplanar();
         mesh
     }
+
+    /// Solid of revolution: revolve the cross-section a FULL 360° around the Y-axis, which becomes the
+    /// Z-axis of the result (Manifold `Revolve`, the full-revolution case). Only the positive-X part is
+    /// used — verts at `x < 0` are dropped, axis crossings interpolated to `x = 0`, and an on-axis vert is
+    /// placed ONCE and reused across all slices (so the surface closes cleanly at the axis).
+    /// `circular_segments` = segments around. Partial revolves (with front/back caps) are a follow-on.
+    pub fn revolve(&self, circular_segments: i32) -> Mesh {
+        // Axis-clip: keep the positive-X part of each contour, interpolating the x=0 crossings.
+        let mut polygons: Vec<Vec<Vec2>> = Vec::new();
+        for poly in &self.contours {
+            let n = poly.len();
+            let mut i = 0;
+            while i < n && poly[i].x < 0.0 {
+                i += 1;
+            }
+            if i == n {
+                continue;
+            }
+            let mut out = Vec::new();
+            let start = i;
+            loop {
+                if poly[i].x >= 0.0 {
+                    out.push(poly[i]);
+                }
+                let next = if i + 1 == n { 0 } else { i + 1 };
+                if (poly[next].x < 0.0) != (poly[i].x < 0.0) {
+                    let y = poly[next].y
+                        - poly[next].x * (poly[i].y - poly[next].y) / (poly[i].x - poly[next].x);
+                    out.push(Vec2::new(0.0, y));
+                }
+                i = next;
+                if i == start {
+                    break;
+                }
+            }
+            if !out.is_empty() {
+                polygons.push(out);
+            }
+        }
+        if polygons.is_empty() {
+            return Mesh::default();
+        }
+
+        let n_div = circular_segments.max(3) as i64;
+        let n_slices = n_div; // full revolution
+        let d_phi = 360.0 / n_div as f64;
+
+        let mut vert_pos: Vec<Vec3> = Vec::new();
+        let mut tris: Vec<[u32; 3]> = Vec::new();
+
+        for poly in &polygons {
+            let n_pos = poly.iter().filter(|p| p.x > 0.0).count() as i64;
+            let n_axis = poly.iter().filter(|p| p.x == 0.0).count() as i64;
+            let pn = poly.len();
+            for poly_vert in 0..pn {
+                let start_i = vert_pos.len() as i64;
+                let curr = poly[poly_vert];
+                let prev = poly[if poly_vert == 0 { pn - 1 } else { poly_vert - 1 }];
+                // Where the PREVIOUS polyVert's ring starts (wrapping to the last vert when poly_vert==0).
+                let prev_start = start_i
+                    + if poly_vert == 0 { n_axis + n_slices * n_pos } else { 0 }
+                    + if prev.x == 0.0 { -1 } else { -n_slices };
+                for slice in 0..n_slices {
+                    let phi = slice as f64 * d_phi;
+                    if slice == 0 || curr.x > 0.0 {
+                        let rad = phi * core::f64::consts::PI / 180.0;
+                        vert_pos.push(Vec3::new(
+                            curr.x * crate::mathf::cos(rad),
+                            curr.x * crate::mathf::sin(rad),
+                            curr.y,
+                        ));
+                    }
+                    // Full revolution ⇒ emit for every slice; slice 0 wraps to the last slice.
+                    let last = if slice == 0 { n_div } else { slice } - 1;
+                    if curr.x > 0.0 {
+                        let third = if prev.x == 0.0 { prev_start } else { prev_start + last };
+                        tris.push([(start_i + slice) as u32, (start_i + last) as u32, third as u32]);
+                    }
+                    if prev.x > 0.0 {
+                        let third = if curr.x == 0.0 { start_i } else { start_i + slice };
+                        tris.push([(prev_start + last) as u32, (prev_start + slice) as u32, third as u32]);
+                    }
+                }
+            }
+        }
+
+        let mut mesh = Mesh { vert_pos, num_prop: 0, ..Default::default() };
+        mesh.create_halfedges(&tris);
+        mesh.initialize_original();
+        mesh.calculate_bbox();
+        mesh.set_epsilon(-1.0, false);
+        mesh.sort_geometry();
+        mesh.set_normals_and_coplanar();
+        mesh
+    }
 }
 
 impl Mesh {
@@ -153,6 +248,34 @@ mod tests {
         assert!(tube.is_manifold(), "holed extrude must be a watertight manifold");
         assert!((tube.volume() - 96.0).abs() < 1e-9, "tube volume {} != 96", tube.volume());
         assert_eq!(crate::check::genus(&tube), 1, "a tube is genus 1");
+    }
+
+    #[test]
+    fn revolve_square_is_a_cylinder() {
+        // Revolve the unit square [0,1]×[0,1] (touching the Y-axis at x=0) → a solid cylinder radius 1,
+        // height 1. Exercises the on-axis vertex reuse. Volume ≈ π (inscribed N-gon for N segments).
+        let cyl = CrossSection::from_polygons(&[square(0.0, 0.0, 1.0)]).revolve(128);
+        assert!(cyl.is_manifold(), "revolved cylinder must be a watertight manifold");
+        assert_eq!(crate::check::genus(&cyl), 0, "a solid cylinder is genus 0");
+        assert!(
+            (cyl.volume() - core::f64::consts::PI).abs() < 1e-2,
+            "cylinder volume {} vs ~π",
+            cyl.volume()
+        );
+    }
+
+    #[test]
+    fn revolve_offset_square_is_a_torus_tube() {
+        // Revolve a square at x∈[1,2] (off the axis) → an annular cylinder (tube), inner r=1, outer r=2,
+        // height 1 → genus 1. Volume ≈ π(2²−1²)·1 = 3π.
+        let ring = CrossSection::from_polygons(&[square(1.0, 0.0, 1.0)]).revolve(128);
+        assert!(ring.is_manifold(), "off-axis revolve must be manifold");
+        assert_eq!(crate::check::genus(&ring), 1, "an annular cylinder is genus 1");
+        assert!(
+            (ring.volume() - 3.0 * core::f64::consts::PI).abs() < 3e-2,
+            "tube volume {} vs ~3π",
+            ring.volume()
+        );
     }
 
     #[test]

@@ -1869,6 +1869,39 @@ mod tests {
         eprintln!("M.5.3 ✓ project (3D→2D) footprint matches C++");
     }
 
+    /// M.5.3 — the REVOLVE bridge (2D→3D solid of revolution) vs C++. Full 360° revolve of an on-axis and
+    /// an off-axis profile (genus 0 vs genus 1) at the same segment count, solid-diverged against C++
+    /// `Revolve` (triangulation-independent — our arc verts via `mathf` vs C++ `cosd` differ by ULPs, but
+    /// the SOLID matches: volume + genus + MC).
+    #[test]
+    fn m5_3_revolve_vs_cpp() {
+        use crate::cross_section::CrossSection;
+        use crate::linalg::Vec2;
+
+        let sq = |x: f64, y: f64, s: f64| -> Vec<Vec2> {
+            vec![Vec2::new(x, y), Vec2::new(x + s, y), Vec2::new(x + s, y + s), Vec2::new(x, y + s)]
+        };
+        let to_cpp_cs = |polys: &[Vec<Vec2>]| -> manifold3d::CrossSection {
+            let cp: Vec<Vec<[f64; 2]>> =
+                polys.iter().map(|c| c.iter().map(|p| [p.x, p.y]).collect()).collect();
+            manifold3d::CrossSection::from_polygons(&cp)
+        };
+
+        let segments = 64;
+        for (label, polys, seed) in [
+            ("on-axis cylinder", vec![sq(0.0, 0.0, 1.0)], 0x5e_33u64),
+            ("off-axis tube", vec![sq(1.0, 0.0, 1.0)], 0x5e_44u64),
+        ] {
+            let rust = CrossSection::from_polygons(&polys).revolve(segments);
+            let cpp = manifold3d::Manifold::revolve(&to_cpp_cs(&polys), segments, 360.0);
+            let cpp_mesh = Mesh::from_mesh_gl(&cpp_to_mesh_gl(&cpp));
+            if let Some(r) = solid_divergence(&rust, &cpp_mesh, 4000, seed, 1e-6) {
+                panic!("{label}: revolve diverges from C++: {r}");
+            }
+        }
+        eprintln!("M.5.3 ✓ revolve (2D→3D) matches C++ (solid divergence)");
+    }
+
     /// M.2.3 — the KEYHOLE integration test: a bar punched all the way through a box (difference) leaves a
     /// square HOLE in the box's top and bottom faces, so `Face2Tri` must triangulate a holed polygon (an
     /// outer loop + an interior CW hole loop) via `CutKeyhole`. Without the keyhole path those faces fill

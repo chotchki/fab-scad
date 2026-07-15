@@ -546,13 +546,12 @@ fn comp(v: Vec3, i: usize) -> f64 {
 /// [`update_reference`] swaps in the real source refs (mirrors C++ Result 947→950). No-op when both
 /// inputs are position-only (`num_prop == 0`).
 ///
-/// DEVIATION (documented, LOUD): the `negateNormals` branch — which flips Q's world-frame vertex
-/// NORMALS (properties slots 0..2) under `Subtract` — is hardwired OFF. It gates on
-/// `Impl::TriHasNormals`, the per-mesh-instance `hasNormals` provenance our `Mesh` doesn't track. So
-/// this is EXACT for colour / UV / any non-normal property (the fab-scad use case + the M.3.4b.6 gate),
-/// and diverges ONLY for a mesh carrying world-frame vertex normals AS properties through
-/// difference/intersection — its own box if that ever lands.
-fn create_properties(out: &mut Mesh, in_p: &Mesh, in_q: &Mesh, _invert_q: bool) {
+/// The `negateNormals` branch (M.3.4b.8) flips Q's world-frame vertex NORMALS (properties slots 0..2)
+/// under `Subtract`: Q's triangles are wound backwards in the result, so its world-frame normals must
+/// sign-flip to keep pointing outward from the result's solid (into the cavity). Gated per source
+/// triangle on [`Mesh::tri_has_normals`] (the per-meshID `hasNormals` provenance), so it fires ONLY for
+/// runs actually carrying normals — colour / UV are untouched.
+fn create_properties(out: &mut Mesh, in_p: &Mesh, in_q: &Mesh, invert_q: bool) {
     let num_prop_p = in_p.num_prop;
     let num_prop_q = in_q.num_prop;
     let num_prop = num_prop_p.max(num_prop_q);
@@ -602,6 +601,10 @@ fn create_properties(out: &mut Mesh, in_p: &Mesh, in_q: &Mesh, _invert_q: bool) 
         let old_num_prop = if pq { num_prop_p } else { num_prop_q };
         let src = if pq { in_p } else { in_q };
         let face_id = r.face_id as usize;
+
+        // For Subtract, Q's tris are wound backwards in the result, so Q's world-frame vertex normals
+        // (slots 0..2 when the source carries them) sign-flip to keep pointing outward. Per source tri.
+        let negate_normals = !pq && invert_q && old_num_prop >= 3 && in_q.tri_has_normals(face_id);
 
         for i in 0..3 {
             let he = HalfedgeId::from_usize(3 * tri + i);
@@ -669,8 +672,11 @@ fn create_properties(out: &mut Mesh, in_p: &Mesh, in_q: &Mesh, _invert_q: bool) 
                         let pv = src.prop(HalfedgeId::from_usize(3 * face_id + j)).u();
                         *op = src.properties[old_num_prop * pv + p];
                     }
-                    // la::dot(uvw, oldProps). negateNormals branch omitted (see fn doc).
-                    let val = uvw.dot(Vec3::new(old_props[0], old_props[1], old_props[2]));
+                    // la::dot(uvw, oldProps), sign-flipped for Q's normal slots under Subtract.
+                    let mut val = uvw.dot(Vec3::new(old_props[0], old_props[1], old_props[2]));
+                    if negate_normals && p < 3 {
+                        val = -val;
+                    }
                     properties.push(val);
                 } else {
                     properties.push(0.0);
@@ -699,6 +705,12 @@ fn update_reference(out: &mut Mesh, in_p: &Mesh, in_q: &Mesh) {
             *r = q;
         }
     }
+    // Thread the per-meshID hasNormals provenance to the output (M.3.4b.8) — P unchanged, Q shifted by
+    // the SAME offset the tri refs used (mirrors C++ boolean_result.cpp 530-535), so a chained op still
+    // knows which runs carry normals.
+    out.mesh_id_has_normals = in_p.mesh_id_has_normals.clone();
+    out.mesh_id_has_normals
+        .extend(in_q.mesh_id_has_normals.iter().map(|&id| id + offset_q));
 }
 
 /// Run a full boolean: the [`Boolean3`] intersection stage then the result assembly. This is the R1
@@ -1086,6 +1098,57 @@ mod tests {
         assert!(chained.is_manifold(), "chained boolean on a re-imported coloured mesh must be manifold");
         assert_eq!(chained.num_prop, 4);
         assert!(!chained.properties.is_empty(), "chained output still carries colour");
+    }
+
+    /// M.3.4b.8 — `CreateProperties` sign-flips Q's world-frame NORMALS under Subtract, and ONLY when the
+    /// source run is flagged `hasNormals`. B carries a valid world-frame vector (its vertex position) in
+    /// property slots 0..2; `A − B` is run twice — B unflagged (no flip) and B `mark_has_normals`-flagged
+    /// (flip). The geometry is identical (properties don't change collapse decisions), and A's faces carry
+    /// zero normals either way, so the flip must EXACTLY NEGATE every normal channel's surface integral.
+    #[test]
+    fn subtract_flips_q_world_frame_normals() {
+        let a = cube(0.0, 0.0, 0.0);
+        let b_plain = cube(0.5, 0.5, 0.5)
+            .set_properties(3, |new, pos, _| new.copy_from_slice(&[pos.x, pos.y, pos.z]));
+        let mut b_flagged = b_plain.clone();
+        b_flagged.mark_has_normals();
+
+        let out_noflip = boolean(&a, &b_plain, OpType::Subtract); // not flagged ⇒ no flip
+        let out_flip = boolean(&a, &b_flagged, OpType::Subtract); // flagged ⇒ flip
+
+        assert_eq!(out_noflip.num_tri(), out_flip.num_tri(), "flagging must not change geometry");
+        assert_eq!(out_flip.num_prop, 3);
+
+        let integral = |m: &Mesh| -> [f64; 3] {
+            let mut acc = [0.0f64; 3];
+            for t in 0..m.num_tri() {
+                let tri = TriId::from_usize(t);
+                let hes = [tri.halfedge(0), tri.halfedge(1), tri.halfedge(2)];
+                let p: Vec<Vec3> = hes.iter().map(|&h| m.pos(m.start(h))).collect();
+                let area = 0.5 * (p[1] - p[0]).cross(p[2] - p[0]).length();
+                for (c, acc_c) in acc.iter_mut().enumerate() {
+                    let mean =
+                        hes.iter().map(|&h| m.properties[m.prop(h).u() * 3 + c]).sum::<f64>() / 3.0;
+                    *acc_c += area * mean;
+                }
+            }
+            acc
+        };
+        let i_noflip = integral(&out_noflip);
+        let i_flip = integral(&out_flip);
+        for c in 0..3 {
+            assert!(
+                i_noflip[c].abs() > 1e-6,
+                "channel {c} integral must be non-trivial to discriminate ({}, ~0 ⇒ test is blind)",
+                i_noflip[c]
+            );
+            assert!(
+                (i_flip[c] + i_noflip[c]).abs() < 1e-9,
+                "hasNormals flip must NEGATE channel {c}: flipped {} vs unflipped {}",
+                i_flip[c],
+                i_noflip[c]
+            );
+        }
     }
 
 /// M.4 pull-forward — the deterministic PARALLEL narrow phase: a multi-cube fold must be BYTE-identical

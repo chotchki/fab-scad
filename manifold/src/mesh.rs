@@ -96,6 +96,12 @@ pub struct Mesh {
     /// filled by [`Mesh::set_normals_and_coplanar`], and the boolean threads it through so
     /// [`crate::boolean::edge_op`]'s `CollapseColinearEdges` knows which edges are safe to collapse.
     pub tri_ref: Vec<TriRef>,
+    /// The mesh-instance IDs whose property slots 0..2 hold WORLD-FRAME vertex normals (Manifold's
+    /// per-meshID `Relation::hasNormals`, reduced to just the flag — the only bit `CreateProperties`'
+    /// `negateNormals` reads). Empty = no normal-carrying runs. Set via [`Mesh::mark_has_normals`] (after
+    /// loading normals into properties), carried through the boolean (union of P + Q-offset). The full
+    /// `meshIDtransform` Relation (backSide/transform, for `GetMeshGL` runTransform) is not ported.
+    pub mesh_id_has_normals: std::collections::BTreeSet<i32>,
 }
 
 impl Default for Mesh {
@@ -114,6 +120,7 @@ impl Default for Mesh {
             tolerance: -1.0,
             mesh_id: -1,
             tri_ref: Vec::new(),
+            mesh_id_has_normals: std::collections::BTreeSet::new(),
         }
     }
 }
@@ -149,6 +156,25 @@ impl Mesh {
     #[inline]
     pub fn num_edge(&self) -> usize {
         self.halfedge.len() / 2
+    }
+
+    /// Flag every mesh-instance this mesh currently carries (from [`Mesh::tri_ref`]) as holding
+    /// WORLD-FRAME vertex normals in property slots 0..2 (Manifold `CalculateNormals`'s per-meshID
+    /// `hasNormals = true`). Call AFTER writing normals into the first three extra properties; the
+    /// boolean then sign-flips them on the Subtract side (`CreateProperties`' negateNormals). Needs
+    /// `initialize_original` to have run so `tri_ref` carries real mesh IDs (a leaf mesh has one).
+    pub fn mark_has_normals(&mut self) {
+        let ids: Vec<i32> = self.tri_ref.iter().map(|r| r.mesh_id).collect();
+        self.mesh_id_has_normals.extend(ids);
+    }
+
+    /// Does the mesh-instance owning triangle `face` carry world-frame normals? (Manifold
+    /// `Impl::TriHasNormals`.) `false` when `tri_ref` is empty or the owning ID isn't flagged.
+    #[inline]
+    pub fn tri_has_normals(&self, face: usize) -> bool {
+        self.tri_ref
+            .get(face)
+            .is_some_and(|r| self.mesh_id_has_normals.contains(&r.mesh_id))
     }
 
     /// Empty mesh (no half-edges)?

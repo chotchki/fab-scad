@@ -1612,6 +1612,90 @@ mod tests {
         eprintln!("M.3.4b.7 ✓ merge-vectors round-trip both ways vs C++");
     }
 
+    /// M.3.4b.8 — the `negateNormals` sign-flip matches C++ end-to-end. Source REAL world-frame vertex
+    /// normals from C++ `calculate_normals` (which also sets the per-run `hasNormals` flag), re-import
+    /// that normal-carrying B into our kernel + flag it, run `A − B` in BOTH engines, and compare the
+    /// output normal field via the area-weighted `∫ normal dA` per channel. Proves our `hasNormals`
+    /// provenance + the Subtract flip agree with the reference. `minSharpAngle = 180` ⇒ smooth (no
+    /// vert-split), so the re-import is clean.
+    #[test]
+    fn m3_4b_negate_normals_vs_cpp() {
+        use crate::boolean::OpType;
+        use crate::boolean::boolean_result::boolean;
+        use crate::mesh_ids::TriId;
+
+        let a = prepared_cube(0.0, 0.0, 0.0);
+        let b = prepared_cube(0.5, 0.5, 0.5);
+        let a_cpp = CppKernel::ingest(&a.to_mesh_gl()).unwrap();
+        let b_cpp = CppKernel::ingest(&b.to_mesh_gl()).unwrap().calculate_normals(0, 180.0);
+
+        // Re-import C++'s normal-carrying B, prep it, and FLAG hasNormals (mirroring what C++ carries).
+        let b_gl = cpp_to_mesh_gl_with_merge(&b_cpp);
+        assert_eq!(b_gl.num_prop, 6, "B: xyz + 3 world-frame normal channels");
+        let mut b_rust = Mesh::from_mesh_gl(&b_gl);
+        b_rust.set_epsilon(-1.0, false);
+        b_rust.initialize_original();
+        b_rust.set_normals_and_coplanar();
+        b_rust.mark_has_normals();
+        assert_eq!(b_rust.num_prop, 3);
+
+        let rust_out = boolean(&a, &b_rust, OpType::Subtract);
+        let cpp_gl = cpp_to_mesh_gl_with_merge(&a_cpp.difference(&b_cpp));
+        assert_eq!(rust_out.num_prop, 3);
+        assert_eq!(cpp_gl.num_prop, 6);
+
+        let integral_rust = {
+            let mut acc = [0.0f64; 3];
+            for t in 0..rust_out.num_tri() {
+                let tri = TriId::from_usize(t);
+                let hes = [tri.halfedge(0), tri.halfedge(1), tri.halfedge(2)];
+                let p: Vec<Vec3> = hes.iter().map(|&h| rust_out.pos(rust_out.start(h))).collect();
+                let area = 0.5 * (p[1] - p[0]).cross(p[2] - p[0]).length();
+                for (c, acc_c) in acc.iter_mut().enumerate() {
+                    let mean = hes.iter().map(|&h| rust_out.properties[rust_out.prop(h).u() * 3 + c]).sum::<f64>()
+                        / 3.0;
+                    *acc_c += area * mean;
+                }
+            }
+            acc
+        };
+        let integral_cpp = {
+            let np = cpp_gl.num_prop;
+            let pos = |v: usize| {
+                Vec3::new(
+                    cpp_gl.vert_properties[v * np],
+                    cpp_gl.vert_properties[v * np + 1],
+                    cpp_gl.vert_properties[v * np + 2],
+                )
+            };
+            let mut acc = [0.0f64; 3];
+            for t in 0..cpp_gl.num_tri() {
+                let idx: Vec<usize> = (0..3).map(|i| cpp_gl.tri_verts[3 * t + i] as usize).collect();
+                let p: Vec<Vec3> = idx.iter().map(|&v| pos(v)).collect();
+                let area = 0.5 * (p[1] - p[0]).cross(p[2] - p[0]).length();
+                for (c, acc_c) in acc.iter_mut().enumerate() {
+                    let mean = idx.iter().map(|&v| cpp_gl.vert_properties[v * np + 3 + c]).sum::<f64>()
+                        / 3.0;
+                    *acc_c += area * mean;
+                }
+            }
+            acc
+        };
+
+        assert!(
+            integral_rust.iter().any(|&x| x.abs() > 1e-6),
+            "the retained B-normals must be a non-trivial field for the test to discriminate: {integral_rust:?}"
+        );
+        for c in 0..3 {
+            let (r, cp) = (integral_rust[c], integral_cpp[c]);
+            assert!(
+                (r - cp).abs() / cp.abs().max(1e-9) < 1e-6,
+                "normal channel {c}: ∫normal dA diverges — rust {r}, cpp {cp}"
+            );
+        }
+        eprintln!("M.3.4b.8 ✓ negateNormals matches C++ (∫normal dA per channel)");
+    }
+
     /// M.2.3 — the KEYHOLE integration test: a bar punched all the way through a box (difference) leaves a
     /// square HOLE in the box's top and bottom faces, so `Face2Tri` must triangulate a holed polygon (an
     /// outer loop + an interior CW hole loop) via `CutKeyhole`. Without the keyhole path those faces fill

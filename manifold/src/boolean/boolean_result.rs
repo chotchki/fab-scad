@@ -1180,6 +1180,88 @@ mod tests {
         assert_eq!(bits(&a), bits(&b), "vertex positions differ run-to-run (bitwise)");
     }
 
+    /// M.4.4 — the K.D determinism gate (in-crate half). A corpus exercising the full deterministic
+    /// pipeline (assembly + simplify + sort_geometry + create_properties) is hashed to a BYTE fingerprint
+    /// — `sort_geometry` canonicalizes vertex/face order, so the bytes are stable given the SAME numeric
+    /// results. The golden hashes below must match in EVERY build config: serial (default), `--features
+    /// par` (⇒ seq == par, since the parallel maps are index-preserving and the sort comparators are
+    /// total-order, M.4.2), and — once a wasm runner is wired — `--target wasm32-wasip1` (⇒ native == wasm,
+    /// the pillar-1 proof C++ structurally cannot make, resting on the portable-libm `mathf` seam).
+    /// Regenerate ONLY on a deliberate output change (run, read the printed hashes, paste them back).
+    #[test]
+    fn boolean_pipeline_bytes_match_golden() {
+        use crate::boolean::OpType;
+        use crate::mesh_ids::TriId;
+
+        // FNV-1a over the canonical output bytes: vert positions, then per-corner start-verts, then the
+        // property stride + rows. All f64 via to_bits (bitwise, so a 1-ULP drift is caught).
+        fn fingerprint(m: &Mesh) -> u64 {
+            let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+            let mut eat = |bytes: &[u8]| {
+                for &b in bytes {
+                    h ^= b as u64;
+                    h = h.wrapping_mul(0x0000_0100_0000_01b3);
+                }
+            };
+            for p in &m.vert_pos {
+                eat(&p.x.to_bits().to_le_bytes());
+                eat(&p.y.to_bits().to_le_bytes());
+                eat(&p.z.to_bits().to_le_bytes());
+            }
+            for tri in 0..m.num_tri() {
+                let t = TriId::from_usize(tri);
+                for i in 0..3 {
+                    eat(&m.start(t.halfedge(i)).raw().to_le_bytes());
+                }
+            }
+            eat(&(m.num_prop as u64).to_le_bytes());
+            for &v in &m.properties {
+                eat(&v.to_bits().to_le_bytes());
+            }
+            h
+        }
+
+        let a = cube(0.0, 0.0, 0.0);
+        // A 3-cube fold — the chained op where the total-order sort comparators (M.4.2) matter most.
+        let mut chained = boolean(&a, &cube(0.5, 0.3, 0.4), OpType::Add);
+        chained.set_epsilon(-1.0, false);
+        chained.initialize_original();
+        chained.set_normals_and_coplanar();
+        let chained = boolean(&chained, &cube(0.2, 0.7, 0.1), OpType::Add);
+        let colored = cube(0.0, 0.0, 0.0)
+            .set_properties(4, |n, p, _| n.copy_from_slice(&[p.x, p.y, p.z, 1.0]));
+
+        let cases: [(&str, Mesh); 5] = [
+            ("union", boolean(&a, &cube(0.3, 0.4, 0.5), OpType::Add)),
+            ("difference", boolean(&a, &cube(0.5, 0.5, 0.5), OpType::Subtract)),
+            ("intersection", boolean(&a, &cube(0.5, 0.5, 0.5), OpType::Intersect)),
+            ("fold3", chained),
+            ("colored_diff", boolean(&colored, &cube(0.5, 0.5, 0.5), OpType::Subtract)),
+        ];
+        // GOLDEN — generated on the serial build; must hold across par + wasm.
+        let golden: [(&str, u64); 5] = [
+            ("union", 0x3890d6b3b8411767),
+            ("difference", 0x67fe71f8a9989ac5),
+            ("intersection", 0x4ce414ea0880e6d5),
+            ("fold3", 0x2fabd3779eadfbd9),
+            ("colored_diff", 0xfdc31c723c573c31),
+        ];
+        let mut mismatch = false;
+        for ((label, mesh), (glabel, ghash)) in cases.iter().zip(golden.iter()) {
+            assert_eq!(label, glabel);
+            let h = fingerprint(mesh);
+            if h != *ghash {
+                mismatch = true;
+                eprintln!("        (\"{label}\", {h:#018x}),");
+            }
+        }
+        assert!(
+            !mismatch,
+            "pipeline fingerprint(s) diverged from golden — non-determinism (seq!=par / native!=wasm) OR a \
+             deliberate output change: paste the printed lines into `golden`"
+        );
+    }
+
     /// GATE-A in pure Rust (no oracle): an OFFSET (general-position) cube∪cube must produce a watertight,
     /// genus-0 solid of the analytic union volume. The offset (0.3,0.4,0.5) shares no coordinate between
     /// the meshes, so no cross-mesh `p == q` tie ever fires — the perturbation normals stay inert and the

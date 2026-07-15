@@ -1,30 +1,43 @@
-//! The broad phase — SERIAL brute-force stand-in for Manifold's LBVH `Collider`.
+//! The broad phase — Manifold's LBVH `Collider` (`collider.h`), ported SERIAL.
 //!
-//! Manifold's `collider.h` is a Karras radix-tree BVH: Morton-sort the leaf boxes, build the tree,
-//! and traverse it per query. We DEFER all of that. A brute-force `O(n · leaves)` scan emits the exact
-//! same candidate SET — every `(query, leaf)` whose boxes overlap — and for the offset tracer that's
-//! all GATE-A needs:
-//! - The `Kernel12` consumer `stable_sort`s the recorded pairs by `(edge, face)` afterward, so the
-//!   ORDER we emit them in is normalized away (no `(edge, face)` pair repeats → the sort is total).
-//! - The `Winding03` consumer accumulates into an INTEGER winding array, so its sum is
-//!   order-independent too.
+//! A Karras Morton radix-tree BVH over one mesh's per-FACE boxes, queried by the other mesh's edges
+//! (or verts) during a boolean. Verbatim `collider.h`: `CreateRadixTree` (Karras split via `PrefixLength`
+//! + count-leading-zeros, ties broken by leaf index), `BuildInternalBoxes` (bottom-up box union), and
+//! the `FindCollision` stack traversal. The parallel/atomic machinery is dropped — a serial counter
+//! reproduces `BuildInternalBoxes` bit-for-bit because a box union is exact (componentwise min/max) and
+//! each internal box is computed exactly once, when its second child arrives, regardless of order.
 //!
-//! So a natural-face-order brute force is bit-equivalent to the BVH here. The Morton BVH (and the
-//! `SortGeometry` reindex it needs) is ported later, behind a flag, differential-tested to emit the
-//! same set — see [[SPEC_manifold-rs_R1]] and M.1.1's note.
+//! ## Node numbering (`collider.h`)
+//! Nodes are indexed so EVEN nodes are leaves and ODD nodes are internal; the root is node 1. Leaf `i`
+//! lives at node `2i`, internal `i` at node `2i+1`. `nodeBBox` has `2·L−1` entries; `internalChildren`
+//! has `L−1`. A `≤1`-leaf collider has no internal nodes and collides nothing (the C++ `NumLeaves()==0`
+//! short-circuit) — real boolean inputs have ≥4 faces, so this only guards the degenerate case.
+//!
+//! ## Why this matches brute-force EXACTLY (the M.2.4.1 gate)
+//! A correct BVH visits every leaf whose box overlaps the query (internal boxes bound their descendants),
+//! so it emits the SAME candidate SET as an `O(n·leaves)` scan. Order differs, but both consumers wash it
+//! out: `Kernel12` `stable_sort`s the recorded pairs by `(edge, face)` and `Winding03` sums into an
+//! integer array. [`Collider::collisions_brute`] keeps the scan as the differential oracle.
+//!
+//! ## Leaf sort + remap
+//! Karras requires the leaf keys Morton-SORTED. Manifold gets that for free — every mesh is Morton-sorted
+//! (`SortGeometry`) before it enters a boolean, so leaf index == face index. We DON'T mutate the caller's
+//! mesh, so [`Collider::from_mesh`] sorts the leaves internally and keeps a `leaf2face` remap, applied at
+//! the record boundary. The morton normalization box is the union of the live face boxes (== the mesh
+//! `bBox_`); its exact value only tunes tree balance, never the collision set.
 //!
 //! Two query modes, matching `Box::DoesOverlap`'s two overloads: a `Box3` query (edge box vs face box)
 //! and a `Vec3` point query (XY-projected — the z-raycast winding). An empty (inverted-infinity) box
 //! query — what a REVERSE half-edge produces — is skipped wholesale, verbatim to the C++ early-out.
 //!
-//! The collider itself is DELIBERATELY index-agnostic: [`Collider::collisions`] collides abstract
-//! leaf/query indices (`i32`), and the CALLER assigns their meaning (a query is an edge here, a vert
-//! there) by wrapping into the typed ids at the callback boundary. Typing the broad phase would be
-//! false precision — it doesn't know or care what the boxes represent.
+//! The collider is DELIBERATELY index-agnostic: [`Collider::collisions`] collides abstract leaf/query
+//! indices (`i32`), and the CALLER assigns their meaning (a query is an edge here, a vert there) by
+//! wrapping into the typed ids at the callback boundary.
 
 use crate::linalg::{Box3, Vec3};
 use crate::mesh::Mesh;
 use crate::mesh_ids::{HalfedgeId, TriId};
+use crate::sort::{K_NO_CODE, morton_code};
 
 /// A broad-phase query — either a `Box3` (box-vs-box overlap) or a `Vec3` (point projected into the
 /// leaf's XY extent). Unifies the two `Box::DoesOverlap` overloads so [`Collider::collisions`] is one
@@ -33,7 +46,7 @@ pub trait ColliderQuery: Copy {
     /// Does this query overlap `leaf`? Box→Box is the symmetric AABB test; point→box is XY-projected.
     fn overlaps(self, leaf: Box3) -> bool;
     /// The empty-box early-out: a reverse half-edge yields an inverted-infinity `Box`, which overlaps
-    /// nothing — the C++ skips it before traversal, so we skip it before scanning.
+    /// nothing — the C++ skips it before traversal, so we skip it before descending the tree.
     fn is_empty(self) -> bool;
 }
 
@@ -61,44 +74,356 @@ impl ColliderQuery for Vec3 {
     }
 }
 
-/// The broad-phase acceleration structure (Manifold's `Collider`), here just the leaf boxes. Built over
-/// one mesh's per-FACE boxes; queried by the other mesh's edges (or verts) during a boolean.
+// --- node arithmetic (`collider.h` collider_internal) ---
+const K_ROOT: i32 = 1;
+/// Exponential-search seed + growth for `RangeEnd` (`collider.h` kInitialLength / kLengthMultiple).
+const K_INITIAL_LENGTH: i32 = 128;
+const K_LENGTH_MULTIPLE: i32 = 4;
+
+#[inline]
+const fn is_leaf(node: i32) -> bool {
+    node % 2 == 0
+}
+#[inline]
+const fn is_internal(node: i32) -> bool {
+    node % 2 == 1
+}
+#[inline]
+const fn node2internal(node: i32) -> i32 {
+    (node - 1) / 2
+}
+#[inline]
+const fn internal2node(internal: i32) -> i32 {
+    internal * 2 + 1
+}
+#[inline]
+const fn node2leaf(node: i32) -> i32 {
+    node / 2
+}
+#[inline]
+const fn leaf2node(leaf: i32) -> i32 {
+    leaf * 2
+}
+
+/// Karras radix-tree builder (`collider.h` `CreateRadixTree`). Borrows the tree arrays plus the
+/// Morton-SORTED leaf codes; `create(internal)` links one internal node to its two children.
+struct RadixTreeBuilder<'a> {
+    node_parent: &'a mut [i32],
+    internal_children: &'a mut [(i32, i32)],
+    leaf_morton: &'a [u32],
+}
+
+impl RadixTreeBuilder<'_> {
+    /// Count of identical high-order bits of two codes (`__builtin_clz(a ^ b)`). `a != b` at every real
+    /// call site (the tie-break below guarantees distinct keys), so the `clz(0)==32` fallback is never
+    /// hit — matching the C++, which relies on the same uniqueness.
+    #[inline]
+    fn prefix_bits(a: u32, b: u32) -> i32 {
+        (a ^ b).leading_zeros() as i32
+    }
+
+    /// Common-prefix length of leaves `i`,`j` (`PrefixLength(int,int)`). Out-of-range `j` → −1; equal
+    /// Morton codes fall back to disambiguating by leaf INDEX (`32 + clz(i^j)`), so the keys are totally
+    /// ordered even under Morton ties.
+    #[inline]
+    fn prefix_length(&self, i: i32, j: i32) -> i32 {
+        if j < 0 || j >= self.leaf_morton.len() as i32 {
+            return -1;
+        }
+        let (mi, mj) = (self.leaf_morton[i as usize], self.leaf_morton[j as usize]);
+        if mi == mj {
+            32 + Self::prefix_bits(i as u32, j as u32)
+        } else {
+            Self::prefix_bits(mi, mj)
+        }
+    }
+
+    /// The far end of leaf `i`'s Karras range (`RangeEnd`): pick the direction of longer common prefix,
+    /// grow a conservative bound exponentially, then binary-search the exact length.
+    fn range_end(&self, i: i32) -> i32 {
+        let mut dir = self.prefix_length(i, i + 1) - self.prefix_length(i, i - 1);
+        dir = (dir > 0) as i32 - (dir < 0) as i32;
+        let common_prefix = self.prefix_length(i, i - dir);
+        let mut max_length = K_INITIAL_LENGTH;
+        while self.prefix_length(i, i + dir * max_length) > common_prefix {
+            max_length *= K_LENGTH_MULTIPLE;
+        }
+        let mut length = 0;
+        let mut step = max_length / 2;
+        while step > 0 {
+            if self.prefix_length(i, i + dir * (length + step)) > common_prefix {
+                length += step;
+            }
+            step /= 2;
+        }
+        i + dir * length
+    }
+
+    /// The split position within `[first, last]` where the next-highest bit differs (`FindSplit`),
+    /// by binary search on the common-prefix length.
+    fn find_split(&self, first: i32, last: i32) -> i32 {
+        let common_prefix = self.prefix_length(first, last);
+        let mut split = first;
+        let mut step = last - first;
+        loop {
+            step = (step + 1) >> 1; // divide by 2, rounding up
+            let new_split = split + step;
+            if new_split < last {
+                let split_prefix = self.prefix_length(first, new_split);
+                if split_prefix > common_prefix {
+                    split = new_split;
+                }
+            }
+            if step <= 1 {
+                break;
+            }
+        }
+        split
+    }
+
+    /// Link internal node `internal` to its two children (`CreateRadixTree::operator()`), recording the
+    /// child ids and back-pointing both children's parent.
+    fn create(&mut self, internal: i32) {
+        let mut first = internal;
+        let mut last = self.range_end(first);
+        if first > last {
+            std::mem::swap(&mut first, &mut last);
+        }
+        let mut split = self.find_split(first, last);
+        let child1 = if split == first {
+            leaf2node(split)
+        } else {
+            internal2node(split)
+        };
+        split += 1;
+        let child2 = if split == last {
+            leaf2node(split)
+        } else {
+            internal2node(split)
+        };
+        self.internal_children[internal as usize] = (child1, child2);
+        let node = internal2node(internal);
+        self.node_parent[child1 as usize] = node;
+        self.node_parent[child2 as usize] = node;
+    }
+}
+
+/// The broad-phase acceleration structure (Manifold's `Collider`): a Karras Morton-BVH over one mesh's
+/// per-face boxes. Built once per boolean input, queried by the other mesh's edges/verts.
 #[derive(Clone, Debug, Default)]
 pub struct Collider {
-    /// One AABB per leaf (per triangle of the source mesh). A removed triangle keeps the default empty
+    /// One AABB per leaf, in ORIGINAL face order — the brute-force oracle ([`Collider::collisions_brute`])
+    /// scans these, and it's the source the BVH is built from. A removed triangle keeps the default empty
     /// box, so it never collides.
     pub leaf_box: Vec<Box3>,
+    /// BVH node boxes (`2·L−1`): leaf `i` at `nodeBBox[2i]`, internal `i` at `nodeBBox[2i+1]`. Empty for a
+    /// `≤1`-leaf collider (which collides nothing).
+    node_bbox: Vec<Box3>,
+    /// `(child1, child2)` node ids per internal node (`L−1` entries). Empty ⇒ no traversal.
+    internal_children: Vec<(i32, i32)>,
+    /// Parent node id per node (`2·L−1`); root's is left at −1.
+    node_parent: Vec<i32>,
+    /// Sorted-leaf position → original face index. Applied at the record boundary so callers see face
+    /// indices, not Morton-sorted positions.
+    leaf2face: Vec<i32>,
 }
 
 impl Collider {
-    /// Build from explicit leaf boxes.
+    /// Build a BVH over explicit leaf boxes, deriving a Morton code per box from its CENTER (used by tests
+    /// and any caller without triangle centroids). Boxes are the source of truth; a non-finite box is a
+    /// removed leaf (`kNoCode`, sorts last, never collides).
     pub fn new(leaf_box: Vec<Box3>) -> Self {
-        Self { leaf_box }
+        let bbox = live_bbox(&leaf_box);
+        let morton: Vec<u32> = leaf_box
+            .iter()
+            .map(|b| {
+                if b.is_finite() {
+                    morton_code(b.center(), bbox)
+                } else {
+                    K_NO_CODE
+                }
+            })
+            .collect();
+        Self::build(leaf_box, &morton)
     }
 
-    /// Build over a mesh's per-face boxes — the way a boolean builds `inQ.collider_` (`GetFaceBoxMorton`
-    /// minus the Morton sort). Each face box is the union of its three vertices; a removed face
-    /// (`pair(first_halfedge)` is NONE) keeps the empty default so it collides with nothing.
+    /// Build over a mesh's per-face boxes — the way a boolean builds `inQ.collider_`
+    /// (`GetFaceBoxMorton` + `SortFaces` + `Collider(faceBox, faceMorton)`, fused). Each face box unions
+    /// its three verts; its Morton code is the centroid normalized by the live bounding box; a removed
+    /// face (`pair(first_halfedge)` is NONE) gets the empty box + `kNoCode`.
     pub fn from_mesh(mesh: &Mesh) -> Self {
-        let mut leaf_box = vec![Box3::default(); mesh.num_tri()];
-        for (face, bx) in leaf_box.iter_mut().enumerate() {
+        let num_tri = mesh.num_tri();
+        let mut leaf_box = vec![Box3::default(); num_tri];
+        let mut centroid = vec![Vec3::ZERO; num_tri];
+        for face in 0..num_tri {
             let t = TriId::from_usize(face);
             if mesh.pair(t.halfedge(0)).is_none() {
-                continue;
+                continue; // removed face: empty box, kNoCode below
             }
+            let mut c = Vec3::ZERO;
             for i in 0..3 {
-                bx.union_point(mesh.pos(mesh.start(t.halfedge(i))));
+                let p = mesh.pos(mesh.start(t.halfedge(i)));
+                c = c + p;
+                leaf_box[face].union_point(p);
             }
+            centroid[face] = c / 3.0;
         }
-        Self { leaf_box }
+        let bbox = live_bbox(&leaf_box);
+        let morton: Vec<u32> = (0..num_tri)
+            .map(|f| {
+                if leaf_box[f].is_finite() {
+                    morton_code(centroid[f], bbox)
+                } else {
+                    K_NO_CODE
+                }
+            })
+            .collect();
+        Self::build(leaf_box, &morton)
     }
 
-    /// Serial brute-force broad phase (`Collider::Collisions`). For each query `i` in `0..n`, take
-    /// `query_fn(i)`; skip an empty box query; otherwise call `record(i, leaf)` for every leaf box it
-    /// overlaps. When `self_collision`, the `i == leaf` self-pair is skipped (only meaningful when the
-    /// queries ARE the leaves; the boolean always passes `false`). Leaves are scanned in natural order.
-    /// Indices are raw `i32` — the caller assigns their meaning.
+    /// Sort the leaves by Morton code (stable, ties → index) and build the radix tree + node boxes over
+    /// the sorted order (`Collider(leafBB, leafMorton)`). `leaf_box` is retained in ORIGINAL order; the
+    /// sort lives entirely in `leaf2face`.
+    fn build(leaf_box: Vec<Box3>, morton: &[u32]) -> Self {
+        let num_leaves = leaf_box.len();
+        // new (sorted) -> old (face) permutation, stable so equal-Morton runs keep face order.
+        let mut leaf2face: Vec<i32> = (0..num_leaves as i32).collect();
+        leaf2face.sort_by(|&a, &b| morton[a as usize].cmp(&morton[b as usize]));
+
+        let mut c = Self {
+            leaf_box,
+            node_bbox: Vec::new(),
+            internal_children: Vec::new(),
+            node_parent: Vec::new(),
+            leaf2face,
+        };
+        // No internal nodes ⇒ nothing to build and nothing collides (C++ `NumLeaves()==0` case).
+        if num_leaves <= 1 {
+            return c;
+        }
+        let num_nodes = 2 * num_leaves - 1;
+        let num_internal = num_leaves - 1;
+        c.node_bbox = vec![Box3::default(); num_nodes];
+        c.node_parent = vec![-1; num_nodes];
+        c.internal_children = vec![(-1, -1); num_internal];
+
+        // Copy the sorted leaf boxes into the even node slots.
+        for (leaf, &old) in c.leaf2face.iter().enumerate() {
+            c.node_bbox[leaf2node(leaf as i32) as usize] = c.leaf_box[old as usize];
+        }
+        // Organize the tree.
+        let sorted_morton: Vec<u32> = c.leaf2face.iter().map(|&o| morton[o as usize]).collect();
+        {
+            let mut rt = RadixTreeBuilder {
+                node_parent: &mut c.node_parent,
+                internal_children: &mut c.internal_children,
+                leaf_morton: &sorted_morton,
+            };
+            for internal in 0..num_internal as i32 {
+                rt.create(internal);
+            }
+        }
+        c.build_internal_boxes(num_internal);
+        c
+    }
+
+    /// Fill internal node boxes bottom-up (`BuildInternalBoxes` / `UpdateBoxes`). Each leaf walks toward
+    /// the root; a per-internal counter lets only the SECOND arriving child compute the union, so both
+    /// child boxes are ready. Serial + a plain counter is bit-identical to the parallel atomic version —
+    /// box union is exact min/max, computed exactly once per node.
+    fn build_internal_boxes(&mut self, num_internal: usize) {
+        let mut counter = vec![0i32; num_internal];
+        let num_leaves = num_internal + 1;
+        for leaf in 0..num_leaves as i32 {
+            let mut node = leaf2node(leaf);
+            loop {
+                node = self.node_parent[node as usize];
+                let internal = node2internal(node);
+                let first = counter[internal as usize] == 0;
+                counter[internal as usize] += 1;
+                if first {
+                    break; // wait for the other child
+                }
+                let (c1, c2) = self.internal_children[internal as usize];
+                self.node_bbox[node as usize] =
+                    self.node_bbox[c1 as usize].union(self.node_bbox[c2 as usize]);
+                if node == K_ROOT {
+                    break;
+                }
+            }
+        }
+    }
+
+    /// BVH broad phase (`Collider::Collisions` + `FindCollision`). For each query `i` in `0..n`, take
+    /// `query_fn(i)`, skip an empty-box query, then depth-first-descend the tree calling `record(i, face)`
+    /// for every leaf box it overlaps (face = the original index via `leaf2face`). When `self_collision`,
+    /// the `face == i` self-pair is skipped (the boolean always passes `false`). Indices are raw `i32` —
+    /// the caller assigns their meaning.
     pub fn collisions<Q: ColliderQuery>(
+        &self,
+        n: usize,
+        self_collision: bool,
+        query_fn: impl Fn(i32) -> Q,
+        mut record: impl FnMut(i32, i32),
+    ) {
+        if self.internal_children.is_empty() {
+            return;
+        }
+        // Max depth is 30 (Morton) + 32 (index tie-break) < 64.
+        let mut stack = [0i32; 64];
+        for i in 0..n as i32 {
+            let q = query_fn(i);
+            if q.is_empty() {
+                continue;
+            }
+            let mut top: i32 = -1;
+            let mut node = K_ROOT;
+            loop {
+                let internal = node2internal(node);
+                let (child1, child2) = self.internal_children[internal as usize];
+                let traverse1 = self.record_collision(q, child1, i, self_collision, &mut record);
+                let traverse2 = self.record_collision(q, child2, i, self_collision, &mut record);
+                if !traverse1 && !traverse2 {
+                    if top < 0 {
+                        break;
+                    }
+                    node = stack[top as usize];
+                    top -= 1;
+                } else {
+                    node = if traverse1 { child1 } else { child2 };
+                    if traverse1 && traverse2 {
+                        top += 1;
+                        stack[top as usize] = child2;
+                    }
+                }
+            }
+        }
+    }
+
+    /// Test `query` against `node`'s box (`FindCollision::RecordCollision`). Records a hit on a leaf; the
+    /// return says whether to descend (overlaps AND internal).
+    #[inline]
+    fn record_collision<Q: ColliderQuery>(
+        &self,
+        query: Q,
+        node: i32,
+        query_idx: i32,
+        self_collision: bool,
+        record: &mut impl FnMut(i32, i32),
+    ) -> bool {
+        let overlaps = query.overlaps(self.node_bbox[node as usize]);
+        if overlaps && is_leaf(node) {
+            let face = self.leaf2face[node2leaf(node) as usize];
+            if !self_collision || face != query_idx {
+                record(query_idx, face);
+            }
+        }
+        overlaps && is_internal(node)
+    }
+
+    /// Serial brute-force broad phase — the DIFFERENTIAL ORACLE the BVH is gated against. Same contract as
+    /// [`Collider::collisions`] but scans every leaf in natural face order; the emitted SET must match.
+    pub fn collisions_brute<Q: ColliderQuery>(
         &self,
         n: usize,
         self_collision: bool,
@@ -118,6 +443,18 @@ impl Collider {
             }
         }
     }
+}
+
+/// Union of the finite (live) boxes — the Morton normalization box, equal to the mesh `bBox_`. Empty
+/// (all-removed / empty mesh) yields the default inverted box; its exact value only tunes tree balance.
+fn live_bbox(leaf_box: &[Box3]) -> Box3 {
+    let mut bbox = Box3::default();
+    for b in leaf_box {
+        if b.is_finite() {
+            bbox = bbox.union(*b);
+        }
+    }
+    bbox
 }
 
 /// The `Box3` a forward half-edge queries with (`Box(vertPos[start], vertPos[end])`), or the empty
@@ -163,6 +500,21 @@ mod tests {
         mesh
     }
 
+    /// Collect the collision SET a collider emits for a mesh's forward edges as a sorted `(edge, face)`
+    /// vector — the order-normalized form both the BVH and brute-force must agree on.
+    fn edge_pairs(c: &Collider, q: &Mesh, brute: bool) -> Vec<(i32, i32)> {
+        let mut pairs = Vec::new();
+        let mut collect = |edge: i32, face: i32| pairs.push((edge, face));
+        let qf = |e: i32| edge_query_box(q, HalfedgeId::new(e));
+        if brute {
+            c.collisions_brute(q.halfedge.len(), false, qf, &mut collect);
+        } else {
+            c.collisions(q.halfedge.len(), false, qf, &mut collect);
+        }
+        pairs.sort_unstable();
+        pairs
+    }
+
     #[test]
     fn face_boxes_union_the_triangle_verts() {
         let mesh = cube_at(0.0, 0.0, 0.0);
@@ -177,6 +529,10 @@ mod tests {
         // The -Z faces (tris 0,1) are flat at z=0.
         assert_eq!(c.leaf_box[0].min.z, 0.0);
         assert_eq!(c.leaf_box[0].max.z, 0.0);
+        // The root BVH box bounds the whole cube.
+        let root = c.node_bbox[internal2node(0) as usize];
+        assert_eq!(root.min, Vec3::ZERO);
+        assert_eq!(root.max, Vec3::splat(1.0));
     }
 
     #[test]
@@ -208,41 +564,28 @@ mod tests {
     }
 
     #[test]
-    fn overlapping_cubes_collide_disjoint_dont() {
+    fn bvh_matches_brute_force_overlapping_cubes() {
         let p = cube_at(0.0, 0.0, 0.0);
         // q offset by (0.5, 0.5, 0.5) overlaps p; the collider is built over q's faces, queried by p's
         // forward edges.
         let q = cube_at(0.5, 0.5, 0.5);
         let collider = Collider::from_mesh(&q);
-        let mut pairs = Vec::new();
-        collider.collisions(
-            p.halfedge.len(),
-            false,
-            |e| edge_query_box(&p, HalfedgeId::new(e)),
-            |edge, face| pairs.push((edge, face)),
-        );
-        assert!(
-            !pairs.is_empty(),
-            "overlapping cubes must produce candidate pairs"
-        );
-        // Every recorded query index is a FORWARD edge of p (reverse edges are empty → skipped).
-        for &(edge, face) in &pairs {
+        let bvh = edge_pairs(&collider, &p, false);
+        let brute = edge_pairs(&collider, &p, true);
+        assert!(!bvh.is_empty(), "overlapping cubes must produce candidate pairs");
+        assert_eq!(bvh, brute, "BVH set must equal brute-force set");
+        // Every recorded query index is a FORWARD edge of p; every face is a real q face.
+        for &(edge, face) in &bvh {
             let e = HalfedgeId::new(edge);
             assert!(p.start(e) < p.end(e), "edge {edge} should be forward");
             assert!((0..12).contains(&face));
         }
 
-        // A far-away cube shares no candidate pairs.
+        // A far-away cube shares no candidate pairs (both modes).
         let far = cube_at(100.0, 100.0, 100.0);
         let far_collider = Collider::from_mesh(&far);
-        let mut far_pairs = 0;
-        far_collider.collisions(
-            p.halfedge.len(),
-            false,
-            |e| edge_query_box(&p, HalfedgeId::new(e)),
-            |_, _| far_pairs += 1,
-        );
-        assert_eq!(far_pairs, 0);
+        assert!(edge_pairs(&far_collider, &p, false).is_empty());
+        assert!(edge_pairs(&far_collider, &p, true).is_empty());
     }
 
     #[test]
@@ -252,28 +595,15 @@ mod tests {
         let q = cube_at(0.0, 0.0, 0.0);
         let collider = Collider::from_mesh(&q);
         let mut hits_inside = 0;
-        collider.collisions(
-            1,
-            false,
-            |_| Vec3::new(0.5, 0.5, 999.0),
-            |_, _| hits_inside += 1,
-        );
-        assert!(
-            hits_inside > 0,
-            "a point over the XY footprint must hit some face boxes"
-        );
+        collider.collisions(1, false, |_| Vec3::new(0.5, 0.5, 999.0), |_, _| hits_inside += 1);
+        let mut brute_inside = 0;
+        collider.collisions_brute(1, false, |_| Vec3::new(0.5, 0.5, 999.0), |_, _| brute_inside += 1);
+        assert!(hits_inside > 0, "a point over the XY footprint must hit some face boxes");
+        assert_eq!(hits_inside, brute_inside, "BVH point-query count must match brute-force");
 
         let mut hits_outside = 0;
-        collider.collisions(
-            1,
-            false,
-            |_| Vec3::new(5.0, 5.0, 0.5),
-            |_, _| hits_outside += 1,
-        );
-        assert_eq!(
-            hits_outside, 0,
-            "a point outside the XY footprint hits nothing"
-        );
+        collider.collisions(1, false, |_| Vec3::new(5.0, 5.0, 0.5), |_, _| hits_outside += 1);
+        assert_eq!(hits_outside, 0, "a point outside the XY footprint hits nothing");
         // (VertId is used by callers to label point-query indices; keep the import exercised.)
         let _ = VertId::new(0);
     }
@@ -285,9 +615,59 @@ mod tests {
         let collider = Collider::new(vec![b, b]);
         let mut with_self = Vec::new();
         collider.collisions(2, false, |_| b, |i, j| with_self.push((i, j)));
+        with_self.sort_unstable();
         assert_eq!(with_self, vec![(0, 0), (0, 1), (1, 0), (1, 1)]);
         let mut no_self = Vec::new();
         collider.collisions(2, true, |_| b, |i, j| no_self.push((i, j)));
+        no_self.sort_unstable();
         assert_eq!(no_self, vec![(0, 1), (1, 0)]);
+    }
+
+    #[test]
+    fn bvh_matches_brute_on_many_overlaps() {
+        // A denser scene: 27 unit cubes on a 3×3×3 grid at half-unit spacing so boxes richly overlap,
+        // unioned into one collider mesh queried by a shifted probe cube. Exercises deep tree traversal.
+        let mut verts = Vec::new();
+        let mut tris = Vec::new();
+        for gx in 0..3 {
+            for gy in 0..3 {
+                for gz in 0..3 {
+                    let base = (verts.len() / 3) as u32;
+                    let (ox, oy, oz) = (gx as f64 * 0.5, gy as f64 * 0.5, gz as f64 * 0.5);
+                    #[rustfmt::skip]
+                    let cube = [
+                        (0.0,0.0,0.0),(1.0,0.0,0.0),(1.0,1.0,0.0),(0.0,1.0,0.0),
+                        (0.0,0.0,1.0),(1.0,0.0,1.0),(1.0,1.0,1.0),(0.0,1.0,1.0),
+                    ];
+                    for (x, y, z) in cube {
+                        verts.extend_from_slice(&[x + ox, y + oy, z + oz]);
+                    }
+                    #[rustfmt::skip]
+                    let t = [
+                        [0u32,2,1],[0,3,2],[4,5,6],[4,6,7],[0,1,5],[0,5,4],
+                        [2,3,7],[2,7,6],[0,4,7],[0,7,3],[1,2,6],[1,6,5],
+                    ];
+                    for tri in t {
+                        tris.push([tri[0] + base, tri[1] + base, tri[2] + base]);
+                    }
+                }
+            }
+        }
+        let mut scene = Mesh {
+            vert_pos: verts
+                .chunks_exact(3)
+                .map(|c| Vec3::new(c[0], c[1], c[2]))
+                .collect(),
+            ..Default::default()
+        };
+        scene.create_halfedges(&tris);
+        let collider = Collider::from_mesh(&scene);
+        assert_eq!(collider.leaf_box.len(), 27 * 12);
+
+        let probe = cube_at(0.3, 0.7, 1.1);
+        let bvh = edge_pairs(&collider, &probe, false);
+        let brute = edge_pairs(&collider, &probe, true);
+        assert!(!bvh.is_empty());
+        assert_eq!(bvh, brute, "BVH and brute-force must emit the identical pair set");
     }
 }

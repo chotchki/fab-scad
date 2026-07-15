@@ -23,7 +23,7 @@ use crate::mesh::{Halfedge, Mesh};
 use crate::mesh_ids::{HalfedgeId, TriId, VertId};
 
 /// The sentinel Morton code for a removed vert/tri (`sort.cpp` `kNoCode`) — all-ones sorts them last.
-const K_NO_CODE: u32 = 0xFFFF_FFFF;
+pub(crate) const K_NO_CODE: u32 = 0xFFFF_FFFF;
 
 /// Interleave the low 10 bits of `v` with two zero bits each (`collider.h` `SpreadBits3`) — the bit
 /// magic that builds a Z-order (Morton) code. Verbatim; `wrapping_mul` matches the C++ `uint32_t`
@@ -40,7 +40,7 @@ fn spread_bits3(mut v: u32) -> u32 {
 /// The 30-bit Morton code of `position` within `b_box` (`collider.h` `Collider::MortonCode`, guarded by
 /// `sort.cpp`'s NaN→`kNoCode`). Normalize to the unit cube, quantize each axis to `[0, 1023]`, then
 /// interleave. A NaN position (removed vert) returns [`K_NO_CODE`].
-fn morton_code(position: Vec3, b_box: Box3) -> u32 {
+pub(crate) fn morton_code(position: Vec3, b_box: Box3) -> u32 {
     if position.x.is_nan() {
         return K_NO_CODE;
     }

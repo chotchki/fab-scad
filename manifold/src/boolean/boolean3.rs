@@ -297,11 +297,14 @@ fn intersect12(
 ) -> Intersections {
     let a = if forward { in_p } else { in_q };
     let mut result = Intersections::default();
+    let t = std::time::Instant::now();
+    let mut n_pairs = 0u64;
     b_collider.collisions(
         a.halfedge.len(),
         false,
         |i| edge_query_box(a, HalfedgeId::new(i)),
         |query_idx, leaf_idx| {
+            n_pairs += 1;
             let (x12, v12) = kernel12(
                 HalfedgeId::new(query_idx),
                 TriId::new(leaf_idx),
@@ -321,6 +324,7 @@ fn intersect12(
             }
         },
     );
+    tracing::debug!(target: "manifold::boolean", forward, ms = t.elapsed().as_millis() as u64, cand_pairs = n_pairs, hits = result.p1q2.len(), "intersect12");
 
     // Sort by the edge column (`index`), then the other, exactly as the C++ stable_sort comparator.
     // Each (edge, face) pair is unique, so the key is total and the permutation is deterministic.
@@ -388,11 +392,14 @@ fn winding03(
     // Sample the winding at each representative: an XY-projected point-in-face query, summing the
     // Kernel02 shadow contributions (integer ⇒ order-independent).
     let mut w03 = vec![0i32; a.num_vert()];
+    let t = std::time::Instant::now();
+    let mut n_pairs = 0u64;
     b_collider.collisions(
         verts.len(),
         false,
         |i| a.pos(VertId::from_usize(verts[i as usize])),
         |i, face| {
+            n_pairs += 1;
             let vert = VertId::from_usize(verts[i as usize]);
             let tri = TriId::new(face);
             let edge_b = load_face_edges(b, tri);
@@ -402,6 +409,7 @@ fn winding03(
             }
         },
     );
+    tracing::debug!(target: "manifold::boolean", forward, ms = t.elapsed().as_millis() as u64, cand_pairs = n_pairs, reps = verts.len(), "winding03");
 
     // Flood the representative's winding to the rest of its component.
     for i in 0..a.num_vert() {

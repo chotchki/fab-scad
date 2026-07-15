@@ -2,7 +2,7 @@
 //!
 //! A Karras Morton radix-tree BVH over one mesh's per-FACE boxes, queried by the other mesh's edges
 //! (or verts) during a boolean. Verbatim `collider.h`: `CreateRadixTree` (Karras split via `PrefixLength`
-//! + count-leading-zeros, ties broken by leaf index), `BuildInternalBoxes` (bottom-up box union), and
+//! with count-leading-zeros, ties broken by leaf index), `BuildInternalBoxes` (bottom-up box union), and
 //! the `FindCollision` stack traversal. The parallel/atomic machinery is dropped — a serial counter
 //! reproduces `BuildInternalBoxes` bit-for-bit because a box union is exact (componentwise min/max) and
 //! each internal box is computed exactly once, when its second child arrives, regardless of order.
@@ -263,7 +263,7 @@ impl Collider {
             let mut c = Vec3::ZERO;
             for i in 0..3 {
                 let p = mesh.pos(mesh.start(t.halfedge(i)));
-                c = c + p;
+                c += p;
                 leaf_box[face].union_point(p);
             }
             centroid[face] = c / 3.0;

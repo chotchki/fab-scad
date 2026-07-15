@@ -1029,11 +1029,13 @@ mod tests {
         eprintln!("THESIS(rot) ✓ {trials} rotated-cube fold-unions — invariants + Monte-Carlo match C++");
     }
 
-    /// M.2.4 (start) — the NASTY corpus: Manifold's own hard test models (self-intersecting / thin /
+    /// M.2.4 — the NASTY corpus: Manifold's own hard test models (self-intersecting / thin /
     /// near-degenerate real geometry), unioned left+right per `boolean_complex_test.cpp`, checked
-    /// manifold + solid-divergence vs C++. Starts with the SMALL pairs — the big ones (self_intersect
-    /// 17K faces, Generic_Twin_7081 20K) wait for the LBVH broad phase (our collider is brute-force
-    /// O(n²)). Skips cleanly if the C++ source isn't unpacked.
+    /// manifold + solid-divergence vs C++. The LBVH broad phase (M.2.4.1) unblocked `self_intersect`
+    /// (17K+17K tri, ~340ms debug) — it's in. The other big one, `Generic_Twin_7081` (20K), is CORRECT
+    /// but ~190s debug on the serial narrow phase (64.5M near-coincident candidate pairs) → its own
+    /// `#[ignore]`d [`big_twin_union_vs_cpp`] until the parallelism phase. Skips cleanly if the C++ source
+    /// isn't unpacked.
     #[test]
     fn nasty_corpus_union_vs_cpp() {
         use crate::boolean::OpType;
@@ -1043,12 +1045,16 @@ mod tests {
             eprintln!("nasty corpus: models dir not found — skipping");
             return;
         };
+        // (left, right, MC samples). Small models get 4000; self_intersect (33K faces) gets 800 — the
+        // brute-force point-in-mesh is O(samples·faces), and its invariants (tri count + volume) already
+        // match C++ exactly, so a lighter Monte-Carlo still catches any gross shape error.
         let pairs = [
-            ("Havocglass8_left.obj", "Havocglass8_right.obj"),
-            ("Cray_left.obj", "Cray_right.obj"),
-            ("Generic_Twin_7863.1.t0_left.obj", "Generic_Twin_7863.1.t0_right.obj"),
+            ("Havocglass8_left.obj", "Havocglass8_right.obj", 4000),
+            ("Cray_left.obj", "Cray_right.obj", 4000),
+            ("Generic_Twin_7863.1.t0_left.obj", "Generic_Twin_7863.1.t0_right.obj", 4000),
+            ("self_intersectA.obj", "self_intersectB.obj", 800),
         ];
-        for (l, r) in pairs {
+        for (l, r, mc) in pairs {
             let gl_l = load_obj(&dir.join(l));
             let gl_r = load_obj(&dir.join(r));
 
@@ -1070,11 +1076,50 @@ mod tests {
             let b = Mesh::from_mesh_gl(&cpp_to_mesh_gl(&cpp));
             // Solid oracle at the R2 determinism tolerance (byte-identity on the nasty corpus is a
             // determinism-close-out goal; correctness = Monte-Carlo-clean).
-            if let Some(reason) = solid_divergence(&res, &b, 4000, 0x0B5E, 2e-2) {
+            if let Some(reason) = solid_divergence(&res, &b, mc, 0x0B5E, 2e-2) {
                 panic!("NASTY {l} ∪ {r}: {reason}");
             }
             eprintln!("nasty ✓ {l} ∪ {r}: vol {:.5} ntri {}", res.volume(), res.num_tri());
         }
+    }
+
+    /// M.2.4 — the BIG twin (`Generic_Twin_7081`, 19.7K+11.7K tri): a near-COINCIDENT pair whose face
+    /// boxes overlap almost everywhere, so `intersect12` legitimately emits ~64.5M candidate box overlaps
+    /// (for ~1024 real hits). The LBVH broad phase finds them fine — the residual ~15s (release) is the
+    /// SERIAL narrow phase grinding ~124M `kernel12` calls, which is the PARALLELISM phase's job (J.4.5),
+    /// not a broad-phase defect. Correct + Monte-Carlo-clean today (matches C++ to the near-degenerate
+    /// determinism tail). `#[ignore]`d until parallel narrow-phase makes it fast enough for the gate.
+    #[test]
+    #[ignore = "correct but ~15s release / ~190s debug — serial narrow phase over 64.5M pairs; un-ignore post-J.4.5 parallelism"]
+    fn big_twin_union_vs_cpp() {
+        use crate::boolean::OpType;
+        use crate::boolean::boolean_result::boolean;
+        init_tracing();
+        let Some(dir) = models_dir() else {
+            eprintln!("big twin: models dir not found — skipping");
+            return;
+        };
+        let (l, r) = ("Generic_Twin_7081.1.t0_left.obj", "Generic_Twin_7081.1.t0_right.obj");
+        let gl_l = load_obj(&dir.join(l));
+        let gl_r = load_obj(&dir.join(r));
+        let mut ml = Mesh::from_mesh_gl(&gl_l);
+        ml.set_epsilon(-1.0, false);
+        ml.initialize_original();
+        ml.set_normals_and_coplanar();
+        let mut mr = Mesh::from_mesh_gl(&gl_r);
+        mr.set_epsilon(-1.0, false);
+        mr.initialize_original();
+        mr.set_normals_and_coplanar();
+        let res = boolean(&ml, &mr, OpType::Add);
+        assert!(res.is_manifold(), "{l} ∪ {r}: rust union is not manifold");
+        let cpp = CppKernel::ingest(&gl_l)
+            .unwrap_or_else(|e| panic!("{l}: cpp ingest {e}"))
+            .union(&CppKernel::ingest(&gl_r).unwrap_or_else(|e| panic!("{r}: cpp ingest {e}")));
+        let b = Mesh::from_mesh_gl(&cpp_to_mesh_gl(&cpp));
+        if let Some(reason) = solid_divergence(&res, &b, 4000, 0x0B5E, 2e-2) {
+            panic!("BIG TWIN {l} ∪ {r}: {reason}");
+        }
+        eprintln!("big twin ✓ {l} ∪ {r}: vol {:.5} ntri {} (cpp {})", res.volume(), res.num_tri(), b.num_tri());
     }
 
     /// Unit-check the point-in-mesh oracle the Monte-Carlo comparison relies on: a unit cube classifies

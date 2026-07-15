@@ -962,6 +962,7 @@ mod tests {
         }
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     proptest::proptest! {
         // polygon_fuzz (M.1.5) — the ear-clip is the one NON-verbatim component, so it gets the
         // structure-aware fuzzer. Star-shaped polygons (points sorted by angle → always simple; random
@@ -1012,6 +1013,7 @@ mod tests {
         }
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     proptest::proptest! {
         // The Delaunay-cost `earclip` (the production path) must ALSO always produce a valid tiling — it
         // has more machinery (cost queue, degenerate pre-clip) that could drop or invert a triangle.
@@ -1051,6 +1053,7 @@ mod tests {
         }
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     proptest::proptest! {
         // Keyhole fuzz: a big CCW outer square with ONE randomly-placed, randomly-sized CW square hole
         // strictly inside must always tile the annulus (area = outer − hole), no grossly-inverted tri.

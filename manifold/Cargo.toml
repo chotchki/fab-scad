@@ -34,8 +34,13 @@ version = "0.3.1"
 optional = true
 
 [dev-dependencies]
-# Port-tests-first: proptest drives the structure-aware CSG-tree fuzzer (Manifold's manifold_fuzz).
-proptest = "1"
 # Test-time tracing subscriber (RUST_LOG-driven) so the differential debug harness can surface per-stage
 # collapse counts + fold divergence without hand-edited eprintln.
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "env-filter", "std"] }
+
+# proptest pulls `rusty-fork` → `wait-timeout`, which doesn't build for wasm (process forking). Gate it
+# (and its tests, `#[cfg(not(target_arch = "wasm32"))]`) off wasm so the test HARNESS cross-compiles — the
+# `wasm32-wasip1` build is how M.4.4's determinism golden proves native==wasm bit-identity.
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+# Port-tests-first: proptest drives the structure-aware CSG-tree fuzzer (Manifold's manifold_fuzz).
+proptest = "1"

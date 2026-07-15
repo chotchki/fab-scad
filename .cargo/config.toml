@@ -1,0 +1,5 @@
+# wasm test runner — runs the wasm32-wasip1 test/example binaries through wasmtime, so M.4.4's
+# determinism golden (`boolean_pipeline_bytes_match_golden`) can prove native==wasm bit-identity.
+# Target-scoped: native builds are unaffected.
+[target.wasm32-wasip1]
+runner = "wasmtime"

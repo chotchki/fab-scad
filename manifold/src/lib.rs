@@ -38,6 +38,13 @@ pub mod mesh_ids;
 pub mod offset;
 // Pillar 1: the deterministic parallel seam (serial when `par` is off).
 pub mod par;
+
+/// Browser-wasm thread-pool initializer (M.6.1): re-exported so ANY final cdylib linking this crate
+/// with `par` on `wasm32-unknown-unknown` carries wasm-bindgen-rayon's `initThreadPool` JS export.
+/// The app MUST `await initThreadPool(navigator.hardwareConcurrency)` before the first kernel call —
+/// rayon's pool doesn't exist until then — on a cross-origin-isolated (COOP/COEP) page.
+#[cfg(all(feature = "par", target_arch = "wasm32", target_os = "unknown"))]
+pub use wasm_bindgen_rayon::init_thread_pool;
 // the robust 2D triangulator the boolean reassembly leans on.
 pub mod polygon;
 // convex hull (`Manifold::Hull`) — the QuickHull port; unblocks minkowski + fab-scad `hull()`.

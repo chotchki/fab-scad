@@ -7,23 +7,28 @@
 //! feeds geometry goes through a fixed-order serial Kahan path); sorts → total-order comparators only.
 //! Result: native-Par == native-Seq == wasm, bit-for-bit.
 //!
-//! With the `par` feature OFF (the default, and the wasm-safe path) every primitive is a plain serial
-//! loop — bit-identical to the parallel path by construction (that's the whole point of the marker),
-//! which is why serial-wasm can ship long before threaded-wasm's nightly `-Zbuild-std` + `+atomics`.
-//! The parallel path is ALSO gated `not(wasm)`: rayon needs OS threads, so wasm is always serial
-//! regardless of the feature. Swaps in for the serial reference at R4.
+//! With the `par` feature OFF (the default) every primitive is a plain serial loop — bit-identical
+//! to the parallel path by construction (that's the whole point of the marker). With `par` ON the
+//! rayon path is live wherever `par_live` holds (build.rs): native OS threads, and — since M.6.1 —
+//! browser wasm (`wasm32-unknown-unknown`), where rayon runs over `wasm-bindgen-rayon`'s
+//! Web-Worker + SharedArrayBuffer pool. That build is nightly `-Zbuild-std` + `+atomics`
+//! (`scripts/wasm-par-check.sh` is the compile gate) and the APP owns the runtime discipline:
+//! `await initThreadPool(...)` (the `init_thread_pool` re-export in lib.rs) BEFORE the first kernel
+//! call, on a cross-origin-isolated page (COOP/COEP — kept alive at W.3.7.4 for exactly this).
+//! `wasm32-wasip1` — the wasmtime differential lane — stays serial always. Because every parallel
+//! primitive here is order-preserving or CA-gated, par-wasm == serial-wasm == native bit-for-bit by
+//! the same construction K.D proved seq==par with; M.6 verifies the corpus on the serial lane and
+//! the construction carries the threaded one.
 //!
-//! THREADED-WASM COEXISTENCE (SPEC risk #5) is DEFERRED, not resolved here: whether
-//! `wasm-bindgen-rayon`'s SharedArrayBuffer worker pool coexists with Bevy's wasm setup is an
-//! integration question that only bites when we turn threads ON in-browser (a later phase). Serial-wasm
-//! sidesteps it entirely — it ships regardless — so R0 doesn't gate on it. The check gets its own task
-//! when threaded-wasm is attempted.
+//! THREADED-WASM⟷BEVY COEXISTENCE (SPEC risk #5) remains the app-level question it always was:
+//! whether the worker pool plays nicely with Bevy's wasm runtime is decided where the GUI turns
+//! threads on (W phase), not here — the kernel only guarantees the pool it computes on.
 //!
-//! M.0.7 is the SPIKE: the seam + the marker + the compile-time proof, validated against the serial
-//! reference. The real swap-in (replacing the kernel's serial loops) is M.4.
+//! M.0.7 was the SPIKE: the seam + the marker + the compile-time proof, validated against the serial
+//! reference. The real swap-in (replacing the kernel's serial loops) was M.4.
 
-// The parallel path is live only with `par` AND off-wasm. One alias keeps the cfg readable.
-#[cfg(all(feature = "par", not(target_arch = "wasm32")))]
+// `par_live` (build.rs): `par` AND (native OR browser-wasm) — see the module doc.
+#[cfg(par_live)]
 use rayon::prelude::*;
 
 /// A reduction's binary combine + identity, kept as a TYPE (not a closure) so the
@@ -64,14 +69,14 @@ where
     R: CommutativeAssociative + Sync,
     R::Item: Send + Sync,
 {
-    #[cfg(all(feature = "par", not(target_arch = "wasm32")))]
+    #[cfg(par_live)]
     {
         items
             .par_iter()
             .copied()
             .reduce(|| reducer.identity(), |a, b| reducer.combine(a, b))
     }
-    #[cfg(not(all(feature = "par", not(target_arch = "wasm32"))))]
+    #[cfg(not(par_live))]
     {
         reduce_serial(items, reducer)
     }
@@ -96,11 +101,11 @@ where
     U: Send,
     F: Fn(&T) -> U + Sync + Send,
 {
-    #[cfg(all(feature = "par", not(target_arch = "wasm32")))]
+    #[cfg(par_live)]
     {
         items.par_iter().map(f).collect()
     }
-    #[cfg(not(all(feature = "par", not(target_arch = "wasm32"))))]
+    #[cfg(not(par_live))]
     {
         items.iter().map(f).collect()
     }
@@ -113,11 +118,11 @@ where
     T: Sync,
     F: Fn(&T) + Sync + Send,
 {
-    #[cfg(all(feature = "par", not(target_arch = "wasm32")))]
+    #[cfg(par_live)]
     {
         items.par_iter().for_each(f);
     }
-    #[cfg(not(all(feature = "par", not(target_arch = "wasm32"))))]
+    #[cfg(not(par_live))]
     {
         items.iter().for_each(f);
     }

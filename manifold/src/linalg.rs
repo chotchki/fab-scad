@@ -260,6 +260,70 @@ impl Mat3x4 {
     pub fn is_finite(self) -> bool {
         self.x.is_finite() && self.y.is_finite() && self.z.is_finite() && self.w.is_finite()
     }
+
+    /// Pure translation (`CsgNode::Translate`): identity basis, translation `t`.
+    #[inline]
+    pub fn translate(t: Vec3) -> Mat3x4 {
+        Mat3x4 { w: t, ..Mat3x4::IDENTITY }
+    }
+
+    /// Per-axis scale (`CsgNode::Scale`): diagonal basis `v`, zero translation.
+    #[inline]
+    pub fn scale(v: Vec3) -> Mat3x4 {
+        Mat3x4 {
+            x: Vec3::new(v.x, 0.0, 0.0),
+            y: Vec3::new(0.0, v.y, 0.0),
+            z: Vec3::new(0.0, 0.0, v.z),
+            w: Vec3::ZERO,
+        }
+    }
+
+    /// Euler rotation about x, then y, then z (degrees) — `CsgNode::Rotate`, `rZ·rY·rX` with zero
+    /// translation. The per-axis matrices are built column-major exactly as the C++ (`sind`/`cosd` via
+    /// [`crate::mathf`], NOT `f64::sin`, so it's bit-identical native==wasm).
+    pub fn rotate(x_degrees: f64, y_degrees: f64, z_degrees: f64) -> Mat3x4 {
+        use crate::mathf::{cosd, sind};
+        let (cx, sx) = (cosd(x_degrees), sind(x_degrees));
+        let (cy, sy) = (cosd(y_degrees), sind(y_degrees));
+        let (cz, sz) = (cosd(z_degrees), sind(z_degrees));
+        // Column-major: each `Vec3::new(...)` is a COLUMN (verbatim from `csg_tree.cpp`).
+        let r_x = Mat3 {
+            x: Vec3::new(1.0, 0.0, 0.0),
+            y: Vec3::new(0.0, cx, sx),
+            z: Vec3::new(0.0, -sx, cx),
+        };
+        let r_y = Mat3 {
+            x: Vec3::new(cy, 0.0, -sy),
+            y: Vec3::new(0.0, 1.0, 0.0),
+            z: Vec3::new(sy, 0.0, cy),
+        };
+        let r_z = Mat3 {
+            x: Vec3::new(cz, sz, 0.0),
+            y: Vec3::new(-sz, cz, 0.0),
+            z: Vec3::new(0.0, 0.0, 1.0),
+        };
+        let linear = r_z.mul_mat3(r_y).mul_mat3(r_x);
+        Mat3x4 { x: linear.x, y: linear.y, z: linear.z, w: Vec3::ZERO }
+    }
+}
+
+impl core::ops::Mul for Mat3x4 {
+    type Output = Mat3x4;
+
+    /// Compose two affines: `self * rhs` applies `rhs` FIRST, then `self` — Manifold's `m * Mat4(other)`
+    /// used by `CsgLeafNode::Transform` to fold chained Translate/Scale/Rotate into ONE matrix. For a
+    /// point `p`: `self(rhs(p)) = (self.linear·rhs.linear)·p + (self.linear·rhs.w + self.w)`. Folding
+    /// FIRST, then applying `transform` ONCE, is what keeps the eager port bit-identical to the lazy C++
+    /// (a per-op `transform` would rescale epsilon by each factor's spectral norm, not the product's).
+    #[inline]
+    fn mul(self, rhs: Mat3x4) -> Mat3x4 {
+        Mat3x4 {
+            x: self.transform_dir(rhs.x),
+            y: self.transform_dir(rhs.y),
+            z: self.transform_dir(rhs.z),
+            w: self.transform_point(rhs.w),
+        }
+    }
 }
 
 /// Linear `mat<double,3,3>`: 3 Vec3 columns, column-major (Manifold `mat3`). Used by the transform
@@ -279,6 +343,16 @@ impl Mat3 {
     #[inline]
     pub fn mul_vec(self, v: Vec3) -> Vec3 {
         self.x * v.x + self.y * v.y + self.z * v.z
+    }
+
+    /// Matrix·matrix (`self * rhs`, column-major): each result column is `self·(rhs column)`.
+    #[inline]
+    pub fn mul_mat3(self, rhs: Mat3) -> Mat3 {
+        Mat3 {
+            x: self.mul_vec(rhs.x),
+            y: self.mul_vec(rhs.y),
+            z: self.mul_vec(rhs.z),
+        }
     }
 
     /// Determinant `a·(b×c)` of the columns — sign gives handedness (negative ⇒ the transform mirrors).
@@ -508,6 +582,35 @@ mod tests {
             Mat3x4::IDENTITY.transform_point(Vec3::new(7.0, 8.0, 9.0)),
             Vec3::new(7.0, 8.0, 9.0)
         );
+    }
+
+    /// M.3.5 — the transform BUILDERS (translate/scale/rotate) + matrix composition, the scaffolding
+    /// `Halfspace` folds into one matrix.
+    #[test]
+    fn transform_builders_and_composition() {
+        let v3 = Vec3::new;
+        let p = v3(1.0, 0.0, 0.0);
+
+        // Builders in isolation.
+        assert_eq!(Mat3x4::translate(v3(10., 20., 30.)).transform_point(p), v3(11., 20., 30.));
+        assert_eq!(Mat3x4::scale(v3(2., 3., 4.)).transform_point(p), v3(2., 0., 0.));
+
+        // 90° about z maps +x → +y (column-major rZ). Uses mathf sind/cosd, so exact at 90°.
+        let rz90 = Mat3x4::rotate(0., 0., 90.);
+        let r = rz90.transform_point(p);
+        assert!((r - v3(0., 1., 0.)).length() < 1e-15, "rot90z(+x) = {r:?}");
+
+        // Composition `a * b` applies b FIRST: scale then translate == the hand-built affine.
+        let composed = Mat3x4::translate(v3(10., 20., 30.)) * Mat3x4::scale(v3(2., 3., 4.));
+        assert_eq!(composed.transform_point(v3(1., 1., 1.)), v3(12., 23., 34.));
+        // Identity is the composition unit both ways.
+        assert_eq!((Mat3x4::IDENTITY * composed).transform_point(p), composed.transform_point(p));
+        assert_eq!((composed * Mat3x4::IDENTITY).transform_point(p), composed.transform_point(p));
+
+        // Mat3 matrix product agrees with applying the two rotations in sequence.
+        let a = Mat3x4::rotate(0., 0., 90.).linear();
+        let b = Mat3x4::rotate(90., 0., 0.).linear();
+        assert!((a.mul_mat3(b).mul_vec(p) - a.mul_vec(b.mul_vec(p))).length() < 1e-15);
     }
 
     #[test]

@@ -13,8 +13,9 @@
 //! position — so a different order compounds into a genuinely different (worse-genus) result. Morton
 //! sorting canonicalizes the order to exactly what C++ produces, making a chained fold bit-identical.
 //!
-//! We skip the collider rebuild (brute-force broad phase) and `CompactProps` (position-only), and
-//! `IncrementMeshIDs` (our global counter already keeps mesh IDs unique). Removal handling (NaN verts /
+//! We skip the collider rebuild (brute-force broad phase) and `IncrementMeshIDs` (our global counter
+//! already keeps mesh IDs unique); `CompactProps` (prop-vert compaction) runs first when a boolean
+//! carried extra properties (M.3.4b), and is a no-op position-only. Removal handling (NaN verts /
 //! dead tris sort to `kNoCode` at the end, then drop) is kept verbatim but inert here — `SimplifyTopology`
 //! already compacted, so nothing is marked when this runs.
 
@@ -59,8 +60,51 @@ impl Mesh {
         if self.halfedge.is_empty() {
             return;
         }
+        self.compact_props();
         self.sort_verts();
         self.sort_faces();
+    }
+
+    /// Remove unreferenced prop-verts and reindex `prop_vert` + [`Mesh::properties`] (`sort.cpp`
+    /// `CompactProps`). No-op position-only (`num_prop == 0`). Runs FIRST in [`Mesh::sort_geometry`],
+    /// mirroring C++ `SortGeometry` — prop-verts live in their own index space, compacted independently
+    /// of the geometric vert sort below.
+    fn compact_props(&mut self) {
+        if self.num_prop == 0 {
+            return;
+        }
+        let num_prop = self.num_prop;
+        let num_verts = self.properties.len() / num_prop;
+        // keep[pv] = referenced by some half-edge.
+        let mut keep = vec![0usize; num_verts];
+        for h in &self.halfedge {
+            if h.prop_vert.is_some() {
+                keep[h.prop_vert.u()] = 1;
+            }
+        }
+        // propOld2New[old] = count of kept prop-verts before `old` = its new index (C++ inclusive_scan
+        // into `+1`). `[num_verts]` holds the new count.
+        let mut prop_old2new = vec![0usize; num_verts + 1];
+        for i in 0..num_verts {
+            prop_old2new[i + 1] = prop_old2new[i] + keep[i];
+        }
+        let num_verts_new = prop_old2new[num_verts];
+        let old_prop = std::mem::take(&mut self.properties);
+        let mut properties = vec![0.0; num_prop * num_verts_new];
+        for (old_idx, &k) in keep.iter().enumerate() {
+            if k == 0 {
+                continue;
+            }
+            let dst = prop_old2new[old_idx] * num_prop;
+            let src = old_idx * num_prop;
+            properties[dst..dst + num_prop].copy_from_slice(&old_prop[src..src + num_prop]);
+        }
+        self.properties = properties;
+        for h in &mut self.halfedge {
+            if h.prop_vert.is_some() {
+                h.prop_vert = VertId::from_usize(prop_old2new[h.prop_vert.u()]);
+            }
+        }
     }
 
     /// Reindex vertices by the Morton code of their position (`sort.cpp` `SortVerts` + `ReindexVerts`),
@@ -79,12 +123,17 @@ impl Mesh {
         for (new, &old) in new2old.iter().enumerate() {
             old2new[old] = new;
         }
+        // With extra properties, prop-verts are a SEPARATE space (already compacted by `compact_props`);
+        // only reindex `prop_vert` off the geometric remap in the position-only 1:1 case (C++
+        // `ReindexVerts`'s `if (!hasProp) SetProp(idx, newStart)`).
+        let has_prop = self.num_prop > 0;
         for h in &mut self.halfedge {
             if h.start_vert.is_some() {
                 let ns = VertId::from_usize(old2new[h.start_vert.u()]);
                 h.start_vert = ns;
-                // prop_vert == start_vert in the position-only model.
-                h.prop_vert = ns;
+                if !has_prop {
+                    h.prop_vert = ns;
+                }
             }
         }
 

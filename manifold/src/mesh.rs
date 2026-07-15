@@ -258,15 +258,17 @@ impl Mesh {
                 new_pos.push(self.vert_pos[old]);
             }
         }
+        // Position-only: `prop_vert == start_vert`, so the geometric remap repoints props too. With extra
+        // properties, prop-verts are a SEPARATE index space — C++ `RemoveUnreferencedVerts` never touches
+        // them; `compact_props` (in `sort_geometry`) reindexes them independently. Remapping a prop-vert
+        // through the GEOMETRIC remap here would corrupt it (the M.3.4b maintenance bug), so leave it.
+        let has_prop = self.num_prop > 0;
         for h in &mut self.halfedge {
             if h.start_vert.is_some() {
                 h.start_vert = remap[h.start_vert.u()];
             }
-            // In the 1:1 case (`prop_vert == start_vert`, the geometric remap fits) this repoints props
-            // too. The DECOUPLED case — prop-verts in their own index space, `properties` compacted
-            // independently (C++ `RemoveUnreferencedVerts` + `CompactProps`) — is M.3.4b.5; guarded by
-            // `< n` so a decoupled high prop-vert is left untouched rather than mis-remapped here.
-            if h.prop_vert.is_some() && h.prop_vert.u() < n {
+            // The `< n` guard tolerates the assembly's transient out-of-range prop-verts in the 1:1 case.
+            if !has_prop && h.prop_vert.is_some() && h.prop_vert.u() < n {
                 h.prop_vert = remap[h.prop_vert.u()];
             }
         }
@@ -588,33 +590,56 @@ impl Mesh {
     /// Export the spine back to a `MeshGl`: re-interleave position + extra properties, and emit each
     /// triangle's three start vertices. The inverse of [`Mesh::from_mesh_gl`] for a well-formed mesh.
     pub fn to_mesh_gl(&self) -> MeshGl {
-        // 1:1 emit (one interchange row per geometric vert). Correct for position-only + the freshly-
-        // ingested/`set_properties` case where `prop_vert == start_vert`. Emitting one row per PROP-vert
-        // (so a seam-split property survives the round-trip) is M.3.4b.3; the merge-vectors that let a
-        // chained op re-ingest those split prop-verts are M.3.4b.7.
         let num_prop = self.num_prop;
         let mesh_gl_prop = num_prop + 3;
-        let mut vert_properties = Vec::with_capacity(self.num_vert() * mesh_gl_prop);
-        for (v, p) in self.vert_pos.iter().enumerate() {
+
+        if num_prop == 0 {
+            // Position-only fast path: one interchange row per geometric vert, `tri_verts` = geo verts.
+            let mut vert_properties = Vec::with_capacity(self.num_vert() * 3);
+            for p in &self.vert_pos {
+                vert_properties.push(p.x);
+                vert_properties.push(p.y);
+                vert_properties.push(p.z);
+            }
+            let mut tri_verts = Vec::with_capacity(self.num_tri() * 3);
+            for tri in 0..self.num_tri() {
+                let t = TriId::from_usize(tri);
+                for i in 0..3 {
+                    tri_verts.push(self.start(t.halfedge(i)).raw() as u32);
+                }
+            }
+            return MeshGl { num_prop: 3, vert_properties, tri_verts };
+        }
+
+        // Decoupled emit: one interchange row per PROP-vert (Manifold `GetMeshGL`). Each row's position
+        // comes from the geometric vert that prop-vert belongs to (found by scanning half-edges — a
+        // prop-vert and its geometric vert are joined at every corner that uses it); its extras come from
+        // `properties`. `tri_verts` reference PROP-verts. Coincident prop-verts (a seam) become distinct
+        // rows sharing a position — faithful to MeshGL, but NOT re-mergeable without the mergeFromVert/To
+        // vectors (M.3.4b.7), so a chained re-ingest of this output isn't manifold yet.
+        let n_pv = self.num_prop_vert();
+        let mut prop2vert = vec![VertId::NONE; n_pv];
+        for h in &self.halfedge {
+            if h.prop_vert.is_some() && h.start_vert.is_some() {
+                prop2vert[h.prop_vert.u()] = h.start_vert;
+            }
+        }
+        let mut vert_properties = Vec::with_capacity(n_pv * mesh_gl_prop);
+        for (pv, &gv) in prop2vert.iter().enumerate() {
+            let p = if gv.is_some() { self.vert_pos[gv.u()] } else { Vec3::ZERO };
             vert_properties.push(p.x);
             vert_properties.push(p.y);
             vert_properties.push(p.z);
-            if num_prop > 0 {
-                vert_properties.extend_from_slice(&self.properties[v * num_prop..(v + 1) * num_prop]);
-            }
+            vert_properties.extend_from_slice(&self.properties[pv * num_prop..(pv + 1) * num_prop]);
         }
         let mut tri_verts = Vec::with_capacity(self.num_tri() * 3);
         for tri in 0..self.num_tri() {
             let t = TriId::from_usize(tri);
             for i in 0..3 {
-                tri_verts.push(self.start(t.halfedge(i)).raw() as u32);
+                tri_verts.push(self.prop(t.halfedge(i)).raw() as u32);
             }
         }
-        MeshGl {
-            num_prop: mesh_gl_prop,
-            vert_properties,
-            tri_verts,
-        }
+        MeshGl { num_prop: mesh_gl_prop, vert_properties, tri_verts }
     }
 
     // --- Perturbation inputs (R1) — the data the boolean's symbolic tie-break consumes. ---

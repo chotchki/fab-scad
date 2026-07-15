@@ -31,8 +31,9 @@
 //!   STALE) and ends `SimplifyTopology` with `CalculateVertNormals` over those carried normals. We do the
 //!   same — carrying (even the stale ones) is what keeps a CHAINED boolean's perturbation bit-faithful,
 //!   since `vertNormal` feeds the next op's coincident tie-break.
-//! - **Properties are skipped.** Every property (`NumProp() > 0`) branch is guarded out — the boolean
-//!   output is position-only (`num_prop == 0`, the C++ `numProp_` "no extras").
+//! - **Properties (M.3.4b).** `CreateProperties` now runs before this pass, so the `NumProp() > 0`
+//!   branches are LIVE: `collapse_edge` repoints the shifted corners to endVert's prop-vert, and
+//!   `swap_edge` interpolates-and-grows a fresh prop-vert. Both are no-ops position-only (`num_prop == 0`).
 //!
 //! `SplitPinchedVerts` and `DedupeEdges` use the SERIAL path (the parallel branches only differ when
 //! `> 1e4`/`1e5` edges and reduce to the same ordered result); `CollapseShortEdges`/`SwapDegenerates`
@@ -269,7 +270,19 @@ fn collapse_edge(
     current = start;
     while current != tri0edge[2] {
         current = current.next();
-        // (NumProp() == 0 → the prop-shift block is skipped.)
+        if mesh.num_prop > 0 {
+            // Repoint the shifted triangles to endVert's prop-vert (`edge_op.cpp` CollapseEdge 579-587):
+            // the corner that just moved from startVert to endVert must read endVert's property row on the
+            // face it belongs to (tri0's via `edge.next()`, tri1's via `pair`).
+            let tri = current.tri();
+            if mesh.tri_ref[tri.u()].same_face(mesh.tri_ref[edge.tri().u()]) {
+                let p = mesh.prop(edge.next());
+                mesh.set_prop(current, p);
+            } else if mesh.tri_ref[tri.u()].same_face(mesh.tri_ref[pair.tri().u()]) {
+                let p = mesh.prop(pair);
+                mesh.set_prop(current, p);
+            }
+        }
         let vert = mesh.end(current);
         let next = mesh.pair(current);
         for i in 0..edges.len() {
@@ -290,10 +303,11 @@ fn collapse_edge(
 }
 
 /// Swap the shared long edge of two facing degenerate triangles to the opposite verts (`edge_op.cpp`'s
-/// `SwapEdge` lambda). Copies the neighbour's face normal (the swapped triangle becomes a subset of it);
-/// `triRef`/property updates are skipped (provenance/position-only). If the swap would recreate an
-/// existing edge, [`form_loop`] splits instead.
-fn swap_edge(mesh: &mut Mesh, tri0edge: [HalfedgeId; 3], tri1edge: [HalfedgeId; 3]) {
+/// `SwapEdge` lambda). Copies the neighbour's face normal + `triRef` (the swapped triangle becomes a
+/// subset of it) and, when the mesh carries extra properties, INTERPOLATES a fresh prop-vert at the swap
+/// point (growing [`Mesh::properties`]) — the factor `a = |v2−v0| / |v1−v0|` comes from the neighbour's
+/// projected verts `v`. If the swap would recreate an existing edge, [`form_loop`] splits instead.
+fn swap_edge(mesh: &mut Mesh, tri0edge: [HalfedgeId; 3], tri1edge: [HalfedgeId; 3], v: [Vec2; 4]) {
     // The 0-verts are swapped to the opposite 2-verts.
     let v0 = mesh.start(tri0edge[2]);
     let v1 = mesh.start(tri1edge[2]);
@@ -311,7 +325,27 @@ fn swap_edge(mesh: &mut Mesh, tri0edge: [HalfedgeId; 3], tri1edge: [HalfedgeId; 
     let tri1 = tri1edge[0].tri();
     mesh.face_normal[tri0.u()] = mesh.face_normal[tri1.u()];
     mesh.tri_ref[tri0.u()] = mesh.tri_ref[tri1.u()];
-    // (property interpolation skipped — NumProp() == 0.)
+    let l01 = (v[1] - v[0]).length();
+    let l02 = (v[2] - v[0]).length();
+    let a_frac = (l02 / l01).clamp(0.0, 1.0); // std::max(0, std::min(1, l02/l01))
+    // Update properties if applicable (`edge_op.cpp` SwapEdge 657-673): repoint the swapped corners and
+    // append the interpolated prop-vert.
+    if !mesh.properties.is_empty() {
+        mesh.set_prop(tri0edge[1], mesh.prop(tri1edge[0]));
+        mesh.set_prop(tri0edge[0], mesh.prop(tri1edge[2]));
+        mesh.set_prop(tri0edge[2], mesh.prop(tri1edge[2]));
+        let num_prop = mesh.num_prop;
+        let new_prop = mesh.properties.len() / num_prop;
+        let prop_idx0 = mesh.prop(tri1edge[0]).u();
+        let prop_idx1 = mesh.prop(tri1edge[1]).u();
+        for p in 0..num_prop {
+            let val = a_frac * mesh.properties[num_prop * prop_idx0 + p]
+                + (1.0 - a_frac) * mesh.properties[num_prop * prop_idx1 + p];
+            mesh.properties.push(val);
+        }
+        mesh.set_prop(tri1edge[0], VertId::from_usize(new_prop));
+        mesh.set_prop(tri0edge[2], VertId::from_usize(new_prop));
+    }
 
     // If the new edge already exists, duplicate the verts and split the mesh.
     let mut current = mesh.pair(tri1edge[0]);
@@ -377,7 +411,7 @@ fn recursive_edge_swap(
             return;
         }
         // Two facing, long-edge degenerates can swap.
-        swap_edge(mesh, tri0edge, tri1edge);
+        swap_edge(mesh, tri0edge, tri1edge, v);
         let e23 = v[3] - v[2];
         if e23.dot(e23) < mesh.tolerance * mesh.tolerance {
             *tag += 1;
@@ -395,7 +429,7 @@ fn recursive_edge_swap(
         return;
     }
     // Normal path.
-    swap_edge(mesh, tri0edge, tri1edge);
+    swap_edge(mesh, tri0edge, tri1edge, v);
     visited[edge.u()] = *tag;
     visited[pair.u()] = *tag;
     let a = mesh.pair(tri1edge[0]);

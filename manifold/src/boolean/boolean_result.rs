@@ -982,6 +982,59 @@ mod tests {
         mesh
     }
 
+    /// M.3.4b — CreateProperties end-to-end, self-checking (no C++). Colour each vertex of `A` by its
+    /// own POSITION (`rgb = xyz`, `a = 1`); then `A − B` (B is the uncoloured cutter). Because colour was
+    /// wired equal to position and the boolean interpolates BOTH barycentrically, every output corner
+    /// must be EITHER all-zero (a corner from B, which had no properties) OR have `rgb ≈ its own position`
+    /// with `a ≈ 1` (a corner from A, colour carried across the seam). Any corruption in
+    /// create_properties / the prop maintenance through simplify+sort (mis-referenced prop-vert, stale
+    /// `properties`, dropped row) breaks this invariant or the manifoldness.
+    #[test]
+    fn colored_cube_minus_cube_carries_position_as_color() {
+        let a = cube(0.0, 0.0, 0.0)
+            .set_properties(4, |new, pos, _old| new.copy_from_slice(&[pos.x, pos.y, pos.z, 1.0]));
+        let b = cube(0.5, 0.5, 0.5);
+        let out = boolean(&a, &b, OpType::Subtract);
+
+        assert!(out.is_manifold(), "coloured difference must stay manifold");
+        assert_eq!(out.num_prop, 4, "num_prop = max(4, 0)");
+        assert!(!out.properties.is_empty(), "output must carry interpolated properties");
+        assert_eq!(
+            out.properties.len(),
+            out.num_prop_vert() * 4,
+            "properties length must be a whole number of prop-vert rows"
+        );
+
+        // Every corner: read (position, its 4 props) and check the invariant.
+        let mut saw_colored = false;
+        let mut saw_zero = false;
+        for tri in 0..out.num_tri() {
+            let t = TriId::from_usize(tri);
+            for i in 0..3 {
+                let he = t.halfedge(i);
+                let pv = out.prop(he);
+                assert!(pv.is_some() && pv.u() < out.num_prop_vert(), "prop-vert in range");
+                let pos = out.pos(out.start(he));
+                let row = &out.properties[pv.u() * 4..pv.u() * 4 + 4];
+                let is_zero = row.iter().all(|&x| x == 0.0);
+                if is_zero {
+                    saw_zero = true;
+                } else {
+                    saw_colored = true;
+                    assert!(
+                        (row[0] - pos.x).abs() < 1e-6
+                            && (row[1] - pos.y).abs() < 1e-6
+                            && (row[2] - pos.z).abs() < 1e-6
+                            && (row[3] - 1.0).abs() < 1e-6,
+                        "A-corner colour must track its own position: row {row:?} vs pos {pos:?}"
+                    );
+                }
+            }
+        }
+        assert!(saw_colored, "some corners keep A's colour (rgb = position)");
+        assert!(saw_zero, "the cut faces from B carry zero properties");
+    }
+
     /// M.4 pull-forward — the deterministic PARALLEL narrow phase: a multi-cube fold must be BYTE-identical
     /// across two independent runs. With `--features par` this proves rayon SCHEDULING can't perturb the
     /// output: `intersect12`/`winding03` map over queries via `par::map_collect` (index-preserving) + the

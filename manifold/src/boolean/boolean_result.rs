@@ -799,6 +799,35 @@ mod tests {
         mesh
     }
 
+    /// M.4 pull-forward — the deterministic PARALLEL narrow phase: a multi-cube fold must be BYTE-identical
+    /// across two independent runs. With `--features par` this proves rayon SCHEDULING can't perturb the
+    /// output: `intersect12`/`winding03` map over queries via `par::map_collect` (index-preserving) + the
+    /// existing `stable_sort`, so thread interleaving is invisible. Serial (default) it's a trivial pass;
+    /// the value is that the SAME test guards the parallel build.
+    #[test]
+    fn narrow_phase_is_run_to_run_deterministic() {
+        use crate::boolean::OpType;
+        fn fold() -> MeshGl {
+            let offsets = [
+                (0.0, 0.0, 0.0), (0.5, 0.3, 0.4), (0.2, 0.7, 0.1), (0.6, 0.1, 0.5), (0.3, 0.5, 0.8),
+            ];
+            let mut acc = cube(offsets[0].0, offsets[0].1, offsets[0].2);
+            for &(ox, oy, oz) in &offsets[1..] {
+                let c = cube(ox, oy, oz);
+                acc = boolean(&acc, &c, OpType::Add);
+                acc.set_epsilon(-1.0, false);
+                acc.initialize_original();
+                acc.set_normals_and_coplanar();
+            }
+            acc.to_mesh_gl()
+        }
+        let (a, b) = (fold(), fold());
+        assert!(!a.tri_verts.is_empty(), "fold produced geometry");
+        assert_eq!(a.tri_verts, b.tri_verts, "triangulation differs run-to-run");
+        let bits = |m: &MeshGl| m.vert_properties.iter().map(|f| f.to_bits()).collect::<Vec<u64>>();
+        assert_eq!(bits(&a), bits(&b), "vertex positions differ run-to-run (bitwise)");
+    }
+
     /// GATE-A in pure Rust (no oracle): an OFFSET (general-position) cube∪cube must produce a watertight,
     /// genus-0 solid of the analytic union volume. The offset (0.3,0.4,0.5) shares no coordinate between
     /// the meshes, so no cross-mesh `p == q` tie ever fires — the perturbation normals stay inert and the

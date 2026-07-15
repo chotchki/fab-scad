@@ -283,6 +283,25 @@ fn kernel12(
     (x12, Vec3::new(xzyy.x, xzyy.z, xzyy.y))
 }
 
+/// One edge×face intersection hit produced by [`intersect12`]'s per-query map. Named fields (not a bare
+/// tuple) so the flatten below can't transpose the shadow count with the vertex. Flattened +
+/// `stable_sort`ed into the sparse [`Intersections`] tables.
+struct Hit12 {
+    /// The `[p-tri, q-tri]` face-pair packing, matching [`Intersections::p1q2`].
+    pair: [i32; 2],
+    /// The shadow (winding) count — the `x12` column.
+    shadow: i32,
+    /// The intersection vertex — the `v12` column.
+    vert: Vec3,
+}
+
+/// One query's (one edge's) contribution to [`intersect12`]: its hits plus the raw box-overlap count
+/// (the `cand_pairs` diagnostic). Returned per query by the deterministic `par::map_collect`.
+struct QueryHits {
+    hits: Vec<Hit12>,
+    overlaps: u64,
+}
+
 /// `Intersect12` — every edge×face crossing in one direction (`boolean3.cpp` `Intersect12_`). `forward`
 /// picks P-edges×Q-faces (`true`) or Q-edges×P-faces (`false`); `b_collider` is the OTHER mesh's
 /// face-box collider. Emits the sparse `(p1q2, x12, v12)`, `stable_sort`ed by the edge column so the
@@ -296,34 +315,38 @@ fn intersect12(
     forward: bool,
 ) -> Intersections {
     let a = if forward { in_p } else { in_q };
-    let mut result = Intersections::default();
     let t = std::time::Instant::now();
-    let mut n_pairs = 0u64;
-    b_collider.collisions(
-        a.halfedge.len(),
-        false,
-        |i| edge_query_box(a, HalfedgeId::new(i)),
-        |query_idx, leaf_idx| {
-            n_pairs += 1;
-            let (x12, v12) = kernel12(
-                HalfedgeId::new(query_idx),
-                TriId::new(leaf_idx),
-                in_p,
-                in_q,
-                expand_p,
-                forward,
-            );
+
+    // Map each edge (query) to its intersection hits, INDEPENDENTLY — the per-query BVH traversal is a
+    // pure read + `kernel12` is a pure fn, so this is a deterministic `par::map_collect` (parallel with
+    // `par` on, serial otherwise; output order is index-preserved either way). Bit-identity holds: the
+    // flatten below reproduces the serial traversal order, and the `stable_sort` finalizes it regardless.
+    let queries: Vec<i32> = (0..a.halfedge.len() as i32).collect();
+    let per_query: Vec<QueryHits> = crate::par::map_collect(&queries, |&i| {
+        let q = edge_query_box(a, HalfedgeId::new(i));
+        let mut hits = Vec::new();
+        let mut overlaps = 0u64;
+        b_collider.query_leaves(i, q, false, |leaf_idx| {
+            overlaps += 1;
+            let (x12, v12) = kernel12(HalfedgeId::new(i), TriId::new(leaf_idx), in_p, in_q, expand_p, forward);
             if v12.x.is_finite() {
-                result.p1q2.push(if forward {
-                    [query_idx, leaf_idx]
-                } else {
-                    [leaf_idx, query_idx]
-                });
-                result.x12.push(x12);
-                result.v12.push(v12);
+                let pair = if forward { [i, leaf_idx] } else { [leaf_idx, i] };
+                hits.push(Hit12 { pair, shadow: x12, vert: v12 });
             }
-        },
-    );
+        });
+        QueryHits { hits, overlaps }
+    });
+
+    let mut result = Intersections::default();
+    let mut n_pairs = 0u64;
+    for qh in &per_query {
+        n_pairs += qh.overlaps;
+        for h in &qh.hits {
+            result.p1q2.push(h.pair);
+            result.x12.push(h.shadow);
+            result.v12.push(h.vert);
+        }
+    }
     tracing::debug!(target: "manifold::boolean", forward, ms = t.elapsed().as_millis() as u64, cand_pairs = n_pairs, hits = result.p1q2.len(), "intersect12");
 
     // Sort by the edge column (`index`), then the other, exactly as the C++ stable_sort comparator.
@@ -347,6 +370,15 @@ fn intersect12(
 /// packing, so `edge` is passed as its raw `i32`.
 fn edge_is_broken(p1q2: &[[i32; 2]], index: usize, edge: i32) -> bool {
     p1q2.binary_search_by(|pair| pair[index].cmp(&edge)).is_ok()
+}
+
+/// One representative vertex's winding contribution from [`winding03`]'s per-rep map — named so the
+/// scatter can't confuse the winding with the box-overlap diagnostic count.
+struct RepWinding {
+    /// The summed Kernel02 shadow contributions at this representative (integer ⇒ order-independent).
+    winding: i32,
+    /// Raw box-overlap count for the `cand_pairs` diagnostic.
+    overlaps: u64,
 }
 
 /// `Winding03` — the winding number of every vertex of one mesh inside the other (`boolean3.cpp`
@@ -390,25 +422,34 @@ fn winding03(
     }
 
     // Sample the winding at each representative: an XY-projected point-in-face query, summing the
-    // Kernel02 shadow contributions (integer ⇒ order-independent).
+    // Kernel02 shadow contributions. Each representative is a DISTINCT vert with its own winding sum, and
+    // the sum is INTEGER (order-independent) — so this maps deterministically (`par::map_collect`, parallel
+    // with `par` on). The per-rep contribution is scattered back afterward, no cross-thread write.
     let mut w03 = vec![0i32; a.num_vert()];
     let t = std::time::Instant::now();
-    let mut n_pairs = 0u64;
-    b_collider.collisions(
-        verts.len(),
-        false,
-        |i| a.pos(VertId::from_usize(verts[i as usize])),
-        |i, face| {
-            n_pairs += 1;
-            let vert = VertId::from_usize(verts[i as usize]);
+    let sign = if forward { 1 } else { -1 };
+    let reps: Vec<usize> = (0..verts.len()).collect();
+    let contrib: Vec<RepWinding> = crate::par::map_collect(&reps, |&i| {
+        let vert = VertId::from_usize(verts[i]);
+        let q = a.pos(vert);
+        let mut winding = 0i32;
+        let mut overlaps = 0u64;
+        b_collider.query_leaves(i as i32, q, false, |face| {
+            overlaps += 1;
             let tri = TriId::new(face);
             let edge_b = load_face_edges(b, tri);
             let (s02, z02) = kernel02(vert, tri, &edge_b, a, b, expand_p, forward);
             if z02.is_finite() {
-                w03[verts[i as usize]] += s02 * if forward { 1 } else { -1 };
+                winding += s02 * sign;
             }
-        },
-    );
+        });
+        RepWinding { winding, overlaps }
+    });
+    let mut n_pairs = 0u64;
+    for (i, rw) in contrib.iter().enumerate() {
+        n_pairs += rw.overlaps;
+        w03[verts[i]] = rw.winding; // each rep is a distinct root vert → assignment, not accumulation
+    }
     tracing::debug!(target: "manifold::boolean", forward, ms = t.elapsed().as_millis() as u64, cand_pairs = n_pairs, reps = verts.len(), "winding03");
 
     // Flood the representative's winding to the rest of its component.

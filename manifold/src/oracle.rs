@@ -1140,7 +1140,7 @@ mod tests {
     /// not a broad-phase defect. Correct + Monte-Carlo-clean today (matches C++ to the near-degenerate
     /// determinism tail). `#[ignore]`d until parallel narrow-phase makes it fast enough for the gate.
     #[test]
-    #[ignore = "correct but ~15s release / ~190s debug — serial narrow phase over 64.5M pairs; un-ignore post-J.4.5 parallelism"]
+    #[ignore = "correct + EXACT vs C++ (33230 tri); ~3s under release+par (narrow phase 15s→1.2s), but ~190s in the default debug+serial lane — run it in a release+par CI lane"]
     fn big_twin_union_vs_cpp() {
         use crate::boolean::OpType;
         use crate::boolean::boolean_result::boolean;

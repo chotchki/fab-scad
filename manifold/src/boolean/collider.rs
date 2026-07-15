@@ -366,42 +366,55 @@ impl Collider {
         query_fn: impl Fn(i32) -> Q,
         mut record: impl FnMut(i32, i32),
     ) {
-        if self.internal_children.is_empty() {
+        for i in 0..n as i32 {
+            let q = query_fn(i);
+            self.query_leaves(i, q, self_collision, |face| record(i, face));
+        }
+    }
+
+    /// Traverse the BVH for a SINGLE query, calling `record(face)` for each overlapping leaf
+    /// (`FindCollision::operator()` for one `queryIdx`). This is the per-query UNIT the deterministic
+    /// parallel narrow phase maps over (`par::map_collect` builds one query's hit list from it, then the
+    /// caller flattens + `stable_sort`s — so parallel output is bit-identical to the serial loop that
+    /// [`Collider::collisions`] is). `query_idx` is only used for the `self_collision` skip.
+    #[inline]
+    pub fn query_leaves<Q: ColliderQuery>(
+        &self,
+        query_idx: i32,
+        q: Q,
+        self_collision: bool,
+        mut record: impl FnMut(i32),
+    ) {
+        if self.internal_children.is_empty() || q.is_empty() {
             return;
         }
         // Max depth is 30 (Morton) + 32 (index tie-break) < 64.
         let mut stack = [0i32; 64];
-        for i in 0..n as i32 {
-            let q = query_fn(i);
-            if q.is_empty() {
-                continue;
-            }
-            let mut top: i32 = -1;
-            let mut node = K_ROOT;
-            loop {
-                let internal = node2internal(node);
-                let (child1, child2) = self.internal_children[internal as usize];
-                let traverse1 = self.record_collision(q, child1, i, self_collision, &mut record);
-                let traverse2 = self.record_collision(q, child2, i, self_collision, &mut record);
-                if !traverse1 && !traverse2 {
-                    if top < 0 {
-                        break;
-                    }
-                    node = stack[top as usize];
-                    top -= 1;
-                } else {
-                    node = if traverse1 { child1 } else { child2 };
-                    if traverse1 && traverse2 {
-                        top += 1;
-                        stack[top as usize] = child2;
-                    }
+        let mut top: i32 = -1;
+        let mut node = K_ROOT;
+        loop {
+            let internal = node2internal(node);
+            let (child1, child2) = self.internal_children[internal as usize];
+            let traverse1 = self.record_collision(q, child1, query_idx, self_collision, &mut record);
+            let traverse2 = self.record_collision(q, child2, query_idx, self_collision, &mut record);
+            if !traverse1 && !traverse2 {
+                if top < 0 {
+                    break;
+                }
+                node = stack[top as usize];
+                top -= 1;
+            } else {
+                node = if traverse1 { child1 } else { child2 };
+                if traverse1 && traverse2 {
+                    top += 1;
+                    stack[top as usize] = child2;
                 }
             }
         }
     }
 
-    /// Test `query` against `node`'s box (`FindCollision::RecordCollision`). Records a hit on a leaf; the
-    /// return says whether to descend (overlaps AND internal).
+    /// Test `query` against `node`'s box (`FindCollision::RecordCollision`). Records a hit on a leaf (by
+    /// original face index); the return says whether to descend (overlaps AND internal).
     #[inline]
     fn record_collision<Q: ColliderQuery>(
         &self,
@@ -409,13 +422,13 @@ impl Collider {
         node: i32,
         query_idx: i32,
         self_collision: bool,
-        record: &mut impl FnMut(i32, i32),
+        record: &mut impl FnMut(i32),
     ) -> bool {
         let overlaps = query.overlaps(self.node_bbox[node as usize]);
         if overlaps && is_leaf(node) {
             let face = self.leaf2face[node2leaf(node) as usize];
             if !self_collision || face != query_idx {
-                record(query_idx, face);
+                record(face);
             }
         }
         overlaps && is_internal(node)

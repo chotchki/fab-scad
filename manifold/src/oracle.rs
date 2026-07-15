@@ -1305,6 +1305,98 @@ mod tests {
         eprintln!("M.3.5 ✓ split/trim by plane match C++ across {} planes", cases.len());
     }
 
+    /// M.3.6 — convex hull (`Mesh::hull_of_points`, the QuickHull port) held to the solid oracle vs
+    /// C++ `Manifold::hull_pts` across a spread of point clouds: a cube (extreme corners), a cube
+    /// with interior points (must be dropped), a tetrahedron, a Fibonacci sphere (60 all-extreme
+    /// points → a rich convex polytope, scaled + offset to exercise the scale-dependent epsilon),
+    /// and a random box-filling cloud. A verbatim port should produce the SAME polytope, so this is
+    /// a tight equality check up to triangulation (which the solid divergence ignores).
+    #[test]
+    fn m3_6_hull_vs_cpp() {
+        use std::f64::consts::PI;
+
+        let mut cases: Vec<(&str, Vec<[f64; 3]>)> = Vec::new();
+
+        // 1. Cube corners → hull is the cube.
+        let mut cube: Vec<[f64; 3]> = Vec::new();
+        for &x in &[0.0, 10.0] {
+            for &y in &[0.0, 10.0] {
+                for &z in &[0.0, 10.0] {
+                    cube.push([x, y, z]);
+                }
+            }
+        }
+        cases.push(("cube8", cube.clone()));
+
+        // 2. Cube corners + interior points → interior dropped, same hull.
+        let mut cube_plus = cube;
+        cube_plus.push([5.0, 5.0, 5.0]);
+        cube_plus.push([2.0, 7.0, 3.0]);
+        cube_plus.push([8.0, 1.0, 6.0]);
+        cases.push(("cube8+interior", cube_plus));
+
+        // 3. Tetrahedron.
+        cases.push((
+            "tetra",
+            vec![
+                [0.0, 0.0, 0.0],
+                [12.0, 0.0, 0.0],
+                [0.0, 12.0, 0.0],
+                [0.0, 0.0, 12.0],
+            ],
+        ));
+
+        // 4. Fibonacci sphere — every point is a hull vertex, so the hull is a dense polytope.
+        let n = 60usize;
+        let golden = PI * (3.0 - 5.0_f64.sqrt());
+        let mut sphere: Vec<[f64; 3]> = Vec::new();
+        for i in 0..n {
+            let y = 1.0 - (i as f64 / (n as f64 - 1.0)) * 2.0;
+            let radius = (1.0 - y * y).max(0.0).sqrt();
+            let theta = golden * i as f64;
+            sphere.push([
+                crate::mathf::cos(theta) * radius * 25.0 + 100.0,
+                y * 25.0 - 40.0,
+                crate::mathf::sin(theta) * radius * 25.0 + 7.0,
+            ]);
+        }
+        cases.push(("fib-sphere-60", sphere));
+
+        // 5. A random box-filling cloud (deterministic LCG) — surface + interior, hull is the
+        //    enclosing convex region.
+        let mut lcg: u64 = 0x1234_5678_9abc_def0;
+        let nextf = |s: &mut u64| -> f64 {
+            *s = s
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (*s >> 11) as f64 / 9007199254740992.0
+        };
+        let mut boxcloud: Vec<[f64; 3]> = Vec::new();
+        for _ in 0..80 {
+            let x = nextf(&mut lcg) * 6.0 - 3.0;
+            let y = nextf(&mut lcg) * 4.0;
+            let z = nextf(&mut lcg) * 10.0 + 1.0;
+            boxcloud.push([x, y, z]);
+        }
+        cases.push(("box-cloud-80", boxcloud));
+
+        for (i, (label, pts)) in cases.iter().enumerate() {
+            let seed = 0x60d5 + (i as u64) * 7;
+            let rust_pts: Vec<Vec3> = pts.iter().map(|p| Vec3::new(p[0], p[1], p[2])).collect();
+            let rust_hull = Mesh::hull_of_points(&rust_pts).unwrap();
+            assert!(rust_hull.is_manifold(), "{label}: rust hull not manifold");
+            assert!(rust_hull.volume() > 0.0, "{label}: rust hull has no volume");
+            assert_eq!(RustKernel::genus(&rust_hull), 0, "{label}: a convex hull is genus 0");
+
+            let cpp = manifold3d::Manifold::hull_pts(pts.as_slice());
+            let cpp_hull = Mesh::from_mesh_gl(&cpp_to_mesh_gl(&cpp));
+            if let Some(r) = solid_divergence(&rust_hull, &cpp_hull, 6000, seed, 1e-9) {
+                panic!("{label}: hull diverges from C++: {r}");
+            }
+        }
+        eprintln!("M.3.6 ✓ convex hull matches C++ across {} clouds", cases.len());
+    }
+
     /// M.2.3 — the KEYHOLE integration test: a bar punched all the way through a box (difference) leaves a
     /// square HOLE in the box's top and bottom faces, so `Face2Tri` must triangulate a holed polygon (an
     /// outer loop + an interior CW hole loop) via `CutKeyhole`. Without the keyhole path those faces fill

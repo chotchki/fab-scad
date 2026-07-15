@@ -27,7 +27,7 @@ use std::collections::{BTreeMap, VecDeque};
 
 use crate::boolean::polygon::triangulate_simple;
 use crate::boolean::predicates::get_axis_aligned_projection;
-use crate::boolean::vocab::Halfedge;
+use crate::boolean::vocab::{Halfedge, TriRef};
 use crate::linalg::Vec2;
 use crate::mesh::Mesh;
 use crate::mesh_ids::{HalfedgeId, TriId, VertId};
@@ -140,10 +140,18 @@ fn write_local_triangles(
 /// Retriangulate the assembled polygon faces into `out`, in place (`Manifold::Impl::Face2Tri`).
 ///
 /// On entry `out.vert_pos` holds the result verts and `out.face_normal` holds ONE normal per result
-/// FACE (as `SizeOutput` gathered them); `face_edge`/`face_halfedges` describe the polygon faces. On
-/// return `out.halfedge` is the triangulated half-edge mesh and `out.face_normal` has been replaced by
-/// one normal per output TRIANGLE (the source face normal, repeated).
-pub fn face2tri(out: &mut Mesh, face_edge: &[i32], face_halfedges: &[Halfedge], epsilon: f64) {
+/// FACE (as `SizeOutput` gathered them); `face_edge`/`face_halfedges` describe the polygon faces, and
+/// `halfedge_ref` holds the provenance [`TriRef`] of each face half-edge (all half-edges of a face share
+/// one source triangle). On return `out.halfedge` is the triangulated half-edge mesh, `out.face_normal`
+/// has one normal per output TRIANGLE, and `out.tri_ref` has one (temporary — `{0|1, srcTri}`) provenance
+/// ref per output triangle, taken from the face's FIRST half-edge (Manifold's `WriteTriRefs`).
+pub fn face2tri(
+    out: &mut Mesh,
+    face_edge: &[i32],
+    face_halfedges: &[Halfedge],
+    halfedge_ref: &[TriRef],
+    epsilon: f64,
+) {
     let num_face = face_edge.len() - 1;
     let face_normal_in = out.face_normal.clone();
 
@@ -184,17 +192,23 @@ pub fn face2tri(out: &mut Mesh, face_edge: &[i32], face_halfedges: &[Halfedge], 
         3 * total_tris
     ];
     let mut tri_normal = vec![crate::linalg::Vec3::ZERO; total_tris];
+    // One provenance ref per output triangle; a placeholder for empty faces (never survives — empty
+    // faces contribute no triangles). Every real triangle is overwritten from its face's first half-edge.
+    let placeholder = TriRef { mesh_id: 0, original_id: -1, face_id: 0, coplanar_id: -1 };
+    let mut tri_ref = vec![placeholder; total_tris];
     let mut contour2tri = vec![HalfedgeId::NONE; face_halfedges.len()];
 
-    // Pass 2: write each face's triangles (with intra-face pairing + boundary recording) and normals.
+    // Pass 2: write each face's triangles (with intra-face pairing + boundary recording), normals + refs.
     for face in 0..num_face {
         let tris = &face_tris[face];
         if tris.is_empty() {
             continue;
         }
         write_local_triangles(out, &mut contour2tri, face_halfedges, tri_offset[face], tris);
+        let face_ref = halfedge_ref[face_edge[face] as usize];
         for t in 0..tris.len() {
             tri_normal[tri_offset[face] + t] = face_normal_in[face];
+            tri_ref[tri_offset[face] + t] = face_ref;
         }
     }
 
@@ -214,6 +228,7 @@ pub fn face2tri(out: &mut Mesh, face_edge: &[i32], face_halfedges: &[Halfedge], 
     }
 
     out.face_normal = tri_normal;
+    out.tri_ref = tri_ref;
 }
 
 #[cfg(test)]
@@ -290,12 +305,25 @@ mod tests {
             face_normal: vec![Vec3::new(0.0, 0.0, 1.0), Vec3::new(0.0, 0.0, 1.0)],
             ..Default::default()
         };
-        face2tri(&mut out, &face_edge, &fhes, 1e-9);
+        // Provenance: face 0 came from P source triangle 5, face 1 from Q source triangle 8.
+        let href = [
+            TriRef { mesh_id: 0, original_id: -1, face_id: 5, coplanar_id: -1 },
+            TriRef { mesh_id: 0, original_id: -1, face_id: 5, coplanar_id: -1 },
+            TriRef { mesh_id: 0, original_id: -1, face_id: 5, coplanar_id: -1 },
+            TriRef { mesh_id: 1, original_id: -1, face_id: 8, coplanar_id: -1 },
+            TriRef { mesh_id: 1, original_id: -1, face_id: 8, coplanar_id: -1 },
+            TriRef { mesh_id: 1, original_id: -1, face_id: 8, coplanar_id: -1 },
+        ];
+        face2tri(&mut out, &face_edge, &fhes, &href, 1e-9);
 
-        // Two output triangles, six half-edges, one normal per triangle.
+        // Two output triangles, six half-edges, one normal per triangle, one ref per triangle.
         assert_eq!(out.num_tri(), 2);
         assert_eq!(out.halfedge.len(), 6);
         assert_eq!(out.face_normal.len(), 2);
+        // Each output triangle inherits its face's first-half-edge provenance ref.
+        assert_eq!(out.tri_ref.len(), 2);
+        assert_eq!(out.tri_ref[0].face_id, 5);
+        assert_eq!(out.tri_ref[1].face_id, 8);
         // The shared edge got stitched: exactly one interior pairing across the two triangles (the 0↔2
         // diagonal), so both triangles carry a valid pair on that edge.
         let paired: usize = out

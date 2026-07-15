@@ -446,6 +446,10 @@ fn dedupe_edge(mesh: &mut Mesh, edge: HalfedgeId) {
             let pc = mesh.pair(current);
             pair_up(mesh, new_halfedge.offset(2), pc);
             pair_up(mesh, new_halfedge.offset(1), current);
+            if !mesh.tri_ref.is_empty() {
+                let r = mesh.tri_ref[old_face.u()];
+                mesh.tri_ref.push(r);
+            }
             if !mesh.face_normal.is_empty() {
                 let n = mesh.face_normal[old_face.u()];
                 mesh.face_normal.push(n);
@@ -462,6 +466,10 @@ fn dedupe_edge(mesh: &mut Mesh, edge: HalfedgeId) {
             pair_up(mesh, new_halfedge.offset(2), po);
             pair_up(mesh, new_halfedge.offset(1), opposite);
             pair_up(mesh, new_halfedge, new_halfedge.offset(-3));
+            if !mesh.tri_ref.is_empty() {
+                let r = mesh.tri_ref[old_face.u()];
+                mesh.tri_ref.push(r);
+            }
             if !mesh.face_normal.is_empty() {
                 let n = mesh.face_normal[old_face.u()];
                 mesh.face_normal.push(n);

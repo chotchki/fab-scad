@@ -30,10 +30,23 @@ use crate::boolean::OpType;
 use crate::boolean::boolean3::Boolean3;
 use crate::boolean::face_op::face2tri;
 use crate::boolean::predicates::fmax;
-use crate::boolean::vocab::Halfedge as VHalfedge;
+use crate::boolean::vocab::{Halfedge as VHalfedge, TriRef};
 use crate::linalg::{Box3, Vec3};
-use crate::mesh::Mesh;
+use crate::mesh::{Mesh, mesh_id_counter};
 use crate::mesh_ids::{HalfedgeId, TriId, VertId};
+
+/// A temporary provenance ref written during assembly (`boolean_result.cpp`'s `{meshID, -1, faceID,
+/// -1}`): `mesh_id` is `0` for a P-source half-edge, `1` for Q, and `face_id` is the SOURCE triangle
+/// index in that input mesh. [`update_reference`] later swaps in the source triangle's REAL [`TriRef`].
+#[inline]
+fn temp_ref(mesh_id: i32, source_tri: TriId) -> TriRef {
+    TriRef {
+        mesh_id,
+        original_id: -1,
+        face_id: source_tri.raw(),
+        coplanar_id: -1,
+    }
+}
 
 /// A cut-edge point awaiting pairing (`boolean_result.cpp` `EdgePos`). Sorted by `(edge_pos,
 /// collision_id)` — `collision_id` deterministically breaks position ties (the fix for the C++'s prior
@@ -184,11 +197,15 @@ fn pair_up(edge_pos: &mut Vec<EdgePos>, mut f: impl FnMut(VHalfedge)) {
 /// the left and right result faces, write the forward edge to `face_left` and its reverse to
 /// `face_right`, cross-linking their pairs. `face_left`/`face_right` are result-face indices; the write
 /// cursors hold `face_halfedges` BUFFER indices.
+#[allow(clippy::too_many_arguments)]
 fn emit_paired(
     face_halfedges: &mut [VHalfedge],
+    halfedge_ref: &mut [TriRef],
     face_ptr_r: &mut [i32],
     face_left: i32,
     face_right: i32,
+    forward_ref: TriRef,
+    backward_ref: TriRef,
     mut e: VHalfedge,
 ) {
     let forward_edge = face_ptr_r[face_left as usize];
@@ -198,10 +215,12 @@ fn emit_paired(
 
     e.paired_halfedge = HalfedgeId::new(backward_edge);
     face_halfedges[forward_edge as usize] = e;
+    halfedge_ref[forward_edge as usize] = forward_ref;
 
     core::mem::swap(&mut e.start_vert, &mut e.end_vert);
     e.paired_halfedge = HalfedgeId::new(forward_edge);
     face_halfedges[backward_edge as usize] = e;
+    halfedge_ref[backward_edge as usize] = backward_ref;
 }
 
 /// Distribute the partially-retained edges to their faces (`boolean_result.cpp` `AppendPartialEdges`).
@@ -211,6 +230,7 @@ fn emit_paired(
 fn append_partial_edges(
     out: &Mesh,
     face_halfedges: &mut [VHalfedge],
+    halfedge_ref: &mut [TriRef],
     whole_halfedge_p: &mut [bool],
     face_ptr_r: &mut [i32],
     edges_p: &BTreeMap<HalfedgeId, Vec<EdgePos>>,
@@ -218,7 +238,9 @@ fn append_partial_edges(
     i03: &[i32],
     v_p2r: &[VertId],
     face_p2r: &[i32],
+    forward: bool,
 ) {
+    let mesh_id = if forward { 0 } else { 1 };
     for (&edge_p, edge_pos_ref) in edges_p {
         let mut edge_pos_p = edge_pos_ref.clone();
         edge_pos_p.sort_by(EdgePos::order);
@@ -262,8 +284,22 @@ fn append_partial_edges(
         let face_left = face_p2r[edge_p.tri().u()];
         let face_right = face_p2r[pair_p.tri().u()];
 
+        // Both output half-edges of this cut edge belong to the same input triangle pair (faceLeftP =
+        // edgeP/3, faceRightP = pairP/3), same mesh side.
+        let forward_ref = temp_ref(mesh_id, edge_p.tri());
+        let backward_ref = temp_ref(mesh_id, pair_p.tri());
+
         pair_up(&mut edge_pos_p, |e| {
-            emit_paired(face_halfedges, face_ptr_r, face_left, face_right, e)
+            emit_paired(
+                face_halfedges,
+                halfedge_ref,
+                face_ptr_r,
+                face_left,
+                face_right,
+                forward_ref,
+                backward_ref,
+                e,
+            )
         });
     }
 }
@@ -271,9 +307,11 @@ fn append_partial_edges(
 /// Distribute the brand-new intersection edges to their `(faceP, faceQ)` face pair
 /// (`boolean_result.cpp` `AppendNewEdges`). Orders each edge's verts along the longest bounding-box axis
 /// before pairing.
+#[allow(clippy::too_many_arguments)]
 fn append_new_edges(
     out: &Mesh,
     face_halfedges: &mut [VHalfedge],
+    halfedge_ref: &mut [TriRef],
     face_ptr_r: &mut [i32],
     edges_new: &BTreeMap<(TriId, TriId), Vec<EdgePos>>,
     face_pq2r: &[i32],
@@ -302,8 +340,21 @@ fn append_new_edges(
         let face_left = face_pq2r[face_p.u()];
         let face_right = face_pq2r[num_face_p + face_q.u()];
 
+        // A brand-new intersection edge: forward side is the P face, backward the Q face.
+        let forward_ref = temp_ref(0, face_p);
+        let backward_ref = temp_ref(1, face_q);
+
         pair_up(&mut edge_pos, |e| {
-            emit_paired(face_halfedges, face_ptr_r, face_left, face_right, e)
+            emit_paired(
+                face_halfedges,
+                halfedge_ref,
+                face_ptr_r,
+                face_left,
+                face_right,
+                forward_ref,
+                backward_ref,
+                e,
+            )
         });
     }
 }
@@ -311,15 +362,19 @@ fn append_new_edges(
 /// Emit the whole (uncut) edges, duplicated per inclusion (`boolean_result.cpp` `DuplicateHalfedges` via
 /// `AppendWholeEdges`). Each uncut edge is processed once from its forward half-edge, emitting both
 /// output half-edges directly with their pairing.
+#[allow(clippy::too_many_arguments)]
 fn append_whole_edges(
     face_halfedges: &mut [VHalfedge],
+    halfedge_ref: &mut [TriRef],
     face_ptr_r: &mut [i32],
     in_p: &Mesh,
     whole_halfedge_p: &[bool],
     i03: &[i32],
     v_p2r: &[VertId],
     face_p2r: &[i32],
+    forward: bool,
 ) {
+    let mesh_id = if forward { 0 } else { 1 };
     for idx in in_p.halfedge_ids() {
         if !whole_halfedge_p[idx.u()] {
             continue;
@@ -344,6 +399,10 @@ fn append_whole_edges(
         let new_face = face_p2r[idx.tri().u()];
         let face_right = face_p2r[pair.tri().u()];
 
+        // This uncut edge belongs to input triangle idx/3 on one side, pair/3 on the other.
+        let forward_ref = temp_ref(mesh_id, idx.tri());
+        let backward_ref = temp_ref(mesh_id, pair.tri());
+
         for _ in 0..inclusion.abs() {
             let forward_edge = face_ptr_r[new_face as usize];
             face_ptr_r[new_face as usize] += 1;
@@ -356,12 +415,14 @@ fn append_whole_edges(
                 paired_halfedge: HalfedgeId::new(backward_edge),
                 prop_vert,
             };
+            halfedge_ref[forward_edge as usize] = forward_ref;
             face_halfedges[backward_edge as usize] = VHalfedge {
                 start_vert: end_vert,
                 end_vert: start_vert,
                 paired_halfedge: HalfedgeId::new(forward_edge),
                 prop_vert: pair_prop_vert,
             };
+            halfedge_ref[backward_edge as usize] = backward_ref;
             start_vert.advance();
             end_vert.advance();
         }
@@ -455,6 +516,25 @@ fn size_output(
     }
 
     (face_edge, face_pq2r)
+}
+
+/// Map each output triangle's TEMPORARY provenance ref (`{0|1, srcTri}`) to the source triangle's real
+/// [`TriRef`] (`boolean_result.cpp` `UpdateReference` + `MapTriRef`). `mesh_id == 0` reads P's `tri_ref`,
+/// else Q's — with Q's `mesh_id` shifted up by `offsetQ = meshIDCounter` (every ID reserved so far), so
+/// P- and Q-origin instance IDs never collide and [`TriRef::same_face`] correctly separates them. Only
+/// `mesh_id` is offset (matching C++); `same_face` ignores `original_id`, so the rest carries verbatim.
+fn update_reference(out: &mut Mesh, in_p: &Mesh, in_q: &Mesh) {
+    let offset_q = mesh_id_counter();
+    for r in &mut out.tri_ref {
+        let src = r.face_id as usize;
+        if r.mesh_id == 0 {
+            *r = in_p.tri_ref[src];
+        } else {
+            let mut q = in_q.tri_ref[src];
+            q.mesh_id += offset_q;
+            *r = q;
+        }
+    }
 }
 
 /// Run a full boolean: the [`Boolean3`] intersection stage then the result assembly. This is the R1
@@ -577,12 +657,16 @@ fn result(b3: &Boolean3, in_p: &Mesh, in_q: &Mesh, op: OpType) -> Mesh {
         };
         total_he
     ];
+    // The temporary provenance ref per output half-edge (`{0|1, srcTri}`) — becomes `tri_ref` after
+    // Face2Tri, then `update_reference` swaps in the real source refs.
+    let mut halfedge_ref = vec![temp_ref(0, TriId::new(0)); total_he];
     let num_tri_p = in_p.num_tri();
 
     // Partial (cut) edges.
     append_partial_edges(
         &out,
         &mut face_halfedges,
+        &mut halfedge_ref,
         &mut whole_halfedge_p,
         &mut face_ptr_r,
         &edges_p,
@@ -590,10 +674,12 @@ fn result(b3: &Boolean3, in_p: &Mesh, in_q: &Mesh, op: OpType) -> Mesh {
         &i03,
         &v_p2r,
         &face_pq2r[..],
+        true,
     );
     append_partial_edges(
         &out,
         &mut face_halfedges,
+        &mut halfedge_ref,
         &mut whole_halfedge_q,
         &mut face_ptr_r,
         &edges_q,
@@ -601,36 +687,54 @@ fn result(b3: &Boolean3, in_p: &Mesh, in_q: &Mesh, op: OpType) -> Mesh {
         &i30,
         &v_q2r,
         &face_pq2r[num_tri_p..],
+        false,
     );
 
     // New intersection edges.
-    append_new_edges(&out, &mut face_halfedges, &mut face_ptr_r, &edges_new, &face_pq2r, num_tri_p);
+    append_new_edges(
+        &out,
+        &mut face_halfedges,
+        &mut halfedge_ref,
+        &mut face_ptr_r,
+        &edges_new,
+        &face_pq2r,
+        num_tri_p,
+    );
 
     // Whole (uncut) edges.
     append_whole_edges(
         &mut face_halfedges,
+        &mut halfedge_ref,
         &mut face_ptr_r,
         in_p,
         &whole_halfedge_p,
         &i03,
         &v_p2r,
         &face_pq2r[..],
+        true,
     );
     append_whole_edges(
         &mut face_halfedges,
+        &mut halfedge_ref,
         &mut face_ptr_r,
         in_q,
         &whole_halfedge_q,
         &i30,
         &v_q2r,
         &face_pq2r[num_tri_p..],
+        false,
     );
 
     // Level 6: retriangulate the polygon faces into the final half-edge mesh. `face2tri` leaves
-    // `out.face_normal` per-TRIANGLE (each triangle carries its polygon face's normal), which
-    // `simplify_topology` reads and carries through the surgery.
+    // `out.face_normal` per-TRIANGLE (each triangle carries its polygon face's normal) and `out.tri_ref`
+    // the per-triangle TEMPORARY provenance ref — both read + carried by `simplify_topology`.
     let epsilon = out.epsilon;
-    face2tri(&mut out, &face_edge, &face_halfedges, epsilon);
+    face2tri(&mut out, &face_edge, &face_halfedges, &halfedge_ref, epsilon);
+
+    // Map each output triangle's temporary `{0|1, srcTri}` ref to the real source `TriRef`
+    // (`triRefP/Q[srcTri]`, Q offset above P), so `simplify_topology`'s `CollapseColinearEdges` can read
+    // the coplanar-face IDs.
+    update_reference(&mut out, in_p, in_q);
 
     // R2 cleanup (`SimplifyTopology`): collapse the coincident/degenerate structure the intersection
     // assembly leaves at seams — turning the correct-but-unclean fold into an exact-genus manifold

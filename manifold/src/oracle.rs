@@ -969,7 +969,15 @@ mod tests {
                 .iter()
                 .map(|&(ox, oy, oz, sx, sy, sz)| prepared_box(ox, oy, oz, sx, sy, sz))
                 .collect();
-            if let Some(reason) = fold_union_solid_divergence(&rmeshes, 2500, 0xB0BA_CAFE) {
+            // Weave the Monte-Carlo seed from THIS case's params (FNV-1a over the raw bits) — determinism
+            // like everywhere else, but each case (and each proptest shrink) samples its own point set,
+            // reproducibly, rather than reusing one fixed pattern.
+            let mc_seed = params.iter().fold(0xcbf2_9ce4_8422_2325u64, |acc, t| {
+                [t.0, t.1, t.2, t.3, t.4, t.5].iter().fold(acc, |h, v| {
+                    (h ^ v.to_bits()).wrapping_mul(0x0000_0100_0000_01b3)
+                })
+            });
+            if let Some(reason) = fold_union_solid_divergence(&rmeshes, 2500, mc_seed) {
                 proptest::prop_assert!(false, "{reason}\nparams = {params:?}");
             }
         }

@@ -271,8 +271,10 @@ impl Mesh {
             next += 3;
         }
         let has_normals = !self.face_normal.is_empty();
+        let has_refs = !self.tri_ref.is_empty();
         let mut new_he = Vec::with_capacity(next as usize);
         let mut new_fn = Vec::with_capacity(next as usize / 3);
+        let mut new_ref = Vec::with_capacity(next as usize / 3);
         for tri in 0..num_tri {
             if self.halfedge[3 * tri].start_vert.is_none() {
                 continue;
@@ -293,10 +295,16 @@ impl Mesh {
             if has_normals {
                 new_fn.push(self.face_normal[tri]);
             }
+            if has_refs {
+                new_ref.push(self.tri_ref[tri]);
+            }
         }
         self.halfedge = new_he;
         if has_normals {
             self.face_normal = new_fn;
+        }
+        if has_refs {
+            self.tri_ref = new_ref;
         }
     }
 

@@ -25,10 +25,9 @@
 
 use std::collections::{BTreeMap, VecDeque};
 
-use crate::boolean::polygon::earclip;
+use crate::boolean::polygon::{PolyVert, triangulate};
 use crate::boolean::predicates::get_axis_aligned_projection;
 use crate::boolean::vocab::{Halfedge, TriRef};
-use crate::linalg::Vec2;
 use crate::mesh::Mesh;
 use crate::mesh_ids::{HalfedgeId, TriId, VertId};
 
@@ -166,16 +165,24 @@ pub fn face2tri(
         let num_edge = last - first;
         let mut tris: Vec<[i32; 3]> = Vec::new();
         if num_edge >= 3 {
+            // Collect ALL loops of the face — an outer plus any interior hole loops — and hand them to the
+            // multi-loop triangulator together, so a punched-through face gets its hole keyholed instead of
+            // filled over. `idx` is the GLOBAL buffer index, so the returned triangles name face-halfedge
+            // corners directly (what `write_local_triangles` consumes).
             let projection = get_axis_aligned_projection(face_normal_in[face]);
-            for loop_edges in assemble_halfedges(face_halfedges, first, last, face_edge[face]) {
-                let pts: Vec<Vec2> = loop_edges
-                    .iter()
-                    .map(|&ge| projection.apply(out.pos(face_halfedges[ge as usize].start_vert)))
-                    .collect();
-                for [a, b, c] in earclip(&pts, epsilon) {
-                    tris.push([loop_edges[a], loop_edges[b], loop_edges[c]]);
-                }
-            }
+            let loops: Vec<Vec<PolyVert>> = assemble_halfedges(face_halfedges, first, last, face_edge[face])
+                .into_iter()
+                .map(|loop_edges| {
+                    loop_edges
+                        .into_iter()
+                        .map(|ge| PolyVert {
+                            pos: projection.apply(out.pos(face_halfedges[ge as usize].start_vert)),
+                            idx: ge,
+                        })
+                        .collect()
+                })
+                .collect();
+            tris = triangulate(&loops, epsilon);
         }
         total_tris += tris.len();
         face_tris.push(tris);

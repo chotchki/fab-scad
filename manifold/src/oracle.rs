@@ -1203,6 +1203,36 @@ mod tests {
         eprintln!("R2 ✓ P−Q (vol {:.4}) + P∩Q (vol {:.4}) match C++", sub.volume(), int.volume());
     }
 
+    /// M.2.3 — the KEYHOLE integration test: a bar punched all the way through a box (difference) leaves a
+    /// square HOLE in the box's top and bottom faces, so `Face2Tri` must triangulate a holed polygon (an
+    /// outer loop + an interior CW hole loop) via `CutKeyhole`. Without the keyhole path those faces fill
+    /// over the hole → non-manifold / wrong genus. The result is a genus-1 tunnel; check watertight +
+    /// analytic volume + genus-1 + solid-divergence-clean vs C++.
+    #[test]
+    fn r2_tunnel_difference_holed_face_vs_cpp() {
+        use crate::boolean::OpType;
+        use crate::boolean::boolean_result::boolean;
+
+        // Box [0,10]³ minus a 4×4 bar spanning z∈[-1,11] centered at (5,5): a square tunnel through z.
+        let block = prepared_box(0.0, 0.0, 0.0, 10.0, 10.0, 10.0);
+        let bar = prepared_box(3.0, 3.0, -1.0, 4.0, 4.0, 12.0);
+        let res = boolean(&block, &bar, OpType::Subtract);
+
+        assert!(res.is_manifold(), "tunnel result is not manifold — keyhole face failed");
+        // Volume = 10³ − (4·4·10 tunnel through the block) = 1000 − 160 = 840.
+        assert!((res.volume() - 840.0).abs() < 1e-9, "tunnel volume {} != 840", res.volume());
+        assert_eq!(RustKernel::genus(&res), 1, "a through-tunnel is genus 1");
+
+        let block_cpp = CppKernel::ingest(&block.to_mesh_gl()).unwrap();
+        let bar_cpp = CppKernel::ingest(&bar.to_mesh_gl()).unwrap();
+        let b = Mesh::from_mesh_gl(&cpp_to_mesh_gl(&block_cpp.difference(&bar_cpp)));
+        assert_eq!(RustKernel::genus(&b), 1, "C++ tunnel is genus 1 (sanity)");
+        if let Some(r) = solid_divergence(&res, &b, 6000, 0x7011, 1e-9) {
+            panic!("tunnel difference diverges from C++: {r}");
+        }
+        eprintln!("M.2.3 ✓ keyhole tunnel: vol {:.1} genus {} ({} tri)", res.volume(), RustKernel::genus(&res), res.num_tri());
+    }
+
     /// R2 sweep: difference + intersection across several general-position box pairs (varied sizes +
     /// offsets, all genuinely overlapping so results are non-empty), each held to the solid oracle vs
     /// C++. Guards the op param (invertQ face-flip for Subtract, the c1/c2/c3 inclusion transforms)

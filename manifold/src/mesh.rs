@@ -22,6 +22,7 @@ use std::sync::atomic::{AtomicI32, Ordering};
 use crate::boolean::vocab::TriRef;
 use crate::linalg::{Box3, Mat3x4, Vec3};
 use crate::mesh_ids::{HalfedgeId, TriId, VertId};
+use crate::status::Error;
 
 /// The global mesh-instance ID counter (Manifold's `Impl::meshIDCounter_`, starting at 1). Each freshly
 /// constructed original reserves a unique ID via [`reserve_ids`]; the boolean offsets Q's IDs above P's
@@ -449,6 +450,20 @@ impl Mesh {
         value + comp
     }
 
+    /// The bounding box (Manifold's `Manifold::BoundingBox`). Kept current by [`Mesh::calculate_bbox`];
+    /// on an empty mesh it's the inverted/empty box (`min = +∞`, `max = −∞`).
+    #[inline]
+    pub fn bounding_box(&self) -> Box3 {
+        self.b_box
+    }
+
+    /// Every vertex position is finite — no NaN/inf (Manifold's `Impl::IsFinite`, a `transform_reduce`
+    /// over `vertPos_`). This is the input-validity query (distinct from [`Mat3x4::is_finite`], which
+    /// checks a transform MATRIX); an empty mesh is vacuously finite.
+    pub fn is_finite(&self) -> bool {
+        self.vert_pos.iter().all(|p| p.is_finite())
+    }
+
     /// Ingest a `MeshGl` (flat buffers) into the spine: extract positions, carry extra properties,
     /// build connectivity, compute the bbox. Panics if `num_prop < 3` or the buffers are ragged.
     pub fn from_mesh_gl(m: &MeshGl) -> Mesh {
@@ -779,18 +794,22 @@ impl Mesh {
         self.tolerance = self.tolerance.max(min_tol);
     }
 
-    /// Apply an affine transform (`Manifold::Impl::Transform`, M.3.1). Positions map through `m`; face +
-    /// vertex normals through the inverse-transpose ([`Mat3::normal_transform`]); a MIRROR (negative
+    /// Apply an affine transform (`Manifold::Impl::Transform`, M.3.1/M.3.2). Positions map through `m`;
+    /// face + vertex normals through the inverse-transpose ([`Mat3::normal_transform`]); a MIRROR (negative
     /// linear determinant) flips every triangle's winding ([`Mesh::flip_tris`]) so the surface stays
     /// outward-oriented. The bbox is recomputed and epsilon scaled by the spectral norm. Topology
-    /// (halfedge order) is preserved — no re-sort. Identity is a cheap clone; a non-finite `m` yields the
-    /// empty mesh (Manifold's `NonFiniteVertex` early-out — status carried at M.3.2).
-    pub fn transform(&self, m: Mat3x4) -> Mesh {
+    /// (halfedge order) is preserved — no re-sort. Identity is a cheap clone.
+    ///
+    /// A non-finite `m` (NaN/inf entry) is `Err(Error::NonFiniteVertex)` — the eager translation of
+    /// Manifold's `MakeEmpty(NonFiniteVertex)`; the C++ status-propagation branch that precedes it
+    /// (`if status_ != NoError`) is gone because eager `?` at the call site replaces it (see
+    /// [`crate::status`]).
+    pub fn transform(&self, m: Mat3x4) -> Result<Mesh, Error> {
         if m == Mat3x4::IDENTITY {
-            return self.clone();
+            return Ok(self.clone());
         }
         if !m.is_finite() {
-            return Mesh::default();
+            return Err(Error::NonFiniteVertex);
         }
         let linear = m.linear();
         let normal_t = linear.normal_transform();
@@ -817,7 +836,7 @@ impl Mesh {
         // Scale epsilon by the 3×3 spectral norm, then re-floor against the new bbox (`SetEpsilon`).
         result.epsilon *= linear.spectral_norm();
         result.set_epsilon(result.epsilon, false);
-        result
+        Ok(result)
     }
 
     /// Reverse the winding of every triangle in place (`mesh_fixes.h` `FlipTris`) — used by a mirror
@@ -990,34 +1009,51 @@ mod tests {
 
         // Translate: shape unchanged, bbox shifted.
         let t = Mat3x4 { x: v3(1., 0., 0.), y: v3(0., 1., 0.), z: v3(0., 0., 1.), w: v3(10., 20., 30.) };
-        let moved = cube.transform(t);
+        let moved = cube.transform(t).unwrap();
         assert!(moved.is_manifold());
         assert!((moved.volume() - 1.0).abs() < 1e-12);
-        assert_eq!(moved.b_box.min, v3(10., 20., 30.));
-        assert_eq!(moved.b_box.max, v3(11., 21., 31.));
+        assert_eq!(moved.bounding_box().min, v3(10., 20., 30.));
+        assert_eq!(moved.bounding_box().max, v3(11., 21., 31.));
 
         // Non-uniform scale: volume ×|det| = 2·3·4 = 24.
         let s = Mat3x4 { x: v3(2., 0., 0.), y: v3(0., 3., 0.), z: v3(0., 0., 4.), w: Vec3::ZERO };
-        let scaled = cube.transform(s);
+        let scaled = cube.transform(s).unwrap();
         assert!(scaled.is_manifold());
         assert!((scaled.volume() - 24.0).abs() < 1e-12);
 
         // Mirror (det = −1): volume stays 1 AND POSITIVE — without the winding flip the signed volume
         // would be −1. Proves flip_tris re-oriented the surface + kept it manifold.
         let mirror = Mat3x4 { x: v3(-1., 0., 0.), y: v3(0., 1., 0.), z: v3(0., 0., 1.), w: Vec3::ZERO };
-        let mirrored = cube.transform(mirror);
+        let mirrored = cube.transform(mirror).unwrap();
         assert!(mirrored.is_manifold(), "mirror must stay manifold (flip_tris pairing)");
         assert!((mirrored.volume() - 1.0).abs() < 1e-12, "mirror volume {} != 1", mirrored.volume());
         assert_eq!(crate::check::genus(&mirrored), 0);
 
         // 90° rotation about z.
         let rot = Mat3x4 { x: v3(0., 1., 0.), y: v3(-1., 0., 0.), z: v3(0., 0., 1.), w: Vec3::ZERO };
-        let rotated = cube.transform(rot);
+        let rotated = cube.transform(rot).unwrap();
         assert!(rotated.is_manifold());
         assert!((rotated.volume() - 1.0).abs() < 1e-12);
 
         // Identity is an exact clone.
-        assert_eq!(cube.transform(Mat3x4::IDENTITY).volume(), cube.volume());
+        assert_eq!(cube.transform(Mat3x4::IDENTITY).unwrap().volume(), cube.volume());
+    }
+
+    /// M.3.2 — a non-finite transform matrix is `Err(NonFiniteVertex)` (the eager translation of
+    /// Manifold's `MakeEmpty(NonFiniteVertex)`), and the vert-position `is_finite` query agrees.
+    #[test]
+    fn transform_non_finite_is_an_error() {
+        let cube = Mesh::from_mesh_gl(&unit_cube());
+        assert!(cube.is_finite());
+        let v3 = Vec3::new;
+        let nan = Mat3x4 { x: v3(f64::NAN, 0., 0.), y: v3(0., 1., 0.), z: v3(0., 0., 1.), w: Vec3::ZERO };
+        assert_eq!(cube.transform(nan).unwrap_err(), Error::NonFiniteVertex);
+        let inf = Mat3x4 { x: v3(1., 0., 0.), y: v3(0., 1., 0.), z: v3(0., 0., 1.), w: v3(f64::INFINITY, 0., 0.) };
+        assert_eq!(cube.transform(inf).unwrap_err(), Error::NonFiniteVertex);
+        // A mesh with a NaN vertex fails the position-finiteness query.
+        let mut bad = cube.clone();
+        bad.vert_pos[0].x = f64::NAN;
+        assert!(!bad.is_finite());
     }
 
     /// M.3.3 — `decompose`: two disjoint cubes split into two manifold parts of volume 1 each; a single

@@ -12,6 +12,9 @@ libm = "0.2"
 # Structured diagnostics (verbatim-port debugging: per-stage collapse counts, differential divergence).
 # Compiled out at release log levels; the workspace already standardises on `tracing`.
 tracing = "0.1"
+# Typed geometry errors (`status::Error`). The eager ops surface failure as `Result`, NOT the C++
+# lazy-CSG `status_` field — see `status.rs`. Workspace already standardises on `thiserror` v2.
+thiserror = "2"
 
 [features]
 default = []

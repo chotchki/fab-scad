@@ -30,6 +30,8 @@ pub mod mesh_ids;
 pub mod par;
 // the robust 2D triangulator the boolean reassembly leans on.
 pub mod polygon;
+// convex hull (`Manifold::Hull`) — the QuickHull port; unblocks minkowski + fab-scad `hull()`.
+pub mod quickhull;
 // Morton-code geometry reindex — the boolean's final canonicalization (`SortGeometry`), so a chained
 // op's intermediate order matches C++ bit-for-bit.
 pub mod sort;

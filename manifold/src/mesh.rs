@@ -784,7 +784,6 @@ impl Mesh {
     /// to have run. Degenerate incident edges are excluded; an unreferenced vertex gets `(0,0,0)`.
     pub fn calculate_vert_normals(&mut self) {
         let num_vert = self.num_vert();
-        self.vert_normal = vec![Vec3::ZERO; num_vert];
         // The smallest half-edge id starting at each vertex — a deterministic ForVert seed (Manifold's
         // atomic vertHalfedgeMap min-reduction, serialized). `None` = not yet referenced.
         let mut vert_halfedge: Vec<Option<HalfedgeId>> = vec![None; num_vert];
@@ -797,37 +796,44 @@ impl Mesh {
                 }
             }
         }
-        for (vert, &first) in vert_halfedge.iter().enumerate() {
-            let Some(first_edge) = first else {
-                continue; // not referenced ⇒ stays (0,0,0)
-            };
-            // Collect the one-ring first (keeps the borrow of `self` inside for_vert from tangling
-            // with the per-edge reads below).
-            let mut ring = Vec::new();
-            self.for_vert(first_edge, |e| ring.push(e));
-            let mut normal = Vec3::ZERO;
-            for edge in ring {
-                let tv0 = self.start(edge);
-                let tv1 = self.end(edge);
-                let tv2 = self.end(edge.next());
-                let curr_edge = (self.pos(tv1) - self.pos(tv0)).normalize();
-                let prev_edge = (self.pos(tv0) - self.pos(tv2)).normalize();
-                // A degenerate incident triangle (zero-length edge ⇒ NaN) is excluded.
-                if !curr_edge.x.is_finite() || !prev_edge.x.is_finite() {
-                    continue;
-                }
-                let dot = -prev_edge.dot(curr_edge);
-                let phi = if dot >= 1.0 {
-                    0.0
-                } else if dot <= -1.0 {
-                    crate::mathf::PI
-                } else {
-                    crate::mathf::acos(dot)
+        // Per-vertex MAP (M.4): each vertex's angle-weighted normal is an independent pure function of
+        // its one-ring + the face normals, so this parallelizes through the order-preserving
+        // `par::map_collect` seam — result index i is always vertex i, so par == seq bit-for-bit (the
+        // per-vertex sum runs in fixed ForVert ring order, `mathf::acos` is portable-libm). Immutable
+        // reborrow, block-scoped so it releases before the write-back.
+        self.vert_normal = {
+            let this = &*self;
+            crate::par::map_collect(&vert_halfedge, |&first| {
+                let Some(first_edge) = first else {
+                    return Vec3::ZERO; // not referenced ⇒ stays (0,0,0)
                 };
-                normal += phi * self.face_normal[edge.tri().u()];
-            }
-            self.vert_normal[vert] = crate::boolean::predicates::safe_normalize(normal);
-        }
+                // Collect the one-ring first (keeps the `for_vert` borrow from tangling with the reads).
+                let mut ring = Vec::new();
+                this.for_vert(first_edge, |e| ring.push(e));
+                let mut normal = Vec3::ZERO;
+                for edge in ring {
+                    let tv0 = this.start(edge);
+                    let tv1 = this.end(edge);
+                    let tv2 = this.end(edge.next());
+                    let curr_edge = (this.pos(tv1) - this.pos(tv0)).normalize();
+                    let prev_edge = (this.pos(tv0) - this.pos(tv2)).normalize();
+                    // A degenerate incident triangle (zero-length edge ⇒ NaN) is excluded.
+                    if !curr_edge.x.is_finite() || !prev_edge.x.is_finite() {
+                        continue;
+                    }
+                    let dot = -prev_edge.dot(curr_edge);
+                    let phi = if dot >= 1.0 {
+                        0.0
+                    } else if dot <= -1.0 {
+                        crate::mathf::PI
+                    } else {
+                        crate::mathf::acos(dot)
+                    };
+                    normal += phi * this.face_normal[edge.tri().u()];
+                }
+                crate::boolean::predicates::safe_normalize(normal)
+            })
+        };
     }
 
     /// Canonicalize the within-triangle half-edge order (Manifold's `ReorderHalfedges`), run AFTER

@@ -95,6 +95,26 @@ impl DisjointSets {
     pub fn same(&mut self, id1: usize, id2: usize) -> bool {
         self.find(id1) == self.find(id2)
     }
+
+    /// Label every element with a compact component index and return `(labels, count)`
+    /// (`disjoint_sets.h` `connectedComponents`). Labels are assigned in first-seen-root order over
+    /// `0..len`, so the numbering is deterministic (the exact index order may differ from C++, but
+    /// [`crate::mesh::Mesh::decompose`] compares parts as a SET, so it doesn't matter).
+    pub fn connected_components(&mut self) -> (Vec<usize>, usize) {
+        let n = self.len();
+        let mut root2label = vec![usize::MAX; n];
+        let mut labels = vec![0usize; n];
+        let mut count = 0;
+        for (v, label) in labels.iter_mut().enumerate() {
+            let r = self.find(v);
+            if root2label[r] == usize::MAX {
+                root2label[r] = count;
+                count += 1;
+            }
+            *label = root2label[r];
+        }
+        (labels, count)
+    }
 }
 
 #[cfg(test)]

@@ -842,6 +842,72 @@ impl Mesh {
             }
         }
     }
+
+    /// Split into connected components (`Manifold::Decompose`, M.3.3): union-find over the forward
+    /// half-edges labels each vertex, then every component is extracted as its own `Mesh` (its vertex
+    /// subset + the triangles it owns, re-paired via [`Mesh::create_halfedges`] and canonicalized by
+    /// [`Mesh::sort_geometry`], inheriting the source epsilon/tolerance). A single component returns a
+    /// clone. The returned order is component-label order (a set, for the differential — not C++'s exact
+    /// order). This is the inverse of `Compose`; enclosed cavities stay their own component (the W.4
+    /// contract).
+    pub fn decompose(&self) -> Vec<Mesh> {
+        use crate::boolean::disjoint_sets::DisjointSets;
+        let num_vert = self.num_vert();
+        let mut uf = DisjointSets::new(num_vert);
+        for e in 0..self.halfedge.len() {
+            let he = HalfedgeId::from_usize(e);
+            let (s, en) = (self.start(he), self.end(he));
+            if s < en {
+                uf.unite(s.u(), en.u());
+            }
+        }
+        let (labels, num_comp) = uf.connected_components();
+        if num_comp <= 1 {
+            return vec![self.clone()];
+        }
+
+        let num_tri = self.num_tri();
+        let mut meshes = Vec::new();
+        for i in 0..num_comp {
+            // Compact this component's verts (old → new), gathering positions.
+            let mut old2new = vec![u32::MAX; num_vert];
+            let mut vert_pos = Vec::new();
+            for (v, &label) in labels.iter().enumerate() {
+                if label == i {
+                    old2new[v] = vert_pos.len() as u32;
+                    vert_pos.push(self.vert_pos[v]);
+                }
+            }
+            // Triangles owned by this component (first-vertex label), remapped to the new vert indices.
+            let mut tris: Vec<[u32; 3]> = Vec::new();
+            for f in 0..num_tri {
+                let t = TriId::from_usize(f);
+                if labels[self.start(t.halfedge(0)).u()] != i {
+                    continue;
+                }
+                tris.push([
+                    old2new[self.start(t.halfedge(0)).u()],
+                    old2new[self.start(t.halfedge(1)).u()],
+                    old2new[self.start(t.halfedge(2)).u()],
+                ]);
+            }
+            if tris.is_empty() {
+                continue;
+            }
+            let mut m = Mesh {
+                vert_pos,
+                num_prop: 3,
+                epsilon: self.epsilon,
+                tolerance: self.tolerance,
+                ..Default::default()
+            };
+            m.create_halfedges(&tris);
+            m.calculate_bbox();
+            m.sort_geometry();
+            meshes.push(m);
+        }
+        meshes
+    }
 }
 
 /// Remap a half-edge index to its position after its triangle is winding-flipped (`mesh_fixes.h`
@@ -952,6 +1018,39 @@ mod tests {
 
         // Identity is an exact clone.
         assert_eq!(cube.transform(Mat3x4::IDENTITY).volume(), cube.volume());
+    }
+
+    /// M.3.3 — `decompose`: two disjoint cubes split into two manifold parts of volume 1 each; a single
+    /// cube stays one component.
+    #[test]
+    fn decompose_splits_disjoint_cubes() {
+        let uc = unit_cube();
+        // Two unit cubes 10 apart in x.
+        let mut verts = uc.vert_properties.clone();
+        for c in uc.vert_properties.chunks_exact(3) {
+            verts.extend_from_slice(&[c[0] + 10.0, c[1], c[2]]);
+        }
+        let mut tris = uc.tri_verts.clone();
+        for &idx in &uc.tri_verts {
+            tris.push(idx + 8);
+        }
+        let mesh = Mesh::from_mesh_gl(&MeshGl { num_prop: 3, vert_properties: verts, tri_verts: tris });
+        assert!(mesh.is_manifold());
+        assert_eq!(mesh.num_tri(), 24);
+
+        let parts = mesh.decompose();
+        assert_eq!(parts.len(), 2, "two disjoint cubes → two components");
+        for p in &parts {
+            assert!(p.is_manifold(), "each part manifold");
+            assert!((p.volume() - 1.0).abs() < 1e-12, "part volume {} != 1", p.volume());
+            assert_eq!(p.num_tri(), 12);
+            assert_eq!(p.num_vert(), 8);
+        }
+        let total: f64 = parts.iter().map(|p| p.volume()).sum();
+        assert!((total - 2.0).abs() < 1e-12, "total volume preserved");
+
+        // A single cube is one component (returned as a clone).
+        assert_eq!(Mesh::from_mesh_gl(&unit_cube()).decompose().len(), 1);
     }
 
     #[test]

@@ -643,6 +643,58 @@ mod tests {
             .try_init();
     }
 
+    /// Locate Manifold's bundled test-model directory (`test/models/*.obj`) inside the linked
+    /// `manifold-csg-sys` build output — the nasty corpus (M.2.4). The build hash varies, so glob
+    /// `target/{debug,release}/build/manifold-csg-sys-*/out/manifold-src/test/models`. `None` if the C++
+    /// source isn't unpacked (then the corpus test skips).
+    fn models_dir() -> Option<std::path::PathBuf> {
+        let target = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../target");
+        for profile in ["release", "debug"] {
+            let build = target.join(profile).join("build");
+            let Ok(entries) = std::fs::read_dir(&build) else {
+                continue;
+            };
+            for e in entries.flatten() {
+                let name = e.file_name();
+                if name.to_string_lossy().starts_with("manifold-csg-sys-") {
+                    let models = e.path().join("out/manifold-src/test/models");
+                    if models.is_dir() {
+                        return Some(models);
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Parse a triangle-mesh Wavefront `.obj` (`v x y z` + `f a b c`, 1-indexed, no texture/normal refs —
+    /// the form Manifold's test corpus uses) into a position-only [`MeshGl`].
+    fn load_obj(path: &std::path::Path) -> MeshGl {
+        let text = std::fs::read_to_string(path).unwrap();
+        let mut vert_properties = Vec::new();
+        let mut tri_verts = Vec::new();
+        for line in text.lines() {
+            let mut it = line.split_whitespace();
+            match it.next() {
+                Some("v") => {
+                    for _ in 0..3 {
+                        vert_properties.push(it.next().unwrap().parse::<f64>().unwrap());
+                    }
+                }
+                Some("f") => {
+                    // `f a b c` — 1-indexed, possibly `a/vt/vn`; take the vertex index before any `/`.
+                    for _ in 0..3 {
+                        let tok = it.next().unwrap();
+                        let idx: u32 = tok.split('/').next().unwrap().parse().unwrap();
+                        tri_verts.push(idx - 1);
+                    }
+                }
+                _ => {}
+            }
+        }
+        MeshGl { num_prop: 3, vert_properties, tri_verts }
+    }
+
     // --- Triangulation-robust solid comparison (chotchki's methodology: invariants + Monte-Carlo). The
     // boolean-residual metric runs through C++'s tolerance booleans, which sliver when tessellations
     // diverge (our un-simplified R1 mesh keeps collinear verts C++ merges). These read the SOLID, not
@@ -975,6 +1027,54 @@ mod tests {
             }
         }
         eprintln!("THESIS(rot) ✓ {trials} rotated-cube fold-unions — invariants + Monte-Carlo match C++");
+    }
+
+    /// M.2.4 (start) — the NASTY corpus: Manifold's own hard test models (self-intersecting / thin /
+    /// near-degenerate real geometry), unioned left+right per `boolean_complex_test.cpp`, checked
+    /// manifold + solid-divergence vs C++. Starts with the SMALL pairs — the big ones (self_intersect
+    /// 17K faces, Generic_Twin_7081 20K) wait for the LBVH broad phase (our collider is brute-force
+    /// O(n²)). Skips cleanly if the C++ source isn't unpacked.
+    #[test]
+    fn nasty_corpus_union_vs_cpp() {
+        use crate::boolean::OpType;
+        use crate::boolean::boolean_result::boolean;
+        init_tracing();
+        let Some(dir) = models_dir() else {
+            eprintln!("nasty corpus: models dir not found — skipping");
+            return;
+        };
+        let pairs = [
+            ("Havocglass8_left.obj", "Havocglass8_right.obj"),
+            ("Cray_left.obj", "Cray_right.obj"),
+            ("Generic_Twin_7863.1.t0_left.obj", "Generic_Twin_7863.1.t0_right.obj"),
+        ];
+        for (l, r) in pairs {
+            let gl_l = load_obj(&dir.join(l));
+            let gl_r = load_obj(&dir.join(r));
+
+            let mut ml = Mesh::from_mesh_gl(&gl_l);
+            ml.set_epsilon(-1.0, false);
+            ml.initialize_original();
+            ml.set_normals_and_coplanar();
+            let mut mr = Mesh::from_mesh_gl(&gl_r);
+            mr.set_epsilon(-1.0, false);
+            mr.initialize_original();
+            mr.set_normals_and_coplanar();
+
+            let res = boolean(&ml, &mr, OpType::Add);
+            assert!(res.is_manifold(), "{l} ∪ {r}: rust union is not manifold");
+
+            let cpp = CppKernel::ingest(&gl_l)
+                .unwrap_or_else(|e| panic!("{l}: cpp ingest {e}"))
+                .union(&CppKernel::ingest(&gl_r).unwrap_or_else(|e| panic!("{r}: cpp ingest {e}")));
+            let b = Mesh::from_mesh_gl(&cpp_to_mesh_gl(&cpp));
+            // Solid oracle at the R2 determinism tolerance (byte-identity on the nasty corpus is a
+            // determinism-close-out goal; correctness = Monte-Carlo-clean).
+            if let Some(reason) = solid_divergence(&res, &b, 4000, 0x0B5E, 2e-2) {
+                panic!("NASTY {l} ∪ {r}: {reason}");
+            }
+            eprintln!("nasty ✓ {l} ∪ {r}: vol {:.5} ntri {}", res.volume(), res.num_tri());
+        }
     }
 
     /// Unit-check the point-in-mesh oracle the Monte-Carlo comparison relies on: a unit cube classifies

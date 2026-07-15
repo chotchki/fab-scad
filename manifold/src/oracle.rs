@@ -1755,6 +1755,41 @@ mod tests {
         eprintln!("M.5.1 ✓ CrossSection area-residual < 1e-5 vs Clipper2 across {} cases", cases.len());
     }
 
+    /// M.5.2 — the OFFSET (round-join) area gate vs Clipper2. Round is the OpenSCAD `offset(r)` path where
+    /// both i_overlay and Clipper2 polygonize toward the true arc, so a fine `circular_segments` makes the
+    /// areas converge. Miter/Square are NOT gated (documented corner-geometry divergence). Tolerance is
+    /// looser than the boolean gate (1e-3) — the residual is the arc-polygonization difference between two
+    /// engines, not a correctness gap.
+    #[test]
+    fn m5_2_offset_round_area_vs_cpp() {
+        use crate::cross_section::{CrossSection, JoinType};
+        use crate::linalg::Vec2;
+
+        let sq = |x: f64, y: f64, s: f64| -> Vec<Vec2> {
+            vec![Vec2::new(x, y), Vec2::new(x + s, y), Vec2::new(x + s, y + s), Vec2::new(x, y + s)]
+        };
+        let to_cpp = |polys: &[Vec<Vec2>]| -> manifold3d::CrossSection {
+            let cp: Vec<Vec<[f64; 2]>> =
+                polys.iter().map(|c| c.iter().map(|p| [p.x, p.y]).collect()).collect();
+            manifold3d::CrossSection::from_polygons(&cp)
+        };
+
+        let segments = 128;
+        let cases: Vec<(&str, Vec<Vec<Vec2>>, f64)> = vec![
+            ("grow square", vec![sq(0.0, 0.0, 4.0)], 1.0),
+            ("grow L-shape", vec![sq(0.0, 0.0, 4.0), sq(4.0, 0.0, 2.0)], 0.7),
+            ("shrink square", vec![sq(0.0, 0.0, 10.0)], -1.5),
+        ];
+        for (label, polys, delta) in &cases {
+            let r = CrossSection::from_polygons(polys).offset(*delta, JoinType::Round, 2.0, segments);
+            let c = to_cpp(polys).offset(*delta, manifold3d::JoinType::Round, 2.0, segments);
+            let (ra, ca) = (r.area(), c.area());
+            let resid = (ra - ca).abs() / ca.abs().max(1e-9);
+            assert!(resid < 1e-3, "{label}: round-offset area rust {ra} cpp {ca} (residual {resid:.3e})");
+        }
+        eprintln!("M.5.2 ✓ round-offset area matches Clipper2 across {} cases", cases.len());
+    }
+
     /// M.2.3 — the KEYHOLE integration test: a bar punched all the way through a box (difference) leaves a
     /// square HOLE in the box's top and bottom faces, so `Face2Tri` must triangulate a holed polygon (an
     /// outer loop + an interior CW hole loop) via `CutKeyhole`. Without the keyhole path those faces fill

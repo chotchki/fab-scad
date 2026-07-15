@@ -13,6 +13,19 @@ use crate::linalg::Vec2;
 use i_overlay::core::fill_rule::FillRule;
 use i_overlay::core::overlay_rule::OverlayRule;
 use i_overlay::float::single::SingleFloatOverlay;
+use i_overlay::mesh::outline::offset::OutlineOffset;
+use i_overlay::mesh::style::{LineJoin, OutlineStyle};
+
+/// Corner handling for [`CrossSection::offset`] (Manifold `JoinType` / Clipper2 `JoinType`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum JoinType {
+    /// Flat (squared-off) corners.
+    Square,
+    /// Rounded corners (arc, resolution = `circular_segments`).
+    Round,
+    /// Sharp mitered corners, bounded by `miter_limit`.
+    Miter,
+}
 
 /// A 2D region as a set of polygon contours (Manifold `CrossSection`). Normalized under Positive fill:
 /// CCW outers fill, CW contours subtract (holes) — the flat `Polygons` form, holes distinguished by
@@ -60,6 +73,36 @@ impl CrossSection {
     /// `self ∩ other` (Manifold `^` / `Boolean(Intersect)`).
     pub fn intersection(&self, other: &Self) -> Self {
         self.boolean(other, OverlayRule::Intersect)
+    }
+
+    /// Grow (`delta > 0`) or shrink (`< 0`) the region by `delta`, with the given corner handling
+    /// (Manifold `Offset`). `circular_segments` is the round-join arc resolution (segments per full
+    /// circle); `miter_limit` bounds miter joins. Backed by i_overlay's `outline`.
+    ///
+    /// JOIN-TYPE FIDELITY: `Round` area-matches Clipper2 (both polygonize toward the true arc, so a fine
+    /// `circular_segments` converges — this is the OpenSCAD `offset(r)` path, the gated case). `Miter` and
+    /// `Square` are best-effort maps (i_overlay `Miter` is a turn-angle threshold, not a ratio; `Square`→
+    /// `Bevel`) — the corner geometry differs from Clipper2, so their AREA diverges at corners and they
+    /// are NOT area-gated. This is the 2D layer's documented approximation.
+    pub fn offset(&self, delta: f64, join_type: JoinType, miter_limit: f64, circular_segments: i32) -> Self {
+        if self.is_empty() {
+            return Self::new();
+        }
+        let join = match join_type {
+            JoinType::Round => {
+                let n = (circular_segments.max(4)) as f64;
+                LineJoin::Round(core::f64::consts::TAU / n)
+            }
+            // Miter length = offset / sin(turn/2); miter used while that ratio ≤ miter_limit ⇒ turn ≥
+            // 2·asin(1/limit). i_overlay's Miter(angle) is that turn-angle threshold (below ⇒ bevel).
+            JoinType::Miter => {
+                LineJoin::Miter(2.0 * crate::mathf::asin((1.0 / miter_limit).clamp(-1.0, 1.0)))
+            }
+            JoinType::Square => LineJoin::Bevel,
+        };
+        let style = OutlineStyle::new(delta).line_join(join);
+        let input = to_io(&self.contours);
+        Self { contours: from_io(input.outline(&style)) }
     }
 
     /// Net signed area — outer contours positive, holes negative (Manifold `Area`).
@@ -179,6 +222,23 @@ mod tests {
 
         let (min, max) = a.bounds().unwrap();
         assert_eq!((min, max), (Vec2::new(0.0, 0.0), Vec2::new(1.0, 1.0)));
+    }
+
+    #[test]
+    fn offset_round_matches_analytic() {
+        let (s, r) = (4.0, 1.0);
+        let a = CrossSection::from_polygons(&[square(0.0, 0.0, s)]);
+        let grown = a.offset(r, JoinType::Round, 2.0, 256);
+        // Rounded rectangle: s² + 4·s·r (edge strips) + π·r² (corner quarter-circles).
+        let expected = s * s + 4.0 * s * r + core::f64::consts::PI * r * r;
+        assert!(
+            (grown.area() - expected).abs() / expected < 2e-3,
+            "round-offset area {} vs analytic {expected}",
+            grown.area()
+        );
+        // A negative offset shrinks: a 4-square inset by 1 → a 2-square, area 4.
+        let inset = a.offset(-1.0, JoinType::Miter, 2.0, 16);
+        assert!((inset.area() - 4.0).abs() < 1e-6, "inset area {}", inset.area());
     }
 
     #[test]

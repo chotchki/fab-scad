@@ -862,6 +862,49 @@ impl Mesh {
         }
     }
 
+    /// Recompute every vertex's EXTRA properties from a callback (`Manifold::SetProperties`, M.3.4a) —
+    /// the mechanism OpenSCAD's `color()` uses to stamp RGBA onto a mesh.
+    ///
+    /// `num_prop` is the EXTRA-property count, EXCLUDING the 3 position channels (matching the C++
+    /// `SetProperties(numProp, …)` parameter, and the existing fab-scad `with_color`'s `set_properties(4,
+    /// …)` for RGBA). So `num_prop == 4` yields `Mesh::num_prop == 3 + 4 == 7`, and `num_prop == 0`
+    /// strips properties back to position-only. Do NOT pass the total here.
+    ///
+    /// `prop_fn(new, position, old)` fills `new` (this vertex's `num_prop` fresh extra values) given its
+    /// read-only `position` and its `old` extra values (`self.num_prop - 3` of them; empty if the source
+    /// was position-only). Position is never touched — it lives in `vert_pos`, exactly as the C++ keeps
+    /// it out of `properties_`. Applied once per triangle CORNER (verbatim), but each vertex's row is
+    /// idempotent, so the redundant writes are harmless. Runs serially — deterministic by construction.
+    ///
+    /// NOTE: a leaf mesh colored here keeps its color only until a boolean, which still forces
+    /// position-only output — the `CreateProperties` interpolation that carries properties across a
+    /// boolean seam is M.3.4b.
+    pub fn set_properties(&self, num_prop: usize, prop_fn: impl Fn(&mut [f64], Vec3, &[f64])) -> Mesh {
+        let mut result = self.clone();
+        if num_prop == 0 {
+            result.props_extra.clear();
+            result.num_prop = 3;
+            return result;
+        }
+        let old_extra = self.num_prop - 3;
+        let num_vert = self.num_vert();
+        let mut new_props = vec![0.0; num_prop * num_vert];
+        for tri in 0..self.num_tri() {
+            let t = TriId::from_usize(tri);
+            for i in 0..3 {
+                let edge = t.halfedge(i);
+                let vert = self.start(edge); // position source (vertPos_[vert])
+                let prop_vert = self.prop(edge).u(); // property-row index
+                let old_row = &self.props_extra[old_extra * prop_vert..old_extra * (prop_vert + 1)];
+                let new_row = &mut new_props[num_prop * prop_vert..num_prop * (prop_vert + 1)];
+                prop_fn(new_row, self.pos(vert), old_row);
+            }
+        }
+        result.props_extra = new_props;
+        result.num_prop = 3 + num_prop;
+        result
+    }
+
     /// Split into connected components (`Manifold::Decompose`, M.3.3): union-find over the forward
     /// half-edges labels each vertex, then every component is extracted as its own `Mesh` (its vertex
     /// subset + the triangles it owns, re-paired via [`Mesh::create_halfedges`] and canonicalized by
@@ -1087,6 +1130,46 @@ mod tests {
 
         // A single cube is one component (returned as a clone).
         assert_eq!(Mesh::from_mesh_gl(&unit_cube()).decompose().len(), 1);
+    }
+
+    /// M.3.4a — `set_properties`: stamp RGBA onto every vertex (the `color()` overwrite), confirm the
+    /// stride grows 3→7 and each row carries the color; then read the old props back to double them; then
+    /// strip to position-only.
+    #[test]
+    fn set_properties_stamps_color_and_reads_old() {
+        let cube = Mesh::from_mesh_gl(&unit_cube()); // position-only, num_prop 3
+        assert_eq!(cube.num_prop, 3);
+        assert!(cube.props_extra.is_empty());
+
+        // Stamp uniform RGBA (4 extra props). `old` is empty (source was position-only).
+        let rgba = [0.2, 0.4, 0.6, 1.0];
+        let red = cube.set_properties(4, |new, _pos, old| {
+            assert!(old.is_empty());
+            new.copy_from_slice(&rgba);
+        });
+        assert_eq!(red.num_prop, 7);
+        assert_eq!(red.props_extra.len(), 8 * 4); // 8 verts × 4 extras
+        for row in red.props_extra.chunks_exact(4) {
+            assert_eq!(row, rgba);
+        }
+        assert_eq!(red.volume(), 1.0); // positions untouched
+        assert!(red.is_manifold());
+
+        // Read the OLD props and double them (4 extras → 4 extras). Confirms `old` is wired.
+        let doubled = red.set_properties(4, |new, _pos, old| {
+            for (n, o) in new.iter_mut().zip(old) {
+                *n = 2.0 * o;
+            }
+        });
+        for row in doubled.props_extra.chunks_exact(4) {
+            assert_eq!(row, [0.4, 0.8, 1.2, 2.0]);
+        }
+
+        // num_prop == 0 strips back to position-only.
+        let stripped = red.set_properties(0, |_new, _pos, _old| unreachable!());
+        assert_eq!(stripped.num_prop, 3);
+        assert!(stripped.props_extra.is_empty());
+        assert_eq!(stripped.to_mesh_gl(), unit_cube());
     }
 
     #[test]

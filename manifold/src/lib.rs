@@ -24,6 +24,8 @@ pub mod linalg;
 pub mod mathf;
 // the halfedge `Impl` (the mesh spine); MeshGL <-> Impl, IsManifold.
 pub mod mesh;
+// Minkowski sum (`Manifold::MinkowskiSum`) — the tiered hull+union over M.3.6's convex hull.
+pub mod minkowski;
 // typed mesh indices (VertId/HalfedgeId/TriId) — the misuse-resistance layer over raw i32.
 pub mod mesh_ids;
 // Pillar 1: the deterministic parallel seam (serial when `par` is off).

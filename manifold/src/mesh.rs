@@ -625,6 +625,52 @@ impl Mesh {
         }
     }
 
+    /// The normal of triangle `t`, computed on the fly — `normalize(cross(v1 − v0, v2 − v0))` with a
+    /// degenerate (zero-area) triangle snapping to `(0,0,1)`. Identical formula to
+    /// [`Mesh::calculate_face_normals`] (so it equals the cached `face_normal` bit-for-bit), but
+    /// self-contained: callers that only need a few normals — [`Mesh::is_convex`], Minkowski's
+    /// coplanar test — don't have to run the full face-normal pass first.
+    pub(crate) fn tri_normal(&self, t: TriId) -> Vec3 {
+        let v = self.pos(self.start(t.halfedge(0)));
+        let n = (self.pos(self.end(t.halfedge(0))) - v).cross(self.pos(self.end(t.halfedge(1))) - v);
+        let normal = n.normalize();
+        if normal.x.is_nan() {
+            Vec3::new(0.0, 0.0, 1.0)
+        } else {
+            normal
+        }
+    }
+
+    /// Is this a convex solid? Manifold's `Impl::IsConvex`: genus 0 (Euler characteristic 2) AND every
+    /// dihedral edge turns the same way (`dot(edgeVec, cross(n0, n1)) > 0`, coplanar faces exempt). The
+    /// Minkowski dispatch keys on this to pick the fast convex×convex tier. Self-contained — recomputes
+    /// face normals via [`Mesh::tri_normal`], so it needs no prior normal pass. Each undirected edge is
+    /// visited once (via the lower-indexed half-edge, which is orientation-symmetric for this test).
+    pub fn is_convex(&self) -> bool {
+        let chi = self.num_vert() as i64 - self.num_edge() as i64 + self.num_tri() as i64;
+        if 1 - chi / 2 != 0 {
+            return false;
+        }
+        for idx in 0..self.halfedge.len() {
+            let he = HalfedgeId::from_usize(idx);
+            let pair = self.pair(he);
+            // Boundary edge (non-manifold) — skip; and process each undirected edge just once.
+            if pair.is_none() || idx >= pair.u() {
+                continue;
+            }
+            let normal0 = self.tri_normal(he.tri());
+            let normal1 = self.tri_normal(pair.tri());
+            if normal0 == normal1 {
+                continue;
+            }
+            let edge_vec = self.pos(self.end(he)) - self.pos(self.start(he));
+            if edge_vec.dot(normal0.cross(normal1)) <= 0.0 {
+                return false;
+            }
+        }
+        true
+    }
+
     /// Compute per-vertex angle-weighted pseudo-normals into [`Mesh::vert_normal`] (Manifold's
     /// `CalculateVertNormals`). Each incident triangle contributes its face normal weighted by the
     /// interior ANGLE `phi` at the vertex, then the sum is `SafeNormalize`d. The angle is

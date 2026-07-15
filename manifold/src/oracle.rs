@@ -1397,6 +1397,52 @@ mod tests {
         eprintln!("M.3.6 ✓ convex hull matches C++ across {} clouds", cases.len());
     }
 
+    /// M.3.7 — Minkowski sum (`Mesh::minkowski_sum`, the tiered hull+union port) held to the solid
+    /// oracle vs C++ `minkowski_sum`. TIER 0 (convex×convex) only: box⊕box and octahedron⊕box (a
+    /// non-axis-aligned convex operand, so the hull-of-vertex-sums is non-trivial). Both operands are
+    /// built Rust-side and the SAME geometry ingested into C++, so the comparison is apples-to-apples.
+    /// The gate is volume-residual (algorithm-independent — Minkowski triangulation is never
+    /// byte-identical), leaning on `solid_divergence`'s volume + genus + point-in-mesh.
+    ///
+    /// Tier 1/2 (nonconvex) are implemented but NOT gated here: they union overlapping swept-face
+    /// hulls, and the boolean's coplanar-merge infinite-loops on some such unions (an R2 boolean
+    /// robustness gap — see `minkowski.rs` module doc + the deferred plan item).
+    #[test]
+    fn m3_7_minkowski_vs_cpp() {
+        let cube_a = prepared_box(0.0, 0.0, 0.0, 6.0, 6.0, 6.0); // convex
+        let cube_b = prepared_box(-1.0, -1.0, -1.0, 2.0, 2.0, 2.0); // [-1,1]³ convex, holds origin
+        // An octahedron (hull of the 6 axis points, scaled) — a convex, non-box operand.
+        let octa = Mesh::hull_of_points(&[
+            Vec3::new(3.0, 0.0, 0.0),
+            Vec3::new(-3.0, 0.0, 0.0),
+            Vec3::new(0.0, 3.0, 0.0),
+            Vec3::new(0.0, -3.0, 0.0),
+            Vec3::new(0.0, 0.0, 3.0),
+            Vec3::new(0.0, 0.0, -3.0),
+        ])
+        .unwrap();
+        assert!(octa.is_convex(), "octahedron must be convex");
+
+        let cases: Vec<(&str, &Mesh, &Mesh)> = vec![
+            ("cube⊕cube", &cube_a, &cube_b),
+            ("octa⊕cube", &octa, &cube_b),
+        ];
+
+        for (i, (label, a, b)) in cases.iter().enumerate() {
+            let seed = 0x7abc + (i as u64) * 5;
+            let rust = a.minkowski_sum(b).unwrap();
+            assert!(rust.is_manifold(), "{label}: rust minkowski not manifold");
+
+            let a_cpp = CppKernel::ingest(&a.to_mesh_gl()).unwrap();
+            let b_cpp = CppKernel::ingest(&b.to_mesh_gl()).unwrap();
+            let cpp = Mesh::from_mesh_gl(&cpp_to_mesh_gl(&a_cpp.minkowski_sum(&b_cpp)));
+            if let Some(r) = solid_divergence(&rust, &cpp, 6000, seed, 1e-6) {
+                panic!("{label}: minkowski diverges from C++: {r}");
+            }
+        }
+        eprintln!("M.3.7 ✓ minkowski (tier 0 convex×convex) matches C++");
+    }
+
     /// M.2.3 — the KEYHOLE integration test: a bar punched all the way through a box (difference) leaves a
     /// square HOLE in the box's top and bottom faces, so `Face2Tri` must triangulate a holed polygon (an
     /// outer loop + an interior CW hole loop) via `CutKeyhole`. Without the keyhole path those faces fill

@@ -25,7 +25,7 @@
 
 use std::collections::{BTreeMap, VecDeque};
 
-use crate::boolean::polygon::triangulate_simple;
+use crate::boolean::polygon::earclip;
 use crate::boolean::predicates::get_axis_aligned_projection;
 use crate::boolean::vocab::{Halfedge, TriRef};
 use crate::linalg::Vec2;
@@ -172,7 +172,7 @@ pub fn face2tri(
                     .iter()
                     .map(|&ge| projection.apply(out.pos(face_halfedges[ge as usize].start_vert)))
                     .collect();
-                for [a, b, c] in triangulate_simple(&pts, epsilon) {
+                for [a, b, c] in earclip(&pts, epsilon) {
                     tris.push([loop_edges[a], loop_edges[b], loop_edges[c]]);
                 }
             }

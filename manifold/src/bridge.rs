@@ -7,8 +7,9 @@
 
 use crate::boolean::polygon::{PolyVert, triangulate};
 use crate::cross_section::CrossSection;
-use crate::linalg::Vec3;
+use crate::linalg::{Vec2, Vec3};
 use crate::mesh::Mesh;
+use crate::mesh_ids::TriId;
 
 impl CrossSection {
     /// Linear extrusion to `height` along +Z (Manifold `Extrude(cs, height)` — the straight-wall case, no
@@ -92,6 +93,31 @@ impl CrossSection {
     }
 }
 
+impl Mesh {
+    /// Project the mesh onto the XY plane (Manifold `Project`) — the 2D silhouette / footprint. Every
+    /// triangle projects to a 2D triangle (oriented CCW); the whole batch feeds ONE i_overlay Positive-fill
+    /// pass, so overlapping projections union into the outline (a downward-facing tri and its upward
+    /// partner cover the same 2D region ⇒ they merge). Degenerate (edge-on) triangles project to zero area
+    /// and drop out.
+    pub fn project(&self) -> CrossSection {
+        let mut polys: Vec<Vec<Vec2>> = Vec::with_capacity(self.num_tri());
+        for tri in 0..self.num_tri() {
+            let t = TriId::from_usize(tri);
+            let p: [Vec2; 3] = [0, 1, 2].map(|i| {
+                let v = self.pos(self.start(t.halfedge(i)));
+                Vec2::new(v.x, v.y)
+            });
+            // Signed area; skip edge-on triangles; orient CCW so Positive fill accumulates coverage.
+            let a2 = (p[1].x - p[0].x) * (p[2].y - p[0].y) - (p[2].x - p[0].x) * (p[1].y - p[0].y);
+            if a2.abs() < 1e-12 {
+                continue;
+            }
+            polys.push(if a2 < 0.0 { vec![p[0], p[2], p[1]] } else { p.to_vec() });
+        }
+        CrossSection::from_polygons(&polys)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -127,6 +153,24 @@ mod tests {
         assert!(tube.is_manifold(), "holed extrude must be a watertight manifold");
         assert!((tube.volume() - 96.0).abs() < 1e-9, "tube volume {} != 96", tube.volume());
         assert_eq!(crate::check::genus(&tube), 1, "a tube is genus 1");
+    }
+
+    #[test]
+    fn project_box_is_its_footprint() {
+        // A 2×2×3 box projected onto XY → its 2×2 base square, area 4. Vertical walls project to lines
+        // (zero area) and drop; the caps give the footprint.
+        let box3 = CrossSection::from_polygons(&[square(0.0, 0.0, 2.0)]).extrude(3.0);
+        let shadow = box3.project();
+        assert!((shadow.area() - 4.0).abs() < 1e-9, "box footprint area {} != 4", shadow.area());
+    }
+
+    #[test]
+    fn project_tube_keeps_hole() {
+        // A tube projected → a ring (the hole survives in the silhouette), area 96.
+        let ring = CrossSection::from_polygons(&[square(0.0, 0.0, 10.0)])
+            .difference(&CrossSection::from_polygons(&[square(4.0, 4.0, 2.0)]));
+        let shadow = ring.extrude(1.0).project();
+        assert!((shadow.area() - 96.0).abs() < 1e-9, "tube footprint area {} != 96", shadow.area());
     }
 
     #[test]

@@ -74,8 +74,19 @@ impl KernelDriver for CppKernel {
     fn ingest(mesh: &MeshGl) -> Result<manifold3d::Manifold, String> {
         // MeshGL64 indices are u64; ours are u32.
         let tris: Vec<u64> = mesh.tri_verts.iter().map(|&i| i as u64).collect();
-        manifold3d::Manifold::from_mesh_f64(&mesh.vert_properties, mesh.num_prop, &tris)
-            .map_err(|e| format!("cpp: {e:?}"))
+        if mesh.merge_from_vert.is_empty() {
+            return manifold3d::Manifold::from_mesh_f64(&mesh.vert_properties, mesh.num_prop, &tris)
+                .map_err(|e| format!("cpp: {e:?}"));
+        }
+        // Property-seam mesh: pass the merge-vectors so C++ re-shares the coincident prop-vert rows
+        // (M.3.4b.7 — validates our merge encoding is C++-compatible).
+        let mf: Vec<u64> = mesh.merge_from_vert.iter().map(|&i| i as u64).collect();
+        let mt: Vec<u64> = mesh.merge_to_vert.iter().map(|&i| i as u64).collect();
+        let opts = manifold3d::MeshGL64Options::new().merge_vertices(&mf, &mt);
+        let meshgl =
+            manifold3d::MeshGL64::new_with_options(&mesh.vert_properties, mesh.num_prop, &tris, opts)
+                .map_err(|e| format!("cpp meshgl: {e:?}"))?;
+        manifold3d::Manifold::from_meshgl64(&meshgl).map_err(|e| format!("cpp: {e:?}"))
     }
     fn volume(s: &manifold3d::Manifold) -> f64 {
         s.volume()
@@ -104,6 +115,21 @@ pub fn cpp_to_mesh_gl(m: &manifold3d::Manifold) -> MeshGl {
         vert_properties,
         tri_verts: tri_u64.iter().map(|&i| i as u32).collect(),
         ..Default::default()
+    }
+}
+
+/// Like [`cpp_to_mesh_gl`] but ALSO extracts C++'s `mergeFromVert`/`mergeToVert` (via the full
+/// `MeshGL64` rather than the merge-less `to_mesh_f64` tuple) — so a property-carrying C++ output can be
+/// re-imported into our [`Mesh::from_mesh_gl`] merge path and validated (M.3.4b.7).
+#[cfg(test)]
+pub fn cpp_to_mesh_gl_with_merge(m: &manifold3d::Manifold) -> MeshGl {
+    let gl = m.to_meshgl64();
+    MeshGl {
+        num_prop: gl.num_prop(),
+        vert_properties: gl.vert_properties(),
+        tri_verts: gl.tri_verts().iter().map(|&i| i as u32).collect(),
+        merge_from_vert: gl.merge_from_vert().iter().map(|&i| i as u32).collect(),
+        merge_to_vert: gl.merge_to_vert().iter().map(|&i| i as u32).collect(),
     }
 }
 
@@ -1541,6 +1567,49 @@ mod tests {
             );
         }
         eprintln!("M.3.4b ✓ CreateProperties matches C++ (∫prop dA per RGBA channel)");
+    }
+
+    /// M.3.4b.7 — the merge-vector serialization round-trip is C++-COMPATIBLE, both directions. A
+    /// property-carrying boolean output has coincident prop-vert rows tagged by `mergeFromVert`/
+    /// `mergeToVert`; this proves our encoding of those is interoperable with the reference kernel.
+    #[test]
+    fn m3_4b_merge_vector_round_trip_vs_cpp() {
+        use crate::boolean::OpType;
+        use crate::boolean::boolean_result::boolean;
+
+        let a = prepared_cube(0.0, 0.0, 0.0)
+            .set_properties(4, |new, pos, _| new.copy_from_slice(&[pos.x, pos.y, pos.z, 1.0]));
+        let b = prepared_cube(0.5, 0.5, 0.5);
+
+        // Direction 1 — our merge-encoded output is C++-INGESTIBLE: colour A−B in Rust, serialize WITH
+        // merge-vectors, and confirm C++ reconstructs the same solid from them.
+        let rust = boolean(&a, &b, OpType::Subtract);
+        let gl = rust.to_mesh_gl();
+        assert!(!gl.merge_from_vert.is_empty(), "seam-split output must carry merge-vectors");
+        let cpp = CppKernel::ingest(&gl).expect("C++ must accept our merge-encoded mesh");
+        let rv = rust.volume();
+        assert!(
+            (rv - cpp.volume()).abs() / rv.abs() < 1e-9,
+            "volume after C++ re-ingest: rust {rv} cpp {}",
+            cpp.volume()
+        );
+        assert_eq!(RustKernel::genus(&rust), cpp.genus(), "genus mismatch after C++ re-ingest");
+
+        // Direction 2 — we can INGEST C++'s merge-vectors: run the coloured difference in C++, pull its
+        // MeshGL64 (WITH merge-vectors), and re-import into our kernel → a valid coloured manifold.
+        let a_cpp = CppKernel::ingest(&a.to_mesh_gl()).unwrap();
+        let b_cpp = CppKernel::ingest(&b.to_mesh_gl()).unwrap();
+        let cpp_out = a_cpp.difference(&b_cpp);
+        let cpp_gl = cpp_to_mesh_gl_with_merge(&cpp_out);
+        assert!(!cpp_gl.merge_from_vert.is_empty(), "C++'s coloured output must carry merge-vectors");
+        let re = Mesh::from_mesh_gl(&cpp_gl);
+        assert!(re.is_manifold(), "re-importing C++'s merge-encoded output must be manifold");
+        assert!(
+            (re.volume() - cpp_out.volume()).abs() / cpp_out.volume().abs() < 1e-9,
+            "volume after ingesting C++'s merge-vectors"
+        );
+        assert_eq!(re.num_prop, 4, "C++ output carries 4 extra properties");
+        eprintln!("M.3.4b.7 ✓ merge-vectors round-trip both ways vs C++");
     }
 
     /// M.2.3 — the KEYHOLE integration test: a bar punched all the way through a box (difference) leaves a

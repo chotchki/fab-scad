@@ -34,6 +34,7 @@ version = "0.3.1"
 optional = true
 
 [dev-dependencies]
+i_overlay = "7.0.2"
 # Test-time tracing subscriber (RUST_LOG-driven) so the differential debug harness can surface per-stage
 # collapse counts + fold divergence without hand-edited eprintln.
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "env-filter", "std"] }

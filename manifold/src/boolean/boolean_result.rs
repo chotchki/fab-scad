@@ -617,7 +617,9 @@ fn result(b3: &Boolean3, in_p: &Mesh, in_q: &Mesh, op: OpType) -> Mesh {
     if num_vert_r == 0 {
         return out;
     }
-    out.num_prop = 3;
+    // Position-only output for now (`num_prop == 0` = C++ `numProp_`, no extras). `CreateProperties`
+    // (M.3.4b.4) overwrites this with `max(numPropP, numPropQ)` and fills the decoupled `properties`.
+    out.num_prop = 0;
     out.epsilon = fmax(in_p.epsilon, in_q.epsilon);
     out.tolerance = fmax(in_p.tolerance, in_q.tolerance);
     out.vert_pos = vec![Vec3::ZERO; num_vert_r as usize];

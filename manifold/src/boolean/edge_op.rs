@@ -32,7 +32,7 @@
 //!   same — carrying (even the stale ones) is what keeps a CHAINED boolean's perturbation bit-faithful,
 //!   since `vertNormal` feeds the next op's coincident tie-break.
 //! - **Properties are skipped.** Every property (`NumProp() > 0`) branch is guarded out — the boolean
-//!   output is position-only (`num_prop == 3`).
+//!   output is position-only (`num_prop == 0`, the C++ `numProp_` "no extras").
 //!
 //! `SplitPinchedVerts` and `DedupeEdges` use the SERIAL path (the parallel branches only differ when
 //! `> 1e4`/`1e5` edges and reduce to the same ordered result); `CollapseShortEdges`/`SwapDegenerates`

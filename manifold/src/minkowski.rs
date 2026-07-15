@@ -208,7 +208,7 @@ mod tests {
     fn minkowski_with_empty_is_identity() {
         let a = Mesh::cube(Vec3::splat(3.0), false).unwrap();
         let empty = Mesh {
-            num_prop: 3,
+            num_prop: 0,
             ..Default::default()
         };
         // A ⊕ ∅ = A.

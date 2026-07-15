@@ -1010,7 +1010,7 @@ impl Mesh {
     pub fn hull_of_points(points: &[Vec3]) -> Result<Mesh, Error> {
         if points.is_empty() {
             return Ok(Mesh {
-                num_prop: 3,
+                num_prop: 0,
                 ..Default::default()
             });
         }
@@ -1019,7 +1019,7 @@ impl Mesh {
         let mut mesh = Mesh {
             vert_pos,
             halfedge,
-            num_prop: 3,
+            num_prop: 0,
             ..Default::default()
         };
         // C++ Hull order: CalculateBBox, SetEpsilon, InitializeOriginal, SortGeometry,
@@ -1102,7 +1102,7 @@ mod tests {
         // Mesh::hull() delegates to hull_of_points over vert_pos.
         let mut m = Mesh {
             vert_pos: cube_corners(),
-            num_prop: 3,
+            num_prop: 0,
             ..Default::default()
         };
         m.calculate_bbox();

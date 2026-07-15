@@ -808,7 +808,7 @@ mod tests {
         let contour: BTreeSet<(i32, i32)> =
             (0..n).map(|i| (loop_pts[i].0, loop_pts[(i + 1) % n].0)).collect();
         for &eps in &[1e-9_f64, 7e-6, 1e-3] {
-            let tris = triangulate(&[poly.clone()], eps);
+            let tris = triangulate(std::slice::from_ref(&poly), eps);
             let mut edges: std::collections::HashMap<(i32, i32), i32> = std::collections::HashMap::new();
             for t in &tris {
                 for i in 0..3 {

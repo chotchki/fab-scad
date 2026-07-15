@@ -49,7 +49,11 @@ pub struct Halfedge {
     pub start_vert: VertId,
     /// The opposite half-edge, or [`HalfedgeId::NONE`] if unpaired.
     pub paired_halfedge: HalfedgeId,
-    /// The property-vertex (== `start_vert` in the 1:1 MeshGL model).
+    /// The property-vertex — an index into [`Mesh::properties`], DECOUPLED from `start_vert` (Manifold
+    /// `Halfedges::propVert_`). Equals `start_vert` in the position-only / freshly-ingested 1:1 case, but
+    /// `CreateProperties` and `CollapseEdge` split it off at property seams: two corners at the same
+    /// geometric vertex can carry different property rows (a UV/color seam), so `prop_vert` roams its own
+    /// index space (`0..num_prop_vert`), not `vert_pos`'s.
     pub prop_vert: VertId,
 }
 
@@ -61,12 +65,15 @@ pub struct Mesh {
     pub vert_pos: Vec<Vec3>,
     /// The half-edges, 3 per triangle (Manifold `halfedge_`).
     pub halfedge: Vec<Halfedge>,
-    /// Properties per vertex, `>= 3` (position is the first 3, NOT stored here — `vert_pos` holds it);
-    /// `num_prop == 3` means position-only.
+    /// Count of EXTRA (non-position) properties per prop-vertex — Manifold `Impl::numProp_`, position
+    /// EXCLUDED (it lives in `vert_pos`). `num_prop == 0` means position-only. NOTE the convention split:
+    /// this is the `Impl` count, whereas [`MeshGl::num_prop`] is the interchange count (`num_prop + 3`,
+    /// position included). Keeping our field faithful to `numProp_` lets the property ports read verbatim.
     pub num_prop: usize,
-    /// The EXTRA (non-position) properties, interleaved with stride `num_prop - 3`, one row per vert.
-    /// Empty when `num_prop == 3`. Carried verbatim for the round-trip.
-    pub props_extra: Vec<f64>,
+    /// The EXTRA properties, flat, stride `num_prop`, indexed by PROP-VERTEX (Manifold `properties_`) —
+    /// NOT by geometric vertex. Its row count is [`Mesh::num_prop_vert`] (`len / num_prop`), which decouples
+    /// from `vert_pos.len()` once a boolean splits prop-verts at a seam. Empty when `num_prop == 0`.
+    pub properties: Vec<f64>,
     /// Axis-aligned bounding box (Manifold `bBox_`).
     pub b_box: Box3,
     /// Per-triangle face normals (Manifold `faceNormal_`) — the perturbation vectors the boolean's
@@ -99,7 +106,7 @@ impl Default for Mesh {
             vert_pos: Vec::new(),
             halfedge: Vec::new(),
             num_prop: 0,
-            props_extra: Vec::new(),
+            properties: Vec::new(),
             b_box: Box3::default(),
             face_normal: Vec::new(),
             vert_normal: Vec::new(),
@@ -122,6 +129,20 @@ impl Mesh {
     #[inline]
     pub fn num_vert(&self) -> usize {
         self.vert_pos.len()
+    }
+
+    /// Number of PROP-vertices — rows in [`Mesh::properties`] (Manifold `Impl::NumPropVert`). When
+    /// position-only (`num_prop == 0`) every geometric vertex is its own trivial prop-vert, so this is
+    /// `num_vert`; otherwise it's `properties.len() / num_prop`, which grows independently of `num_vert`
+    /// as booleans/collapses split prop-verts at seams.
+    #[inline]
+    pub fn num_prop_vert(&self) -> usize {
+        // C++ `NumProp() == 0 ? NumVert() : properties_.size() / NumProp()` — the division is guarded
+        // against a zero stride, falling back to the geometric vert count (every vert its own prop-vert).
+        self.properties
+            .len()
+            .checked_div(self.num_prop)
+            .unwrap_or_else(|| self.num_vert())
     }
 
     /// Number of undirected edges (`halfedge.len() / 2`).
@@ -241,7 +262,10 @@ impl Mesh {
             if h.start_vert.is_some() {
                 h.start_vert = remap[h.start_vert.u()];
             }
-            // prop_vert == start_vert in the 1:1 MeshGL model, so it remaps the same way.
+            // In the 1:1 case (`prop_vert == start_vert`, the geometric remap fits) this repoints props
+            // too. The DECOUPLED case — prop-verts in their own index space, `properties` compacted
+            // independently (C++ `RemoveUnreferencedVerts` + `CompactProps`) — is M.3.4b.5; guarded by
+            // `< n` so a decoupled high prop-vert is left untouched rather than mis-remapped here.
             if h.prop_vert.is_some() && h.prop_vert.u() < n {
                 h.prop_vert = remap[h.prop_vert.u()];
             }
@@ -499,7 +523,7 @@ impl Mesh {
         };
         let mut mesh = Mesh {
             vert_pos: base.iter().map(|&v| m.transform_point(v)).collect(),
-            num_prop: 3,
+            num_prop: 0,
             ..Default::default()
         };
         mesh.create_halfedges(&tris);
@@ -528,10 +552,13 @@ impl Mesh {
             "tri_verts not a multiple of 3"
         );
 
+        // MeshGl carries position IN `num_prop` (>= 3); our `Mesh::num_prop` is the C++ `numProp_` count
+        // with position EXCLUDED. 1:1 ingest for now — the faithful position-dedup that splits prop-verts
+        // from geometric verts (mirroring C++'s merge-vector/coincident-vert quotient) is M.3.4b.2.
         let n_vert = m.vert_properties.len() / m.num_prop;
-        let extra = m.num_prop - 3;
+        let num_prop = m.num_prop - 3;
         let mut vert_pos = Vec::with_capacity(n_vert);
-        let mut props_extra = Vec::with_capacity(n_vert * extra);
+        let mut properties = Vec::with_capacity(n_vert * num_prop);
         for v in 0..n_vert {
             let o = v * m.num_prop;
             vert_pos.push(Vec3::new(
@@ -539,7 +566,7 @@ impl Mesh {
                 m.vert_properties[o + 1],
                 m.vert_properties[o + 2],
             ));
-            props_extra.extend_from_slice(&m.vert_properties[o + 3..o + m.num_prop]);
+            properties.extend_from_slice(&m.vert_properties[o + 3..o + m.num_prop]);
         }
         let tri_verts: Vec<[u32; 3]> = m
             .tri_verts
@@ -549,8 +576,8 @@ impl Mesh {
 
         let mut mesh = Mesh {
             vert_pos,
-            num_prop: m.num_prop,
-            props_extra,
+            num_prop,
+            properties,
             ..Default::default()
         };
         mesh.create_halfedges(&tri_verts);
@@ -561,14 +588,19 @@ impl Mesh {
     /// Export the spine back to a `MeshGl`: re-interleave position + extra properties, and emit each
     /// triangle's three start vertices. The inverse of [`Mesh::from_mesh_gl`] for a well-formed mesh.
     pub fn to_mesh_gl(&self) -> MeshGl {
-        let extra = self.num_prop - 3;
-        let mut vert_properties = Vec::with_capacity(self.num_vert() * self.num_prop);
+        // 1:1 emit (one interchange row per geometric vert). Correct for position-only + the freshly-
+        // ingested/`set_properties` case where `prop_vert == start_vert`. Emitting one row per PROP-vert
+        // (so a seam-split property survives the round-trip) is M.3.4b.3; the merge-vectors that let a
+        // chained op re-ingest those split prop-verts are M.3.4b.7.
+        let num_prop = self.num_prop;
+        let mesh_gl_prop = num_prop + 3;
+        let mut vert_properties = Vec::with_capacity(self.num_vert() * mesh_gl_prop);
         for (v, p) in self.vert_pos.iter().enumerate() {
             vert_properties.push(p.x);
             vert_properties.push(p.y);
             vert_properties.push(p.z);
-            if extra > 0 {
-                vert_properties.extend_from_slice(&self.props_extra[v * extra..(v + 1) * extra]);
+            if num_prop > 0 {
+                vert_properties.extend_from_slice(&self.properties[v * num_prop..(v + 1) * num_prop]);
             }
         }
         let mut tri_verts = Vec::with_capacity(self.num_tri() * 3);
@@ -579,7 +611,7 @@ impl Mesh {
             }
         }
         MeshGl {
-            num_prop: self.num_prop,
+            num_prop: mesh_gl_prop,
             vert_properties,
             tri_verts,
         }
@@ -960,14 +992,14 @@ impl Mesh {
     ///
     /// `num_prop` is the EXTRA-property count, EXCLUDING the 3 position channels (matching the C++
     /// `SetProperties(numProp, …)` parameter, and the existing fab-scad `with_color`'s `set_properties(4,
-    /// …)` for RGBA). So `num_prop == 4` yields `Mesh::num_prop == 3 + 4 == 7`, and `num_prop == 0`
-    /// strips properties back to position-only. Do NOT pass the total here.
+    /// …)` for RGBA). It becomes `Mesh::num_prop` directly (our field IS the C++ `numProp_`); `num_prop ==
+    /// 0` strips properties back to position-only. Do NOT pass the interchange total (position-inclusive).
     ///
     /// `prop_fn(new, position, old)` fills `new` (this vertex's `num_prop` fresh extra values) given its
-    /// read-only `position` and its `old` extra values (`self.num_prop - 3` of them; empty if the source
-    /// was position-only). Position is never touched — it lives in `vert_pos`, exactly as the C++ keeps
-    /// it out of `properties_`. Applied once per triangle CORNER (verbatim), but each vertex's row is
-    /// idempotent, so the redundant writes are harmless. Runs serially — deterministic by construction.
+    /// read-only `position` and its `old` extra values (`self.num_prop` of them; empty if the source was
+    /// position-only). Position is never touched — it lives in `vert_pos`, exactly as the C++ keeps it out
+    /// of `properties_`. Applied once per triangle CORNER (verbatim), but each vertex's row is idempotent,
+    /// so the redundant writes are harmless. Runs serially — deterministic by construction.
     ///
     /// NOTE: a leaf mesh colored here keeps its color only until a boolean, which still forces
     /// position-only output — the `CreateProperties` interpolation that carries properties across a
@@ -975,11 +1007,11 @@ impl Mesh {
     pub fn set_properties(&self, num_prop: usize, prop_fn: impl Fn(&mut [f64], Vec3, &[f64])) -> Mesh {
         let mut result = self.clone();
         if num_prop == 0 {
-            result.props_extra.clear();
-            result.num_prop = 3;
+            result.properties.clear();
+            result.num_prop = 0;
             return result;
         }
-        let old_extra = self.num_prop - 3;
+        let old_extra = self.num_prop;
         let num_vert = self.num_vert();
         let mut new_props = vec![0.0; num_prop * num_vert];
         for tri in 0..self.num_tri() {
@@ -988,13 +1020,13 @@ impl Mesh {
                 let edge = t.halfedge(i);
                 let vert = self.start(edge); // position source (vertPos_[vert])
                 let prop_vert = self.prop(edge).u(); // property-row index
-                let old_row = &self.props_extra[old_extra * prop_vert..old_extra * (prop_vert + 1)];
+                let old_row = &self.properties[old_extra * prop_vert..old_extra * (prop_vert + 1)];
                 let new_row = &mut new_props[num_prop * prop_vert..num_prop * (prop_vert + 1)];
                 prop_fn(new_row, self.pos(vert), old_row);
             }
         }
-        result.props_extra = new_props;
-        result.num_prop = 3 + num_prop;
+        result.properties = new_props;
+        result.num_prop = num_prop;
         result
     }
 
@@ -1051,7 +1083,7 @@ impl Mesh {
             }
             let mut m = Mesh {
                 vert_pos,
-                num_prop: 3,
+                num_prop: 0,
                 epsilon: self.epsilon,
                 tolerance: self.tolerance,
                 ..Default::default()
@@ -1277,9 +1309,9 @@ mod tests {
     /// strip to position-only.
     #[test]
     fn set_properties_stamps_color_and_reads_old() {
-        let cube = Mesh::from_mesh_gl(&unit_cube()); // position-only, num_prop 3
-        assert_eq!(cube.num_prop, 3);
-        assert!(cube.props_extra.is_empty());
+        let cube = Mesh::from_mesh_gl(&unit_cube()); // position-only, num_prop 0 (Impl `numProp_`)
+        assert_eq!(cube.num_prop, 0);
+        assert!(cube.properties.is_empty());
 
         // Stamp uniform RGBA (4 extra props). `old` is empty (source was position-only).
         let rgba = [0.2, 0.4, 0.6, 1.0];
@@ -1287,9 +1319,9 @@ mod tests {
             assert!(old.is_empty());
             new.copy_from_slice(&rgba);
         });
-        assert_eq!(red.num_prop, 7);
-        assert_eq!(red.props_extra.len(), 8 * 4); // 8 verts × 4 extras
-        for row in red.props_extra.chunks_exact(4) {
+        assert_eq!(red.num_prop, 4); // extras only; interchange (`to_mesh_gl`) would report 7
+        assert_eq!(red.properties.len(), 8 * 4); // 8 prop-verts × 4 extras
+        for row in red.properties.chunks_exact(4) {
             assert_eq!(row, rgba);
         }
         assert_eq!(red.volume(), 1.0); // positions untouched
@@ -1301,15 +1333,51 @@ mod tests {
                 *n = 2.0 * o;
             }
         });
-        for row in doubled.props_extra.chunks_exact(4) {
+        for row in doubled.properties.chunks_exact(4) {
             assert_eq!(row, [0.4, 0.8, 1.2, 2.0]);
         }
 
         // num_prop == 0 strips back to position-only.
         let stripped = red.set_properties(0, |_new, _pos, _old| unreachable!());
-        assert_eq!(stripped.num_prop, 3);
-        assert!(stripped.props_extra.is_empty());
+        assert_eq!(stripped.num_prop, 0);
+        assert!(stripped.properties.is_empty());
         assert_eq!(stripped.to_mesh_gl(), unit_cube());
+    }
+
+    /// M.3.4b.1 — the property model is DECOUPLED: `prop_vert` indexes `properties` in its OWN space, so
+    /// `num_prop_vert` can exceed `num_vert` (a seam-split vertex), and a half-edge reads its property row
+    /// by `prop_vert`, independent of the geometric `start_vert`. Exercises the data-model invariant
+    /// directly — no geometry op — which is what the downstream ports (4b.4/4b.5) will lean on.
+    #[test]
+    fn decoupled_prop_verts_index_their_own_space() {
+        let (a, b, c) = (VertId::new(0), VertId::new(1), VertId::new(2));
+        let he = |s: VertId, p: usize| Halfedge {
+            start_vert: s,
+            paired_halfedge: HalfedgeId::NONE,
+            prop_vert: VertId::from_usize(p),
+        };
+        // 3 geometric verts, but 4 PROP-verts: the corner at `a` carries prop-row 3 (a color seam), not
+        // row 0 — so `properties` has one more row than `vert_pos`.
+        let mesh = Mesh {
+            vert_pos: vec![Vec3::ZERO, Vec3::new(1.0, 0.0, 0.0), Vec3::new(0.0, 1.0, 0.0)],
+            halfedge: vec![he(a, 3), he(b, 1), he(c, 2)],
+            num_prop: 2,
+            #[rustfmt::skip]
+            properties: vec![10.0, 11.0,  20.0, 21.0,  30.0, 31.0,  40.0, 41.0],
+            ..Default::default()
+        };
+        assert_eq!(mesh.num_vert(), 3);
+        assert_eq!(mesh.num_prop_vert(), 4, "prop-verts decouple from geometric verts");
+        let corner_a = HalfedgeId::new(0);
+        assert_eq!(mesh.start(corner_a), a, "geometrically at vert a");
+        assert_eq!(mesh.prop(corner_a).u(), 3, "but reads the seam prop-row, not row 0");
+        let pv = mesh.prop(corner_a).u();
+        assert_eq!(&mesh.properties[pv * mesh.num_prop..][..mesh.num_prop], [40.0, 41.0]);
+
+        // Position-only degenerates back to 1:1: num_prop_vert == num_vert.
+        let plain = Mesh::from_mesh_gl(&unit_cube());
+        assert_eq!(plain.num_prop, 0);
+        assert_eq!(plain.num_prop_vert(), plain.num_vert());
     }
 
     /// M.3.5 — the `cube` primitive: centered/uncentered, volume = size product, manifold + genus 0,
@@ -1418,8 +1486,8 @@ mod tests {
             tri_verts: cube.tri_verts,
         };
         let mesh = Mesh::from_mesh_gl(&m);
-        assert_eq!(mesh.num_prop, 7);
-        assert_eq!(mesh.props_extra.len(), 8 * 4);
+        assert_eq!(mesh.num_prop, 4); // Impl `numProp_` = interchange 7 − 3 position channels
+        assert_eq!(mesh.properties.len(), 8 * 4);
         assert_eq!(mesh.volume(), 1.0); // positions still the unit cube
         assert_eq!(mesh.to_mesh_gl(), m);
     }

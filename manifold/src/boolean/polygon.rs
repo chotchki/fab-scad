@@ -184,20 +184,27 @@ impl EarClipper {
     /// `None` if the contour has degenerated below a triangle (the C++ `polygon_.end()` return). Advances
     /// past a clipped `start` via `right.left`, exactly like `Loop`.
     fn ring(&self, start: usize) -> Option<Vec<usize>> {
-        let mut first = start;
-        if self.clipped(first) {
-            first = self.verts[self.verts[first].right].left;
-            if self.clipped(first) {
-                return None;
-            }
-        }
         let mut out = Vec::new();
+        let mut first = start;
         let mut v = first;
         loop {
-            if self.verts[v].right == self.verts[v].left {
-                return None;
+            if self.clipped(v) {
+                // Update `first` to an un-clipped vert so we return to it instead of looping forever —
+                // C++ `Loop` re-anchors on EVERY clipped vert as it walks, not just once at the start.
+                first = self.verts[self.verts[v].right].left;
+                if !self.clipped(first) {
+                    v = first;
+                    if self.verts[v].right == self.verts[v].left {
+                        return None;
+                    }
+                    out.push(v);
+                }
+            } else {
+                if self.verts[v].right == self.verts[v].left {
+                    return None;
+                }
+                out.push(v);
             }
-            out.push(v);
             v = self.verts[v].right;
             if v == first {
                 break;
@@ -778,6 +785,44 @@ mod tests {
             s += a.x * b.y - b.x * a.y;
         }
         0.5 * s
+    }
+
+    /// Regression (M.3.9): a self-touching degenerate octagon from the coplanar-slab union. The whole
+    /// leading run of verts is short/collinear, so `Initialize`'s degenerate cascade clips the original
+    /// loop start; `ring` MUST re-anchor past every clipped vert (like C++ `Loop`) to recover the
+    /// surviving triangle, or the last real triangle is lost and the boundary stops matching the contour
+    /// — which orphans a half-edge downstream and hangs `for_vert`. Assert a TOPOLOGICALLY valid
+    /// triangulation: every boundary edge (appears once, no reverse) is an original contour edge.
+    #[test]
+    fn self_touching_octagon_triangulation_is_contour_valid() {
+        // (idx, x, y) — the exact projected loop `face2tri` hands `triangulate` for this face.
+        let loop_pts = [
+            (81, 0.5, 5.5), (84, 0.5, 5.5), (86, 0.5, 6.5), (85, 0.5, 6.5),
+            (83, 1.25, 5.75), (82, 1.25, 5.75), (88, 3.5, 6.5), (87, 0.5, 6.5),
+        ];
+        let poly: Vec<PolyVert> = loop_pts
+            .iter()
+            .map(|&(idx, x, y)| PolyVert { pos: Vec2::new(x, y), idx })
+            .collect();
+        let n = loop_pts.len();
+        let contour: BTreeSet<(i32, i32)> =
+            (0..n).map(|i| (loop_pts[i].0, loop_pts[(i + 1) % n].0)).collect();
+        for &eps in &[1e-9_f64, 7e-6, 1e-3] {
+            let tris = triangulate(&[poly.clone()], eps);
+            let mut edges: std::collections::HashMap<(i32, i32), i32> = std::collections::HashMap::new();
+            for t in &tris {
+                for i in 0..3 {
+                    *edges.entry((t[i], t[(i + 1) % 3])).or_insert(0) += 1;
+                }
+            }
+            for (&(a, b), &cnt) in &edges {
+                let rev = *edges.get(&(b, a)).unwrap_or(&0);
+                assert!(
+                    !(cnt > 0 && rev == 0 && !contour.contains(&(a, b))),
+                    "eps={eps:e}: spurious non-contour boundary edge ({a}->{b}) — invalid triangulation {tris:?}"
+                );
+            }
+        }
     }
 
     #[test]

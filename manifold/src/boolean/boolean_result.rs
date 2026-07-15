@@ -860,6 +860,60 @@ mod tests {
         assert!((v - expected).abs() < 1e-9, "volume {v} != {expected}");
     }
 
+    /// Build a prepared slab from a flat vert list + 0-based tri index list.
+    fn prepared(verts: Vec<f64>, tris: Vec<u32>) -> Mesh {
+        let mut mesh = Mesh::from_mesh_gl(&MeshGl {
+            num_prop: 3,
+            vert_properties: verts,
+            tri_verts: tris,
+        });
+        mesh.set_epsilon(-1.0, false);
+        mesh.initialize_original();
+        mesh.set_normals_and_coplanar();
+        mesh
+    }
+
+    /// Regression (M.3.9): the coplanar-union INFINITE LOOP. Two axis-aligned slabs share the x=6.5 and
+    /// z=6.5 planes with coincident/coplanar faces; before the `ring` re-anchor fix, `face2tri` mis-
+    /// triangulated a self-touching degenerate seam face, dropped a triangle, and left an output half-edge
+    /// UNPAIRED — which sent `for_vert` (in `split_pinched_verts`) walking off the NONE pair forever.
+    /// Now it must terminate and produce a watertight manifold. Slab data captured verbatim from the
+    /// minimized minkowski-sum repro (all coords integer±0.5).
+    #[test]
+    fn coplanar_slab_union_terminates_and_is_manifold() {
+        use crate::boolean::OpType;
+        #[rustfmt::skip]
+        let a = prepared(
+            vec![
+                -0.5,-0.5,5.5, -0.5,0.5,5.5, -0.5,-0.5,6.5, -0.5,0.5,6.5,
+                2.5,3.5,5.5, 2.5,3.5,6.5, 6.5,-0.5,5.5, 6.5,0.5,5.5,
+                6.5,-0.5,6.5, 6.5,0.5,6.5, 3.5,3.5,5.5, 3.5,3.5,6.5,
+            ],
+            vec![
+                0,3,1, 4,0,1, 6,2,0, 4,6,0, 0,2,3, 2,5,3, 2,9,5, 3,4,1,
+                3,5,4, 4,5,11, 9,6,7, 6,4,7, 2,6,8, 9,2,8, 6,9,8, 7,4,10,
+                4,11,10, 11,7,10, 11,5,9, 9,7,11,
+            ],
+        );
+        #[rustfmt::skip]
+        let b = prepared(
+            vec![
+                5.5,-0.5,-0.5, 5.5,0.5,-0.5, 5.5,-0.5,6.5, 5.5,0.5,6.5,
+                5.5,3.5,2.5, 5.5,3.5,3.5, 6.5,-0.5,-0.5, 6.5,0.5,-0.5,
+                6.5,-0.5,6.5, 6.5,0.5,6.5, 6.5,3.5,2.5, 6.5,3.5,3.5,
+            ],
+            vec![
+                0,4,1, 2,4,0, 7,0,1, 6,2,0, 4,2,3, 2,9,3, 4,7,1, 4,3,5,
+                3,11,5, 11,4,5, 6,0,7, 10,6,7, 6,10,9, 2,6,8, 9,2,8, 6,9,8,
+                4,10,7, 11,10,4, 3,9,11, 9,10,11,
+            ],
+        );
+        let u = boolean(&a, &b, OpType::Add);
+        assert!(!u.is_empty(), "union produced an empty mesh");
+        assert!(u.is_manifold(), "coplanar-slab union is not a watertight manifold");
+        assert!(u.volume().is_finite() && u.volume() > 0.0, "union volume invalid");
+    }
+
     /// Disjoint cubes union to the two separate cubes: volume 2, genus 0, still manifold. Exercises the
     /// no-overlap early-out path in `Boolean3` feeding a clean assembly (all verts retained, no cuts).
     #[test]

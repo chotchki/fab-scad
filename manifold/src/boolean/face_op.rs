@@ -5,15 +5,22 @@
 //! (offsets into `face_halfedges`, `numFaceR + 1` of them). `Face2Tri` turns each into triangles and
 //! stitches the final half-edge mesh.
 //!
-//! UNIFIED PATH vs Manifold: `face_op.cpp` special-cases tris (`WriteLocalTriangles` with 1 triangle,
+//! PATH STRUCTURE vs Manifold: `face_op.cpp` special-cases tris (`WriteLocalTriangles` with 1 triangle,
 //! plus an edge-reorder to form a valid triangle) and quads (2 triangles chosen by a CCW/diagonal-length
-//! test), and only routes `numEdge > 4` through the full `TriangulateIdxHalfedges`/`HalfedgeTriangulation`
-//! machinery. We collapse all three into ONE path: `AssembleHalfedges` → project → ear-clip
-//! ([`crate::boolean::polygon`]) → a generalized `WriteLocalTriangles` that pairs interior diagonals by
-//! reverse-edge matching and records boundary edges in `contour2tri` for cross-face stitching. The tri
-//! and quad fast paths are just the 1- and 2-triangle cases of this, so the unified path subsumes them.
-//! Legit because the gate metric is the triangulation-INDEPENDENT residual — the exact diagonal CHOICE
-//! doesn't change the covered solid.
+//! test), and routes everything else through `TriangulateIdxHalfedges`/`HalfedgeTriangulation`. We keep
+//! the quad fast path verbatim (diagonal choice + `write_local_triangles`) and route every other face
+//! (tris included) through `AssembleHalfedges` → project → ear-clip ([`crate::boolean::polygon`]) →
+//! [`write_general_triangulation`], a port of the C++ `HalfedgeTriangulation` pairing scheme
+//! (`polygon_internal.h` `AddHalfedge`/`AddContours` + `face_op.cpp` `WriteGeneralTriangulation`):
+//! contour half-edges first (reversed), then triangle edges in emission order, each CONSUMING its
+//! reverse match from a per-direction stack (LIFO). Consumption is load-bearing — a degenerate
+//! self-touching face can legitimately use the same label diagonal TWICE (fuzzer trophy M.2.4b), and a
+//! non-consuming first-match pairs both instances to the same partner, breaking the pairing involution
+//! and sending `split_pinched_verts`' `for_vert` orbit off the rails (the M.3.9 class, OOM flavor).
+//! Naive label matching survives only where labels are provably unique — the ≤2-triangle quad path,
+//! exactly where C++ uses it. Routing single tris through the general writer (C++ uses
+//! `WriteLocalTriangles`) is output-identical: one triangle has no diagonals, so all three edges land in
+//! `contour2tri` either way.
 //!
 //! INDEX SPACES: `face_halfedges` is a SEPARATE array from the output mesh's `halfedge`, so a position
 //! into it is a local BUFFER index (`i32`), not a mesh [`HalfedgeId`]. The typed ids appear where this
@@ -95,7 +102,9 @@ struct LocalEdge {
 
 /// Emit `tris` (triples of GLOBAL `face_halfedges` buffer indices — each names a polygon corner) as
 /// output half-edges starting at `first_tri`, pairing interior diagonals within the face and recording
-/// boundary edges into `contour2tri` (`face_op.cpp` `WriteLocalTriangles`, generalized past 2 tris).
+/// boundary edges into `contour2tri` (`face_op.cpp` `WriteLocalTriangles`). QUAD PATH ONLY: the naive
+/// reverse-label match is sound only while every directed label edge is unique — guaranteed for ≤2
+/// triangles of a single loop, NOT for general faces (see [`write_general_triangulation`]).
 fn write_local_triangles(
     out: &mut Mesh,
     contour2tri: &mut [HalfedgeId],
@@ -141,6 +150,106 @@ fn write_local_triangles(
     }
 }
 
+/// One half-edge of a face's local triangulation (C++ `polygon_internal.h` `HalfedgeTriangulation`
+/// entry): `start`/`end` are corner LABELS (buffer indices into `face_halfedges`), `pair` a LOCAL index
+/// into the same list (`-1` = unpaired).
+struct FaceHalfedge {
+    start: i32,
+    end: i32,
+    pair: i32,
+}
+
+/// Emit a general face's ear-clip triangulation as output half-edges, pairing via the C++
+/// `HalfedgeTriangulation` scheme (`polygon_internal.h` `AddContours`/`AddHalfedge` +
+/// `face_op.cpp` `WriteGeneralTriangulation`): the face's contour half-edges are added FIRST, each
+/// REVERSED (the exterior side, opposite the filled interior), then the triangles' edges in emission
+/// order; every added edge CONSUMES an unpaired reverse match from a per-direction stack (LIFO —
+/// C++ `back()`/`pop_back`). A triangle edge that pairs another triangle edge is an interior diagonal
+/// (intra-face pair); one that pairs a contour half-edge is a face boundary, recorded in `contour2tri`
+/// (keyed by the contour edge's start label) for the cross-face stitch. Consuming matches is what keeps
+/// the pairing an involution when a degenerate self-touching face uses the same label diagonal twice
+/// (fuzzer trophy M.2.4b) — naive first-match pairs both instances to one partner and breaks it.
+fn write_general_triangulation(
+    out: &mut Mesh,
+    contour2tri: &mut [HalfedgeId],
+    hes: &[Halfedge],
+    first_tri: usize,
+    loops: &[Vec<i32>],
+    tris: &[[i32; 3]],
+) {
+    use std::collections::HashMap;
+    let num_contour: usize = loops.iter().map(Vec::len).sum();
+    let mut halfedges: Vec<FaceHalfedge> = Vec::with_capacity(num_contour + 3 * tris.len());
+    // Directed label edge → stack of yet-unpaired local half-edge indices. Lookup-only (never
+    // iterated), so a HashMap is order-safe here; determinism comes from insertion/pop order.
+    let mut edge2halfedge: HashMap<(i32, i32), Vec<i32>> = HashMap::new();
+    let mut add_halfedge = |halfedges: &mut Vec<FaceHalfedge>, start: i32, end: i32| {
+        let idx = halfedges.len() as i32;
+        let mut pair = -1;
+        if let Some(stack) = edge2halfedge.get_mut(&(end, start)) {
+            let rev = stack.pop().expect("empty stacks are removed");
+            if stack.is_empty() {
+                edge2halfedge.remove(&(end, start));
+            }
+            halfedges[rev as usize].pair = idx;
+            pair = rev;
+        } else {
+            edge2halfedge.entry((start, end)).or_default().push(idx);
+        }
+        halfedges.push(FaceHalfedge { start, end, pair });
+    };
+
+    // AddContours: store the exterior contour half-edge, opposite the filled interior.
+    for lp in loops {
+        let n = lp.len();
+        for i in 0..n {
+            let start = lp[i];
+            let end = lp[(i + 1) % n];
+            add_halfedge(&mut halfedges, end, start);
+        }
+    }
+    let contour_end = halfedges.len() as i32;
+
+    for t in tris {
+        add_halfedge(&mut halfedges, t[0], t[1]);
+        add_halfedge(&mut halfedges, t[1], t[2]);
+        add_halfedge(&mut halfedges, t[2], t[0]);
+    }
+
+    // Triangle half-edges → output mesh (C++ `WriteGeneralTriangulation`, triangle pass): an
+    // intra-face pair maps to the partner's output slot; a contour pair stays NONE here (the contour
+    // pass + cross-face stitch fill it).
+    let first_out = TriId::from_usize(first_tri).first_halfedge();
+    let num_tri_he = halfedges.len() as i32 - contour_end;
+    for local in 0..num_tri_he {
+        let he = &halfedges[(contour_end + local) as usize];
+        let out_idx = first_out.offset(local);
+        out.set_start(out_idx, hes[he.start as usize].start_vert);
+        out.set_prop(out_idx, hes[he.start as usize].prop_vert);
+        if he.pair >= contour_end {
+            out.set_pair(out_idx, first_out.offset(he.pair - contour_end));
+        } else {
+            out.set_pair(out_idx, HalfedgeId::NONE);
+        }
+    }
+
+    // Contour pass: each paired contour half-edge names the boundary triangle-edge for the cross-face
+    // stitch. The contour half-edge was stored REVERSED, so its `end` is the contour edge's START
+    // label — the `contour2tri` key. A contour half-edge paired to another contour half-edge would be a
+    // doubled contour edge (C++ DEBUG_ASSERTs `topologyErr` there); skip it rather than write a
+    // negative offset.
+    for c in 0..contour_end {
+        let he = &halfedges[c as usize];
+        // `< contour_end` covers both C++ checks: unpaired (`< 0`, skipped) and contour-paired-to-
+        // contour (the doubled-contour degenerate C++ DEBUG_ASSERTs on — skipping keeps us from
+        // writing a negative offset).
+        if he.pair < contour_end {
+            continue;
+        }
+        contour2tri[he.end as usize] = first_out.offset(he.pair - contour_end);
+    }
+}
+
 /// Retriangulate the assembled polygon faces into `out`, in place (`Manifold::Impl::Face2Tri`).
 ///
 /// On entry `out.vert_pos` holds the result verts and `out.face_normal` holds ONE normal per result
@@ -162,13 +271,15 @@ pub fn face2tri(
     // Pass 1 (PARALLEL, M.4.3c): triangulate every face — a pure per-face function of the shared
     // assembly inputs, so the order-preserving `par::map_collect` gives par == seq bit-for-bit (the
     // ear-clip's BTreeSet cost queue is per-face LOCAL state). The prefix-sum layout stays serial.
+    // Yields `(label loops, triangles)` per face: the general writer needs the assembled contour
+    // loops for its pairing (the quad path doesn't — its loops slot stays empty).
     let vert_pos = &out.vert_pos;
     let faces: Vec<usize> = (0..num_face).collect();
-    let face_tris: Vec<Vec<[i32; 3]>> = crate::par::map_collect(&faces, |&face| {
+    type FacePolys = (Vec<Vec<i32>>, Vec<[i32; 3]>);
+    let face_polys: Vec<FacePolys> = crate::par::map_collect(&faces, |&face| {
         let first = face_edge[face] as usize;
         let last = face_edge[face + 1] as usize;
         let num_edge = last - first;
-        let mut tris: Vec<[i32; 3]> = Vec::new();
         // C++ `Face2Tri`'s numEdge==4 QUAD fast path (face_op.cpp:237-265), M.2.4a: diagonal
         // quad[0]-quad[2] preferred; flipped when non-CCW, or when both diagonals are valid and
         // quad[1]-quad[3] is shorter. The unified ear-clip used to take these too — same covered
@@ -198,35 +309,36 @@ pub fn face2tri(
                     choice = 1;
                 }
             }
-            return cand[choice].to_vec();
+            return (Vec::new(), cand[choice].to_vec());
         }
         if num_edge >= 3 {
             // Collect ALL loops of the face — an outer plus any interior hole loops — and hand them to the
             // multi-loop triangulator together, so a punched-through face gets its hole keyholed instead of
             // filled over. `idx` is the GLOBAL buffer index, so the returned triangles name face-halfedge
-            // corners directly (what `write_local_triangles` consumes).
+            // corners directly (what `write_general_triangulation` consumes).
             let projection = get_axis_aligned_projection(face_normal_in[face]);
-            let loops: Vec<Vec<PolyVert>> =
-                assemble_halfedges(face_halfedges, first, last, face_edge[face])
-                    .into_iter()
-                    .map(|loop_edges| {
-                        loop_edges
-                            .into_iter()
-                            .map(|ge| PolyVert {
-                                pos: projection
-                                    .apply(vert_pos[face_halfedges[ge as usize].start_vert.u()]),
-                                idx: ge,
-                            })
-                            .collect()
-                    })
-                    .collect();
-            tris = triangulate(&loops, epsilon);
+            let label_loops = assemble_halfedges(face_halfedges, first, last, face_edge[face]);
+            let loops: Vec<Vec<PolyVert>> = label_loops
+                .iter()
+                .map(|loop_edges| {
+                    loop_edges
+                        .iter()
+                        .map(|&ge| PolyVert {
+                            pos: projection
+                                .apply(vert_pos[face_halfedges[ge as usize].start_vert.u()]),
+                            idx: ge,
+                        })
+                        .collect()
+                })
+                .collect();
+            let tris = triangulate(&loops, epsilon);
+            return (label_loops, tris);
         }
-        tris
+        (Vec::new(), Vec::new())
     });
     let mut tri_offset: Vec<usize> = Vec::with_capacity(num_face + 1);
     let mut total_tris = 0usize;
-    for tris in &face_tris {
+    for (_, tris) in &face_polys {
         tri_offset.push(total_tris);
         total_tris += tris.len();
     }
@@ -254,18 +366,32 @@ pub fn face2tri(
     let mut contour2tri = vec![HalfedgeId::NONE; face_halfedges.len()];
 
     // Pass 2: write each face's triangles (with intra-face pairing + boundary recording), normals + refs.
+    // The quad fast path keeps C++ `WriteLocalTriangles` (label matching is safe at ≤2 triangles of one
+    // loop — labels are unique); every other face goes through the `HalfedgeTriangulation` port.
     for face in 0..num_face {
-        let tris = &face_tris[face];
+        let (loops, tris) = &face_polys[face];
         if tris.is_empty() {
             continue;
         }
-        write_local_triangles(
-            out,
-            &mut contour2tri,
-            face_halfedges,
-            tri_offset[face],
-            tris,
-        );
+        let num_edge = (face_edge[face + 1] - face_edge[face]) as usize;
+        if num_edge == 4 {
+            write_local_triangles(
+                out,
+                &mut contour2tri,
+                face_halfedges,
+                tri_offset[face],
+                tris,
+            );
+        } else {
+            write_general_triangulation(
+                out,
+                &mut contour2tri,
+                face_halfedges,
+                tri_offset[face],
+                loops,
+                tris,
+            );
+        }
         let face_ref = halfedge_ref[face_edge[face] as usize];
         for t in 0..tris.len() {
             tri_normal[tri_offset[face] + t] = face_normal_in[face];

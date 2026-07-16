@@ -1447,6 +1447,71 @@ mod tests {
         );
     }
 
+    /// Regression (M.2.4b, fuzzer trophy #1): the DOUBLED-DIAGONAL pairing clobber. Fold-unioning these
+    /// 15 near-identical tiny cubes (decoded + minimized from the csg_tree OOM artifact — no subset of
+    /// ≤3 fewer cubes reproduces) grinds the accumulator into a degenerate self-touching seam face whose
+    /// ear-clip triangulation legitimately uses the SAME label diagonal twice. `face2tri`'s old
+    /// generalized reverse-label matcher paired both instances to one partner (no consumption), breaking
+    /// the pairing involution — `for_vert` in `split_pinched_verts` then orbits forever pushing
+    /// half-edges (the M.3.9 class, 2GB-OOM flavor). C++ never label-matches on general faces
+    /// (`polygon_internal.h` `HalfedgeTriangulation::AddHalfedge` consumes reverse matches from
+    /// per-direction stacks) and folds this input clean; `write_general_triangulation` now ports that
+    /// scheme. The fold must terminate with every intermediate a watertight manifold.
+    #[test]
+    fn fuzz_cube_fold_doubled_diagonal_terminates_and_is_manifold() {
+        use crate::linalg::{Mat3x4, rotate_xyz_degrees};
+
+        // (rx, ry, rz, scale, tx, ty, tz) — the exact clamped f64 transforms from the artifact, in fold
+        // order. Most rows differ only in the last few ulps; that near-coincidence IS the trigger.
+        #[rustfmt::skip]
+        let xforms: [(f64, f64, f64, f64, f64, f64, f64); 15] = [
+            (0.0, 0.0, 0.01167297232314013, 0.25, -1.999999999883585, -1.9999999999999716, -1.9999999975676117),
+            (5.735851293930949e-8, 5.735851293930949e-8, 1.158345944049531e-35, 0.25000000059749183, -1.9999999993626831, -1.9999999993626831, -1.9999999993626831),
+            (5.735851293930949e-8, 5.735851293930949e-8, 5.735851293930949e-8, 0.2500000005974845, -1.9999999993626831, -1.9999999993626831, -2.0),
+            (5.735851293930949e-8, 5.735851293930949e-8, 5.735851293930949e-8, 0.2500000005974845, -1.9999999993626831, -1.9999999993626831, -1.9999999993626831),
+            (5.735851293930949e-8, 5.735851293930949e-8, 5.735851293930949e-8, 0.2500000005974845, -1.9999999993626831, -1.9999999993626831, -1.9999999993626831),
+            (5.735851293930949e-8, 5.735851293930949e-8, 5.735851293930949e-8, 0.2500000005974845, -1.9999999993626831, -1.9999999993626831, -1.9999999993626831),
+            (5.735851293930949e-8, 5.735851293930949e-8, 5.735851293930949e-8, 0.2500000005974845, -1.999999999373597, -1.9999999993626831, -1.9999999993626831),
+            (1.4982683180560944e-40, 0.0, 5.735851293930949e-8, 0.2500000005974845, -1.9999999993626831, -1.9999999993612052, -1.9999999993626831),
+            (5.735851293930949e-8, 5.735851293930949e-8, 5.735851293930949e-8, 0.2500000005974845, -1.9999999993627258, -1.9999999993626831, -1.9999999993626831),
+            (5.735851293930949e-8, 5.735851293930949e-8, 5.735851293930949e-8, 0.2500000005974845, -1.9999999993626831, -1.9999999993626831, -1.9999999993626831),
+            (5.735849795129866e-8, 5.735851293930949e-8, 5.735851293930949e-8, 0.2500000005974845, -1.9999999993626831, -1.9999999993626831, -1.9999999993626831),
+            (8.326129277161295e-37, 0.0, 5.729816621169448e-8, 0.2500000005974845, -1.9999999993624558, -1.9999999993626831, -1.999999999373597),
+            (5.735851293930949e-8, 5.735851293930949e-8, 5.735851293930949e-8, 0.2500000005974845, -1.9999999993626831, -1.9999999993626831, -1.9999999993626831),
+            (5.735851293930949e-8, 5.735851293930949e-8, 5.735851293930949e-8, 0.2500000005974845, -1.9999999993626831, -1.9999999993626831, -1.9999999993626831),
+            (5.735851293930949e-8, 2.0377837351514036e-22, 5.735851293930949e-8, 0.2500000005974845, -1.9999999993626831, -1.9999999993626831, -1.9999999993626831),
+        ];
+
+        let mut acc: Option<Mesh> = None;
+        for (i, &(rx, ry, rz, s, tx, ty, tz)) in xforms.iter().enumerate() {
+            let c = Mesh::cube(crate::linalg::Vec3::new(1.0, 1.0, 1.0), true)
+                .expect("unit cube")
+                .transform(rotate_xyz_degrees(rx, ry, rz))
+                .and_then(|m| m.transform(Mat3x4::scale(crate::linalg::Vec3::splat(s))))
+                .and_then(|m| m.transform(Mat3x4::translate(crate::linalg::Vec3::new(tx, ty, tz))))
+                .expect("finite transforms");
+            acc = Some(match acc {
+                None => c,
+                Some(prev) => {
+                    let mut u = boolean(&prev, &c, OpType::Add);
+                    assert!(
+                        u.is_manifold(),
+                        "fold step {i}: union is not a watertight manifold"
+                    );
+                    u.set_epsilon(-1.0, false);
+                    u.initialize_original();
+                    u.set_normals_and_coplanar();
+                    u
+                }
+            });
+        }
+        let u = acc.expect("non-empty fold");
+        assert!(
+            u.volume().is_finite() && u.volume() > 0.0,
+            "fold volume invalid"
+        );
+    }
+
     /// Disjoint cubes union to the two separate cubes: volume 2, genus 0, still manifold. Exercises the
     /// no-overlap early-out path in `Boolean3` feeding a clean assembly (all verts retained, no cuts).
     #[test]

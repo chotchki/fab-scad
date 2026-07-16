@@ -97,12 +97,27 @@ fn exclusive_scan_abssum(input: &[i32], init: i32) -> (Vec<VertId>, i32) {
 /// remap index (`boolean_result.cpp` `DuplicateVerts`). `inclusion`/`remap`/`src` are all indexed by the
 /// source vertex; a `0`-inclusion vert writes nothing.
 fn duplicate_verts(vert_pos_r: &mut [Vec3], inclusion: &[i32], remap: &[VertId], src: &[Vec3]) {
-    for vert in 0..src.len() {
-        let n = inclusion[vert].abs();
-        for i in 0..n {
-            vert_pos_r[remap[vert].offset(i).u()] = src[vert];
-        }
+    // The C++ scatters in parallel over SOURCE verts (`DuplicateVerts` — the output ranges are
+    // disjoint by the exclusive-scan construction). An unsafe-free parallelization INVERTS it into a
+    // map over OUTPUT slots (M.4.3c): `remap` is monotone and its ranges tile the contiguous region
+    // [remap[0], remap[last] + n_last), so each slot binary-searches its source vert — every slot
+    // written exactly once either way, bytes identical, and `map_collect` keeps it order-preserving.
+    if src.is_empty() {
+        return;
     }
+    let start = remap[0].u();
+    let end = remap[src.len() - 1].u() + inclusion[src.len() - 1].unsigned_abs() as usize;
+    if start == end {
+        return;
+    }
+    let slots: Vec<usize> = (start..end).collect();
+    let region: Vec<Vec3> = crate::par::map_collect(&slots, |&slot| {
+        // Last vert with remap <= slot. A zero-count vert shares its remap with the NEXT vert, so
+        // the found vert always has n > 0 and covers `slot`.
+        let v = remap.partition_point(|r| r.u() <= slot) - 1;
+        src[v]
+    });
+    vert_pos_r[start..end].copy_from_slice(&region);
 }
 
 /// For each edge×face intersection, add its new vertex to the intersected edge's list (`edgesP`) and to

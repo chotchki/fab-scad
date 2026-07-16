@@ -159,12 +159,12 @@ pub fn face2tri(
     let num_face = face_edge.len() - 1;
     let face_normal_in = out.face_normal.clone();
 
-    // Pass 1: triangulate every face; remember its triangles and count so we can lay out `halfedge`.
-    let mut face_tris: Vec<Vec<[i32; 3]>> = Vec::with_capacity(num_face);
-    let mut tri_offset: Vec<usize> = Vec::with_capacity(num_face + 1);
-    let mut total_tris = 0usize;
-    for face in 0..num_face {
-        tri_offset.push(total_tris);
+    // Pass 1 (PARALLEL, M.4.3c): triangulate every face — a pure per-face function of the shared
+    // assembly inputs, so the order-preserving `par::map_collect` gives par == seq bit-for-bit (the
+    // ear-clip's BTreeSet cost queue is per-face LOCAL state). The prefix-sum layout stays serial.
+    let vert_pos = &out.vert_pos;
+    let faces: Vec<usize> = (0..num_face).collect();
+    let face_tris: Vec<Vec<[i32; 3]>> = crate::par::map_collect(&faces, |&face| {
         let first = face_edge[face] as usize;
         let last = face_edge[face + 1] as usize;
         let num_edge = last - first;
@@ -180,7 +180,8 @@ pub fn face2tri(
                 .into_iter()
                 .next()
                 .expect("quad face has a loop");
-            let p = |ge: i32| projection.apply(out.pos(face_halfedges[ge as usize].start_vert));
+            let p =
+                |ge: i32| projection.apply(vert_pos[face_halfedges[ge as usize].start_vert.u()]);
             let tri_ccw = |t: [i32; 3]| ccw(p(t[0]), p(t[1]), p(t[2]), epsilon) >= 0;
             let cand = [
                 [[quad[0], quad[1], quad[2]], [quad[0], quad[2], quad[3]]],
@@ -190,17 +191,14 @@ pub fn face2tri(
             if !(tri_ccw(cand[0][0]) && tri_ccw(cand[0][1])) {
                 choice = 1;
             } else if tri_ccw(cand[1][0]) && tri_ccw(cand[1][1]) {
-                let pos = |ge: i32| out.pos(face_halfedges[ge as usize].start_vert);
+                let pos = |ge: i32| vert_pos[face_halfedges[ge as usize].start_vert.u()];
                 let diag0 = pos(quad[0]) - pos(quad[2]);
                 let diag1 = pos(quad[1]) - pos(quad[3]);
                 if diag0.dot(diag0) > diag1.dot(diag1) {
                     choice = 1;
                 }
             }
-            tris = cand[choice].to_vec();
-            total_tris += tris.len();
-            face_tris.push(tris);
-            continue;
+            return cand[choice].to_vec();
         }
         if num_edge >= 3 {
             // Collect ALL loops of the face — an outer plus any interior hole loops — and hand them to the
@@ -216,7 +214,7 @@ pub fn face2tri(
                             .into_iter()
                             .map(|ge| PolyVert {
                                 pos: projection
-                                    .apply(out.pos(face_halfedges[ge as usize].start_vert)),
+                                    .apply(vert_pos[face_halfedges[ge as usize].start_vert.u()]),
                                 idx: ge,
                             })
                             .collect()
@@ -224,8 +222,13 @@ pub fn face2tri(
                     .collect();
             tris = triangulate(&loops, epsilon);
         }
+        tris
+    });
+    let mut tri_offset: Vec<usize> = Vec::with_capacity(num_face + 1);
+    let mut total_tris = 0usize;
+    for tris in &face_tris {
+        tri_offset.push(total_tris);
         total_tris += tris.len();
-        face_tris.push(tris);
     }
     tri_offset.push(total_tris);
 

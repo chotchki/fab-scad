@@ -589,3 +589,52 @@ matches, but not that `_EPSILON` still evaluates to 1e-9 in the fn's home scope 
 hardcoded constant silently wrong — doctrine violation). So `Entry` grows a wire-time const guard: named
 constants + expected bits, checked against the home scope at `build_intrinsics`; mismatch → the entry doesn't
 wire (worst case stays "missed speedup, never a wrong answer").
+
+## O.5 — the first intrinsics campaign, closed out (2026-07-16)
+
+Four bands landed off the O.4 worklist, all fingerprint-gated + guard-checked (O.5.1 const guards for the
+`_EPSILON` bakes, O.5.2 dep pins + builtin-shadow checks — the gate extended one hop), every native proven
+bit-identical by a fast==slow battery and WIRED/ARMED against the vendored BOSL2 under `FAB_EXPLAIN`:
+
+- **O.5.2 shape/predicate** (11): `_list_pattern`, `same_shape`, `is_consistent`, `num_defined`,
+  `force_list`, `approx`, `posmod`, `idx`, `all_nonzero`, `is_vector`, `is_matrix`.
+- **O.5.3 earcut** (3): `_tri_class`, `_is_at_left`, `_none_inside` — window_air_cover's core.
+- **O.5.4 aggregate/affine** (7): `sum`, `_sum`, `unit`, `is_2d_transform`, `_apply`, `_bt_search`,
+  `vector_angle`.
+
+### The scoreboard (worker wall, kernel included)
+
+| model | pre-O.5 | post-O.5 | Δ | interpreted user-fn self |
+|---|---|---|---|---|
+| window_air_cover | ~38s (36s eval) | **13.9s** | −63% | 37.0s → 6.8s |
+| shoe_holder | 17.9s | **11.0s** | −39% | 23.0s → 17.4s |
+| webcam_holder | 12.2s | **7.6s** | −38% | 15.7s → 8.9s |
+| pill_holder | 8.0s | **4.0s** | −50% | 7.6s → 3.2s |
+
+83.2s of interpreted user-fn self across the four → 36.3s. Corpus 901/901 throughout; all four golden lanes
+(m7 + m6, serial + par) green — the intrinsics are A/B-invisible, as the doctrine demands.
+
+### The residual worklist (the NEXT cut)
+
+- **`_region_region_intersections` + `_point_dist` — 14.2s, shoe_holder's whole story now (54%+28% of its
+  residual).** Six calls, comprehension-heavy monster body: hand-transliteration stops being
+  obviously-correct at this size. This is the JIT tier's case (P.1.6 list ABI) or a second, very carefully
+  harnessed intrinsic pass.
+- **`_find_anchor` (3.8s, webcam+pill)** — same class, attachable anchor resolution.
+- **`_group_sort_by_index` (2.0s)**, **`_vnf_centroid` (2.3s, webcam+pill)**, **`rot` (1.3s, wac)** — medium
+  bodies, plausible band 5.
+- **The NAMED-ARG gap**: `is_vector`/`unit` still burn ~1.2s interpreted in wac alone because BOSL2 calls
+  them with named args (`zero=`, `error=`) and the v1 intrinsic ABI only routes all-positional calls. A
+  named→positional rebind at dispatch (names are known at the call site) would extend every existing
+  intrinsic to those calls — likely the cheapest s/loc in the residual.
+- Deferred small fry: `in_list` (0.5s, needs the all-hits retry tail + search), `is_path`, `constrain`,
+  `_get_ear` (0.6s self), `vector_axis`, `affine3d_rot_from_to`, `apply` (the wrapper over `_apply`).
+
+### The K.1.2 sweep verdict (run-1784241178, baseline re-frozen)
+
+Aggregate fab wall on the common set **124.0s → 94.9s** (oracle flat at 250.1s): the fab-vs-OpenSCAD ratio
+moves **2.02× → 2.63×**, median per-model **2.69× → 3.34×**. 28 models improved ≥20% — the intrinsics lift
+everything BOSL2-heavy, not just the four targets (traced_holder −71%, kirby_holder −59%, shower_holder
+−57%, the whole pill_holder family −21..−41%). Zero regressions. Two new rescues: `silverwear.scad` and
+`window_air_cover.scad` go fab-TIMEOUT → SOLID while the oracle still times out — they move to the
+fab-renders-where-OpenSCAD-can't column (8→10).

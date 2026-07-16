@@ -372,6 +372,83 @@ static REGISTRY: &[Entry] = &[
         builtins: &["is_list", "len", "is_undef", "is_num"],
         func: is_matrix,
     },
+    // ── O.5.3, the EARCUT band (geometry.scad) ───────────────────────────────────────────────────────────
+    // BOSL2 triangulates every VNF polygon by ear-cutting IN THE INTERPRETER: `_tri_class` (the CW/CCW/
+    // collinear classifier) is 12.4s/3.9M calls across the O.4 four — window_air_cover's single biggest
+    // line — and `_none_inside` (the per-ear containment scan, 4.8s/1.6M) is its hottest caller. The 2D
+    // fast paths reproduce the builtins' EXACT formulas (`norm` = sequential sum-of-squares sqrt, 2D
+    // `cross` = a0*b1 - a1*b0, `sign` = comparison chain, 0 at NaN); any other shape routes through the
+    // real builtins/ops (a 3D triangle degenerates to undef exactly as interpreted).
+    Entry {
+        name: "_tri_class",
+        reference: "function _tri_class(tri, eps=_EPSILON) =
+    let( crx = cross(tri[1]-tri[2],tri[0]-tri[2]) )
+    abs( crx ) <= eps*norm(tri[1]-tri[2])*norm(tri[0]-tri[2]) ? 0 : sign( crx );",
+        consts: &[("_EPSILON", 1e-9)],
+        deps: &[],
+        builtins: &["cross", "norm", "abs", "sign"],
+        func: tri_class,
+    },
+    Entry {
+        name: "_is_at_left",
+        reference: "function _is_at_left(pt,line,eps=_EPSILON) = _tri_class([pt,line[0],line[1]],eps) <= 0;",
+        consts: &[("_EPSILON", 1e-9)],
+        deps: &["_tri_class"],
+        builtins: &["cross", "norm", "abs", "sign"],
+        func: is_at_left,
+    },
+    // `eps` here is an EXPLICIT parameter (no default) — every internal call forwards it — so this entry
+    // needs no `_EPSILON` guard despite living knee-deep in the tolerance family. The exotic-input
+    // termination story rides on `select`: a non-list `idxs` or non-numeric `i` reaches `select`'s asserts
+    // (which the native `select` raises identically), so the loop can't diverge where the interpreter
+    // wouldn't.
+    Entry {
+        name: "_none_inside",
+        reference: "function _none_inside(idxs,poly,p0,p1,p2,eps,i=0) =
+    i>=len(idxs) ? true :
+    let(
+        vert      = poly[idxs[i]],
+        prev_vert = poly[select(idxs,i-1)],
+        next_vert = poly[select(idxs,i+1)]
+    )
+    // check if vert prevent [p0,p1,p2] to be an ear
+    // this conditions might have a simpler expression
+    _tri_class([prev_vert, vert, next_vert],eps) <= 0  // reflex condition
+    &&  (  // vert is a cw reflex poly vertex inside the triangle [p0,p1,p2]
+          ( _tri_class([p0,p1,vert],eps)>0 &&
+            _tri_class([p1,p2,vert],eps)>0 &&
+            _tri_class([p2,p0,vert],eps)>=0  )
+          // or it is equal to p1 and some of its adjacent edges cross the open segment (p0,p2)
+          ||  ( norm(vert-p1) < eps
+                && _is_at_left(p0,[prev_vert,p1],eps) && _is_at_left(p2,[p1,prev_vert],eps)
+                && _is_at_left(p2,[p1,next_vert],eps) && _is_at_left(p0,[next_vert,p1],eps)
+              )
+        )
+    ?   false
+    :   _none_inside(idxs,poly,p0,p1,p2,eps,i=i+1);",
+        consts: &[],
+        deps: &[
+            "select",
+            "_tri_class",
+            "_is_at_left",
+            "is_vector",
+            "is_range",
+            "is_finite",
+            "is_nan",
+        ],
+        builtins: &[
+            "len",
+            "cross",
+            "norm",
+            "abs",
+            "sign",
+            "is_list",
+            "is_string",
+            "is_num",
+            "is_undef",
+        ],
+        func: none_inside,
+    },
 ];
 
 /// The POC intrinsic: `x * x`. Mirrors the interpreter's `Num * Num` (and `undef` for a non-number arg, as
@@ -729,6 +806,196 @@ fn is_matrix(args: &[Value]) -> crate::Result<Value> {
         return Ok(Value::Bool(false));
     }
     is_consistent(&[a])
+}
+
+/// A finite-or-not 2D point view: `Some([x, y])` iff the value is a 2-element `NumList` (any bits — the
+/// f64 formulas below are bit-faithful for inf/NaN too, so no finiteness gate).
+fn as_p2(v: &Value) -> Option<[f64; 2]> {
+    match v {
+        Value::NumList(xs) if xs.len() == 2 => Some([xs[0], xs[1]]),
+        _ => None,
+    }
+}
+
+/// The `_tri_class` scalar core on three 2D points — EXACTLY the reference's arithmetic: `crx = cross(
+/// tri[1]-tri[2], tri[0]-tri[2])` with the builtins' own formulas (2D cross `a0*b1 - a1*b0`, `norm` =
+/// sequential sum-of-squares sqrt), the tolerance product left-associated (`(eps*n1)*n2`), `sign` with 0 at
+/// NaN.
+fn tri_class_2d(t0: [f64; 2], t1: [f64; 2], t2: [f64; 2], eps: f64) -> f64 {
+    let u = [t1[0] - t2[0], t1[1] - t2[1]];
+    let w = [t0[0] - t2[0], t0[1] - t2[1]];
+    let crx = u[0] * w[1] - u[1] * w[0];
+    let n1 = (u[0] * u[0] + u[1] * u[1]).sqrt();
+    let n2 = (w[0] * w[0] + w[1] * w[1]).sqrt();
+    if crx.abs() <= eps * n1 * n2 {
+        0.0
+    } else if crx > 0.0 {
+        1.0
+    } else if crx < 0.0 {
+        -1.0
+    } else {
+        0.0 // sign(NaN) — unreachable (a NaN crx fails the <= above only when the bound is NaN too… routed
+        // and fast agree either way because both use this exact chain)
+    }
+}
+
+/// BOSL2 `_tri_class(tri, eps=_EPSILON)` — CW(1)/collinear(0)/CCW(-1) of a 2D triangle. Fast path for the
+/// `[[x,y],[x,y],[x,y]]` + numeric-eps shape; everything else (3D points → undef, short lists, exotic eps)
+/// routes through the real builtins/ops.
+fn tri_class(args: &[Value]) -> crate::Result<Value> {
+    let tri = args.first().cloned().unwrap_or(Value::Undef);
+    let eps = args.get(1).cloned().unwrap_or(Value::Num(1e-9));
+    Ok(tri_class_val(&tri, &eps))
+}
+fn tri_class_val(tri: &Value, eps: &Value) -> Value {
+    if let (Value::Num(e), Value::List(xs)) = (eps, tri)
+        && xs.len() == 3
+        && let (Some(t0), Some(t1), Some(t2)) = (as_p2(&xs[0]), as_p2(&xs[1]), as_p2(&xs[2]))
+    {
+        return Value::Num(tri_class_2d(t0, t1, t2, *e));
+    }
+    let t0 = super::ops::index(tri.clone(), &Value::Num(0.0));
+    let t1 = super::ops::index(tri.clone(), &Value::Num(1.0));
+    let t2 = super::ops::index(tri.clone(), &Value::Num(2.0));
+    let a = super::ops::apply_binary(BinOp::Sub, t1, t2.clone());
+    let b = super::ops::apply_binary(BinOp::Sub, t0, t2);
+    let crx = super::builtins::apply("cross", &[a.clone(), b.clone()]);
+    let bound = super::ops::apply_binary(
+        BinOp::Mul,
+        super::ops::apply_binary(
+            BinOp::Mul,
+            eps.clone(),
+            super::builtins::apply("norm", std::slice::from_ref(&a)),
+        ),
+        super::builtins::apply("norm", std::slice::from_ref(&b)),
+    );
+    let near = super::ops::apply_binary(
+        BinOp::Le,
+        super::builtins::apply("abs", std::slice::from_ref(&crx)),
+        bound,
+    );
+    if near.is_truthy() {
+        Value::Num(0.0)
+    } else {
+        super::builtins::apply("sign", std::slice::from_ref(&crx))
+    }
+}
+
+/// BOSL2 `_is_at_left(pt,line,eps=_EPSILON) = _tri_class([pt,line[0],line[1]],eps) <= 0` — is `pt` left of
+/// (or on) the directed 2D line? The routed tail builds the triangle with the interpreter's `build_vector`
+/// (three Nums would coalesce to a `NumList` exactly like the literal would).
+fn is_at_left(args: &[Value]) -> crate::Result<Value> {
+    let pt = args.first().cloned().unwrap_or(Value::Undef);
+    let line = args.get(1).cloned().unwrap_or(Value::Undef);
+    let eps = args.get(2).cloned().unwrap_or(Value::Num(1e-9));
+    Ok(is_at_left_val(&pt, &line, &eps))
+}
+fn is_at_left_val(pt: &Value, line: &Value, eps: &Value) -> Value {
+    if let (Value::Num(e), Some(p), Value::List(ls)) = (eps, as_p2(pt), line)
+        && ls.len() == 2
+        && let (Some(l0), Some(l1)) = (as_p2(&ls[0]), as_p2(&ls[1]))
+    {
+        return Value::Bool(tri_class_2d(p, l0, l1, *e) <= 0.0);
+    }
+    let l0 = super::ops::index(line.clone(), &Value::Num(0.0));
+    let l1 = super::ops::index(line.clone(), &Value::Num(1.0));
+    let tri = super::build_vector(vec![pt.clone(), l0, l1]);
+    super::ops::apply_binary(BinOp::Le, tri_class_val(&tri, eps), Value::Num(0.0))
+}
+
+/// BOSL2 `_none_inside(idxs,poly,p0,p1,p2,eps,i=0)` — the ear-cut containment scan: is NO polygon vertex
+/// (of `idxs`) blocking the candidate ear `[p0,p1,p2]`? The reference's tail recursion becomes a loop with
+/// the same early-exit `false`; neighbor lookups go through the REAL native [`select`] (whose asserts are
+/// what terminates the exotic-input shapes — a non-list `idxs` or non-numeric `i` raises there exactly like
+/// the interpreter). Per-iteration fast path when everything is 2D + numeric; any shape break routes that
+/// iteration through the same builtins/ops the body would run.
+fn none_inside(args: &[Value]) -> crate::Result<Value> {
+    let idxs = args.first().cloned().unwrap_or(Value::Undef);
+    let poly = args.get(1).cloned().unwrap_or(Value::Undef);
+    let p0 = args.get(2).cloned().unwrap_or(Value::Undef);
+    let p1 = args.get(3).cloned().unwrap_or(Value::Undef);
+    let p2 = args.get(4).cloned().unwrap_or(Value::Undef);
+    let eps = args.get(5).cloned().unwrap_or(Value::Undef); // eps has NO default in the reference
+    let mut i = args.get(6).cloned().unwrap_or(Value::Num(0.0));
+
+    // `_tri_class([a,b,c],eps)` as the body composes it — fast scalar or the literal-built routed form.
+    let tc = |a: &Value, b: &Value, c: &Value, eps: &Value| -> Value {
+        if let (Value::Num(e), Some(pa), Some(pb), Some(pc)) = (eps, as_p2(a), as_p2(b), as_p2(c)) {
+            Value::Num(tri_class_2d(pa, pb, pc, *e))
+        } else {
+            tri_class_val(
+                &super::build_vector(vec![a.clone(), b.clone(), c.clone()]),
+                eps,
+            )
+        }
+    };
+    // `_is_at_left(pt,[la,lb],eps)` as the body composes it.
+    let left = |pt: &Value, la: &Value, lb: &Value, eps: &Value| -> Value {
+        if let (Value::Num(e), Some(p), Some(a), Some(b)) = (eps, as_p2(pt), as_p2(la), as_p2(lb)) {
+            Value::Bool(tri_class_2d(p, a, b, *e) <= 0.0)
+        } else {
+            is_at_left_val(pt, &super::build_vector(vec![la.clone(), lb.clone()]), eps)
+        }
+    };
+
+    loop {
+        let ll = super::builtins::apply("len", std::slice::from_ref(&idxs));
+        if super::ops::apply_binary(BinOp::Ge, i.clone(), ll).is_truthy() {
+            return Ok(Value::Bool(true));
+        }
+        let vert = super::ops::index(poly.clone(), &super::ops::index(idxs.clone(), &i));
+        let prev = super::ops::index(
+            poly.clone(),
+            &select(&[
+                idxs.clone(),
+                super::ops::apply_binary(BinOp::Sub, i.clone(), Value::Num(1.0)),
+            ])?,
+        );
+        let next = super::ops::index(
+            poly.clone(),
+            &select(&[
+                idxs.clone(),
+                super::ops::apply_binary(BinOp::Add, i.clone(), Value::Num(1.0)),
+            ])?,
+        );
+        // reflex && (inside-the-ear || touches-p1-and-crosses) ? false : next i — short-circuits preserved.
+        let reflex =
+            super::ops::apply_binary(BinOp::Le, tc(&prev, &vert, &next, &eps), Value::Num(0.0));
+        if reflex.is_truthy() {
+            let inside =
+                super::ops::apply_binary(BinOp::Gt, tc(&p0, &p1, &vert, &eps), Value::Num(0.0))
+                    .is_truthy()
+                    && super::ops::apply_binary(
+                        BinOp::Gt,
+                        tc(&p1, &p2, &vert, &eps),
+                        Value::Num(0.0),
+                    )
+                    .is_truthy()
+                    && super::ops::apply_binary(
+                        BinOp::Ge,
+                        tc(&p2, &p0, &vert, &eps),
+                        Value::Num(0.0),
+                    )
+                    .is_truthy();
+            let blocking = inside || {
+                let d = super::ops::apply_binary(BinOp::Sub, vert.clone(), p1.clone());
+                super::ops::apply_binary(
+                    BinOp::Lt,
+                    super::builtins::apply("norm", std::slice::from_ref(&d)),
+                    eps.clone(),
+                )
+                .is_truthy()
+                    && left(&p0, &prev, &p1, &eps).is_truthy()
+                    && left(&p2, &p1, &prev, &eps).is_truthy()
+                    && left(&p2, &p1, &next, &eps).is_truthy()
+                    && left(&p0, &next, &p1, &eps).is_truthy()
+            };
+            if blocking {
+                return Ok(Value::Bool(false));
+            }
+        }
+        i = super::ops::apply_binary(BinOp::Add, i, Value::Num(1.0));
+    }
 }
 
 /// BOSL2 `force_list(value, n=1, fill)` — a list passes through; a scalar becomes `n` copies (or
@@ -1358,7 +1625,7 @@ fn hash_opt(e: Option<&Expr>, h: &mut impl Hasher) {
     reason = "test harness: expect/panic ARE the assertions; intrinsics must bit-match, so == is exact"
 )]
 mod tests {
-    use super::{fingerprint, poc_sq, reference_of, resolve};
+    use super::{fingerprint, pin_reference_of, poc_sq, reference_of, resolve};
     use crate::eval::build_ctx;
     use crate::parser::{Expr, Parameter, StmtKind, parse};
     use crate::{Scope, Value, eval_expr};
@@ -1998,6 +2265,232 @@ mod tests {
                     }
                 }
             }
+        }
+    }
+
+    /// A 2D point as the interpreter builds it.
+    fn p2(x: f64, y: f64) -> Value {
+        Value::num_list(vec![x, y])
+    }
+
+    #[test]
+    fn fast_equals_slow_earcut_band() {
+        let consts = [("_EPSILON", Value::Num(1e-9))];
+        let tc_ref = reference_of("_tri_class").unwrap();
+        let al_ref = reference_of("_is_at_left").unwrap();
+        let ni_ref = reference_of("_none_inside").unwrap();
+        let al_deps = [tc_ref];
+        let ni_deps = [
+            reference_of("select").unwrap(),
+            tc_ref,
+            al_ref,
+            reference_of("is_vector").unwrap(),
+            pin_reference_of("is_range").unwrap(),
+            reference_of("is_finite").unwrap(),
+            reference_of("is_nan").unwrap(),
+        ];
+
+        // _tri_class: CW / CCW / collinear / near-collinear-within-eps triangles, 3D points (→ undef),
+        // degenerate shapes, exotic eps.
+        let tris = [
+            Value::list(vec![p2(0.0, 0.0), p2(1.0, 0.0), p2(0.0, 1.0)]),
+            Value::list(vec![p2(0.0, 0.0), p2(0.0, 1.0), p2(1.0, 0.0)]),
+            Value::list(vec![p2(0.0, 0.0), p2(1.0, 1.0), p2(2.0, 2.0)]),
+            Value::list(vec![p2(0.0, 0.0), p2(1.0, 1e-12), p2(2.0, 0.0)]),
+            Value::list(vec![p2(0.0, 0.0), p2(1.0, 1e-3), p2(2.0, 0.0)]),
+            Value::list(vec![p2(0.0, 0.0), p2(0.0, 0.0), p2(1.0, 1.0)]),
+            Value::list(vec![
+                Value::num_list(vec![0.0, 0.0, 0.0]),
+                Value::num_list(vec![1.0, 0.0, 0.0]),
+                Value::num_list(vec![0.0, 1.0, 0.0]),
+            ]),
+            Value::list(vec![p2(0.0, 0.0), p2(1.0, 0.0)]),
+            Value::num_list(vec![1.0, 2.0, 3.0]),
+            Value::Undef,
+            Value::string("tri"),
+            Value::list(vec![p2(f64::NAN, 0.0), p2(1.0, 0.0), p2(0.0, 1.0)]),
+            Value::list(vec![p2(f64::INFINITY, 0.0), p2(1.0, 0.0), p2(0.0, 1.0)]),
+        ];
+        let epses = [
+            None,
+            Some(Value::Num(1e-9)),
+            Some(Value::Num(0.1)),
+            Some(Value::Undef),
+            Some(Value::string("e")),
+        ];
+        for tri in &tris {
+            for eps in &epses {
+                let mut args = vec![tri.clone()];
+                if let Some(e) = eps {
+                    args.push(e.clone());
+                }
+                assert!(
+                    same_result(
+                        &super::tri_class(&args),
+                        &interpret_with_deps_consts(tc_ref, &[], &consts, &args)
+                    ),
+                    "_tri_class diverged on ({tri:?}, eps {eps:?})"
+                );
+            }
+        }
+
+        // _is_at_left: points against directed segments, incl. on-the-line and exotic shapes.
+        let pts = [
+            p2(0.0, 1.0),
+            p2(0.0, -1.0),
+            p2(0.5, 0.0),
+            p2(f64::NAN, 0.0),
+            Value::Undef,
+            Value::Num(3.0),
+        ];
+        let lines = [
+            Value::list(vec![p2(0.0, 0.0), p2(1.0, 0.0)]),
+            Value::list(vec![p2(1.0, 0.0), p2(0.0, 0.0)]),
+            Value::list(vec![p2(0.0, 0.0), p2(0.0, 0.0)]),
+            Value::list(vec![p2(0.0, 0.0)]),
+            Value::Undef,
+        ];
+        for pt in &pts {
+            for line in &lines {
+                for eps in &epses {
+                    let mut args = vec![pt.clone(), line.clone()];
+                    if let Some(e) = eps {
+                        args.push(e.clone());
+                    }
+                    assert!(
+                        same_result(
+                            &super::is_at_left(&args),
+                            &interpret_with_deps_consts(al_ref, &al_deps, &consts, &args)
+                        ),
+                        "_is_at_left diverged on ({pt:?}, {line:?}, eps {eps:?})"
+                    );
+                }
+            }
+        }
+
+        // _none_inside: real ear-scan shapes over a CW L-polygon (concave), incl. an ear a reflex vertex
+        // blocks, a duplicate-vertex polygon (the norm(vert-p1)<eps arm), the i-offset start, and the
+        // exotic-input raise paths (non-list idxs / NaN i → select's asserts fire on BOTH sides).
+        let lpoly = Value::list(vec![
+            p2(0.0, 0.0),
+            p2(0.0, 2.0),
+            p2(1.0, 2.0),
+            p2(1.0, 1.0),
+            p2(2.0, 1.0),
+            p2(2.0, 0.0),
+        ]);
+        let sq = Value::list(vec![p2(0.0, 0.0), p2(0.0, 1.0), p2(1.0, 1.0), p2(1.0, 0.0)]);
+        let dup = Value::list(vec![p2(0.0, 0.0), p2(0.0, 1.0), p2(0.0, 1.0), p2(1.0, 0.0)]);
+        let all6 = Value::num_list(vec![0.0, 1.0, 2.0, 3.0, 4.0, 5.0]);
+        let all4 = Value::num_list(vec![0.0, 1.0, 2.0, 3.0]);
+        let e9 = Value::Num(1e-9);
+        let cases: Vec<Vec<Value>> = vec![
+            // (idxs, poly, p0, p1, p2, eps[, i])
+            vec![
+                all6.clone(),
+                lpoly.clone(),
+                p2(0.0, 0.0),
+                p2(0.0, 2.0),
+                p2(1.0, 2.0),
+                e9.clone(),
+            ],
+            vec![
+                all6.clone(),
+                lpoly.clone(),
+                p2(1.0, 2.0),
+                p2(1.0, 1.0),
+                p2(2.0, 1.0),
+                e9.clone(),
+            ],
+            vec![
+                all6.clone(),
+                lpoly.clone(),
+                p2(2.0, 1.0),
+                p2(2.0, 0.0),
+                p2(0.0, 0.0),
+                e9.clone(),
+            ],
+            vec![
+                all4.clone(),
+                sq.clone(),
+                p2(0.0, 0.0),
+                p2(0.0, 1.0),
+                p2(1.0, 1.0),
+                e9.clone(),
+            ],
+            vec![
+                all4.clone(),
+                sq.clone(),
+                p2(0.0, 0.0),
+                p2(0.0, 1.0),
+                p2(1.0, 1.0),
+                e9.clone(),
+                Value::Num(2.0),
+            ],
+            vec![
+                all4.clone(),
+                dup.clone(),
+                p2(0.0, 1.0),
+                p2(0.0, 1.0),
+                p2(1.0, 0.0),
+                e9.clone(),
+            ],
+            vec![
+                Value::num_list(vec![]),
+                sq.clone(),
+                p2(0.0, 0.0),
+                p2(0.0, 1.0),
+                p2(1.0, 1.0),
+                e9.clone(),
+            ],
+            // exotic: eps undef, idxs non-list (select raises), i NaN (select raises)
+            vec![
+                all4.clone(),
+                sq.clone(),
+                p2(0.0, 0.0),
+                p2(0.0, 1.0),
+                p2(1.0, 1.0),
+                Value::Undef,
+            ],
+            vec![
+                Value::Num(7.0),
+                sq.clone(),
+                p2(0.0, 0.0),
+                p2(0.0, 1.0),
+                p2(1.0, 1.0),
+                e9.clone(),
+            ],
+            vec![
+                all4.clone(),
+                sq.clone(),
+                p2(0.0, 0.0),
+                p2(0.0, 1.0),
+                p2(1.0, 1.0),
+                e9.clone(),
+                Value::Num(f64::NAN),
+            ],
+            // 3D polygon: every tri_class degrades to undef exactly as interpreted
+            vec![
+                Value::num_list(vec![0.0, 1.0, 2.0]),
+                Value::list(vec![
+                    Value::num_list(vec![0.0, 0.0, 0.0]),
+                    Value::num_list(vec![1.0, 0.0, 0.0]),
+                    Value::num_list(vec![0.0, 1.0, 0.0]),
+                ]),
+                Value::num_list(vec![0.0, 0.0, 0.0]),
+                Value::num_list(vec![1.0, 0.0, 0.0]),
+                Value::num_list(vec![0.0, 1.0, 0.0]),
+                e9.clone(),
+            ],
+        ];
+        for args in &cases {
+            assert!(
+                same_result(
+                    &super::none_inside(args),
+                    &interpret_with_deps_consts(ni_ref, &ni_deps, &consts, args)
+                ),
+                "_none_inside diverged on {args:?}"
+            );
         }
     }
 

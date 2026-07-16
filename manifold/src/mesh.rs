@@ -127,6 +127,18 @@ pub struct Mesh {
     /// loading normals into properties), carried through the boolean (union of P + Q-offset). The full
     /// `meshIDtransform` Relation (backSide/transform, for `GetMeshGL` runTransform) is not ported.
     pub mesh_id_has_normals: std::collections::BTreeSet<i32>,
+    /// The cached broad-phase BVH over this mesh's face boxes (Manifold `Impl::collider_`, BU.4.5b) —
+    /// what `Boolean3::new` queries instead of rebuilding two colliders per op. EAGER, C++-parity:
+    /// built at the tail of [`Mesh::sort_geometry`] (the universal finalizer every rest-state mesh
+    /// passes through — ingest, boolean finish, bridge/quickhull/decompose, primitives) and rebuilt by
+    /// [`Mesh::transform`] (the one sanctioned geometry-mutating path that skips the re-sort; C++
+    /// transforms `collider_` lazily at impl.cpp:675 instead). `None` = never finalized (a raw
+    /// harness ingest, a mid-surgery mesh) — `Boolean3::new` falls back to building on the spot.
+    /// FRESHNESS CONTRACT: this is valid iff positions/topology are unchanged since the last
+    /// `sort_geometry`/`transform`; any in-place geometry edit must re-run the finalizers (exactly the
+    /// pre-existing contract for `b_box`/normals/epsilon — a mesh that skips them is already broken).
+    /// Prop-only mutation ([`Mesh::set_properties`]) moves no geometry, so the clone keeps it valid.
+    pub(crate) collider: Option<crate::boolean::collider::Collider>,
 }
 
 impl Default for Mesh {
@@ -146,6 +158,7 @@ impl Default for Mesh {
             mesh_id: -1,
             tri_ref: Vec::new(),
             mesh_id_has_normals: std::collections::BTreeSet::new(),
+            collider: None,
         }
     }
 }
@@ -1272,6 +1285,16 @@ impl Mesh {
         // Scale epsilon by the 3×3 spectral norm, then re-floor against the new bbox (`SetEpsilon`).
         result.epsilon *= linear.spectral_norm();
         result.set_epsilon(result.epsilon, false);
+        // The clone carried the SOURCE-position collider — stale now that every vert moved. Rebuild
+        // from the transformed geometry (C++ keeps validity here too, via the lazy `collider_`
+        // Transform/UpdateBoxes at impl.cpp:675; a full rebuild is our eager equivalent — same exact
+        // face boxes, so the collision SET the boolean sees is identical). A `None` source (below the
+        // finalizer boundary) stays `None`.
+        result.collider = if self.collider.is_some() {
+            Some(crate::boolean::collider::Collider::from_mesh(&result))
+        } else {
+            None
+        };
         Ok(result)
     }
 

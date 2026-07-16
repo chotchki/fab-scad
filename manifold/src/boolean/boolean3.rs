@@ -23,6 +23,27 @@
 
 use crate::boolean::OpType;
 use crate::boolean::collider::Collider;
+
+// Test-only observability for the BU.4.5b collider cache: counts `Boolean3::new`'s FALLBACK collider
+// builds (a finalized input should contribute zero). Thread-local `Cell`, no atomics — it decides no
+// value or order (the doctrine's bar), doesn't exist outside `cfg(test)`, and each unit test's own
+// thread sees only its own ops. Incremented on the caller thread (the fallback runs before any
+// `par::` fan-out).
+#[cfg(test)]
+thread_local! {
+    static FALLBACK_COLLIDER_BUILDS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn fallback_collider_builds() -> u64 {
+    FALLBACK_COLLIDER_BUILDS.with(|c| c.get())
+}
+
+#[inline]
+fn note_fallback_build() {
+    #[cfg(test)]
+    FALLBACK_COLLIDER_BUILDS.with(|c| c.set(c.get() + 1));
+}
 use crate::boolean::disjoint_sets::DisjointSets;
 use crate::boolean::predicates::{interpolate, intersect, shadows, with_sign};
 use crate::boolean::vocab::Intersections;
@@ -695,17 +716,36 @@ impl Boolean3 {
         }
 
         // The BU.4.2 validation gate — FIRST touch of the tables: one O(halfedges) pass per input
-        // proves them closed, and everything downstream (the collider build + the whole cascade)
+        // proves them closed, and everything downstream (the collider queries + the whole cascade)
         // reads them unchecked through these views.
         let vp = MeshView::validate(in_p);
         let vq = MeshView::validate(in_q);
 
-        // Each mesh's face-box collider is queried by the OTHER mesh's edges/verts.
-        let collider_p = Collider::from_mesh(in_p);
-        let collider_q = Collider::from_mesh(in_q);
+        // Each mesh's face-box collider is queried by the OTHER mesh's edges/verts. Finalized meshes
+        // arrive with it PREBUILT (`sort_geometry`'s tail, BU.4.5b — the C++ `collider_` member);
+        // only a below-the-boundary mesh (raw harness ingest, hand-built test rig) pays a build here.
+        // The fallback builds from the identical rest-state mesh, so its collider — and therefore
+        // every candidate set — is byte-identical to the cached one.
+        let (fb_p, fb_q); // fallback storage, kept alive alongside the borrows
+        let collider_p = match &in_p.collider {
+            Some(c) => c,
+            None => {
+                note_fallback_build();
+                fb_p = Collider::from_mesh(in_p);
+                &fb_p
+            }
+        };
+        let collider_q = match &in_q.collider {
+            Some(c) => c,
+            None => {
+                note_fallback_build();
+                fb_q = Collider::from_mesh(in_q);
+                &fb_q
+            }
+        };
 
-        let xv12 = intersect12(&vp, &vq, &collider_q, expand_p, true);
-        let xv21 = intersect12(&vp, &vq, &collider_p, expand_p, false);
+        let xv12 = intersect12(&vp, &vq, collider_q, expand_p, true);
+        let xv21 = intersect12(&vp, &vq, collider_p, expand_p, false);
 
         // `i32` overflow guard (the C++ INT_MAX_SZ check): an intersection set this large is unusable.
         if xv12.x12.len() > i32::MAX as usize || xv21.x12.len() > i32::MAX as usize {
@@ -719,8 +759,8 @@ impl Boolean3 {
             };
         }
 
-        let w03 = winding03(&vp, &vq, &xv12.p1q2, &collider_q, expand_p, true);
-        let w30 = winding03(&vp, &vq, &xv21.p1q2, &collider_p, expand_p, false);
+        let w03 = winding03(&vp, &vq, &xv12.p1q2, collider_q, expand_p, true);
+        let w30 = winding03(&vp, &vq, &xv21.p1q2, collider_p, expand_p, false);
 
         Self {
             xv12,
@@ -833,5 +873,109 @@ mod tests {
         let mut q = cube(0.3, 0.4, 0.5);
         q.halfedge[7].paired_halfedge = HalfedgeId::NONE;
         let _ = Boolean3::new(&p, &q, OpType::Add);
+    }
+
+    /// BU.4.5b repeated-op: one solid booleaned against two different others must consume its cached
+    /// collider both times (zero fallback builds — the observable skip, timing-free), the boolean's
+    /// own outputs must leave finalized (the chained-op win), and the second op's bytes must match a
+    /// cache-stripped rerun (correctness of the skip).
+    #[test]
+    fn cached_collider_skips_rebuild_across_repeated_ops() {
+        let a = cube(0.0, 0.0, 0.0);
+        let b = cube(0.3, 0.4, 0.5);
+        let c = cube(-0.4, -0.3, -0.2);
+        assert!(
+            a.collider.is_some() && b.collider.is_some() && c.collider.is_some(),
+            "ingest must finalize the collider"
+        );
+
+        let base = fallback_collider_builds();
+        let r1 = crate::boolean::boolean_result::boolean(&a, &b, OpType::Add);
+        let r2 = crate::boolean::boolean_result::boolean(&a, &c, OpType::Add);
+        assert_eq!(
+            fallback_collider_builds(),
+            base,
+            "finalized inputs must skip the Boolean3 collider builds"
+        );
+        assert!(
+            r1.collider.is_some() && r2.collider.is_some(),
+            "boolean outputs must leave sort_geometry finalized"
+        );
+
+        // Correctness of the skip: the identical mesh state minus the cache pays the fallback build
+        // and must produce byte-identical output.
+        let mut a_n = a.clone();
+        a_n.collider = None;
+        let mut c_n = c.clone();
+        c_n.collider = None;
+        let r2_fb = crate::boolean::boolean_result::boolean(&a_n, &c_n, OpType::Add);
+        assert_eq!(
+            fallback_collider_builds(),
+            base + 2,
+            "cache-stripped inputs must exercise the fallback"
+        );
+        assert_eq!(
+            r2.to_mesh_gl(),
+            r2_fb.to_mesh_gl(),
+            "cached vs fallback collider must be byte-identical"
+        );
+    }
+
+    /// BU.4.5b staleness regression: boolean → in-place geometry mutation (re-finalized per the mesh
+    /// contract) → boolean again must equal the cache-free result; and `transform` — the one
+    /// geometry-mutating path that skips `sort_geometry` — must rebuild the clone's collider at the
+    /// NEW positions, never serve the source's.
+    #[test]
+    fn collider_cache_never_serves_stale_geometry() {
+        let a = cube(0.0, 0.0, 0.0);
+        let b = cube(0.3, 0.4, 0.5);
+        let r_before = crate::boolean::boolean_result::boolean(&a, &b, OpType::Add);
+
+        // In-place mutate: shift every vert, then re-run the finalizers (bbox → sort, whose tail
+        // rebuilds the collider). The moved solid overlaps `b` differently, so a stale broad phase
+        // would feed the kernels the wrong candidate set.
+        let mut a2 = a.clone();
+        for p in &mut a2.vert_pos {
+            p.x += 0.5;
+            p.y += 0.25;
+        }
+        a2.calculate_bbox();
+        a2.sort_geometry();
+        assert!(
+            a2.collider.is_some(),
+            "sort_geometry must refinalize the collider"
+        );
+        let r_after = crate::boolean::boolean_result::boolean(&a2, &b, OpType::Add);
+        let mut a2_fresh = a2.clone();
+        a2_fresh.collider = None;
+        let r_fresh = crate::boolean::boolean_result::boolean(&a2_fresh, &b, OpType::Add);
+        assert_eq!(
+            r_after.to_mesh_gl(),
+            r_fresh.to_mesh_gl(),
+            "post-mutation cache must match a cache-free boolean"
+        );
+        assert_ne!(
+            r_after.to_mesh_gl(),
+            r_before.to_mesh_gl(),
+            "sanity: the mutation changed the result"
+        );
+
+        // transform(): same solid, same shift, through the sanctioned path.
+        let t = a
+            .transform(crate::linalg::Mat3x4::translate(Vec3::new(0.5, 0.25, 0.0)))
+            .unwrap();
+        assert!(
+            t.collider.is_some(),
+            "transform must rebuild, not drop, the collider"
+        );
+        let r_t = crate::boolean::boolean_result::boolean(&t, &b, OpType::Add);
+        let mut t_fresh = t.clone();
+        t_fresh.collider = None;
+        let r_t_fresh = crate::boolean::boolean_result::boolean(&t_fresh, &b, OpType::Add);
+        assert_eq!(
+            r_t.to_mesh_gl(),
+            r_t_fresh.to_mesh_gl(),
+            "transformed mesh's cache must be rebuilt at the new positions"
+        );
     }
 }

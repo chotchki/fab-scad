@@ -76,13 +76,28 @@ pub(crate) fn morton_code(position: Vec3, b_box: Box3) -> u32 {
 impl Mesh {
     /// Canonicalize vertex + triangle order by Morton code (`sort.cpp` `SortGeometry`). No-op on an empty
     /// mesh. Requires `b_box` to be current (the boolean calls `calculate_bbox` first).
+    ///
+    /// Tail-builds [`Mesh::collider`] (BU.4.5b), mirroring C++ `SortGeometry`'s `collider_ =
+    /// Collider(faceBox, faceMorton)` (sort.cpp:213) — every finalized mesh leaves here with a fresh
+    /// broad-phase BVH, so `Boolean3::new` never rebuilds one. Built UNFUSED (a plain
+    /// `Collider::from_mesh` over the sorted mesh, not C++'s reuse of `SortFaces`' arrays): the input
+    /// state is byte-identical to what the boolean used to feed `from_mesh` at op time, so the cached
+    /// collider is byte-identical to the one it replaces — zero golden risk; the re-sort inside
+    /// `build` is over already-Morton-ordered codes (the adaptive stable sort's fast path).
     pub fn sort_geometry(&mut self) {
         if self.halfedge.is_empty() {
+            self.collider = None; // C++ `collider_ = {}` (sort.cpp:193)
             return;
         }
         self.compact_props();
         self.sort_verts();
         self.sort_faces();
+        // All faces can Morton-sort to kNoCode and drop (C++ sort.cpp:210's second empty check).
+        self.collider = if self.halfedge.is_empty() {
+            None
+        } else {
+            Some(crate::boolean::collider::Collider::from_mesh(self))
+        };
     }
 
     /// Remove unreferenced prop-verts and reindex `prop_vert` + [`Mesh::properties`] (`sort.cpp`

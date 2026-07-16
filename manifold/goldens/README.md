@@ -16,7 +16,9 @@ Everything the differential oracle proved gets RECORDED here while the C++ is st
 - `inputs/*.bin` — C++-GENERATED inputs (spheres/cylinder) frozen as little-endian MeshGL dumps
   (`FMGL` magic; see tests/m7_golden_mode.rs) — same reason.
 
-Regenerate (requires the oracle feature, i.e. pre-cut only):
+Regenerate — the C++ was CUT at M.7.4, so the freeze test is GONE from the tree. To re-freeze
+against a future reference, resurrect `freeze_oracle_goldens` (tests/m7_golden_mode.rs) and the
+`oracle` feature from git history (pre-M.7.4), then:
 
     cargo test --release --features oracle --test m7_golden_mode freeze -- --ignored --nocapture
 

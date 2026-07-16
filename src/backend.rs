@@ -24,13 +24,21 @@ use fab_lang::{
 /// [`extrude`](GeometryBackend::extrude) (2D→3D) and [`projection`](GeometryBackend::projection)
 /// (3D→2D).
 pub trait GeometryBackend {
-    /// The backend's solid handle.
-    type Solid;
+    /// The backend's solid handle. `Clone` MUST be cheap (a handle/Rc copy, not a mesh copy) — the
+    /// P.2 memo serves repeated subtrees by cloning the stored solid.
+    type Solid: Clone;
     /// The backend's 2D-region handle (Manifold `CrossSection`).
     type Shape;
 
     /// A tessellated mesh (a fab-lang primitive) → a backend solid. An empty mesh → the empty solid.
     fn leaf(&self, mesh: &Mesh) -> Self::Solid;
+    /// A served P.2-memo copy of `s` — a backend with provenance IDs (Manifold `mesh_id`/`same_face`)
+    /// must RE-MINT them here so a cached copy is ID-distinct from its source, exactly like a fresh
+    /// render (else copies coplanar-merge with each other in union trees — the silverwear class).
+    /// Backends without instance IDs keep the default clone.
+    fn fresh_instance(&self, s: &Self::Solid) -> Self::Solid {
+        s.clone()
+    }
     /// Boolean union.
     fn union(&self, a: &Self::Solid, b: &Self::Solid) -> Self::Solid;
     /// N-ary union. The default is the pairwise fold; a real kernel overrides with its batch
@@ -95,18 +103,47 @@ pub trait GeometryBackend {
 /// 3D solid, so on this axis it lowers to the empty solid (its 2D region is reached by matching the
 /// [`Geo::D2`] and calling [`build_2d`] on the `Shape2D` — the extrude/projection path, J.3).
 pub fn build_geo<B: GeometryBackend>(geo: &Geo, backend: &B) -> B::Solid {
-    crate::geo_redundancy::reset();
-    let probe_start = std::time::Instant::now();
-    let out = build_geo_inner(geo, backend);
-    crate::geo_redundancy::report(probe_start.elapsed());
-    out
+    build_geo_gated(geo, backend, geo_cache_enabled())
 }
 
-fn build_geo_inner<B: GeometryBackend>(geo: &Geo, backend: &B) -> B::Solid {
-    match geo {
-        Geo::D3(node) => build(node, backend),
+/// The P.2 gate read once per build: on unless `FAB_GEO_CACHE=0`.
+fn geo_cache_enabled() -> bool {
+    std::env::var_os("FAB_GEO_CACHE").as_deref() != Some(std::ffi::OsStr::new("0"))
+}
+
+/// Bit-exact mesh compare for the verify mode (`PartialEq` would pass `-0.0 == 0.0`; the kernel's
+/// symbolic-perturbation predicates read the BITS, so sign-blind equality is not render-identity).
+fn meshes_bit_eq(a: &Mesh, b: &Mesh) -> bool {
+    a.verts.len() == b.verts.len()
+        && a.tris == b.tris
+        && a.verts.iter().zip(&b.verts).all(|(p, q)| {
+            p.x.to_bits() == q.x.to_bits()
+                && p.y.to_bits() == q.y.to_bits()
+                && p.z.to_bits() == q.z.to_bits()
+        })
+}
+
+/// Debug hunt mode (`FAB_GEO_CACHE=verify`): every memo HIT also re-renders and byte-compares the
+/// meshes — the first divergent serve panics with the node's identity. Slow; a diagnosis tool.
+fn geo_cache_verify() -> bool {
+    std::env::var_os("FAB_GEO_CACHE").as_deref() == Some(std::ffi::OsStr::new("verify"))
+}
+
+/// [`build_geo`] with the P.2 memo gate explicit — the A/B tests toggle it here instead of racing
+/// the process-global env.
+fn build_geo_gated<B: GeometryBackend>(geo: &Geo, backend: &B, cache: bool) -> B::Solid {
+    crate::geo_redundancy::reset();
+    let probe_start = std::time::Instant::now();
+    let out = match geo {
+        Geo::D3(node) => {
+            let mut memo = GeoMemo::new(cache);
+            memo.prepass(node);
+            build_inner(node, backend, &mut memo)
+        }
         Geo::D2(_) => backend.leaf(&Mesh::new()),
-    }
+    };
+    crate::geo_redundancy::report(probe_start.elapsed());
+    out
 }
 
 /// Split a [`Geo`] result into its TOP-LEVEL PARTS — one backend solid per implicit-union child at
@@ -123,7 +160,15 @@ fn build_geo_inner<B: GeometryBackend>(geo: &Geo, backend: &B) -> B::Solid {
 pub fn build_geo_parts<B: GeometryBackend>(geo: &Geo, backend: &B) -> Vec<B::Solid> {
     match geo {
         Geo::D3(GeoNode::Union(kids)) if kids.len() > 1 => {
-            kids.iter().map(|k| build(k, backend)).collect()
+            // ONE memo across every part: a sliced model shares its base subtree BETWEEN parts
+            // (part = base ∩ half), which per-part memos would rebuild per part.
+            let mut memo = GeoMemo::new(geo_cache_enabled());
+            for k in kids {
+                memo.prepass(k);
+            }
+            kids.iter()
+                .map(|k| build_inner(k, backend, &mut memo))
+                .collect()
         }
         _ => vec![build_geo(geo, backend)],
     }
@@ -214,49 +259,183 @@ fn part_names_of(text: &str) -> Vec<Option<String>> {
         .collect()
 }
 
+// ─────────────────────────── P.2: the kernel-level Solid memo ──────────────────────────────────
+//
+// The BU.7 probe measured the tree the backend receives: with the evaluator's CSG cache ON, every
+// memo hit splices a deep `Geo` clone, so the kernel re-renders identical content constantly —
+// slice_parts spent 95% of its build on subtrees already rendered (53,382 nodes, 367 distinct).
+// This memo is the fix: a per-build content-addressed `Solid` store. A PREPASS counts every
+// subtree hash, so only subtrees that WILL recur are retained (a singleton renders plain, no clone,
+// no memory); entries evict when their last expected use is served. Every hit is verified by a deep
+// `PartialEq` compare against the stored node — a 64-bit hash collision can cost a re-render,
+// never a wrong mesh. Bit-identity is by construction: the kernel is deterministic, so the clone a
+// hit returns is byte-identical to what a re-render would produce (the models differential + the
+// bitwise STL A/B are the standing gates). `FAB_GEO_CACHE=0` opts out.
+//
+// KNOWN SLACK, accepted: when a PARENT subtree hits, its children never re-visit, so their
+// remaining-use counts stay high and their entries live to end-of-build — memory only, bounded by
+// the model's distinct shared content.
+
+use std::collections::BTreeMap;
+
+struct GeoMemo<'t, B: GeometryBackend> {
+    /// Subtree hash → REMAINING expected builds (prepass count, decremented per visit; entry + any
+    /// stored solids evict at 0).
+    counts: BTreeMap<u64, u32>,
+    /// Subtree hash → rendered entries awaiting reuse (the node ref backs the deep-eq hit check).
+    ready: BTreeMap<u64, Vec<(&'t GeoNode, B::Solid)>>,
+    /// Node address → subtree hash (shared with the prepass; O(tree) hashing total).
+    hashes: BTreeMap<usize, u64>,
+    enabled: bool,
+}
+
+impl<'t, B: GeometryBackend> GeoMemo<'t, B> {
+    fn new(enabled: bool) -> Self {
+        Self {
+            counts: BTreeMap::new(),
+            ready: BTreeMap::new(),
+            hashes: BTreeMap::new(),
+            enabled,
+        }
+    }
+
+    /// Count every subtree hash under `node` — the reuse forecast the store/evict decisions key on.
+    fn prepass(&mut self, node: &'t GeoNode) {
+        if !self.enabled {
+            return;
+        }
+        let h = crate::geo_hash::hash_node(node, &mut self.hashes);
+        *self.counts.entry(h).or_insert(0) += 1;
+        match node {
+            GeoNode::Empty | GeoNode::Leaf(_) | GeoNode::Extrude { .. } => {}
+            GeoNode::Transform { child, .. } | GeoNode::Color { child, .. } => self.prepass(child),
+            GeoNode::Union(kids)
+            | GeoNode::Difference(kids)
+            | GeoNode::Intersection(kids)
+            | GeoNode::Hull(kids)
+            | GeoNode::Minkowski(kids) => {
+                for k in kids {
+                    self.prepass(k);
+                }
+            }
+        }
+    }
+}
+
 /// Lower a fab-lang CSG tree ([`GeoNode`], J.2) to a backend solid — the geometry lowering. This is
 /// the integration seam: fab-lang builds the backend-agnostic tree, the backend does the real CSG.
 /// Recursion is bounded by the tree depth (the parser's `MAX_DEPTH`), so it can't overflow the stack.
 pub fn build<B: GeometryBackend>(node: &GeoNode, backend: &B) -> B::Solid {
-    // BU.7 probe (no-op unless FAB_GEO_REDUNDANCY=1): subtree hash + inclusive render time.
+    let mut memo = GeoMemo::new(geo_cache_enabled());
+    memo.prepass(node);
+    build_inner(node, backend, &mut memo)
+}
+
+/// The memoizing recursion behind [`build`]: serve a repeated subtree from the P.2 memo (deep-eq
+/// verified), render + store a first-of-many, render plain a singleton.
+fn build_inner<'t, B: GeometryBackend>(
+    node: &'t GeoNode,
+    backend: &B,
+    memo: &mut GeoMemo<'t, B>,
+) -> B::Solid {
+    if memo.enabled {
+        let h = crate::geo_hash::hash_node(node, &mut memo.hashes);
+        if let Some(rem) = memo.counts.get_mut(&h) {
+            *rem = rem.saturating_sub(1);
+            let more_coming = *rem > 0;
+            if let Some(entries) = memo.ready.get(&h)
+                && let Some((stored, solid)) = entries.iter().find(|(n, _)| *n == node) {
+                    let out = backend.fresh_instance(solid);
+                    if geo_cache_verify() {
+                        let stored: &GeoNode = stored;
+                        assert!(
+                            std::ptr::eq(stored, node) || stored == node,
+                            "verify: eq drifted mid-build"
+                        );
+                        // Fresh = a fully UNCACHED render in a throwaway memo (no bookkeeping
+                        // perturbation, no circular serve reuse); compared BITWISE (PartialEq is
+                        // sign-of-zero-blind, the kernel's shadow predicates are not).
+                        let fresh = {
+                            let mut scratch = GeoMemo::new(false);
+                            render_node(node, backend, &mut scratch)
+                        };
+                        assert!(
+                            meshes_bit_eq(&backend.to_mesh(&out), &backend.to_mesh(&fresh)),
+                            "FAB_GEO_CACHE=verify: served solid != UNCACHED fresh render, bitwise (hash {h:#018x})"
+                        );
+                    }
+                    if !more_coming {
+                        memo.ready.remove(&h);
+                        memo.counts.remove(&h);
+                    }
+                    return out;
+                }
+            let out = render_node(node, backend, memo);
+            if more_coming {
+                memo.ready.entry(h).or_default().push((node, out.clone()));
+            }
+            return out;
+        }
+    }
+    render_node(node, backend, memo)
+}
+
+/// One node's actual backend lowering (the pre-P.2 `build` body); children recurse through the memo.
+fn render_node<'t, B: GeometryBackend>(
+    node: &'t GeoNode,
+    backend: &B,
+    memo: &mut GeoMemo<'t, B>,
+) -> B::Solid {
+    // BU.7 probe (no-op unless FAB_GEO_REDUNDANCY=1): subtree hash + inclusive render time. Sits on
+    // the RENDER path, so with the memo live it reports the RESIDUAL waste the memo didn't catch.
     let _probe = crate::geo_redundancy::enter(node);
     match node {
         GeoNode::Empty => backend.leaf(&Mesh::new()),
         GeoNode::Leaf(mesh) => backend.leaf(mesh),
-        GeoNode::Transform { matrix, child } => backend.transform(&build(child, backend), matrix),
+        GeoNode::Transform { matrix, child } => {
+            backend.transform(&build_inner(child, backend, memo), matrix)
+        }
         // Union is N-ary via the backend's batch strategy; difference = first − union(rest) — the
         // same set (A−B−C ≡ A−(B∪C)) and the same shape the C++ csg tree evaluates, so one big
         // subtract replaces a quadratic fold over the accumulating base.
         GeoNode::Union(kids) => {
-            backend.batch_union(kids.iter().map(|k| build(k, backend)).collect())
+            backend.batch_union(kids.iter().map(|k| build_inner(k, backend, memo)).collect())
         }
         GeoNode::Difference(kids) => match kids.split_first() {
             None => backend.leaf(&Mesh::new()),
             Some((first, rest)) => {
-                let base = build(first, backend);
+                let base = build_inner(first, backend, memo);
                 if rest.is_empty() {
                     base
                 } else {
-                    let cutter =
-                        backend.batch_union(rest.iter().map(|k| build(k, backend)).collect());
+                    let cutter = backend
+                        .batch_union(rest.iter().map(|k| build_inner(k, backend, memo)).collect());
                     backend.difference(&base, &cutter)
                 }
             }
         },
-        GeoNode::Intersection(kids) => reduce(kids, backend, |b, x, y| b.intersection(x, y)),
+        GeoNode::Intersection(kids) => reduce(kids, backend, memo, |b, x, y| b.intersection(x, y)),
         // hull is N-ary — the backend hulls the whole operand set at once (not a pairwise fold).
-        GeoNode::Hull(kids) => {
-            backend.hull(&kids.iter().map(|k| build(k, backend)).collect::<Vec<_>>())
-        }
+        GeoNode::Hull(kids) => backend.hull(
+            &kids
+                .iter()
+                .map(|k| build_inner(k, backend, memo))
+                .collect::<Vec<_>>(),
+        ),
         // minkowski is an N-ary fold of the binary sum (J.4.4); the backend owns the empty-annihilator rule.
-        GeoNode::Minkowski(kids) => {
-            backend.minkowski(&kids.iter().map(|k| build(k, backend)).collect::<Vec<_>>())
-        }
+        GeoNode::Minkowski(kids) => backend.minkowski(
+            &kids
+                .iter()
+                .map(|k| build_inner(k, backend, memo))
+                .collect::<Vec<_>>(),
+        ),
         // The 2D→3D bridge: lower the 2D child to a Shape, then sweep it into a Solid (J.3.4/J.3.5).
         GeoNode::Extrude { kind, child } => backend.extrude(&build_2d(child, backend), kind),
         // Color sets EVERY vertex of the child subtree (J.2.9). Outermost `color()` wins because the
         // enclosing node's color op overwrites any inner one; distinct colors survive a union.
-        GeoNode::Color { color, child } => backend.color(&build(child, backend), *color),
+        GeoNode::Color { color, child } => {
+            backend.color(&build_inner(child, backend, memo), *color)
+        }
     }
 }
 
@@ -309,14 +488,21 @@ fn reduce_2d<B: GeometryBackend>(
 
 /// Fold children left-to-right with `combine` (the empty algebra lives in the backend ops). An empty
 /// child list → the empty solid; for `difference` the fold is `first − rest`.
-fn reduce<B: GeometryBackend>(
-    kids: &[GeoNode],
+fn reduce<'t, B: GeometryBackend>(
+    kids: &'t [GeoNode],
     backend: &B,
+    memo: &mut GeoMemo<'t, B>,
     combine: impl Fn(&B, &B::Solid, &B::Solid) -> B::Solid,
 ) -> B::Solid {
-    let mut solids = kids.iter().map(|k| build(k, backend));
-    match solids.next() {
-        Some(first) => solids.fold(first, |acc, s| combine(backend, &acc, &s)),
+    let mut kids = kids.iter();
+    match kids.next() {
+        Some(first) => {
+            let first = build_inner(first, backend, memo);
+            kids.fold(first, |acc, k| {
+                let s = build_inner(k, backend, memo);
+                combine(backend, &acc, &s)
+            })
+        }
         None => backend.leaf(&Mesh::new()),
     }
 }
@@ -335,6 +521,10 @@ impl GeometryBackend for ManifoldBackend {
     // `Section` (Manifold `CrossSection`) is empty-aware natively (`empty()` / `is_empty()`), so — unlike
     // `Solid` — it needs no `Option` wrapper to represent the empty region.
     type Shape = crate::kernel::Section;
+
+    fn fresh_instance(&self, s: &Self::Solid) -> Self::Solid {
+        s.as_ref().map(crate::kernel::Solid::as_fresh_instance)
+    }
 
     fn leaf(&self, mesh: &Mesh) -> Self::Solid {
         // `from_indexed` rejects an empty mesh (→ None); a non-manifold mesh also → None (polyhedron
@@ -741,6 +931,116 @@ impl GeometryBackend for MockBackend {
 #[cfg(test)]
 mod tests {
     use super::{GeometryBackend, MockBackend, build_geo_parts, part_names_of};
+
+    /// P.2 — the memo must (a) render a repeated subtree ONCE (the counting delegate proves the
+    /// skip) and (b) change NOTHING about the output. The duplicated children are structurally
+    /// identical but DISTINCT allocations — the deep-clone shape the evaluator's CSG cache splices
+    /// into real trees. Gate toggled via `build_geo_gated`, not the process-global env.
+    #[test]
+    fn p2_memo_renders_repeated_subtrees_once_with_identical_output() {
+        use std::cell::Cell;
+
+        struct Counting<'a> {
+            inner: MockBackend,
+            leaves: &'a Cell<u32>,
+        }
+        impl GeometryBackend for Counting<'_> {
+            type Solid = super::MockSolid;
+            type Shape = super::MockShape;
+            fn leaf(&self, mesh: &fab_lang::Mesh) -> Self::Solid {
+                self.leaves.set(self.leaves.get() + 1);
+                self.inner.leaf(mesh)
+            }
+            fn union(&self, a: &Self::Solid, b: &Self::Solid) -> Self::Solid {
+                self.inner.union(a, b)
+            }
+            fn difference(&self, a: &Self::Solid, b: &Self::Solid) -> Self::Solid {
+                self.inner.difference(a, b)
+            }
+            fn intersection(&self, a: &Self::Solid, b: &Self::Solid) -> Self::Solid {
+                self.inner.intersection(a, b)
+            }
+            fn hull(&self, solids: &[Self::Solid]) -> Self::Solid {
+                self.inner.hull(solids)
+            }
+            fn minkowski(&self, solids: &[Self::Solid]) -> Self::Solid {
+                self.inner.minkowski(solids)
+            }
+            fn transform(&self, s: &Self::Solid, m: &fab_lang::Affine) -> Self::Solid {
+                self.inner.transform(s, m)
+            }
+            fn color(&self, s: &Self::Solid, rgba: fab_lang::Rgba) -> Self::Solid {
+                self.inner.color(s, rgba)
+            }
+            fn to_mesh(&self, s: &Self::Solid) -> fab_lang::Mesh {
+                self.inner.to_mesh(s)
+            }
+            fn is_empty(&self, s: &Self::Solid) -> bool {
+                self.inner.is_empty(s)
+            }
+            fn leaf_2d(&self, contours: &[Vec<[f64; 2]>]) -> Self::Shape {
+                self.inner.leaf_2d(contours)
+            }
+            fn union_2d(&self, a: &Self::Shape, b: &Self::Shape) -> Self::Shape {
+                self.inner.union_2d(a, b)
+            }
+            fn difference_2d(&self, a: &Self::Shape, b: &Self::Shape) -> Self::Shape {
+                self.inner.difference_2d(a, b)
+            }
+            fn intersection_2d(&self, a: &Self::Shape, b: &Self::Shape) -> Self::Shape {
+                self.inner.intersection_2d(a, b)
+            }
+            fn offset_2d(
+                &self,
+                s: &Self::Shape,
+                delta: f64,
+                join: fab_lang::Join2D,
+                segments: u32,
+            ) -> Self::Shape {
+                self.inner.offset_2d(s, delta, join, segments)
+            }
+            fn transform_2d(&self, s: &Self::Shape, m: &fab_lang::Affine2) -> Self::Shape {
+                self.inner.transform_2d(s, m)
+            }
+            fn extrude(&self, s: &Self::Shape, kind: &fab_lang::ExtrudeKind) -> Self::Solid {
+                self.inner.extrude(s, kind)
+            }
+            fn projection(&self, s: &Self::Solid, cut: bool) -> Self::Shape {
+                self.inner.projection(s, cut)
+            }
+            fn to_polygons(&self, s: &Self::Shape) -> Vec<Vec<[f64; 2]>> {
+                self.inner.to_polygons(s)
+            }
+            fn is_empty_2d(&self, s: &Self::Shape) -> bool {
+                self.inner.is_empty_2d(s)
+            }
+        }
+
+        // Two identical-content children (distinct allocations) + one singleton.
+        let geo = fab_lang::evaluate_geometry(
+            "module leaf(){ sphere(4, $fn=12); } leaf(); translate([9,0,0]) leaf(); cube(1);",
+        )
+        .expect("evaluates");
+        let count = |cache: bool| {
+            let leaves = Cell::new(0);
+            let b = Counting {
+                inner: MockBackend,
+                leaves: &leaves,
+            };
+            let solid = super::build_geo_gated(&geo, &b, cache);
+            (leaves.get(), solid.mesh)
+        };
+        let (leaves_off, mesh_off) = count(false);
+        let (leaves_on, mesh_on) = count(true);
+        assert!(
+            leaves_on < leaves_off,
+            "the repeated leaf must render once with the memo on ({leaves_on} vs {leaves_off})"
+        );
+        assert_eq!(
+            mesh_on, mesh_off,
+            "the memo must not change the output mesh"
+        );
+    }
 
     #[test]
     fn part_names_descend_wrappers_and_flag_anonymous() {

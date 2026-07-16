@@ -70,7 +70,7 @@ impl Config {
     /// deep-recursion pathology that reverted the first flip (verified: `module_recursion_bound` cache-on
     /// == off), and the flip's gate was the FULL suite + gauntlet + bitwise STL diffs, per the task's own
     /// terms. `FAB_CSG_CACHE=0` opts out. The EVAL cache stays opt-in (`FAB_EVAL_CACHE=1`) — its win
-    /// profile is model-dependent (under_sink_guide measured net-negative in N.2c.2.1) and its auto-off
+    /// profile is model-dependent (`under_sink_guide` measured net-negative in N.2c.2.1) and its auto-off
     /// (N.2c.2.2) hasn't been revalidated at default-on; that half of N.2c.2.3 remains open.
     #[must_use]
     pub fn from_env() -> Self {

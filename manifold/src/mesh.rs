@@ -1151,6 +1151,41 @@ impl Mesh {
         ];
     }
 
+    /// A copy of this mesh under FRESH instance IDs (P.2 serve semantics): every distinct
+    /// `tri_ref.mesh_id` remaps to a newly reserved ID (bijective — equality classes preserved,
+    /// labels fresh), with `mesh_id` and `mesh_id_has_normals` remapped to match. Serving a cached
+    /// Solid VERBATIM would let two copies of one render carry identical `(mesh_id, coplanar_id,
+    /// face_id)` triples; because a boolean's Q-side offset is the SAME `mesh_id_counter()` constant
+    /// for every op in a build (ops read but never reserve), copies collide in a union tree and
+    /// [`crate::boolean::vocab::TriRef::same_face`] merges coplanar faces ACROSS copies — bytes a
+    /// fresh per-copy ingest (distinct IDs) would never produce. `original_id` remaps with the same
+    /// table (it shares the ID space).
+    #[must_use]
+    pub fn as_fresh_instance(&self) -> Mesh {
+        let mut distinct: std::collections::BTreeMap<i32, i32> = std::collections::BTreeMap::new();
+        for r in &self.tri_ref {
+            distinct.entry(r.mesh_id).or_insert(0);
+            distinct.entry(r.original_id).or_insert(0);
+        }
+        distinct.entry(self.mesh_id).or_insert(0);
+        let base = reserve_ids(i32::try_from(distinct.len()).expect("id count fits i32"));
+        for (i, v) in distinct.values_mut().enumerate() {
+            *v = base + i32::try_from(i).expect("id count fits i32");
+        }
+        let mut out = self.clone();
+        out.mesh_id = distinct[&self.mesh_id];
+        for r in &mut out.tri_ref {
+            r.mesh_id = distinct[&r.mesh_id];
+            r.original_id = distinct[&r.original_id];
+        }
+        out.mesh_id_has_normals = self
+            .mesh_id_has_normals
+            .iter()
+            .map(|id| distinct.get(id).copied().unwrap_or(*id))
+            .collect();
+        out
+    }
+
     /// Compute face normals AND flood the coplanar-group IDs (Manifold's `SetNormalsAndCoplanar`), then
     /// the vertex normals. Requires [`Mesh::initialize_original`] (for `tri_ref`) and
     /// [`Mesh::set_epsilon`] (for `tolerance`, the coplanarity threshold) to have run.

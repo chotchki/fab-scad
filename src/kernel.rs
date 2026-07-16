@@ -802,6 +802,14 @@ impl Solid {
     pub fn is_manifold(&self) -> bool {
         self.0.is_manifold()
     }
+    /// This solid under FRESH mesh-instance IDs (P.2 serve semantics — see
+    /// `fab_manifold::mesh::Mesh::as_fresh_instance`): geometry identical, provenance IDs re-minted
+    /// so a served cache copy relates to its siblings exactly like a fresh render would.
+    #[must_use]
+    pub fn as_fresh_instance(&self) -> Solid {
+        Solid::wrap(self.0.as_fresh_instance())
+    }
+
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
     }

@@ -704,6 +704,154 @@ static REGISTRY: &[Entry] = &[
         ],
         func: vnf_centroid,
     },
+    // ── O.7, band 5 batch 2 (linalg/affine/geometry/lists/paths.scad) ───────────────────────────────────
+    // The affine BUILDERS rot() leans on (rot itself is a dep avalanche — move/rot_inverse/_NO_ARG — and
+    // stays interpreted, in the JIT bucket with _find_anchor/apply/vector_axis), the earcut driver's
+    // per-candidate scan, and pill_holder's membership pair.
+    Entry {
+        name: "ident",
+        reference: "function ident(n) = [
+    for (i = [0:1:n-1]) [
+        for (j = [0:1:n-1]) (i==j)? 1 : 0
+    ]
+];",
+        consts: &[],
+        deps: &[],
+        builtins: &[],
+        func: ident,
+    },
+    Entry {
+        name: "affine3d_zrot",
+        reference: "function affine3d_zrot(ang=0) =
+    assert(is_finite(ang))
+    [
+        [cos(ang), -sin(ang), 0, 0],
+        [sin(ang),  cos(ang), 0, 0],
+        [       0,         0, 1, 0],
+        [       0,         0, 0, 1]
+    ];",
+        consts: &[],
+        deps: &["is_finite", "is_nan"],
+        builtins: &["sin", "cos", "is_num"],
+        func: affine3d_zrot,
+    },
+    Entry {
+        name: "affine3d_xrot",
+        reference: "function affine3d_xrot(ang=0) =
+    assert(is_finite(ang))
+    [
+        [1,        0,         0,   0],
+        [0, cos(ang), -sin(ang),   0],
+        [0, sin(ang),  cos(ang),   0],
+        [0,        0,         0,   1]
+    ];",
+        consts: &[],
+        deps: &["is_finite", "is_nan"],
+        builtins: &["sin", "cos", "is_num"],
+        func: affine3d_xrot,
+    },
+    Entry {
+        name: "affine3d_yrot",
+        reference: "function affine3d_yrot(ang=0) =
+    assert(is_finite(ang))
+    [
+        [ cos(ang), 0, sin(ang),   0],
+        [        0, 1,        0,   0],
+        [-sin(ang), 0, cos(ang),   0],
+        [        0, 0,        0,   1]
+    ];",
+        consts: &[],
+        deps: &["is_finite", "is_nan"],
+        builtins: &["sin", "cos", "is_num"],
+        func: affine3d_yrot,
+    },
+    // eps is explicit here, but the wiskers lane runs `idx` → `posmod` → `approx`, whose DEFAULT eps is
+    // `_EPSILON` — so the guard rides along.
+    Entry {
+        name: "_get_ear",
+        reference: "function _get_ear(poly, ind,  eps, _i=0) =
+    let( lind = len(ind) )
+    lind==3 ? 0 :
+    let( // the _i-th ear candidate
+        p0 = poly[ind[_i]],
+        p1 = poly[ind[(_i+1)%lind]],
+        p2 = poly[ind[(_i+2)%lind]]
+    )
+    // if vertex p1 is a convex candidate to be an ear,
+    // check if the triangle [p0,p1,p2] contains any other point
+    // except possibly p0 and p2
+    // exclude the ear candidate central vertex p1 from the verts to check
+    _tri_class([p0,p1,p2],eps) > 0
+    &&  _none_inside(select(ind,_i+2, _i),poly,p0,p1,p2,eps) ? _i : // found an ear
+    // otherwise check the next ear candidate
+    _i<lind-1 ?  _get_ear(poly, ind,  eps, _i=_i+1) :
+    // poly has no ears, look for wiskers
+    let( wiskers = [for(j=idx(ind)) if(norm(poly[ind[j]]-poly[ind[(j+2)%lind]])<eps) j ] )
+    wiskers==[] ? undef : [wiskers[0]];",
+        consts: &[("_EPSILON", 1e-9)],
+        deps: &[
+            "_tri_class",
+            "_none_inside",
+            "_is_at_left",
+            "select",
+            "idx",
+            "posmod",
+            "approx",
+            "is_finite",
+            "is_nan",
+            "is_vector",
+            "is_range",
+        ],
+        builtins: &[
+            "len", "norm", "cross", "abs", "sign", "is_list", "is_string", "is_num", "is_undef",
+            "is_bool",
+        ],
+        func: get_ear,
+    },
+    Entry {
+        name: "in_list",
+        reference: "function in_list(val,list,idx) =
+    assert(is_list(list),\"Input is not a list\")
+    assert(is_undef(idx) || is_finite(idx), \"Invalid idx value.\")
+    let( firsthit = search([val], list, num_returns_per_match=1, index_col_num=idx)[0] )
+    firsthit==[] ? false
+    : is_undef(idx) && val==list[firsthit] ? true
+    : is_def(idx) && val==list[firsthit][idx] ? true
+    // first hit was found but didn't match, so try again with all hits
+    : let ( allhits = search([val], list, 0, idx)[0])
+      is_undef(idx) ? [for(hit=allhits) if (list[hit]==val) 1] != []
+    : [for(hit=allhits) if (list[hit][idx]==val) 1] != [];",
+        consts: &[],
+        deps: &["is_finite", "is_nan", "is_def"],
+        builtins: &["search", "is_list", "is_undef", "is_num"],
+        func: in_list,
+    },
+    Entry {
+        name: "is_path",
+        reference: "function is_path(list, dim=[2,3], fast=false) =
+    fast
+    ?   is_list(list) && is_vector(list[0])
+    :   is_matrix(list)
+        && len(list)>1
+        && len(list[0])>0
+        && (is_undef(dim) || in_list(len(list[0]), force_list(dim)));",
+        consts: &[],
+        deps: &[
+            "is_matrix",
+            "is_vector",
+            "is_finite",
+            "is_nan",
+            "is_consistent",
+            "_list_pattern",
+            "in_list",
+            "is_def",
+            "force_list",
+        ],
+        builtins: &[
+            "is_list", "len", "is_undef", "is_num", "search",
+        ],
+        func: is_path,
+    },
     // The reference's lesser/[equal]/greater concat recursion flattens to an iterative in-order walk (a
     // 20k-element pre-sorted input would recurse 20k deep); partition subsets are strictly smaller (the
     // pivot's own element lands in `equal` or — NaN/incomparable — nowhere), so the walk terminates.
@@ -1945,6 +2093,274 @@ fn group_sort_by_index(args: &[Value]) -> crate::Result<Value> {
         stack.push(Work::Split(super::build_vector(lesser))); // LIFO → lesser first: in-order
     }
     Ok(super::build_vector(out))
+}
+
+/// BOSL2 `ident(n)` — the n×n identity matrix, rows built like the comprehension would (`build_vector`
+/// coalesces each all-num row to a `NumList`); a garbage `n` degenerates through `build_range` exactly as
+/// interpreted.
+fn ident(args: &[Value]) -> crate::Result<Value> {
+    let n = args.first().cloned().unwrap_or(Value::Undef);
+    let end = super::ops::apply_binary(BinOp::Sub, n, Value::Num(1.0));
+    let range = super::build_range(&Value::Num(0.0), &Value::Num(1.0), &end);
+    let is_idx = super::iter_values(&range);
+    let mut rows: Vec<Value> = Vec::new();
+    for i in &is_idx {
+        let row: Vec<Value> = is_idx
+            .iter()
+            .map(|j| {
+                if super::ops::apply_binary(BinOp::Eq, i.clone(), j.clone()).is_truthy() {
+                    Value::Num(1.0)
+                } else {
+                    Value::Num(0.0)
+                }
+            })
+            .collect();
+        rows.push(super::build_vector(row));
+    }
+    Ok(super::build_vector(rows))
+}
+
+/// One axis-rotation affine builder — the shared shape of `affine3d_zrot`/`xrot`/`yrot`: assert the angle
+/// finite, take `sin`/`cos` through the REAL builtins (the exact-degree snap lives there), lay out the rows.
+/// `layout` receives `(c, s, -s)` and returns the 16 cells in row order.
+fn axis_rot(
+    args: &[Value],
+    layout: fn(Value, Value, Value) -> [[Value; 4]; 4],
+) -> crate::Result<Value> {
+    let ang = args.first().cloned().unwrap_or(Value::Num(0.0));
+    if !v_is_finite(&ang) {
+        return Err(bosl_assert("affine3d rotation: angle must be finite"));
+    }
+    let c = super::builtins::apply("cos", std::slice::from_ref(&ang));
+    let s = super::builtins::apply("sin", std::slice::from_ref(&ang));
+    let ns = super::ops::apply_unary(crate::parser::UnOp::Neg, s.clone());
+    let rows: Vec<Value> = layout(c, s, ns)
+        .into_iter()
+        .map(|row| super::build_vector(row.into_iter().collect()))
+        .collect();
+    Ok(super::build_vector(rows))
+}
+fn affine3d_zrot(args: &[Value]) -> crate::Result<Value> {
+    axis_rot(args, |c, s, ns| {
+        let z = || Value::Num(0.0);
+        let one = || Value::Num(1.0);
+        [
+            [c.clone(), ns, z(), z()],
+            [s, c, z(), z()],
+            [z(), z(), one(), z()],
+            [z(), z(), z(), one()],
+        ]
+    })
+}
+fn affine3d_xrot(args: &[Value]) -> crate::Result<Value> {
+    axis_rot(args, |c, s, ns| {
+        let z = || Value::Num(0.0);
+        let one = || Value::Num(1.0);
+        [
+            [one(), z(), z(), z()],
+            [z(), c.clone(), ns, z()],
+            [z(), s, c, z()],
+            [z(), z(), z(), one()],
+        ]
+    })
+}
+fn affine3d_yrot(args: &[Value]) -> crate::Result<Value> {
+    axis_rot(args, |c, s, ns| {
+        let z = || Value::Num(0.0);
+        let one = || Value::Num(1.0);
+        [
+            [c.clone(), z(), s, z()],
+            [z(), one(), z(), z()],
+            [ns, z(), c, z()],
+            [z(), z(), z(), one()],
+        ]
+    })
+}
+
+/// BOSL2 `_get_ear(poly, ind, eps, _i=0)` — the ear-cut driver's per-candidate scan: the first `_i` whose
+/// fan triangle is convex and empty ([`tri_class_val`] + the native [`none_inside`], with [`select`]'s
+/// slice for the exclusion window), else the whisker fallback. Tail recursion → loop with the
+/// [`no_progress`] guard; the whisker lane's `idx(ind)` runs the real native (its assert raises on a
+/// non-list `ind` exactly like the reference).
+#[allow(
+    clippy::similar_names,
+    reason = "`ind`/`lind` ARE the reference's own parameter and let names"
+)]
+fn get_ear(args: &[Value]) -> crate::Result<Value> {
+    let poly = args.first().cloned().unwrap_or(Value::Undef);
+    let ind = args.get(1).cloned().unwrap_or(Value::Undef);
+    let eps = args.get(2).cloned().unwrap_or(Value::Undef); // eps has NO default in the reference
+    let mut i = args.get(3).cloned().unwrap_or(Value::Num(0.0));
+    let at = |k: &Value| super::ops::index(poly.clone(), &super::ops::index(ind.clone(), k));
+    loop {
+        let lind = super::builtins::apply("len", std::slice::from_ref(&ind));
+        if super::ops::apply_binary(BinOp::Eq, lind.clone(), Value::Num(3.0)).is_truthy() {
+            return Ok(Value::Num(0.0));
+        }
+        let wrap = |off: f64| {
+            super::ops::apply_binary(
+                BinOp::Mod,
+                super::ops::apply_binary(BinOp::Add, i.clone(), Value::Num(off)),
+                lind.clone(),
+            )
+        };
+        let p0 = at(&i);
+        let p1 = at(&wrap(1.0));
+        let p2 = at(&wrap(2.0));
+        let tri = super::build_vector(vec![p0.clone(), p1.clone(), p2.clone()]);
+        if super::ops::apply_binary(BinOp::Gt, tri_class_val(&tri, &eps), Value::Num(0.0))
+            .is_truthy()
+        {
+            let window = select(&[
+                ind.clone(),
+                super::ops::apply_binary(BinOp::Add, i.clone(), Value::Num(2.0)),
+                i.clone(),
+            ])?;
+            if none_inside(&[window, poly.clone(), p0, p1, p2, eps.clone()])?.is_truthy() {
+                return Ok(i);
+            }
+        }
+        if super::ops::apply_binary(
+            BinOp::Lt,
+            i.clone(),
+            super::ops::apply_binary(BinOp::Sub, lind.clone(), Value::Num(1.0)),
+        )
+        .is_truthy()
+        {
+            let next = super::ops::apply_binary(BinOp::Add, i.clone(), Value::Num(1.0));
+            if no_progress(&i, &next) {
+                return Err(non_terminating("_get_ear"));
+            }
+            i = next;
+            continue;
+        }
+        // whiskers: adjacent-but-one vertices closer than eps
+        let jrange = idx(std::slice::from_ref(&ind))?;
+        let mut ws: Vec<Value> = Vec::new();
+        for j in super::iter_values(&jrange) {
+            let far = super::ops::apply_binary(
+                BinOp::Mod,
+                super::ops::apply_binary(BinOp::Add, j.clone(), Value::Num(2.0)),
+                lind.clone(),
+            );
+            let d = super::ops::apply_binary(BinOp::Sub, at(&j), at(&far));
+            if super::ops::apply_binary(
+                BinOp::Lt,
+                super::builtins::apply("norm", std::slice::from_ref(&d)),
+                eps.clone(),
+            )
+            .is_truthy()
+            {
+                ws.push(j);
+            }
+        }
+        let wsv = super::build_vector(ws);
+        return Ok(
+            if super::ops::apply_binary(BinOp::Eq, wsv.clone(), super::build_vector(Vec::new()))
+                .is_truthy()
+            {
+                Value::Undef
+            } else {
+                super::build_vector(vec![super::ops::index(wsv, &Value::Num(0.0))])
+            },
+        );
+    }
+}
+
+/// BOSL2 `in_list(val, list, idx)` — membership via the REAL `search` builtin (its named args are
+/// positional slots 2/3 — OpenSCAD builtins read by position), with the reference's first-hit shortcut and
+/// the all-hits retry. The retry's `[for(hit=…) if(…) 1] != []` is an any-match — collecting past the first
+/// match is unobservable, so the native breaks early.
+fn in_list(args: &[Value]) -> crate::Result<Value> {
+    let val = args.first().cloned().unwrap_or(Value::Undef);
+    let list = args.get(1).cloned().unwrap_or(Value::Undef);
+    let idxv = args.get(2).cloned().unwrap_or(Value::Undef);
+    if !v_is_list(&list) {
+        return Err(bosl_assert("in_list: input is not a list"));
+    }
+    let idx_undef = matches!(idxv, Value::Undef);
+    if !(idx_undef || v_is_finite(&idxv)) {
+        return Err(bosl_assert("in_list: invalid idx value"));
+    }
+    let val_list = super::build_vector(vec![val.clone()]);
+    let firsthit = super::ops::index(
+        super::builtins::apply(
+            "search",
+            &[
+                val_list.clone(),
+                list.clone(),
+                Value::Num(1.0),
+                idxv.clone(),
+            ],
+        ),
+        &Value::Num(0.0),
+    );
+    let empty = super::build_vector(Vec::new());
+    if super::ops::apply_binary(BinOp::Eq, firsthit.clone(), empty).is_truthy() {
+        return Ok(Value::Bool(false));
+    }
+    let hit_item = |hit: &Value| {
+        let item = super::ops::index(list.clone(), hit);
+        if idx_undef {
+            item
+        } else {
+            super::ops::index(item, &idxv)
+        }
+    };
+    if super::ops::apply_binary(BinOp::Eq, val.clone(), hit_item(&firsthit)).is_truthy() {
+        return Ok(Value::Bool(true));
+    }
+    let allhits = super::ops::index(
+        super::builtins::apply(
+            "search",
+            &[val_list, list.clone(), Value::Num(0.0), idxv.clone()],
+        ),
+        &Value::Num(0.0),
+    );
+    for hit in super::iter_values(&allhits) {
+        if super::ops::apply_binary(BinOp::Eq, hit_item(&hit), val.clone()).is_truthy() {
+            return Ok(Value::Bool(true));
+        }
+    }
+    Ok(Value::Bool(false))
+}
+
+/// BOSL2 `is_path(list, dim=[2,3], fast=false)` — a matrix of ≥2 points whose width is in `dim`;
+/// composes the band's own [`is_matrix`]/[`in_list`]/[`force_list`] natives.
+fn is_path(args: &[Value]) -> crate::Result<Value> {
+    let list = args.first().cloned().unwrap_or(Value::Undef);
+    let dim = args
+        .get(1)
+        .cloned()
+        .unwrap_or_else(|| Value::num_list(vec![2.0, 3.0]));
+    let fast = args.get(2).cloned().unwrap_or(Value::Bool(false));
+    if fast.is_truthy() {
+        return Ok(Value::Bool(
+            v_is_list(&list)
+                && is_vector(std::slice::from_ref(&super::ops::index(
+                    list.clone(),
+                    &Value::Num(0.0),
+                )))?
+                .is_truthy(),
+        ));
+    }
+    if !is_matrix(std::slice::from_ref(&list))?.is_truthy() {
+        return Ok(Value::Bool(false));
+    }
+    let ll = super::builtins::apply("len", std::slice::from_ref(&list));
+    if !super::ops::apply_binary(BinOp::Gt, ll, Value::Num(1.0)).is_truthy() {
+        return Ok(Value::Bool(false));
+    }
+    let row0 = super::ops::index(list, &Value::Num(0.0));
+    let l0 = super::builtins::apply("len", std::slice::from_ref(&row0));
+    if !super::ops::apply_binary(BinOp::Gt, l0.clone(), Value::Num(0.0)).is_truthy() {
+        return Ok(Value::Bool(false));
+    }
+    if matches!(dim, Value::Undef) {
+        return Ok(Value::Bool(true));
+    }
+    let forced = force_list(std::slice::from_ref(&dim))?;
+    in_list(&[l0, forced])
 }
 
 /// BOSL2 `force_list(value, n=1, fill)` — a list passes through; a scalar becomes `n` copies (or
@@ -3948,6 +4364,194 @@ mod tests {
                     &interpret_with_deps_consts(gs_ref, &[], &consts, args)
                 ),
                 "_group_sort_by_index diverged on {args:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn fast_equals_slow_band5_batch2() {
+        let consts = [("_EPSILON", Value::Num(1e-9))];
+
+        // ident / the axis rotations — sizes, angle values incl. the snap-relevant right angles, raises.
+        let id_ref = reference_of("ident").unwrap();
+        for n in [
+            Value::Num(0.0),
+            Value::Num(1.0),
+            Value::Num(3.0),
+            Value::Num(4.0),
+            Value::Num(2.5),
+            Value::Undef,
+            Value::string("n"),
+        ] {
+            let args = [n.clone()];
+            assert!(
+                same_result(
+                    &super::ident(&args),
+                    &interpret_with_deps_consts(id_ref, &[], &consts, &args)
+                ),
+                "ident diverged on {n:?}"
+            );
+        }
+        let rot_deps = [
+            reference_of("is_finite").unwrap(),
+            reference_of("is_nan").unwrap(),
+        ];
+        let angles = [
+            None,
+            Some(Value::Num(0.0)),
+            Some(Value::Num(90.0)),
+            Some(Value::Num(-30.0)),
+            Some(Value::Num(123.456)),
+            Some(Value::Num(f64::NAN)),
+            Some(Value::Undef),
+        ];
+        for (name, func) in [
+            ("affine3d_zrot", super::affine3d_zrot as super::Intrinsic),
+            ("affine3d_xrot", super::affine3d_xrot),
+            ("affine3d_yrot", super::affine3d_yrot),
+        ] {
+            let r = reference_of(name).unwrap();
+            for ang in &angles {
+                let args: Vec<Value> = ang.iter().cloned().collect();
+                assert!(
+                    same_result(
+                        &func(&args),
+                        &interpret_with_deps_consts(r, &rot_deps, &consts, &args)
+                    ),
+                    "{name} diverged on {ang:?}"
+                );
+            }
+        }
+
+        // _get_ear — the concave L-polygon (has real ears at various _i), a triangle (immediate 0), a
+        // whisker polygon (duplicate-adjacent vertices, no ears), and the raise/exotic lanes.
+        let ge_ref = reference_of("_get_ear").unwrap();
+        let ge_deps = [
+            reference_of("_tri_class").unwrap(),
+            reference_of("_none_inside").unwrap(),
+            reference_of("_is_at_left").unwrap(),
+            reference_of("select").unwrap(),
+            reference_of("idx").unwrap(),
+            reference_of("posmod").unwrap(),
+            reference_of("approx").unwrap(),
+            reference_of("is_finite").unwrap(),
+            reference_of("is_nan").unwrap(),
+            reference_of("is_vector").unwrap(),
+            pin_reference_of("is_range").unwrap(),
+            reference_of("all_nonzero").unwrap(),
+        ];
+        // CW L-poly (BOSL2's earcut runs on CW): reversed order of the CCW L used in the earcut battery
+        let lpoly_cw = Value::list(vec![
+            p2(2.0, 0.0),
+            p2(2.0, 1.0),
+            p2(1.0, 1.0),
+            p2(1.0, 2.0),
+            p2(0.0, 2.0),
+            p2(0.0, 0.0),
+        ]);
+        let tri_ind = Value::num_list(vec![0.0, 1.0, 2.0]);
+        let all6 = Value::num_list(vec![0.0, 1.0, 2.0, 3.0, 4.0, 5.0]);
+        // a degenerate spike: b == d, so every candidate fails and the whisker lane fires
+        let spike = Value::list(vec![p2(0.0, 0.0), p2(1.0, 0.0), p2(2.0, 0.0), p2(1.0, 0.0)]);
+        let all4 = Value::num_list(vec![0.0, 1.0, 2.0, 3.0]);
+        let e9 = Value::Num(1e-9);
+        let ge_cases: Vec<Vec<Value>> = vec![
+            vec![lpoly_cw.clone(), all6.clone(), e9.clone()],
+            vec![lpoly_cw.clone(), all6.clone(), e9.clone(), Value::Num(3.0)],
+            vec![lpoly_cw.clone(), tri_ind.clone(), e9.clone()],
+            vec![spike.clone(), all4.clone(), e9.clone()],
+            vec![spike.clone(), all4.clone(), Value::Undef],
+            vec![Value::Undef, all4.clone(), e9.clone()],
+            vec![lpoly_cw.clone(), Value::Num(7.0), e9.clone()],
+        ];
+        for args in &ge_cases {
+            assert!(
+                same_result(
+                    &super::get_ear(args),
+                    &interpret_with_deps_consts(ge_ref, &ge_deps, &consts, args)
+                ),
+                "_get_ear diverged on {args:?}"
+            );
+        }
+
+        // in_list / is_path — hits, misses, idx-column lookups, the all-hits retry (a first hit that
+        // doesn't match), raises, and is_path's dim/fast lanes.
+        let il_ref = reference_of("in_list").unwrap();
+        let il_deps = [
+            reference_of("is_finite").unwrap(),
+            reference_of("is_nan").unwrap(),
+            reference_of("is_def").unwrap(),
+        ];
+        let nums = Value::num_list(vec![3.0, 5.0, 7.0]);
+        let rows = Value::list(vec![
+            Value::list(vec![Value::Num(1.0), Value::string("a")]),
+            Value::list(vec![Value::Num(2.0), Value::string("b")]),
+        ]);
+        let il_cases: Vec<Vec<Value>> = vec![
+            vec![Value::Num(5.0), nums.clone()],
+            vec![Value::Num(4.0), nums.clone()],
+            vec![Value::string("b"), rows.clone(), Value::Num(1.0)],
+            vec![Value::string("c"), rows.clone(), Value::Num(1.0)],
+            vec![Value::Num(2.0), rows.clone(), Value::Num(0.0)],
+            vec![Value::string("a"), rows.clone()],
+            vec![Value::Num(1.0), Value::Num(9.0)],
+            vec![Value::Num(1.0), nums.clone(), Value::string("i")],
+            vec![Value::Undef, nums.clone()],
+        ];
+        for args in &il_cases {
+            assert!(
+                same_result(
+                    &super::in_list(args),
+                    &interpret_with_deps_consts(il_ref, &il_deps, &consts, args)
+                ),
+                "in_list diverged on {args:?}"
+            );
+        }
+        let ip_ref = reference_of("is_path").unwrap();
+        let ip_deps: Vec<&str> = il_deps
+            .iter()
+            .copied()
+            .chain([
+                reference_of("is_matrix").unwrap(),
+                reference_of("is_vector").unwrap(),
+                reference_of("is_consistent").unwrap(),
+                reference_of("_list_pattern").unwrap(),
+                reference_of("in_list").unwrap(),
+                reference_of("force_list").unwrap(),
+                reference_of("all_nonzero").unwrap(),
+            ])
+            .collect();
+        let path2 = Value::list(vec![p2(0.0, 0.0), p2(1.0, 0.0), p2(1.0, 1.0)]);
+        let path4 = Value::list(vec![
+            Value::num_list(vec![0.0, 0.0, 0.0, 0.0]),
+            Value::num_list(vec![1.0, 0.0, 0.0, 0.0]),
+        ]);
+        let ip_cases: Vec<Vec<Value>> = vec![
+            vec![path2.clone()],
+            vec![path4.clone()],
+            vec![path4.clone(), Value::Num(4.0)],
+            vec![path2.clone(), Value::Undef],
+            vec![path2.clone(), Value::num_list(vec![3.0])],
+            vec![
+                path2.clone(),
+                Value::num_list(vec![2.0, 3.0]),
+                Value::Bool(true),
+            ],
+            vec![
+                Value::Num(5.0),
+                Value::num_list(vec![2.0, 3.0]),
+                Value::Bool(true),
+            ],
+            vec![Value::list(vec![p2(0.0, 0.0)])],
+            vec![Value::Undef],
+        ];
+        for args in &ip_cases {
+            assert!(
+                same_result(
+                    &super::is_path(args),
+                    &interpret_with_deps_consts(ip_ref, &ip_deps, &consts, args)
+                ),
+                "is_path diverged on {args:?}"
             );
         }
     }

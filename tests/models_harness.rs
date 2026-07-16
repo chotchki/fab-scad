@@ -290,6 +290,116 @@ fn parse_worker_line(line: &str) -> Outcome {
 // The harness.
 // ─────────────────────────────────────────────────────────────────────────────────────────────────────────
 
+/// K.1.2 — full-PIPELINE wall time, fab-scad vs OpenSCAD, over the real `models/` tree. Each side
+/// runs its complete file→Solid path via the differ's own `Driver::eval_file` (ours: resolve +
+/// evaluate + kernel build; oracle: spawn OpenSCAD, render, re-import) — the same code the
+/// correctness differential trusts, now timed. Serial on purpose (no contention noise); one timed
+/// pass per side per model (this is a shape-of-the-landscape sweep, not a microbenchmark). A side
+/// that errors or blows the budget is listed but excluded from ratios; an in-process timeout leaks
+/// its eval thread until exit (the compare_one precedent) — acceptable for a perf lane.
+///
+///   cargo test --release -p fab-scad --test models_harness -- --ignored --nocapture models_perf
+#[test]
+#[ignore = "minutes-long timed models/ sweep; run explicitly with --ignored (use --release)"]
+fn models_perf_vs_openscad() {
+    use fab_scad::differ::{Outcome, drivers};
+
+    const BUDGET: Duration = Duration::from_secs(30);
+
+    let manifest = manifest();
+    if !manifest.join("libs/BOSL2/std.scad").exists() {
+        eprintln!("note: libs/BOSL2 not checked out — perf sweep skipped");
+        return;
+    }
+    let drivers = drivers();
+    if drivers.len() < 2 {
+        eprintln!("note: OpenSCAD not found — perf sweep needs both engines");
+        return;
+    }
+    let libs: Vec<PathBuf> = vec![manifest.join("libs"), manifest.join("scad-lib")];
+    let files = model_files();
+    eprintln!(
+        "=== K.1.2 perf: {} models × {} drivers, serial, {}s budget/side ===",
+        files.len(),
+        drivers.len(),
+        BUDGET.as_secs()
+    );
+
+    // (model, per-driver: Some(ms) rendered | None err/timeout, kind label)
+    let mut rows: Vec<(String, Vec<(Option<u128>, &'static str)>)> = Vec::new();
+    for path in &files {
+        let rel = path.strip_prefix(&manifest).unwrap_or(path).display().to_string();
+        let mut cells = Vec::new();
+        for d in &drivers {
+            let model = path.clone();
+            let libs = libs.clone();
+            let name: String = d.name().to_string();
+            let (tx, rx) = mpsc::channel();
+            let start = Instant::now();
+            thread::Builder::new()
+                .name("perf-eval".to_string())
+                .stack_size(fab_scad::EVAL_STACK)
+                .spawn(move || {
+                    // `Solid` is !Send — ship only the outcome KIND; the wall time is measured on
+                    // the receiving side.
+                    let kind = match fab_scad::differ::drivers()
+                        .into_iter()
+                        .find(|dd| dd.name() == name.as_str())
+                        .expect("driver present")
+                        .eval_file(&model, &libs)
+                    {
+                        Outcome::Solid(_) => "solid",
+                        Outcome::Empty => "empty",
+                        Outcome::Rejected => "rejected",
+                    };
+                    let _ = tx.send(kind);
+                })
+                .expect("spawn perf thread");
+            let cell = match rx.recv_timeout(BUDGET) {
+                Ok("rejected") => (None, "rejected"),
+                Ok(k) => (Some(start.elapsed().as_millis()), k),
+                Err(_) => (None, "TIMEOUT"),
+            };
+            cells.push(cell);
+        }
+        let show = |c: &(Option<u128>, &'static str)| match c.0 {
+            Some(ms) => format!("{ms}ms"),
+            None => c.1.to_string(),
+        };
+        eprintln!("  {rel}: fab {} | oracle {}", show(&cells[0]), show(&cells[1]));
+        rows.push((rel, cells));
+    }
+
+    // Aggregate over models BOTH sides rendered.
+    let mut ratios: Vec<f64> = Vec::new();
+    let (mut fab_total, mut orc_total) = (0u128, 0u128);
+    let mut both = 0usize;
+    for (_, cells) in &rows {
+        if let (Some(f), Some(o)) = (cells[0].0, cells[1].0) {
+            both += 1;
+            fab_total += f;
+            orc_total += o;
+            ratios.push(o as f64 / (f as f64).max(1.0));
+        }
+    }
+    ratios.sort_by(f64::total_cmp);
+    let fab_only_fail = rows.iter().filter(|(_, c)| c[0].0.is_none() && c[1].0.is_some()).count();
+    let orc_only_fail = rows.iter().filter(|(_, c)| c[0].0.is_some() && c[1].0.is_none()).count();
+    eprintln!("\n=== K.1.2 summary ===");
+    eprintln!("both rendered: {both}/{} models", rows.len());
+    eprintln!("fab-scad failed/timed-out where OpenSCAD rendered: {fab_only_fail}");
+    eprintln!("OpenSCAD failed/timed-out where fab-scad rendered: {orc_only_fail}");
+    if both > 0 {
+        eprintln!(
+            "wall totals on the common set: fab-scad {:.1}s vs OpenSCAD {:.1}s (ratio {:.2}× — >1 means fab-scad faster)",
+            fab_total as f64 / 1e3,
+            orc_total as f64 / 1e3,
+            orc_total as f64 / fab_total as f64
+        );
+        eprintln!("median per-model oracle/fab ratio: {:.2}×", ratios[ratios.len() / 2]);
+    }
+}
+
 #[test]
 #[ignore = "minutes-long models/ sweep; run explicitly with --ignored"]
 fn models_profile_and_compare() {

@@ -152,6 +152,82 @@ where
     }
 }
 
+/// Order-preserving parallel map over an index range → `Vec` — the allocation-free sibling of
+/// [`map_collect`] for the `(0..n)` index-domain callers (which otherwise materialize an index Vec
+/// just to feed the slice seam). Output index `i` is always `f(i)`, so the result is deterministic.
+pub fn map_range<U, F>(n: usize, f: F) -> Vec<U>
+where
+    U: Send,
+    F: Fn(usize) -> U + Sync + Send,
+{
+    #[cfg(par_live)]
+    {
+        if n <= SEQ_THRESHOLD {
+            return (0..n).map(f).collect();
+        }
+        (0..n).into_par_iter().map(f).collect()
+    }
+    #[cfg(not(par_live))]
+    {
+        (0..n).map(f).collect()
+    }
+}
+
+/// Fill each slot of `items` from its own index — the deterministic parallel SCATTER. Slot `i`
+/// depends only on `(i, f)`, never on scheduling, so serial and parallel produce identical bytes by
+/// construction. This is the shape that replaces C++'s atomic-slot-allocation races (upstream
+/// Manifold's S.4 run-to-run nondeterminism class): callers precompute each item's slot (usually an
+/// exclusive scan) and write disjointly, instead of racing a shared cursor.
+pub fn for_each_mut<T, F>(items: &mut [T], f: F)
+where
+    T: Send,
+    F: Fn(usize, &mut T) + Sync + Send,
+{
+    #[cfg(par_live)]
+    {
+        if items.len() <= SEQ_THRESHOLD {
+            for (i, item) in items.iter_mut().enumerate() {
+                f(i, item);
+            }
+            return;
+        }
+        items
+            .par_iter_mut()
+            .enumerate()
+            .for_each(|(i, item)| f(i, item));
+    }
+    #[cfg(not(par_live))]
+    {
+        for (i, item) in items.iter_mut().enumerate() {
+            f(i, item);
+        }
+    }
+}
+
+/// STABLE sort through the seam: serial `slice::sort_by` below [`SEQ_THRESHOLD`] (and always off
+/// `par`), rayon's stable `par_sort_by` above it. Stability pins the output uniquely — equal
+/// elements keep their input order — so serial and parallel yield the IDENTICAL array for any
+/// comparator, including ones with ties. (`par_sort_unstable` would NOT have this property; never
+/// swap it in.)
+pub fn sort_by<T, F>(items: &mut [T], cmp: F)
+where
+    T: Send,
+    F: Fn(&T, &T) -> core::cmp::Ordering + Sync,
+{
+    #[cfg(par_live)]
+    {
+        if items.len() <= SEQ_THRESHOLD {
+            items.sort_by(&cmp);
+            return;
+        }
+        items.par_sort_by(&cmp);
+    }
+    #[cfg(not(par_live))]
+    {
+        items.sort_by(&cmp);
+    }
+}
+
 // -----------------------------------------------------------------------------
 // Built-in reducers. min/max/union are commutative + associative (CA); naive float sum is NOT.
 // -----------------------------------------------------------------------------
@@ -276,6 +352,37 @@ mod tests {
             })
             .collect();
         assert_eq!(reduce(&boxes, &BoxUnion), reduce_serial(&boxes, &BoxUnion));
+    }
+
+    #[test]
+    fn map_range_is_index_exact_both_sides_of_threshold() {
+        assert_eq!(map_range(500, |i| i * 3), (0..500).map(|i| i * 3).collect::<Vec<_>>());
+        assert_eq!(
+            map_range(20_000, |i| i * 3),
+            (0..20_000).map(|i| i * 3).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn for_each_mut_scatter_matches_serial_fill() {
+        // Above the threshold (rayon path under `par`): every slot must come out exactly as the
+        // serial fill — the deterministic-scatter property the boolean assembly leans on.
+        let mut par_side = vec![0u64; 20_000];
+        for_each_mut(&mut par_side, |i, slot| *slot = (i as u64).wrapping_mul(2_654_435_761));
+        let serial: Vec<u64> = (0..20_000u64).map(|i| i.wrapping_mul(2_654_435_761)).collect();
+        assert_eq!(par_side, serial);
+    }
+
+    #[test]
+    fn sort_by_stable_ties_match_std_above_threshold() {
+        // Keys collide (i % 7) so stability is load-bearing: the seam sort must equal std's stable
+        // sort EXACTLY, payload order included — that equality is what pins par == serial bytes.
+        let items: Vec<(u64, usize)> = (0..20_000).map(|i| ((i % 7) as u64, i)).collect();
+        let mut seam = items.clone();
+        sort_by(&mut seam, |a, b| a.0.cmp(&b.0));
+        let mut std_sorted = items;
+        std_sorted.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(seam, std_sorted);
     }
 
     #[test]

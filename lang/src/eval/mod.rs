@@ -748,7 +748,8 @@ impl<'a> FnOracle<'a> {
 #[doc(hidden)]
 #[must_use]
 pub fn bench_intrinsic(name: &str, params: &[Parameter], body: &Expr) -> Option<IntrinsicFn> {
-    intrinsics::lookup(name, params, body)
+    // Bench seam only — no dep/const guard here (the bench times the fn pointer, it doesn't dispatch it).
+    intrinsics::resolve(name, params, body).map(|e| e.func)
 }
 
 /// The intrinsic tier's entry shape: the call's evaluated args in, value out — the very fn pointer
@@ -1962,11 +1963,37 @@ fn tagged_globals<'a>(islands: &loader::Islands<'a>) -> BTreeMap<&'a str, &'a Ex
     out
 }
 
+/// A fingerprint-matched entry's REMAINING guards (O.5.2): the dep pins (each user fn the reference can
+/// reach must fingerprint to ITS OWN registry/pin reference — the fingerprint gate extended one hop) and the
+/// builtin-shadow check (a user fn shadowing a builtin the reference leans on reroutes the interpreted body
+/// while the native keeps the real builtin — BOSL2 itself shadows `reverse`, so this is a per-entry check,
+/// never a blanket). Returns the EXPLAIN reason the entry can't wire, or `None` when clear.
+fn guard_veto<'a>(
+    entry: &intrinsics::Entry,
+    functions: &BTreeMap<&'a str, (loader::FnDef<'a>, usize)>,
+) -> Option<String> {
+    for &dep in entry.deps {
+        let Some(&((p, b), _)) = functions.get(dep) else {
+            return Some(format!("dep `{dep}` is not defined in this program"));
+        };
+        if intrinsics::anchor_fp(dep) != Some(intrinsics::fingerprint(p, b)) {
+            return Some(format!("dep `{dep}` drifted from its pinned reference"));
+        }
+    }
+    for &b in entry.builtins {
+        if functions.contains_key(b) {
+            return Some(format!("builtin `{b}` is shadowed by a user function"));
+        }
+    }
+    None
+}
+
 /// Resolve each defined function to a registered INTRINSIC (O.1) — the fingerprint gate, run ONCE here at
 /// ctx build so call-time dispatch is a cheap name lookup. A function whose `(params, body)` fingerprints to
-/// a registry entry gets a native impl; everything else (the vast majority) is absent → interpreted. Built
-/// from the SAME resolved `functions` map the interpreter dispatches against, so the body matched is the body
-/// that would run.
+/// a registry entry AND clears its dep/builtin guards ([`guard_veto`]) gets a native impl; everything else
+/// (the vast majority) is absent → interpreted. Built from the SAME resolved `functions` map the interpreter
+/// dispatches against, so the body matched is the body that would run. CONST-GUARDED entries (non-empty
+/// `consts`) never wire here — they arm post-hoist in [`arm_guarded_intrinsics`].
 fn build_intrinsics<'a>(
     functions: &BTreeMap<&'a str, (loader::FnDef<'a>, usize)>,
 ) -> BTreeMap<&'a str, intrinsics::Intrinsic> {
@@ -1997,8 +2024,21 @@ fn build_intrinsics<'a>(
                 intrinsics::Plan::NotRegistered => {}
             }
         }
-        if let Some(func) = intrinsics::lookup(name, params, body) {
-            out.insert(name, func);
+        let Some(entry) = intrinsics::resolve(name, params, body) else {
+            continue;
+        };
+        if !entry.consts.is_empty() {
+            continue; // const-guarded: arms post-hoist (arm_guarded_intrinsics)
+        }
+        match guard_veto(entry, functions) {
+            None => {
+                out.insert(name, entry.func);
+            }
+            Some(why) => {
+                if explain {
+                    eprintln!("+ [intrinsic GUARD-DECLINED] {name} — {why} → INTERPRETED");
+                }
+            }
         }
     }
     out
@@ -2008,24 +2048,34 @@ fn build_intrinsics<'a>(
 /// constant (`eps=_EPSILON`) — the fingerprint proves the function's source, not the constants it names, so
 /// these can't wire at [`build_intrinsics`] time. Called AFTER island globals are built (they don't exist
 /// earlier — and mid-hoist a partially-bound scope could make even a correct bake diverge, so the interpreter
-/// runs there); wires each fingerprint-matched entry ONLY if every guarded constant's BOUND value in the fn's
-/// home-island global is bit-exactly the baked one. Nothing rebinds a top-level global after the hoist (a
-/// module-local shadow can't reach a default, which evaluates in the DEFINITION scope), so a verdict here
-/// holds for the whole eval. Returns the additions for the caller to insert — only the loader path and the
-/// JIT oracle arm; the raw-AST path (tests, single-program evals) fuses hoist+eval so guarded entries simply
-/// stay interpreted there (correct, just not accelerated).
+/// runs there); wires each fingerprint-matched entry ONLY if its dep/builtin guards clear ([`guard_veto`])
+/// AND every guarded constant's BOUND value in the fn's home-island global is bit-exactly the baked one.
+/// Nothing rebinds a top-level global after the hoist (a module-local shadow can't reach a default, which
+/// evaluates in the DEFINITION scope), so a verdict here holds for the whole eval. Returns the additions for
+/// the caller to insert — only the loader path and the JIT oracle arm; the raw-AST path (tests,
+/// single-program evals) fuses hoist+eval so guarded entries simply stay interpreted there (correct, just
+/// not accelerated).
 fn arm_guarded_intrinsics<'a>(ctx: &Ctx<'a>) -> Vec<(&'a str, intrinsics::Intrinsic)> {
     let explain = intrinsics::explain_on();
     let mut out = Vec::new();
     for (&name, &((params, body), home)) in &ctx.functions {
-        let Some((func, consts)) = intrinsics::lookup_guarded(name, params, body) else {
+        let Some(entry) = intrinsics::resolve(name, params, body) else {
             continue;
         };
+        if entry.consts.is_empty() {
+            continue; // unguarded: already wired (or vetoed) at build_intrinsics
+        }
+        if let Some(why) = guard_veto(entry, &ctx.functions) {
+            if explain {
+                eprintln!("+ [intrinsic GUARD-DECLINED] {name} — {why} → INTERPRETED");
+            }
+            continue;
+        }
         let globals = ctx.island_globals.borrow();
         let Some(scope) = globals.get(home) else {
             continue;
         };
-        let bad = consts.iter().find(|&&(cname, expected)| {
+        let bad = entry.consts.iter().find(|&&(cname, expected)| {
             !matches!(scope.lookup_opt(cname), Some(Value::Num(n)) if n.to_bits() == expected.to_bits())
         });
         match bad {
@@ -2033,7 +2083,7 @@ fn arm_guarded_intrinsics<'a>(ctx: &Ctx<'a>) -> Vec<(&'a str, intrinsics::Intrin
                 if explain {
                     eprintln!("+ [intrinsic ARMED] {name} — const guard ok");
                 }
-                out.push((name, func));
+                out.push((name, entry.func));
             }
             Some(&(cname, expected)) => {
                 if explain {
@@ -2775,6 +2825,83 @@ mod tests {
     #[test]
     fn tagged_functions_of_no_islands_is_empty() {
         assert!(tagged_functions(&Vec::new()).is_empty());
+    }
+
+    /// O.5.2 mechanism, direct: [`super::guard_veto`] via [`super::build_intrinsics`] — a fingerprint-matched
+    /// entry still declines when a DEP drifted/is absent (the interpreted reference would route through the
+    /// changed dep; the native bakes the pinned one) or when a user fn SHADOWS a builtin the reference leans
+    /// on (dispatch resolves user fns first).
+    #[test]
+    fn dep_drift_and_builtin_shadow_veto_wiring() {
+        use super::intrinsics::reference_of;
+        let is_finite = reference_of("is_finite").unwrap();
+        let is_nan = reference_of("is_nan").unwrap();
+
+        let wired = |src: &str, name: &str| {
+            build_ctx(&parse(src).unwrap(), crate::Config::default())
+                .intrinsics
+                .contains_key(name)
+        };
+        assert!(
+            wired(&format!("{is_nan}\n{is_finite}"), "is_finite"),
+            "exact dep → wires"
+        );
+        assert!(
+            !wired(
+                &format!("function is_nan(x) = false;\n{is_finite}"),
+                "is_finite"
+            ),
+            "a DRIFTED dep must veto (the interpreted body would call the new is_nan)"
+        );
+        assert!(
+            !wired(is_finite, "is_finite"),
+            "an ABSENT dep must veto (interpreting would error where the native wouldn't)"
+        );
+
+        let last = reference_of("last").unwrap();
+        assert!(wired(last, "last"), "no shadow → wires");
+        assert!(
+            !wired(&format!("function len(x) = 99;\n{last}"), "last"),
+            "a user fn shadowing `len` must veto (the interpreted body would call it)"
+        );
+    }
+
+    /// The pinned-dep chain end-to-end: `select` (deps is_vector/is_range/is_finite/is_nan) wires only when
+    /// every dep is present AND verbatim; dropping one pin declines it while the others stay wired.
+    #[test]
+    fn select_wires_only_with_its_pinned_deps_verbatim() {
+        use super::intrinsics::{pin_reference_of, reference_of};
+        let full = format!(
+            "{}\n{}\n{}\n{}\n{}",
+            reference_of("select").unwrap(),
+            pin_reference_of("is_vector").unwrap(),
+            pin_reference_of("is_range").unwrap(),
+            reference_of("is_finite").unwrap(),
+            reference_of("is_nan").unwrap(),
+        );
+        let full = parse(&full).unwrap();
+        let ctx = build_ctx(&full, crate::Config::default());
+        assert!(
+            ctx.intrinsics.contains_key("select"),
+            "all deps verbatim → select wires"
+        );
+        let sans_vector = format!(
+            "{}\n{}\n{}\n{}",
+            reference_of("select").unwrap(),
+            pin_reference_of("is_range").unwrap(),
+            reference_of("is_finite").unwrap(),
+            reference_of("is_nan").unwrap(),
+        );
+        let sans_vector = parse(&sans_vector).unwrap();
+        let ctx = build_ctx(&sans_vector, crate::Config::default());
+        assert!(
+            !ctx.intrinsics.contains_key("select"),
+            "missing is_vector → select declines"
+        );
+        assert!(
+            ctx.intrinsics.contains_key("is_finite"),
+            "the other entries keep wiring independently"
+        );
     }
 
     /// O.5.1 mechanism, direct: [`super::arm_guarded_intrinsics`] wires a fingerprint-matched guarded entry

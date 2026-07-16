@@ -39,23 +39,56 @@ pub(super) type Intrinsic = fn(&[Value]) -> crate::Result<Value>;
 /// One registered intrinsic: the exact function it stands in for. `reference` is the VERBATIM source of that
 /// function (one `function name(params) = body;`) — the single source of truth: its fingerprint gates
 /// dispatch, and the fast==slow harness runs its interpreted body as the oracle the `func` must bit-match.
-struct Entry {
+pub(super) struct Entry {
     /// The function name the intrinsic implements (registry bucket key).
-    name: &'static str,
+    pub(super) name: &'static str,
     /// The verbatim reference source of that function — fingerprinted + run as the harness oracle.
     reference: &'static str,
-    /// Named TOP-LEVEL CONSTANTS the reference hardcodes (default exprs like `eps=_EPSILON`, or body reads),
-    /// with the value the native impl bakes in. Empty = self-contained. Non-empty makes the entry
-    /// CONST-GUARDED (O.5.1): the fingerprint proves the FUNCTION source, not the constants it names, so a
-    /// user override (`_EPSILON = 1e-6;`) would make the baked value silently wrong. Guarded entries skip
-    /// [`lookup`] (never wire at ctx build) and arm ONLY after island globals are built, when each named
-    /// constant's BOUND value in the fn's home-island global bit-matches — see
+    /// Named TOP-LEVEL CONSTANTS the reference hardcodes (default exprs like `eps=_EPSILON`, or body reads
+    /// — `PI` counts too, it's just a seeded binding), with the value the native impl bakes in. Empty =
+    /// self-contained. Non-empty makes the entry CONST-GUARDED (O.5.1): the fingerprint proves the FUNCTION
+    /// source, not the constants it names, so a user override (`_EPSILON = 1e-6;`) would make the baked
+    /// value silently wrong. Guarded entries never wire at ctx build and arm ONLY after island globals are
+    /// built, when each named constant's BOUND value in the fn's home-island global bit-matches — see
     /// `super::arm_guarded_intrinsics`. Mismatch (or mid-hoist, before globals exist) → interpreted: the
     /// worst case stays "missed speedup, never a wrong answer".
-    consts: &'static [(&'static str, f64)],
+    pub(super) consts: &'static [(&'static str, f64)],
+    /// USER-FUNCTION names interpreting the reference can reach (O.5.2 dep pins), TRANSITIVELY CLOSED by the
+    /// author over every arg shape the native accepts (`select` → `is_vector`/`is_range` → `is_finite` →
+    /// `is_nan`; a branch no accepted arg shape can reach — `all_nonzero` behind select's fixed 1-arg
+    /// `is_vector(start)` — is excluded). The entry wires only if each dep's DEFINED body fingerprints to
+    /// that dep's own registry/[`PINS`] reference — the fingerprint gate extended one hop, because the
+    /// native bakes the dep's semantics without the dep's own fingerprint ever being consulted at dispatch.
+    pub(super) deps: &'static [&'static str],
+    /// BUILTIN names interpreting the reference (or a pinned dep) can reach. A user function may SHADOW a
+    /// builtin (dispatch resolves user fns first — BOSL2 itself shadows `reverse`), which would reroute the
+    /// interpreted body while the native keeps the real builtin. The entry wires only if none of these names
+    /// has a user-function definition.
+    pub(super) builtins: &'static [&'static str],
     /// The native implementation.
-    func: Intrinsic,
+    pub(super) func: Intrinsic,
 }
+
+/// Reference-only dependency anchors: BOSL2 functions we PIN (verbatim source → fingerprint) because a
+/// registry entry's reference calls them, without shipping a native impl of our own. [`anchor_fp`] resolves
+/// a dep name against entries first, then here.
+static PINS: &[(&str, &str)] = &[
+    // vectors.scad — `select`'s start-vector assert calls `is_vector(start)` (1-arg: the
+    // `all_nonzero`/`zero`/`length` branches are unreachable, so they add no further deps).
+    (
+        "is_vector",
+        "function is_vector(v, length, zero, all_nonzero=false, eps=_EPSILON) =
+    is_list(v) && len(v)>0 && []==[for(vi=v) if(!is_finite(vi)) 0]
+    && (is_undef(length) || (assert(is_num(length))len(v)==length))
+    && (is_undef(zero) || ((norm(v) >= eps) == !zero))
+    && (!all_nonzero || all_nonzero(v)) ;",
+    ),
+    // utility.scad — `select`'s other assert branch.
+    (
+        "is_range",
+        "function is_range(x) = !is_list(x) && is_finite(x[0]) && is_finite(x[1]) && is_finite(x[2]) ;",
+    ),
+];
 
 /// The intrinsic registry. `_fab_poc_sq` is the O.1 mechanism POC (a synthetic, collision-proof name); the
 /// rest are O.2 — the profile's hot BOSL2 predicates. Each entry's `reference` is the VERBATIM BOSL2 source
@@ -76,6 +109,8 @@ static REGISTRY: &[Entry] = &[
         name: "_fab_poc_sq",
         reference: "function _fab_poc_sq(x) = x * x;",
         consts: &[],
+        deps: &[],
+        builtins: &[],
         func: poc_sq,
     },
     // BOSL2 `is_def`/`is_str` — the two hottest LEAF predicates (called in nearly every optional-arg check
@@ -84,12 +119,16 @@ static REGISTRY: &[Entry] = &[
         name: "is_def",
         reference: "function is_def(x) = !is_undef(x);",
         consts: &[],
+        deps: &[],
+        builtins: &["is_undef"],
         func: is_def,
     },
     Entry {
         name: "is_str",
         reference: "function is_str(x) = is_string(x);",
         consts: &[],
+        deps: &[],
+        builtins: &["is_string"],
         func: is_str,
     },
     // BOSL2 `is_nan`/`is_finite` — the #1 and #2 hottest user functions on the model profile (56% of calls
@@ -98,12 +137,16 @@ static REGISTRY: &[Entry] = &[
         name: "is_nan",
         reference: "function is_nan(x) = (x!=x);",
         consts: &[],
+        deps: &[],
+        builtins: &[],
         func: is_nan,
     },
     Entry {
         name: "is_finite",
         reference: "function is_finite(x) = is_num(x) && !is_nan(0*x);",
         consts: &[],
+        deps: &["is_nan"],
+        builtins: &["is_num"],
         func: is_finite,
     },
     // BOSL2 `last` (9.6% of user-fn calls) + `default` (2.5%) — the next two down the profile. Both call only
@@ -113,12 +156,16 @@ static REGISTRY: &[Entry] = &[
         name: "last",
         reference: "function last(list) = list[len(list)-1];",
         consts: &[],
+        deps: &[],
+        builtins: &["len"],
         func: last,
     },
     Entry {
         name: "default",
         reference: "function default(v,dflt=undef) = is_undef(v)? dflt : v;",
         consts: &[],
+        deps: &[],
+        builtins: &["is_undef"],
         func: default,
     },
     // `_is_liststr` (2.2%) — a pure leaf (calls only the `is_str` intrinsic + the `is_list` builtin), from
@@ -128,12 +175,16 @@ static REGISTRY: &[Entry] = &[
         name: "_is_liststr",
         reference: "function _is_liststr(s) = is_list(s) || is_str(s);",
         consts: &[],
+        deps: &["is_str"],
+        builtins: &["is_list", "is_string"],
         func: is_liststr,
     },
     Entry {
         name: "point3d",
         reference: "function point3d(p, fill=0) = assert(is_list(p)) [for (i=[0:2]) (p[i]==undef)? fill : p[i]];",
         consts: &[],
+        deps: &[],
+        builtins: &["is_list"],
         func: point3d,
     },
     // BOSL2 `select` (lists.scad) — the WRAPAROUND list indexer, the single hottest function in the path/list
@@ -162,6 +213,8 @@ static REGISTRY: &[Entry] = &[
                       ? [ for (i = [s:1:e])   list[i] ] \
                       : [ for (i = [s:1:l-1]) list[i], for (i = [0:1:e])   list[i] ] ;",
         consts: &[],
+        deps: &["is_vector", "is_range", "is_finite", "is_nan"],
+        builtins: &["len", "is_list", "is_string", "is_num", "norm", "is_undef"],
         func: select,
     },
     // The CONST-GUARD POC (O.5.1, a synthetic collision-proof name like `_fab_poc_sq`): its reference bakes
@@ -172,6 +225,8 @@ static REGISTRY: &[Entry] = &[
         name: "_fab_poc_near0",
         reference: "function _fab_poc_near0(x) = abs(x) < _EPSILON;",
         consts: &[("_EPSILON", 1e-9)],
+        deps: &[],
+        builtins: &["abs"],
         func: poc_near0,
     },
 ];
@@ -458,22 +513,45 @@ fn select_assert(msg: &str) -> crate::Error {
     crate::Error::Eval(format!("assert failed: {msg}"))
 }
 
-/// `name → (fingerprint, intrinsic, const guard)` for every registry entry, computed ONCE by parsing each
-/// `reference` and fingerprinting its `(params, body)`. Lazy + cached: the parse cost is paid the first time
-/// an intrinsic is looked up in the process, never per call. A `reference` that doesn't parse to a single
-/// `function` def is a registry BUG — it's dropped with a debug assert rather than silently mis-registering.
-type Row = (&'static str, u64, Intrinsic, &'static [(&'static str, f64)]);
-fn table() -> &'static [Row] {
-    static TABLE: OnceLock<Vec<Row>> = OnceLock::new();
+/// `(fingerprint, entry)` for every registry entry, computed ONCE by parsing each `reference` and
+/// fingerprinting its `(params, body)`. Lazy + cached: the parse cost is paid the first time an intrinsic is
+/// looked up in the process, never per call. A `reference` that doesn't parse to a single `function` def is
+/// a registry BUG — it's dropped with a debug assert rather than silently mis-registering.
+fn table() -> &'static [(u64, &'static Entry)] {
+    static TABLE: OnceLock<Vec<(u64, &'static Entry)>> = OnceLock::new();
     TABLE.get_or_init(|| {
         REGISTRY
             .iter()
-            .filter_map(|entry| {
-                let fp = reference_fingerprint(entry.reference)?;
-                Some((entry.name, fp, entry.func, entry.consts))
-            })
+            .filter_map(|entry| Some((reference_fingerprint(entry.reference)?, entry)))
             .collect()
     })
+}
+
+/// The [`PINS`] fingerprints, same lazy shape as [`table`].
+fn pin_table() -> &'static [(&'static str, u64)] {
+    static TABLE: OnceLock<Vec<(&'static str, u64)>> = OnceLock::new();
+    TABLE.get_or_init(|| {
+        PINS.iter()
+            .filter_map(|&(name, reference)| Some((name, reference_fingerprint(reference)?)))
+            .collect()
+    })
+}
+
+/// The reference fingerprint a DEP name must match to satisfy an entry's dep pin: the dep's own registry
+/// entry if it has one, else its [`PINS`] row. `None` = the dep isn't anchored anywhere — a registry
+/// authoring bug the depending entry then never wires over.
+#[must_use]
+pub(super) fn anchor_fp(name: &str) -> Option<u64> {
+    table()
+        .iter()
+        .find(|(_, e)| e.name == name)
+        .map(|(fp, _)| *fp)
+        .or_else(|| {
+            pin_table()
+                .iter()
+                .find(|(n, _)| *n == name)
+                .map(|(_, fp)| *fp)
+        })
 }
 
 /// Parse a registry `reference` (one `function` def) and fingerprint it, or `None` if it isn't exactly that
@@ -493,36 +571,20 @@ fn reference_fingerprint(reference: &str) -> Option<u64> {
     }
 }
 
-/// Resolve a defined function to its UNGUARDED intrinsic, if one is registered for EXACTLY this body. Called
-/// ONCE per function at [`super::build_ctx`] time (never per call): fingerprint the running `(params, body)`,
+/// Resolve a defined function to its registry entry, if one is registered for EXACTLY this body. Called ONCE
+/// per function at [`super::build_ctx`] time (never per call): fingerprint the running `(params, body)`,
 /// then match on (name, fingerprint). A miss — no entry for the name, or the name matches but the body
-/// doesn't — returns `None`, so the interpreter runs the real body. This is the never-silently-wrong gate.
-/// CONST-GUARDED entries (non-empty `consts`) never resolve here — they arm later, after island globals are
-/// built, via [`lookup_guarded`] + `super::arm_guarded_intrinsics` (their baked constants can't be checked at
-/// ctx build, and mid-hoist the interpreter must run).
+/// doesn't — returns `None`, so the interpreter runs the real body. This is the never-silently-wrong gate's
+/// FIRST hop; the caller must still clear the entry's `deps`/`builtins` guards (and, for a non-empty
+/// `consts`, arm post-hoist) before wiring `func` — see `super::build_intrinsics` /
+/// `super::arm_guarded_intrinsics`.
 #[must_use]
-pub(super) fn lookup(name: &str, params: &[Parameter], body: &Expr) -> Option<Intrinsic> {
+pub(super) fn resolve(name: &str, params: &[Parameter], body: &Expr) -> Option<&'static Entry> {
     let fp = fingerprint(params, body);
     table()
         .iter()
-        .find(|(n, f, _, consts)| *n == name && *f == fp && consts.is_empty())
-        .map(|(_, _, func, _)| *func)
-}
-
-/// The CONST-GUARDED half of [`lookup`]: a fingerprint-matched entry with a non-empty const guard, returned
-/// WITH the guard so the caller (`super::arm_guarded_intrinsics`) can verify each named constant's bound
-/// value before wiring.
-#[must_use]
-pub(super) fn lookup_guarded(
-    name: &str,
-    params: &[Parameter],
-    body: &Expr,
-) -> Option<(Intrinsic, &'static [(&'static str, f64)])> {
-    let fp = fingerprint(params, body);
-    table()
-        .iter()
-        .find(|(n, f, _, consts)| *n == name && *f == fp && !consts.is_empty())
-        .map(|(_, _, func, consts)| (*func, *consts))
+        .find(|(f, e)| e.name == name && *f == fp)
+        .map(|(_, e)| *e)
 }
 
 /// Test-only access to a registry entry's reference source, for the fast==slow harness.
@@ -532,6 +594,12 @@ pub(super) fn reference_of(name: &str) -> Option<&'static str> {
         .iter()
         .find(|e| e.name == name)
         .map(|e| e.reference)
+}
+
+/// Test-only access to a PIN's reference source (dep-guard tests assemble programs from these).
+#[cfg(test)]
+pub(super) fn pin_reference_of(name: &str) -> Option<&'static str> {
+    PINS.iter().find(|(n, _)| *n == name).map(|(_, r)| *r)
 }
 
 /// How a defined function relates to the intrinsic registry — the EXPLAIN classification (O.3).
@@ -554,10 +622,9 @@ pub(super) fn classify(name: &str, params: &[Parameter], body: &Expr) -> Plan {
     if !REGISTRY.iter().any(|e| e.name == name) {
         return Plan::NotRegistered;
     }
-    // Fingerprint-level truth: a const-guarded match is WIRED here (the source matched); whether its guard
-    // then arms is a separate, per-program verdict `arm_guarded_intrinsics` prints under the same EXPLAIN.
-    let fp = fingerprint(params, body);
-    if table().iter().any(|(n, f, ..)| *n == name && *f == fp) {
+    // Fingerprint-level truth: a guarded match is WIRED here (the source matched); whether its deps/consts
+    // guards then clear is a separate, per-program verdict the build/arm steps print under the same EXPLAIN.
+    if resolve(name, params, body).is_some() {
         Plan::Wired
     } else {
         Plan::Drift
@@ -572,8 +639,8 @@ pub(super) fn classify(name: &str, params: &[Parameter], body: &Expr) -> Plan {
 pub(super) fn reference_fp(name: &str) -> Option<u64> {
     table()
         .iter()
-        .find(|(n, ..)| *n == name)
-        .map(|(_, fp, ..)| *fp)
+        .find(|(_, e)| e.name == name)
+        .map(|(fp, _)| *fp)
 }
 
 /// Is the `FAB_EXPLAIN` intrinsic-plan report on? Cached once (env read per ctx build would be silly).
@@ -780,7 +847,7 @@ fn hash_opt(e: Option<&Expr>, h: &mut impl Hasher) {
     reason = "test harness: expect/panic ARE the assertions; intrinsics must bit-match, so == is exact"
 )]
 mod tests {
-    use super::{fingerprint, lookup, poc_sq, reference_of};
+    use super::{fingerprint, poc_sq, reference_of, resolve};
     use crate::eval::build_ctx;
     use crate::parser::{Expr, Parameter, StmtKind, parse};
     use crate::{Scope, Value, eval_expr};
@@ -1045,21 +1112,24 @@ mod tests {
     }
 
     #[test]
-    fn a_const_guarded_entry_never_wires_through_the_unguarded_lookup() {
-        // The build-time gate: `lookup` (what `build_intrinsics` wires from) must SKIP a guarded entry even
-        // on an exact fingerprint match — it arms later, after the guard verifies (`lookup_guarded`).
+    fn a_const_guarded_entry_resolves_with_its_guard_attached() {
+        // The build-time gate reads `consts` off the resolved entry: non-empty means build_intrinsics skips
+        // it (it arms post-hoist), and the guard travels with the entry for the arm step to verify.
         let (p, b) = parse_fn(reference_of("_fab_poc_near0").unwrap());
+        let entry = resolve("_fab_poc_near0", &p, &b).expect("exact fingerprint resolves");
+        assert_eq!(entry.consts, &[("_EPSILON", 1e-9)]);
         assert!(
-            lookup("_fab_poc_near0", &p, &b).is_none(),
-            "guarded entries must not wire at ctx build"
+            resolve("_fab_poc_sq", &p, &b).is_none(),
+            "same body, different name → no entry"
+        );
+        // The pin anchors resolve too — a dep check needs their fingerprints.
+        assert!(
+            super::anchor_fp("is_range").is_some(),
+            "PINS must anchor is_range"
         );
         assert!(
-            super::lookup_guarded("_fab_poc_near0", &p, &b).is_some(),
-            "the guarded lookup must find it (exact fingerprint)"
-        );
-        assert!(
-            super::lookup_guarded("_fab_poc_sq", &p, &b).is_none(),
-            "an unguarded name never resolves through the guarded lookup"
+            super::anchor_fp("no_such_fn").is_none(),
+            "an unanchored name is a registry authoring bug the dep check declines over"
         );
     }
 
@@ -1069,24 +1139,24 @@ mod tests {
         // perturbation (different body) or a name mismatch → the interpreter runs the real body instead.
         let (p, b) = parse_fn(reference_of("_fab_poc_sq").unwrap());
         assert!(
-            lookup("_fab_poc_sq", &p, &b).is_some(),
+            resolve("_fab_poc_sq", &p, &b).is_some(),
             "the exact reference must register"
         );
 
         let (p2, b2) = parse_fn("function _fab_poc_sq(x) = x + x;");
         assert!(
-            lookup("_fab_poc_sq", &p2, &b2).is_none(),
+            resolve("_fab_poc_sq", &p2, &b2).is_none(),
             "a changed body must NOT match"
         );
 
         let (p3, b3) = parse_fn("function _fab_poc_sq(x, y) = x * x;");
         assert!(
-            lookup("_fab_poc_sq", &p3, &b3).is_none(),
+            resolve("_fab_poc_sq", &p3, &b3).is_none(),
             "a changed arity must NOT match"
         );
 
         assert!(
-            lookup("some_other_name", &p, &b).is_none(),
+            resolve("some_other_name", &p, &b).is_none(),
             "same body, wrong name → no match"
         );
     }
@@ -1149,7 +1219,9 @@ mod tests {
         for name in ["is_def", "is_str"] {
             let reference = reference_of(name).expect("registered");
             let (params, body) = parse_fn(reference);
-            let func = lookup(name, &params, &body).expect("its own reference must register");
+            let func = resolve(name, &params, &body)
+                .expect("its own reference must register")
+                .func;
             for input in &cases {
                 let one = [input.clone()];
                 assert!(
@@ -1172,7 +1244,9 @@ mod tests {
         // wrong there — the intrinsic routes non-numbers through the real `!=`, and this proves it.
         let reference = reference_of("is_nan").expect("registered");
         let (params, body) = parse_fn(reference);
-        let func = lookup("is_nan", &params, &body).expect("its own reference must register");
+        let func = resolve("is_nan", &params, &body)
+            .expect("its own reference must register")
+            .func;
         for input in value_battery() {
             let one = [input.clone()];
             assert!(
@@ -1193,7 +1267,9 @@ mod tests {
         // direct `f64::is_finite` collapse equals the full is_num/`0*x`/is_nan chain across every value shape.
         let reference = reference_of("is_finite").expect("registered");
         let (params, body) = parse_fn(reference);
-        let func = lookup("is_finite", &params, &body).expect("its own reference must register");
+        let func = resolve("is_finite", &params, &body)
+            .expect("its own reference must register")
+            .func;
         let deps = ["function is_nan(x) = (x!=x);"];
         for input in value_battery() {
             let one = [input.clone()];
@@ -1215,7 +1291,9 @@ mod tests {
         // index -1 → undef), a string (last char), and non-indexables (num/range/undef → undef).
         let reference = reference_of("last").expect("registered");
         let (params, body) = parse_fn(reference);
-        let func = lookup("last", &params, &body).expect("its own reference must register");
+        let func = resolve("last", &params, &body)
+            .expect("its own reference must register")
+            .func;
         for input in value_battery() {
             let one = [input.clone()];
             assert!(
@@ -1239,7 +1317,9 @@ mod tests {
         // its undef default) and 2-arg forms across the battery. `is_undef` is a builtin → plain oracle.
         let reference = reference_of("default").expect("registered");
         let (params, body) = parse_fn(reference);
-        let func = lookup("default", &params, &body).expect("its own reference must register");
+        let func = resolve("default", &params, &body)
+            .expect("its own reference must register")
+            .func;
         let battery = value_battery();
         for v in &battery {
             let one = [v.clone()];
@@ -1263,7 +1343,9 @@ mod tests {
         // (is_list is a builtin). True for List/NumList/Str, false otherwise, across the whole battery.
         let reference = reference_of("_is_liststr").expect("registered");
         let (params, body) = parse_fn(reference);
-        let func = lookup("_is_liststr", &params, &body).expect("its own reference must register");
+        let func = resolve("_is_liststr", &params, &body)
+            .expect("its own reference must register")
+            .func;
         let deps = ["function is_str(x) = is_string(x);"];
         for input in value_battery() {
             let one = [input.clone()];
@@ -1282,7 +1364,9 @@ mod tests {
         // paths — including the NumList-vs-List coalescing of the result.
         let reference = reference_of("point3d").expect("registered");
         let (params, body) = parse_fn(reference);
-        let func = lookup("point3d", &params, &body).expect("its own reference must register");
+        let func = resolve("point3d", &params, &body)
+            .expect("its own reference must register")
+            .func;
         for input in value_battery() {
             let one = [input.clone()];
             assert!(
@@ -1329,7 +1413,9 @@ mod tests {
         // no definition — an unknown `_EPSILON` resolves to undef and is never read.
         let reference = reference_of("select").expect("registered");
         let (params, body) = parse_fn(reference);
-        let func = lookup("select", &params, &body).expect("its own reference must register");
+        let func = resolve("select", &params, &body)
+            .expect("its own reference must register")
+            .func;
         let deps = [
             "function is_nan(x) = (x!=x);",
             "function is_finite(x) = is_num(x) && !is_nan(0*x);",

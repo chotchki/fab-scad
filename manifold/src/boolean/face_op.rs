@@ -102,14 +102,22 @@ struct LocalEdge {
 
 /// Emit `tris` (triples of GLOBAL `face_halfedges` buffer indices — each names a polygon corner) as
 /// output half-edges starting at `first_tri`, pairing interior diagonals within the face and recording
-/// boundary edges into `contour2tri` (`face_op.cpp` `WriteLocalTriangles`). QUAD PATH ONLY: the naive
-/// reverse-label match is sound only while every directed label edge is unique — guaranteed for ≤2
-/// triangles of a single loop, NOT for general faces (see [`write_general_triangulation`]).
+/// boundary edges into the face's `contour2tri` chunk (`face_op.cpp` `WriteLocalTriangles`). QUAD PATH
+/// ONLY: the naive reverse-label match is sound only while every directed label edge is unique —
+/// guaranteed for ≤2 triangles of a single loop, NOT for general faces (see
+/// [`write_general_triangulation`]).
+///
+/// CHUNKED FORM (parallel pass 2): `hes_out` is the face's own `3 * numTri` slice of the output
+/// half-edge array and `c2t` its `face_edge[face]..face_edge[face+1]` slice of `contour2tri` —
+/// slot indices are chunk-LOCAL (`label - label_base` for `c2t`), while the pair VALUES stay global
+/// [`HalfedgeId`]s built from `first_tri`. Same values into the same slots as the old whole-array
+/// writes, so serial == parallel bytes by construction.
 fn write_local_triangles(
-    out: &mut Mesh,
-    contour2tri: &mut [HalfedgeId],
+    hes_out: &mut [crate::mesh::Halfedge],
+    c2t: &mut [HalfedgeId],
     hes: &[Halfedge],
     first_tri: usize,
+    label_base: i32,
     tris: &[[i32; 3]],
 ) {
     let first_out = TriId::from_usize(first_tri).first_halfedge();
@@ -125,16 +133,17 @@ fn write_local_triangles(
                 end,
                 out: out_idx,
             });
-            out.set_start(out_idx, hes[start as usize].start_vert);
-            out.set_prop(out_idx, hes[start as usize].prop_vert);
-            out.set_pair(out_idx, HalfedgeId::NONE);
+            let slot = &mut hes_out[num_edge as usize];
+            slot.start_vert = hes[start as usize].start_vert;
+            slot.prop_vert = hes[start as usize].prop_vert;
+            slot.paired_halfedge = HalfedgeId::NONE;
             num_edge += 1;
         }
     }
 
     // Interior diagonals occur twice (once per adjacent triangle, reversed) → pair them; a boundary edge
     // occurs once → stash it in contour2tri for the later cross-face stitch.
-    for e in &local_edges {
+    for (local, e) in local_edges.iter().enumerate() {
         let mut pair = HalfedgeId::NONE;
         for cand in &local_edges {
             if cand.start == e.end && cand.end == e.start {
@@ -143,9 +152,9 @@ fn write_local_triangles(
             }
         }
         if pair.is_some() {
-            out.set_pair(e.out, pair);
+            hes_out[local].paired_halfedge = pair;
         } else {
-            contour2tri[e.start as usize] = e.out;
+            c2t[(e.start - label_base) as usize] = e.out;
         }
     }
 }
@@ -169,11 +178,15 @@ struct FaceHalfedge {
 /// (keyed by the contour edge's start label) for the cross-face stitch. Consuming matches is what keeps
 /// the pairing an involution when a degenerate self-touching face uses the same label diagonal twice
 /// (fuzzer trophy M.2.4b) — naive first-match pairs both instances to one partner and breaks it.
+///
+/// CHUNKED FORM (parallel pass 2): `hes_out`/`c2t` are the face's own disjoint slices (see
+/// [`write_local_triangles`]) — chunk-local slots, global [`HalfedgeId`] values.
 fn write_general_triangulation(
-    out: &mut Mesh,
-    contour2tri: &mut [HalfedgeId],
+    hes_out: &mut [crate::mesh::Halfedge],
+    c2t: &mut [HalfedgeId],
     hes: &[Halfedge],
     first_tri: usize,
+    label_base: i32,
     loops: &[Vec<i32>],
     tris: &[[i32; 3]],
 ) {
@@ -223,14 +236,14 @@ fn write_general_triangulation(
     let num_tri_he = halfedges.len() as i32 - contour_end;
     for local in 0..num_tri_he {
         let he = &halfedges[(contour_end + local) as usize];
-        let out_idx = first_out.offset(local);
-        out.set_start(out_idx, hes[he.start as usize].start_vert);
-        out.set_prop(out_idx, hes[he.start as usize].prop_vert);
-        if he.pair >= contour_end {
-            out.set_pair(out_idx, first_out.offset(he.pair - contour_end));
+        let slot = &mut hes_out[local as usize];
+        slot.start_vert = hes[he.start as usize].start_vert;
+        slot.prop_vert = hes[he.start as usize].prop_vert;
+        slot.paired_halfedge = if he.pair >= contour_end {
+            first_out.offset(he.pair - contour_end)
         } else {
-            out.set_pair(out_idx, HalfedgeId::NONE);
-        }
+            HalfedgeId::NONE
+        };
     }
 
     // Contour pass: each paired contour half-edge names the boundary triangle-edge for the cross-face
@@ -246,7 +259,7 @@ fn write_general_triangulation(
         if he.pair < contour_end {
             continue;
         }
-        contour2tri[he.end as usize] = first_out.offset(he.pair - contour_end);
+        c2t[(he.end - label_base) as usize] = first_out.offset(he.pair - contour_end);
     }
 }
 
@@ -381,56 +394,122 @@ pub fn face2tri(
     let mut tri_ref = vec![placeholder; total_tris];
     let mut contour2tri = vec![HalfedgeId::NONE; face_halfedges.len()];
 
-    // Pass 2: write each face's triangles (with intra-face pairing + boundary recording), normals + refs.
-    // The quad fast path keeps C++ `WriteLocalTriangles` (label matching is safe at ≤2 triangles of one
-    // loop — labels are unique); every other face goes through the `HalfedgeTriangulation` port.
-    for face in 0..num_face {
-        let (loops, tris) = &face_polys[face];
-        if tris.is_empty() {
-            continue;
+    // Pass 2 (PARALLEL, C++ `outputFace` Par ≥1e4 at face_op.cpp:342): write each face's triangles
+    // (with intra-face pairing + boundary recording), normals + refs. The quad fast path keeps C++
+    // `WriteLocalTriangles` (label matching is safe at ≤2 triangles of one loop — labels are unique);
+    // every other face goes through the `HalfedgeTriangulation` port.
+    //
+    // DETERMINISM: every write a face makes lands in slots OWNED by that face — output half-edges
+    // `3*tri_offset[face]..3*tri_offset[face+1]`, normals/refs `tri_offset[face]..tri_offset[face+1]`,
+    // and `contour2tri` only at the face's own labels `face_edge[face]..face_edge[face+1]` (both
+    // writers key `contour2tri` by the face's OWN corner labels). So we pre-split all four arrays into
+    // per-face chunks and drive `par::for_each_mut` over the chunk structs: slot values are pure
+    // per-face functions of the shared assembly inputs, writes are disjoint by construction — the
+    // deterministic scatter, NOT C++'s tbb emit-order scheme (which is only safe because ITS writes
+    // are disjoint too; ours makes the disjointness structural).
+    struct FaceSlots<'a> {
+        hes_out: &'a mut [crate::mesh::Halfedge],
+        normals: &'a mut [crate::linalg::Vec3],
+        refs: &'a mut [TriRef],
+        c2t: &'a mut [HalfedgeId],
+    }
+    {
+        let mut face_slots: Vec<FaceSlots> = Vec::with_capacity(num_face);
+        let mut hes_rest: &mut [crate::mesh::Halfedge] = &mut out.halfedge;
+        let mut norm_rest: &mut [crate::linalg::Vec3] = &mut tri_normal;
+        let mut ref_rest: &mut [TriRef] = &mut tri_ref;
+        let mut c2t_rest: &mut [HalfedgeId] = &mut contour2tri;
+        for face in 0..num_face {
+            let ntri = tri_offset[face + 1] - tri_offset[face];
+            let nedge = (face_edge[face + 1] - face_edge[face]) as usize;
+            let (hes_out, hr) = hes_rest.split_at_mut(3 * ntri);
+            let (normals, nr) = norm_rest.split_at_mut(ntri);
+            let (refs, rr) = ref_rest.split_at_mut(ntri);
+            let (c2t, cr) = c2t_rest.split_at_mut(nedge);
+            hes_rest = hr;
+            norm_rest = nr;
+            ref_rest = rr;
+            c2t_rest = cr;
+            face_slots.push(FaceSlots {
+                hes_out,
+                normals,
+                refs,
+                c2t,
+            });
         }
-        let num_edge = (face_edge[face + 1] - face_edge[face]) as usize;
-        // Tri AND quad take C++ `WriteLocalTriangles` (label matching is safe at ≤2 triangles of
-        // one loop). Routing the tri path's loop-less output through the GENERAL writer left every
-        // tri boundary edge out of `contour2tri` — NONE pairs → runaway `for_vert` orbits.
-        if num_edge <= 4 {
-            write_local_triangles(
-                out,
-                &mut contour2tri,
-                face_halfedges,
-                tri_offset[face],
-                tris,
-            );
-        } else {
-            write_general_triangulation(
-                out,
-                &mut contour2tri,
-                face_halfedges,
-                tri_offset[face],
-                loops,
-                tris,
-            );
-        }
-        let face_ref = halfedge_ref[face_edge[face] as usize];
-        for t in 0..tris.len() {
-            tri_normal[tri_offset[face] + t] = face_normal_in[face];
-            tri_ref[tri_offset[face] + t] = face_ref;
-        }
+        crate::par::for_each_mut(&mut face_slots, |face, slots| {
+            let (loops, tris) = &face_polys[face];
+            if tris.is_empty() {
+                return;
+            }
+            let num_edge = (face_edge[face + 1] - face_edge[face]) as usize;
+            // Tri AND quad take C++ `WriteLocalTriangles` (label matching is safe at ≤2 triangles of
+            // one loop). Routing the tri path's loop-less output through the GENERAL writer left every
+            // tri boundary edge out of `contour2tri` — NONE pairs → runaway `for_vert` orbits.
+            if num_edge <= 4 {
+                write_local_triangles(
+                    slots.hes_out,
+                    slots.c2t,
+                    face_halfedges,
+                    tri_offset[face],
+                    face_edge[face],
+                    tris,
+                );
+            } else {
+                write_general_triangulation(
+                    slots.hes_out,
+                    slots.c2t,
+                    face_halfedges,
+                    tri_offset[face],
+                    face_edge[face],
+                    loops,
+                    tris,
+                );
+            }
+            let face_ref = halfedge_ref[face_edge[face] as usize];
+            for t in 0..tris.len() {
+                slots.normals[t] = face_normal_in[face];
+                slots.refs[t] = face_ref;
+            }
+        });
     }
 
-    // Cross-face stitch: pair each boundary output half-edge with the triangulated half-edge of the
-    // face-half-edge's reverse (its `paired_halfedge`, a buffer index), via `contour2tri`.
-    for edge in 0..face_halfedges.len() {
-        let tri_edge = contour2tri[edge];
-        if tri_edge.is_none() {
-            continue;
+    // Cross-face stitch (PARALLEL, C++ Par ≥1e5 at face_op.cpp:355): pair each boundary output
+    // half-edge with the triangulated half-edge of the face-half-edge's reverse (its
+    // `paired_halfedge`, a buffer index), via `contour2tri`.
+    //
+    // DETERMINISM: the stitch is per-face independent in its WRITES — `contour2tri[edge]` was
+    // written by edge's own face and points into that face's output-halfedge chunk (both writers
+    // only record their OWN output half-edges), so chunking `out.halfedge` per face again gives
+    // disjoint writes; the cross-face part (`contour2tri[pair]`, the other face's boundary edge) is
+    // a pure READ of the now-frozen `contour2tri`. Within a face, edges run in the original
+    // ascending order, so even a degenerate duplicate `tri_edge` resolves exactly as the old serial
+    // loop did.
+    let contour2tri = contour2tri; // frozen: reads only from here on
+    {
+        let mut stitch_chunks: Vec<&mut [crate::mesh::Halfedge]> = Vec::with_capacity(num_face);
+        let mut rest: &mut [crate::mesh::Halfedge] = &mut out.halfedge;
+        for face in 0..num_face {
+            let ntri = tri_offset[face + 1] - tri_offset[face];
+            let (chunk, r) = rest.split_at_mut(3 * ntri);
+            stitch_chunks.push(chunk);
+            rest = r;
         }
-        let pair = face_halfedges[edge].paired_halfedge;
-        if pair.is_none() {
-            continue;
-        }
-        let pair_tri = contour2tri[pair.u()];
-        out.set_pair(tri_edge, pair_tri);
+        crate::par::for_each_mut(&mut stitch_chunks, |face, chunk| {
+            let he_base = 3 * tri_offset[face];
+            for edge in face_edge[face] as usize..face_edge[face + 1] as usize {
+                let tri_edge = contour2tri[edge];
+                if tri_edge.is_none() {
+                    continue;
+                }
+                let pair = face_halfedges[edge].paired_halfedge;
+                if pair.is_none() {
+                    continue;
+                }
+                let pair_tri = contour2tri[pair.u()];
+                chunk[tri_edge.u() - he_base].paired_halfedge = pair_tri;
+            }
+        });
     }
 
     out.face_normal = tri_normal;

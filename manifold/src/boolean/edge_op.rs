@@ -35,15 +35,56 @@
 //!   branches are LIVE: `collapse_edge` repoints the shifted corners to endVert's prop-vert, and
 //!   `swap_edge` interpolates-and-grows a fresh prop-vert. Both are no-ops position-only (`num_prop == 0`).
 //!
-//! `SplitPinchedVerts` and `DedupeEdges` use the SERIAL path (the parallel branches only differ when
-//! `> 1e4`/`1e5` edges and reduce to the same ordered result); `CollapseShortEdges`/`SwapDegenerates`
-//! use the serial `FlagStore` = flag-all-then-process-in-ascending-order (the parallel path sorts to the
-//! same order). Container/iteration order is load-bearing and deterministic throughout.
+//! Every detection scan is PARALLEL-DETECT / SERIAL-APPLY (BU.4.6), all gated at
+//! `PAR_DETECT_THRESHOLD` (C++ FlagStore's 1e5 crossover; see the const for why the CleanupTopology
+//! scans deviate from C++'s 1e4). The three flag/predicate scans (`CollapseShortEdges`/
+//! `CollapseColinearEdges`/`SwapDegenerates` — C++'s `FlagStore`) are pure per-index reads evaluated
+//! through the order-preserving seam and consumed in ascending index order = the serial emission on
+//! every lane (`flagged_edges`). `SplitPinchedVerts` and `DedupeEdges` run a deterministic seed-scan
+//! that reproduces the serial ring-emission order EXACTLY — NOT C++'s thread-local/CAS parallel
+//! branches, whose emission order is scheduling-dependent (upstream's S.4 nondeterminism class).
+//! Container/iteration order is load-bearing and deterministic throughout.
 
 use crate::boolean::predicates::{ccw, get_axis_aligned_projection};
 use crate::linalg::{Vec2, Vec3};
 use crate::mesh::{Halfedge, Mesh};
 use crate::mesh_ids::{HalfedgeId, VertId};
+
+/// The parallel gate for EVERY detection scan here: C++'s `FlagStore::run` crossover (`> 1e5`).
+/// C++ gates its CleanupTopology scans (`SplitPinchedVerts` :722 / `DedupeEdges` :904) lower, at
+/// `> 1e4` — but its parallel branches there do ~1× the serial walk work (thread-local approximate
+/// `local` marks, scheduling-dependent emission), where our DETERMINISTIC seed-scan pays
+/// ~ring-size× redundancy for byte-stable order. That moves the measured crossover up: at
+/// sphere128's 39k half-edges the 1e4 gate LOSES ~0.3-0.7ms (~4-9%) to fork overhead + redundancy,
+/// while self_intersect's 100k domain wins ~19%. Deviation is perf-only — bytes identical either
+/// side by construction.
+#[cfg(par_live)]
+const PAR_DETECT_THRESHOLD: usize = 100_000;
+
+/// The detection half of C++'s `FlagStore::run`: the ascending list of edges where `pred` holds.
+/// `pred` must be a pure per-index read — above [`PAR_DETECT_THRESHOLD`] the par lane evaluates it
+/// through the order-preserving seam, and filtering the verdicts by index reproduces the serial
+/// push order exactly, so the list is identical bytes on every lane. (C++ re-sorts thread-local
+/// emissions; the order-preserving map needs no sort. Serial keeps the plain single-pass scan —
+/// materializing a verdict per edge only pays when the map forks.)
+fn flagged_edges(nb_edges: usize, pred: impl Fn(usize) -> bool + Sync + Send) -> Vec<HalfedgeId> {
+    #[cfg(par_live)]
+    if nb_edges > PAR_DETECT_THRESHOLD {
+        return crate::par::map_range(nb_edges, &pred)
+            .into_iter()
+            .enumerate()
+            .filter(|&(_, flag)| flag)
+            .map(|(i, _)| HalfedgeId::from_usize(i))
+            .collect();
+    }
+    let mut flagged = Vec::new();
+    for i in 0..nb_edges {
+        if pred(i) {
+            flagged.push(HalfedgeId::from_usize(i));
+        }
+    }
+    flagged
+}
 
 /// The three half-edges of a triangle, from `edge` (`edge_op.cpp` `TriOf`): `[edge, next, next·next]`.
 #[inline]
@@ -554,10 +595,22 @@ fn dedupe_edge(mesh: &mut Mesh, edge: HalfedgeId) {
 }
 
 /// Duplicate just enough verts to convert an even-manifold to a proper 2-manifold, splitting
-/// non-manifold verts where multiple fan-cycles share one vertex (`edge_op.cpp` `SplitPinchedVerts`,
-/// serial branch). Each vertex fan is processed once; a second fan on an already-seen vertex gets a
-/// fresh duplicate vert.
+/// non-manifold verts where multiple fan-cycles share one vertex (`edge_op.cpp` `SplitPinchedVerts`).
+/// Each vertex fan is processed once; a second fan on an already-seen vertex gets a fresh duplicate
+/// vert. Above [`PAR_DETECT_THRESHOLD`] the par lane detects in parallel — same bytes by
+/// construction.
 fn split_pinched_verts(mesh: &mut Mesh) -> usize {
+    #[cfg(par_live)]
+    if mesh.halfedge.len() > PAR_DETECT_THRESHOLD {
+        return split_pinched_verts_par(mesh);
+    }
+    split_pinched_verts_serial(mesh)
+}
+
+/// The serial lane of [`split_pinched_verts`] (`edge_op.cpp` `SplitPinchedVerts`, serial branch):
+/// one ascending scan, each fan handled at its first unprocessed half-edge, `halfedge_processed`
+/// marking the rest of the ring.
+fn split_pinched_verts_serial(mesh: &mut Mesh) -> usize {
     let nb_edges = mesh.halfedge.len();
     let mut vert_processed = vec![false; mesh.num_vert()];
     let mut halfedge_processed = vec![false; nb_edges];
@@ -594,11 +647,119 @@ fn split_pinched_verts(mesh: &mut Mesh) -> usize {
     splits
 }
 
-/// Find the duplicate half-edges to split — for each vertex fan, all out-edges sharing an end-vert keep
-/// the minimal half-edge index; the rest are flagged (the serial `localLoop` of `edge_op.cpp`
-/// `DedupeEdges`). Deterministic: emission is in fan order, seeds in ascending index. The end-vert→min
+/// The parallel lane of [`split_pinched_verts`]: PARALLEL DETECT, SERIAL APPLY — bit-identical to
+/// the serial lane by construction (NOT a port of C++'s CAS branch, whose winner is
+/// scheduling-dependent). The serial scan processes each fan exactly once, at its minimal
+/// `start`-valid member (`halfedge_processed` lands every ring there; invalid half-edges skip
+/// WITHOUT marking, so they never seed). "Is `i` that member" is a pure per-index read on the
+/// un-mutated mesh, so it runs through the order-preserving seam; the apply then walks the verdicts
+/// in ascending index order = the serial processing order. The apply's mutations only touch fans
+/// already decided (fans are disjoint half-edge sets, and a split fan's members are never a later
+/// seed), so the upfront verdicts equal the serial scan's lazy ones.
+#[cfg(par_live)]
+fn split_pinched_verts_par(mesh: &mut Mesh) -> usize {
+    let nb_edges = mesh.halfedge.len();
+    let fan_min = {
+        let m: &Mesh = mesh;
+        crate::par::map_range(nb_edges, |i| {
+            let hi = HalfedgeId::from_usize(i);
+            if m.start(hi).is_none() {
+                return false;
+            }
+            // Orbit the ring looking for a smaller valid member (early-exit hand walk of `for_vert`).
+            let mut current = hi;
+            loop {
+                current = m.pair(current).next();
+                if current == hi {
+                    return true;
+                }
+                if current.u() < i && m.start(current).is_some() {
+                    return false;
+                }
+            }
+        })
+    };
+
+    let mut vert_processed = vec![false; mesh.num_vert()];
+    let mut splits = 0;
+    for (i, &is_min) in fan_min.iter().enumerate() {
+        if !is_min {
+            continue;
+        }
+        let hi = HalfedgeId::from_usize(i);
+        let vert = mesh.start(hi);
+        if vert_processed[vert.u()] {
+            let p = mesh.pos(vert);
+            mesh.vert_pos.push(p);
+            let new_vert = VertId::from_usize(mesh.num_vert() - 1);
+            splits += 1;
+            let mut ring = Vec::new();
+            mesh.for_vert(hi, |e| ring.push(e));
+            for e in ring {
+                mesh.set_start(e, new_vert);
+                let pe = mesh.pair(e);
+                mesh.set_end(pe, new_vert);
+            }
+        } else {
+            vert_processed[vert.u()] = true;
+        }
+    }
+    splits
+}
+
+/// The par lane's per-ring duplicate scan (the two-pass body of `edge_op.cpp` `DedupeEdges`'
+/// `localLoop`, minus the serial lane's interleaved `local` marking): all out-edges sharing an
+/// end-vert keep the minimal half-edge index; the rest are pushed, in fan order. The end-vert→min
 /// map is lookup-only (never iterated) so a `HashMap` is order-safe here.
+#[cfg(par_live)]
+fn ring_duplicates(mesh: &Mesh, ring: &[HalfedgeId], results: &mut Vec<HalfedgeId>) {
+    use std::collections::HashMap;
+    // First pass: minimal half-edge index per end-vert.
+    let mut min_by_end: HashMap<VertId, HalfedgeId> = HashMap::new();
+    for &current in ring {
+        let sv = mesh.start(current);
+        let ev = mesh.end(current);
+        if sv.is_none() || ev.is_none() {
+            continue;
+        }
+        min_by_end
+            .entry(ev)
+            .and_modify(|c| {
+                if current < *c {
+                    *c = current;
+                }
+            })
+            .or_insert(current);
+    }
+    // Second pass: flag every non-minimal duplicate.
+    for &current in ring {
+        let sv = mesh.start(current);
+        let ev = mesh.end(current);
+        if sv.is_none() || ev.is_none() {
+            continue;
+        }
+        if min_by_end[&ev] != current {
+            results.push(current);
+        }
+    }
+}
+
+/// Find the duplicate half-edges to split (`edge_op.cpp` `DedupeEdges`' detection scan).
+/// Deterministic: emission is in fan order, ring seeds in ascending index. Above
+/// [`PAR_DETECT_THRESHOLD`] the par lane detects in parallel — same bytes.
 fn find_duplicate_edges(mesh: &Mesh, nb_edges: usize) -> Vec<HalfedgeId> {
+    #[cfg(par_live)]
+    if nb_edges > PAR_DETECT_THRESHOLD {
+        return find_duplicate_edges_par(mesh, nb_edges);
+    }
+    find_duplicate_edges_serial(mesh, nb_edges)
+}
+
+/// The serial lane (the serial `localLoop` of `edge_op.cpp` `DedupeEdges`): one ascending scan, each
+/// ring handled at its first unprocessed valid half-edge, `local` marking the rest (interleaved with
+/// the first map pass, exactly as the C++ — the par lane's `ring_duplicates` is this minus the
+/// marking).
+fn find_duplicate_edges_serial(mesh: &Mesh, nb_edges: usize) -> Vec<HalfedgeId> {
     use std::collections::HashMap;
     let mut local = vec![false; nb_edges];
     let mut results = Vec::new();
@@ -642,6 +803,53 @@ fn find_duplicate_edges(mesh: &Mesh, nb_edges: usize) -> Vec<HalfedgeId> {
                 results.push(current);
             }
         }
+    }
+    results
+}
+
+/// The parallel lane: PARALLEL DETECT, SERIAL FLATTEN — bit-identical to the serial lane by
+/// construction (NOT C++'s thread-local branch, whose approximate per-thread `local` re-emits rings
+/// in scheduling order and needs a sort+unique that CHANGES the emission order vs its own serial
+/// path). The serial scan seeds each ring at its minimal start+end-valid member (invalid members
+/// skip WITHOUT marking, so they never seed); "is `i` that member" is a pure per-index read, so both
+/// passes run through the order-preserving seam: seed verdicts over all edges, then the per-ring
+/// two-pass scan over the (ascending) seeds. Flattening per-seed results in seed order is then
+/// exactly the serial emission: seeds ascending, fan order within a ring.
+#[cfg(par_live)]
+fn find_duplicate_edges_par(mesh: &Mesh, nb_edges: usize) -> Vec<HalfedgeId> {
+    let is_seed = crate::par::map_range(nb_edges, |i| {
+        let hi = HalfedgeId::from_usize(i);
+        if mesh.start(hi).is_none() || mesh.end(hi).is_none() {
+            return false;
+        }
+        // Orbit the ring looking for a smaller valid member (early-exit hand walk of `for_vert`).
+        let mut current = hi;
+        loop {
+            current = mesh.pair(current).next();
+            if current == hi {
+                return true;
+            }
+            if current.u() < i && mesh.start(current).is_some() && mesh.end(current).is_some() {
+                return false;
+            }
+        }
+    });
+    let seeds: Vec<HalfedgeId> = is_seed
+        .into_iter()
+        .enumerate()
+        .filter(|&(_, s)| s)
+        .map(|(i, _)| HalfedgeId::from_usize(i))
+        .collect();
+    let per_seed: Vec<Vec<HalfedgeId>> = crate::par::map_collect(&seeds, |&seed| {
+        let mut ring = Vec::new();
+        mesh.for_vert(seed, |e| ring.push(e));
+        let mut results = Vec::new();
+        ring_duplicates(mesh, &ring, &mut results);
+        results
+    });
+    let mut results = Vec::new();
+    for r in &per_seed {
+        results.extend_from_slice(r);
     }
     results
 }
@@ -691,9 +899,10 @@ fn short_edge_pred(mesh: &Mesh, edge: HalfedgeId, first_new_vert: i32, tol: f64)
 }
 
 /// Collapse edges shorter than tolerance, removing degenerate triangles (`edge_op.cpp`
-/// `CollapseShortEdges`). Flag-all-then-collapse (the serial `FlagStore`): the flagging reads the clean
-/// post-dedupe mesh, then each flagged edge is collapsed in ascending order (already-collapsed edges are
-/// no-ops via the `pair < 0` guard). In a boolean (`first_new_vert > 0`) the bound is `tolerance`.
+/// `CollapseShortEdges`). Flag-all-then-collapse (C++'s `FlagStore`): the flagging is a pure per-index
+/// read of the clean post-dedupe mesh — PARALLEL through the order-preserving seam — then each flagged
+/// edge is collapsed in ascending index order, exactly the serial emission (already-collapsed edges
+/// are no-ops via the `pair < 0` guard). In a boolean (`first_new_vert > 0`) the bound is `tolerance`.
 fn collapse_short_edges(mesh: &mut Mesh, first_new_vert: i32) -> usize {
     let nb_edges = mesh.halfedge.len();
     let tol = if first_new_vert == 0 {
@@ -702,13 +911,12 @@ fn collapse_short_edges(mesh: &mut Mesh, first_new_vert: i32) -> usize {
         mesh.tolerance
     };
 
-    let mut flagged = Vec::new();
-    for i in 0..nb_edges {
-        let hi = HalfedgeId::from_usize(i);
-        if short_edge_pred(mesh, hi, first_new_vert, tol) {
-            flagged.push(hi);
-        }
-    }
+    let flagged = {
+        let m: &Mesh = mesh;
+        flagged_edges(nb_edges, |i| {
+            short_edge_pred(m, HalfedgeId::from_usize(i), first_new_vert, tol)
+        })
+    };
 
     let mut scratch = Vec::new();
     let mut collapsed = 0;
@@ -751,20 +959,22 @@ fn colinear_edge_pred(mesh: &Mesh, edge: HalfedgeId, first_new_vert: i32) -> boo
 
 /// Collapse colinear edges until none remain (`edge_op.cpp` `CollapseColinearEdges`). Each round flags
 /// every colinear edge (verts interior to a coplanar face — [`colinear_edge_pred`]) then collapses them;
-/// a collapse can expose new ones, so it loops to a fixed point. Collapses run with `first_new_vert = 0`
-/// (the 2-arg `CollapseEdge`) even though flagging respects the passed `first_new_vert` — verbatim.
+/// a collapse can expose new ones, so it loops to a fixed point. The fixed-point loop stays serial —
+/// only each round's flag scan (a pure per-index read of that round's mesh) runs PARALLEL through the
+/// order-preserving seam, collapses consuming it in ascending index order = the serial emission.
+/// Collapses run with `first_new_vert = 0` (the 2-arg `CollapseEdge`) even though flagging respects the
+/// passed `first_new_vert` — verbatim.
 fn collapse_colinear_edges(mesh: &mut Mesh, first_new_vert: i32) -> usize {
     let nb_edges = mesh.halfedge.len();
     let mut scratch = Vec::new();
     let mut total = 0;
     loop {
-        let mut flagged = Vec::new();
-        for i in 0..nb_edges {
-            let hi = HalfedgeId::from_usize(i);
-            if colinear_edge_pred(mesh, hi, first_new_vert) {
-                flagged.push(hi);
-            }
-        }
+        let flagged = {
+            let m: &Mesh = mesh;
+            flagged_edges(nb_edges, |i| {
+                colinear_edge_pred(m, HalfedgeId::from_usize(i), first_new_vert)
+            })
+        };
         let mut num_flagged = 0;
         for hi in flagged {
             if collapse_edge(mesh, hi, &mut scratch, -1.0, 0) {
@@ -817,18 +1027,19 @@ fn swappable_edge_pred(mesh: &Mesh, edge: HalfedgeId, first_new_vert: i32) -> bo
 }
 
 /// Perform edge swaps on the long edges of degenerate triangles (`edge_op.cpp` `SwapDegenerates`).
-/// Flag-all-then-process; each flagged edge seeds a fresh `tag` and drains its cascade stack before the
-/// next. `visited` is sized to the (post-collapse-stage) half-edge count, which no swap grows.
+/// Flag-all-then-process; the flag scan (a pure per-index read) runs PARALLEL through the
+/// order-preserving seam, then each flagged edge — in ascending index order, the serial emission —
+/// seeds a fresh `tag` and drains its cascade stack before the next. `visited` is sized to the
+/// (post-collapse-stage) half-edge count, which no swap grows.
 fn swap_degenerates(mesh: &mut Mesh, first_new_vert: i32) -> usize {
     let nb_edges = mesh.halfedge.len();
 
-    let mut flagged = Vec::new();
-    for i in 0..nb_edges {
-        let hi = HalfedgeId::from_usize(i);
-        if swappable_edge_pred(mesh, hi, first_new_vert) {
-            flagged.push(hi);
-        }
-    }
+    let flagged = {
+        let m: &Mesh = mesh;
+        flagged_edges(nb_edges, |i| {
+            swappable_edge_pred(m, HalfedgeId::from_usize(i), first_new_vert)
+        })
+    };
 
     let num_flagged = flagged.len();
     let mut edge_swap_stack: Vec<HalfedgeId> = Vec::new();
@@ -950,4 +1161,105 @@ pub fn remove_degenerates(mesh: &mut Mesh, first_new_vert: i32) {
     mesh.remove_dead_triangles();
     mesh.remove_unreferenced_verts();
     mesh.calculate_vert_normals();
+}
+
+#[cfg(all(test, par_live))]
+mod par_lane_tests {
+    //! The par-lane detection algorithms must be BYTE-IDENTICAL to the serial scans they replace.
+    //! These call the `_par`/`_serial` lanes DIRECTLY (bypassing the `PAR_DETECT_THRESHOLD`
+    //! dispatch) so small hand-built fixtures exercise the seed-scan logic itself; the full-scale
+    //! proof is the golden gates, which run both lanes over real >1e4-half-edge booleans.
+    use super::*;
+
+    /// Two tetrahedra sharing only vertex 0 — the canonical pinched vert (two fan-cycles, one vert).
+    fn pinched_vert_mesh() -> Mesh {
+        let mut mesh = Mesh {
+            vert_pos: vec![
+                Vec3::new(0.0, 0.0, 0.0),
+                Vec3::new(1.0, 0.0, 0.0),
+                Vec3::new(0.0, 1.0, 0.0),
+                Vec3::new(0.0, 0.0, 1.0),
+                Vec3::new(-1.0, 0.0, 0.0),
+                Vec3::new(0.0, -1.0, 0.0),
+                Vec3::new(0.0, 0.0, -1.0),
+            ],
+            ..Default::default()
+        };
+        #[rustfmt::skip]
+        let tris = [
+            [0u32, 2, 1], [0, 1, 3], [1, 2, 3], [2, 0, 3], // tet A = {0,1,2,3}
+            [0, 5, 4], [0, 4, 6], [4, 5, 6], [5, 0, 6],    // tet B = {0,4,5,6}
+        ];
+        mesh.create_halfedges(&tris);
+        mesh
+    }
+
+    /// Two tetrahedra sharing edge (0,1), triangle order arranged so `create_halfedges`' fwd/bwd
+    /// zip pairs the duplicated edge ACROSS the tets — vertex 0's fan is then a single cycle
+    /// containing both 0→1 half-edges, the shape `DedupeEdges` flags.
+    fn duplicate_edge_mesh() -> Mesh {
+        let mut mesh = Mesh {
+            vert_pos: vec![
+                Vec3::new(0.0, 0.0, 0.0),
+                Vec3::new(1.0, 0.0, 0.0),
+                Vec3::new(0.0, 1.0, 0.0),
+                Vec3::new(0.0, 0.0, 1.0),
+                Vec3::new(0.0, -1.0, 0.0),
+                Vec3::new(0.0, 0.0, -1.0),
+            ],
+            ..Default::default()
+        };
+        // Tet A = {0,1,2,3}, tet B = {0,1,4,5}. A's 0→1 face before B's, but B's 1→0 face before
+        // A's: the (0,1) group zips fwd=[A,B] against bwd=[B,A], crossing the tets.
+        #[rustfmt::skip]
+        let tris = [
+            [0u32, 1, 3], [0, 4, 1], [0, 1, 5], [0, 2, 1], // A(0→1), B(1→0), B(0→1), A(1→0)
+            [1, 2, 3], [2, 0, 3], [1, 4, 5], [4, 0, 5],    // the remaining closed-tet faces
+        ];
+        mesh.create_halfedges(&tris);
+        mesh
+    }
+
+    #[test]
+    fn split_pinched_verts_par_matches_serial() {
+        let mut serial = pinched_vert_mesh();
+        let mut par = serial.clone();
+        let splits_serial = split_pinched_verts_serial(&mut serial);
+        let splits_par = split_pinched_verts_par(&mut par);
+        assert_eq!(splits_serial, 1, "fixture must actually pinch");
+        assert_eq!(splits_par, splits_serial);
+        assert_eq!(par.halfedge, serial.halfedge);
+        assert_eq!(par.vert_pos, serial.vert_pos);
+    }
+
+    #[test]
+    fn split_pinched_verts_par_matches_serial_when_clean() {
+        // No pinched verts (single fan per vert): both lanes must agree on the no-op too.
+        let mut serial = duplicate_edge_mesh();
+        let mut par = serial.clone();
+        assert_eq!(split_pinched_verts_serial(&mut serial), 0);
+        assert_eq!(split_pinched_verts_par(&mut par), 0);
+        assert_eq!(par.halfedge, serial.halfedge);
+        assert_eq!(par.vert_pos, serial.vert_pos);
+    }
+
+    #[test]
+    fn find_duplicate_edges_par_matches_serial() {
+        let mesh = duplicate_edge_mesh();
+        let n = mesh.halfedge.len();
+        let serial = find_duplicate_edges_serial(&mesh, n);
+        let par = find_duplicate_edges_par(&mesh, n);
+        assert!(!serial.is_empty(), "fixture must actually carry duplicates");
+        assert_eq!(par, serial); // same edges, same EMISSION ORDER
+    }
+
+    #[test]
+    fn find_duplicate_edges_par_matches_serial_when_clean() {
+        let mesh = pinched_vert_mesh();
+        let n = mesh.halfedge.len();
+        let serial = find_duplicate_edges_serial(&mesh, n);
+        let par = find_duplicate_edges_par(&mesh, n);
+        assert!(serial.is_empty(), "separate fans dedupe nothing");
+        assert_eq!(par, serial);
+    }
 }

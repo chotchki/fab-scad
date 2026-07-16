@@ -22,8 +22,11 @@ pub struct Config {
     /// hashing every lookup. `FAB_EVAL_CACHE_ARGCAP` (default 256).
     pub eval_cache_argcap: usize,
     /// Memoize a child-less user-MODULE call's `Geo` subtree — the content-addressed CSG cache (J.5.2,
-    /// read-set-precise keys since rung 2b/BU.8). OFF by default everywhere (the N.2c.2.3 default-on flip
-    /// stays reverted pending the deep-recursion gate-cost fix); `FAB_CSG_CACHE=1` enables.
+    /// read-set-precise keys since rung 2b/BU.8). OFF in [`Config::default`] (the A/B baseline the
+    /// differential toggles against) but ON in [`Config::from_env`] (the app path) since BU.8: rung 2b
+    /// killed the N.2c.3 deep-recursion pathology (the per-level `specials()` walk + 42-var hash WAS the
+    /// cost), outputs are bitwise-identical on vs off (STL-diffed + the corpus A/B), and the measured
+    /// profile is never-worse (chotchki's call, 2026-07-16). `FAB_CSG_CACHE=0` disables.
     pub csg_cache: bool,
     /// Skip memoizing a module call whose params — or, at store time, its observed `$`-read set — exceed
     /// this shallow element count. `FAB_CSG_CACHE_KEYCAP` (default 2048).
@@ -63,11 +66,12 @@ impl Config {
     /// execution accelerators are strict `=1` OPT-IN (a new eval path stays off unless explicitly enabled),
     /// matching the per-module gates this replaces; the caps parse-or-default.
     ///
-    /// NOTE (N.2c.2.3): both caches WERE briefly defaulted ON here for forgetful-fast dogfooding, but that
-    /// exposed a real csg-cache pathology — csg-on makes DEEP/infinite module recursion ~200× slower to reach
-    /// the `MAX_MODULE_DEPTH` guard (`runaway_module_recursion` hangs). So the default-on flip is REVERTED
-    /// pending that fix; the caches remain opt-in + correct. `eval_cache`'s auto-off (N.2c.2.2) is orthogonal +
-    /// stays.
+    /// NOTE (N.2c.2.3, updated at BU.8): the csg cache is default-ON here — rung 2b removed the
+    /// deep-recursion pathology that reverted the first flip (verified: `module_recursion_bound` cache-on
+    /// == off), and the flip's gate was the FULL suite + gauntlet + bitwise STL diffs, per the task's own
+    /// terms. `FAB_CSG_CACHE=0` opts out. The EVAL cache stays opt-in (`FAB_EVAL_CACHE=1`) — its win
+    /// profile is model-dependent (under_sink_guide measured net-negative in N.2c.2.1) and its auto-off
+    /// (N.2c.2.2) hasn't been revalidated at default-on; that half of N.2c.2.3 remains open.
     #[must_use]
     pub fn from_env() -> Self {
         let d = Self::default();
@@ -75,7 +79,7 @@ impl Config {
             jit: env_on("FAB_JIT"),
             eval_cache: env_on("FAB_EVAL_CACHE"),
             eval_cache_argcap: env_usize("FAB_EVAL_CACHE_ARGCAP", d.eval_cache_argcap),
-            csg_cache: env_on("FAB_CSG_CACHE"),
+            csg_cache: !env_is("FAB_CSG_CACHE", "0"),
             csg_cache_keycap: env_usize("FAB_CSG_CACHE_KEYCAP", d.csg_cache_keycap),
             eval_budget: env_u64_opt("FAB_EVAL_BUDGET"),
         }
@@ -84,7 +88,12 @@ impl Config {
 
 /// A strict `FAB_*=1` gate (any other value / unset → off).
 fn env_on(name: &str) -> bool {
-    std::env::var_os(name).as_deref() == Some(std::ffi::OsStr::new("1"))
+    env_is(name, "1")
+}
+
+/// Does `name` hold exactly `value`? The default-ON gates use `!env_is(_, "0")` — on unless opted out.
+fn env_is(name: &str, value: &str) -> bool {
+    std::env::var_os(name).as_deref() == Some(std::ffi::OsStr::new(value))
 }
 
 /// A `FAB_*` unsigned tuning cap, parse-or-default.

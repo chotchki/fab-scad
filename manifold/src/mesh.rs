@@ -41,6 +41,31 @@ pub fn mesh_id_counter() -> i32 {
     MESH_ID_COUNTER.load(Ordering::Relaxed)
 }
 
+// Mesh-tail parallel crossovers, in HALF-EDGE units — per-pass because the measured break-even
+// points differ by 4x. These finish passes are trivial-body and memory-bound, and our seam shapes
+// pay a collect allocation (plus, for reorder, an extra pass) that C++'s in-place TBB loops don't,
+// so the profitable crossover sits far above both the seam's 1e4 default and C++'s custom 1e5
+// mesh-tail `autoPolicy` — BU.4 measured (M4 Pro, median µs, serial-branch vs par-branch):
+//
+//   half-edges        100k        239k        334k        745k
+//   reorder        370 / 790        —      1193 / 911  3008 / 1328
+//   remove_dead    230 / 830   699 / 1349   735 / 1044  1816 / 1810
+//   remove_unref   175 / 490   398 /  661   530 /  633  1245 / 1052
+//
+// Each fork keys on `cfg!(par_live) && size > threshold`: the serial build keeps its alloc-free
+// in-place form at every size, and value-identity is untouched — both branches produce the same
+// bytes by construction (order-preserving shapes; goldens ran green with the fork pinned to each
+// side). The whole M.5/M.7 corpus sits at or below ~100k half-edges, so these only fire on
+// genuinely large meshes.
+
+/// [`Mesh::reorder_halfedges`] crossover — par wins 1.3x at 334k he, 2.3x at 745k; loses 2x at 100k.
+const REORDER_PAR_THRESHOLD: usize = 250_000;
+/// [`Mesh::remove_unreferenced_verts`] remap-apply crossover — par wins 1.2x at 745k, loses below ~500k.
+const UNREF_APPLY_PAR_THRESHOLD: usize = 600_000;
+/// [`Mesh::remove_dead_triangles`] gather crossover — still a wash at 745k (largest measured point);
+/// the win region is extrapolated, so the gate sits above everything measured.
+const DEAD_GATHER_PAR_THRESHOLD: usize = 1_000_000;
+
 /// A single half-edge. `end` is DERIVED (see the module doc), so only these three fields are stored;
 /// [`VertId::NONE`]/[`HalfedgeId::NONE`] (`-1`) is the removed/unpaired sentinel.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -289,13 +314,25 @@ impl Mesh {
         // them; `compact_props` (in `sort_geometry`) reindexes them independently. Remapping a prop-vert
         // through the GEOMETRIC remap here would corrupt it (the M.3.4b maintenance bug), so leave it.
         let has_prop = self.num_prop > 0;
-        for h in &mut self.halfedge {
+        // Per-slot pure over half-edges (each rewrites only itself through the frozen `remap`), so the
+        // disjoint-write `par::for_each_mut` seam keeps par == seq bit-for-bit; below the measured
+        // crossover (see [`UNREF_APPLY_PAR_THRESHOLD`]) the same closure runs as a plain serial loop —
+        // identical bytes either way. The keep-mark and compaction scans above stay serial: marking is
+        // a keyed scatter (no deterministic seam shape) and the remap build is a prefix scan.
+        let apply = |h: &mut Halfedge| {
             if h.start_vert.is_some() {
                 h.start_vert = remap[h.start_vert.u()];
             }
             // The `< n` guard tolerates the assembly's transient out-of-range prop-verts in the 1:1 case.
             if !has_prop && h.prop_vert.is_some() && h.prop_vert.u() < n {
                 h.prop_vert = remap[h.prop_vert.u()];
+            }
+        };
+        if cfg!(par_live) && self.halfedge.len() > UNREF_APPLY_PAR_THRESHOLD {
+            crate::par::for_each_mut(&mut self.halfedge, |_i, h| apply(h));
+        } else {
+            for h in &mut self.halfedge {
+                apply(h);
             }
         }
         self.vert_pos = new_pos;
@@ -311,8 +348,11 @@ impl Mesh {
     pub fn remove_dead_triangles(&mut self) {
         let old_len = self.halfedge.len();
         let num_tri = old_len / 3;
-        // old half-edge index → new (NONE for a dead triangle's half-edges).
+        // old half-edge index → new (NONE for a dead triangle's half-edges), plus the survivor list
+        // (old tri per new tri). This is the compaction's exclusive-scan half — inherently serial —
+        // and precomputing it is what gives the heavy gather below its clean per-slot shape.
         let mut he_remap = vec![HalfedgeId::NONE; old_len];
+        let mut tri_new2old = Vec::with_capacity(num_tri);
         let mut next = 0i32;
         for tri in 0..num_tri {
             if self.halfedge[3 * tri].start_vert.is_none() {
@@ -321,42 +361,55 @@ impl Mesh {
             for i in 0..3 {
                 he_remap[3 * tri + i] = HalfedgeId::new(next + i as i32);
             }
+            tri_new2old.push(tri);
             next += 3;
         }
         let has_normals = !self.face_normal.is_empty();
         let has_refs = !self.tri_ref.is_empty();
-        let mut new_he = Vec::with_capacity(next as usize);
-        let mut new_fn = Vec::with_capacity(next as usize / 3);
-        let mut new_ref = Vec::with_capacity(next as usize / 3);
-        for tri in 0..num_tri {
-            if self.halfedge[3 * tri].start_vert.is_none() {
-                continue;
-            }
-            for i in 0..3 {
-                let h = self.halfedge[3 * tri + i];
+        // Gather: new slot `i` is a pure function of `(i, tri_new2old, he_remap, old arrays)`, so the
+        // order-preserving `par::map_range`/`map_collect` seams keep par == seq bit-for-bit — same
+        // values, same order, as the serial push loop this replaces. Below the crossover gate (see
+        // [`DEAD_GATHER_PAR_THRESHOLD`]) the same closures run serially — identical bytes, no
+        // fork-join overhead.
+        let par = cfg!(par_live) && next as usize > DEAD_GATHER_PAR_THRESHOLD;
+        let new_he = {
+            let he = &self.halfedge;
+            let he_remap = &he_remap;
+            let tri_new2old = &tri_new2old;
+            let build = |i: usize| {
+                let h = he[3 * tri_new2old[i / 3] + (i % 3)];
                 let pair = if h.paired_halfedge.is_none() {
                     HalfedgeId::NONE
                 } else {
                     he_remap[h.paired_halfedge.u()]
                 };
-                new_he.push(Halfedge {
+                Halfedge {
                     start_vert: h.start_vert,
                     paired_halfedge: pair,
                     prop_vert: h.prop_vert,
-                });
+                }
+            };
+            if par {
+                crate::par::map_range(next as usize, build)
+            } else {
+                (0..next as usize).map(build).collect()
             }
-            if has_normals {
-                new_fn.push(self.face_normal[tri]);
-            }
-            if has_refs {
-                new_ref.push(self.tri_ref[tri]);
-            }
-        }
+        };
         self.halfedge = new_he;
         if has_normals {
+            let new_fn = if par {
+                crate::par::map_collect(&tri_new2old, |&t| self.face_normal[t])
+            } else {
+                tri_new2old.iter().map(|&t| self.face_normal[t]).collect()
+            };
             self.face_normal = new_fn;
         }
         if has_refs {
+            let new_ref = if par {
+                crate::par::map_collect(&tri_new2old, |&t| self.tri_ref[t])
+            } else {
+                tri_new2old.iter().map(|&t| self.tri_ref[t]).collect()
+            };
             self.tri_ref = new_ref;
         }
     }
@@ -903,7 +956,10 @@ impl Mesh {
     pub fn calculate_vert_normals(&mut self) {
         let num_vert = self.num_vert();
         // The smallest half-edge id starting at each vertex — a deterministic ForVert seed (Manifold's
-        // atomic vertHalfedgeMap min-reduction, serialized). `None` = not yet referenced.
+        // atomic vertHalfedgeMap min-reduction, serialized). `None` = not yet referenced. Stays serial:
+        // it's a keyed min-SCATTER (slot = start vert, not loop index), which none of the deterministic
+        // seam shapes fit without atomics — and the seed VALUE must stay exactly this min, because the
+        // ring-sum below accumulates floats in seed-anchored ring order.
         let mut vert_halfedge: Vec<Option<HalfedgeId>> = vec![None; num_vert];
         for e in self.halfedge_ids() {
             let v = self.start(e);
@@ -965,46 +1021,101 @@ impl Mesh {
     /// in the opposite face, the half-edge whose `end` equals this one's `start`. Per-triangle data
     /// (`face_normal`/`tri_ref`) is untouched — the triangle INDEX doesn't move, only its internal order.
     pub fn reorder_halfedges(&mut self) {
-        let num_tri = self.num_tri();
-        // Step 1: rotate within each face so the smallest start vertex leads.
-        for tri in 0..num_tri {
-            let base = 3 * tri;
-            let face = [
-                self.halfedge[base],
-                self.halfedge[base + 1],
-                self.halfedge[base + 2],
-            ];
-            if face[0].start_vert.is_none() {
-                continue;
-            }
-            let mut index = 0;
-            for i in [1usize, 2] {
-                if face[i].start_vert < face[index].start_vert {
-                    index = i;
-                }
-            }
-            for i in 0..3 {
-                self.halfedge[base + i] = face[(index + i) % 3];
-            }
-        }
-        // Step 2: repair pair pointers (the pair's within-face position changed under step 1).
-        for tri in 0..num_tri {
-            for i in 0..3 {
-                let curr = HalfedgeId::from_usize(3 * tri + i);
-                let start_vert = self.start(curr);
-                if start_vert.is_none() {
+        let num_he = self.halfedge.len();
+        // Fork, value-identical both sides: below the measured crossover (or whenever `par` is off)
+        // the original in-place serial rotate wins — the par shape pays two Vec allocations plus an
+        // extra full pass, which only amortize once fork-join actually spreads the work. See the
+        // crossover table at [`REORDER_PAR_THRESHOLD`].
+        if !(cfg!(par_live) && num_he > REORDER_PAR_THRESHOLD) {
+            // Step 1: rotate within each face so the smallest start vertex leads.
+            let num_tri = num_he / 3;
+            for tri in 0..num_tri {
+                let base = 3 * tri;
+                let face = [
+                    self.halfedge[base],
+                    self.halfedge[base + 1],
+                    self.halfedge[base + 2],
+                ];
+                if face[0].start_vert.is_none() {
                     continue;
                 }
-                let opposite_face = self.pair(curr).tri();
+                let mut index = 0;
+                for i in [1usize, 2] {
+                    if face[i].start_vert < face[index].start_vert {
+                        index = i;
+                    }
+                }
+                for i in 0..3 {
+                    self.halfedge[base + i] = face[(index + i) % 3];
+                }
+            }
+            // Step 2: repair pair pointers (the pair's within-face position changed under step 1).
+            for tri in 0..num_tri {
+                for i in 0..3 {
+                    let curr = HalfedgeId::from_usize(3 * tri + i);
+                    let start_vert = self.start(curr);
+                    if start_vert.is_none() {
+                        continue;
+                    }
+                    let opposite_face = self.pair(curr).tri();
+                    let mut index = -1i32;
+                    for j in 0..3 {
+                        if start_vert == self.end(opposite_face.halfedge(j)) {
+                            index = j as i32;
+                        }
+                    }
+                    self.set_pair(curr, opposite_face.halfedge(index as usize));
+                }
+            }
+            return;
+        }
+        // Step 1: rotate within each face so the smallest start vertex leads. C++ runs this as a
+        // parallel per-triangle pass; ours is per-SLOT through the order-preserving `par::map_range`
+        // seam — slot `i` reads only its own face's three OLD half-edges (each corner recomputes the
+        // same 2-compare argmin, the price of the disjoint-write shape), so par == seq bit-for-bit.
+        self.halfedge = {
+            let he = &self.halfedge;
+            crate::par::map_range(num_he, |i| {
+                let base = 3 * (i / 3);
+                let face = [he[base], he[base + 1], he[base + 2]];
+                if face[0].start_vert.is_none() {
+                    return he[i];
+                }
+                let mut index = 0;
+                for k in [1usize, 2] {
+                    if face[k].start_vert < face[index].start_vert {
+                        index = k;
+                    }
+                }
+                face[(index + (i - base)) % 3]
+            })
+        };
+        // Step 2: repair pair pointers (the pair's within-face position changed under step 1). The
+        // C++ pass writes `pairedHalfedge` in place while reading only start verts (field-disjoint);
+        // the safe Rust split computes every new pair from the frozen step-1 state, then scatters via
+        // `par::for_each_mut` (slot `i` writes only itself). Values are identical to the in-place
+        // serial loop: each slot is written once, and no read ever touches another slot's pair field.
+        let new_pairs = {
+            let this = &*self;
+            crate::par::map_range(num_he, |i| {
+                let curr = HalfedgeId::from_usize(i);
+                let start_vert = this.start(curr);
+                if start_vert.is_none() {
+                    return this.pair(curr); // dead half-edge — pair unchanged
+                }
+                let opposite_face = this.pair(curr).tri();
                 let mut index = -1i32;
                 for j in 0..3 {
-                    if start_vert == self.end(opposite_face.halfedge(j)) {
+                    if start_vert == this.end(opposite_face.halfedge(j)) {
                         index = j as i32;
                     }
                 }
-                self.set_pair(curr, opposite_face.halfedge(index as usize));
-            }
-        }
+                opposite_face.halfedge(index as usize)
+            })
+        };
+        crate::par::for_each_mut(&mut self.halfedge, |i, h| {
+            h.paired_halfedge = new_pairs[i];
+        });
     }
 
     /// Stamp this mesh as a fresh ORIGINAL (Manifold's `InitializeOriginal`): reserve a unique

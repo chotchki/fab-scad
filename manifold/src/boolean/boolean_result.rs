@@ -99,9 +99,10 @@ fn exclusive_scan_abssum(input: &[i32], init: i32) -> (Vec<VertId>, i32) {
 fn duplicate_verts(vert_pos_r: &mut [Vec3], inclusion: &[i32], remap: &[VertId], src: &[Vec3]) {
     // The C++ scatters in parallel over SOURCE verts (`DuplicateVerts` — the output ranges are
     // disjoint by the exclusive-scan construction). An unsafe-free parallelization INVERTS it into a
-    // map over OUTPUT slots (M.4.3c): `remap` is monotone and its ranges tile the contiguous region
+    // fill over OUTPUT slots (M.4.3c): `remap` is monotone and its ranges tile the contiguous region
     // [remap[0], remap[last] + n_last), so each slot binary-searches its source vert — every slot
-    // written exactly once either way, bytes identical, and `map_collect` keeps it order-preserving.
+    // written exactly once either way, bytes identical, and `for_each_mut` computes each slot from
+    // its own index (the deterministic scatter shape).
     if src.is_empty() {
         return;
     }
@@ -110,14 +111,13 @@ fn duplicate_verts(vert_pos_r: &mut [Vec3], inclusion: &[i32], remap: &[VertId],
     if start == end {
         return;
     }
-    let slots: Vec<usize> = (start..end).collect();
-    let region: Vec<Vec3> = crate::par::map_collect(&slots, |&slot| {
+    crate::par::for_each_mut(&mut vert_pos_r[start..end], |k, slot_pos| {
         // Last vert with remap <= slot. A zero-count vert shares its remap with the NEXT vert, so
         // the found vert always has n > 0 and covers `slot`.
+        let slot = start + k;
         let v = remap.partition_point(|r| r.u() <= slot) - 1;
-        src[v]
+        *slot_pos = src[v];
     });
-    vert_pos_r[start..end].copy_from_slice(&region);
 }
 
 /// For each edge×face intersection, add its new vertex to the intersected edge's list (`edgesP`) and to
@@ -378,9 +378,48 @@ fn append_new_edges(
     }
 }
 
+/// One uncut halfedge's precomputed emission — `append_whole_edges`'s parallel-gather record, carrying
+/// everything the serial slot-allocation loop consumes. `n == 0` marks a skipped halfedge (cut edge,
+/// reverse duplicate, or zero inclusion).
+#[derive(Clone, Copy)]
+struct WholeEdgeEmit {
+    /// Output start vert (already remapped through `v_p2r`, inclusion-swap applied).
+    start_vert: VertId,
+    /// Output end vert (already remapped, swap applied).
+    end_vert: VertId,
+    /// Source prop-vert of the forward half-edge.
+    prop_vert: VertId,
+    /// Source prop-vert of the paired half-edge.
+    pair_prop_vert: VertId,
+    /// Result-face index receiving the forward output half-edge.
+    new_face: i32,
+    /// Result-face index receiving the backward output half-edge.
+    face_right: i32,
+    /// Source triangle of the forward half-edge (feeds `forward_ref`).
+    src_tri: TriId,
+    /// Source triangle of the paired half-edge (feeds `backward_ref`).
+    pair_tri: TriId,
+    /// `|inclusion|` — how many duplicated output edge pairs to emit; `0` = skip.
+    n: i32,
+}
+
 /// Emit the whole (uncut) edges, duplicated per inclusion (`boolean_result.cpp` `DuplicateHalfedges` via
 /// `AppendWholeEdges`). Each uncut edge is processed once from its forward half-edge, emitting both
 /// output half-edges directly with their pairing.
+///
+/// C++ parallelizes this by racing `AtomicAdd` on the `facePtr` cursors — upstream's S.4 run-to-run
+/// nondeterminism class, FORBIDDEN here. The output slot of an emission is the state of two per-face
+/// cursors threaded through every prior emission (and the partial/new passes before that), so it is NOT
+/// a pure function of simple scans; instead of replaying cursors per slot, we split the pass: the
+/// per-halfedge reads/predicates/remaps (the bulk) run as an order-preserving [`crate::par::map_range`],
+/// and the cursor walk + writes stay a tight serial loop over the records in halfedge order — identical
+/// slots, identical bytes, by construction.
+///
+/// The split only fires with rayon compiled in (`par_live`) AND >= 1e5 halfedges — at ~5ns/halfedge
+/// the dispatch doesn't amortize below that (measured at 51k halfedges the split LOST to the fused
+/// loop), and without rayon the record buffer is pure overhead. Below the gate the SAME two closures
+/// run fused per halfedge, so the gate picks execution strategy only — bytes can't diverge
+/// (`whole_edges_split_and_fused_paths_write_identical_bytes` proves it at gate scale).
 #[allow(clippy::too_many_arguments)]
 fn append_whole_edges(
     face_halfedges: &mut [VHalfedge],
@@ -393,57 +432,133 @@ fn append_whole_edges(
     face_p2r: &[i32],
     forward: bool,
 ) {
+    // `par_live` mirrors the seam's own cfg (build.rs): without rayon compiled the split's record
+    // buffer buys nothing, so the fused loop is unconditionally better there.
+    #[cfg(par_live)]
+    let split = in_p.halfedge.len() >= 100_000;
+    #[cfg(not(par_live))]
+    let split = false;
+    append_whole_edges_impl(
+        face_halfedges,
+        halfedge_ref,
+        face_ptr_r,
+        in_p,
+        whole_halfedge_p,
+        i03,
+        v_p2r,
+        face_p2r,
+        forward,
+        split,
+    );
+}
+
+/// [`append_whole_edges`] with the strategy pinned — `split` chooses parallel-gather + serial-emit vs
+/// the fused per-halfedge loop. Separated from the gate so the byte-equality of the two strategies is
+/// directly testable.
+#[allow(clippy::too_many_arguments)]
+fn append_whole_edges_impl(
+    face_halfedges: &mut [VHalfedge],
+    halfedge_ref: &mut [TriRef],
+    face_ptr_r: &mut [i32],
+    in_p: &Mesh,
+    whole_halfedge_p: &[bool],
+    i03: &[i32],
+    v_p2r: &[VertId],
+    face_p2r: &[i32],
+    forward: bool,
+    split: bool,
+) {
     let mesh_id = if forward { 0 } else { 1 };
-    for idx in in_p.halfedge_ids() {
-        if !whole_halfedge_p[idx.u()] {
-            continue;
+    let skip = WholeEdgeEmit {
+        start_vert: VertId::NONE,
+        end_vert: VertId::NONE,
+        prop_vert: VertId::NONE,
+        pair_prop_vert: VertId::NONE,
+        new_face: 0,
+        face_right: 0,
+        src_tri: TriId::new(0),
+        pair_tri: TriId::new(0),
+        n: 0,
+    };
+
+    // The gather: record `i` is a pure function of halfedge `i` (reads only) — safe as a parallel
+    // order-preserving map.
+    let gather = |i: usize| -> WholeEdgeEmit {
+        if !whole_halfedge_p[i] {
+            return skip;
         }
+        let idx = HalfedgeId::from_usize(i);
         let mut start_vert = in_p.start(idx);
         let mut end_vert = in_p.end(idx);
         if start_vert >= end_vert {
-            continue;
+            return skip;
         }
         let inclusion = i03[start_vert.u()];
         if inclusion == 0 {
-            continue;
+            return skip;
         }
         if inclusion < 0 {
             core::mem::swap(&mut start_vert, &mut end_vert);
         }
-        start_vert = v_p2r[start_vert.u()];
-        end_vert = v_p2r[end_vert.u()];
-        let prop_vert = in_p.prop(idx);
         let pair = in_p.pair(idx);
-        let pair_prop_vert = in_p.prop(pair);
-        let new_face = face_p2r[idx.tri().u()];
-        let face_right = face_p2r[pair.tri().u()];
+        WholeEdgeEmit {
+            start_vert: v_p2r[start_vert.u()],
+            end_vert: v_p2r[end_vert.u()],
+            prop_vert: in_p.prop(idx),
+            pair_prop_vert: in_p.prop(pair),
+            new_face: face_p2r[idx.tri().u()],
+            face_right: face_p2r[pair.tri().u()],
+            src_tri: idx.tri(),
+            pair_tri: pair.tri(),
+            n: inclusion.abs(),
+        }
+    };
 
+    // The emit: cursor advancement and writes, in halfedge order — matches the C++ loop
+    // slot-for-slot whichever side of the gate ran the gather.
+    let mut emit = |e: &WholeEdgeEmit| {
+        if e.n == 0 {
+            return;
+        }
         // This uncut edge belongs to input triangle idx/3 on one side, pair/3 on the other.
-        let forward_ref = temp_ref(mesh_id, idx.tri());
-        let backward_ref = temp_ref(mesh_id, pair.tri());
+        let forward_ref = temp_ref(mesh_id, e.src_tri);
+        let backward_ref = temp_ref(mesh_id, e.pair_tri);
+        let mut start_vert = e.start_vert;
+        let mut end_vert = e.end_vert;
 
-        for _ in 0..inclusion.abs() {
-            let forward_edge = face_ptr_r[new_face as usize];
-            face_ptr_r[new_face as usize] += 1;
-            let backward_edge = face_ptr_r[face_right as usize];
-            face_ptr_r[face_right as usize] += 1;
+        for _ in 0..e.n {
+            let forward_edge = face_ptr_r[e.new_face as usize];
+            face_ptr_r[e.new_face as usize] += 1;
+            let backward_edge = face_ptr_r[e.face_right as usize];
+            face_ptr_r[e.face_right as usize] += 1;
 
             face_halfedges[forward_edge as usize] = VHalfedge {
                 start_vert,
                 end_vert,
                 paired_halfedge: HalfedgeId::new(backward_edge),
-                prop_vert,
+                prop_vert: e.prop_vert,
             };
             halfedge_ref[forward_edge as usize] = forward_ref;
             face_halfedges[backward_edge as usize] = VHalfedge {
                 start_vert: end_vert,
                 end_vert: start_vert,
                 paired_halfedge: HalfedgeId::new(forward_edge),
-                prop_vert: pair_prop_vert,
+                prop_vert: e.pair_prop_vert,
             };
             halfedge_ref[backward_edge as usize] = backward_ref;
             start_vert.advance();
             end_vert.advance();
+        }
+    };
+
+    if split {
+        let emits: Vec<WholeEdgeEmit> = crate::par::map_range(in_p.halfedge.len(), gather);
+        for e in &emits {
+            emit(e);
+        }
+    } else {
+        for i in 0..in_p.halfedge.len() {
+            emit(&gather(i));
         }
     }
 }
@@ -469,21 +584,36 @@ fn size_output(
     let num_tri_q = in_q.num_tri();
     let mut sides = vec![0i32; num_tri_p + num_tri_q];
 
-    // CountVerts: each face collects |inclusion| of each of its 3 corner verts.
-    for (i, side) in sides.iter_mut().enumerate().take(num_tri_p) {
-        let t = TriId::from_usize(i);
-        for j in 0..3 {
-            *side += i03[in_p.start(t.halfedge(j)).u()].abs();
+    // CountVerts: each face collects |inclusion| of each of its 3 corner verts. Each slot is a pure
+    // gather from its own tri index, so `for_each_mut` parallelizes it deterministically — P and Q
+    // FUSED into one dispatch (same bytes as two loops, half the fork-join cost). Gated at 1e5
+    // (C++'s cheap-pass tier, not its 1e4 CountVerts default): at ~4.5ns/tri the dispatch only
+    // amortizes near 1e5 — measured at 34k sides (self_intersect) the rayon path LOST ~0.4ms to
+    // wake-from-idle. The closure is shared, so the gate picks execution only — bytes can't diverge.
+    let count = |i: usize, side: &mut i32| {
+        if i < num_tri_p {
+            let t = TriId::from_usize(i);
+            for j in 0..3 {
+                *side += i03[in_p.start(t.halfedge(j)).u()].abs();
+            }
+        } else {
+            let t = TriId::from_usize(i - num_tri_p);
+            for j in 0..3 {
+                *side += i30[in_q.start(t.halfedge(j)).u()].abs();
+            }
         }
-    }
-    for i in 0..num_tri_q {
-        let t = TriId::from_usize(i);
-        for j in 0..3 {
-            sides[num_tri_p + i] += i30[in_q.start(t.halfedge(j)).u()].abs();
+    };
+    if sides.len() >= 100_000 {
+        crate::par::for_each_mut(&mut sides, count);
+    } else {
+        for (i, side) in sides.iter_mut().enumerate() {
+            count(i, side);
         }
     }
 
-    // CountNewVerts<false> over p1q2: edgeP = pq[0] (P edge), faceQ = pq[1] (Q face).
+    // CountNewVerts<false> over p1q2: edgeP = pq[0] (P edge), faceQ = pq[1] (Q face). C++ goes
+    // parallel at >= 1e5 via AtomicAdd (a colliding scatter — the forbidden shape); these stay
+    // serial: corpus p1q2 sizes are far below even the 1e4 seam threshold, so there's no win to buy.
     for idx in 0..p1q2.len() {
         let edge_p = HalfedgeId::new(p1q2[idx][0]);
         let face_q = p1q2[idx][1] as usize;
@@ -580,25 +710,32 @@ fn create_properties(out: &mut Mesh, in_p: &Mesh, in_q: &Mesh, invert_q: bool) {
     }
 
     let num_tri = out.num_tri();
-    // Barycentric coords per output half-edge (Manifold `bary`), against each corner's SOURCE triangle.
-    let mut bary = vec![Vec3::ZERO; out.halfedge.len()];
-    for tri in 0..num_tri {
-        let ref_pq = out.tri_ref[tri];
-        if out.start(HalfedgeId::from_usize(3 * tri)).is_none() {
-            continue;
-        }
-        let tri_pq = ref_pq.face_id as usize;
-        let pq = ref_pq.mesh_id == 0;
-        let src = if pq { in_p } else { in_q };
-        let mut tri_pos = [Vec3::ZERO; 3];
-        for (j, tp) in tri_pos.iter_mut().enumerate() {
-            *tp = src.pos(src.start(HalfedgeId::from_usize(3 * tri_pq + j)));
-        }
-        for i in 0..3 {
-            let vert = out.start(HalfedgeId::from_usize(3 * tri + i));
-            bary[3 * tri + i] = get_barycentric(out.pos(vert), tri_pos, out.epsilon);
-        }
-    }
+    // Barycentric coords per output half-edge (Manifold `bary`), against each corner's SOURCE
+    // triangle. Each tri's three coords are a pure function of that tri (reads only), so the
+    // precompute runs as an order-preserving parallel map (C++ runs `GetBarycentric` Par >= 1e4);
+    // the propIdx dedupe loop below stays serial and just consumes the values.
+    let bary: Vec<[Vec3; 3]> = {
+        let out_r: &Mesh = out;
+        crate::par::map_range(num_tri, |tri| {
+            let ref_pq = out_r.tri_ref[tri];
+            if out_r.start(HalfedgeId::from_usize(3 * tri)).is_none() {
+                return [Vec3::ZERO; 3];
+            }
+            let tri_pq = ref_pq.face_id as usize;
+            let pq = ref_pq.mesh_id == 0;
+            let src = if pq { in_p } else { in_q };
+            let mut tri_pos = [Vec3::ZERO; 3];
+            for (j, tp) in tri_pos.iter_mut().enumerate() {
+                *tp = src.pos(src.start(HalfedgeId::from_usize(3 * tri_pq + j)));
+            }
+            let mut uvw = [Vec3::ZERO; 3];
+            for (i, u) in uvw.iter_mut().enumerate() {
+                let vert = out_r.start(HalfedgeId::from_usize(3 * tri + i));
+                *u = get_barycentric(out_r.pos(vert), tri_pos, out_r.epsilon);
+            }
+            uvw
+        })
+    };
 
     let id_miss_prop = out.num_vert() as i32;
     // Per output-vert bins of `((key.x, key.z, key.w), idx)`; the `+ 1` bin is `propIdx[idMissProp]`.
@@ -612,7 +749,7 @@ fn create_properties(out: &mut Mesh, in_p: &Mesh, in_q: &Mesh, invert_q: bool) {
     let mut properties: Vec<f64> = Vec::with_capacity(out.num_vert() * num_prop);
     let mut idx: i32 = 0;
 
-    for tri in 0..num_tri {
+    for (tri, tri_bary) in bary.iter().enumerate() {
         // Skip collapsed triangles.
         if out.start(HalfedgeId::from_usize(3 * tri)).is_none() {
             continue;
@@ -627,10 +764,9 @@ fn create_properties(out: &mut Mesh, in_p: &Mesh, in_q: &Mesh, invert_q: bool) {
         // (slots 0..2 when the source carries them) sign-flip to keep pointing outward. Per source tri.
         let negate_normals = !pq && invert_q && old_num_prop >= 3 && in_q.tri_has_normals(face_id);
 
-        for i in 0..3 {
+        for (i, &uvw) in tri_bary.iter().enumerate() {
             let he = HalfedgeId::from_usize(3 * tri + i);
             let vert = out.start(he);
-            let uvw = bary[3 * tri + i];
 
             // ivec4 key(PQ, idMissProp, -1, -1).
             let mut key = [pq as i32, id_miss_prop, -1i32, -1i32];
@@ -720,15 +856,26 @@ fn create_properties(out: &mut Mesh, in_p: &Mesh, in_q: &Mesh, invert_q: bool) {
 /// `mesh_id` is offset (matching C++); `same_face` ignores `original_id`, so the rest carries verbatim.
 fn update_reference(out: &mut Mesh, in_p: &Mesh, in_q: &Mesh) {
     let offset_q = mesh_id_counter();
-    for r in &mut out.tri_ref {
+    // A pure per-slot remap (each ref rewritten from only its own value) — `for_each_mut` runs it
+    // parallel deterministically. Gated at C++'s CUSTOM 1e5 threshold (`autoPolicy(NumTri, 1e5)`),
+    // not the seam's uniform 1e4: the remap is ~1ns/tri, so a parallel dispatch only amortizes at
+    // 1e5+ tris — below that the serial loop is strictly faster (measured: 27us serial vs 300us+
+    // dispatched at 33k tris). Both paths write identical bytes, so the size gate can't diverge.
+    let (tri_ref_p, tri_ref_q) = (&in_p.tri_ref, &in_q.tri_ref);
+    let remap = |r: &mut TriRef| {
         let src = r.face_id as usize;
         if r.mesh_id == 0 {
-            *r = in_p.tri_ref[src];
+            *r = tri_ref_p[src];
         } else {
-            let mut q = in_q.tri_ref[src];
+            let mut q = tri_ref_q[src];
             q.mesh_id += offset_q;
             *r = q;
         }
+    };
+    if out.tri_ref.len() >= 100_000 {
+        crate::par::for_each_mut(&mut out.tri_ref, |_, r| remap(r));
+    } else {
+        out.tri_ref.iter_mut().for_each(remap);
     }
     // Thread the per-meshID hasNormals provenance to the output (M.3.4b.8) — P unchanged, Q shifted by
     // the SAME offset the tri refs used (mirrors C++ boolean_result.cpp 530-535), so a chained op still
@@ -1509,6 +1656,64 @@ mod tests {
         assert!(
             u.volume().is_finite() && u.volume() > 0.0,
             "fold volume invalid"
+        );
+    }
+
+    /// BU.4 — the `append_whole_edges` strategy gate can't diverge: the parallel-gather + serial-emit
+    /// split and the fused per-halfedge loop must write IDENTICAL bytes into all three outputs. Runs at
+    /// gate scale (a 200-segment sphere ⇒ ~120k halfedges > the 1e5 gate) so on the `par` lane the
+    /// split side actually exercises the rayon `map_range`. Inputs are the all-whole/identity case
+    /// (every vert inclusion 1, no cut edges): every accepted halfedge emits exactly one pair and the
+    /// two strategies must fill every slot the same way.
+    #[test]
+    fn whole_edges_split_and_fused_paths_write_identical_bytes() {
+        let sphere = Mesh::sphere(1.0, 200);
+        let n_he = sphere.halfedge.len();
+        assert!(
+            n_he >= 100_000,
+            "test must cross the 1e5 split gate: {n_he}"
+        );
+        let num_tri = sphere.num_tri();
+
+        let whole = vec![true; n_he];
+        let i03 = vec![1i32; sphere.num_vert()];
+        let v_p2r: Vec<VertId> = (0..sphere.num_vert() as i32).map(VertId::new).collect();
+        let face_p2r: Vec<i32> = (0..num_tri as i32).collect();
+
+        let blank = VHalfedge {
+            start_vert: VertId::NONE,
+            end_vert: VertId::NONE,
+            paired_halfedge: HalfedgeId::NONE,
+            prop_vert: VertId::NONE,
+        };
+        let mut run = |split: bool| {
+            let mut face_halfedges = vec![blank; n_he];
+            let mut halfedge_ref = vec![temp_ref(0, TriId::new(0)); n_he];
+            let mut face_ptr_r: Vec<i32> = (0..num_tri as i32).map(|f| 3 * f).collect();
+            append_whole_edges_impl(
+                &mut face_halfedges,
+                &mut halfedge_ref,
+                &mut face_ptr_r,
+                &sphere,
+                &whole,
+                &i03,
+                &v_p2r,
+                &face_p2r,
+                true,
+                split,
+            );
+            (face_halfedges, halfedge_ref, face_ptr_r)
+        };
+
+        let fused = run(false);
+        let split = run(true);
+        assert!(split.0 == fused.0, "face_halfedges diverged");
+        assert!(split.1 == fused.1, "halfedge_ref diverged");
+        assert!(split.2 == fused.2, "face_ptr_r cursors diverged");
+        // And the pass actually filled everything: every slot written exactly once.
+        assert!(
+            fused.0.iter().all(|h| h.start_vert.is_some()),
+            "all-whole identity case must fill every slot"
         );
     }
 

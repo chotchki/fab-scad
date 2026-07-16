@@ -2075,8 +2075,8 @@ fn build_intrinsics<'a>(
         let Some(entry) = intrinsics::resolve(name, params, body) else {
             continue;
         };
-        if !entry.consts.is_empty() {
-            continue; // const-guarded: arms post-hoist (arm_guarded_intrinsics)
+        if !entry.consts.is_empty() || !entry.consts_v.is_empty() {
+            continue; // const-guarded (numeric or Value): arms post-hoist (arm_guarded_intrinsics)
         }
         match guard_veto(entry, functions) {
             None => {
@@ -2110,7 +2110,7 @@ fn arm_guarded_intrinsics<'a>(ctx: &Ctx<'a>) -> Vec<(&'a str, intrinsics::Intrin
         let Some(entry) = intrinsics::resolve(name, params, body) else {
             continue;
         };
-        if entry.consts.is_empty() {
+        if entry.consts.is_empty() && entry.consts_v.is_empty() {
             continue; // unguarded: already wired (or vetoed) at build_intrinsics
         }
         if let Some(why) = guard_veto(entry, &ctx.functions) {
@@ -2126,18 +2126,33 @@ fn arm_guarded_intrinsics<'a>(ctx: &Ctx<'a>) -> Vec<(&'a str, intrinsics::Intrin
         let bad = entry.consts.iter().find(|&&(cname, expected)| {
             !matches!(scope.lookup_opt(cname), Some(Value::Num(n)) if n.to_bits() == expected.to_bits())
         });
-        match bad {
-            None => {
+        // the VALUE-typed half (O.8): the bound value must bit-match the built expectation exactly
+        let bad_v = entry.consts_v.iter().find(|&&(cname, expected)| {
+            !scope
+                .lookup_opt(cname)
+                .is_some_and(|v| intrinsics::value_bits_eq(&v, &expected()))
+        });
+        match (bad, bad_v) {
+            (None, None) => {
                 if explain {
                     eprintln!("+ [intrinsic ARMED] {name} — const guard ok");
                 }
                 out.push((name, entry.func));
             }
-            Some(&(cname, expected)) => {
+            (Some(&(cname, expected)), _) => {
                 if explain {
                     eprintln!(
                         "+ [intrinsic CONST-DECLINED] {name} — `{cname}` in its home scope is {:?}, \
                          intrinsic baked {expected} → INTERPRETED",
+                        scope.lookup_opt(cname),
+                    );
+                }
+            }
+            (None, Some(&(cname, _))) => {
+                if explain {
+                    eprintln!(
+                        "+ [intrinsic CONST-DECLINED] {name} — `{cname}` in its home scope is {:?}, \
+                         which is not the baked value → INTERPRETED",
                         scope.lookup_opt(cname),
                     );
                 }
@@ -3060,6 +3075,62 @@ mod tests {
                 "intrinsic vs interpreted rand-stream diverged on: {body}"
             );
         }
+    }
+
+    /// O.8 mechanism, direct: the VALUE-const guard ([`super::intrinsics::Entry::consts_v`]) arms only on a
+    /// bit-exact, VARIANT-exact bound value — an overridden vector, a one-ulp drift, an element-wise-equal
+    /// `List` (vs the baked `NumList`), and an unbound constant all DECLINE.
+    #[test]
+    fn value_const_guard_arms_on_exact_bits_and_variant() {
+        let program = parse("UP=[0,0,1]; function _fab_poc_isup(v) = v == UP;").unwrap();
+        let ctx = build_ctx(&program, crate::Config::default());
+        let armed_isup = |ctx: &super::Ctx| {
+            super::arm_guarded_intrinsics(ctx)
+                .iter()
+                .any(|(n, _)| *n == "_fab_poc_isup")
+        };
+        assert!(!armed_isup(&ctx), "unbound const → declines");
+
+        let bind_up = |v: Value| {
+            let mut g = Scope::new();
+            g.bind("UP".to_string(), v);
+            *ctx.island_globals.borrow_mut().first_mut().unwrap() = g;
+        };
+        bind_up(Value::num_list(vec![0.0, 0.0, 1.0]));
+        assert!(armed_isup(&ctx), "exact NumList → arms");
+        bind_up(Value::num_list(vec![0.0, 1.0, 0.0]));
+        assert!(!armed_isup(&ctx), "overridden vector → declines");
+        bind_up(Value::num_list(vec![
+            0.0,
+            0.0,
+            f64::from_bits(1.0_f64.to_bits() + 1),
+        ]));
+        assert!(!armed_isup(&ctx), "one-ulp drift → declines");
+        bind_up(Value::list(vec![
+            Value::Num(0.0),
+            Value::Num(0.0),
+            Value::Num(1.0),
+        ]));
+        assert!(
+            !armed_isup(&ctx),
+            "element-wise-equal List → declines (variant-exact)"
+        );
+    }
+
+    /// O.8 end-to-end through [`super::resolve_source`]: an `UP` override must flip the echo — a
+    /// stale-baked intrinsic would answer `true` for `[0,0,1]` where the interpreter's truth is `false`.
+    #[test]
+    fn value_const_override_declines_end_to_end() {
+        let poc = "function _fab_poc_isup(v) = v == UP;\n\
+                   echo(_fab_poc_isup([0,0,1]), _fab_poc_isup([0,1,0]));";
+        assert_eq!(
+            run_echo(&format!("UP=[0,0,1];\n{poc}")),
+            "ECHO: true, false"
+        );
+        assert_eq!(
+            run_echo(&format!("UP=[0,1,0];\n{poc}")),
+            "ECHO: false, true"
+        );
     }
 
     /// O.5.1 end-to-end through [`super::resolve_source`] (the path that ARMS): the program's `_EPSILON`

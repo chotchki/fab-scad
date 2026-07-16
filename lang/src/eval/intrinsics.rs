@@ -39,6 +39,9 @@ pub(super) type Intrinsic = fn(&[Value]) -> crate::Result<Value>;
 /// One registered intrinsic: the exact function it stands in for. `reference` is the VERBATIM source of that
 /// function (one `function name(params) = body;`) — the single source of truth: its fingerprint gates
 /// dispatch, and the fast==slow harness runs its interpreted body as the oracle the `func` must bit-match.
+/// A named top-level constant + a builder for its expected `Value` (statics can't hold one directly).
+type ValueConst = (&'static str, fn() -> Value);
+
 pub(super) struct Entry {
     /// The function name the intrinsic implements (registry bucket key).
     pub(super) name: &'static str,
@@ -53,6 +56,12 @@ pub(super) struct Entry {
     /// `super::arm_guarded_intrinsics`. Mismatch (or mid-hoist, before globals exist) → interpreted: the
     /// worst case stays "missed speedup, never a wrong answer".
     pub(super) consts: &'static [(&'static str, f64)],
+    /// The VALUE-typed half of the const guard (O.8): named top-level constants whose baked value is NOT a
+    /// number — BOSL2's direction vectors (`UP`/`RIGHT`) and sentinels (`_NO_ARG`). Each `fn()` builds the
+    /// expected `Value` (statics can't hold one); the arm step compares it against the home-scope binding
+    /// BIT-level ([`value_bits_eq`]: f64s by `to_bits`, exact variant, recursive) — same
+    /// wire-only-if-proven contract as `consts`, same post-hoist arm timing.
+    pub(super) consts_v: &'static [ValueConst],
     /// USER-FUNCTION names interpreting the reference can reach (O.5.2 dep pins), TRANSITIVELY CLOSED by the
     /// author over every arg shape the native accepts (`select` → `is_vector`/`is_range` → `is_finite` →
     /// `is_nan`; a branch no accepted arg shape can reach — `all_nonzero` behind select's fixed 1-arg
@@ -136,6 +145,7 @@ static REGISTRY: &[Entry] = &[
         name: "_fab_poc_sq",
         reference: "function _fab_poc_sq(x) = x * x;",
         consts: &[],
+        consts_v: &[],
         deps: &[],
         builtins: &[],
         func: poc_sq,
@@ -146,6 +156,7 @@ static REGISTRY: &[Entry] = &[
         name: "is_def",
         reference: "function is_def(x) = !is_undef(x);",
         consts: &[],
+        consts_v: &[],
         deps: &[],
         builtins: &["is_undef"],
         func: is_def,
@@ -154,6 +165,7 @@ static REGISTRY: &[Entry] = &[
         name: "is_str",
         reference: "function is_str(x) = is_string(x);",
         consts: &[],
+        consts_v: &[],
         deps: &[],
         builtins: &["is_string"],
         func: is_str,
@@ -164,6 +176,7 @@ static REGISTRY: &[Entry] = &[
         name: "is_nan",
         reference: "function is_nan(x) = (x!=x);",
         consts: &[],
+        consts_v: &[],
         deps: &[],
         builtins: &[],
         func: is_nan,
@@ -172,6 +185,7 @@ static REGISTRY: &[Entry] = &[
         name: "is_finite",
         reference: "function is_finite(x) = is_num(x) && !is_nan(0*x);",
         consts: &[],
+        consts_v: &[],
         deps: &["is_nan"],
         builtins: &["is_num"],
         func: is_finite,
@@ -183,6 +197,7 @@ static REGISTRY: &[Entry] = &[
         name: "last",
         reference: "function last(list) = list[len(list)-1];",
         consts: &[],
+        consts_v: &[],
         deps: &[],
         builtins: &["len"],
         func: last,
@@ -191,6 +206,7 @@ static REGISTRY: &[Entry] = &[
         name: "default",
         reference: "function default(v,dflt=undef) = is_undef(v)? dflt : v;",
         consts: &[],
+        consts_v: &[],
         deps: &[],
         builtins: &["is_undef"],
         func: default,
@@ -202,6 +218,7 @@ static REGISTRY: &[Entry] = &[
         name: "_is_liststr",
         reference: "function _is_liststr(s) = is_list(s) || is_str(s);",
         consts: &[],
+        consts_v: &[],
         deps: &["is_str"],
         builtins: &["is_list", "is_string"],
         func: is_liststr,
@@ -210,6 +227,7 @@ static REGISTRY: &[Entry] = &[
         name: "point3d",
         reference: "function point3d(p, fill=0) = assert(is_list(p)) [for (i=[0:2]) (p[i]==undef)? fill : p[i]];",
         consts: &[],
+        consts_v: &[],
         deps: &[],
         builtins: &["is_list"],
         func: point3d,
@@ -240,6 +258,7 @@ static REGISTRY: &[Entry] = &[
                       ? [ for (i = [s:1:e])   list[i] ] \
                       : [ for (i = [s:1:l-1]) list[i], for (i = [0:1:e])   list[i] ] ;",
         consts: &[],
+        consts_v: &[],
         deps: &["is_vector", "is_range", "is_finite", "is_nan"],
         builtins: &["len", "is_list", "is_string", "is_num", "norm", "is_undef"],
         func: select,
@@ -252,9 +271,22 @@ static REGISTRY: &[Entry] = &[
         name: "_fab_poc_near0",
         reference: "function _fab_poc_near0(x) = abs(x) < _EPSILON;",
         consts: &[("_EPSILON", 1e-9)],
+        consts_v: &[],
         deps: &[],
         builtins: &["abs"],
         func: poc_near0,
+    },
+    // The VALUE-const guard POC (O.8): bakes the vector constant `UP` — wires only when the home scope's
+    // `UP` is bit-exactly `[0,0,1]` AS A NumList ([`value_bits_eq`] is variant-exact). The real consumers
+    // (vector_axis's UP/RIGHT, rot's _NO_ARG sentinel) are O.9.
+    Entry {
+        name: "_fab_poc_isup",
+        reference: "function _fab_poc_isup(v) = v == UP;",
+        consts: &[],
+        consts_v: &[("UP", poc_up_value)],
+        deps: &[],
+        builtins: &[],
+        func: poc_isup,
     },
     // ── O.5.2, the SHAPE band (utility.scad / lists.scad) ────────────────────────────────────────────────
     // The `is_consistent`/`_list_pattern`/`same_shape` bundle is ~4.7s of self time across the O.4 four
@@ -269,6 +301,7 @@ static REGISTRY: &[Entry] = &[
   ? [for(entry=list) is_list(entry) ? _list_pattern(entry) : 0]
   : 0;",
         consts: &[],
+        consts_v: &[],
         deps: &[],
         builtins: &["is_list"],
         func: list_pattern,
@@ -277,6 +310,7 @@ static REGISTRY: &[Entry] = &[
         name: "same_shape",
         reference: "function same_shape(a,b) = is_def(b) && _list_pattern(a) == b*0;",
         consts: &[],
+        consts_v: &[],
         deps: &["is_def", "_list_pattern"],
         builtins: &["is_undef", "is_list"],
         func: same_shape,
@@ -289,6 +323,7 @@ static REGISTRY: &[Entry] = &[
        || (let(pattern = is_undef(pattern) ? _list_pattern(list[0]): _list_pattern(pattern) )
           []==[for(entry=0*list) if (entry != pattern) entry]));",
         consts: &[],
+        consts_v: &[],
         deps: &["_list_pattern"],
         builtins: &["is_list", "len", "is_undef"],
         func: is_consistent,
@@ -298,6 +333,7 @@ static REGISTRY: &[Entry] = &[
         reference: "function num_defined(v) =
     len([for(vi=v) if(!is_undef(vi)) 1]);",
         consts: &[],
+        consts_v: &[],
         deps: &[],
         builtins: &["len", "is_undef"],
         func: num_defined,
@@ -308,6 +344,7 @@ static REGISTRY: &[Entry] = &[
     is_list(value) ? value :
     is_undef(fill)? [for (i=[1:1:n]) value] : [value, for (i=[2:1:n]) fill];",
         consts: &[],
+        consts_v: &[],
         deps: &[],
         builtins: &["is_list", "is_undef"],
         func: force_list,
@@ -333,6 +370,7 @@ static REGISTRY: &[Entry] = &[
         ]
     ) : false;",
         consts: &[("_EPSILON", 1e-9)],
+        consts_v: &[],
         deps: &["idx", "posmod", "is_finite", "is_nan"],
         builtins: &["is_bool", "is_num", "abs", "is_list", "is_string", "len"],
         func: approx,
@@ -343,6 +381,7 @@ static REGISTRY: &[Entry] = &[
     assert( is_finite(x) && is_finite(m) && !approx(m,0) , \"\\nInput must be finite numbers. The divisor cannot be zero.\")
     (x%m+m)%m;",
         consts: &[("_EPSILON", 1e-9)],
+        consts_v: &[],
         deps: &["is_finite", "is_nan", "approx"],
         builtins: &["is_num", "abs", "is_bool"],
         func: posmod,
@@ -358,6 +397,7 @@ static REGISTRY: &[Entry] = &[
         _e = posmod(e,ll)
     ) [_s : step : _e];",
         consts: &[("_EPSILON", 1e-9)],
+        consts_v: &[],
         deps: &["posmod", "is_finite", "is_nan", "approx"],
         builtins: &["is_list", "is_string", "len", "is_num", "abs", "is_bool"],
         func: idx,
@@ -368,6 +408,7 @@ static REGISTRY: &[Entry] = &[
     is_finite(x)? abs(x)>eps :
     is_vector(x) && [for (xx=x) if(abs(xx)<eps) 1] == [];",
         consts: &[("_EPSILON", 1e-9)],
+        consts_v: &[],
         deps: &["is_finite", "is_nan", "is_vector"],
         builtins: &["is_num", "abs", "is_list", "len", "is_undef"],
         func: all_nonzero,
@@ -380,6 +421,7 @@ static REGISTRY: &[Entry] = &[
     && (is_undef(zero) || ((norm(v) >= eps) == !zero))
     && (!all_nonzero || all_nonzero(v)) ;",
         consts: &[("_EPSILON", 1e-9)],
+        consts_v: &[],
         deps: &["is_finite", "is_nan", "all_nonzero"],
         builtins: &["is_list", "len", "is_undef", "is_num", "norm", "abs"],
         func: is_vector,
@@ -395,6 +437,7 @@ static REGISTRY: &[Entry] = &[
    && is_vector(A[0],n)
    && is_consistent(A);",
         consts: &[],
+        consts_v: &[],
         deps: &["is_vector", "is_finite", "is_nan", "is_consistent", "_list_pattern"],
         builtins: &["is_list", "len", "is_undef", "is_num"],
         func: is_matrix,
@@ -412,6 +455,7 @@ static REGISTRY: &[Entry] = &[
     let( crx = cross(tri[1]-tri[2],tri[0]-tri[2]) )
     abs( crx ) <= eps*norm(tri[1]-tri[2])*norm(tri[0]-tri[2]) ? 0 : sign( crx );",
         consts: &[("_EPSILON", 1e-9)],
+        consts_v: &[],
         deps: &[],
         builtins: &["cross", "norm", "abs", "sign"],
         func: tri_class,
@@ -420,6 +464,7 @@ static REGISTRY: &[Entry] = &[
         name: "_is_at_left",
         reference: "function _is_at_left(pt,line,eps=_EPSILON) = _tri_class([pt,line[0],line[1]],eps) <= 0;",
         consts: &[("_EPSILON", 1e-9)],
+        consts_v: &[],
         deps: &["_tri_class"],
         builtins: &["cross", "norm", "abs", "sign"],
         func: is_at_left,
@@ -454,6 +499,7 @@ static REGISTRY: &[Entry] = &[
     ?   false
     :   _none_inside(idxs,poly,p0,p1,p2,eps,i=i+1);",
         consts: &[],
+        consts_v: &[],
         deps: &[
             "select",
             "_tri_class",
@@ -485,6 +531,7 @@ static REGISTRY: &[Entry] = &[
         name: "_sum",
         reference: "function _sum(v,_total,_i=0) = _i>=len(v) ? _total : _sum(v,_total+v[_i], _i+1);",
         consts: &[],
+        consts_v: &[],
         deps: &[],
         builtins: &["len"],
         func: sum_tail,
@@ -497,6 +544,7 @@ static REGISTRY: &[Entry] = &[
     is_finite(v[0]) || is_vector(v[0]) ? [for(i=v) 1]*v :
     _sum(v,v[0]*0);",
         consts: &[],
+        consts_v: &[],
         deps: &[
             "is_consistent",
             "_list_pattern",
@@ -515,6 +563,7 @@ static REGISTRY: &[Entry] = &[
     norm(v)<_EPSILON? (error==[[[\"ASSERT\"]]]? assert(norm(v)>=_EPSILON,\"\\nCannot normalize a zero vector.\") : error) :
     v/norm(v);",
         consts: &[("_EPSILON", 1e-9)],
+        consts_v: &[],
         deps: &["is_vector", "is_finite", "is_nan"],
         builtins: &["norm", "is_list", "len", "is_undef", "is_num"],
         func: unit,
@@ -525,6 +574,7 @@ static REGISTRY: &[Entry] = &[
   t[2][0]==0 && t[2][1]==0 && t[2][3]==0 && t[0][2] == 0 && t[1][2]==0 &&
   (t[2][2]==1 || !(t[0][0]==1 && t[0][1]==0 && t[1][0]==0 && t[1][1]==1));",
         consts: &[],
+        consts_v: &[],
         deps: &[],
         builtins: &[],
         func: is_2d_transform,
@@ -551,6 +601,7 @@ static REGISTRY: &[Entry] = &[
   : assert(false, str(\"Unsupported combination: \",len(transform),\"x\",len(transform[0]),\" transform (dimension \",tdim,
                           \"), data of dimension \",datadim));",
         consts: &[],
+        consts_v: &[],
         deps: &[
             "is_matrix",
             "is_vector",
@@ -579,6 +630,7 @@ static REGISTRY: &[Entry] = &[
             _bt_search(query, r, points, tree[2]),
             _bt_search(query, r, points, tree[3]) ) ;",
         consts: &[],
+        consts_v: &[],
         deps: &["is_vector", "is_finite", "is_nan"],
         builtins: &["is_list", "len", "is_num", "norm", "concat", "is_undef"],
         func: bt_search,
@@ -606,6 +658,7 @@ static REGISTRY: &[Entry] = &[
     // NOTE: constrain() corrects crazy FP rounding errors that exceed acos()'s domain.
     acos(constrain((vecs[0]*vecs[1])/(norm0*norm1), -1, 1));",
         consts: &[],
+        consts_v: &[],
         deps: &[
             "same_shape",
             "is_def",
@@ -641,6 +694,7 @@ static REGISTRY: &[Entry] = &[
         ) segdist
     ]);",
         consts: &[],
+        consts_v: &[],
         deps: &["select", "is_vector", "is_range", "is_finite", "is_nan"],
         builtins: &[
             "min", "norm", "len", "is_list", "is_string", "is_num", "is_undef",
@@ -661,6 +715,7 @@ static REGISTRY: &[Entry] = &[
     && (!bounded[0] || t>=-eps)
     && (!bounded[1] || t<1+eps) ;",
         consts: &[("_EPSILON", 1e-9)],
+        consts_v: &[],
         deps: &["force_list"],
         builtins: &["abs", "cross", "norm", "len", "is_list", "is_undef"],
         func: is_point_on_line,
@@ -686,6 +741,7 @@ static REGISTRY: &[Entry] = &[
     assert(!approx(pos[0],0, eps), \"\\nThe vnf has self-intersections.\")
     pos[1]/pos[0]/4;",
         consts: &[("_EPSILON", 1e-9)],
+        consts_v: &[],
         deps: &[
             "is_vnf",
             "is_vector",
@@ -716,6 +772,7 @@ static REGISTRY: &[Entry] = &[
     ]
 ];",
         consts: &[],
+        consts_v: &[],
         deps: &[],
         builtins: &[],
         func: ident,
@@ -731,6 +788,7 @@ static REGISTRY: &[Entry] = &[
         [       0,         0, 0, 1]
     ];",
         consts: &[],
+        consts_v: &[],
         deps: &["is_finite", "is_nan"],
         builtins: &["sin", "cos", "is_num"],
         func: affine3d_zrot,
@@ -746,6 +804,7 @@ static REGISTRY: &[Entry] = &[
         [0,        0,         0,   1]
     ];",
         consts: &[],
+        consts_v: &[],
         deps: &["is_finite", "is_nan"],
         builtins: &["sin", "cos", "is_num"],
         func: affine3d_xrot,
@@ -761,6 +820,7 @@ static REGISTRY: &[Entry] = &[
         [        0, 0,        0,   1]
     ];",
         consts: &[],
+        consts_v: &[],
         deps: &["is_finite", "is_nan"],
         builtins: &["sin", "cos", "is_num"],
         func: affine3d_yrot,
@@ -789,6 +849,7 @@ static REGISTRY: &[Entry] = &[
     let( wiskers = [for(j=idx(ind)) if(norm(poly[ind[j]]-poly[ind[(j+2)%lind]])<eps) j ] )
     wiskers==[] ? undef : [wiskers[0]];",
         consts: &[("_EPSILON", 1e-9)],
+        consts_v: &[],
         deps: &[
             "_tri_class",
             "_none_inside",
@@ -822,6 +883,7 @@ static REGISTRY: &[Entry] = &[
       is_undef(idx) ? [for(hit=allhits) if (list[hit]==val) 1] != []
     : [for(hit=allhits) if (list[hit][idx]==val) 1] != [];",
         consts: &[],
+        consts_v: &[],
         deps: &["is_finite", "is_nan", "is_def"],
         builtins: &["search", "is_list", "is_undef", "is_num"],
         func: in_list,
@@ -836,6 +898,7 @@ static REGISTRY: &[Entry] = &[
         && len(list[0])>0
         && (is_undef(dim) || in_list(len(list[0]), force_list(dim)));",
         consts: &[],
+        consts_v: &[],
         deps: &[
             "is_matrix",
             "is_vector",
@@ -872,6 +935,7 @@ static REGISTRY: &[Entry] = &[
         _group_sort_by_index(greater,idx)
     );",
         consts: &[],
+        consts_v: &[],
         deps: &[],
         builtins: &["len", "floor", "concat"],
         func: group_sort_by_index,
@@ -894,6 +958,18 @@ fn poc_near0(args: &[Value]) -> crate::Result<Value> {
     let x = args.first().cloned().unwrap_or(Value::Undef);
     let a = super::builtins::apply("abs", &[x]);
     Ok(super::ops::apply_binary(BinOp::Lt, a, Value::Num(1e-9)))
+}
+
+/// The Value-const guard POC's expected `UP` — built like the `[0,0,1]` literal would (a `NumList`).
+fn poc_up_value() -> Value {
+    Value::num_list(vec![0.0, 0.0, 1.0])
+}
+
+/// The Value-const-guard POC: `v == UP` with `UP` baked as `[0,0,1]` (the `consts_v` guard proves the bake).
+/// The `==` routes through the interpreter's own op — exotic `v` compares exactly as interpreted.
+fn poc_isup(args: &[Value]) -> crate::Result<Value> {
+    let v = args.first().cloned().unwrap_or(Value::Undef);
+    Ok(super::ops::apply_binary(BinOp::Eq, v, poc_up_value()))
 }
 
 /// Is `v` a list to the `is_list` BUILTIN (the branch every shape function turns on)? Both vector variants;
@@ -982,6 +1058,45 @@ fn num_defined(args: &[Value]) -> crate::Result<Value> {
 /// text), same contract as [`select_assert`].
 fn bosl_assert(msg: &str) -> crate::Error {
     crate::Error::Eval(format!("assert failed: {msg}"))
+}
+
+/// Bit-level `Value` equality — the [`Entry::consts_v`] guard's notion of "unchanged": `f64`s compare by
+/// `to_bits` (same-bits NaNs are EQUAL, `0.0`/`-0.0` are DISTINCT — the determinism doctrine), lists
+/// recurse, and the VARIANT must match exactly (a `NumList` never equals the element-wise-equal `List` —
+/// conservative: an unexpected construction declines rather than wires).
+pub(super) fn value_bits_eq(a: &Value, b: &Value) -> bool {
+    match (a, b) {
+        (Value::Num(x), Value::Num(y)) => x.to_bits() == y.to_bits(),
+        (Value::NumList(x), Value::NumList(y)) => {
+            x.len() == y.len()
+                && x.iter()
+                    .zip(y.iter())
+                    .all(|(p, q)| p.to_bits() == q.to_bits())
+        }
+        (Value::List(x), Value::List(y)) => {
+            x.len() == y.len() && x.iter().zip(y.iter()).all(|(p, q)| value_bits_eq(p, q))
+        }
+        (
+            Value::Range {
+                start: s1,
+                step: t1,
+                end: e1,
+            },
+            Value::Range {
+                start: s2,
+                step: t2,
+                end: e2,
+            },
+        ) => {
+            s1.to_bits() == s2.to_bits()
+                && t1.to_bits() == t2.to_bits()
+                && e1.to_bits() == e2.to_bits()
+        }
+        (Value::Bool(x), Value::Bool(y)) => x == y,
+        (Value::Str(x), Value::Str(y)) => x == y,
+        (Value::Undef, Value::Undef) => true,
+        _ => false,
+    }
 }
 
 /// `is_finite` as the BOSL2 user fn computes it (`is_num(x) && !is_nan(0*x)`): a NON-NaN finite number.
@@ -4552,6 +4667,32 @@ mod tests {
                     &interpret_with_deps_consts(ip_ref, &ip_deps, &consts, args)
                 ),
                 "is_path diverged on {args:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn fast_equals_slow_fab_poc_isup() {
+        // The Value-const POC's correctness half: with `UP` bound to the baked [0,0,1] (the only state the
+        // intrinsic ever arms under), native must bit-match the interpreter over the battery plus the
+        // exact/near-miss vectors.
+        let reference = reference_of("_fab_poc_isup").unwrap();
+        let consts = [("UP", Value::num_list(vec![0.0, 0.0, 1.0]))];
+        let mut inputs = value_battery();
+        inputs.extend([
+            Value::num_list(vec![0.0, 0.0, 1.0]),
+            Value::num_list(vec![0.0, 0.0, -1.0]),
+            Value::num_list(vec![0.0, 0.0, 1.0 + 1e-15]),
+            Value::list(vec![Value::Num(0.0), Value::Num(0.0), Value::Num(1.0)]),
+        ]);
+        for v in inputs {
+            let args = [v.clone()];
+            assert!(
+                same_result(
+                    &super::poc_isup(&args),
+                    &interpret_with_deps_consts(reference, &[], &consts, &args)
+                ),
+                "_fab_poc_isup diverged on {v:?}"
             );
         }
     }

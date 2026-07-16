@@ -1,0 +1,33 @@
+# M.1.5 — the continuous fuzz lane (nightly cargo-fuzz + ASan; K.5's "24h, 0 trophies" clause runs
+# here). Excluded from the root workspace; corpus/artifacts are gitignored (the never-git-add-lang/
+# discipline). Launch: `cargo +nightly fuzz run csg_tree -- -max_total_time=86400` (and `polygon`).
+[package]
+name = "fab-manifold-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+arbitrary = { version = "1", features = ["derive"] }
+fab-manifold = { path = ".." }
+
+[[bin]]
+name = "csg_tree"
+path = "fuzz_targets/csg_tree.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "polygon"
+path = "fuzz_targets/polygon.rs"
+test = false
+doc = false
+bench = false
+
+# Its own workspace root — belt to the parent's `exclude` suspenders (cargo-fuzz standard layout).
+[workspace]

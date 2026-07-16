@@ -57,6 +57,8 @@ required-features = ["native"]
 
 [workspace]
 members = ["gen", "geom", "gui", "jit", "lang", "manifold", "web"]
+# The fuzz crate is nightly-only (cargo-fuzz) — kept out of the workspace so stable builds never see it.
+exclude = ["manifold/fuzz"]
 
 [features]
 # The in-process Manifold geometry kernel (Track C). Default-on so the normal build + tests

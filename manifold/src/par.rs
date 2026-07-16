@@ -118,15 +118,33 @@ where
     U: Send,
     F: Fn(&T) -> U + Sync + Send,
 {
+    map_collect_min_len(items, SEQ_THRESHOLD, f)
+}
+
+/// [`map_collect`] with a caller-supplied serial/parallel crossover: serial at
+/// `len() <= min_len` (the same `<=` C++ `autoPolicy(size, threshold)` uses), rayon above it.
+/// For HEAVY per-item work — a whole quickhull, a whole boolean — where the uniform
+/// [`SEQ_THRESHOLD`] (tuned for per-element float ops) would keep 30–1000-item batches serial
+/// forever. C++ passes 100 at exactly these sites (`minkowski.cpp` `autoPolicy(numIter, 100)`).
+///
+/// Determinism is inherited from [`map_collect`]'s shape: output index `i` is always
+/// `f(&items[i])`, so the threshold only moves the crossover, never the bytes.
+pub fn map_collect_min_len<T, U, F>(items: &[T], min_len: usize, f: F) -> Vec<U>
+where
+    T: Sync,
+    U: Send,
+    F: Fn(&T) -> U + Sync + Send,
+{
     #[cfg(par_live)]
     {
-        if items.len() <= SEQ_THRESHOLD {
+        if items.len() <= min_len {
             return items.iter().map(f).collect();
         }
         items.par_iter().map(f).collect()
     }
     #[cfg(not(par_live))]
     {
+        let _ = min_len; // only steers the par_live crossover
         items.iter().map(f).collect()
     }
 }
@@ -336,6 +354,23 @@ mod tests {
         let items: Vec<i32> = (0..20_000).collect();
         let doubled = map_collect(&items, |&x| x * 2);
         assert_eq!(doubled, (0..20_000).map(|x| x * 2).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn map_collect_min_len_is_index_exact_both_sides_of_custom_threshold() {
+        // min_len = 8: 8 items take the serial early-out, 50 items cross into the rayon path under
+        // `par` — WAY below SEQ_THRESHOLD, which is the point (heavy items, tiny batches). Both
+        // sides must be index-exact against the plain serial map.
+        let small: Vec<i64> = (0..8).collect();
+        assert_eq!(
+            map_collect_min_len(&small, 8, |&x| x * x + 1),
+            small.iter().map(|&x| x * x + 1).collect::<Vec<_>>()
+        );
+        let big: Vec<i64> = (0..50).collect();
+        assert_eq!(
+            map_collect_min_len(&big, 8, |&x| x * x + 1),
+            big.iter().map(|&x| x * x + 1).collect::<Vec<_>>()
+        );
     }
 
     #[test]

@@ -340,7 +340,10 @@ fn m6_full_surface_golden() {
         ("hull_cloud", 0xd54959f5a7d51ab3),
         ("hull_fibonacci", 0x8e41cb8f12c6b1ec),
         ("minkowski_t0", 0xc279fe066511cb73),
-        ("minkowski_t1", 0xc14d52688455a5d9),
+        // BU.4.4: union_all went left-fold → fixed-shape pairwise tree (the parallel union). Same
+        // SOLID (volume bits identical, dyadic-exact 10.390625), different triangulation — the one
+        // deliberate regen; serial == par == this value, verified both lanes at landing.
+        ("minkowski_t1", 0x3b4638feed958818),
         ("colored_difference", 0x75865c501b1e3cd1),
         ("ingest_canonical", 0xea2b3709e58d74e5),
         ("cs_union", 0x5af29e0b01b9c18e),

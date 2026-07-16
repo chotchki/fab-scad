@@ -15,13 +15,17 @@
 //! The final result unions all the per-face hulls with the ORIGINAL `A` (which fills the core), then
 //! C++ resets provenance via `AsOriginal` — skipped here, invisible to the volume gate.
 //!
-//! Two deviations from the C++, neither affecting the computed SOLID (the gate is volume-residual,
-//! algorithm-independent — Minkowski triangulation is never byte-identical):
+//! Parallelism mirrors C++'s COARSE grain (BU.4.4): per-face hulls go through the seam with C++'s
+//! exact threshold 100 (`autoPolicy(numIter, 100)` — each item is a whole quickhull), and the hull
+//! unions run as a fixed-shape pairwise reduction tree. Two deviations from the C++, neither
+//! affecting the computed SOLID (the gate is volume-residual, algorithm-independent — Minkowski
+//! triangulation is never byte-identical):
 //!
-//! - **Sequential union.** C++ `BatchBoolean(items, Add)` is a parallel CSG-tree; union is
-//!   associative, so a left-fold of pairwise booleans is equivalent. It's the perf cost on the
-//!   non-convex tiers — and, while M.4's deterministic parallelism is still pending, the
-//!   determinism-safe way to land this (manifold#666's own CI broke on parallel non-CCW triangulation).
+//! - **Fixed-shape union tree.** C++ `BatchBoolean(items, Add)` unions through a size-ordered
+//!   priority queue whose pairing can be timing-dependent; we union adjacent pairs in fixed rounds
+//!   (tree shape = pure function of the input count), so serial/par/wasm execute the IDENTICAL
+//!   boolean sequence. Union is associative — same solid, different (still deterministic)
+//!   triangulation than either C++ or the pre-BU.4.4 left-fold.
 //! - **Inset/difference deferred.** Only `minkowski_sum` (dilate) ships here; `MinkowskiDifference`
 //!   (erode, `inset = true`) is a later box — no stub, no caller yet.
 //!
@@ -33,16 +37,32 @@ use crate::boolean::OpType;
 use crate::boolean::boolean_result::boolean;
 use crate::mesh::Mesh;
 use crate::mesh_ids::{HalfedgeId, TriId};
+use crate::par;
 use crate::status::Error;
 
-/// Union a set of meshes (C++ `BatchBoolean(items, Add)`). `None` if empty. Linear left-fold — a
-/// balanced pairwise tree was tried and is WORSE here: it changes which meshes get unioned together,
-/// and some of those pairs trip the boolean's coplanar-merge infinite-loop (the deferred Tier 1/2
-/// blocker) on inputs the accumulate order clears. Linear it is until that boolean bug is fixed.
+/// Union a set of meshes (C++ `BatchBoolean(items, Add)`). `None` if empty. FIXED-SHAPE pairwise
+/// reduction tree: each round unions adjacent pairs `(0,1), (2,3), …` — an odd tail rides into the
+/// next round unchanged — until one mesh remains. The tree shape is a pure function of the input
+/// count (NOT C++'s BatchBoolean priority queue, whose pairing follows intermediate result sizes),
+/// so every lane executes the identical boolean sequence. Rounds go through
+/// [`par::map_collect_min_len`] with threshold 2: each item is a whole boolean, so the seam's
+/// uniform 10k threshold would never fire.
+///
+/// HISTORY: a pairwise tree was tried pre-M.3.9 and some pairings hung in the boolean's
+/// coplanar-merge loop — that was the ear-clip re-anchor port bug, fixed at M.3.9. Re-verified at
+/// BU.4.4: tier-1/2 lib tests + the t1 harness + a nonconvex⊕nonconvex case all complete.
 fn union_all(meshes: Vec<Mesh>) -> Option<Mesh> {
-    let mut iter = meshes.into_iter();
-    let first = iter.next()?;
-    Some(iter.fold(first, |acc, m| boolean(&acc, &m, OpType::Add)))
+    let mut level = meshes;
+    while level.len() > 1 {
+        let pairs: Vec<(&Mesh, &Mesh)> = level.chunks_exact(2).map(|c| (&c[0], &c[1])).collect();
+        let mut next = par::map_collect_min_len(&pairs, 2, |&(x, y)| boolean(x, y, OpType::Add));
+        drop(pairs);
+        if level.len() % 2 == 1 {
+            next.push(level.pop().expect("odd level is non-empty"));
+        }
+        level = next;
+    }
+    level.pop()
 }
 
 impl Mesh {
@@ -84,10 +104,12 @@ impl Mesh {
             }
             composed_hulls.push(Mesh::hull_of_points(&simple_hull)?);
         } else if b_convex {
-            // Tier 1 — nonconvex×convex: sweep convex B along each A triangle face.
+            // Tier 1 — nonconvex×convex: sweep convex B along each A triangle face. Each face's
+            // hull is a pure function of (face verts, B), order preserved through the seam;
+            // threshold 100 is C++'s `autoPolicy(numIter, 100)` — a whole quickhull per item.
             let num_tri = a.num_tri();
-            let mut hulls: Vec<Mesh> = Vec::with_capacity(num_tri);
-            for tri in 0..num_tri {
+            let faces: Vec<usize> = (0..num_tri).collect();
+            let hulls = par::map_collect_min_len(&faces, 100, |&tri| {
                 let mut simple_hull = Vec::with_capacity(3 * b.num_vert());
                 for i in 0..3 {
                     let vertex = a.pos(a.start(HalfedgeId::from_usize(tri * 3 + i)));
@@ -95,29 +117,34 @@ impl Mesh {
                         simple_hull.push(bv + vertex);
                     }
                 }
-                hulls.push(Mesh::hull_of_points(&simple_hull)?);
-            }
+                Mesh::hull_of_points(&simple_hull)
+            })
+            .into_iter()
+            .collect::<Result<Vec<Mesh>, Error>>()?;
             if let Some(u) = union_all(hulls) {
                 composed_hulls.push(u);
             }
         } else {
             // Tier 2 — nonconvex×nonconvex: per (A-face, B-face) pair, hull the 9 vertex-sums.
+            // A faces stay sequential (as in C++); each A face's B sweep goes through the seam
+            // with C++'s threshold 100 (`autoPolicy(numTriB, 100)`). `None` = coplanar-skipped
+            // or empty hull; order preserved, filtered after the seam.
             let num_tri_a = a.num_tri();
             let num_tri_b = b.num_tri();
+            let b_faces: Vec<usize> = (0..num_tri_b).collect();
             let mut accumulated: Vec<Mesh> = Vec::new();
             for a_face in 0..num_tri_a {
                 let a1 = a.pos(a.start(HalfedgeId::from_usize(a_face * 3)));
                 let a2 = a.pos(a.start(HalfedgeId::from_usize(a_face * 3 + 1)));
                 let a3 = a.pos(a.start(HalfedgeId::from_usize(a_face * 3 + 2)));
                 let n_a = a.tri_normal(TriId::from_usize(a_face));
-                let mut face_hulls: Vec<Mesh> = Vec::new();
-                for b_face in 0..num_tri_b {
+                let hulls = par::map_collect_min_len(&b_faces, 100, |&b_face| {
                     let n_b = b.tri_normal(TriId::from_usize(b_face));
                     // Skip coplanar face pairs — their 9-point hull is degenerate.
                     let coplanar = (n_a.dot(n_b) - 1.0).abs() < 1e-12
                         || (n_a.dot(-n_b) - 1.0).abs() < 1e-12;
                     if coplanar {
-                        continue;
+                        return Ok(None);
                     }
                     let b1 = b.pos(b.start(HalfedgeId::from_usize(b_face * 3)));
                     let b2 = b.pos(b.start(HalfedgeId::from_usize(b_face * 3 + 1)));
@@ -128,7 +155,11 @@ impl Mesh {
                         a3 + b1, a3 + b2, a3 + b3,
                     ];
                     let h = Mesh::hull_of_points(&pts)?;
-                    if !h.is_empty() {
+                    Ok(if h.is_empty() { None } else { Some(h) })
+                });
+                let mut face_hulls: Vec<Mesh> = Vec::with_capacity(hulls.len());
+                for h in hulls {
+                    if let Some(h) = h? {
                         face_hulls.push(h);
                     }
                 }
@@ -149,7 +180,45 @@ impl Mesh {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::linalg::Vec3;
+    use crate::linalg::{Mat3x4, Vec3};
+
+    /// BU.4.4 timing harness — the perf-tracked "t1" case (concave = cube(2,2,2) minus the [1,2]³
+    /// corner octant, dilated by a centered 0.25-cube). Ignored: run explicitly with
+    /// `cargo test --release -p fab-manifold --lib -- --ignored t1_timing` (± `--features par`).
+    /// Prints median-of-5 ms plus the result's num_tri and volume BITS — the cross-lane
+    /// (serial/par/pre-change) identity check.
+    #[test]
+    #[ignore = "timing harness — run with --release -- --ignored"]
+    fn t1_timing_and_result_fingerprint() {
+        let concave = boolean(
+            &Mesh::cube(Vec3::new(2.0, 2.0, 2.0), false).unwrap(),
+            &Mesh::cube(Vec3::new(1.0, 1.0, 1.0), false)
+                .unwrap()
+                .transform(Mat3x4::translate(Vec3::new(1.0, 1.0, 1.0)))
+                .unwrap(),
+            OpType::Subtract,
+        );
+        let small = Mesh::cube(Vec3::new(0.25, 0.25, 0.25), true).unwrap();
+
+        let mut times = Vec::new();
+        let mut result = None;
+        for _ in 0..5 {
+            let t0 = std::time::Instant::now();
+            let r = concave.minkowski_sum(&small).unwrap();
+            times.push(t0.elapsed().as_secs_f64() * 1e3);
+            result = Some(r);
+        }
+        times.sort_by(f64::total_cmp);
+        let r = result.unwrap();
+        eprintln!(
+            "t1 median {:.3} ms (runs {:?}); num_tri={} volume={} volume_bits=0x{:016x}",
+            times[2],
+            times,
+            r.num_tri(),
+            r.volume(),
+            r.volume().to_bits()
+        );
+    }
 
     #[test]
     fn cube_minkowski_cube_is_a_bigger_box() {
@@ -201,6 +270,60 @@ mod tests {
             dilated.volume() > concave_vol,
             "dilated volume {} should exceed the original {concave_vol}",
             dilated.volume()
+        );
+    }
+
+    #[test]
+    fn tier2_nonconvex_nonconvex_dilates() {
+        // Tier 2: BOTH operands concave (corner-notched cubes) — the (A-face × B-face) hull sweep
+        // plus the union tree. Doubles as the BU.4.4 hang re-test: pre-M.3.9 some pairwise-tree
+        // pairings looped forever in the boolean coplanar merge; this must terminate.
+        let concave_a = boolean(
+            &Mesh::cube(Vec3::splat(4.0), false).unwrap(),
+            &Mesh::cube(Vec3::splat(2.0), false).unwrap(),
+            OpType::Subtract,
+        );
+        let concave_b = boolean(
+            &Mesh::cube(Vec3::splat(1.0), false).unwrap(),
+            &Mesh::cube(Vec3::splat(0.5), false).unwrap(),
+            OpType::Subtract,
+        );
+        assert!(!concave_a.is_convex() && !concave_b.is_convex());
+        let a_vol = concave_a.volume();
+
+        let dilated = concave_a.minkowski_sum(&concave_b).unwrap();
+        assert!(dilated.is_manifold(), "tier 2 result must be manifold");
+        assert!(
+            dilated.volume() > a_vol,
+            "dilated volume {} should exceed the original {a_vol}",
+            dilated.volume()
+        );
+        // A ⊕ B's bounding box is exactly box(A) + box(B): [0,4]³ + [0,1]³ = [0,5]³.
+        let bb = dilated.bounding_box();
+        assert!(bb.min.x.abs() < 1e-9 && (bb.max.x - 5.0).abs() < 1e-9);
+    }
+
+    /// Cross-lane identity for the tier-2 case (the union tree + B-sweep under par): prints
+    /// num_tri + volume bits — run under serial and `--features par`, the lines must match.
+    #[test]
+    #[ignore = "fingerprint probe — run with -- --ignored on both lanes and compare"]
+    fn tier2_result_fingerprint() {
+        let concave_a = boolean(
+            &Mesh::cube(Vec3::splat(4.0), false).unwrap(),
+            &Mesh::cube(Vec3::splat(2.0), false).unwrap(),
+            OpType::Subtract,
+        );
+        let concave_b = boolean(
+            &Mesh::cube(Vec3::splat(1.0), false).unwrap(),
+            &Mesh::cube(Vec3::splat(0.5), false).unwrap(),
+            OpType::Subtract,
+        );
+        let r = concave_a.minkowski_sum(&concave_b).unwrap();
+        eprintln!(
+            "tier2 num_tri={} volume={} volume_bits=0x{:016x}",
+            r.num_tri(),
+            r.volume(),
+            r.volume().to_bits()
         );
     }
 

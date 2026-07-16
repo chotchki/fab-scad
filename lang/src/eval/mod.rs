@@ -1272,18 +1272,66 @@ fn dispatch_call<'a>(
             // call (v1 ABI: the native fn takes a flat positional slice, so a named-arg call falls through
             // to the interpreter below rather than needing post-eval rebinding). The fingerprint match that
             // authorized this intrinsic happened once at `build_intrinsics`; here it's a name lookup.
-            if let Some(&func) = ctx.intrinsics.get(name.as_str())
-                && args.iter().all(|a| a.name.is_none())
-            {
-                fnprofile::record_intrinsic(name.as_str()); // dev probe: the already-native side of the worklist
-                tasks.push(Task::Intrinsic {
-                    func,
-                    nargs: args.len(),
-                });
-                for arg in args.iter().rev() {
-                    tasks.push(Task::Eval(&arg.value, scope.clone()));
+            if let Some(&func) = ctx.intrinsics.get(name.as_str()) {
+                if args.iter().all(|a| a.name.is_none()) {
+                    fnprofile::record_intrinsic(name.as_str()); // dev probe: the already-native side of the worklist
+                    // EXTRA positional args (beyond arity) are dropped UNEVALUATED, like `push_call`'s
+                    // slot filling — evaluating them here would fire side effects (echo, seedless rands)
+                    // the interpreter never runs.
+                    let nargs = args.len().min(params.len());
+                    tasks.push(Task::Intrinsic { func, nargs });
+                    for arg in args[..nargs].iter().rev() {
+                        tasks.push(Task::Eval(&arg.value, scope.clone()));
+                    }
+                    return Ok(());
                 }
-                return Ok(());
+                // O.6: NAMED-ARG rebind — BOSL2 calls the hot predicates with named args (`is_vector(v,
+                // zero=true)`, `unit(v, error=…)`), which the v1 all-positional gate sent to the
+                // interpreter. Mirror `push_call`'s slot filling exactly: positional by position, named
+                // by name (last wins), unknown/extra args dropped UNEVALUATED; a hole evaluates the
+                // param's real DEFAULT expr in the definition `base` (bit-identical to the baked value —
+                // the const guard proved it) or pushes undef for a defaultless slot. Value-sources
+                // evaluate in PARAM order, `push_call`'s own order. `$`-args decline to the interpreter:
+                // their exprs must both evaluate AND inject dynamically, which the flat ABI can't honor.
+                if !args
+                    .iter()
+                    .any(|a| a.name.as_deref().is_some_and(|n| n.starts_with('$')))
+                {
+                    fnprofile::record_intrinsic(name.as_str());
+                    let mut arg_slots: Vec<Option<&'a Expr>> = vec![None; params.len()];
+                    let mut positional = 0;
+                    for arg in args {
+                        match &arg.name {
+                            None => {
+                                if let Some(slot) = arg_slots.get_mut(positional) {
+                                    *slot = Some(&arg.value);
+                                }
+                                positional += 1;
+                            }
+                            Some(n) => {
+                                if let Some(i) = params.iter().position(|p| p.name == *n) {
+                                    arg_slots[i] = Some(&arg.value);
+                                }
+                            }
+                        }
+                    }
+                    let base = ctx.island_globals.borrow()[home].clone();
+                    tasks.push(Task::Intrinsic {
+                        func,
+                        nargs: params.len(),
+                    });
+                    for (slot, param) in arg_slots.into_iter().zip(params).rev() {
+                        match (slot, &param.default) {
+                            (Some(expr), _) => tasks.push(Task::Eval(expr, scope.clone())),
+                            (None, Some(default)) => {
+                                tasks.push(Task::Eval(default, base.clone()));
+                            }
+                            (None, None) => tasks.push(Task::PushUndef),
+                        }
+                    }
+                    return Ok(());
+                }
+                // a `$`-arg call falls through to the interpreted path below
             }
             // A call-path EVENT, not a span: the call's body evaluates across later loop iterations on
             // the explicit stack (no host recursion), so its subtree isn't scope-bounded here — the
@@ -2937,6 +2985,81 @@ mod tests {
             super::arm_guarded_intrinsics(&ctx).is_empty(),
             "one-ulp drift → declines (bit compare, not ==)"
         );
+    }
+
+    /// Run a program through [`super::resolve_source`] (the full loader path — intrinsics wire + arm) and
+    /// return its rendered console output.
+    fn run_echo(src: &str) -> String {
+        use std::path::Path;
+
+        use super::loader::SourceMap;
+        use super::{FileTable, Resolution, resolve_source};
+        match resolve_source(
+            src,
+            Path::new("."),
+            None,
+            &SourceMap::new(),
+            &FileTable::new(),
+            None,
+            crate::Config::default(),
+        )
+        .expect("resolves")
+        {
+            Resolution::Complete { messages, .. } => messages
+                .iter()
+                .map(crate::Message::render)
+                .collect::<Vec<_>>()
+                .join("\n"),
+            other => panic!("expected Complete, got {other:?}"),
+        }
+    }
+
+    /// O.6 — the named-arg rebind at intrinsic dispatch mirrors `push_call`'s slot semantics: named args
+    /// fill by name (overriding positional), holes take the param's DEFAULT (evaluated in the definition
+    /// base), and dropped args (unknown named / extra positional / an overwritten positional) are never
+    /// EVALUATED — pinned via the deterministic seedless-rands stream, which any stray evaluation would
+    /// advance. The interpreted twin (a fingerprint-missing body computing the same values) must agree.
+    #[test]
+    fn intrinsic_named_arg_rebind_matches_push_call_semantics() {
+        let point3d = super::intrinsics::reference_of("point3d").unwrap();
+        // fingerprints DIFFERENTLY (p[i+0]) but computes the same values → the interpreted twin.
+        let interp = "function point3d(p, fill=0) = assert(is_list(p)) [for (i=[0:2]) (p[i]==undef)? fill : p[i+0]];";
+
+        // named args + a hole taking the default
+        assert_eq!(
+            run_echo(&format!("{point3d}\necho(point3d(fill=7, p=[1]));")),
+            "ECHO: [1, 7, 7]"
+        );
+        assert_eq!(
+            run_echo(&format!("{point3d}\necho(point3d(p=[1]));")),
+            "ECHO: [1, 0, 0]"
+        );
+        // named overrides positional; the overwritten positional never evaluates
+        assert_eq!(
+            run_echo(&format!("{point3d}\necho(point3d([9,9,9], p=[1]));")),
+            "ECHO: [1, 0, 0]"
+        );
+        // a `$`-arg declines to the interpreter — same value either way
+        assert_eq!(
+            run_echo(&format!("{point3d}\necho(point3d([1], $junk=2));")),
+            "ECHO: [1, 0, 0]"
+        );
+
+        // Side-effect parity with the interpreter: dropped args must not advance the rand stream. Each
+        // program's echoed draw must equal the interpreted twin's.
+        let cases = [
+            "x = point3d([1,2,3], junk=rands(0,1,1)); echo(rands(0,1,1));", // unknown named: dropped
+            "x = point3d([1,2,3], 0, rands(0,1,1)); echo(rands(0,1,1));", // extra positional: dropped
+            "x = point3d(rands(0,1,1), p=[1]); echo(rands(0,1,1));", // overwritten positional: dropped
+            "x = point3d(fill=rands(0,1,1)[0], p=[1,undef,3]); echo(rands(0,1,1));", // named DOES evaluate
+        ];
+        for body in cases {
+            assert_eq!(
+                run_echo(&format!("{point3d}\n{body}")),
+                run_echo(&format!("{interp}\n{body}")),
+                "intrinsic vs interpreted rand-stream diverged on: {body}"
+            );
+        }
     }
 
     /// O.5.1 end-to-end through [`super::resolve_source`] (the path that ARMS): the program's `_EPSILON`

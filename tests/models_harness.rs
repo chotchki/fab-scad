@@ -818,3 +818,135 @@ fn models_profile_and_compare() {
     // distribution + profile + divergence report ARE the deliverable, and the numbers move as the tiers land.
     assert!(rendered > 0, "no models rendered — the sweep is broken");
 }
+
+/// The default targets for [`models_profile_targets`]: the eval-bound tail BU.7 named — models whose wall is
+/// ≥85% EVALUATOR (the kernel + caches already did their part), i.e. exactly what the intrinsics/JIT tier
+/// has to move. window_air_cover is the headline: 36s of its 38s wall is eval.
+const PROFILE_TARGET_DEFAULTS: &[&str] = &[
+    "models/window_air_cover/window_air_cover.scad",
+    "models/shoe_holder/shoe_holder.scad",
+    "models/webcam_holder/webcam_holder.scad",
+    "models/pill_holder/pill_holder.scad",
+];
+
+/// O.4 — deep-profile SPECIFIC models by name, however slow they are. The `models_profile_and_compare` leg
+/// only drills into the top completers of a 10s sweep, so a 38s eval-bound model (the intrinsics tier's whole
+/// point) is structurally invisible to it. This leg takes its targets from `FAB_PROFILE_TARGETS`
+/// (comma-separated, manifest-relative) or defaults to the BU.7 eval-bound tail, runs each IN-PROCESS under
+/// the tracing layer (per-builtin self-time, per-module inclusive), and prints PER-MODEL tables — plus, when
+/// `FAB_PROFILE_FNS=1` is set, the fnprofile report (per-user-fn SELF time — the worklist) prints from inside
+/// each eval. Wall times here include probe overhead — attribution shares are the signal, not the totals; the
+/// perf harness owns the honest walls. Run:
+///   FAB_PROFILE_FNS=1 cargo test --release -p fab-scad --test models_harness -- --ignored --nocapture models_profile_targets
+#[test]
+#[ignore = "targeted deep-profile; run explicitly with --ignored (see doc comment)"]
+fn models_profile_targets() {
+    let manifest = manifest();
+    if !manifest.join("libs/BOSL2/std.scad").exists() {
+        eprintln!("note: libs/BOSL2 not checked out — targeted profile skipped");
+        return;
+    }
+    let libs: Vec<PathBuf> = vec![manifest.join("libs"), manifest.join("scad-lib")];
+    let targets: Vec<PathBuf> = match std::env::var("FAB_PROFILE_TARGETS") {
+        Ok(list) => list
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|rel| manifest.join(rel))
+            .collect(),
+        Err(_) => PROFILE_TARGET_DEFAULTS
+            .iter()
+            .map(|rel| manifest.join(rel))
+            .collect(),
+    };
+    // Generous per-model budget: these targets are CHOSEN for being slow, and the probes multiply the wall.
+    // On expiry the eval thread is leaked (same tradeoff as the deep-profile leg) and the partial attribution
+    // still prints — partial shares of a hung model are exactly the data we came for.
+    let budget = Duration::from_secs(
+        std::env::var("FAB_PROFILE_BUDGET_S")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(300),
+    );
+
+    let profiler = Profiler::default();
+    let profile = profiler.profile.clone();
+    tracing::subscriber::set_global_default(Registry::default().with(profiler))
+        .expect("set global tracing subscriber");
+    if std::env::var_os("FAB_PROFILE_FNS").is_none() {
+        eprintln!("(FAB_PROFILE_FNS not set — per-user-fn self-time tables won't print)");
+    }
+
+    for target in &targets {
+        let rel = target
+            .strip_prefix(&manifest)
+            .unwrap_or(target)
+            .display()
+            .to_string();
+        eprintln!(
+            "\n=== deep-profiling {rel} (budget {}s) ===",
+            budget.as_secs()
+        );
+        let t0 = Instant::now();
+        let (tx, rx) = mpsc::channel();
+        let t = target.clone();
+        let libs_t = libs.clone();
+        thread::Builder::new()
+            .name("profile-eval".into())
+            .stack_size(fab_scad::EVAL_STACK)
+            .spawn(move || {
+                let res = fab_scad::import::resolve_geometry_file(
+                    &t,
+                    &libs_t,
+                    fab_lang::Config::from_env(),
+                );
+                let _ = tx.send(res.map(|_| ()).map_err(|e| e.to_string()));
+            })
+            .expect("spawn profile thread");
+        match rx.recv_timeout(budget) {
+            Ok(Ok(())) => eprintln!(
+                "  rendered in {:.2}s (probe overhead included)",
+                t0.elapsed().as_secs_f64()
+            ),
+            Ok(Err(e)) => eprintln!(
+                "  ERR after {:.2}s: {}",
+                t0.elapsed().as_secs_f64(),
+                e.lines().next().unwrap_or_default()
+            ),
+            Err(_) => eprintln!(
+                "  TIMED OUT at {}s — thread leaked, attribution below is PARTIAL",
+                budget.as_secs()
+            ),
+        }
+
+        // Snapshot + clear so each model's tables are its own (the subscriber is global and reused).
+        let snap: Profile = std::mem::take(&mut *profile.lock().unwrap());
+        let mut ranked: Vec<(&String, u64, Duration)> =
+            snap.iter().map(|(k, &(n, d))| (k, n, d)).collect();
+        ranked.sort_by_key(|&(_, _, d)| std::cmp::Reverse(d));
+        eprintln!("  --- hot BUILTINS (leaf self-time) — total ms × calls ---");
+        for (key, n, d) in ranked
+            .iter()
+            .filter(|(k, ..)| k.starts_with("builtin:"))
+            .take(20)
+        {
+            eprintln!(
+                "  {:<26} {:>8} ms  ×{n}",
+                key.trim_start_matches("builtin:"),
+                d.as_millis()
+            );
+        }
+        eprintln!("  --- hot MODULES (inclusive subtree time) — total ms × calls ---");
+        for (key, n, d) in ranked
+            .iter()
+            .filter(|(k, ..)| k.starts_with("module:"))
+            .take(15)
+        {
+            eprintln!(
+                "  {:<26} {:>8} ms  ×{n}",
+                key.trim_start_matches("module:"),
+                d.as_millis()
+            );
+        }
+    }
+}

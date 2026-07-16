@@ -571,6 +571,11 @@ enum Task<'a> {
     /// without consuming it. Pushed BELOW a call's tasks so it fires the instant the return lands, before
     /// the caller reads it. Only ever pushed when the `FAB_TRACE` trace is on, so it's absent otherwise.
     TraceReturn { name: &'a str },
+    /// Dev probe (`FAB_PROFILE_FNS`): close the [`fnprofile`] shadow-stack window the dispatch site's
+    /// [`fnprofile::enter_fn`] opened — books the call's self + outermost-inclusive time. Pushed like
+    /// [`TraceReturn`] (below the call's tasks → fires the instant the return lands); nameless because the
+    /// task stack's LIFO order makes windows strictly well-nested. Absent when the probe is off.
+    FnTimeReturn,
     /// N.2c eval-memo: peek the top value (a memoizable call's just-produced result — like [`TraceReturn`],
     /// pushed below the body so it fires the instant the result lands) and, IF the call's subtree left no
     /// observable side effect (the `snap` counters are unmoved), store it under `key`. NEVER a `geo_stack`
@@ -981,6 +986,7 @@ fn eval_with_global<'a>(
                     trace::ret(name, v);
                 }
             }
+            Task::FnTimeReturn => fnprofile::exit_fn(),
             Task::CacheStore { key, snap } => {
                 // Peek the result (never consume — the caller reads it, like `TraceReturn`). Store ONLY if the
                 // body left NO observable side effect: unchanged message log, RNG draw count, closure table,
@@ -1263,6 +1269,7 @@ fn dispatch_call<'a>(
             if let Some(&func) = ctx.intrinsics.get(name.as_str())
                 && args.iter().all(|a| a.name.is_none())
             {
+                fnprofile::record_intrinsic(name.as_str()); // dev probe: the already-native side of the worklist
                 tasks.push(Task::Intrinsic {
                     func,
                     nargs: args.len(),
@@ -1277,6 +1284,11 @@ fn dispatch_call<'a>(
             // event marks WHICH function was entered, the enclosing `eval_program` span times the whole.
             tracing::trace!(function = name.as_str(), "call");
             fnprofile::record_fn(name.as_str()); // dev probe (FAB_PROFILE_FNS): per-name call counts
+            if fnprofile::enter_fn(name.as_str()) {
+                // Books self + outermost-inclusive time when the return lands (LIFO, like TraceReturn).
+                // The window opens HERE — before the arg tasks push — so arg eval books to the callee.
+                tasks.push(Task::FnTimeReturn);
+            }
             if trace::on() {
                 tasks.push(Task::TraceReturn { name }); // fires when the body's value lands (peek-only)
             }

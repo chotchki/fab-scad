@@ -527,3 +527,65 @@ rendered empty so nothing subtracted), and the whole chamfer/rounding/teardrop/`
   count against the baseline.
 - **A fresh compare pass** post-modifier-fix re-baselines the number — every model whose ONLY divergence was
   `*`-block spurious geometry now agrees.
+
+## O.4 — the eval-bound tail, per-NAME wall time (2026-07-16)
+
+Post-BU/P.2 the perf sweep's remaining 30-second models are ≥85% EVALUATOR (window_air_cover: 36s of a 38s
+wall). The existing deep-profile leg structurally couldn't see them — it drills into the top COMPLETERS of a
+10s sweep, and the intrinsics tier's whole point is the models that blow 10s. Two additions close the gap:
+
+- **`FAB_PROFILE_FNS` grew a per-user-fn CLOCK** (self + outermost-inclusive time, not just call counts). User
+  fns can't be span-timed — bodies evaluate on the explicit task stack, no host recursion — so the dispatch
+  site opens a window and a `Task::FnTimeReturn` (pushed like `TraceReturn`) closes it when the return value
+  lands; strict LIFO makes a SHADOW STACK sound. SELF time subtracts timed user-fn callees ONLY — builtin
+  sub-evals stay with the caller, which is exactly what a hand intrinsic erases, so the self column IS the
+  reclaimable number. Outermost-inclusive is what deleting the function entirely would reclaim (recursion
+  doesn't double-book).
+- **`models_profile_targets`** — a targeted harness leg (`FAB_PROFILE_TARGETS=a.scad,b.scad`, default = the
+  BU.7 eval-bound four) that deep-profiles NAMED models however slow they are, per-model tables.
+
+Probe overhead ~1.7× on wall (window_air_cover 38→63s) — SHARES are the signal, the perf harness owns honest
+walls. Sanity anchor: the 37.0s of booked self time ≈ the model's 36s un-probed eval wall.
+
+### The cross-model worklist (four models, 83.2s total user-fn self)
+
+| function | self (s) | calls | models | note |
+|---|---|---|---|---|
+| `_tri_class` | 12.4 | 3.9M | wac, pill | earcut CW/CCW classifier — cross+norm+sign, tiny body |
+| `_region_region_intersections` | 9.7 | 6 | shoe | MONSTER body (comprehension loops) — deferred, JIT-tier shape |
+| `is_vector` | 8.8 | 2.4M | all four | THE type predicate; the registry header's own "next step" |
+| `approx` | 5.9 | 2.2M | all four | tolerance compare |
+| `_bt_search` | 5.2 | 800k | shoe, webcam | recursive binary search |
+| `_point_dist` | 4.9 | 1.8k | shoe | inside the region monster — deferred with it |
+| `_none_inside` | 4.8 | 1.6M | wac | earcut ear test, recursive w/ early exit (deps: select, _tri_class, _pt_in_tri) |
+| `is_consistent`+`_list_pattern`+`same_shape` | 4.7 | 1.3M | all four | the shape-check bundle |
+| `_find_anchor` | 3.6 | 900 | webcam, pill | attachable anchor resolution — big body, deferred |
+| `sum`+`_sum` | 3.1 | 830k | webcam, pill | recursive accumulate |
+| `_apply` | 2.2 | 145k | all four | affine matrix × points |
+| `_group_sort_by_index` | 2.0 | 20k | webcam | sorting machinery — deferred |
+| `rot` | 1.4 | 132k | wac | big dispatch body — deferred |
+| `vector_angle` | 1.2 | 176k | wac, webcam | |
+| `unit` | 1.1 | 500k | wac, webcam, pill | assert + v/norm(v) |
+| `is_matrix` | 0.9 | 417k | wac, pill | |
+| `posmod` | 0.9 | 710k | wac, shoe, pill | (x%m+m)%m + assert |
+| `idx` | 0.8 | 355k | wac, shoe, pill | range builder |
+| `in_list` | 0.6 | 180k | webcam, pill | |
+| `constrain`, `force_list`, `num_defined` | 0.9 | 900k | mixed | trivial leaves |
+
+The intrinsic-able bands sum to ~53s of the 83s; the four deferred monsters (`_region_region_intersections`,
+`_point_dist`, `_find_anchor`, `_group_sort_by_index`, plus `rot`) hold ~22s and are the NEXT cut — their
+bodies are big enough that hand-transliteration stops being obviously-correct, which is the JIT tier's case
+(P.1.6 list ABI) or a second, carefully-harnessed intrinsic pass.
+
+Confirmations along the way: the O.2 tier FIRES on these models (17.9M intrinsic dispatches across the four —
+`is_finite` + `select` dominate, no DRIFT), and the builtin tables show what the worklist bottoms out in
+(window_air_cover: 43M builtin calls — `norm` 10.3M, `is_undef` 6.1M, `len` 5.7M, `cross` 4.2M) — per-call
+eval-loop dispatch that a native body erases wholesale.
+
+### The `_EPSILON` gate — new mechanism the band needs first
+
+Nearly every target defaults `eps=_EPSILON` — an IDENT default. The fingerprint proves the FUNCTION source
+matches, but not that `_EPSILON` still evaluates to 1e-9 in the fn's home scope (a user override would make a
+hardcoded constant silently wrong — doctrine violation). So `Entry` grows a wire-time const guard: named
+constants + expected bits, checked against the home scope at `build_intrinsics`; mismatch → the entry doesn't
+wire (worst case stays "missed speedup, never a wrong answer").

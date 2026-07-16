@@ -187,6 +187,8 @@ added 2026-07-07.
 - [x] O.1 - O.1 - Intrinsic registry LANDED: AST-fingerprint gate (exact-match-or-interpret) + Task::Intrinsic dispatch + fast==slow harness; POC proves the chain, corpus 901/901
 - [x] O.2 - O.2 - First hand-written BOSL2-function intrinsics from the release profile
 - [x] O.3 - O.3 v1 - EXPLAIN report LANDED (FAB_EXPLAIN): per-function intrinsic plan WIRED/DRIFT/interpreted, so you can see if an intrinsic fires or silently interprets (library drift). Runtime fire-counts + JIT path ride with P.1
+- [ ] O.4 - O.4 - Targeted deep-profile: per-user-fn inclusive TIME (task-stack-aware fnprofile) + FAB_PROFILE_TARGETS harness leg; profile the eval-bound tail (window_air_cover 36s, shoe_holder, webcam_holder, pill_holder) → the ranked worklist
+- [ ] O.5 - O.5 - Next intrinsics band from the O.4 worklist (hand-written, wasm-safe, fast==slow gated) — concrete sub-tasks cut from the profile data
 ## Phase P - P - Cranelift JIT + CSG cache (desktop)
 - [ ] P.1 - P.1 - Cranelift JIT for the numeric long tail (desktop)
   - [x] P.1.1 - P.1.1 - JIT registry + compile cache (one JITModule, keyed by fingerprint)

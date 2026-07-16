@@ -16,6 +16,8 @@ pub mod auto_slice;
 // (NOT `native`) so miri can run the mock without the OS-heavy native deps.
 #[cfg(feature = "geometry")]
 pub mod backend;
+// BU.7 dev probe: GeoNode->Solid redundancy (FAB_GEO_REDUNDANCY=1) — the P.2 kernel-cache ceiling.
+mod geo_redundancy;
 // The Bambu `.3mf` writer — mesh-only (no Solid), so it rides `mesh-io` not `kernel`, reachable on
 // the wasm app for in-process co-pack + export (W.3.4). `kernel` implies `mesh-io`, so native is unchanged.
 #[cfg(feature = "mesh-io")]

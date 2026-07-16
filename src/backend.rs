@@ -95,6 +95,14 @@ pub trait GeometryBackend {
 /// 3D solid, so on this axis it lowers to the empty solid (its 2D region is reached by matching the
 /// [`Geo::D2`] and calling [`build_2d`] on the `Shape2D` — the extrude/projection path, J.3).
 pub fn build_geo<B: GeometryBackend>(geo: &Geo, backend: &B) -> B::Solid {
+    crate::geo_redundancy::reset();
+    let probe_start = std::time::Instant::now();
+    let out = build_geo_inner(geo, backend);
+    crate::geo_redundancy::report(probe_start.elapsed());
+    out
+}
+
+fn build_geo_inner<B: GeometryBackend>(geo: &Geo, backend: &B) -> B::Solid {
     match geo {
         Geo::D3(node) => build(node, backend),
         Geo::D2(_) => backend.leaf(&Mesh::new()),
@@ -210,6 +218,8 @@ fn part_names_of(text: &str) -> Vec<Option<String>> {
 /// the integration seam: fab-lang builds the backend-agnostic tree, the backend does the real CSG.
 /// Recursion is bounded by the tree depth (the parser's `MAX_DEPTH`), so it can't overflow the stack.
 pub fn build<B: GeometryBackend>(node: &GeoNode, backend: &B) -> B::Solid {
+    // BU.7 probe (no-op unless FAB_GEO_REDUNDANCY=1): subtree hash + inclusive render time.
+    let _probe = crate::geo_redundancy::enter(node);
     match node {
         GeoNode::Empty => backend.leaf(&Mesh::new()),
         GeoNode::Leaf(mesh) => backend.leaf(mesh),

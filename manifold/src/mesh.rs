@@ -981,11 +981,11 @@ impl Mesh {
                 let Some(first_edge) = first else {
                     return Vec3::ZERO; // not referenced ⇒ stays (0,0,0)
                 };
-                // Collect the one-ring first (keeps the `for_vert` borrow from tangling with the reads).
-                let mut ring = Vec::new();
-                this.for_vert(first_edge, |e| ring.push(e));
+                // Fold over the ring IN PLACE (the C++ `ForVert` lambda) — no ring Vec. The
+                // accumulation runs in the identical `for_vert` visit order, so the per-ring float
+                // sum (GATE-A's bit-load-bearing acos sum) is unchanged.
                 let mut normal = Vec3::ZERO;
-                for edge in ring {
+                this.for_vert(first_edge, |edge| {
                     let tv0 = this.start(edge);
                     let tv1 = this.end(edge);
                     let tv2 = this.end(edge.next());
@@ -993,7 +993,7 @@ impl Mesh {
                     let prev_edge = (this.pos(tv0) - this.pos(tv2)).normalize();
                     // A degenerate incident triangle (zero-length edge ⇒ NaN) is excluded.
                     if !curr_edge.x.is_finite() || !prev_edge.x.is_finite() {
-                        continue;
+                        return;
                     }
                     let dot = -prev_edge.dot(curr_edge);
                     let phi = if dot >= 1.0 {
@@ -1004,7 +1004,7 @@ impl Mesh {
                         crate::mathf::acos(dot)
                     };
                     normal += phi * this.face_normal[edge.tri().u()];
-                }
+                });
                 crate::boolean::predicates::safe_normalize(normal)
             })
         };

@@ -487,15 +487,18 @@ fn recursive_edge_swap(
 }
 
 /// Repoint an entire vertex fan (seeded at `seed`) to `new_vert` (the `ForVert` lambda shared by
-/// `DedupeEdge`). The fan is collected first (pair pointers, which drive the walk, are untouched by the
-/// `start`/`end` writes), then repointed.
+/// `DedupeEdge`). Mutates IN PLACE during the walk, exactly as the C++: the walk reads only pair
+/// pointers + the triangle `next`, both untouched by the `start`/`end` writes — no ring Vec.
 fn repoint_vert_ring(mesh: &mut Mesh, seed: HalfedgeId, new_vert: VertId) {
-    let mut ring = Vec::new();
-    mesh.for_vert(seed, |e| ring.push(e));
-    for e in ring {
-        mesh.set_start(e, new_vert);
-        let pe = mesh.pair(e);
+    let mut current = seed;
+    loop {
+        current = mesh.pair(current).next();
+        mesh.set_start(current, new_vert);
+        let pe = mesh.pair(current);
         mesh.set_end(pe, new_vert);
+        if current == seed {
+            break;
+        }
     }
 }
 
@@ -609,7 +612,9 @@ fn split_pinched_verts(mesh: &mut Mesh) -> usize {
 
 /// The serial lane of [`split_pinched_verts`] (`edge_op.cpp` `SplitPinchedVerts`, serial branch):
 /// one ascending scan, each fan handled at its first unprocessed half-edge, `halfedge_processed`
-/// marking the rest of the ring.
+/// marking the rest of the ring. Both branches walk the fan IN PLACE (C++'s `ForVert` lambdas) —
+/// the walk reads only pair pointers + `next`, untouched by the `start`/`end` writes, so no ring
+/// Vec is ever materialized.
 fn split_pinched_verts_serial(mesh: &mut Mesh) -> usize {
     let nb_edges = mesh.halfedge.len();
     let mut vert_processed = vec![false; mesh.num_vert()];
@@ -624,24 +629,25 @@ fn split_pinched_verts_serial(mesh: &mut Mesh) -> usize {
         if vert.is_none() {
             continue;
         }
-        let mut ring = Vec::new();
-        mesh.for_vert(hi, |e| ring.push(e));
         if vert_processed[vert.u()] {
             let p = mesh.pos(vert);
             mesh.vert_pos.push(p);
             let new_vert = VertId::from_usize(mesh.num_vert() - 1);
             splits += 1;
-            for e in ring {
-                halfedge_processed[e.u()] = true;
-                mesh.set_start(e, new_vert);
-                let pe = mesh.pair(e);
+            let mut current = hi;
+            loop {
+                current = mesh.pair(current).next();
+                halfedge_processed[current.u()] = true;
+                mesh.set_start(current, new_vert);
+                let pe = mesh.pair(current);
                 mesh.set_end(pe, new_vert);
+                if current == hi {
+                    break;
+                }
             }
         } else {
             vert_processed[vert.u()] = true;
-            for e in ring {
-                halfedge_processed[e.u()] = true;
-            }
+            mesh.for_vert(hi, |e| halfedge_processed[e.u()] = true);
         }
     }
     splits
@@ -693,13 +699,7 @@ fn split_pinched_verts_par(mesh: &mut Mesh) -> usize {
             mesh.vert_pos.push(p);
             let new_vert = VertId::from_usize(mesh.num_vert() - 1);
             splits += 1;
-            let mut ring = Vec::new();
-            mesh.for_vert(hi, |e| ring.push(e));
-            for e in ring {
-                mesh.set_start(e, new_vert);
-                let pe = mesh.pair(e);
-                mesh.set_end(pe, new_vert);
-            }
+            repoint_vert_ring(mesh, hi, new_vert);
         } else {
             vert_processed[vert.u()] = true;
         }
@@ -707,41 +707,99 @@ fn split_pinched_verts_par(mesh: &mut Mesh) -> usize {
     splits
 }
 
+/// The end-vert → minimal-half-edge map for one ring (`edge_op.cpp` `DedupeEdges`' `endVerts` +
+/// `endVertSet` pair): a linear-scan `(end_vert, min_halfedge)` buffer — a typical ring is ~6
+/// edges, where the scan beats any hash — spilling EVERY entry into a `HashMap` past 32 so a
+/// pathological fan can't go quadratic (C++'s `endVerts.size() > 32` migration). Both containers
+/// are lookup-only (never iterated), so the `HashMap` is order-safe; [`EndVertMin::clear`] keeps
+/// both containers' capacity (C++ `endVerts.clear(false)`), so the serial lane reuses ONE of these
+/// across every ring alloc-free.
+#[derive(Default)]
+struct EndVertMin {
+    small: Vec<(VertId, HalfedgeId)>,
+    spill: std::collections::HashMap<VertId, HalfedgeId>,
+}
+
+impl EndVertMin {
+    /// C++'s migration threshold: past 32 entries the linear scan loses to the hash.
+    const SPILL_AT: usize = 32;
+
+    /// Reset for the next ring, KEEPING capacity on both containers.
+    fn clear(&mut self) {
+        self.small.clear();
+        self.spill.clear();
+    }
+
+    /// Pass 1: record `current` as `ev`'s half-edge, keeping the minimum on a repeat.
+    fn insert_min(&mut self, ev: VertId, current: HalfedgeId) {
+        if self.spill.is_empty() {
+            if let Some(entry) = self.small.iter_mut().find(|e| e.0 == ev) {
+                if current < entry.1 {
+                    entry.1 = current;
+                }
+            } else {
+                self.small.push((ev, current));
+                if self.small.len() > Self::SPILL_AT {
+                    self.spill.extend(self.small.drain(..));
+                }
+            }
+        } else {
+            self.spill
+                .entry(ev)
+                .and_modify(|c| {
+                    if current < *c {
+                        *c = current;
+                    }
+                })
+                .or_insert(current);
+        }
+    }
+
+    /// Pass 2: the recorded minimum for `ev`. Only queries keys pass 1 inserted (the C++
+    /// dereferences its `find_if` result unchecked on the same invariant).
+    fn min_for(&self, ev: VertId) -> HalfedgeId {
+        if self.spill.is_empty() {
+            self.small
+                .iter()
+                .find(|e| e.0 == ev)
+                .expect("pass 2 only queries end-verts pass 1 recorded")
+                .1
+        } else {
+            self.spill[&ev]
+        }
+    }
+}
+
 /// The par lane's per-ring duplicate scan (the two-pass body of `edge_op.cpp` `DedupeEdges`'
 /// `localLoop`, minus the serial lane's interleaved `local` marking): all out-edges sharing an
-/// end-vert keep the minimal half-edge index; the rest are pushed, in fan order. The end-vert→min
-/// map is lookup-only (never iterated) so a `HashMap` is order-safe here.
+/// end-vert keep the minimal half-edge index; the rest are pushed, in fan order. Walks the fan in
+/// place twice (C++ `ForVert`) — no ring Vec; the [`EndVertMin`] buffer is per-seed local (still
+/// beats a per-ring SipHash map at typical ring sizes).
 #[cfg(par_live)]
-fn ring_duplicates(mesh: &Mesh, ring: &[HalfedgeId], results: &mut Vec<HalfedgeId>) {
-    use std::collections::HashMap;
+fn ring_duplicates(mesh: &Mesh, seed: HalfedgeId) -> Vec<HalfedgeId> {
+    let mut min_by_end = EndVertMin::default();
     // First pass: minimal half-edge index per end-vert.
-    let mut min_by_end: HashMap<VertId, HalfedgeId> = HashMap::new();
-    for &current in ring {
+    mesh.for_vert(seed, |current| {
         let sv = mesh.start(current);
         let ev = mesh.end(current);
         if sv.is_none() || ev.is_none() {
-            continue;
+            return;
         }
-        min_by_end
-            .entry(ev)
-            .and_modify(|c| {
-                if current < *c {
-                    *c = current;
-                }
-            })
-            .or_insert(current);
-    }
+        min_by_end.insert_min(ev, current);
+    });
     // Second pass: flag every non-minimal duplicate.
-    for &current in ring {
+    let mut results = Vec::new();
+    mesh.for_vert(seed, |current| {
         let sv = mesh.start(current);
         let ev = mesh.end(current);
         if sv.is_none() || ev.is_none() {
-            continue;
+            return;
         }
-        if min_by_end[&ev] != current {
+        if min_by_end.min_for(ev) != current {
             results.push(current);
         }
-    }
+    });
+    results
 }
 
 /// Find the duplicate half-edges to split (`edge_op.cpp` `DedupeEdges`' detection scan).
@@ -758,11 +816,13 @@ fn find_duplicate_edges(mesh: &Mesh, nb_edges: usize) -> Vec<HalfedgeId> {
 /// The serial lane (the serial `localLoop` of `edge_op.cpp` `DedupeEdges`): one ascending scan, each
 /// ring handled at its first unprocessed valid half-edge, `local` marking the rest (interleaved with
 /// the first map pass, exactly as the C++ — the par lane's `ring_duplicates` is this minus the
-/// marking).
+/// marking). ONE reused [`EndVertMin`] buffer threads through the whole scan (cleared per ring,
+/// capacity kept) and both passes walk the fan in place — zero allocation per ring, the C++
+/// `endVerts` scheme verbatim.
 fn find_duplicate_edges_serial(mesh: &Mesh, nb_edges: usize) -> Vec<HalfedgeId> {
-    use std::collections::HashMap;
     let mut local = vec![false; nb_edges];
     let mut results = Vec::new();
+    let mut min_by_end = EndVertMin::default();
     for i in 0..nb_edges {
         if local[i] {
             continue;
@@ -771,38 +831,29 @@ fn find_duplicate_edges_serial(mesh: &Mesh, nb_edges: usize) -> Vec<HalfedgeId> 
         if mesh.start(hi).is_none() || mesh.end(hi).is_none() {
             continue;
         }
-        let mut ring = Vec::new();
-        mesh.for_vert(hi, |e| ring.push(e));
+        min_by_end.clear();
 
-        // First pass: minimal half-edge index per end-vert.
-        let mut min_by_end: HashMap<VertId, HalfedgeId> = HashMap::new();
-        for &current in &ring {
+        // First pass: minimal half-edge index per end-vert, marking the ring processed.
+        mesh.for_vert(hi, |current| {
             local[current.u()] = true;
             let sv = mesh.start(current);
             let ev = mesh.end(current);
             if sv.is_none() || ev.is_none() {
-                continue;
+                return;
             }
-            min_by_end
-                .entry(ev)
-                .and_modify(|c| {
-                    if current < *c {
-                        *c = current;
-                    }
-                })
-                .or_insert(current);
-        }
+            min_by_end.insert_min(ev, current);
+        });
         // Second pass: flag every non-minimal duplicate.
-        for &current in &ring {
+        mesh.for_vert(hi, |current| {
             let sv = mesh.start(current);
             let ev = mesh.end(current);
             if sv.is_none() || ev.is_none() {
-                continue;
+                return;
             }
-            if min_by_end[&ev] != current {
+            if min_by_end.min_for(ev) != current {
                 results.push(current);
             }
-        }
+        });
     }
     results
 }
@@ -840,13 +891,8 @@ fn find_duplicate_edges_par(mesh: &Mesh, nb_edges: usize) -> Vec<HalfedgeId> {
         .filter(|&(_, s)| s)
         .map(|(i, _)| HalfedgeId::from_usize(i))
         .collect();
-    let per_seed: Vec<Vec<HalfedgeId>> = crate::par::map_collect(&seeds, |&seed| {
-        let mut ring = Vec::new();
-        mesh.for_vert(seed, |e| ring.push(e));
-        let mut results = Vec::new();
-        ring_duplicates(mesh, &ring, &mut results);
-        results
-    });
+    let per_seed: Vec<Vec<HalfedgeId>> =
+        crate::par::map_collect(&seeds, |&seed| ring_duplicates(mesh, seed));
     let mut results = Vec::new();
     for r in &per_seed {
         results.extend_from_slice(r);

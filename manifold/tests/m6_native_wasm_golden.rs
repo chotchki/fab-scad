@@ -310,7 +310,7 @@ fn m6_full_surface_golden() {
             .unwrap()
             .translate(Vec2::new(1.0, 0.0))
             .unwrap();
-        cases.push(("revolve", golden::mesh(&profile.revolve(48))));
+        cases.push(("revolve", golden::mesh(&profile.revolve(48, 360.0))));
     }
 
     // 13. The par:: seam primitives directly (reduce + map order).
@@ -355,7 +355,9 @@ fn m6_full_surface_golden() {
         ("extrude", 0x8b2f876ff8bf6975),
         ("project", 0xed2f4eb3c0a56365),
         ("slice", 0xed2f4eb3c0a56365),
-        ("revolve", 0xf3a7095d923dcce9),
+        // M.7.3: revolve rewrote to the verbatim C++ (sind/cosd degree trig, convex-clip caps,
+        // partial-angle support) — byte-gated vs C++ in `m7_3_revolve_partial_vs_cpp`; regenerated.
+        ("revolve", 0xce565cabcc7c583d),
         ("par_map", 0x6d0302e2f813e9af),
     ];
 

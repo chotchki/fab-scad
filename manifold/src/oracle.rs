@@ -221,6 +221,7 @@ pub fn differential(mesh: &MeshGl, rel_tol: f64) -> Result<Vec<Divergence>, Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::golden;
 
     /// A prepared box's params: `(ox, oy, oz, sx, sy, sz)`. Shared by the GATE-A/B config sweeps.
     type BoxParams = (f64, f64, f64, f64, f64, f64);
@@ -2250,7 +2251,7 @@ mod tests {
         ] {
             let rust = CrossSection::from_polygons(&polys)
                 .unwrap()
-                .revolve(segments);
+                .revolve(segments, 360.0);
             let cpp = manifold3d::Manifold::revolve(&to_cpp_cs(&polys), segments, 360.0);
             let cpp_mesh = Mesh::from_mesh_gl_raw(&cpp_to_mesh_gl(&cpp)).unwrap();
             if let Some(r) = solid_divergence(&rust, &cpp_mesh, 4000, seed, 1e-6) {
@@ -2258,6 +2259,193 @@ mod tests {
             }
         }
         eprintln!("M.5.3 ✓ revolve (2D→3D) matches C++ (solid divergence)");
+    }
+
+    /// Rotation-canonical mesh fingerprint for the C++ BYTE gates: verts raw, each triangle rotated
+    /// smallest-vert-first, in stored order. C++'s pipeline rotates a triangle's stored STARTING corner
+    /// as an artifact of its halfedge machinery (`ReorderHalfedges`-era, a documented port deviation);
+    /// geometry, winding, triangle SET and ORDER all still gate.
+    fn canon_mesh_fingerprint(m: &Mesh) -> u64 {
+        let mut h = golden::Fnv::default();
+        for p in &m.vert_pos {
+            h.eat_f64(p.x);
+            h.eat_f64(p.y);
+            h.eat_f64(p.z);
+        }
+        for tri in 0..m.num_tri() {
+            let t = crate::mesh_ids::TriId::from_usize(tri);
+            let v = [0, 1, 2].map(|i| m.start(t.halfedge(i)).raw());
+            let k = (0..3).min_by_key(|&i| v[i]).unwrap_or(0);
+            for i in 0..3 {
+                h.eat(&v[(k + i) % 3].to_le_bytes());
+            }
+        }
+        h.digest()
+    }
+
+    /// M.7.3 — the GENERAL extrude (divisions/twist/scaleTop/cone) vs C++, BYTE parity: the port is
+    /// verbatim (`sind`/`cosd`, la's lerp + product order, TriangulateIdx eps −1), so the produced solid
+    /// must fingerprint identically to the C++ result re-imported raw. This is the gate that lets
+    /// kernel.rs's `extrude_with_options` call flip backends without a behavior change.
+    #[test]
+    fn m7_3_extrude_options_vs_cpp() {
+        use crate::cross_section::CrossSection;
+        use crate::linalg::Vec2;
+
+        let sq = |x: f64, y: f64, s: f64| -> Vec<Vec2> {
+            vec![
+                Vec2::new(x, y),
+                Vec2::new(x + s, y),
+                Vec2::new(x + s, y + s),
+                Vec2::new(x, y + s),
+            ]
+        };
+        let to_cpp_cs = |polys: &[Vec<Vec2>]| -> manifold3d::CrossSection {
+            let cp: Vec<Vec<[f64; 2]>> = polys
+                .iter()
+                .map(|c| c.iter().map(|p| [p.x, p.y]).collect())
+                .collect();
+            manifold3d::CrossSection::from_polygons(&cp)
+        };
+
+        let ring = CrossSection::from_polygons(&[sq(-2.0, -2.0, 4.0)])
+            .unwrap()
+            .difference(&CrossSection::from_polygons(&[sq(-1.0, -1.0, 2.0)]).unwrap());
+        let ring_polys = ring.contours.iter().map(|c| c.to_vec()).collect::<Vec<_>>();
+        let centered = vec![sq(-1.0, -1.0, 2.0)];
+        let offset = vec![sq(0.5, 0.25, 1.5)];
+
+        for (label, polys, height, ndiv, twist, scale) in [
+            ("twist90", &centered, 3.0, 8, 90.0, [1.0, 1.0]),
+            ("frustum", &centered, 3.0, 4, 0.0, [0.5, 0.8]),
+            ("cone", &centered, 3.0, 4, 0.0, [0.0, 0.0]),
+            ("ring twist+grow", &ring_polys, 2.0, 6, 45.0, [1.2, 1.2]),
+            ("offset twist", &offset, 1.5, 5, 30.0, [1.0, 1.0]),
+            ("no divisions", &centered, 2.0, 0, 0.0, [1.0, 1.0]),
+        ] {
+            // BOTH engines get the identical post-Clipper2 contours — the C++ side consumes a
+            // CrossSection, whose Clipper2 round-trip may ROTATE a contour's starting vertex.
+            let cpp_cs = to_cpp_cs(polys);
+            let shared: Vec<Vec<Vec2>> = cpp_cs
+                .to_polygons()
+                .iter()
+                .map(|c| c.iter().map(|&[x, y]| Vec2::new(x, y)).collect())
+                .collect();
+            let ours = crate::bridge::extrude_polygons(
+                &shared,
+                height,
+                ndiv,
+                twist,
+                Vec2::new(scale[0], scale[1]),
+            );
+            let cpp = manifold3d::Manifold::extrude_with_options(
+                &cpp_cs, height, ndiv, twist, scale[0], scale[1],
+            );
+            let cpp_mesh = Mesh::from_mesh_gl_raw(&cpp_to_mesh_gl(&cpp)).unwrap();
+            if let Some(r) = solid_divergence(&ours, &cpp_mesh, 4000, 0x73_01, 1e-6) {
+                panic!("{label}: extrude_with_options diverges from C++: {r}");
+            }
+            let (h_ours, h_cpp) = (
+                canon_mesh_fingerprint(&ours),
+                canon_mesh_fingerprint(&cpp_mesh),
+            );
+            assert_eq!(
+                h_ours, h_cpp,
+                "{label}: byte fingerprint ours {h_ours:#018x} vs cpp {h_cpp:#018x}"
+            );
+        }
+        eprintln!("M.7.3 ✓ general extrude (twist/scale/cone) BYTE-matches C++");
+    }
+
+    /// M.7.3 — the PARTIAL-angle revolve (front/back caps) vs C++, BYTE parity — the other half of the
+    /// kernel.rs `ExtrudeKind::Rotate` flip. Covers on-axis, off-axis, axis-crossing (clip + interpolated
+    /// crossings), an odd segment count, and >360° clamping.
+    #[test]
+    fn m7_3_revolve_partial_vs_cpp() {
+        use crate::linalg::Vec2;
+
+        let sq = |x: f64, y: f64, s: f64| -> Vec<Vec2> {
+            vec![
+                Vec2::new(x, y),
+                Vec2::new(x + s, y),
+                Vec2::new(x + s, y + s),
+                Vec2::new(x, y + s),
+            ]
+        };
+        let to_cpp_cs = |polys: &[Vec<Vec2>]| -> manifold3d::CrossSection {
+            let cp: Vec<Vec<[f64; 2]>> = polys
+                .iter()
+                .map(|c| c.iter().map(|p| [p.x, p.y]).collect())
+                .collect();
+            manifold3d::CrossSection::from_polygons(&cp)
+        };
+
+        for (label, polys, segments, degrees) in [
+            ("on-axis 90°", vec![sq(0.0, 0.0, 1.0)], 64, 90.0),
+            ("off-axis 180°", vec![sq(1.0, 0.0, 1.0)], 48, 180.0),
+            (
+                "off-axis 270° odd segs",
+                vec![sq(1.0, -0.5, 1.0)],
+                33,
+                270.0,
+            ),
+            ("axis-crossing 120°", vec![sq(-0.5, 0.0, 2.0)], 24, 120.0),
+            ("clamped >360°", vec![sq(1.0, 0.0, 1.0)], 16, 400.0),
+        ] {
+            let cpp_cs = to_cpp_cs(&polys);
+            let shared: Vec<Vec<Vec2>> = cpp_cs
+                .to_polygons()
+                .iter()
+                .map(|c| c.iter().map(|&[x, y]| Vec2::new(x, y)).collect())
+                .collect();
+            let ours = crate::bridge::revolve_polygons(&shared, segments, degrees);
+            let cpp = manifold3d::Manifold::revolve(&cpp_cs, segments, degrees);
+            let cpp_mesh = Mesh::from_mesh_gl_raw(&cpp_to_mesh_gl(&cpp)).unwrap();
+            if let Some(r) = solid_divergence(&ours, &cpp_mesh, 4000, 0x73_02, 1e-6) {
+                panic!("{label}: partial revolve diverges from C++: {r}");
+            }
+            let (h_ours, h_cpp) = (
+                canon_mesh_fingerprint(&ours),
+                canon_mesh_fingerprint(&cpp_mesh),
+            );
+            assert_eq!(
+                h_ours, h_cpp,
+                "{label}: byte fingerprint ours {h_ours:#018x} vs cpp {h_cpp:#018x}"
+            );
+        }
+        eprintln!("M.7.3 ✓ partial revolve BYTE-matches C++");
+    }
+
+    /// M.7.3 — `Mesh::cylinder` vs C++ `Manifold::Cylinder`, BYTE parity: the C++ cylinder IS
+    /// `Extrude(cosd/sind circle, scale)` (+ mirror for the apex-at-bottom cone), and ours is the same
+    /// composition over the verbatim extrude, so bytes must match — including the mirrored path, whose
+    /// winding flip rides `transform`'s negative determinant.
+    #[test]
+    fn m7_3_cylinder_vs_cpp() {
+        for (label, h, rl, rh, segs, center) in [
+            ("straight", 3.0, 2.0, -1.0, 64, false),
+            ("straight centered", 3.0, 2.0, 2.0, 64, true),
+            ("taper", 5.0, 2.0, 1.0, 48, false),
+            ("cone up", 3.0, 2.0, 0.0, 32, false),
+            ("cone down (mirrored)", 3.0, 0.0, 2.0, 32, false),
+            ("cone down centered", 3.0, 0.0, 2.0, 32, true),
+        ] {
+            let ours = Mesh::cylinder(h, rl, rh, segs, center);
+            let cpp = manifold3d::Manifold::cylinder(h, rl, rh, segs, center);
+            let cpp_mesh = Mesh::from_mesh_gl_raw(&cpp_to_mesh_gl(&cpp)).unwrap();
+            if let Some(r) = solid_divergence(&ours, &cpp_mesh, 4000, 0x73_03, 1e-6) {
+                panic!("{label}: cylinder diverges from C++: {r}");
+            }
+            let (h_ours, h_cpp) = (
+                canon_mesh_fingerprint(&ours),
+                canon_mesh_fingerprint(&cpp_mesh),
+            );
+            assert_eq!(
+                h_ours, h_cpp,
+                "{label}: byte fingerprint ours {h_ours:#018x} vs cpp {h_cpp:#018x}"
+            );
+        }
+        eprintln!("M.7.3 ✓ cylinder (incl. mirrored cone) BYTE-matches C++");
     }
 
     /// M.5.3 — the SLICE bridge (3D→2D at a plane) vs C++. Extrude to a solid, slice at mid-height in both
@@ -2747,7 +2935,7 @@ mod tests {
             .unwrap();
         check(
             "revolve(offset profile)",
-            &profile.revolve(48),
+            &profile.revolve(48, 360.0),
             &manifold3d::Manifold::revolve(&to_cpp(&profile), 48, 360.0),
             0x54_03,
         );
@@ -3153,9 +3341,10 @@ mod tests {
         );
         assert!(differential(&nan_mesh, 1e-9).unwrap().is_empty());
 
-        //   (b) the mirror — an opposed-triangle "flap" appended to a valid cube: C++'s CreateHalfedges
-        //       REMOVES the degenerate pair and accepts, but our clean-pairing (opposed-tri removal is
-        //       the M.0.5 gap deferred to R1) sees broken pairing and rejects → "cpp accepted".
+        //   (b) an opposed-triangle "flap" appended to a valid cube: C++'s CreateHalfedges REMOVES
+        //       the degenerate pair and accepts. This was the M.0.5 gap deferred to R1 (we rejected →
+        //       "cpp accepted" divergence); M.7.3's `cancel_opposed_tris` CLOSED it — both engines
+        //       now accept and agree on the cube.
         #[rustfmt::skip]
         let flap_vp = vec![
             0.0,0.0,0.0, 1.0,0.0,0.0, 1.0,1.0,0.0, 0.0,1.0,0.0,
@@ -3169,7 +3358,9 @@ mod tests {
             tri_verts: flap_tris,
             ..Default::default()
         };
-        let e = differential(&flap, 1e-9).unwrap_err();
-        assert!(e.contains("cpp accepted"), "got: {e}");
+        assert!(
+            differential(&flap, 1e-9).unwrap().is_empty(),
+            "both engines drop the opposed flap and agree on the cube"
+        );
     }
 }

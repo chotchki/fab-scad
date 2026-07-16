@@ -224,7 +224,12 @@ impl EarClipper {
     #[inline]
     fn is_convex(&self, v: usize, epsilon: f64) -> bool {
         let (l, r) = (self.verts[v].left, self.verts[v].right);
-        ccw(self.verts[l].pos, self.verts[v].pos, self.verts[r].pos, epsilon) >= 0
+        ccw(
+            self.verts[l].pos,
+            self.verts[v].pos,
+            self.verts[r].pos,
+            epsilon,
+        ) >= 0
     }
 
     /// Reflex test that walks to certainty (`IsReflex` = `!left.InsideEdge(left.right, eps, true)`) — subtly
@@ -244,13 +249,21 @@ impl EarClipper {
         let mut next_r = self.verts[tail].right;
         let mut center = tail;
         let mut last = center;
-        let stop = if to_left { self.verts[this].right } else { self.verts[this].left };
+        let stop = if to_left {
+            self.verts[this].right
+        } else {
+            self.verts[this].left
+        };
 
         while next_l != next_r && tail != next_r && next_l != stop {
             let edge_l = self.verts[next_l].pos - self.verts[center].pos;
             let l2 = edge_l.dot(edge_l);
             if l2 <= p2 {
-                next_l = if to_left { self.verts[next_l].left } else { self.verts[next_l].right };
+                next_l = if to_left {
+                    self.verts[next_l].left
+                } else {
+                    self.verts[next_l].right
+                };
                 continue;
             }
             let edge_r = self.verts[next_r].pos - self.verts[center].pos;
@@ -264,7 +277,11 @@ impl EarClipper {
             if lr2 <= p2 {
                 last = center;
                 center = next_l;
-                next_l = if to_left { self.verts[next_l].left } else { self.verts[next_l].right };
+                next_l = if to_left {
+                    self.verts[next_l].left
+                } else {
+                    self.verts[next_l].right
+                };
                 if next_l == next_r {
                     break;
                 }
@@ -278,15 +295,28 @@ impl EarClipper {
                 self.epsilon,
             );
             if center != last {
-                convexity += ccw(self.verts[last].pos, self.verts[center].pos, self.verts[next_l].pos, self.epsilon)
-                    + ccw(self.verts[next_r].pos, self.verts[center].pos, self.verts[last].pos, self.epsilon);
+                convexity += ccw(
+                    self.verts[last].pos,
+                    self.verts[center].pos,
+                    self.verts[next_l].pos,
+                    self.epsilon,
+                ) + ccw(
+                    self.verts[next_r].pos,
+                    self.verts[center].pos,
+                    self.verts[last].pos,
+                    self.epsilon,
+                );
             }
             if convexity != 0 {
                 return convexity > 0;
             }
             if l2 < r2 {
                 center = next_l;
-                next_l = if to_left { self.verts[next_l].left } else { self.verts[next_l].right };
+                next_l = if to_left {
+                    self.verts[next_l].left
+                } else {
+                    self.verts[next_l].right
+                };
             } else {
                 center = next_r;
                 next_r = self.verts[next_r].right;
@@ -374,12 +404,17 @@ impl EarClipper {
         // ears, exactly where the divergence lives.
         open_side = open_side.normalize();
 
-        let mut total_cost = self.verts[l].right_dir.dot(self.verts[ear].right_dir) - 1.0 - self.epsilon;
+        let mut total_cost =
+            self.verts[l].right_dir.dot(self.verts[ear].right_dir) - 1.0 - self.epsilon;
         if ccw(ep, lp, rp, self.epsilon) == 0 {
             return total_cost; // clip folded ears first
         }
 
-        let (mid, lid, rid) = (self.verts[ear].mesh_idx, self.verts[l].mesh_idx, self.verts[r].mesh_idx);
+        let (mid, lid, rid) = (
+            self.verts[ear].mesh_idx,
+            self.verts[l].mesh_idx,
+            self.verts[r].mesh_idx,
+        );
         for &test in &self.active {
             let tid = self.verts[test].mesh_idx;
             if self.clipped(test) || tid == mid || tid == lid || tid == rid {
@@ -403,7 +438,11 @@ impl EarClipper {
     fn clip_ear(&mut self, ear: usize) {
         let (l, r) = (self.verts[ear].left, self.verts[ear].right);
         self.link(l, r);
-        let (lid, mid, rid) = (self.verts[l].mesh_idx, self.verts[ear].mesh_idx, self.verts[r].mesh_idx);
+        let (lid, mid, rid) = (
+            self.verts[l].mesh_idx,
+            self.verts[ear].mesh_idx,
+            self.verts[r].mesh_idx,
+        );
         if lid != mid && mid != rid && rid != lid {
             self.tris.push([lid, mid, rid]);
         }
@@ -488,7 +527,9 @@ impl EarClipper {
         let mut connector: Option<usize> = None;
         for oi in 0..self.outers.len() {
             let first = self.outers[oi];
-            let Some(ring) = self.ring(first) else { continue };
+            let Some(ring) = self.ring(first) else {
+                continue;
+            };
             for &edge in &ring {
                 let x = self.interp_y2x(edge, sp, on_top);
                 if !x.is_finite() || !self.inside_edge(start, edge, true) {
@@ -498,7 +539,13 @@ impl EarClipper {
                     None => true,
                     Some(c) => {
                         let cr = self.verts[c].right;
-                        if ccw(Vec2::new(x, sp.y), self.verts[c].pos, self.verts[cr].pos, eps) == 1 {
+                        if ccw(
+                            Vec2::new(x, sp.y),
+                            self.verts[c].pos,
+                            self.verts[cr].pos,
+                            eps,
+                        ) == 1
+                        {
                             true
                         } else if self.verts[c].pos.y < self.verts[edge].pos.y {
                             self.inside_edge(edge, c, false)
@@ -542,11 +589,17 @@ impl EarClipper {
         if (self.verts[connector].pos.y - sp.y).abs() <= eps {
             return connector;
         }
-        let above = if self.verts[connector].pos.y > sp.y { 1.0 } else { -1.0 };
+        let above = if self.verts[connector].pos.y > sp.y {
+            1.0
+        } else {
+            -1.0
+        };
 
         for oi in 0..self.outers.len() {
             let first = self.outers[oi];
-            let Some(ring) = self.ring(first) else { continue };
+            let Some(ring) = self.ring(first) else {
+                continue;
+            };
             for &vert in &ring {
                 let vp = self.verts[vert].pos;
                 let cp = self.verts[connector].pos;
@@ -602,7 +655,11 @@ impl EarClipper {
             None
         };
         if let Some(cost) = cost {
-            let ear = Ear { cost, seq: self.seq, vert: v };
+            let ear = Ear {
+                cost,
+                seq: self.seq,
+                vert: v,
+            };
             self.seq += 1;
             self.verts[v].ear = Some(ear);
             self.queue.insert(ear);
@@ -666,12 +723,88 @@ const K_PRECISION: f64 = 1e-12;
 /// Triangulate a set of polygons — outer loops wound CCW, holes CW — by the Delaunay-cost ear clip with
 /// keyhole holes (`polygon.cpp` `TriangulateIdx`/`EarClip::Triangulate`). Returns triangles as triples of
 /// the input `PolyVert::idx` values. Empty input → nothing.
+///
+/// This is the `allowConvex = false` flavor — what the BOOLEAN pipeline uses (`boolean_result.cpp`
+/// passes `/*allowConvex=*/false` to `Face2Tri`). The constructors (extrude/revolve caps) go through
+/// [`triangulate_with_convex`] with `true`, matching `Triangulate`'s C++ default.
 pub fn triangulate(polys: &[Vec<PolyVert>], epsilon: f64) -> Vec<[i32; 3]> {
     if polys.iter().all(|p| p.len() < 3) && polys.iter().map(|p| p.len()).sum::<usize>() < 3 {
         return Vec::new();
     }
     let mut ec = EarClipper::new(polys, epsilon);
     ec.run()
+}
+
+/// `TriangulateIdx` with the `allowConvex` knob (`polygon.cpp:939`): convex input takes the fast
+/// alternating clip ([`triangulate_convex`]), everything else falls back to the ear clip.
+pub fn triangulate_with_convex(
+    polys: &[Vec<PolyVert>],
+    epsilon: f64,
+    allow_convex: bool,
+) -> Vec<[i32; 3]> {
+    if allow_convex && is_convex(polys, epsilon) {
+        triangulate_convex(polys)
+    } else {
+        triangulate(polys, epsilon)
+    }
+}
+
+/// `IsConvex` (`polygon.cpp:172`): reflex-vert search across all contours. Exactly-colinear and
+/// zero-length edges conservatively count as reflex (a zero-length edge normalizes to NaN, which can't
+/// trip the early return, but the same edge is also tested NON-normalized and trips `det <= 0`). An
+/// `epsilon < 0` (the self-compute sentinel) disables the near-colinear dot check, same as the C++.
+///
+/// DEVIATION (panic-safety): an empty contour is "not convex" — the C++ would UB on `poly[0]`; the ear
+/// clip handles the degenerate downstream.
+pub fn is_convex(polys: &[Vec<PolyVert>], epsilon: f64) -> bool {
+    for poly in polys {
+        let Some(last) = poly.last() else {
+            return false;
+        };
+        let first_edge = poly[0].pos - last.pos;
+        let mut last_edge = first_edge.normalize();
+        for v in 0..poly.len() {
+            let edge = if v + 1 < poly.len() {
+                poly[v + 1].pos - poly[v].pos
+            } else {
+                first_edge
+            };
+            // determinant2x2 (`polygon.cpp:39`).
+            let det = last_edge.x * edge.y - last_edge.y * edge.x;
+            if det <= 0.0 || (det.abs() < epsilon && last_edge.dot(edge) < 0.0) {
+                return false;
+            }
+            last_edge = edge.normalize();
+        }
+    }
+    true
+}
+
+/// `TriangulateConvex` (`polygon.cpp:195`): clip ALTERNATING ends (not a fan) to avoid high-degree
+/// vertices. Triangle order matches the C++ emission order (`HalfedgeTriangulation::Triangles` reads
+/// them back in `AddTriangle` order), so constructor caps stay byte-identical.
+pub fn triangulate_convex(polys: &[Vec<PolyVert>]) -> Vec<[i32; 3]> {
+    let num_tri: usize = polys.iter().map(|p| p.len().saturating_sub(2)).sum();
+    let mut tris = Vec::with_capacity(num_tri);
+    for poly in polys {
+        if poly.len() < 3 {
+            continue;
+        }
+        let mut i = 0usize;
+        let mut k = poly.len() - 1;
+        let mut right = true;
+        while i + 1 < k {
+            let j = if right { i + 1 } else { k - 1 };
+            tris.push([poly[i].idx, poly[j].idx, poly[k].idx]);
+            if right {
+                i = j;
+            } else {
+                k = j;
+            }
+            right = !right;
+        }
+    }
+    tris
 }
 
 /// Triangulate a single simple CCW polygon by the Delaunay-cost ear clip (`polygon.cpp` `EarClip`),
@@ -797,19 +930,30 @@ mod tests {
     fn self_touching_octagon_triangulation_is_contour_valid() {
         // (idx, x, y) — the exact projected loop `face2tri` hands `triangulate` for this face.
         let loop_pts = [
-            (81, 0.5, 5.5), (84, 0.5, 5.5), (86, 0.5, 6.5), (85, 0.5, 6.5),
-            (83, 1.25, 5.75), (82, 1.25, 5.75), (88, 3.5, 6.5), (87, 0.5, 6.5),
+            (81, 0.5, 5.5),
+            (84, 0.5, 5.5),
+            (86, 0.5, 6.5),
+            (85, 0.5, 6.5),
+            (83, 1.25, 5.75),
+            (82, 1.25, 5.75),
+            (88, 3.5, 6.5),
+            (87, 0.5, 6.5),
         ];
         let poly: Vec<PolyVert> = loop_pts
             .iter()
-            .map(|&(idx, x, y)| PolyVert { pos: Vec2::new(x, y), idx })
+            .map(|&(idx, x, y)| PolyVert {
+                pos: Vec2::new(x, y),
+                idx,
+            })
             .collect();
         let n = loop_pts.len();
-        let contour: BTreeSet<(i32, i32)> =
-            (0..n).map(|i| (loop_pts[i].0, loop_pts[(i + 1) % n].0)).collect();
+        let contour: BTreeSet<(i32, i32)> = (0..n)
+            .map(|i| (loop_pts[i].0, loop_pts[(i + 1) % n].0))
+            .collect();
         for &eps in &[1e-9_f64, 7e-6, 1e-3] {
             let tris = triangulate(std::slice::from_ref(&poly), eps);
-            let mut edges: std::collections::HashMap<(i32, i32), i32> = std::collections::HashMap::new();
+            let mut edges: std::collections::HashMap<(i32, i32), i32> =
+                std::collections::HashMap::new();
             for t in &tris {
                 for i in 0..3 {
                     *edges.entry((t[i], t[(i + 1) % 3])).or_insert(0) += 1;
@@ -903,20 +1047,47 @@ mod tests {
         let h = 1.0; // hole half-extent
         // Outer CCW, hole CW (reversed). idx: outer 0..4, hole 4..8.
         let outer = vec![
-            PolyVert { pos: Vec2::new(-s, -s), idx: 0 },
-            PolyVert { pos: Vec2::new(s, -s), idx: 1 },
-            PolyVert { pos: Vec2::new(s, s), idx: 2 },
-            PolyVert { pos: Vec2::new(-s, s), idx: 3 },
+            PolyVert {
+                pos: Vec2::new(-s, -s),
+                idx: 0,
+            },
+            PolyVert {
+                pos: Vec2::new(s, -s),
+                idx: 1,
+            },
+            PolyVert {
+                pos: Vec2::new(s, s),
+                idx: 2,
+            },
+            PolyVert {
+                pos: Vec2::new(-s, s),
+                idx: 3,
+            },
         ];
         let hole = vec![
-            PolyVert { pos: Vec2::new(-h, -h), idx: 4 },
-            PolyVert { pos: Vec2::new(-h, h), idx: 5 },
-            PolyVert { pos: Vec2::new(h, h), idx: 6 },
-            PolyVert { pos: Vec2::new(h, -h), idx: 7 },
+            PolyVert {
+                pos: Vec2::new(-h, -h),
+                idx: 4,
+            },
+            PolyVert {
+                pos: Vec2::new(-h, h),
+                idx: 5,
+            },
+            PolyVert {
+                pos: Vec2::new(h, h),
+                idx: 6,
+            },
+            PolyVert {
+                pos: Vec2::new(h, -h),
+                idx: 7,
+            },
         ];
         let pts: Vec<Vec2> = outer.iter().chain(hole.iter()).map(|v| v.pos).collect();
         let tris_i = triangulate(&[outer, hole], 1e-9);
-        let tris: Vec<[usize; 3]> = tris_i.iter().map(|t| [t[0] as usize, t[1] as usize, t[2] as usize]).collect();
+        let tris: Vec<[usize; 3]> = tris_i
+            .iter()
+            .map(|t| [t[0] as usize, t[1] as usize, t[2] as usize])
+            .collect();
 
         let annulus = (2.0 * s) * (2.0 * s) - (2.0 * h) * (2.0 * h); // 64 - 4 = 60
         let sum = tri_area_sum(&pts, &tris);
@@ -926,10 +1097,17 @@ mod tests {
             tris.len()
         );
         // Keyhole bridges 2 verts → a holed poly of V verts + 1 hole triangulates to V triangles.
-        assert_eq!(tris.len(), 8, "expected V=8 triangles for a 4+4 holed square");
+        assert_eq!(
+            tris.len(),
+            8,
+            "expected V=8 triangles for a 4+4 holed square"
+        );
         // No grossly-inverted triangle.
         for t in &tris {
-            assert!(area2(pts[t[0]], pts[t[1]], pts[t[2]]) > -1e-9, "inverted triangle {t:?}");
+            assert!(
+                area2(pts[t[0]], pts[t[1]], pts[t[2]]) > -1e-9,
+                "inverted triangle {t:?}"
+            );
         }
     }
 
@@ -938,27 +1116,60 @@ mod tests {
     #[test]
     fn offset_hole_tiles_the_annulus() {
         let outer = vec![
-            PolyVert { pos: Vec2::new(0.0, 0.0), idx: 0 },
-            PolyVert { pos: Vec2::new(10.0, 0.0), idx: 1 },
-            PolyVert { pos: Vec2::new(10.0, 6.0), idx: 2 },
-            PolyVert { pos: Vec2::new(0.0, 6.0), idx: 3 },
+            PolyVert {
+                pos: Vec2::new(0.0, 0.0),
+                idx: 0,
+            },
+            PolyVert {
+                pos: Vec2::new(10.0, 0.0),
+                idx: 1,
+            },
+            PolyVert {
+                pos: Vec2::new(10.0, 6.0),
+                idx: 2,
+            },
+            PolyVert {
+                pos: Vec2::new(0.0, 6.0),
+                idx: 3,
+            },
         ];
         // CW hole near the right side.
         let hole = vec![
-            PolyVert { pos: Vec2::new(6.0, 2.0), idx: 4 },
-            PolyVert { pos: Vec2::new(6.0, 4.0), idx: 5 },
-            PolyVert { pos: Vec2::new(8.5, 4.0), idx: 6 },
-            PolyVert { pos: Vec2::new(8.5, 2.0), idx: 7 },
+            PolyVert {
+                pos: Vec2::new(6.0, 2.0),
+                idx: 4,
+            },
+            PolyVert {
+                pos: Vec2::new(6.0, 4.0),
+                idx: 5,
+            },
+            PolyVert {
+                pos: Vec2::new(8.5, 4.0),
+                idx: 6,
+            },
+            PolyVert {
+                pos: Vec2::new(8.5, 2.0),
+                idx: 7,
+            },
         ];
         let pts: Vec<Vec2> = outer.iter().chain(hole.iter()).map(|v| v.pos).collect();
         let tris_i = triangulate(&[outer, hole], 1e-9);
-        let tris: Vec<[usize; 3]> = tris_i.iter().map(|t| [t[0] as usize, t[1] as usize, t[2] as usize]).collect();
+        let tris: Vec<[usize; 3]> = tris_i
+            .iter()
+            .map(|t| [t[0] as usize, t[1] as usize, t[2] as usize])
+            .collect();
         let annulus = 10.0 * 6.0 - 2.5 * 2.0; // 60 - 5 = 55
         let sum = tri_area_sum(&pts, &tris);
-        assert!((sum - annulus).abs() < 1e-9, "annulus area {sum} != {annulus}");
+        assert!(
+            (sum - annulus).abs() < 1e-9,
+            "annulus area {sum} != {annulus}"
+        );
         assert_eq!(tris.len(), 8);
         for t in &tris {
-            assert!(area2(pts[t[0]], pts[t[1]], pts[t[2]]) > -1e-9, "inverted triangle {t:?}");
+            assert!(
+                area2(pts[t[0]], pts[t[1]], pts[t[2]]) > -1e-9,
+                "inverted triangle {t:?}"
+            );
         }
     }
 

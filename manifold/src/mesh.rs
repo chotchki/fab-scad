@@ -363,10 +363,14 @@ impl Mesh {
 
     /// Build the half-edge connectivity from triangle vertex indices, pairing opposite half-edges.
     ///
-    /// Deterministic clean-mesh pairing: group the two directed half-edges of every undirected edge
-    /// `{min,max}` and link them. A manifold edge has exactly one `a→b` and one `b→a` → unique pairing;
-    /// anything else (boundary, >2 incident, same-direction duplicate) is left `NONE`, which
-    /// [`Mesh::is_manifold`] then rejects. (Opposed-triangle removal is R1 — see the module doc.)
+    /// Deterministic pairing: group the directed half-edges of every undirected edge `{min,max}` and
+    /// THREAD them — the k-th forward (min→max) links to the k-th backward, both in triangle order.
+    /// That is exactly the C++ ingest `CreateHalfedges`' global stable sort (fwd-bit | min | max keys
+    /// align slot `i` with `i + numEdge`): a clean manifold edge is the k=1 case, and an edge shared
+    /// by 2k triangles (a PINCHED edge — two surfaces meeting along a line, which real welded
+    /// imports carry) pairs crosswise for `split_pinched_verts` to untangle in `cleanup_topology`.
+    /// Unbalanced leftovers (boundary, same-direction duplicates) stay `NONE`, which
+    /// [`Mesh::is_manifold`] rejects — same verdict as the C++'s misaligned pairing.
     pub fn create_halfedges(&mut self, tri_verts: &[[u32; 3]]) {
         use std::collections::BTreeMap;
 
@@ -387,22 +391,19 @@ impl Mesh {
             }
         }
 
-        // Group half-edge indices by undirected-edge key. BTreeMap = deterministic iteration.
-        let mut groups: BTreeMap<(VertId, VertId), Vec<usize>> = BTreeMap::new();
+        // Group half-edge indices by undirected-edge key, split by direction. BTreeMap =
+        // deterministic iteration; push order within a group = triangle order (the C++'s stable
+        // sort tiebreak).
+        let mut groups: BTreeMap<(VertId, VertId), [Vec<usize>; 2]> = BTreeMap::new();
         for (idx, h) in he.iter().enumerate() {
             let (a, b) = (h.start_vert, ends[idx]);
-            let key = if a < b { (a, b) } else { (b, a) };
-            groups.entry(key).or_default().push(idx);
+            let (key, dir) = if a < b { ((a, b), 0) } else { ((b, a), 1) };
+            groups.entry(key).or_default()[dir].push(idx);
         }
-        for idxs in groups.values() {
-            if idxs.len() == 2 {
-                let (e0, e1) = (idxs[0], idxs[1]);
-                // Only a genuine reverse pair (opposite directions) links; a same-direction
-                // duplicate is non-manifold and stays unpaired.
-                if he[e0].start_vert == ends[e1] && ends[e0] == he[e1].start_vert {
-                    he[e0].paired_halfedge = HalfedgeId::from_usize(e1);
-                    he[e1].paired_halfedge = HalfedgeId::from_usize(e0);
-                }
+        for [fwd, bwd] in groups.values() {
+            for (&e0, &e1) in fwd.iter().zip(bwd) {
+                he[e0].paired_halfedge = HalfedgeId::from_usize(e1);
+                he[e1].paired_halfedge = HalfedgeId::from_usize(e0);
             }
         }
         self.halfedge = he;
@@ -566,7 +567,12 @@ impl Mesh {
     /// Ingest a `MeshGl` (flat buffers) into the spine: extract positions, carry extra properties,
     /// build connectivity, compute the bbox. Panics if `num_prop < 3` or the buffers are ragged.
     pub fn from_mesh_gl(m: &MeshGl) -> Result<Mesh, Error> {
-        let mut mesh = Self::from_mesh_gl_raw(m)?;
+        // Opposed-triangle cancellation FIRST (the C++ ingest `CreateHalfedges`' `removed` pass,
+        // impl.cpp:385) — a welded real-world import legitimately carries back-to-back internal
+        // walls (the same vertex triple wound both ways), which the clean-mesh unique pairing
+        // below would read as >2-incident edges and reject. 4 of 15 corpus STLs need this.
+        let cleaned = cancel_opposed_tris(m);
+        let mut mesh = Self::from_mesh_gl_raw(cleaned.as_ref().unwrap_or(m))?;
 
         // THE INGEST TAIL — the C++ `Impl(MeshGL)` ctor's phase sequence (impl.h:474-501), M.2.4a:
         // skipping it was half the Cray divergence. Most visible is the missing Morton SORT — a raw
@@ -656,11 +662,15 @@ impl Mesh {
 
         let mut mesh = if m.merge_from_vert.is_empty() {
             // No seams: every row is its own geometric vert (the 1:1 case — position-only and
-            // freshly-coloured meshes). `tri_verts` reference rows directly.
+            // freshly-coloured meshes). `tri_verts` reference rows directly. Repeated-vert
+            // DEGENERATES are dropped before pairing (the C++ ctor's `triV[0] != triV[1] && ...`
+            // filter, impl.h:459) — a welded import legitimately collapses slivers to them, and
+            // their self-loop/duplicate halfedges would poison the pairing.
             let tri_verts: Vec<[u32; 3]> = m
                 .tri_verts
                 .chunks_exact(3)
                 .map(|c| [c[0], c[1], c[2]])
+                .filter(|t| t[0] != t[1] && t[1] != t[2] && t[2] != t[0])
                 .collect();
             let mut mesh = Mesh {
                 vert_pos,
@@ -678,17 +688,21 @@ impl Mesh {
             for (&from, &to) in m.merge_from_vert.iter().zip(&m.merge_to_vert) {
                 prop2vert[from as usize] = to;
             }
-            let tri_geo: Vec<[u32; 3]> = m
-                .tri_verts
-                .chunks_exact(3)
-                .map(|c| {
-                    [
-                        prop2vert[c[0] as usize],
-                        prop2vert[c[1] as usize],
-                        prop2vert[c[2] as usize],
-                    ]
-                })
-                .collect();
+            // Same degenerate filter as the seamless branch, on the MERGED geometric triple; the
+            // kept triangles' original rows ride along for the prop overwrite below.
+            let mut tri_geo: Vec<[u32; 3]> = Vec::new();
+            let mut kept_rows: Vec<[u32; 3]> = Vec::new();
+            for c in m.tri_verts.chunks_exact(3) {
+                let g = [
+                    prop2vert[c[0] as usize],
+                    prop2vert[c[1] as usize],
+                    prop2vert[c[2] as usize],
+                ];
+                if g[0] != g[1] && g[1] != g[2] && g[2] != g[0] {
+                    tri_geo.push(g);
+                    kept_rows.push([c[0], c[1], c[2]]);
+                }
+            }
             let mut mesh = Mesh {
                 vert_pos,
                 num_prop,
@@ -697,7 +711,7 @@ impl Mesh {
             };
             mesh.create_halfedges(&tri_geo);
             // create_halfedges set prop_vert = start (the merged geo vert); overwrite with the ORIGINAL row.
-            for (tri, c) in m.tri_verts.chunks_exact(3).enumerate() {
+            for (tri, c) in kept_rows.iter().enumerate() {
                 for (i, &row) in c.iter().enumerate() {
                     mesh.set_prop(HalfedgeId::from_usize(3 * tri + i), VertId::new(row as i32));
                 }
@@ -1202,8 +1216,10 @@ impl Mesh {
             return result;
         }
         let old_extra = self.num_prop;
-        let num_vert = self.num_vert();
-        let mut new_props = vec![0.0; num_prop * num_vert];
+        // Rows = PROP-verts, not geometric verts (C++ `numProp * NumPropVert()`): a boolean output
+        // keeps distinct property rows for coincident seam verts, so it can carry MORE rows than
+        // verts — sizing by `num_vert` blew up the first recolor of a colored boolean result.
+        let mut new_props = vec![0.0; num_prop * self.num_prop_vert()];
         for tri in 0..self.num_tri() {
             let t = TriId::from_usize(tri);
             for i in 0..3 {
@@ -1246,17 +1262,31 @@ impl Mesh {
         let num_tri = self.num_tri();
         let mut meshes = Vec::new();
         for i in 0..num_comp {
-            // Compact this component's verts (old → new), gathering positions.
+            // Compact this component's verts (old → new), gathering positions AND vert normals — the
+            // C++ gathers `vertNormal_` alongside `vertPos_`, and the boolean's `shadow01` reads vert
+            // normals unconditionally (skipping them panics the first boolean on a decomposed body).
+            // A raw-ingested mesh (the differential harness's `from_mesh_gl_raw`) has no derived
+            // normals/refs to gather — guard each array; production meshes always carry them.
+            let has_vn = self.vert_normal.len() == num_vert;
+            let has_fn = self.face_normal.len() == num_tri;
+            let has_ref = self.tri_ref.len() == num_tri;
             let mut old2new = vec![u32::MAX; num_vert];
             let mut vert_pos = Vec::new();
+            let mut vert_normal = Vec::new();
             for (v, &label) in labels.iter().enumerate() {
                 if label == i {
                     old2new[v] = vert_pos.len() as u32;
                     vert_pos.push(self.vert_pos[v]);
+                    if has_vn {
+                        vert_normal.push(self.vert_normal[v]);
+                    }
                 }
             }
-            // Triangles owned by this component (first-vertex label), remapped to the new vert indices.
+            // Triangles owned by this component (first-vertex label), remapped to the new vert
+            // indices; face normals + refs ride along per kept face (C++ `GatherFaces`).
             let mut tris: Vec<[u32; 3]> = Vec::new();
+            let mut face_normal = Vec::new();
+            let mut tri_ref = Vec::new();
             for f in 0..num_tri {
                 let t = TriId::from_usize(f);
                 if labels[self.start(t.halfedge(0)).u()] != i {
@@ -1267,18 +1297,27 @@ impl Mesh {
                     old2new[self.start(t.halfedge(1)).u()],
                     old2new[self.start(t.halfedge(2)).u()],
                 ]);
+                if has_fn {
+                    face_normal.push(self.face_normal[f]);
+                }
+                if has_ref {
+                    tri_ref.push(self.tri_ref[f]);
+                }
             }
             if tris.is_empty() {
                 continue;
             }
             let mut m = Mesh {
                 vert_pos,
+                vert_normal,
                 num_prop: 0,
                 epsilon: self.epsilon,
                 tolerance: self.tolerance,
                 ..Default::default()
             };
             m.create_halfedges(&tris);
+            m.face_normal = face_normal;
+            m.tri_ref = tri_ref;
             m.calculate_bbox();
             m.sort_geometry();
             meshes.push(m);
@@ -1343,6 +1382,78 @@ fn flip_halfedge(h: HalfedgeId) -> HalfedgeId {
     }
     let u = h.u();
     HalfedgeId::from_usize(3 * (u / 3) + (2 - u % 3))
+}
+
+/// The C++ ingest `CreateHalfedges`' opposed-triangle removal (impl.cpp:385, the `removed` pass),
+/// run as a PRE-pass over the flat triangle list: cancel pairs of triangles that cover the same
+/// GEOMETRIC vertex triple with OPPOSITE winding — back-to-back internal walls a welded import
+/// (STL/3mf of a model whose union left coincident faces) legitimately carries. FIFO per triple,
+/// matching the C++'s earliest-with-earliest pairing over the stable edge sort. Degenerate triples
+/// (a repeated vert) pass through untouched. Returns `None` when nothing cancels (the common case —
+/// no copy made).
+///
+/// DEVIATION (narrower acceptance, documented): after cancellation an edge still shared by more
+/// than two triangles is rejected downstream as `NotManifold`, where the C++'s slot pairing can
+/// thread SAME-winding duplicates into a pinched-but-paired topology for `CleanupTopology` to split.
+/// No corpus input exercises that shape; revisit if one appears.
+fn cancel_opposed_tris(m: &MeshGl) -> Option<MeshGl> {
+    use std::collections::{HashMap, VecDeque};
+    if m.num_prop < 3
+        || !m.vert_properties.len().is_multiple_of(m.num_prop)
+        || !m.tri_verts.len().is_multiple_of(3)
+        || m.merge_from_vert.len() != m.merge_to_vert.len()
+    {
+        return None; // structurally invalid — let the raw ingest surface the right Error
+    }
+    let n_row = m.vert_properties.len() / m.num_prop;
+    // Geometric identity per row: the merge target when given, else the row itself.
+    let mut geo: Vec<u32> = (0..n_row as u32).collect();
+    for (&f, &t) in m.merge_from_vert.iter().zip(&m.merge_to_vert) {
+        if (f as usize) < n_row && (t as usize) < n_row {
+            geo[f as usize] = t;
+        }
+    }
+    let num_tri = m.tri_verts.len() / 3;
+    let mut dead = vec![false; num_tri];
+    let mut any = false;
+    // Key = the sorted triple; the flag encodes the winding CLASS (canonical-cycle orientation).
+    let mut queues: HashMap<[u32; 3], [VecDeque<usize>; 2]> = HashMap::new();
+    for (t, c) in m.tri_verts.chunks_exact(3).enumerate() {
+        let idx = |i: usize| -> Option<u32> { geo.get(c[i] as usize).copied() };
+        let (Some(a), Some(b), Some(cc)) = (idx(0), idx(1), idx(2)) else {
+            return None; // out-of-bounds index — let the raw ingest reject
+        };
+        let v = [a, b, cc];
+        if v[0] == v[1] || v[1] == v[2] || v[0] == v[2] {
+            continue;
+        }
+        let k = (0..3).min_by_key(|&i| v[i]).unwrap_or(0);
+        let (p, q) = (v[(k + 1) % 3], v[(k + 2) % 3]);
+        let key = [v[k], p.min(q), p.max(q)];
+        let flag = usize::from(p < q);
+        let entry = queues.entry(key).or_default();
+        if let Some(other) = entry[1 - flag].pop_front() {
+            dead[other] = true;
+            dead[t] = true;
+            any = true;
+        } else {
+            entry[flag].push_back(t);
+        }
+    }
+    if !any {
+        return None;
+    }
+    let tri_verts: Vec<u32> = m
+        .tri_verts
+        .chunks_exact(3)
+        .enumerate()
+        .filter(|(t, _)| !dead[*t])
+        .flat_map(|(_, c)| c.iter().copied())
+        .collect();
+    Some(MeshGl {
+        tri_verts,
+        ..m.clone()
+    })
 }
 
 /// The flat interchange buffer — Manifold's `MeshGL64` core (double precision, the format the kernel
@@ -1554,6 +1665,24 @@ mod tests {
             Mesh::from_mesh_gl(&unit_cube()).unwrap().decompose().len(),
             1
         );
+
+        // REGRESSION (M.7.3 flip): a decomposed component must be BOOLEAN-READY — the C++ gathers
+        // vert normals (+ face normals/refs) into each component, and `shadow01` reads vert normals
+        // unconditionally, so a component missing them panics the first boolean it enters.
+        for p in &parts {
+            assert_eq!(p.vert_normal.len(), p.num_vert(), "vert normals gathered");
+            assert_eq!(p.face_normal.len(), p.num_tri(), "face normals gathered");
+            let probe = Mesh::cube(crate::linalg::Vec3::splat(0.5), true).unwrap();
+            let cut = crate::boolean::boolean_result::boolean(
+                p,
+                &probe
+                    .transform(crate::linalg::Mat3x4::translate(p.b_box.min))
+                    .unwrap(),
+                crate::boolean::OpType::Subtract,
+            );
+            assert!(cut.is_manifold(), "boolean on a decomposed part works");
+            assert!(cut.volume() < p.volume());
+        }
     }
 
     /// M.3.4a — `set_properties`: stamp RGBA onto every vertex (the `color()` overwrite), confirm the

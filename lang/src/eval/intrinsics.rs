@@ -229,6 +229,149 @@ static REGISTRY: &[Entry] = &[
         builtins: &["abs"],
         func: poc_near0,
     },
+    // ── O.5.2, the SHAPE band (utility.scad / lists.scad) ────────────────────────────────────────────────
+    // The `is_consistent`/`_list_pattern`/`same_shape` bundle is ~4.7s of self time across the O.4 four
+    // (every BOSL2 path/vector assert funnels through it), `num_defined`/`force_list` are its cheap leaf
+    // companions. All verbatim; every op routes through the interpreter's own primitives (`iter_values` for
+    // comprehension iteration, `build_vector` for result coalescing, `apply_binary`/`index` for ops), so
+    // variant identity (NumList vs List) and exotic-input behavior match by construction.
+    Entry {
+        name: "_list_pattern",
+        reference: "function _list_pattern(list) =
+  is_list(list)
+  ? [for(entry=list) is_list(entry) ? _list_pattern(entry) : 0]
+  : 0;",
+        consts: &[],
+        deps: &[],
+        builtins: &["is_list"],
+        func: list_pattern,
+    },
+    Entry {
+        name: "same_shape",
+        reference: "function same_shape(a,b) = is_def(b) && _list_pattern(a) == b*0;",
+        consts: &[],
+        deps: &["is_def", "_list_pattern"],
+        builtins: &["is_undef", "is_list"],
+        func: same_shape,
+    },
+    Entry {
+        name: "is_consistent",
+        reference: "function is_consistent(list, pattern) =
+    is_list(list)
+    && (len(list)==0
+       || (let(pattern = is_undef(pattern) ? _list_pattern(list[0]): _list_pattern(pattern) )
+          []==[for(entry=0*list) if (entry != pattern) entry]));",
+        consts: &[],
+        deps: &["_list_pattern"],
+        builtins: &["is_list", "len", "is_undef"],
+        func: is_consistent,
+    },
+    Entry {
+        name: "num_defined",
+        reference: "function num_defined(v) =
+    len([for(vi=v) if(!is_undef(vi)) 1]);",
+        consts: &[],
+        deps: &[],
+        builtins: &["len", "is_undef"],
+        func: num_defined,
+    },
+    Entry {
+        name: "force_list",
+        reference: "function force_list(value, n=1, fill) =
+    is_list(value) ? value :
+    is_undef(fill)? [for (i=[1:1:n]) value] : [value, for (i=[2:1:n]) fill];",
+        consts: &[],
+        deps: &[],
+        builtins: &["is_list", "is_undef"],
+        func: force_list,
+    },
+    // ── O.5.2, the `_EPSILON` family (vectors/comparisons/math/lists/linalg.scad) ───────────────────────
+    // The band's core: is_vector 8.8s / approx 5.9s of cross-model self time (every BOSL2 input assert
+    // funnels through them), plus the posmod↔approx↔idx cycle group they drag in and is_matrix on top. All
+    // const-guarded on `_EPSILON` (they bake 1e-9); the deps lists close the reachable-call graph so a
+    // drifted neighbor declines the whole knot rather than running stale.
+    Entry {
+        name: "approx",
+        reference: "function approx(a,b,eps=_EPSILON) =
+    a == b? is_bool(a) == is_bool(b) :
+    is_num(a) && is_num(b)? abs(a-b) <= eps :
+    is_list(a) && is_list(b) && len(a) == len(b)? (
+        [] == [
+            for (i=idx(a))
+            let(aa=a[i], bb=b[i])
+            if(
+                is_num(aa) && is_num(bb)? abs(aa-bb) > eps :
+                !approx(aa,bb,eps=eps)
+            ) 1
+        ]
+    ) : false;",
+        consts: &[("_EPSILON", 1e-9)],
+        deps: &["idx", "posmod", "is_finite", "is_nan"],
+        builtins: &["is_bool", "is_num", "abs", "is_list", "is_string", "len"],
+        func: approx,
+    },
+    Entry {
+        name: "posmod",
+        reference: "function posmod(x,m) =
+    assert( is_finite(x) && is_finite(m) && !approx(m,0) , \"\\nInput must be finite numbers. The divisor cannot be zero.\")
+    (x%m+m)%m;",
+        consts: &[("_EPSILON", 1e-9)],
+        deps: &["is_finite", "is_nan", "approx"],
+        builtins: &["is_num", "abs", "is_bool"],
+        func: posmod,
+    },
+    Entry {
+        name: "idx",
+        reference: "function idx(list, s=0, e=-1, step=1) =
+    assert(is_list(list)||is_string(list), \"Invalid input.\" )
+    let( ll = len(list) )
+    ll == 0 ? [0:1:ll-1] :
+    let(
+        _s = posmod(s,ll),
+        _e = posmod(e,ll)
+    ) [_s : step : _e];",
+        consts: &[("_EPSILON", 1e-9)],
+        deps: &["posmod", "is_finite", "is_nan", "approx"],
+        builtins: &["is_list", "is_string", "len", "is_num", "abs", "is_bool"],
+        func: idx,
+    },
+    Entry {
+        name: "all_nonzero",
+        reference: "function all_nonzero(x, eps=_EPSILON) =
+    is_finite(x)? abs(x)>eps :
+    is_vector(x) && [for (xx=x) if(abs(xx)<eps) 1] == [];",
+        consts: &[("_EPSILON", 1e-9)],
+        deps: &["is_finite", "is_nan", "is_vector"],
+        builtins: &["is_num", "abs", "is_list", "len", "is_undef"],
+        func: all_nonzero,
+    },
+    Entry {
+        name: "is_vector",
+        reference: "function is_vector(v, length, zero, all_nonzero=false, eps=_EPSILON) =
+    is_list(v) && len(v)>0 && []==[for(vi=v) if(!is_finite(vi)) 0]
+    && (is_undef(length) || (assert(is_num(length))len(v)==length))
+    && (is_undef(zero) || ((norm(v) >= eps) == !zero))
+    && (!all_nonzero || all_nonzero(v)) ;",
+        consts: &[("_EPSILON", 1e-9)],
+        deps: &["is_finite", "is_nan", "all_nonzero"],
+        builtins: &["is_list", "len", "is_undef", "is_num", "norm", "abs"],
+        func: is_vector,
+    },
+    // `is_vector(A[0],n)` is a fixed 2-arg call, so the zero/norm and all_nonzero branches are unreachable
+    // from is_matrix — the deps close over what interpreting THIS reference can run, not all of is_vector.
+    Entry {
+        name: "is_matrix",
+        reference: "function is_matrix(A,m,n,square=false) =
+   is_list(A)
+   && (( is_undef(m) && len(A) ) || len(A)==m)
+   && (!square || len(A) == len(A[0]))
+   && is_vector(A[0],n)
+   && is_consistent(A);",
+        consts: &[],
+        deps: &["is_vector", "is_finite", "is_nan", "is_consistent", "_list_pattern"],
+        builtins: &["is_list", "len", "is_undef", "is_num"],
+        func: is_matrix,
+    },
 ];
 
 /// The POC intrinsic: `x * x`. Mirrors the interpreter's `Num * Num` (and `undef` for a non-number arg, as
@@ -247,6 +390,374 @@ fn poc_near0(args: &[Value]) -> crate::Result<Value> {
     let x = args.first().cloned().unwrap_or(Value::Undef);
     let a = super::builtins::apply("abs", &[x]);
     Ok(super::ops::apply_binary(BinOp::Lt, a, Value::Num(1e-9)))
+}
+
+/// Is `v` a list to the `is_list` BUILTIN (the branch every shape function turns on)? Both vector variants;
+/// nothing else (a string/range iterates in `for` but is NOT a list).
+fn v_is_list(v: &Value) -> bool {
+    matches!(v, Value::List(_) | Value::NumList(_))
+}
+
+/// BOSL2 `_list_pattern(list)` — the shape skeleton: every non-list leaf becomes `0`, lists recurse. Results
+/// coalesce through the interpreter's own `build_vector`, so a flat numeric level becomes the same `NumList`
+/// the comprehension would build — VARIANT identity matters, the callers compare patterns with `==`/`!=`.
+fn list_pattern(args: &[Value]) -> crate::Result<Value> {
+    Ok(list_pattern_of(args.first().unwrap_or(&Value::Undef)))
+}
+fn list_pattern_of(v: &Value) -> Value {
+    if v_is_list(v) {
+        let out: Vec<Value> = super::iter_values(v).iter().map(list_pattern_of).collect();
+        super::build_vector(out)
+    } else {
+        Value::Num(0.0)
+    }
+}
+
+/// BOSL2 `same_shape(a,b) = is_def(b) && _list_pattern(a) == b*0` — do `a` and `b` have the same nesting
+/// skeleton? `b*0` and the `==` route through `apply_binary` (`0*"str"` is undef, list `==` is elementwise),
+/// and a falsy `is_def(b)` short-circuits to `false` exactly like the interpreter's `&&`.
+fn same_shape(args: &[Value]) -> crate::Result<Value> {
+    if matches!(args.get(1), None | Some(Value::Undef)) {
+        return Ok(Value::Bool(false)); // is_def(b) is false → && yields false
+    }
+    let a = args.first().cloned().unwrap_or(Value::Undef);
+    let b = args.get(1).cloned().unwrap_or(Value::Undef);
+    let pattern = list_pattern_of(&a);
+    let b0 = super::ops::apply_binary(BinOp::Mul, b, Value::Num(0.0));
+    let eq = super::ops::apply_binary(BinOp::Eq, pattern, b0);
+    Ok(Value::Bool(eq.is_truthy()))
+}
+
+/// BOSL2 `is_consistent(list, pattern)` — is every element of `list` shaped like `pattern` (default: like
+/// `list[0]`)? The reference compares each entry of `0*list` against the pattern with `!=`; both the zeroing
+/// and the compare route through `apply_binary`, iteration through `iter_values` — so a heterogeneous list
+/// (where `0*entry` is undef) answers exactly as interpreted.
+fn is_consistent(args: &[Value]) -> crate::Result<Value> {
+    let list = args.first().cloned().unwrap_or(Value::Undef);
+    if !v_is_list(&list) {
+        return Ok(Value::Bool(false));
+    }
+    let n = match &list {
+        Value::List(xs) => xs.len(),
+        Value::NumList(xs) => xs.len(),
+        _ => 0, // unreachable: v_is_list above
+    };
+    if n == 0 {
+        return Ok(Value::Bool(true));
+    }
+    let pattern = match args.get(1) {
+        None | Some(Value::Undef) => {
+            list_pattern_of(&super::ops::index(list.clone(), &Value::Num(0.0)))
+        }
+        Some(p) => list_pattern_of(p),
+    };
+    let zeroed = super::ops::apply_binary(BinOp::Mul, Value::Num(0.0), list);
+    let ok = super::iter_values(&zeroed)
+        .into_iter()
+        .all(|entry| !super::ops::apply_binary(BinOp::Ne, entry, pattern.clone()).is_truthy());
+    Ok(Value::Bool(ok))
+}
+
+/// BOSL2 `num_defined(v) = len([for(vi=v) if(!is_undef(vi)) 1])` — how many entries are defined? Iteration
+/// via `iter_values` (the interpreter's own `for` expansion: a scalar iterates once, a range expands), count
+/// as the `len` builtin would report it.
+#[allow(
+    clippy::cast_precision_loss,
+    reason = "matches the `len` builtin's `count as f64`; a list past 2^52 elements is unreachable"
+)]
+fn num_defined(args: &[Value]) -> crate::Result<Value> {
+    let v = args.first().cloned().unwrap_or(Value::Undef);
+    let count = super::iter_values(&v)
+        .iter()
+        .filter(|vi| !matches!(vi, Value::Undef))
+        .count();
+    Ok(Value::Num(count as f64))
+}
+
+/// A raised BOSL2 `assert(…)` — the message is a diagnostic LOCATOR (fast==slow matches "both raised", not
+/// text), same contract as [`select_assert`].
+fn bosl_assert(msg: &str) -> crate::Error {
+    crate::Error::Eval(format!("assert failed: {msg}"))
+}
+
+/// `is_finite` as the BOSL2 user fn computes it (`is_num(x) && !is_nan(0*x)`): a NON-NaN finite number.
+fn v_is_finite(v: &Value) -> bool {
+    matches!(v, Value::Num(n) if n.is_finite())
+}
+
+/// BOSL2 `approx(a,b,eps=_EPSILON)` — tolerant equality, recursing into lists. The num fast path requires
+/// BOTH operands non-NaN (`is_num(NaN)` is false, so the interpreter routes NaN past that branch to the
+/// list-check → `false`); an exotic (non-num) `eps` routes the compare through the interpreter's own op so
+/// its undef-propagation survives. The list branch iterates pairwise (the reference's `idx(a)` is
+/// `[0:1:len-1]` here — `posmod`'s assert can't fire, `len>0` when this branch differs from the `a==b` one).
+fn approx(args: &[Value]) -> crate::Result<Value> {
+    let a = args.first().cloned().unwrap_or(Value::Undef);
+    let b = args.get(1).cloned().unwrap_or(Value::Undef);
+    let eps = args.get(2).cloned().unwrap_or(Value::Num(1e-9));
+    approx_val(&a, &b, &eps)
+}
+fn approx_val(a: &Value, b: &Value, eps: &Value) -> crate::Result<Value> {
+    use Value::{Bool, Num};
+    if super::ops::apply_binary(BinOp::Eq, a.clone(), b.clone()).is_truthy() {
+        return Ok(Bool(matches!(a, Bool(_)) == matches!(b, Bool(_))));
+    }
+    if let (Num(x), Num(y)) = (a, b)
+        && !x.is_nan()
+        && !y.is_nan()
+    {
+        return Ok(if let Num(e) = eps {
+            Bool((x - y).abs() <= *e)
+        } else {
+            super::ops::apply_binary(
+                BinOp::Le,
+                super::builtins::apply("abs", &[Num(x - y)]),
+                eps.clone(),
+            )
+        });
+    }
+    if v_is_list(a) && v_is_list(b) {
+        let av = super::iter_values(a);
+        let bv = super::iter_values(b);
+        if av.len() == bv.len() {
+            for (aa, bb) in av.iter().zip(bv.iter()) {
+                let mismatch = if let (Num(x), Num(y)) = (aa, bb)
+                    && !x.is_nan()
+                    && !y.is_nan()
+                {
+                    if let Num(e) = eps {
+                        (x - y).abs() > *e
+                    } else {
+                        super::ops::apply_binary(
+                            BinOp::Gt,
+                            super::builtins::apply("abs", &[Num(x - y)]),
+                            eps.clone(),
+                        )
+                        .is_truthy()
+                    }
+                } else {
+                    !approx_val(aa, bb, eps)?.is_truthy()
+                };
+                if mismatch {
+                    return Ok(Bool(false)); // one collected entry → `[] == [..]` is false
+                }
+            }
+            return Ok(Bool(true));
+        }
+    }
+    Ok(Bool(false))
+}
+
+/// BOSL2 `posmod(x,m)` — the always-positive modulo. The assert passes iff both are finite numbers and
+/// `approx(m,0)` (default eps) is false — i.e. `|m| > 1e-9`; then `(x%m+m)%m` routes through the
+/// interpreter's own `%`/`+`.
+fn posmod(args: &[Value]) -> crate::Result<Value> {
+    let x = args.first().cloned().unwrap_or(Value::Undef);
+    let m = args.get(1).cloned().unwrap_or(Value::Undef);
+    let ok = matches!(&x, Value::Num(n) if n.is_finite())
+        && matches!(&m, Value::Num(n) if n.is_finite() && n.abs() > 1e-9);
+    if !ok {
+        return Err(bosl_assert(
+            "posmod: input must be finite numbers, divisor nonzero",
+        ));
+    }
+    let r = super::ops::apply_binary(BinOp::Mod, x, m.clone());
+    let r = super::ops::apply_binary(BinOp::Add, r, m.clone());
+    Ok(super::ops::apply_binary(BinOp::Mod, r, m))
+}
+
+/// BOSL2 `idx(list, s=0, e=-1, step=1)` — the index RANGE of a list (`[0:1:len-1]` for the defaults; an
+/// empty list yields the empty `[0:1:-1]`). Start/end wrap through the real [`posmod`] (so its assert raises
+/// on a non-finite `s`/`e` exactly like the reference), the range builds through the interpreter's
+/// `build_range`.
+fn idx(args: &[Value]) -> crate::Result<Value> {
+    let list = args.first().cloned().unwrap_or(Value::Undef);
+    if !(v_is_list(&list) || matches!(list, Value::Str(_))) {
+        return Err(bosl_assert("idx: invalid input"));
+    }
+    let ll = super::builtins::apply("len", &[list]);
+    let s = args.get(1).cloned().unwrap_or(Value::Num(0.0));
+    let e = args.get(2).cloned().unwrap_or(Value::Num(-1.0));
+    let step = args.get(3).cloned().unwrap_or(Value::Num(1.0));
+    if matches!(ll, Value::Num(n) if n == 0.0) {
+        return Ok(super::build_range(
+            &Value::Num(0.0),
+            &Value::Num(1.0),
+            &Value::Num(-1.0),
+        ));
+    }
+    let s2 = posmod(&[s, ll.clone()])?;
+    let e2 = posmod(&[e, ll])?;
+    Ok(super::build_range(&s2, &step, &e2))
+}
+
+/// The `is_vector` CORE (its first three clauses — the 1-arg semantics): a nonempty list whose every element
+/// is a finite number. Shared by [`is_vector`], [`all_nonzero`]'s vector branch, and [`is_matrix`]'s row
+/// check.
+fn is_vector_core(v: &Value) -> bool {
+    match v {
+        Value::NumList(xs) => !xs.is_empty() && xs.iter().all(|x| x.is_finite()),
+        Value::List(xs) => !xs.is_empty() && xs.iter().all(v_is_finite),
+        _ => false,
+    }
+}
+
+/// BOSL2 `all_nonzero(x, eps=_EPSILON)` — a finite scalar farther than `eps` from zero, or a vector of them.
+/// Exotic `eps` routes the compares through the interpreter's ops (undef-propagation intact).
+fn all_nonzero(args: &[Value]) -> crate::Result<Value> {
+    let x = args.first().cloned().unwrap_or(Value::Undef);
+    let eps = args.get(1).cloned().unwrap_or(Value::Num(1e-9));
+    if v_is_finite(&x) {
+        return Ok(match (&x, &eps) {
+            (Value::Num(n), Value::Num(e)) => Value::Bool(n.abs() > *e),
+            _ => super::ops::apply_binary(
+                BinOp::Gt,
+                super::builtins::apply("abs", std::slice::from_ref(&x)),
+                eps.clone(),
+            ),
+        });
+    }
+    if !is_vector_core(&x) {
+        return Ok(Value::Bool(false)); // is_vector(x) && … short-circuits
+    }
+    let near_zero = super::iter_values(&x)
+        .into_iter()
+        .any(|xx| match (&xx, &eps) {
+            (Value::Num(n), Value::Num(e)) => n.abs() < *e,
+            _ => super::ops::apply_binary(
+                BinOp::Lt,
+                super::builtins::apply("abs", std::slice::from_ref(&xx)),
+                eps.clone(),
+            )
+            .is_truthy(),
+        });
+    Ok(Value::Bool(!near_zero)) // `[collected…] == []`
+}
+
+/// BOSL2 `is_vector(v, length, zero, all_nonzero=false, eps=_EPSILON)` — THE type predicate (8.8s of self
+/// time across the O.4 four). Core + the three optional clauses in reference order; the `length` assert is
+/// the one raise-site; `zero` compares `norm(v) >= eps` against `!zero`; a truthy `all_nonzero` delegates to
+/// the real [`all_nonzero`] with ITS default eps (the reference's inner call passes none).
+#[allow(
+    clippy::cast_precision_loss,
+    reason = "matches the `len` builtin's `count as f64`; a list past 2^52 elements is unreachable"
+)]
+#[allow(
+    clippy::float_cmp,
+    reason = "the reference's `len(v)==length` IS an exact f64 equality; a tolerance would diverge"
+)]
+fn is_vector(args: &[Value]) -> crate::Result<Value> {
+    let v = args.first().cloned().unwrap_or(Value::Undef);
+    if !is_vector_core(&v) {
+        return Ok(Value::Bool(false));
+    }
+    let n = match &v {
+        Value::NumList(xs) => xs.len(),
+        Value::List(xs) => xs.len(),
+        _ => 0, // unreachable: is_vector_core above
+    } as f64;
+    if let Some(length) = args.get(1)
+        && !matches!(length, Value::Undef)
+    {
+        let Value::Num(l) = length else {
+            return Err(bosl_assert("is_vector: length must be a number"));
+        };
+        if l.is_nan() {
+            return Err(bosl_assert("is_vector: length must be a number")); // is_num(NaN) is false
+        }
+        if *l != n {
+            return Ok(Value::Bool(false));
+        }
+    }
+    if let Some(zero) = args.get(2)
+        && !matches!(zero, Value::Undef)
+    {
+        let eps = args.get(4).cloned().unwrap_or(Value::Num(1e-9));
+        let norm_v = super::builtins::apply("norm", std::slice::from_ref(&v));
+        let cmp = match (&norm_v, &eps) {
+            (Value::Num(nv), Value::Num(e)) => Value::Bool(nv >= e),
+            _ => super::ops::apply_binary(BinOp::Ge, norm_v, eps),
+        };
+        let want = Value::Bool(!zero.is_truthy());
+        if !super::ops::apply_binary(BinOp::Eq, cmp, want).is_truthy() {
+            return Ok(Value::Bool(false));
+        }
+    }
+    if let Some(anz) = args.get(3)
+        && anz.is_truthy()
+    {
+        return all_nonzero(&[v]); // 1-arg → the reference's inner call takes all_nonzero's own default eps
+    }
+    Ok(Value::Bool(true))
+}
+
+/// BOSL2 `is_matrix(A,m,n,square=false)` — rectangular numeric matrix, optionally shape-pinned. Composes the
+/// band's own natives: `is_vector(A[0],n)` is the fixed 2-arg call (`zero`/`all_nonzero` branches unreachable —
+/// which is why this entry needs NO `_EPSILON` guard even though `is_vector`'s does), `is_consistent(A)`
+/// closes it. `len(A)` participates as a TRUTHINESS value in the `m`-undef clause (`0` rows → false).
+#[allow(
+    clippy::cast_precision_loss,
+    reason = "matches the `len` builtin's `count as f64`; a list past 2^52 elements is unreachable"
+)]
+fn is_matrix(args: &[Value]) -> crate::Result<Value> {
+    let a = args.first().cloned().unwrap_or(Value::Undef);
+    if !v_is_list(&a) {
+        return Ok(Value::Bool(false));
+    }
+    let la = match &a {
+        Value::NumList(xs) => xs.len(),
+        Value::List(xs) => xs.len(),
+        _ => 0, // unreachable: v_is_list above
+    } as f64;
+    let rows_ok = match args.get(1) {
+        None | Some(Value::Undef) => la != 0.0, // (is_undef(m) && len(A)) — Num truthiness
+        Some(m) => super::ops::apply_binary(BinOp::Eq, Value::Num(la), m.clone()).is_truthy(),
+    };
+    if !rows_ok {
+        return Ok(Value::Bool(false));
+    }
+    let a0 = super::ops::index(a.clone(), &Value::Num(0.0));
+    if let Some(square) = args.get(3)
+        && square.is_truthy()
+    {
+        let l0 = super::builtins::apply("len", std::slice::from_ref(&a0));
+        if !super::ops::apply_binary(BinOp::Eq, Value::Num(la), l0).is_truthy() {
+            return Ok(Value::Bool(false));
+        }
+    }
+    let n = args.get(2).cloned().unwrap_or(Value::Undef);
+    if !is_vector(&[a0, n])?.is_truthy() {
+        return Ok(Value::Bool(false));
+    }
+    is_consistent(&[a])
+}
+
+/// BOSL2 `force_list(value, n=1, fill)` — a list passes through; a scalar becomes `n` copies (or
+/// `[value, fill, fill, …]` when `fill` is given). The repeat counts come from iterating the reference's own
+/// ranges (`[1:1:n]` / `[2:1:n]`) built with the interpreter's `build_range` — so a garbage `n` degenerates
+/// exactly as interpreted instead of needing its own numeric validation.
+fn force_list(args: &[Value]) -> crate::Result<Value> {
+    let value = args.first().cloned().unwrap_or(Value::Undef);
+    if v_is_list(&value) {
+        return Ok(value);
+    }
+    let n = args.get(1).cloned().unwrap_or(Value::Num(1.0));
+    let one = Value::Num(1.0);
+    match args.get(2) {
+        None | Some(Value::Undef) => {
+            let range = super::build_range(&one, &one, &n);
+            let out: Vec<Value> = super::iter_values(&range)
+                .iter()
+                .map(|_| value.clone())
+                .collect();
+            Ok(super::build_vector(out))
+        }
+        Some(fill) => {
+            let range = super::build_range(&Value::Num(2.0), &one, &n);
+            let mut out = vec![value];
+            out.extend(super::iter_values(&range).iter().map(|_| fill.clone()));
+            Ok(super::build_vector(out))
+        }
+    }
 }
 
 /// BOSL2 `is_def(x) = !is_undef(x)` — true iff `x` is anything but `undef`. Only the first positional arg
@@ -1108,6 +1619,385 @@ mod tests {
                 ),
                 "intrinsic vs interpreter diverged at {v:?}"
             );
+        }
+    }
+
+    /// The full oracle: deps AND top-level consts — a reference whose DEFAULT reads `_EPSILON` (approx,
+    /// is_vector…) needs the constant bound BEFORE params bind, exactly like the real definition scope (the
+    /// island global) provides it. Same clear-intrinsics contract as [`interpret_with_deps`].
+    fn interpret_with_deps_consts(
+        target: &str,
+        deps: &[&str],
+        consts: &[(&str, Value)],
+        inputs: &[Value],
+    ) -> crate::Result<Value> {
+        let src = format!("{}\n{target}", deps.join("\n"));
+        let program = parse(&src).expect("deps+target parse");
+        let mut ctx = build_ctx(&program, crate::Config::default());
+        ctx.intrinsics.clear();
+        let (params, body) = match &program.stmts.last().expect("has target").kind {
+            StmtKind::FunctionDef { params, body, .. } => (params, body),
+            other => panic!("target is not a function def: {other:?}"),
+        };
+        let mut scope = Scope::new();
+        for (name, v) in consts {
+            scope.bind((*name).to_string(), v.clone());
+        }
+        // PUBLISH the consts as island 0's global too — a DEP's defaults (approx's `eps=_EPSILON` when
+        // posmod calls it) evaluate against the callee's home-island global, not the caller's scope. In a
+        // real program both are the same hoisted global; the oracle must mirror that or a dep's default
+        // silently reads undef (caught by the posmod battery).
+        if let Some(slot) = ctx.island_globals.borrow_mut().first_mut() {
+            *slot = scope.clone();
+        }
+        for (i, p) in params.iter().enumerate() {
+            let v = match inputs.get(i) {
+                Some(v) => v.clone(),
+                None => match &p.default {
+                    Some(d) => crate::eval::eval_with_ctx(d, &scope, &ctx)?,
+                    None => Value::Undef,
+                },
+            };
+            scope.bind(p.name.clone(), v);
+        }
+        crate::eval::eval_with_ctx(body, &scope, &ctx)
+    }
+
+    /// The shape band's richer battery: everything in [`value_battery`] plus the nested/mixed/undef-bearing
+    /// shapes `_list_pattern`/`is_consistent`/`same_shape` actually discriminate on.
+    fn shape_battery() -> Vec<Value> {
+        let mut b = value_battery();
+        b.extend([
+            Value::list(vec![
+                Value::num_list(vec![1.0, 2.0]),
+                Value::num_list(vec![3.0, 4.0]),
+            ]),
+            Value::list(vec![
+                Value::num_list(vec![1.0]),
+                Value::list(vec![Value::Num(2.0), Value::string("a")]),
+            ]),
+            Value::list(vec![Value::Num(1.0), Value::num_list(vec![2.0])]),
+            Value::list(vec![Value::Undef, Value::Num(1.0), Value::Undef]),
+            Value::list(vec![Value::string("x"), Value::string("y")]),
+            Value::list(vec![Value::list(vec![])]),
+            Value::num_list(vec![0.0, -0.0]),
+        ]);
+        b
+    }
+
+    #[test]
+    fn fast_equals_slow_shape_band() {
+        // The O.5.2 shape band, whole-battery: 1-arg fns over every battery value, 2-arg fns over every
+        // PAIR (shape comparisons are about how two inputs relate). interpret_with_deps supplies the
+        // recursive/dep definitions; deps=[] still resolves self-recursion (build_ctx sees the target).
+        let battery = shape_battery();
+        let lp_ref = reference_of("_list_pattern").unwrap();
+        for v in &battery {
+            let args = [v.clone()];
+            assert!(
+                same_result(
+                    &super::list_pattern(&args),
+                    &interpret_with_deps(lp_ref, &[], &args)
+                ),
+                "_list_pattern diverged on {v:?}"
+            );
+            let nd_ref = reference_of("num_defined").unwrap();
+            assert!(
+                same_result(
+                    &super::num_defined(&args),
+                    &interpret_with_deps(nd_ref, &[], &args)
+                ),
+                "num_defined diverged on {v:?}"
+            );
+        }
+        let ss_ref = reference_of("same_shape").unwrap();
+        let ss_deps = [reference_of("is_def").unwrap(), lp_ref];
+        let ic_ref = reference_of("is_consistent").unwrap();
+        for a in &battery {
+            for b in &battery {
+                let args = [a.clone(), b.clone()];
+                assert!(
+                    same_result(
+                        &super::same_shape(&args),
+                        &interpret_with_deps(ss_ref, &ss_deps, &args)
+                    ),
+                    "same_shape diverged on ({a:?}, {b:?})"
+                );
+                assert!(
+                    same_result(
+                        &super::is_consistent(&args),
+                        &interpret_with_deps(ic_ref, &[lp_ref], &args)
+                    ),
+                    "is_consistent diverged on ({a:?}, {b:?})"
+                );
+            }
+            // the 1-arg form (pattern defaults to list[0]'s shape) — the overwhelmingly common call
+            let args = [a.clone()];
+            assert!(
+                same_result(
+                    &super::is_consistent(&args),
+                    &interpret_with_deps(ic_ref, &[lp_ref], &args)
+                ),
+                "is_consistent/1 diverged on {a:?}"
+            );
+        }
+        let fl_ref = reference_of("force_list").unwrap();
+        let ns = [
+            Value::Undef,
+            Value::Num(0.0),
+            Value::Num(1.0),
+            Value::Num(3.0),
+            Value::Num(-1.0),
+            Value::Num(2.5),
+            Value::string("x"),
+        ];
+        let fills = [Value::Undef, Value::Num(7.0), Value::string("f")];
+        for v in &battery {
+            for n in &ns {
+                for fill in &fills {
+                    let args = [v.clone(), n.clone(), fill.clone()];
+                    assert!(
+                        same_result(
+                            &super::force_list(&args),
+                            &interpret_with_deps(fl_ref, &[], &args)
+                        ),
+                        "force_list diverged on ({v:?}, {n:?}, {fill:?})"
+                    );
+                }
+            }
+            let args = [v.clone()]; // defaults: n=1, fill undef
+            assert!(
+                same_result(
+                    &super::force_list(&args),
+                    &interpret_with_deps(fl_ref, &[], &args)
+                ),
+                "force_list/1 diverged on {v:?}"
+            );
+        }
+    }
+
+    /// The `_EPSILON` family's battery: numeric edges around the 1e-9 tolerance, vectors with NaN/inf
+    /// poison, near-zero vectors, plus every non-vector shape from the base battery.
+    fn eps_battery() -> Vec<Value> {
+        let mut b = shape_battery();
+        b.extend([1e-10, -1e-10, 1e-9, 2e-9, 1.0 + 1e-10, 0.5, -2.5, 1e12].map(Value::Num));
+        b.extend([
+            Value::num_list(vec![0.0, 0.0]),
+            Value::num_list(vec![1e-10, 1.0]),
+            Value::num_list(vec![1.0, 2.0, 3.0]),
+            Value::num_list(vec![1.0, f64::NAN]),
+            Value::num_list(vec![1.0, f64::INFINITY]),
+            Value::list(vec![Value::Num(1.0), Value::string("a")]),
+        ]);
+        b
+    }
+
+    #[test]
+    fn fast_equals_slow_epsilon_family() {
+        let consts = [("_EPSILON", Value::Num(1e-9))];
+        let battery = eps_battery();
+        let refs = |names: &[&str]| -> Vec<&'static str> {
+            names.iter().map(|n| reference_of(n).expect(n)).collect()
+        };
+        let epses = [
+            None,
+            Some(Value::Num(1e-9)),
+            Some(Value::Num(0.5)),
+            Some(Value::Undef),
+            Some(Value::string("x")),
+        ];
+
+        // approx(a,b[,eps]) — every pair × every eps shape (the recursion + NaN routing live here).
+        let approx_ref = reference_of("approx").unwrap();
+        let approx_deps = refs(&["idx", "posmod", "is_finite", "is_nan"]);
+        for a in &battery {
+            for b in &battery {
+                for eps in &epses {
+                    let mut args = vec![a.clone(), b.clone()];
+                    if let Some(e) = eps {
+                        args.push(e.clone());
+                    }
+                    assert!(
+                        same_result(
+                            &super::approx(&args),
+                            &interpret_with_deps_consts(approx_ref, &approx_deps, &consts, &args)
+                        ),
+                        "approx diverged on ({a:?}, {b:?}, eps {eps:?})"
+                    );
+                }
+            }
+        }
+
+        // posmod(x,m) — the assert-heavy one: both raise-sites and the wrap arithmetic.
+        let posmod_ref = reference_of("posmod").unwrap();
+        let posmod_deps = refs(&["is_finite", "is_nan", "approx", "idx"]);
+        let nums = [
+            Value::Num(0.0),
+            Value::Num(-0.0),
+            Value::Num(1e-10),
+            Value::Num(-1e-10),
+            Value::Num(5.0),
+            Value::Num(-5.0),
+            Value::Num(2.5),
+            Value::Num(-7.25),
+            Value::Num(f64::INFINITY),
+            Value::Num(f64::NAN),
+            Value::Undef,
+            Value::string("m"),
+            Value::num_list(vec![1.0]),
+        ];
+        for x in &nums {
+            for m in &nums {
+                let args = [x.clone(), m.clone()];
+                assert!(
+                    same_result(
+                        &super::posmod(&args),
+                        &interpret_with_deps_consts(posmod_ref, &posmod_deps, &consts, &args)
+                    ),
+                    "posmod diverged on ({x:?}, {m:?})"
+                );
+            }
+        }
+
+        // idx(list[,s,e,step]) — range identity (bit_eq compares Range fields) + the two raise-sites.
+        let idx_ref = reference_of("idx").unwrap();
+        let idx_deps = refs(&["posmod", "is_finite", "is_nan", "approx"]);
+        let arg_sets: Vec<Vec<Value>> = vec![
+            vec![],
+            vec![Value::Num(1.0)],
+            vec![Value::Num(1.0), Value::Num(-2.0)],
+            vec![Value::Num(0.0), Value::Num(-1.0), Value::Num(2.0)],
+            vec![Value::string("s")],
+            vec![Value::Undef],
+        ];
+        for v in &battery {
+            for tail in &arg_sets {
+                let mut args = vec![v.clone()];
+                args.extend(tail.iter().cloned());
+                assert!(
+                    same_result(
+                        &super::idx(&args),
+                        &interpret_with_deps_consts(idx_ref, &idx_deps, &consts, &args)
+                    ),
+                    "idx diverged on ({v:?}, tail {tail:?})"
+                );
+            }
+        }
+
+        // all_nonzero(x[,eps]).
+        let anz_ref = reference_of("all_nonzero").unwrap();
+        let anz_deps = refs(&["is_finite", "is_nan", "is_vector"]);
+        for v in &battery {
+            for eps in &epses {
+                let mut args = vec![v.clone()];
+                if let Some(e) = eps {
+                    args.push(e.clone());
+                }
+                assert!(
+                    same_result(
+                        &super::all_nonzero(&args),
+                        &interpret_with_deps_consts(anz_ref, &anz_deps, &consts, &args)
+                    ),
+                    "all_nonzero diverged on ({v:?}, eps {eps:?})"
+                );
+            }
+        }
+
+        // is_vector(v[,length,zero,all_nonzero,eps]) — clause-by-clause arg shapes over the battery.
+        let iv_ref = reference_of("is_vector").unwrap();
+        let iv_deps = refs(&["is_finite", "is_nan", "all_nonzero"]);
+        let lengths = [
+            Value::Undef,
+            Value::Num(2.0),
+            Value::Num(3.0),
+            Value::string("L"),
+            Value::Num(f64::NAN),
+        ];
+        let zeros = [Value::Undef, Value::Bool(true), Value::Bool(false)];
+        let anzs = [Value::Bool(false), Value::Bool(true)];
+        for v in &battery {
+            for length in &lengths {
+                let args = [v.clone(), length.clone()];
+                assert!(
+                    same_result(
+                        &super::is_vector(&args),
+                        &interpret_with_deps_consts(iv_ref, &iv_deps, &consts, &args)
+                    ),
+                    "is_vector diverged on ({v:?}, length {length:?})"
+                );
+            }
+            for zero in &zeros {
+                for eps in [Value::Num(1e-9), Value::Num(0.5), Value::Undef] {
+                    let args = [
+                        v.clone(),
+                        Value::Undef,
+                        zero.clone(),
+                        Value::Bool(false),
+                        eps.clone(),
+                    ];
+                    assert!(
+                        same_result(
+                            &super::is_vector(&args),
+                            &interpret_with_deps_consts(iv_ref, &iv_deps, &consts, &args)
+                        ),
+                        "is_vector diverged on ({v:?}, zero {zero:?}, eps {eps:?})"
+                    );
+                }
+            }
+            for anz in &anzs {
+                let args = [v.clone(), Value::Undef, Value::Undef, anz.clone()];
+                assert!(
+                    same_result(
+                        &super::is_vector(&args),
+                        &interpret_with_deps_consts(iv_ref, &iv_deps, &consts, &args)
+                    ),
+                    "is_vector diverged on ({v:?}, all_nonzero {anz:?})"
+                );
+            }
+        }
+
+        // is_matrix(A[,m,n,square]).
+        let im_ref = reference_of("is_matrix").unwrap();
+        let im_deps = refs(&[
+            "is_vector",
+            "is_finite",
+            "is_nan",
+            "is_consistent",
+            "_list_pattern",
+        ]);
+        let mut mats = battery.clone();
+        mats.extend([
+            Value::list(vec![
+                Value::num_list(vec![1.0, 2.0]),
+                Value::num_list(vec![3.0, 4.0]),
+            ]),
+            Value::list(vec![
+                Value::num_list(vec![1.0, 2.0]),
+                Value::num_list(vec![3.0]),
+            ]),
+            Value::list(vec![
+                Value::num_list(vec![1.0, 2.0, 5.0]),
+                Value::num_list(vec![3.0, 4.0, 6.0]),
+            ]),
+        ]);
+        let ms = [Value::Undef, Value::Num(2.0), Value::Num(3.0)];
+        let ns = [Value::Undef, Value::Num(2.0), Value::string("n")];
+        let squares = [Value::Bool(false), Value::Bool(true)];
+        for a in &mats {
+            for m in &ms {
+                for n in &ns {
+                    for square in &squares {
+                        let args = [a.clone(), m.clone(), n.clone(), square.clone()];
+                        assert!(
+                            same_result(
+                                &super::is_matrix(&args),
+                                &interpret_with_deps_consts(im_ref, &im_deps, &consts, &args)
+                            ),
+                            "is_matrix diverged on ({a:?}, m {m:?}, n {n:?}, square {square:?})"
+                        );
+                    }
+                }
+            }
         }
     }
 

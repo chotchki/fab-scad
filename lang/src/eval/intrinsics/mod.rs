@@ -49,7 +49,7 @@ pub(super) use fingerprint::fingerprint;
 // paths valid from the tests submodule.
 #[cfg(test)]
 use affine::{
-    affine3d_identity, affine3d_rot_from_to, affine3d_xrot, affine3d_yrot, affine3d_zrot,
+    affine3d_identity, affine3d_rot_from_to, affine3d_xrot, affine3d_yrot, affine3d_zrot, apply,
     apply_transform, ident, is_2d_transform,
 };
 #[cfg(test)]
@@ -168,6 +168,80 @@ static PINS: &[(&str, &str)] = &[
     ) list_to_matrix(clamped, len(v[0]), 0)
     : is_list(v) ? [ for(vec=v) [ for(f=vec) max(minval, min(f, maxval)) ] ]
     : assert(false, \"\\nIn constrain(), v must be a number, 1D vector, rectangular matrix, or list of vectors.\");",
+    ),
+    // linalg.scad — `apply`'s mirror-detection chain. From `apply` only the 4×4 lane is reachable (the vnf
+    // branch's _apply asserts force tdim==datadim==3 before determinant runs), but the pins cover the whole
+    // bodies.
+    (
+        "determinant",
+        "function determinant(M) =
+    assert(is_list(M), \"Input must be a square matrix.\" )
+    len(M)==1? M[0][0] :
+    len(M)==2? det2(M) :
+    len(M)==3? det3(M) :
+    len(M)==4? det4(M) :
+    assert(is_matrix(M, square=true), \"Input must be a square matrix.\" )
+    sum(
+        [for (col=[0:1:len(M)-1])
+            ((col%2==0)? 1 : -1) *
+                M[col][0] *
+                determinant(
+                    [for (r=[1:1:len(M)-1])
+                        [for (c=[0:1:len(M)-1])
+                            if (c!=col) M[c][r]
+                        ]
+                    ]
+                )
+        ]
+    );",
+    ),
+    (
+        "det2",
+        "function det2(M) =
+    assert(is_def(M) && M*0==[[0,0],[0,0]], \"Expected square matrix (2x2)\")
+    cross(M[0],M[1]);",
+    ),
+    (
+        "det3",
+        "function det3(M) =
+    assert(is_def(M) && M*0==[[0,0,0],[0,0,0],[0,0,0]], \"Expected square matrix (3x3).\")
+    M[0][0] * (M[1][1]*M[2][2]-M[2][1]*M[1][2]) -
+    M[1][0] * (M[0][1]*M[2][2]-M[2][1]*M[0][2]) +
+    M[2][0] * (M[0][1]*M[1][2]-M[1][1]*M[0][2]);",
+    ),
+    (
+        "det4",
+        "function det4(M) =
+    assert(is_def(M) && M*0==[[0,0,0,0],[0,0,0,0],[0,0,0,0],[0,0,0,0]], \"Expected square matrix (4x4).\")
+    M[0][0]*M[1][1]*M[2][2]*M[3][3] + M[0][0]*M[1][2]*M[2][3]*M[3][1] + M[0][0]*M[1][3]*M[2][1]*M[3][2]
+    + M[0][1]*M[1][0]*M[2][3]*M[3][2] + M[0][1]*M[1][2]*M[2][0]*M[3][3] + M[0][1]*M[1][3]*M[2][2]*M[3][0]
+    + M[0][2]*M[1][0]*M[2][1]*M[3][3] + M[0][2]*M[1][1]*M[2][3]*M[3][0] + M[0][2]*M[1][3]*M[2][0]*M[3][1]
+    + M[0][3]*M[1][0]*M[2][2]*M[3][1] + M[0][3]*M[1][1]*M[2][0]*M[3][2] + M[0][3]*M[1][2]*M[2][1]*M[3][0]
+    - M[0][0]*M[1][1]*M[2][3]*M[3][2] - M[0][0]*M[1][2]*M[2][1]*M[3][3] - M[0][0]*M[1][3]*M[2][2]*M[3][1]
+    - M[0][1]*M[1][0]*M[2][2]*M[3][3] - M[0][1]*M[1][2]*M[2][3]*M[3][0] - M[0][1]*M[1][3]*M[2][0]*M[3][2]
+    - M[0][2]*M[1][0]*M[2][3]*M[3][1] - M[0][2]*M[1][1]*M[2][0]*M[3][3] - M[0][2]*M[1][3]*M[2][1]*M[3][0]
+    - M[0][3]*M[1][0]*M[2][1]*M[3][2] - M[0][3]*M[1][1]*M[2][2]*M[3][0] - M[0][3]*M[1][2]*M[2][0]*M[3][1];",
+    ),
+    // lists.scad — BOSL2's `reverse` SHADOWS the builtin (the per-entry shadow check knows); reached from
+    // `apply` via `vnf_reverse_faces`. Its string lane reaches `str_join` (strings.scad).
+    (
+        "reverse",
+        "function reverse(list) =
+    assert(is_list(list)||is_string(list), str(\"Input to reverse must be a list or string. Got: \",list))
+    let (elems = [ for (i = [len(list)-1 : -1 : 0]) list[i] ])
+    is_string(list)? str_join(elems) : elems;",
+    ),
+    (
+        "vnf_reverse_faces",
+        "function vnf_reverse_faces(vnf) =
+    [vnf[0], [for (face=vnf[1]) reverse(face)]];",
+    ),
+    (
+        "str_join",
+        "function str_join(list,sep=\"\",_i=0, _result=\"\") =
+    assert(is_list(list))
+    _i >= len(list)-1 ? (_i==len(list) ? _result : str(_result,list[_i])) :
+    str_join(list,sep,_i+1,str(_result,list[_i],sep));",
     ),
 ];
 
@@ -1130,6 +1204,52 @@ static REGISTRY: &[Entry] = &[
             "cos", "acos", "min", "max", "is_bool", "is_string",
         ],
         func: affine::affine3d_rot_from_to,
+    },
+    // ── O.9 tree 2a (transforms.scad) ────────────────────────────────────────────────────────────────────
+    // `apply` — the public transform-application dispatcher over the already-native `_apply`. Its vnf lane's
+    // mirror check reaches the determinant chain (4×4 only — the _apply asserts force tdim==datadim==3
+    // before determinant runs) and `vnf_reverse_faces` → BOSL2's `reverse` (the builtin shadow) → whose
+    // string lane reaches `str_join` (a degenerate-but-is_vnf-passing input can put a string face through
+    // it, so the native reproduces that too).
+    Entry {
+        name: "apply",
+        reference: "function apply(transform,points) =
+    points==[] ? []
+  : is_vector(points) ? _apply(transform, [points])[0]    // point
+  : is_vnf(points) ?                                      // vnf
+        let(
+            newvnf = [_apply(transform, points[0]), points[1]],
+            reverse = (len(transform)==len(transform[0])) && determinant(transform)<0
+        )
+        reverse ? vnf_reverse_faces(newvnf) : newvnf
+  : is_list(points) && is_list(points[0]) && is_vector(points[0][0])    // bezier patch
+        ? [for (x=points) _apply(transform,x)]
+  : _apply(transform,points);",
+        consts: &[],
+        consts_v: &[],
+        deps: &[
+            "_apply",
+            "is_matrix",
+            "is_vector",
+            "is_finite",
+            "is_nan",
+            "is_consistent",
+            "_list_pattern",
+            "is_2d_transform",
+            "is_vnf",
+            "determinant",
+            "det2",
+            "det3",
+            "det4",
+            "is_def",
+            "reverse",
+            "vnf_reverse_faces",
+            "str_join",
+        ],
+        builtins: &[
+            "is_list", "len", "is_undef", "is_num", "concat", "str", "cross", "is_string",
+        ],
+        func: affine::apply,
     },
 ];
 

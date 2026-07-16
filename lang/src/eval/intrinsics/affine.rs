@@ -259,3 +259,205 @@ pub(super) fn affine3d_rot_from_to(args: &[Value]) -> crate::Result<Value> {
     ];
     Ok(build_vector(rows))
 }
+
+/// The `apply`-reachable slice of BOSL2 `determinant`: the closed-form 1–4 lanes (each with its own
+/// `M*0 == [[0,…]]` shape assert and the reference's exact term order/associativity). The n≥5 minor
+/// recursion is UNREACHABLE from `apply` (the vnf lane's `_apply` asserts force a 4×4 before determinant
+/// runs) — LOUD error, not a silent wrong answer, if that proof ever breaks.
+fn det_reachable(m: &Value) -> crate::Result<Value> {
+    if !super::v_is_list(m) {
+        return Err(bosl_assert("determinant: input must be a square matrix"));
+    }
+    let n = builtins::apply("len", std::slice::from_ref(m));
+    let at = |r: f64, c: f64| ops::index(ops::index(m.clone(), &Value::Num(r)), &Value::Num(c));
+    let is_n = |k: f64| ops::apply_binary(BinOp::Eq, n.clone(), Value::Num(k)).is_truthy();
+    // the det2/3/4 shape assert: `M*0 == [[0,…],…]` through the interpreter's own ops
+    let shape_ok = |k: usize| {
+        let zero_row = Value::num_list(vec![0.0; k]);
+        let zeros = build_vector(vec![zero_row; k]);
+        ops::apply_binary(
+            BinOp::Eq,
+            ops::apply_binary(BinOp::Mul, m.clone(), Value::Num(0.0)),
+            zeros,
+        )
+        .is_truthy()
+    };
+    if is_n(1.0) {
+        return Ok(at(0.0, 0.0));
+    }
+    let mul = |a: Value, b: Value| ops::apply_binary(BinOp::Mul, a, b);
+    let add = |a: Value, b: Value| ops::apply_binary(BinOp::Add, a, b);
+    let sub = |a: Value, b: Value| ops::apply_binary(BinOp::Sub, a, b);
+    if is_n(2.0) {
+        if !shape_ok(2) {
+            return Err(bosl_assert("det2: expected square matrix (2x2)"));
+        }
+        let r0 = ops::index(m.clone(), &Value::Num(0.0));
+        let r1 = ops::index(m.clone(), &Value::Num(1.0));
+        return Ok(builtins::apply("cross", &[r0, r1]));
+    }
+    if is_n(3.0) {
+        if !shape_ok(3) {
+            return Err(bosl_assert("det3: expected square matrix (3x3)"));
+        }
+        // M[0][0]*(M[1][1]*M[2][2]-M[2][1]*M[1][2]) - M[1][0]*(…) + M[2][0]*(…)
+        let minor = |a: (f64, f64), b: (f64, f64), c: (f64, f64), d: (f64, f64)| {
+            sub(
+                mul(at(a.0, a.1), at(b.0, b.1)),
+                mul(at(c.0, c.1), at(d.0, d.1)),
+            )
+        };
+        let t0 = mul(
+            at(0.0, 0.0),
+            minor((1.0, 1.0), (2.0, 2.0), (2.0, 1.0), (1.0, 2.0)),
+        );
+        let t1 = mul(
+            at(1.0, 0.0),
+            minor((0.0, 1.0), (2.0, 2.0), (2.0, 1.0), (0.0, 2.0)),
+        );
+        let t2 = mul(
+            at(2.0, 0.0),
+            minor((0.0, 1.0), (1.0, 2.0), (1.0, 1.0), (0.0, 2.0)),
+        );
+        return Ok(add(sub(t0, t1), t2));
+    }
+    if is_n(4.0) {
+        // det4's 24 four-factor terms folded in SOURCE order (12 added, 12 subtracted), each product
+        // left-associated: ((M[a][b]*M[c][d])*M[e][f])*M[g][h].
+        #[rustfmt::skip]
+        const TERMS: [(bool, [(f64, f64); 4]); 24] = [
+            (true,  [(0.,0.),(1.,1.),(2.,2.),(3.,3.)]), (true,  [(0.,0.),(1.,2.),(2.,3.),(3.,1.)]),
+            (true,  [(0.,0.),(1.,3.),(2.,1.),(3.,2.)]), (true,  [(0.,1.),(1.,0.),(2.,3.),(3.,2.)]),
+            (true,  [(0.,1.),(1.,2.),(2.,0.),(3.,3.)]), (true,  [(0.,1.),(1.,3.),(2.,2.),(3.,0.)]),
+            (true,  [(0.,2.),(1.,0.),(2.,1.),(3.,3.)]), (true,  [(0.,2.),(1.,1.),(2.,3.),(3.,0.)]),
+            (true,  [(0.,2.),(1.,3.),(2.,0.),(3.,1.)]), (true,  [(0.,3.),(1.,0.),(2.,2.),(3.,1.)]),
+            (true,  [(0.,3.),(1.,1.),(2.,0.),(3.,2.)]), (true,  [(0.,3.),(1.,2.),(2.,1.),(3.,0.)]),
+            (false, [(0.,0.),(1.,1.),(2.,3.),(3.,2.)]), (false, [(0.,0.),(1.,2.),(2.,1.),(3.,3.)]),
+            (false, [(0.,0.),(1.,3.),(2.,2.),(3.,1.)]), (false, [(0.,1.),(1.,0.),(2.,2.),(3.,3.)]),
+            (false, [(0.,1.),(1.,2.),(2.,3.),(3.,0.)]), (false, [(0.,1.),(1.,3.),(2.,0.),(3.,2.)]),
+            (false, [(0.,2.),(1.,0.),(2.,3.),(3.,1.)]), (false, [(0.,2.),(1.,1.),(2.,0.),(3.,3.)]),
+            (false, [(0.,2.),(1.,3.),(2.,1.),(3.,0.)]), (false, [(0.,3.),(1.,0.),(2.,1.),(3.,2.)]),
+            (false, [(0.,3.),(1.,1.),(2.,2.),(3.,0.)]), (false, [(0.,3.),(1.,2.),(2.,0.),(3.,1.)]),
+        ];
+        if !shape_ok(4) {
+            return Err(bosl_assert("det4: expected square matrix (4x4)"));
+        }
+        let product = |ix: &[(f64, f64); 4]| {
+            let mut acc = at(ix[0].0, ix[0].1);
+            for &(r, c) in &ix[1..] {
+                acc = mul(acc, at(r, c));
+            }
+            acc
+        };
+        let mut acc = product(&TERMS[0].1);
+        for (plus, ix) in &TERMS[1..] {
+            let p = product(ix);
+            acc = if *plus { add(acc, p) } else { sub(acc, p) };
+        }
+        return Ok(acc);
+    }
+    Err(crate::Error::Eval(
+        "determinant: n>4 unreachable from apply (intrinsic guard)".to_string(),
+    ))
+}
+
+/// BOSL2 `str_join(list, sep)` as `reverse`'s string lane reaches it: the tail recursion becomes a loop,
+/// every concatenation through the REAL `str` builtin.
+fn str_join_val(list: &Value, sep: &Value) -> Value {
+    let ll = builtins::apply("len", std::slice::from_ref(list));
+    let last_idx = ops::apply_binary(BinOp::Sub, ll.clone(), Value::Num(1.0));
+    let mut i = 0.0;
+    let mut result = Value::string("");
+    loop {
+        let iv = Value::Num(i);
+        let item = ops::index(list.clone(), &iv);
+        if ops::apply_binary(BinOp::Ge, iv.clone(), last_idx.clone()).is_truthy() {
+            return if ops::apply_binary(BinOp::Eq, iv, ll).is_truthy() {
+                result
+            } else {
+                builtins::apply("str", &[result, item])
+            };
+        }
+        result = builtins::apply("str", &[result, item, sep.clone()]);
+        i += 1.0;
+    }
+}
+
+/// BOSL2 `reverse(list)` — the USER fn that shadows the builtin: reversed-range gather, with the string
+/// lane rejoining through [`str_join_val`].
+fn reverse_val(list: &Value) -> crate::Result<Value> {
+    let is_str = matches!(list, Value::Str(_));
+    if !(super::v_is_list(list) || is_str) {
+        return Err(bosl_assert("reverse: input must be a list or string"));
+    }
+    let last_idx = ops::apply_binary(
+        BinOp::Sub,
+        builtins::apply("len", std::slice::from_ref(list)),
+        Value::Num(1.0),
+    );
+    let range = build_range(&last_idx, &Value::Num(-1.0), &Value::Num(0.0));
+    let elems: Vec<Value> = iter_values(&range)
+        .iter()
+        .map(|i| ops::index(list.clone(), i))
+        .collect();
+    let elems = build_vector(elems);
+    Ok(if is_str {
+        str_join_val(&elems, &Value::string(""))
+    } else {
+        elems
+    })
+}
+
+/// BOSL2 `apply(transform, points)` — the public dispatcher over [`apply_transform`]: single point,
+/// VNF (with the mirror-detection determinant + `vnf_reverse_faces` lane), bezier patch, or plain point
+/// list. Branch ORDER and the vnf `let`'s eager `newvnf`-before-determinant evaluation preserved (the
+/// `_apply` asserts fire first, which is what makes [`det_reachable`]'s 4×4-only proof hold).
+pub(super) fn apply(args: &[Value]) -> crate::Result<Value> {
+    let transform = args.first().cloned().unwrap_or(Value::Undef);
+    let points = args.get(1).cloned().unwrap_or(Value::Undef);
+    if ops::apply_binary(BinOp::Eq, points.clone(), build_vector(Vec::new())).is_truthy() {
+        return Ok(build_vector(Vec::new()));
+    }
+    if is_vector_core(&points) {
+        let one = apply_transform(&[transform, build_vector(vec![points])])?;
+        return Ok(ops::index(one, &Value::Num(0.0)));
+    }
+    if super::geometry::is_vnf_check(&points)? {
+        let new_verts = apply_transform(&[
+            transform.clone(),
+            ops::index(points.clone(), &Value::Num(0.0)),
+        ])?;
+        let faces = ops::index(points, &Value::Num(1.0));
+        let newvnf = build_vector(vec![new_verts, faces.clone()]);
+        let lt = builtins::apply("len", std::slice::from_ref(&transform));
+        let lt0 = builtins::apply(
+            "len",
+            std::slice::from_ref(&ops::index(transform.clone(), &Value::Num(0.0))),
+        );
+        let mirror = ops::apply_binary(BinOp::Eq, lt, lt0).is_truthy()
+            && ops::apply_binary(BinOp::Lt, det_reachable(&transform)?, Value::Num(0.0))
+                .is_truthy();
+        if !mirror {
+            return Ok(newvnf);
+        }
+        let rev_faces: crate::Result<Vec<Value>> =
+            iter_values(&faces).iter().map(reverse_val).collect();
+        return Ok(build_vector(vec![
+            ops::index(newvnf, &Value::Num(0.0)),
+            build_vector(rev_faces?),
+        ]));
+    }
+    let p0 = ops::index(points.clone(), &Value::Num(0.0));
+    if super::v_is_list(&points)
+        && super::v_is_list(&p0)
+        && super::shape::is_vector(std::slice::from_ref(&ops::index(p0, &Value::Num(0.0))))?
+            .is_truthy()
+    {
+        let rows: crate::Result<Vec<Value>> = iter_values(&points)
+            .iter()
+            .map(|x| apply_transform(&[transform.clone(), x.clone()]))
+            .collect();
+        return Ok(build_vector(rows?));
+    }
+    apply_transform(&[transform, points])
+}

@@ -1591,6 +1591,100 @@ fn fast_equals_slow_fab_poc_isup() {
 }
 
 #[test]
+fn fast_equals_slow_o9_tree2a_apply() {
+    let consts = [("_EPSILON", Value::Num(1e-9))];
+    let ap_ref = reference_of("apply").unwrap();
+    let ap_deps = [
+        reference_of("_apply").unwrap(),
+        reference_of("is_matrix").unwrap(),
+        reference_of("is_vector").unwrap(),
+        reference_of("is_finite").unwrap(),
+        reference_of("is_nan").unwrap(),
+        reference_of("all_nonzero").unwrap(),
+        reference_of("is_consistent").unwrap(),
+        reference_of("_list_pattern").unwrap(),
+        reference_of("is_2d_transform").unwrap(),
+        reference_of("is_def").unwrap(),
+        pin_reference_of("is_vnf").unwrap(),
+        pin_reference_of("determinant").unwrap(),
+        pin_reference_of("det2").unwrap(),
+        pin_reference_of("det3").unwrap(),
+        pin_reference_of("det4").unwrap(),
+        pin_reference_of("reverse").unwrap(),
+        pin_reference_of("vnf_reverse_faces").unwrap(),
+        pin_reference_of("str_join").unwrap(),
+    ];
+    let p3 = |x: f64, y: f64, z: f64| Value::num_list(vec![x, y, z]);
+    let m4 = |rows: [[f64; 4]; 4]| {
+        let rows: Vec<Value> = rows.iter().map(|r| Value::num_list(r.to_vec())).collect();
+        Value::list(rows)
+    };
+    let translate = m4([
+        [1.0, 0.0, 0.0, 5.0],
+        [0.0, 1.0, 0.0, -3.0],
+        [0.0, 0.0, 1.0, 2.0],
+        [0.0, 0.0, 0.0, 1.0],
+    ]);
+    let mirror_x = m4([
+        [-1.0, 0.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0, 0.0],
+        [0.0, 0.0, 1.0, 0.0],
+        [0.0, 0.0, 0.0, 1.0],
+    ]);
+    let tet = Value::list(vec![
+        Value::list(vec![
+            p3(0.0, 0.0, 0.0),
+            p3(1.0, 0.0, 0.0),
+            p3(0.0, 1.0, 0.0),
+            p3(0.0, 0.0, 1.0),
+        ]),
+        Value::list(vec![
+            Value::num_list(vec![0.0, 2.0, 1.0]),
+            Value::num_list(vec![0.0, 1.0, 3.0]),
+            Value::num_list(vec![1.0, 2.0, 3.0]),
+            Value::num_list(vec![0.0, 3.0, 2.0]),
+        ]),
+    ]);
+    // a degenerate-but-is_vnf-passing VNF with a STRING face — the str_join lane under a mirror
+    let stringy = Value::list(vec![
+        Value::list(vec![
+            p3(0.0, 0.0, 0.0),
+            p3(1.0, 0.0, 0.0),
+            p3(0.0, 1.0, 0.0),
+        ]),
+        Value::list(vec![
+            Value::num_list(vec![0.0, 1.0, 2.0]),
+            Value::string("abc"),
+        ]),
+    ]);
+    let patch = Value::list(vec![
+        Value::list(vec![p3(0.0, 0.0, 0.0), p3(1.0, 0.0, 0.0)]),
+        Value::list(vec![p3(0.0, 1.0, 0.0), p3(1.0, 1.0, 0.0)]),
+    ]);
+    let pts = Value::list(vec![p3(1.0, 2.0, 3.0), p3(-1.0, 0.5, 0.0)]);
+    let cases: Vec<Vec<Value>> = vec![
+        vec![translate.clone(), Value::list(vec![])],
+        vec![translate.clone(), p3(1.0, 2.0, 3.0)],
+        vec![translate.clone(), tet.clone()],
+        vec![mirror_x.clone(), tet.clone()],
+        vec![mirror_x.clone(), stringy.clone()],
+        vec![translate.clone(), patch.clone()],
+        vec![translate.clone(), pts.clone()],
+        vec![Value::Num(5.0), pts.clone()],
+        vec![translate.clone(), Value::Num(7.0)],
+    ];
+    for args in &cases {
+        assert!(
+            same_result(
+                &super::apply(args),
+                &interpret_with_deps_consts(ap_ref, &ap_deps, &consts, args)
+            ),
+            "apply diverged on {args:?}"
+        );
+    }
+}
+
+#[test]
 fn fast_equals_slow_o9_tree1() {
     let consts = [
         ("_EPSILON", Value::Num(1e-9)),

@@ -940,6 +940,152 @@ static REGISTRY: &[Entry] = &[
         builtins: &["len", "floor", "concat"],
         func: group_sort_by_index,
     },
+    // ── O.9 tree 1 (vectors/coords/affine.scad) — the band the O.8 Value-const guard unlocked ───────────
+    // vector_axis bakes UP/RIGHT (consts_v) and affine3d_rot_from_to composes it with the whole
+    // vector_angle/approx knot; v_abs/v_theta/point2d/affine3d_identity are their small deps, landed as
+    // entries so the pins are natives too.
+    Entry {
+        name: "v_abs",
+        reference: "function v_abs(v) =
+    assert( is_vector(v), \"\\nInvalid vector.\" )
+    [for (x=v) abs(x)];",
+        consts: &[],
+        consts_v: &[],
+        deps: &["is_vector", "is_finite", "is_nan"],
+        builtins: &["abs", "is_list", "len", "is_undef", "is_num"],
+        func: v_abs,
+    },
+    Entry {
+        name: "v_theta",
+        reference: "function v_theta(v) =
+    assert( is_vector(v,2) || is_vector(v,3) , \"\\nInvalid vector.\")
+    atan2(v.y,v.x);",
+        consts: &[],
+        consts_v: &[],
+        deps: &["is_vector", "is_finite", "is_nan"],
+        builtins: &["atan2", "is_list", "len", "is_undef", "is_num"],
+        func: v_theta,
+    },
+    Entry {
+        name: "point2d",
+        reference: "function point2d(p, fill=0) = assert(is_list(p)) [for (i=[0:1]) (p[i]==undef)? fill : p[i]];",
+        consts: &[],
+        consts_v: &[],
+        deps: &[],
+        builtins: &["is_list"],
+        func: point2d,
+    },
+    Entry {
+        name: "affine3d_identity",
+        reference: "function affine3d_identity() = ident(4);",
+        consts: &[],
+        consts_v: &[],
+        deps: &["ident"],
+        builtins: &[],
+        func: affine3d_identity,
+    },
+    // `is_vector(v1, zero=false)` runs the zero clause with its DEFAULT eps → the `_EPSILON` guard; the
+    // `all_nonzero` branch stays unreachable (the flag is never passed). The in-body `eps = 1e-6` is a
+    // LITERAL, not a constant read.
+    Entry {
+        name: "vector_axis",
+        reference: "function vector_axis(v1,v2=undef,v3=undef) =
+    is_vector(v3)
+    ?   assert(is_consistent([v3,v2,v1]), \"\\nBad arguments.\")
+        vector_axis(v1-v2, v3-v2)
+    :   assert( is_undef(v3), \"\\nBad arguments.\")
+        is_undef(v2)
+        ?   assert( is_list(v1), \"\\nBad arguments.\")
+            len(v1) == 2
+            ?   vector_axis(v1[0],v1[1])
+            :   vector_axis(v1[0],v1[1],v1[2])
+        :   assert( is_vector(v1,zero=false) && is_vector(v2,zero=false) && is_consistent([v1,v2])
+                    , \"\\nBad arguments.\")
+            let(
+              eps = 1e-6,
+              w1 = point3d(v1/norm(v1)),
+              w2 = point3d(v2/norm(v2)),
+              w3 = (norm(w1-w2) > eps && norm(w1+w2) > eps) ? w2
+                   : (norm(v_abs(w2)-UP) > eps)? UP
+                   : RIGHT
+            ) unit(cross(w1,w3));",
+        consts: &[("_EPSILON", 1e-9)],
+        consts_v: &[("UP", bosl_up), ("RIGHT", bosl_right)],
+        deps: &[
+            "is_vector",
+            "is_finite",
+            "is_nan",
+            "is_consistent",
+            "_list_pattern",
+            "point3d",
+            "unit",
+            "v_abs",
+        ],
+        builtins: &[
+            "is_list", "len", "is_undef", "is_num", "norm", "abs", "cross",
+        ],
+        func: vector_axis,
+    },
+    // `approx(from,to)` on two 3-vectors runs the LIST branch → the idx/posmod knot rides in; the
+    // vector_angle chain (same_shape/constrain-pin/is_matrix) too. UP/RIGHT guard because the native
+    // composes [`vector_axis`], which bakes them.
+    Entry {
+        name: "affine3d_rot_from_to",
+        reference: "function affine3d_rot_from_to(from, to) =
+    assert(is_vector(from))
+    assert(is_vector(to))
+    assert(len(from)==len(to))
+    let(
+        from = unit(point3d(from)),
+        to = unit(point3d(to))
+    ) approx(from,to)? affine3d_identity() :
+    from.z==0 && to.z==0 ?  affine3d_zrot(v_theta(point2d(to)) - v_theta(point2d(from)))
+    :
+    let(
+        u = vector_axis(from,to),
+        ang = vector_angle(from,to),
+        c = cos(ang),
+        c2 = 1-c,
+        s = sin(ang)
+    ) [
+        [u.x*u.x*c2+c    , u.x*u.y*c2-u.z*s, u.x*u.z*c2+u.y*s, 0],
+        [u.y*u.x*c2+u.z*s, u.y*u.y*c2+c    , u.y*u.z*c2-u.x*s, 0],
+        [u.z*u.x*c2-u.y*s, u.z*u.y*c2+u.x*s, u.z*u.z*c2+c    , 0],
+        [               0,                0,                0, 1]
+    ];",
+        consts: &[("_EPSILON", 1e-9)],
+        consts_v: &[("UP", bosl_up), ("RIGHT", bosl_right)],
+        deps: &[
+            "is_vector",
+            "is_finite",
+            "is_nan",
+            "unit",
+            "point3d",
+            "point2d",
+            "approx",
+            "idx",
+            "posmod",
+            "affine3d_identity",
+            "ident",
+            "affine3d_zrot",
+            "v_theta",
+            "vector_axis",
+            "v_abs",
+            "vector_angle",
+            "same_shape",
+            "is_def",
+            "is_matrix",
+            "is_consistent",
+            "_list_pattern",
+            "constrain",
+            "all_nonzero",
+        ],
+        builtins: &[
+            "is_list", "len", "is_undef", "is_num", "norm", "abs", "cross", "atan2", "sin",
+            "cos", "acos", "min", "max", "is_bool", "is_string",
+        ],
+        func: affine3d_rot_from_to,
+    },
 ];
 
 /// The POC intrinsic: `x * x`. Mirrors the interpreter's `Num * Num` (and `undef` for a non-number arg, as
@@ -2476,6 +2622,212 @@ fn is_path(args: &[Value]) -> crate::Result<Value> {
     }
     let forced = force_list(std::slice::from_ref(&dim))?;
     in_list(&[l0, forced])
+}
+
+/// BOSL2 `UP` (= `TOP`) as the guard proves it bound: `[0,0,1]` as a `NumList`.
+fn bosl_up() -> Value {
+    Value::num_list(vec![0.0, 0.0, 1.0])
+}
+/// BOSL2 `RIGHT`: `[1,0,0]` as a `NumList`.
+fn bosl_right() -> Value {
+    Value::num_list(vec![1.0, 0.0, 0.0])
+}
+
+/// BOSL2 `v_abs(v)` — element-wise absolute value of a vector; each element through the REAL `abs`.
+fn v_abs(args: &[Value]) -> crate::Result<Value> {
+    let v = args.first().cloned().unwrap_or(Value::Undef);
+    if !is_vector_core(&v) {
+        return Err(bosl_assert("v_abs: invalid vector"));
+    }
+    let out: Vec<Value> = super::iter_values(&v)
+        .iter()
+        .map(|x| super::builtins::apply("abs", std::slice::from_ref(x)))
+        .collect();
+    Ok(super::build_vector(out))
+}
+
+/// BOSL2 `v_theta(v)` — the polar angle of a 2D/3D vector, through the REAL `atan2` and the same `.y`/`.x`
+/// member reads the body does.
+fn v_theta(args: &[Value]) -> crate::Result<Value> {
+    let v = args.first().cloned().unwrap_or(Value::Undef);
+    let ok = is_vector(&[v.clone(), Value::Num(2.0)])?.is_truthy()
+        || is_vector(&[v.clone(), Value::Num(3.0)])?.is_truthy();
+    if !ok {
+        return Err(bosl_assert("v_theta: invalid vector"));
+    }
+    let y = super::ops::member(v.clone(), "y");
+    let x = super::ops::member(v, "x");
+    Ok(super::builtins::apply("atan2", &[y, x]))
+}
+
+/// BOSL2 `point2d(p, fill=0)` — force a point to 2 coords; [`point3d`]'s exact shape, one slot shorter.
+fn point2d(args: &[Value]) -> crate::Result<Value> {
+    let p = args.first().cloned().unwrap_or(Value::Undef);
+    if !v_is_list(&p) {
+        return Err(bosl_assert("point2d: p must be a list"));
+    }
+    let fill = args.get(1).cloned().unwrap_or(Value::Num(0.0));
+    let coords = (0..2)
+        .map(|i| {
+            let pi = super::ops::index(p.clone(), &Value::Num(f64::from(i)));
+            if super::ops::apply_binary(BinOp::Eq, pi.clone(), Value::Undef).is_truthy() {
+                fill.clone()
+            } else {
+                pi
+            }
+        })
+        .collect();
+    Ok(super::build_vector(coords))
+}
+
+/// BOSL2 `affine3d_identity() = ident(4)` — through the real [`ident`].
+fn affine3d_identity(_args: &[Value]) -> crate::Result<Value> {
+    ident(&[Value::Num(4.0)])
+}
+
+/// BOSL2 `vector_axis(v1,v2,v3)` — the rotation axis between two vectors (or three points, or a paired
+/// list): `unit(cross(w1,w3))` with the near-(anti)parallel fallback through `UP`/`RIGHT` (the O.8
+/// Value-const guard proves the bakes). `is_vector(v, zero=false)` is the guarded-eps nonzero check —
+/// reproduced by calling the real [`is_vector`] native with the same arg shape. Recursion is
+/// depth-bounded (three-point → two-vector → done), so plain Rust recursion is safe.
+fn vector_axis(args: &[Value]) -> crate::Result<Value> {
+    let v1 = args.first().cloned().unwrap_or(Value::Undef);
+    let v2 = args.get(1).cloned().unwrap_or(Value::Undef);
+    let v3 = args.get(2).cloned().unwrap_or(Value::Undef);
+    if is_vector_core(&v3) {
+        let trio = super::build_vector(vec![v3.clone(), v2.clone(), v1.clone()]);
+        if !is_consistent(std::slice::from_ref(&trio))?.is_truthy() {
+            return Err(bosl_assert("vector_axis: bad arguments"));
+        }
+        return vector_axis(&[
+            super::ops::apply_binary(BinOp::Sub, v1, v2.clone()),
+            super::ops::apply_binary(BinOp::Sub, v3, v2),
+        ]);
+    }
+    if !matches!(v3, Value::Undef) {
+        return Err(bosl_assert("vector_axis: bad arguments"));
+    }
+    if matches!(v2, Value::Undef) {
+        if !v_is_list(&v1) {
+            return Err(bosl_assert("vector_axis: bad arguments"));
+        }
+        let ll = super::builtins::apply("len", std::slice::from_ref(&v1));
+        let e = |i: f64| super::ops::index(v1.clone(), &Value::Num(i));
+        return if super::ops::apply_binary(BinOp::Eq, ll, Value::Num(2.0)).is_truthy() {
+            vector_axis(&[e(0.0), e(1.0)])
+        } else {
+            vector_axis(&[e(0.0), e(1.0), e(2.0)])
+        };
+    }
+    let nonzero = |v: &Value| -> crate::Result<bool> {
+        Ok(is_vector(&[v.clone(), Value::Undef, Value::Bool(false)])?.is_truthy())
+    };
+    let pair = super::build_vector(vec![v1.clone(), v2.clone()]);
+    if !(nonzero(&v1)? && nonzero(&v2)? && is_consistent(std::slice::from_ref(&pair))?.is_truthy())
+    {
+        return Err(bosl_assert("vector_axis: bad arguments"));
+    }
+    let unit_of = |v: Value| -> crate::Result<Value> {
+        let n = super::builtins::apply("norm", std::slice::from_ref(&v));
+        point3d(&[super::ops::apply_binary(BinOp::Div, v, n)])
+    };
+    let w1 = unit_of(v1)?;
+    let w2 = unit_of(v2)?;
+    let gt_eps = |v: Value| {
+        super::ops::apply_binary(
+            BinOp::Gt,
+            super::builtins::apply("norm", std::slice::from_ref(&v)),
+            Value::Num(1e-6),
+        )
+        .is_truthy()
+    };
+    let far = gt_eps(super::ops::apply_binary(BinOp::Sub, w1.clone(), w2.clone()))
+        && gt_eps(super::ops::apply_binary(BinOp::Add, w1.clone(), w2.clone()));
+    let w3 = if far {
+        w2
+    } else if gt_eps(super::ops::apply_binary(
+        BinOp::Sub,
+        v_abs(std::slice::from_ref(&w2))?,
+        bosl_up(),
+    )) {
+        bosl_up()
+    } else {
+        bosl_right()
+    };
+    unit(&[super::builtins::apply("cross", &[w1, w3])])
+}
+
+/// BOSL2 `affine3d_rot_from_to(from, to)` — the rotation matrix taking `from` to `to`: identity when
+/// already aligned ([`approx`] on the unit vectors), a z-rotation when both are planar (`v_theta` deltas),
+/// else Rodrigues from [`vector_axis`]/[`vector_angle`] with the reference's exact cell arithmetic
+/// (left-associated products, `.x/.y/.z` through the real member op, `sin`/`cos` through the builtins).
+fn affine3d_rot_from_to(args: &[Value]) -> crate::Result<Value> {
+    let from = args.first().cloned().unwrap_or(Value::Undef);
+    let to = args.get(1).cloned().unwrap_or(Value::Undef);
+    if !is_vector_core(&from) || !is_vector_core(&to) {
+        return Err(bosl_assert("affine3d_rot_from_to: invalid vector"));
+    }
+    let lf = super::builtins::apply("len", std::slice::from_ref(&from));
+    let lt = super::builtins::apply("len", std::slice::from_ref(&to));
+    if !super::ops::apply_binary(BinOp::Eq, lf, lt).is_truthy() {
+        return Err(bosl_assert("affine3d_rot_from_to: length mismatch"));
+    }
+    let from = unit(&[point3d(std::slice::from_ref(&from))?])?;
+    let to = unit(&[point3d(std::slice::from_ref(&to))?])?;
+    if approx(&[from.clone(), to.clone()])?.is_truthy() {
+        return affine3d_identity(&[]);
+    }
+    let z0 = |v: &Value| {
+        super::ops::apply_binary(
+            BinOp::Eq,
+            super::ops::member(v.clone(), "z"),
+            Value::Num(0.0),
+        )
+        .is_truthy()
+    };
+    if z0(&from) && z0(&to) {
+        let theta =
+            |v: &Value| -> crate::Result<Value> { v_theta(&[point2d(std::slice::from_ref(v))?]) };
+        let dt = super::ops::apply_binary(BinOp::Sub, theta(&to)?, theta(&from)?);
+        return affine3d_zrot(std::slice::from_ref(&dt));
+    }
+    let u = vector_axis(&[from.clone(), to.clone()])?;
+    let ang = vector_angle(&[from, to])?;
+    let c = super::builtins::apply("cos", std::slice::from_ref(&ang));
+    let c2 = super::ops::apply_binary(BinOp::Sub, Value::Num(1.0), c.clone());
+    let s = super::builtins::apply("sin", std::slice::from_ref(&ang));
+    let ux = super::ops::member(u.clone(), "x");
+    let uy = super::ops::member(u.clone(), "y");
+    let uz = super::ops::member(u, "z");
+    let mul = |a: &Value, b: &Value| super::ops::apply_binary(BinOp::Mul, a.clone(), b.clone());
+    let add = |a: Value, b: Value| super::ops::apply_binary(BinOp::Add, a, b);
+    let sub = |a: Value, b: Value| super::ops::apply_binary(BinOp::Sub, a, b);
+    // each cell exactly as written: ((u.i*u.j)*c2) ± (u.k*s), diagonal ((u.i*u.i)*c2) + c
+    let cell = |a: &Value, b: &Value| mul(&mul(a, b), &c2);
+    let row = |cells: Vec<Value>| super::build_vector(cells);
+    let z = || Value::Num(0.0);
+    let rows = vec![
+        row(vec![
+            add(cell(&ux, &ux), c.clone()),
+            sub(cell(&ux, &uy), mul(&uz, &s)),
+            add(cell(&ux, &uz), mul(&uy, &s)),
+            z(),
+        ]),
+        row(vec![
+            add(cell(&uy, &ux), mul(&uz, &s)),
+            add(cell(&uy, &uy), c.clone()),
+            sub(cell(&uy, &uz), mul(&ux, &s)),
+            z(),
+        ]),
+        row(vec![
+            sub(cell(&uz, &ux), mul(&uy, &s)),
+            add(cell(&uz, &uy), mul(&ux, &s)),
+            add(cell(&uz, &uz), c),
+            z(),
+        ]),
+        row(vec![z(), z(), z(), Value::Num(1.0)]),
+    ];
+    Ok(super::build_vector(rows))
 }
 
 /// BOSL2 `force_list(value, n=1, fill)` — a list passes through; a scalar becomes `n` copies (or
@@ -4693,6 +5045,172 @@ mod tests {
                     &interpret_with_deps_consts(reference, &[], &consts, &args)
                 ),
                 "_fab_poc_isup diverged on {v:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn fast_equals_slow_o9_tree1() {
+        let consts = [
+            ("_EPSILON", Value::Num(1e-9)),
+            ("UP", Value::num_list(vec![0.0, 0.0, 1.0])),
+            ("RIGHT", Value::num_list(vec![1.0, 0.0, 0.0])),
+        ];
+        let p3v = |x: f64, y: f64, z: f64| Value::num_list(vec![x, y, z]);
+        let iv_knot = [
+            reference_of("is_vector").unwrap(),
+            reference_of("is_finite").unwrap(),
+            reference_of("is_nan").unwrap(),
+            reference_of("all_nonzero").unwrap(),
+        ];
+
+        // v_abs / v_theta / point2d / affine3d_identity — smalls.
+        let va_ref = reference_of("v_abs").unwrap();
+        let vt_ref = reference_of("v_theta").unwrap();
+        for v in [
+            p3v(1.0, -2.0, 3.0),
+            p3v(-0.0, 0.0, -1.5),
+            p2(-1.0, 1.0),
+            p2(3.0, -4.0),
+            Value::num_list(vec![1.0]),
+            Value::Num(2.0),
+            Value::Undef,
+        ] {
+            let args = [v.clone()];
+            assert!(
+                same_result(
+                    &super::v_abs(&args),
+                    &interpret_with_deps_consts(va_ref, &iv_knot, &consts, &args)
+                ),
+                "v_abs diverged on {v:?}"
+            );
+            assert!(
+                same_result(
+                    &super::v_theta(&args),
+                    &interpret_with_deps_consts(vt_ref, &iv_knot, &consts, &args)
+                ),
+                "v_theta diverged on {v:?}"
+            );
+        }
+        let p2d_ref = reference_of("point2d").unwrap();
+        for (p, fill) in [
+            (Value::num_list(vec![1.0]), None),
+            (p3v(1.0, 2.0, 3.0), None),
+            (
+                Value::list(vec![Value::Undef, Value::Num(2.0)]),
+                Some(Value::Num(7.0)),
+            ),
+            (Value::Num(5.0), None),
+        ] {
+            let mut args = vec![p.clone()];
+            if let Some(f) = &fill {
+                args.push(f.clone());
+            }
+            assert!(
+                same_result(
+                    &super::point2d(&args),
+                    &interpret_with_deps_consts(p2d_ref, &[], &consts, &args)
+                ),
+                "point2d diverged on ({p:?}, {fill:?})"
+            );
+        }
+        let ai_ref = reference_of("affine3d_identity").unwrap();
+        assert!(
+            same_result(
+                &super::affine3d_identity(&[]),
+                &interpret_with_deps_consts(
+                    ai_ref,
+                    &[reference_of("ident").unwrap()],
+                    &consts,
+                    &[]
+                )
+            ),
+            "affine3d_identity diverged"
+        );
+
+        // vector_axis — the two-vector forms (perpendicular / parallel → UP fallback / UP-aligned → RIGHT
+        // fallback / antiparallel), the three-point form, both paired-list arities, and the raise lanes.
+        let vx_ref = reference_of("vector_axis").unwrap();
+        let vx_deps: Vec<&str> = iv_knot
+            .iter()
+            .copied()
+            .chain([
+                reference_of("is_consistent").unwrap(),
+                reference_of("_list_pattern").unwrap(),
+                reference_of("point3d").unwrap(),
+                reference_of("unit").unwrap(),
+                reference_of("v_abs").unwrap(),
+            ])
+            .collect();
+        let vx_cases: Vec<Vec<Value>> = vec![
+            vec![p3v(1.0, 0.0, 0.0), p3v(0.0, 1.0, 0.0)],
+            vec![p3v(1.0, 0.0, 0.0), p3v(2.0, 0.0, 0.0)],
+            vec![p3v(0.0, 0.0, 1.0), p3v(0.0, 0.0, 2.0)],
+            vec![p3v(1.0, 0.0, 0.0), p3v(-1.0, 0.0, 0.0)],
+            vec![p2(1.0, 0.0), p2(0.0, 1.0)],
+            vec![p3v(0.0, 0.0, 0.0), p3v(1.0, 0.0, 0.0)],
+            vec![p3v(1.0, 2.0, 3.0), p2(1.0, 2.0)],
+            vec![p3v(0.0, 0.0, 0.0), p3v(1.0, 1.0, 0.0), p3v(2.0, 0.0, 0.0)],
+            vec![Value::list(vec![p3v(1.0, 0.0, 0.0), p3v(0.0, 1.0, 0.0)])],
+            vec![Value::list(vec![
+                p3v(0.0, 0.0, 0.0),
+                p3v(1.0, 1.0, 0.0),
+                p3v(2.0, 0.0, 0.0),
+            ])],
+            vec![Value::Num(5.0)],
+            vec![p3v(1.0, 0.0, 0.0), p3v(0.0, 1.0, 0.0), Value::Num(9.0)],
+        ];
+        for args in &vx_cases {
+            assert!(
+                same_result(
+                    &super::vector_axis(args),
+                    &interpret_with_deps_consts(vx_ref, &vx_deps, &consts, args)
+                ),
+                "vector_axis diverged on {args:?}"
+            );
+        }
+
+        // affine3d_rot_from_to — aligned (identity), planar (zrot delta), general Rodrigues, 2D inputs,
+        // antiparallel (the vector_axis fallback feeds Rodrigues), and the raise lanes.
+        let rft_ref = reference_of("affine3d_rot_from_to").unwrap();
+        let rft_deps: Vec<&str> = vx_deps
+            .iter()
+            .copied()
+            .chain([
+                reference_of("approx").unwrap(),
+                reference_of("idx").unwrap(),
+                reference_of("posmod").unwrap(),
+                reference_of("affine3d_identity").unwrap(),
+                reference_of("ident").unwrap(),
+                reference_of("affine3d_zrot").unwrap(),
+                reference_of("v_theta").unwrap(),
+                reference_of("point2d").unwrap(),
+                reference_of("vector_axis").unwrap(),
+                reference_of("vector_angle").unwrap(),
+                reference_of("same_shape").unwrap(),
+                reference_of("is_def").unwrap(),
+                reference_of("is_matrix").unwrap(),
+                pin_reference_of("constrain").unwrap(),
+            ])
+            .collect();
+        let rft_cases: Vec<Vec<Value>> = vec![
+            vec![p3v(1.0, 0.0, 0.0), p3v(2.0, 0.0, 0.0)],
+            vec![p3v(1.0, 0.0, 0.0), p3v(0.0, 1.0, 0.0)],
+            vec![p3v(1.0, 0.0, 0.0), p3v(0.0, 0.0, 1.0)],
+            vec![p3v(1.0, 2.0, 3.0), p3v(-3.0, 1.0, 0.5)],
+            vec![p3v(1.0, 0.0, 0.0), p3v(-1.0, 0.0, 0.0)],
+            vec![p2(1.0, 0.0), p2(0.0, 1.0)],
+            vec![p3v(1.0, 0.0, 0.0), p2(0.0, 1.0)],
+            vec![Value::Num(1.0), p3v(0.0, 0.0, 1.0)],
+            vec![p3v(0.0, 0.0, 0.0), p3v(0.0, 0.0, 1.0)],
+        ];
+        for args in &rft_cases {
+            assert!(
+                same_result(
+                    &super::affine3d_rot_from_to(args),
+                    &interpret_with_deps_consts(rft_ref, &rft_deps, &consts, args)
+                ),
+                "affine3d_rot_from_to diverged on {args:?}"
             );
         }
     }

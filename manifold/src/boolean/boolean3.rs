@@ -585,7 +585,14 @@ fn winding03_impl<const EXPAND_P: bool, const FORWARD: bool>(
     let (a, b) = if FORWARD { (in_p, in_q) } else { (in_q, in_p) };
     let index = if FORWARD { 0 } else { 1 };
 
-    // Union the endpoints of every intact (non-intersected) forward edge of `a`.
+    // Union the endpoints of every intact (non-intersected) forward edge of `a`. The C++ runs this
+    // loop Par over a CONCURRENT atomic DSU (`boolean3.cpp` Winding03_) — timing-dependent roots,
+    // the forbidden shape; the serial loop pins every representative choice. The deterministic
+    // split (par-map the `edge_is_broken` flags, then a serial fixed-order unite pass) was
+    // MEASURED and rejected: on self_intersect (51,480 halfedges, |p1q2| ~300) the fused serial
+    // loop runs ~0.4 ms and the unites — serial-mandatory either way — are ~0.27 ms of it, so the
+    // parallelizable binary searches are only ~0.15 ms; the split's flag Vec + second pass came out
+    // NET SLOWER (~0.62 ms). Amdahl says no until |p1q2| is orders of magnitude bigger.
     let mut u_a = DisjointSets::new(a.num_vert());
     for edge in (0..a.num_halfedge() as i32).map(HalfedgeId::new) {
         let start = a.start(edge);

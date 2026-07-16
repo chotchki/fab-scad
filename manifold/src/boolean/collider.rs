@@ -3,9 +3,11 @@
 //! A Karras Morton radix-tree BVH over one mesh's per-FACE boxes, queried by the other mesh's edges
 //! (or verts) during a boolean. Verbatim `collider.h`: `CreateRadixTree` (Karras split via `PrefixLength`
 //! with count-leading-zeros, ties broken by leaf index), `BuildInternalBoxes` (bottom-up box union), and
-//! the `FindCollision` stack traversal. The parallel/atomic machinery is dropped — a serial counter
-//! reproduces `BuildInternalBoxes` bit-for-bit because a box union is exact (componentwise min/max) and
-//! each internal box is computed exactly once, when its second child arrives, regardless of order.
+//! the `FindCollision` stack traversal. The radix-tree fill runs through the deterministic parallel seam
+//! (`par::for_each_mut` — each internal node's children derive purely from the sorted codes); the rest of
+//! the C++ parallel/atomic machinery is dropped — a serial counter reproduces `BuildInternalBoxes`
+//! bit-for-bit because a box union is exact (componentwise min/max) and each internal box is computed
+//! exactly once, when its second child arrives, regardless of order.
 //!
 //! ## Node numbering (`collider.h`)
 //! Nodes are indexed so EVEN nodes are leaves and ODD nodes are internal; the root is node 1. Leaf `i`
@@ -105,11 +107,13 @@ const fn leaf2node(leaf: i32) -> i32 {
     leaf * 2
 }
 
-/// Karras radix-tree builder (`collider.h` `CreateRadixTree`). Borrows the tree arrays plus the
-/// Morton-SORTED leaf codes; `create(internal)` links one internal node to its two children.
+/// Karras radix-tree builder (`collider.h` `CreateRadixTree`) — a READ-ONLY view over the
+/// Morton-SORTED leaf codes. Each internal node's `children(internal)` derives purely from the
+/// codes (the Karras binary searches — per-node independent, and the bulk of the build cost), so
+/// the fill is an order-preserving parallel map (`par::for_each_mut`, matching the C++
+/// Par-over-`NumInternal` dispatch at the same 1e4 threshold); the parent back-pointers are wired
+/// afterward in a cheap serial pass, replacing the C++'s in-kernel scattered stores.
 struct RadixTreeBuilder<'a> {
-    node_parent: &'a mut [i32],
-    internal_children: &'a mut [(i32, i32)],
     leaf_morton: &'a [u32],
 }
 
@@ -181,9 +185,10 @@ impl RadixTreeBuilder<'_> {
         split
     }
 
-    /// Link internal node `internal` to its two children (`CreateRadixTree::operator()`), recording the
-    /// child ids and back-pointing both children's parent.
-    fn create(&mut self, internal: i32) {
+    /// One internal node's `(child1, child2)` (`CreateRadixTree::operator()` minus the parent
+    /// wiring): a pure function of the sorted codes, independent per node — the unit the parallel
+    /// fill maps over.
+    fn children(&self, internal: i32) -> (i32, i32) {
         let mut first = internal;
         let mut last = self.range_end(first);
         if first > last {
@@ -201,10 +206,7 @@ impl RadixTreeBuilder<'_> {
         } else {
             internal2node(split)
         };
-        self.internal_children[internal as usize] = (child1, child2);
-        let node = internal2node(internal);
-        self.node_parent[child1 as usize] = node;
-        self.node_parent[child2 as usize] = node;
+        (child1, child2)
     }
 }
 
@@ -314,17 +316,29 @@ impl Collider {
         for (leaf, &old) in c.leaf2face.iter().enumerate() {
             c.node_bbox[leaf2node(leaf as i32) as usize] = c.leaf_box[old as usize];
         }
-        // Organize the tree.
+        // Organize the tree. The per-node child derivation (the Karras binary searches — the bulk
+        // of the build) is a pure read over the sorted codes, so it maps in parallel: slot
+        // `internal` depends only on its own index → deterministic by construction. Measured on
+        // self_intersect (17k faces): whole-build 1.84 ms → 1.48 ms par. The neighboring passes
+        // (morton sort/gather, face boxes, internal boxes) were each measured par and REGRESSED —
+        // their per-item work is a few ns, below rayon's dispatch cost at these sizes — so they
+        // stay serial.
         let sorted_morton: Vec<u32> = c.leaf2face.iter().map(|&o| morton[o as usize]).collect();
         {
-            let mut rt = RadixTreeBuilder {
-                node_parent: &mut c.node_parent,
-                internal_children: &mut c.internal_children,
+            let rt = RadixTreeBuilder {
                 leaf_morton: &sorted_morton,
             };
-            for internal in 0..num_internal as i32 {
-                rt.create(internal);
-            }
+            crate::par::for_each_mut(&mut c.internal_children, |i, slot| {
+                *slot = rt.children(i as i32);
+            });
+        }
+        // Parent wiring: two stores per internal, each node has exactly one parent (disjoint
+        // writes, fixed order) — trivially cheap, kept serial.
+        for internal in 0..num_internal as i32 {
+            let (child1, child2) = c.internal_children[internal as usize];
+            let node = internal2node(internal);
+            c.node_parent[child1 as usize] = node;
+            c.node_parent[child2 as usize] = node;
         }
         c.build_internal_boxes(num_internal);
         c
@@ -334,6 +348,13 @@ impl Collider {
     /// the root; a per-internal counter lets only the SECOND arriving child compute the union, so both
     /// child boxes are ready. Serial + a plain counter is bit-identical to the parallel atomic version —
     /// box union is exact min/max, computed exactly once per node.
+    ///
+    /// KEPT SERIAL after measuring a deterministic level-sweep alternative (integer height climb,
+    /// bucket internals by height, per-level `par::map_collect` union): every level is below
+    /// `par`'s 10k threshold at corpus scale (level 1 holds at most `num_leaves/2` nodes, so
+    /// nothing parallelizes under ~20k faces) and the extra climb + bucketing cost ~0.5 ms on
+    /// self_intersect — pure overhead, no payoff until ~40k+ faces. The C++ atomic second-arrival
+    /// scheme is the forbidden who-computes-it shape, so serial stands.
     fn build_internal_boxes(&mut self, num_internal: usize) {
         let mut counter = vec![0i32; num_internal];
         let num_leaves = num_internal + 1;

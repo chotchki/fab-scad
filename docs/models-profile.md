@@ -638,3 +638,53 @@ everything BOSL2-heavy, not just the four targets (traced_holder −71%, kirby_h
 −57%, the whole pill_holder family −21..−41%). Zero regressions. Two new rescues: `silverwear.scad` and
 `window_air_cover.scad` go fab-TIMEOUT → SOLID while the oracle still times out — they move to the
 fab-renders-where-OpenSCAD-can't column (8→10).
+
+## O.6 + O.7 — the rebind and band 5 (2026-07-16, same day)
+
+**O.6, the named-arg rebind**: the v1 intrinsic gate only routed all-positional calls; BOSL2's named-arg
+style (`is_vector(v, zero=true)`, `unit(v, error=…)`) fell to the interpreter. The rebind mirrors
+`push_call`'s slot filling exactly — named-by-name last-wins, unknown/extra args dropped UNEVALUATED, holes
+evaluating their real default exprs against the definition base, `$`-args declining. The review also caught
+a pre-existing doctrine bug: extra positional args used to EVALUATE on the intrinsic path where the
+interpreter drops them (side effects diverged). One dispatch change extended all 21 intrinsics at once.
+
+**O.7, band 5** (11 more natives in two batches): `_point_dist` (offset()'s per-point segment scan — the
+single biggest remaining line at 4.9s), `_is_point_on_line`, `_vnf_centroid`, `_group_sort_by_index`,
+`ident`, `affine3d_{z,x,y}rot`, `_get_ear` (closing the earcut family), `in_list` (full all-hits retry via
+the real `search` builtin), `is_path`.
+
+### The scoreboard, campaign-total (worker wall, kernel included)
+
+| model | campaign start | post-O.7 | Δ |
+|---|---|---|---|
+| window_air_cover | ~38s | **12.8s** | −66% |
+| shoe_holder | 17.9s | **7.0s** | −61% |
+| webcam_holder | 12.2s | **4.6s** | −62% |
+| pill_holder | 8.0s | **2.65s** | −67% |
+
+32 intrinsics live, all WIRED/ARMED against the vendored BOSL2, corpus 901/901 and all four golden lanes
+green at every step.
+
+### The JIT bucket — what stays interpreted, by verdict
+
+Everything left is a BIG BODY where hand-transliteration stops being obviously-correct, or a dep avalanche:
+
+- `_region_region_intersections` (9.7s/6 calls, shoe_holder) — 61 comprehension-heavy lines.
+- `_find_anchor` (3.8s, webcam+pill) — 443 lines.
+- `rot` (1.3s self) — the body is modest but its closure needs `move`/`rot_inverse`/
+  `affine3d_rot_by_axis` AND the `_NO_ARG` sentinel — a NON-NUMERIC constant the O.5.1 guard can't hold
+  (it checks f64 bits). Same blocker for `vector_axis`/`affine3d_rot_from_to` (`UP`/`RIGHT` vector
+  consts) and `apply` (`vnf_reverse_faces` → BOSL2's user `reverse`, the builtin shadow). A Value-const
+  guard extension (fn-pointer-built expected values, bit-compared) would unlock this tier for hand
+  intrinsics — file it with the next band, or let P.1.6's JIT list ABI take the whole bucket.
+
+This is the P.1.4–P.1.6 hand-off point: the interpreted residual is now concentrated in exactly the shapes
+the Cranelift list-ABI rungs were cut for.
+
+### The final sweep (run-1784243538, baseline re-frozen)
+
+Aggregate fab wall **94.9s → 77.2s** (oracle 245.8s): the ratio moves **2.63× → 3.18×**, median per-model
+**3.34× → 3.64×**. Eleven models improved ≥29% — the whole pill_holder family again, shoe_holder −39%,
+webcam_holder −39%, shower_holder_mini −52%, traced_holder −33% — zero regressions. The full-day arc, one
+harness, same 109 models: **0.96× → 2.02× (kernel+caches) → 2.63× (O.5) → 3.18× (O.6+O.7)**, with fab
+rendering 10 models OpenSCAD can't vs 8 the other way.

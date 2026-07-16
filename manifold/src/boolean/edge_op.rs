@@ -231,8 +231,12 @@ fn collapse_edge(
                 if (r.mesh_id != old_ref.mesh_id
                     || r.face_id != old_ref.face_id
                     || mesh.face_normal[pair.tri().u()].dot(mesh.face_normal[tri.u()]) < -0.5)
-                    && ccw(projection.apply(p_last), projection.apply(p_old), projection.apply(p_new), tol)
-                        != 0
+                    && ccw(
+                        projection.apply(p_last),
+                        projection.apply(p_old),
+                        projection.apply(p_new),
+                        tol,
+                    ) != 0
                 {
                     return false;
                 }
@@ -425,7 +429,9 @@ fn recursive_edge_swap(
             }
         }
         return;
-    } else if ccw(v[0], v[3], v[2], mesh.tolerance) <= 0 || ccw(v[1], v[2], v[3], mesh.tolerance) <= 0 {
+    } else if ccw(v[0], v[3], v[2], mesh.tolerance) <= 0
+        || ccw(v[1], v[2], v[3], mesh.tolerance) <= 0
+    {
         return;
     }
     // Normal path.
@@ -831,9 +837,23 @@ fn swap_degenerates(mesh: &mut Mesh, first_new_vert: i32) -> usize {
     let mut scratch = Vec::new();
     for hi in flagged {
         tag += 1;
-        recursive_edge_swap(mesh, hi, &mut tag, &mut visited, &mut edge_swap_stack, &mut scratch);
+        recursive_edge_swap(
+            mesh,
+            hi,
+            &mut tag,
+            &mut visited,
+            &mut edge_swap_stack,
+            &mut scratch,
+        );
         while let Some(last) = edge_swap_stack.pop() {
-            recursive_edge_swap(mesh, last, &mut tag, &mut visited, &mut edge_swap_stack, &mut scratch);
+            recursive_edge_swap(
+                mesh,
+                last,
+                &mut tag,
+                &mut visited,
+                &mut edge_swap_stack,
+                &mut scratch,
+            );
         }
     }
     num_flagged
@@ -888,5 +908,46 @@ pub fn simplify_topology(mesh: &mut Mesh, first_new_vert: i32) {
     mesh.remove_unreferenced_verts();
 
     // Merging verts changed the geometry → recompute vertNormal on the clean mesh (the C++ tail).
+    mesh.calculate_vert_normals();
+}
+
+/// `Impl::CleanupTopology` (edge_op.cpp:108): duplicate just enough verts to convert an
+/// even-manifold into a proper 2-manifold — split pinched verts, then dedupe 4-manifold edges.
+/// The shared preamble of `SimplifyTopology`/`RemoveDegenerates`, and the first stage of the
+/// MeshGL ingest tail (M.2.4a). Both stages only ADD verts/tris — nothing is marked removed, so no
+/// compaction here.
+pub fn cleanup_topology(mesh: &mut Mesh) {
+    if mesh.halfedge.is_empty() {
+        return;
+    }
+    split_pinched_verts(mesh);
+    dedupe_edges(mesh);
+}
+
+/// `Impl::RemoveDegenerates` (edge_op.cpp:153) — `SimplifyTopology` WITHOUT the provenance-driven
+/// colinear stage: CleanupTopology + CollapseShortEdges + SwapDegenerates, then compact + rebuild
+/// normals. The MeshGL ingest tail runs THIS (a raw import carries no boolean provenance for the
+/// colinear `same_face` test to read). M.2.4a: skipping it on ingest was half the Cray divergence —
+/// C++ pre-collapses an import's degenerate triangles before any boolean sees them.
+pub fn remove_degenerates(mesh: &mut Mesh, first_new_vert: i32) {
+    if mesh.halfedge.is_empty() {
+        return;
+    }
+    mesh.vert_normal.clear();
+    let pinched = split_pinched_verts(mesh);
+    let deduped = dedupe_edges(mesh);
+    let short = collapse_short_edges(mesh, first_new_vert);
+    let swapped = swap_degenerates(mesh, first_new_vert);
+    tracing::debug!(
+        target: "manifold::simplify",
+        first_new_vert,
+        pinched,
+        deduped,
+        short,
+        swapped,
+        "remove_degenerates stages",
+    );
+    mesh.remove_dead_triangles();
+    mesh.remove_unreferenced_verts();
     mesh.calculate_vert_normals();
 }

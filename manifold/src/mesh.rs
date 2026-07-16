@@ -565,25 +565,67 @@ impl Mesh {
 
     /// Ingest a `MeshGl` (flat buffers) into the spine: extract positions, carry extra properties,
     /// build connectivity, compute the bbox. Panics if `num_prop < 3` or the buffers are ragged.
-    pub fn from_mesh_gl(m: &MeshGl) -> Mesh {
-        assert!(
-            m.num_prop >= 3,
-            "MeshGl.num_prop must be >= 3 (got {})",
-            m.num_prop
-        );
-        assert!(
-            m.vert_properties.len().is_multiple_of(m.num_prop),
-            "vert_properties not a multiple of num_prop"
-        );
-        assert!(
-            m.tri_verts.len().is_multiple_of(3),
-            "tri_verts not a multiple of 3"
-        );
-        assert_eq!(
-            m.merge_from_vert.len(),
-            m.merge_to_vert.len(),
-            "mergeFromVert / mergeToVert length mismatch"
-        );
+    pub fn from_mesh_gl(m: &MeshGl) -> Result<Mesh, Error> {
+        let mut mesh = Self::from_mesh_gl_raw(m)?;
+
+        // THE INGEST TAIL — the C++ `Impl(MeshGL)` ctor's phase sequence (impl.h:474-501), M.2.4a:
+        // skipping it was half the Cray divergence. Most visible is the missing Morton SORT — a raw
+        // import stayed in file order, permuting every index-ordered loop downstream vs C++ — but the
+        // cleanup/degenerate stages matter too: C++ collapses an import's degenerate triangles BEFORE
+        // any boolean sees them.
+        if !mesh.is_manifold() {
+            return Err(Error::NotManifold);
+        }
+        // C++ runs its IsFinite → MakeEmpty(NonFiniteVertex) check at the ctor's END, after driving
+        // the whole tail over the NaN coordinates (survivable only because its raw-array indexing
+        // doesn't bounds-check; a referenced NaN vert Morton-sorts to kNoCode and gets truncated,
+        // leaving faces pointing at dropped verts). Same Err, checked EARLY here — observationally
+        // identical, and no sort over garbage.
+        if !mesh.is_finite() {
+            return Err(Error::NonFiniteVertex);
+        }
+        mesh.set_epsilon(-1.0, false);
+        crate::boolean::edge_op::cleanup_topology(&mut mesh);
+        // DedupePropVerts — NOT PORTED (loud): a no-op for position-only ingest (`num_prop == 0`);
+        // a property-carrying import may keep near-duplicate prop rows the C++ would merge.
+        mesh.initialize_original();
+        mesh.set_normals_and_coplanar();
+        crate::boolean::edge_op::remove_degenerates(&mut mesh, 0);
+        mesh.remove_unreferenced_verts();
+        // Morton codes read the PRE-removal bbox (C++ sorts with bBox_ from the ctor, dangling
+        // verts included — sort.cpp:272) — our compaction already dropped them, but b_box still
+        // holds the raw-build extent, so the codes match. THEN the final bbox: C++ takes it from
+        // the collider after SortFaces (sort.cpp:214), which excludes unreferenced verts; our
+        // recompute over the compacted vert set lands the identical box.
+        mesh.sort_geometry();
+        mesh.calculate_bbox();
+        if !mesh.is_finite() {
+            return Err(Error::NonFiniteVertex);
+        }
+        Ok(mesh)
+    }
+
+    /// RAW spine deserialization — structural validation + halfedge pairing + bbox, NO ctor tail.
+    /// For the differential harness ONLY: a C++ RESULT being compared was never re-run through the
+    /// C++ ctor, so re-ingesting it through [`Mesh::from_mesh_gl`] would legitimately COLLAPSE the
+    /// sub-epsilon structure the result actually carries (RemoveDegenerates at the result's own
+    /// bbox-scale epsilon) — masking real divergence or manufacturing false divergence. Accepts
+    /// non-manifold pairing (topology-only), like the pre-M.2.4a ingest.
+    pub(crate) fn from_mesh_gl_raw(m: &MeshGl) -> Result<Mesh, Error> {
+        // Structural validation — the C++ ctor's `MakeEmpty(status)` arms surfaced as typed Errors
+        // (the M.3.2 eager-Result pattern; these were panicking asserts pre-M.2.4a).
+        if m.num_prop < 3 {
+            return Err(Error::MissingPositionProperties);
+        }
+        if !m.vert_properties.len().is_multiple_of(m.num_prop) {
+            return Err(Error::PropertiesWrongLength);
+        }
+        if !m.tri_verts.len().is_multiple_of(3) {
+            return Err(Error::InvalidConstruction);
+        }
+        if m.merge_from_vert.len() != m.merge_to_vert.len() {
+            return Err(Error::MergeVectorsDifferentLengths);
+        }
 
         // MeshGl carries position IN `num_prop` (>= 3); our `Mesh::num_prop` is the C++ `numProp_` count
         // with position EXCLUDED. Each ROW is a prop-vertex; positions/properties are indexed by row.
@@ -601,48 +643,72 @@ impl Mesh {
             properties.extend_from_slice(&m.vert_properties[o + 3..o + m.num_prop]);
         }
 
-        if m.merge_from_vert.is_empty() {
-            // No seams: every row is its own geometric vert (the 1:1 case — position-only and
-            // freshly-coloured meshes). `tri_verts` reference rows directly.
-            let tri_verts: Vec<[u32; 3]> =
-                m.tri_verts.chunks_exact(3).map(|c| [c[0], c[1], c[2]]).collect();
-            let mut mesh = Mesh { vert_pos, num_prop, properties, ..Default::default() };
-            mesh.create_halfedges(&tri_verts);
-            mesh.calculate_bbox();
-            return mesh;
+        if m.tri_verts.iter().any(|&v| v as usize >= n_row) {
+            return Err(Error::VertexOutOfBounds);
+        }
+        if m.merge_from_vert
+            .iter()
+            .chain(&m.merge_to_vert)
+            .any(|&v| v as usize >= n_row)
+        {
+            return Err(Error::MergeIndexOutOfBounds);
         }
 
-        // Merge-vector ingest (Manifold `Impl` ctor): `prop2vert[from] = to` folds coincident prop-vert
-        // ROWS into a shared GEOMETRIC vert, so a seam-split property mesh re-shares into a manifold.
-        // Half-edges pair on the merged geometric verts; each corner's `prop_vert` keeps its own row.
-        let mut prop2vert: Vec<u32> = (0..n_row as u32).collect();
-        for (&from, &to) in m.merge_from_vert.iter().zip(&m.merge_to_vert) {
-            prop2vert[from as usize] = to;
-        }
-        let tri_geo: Vec<[u32; 3]> = m
-            .tri_verts
-            .chunks_exact(3)
-            .map(|c| {
-                [
-                    prop2vert[c[0] as usize],
-                    prop2vert[c[1] as usize],
-                    prop2vert[c[2] as usize],
-                ]
-            })
-            .collect();
-        let mut mesh = Mesh { vert_pos, num_prop, properties, ..Default::default() };
-        mesh.create_halfedges(&tri_geo);
-        // create_halfedges set prop_vert = start (the merged geo vert); overwrite with the ORIGINAL row.
-        for (tri, c) in m.tri_verts.chunks_exact(3).enumerate() {
-            for (i, &row) in c.iter().enumerate() {
-                mesh.set_prop(HalfedgeId::from_usize(3 * tri + i), VertId::new(row as i32));
+        let mut mesh = if m.merge_from_vert.is_empty() {
+            // No seams: every row is its own geometric vert (the 1:1 case — position-only and
+            // freshly-coloured meshes). `tri_verts` reference rows directly.
+            let tri_verts: Vec<[u32; 3]> = m
+                .tri_verts
+                .chunks_exact(3)
+                .map(|c| [c[0], c[1], c[2]])
+                .collect();
+            let mut mesh = Mesh {
+                vert_pos,
+                num_prop,
+                properties,
+                ..Default::default()
+            };
+            mesh.create_halfedges(&tri_verts);
+            mesh
+        } else {
+            // Merge-vector ingest (Manifold `Impl` ctor): `prop2vert[from] = to` folds coincident prop-vert
+            // ROWS into a shared GEOMETRIC vert, so a seam-split property mesh re-shares into a manifold.
+            // Half-edges pair on the merged geometric verts; each corner's `prop_vert` keeps its own row.
+            let mut prop2vert: Vec<u32> = (0..n_row as u32).collect();
+            for (&from, &to) in m.merge_from_vert.iter().zip(&m.merge_to_vert) {
+                prop2vert[from as usize] = to;
             }
-        }
-        // Drop the now-unreferenced duplicate positions (the non-canonical rows). With `num_prop > 0`
-        // this leaves `prop_vert` / `properties` alone (C++ defers prop compaction to CompactProps).
-        mesh.remove_unreferenced_verts();
+            let tri_geo: Vec<[u32; 3]> = m
+                .tri_verts
+                .chunks_exact(3)
+                .map(|c| {
+                    [
+                        prop2vert[c[0] as usize],
+                        prop2vert[c[1] as usize],
+                        prop2vert[c[2] as usize],
+                    ]
+                })
+                .collect();
+            let mut mesh = Mesh {
+                vert_pos,
+                num_prop,
+                properties,
+                ..Default::default()
+            };
+            mesh.create_halfedges(&tri_geo);
+            // create_halfedges set prop_vert = start (the merged geo vert); overwrite with the ORIGINAL row.
+            for (tri, c) in m.tri_verts.chunks_exact(3).enumerate() {
+                for (i, &row) in c.iter().enumerate() {
+                    mesh.set_prop(HalfedgeId::from_usize(3 * tri + i), VertId::new(row as i32));
+                }
+            }
+            // Drop the now-unreferenced duplicate positions (the non-canonical rows). With `num_prop > 0`
+            // this leaves `prop_vert` / `properties` alone (C++ defers prop compaction to CompactProps).
+            mesh.remove_unreferenced_verts();
+            mesh
+        };
         mesh.calculate_bbox();
-        mesh
+        Ok(mesh)
     }
 
     /// Export the spine back to a `MeshGl`: re-interleave position + extra properties, and emit each
@@ -666,7 +732,12 @@ impl Mesh {
                     tri_verts.push(self.start(t.halfedge(i)).raw() as u32);
                 }
             }
-            return MeshGl { num_prop: 3, vert_properties, tri_verts, ..Default::default() };
+            return MeshGl {
+                num_prop: 3,
+                vert_properties,
+                tri_verts,
+                ..Default::default()
+            };
         }
 
         // Decoupled emit (Manifold `GetMeshGL` 620-683): one interchange row per distinct
@@ -688,9 +759,7 @@ impl Mesh {
                 let he = t.halfedge(i);
                 let vert = self.start(he).u();
                 let prop = self.prop(he).raw() as u32;
-                if let Some(&(_, row)) =
-                    vert_prop_pair[vert].iter().find(|(p, _)| *p == prop)
-                {
+                if let Some(&(_, row)) = vert_prop_pair[vert].iter().find(|(p, _)| *p == prop) {
                     tri_verts.push(row);
                     continue;
                 }
@@ -702,7 +771,8 @@ impl Mesh {
                 vert_properties.push(p.y);
                 vert_properties.push(p.z);
                 let pv = prop as usize;
-                vert_properties.extend_from_slice(&self.properties[pv * num_prop..(pv + 1) * num_prop]);
+                vert_properties
+                    .extend_from_slice(&self.properties[pv * num_prop..(pv + 1) * num_prop]);
                 if vert2row[vert] == u32::MAX {
                     vert2row[vert] = row;
                 } else {
@@ -711,7 +781,13 @@ impl Mesh {
                 }
             }
         }
-        MeshGl { num_prop: mesh_gl_prop, vert_properties, tri_verts, merge_from_vert, merge_to_vert }
+        MeshGl {
+            num_prop: mesh_gl_prop,
+            vert_properties,
+            tri_verts,
+            merge_from_vert,
+            merge_to_vert,
+        }
     }
 
     // --- Perturbation inputs (R1) — the data the boolean's symbolic tie-break consumes. ---
@@ -745,7 +821,8 @@ impl Mesh {
                 continue;
             }
             let v = self.pos(self.start(t.halfedge(0)));
-            let n = (self.pos(self.end(t.halfedge(0))) - v).cross(self.pos(self.end(t.halfedge(1))) - v);
+            let n = (self.pos(self.end(t.halfedge(0))) - v)
+                .cross(self.pos(self.end(t.halfedge(1))) - v);
             let mut normal = n.normalize();
             if normal.x.is_nan() {
                 normal = Vec3::new(0.0, 0.0, 1.0);
@@ -761,7 +838,8 @@ impl Mesh {
     /// coplanar test — don't have to run the full face-normal pass first.
     pub(crate) fn tri_normal(&self, t: TriId) -> Vec3 {
         let v = self.pos(self.start(t.halfedge(0)));
-        let n = (self.pos(self.end(t.halfedge(0))) - v).cross(self.pos(self.end(t.halfedge(1))) - v);
+        let n =
+            (self.pos(self.end(t.halfedge(0))) - v).cross(self.pos(self.end(t.halfedge(1))) - v);
         let normal = n.normalize();
         if normal.x.is_nan() {
             Vec3::new(0.0, 0.0, 1.0)
@@ -877,7 +955,11 @@ impl Mesh {
         // Step 1: rotate within each face so the smallest start vertex leads.
         for tri in 0..num_tri {
             let base = 3 * tri;
-            let face = [self.halfedge[base], self.halfedge[base + 1], self.halfedge[base + 2]];
+            let face = [
+                self.halfedge[base],
+                self.halfedge[base + 1],
+                self.halfedge[base + 2],
+            ];
             if face[0].start_vert.is_none() {
                 continue;
             }
@@ -955,7 +1037,8 @@ impl Mesh {
                 continue;
             }
             let v = self.pos(self.start(t.halfedge(0)));
-            let n = (self.pos(self.end(t.halfedge(0))) - v).cross(self.pos(self.end(t.halfedge(1))) - v);
+            let n = (self.pos(self.end(t.halfedge(0))) - v)
+                .cross(self.pos(self.end(t.halfedge(1))) - v);
             let mut normal = n.normalize();
             if normal.x.is_nan() {
                 normal = Vec3::new(0.0, 0.0, 1.0);
@@ -1107,7 +1190,11 @@ impl Mesh {
     /// NOTE: a leaf mesh colored here keeps its color only until a boolean, which still forces
     /// position-only output — the `CreateProperties` interpolation that carries properties across a
     /// boolean seam is M.3.4b.
-    pub fn set_properties(&self, num_prop: usize, prop_fn: impl Fn(&mut [f64], Vec3, &[f64])) -> Mesh {
+    pub fn set_properties(
+        &self,
+        num_prop: usize,
+        prop_fn: impl Fn(&mut [f64], Vec3, &[f64]),
+    ) -> Mesh {
         let mut result = self.clone();
         if num_prop == 0 {
             result.properties.clear();
@@ -1331,11 +1418,16 @@ mod tests {
     /// MIRROR (det<0) must flip winding so the signed volume stays POSITIVE (the flip_tris gate).
     #[test]
     fn transform_moves_scales_and_mirrors() {
-        let cube = Mesh::from_mesh_gl(&unit_cube()); // [0,1]³, volume 1
+        let cube = Mesh::from_mesh_gl(&unit_cube()).unwrap(); // [0,1]³, volume 1
         let v3 = Vec3::new;
 
         // Translate: shape unchanged, bbox shifted.
-        let t = Mat3x4 { x: v3(1., 0., 0.), y: v3(0., 1., 0.), z: v3(0., 0., 1.), w: v3(10., 20., 30.) };
+        let t = Mat3x4 {
+            x: v3(1., 0., 0.),
+            y: v3(0., 1., 0.),
+            z: v3(0., 0., 1.),
+            w: v3(10., 20., 30.),
+        };
         let moved = cube.transform(t).unwrap();
         assert!(moved.is_manifold());
         assert!((moved.volume() - 1.0).abs() < 1e-12);
@@ -1343,39 +1435,74 @@ mod tests {
         assert_eq!(moved.bounding_box().max, v3(11., 21., 31.));
 
         // Non-uniform scale: volume ×|det| = 2·3·4 = 24.
-        let s = Mat3x4 { x: v3(2., 0., 0.), y: v3(0., 3., 0.), z: v3(0., 0., 4.), w: Vec3::ZERO };
+        let s = Mat3x4 {
+            x: v3(2., 0., 0.),
+            y: v3(0., 3., 0.),
+            z: v3(0., 0., 4.),
+            w: Vec3::ZERO,
+        };
         let scaled = cube.transform(s).unwrap();
         assert!(scaled.is_manifold());
         assert!((scaled.volume() - 24.0).abs() < 1e-12);
 
         // Mirror (det = −1): volume stays 1 AND POSITIVE — without the winding flip the signed volume
         // would be −1. Proves flip_tris re-oriented the surface + kept it manifold.
-        let mirror = Mat3x4 { x: v3(-1., 0., 0.), y: v3(0., 1., 0.), z: v3(0., 0., 1.), w: Vec3::ZERO };
+        let mirror = Mat3x4 {
+            x: v3(-1., 0., 0.),
+            y: v3(0., 1., 0.),
+            z: v3(0., 0., 1.),
+            w: Vec3::ZERO,
+        };
         let mirrored = cube.transform(mirror).unwrap();
-        assert!(mirrored.is_manifold(), "mirror must stay manifold (flip_tris pairing)");
-        assert!((mirrored.volume() - 1.0).abs() < 1e-12, "mirror volume {} != 1", mirrored.volume());
+        assert!(
+            mirrored.is_manifold(),
+            "mirror must stay manifold (flip_tris pairing)"
+        );
+        assert!(
+            (mirrored.volume() - 1.0).abs() < 1e-12,
+            "mirror volume {} != 1",
+            mirrored.volume()
+        );
         assert_eq!(crate::check::genus(&mirrored), 0);
 
         // 90° rotation about z.
-        let rot = Mat3x4 { x: v3(0., 1., 0.), y: v3(-1., 0., 0.), z: v3(0., 0., 1.), w: Vec3::ZERO };
+        let rot = Mat3x4 {
+            x: v3(0., 1., 0.),
+            y: v3(-1., 0., 0.),
+            z: v3(0., 0., 1.),
+            w: Vec3::ZERO,
+        };
         let rotated = cube.transform(rot).unwrap();
         assert!(rotated.is_manifold());
         assert!((rotated.volume() - 1.0).abs() < 1e-12);
 
         // Identity is an exact clone.
-        assert_eq!(cube.transform(Mat3x4::IDENTITY).unwrap().volume(), cube.volume());
+        assert_eq!(
+            cube.transform(Mat3x4::IDENTITY).unwrap().volume(),
+            cube.volume()
+        );
     }
 
     /// M.3.2 — a non-finite transform matrix is `Err(NonFiniteVertex)` (the eager translation of
     /// Manifold's `MakeEmpty(NonFiniteVertex)`), and the vert-position `is_finite` query agrees.
     #[test]
     fn transform_non_finite_is_an_error() {
-        let cube = Mesh::from_mesh_gl(&unit_cube());
+        let cube = Mesh::from_mesh_gl(&unit_cube()).unwrap();
         assert!(cube.is_finite());
         let v3 = Vec3::new;
-        let nan = Mat3x4 { x: v3(f64::NAN, 0., 0.), y: v3(0., 1., 0.), z: v3(0., 0., 1.), w: Vec3::ZERO };
+        let nan = Mat3x4 {
+            x: v3(f64::NAN, 0., 0.),
+            y: v3(0., 1., 0.),
+            z: v3(0., 0., 1.),
+            w: Vec3::ZERO,
+        };
         assert_eq!(cube.transform(nan).unwrap_err(), Error::NonFiniteVertex);
-        let inf = Mat3x4 { x: v3(1., 0., 0.), y: v3(0., 1., 0.), z: v3(0., 0., 1.), w: v3(f64::INFINITY, 0., 0.) };
+        let inf = Mat3x4 {
+            x: v3(1., 0., 0.),
+            y: v3(0., 1., 0.),
+            z: v3(0., 0., 1.),
+            w: v3(f64::INFINITY, 0., 0.),
+        };
         assert_eq!(cube.transform(inf).unwrap_err(), Error::NonFiniteVertex);
         // A mesh with a NaN vertex fails the position-finiteness query.
         let mut bad = cube.clone();
@@ -1397,7 +1524,13 @@ mod tests {
         for &idx in &uc.tri_verts {
             tris.push(idx + 8);
         }
-        let mesh = Mesh::from_mesh_gl(&MeshGl { num_prop: 3, vert_properties: verts, tri_verts: tris, ..Default::default() });
+        let mesh = Mesh::from_mesh_gl(&MeshGl {
+            num_prop: 3,
+            vert_properties: verts,
+            tri_verts: tris,
+            ..Default::default()
+        })
+        .unwrap();
         assert!(mesh.is_manifold());
         assert_eq!(mesh.num_tri(), 24);
 
@@ -1405,7 +1538,11 @@ mod tests {
         assert_eq!(parts.len(), 2, "two disjoint cubes → two components");
         for p in &parts {
             assert!(p.is_manifold(), "each part manifold");
-            assert!((p.volume() - 1.0).abs() < 1e-12, "part volume {} != 1", p.volume());
+            assert!(
+                (p.volume() - 1.0).abs() < 1e-12,
+                "part volume {} != 1",
+                p.volume()
+            );
             assert_eq!(p.num_tri(), 12);
             assert_eq!(p.num_vert(), 8);
         }
@@ -1413,7 +1550,10 @@ mod tests {
         assert!((total - 2.0).abs() < 1e-12, "total volume preserved");
 
         // A single cube is one component (returned as a clone).
-        assert_eq!(Mesh::from_mesh_gl(&unit_cube()).decompose().len(), 1);
+        assert_eq!(
+            Mesh::from_mesh_gl(&unit_cube()).unwrap().decompose().len(),
+            1
+        );
     }
 
     /// M.3.4a — `set_properties`: stamp RGBA onto every vertex (the `color()` overwrite), confirm the
@@ -1421,7 +1561,7 @@ mod tests {
     /// strip to position-only.
     #[test]
     fn set_properties_stamps_color_and_reads_old() {
-        let cube = Mesh::from_mesh_gl(&unit_cube()); // position-only, num_prop 0 (Impl `numProp_`)
+        let cube = Mesh::from_mesh_gl(&unit_cube()).unwrap(); // position-only, num_prop 0 (Impl `numProp_`)
         assert_eq!(cube.num_prop, 0);
         assert!(cube.properties.is_empty());
 
@@ -1449,11 +1589,15 @@ mod tests {
             assert_eq!(row, [0.4, 0.8, 1.2, 2.0]);
         }
 
-        // num_prop == 0 strips back to position-only.
+        // num_prop == 0 strips back to position-only. Compare against the CANONICALIZED fixture —
+        // the ingest tail Morton-sorted `red`'s geometry (M.2.4a), so raw file order is gone.
         let stripped = red.set_properties(0, |_new, _pos, _old| unreachable!());
         assert_eq!(stripped.num_prop, 0);
         assert!(stripped.properties.is_empty());
-        assert_eq!(stripped.to_mesh_gl(), unit_cube());
+        assert_eq!(
+            stripped.to_mesh_gl(),
+            Mesh::from_mesh_gl(&unit_cube()).unwrap().to_mesh_gl()
+        );
     }
 
     /// M.3.4b.1 — the property model is DECOUPLED: `prop_vert` indexes `properties` in its OWN space, so
@@ -1471,7 +1615,11 @@ mod tests {
         // 3 geometric verts, but 4 PROP-verts: the corner at `a` carries prop-row 3 (a color seam), not
         // row 0 — so `properties` has one more row than `vert_pos`.
         let mesh = Mesh {
-            vert_pos: vec![Vec3::ZERO, Vec3::new(1.0, 0.0, 0.0), Vec3::new(0.0, 1.0, 0.0)],
+            vert_pos: vec![
+                Vec3::ZERO,
+                Vec3::new(1.0, 0.0, 0.0),
+                Vec3::new(0.0, 1.0, 0.0),
+            ],
             halfedge: vec![he(a, 3), he(b, 1), he(c, 2)],
             num_prop: 2,
             #[rustfmt::skip]
@@ -1479,15 +1627,26 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(mesh.num_vert(), 3);
-        assert_eq!(mesh.num_prop_vert(), 4, "prop-verts decouple from geometric verts");
+        assert_eq!(
+            mesh.num_prop_vert(),
+            4,
+            "prop-verts decouple from geometric verts"
+        );
         let corner_a = HalfedgeId::new(0);
         assert_eq!(mesh.start(corner_a), a, "geometrically at vert a");
-        assert_eq!(mesh.prop(corner_a).u(), 3, "but reads the seam prop-row, not row 0");
+        assert_eq!(
+            mesh.prop(corner_a).u(),
+            3,
+            "but reads the seam prop-row, not row 0"
+        );
         let pv = mesh.prop(corner_a).u();
-        assert_eq!(&mesh.properties[pv * mesh.num_prop..][..mesh.num_prop], [40.0, 41.0]);
+        assert_eq!(
+            &mesh.properties[pv * mesh.num_prop..][..mesh.num_prop],
+            [40.0, 41.0]
+        );
 
         // Position-only degenerates back to 1:1: num_prop_vert == num_vert.
-        let plain = Mesh::from_mesh_gl(&unit_cube());
+        let plain = Mesh::from_mesh_gl(&unit_cube()).unwrap();
         assert_eq!(plain.num_prop, 0);
         assert_eq!(plain.num_prop_vert(), plain.num_vert());
     }
@@ -1515,13 +1674,19 @@ mod tests {
         assert_eq!(b.bounding_box().max, v3(2.0, 3.0, 4.0));
 
         // Invalid sizes → InvalidConstruction (C++ Invalid()).
-        assert_eq!(Mesh::cube(v3(-1.0, 1.0, 1.0), true).unwrap_err(), Error::InvalidConstruction);
-        assert_eq!(Mesh::cube(Vec3::ZERO, false).unwrap_err(), Error::InvalidConstruction);
+        assert_eq!(
+            Mesh::cube(v3(-1.0, 1.0, 1.0), true).unwrap_err(),
+            Error::InvalidConstruction
+        );
+        assert_eq!(
+            Mesh::cube(Vec3::ZERO, false).unwrap_err(),
+            Error::InvalidConstruction
+        );
     }
 
     #[test]
     fn cube_ingests_and_is_manifold() {
-        let mesh = Mesh::from_mesh_gl(&unit_cube());
+        let mesh = Mesh::from_mesh_gl(&unit_cube()).unwrap();
         assert_eq!(mesh.num_vert(), 8);
         assert_eq!(mesh.num_tri(), 12);
         assert_eq!(mesh.halfedge.len(), 36);
@@ -1533,7 +1698,7 @@ mod tests {
 
     #[test]
     fn cube_volume_and_area_exact() {
-        let mesh = Mesh::from_mesh_gl(&unit_cube());
+        let mesh = Mesh::from_mesh_gl(&unit_cube()).unwrap();
         // outward winding ⇒ +1 exactly (the sign check: inward winding would give -1).
         assert_eq!(mesh.volume(), 1.0);
         // 6 faces × 1.0 = 6.0.
@@ -1558,8 +1723,10 @@ mod tests {
         let mesh = Mesh::from_mesh_gl(&MeshGl {
             num_prop: 3,
             vert_properties: verts,
-            tri_verts: base.tri_verts, ..Default::default()
-        });
+            tri_verts: base.tri_verts,
+            ..Default::default()
+        })
+        .unwrap();
         let v = mesh.volume();
         assert!((v - 8.0).abs() < 1e-9, "volume {v} !~ 8");
         assert_eq!(mesh.surface_area(), 24.0); // exact: differences only
@@ -1567,10 +1734,17 @@ mod tests {
 
     #[test]
     fn mesh_gl_round_trips() {
+        // The ingest tail (M.2.4a) canonicalizes — Morton sort et al. — so raw-file order is NOT a
+        // fixed point anymore (matching C++, whose Impl(MeshGL) ctor does the same). The identity
+        // holds from the FIRST emit onward: a canonicalized MeshGl re-ingests to itself exactly.
         let cube = unit_cube();
-        let mesh = Mesh::from_mesh_gl(&cube);
-        let out = mesh.to_mesh_gl();
-        assert_eq!(out, cube); // exact identity for a well-formed position-only mesh
+        let canonical = Mesh::from_mesh_gl(&cube).unwrap().to_mesh_gl();
+        let again = Mesh::from_mesh_gl(&canonical).unwrap().to_mesh_gl();
+        assert_eq!(again, canonical); // exact identity once canonical
+        // Geometry itself survives the canonicalization.
+        let m = Mesh::from_mesh_gl(&cube).unwrap();
+        assert_eq!((m.num_vert(), m.num_tri()), (8, 12));
+        assert_eq!(m.volume(), 1.0);
     }
 
     #[test]
@@ -1595,9 +1769,10 @@ mod tests {
         let m = MeshGl {
             num_prop: 7,
             vert_properties: vp,
-            tri_verts: cube.tri_verts, ..Default::default()
+            tri_verts: cube.tri_verts,
+            ..Default::default()
         };
-        let mesh = Mesh::from_mesh_gl(&m);
+        let mesh = Mesh::from_mesh_gl(&m).unwrap();
         assert_eq!(mesh.num_prop, 4); // Impl `numProp_` = interchange 7 − 3 position channels
         assert_eq!(mesh.properties.len(), 8 * 4);
         assert_eq!(mesh.volume(), 1.0); // positions still the unit cube
@@ -1607,8 +1782,11 @@ mod tests {
         // rows as a bit-exact SET instead.
         let gl = mesh.to_mesh_gl();
         assert_eq!(gl.num_prop, 7);
-        assert!(gl.merge_from_vert.is_empty(), "no coincident verts ⟹ no merge-vectors");
-        let re = Mesh::from_mesh_gl(&gl);
+        assert!(
+            gl.merge_from_vert.is_empty(),
+            "no coincident verts ⟹ no merge-vectors"
+        );
+        let re = Mesh::from_mesh_gl(&gl).unwrap();
         assert_eq!(re.num_prop, 4);
         assert_eq!(re.num_vert(), 8);
         assert!((re.volume() - 1.0).abs() < 1e-12);
@@ -1616,12 +1794,23 @@ mod tests {
             let mut rows: Vec<[u64; 4]> = m
                 .properties
                 .chunks_exact(4)
-                .map(|r| [r[0].to_bits(), r[1].to_bits(), r[2].to_bits(), r[3].to_bits()])
+                .map(|r| {
+                    [
+                        r[0].to_bits(),
+                        r[1].to_bits(),
+                        r[2].to_bits(),
+                        r[3].to_bits(),
+                    ]
+                })
                 .collect();
             rows.sort_unstable();
             rows
         };
-        assert_eq!(bits(&mesh), bits(&re), "the RGBA rows survive the round-trip as a set");
+        assert_eq!(
+            bits(&mesh),
+            bits(&re),
+            "the RGBA rows survive the round-trip as a set"
+        );
     }
 
     #[test]
@@ -1630,9 +1819,18 @@ mod tests {
         let m = MeshGl {
             num_prop: 3,
             vert_properties: vec![0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
-            tri_verts: vec![0, 1, 2], ..Default::default()
+            tri_verts: vec![0, 1, 2],
+            ..Default::default()
         };
-        let mesh = Mesh::from_mesh_gl(&m);
+        // Ingest itself refuses it now (the C++ MakeEmpty(NotManifold) arm, M.2.4a); the pairing
+        // behavior is still pinned below the boundary via create_halfedges.
+        assert_eq!(Mesh::from_mesh_gl(&m).unwrap_err(), Error::NotManifold);
+        let mut mesh = Mesh {
+            vert_pos: (0..3).map(|_| Vec3::ZERO).collect(),
+            num_prop: 0,
+            ..Default::default()
+        };
+        mesh.create_halfedges(&[[0, 1, 2]]);
         assert!(!mesh.is_manifold());
     }
 
@@ -1649,9 +1847,18 @@ mod tests {
                 0.0, 0.0, 1.0, // 3
                 0.0, -1.0, 0.0, // 4
             ],
-            tri_verts: vec![0, 1, 2, 0, 1, 3, 0, 1, 4], ..Default::default()
+            tri_verts: vec![0, 1, 2, 0, 1, 3, 0, 1, 4],
+            ..Default::default()
         };
-        let mesh = Mesh::from_mesh_gl(&m);
+        // Ingest itself refuses it now (the C++ MakeEmpty(NotManifold) arm, M.2.4a); the pairing
+        // behavior is still pinned below the boundary via create_halfedges.
+        assert_eq!(Mesh::from_mesh_gl(&m).unwrap_err(), Error::NotManifold);
+        let mut mesh = Mesh {
+            vert_pos: (0..5).map(|_| Vec3::ZERO).collect(),
+            num_prop: 0,
+            ..Default::default()
+        };
+        mesh.create_halfedges(&[[0, 1, 2], [0, 1, 3], [0, 1, 4]]);
         assert!(!mesh.is_manifold());
     }
 
@@ -1666,7 +1873,7 @@ mod tests {
 
     #[test]
     fn bbox_from_cube() {
-        let mesh = Mesh::from_mesh_gl(&unit_cube());
+        let mesh = Mesh::from_mesh_gl(&unit_cube()).unwrap();
         assert_eq!(mesh.b_box.min, Vec3::new(0.0, 0.0, 0.0));
         assert_eq!(mesh.b_box.max, Vec3::new(1.0, 1.0, 1.0));
         assert_eq!(mesh.b_box.size(), Vec3::new(1.0, 1.0, 1.0));
@@ -1674,10 +1881,16 @@ mod tests {
 
     #[test]
     fn accessors_and_meshgl_counts() {
-        let mesh = Mesh::from_mesh_gl(&unit_cube());
+        let mesh = Mesh::from_mesh_gl(&unit_cube()).unwrap();
         // prop() accessor: position-only ⇒ prop_vert == start_vert.
-        assert_eq!(mesh.prop(HalfedgeId::new(0)), mesh.start(HalfedgeId::new(0)));
-        assert_eq!(mesh.prop(HalfedgeId::new(17)), mesh.start(HalfedgeId::new(17)));
+        assert_eq!(
+            mesh.prop(HalfedgeId::new(0)),
+            mesh.start(HalfedgeId::new(0))
+        );
+        assert_eq!(
+            mesh.prop(HalfedgeId::new(17)),
+            mesh.start(HalfedgeId::new(17))
+        );
         // MeshGl count helpers.
         let gl = mesh.to_mesh_gl();
         assert_eq!(gl.num_vert(), 8);
@@ -1716,7 +1929,7 @@ mod tests {
 
     #[test]
     fn calculate_bbox_skips_nan_verts() {
-        let mut m = Mesh::from_mesh_gl(&unit_cube());
+        let mut m = Mesh::from_mesh_gl(&unit_cube()).unwrap();
         m.vert_pos.push(Vec3::new(f64::NAN, 50.0, 50.0)); // NaN x → skipped (Manifold's isnan(a.x))
         m.calculate_bbox();
         // the NaN vert is ignored; the bbox stays the unit cube's.
@@ -1727,13 +1940,30 @@ mod tests {
     #[test]
     fn same_direction_duplicate_edge_is_unpaired() {
         // Two triangles share the DIRECTED edge 0→1 (not a reverse pair), so the len-2 group fails the
-        // reverse check and both stay unpaired → not manifold.
-        let m = Mesh::from_mesh_gl(&MeshGl {
-            num_prop: 3,
-            vert_properties: vec![0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
-            tri_verts: vec![0, 1, 2, 0, 1, 3], ..Default::default()
-        });
+        // reverse check and both stay unpaired → not manifold. Built RAW: `from_mesh_gl` now rejects
+        // this at ingest (Err(NotManifold), the C++ MakeEmpty arm — pinned below).
+        let mut m = Mesh {
+            vert_pos: vec![
+                Vec3::new(0.0, 0.0, 0.0),
+                Vec3::new(1.0, 0.0, 0.0),
+                Vec3::new(0.0, 1.0, 0.0),
+                Vec3::new(0.0, 0.0, 1.0),
+            ],
+            num_prop: 0,
+            ..Default::default()
+        };
+        m.create_halfedges(&[[0, 1, 2], [0, 1, 3]]);
         assert!(!m.is_manifold());
+        assert_eq!(
+            Mesh::from_mesh_gl(&MeshGl {
+                num_prop: 3,
+                vert_properties: vec![0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+                tri_verts: vec![0, 1, 2, 0, 1, 3],
+                ..Default::default()
+            })
+            .unwrap_err(),
+            Error::NotManifold
+        );
         // the shared 0→1 half-edges never linked
         assert!(
             m.halfedge
@@ -1748,8 +1978,17 @@ mod tests {
 
     #[test]
     fn unit_epsilon_and_tolerance() {
-        let mut mesh = Mesh::from_mesh_gl(&unit_cube());
-        // Fresh mesh: the -1 "unset" sentinel.
+        // Built raw: the ingest tail now runs set_epsilon itself (M.2.4a), so a from_mesh_gl mesh
+        // never carries the -1 sentinel this test pins.
+        let mut mesh = Mesh::from_mesh_gl(&unit_cube()).unwrap();
+        assert_eq!(
+            mesh.epsilon,
+            crate::boolean::predicates::K_PRECISION,
+            "ingest set epsilon"
+        );
+        mesh.epsilon = -1.0;
+        mesh.tolerance = -1.0;
+        // The -1 "unset" sentinel.
         assert_eq!(mesh.epsilon, -1.0);
         assert_eq!(mesh.tolerance, -1.0);
         // Scale of [0,1]³ is 1 ⇒ epsilon = kPrecision·1 = 1e-12; tolerance grows to match (was -1).
@@ -1764,11 +2003,12 @@ mod tests {
 
     #[test]
     fn cube_face_normals_are_axis_aligned() {
-        let mut mesh = Mesh::from_mesh_gl(&unit_cube());
+        let mut mesh = Mesh::from_mesh_gl(&unit_cube()).unwrap();
         mesh.calculate_face_normals();
         assert_eq!(mesh.face_normal.len(), 12);
-        // Every face of an axis-aligned cube has a unit ±axis normal, and the pair of tris on each
-        // face agree. The fixture's face order is -Z,-Z,+Z,+Z,-Y,-Y,+Y,+Y,-X,-X,+X,+X.
+        // Every face of an axis-aligned cube has a unit ±axis normal, two tris per face direction.
+        // (Tri ORDER is no longer the fixture's: the ingest tail Morton-sorts, M.2.4a — so count per
+        // direction instead of indexing.)
         let expect = [
             Vec3::new(0.0, 0.0, -1.0),
             Vec3::new(0.0, 0.0, 1.0),
@@ -1777,8 +2017,9 @@ mod tests {
             Vec3::new(-1.0, 0.0, 0.0),
             Vec3::new(1.0, 0.0, 0.0),
         ];
-        for (tri, n) in mesh.face_normal.iter().enumerate() {
-            assert_eq!(*n, expect[tri / 2], "tri {tri}");
+        for dir in expect {
+            let count = mesh.face_normal.iter().filter(|&&n| n == dir).count();
+            assert_eq!(count, 2, "direction {dir:?}");
         }
     }
 

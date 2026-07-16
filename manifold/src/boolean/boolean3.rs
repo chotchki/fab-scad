@@ -555,15 +555,13 @@ mod tests {
             0,1,5, 0,5,4, 2,3,7, 2,7,6,
             0,4,7, 0,7,3, 1,2,6, 1,6,5,
         ];
-        let mut mesh = Mesh::from_mesh_gl(&MeshGl {
+        // Ingest runs the full ctor tail now (M.2.4a) — epsilon + normals included.
+        Mesh::from_mesh_gl(&MeshGl {
             num_prop: 3,
             vert_properties: verts,
             tri_verts: tris, ..Default::default()
-        });
-        mesh.set_epsilon(-1.0, false);
-        mesh.calculate_face_normals();
-        mesh.calculate_vert_normals();
-        mesh
+        })
+        .unwrap()
     }
 
     #[test]

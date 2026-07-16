@@ -100,8 +100,10 @@ mod tests {
         Mesh::from_mesh_gl(&MeshGl {
             num_prop: 3,
             vert_properties: verts,
-            tri_verts: tris, ..Default::default()
+            tri_verts: tris,
+            ..Default::default()
         })
+        .unwrap()
     }
 
     #[test]
@@ -131,24 +133,43 @@ mod tests {
         assert_eq!(strictly(&m).unwrap_err(), "non-finite vertex position");
     }
 
+    /// A single open triangle, built RAW (create_halfedges) — `from_mesh_gl` now rejects
+    /// non-manifold input at ingest (the C++ `MakeEmpty(NotManifold)` arm, M.2.4a), so invalid
+    /// meshes for check-machinery tests are constructed below the ingest boundary.
+    fn open_triangle() -> Mesh {
+        use crate::linalg::Vec3;
+        let mut m = Mesh {
+            vert_pos: vec![
+                Vec3::new(0.0, 0.0, 0.0),
+                Vec3::new(1.0, 0.0, 0.0),
+                Vec3::new(0.0, 1.0, 0.0),
+            ],
+            num_prop: 0,
+            ..Default::default()
+        };
+        m.create_halfedges(&[[0, 1, 2]]);
+        m
+    }
+
     #[test]
     fn non_manifold_fails_strictly() {
-        // single triangle → open, unpaired edges.
-        let m = Mesh::from_mesh_gl(&MeshGl {
-            num_prop: 3,
-            vert_properties: vec![0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
-            tri_verts: vec![0, 1, 2], ..Default::default()
-        });
-        assert!(strictly(&m).is_err());
+        // single triangle → open, unpaired edges; ingest itself refuses it.
+        assert!(strictly(&open_triangle()).is_err());
+        assert_eq!(
+            Mesh::from_mesh_gl(&MeshGl {
+                num_prop: 3,
+                vert_properties: vec![0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+                tri_verts: vec![0, 1, 2],
+                ..Default::default()
+            })
+            .unwrap_err(),
+            crate::status::Error::NotManifold
+        );
     }
 
     #[test]
     fn intermediate_check_gated_by_flag() {
-        let bad = Mesh::from_mesh_gl(&MeshGl {
-            num_prop: 3,
-            vert_properties: vec![0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
-            tri_verts: vec![0, 1, 2], ..Default::default()
-        });
+        let bad = open_triangle();
         // flag off: no-op even on a broken mesh.
         intermediate_check(&bad, KernelParams::default());
     }
@@ -156,11 +177,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "intermediate check failed")]
     fn intermediate_check_panics_when_on() {
-        let bad = Mesh::from_mesh_gl(&MeshGl {
-            num_prop: 3,
-            vert_properties: vec![0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
-            tri_verts: vec![0, 1, 2], ..Default::default()
-        });
+        let bad = open_triangle();
         intermediate_check(
             &bad,
             KernelParams {

@@ -115,7 +115,8 @@ impl Mesh {
         // Per-vertex Morton code — an independent pure function of (position, bbox), so it maps through
         // the order-preserving `par::` seam (par == seq by construction). M.4.
         let bbox = self.b_box;
-        let vert_morton: Vec<u32> = crate::par::map_collect(&self.vert_pos, |&p| morton_code(p, bbox));
+        let vert_morton: Vec<u32> =
+            crate::par::map_collect(&self.vert_pos, |&p| morton_code(p, bbox));
 
         // new -> old permutation, sorted by Morton code with the ORIGINAL INDEX as a total-order
         // tiebreak (M.4.2). Distinct verts sharing a 30-bit-quantized Morton code would otherwise tie,
@@ -145,10 +146,19 @@ impl Mesh {
         }
 
         // NaN verts got kNoCode and sorted to the end — keep only the real prefix.
-        let keep = new2old.iter().take_while(|&&old| vert_morton[old] != K_NO_CODE).count();
-        self.vert_pos = new2old[..keep].iter().map(|&old| self.vert_pos[old]).collect();
+        let keep = new2old
+            .iter()
+            .take_while(|&&old| vert_morton[old] != K_NO_CODE)
+            .count();
+        self.vert_pos = new2old[..keep]
+            .iter()
+            .map(|&old| self.vert_pos[old])
+            .collect();
         if self.vert_normal.len() == num_vert {
-            self.vert_normal = new2old[..keep].iter().map(|&old| self.vert_normal[old]).collect();
+            self.vert_normal = new2old[..keep]
+                .iter()
+                .map(|&old| self.vert_normal[old])
+                .collect();
         }
     }
 
@@ -179,7 +189,10 @@ impl Mesh {
         // Original-index tiebreak for total order (M.4.2) — same rationale as `sort_verts`.
         let mut new2old: Vec<usize> = (0..old_num_tri).collect();
         new2old.sort_by(|&a, &b| face_morton[a].cmp(&face_morton[b]).then(a.cmp(&b)));
-        let keep = new2old.iter().take_while(|&&old| face_morton[old] != K_NO_CODE).count();
+        let keep = new2old
+            .iter()
+            .take_while(|&&old| face_morton[old] != K_NO_CODE)
+            .count();
         new2old.truncate(keep);
 
         self.gather_faces(&new2old, old_num_tri);
@@ -249,7 +262,13 @@ mod tests {
             0,2,1, 0,3,2, 4,5,6, 4,6,7, 0,1,5, 0,5,4,
             2,3,7, 2,7,6, 0,4,7, 0,7,3, 1,2,6, 1,6,5,
         ];
-        let mut a = Mesh::from_mesh_gl(&MeshGl { num_prop: 3, vert_properties: verts.clone(), tri_verts: tris.clone(), ..Default::default() });
+        let mut a = Mesh::from_mesh_gl(&MeshGl {
+            num_prop: 3,
+            vert_properties: verts.clone(),
+            tri_verts: tris.clone(),
+            ..Default::default()
+        })
+        .unwrap();
         let vol_before = a.volume();
         a.calculate_bbox();
         a.sort_geometry();
@@ -259,8 +278,15 @@ mod tests {
         assert_eq!(a.num_tri(), 12);
         assert_eq!(a.volume(), vol_before);
         // Verts are now in nondecreasing Morton order.
-        let codes: Vec<u32> = a.vert_pos.iter().map(|&p| morton_code(p, a.b_box)).collect();
-        assert!(codes.windows(2).all(|w| w[0] <= w[1]), "verts not Morton-ordered");
+        let codes: Vec<u32> = a
+            .vert_pos
+            .iter()
+            .map(|&p| morton_code(p, a.b_box))
+            .collect();
+        assert!(
+            codes.windows(2).all(|w| w[0] <= w[1]),
+            "verts not Morton-ordered"
+        );
     }
 
     #[test]

@@ -26,7 +26,7 @@
 use std::collections::{BTreeMap, VecDeque};
 
 use crate::boolean::polygon::{PolyVert, triangulate};
-use crate::boolean::predicates::get_axis_aligned_projection;
+use crate::boolean::predicates::{ccw, get_axis_aligned_projection};
 use crate::boolean::vocab::{Halfedge, TriRef};
 use crate::mesh::Mesh;
 use crate::mesh_ids::{HalfedgeId, TriId, VertId};
@@ -40,7 +40,12 @@ use crate::mesh_ids::{HalfedgeId, TriId, VertId};
 /// smallest-key first-inserted edge, `find(endVert)` continues it, `erase` consumes. We mirror that
 /// with a `BTreeMap<VertId, VecDeque<local>>` — smallest key via the ordered map, insertion order via
 /// the deque (FIFO), `pop_front` = `find`+`erase`.
-fn assemble_halfedges(hes: &[Halfedge], first: usize, last: usize, start_idx: i32) -> Vec<Vec<i32>> {
+fn assemble_halfedges(
+    hes: &[Halfedge],
+    first: usize,
+    last: usize,
+    start_idx: i32,
+) -> Vec<Vec<i32>> {
     let n = last - first;
     let mut vert_edge: BTreeMap<VertId, VecDeque<usize>> = BTreeMap::new();
     for local in 0..n {
@@ -164,24 +169,59 @@ pub fn face2tri(
         let last = face_edge[face + 1] as usize;
         let num_edge = last - first;
         let mut tris: Vec<[i32; 3]> = Vec::new();
+        // C++ `Face2Tri`'s numEdge==4 QUAD fast path (face_op.cpp:237-265), M.2.4a: diagonal
+        // quad[0]-quad[2] preferred; flipped when non-CCW, or when both diagonals are valid and
+        // quad[1]-quad[3] is shorter. The unified ear-clip used to take these too — same covered
+        // SOLID, but a different diagonal on degenerate quads changes the EDGE SET, which reorders
+        // the collapse cascade downstream (half the Cray divergence). Verbatim now.
+        if num_edge == 4 {
+            let projection = get_axis_aligned_projection(face_normal_in[face]);
+            let quad = assemble_halfedges(face_halfedges, first, last, face_edge[face])
+                .into_iter()
+                .next()
+                .expect("quad face has a loop");
+            let p = |ge: i32| projection.apply(out.pos(face_halfedges[ge as usize].start_vert));
+            let tri_ccw = |t: [i32; 3]| ccw(p(t[0]), p(t[1]), p(t[2]), epsilon) >= 0;
+            let cand = [
+                [[quad[0], quad[1], quad[2]], [quad[0], quad[2], quad[3]]],
+                [[quad[1], quad[2], quad[3]], [quad[0], quad[1], quad[3]]],
+            ];
+            let mut choice = 0usize;
+            if !(tri_ccw(cand[0][0]) && tri_ccw(cand[0][1])) {
+                choice = 1;
+            } else if tri_ccw(cand[1][0]) && tri_ccw(cand[1][1]) {
+                let pos = |ge: i32| out.pos(face_halfedges[ge as usize].start_vert);
+                let diag0 = pos(quad[0]) - pos(quad[2]);
+                let diag1 = pos(quad[1]) - pos(quad[3]);
+                if diag0.dot(diag0) > diag1.dot(diag1) {
+                    choice = 1;
+                }
+            }
+            tris = cand[choice].to_vec();
+            total_tris += tris.len();
+            face_tris.push(tris);
+            continue;
+        }
         if num_edge >= 3 {
             // Collect ALL loops of the face — an outer plus any interior hole loops — and hand them to the
             // multi-loop triangulator together, so a punched-through face gets its hole keyholed instead of
             // filled over. `idx` is the GLOBAL buffer index, so the returned triangles name face-halfedge
             // corners directly (what `write_local_triangles` consumes).
             let projection = get_axis_aligned_projection(face_normal_in[face]);
-            let loops: Vec<Vec<PolyVert>> = assemble_halfedges(face_halfedges, first, last, face_edge[face])
-                .into_iter()
-                .map(|loop_edges| {
-                    loop_edges
-                        .into_iter()
-                        .map(|ge| PolyVert {
-                            pos: projection.apply(out.pos(face_halfedges[ge as usize].start_vert)),
-                            idx: ge,
-                        })
-                        .collect()
-                })
-                .collect();
+            let loops: Vec<Vec<PolyVert>> =
+                assemble_halfedges(face_halfedges, first, last, face_edge[face])
+                    .into_iter()
+                    .map(|loop_edges| {
+                        loop_edges
+                            .into_iter()
+                            .map(|ge| PolyVert {
+                                pos: projection
+                                    .apply(out.pos(face_halfedges[ge as usize].start_vert)),
+                                idx: ge,
+                            })
+                            .collect()
+                    })
+                    .collect();
             tris = triangulate(&loops, epsilon);
         }
         total_tris += tris.len();
@@ -201,7 +241,12 @@ pub fn face2tri(
     let mut tri_normal = vec![crate::linalg::Vec3::ZERO; total_tris];
     // One provenance ref per output triangle; a placeholder for empty faces (never survives — empty
     // faces contribute no triangles). Every real triangle is overwritten from its face's first half-edge.
-    let placeholder = TriRef { mesh_id: 0, original_id: -1, face_id: 0, coplanar_id: -1 };
+    let placeholder = TriRef {
+        mesh_id: 0,
+        original_id: -1,
+        face_id: 0,
+        coplanar_id: -1,
+    };
     let mut tri_ref = vec![placeholder; total_tris];
     let mut contour2tri = vec![HalfedgeId::NONE; face_halfedges.len()];
 
@@ -211,7 +256,13 @@ pub fn face2tri(
         if tris.is_empty() {
             continue;
         }
-        write_local_triangles(out, &mut contour2tri, face_halfedges, tri_offset[face], tris);
+        write_local_triangles(
+            out,
+            &mut contour2tri,
+            face_halfedges,
+            tri_offset[face],
+            tris,
+        );
         let face_ref = halfedge_ref[face_edge[face] as usize];
         for t in 0..tris.len() {
             tri_normal[tri_offset[face] + t] = face_normal_in[face];
@@ -314,12 +365,42 @@ mod tests {
         };
         // Provenance: face 0 came from P source triangle 5, face 1 from Q source triangle 8.
         let href = [
-            TriRef { mesh_id: 0, original_id: -1, face_id: 5, coplanar_id: -1 },
-            TriRef { mesh_id: 0, original_id: -1, face_id: 5, coplanar_id: -1 },
-            TriRef { mesh_id: 0, original_id: -1, face_id: 5, coplanar_id: -1 },
-            TriRef { mesh_id: 1, original_id: -1, face_id: 8, coplanar_id: -1 },
-            TriRef { mesh_id: 1, original_id: -1, face_id: 8, coplanar_id: -1 },
-            TriRef { mesh_id: 1, original_id: -1, face_id: 8, coplanar_id: -1 },
+            TriRef {
+                mesh_id: 0,
+                original_id: -1,
+                face_id: 5,
+                coplanar_id: -1,
+            },
+            TriRef {
+                mesh_id: 0,
+                original_id: -1,
+                face_id: 5,
+                coplanar_id: -1,
+            },
+            TriRef {
+                mesh_id: 0,
+                original_id: -1,
+                face_id: 5,
+                coplanar_id: -1,
+            },
+            TriRef {
+                mesh_id: 1,
+                original_id: -1,
+                face_id: 8,
+                coplanar_id: -1,
+            },
+            TriRef {
+                mesh_id: 1,
+                original_id: -1,
+                face_id: 8,
+                coplanar_id: -1,
+            },
+            TriRef {
+                mesh_id: 1,
+                original_id: -1,
+                face_id: 8,
+                coplanar_id: -1,
+            },
         ];
         face2tri(&mut out, &face_edge, &fhes, &href, 1e-9);
 
@@ -340,6 +421,10 @@ mod tests {
             .count();
         assert_eq!(paired, 2, "the shared 0↔2 edge pairs both ways");
         // Every output start vert is one of the 4 input verts.
-        assert!(out.halfedge.iter().all(|h| (0..4).contains(&h.start_vert.raw())));
+        assert!(
+            out.halfedge
+                .iter()
+                .all(|h| (0..4).contains(&h.start_vert.raw()))
+        );
     }
 }

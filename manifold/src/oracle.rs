@@ -43,11 +43,8 @@ impl KernelDriver for RustKernel {
         "rust(fab-manifold)"
     }
     fn ingest(mesh: &MeshGl) -> Result<Mesh, String> {
-        let m = Mesh::from_mesh_gl(mesh);
-        if !m.is_manifold() {
-            return Err("rust: not manifold".to_string());
-        }
-        Ok(m)
+        // from_mesh_gl now runs the full C++ ctor tail (M.2.4a) — manifold/finite rejection included.
+        Mesh::from_mesh_gl(mesh).map_err(|e| format!("rust: {e}"))
     }
     fn volume(s: &Mesh) -> f64 {
         s.volume()
@@ -359,7 +356,7 @@ mod tests {
             );
 
             // (3) round-trip idempotence — our own re-ingest preserves geometry to the bit.
-            let reingested = Mesh::from_mesh_gl(&rust.to_mesh_gl());
+            let reingested = Mesh::from_mesh_gl(&rust.to_mesh_gl()).unwrap();
             assert_eq!(
                 rust.volume().to_bits(),
                 reingested.volume().to_bits(),
@@ -395,16 +392,13 @@ mod tests {
             0,1,5, 0,5,4, 2,3,7, 2,7,6,
             0,4,7, 0,7,3, 1,2,6, 1,6,5,
         ];
-        let mut mesh = Mesh::from_mesh_gl(&MeshGl {
+        Mesh::from_mesh_gl(&MeshGl {
             num_prop: 3,
             vert_properties: verts,
             tri_verts: tris,
             ..Default::default()
-        });
-        mesh.set_epsilon(-1.0, false);
-        mesh.initialize_original();
-        mesh.set_normals_and_coplanar();
-        mesh
+        })
+        .unwrap()
     }
 
     // =====================================================================================
@@ -484,16 +478,13 @@ mod tests {
             0,1,5, 0,5,4, 2,3,7, 2,7,6,
             0,4,7, 0,7,3, 1,2,6, 1,6,5,
         ];
-        let mut mesh = Mesh::from_mesh_gl(&MeshGl {
+        Mesh::from_mesh_gl(&MeshGl {
             num_prop: 3,
             vert_properties: verts,
             tri_verts: tris,
             ..Default::default()
-        });
-        mesh.set_epsilon(-1.0, false);
-        mesh.initialize_original();
-        mesh.set_normals_and_coplanar();
-        mesh
+        })
+        .unwrap()
     }
 
     /// GATE-A robustness sweep: several general-position box∪box configs (varied sizes + offsets, so cut
@@ -868,15 +859,54 @@ mod tests {
     /// point-in-mesh on BOTH meshes over `n` seeded points in the shared bbox). Estimates the
     /// symmetric-difference fraction; a correct union disagrees only on the vanishing boundary-rounding
     /// shell. `Some(reason)` on divergence.
+    /// M.2.4a un-blinding: component count + sorted per-component volumes, each gated at its OWN
+    /// relative scale — garbage components can never hide under a much larger total again.
+    fn component_structure_match(l: &str, op: &str, r: &str, a: &Mesh, b: &Mesh) {
+        let vols = |m: &Mesh| {
+            let mut v: Vec<f64> = m.decompose().iter().map(Mesh::volume).collect();
+            v.sort_by(f64::total_cmp);
+            v
+        };
+        let (av, bv) = (vols(a), vols(b));
+        assert_eq!(
+            av.len(),
+            bv.len(),
+            "{l} {op} {r}: component count {} vs {} (rust {av:?} cpp {bv:?})",
+            av.len(),
+            bv.len()
+        );
+        for (x, y) in av.iter().zip(&bv) {
+            assert!(
+                (x - y).abs() / y.abs().max(1e-9) < 1e-6,
+                "{l} {op} {r}: component volume {x} vs {y}"
+            );
+        }
+    }
+
     fn solid_divergence(a: &Mesh, b: &Mesh, n: usize, seed: u64, vol_tol: f64) -> Option<String> {
+        solid_divergence_gated(a, b, n, seed, vol_tol, true)
+    }
+
+    /// [`solid_divergence`] with the genus gate optional — for ε-INVALID inputs (the
+    /// self-intersecting corpus models) under ops upstream itself never exercises on them:
+    /// both engines produce a valid solid, but the internal-wall topology (and hence genus) of a
+    /// self-intersecting input's difference/intersection is not a promised invariant on either side.
+    fn solid_divergence_gated(
+        a: &Mesh,
+        b: &Mesh,
+        n: usize,
+        seed: u64,
+        vol_tol: f64,
+        check_genus: bool,
+    ) -> Option<String> {
         if let Some(r) = invariants_divergence(a, b.volume(), b.b_box, vol_tol) {
             return Some(format!("invariant: {r}"));
         }
         // Genus (handle count) is a topological invariant a filled-over hole or a spurious internal wall
         // would break even when volume matches — the exact defect M.2.3's keyhole path fixed. Cheap, so
-        // check it on every differential.
+        // check it on every differential (except the ε-invalid carve-out above).
         let (ga, gb) = (RustKernel::genus(a), RustKernel::genus(b));
-        if ga != gb {
+        if check_genus && ga != gb {
             return Some(format!("genus {ga} vs {gb}"));
         }
         let lo = a.b_box.min.cmin(b.b_box.min);
@@ -961,7 +991,7 @@ mod tests {
             }
         }
         // C++ result as our Mesh, for the Monte-Carlo point-in-mesh (a triangle soup is enough).
-        let b = Mesh::from_mesh_gl(&cpp_to_mesh_gl(&ccpp));
+        let b = Mesh::from_mesh_gl_raw(&cpp_to_mesh_gl(&ccpp)).unwrap();
         tracing::debug!(
             target: "manifold::fold",
             rust_genus = crate::check::genus(&acc),
@@ -1059,16 +1089,13 @@ mod tests {
             0,1,5, 0,5,4, 2,3,7, 2,7,6,
             0,4,7, 0,7,3, 1,2,6, 1,6,5,
         ];
-        let mut mesh = Mesh::from_mesh_gl(&MeshGl {
+        Mesh::from_mesh_gl(&MeshGl {
             num_prop: 3,
             vert_properties: verts,
             tri_verts: tris,
             ..Default::default()
-        });
-        mesh.set_epsilon(-1.0, false);
-        mesh.initialize_original();
-        mesh.set_normals_and_coplanar();
-        mesh
+        })
+        .unwrap()
     }
 
     /// THESIS, hardest form: fold-unions of ROTATED cubes — arbitrary face normals, non-axis-aligned
@@ -1160,7 +1187,7 @@ mod tests {
             // Sanity: the fuzzer actually produced at least one tunnel (a genus-adding hole).
             proptest::prop_assert!(ccpp.genus() >= 1, "no hole produced (bars {:?})", bars);
 
-            let b = Mesh::from_mesh_gl(&cpp_to_mesh_gl(&ccpp));
+            let b = Mesh::from_mesh_gl_raw(&cpp_to_mesh_gl(&ccpp)).unwrap();
             if let Some(reason) = solid_divergence(&acc, &b, 3000, 0x4011, 1e-9) {
                 proptest::prop_assert!(false, "keyhole boolean diverges from C++: {reason}\nbars {:?}", bars);
             }
@@ -1200,11 +1227,11 @@ mod tests {
             let gl_l = load_obj(&dir.join(l));
             let gl_r = load_obj(&dir.join(r));
 
-            let mut ml = Mesh::from_mesh_gl(&gl_l);
+            let mut ml = Mesh::from_mesh_gl(&gl_l).unwrap();
             ml.set_epsilon(-1.0, false);
             ml.initialize_original();
             ml.set_normals_and_coplanar();
-            let mut mr = Mesh::from_mesh_gl(&gl_r);
+            let mut mr = Mesh::from_mesh_gl(&gl_r).unwrap();
             mr.set_epsilon(-1.0, false);
             mr.initialize_original();
             mr.set_normals_and_coplanar();
@@ -1215,16 +1242,104 @@ mod tests {
             let cpp = CppKernel::ingest(&gl_l)
                 .unwrap_or_else(|e| panic!("{l}: cpp ingest {e}"))
                 .union(&CppKernel::ingest(&gl_r).unwrap_or_else(|e| panic!("{r}: cpp ingest {e}")));
-            let b = Mesh::from_mesh_gl(&cpp_to_mesh_gl(&cpp));
+            let b = Mesh::from_mesh_gl_raw(&cpp_to_mesh_gl(&cpp)).unwrap();
             // Solid oracle at the tight 1e-9 volume + genus-match + Monte-Carlo (M.2.2.3).
             if let Some(reason) = solid_divergence(&res, &b, mc, 0x0B5E, 1e-9) {
                 panic!("NASTY {l} ∪ {r}: {reason}");
             }
+            // UN-BLINDING (M.2.4a): the total-volume gate is RELATIVE — on Cray, e13-scale garbage
+            // components slid under a 1e-9 gate against the 1.58e116 union. Compare the component
+            // STRUCTURE: count + sorted per-component volumes, each at its OWN scale.
+            component_structure_match(l, "∪", r, &res, &b);
             eprintln!(
                 "nasty ✓ {l} ∪ {r}: vol {:.5} ntri {}",
                 res.volume(),
                 res.num_tri()
             );
+        }
+    }
+
+    /// M.2.4 (close-out) — the nasty corpus through DIFFERENCE and INTERSECTION (the union half
+    /// lives in [`nasty_corpus_union_vs_cpp`]; the C++ suite only ever unions these models, so this
+    /// goes beyond `boolean_complex_test.cpp`). Same solid oracle; a pair whose C++ result is empty
+    /// must be empty for us too (both-empty is a pass, not a skip — Cray's halves genuinely
+    /// intersect or don't, and the oracle decides).
+    #[test]
+    fn nasty_corpus_difference_intersection_vs_cpp() {
+        use crate::boolean::OpType;
+        use crate::boolean::boolean_result::boolean;
+        init_tracing();
+        let Some(dir) = models_dir() else {
+            eprintln!("nasty corpus: models dir not found — skipping");
+            return;
+        };
+        let pairs = [
+            ("Havocglass8_left.obj", "Havocglass8_right.obj", 4000),
+            ("Cray_left.obj", "Cray_right.obj", 4000),
+            (
+                "Generic_Twin_7863.1.t0_left.obj",
+                "Generic_Twin_7863.1.t0_right.obj",
+                4000,
+            ),
+            ("self_intersectA.obj", "self_intersectB.obj", 800),
+        ];
+        for (l, r, mc) in pairs {
+            let gl_l = load_obj(&dir.join(l));
+            let gl_r = load_obj(&dir.join(r));
+
+            let mut ml = Mesh::from_mesh_gl(&gl_l).unwrap();
+            ml.set_epsilon(-1.0, false);
+            ml.initialize_original();
+            ml.set_normals_and_coplanar();
+            let mut mr = Mesh::from_mesh_gl(&gl_r).unwrap();
+            mr.set_epsilon(-1.0, false);
+            mr.initialize_original();
+            mr.set_normals_and_coplanar();
+
+            let cpp_l = CppKernel::ingest(&gl_l).unwrap_or_else(|e| panic!("{l}: cpp ingest {e}"));
+            let cpp_r = CppKernel::ingest(&gl_r).unwrap_or_else(|e| panic!("{r}: cpp ingest {e}"));
+
+            for (op, label) in [(OpType::Subtract, "−"), (OpType::Intersect, "∩")] {
+                let res = boolean(&ml, &mr, op);
+                assert!(
+                    res.is_manifold(),
+                    "{l} {label} {r}: rust result is not manifold"
+                );
+                let cpp = match op {
+                    OpType::Subtract => cpp_l.difference(&cpp_r),
+                    OpType::Intersect => cpp_l.intersection(&cpp_r),
+                    OpType::Add => unreachable!(),
+                };
+                let b = Mesh::from_mesh_gl_raw(&cpp_to_mesh_gl(&cpp)).unwrap();
+                if res.is_empty() || b.is_empty() {
+                    assert!(
+                        res.is_empty() && b.is_empty(),
+                        "{l} {label} {r}: emptiness disagrees — rust {} cpp {}",
+                        res.is_empty(),
+                        b.is_empty()
+                    );
+                    eprintln!("nasty ✓ {l} {label} {r}: both empty");
+                    continue;
+                }
+                // self_intersect A/B are ε-INVALID (self-intersecting) inputs; upstream only ever
+                // UNIONS them (boolean_complex_test, processOverlaps=true). Their difference/
+                // intersection genus is not a stable invariant in either engine — gate those on
+                // volume + Monte-Carlo + manifoldness, genus on everything else.
+                let check_genus = !l.starts_with("self_intersect");
+                if let Some(reason) =
+                    solid_divergence_gated(&res, &b, mc, 0x0B5F, 1e-9, check_genus)
+                {
+                    panic!("NASTY {l} {label} {r}: {reason}");
+                }
+                if check_genus {
+                    component_structure_match(l, label, r, &res, &b);
+                }
+                eprintln!(
+                    "nasty ✓ {l} {label} {r}: vol {:.5} ntri {}",
+                    res.volume(),
+                    res.num_tri()
+                );
+            }
         }
     }
 
@@ -1250,11 +1365,11 @@ mod tests {
         );
         let gl_l = load_obj(&dir.join(l));
         let gl_r = load_obj(&dir.join(r));
-        let mut ml = Mesh::from_mesh_gl(&gl_l);
+        let mut ml = Mesh::from_mesh_gl(&gl_l).unwrap();
         ml.set_epsilon(-1.0, false);
         ml.initialize_original();
         ml.set_normals_and_coplanar();
-        let mut mr = Mesh::from_mesh_gl(&gl_r);
+        let mut mr = Mesh::from_mesh_gl(&gl_r).unwrap();
         mr.set_epsilon(-1.0, false);
         mr.initialize_original();
         mr.set_normals_and_coplanar();
@@ -1263,7 +1378,7 @@ mod tests {
         let cpp = CppKernel::ingest(&gl_l)
             .unwrap_or_else(|e| panic!("{l}: cpp ingest {e}"))
             .union(&CppKernel::ingest(&gl_r).unwrap_or_else(|e| panic!("{r}: cpp ingest {e}")));
-        let b = Mesh::from_mesh_gl(&cpp_to_mesh_gl(&cpp));
+        let b = Mesh::from_mesh_gl_raw(&cpp_to_mesh_gl(&cpp)).unwrap();
         if let Some(reason) = solid_divergence(&res, &b, 4000, 0x0B5E, 2e-2) {
             panic!("BIG TWIN {l} ∪ {r}: {reason}");
         }
@@ -1359,7 +1474,7 @@ mod tests {
             "P−Q volume {} != 0.79",
             sub.volume()
         );
-        let sub_b = Mesh::from_mesh_gl(&cpp_to_mesh_gl(&p_cpp.difference(&q_cpp)));
+        let sub_b = Mesh::from_mesh_gl_raw(&cpp_to_mesh_gl(&p_cpp.difference(&q_cpp))).unwrap();
         if let Some(r) = solid_divergence(&sub, &sub_b, 5000, 0xD1FF, 1e-9) {
             panic!("P−Q diverges from C++: {r}");
         }
@@ -1372,7 +1487,7 @@ mod tests {
             "P∩Q volume {} != 0.21",
             int.volume()
         );
-        let int_b = Mesh::from_mesh_gl(&cpp_to_mesh_gl(&p_cpp.intersection(&q_cpp)));
+        let int_b = Mesh::from_mesh_gl_raw(&cpp_to_mesh_gl(&p_cpp.intersection(&q_cpp))).unwrap();
         if let Some(r) = solid_divergence(&int, &int_b, 5000, 0x1417, 1e-9) {
             panic!("P∩Q diverges from C++: {r}");
         }
@@ -1417,8 +1532,8 @@ mod tests {
             );
 
             let (pos_c, neg_c) = block_cpp.split_by_plane(n, off);
-            let pos_b = Mesh::from_mesh_gl(&cpp_to_mesh_gl(&pos_c));
-            let neg_b = Mesh::from_mesh_gl(&cpp_to_mesh_gl(&neg_c));
+            let pos_b = Mesh::from_mesh_gl_raw(&cpp_to_mesh_gl(&pos_c)).unwrap();
+            let neg_b = Mesh::from_mesh_gl_raw(&cpp_to_mesh_gl(&neg_c)).unwrap();
             if let Some(r) = solid_divergence(&pos, &pos_b, 4000, seed, 1e-9) {
                 panic!("{label}: +side diverges from C++: {r}");
             }
@@ -1526,7 +1641,7 @@ mod tests {
             );
 
             let cpp = manifold3d::Manifold::hull_pts(pts.as_slice());
-            let cpp_hull = Mesh::from_mesh_gl(&cpp_to_mesh_gl(&cpp));
+            let cpp_hull = Mesh::from_mesh_gl_raw(&cpp_to_mesh_gl(&cpp)).unwrap();
             if let Some(r) = solid_divergence(&rust_hull, &cpp_hull, 6000, seed, 1e-9) {
                 panic!("{label}: hull diverges from C++: {r}");
             }
@@ -1593,7 +1708,8 @@ mod tests {
 
             let a_cpp = CppKernel::ingest(&a.to_mesh_gl()).unwrap();
             let b_cpp = CppKernel::ingest(&b.to_mesh_gl()).unwrap();
-            let cpp = Mesh::from_mesh_gl(&cpp_to_mesh_gl(&a_cpp.minkowski_sum(&b_cpp)));
+            let cpp =
+                Mesh::from_mesh_gl_raw(&cpp_to_mesh_gl(&a_cpp.minkowski_sum(&b_cpp))).unwrap();
             if let Some(r) = solid_divergence(&rust, &cpp, 6000, seed, 1e-6) {
                 panic!("{label}: minkowski diverges from C++: {r}");
             }
@@ -1742,7 +1858,7 @@ mod tests {
             !cpp_gl.merge_from_vert.is_empty(),
             "C++'s coloured output must carry merge-vectors"
         );
-        let re = Mesh::from_mesh_gl(&cpp_gl);
+        let re = Mesh::from_mesh_gl(&cpp_gl).unwrap();
         assert!(
             re.is_manifold(),
             "re-importing C++'s merge-encoded output must be manifold"
@@ -1777,7 +1893,7 @@ mod tests {
         // Re-import C++'s normal-carrying B, prep it, and FLAG hasNormals (mirroring what C++ carries).
         let b_gl = cpp_to_mesh_gl_with_merge(&b_cpp);
         assert_eq!(b_gl.num_prop, 6, "B: xyz + 3 world-frame normal channels");
-        let mut b_rust = Mesh::from_mesh_gl(&b_gl);
+        let mut b_rust = Mesh::from_mesh_gl(&b_gl).unwrap();
         b_rust.set_epsilon(-1.0, false);
         b_rust.initialize_original();
         b_rust.set_normals_and_coplanar();
@@ -2037,7 +2153,7 @@ mod tests {
         ] {
             let rust = CrossSection::from_polygons(polys).unwrap().extrude(height);
             let cpp = manifold3d::Manifold::extrude(&to_cpp_cs(polys), height);
-            let cpp_mesh = Mesh::from_mesh_gl(&cpp_to_mesh_gl(&cpp));
+            let cpp_mesh = Mesh::from_mesh_gl_raw(&cpp_to_mesh_gl(&cpp)).unwrap();
             if let Some(r) = solid_divergence(&rust, &cpp_mesh, 4000, seed, 1e-6) {
                 panic!("{label}: extrude diverges from C++: {r}");
             }
@@ -2136,7 +2252,7 @@ mod tests {
                 .unwrap()
                 .revolve(segments);
             let cpp = manifold3d::Manifold::revolve(&to_cpp_cs(&polys), segments, 360.0);
-            let cpp_mesh = Mesh::from_mesh_gl(&cpp_to_mesh_gl(&cpp));
+            let cpp_mesh = Mesh::from_mesh_gl_raw(&cpp_to_mesh_gl(&cpp)).unwrap();
             if let Some(r) = solid_divergence(&rust, &cpp_mesh, 4000, seed, 1e-6) {
                 panic!("{label}: revolve diverges from C++: {r}");
             }
@@ -2576,7 +2692,7 @@ mod tests {
 
         let to_cpp = |cs: &CrossSection| manifold3d::CrossSection::from_polygons(&cs.to_polygons());
         let check = |label: &str, rust: &Mesh, cpp: &manifold3d::Manifold, seed: u64| {
-            let cpp_mesh = Mesh::from_mesh_gl(&cpp_to_mesh_gl(cpp));
+            let cpp_mesh = Mesh::from_mesh_gl_raw(&cpp_to_mesh_gl(cpp)).unwrap();
             if let Some(r) = solid_divergence(rust, &cpp_mesh, 4000, seed, 1e-6) {
                 panic!("{label}: diverges from C++: {r}");
             }
@@ -2667,7 +2783,7 @@ mod tests {
 
         let block_cpp = CppKernel::ingest(&block.to_mesh_gl()).unwrap();
         let bar_cpp = CppKernel::ingest(&bar.to_mesh_gl()).unwrap();
-        let b = Mesh::from_mesh_gl(&cpp_to_mesh_gl(&block_cpp.difference(&bar_cpp)));
+        let b = Mesh::from_mesh_gl_raw(&cpp_to_mesh_gl(&block_cpp.difference(&bar_cpp))).unwrap();
         assert_eq!(RustKernel::genus(&b), 1, "C++ tunnel is genus 1 (sanity)");
         if let Some(r) = solid_divergence(&res, &b, 6000, 0x7011, 1e-9) {
             panic!("tunnel difference diverges from C++: {r}");
@@ -2732,7 +2848,7 @@ mod tests {
                     "R2 sweep [{i}] {op:?}: volume {} vs cpp {bvol}",
                     a.volume()
                 );
-                let b = Mesh::from_mesh_gl(&cpp_to_mesh_gl(&b_cpp));
+                let b = Mesh::from_mesh_gl_raw(&cpp_to_mesh_gl(&b_cpp)).unwrap();
                 if let Some(r) = solid_divergence(&a, &b, 4000, 0x5A5A + i as u64, 1e-9) {
                     panic!("R2 sweep [{i}] {op:?} diverges from C++: {r}");
                 }
@@ -2761,9 +2877,9 @@ mod tests {
         let d = &all[0];
         assert!(d.abs >= 0.0 && d.rel >= 0.0 && !format!("{d:?}").is_empty());
 
-        // A REAL divergence the harness must catch: a unit cube with two DANGLING vertices (indexed by
-        // no triangle). Rust keeps them → χ=10−18+12=4 → genus −1, and a bbox that swallows them; C++
-        // drops unreferenced verts → genus 0, cube bbox. So genus AND bbox diverge (volume agrees).
+        // Pre-M.2.4a this was the harness's pet divergence: rust kept dangling verts, C++ dropped
+        // them. The ingest tail (RemoveUnreferencedVerts) now matches C++ — the same input must
+        // produce NO divergence, pinning the ctor-tail parity.
         #[rustfmt::skip]
         let mut vp = vec![
             0.0,0.0,0.0, 1.0,0.0,0.0, 1.0,1.0,0.0, 0.0,1.0,0.0,
@@ -2783,8 +2899,8 @@ mod tests {
         };
         let divs = differential(&dangling, 1e-9).unwrap();
         assert!(
-            divs.iter().any(|d| d.metric == "genus"),
-            "expected a genus divergence: {divs:#?}"
+            divs.is_empty(),
+            "ingest tail must drop dangling verts like C++: {divs:#?}"
         );
 
         // Reject paths: a mesh with an out-of-range index — BOTH kernels reject (rust: unpaired →
@@ -2799,10 +2915,9 @@ mod tests {
         assert!(CppKernel::ingest(&bad_index).is_err());
         assert!(differential(&bad_index, 1e-9).unwrap().is_empty());
 
-        // Asymmetric validity — the two kernels DISAGREE, which the differential surfaces as an Err.
-        // Both are REAL, meaningful cases:
-        //   (a) rust's ingest is topology-only, so a NaN-vertex mesh (valid pairing, invalid geometry)
-        //       is accepted by rust but rejected by C++ → "rust accepted, cpp rejected".
+        // (a) NaN-vertex mesh: pre-M.2.4a rust's topology-only ingest ACCEPTED it while C++
+        //     rejected (the harness's asymmetric-validity arm). The ctor tail's IsFinite check now
+        //     rejects it too — both-reject ⇒ Ok(empty), pinning the parity.
         #[rustfmt::skip]
         let mut nan_vp = vec![
             0.0,0.0,0.0, 1.0,0.0,0.0, 1.0,1.0,0.0, 0.0,1.0,0.0,
@@ -2820,8 +2935,11 @@ mod tests {
             tri_verts: cube_tris.clone(),
             ..Default::default()
         };
-        let e = differential(&nan_mesh, 1e-9).unwrap_err();
-        assert!(e.contains("rust accepted"), "got: {e}");
+        assert!(
+            RustKernel::ingest(&nan_mesh).is_err(),
+            "ctor tail rejects non-finite verts"
+        );
+        assert!(differential(&nan_mesh, 1e-9).unwrap().is_empty());
 
         //   (b) the mirror — an opposed-triangle "flap" appended to a valid cube: C++'s CreateHalfedges
         //       REMOVES the degenerate pair and accepts, but our clean-pairing (opposed-tri removal is

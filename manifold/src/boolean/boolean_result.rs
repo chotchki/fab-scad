@@ -180,7 +180,11 @@ fn pair_up(edge_pos: &mut Vec<EdgePos>, mut f: impl FnMut(VHalfedge)) {
     let n_edges = edge_pos.len() / 2;
     let (mut starts, mut ends): (Vec<EdgePos>, Vec<EdgePos>) =
         edge_pos.drain(..).partition(|e| e.is_start);
-    debug_assert_eq!(starts.len(), n_edges, "non-manifold edge: start/end imbalance");
+    debug_assert_eq!(
+        starts.len(),
+        n_edges,
+        "non-manifold edge: start/end imbalance"
+    );
     starts.sort_by(EdgePos::order);
     ends.sort_by(EdgePos::order);
     for i in 0..n_edges {
@@ -585,8 +589,10 @@ fn create_properties(out: &mut Mesh, in_p: &Mesh, in_q: &Mesh, invert_q: bool) {
     // Per output-vert bins of `((key.x, key.z, key.w), idx)`; the `+ 1` bin is `propIdx[idMissProp]`.
     let mut prop_idx: Vec<Vec<([i32; 3], i32)>> = vec![Vec::new(); out.num_vert() + 1];
     // `[0]` indexed by inQ prop-verts, `[1]` by inP prop-verts (mirrors C++'s swapped sizing).
-    let mut prop_miss_idx: [Vec<i32>; 2] =
-        [vec![-1; in_q.num_prop_vert()], vec![-1; in_p.num_prop_vert()]];
+    let mut prop_miss_idx: [Vec<i32>; 2] = [
+        vec![-1; in_q.num_prop_vert()],
+        vec![-1; in_p.num_prop_vert()],
+    ];
 
     let mut properties: Vec<f64> = Vec::with_capacity(out.num_vert() * num_prop);
     let mut idx: i32 = 0;
@@ -629,8 +635,12 @@ fn create_properties(out: &mut Mesh, in_p: &Mesh, in_q: &Mesh, invert_q: bool) {
                 if edge >= 0 {
                     // On an edge, both propVerts must match.
                     let e = edge as usize;
-                    let p0 = src.prop(HalfedgeId::from_usize(3 * face_id + next3(e))).raw();
-                    let p1 = src.prop(HalfedgeId::from_usize(3 * face_id + prev3(e))).raw();
+                    let p0 = src
+                        .prop(HalfedgeId::from_usize(3 * face_id + next3(e)))
+                        .raw();
+                    let p1 = src
+                        .prop(HalfedgeId::from_usize(3 * face_id + prev3(e)))
+                        .raw();
                     key[1] = vert.raw();
                     key[2] = p0.min(p1);
                     key[3] = p0.max(p1);
@@ -810,7 +820,16 @@ fn result(b3: &Boolean3, in_p: &Mesh, in_q: &Mesh, op: OpType) -> Mesh {
     let mut edges_p: BTreeMap<HalfedgeId, Vec<EdgePos>> = BTreeMap::new();
     let mut edges_q: BTreeMap<HalfedgeId, Vec<EdgePos>> = BTreeMap::new();
     let mut edges_new: BTreeMap<(TriId, TriId), Vec<EdgePos>> = BTreeMap::new();
-    add_new_edge_verts(&mut edges_p, &mut edges_new, &b3.xv12.p1q2, &i12, &v12r, in_p, true, 0);
+    add_new_edge_verts(
+        &mut edges_p,
+        &mut edges_new,
+        &b3.xv12.p1q2,
+        &i12,
+        &v12r,
+        in_p,
+        true,
+        0,
+    );
     add_new_edge_verts(
         &mut edges_q,
         &mut edges_new,
@@ -922,7 +941,13 @@ fn result(b3: &Boolean3, in_p: &Mesh, in_q: &Mesh, op: OpType) -> Mesh {
     // the per-triangle TEMPORARY provenance ref — both read + carried by `simplify_topology`.
     let epsilon = out.epsilon;
     let t = std::time::Instant::now();
-    face2tri(&mut out, &face_edge, &face_halfedges, &halfedge_ref, epsilon);
+    face2tri(
+        &mut out,
+        &face_edge,
+        &face_halfedges,
+        &halfedge_ref,
+        epsilon,
+    );
     tracing::debug!(target: "manifold::boolean", ms = t.elapsed().as_millis() as u64, tris = out.num_tri(), "face2tri (earclip)");
 
     // Canonicalize within-face half-edge order (Manifold runs this BEFORE SimplifyTopology) so the
@@ -986,8 +1011,10 @@ mod tests {
         let mut mesh = Mesh::from_mesh_gl(&MeshGl {
             num_prop: 3,
             vert_properties: verts,
-            tri_verts: tris, ..Default::default()
-        });
+            tri_verts: tris,
+            ..Default::default()
+        })
+        .unwrap();
         mesh.set_epsilon(-1.0, false);
         mesh.initialize_original();
         mesh.set_normals_and_coplanar();
@@ -1003,14 +1030,18 @@ mod tests {
     /// `properties`, dropped row) breaks this invariant or the manifoldness.
     #[test]
     fn colored_cube_minus_cube_carries_position_as_color() {
-        let a = cube(0.0, 0.0, 0.0)
-            .set_properties(4, |new, pos, _old| new.copy_from_slice(&[pos.x, pos.y, pos.z, 1.0]));
+        let a = cube(0.0, 0.0, 0.0).set_properties(4, |new, pos, _old| {
+            new.copy_from_slice(&[pos.x, pos.y, pos.z, 1.0])
+        });
         let b = cube(0.5, 0.5, 0.5);
         let out = boolean(&a, &b, OpType::Subtract);
 
         assert!(out.is_manifold(), "coloured difference must stay manifold");
         assert_eq!(out.num_prop, 4, "num_prop = max(4, 0)");
-        assert!(!out.properties.is_empty(), "output must carry interpolated properties");
+        assert!(
+            !out.properties.is_empty(),
+            "output must carry interpolated properties"
+        );
         assert_eq!(
             out.properties.len(),
             out.num_prop_vert() * 4,
@@ -1025,7 +1056,10 @@ mod tests {
             for i in 0..3 {
                 let he = t.halfedge(i);
                 let pv = out.prop(he);
-                assert!(pv.is_some() && pv.u() < out.num_prop_vert(), "prop-vert in range");
+                assert!(
+                    pv.is_some() && pv.u() < out.num_prop_vert(),
+                    "prop-vert in range"
+                );
                 let pos = out.pos(out.start(he));
                 let row = &out.properties[pv.u() * 4..pv.u() * 4 + 4];
                 let is_zero = row.iter().all(|&x| x == 0.0);
@@ -1054,20 +1088,37 @@ mod tests {
     /// the SERIALIZATION path — save/load, cross-subsystem hand-off.)
     #[test]
     fn colored_output_survives_mesh_gl_round_trip() {
-        let a = cube(0.0, 0.0, 0.0)
-            .set_properties(4, |new, pos, _| new.copy_from_slice(&[pos.x, pos.y, pos.z, 1.0]));
+        let a = cube(0.0, 0.0, 0.0).set_properties(4, |new, pos, _| {
+            new.copy_from_slice(&[pos.x, pos.y, pos.z, 1.0])
+        });
         let b = cube(0.5, 0.5, 0.5);
         let out = boolean(&a, &b, OpType::Subtract);
-        assert!(out.num_prop_vert() > out.num_vert(), "the seam must split some prop-verts");
+        assert!(
+            out.num_prop_vert() > out.num_vert(),
+            "the seam must split some prop-verts"
+        );
 
         // Serialize (with merge-vectors) and re-import.
         let gl = out.to_mesh_gl();
-        assert!(!gl.merge_from_vert.is_empty(), "a seam-split output must carry merge-vectors");
-        let re = Mesh::from_mesh_gl(&gl);
-        assert!(re.is_manifold(), "merge-vectors must re-share the seam into a manifold");
-        assert!((re.volume() - out.volume()).abs() < 1e-9, "round-trip preserves volume");
+        assert!(
+            !gl.merge_from_vert.is_empty(),
+            "a seam-split output must carry merge-vectors"
+        );
+        let re = Mesh::from_mesh_gl(&gl).unwrap();
+        assert!(
+            re.is_manifold(),
+            "merge-vectors must re-share the seam into a manifold"
+        );
+        assert!(
+            (re.volume() - out.volume()).abs() < 1e-9,
+            "round-trip preserves volume"
+        );
         assert_eq!(re.num_prop, 4);
-        assert_eq!(re.num_vert(), out.num_vert(), "geometric vert count preserved");
+        assert_eq!(
+            re.num_vert(),
+            out.num_vert(),
+            "geometric vert count preserved"
+        );
 
         // Colour still tracks position (or is zero from B) on every corner of the re-imported mesh.
         for tri in 0..re.num_tri() {
@@ -1095,9 +1146,15 @@ mod tests {
         re.set_normals_and_coplanar();
         let c = cube(0.25, 0.25, 0.25);
         let chained = boolean(&re, &c, OpType::Subtract);
-        assert!(chained.is_manifold(), "chained boolean on a re-imported coloured mesh must be manifold");
+        assert!(
+            chained.is_manifold(),
+            "chained boolean on a re-imported coloured mesh must be manifold"
+        );
         assert_eq!(chained.num_prop, 4);
-        assert!(!chained.properties.is_empty(), "chained output still carries colour");
+        assert!(
+            !chained.properties.is_empty(),
+            "chained output still carries colour"
+        );
     }
 
     /// M.3.4b.8 — `CreateProperties` sign-flips Q's world-frame NORMALS under Subtract, and ONLY when the
@@ -1116,7 +1173,11 @@ mod tests {
         let out_noflip = boolean(&a, &b_plain, OpType::Subtract); // not flagged ⇒ no flip
         let out_flip = boolean(&a, &b_flagged, OpType::Subtract); // flagged ⇒ flip
 
-        assert_eq!(out_noflip.num_tri(), out_flip.num_tri(), "flagging must not change geometry");
+        assert_eq!(
+            out_noflip.num_tri(),
+            out_flip.num_tri(),
+            "flagging must not change geometry"
+        );
         assert_eq!(out_flip.num_prop, 3);
 
         let integral = |m: &Mesh| -> [f64; 3] {
@@ -1127,8 +1188,11 @@ mod tests {
                 let p: Vec<Vec3> = hes.iter().map(|&h| m.pos(m.start(h))).collect();
                 let area = 0.5 * (p[1] - p[0]).cross(p[2] - p[0]).length();
                 for (c, acc_c) in acc.iter_mut().enumerate() {
-                    let mean =
-                        hes.iter().map(|&h| m.properties[m.prop(h).u() * 3 + c]).sum::<f64>() / 3.0;
+                    let mean = hes
+                        .iter()
+                        .map(|&h| m.properties[m.prop(h).u() * 3 + c])
+                        .sum::<f64>()
+                        / 3.0;
                     *acc_c += area * mean;
                 }
             }
@@ -1151,7 +1215,7 @@ mod tests {
         }
     }
 
-/// M.4 pull-forward — the deterministic PARALLEL narrow phase: a multi-cube fold must be BYTE-identical
+    /// M.4 pull-forward — the deterministic PARALLEL narrow phase: a multi-cube fold must be BYTE-identical
     /// across two independent runs. With `--features par` this proves rayon SCHEDULING can't perturb the
     /// output: `intersect12`/`winding03` map over queries via `par::map_collect` (index-preserving) + the
     /// existing `stable_sort`, so thread interleaving is invisible. Serial (default) it's a trivial pass;
@@ -1161,7 +1225,11 @@ mod tests {
         use crate::boolean::OpType;
         fn fold() -> MeshGl {
             let offsets = [
-                (0.0, 0.0, 0.0), (0.5, 0.3, 0.4), (0.2, 0.7, 0.1), (0.6, 0.1, 0.5), (0.3, 0.5, 0.8),
+                (0.0, 0.0, 0.0),
+                (0.5, 0.3, 0.4),
+                (0.2, 0.7, 0.1),
+                (0.6, 0.1, 0.5),
+                (0.3, 0.5, 0.8),
             ];
             let mut acc = cube(offsets[0].0, offsets[0].1, offsets[0].2);
             for &(ox, oy, oz) in &offsets[1..] {
@@ -1176,8 +1244,17 @@ mod tests {
         let (a, b) = (fold(), fold());
         assert!(!a.tri_verts.is_empty(), "fold produced geometry");
         assert_eq!(a.tri_verts, b.tri_verts, "triangulation differs run-to-run");
-        let bits = |m: &MeshGl| m.vert_properties.iter().map(|f| f.to_bits()).collect::<Vec<u64>>();
-        assert_eq!(bits(&a), bits(&b), "vertex positions differ run-to-run (bitwise)");
+        let bits = |m: &MeshGl| {
+            m.vert_properties
+                .iter()
+                .map(|f| f.to_bits())
+                .collect::<Vec<u64>>()
+        };
+        assert_eq!(
+            bits(&a),
+            bits(&b),
+            "vertex positions differ run-to-run (bitwise)"
+        );
     }
 
     /// M.4.4 — the K.D determinism gate (in-crate half). A corpus exercising the full deterministic
@@ -1233,18 +1310,29 @@ mod tests {
 
         let cases: [(&str, Mesh); 5] = [
             ("union", boolean(&a, &cube(0.3, 0.4, 0.5), OpType::Add)),
-            ("difference", boolean(&a, &cube(0.5, 0.5, 0.5), OpType::Subtract)),
-            ("intersection", boolean(&a, &cube(0.5, 0.5, 0.5), OpType::Intersect)),
+            (
+                "difference",
+                boolean(&a, &cube(0.5, 0.5, 0.5), OpType::Subtract),
+            ),
+            (
+                "intersection",
+                boolean(&a, &cube(0.5, 0.5, 0.5), OpType::Intersect),
+            ),
             ("fold3", chained),
-            ("colored_diff", boolean(&colored, &cube(0.5, 0.5, 0.5), OpType::Subtract)),
+            (
+                "colored_diff",
+                boolean(&colored, &cube(0.5, 0.5, 0.5), OpType::Subtract),
+            ),
         ];
         // GOLDEN — generated on the serial build; must hold across par + wasm.
+        // Regenerated at M.2.4a (a deliberate output change): the Face2Tri quad fast path aligns
+        // the cut-face diagonals with C++, and the ingest tail Morton-sorts the cube fixtures.
         let golden: [(&str, u64); 5] = [
-            ("union", 0x3890d6b3b8411767),
-            ("difference", 0x67fe71f8a9989ac5),
-            ("intersection", 0x4ce414ea0880e6d5),
-            ("fold3", 0x2fabd3779eadfbd9),
-            ("colored_diff", 0xfdc31c723c573c31),
+            ("union", 0x0feb42b17e72ff17),
+            ("difference", 0x3c020df78fee1715),
+            ("intersection", 0x07c1d094cd1d5385),
+            ("fold3", 0xcd65199d0d12abb9),
+            ("colored_diff", 0x512df0b49a2565a1),
         ];
         let mut mismatch = false;
         for ((label, mesh), (glabel, ghash)) in cases.iter().zip(golden.iter()) {
@@ -1287,8 +1375,10 @@ mod tests {
         let mut mesh = Mesh::from_mesh_gl(&MeshGl {
             num_prop: 3,
             vert_properties: verts,
-            tri_verts: tris, ..Default::default()
-        });
+            tri_verts: tris,
+            ..Default::default()
+        })
+        .unwrap();
         mesh.set_epsilon(-1.0, false);
         mesh.initialize_original();
         mesh.set_normals_and_coplanar();
@@ -1332,8 +1422,14 @@ mod tests {
         );
         let u = boolean(&a, &b, OpType::Add);
         assert!(!u.is_empty(), "union produced an empty mesh");
-        assert!(u.is_manifold(), "coplanar-slab union is not a watertight manifold");
-        assert!(u.volume().is_finite() && u.volume() > 0.0, "union volume invalid");
+        assert!(
+            u.is_manifold(),
+            "coplanar-slab union is not a watertight manifold"
+        );
+        assert!(
+            u.volume().is_finite() && u.volume() > 0.0,
+            "union volume invalid"
+        );
     }
 
     /// Disjoint cubes union to the two separate cubes: volume 2, genus 0, still manifold. Exercises the
@@ -1344,7 +1440,10 @@ mod tests {
         let q = cube(5.0, 5.0, 5.0);
         let u = boolean(&p, &q, OpType::Add);
         assert!(u.is_manifold());
-        assert!((u.volume() - 2.0).abs() < 1e-12, "two unit cubes ⇒ volume 2");
+        assert!(
+            (u.volume() - 2.0).abs() < 1e-12,
+            "two unit cubes ⇒ volume 2"
+        );
         // Two disjoint closed surfaces: χ = 4, genus formula 1 − 4/2 = −1 (the single-component formula's
         // known behaviour on two components — a documented backstop limitation, not a bug here).
         assert_eq!(crate::check::euler_characteristic(&u), 4);

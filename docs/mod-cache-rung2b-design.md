@@ -138,6 +138,54 @@ hit-rate work, and it is NOT fixed here.
 - **Perf:** slice_parts + under_sink_guide wall time, cache on vs off, plus the BU.6 harness delta
   report for the models tree.
 
+## Implemented (BU.8, 2026-07-16) — deviations, the review catch + measured results
+
+Landed as designed, with findings from contact with the code — the last one CRITICAL, caught by an
+adversarial review pass before landing, not by the (then-blind) test suite:
+
+- **The overlay hazard never existed.** The audit's `specials()`-inside-capture worry was a stale
+  mental model: `children()` already CHAINS the current dynamic context by reference
+  (`Scope::call_frame`) — no flatten — so children's `$`-reads record precisely. The only remaining
+  `specials()` callers are the two env-gated dev probes, wrapped in `suppressed()`.
+- **The eval-cache interaction**: a FUNCTION-cache hit inside a capture skips the fn body and hides
+  its `$`-reads → under-recorded store. Fix: `eval_cache::get` force-misses while
+  `captures_active()` (stores stay allowed).
+- **The boundary sits AT the entry frame, inclusive** ($-args are part of the call's identity);
+  the dyn_ctx pointer fast path was dropped (every call frame mints a fresh ctx — never matches).
+- **THE REVIEW CATCH (wrong-hit, confirmed on 7 programs): pointer identity does not survive COW.**
+  `Scope::bind` is `Rc::make_mut` copy-on-write; a bind on a SHARED frame replaces the allocation —
+  so any module body with a top-level assignment (or `for`, or a builtin `$`-arg, or a local
+  `function` def) COW'd its own capture ENTRY, the walk never crossed the original pointer, nothing
+  recorded, and the empty read set hit vacuously → stale geometry. The in-tree suite was blind
+  (every test body happened to be bind-free). Fix, per the review: (1) `Frame.boundary` — a
+  monotonic per-thread u64 minted at the constructors and PRESERVED by the COW clone (also kills
+  the review's ABA finding: ids are never reused, unlike freed addresses); captures key on it.
+  (2) `hoist_scope`/`for_scopes`/`eval_args` bind into a `child()` instead of a COW'd clone, so
+  in-body binds land BELOW the boundary and KILL (id-preservation alone would record the internally
+  bound value → sound but chronic misses). (3) Panic-safe suppression (drop guard) + a
+  `reset_thread_state()` at eval top (a caught panic on a reused worker thread must not wedge
+  recording). (4) The seven killer programs are now IN the A/B suite.
+
+Measured POST-FIX (release, `FAB_CSG_CACHE=1`; gates: fab-lang 311/311 cache-on ×5, fab-scad
+192/0 cache-on, BOSL2 gauntlet ratchet green cache-on, recursion suite green, and the rendered
+STL is BITWISE IDENTICAL cache-on vs off on every model below):
+
+| model | wall off → on | hit rate |
+|---|---|---|
+| wall_screen/slice_parts | 21.1s → 7.5s (−64%) | 71.1% (619/870), 0 declines |
+| shower_holder_mini | 8.1s → 6.9s (−15%) | 60.1% |
+| under_sink_guide | 4.8s → 4.8s (even) | 42.9% of 21 lookups — do-no-harm holds |
+| xcopies microbench (n=50, blind child) | — | 49/50 hits (the motivating case, unit-pinned) |
+
+(The pre-fix build's numbers — 53.4% at 36k lookups, −32% — were WRONG-hit inflated in both
+directions: vacuous leaf hits, and outer modules that never hit. Correct outer-module hits now
+short-circuit whole subtrees, which is why lookups dropped 42× while wall improved.)
+
+**N.2c.3 died as a side effect** (re-verified post-fix): the deep-recursion pathology was the
+per-level `specials()` walk + ~42-var hash — both gone with the params-only key.
+`module_recursion_bound` cache-on vs off: 0.05s vs 0.06s. The default-ON flip (N.2c.2.3, csg half)
+is unblocked.
+
 ## Out of scope (and where it lives)
 
 - Kernel-level `GeoNode → Solid` caching (P.2) — keys the child BELOW the `Transform` node, so the

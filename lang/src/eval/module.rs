@@ -25,7 +25,10 @@ pub(super) fn eval_args<'a>(
     scope: &Scope,
     ctx: &Ctx<'a>,
 ) -> crate::Result<(Vec<Value>, BTreeMap<String, Value>, Scope)> {
-    let mut child = scope.clone();
+    // child(), not clone+COW: a `$`-arg bind on a clone would COW the SHARED scope frame — inside a
+    // cached module body that frame can be the read-capture's entry (BU.8 review finding 1). The child
+    // keeps `$`-arg binds below the boundary, so `sphere(1, $fa=12)` inside a body KILLS the read.
+    let mut child = scope.child();
     let mut positional = Vec::new();
     let mut named = BTreeMap::new();
     for arg in &mi.args {

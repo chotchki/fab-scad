@@ -280,7 +280,16 @@ impl Default for Cache {
 
 impl Cache {
     /// A cached result for `key`, if any. A cold hit is PROMOTED to hot so it survives the next rotation.
+    ///
+    /// RUNG-2B FENCE (BU.8, `mod_cache` module doc): while a CSG read-capture is open, a hit here would
+    /// SKIP the function body — hiding its `$`-reads from the capture and under-recording the module
+    /// entry's probe set (a silent wrong-hit later). Force a miss instead; the enclosing CSG hit skips
+    /// these bodies wholesale, so the loss is second-order. Stores stay allowed (the entry is keyed on its
+    /// own `dyn_ctx` pointer — serving it OUTSIDE captures is fine).
     pub(super) fn get(&mut self, key: &Key) -> Option<Value> {
+        if super::mod_cache::captures_active() {
+            return None;
+        }
         if let Some(v) = self.hot.get(key) {
             return Some(v.clone());
         }

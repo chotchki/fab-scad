@@ -1829,6 +1829,7 @@ fn resolve_source(
     }
     redundancy::reset(); // dev probe: fresh count per run so the import fixpoint's partial runs don't bleed in
     mod_redundancy::reset(); // dev probe (J.5.1): fresh module-call ceiling per run (FAB_CSG_REDUNDANCY)
+    mod_cache::reset_thread_state(); // a panic-unwound PRIOR eval on a reused thread must not leak captures
     fnprofile::reset(); // dev probe: same — fresh per-name call counts per run (FAB_PROFILE_FNS)
     let tree = eval_top(&exec, &global, &ctx)?;
     redundancy::report(); // prints to stderr only under FAB_REDUNDANCY=1
@@ -2060,7 +2061,11 @@ fn collect_module_defs<'a>(stmts: &[&'a Stmt]) -> loader::ModStore<'a> {
 /// self-reference sees `undef`. Returns the bound scope — the pure prefix `eval_nodes` and `run_stmts`
 /// share. Hoisting into a FRESH scope (nothing pre-bound) is what keeps `a = b; b = 5` → `a` undef.
 fn hoist_scope<'a>(stmts: &[&'a Stmt], scope: &Scope, ctx: &Ctx<'a>) -> crate::Result<Scope> {
-    let mut scope = scope.clone();
+    // A CHILD, not a clone (BU.8 review finding 1): binding into a clone COWs the SHARED frame — for a
+    // cached module body that frame is the capture's entry, and the COW replaced it mid-capture. The
+    // boundary id now survives COW regardless; the child keeps the binds BELOW the boundary so an in-body
+    // `$x = …` KILLS instead of recording its own bound value (the read-set stays caller-facing).
+    let mut scope = scope.child();
     for item in hoisted_bindings(stmts) {
         // sigil `=` for an assignment, `f` for a hoisted function def (so the trace tells them apart).
         let (sigil, name, value) = match item {

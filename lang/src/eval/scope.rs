@@ -82,6 +82,20 @@ impl VarMap {
     }
 }
 
+thread_local! {
+    /// The per-thread monotonic boundary-id mint (see `Frame::boundary`). Never reused within a thread;
+    /// captures are thread-local too, so cross-thread collisions can't be observed.
+    static NEXT_BOUNDARY: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+fn mint_boundary() -> u64 {
+    NEXT_BOUNDARY.with(|c| {
+        let v = c.get();
+        c.set(v + 1);
+        v
+    })
+}
+
 /// One frame of bindings plus a link to the enclosing frame (`None` at the root). `$`-specials live in
 /// their OWN map, apart from the (often huge) lexical `vars`: every user call inherits the caller's reaching
 /// `$`-context via [`Scope::specials`], which must iterate ONLY the `$`-vars — a BOSL2 island global holds
@@ -105,6 +119,14 @@ struct Frame {
     /// see [`DynCtxNode`]. This is what lets the cache key a call's `$`-context WITHOUT the O(depth)
     /// `specials()` walk B2 flagged — read it in O(1), share it across all calls under the same context.
     dyn_ctx: Rc<DynCtxNode>,
+    /// COW-SURVIVING identity for the CSG memo's read-capture boundary (BU.8 review findings 1+2): minted
+    /// once per LOGICAL frame at the explicit constructors ([`Scope::new`]/[`child`](Scope::child)/
+    /// [`call_frame`](Scope::call_frame)) and PRESERVED by `Rc::make_mut`'s derived-`Clone` copy — so a
+    /// shared frame that COWs on [`bind`](Scope::bind) keeps its boundary id and the capture walk still
+    /// crosses it (pointer identity does NOT survive the COW; keying on it under-recorded read sets →
+    /// wrong hits). Monotonic per thread, never reused (no ABA on freed frames). Distinct from
+    /// [`frame_id`](Scope::frame_id) (pointer identity — the eval-cache's sharing-sensitive contract).
+    boundary: u64,
 }
 
 /// An opaque IDENTITY for a reaching `$`-context (N.2c cache key). The Rc POINTER is the whole meaning: two
@@ -172,6 +194,7 @@ impl Scope {
                 // The root $-context: the `$fn`/`$fa`/`$fs` defaults above. Every scope descends from a root,
                 // so all default-context calls share THIS node (depth 0) → the cache keys them together.
                 dyn_ctx: Rc::new(DynCtxNode { depth: 0 }),
+                boundary: mint_boundary(),
             }),
         }
     }
@@ -193,6 +216,7 @@ impl Scope {
                 // an O(1) Rc-clone, and every call sharing the caller's context shares this node. A `$`-arg
                 // bound into this frame below then mints a fresh node via `bind`.
                 dyn_ctx: Rc::clone(&caller.frame.dyn_ctx),
+                boundary: mint_boundary(),
             }),
         }
     }
@@ -206,6 +230,13 @@ impl Scope {
     #[must_use]
     pub(super) fn frame_id(&self) -> usize {
         Rc::as_ptr(&self.frame) as usize
+    }
+
+    /// The COW-surviving boundary id of this scope's frame (see `Frame::boundary`) — the CSG memo's
+    /// read-capture token.
+    #[must_use]
+    pub(super) fn boundary_id(&self) -> u64 {
+        self.frame.boundary
     }
 
     /// Look up a variable, walking child→parent (inner SHADOWS outer). Unbound → `undef`.
@@ -224,11 +255,22 @@ impl Scope {
         // LEXICAL chain. Route by prefix, then walk that chain child→parent (inner shadows outer).
         let mut frame = &self.frame;
         if name.starts_with('$') {
+            // Rung 2b (BU.8): this walk is the ONE choke point every `$`-read flows through, so the CSG
+            // memo's read capture rides it — `visit` each frame BEFORE its map check (a resolution AT a
+            // capture's entry frame is at-or-above the boundary), `record` the outcome (UNBOUND included).
+            // Near-free when no capture is open ([`mod_cache::ReadWalk::begin`] short-circuits).
+            let mut walk = super::mod_cache::ReadWalk::begin();
             loop {
+                walk.visit(frame.boundary);
                 if let Some(value) = frame.specials.get(name) {
+                    walk.record(name, Some(value));
                     return Some(value.clone());
                 }
-                frame = frame.dynamic_parent.as_ref()?;
+                let Some(parent) = frame.dynamic_parent.as_ref() else {
+                    walk.record(name, None);
+                    return None;
+                };
+                frame = parent;
             }
         } else {
             loop {
@@ -280,6 +322,7 @@ impl Scope {
                 dynamic_parent: Some(Rc::clone(&self.frame)),
                 // A `let`/comprehension child adds no `$`-binding of its own → inherit this scope's context.
                 dyn_ctx: Rc::clone(&self.frame.dyn_ctx),
+                boundary: mint_boundary(),
             }),
         }
     }

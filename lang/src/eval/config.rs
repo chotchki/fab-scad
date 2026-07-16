@@ -21,12 +21,12 @@ pub struct Config {
     /// Skip memoizing a function call whose args exceed this shallow element count — a big key isn't worth
     /// hashing every lookup. `FAB_EVAL_CACHE_ARGCAP` (default 256).
     pub eval_cache_argcap: usize,
-    /// Memoize a child-less user-MODULE call's `Geo` subtree — the content-addressed CSG cache (J.5.2a).
-    /// Defaults OFF in [`Config::default`] (the baseline) but **ON in [`Config::from_env`]** (the app path) —
-    /// it's bit-identity-validated + pure-win; `FAB_CSG_CACHE=0` disables.
+    /// Memoize a child-less user-MODULE call's `Geo` subtree — the content-addressed CSG cache (J.5.2,
+    /// read-set-precise keys since rung 2b/BU.8). OFF by default everywhere (the N.2c.2.3 default-on flip
+    /// stays reverted pending the deep-recursion gate-cost fix); `FAB_CSG_CACHE=1` enables.
     pub csg_cache: bool,
-    /// Skip memoizing a module call whose (params + reaching `$`-context) key exceeds this shallow element
-    /// count. `FAB_CSG_CACHE_KEYCAP` (default 2048).
+    /// Skip memoizing a module call whose params — or, at store time, its observed `$`-read set — exceed
+    /// this shallow element count. `FAB_CSG_CACHE_KEYCAP` (default 2048).
     pub csg_cache_keycap: usize,
     /// The eval RESOURCE budget (Q.5): the max number of deterministic eval-steps a single evaluation may
     /// burn before it fails LOUD with an [`Error::Eval`](crate::Error::Eval), or `None` for UNLIMITED (the

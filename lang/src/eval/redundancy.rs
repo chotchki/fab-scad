@@ -93,6 +93,12 @@ pub(super) fn record(body: &Expr, base: &Scope, args: &[Value], caller: &Scope) 
     if !enabled() {
         return;
     }
+    // The probe's `specials()` walk below is diagnostic, not a semantic read — keep it out of any open
+    // CSG read capture (rung 2b) by suppressing recording for the whole record.
+    super::mod_cache::suppressed(|| record_inner(body, base, args, caller));
+}
+
+fn record_inner(body: &Expr, base: &Scope, args: &[Value], caller: &Scope) {
     // fn IDENTITY is (body ptr, captured-env ptr): a closure shares the body AST with its siblings but
     // captures a distinct env, so the env ptr is what keeps `adder(1)` and `adder(2)` from colliding. For a
     // named fn the env is the stable home global (same ptr every call) → no effect. Without this, the ceiling

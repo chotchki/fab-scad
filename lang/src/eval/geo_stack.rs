@@ -190,12 +190,17 @@ enum GTask<'a> {
     CacheStoreModule {
         key: super::mod_cache::ModKey,
         snap: super::PuritySnap,
+        /// The call frame's boundary id — the open capture this store reads its observed `$`-read set from.
+        entry: u64,
     },
     /// CLEANUP — pop a scope-local module store pushed by an `EvalNodes` that had local defs.
     PopLocalModules,
     /// CLEANUP — the three-frame user-module pop: restore `module_depth` from the pre-call SNAPSHOT (never a
-    /// decrement — it's a `Cell`), then pop `module_stack` + `children_stack`. (Increment 2.)
-    PopModuleFrame { depth: usize },
+    /// decrement — it's a `Cell`), then pop `module_stack` + `children_stack`. (Increment 2.) `capture` is
+    /// the read-capture token to close, when this call opened one (rung 2b) — closed HERE, not at
+    /// `CacheStoreModule`, because CLEANUP runs on the error drain too (an errored body must not leak its
+    /// capture; the store, being WORK, is skipped there).
+    PopModuleFrame { depth: usize, capture: Option<u64> },
     /// CLEANUP — re-push a `ChildrenFrame` that `children()` transiently popped, keeping `children_stack`
     /// balanced across both paths. (Increment 2.)
     RestoreChildrenFrame(super::ChildrenFrame<'a>),
@@ -259,12 +264,15 @@ fn run_cleanup<'a>(task: GTask<'a>, ctx: &Ctx<'a>) {
         GTask::PopLocalModules => {
             ctx.local_modules.borrow_mut().pop();
         }
-        GTask::PopModuleFrame { depth } => {
+        GTask::PopModuleFrame { depth, capture } => {
             // Restore from the SNAPSHOT — never `set(get()-1)`: module_depth is a Cell<usize>, and a decrement
             // during a mis-built drain would underflow.
             ctx.module_depth.set(depth);
             ctx.module_stack.borrow_mut().pop();
             ctx.children_stack.borrow_mut().pop();
+            if let Some(entry) = capture {
+                super::mod_cache::close_capture(entry);
+            }
         }
         GTask::RestoreChildrenFrame(frame) => {
             ctx.children_stack.borrow_mut().push(frame);
@@ -346,7 +354,7 @@ fn dispatch_work<'a>(
         // reads it). An impure subtree (echo/warning, seedless `rands`, `parent_module`) re-runs every time
         // instead of serving a stale node; `$children == 0` (the eligibility gate) already fenced the children
         // hazard. This mirrors the eval cache's `Task::CacheStore` on the geometry side.
-        GTask::CacheStoreModule { key, snap } => {
+        GTask::CacheStoreModule { key, snap, entry } => {
             if let Some(geo) = results.last() {
                 // Purity for a MODULE is narrower than for a function: the output is a `Geo` (mesh/transform/
                 // boolean), NEVER a closure — so a closure created + used + discarded inside the body can't
@@ -362,8 +370,15 @@ fn dispatch_work<'a>(
                     ctx.mod_cache
                         .borrow_mut()
                         .note_decline(msg_moved, draws_moved, impure_moved);
-                } else {
-                    ctx.mod_cache.borrow_mut().put(key, geo.clone());
+                } else if let Some(reads) = super::mod_cache::capture_reads(entry) {
+                    // The capture (still open — `PopModuleFrame` closes it next) carries the body's
+                    // observed `$`-read set: the entry's probe condition.
+                    ctx.mod_cache.borrow_mut().put(
+                        key,
+                        geo.clone(),
+                        reads,
+                        ctx.config.csg_cache_keycap,
+                    );
                 }
             }
             Ok(())
@@ -709,22 +724,28 @@ fn push_user_module<'a>(
         Value::Num(super::child_count(ctx.module_stack.borrow().len())),
     );
     // Dev probe (off unless FAB_CSG_REDUNDANCY=1, J.5.1): the fully-bound `call` frame carries the params +
-    // reaching $-context; count repeats vs distinct to gauge the memo ceiling.
-    super::mod_redundancy::record(body_ptr, &home_global, mi.name.as_str(), params, &call);
-    // J.5.2a — the CSG memo. Eligible ONLY when child-less: a module that renders `children()` depends on its
+    // reaching $-context; count repeats vs distinct to gauge the memo ceiling. Suppressed: its `specials()`
+    // walk is diagnostic, not a semantic read — it must not record into an enclosing capture.
+    super::mod_cache::suppressed(|| {
+        super::mod_redundancy::record(body_ptr, &home_global, mi.name.as_str(), params, &call);
+    });
+    // J.5.2 — the CSG memo. Eligible ONLY when child-less: a module that renders `children()` depends on its
     // call-site children (NOT in the key), but `$children == 0` ⇒ `children()` renders nothing ⇒ the result is
-    // a pure function of (body, home, params, reaching $-context). On a HIT, push the cached `Geo` and skip the
-    // body, the frames, AND the depth bump — the redundant subtree never runs (the whole point). On a MISS,
-    // snapshot the purity counters + queue a `CacheStoreModule` that memoizes the node IFF the body was pure.
+    // a pure function of (body, home, params) + its observed `$`-reads (rung 2b — see `mod_cache`). On a HIT,
+    // push the cached `Geo` and skip the body, the frames, AND the depth bump — the redundant subtree never
+    // runs (the whole point; `get` replays the entry's reads so an ENCLOSING capture still records them). On a
+    // MISS, OPEN a read capture on the call frame, snapshot the purity counters, and queue a
+    // `CacheStoreModule` that memoizes (node, observed reads) IFF the body was pure.
     let store = if childless && ctx.config.csg_cache {
         let param_vals: Vec<Value> = params.iter().map(|p| call.lookup(&p.name)).collect();
-        let specials = call.specials();
-        if super::mod_cache::worth_caching(&param_vals, &specials, ctx.config.csg_cache_keycap) {
-            let key = super::mod_cache::ModKey::new(body_ptr, &home_global, &param_vals, &specials);
-            if let Some(geo) = ctx.mod_cache.borrow_mut().get(&key) {
+        if super::mod_cache::worth_caching(&param_vals, ctx.config.csg_cache_keycap) {
+            let key = super::mod_cache::ModKey::new(body_ptr, &home_global, &param_vals);
+            if let Some(geo) = ctx.mod_cache.borrow_mut().get(&key, &call) {
                 results.push(geo);
                 return Ok(());
             }
+            let entry = call.boundary_id();
+            super::mod_cache::open_capture(entry);
             Some((
                 key,
                 super::PuritySnap {
@@ -733,6 +754,7 @@ fn push_user_module<'a>(
                     closures: ctx.closures.borrow().len(),
                     impure_reads: ctx.impure_reads.get(),
                 },
+                entry,
             ))
         } else {
             None
@@ -754,9 +776,12 @@ fn push_user_module<'a>(
     // Collect at `mark`, `CacheStoreModule` peeks it, then the frames pop. The body resolves ITS module calls
     // against the DEFINITION island (`home`) with the home global.
     let mark = results.len();
-    work.push(GTask::PopModuleFrame { depth });
-    if let Some((key, snap)) = store {
-        work.push(GTask::CacheStoreModule { key, snap });
+    work.push(GTask::PopModuleFrame {
+        depth,
+        capture: store.as_ref().map(|(_, _, entry)| *entry),
+    });
+    if let Some((key, snap, entry)) = store {
+        work.push(GTask::CacheStoreModule { key, snap, entry });
     }
     work.push(GTask::Collect {
         mark,
@@ -787,7 +812,8 @@ fn for_scopes<'a>(
             let name = arg.name.as_deref().unwrap_or("");
             let iterable = eval_with_ctx(&arg.value, scope, ctx)?;
             for value in super::iterate_values(&iterable) {
-                let mut child = scope.clone();
+                // child(), not clone+COW — keeps the loop bind below any capture boundary (BU.8).
+                let mut child = scope.child();
                 child.bind(name, value);
                 for_scopes(rest, &child, ctx, out)?;
             }

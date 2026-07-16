@@ -339,6 +339,7 @@ Own the kernel — reimplement Manifold's ~4.4K robustness core in pure Rust so 
   - [x] M.6.2 - M.6.2 - Discipline audit: clippy ban list extended to the full transcendental family (exp2/log2/log10/ln_1p/exp_m1/hyperbolics); zero std-float calls outside mathf verified; both HashMap sites audited order-safe (lookup-only / test counter); no FMA anywhere
   - [x] M.6.3 - M.6.3 - The native==wasm FULL-SURFACE golden corpus: `golden` module (FNV-1a mesh/cross-section/f64 fingerprints — the M.7 golden-mode vocabulary) + tests/m6_native_wasm_golden.rs covering mathf sweep, booleans (folds/rotated/coincident), transforms, split/trim, decompose, hull, minkowski, properties, 2D ops + all four bridges — baked goldens must match bit-for-bit under wasmtime
 - [ ] M.7 - R.X: CUT C++ — freeze `oracle_goldens.json` (vol/area/genus/bbox/status) + own byte-exact `mesh_snapshots/`, flip to golden-mode, drop manifold3d / the `kernel` feature (SPEC [OPEN #5]). Suite green with C++ GONE = the finish line.
+  - [ ] M.7.1 - M.7.1 - Pre-cut perf comparison (chotchki, run POST-fuzzing): Rust kernel vs C++ via the oracle bridge — identical MeshGL inputs, lazy-C++ forced with num_tri(), medians over repeats; booleans (spheres/folds/nasty corpus incl. big twin), minkowski, hull; ours-serial AND ours-par vs TBB-parallel C++
 
 ## Backlog (not yet phased)
 

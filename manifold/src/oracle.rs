@@ -2417,8 +2417,9 @@ mod tests {
             &base_cpp.mirror(1.0, 1.0),
             1e-5,
         );
-        let m = Mat2x3::translate(Vec2::new(1.0, 2.0))
-            .compose(crate::linalg::rotate2_degrees(15.0).compose(Mat2x3::scale(Vec2::new(1.5, 0.75))));
+        let m = Mat2x3::translate(Vec2::new(1.0, 2.0)).compose(
+            crate::linalg::rotate2_degrees(15.0).compose(Mat2x3::scale(Vec2::new(1.5, 0.75))),
+        );
         region_match(
             "transform (composed)",
             &base.transform(m).unwrap(),
@@ -2858,6 +2859,217 @@ mod tests {
             "R2 ✓ difference + intersection sweep ({} configs) match C++",
             configs.len()
         );
+    }
+
+    /// M.7.1 — the pre-cut PERF comparison (chotchki: numbers taken POST-fuzzing — the 24h soaks
+    /// hold cores while they run). Identical MeshGL inputs through both kernels, ingest OUTSIDE the
+    /// timed region, and the timed closure ends in `num_tri()` (the C++ Manifold is LAZY — an
+    /// untimed force would flatter it to ~0). Medians over per-case repeats; `black_box` keeps the
+    /// optimizer honest. The ours column is a COMPILE-TIME config — run both:
+    ///
+    ///   cargo test --release --features oracle     perf_comparison -- --ignored --nocapture
+    ///   cargo test --release --features par,oracle perf_comparison -- --ignored --nocapture
+    ///
+    /// The C++ side is TBB-parallel as built (J.4.5 note), so serial-ours vs C++ understates us.
+    #[test]
+    #[ignore = "perf lane (M.7.1) — run explicitly in --release, post-fuzzing"]
+    fn perf_comparison() {
+        use crate::boolean::OpType;
+        use crate::boolean::boolean_result::boolean;
+        use std::hint::black_box;
+        use std::time::Instant;
+
+        fn median_ms(reps: usize, mut f: impl FnMut()) -> f64 {
+            let mut times: Vec<f64> = (0..reps)
+                .map(|_| {
+                    let t = Instant::now();
+                    f();
+                    t.elapsed().as_secs_f64() * 1e3
+                })
+                .collect();
+            times.sort_by(f64::total_cmp);
+            times[times.len() / 2]
+        }
+
+        /// Shift every vertex of a MeshGL by (dx, dy, dz) — identical offset buffers for both
+        /// engines without either engine's transform in the picture.
+        fn shifted(gl: &MeshGl, dx: f64, dy: f64, dz: f64) -> MeshGl {
+            let mut out = gl.clone();
+            for row in out.vert_properties.chunks_exact_mut(gl.num_prop) {
+                row[0] += dx;
+                row[1] += dy;
+                row[2] += dz;
+            }
+            out
+        }
+
+        struct Case {
+            name: &'static str,
+            reps: usize,
+            a: MeshGl,
+            b: Option<MeshGl>,
+            op: OpType,
+        }
+
+        let sphere = |r: f64, seg: i32| cpp_to_mesh_gl(&manifold3d::Manifold::sphere(r, seg));
+        let mut cases: Vec<Case> = vec![
+            Case {
+                name: "sphere64  ∪ sphere64",
+                reps: 9,
+                a: sphere(10.0, 64),
+                b: Some(shifted(&sphere(10.0, 64), 7.0, 3.0, 2.0)),
+                op: OpType::Add,
+            },
+            Case {
+                name: "sphere128 ∪ sphere128",
+                reps: 5,
+                a: sphere(10.0, 128),
+                b: Some(shifted(&sphere(10.0, 128), 7.0, 3.0, 2.0)),
+                op: OpType::Add,
+            },
+            Case {
+                name: "sphere128 − sphere128",
+                reps: 5,
+                a: sphere(10.0, 128),
+                b: Some(shifted(&sphere(10.0, 128), 7.0, 3.0, 2.0)),
+                op: OpType::Subtract,
+            },
+        ];
+        if let Some(dir) = models_dir() {
+            let obj = |n: &str| load_obj(&dir.join(n));
+            cases.push(Case {
+                name: "Havocglass8 ∪",
+                reps: 7,
+                a: obj("Havocglass8_left.obj"),
+                b: Some(obj("Havocglass8_right.obj")),
+                op: OpType::Add,
+            });
+            cases.push(Case {
+                name: "Cray −",
+                reps: 7,
+                a: obj("Cray_left.obj"),
+                b: Some(obj("Cray_right.obj")),
+                op: OpType::Subtract,
+            });
+            cases.push(Case {
+                name: "self_intersect ∪ (33K)",
+                reps: 3,
+                a: obj("self_intersectA.obj"),
+                b: Some(obj("self_intersectB.obj")),
+                op: OpType::Add,
+            });
+            cases.push(Case {
+                name: "big_twin ∪ (64.5M cand)",
+                reps: 1,
+                a: obj("Generic_Twin_7081.1.t0_left.obj"),
+                b: Some(obj("Generic_Twin_7081.1.t0_right.obj")),
+                op: OpType::Add,
+            });
+        } else {
+            eprintln!("(models dir not found — nasty corpus cases skipped)");
+        }
+
+        eprintln!(
+            "\nM.7.1 perf: ours({}) vs C++(TBB)   [medians, ms]",
+            if cfg!(par_live) { "PAR" } else { "SERIAL" }
+        );
+        eprintln!(
+            "{:<26} {:>10} {:>10} {:>7}",
+            "case", "ours", "cpp", "cpp/ours"
+        );
+        for c in &cases {
+            // Ingest once, untimed, for both engines.
+            let ra = Mesh::from_mesh_gl(&c.a).unwrap();
+            let rb = c.b.as_ref().map(|b| Mesh::from_mesh_gl(b).unwrap());
+            let ca = CppKernel::ingest(&c.a).unwrap();
+            let cb = c.b.as_ref().map(|b| CppKernel::ingest(b).unwrap());
+
+            let ours = median_ms(c.reps, || {
+                let rb = rb.as_ref().unwrap();
+                let out = boolean(&ra, rb, c.op);
+                black_box(out.num_tri());
+            });
+            let cpp = median_ms(c.reps, || {
+                let cb = cb.as_ref().unwrap();
+                let out = match c.op {
+                    OpType::Add => ca.union(cb),
+                    OpType::Subtract => ca.difference(cb),
+                    OpType::Intersect => ca.intersection(cb),
+                };
+                black_box(out.num_tri());
+            });
+            eprintln!(
+                "{:<26} {:>10.2} {:>10.2} {:>7.2}",
+                c.name,
+                ours,
+                cpp,
+                cpp / ours
+            );
+        }
+
+        // Hull: a 4096-point Fibonacci sphere through both quickhulls.
+        {
+            let n = 4096;
+            let ga = std::f64::consts::PI * (3.0 - 5.0_f64.sqrt());
+            let pts: Vec<Vec3> = (0..n)
+                .map(|i| {
+                    let y = 1.0 - 2.0 * (f64::from(i) + 0.5) / f64::from(n);
+                    let r = (1.0 - y * y).sqrt();
+                    let th = ga * f64::from(i);
+                    Vec3::new(
+                        100.0 * r * crate::mathf::cos(th),
+                        100.0 * y,
+                        100.0 * r * crate::mathf::sin(th),
+                    )
+                })
+                .collect();
+            let raw: Vec<[f64; 3]> = pts.iter().map(|p| [p.x, p.y, p.z]).collect();
+            let ours = median_ms(7, || {
+                black_box(Mesh::hull_of_points(&pts).unwrap().num_tri());
+            });
+            let cpp = median_ms(7, || {
+                black_box(manifold3d::Manifold::hull_pts(raw.as_slice()).num_tri());
+            });
+            eprintln!(
+                "{:<26} {:>10.2} {:>10.2} {:>7.2}",
+                "hull fib-4096",
+                ours,
+                cpp,
+                cpp / ours
+            );
+        }
+
+        // Minkowski t1: concave ⊕ small cube, both engines.
+        {
+            let concave_gl = {
+                let big = Mesh::cube(Vec3::new(2.0, 2.0, 2.0), false).unwrap();
+                let bite = Mesh::cube(Vec3::new(1.0, 1.0, 1.0), false)
+                    .unwrap()
+                    .transform(crate::linalg::Mat3x4::translate(Vec3::new(1.0, 1.0, 1.0)))
+                    .unwrap();
+                boolean(&big, &bite, OpType::Subtract).to_mesh_gl()
+            };
+            let small_gl = Mesh::cube(Vec3::new(0.25, 0.25, 0.25), true)
+                .unwrap()
+                .to_mesh_gl();
+            let rc = Mesh::from_mesh_gl(&concave_gl).unwrap();
+            let rs = Mesh::from_mesh_gl(&small_gl).unwrap();
+            let cc = CppKernel::ingest(&concave_gl).unwrap();
+            let cs = CppKernel::ingest(&small_gl).unwrap();
+            let ours = median_ms(3, || {
+                black_box(rc.minkowski_sum(&rs).unwrap().num_tri());
+            });
+            let cpp = median_ms(3, || {
+                black_box(cc.minkowski_sum(&cs).num_tri());
+            });
+            eprintln!(
+                "{:<26} {:>10.2} {:>10.2} {:>7.2}",
+                "minkowski t1",
+                ours,
+                cpp,
+                cpp / ours
+            );
+        }
     }
 
     /// Exercises the divergence-REPORTING machinery (the paths that only fire when the kernels

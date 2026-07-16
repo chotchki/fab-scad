@@ -342,6 +342,11 @@ Own the kernel — reimplement Manifold's ~4.4K robustness core in pure Rust so 
 - [ ] M.7 - R.X: CUT C++ — freeze `oracle_goldens.json` (vol/area/genus/bbox/status) + own byte-exact `mesh_snapshots/`, flip to golden-mode, drop manifold3d / the `kernel` feature (SPEC [OPEN #5]). Suite green with C++ GONE = the finish line.
   - [x] M.7.1 - M.7.1 - Pre-cut perf comparison (chotchki, run POST-fuzzing): Rust kernel vs C++ via the oracle bridge — identical MeshGL inputs, lazy-C++ forced with num_tri(), medians over repeats; booleans (spheres/folds/nasty corpus incl. big twin), minkowski, hull; ours-serial AND ours-par vs TBB-parallel C++
   - [x] M.7.2 - M.7.2 - The FREEZE (pre-cut, C++ still linked): goldens/ = oracle_goldens.json (C++ volume/area/genus/bbox per corpus case × op, bit-recorded) + frozen corpus inputs (10 nasty OBJs + C++-generated sphere/cylinder as .bin MeshGLs) + our-output fingerprints; capture is an #[ignore]d oracle-feature test (idempotent bytes), golden-mode lane runs on DEFAULT features (native; wasm keeps the in-code M.6 corpus) — the cut then only deletes
+  - [ ] M.7.3 - M.7.3 - THE FLIP: fab-scad's kernel.rs onto fab-manifold (replace the manifold3d wrapper, keep the Solid/Section API) — inventory the surface, fill kernel gaps first (twist/scale extrude the known one), then validate with the FULL fab-scad suites + models differential sweep vs OpenSCAD (which survives the cut — it's an external binary)
+    - [ ] M.7.3.1 - M.7.3.1 - Coincident-ring union genus divergence (drill_guide class): two coaxial tubes attached end-to-end union to genus 0 (tunnel CLOSED) vs C++ genus 1 — same volume; also charger_v3 (2 vs 0), seltzer_fix (9 vs 5). Reduce vs C++ at kernel level, fix pre-cut
+    - [ ] M.7.3.2 - M.7.3.2 - face2tri runaway on uncut_supported_outlet: write_general_triangulation grows to 4GB+ (grow_one hot, trophy-#1 class) where C++ renders in seconds — reduce to minimal face, fix pre-cut
+  - [ ] M.7.4 - M.7.4 - THE CUT: drop manifold3d + the oracle feature from fab-manifold (golden-mode carries the correctness memory) and from fab-scad's deps; delete oracle.rs; suite green with the C++ GONE — the finish line
+  - [ ] M.7.5 - M.7.5 - REMEASURE post-flip: K.1.2 models-tree sweep again — fab-scad-on-fab-manifold vs OpenSCAD-on-C++-Manifold — the bet's final number
 
 ## Backlog (not yet phased)
 

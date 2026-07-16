@@ -2936,6 +2936,7 @@ dependencies = [
  "clap",
  "fab-jit",
  "fab-lang",
+ "fab-manifold",
  "manifold3d",
  "quick-xml",
  "rayon",

@@ -66,7 +66,15 @@ exclude = ["manifold/fuzz"]
 default = ["kernel", "native"]
 # `geometry` (fab-lang) too: the kernel now speaks the shared geom vocabulary (Vec3/Tri/Affine), so
 # Solid's mesh + transform APIs are typed. fab-lang is pure Rust — cheap to pull in alongside Manifold.
-kernel = ["geometry", "mesh-io", "dep:manifold3d", "dep:threemf", "dep:quick-xml", "dep:usvg"]
+kernel = [
+    "geometry",
+    "mesh-io",
+    "dep:fab-manifold",
+    "dep:manifold3d",
+    "dep:threemf",
+    "dep:quick-xml",
+    "dep:usvg",
+]
 # The Bambu `.3mf` WRITER (`bambu`): an OPC zip of hand-written XML + indexed meshes — mesh-only, no
 # Solid, no C++ kernel. Split out of `kernel` (W.3.4) so the wasm fab-gui app can co-pack + export
 # in-process without the Manifold toolchain, while the miri-lean `geometry` build stays zip-free.
@@ -131,8 +139,12 @@ tracing-subscriber = { version = "0.3", default-features = false, features = ["r
 # Same crate, same API — kernel.rs doesn't know which it got.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 manifold3d = { version = "0.3.1", optional = true }
+# OUR Manifold port (Phase M) — the kernel backend since M.7.3. Parallel on native.
+fab-manifold = { path = "manifold", optional = true, features = ["par"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 manifold3d = { version = "0.3.1", optional = true, default-features = false, features = [
     "unstable-wasm-uu",
 ] }
+# Pure Rust — serial on wasm by default (the gui's threaded build opts into `par` itself).
+fab-manifold = { path = "manifold", optional = true }

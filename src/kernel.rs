@@ -1,19 +1,87 @@
-//! The in-process geometry kernel (Track C) — a typed Rust wrapper over Manifold (`manifold3d`),
-//! the same CSG engine OpenSCAD's Manifold backend uses. This is the seam that lets fab do slicing +
-//! connector CSG WITHOUT shelling out per piece: a re-slice is an in-process boolean on a cached mesh
-//! (~ms), not a process spawn (~hundreds of ms). OpenSCAD stays the SCAD→mesh front-door (see
-//! `docs/manifold-kernel-spike.md` for the go/no-go); this owns everything downstream of the base mesh.
+//! The in-process geometry kernel (Track C) — a typed wrapper over `fab-manifold`, OUR pure-Rust
+//! port of the Manifold CSG engine (Phase M; flipped off the `manifold3d` C++ bindings in M.7.3).
+//! This is the seam that lets fab do slicing + connector CSG WITHOUT shelling out per piece: a
+//! re-slice is an in-process boolean on a cached mesh (~ms), not a process spawn (~hundreds of ms).
+//! OpenSCAD stays the SCAD→mesh front-door (see `docs/manifold-kernel-spike.md` for the go/no-go);
+//! this owns everything downstream of the base mesh.
 //!
-//! [`Solid`] is a newtype around a Manifold handle so the rest of fab talks in one strongly-typed
-//! shape instead of raw bindings. Import (11.2), STL/3mf export (11.3), the slicer (11.4), and the
+//! [`Solid`] is a newtype around a [`Mesh`] so the rest of fab talks in one strongly-typed shape
+//! instead of raw kernel types. Import (11.2), STL/3mf export (11.3), the slicer (11.4), and the
 //! connectors (11.6) build on it.
+//!
+//! Fallibility at this seam: fab-manifold surfaces invalid input as typed `Err`s (M.5.4.5), where
+//! the C++ silently produced an INVALID (empty, status-carrying) manifold. This wrapper keeps its
+//! historical infallible signatures by mapping those `Err`s to the SAME observable the C++ gave:
+//! an empty solid/section (plus a `tracing::warn!`) — no caller sees a new failure mode.
 
 use anyhow::{Context, Result, anyhow};
 use fab_lang::{Affine, Affine2, ExtrudeKind, Join2D, Rgba, Tri, Vec3};
-use manifold3d::{CrossSection, FillRule, JoinType, Manifold, MeshGL};
+use fab_manifold::boolean::OpType;
+use fab_manifold::boolean::boolean_result::boolean;
+use fab_manifold::cross_section::{CrossSection, FillRule, JoinType};
+use fab_manifold::linalg::{Mat2x3, Mat3x4, Vec2, rotate_xyz_degrees};
+use fab_manifold::mesh::{Mesh, MeshGl};
+use fab_manifold::{bridge, check};
 use std::collections::HashMap;
 use std::marker::PhantomData;
 use std::path::Path;
+
+/// A fab-lang [`Affine`] (row-major 3×4) as the kernel's column-basis [`Mat3x4`].
+fn to_mat3x4(m: &Affine) -> Mat3x4 {
+    let c = m.to_column_major();
+    Mat3x4 {
+        x: Vec3::new(c[0], c[1], c[2]),
+        y: Vec3::new(c[3], c[4], c[5]),
+        z: Vec3::new(c[6], c[7], c[8]),
+        w: Vec3::new(c[9], c[10], c[11]),
+    }
+}
+
+/// A fab-lang [`Affine2`] (row-major 2×3) as the kernel's column-basis [`Mat2x3`].
+fn to_mat2x3(m: &Affine2) -> Mat2x3 {
+    let c = m.to_column_major();
+    Mat2x3 {
+        x: Vec2::new(c[0], c[1]),
+        y: Vec2::new(c[2], c[3]),
+        w: Vec2::new(c[4], c[5]),
+    }
+}
+
+/// Collapse a kernel `Err` to the empty mesh the C++ backend's INVALID manifold used to surface as,
+/// loudly — the M.5.4.5 seam contract (see the module doc).
+fn mesh_or_empty(r: std::result::Result<Mesh, fab_manifold::status::Error>, op: &str) -> Mesh {
+    r.unwrap_or_else(|e| {
+        tracing::warn!(
+            ?e,
+            op,
+            "kernel op rejected its input; yielding the empty solid"
+        );
+        Mesh::default()
+    })
+}
+
+/// Raw `[x, y]` contours as the kernel's typed [`Vec2`] rings.
+fn to_vec2_contours(contours: &[Vec<[f64; 2]>]) -> Vec<Vec<Vec2>> {
+    contours
+        .iter()
+        .map(|c| c.iter().map(|&[x, y]| Vec2::new(x, y)).collect())
+        .collect()
+}
+
+/// [`mesh_or_empty`]'s 2D twin.
+fn section_or_empty(
+    r: std::result::Result<CrossSection, fab_manifold::status::Error>,
+    op: &str,
+) -> CrossSection {
+    r.unwrap_or_else(|e| {
+        tracing::warn!(
+            ?e,
+            op,
+            "2D op rejected its input; yielding the empty region"
+        );
+        CrossSection::new()
+    })
+}
 
 /// A closed, manifold 3D solid — the unit every kernel op consumes and produces.
 ///
@@ -32,40 +100,46 @@ use std::path::Path;
 /// assert_send(Solid::cube(1.0, 1.0, 1.0, true)); // Solid is !Send by construction
 /// ```
 #[derive(Clone)]
-pub struct Solid(Manifold, PhantomData<*const ()>);
+pub struct Solid(std::rc::Rc<Mesh>, PhantomData<*const ()>);
 
 impl Solid {
-    /// The single construction point — keeps the !Send marker consistent everywhere.
-    fn wrap(m: Manifold) -> Self {
-        Solid(m, PhantomData)
+    /// The single construction point — keeps the !Send marker consistent everywhere. `Rc` restores
+    /// the cheap `clone()` the C++ backend's shared handle gave (a `Mesh` is a deep value type, and
+    /// the slicer/components paths clone Solids freely); `Solid` is immutable and already `!Send`,
+    /// so a plain refcount is exactly right.
+    fn wrap(m: Mesh) -> Self {
+        Solid(std::rc::Rc::new(m), PhantomData)
     }
 
-    /// Wrap a raw Manifold (import/slicer internals build these). Used by 11.2 import / 11.4 slicer.
+    /// Wrap a raw kernel mesh (import/slicer internals build these). Used by 11.2 import / 11.4 slicer.
     #[allow(dead_code)]
-    pub(crate) fn from_manifold(m: Manifold) -> Self {
+    pub(crate) fn from_manifold(m: Mesh) -> Self {
         Solid::wrap(m)
     }
 
-    /// Borrow the underlying handle (for ops the wrapper doesn't surface yet). Used by 11.3 export.
+    /// Borrow the underlying mesh (for ops the wrapper doesn't surface yet). Used by 11.3 export.
     #[allow(dead_code)]
-    pub(crate) fn inner(&self) -> &Manifold {
+    pub(crate) fn inner(&self) -> &Mesh {
         &self.0
     }
 
     /// An axis-aligned box. `center` puts the centroid at the origin (else the min corner).
     pub fn cube(x: f64, y: f64, z: f64, center: bool) -> Self {
-        Solid::wrap(Manifold::cube(x, y, z, center))
+        Solid::wrap(mesh_or_empty(
+            Mesh::cube(Vec3::new(x, y, z), center),
+            "cube",
+        ))
     }
 
     /// A UV sphere of `radius` with `segments` around the equator.
     pub fn sphere(radius: f64, segments: i32) -> Self {
-        Solid::wrap(Manifold::sphere(radius, segments))
+        Solid::wrap(Mesh::sphere(radius, segments))
     }
 
     /// A cone/cylinder along +Z: `r_low` at the base, `r_high` at the top (0 ⇒ a point). `center`
     /// puts the mid-height at the origin; otherwise the base is at z=0 spanning `[0, height]`.
     pub fn cylinder(height: f64, r_low: f64, r_high: f64, segments: i32, center: bool) -> Self {
-        Solid::wrap(Manifold::cylinder(height, r_low, r_high, segments, center))
+        Solid::wrap(Mesh::cylinder(height, r_low, r_high, segments, center))
     }
 
     /// A teardrop PRISM along +Z (spanning `[0, length]`): a circle of radius `r` with a pointed cap
@@ -82,7 +156,9 @@ impl Solid {
             })
             .collect();
         pts.push([0.0, r * std::f64::consts::SQRT_2]); // apex where the 45° tangents meet
-        Solid::wrap(CrossSection::hull_simple_polygon(&pts).extrude(length))
+        let pts: Vec<Vec2> = pts.iter().map(|&[x, y]| Vec2::new(x, y)).collect();
+        let hull = section_or_empty(CrossSection::hull_of_points(&pts), "teardrop hull");
+        Solid::wrap(hull.extrude(length))
     }
 
     // --- connector solids (11.6) -----------------------------------------------------------------
@@ -183,7 +259,7 @@ impl Solid {
             2 => (self.clone(), at),
             _ => return Vec::new(),
         };
-        rot.0.slice_at_z(h)
+        section_or_empty(rot.0.slice_at_z(h), "cross_section slice").to_polygons()
     }
 
     // --- import (11.2) ---------------------------------------------------------------------------
@@ -216,8 +292,13 @@ impl Solid {
             });
             idx.push(id);
         }
-        let mesh = MeshGL::new(&verts, 3, &idx).map_err(|e| anyhow!("building mesh: {e:?}"))?;
-        let m = Manifold::from_meshgl(&mesh)
+        let gl = MeshGl {
+            num_prop: 3,
+            vert_properties: verts.iter().map(|&v| f64::from(v)).collect(),
+            tri_verts: idx,
+            ..Default::default()
+        };
+        let m = Mesh::from_mesh_gl(&gl)
             .map_err(|e| anyhow!("STL is not a valid manifold after weld: {e:?}"))?;
         Ok(Solid::wrap(m))
     }
@@ -251,12 +332,12 @@ impl Solid {
             });
             remap.push(id);
         }
-        let idx: Vec<u64> = tris
+        let idx: Vec<u32> = tris
             .iter()
             .filter_map(|t| {
                 let [a, b, c] = t.indices().map(|i| remap[i as usize]);
                 // Drop tris the weld collapsed to a degenerate (a repeated vertex → zero area).
-                (a != b && b != c && a != c).then_some([u64::from(a), u64::from(b), u64::from(c)])
+                (a != b && b != c && a != c).then_some([a, b, c])
             })
             .flatten()
             .collect();
@@ -265,8 +346,14 @@ impl Solid {
                 "mesh is degenerate after weld (no non-degenerate triangles)"
             ));
         }
-        let m = Manifold::from_mesh_f64(&flat, 3, &idx)
-            .map_err(|e| anyhow!("mesh is not a valid manifold: {e:?}"))?;
+        let gl = MeshGl {
+            num_prop: 3,
+            vert_properties: flat,
+            tri_verts: idx,
+            ..Default::default()
+        };
+        let m =
+            Mesh::from_mesh_gl(&gl).map_err(|e| anyhow!("mesh is not a valid manifold: {e:?}"))?;
         Ok(Solid::wrap(m))
     }
 
@@ -274,8 +361,9 @@ impl Solid {
 
     /// Serialize to binary STL bytes (per-face normals computed from the winding).
     pub fn to_stl_bytes(&self) -> Vec<u8> {
-        let (v, stride, idx) = self.0.to_mesh_f64();
-        let p = |i: u64| {
+        let gl = self.0.to_mesh_gl();
+        let (v, stride, idx) = (gl.vert_properties, gl.num_prop, gl.tri_verts);
+        let p = |i: u32| {
             let b = i as usize * stride;
             [v[b] as f32, v[b + 1] as f32, v[b + 2] as f32]
         };
@@ -312,13 +400,14 @@ impl Solid {
     /// Indexed mesh: deduped vertices + 0-based triangle indices (for exporters that want indexed
     /// geometry, e.g. the Bambu writer).
     pub fn to_indexed(&self) -> (Vec<Vec3>, Vec<Tri>) {
-        let (v, stride, idx) = self.0.to_mesh_f64();
+        let gl = self.0.to_mesh_gl();
+        let (v, stride, idx) = (gl.vert_properties, gl.num_prop, gl.tri_verts);
         let verts = (0..v.len() / stride)
             .map(|i| Vec3::new(v[i * stride], v[i * stride + 1], v[i * stride + 2]))
             .collect();
         let tris = idx
             .chunks_exact(3)
-            .map(|t| Tri::new(t[0] as u32, t[1] as u32, t[2] as u32))
+            .map(|t| Tri::new(t[0], t[1], t[2]))
             .collect();
         (verts, tris)
     }
@@ -338,7 +427,8 @@ impl Solid {
     /// Per-vertex colors, index-aligned with [`to_indexed`](Self::to_indexed)'s verts — or `None` when
     /// the solid is UNCOLORED (no color property: MeshGL stride 3, not 7).
     pub fn vertex_colors(&self) -> Option<Vec<Rgba>> {
-        let (v, stride, _) = self.0.to_mesh_f64();
+        let gl = self.0.to_mesh_gl();
+        let (v, stride) = (gl.vert_properties, gl.num_prop);
         if stride < 7 {
             return None; // xyz only — never colored
         }
@@ -408,13 +498,13 @@ impl Solid {
     // --- booleans --------------------------------------------------------------------------------
 
     pub fn union(&self, other: &Solid) -> Solid {
-        Solid::wrap(self.0.union(&other.0))
+        Solid::wrap(boolean(&self.0, &other.0, OpType::Add))
     }
     pub fn difference(&self, other: &Solid) -> Solid {
-        Solid::wrap(self.0.difference(&other.0))
+        Solid::wrap(boolean(&self.0, &other.0, OpType::Subtract))
     }
     pub fn intersection(&self, other: &Solid) -> Solid {
-        Solid::wrap(self.0.intersection(&other.0))
+        Solid::wrap(boolean(&self.0, &other.0, OpType::Intersect))
     }
 
     /// Minkowski sum `self ⊕ other` (`minkowski()`, J.4.4) — Manifold's NATIVE `minkowski_sum` (elalish/
@@ -423,34 +513,48 @@ impl Solid {
     /// offsetting a shape by a convex probe (sphere/box). Validated by VOLUME-RESIDUAL (`differ.rs`), not
     /// bit-exact — a mesh Minkowski sum is topologically unlike CGAL's Nef result but shape-identical.
     pub fn minkowski_sum(&self, other: &Solid) -> Solid {
-        Solid::wrap(self.0.minkowski_sum(&other.0))
+        Solid::wrap(mesh_or_empty(self.0.minkowski_sum(&other.0), "minkowski"))
     }
 
-    /// Union many solids at once (cheaper + more robust than folding `union`). Empty ⇒ empty solid.
+    /// Union many solids at once. A left fold of pairwise booleans in list order — deterministic;
+    /// the C++'s `BatchBoolean` volume-reordering was a perf trick, not a semantic (same solid out).
+    /// Empty ⇒ empty solid.
     pub fn batch_union(solids: &[Solid]) -> Solid {
-        let hs: Vec<Manifold> = solids.iter().map(|s| s.0.clone()).collect();
-        Solid::wrap(Manifold::batch_union(&hs))
+        let mut it = solids.iter();
+        let Some(first) = it.next() else {
+            return Solid::wrap(Mesh::default());
+        };
+        Solid::wrap(it.fold((*first.0).clone(), |acc, s| {
+            boolean(&acc, &s.0, OpType::Add)
+        }))
     }
 
-    /// The convex hull of many solids COMBINED (`hull()`, J.4.1) — Manifold's `batch_hull` over the union
-    /// of their vertices. `hull()` of one solid is its own convex hull. Empty ⇒ empty solid.
+    /// The convex hull of many solids COMBINED (`hull()`, J.4.1) — one quickhull over the union of
+    /// their vertices (Manifold `Hull(points)`). `hull()` of one solid is its own convex hull.
+    /// Empty ⇒ empty solid.
     pub fn batch_hull(solids: &[Solid]) -> Solid {
-        let hs: Vec<Manifold> = solids.iter().map(|s| s.0.clone()).collect();
-        Solid::wrap(Manifold::batch_hull(&hs))
+        let pts: Vec<Vec3> = solids.iter().flat_map(|s| s.0.vert_pos.clone()).collect();
+        Solid::wrap(mesh_or_empty(Mesh::hull_of_points(&pts), "hull"))
     }
 
     // --- transforms ------------------------------------------------------------------------------
 
     pub fn translate(&self, v: Vec3) -> Solid {
-        Solid::wrap(self.0.translate(v.x, v.y, v.z))
+        Solid::wrap(mesh_or_empty(
+            self.0.transform(Mat3x4::translate(v)),
+            "translate",
+        ))
     }
     /// Rotate by Euler angles in DEGREES (X then Y then Z).
     pub fn rotate(&self, x_deg: f64, y_deg: f64, z_deg: f64) -> Solid {
-        Solid::wrap(self.0.rotate(x_deg, y_deg, z_deg))
+        Solid::wrap(mesh_or_empty(
+            self.0.transform(rotate_xyz_degrees(x_deg, y_deg, z_deg)),
+            "rotate",
+        ))
     }
-    /// Apply a 3×4 [`Affine`] (row-major; transposed to Manifold's column-major at the boundary).
+    /// Apply a 3×4 [`Affine`] (row-major; transposed to the kernel's column basis at the boundary).
     pub fn transform(&self, m: &Affine) -> Solid {
-        Solid::wrap(self.0.transform(&m.to_column_major()))
+        Solid::wrap(mesh_or_empty(self.0.transform(to_mat3x4(m)), "transform"))
     }
 
     /// Rotate so local +Z maps onto unit `axis` — used to point a connector's cap along its
@@ -573,6 +677,7 @@ impl Solid {
             .into_iter()
             .map(Solid::wrap)
             .partition(|s| s.volume() >= 0.0);
+        // (decompose is fab-manifold's native port of Manifold Decompose — same body/void surfacing.)
         tracing::debug!(
             bodies = bodies.len(),
             cavities = cavities.len(),
@@ -653,25 +758,23 @@ impl Solid {
     /// `normal·p > offset` side. Both halves are independent solids; this is the slicer primitive
     /// (11.4), preferred over `trim_by_plane` because both sides come back clean.
     pub fn split_by_plane(&self, normal: Vec3, offset: f64) -> (Solid, Solid) {
-        let (pos, neg) = self.0.split_by_plane(normal.to_array(), offset);
+        let (pos, neg) = self.0.split_by_plane(normal, offset);
         (Solid::wrap(pos), Solid::wrap(neg))
     }
     /// Keep only the `normal·p > offset` half (drops the rest). NOTE upstream #1516: trimmed halves
     /// may not re-union cleanly (coincident faces) — use `split_by_plane` when you need both sides.
     pub fn trim_by_plane(&self, normal: Vec3, offset: f64) -> Solid {
-        Solid::wrap(self.0.trim_by_plane(normal.to_array(), offset))
+        Solid::wrap(self.0.trim_by_plane(normal, offset))
     }
 
     // --- queries ---------------------------------------------------------------------------------
 
     /// Err if the solid isn't a valid 2-manifold — the gate a slice/connector result must pass.
     pub fn check(&self) -> Result<()> {
-        self.0
-            .status()
-            .map_err(|e| anyhow!("non-manifold solid: {e:?}"))
+        check::strictly(&self.0).map_err(|e| anyhow!("non-manifold solid: {e}"))
     }
     pub fn is_manifold(&self) -> bool {
-        self.0.status().is_ok()
+        self.0.is_manifold()
     }
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
@@ -685,9 +788,11 @@ impl Solid {
 
     /// `(min, max)` corners, or None when empty.
     pub fn bbox(&self) -> Option<(Vec3, Vec3)> {
-        self.0
-            .bounding_box()
-            .map(|b| (Vec3::from_array(b.min()), Vec3::from_array(b.max())))
+        if self.0.is_empty() {
+            return None;
+        }
+        let b = self.0.bounding_box();
+        Some((b.min, b.max))
     }
 
     /// Enclosed volume — a topology-invariant scalar the differential harness compares (G.3.7).
@@ -702,7 +807,7 @@ impl Solid {
 
     /// Genus (handle count). Euler characteristic of the closed surface is `2 - 2·genus`.
     pub fn genus(&self) -> i32 {
-        self.0.genus()
+        check::genus(&self.0)
     }
 
     /// `projection()` — flatten this solid to a 2D [`Section`] (the 3D→2D bridge, J.3.6). `cut = true`
@@ -710,9 +815,9 @@ impl Solid {
     /// solid projected onto the XY plane (Manifold `project`).
     pub fn project_2d(&self, cut: bool) -> Section {
         if cut {
-            Section::wrap(self.0.slice_to_cross_section(0.0))
+            Section::wrap(section_or_empty(self.0.slice_at_z(0.0), "projection cut"))
         } else {
-            Section::from_polygons(&self.0.project())
+            Section::wrap(section_or_empty(self.0.project(), "projection shadow"))
         }
     }
 }
@@ -775,14 +880,17 @@ impl Section {
 
     /// The empty region (no area) — the 2D identity for union, absorbing for intersection.
     pub fn empty() -> Self {
-        Section::wrap(CrossSection::default())
+        Section::wrap(CrossSection::new())
     }
 
     /// A region from closed contours, resolved by Manifold's default `Positive` fill rule (positively-
     /// wound contours fill, negatively-wound are holes). Used for contours WE produce that are already
     /// correctly wound — a `project` shadow, a twist resample — where the winding carries the intent.
     pub fn from_polygons(contours: &[Vec<[f64; 2]>]) -> Self {
-        Section::wrap(CrossSection::from_polygons(contours))
+        Section::wrap(section_or_empty(
+            CrossSection::from_polygons(&to_vec2_contours(contours)),
+            "from_polygons",
+        ))
     }
 
     /// A region from a `polygon()` primitive's raw contours (J.3.2) — the EVEN-ODD fill rule, matching
@@ -790,9 +898,9 @@ impl Section {
     /// BOSL2 `star()`/`hexagon()` path, which winds CW) still fills, and a contour nested inside another
     /// is a hole regardless of its winding. The default `Positive` rule would drop the CW loop to empty.
     pub fn polygon(contours: &[Vec<[f64; 2]>]) -> Self {
-        Section::wrap(CrossSection::from_polygons_with_fill_rule(
-            contours,
-            FillRule::EvenOdd,
+        Section::wrap(section_or_empty(
+            CrossSection::from_polygons_with(&to_vec2_contours(contours), FillRule::EvenOdd),
+            "polygon",
         ))
     }
 
@@ -817,12 +925,18 @@ impl Section {
             // Clipper2 `jtSquare`, NOT `jtBevel` (verified by area vs 2026.06.12: square → 78.2548).
             Join2D::Bevel => JoinType::Square,
         };
-        Section::wrap(self.0.offset(delta, jt, 2.0, segments))
+        Section::wrap(section_or_empty(
+            self.0.offset(delta, jt, 2.0, segments),
+            "offset",
+        ))
     }
 
-    /// Apply a 2×3 [`Affine2`] (row-major; transposed to Manifold's column-pair layout at the boundary).
+    /// Apply a 2×3 [`Affine2`] (row-major; transposed to the kernel's column basis at the boundary).
     pub fn transform(&self, m: &Affine2) -> Section {
-        Section::wrap(self.0.transform(&m.to_column_major()))
+        Section::wrap(section_or_empty(
+            self.0.transform(to_mat2x3(m)),
+            "2d transform",
+        ))
     }
 
     /// Sweep this region into a 3D [`Solid`] — the 2D→3D bridge (`linear_extrude` / `rotate_extrude`,
@@ -843,23 +957,29 @@ impl Section {
                 // `round(len / perimeter · facets)` even segments — so the helical walls line up. The raw
                 // profile only matches an un-twisted sweep. J.3.4.1 (measured 22.8% residual → 6.9% after
                 // the negate → ~1-2% at typical $fn after the resample; a small per-slice tessellation-phase
-                // remainder is an accepted, documented divergence). `resampled` outlives the borrow below.
-                let resampled;
-                let profile = if twist == 0.0 {
-                    &self.0
+                // remainder is an accepted, documented divergence).
+                //
+                // The resampled contours go to the extrude as RAW polygons (the C++ `Manifold::Extrude`
+                // signature) — a CrossSection round-trip would let i_overlay's normalization DROP the
+                // resample's deliberately-collinear edge points, collapsing the profile back to its
+                // corners and gutting the helical walls (measured: the twist-90 square lost 6.5% volume).
+                let m = if twist == 0.0 {
+                    self.0.extrude_with_options(
+                        height,
+                        slices as i32,
+                        0.0,
+                        Vec2::new(scale[0], scale[1]),
+                    )
                 } else {
-                    resampled =
-                        Section::from_polygons(&resample_for_twist(&self.to_polygons(), facets));
-                    &resampled.0
+                    let resampled = resample_for_twist(&self.to_polygons(), facets);
+                    bridge::extrude_polygons(
+                        &to_vec2_contours(&resampled),
+                        height,
+                        slices as i32,
+                        -twist,
+                        Vec2::new(scale[0], scale[1]),
+                    )
                 };
-                let m = Manifold::extrude_with_options(
-                    profile,
-                    height,
-                    slices as i32,
-                    -twist,
-                    scale[0],
-                    scale[1],
-                );
                 let s = Solid::wrap(m);
                 if center {
                     s.translate(Vec3::new(0.0, 0.0, -height / 2.0))
@@ -868,7 +988,7 @@ impl Section {
                 }
             }
             ExtrudeKind::Rotate { angle, segments } => {
-                Solid::wrap(Manifold::revolve(&self.0, segments as i32, angle))
+                Solid::wrap(self.0.revolve(segments as i32, angle))
             }
         }
     }
@@ -933,7 +1053,8 @@ fn read_stl_soup(bytes: &[u8]) -> Result<Vec<[f32; 3]>> {
 
 /// A Solid's mesh as a threemf Mesh (indexed verts + triangles) for the 3mf writer.
 fn to_3mf_mesh(s: &Solid) -> threemf::model::Mesh {
-    let (v, stride, idx) = s.0.to_mesh_f64();
+    let gl = s.0.to_mesh_gl();
+    let (v, stride, idx) = (gl.vert_properties, gl.num_prop, gl.tri_verts);
     let vertex = (0..v.len() / stride)
         .map(|i| threemf::model::Vertex {
             x: v[i * stride],

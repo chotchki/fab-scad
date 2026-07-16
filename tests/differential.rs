@@ -363,7 +363,34 @@ fn bosl2_2d_shapes_match_the_oracle() {
     // 2D booleans + offset over BOSL2 shapes (regions):
     agree_bosl2("difference() { rect([10, 8], rounding = 2); circle(d = 4); }");
     agree_bosl2("offset(r = 1) star(n = 6, r = 5, ir = 2.5)");
-    agree_bosl2("region([square(6), move([3, 3], square(6))])");
+    // KNOWN DIVERGENCE (M.7.3, fab strictly better): this region is an even-odd XOR of two
+    // OVERLAPPING squares — the overlap is a hole touching the outline at two corner points.
+    // OpenSCAD REJECTS the vertex-touching extrude outright; pre-flip, Clipper2 + C++ Extrude fell
+    // over the same way (both sides "rejected" read as agreement). Our i_overlay splits the pinch
+    // into clean contours and the extrude yields the analytically-exact solid (area 36+36−2·9 = 54),
+    // so assert fab's CORRECT result instead of parity with a rejection.
+    {
+        let bosl2 = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("libs/BOSL2");
+        if bosl2.join("std.scad").exists() {
+            let base = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("bosl2_diff");
+            std::fs::create_dir_all(&base).unwrap();
+            let root = base.join("region_xor_overlapping_squares.scad");
+            std::fs::write(
+                &root,
+                "include <std.scad>\nlinear_extrude(1) region([square(6), move([3, 3], square(6))]);\n",
+            )
+            .unwrap();
+            let Outcome::Solid(solid) = drivers()[0].eval_file(&root, &[bosl2]) else {
+                panic!("fab must render the even-odd region as a solid");
+            };
+            assert!(
+                (solid.volume() - 54.0).abs() < 1e-9,
+                "even-odd region volume {} != 54",
+                solid.volume()
+            );
+            assert!(solid.is_manifold());
+        }
+    }
 }
 
 #[test]

@@ -8,7 +8,7 @@ use arbitrary::Arbitrary;
 use fab_manifold::boolean::OpType;
 use fab_manifold::boolean::boolean_result::boolean;
 use fab_manifold::check::{KernelParams, intermediate_check};
-use fab_manifold::linalg::{Mat3x4, Vec3};
+use fab_manifold::linalg::{Mat3x4, Vec3, rotate_xyz_degrees};
 use fab_manifold::mesh::Mesh;
 use libfuzzer_sys::fuzz_target;
 
@@ -37,7 +37,7 @@ fn clamp(v: f32, lo: f64, hi: f64) -> f64 {
 fuzz_target!(|tree: Tree| {
     let mut acc: Option<Mesh> = None;
     for x in tree.cubes.iter().take(100) {
-        let rot = Mat3x4::rotate(
+        let rot = rotate_xyz_degrees(
             clamp(x.r[0], 0.0, 360.0),
             clamp(x.r[1], 0.0, 360.0),
             clamp(x.r[2], 0.0, 360.0),

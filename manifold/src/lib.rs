@@ -23,6 +23,8 @@ pub mod check;
 pub mod cross_section;
 // R5 — the 2D↔3D bridges (Extrude/Revolve/Project/Slice); unblocks M.3.8.
 pub mod bridge;
+// Byte-fingerprinting for the golden-mode gates (M.6.3) — the M.7 freeze's vocabulary.
+pub mod golden;
 // The internal linalg (linalg.h subset) — vec2/3/4, mat3x4, Box; op order matches the C++ oracle.
 pub mod linalg;
 // Pillar 2: the libm seam — every transcendental routes through here.

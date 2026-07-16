@@ -88,6 +88,22 @@ static PINS: &[(&str, &str)] = &[
         "is_range",
         "function is_range(x) = !is_list(x) && is_finite(x[0]) && is_finite(x[1]) && is_finite(x[2]) ;",
     ),
+    // math.scad — `vector_angle`'s acos-domain clamp. Only its `is_num` branch (and the assert-false tail
+    // its predicate chain reaches on undef/NaN) is reachable there, but the pin covers the whole body — so
+    // `flatten`/`list_to_matrix` stay unreachable as long as the pinned `is_matrix` answers false for
+    // non-lists.
+    (
+        "constrain",
+        "function constrain(v, minval, maxval) =
+    is_num(v) ? max(minval, min(v, maxval))
+    : is_vector(v) ? [for(f=v) max(minval, min(f, maxval))]
+    : is_matrix(v) ? let( // for a matrix, this should be more efficient than indexing
+        mflat = flatten(v),
+        clamped = [ for(f=mflat) max(minval, min(f, maxval)) ]
+    ) list_to_matrix(clamped, len(v[0]), 0)
+    : is_list(v) ? [ for(vec=v) [ for(f=vec) max(minval, min(f, maxval)) ] ]
+    : assert(false, \"\\nIn constrain(), v must be a number, 1D vector, rectangular matrix, or list of vectors.\");",
+    ),
 ];
 
 /// The intrinsic registry. `_fab_poc_sq` is the O.1 mechanism POC (a synthetic, collision-proof name); the
@@ -448,6 +464,152 @@ static REGISTRY: &[Entry] = &[
             "is_undef",
         ],
         func: none_inside,
+    },
+    // ── O.5.4, the AGGREGATE/AFFINE band (math/vectors/transforms.scad) ──────────────────────────────────
+    // sum+_sum 3.1s, _apply 2.2s, _bt_search 5.2s, unit 1.1s, vector_angle 1.2s across the O.4 four. These
+    // are OP-level natives: the heavy lifting (`[for(i=v)1]*v` dot/matrix products, `[…]/scale`, `concat`)
+    // already runs native inside apply_binary/builtins — the intrinsic erases the per-call task-stack
+    // orchestration around them, which is where the interpreted time actually went.
+    Entry {
+        name: "_sum",
+        reference: "function _sum(v,_total,_i=0) = _i>=len(v) ? _total : _sum(v,_total+v[_i], _i+1);",
+        consts: &[],
+        deps: &[],
+        builtins: &["len"],
+        func: sum_tail,
+    },
+    Entry {
+        name: "sum",
+        reference: "function sum(v, dflt=0) =
+    v==[]? dflt :
+    assert(is_consistent(v), \"\\nInput to sum is non-numeric or inconsistent.\")
+    is_finite(v[0]) || is_vector(v[0]) ? [for(i=v) 1]*v :
+    _sum(v,v[0]*0);",
+        consts: &[],
+        deps: &[
+            "is_consistent",
+            "_list_pattern",
+            "is_finite",
+            "is_nan",
+            "is_vector",
+            "_sum",
+        ],
+        builtins: &["is_list", "len", "is_undef", "is_num"],
+        func: sum,
+    },
+    Entry {
+        name: "unit",
+        reference: "function unit(v, error=[[[\"ASSERT\"]]]) =
+    assert(is_vector(v), \"\\nInvalid vector.\")
+    norm(v)<_EPSILON? (error==[[[\"ASSERT\"]]]? assert(norm(v)>=_EPSILON,\"\\nCannot normalize a zero vector.\") : error) :
+    v/norm(v);",
+        consts: &[("_EPSILON", 1e-9)],
+        deps: &["is_vector", "is_finite", "is_nan"],
+        builtins: &["norm", "is_list", "len", "is_undef", "is_num"],
+        func: unit,
+    },
+    Entry {
+        name: "is_2d_transform",
+        reference: "function is_2d_transform(t) =    // z-parameters are zero, except we allow t[2][2]!=1 so scale() works
+  t[2][0]==0 && t[2][1]==0 && t[2][3]==0 && t[0][2] == 0 && t[1][2]==0 &&
+  (t[2][2]==1 || !(t[0][0]==1 && t[0][1]==0 && t[1][0]==0 && t[1][1]==1));",
+        consts: &[],
+        deps: &[],
+        builtins: &[],
+        func: is_2d_transform,
+    },
+    Entry {
+        name: "_apply",
+        reference: "function _apply(transform,points) =
+    assert(is_matrix(transform),\"Invalid transformation matrix\")
+    assert(is_matrix(points),\"Invalid points list\")
+    let(
+        tdim = len(transform[0])-1,
+        datadim = len(points[0])
+    )
+    assert(len(transform)==tdim || len(transform)-1==tdim, \"transform matrix height not compatible with width\")
+    assert(datadim==2 || datadim==3,\"Data must be 2D or 3D\")
+    let(
+        scale = len(transform)==tdim ? 1 : transform[tdim][tdim],
+        matrix = [for(i=[0:1:tdim]) [for(j=[0:1:datadim-1]) transform[j][i]]] / scale
+    )
+    tdim==datadim ? [for(p=points) concat(p,1)] * matrix
+  : tdim == 3 && datadim == 2 ?
+            assert(is_2d_transform(transform), str(\"Transforms is 3D and acts on Z, but points are 2D\"))
+            [for(p=points) concat(p,[0,1])]*matrix
+  : assert(false, str(\"Unsupported combination: \",len(transform),\"x\",len(transform[0]),\" transform (dimension \",tdim,
+                          \"), data of dimension \",datadim));",
+        consts: &[],
+        deps: &[
+            "is_matrix",
+            "is_vector",
+            "is_finite",
+            "is_nan",
+            "is_consistent",
+            "_list_pattern",
+            "is_2d_transform",
+        ],
+        builtins: &["is_list", "len", "is_undef", "is_num", "concat", "str"],
+        func: apply_transform,
+    },
+    Entry {
+        name: "_bt_search",
+        reference: "function _bt_search(query, r, points, tree) =
+    assert( is_list(tree)
+            && (   ( len(tree)==1 && is_list(tree[0]) )
+                || ( len(tree)==4 && is_num(tree[0]) && is_num(tree[1]) ) ),
+            \"\\nThe tree is invalid.\")
+    len(tree)==1
+    ?   assert( tree[0]==[] || is_vector(tree[0]), \"\\nThe tree is invalid.\" )
+        [for(i=tree[0]) if(norm(points[i]-query)<=r) i ]
+    :   norm(query-points[tree[0]]) > r+tree[1] ? [] :
+        concat(
+            [ if(norm(query-points[tree[0]])<=r) tree[0] ],
+            _bt_search(query, r, points, tree[2]),
+            _bt_search(query, r, points, tree[3]) ) ;",
+        consts: &[],
+        deps: &["is_vector", "is_finite", "is_nan"],
+        builtins: &["is_list", "len", "is_num", "norm", "concat", "is_undef"],
+        func: bt_search,
+    },
+    // `constrain` is a dep PIN, not an entry: only its `is_num` branch is reachable here (the argument is a
+    // dot-product scalar or the undef the asserts then kill), but the pin covers the whole body.
+    Entry {
+        name: "vector_angle",
+        reference: "function vector_angle(v1,v2,v3) =
+    assert( ( is_undef(v3) && ( is_undef(v2) || same_shape(v1,v2) ) )
+            || is_consistent([v1,v2,v3]) ,
+            \"\\nBad arguments.\")
+    assert( is_vector(v1) || is_consistent(v1), \"\\nBad arguments.\")
+    let( vecs = ! is_undef(v3) ? [v1-v2,v3-v2] :
+                ! is_undef(v2) ? [v1,v2] :
+                len(v1) == 3   ? [v1[0]-v1[1], v1[2]-v1[1]]
+                               : v1
+    )
+    assert(is_vector(vecs[0],2) || is_vector(vecs[0],3), \"\\nBad arguments.\")
+    let(
+        norm0 = norm(vecs[0]),
+        norm1 = norm(vecs[1])
+    )
+    assert(norm0>0 && norm1>0, \"\\nZero length vector.\")
+    // NOTE: constrain() corrects crazy FP rounding errors that exceed acos()'s domain.
+    acos(constrain((vecs[0]*vecs[1])/(norm0*norm1), -1, 1));",
+        consts: &[],
+        deps: &[
+            "same_shape",
+            "is_def",
+            "_list_pattern",
+            "is_consistent",
+            "is_vector",
+            "is_matrix",
+            "is_finite",
+            "is_nan",
+            "constrain",
+        ],
+        builtins: &[
+            "is_undef", "is_list", "is_num", "len", "norm", "acos", "min", "max",
+        ],
+        func: vector_angle,
     },
 ];
 
@@ -994,8 +1156,404 @@ fn none_inside(args: &[Value]) -> crate::Result<Value> {
                 return Ok(Value::Bool(false));
             }
         }
-        i = super::ops::apply_binary(BinOp::Add, i, Value::Num(1.0));
+        let next_i = super::ops::apply_binary(BinOp::Add, i.clone(), Value::Num(1.0));
+        if no_progress(&i, &next_i) {
+            return Err(non_terminating("_none_inside"));
+        }
+        i = next_i;
     }
+}
+
+/// `i+1` made no progress (`i` is ±inf — undef/NaN shapes raise in `select` before reaching this): the
+/// reference would recurse forever, which the interpreter only stops via its step budget. LOUD [`Err`]
+/// beats a native hang; a real model never constructs this.
+fn no_progress(i: &Value, next: &Value) -> bool {
+    match (i, next) {
+        (Value::Num(a), Value::Num(b)) => a.to_bits() == b.to_bits() || (a.is_nan() && b.is_nan()),
+        _ => false,
+    }
+}
+fn non_terminating(name: &str) -> crate::Error {
+    crate::Error::Eval(format!(
+        "{name}: non-terminating recursion (the interpreter would only stop at its step budget)"
+    ))
+}
+
+/// BOSL2 `_sum(v,_total,_i=0)` — the fold tail: `_total + v[_i]` per index, entirely through the
+/// interpreter's `+`/index (so vector/matrix accumulation is elementwise exactly as interpreted). A stuck
+/// `_i` (±inf) trips the [`no_progress`] guard instead of hanging.
+fn sum_tail(args: &[Value]) -> crate::Result<Value> {
+    let v = args.first().cloned().unwrap_or(Value::Undef);
+    let mut total = args.get(1).cloned().unwrap_or(Value::Undef);
+    let mut i = args.get(2).cloned().unwrap_or(Value::Num(0.0));
+    loop {
+        let ll = super::builtins::apply("len", std::slice::from_ref(&v));
+        if super::ops::apply_binary(BinOp::Ge, i.clone(), ll.clone()).is_truthy() {
+            return Ok(total);
+        }
+        if !matches!(ll, Value::Num(_)) {
+            // len(v) is undef (non-list v): `_i >= undef` is never true, so the reference recurses forever
+            // — only the interpreter's step budget would stop it. LOUD instead of a native hang.
+            return Err(non_terminating("_sum"));
+        }
+        total = super::ops::apply_binary(BinOp::Add, total, super::ops::index(v.clone(), &i));
+        let next_i = super::ops::apply_binary(BinOp::Add, i.clone(), Value::Num(1.0));
+        if no_progress(&i, &next_i) {
+            return Err(non_terminating("_sum"));
+        }
+        i = next_i;
+    }
+}
+
+/// BOSL2 `sum(v, dflt=0)` — the numeric/vector fast lane is the reference's own trick: `[for(i=v) 1]*v`
+/// (a ones-vector dot / vector-matrix product through the interpreter's `*`); anything else consistent
+/// (matrices…) folds through [`sum_tail`] with a `v[0]*0` seed.
+fn sum(args: &[Value]) -> crate::Result<Value> {
+    let v = args.first().cloned().unwrap_or(Value::Undef);
+    let dflt = args.get(1).cloned().unwrap_or(Value::Num(0.0));
+    if super::ops::apply_binary(BinOp::Eq, v.clone(), super::build_vector(Vec::new())).is_truthy() {
+        return Ok(dflt);
+    }
+    if !is_consistent(std::slice::from_ref(&v))?.is_truthy() {
+        return Err(bosl_assert("sum: non-numeric or inconsistent input"));
+    }
+    let v0 = super::ops::index(v.clone(), &Value::Num(0.0));
+    if v_is_finite(&v0) || is_vector_core(&v0) {
+        let n = super::iter_values(&v).len();
+        let ones = super::build_vector(vec![Value::Num(1.0); n]);
+        return Ok(super::ops::apply_binary(BinOp::Mul, ones, v));
+    }
+    let seed = super::ops::apply_binary(BinOp::Mul, v0, Value::Num(0.0));
+    sum_tail(&[v, seed])
+}
+
+/// The `unit` error-sentinel `[[["ASSERT"]]]`, built the way the literal would (`build_vector` all the way
+/// down — a one-string level is a `List`).
+fn unit_sentinel() -> Value {
+    super::build_vector(vec![super::build_vector(vec![super::build_vector(vec![
+        Value::string("ASSERT"),
+    ])])])
+}
+
+/// BOSL2 `unit(v, error=[[["ASSERT"]]])` — `v/norm(v)`, raising on a non-vector and (by default) on a
+/// near-zero one; a caller-provided `error` value is returned instead of raising. The near-zero compare and
+/// division route through ops so a `List`-shaped vector (norm → undef) degrades exactly as interpreted.
+fn unit(args: &[Value]) -> crate::Result<Value> {
+    let v = args.first().cloned().unwrap_or(Value::Undef);
+    if !is_vector_core(&v) {
+        return Err(bosl_assert("unit: invalid vector"));
+    }
+    let norm_v = super::builtins::apply("norm", std::slice::from_ref(&v));
+    if super::ops::apply_binary(BinOp::Lt, norm_v.clone(), Value::Num(1e-9)).is_truthy() {
+        return match args.get(1) {
+            // default error → the sentinel → the inner assert(norm(v)>=_EPSILON) fires
+            None => Err(bosl_assert("unit: cannot normalize a zero vector")),
+            Some(err) => {
+                if super::ops::apply_binary(BinOp::Eq, err.clone(), unit_sentinel()).is_truthy() {
+                    Err(bosl_assert("unit: cannot normalize a zero vector"))
+                } else {
+                    Ok(err.clone())
+                }
+            }
+        };
+    }
+    Ok(super::ops::apply_binary(BinOp::Div, v, norm_v))
+}
+
+/// BOSL2 `is_2d_transform(t)` — the affine matrix's z-action is trivial (with the zscale carve-out). Pure
+/// index chains + `==`, fully routed; every branch value is a `Bool` like the interpreter's `&&`/`||` yield.
+fn is_2d_transform(args: &[Value]) -> crate::Result<Value> {
+    let t = args.first().cloned().unwrap_or(Value::Undef);
+    let at = |r: f64, c: f64| {
+        super::ops::index(super::ops::index(t.clone(), &Value::Num(r)), &Value::Num(c))
+    };
+    let eq = |v: Value, k: f64| super::ops::apply_binary(BinOp::Eq, v, Value::Num(k)).is_truthy();
+    let zs_clear = eq(at(2.0, 0.0), 0.0)
+        && eq(at(2.0, 1.0), 0.0)
+        && eq(at(2.0, 3.0), 0.0)
+        && eq(at(0.0, 2.0), 0.0)
+        && eq(at(1.0, 2.0), 0.0);
+    if !zs_clear {
+        return Ok(Value::Bool(false));
+    }
+    let xy_identity = eq(at(0.0, 0.0), 1.0)
+        && eq(at(0.0, 1.0), 0.0)
+        && eq(at(1.0, 0.0), 0.0)
+        && eq(at(1.0, 1.0), 1.0);
+    Ok(Value::Bool(eq(at(2.0, 2.0), 1.0) || !xy_identity))
+}
+
+/// BOSL2 `_apply(transform, points)` — affine matrix × point list. The interpreted version rebuilds the
+/// transposed/scaled matrix and augments every point through per-element comprehension TASKS; here the same
+/// values come from a handful of op calls (`concat` per point, one `/`, one matrix `*` — all already native
+/// inside ops/builtins), which is where the 2.2s went.
+#[allow(
+    clippy::float_cmp,
+    reason = "the reference's dimension checks (len==tdim, datadim==2) ARE exact f64 equalities"
+)]
+fn apply_transform(args: &[Value]) -> crate::Result<Value> {
+    let transform = args.first().cloned().unwrap_or(Value::Undef);
+    let points = args.get(1).cloned().unwrap_or(Value::Undef);
+    if !is_matrix(std::slice::from_ref(&transform))?.is_truthy() {
+        return Err(bosl_assert("_apply: invalid transformation matrix"));
+    }
+    if !is_matrix(std::slice::from_ref(&points))?.is_truthy() {
+        return Err(bosl_assert("_apply: invalid points list"));
+    }
+    // is_matrix guarantees lists-of-vectors, so the dims are plain numbers.
+    let num_len = |v: &Value| -> f64 {
+        match super::builtins::apply("len", std::slice::from_ref(v)) {
+            Value::Num(n) => n,
+            _ => f64::NAN, // unreachable: is_matrix above
+        }
+    };
+    let lt = num_len(&transform);
+    let tdim = num_len(&super::ops::index(transform.clone(), &Value::Num(0.0))) - 1.0;
+    let datadim = num_len(&super::ops::index(points.clone(), &Value::Num(0.0)));
+    if !(lt == tdim || lt - 1.0 == tdim) {
+        return Err(bosl_assert(
+            "_apply: transform matrix height not compatible with width",
+        ));
+    }
+    if !(datadim == 2.0 || datadim == 3.0) {
+        return Err(bosl_assert("_apply: data must be 2D or 3D"));
+    }
+    let scale = if lt == tdim {
+        Value::Num(1.0)
+    } else {
+        super::ops::index(
+            super::ops::index(transform.clone(), &Value::Num(tdim)),
+            &Value::Num(tdim),
+        )
+    };
+    let mut rows = Vec::new();
+    for i in super::value::range_iter(0.0, 1.0, tdim) {
+        let mut row = Vec::new();
+        for j in super::value::range_iter(0.0, 1.0, datadim - 1.0) {
+            row.push(super::ops::index(
+                super::ops::index(transform.clone(), &Value::Num(j)),
+                &Value::Num(i),
+            ));
+        }
+        rows.push(super::build_vector(row));
+    }
+    let matrix = super::ops::apply_binary(BinOp::Div, super::build_vector(rows), scale);
+    if tdim == datadim {
+        let aug: Vec<Value> = super::iter_values(&points)
+            .iter()
+            .map(|p| super::builtins::apply("concat", &[p.clone(), Value::Num(1.0)]))
+            .collect();
+        return Ok(super::ops::apply_binary(
+            BinOp::Mul,
+            super::build_vector(aug),
+            matrix,
+        ));
+    }
+    if tdim == 3.0 && datadim == 2.0 {
+        if !is_2d_transform(std::slice::from_ref(&transform))?.is_truthy() {
+            return Err(bosl_assert(
+                "_apply: transform is 3D and acts on Z, but points are 2D",
+            ));
+        }
+        let aug: Vec<Value> = super::iter_values(&points)
+            .iter()
+            .map(|p| {
+                super::builtins::apply("concat", &[p.clone(), Value::num_list(vec![0.0, 1.0])])
+            })
+            .collect();
+        return Ok(super::ops::apply_binary(
+            BinOp::Mul,
+            super::build_vector(aug),
+            matrix,
+        ));
+    }
+    Err(bosl_assert("_apply: unsupported combination"))
+}
+
+/// BOSL2 `_bt_search(query, r, points, tree)` — radius search over a ball tree. The reference's
+/// `concat(root-hit, left, right)` tree recursion flattens to an ITERATIVE preorder DFS: the asserts force
+/// every collected element to be a number, so a flat all-`Num` collection coalesces to the same `NumList`
+/// the nested concats build — and an explicit stack can't blow the native stack on a crafted deep tree.
+/// Assert/visit ORDER matches the interpreter (a raise in the left subtree fires before the right subtree
+/// is looked at).
+#[allow(
+    clippy::float_cmp,
+    reason = "the reference's len(tree)==1 / ==4 ARE exact f64 equalities on integer lengths"
+)]
+fn bt_search(args: &[Value]) -> crate::Result<Value> {
+    let query = args.first().cloned().unwrap_or(Value::Undef);
+    let r = args.get(1).cloned().unwrap_or(Value::Undef);
+    let points = args.get(2).cloned().unwrap_or(Value::Undef);
+    let mut out: Vec<Value> = Vec::new();
+    let mut stack = vec![args.get(3).cloned().unwrap_or(Value::Undef)];
+    while let Some(tree) = stack.pop() {
+        let ll = super::builtins::apply("len", std::slice::from_ref(&tree));
+        let t0 = super::ops::index(tree.clone(), &Value::Num(0.0));
+        let leaf = matches!(ll, Value::Num(n) if n == 1.0) && v_is_list(&t0);
+        let node = matches!(ll, Value::Num(n) if n == 4.0)
+            && matches!(&t0, Value::Num(n) if !n.is_nan())
+            && matches!(super::ops::index(tree.clone(), &Value::Num(1.0)), Value::Num(n) if !n.is_nan());
+        if !(v_is_list(&tree) && (leaf || node)) {
+            return Err(bosl_assert("_bt_search: the tree is invalid"));
+        }
+        if leaf {
+            let empty_ok =
+                super::ops::apply_binary(BinOp::Eq, t0.clone(), super::build_vector(Vec::new()))
+                    .is_truthy();
+            if !(empty_ok || is_vector_core(&t0)) {
+                return Err(bosl_assert("_bt_search: the tree is invalid"));
+            }
+            for iv in super::iter_values(&t0) {
+                let d = super::ops::apply_binary(
+                    BinOp::Sub,
+                    super::ops::index(points.clone(), &iv),
+                    query.clone(),
+                );
+                if super::ops::apply_binary(
+                    BinOp::Le,
+                    super::builtins::apply("norm", std::slice::from_ref(&d)),
+                    r.clone(),
+                )
+                .is_truthy()
+                {
+                    out.push(iv);
+                }
+            }
+        } else {
+            let d = super::ops::apply_binary(
+                BinOp::Sub,
+                query.clone(),
+                super::ops::index(points.clone(), &t0),
+            );
+            let dist = super::builtins::apply("norm", std::slice::from_ref(&d));
+            let radius = super::ops::apply_binary(
+                BinOp::Add,
+                r.clone(),
+                super::ops::index(tree.clone(), &Value::Num(1.0)),
+            );
+            if super::ops::apply_binary(BinOp::Gt, dist.clone(), radius).is_truthy() {
+                continue; // pruned subtree contributes `[]` — a no-op in the flat collection
+            }
+            if super::ops::apply_binary(BinOp::Le, dist, r.clone()).is_truthy() {
+                out.push(t0);
+            }
+            stack.push(super::ops::index(tree.clone(), &Value::Num(3.0)));
+            stack.push(super::ops::index(tree.clone(), &Value::Num(2.0)));
+        }
+    }
+    Ok(super::build_vector(out))
+}
+
+/// The reachable slice of BOSL2 `constrain` for [`vector_angle`]'s clamp: a non-NaN number clamps through
+/// the real `min`/`max` builtins; a vector clamps elementwise; everything the asserts let through that ISN'T
+/// one of those (undef, NaN — `is_num(NaN)` is false) falls to the reference's `assert(false)`. The matrix
+/// branch (`flatten`/`list_to_matrix`) is unreachable from `vector_angle`'s asserted shapes — LOUD error, not
+/// a silent wrong answer, if that proof ever breaks.
+fn constrain_clamp(v: &Value, minval: f64, maxval: f64) -> crate::Result<Value> {
+    let clamp1 = |f: &Value| {
+        super::builtins::apply(
+            "max",
+            &[
+                Value::Num(minval),
+                super::builtins::apply("min", &[f.clone(), Value::Num(maxval)]),
+            ],
+        )
+    };
+    match v {
+        Value::Num(n) if !n.is_nan() => Ok(clamp1(v)),
+        _ if is_vector_core(v) => {
+            let out: Vec<Value> = super::iter_values(v).iter().map(clamp1).collect();
+            Ok(super::build_vector(out))
+        }
+        _ if is_matrix(std::slice::from_ref(v))?.is_truthy() => Err(crate::Error::Eval(
+            "constrain: matrix input unreachable from vector_angle (intrinsic guard)".to_string(),
+        )),
+        Value::List(_) | Value::NumList(_) => {
+            let out: Vec<Value> = super::iter_values(v)
+                .iter()
+                .map(|vec| {
+                    let row: Vec<Value> = super::iter_values(vec).iter().map(clamp1).collect();
+                    super::build_vector(row)
+                })
+                .collect();
+            Ok(super::build_vector(out))
+        }
+        _ => Err(bosl_assert("constrain: invalid input")),
+    }
+}
+
+/// BOSL2 `vector_angle(v1,v2,v3)` — the angle between two vectors (or three points, or a pre-paired list),
+/// `acos`-clamped. Assert chain in reference order with short-circuits preserved; the trig goes through the
+/// REAL `acos` builtin (the exact-degree snap lives there).
+#[allow(
+    clippy::float_cmp,
+    reason = "the reference's len(v1)==3 IS an exact f64 equality on an integer length"
+)]
+fn vector_angle(args: &[Value]) -> crate::Result<Value> {
+    let v1 = args.first().cloned().unwrap_or(Value::Undef);
+    let v2 = args.get(1).cloned().unwrap_or(Value::Undef);
+    let v3 = args.get(2).cloned().unwrap_or(Value::Undef);
+    let v2_undef = matches!(v2, Value::Undef);
+    let v3_undef = matches!(v3, Value::Undef);
+    let ok1 = (v3_undef && (v2_undef || same_shape(&[v1.clone(), v2.clone()])?.is_truthy()))
+        || is_consistent(&[super::build_vector(vec![
+            v1.clone(),
+            v2.clone(),
+            v3.clone(),
+        ])])?
+        .is_truthy();
+    if !ok1 {
+        return Err(bosl_assert("vector_angle: bad arguments"));
+    }
+    let ok2 = is_vector(std::slice::from_ref(&v1))?.is_truthy()
+        || is_consistent(std::slice::from_ref(&v1))?.is_truthy();
+    if !ok2 {
+        return Err(bosl_assert("vector_angle: bad arguments"));
+    }
+    let vecs = if !v3_undef {
+        super::build_vector(vec![
+            super::ops::apply_binary(BinOp::Sub, v1, v2.clone()),
+            super::ops::apply_binary(BinOp::Sub, v3, v2),
+        ])
+    } else if !v2_undef {
+        super::build_vector(vec![v1, v2])
+    } else if matches!(
+        super::builtins::apply("len", std::slice::from_ref(&v1)),
+        Value::Num(n) if n == 3.0
+    ) {
+        let p = |i: f64| super::ops::index(v1.clone(), &Value::Num(i));
+        super::build_vector(vec![
+            super::ops::apply_binary(BinOp::Sub, p(0.0), p(1.0)),
+            super::ops::apply_binary(BinOp::Sub, p(2.0), p(1.0)),
+        ])
+    } else {
+        v1
+    };
+    let vecs0 = super::ops::index(vecs.clone(), &Value::Num(0.0));
+    let vecs1 = super::ops::index(vecs, &Value::Num(1.0));
+    let ok3 = is_vector(&[vecs0.clone(), Value::Num(2.0)])?.is_truthy()
+        || is_vector(&[vecs0.clone(), Value::Num(3.0)])?.is_truthy();
+    if !ok3 {
+        return Err(bosl_assert("vector_angle: bad arguments"));
+    }
+    let norm0 = super::builtins::apply("norm", std::slice::from_ref(&vecs0));
+    let norm1 = super::builtins::apply("norm", std::slice::from_ref(&vecs1));
+    let pos =
+        |n: &Value| super::ops::apply_binary(BinOp::Gt, n.clone(), Value::Num(0.0)).is_truthy();
+    if !(pos(&norm0) && pos(&norm1)) {
+        return Err(bosl_assert("vector_angle: zero length vector"));
+    }
+    let dot = super::ops::apply_binary(BinOp::Mul, vecs0, vecs1);
+    let ratio = super::ops::apply_binary(
+        BinOp::Div,
+        dot,
+        super::ops::apply_binary(BinOp::Mul, norm0, norm1),
+    );
+    let clamped = constrain_clamp(&ratio, -1.0, 1.0)?;
+    Ok(super::builtins::apply(
+        "acos",
+        std::slice::from_ref(&clamped),
+    ))
 }
 
 /// BOSL2 `force_list(value, n=1, fill)` — a list passes through; a scalar becomes `n` copies (or
@@ -2490,6 +3048,309 @@ mod tests {
                     &interpret_with_deps_consts(ni_ref, &ni_deps, &consts, args)
                 ),
                 "_none_inside diverged on {args:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn fast_equals_slow_aggregate_band() {
+        let consts = [("_EPSILON", Value::Num(1e-9))];
+        let shape_deps = [
+            reference_of("is_consistent").unwrap(),
+            reference_of("_list_pattern").unwrap(),
+            reference_of("is_finite").unwrap(),
+            reference_of("is_nan").unwrap(),
+            reference_of("is_vector").unwrap(),
+            reference_of("all_nonzero").unwrap(),
+        ];
+
+        // _sum / sum — scalars, vectors, matrices (the _sum lane), inconsistent (raise), empty (dflt).
+        let sum_ref = reference_of("sum").unwrap();
+        let sum_deps: Vec<&str> = shape_deps
+            .iter()
+            .copied()
+            .chain([reference_of("_sum").unwrap()])
+            .collect();
+        let st_ref = reference_of("_sum").unwrap();
+        let m22 = Value::list(vec![
+            Value::num_list(vec![1.0, 2.0]),
+            Value::num_list(vec![3.0, 4.0]),
+        ]);
+        let sums = [
+            Value::num_list(vec![1.0, 2.0, 3.0]),
+            Value::num_list(vec![0.5]),
+            Value::list(vec![
+                Value::num_list(vec![1.0, 2.0]),
+                Value::num_list(vec![10.0, 20.0]),
+            ]),
+            Value::list(vec![m22.clone(), m22.clone()]),
+            Value::list(vec![]),
+            Value::list(vec![Value::Num(1.0), Value::string("x")]),
+            Value::num_list(vec![f64::NAN, 1.0]),
+            Value::Num(7.0),
+            Value::Undef,
+        ];
+        for v in &sums {
+            for dflt in [None, Some(Value::Num(9.0)), Some(Value::string("d"))] {
+                let mut args = vec![v.clone()];
+                if let Some(d) = &dflt {
+                    args.push(d.clone());
+                }
+                assert!(
+                    same_result(
+                        &super::sum(&args),
+                        &interpret_with_deps_consts(sum_ref, &sum_deps, &consts, &args)
+                    ),
+                    "sum diverged on ({v:?}, dflt {dflt:?})"
+                );
+            }
+            // a non-list v makes the reference recurse forever (len(v) is undef) — the oracle would HANG,
+            // so those inputs are asserted native-side only below.
+            if matches!(v, Value::List(_) | Value::NumList(_)) {
+                let args = [v.clone(), Value::Num(0.0)];
+                assert!(
+                    same_result(
+                        &super::sum_tail(&args),
+                        &interpret_with_deps_consts(st_ref, &[], &consts, &args)
+                    ),
+                    "_sum diverged on {v:?}"
+                );
+            }
+        }
+        // the non-terminating shapes: LOUD Err, never a hang (the interpreter only stops at its budget).
+        assert!(super::sum_tail(&[Value::Num(7.0), Value::Num(0.0)]).is_err());
+        assert!(super::sum_tail(&[Value::Undef, Value::Num(0.0)]).is_err());
+        assert!(
+            super::sum_tail(&[
+                Value::num_list(vec![1.0]),
+                Value::Num(0.0),
+                Value::Num(f64::NEG_INFINITY)
+            ])
+            .is_err()
+        );
+
+        // unit — ordinary, near-zero (default raise vs custom error value), non-vector raise, List-shaped.
+        let unit_ref = reference_of("unit").unwrap();
+        let unit_deps = [
+            reference_of("is_vector").unwrap(),
+            reference_of("is_finite").unwrap(),
+            reference_of("is_nan").unwrap(),
+            reference_of("all_nonzero").unwrap(),
+        ];
+        let units = [
+            Value::num_list(vec![3.0, 4.0]),
+            Value::num_list(vec![0.0, 0.0]),
+            Value::num_list(vec![1e-10, 0.0]),
+            Value::num_list(vec![1.0, 2.0, 3.0]),
+            Value::Num(5.0),
+            Value::Undef,
+            Value::list(vec![Value::Num(1.0), Value::string("x")]),
+        ];
+        for v in &units {
+            for err in [None, Some(Value::Num(-7.0)), Some(Value::Undef)] {
+                let mut args = vec![v.clone()];
+                if let Some(e) = &err {
+                    args.push(e.clone());
+                }
+                assert!(
+                    same_result(
+                        &super::unit(&args),
+                        &interpret_with_deps_consts(unit_ref, &unit_deps, &consts, &args)
+                    ),
+                    "unit diverged on ({v:?}, error {err:?})"
+                );
+            }
+        }
+
+        // is_2d_transform / _apply — real affine matrices (2D-in-3D, translation, scale, zscale), the
+        // 2D-points-under-3D-transform lane, and the raise paths.
+        let i2t_ref = reference_of("is_2d_transform").unwrap();
+        let ap_ref = reference_of("_apply").unwrap();
+        let ap_deps: Vec<&str> = shape_deps
+            .iter()
+            .copied()
+            .chain([reference_of("is_matrix").unwrap(), i2t_ref])
+            .collect();
+        let mat4 = |rows: [[f64; 4]; 4]| {
+            let rows: Vec<Value> = rows.iter().map(|r| Value::num_list(r.to_vec())).collect();
+            Value::list(rows)
+        };
+        let ident = mat4([
+            [1.0, 0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0],
+            [0.0, 0.0, 0.0, 1.0],
+        ]);
+        let translate = mat4([
+            [1.0, 0.0, 0.0, 5.0],
+            [0.0, 1.0, 0.0, -3.0],
+            [0.0, 0.0, 1.0, 2.0],
+            [0.0, 0.0, 0.0, 1.0],
+        ]);
+        let zscale = mat4([
+            [1.0, 0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0, 0.0],
+            [0.0, 0.0, 4.0, 0.0],
+            [0.0, 0.0, 0.0, 1.0],
+        ]);
+        let scale2 = mat4([
+            [2.0, 0.0, 0.0, 0.0],
+            [0.0, 3.0, 0.0, 0.0],
+            [0.0, 0.0, 4.0, 0.0],
+            [0.0, 0.0, 0.0, 2.0],
+        ]);
+        let rot2d = mat4([
+            [0.0, -1.0, 0.0, 1.0],
+            [1.0, 0.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0],
+            [0.0, 0.0, 0.0, 1.0],
+        ]);
+        let mats = [
+            ident.clone(),
+            translate.clone(),
+            zscale.clone(),
+            scale2.clone(),
+            rot2d.clone(),
+            m22.clone(),
+            Value::Undef,
+        ];
+        for t in &mats {
+            let args = [t.clone()];
+            assert!(
+                same_result(
+                    &super::is_2d_transform(&args),
+                    &interpret_with_deps_consts(i2t_ref, &[], &consts, &args)
+                ),
+                "is_2d_transform diverged on {t:?}"
+            );
+        }
+        let pts3 = Value::list(vec![
+            Value::num_list(vec![1.0, 2.0, 3.0]),
+            Value::num_list(vec![-1.0, 0.5, 0.0]),
+        ]);
+        let pts2 = Value::list(vec![
+            Value::num_list(vec![1.0, 2.0]),
+            Value::num_list(vec![-1.0, 0.5]),
+        ]);
+        for t in &mats {
+            for p in [&pts3, &pts2, &m22, &Value::Undef] {
+                let args = [t.clone(), p.clone()];
+                assert!(
+                    same_result(
+                        &super::apply_transform(&args),
+                        &interpret_with_deps_consts(ap_ref, &ap_deps, &consts, &args)
+                    ),
+                    "_apply diverged on ({t:?}, {p:?})"
+                );
+            }
+        }
+
+        // _bt_search — a real 2-level tree over five 2D points, radii that hit the prune / root-hit / leaf
+        // lanes, plus the malformed-tree raises.
+        let bt_ref = reference_of("_bt_search").unwrap();
+        let bt_deps = [
+            reference_of("is_vector").unwrap(),
+            reference_of("is_finite").unwrap(),
+            reference_of("is_nan").unwrap(),
+            reference_of("all_nonzero").unwrap(),
+        ];
+        let points = Value::list(vec![
+            p2(0.0, 0.0),
+            p2(1.0, 0.0),
+            p2(0.0, 1.0),
+            p2(5.0, 5.0),
+            p2(5.2, 5.0),
+        ]);
+        // node: [pivot_idx, radius, left, right]; leaves carry index lists
+        let leaf = |ids: &[f64]| Value::list(vec![Value::num_list(ids.to_vec())]);
+        let tree = Value::list(vec![
+            Value::Num(0.0),
+            Value::Num(1.5),
+            leaf(&[1.0, 2.0]),
+            Value::list(vec![
+                Value::Num(3.0),
+                Value::Num(0.5),
+                leaf(&[4.0]),
+                leaf(&[]),
+            ]),
+        ]);
+        let bt_cases: Vec<Vec<Value>> = vec![
+            vec![p2(0.0, 0.0), Value::Num(1.1), points.clone(), tree.clone()],
+            vec![p2(0.0, 0.0), Value::Num(0.1), points.clone(), tree.clone()],
+            vec![p2(5.0, 5.0), Value::Num(0.5), points.clone(), tree.clone()],
+            vec![p2(9.0, 9.0), Value::Num(0.1), points.clone(), tree.clone()],
+            vec![
+                p2(0.0, 0.0),
+                Value::Num(1.1),
+                points.clone(),
+                leaf(&[0.0, 3.0]),
+            ],
+            vec![p2(0.0, 0.0), Value::Num(1.1), points.clone(), leaf(&[])],
+            vec![
+                p2(0.0, 0.0),
+                Value::Num(1.1),
+                points.clone(),
+                Value::Num(7.0),
+            ],
+            vec![
+                p2(0.0, 0.0),
+                Value::Num(1.1),
+                points.clone(),
+                Value::list(vec![
+                    Value::Num(0.0),
+                    Value::Num(1.0),
+                    leaf(&[]),
+                    Value::Num(9.0),
+                ]),
+            ],
+            vec![p2(0.0, 0.0), Value::Undef, points.clone(), tree.clone()],
+        ];
+        for args in &bt_cases {
+            assert!(
+                same_result(
+                    &super::bt_search(args),
+                    &interpret_with_deps_consts(bt_ref, &bt_deps, &consts, args)
+                ),
+                "_bt_search diverged on {args:?}"
+            );
+        }
+
+        // vector_angle — two-vector, three-point, paired-list, and the assert lanes (mismatched shapes,
+        // zero-length, scalar input); the acos-domain clamp edge via antiparallel vectors.
+        let va_ref = reference_of("vector_angle").unwrap();
+        let va_deps: Vec<&str> = shape_deps
+            .iter()
+            .copied()
+            .chain([
+                reference_of("same_shape").unwrap(),
+                reference_of("is_def").unwrap(),
+                reference_of("is_matrix").unwrap(),
+                pin_reference_of("constrain").unwrap(),
+            ])
+            .collect();
+        let va_cases: Vec<Vec<Value>> = vec![
+            vec![p2(1.0, 0.0), p2(0.0, 1.0)],
+            vec![p2(1.0, 0.0), p2(-1.0, 0.0)],
+            vec![p2(1.0, 0.0), p2(1.0, 0.0)],
+            vec![
+                Value::num_list(vec![1.0, 0.0, 0.0]),
+                Value::num_list(vec![0.0, 0.0, 1.0]),
+            ],
+            vec![p2(1.0, 0.0), p2(0.0, 1.0), p2(1.0, 1.0)],
+            vec![Value::list(vec![p2(1.0, 0.0), p2(0.0, 1.0)])],
+            vec![Value::list(vec![p2(0.0, 2.0), p2(0.0, 0.0), p2(2.0, 0.0)])],
+            vec![p2(1.0, 0.0), Value::num_list(vec![1.0, 0.0, 0.0])],
+            vec![p2(0.0, 0.0), p2(1.0, 0.0)],
+            vec![Value::Num(3.0)],
+            vec![Value::Undef],
+        ];
+        for args in &va_cases {
+            assert!(
+                same_result(
+                    &super::vector_angle(args),
+                    &interpret_with_deps_consts(va_ref, &va_deps, &consts, args)
+                ),
+                "vector_angle diverged on {args:?}"
             );
         }
     }

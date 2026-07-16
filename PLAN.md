@@ -191,7 +191,7 @@ added 2026-07-07.
 - [ ] O.5 - O.5 - Next intrinsics band from the O.4 worklist (hand-written, wasm-safe, fast==slow gated) — concrete sub-tasks cut from the profile data
   - [x] O.5.1 - O.5.1 - Wire-time const guard: Entry.consts (name, expected bits) checked against the fn's home scope at build_intrinsics — mismatch doesn't wire. Unblocks the eps=_EPSILON family (is_vector, approx, _tri_class, unit, posmod...)
   - [x] O.5.2 - O.5.2 - Predicate/shape band (~19s): is_vector, approx, is_consistent+_list_pattern+same_shape, is_matrix, is_path, in_list, force_list, num_defined, constrain, posmod — each verbatim-reference + fast==slow battery
-  - [ ] O.5.3 - O.5.3 - Earcut band (~17s, window_air_cover's core): _tri_class (12.4s/3.9M), _none_inside (4.8s/1.6M, recursive w/ early exit; deps select/_tri_class/_pt_in_tri)
+  - [x] O.5.3 - O.5.3 - Earcut band (~17s, window_air_cover's core): _tri_class (12.4s/3.9M), _none_inside (4.8s/1.6M, recursive w/ early exit; deps select/_tri_class/_pt_in_tri)
   - [ ] O.5.4 - O.5.4 - Aggregate/affine band (~12s): sum/_sum, _apply, unit, idx, _bt_search, vector_angle — recursive accumulators + matrix×points
   - [ ] O.5.5 - O.5.5 - Re-measure + docs: the four models under models_profile_targets + K.1.2 sweep vs baseline; models-profile.md updated; deferred monsters (_region_region_intersections, _point_dist, _find_anchor, _group_sort_by_index, rot ~22s) named for the next cut
 ## Phase P - P - Cranelift JIT + CSG cache (desktop)

@@ -194,7 +194,7 @@ added 2026-07-07.
   - [x] O.5.3 - O.5.3 - Earcut band (~17s, window_air_cover's core): _tri_class (12.4s/3.9M), _none_inside (4.8s/1.6M, recursive w/ early exit; deps select/_tri_class/_pt_in_tri)
   - [x] O.5.4 - O.5.4 - Aggregate/affine band (~12s): sum/_sum, _apply, unit, idx, _bt_search, vector_angle — recursive accumulators + matrix×points
   - [x] O.5.5 - O.5.5 - Re-measure + docs: the four models under models_profile_targets + K.1.2 sweep vs baseline; models-profile.md updated; deferred monsters (_region_region_intersections, _point_dist, _find_anchor, _group_sort_by_index, rot ~22s) named for the next cut
-- [ ] O.6 - O.6 - Named-arg → positional rebind at intrinsic dispatch: BOSL2's is_vector(v, zero=)/unit(v, error=) calls fall past the v1 all-positional gate (~1.2s interpreted in wac alone) — rebind by the callee's param names at dispatch_call, extending every existing intrinsic
+- [x] O.6 - O.6 - Named-arg → positional rebind at intrinsic dispatch: BOSL2's is_vector(v, zero=)/unit(v, error=) calls fall past the v1 all-positional gate (~1.2s interpreted in wac alone) — rebind by the callee's param names at dispatch_call, extending every existing intrinsic
 - [ ] O.7 - O.7 - Residual band 5 (medium bodies, ~7s): _find_anchor? _group_sort_by_index, _vnf_centroid, rot, _get_ear, vector_axis, affine3d_rot_from_to + small fry (in_list, is_path, constrain, apply) — OR route to P.1.6 JIT list ABI; the monsters (_region_region_intersections+_point_dist 14.2s) decide the JIT-vs-intrinsic split
 ## Phase P - P - Cranelift JIT + CSG cache (desktop)
 - [ ] P.1 - P.1 - Cranelift JIT for the numeric long tail (desktop)

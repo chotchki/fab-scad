@@ -88,6 +88,17 @@ static PINS: &[(&str, &str)] = &[
         "is_range",
         "function is_range(x) = !is_list(x) && is_finite(x[0]) && is_finite(x[1]) && is_finite(x[2]) ;",
     ),
+    // vnf.scad — `_vnf_centroid`'s structural assert.
+    (
+        "is_vnf",
+        "function is_vnf(x) =
+    is_list(x) &&
+    len(x)==2 &&
+    is_list(x[0]) &&
+    is_list(x[1]) &&
+    (x[0]==[] || (len(x[0])>=3 && is_vector(x[0][0],3))) &&
+    (x[1]==[] || is_vector(x[1][0]));",
+    ),
     // math.scad — `vector_angle`'s acos-domain clamp. Only its `is_num` branch (and the assert-false tail
     // its predicate chain reaches on undef/NaN) is reachable there, but the pin covers the whole body — so
     // `flatten`/`list_to_matrix` stay unreachable as long as the pinned `is_matrix` answers false for
@@ -610,6 +621,112 @@ static REGISTRY: &[Entry] = &[
             "is_undef", "is_list", "is_num", "len", "norm", "acos", "min", "max",
         ],
         func: vector_angle,
+    },
+    // ── O.7, band 5 batch 1 (regions/geometry/vnf/comparisons.scad) ─────────────────────────────────────
+    // The post-O.6 residual's small-body big-timers: _point_dist is 4.9s in shoe_holder alone (offset()'s
+    // per-point distance scan), _vnf_centroid/_group_sort_by_index are webcam_holder's #2/#3. All fully
+    // ROUTED through ops/builtins — no hand-f64 fast paths here, because `ops::dot` is 4-laned (not a
+    // sequential fold) and these bodies are dot-product-heavy; the win is erasing the task-stack
+    // orchestration, not the arithmetic.
+    Entry {
+        name: "_point_dist",
+        reference: "function _point_dist(path,pathseg_unit,pathseg_len,pt) =
+    min([
+        for(i=[0:len(pathseg_unit)-1]) let(
+            v = pt-path[i],
+            projection = v*pathseg_unit[i],
+            segdist = projection < 0? norm(pt-path[i]) :
+                projection > pathseg_len[i]? norm(pt-select(path,i+1)) :
+                norm(v-projection*pathseg_unit[i])
+        ) segdist
+    ]);",
+        consts: &[],
+        deps: &["select", "is_vector", "is_range", "is_finite", "is_nan"],
+        builtins: &[
+            "min", "norm", "len", "is_list", "is_string", "is_num", "is_undef",
+        ],
+        func: point_dist,
+    },
+    Entry {
+        name: "_is_point_on_line",
+        reference: "function _is_point_on_line(point, line, bounded=false, eps=_EPSILON) =
+    let(
+        v1 = (line[1]-line[0]),
+        v0 = (point-line[0]),
+        t  = v0*v1/(v1*v1),
+        bounded = force_list(bounded,2),
+        norm_crossprod = len(v1)==2 ? abs(cross(v0,v1)) : norm(cross(v0,v1))
+    )
+    norm_crossprod <= eps*norm(v1)
+    && (!bounded[0] || t>=-eps)
+    && (!bounded[1] || t<1+eps) ;",
+        consts: &[("_EPSILON", 1e-9)],
+        deps: &["force_list"],
+        builtins: &["abs", "cross", "norm", "len", "is_list", "is_undef"],
+        func: is_point_on_line,
+    },
+    // `sum` runs its `_sum` lane here (the summands are [scalar, vector] pairs — not vectors), and the
+    // final `approx(pos[0], 0, eps)` is a plain num/num compare — both already entries, called natively.
+    Entry {
+        name: "_vnf_centroid",
+        reference: "function _vnf_centroid(vnf,eps=_EPSILON) =
+    assert(is_vnf(vnf) && len(vnf[0])!=0 && len(vnf[1])!=0,\"\\nInvalid or empty VNF given to centroid.\")
+    let(
+        verts = vnf[0],
+        pos = sum([
+            for(face=vnf[1], j=[1:1:len(face)-2]) let(
+                v0  = verts[face[0]],
+                v1  = verts[face[j]],
+                v2  = verts[face[j+1]],
+                vol = cross(v2,v1)*v0
+            )
+            [ vol, (v0+v1+v2)*vol ]
+        ])
+    )
+    assert(!approx(pos[0],0, eps), \"\\nThe vnf has self-intersections.\")
+    pos[1]/pos[0]/4;",
+        consts: &[("_EPSILON", 1e-9)],
+        deps: &[
+            "is_vnf",
+            "is_vector",
+            "is_finite",
+            "is_nan",
+            "sum",
+            "_sum",
+            "is_consistent",
+            "_list_pattern",
+            "approx",
+            "idx",
+            "posmod",
+        ],
+        builtins: &[
+            "len", "is_list", "is_undef", "is_num", "cross", "is_bool", "abs", "is_string",
+        ],
+        func: vnf_centroid,
+    },
+    // The reference's lesser/[equal]/greater concat recursion flattens to an iterative in-order walk (a
+    // 20k-element pre-sorted input would recurse 20k deep); partition subsets are strictly smaller (the
+    // pivot's own element lands in `equal` or — NaN/incomparable — nowhere), so the walk terminates.
+    Entry {
+        name: "_group_sort_by_index",
+        reference: "function _group_sort_by_index(l,idx) =
+    len(l) == 0 ? [] :
+    len(l) == 1 ? [l] :
+    let(
+        pivot   = l[floor(len(l)/2)][idx],
+        equal   = [ for(li=l) if( li[idx]==pivot) li ],
+        lesser  = [ for(li=l) if( li[idx]< pivot) li ],
+        greater = [ for(li=l) if( li[idx]> pivot) li ]
+    )
+    concat(
+        _group_sort_by_index(lesser,idx),
+        [equal],
+        _group_sort_by_index(greater,idx)
+    );",
+        consts: &[],
+        deps: &[],
+        builtins: &["len", "floor", "concat"],
+        func: group_sort_by_index,
     },
 ];
 
@@ -1554,6 +1671,280 @@ fn vector_angle(args: &[Value]) -> crate::Result<Value> {
         "acos",
         std::slice::from_ref(&clamped),
     ))
+}
+
+/// BOSL2 `_point_dist(path, pathseg_unit, pathseg_len, pt)` — min distance from `pt` to a precomputed
+/// segment chain; `offset()`'s inner scan (4.9s/1770 calls in `shoe_holder` — ~10 elements per call ×
+/// interpreted let-chains). Fully routed: dots through `apply_binary` (the 4-lane `ops::dot`), the final
+/// reduction through the real `min` builtin, the wraparound neighbor through the native [`select`] (its
+/// assert raises exactly like the reference on a degenerate `i+1`).
+fn point_dist(args: &[Value]) -> crate::Result<Value> {
+    let path = args.first().cloned().unwrap_or(Value::Undef);
+    let unit = args.get(1).cloned().unwrap_or(Value::Undef);
+    let seg_len = args.get(2).cloned().unwrap_or(Value::Undef);
+    let pt = args.get(3).cloned().unwrap_or(Value::Undef);
+    let ll = super::builtins::apply("len", std::slice::from_ref(&unit));
+    let end = super::ops::apply_binary(BinOp::Sub, ll, Value::Num(1.0));
+    let range = super::build_range(&Value::Num(0.0), &Value::Num(1.0), &end);
+    let mut dists: Vec<Value> = Vec::new();
+    for iv in super::iter_values(&range) {
+        let pi = super::ops::index(path.clone(), &iv);
+        let v = super::ops::apply_binary(BinOp::Sub, pt.clone(), pi.clone());
+        let ui = super::ops::index(unit.clone(), &iv);
+        let projection = super::ops::apply_binary(BinOp::Mul, v.clone(), ui.clone());
+        let li = super::ops::index(seg_len.clone(), &iv);
+        let d = if super::ops::apply_binary(BinOp::Lt, projection.clone(), Value::Num(0.0))
+            .is_truthy()
+        {
+            super::ops::apply_binary(BinOp::Sub, pt.clone(), pi)
+        } else if super::ops::apply_binary(BinOp::Gt, projection.clone(), li).is_truthy() {
+            let next = select(&[
+                path.clone(),
+                super::ops::apply_binary(BinOp::Add, iv.clone(), Value::Num(1.0)),
+            ])?;
+            super::ops::apply_binary(BinOp::Sub, pt.clone(), next)
+        } else {
+            super::ops::apply_binary(
+                BinOp::Sub,
+                v,
+                super::ops::apply_binary(BinOp::Mul, projection, ui),
+            )
+        };
+        dists.push(super::builtins::apply("norm", std::slice::from_ref(&d)));
+    }
+    let list = super::build_vector(dists);
+    Ok(super::builtins::apply("min", std::slice::from_ref(&list)))
+}
+
+/// BOSL2 `_is_point_on_line(point, line, bounded=false, eps=_EPSILON)` — collinearity within tolerance,
+/// optionally clamped to the segment on either end (`bounded` goes through the real [`force_list`]). The
+/// 2D/3D split (`abs(cross)` vs `norm(cross)`) and the `t` parameter all route through ops.
+fn is_point_on_line(args: &[Value]) -> crate::Result<Value> {
+    let point = args.first().cloned().unwrap_or(Value::Undef);
+    let line = args.get(1).cloned().unwrap_or(Value::Undef);
+    let bounded = args.get(2).cloned().unwrap_or(Value::Bool(false));
+    let eps = args.get(3).cloned().unwrap_or(Value::Num(1e-9));
+    let l0 = super::ops::index(line.clone(), &Value::Num(0.0));
+    let l1 = super::ops::index(line, &Value::Num(1.0));
+    let v1 = super::ops::apply_binary(BinOp::Sub, l1, l0.clone());
+    let v0 = super::ops::apply_binary(BinOp::Sub, point, l0);
+    let t = super::ops::apply_binary(
+        BinOp::Div,
+        super::ops::apply_binary(BinOp::Mul, v0.clone(), v1.clone()),
+        super::ops::apply_binary(BinOp::Mul, v1.clone(), v1.clone()),
+    );
+    let bounded2 = force_list(&[bounded, Value::Num(2.0)])?;
+    let crx = super::builtins::apply("cross", &[v0, v1.clone()]);
+    let ncp = if super::ops::apply_binary(
+        BinOp::Eq,
+        super::builtins::apply("len", std::slice::from_ref(&v1)),
+        Value::Num(2.0),
+    )
+    .is_truthy()
+    {
+        super::builtins::apply("abs", std::slice::from_ref(&crx))
+    } else {
+        super::builtins::apply("norm", std::slice::from_ref(&crx))
+    };
+    let on_line = super::ops::apply_binary(
+        BinOp::Le,
+        ncp,
+        super::ops::apply_binary(
+            BinOp::Mul,
+            eps.clone(),
+            super::builtins::apply("norm", std::slice::from_ref(&v1)),
+        ),
+    );
+    if !on_line.is_truthy() {
+        return Ok(Value::Bool(false));
+    }
+    if super::ops::index(bounded2.clone(), &Value::Num(0.0)).is_truthy()
+        && !super::ops::apply_binary(
+            BinOp::Ge,
+            t.clone(),
+            super::ops::apply_unary(crate::parser::UnOp::Neg, eps.clone()),
+        )
+        .is_truthy()
+    {
+        return Ok(Value::Bool(false));
+    }
+    if super::ops::index(bounded2, &Value::Num(1.0)).is_truthy()
+        && !super::ops::apply_binary(
+            BinOp::Lt,
+            t,
+            super::ops::apply_binary(BinOp::Add, Value::Num(1.0), eps),
+        )
+        .is_truthy()
+    {
+        return Ok(Value::Bool(false));
+    }
+    Ok(Value::Bool(true))
+}
+
+/// The [`PINS`]' `is_vnf(x)` as [`vnf_centroid`]'s assert needs it, composed from the band's own natives
+/// (`is_vector(x[0][0], 3)` / `is_vector(x[1][0])`).
+fn is_vnf_check(x: &Value) -> crate::Result<bool> {
+    if !v_is_list(x) {
+        return Ok(false);
+    }
+    let ll = super::builtins::apply("len", std::slice::from_ref(x));
+    if !super::ops::apply_binary(BinOp::Eq, ll, Value::Num(2.0)).is_truthy() {
+        return Ok(false);
+    }
+    let x0 = super::ops::index(x.clone(), &Value::Num(0.0));
+    let x1 = super::ops::index(x.clone(), &Value::Num(1.0));
+    if !(v_is_list(&x0) && v_is_list(&x1)) {
+        return Ok(false);
+    }
+    let empty = super::build_vector(Vec::new());
+    let verts_ok = super::ops::apply_binary(BinOp::Eq, x0.clone(), empty.clone()).is_truthy()
+        || (super::ops::apply_binary(
+            BinOp::Ge,
+            super::builtins::apply("len", std::slice::from_ref(&x0)),
+            Value::Num(3.0),
+        )
+        .is_truthy()
+            && is_vector(&[
+                super::ops::index(x0.clone(), &Value::Num(0.0)),
+                Value::Num(3.0),
+            ])?
+            .is_truthy());
+    if !verts_ok {
+        return Ok(false);
+    }
+    Ok(
+        super::ops::apply_binary(BinOp::Eq, x1.clone(), empty).is_truthy()
+            || is_vector(std::slice::from_ref(&super::ops::index(
+                x1,
+                &Value::Num(0.0),
+            )))?
+            .is_truthy(),
+    )
+}
+
+/// BOSL2 `_vnf_centroid(vnf, eps=_EPSILON)` — the volume-weighted centroid: per face-fan triangle,
+/// `vol = cross(v2,v1)*v0` and the running `[vol, (v0+v1+v2)*vol]` pairs sum through the REAL [`sum`]
+/// entry (its `_sum` lane — the summands are [scalar, vector] pairs), then `approx(pos[0], 0, eps)` guards
+/// self-intersection. 1.9s/30 calls in `webcam_holder` — the fan loop over every face, interpreted.
+fn vnf_centroid(args: &[Value]) -> crate::Result<Value> {
+    let vnf = args.first().cloned().unwrap_or(Value::Undef);
+    let eps = args.get(1).cloned().unwrap_or(Value::Num(1e-9));
+    let verts = super::ops::index(vnf.clone(), &Value::Num(0.0));
+    let faces = super::ops::index(vnf.clone(), &Value::Num(1.0));
+    let nonzero = |v: &Value| {
+        !super::ops::apply_binary(
+            BinOp::Eq,
+            super::builtins::apply("len", std::slice::from_ref(v)),
+            Value::Num(0.0),
+        )
+        .is_truthy()
+    };
+    if !(is_vnf_check(&vnf)? && nonzero(&verts) && nonzero(&faces)) {
+        return Err(bosl_assert("_vnf_centroid: invalid or empty VNF"));
+    }
+    let mut pairs: Vec<Value> = Vec::new();
+    for face in super::iter_values(&faces) {
+        let jr = super::build_range(
+            &Value::Num(1.0),
+            &Value::Num(1.0),
+            &super::ops::apply_binary(
+                BinOp::Sub,
+                super::builtins::apply("len", std::slice::from_ref(&face)),
+                Value::Num(2.0),
+            ),
+        );
+        for j in super::iter_values(&jr) {
+            let vat = |idx: &Value| {
+                super::ops::index(verts.clone(), &super::ops::index(face.clone(), idx))
+            };
+            let v0 = vat(&Value::Num(0.0));
+            let v1 = vat(&j);
+            let v2 = vat(&super::ops::apply_binary(
+                BinOp::Add,
+                j.clone(),
+                Value::Num(1.0),
+            ));
+            let vol = super::ops::apply_binary(
+                BinOp::Mul,
+                super::builtins::apply("cross", &[v2.clone(), v1.clone()]),
+                v0.clone(),
+            );
+            let centroid_part = super::ops::apply_binary(
+                BinOp::Mul,
+                super::ops::apply_binary(
+                    BinOp::Add,
+                    super::ops::apply_binary(BinOp::Add, v0, v1),
+                    v2,
+                ),
+                vol.clone(),
+            );
+            pairs.push(super::build_vector(vec![vol, centroid_part]));
+        }
+    }
+    let pos = sum(&[super::build_vector(pairs)])?;
+    let p0 = super::ops::index(pos.clone(), &Value::Num(0.0));
+    if approx(&[p0.clone(), Value::Num(0.0), eps])?.is_truthy() {
+        return Err(bosl_assert("_vnf_centroid: the vnf has self-intersections"));
+    }
+    Ok(super::ops::apply_binary(
+        BinOp::Div,
+        super::ops::apply_binary(BinOp::Div, super::ops::index(pos, &Value::Num(1.0)), p0),
+        Value::Num(4.0),
+    ))
+}
+
+/// BOSL2 `_group_sort_by_index(l, idx)` — quicksort-flavored grouping by `l[i][idx]`. The reference's
+/// `concat(recurse(lesser), [equal], recurse(greater))` flattens to an iterative IN-ORDER walk (a
+/// pre-sorted 20k-element input would recurse ~20k deep otherwise); partitions are strictly smaller — the
+/// pivot's own element lands in `equal`, or (NaN/incomparable index) in none — so the walk terminates.
+/// All comparisons route through ops (mixed-type `<`/`>` yield undef → dropped, like the comprehensions).
+fn group_sort_by_index(args: &[Value]) -> crate::Result<Value> {
+    enum Work {
+        Split(Value),
+        Emit(Value),
+    }
+    let idx = args.get(1).cloned().unwrap_or(Value::Undef);
+    let mut out: Vec<Value> = Vec::new();
+    let mut stack = vec![Work::Split(args.first().cloned().unwrap_or(Value::Undef))];
+    while let Some(work) = stack.pop() {
+        let l = match work {
+            Work::Emit(group) => {
+                out.push(group);
+                continue;
+            }
+            Work::Split(l) => l,
+        };
+        let ll = super::builtins::apply("len", std::slice::from_ref(&l));
+        if super::ops::apply_binary(BinOp::Eq, ll.clone(), Value::Num(0.0)).is_truthy() {
+            continue; // `[]` contributes nothing to the flat walk
+        }
+        if super::ops::apply_binary(BinOp::Eq, ll.clone(), Value::Num(1.0)).is_truthy() {
+            out.push(l);
+            continue;
+        }
+        let mid = super::builtins::apply(
+            "floor",
+            &[super::ops::apply_binary(BinOp::Div, ll, Value::Num(2.0))],
+        );
+        let pivot = super::ops::index(super::ops::index(l.clone(), &mid), &idx);
+        let mut equal: Vec<Value> = Vec::new();
+        let mut lesser: Vec<Value> = Vec::new();
+        let mut greater: Vec<Value> = Vec::new();
+        for li in super::iter_values(&l) {
+            let key = super::ops::index(li.clone(), &idx);
+            if super::ops::apply_binary(BinOp::Eq, key.clone(), pivot.clone()).is_truthy() {
+                equal.push(li);
+            } else if super::ops::apply_binary(BinOp::Lt, key.clone(), pivot.clone()).is_truthy() {
+                lesser.push(li);
+            } else if super::ops::apply_binary(BinOp::Gt, key, pivot.clone()).is_truthy() {
+                greater.push(li);
+            }
+        }
+        stack.push(Work::Split(super::build_vector(greater)));
+        stack.push(Work::Emit(super::build_vector(equal)));
+        stack.push(Work::Split(super::build_vector(lesser))); // LIFO → lesser first: in-order
+    }
+    Ok(super::build_vector(out))
 }
 
 /// BOSL2 `force_list(value, n=1, fill)` — a list passes through; a scalar becomes `n` copies (or
@@ -3351,6 +3742,212 @@ mod tests {
                     &interpret_with_deps_consts(va_ref, &va_deps, &consts, args)
                 ),
                 "vector_angle diverged on {args:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn fast_equals_slow_band5_batch1() {
+        let consts = [("_EPSILON", Value::Num(1e-9))];
+        let select_knot = [
+            reference_of("select").unwrap(),
+            reference_of("is_vector").unwrap(),
+            pin_reference_of("is_range").unwrap(),
+            reference_of("is_finite").unwrap(),
+            reference_of("is_nan").unwrap(),
+            reference_of("all_nonzero").unwrap(),
+        ];
+
+        // _point_dist — a real segment chain (precomputed unit/len like offset() passes), the three
+        // segdist lanes (behind / beyond / perpendicular), plus degenerate shapes.
+        let pd_ref = reference_of("_point_dist").unwrap();
+        let path = Value::list(vec![p2(0.0, 0.0), p2(2.0, 0.0), p2(2.0, 2.0)]);
+        let units = Value::list(vec![p2(1.0, 0.0), p2(0.0, 1.0)]);
+        let lens = Value::num_list(vec![2.0, 2.0]);
+        let pd_cases: Vec<Vec<Value>> = vec![
+            vec![path.clone(), units.clone(), lens.clone(), p2(1.0, 1.0)],
+            vec![path.clone(), units.clone(), lens.clone(), p2(-1.0, -1.0)],
+            vec![path.clone(), units.clone(), lens.clone(), p2(5.0, 5.0)],
+            vec![path.clone(), units.clone(), lens.clone(), p2(2.0, 1.0)],
+            vec![
+                path.clone(),
+                Value::list(vec![]),
+                Value::num_list(vec![]),
+                p2(0.0, 0.0),
+            ],
+            vec![Value::Undef, units.clone(), lens.clone(), p2(0.0, 0.0)],
+            vec![path.clone(), units.clone(), lens.clone(), Value::Undef],
+        ];
+        for args in &pd_cases {
+            assert!(
+                same_result(
+                    &super::point_dist(args),
+                    &interpret_with_deps_consts(pd_ref, &select_knot, &consts, args)
+                ),
+                "_point_dist diverged on {args:?}"
+            );
+        }
+
+        // _is_point_on_line — on/off the line in 2D and 3D, each bounded mode, exotic shapes.
+        let ipol_ref = reference_of("_is_point_on_line").unwrap();
+        let ipol_deps = [reference_of("force_list").unwrap()];
+        let line2 = Value::list(vec![p2(0.0, 0.0), p2(2.0, 0.0)]);
+        let line3 = Value::list(vec![
+            Value::num_list(vec![0.0, 0.0, 0.0]),
+            Value::num_list(vec![0.0, 0.0, 2.0]),
+        ]);
+        let bounds = [
+            None,
+            Some(Value::Bool(true)),
+            Some(Value::list(vec![Value::Bool(true), Value::Bool(false)])),
+        ];
+        let ipol_pts = [
+            (p2(1.0, 0.0), line2.clone()),
+            (p2(-1.0, 0.0), line2.clone()),
+            (p2(3.0, 0.0), line2.clone()),
+            (p2(1.0, 0.5), line2.clone()),
+            (p2(1.0, 1e-12), line2.clone()),
+            (Value::num_list(vec![0.0, 0.0, 1.0]), line3.clone()),
+            (Value::num_list(vec![1.0, 0.0, 1.0]), line3.clone()),
+            (Value::Undef, line2.clone()),
+            (p2(1.0, 0.0), Value::Undef),
+        ];
+        for (pt, line) in &ipol_pts {
+            for b in &bounds {
+                let mut args = vec![pt.clone(), line.clone()];
+                if let Some(b) = b {
+                    args.push(b.clone());
+                }
+                assert!(
+                    same_result(
+                        &super::is_point_on_line(&args),
+                        &interpret_with_deps_consts(ipol_ref, &ipol_deps, &consts, &args)
+                    ),
+                    "_is_point_on_line diverged on ({pt:?}, {line:?}, {b:?})"
+                );
+            }
+        }
+
+        // _vnf_centroid — a unit cube VNF (quad faces exercise the fan j-loop), a tet, empty/invalid
+        // raises, and a degenerate (zero-volume) self-intersection raise.
+        let vc_ref = reference_of("_vnf_centroid").unwrap();
+        let vc_deps = [
+            pin_reference_of("is_vnf").unwrap(),
+            reference_of("is_vector").unwrap(),
+            reference_of("is_finite").unwrap(),
+            reference_of("is_nan").unwrap(),
+            reference_of("all_nonzero").unwrap(),
+            reference_of("sum").unwrap(),
+            reference_of("_sum").unwrap(),
+            reference_of("is_consistent").unwrap(),
+            reference_of("_list_pattern").unwrap(),
+            reference_of("approx").unwrap(),
+            reference_of("idx").unwrap(),
+            reference_of("posmod").unwrap(),
+        ];
+        let p3 = |x: f64, y: f64, z: f64| Value::num_list(vec![x, y, z]);
+        let f = |ids: &[f64]| Value::num_list(ids.to_vec());
+        let cube = Value::list(vec![
+            Value::list(vec![
+                p3(0.0, 0.0, 0.0),
+                p3(1.0, 0.0, 0.0),
+                p3(1.0, 1.0, 0.0),
+                p3(0.0, 1.0, 0.0),
+                p3(0.0, 0.0, 1.0),
+                p3(1.0, 0.0, 1.0),
+                p3(1.0, 1.0, 1.0),
+                p3(0.0, 1.0, 1.0),
+            ]),
+            Value::list(vec![
+                f(&[0.0, 3.0, 2.0, 1.0]),
+                f(&[4.0, 5.0, 6.0, 7.0]),
+                f(&[0.0, 1.0, 5.0, 4.0]),
+                f(&[1.0, 2.0, 6.0, 5.0]),
+                f(&[2.0, 3.0, 7.0, 6.0]),
+                f(&[3.0, 0.0, 4.0, 7.0]),
+            ]),
+        ]);
+        let tet = Value::list(vec![
+            Value::list(vec![
+                p3(0.0, 0.0, 0.0),
+                p3(1.0, 0.0, 0.0),
+                p3(0.0, 1.0, 0.0),
+                p3(0.0, 0.0, 1.0),
+            ]),
+            Value::list(vec![
+                f(&[0.0, 2.0, 1.0]),
+                f(&[0.0, 1.0, 3.0]),
+                f(&[1.0, 2.0, 3.0]),
+                f(&[0.0, 3.0, 2.0]),
+            ]),
+        ]);
+        // one open face only → summed signed volume ≈ 0 → the self-intersection assert raises
+        let flat = Value::list(vec![
+            Value::list(vec![
+                p3(0.0, 0.0, 0.0),
+                p3(1.0, 0.0, 0.0),
+                p3(0.0, 1.0, 0.0),
+            ]),
+            Value::list(vec![f(&[0.0, 1.0, 2.0])]),
+        ]);
+        let vc_cases = [
+            cube,
+            tet,
+            flat,
+            Value::list(vec![Value::list(vec![]), Value::list(vec![])]),
+            Value::Undef,
+            Value::Num(3.0),
+        ];
+        for vnf in &vc_cases {
+            let args = [vnf.clone()];
+            assert!(
+                same_result(
+                    &super::vnf_centroid(&args),
+                    &interpret_with_deps_consts(vc_ref, &vc_deps, &consts, &args)
+                ),
+                "_vnf_centroid diverged on {vnf:?}"
+            );
+        }
+
+        // _group_sort_by_index — grouping, ordering, NaN/mixed-type key drops, empty/single/scalar.
+        let gs_ref = reference_of("_group_sort_by_index").unwrap();
+        let rows = |ks: &[f64]| {
+            let v: Vec<Value> = ks
+                .iter()
+                .enumerate()
+                .map(|(i, &k)| {
+                    #[allow(clippy::cast_precision_loss, reason = "tiny test indices")]
+                    Value::list(vec![Value::Num(k), Value::Num(i as f64)])
+                })
+                .collect();
+            Value::list(v)
+        };
+        let gs_cases: Vec<Vec<Value>> = vec![
+            vec![rows(&[3.0, 1.0, 2.0, 1.0, 3.0]), Value::Num(0.0)],
+            vec![rows(&[1.0, 1.0, 1.0]), Value::Num(0.0)],
+            vec![rows(&[5.0, 4.0, 3.0, 2.0, 1.0]), Value::Num(0.0)],
+            vec![rows(&[1.0, 2.0, 3.0, 4.0, 5.0]), Value::Num(0.0)],
+            vec![rows(&[2.0, f64::NAN, 1.0]), Value::Num(0.0)],
+            vec![rows(&[1.0]), Value::Num(0.0)],
+            vec![Value::list(vec![]), Value::Num(0.0)],
+            vec![
+                Value::list(vec![
+                    Value::list(vec![Value::Num(1.0)]),
+                    Value::list(vec![Value::string("a")]),
+                    Value::list(vec![Value::Num(0.0)]),
+                ]),
+                Value::Num(0.0),
+            ],
+            vec![Value::Num(5.0), Value::Num(0.0)],
+            vec![rows(&[2.0, 1.0]), Value::Undef],
+        ];
+        for args in &gs_cases {
+            assert!(
+                same_result(
+                    &super::group_sort_by_index(args),
+                    &interpret_with_deps_consts(gs_ref, &[], &consts, args)
+                ),
+                "_group_sort_by_index diverged on {args:?}"
             );
         }
     }

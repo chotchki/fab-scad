@@ -9,10 +9,15 @@
 //! `KernelDriver`) gates every phase before the geometry that feeds it exists. Nothing here is load-
 //! bearing yet — Phase M.0 is the crate skeleton + the oracle harness + the mesh spine, NO booleans.
 
-// The whole point of the port is to LEAVE C++'s unsafety behind — this crate carries none of its own.
-// (manifold3d, the differential oracle, has its own unsafe; that's a dep, not us, and it's off by
-// default and gone at R.X.)
-#![forbid(unsafe_code)]
+// The whole point of the port is to LEAVE C++'s unsafety behind — this crate carries almost none of
+// its own. `deny` (not `forbid`) because the boolean narrow phase carries a SMALL audited set of
+// unchecked hot loads (C++ VecView release parity, BU.4.2): `boolean3::MeshView` VALIDATES the
+// mesh tables in one O(halfedges) pass at Boolean3 entry — a violating mesh PANICS there — and
+// only then reads them unchecked, through typed ids only; `collider::query_leaves` reads its own
+// self-built arrays under a documented depth bound. Each site is an item-scoped
+// `#[allow(unsafe_code)]` with a debug_assert! bound and a SAFETY invariant naming the check that
+// justifies it. Any NEW unsafe anywhere else still fails the build.
+#![deny(unsafe_code)]
 
 // the robustness core: boolean3 + boolean_result + face_op + edge_op.
 pub mod boolean;

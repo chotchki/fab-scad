@@ -22,13 +22,139 @@
 //! `mathf::acos` they're already bit-exact, so the coincident case (GATE-B) needs nothing new here.
 
 use crate::boolean::OpType;
-use crate::boolean::collider::{Collider, edge_query_box};
+use crate::boolean::collider::Collider;
 use crate::boolean::disjoint_sets::DisjointSets;
 use crate::boolean::predicates::{interpolate, intersect, shadows, with_sign};
 use crate::boolean::vocab::Intersections;
-use crate::linalg::{Vec2, Vec3, Vec4};
-use crate::mesh::Mesh;
+use crate::linalg::{Box3, Vec2, Vec3, Vec4};
+use crate::mesh::{Halfedge, Mesh};
 use crate::mesh_ids::{HalfedgeId, TriId, VertId};
+
+// ─── The validated view (BU.4.2) ────────────────────────────────────────────────────────────────
+//
+// The cascade below is the boolean's profile hot spot (~18 `shadow01` calls per candidate pair,
+// 124M candidate pairs on the big_twin case), and every load in it is a slice index the C++ reads
+// UNCHECKED (`VecView::operator[]` asserts only in debug). `MeshView` gives ONLY this module the
+// same codegen, with the check moved from per-lookup to per-construction (chotchki's design):
+// `validate` runs one O(halfedges) pass proving every id STORED in the tables in-bounds, so every
+// id REACHABLE from them — a query edge in `0..len`, a collider leaf built over the same mesh,
+// `pair`/`next`/`tri` of an in-bounds edge — is in-bounds with no per-load branch. Lookups take
+// only the typed ids minted from these tables ([`VertId`]/[`HalfedgeId`]/[`TriId`], never a raw
+// index), `debug_assert!` keeps every bound live in debug/test/fuzz builds, and a mesh that
+// VIOLATES the invariant (a mid-surgery caller) panics at construction — the loud version of the
+// guarantee the per-load checks used to give.
+
+struct MeshView<'a> {
+    vert_pos: &'a [Vec3],
+    halfedge: &'a [Halfedge],
+    vert_normal: &'a [Vec3],
+    face_normal: &'a [Vec3],
+}
+
+impl<'a> MeshView<'a> {
+    /// The O(halfedges) local validation — the whole soundness argument for the unchecked loads
+    /// below. A `NONE` (-1) start/pair casts to a huge usize and fails the same comparison.
+    fn validate(m: &'a Mesh) -> MeshView<'a> {
+        let nv = m.vert_pos.len();
+        let nh = m.halfedge.len();
+        assert!(
+            m.vert_normal.len() == nv && m.face_normal.len() == nh / 3,
+            "MeshView: normals not sized to the mesh (vert {}/{nv}, face {}/{})",
+            m.vert_normal.len(),
+            m.face_normal.len(),
+            nh / 3
+        );
+        for (i, h) in m.halfedge.iter().enumerate() {
+            assert!(
+                h.start_vert.u() < nv && h.paired_halfedge.u() < nh,
+                "MeshView: halfedge {i} escapes its tables (start {:?}, pair {:?})",
+                h.start_vert,
+                h.paired_halfedge
+            );
+        }
+        MeshView {
+            vert_pos: &m.vert_pos,
+            halfedge: &m.halfedge,
+            vert_normal: &m.vert_normal,
+            face_normal: &m.face_normal,
+        }
+    }
+
+    #[inline(always)]
+    fn num_vert(&self) -> usize {
+        self.vert_pos.len()
+    }
+
+    #[inline(always)]
+    fn num_halfedge(&self) -> usize {
+        self.halfedge.len()
+    }
+
+    /// `Mesh::pos` without the per-load check.
+    #[allow(unsafe_code)]
+    #[inline(always)]
+    fn pos(&self, v: VertId) -> Vec3 {
+        debug_assert!(v.u() < self.vert_pos.len());
+        // SAFETY: `v` is a query vert (`0..num_vert`) or a `start_vert` proven in-bounds by `validate`.
+        unsafe { *self.vert_pos.get_unchecked(v.u()) }
+    }
+
+    /// `Mesh::start` without the per-load check.
+    #[allow(unsafe_code)]
+    #[inline(always)]
+    fn start(&self, e: HalfedgeId) -> VertId {
+        debug_assert!(e.u() < self.halfedge.len());
+        // SAFETY: `e` is a query edge (`0..num_halfedge`), a leaf tri's edge (`3*tri + i` with the
+        // leaf from this mesh's own collider), or a `pair`/`next` of one — all in-table, `validate`d.
+        unsafe { self.halfedge.get_unchecked(e.u()) }.start_vert
+    }
+
+    /// `Mesh::end` (derived: start of the tri-local next edge — stays inside `e`'s own triangle).
+    #[inline(always)]
+    fn end(&self, e: HalfedgeId) -> VertId {
+        self.start(e.next())
+    }
+
+    /// `Mesh::pair` without the per-load check.
+    #[allow(unsafe_code)]
+    #[inline(always)]
+    fn pair(&self, e: HalfedgeId) -> HalfedgeId {
+        debug_assert!(e.u() < self.halfedge.len());
+        // SAFETY: same id provenance as `start`.
+        unsafe { self.halfedge.get_unchecked(e.u()) }.paired_halfedge
+    }
+
+    /// `vert_normal[v]` without the per-load check.
+    #[allow(unsafe_code)]
+    #[inline(always)]
+    fn vert_normal(&self, v: VertId) -> Vec3 {
+        debug_assert!(v.u() < self.vert_normal.len());
+        // SAFETY: `vert_normal.len() == num_vert` is `validate`d; `v`'s provenance as in `pos`.
+        unsafe { *self.vert_normal.get_unchecked(v.u()) }
+    }
+
+    /// `face_normal[t]` without the per-load check.
+    #[allow(unsafe_code)]
+    #[inline(always)]
+    fn face_normal(&self, t: TriId) -> Vec3 {
+        debug_assert!(t.u() < self.face_normal.len());
+        // SAFETY: `face_normal.len() == num_tri` is `validate`d; `t` is a collider leaf over this
+        // mesh or an in-bounds halfedge's own `tri()` (`e.u()/3 < num_tri`).
+        unsafe { *self.face_normal.get_unchecked(t.u()) }
+    }
+
+    /// [`crate::boolean::collider::edge_query_box`], on the view (same values, unchecked loads).
+    #[inline(always)]
+    fn edge_box(&self, edge: HalfedgeId) -> Box3 {
+        let start = self.start(edge);
+        let end = self.end(edge);
+        if start < end {
+            Box3::from_points(self.pos(start), self.pos(end))
+        } else {
+            Box3::default()
+        }
+    }
+}
 
 /// One edge of a face, oriented forward, plus whether that matched the stored half-edge direction
 /// (`boolean3.cpp` `FaceEdge`).
@@ -42,7 +168,7 @@ struct FaceEdge {
 
 /// The three forward edges of triangle `tri` (`LoadFaceEdges`): each is stored forward if `start <
 /// end`, else it borrows its pair's index and swapped endpoints.
-fn load_face_edges(mesh: &Mesh, tri: TriId) -> [FaceEdge; 3] {
+fn load_face_edges(mesh: &MeshView<'_>, tri: TriId) -> [FaceEdge; 3] {
     core::array::from_fn(|i| {
         let halfedge = tri.halfedge(i);
         let start = mesh.start(halfedge);
@@ -74,15 +200,15 @@ fn shadow01<const EXPAND_P: bool, const FORWARD: bool>(
     b1: HalfedgeId,
     b1s: VertId,
     b1e: VertId,
-    in_a: &Mesh,
-    in_b: &Mesh,
+    in_a: &MeshView<'_>,
+    in_b: &MeshView<'_>,
 ) -> (i32, Vec2) {
     let a0x = in_a.pos(a0).x;
     let b1sx = in_b.pos(b1s).x;
     let b1ex = in_b.pos(b1e).x;
-    let a0xp = in_a.vert_normal[a0.u()].x;
-    let b1sxp = in_b.vert_normal[b1s.u()].x;
-    let b1exp = in_b.vert_normal[b1e.u()].x;
+    let a0xp = in_a.vert_normal(a0).x;
+    let b1sxp = in_b.vert_normal(b1s).x;
+    let b1exp = in_b.vert_normal(b1e).x;
     let mut s01 = if FORWARD {
         shadows(a0x, b1ex, with_sign(EXPAND_P, a0xp) - b1exp) as i32
             - shadows(a0x, b1sx, with_sign(EXPAND_P, a0xp) - b1sxp) as i32
@@ -95,7 +221,7 @@ fn shadow01<const EXPAND_P: bool, const FORWARD: bool>(
     if s01 != 0 {
         yz01 = interpolate(in_b.pos(b1s), in_b.pos(b1e), in_a.pos(a0).x);
         let b1pair = in_b.pair(b1);
-        let dir = in_b.face_normal[b1.tri().u()].y + in_b.face_normal[b1pair.tri().u()].y;
+        let dir = in_b.face_normal(b1.tri()).y + in_b.face_normal(b1pair.tri()).y;
         if FORWARD {
             if !shadows(in_a.pos(a0).y, yz01.x, -dir) {
                 s01 = 0;
@@ -119,8 +245,8 @@ fn kernel11<const EXPAND_P: bool>(
     q1: HalfedgeId,
     q1s: VertId,
     q1e: VertId,
-    in_p: &Mesh,
-    in_q: &Mesh,
+    in_p: &MeshView<'_>,
+    in_q: &MeshView<'_>,
 ) -> (i32, Vec4) {
     let mut s11 = 0;
     let mut k = 0usize;
@@ -162,9 +288,9 @@ fn kernel11<const EXPAND_P: bool>(
     // (a finite xyzz[0]) to record the shadow boundary, gating only the winding sum on s11.
     let xyzz11 = intersect(p_rl[0], p_rl[1], q_rl[0], q_rl[1]);
     let p1pair = in_p.pair(p1);
-    let dir_p = in_p.face_normal[p1.tri().u()].z + in_p.face_normal[p1pair.tri().u()].z;
+    let dir_p = in_p.face_normal(p1.tri()).z + in_p.face_normal(p1pair.tri()).z;
     let q1pair = in_q.pair(q1);
-    let dir_q = in_q.face_normal[q1.tri().u()].z + in_q.face_normal[q1pair.tri().u()].z;
+    let dir_q = in_q.face_normal(q1.tri()).z + in_q.face_normal(q1pair.tri()).z;
     if !shadows(xyzz11.z, xyzz11.w, with_sign(EXPAND_P, dir_p) - dir_q) {
         s11 = 0;
     }
@@ -179,8 +305,8 @@ fn kernel02<const EXPAND_P: bool, const FORWARD: bool>(
     a0: VertId,
     b2: TriId,
     edge_b: &[FaceEdge; 3],
-    in_a: &Mesh,
-    in_b: &Mesh,
+    in_a: &MeshView<'_>,
+    in_b: &MeshView<'_>,
 ) -> (i32, f64) {
     let mut s02 = 0;
     let mut k = 0usize;
@@ -206,9 +332,13 @@ fn kernel02<const EXPAND_P: bool, const FORWARD: bool>(
     let vert_pos_a = in_a.pos(a0);
     let z02 = interpolate(yzz_rl[0], yzz_rl[1], vert_pos_a.y).y;
     let keep = if FORWARD {
-        shadows(vert_pos_a.z, z02, -in_b.face_normal[b2.u()].z)
+        shadows(vert_pos_a.z, z02, -in_b.face_normal(b2).z)
     } else {
-        shadows(z02, vert_pos_a.z, with_sign(EXPAND_P, in_b.face_normal[b2.u()].z))
+        shadows(
+            z02,
+            vert_pos_a.z,
+            with_sign(EXPAND_P, in_b.face_normal(b2).z),
+        )
     };
     (if keep { s02 } else { 0 }, z02)
 }
@@ -220,8 +350,8 @@ fn kernel02<const EXPAND_P: bool, const FORWARD: bool>(
 fn kernel12<const EXPAND_P: bool, const FORWARD: bool>(
     a1: HalfedgeId,
     b2: TriId,
-    in_p: &Mesh,
-    in_q: &Mesh,
+    in_p: &MeshView<'_>,
+    in_q: &MeshView<'_>,
 ) -> (i32, Vec3) {
     let (in_a, in_b) = if FORWARD { (in_p, in_q) } else { (in_q, in_p) };
     let mut x12 = 0;
@@ -237,7 +367,11 @@ fn kernel12<const EXPAND_P: bool, const FORWARD: bool>(
     for &vert_a in &[edge_a_start, edge_a_end] {
         let (s, z) = kernel02::<EXPAND_P, FORWARD>(vert_a, b2, &edge_b, in_a, in_b);
         if z.is_finite() {
-            x12 += s * if (vert_a == edge_a_start) == FORWARD { 1 } else { -1 };
+            x12 += s * if (vert_a == edge_a_start) == FORWARD {
+                1
+            } else {
+                -1
+            };
             if k < 2 && (k == 0 || (s != 0) != shadows_flag) {
                 shadows_flag = s != 0;
                 let mut v = in_a.pos(vert_a);
@@ -252,9 +386,27 @@ fn kernel12<const EXPAND_P: bool, const FORWARD: bool>(
 
     for e in edge_b.iter() {
         let (s, xyzz) = if FORWARD {
-            kernel11::<EXPAND_P>(a1, edge_a_start, edge_a_end, e.edge, e.start, e.end, in_p, in_q)
+            kernel11::<EXPAND_P>(
+                a1,
+                edge_a_start,
+                edge_a_end,
+                e.edge,
+                e.start,
+                e.end,
+                in_p,
+                in_q,
+            )
         } else {
-            kernel11::<EXPAND_P>(e.edge, e.start, e.end, a1, edge_a_start, edge_a_end, in_p, in_q)
+            kernel11::<EXPAND_P>(
+                e.edge,
+                e.start,
+                e.end,
+                a1,
+                edge_a_start,
+                edge_a_end,
+                in_p,
+                in_q,
+            )
         };
         if xyzz.x.is_finite() {
             x12 -= s * if e.is_forward { 1 } else { -1 };
@@ -306,8 +458,8 @@ struct QueryHits {
 /// order is deterministic and collider-order-independent. The collider's raw `i32` indices are wrapped
 /// into ids at the callback: a query is an edge ([`HalfedgeId`]), a leaf is a face ([`TriId`]).
 fn intersect12(
-    in_p: &Mesh,
-    in_q: &Mesh,
+    in_p: &MeshView<'_>,
+    in_q: &MeshView<'_>,
     b_collider: &Collider,
     expand_p: bool,
     forward: bool,
@@ -323,8 +475,8 @@ fn intersect12(
 }
 
 fn intersect12_impl<const EXPAND_P: bool, const FORWARD: bool>(
-    in_p: &Mesh,
-    in_q: &Mesh,
+    in_p: &MeshView<'_>,
+    in_q: &MeshView<'_>,
     b_collider: &Collider,
 ) -> Intersections {
     let a = if FORWARD { in_p } else { in_q };
@@ -334,9 +486,9 @@ fn intersect12_impl<const EXPAND_P: bool, const FORWARD: bool>(
     // pure read + `kernel12` is a pure fn, so this is a deterministic `par::map_collect` (parallel with
     // `par` on, serial otherwise; output order is index-preserved either way). Bit-identity holds: the
     // flatten below reproduces the serial traversal order, and the `stable_sort` finalizes it regardless.
-    let queries: Vec<i32> = (0..a.halfedge.len() as i32).collect();
+    let queries: Vec<i32> = (0..a.num_halfedge() as i32).collect();
     let per_query: Vec<QueryHits> = crate::par::map_collect(&queries, |&i| {
-        let q = edge_query_box(a, HalfedgeId::new(i));
+        let q = a.edge_box(HalfedgeId::new(i));
         let mut hits = Vec::new();
         let mut overlaps = 0u64;
         b_collider.query_leaves(i, q, false, |leaf_idx| {
@@ -344,8 +496,16 @@ fn intersect12_impl<const EXPAND_P: bool, const FORWARD: bool>(
             let (x12, v12) =
                 kernel12::<EXPAND_P, FORWARD>(HalfedgeId::new(i), TriId::new(leaf_idx), in_p, in_q);
             if v12.x.is_finite() {
-                let pair = if FORWARD { [i, leaf_idx] } else { [leaf_idx, i] };
-                hits.push(Hit12 { pair, shadow: x12, vert: v12 });
+                let pair = if FORWARD {
+                    [i, leaf_idx]
+                } else {
+                    [leaf_idx, i]
+                };
+                hits.push(Hit12 {
+                    pair,
+                    shadow: x12,
+                    vert: v12,
+                });
             }
         });
         QueryHits { hits, overlaps }
@@ -400,8 +560,8 @@ struct RepWinding {
 /// share a winding number, so we union-find the intact edges, sample the winding once per component via
 /// a `Kernel02` point-in-mesh query, and flood-fill the rest.
 fn winding03(
-    in_p: &Mesh,
-    in_q: &Mesh,
+    in_p: &MeshView<'_>,
+    in_q: &MeshView<'_>,
     p1q2: &[[i32; 2]],
     b_collider: &Collider,
     expand_p: bool,
@@ -417,8 +577,8 @@ fn winding03(
 }
 
 fn winding03_impl<const EXPAND_P: bool, const FORWARD: bool>(
-    in_p: &Mesh,
-    in_q: &Mesh,
+    in_p: &MeshView<'_>,
+    in_q: &MeshView<'_>,
     p1q2: &[[i32; 2]],
     b_collider: &Collider,
 ) -> Vec<i32> {
@@ -427,7 +587,7 @@ fn winding03_impl<const EXPAND_P: bool, const FORWARD: bool>(
 
     // Union the endpoints of every intact (non-intersected) forward edge of `a`.
     let mut u_a = DisjointSets::new(a.num_vert());
-    for edge in a.halfedge_ids() {
+    for edge in (0..a.num_halfedge() as i32).map(HalfedgeId::new) {
         let start = a.start(edge);
         let end = a.end(edge);
         if start >= end {
@@ -527,12 +687,18 @@ impl Boolean3 {
             };
         }
 
+        // The BU.4.2 validation gate — FIRST touch of the tables: one O(halfedges) pass per input
+        // proves them closed, and everything downstream (the collider build + the whole cascade)
+        // reads them unchecked through these views.
+        let vp = MeshView::validate(in_p);
+        let vq = MeshView::validate(in_q);
+
         // Each mesh's face-box collider is queried by the OTHER mesh's edges/verts.
         let collider_p = Collider::from_mesh(in_p);
         let collider_q = Collider::from_mesh(in_q);
 
-        let xv12 = intersect12(in_p, in_q, &collider_q, expand_p, true);
-        let xv21 = intersect12(in_p, in_q, &collider_p, expand_p, false);
+        let xv12 = intersect12(&vp, &vq, &collider_q, expand_p, true);
+        let xv21 = intersect12(&vp, &vq, &collider_p, expand_p, false);
 
         // `i32` overflow guard (the C++ INT_MAX_SZ check): an intersection set this large is unusable.
         if xv12.x12.len() > i32::MAX as usize || xv21.x12.len() > i32::MAX as usize {
@@ -546,8 +712,8 @@ impl Boolean3 {
             };
         }
 
-        let w03 = winding03(in_p, in_q, &xv12.p1q2, &collider_q, expand_p, true);
-        let w30 = winding03(in_p, in_q, &xv21.p1q2, &collider_p, expand_p, false);
+        let w03 = winding03(&vp, &vq, &xv12.p1q2, &collider_q, expand_p, true);
+        let w30 = winding03(&vp, &vq, &xv21.p1q2, &collider_p, expand_p, false);
 
         Self {
             xv12,
@@ -588,7 +754,8 @@ mod tests {
         Mesh::from_mesh_gl(&MeshGl {
             num_prop: 3,
             vert_properties: verts,
-            tri_verts: tris, ..Default::default()
+            tri_verts: tris,
+            ..Default::default()
         })
         .unwrap()
     }
@@ -647,5 +814,17 @@ mod tests {
         assert_eq!(near.w03, far.w03);
         assert_eq!(near.w30, far.w30);
         assert_eq!(near.xv12.p1q2, far.xv12.p1q2);
+    }
+
+    /// The BU.4.2 gate: a mesh whose tables escaped their bounds (here a corrupt pair pointer — the
+    /// mid-surgery-caller scenario) PANICS at `MeshView::validate`, in release too. The loud
+    /// replacement for the per-load bounds checks the cascade no longer pays.
+    #[test]
+    #[should_panic(expected = "MeshView: halfedge")]
+    fn corrupt_tables_panic_at_the_validation_gate() {
+        let p = cube(0.0, 0.0, 0.0);
+        let mut q = cube(0.3, 0.4, 0.5);
+        q.halfedge[7].paired_halfedge = HalfedgeId::NONE;
+        let _ = Boolean3::new(&p, &q, OpType::Add);
     }
 }

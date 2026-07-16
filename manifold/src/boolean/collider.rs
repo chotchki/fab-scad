@@ -380,6 +380,7 @@ impl Collider {
     /// parallel narrow phase maps over (`par::map_collect` builds one query's hit list from it, then the
     /// caller flattens + `stable_sort`s — so parallel output is bit-identical to the serial loop that
     /// [`Collider::collisions`] is). `query_idx` is only used for the `self_collision` skip.
+    #[allow(unsafe_code)] // hot loop: unchecked loads, C++ VecView release parity (see below)
     #[inline]
     pub fn query_leaves<Q: ColliderQuery>(
         &self,
@@ -397,20 +398,30 @@ impl Collider {
         let mut node = K_ROOT;
         loop {
             let internal = node2internal(node);
-            let (child1, child2) = self.internal_children[internal as usize];
-            let traverse1 = self.record_collision(q, child1, query_idx, self_collision, &mut record);
-            let traverse2 = self.record_collision(q, child2, query_idx, self_collision, &mut record);
+            debug_assert!((internal as usize) < self.internal_children.len());
+            // SAFETY: `node` is the root or a child `record_collision` returned true for (odd ⇒
+            // internal); `build` sizes `internal_children` to cover every internal node id.
+            let (child1, child2) =
+                unsafe { *self.internal_children.get_unchecked(internal as usize) };
+            let traverse1 =
+                self.record_collision(q, child1, query_idx, self_collision, &mut record);
+            let traverse2 =
+                self.record_collision(q, child2, query_idx, self_collision, &mut record);
             if !traverse1 && !traverse2 {
                 if top < 0 {
                     break;
                 }
-                node = stack[top as usize];
+                debug_assert!((top as usize) < stack.len());
+                // SAFETY: `top < 64` — pushes are bounded by the tree depth (< 64, above).
+                node = unsafe { *stack.get_unchecked(top as usize) };
                 top -= 1;
             } else {
                 node = if traverse1 { child1 } else { child2 };
                 if traverse1 && traverse2 {
                     top += 1;
-                    stack[top as usize] = child2;
+                    debug_assert!((top as usize) < stack.len());
+                    // SAFETY: `top < 64` — one push per descent level, depth < 64 (above).
+                    unsafe { *stack.get_unchecked_mut(top as usize) = child2 };
                 }
             }
         }
@@ -418,6 +429,7 @@ impl Collider {
 
     /// Test `query` against `node`'s box (`FindCollision::RecordCollision`). Records a hit on a leaf (by
     /// original face index); the return says whether to descend (overlaps AND internal).
+    #[allow(unsafe_code)] // hot loop: unchecked loads, C++ VecView release parity
     #[inline]
     fn record_collision<Q: ColliderQuery>(
         &self,
@@ -427,9 +439,14 @@ impl Collider {
         self_collision: bool,
         record: &mut impl FnMut(i32),
     ) -> bool {
-        let overlaps = query.overlaps(self.node_bbox[node as usize]);
+        debug_assert!((node as usize) < self.node_bbox.len());
+        // SAFETY: `node` is a child id out of `internal_children`; `create` only emits node ids
+        // `< 2·L−1 == node_bbox.len()`.
+        let overlaps = query.overlaps(unsafe { *self.node_bbox.get_unchecked(node as usize) });
         if overlaps && is_leaf(node) {
-            let face = self.leaf2face[node2leaf(node) as usize];
+            debug_assert!((node2leaf(node) as usize) < self.leaf2face.len());
+            // SAFETY: an even node id `< 2·L−1` maps to a leaf `< L == leaf2face.len()`.
+            let face = unsafe { *self.leaf2face.get_unchecked(node2leaf(node) as usize) };
             if !self_collision || face != query_idx {
                 record(face);
             }
@@ -588,7 +605,10 @@ mod tests {
         let collider = Collider::from_mesh(&q);
         let bvh = edge_pairs(&collider, &p, false);
         let brute = edge_pairs(&collider, &p, true);
-        assert!(!bvh.is_empty(), "overlapping cubes must produce candidate pairs");
+        assert!(
+            !bvh.is_empty(),
+            "overlapping cubes must produce candidate pairs"
+        );
         assert_eq!(bvh, brute, "BVH set must equal brute-force set");
         // Every recorded query index is a FORWARD edge of p; every face is a real q face.
         for &(edge, face) in &bvh {
@@ -611,15 +631,39 @@ mod tests {
         let q = cube_at(0.0, 0.0, 0.0);
         let collider = Collider::from_mesh(&q);
         let mut hits_inside = 0;
-        collider.collisions(1, false, |_| Vec3::new(0.5, 0.5, 999.0), |_, _| hits_inside += 1);
+        collider.collisions(
+            1,
+            false,
+            |_| Vec3::new(0.5, 0.5, 999.0),
+            |_, _| hits_inside += 1,
+        );
         let mut brute_inside = 0;
-        collider.collisions_brute(1, false, |_| Vec3::new(0.5, 0.5, 999.0), |_, _| brute_inside += 1);
-        assert!(hits_inside > 0, "a point over the XY footprint must hit some face boxes");
-        assert_eq!(hits_inside, brute_inside, "BVH point-query count must match brute-force");
+        collider.collisions_brute(
+            1,
+            false,
+            |_| Vec3::new(0.5, 0.5, 999.0),
+            |_, _| brute_inside += 1,
+        );
+        assert!(
+            hits_inside > 0,
+            "a point over the XY footprint must hit some face boxes"
+        );
+        assert_eq!(
+            hits_inside, brute_inside,
+            "BVH point-query count must match brute-force"
+        );
 
         let mut hits_outside = 0;
-        collider.collisions(1, false, |_| Vec3::new(5.0, 5.0, 0.5), |_, _| hits_outside += 1);
-        assert_eq!(hits_outside, 0, "a point outside the XY footprint hits nothing");
+        collider.collisions(
+            1,
+            false,
+            |_| Vec3::new(5.0, 5.0, 0.5),
+            |_, _| hits_outside += 1,
+        );
+        assert_eq!(
+            hits_outside, 0,
+            "a point outside the XY footprint hits nothing"
+        );
         // (VertId is used by callers to label point-query indices; keep the import exercised.)
         let _ = VertId::new(0);
     }
@@ -684,6 +728,9 @@ mod tests {
         let bvh = edge_pairs(&collider, &probe, false);
         let brute = edge_pairs(&collider, &probe, true);
         assert!(!bvh.is_empty());
-        assert_eq!(bvh, brute, "BVH and brute-force must emit the identical pair set");
+        assert_eq!(
+            bvh, brute,
+            "BVH and brute-force must emit the identical pair set"
+        );
     }
 }

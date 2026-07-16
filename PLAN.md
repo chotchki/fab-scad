@@ -195,7 +195,7 @@ added 2026-07-07.
   - [ ] P.1.4 - P.1.4 - Extend the numeric subset (ternary, comparisons, transcendental calls)
   - [ ] P.1.5 - P.1.5 - Measure + coverage report
   - [ ] P.1.6 - P.1.6 - JIT list/vector ABI (scalarize A/B/C, sink-return D)
-- [ ] P.2 - P.2 - Content-addressed CSG cache
+- [x] P.2 - P.2 - Content-addressed CSG cache — DONE cf1ff16a as the kernel-level Solid memo (the rung BU.7's measurement picked): per-build content-addressed memo in build_geo/build_geo_parts (ONE memo spans parts — sliced models share the base between parts), prepass-counted so only will-recur content is retained, deep-eq verified per hit (collision = re-render, never a wrong mesh), FAB_GEO_CACHE=0 opt-out + =verify diagnosis mode. THE HUNT: silverwear diverged 140 tris — ops never MINT ids so update_reference's Q-offset is one constant per build; served copies sharing an id-set collide in union trees and same_face merges ACROSS copies; fixed with fresh_instance-on-serve (Mesh::as_fresh_instance re-mints instance ids, classes preserved). All four heavy models bitwise-identical on/off. Sweep: slice_parts 8.0s→0.59s (−92%), bowtie −77%, garage −53%, desktop_holder TIMEOUT→solid; wall-total 124.0s vs OpenSCAD 250.0s = 2.02× FASTER (day-start: 0.96×), median 2.69×, 75/109 both-rendered; baseline re-frozen
 ## Phase Q - Fuzzing the evaluator + JIT (miri/Kani can't execute native code — fuzzing runs it, ASan checks it)
 - [x] Q.1 - Q.1 - eval fuzz target: parse→eval→geometry→mesh under ASan (the interpreter miri-substitute)
 - [x] Q.2 - Q.2 - jit_diff fuzz target: interp vs JIT bit-identity, executes the JIT unsafe seam under ASan

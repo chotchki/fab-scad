@@ -187,8 +187,13 @@ added 2026-07-07.
 - [x] O.1 - O.1 - Intrinsic registry LANDED: AST-fingerprint gate (exact-match-or-interpret) + Task::Intrinsic dispatch + fast==slow harness; POC proves the chain, corpus 901/901
 - [x] O.2 - O.2 - First hand-written BOSL2-function intrinsics from the release profile
 - [x] O.3 - O.3 v1 - EXPLAIN report LANDED (FAB_EXPLAIN): per-function intrinsic plan WIRED/DRIFT/interpreted, so you can see if an intrinsic fires or silently interprets (library drift). Runtime fire-counts + JIT path ride with P.1
-- [ ] O.4 - O.4 - Targeted deep-profile: per-user-fn inclusive TIME (task-stack-aware fnprofile) + FAB_PROFILE_TARGETS harness leg; profile the eval-bound tail (window_air_cover 36s, shoe_holder, webcam_holder, pill_holder) → the ranked worklist
+- [x] O.4 - O.4 - Targeted deep-profile: per-user-fn inclusive TIME (task-stack-aware fnprofile) + FAB_PROFILE_TARGETS harness leg; profile the eval-bound tail (window_air_cover 36s, shoe_holder, webcam_holder, pill_holder) → the ranked worklist
 - [ ] O.5 - O.5 - Next intrinsics band from the O.4 worklist (hand-written, wasm-safe, fast==slow gated) — concrete sub-tasks cut from the profile data
+  - [ ] O.5.1 - O.5.1 - Wire-time const guard: Entry.consts (name, expected bits) checked against the fn's home scope at build_intrinsics — mismatch doesn't wire. Unblocks the eps=_EPSILON family (is_vector, approx, _tri_class, unit, posmod...)
+  - [ ] O.5.2 - O.5.2 - Predicate/shape band (~19s): is_vector, approx, is_consistent+_list_pattern+same_shape, is_matrix, is_path, in_list, force_list, num_defined, constrain, posmod — each verbatim-reference + fast==slow battery
+  - [ ] O.5.3 - O.5.3 - Earcut band (~17s, window_air_cover's core): _tri_class (12.4s/3.9M), _none_inside (4.8s/1.6M, recursive w/ early exit; deps select/_tri_class/_pt_in_tri)
+  - [ ] O.5.4 - O.5.4 - Aggregate/affine band (~12s): sum/_sum, _apply, unit, idx, _bt_search, vector_angle — recursive accumulators + matrix×points
+  - [ ] O.5.5 - O.5.5 - Re-measure + docs: the four models under models_profile_targets + K.1.2 sweep vs baseline; models-profile.md updated; deferred monsters (_region_region_intersections, _point_dist, _find_anchor, _group_sort_by_index, rot ~22s) named for the next cut
 ## Phase P - P - Cranelift JIT + CSG cache (desktop)
 - [ ] P.1 - P.1 - Cranelift JIT for the numeric long tail (desktop)
   - [x] P.1.1 - P.1.1 - JIT registry + compile cache (one JITModule, keyed by fingerprint)

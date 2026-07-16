@@ -670,7 +670,7 @@ impl<'a> FnOracle<'a> {
             .map(|&(n, p, b)| (n, ((p, b), 0usize)))
             .collect();
         let intrinsics = build_intrinsics(&ctx_functions);
-        let ctx = Ctx {
+        let mut ctx = Ctx {
             functions: ctx_functions,
             intrinsics,
             island_globals: RefCell::new(vec![Scope::new()]),
@@ -710,6 +710,11 @@ impl<'a> FnOracle<'a> {
                     *slot = scope.clone();
                 }
             }
+        }
+        // O.5.1: constants are published → arm the const-guarded intrinsics (they count as "the
+        // interpreter" here exactly like the unguarded ones `build_intrinsics` wired above).
+        for (name, func) in arm_guarded_intrinsics(&ctx) {
+            ctx.intrinsics.insert(name, func);
         }
         Ok(Self {
             ctx,
@@ -1798,7 +1803,7 @@ fn resolve_source(
         f.compile(&defs, &consts, config.jit)
     });
     let n = islands.len();
-    let ctx = Ctx {
+    let mut ctx = Ctx {
         functions,
         intrinsics,
         jit,
@@ -1838,6 +1843,11 @@ fn resolve_source(
         if let Some(slot) = ctx.island_globals.borrow_mut().get_mut(i) {
             *slot = island_global;
         }
+    }
+    // O.5.1: island globals now exist, so the const-guarded intrinsics can prove their baked constants
+    // against the real bound values and arm. Before this point (incl. the hoist above) they interpreted.
+    for (name, func) in arm_guarded_intrinsics(&ctx) {
+        ctx.intrinsics.insert(name, func);
     }
     redundancy::reset(); // dev probe: fresh count per run so the import fixpoint's partial runs don't bleed in
     mod_redundancy::reset(); // dev probe (J.5.1): fresh module-call ceiling per run (FAB_CSG_REDUNDANCY)
@@ -1989,6 +1999,51 @@ fn build_intrinsics<'a>(
         }
         if let Some(func) = intrinsics::lookup(name, params, body) {
             out.insert(name, func);
+        }
+    }
+    out
+}
+
+/// Arm the CONST-GUARDED intrinsics (O.5.1): registry entries whose native impl BAKES a named top-level
+/// constant (`eps=_EPSILON`) — the fingerprint proves the function's source, not the constants it names, so
+/// these can't wire at [`build_intrinsics`] time. Called AFTER island globals are built (they don't exist
+/// earlier — and mid-hoist a partially-bound scope could make even a correct bake diverge, so the interpreter
+/// runs there); wires each fingerprint-matched entry ONLY if every guarded constant's BOUND value in the fn's
+/// home-island global is bit-exactly the baked one. Nothing rebinds a top-level global after the hoist (a
+/// module-local shadow can't reach a default, which evaluates in the DEFINITION scope), so a verdict here
+/// holds for the whole eval. Returns the additions for the caller to insert — only the loader path and the
+/// JIT oracle arm; the raw-AST path (tests, single-program evals) fuses hoist+eval so guarded entries simply
+/// stay interpreted there (correct, just not accelerated).
+fn arm_guarded_intrinsics<'a>(ctx: &Ctx<'a>) -> Vec<(&'a str, intrinsics::Intrinsic)> {
+    let explain = intrinsics::explain_on();
+    let mut out = Vec::new();
+    for (&name, &((params, body), home)) in &ctx.functions {
+        let Some((func, consts)) = intrinsics::lookup_guarded(name, params, body) else {
+            continue;
+        };
+        let globals = ctx.island_globals.borrow();
+        let Some(scope) = globals.get(home) else {
+            continue;
+        };
+        let bad = consts.iter().find(|&&(cname, expected)| {
+            !matches!(scope.lookup_opt(cname), Some(Value::Num(n)) if n.to_bits() == expected.to_bits())
+        });
+        match bad {
+            None => {
+                if explain {
+                    eprintln!("+ [intrinsic ARMED] {name} — const guard ok");
+                }
+                out.push((name, func));
+            }
+            Some(&(cname, expected)) => {
+                if explain {
+                    eprintln!(
+                        "+ [intrinsic CONST-DECLINED] {name} — `{cname}` in its home scope is {:?}, \
+                         intrinsic baked {expected} → INTERPRETED",
+                        scope.lookup_opt(cname),
+                    );
+                }
+            }
         }
     }
     out
@@ -2720,6 +2775,84 @@ mod tests {
     #[test]
     fn tagged_functions_of_no_islands_is_empty() {
         assert!(tagged_functions(&Vec::new()).is_empty());
+    }
+
+    /// O.5.1 mechanism, direct: [`super::arm_guarded_intrinsics`] wires a fingerprint-matched guarded entry
+    /// ONLY when every guarded constant's bound value bit-matches the bake — unbound, off-by-value, and even
+    /// a bit-different same-magnitude float all DECLINE.
+    #[test]
+    fn arm_guarded_intrinsics_checks_bound_const_bits() {
+        let program =
+            parse("_EPSILON = 1e-9; function _fab_poc_near0(x) = abs(x) < _EPSILON;").unwrap();
+        let ctx = build_ctx(&program, crate::Config::default());
+        // Nothing hoisted yet → the const is UNBOUND → declines (this is the mid-hoist state).
+        assert!(super::arm_guarded_intrinsics(&ctx).is_empty());
+
+        let bind_eps = |v: Value| {
+            let mut g = Scope::new();
+            g.bind("_EPSILON".to_string(), v);
+            *ctx.island_globals.borrow_mut().first_mut().unwrap() = g;
+        };
+        bind_eps(Value::Num(1e-9));
+        let armed = super::arm_guarded_intrinsics(&ctx);
+        assert_eq!(
+            armed.iter().map(|(n, _)| *n).collect::<Vec<_>>(),
+            ["_fab_poc_near0"],
+            "exact const → arms"
+        );
+        bind_eps(Value::Num(1e-6));
+        assert!(
+            super::arm_guarded_intrinsics(&ctx).is_empty(),
+            "overridden const → declines"
+        );
+        bind_eps(Value::Num(f64::from_bits(1e-9_f64.to_bits() + 1)));
+        assert!(
+            super::arm_guarded_intrinsics(&ctx).is_empty(),
+            "one-ulp drift → declines (bit compare, not ==)"
+        );
+    }
+
+    /// O.5.1 end-to-end through [`super::resolve_source`] (the path that ARMS): the program's `_EPSILON`
+    /// decides the answer. With the stock 1e-9 the intrinsic arms and must agree with the interpreter; with
+    /// a user OVERRIDE to 1e-6 the guard declines — a stale-baked intrinsic would answer `false` for 5e-7,
+    /// the interpreter's `true` is the required output.
+    #[test]
+    fn const_override_declines_the_guarded_intrinsic_end_to_end() {
+        use std::path::Path;
+
+        use super::loader::SourceMap;
+        use super::{FileTable, Resolution, resolve_source};
+
+        let run = |src: &str| -> String {
+            match resolve_source(
+                src,
+                Path::new("."),
+                None,
+                &SourceMap::new(),
+                &FileTable::new(),
+                None,
+                crate::Config::default(),
+            )
+            .expect("resolves")
+            {
+                Resolution::Complete { messages, .. } => messages
+                    .iter()
+                    .map(crate::Message::render)
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+                other => panic!("expected Complete, got {other:?}"),
+            }
+        };
+        let poc = "function _fab_poc_near0(x) = abs(x) < _EPSILON;\n\
+                   echo(_fab_poc_near0(0.0000000005), _fab_poc_near0(0.0000005));";
+
+        // Stock: 5e-10 < 1e-9 → true; 5e-7 → false. (The intrinsic ARMS here — same answer by the harness.)
+        assert_eq!(
+            run(&format!("_EPSILON = 1e-9;\n{poc}")),
+            "ECHO: true, false"
+        );
+        // Override: the guard DECLINES, the interpreter answers per 1e-6 → 5e-7 is near-zero now.
+        assert_eq!(run(&format!("_EPSILON = 1e-6;\n{poc}")), "ECHO: true, true");
     }
 
     /// The PURE inner step ([`super::resolve_source`], M.4): with empty source tables it surfaces NEEDS

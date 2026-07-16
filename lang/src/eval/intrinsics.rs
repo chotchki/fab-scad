@@ -44,6 +44,15 @@ struct Entry {
     name: &'static str,
     /// The verbatim reference source of that function — fingerprinted + run as the harness oracle.
     reference: &'static str,
+    /// Named TOP-LEVEL CONSTANTS the reference hardcodes (default exprs like `eps=_EPSILON`, or body reads),
+    /// with the value the native impl bakes in. Empty = self-contained. Non-empty makes the entry
+    /// CONST-GUARDED (O.5.1): the fingerprint proves the FUNCTION source, not the constants it names, so a
+    /// user override (`_EPSILON = 1e-6;`) would make the baked value silently wrong. Guarded entries skip
+    /// [`lookup`] (never wire at ctx build) and arm ONLY after island globals are built, when each named
+    /// constant's BOUND value in the fn's home-island global bit-matches — see
+    /// `super::arm_guarded_intrinsics`. Mismatch (or mid-hoist, before globals exist) → interpreted: the
+    /// worst case stays "missed speedup, never a wrong answer".
+    consts: &'static [(&'static str, f64)],
     /// The native implementation.
     func: Intrinsic,
 }
@@ -66,6 +75,7 @@ static REGISTRY: &[Entry] = &[
     Entry {
         name: "_fab_poc_sq",
         reference: "function _fab_poc_sq(x) = x * x;",
+        consts: &[],
         func: poc_sq,
     },
     // BOSL2 `is_def`/`is_str` — the two hottest LEAF predicates (called in nearly every optional-arg check
@@ -73,11 +83,13 @@ static REGISTRY: &[Entry] = &[
     Entry {
         name: "is_def",
         reference: "function is_def(x) = !is_undef(x);",
+        consts: &[],
         func: is_def,
     },
     Entry {
         name: "is_str",
         reference: "function is_str(x) = is_string(x);",
+        consts: &[],
         func: is_str,
     },
     // BOSL2 `is_nan`/`is_finite` — the #1 and #2 hottest user functions on the model profile (56% of calls
@@ -85,11 +97,13 @@ static REGISTRY: &[Entry] = &[
     Entry {
         name: "is_nan",
         reference: "function is_nan(x) = (x!=x);",
+        consts: &[],
         func: is_nan,
     },
     Entry {
         name: "is_finite",
         reference: "function is_finite(x) = is_num(x) && !is_nan(0*x);",
+        consts: &[],
         func: is_finite,
     },
     // BOSL2 `last` (9.6% of user-fn calls) + `default` (2.5%) — the next two down the profile. Both call only
@@ -98,11 +112,13 @@ static REGISTRY: &[Entry] = &[
     Entry {
         name: "last",
         reference: "function last(list) = list[len(list)-1];",
+        consts: &[],
         func: last,
     },
     Entry {
         name: "default",
         reference: "function default(v,dflt=undef) = is_undef(v)? dflt : v;",
+        consts: &[],
         func: default,
     },
     // `_is_liststr` (2.2%) — a pure leaf (calls only the `is_str` intrinsic + the `is_list` builtin), from
@@ -111,11 +127,13 @@ static REGISTRY: &[Entry] = &[
     Entry {
         name: "_is_liststr",
         reference: "function _is_liststr(s) = is_list(s) || is_str(s);",
+        consts: &[],
         func: is_liststr,
     },
     Entry {
         name: "point3d",
         reference: "function point3d(p, fill=0) = assert(is_list(p)) [for (i=[0:2]) (p[i]==undef)? fill : p[i]];",
+        consts: &[],
         func: point3d,
     },
     // BOSL2 `select` (lists.scad) — the WRAPAROUND list indexer, the single hottest function in the path/list
@@ -143,7 +161,18 @@ static REGISTRY: &[Entry] = &[
                     (s <= e) \
                       ? [ for (i = [s:1:e])   list[i] ] \
                       : [ for (i = [s:1:l-1]) list[i], for (i = [0:1:e])   list[i] ] ;",
+        consts: &[],
         func: select,
+    },
+    // The CONST-GUARD POC (O.5.1, a synthetic collision-proof name like `_fab_poc_sq`): its reference bakes
+    // the top-level constant `_EPSILON`, so it exercises the guarded-arm path end-to-end — it wires only
+    // AFTER island globals are built and only when the home scope's `_EPSILON` is bit-exactly 1e-9
+    // (`super::arm_guarded_intrinsics`). The real `_EPSILON` family (is_vector/approx/_tri_class…) is O.5.2+.
+    Entry {
+        name: "_fab_poc_near0",
+        reference: "function _fab_poc_near0(x) = abs(x) < _EPSILON;",
+        consts: &[("_EPSILON", 1e-9)],
+        func: poc_near0,
     },
 ];
 
@@ -154,6 +183,15 @@ fn poc_sq(args: &[Value]) -> crate::Result<Value> {
         [Value::Num(x)] => Value::Num(x * x),
         _ => Value::Undef,
     })
+}
+
+/// The const-guard POC: `abs(x) < _EPSILON` with `_EPSILON` baked as 1e-9 (the guard proves the bake).
+/// Routes through the REAL `abs` builtin + the interpreter's own `<`, so it can't diverge on exotic inputs
+/// (`abs` of a list/undef, `undef < num`) — bit-identical by construction, like `select`.
+fn poc_near0(args: &[Value]) -> crate::Result<Value> {
+    let x = args.first().cloned().unwrap_or(Value::Undef);
+    let a = super::builtins::apply("abs", &[x]);
+    Ok(super::ops::apply_binary(BinOp::Lt, a, Value::Num(1e-9)))
 }
 
 /// BOSL2 `is_def(x) = !is_undef(x)` — true iff `x` is anything but `undef`. Only the first positional arg
@@ -420,18 +458,19 @@ fn select_assert(msg: &str) -> crate::Error {
     crate::Error::Eval(format!("assert failed: {msg}"))
 }
 
-/// `name → (fingerprint, intrinsic)` for every registry entry, computed ONCE by parsing each `reference` and
-/// fingerprinting its `(params, body)`. Lazy + cached: the parse cost is paid the first time an intrinsic is
-/// looked up in the process, never per call. A `reference` that doesn't parse to a single `function` def is
-/// a registry BUG — it's dropped with a debug assert rather than silently mis-registering.
-fn table() -> &'static [(&'static str, u64, Intrinsic)] {
-    static TABLE: OnceLock<Vec<(&'static str, u64, Intrinsic)>> = OnceLock::new();
+/// `name → (fingerprint, intrinsic, const guard)` for every registry entry, computed ONCE by parsing each
+/// `reference` and fingerprinting its `(params, body)`. Lazy + cached: the parse cost is paid the first time
+/// an intrinsic is looked up in the process, never per call. A `reference` that doesn't parse to a single
+/// `function` def is a registry BUG — it's dropped with a debug assert rather than silently mis-registering.
+type Row = (&'static str, u64, Intrinsic, &'static [(&'static str, f64)]);
+fn table() -> &'static [Row] {
+    static TABLE: OnceLock<Vec<Row>> = OnceLock::new();
     TABLE.get_or_init(|| {
         REGISTRY
             .iter()
             .filter_map(|entry| {
                 let fp = reference_fingerprint(entry.reference)?;
-                Some((entry.name, fp, entry.func))
+                Some((entry.name, fp, entry.func, entry.consts))
             })
             .collect()
     })
@@ -454,17 +493,36 @@ fn reference_fingerprint(reference: &str) -> Option<u64> {
     }
 }
 
-/// Resolve a defined function to its intrinsic, if one is registered for EXACTLY this body. Called ONCE per
-/// function at [`super::build_ctx`] time (never per call): fingerprint the running `(params, body)`, then
-/// match on (name, fingerprint). A miss — no entry for the name, or the name matches but the body doesn't —
-/// returns `None`, so the interpreter runs the real body. This is the never-silently-wrong gate.
+/// Resolve a defined function to its UNGUARDED intrinsic, if one is registered for EXACTLY this body. Called
+/// ONCE per function at [`super::build_ctx`] time (never per call): fingerprint the running `(params, body)`,
+/// then match on (name, fingerprint). A miss — no entry for the name, or the name matches but the body
+/// doesn't — returns `None`, so the interpreter runs the real body. This is the never-silently-wrong gate.
+/// CONST-GUARDED entries (non-empty `consts`) never resolve here — they arm later, after island globals are
+/// built, via [`lookup_guarded`] + `super::arm_guarded_intrinsics` (their baked constants can't be checked at
+/// ctx build, and mid-hoist the interpreter must run).
 #[must_use]
 pub(super) fn lookup(name: &str, params: &[Parameter], body: &Expr) -> Option<Intrinsic> {
     let fp = fingerprint(params, body);
     table()
         .iter()
-        .find(|(n, f, _)| *n == name && *f == fp)
-        .map(|(_, _, func)| *func)
+        .find(|(n, f, _, consts)| *n == name && *f == fp && consts.is_empty())
+        .map(|(_, _, func, _)| *func)
+}
+
+/// The CONST-GUARDED half of [`lookup`]: a fingerprint-matched entry with a non-empty const guard, returned
+/// WITH the guard so the caller (`super::arm_guarded_intrinsics`) can verify each named constant's bound
+/// value before wiring.
+#[must_use]
+pub(super) fn lookup_guarded(
+    name: &str,
+    params: &[Parameter],
+    body: &Expr,
+) -> Option<(Intrinsic, &'static [(&'static str, f64)])> {
+    let fp = fingerprint(params, body);
+    table()
+        .iter()
+        .find(|(n, f, _, consts)| *n == name && *f == fp && !consts.is_empty())
+        .map(|(_, _, func, consts)| (*func, *consts))
 }
 
 /// Test-only access to a registry entry's reference source, for the fast==slow harness.
@@ -496,7 +554,10 @@ pub(super) fn classify(name: &str, params: &[Parameter], body: &Expr) -> Plan {
     if !REGISTRY.iter().any(|e| e.name == name) {
         return Plan::NotRegistered;
     }
-    if lookup(name, params, body).is_some() {
+    // Fingerprint-level truth: a const-guarded match is WIRED here (the source matched); whether its guard
+    // then arms is a separate, per-program verdict `arm_guarded_intrinsics` prints under the same EXPLAIN.
+    let fp = fingerprint(params, body);
+    if table().iter().any(|(n, f, ..)| *n == name && *f == fp) {
         Plan::Wired
     } else {
         Plan::Drift
@@ -511,8 +572,8 @@ pub(super) fn classify(name: &str, params: &[Parameter], body: &Expr) -> Plan {
 pub(super) fn reference_fp(name: &str) -> Option<u64> {
     table()
         .iter()
-        .find(|(n, _, _)| *n == name)
-        .map(|(_, fp, _)| *fp)
+        .find(|(n, ..)| *n == name)
+        .map(|(_, fp, ..)| *fp)
 }
 
 /// Is the `FAB_EXPLAIN` intrinsic-plan report on? Cached once (env read per ctx build would be silly).
@@ -933,6 +994,72 @@ mod tests {
         assert!(
             same_result(&poc_sq(&bad), &interpret(reference, &bad)),
             "undef path must match too"
+        );
+    }
+
+    /// The SLOW side for a reference that reads a TOP-LEVEL CONSTANT (`_EPSILON`): like [`interpret`], plus
+    /// the named constants bound into the scope first — in a real program they'd resolve from the home-island
+    /// global, and the const GUARD (O.5.1) is what certifies the bound value matches the intrinsic's bake.
+    fn interpret_with_consts(
+        reference: &str,
+        consts: &[(&str, Value)],
+        inputs: &[Value],
+    ) -> crate::Result<Value> {
+        let (params, body) = parse_fn(reference);
+        let mut scope = Scope::new();
+        for (name, v) in consts {
+            scope.bind((*name).to_string(), v.clone());
+        }
+        for (i, p) in params.iter().enumerate() {
+            let v = match inputs.get(i) {
+                Some(v) => v.clone(),
+                None => match &p.default {
+                    Some(d) => eval_expr(d, &scope)?,
+                    None => Value::Undef,
+                },
+            };
+            scope.bind(p.name.clone(), v);
+        }
+        eval_expr(&body, &scope)
+    }
+
+    #[test]
+    fn fast_equals_slow_fab_poc_near0() {
+        // The const-guard POC's correctness half: with `_EPSILON` bound to the guarded 1e-9 (the only state
+        // the intrinsic ever arms under), native must bit-match the interpreter over the whole battery plus
+        // the near-epsilon edges (strictly-less, exactly-equal, just-above).
+        let reference = reference_of("_fab_poc_near0").expect("POC registered");
+        let eps = [("_EPSILON", Value::Num(1e-9))];
+        let mut inputs = value_battery();
+        inputs.extend([5e-10, 1e-9, 2e-9, -5e-10, -1e-9].map(Value::Num));
+        for v in inputs {
+            let args = [v.clone()];
+            assert!(
+                same_result(
+                    &super::poc_near0(&args),
+                    &interpret_with_consts(reference, &eps, &args)
+                ),
+                "intrinsic vs interpreter diverged at {v:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_const_guarded_entry_never_wires_through_the_unguarded_lookup() {
+        // The build-time gate: `lookup` (what `build_intrinsics` wires from) must SKIP a guarded entry even
+        // on an exact fingerprint match — it arms later, after the guard verifies (`lookup_guarded`).
+        let (p, b) = parse_fn(reference_of("_fab_poc_near0").unwrap());
+        assert!(
+            lookup("_fab_poc_near0", &p, &b).is_none(),
+            "guarded entries must not wire at ctx build"
+        );
+        assert!(
+            super::lookup_guarded("_fab_poc_near0", &p, &b).is_some(),
+            "the guarded lookup must find it (exact fingerprint)"
+        );
+        assert!(
+            super::lookup_guarded("_fab_poc_sq", &p, &b).is_none(),
+            "an unguarded name never resolves through the guarded lookup"
         );
     }
 

@@ -9,7 +9,9 @@
 //!
 //! With the `par` feature OFF (the default) every primitive is a plain serial loop — bit-identical
 //! to the parallel path by construction (that's the whole point of the marker). With `par` ON the
-//! rayon path is live wherever `par_live` holds (build.rs): native OS threads, and — since M.6.1 —
+//! rayon path is live wherever `par_live` holds (build.rs) AND the batch beats `SEQ_THRESHOLD`
+//! (C++ `kSeqThreshold` parity — small batches stay serial, fork-join overhead isn't worth it):
+//! native OS threads, and — since M.6.1 —
 //! browser wasm (`wasm32-unknown-unknown`), where rayon runs over `wasm-bindgen-rayon`'s
 //! Web-Worker + SharedArrayBuffer pool. That build is nightly `-Zbuild-std` + `+atomics`
 //! (`scripts/wasm-par-check.sh` is the compile gate) and the APP owns the runtime discipline:
@@ -30,6 +32,18 @@
 // `par_live` (build.rs): `par` AND (native OR browser-wasm) — see the module doc.
 #[cfg(par_live)]
 use rayon::prelude::*;
+
+/// C++-parity sequential threshold (`parallel.h` `kSeqThreshold = 1e4`): at `len() <= SEQ_THRESHOLD`
+/// every entry point takes the serial path even with `par` live — fork-join overhead dominates small
+/// batches (`autoPolicy(size)` makes the same call, comparison `<=` matched exactly). Safe for bit
+/// identity by construction: `map_collect` is order-preserving and `reduce` is CA-gated, so serial
+/// and parallel already produce identical bytes — this only moves the crossover.
+///
+/// NOTE: C++ hot boolean loops (`boolean3.cpp` Intersect12/Winding03) use this default, but its
+/// sort.cpp/face_op.cpp/impl.cpp sites pass a CUSTOM 1e5 — the seam's uniform 10k is *more* parallel
+/// than C++ at those sites, not less.
+#[cfg_attr(not(par_live), allow(dead_code))] // only read on the par_live path; doc-visible always
+const SEQ_THRESHOLD: usize = 10_000;
 
 /// A reduction's binary combine + identity, kept as a TYPE (not a closure) so the
 /// [`CommutativeAssociative`] marker can gate it. `combine(identity, x) == x` must hold.
@@ -71,6 +85,9 @@ where
 {
     #[cfg(par_live)]
     {
+        if items.len() <= SEQ_THRESHOLD {
+            return reduce_serial(items, reducer);
+        }
         items
             .par_iter()
             .copied()
@@ -103,6 +120,9 @@ where
 {
     #[cfg(par_live)]
     {
+        if items.len() <= SEQ_THRESHOLD {
+            return items.iter().map(f).collect();
+        }
         items.par_iter().map(f).collect()
     }
     #[cfg(not(par_live))]
@@ -120,6 +140,10 @@ where
 {
     #[cfg(par_live)]
     {
+        if items.len() <= SEQ_THRESHOLD {
+            items.iter().for_each(f);
+            return;
+        }
         items.par_iter().for_each(f);
     }
     #[cfg(not(par_live))]
@@ -227,6 +251,31 @@ mod tests {
             acc += x;
         }
         assert_eq!(s.to_bits(), acc.to_bits());
+    }
+
+    #[test]
+    fn map_collect_preserves_order_above_seq_threshold() {
+        // 20k items > SEQ_THRESHOLD — under `par` this is the rayon path (the sub-threshold tests
+        // above now exercise the serial early-out); either way the output must be index-exact.
+        let items: Vec<i32> = (0..20_000).collect();
+        let doubled = map_collect(&items, |&x| x * 2);
+        assert_eq!(doubled, (0..20_000).map(|x| x * 2).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn reduce_above_seq_threshold_matches_serial() {
+        let boxes: Vec<Box3> = (0..20_000)
+            .map(|i| {
+                let f = i as f64;
+                let p = Vec3::new(
+                    (f * 1.3) % 7.0 - 3.0,
+                    (f * 2.7) % 11.0 - 5.0,
+                    (f * 0.7) % 5.0 - 2.0,
+                );
+                Box3::from_points(p, p)
+            })
+            .collect();
+        assert_eq!(reduce(&boxes, &BoxUnion), reduce_serial(&boxes, &BoxUnion));
     }
 
     #[test]

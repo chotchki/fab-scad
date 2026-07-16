@@ -8,8 +8,9 @@
 //!
 //! The cascade is `Shadow01 → Kernel02 → Kernel11 → Kernel12`, each an exact-`f64` shadow test resolved
 //! at coordinate ties by the symbolic perturbation ([`crate::boolean::predicates::shadows`]). NO exact
-//! arithmetic, NO FMA. The `expandP`/`forward` template params of the C++ are runtime `bool`s here
-//! (perf-neutral at tracer scale; const-generic later if the profile asks).
+//! arithmetic, NO FMA. The `expandP`/`forward` template params of the C++ are CONST GENERICS here,
+//! matching the C++ monomorphization: [`intersect12`] and [`winding03`] match on the runtime bools once
+//! and dispatch into one of the four fully-monomorphized cascade instantiations.
 //!
 //! SERIAL: the C++ recorder is `tbb::combinable`; we accumulate into one `Intersections` and, exactly
 //! like the C++, `stable_sort` the pairs by edge afterward so the emit order is normalized away.
@@ -67,15 +68,14 @@ fn load_face_edges(mesh: &Mesh, tri: TriId) -> [FaceEdge; 3] {
 /// `Shadow01` — does vertex `a0` (of `in_a`) shadow edge `b1` (of `in_b`, endpoints `b1s`/`b1e`), and
 /// where in `(y, z)` (`boolean3.cpp` `Shadow01`)? Returns `(s01, yz01)`; `yz01.x` NaN means no overlap.
 #[allow(clippy::too_many_arguments)]
-fn shadow01(
+#[inline(always)]
+fn shadow01<const EXPAND_P: bool, const FORWARD: bool>(
     a0: VertId,
     b1: HalfedgeId,
     b1s: VertId,
     b1e: VertId,
     in_a: &Mesh,
     in_b: &Mesh,
-    expand_p: bool,
-    forward: bool,
 ) -> (i32, Vec2) {
     let a0x = in_a.pos(a0).x;
     let b1sx = in_b.pos(b1s).x;
@@ -83,12 +83,12 @@ fn shadow01(
     let a0xp = in_a.vert_normal[a0.u()].x;
     let b1sxp = in_b.vert_normal[b1s.u()].x;
     let b1exp = in_b.vert_normal[b1e.u()].x;
-    let mut s01 = if forward {
-        shadows(a0x, b1ex, with_sign(expand_p, a0xp) - b1exp) as i32
-            - shadows(a0x, b1sx, with_sign(expand_p, a0xp) - b1sxp) as i32
+    let mut s01 = if FORWARD {
+        shadows(a0x, b1ex, with_sign(EXPAND_P, a0xp) - b1exp) as i32
+            - shadows(a0x, b1sx, with_sign(EXPAND_P, a0xp) - b1sxp) as i32
     } else {
-        shadows(b1sx, a0x, with_sign(expand_p, b1sxp) - a0xp) as i32
-            - shadows(b1ex, a0x, with_sign(expand_p, b1exp) - a0xp) as i32
+        shadows(b1sx, a0x, with_sign(EXPAND_P, b1sxp) - a0xp) as i32
+            - shadows(b1ex, a0x, with_sign(EXPAND_P, b1exp) - a0xp) as i32
     };
     let mut yz01 = Vec2::new(f64::NAN, f64::NAN);
 
@@ -96,11 +96,11 @@ fn shadow01(
         yz01 = interpolate(in_b.pos(b1s), in_b.pos(b1e), in_a.pos(a0).x);
         let b1pair = in_b.pair(b1);
         let dir = in_b.face_normal[b1.tri().u()].y + in_b.face_normal[b1pair.tri().u()].y;
-        if forward {
+        if FORWARD {
             if !shadows(in_a.pos(a0).y, yz01.x, -dir) {
                 s01 = 0;
             }
-        } else if !shadows(yz01.x, in_a.pos(a0).y, with_sign(expand_p, dir)) {
+        } else if !shadows(yz01.x, in_a.pos(a0).y, with_sign(EXPAND_P, dir)) {
             s01 = 0;
         }
     }
@@ -111,7 +111,8 @@ fn shadow01(
 /// xyzz11)`; `xyzz11.x` NaN means no intersection. Always uses the ORIGINAL `in_p`/`in_q` (its callers
 /// map their `a`/`b` edges into the right P/Q slot before calling).
 #[allow(clippy::too_many_arguments)]
-fn kernel11(
+#[inline]
+fn kernel11<const EXPAND_P: bool>(
     p1: HalfedgeId,
     p1s: VertId,
     p1e: VertId,
@@ -120,7 +121,6 @@ fn kernel11(
     q1e: VertId,
     in_p: &Mesh,
     in_q: &Mesh,
-    expand_p: bool,
 ) -> (i32, Vec4) {
     let mut s11 = 0;
     let mut k = 0usize;
@@ -129,7 +129,7 @@ fn kernel11(
     let mut shadows_flag = false;
 
     for (i, &p0i) in [p1s, p1e].iter().enumerate() {
-        let (s01, yz01) = shadow01(p0i, q1, q1s, q1e, in_p, in_q, expand_p, true);
+        let (s01, yz01) = shadow01::<EXPAND_P, true>(p0i, q1, q1s, q1e, in_p, in_q);
         if yz01.x.is_finite() {
             s11 += s01 * if i == 0 { -1 } else { 1 };
             if k < 2 && (k == 0 || (s01 != 0) != shadows_flag) {
@@ -142,7 +142,7 @@ fn kernel11(
     }
 
     for (i, &q0i) in [q1s, q1e].iter().enumerate() {
-        let (s10, yz10) = shadow01(q0i, p1, p1s, p1e, in_q, in_p, expand_p, false);
+        let (s10, yz10) = shadow01::<EXPAND_P, false>(q0i, p1, p1s, p1e, in_q, in_p);
         if yz10.x.is_finite() {
             s11 += s10 * if i == 0 { -1 } else { 1 };
             if k < 2 && (k == 0 || (s10 != 0) != shadows_flag) {
@@ -165,7 +165,7 @@ fn kernel11(
     let dir_p = in_p.face_normal[p1.tri().u()].z + in_p.face_normal[p1pair.tri().u()].z;
     let q1pair = in_q.pair(q1);
     let dir_q = in_q.face_normal[q1.tri().u()].z + in_q.face_normal[q1pair.tri().u()].z;
-    if !shadows(xyzz11.z, xyzz11.w, with_sign(expand_p, dir_p) - dir_q) {
+    if !shadows(xyzz11.z, xyzz11.w, with_sign(EXPAND_P, dir_p) - dir_q) {
         s11 = 0;
     }
     (s11, xyzz11)
@@ -174,14 +174,13 @@ fn kernel11(
 /// `Kernel02` — does vertex `a0` shadow face `b2` (with edges `edge_b`), and at what `z`
 /// (`boolean3.cpp` `Kernel02`)? Returns `(s02, z02)`; `z02` NaN means no intersection.
 #[allow(clippy::too_many_arguments)]
-fn kernel02(
+#[inline]
+fn kernel02<const EXPAND_P: bool, const FORWARD: bool>(
     a0: VertId,
     b2: TriId,
     edge_b: &[FaceEdge; 3],
     in_a: &Mesh,
     in_b: &Mesh,
-    expand_p: bool,
-    forward: bool,
 ) -> (i32, f64) {
     let mut s02 = 0;
     let mut k = 0usize;
@@ -189,9 +188,9 @@ fn kernel02(
     let mut shadows_flag = false;
 
     for e in edge_b.iter() {
-        let (s01, yz01) = shadow01(a0, e.edge, e.start, e.end, in_a, in_b, expand_p, forward);
+        let (s01, yz01) = shadow01::<EXPAND_P, FORWARD>(a0, e.edge, e.start, e.end, in_a, in_b);
         if yz01.x.is_finite() {
-            s02 += s01 * if forward == e.is_forward { -1 } else { 1 };
+            s02 += s01 * if FORWARD == e.is_forward { -1 } else { 1 };
             if k < 2 && (k == 0 || (s01 != 0) != shadows_flag) {
                 shadows_flag = s01 != 0;
                 yzz_rl[k] = Vec3::new(yz01.x, yz01.y, yz01.y);
@@ -206,10 +205,10 @@ fn kernel02(
     debug_assert!(k == 2, "Boolean manifold error: s02");
     let vert_pos_a = in_a.pos(a0);
     let z02 = interpolate(yzz_rl[0], yzz_rl[1], vert_pos_a.y).y;
-    let keep = if forward {
+    let keep = if FORWARD {
         shadows(vert_pos_a.z, z02, -in_b.face_normal[b2.u()].z)
     } else {
-        shadows(z02, vert_pos_a.z, with_sign(expand_p, in_b.face_normal[b2.u()].z))
+        shadows(z02, vert_pos_a.z, with_sign(EXPAND_P, in_b.face_normal[b2.u()].z))
     };
     (if keep { s02 } else { 0 }, z02)
 }
@@ -217,15 +216,14 @@ fn kernel02(
 /// `Kernel12` — does edge `a1` (of `in_a`) pass through face `b2` (of `in_b`), and where
 /// (`boolean3.cpp` `Kernel12`)? Returns `(x12, v12)`; `v12.x` NaN means no intersection. Combines the
 /// two-endpoint `Kernel02` contributions with the three-edge `Kernel11` contributions.
-fn kernel12(
+#[inline]
+fn kernel12<const EXPAND_P: bool, const FORWARD: bool>(
     a1: HalfedgeId,
     b2: TriId,
     in_p: &Mesh,
     in_q: &Mesh,
-    expand_p: bool,
-    forward: bool,
 ) -> (i32, Vec3) {
-    let (in_a, in_b) = if forward { (in_p, in_q) } else { (in_q, in_p) };
+    let (in_a, in_b) = if FORWARD { (in_p, in_q) } else { (in_q, in_p) };
     let mut x12 = 0;
     let mut k = 0usize;
     let mut xzy_lr0 = [Vec3::ZERO; 2];
@@ -237,9 +235,9 @@ fn kernel12(
     let edge_b = load_face_edges(in_b, b2);
 
     for &vert_a in &[edge_a_start, edge_a_end] {
-        let (s, z) = kernel02(vert_a, b2, &edge_b, in_a, in_b, expand_p, forward);
+        let (s, z) = kernel02::<EXPAND_P, FORWARD>(vert_a, b2, &edge_b, in_a, in_b);
         if z.is_finite() {
-            x12 += s * if (vert_a == edge_a_start) == forward { 1 } else { -1 };
+            x12 += s * if (vert_a == edge_a_start) == FORWARD { 1 } else { -1 };
             if k < 2 && (k == 0 || (s != 0) != shadows_flag) {
                 shadows_flag = s != 0;
                 let mut v = in_a.pos(vert_a);
@@ -253,10 +251,10 @@ fn kernel12(
     }
 
     for e in edge_b.iter() {
-        let (s, xyzz) = if forward {
-            kernel11(a1, edge_a_start, edge_a_end, e.edge, e.start, e.end, in_p, in_q, expand_p)
+        let (s, xyzz) = if FORWARD {
+            kernel11::<EXPAND_P>(a1, edge_a_start, edge_a_end, e.edge, e.start, e.end, in_p, in_q)
         } else {
-            kernel11(e.edge, e.start, e.end, a1, edge_a_start, edge_a_end, in_p, in_q, expand_p)
+            kernel11::<EXPAND_P>(e.edge, e.start, e.end, a1, edge_a_start, edge_a_end, in_p, in_q)
         };
         if xyzz.x.is_finite() {
             x12 -= s * if e.is_forward { 1 } else { -1 };
@@ -265,7 +263,7 @@ fn kernel12(
                 let mut lo = Vec3::new(xyzz.x, xyzz.z, xyzz.y);
                 let mut hi = lo;
                 hi.y = xyzz.w;
-                if !forward {
+                if !FORWARD {
                     core::mem::swap(&mut lo.y, &mut hi.y);
                 }
                 xzy_lr0[k] = lo;
@@ -314,7 +312,22 @@ fn intersect12(
     expand_p: bool,
     forward: bool,
 ) -> Intersections {
-    let a = if forward { in_p } else { in_q };
+    // The one runtime→compile-time dispatch: everything below (the BVH traversal closure and the whole
+    // Shadow01→Kernel02/11→Kernel12 cascade) is monomorphized per (EXPAND_P, FORWARD), as in the C++.
+    match (expand_p, forward) {
+        (true, true) => intersect12_impl::<true, true>(in_p, in_q, b_collider),
+        (true, false) => intersect12_impl::<true, false>(in_p, in_q, b_collider),
+        (false, true) => intersect12_impl::<false, true>(in_p, in_q, b_collider),
+        (false, false) => intersect12_impl::<false, false>(in_p, in_q, b_collider),
+    }
+}
+
+fn intersect12_impl<const EXPAND_P: bool, const FORWARD: bool>(
+    in_p: &Mesh,
+    in_q: &Mesh,
+    b_collider: &Collider,
+) -> Intersections {
+    let a = if FORWARD { in_p } else { in_q };
     let t = std::time::Instant::now();
 
     // Map each edge (query) to its intersection hits, INDEPENDENTLY — the per-query BVH traversal is a
@@ -328,9 +341,10 @@ fn intersect12(
         let mut overlaps = 0u64;
         b_collider.query_leaves(i, q, false, |leaf_idx| {
             overlaps += 1;
-            let (x12, v12) = kernel12(HalfedgeId::new(i), TriId::new(leaf_idx), in_p, in_q, expand_p, forward);
+            let (x12, v12) =
+                kernel12::<EXPAND_P, FORWARD>(HalfedgeId::new(i), TriId::new(leaf_idx), in_p, in_q);
             if v12.x.is_finite() {
-                let pair = if forward { [i, leaf_idx] } else { [leaf_idx, i] };
+                let pair = if FORWARD { [i, leaf_idx] } else { [leaf_idx, i] };
                 hits.push(Hit12 { pair, shadow: x12, vert: v12 });
             }
         });
@@ -347,11 +361,11 @@ fn intersect12(
             result.v12.push(h.vert);
         }
     }
-    tracing::debug!(target: "manifold::boolean", forward, ms = t.elapsed().as_millis() as u64, cand_pairs = n_pairs, hits = result.p1q2.len(), "intersect12");
+    tracing::debug!(target: "manifold::boolean", forward = FORWARD, ms = t.elapsed().as_millis() as u64, cand_pairs = n_pairs, hits = result.p1q2.len(), "intersect12");
 
     // Sort by the edge column (`index`), then the other, exactly as the C++ stable_sort comparator.
     // Each (edge, face) pair is unique, so the key is total and the permutation is deterministic.
-    let index = if forward { 0 } else { 1 };
+    let index = if FORWARD { 0 } else { 1 };
     let mut order: Vec<usize> = (0..result.p1q2.len()).collect();
     order.sort_by(|&a, &b| {
         let ka = (result.p1q2[a][index], result.p1q2[a][1 - index]);
@@ -393,8 +407,23 @@ fn winding03(
     expand_p: bool,
     forward: bool,
 ) -> Vec<i32> {
-    let (a, b) = if forward { (in_p, in_q) } else { (in_q, in_p) };
-    let index = if forward { 0 } else { 1 };
+    // Same single dispatch as `intersect12` — the point-in-mesh sampling rides the same Kernel02.
+    match (expand_p, forward) {
+        (true, true) => winding03_impl::<true, true>(in_p, in_q, p1q2, b_collider),
+        (true, false) => winding03_impl::<true, false>(in_p, in_q, p1q2, b_collider),
+        (false, true) => winding03_impl::<false, true>(in_p, in_q, p1q2, b_collider),
+        (false, false) => winding03_impl::<false, false>(in_p, in_q, p1q2, b_collider),
+    }
+}
+
+fn winding03_impl<const EXPAND_P: bool, const FORWARD: bool>(
+    in_p: &Mesh,
+    in_q: &Mesh,
+    p1q2: &[[i32; 2]],
+    b_collider: &Collider,
+) -> Vec<i32> {
+    let (a, b) = if FORWARD { (in_p, in_q) } else { (in_q, in_p) };
+    let index = if FORWARD { 0 } else { 1 };
 
     // Union the endpoints of every intact (non-intersected) forward edge of `a`.
     let mut u_a = DisjointSets::new(a.num_vert());
@@ -427,7 +456,7 @@ fn winding03(
     // with `par` on). The per-rep contribution is scattered back afterward, no cross-thread write.
     let mut w03 = vec![0i32; a.num_vert()];
     let t = std::time::Instant::now();
-    let sign = if forward { 1 } else { -1 };
+    let sign = if FORWARD { 1 } else { -1 };
     let reps: Vec<usize> = (0..verts.len()).collect();
     let contrib: Vec<RepWinding> = crate::par::map_collect(&reps, |&i| {
         let vert = VertId::from_usize(verts[i]);
@@ -438,7 +467,7 @@ fn winding03(
             overlaps += 1;
             let tri = TriId::new(face);
             let edge_b = load_face_edges(b, tri);
-            let (s02, z02) = kernel02(vert, tri, &edge_b, a, b, expand_p, forward);
+            let (s02, z02) = kernel02::<EXPAND_P, FORWARD>(vert, tri, &edge_b, a, b);
             if z02.is_finite() {
                 winding += s02 * sign;
             }
@@ -450,7 +479,7 @@ fn winding03(
         n_pairs += rw.overlaps;
         w03[verts[i]] = rw.winding; // each rep is a distinct root vert → assignment, not accumulation
     }
-    tracing::debug!(target: "manifold::boolean", forward, ms = t.elapsed().as_millis() as u64, cand_pairs = n_pairs, reps = verts.len(), "winding03");
+    tracing::debug!(target: "manifold::boolean", forward = FORWARD, ms = t.elapsed().as_millis() as u64, cand_pairs = n_pairs, reps = verts.len(), "winding03");
 
     // Flood the representative's winding to the rest of its component.
     for i in 0..a.num_vert() {

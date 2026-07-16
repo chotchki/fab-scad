@@ -26,6 +26,26 @@ use crate::mesh_ids::{HalfedgeId, TriId, VertId};
 /// The sentinel Morton code for a removed vert/tri (`sort.cpp` `kNoCode`) — all-ones sorts them last.
 pub(crate) const K_NO_CODE: u32 = 0xFFFF_FFFF;
 
+/// C++ gates every sort.cpp gather/scatter pass at `autoPolicy(n, 1e5)` (`parallel.h` `gather`,
+/// `ReindexVerts`/`GatherFaces` for_each_n) — 10× the seam's uniform 1e4, and measurement agrees:
+/// these passes are memory-bound copies with ~zero compute per element, so rayon's fork-join tax
+/// loses below ~1e5 (sphere128's 39k-halfedge remap par-costs ~+0.3ms, self_intersect's 33k tri
+/// gathers similar). Site-local gate, NOT a seam change: below it we run the seam's serial
+/// construction verbatim, and since seam-par == seam-serial bit-for-bit by construction, the gate
+/// moves only the crossover — it cannot move a byte. The Morton STABLE SORTS stay on the seam's
+/// 1e4 gate (C++ `stable_sort` default policy, sort.cpp:279/:425 — exact parity).
+const GATHER_SEQ_THRESHOLD: usize = 100_000;
+
+/// `Permute`-shaped gather (`utils.h` `Permute` → `parallel.h` `gather`): `out[i] = items[new2old[i]]`,
+/// parallel above [`GATHER_SEQ_THRESHOLD`] elements. Order-preserving pure gather ⇒ par == serial.
+fn gather<T: Copy + Send + Sync>(new2old: &[usize], items: &[T]) -> Vec<T> {
+    if new2old.len() > GATHER_SEQ_THRESHOLD {
+        crate::par::map_collect(new2old, |&old| items[old])
+    } else {
+        new2old.iter().map(|&old| items[old]).collect()
+    }
+}
+
 /// Interleave the low 10 bits of `v` with two zero bits each (`collider.h` `SpreadBits3`) — the bit
 /// magic that builds a Z-order (Morton) code. Verbatim; `wrapping_mul` matches the C++ `uint32_t`
 /// overflow.
@@ -120,22 +140,28 @@ impl Mesh {
 
         // new -> old permutation, sorted by Morton code with the ORIGINAL INDEX as a total-order
         // tiebreak (M.4.2). Distinct verts sharing a 30-bit-quantized Morton code would otherwise tie,
-        // and THIS is the canonical order fed to chained booleans — so the tiebreak must be explicit, not
-        // an implicit reliance on stable-sort, before this can become a parallel (unstable) sort. It's a
-        // no-op on the current output (stable-sort already breaks ties by ascending index).
+        // and THIS is the canonical order fed to chained booleans — so the tiebreak stays explicit even
+        // though the seam sort is STABLE both lanes (a total order can't diverge regardless of
+        // stability). C++ parallel stable_sort ≥1e4 (sort.cpp `SortVerts`).
         let mut new2old: Vec<usize> = (0..num_vert).collect();
-        new2old.sort_by(|&a, &b| vert_morton[a].cmp(&vert_morton[b]).then(a.cmp(&b)));
+        crate::par::sort_by(&mut new2old, |&a, &b| {
+            vert_morton[a].cmp(&vert_morton[b]).then(a.cmp(&b))
+        });
 
-        // old -> new (the halfedge remap).
+        // old -> new (the halfedge remap). SERIAL on purpose: the inverse-permutation scatter's write
+        // target is data-dependent (`old2new[new2old[new]] = new`), which the seam's fill-slot-i-from-i
+        // shape can't express — and it's a memory-bound usize pass, trivial next to the sort.
         let mut old2new = vec![0usize; num_vert];
         for (new, &old) in new2old.iter().enumerate() {
             old2new[old] = new;
         }
         // With extra properties, prop-verts are a SEPARATE space (already compacted by `compact_props`);
         // only reindex `prop_vert` off the geometric remap in the position-only 1:1 case (C++
-        // `ReindexVerts`'s `if (!hasProp) SetProp(idx, newStart)`).
+        // `ReindexVerts`'s `if (!hasProp) SetProp(idx, newStart)`). Each half-edge slot is rewritten
+        // from its OWN old value plus the read-only `old2new` — disjoint writes by construction, so it
+        // maps through the deterministic scatter above the C++ 1e5 cutoff (`ReindexVerts` for_each_n).
         let has_prop = self.num_prop > 0;
-        for h in &mut self.halfedge {
+        let remap = |h: &mut Halfedge| {
             if h.start_vert.is_some() {
                 let ns = VertId::from_usize(old2new[h.start_vert.u()]);
                 h.start_vert = ns;
@@ -143,6 +169,11 @@ impl Mesh {
                     h.prop_vert = ns;
                 }
             }
+        };
+        if self.halfedge.len() > GATHER_SEQ_THRESHOLD {
+            crate::par::for_each_mut(&mut self.halfedge, |_, h| remap(h));
+        } else {
+            self.halfedge.iter_mut().for_each(remap);
         }
 
         // NaN verts got kNoCode and sorted to the end — keep only the real prefix.
@@ -150,15 +181,9 @@ impl Mesh {
             .iter()
             .take_while(|&&old| vert_morton[old] != K_NO_CODE)
             .count();
-        self.vert_pos = new2old[..keep]
-            .iter()
-            .map(|&old| self.vert_pos[old])
-            .collect();
+        self.vert_pos = gather(&new2old[..keep], &self.vert_pos);
         if self.vert_normal.len() == num_vert {
-            self.vert_normal = new2old[..keep]
-                .iter()
-                .map(|&old| self.vert_normal[old])
-                .collect();
+            self.vert_normal = gather(&new2old[..keep], &self.vert_normal);
         }
     }
 
@@ -172,7 +197,7 @@ impl Mesh {
         let face_morton: Vec<u32> = {
             let this = &*self;
             let bbox = this.b_box;
-            crate::par::map_collect(&(0..old_num_tri).collect::<Vec<_>>(), |&face| {
+            crate::par::map_range(old_num_tri, |face| {
                 let t = TriId::from_usize(face);
                 // A removed tri has an unpaired first half-edge — leave it at kNoCode to sort last.
                 if this.pair(t.first_halfedge()).is_none() {
@@ -186,9 +211,12 @@ impl Mesh {
             })
         };
 
-        // Original-index tiebreak for total order (M.4.2) — same rationale as `sort_verts`.
+        // Original-index tiebreak for total order (M.4.2) — same rationale as `sort_verts`. Seam sort
+        // is STABLE both lanes; C++ parallel stable_sort ≥1e4 (sort.cpp `SortFaces`).
         let mut new2old: Vec<usize> = (0..old_num_tri).collect();
-        new2old.sort_by(|&a, &b| face_morton[a].cmp(&face_morton[b]).then(a.cmp(&b)));
+        crate::par::sort_by(&mut new2old, |&a, &b| {
+            face_morton[a].cmp(&face_morton[b]).then(a.cmp(&b))
+        });
         let keep = new2old
             .iter()
             .take_while(|&&old| face_morton[old] != K_NO_CODE)
@@ -204,42 +232,44 @@ impl Mesh {
     fn gather_faces(&mut self, new2old: &[usize], old_num_tri: usize) {
         let num_tri = new2old.len();
 
+        // Pure gathers (`utils.h` `Permute`), parallel above the C++ 1e5 cutoff via [`gather`].
         if self.tri_ref.len() == old_num_tri {
-            self.tri_ref = new2old.iter().map(|&old| self.tri_ref[old]).collect();
+            self.tri_ref = gather(new2old, &self.tri_ref);
         }
         if self.face_normal.len() == old_num_tri {
-            self.face_normal = new2old.iter().map(|&old| self.face_normal[old]).collect();
+            self.face_normal = gather(new2old, &self.face_normal);
         }
 
+        // SERIAL on purpose: inverse-permutation scatter (`old2new[new2old[new]] = new`) has a
+        // data-dependent write target the seam's fill-slot-i-from-i shape can't express; memory-bound
+        // usize pass, trivial next to the remap below.
         let mut old2new = vec![0usize; old_num_tri];
         for (new, &old) in new2old.iter().enumerate() {
             old2new[old] = new;
         }
 
+        // Each new half-edge slot `j` is a pure function of `j` + read-only inputs (old halfedges,
+        // both permutations) — output[j] = f(j) through the order-preserving seam above the C++ 1e5
+        // cutoff (`GatherFaces`'s `ReindexFace` for_each_n), with no placeholder fill; the serial
+        // branch is the identical collect.
         let old_halfedge = std::mem::take(&mut self.halfedge);
-        let mut new_he = vec![
+        let rebuild = |j: usize| {
+            let new_face = j / 3;
+            let i = j - 3 * new_face;
+            let edge = old_halfedge[3 * new2old[new_face] + i];
+            let paired_face = edge.paired_halfedge.u() / 3;
+            let offset = edge.paired_halfedge.u() - 3 * paired_face;
             Halfedge {
-                start_vert: VertId::NONE,
-                paired_halfedge: HalfedgeId::NONE,
-                prop_vert: VertId::NONE,
-            };
-            3 * num_tri
-        ];
-        for new_face in 0..num_tri {
-            let old_face = new2old[new_face];
-            for i in 0..3 {
-                let edge = old_halfedge[3 * old_face + i];
-                let paired_face = edge.paired_halfedge.u() / 3;
-                let offset = edge.paired_halfedge.u() - 3 * paired_face;
-                let new_pair = 3 * old2new[paired_face] + offset;
-                new_he[3 * new_face + i] = Halfedge {
-                    start_vert: edge.start_vert,
-                    paired_halfedge: HalfedgeId::from_usize(new_pair),
-                    prop_vert: edge.prop_vert,
-                };
+                start_vert: edge.start_vert,
+                paired_halfedge: HalfedgeId::from_usize(3 * old2new[paired_face] + offset),
+                prop_vert: edge.prop_vert,
             }
-        }
-        self.halfedge = new_he;
+        };
+        self.halfedge = if 3 * num_tri > GATHER_SEQ_THRESHOLD {
+            crate::par::map_range(3 * num_tri, rebuild)
+        } else {
+            (0..3 * num_tri).map(rebuild).collect()
+        };
     }
 }
 

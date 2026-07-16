@@ -58,8 +58,7 @@ pub mod sort;
 // `status_` field. See the module doc for why the flattening dissolves that pattern.
 pub mod status;
 
-/// The C++ Manifold differential oracle (Oracle A) — a `KernelDriver` trait with a Rust and a C++
-/// backend, plus the triangulation-independent boolean-residual metric. Scaffolds R0..R.X; gone at
-/// R.X. Native-only (needs the C++ toolchain), so it's behind BOTH the feature and a non-wasm cfg.
-#[cfg(all(feature = "oracle", not(target_arch = "wasm32")))]
-pub mod oracle;
+// The C++ Manifold differential oracle (Oracle A) lived here R0..M.7.3 — a `KernelDriver` A/B
+// harness over manifold3d that gated every port stage. CUT at M.7.4 (the finish line): the frozen
+// goldens (`goldens/`, tests/m7_golden_mode.rs) + the M.6 cross-lane corpus carry the correctness
+// memory; the OpenSCAD-binary differential (fab-scad differ) remains as the external oracle.

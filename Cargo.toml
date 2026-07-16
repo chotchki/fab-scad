@@ -70,7 +70,6 @@ kernel = [
     "geometry",
     "mesh-io",
     "dep:fab-manifold",
-    "dep:manifold3d",
     "dep:threemf",
     "dep:quick-xml",
     "dep:usvg",
@@ -137,14 +136,11 @@ tracing-subscriber = { version = "0.3", default-features = false, features = ["r
 # The kernel per target (18.4): native gets the default `parallel` (TBB); wasm32 swaps to the
 # provisional `unstable-wasm-uu` backend (C++ via wasm-cxx-shim, single-threaded, no exceptions).
 # Same crate, same API — kernel.rs doesn't know which it got.
+# OUR Manifold port (Phase M) — the kernel backend since M.7.3 (the C++ manifold3d bindings were
+# CUT at M.7.4). Parallel on native; serial on wasm by default (the gui's threaded build opts into
+# `par` itself).
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-manifold3d = { version = "0.3.1", optional = true }
-# OUR Manifold port (Phase M) — the kernel backend since M.7.3. Parallel on native.
 fab-manifold = { path = "manifold", optional = true, features = ["par"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-manifold3d = { version = "0.3.1", optional = true, default-features = false, features = [
-    "unstable-wasm-uu",
-] }
-# Pure Rust — serial on wasm by default (the gui's threaded build opts into `par` itself).
 fab-manifold = { path = "manifold", optional = true }

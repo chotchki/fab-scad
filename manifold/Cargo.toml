@@ -32,9 +32,6 @@ default = []
 # before any kernel call; the page needs COOP/COEP (cross-origin isolation). wasm32-wasip1 — the
 # wasmtime test lane — stays serial regardless (see build.rs `par_live`).
 par = ["dep:rayon", "dep:wasm-bindgen-rayon"]
-# The C++ Manifold DIFFERENTIAL ORACLE (the R0..R.X scaffold). Links manifold3d for the KernelDriver's
-# CppKernel; OFF by default, and DROPPED at R.X (the finish line). Native-only (needs the C++ toolchain).
-oracle = ["dep:manifold3d"]
 
 [dependencies.rayon]
 version = "1"
@@ -44,10 +41,6 @@ optional = true
 # native never sees it; `dep:` activation is a no-op off-target.
 [target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies.wasm-bindgen-rayon]
 version = "1.3"
-optional = true
-
-[dependencies.manifold3d]
-version = "0.3.1"
 optional = true
 
 [dev-dependencies]

@@ -1,7 +1,8 @@
 //! M.7.2 — the golden FREEZE + the golden-mode lane (the correctness memory that outlives the C++).
 //!
 //! Two halves in one file so the schema lives once:
-//! - `freeze_oracle_goldens` (oracle feature, `#[ignore]`): captures the C++ reference metrics per
+//! - `freeze_oracle_goldens` (CUT at M.7.4 with the C++; see the freeze HISTORY marker below):
+//!   captured the C++ reference metrics per
 //!   corpus case × op into `goldens/oracle_goldens.json`, alongside the FINGERPRINT of our own
 //!   output; also freezes the C++-generated inputs (spheres/cylinder) as `goldens/inputs/*.bin`.
 //!   Byte-idempotent when nothing changed.
@@ -53,8 +54,8 @@ struct CorpusCase {
     a: MeshGl,
     b: MeshGl,
     op: OpType,
-    /// Consumed by the oracle-gated freeze only (golden_mode reads the FROZEN flag instead).
-    #[cfg_attr(not(feature = "oracle"), allow(dead_code))]
+    /// Was consumed by the (cut) oracle freeze; golden_mode reads the FROZEN flag instead.
+    #[allow(dead_code)]
     genus_checked: bool,
 }
 
@@ -181,7 +182,7 @@ fn load_obj(path: &Path) -> MeshGl {
 
 /// `FMGL` little-endian MeshGL dump: magic, u32 num_prop, u64 n_prop_f64s, f64s, u64 n_tri_u32s,
 /// u32s. Byte-exact both ways. (Writer is freeze-side only.)
-#[cfg_attr(not(feature = "oracle"), allow(dead_code))]
+#[allow(dead_code)]
 fn write_mesh_bin(path: &Path, m: &MeshGl) {
     let mut out: Vec<u8> = b"FMGL".to_vec();
     out.extend_from_slice(&(m.num_prop as u32).to_le_bytes());
@@ -242,70 +243,11 @@ fn shifted(gl: &MeshGl, dx: f64, dy: f64, dz: f64) -> MeshGl {
     out
 }
 
-// ── the freeze (oracle feature, pre-cut only) ───────────────────────────────────────────────────
-
-#[cfg(feature = "oracle")]
-#[test]
-#[ignore = "the M.7.2 capture — run explicitly pre-cut: --features oracle --test m7_golden_mode freeze -- --ignored"]
-fn freeze_oracle_goldens() {
-    use fab_manifold::oracle::{CppKernel, KernelDriver, cpp_to_mesh_gl};
-
-    let dir = goldens_dir();
-    std::fs::create_dir_all(dir.join("inputs")).unwrap();
-
-    // Freeze the C++-GENERATED inputs first (the corpus reads them back).
-    write_mesh_bin(
-        &dir.join("inputs/sphere64.bin"),
-        &cpp_to_mesh_gl(&manifold3d::Manifold::sphere(8.0, 64)),
-    );
-    write_mesh_bin(
-        &dir.join("inputs/sphere128.bin"),
-        &cpp_to_mesh_gl(&manifold3d::Manifold::sphere(8.0, 128)),
-    );
-    write_mesh_bin(
-        &dir.join("inputs/cylinder64.bin"),
-        &cpp_to_mesh_gl(&manifold3d::Manifold::cylinder(10.0, 5.0, 5.0, 64, true)),
-    );
-
-    let mut cases = Vec::new();
-    for c in corpus() {
-        let ca = CppKernel::ingest(&c.a).unwrap();
-        let cb = CppKernel::ingest(&c.b).unwrap();
-        let cpp = match c.op {
-            OpType::Add => ca.union(&cb),
-            OpType::Subtract => ca.difference(&cb),
-            OpType::Intersect => ca.intersection(&cb),
-        };
-        let bb = CppKernel::bbox(&cpp);
-        let ours = run_ours(&c);
-        cases.push(GoldenCase {
-            name: c.name.clone(),
-            cpp_volume_bits: CppKernel::volume(&cpp).to_bits(),
-            cpp_area_bits: CppKernel::surface_area(&cpp).to_bits(),
-            cpp_genus: CppKernel::genus(&cpp),
-            cpp_bbox_bits: [
-                bb.min.x.to_bits(),
-                bb.min.y.to_bits(),
-                bb.min.z.to_bits(),
-                bb.max.x.to_bits(),
-                bb.max.y.to_bits(),
-                bb.max.z.to_bits(),
-            ],
-            genus_checked: c.genus_checked,
-            ours_fingerprint: golden::mesh(&ours),
-        });
-        eprintln!("froze: {}", c.name);
-    }
-
-    let json = serde_json::to_string_pretty(&Goldens { schema: 1, cases }).unwrap();
-    let path = dir.join("oracle_goldens.json");
-    if std::fs::read_to_string(&path).ok().as_deref() != Some(json.as_str()) {
-        std::fs::write(&path, json).unwrap();
-        eprintln!("oracle_goldens.json written");
-    } else {
-        eprintln!("oracle_goldens.json unchanged (idempotent)");
-    }
-}
+// ── the freeze (HISTORY) ───────────────────────────────────────────────────────────────────────
+// `freeze_oracle_goldens` lived here until M.7.4 — an oracle-feature #[ignore]d capture that wrote
+// goldens/inputs/*.bin (C++-generated meshes) + oracle_goldens.json (the C++ reference metrics,
+// bit-recorded, per corpus case × op). The C++ is CUT; the frozen files are the correctness memory.
+// To re-freeze against a future reference, resurrect it from git history (pre-M.7.4).
 
 // ── golden mode (default features — what survives the cut) ──────────────────────────────────────
 

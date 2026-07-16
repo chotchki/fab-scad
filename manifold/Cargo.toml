@@ -51,6 +51,11 @@ version = "0.3.1"
 optional = true
 
 [dev-dependencies]
+# M.7.2 — the golden freeze's serialization (oracle_goldens.json). Dev-only: the shipping lib never
+# serializes; capture + golden-mode are tests.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
 # Test-time tracing subscriber (RUST_LOG-driven) so the differential debug harness can surface per-stage
 # collapse counts + fold divergence without hand-edited eprintln.
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "env-filter", "std"] }

@@ -42,3 +42,6 @@ spikes/wasm-gui/web/*
 
 # fab-gui live-editor preview temp (U.3.2) — written beside the edited .scad, transient
 .fab-preview-*.scad
+
+# BU.6 perf harness: local per-run artifacts (the committed anchor is perf/baseline.json)
+/perf/runs/

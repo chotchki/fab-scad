@@ -11,6 +11,13 @@ Driven by `claude-plan-bridge` (FORMATv2). Hand-authored; run
 `claude-plan-bridge baseline` after a rewrite to resync the state file.
 -->
 ## Phase BT - U.2 Nudge flash — per-row confirmation flash on value change
+## Phase BU - Big-boolean kernel perf: close the heavy-mesh gap vs C++ (the M.7.1 tail — wall-total 0.96×)
+- [ ] BU.1 - Re-baseline the kernel gap: M.7.1 harness in a pre-cut worktree (e179088d) — fresh Rust(serial+par) vs C++(TBB) per-op ratios incl. million-tri booleans; name the worst cases
+- [ ] BU.2 - Profile the worst cases on the current tree (samply, release+debuginfo): wall time attributed per boolean pipeline stage (collider broad-phase, intersections/winding, result assembly, face2tri, simplify) + hot-function report
+- [ ] BU.3 - Parallel-coverage + algorithm map: every C++ TBB/par_for site in boolean3/boolean_result/collider vs our par:: seam; algorithmic deltas in the hot stages
+- [ ] BU.4 - Fix the top bottlenecks profile-first, byte-golden-gated: M.6 cross-lane + m7 golden-mode stay bit-identical, determinism doctrine holds (serial == par == wasm)
+- [ ] BU.5 - Re-measure: kernel per-op ratios + the K.1.2 models sweep; exit = wall-total ≥1× vs OpenSCAD and the outlet inside its budget
+- [ ] BU.6 - PERSISTENT perf harness: models-tree fab-vs-OpenSCAD sweep as a rerunnable, artifact-writing harness (per-run JSON + committed baseline + delta report vs baseline) + the kernel-level boolean_perf driver
 ## Phase I - scad-rs: evaluator core
   Meta - Cranelift is the NATIVE JIT rung (chotchki's find: VERY approachable, and it's determinism-friendly — no auto-FMA, transcendentals stay CALLS to our own math, so the fixed-accumulation doctrine survives). NOT a replacement for the interpreter: the wasm/browser target can't JIT in-sandbox (the bet's #1 differentiator needs ONE implementation everywhere), and the interpreter is the bit-identical baseline the JIT validates against (fast==slow extends to fast==JIT). Spiked at I.8 (one hot function, prove bit-identical); the JIT-vs-intrinsics PROMOTE decision lands at Phase L with data.
 added 2026-07-06.

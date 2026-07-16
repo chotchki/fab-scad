@@ -28,7 +28,7 @@
     reason = "integration harness: unwrap/expect ARE the assertions"
 )]
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -287,16 +287,126 @@ fn parse_worker_line(line: &str) -> Outcome {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────────────────
+// BU.6 — the PERSISTENT perf artifact: every sweep writes a run JSON, diffs against the committed
+// baseline, and can freeze itself AS the new baseline. The trend line lives in git, not in scrollback.
+// ─────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+/// One model's timing row. `ms` is `Some` only when that side RENDERED inside the budget; `kind`
+/// keeps the terminal state either way (solid/empty/rejected/TIMEOUT) so status TRANSITIONS diff too.
+#[derive(serde::Serialize, serde::Deserialize, Clone)]
+struct PerfRow {
+    model: String,
+    fab_ms: Option<u64>,
+    fab_kind: String,
+    oracle_ms: Option<u64>,
+    oracle_kind: String,
+}
+
+/// A whole sweep, as written to `perf/runs/run-<epoch>.json` (local, gitignored) and
+/// `perf/baseline.json` (committed — the anchor every later run reports against).
+#[derive(serde::Serialize, serde::Deserialize)]
+struct PerfRun {
+    schema: u32,
+    captured_epoch_s: u64,
+    budget_s: u64,
+    rows: Vec<PerfRow>,
+}
+
+/// The common-set aggregates: (both-rendered count, fab total ms, oracle total ms, median o/f ratio).
+fn perf_aggregates(rows: &[PerfRow]) -> (usize, u64, u64, f64) {
+    let mut ratios: Vec<f64> = Vec::new();
+    let (mut fab_total, mut orc_total, mut both) = (0u64, 0u64, 0usize);
+    for r in rows {
+        if let (Some(f), Some(o)) = (r.fab_ms, r.oracle_ms) {
+            both += 1;
+            fab_total += f;
+            orc_total += o;
+            ratios.push(o as f64 / (f as f64).max(1.0));
+        }
+    }
+    ratios.sort_by(f64::total_cmp);
+    let median = if ratios.is_empty() {
+        f64::NAN
+    } else {
+        ratios[ratios.len() / 2]
+    };
+    (both, fab_total, orc_total, median)
+}
+
+/// The delta report. Status TRANSITIONS always print; a fab-side timing move prints past the noise
+/// gate (|Δ| ≥ 100ms AND ≥ 20%). Per-model ORACLE timing moves stay out on purpose — OpenSCAD is
+/// run-to-run nondeterministic under TBB, so only its aggregate is worth reading.
+fn print_perf_delta(base: &PerfRun, run: &PerfRun) {
+    let by_model: BTreeMap<&str, &PerfRow> =
+        base.rows.iter().map(|r| (r.model.as_str(), r)).collect();
+    eprintln!(
+        "\n=== delta vs baseline (epoch {}) ===",
+        base.captured_epoch_s
+    );
+    let mut moves = 0usize;
+    for now in &run.rows {
+        let Some(then) = by_model.get(now.model.as_str()) else {
+            eprintln!("  NEW  {}", now.model);
+            moves += 1;
+            continue;
+        };
+        if then.fab_kind != now.fab_kind || then.oracle_kind != now.oracle_kind {
+            eprintln!(
+                "  {}: fab {} → {} | oracle {} → {}",
+                now.model, then.fab_kind, now.fab_kind, then.oracle_kind, now.oracle_kind
+            );
+            moves += 1;
+            continue;
+        }
+        if let (Some(a), Some(b)) = (then.fab_ms, now.fab_ms) {
+            let d = b as i64 - a as i64;
+            if d.unsigned_abs() >= 100 && d.unsigned_abs() as f64 >= 0.2 * a as f64 {
+                eprintln!(
+                    "  {}: fab {a}ms → {b}ms ({:+}%)",
+                    now.model,
+                    100 * d / (a.max(1) as i64)
+                );
+                moves += 1;
+            }
+        }
+    }
+    let now_names: BTreeSet<&str> = run.rows.iter().map(|r| r.model.as_str()).collect();
+    for r in &base.rows {
+        if !now_names.contains(r.model.as_str()) {
+            eprintln!("  GONE {}", r.model);
+            moves += 1;
+        }
+    }
+    if moves == 0 {
+        eprintln!("  (no per-model moves past the noise gate)");
+    }
+    let (b_both, b_fab, b_orc, b_med) = perf_aggregates(&base.rows);
+    let (n_both, n_fab, n_orc, n_med) = perf_aggregates(&run.rows);
+    eprintln!(
+        "  aggregate: both {b_both}→{n_both} | fab wall {:.1}s→{:.1}s | oracle wall {:.1}s→{:.1}s | median o/f {b_med:.2}×→{n_med:.2}×",
+        b_fab as f64 / 1e3,
+        n_fab as f64 / 1e3,
+        b_orc as f64 / 1e3,
+        n_orc as f64 / 1e3,
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────────────────
 // The harness.
 // ─────────────────────────────────────────────────────────────────────────────────────────────────────────
 
-/// K.1.2 — full-PIPELINE wall time, fab-scad vs OpenSCAD, over the real `models/` tree. Each side
-/// runs its complete file→Solid path via the differ's own `Driver::eval_file` (ours: resolve +
+/// K.1.2 / BU.6 — full-PIPELINE wall time, fab-scad vs OpenSCAD, over the real `models/` tree. Each
+/// side runs its complete file→Solid path via the differ's own `Driver::eval_file` (ours: resolve +
 /// evaluate + kernel build; oracle: spawn OpenSCAD, render, re-import) — the same code the
 /// correctness differential trusts, now timed. Serial on purpose (no contention noise); one timed
 /// pass per side per model (this is a shape-of-the-landscape sweep, not a microbenchmark). A side
 /// that errors or blows the budget is listed but excluded from ratios; an in-process timeout leaks
 /// its eval thread until exit (the compare_one precedent) — acceptable for a perf lane.
+///
+/// PERSISTENT since BU.6: every run writes `perf/runs/run-<epoch>.json` (gitignored) and prints a
+/// delta report against the committed `perf/baseline.json` (status transitions + fab-side moves past
+/// the 100ms/20% noise gate). `FAB_PERF_WRITE_BASELINE=1` freezes the run as the new baseline —
+/// commit that only on a QUIET machine and a deliberate anchor point (post-perf-phase, not mid-fix).
 ///
 ///   cargo test --release -p fab-scad --test models_harness -- --ignored --nocapture models_perf
 #[test]
@@ -325,11 +435,14 @@ fn models_perf_vs_openscad() {
         BUDGET.as_secs()
     );
 
-    // (model, per-driver: Some(ms) rendered | None err/timeout, kind label)
-    let mut rows: Vec<(String, Vec<(Option<u128>, &'static str)>)> = Vec::new();
+    let mut rows: Vec<PerfRow> = Vec::new();
     for path in &files {
-        let rel = path.strip_prefix(&manifest).unwrap_or(path).display().to_string();
-        let mut cells = Vec::new();
+        let rel = path
+            .strip_prefix(&manifest)
+            .unwrap_or(path)
+            .display()
+            .to_string();
+        let mut cells: Vec<(Option<u64>, &'static str)> = Vec::new();
         for d in &drivers {
             let model = path.clone();
             let libs = libs.clone();
@@ -357,34 +470,39 @@ fn models_perf_vs_openscad() {
                 .expect("spawn perf thread");
             let cell = match rx.recv_timeout(BUDGET) {
                 Ok("rejected") => (None, "rejected"),
-                Ok(k) => (Some(start.elapsed().as_millis()), k),
+                Ok(k) => (Some(start.elapsed().as_millis() as u64), k),
                 Err(_) => (None, "TIMEOUT"),
             };
             cells.push(cell);
         }
-        let show = |c: &(Option<u128>, &'static str)| match c.0 {
+        let show = |c: &(Option<u64>, &'static str)| match c.0 {
             Some(ms) => format!("{ms}ms"),
             None => c.1.to_string(),
         };
-        eprintln!("  {rel}: fab {} | oracle {}", show(&cells[0]), show(&cells[1]));
-        rows.push((rel, cells));
+        eprintln!(
+            "  {rel}: fab {} | oracle {}",
+            show(&cells[0]),
+            show(&cells[1])
+        );
+        rows.push(PerfRow {
+            model: rel,
+            fab_ms: cells[0].0,
+            fab_kind: cells[0].1.to_string(),
+            oracle_ms: cells[1].0,
+            oracle_kind: cells[1].1.to_string(),
+        });
     }
 
     // Aggregate over models BOTH sides rendered.
-    let mut ratios: Vec<f64> = Vec::new();
-    let (mut fab_total, mut orc_total) = (0u128, 0u128);
-    let mut both = 0usize;
-    for (_, cells) in &rows {
-        if let (Some(f), Some(o)) = (cells[0].0, cells[1].0) {
-            both += 1;
-            fab_total += f;
-            orc_total += o;
-            ratios.push(o as f64 / (f as f64).max(1.0));
-        }
-    }
-    ratios.sort_by(f64::total_cmp);
-    let fab_only_fail = rows.iter().filter(|(_, c)| c[0].0.is_none() && c[1].0.is_some()).count();
-    let orc_only_fail = rows.iter().filter(|(_, c)| c[0].0.is_some() && c[1].0.is_none()).count();
+    let (both, fab_total, orc_total, median) = perf_aggregates(&rows);
+    let fab_only_fail = rows
+        .iter()
+        .filter(|r| r.fab_ms.is_none() && r.oracle_ms.is_some())
+        .count();
+    let orc_only_fail = rows
+        .iter()
+        .filter(|r| r.fab_ms.is_some() && r.oracle_ms.is_none())
+        .count();
     eprintln!("\n=== K.1.2 summary ===");
     eprintln!("both rendered: {both}/{} models", rows.len());
     eprintln!("fab-scad failed/timed-out where OpenSCAD rendered: {fab_only_fail}");
@@ -396,7 +514,42 @@ fn models_perf_vs_openscad() {
             orc_total as f64 / 1e3,
             orc_total as f64 / fab_total as f64
         );
-        eprintln!("median per-model oracle/fab ratio: {:.2}×", ratios[ratios.len() / 2]);
+        eprintln!("median per-model oracle/fab ratio: {median:.2}×");
+    }
+
+    // ── BU.6: persist the run, diff against the committed baseline, optionally freeze ────────────
+    let run = PerfRun {
+        schema: 1,
+        captured_epoch_s: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs(),
+        budget_s: BUDGET.as_secs(),
+        rows,
+    };
+    let perf_dir = manifest.join("perf");
+    let runs_dir = perf_dir.join("runs");
+    std::fs::create_dir_all(&runs_dir).unwrap();
+    let run_path = runs_dir.join(format!("run-{}.json", run.captured_epoch_s));
+    std::fs::write(&run_path, serde_json::to_string_pretty(&run).unwrap()).unwrap();
+    eprintln!("\nrun written: {}", run_path.display());
+
+    let baseline_path = perf_dir.join("baseline.json");
+    match std::fs::read_to_string(&baseline_path) {
+        Ok(text) => {
+            let base: serde_json::Result<PerfRun> = serde_json::from_str(&text);
+            match base {
+                Ok(base) => print_perf_delta(&base, &run),
+                Err(e) => eprintln!("perf/baseline.json unreadable ({e}) — refreeze it"),
+            }
+        }
+        Err(_) => {
+            eprintln!("no perf/baseline.json — rerun with FAB_PERF_WRITE_BASELINE=1 to freeze one")
+        }
+    }
+    if std::env::var_os("FAB_PERF_WRITE_BASELINE").is_some_and(|v| v == "1") {
+        std::fs::write(&baseline_path, serde_json::to_string_pretty(&run).unwrap()).unwrap();
+        eprintln!("baseline frozen: {}", baseline_path.display());
     }
 }
 

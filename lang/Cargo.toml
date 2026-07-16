@@ -18,6 +18,8 @@ default = []
 trace = ["winnow/debug"]
 
 [dependencies]
+# M.0.2.1 — the shared geometry vocabulary (one Vec3 across lang + kernel; see types/).
+fab-types = { path = "../types" }
 # The parser-combinator engine (hand-written lexer + parser). Latest major; winnow 1.0.x is
 # already in the workspace tree via toml_edit, and toml/toml_edit are native-only so this adds
 # no wasm bloat. The `debug` feature (parser trace tree) rides the crate `trace` feature above.

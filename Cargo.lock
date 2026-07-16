@@ -2900,6 +2900,7 @@ dependencies = [
 name = "fab-lang"
 version = "0.1.0"
 dependencies = [
+ "fab-types",
  "proptest",
  "rustybuzz",
  "thiserror 2.0.18",
@@ -2912,6 +2913,7 @@ dependencies = [
 name = "fab-manifold"
 version = "0.1.0"
 dependencies = [
+ "fab-types",
  "i_overlay",
  "libm",
  "manifold3d",
@@ -2944,6 +2946,10 @@ dependencies = [
  "usvg",
  "zip",
 ]
+
+[[package]]
+name = "fab-types"
+version = "0.1.0"
 
 [[package]]
 name = "fab-web"

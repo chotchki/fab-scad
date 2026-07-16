@@ -13,7 +13,7 @@ use fab_manifold::boolean::OpType;
 use fab_manifold::boolean::boolean_result::boolean;
 use fab_manifold::cross_section::{CrossSection, FillRule, JoinType};
 use fab_manifold::golden;
-use fab_manifold::linalg::{Mat3x4, Vec2, Vec3};
+use fab_manifold::linalg::{Mat3x4, Vec2, Vec3, rotate_xyz_degrees};
 use fab_manifold::mesh::Mesh;
 use fab_manifold::{mathf, par};
 
@@ -111,7 +111,7 @@ fn m6_full_surface_golden() {
 
         let mut acc = cube_at(0.0, 0.0, 0.0);
         for (i, &(x, y, z)) in offsets.iter().enumerate() {
-            let m = Mat3x4::rotate(10.0 + 7.0 * i as f64, 3.0 * i as f64, 17.0 * i as f64);
+            let m = rotate_xyz_degrees(10.0 + 7.0 * i as f64, 3.0 * i as f64, 17.0 * i as f64);
             let c = cube_at(x, y, z).transform(m).unwrap();
             acc = prepared_union(&acc, &c);
         }
@@ -126,7 +126,7 @@ fn m6_full_surface_golden() {
 
     // 4. Transforms: a mirrored composite (det < 0 → flip_tris) on a boolean output.
     {
-        let m = Mat3x4::rotate(30.0, 45.0, 60.0);
+        let m = rotate_xyz_degrees(30.0, 45.0, 60.0);
         let mirrored = Mat3x4::scale(Vec3::new(-1.0, 1.0, 1.0));
         let t = boolean(&a, &cube_at(0.5, 0.5, 0.5), OpType::Add)
             .transform(m)

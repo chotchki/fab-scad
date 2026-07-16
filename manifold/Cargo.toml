@@ -15,6 +15,9 @@ tracing = "0.1"
 # Typed geometry errors (`status::Error`). The eager ops surface failure as `Result`, NOT the C++
 # lazy-CSG `status_` field — see `status.rs`. Workspace already standardises on `thiserror` v2.
 thiserror = "2"
+# M.0.2.1 — the shared geometry vocabulary (linalg lifted out post-R6; see types/).
+fab-types = { path = "../types" }
+
 # R5 — the 2D boolean engine. Manifold's 2D IS Clipper2; we adopt i_overlay (pure-Rust, integer-coords ⇒
 # deterministic + wasm-clean) and validate by AREA-residual, NOT bit-match (SPEC [OPEN #4], M.5.0 spike).
 i_overlay = "7.0.2"

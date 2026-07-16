@@ -8,151 +8,42 @@
 //!
 //! `Rgba` (the `color()` model, BOSL2-critical) joins this vocabulary at J.2.8, wired to a real use.
 
-use std::ops::{Add, Index, Mul, Neg, Sub};
+use std::ops::Index;
 
-/// A 3D coordinate — a point or a vector (OpenSCAD doesn't distinguish).
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct Vec3 {
-    /// x coordinate.
-    pub x: f64,
-    /// y coordinate.
-    pub y: f64,
-    /// z coordinate.
-    pub z: f64,
-}
+// Vec2/Vec3 are the SHARED vocabulary since M.0.2.1 — re-exported from `fab-types` (the leaf crate
+// lifted out of fab-manifold's linalg once R0–R6 proved its op order bit-clean vs the C++ oracle).
+// One Vec3, no more duplicate — and the kernel no longer needs fab-lang for a vector.
+pub use fab_types::{Vec2, Vec3};
 
-impl Vec3 {
-    /// The origin / zero vector.
-    pub const ZERO: Vec3 = Vec3::new(0.0, 0.0, 0.0);
-
-    /// A coordinate from its components.
-    #[must_use]
-    pub const fn new(x: f64, y: f64, z: f64) -> Self {
-        Vec3 { x, y, z }
-    }
-
-    /// From an `[x, y, z]` array (the FFI / literal boundary).
-    #[must_use]
-    pub const fn from_array([x, y, z]: [f64; 3]) -> Self {
-        Vec3 { x, y, z }
-    }
-
-    /// To an `[x, y, z]` array (the FFI / export boundary).
-    #[must_use]
-    pub const fn to_array(self) -> [f64; 3] {
-        [self.x, self.y, self.z]
-    }
-
-    /// Dot product.
-    #[must_use]
-    pub fn dot(self, o: Self) -> f64 {
-        self.x * o.x + self.y * o.y + self.z * o.z
-    }
-
-    /// Cross product.
-    #[must_use]
-    pub fn cross(self, o: Self) -> Self {
-        Vec3::new(
-            self.y * o.z - self.z * o.y,
-            self.z * o.x - self.x * o.z,
-            self.x * o.y - self.y * o.x,
-        )
-    }
-
-    /// Euclidean length.
-    #[must_use]
-    pub fn length(self) -> f64 {
-        self.dot(self).sqrt()
-    }
-
+/// The EVALUATOR-dialect vector ops (M.0.2.1): semantics predating the fab-types unification,
+/// preserved bit-for-bit. The shared type's inherent `normalize` is the KERNEL's straight divide
+/// (validated vs the C++ oracle); THIS dialect guards near-zero (no NaN out) and multiplies by the
+/// reciprocal — different rounding AND different zero behavior, so it keeps a distinct name instead
+/// of being silently captured.
+pub trait VecExt {
     /// Unit vector in the same direction. A ~zero vector is returned unchanged (no NaN).
     #[must_use]
-    pub fn normalize(self) -> Vec3 {
+    fn normalize_or_self(self) -> Self;
+    /// Angle to `other` in DEGREES (`0..=180`). Zero-length inputs clamp cleanly. Platform-libm
+    /// `acos` — orientation heuristics, not differential-gated bits.
+    #[must_use]
+    fn angle_deg(self, other: Self) -> f64
+    where
+        Self: Sized;
+}
+
+impl VecExt for Vec3 {
+    fn normalize_or_self(self) -> Vec3 {
         let n = self.length();
         if n < 1e-12 { self } else { self * (1.0 / n) }
     }
 
-    /// Angle to `other` in DEGREES (`0..=180`). Zero-length inputs clamp cleanly.
-    #[must_use]
-    pub fn angle_deg(self, other: Vec3) -> f64 {
-        self.normalize()
-            .dot(other.normalize())
+    fn angle_deg(self, other: Vec3) -> f64 {
+        self.normalize_or_self()
+            .dot(other.normalize_or_self())
             .clamp(-1.0, 1.0)
             .acos()
             .to_degrees()
-    }
-}
-
-impl Add for Vec3 {
-    type Output = Vec3;
-    fn add(self, o: Vec3) -> Vec3 {
-        Vec3::new(self.x + o.x, self.y + o.y, self.z + o.z)
-    }
-}
-impl Sub for Vec3 {
-    type Output = Vec3;
-    fn sub(self, o: Vec3) -> Vec3 {
-        Vec3::new(self.x - o.x, self.y - o.y, self.z - o.z)
-    }
-}
-impl Mul<f64> for Vec3 {
-    type Output = Vec3;
-    /// Scale by a scalar.
-    fn mul(self, s: f64) -> Vec3 {
-        Vec3::new(self.x * s, self.y * s, self.z * s)
-    }
-}
-impl Neg for Vec3 {
-    type Output = Vec3;
-    fn neg(self) -> Vec3 {
-        Vec3::new(-self.x, -self.y, -self.z)
-    }
-}
-impl Index<usize> for Vec3 {
-    type Output = f64;
-    /// Component access: `0`→x, `1`→y, `2`→z. Panics out of range, like slice indexing.
-    #[allow(
-        clippy::panic,
-        reason = "an out-of-range component index is a bug — panics by contract, exactly as [f64; 3] does"
-    )]
-    fn index(&self, i: usize) -> &f64 {
-        match i {
-            0 => &self.x,
-            1 => &self.y,
-            2 => &self.z,
-            _ => panic!("Vec3 index {i} out of range (0..3)"),
-        }
-    }
-}
-
-/// A 2D coordinate — a point in the XY plane (the 2D subsystem's currency, J.3). A point OR a
-/// direction, same as [`Vec3`]: OpenSCAD conflates them. Contours (rings of these) build a
-/// [`Shape2D::Polygon`](crate::Shape2D).
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct Vec2 {
-    /// x coordinate.
-    pub x: f64,
-    /// y coordinate.
-    pub y: f64,
-}
-
-impl Vec2 {
-    /// A coordinate from its components.
-    #[must_use]
-    pub const fn new(x: f64, y: f64) -> Self {
-        Vec2 { x, y }
-    }
-
-    /// From an `[x, y]` array (the value / literal boundary).
-    #[must_use]
-    pub const fn from_array([x, y]: [f64; 2]) -> Self {
-        Vec2 { x, y }
-    }
-
-    /// To an `[x, y]` array (the FFI boundary — Manifold's `CrossSection` speaks `[f64; 2]`).
-    #[must_use]
-    pub const fn to_array(self) -> [f64; 2] {
-        [self.x, self.y]
     }
 }
 
@@ -469,7 +360,7 @@ fn byte(h: &str, i: usize) -> Option<u8> {
     reason = "exact vector/matrix arithmetic on literal inputs"
 )]
 mod tests {
-    use super::{Affine, Affine2, Dims, Rgba, Tri, Vec2, Vec3};
+    use super::{Affine, Affine2, Dims, Rgba, Tri, Vec2, Vec3, VecExt};
 
     #[test]
     fn vec2_ops() {
@@ -513,12 +404,18 @@ mod tests {
         );
         assert_eq!(Vec3::ZERO, Vec3::new(0.0, 0.0, 0.0));
         assert_eq!([a[0], a[1], a[2]], [1.0, 2.0, 3.0]); // Index<usize>
-        // normalize + angle_deg (ported from the old geom::V3 helpers).
+        // The TWO normalize dialects, side by side (M.0.2.1): the shared type's inherent
+        // `normalize` is the kernel's straight divide; the evaluator dialect keeps its zero-guard
+        // under its own name. The zero case is the visible difference.
         assert_eq!(
             Vec3::new(0.0, 0.0, 5.0).normalize(),
             Vec3::new(0.0, 0.0, 1.0)
         );
-        assert_eq!(Vec3::ZERO.normalize(), Vec3::ZERO); // ~zero → unchanged, no NaN
+        assert_eq!(Vec3::ZERO.normalize_or_self(), Vec3::ZERO); // ~zero → unchanged, no NaN
+        assert!(
+            Vec3::ZERO.normalize().x.is_nan(),
+            "kernel dialect: zero → NaN — the guard IS the dialect difference"
+        );
         assert!((Vec3::new(1.0, 0.0, 0.0).angle_deg(Vec3::new(0.0, 2.0, 0.0)) - 90.0).abs() < 1e-9);
         assert!(
             Vec3::new(1.0, 0.0, 0.0)

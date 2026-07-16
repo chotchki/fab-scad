@@ -4,6 +4,7 @@
 //! Pure triangle math, so `fab slice` and the GUI compute byte-identical picks.
 
 use fab_lang::Vec3;
+use fab_lang::VecExt;
 
 /// Overhang threshold: a face is unsupported if it points downward more than this from horizontal.
 /// Tunable like the slicer's gate; refine with a printed coupon.
@@ -41,7 +42,7 @@ pub fn candidates(cut_normals: &[Vec3]) -> Vec<Vec3> {
         Vec3::new(0.0, s, s),
         Vec3::new(0.0, -s, s),
     ];
-    c.extend(cut_normals.iter().map(|&n| n.normalize()));
+    c.extend(cut_normals.iter().map(|&n| n.normalize_or_self()));
     c
 }
 
@@ -55,7 +56,7 @@ fn tri_area(t: &[Vec3; 3]) -> f64 {
 /// bed-contact layer, or as contact if it rests within `BED_EPS` of the lowest point — so the flat
 /// bottom on the bed is NOT scored as the worst overhang (the trap the naive version falls into).
 fn areas(tris: &[[Vec3; 3]], up: Vec3) -> (f64, f64) {
-    let up = up.normalize();
+    let up = up.normalize_or_self();
     let cos_t = SUPPORT_ANGLE.to_radians().cos(); // 0.707 at 45°
     let z_min = tris
         .iter()
@@ -64,7 +65,7 @@ fn areas(tris: &[[Vec3; 3]], up: Vec3) -> (f64, f64) {
         .fold(f64::INFINITY, f64::min);
     let (mut overhang, mut contact) = (0.0, 0.0);
     for t in tris {
-        let normal = (t[1] - t[0]).cross(t[2] - t[0]).normalize();
+        let normal = (t[1] - t[0]).cross(t[2] - t[0]).normalize_or_self();
         if normal.dot(up) >= -cos_t {
             continue; // not a downward-facing face
         }
@@ -249,7 +250,7 @@ mod tests {
     #[test]
     fn cut_normals_are_candidates() {
         let cn = Vec3::new(0.123, 0.456, 0.789);
-        assert!(candidates(&[cn]).contains(&cn.normalize()));
+        assert!(candidates(&[cn]).contains(&cn.normalize_or_self()));
     }
 
     // A closed box `w × d × h` at the origin, 12 tris, outward normals.

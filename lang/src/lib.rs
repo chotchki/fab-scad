@@ -56,7 +56,7 @@ pub use eval::{
     RangeIter, Resolution, Scope, Shape2D, SourceNeed, Value, bench_intrinsic, eval_expr,
     eval_program, evaluate_geometry_metered, fragments, interpret_fn, range_iter, range_len,
 };
-pub use geom::{Affine, Affine2, Dims, Rgba, Tri, Vec2, Vec3};
+pub use geom::{Affine, Affine2, Dims, Rgba, Tri, Vec2, Vec3, VecExt};
 pub use lexer::{Lexed, Token, TokenKind, decode_str, lex, num_value};
 pub use mesh::Mesh;
 pub use parser::{

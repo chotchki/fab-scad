@@ -3,6 +3,7 @@
 //! lives in `slice_cmd`. This is the GUI ↔ fab contract: the GUI edits the spec, this
 //! reproduces the same SCAD headlessly, so preview and `fab slice` are one path.
 
+use fab_lang::VecExt;
 #[cfg(feature = "native")]
 use std::path::{Path, PathBuf};
 #[cfg(feature = "native")]
@@ -713,8 +714,8 @@ pub fn slice_solid(s: &Slicing, base: &Solid) -> Result<Vec<([usize; 3], Solid)>
                             cl, *through, cb_d, cb_h, ins_d, ins_h, SEG, teardrop,
                         );
                         let oriented = if teardrop {
-                            let zc = axis.normalize();
-                            let yc = peak.normalize();
+                            let zc = axis.normalize_or_self();
+                            let yc = peak.normalize_or_self();
                             let xc = yc.cross(zc);
                             bolt.transform(&Affine::from_column_major([
                                 xc[0], xc[1], xc[2], yc[0], yc[1], yc[2], zc[0], zc[1], zc[2], 0.0,

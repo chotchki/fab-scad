@@ -20,6 +20,7 @@ use fab_manifold::boolean::boolean_result::boolean;
 use fab_manifold::check;
 use fab_manifold::cross_section::{CrossSection, FillRule, JoinType};
 use fab_manifold::linalg::{Mat2x3, Rect, Vec2, Vec3};
+use fab_manifold::linalg::rotate2_degrees;
 use fab_manifold::mesh::Mesh;
 
 fn v(x: f64, y: f64) -> Vec2 {
@@ -189,7 +190,7 @@ fn transform() {
 
     // The C++ builds trans·scale·rot as mat3 products; compose() is that chain.
     let m = Mat2x3::translate(v(4.0, 5.0))
-        .compose(Mat2x3::scale(v(2.0, 3.0)).compose(Mat2x3::rotate_degrees(45.0)));
+        .compose(Mat2x3::scale(v(2.0, 3.0)).compose(rotate2_degrees(45.0)));
     let b = sq.transform(m).unwrap();
     let b_copy = b.clone();
 

@@ -341,7 +341,7 @@ impl CrossSection {
 
     /// Rotate about the origin by `degrees` (Manifold `Rotate`).
     pub fn rotate(&self, degrees: f64) -> Result<Self, Error> {
-        self.transform(Mat2x3::rotate_degrees(degrees))
+        self.transform(crate::linalg::rotate2_degrees(degrees))
     }
 
     /// Componentwise scale (Manifold `Scale`).
@@ -784,7 +784,7 @@ mod tests {
         let composed = sq
             .transform(
                 Mat2x3::translate(Vec2::new(4.0, 5.0)).compose(
-                    Mat2x3::scale(Vec2::new(2.0, 3.0)).compose(Mat2x3::rotate_degrees(30.0)),
+                    Mat2x3::scale(Vec2::new(2.0, 3.0)).compose(crate::linalg::rotate2_degrees(30.0)),
                 ),
             )
             .unwrap();

@@ -1,0 +1,12 @@
+# fab-types — the shared geometry vocabulary (M.0.2.1): Vec2/3/4, Mat3/Mat3x4/Mat2x3, Box3, Rect.
+# Lifted from fab-manifold's linalg.rs AFTER R0–R6 proved the op order bit-clean vs the C++ oracle
+# (lift VALIDATED code, don't guess). Deliberately a LEAF: no deps, no trig — the rotate builders
+# take precomputed sincos, because fab-lang's trig dialect (OpenSCAD func.cc reference) and
+# fab-manifold's (Manifold math.h reference) target DIFFERENT oracles and must never unify.
+[package]
+name = "fab-types"
+version = "0.1.0"
+edition = "2024"
+license = "GPL-2.0-or-later"
+
+[dependencies]

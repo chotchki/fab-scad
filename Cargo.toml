@@ -56,7 +56,7 @@ path = "src/bin/echo_repro.rs"
 required-features = ["native"]
 
 [workspace]
-members = ["gen", "geom", "gui", "jit", "lang", "manifold", "web"]
+members = ["gen", "geom", "gui", "jit", "lang", "manifold", "types", "web"]
 # The fuzz crate is nightly-only (cargo-fuzz) — kept out of the workspace so stable builds never see it.
 exclude = ["manifold/fuzz"]
 

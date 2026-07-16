@@ -6,6 +6,7 @@
 //! and never disagree.
 
 use anyhow::{Context, Result};
+use fab_lang::VecExt;
 
 use crate::manifest::{Connector, Slicing};
 use fab_lang::Vec3;
@@ -99,7 +100,7 @@ pub(crate) fn piece_up(s: &Slicing, mi: [usize; 3], comp: usize) -> Vec3 {
     let at = |c: usize| s.orient.iter().find(|p| p.piece == mi && p.comp == c);
     at(comp)
         .or_else(|| at(0))
-        .map(|p| Vec3::new(p.up[0].f(), p.up[1].f(), p.up[2].f()).normalize())
+        .map(|p| Vec3::new(p.up[0].f(), p.up[1].f(), p.up[2].f()).normalize_or_self())
         .unwrap_or(Vec3::new(0.0, 0.0, 1.0))
 }
 

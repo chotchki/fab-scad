@@ -2418,7 +2418,7 @@ mod tests {
             1e-5,
         );
         let m = Mat2x3::translate(Vec2::new(1.0, 2.0))
-            .compose(Mat2x3::rotate_degrees(15.0).compose(Mat2x3::scale(Vec2::new(1.5, 0.75))));
+            .compose(crate::linalg::rotate2_degrees(15.0).compose(Mat2x3::scale(Vec2::new(1.5, 0.75))));
         region_match(
             "transform (composed)",
             &base.transform(m).unwrap(),

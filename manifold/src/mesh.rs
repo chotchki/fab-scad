@@ -1302,7 +1302,7 @@ impl Mesh {
         let y_deg = crate::mathf::degrees(-crate::mathf::asin(normal.z));
         let z_deg = crate::mathf::degrees(crate::mathf::atan2(normal.y, normal.x));
         // Fold: Rotate ∘ Translate(offset) ∘ Scale(size) ∘ Translate(1,0,0), then transform once.
-        let m = Mat3x4::rotate(0.0, y_deg, z_deg)
+        let m = crate::linalg::rotate_xyz_degrees(0.0, y_deg, z_deg)
             * Mat3x4::translate(Vec3::new(origin_offset, 0.0, 0.0))
             * Mat3x4::scale(Vec3::splat(size))
             * Mat3x4::translate(Vec3::new(1.0, 0.0, 0.0));

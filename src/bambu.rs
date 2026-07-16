@@ -27,6 +27,7 @@
 //! re-slices on open. (Real BambuStudio exports carry ~30 entries + a 569-key config; not needed to
 //! reconstruct plates.)
 
+use fab_lang::VecExt;
 use std::io::{Seek, Write};
 use std::path::Path;
 
@@ -403,7 +404,7 @@ fn matmul(a: [[f64; 3]; 3], b: [[f64; 3]; 3]) -> [[f64; 3]; 3] {
 fn rot_up_to_z(up: [f64; 3]) -> [[f64; 3]; 3] {
     const I: [[f64; 3]; 3] = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
     // bambu keeps its 3×3-matrix math in raw [f64;3] (export leaf); borrow Vec3 just for the vector ops.
-    let u = Vec3::from_array(up).normalize().to_array();
+    let u = Vec3::from_array(up).normalize_or_self().to_array();
     let c = u[2]; // u · +Z
     if c > 1.0 - 1e-9 {
         return I;
@@ -537,7 +538,10 @@ mod tests {
             [0.0, 0.0, -1.0],
             [1.0, 1.0, 1.0],
         ] {
-            let z = matvec(rot_up_to_z(up), Vec3::from_array(up).normalize().to_array());
+            let z = matvec(
+                rot_up_to_z(up),
+                Vec3::from_array(up).normalize_or_self().to_array(),
+            );
             assert!(
                 (z[0]).abs() < 1e-9 && (z[1]).abs() < 1e-9 && (z[2] - 1.0).abs() < 1e-9,
                 "up {up:?} → {z:?}"

@@ -516,17 +516,43 @@ impl Solid {
         Solid::wrap(mesh_or_empty(self.0.minkowski_sum(&other.0), "minkowski"))
     }
 
-    /// Union many solids at once. A left fold of pairwise booleans in list order — deterministic;
-    /// the C++'s `BatchBoolean` volume-reordering was a perf trick, not a semantic (same solid out).
+    /// Union many solids at once — the C++ `BatchBoolean(Add)` strategy: a min-heap by vert count
+    /// (insertion-order tie-break) always unions the two SMALLEST next, giving a balanced
+    /// O(total·log n) merge tree. The left fold this replaced was "a perf trick, not a semantic" —
+    /// semantically true, complexity-fatal: a 101-layer union re-triangulated a 2.3M-tri
+    /// accumulator per op (the M.7.3.2 outlet runaway). Same solid out, deterministic order.
     /// Empty ⇒ empty solid.
     pub fn batch_union(solids: &[Solid]) -> Solid {
-        let mut it = solids.iter();
-        let Some(first) = it.next() else {
+        use std::cmp::Reverse;
+        use std::collections::BinaryHeap;
+        use std::rc::Rc;
+        if solids.is_empty() {
             return Solid::wrap(Mesh::default());
-        };
-        Solid::wrap(it.fold((*first.0).clone(), |acc, s| {
-            boolean(&acc, &s.0, OpType::Add)
-        }))
+        }
+        if solids.len() == 1 {
+            return solids[0].clone();
+        }
+        let mut slab: Vec<Option<Rc<Mesh>>> = Vec::with_capacity(2 * solids.len());
+        let mut heap: BinaryHeap<Reverse<(usize, u64, usize)>> =
+            BinaryHeap::with_capacity(solids.len());
+        for (i, s) in solids.iter().enumerate() {
+            heap.push(Reverse((s.0.num_vert(), i as u64, i)));
+            slab.push(Some(s.0.clone()));
+        }
+        let mut serial = solids.len() as u64;
+        loop {
+            let Reverse((_, _, ia)) = heap.pop().expect("heap has >= 2 entries");
+            let Reverse((_, _, ib)) = heap.pop().expect("heap has >= 2 entries");
+            let a = slab[ia].take().expect("heap indexes live slab entries");
+            let b = slab[ib].take().expect("heap indexes live slab entries");
+            let u = boolean(&a, &b, OpType::Add);
+            if heap.is_empty() {
+                return Solid::wrap(u);
+            }
+            heap.push(Reverse((u.num_vert(), serial, slab.len())));
+            serial += 1;
+            slab.push(Some(Rc::new(u)));
+        }
     }
 
     /// The convex hull of many solids COMBINED (`hull()`, J.4.1) — one quickhull over the union of

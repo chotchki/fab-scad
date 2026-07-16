@@ -280,6 +280,22 @@ pub fn face2tri(
         let first = face_edge[face] as usize;
         let last = face_edge[face + 1] as usize;
         let num_edge = last - first;
+        // C++ `Face2Tri`'s numEdge==3 SINGLE-TRIANGLE fast path (face_op.cpp:219), M.7.3.2: the
+        // three half-edges already ARE the triangle — order them (at most one swap) and emit,
+        // skipping assembly, projection, and the general writer's per-face maps. ~95% of a big
+        // union's faces are plain triangles; routing them through the general path was the
+        // constant-factor half of the outlet runaway.
+        if num_edge == 3 {
+            let ge = [first as i32, first as i32 + 1, first as i32 + 2];
+            let tri = ge.map(|e| face_halfedges[e as usize].start_vert);
+            let ends = ge.map(|e| face_halfedges[e as usize].end_vert);
+            let ordered = if ends[0] == tri[2] {
+                [ge[0], ge[2], ge[1]]
+            } else {
+                ge
+            };
+            return (Vec::new(), vec![ordered]);
+        }
         // C++ `Face2Tri`'s numEdge==4 QUAD fast path (face_op.cpp:237-265), M.2.4a: diagonal
         // quad[0]-quad[2] preferred; flipped when non-CCW, or when both diagonals are valid and
         // quad[1]-quad[3] is shorter. The unified ear-clip used to take these too — same covered
@@ -374,7 +390,10 @@ pub fn face2tri(
             continue;
         }
         let num_edge = (face_edge[face + 1] - face_edge[face]) as usize;
-        if num_edge == 4 {
+        // Tri AND quad take C++ `WriteLocalTriangles` (label matching is safe at ≤2 triangles of
+        // one loop). Routing the tri path's loop-less output through the GENERAL writer left every
+        // tri boundary edge out of `contour2tri` — NONE pairs → runaway `for_vert` orbits.
+        if num_edge <= 4 {
             write_local_triangles(
                 out,
                 &mut contour2tri,

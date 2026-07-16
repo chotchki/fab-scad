@@ -94,3 +94,56 @@ fn degenerate_triangles_drop_at_ingest() {
     assert_eq!(m.num_tri(), 4, "the sliver is gone");
     assert!(m.volume() > 0.0);
 }
+
+/// REGRESSION (M.7.3.1, drill_guide): the i_overlay f64→int-grid→f64 round-trip shifted non-dyadic
+/// contours by ~1e-9, dragging a revolve profile's `x = 0` verts OFF the axis — the revolved cutter
+/// grew a hair-thin axial tunnel and the subtract left a degenerate filament component (genus read 0
+/// vs the C++-pipeline's 1 at identical volume). `snap_to_inputs` restores exact input bits.
+#[test]
+fn ingest_preserves_exact_input_coordinates() {
+    use fab_manifold::boolean::{OpType, boolean_result::boolean};
+    use fab_manifold::cross_section::CrossSection;
+    use fab_manifold::linalg::Vec2;
+
+    // The real cutter profile: axis-touching, with the non-dyadic 2.65 that shifts the grid.
+    let profile = vec![
+        Vec2::new(0.0, -2.0),
+        Vec2::new(2.65, -2.0),
+        Vec2::new(2.65, -1.0),
+        Vec2::new(2.65, 1.0),
+        Vec2::new(2.65, 2.0),
+        Vec2::new(0.0, 2.0),
+    ];
+    let cs = CrossSection::from_polygons(std::slice::from_ref(&profile)).unwrap();
+    for c in cs.contours() {
+        for p in c {
+            assert!(
+                (p.x == 0.0 || p.x == 2.65) && p.y.abs() == 2.0 || p.y.abs() == 1.0,
+                "vert ({}, {}) is not an exact input coordinate",
+                p.x,
+                p.y
+            );
+        }
+    }
+    assert!(
+        cs.contours().iter().flatten().any(|p| p.x == 0.0),
+        "the axis verts survive with exact x = 0"
+    );
+
+    // The minimal end-to-end: outer revolve minus the axis-touching cutter is ONE genus-1 tube.
+    let outer = CrossSection::from_polygons(&[vec![
+        Vec2::new(0.0, -1.0),
+        Vec2::new(8.5, -1.0),
+        Vec2::new(8.5, 1.0),
+        Vec2::new(0.0, 1.0),
+    ]])
+    .unwrap();
+    let tube = boolean(
+        &outer.revolve(100, 360.0),
+        &cs.revolve(100, 360.0),
+        OpType::Subtract,
+    );
+    assert!(tube.is_manifold());
+    assert_eq!(tube.decompose().len(), 1, "no degenerate filament component");
+    assert_eq!(fab_manifold::check::genus(&tube), 1, "the through-tunnel is open");
+}

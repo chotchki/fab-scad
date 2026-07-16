@@ -566,7 +566,73 @@ impl CrossSection {
 /// C++ `C2::Union(ps, fillrule)`) resolving self-intersections + canonicalizing winding.
 fn normalize(polygons: &[Vec<Vec2>], rule: IoFillRule) -> Vec<Vec<Vec2>> {
     let subj = to_io(polygons);
-    from_io(subj.overlay(&empty_clip(), OverlayRule::Subject, rule))
+    snap_to_inputs(
+        from_io(subj.overlay(&empty_clip(), OverlayRule::Subject, rule)),
+        polygons,
+    )
+}
+
+/// Restore EXACT input coordinates after the i_overlay round-trip (M.7.3.1). The f64→int-grid→f64
+/// normalization can shift non-dyadic contours by ~1e-9 — harmless by the 2D layer's area-residual
+/// thesis, but TOPOLOGICALLY live: a revolve profile's `x = 0` axis verts came back at 7.5e-10, so
+/// the revolved cutter grew a hair-thin axial tunnel and the subtract left a degenerate filament
+/// component (the drill_guide genus divergence; C++ given the same damaged buffer agrees with us —
+/// OpenSCAD differs only because Clipper2's DECIMAL grid kept the profile exact). Every output vert
+/// within the grid-noise envelope of an input vert snaps back to the input's exact bits; genuinely
+/// new verts are untouched. Ingest-only — boolean/offset outputs keep the relaxed thesis.
+fn snap_to_inputs(mut out: Vec<Vec<Vec2>>, inputs: &[Vec<Vec2>]) -> Vec<Vec<Vec2>> {
+    let mut scale = 0.0f64;
+    for c in inputs {
+        for p in c {
+            scale = scale.max(p.x.abs()).max(p.y.abs());
+        }
+    }
+    // Observed noise is ~1e-10 relative to the coordinate scale; 1e-8 relative gives 100× headroom
+    // while staying far below any real 2D feature.
+    let eps = scale * 1e-8;
+    if eps == 0.0 {
+        return out;
+    }
+    // Coarse hash grid over the input verts, cell = eps; a within-eps match is in the 3×3 block.
+    use std::collections::HashMap;
+    let cell = |v: f64| -> i64 {
+        #[allow(
+            clippy::cast_possible_truncation,
+            reason = "finite coords / eps of their own scale — |result| is bounded by 1e8"
+        )]
+        {
+            (v / eps).floor() as i64
+        }
+    };
+    let mut grid: HashMap<(i64, i64), Vec<Vec2>> = HashMap::new();
+    for c in inputs {
+        for &p in c {
+            grid.entry((cell(p.x), cell(p.y))).or_default().push(p);
+        }
+    }
+    let eps2 = eps * eps;
+    for c in &mut out {
+        for p in c {
+            let (cx, cy) = (cell(p.x), cell(p.y));
+            let mut best: Option<(f64, Vec2)> = None;
+            for dx in -1..=1 {
+                for dy in -1..=1 {
+                    if let Some(cands) = grid.get(&(cx + dx, cy + dy)) {
+                        for &q in cands {
+                            let d = (q - *p).length2();
+                            if d <= eps2 && best.is_none_or(|(bd, _)| d < bd) {
+                                best = Some((d, q));
+                            }
+                        }
+                    }
+                }
+            }
+            if let Some((_, q)) = best {
+                *p = q;
+            }
+        }
+    }
+    out
 }
 
 /// An empty clip contour set — the second operand for a `Subject`-rule normalization.

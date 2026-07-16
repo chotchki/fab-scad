@@ -33,6 +33,16 @@ pub trait GeometryBackend {
     fn leaf(&self, mesh: &Mesh) -> Self::Solid;
     /// Boolean union.
     fn union(&self, a: &Self::Solid, b: &Self::Solid) -> Self::Solid;
+    /// N-ary union. The default is the pairwise fold; a real kernel overrides with its batch
+    /// strategy (Manifold's `BatchBoolean` smallest-first heap — the fold is O(n²) on n heavy
+    /// children, the M.7.3.2 outlet runaway).
+    fn batch_union(&self, solids: Vec<Self::Solid>) -> Self::Solid {
+        let mut it = solids.into_iter();
+        match it.next() {
+            Some(first) => it.fold(first, |acc, s| self.union(&acc, &s)),
+            None => self.leaf(&Mesh::new()),
+        }
+    }
     /// Boolean difference (`a − b`).
     fn difference(&self, a: &Self::Solid, b: &Self::Solid) -> Self::Solid;
     /// Boolean intersection.
@@ -204,8 +214,25 @@ pub fn build<B: GeometryBackend>(node: &GeoNode, backend: &B) -> B::Solid {
         GeoNode::Empty => backend.leaf(&Mesh::new()),
         GeoNode::Leaf(mesh) => backend.leaf(mesh),
         GeoNode::Transform { matrix, child } => backend.transform(&build(child, backend), matrix),
-        GeoNode::Union(kids) => reduce(kids, backend, |b, x, y| b.union(x, y)),
-        GeoNode::Difference(kids) => reduce(kids, backend, |b, x, y| b.difference(x, y)),
+        // Union is N-ary via the backend's batch strategy; difference = first − union(rest) — the
+        // same set (A−B−C ≡ A−(B∪C)) and the same shape the C++ csg tree evaluates, so one big
+        // subtract replaces a quadratic fold over the accumulating base.
+        GeoNode::Union(kids) => {
+            backend.batch_union(kids.iter().map(|k| build(k, backend)).collect())
+        }
+        GeoNode::Difference(kids) => match kids.split_first() {
+            None => backend.leaf(&Mesh::new()),
+            Some((first, rest)) => {
+                let base = build(first, backend);
+                if rest.is_empty() {
+                    base
+                } else {
+                    let cutter =
+                        backend.batch_union(rest.iter().map(|k| build(k, backend)).collect());
+                    backend.difference(&base, &cutter)
+                }
+            }
+        },
         GeoNode::Intersection(kids) => reduce(kids, backend, |b, x, y| b.intersection(x, y)),
         // hull is N-ary — the backend hulls the whole operand set at once (not a pairwise fold).
         GeoNode::Hull(kids) => {
@@ -305,6 +332,14 @@ impl GeometryBackend for ManifoldBackend {
         crate::kernel::Solid::from_indexed(&mesh.verts, &mesh.tris).ok()
     }
 
+    fn batch_union(&self, solids: Vec<Self::Solid>) -> Self::Solid {
+        // `None` children are empty geometry — the union identity, dropped.
+        let live: Vec<crate::kernel::Solid> = solids.into_iter().flatten().collect();
+        if live.is_empty() {
+            return None;
+        }
+        Some(crate::kernel::Solid::batch_union(&live))
+    }
     fn union(&self, a: &Self::Solid, b: &Self::Solid) -> Self::Solid {
         match (a.as_ref(), b.as_ref()) {
             (Some(a), Some(b)) => Some(a.union(b)),

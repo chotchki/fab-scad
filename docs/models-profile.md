@@ -825,3 +825,32 @@ opt-in/OFF. The performance budget goes where the data points: the O.10 hand ban
 (N.2c.2.3). The ABI rung would need ragged-args + major subset growth + a cheaper decline path to beat
 what one intrinsics band delivers — that trade only reopens if a future corpus shows a hot
 numeric-scalar population the hand tier can't cover.
+
+## O.10 — the region monster falls (2026-07-17)
+
+The P.1.6 decision executed: `_region_region_intersections` — the single biggest interpreted body
+left after O.9 — is a hand native, with its FULL 35-dep reachable closure landed the O-series way
+(verbatim pinned references, every product through the interpreter's own ops, fast==slow batteries
+per tier). Three commits: the small-dep tier (12 natives + 13 mechanically-extracted pins), the
+search pair (`vector_search` with BOTH branches — the ≤400 quadratic scan and the over-400 ball tree
+return indices in DIFFERENT orders, and the downstream `search`/`select` sees that order — plus
+`_bt_tree` as an iterative slot-arena build), and the monster itself wired + armed.
+
+The contract paid for itself twice more: the battery caught a truncated pin extraction, and the WIRE
+CHECK caught that `comparisons.scad` defines `_sort_vectors` TWICE — last-wins makes the 3-param
+`idxlist` form the effective one, and the fingerprint gate refused the first-form pin until the
+native replicated reality. (Band-wide audit: no other double definitions.)
+
+### The scoreboard (run-1784266138, baseline re-frozen)
+
+Fab wall **74.7s → 68.8s**, ratio **3.32× → 3.58×** (median **3.98×**), zero regressions — one model
+carried it: **shoe_holder 8,988ms → 2,619ms (−70%)**, standalone worker wall 6,986→2,039ms (3.4×).
+The whole O.4→O.10 arc, one harness, same models: **0.96× → 3.58×**, fab wall 245s → 68.8s. And every
+one of the 52 natives is wasm-safe — the web app inherits the lot.
+
+### What's left interpreted (the O.11 candidates)
+
+`_find_anchor` (443 lines, attachments.scad — big, string/geom-typed, feasibility unproven), the
+~2s thin tail (`_triangulate`, `_compute_spin`, `zrot`/`_lsw_*` wrappers), and L.2.7a's
+spheroid/gaussian_rands. Diminishing returns territory: the next profile decides whether an O.11
+band beats spending the effort elsewhere (V.1 per-part parallelism reads richer at this point).

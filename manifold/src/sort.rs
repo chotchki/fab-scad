@@ -79,11 +79,11 @@ impl Mesh {
     ///
     /// Tail-builds [`Mesh::collider`] (BU.4.5b), mirroring C++ `SortGeometry`'s `collider_ =
     /// Collider(faceBox, faceMorton)` (sort.cpp:213) — every finalized mesh leaves here with a fresh
-    /// broad-phase BVH, so `Boolean3::new` never rebuilds one. Built UNFUSED (a plain
-    /// `Collider::from_mesh` over the sorted mesh, not C++'s reuse of `SortFaces`' arrays): the input
-    /// state is byte-identical to what the boolean used to feed `from_mesh` at op time, so the cached
-    /// collider is byte-identical to the one it replaces — zero golden risk; the re-sort inside
-    /// `build` is over already-Morton-ordered codes (the adaptive stable sort's fast path).
+    /// broad-phase BVH, so `Boolean3::new` never rebuilds one. FUSED (BU.4.7): [`sort_faces`](Self::sort_faces)
+    /// computes each face's box + centroid in its ONE per-vertex sweep and hands them to
+    /// [`Collider::from_sorted_leaves`], so the collider skips the second sweep C++ also skips (its reuse of
+    /// `SortFaces`' `faceBox`/`faceMorton`). Byte-identical to the old `from_mesh` over the sorted mesh — the
+    /// boxes/centroids ARE that mesh's, and the collider's live-bbox Morton is recomputed there unchanged.
     pub fn sort_geometry(&mut self) {
         if self.halfedge.is_empty() {
             self.collider = None; // C++ `collider_ = {}` (sort.cpp:193)
@@ -91,13 +91,11 @@ impl Mesh {
         }
         self.compact_props();
         self.sort_verts();
-        self.sort_faces();
-        // All faces can Morton-sort to kNoCode and drop (C++ sort.cpp:210's second empty check).
-        self.collider = if self.halfedge.is_empty() {
-            None
-        } else {
-            Some(crate::boolean::collider::Collider::from_mesh(self))
-        };
+        // `sort_faces` returns the SORTED per-face box+centroid (or `None` when every face Morton-sorts to
+        // kNoCode and drops — C++ sort.cpp:210's second empty check).
+        self.collider = self.sort_faces().map(|(leaf_box, centroid)| {
+            crate::boolean::collider::Collider::from_sorted_leaves(leaf_box, &centroid)
+        });
     }
 
     /// Remove unreferenced prop-verts and reindex `prop_vert` + [`Mesh::properties`] (`sort.cpp`
@@ -205,24 +203,34 @@ impl Mesh {
     /// Reindex triangles by the Morton code of their centroid (`sort.cpp` `SortFaces` + `GatherFaces`),
     /// dropping dead tris. Permutes the per-triangle `face_normal`/`tri_ref` to match, and rebuilds
     /// `halfedge` with pair pointers translated through the face permutation (`ReindexFace`).
-    fn sort_faces(&mut self) {
+    /// Returns the SORTED per-face `(box, centroid)` for the collider to reuse (BU.4.7), or `None` when every
+    /// face Morton-sorts to kNoCode and drops. C++'s `GetFaceBoxMorton` computes `faceBox`/`faceMorton` in one
+    /// sweep and `SortGeometry` reuses them for the collider; we do the same — the ONE per-vertex sweep here
+    /// builds each face's box + centroid, sorts by the mesh-bbox Morton, and the caller hands the permuted
+    /// box+centroid to [`Collider::from_sorted_leaves`] (whose live-bbox Morton is recomputed there).
+    fn sort_faces(&mut self) -> Option<(Vec<Box3>, Vec<Vec3>)> {
         let old_num_tri = self.num_tri();
-        // Per-face centroid Morton code — independent per face (a removed tri stays `kNoCode`), so it maps
-        // through the `par::` seam (order-preserving ⇒ par == seq). M.4. Block-scoped immutable reborrow.
-        let face_morton: Vec<u32> = {
+        // The single per-vertex sweep: each face's AABB + centroid + its sort Morton. Independent per face (a
+        // removed tri stays `kNoCode` + empty box), so it maps through the `par::` seam (order-preserving ⇒
+        // par == seq). M.4. Block-scoped immutable reborrow.
+        let leaves: Vec<(Box3, Vec3, u32)> = {
             let this = &*self;
             let bbox = this.b_box;
             crate::par::map_range(old_num_tri, |face| {
                 let t = TriId::from_usize(face);
-                // A removed tri has an unpaired first half-edge — leave it at kNoCode to sort last.
+                // A removed tri has an unpaired first half-edge — empty box + kNoCode to sort last + drop.
                 if this.pair(t.first_halfedge()).is_none() {
-                    return K_NO_CODE;
+                    return (Box3::default(), Vec3::ZERO, K_NO_CODE);
                 }
-                let center = (this.pos(this.start(t.halfedge(0)))
-                    + this.pos(this.start(t.halfedge(1)))
-                    + this.pos(this.start(t.halfedge(2))))
-                    / 3.0;
-                morton_code(center, bbox)
+                let mut b = Box3::default();
+                let mut c = Vec3::ZERO;
+                for i in 0..3 {
+                    let p = this.pos(this.start(t.halfedge(i)));
+                    c += p;
+                    b.union_point(p);
+                }
+                let centroid = c / 3.0;
+                (b, centroid, morton_code(centroid, bbox))
             })
         };
 
@@ -230,15 +238,23 @@ impl Mesh {
         // is STABLE both lanes; C++ parallel stable_sort ≥1e4 (sort.cpp `SortFaces`).
         let mut new2old: Vec<usize> = (0..old_num_tri).collect();
         crate::par::sort_by(&mut new2old, |&a, &b| {
-            face_morton[a].cmp(&face_morton[b]).then(a.cmp(&b))
+            leaves[a].2.cmp(&leaves[b].2).then(a.cmp(&b))
         });
         let keep = new2old
             .iter()
-            .take_while(|&&old| face_morton[old] != K_NO_CODE)
+            .take_while(|&&old| leaves[old].2 != K_NO_CODE)
             .count();
         new2old.truncate(keep);
 
         self.gather_faces(&new2old, old_num_tri);
+        if new2old.is_empty() {
+            return None;
+        }
+        // Permute the reused box+centroid into the sorted face order (mirrors `gather_faces`) — this IS the
+        // sorted mesh's per-face box/centroid, so `from_sorted_leaves` is byte-identical to `from_mesh` on it.
+        let leaf_box: Vec<Box3> = new2old.iter().map(|&o| leaves[o].0).collect();
+        let centroid: Vec<Vec3> = new2old.iter().map(|&o| leaves[o].1).collect();
+        Some((leaf_box, centroid))
     }
 
     /// Rebuild `halfedge` (plus `face_normal`/`tri_ref`) in the new triangle order (`sort.cpp`

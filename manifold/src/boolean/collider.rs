@@ -270,8 +270,21 @@ impl Collider {
             }
             centroid[face] = c / 3.0;
         }
+        Self::from_sorted_leaves(leaf_box, &centroid)
+    }
+
+    /// Build the collider from PRECOMPUTED per-face boxes + centroids (BU.4.7) — the fused entry
+    /// [`Mesh::sort_faces`] hands its already-computed `faceBox`/centroid to, so the second per-vertex sweep
+    /// [`from_mesh`](Self::from_mesh) does is skipped (C++ reuses `SortFaces`' `faceBox`/`faceMorton` in
+    /// `Collider(faceBox, faceMorton)`, `sort.cpp:213`). Byte-IDENTICAL to `from_mesh` over the same mesh:
+    /// `leaf_box`/`centroid` ARE that mesh's per-face box/centroid, and `live_bbox` + `morton_code` are
+    /// recomputed here exactly as `from_mesh` did (the collider's Morton is the LIVE-bbox one — distinct from
+    /// the mesh-bbox sort key — so it must be derived here, not reused from the sort). `build` re-sorts by
+    /// Morton, so a non-sorted `leaf_box` (the `from_mesh` callers) is fine too; the fused path just feeds it
+    /// pre-sorted, which the adaptive stable sort takes as its fast path.
+    pub(crate) fn from_sorted_leaves(leaf_box: Vec<Box3>, centroid: &[Vec3]) -> Self {
         let bbox = live_bbox(&leaf_box);
-        let morton: Vec<u32> = (0..num_tri)
+        let morton: Vec<u32> = (0..leaf_box.len())
             .map(|f| {
                 if leaf_box[f].is_finite() {
                     morton_code(centroid[f], bbox)

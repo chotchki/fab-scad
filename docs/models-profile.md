@@ -719,3 +719,70 @@ P.1.6 case), `_find_anchor` (443 lines), and a thin tail (`_triangulate` 0.6s, `
 Fab wall **77.2s → 74.7s**, ratio **3.18× → 3.32×** (median **3.89×**), zero regressions — the O.8/O.9 wins
 spread thin across the whole BOSL2-heavy set rather than concentrating (no single model crossed the delta
 gate). The day's full arc, one harness, same 109 models: **0.96× → 3.32×**, with fab wall 245s → 74.7s.
+
+## P.1.5 — the JIT measured against reality (2026-07-16, the same day again)
+
+The measure-before-extend pass the stale P.1.4 box needed. Verdict up front: **the JIT never fires on real
+models, and its default stays OFF.** The intrinsics tier took every win the JIT was built to chase.
+
+### The jit-on-vs-off A/B sweep (perf/runs/jit-ab-1784259000.json)
+
+Every harness model through `models_worker` twice — `FAB_JIT` unset vs `=1` — with `FAB_GEO_FINGERPRINT`
+gating the Geo tree bit-for-bit. 87 ok-pairs: **fingerprints identical everywhere** (fast==JIT holds at
+model scale, where the corpus differential structurally can't look: it feeds both engines the same lexical
+globals — the pattern that hid task #51's `$`-inline bug until the end-to-end probe). But the wall says
+**off 102.5s → on 104.9s (+2.3%)**: +20–35% on sub-100ms models, +2–4% at seconds scale. All cost, no win.
+
+### Why: it never fires ([jit-fires], the new drop report)
+
+`FAB_JIT_EXPLAIN` now prints runtime activity, and the four heavies are damning — window_air_cover,
+webcam_holder, pill_holder: **offered 0**. shoe_holder: **offered 7, fired 7**, all `in_to_mm` (a
+unit-convert one-liner). Real BOSL2 calls are NAMED-ARG calls, and the dispatch gate only offers
+all-positional calls to the JIT — O.6 built the named→positional rebind for intrinsics and the JIT never
+got its twin. So the +2.3% is pure REGISTRY BUILD cost: ~85 eager Cranelift compiles per eval, repeated
+per import-fixpoint round. The P.1.4 recut (task #66): rebind + lazy/cached build FIRST, re-measure, and
+only then ask whether subset extensions pay.
+
+### The blockers on the monsters (FAB_JIT_EXPLAIN=full, new)
+
+All-scalar coverage is 84/989 on the real-model closure (top blocker: comprehension-iterable shape,
+30.7%), but the named residual can't ride regardless: `_region_region_intersections`/`_point_dist` args
+are 3-level RAGGED (regions→paths→points, hundreds of leaves against the 64-leaf scalarize cap; the arena
+runtime is flat `Vec<f64>` — `DynMat` is fixed-width, no ragged). `_find_anchor`/`_compute_spin`/`zrot`
+block on free identifiers and strings. `gaussian_rands` blocks on a call-result iterable. Per the O.8
+doctrine (intrinsics first — wasm inherits every win), the recommended route for the monsters is a hand
+band, not an ABI rung; task #68 holds that decision.
+
+### The flake the sweep caught (P.1.5.2, OPEN)
+
+One "mismatch" wasn't the JIT: pill_holder_combined_tray fingerprints BISTABLY on the pure-interpreter
+side — `fa3a…` twice ever (both under the pre-1236ed19 binary layout, ~2/130), `5cb3…` otherwise
+(0/450+ since). Ruled out: rands (fixed-seed MT19937), fonts (bundled), csg-cache (on/off both clean),
+lang-side HashMap (FixedHasher/BTreeMap discipline). `models_worker` now takes `FAB_GEO_DUMP=<dir>` and
+writes the full Geo Debug per fingerprint — the diff names the divergent subtree the moment a `fa3a…`
+specimen lands. Doctrine #36 says this is a real bug regardless of rarity; task #67 tracks the hunt.
+
+### The LTO experiment (P.1.5.1, chotchki's ask)
+
+Fat LTO + `codegen-units=1` vs today's profile (which is NO profile — pure cargo defaults) — separate
+target dir, interleaved 3-rep medians, JIT off:
+
+| model | base | fat-LTO | delta |
+|---|---|---|---|
+| window_air_cover | 11348ms | 11218ms | −1.1% |
+| shoe_holder | 6986ms | 7050ms | +0.9% |
+| webcam_holder | 4500ms | 4280ms | **−4.9%** |
+| pill_holder | 2457ms | 2340ms | **−4.8%** |
+| circle_loom | 5597ms | 5516ms | −1.4% |
+| traced_holder | 4331ms | 4192ms | −3.2% |
+| under_sink_guide | 4177ms | 4176ms | −0.0% |
+| hydwasted/handle | 1496ms | 1460ms | −2.4% |
+| kirby_holder | 2041ms | 1947ms | −4.6% |
+| **TOTAL (medians)** | **42933ms** | **42179ms** | **−1.8%** |
+
+Reads exactly as predicted: the eval-bound mixed models gain ~5% (cross-crate inlining through the
+fab-lang↔fab-scad seam), the intrinsic-saturated and kernel-bound ones barely move (Rust LTO can't touch
+the cmake-built Manifold C++). Aggregate implication vs OpenSCAD: ~3.32× → ~3.38×. Worth shipping as a
+`[profile.dist]` for release artifacts (fat LTO roughly doubles link time — keep the dev/test loop on
+plain `release`); landing that profile + wiring cargo-packager/CI is the follow-up, chotchki's call on
+whether the perf-baseline lineage moves with it.

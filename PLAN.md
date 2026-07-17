@@ -205,7 +205,7 @@ added 2026-07-16.
   - [x] P.1.2 - P.1.2 - Crate-boundary hook + dispatch integration
   - [x] P.1.3 - P.1.3 - fast==JIT differential over the corpus + EXPLAIN coverage
   - [x] P.1.3a - JIT $-global hazard (reviewer find, pre-existing, NOT 2b): loader.rs tagged_globals doesn't filter $-assignments — a top-level `$fn=32;` + a JIT'd fn reading $fn inlines 32 and diverges from the interpreter under dynamic shadowing. Needs a fast==JIT probe + fix — DONE (6c06b8af): probe watched failing end-to-end, then two-layer fix (Ident-arm $-decline + tagged_globals filter); corpus coverage unchanged
-  - [ ] P.1.4 - P.1.4 - Extend the numeric subset (ternary, comparisons, transcendental calls)
+  - [x] P.1.4 - P.1.4 - Extend the numeric subset (ternary, comparisons, transcendental calls)
   - [x] P.1.5 - P.1.5 - Measure + coverage report
     - [x] P.1.5.1 - P.1.5.1 - LTO experiment: fat LTO + codegen-units=1 vs the default release profile (chotchki's ask) — measured on the heavies + mid models, vs-OpenSCAD implication from baseline oracle times
     - [ ] P.1.5.2 - P.1.5.2 - Interpreter Geo-tree nondeterminism (pill_holder flake): bistable fingerprint on the PURE-interpreter side, doctrine #36 violation — hunt with FAB_GEO_DUMP, root-cause, fix

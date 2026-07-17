@@ -31,6 +31,7 @@ mod geometry;
 mod lists;
 mod math;
 mod poc;
+mod regions;
 mod shape;
 #[cfg(test)]
 #[allow(
@@ -128,6 +129,129 @@ pub(super) struct Entry {
 /// registry entry's reference calls them, without shipping a native impl of our own. [`anchor_fp`] resolves
 /// a dep name against entries first, then here.
 static PINS: &[(&str, &str)] = &[
+    // O.10 band dep (utility.scad) — `column`'s index assert.
+    (
+        "is_int",
+        "function is_int(n) = is_finite(n) && n == round(n);",
+    ),
+    // O.10 band dep (comparisons.scad).
+    (
+        "list_wrap",
+        "function list_wrap(list, eps=_EPSILON) =
+    assert(is_list(list))
+    assert(is_finite(eps) && eps>=0)
+    len(list)<2 || are_ends_equal(list,eps=eps)? list : [each list, list[0]];",
+    ),
+    // O.10 band dep (comparisons.scad).
+    (
+        "are_ends_equal",
+        "function are_ends_equal(list, eps=_EPSILON) =
+  assert(is_list(list) && len(list)>0, \"Must give a nonempty list\")
+  approx(list[0], list[len(list)-1], eps=eps);",
+    ),
+    // O.10 band dep (geometry.scad).
+    (
+        "_general_line_intersection",
+        "function _general_line_intersection(s1,s2,eps=_EPSILON) =
+    let(
+        denominator = cross(s1[0]-s1[1],s2[0]-s2[1])
+    )
+    approx(denominator,0,eps=eps) ? undef :
+    let(
+        t = cross(s1[0]-s2[0],s2[0]-s2[1]) / denominator,
+        u = cross(s1[0]-s2[0],s1[0]-s1[1]) / denominator
+    )
+    [s1[0]+t*(s1[1]-s1[0]), t, u];",
+    ),
+    // O.10 band dep (lists.scad).
+    (
+        "flatten",
+        "function flatten(l) =
+    !is_list(l)? l :
+    [for (a=l) if (is_list(a)) (each a) else a];",
+    ),
+    // O.10 band dep (linalg.scad).
+    (
+        "column",
+        "function column(M, i) =
+    assert( is_list(M), \"The input is not a list.\" )
+    assert( is_int(i) && i>=0, \"Invalid index\")
+    [for(row=M) row[i]];",
+    ),
+    // O.10 band dep (math.scad).
+    (
+        "count",
+        "function count(n,s=0,step=1,reverse=false) = let(n=is_list(n) ? len(n) : n)
+                                             reverse? [for (i=[n-1:-1:0]) s+i*step]
+                                                    : [for (i=[0:1:n-1]) s+i*step];",
+    ),
+    // O.10 band dep (math.scad).
+    (
+        "mean",
+        "function mean(v) = 
+    assert(is_list(v) && len(v)>0, \"\\nInvalid list.\")
+    sum(v)/len(v);",
+    ),
+    // O.10 band dep (comparisons.scad).
+    (
+        "min_index",
+        "function min_index(vals, all=false) =
+    assert( is_vector(vals), \"Invalid or list of numbers.\")
+    all ? search(min(vals),vals,0) : search(min(vals), vals)[0];",
+    ),
+    // O.10 band dep (comparisons.scad).
+    (
+        "max_index",
+        "function max_index(vals, all=false) =
+    assert( is_vector(vals) && len(vals)>0 , \"Invalid or empty list of numbers.\")
+    all ? search(max(vals),vals,0) : search(max(vals), vals)[0];",
+    ),
+    // O.10 band dep (linalg.scad).
+    (
+        "transpose",
+        "function transpose(M, reverse=false) =
+    assert( is_list(M) && len(M)>0, \"Input to transpose must be a nonempty list.\")
+    is_list(M[0])
+    ?   let( len0 = len(M[0]) )
+        assert([for(a=M) if(!is_list(a) || len(a)!=len0) 1 ]==[], \"Input to transpose has inconsistent row lengths.\" )
+        reverse
+        ? [for (i=[0:1:len0-1]) 
+              [ for (j=[0:1:len(M)-1]) M[len(M)-1-j][len0-1-i] ] ] 
+        : [for (i=[0:1:len0-1]) 
+              [ for (j=[0:1:len(M)-1]) M[j][i] ] ] 
+    :  assert( is_vector(M), \"Input to transpose must be a vector or list of lists.\")
+           M;",
+    ),
+    // O.10 band dep (vectors.scad).
+    (
+        "pointlist_bounds",
+        "function pointlist_bounds(pts) =
+    assert(is_path(pts,dim=undef,fast=true) , \"\\nInvalid pointlist.\" )
+    let(
+        select = ident(len(pts[0])),
+        spread = [
+            for(i=[0:len(pts[0])-1])
+            let( spreadi = pts*select[i] )
+            [ min(spreadi), max(spreadi) ]
+        ]
+    ) transpose(spread);",
+    ),
+    // O.10 band dep (comparisons.scad).
+    (
+        "_sort_vectors",
+        "function _sort_vectors(arr, _i=0) =
+    len(arr)<=1 || _i>=len(arr[0]) ? arr :
+    let(
+        pivot   = arr[floor(len(arr)/2)][_i],
+        lesser  = [ for (entry=arr) if (entry[_i]  < pivot ) entry ],
+        equal   = [ for (entry=arr) if (entry[_i] == pivot ) entry ],
+        greater = [ for (entry=arr) if (entry[_i]  > pivot ) entry ]
+    )
+    concat(
+        _sort_vectors(lesser,  _i   ), 
+        _sort_vectors(equal,   _i+1 ), 
+        _sort_vectors(greater, _i ) );",
+    ),
     // vectors.scad — `select`'s start-vector assert calls `is_vector(start)` (1-arg: the
     // `all_nonzero`/`zero`/`length` branches are unreachable, so they add no further deps).
     (

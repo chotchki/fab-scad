@@ -2461,3 +2461,333 @@ fn explain_classifies_wired_drift_and_unregistered() {
     let (pn, bn) = parse_fn("function ordinary(x) = x + 1;");
     assert_eq!(super::classify("ordinary", &pn, &bn), Plan::NotRegistered);
 }
+
+/// O.10a — the region-monster band's DEPENDENCY tier, each native vs interpreting its pinned
+/// reference: list handling (`list_wrap`/`are_ends_equal`/`flatten`/`column`/`count`), stats
+/// (`mean`/`min_index`/`max_index`), linalg (`transpose`/`pointlist_bounds`), the segment intersection
+/// (`_general_line_intersection`), and the lexicographic `_sort_vectors`. Exotic shapes ride along
+/// (ragged rows, NaN cells, `-0.0` — the 4-lane-dot sign case lives in `pointlist_bounds`).
+#[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one battery per band tier, like its siblings"
+)]
+fn fast_equals_slow_o10_dep_tier() {
+    let consts = [("_EPSILON", Value::Num(1e-9))];
+    let approx_deps = [
+        reference_of("idx").unwrap(),
+        reference_of("posmod").unwrap(),
+        reference_of("is_finite").unwrap(),
+        reference_of("is_nan").unwrap(),
+    ];
+    let p = |xs: &[f64]| Value::num_list(xs.to_vec());
+
+    // list_wrap / are_ends_equal — open, closed, near-closed (eps), short, exotic.
+    let lw_ref = pin_reference_of("list_wrap").unwrap();
+    let lw_deps: Vec<&str> = approx_deps
+        .iter()
+        .copied()
+        .chain([
+            pin_reference_of("are_ends_equal").unwrap(),
+            reference_of("approx").unwrap(),
+        ])
+        .collect();
+    let square_open = Value::list(vec![p(&[0.0, 0.0]), p(&[10.0, 0.0]), p(&[10.0, 10.0])]);
+    let square_closed = Value::list(vec![p(&[0.0, 0.0]), p(&[10.0, 0.0]), p(&[0.0, 0.0])]);
+    let near_closed = Value::list(vec![p(&[0.0, 0.0]), p(&[10.0, 0.0]), p(&[0.0, 5e-10])]);
+    let one_pt = Value::list(vec![p(&[1.0, 2.0])]);
+    let raw_nums = Value::num_list(vec![1.0, 2.0, 3.0]);
+    for list in [
+        &square_open,
+        &square_closed,
+        &near_closed,
+        &one_pt,
+        &raw_nums,
+        &Value::Num(3.0),
+    ] {
+        let args = vec![list.clone(), Value::Num(1e-9)];
+        assert!(
+            same_result(
+                &super::regions::list_wrap_val(list, &Value::Num(1e-9)),
+                &interpret_with_deps_consts(lw_ref, &lw_deps, &consts, &args)
+            ),
+            "list_wrap diverged on {list:?}"
+        );
+        let ae_ref = pin_reference_of("are_ends_equal").unwrap();
+        let ae_deps: Vec<&str> = approx_deps
+            .iter()
+            .copied()
+            .chain([reference_of("approx").unwrap()])
+            .collect();
+        assert!(
+            same_result(
+                &super::regions::are_ends_equal_val(list, &Value::Num(1e-9)),
+                &interpret_with_deps_consts(ae_ref, &ae_deps, &consts, &args)
+            ),
+            "are_ends_equal diverged on {list:?}"
+        );
+    }
+
+    // _general_line_intersection — crossing, parallel, near-parallel, collinear, degenerate.
+    let gli_ref = pin_reference_of("_general_line_intersection").unwrap();
+    let gli_deps: Vec<&str> = approx_deps
+        .iter()
+        .copied()
+        .chain([reference_of("approx").unwrap()])
+        .collect();
+    let seg = |a: [f64; 2], b: [f64; 2]| Value::list(vec![p(&a), p(&b)]);
+    let cases = [
+        (seg([0.0, 0.0], [10.0, 0.0]), seg([5.0, -5.0], [5.0, 5.0])),
+        (seg([0.0, 0.0], [10.0, 0.0]), seg([0.0, 1.0], [10.0, 1.0])), // parallel
+        (seg([0.0, 0.0], [10.0, 0.0]), seg([0.0, 0.0], [10.0, 1e-12])), // near-parallel
+        (seg([0.0, 0.0], [10.0, 0.0]), seg([3.0, 0.0], [7.0, 0.0])),  // collinear
+        (seg([2.0, 2.0], [2.0, 2.0]), seg([0.0, 0.0], [4.0, 4.0])),   // zero-length s1
+        (seg([-0.0, 1.0], [4.0, -3.0]), seg([0.0, -1.0], [4.0, 3.0])), // -0.0 endpoint
+    ];
+    for (s1, s2) in &cases {
+        let args = vec![s1.clone(), s2.clone(), Value::Num(1e-9)];
+        assert!(
+            same_result(
+                &super::regions::gli_val(s1, s2, &Value::Num(1e-9)),
+                &interpret_with_deps_consts(gli_ref, &gli_deps, &consts, &args)
+            ),
+            "_general_line_intersection diverged on {s1:?} x {s2:?}"
+        );
+    }
+
+    // flatten / column / count — plain, nested, ragged, exotic.
+    let fl_ref = pin_reference_of("flatten").unwrap();
+    let nested = Value::list(vec![
+        Value::list(vec![Value::Num(1.0), Value::Num(2.0)]),
+        p(&[3.0, 4.0]),
+        Value::Num(5.0),
+        Value::string("s"),
+        Value::list(vec![Value::list(vec![Value::Num(6.0)])]),
+    ]);
+    for l in [&nested, &raw_nums, &Value::Num(7.0), &Value::Undef] {
+        assert!(
+            same_result(
+                &super::regions::flatten_val(l),
+                &interpret_with_deps_consts(fl_ref, &[], &consts, std::slice::from_ref(l))
+            ),
+            "flatten diverged on {l:?}"
+        );
+    }
+    let col_ref = pin_reference_of("column").unwrap();
+    let col_deps = [
+        pin_reference_of("is_int").unwrap(),
+        reference_of("is_finite").unwrap(),
+        reference_of("is_nan").unwrap(),
+    ];
+    let ragged = Value::list(vec![p(&[1.0, 2.0, 3.0]), p(&[4.0]), p(&[5.0, 6.0])]);
+    for (m, i) in [
+        (&square_open, Value::Num(0.0)),
+        (&square_open, Value::Num(1.0)),
+        (&ragged, Value::Num(1.0)),
+        (&square_open, Value::Num(-1.0)),
+        (&square_open, Value::Num(0.5)),
+        (&Value::Num(1.0), Value::Num(0.0)),
+    ] {
+        let args = vec![m.clone(), i.clone()];
+        assert!(
+            same_result(
+                &super::regions::column_val(m, &i),
+                &interpret_with_deps_consts(col_ref, &col_deps, &consts, &args)
+            ),
+            "column diverged on {m:?}[{i:?}]"
+        );
+    }
+    let cnt_ref = pin_reference_of("count").unwrap();
+    for (n, s, step, rev) in [
+        (
+            Value::Num(4.0),
+            Value::Num(0.0),
+            Value::Num(1.0),
+            Value::Bool(false),
+        ),
+        (
+            Value::Num(4.0),
+            Value::Num(2.0),
+            Value::Num(3.0),
+            Value::Bool(true),
+        ),
+        (
+            raw_nums.clone(),
+            Value::Num(0.0),
+            Value::Num(1.0),
+            Value::Bool(false),
+        ),
+        (
+            Value::Num(0.0),
+            Value::Num(0.0),
+            Value::Num(1.0),
+            Value::Bool(false),
+        ),
+        (
+            Value::Num(2.5),
+            Value::Num(0.0),
+            Value::Num(1.0),
+            Value::Bool(false),
+        ),
+        (
+            Value::Num(2.5),
+            Value::Num(0.0),
+            Value::Num(1.0),
+            Value::Bool(true),
+        ),
+    ] {
+        let args = vec![n.clone(), s.clone(), step.clone(), rev.clone()];
+        assert!(
+            same_result(
+                &super::regions::count_val(&n, &s, &step, &rev),
+                &interpret_with_deps_consts(cnt_ref, &[], &consts, &args)
+            ),
+            "count diverged on {args:?}"
+        );
+    }
+
+    // mean — numbers, vectors (the vector-sum lane), empty (raise), inconsistent (raise).
+    let mean_ref = pin_reference_of("mean").unwrap();
+    let mean_deps = [
+        reference_of("sum").unwrap(),
+        reference_of("_sum").unwrap(),
+        reference_of("is_consistent").unwrap(),
+        reference_of("_list_pattern").unwrap(),
+        reference_of("same_shape").unwrap(),
+        reference_of("is_finite").unwrap(),
+        reference_of("is_nan").unwrap(),
+        reference_of("is_vector").unwrap(),
+    ];
+    let vecs = Value::list(vec![p(&[1.0, 2.0]), p(&[3.0, 4.0]), p(&[5.0, 6.0])]);
+    let mixed = Value::list(vec![Value::Num(1.0), p(&[2.0, 3.0])]);
+    for v in [
+        &raw_nums,
+        &vecs,
+        &mixed,
+        &Value::list(vec![]),
+        &Value::Num(2.0),
+    ] {
+        assert!(
+            same_result(
+                &super::regions::mean_val(v),
+                &interpret_with_deps_consts(mean_ref, &mean_deps, &consts, std::slice::from_ref(v))
+            ),
+            "mean diverged on {v:?}"
+        );
+    }
+
+    // min_index / max_index — plain, ties (first match), negatives, non-vector (raise).
+    let iv_deps = [
+        reference_of("is_vector").unwrap(),
+        reference_of("is_finite").unwrap(),
+        reference_of("is_nan").unwrap(),
+        reference_of("all_nonzero").unwrap(),
+        reference_of("idx").unwrap(),
+        reference_of("posmod").unwrap(),
+    ];
+    let mini_ref = pin_reference_of("min_index").unwrap();
+    let maxi_ref = pin_reference_of("max_index").unwrap();
+    for v in [
+        &p(&[3.0, 1.0, 2.0]),
+        &p(&[1.0, 1.0, 1.0]),
+        &p(&[-5.0, 0.0, -5.0]),
+        &raw_nums,
+        &mixed,
+        &Value::Num(4.0),
+    ] {
+        assert!(
+            same_result(
+                &super::regions::min_index_val(v),
+                &interpret_with_deps_consts(mini_ref, &iv_deps, &consts, std::slice::from_ref(v))
+            ),
+            "min_index diverged on {v:?}"
+        );
+        assert!(
+            same_result(
+                &super::regions::max_index_val(v),
+                &interpret_with_deps_consts(maxi_ref, &iv_deps, &consts, std::slice::from_ref(v))
+            ),
+            "max_index diverged on {v:?}"
+        );
+    }
+
+    // transpose (1-arg shape) — matrix, vector pass-through, ragged (raise), empty (raise).
+    let tr_ref = pin_reference_of("transpose").unwrap();
+    let tr_deps: Vec<&str> = iv_deps.to_vec();
+    for m in [
+        &square_open,
+        &vecs,
+        &raw_nums,
+        &ragged,
+        &Value::list(vec![]),
+        &Value::Num(1.0),
+    ] {
+        assert!(
+            same_result(
+                &super::regions::transpose_val(m),
+                &interpret_with_deps_consts(tr_ref, &tr_deps, &consts, std::slice::from_ref(m))
+            ),
+            "transpose diverged on {m:?}"
+        );
+    }
+
+    // pointlist_bounds — 2D/3D, -0.0 coords (the 4-lane dot sign-of-zero case), invalid (raise).
+    let pb_ref = pin_reference_of("pointlist_bounds").unwrap();
+    let pb_deps: Vec<&str> = iv_deps
+        .iter()
+        .copied()
+        .chain([
+            reference_of("is_path").unwrap(),
+            reference_of("is_matrix").unwrap(),
+            reference_of("is_consistent").unwrap(),
+            reference_of("_list_pattern").unwrap(),
+            reference_of("same_shape").unwrap(),
+            reference_of("in_list").unwrap(),
+            reference_of("force_list").unwrap(),
+            reference_of("ident").unwrap(),
+            pin_reference_of("transpose").unwrap(),
+        ])
+        .collect();
+    let pts_2d = Value::list(vec![p(&[1.0, -2.0]), p(&[-3.0, 4.0]), p(&[0.5, 0.5])]);
+    let pts_negz = Value::list(vec![p(&[-0.0, 1.0]), p(&[2.0, -0.0])]);
+    let pts_3d = Value::list(vec![p(&[1.0, 2.0, 3.0]), p(&[-1.0, -2.0, -3.0])]);
+    for pts in [&pts_2d, &pts_negz, &pts_3d, &raw_nums, &Value::Num(1.0)] {
+        assert!(
+            same_result(
+                &super::regions::pointlist_bounds_val(pts),
+                &interpret_with_deps_consts(pb_ref, &pb_deps, &consts, std::slice::from_ref(pts))
+            ),
+            "pointlist_bounds diverged on {pts:?}"
+        );
+    }
+
+    // _sort_vectors — shuffles, duplicate first columns (the _i+1 lane), -0.0/0.0 ties, NaN cells
+    // (rows in NO partition — dropped), ragged rows, singletons.
+    let sv_ref = pin_reference_of("_sort_vectors").unwrap();
+    let shuffled = Value::list(vec![
+        p(&[3.0, 1.0]),
+        p(&[1.0, 9.0]),
+        p(&[1.0, 2.0]),
+        p(&[2.0, 0.0]),
+        p(&[1.0, 2.0]),
+    ]);
+    let zero_ties = Value::list(vec![p(&[0.0, 2.0]), p(&[-0.0, 1.0]), p(&[0.0, 0.0])]);
+    let with_nan = Value::list(vec![p(&[1.0, 2.0]), p(&[f64::NAN, 0.0]), p(&[0.5, 1.0])]);
+    let ragged_rows = Value::list(vec![p(&[2.0, 1.0]), p(&[2.0]), p(&[1.0, 5.0, 9.0])]);
+    for arr in [
+        &shuffled,
+        &zero_ties,
+        &with_nan,
+        &ragged_rows,
+        &Value::list(vec![]),
+        &one_pt,
+    ] {
+        assert!(
+            same_result(
+                &super::regions::sort_vectors_val(arr),
+                &interpret_with_deps_consts(sv_ref, &[], &consts, std::slice::from_ref(arr))
+            ),
+            "_sort_vectors diverged on {arr:?}"
+        );
+    }
+}

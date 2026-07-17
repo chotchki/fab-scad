@@ -198,6 +198,7 @@ added 2026-07-07.
 - [x] O.7 - O.7 - Residual band 5 (medium bodies, ~7s): _find_anchor? _group_sort_by_index, _vnf_centroid, rot, _get_ear, vector_axis, affine3d_rot_from_to + small fry (in_list, is_path, constrain, apply) — OR route to P.1.6 JIT list ABI; the monsters (_region_region_intersections+_point_dist 14.2s) decide the JIT-vs-intrinsic split
 - [x] O.8 - O.8 - Value-const guard: Entry.consts_v (name, fn()->Value) bit-compared against the home-scope binding at arm time — unlocks the non-numeric-constant tier (_NO_ARG, UP, RIGHT) for hand intrinsics (wasm gets every win, unlike the JIT)
 - [x] O.9 - O.9 - The unlocked band: vector_axis, affine3d_rot_from_to (+v_theta/v_abs/point2d/affine3d_identity deps), then apply (determinant/det2-4 + vnf_reverse_faces + BOSL2-reverse chain), then rot (move/rot_inverse/affine3d_rot_by_axis + _NO_ARG) — cut per dep-tree, each with battery + wire check
+- [ ] O.10 - O.10 - The region-monster band: _region_region_intersections + its full reachable closure as hand intrinsics (the P.1.6 resolution — ~9.7s/6 calls on shoe_holder)
 ## Phase P - P - Cranelift JIT + CSG cache (desktop)
 added 2026-07-16.
 - [ ] P.1 - P.1 - Cranelift JIT for the numeric long tail (desktop)
@@ -208,8 +209,8 @@ added 2026-07-16.
   - [x] P.1.4 - P.1.4 - Extend the numeric subset (ternary, comparisons, transcendental calls)
   - [x] P.1.5 - P.1.5 - Measure + coverage report
     - [x] P.1.5.1 - P.1.5.1 - LTO experiment: fat LTO + codegen-units=1 vs the default release profile (chotchki's ask) — measured on the heavies + mid models, vs-OpenSCAD implication from baseline oracle times
-    - [ ] P.1.5.2 - P.1.5.2 - Interpreter Geo-tree nondeterminism (pill_holder flake): bistable fingerprint on the PURE-interpreter side, doctrine #36 violation — hunt with FAB_GEO_DUMP, root-cause, fix
-  - [ ] P.1.6 - P.1.6 - JIT list/vector ABI (scalarize A/B/C, sink-return D)
+    - [x] P.1.5.2 - P.1.5.2 - Interpreter Geo-tree nondeterminism (pill_holder flake): bistable fingerprint on the PURE-interpreter side, doctrine #36 violation — hunt with FAB_GEO_DUMP, root-cause, fix
+  - [x] P.1.6 - P.1.6 - JIT list/vector ABI (scalarize A/B/C, sink-return D)
 - [x] P.2 - P.2 - Content-addressed CSG cache — DONE cf1ff16a as the kernel-level Solid memo (the rung BU.7's measurement picked): per-build content-addressed memo in build_geo/build_geo_parts (ONE memo spans parts — sliced models share the base between parts), prepass-counted so only will-recur content is retained, deep-eq verified per hit (collision = re-render, never a wrong mesh), FAB_GEO_CACHE=0 opt-out + =verify diagnosis mode. THE HUNT: silverwear diverged 140 tris — ops never MINT ids so update_reference's Q-offset is one constant per build; served copies sharing an id-set collide in union trees and same_face merges ACROSS copies; fixed with fresh_instance-on-serve (Mesh::as_fresh_instance re-mints instance ids, classes preserved). All four heavy models bitwise-identical on/off. Sweep: slice_parts 8.0s→0.59s (−92%), bowtie −77%, garage −53%, desktop_holder TIMEOUT→solid; wall-total 124.0s vs OpenSCAD 250.0s = 2.02× FASTER (day-start: 0.96×), median 2.69×, 75/109 both-rendered; baseline re-frozen
 ## Phase Q - Fuzzing the evaluator + JIT (miri/Kani can't execute native code — fuzzing runs it, ASan checks it)
 - [x] Q.1 - Q.1 - eval fuzz target: parse→eval→geometry→mesh under ASan (the interpreter miri-substitute)

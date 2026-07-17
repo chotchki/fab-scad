@@ -688,3 +688,34 @@ Aggregate fab wall **94.9s → 77.2s** (oracle 245.8s): the ratio moves **2.63×
 webcam_holder −39%, shower_holder_mini −52%, traced_holder −33% — zero regressions. The full-day arc, one
 harness, same 109 models: **0.96× → 2.02× (kernel+caches) → 2.63× (O.5) → 3.18× (O.6+O.7)**, with fab
 rendering 10 models OpenSCAD can't vs 8 the other way.
+
+## O.8 + O.9 — the Value-const guard and the unlocked band (2026-07-16, same day)
+
+**O.8**: `Entry.consts_v` — Value-typed constant guards (fn-built expected values, bit-compared with exact
+variant matching). chotchki's call: keep hand-writing intrinsics rather than leaning on the JIT for this
+tier, because intrinsics are wasm-safe — the web layer inherits every win, where Cranelift is native-only.
+
+**O.9** (13 new natives in three trees): `vector_axis` + `affine3d_rot_from_to` (first UP/RIGHT consumers,
+with `v_abs`/`v_theta`/`point2d`/`affine3d_identity` as entry-deps), `apply` (the determinant chain pinned —
+det4's 24-term polynomial in source order — plus BOSL2's `reverse` and its `str_join` string lane, which a
+degenerate-but-valid VNF can genuinely reach), and `rot` — the affine family's dispatcher, whose closure
+needed eight more pins (`move`, `rot_inverse`, `hstack`, `all`, `_all_bool`, `is_func`, `min_length`,
+`max_length`) but whose native composes only already-landed pieces. The `_NO_ARG`/`UP`/`RIGHT` triple ARMS
+against the vendored library.
+
+Also this stretch: `intrinsics.rs` (5644 lines) split into the `intrinsics/` module tree (registry+plumbing
+in mod.rs, natives by domain, the fast==slow harness in tests.rs) — pure motion, verified line-exact.
+
+**The state of the tail**: window_air_cover's interpreted user-fn self is now **2.85s** — it was 37.0s when
+O.4 first measured it. The whole top-30 worklist from that first profile is native. What remains
+interpreted: the shoe_holder region monster (`_region_region_intersections`, ~9.7s/6 calls — still THE
+P.1.6 case), `_find_anchor` (443 lines), and a thin tail (`_triangulate` 0.6s, `_compute_spin` 0.4s,
+`zrot`/`_lsw_*` wrappers ~1s combined) whose next band would be diminishing returns against the JIT rungs.
+
+51 intrinsics (plus the 3 mechanism POCs) and 23 reference pins live. Corpus 901/901 and every golden lane green at each of the 8 commits.
+
+### O.9's sweep verdict (run-1784247593, baseline re-frozen)
+
+Fab wall **77.2s → 74.7s**, ratio **3.18× → 3.32×** (median **3.89×**), zero regressions — the O.8/O.9 wins
+spread thin across the whole BOSL2-heavy set rather than concentrating (no single model crossed the delta
+gate). The day's full arc, one harness, same 109 models: **0.96× → 3.32×**, with fab wall 245s → 74.7s.

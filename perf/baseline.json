@@ -1,153 +1,153 @@
 {
   "schema": 1,
-  "captured_epoch_s": 1784243538,
+  "captured_epoch_s": 1784247593,
   "budget_s": 30,
   "rows": [
     {
       "model": "models/Underdesk/Underdesk.scad",
-      "fab_ms": 123,
+      "fab_ms": 103,
       "fab_kind": "solid",
-      "oracle_ms": 937,
+      "oracle_ms": 952,
       "oracle_kind": "solid"
     },
     {
       "model": "models/Underdesk/angled_laptop_holder.scad",
-      "fab_ms": 250,
+      "fab_ms": 227,
       "fab_kind": "solid",
-      "oracle_ms": 823,
+      "oracle_ms": 834,
       "oracle_kind": "solid"
     },
     {
       "model": "models/ams_stackfix/ams_stackfix.scad",
-      "fab_ms": 68,
+      "fab_ms": 65,
       "fab_kind": "solid",
-      "oracle_ms": 276,
+      "oracle_ms": 297,
       "oracle_kind": "solid"
     },
     {
       "model": "models/ams_stackfix/drill_guide.scad",
-      "fab_ms": 57,
+      "fab_ms": 56,
       "fab_kind": "solid",
-      "oracle_ms": 222,
+      "oracle_ms": 180,
       "oracle_kind": "solid"
     },
     {
       "model": "models/ashtray/ashtray.scad",
-      "fab_ms": 194,
+      "fab_ms": 188,
       "fab_kind": "solid",
-      "oracle_ms": 670,
+      "oracle_ms": 706,
       "oracle_kind": "solid"
     },
     {
       "model": "models/bosl2_bug.scad",
-      "fab_ms": 59,
+      "fab_ms": 57,
       "fab_kind": "solid",
-      "oracle_ms": 220,
+      "oracle_ms": 231,
       "oracle_kind": "solid"
     },
     {
       "model": "models/bowtie/3d_shape.scad",
-      "fab_ms": 286,
+      "fab_ms": 288,
       "fab_kind": "solid",
-      "oracle_ms": 589,
+      "oracle_ms": 592,
       "oracle_kind": "solid"
     },
     {
       "model": "models/bowtie/bowtie.scad",
-      "fab_ms": 45,
+      "fab_ms": 46,
       "fab_kind": "solid",
-      "oracle_ms": 164,
+      "oracle_ms": 181,
       "oracle_kind": "solid"
     },
     {
       "model": "models/bowtie/second_approach.scad",
-      "fab_ms": 5223,
+      "fab_ms": 5249,
       "fab_kind": "solid",
-      "oracle_ms": 2170,
+      "oracle_ms": 2208,
       "oracle_kind": "solid"
     },
     {
       "model": "models/buttons/buttons.scad",
-      "fab_ms": 266,
+      "fab_ms": 262,
       "fab_kind": "solid",
-      "oracle_ms": 469,
+      "oracle_ms": 437,
       "oracle_kind": "solid"
     },
     {
       "model": "models/cart_brace/cart_brace.scad",
-      "fab_ms": 46,
+      "fab_ms": 45,
       "fab_kind": "empty",
       "oracle_ms": null,
       "oracle_kind": "rejected"
     },
     {
       "model": "models/cart_brace/corner_brace.scad",
-      "fab_ms": 93,
+      "fab_ms": 89,
       "fab_kind": "solid",
-      "oracle_ms": 444,
+      "oracle_ms": 475,
       "oracle_kind": "solid"
     },
     {
       "model": "models/ceiling_bracket/ceiling_bracket.scad",
-      "fab_ms": 50,
+      "fab_ms": 49,
       "fab_kind": "solid",
-      "oracle_ms": 162,
+      "oracle_ms": 180,
       "oracle_kind": "solid"
     },
     {
       "model": "models/ceiling_bracket/ceiling_pry_wedge.scad",
-      "fab_ms": 83,
+      "fab_ms": 81,
       "fab_kind": "solid",
-      "oracle_ms": 394,
+      "oracle_ms": 369,
       "oracle_kind": "solid"
     },
     {
       "model": "models/circle_loom/circle_loom.scad",
-      "fab_ms": 8427,
+      "fab_ms": 7650,
       "fab_kind": "solid",
-      "oracle_ms": 20686,
+      "oracle_ms": 20513,
       "oracle_kind": "solid"
     },
     {
       "model": "models/controller_charger_holder/controller_charger_holder.scad",
       "fab_ms": null,
       "fab_kind": "rejected",
-      "oracle_ms": 1034,
+      "oracle_ms": 1021,
       "oracle_kind": "solid"
     },
     {
       "model": "models/controller_charger_holder/hanging_strips.scad",
-      "fab_ms": 182,
+      "fab_ms": 151,
       "fab_kind": "solid",
-      "oracle_ms": 778,
+      "oracle_ms": 729,
       "oracle_kind": "solid"
     },
     {
       "model": "models/controller_charger_holder/traced_holder.scad",
-      "fab_ms": 5439,
+      "fab_ms": 4401,
       "fab_kind": "solid",
       "oracle_ms": null,
       "oracle_kind": "TIMEOUT"
     },
     {
       "model": "models/desk_hanging/desk_hanging.scad",
-      "fab_ms": 122,
+      "fab_ms": 110,
       "fab_kind": "solid",
-      "oracle_ms": 719,
+      "oracle_ms": 728,
       "oracle_kind": "solid"
     },
     {
       "model": "models/desk_side/desk_side.scad",
       "fab_ms": null,
       "fab_kind": "rejected",
-      "oracle_ms": 19215,
+      "oracle_ms": 19202,
       "oracle_kind": "solid"
     },
     {
       "model": "models/dowels/dowels.scad",
-      "fab_ms": 111,
+      "fab_ms": 105,
       "fab_kind": "solid",
-      "oracle_ms": 345,
+      "oracle_ms": 313,
       "oracle_kind": "solid"
     },
     {
@@ -159,23 +159,23 @@
     },
     {
       "model": "models/dry_cabinet/front_frame_back_brace.scad",
-      "fab_ms": 66,
+      "fab_ms": 63,
       "fab_kind": "solid",
-      "oracle_ms": 273,
+      "oracle_ms": 241,
       "oracle_kind": "solid"
     },
     {
       "model": "models/dry_cabinet/handle.scad",
-      "fab_ms": 345,
+      "fab_ms": 332,
       "fab_kind": "solid",
-      "oracle_ms": 925,
+      "oracle_ms": 894,
       "oracle_kind": "solid"
     },
     {
       "model": "models/dry_cabinet/magnet_tester.scad",
-      "fab_ms": 61,
+      "fab_ms": 57,
       "fab_kind": "solid",
-      "oracle_ms": 278,
+      "oracle_ms": 243,
       "oracle_kind": "solid"
     },
     {
@@ -189,63 +189,63 @@
       "model": "models/dry_cabinet/unified.scad",
       "fab_ms": null,
       "fab_kind": "rejected",
-      "oracle_ms": 8425,
+      "oracle_ms": 8331,
       "oracle_kind": "solid"
     },
     {
       "model": "models/dutch_oven/small_fix.scad",
-      "fab_ms": 68,
+      "fab_ms": 66,
       "fab_kind": "solid",
-      "oracle_ms": 231,
+      "oracle_ms": 257,
       "oracle_kind": "solid"
     },
     {
       "model": "models/dyson_holder/dyson_holder.scad",
-      "fab_ms": 82,
+      "fab_ms": 78,
       "fab_kind": "solid",
-      "oracle_ms": 280,
+      "oracle_ms": 299,
       "oracle_kind": "solid"
     },
     {
       "model": "models/falcon_mount/falcon_mount.scad",
       "fab_ms": null,
       "fab_kind": "rejected",
-      "oracle_ms": 996,
+      "oracle_ms": 955,
       "oracle_kind": "solid"
     },
     {
       "model": "models/flat_spring/flat_spring.scad",
-      "fab_ms": 714,
+      "fab_ms": 615,
       "fab_kind": "solid",
-      "oracle_ms": 1584,
+      "oracle_ms": 1556,
       "oracle_kind": "solid"
     },
     {
       "model": "models/garage_door/garage_door.scad",
-      "fab_ms": 2756,
+      "fab_ms": 2572,
       "fab_kind": "solid",
-      "oracle_ms": 5599,
+      "oracle_ms": 5590,
       "oracle_kind": "solid"
     },
     {
       "model": "models/homepod_mount/homepod_mount.scad",
-      "fab_ms": 227,
+      "fab_ms": 212,
       "fab_kind": "solid",
-      "oracle_ms": 629,
+      "oracle_ms": 623,
       "oracle_kind": "solid"
     },
     {
       "model": "models/honeycomb/custom-honeycomb-wall-v2.scad",
-      "fab_ms": 42,
+      "fab_ms": 41,
       "fab_kind": "solid",
-      "oracle_ms": 117,
+      "oracle_ms": 128,
       "oracle_kind": "solid"
     },
     {
       "model": "models/hydwasted/handle.scad",
-      "fab_ms": 3734,
+      "fab_ms": 3627,
       "fab_kind": "solid",
-      "oracle_ms": 6275,
+      "oracle_ms": 6198,
       "oracle_kind": "solid"
     },
     {
@@ -264,35 +264,35 @@
     },
     {
       "model": "models/keyboard_tent/keyboard_tent.scad",
-      "fab_ms": 396,
+      "fab_ms": 374,
       "fab_kind": "solid",
-      "oracle_ms": 2336,
+      "oracle_ms": 2324,
       "oracle_kind": "solid"
     },
     {
       "model": "models/keyboard_tent/keyboard_tent_refine.scad",
-      "fab_ms": 501,
+      "fab_ms": 485,
       "fab_kind": "solid",
-      "oracle_ms": 2572,
+      "oracle_ms": 2614,
       "oracle_kind": "solid"
     },
     {
       "model": "models/keyboard_tent/rotation_test.scad",
       "fab_ms": 49,
       "fab_kind": "solid",
-      "oracle_ms": 167,
+      "oracle_ms": 166,
       "oracle_kind": "solid"
     },
     {
       "model": "models/kid_desk_holder/kid_desktop_holder.scad",
-      "fab_ms": 595,
+      "fab_ms": 588,
       "fab_kind": "solid",
-      "oracle_ms": 886,
+      "oracle_ms": 882,
       "oracle_kind": "solid"
     },
     {
       "model": "models/license_plate_holder/kirby_holder.scad",
-      "fab_ms": 4584,
+      "fab_ms": 3785,
       "fab_kind": "solid",
       "oracle_ms": null,
       "oracle_kind": "TIMEOUT"
@@ -308,19 +308,19 @@
       "model": "models/license_plate_holder/spaceballs_holder.scad",
       "fab_ms": 131,
       "fab_kind": "solid",
-      "oracle_ms": 336,
+      "oracle_ms": 331,
       "oracle_kind": "solid"
     },
     {
       "model": "models/logan_lunchbox/logan_lunchbox.scad",
       "fab_ms": 47,
       "fab_kind": "solid",
-      "oracle_ms": 162,
+      "oracle_ms": 166,
       "oracle_kind": "solid"
     },
     {
       "model": "models/nail_cure/nail_cure.scad",
-      "fab_ms": 1379,
+      "fab_ms": 1275,
       "fab_kind": "solid",
       "oracle_ms": null,
       "oracle_kind": "TIMEOUT"
@@ -334,37 +334,37 @@
     },
     {
       "model": "models/network_shim/network_shim.scad",
-      "fab_ms": 71,
+      "fab_ms": 66,
       "fab_kind": "solid",
-      "oracle_ms": 277,
+      "oracle_ms": 278,
       "oracle_kind": "solid"
     },
     {
       "model": "models/new_desk/charger_control_holder.scad",
       "fab_ms": null,
       "fab_kind": "rejected",
-      "oracle_ms": 1601,
+      "oracle_ms": 1598,
       "oracle_kind": "solid"
     },
     {
       "model": "models/new_desk/charger_control_holder_v2.scad",
-      "fab_ms": 555,
+      "fab_ms": 533,
       "fab_kind": "solid",
-      "oracle_ms": 933,
+      "oracle_ms": 934,
       "oracle_kind": "solid"
     },
     {
       "model": "models/new_desk/charger_control_holder_v2_alicea.scad",
-      "fab_ms": 1216,
+      "fab_ms": 1056,
       "fab_kind": "solid",
-      "oracle_ms": 2091,
+      "oracle_ms": 2093,
       "oracle_kind": "solid"
     },
     {
       "model": "models/new_desk/cisco_asa_bracket/cisco_asa_bracket.scad",
-      "fab_ms": 232,
+      "fab_ms": 217,
       "fab_kind": "solid",
-      "oracle_ms": 661,
+      "oracle_ms": 659,
       "oracle_kind": "solid"
     },
     {
@@ -383,16 +383,16 @@
     },
     {
       "model": "models/new_desk/desktop_holder/desktop_holder.scad",
-      "fab_ms": 6184,
+      "fab_ms": 6169,
       "fab_kind": "solid",
-      "oracle_ms": 14623,
+      "oracle_ms": 14612,
       "oracle_kind": "solid"
     },
     {
       "model": "models/new_desk/device_holder.scad",
-      "fab_ms": 90,
+      "fab_ms": 89,
       "fab_kind": "solid",
-      "oracle_ms": 279,
+      "oracle_ms": 277,
       "oracle_kind": "solid"
     },
     {
@@ -404,140 +404,140 @@
     },
     {
       "model": "models/new_desk/hp_dock.scad",
-      "fab_ms": 238,
+      "fab_ms": 226,
       "fab_kind": "solid",
-      "oracle_ms": 1070,
+      "oracle_ms": 1064,
       "oracle_kind": "solid"
     },
     {
       "model": "models/new_desk/wire_holder.scad",
-      "fab_ms": 159,
+      "fab_ms": 128,
       "fab_kind": "solid",
-      "oracle_ms": 603,
+      "oracle_ms": 605,
       "oracle_kind": "solid"
     },
     {
       "model": "models/new_desk/wire_holder2.scad",
-      "fab_ms": 224,
+      "fab_ms": 184,
       "fab_kind": "solid",
       "oracle_ms": 834,
       "oracle_kind": "solid"
     },
     {
       "model": "models/new_desk_v2/CVO_holder.scad",
-      "fab_ms": 160,
+      "fab_ms": 151,
       "fab_kind": "solid",
-      "oracle_ms": 626,
+      "oracle_ms": 681,
       "oracle_kind": "solid"
     },
     {
       "model": "models/new_desk_v2/RoundedCornerJig.scad",
       "fab_ms": null,
       "fab_kind": "rejected",
-      "oracle_ms": 113,
+      "oracle_ms": 117,
       "oracle_kind": "solid"
     },
     {
       "model": "models/new_desk_v2/back_jig.scad",
-      "fab_ms": 73,
+      "fab_ms": 64,
       "fab_kind": "solid",
       "oracle_ms": 276,
       "oracle_kind": "solid"
     },
     {
       "model": "models/new_desk_v2/charger_control_holder_v3.scad",
-      "fab_ms": 1128,
+      "fab_ms": 966,
       "fab_kind": "solid",
-      "oracle_ms": 2208,
+      "oracle_ms": 2201,
       "oracle_kind": "solid"
     },
     {
       "model": "models/new_desk_v2/under_support/under_support.scad",
-      "fab_ms": 108,
+      "fab_ms": 100,
       "fab_kind": "solid",
-      "oracle_ms": 448,
+      "oracle_ms": 450,
       "oracle_kind": "solid"
     },
     {
       "model": "models/pill_holder/pill_holder.scad",
-      "fab_ms": 3088,
+      "fab_ms": 2911,
       "fab_kind": "solid",
-      "oracle_ms": 14553,
+      "oracle_ms": 14745,
       "oracle_kind": "solid"
     },
     {
       "model": "models/pill_holder/pill_holder_angled_cup.scad",
-      "fab_ms": 8770,
+      "fab_ms": 8537,
       "fab_kind": "solid",
       "oracle_ms": null,
       "oracle_kind": "TIMEOUT"
     },
     {
       "model": "models/pill_holder/pill_holder_combined_tray.scad",
-      "fab_ms": 2159,
+      "fab_ms": 1987,
       "fab_kind": "solid",
-      "oracle_ms": 8918,
+      "oracle_ms": 8974,
       "oracle_kind": "solid"
     },
     {
       "model": "models/pill_holder/pill_holder_smaller.scad",
-      "fab_ms": 1284,
+      "fab_ms": 1185,
       "fab_kind": "solid",
-      "oracle_ms": 5043,
+      "oracle_ms": 5122,
       "oracle_kind": "solid"
     },
     {
       "model": "models/pin_washers/pin_washers.scad",
-      "fab_ms": 91,
+      "fab_ms": 93,
       "fab_kind": "solid",
-      "oracle_ms": 282,
+      "oracle_ms": 274,
       "oracle_kind": "solid"
     },
     {
       "model": "models/poop_chute/poop_chute.scad",
-      "fab_ms": 55,
+      "fab_ms": 53,
+      "fab_kind": "solid",
+      "oracle_ms": 222,
+      "oracle_kind": "solid"
+    },
+    {
+      "model": "models/print_in_place_chain/custom_links.scad",
+      "fab_ms": 9616,
+      "fab_kind": "solid",
+      "oracle_ms": 17978,
+      "oracle_kind": "solid"
+    },
+    {
+      "model": "models/printer_holder/foot_holder.scad",
+      "fab_ms": 58,
       "fab_kind": "solid",
       "oracle_ms": 221,
       "oracle_kind": "solid"
     },
     {
-      "model": "models/print_in_place_chain/custom_links.scad",
-      "fab_ms": 10188,
-      "fab_kind": "solid",
-      "oracle_ms": 17860,
-      "oracle_kind": "solid"
-    },
-    {
-      "model": "models/printer_holder/foot_holder.scad",
-      "fab_ms": 59,
-      "fab_kind": "solid",
-      "oracle_ms": 214,
-      "oracle_kind": "solid"
-    },
-    {
       "model": "models/printer_holder/printer_holder.scad",
-      "fab_ms": 132,
+      "fab_ms": 110,
       "fab_kind": "solid",
-      "oracle_ms": 551,
+      "oracle_ms": 555,
       "oracle_kind": "solid"
     },
     {
       "model": "models/seltzer_fix/seltzer_fix.scad",
-      "fab_ms": 112,
+      "fab_ms": 94,
       "fab_kind": "solid",
-      "oracle_ms": 388,
+      "oracle_ms": 390,
       "oracle_kind": "solid"
     },
     {
       "model": "models/shelf_bracket/bracket.scad",
-      "fab_ms": 165,
+      "fab_ms": 132,
       "fab_kind": "solid",
-      "oracle_ms": 671,
+      "oracle_ms": 611,
       "oracle_kind": "solid"
     },
     {
       "model": "models/shoe_holder/bosl2_cutpath.scad",
-      "fab_ms": 50,
+      "fab_ms": 43,
       "fab_kind": "empty",
       "oracle_ms": null,
       "oracle_kind": "rejected"
@@ -551,9 +551,9 @@
     },
     {
       "model": "models/shoe_holder/leg_gap.scad",
-      "fab_ms": 75,
+      "fab_ms": 77,
       "fab_kind": "solid",
-      "oracle_ms": 439,
+      "oracle_ms": 710,
       "oracle_kind": "solid"
     },
     {
@@ -565,9 +565,9 @@
     },
     {
       "model": "models/shoe_holder/shoe_holder.scad",
-      "fab_ms": 8158,
+      "fab_ms": 8988,
       "fab_kind": "solid",
-      "oracle_ms": 21195,
+      "oracle_ms": 21625,
       "oracle_kind": "solid"
     },
     {
@@ -579,9 +579,9 @@
     },
     {
       "model": "models/shoe_holder/uncut_supported_hardened.scad",
-      "fab_ms": 822,
+      "fab_ms": 739,
       "fab_kind": "solid",
-      "oracle_ms": 3913,
+      "oracle_ms": 3979,
       "oracle_kind": "solid"
     },
     {
@@ -593,28 +593,28 @@
     },
     {
       "model": "models/shower_holder/shower_holder.scad",
-      "fab_ms": 136,
+      "fab_ms": 129,
       "fab_kind": "solid",
-      "oracle_ms": 1592,
+      "oracle_ms": 1623,
       "oracle_kind": "solid"
     },
     {
       "model": "models/shower_holder/shower_holder_mini.scad",
-      "fab_ms": 2427,
+      "fab_ms": 2262,
       "fab_kind": "solid",
-      "oracle_ms": 11463,
+      "oracle_ms": 11580,
       "oracle_kind": "solid"
     },
     {
       "model": "models/silverwear/silverwear.scad",
-      "fab_ms": 22426,
+      "fab_ms": 22059,
       "fab_kind": "solid",
       "oracle_ms": null,
       "oracle_kind": "TIMEOUT"
     },
     {
       "model": "models/silverwear/silverwear_5part.scad",
-      "fab_ms": 18413,
+      "fab_ms": 18319,
       "fab_kind": "solid",
       "oracle_ms": null,
       "oracle_kind": "TIMEOUT"
@@ -628,30 +628,30 @@
     },
     {
       "model": "models/slop_test/slop_test.scad",
-      "fab_ms": 127,
+      "fab_ms": 123,
       "fab_kind": "solid",
       "oracle_ms": 282,
       "oracle_kind": "solid"
     },
     {
       "model": "models/trash_can/trash_can.scad",
-      "fab_ms": 101,
+      "fab_ms": 98,
       "fab_kind": "solid",
       "oracle_ms": 557,
       "oracle_kind": "solid"
     },
     {
       "model": "models/under_sink_guide/under_sink_guide.scad",
-      "fab_ms": 4494,
+      "fab_ms": 4538,
       "fab_kind": "solid",
-      "oracle_ms": 5614,
+      "oracle_ms": 5679,
       "oracle_kind": "solid"
     },
     {
       "model": "models/wall_screen/.fab-preview-slice_parts.scad",
-      "fab_ms": 502,
+      "fab_ms": 493,
       "fab_kind": "solid",
-      "oracle_ms": 25179,
+      "oracle_ms": 25520,
       "oracle_kind": "solid"
     },
     {
@@ -663,37 +663,37 @@
     },
     {
       "model": "models/wall_screen/slice_parts.scad",
-      "fab_ms": 494,
+      "fab_ms": 495,
       "fab_kind": "solid",
-      "oracle_ms": 25588,
+      "oracle_ms": 26023,
       "oracle_kind": "solid"
     },
     {
       "model": "models/wall_screen/things/.fab-preview-monitor.scad",
-      "fab_ms": 117,
+      "fab_ms": 118,
       "fab_kind": "solid",
-      "oracle_ms": 441,
+      "oracle_ms": 494,
       "oracle_kind": "solid"
     },
     {
       "model": "models/webcam_holder/webcam_holder.scad",
-      "fab_ms": 4823,
+      "fab_ms": 4727,
       "fab_kind": "solid",
-      "oracle_ms": 13833,
+      "oracle_ms": 14109,
       "oracle_kind": "solid"
     },
     {
       "model": "models/window_air_cover/window_air_cover.scad",
-      "fab_ms": 13219,
+      "fab_ms": 11774,
       "fab_kind": "solid",
       "oracle_ms": null,
-      "oracle_kind": "rejected"
+      "oracle_kind": "TIMEOUT"
     },
     {
       "model": "models/window_light_blocker/.fab-preview-window_light_blocker.scad",
-      "fab_ms": 456,
+      "fab_ms": 401,
       "fab_kind": "solid",
-      "oracle_ms": 3032,
+      "oracle_ms": 3025,
       "oracle_kind": "solid"
     },
     {
@@ -705,9 +705,9 @@
     },
     {
       "model": "models/window_light_blocker/headboard/headboard_light_blocker.scad",
-      "fab_ms": 365,
+      "fab_ms": 324,
       "fab_kind": "solid",
-      "oracle_ms": 2026,
+      "oracle_ms": 2009,
       "oracle_kind": "solid"
     },
     {
@@ -719,16 +719,16 @@
     },
     {
       "model": "models/window_light_blocker/top_support.scad",
-      "fab_ms": 240,
+      "fab_ms": 238,
       "fab_kind": "solid",
-      "oracle_ms": 548,
+      "oracle_ms": 551,
       "oracle_kind": "solid"
     },
     {
       "model": "models/window_light_blocker/window_light_blocker.scad",
-      "fab_ms": 440,
+      "fab_ms": 402,
       "fab_kind": "solid",
-      "oracle_ms": 3023,
+      "oracle_ms": 3075,
       "oracle_kind": "solid"
     },
     {
@@ -756,14 +756,14 @@
       "model": "models/window_stopper/window_stopper.scad",
       "fab_ms": null,
       "fab_kind": "rejected",
-      "oracle_ms": 3307,
+      "oracle_ms": 3322,
       "oracle_kind": "solid"
     },
     {
       "model": "models/yes_no_button/yes_no_button.scad",
-      "fab_ms": 160,
+      "fab_ms": 155,
       "fab_kind": "solid",
-      "oracle_ms": 483,
+      "oracle_ms": 474,
       "oracle_kind": "solid"
     }
   ]

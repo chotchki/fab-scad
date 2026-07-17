@@ -501,7 +501,7 @@ fn intersect12_impl<const EXPAND_P: bool, const FORWARD: bool>(
     b_collider: &Collider,
 ) -> Intersections {
     let a = if FORWARD { in_p } else { in_q };
-    let t = std::time::Instant::now();
+    let t = crate::probe::ProbeClock::start();
 
     // Map each edge (query) to its intersection hits, INDEPENDENTLY — the per-query BVH traversal is a
     // pure read + `kernel12` is a pure fn, so this is a deterministic `par::map_collect` (parallel with
@@ -542,7 +542,7 @@ fn intersect12_impl<const EXPAND_P: bool, const FORWARD: bool>(
             result.v12.push(h.vert);
         }
     }
-    tracing::debug!(target: "manifold::boolean", forward = FORWARD, ms = t.elapsed().as_millis() as u64, cand_pairs = n_pairs, hits = result.p1q2.len(), "intersect12");
+    tracing::debug!(target: "manifold::boolean", forward = FORWARD, ms = t.elapsed_ms(), cand_pairs = n_pairs, hits = result.p1q2.len(), "intersect12");
 
     // Sort by the edge column (`index`), then the other, exactly as the C++ stable_sort comparator.
     // Each (edge, face) pair is unique, so the key is total and the permutation is deterministic.
@@ -643,7 +643,7 @@ fn winding03_impl<const EXPAND_P: bool, const FORWARD: bool>(
     // the sum is INTEGER (order-independent) — so this maps deterministically (`par::map_collect`, parallel
     // with `par` on). The per-rep contribution is scattered back afterward, no cross-thread write.
     let mut w03 = vec![0i32; a.num_vert()];
-    let t = std::time::Instant::now();
+    let t = crate::probe::ProbeClock::start();
     let sign = if FORWARD { 1 } else { -1 };
     let reps: Vec<usize> = (0..verts.len()).collect();
     let contrib: Vec<RepWinding> = crate::par::map_collect(&reps, |&i| {
@@ -667,7 +667,7 @@ fn winding03_impl<const EXPAND_P: bool, const FORWARD: bool>(
         n_pairs += rw.overlaps;
         w03[verts[i]] = rw.winding; // each rep is a distinct root vert → assignment, not accumulation
     }
-    tracing::debug!(target: "manifold::boolean", forward = FORWARD, ms = t.elapsed().as_millis() as u64, cand_pairs = n_pairs, reps = verts.len(), "winding03");
+    tracing::debug!(target: "manifold::boolean", forward = FORWARD, ms = t.elapsed_ms(), cand_pairs = n_pairs, reps = verts.len(), "winding03");
 
     // Flood the representative's winding to the rest of its component.
     for i in 0..a.num_vert() {

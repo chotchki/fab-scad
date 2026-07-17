@@ -43,6 +43,7 @@ pub mod mesh_ids;
 // 2D offset — the verbatim Clipper2 `ClipperOffset` polygon walk (M.5.4.1): join-corner geometry is
 // engine-DEFINED, so K.6's OpenSCAD-area parity forced a port; i_overlay only finishes the union.
 pub mod offset;
+pub(crate) mod probe;
 // Pillar 1: the deterministic parallel seam (serial when `par` is off).
 pub mod par;
 

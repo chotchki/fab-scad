@@ -888,9 +888,9 @@ fn update_reference(out: &mut Mesh, in_p: &Mesh, in_q: &Mesh) {
 /// Run a full boolean: the [`Boolean3`] intersection stage then the result assembly. This is the R1
 /// tracer entry point (`Manifold::Impl::Boolean` + `Boolean3::Result` fused).
 pub fn boolean(in_p: &Mesh, in_q: &Mesh, op: OpType) -> Mesh {
-    let t = std::time::Instant::now();
+    let t = crate::probe::ProbeClock::start();
     let b3 = Boolean3::new(in_p, in_q, op);
-    tracing::debug!(target: "manifold::boolean", ms = t.elapsed().as_millis() as u64, "Boolean3::new (narrow phase)");
+    tracing::debug!(target: "manifold::boolean", ms = t.elapsed_ms(), "Boolean3::new (narrow phase)");
     result(&b3, in_p, in_q, op)
 }
 
@@ -1102,7 +1102,7 @@ fn result(b3: &Boolean3, in_p: &Mesh, in_q: &Mesh, op: OpType) -> Mesh {
     // `out.face_normal` per-TRIANGLE (each triangle carries its polygon face's normal) and `out.tri_ref`
     // the per-triangle TEMPORARY provenance ref — both read + carried by `simplify_topology`.
     let epsilon = out.epsilon;
-    let t = std::time::Instant::now();
+    let t = crate::probe::ProbeClock::start();
     face2tri(
         &mut out,
         &face_edge,
@@ -1110,7 +1110,7 @@ fn result(b3: &Boolean3, in_p: &Mesh, in_q: &Mesh, op: OpType) -> Mesh {
         &halfedge_ref,
         epsilon,
     );
-    tracing::debug!(target: "manifold::boolean", ms = t.elapsed().as_millis() as u64, tris = out.num_tri(), "face2tri (earclip)");
+    tracing::debug!(target: "manifold::boolean", ms = t.elapsed_ms(), tris = out.num_tri(), "face2tri (earclip)");
 
     // Canonicalize within-face half-edge order (Manifold runs this BEFORE SimplifyTopology) so the
     // collapse cascade visits edges in the same sequence C++ does — without it the surgery gets stuck at
@@ -1132,17 +1132,17 @@ fn result(b3: &Boolean3, in_p: &Mesh, in_q: &Mesh, op: OpType) -> Mesh {
     // WITHOUT moving the non-intersecting input geometry. New intersection verts begin at `n_pv + n_qv`
     // (retained P + retained Q); only those may collapse. Also compacts the marked-removed geometry (it
     // subsumes the old GATE-A `remove_unreferenced_verts`) and rebuilds the vertex normals.
-    let t = std::time::Instant::now();
+    let t = crate::probe::ProbeClock::start();
     crate::boolean::edge_op::simplify_topology(&mut out, n_pv + n_qv);
-    tracing::debug!(target: "manifold::boolean", ms = t.elapsed().as_millis() as u64, "simplify_topology");
+    tracing::debug!(target: "manifold::boolean", ms = t.elapsed_ms(), "simplify_topology");
 
-    let t = std::time::Instant::now();
+    let t = crate::probe::ProbeClock::start();
     out.calculate_bbox();
     // Canonicalize vertex + triangle order by Morton code (Manifold's `SortGeometry`) — makes a CHAINED
     // op's intermediate byte-identical to C++'s, so a fold stays bit-identical instead of amplifying
     // order-dependent tie-breaks into a divergent result.
     out.sort_geometry();
-    tracing::debug!(target: "manifold::boolean", ms = t.elapsed().as_millis() as u64, "bbox + sort_geometry");
+    tracing::debug!(target: "manifold::boolean", ms = t.elapsed_ms(), "bbox + sort_geometry");
     out
 }
 

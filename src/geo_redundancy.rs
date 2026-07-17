@@ -33,6 +33,12 @@ struct State {
     wasted_ns: u128,
     /// >0 while inside a repeated subtree — only the outermost repeat books waste.
     repeat_depth: u32,
+    /// The whole-build wall clock, taken when [`reset`] arms. Lives INSIDE the armed state on
+    /// purpose: `std::time::Instant::now()` PANICS on wasm32-unknown-unknown (time is unsupported),
+    /// and the geom worker runs [`build_geo`](crate::backend::build_geo) on exactly that target —
+    /// the web-v0.13.0 boot gate caught an unconditional probe timestamp panicking every browser
+    /// render. Disarmed (env unset — always, on wasm) → no `Instant` is ever constructed.
+    build_start: Instant,
 }
 
 thread_local! {
@@ -54,6 +60,7 @@ pub(crate) fn reset() {
             repeats: 0,
             wasted_ns: 0,
             repeat_depth: 0,
+            build_start: Instant::now(),
         });
     });
 }
@@ -120,7 +127,7 @@ impl Drop for Guard {
     clippy::cast_precision_loss,
     reason = "stderr percentages over probe counters — never near 2^52"
 )]
-pub(crate) fn report(total: std::time::Duration) {
+pub(crate) fn report() {
     STATE.with(|s| {
         let Some(st) = s.borrow_mut().take() else {
             return;
@@ -128,6 +135,8 @@ pub(crate) fn report(total: std::time::Duration) {
         if st.nodes == 0 {
             return;
         }
+        // Armed-state clock (see `State::build_start`): elapsed since `reset`, i.e. the whole build.
+        let total = st.build_start.elapsed();
         let total_ns = total.as_nanos().max(1);
         eprintln!(
             "[geo-redundancy] nodes {}  distinct {}  repeated-renders {}  build {:.2}s  WASTED {:.2}s ({:.1}% of build) — the P.2 kernel-cache ceiling",

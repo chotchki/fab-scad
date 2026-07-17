@@ -132,8 +132,10 @@ fn geo_cache_verify() -> bool {
 /// [`build_geo`] with the P.2 memo gate explicit — the A/B tests toggle it here instead of racing
 /// the process-global env.
 fn build_geo_gated<B: GeometryBackend>(geo: &Geo, backend: &B, cache: bool) -> B::Solid {
+    // The redundancy probe owns its own wall clock, INSIDE its armed state — an unconditional
+    // `Instant::now()` here panicked the wasm geom worker on every render (std::time is unsupported
+    // on wasm32-unknown-unknown; the web-v0.13.0 boot gate caught it). Disarmed = no clock at all.
     crate::geo_redundancy::reset();
-    let probe_start = std::time::Instant::now();
     let out = match geo {
         Geo::D3(node) => {
             let mut memo = GeoMemo::new(cache);
@@ -142,7 +144,7 @@ fn build_geo_gated<B: GeometryBackend>(geo: &Geo, backend: &B, cache: bool) -> B
         }
         Geo::D2(_) => backend.leaf(&Mesh::new()),
     };
-    crate::geo_redundancy::report(probe_start.elapsed());
+    crate::geo_redundancy::report();
     out
 }
 

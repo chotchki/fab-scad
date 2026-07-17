@@ -203,6 +203,8 @@ added 2026-07-07.
   - [x] P.1.1 - P.1.1 - JIT registry + compile cache (one JITModule, keyed by fingerprint)
   - [x] P.1.2 - P.1.2 - Crate-boundary hook + dispatch integration
   - [x] P.1.3 - P.1.3 - fast==JIT differential over the corpus + EXPLAIN coverage
+  - [ ] P.1.3a - JIT $-global hazard (reviewer find, pre-existing, NOT 2b): loader.rs tagged_globals doesn't filter $-assignments — a top-level `$fn=32;` + a JIT'd fn reading $fn inlines 32 and diverges from the interpreter under dynamic shadowing. Needs a fast==JIT probe + fix
+added 2026-07-16.
   - [ ] P.1.4 - P.1.4 - Extend the numeric subset (ternary, comparisons, transcendental calls)
   - [ ] P.1.5 - P.1.5 - Measure + coverage report
   - [ ] P.1.6 - P.1.6 - JIT list/vector ABI (scalarize A/B/C, sink-return D)
@@ -325,4 +327,3 @@ Parked 2026-07-04 for the scad-rs pivot — the workflow tool works and stays in
 - **JIT-in-WASM may be viable — revisit the desktop-only-JIT assumption** — added 2026-07-09.
 - **gui module imports: tighten `use crate::*` globs (U.4 refactor artifact) to explicit imports, then prune the uniform pub(crate) to the real cross-module surface** — added 2026-07-12.
 - **Evaluate grcov swap: line-level coverage exclusion (GRCOV_EXCL_LINE) → parser/lexer gate back to 100%** — added 2026-07-12.
-- **JIT $-global hazard (reviewer find, pre-existing, NOT 2b): loader.rs tagged_globals doesn't filter $-assignments — a top-level `$fn=32;` + a JIT'd fn reading $fn inlines 32 and diverges from the interpreter under dynamic shadowing. Needs a fast==JIT probe + fix** — added 2026-07-16.

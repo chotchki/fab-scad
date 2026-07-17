@@ -1996,16 +1996,26 @@ fn tagged_functions<'a>(
 /// function referencing a top-level constant resolves it (P.1.4 globals). Every assignment is included,
 /// numeric or not; a non-numeric one (a vector/string constant) just makes any referrer DECLINE when the JIT
 /// compiles its value-expr. `last`-wins within an island matches how [`build_island_global`] re-binds.
+///
+/// EXCEPT `$`-assignments (task #51): a `$`-variable is dynamically scoped — a top-level `$fn = 32;` is only
+/// the fallback the runtime call chain overrides — so it must never reach the JIT as an inlinable lexical
+/// constant. The compiler's `Ident` arm independently declines every `$`-read (the authoritative guard);
+/// filtering here keeps the registry from even holding one. The interpreter's own hoist reads
+/// [`loader::Island::assignments`] directly, so top-level `$`-bindings still work everywhere else.
 fn tagged_globals<'a>(islands: &loader::Islands<'a>) -> BTreeMap<&'a str, &'a Expr> {
     let mut out = BTreeMap::new();
     if let Some(root) = islands.first() {
         for &u in &root.uses {
             for &(name, expr) in &islands[u].assignments {
-                out.insert(name, expr);
+                if !name.starts_with('$') {
+                    out.insert(name, expr);
+                }
             }
         }
         for &(name, expr) in &root.assignments {
-            out.insert(name, expr);
+            if !name.starts_with('$') {
+                out.insert(name, expr);
+            }
         }
     }
     out

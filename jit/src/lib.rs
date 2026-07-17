@@ -2019,6 +2019,17 @@ fn compile_expr(fb: &mut FunctionBuilder, expr: &Expr, lower: &Lower) -> Result<
         // `cond ? true : false` compile — the ternary's branches now agree as `Bool`.
         ExprKind::Bool(b) => Ok(Lowered::Bool(fb.ins().iconst(types::I8, i64::from(*b)))),
         ExprKind::Ident(name) => {
+            // A `$`-variable read is DYNAMICALLY scoped — the interpreter resolves it up the runtime CALL
+            // chain, so NO lexical resolution here (a param slot, a let-local, an inlined global) is
+            // trustworthy; a body reading one declines outright and stays interpreted (task #51: a
+            // top-level `$fn = 32;` arrived via the consts and a compiled `$fn`-reader inlined 32, wrong
+            // under any dynamic override). Checked BEFORE the env/param lookups on purpose: an INLINED
+            // callee's `$`-read must not quietly resolve against the outer function's like-named binding.
+            // The dispatch gate separately declines calls with explicit `$`-args; this guards the
+            // inherited-context route in.
+            if name.starts_with('$') {
+                return Err(JitError::Unsupported("dynamically-scoped $-variable"));
+            }
             // A `let`-bound local (or inlined-call param) shadows a parameter — check the env first. It may be
             // a scalarized vector (a `let(v = [a,b,c])`), so clone the whole `Lowered`.
             if let Some(v) = lower.locals.get(name.as_str()) {

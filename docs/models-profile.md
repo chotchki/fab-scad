@@ -786,3 +786,42 @@ the cmake-built Manifold C++). Aggregate implication vs OpenSCAD: ~3.32× → ~3
 `[profile.dist]` for release artifacts (fat LTO roughly doubles link time — keep the dev/test loop on
 plain `release`); landing that profile + wiring cargo-packager/CI is the follow-up, chotchki's call on
 whether the perf-baseline lineage moves with it.
+
+## P.1.4 recut — the JIT made reachable, and the answer it forced (2026-07-16)
+
+The two fixes (task #66), each pinned by tests:
+
+- **Named-arg dispatch**: the all-positional gate at `dispatch_call` is gone. `push_call` was already
+  binding named args into param-order slots for the interpreter; `Task::Apply`'s hook sees those final
+  `vals` either way, so how the caller spells the args is invisible to the compiled body. The one real
+  arity hazard — `$`-args appending past the params — keeps its own gate in `push_call`. End-to-end
+  named-arg fast==JIT probe in `jit/tests/named_args.rs`; the lang-side MarkerJit test flipped to
+  assert dispatch.
+- **Lazy registry** (`build_lazy`): shapes compile on FIRST CALL and memoize; the eager whole-program
+  pass survives only under `FAB_JIT_EXPLAIN` (the coverage report needs it). Small models' jit-on
+  penalty fell +25–35% → +14–17% (the residual is the per-round AST ownership clone, ~7ms).
+
+### The verdict the recut was built to force
+
+Reachability is fixed — window_air_cover went **offered 0 → offered 1,570,924**. And the answer is no:
+
+| | offered | fired | fired-% | net wall |
+|---|---|---|---|---|
+| window_air_cover | 1,570,924 | 3,339 | 0.2% | **+3.1%** |
+| shoe_holder | — | — | — | −0.2% |
+| webcam_holder | — | — | — | −0.6% |
+| pill_holder | — | — | — | +4.4% |
+
+What fires is one-liners (`is_int` 1719, `_pt_in_tri` 1476, `column`, `modang` — single-digit ms of
+win, total). What declines is the call VOLUME: 71% memoized body-declines (comprehension shape, string
+lanes, type mixing) and 29% arg-shape declines (the ragged-region wall) — 1.57M calls paying the
+flatten + shape-lookup tax to buy 3.3k trivial wins. The functions holding actual TIME are exactly the
+ones the subset can't take, and the intrinsics tier already owns everything it could.
+
+**Conclusion: at this corpus the Cranelift JIT is a correctness asset, not a performance one.** The
+fast==JIT differential lane keeps earning (it forced the #51 class into the open); `FAB_JIT` stays
+opt-in/OFF. The performance budget goes where the data points: the O.10 hand band for the monsters
+(task #68 resolves to the intrinsic route), the LTO dist profile (−1.8%), and the eval_cache half
+(N.2c.2.3). The ABI rung would need ragged-args + major subset growth + a cheaper decline path to beat
+what one intrinsics band delivers — that trade only reopens if a future corpus shows a hot
+numeric-scalar population the hand tier can't cover.

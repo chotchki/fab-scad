@@ -1350,11 +1350,15 @@ fn dispatch_call<'a>(
             // the caller's `global` — the use-scope fix. For a root-defined function home is 0 (the root
             // global), so this is a no-op there; for a `use`d function it swaps in the library's constants.
             let base = ctx.island_globals.borrow()[home].clone();
-            // JIT-eligible when a hook is present AND the call is all-positional (no named/`$`-args): then
-            // `names.len()` equals the compiled arity, so `Task::Apply`'s all-`Num` guard can offer it to
-            // the JIT. A `None` hook (wasm / raw-AST) or a named call passes the name as `None` → interpret.
-            let jit = (ctx.jit.is_some() && args.iter().all(|a| a.name.is_none()))
-                .then_some(name.as_str());
+            // JIT-eligible whenever a hook is present — named args included (P.1.4 recut, task #66): the
+            // hook fires in `Task::Apply` on `vals`, which are the FINAL param-order slot values
+            // `push_call` bound (positional by position, named by name, defaults evaluated interpreter-side
+            // in the right scope), so how the caller SPELLED the args is invisible to the compiled body.
+            // The old all-positional gate was v1 conservatism that turned out to gate out essentially all
+            // of BOSL2 (named-arg calls everywhere → the P.1.5 fires report read `offered 0`). The one real
+            // arity hazard — `$`-args appending to `names` past the params — is `push_call`'s own gate
+            // (it clears the hint when dollars exist). A `None` hook (wasm / raw-AST) → interpret.
+            let jit = ctx.jit.is_some().then_some(name.as_str());
             push_call(params, body, args, scope, &base, jit, tasks);
             return Ok(());
         }
@@ -3507,12 +3511,23 @@ mod tests {
             Value::Num(5.0),
             "a vector arg the mock doesn't handle falls back to the interpreted body (no marker)"
         );
-        // (3) a NAMED arg → not JIT-eligible (dispatch passes jit=None) → interpreter runs → 25. This is
-        // the BOSL2-loves-named-args gap: the fast path is declined, correctness is preserved. (follow-on)
+        // (3) a NAMED arg → JIT-eligible since the P.1.4 recut (task #66): `push_call` binds the slot by
+        // name and the hook sees the same param-order `vals` as a positional spelling — the marker fires.
+        // (BOSL2 calls named everywhere; this was the whole `offered 0` finding.)
         assert_eq!(
             eval_last_jit("function sq(x) = x*x; y = sq(x = 5);", Box::new(MarkerJit)),
+            Value::Num(1025.0),
+            "a named-arg call takes the JIT path (rebind at push_call, same slot values)"
+        );
+        // (3b) a `$`-ARG call stays interpreted — the one real arity hazard: dollars append to `names`
+        // past the params, so `push_call` clears the hint (the load-bearing half of the old gate).
+        assert_eq!(
+            eval_last_jit(
+                "function sq(x) = x*x; y = sq(5, $fn = 16);",
+                Box::new(MarkerJit)
+            ),
             Value::Num(25.0),
-            "a named-arg call falls back to the interpreter (no marker)"
+            "a $-arg call falls back to the interpreter (no marker)"
         );
         // (4) a function the registry doesn't know → call_numeric returns None → interpreter runs → 27.
         assert_eq!(

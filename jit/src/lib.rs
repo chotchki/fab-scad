@@ -612,6 +612,30 @@ impl JitRegistry {
         defs: impl IntoIterator<Item = (&'a str, &'a [Parameter], &'a Expr)>,
         consts: impl IntoIterator<Item = (&'a str, &'a Expr)>,
     ) -> Result<Self, JitError> {
+        Self::build_inner(defs, consts, true)
+    }
+
+    /// [`build`](Self::build) without the eager all-scalar pass (P.1.4 recut, task #66): every shape —
+    /// the scalar one included — compiles on FIRST CALL via `get_or_compile` and memoizes. The production
+    /// path: the P.1.5 fires data showed real models call a handful of the ~1000 owned functions, so ~85
+    /// eager Cranelift compiles per eval (× import-fixpoint rounds) were almost pure waste. Costs the
+    /// first call to each (name, shape) a one-time compile; `declined`/`len()` stay empty (they feed the
+    /// EXPLAIN coverage report, whose path keeps using the eager [`build`](Self::build)).
+    ///
+    /// # Errors
+    /// [`JitError::Cranelift`] only for module-level setup failure (no per-function work happens here).
+    pub fn build_lazy<'a>(
+        defs: impl IntoIterator<Item = (&'a str, &'a [Parameter], &'a Expr)>,
+        consts: impl IntoIterator<Item = (&'a str, &'a Expr)>,
+    ) -> Result<Self, JitError> {
+        Self::build_inner(defs, consts, false)
+    }
+
+    fn build_inner<'a>(
+        defs: impl IntoIterator<Item = (&'a str, &'a [Parameter], &'a Expr)>,
+        consts: impl IntoIterator<Item = (&'a str, &'a Expr)>,
+        precompile: bool,
+    ) -> Result<Self, JitError> {
         // Own the AST up front so the registry can recompile any function for a new arg shape later.
         let owned_defs: BTreeMap<String, OwnedDef> = defs
             .into_iter()
@@ -637,7 +661,7 @@ impl JitRegistry {
         let mut declined: BTreeMap<String, &'static str> = BTreeMap::new();
         let mut scalar_compiled = 0usize;
         let mut next_symbol = 0usize;
-        {
+        if precompile {
             // Borrow-maps over the OWNED AST for the compiler (every function visible to every other, so a
             // caller can inline any callee incl. a forward reference). Built once for the whole build pass.
             let fn_defs: FnDefs = owned_defs
@@ -985,14 +1009,24 @@ impl NumericJitFactory for JitFactory {
         if !enabled && !explain {
             return None; // neither running nor reporting → skip the compile entirely
         }
-        let registry = JitRegistry::build(
-            defs.iter().map(|d| (d.name, d.params, d.body)),
-            consts.iter().map(|c| (c.name, c.value)),
-        )
-        .ok()?;
-        if explain {
-            explain_coverage(defs, &registry);
-        }
+        // LAZY on the production path (P.1.4 recut): shapes compile on first call, so an eval pays for
+        // exactly the functions it runs — the eager whole-program pass exists for EXPLAIN's coverage
+        // report only (it needs every all-scalar compile attempted to histogram the declines).
+        let registry = if explain {
+            let r = JitRegistry::build(
+                defs.iter().map(|d| (d.name, d.params, d.body)),
+                consts.iter().map(|c| (c.name, c.value)),
+            )
+            .ok()?;
+            explain_coverage(defs, &r);
+            r
+        } else {
+            JitRegistry::build_lazy(
+                defs.iter().map(|d| (d.name, d.params, d.body)),
+                consts.iter().map(|c| (c.name, c.value)),
+            )
+            .ok()?
+        };
         // EXPLAIN can run with the JIT OFF (report-only) — return the hook ONLY when actually enabled.
         if !enabled || registry.is_empty() {
             return None;

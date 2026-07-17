@@ -193,17 +193,40 @@ pub(crate) fn panel_ui(
                     // mechanism both platforms share (web downloads the same bytes). `with_config_block`
                     // strips any prior block first, so re-saving replaces, never stacks.
                     ui.horizontal(|ui| {
+                        // Save delivery splits per platform (W.3.13): native writes the file; the
+                        // browser downloads the SAME config-baked bytes (there is no disk — this is
+                        // W.3.8's "web downloads the same bytes", finally wired).
+                        let save_hover = if cfg!(target_arch = "wasm32") {
+                            "download .scad"
+                        } else {
+                            "save to disk"
+                        };
                         if ui
                             .add_enabled(editor.dirty, egui::Button::new(icons::SAVE))
-                            .on_hover_text("save to disk")
+                            .on_hover_text(save_hover)
                             .clicked()
-                            && std::fs::write(
-                                &editor.path,
-                                config::with_config_block(&editor.text, &parts.0),
-                            )
-                            .is_ok()
                         {
-                            editor.dirty = false;
+                            let baked = config::with_config_block(&editor.text, &parts.0);
+                            #[cfg(not(target_arch = "wasm32"))]
+                            if std::fs::write(&editor.path, baked).is_ok() {
+                                editor.dirty = false;
+                            }
+                            #[cfg(target_arch = "wasm32")]
+                            {
+                                let name = editor
+                                    .path
+                                    .file_name()
+                                    .and_then(|n| n.to_str())
+                                    .filter(|n| !n.is_empty())
+                                    .unwrap_or("model.scad");
+                                if crate::web_host::download_bytes(
+                                    name,
+                                    "application/x-openscad",
+                                    baked.as_bytes(),
+                                ) {
+                                    editor.dirty = false;
+                                }
+                            }
                         }
                         if editor.dirty {
                             ui.colored_label(
@@ -712,9 +735,9 @@ pub(crate) fn signal_ready(mut fired: Local<bool>, mut contexts: EguiContexts) {
     }
     *fired = true;
     #[cfg(target_arch = "wasm32")]
-    if let Some(doc) = web_sys::window().and_then(|w| w.document()) {
-        if let Ok(ev) = web_sys::CustomEvent::new("fab-gui:ready") {
-            let _ = doc.dispatch_event(&ev);
-        }
+    if let Some(doc) = web_sys::window().and_then(|w| w.document())
+        && let Ok(ev) = web_sys::CustomEvent::new("fab-gui:ready")
+    {
+        let _ = doc.dispatch_event(&ev);
     }
 }

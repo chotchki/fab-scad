@@ -69,7 +69,11 @@ web-sys = { version = "0.3", features = [
     "Document",
     "Element",
     "Blob",
+    # Blob download (W.3.13): typed Blob options + the object-URL anchor click.
+    "BlobPropertyBag",
     "Url",
+    # `?model=` scad-in (W.3.12): parse the page URL's query string.
+    "UrlSearchParams",
     "HtmlAnchorElement",
     "Response",
     "Storage",

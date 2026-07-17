@@ -489,28 +489,52 @@ pub(crate) fn export_plates_action(
             [u[0] as f64, u[1] as f64, u[2] as f64]
         })
         .collect();
-    let out = match &scene.source {
-        Some(s) => {
-            let stem = s.file_stem().and_then(|n| n.to_str()).unwrap_or("part");
-            s.with_file_name(format!("{stem}-plates.3mf"))
-        }
-        None => scene.tmp.join("plates.3mf"),
-    };
     let bed = [scene.bed[0] as f64, scene.bed[1] as f64]; // pack within the usable bed
     let plate = [scene.plate[0] as f64, scene.plate[1] as f64]; // tile on the real plate grid
     let preset = default_bambu_preset(); // names the presets so BambuStudio imports prompt-free
-    match fab::export_plates(&refs, &ups, bed, plate, PLATE_GAP, preset.as_ref(), &out) {
-        Ok(sum) => {
-            status.0 = format!(
-                "exported {} piece(s) on {} plate(s), {}% full -> {}",
-                sum.pieces,
-                sum.plates,
-                (sum.fill * 100.0).round() as i32,
-                out.display()
-            );
-            info!("{}", status.0);
+    // Delivery splits per platform (W.3.13): native writes next to the source (BambuStudio opens it
+    // from there); the browser has NO fs — the .3mf zips into memory and lands as a Blob download.
+    // Same layout/pack/emit either way (`bambu::export_plates_to` under both).
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let out = match &scene.source {
+            Some(s) => {
+                let stem = s.file_stem().and_then(|n| n.to_str()).unwrap_or("part");
+                s.with_file_name(format!("{stem}-plates.3mf"))
+            }
+            None => scene.tmp.join("plates.3mf"),
+        };
+        match fab::export_plates(&refs, &ups, bed, plate, PLATE_GAP, preset.as_ref(), &out) {
+            Ok(sum) => {
+                status.0 = format!(
+                    "exported {} piece(s) on {} plate(s), {}% full -> {}",
+                    sum.pieces,
+                    sum.plates,
+                    (sum.fill * 100.0).round() as i32,
+                    out.display()
+                );
+                info!("{}", status.0);
+            }
+            Err(e) => status.0 = format!("export failed: {e:#}"),
         }
-        Err(e) => status.0 = format!("export failed: {e:#}"),
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        match fab::export_plates_bytes(&refs, &ups, bed, plate, PLATE_GAP, preset.as_ref()) {
+            Ok((sum, bytes))
+                if crate::web_host::download_bytes("plates.3mf", "model/3mf", &bytes) =>
+            {
+                status.0 = format!(
+                    "exported {} piece(s) on {} plate(s), {}% full -> plates.3mf downloaded",
+                    sum.pieces,
+                    sum.plates,
+                    (sum.fill * 100.0).round() as i32,
+                );
+                info!("{}", status.0);
+            }
+            Ok(_) => status.0 = "export failed: browser download did not start".into(),
+            Err(e) => status.0 = format!("export failed: {e:#}"),
+        }
     }
 }
 

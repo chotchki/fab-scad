@@ -12,9 +12,13 @@ pub(crate) struct SceneCfg {
     pub(crate) bed: [f32; 2],           // usable area — pieces pack within this (extruder reach)
     pub(crate) plate: [f32; 2], // real plate size for the Bambu export grid/printable_area (≥ bed)
     pub(crate) root: Option<PathBuf>, // workspace root, for OPENSCADPATH
-    pub(crate) tmp: PathBuf,    // scratch dir for rendered/sliced STLs
+    // Scratch dir for rendered/sliced STLs. Unread on wasm since W.3.13 (the .3mf export downloads
+    // instead of writing to a tmp path), but the field stays: SceneCfg is the ONE boot config both
+    // platforms share.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    pub(crate) tmp: PathBuf,
     pub(crate) reslice_on_start: bool, // screenshot --reslice: display the sliced result
-    pub(crate) cut_pct: f32,    // screenshot --cut <0..100>: where along X to cut
+    pub(crate) cut_pct: f32,           // screenshot --cut <0..100>: where along X to cut
 }
 
 /// Marks the displayed model entity, so re-slice can swap it out.

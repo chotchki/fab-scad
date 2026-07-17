@@ -85,6 +85,8 @@ pub(crate) use geom::GeomPool;
 #[cfg(target_arch = "wasm32")]
 pub mod geom_wasm;
 #[cfg(target_arch = "wasm32")]
+mod web_host;
+#[cfg(target_arch = "wasm32")]
 mod worker_rpc;
 #[cfg(target_arch = "wasm32")]
 pub(crate) use geom_wasm::GeomPool;
@@ -150,122 +152,126 @@ pub fn start() {
 
 // ---- windowed -------------------------------------------------------------------------
 fn run_windowed(scene: SceneCfg, shot: Option<PathBuf>) {
-    App::new()
-        .add_plugins((
-            DefaultPlugins.set(assets_dir()).set(window_plugin()),
-            MeshPickingPlugin,
-            EguiPlugin::default(),
-        ))
-        .insert_resource(ClearColor(theme::VIEWPORT))
-        .insert_resource(scene)
-        // The geometry service (W.3.3): one kernel-thread shard to start. Every render/slice/plan/
-        // section op routes through it — Solids stay on this thread, only bytes/handles cross.
-        .insert_resource(GeomPool::new(1))
-        .insert_resource(WindowShot(shot))
-        // U.3.9: we pin the primary egui context to the full-window Camera2d ourselves (see
-        // setup_windowed). Auto-create picks the "first found" camera — an archetype-order lottery.
-        .insert_resource(EguiGlobalSettings {
-            auto_create_primary_context: false,
-            ..default()
-        })
-        .init_resource::<Job>()
-        .insert_resource(Parts(vec![Part::default()]))
-        .init_resource::<ActivePart>()
-        .init_resource::<ActiveConn>()
-        .init_resource::<EditCut>()
-        .init_resource::<XSection>()
-        .init_resource::<PrintView>()
-        .init_resource::<PrintJob>()
-        .init_resource::<PrintPieces>()
-        .init_resource::<CoPack>()
-        .init_resource::<Platform>()
-        .init_resource::<Pipeline>()
-        .init_resource::<AutoJob>()
-        .init_resource::<PublishJob>()
-        .init_resource::<Tab>()
-        .init_resource::<theme::ThemeReady>()
-        .init_resource::<EditorBuf>()
-        .init_resource::<PrevCam>()
-        .init_resource::<Feas>()
-        .init_resource::<DraggingCut>()
-        .init_resource::<FileList>()
-        .init_resource::<OpenDialog>()
-        .init_resource::<Watch>()
-        .init_resource::<SliceInBackground>()
-        .init_resource::<PendingConfig>()
-        .init_resource::<PanelSeam>()
-        .insert_resource(Status("rendering".into()))
-        .add_message::<ReSlice>()
-        .add_message::<AutoPlace>()
-        .add_message::<SwitchFile>()
-        .add_message::<PanelCmd>()
-        .add_observer(on_drag_start)
-        .add_observer(on_drag)
-        .add_observer(on_drag_end)
-        .add_observer(on_click)
-        .add_observer(place_on_profile_click)
-        .add_observer(orient_piece_on_click)
-        .add_systems(Startup, setup_windowed)
-        .add_systems(
-            Update,
+    let mut app = App::new();
+    app.add_plugins((
+        DefaultPlugins.set(assets_dir()).set(window_plugin()),
+        MeshPickingPlugin,
+        EguiPlugin::default(),
+    ))
+    .insert_resource(ClearColor(theme::VIEWPORT))
+    .insert_resource(scene)
+    // The geometry service (W.3.3): one kernel-thread shard to start. Every render/slice/plan/
+    // section op routes through it — Solids stay on this thread, only bytes/handles cross.
+    .insert_resource(GeomPool::new(1))
+    .insert_resource(WindowShot(shot))
+    // U.3.9: we pin the primary egui context to the full-window Camera2d ourselves (see
+    // setup_windowed). Auto-create picks the "first found" camera — an archetype-order lottery.
+    .insert_resource(EguiGlobalSettings {
+        auto_create_primary_context: false,
+        ..default()
+    })
+    .init_resource::<Job>()
+    .insert_resource(Parts(vec![Part::default()]))
+    .init_resource::<ActivePart>()
+    .init_resource::<ActiveConn>()
+    .init_resource::<EditCut>()
+    .init_resource::<XSection>()
+    .init_resource::<PrintView>()
+    .init_resource::<PrintJob>()
+    .init_resource::<PrintPieces>()
+    .init_resource::<CoPack>()
+    .init_resource::<Platform>()
+    .init_resource::<Pipeline>()
+    .init_resource::<AutoJob>()
+    .init_resource::<PublishJob>()
+    .init_resource::<Tab>()
+    .init_resource::<theme::ThemeReady>()
+    .init_resource::<EditorBuf>()
+    .init_resource::<PrevCam>()
+    .init_resource::<Feas>()
+    .init_resource::<DraggingCut>()
+    .init_resource::<FileList>()
+    .init_resource::<OpenDialog>()
+    .init_resource::<Watch>()
+    .init_resource::<SliceInBackground>()
+    .init_resource::<PendingConfig>()
+    .init_resource::<PanelSeam>()
+    .insert_resource(Status("rendering".into()))
+    .add_message::<ReSlice>()
+    .add_message::<AutoPlace>()
+    .add_message::<SwitchFile>()
+    .add_message::<PanelCmd>()
+    .add_observer(on_drag_start)
+    .add_observer(on_drag)
+    .add_observer(on_drag_end)
+    .add_observer(on_click)
+    .add_observer(place_on_profile_click)
+    .add_observer(orient_piece_on_click)
+    .add_systems(Startup, setup_windowed)
+    .add_systems(
+        Update,
+        (
+            orbit,
+            request_reslice,
+            poll_job,
+            // Auto-on-open: a fresh too-big model auto-slices + connects (kick), then the plan
+            // lands and seeds cuts + connectors (poll). After poll_job so bounds are set.
+            (kick_auto_plan, poll_auto_plan).chain().after(poll_job),
+            poll_publish,
             (
-                orbit,
-                request_reslice,
-                poll_job,
-                // Auto-on-open: a fresh too-big model auto-slices + connects (kick), then the plan
-                // lands and seeds cuts + connectors (poll). After poll_job so bounds are set.
-                (kick_auto_plan, poll_auto_plan).chain().after(poll_job),
-                poll_publish,
-                (
-                    poll_open_dialog,
-                    apply_switch_file,
-                    watch_source,
-                    preview_edited_buffer,
-                ),
-                sync_overlays,
-                sync_overlay_visuals,
-                sync_dim_labels,
-                sync_conn_markers,
-                edit_mode,
-                draw_profile,
-                (auto_reslice, revert_on_edit),
-                (auto_scale, split_viewport, seat_bed),
-                // The panel's button commands (heavy actions the egui `panel_ui` writes as PanelCmd).
-                (
-                    toggle_view,
-                    publish_action,
-                    auto_slice_action,
-                    export_plates_action,
-                ),
-                (
-                    sync_tab_modes,
-                    enforce_exclusive_modes,
-                    apply_view_visibility,
-                    manage_view_camera,
-                    enter_exit_print,
-                    // poll seeds the auto-orient, then sync_orientation lays out + flags downgrades.
-                    (poll_print_job, sync_orientation).chain(),
-                    color_conn_markers,
-                    do_auto_place,
-                    estimate_copack, // U.3.5 — reactive co-pack metric for the Export tab
-                    sync_pipeline,   // U.3.7 — per-node stale flags + busy for the tab-bar feedback
-                ),
+                poll_open_dialog,
+                apply_switch_file,
+                watch_source,
+                preview_edited_buffer,
             ),
-        )
-        // After `orbit` so the corner axis gizmo reads THIS frame's orbit state (no swim/flicker).
-        .add_systems(Update, draw_axis_gizmo.after(orbit))
-        .add_systems(Update, window_shot)
-        .add_systems(
-            EguiPrimaryContextPass,
+            sync_overlays,
+            sync_overlay_visuals,
+            sync_dim_labels,
+            sync_conn_markers,
+            edit_mode,
+            draw_profile,
+            (auto_reslice, revert_on_edit),
+            (auto_scale, split_viewport, seat_bed),
+            // The panel's button commands (heavy actions the egui `panel_ui` writes as PanelCmd).
             (
-                theme::install_theme,
-                panel_ui.run_if(theme::theme_ready),
-                // The host's splash-removal cue, fired once the themed UI is up (docs/web-embed.md).
-                signal_ready.run_if(theme::theme_ready),
-            )
-                .chain(),
+                toggle_view,
+                publish_action,
+                auto_slice_action,
+                export_plates_action,
+            ),
+            (
+                sync_tab_modes,
+                enforce_exclusive_modes,
+                apply_view_visibility,
+                manage_view_camera,
+                enter_exit_print,
+                // poll seeds the auto-orient, then sync_orientation lays out + flags downgrades.
+                (poll_print_job, sync_orientation).chain(),
+                color_conn_markers,
+                do_auto_place,
+                estimate_copack, // U.3.5 — reactive co-pack metric for the Export tab
+                sync_pipeline,   // U.3.7 — per-node stale flags + busy for the tab-bar feedback
+            ),
+        ),
+    )
+    // After `orbit` so the corner axis gizmo reads THIS frame's orbit state (no swim/flicker).
+    .add_systems(Update, draw_axis_gizmo.after(orbit))
+    .add_systems(Update, window_shot)
+    .add_systems(
+        EguiPrimaryContextPass,
+        (
+            theme::install_theme,
+            panel_ui.run_if(theme::theme_ready),
+            // The host's splash-removal cue, fired once the themed UI is up (docs/web-embed.md).
+            signal_ready.run_if(theme::theme_ready),
         )
-        .run();
+            .chain(),
+    );
+    // Browser-only file-IO surface (W.3.12): the `?model=` fetch resource + its landing system.
+    #[cfg(target_arch = "wasm32")]
+    app.init_resource::<jobs::ModelFetch>()
+        .add_systems(Update, jobs::poll_model_fetch);
+    app.run();
 }
 
 fn run_screenshot(scene: SceneCfg, png: PathBuf) {

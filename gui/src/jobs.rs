@@ -508,6 +508,50 @@ pub(crate) fn kick_render_bytes(
     status.0 = "rendering".into();
 }
 
+/// The `?model=` fetch in flight (W.3.12): the .scad text arriving from the page URL's `model`
+/// parameter, plus the basename it gives the editor path (so the tab + Save-download carry the real
+/// model name). Spawned by `setup_windowed`, landed by [`poll_model_fetch`].
+#[cfg(target_arch = "wasm32")]
+#[derive(Resource, Default)]
+pub(crate) struct ModelFetch {
+    pub task: Option<bevy::tasks::Task<Option<String>>>,
+    pub name: String,
+}
+
+/// Land the `?model=` fetch (W.3.12): on arrival the text seeds the editor exactly like a native file
+/// open — `fab:config` block parsed into [`PendingConfig`] + stripped from the buffer (the W.3.8
+/// codec, string-level) — and the armed debounce renders it through the geom Worker. A failed fetch
+/// reports and falls back to the demo, so the app never boots to a dead editor.
+#[cfg(target_arch = "wasm32")]
+pub(crate) fn poll_model_fetch(
+    mut fetch: ResMut<ModelFetch>,
+    mut editor: ResMut<EditorBuf>,
+    mut pending_config: ResMut<PendingConfig>,
+    mut status: ResMut<Status>,
+) {
+    let Some(task) = fetch.task.as_mut() else {
+        return;
+    };
+    let Some(result) = block_on(future::poll_once(task)) else {
+        return; // still fetching
+    };
+    fetch.task = None;
+    match result {
+        Some(raw) => {
+            pending_config.0 = config::read_config_block(&raw);
+            editor.text = config::strip_config_block(&raw);
+            editor.path = std::path::PathBuf::from(&fetch.name);
+            status.0 = format!("loaded {}", fetch.name);
+        }
+        None => {
+            editor.text = crate::scene::WEB_DEMO.to_string();
+            status.0 = "model fetch failed (URL reachable? CORS/CORP?) — rendering the demo".into();
+        }
+    }
+    editor.dirty = false;
+    editor.edited_at = Some(0.0); // arm the debounced preview — the render kick
+}
+
 /// The shared render task-spawn (T.2b, W.3.3): fire `RenderParts` at the service and bank the minted
 /// handles + display STL bytes + bboxes as a [`JobResult::Rendered`]. The service builds + HOLDS each
 /// part Solid (!Send stays on its shard); only bytes cross back. Source is `Path` (native fs) or

@@ -54,7 +54,7 @@ pub(crate) fn window_plugin() -> WindowPlugin {
 /// (`fabdemo.scad`) so it exercises the Stage-2 lib-closure fetch — the app pulls fabdemo.scad from
 /// libs.json and hands it to the worker, proving real include-using models render on the web.
 #[cfg(target_arch = "wasm32")]
-const WEB_DEMO: &str = "\
+pub(crate) const WEB_DEMO: &str = "\
 // fab-gui on the web — a bracket from the demo library (exercises the include-closure fetch)\n\
 $fn = $preview ? 24 : 64;\n\
 include <fabdemo.scad>\n\
@@ -72,6 +72,7 @@ pub(crate) fn setup_windowed(
     mut editor: ResMut<EditorBuf>,
     mut files: ResMut<FileList>,
     mut pending_config: ResMut<PendingConfig>,
+    #[cfg(target_arch = "wasm32")] mut model_fetch: ResMut<crate::jobs::ModelFetch>,
     pool: Res<GeomPool>,
 ) {
     spawn_environment(&mut commands, &mut meshes, &mut materials, &scene);
@@ -82,12 +83,31 @@ pub(crate) fn setup_windowed(
         files.files = vec![src];
         files.active = Some(0);
     }
-    // wasm smoke (W.3.6): no launch file → seed a NO-INCLUDE demo into the editor buffer and arm the
-    // debounced preview, so the geom Worker renders it (the browser's source is the buffer, not a path).
+    // Web boot source (W.3.6 + W.3.12): a `?model=<url>` page parameter fetches that .scad into the
+    // editor (poll_model_fetch lands it — async, so the fetch spawns here and the seed happens there);
+    // without one, seed the NO-INCLUDE demo and arm the debounced preview, so the geom Worker renders
+    // it (the browser's source is the buffer, not a path).
     #[cfg(target_arch = "wasm32")]
     if scene.source.is_none() {
-        editor.text = WEB_DEMO.to_string();
-        editor.edited_at = Some(0.0);
+        if let Some(url) = crate::web_host::query_param("model") {
+            status.0 = format!("fetching {url}");
+            model_fetch.name = url
+                .rsplit('/')
+                .next()
+                .filter(|n| !n.is_empty())
+                .unwrap_or("model.scad")
+                .split('?')
+                .next()
+                .unwrap_or("model.scad")
+                .to_string();
+            model_fetch.task = Some(
+                bevy::tasks::AsyncComputeTaskPool::get()
+                    .spawn(async move { crate::web_host::fetch_text(&url).await }),
+            );
+        } else {
+            editor.text = WEB_DEMO.to_string();
+            editor.edited_at = Some(0.0);
+        }
     }
     let radius = scene.bed[0].max(scene.bed[1]).max(80.0);
     // Two cameras: a full-window UI camera (draws the panel + clears the dark bg) and the 3D camera,

@@ -126,10 +126,29 @@ document.addEventListener('fab-gui:ready', () => splash.remove(), { once: true }
 ### 4. Owns file-open and download — the host provides nothing
 
 - **Open**: an `<input type=file>` the app creates (rfd on wasm) → reads BYTES (no filesystem). `.scad`
-  in, and its `fab:config` block (W.3.8) rehydrates the slicing state.
-- **Save / Export**: the app builds a `Blob` and triggers an anchor-click download — the browser's own
-  save dialog. Save writes the `.scad` with the live `fab:config` block baked in; Export writes the
-  Bambu multi-plate `.3mf`. The host wires up nothing; it just must not sandbox downloads away.
+  in, and its `fab:config` block (W.3.8) rehydrates the slicing state. (Still pending — the picker is
+  hidden on web; `?model=` below is the load path that ships first.)
+- **Save / Export** (LIVE since W.3.13): the app builds a `Blob` and triggers an anchor-click
+  download — the browser's own save dialog. Save downloads the `.scad` with the live `fab:config`
+  block baked in (named by the loaded model's basename); Export downloads the Bambu multi-plate
+  `plates.3mf` (zipped in memory — `bambu::export_plates_to` into a `Cursor`, byte-identical to the
+  desktop file). The host wires up nothing; it just must not sandbox downloads away.
+
+### 5. Loads a model from the page URL — `?model=<url>` (W.3.12)
+
+The deep-link surface: `index.html?model=path/to/part.scad` fetches that `.scad` at boot, lands it in
+the editor (its `fab:config` block parsed + stripped, exactly like a native file open), and renders it
+through the worker. No param → the built-in demo, as before.
+
+- The URL resolves against the PAGE (not the bundle base), so a host page can point at its own assets:
+  a project page deep-links its published model into the tool with a plain `<a href>`.
+- Same-origin fetches just work under the bundle's COOP/COEP. A CROSS-origin model host must send
+  CORS (`Access-Control-Allow-Origin`) **and** CORP (`Cross-Origin-Resource-Policy: cross-origin`) —
+  COEP blocks the response without the latter.
+- A failed fetch (404, missing CORS/CORP) reports in the status line and falls back to the demo — the
+  app never boots to a dead editor.
+- Includes resolve against the packed lib tree (`libs.json`: BOSL2 + scad-lib), same as editor
+  content. Includes relative to the MODEL's own URL are not yet resolved (v2 if a real model needs it).
 
 ## The bundle
 

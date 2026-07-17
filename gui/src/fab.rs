@@ -6,7 +6,10 @@
 //! (onion feasibility is a pure predicate on the spec; co-pack + 3mf export are indexed-MESH work).
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+// `Path` feeds only the native `export_plates` (wasm delivers `.3mf` bytes as a Blob — W.3.13).
+#[cfg(not(target_arch = "wasm32"))]
+use std::path::Path;
+use std::path::PathBuf;
 
 use anyhow::Result;
 
@@ -213,10 +216,24 @@ fn stlmesh_to_bambu(m: &StlMesh) -> bambu::Mesh {
     bambu::Mesh { verts, tris }
 }
 
+/// The shared piece-prep for the export/summary entries: preview meshes welded to indexed
+/// [`bambu::Mesh`]es, paired with their resolved build-ups.
+fn pieces_to_place(pieces: &[&PiecePrint], ups: &[[f64; 3]]) -> Vec<PieceToPlace> {
+    pieces
+        .iter()
+        .zip(ups)
+        .map(|(pp, &up)| PieceToPlace {
+            mesh: stlmesh_to_bambu(&pp.mesh),
+            up,
+        })
+        .collect()
+}
+
 /// Export the print-oriented preview pieces as a Bambu multi-plate project `.3mf` at `out`. `ups[i]`
 /// is the resolved build-up for `pieces[i]` (auto-pick or the user's manual override). Bin-packs onto
 /// the fewest `bed`-sized plates, `gap` mm apart. Pure indexed-MESH work — no `Solid` — so it stays
 /// in-process; it's cheap enough to call inline on a click.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn export_plates(
     pieces: &[&PiecePrint],
     ups: &[[f64; 3]],
@@ -226,15 +243,33 @@ pub fn export_plates(
     preset: Option<&fab_scad::printers::BambuPreset>,
     out: &Path,
 ) -> Result<bambu::ExportSummary> {
-    let to_place: Vec<PieceToPlace> = pieces
-        .iter()
-        .zip(ups)
-        .map(|(pp, &up)| PieceToPlace {
-            mesh: stlmesh_to_bambu(&pp.mesh),
-            up,
-        })
-        .collect();
-    bambu::export_plates(out, to_place, bed, plate, gap, preset)
+    bambu::export_plates(out, pieces_to_place(pieces, ups), bed, plate, gap, preset)
+}
+
+/// [`export_plates`] into MEMORY (W.3.13) — the browser delivery: same layout/pack/emit through
+/// `bambu::export_plates_to`, sunk into a `Cursor<Vec<u8>>` so the wasm app can hand the `.3mf`
+/// bytes to a Blob download (there is no fs to write "next to the source" in a browser). Compiled
+/// on native too (only the wasm export action CALLS it there → allow) so the unit test below covers
+/// the byte path without a browser.
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+pub fn export_plates_bytes(
+    pieces: &[&PiecePrint],
+    ups: &[[f64; 3]],
+    bed: [f64; 2],
+    plate: [f64; 2],
+    gap: f64,
+    preset: Option<&fab_scad::printers::BambuPreset>,
+) -> Result<(bambu::ExportSummary, Vec<u8>)> {
+    let mut sink = std::io::Cursor::new(Vec::new());
+    let sum = bambu::export_plates_to(
+        &mut sink,
+        pieces_to_place(pieces, ups),
+        bed,
+        plate,
+        gap,
+        preset,
+    )?;
+    Ok((sum, sink.into_inner()))
 }
 
 /// Plate-count / fill summary of co-packing `pieces` (U.3.5) — the cheap reactive twin of
@@ -246,13 +281,50 @@ pub fn copack_summary(
     bed: [f64; 2],
     gap: f64,
 ) -> Result<bambu::ExportSummary> {
-    let to_place: Vec<PieceToPlace> = pieces
-        .iter()
-        .zip(ups)
-        .map(|(pp, &up)| PieceToPlace {
-            mesh: stlmesh_to_bambu(&pp.mesh),
-            up,
-        })
-        .collect();
-    bambu::pack_summary(&to_place, bed, gap)
+    bambu::pack_summary(&pieces_to_place(pieces, ups), bed, gap)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A unit tetrahedron as STL triangle soup — the smallest closed mesh with a real footprint.
+    fn tet() -> StlMesh {
+        let v = [
+            [0.0f32, 0.0, 0.0],
+            [10.0, 0.0, 0.0],
+            [0.0, 10.0, 0.0],
+            [0.0, 0.0, 10.0],
+        ];
+        let tris = [[0, 2, 1], [0, 1, 3], [1, 2, 3], [0, 3, 2]];
+        let positions: Vec<[f32; 3]> = tris.iter().flat_map(|t| t.map(|i| v[i])).collect();
+        let normals = vec![[0.0f32, 0.0, 1.0]; positions.len()];
+        StlMesh { positions, normals }
+    }
+
+    /// W.3.13's core: the in-memory `.3mf` export produces a real zip (the Blob download's bytes) with
+    /// the same summary the path-writing export reports. Native-tested — the wasm side only differs in
+    /// delivery (Blob vs file), never in bytes.
+    #[test]
+    fn export_plates_bytes_zips_in_memory() {
+        let piece = PiecePrint {
+            piece: [0, 0, 0],
+            comp: 0,
+            mesh: tet(),
+            up: [0.0, 0.0, 1.0],
+        };
+        let (sum, bytes) = export_plates_bytes(
+            &[&piece],
+            &[[0.0, 0.0, 1.0]],
+            [256.0, 256.0],
+            [256.0, 256.0],
+            5.0,
+            None,
+        )
+        .expect("one tet packs onto one plate");
+        assert_eq!(sum.pieces, 1);
+        assert_eq!(sum.plates, 1);
+        assert!(bytes.len() > 200, "a real 3mf zip, not a stub");
+        assert_eq!(&bytes[..2], b"PK", "3mf is a zip container");
+    }
 }

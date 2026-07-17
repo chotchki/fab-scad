@@ -576,6 +576,27 @@ pub struct JitRegistry {
     declined: BTreeMap<String, &'static str>,
     /// How many functions compiled their all-scalar shape at build — the EXPLAIN coverage count.
     scalar_compiled: usize,
+    /// Runtime activity counters (P.1.5): what the JIT actually DID this eval — offered calls, per-name
+    /// fires, and the decline taxonomy. Reported at drop under `FAB_JIT_EXPLAIN`; the increments are cheap
+    /// enough to keep unconditionally.
+    stats: RefCell<JitStats>,
+}
+
+/// One eval's runtime JIT activity (P.1.5) — the "is it even firing?" numbers the coverage report can't
+/// give. `offered` counts calls that passed the name gate (the flatten/lookup tax was paid); the rest
+/// partition its outcomes.
+#[derive(Default)]
+struct JitStats {
+    /// Calls to a name the registry owns (compiled OR declined) — each paid the shape/flatten scan.
+    offered: u64,
+    /// Args didn't scalarize (nested/oversized/non-numeric) — interpreted.
+    shape_declined: u64,
+    /// The (name, shape) is memoized as out-of-subset — interpreted.
+    subset_declined: u64,
+    /// An inline assert raised; the interpreter re-ran the call to raise the real error.
+    assert_bailed: u64,
+    /// Completed native calls, per function name.
+    fired: BTreeMap<String, u64>,
 }
 
 impl JitRegistry {
@@ -680,6 +701,7 @@ impl JitRegistry {
             next_symbol: Cell::new(next_symbol),
             declined,
             scalar_compiled,
+            stats: RefCell::default(),
         })
     }
 
@@ -813,12 +835,19 @@ impl NumericJit for JitRegistry {
         if !self.defs.contains_key(name) {
             return None;
         }
+        self.stats.borrow_mut().offered += 1;
         let mut scratch = self.scratch.borrow_mut();
         // Derive the arg shape + flatten the f64s into scratch. `None` → a non-scalarizable arg (nested list,
         // string, over-long vector) → interpret. `get_or_compile` doesn't touch `scratch`, so holding this
         // borrow across it is safe (a different `RefCell`), and the compiled fn then reads `scratch` directly.
-        let sig = shape_and_flatten(args, &mut scratch)?;
-        let compiled = self.get_or_compile(name, &sig)?;
+        let Some(sig) = shape_and_flatten(args, &mut scratch) else {
+            self.stats.borrow_mut().shape_declined += 1;
+            return None;
+        };
+        let Some(compiled) = self.get_or_compile(name, &sig) else {
+            self.stats.borrow_mut().subset_declined += 1;
+            return None;
+        };
         // RE-TAG the untyped native return by the specialization's static shape (P.1.4e + rung C): a `Num` IS
         // the `f64`; a `Bool` predicate yields `0.0`/`1.0` → `Value::Bool`; a `Vec(n)` wrote its `n` elements to
         // a sink buffer → `Value::NumList`. `None` from `call` = the inline assert raised → interpret. The
@@ -830,7 +859,7 @@ impl NumericJit for JitRegistry {
         // used) arena; it's freed when this fn returns, AFTER a `DynVec` result is taken out of it.
         let mut arena = JitArena::new();
         let arena_ptr = std::ptr::from_mut(&mut arena).cast::<core::ffi::c_void>();
-        match &compiled.ret_ty {
+        let out = match &compiled.ret_ty {
             Ret::Num => Some(JitOutcome::Num(unsafe {
                 compiled.call(&scratch, &mut [0.0], rand, arena_ptr)
             }?)),
@@ -888,6 +917,45 @@ impl NumericJit for JitRegistry {
                     .collect();
                 Some(JitOutcome::Nested(ScadValue::list(rows)))
             }
+        };
+        // Book the outcome (P.1.5): a `Some` is a completed native call; a `None` here can only be the
+        // inline-assert/budget bail (both declines already returned above).
+        let mut stats = self.stats.borrow_mut();
+        if out.is_some() {
+            if let Some(n) = stats.fired.get_mut(name) {
+                *n += 1;
+            } else {
+                stats.fired.insert(name.to_string(), 1);
+            }
+        } else {
+            stats.assert_bailed += 1;
+        }
+        out
+    }
+}
+
+/// The runtime-activity report (P.1.5), printed when the registry drops (eval end) under `FAB_JIT_EXPLAIN`
+/// — the "did it even fire?" numbers: how many eligible calls the JIT was OFFERED, how they partitioned
+/// (fired / shape-declined / subset-declined / assert-bailed), and the per-function fire counts. The decline
+/// counts price the flatten/lookup tax the hook pays on calls it ends up interpreting anyway.
+impl Drop for JitRegistry {
+    fn drop(&mut self) {
+        if std::env::var_os("FAB_JIT_EXPLAIN").is_none() {
+            return;
+        }
+        let stats = self.stats.borrow();
+        if stats.offered == 0 {
+            return; // a compile-for-coverage registry that never dispatched (EXPLAIN with the JIT off)
+        }
+        let fired_total: u64 = stats.fired.values().sum();
+        eprintln!(
+            "[jit-fires] offered {} → fired {fired_total}  shape-declined {}  subset-declined {}  assert-bailed {}",
+            stats.offered, stats.shape_declined, stats.subset_declined, stats.assert_bailed
+        );
+        let mut by_count: Vec<(&String, &u64)> = stats.fired.iter().collect();
+        by_count.sort_unstable_by(|a, b| b.1.cmp(a.1).then(a.0.cmp(b.0)));
+        for (name, count) in by_count {
+            eprintln!("[jit-fires]   {count:>9}  {name}");
         }
     }
 }
@@ -972,6 +1040,19 @@ fn explain_coverage(defs: &[JitDef<'_>], registry: &JitRegistry) {
     eprintln!(
         "[jit-explain]   (vector-arg specializations compile on demand at runtime — not in the counts above)"
     );
+    // `FAB_JIT_EXPLAIN=full`: the per-function decline listing behind the histogram — "why did fn X
+    // decline" without a scratch probe (P.1.5). Grouped by reason so the biggest bucket reads as a worklist.
+    if std::env::var_os("FAB_JIT_EXPLAIN").is_some_and(|v| v == "full") {
+        let mut by_fn: Vec<(&str, &&'static str)> = registry
+            .declined()
+            .iter()
+            .map(|(n, r)| (n.as_str(), r))
+            .collect();
+        by_fn.sort_unstable_by(|a, b| a.1.cmp(b.1).then(a.0.cmp(b.0)));
+        for (name, reason) in by_fn {
+            eprintln!("[jit-explain]   - declined  {name}: {reason}");
+        }
+    }
 }
 
 /// Compile a single numeric function body (over `param_names`, in order) to native code, owning its own

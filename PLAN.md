@@ -199,14 +199,15 @@ added 2026-07-07.
 - [x] O.8 - O.8 - Value-const guard: Entry.consts_v (name, fn()->Value) bit-compared against the home-scope binding at arm time — unlocks the non-numeric-constant tier (_NO_ARG, UP, RIGHT) for hand intrinsics (wasm gets every win, unlike the JIT)
 - [x] O.9 - O.9 - The unlocked band: vector_axis, affine3d_rot_from_to (+v_theta/v_abs/point2d/affine3d_identity deps), then apply (determinant/det2-4 + vnf_reverse_faces + BOSL2-reverse chain), then rot (move/rot_inverse/affine3d_rot_by_axis + _NO_ARG) — cut per dep-tree, each with battery + wire check
 ## Phase P - P - Cranelift JIT + CSG cache (desktop)
+added 2026-07-16.
 - [ ] P.1 - P.1 - Cranelift JIT for the numeric long tail (desktop)
   - [x] P.1.1 - P.1.1 - JIT registry + compile cache (one JITModule, keyed by fingerprint)
   - [x] P.1.2 - P.1.2 - Crate-boundary hook + dispatch integration
   - [x] P.1.3 - P.1.3 - fast==JIT differential over the corpus + EXPLAIN coverage
-  - [ ] P.1.3a - JIT $-global hazard (reviewer find, pre-existing, NOT 2b): loader.rs tagged_globals doesn't filter $-assignments — a top-level `$fn=32;` + a JIT'd fn reading $fn inlines 32 and diverges from the interpreter under dynamic shadowing. Needs a fast==JIT probe + fix
-added 2026-07-16.
+  - [x] P.1.3a - JIT $-global hazard (reviewer find, pre-existing, NOT 2b): loader.rs tagged_globals doesn't filter $-assignments — a top-level `$fn=32;` + a JIT'd fn reading $fn inlines 32 and diverges from the interpreter under dynamic shadowing. Needs a fast==JIT probe + fix — DONE (6c06b8af): probe watched failing end-to-end, then two-layer fix (Ident-arm $-decline + tagged_globals filter); corpus coverage unchanged
   - [ ] P.1.4 - P.1.4 - Extend the numeric subset (ternary, comparisons, transcendental calls)
   - [ ] P.1.5 - P.1.5 - Measure + coverage report
+    - [ ] P.1.5.1 - P.1.5.1 - LTO experiment: fat LTO + codegen-units=1 vs the default release profile (chotchki's ask) — measured on the heavies + mid models, vs-OpenSCAD implication from baseline oracle times
   - [ ] P.1.6 - P.1.6 - JIT list/vector ABI (scalarize A/B/C, sink-return D)
 - [x] P.2 - P.2 - Content-addressed CSG cache — DONE cf1ff16a as the kernel-level Solid memo (the rung BU.7's measurement picked): per-build content-addressed memo in build_geo/build_geo_parts (ONE memo spans parts — sliced models share the base between parts), prepass-counted so only will-recur content is retained, deep-eq verified per hit (collision = re-render, never a wrong mesh), FAB_GEO_CACHE=0 opt-out + =verify diagnosis mode. THE HUNT: silverwear diverged 140 tris — ops never MINT ids so update_reference's Q-offset is one constant per build; served copies sharing an id-set collide in union trees and same_face merges ACROSS copies; fixed with fresh_instance-on-serve (Mesh::as_fresh_instance re-mints instance ids, classes preserved). All four heavy models bitwise-identical on/off. Sweep: slice_parts 8.0s→0.59s (−92%), bowtie −77%, garage −53%, desktop_holder TIMEOUT→solid; wall-total 124.0s vs OpenSCAD 250.0s = 2.02× FASTER (day-start: 0.96×), median 2.69×, 75/109 both-rendered; baseline re-frozen
 ## Phase Q - Fuzzing the evaluator + JIT (miri/Kani can't execute native code — fuzzing runs it, ASan checks it)

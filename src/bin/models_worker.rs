@@ -41,8 +41,16 @@ fn main() {
                     if std::env::var_os("FAB_GEO_FINGERPRINT").is_some() {
                         use std::hash::{Hash, Hasher};
                         let mut h = std::collections::hash_map::DefaultHasher::new();
-                        format!("{geo:?}").hash(&mut h);
-                        eprintln!("FINGERPRINT\t{:016x}", h.finish());
+                        let debug = format!("{geo:?}");
+                        debug.hash(&mut h);
+                        let fp = h.finish();
+                        eprintln!("FINGERPRINT\t{fp:016x}");
+                        // FAB_GEO_DUMP=<dir>: also write the full Debug tree to `<dir>/<fp>.geo` — the
+                        // diffable evidence when two runs fingerprint apart (the P.1.5 flake hunt).
+                        if let Some(dir) = std::env::var_os("FAB_GEO_DUMP") {
+                            let path = std::path::Path::new(&dir).join(format!("{fp:016x}.geo"));
+                            let _ = std::fs::write(path, &debug);
+                        }
                     }
                     format!("OK\t{ms}")
                 }

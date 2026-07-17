@@ -344,32 +344,33 @@ fn build_inner<'t, B: GeometryBackend>(
             *rem = rem.saturating_sub(1);
             let more_coming = *rem > 0;
             if let Some(entries) = memo.ready.get(&h)
-                && let Some((stored, solid)) = entries.iter().find(|(n, _)| *n == node) {
-                    let out = backend.fresh_instance(solid);
-                    if geo_cache_verify() {
-                        let stored: &GeoNode = stored;
-                        assert!(
-                            std::ptr::eq(stored, node) || stored == node,
-                            "verify: eq drifted mid-build"
-                        );
-                        // Fresh = a fully UNCACHED render in a throwaway memo (no bookkeeping
-                        // perturbation, no circular serve reuse); compared BITWISE (PartialEq is
-                        // sign-of-zero-blind, the kernel's shadow predicates are not).
-                        let fresh = {
-                            let mut scratch = GeoMemo::new(false);
-                            render_node(node, backend, &mut scratch)
-                        };
-                        assert!(
-                            meshes_bit_eq(&backend.to_mesh(&out), &backend.to_mesh(&fresh)),
-                            "FAB_GEO_CACHE=verify: served solid != UNCACHED fresh render, bitwise (hash {h:#018x})"
-                        );
-                    }
-                    if !more_coming {
-                        memo.ready.remove(&h);
-                        memo.counts.remove(&h);
-                    }
-                    return out;
+                && let Some((stored, solid)) = entries.iter().find(|(n, _)| *n == node)
+            {
+                let out = backend.fresh_instance(solid);
+                if geo_cache_verify() {
+                    let stored: &GeoNode = stored;
+                    assert!(
+                        std::ptr::eq(stored, node) || stored == node,
+                        "verify: eq drifted mid-build"
+                    );
+                    // Fresh = a fully UNCACHED render in a throwaway memo (no bookkeeping
+                    // perturbation, no circular serve reuse); compared BITWISE (PartialEq is
+                    // sign-of-zero-blind, the kernel's shadow predicates are not).
+                    let fresh = {
+                        let mut scratch = GeoMemo::new(false);
+                        render_node(node, backend, &mut scratch)
+                    };
+                    assert!(
+                        meshes_bit_eq(&backend.to_mesh(&out), &backend.to_mesh(&fresh)),
+                        "FAB_GEO_CACHE=verify: served solid != UNCACHED fresh render, bitwise (hash {h:#018x})"
+                    );
                 }
+                if !more_coming {
+                    memo.ready.remove(&h);
+                    memo.counts.remove(&h);
+                }
+                return out;
+            }
             let out = render_node(node, backend, memo);
             if more_coming {
                 memo.ready.entry(h).or_default().push((node, out.clone()));

@@ -2782,12 +2782,315 @@ fn fast_equals_slow_o10_dep_tier() {
         &Value::list(vec![]),
         &one_pt,
     ] {
+        for il in [
+            &Value::Undef,
+            &Value::num_list(vec![1.0, 0.0]),
+            &Value::num_list(vec![1.0]),
+            &Value::num_list(vec![]),
+        ] {
+            let args = vec![arr.clone(), (*il).clone()];
+            assert!(
+                same_result(
+                    &super::regions::sort_vectors_val(arr, il),
+                    &interpret_with_deps_consts(sv_ref, &[], &consts, &args)
+                ),
+                "_sort_vectors diverged on {arr:?} idxlist={il:?}"
+            );
+        }
+    }
+}
+
+/// O.10b — `vector_search` + `_bt_tree`, native vs interpreted, BOTH branches: the ≤400-point
+/// quadratic scan AND the >400-point ball tree (they return indices in DIFFERENT orders — tree
+/// order is load-bearing for `_rri`'s downstream `search`/`select`), plus the pre-built
+/// `[points, tree]` target form and the empty/multi-query shapes.
+#[test]
+fn fast_equals_slow_o10_vector_search() {
+    let consts = [("_EPSILON", Value::Num(1e-9))];
+    let p = |xs: &[f64]| Value::num_list(xs.to_vec());
+    let deps: Vec<&str> = vec![
+        pin_reference_of("_bt_tree").unwrap(),
+        reference_of("_bt_search").unwrap(),
+        pin_reference_of("pointlist_bounds").unwrap(),
+        pin_reference_of("max_index").unwrap(),
+        pin_reference_of("min_index").unwrap(),
+        pin_reference_of("mean").unwrap(),
+        pin_reference_of("count").unwrap(),
+        pin_reference_of("transpose").unwrap(),
+        reference_of("ident").unwrap(),
+        reference_of("select").unwrap(),
+        reference_of("idx").unwrap(),
+        reference_of("sum").unwrap(),
+        reference_of("_sum").unwrap(),
+        reference_of("is_path").unwrap(),
+        reference_of("is_matrix").unwrap(),
+        reference_of("is_vector").unwrap(),
+        reference_of("is_consistent").unwrap(),
+        reference_of("_list_pattern").unwrap(),
+        reference_of("same_shape").unwrap(),
+        reference_of("in_list").unwrap(),
+        reference_of("force_list").unwrap(),
+        reference_of("is_finite").unwrap(),
+        reference_of("is_nan").unwrap(),
+        pin_reference_of("is_range").unwrap(),
+        reference_of("all_nonzero").unwrap(),
+        reference_of("posmod").unwrap(),
+        reference_of("approx").unwrap(),
+    ];
+    let vs_ref = pin_reference_of("vector_search").unwrap();
+
+    // A deterministic pseudo-random 2D cloud (fixed recurrence — no rand dep): 30 points for the
+    // quadratic branch, 420 for the tree branch.
+    let cloud = |n: usize| -> Value {
+        let mut pts = Vec::new();
+        let mut x: f64 = 3.7;
+        for _ in 0..n {
+            x = (x * 73.5 + 11.25) % 97.0;
+            let y = (x * 31.5 + 5.125) % 89.0;
+            pts.push(p(&[x, y]));
+        }
+        Value::list(pts)
+    };
+    let small = cloud(30);
+    let big = cloud(420);
+    let q1 = p(&[50.0, 40.0]);
+    let qs = Value::list(vec![p(&[50.0, 40.0]), p(&[10.0, 10.0])]);
+    let empty = Value::list(vec![]);
+
+    let cases: Vec<(Value, Value, Value)> = vec![
+        (q1.clone(), Value::Num(20.0), small.clone()),
+        (qs.clone(), Value::Num(20.0), small.clone()),
+        (q1.clone(), Value::Num(30.0), big.clone()), // the TREE branch
+        (qs.clone(), Value::Num(30.0), big.clone()), // tree branch, multi-query
+        (q1.clone(), Value::Num(0.0), small.clone()), // zero radius
+        (empty.clone(), Value::Num(5.0), small.clone()),
+        (q1.clone(), Value::Num(-1.0), small.clone()), // bad radius (raise)
+        (q1.clone(), Value::Num(5.0), empty.clone()),  // empty target... query is a vector
+        (qs.clone(), Value::Num(5.0), empty.clone()),  // empty target, matrix query
+        (q1.clone(), Value::Num(5.0), Value::Num(3.0)), // invalid target (raise)
+    ];
+    for (q, r, target) in &cases {
+        let args = vec![q.clone(), r.clone(), target.clone()];
         assert!(
             same_result(
-                &super::regions::sort_vectors_val(arr),
-                &interpret_with_deps_consts(sv_ref, &[], &consts, std::slice::from_ref(arr))
+                &super::regions::vector_search_val(q, r, target),
+                &interpret_with_deps_consts(vs_ref, &deps, &consts, &args)
             ),
-            "_sort_vectors diverged on {arr:?}"
+            "vector_search diverged on q={q:?} r={r:?} target={target:?}"
+        );
+    }
+
+    // The pre-built [points, tree] target form: build the tree NATIVELY (bt_tree_val is itself
+    // battery-checked just below), search through both engines.
+    let n_small = 30.0;
+    let ind = super::regions::count_val(
+        &Value::Num(n_small),
+        &Value::Num(0.0),
+        &Value::Num(1.0),
+        &Value::Bool(false),
+    )
+    .unwrap();
+    let tree = super::regions::bt_tree_val(&small, &ind, &Value::Num(5.0)).unwrap();
+    let prebuilt = Value::list(vec![small.clone(), tree.clone()]);
+    let args = vec![q1.clone(), Value::Num(25.0), prebuilt.clone()];
+    assert!(
+        same_result(
+            &super::regions::vector_search_val(&q1, &Value::Num(25.0), &prebuilt),
+            &interpret_with_deps_consts(vs_ref, &deps, &consts, &args)
+        ),
+        "vector_search diverged on the pre-built tree target"
+    );
+
+    // _bt_tree itself, structurally: leaf collapse (n<=leafsize) and a real split, both vs the
+    // interpreted reference.
+    let bt_ref = pin_reference_of("_bt_tree").unwrap();
+    for (pts, leafsize) in [(&small, 50.0), (&small, 5.0), (&big, 25.0)] {
+        let n = match pts {
+            Value::List(xs) => xs.len(),
+            _ => 0,
+        };
+        #[allow(clippy::cast_precision_loss, reason = "tiny test sizes")]
+        let ind = super::regions::count_val(
+            &Value::Num(n as f64),
+            &Value::Num(0.0),
+            &Value::Num(1.0),
+            &Value::Bool(false),
+        )
+        .unwrap();
+        let args = vec![(*pts).clone(), ind.clone(), Value::Num(leafsize)];
+        assert!(
+            same_result(
+                &super::regions::bt_tree_val(pts, &ind, &Value::Num(leafsize)),
+                &interpret_with_deps_consts(bt_ref, &deps, &consts, &args)
+            ),
+            "_bt_tree diverged on n={n} leafsize={leafsize}"
+        );
+    }
+}
+
+/// O.10c — the region monster itself: `_region_region_intersections` native vs interpreting the
+/// verbatim reference with its FULL dep closure. Crossing regions, multi-path regions, self-touching
+/// corners (the `vector_search` duplicate lane), open paths, degenerate zero-length edges, collinear
+/// non-crossings, and a >400-point region that flips the corner search onto the ball-tree branch.
+#[test]
+fn fast_equals_slow_o10_region_monster() {
+    let consts = [("_EPSILON", Value::Num(1e-9))];
+    let p = |xs: &[f64]| Value::num_list(xs.to_vec());
+    let deps: Vec<&str> = vec![
+        reference_of("idx").unwrap(),
+        pin_reference_of("list_wrap").unwrap(),
+        pin_reference_of("are_ends_equal").unwrap(),
+        reference_of("approx").unwrap(),
+        reference_of("is_finite").unwrap(),
+        reference_of("is_nan").unwrap(),
+        reference_of("posmod").unwrap(),
+        pin_reference_of("_general_line_intersection").unwrap(),
+        pin_reference_of("flatten").unwrap(),
+        pin_reference_of("vector_search").unwrap(),
+        pin_reference_of("_bt_tree").unwrap(),
+        reference_of("_bt_search").unwrap(),
+        pin_reference_of("pointlist_bounds").unwrap(),
+        reference_of("ident").unwrap(),
+        pin_reference_of("transpose").unwrap(),
+        reference_of("is_path").unwrap(),
+        reference_of("is_matrix").unwrap(),
+        reference_of("is_vector").unwrap(),
+        reference_of("is_consistent").unwrap(),
+        reference_of("_list_pattern").unwrap(),
+        reference_of("same_shape").unwrap(),
+        reference_of("in_list").unwrap(),
+        reference_of("force_list").unwrap(),
+        reference_of("all_nonzero").unwrap(),
+        pin_reference_of("is_range").unwrap(),
+        pin_reference_of("max_index").unwrap(),
+        pin_reference_of("min_index").unwrap(),
+        pin_reference_of("mean").unwrap(),
+        reference_of("sum").unwrap(),
+        reference_of("_sum").unwrap(),
+        pin_reference_of("column").unwrap(),
+        pin_reference_of("is_int").unwrap(),
+        pin_reference_of("count").unwrap(),
+        reference_of("select").unwrap(),
+        pin_reference_of("_sort_vectors").unwrap(),
+    ];
+    let rri_ref = reference_of("_region_region_intersections").unwrap();
+
+    let square = |x0: f64, y0: f64, s: f64| {
+        Value::list(vec![
+            p(&[x0, y0]),
+            p(&[x0 + s, y0]),
+            p(&[x0 + s, y0 + s]),
+            p(&[x0, y0 + s]),
+        ])
+    };
+    let r_a = Value::list(vec![square(0.0, 0.0, 10.0)]);
+    let r_b = Value::list(vec![square(5.0, 5.0, 10.0)]);
+    let r_two = Value::list(vec![square(0.0, 0.0, 4.0), square(20.0, 0.0, 4.0)]);
+    // Self-touching: a bowtie sharing its center point twice (the cornerpts lane).
+    let bowtie = Value::list(vec![Value::list(vec![
+        p(&[0.0, 0.0]),
+        p(&[4.0, 4.0]),
+        p(&[8.0, 0.0]),
+        p(&[4.0, 4.0]),
+        p(&[4.0, 8.0]),
+    ])]);
+    // Degenerate: a duplicate consecutive point (zero-length edge) + a collinear side.
+    let degen = Value::list(vec![Value::list(vec![
+        p(&[0.0, 0.0]),
+        p(&[0.0, 0.0]),
+        p(&[10.0, 0.0]),
+        p(&[10.0, 10.0]),
+    ])]);
+    // >400 points total: a 420-vertex near-circle — the corner search's TREE branch inside _rri.
+    let big_poly = {
+        let mut pts = Vec::new();
+        for k in 0..420 {
+            let th = f64::from(k) * std::f64::consts::TAU / 420.0;
+            pts.push(p(&[7.0 * th.cos(), 7.0 * th.sin()]));
+        }
+        Value::list(vec![Value::list(pts)])
+    };
+
+    let cases: Vec<(Value, Value, Value, Value, Value)> = vec![
+        (
+            r_a.clone(),
+            r_b.clone(),
+            Value::Bool(true),
+            Value::Bool(true),
+            Value::Num(1e-9),
+        ),
+        (
+            r_b.clone(),
+            r_a.clone(),
+            Value::Bool(true),
+            Value::Bool(true),
+            Value::Num(1e-9),
+        ),
+        (
+            r_two.clone(),
+            r_a.clone(),
+            Value::Bool(true),
+            Value::Bool(true),
+            Value::Num(1e-9),
+        ),
+        (
+            bowtie.clone(),
+            r_a.clone(),
+            Value::Bool(true),
+            Value::Bool(true),
+            Value::Num(1e-9),
+        ),
+        (
+            degen.clone(),
+            r_b.clone(),
+            Value::Bool(true),
+            Value::Bool(true),
+            Value::Num(1e-9),
+        ),
+        (
+            r_a.clone(),
+            r_b.clone(),
+            Value::Bool(false),
+            Value::Bool(true),
+            Value::Num(1e-9),
+        ),
+        (
+            r_a.clone(),
+            r_b.clone(),
+            Value::Bool(true),
+            Value::Bool(false),
+            Value::Num(1e-9),
+        ),
+        (
+            r_a.clone(),
+            r_a.clone(),
+            Value::Bool(true),
+            Value::Bool(true),
+            Value::Num(1e-9),
+        ), // self
+        (
+            r_a.clone(),
+            r_b.clone(),
+            Value::Bool(true),
+            Value::Bool(true),
+            Value::Num(0.5),
+        ), // fat eps
+        (
+            big_poly.clone(),
+            r_a.clone(),
+            Value::Bool(true),
+            Value::Bool(true),
+            Value::Num(1e-9),
+        ),
+    ];
+    for (r1, r2, c1, c2, eps) in &cases {
+        let args = vec![r1.clone(), r2.clone(), c1.clone(), c2.clone(), eps.clone()];
+        assert!(
+            same_result(
+                &super::regions::rri_val(&args),
+                &interpret_with_deps_consts(rri_ref, &deps, &consts, &args)
+            ),
+            "_rri diverged on closed=({c1:?},{c2:?}) eps={eps:?} r1={r1:?}"
         );
     }
 }

@@ -129,6 +129,57 @@ pub(super) struct Entry {
 /// registry entry's reference calls them, without shipping a native impl of our own. [`anchor_fp`] resolves
 /// a dep name against entries first, then here.
 static PINS: &[(&str, &str)] = &[
+    // O.10 band dep (vectors.scad).
+    (
+        "vector_search",
+        "function vector_search(query, r, target) =
+    query==[] ? [] :
+    is_list(query) && target==[] ? is_vector(query) ? [] : [for(q=query) [] ] :
+    assert( is_finite(r) && r>=0, 
+            \"\\nThe query radius should be a positive number.\" )
+    let(
+        tgpts  = is_matrix(target),   // target is a point list
+        tgtree = is_list(target)      // target is a tree
+                 && (len(target)==2)
+                 && is_matrix(target[0])
+                 && is_list(target[1])
+                 && (len(target[1])==4 || (len(target[1])==1 && is_list(target[1][0])) )
+    )
+    assert( tgpts || tgtree, 
+            \"\\nThe target should be a list of points or a search tree compatible with the query.\" )
+    let( 
+        dim    = tgpts ? len(target[0]) : len(target[0][0]),
+        simple = is_vector(query, dim)
+        )
+    assert( simple || is_matrix(query,undef,dim), 
+            \"\\nThe query points should be a list of points compatible with the target point list.\")
+    tgpts 
+    ?   len(target)<=400
+        ?   simple ? [for(i=idx(target)) if(norm(target[i]-query)<=r) i ] :
+            [for(q=query) [for(i=idx(target)) if(norm(target[i]-q)<=r) i ] ]
+        :   let( tree = _bt_tree(target, count(len(target)), leafsize=25) )
+            simple ? _bt_search(query, r, target, tree) :
+            [for(q=query) _bt_search(q, r, target, tree)]
+    :   simple ?  _bt_search(query, r, target[0], target[1]) :
+        [for(q=query) _bt_search(q, r, target[0], target[1])];",
+    ),
+    // O.10 band dep (vectors.scad).
+    (
+        "_bt_tree",
+        "function _bt_tree(points, ind, leafsize=25) =
+    len(ind)<=leafsize ? [ind] :
+    let( 
+        bounds = pointlist_bounds(select(points,ind)),
+        coord  = max_index(bounds[1]-bounds[0]), 
+        projc  = [for(i=ind) points[i][coord] ],
+        meanpr = mean(projc), 
+        pivot  = min_index([for(p=projc) abs(p-meanpr)]),
+        radius = max([for(i=ind) norm(points[ind[pivot]]-points[i]) ]),
+        Lind   = [for(i=idx(ind)) if(projc[i]<=meanpr && i!=pivot) ind[i] ],
+        Rind   = [for(i=idx(ind)) if(projc[i] >meanpr && i!=pivot) ind[i] ]
+      )
+    [ ind[pivot], radius, _bt_tree(points, Lind, leafsize), _bt_tree(points, Rind, leafsize) ];",
+    ),
     // O.10 band dep (utility.scad) — `column`'s index assert.
     (
         "is_int",
@@ -239,18 +290,19 @@ static PINS: &[(&str, &str)] = &[
     // O.10 band dep (comparisons.scad).
     (
         "_sort_vectors",
-        "function _sort_vectors(arr, _i=0) =
-    len(arr)<=1 || _i>=len(arr[0]) ? arr :
+        "function _sort_vectors(arr, idxlist, _i=0) =
+    len(arr)<=1 || ( is_list(idxlist) && _i>=len(idxlist) ) || _i>=len(arr[0])  ? arr :
     let(
-        pivot   = arr[floor(len(arr)/2)][_i],
-        lesser  = [ for (entry=arr) if (entry[_i]  < pivot ) entry ],
-        equal   = [ for (entry=arr) if (entry[_i] == pivot ) entry ],
-        greater = [ for (entry=arr) if (entry[_i]  > pivot ) entry ]
-    )
+        k = is_list(idxlist) ? idxlist[_i] : _i,
+        pivot   = arr[floor(len(arr)/2)][k],
+        lesser  = [ for (entry=arr) if (entry[k]  < pivot ) entry ],
+        equal   = [ for (entry=arr) if (entry[k] == pivot ) entry ],
+        greater = [ for (entry=arr) if (entry[k]  > pivot ) entry ]
+      )
     concat(
-        _sort_vectors(lesser,  _i   ), 
-        _sort_vectors(equal,   _i+1 ), 
-        _sort_vectors(greater, _i ) );",
+        _sort_vectors(lesser,  idxlist, _i  ), 
+        _sort_vectors(equal,   idxlist, _i+1), 
+        _sort_vectors(greater, idxlist, _i  ) );",
     ),
     // vectors.scad — `select`'s start-vector assert calls `is_vector(start)` (1-arg: the
     // `all_nonzero`/`zero`/`length` branches are unreachable, so they add no further deps).
@@ -1623,6 +1675,115 @@ static REGISTRY: &[Entry] = &[
             "is_function",
         ],
         func: affine::rot,
+    },
+    // ── O.10c (regions.scad) — the region monster: shoe_holder's ~9.7s/6-call residual ─────────────
+    Entry {
+        name: "_region_region_intersections",
+        reference: "function _region_region_intersections(region1, region2, closed1=true,closed2=true, eps=_EPSILON) =
+   let(
+       intersections =   [
+           for(p1=idx(region1))
+              let(
+                  path = closed1?list_wrap(region1[p1]):region1[p1]
+              )
+              for(i = [0:1:len(path)-2])
+                  let(
+                      a1 = path[i],
+                      a2 = path[i+1],
+                      nrm = norm(a1-a2)
+                  )
+                  if( nrm>eps )  // ignore zero-length path edges
+                       let( 
+                           seg_normal = [-(a2-a1).y, (a2-a1).x]/nrm,
+                           ref = a1*seg_normal
+                       )
+                           // `signs[j]` is the sign of the signed distance from
+                           // poly vertex j to the line [a1,a2] where near zero
+                           // distances are snapped to zero;  poly edges 
+                           //  with equal signs at its vertices cannot intersect
+                           // the path edge [a1,a2] or they are collinear and 
+                           // further tests can be discarded.
+                       for(p2=idx(region2))
+                           let(
+                               poly  = closed2?list_wrap(region2[p2]):region2[p2],
+                               signs = [for(v=poly*seg_normal) abs(v-ref) < eps ? 0 : sign(v-ref) ]
+                           ) 
+                           if(max(signs)>=0 && min(signs)<=0) // some edge intersects line [a1,a2]
+                               for(j=[0:1:len(poly)-2]) 
+                                   if(signs[j]!=signs[j+1])
+                                        let( // exclude non-crossing and collinear segments
+                                            b1 = poly[j],
+                                            b2 = poly[j+1],
+                                            isect = _general_line_intersection([a1,a2],[b1,b2],eps=eps) 
+                                        )
+                                        if (isect 
+                                            && isect[1]>= -eps 
+                                            && isect[1]<= 1+eps 
+                                            && isect[2]>= -eps
+                                            && isect[2]<= 1+eps)       
+                                         [[p1,i,isect[1]], [p2,j,isect[2]]]
+         ],
+         regions=[region1,region2],
+         // Create a flattened index list corresponding to the points in region1 and region2
+         // that gives each point as an intersection point
+         ptind = [for(i=[0:1])   
+                    [for(p=idx(regions[i]))
+                       for(j=idx(regions[i][p])) [p,j,0]]],
+         points = [for(i=[0:1]) flatten(regions[i])],
+         // Corner points are those points where the region touches itself, hence duplicate
+         // points in the region's point set
+         cornerpts = [for(i=[0:1])
+                         [for(k=vector_search(points[i],eps,points[i]))
+                             each if (len(k)>1) select(ptind[i],k)]],
+         risect = [for(i=[0:1]) concat(column(intersections,i), cornerpts[i])],
+         counts = [count(len(region1)), count(len(region2))],
+         pathind = [for(i=[0:1]) search(counts[i], risect[i], 0)]
+       )
+       [for(i=[0:1]) [for(j=counts[i]) _sort_vectors(select(risect[i],pathind[i][j]))]];",
+        consts: &[("_EPSILON", 1e-9)],
+        consts_v: &[],
+        deps: &[
+            "idx",
+            "list_wrap",
+            "are_ends_equal",
+            "approx",
+            "is_finite",
+            "is_nan",
+            "posmod",
+            "_general_line_intersection",
+            "flatten",
+            "vector_search",
+            "_bt_tree",
+            "_bt_search",
+            "pointlist_bounds",
+            "ident",
+            "transpose",
+            "is_path",
+            "is_matrix",
+            "is_vector",
+            "is_consistent",
+            "_list_pattern",
+            "same_shape",
+            "in_list",
+            "force_list",
+            "all_nonzero",
+            "is_range",
+            "max_index",
+            "min_index",
+            "mean",
+            "sum",
+            "_sum",
+            "column",
+            "is_int",
+            "count",
+            "select",
+            "_sort_vectors",
+        ],
+        builtins: &[
+            "norm", "sign", "cross", "search", "max", "min", "abs", "floor", "round", "concat",
+            "len", "is_list", "is_num", "is_undef",
+        ],
+        func: regions::rri_val,
     },
 ];
 

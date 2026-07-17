@@ -1685,6 +1685,192 @@ fn fast_equals_slow_o9_tree2a_apply() {
 }
 
 #[test]
+fn fast_equals_slow_o9_tree2b_rot() {
+    let no_arg = Value::list(vec![
+        Value::Bool(true),
+        Value::num_list(vec![123_232_345.0]),
+        Value::Bool(false),
+    ]);
+    let consts = [
+        ("_EPSILON", Value::Num(1e-9)),
+        ("UP", Value::num_list(vec![0.0, 0.0, 1.0])),
+        ("RIGHT", Value::num_list(vec![1.0, 0.0, 0.0])),
+        ("_NO_ARG", no_arg.clone()),
+    ];
+    // rot's whole closure as the oracle program
+    let deps: Vec<&str> = [
+        "point3d",
+        "affine3d_rot_from_to",
+        "affine3d_rot_by_axis",
+        "affine3d_zrot",
+        "affine3d_yrot",
+        "affine3d_xrot",
+        "affine3d_translate",
+        "affine3d_identity",
+        "ident",
+        "default",
+        "apply",
+        "_apply",
+        "is_2d_transform",
+        "vector_axis",
+        "v_abs",
+        "v_theta",
+        "point2d",
+        "vector_angle",
+        "same_shape",
+        "is_def",
+        "is_matrix",
+        "is_consistent",
+        "_list_pattern",
+        "unit",
+        "approx",
+        "idx",
+        "posmod",
+        "is_vector",
+        "all_nonzero",
+        "is_finite",
+        "is_nan",
+    ]
+    .iter()
+    .map(|n| reference_of(n).expect(n))
+    .chain(
+        [
+            "move",
+            "rot_inverse",
+            "hstack",
+            "all",
+            "_all_bool",
+            "is_func",
+            "min_length",
+            "max_length",
+            "determinant",
+            "det2",
+            "det3",
+            "det4",
+            "is_vnf",
+            "reverse",
+            "vnf_reverse_faces",
+            "str_join",
+            "constrain",
+        ]
+        .iter()
+        .map(|n| pin_reference_of(n).expect(n)),
+    )
+    .collect();
+    let p3 = |x: f64, y: f64, z: f64| Value::num_list(vec![x, y, z]);
+    let u = Value::Undef;
+    let pts = Value::list(vec![p3(1.0, 2.0, 3.0), p3(-1.0, 0.5, 0.0)]);
+
+    // translate / rot_by_axis smalls first
+    let tr_ref = reference_of("affine3d_translate").unwrap();
+    let tr_deps = [reference_of("default").unwrap()];
+    for v in [
+        Value::num_list(vec![1.0, -2.0, 3.0]),
+        p2(4.0, 5.0),
+        Value::list(vec![]),
+        Value::Num(7.0),
+    ] {
+        let args = [v.clone()];
+        assert!(
+            same_result(
+                &super::affine3d_translate(&args),
+                &interpret_with_deps_consts(tr_ref, &tr_deps, &consts, &args)
+            ),
+            "affine3d_translate diverged on {v:?}"
+        );
+    }
+    let ba_ref = reference_of("affine3d_rot_by_axis").unwrap();
+    let ba_cases: Vec<Vec<Value>> = vec![
+        vec![p3(0.0, 0.0, 1.0), Value::Num(45.0)],
+        vec![p3(1.0, 1.0, 1.0), Value::Num(120.0)],
+        vec![p3(1.0, 0.0, 0.0), Value::Num(0.0)],
+        vec![p3(1.0, 0.0, 0.0), Value::Num(1e-12)],
+        vec![p2(1.0, 0.0), Value::Num(30.0)],
+        vec![p3(1.0, 0.0, 0.0), Value::Undef],
+    ];
+    for args in &ba_cases {
+        assert!(
+            same_result(
+                &super::affine3d_rot_by_axis(args),
+                &interpret_with_deps_consts(ba_ref, &deps, &consts, args)
+            ),
+            "affine3d_rot_by_axis diverged on {args:?}"
+        );
+    }
+
+    // rot — every lane: scalar, Euler vector, v-axis, from/to, cp conjugation, reverse (both parities of
+    // matrix), p application, explicit-sentinel p, and the assert lanes.
+    let rot_ref = reference_of("rot").unwrap();
+    let cases: Vec<Vec<Value>> = vec![
+        vec![Value::Num(37.0)],
+        vec![p3(30.0, 40.0, 50.0)],
+        vec![Value::Num(45.0), p3(1.0, 1.0, 0.0)],
+        vec![Value::Num(30.0), u.clone(), p3(1.0, 2.0, 3.0)],
+        vec![
+            Value::Num(15.0),
+            u.clone(),
+            u.clone(),
+            p3(0.0, 0.0, 1.0),
+            p3(1.0, 0.0, 0.0),
+        ],
+        vec![
+            Value::Num(0.0),
+            u.clone(),
+            u.clone(),
+            p3(0.0, 0.0, 1.0),
+            p3(0.0, 0.0, 2.0),
+        ],
+        vec![
+            Value::Num(37.0),
+            u.clone(),
+            u.clone(),
+            u.clone(),
+            u.clone(),
+            Value::Bool(true),
+        ],
+        vec![
+            Value::Num(37.0),
+            u.clone(),
+            u.clone(),
+            u.clone(),
+            u.clone(),
+            Value::Bool(false),
+            pts.clone(),
+        ],
+        vec![
+            Value::Num(37.0),
+            u.clone(),
+            u.clone(),
+            u.clone(),
+            u.clone(),
+            Value::Bool(false),
+            no_arg.clone(),
+        ],
+        vec![Value::Num(30.0), p3(0.0, 0.0, 0.0)],
+        vec![Value::string("a")],
+        vec![Value::Num(30.0), u.clone(), u.clone(), p3(1.0, 0.0, 0.0)],
+        vec![
+            p3(10.0, 20.0, 30.0),
+            u.clone(),
+            u.clone(),
+            u.clone(),
+            u.clone(),
+            Value::Bool(true),
+            pts.clone(),
+        ],
+    ];
+    for args in &cases {
+        assert!(
+            same_result(
+                &super::rot(args),
+                &interpret_with_deps_consts(rot_ref, &deps, &consts, args)
+            ),
+            "rot diverged on {args:?}"
+        );
+    }
+}
+
+#[test]
 fn fast_equals_slow_o9_tree1() {
     let consts = [
         ("_EPSILON", Value::Num(1e-9)),

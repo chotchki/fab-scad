@@ -226,38 +226,7 @@ pub(super) fn affine3d_rot_from_to(args: &[Value]) -> crate::Result<Value> {
     let c = builtins::apply("cos", std::slice::from_ref(&ang));
     let c2 = ops::apply_binary(BinOp::Sub, Value::Num(1.0), c.clone());
     let s = builtins::apply("sin", std::slice::from_ref(&ang));
-    let ux = ops::member(u.clone(), "x");
-    let uy = ops::member(u.clone(), "y");
-    let uz = ops::member(u, "z");
-    let mul = |a: &Value, b: &Value| ops::apply_binary(BinOp::Mul, a.clone(), b.clone());
-    let add = |a: Value, b: Value| ops::apply_binary(BinOp::Add, a, b);
-    let sub = |a: Value, b: Value| ops::apply_binary(BinOp::Sub, a, b);
-    // each cell exactly as written: ((u.i*u.j)*c2) ± (u.k*s), diagonal ((u.i*u.i)*c2) + c
-    let cell = |a: &Value, b: &Value| mul(&mul(a, b), &c2);
-    let row = |cells: Vec<Value>| build_vector(cells);
-    let z = || Value::Num(0.0);
-    let rows = vec![
-        row(vec![
-            add(cell(&ux, &ux), c.clone()),
-            sub(cell(&ux, &uy), mul(&uz, &s)),
-            add(cell(&ux, &uz), mul(&uy, &s)),
-            z(),
-        ]),
-        row(vec![
-            add(cell(&uy, &ux), mul(&uz, &s)),
-            add(cell(&uy, &uy), c.clone()),
-            sub(cell(&uy, &uz), mul(&ux, &s)),
-            z(),
-        ]),
-        row(vec![
-            sub(cell(&uz, &ux), mul(&uy, &s)),
-            add(cell(&uz, &uy), mul(&ux, &s)),
-            add(cell(&uz, &uz), c),
-            z(),
-        ]),
-        row(vec![z(), z(), z(), Value::Num(1.0)]),
-    ];
-    Ok(build_vector(rows))
+    Ok(rodrigues_rows(&u, &c, &c2, &s))
 }
 
 /// The `apply`-reachable slice of BOSL2 `determinant`: the closed-form 1–4 lanes (each with its own
@@ -460,4 +429,255 @@ pub(super) fn apply(args: &[Value]) -> crate::Result<Value> {
         return Ok(build_vector(rows?));
     }
     apply_transform(&[transform, points])
+}
+
+/// BOSL2 `affine3d_translate(v=[0,0,0])` — the translation matrix; the slot-defaulting
+/// `[for (i=[0:2]) default(v[i],0)]` runs through the real [`default`](super::lists::default).
+pub(super) fn affine3d_translate(args: &[Value]) -> crate::Result<Value> {
+    let v = args
+        .first()
+        .cloned()
+        .unwrap_or_else(|| Value::num_list(vec![0.0, 0.0, 0.0]));
+    if !super::v_is_list(&v) {
+        return Err(bosl_assert("affine3d_translate: v must be a list"));
+    }
+    let slot = |i: f64| -> crate::Result<Value> {
+        super::lists::default(&[ops::index(v.clone(), &Value::Num(i)), Value::Num(0.0)])
+    };
+    let (vx, vy, vz) = (slot(0.0)?, slot(1.0)?, slot(2.0)?);
+    let z = || Value::Num(0.0);
+    let one = || Value::Num(1.0);
+    let rows = vec![
+        build_vector(vec![one(), z(), z(), vx]),
+        build_vector(vec![z(), one(), z(), vy]),
+        build_vector(vec![z(), z(), one(), vz]),
+        build_vector(vec![z(), z(), z(), one()]),
+    ];
+    Ok(build_vector(rows))
+}
+
+/// The Rodrigues rotation rows shared by [`affine3d_rot_by_axis`] and [`affine3d_rot_from_to`] — the
+/// references' identical cell arithmetic: diagonal `((u.i*u.i)*c2)+c`, off-diagonal `((u.i*u.j)*c2) ± u.k*s`.
+fn rodrigues_rows(u: &Value, c: &Value, c2: &Value, s: &Value) -> Value {
+    let ux = ops::member(u.clone(), "x");
+    let uy = ops::member(u.clone(), "y");
+    let uz = ops::member(u.clone(), "z");
+    let mul = |a: &Value, b: &Value| ops::apply_binary(BinOp::Mul, a.clone(), b.clone());
+    let add = |a: Value, b: Value| ops::apply_binary(BinOp::Add, a, b);
+    let sub = |a: Value, b: Value| ops::apply_binary(BinOp::Sub, a, b);
+    let cell = |a: &Value, b: &Value| mul(&mul(a, b), c2);
+    let z = || Value::Num(0.0);
+    build_vector(vec![
+        build_vector(vec![
+            add(cell(&ux, &ux), c.clone()),
+            sub(cell(&ux, &uy), mul(&uz, s)),
+            add(cell(&ux, &uz), mul(&uy, s)),
+            z(),
+        ]),
+        build_vector(vec![
+            add(cell(&uy, &ux), mul(&uz, s)),
+            add(cell(&uy, &uy), c.clone()),
+            sub(cell(&uy, &uz), mul(&ux, s)),
+            z(),
+        ]),
+        build_vector(vec![
+            sub(cell(&uz, &ux), mul(&uy, s)),
+            add(cell(&uz, &uy), mul(&ux, s)),
+            add(cell(&uz, &uz), c.clone()),
+            z(),
+        ]),
+        build_vector(vec![z(), z(), z(), Value::Num(1.0)]),
+    ])
+}
+
+/// BOSL2 `affine3d_rot_by_axis(u=UP, ang=0)` — Rodrigues about an arbitrary axis; identity shortcut through
+/// the real [`approx`] (numeric lane only — `ang` is asserted finite).
+pub(super) fn affine3d_rot_by_axis(args: &[Value]) -> crate::Result<Value> {
+    let u = args
+        .first()
+        .cloned()
+        .unwrap_or_else(super::vectors::bosl_up);
+    let ang = args.get(1).cloned().unwrap_or(Value::Num(0.0));
+    if !v_is_finite(&ang) {
+        return Err(bosl_assert("affine3d_rot_by_axis: angle must be finite"));
+    }
+    if !super::shape::is_vector(&[u.clone(), Value::Num(3.0)])?.is_truthy() {
+        return Err(bosl_assert("affine3d_rot_by_axis: u must be a 3-vector"));
+    }
+    if approx(&[ang.clone(), Value::Num(0.0)])?.is_truthy() {
+        return affine3d_identity(&[]);
+    }
+    let u = unit(std::slice::from_ref(&u))?;
+    let c = builtins::apply("cos", std::slice::from_ref(&ang));
+    let c2 = ops::apply_binary(BinOp::Sub, Value::Num(1.0), c.clone());
+    let s = builtins::apply("sin", std::slice::from_ref(&ang));
+    Ok(rodrigues_rows(&u, &c, &c2, &s))
+}
+
+/// The `rot`-reachable slice of BOSL2 `move`: `cp` is asserted a VECTOR in rot before `move(cp)` runs, so
+/// the string lane (`centroid`/`mean`/`pointlist_bounds`) is unreachable — this is the
+/// `affine3d_translate(point3d(v))` matrix branch with `p` defaulted.
+fn move_mat(v: &Value) -> crate::Result<Value> {
+    let len_ok = |k: f64| {
+        ops::apply_binary(
+            BinOp::Eq,
+            builtins::apply("len", std::slice::from_ref(v)),
+            Value::Num(k),
+        )
+        .is_truthy()
+    };
+    if !(is_vector_core(v) && (len_ok(3.0) || len_ok(2.0))) {
+        return Err(bosl_assert("move: invalid value for v"));
+    }
+    affine3d_translate(&[point3d(std::slice::from_ref(v))?])
+}
+
+/// The `rot`-reachable slice of BOSL2 `rot_inverse` (the `reverse=true` lane): transpose the rotation
+/// block, verify `approx(determinant(T), 1)` through [`det_reachable`], and reassemble via the pinned
+/// `hstack`'s reachable semantics — row-wise `each`-splice of the transposed block and the negated
+/// back-rotated translation, plus the `[0,…,0,1]` bottom row.
+fn rot_inverse_val(t: &Value) -> crate::Result<Value> {
+    if !super::shape::is_matrix(&[t.clone(), Value::Undef, Value::Undef, Value::Bool(true)])?
+        .is_truthy()
+    {
+        return Err(bosl_assert("rot_inverse: matrix must be square"));
+    }
+    let n = builtins::apply("len", std::slice::from_ref(t));
+    let is_n = |k: f64| ops::apply_binary(BinOp::Eq, n.clone(), Value::Num(k)).is_truthy();
+    if !(is_n(3.0) || is_n(4.0)) {
+        return Err(bosl_assert("rot_inverse: matrix must be 3x3 or 4x4"));
+    }
+    let last = ops::apply_binary(BinOp::Sub, n.clone(), Value::Num(1.0));
+    let at = |r: &Value, c: &Value| ops::index(ops::index(t.clone(), r), c);
+    let idx_range = build_range(
+        &Value::Num(0.0),
+        &Value::Num(1.0),
+        &ops::apply_binary(BinOp::Sub, n.clone(), Value::Num(2.0)),
+    );
+    let idxs = iter_values(&idx_range);
+    let rotpart = build_vector(
+        idxs.iter()
+            .map(|i| build_vector(idxs.iter().map(|j| at(j, i)).collect()))
+            .collect(),
+    );
+    let transpart = build_vector(idxs.iter().map(|row| at(row, &last)).collect());
+    if !approx(&[det_reachable(t)?, Value::Num(1.0)])?.is_truthy() {
+        return Err(bosl_assert("rot_inverse: matrix is not a rotation"));
+    }
+    // hstack(rotpart, -rotpart*transpart): row-wise each-splice — a row's elements then the scalar
+    let back = ops::apply_binary(
+        BinOp::Mul,
+        ops::apply_unary(crate::parser::UnOp::Neg, rotpart.clone()),
+        transpart,
+    );
+    let mut rows: Vec<Value> = Vec::new();
+    for row in &idxs {
+        let mut cells: Vec<Value> = iter_values(&ops::index(rotpart.clone(), row));
+        let b = ops::index(back.clone(), row);
+        match b {
+            Value::NumList(_) | Value::List(_) => cells.extend(iter_values(&b)),
+            other => cells.push(other),
+        }
+        rows.push(build_vector(cells));
+    }
+    // the bottom row: [for(i=[2:n]) 0, 1]
+    let zrange = build_range(&Value::Num(2.0), &Value::Num(1.0), &n);
+    let mut bottom: Vec<Value> = iter_values(&zrange)
+        .iter()
+        .map(|_| Value::Num(0.0))
+        .collect();
+    bottom.push(Value::Num(1.0));
+    rows.push(build_vector(bottom));
+    Ok(build_vector(rows))
+}
+
+/// BOSL2 `rot(a=0, v, cp, from, to, reverse=false, p=_NO_ARG)` — the rotation dispatcher: from/to
+/// (`rot_from_to` × `rot_by_axis`), axis-angle, scalar z-rotation, or Euler `zrot*yrot*xrot`; optional
+/// centerpoint conjugation through the translate matrices; optional inversion through the
+/// [`rot_inverse_val`] slice; `p` applied through the native [`apply`] unless it is the `_NO_ARG` sentinel
+/// (the O.8 guard proves the bake).
+pub(super) fn rot(args: &[Value]) -> crate::Result<Value> {
+    let a = args.first().cloned().unwrap_or(Value::Num(0.0));
+    let v = args.get(1).cloned().unwrap_or(Value::Undef);
+    let cp = args.get(2).cloned().unwrap_or(Value::Undef);
+    let from = args.get(3).cloned().unwrap_or(Value::Undef);
+    let to = args.get(4).cloned().unwrap_or(Value::Undef);
+    let reverse = args.get(5).cloned().unwrap_or(Value::Bool(false));
+    let from_undef = matches!(from, Value::Undef);
+    let to_undef = matches!(to, Value::Undef);
+    if from_undef != to_undef {
+        return Err(bosl_assert("rot: from and to must be specified together"));
+    }
+    let nonzero_vec = |x: &Value| -> crate::Result<bool> {
+        Ok(matches!(x, Value::Undef)
+            || super::shape::is_vector(&[x.clone(), Value::Undef, Value::Bool(false)])?.is_truthy())
+    };
+    if !nonzero_vec(&from)? {
+        return Err(bosl_assert("rot: 'from' must be a non-zero vector"));
+    }
+    if !nonzero_vec(&to)? {
+        return Err(bosl_assert("rot: 'to' must be a non-zero vector"));
+    }
+    if !nonzero_vec(&v)? {
+        return Err(bosl_assert("rot: 'v' must be a non-zero vector"));
+    }
+    if !(matches!(cp, Value::Undef)
+        || super::shape::is_vector(std::slice::from_ref(&cp))?.is_truthy())
+    {
+        return Err(bosl_assert("rot: 'cp' must be a vector"));
+    }
+    if !(v_is_finite(&a) || super::shape::is_vector(std::slice::from_ref(&a))?.is_truthy()) {
+        return Err(bosl_assert("rot: 'a' must be a finite scalar or a vector"));
+    }
+    if !matches!(reverse, Value::Bool(_)) {
+        return Err(bosl_assert("rot: reverse must be a bool"));
+    }
+    let a_is_num = matches!(&a, Value::Num(n) if !n.is_nan());
+    let mul = |x: Value, y: Value| ops::apply_binary(BinOp::Mul, x, y);
+    let m1 = if !from_undef {
+        if !a_is_num {
+            return Err(bosl_assert("rot: 'a' must be a number with from/to"));
+        }
+        let from3 = point3d(std::slice::from_ref(&from))?;
+        let to3 = point3d(std::slice::from_ref(&to))?;
+        mul(
+            affine3d_rot_from_to(&[from3.clone(), to3])?,
+            affine3d_rot_by_axis(&[from3, a])?,
+        )
+    } else if !matches!(v, Value::Undef) {
+        if !a_is_num {
+            return Err(bosl_assert("rot: 'a' must be a number with v"));
+        }
+        affine3d_rot_by_axis(&[v, a])?
+    } else if a_is_num {
+        affine3d_zrot(std::slice::from_ref(&a))?
+    } else {
+        let part = |field: &str| ops::member(a.clone(), field);
+        mul(
+            mul(affine3d_zrot(&[part("z")])?, affine3d_yrot(&[part("y")])?),
+            affine3d_xrot(&[part("x")])?,
+        )
+    };
+    let m2 = if matches!(cp, Value::Undef) {
+        m1
+    } else {
+        let cp3 = point3d(std::slice::from_ref(&cp))?;
+        let neg_cp = ops::apply_unary(crate::parser::UnOp::Neg, cp3.clone());
+        mul(mul(move_mat(&cp3)?, m1), move_mat(&neg_cp)?)
+    };
+    let m3 = if reverse.is_truthy() {
+        rot_inverse_val(&m2)?
+    } else {
+        m2
+    };
+    match args.get(6) {
+        None => Ok(m3), // p defaulted → the _NO_ARG sentinel → the matrix
+        Some(p) => {
+            if ops::apply_binary(BinOp::Eq, p.clone(), super::no_arg_value()).is_truthy() {
+                Ok(m3)
+            } else {
+                apply(&[m3, p.clone()])
+            }
+        }
+    }
 }

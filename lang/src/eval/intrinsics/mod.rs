@@ -49,8 +49,9 @@ pub(super) use fingerprint::fingerprint;
 // paths valid from the tests submodule.
 #[cfg(test)]
 use affine::{
-    affine3d_identity, affine3d_rot_from_to, affine3d_xrot, affine3d_yrot, affine3d_zrot, apply,
-    apply_transform, ident, is_2d_transform,
+    affine3d_identity, affine3d_rot_by_axis, affine3d_rot_from_to, affine3d_translate,
+    affine3d_xrot, affine3d_yrot, affine3d_zrot, apply, apply_transform, ident, is_2d_transform,
+    rot,
 };
 #[cfg(test)]
 use geometry::{
@@ -242,6 +243,90 @@ static PINS: &[(&str, &str)] = &[
     assert(is_list(list))
     _i >= len(list)-1 ? (_i==len(list) ? _result : str(_result,list[_i])) :
     str_join(list,sep,_i+1,str(_result,list[_i],sep));",
+    ),
+    // transforms/linalg/utility/lists.scad — `rot`'s closure. From rot, `move` is only ever called with a
+    // VECTOR cp (rot's own assert), so its string lane (centroid/mean/pointlist_bounds) stays unreachable;
+    // `rot_inverse` (the reverse=true lane) pulls hstack → all → _all_bool/is_func and min/max_length.
+    (
+        "move",
+        "function move(v=[0,0,0], p=_NO_ARG) =
+    is_string(v) ? (
+        assert(is_vnf(p) || is_path(p),\"String movements only work with point lists and VNFs\")
+        let(
+             center = v==\"centroid\" ? centroid(p)
+                    : v==\"mean\" ? mean(p)
+                    : v==\"box\" ? mean(pointlist_bounds(p))
+                    : assert(false,str(\"Unknown string movement \",v))
+        )
+        move(-center,p=p)
+      )
+    :
+    assert(is_vector(v) && (len(v)==3 || len(v)==2), \"Invalid value for `v`\")
+    let(
+        m = affine3d_translate(point3d(v))
+    )
+    p==_NO_ARG ? m : apply(m, p);",
+    ),
+    (
+        "rot_inverse",
+        "function rot_inverse(T) =
+    assert(is_matrix(T,square=true),\"Matrix must be square\")
+    let( n = len(T))
+    assert(n==3 || n==4, \"Matrix must be 3x3 or 4x4\")
+    let(
+        rotpart =  [for(i=[0:n-2]) [for(j=[0:n-2]) T[j][i]]],
+        transpart = [for(row=[0:n-2]) T[row][n-1]]
+    )
+    assert(approx(determinant(T),1),\"Matrix is not a rotation\")
+    concat(hstack(rotpart, -rotpart*transpart),[[for(i=[2:n]) 0, 1]]);",
+    ),
+    (
+        "hstack",
+        "function hstack(M1, M2, M3) =
+    (M3!=undef)? hstack([M1,M2,M3]) :
+    (M2!=undef)? hstack([M1,M2]) :
+    assert(all([for(v=M1) is_list(v)]), \"One of the inputs to hstack is not a list\")
+    let(
+        minlen = min_length(M1),
+        maxlen = max_length(M1)
+    )
+    assert(minlen==maxlen, \"Input vectors to hstack must have the same length\")
+    [for(row=[0:1:minlen-1])
+        [for(matrix=M1)
+           each matrix[row]
+        ]
+    ];",
+    ),
+    (
+        "all",
+        "function all(l, func) =
+    assert(is_list(l), \"The input is not a list.\")
+    assert(func==undef || is_func(func))
+    is_func(func)
+      ? _all_func(l, func)
+      : _all_bool(l);",
+    ),
+    (
+        "_all_bool",
+        "function _all_bool(l, i=0, out=true) =
+    i >= len(l) || !out? out :
+    _all_bool(l, i=i+1, out=out && l[i]);",
+    ),
+    (
+        "is_func",
+        "function is_func(x) = version_num()>20210000 && is_function(x);",
+    ),
+    (
+        "min_length",
+        "function min_length(list) =
+    assert(is_list(list), \"Invalid input.\" )
+    min([for (v = list) len(v)]);",
+    ),
+    (
+        "max_length",
+        "function max_length(list) =
+    assert(is_list(list), \"Invalid input.\" )
+    max([for (v = list) len(v)]);",
     ),
 ];
 
@@ -1251,7 +1336,180 @@ static REGISTRY: &[Entry] = &[
         ],
         func: affine::apply,
     },
+    // ── O.9 tree 2b (transforms/affine.scad) — rot, the band's finale ───────────────────────────────────
+    Entry {
+        name: "affine3d_translate",
+        reference: "function affine3d_translate(v=[0,0,0]) =
+    assert(is_list(v))
+    let( v = [for (i=[0:2]) default(v[i],0)] )
+    [
+        [1, 0, 0, v.x],
+        [0, 1, 0, v.y],
+        [0, 0, 1, v.z],
+        [0 ,0, 0,   1]
+    ];",
+        consts: &[],
+        consts_v: &[],
+        deps: &["default"],
+        builtins: &["is_list", "is_undef"],
+        func: affine::affine3d_translate,
+    },
+    // `approx(ang, 0)` runs on ASSERTED-finite numbers — its list branch (and the idx/posmod knot) is
+    // unreachable, but its default eps is `_EPSILON` → the guard. `u=UP` is the reference's own default.
+    Entry {
+        name: "affine3d_rot_by_axis",
+        reference: "function affine3d_rot_by_axis(u=UP, ang=0) =
+    assert(is_finite(ang))
+    assert(is_vector(u,3))
+    approx(ang,0)? affine3d_identity() :
+    let(
+        u = unit(u),
+        c = cos(ang),
+        c2 = 1-c,
+        s = sin(ang)
+    ) [
+        [u.x*u.x*c2+c    , u.x*u.y*c2-u.z*s, u.x*u.z*c2+u.y*s, 0],
+        [u.y*u.x*c2+u.z*s, u.y*u.y*c2+c    , u.y*u.z*c2-u.x*s, 0],
+        [u.z*u.x*c2-u.y*s, u.z*u.y*c2+u.x*s, u.z*u.z*c2+c    , 0],
+        [               0,                0,                0, 1]
+    ];",
+        consts: &[("_EPSILON", 1e-9)],
+        consts_v: &[("UP", vectors::bosl_up)],
+        deps: &[
+            "is_finite",
+            "is_nan",
+            "is_vector",
+            "approx",
+            "unit",
+            "affine3d_identity",
+            "ident",
+        ],
+        builtins: &[
+            "is_num", "is_list", "len", "is_undef", "norm", "sin", "cos", "is_bool",
+        ],
+        func: affine::affine3d_rot_by_axis,
+    },
+    // The band's finale: rot's own body is a dispatcher, but its CLOSURE is the whole affine family — every
+    // lane composes already-landed natives (rot_from_to, rot_by_axis, the translate conjugation, the
+    // rot_inverse/hstack reachable slice, apply). `_NO_ARG` is the p-sentinel; UP/RIGHT ride in through the
+    // composed natives' bakes.
+    Entry {
+        name: "rot",
+        reference: "function rot(a=0, v, cp, from, to, reverse=false, p=_NO_ARG) =
+    assert(is_undef(from)==is_undef(to), \"from and to must be specified together.\")
+    assert(is_undef(from) || is_vector(from, zero=false), \"'from' must be a non-zero vector.\")
+    assert(is_undef(to) || is_vector(to, zero=false), \"'to' must be a non-zero vector.\")
+    assert(is_undef(v) || is_vector(v, zero=false), \"'v' must be a non-zero vector.\")
+    assert(is_undef(cp) || is_vector(cp), \"'cp' must be a vector.\")
+    assert(is_finite(a) || is_vector(a), \"'a' must be a finite scalar or a vector.\")
+    assert(is_bool(reverse))
+    let(
+        m = let(
+                from = is_undef(from)? undef : point3d(from),
+                to = is_undef(to)? undef : point3d(to),
+                cp = is_undef(cp)? undef : point3d(cp),
+                m1 = !is_undef(from) ?
+                        assert(is_num(a))
+                        affine3d_rot_from_to(from,to) * affine3d_rot_by_axis(from,a)
+                   : !is_undef(v)?
+                        assert(is_num(a))
+                        affine3d_rot_by_axis(v,a)
+                   : is_num(a) ? affine3d_zrot(a)
+                   : affine3d_zrot(a.z) * affine3d_yrot(a.y) * affine3d_xrot(a.x),
+                m2 = is_undef(cp)? m1 : (move(cp) * m1 * move(-cp)),
+                m3 = reverse? rot_inverse(m2) : m2
+            ) m3
+    )
+    p==_NO_ARG ? m : apply(m, p);",
+        consts: &[("_EPSILON", 1e-9)],
+        consts_v: &[
+            ("_NO_ARG", no_arg_value),
+            ("UP", vectors::bosl_up),
+            ("RIGHT", vectors::bosl_right),
+        ],
+        deps: &[
+            "point3d",
+            "affine3d_rot_from_to",
+            "affine3d_rot_by_axis",
+            "affine3d_zrot",
+            "affine3d_yrot",
+            "affine3d_xrot",
+            "affine3d_translate",
+            "affine3d_identity",
+            "ident",
+            "default",
+            "move",
+            "rot_inverse",
+            "hstack",
+            "all",
+            "_all_bool",
+            "is_func",
+            "min_length",
+            "max_length",
+            "determinant",
+            "det2",
+            "det3",
+            "det4",
+            "apply",
+            "_apply",
+            "is_2d_transform",
+            "is_vnf",
+            "reverse",
+            "vnf_reverse_faces",
+            "str_join",
+            "vector_axis",
+            "v_abs",
+            "v_theta",
+            "point2d",
+            "vector_angle",
+            "same_shape",
+            "is_def",
+            "is_matrix",
+            "is_consistent",
+            "_list_pattern",
+            "constrain",
+            "unit",
+            "approx",
+            "idx",
+            "posmod",
+            "is_vector",
+            "all_nonzero",
+            "is_finite",
+            "is_nan",
+        ],
+        builtins: &[
+            "is_list",
+            "len",
+            "is_undef",
+            "is_num",
+            "is_bool",
+            "norm",
+            "abs",
+            "cross",
+            "sin",
+            "cos",
+            "acos",
+            "atan2",
+            "min",
+            "max",
+            "is_string",
+            "concat",
+            "str",
+            "version_num",
+            "is_function",
+        ],
+        func: affine::rot,
+    },
 ];
+
+/// BOSL2 `_NO_ARG` (transforms.scad) — the p-not-given sentinel: `[true,[123232345],false]`.
+fn no_arg_value() -> Value {
+    Value::list(vec![
+        Value::Bool(true),
+        Value::num_list(vec![123_232_345.0]),
+        Value::Bool(false),
+    ])
+}
 
 /// Is `v` a list to the `is_list` BUILTIN (the branch every shape function turns on)? Both vector variants;
 /// nothing else (a string/range iterates in `for` but is NOT a list).

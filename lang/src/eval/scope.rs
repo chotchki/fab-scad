@@ -225,11 +225,20 @@ impl Scope {
     /// SHARE a frame (a clone, or a named function's re-fetched home global) compare equal; a closure's
     /// distinct captured env compares distinct. Used as the captured-env component of the eval-memo cache key
     /// (N.2c) — a closure's result depends on its capture, which is neither an arg nor a `$`-var, so the key
-    /// must carry this or two closures sharing a body would collide. Pointer identity is SAFE (never a false
-    /// match; at worst a missed share of two structurally-equal-but-distinct frames).
+    /// must carry this or two closures sharing a body would collide. Pointer identity is safe ONLY while the
+    /// consumer HOLDS the frame (a key must store the `Scope`, as `eval_cache::Key.env` and
+    /// `mod_cache::ModKey.home` do): a bare stored address outlives its frame and a reused allocation
+    /// false-matches it — the ABA that flipped `pill_holder` geometry (P.1.5.2).
     #[must_use]
     pub(super) fn frame_id(&self) -> usize {
         Rc::as_ptr(&self.frame) as usize
+    }
+
+    /// Live-frame identity: do `self` and `other` share the SAME frame right now? The ABA-proof form of
+    /// comparing [`frame_id`](Self::frame_id)s — both `Rc`s are in hand, so the pointers can't be stale.
+    #[must_use]
+    pub(super) fn same_frame(&self, other: &Scope) -> bool {
+        Rc::ptr_eq(&self.frame, &other.frame)
     }
 
     /// The COW-surviving boundary id of this scope's frame (see `Frame::boundary`) — the CSG memo's

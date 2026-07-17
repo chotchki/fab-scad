@@ -29,8 +29,9 @@
 //!     recorded set forces the same trace.
 //!   - On a HIT the matched entry's reads are REPLAYED (plain `lookup_opt`, recording live) so ENCLOSING
 //!     captures inherit them — the reads logically happened even though the body was skipped.
-//!   - `params`/read values are owned snapshots (bit-compared), so no ABA on the AST-outlives-cache
-//!     pointers we key `body`/`home` by.
+//!   - `params`/read values are owned snapshots (bit-compared). `body` is ABA-safe because the AST
+//!     outlives the cache; `home` is NOT address-safe by lifetime — frames drop mid-eval — so the key
+//!     HOLDS the scope (see [`ModKey`]; the P.1.5.2 lesson).
 //!
 //! ## Purity fence (in the `CacheStoreModule` handler, `geo_stack` — unchanged)
 //! Store only if the body left NO observable side effect — the SAME snapshot [`eval_cache`] uses
@@ -118,9 +119,17 @@ type FixedMap<K, V> = std::collections::HashMap<K, V, FixedHasher>;
 
 /// The rung-2b BASE key: `(body, home, params)` — the reaching `$`-context is NOT here (it lives in each
 /// entry's observed read set). `params` are owned snapshots (bit-compared).
+///
+/// `home` HOLDS the scope (its live `Rc<Frame>`), never a bare frame address: pointer identity is only
+/// sound while both frames are ALIVE. The pre-fix `home: usize` stored `frame_id()` without holding the
+/// frame — a dropped captured-defining-scope's address could be REUSED by a different frame (classic ABA,
+/// allocator-layout-dependent), making a later call compare EQUAL to a stale key and serve the wrong
+/// subtree (the P.1.5.2 `pill_holder` flake: one cuboid corner flipping rounded/sharp under
+/// `MallocNanoZone=0`/`MallocPreScribble=1`). Same contract as `eval_cache`'s `Key.env` and
+/// [`DynCtxNode`](super::scope): the key holds the `Rc` so the address can't recycle under it.
 pub(super) struct ModKey {
     body: usize,
-    home: usize,
+    home: Scope,
     params: Box<[Value]>,
 }
 
@@ -131,7 +140,7 @@ impl ModKey {
     pub(super) fn new(body: *const (), home: &Scope, params: &[Value]) -> Self {
         Self {
             body: body as usize,
-            home: home.frame_id(),
+            home: home.clone(),
             params: params.to_vec().into_boxed_slice(),
         }
     }
@@ -140,7 +149,9 @@ impl ModKey {
 impl Hash for ModKey {
     fn hash<H: Hasher>(&self, h: &mut H) {
         self.body.hash(h);
-        self.home.hash(h);
+        // Hashing the held frame's address is sound: the key keeps the frame alive, so the address is
+        // stable and two equal-hashing LIVE frames at one address are genuinely the same frame.
+        self.home.frame_id().hash(h);
         for v in &self.params {
             hash_value_bits(v, h);
         }
@@ -150,7 +161,7 @@ impl Hash for ModKey {
 impl PartialEq for ModKey {
     fn eq(&self, o: &Self) -> bool {
         self.body == o.body
-            && self.home == o.home
+            && self.home.same_frame(&o.home)
             && self.params.len() == o.params.len()
             && self
                 .params
@@ -518,7 +529,7 @@ pub(super) fn last_run_stats() -> (u64, u64) {
 fn clone_key(k: &ModKey) -> ModKey {
     ModKey {
         body: k.body,
-        home: k.home,
+        home: k.home.clone(),
         params: k.params.clone(),
     }
 }
@@ -530,6 +541,38 @@ pub(super) type CacheCell = RefCell<ModCache>;
 #[allow(clippy::unwrap_used, reason = "unit test: unwrap IS the assertion")]
 mod tests {
     use super::super::{Config, Geo, Message};
+
+    /// P.1.5.2 regression — the `ModKey` ABA: a key must HOLD its home frame, never just remember its
+    /// address. Pre-fix `home: usize` stored `frame_id()` without keeping the frame alive; a dropped
+    /// captured scope's address could be REUSED by a different frame (allocator-dependent), a later
+    /// call then compared EQUAL to the stale key, and the memo served the WRONG module subtree —
+    /// `pill_holder`'s cuboid corner flipping rounded/sharp under `MallocNanoZone=0` /
+    /// `MallocPreScribble=1` (~50% wrong on the right binary layout, invisible on others). Pinned at
+    /// the semantic level: key equality means SAME LIVE FRAME — a cloned scope (shared frame) is the
+    /// same key, a structurally-identical distinct frame is a different key, and because the key holds
+    /// the `Rc`, no address can recycle under it by construction.
+    #[test]
+    fn mod_key_home_identity_is_live_frame_not_address() {
+        use crate::Scope;
+        let body = std::ptr::null::<()>();
+        let a = Scope::new();
+        let a_clone = a.clone(); // shares a's frame
+        let b = Scope::new(); // structurally identical to a, DISTINCT frame
+        let k_a = super::ModKey::new(body, &a, &[]);
+        let k_a2 = super::ModKey::new(body, &a_clone, &[]);
+        let k_b = super::ModKey::new(body, &b, &[]);
+        assert!(k_a == k_a2, "a shared frame is one identity");
+        assert!(
+            k_a != k_b,
+            "distinct frames stay distinct keys even when structurally identical"
+        );
+        // The key OWNS the identity: with every Scope dropped, the held frames keep the keys' meaning
+        // stable (the pre-fix bare-address form is exactly what this line makes impossible).
+        drop(a);
+        drop(a_clone);
+        drop(b);
+        assert!(k_a == k_a2 && k_a != k_b);
+    }
 
     /// Eval `src` to its geometry tree + messages with the CSG cache forced `on` (everything else off — the
     /// A/B differential is exactly this toggle). In-memory, CWD base, no libs — the module-cache mechanics

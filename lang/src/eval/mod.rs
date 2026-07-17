@@ -2870,7 +2870,9 @@ fn check_assert<'a>(
         return Ok(());
     }
     let locator = format!(" [assert({cond_src})]");
-    Err(crate::Error::Eval(match message {
+    // Error::Assert (NOT Eval): OpenSCAD prints the assert ERROR but still exports the geometry built before
+    // it, so the top-level geometry driver catches this to warn + halt + keep the partial (L.5.8).
+    Err(crate::Error::Assert(match message {
         Some(Value::Str(s)) => format!("assertion failed: {s}{locator}"),
         Some(other) => format!("assertion failed: {}{locator}", fmt::format_value(&other)),
         None => format!("assertion failed{locator}"),

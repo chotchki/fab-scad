@@ -20,9 +20,17 @@ pub enum Error {
     #[error("parse error:\n{0}")]
     Parse(String),
 
-    /// A well-formed program failed at evaluation time (arity, undef misuse, `assert`, …).
+    /// A well-formed program failed at evaluation time (arity, undef misuse, …).
     #[error("evaluation error: {0}")]
     Eval(String),
+
+    /// A user `assert` (module or expression form) failed. Distinct from [`Eval`](Error::Eval) because
+    /// OpenSCAD prints the assert ERROR but STILL exports the top-level geometry accumulated BEFORE the
+    /// failing statement — so the geometry driver catches THIS specifically to warn + halt + keep what it has
+    /// (L.5.8), matching the oracle's partial render. A genuine `Eval` fault stays fatal. Display is identical
+    /// to `Eval` so console/log text ("evaluation error: assertion failed …") is unchanged.
+    #[error("evaluation error: {0}")]
+    Assert(String),
 
     /// A CSG node could not be lowered to a `kernel::Solid`.
     #[error("geometry error: {0}")]

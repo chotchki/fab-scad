@@ -177,6 +177,7 @@ added 2026-07-07.
   - [x] L.5.5 - L.5.5 - unified.scad fab-specific assert (OpenSCAD renders clean)
   - [ ] L.5.6 - L.5.6 - BOSL2 examples corpus in the harness; perf-vs-oracle (mine + BOSL2) published
   - [x] L.5.7 - L.5.7 - warn-and-continue on missing resources (match OpenSCAD)
+  - [x] L.5.8 - L.5.8 - assert failure exports pre-assert geometry (match OpenSCAD)
 ## Phase N - N - Interpreter fast-paths (our builtins)
 - [x] N.1 - N.1 - Re-profile a slow model on RELEASE with a sampling profiler
 - [x] N.2 - N.2 - Cut eval allocation (profile-driven; builtin dispatch was <1%)

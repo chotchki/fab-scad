@@ -476,7 +476,9 @@ pub(super) fn vnf_centroid(args: &[Value]) -> crate::Result<Value> {
 pub(super) fn point3d(args: &[Value]) -> crate::Result<Value> {
     let p = args.first().cloned().unwrap_or(Value::Undef);
     if !matches!(p, Value::List(_) | Value::NumList(_)) {
-        return Err(crate::Error::Eval(
+        // Error::Assert (not Eval): this mirrors the interpreted BOSL2 `assert(is_list(p))`, so it must
+        // halt-and-export like a user assert (L.5.8), identical to the function it replaces.
+        return Err(crate::Error::Assert(
             "assertion failed [assert(is_list(p))]".to_string(),
         ));
     }

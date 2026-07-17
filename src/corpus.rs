@@ -26,7 +26,7 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
-use fab_lang::Error;
+use fab_lang::{Error, Message};
 
 /// The per-test wall-clock budget. A normal BOSL2 test evaluates in well under a second; a script that runs
 /// past this is hung or pathological (a non-terminating recursion the guard doesn't catch, a runaway
@@ -194,10 +194,26 @@ pub fn enumerate_tests(bosl2_dir: &Path) -> Result<Vec<TestCase>> {
 #[must_use]
 pub fn run_script(script: &str, tests_dir: &Path) -> (Bucket, u128, String) {
     let start = Instant::now();
-    let result = fab_lang::evaluate_geometry_with_base(script, tests_dir, &[]);
+    // `_full` for the MESSAGES: since L.5.8 a failed `assert` HALTS-and-exports partial geometry (a WARNING,
+    // not a hard error) to match OpenSCAD's STL export — but BOSL2's scadtest suite treats a fired assert as a
+    // FAILURE (its `expect_success=false` negatives PROVE validation rejects bad input). So an assert warning
+    // still buckets as `Assertion` here, the verdict the corpus ran on before the driver's export change.
+    let result = fab_lang::evaluate_geometry_with_base_full(script, tests_dir, &[]);
     let ms = start.elapsed().as_millis();
     match result {
-        Ok(_) => (Bucket::Pass, ms, String::new()),
+        Ok((_, messages)) => {
+            match messages.iter().find_map(|m| match m {
+                Message::Warning(w) if w.starts_with("assertion failed") => Some(w),
+                _ => None,
+            }) {
+                Some(w) => (
+                    Bucket::Assertion,
+                    ms,
+                    w.lines().next().unwrap_or_default().to_string(),
+                ),
+                None => (Bucket::Pass, ms, String::new()),
+            }
+        }
         Err(e) => {
             let first = format!("{e}")
                 .lines()
@@ -214,6 +230,9 @@ pub fn run_script(script: &str, tests_dir: &Path) -> (Bucket, u128, String) {
 fn classify(e: &Error) -> Bucket {
     match e {
         Error::Parse(_) => Bucket::Parse,
+        // A failed `assert` — its own bucket (it means our MATH diverged). Now a distinct Error::Assert
+        // variant (L.5.8); the legacy Eval-message check stays for any pre-variant assert string.
+        Error::Assert(_) => Bucket::Assertion,
         Error::Eval(m) if m.starts_with("assertion failed") => Bucket::Assertion,
         Error::Eval(_) => Bucket::Eval,
         Error::Load(_) => Bucket::Load,

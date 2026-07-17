@@ -279,6 +279,22 @@ fn nested_mutually_recursive_functions_match_the_oracle() {
 }
 
 #[test]
+fn failed_assert_exports_pre_assert_geometry_like_the_oracle() {
+    // L.5.8: a failed assert is NOT fatal — OpenSCAD prints the ERROR but still exports the top-level
+    // geometry accumulated BEFORE the failing statement, and fab now matches. The differential compares the
+    // PARTIAL solid both engines produce (a wrong boundary → residual/genus mismatch, so this is a real gate).
+    agree("cube(10); assert(false); translate([20, 0, 0]) cube(5);"); // both → cube(10) only (cube(5) unreached)
+    agree("cube(8); assert(1 > 2); sphere(5, $fn = 16);"); // stops at the assert → cube(8) only
+    // an assert INSIDE an instantiated module halts the same way — the geometry before the call survives.
+    agree("cube(8); module m() { assert(false); cube(3); } m(); cube(4);"); // → cube(8) only
+    // a PASSING assert is transparent (both render the full thing).
+    agree("assert(1 < 2); cube(6); assert(true, \"msg\") sphere(4, $fn = 16);");
+    // NOTE: the pre-geometry case (`assert(false); cube(10);`) is deliberately NOT here — OpenSCAD writes an
+    // EMPTY stl, which the oracle's mesh reader reports as `rejected` while fab reports `empty`; both produce
+    // no geometry, so it's a harness empty-vs-rejected classification edge, not a divergence in the render.
+}
+
+#[test]
 fn unknown_module_warns_and_continues_like_the_oracle() {
     // L.5.7: an unknown module instantiation renders NOTHING for that node (warn-and-continue), and the
     // REST of the program renders — bit-for-bit what OpenSCAD does ("Ignoring unknown module 'X'", exit 0).

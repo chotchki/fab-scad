@@ -224,18 +224,34 @@ pub(super) fn eval_geometry_driver<'a>(
     island: usize,
     ctx: &Ctx<'a>,
 ) -> crate::Result<Vec<Geo>> {
-    let mut work: Vec<GTask<'a>> = Vec::with_capacity(stmts.len());
-    // Reverse-push so the FIRST statement is on top of the stack and pops first → source order preserved.
-    for stmt in stmts.iter().rev() {
-        work.push(GTask::Stmt {
+    let mut results: Vec<Geo> = Vec::new();
+    // Drive each TOP-LEVEL statement independently (they share no work-stack state — a statement's subtree
+    // fully resolves before the next), which gives a clean per-statement boundary for the assert rule below.
+    // Equivalent to one combined stack on the happy path (source order preserved, results accumulate in place).
+    for stmt in stmts {
+        let mark = results.len();
+        let work = vec![GTask::Stmt {
             stmt,
             scope: scope.clone(),
             global: global.clone(),
             island,
-        });
+        }];
+        if let Err(e) = drive(work, &mut results, ctx) {
+            match e {
+                // L.5.8 — a failed `assert` is NOT fatal: OpenSCAD prints the ERROR but still exports the
+                // top-level geometry accumulated BEFORE the failing statement. So DROP this statement's
+                // partial subtree (truncate to its start mark), warn, and STOP — no later statement renders
+                // either (verified vs the oracle: `cube(10); assert(false); cube(5);` → exports cube(10)).
+                crate::Error::Assert(msg) => {
+                    results.truncate(mark);
+                    ctx.warn(msg);
+                    break;
+                }
+                // A genuine evaluation/parse/lower fault stays LOUD.
+                other => return Err(other),
+            }
+        }
     }
-    let mut results: Vec<Geo> = Vec::new();
-    drive(work, &mut results, ctx)?;
     Ok(results)
 }
 

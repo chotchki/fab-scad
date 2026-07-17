@@ -200,7 +200,11 @@ pub fn get_barycentric(v: Vec3, tri_pos: [Vec3; 3], tolerance: f64) -> Vec3 {
         tri_pos[0] - tri_pos[2],
         tri_pos[1] - tri_pos[0],
     ];
-    let d2 = [edges[0].dot(edges[0]), edges[1].dot(edges[1]), edges[2].dot(edges[2])];
+    let d2 = [
+        edges[0].dot(edges[0]),
+        edges[1].dot(edges[1]),
+        edges[2].dot(edges[2]),
+    ];
     let long_side = if d2[0] > d2[1] && d2[0] > d2[2] {
         0
     } else if d2[1] > d2[2] {
@@ -232,7 +236,11 @@ pub fn get_barycentric(v: Vec3, tri_pos: [Vec3; 3], tolerance: f64) -> Vec3 {
             let cross_pv = edges[i].cross(v - tri_pos[j]);
             let area2v = cross_pv.dot(cross_pv);
             // Return exactly equal if within tolerance of edge.
-            uvw[i] = if area2v < d2[i] * tol2 { 0.0 } else { cross_pv.dot(cross_p) };
+            uvw[i] = if area2v < d2[i] * tol2 {
+                0.0
+            } else {
+                cross_pv.dot(cross_p)
+            };
         }
         let uvw = Vec3::new(uvw[0], uvw[1], uvw[2]);
         uvw / (uvw.x + uvw.y + uvw.z)

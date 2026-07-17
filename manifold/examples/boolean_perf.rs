@@ -114,7 +114,9 @@ fn main() {
             ]),
         ),
         _ => {
-            eprintln!("usage: boolean_perf <left.obj|.bin> <right.obj|.bin> <add|sub|int> [reps [dx dy dz]]");
+            eprintln!(
+                "usage: boolean_perf <left.obj|.bin> <right.obj|.bin> <add|sub|int> [reps [dx dy dz]]"
+            );
             std::process::exit(2);
         }
     };

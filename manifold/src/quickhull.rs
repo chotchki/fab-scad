@@ -374,7 +374,10 @@ impl QuickHull {
         let d = get_signed_distance_to_plane(point, &self.mesh.faces[face_index].p);
         let sqr_n_length = self.mesh.faces[face_index].p.sqr_n_length;
         if d > 0.0 && d * d > self.epsilon_squared * sqr_n_length {
-            if self.mesh.faces[face_index].points_on_positive_side.is_none() {
+            if self.mesh.faces[face_index]
+                .points_on_positive_side
+                .is_none()
+            {
                 let v = self.get_index_vector_from_pool();
                 self.mesh.faces[face_index].points_on_positive_side = Some(v);
             }
@@ -467,8 +470,7 @@ impl QuickHull {
         }
         debug_assert_eq!(
             self.mesh.halfedges[horizon_edges[horizon_edges.len() - 1]].end_vert,
-            self.mesh.halfedges
-                [self.mesh.halfedges[horizon_edges[0]].paired_halfedge as usize]
+            self.mesh.halfedges[self.mesh.halfedges[horizon_edges[0]].paired_halfedge as usize]
                 .end_vert
         );
         true
@@ -527,7 +529,8 @@ impl QuickHull {
         // Find the point most distant from the line through the two chosen extremes.
         let r = Ray::new(
             self.original_vertex_data[selected_points.0],
-            self.original_vertex_data[selected_points.1] - self.original_vertex_data[selected_points.0],
+            self.original_vertex_data[selected_points.1]
+                - self.original_vertex_data[selected_points.0],
         );
         max_d = self.epsilon_squared;
         let mut max_i = usize::MAX;
@@ -707,8 +710,9 @@ impl QuickHull {
                         self.mesh.faces[pvf_idx].is_visible_face_on_current_iteration = true;
                         self.mesh.faces[pvf_idx].horizon_edges_on_current_iteration = 0;
                         self.visible_faces.push(pvf_idx);
-                        let he_indices =
-                            self.mesh.get_half_edge_indices_of_face(&self.mesh.faces[pvf_idx]);
+                        let he_indices = self
+                            .mesh
+                            .get_half_edge_indices_of_face(&self.mesh.faces[pvf_idx]);
                         for &he_index in he_indices.iter() {
                             let paired = self.mesh.halfedges[he_index as usize].paired_halfedge;
                             if paired != face_data.entered_from_halfedge {
@@ -729,9 +733,11 @@ impl QuickHull {
                 self.mesh.faces[pvf_idx].is_visible_face_on_current_iteration = false;
                 self.horizon_edges_data
                     .push(face_data.entered_from_halfedge as usize);
-                let hef = self.mesh.halfedge_to_face[face_data.entered_from_halfedge as usize]
-                    as usize;
-                let half_edges_mesh = self.mesh.get_half_edge_indices_of_face(&self.mesh.faces[hef]);
+                let hef =
+                    self.mesh.halfedge_to_face[face_data.entered_from_halfedge as usize] as usize;
+                let half_edges_mesh = self
+                    .mesh
+                    .get_half_edge_indices_of_face(&self.mesh.faces[hef]);
                 let ind: u8 = if half_edges_mesh[0] == face_data.entered_from_halfedge {
                     0
                 } else if half_edges_mesh[1] == face_data.entered_from_halfedge {
@@ -789,7 +795,9 @@ impl QuickHull {
             let mut disable_counter = 0usize;
             for k in 0..self.visible_faces.len() {
                 let face_index = self.visible_faces[k];
-                let half_edges_mesh = self.mesh.get_half_edge_indices_of_face(&self.mesh.faces[face_index]);
+                let half_edges_mesh = self
+                    .mesh
+                    .get_half_edge_indices_of_face(&self.mesh.faces[face_index]);
                 let horizon_bits = self.mesh.faces[face_index].horizon_edges_on_current_iteration;
                 for (j, &hem) in half_edges_mesh.iter().enumerate() {
                     if (horizon_bits & (1 << j)) == 0 {
@@ -817,7 +825,9 @@ impl QuickHull {
             // Create the new faces around the horizon edge loop, connecting each to the active point.
             for i in 0..horizon_edge_count {
                 let ab = self.horizon_edges_data[i];
-                let vidx = self.mesh.get_vertex_indices_of_half_edge(&self.mesh.halfedges[ab]);
+                let vidx = self
+                    .mesh
+                    .get_vertex_indices_of_half_edge(&self.mesh.halfedges[ab]);
                 let a = vidx[0];
                 let b = vidx[1];
                 let c = active_point_index as i32;
@@ -847,9 +857,11 @@ impl QuickHull {
                 self.mesh.faces[new_face_index].p = Plane::new(plane_normal, active_point);
                 self.mesh.faces[new_face_index].he = ab as i32;
 
-                self.mesh.halfedges[ca].paired_halfedge = self.new_halfedge_indices
-                    [if i > 0 { i * 2 - 1 } else { 2 * horizon_edge_count - 1 }]
-                    as i32;
+                self.mesh.halfedges[ca].paired_halfedge = self.new_halfedge_indices[if i > 0 {
+                    i * 2 - 1
+                } else {
+                    2 * horizon_edge_count - 1
+                }] as i32;
                 self.mesh.halfedges[bc].paired_halfedge =
                     self.new_halfedge_indices[((i + 1) * 2) % (horizon_edge_count * 2)] as i32;
             }
@@ -876,11 +888,13 @@ impl QuickHull {
             for k in 0..self.new_face_indices.len() {
                 let nfi = self.new_face_indices[k];
                 if self.mesh.faces[nfi].points_on_positive_side.is_some() {
-                    debug_assert!(!self.mesh.faces[nfi]
-                        .points_on_positive_side
-                        .as_ref()
-                        .unwrap()
-                        .is_empty());
+                    debug_assert!(
+                        !self.mesh.faces[nfi]
+                            .points_on_positive_side
+                            .as_ref()
+                            .unwrap()
+                            .is_empty()
+                    );
                     if !self.mesh.faces[nfi].in_face_stack {
                         self.face_list.push_back(nfi as i32);
                         self.mesh.faces[nfi].in_face_stack = true;

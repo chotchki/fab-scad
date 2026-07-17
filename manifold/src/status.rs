@@ -72,7 +72,10 @@ mod tests {
     #[test]
     fn errors_display_and_compare() {
         // thiserror `Display` renders the `#[error("…")]` message.
-        assert_eq!(Error::NonFiniteVertex.to_string(), "non-finite vertex position (NaN or infinite)");
+        assert_eq!(
+            Error::NonFiniteVertex.to_string(),
+            "non-finite vertex position (NaN or infinite)"
+        );
         // Copy + Eq: the enum is a plain value type (fits in a `Result<Mesh, Error>` return cheaply).
         let e = Error::NotManifold;
         assert_eq!(e, e);

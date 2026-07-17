@@ -90,6 +90,11 @@ pub fn extrude_polygons(
         let (t01, t11) = (scale.x * -s + 0.0 * c, 0.0 * -s + scale.y * c);
         let mut j: i64 = 0;
         let mut idx: i64 = 0;
+        #[allow(
+            clippy::explicit_counter_loop,
+            reason = "C++ port parity: the reference walks polys with an explicit running counter; \
+                      reshaping to enumerate() obscures the line-for-line correspondence"
+        )]
         for poly in cross_section {
             let pn = poly.len() as i64;
             for vert in 0..pn {
@@ -357,6 +362,11 @@ impl Mesh {
     /// DEVIATIONS: `circular_segments < 3` clamps to 3 (C++ Quality fallback unported, same as
     /// [`revolve_polygons`]); non-finite params ⇒ empty mesh for panic-safety (the C++ happily builds a
     /// NaN mesh).
+    #[allow(
+        clippy::neg_cmp_op_on_partial_ord,
+        reason = "the guards are deliberately NaN-true: `!(x > 0.0)` rejects NaN where `x <= 0.0` \
+                  would admit it — the negated form IS the intent, not a readability accident"
+    )]
     pub fn cylinder(
         height: f64,
         radius_low: f64,
@@ -423,6 +433,10 @@ impl Mesh {
     /// (onion, bolt_clearance), gated by tolerance/property tests; OpenSCAD `sphere()` never routes here
     /// (fab-lang tessellates it itself). The profile endpoints land EXACTLY on the revolve axis
     /// (`cosd(±90) == 0`), so the poles close via the on-axis vertex-reuse path.
+    #[allow(
+        clippy::neg_cmp_op_on_partial_ord,
+        reason = "deliberately NaN-true guard, as in `cylinder` above"
+    )]
     pub fn sphere(radius: f64, circular_segments: i32) -> Mesh {
         if !(radius > 0.0) || !radius.is_finite() {
             return Mesh::default();

@@ -1686,7 +1686,7 @@ mod tests {
             paired_halfedge: HalfedgeId::NONE,
             prop_vert: VertId::NONE,
         };
-        let mut run = |split: bool| {
+        let run = |split: bool| {
             let mut face_halfedges = vec![blank; n_he];
             let mut halfedge_ref = vec![temp_ref(0, TriId::new(0)); n_he];
             let mut face_ptr_r: Vec<i32> = (0..num_tri as i32).map(|f| 3 * f).collect();

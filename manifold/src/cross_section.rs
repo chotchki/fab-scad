@@ -848,11 +848,9 @@ mod tests {
             .translate(Vec2::new(4.0, 5.0))
             .unwrap();
         let composed = sq
-            .transform(
-                Mat2x3::translate(Vec2::new(4.0, 5.0)).compose(
-                    Mat2x3::scale(Vec2::new(2.0, 3.0)).compose(crate::linalg::rotate2_degrees(30.0)),
-                ),
-            )
+            .transform(Mat2x3::translate(Vec2::new(4.0, 5.0)).compose(
+                Mat2x3::scale(Vec2::new(2.0, 3.0)).compose(crate::linalg::rotate2_degrees(30.0)),
+            ))
             .unwrap();
         for (c1, c2) in chained.contours.iter().zip(&composed.contours) {
             for (p1, p2) in c1.iter().zip(c2) {

@@ -141,8 +141,8 @@ impl Mesh {
                 let hulls = par::map_collect_min_len(&b_faces, 100, |&b_face| {
                     let n_b = b.tri_normal(TriId::from_usize(b_face));
                     // Skip coplanar face pairs — their 9-point hull is degenerate.
-                    let coplanar = (n_a.dot(n_b) - 1.0).abs() < 1e-12
-                        || (n_a.dot(-n_b) - 1.0).abs() < 1e-12;
+                    let coplanar =
+                        (n_a.dot(n_b) - 1.0).abs() < 1e-12 || (n_a.dot(-n_b) - 1.0).abs() < 1e-12;
                     if coplanar {
                         return Ok(None);
                     }
@@ -150,9 +150,15 @@ impl Mesh {
                     let b2 = b.pos(b.start(HalfedgeId::from_usize(b_face * 3 + 1)));
                     let b3 = b.pos(b.start(HalfedgeId::from_usize(b_face * 3 + 2)));
                     let pts = [
-                        a1 + b1, a1 + b2, a1 + b3,
-                        a2 + b1, a2 + b2, a2 + b3,
-                        a3 + b1, a3 + b2, a3 + b3,
+                        a1 + b1,
+                        a1 + b2,
+                        a1 + b3,
+                        a2 + b1,
+                        a2 + b2,
+                        a2 + b3,
+                        a3 + b1,
+                        a3 + b2,
+                        a3 + b3,
                     ];
                     let h = Mesh::hull_of_points(&pts)?;
                     Ok(if h.is_empty() { None } else { Some(h) })
@@ -336,9 +342,15 @@ mod tests {
         };
         // A ⊕ ∅ = A.
         let r1 = a.minkowski_sum(&empty).unwrap();
-        assert!((r1.volume() - 27.0).abs() < 1e-9, "A ⊕ ∅ should be A (vol 27)");
+        assert!(
+            (r1.volume() - 27.0).abs() < 1e-9,
+            "A ⊕ ∅ should be A (vol 27)"
+        );
         // ∅ ⊕ A = A.
         let r2 = empty.minkowski_sum(&a).unwrap();
-        assert!((r2.volume() - 27.0).abs() < 1e-9, "∅ ⊕ A should be A (vol 27)");
+        assert!(
+            (r2.volume() - 27.0).abs() < 1e-9,
+            "∅ ⊕ A should be A (vol 27)"
+        );
     }
 }

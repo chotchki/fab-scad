@@ -19,8 +19,8 @@ use fab_manifold::boolean::OpType;
 use fab_manifold::boolean::boolean_result::boolean;
 use fab_manifold::check;
 use fab_manifold::cross_section::{CrossSection, FillRule, JoinType};
-use fab_manifold::linalg::{Mat2x3, Rect, Vec2, Vec3};
 use fab_manifold::linalg::rotate2_degrees;
+use fab_manifold::linalg::{Mat2x3, Rect, Vec2, Vec3};
 use fab_manifold::mesh::Mesh;
 
 fn v(x: f64, y: f64) -> Vec2 {

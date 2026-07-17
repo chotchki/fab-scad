@@ -391,7 +391,10 @@ mod tests {
 
     #[test]
     fn map_range_is_index_exact_both_sides_of_threshold() {
-        assert_eq!(map_range(500, |i| i * 3), (0..500).map(|i| i * 3).collect::<Vec<_>>());
+        assert_eq!(
+            map_range(500, |i| i * 3),
+            (0..500).map(|i| i * 3).collect::<Vec<_>>()
+        );
         assert_eq!(
             map_range(20_000, |i| i * 3),
             (0..20_000).map(|i| i * 3).collect::<Vec<_>>()
@@ -403,8 +406,12 @@ mod tests {
         // Above the threshold (rayon path under `par`): every slot must come out exactly as the
         // serial fill — the deterministic-scatter property the boolean assembly leans on.
         let mut par_side = vec![0u64; 20_000];
-        for_each_mut(&mut par_side, |i, slot| *slot = (i as u64).wrapping_mul(2_654_435_761));
-        let serial: Vec<u64> = (0..20_000u64).map(|i| i.wrapping_mul(2_654_435_761)).collect();
+        for_each_mut(&mut par_side, |i, slot| {
+            *slot = (i as u64).wrapping_mul(2_654_435_761)
+        });
+        let serial: Vec<u64> = (0..20_000u64)
+            .map(|i| i.wrapping_mul(2_654_435_761))
+            .collect();
         assert_eq!(par_side, serial);
     }
 
@@ -416,6 +423,11 @@ mod tests {
         let mut seam = items.clone();
         sort_by(&mut seam, |a, b| a.0.cmp(&b.0));
         let mut std_sorted = items;
+        #[allow(
+            clippy::unnecessary_sort_by,
+            reason = "the comparator stays textually identical to the seam call above — that \
+                      symmetry (same comparator, both sorts) is the equality this test pins"
+        )]
         std_sorted.sort_by(|a, b| a.0.cmp(&b.0));
         assert_eq!(seam, std_sorted);
     }

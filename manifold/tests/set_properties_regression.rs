@@ -29,7 +29,7 @@ fn recolor_of_colored_boolean_outputs() {
             [0.0, 0.0, 1.0, 1.0],
         );
         for op in [OpType::Add, OpType::Subtract, OpType::Intersect] {
-            let out = boolean(&a, &b, op.clone());
+            let out = boolean(&a, &b, op);
             let rows = out.num_prop_vert();
             let max_pv = out
                 .halfedge_ids()

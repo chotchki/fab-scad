@@ -49,15 +49,31 @@ fn i_overlay_booleans_positive_fill_are_analytic() {
     let i = a.overlay(&b, OverlayRule::Intersect, FillRule::Positive);
     let d = a.overlay(&b, OverlayRule::Difference, FillRule::Positive);
 
-    assert!((area(&u) - 7.0).abs() < 1e-9, "union area {} != 7", area(&u));
-    assert!((area(&i) - 1.0).abs() < 1e-9, "intersect area {} != 1", area(&i));
-    assert!((area(&d) - 3.0).abs() < 1e-9, "difference area {} != 3", area(&d));
+    assert!(
+        (area(&u) - 7.0).abs() < 1e-9,
+        "union area {} != 7",
+        area(&u)
+    );
+    assert!(
+        (area(&i) - 1.0).abs() < 1e-9,
+        "intersect area {} != 1",
+        area(&i)
+    );
+    assert!(
+        (area(&d) - 3.0).abs() < 1e-9,
+        "difference area {} != 3",
+        area(&d)
+    );
 
     // A hole must survive: a big square minus a centered small one.
     let big = square(0.0, 0.0, 10.0); // 100
     let small = square(4.0, 4.0, 2.0); // 4, fully interior
     let holed = big.overlay(&small, OverlayRule::Difference, FillRule::Positive);
-    assert!((area(&holed) - 96.0).abs() < 1e-9, "holed area {} != 96", area(&holed));
+    assert!(
+        (area(&holed) - 96.0).abs() < 1e-9,
+        "holed area {} != 96",
+        area(&holed)
+    );
     // The result is one shape with an outer + a hole contour.
     assert_eq!(holed.len(), 1, "expected a single shape");
     assert_eq!(holed[0].len(), 2, "expected outer + 1 hole contour");
@@ -94,11 +110,19 @@ fn i_overlay_offset_round_joins_match_analytic() {
     // Bevel joins → chopped corners, strictly between round and miter.
     let bevel = sq.outline(&OutlineStyle::new(r).line_join(LineJoin::Bevel));
     let ab = area(&bevel);
-    assert!(ab < area(&out) && area(&out) < area(&miter), "bevel < round < miter must hold: {ab} {got} {}", area(&miter));
+    assert!(
+        ab < area(&out) && area(&out) < area(&miter),
+        "bevel < round < miter must hold: {ab} {got} {}",
+        area(&miter)
+    );
 
     // INSET (negative offset) must shrink: a 4-square inset by 1 → a 2-square, area 4.
     let inset = sq.outline(&OutlineStyle::new(-1.0).line_join(LineJoin::Miter(0.1)));
-    assert!((area(&inset) - 4.0).abs() < 1e-6, "inset area {} != 4", area(&inset));
+    assert!(
+        (area(&inset) - 4.0).abs() < 1e-6,
+        "inset area {} != 4",
+        area(&inset)
+    );
 }
 
 #[test]
@@ -109,14 +133,26 @@ fn i_overlay_is_deterministic() {
     let r1 = a.overlay(&b, OverlayRule::Union, FillRule::Positive);
     let r2 = a.overlay(&b, OverlayRule::Union, FillRule::Positive);
     let bits = |s: &[Vec<Vec<Pt>>]| {
-        s.iter().flatten().flatten().flat_map(|p| [p[0].to_bits(), p[1].to_bits()]).collect::<Vec<u64>>()
+        s.iter()
+            .flatten()
+            .flatten()
+            .flat_map(|p| [p[0].to_bits(), p[1].to_bits()])
+            .collect::<Vec<u64>>()
     };
-    assert_eq!(bits(&r1), bits(&r2), "i_overlay union not bit-deterministic run-to-run");
+    assert_eq!(
+        bits(&r1),
+        bits(&r2),
+        "i_overlay union not bit-deterministic run-to-run"
+    );
 
     // And the offset path.
     let o1 = a.outline(&OutlineStyle::new(0.5).line_join(LineJoin::Round(0.05)));
     let o2 = a.outline(&OutlineStyle::new(0.5).line_join(LineJoin::Round(0.05)));
-    assert_eq!(bits(&o1), bits(&o2), "i_overlay offset not bit-deterministic run-to-run");
+    assert_eq!(
+        bits(&o1),
+        bits(&o2),
+        "i_overlay offset not bit-deterministic run-to-run"
+    );
 }
 
 #[test]
@@ -129,11 +165,17 @@ fn i_overlay_handles_degenerate_inputs() {
     let a = area(&resolved).abs();
     // The two triangles each have area 1 → total 2 (NonZero) — the exact value depends on winding, but
     // it MUST be a finite, sane positive area, not a panic or a wild number.
-    assert!(a.is_finite() && a > 0.0 && a < 10.0, "bowtie resolved to insane area {a}");
+    assert!(
+        a.is_finite() && a > 0.0 && a < 10.0,
+        "bowtie resolved to insane area {a}"
+    );
 
     // A near-degenerate sliver (three nearly-collinear points + a real vertex) must not panic.
     let sliver = vec![[0.0, 0.0], [10.0, 1e-9], [10.0, 0.0], [5.0, 3.0]];
     let clip = square(0.0, 0.0, 10.0);
     let r = sliver.overlay(&clip, OverlayRule::Intersect, FillRule::Positive);
-    assert!(area(&r).abs().is_finite(), "sliver intersect produced non-finite area");
+    assert!(
+        area(&r).abs().is_finite(),
+        "sliver intersect produced non-finite area"
+    );
 }

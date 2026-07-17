@@ -144,6 +144,14 @@ fn ingest_preserves_exact_input_coordinates() {
         OpType::Subtract,
     );
     assert!(tube.is_manifold());
-    assert_eq!(tube.decompose().len(), 1, "no degenerate filament component");
-    assert_eq!(fab_manifold::check::genus(&tube), 1, "the through-tunnel is open");
+    assert_eq!(
+        tube.decompose().len(),
+        1,
+        "no degenerate filament component"
+    );
+    assert_eq!(
+        fab_manifold::check::genus(&tube),
+        1,
+        "the through-tunnel is open"
+    );
 }

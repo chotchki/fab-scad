@@ -1,6 +1,6 @@
 # The web channel (W.3.7): build the fab-gui wasm bundle and attach it to a GitHub release —
 # the artifact hotchkiss-io's build.rs fetches (contract: docs/web-embed.md).
-# Tag `web-vX.Y.Z` → prerelease with fab-gui-X.Y.Z.tar.gz. Manual dispatch → CI artifact only.
+# Tag `web-vX.Y.Z` → the Latest release with fab-gui-X.Y.Z.tar.gz. Manual dispatch → CI artifact only.
 # Payload: the ONE fab-gui app (desktop + web from one codebase, W.3) + the fab-geom kernel worker.
 # The fab-web payload + the OpenSCAD side-module are GONE — scad-rs+Manifold render everywhere now.
 name: release-web
@@ -137,7 +137,10 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/web-v')
         uses: softprops/action-gh-release@v2
         with:
-          prerelease: true
+          # Full releases, not prereleases: the web bundle is ACTIVELY DOGFOODED (pre-1.0, but real —
+          # hotchkiss-io fetches whatever's newest), so mark each the Latest release, not a hidden preview.
+          prerelease: false
+          make_latest: true
           files: target/fab-gui/out/*.tar.gz
           body: |
             fab-gui bundle — the wasm app hotchkiss-io bakes into its /3d/editor page.

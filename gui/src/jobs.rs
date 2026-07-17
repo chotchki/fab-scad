@@ -897,9 +897,24 @@ pub(crate) fn refresh_part(
     part.spread = 0.0; // reload drops back to the intact model
     part.sliced = None;
     part.sliced_hash = None; // force a reslice off the new geometry if the part has cuts
-    // A reload keeps the ORIGINAL bbox (moving it would desync the cut positions from the source the
-    // slicer re-renders); only seed it if this is the first geometry the part has seen.
-    if part.bounds.0.is_none() {
+    refresh_bounds_on_reload(part, min, max);
+}
+
+/// On a RELOAD, reconcile a part's bbox + auto-plan state with the freshly-rendered geometry.
+///
+/// A part carrying USER CUTS keeps its FROZEN bbox and plan: the cut coordinates are absolute in that
+/// frame, so re-seating the bbox would desync the cut planes from the geometry the slicer re-renders,
+/// and the user owns those cuts — we don't silently re-derive them. But a CUTLESS part (whole, or
+/// PRESLICED into disjoint components) hasn't been sliced, so an edit is free to RESIZE it: take the
+/// fresh bbox, re-arm `kick_auto_plan`, and drop the stale component count. Without this the bbox froze
+/// at the FIRST render, so removing a part's pre-slices (or any resize) left the bed-overflow check —
+/// and "Reset to auto" after it — judging the NEW solid by the OLD size, and it would refuse to slice.
+pub(crate) fn refresh_bounds_on_reload(part: &mut Part, min: [f64; 3], max: [f64; 3]) {
+    if part.cuts.list.is_empty() {
+        part.bounds.0 = Some((vec3_of(min), vec3_of(max)));
+        part.auto_planned.0 = None; // re-run the overflow pre-check against the fresh geometry
+        part.pieces = 0; // stale presliced count — the re-plan restamps it (a fitting part reads whole)
+    } else if part.bounds.0.is_none() {
         part.bounds.0 = Some((vec3_of(min), vec3_of(max)));
     }
 }

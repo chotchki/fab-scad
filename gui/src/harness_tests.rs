@@ -491,6 +491,49 @@ fn reset_to_auto_wipes_cuts_conns_and_rearms_derive() {
     );
 }
 
+// ── refresh_bounds_on_reload — a RESIZED part re-decides slicing; a CUT part stays frozen ───────────
+#[test]
+fn reload_refreshes_bounds_and_rearms_a_cutless_part() {
+    // A presliced/whole part (no cuts) that the editor RESIZED: on reload it takes the fresh (bigger)
+    // bbox and re-arms auto-plan, so the bed-overflow check judges the NEW solid — not the stale first
+    // render. This is the "removed the pre-slices, won't re-slice" dogfood bug: the bbox used to freeze.
+    let mut p = seeded_part(vec![]); // cutless (presliced or whole)
+    p.auto_planned.0 = Some(std::path::PathBuf::from("m.scad")); // already derived once
+    p.pieces = 3; // stale presliced component count
+    refresh_bounds_on_reload(&mut p, [-200.0, -50.0, -50.0], [200.0, 50.0, 50.0]);
+    assert_eq!(
+        p.bounds.0,
+        Some((
+            Vec3::new(-200.0, -50.0, -50.0),
+            Vec3::new(200.0, 50.0, 50.0)
+        )),
+        "a cutless reload takes the fresh bbox"
+    );
+    assert!(
+        p.auto_planned.0.is_none(),
+        "a cutless reload re-arms auto-plan against the new geometry"
+    );
+    assert_eq!(p.pieces, 0, "the stale presliced count is dropped");
+}
+
+#[test]
+fn reload_freezes_bounds_of_a_part_with_user_cuts() {
+    // A part the user already SLICED keeps its frozen bbox + plan on reload — the cut coords are
+    // absolute in that frame, so re-seating the bbox would desync the cut planes from the geometry.
+    let mut p = seeded_part(vec![x_cut(0.0)]); // has a user cut
+    p.auto_planned.0 = Some(std::path::PathBuf::from("m.scad"));
+    refresh_bounds_on_reload(&mut p, [-200.0, -50.0, -50.0], [200.0, 50.0, 50.0]);
+    assert_eq!(
+        p.bounds.0,
+        Some((LO, HI)),
+        "a part with cuts keeps its frozen bbox"
+    );
+    assert!(
+        p.auto_planned.0.is_some(),
+        "a part with cuts is NOT re-armed — the user owns those cuts"
+    );
+}
+
 // ── revert_on_edit (U.3.15 flicker fix) — spurious Parts change must NOT collapse an explode ───────
 #[test]
 fn revert_on_edit_ignores_spurious_change_but_reverts_a_real_edit() {

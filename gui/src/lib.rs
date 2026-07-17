@@ -398,6 +398,9 @@ fn run_scripted(scene: SceneCfg, actions: Vec<Action>) {
             (
                 request_reslice,
                 poll_job,
+                // Auto-on-open (kick) + the plan landing (poll) — the offscreen harness ran WITHOUT
+                // these, so it never auto-sliced an overflowing part (unfaithful to run_windowed).
+                (kick_auto_plan, poll_auto_plan).chain().after(poll_job),
                 apply_switch_file,
                 watch_source,
                 preview_edited_buffer,

@@ -87,3 +87,64 @@ jobs:
           cargo test -p fab-scad --features "geometry kernel"
           --target $(rustc -vV | sed -n 's/host: //p')
           --lib backend::tests::manifold_backend_interface
+
+  # The wasm BOOT GATE on every push — the W.3.10 lesson, learned twice in one day: the geom
+  # worker's panic surface is invisible to every native gate above (web-v0.13.0's std::time panic
+  # sat green through the whole matrix and died in a real browser; the P.2 probe repeated the
+  # trick). Build the bundle LEAN (no wasm-opt/brotli — size gates the release, not boot) and
+  # require the sourceless demo to render end-to-end THROUGH the geom worker in headless Chrome.
+  # Mirrors release-web.yml's gate; a failure here means the release gate would fail too.
+  boot-gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: git submodule update --init libs/BOSL2
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - name: Install LLVM 21 + lld + libc++ (the worker's C++ kernel)
+        run: |
+          wget -qO- https://apt.llvm.org/llvm.sh | sudo bash -s -- 21
+          sudo apt-get install -y lld-21 libc++-21-dev libc++abi-21-dev
+      - name: Install wasm-bindgen (lockfile-pinned)
+        run: |
+          V=$(grep -A1 'name = "wasm-bindgen"' Cargo.lock | grep version | head -1 | cut -d'"' -f2)
+          cargo install wasm-bindgen-cli --version "$V" --locked
+      - name: Build the wasm app + geom worker
+        run: cargo build --release --target wasm32-unknown-unknown -p fab-gui --lib -p fab-geom
+      - name: Stage lean (unoptimized wasm boots fine; only the gate runs against it)
+        run: |
+          set -euo pipefail
+          STAGE=target/fab-gui/stage && mkdir -p "$STAGE/geom"
+          wasm-bindgen --target web --no-typescript --out-name fab_gui --out-dir "$STAGE" \
+            target/wasm32-unknown-unknown/release/fab_gui.wasm
+          wasm-bindgen --target web --no-typescript --out-name fab_geom --out-dir "$STAGE/geom" \
+            target/wasm32-unknown-unknown/release/fab_geom.wasm
+          cp packaging/web/geom-worker.js "$STAGE/geom/"
+          python3 packaging/web/pack_scad_libs.py "$STAGE/libs.json"
+          cp gui/web/index.html "$STAGE/index.html"
+      - name: Boot the bundle in Chrome
+        run: |
+          STAGE=target/fab-gui/stage
+          (cd "$STAGE" && python3 -m http.server 8899 &>/dev/null &)
+          sleep 1
+          # SwiftShader software WebGL2 (no GPU on the runner); REAL wall-clock poll — virtual time
+          # races the geom worker's threads (the fab-web A-phase lesson).
+          google-chrome --headless=new --no-sandbox --enable-logging=stderr \
+            --enable-unsafe-swiftshader --use-gl=angle --use-angle=swiftshader-webgl \
+            --window-size=1000,700 \
+            "http://127.0.0.1:8899/index.html" 2> /tmp/console.log &
+          CHROME=$!
+          for i in $(seq 1 45); do
+            sleep 2
+            grep -qE "fab-gui render complete: [1-9]" /tmp/console.log && break
+            grep -qE "RuntimeError|panicked|could not grow" /tmp/console.log && break
+          done
+          kill $CHROME 2>/dev/null || true
+          if grep -qE "RuntimeError|panicked|could not grow" /tmp/console.log; then
+            echo "::error::bundle failed to boot"; grep -E "RuntimeError|panicked|could not grow" /tmp/console.log | head -5; exit 1
+          fi
+          grep -qE "fab-gui render complete: [1-9]" /tmp/console.log \
+            || { echo "::error::demo never rendered through the geom worker"; tail -30 /tmp/console.log; exit 1; }
+          echo "boot gate: OK (bundle boots + kernel renders the demo)"

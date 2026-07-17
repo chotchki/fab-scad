@@ -1,3 +1,8 @@
+#![allow(
+    clippy::similar_names,
+    clippy::too_many_lines,
+    reason = "fast==slow battery tests: near-twin bindings (native vs interpreted) and long input batteries are the design, not an accident"
+)]
 use super::{fingerprint, pin_reference_of, poc_sq, reference_of, resolve};
 use crate::eval::build_ctx;
 use crate::parser::{Expr, Parameter, StmtKind, parse};
@@ -263,7 +268,7 @@ fn fast_equals_slow_fab_poc_near0() {
 }
 
 /// The full oracle: deps AND top-level consts — a reference whose DEFAULT reads `_EPSILON` (approx,
-/// is_vector…) needs the constant bound BEFORE params bind, exactly like the real definition scope (the
+/// `is_vector`…) needs the constant bound BEFORE params bind, exactly like the real definition scope (the
 /// island global) provides it. Same clear-intrinsics contract as [`interpret_with_deps`].
 fn interpret_with_deps_consts(
     target: &str,

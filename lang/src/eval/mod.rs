@@ -2939,7 +2939,7 @@ mod tests {
         );
     }
 
-    /// The pinned-dep chain end-to-end: `select` (deps is_vector/is_range/is_finite/is_nan) wires only when
+    /// The pinned-dep chain end-to-end: `select` (deps `is_vector`/`is_range`/`is_finite`/`is_nan`) wires only when
     /// every dep is present AND verbatim; dropping one pin declines it while the others stay wired.
     #[test]
     fn select_wires_only_with_its_pinned_deps_verbatim() {
@@ -3035,7 +3035,7 @@ mod tests {
                 .map(crate::Message::render)
                 .collect::<Vec<_>>()
                 .join("\n"),
-            other => panic!("expected Complete, got {other:?}"),
+            other @ Resolution::Incomplete { .. } => panic!("expected Complete, got {other:?}"),
         }
     }
 
@@ -3171,7 +3171,7 @@ mod tests {
                     .map(crate::Message::render)
                     .collect::<Vec<_>>()
                     .join("\n"),
-                other => panic!("expected Complete, got {other:?}"),
+                other @ Resolution::Incomplete { .. } => panic!("expected Complete, got {other:?}"),
             }
         };
         let poc = "function _fab_poc_near0(x) = abs(x) < _EPSILON;\n\

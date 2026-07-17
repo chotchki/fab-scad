@@ -1,4 +1,4 @@
-<!-- plan-bridge:phase-high-water=BT -->
+<!-- plan-bridge:phase-high-water=BU -->
 # PLAN
 
 PIVOTED 2026-07-04: scad-rs — a GPL Rust implementation of the OpenSCAD language over the
@@ -192,43 +192,6 @@ added 2026-07-07.
   - [x] N.2c.3 - N.2c.3 - csg-cache + deep-recursion pathology — RESOLVED as a BU.8 side effect: rung 2b's params-only key deleted the per-level specials() walk + ~42-var hash that WAS the cost; module_recursion_bound cache-on 0.05s == off 0.06s. No guard-check needed
 - [x] N.2d - N.2d - Vec-frame Scope LANDED: adaptive VarMap (Vec small / BTreeMap-spill for island globals); slice_parts eval -4.6% (8925→8517ms), corpus 901/901 (cleared spheroid+gaussian_rands); residual per-bind String-key alloc → N.2b
 - [x] N.2e - N.2e - NumList COW buffer reuse LANDED (ceiling-verified): zip_reuse/map_reuse recycle a refcount-1 Rc<[f64]>; ~0% slice_parts (falsified the theory — its alloc is comprehension result-lists) but ~11% on vector-arithmetic-heavy; bit-identical, corpus 901/901
-## Phase O - O - Intrinsics tier (AST-fingerprint, wasm-safe)
-- [x] O.1 - O.1 - Intrinsic registry LANDED: AST-fingerprint gate (exact-match-or-interpret) + Task::Intrinsic dispatch + fast==slow harness; POC proves the chain, corpus 901/901
-- [x] O.2 - O.2 - First hand-written BOSL2-function intrinsics from the release profile
-- [x] O.3 - O.3 v1 - EXPLAIN report LANDED (FAB_EXPLAIN): per-function intrinsic plan WIRED/DRIFT/interpreted, so you can see if an intrinsic fires or silently interprets (library drift). Runtime fire-counts + JIT path ride with P.1
-- [x] O.4 - O.4 - Targeted deep-profile: per-user-fn inclusive TIME (task-stack-aware fnprofile) + FAB_PROFILE_TARGETS harness leg; profile the eval-bound tail (window_air_cover 36s, shoe_holder, webcam_holder, pill_holder) → the ranked worklist
-- [x] O.5 - O.5 - Next intrinsics band from the O.4 worklist (hand-written, wasm-safe, fast==slow gated) — concrete sub-tasks cut from the profile data
-  - [x] O.5.1 - O.5.1 - Wire-time const guard: Entry.consts (name, expected bits) checked against the fn's home scope at build_intrinsics — mismatch doesn't wire. Unblocks the eps=_EPSILON family (is_vector, approx, _tri_class, unit, posmod...)
-  - [x] O.5.2 - O.5.2 - Predicate/shape band (~19s): is_vector, approx, is_consistent+_list_pattern+same_shape, is_matrix, is_path, in_list, force_list, num_defined, constrain, posmod — each verbatim-reference + fast==slow battery
-  - [x] O.5.3 - O.5.3 - Earcut band (~17s, window_air_cover's core): _tri_class (12.4s/3.9M), _none_inside (4.8s/1.6M, recursive w/ early exit; deps select/_tri_class/_pt_in_tri)
-  - [x] O.5.4 - O.5.4 - Aggregate/affine band (~12s): sum/_sum, _apply, unit, idx, _bt_search, vector_angle — recursive accumulators + matrix×points
-  - [x] O.5.5 - O.5.5 - Re-measure + docs: the four models under models_profile_targets + K.1.2 sweep vs baseline; models-profile.md updated; deferred monsters (_region_region_intersections, _point_dist, _find_anchor, _group_sort_by_index, rot ~22s) named for the next cut
-- [x] O.6 - O.6 - Named-arg → positional rebind at intrinsic dispatch: BOSL2's is_vector(v, zero=)/unit(v, error=) calls fall past the v1 all-positional gate (~1.2s interpreted in wac alone) — rebind by the callee's param names at dispatch_call, extending every existing intrinsic
-- [x] O.7 - O.7 - Residual band 5 (medium bodies, ~7s): _find_anchor? _group_sort_by_index, _vnf_centroid, rot, _get_ear, vector_axis, affine3d_rot_from_to + small fry (in_list, is_path, constrain, apply) — OR route to P.1.6 JIT list ABI; the monsters (_region_region_intersections+_point_dist 14.2s) decide the JIT-vs-intrinsic split
-- [x] O.8 - O.8 - Value-const guard: Entry.consts_v (name, fn()->Value) bit-compared against the home-scope binding at arm time — unlocks the non-numeric-constant tier (_NO_ARG, UP, RIGHT) for hand intrinsics (wasm gets every win, unlike the JIT)
-- [x] O.9 - O.9 - The unlocked band: vector_axis, affine3d_rot_from_to (+v_theta/v_abs/point2d/affine3d_identity deps), then apply (determinant/det2-4 + vnf_reverse_faces + BOSL2-reverse chain), then rot (move/rot_inverse/affine3d_rot_by_axis + _NO_ARG) — cut per dep-tree, each with battery + wire check
-- [x] O.10 - O.10 - The region-monster band: _region_region_intersections + its full reachable closure as hand intrinsics (the P.1.6 resolution — ~9.7s/6 calls on shoe_holder)
-## Phase P - P - Cranelift JIT + CSG cache (desktop)
-added 2026-07-16.
-- [ ] P.1 - P.1 - Cranelift JIT for the numeric long tail (desktop)
-  - [x] P.1.1 - P.1.1 - JIT registry + compile cache (one JITModule, keyed by fingerprint)
-  - [x] P.1.2 - P.1.2 - Crate-boundary hook + dispatch integration
-  - [x] P.1.3 - P.1.3 - fast==JIT differential over the corpus + EXPLAIN coverage
-  - [x] P.1.3a - JIT $-global hazard (reviewer find, pre-existing, NOT 2b): loader.rs tagged_globals doesn't filter $-assignments — a top-level `$fn=32;` + a JIT'd fn reading $fn inlines 32 and diverges from the interpreter under dynamic shadowing. Needs a fast==JIT probe + fix — DONE (6c06b8af): probe watched failing end-to-end, then two-layer fix (Ident-arm $-decline + tagged_globals filter); corpus coverage unchanged
-  - [x] P.1.4 - P.1.4 - Extend the numeric subset (ternary, comparisons, transcendental calls)
-  - [x] P.1.5 - P.1.5 - Measure + coverage report
-    - [x] P.1.5.1 - P.1.5.1 - LTO experiment: fat LTO + codegen-units=1 vs the default release profile (chotchki's ask) — measured on the heavies + mid models, vs-OpenSCAD implication from baseline oracle times
-    - [x] P.1.5.2 - P.1.5.2 - Interpreter Geo-tree nondeterminism (pill_holder flake): bistable fingerprint on the PURE-interpreter side, doctrine #36 violation — hunt with FAB_GEO_DUMP, root-cause, fix
-  - [x] P.1.6 - P.1.6 - JIT list/vector ABI (scalarize A/B/C, sink-return D)
-- [x] P.2 - P.2 - Content-addressed CSG cache — DONE cf1ff16a as the kernel-level Solid memo (the rung BU.7's measurement picked): per-build content-addressed memo in build_geo/build_geo_parts (ONE memo spans parts — sliced models share the base between parts), prepass-counted so only will-recur content is retained, deep-eq verified per hit (collision = re-render, never a wrong mesh), FAB_GEO_CACHE=0 opt-out + =verify diagnosis mode. THE HUNT: silverwear diverged 140 tris — ops never MINT ids so update_reference's Q-offset is one constant per build; served copies sharing an id-set collide in union trees and same_face merges ACROSS copies; fixed with fresh_instance-on-serve (Mesh::as_fresh_instance re-mints instance ids, classes preserved). All four heavy models bitwise-identical on/off. Sweep: slice_parts 8.0s→0.59s (−92%), bowtie −77%, garage −53%, desktop_holder TIMEOUT→solid; wall-total 124.0s vs OpenSCAD 250.0s = 2.02× FASTER (day-start: 0.96×), median 2.69×, 75/109 both-rendered; baseline re-frozen
-## Phase Q - Fuzzing the evaluator + JIT (miri/Kani can't execute native code — fuzzing runs it, ASan checks it)
-- [x] Q.1 - Q.1 - eval fuzz target: parse→eval→geometry→mesh under ASan (the interpreter miri-substitute)
-- [x] Q.2 - Q.2 - jit_diff fuzz target: interp vs JIT bit-identity, executes the JIT unsafe seam under ASan
-- [x] Q.3 - Q.3 - wire eval + jit_diff into the fuzz.yml nightly campaign (corpus persist + crash upload)
-- [x] Q.4 - Q.4 - overnight campaign run + triage; any crash → minimize + TROPHIES.md
-- [x] Q.5 - Q.5 - global eval iteration/time budget (untrusted-input DoS hardening; a single 10M-element comprehension is bounded but 10s)
-- [x] Q.6 - Q.6 - fix JIT/interp NaN divergence: resolved as NaN-CLASS convention (fab_lang::tier_eq). Real cause = Cranelift folding (-s)*(-s)→s*s, not fmul canonicalization; NaN payload unobservable + ISA-nondeterministic so waived. Doctrine #36 refined in SPEC.md.
-- [x] Q.7 - Q.7 - JIT compile-complexity budget (fab-jit): bound the lowering's IR growth so compile_function declines a pathological body cheaply instead of OOMing
 ## Phase R - R - Generator + success-function search (perf + correctness fitness)
 - [x] R.1 - R.1 - v0 perf success function: generate → rank programs by deterministic eval-cost → worst-case report
   - [x] R.1.1 - R.1.1 - surface a deterministic eval-cost metric (eval_steps) from fab_lang — a metered-eval entry that returns (result, steps)
@@ -241,16 +204,6 @@ added 2026-07-16.
 - [x] S.2 - S.2 - test B: native MANIFOLD_PAR=ON vs a PAR=OFF rebuild — confirm parallel ≡ serial output bit-for-bit
 - [ ] S.3 - S.3 - test C: native (arm64) vs wasm cross-platform check — DEFERRED (needs a headless wasm mesh harness that doesn't exist yet; wasm is browser-only wasm32-uu). Predicted outcome: polyhedra match, curved primitives diverge on libm → collapses into libm-transcendental-divergence (fix = libm crate), NOT a Manifold issue
 - [ ] S.4 - S.4 - REOPENED: Manifold is run-to-run NON-deterministic on complex non-convex meshes, same-platform (garage_door: 3 runs → 3 STL hashes, identical vol/genus). Test A/S.1 only proved simple convex booleans. Root: per-SimpleBoolean internal parallelism. Confirm via garage_door PAR=OFF rebuild; fix = MANIFOLD_PAR=NONE or Manifold deterministic mode
-## Phase T - T - Slice/plate pipeline: multi-part models + print-orientation
-- [x] T.1 - T.1 - BUG (dogfood): sliced plate pieces land ~45° from the bed in the print-orientation view instead of lying flat. Hypothesis: auto-orient/plate-placement using the wrong up-vector (slice-plane frame leaking into the bed frame)
-- [x] T.2 - T.2 - treat separate TOP-LEVEL items as DISTINCT slice/place targets (partition the root union's children into independent parts, each sliced + oriented + packed on its own) — solves legacy presliced parts. The big one.
-- [x] T.2a - T.2a - CC print-pipeline fix (kernel connected-components + per-component best_up); subsumes T.1
-- [x] T.2b - T.2b - structural parts (build_geo_parts) + egui multi-part tabbed UI; co-pack shared plates
-  - [x] T.2b.1 - T.2b.1 - lib keystone: build_geo_parts (split root Union into N part Solids) + per-part fab.rs pipeline
-  - [x] T.2b.2 - T.2b.2 - GUI state model → per-part: Parts vec + ActivePart, part_id on entities, slice_hash/poll/sync
-  - [x] T.2b.3 - T.2b.3 - multi-part tabbed UI (part switcher + per-part editing) — the design work
-  - [x] T.2b.4 - T.2b.4 - co-pack all parts onto shared plates + full verify (headless screenshot/script + tests)
-- [x] T.3 - T.3 - best_up prefer-flat policy: stop tilting structured pieces to 45° over a stable flat face
 ## Phase V - V - Multi-part parallelism (per-part render/slice/pack on independent worker threads; Solids stay thread-local, mesh data crosses)
 - [ ] V.1 - V.1 - per-part parallelism: render/slice/print-layout each part on its own worker thread
 ## Phase W - Release polish (theme match → standalone .app → wasm on hotchkiss.io)

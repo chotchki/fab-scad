@@ -698,6 +698,7 @@ pub(crate) fn poll_job(
     mut active_part: ResMut<ActivePart>,
     mut pending_config: ResMut<PendingConfig>,
     mut pipeline: ResMut<Pipeline>,
+    mut scene: ResMut<SceneCfg>,
     editor: Res<EditorBuf>,
     bg: Res<SliceInBackground>,
     pool: Res<GeomPool>,
@@ -747,8 +748,18 @@ pub(crate) fn poll_job(
                 // cuts makes `kick_auto_plan` stand down, so config wins over auto-derive, W.3.8). The
                 // block was stashed at load (both platforms); no block → every part auto-derives. The
                 // legacy project.toml load is GONE — the .scad block is the one config mechanism.
-                if let Some(blocks) = pending_config.0.take() {
-                    config::apply_blocks(&mut new, &blocks);
+                if let Some(cfg) = pending_config.0.take() {
+                    config::apply_blocks(&mut new, &cfg.parts);
+                    // The model's own printer (if it declared one) overrides the boot bed — the web
+                    // has no printers.toml, so the .scad's fab:config IS the bed AND plate source there
+                    // (W.3.8), which is why this slaves the export plate to the bed (set_configured_bed).
+                    if let Some(p) = cfg.printer {
+                        scene.set_configured_bed([
+                            p.bed[0] as f32,
+                            p.bed[1] as f32,
+                            p.bed[2] as f32,
+                        ]);
+                    }
                 }
                 *parts = Parts(new);
                 active_part.0 = 0;
@@ -1034,7 +1045,13 @@ pub(crate) fn kick_auto_plan(
     let Some(src) = scene.source.clone() else {
         return;
     };
-    let (bed, _) = bed_size().unwrap_or(([256.0; 3], [256.0; 3])); // pieces fit the USABLE bed
+    // Pieces fit the USABLE bed — SceneCfg is the single bed source of truth (boot printers.toml, or
+    // the model's fab:config, or the Parts-tab override), NOT a fresh printers.toml read (web has none).
+    let bed = [
+        scene.bed[0] as f64,
+        scene.bed[1] as f64,
+        scene.bed[2] as f64,
+    ];
     for i in 0..parts.0.len() {
         let part = &mut parts.0[i];
         if part.auto_planned.0.as_deref() == Some(src.as_path()) || !part.cuts.list.is_empty() {

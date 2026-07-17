@@ -107,36 +107,76 @@ pub(crate) fn apply_blocks(parts: &mut [Part], blocks: &[PartSlicing]) {
 // source (baked into the downloaded .scad); desktop writes the SAME block, retiring the toml_edit
 // autosave. A comment is ignored by scad-rs/OpenSCAD, so the model renders identically with or without it.
 
-/// The marker prefix; the rest of the line is the config JSON. Versioned so a future schema can migrate.
-const CONFIG_MARKER: &str = "// fab:config v1 ";
+/// The per-model PRINTER a `fab:config` block declares (W.3.8+, the wasm dogfooding path): the model
+/// records the bed it was sliced for, so it round-trips a printer size where there's no `printers.toml`
+/// (the browser) — and, once set, wins over `printers.toml` on desktop too. `bed` is [x,y,z] (the plan
+/// needs z for tall parts); the Bambu-export plate footprint just tracks the bed's x/y.
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, PartialEq)]
+pub(crate) struct PrinterCfg {
+    pub(crate) bed: [f64; 3],
+}
 
-/// The `fab:config` block for the live parts — a single line `// fab:config v1 {json}` — or `None` when
-/// nothing's worth persisting (every part auto-derives). Appended to a model's source at the bottom.
-pub(crate) fn config_block(parts: &[Part]) -> Option<String> {
+/// The whole `fab:config` v2 payload: the optional per-model printer + the per-part slicing blocks. v1 was
+/// the bare `[PartSlicing]` array; [`read_config_block`] still reads it (printer `None`) so existing models
+/// keep their cuts.
+#[derive(serde::Serialize, serde::Deserialize, Default)]
+pub(crate) struct FabConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) printer: Option<PrinterCfg>,
+    pub(crate) parts: Vec<PartSlicing>,
+}
+
+/// The v2 marker; the rest of the line is the v2 JSON object. v1 (a bare array) is still READ for
+/// back-compat, never written. Versioned so a future schema can migrate.
+const CONFIG_MARKER: &str = "// fab:config v2 ";
+/// The legacy v1 marker — read-only (existing desktop models' per-part config).
+const CONFIG_MARKER_V1: &str = "// fab:config v1 ";
+
+/// The `fab:config` block for the live parts + `printer` — a single line `// fab:config v2 {json}` — or
+/// `None` when nothing's worth persisting (no printer set AND every part auto-derives). Appended at the
+/// model source's bottom.
+pub(crate) fn config_block(parts: &[Part], printer: Option<PrinterCfg>) -> Option<String> {
     let blocks = slicing_blocks(parts);
-    if blocks.is_empty() {
+    if blocks.is_empty() && printer.is_none() {
         return None;
     }
     Some(format!(
         "{CONFIG_MARKER}{}",
-        serde_json::to_string(&blocks).ok()?
+        serde_json::to_string(&FabConfig {
+            printer,
+            parts: blocks,
+        })
+        .ok()?
     ))
 }
 
-/// Read a `fab:config` block out of source `text` — the per-part slicing config, or `None` if absent or
-/// malformed (a stray/corrupt block is ignored, never fatal — those parts auto-derive).
+/// Read a `fab:config` block out of source `text` — the printer + per-part slicing config, or `None` if
+/// absent or malformed (a stray/corrupt block is ignored, never fatal — those parts auto-derive). Reads v2
+/// (`{printer, parts}`) OR the legacy v1 bare array (→ printer `None`), whichever the last block is.
 ///
 /// CONTRACT: `text` is ONE .scad's own source — the editing BUFFER (the main/open file), never resolved
 /// `include`/`use` content. An include is a reference *line*; the lib's bytes (and any `fab:config` block
 /// inside a lib that was itself edited in fab-gui) are NEVER spliced into the buffer, so they can't leak
 /// in as this model's config. As belt-and-suspenders we read the LAST block (our own append position at
 /// the file's bottom), so a file's own trailing metadata always wins over anything above it.
-pub(crate) fn read_config_block(text: &str) -> Option<Vec<PartSlicing>> {
-    let payload = text
+pub(crate) fn read_config_block(text: &str) -> Option<FabConfig> {
+    let line = text
         .lines()
         .rev()
-        .find_map(|l| l.trim_start().strip_prefix(CONFIG_MARKER))?;
-    serde_json::from_str(payload.trim()).ok()
+        .find(|l| l.trim_start().starts_with("// fab:config"))?;
+    let line = line.trim_start();
+    if let Some(payload) = line.strip_prefix(CONFIG_MARKER) {
+        serde_json::from_str(payload.trim()).ok()
+    } else {
+        // legacy v1: a bare [PartSlicing] array, no printer.
+        let payload = line.strip_prefix(CONFIG_MARKER_V1)?;
+        serde_json::from_str(payload.trim())
+            .ok()
+            .map(|parts| FabConfig {
+                printer: None,
+                parts,
+            })
+    }
 }
 
 /// `text` with any `fab:config` block line removed + trailing blank lines trimmed — the clean model
@@ -160,9 +200,13 @@ pub(crate) fn strip_config_block(text: &str) -> String {
 /// Append (or replace) a model's `fab:config` block — strip any existing block, then add the fresh one
 /// with a blank-line separator. This is what desktop Save writes to the `.scad` and web download bakes
 /// into the bytes. No config to persist → just the clean model.
-pub(crate) fn with_config_block(model: &str, parts: &[Part]) -> String {
+pub(crate) fn with_config_block(
+    model: &str,
+    parts: &[Part],
+    printer: Option<PrinterCfg>,
+) -> String {
     let clean = strip_config_block(model);
-    match config_block(parts) {
+    match config_block(parts, printer) {
         Some(block) => {
             let sep = if clean.is_empty() || clean.ends_with('\n') {
                 ""
@@ -437,16 +481,16 @@ mod tests {
             part_with(Some("frame"), &[(Axis::X, 10.0, true)], &[]),
         ];
         let model = "cube([60,40,30]);\n";
-        let saved = with_config_block(model, &parts);
+        let saved = with_config_block(model, &parts, None);
         assert!(
             saved.starts_with(model),
             "model source untouched above the block"
         );
-        assert!(saved.contains("// fab:config v1 "));
+        assert!(saved.contains("// fab:config v2 "));
 
-        let blocks = read_config_block(&saved).expect("block reads back");
+        let cfg = read_config_block(&saved).expect("block reads back");
         let mut fresh = vec![part_named("wall"), part_named("frame")];
-        apply_blocks(&mut fresh, &blocks);
+        apply_blocks(&mut fresh, &cfg.parts);
         assert_eq!(fresh[0].cuts.list[0].at, 40.0);
         assert_eq!(fresh[0].conns.list[0].kind, fab::ConnKind::Bolt);
         assert_eq!(fresh[1].cuts.list[0].axis, Axis::X);
@@ -468,20 +512,26 @@ mod tests {
 
         // And if a lib's block ever DID appear above the model's OWN (a hypothetical splice), the file's
         // own trailing block still wins — we read the bottom-most, our append position.
-        let lib_block =
-            config_block(&[part_with(Some("lib"), &[(Axis::Z, 9.0, true)], &[])]).unwrap();
+        let lib_block = config_block(
+            &[part_with(Some("lib"), &[(Axis::Z, 9.0, true)], &[])],
+            None,
+        )
+        .unwrap();
         let own_block =
-            config_block(&[part_with(Some("me"), &[(Axis::X, 3.0, true)], &[])]).unwrap();
+            config_block(&[part_with(Some("me"), &[(Axis::X, 3.0, true)], &[])], None).unwrap();
         let spliced = format!("{lib_block}\nwidget();\n{own_block}\n");
-        assert_eq!(read_config_block(&spliced).unwrap()[0].cut[0].axis, "x");
+        assert_eq!(
+            read_config_block(&spliced).unwrap().parts[0].cut[0].axis,
+            "x"
+        );
     }
 
     #[test]
     fn no_config_writes_no_block_and_reads_none() {
         let parts = vec![part_named("wall")]; // auto-derive → nothing to persist
-        assert!(config_block(&parts).is_none());
+        assert!(config_block(&parts, None).is_none());
         let model = "cube(1);\n";
-        assert_eq!(with_config_block(model, &parts), model);
+        assert_eq!(with_config_block(model, &parts, None), model);
         assert!(read_config_block(model).is_none());
     }
 
@@ -489,13 +539,38 @@ mod tests {
     fn resaving_replaces_the_block_never_stacks_it() {
         let a = vec![part_with(Some("p"), &[(Axis::Z, 40.0, true)], &[])];
         let b = vec![part_with(Some("p"), &[(Axis::Z, 41.0, true)], &[])];
-        let once = with_config_block("cube(1);\n", &a);
-        let twice = with_config_block(&once, &b); // re-save with moved cut
+        let once = with_config_block("cube(1);\n", &a, None);
+        let twice = with_config_block(&once, &b, None); // re-save with moved cut
         assert_eq!(
             twice.matches("// fab:config").count(),
             1,
             "one block, not two"
         );
-        assert_eq!(read_config_block(&twice).unwrap()[0].cut[0].at.f(), 41.0);
+        assert_eq!(
+            read_config_block(&twice).unwrap().parts[0].cut[0].at.f(),
+            41.0
+        );
+    }
+
+    #[test]
+    fn printer_round_trips_and_a_v1_block_still_reads() {
+        // v2: the printer rides in the block alongside the parts, and survives a save without cuts.
+        let printer = Some(PrinterCfg {
+            bed: [325.0, 320.0, 320.0],
+        });
+        let saved = with_config_block("cube(1);\n", &[part_named("p")], printer);
+        assert!(saved.contains("// fab:config v2 "));
+        let cfg = read_config_block(&saved).expect("reads back");
+        assert_eq!(cfg.printer, printer);
+        assert!(cfg.parts.is_empty()); // no cuts, but the block still exists FOR the printer
+
+        // a printer with no parts still persists (the whole point — the model declares its bed).
+        assert!(config_block(&[part_named("p")], printer).is_some());
+
+        // back-compat: a legacy v1 bare-array block reads as parts with printer None.
+        let v1 = "cube(1);\n// fab:config v1 [{\"key\":{\"name\":\"p\",\"nth\":0,\"index\":0},\"cut\":[{\"axis\":\"z\",\"at\":5.0}],\"connector\":[],\"orient\":[]}]\n";
+        let cfg = read_config_block(v1).expect("v1 reads");
+        assert!(cfg.printer.is_none());
+        assert_eq!(cfg.parts[0].cut[0].axis, "z");
     }
 }

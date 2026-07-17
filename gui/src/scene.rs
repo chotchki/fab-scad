@@ -180,6 +180,31 @@ pub(crate) fn seat_bed(
     }
 }
 
+/// React to a printer-bed change (the Parts-tab X/Y/Z fields, or a model's `fab:config` printer landing
+/// at load): rebuild the slab mesh to the new footprint, and RE-ARM auto-plan for every part that has no
+/// user cuts so `kick_auto_plan` re-decides whole-vs-cut against the new bed (a part that already carries
+/// cuts is left alone — "Reset to auto" re-derives it). Gated on a REAL change (`SceneCfg` is only written
+/// on a genuine edit/config-load, never every frame), so the re-arm doesn't thrash. On wasm the re-arm is
+/// inert (auto-plan lands via the Worker), but the slab still needs resizing there.
+pub(crate) fn resize_bed(
+    scene: Res<SceneCfg>,
+    mut parts: ResMut<Parts>,
+    mut beds: Query<&mut Mesh3d, With<Bed>>,
+    mut meshes: ResMut<Assets<Mesh>>,
+) {
+    if !scene.is_changed() {
+        return;
+    }
+    for mut mesh in &mut beds {
+        mesh.0 = meshes.add(Cuboid::new(scene.bed[0], scene.bed[1], 1.0));
+    }
+    for part in &mut parts.0 {
+        if part.cuts.list.is_empty() {
+            part.auto_planned.0 = None; // re-check whole-vs-cut against the resized bed
+        }
+    }
+}
+
 // ---- shared scene ---------------------------------------------------------------------
 /// The bed + lights (everything but the model + cut planes, which load via a job / synchronously).
 pub(crate) fn spawn_environment(

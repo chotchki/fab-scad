@@ -48,6 +48,7 @@ pub(crate) fn panel_ui(
     status: Res<Status>,
     mut open_dialog: ResMut<OpenDialog>,
     mut editor: ResMut<EditorBuf>,
+    mut scene: ResMut<SceneCfg>,
     time: Res<Time>,
     view: PanelView,
     mut writers: PanelWriters,
@@ -206,7 +207,17 @@ pub(crate) fn panel_ui(
                             .on_hover_text(save_hover)
                             .clicked()
                         {
-                            let baked = config::with_config_block(&editor.text, &parts.0);
+                            // Bake the CURRENT bed into the block too (W.3.8) — the model carries its
+                            // own printer, so a web reload with no printers.toml still sizes right.
+                            let printer = config::PrinterCfg {
+                                bed: [
+                                    scene.bed[0] as f64,
+                                    scene.bed[1] as f64,
+                                    scene.bed[2] as f64,
+                                ],
+                            };
+                            let baked =
+                                config::with_config_block(&editor.text, &parts.0, Some(printer));
                             #[cfg(not(target_arch = "wasm32"))]
                             if std::fs::write(&editor.path, baked).is_ok() {
                                 editor.dirty = false;
@@ -277,6 +288,33 @@ pub(crate) fn panel_ui(
                         });
                 }
                 Tab::Parts => {
+                    // Printer bed (W.3.8): the build volume every part slices + packs against — a
+                    // per-MODEL slicing input (not a global), so it lives on the Parts tab and persists
+                    // in the .scad's fab:config on Save. That's the web's only bed source (no
+                    // printers.toml in the browser), so a `?model=` reload sizes right. Edit a COPY so
+                    // DragValue's mutable borrow can't false-trip SceneCfg's change detection — only a
+                    // REAL delta writes back (→ `resize_bed` reshapes the slab + re-arms auto-plan).
+                    {
+                        let mut bed = scene.bed;
+                        ui.horizontal(|ui| {
+                            ui.label(theme::chrome("printer bed", 15.0).color(theme::NAVY));
+                            for (axis, i) in [("X", 0usize), ("Y", 1), ("Z", 2)] {
+                                ui.label(egui::RichText::new(axis).small().weak());
+                                ui.add(
+                                    egui::DragValue::new(&mut bed[i])
+                                        .speed(1.0)
+                                        .range(10.0..=1000.0)
+                                        .fixed_decimals(0)
+                                        .suffix(" mm"),
+                                );
+                            }
+                        });
+                        if bed != scene.bed {
+                            scene.set_configured_bed(bed); // slaves the export plate to the new bed
+                            editor.dirty = true; // enable Save so the new bed bakes into fab:config
+                        }
+                    }
+                    ui.separator();
                     // THE DRILL (U.3.3): part → cut → connector, top to bottom. A collapsing section
                     // per top-level part (green + bold = active); its body flattens to that part's
                     // cuts; expanding a cut (▼) reveals its connectors inline. The active part drives

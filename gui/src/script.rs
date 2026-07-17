@@ -121,11 +121,14 @@ pub(crate) fn setup_script(
     mut status: ResMut<Status>,
     mut editor: ResMut<EditorBuf>,
     mut files: ResMut<FileList>,
+    mut pending_config: ResMut<PendingConfig>,
     pool: Res<GeomPool>,
 ) {
     spawn_environment(&mut commands, &mut meshes, &mut materials, &scene);
     if let Some(src) = scene.source.clone() {
-        read_into_editor(&mut editor, &src);
+        // Stash the source's fab:config for poll_job to apply (per-part cuts + the printer) — mirrors
+        // setup_windowed so the offscreen harness is faithful to run_windowed (it silently dropped it).
+        pending_config.0 = read_into_editor(&mut editor, &src);
         files.files = vec![src];
         files.active = Some(0);
     }

@@ -102,7 +102,7 @@ pub fn native_entry() {
             .find(|a| a.ends_with(".scad"))
             .map(PathBuf::from),
         stl: args.iter().find(|a| a.ends_with(".stl")).map(PathBuf::from),
-        bed: [bed[0] as f32, bed[1] as f32],
+        bed: [bed[0] as f32, bed[1] as f32, bed[2] as f32],
         plate: [plate[0] as f32, plate[1] as f32],
         root: fab::find_root(),
         tmp: std::env::temp_dir().join("fab-gui"),
@@ -139,7 +139,7 @@ pub fn start() {
         SceneCfg {
             source: None,
             stl: None,
-            bed: [256.0, 256.0],
+            bed: [256.0, 256.0, 256.0], // web has no printers.toml — a sane default the model's fab:config overrides
             plate: [256.0, 256.0],
             root: None,
             tmp: PathBuf::from("/tmp/fab-gui"),
@@ -231,7 +231,7 @@ fn run_windowed(scene: SceneCfg, shot: Option<PathBuf>) {
             edit_mode,
             draw_profile,
             (auto_reslice, revert_on_edit),
-            (auto_scale, split_viewport, seat_bed),
+            (auto_scale, split_viewport, seat_bed, resize_bed),
             // The panel's button commands (heavy actions the egui `panel_ui` writes as PanelCmd).
             (
                 toggle_view,
@@ -421,6 +421,7 @@ fn run_scripted(scene: SceneCfg, actions: Vec<Action>) {
                     do_auto_place,
                     split_viewport,
                     seat_bed,
+                    resize_bed,
                     export_plates_action, // the `export` script verb → co-pack .3mf (T.2b.4)
                 ),
                 sync_pipeline, // U.3.7 feedback: keep the offscreen harness faithful to run_windowed

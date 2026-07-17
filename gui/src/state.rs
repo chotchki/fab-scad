@@ -9,8 +9,8 @@ pub(crate) const SPREAD: f64 = 50.0;
 pub(crate) struct SceneCfg {
     pub(crate) source: Option<PathBuf>, // .scad source (sliceable, preferred)
     pub(crate) stl: Option<PathBuf>,    // .stl to display directly (when there's no source)
-    pub(crate) bed: [f32; 2],           // usable area — pieces pack within this (extruder reach)
-    pub(crate) plate: [f32; 2], // real plate size for the Bambu export grid/printable_area (≥ bed)
+    pub(crate) bed: [f32; 3], // usable build volume [x,y,z] — pieces pack within x/y (extruder reach), z bounds tall parts
+    pub(crate) plate: [f32; 2], // real plate size for the Bambu export grid/printable_area (≥ bed x/y)
     pub(crate) root: Option<PathBuf>, // workspace root, for OPENSCADPATH
     // Scratch dir for rendered/sliced STLs. Unread on wasm since W.3.13 (the .3mf export downloads
     // instead of writing to a tmp path), but the field stays: SceneCfg is the ONE boot config both
@@ -19,6 +19,19 @@ pub(crate) struct SceneCfg {
     pub(crate) tmp: PathBuf,
     pub(crate) reslice_on_start: bool, // screenshot --reslice: display the sliced result
     pub(crate) cut_pct: f32,           // screenshot --cut <0..100>: where along X to cut
+}
+
+impl SceneCfg {
+    /// Set the build volume from an EXPLICIT config — a model's `fab:config` printer or the Parts-tab
+    /// X/Y/Z fields — and SLAVE the Bambu export plate to its x/y. The web has no separate real-plate
+    /// source (no printers.toml), so the bed the user configured IS the plate: this keeps the exported
+    /// `.3mf`'s `printable_area`/grid matching that bed (the W.3.8 web dogfood path). Native BOOT reads
+    /// `printers.toml` directly (its real plate can exceed the reachable bed) and never routes here, so
+    /// an un-configured desktop print keeps its true plate + preset.
+    pub(crate) fn set_configured_bed(&mut self, bed: [f32; 3]) {
+        self.bed = bed;
+        self.plate = [bed[0], bed[1]];
+    }
 }
 
 /// Marks the displayed model entity, so re-slice can swap it out.
@@ -87,10 +100,7 @@ pub(crate) struct EditorBuf {
 /// stripped from the buffer (the editor shows the clean model — chotchki's call) and its parsed config
 /// RETURNED for the caller to stash into [`PendingConfig`] + apply once the parts are built. Clean (not
 /// dirty, no pending edit). Used on the launch seed + every file switch.
-pub(crate) fn read_into_editor(
-    editor: &mut EditorBuf,
-    path: &Path,
-) -> Option<Vec<fab_scad::manifest::PartSlicing>> {
+pub(crate) fn read_into_editor(editor: &mut EditorBuf, path: &Path) -> Option<config::FabConfig> {
     editor.path = path.to_path_buf();
     let raw = std::fs::read_to_string(path).unwrap_or_default();
     let cfg = config::read_config_block(&raw);
@@ -100,11 +110,12 @@ pub(crate) fn read_into_editor(
     cfg
 }
 
-/// Per-part slicing config parsed from a freshly-loaded source's `fab:config` block (W.3.8), waiting for
-/// `poll_job` to apply it once the parts are built (the block loads BEFORE the render that makes the
-/// parts). `read_into_editor` fills it; `poll_job` takes it. `None` = no block → parts auto-derive.
+/// The `fab:config` block parsed from a freshly-loaded source (W.3.8), waiting for `poll_job` to apply it
+/// once the parts are built (the block loads BEFORE the render that makes the parts): the per-part
+/// slicing binds back to the parts, and the optional printer overwrites [`SceneCfg::bed`]. `read_into_editor`
+/// fills it; `poll_job` takes it. `None` = no block → parts auto-derive + the boot printer stands.
 #[derive(Resource, Default)]
-pub(crate) struct PendingConfig(pub(crate) Option<Vec<fab_scad::manifest::PartSlicing>>);
+pub(crate) struct PendingConfig(pub(crate) Option<config::FabConfig>);
 
 /// A finished render/slice job's payload (T.2b). A whole render mints ALL top-level parts' base solids
 /// in the geometry service (W.3.3); a reslice reads ONE held base and hands back the sliced STL bytes.

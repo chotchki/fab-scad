@@ -549,10 +549,10 @@ pub(crate) fn estimate_copack(
     scene: Res<SceneCfg>,
     mut copack: ResMut<CoPack>,
 ) {
-    if !pieces.is_changed() && !parts.is_changed() {
-        return;
+    if !pieces.is_changed() && !parts.is_changed() && !scene.is_changed() {
+        return; // scene.is_changed() re-packs when the printer bed is resized on the Parts tab
     }
-    copack.bed = scene.bed;
+    copack.bed = [scene.bed[0], scene.bed[1]]; // the copack display grid is x/y only
     let Some(list) = pieces.0.as_ref().filter(|l| !l.is_empty()) else {
         copack.summary = None;
         return;

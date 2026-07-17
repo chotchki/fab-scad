@@ -69,6 +69,10 @@ pub trait GeometryBackend {
     fn to_mesh(&self, s: &Self::Solid) -> Mesh;
     /// Whether the solid is empty (no geometry) — the differential's `Empty` outcome.
     fn is_empty(&self, s: &Self::Solid) -> bool;
+    /// The axis-aligned bounding box `(lo, hi)` of the solid, or `None` when it's empty. `resize()` needs
+    /// the child's MEASURED extent to fix its scale factors — unlike a plain transform it can't fold to an
+    /// `Affine` at tree-build time (L.5.1).
+    fn bbox(&self, s: &Self::Solid) -> Option<(Vec3, Vec3)>;
 
     // ── 2D surface (J.3) ─────────────────────────────────────────────────────────────────────────
 
@@ -310,7 +314,9 @@ impl<'t, B: GeometryBackend> GeoMemo<'t, B> {
         *self.counts.entry(h).or_insert(0) += 1;
         match node {
             GeoNode::Empty | GeoNode::Leaf(_) | GeoNode::Extrude { .. } => {}
-            GeoNode::Transform { child, .. } | GeoNode::Color { child, .. } => self.prepass(child),
+            GeoNode::Transform { child, .. }
+            | GeoNode::Color { child, .. }
+            | GeoNode::Resize { child, .. } => self.prepass(child),
             GeoNode::Union(kids)
             | GeoNode::Difference(kids)
             | GeoNode::Intersection(kids)
@@ -439,7 +445,56 @@ fn render_node<'t, B: GeometryBackend>(
         GeoNode::Color { color, child } => {
             backend.color(&build_inner(child, backend, memo), *color)
         }
+        // resize() — build the child, measure its bbox, then pure-scale (about the origin, like OpenSCAD's
+        // multmatrix) so each axis hits `newsize`. An empty child has no bbox → nothing to scale (L.5.1).
+        GeoNode::Resize {
+            newsize,
+            auto,
+            child,
+        } => {
+            let built = build_inner(child, backend, memo);
+            match backend.bbox(&built) {
+                Some((lo, hi)) => {
+                    let ext = [hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]];
+                    let s = resize_scale(*newsize, *auto, ext);
+                    backend.transform(
+                        &built,
+                        &Affine::row_major([
+                            s[0], 0.0, 0.0, 0.0, //
+                            0.0, s[1], 0.0, 0.0, //
+                            0.0, 0.0, s[2], 0.0,
+                        ]),
+                    )
+                }
+                None => built,
+            }
+        }
     }
+}
+
+/// `resize()`'s per-axis scale factors from the child's measured extent. A `newsize` axis of `0` (or an axis
+/// the child is FLAT in, extent `0`) is kept at `1` — UNLESS `auto` is set for a `0`-newsize axis, which then
+/// scales PROPORTIONALLY to the first axis that DID get a size (OpenSCAD's `Resize` autosize). All-zero
+/// `newsize` → identity.
+fn resize_scale(newsize: [f64; 3], auto: [bool; 3], ext: [f64; 3]) -> [f64; 3] {
+    let mut scale = [1.0_f64; 3];
+    let mut first_sized: Option<f64> = None;
+    for i in 0..3 {
+        if newsize[i] > 0.0 && ext[i] > 0.0 {
+            scale[i] = newsize[i] / ext[i];
+            if first_sized.is_none() {
+                first_sized = Some(scale[i]);
+            }
+        }
+    }
+    if let Some(f) = first_sized {
+        for i in 0..3 {
+            if newsize[i] == 0.0 && auto[i] && ext[i] > 0.0 {
+                scale[i] = f;
+            }
+        }
+    }
+    scale
 }
 
 /// Lower a fab-lang 2D tree ([`Shape2D`], J.3) to a backend region — the 2D half of the geometry
@@ -527,6 +582,10 @@ impl GeometryBackend for ManifoldBackend {
 
     fn fresh_instance(&self, s: &Self::Solid) -> Self::Solid {
         s.as_ref().map(crate::kernel::Solid::as_fresh_instance)
+    }
+
+    fn bbox(&self, s: &Self::Solid) -> Option<(Vec3, Vec3)> {
+        s.as_ref().and_then(crate::kernel::Solid::bbox)
     }
 
     fn leaf(&self, mesh: &Mesh) -> Self::Solid {
@@ -719,6 +778,16 @@ impl GeometryBackend for MockBackend {
             mesh: mesh.clone(),
             ops: 0,
         }
+    }
+
+    fn bbox(&self, s: &Self::Solid) -> Option<(Vec3, Vec3)> {
+        let first = *s.mesh.verts.first()?;
+        Some(s.mesh.verts.iter().fold((first, first), |(lo, hi), v| {
+            (
+                Vec3::new(lo.x.min(v.x), lo.y.min(v.y), lo.z.min(v.z)),
+                Vec3::new(hi.x.max(v.x), hi.y.max(v.y), hi.z.max(v.z)),
+            )
+        }))
     }
 
     fn union(&self, a: &Self::Solid, b: &Self::Solid) -> Self::Solid {
@@ -971,6 +1040,9 @@ mod tests {
             }
             fn transform(&self, s: &Self::Solid, m: &fab_lang::Affine) -> Self::Solid {
                 self.inner.transform(s, m)
+            }
+            fn bbox(&self, s: &Self::Solid) -> Option<(fab_lang::Vec3, fab_lang::Vec3)> {
+                self.inner.bbox(s)
             }
             fn color(&self, s: &Self::Solid, rgba: fab_lang::Rgba) -> Self::Solid {
                 self.inner.color(s, rgba)

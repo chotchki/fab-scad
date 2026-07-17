@@ -19,7 +19,9 @@ enum Sub {
 /// Move a `GeoNode`'s direct children OUT (leaving it childless) into `work`.
 fn drain_geonode(node: &mut GeoNode, work: &mut Vec<Sub>) {
     match node {
-        GeoNode::Transform { child, .. } | GeoNode::Color { child, .. } => {
+        GeoNode::Transform { child, .. }
+        | GeoNode::Color { child, .. }
+        | GeoNode::Resize { child, .. } => {
             work.push(Sub::D3(std::mem::replace(&mut **child, GeoNode::Empty)));
         }
         GeoNode::Union(v)

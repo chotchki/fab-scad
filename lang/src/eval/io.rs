@@ -144,6 +144,11 @@ where
 /// [`fulfill`]'s fs-free twin: a `Scad` reference resolves against the virtual `sources` map
 /// (`from_dir` first, then the lib root — both lexically normalized), a `File` reference goes to
 /// `mesh_reader`.
+#[allow(
+    clippy::unnecessary_wraps,
+    reason = "the twin of the fallible `fulfill` (whose fs read stays LOUD); kept `Result` for the parallel \
+              signature the needs-fixpoint drives both through"
+)]
 fn fulfill_from_map<R>(
     need: SourceNeed,
     sources: &std::collections::BTreeMap<PathBuf, String>,
@@ -189,8 +194,19 @@ where
             scad.insert(key, ProvidedSource { id, dir, program });
         }
         SourceNeed::File { raw } => {
-            let imported = mesh_reader(&raw)?;
-            files.insert(raw, imported);
+            // TOLERANT (L.5.7), like `fulfill` + the `Scad` arm: a missing/broken import → warn + EMPTY mesh.
+            match mesh_reader(&raw) {
+                Ok(imported) => {
+                    files.insert(raw, imported);
+                }
+                Err(why) => {
+                    warnings.push(Message::Warning(format!(
+                        "Can't open import file '{raw}': {why}"
+                    )));
+                    let empty = Imported::empty_for(&raw);
+                    files.insert(raw, empty);
+                }
+            }
         }
     }
     Ok(())
@@ -272,8 +288,21 @@ where
             // No dedup guard needed: `Ctx::request_file` accumulates File needs in a `BTreeSet`, so each
             // `raw` surfaces at most once per round, and a fulfilled one never re-surfaces (the table has
             // it) — unlike `Scad`, where a diamond can name the same lib twice in one pass.
-            let imported = mesh_reader(&raw)?;
-            files.insert(raw, imported);
+            // TOLERANT (L.5.7), matching the `Scad` arm above + OpenSCAD: a missing/broken import file →
+            // warn + an EMPTY mesh (dimension by extension), so the rest of the model still renders
+            // ("Can't open import file '…'", warn-and-render-without-it) instead of a hard load error.
+            match mesh_reader(&raw) {
+                Ok(imported) => {
+                    files.insert(raw, imported);
+                }
+                Err(why) => {
+                    warnings.push(Message::Warning(format!(
+                        "Can't open import file '{raw}': {why}"
+                    )));
+                    let empty = Imported::empty_for(&raw);
+                    files.insert(raw, empty);
+                }
+            }
         }
     }
     Ok(())

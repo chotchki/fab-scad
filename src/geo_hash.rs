@@ -61,6 +61,19 @@ fn hash_node_into(node: &GeoNode, memo: &mut BTreeMap<usize, u64>, h: &mut FnvHa
             }
             h.write(&hash_node(child, memo).to_le_bytes());
         }
+        GeoNode::Resize {
+            newsize,
+            auto,
+            child,
+        } => {
+            for c in newsize {
+                h.write(&c.to_bits().to_le_bytes());
+            }
+            for a in auto {
+                h.write(&[u8::from(*a)]);
+            }
+            h.write(&hash_node(child, memo).to_le_bytes());
+        }
         GeoNode::Union(kids)
         | GeoNode::Difference(kids)
         | GeoNode::Intersection(kids)

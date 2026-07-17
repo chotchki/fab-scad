@@ -68,6 +68,18 @@ pub enum GeoNode {
         /// The colored subtree.
         child: Box<GeoNode>,
     },
+    /// `resize()` — scale a subtree so its bounding box hits `newsize` per axis. A `0` keeps the axis (or,
+    /// when `auto` for that axis, scales it PROPORTIONALLY to the first sized axis). The scale factors need
+    /// the child's BUILT bounding box, so unlike [`GeoNode::Transform`] it can't fold to an `Affine` at
+    /// tree-build time — the backend measures the child and applies the scale (L.5.1).
+    Resize {
+        /// Target size per axis; `0` = keep (or auto-proportional).
+        newsize: [f64; 3],
+        /// Per-axis auto flag: a `0` axis scales proportionally to the first sized axis when set.
+        auto: [bool; 3],
+        /// The resized subtree.
+        child: Box<GeoNode>,
+    },
 }
 
 /// Whether `name` is a built-in affine transform (dispatched to [`GeoNode::Transform`]).
@@ -102,6 +114,27 @@ pub(super) fn resolve_color(positional: &[Value], named: &BTreeMap<String, Value
         rgba.a = *a;
     }
     Some(rgba)
+}
+
+/// `resize()`'s evaluated args → `(newsize, auto)`. `newsize` (1st positional / `newsize=`) is an
+/// `[x, y, z]` target where a `0` axis is KEPT (or auto-scaled, below); `auto` (2nd positional / `auto=`)
+/// is a single bool applied to every axis or a per-axis `[bool, bool, bool]`, default all-false — matching
+/// OpenSCAD's `Resize` node. The scale factors themselves need the child's built bbox, so they're computed
+/// in the backend, not here (L.5.1).
+pub(super) fn resolve_resize(
+    positional: &[Value],
+    named: &BTreeMap<String, Value>,
+) -> ([f64; 3], [bool; 3]) {
+    let newsize = vec3(arg(positional, named, 0, "newsize"));
+    let auto = match arg(positional, named, 1, "auto") {
+        Some(Value::Bool(b)) => [*b; 3],
+        Some(Value::List(xs)) => {
+            let g = |i: usize| matches!(xs.get(i), Some(Value::Bool(true)));
+            [g(0), g(1), g(2)]
+        }
+        _ => [false; 3],
+    };
+    (newsize, auto)
 }
 
 /// Resolve an `offset()` module's evaluated args to its lowering params `(delta, join, segments)`.

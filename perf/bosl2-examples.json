@@ -1,0 +1,267 @@
+{
+  "schema": 1,
+  "captured_epoch_s": 1784300994,
+  "budget_s": 180,
+  "rows": [
+    {
+      "example": "BOSL2logo.scad",
+      "fab": {
+        "ms": 600,
+        "kind": "solid",
+        "tris": 55718,
+        "verts": 27763,
+        "genus": 49,
+        "volume": 57465.08438890674,
+        "area": 36481.05212321197
+      },
+      "oracle": {
+        "ms": 1426,
+        "kind": "solid",
+        "tris": 55736,
+        "verts": 27772,
+        "genus": 49,
+        "volume": 57465.08365336623,
+        "area": 36481.045848678295
+      },
+      "boolean_residual": 1.7371189425838708e-7,
+      "volume_rel_err": 1.2799781264160082e-8,
+      "area_rel_err": 1.7199431790347042e-7,
+      "genus_match": true,
+      "agree": true
+    },
+    {
+      "example": "attachments.scad",
+      "fab": {
+        "ms": 70,
+        "kind": "solid",
+        "tris": 1192,
+        "verts": 598,
+        "genus": 0,
+        "volume": 206015.24801724433,
+        "area": 32852.8170266399
+      },
+      "oracle": {
+        "ms": 273,
+        "kind": "solid",
+        "tris": 1312,
+        "verts": 630,
+        "genus": 14,
+        "volume": 206015.25022240847,
+        "area": 32930.6312864711
+      },
+      "boolean_residual": 3.593498804554691e-8,
+      "volume_rel_err": 1.0703887893109117e-8,
+      "area_rel_err": 0.0023629750415129587,
+      "genus_match": false,
+      "agree": false
+    },
+    {
+      "example": "boolean_geometry.scad",
+      "fab": {
+        "ms": 274,
+        "kind": "solid",
+        "tris": 45420,
+        "verts": 22794,
+        "genus": -41,
+        "volume": 5472.766033721536,
+        "area": 93535.6471259338
+      },
+      "oracle": {
+        "ms": 852,
+        "kind": "solid",
+        "tris": 29492,
+        "verts": 14828,
+        "genus": -40,
+        "volume": 5472.756179600188,
+        "area": 93535.308450745
+      },
+      "boolean_residual": 0.006185594988228319,
+      "volume_rel_err": 1.8005742044695936e-6,
+      "area_rel_err": 3.6208140875627696e-6,
+      "genus_match": false,
+      "agree": false
+    },
+    {
+      "example": "fractal_tree.scad",
+      "fab": {
+        "ms": 571,
+        "kind": "solid",
+        "tris": 268454,
+        "verts": 136245,
+        "genus": -1008,
+        "volume": 239715557.09225523,
+        "area": 30055378.047007516
+      },
+      "oracle": {
+        "ms": 13356,
+        "kind": "solid",
+        "tris": 268454,
+        "verts": 136245,
+        "genus": -1008,
+        "volume": 239715560.9276321,
+        "area": 30055378.862434465
+      },
+      "boolean_residual": 3.483128300337999e-6,
+      "volume_rel_err": 1.5999699159576492e-8,
+      "area_rel_err": 2.713081585641944e-8,
+      "genus_match": true,
+      "agree": true
+    },
+    {
+      "example": "jigsaw_puzzle.scad",
+      "fab": {
+        "ms": 736,
+        "kind": "empty",
+        "tris": null,
+        "verts": null,
+        "genus": null,
+        "volume": null,
+        "area": null
+      },
+      "oracle": {
+        "ms": null,
+        "kind": "rejected",
+        "tris": null,
+        "verts": null,
+        "genus": null,
+        "volume": null,
+        "area": null
+      },
+      "boolean_residual": null,
+      "volume_rel_err": null,
+      "area_rel_err": null,
+      "genus_match": null,
+      "agree": null
+    },
+    {
+      "example": "lsystems.scad",
+      "fab": {
+        "ms": 179,
+        "kind": "empty",
+        "tris": null,
+        "verts": null,
+        "genus": null,
+        "volume": null,
+        "area": null
+      },
+      "oracle": {
+        "ms": null,
+        "kind": "rejected",
+        "tris": null,
+        "verts": null,
+        "genus": null,
+        "volume": null,
+        "area": null
+      },
+      "boolean_residual": null,
+      "volume_rel_err": null,
+      "area_rel_err": null,
+      "genus_match": null,
+      "agree": null
+    },
+    {
+      "example": "orientations.scad",
+      "fab": {
+        "ms": 421,
+        "kind": "solid",
+        "tris": 93292,
+        "verts": 46728,
+        "genus": -40,
+        "volume": 32016.19325418375,
+        "area": 9753.41119636272
+      },
+      "oracle": {
+        "ms": 489,
+        "kind": "solid",
+        "tris": 45918,
+        "verts": 23041,
+        "genus": -40,
+        "volume": 32016.145985728537,
+        "area": 9753.328445206611
+      },
+      "boolean_residual": 0.00008470788896186885,
+      "volume_rel_err": 1.4763921130840456e-6,
+      "area_rel_err": 8.484329681505174e-6,
+      "genus_match": true,
+      "agree": true
+    },
+    {
+      "example": "spherical_patch.scad",
+      "fab": {
+        "ms": 93,
+        "kind": "solid",
+        "tris": 2444,
+        "verts": 1190,
+        "genus": 17,
+        "volume": 1996.066626686993,
+        "area": 8903.958607581319
+      },
+      "oracle": {
+        "ms": 279,
+        "kind": "solid",
+        "tris": 2172,
+        "verts": 1054,
+        "genus": 17,
+        "volume": 1996.0654877521101,
+        "area": 8903.95553295296
+      },
+      "boolean_residual": 2.9571682470404996e-6,
+      "volume_rel_err": 5.705896124142294e-7,
+      "area_rel_err": 3.4531027093438935e-7,
+      "genus_match": true,
+      "agree": true
+    },
+    {
+      "example": "spring_handle.scad",
+      "fab": {
+        "ms": 453,
+        "kind": "solid",
+        "tris": 69460,
+        "verts": 34702,
+        "genus": 15,
+        "volume": 11709.32418687708,
+        "area": 9834.381290988327
+      },
+      "oracle": {
+        "ms": 956,
+        "kind": "solid",
+        "tris": 69460,
+        "verts": 34702,
+        "genus": 15,
+        "volume": 11709.324079364256,
+        "area": 9834.381265633716
+      },
+      "boolean_residual": -3.1252511919478945e-7,
+      "volume_rel_err": 9.181812901601348e-9,
+      "area_rel_err": 2.5781602932053976e-9,
+      "genus_match": true,
+      "agree": true
+    },
+    {
+      "example": "worldmap_360x180.scad",
+      "fab": {
+        "ms": 11,
+        "kind": "empty",
+        "tris": null,
+        "verts": null,
+        "genus": null,
+        "volume": null,
+        "area": null
+      },
+      "oracle": {
+        "ms": null,
+        "kind": "rejected",
+        "tris": null,
+        "verts": null,
+        "genus": null,
+        "volume": null,
+        "area": null
+      },
+      "boolean_residual": null,
+      "volume_rel_err": null,
+      "area_rel_err": null,
+      "genus_match": null,
+      "agree": null
+    }
+  ]
+}

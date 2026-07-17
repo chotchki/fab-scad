@@ -57,7 +57,29 @@ pub enum Value {
         /// OpenSCAD's `str()` rendering — the closure's SOURCE (`function(x) target_func(x)`), pre-computed
         /// at creation because `str` can't reach the eval `Ctx`'s AST table. See `print::function_value_repr`.
         repr: Rc<str>,
+        /// The letrec GROUP: the OTHER nested `function`s defined in the SAME body scope. OpenSCAD makes all
+        /// functions in a scope mutually visible — so `_gather_contiguous_edges` can call
+        /// `_gather_contiguous_edges_r` defined ten lines BELOW it. Our frames are copy-on-write, so (as with
+        /// `self_name`) we don't store the siblings in `env` — which would cycle — but re-inject them into the
+        /// body scope at call time from this list. `None`/empty for a lone body function or a plain literal.
+        /// L.5.4.
+        group: Option<Rc<[SiblingFn]>>,
     },
+}
+
+/// One member of a nested-function letrec [`group`](Value::Function): the data to RECONSTRUCT its
+/// [`Value::Function`] at call time. `env` is NOT stored — each sibling is rebuilt with the CALLING
+/// sibling's captured `env` (the shared body scope), so mutually-recursive body functions that read their
+/// params + each other resolve; a sibling that reads an enclosing local defined textually BETWEEN it and the
+/// caller sees that local as `undef` (a documented v1 bound, like the L.2.8m nested-def simplifications).
+#[derive(Debug, Clone)]
+pub struct SiblingFn {
+    /// The sibling's bound name — how a caller names it, and its own `self_name` when reconstructed.
+    pub name: Rc<str>,
+    /// Its slot in the `Ctx` closure table (params + body), registered ONCE when the group is built.
+    pub closure_id: usize,
+    /// Its pre-computed `str()` source rendering.
+    pub repr: Rc<str>,
 }
 
 /// The payload of [`Value::List`] — a shared, heterogeneous `[Value]`. A newtype PURELY so its `Drop` can be

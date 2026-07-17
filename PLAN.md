@@ -169,6 +169,14 @@ added 2026-07-07.
   - [x] L.3.6 - L.3.6 - text() 100/72 DPI scale (was rendering glyphs 0.72× too small)
   - [x] L.3.8 - L.3.8 - color() on 2D geometry tags the color (Shape2D::Color) — the 343× BOSL2-example bucket
 - [ ] L.4 - Exit review: divergences zero-or-documented, perf-vs-oracle published; rung 2/3 (intrinsics, JIT) phase cut FROM THIS DATA
+- [ ] L.5 - L.5 - Evaluator-gap closure: BOSL2 examples + models/ render clean (the perf-blog gate)
+  - [x] L.5.1 - L.5.1 - render() + resize() builtin modules
+  - [x] L.5.2 - L.5.2 - children(i) interleaved-assignment child-scope + $children fix
+  - [x] L.5.3 - L.5.3 - seed viewport specials $vpr/$vpt/$vpd/$vpf
+  - [x] L.5.4 - L.5.4 - resolve BOSL2 std-chain symbols (hulling, _gather_contiguous_edges_r)
+  - [x] L.5.5 - L.5.5 - unified.scad fab-specific assert (OpenSCAD renders clean)
+  - [ ] L.5.6 - L.5.6 - BOSL2 examples corpus in the harness; perf-vs-oracle (mine + BOSL2) published
+  - [x] L.5.7 - L.5.7 - warn-and-continue on missing resources (match OpenSCAD)
 ## Phase N - N - Interpreter fast-paths (our builtins)
 - [x] N.1 - N.1 - Re-profile a slow model on RELEASE with a sampling profiler
 - [x] N.2 - N.2 - Cut eval allocation (profile-driven; builtin dispatch was <1%)

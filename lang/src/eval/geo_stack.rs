@@ -75,6 +75,9 @@ enum Combinator {
     Projection { cut: bool },
     /// `color()` — tag the child's subtree; `None` (invalid color) inherits (no node).
     Color(Option<Rgba>),
+    /// `resize()` — scale the (force-3D'd) child so its bbox hits `newsize` per axis; the backend measures
+    /// the built child (a `0` axis is kept, or auto-scaled proportionally).
+    Resize { newsize: [f64; 3], auto: [bool; 3] },
 }
 
 impl Combinator {
@@ -151,6 +154,11 @@ impl Combinator {
                 // invalid color → inherit: the child unchanged, either dimension.
                 (child, None) => child,
             },
+            Combinator::Resize { newsize, auto } => Geo::D3(GeoNode::Resize {
+                newsize,
+                auto,
+                child: Box::new(force_3d(union_of(children, ctx), ctx)),
+            }),
         })
     }
 }
@@ -533,6 +541,21 @@ fn dispatch_module<'a>(
             group(work, Combinator::Minkowski, scope);
             Ok(())
         }
+        // A5' — render() forces a CGAL/nef evaluation in OpenSCAD; in our Manifold-backed pipeline every node
+        // is already an exact manifold, so it's semantically identity — group its children (its `convexity` arg
+        // is a render hint with no bearing on geometry). Unblocks BOSL2's cubetruss_corner() + slicer_module.scad.
+        "render" => {
+            group(work, Combinator::Union, scope);
+            Ok(())
+        }
+        // resize() scales the child so its bbox hits `newsize` per axis — the scale needs the BUILT child's
+        // bbox, so it resolves in the backend (like RotateExtrude defers to apply). newsize/auto resolve eagerly.
+        "resize" => {
+            let (positional, named, _child_scope) = module::eval_args(mi, &scope, ctx)?;
+            let (newsize, auto) = geo::resolve_resize(&positional, &named);
+            group(work, Combinator::Resize { newsize, auto }, scope);
+            Ok(())
+        }
         // A6 — the fixed-dimension bridges + color, each resolving its params eagerly off the child scope.
         "offset" => {
             let (positional, named, child_scope) = module::eval_args(mi, &scope, ctx)?;
@@ -619,9 +642,15 @@ fn dispatch_module<'a>(
             // by reference), the caller's module island, and the CURRENT global (where children() is written).
             let caller_island = frame.island;
             let child_scope = Scope::call_frame(&frame.scope, &scope);
+            // L.5.2 — the block's sibling assignments bind into the child scope FIRST: prepend them so
+            // `hoist_scope` (whole-scope, last-wins) picks them up, then the selected geometry renders SEEING
+            // those locals (BOSL2logo's `path_sweep(bezpath_curve(sbez))` reads a sibling `sbez = …`). Empty
+            // in the common block with no interleaved assignments — a plain clone-extend, no node.
+            let mut render_stmts = frame.assigns.clone();
+            render_stmts.extend(selected);
             work.push(GTask::RestoreChildrenFrame(frame));
             work.push(GTask::EvalNodes {
-                stmts: selected,
+                stmts: render_stmts,
                 scope: child_scope,
                 global: global.clone(),
                 island: caller_island,
@@ -706,11 +735,18 @@ fn push_user_module<'a>(
     let home_global = base.unwrap_or_else(|| ctx.island_globals.borrow()[home].clone());
     let mut call = super::bind_module_scope(params, &mi.args, &caller, &home_global, ctx)?;
     // `$children` = the call-site child count; the children are stashed for `children()` to render LATE in the
-    // CALLER's scope + island. Lone-`;` empties are not children (they'd misalign the count + `children(i)`).
+    // CALLER's scope + island. Lone-`;` empties AND child-block assignments are NOT children (either would
+    // misalign the count + `children(i)`); the assignments are kept separately so their bindings still reach
+    // every geometry child (L.5.2).
     let child_stmts: Vec<&Stmt> = mi
         .children
         .iter()
-        .filter(|s| !matches!(s.kind, StmtKind::Empty))
+        .filter(|s| !matches!(s.kind, StmtKind::Empty | StmtKind::Assignment { .. }))
+        .collect();
+    let child_assigns: Vec<&Stmt> = mi
+        .children
+        .iter()
+        .filter(|s| matches!(s.kind, StmtKind::Assignment { .. }))
         .collect();
     let childless = child_stmts.is_empty();
     call.bind(
@@ -767,6 +803,7 @@ fn push_user_module<'a>(
     ctx.module_depth.set(depth + 1);
     ctx.children_stack.borrow_mut().push(super::ChildrenFrame {
         stmts: child_stmts,
+        assigns: child_assigns,
         scope: caller,
         island,
     });

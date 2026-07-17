@@ -173,16 +173,33 @@ pub struct Scope {
 }
 
 impl Scope {
-    /// A fresh root scope with OpenSCAD's `$fn=0`, `$fa=12`, `$fs=2` fragment defaults plus the builtin
-    /// `PI` constant (`Builtins.cc`). `PI` is OpenSCAD's ONE named math constant — a plain shadowable
-    /// variable, not a keyword — so it lives at the root like the `$`-vars; BOSL2 leans on `2*PI` heavily
-    /// (`segs`, every arc/circle), and without it those go `undef` and cascade.
+    /// A fresh root scope with OpenSCAD's `$fn=0`, `$fa=12`, `$fs=2` fragment defaults, the `$vpr/$vpt/$vpd/$vpf`
+    /// viewport defaults, plus the builtin `PI` constant (`Builtins.cc`). `PI` is OpenSCAD's ONE named math
+    /// constant — a plain shadowable variable, not a keyword — so it lives at the root like the `$`-vars; BOSL2
+    /// leans on `2*PI` heavily (`segs`, every arc/circle), and without it those go `undef` and cascade.
+    ///
+    /// The viewport specials (L.5.3): OpenSCAD seeds the camera state even headless, so a model that reads it
+    /// AS a geometry input (BOSL2's `orientations.scad`: `rot([0,-90,90+$vpr[2]])`) resolves a real number
+    /// instead of `undef` → a non-finite `rot` assert. The values are OpenSCAD's documented no-`--camera`
+    /// defaults: `$vpr` rotation `[55,0,25]`, `$vpt` center `[0,0,0]`, `$vpd` distance `140`, `$vpf` fov `22.5`.
+    /// For STL export the camera is inert unless the program reads it, so these matter only for that rare
+    /// (arguably-antipattern) class — but there they match the oracle.
     #[must_use]
     pub fn new() -> Self {
         let mut specials = BTreeMap::new();
         specials.insert(Rc::from("$fn"), Value::Num(0.0));
         specials.insert(Rc::from("$fa"), Value::Num(12.0));
         specials.insert(Rc::from("$fs"), Value::Num(2.0));
+        specials.insert(
+            Rc::from("$vpr"),
+            Value::NumList([55.0, 0.0, 25.0].as_slice().into()),
+        );
+        specials.insert(
+            Rc::from("$vpt"),
+            Value::NumList([0.0, 0.0, 0.0].as_slice().into()),
+        );
+        specials.insert(Rc::from("$vpd"), Value::Num(140.0));
+        specials.insert(Rc::from("$vpf"), Value::Num(22.5));
         let mut vars = VarMap::new();
         vars.insert(Rc::from("PI"), Value::Num(std::f64::consts::PI));
         Self {

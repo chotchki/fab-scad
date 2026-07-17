@@ -363,11 +363,18 @@ pub(super) struct Ctx<'a> {
 /// the CALLER's scope AND module ISLAND they evaluate in (OpenSCAD renders `children()` in the
 /// instantiation context — same lexical scope AND same module-resolution scope as the call site, I.9.5).
 struct ChildrenFrame<'a> {
-    /// The call-site children WITH lone-`;` empties filtered out — a `StmtKind::Empty` is not a child in
-    /// OpenSCAD (it neither counts toward `$children` nor is reachable via `children(i)`), so keeping it
-    /// here would misalign both. The filtered list is what BOSL2's `attachable(){ shape; union(){}; }`
-    /// needs to see as exactly 2 children (the terminating `;` after the empty union is not a third).
+    /// The call-site GEOMETRY children — lone-`;` empties AND child-block `assignment`s filtered out. Neither
+    /// is a child in OpenSCAD: an `Empty`/`Assignment` counts toward neither `$children` nor `children(i)`,
+    /// so keeping either here would misalign both (L.5.2 — a `{ shape; x = 5; shape; }` block is 2 children,
+    /// not 3, and `children(1)` is the second SHAPE). This is also what BOSL2's `attachable(){ shape;
+    /// union(){}; }` needs to see as exactly 2 children (the terminating `;` after the empty union is not a
+    /// third).
     stmts: Vec<&'a Stmt>,
+    /// The child-block's `assignment` statements, in source order — NOT children, but their bindings ARE in
+    /// scope for every geometry child (OpenSCAD child-block locals, e.g. `BOSL2logo`'s `sbez = …;` read by a
+    /// sibling `path_sweep(...)`). Prepended to the rendered stmts in `children()` so `hoist_scope` binds them
+    /// (whole-scope, last-wins) before the selected geometry evaluates.
+    assigns: Vec<&'a Stmt>,
     scope: Scope,
     island: usize,
 }
@@ -496,6 +503,9 @@ const MAX_MODULE_DEPTH: usize = 100_000;
 enum Task<'a> {
     /// Evaluate this expression in this scope, pushing its result onto the value stack.
     Eval(&'a Expr, Scope),
+    /// Push a ready-made value — the result of a call the dispatcher short-circuits (an unknown function →
+    /// `undef`, warn-and-continue like OpenSCAD, L.5.7) without evaluating a body.
+    Const(Value),
     /// Pop two values, apply the binary op, push the result.
     Binary(BinOp),
     /// Pop one value, apply the unary op, push the result.
@@ -793,6 +803,7 @@ fn eval_with_global<'a>(
         ctx.charge(1)?;
         match task {
             Task::Eval(e, s) => eval_node(e, &s, &global, ctx, &mut tasks, &mut values)?,
+            Task::Const(v) => values.push(v),
             Task::Binary(op) => {
                 // pop order: rhs was pushed after lhs, so it's on top.
                 let rhs = values.pop().unwrap_or(Value::Undef);
@@ -966,20 +977,33 @@ fn eval_with_global<'a>(
                         closure_id,
                         env,
                         self_name,
+                        group,
                         ..
                     } => {
                         let (params, body) = ctx.closures.borrow()[*closure_id];
-                        // a closure's body is lexically scoped to its captured env, not the caller's. If it
-                        // was defined with a name, re-inject NAME→itself so it can recurse (letrec) — our
-                        // COW frames can't self-reference at capture time, so we do it here, where we hold
-                        // the closure value. Every recursive call re-injects, so depth is unbounded.
-                        let base = match self_name {
-                            Some(name) => {
-                                let mut b = env.child();
-                                b.bind(Rc::clone(name), callee.clone());
-                                b
+                        // a closure's body is lexically scoped to its captured env, not the caller's. Re-inject
+                        // the letrec bindings NOW, where we hold the closure value (our COW frames can't
+                        // self-reference at capture time): NAME→itself so it can recurse, AND every sibling in
+                        // its GROUP (L.5.4) — each reconstructed with THIS env — so a forward/mutual body-fn
+                        // call resolves. Every call re-injects, so recursion depth stays unbounded. A lone
+                        // anonymous literal (no name, no group) skips the child frame entirely.
+                        let needs_inject =
+                            self_name.is_some() || group.as_ref().is_some_and(|g| !g.is_empty());
+                        let base = if needs_inject {
+                            let mut b = env.child();
+                            if let Some(g) = group {
+                                for s in g.iter() {
+                                    b.bind(Rc::clone(&s.name), nested_fn_value(s, env, Some(g)));
+                                }
                             }
-                            None => env.clone(),
+                            // self LAST → the exact invoked value (its own group intact) wins over the group's
+                            // reconstructed self-entry; both are call-equivalent, this just keeps identity.
+                            if let Some(name) = self_name {
+                                b.bind(Rc::clone(name), callee.clone());
+                            }
+                            b
+                        } else {
+                            env.clone()
                         };
                         // A closure has no static name to look up in the JIT registry → never JIT-eligible.
                         push_call(params, body, args, &caller, &base, None, &mut tasks);
@@ -1152,6 +1176,7 @@ fn eval_node<'a>(
                 self_name: None, // set when bound to a name (`g = function…`) — see `name_closure`
                 // OpenSCAD's `str()` rendering, computed here where the AST is in hand (str can't reach it).
                 repr: crate::parser::print::function_value_repr(params, body).into(),
+                group: None, // a plain literal has no letrec siblings (L.5.4)
             });
         }
         ExprKind::Let { bindings, body } => match bindings.split_first() {
@@ -1256,8 +1281,13 @@ fn resolve_ident(name: &str, scope: &Scope, ctx: &Ctx<'_>) -> Value {
 }
 
 /// Dispatch a call `callee(args)`: a NAMED user function (own namespace) resolves first; an UNBOUND
-/// identifier callee is a builtin or genuinely unknown → LOUD (I.4); otherwise the callee is a value —
-/// evaluate it and apply it (a closure in a variable, or `(expr)(args)`).
+/// identifier callee is a builtin or genuinely unknown → warn-and-`undef` (L.5.7, OpenSCAD-faithful);
+/// otherwise the callee is a value — evaluate it and apply it (a closure in a variable, or `(expr)(args)`).
+#[allow(
+    clippy::unnecessary_wraps,
+    reason = "shares the fallible crate::Result<()> dispatcher contract with the eval_node call paths; \
+              regains an Err path when arity/charge checks land — kept for signature symmetry"
+)]
 fn dispatch_call<'a>(
     callee: &'a Expr,
     args: &'a [Arg],
@@ -1372,10 +1402,14 @@ fn dispatch_call<'a>(
             return Ok(());
         }
         if matches!(scope.lookup(name), Value::Undef) {
-            // not a user fn, not a builtin, not a bound function-value → a missing builtin or a typo.
-            // LOUD for now (catches missing builtins); OpenSCAD's warn-and-undef is I.5. Naming the
-            // symbol is what makes the corpus's "unknown function" cluster a per-symbol worklist (L.2).
-            return Err(crate::Error::Unknown(format!("function `{name}`")));
+            // not a user fn, not a builtin, not a bound function-value → a missing builtin or a typo. WARN
+            // and evaluate to `undef`, exactly as OpenSCAD does ("Ignoring unknown function 'name'",
+            // `Expression.cc` FunctionCall::evaluate) — faithful-to-oracle so a corpus that names a
+            // newer-BOSL2 function still renders the REST instead of hard-failing (L.5.7). The named symbol
+            // still surfaces in the console log for the evaluator-gap worklist.
+            ctx.warn(format!("Ignoring unknown function '{name}'"));
+            tasks.push(Task::Const(Value::Undef));
+            return Ok(());
         }
     }
     tasks.push(Task::CallValue {
@@ -1697,11 +1731,13 @@ fn name_closure(value: Value, name: &str) -> Value {
             env,
             self_name: None,
             repr,
+            group,
         } => Value::Function {
             closure_id,
             env,
             self_name: Some(std::rc::Rc::from(name)),
             repr,
+            group,
         },
         other => other,
     }
@@ -2260,23 +2296,30 @@ fn hoist_scope<'a>(stmts: &[&'a Stmt], scope: &Scope, ctx: &Ctx<'a>) -> crate::R
     // boundary id now survives COW regardless; the child keeps the binds BELOW the boundary so an in-body
     // `$x = …` KILLS instead of recording its own bound value (the read-set stays caller-facing).
     let mut scope = scope.child();
-    for item in hoisted_bindings(stmts) {
+    let items = hoisted_bindings(stmts);
+    // Register the body's nested functions as ONE letrec GROUP up front (L.5.4), so each — bound below in
+    // textual order (capturing the enclosing locals hoisted before it) — carries the WHOLE sibling set and
+    // can call a function defined LATER in the same body (`_gather_contiguous_edges` → the `_r` below it).
+    let group = register_fn_group(&items, ctx);
+    // The group holds one entry per `Func` item in the SAME order `register_fn_group` walked `items`, so a
+    // single forward iterator stays aligned with the `Func` arms below — no per-name lookup, no `expect`.
+    let mut siblings = group.iter().flat_map(|g| g.iter());
+    for item in &items {
         // sigil `=` for an assignment, `f` for a hoisted function def (so the trace tells them apart).
-        let (sigil, name, value) = match item {
+        let (sigil, name, value) = match *item {
             HoistItem::Assign(name, expr) => (
                 '=',
                 name,
                 name_closure(eval_with_ctx(expr, &scope, ctx)?, name),
             ),
-            // A module-body-LOCAL `function f(x)=…` becomes a closure VALUE in the body scope, captured
-            // AT THIS POINT so it sees the enclosing locals hoisted before it (BOSL2's `make_path` closes
-            // over `steps`/`ang`). `dispatch_call`'s function-value path then applies it; `self_name`
-            // gives it recursion.
-            HoistItem::Func(name, params, body) => (
-                'f',
-                name,
-                function_def_closure(name, params, body, &scope, ctx),
-            ),
+            // A module-body-LOCAL `function f(x)=…` becomes a closure VALUE in the body scope, capturing the
+            // CURRENT scope so it sees the enclosing locals hoisted before it (BOSL2's `make_path` closes over
+            // `steps`/`ang`), PLUS the shared group so it reaches every sibling (`self_name` still gives it
+            // direct self-recursion). `dispatch_call`'s function-value path applies it.
+            HoistItem::Func(name, ..) => match siblings.next() {
+                Some(s) => ('f', name, nested_fn_value(s, &scope, group.as_ref())),
+                None => continue, // register_fn_group emits one entry per Func — this arm is unreachable
+            },
         };
         trace::bind(sigil, name, &value);
         scope.bind(name.to_string(), value);
@@ -2658,6 +2701,7 @@ fn hoisted_assignments<'a>(stmts: &[&'a Stmt]) -> Vec<(&'a str, &'a Expr)> {
 /// the scope's variable namespace in our model — a module-body `function f(x)=…` binds a closure VALUE
 /// named `f` (see [`hoist_scope`]). (OpenSCAD keeps functions in a separate namespace; collapsing them here
 /// only misbehaves if a scope names a var AND a function the same, which real code doesn't.)
+#[derive(Clone, Copy)]
 enum HoistItem<'a> {
     Assign(&'a str, &'a Expr),
     Func(&'a str, &'a [Parameter], &'a Expr),
@@ -2694,23 +2738,46 @@ fn hoisted_bindings<'a>(stmts: &[&'a Stmt]) -> Vec<HoistItem<'a>> {
 /// Build a NAMED-function closure `Value` from a nested `function` definition: register its params+body in
 /// the closure table, capture the (partially-hoisted) `scope` as its lexical env, and stamp its name for
 /// recursion (`self_name`) + `str()` rendering. The nested-def analogue of the `FunctionLiteral` eval arm.
-fn function_def_closure<'a>(
-    name: &str,
-    params: &'a [Parameter],
-    body: &'a Expr,
-    scope: &Scope,
+/// Register every nested `function` in `items` into the `Ctx` closure table ONCE, returning the shared
+/// letrec GROUP — the sibling list each body function carries so it can call the others regardless of
+/// textual order (L.5.4). `None` when the body defines no functions (the overwhelmingly common block, so
+/// the group machinery costs nothing there).
+fn register_fn_group<'a>(
+    items: &[HoistItem<'a>],
     ctx: &Ctx<'a>,
+) -> Option<Rc<[value::SiblingFn]>> {
+    let mut group: Vec<value::SiblingFn> = Vec::new();
+    for item in items {
+        if let HoistItem::Func(name, params, body) = *item {
+            let closure_id = {
+                let mut closures = ctx.closures.borrow_mut();
+                closures.push((params, body));
+                closures.len() - 1
+            };
+            group.push(value::SiblingFn {
+                name: Rc::from(name),
+                closure_id,
+                repr: crate::parser::print::function_value_repr(params, body).into(),
+            });
+        }
+    }
+    (!group.is_empty()).then(|| Rc::from(group))
+}
+
+/// Build a body-local function's [`Value::Function`] from its already-registered group entry `s`, capturing
+/// `env` (the enclosing locals hoisted so far) and carrying the shared `group` (all siblings), so it resolves
+/// a forward/mutual sibling call at invoke time (L.5.4).
+fn nested_fn_value(
+    s: &value::SiblingFn,
+    env: &Scope,
+    group: Option<&Rc<[value::SiblingFn]>>,
 ) -> Value {
-    let closure_id = {
-        let mut closures = ctx.closures.borrow_mut();
-        closures.push((params, body));
-        closures.len() - 1
-    };
     Value::Function {
-        closure_id,
-        env: scope.clone(),
-        self_name: Some(std::rc::Rc::from(name)),
-        repr: crate::parser::print::function_value_repr(params, body).into(),
+        closure_id: s.closure_id,
+        env: env.clone(),
+        self_name: Some(Rc::clone(&s.name)),
+        repr: Rc::clone(&s.repr),
+        group: group.cloned(),
     }
 }
 
@@ -3613,6 +3680,26 @@ mod tests {
                 "function inner() = $fn; function outer() = inner($fn = 3); y = outer($fn = 8);"
             ),
             Value::Num(3.0)
+        );
+    }
+
+    #[test]
+    fn viewport_specials_are_seeded() {
+        // L.5.3 — the camera specials resolve to OpenSCAD's no-`--camera` defaults, not `undef`, so a model
+        // that reads them as a geometry input (BOSL2's orientations.scad) gets a finite number. `$vpr[2]` is
+        // the one orientations.scad actually bakes into a rotation; the rest just need to be present + finite.
+        assert_eq!(eval_last("x = $vpr[2];"), Value::Num(25.0));
+        assert_eq!(eval_last("x = $vpr[0];"), Value::Num(55.0));
+        assert_eq!(
+            eval_last("x = $vpt;"),
+            Value::NumList([0.0, 0.0, 0.0].as_slice().into())
+        );
+        assert_eq!(eval_last("x = $vpd;"), Value::Num(140.0));
+        assert_eq!(eval_last("x = $vpf;"), Value::Num(22.5));
+        // and they're dynamically scoped like every other $-var (overridable per call).
+        assert_eq!(
+            eval_last("function f() = $vpd; y = f($vpd = 500);"),
+            Value::Num(500.0)
         );
     }
 

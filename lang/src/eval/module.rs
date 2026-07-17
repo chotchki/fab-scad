@@ -107,7 +107,15 @@ pub(super) fn eval_module<'a>(
         // Not a builtin primitive (sphere/cube/cylinder/polyhedron, square/circle/polygon), transform,
         // boolean, or a defined user module — a typo or a builtin still deferred past the current subset.
         // Naming it turns the corpus's generic "unknown module" cluster into a per-symbol worklist (L.2).
-        other => Err(crate::Error::Unknown(format!("module `{other}`"))),
+        // WARN and render NOTHING for this node — OpenSCAD's "Ignoring unknown module 'name'"
+        // (`ModuleInstantiation::evaluate`). Faithful-to-oracle (L.5.7): a corpus naming a newer-BOSL2
+        // module (`hulling`, `force_tags`) or a typo renders the REST instead of hard-failing. A builtin
+        // fab hasn't wired yet still surfaces — as this NAMED console warning PLUS a geometry divergence the
+        // differential catches (empty here vs the oracle's real node), never a silent pass.
+        other => {
+            ctx.warn(format!("Ignoring unknown module '{other}'"));
+            Ok(Geo::D3(GeoNode::Empty))
+        }
     }
 }
 

@@ -172,5 +172,6 @@ fn kind_of(node: &GeoNode) -> &'static str {
         GeoNode::Minkowski(_) => "Minkowski",
         GeoNode::Extrude { .. } => "Extrude",
         GeoNode::Color { .. } => "Color",
+        GeoNode::Resize { .. } => "Resize",
     }
 }

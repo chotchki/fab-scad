@@ -215,6 +215,106 @@ fn transforms_match_the_oracle() {
 }
 
 #[test]
+fn resize_matches_the_oracle() {
+    // L.5.1: resize() scales the child so its bbox hits `newsize` per axis — the factors come from the
+    // BUILT child's measured extent (GeoNode::Resize, resolved in the backend), so it's pose-sensitive and
+    // a wrong scale/axis blows the residual. A `0` axis is kept; an `auto` `0` axis scales proportionally.
+    agree("resize([10, 20, 30]) cube(1);"); // full per-axis target
+    agree("resize([20, 0, 0]) cube([10, 10, 10]);"); // x→20, y/z KEPT at 10
+    agree("resize([20, 0, 0], auto = true) cube([10, 10, 10]);"); // auto: all axes ×2 → [20,20,20]
+    agree("resize([0, 15, 0], auto = [true, false, true]) cube([10, 10, 10]);"); // y sized; x,z auto-proportional
+    agree("resize([30, 20, 10]) sphere(5, $fn = 24);"); // non-uniform scale of a curved solid → ellipsoid
+    agree("resize([12, 0, 0]) cylinder(h = 10, r = 3, $fn = 24);"); // keep h, widen r
+}
+
+#[test]
+fn render_is_identity_vs_the_oracle() {
+    // L.5.1: render() forces a nef/CGAL evaluation in OpenSCAD but is semantically identity — every fab
+    // node is already an exact manifold, so render() just groups its children. Both engines' render() = the
+    // child, so they agree; this proves fab's render() doesn't drop or alter geometry (the `convexity` hint
+    // is inert).
+    agree("render() cube(10);");
+    agree(
+        "render(convexity = 4) difference() { cube(10); translate([5, 5, 5]) sphere(6, $fn = 24); }",
+    );
+    agree("render() translate([5, 0, 0]) sphere(5, $fn = 24);");
+    agree("difference() { cube(10); render() translate([5, 5, 5]) cube(8); }"); // render nested under a boolean
+}
+
+#[test]
+fn child_block_assignments_are_not_children_but_bind() {
+    // L.5.2: a child-block `assignment` is NOT a child — it counts toward neither `$children` nor a
+    // `children(i)` index — but its binding IS in scope for every geometry child. This is the BOSL2logo
+    // pattern (an `xdistribute()` block interleaving `sbez = …;` among the shapes, read by a sibling
+    // `path_sweep(bezpath_curve(sbez))`), reduced to a hand distributor so the divergence is unambiguous.
+    let dist = "module dist() { for (i = [0:$children-1]) translate([i*20, 0, 0]) children(i); }\n";
+    // interleaved locals the geometry children READ; $children must be 2 (the two cubes), each seeing s / t.
+    agree(&format!(
+        "{dist}dist() {{ s = 6; cube(s); t = 8; cube([t, 3, 3]); }}"
+    ));
+    // $children arithmetic must EXCLUDE the middle assignment (3 stmts, 2 geometry children).
+    agree(&format!(
+        "{dist}dist() {{ cube(3); a = 4; sphere(a, $fn = 24); }}"
+    ));
+    // children() (all) must bind a leading local too.
+    agree("module wrap() { children(); }\nwrap() { r = 5; sphere(r, $fn = 24); }");
+    // a trailing assignment after the only child is a no-op (1 child), and the child still renders.
+    agree(&format!("{dist}dist() {{ cube(4); unused = 99; }}"));
+}
+
+#[test]
+fn nested_mutually_recursive_functions_match_the_oracle() {
+    // L.5.4: `function`s defined in one BODY scope are mutually visible regardless of textual order (a
+    // sibling defined LATER, and mutual recursion) — OpenSCAD's letrec-group semantics. A wrong resolution
+    // would leave the call `undef` → a mis-sized/positioned primitive → the residual blows, so driving
+    // geometry from the result validates the group binding against the real binary.
+    // forward reference: g (first) calls h (defined 1 line BELOW it) — the `_gather_contiguous_edges` pattern.
+    agree("module m() { function g(n) = h(n) + 1; function h(n) = n * 2; translate([g(3), 0, 0]) cube(2); } m();");
+    // mutual recursion: even/odd ping-pong between two body functions.
+    agree("module m() { function ev(n) = n == 0 ? true : od(n - 1); function od(n) = n == 0 ? false : ev(n - 1); translate([ev(6) ? 8 : 0, 0, 0]) cube(2); } m();");
+    // a body function reading an ENCLOSING local (the L.2.8m capture) still works alongside the group.
+    agree("module m() { k = 4; function scaled(n) = n * k; cube(scaled(3)); } m();"); // cube(12)
+    // self-recursion (the self_name path) next to a sibling call — both must resolve.
+    agree("module m() { function fact(n) = n <= 1 ? 1 : n * fact(n - 1); function twice(n) = fact(n) * 2; cube(twice(3)); } m();"); // cube(12)
+}
+
+#[test]
+fn unknown_module_warns_and_continues_like_the_oracle() {
+    // L.5.7: an unknown module instantiation renders NOTHING for that node (warn-and-continue), and the
+    // REST of the program renders — bit-for-bit what OpenSCAD does ("Ignoring unknown module 'X'", exit 0).
+    // This is the behavior a corpus naming a newer-BOSL2 module (hulling/force_tags) or a typo relies on.
+    agree("cube(10); nonexistent_module_xyz();"); // sibling unknown → dropped, cube stays
+    agree("difference() { cube(10); unknown_cut_module(); }"); // unknown boolean operand → no-op
+    agree("cube(5); mystery_mod() { sphere(3, $fn = 16); }"); // unknown module WITH children → dropped whole
+    agree("cube(5); translate([20, 0, 0]) also_unknown();"); // unknown under a transform → the transform is empty
+}
+
+#[test]
+fn unknown_function_is_undef_like_the_oracle() {
+    // L.5.7: an unknown function call evaluates to `undef` (warn-and-continue), matching OpenSCAD's
+    // "Ignoring unknown function 'X'". A primitive sized by that undef renders nothing on BOTH engines, and
+    // the sibling geometry still renders — so they agree.
+    agree("cube(10); sphere(r = no_such_fn_abc(), $fn = 16);"); // sphere(undef) → empty both sides
+    agree("cube(10); translate([20, 0, 0]) cube(mystery_size_fn(4));"); // cube(undef) under a transform
+}
+
+#[test]
+fn missing_import_warns_and_continues_like_the_oracle() {
+    // L.5.7: a missing import()/surface() file → warn + EMPTY mesh, the rest of the model renders — OpenSCAD's
+    // "Can't open import file '…'", warn-and-render-without-it. Exercised through the FILE path (the loader's
+    // needs fixpoint, where the tolerance lives), so it's a real gate vs the oracle on a dev box.
+    agree_graph(
+        "missing_import",
+        &[(
+            "root.scad",
+            "cube(10);\ntranslate([20, 0, 0]) import(\"definitely_absent_part_xyz.stl\");",
+        )],
+        "root.scad",
+        &[],
+    );
+}
+
+#[test]
 fn booleans_and_multi_object_match_the_oracle() {
     // Now that the oracle-side re-import is f64-pure (MeshGL64, J.2.7.1), boolean-RESULT meshes read
     // back cleanly — including a DISJOINT multi-object union (a 2-component mesh) that f32 rejected.

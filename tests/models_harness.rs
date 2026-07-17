@@ -950,3 +950,352 @@ fn models_profile_targets() {
         }
     }
 }
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────────────────
+// BOSL2 EXAMPLES perf leg — the PUBLIC, reproducible-by-anyone corpus. The `models/` sweep above times
+// chotchki's OWN parts (private-ish submodule); this one times the ten canonical BOSL2 example files
+// (`libs/BOSL2/examples/*.scad`) that ship with the library everyone already has. Same measurement path
+// as `models_perf_vs_openscad` (each engine's full file→Solid wall via `differ`), plus a per-example
+// CORRECTNESS pass (genus + boolean residual, the tessellation-independent gate) and mesh stats — the
+// richer table a blog wants: "here's the speed AND here's that it's the SAME solid OpenSCAD makes".
+// ─────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+/// The BOSL2 example files — the library's own showcase (`libs/BOSL2/examples/*.scad`), sorted. These
+/// exercise the attachment/anchor system, VNF/path-sweep, roundings, and the recursive/data-heavy corners
+/// (fractal_tree, lsystems, worldmap) that stress the interpreter hardest — a fair public cross-section.
+fn bosl2_example_files() -> Vec<PathBuf> {
+    let dir = manifest().join("libs/BOSL2/examples");
+    let mut out: Vec<PathBuf> = std::fs::read_dir(&dir)
+        .into_iter()
+        .flatten()
+        .filter_map(Result::ok)
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|e| e == "scad"))
+        .collect();
+    out.sort();
+    out
+}
+
+/// One engine's outcome on one file: wall time + terminal kind, and — when it realized a solid — the
+/// mesh's own stats (all `Send`, extracted on the eval thread before it hands back; the `Solid` itself
+/// is `!Send` and never crosses). `ms`/stats are `None` for a non-solid (empty/rejected/timeout) side.
+#[derive(Clone, serde::Serialize)]
+struct SidePerf {
+    ms: Option<u64>,
+    kind: &'static str,
+    tris: Option<u64>,
+    verts: Option<u64>,
+    genus: Option<i32>,
+    volume: Option<f64>,
+    area: Option<f64>,
+}
+
+impl SidePerf {
+    fn timed_out() -> Self {
+        Self {
+            ms: None,
+            kind: "TIMEOUT",
+            tris: None,
+            verts: None,
+            genus: None,
+            volume: None,
+            area: None,
+        }
+    }
+    fn absent() -> Self {
+        Self {
+            ms: None,
+            kind: "absent",
+            tris: None,
+            verts: None,
+            genus: None,
+            volume: None,
+            area: None,
+        }
+    }
+}
+
+/// Time ONE driver's full file→Solid pass on a big-stack thread (host recursion in deep BOSL2 eval-assembly
+/// would overflow the default), bounded by `budget`. The wall is measured around `eval_file` ALONE; the mesh
+/// stats are read AFTER the clock stops, so they never inflate the timing. A `rejected` side keeps `ms=None`
+/// (excluded from ratios, same convention as `models_perf_vs_openscad`) but records the kind for the coverage
+/// story; an `empty` side (a 2D-only example → no 3D mesh) DID render, so it keeps its wall.
+fn time_bosl2_side(
+    driver_name: &'static str,
+    model: &Path,
+    libs: &[PathBuf],
+    budget: Duration,
+) -> SidePerf {
+    use fab_scad::differ::{Outcome, drivers};
+    let (tx, rx) = mpsc::channel();
+    let model = model.to_path_buf();
+    let libs = libs.to_vec();
+    let name = driver_name.to_string();
+    thread::Builder::new()
+        .name("bosl2-perf".into())
+        .stack_size(fab_scad::EVAL_STACK)
+        .spawn(move || {
+            let drivers = drivers();
+            let Some(d) = drivers.iter().find(|d| d.name() == name.as_str()) else {
+                let _ = tx.send(SidePerf::absent());
+                return;
+            };
+            let start = Instant::now();
+            let outcome = d.eval_file(&model, &libs);
+            let ms = start.elapsed().as_millis() as u64; // clock stops BEFORE reading mesh stats
+            let side = match outcome {
+                Outcome::Solid(s) => SidePerf {
+                    ms: Some(ms),
+                    kind: "solid",
+                    tris: Some(s.num_tri() as u64),
+                    verts: Some(s.num_vert() as u64),
+                    genus: Some(s.genus()),
+                    volume: Some(s.volume()),
+                    area: Some(s.surface_area()),
+                },
+                Outcome::Empty => SidePerf {
+                    ms: Some(ms),
+                    kind: "empty",
+                    tris: None,
+                    verts: None,
+                    genus: None,
+                    volume: None,
+                    area: None,
+                },
+                Outcome::Rejected => SidePerf {
+                    ms: None,
+                    kind: "rejected",
+                    tris: None,
+                    verts: None,
+                    genus: None,
+                    volume: None,
+                    area: None,
+                },
+            };
+            let _ = tx.send(side);
+        })
+        .expect("spawn bosl2 timing thread");
+    rx.recv_timeout(budget)
+        .unwrap_or_else(|_| SidePerf::timed_out())
+}
+
+/// The tessellation-independent CORRECTNESS pass for one file: re-eval BOTH engines on one thread (the two
+/// `Solid`s must meet to boolean them) and return `(boolean_residual, vol_rel_err, area_rel_err, genus_match)`.
+/// `boolean_residual = vol((F−O) ∪ (O−F)) / vol(F)` — 0 means "the SAME solid" no matter how each triangulated
+/// it, the strongest tier the differential trusts. `None` when either side isn't a solid, or the pass blows
+/// `budget`. Re-evaluating (rather than reusing the timing pass's solids) keeps `Solid` off the thread seam.
+fn bosl2_residual(
+    model: &Path,
+    libs: &[PathBuf],
+    budget: Duration,
+) -> Option<(f64, f64, f64, bool)> {
+    use fab_scad::differ::{Outcome, drivers};
+    let (tx, rx) = mpsc::channel();
+    let model = model.to_path_buf();
+    let libs = libs.to_vec();
+    thread::Builder::new()
+        .name("bosl2-residual".into())
+        .stack_size(fab_scad::EVAL_STACK)
+        .spawn(move || {
+            let drivers = drivers();
+            let (Some(fab), Some(orc)) = (
+                drivers.iter().find(|d| d.name() == "fab-lang"),
+                drivers.iter().find(|d| d.name() == "openscad"),
+            ) else {
+                let _ = tx.send(None);
+                return;
+            };
+            let out = match (fab.eval_file(&model, &libs), orc.eval_file(&model, &libs)) {
+                (Outcome::Solid(f), Outcome::Solid(o)) => {
+                    let sym = f.difference(&o).union(&o.difference(&f));
+                    let resid = sym.volume() / f.volume().abs().max(f64::MIN_POSITIVE);
+                    let rel = |a: f64, b: f64| {
+                        (a - b).abs() / a.abs().max(b.abs()).max(f64::MIN_POSITIVE)
+                    };
+                    Some((
+                        resid,
+                        rel(f.volume(), o.volume()),
+                        rel(f.surface_area(), o.surface_area()),
+                        f.genus() == o.genus(),
+                    ))
+                }
+                _ => None,
+            };
+            let _ = tx.send(out);
+        })
+        .expect("spawn bosl2 residual thread");
+    rx.recv_timeout(budget).ok().flatten()
+}
+
+/// One BOSL2 example's full comparison row — both engines' timing/stats + the correctness verdict.
+#[derive(serde::Serialize)]
+struct BoslPerfRow {
+    example: String,
+    fab: SidePerf,
+    oracle: SidePerf,
+    boolean_residual: Option<f64>,
+    volume_rel_err: Option<f64>,
+    area_rel_err: Option<f64>,
+    genus_match: Option<bool>,
+    /// Both engines realized a solid, agreed on genus, and their symmetric difference is < 1e-3 — the
+    /// same gate `diff_files` uses. The blog's "and it's CORRECT" column.
+    agree: Option<bool>,
+}
+
+/// The whole BOSL2-examples run, written to `perf/bosl2-examples.json` (a committed-eligible artifact, the
+/// public sibling of `perf/baseline.json`).
+#[derive(serde::Serialize)]
+struct BoslPerfRun {
+    schema: u32,
+    captured_epoch_s: u64,
+    budget_s: u64,
+    rows: Vec<BoslPerfRow>,
+}
+
+/// The PUBLIC-corpus perf comparison: fab-scad vs OpenSCAD over the ten BOSL2 example files, with a
+/// correctness verdict per example. Complements `models_perf_vs_openscad` (chotchki's own `models/`) with a
+/// corpus anyone can reproduce. Writes `perf/bosl2-examples.json` + prints a per-example table + aggregates.
+///
+///   cargo test --release -p fab-scad --test models_harness -- --ignored --nocapture perf_bosl2_examples
+///
+/// `FAB_BOSL2_BUDGET_S` overrides the per-side budget (default 180s — the interpreter is slow on the
+/// recursive/data-heavy examples, and a wall-clock TIMEOUT is itself a finding).
+#[test]
+#[ignore = "minutes-long BOSL2-examples fab-vs-oracle sweep; run explicitly with --ignored (use --release)"]
+fn perf_bosl2_examples() {
+    let manifest = manifest();
+    if !manifest.join("libs/BOSL2/examples").is_dir() {
+        eprintln!("note: libs/BOSL2/examples not checked out — BOSL2 perf leg skipped");
+        return;
+    }
+    let has_oracle = find_bin().is_some();
+    if !has_oracle {
+        eprintln!("note: OpenSCAD not found — BOSL2 perf leg runs the fab-lang side only");
+    }
+    let libs: Vec<PathBuf> = vec![manifest.join("libs"), manifest.join("scad-lib")];
+    let budget = Duration::from_secs(
+        std::env::var("FAB_BOSL2_BUDGET_S")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(180),
+    );
+    let files = bosl2_example_files();
+    eprintln!(
+        "=== BOSL2 examples perf: {} files × {} engine(s), serial, {}s budget/side ===",
+        files.len(),
+        if has_oracle { 2 } else { 1 },
+        budget.as_secs()
+    );
+
+    let mut rows: Vec<BoslPerfRow> = Vec::new();
+    for path in &files {
+        let name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or_default()
+            .to_string();
+        let fab = time_bosl2_side("fab-lang", path, &libs, budget);
+        let oracle = if has_oracle {
+            time_bosl2_side("openscad", path, &libs, budget)
+        } else {
+            SidePerf::absent()
+        };
+        // Correctness only when both sides made a solid — the residual needs two meshes to boolean.
+        let (boolean_residual, volume_rel_err, area_rel_err, genus_match, agree) =
+            if fab.kind == "solid" && oracle.kind == "solid" {
+                match bosl2_residual(path, &libs, budget) {
+                    Some((r, ve, ae, gm)) => {
+                        (Some(r), Some(ve), Some(ae), Some(gm), Some(gm && r < 1e-3))
+                    }
+                    None => (None, None, None, None, None),
+                }
+            } else {
+                (None, None, None, None, None)
+            };
+
+        let show = |s: &SidePerf| match s.ms {
+            Some(ms) => format!("{ms}ms"),
+            None => s.kind.to_string(),
+        };
+        let ratio = match (fab.ms, oracle.ms) {
+            (Some(f), Some(o)) if f > 0 => format!("{:.2}×", o as f64 / f as f64),
+            _ => "—".to_string(),
+        };
+        eprintln!(
+            "  {name:<26} fab {:>9} | oracle {:>9} | {ratio:>7} | resid {} | agree {}",
+            show(&fab),
+            show(&oracle),
+            boolean_residual.map_or_else(|| "—".to_string(), |r| format!("{r:.1e}")),
+            agree.map_or_else(|| "—".to_string(), |a| a.to_string()),
+        );
+        rows.push(BoslPerfRow {
+            example: name,
+            fab,
+            oracle,
+            boolean_residual,
+            volume_rel_err,
+            area_rel_err,
+            genus_match,
+            agree,
+        });
+    }
+
+    // ── Aggregates over the common (both-solid) set ──────────────────────────────────────────────
+    let mut ratios: Vec<f64> = Vec::new();
+    let (mut fab_total, mut orc_total) = (0u64, 0u64);
+    let (mut both, mut agreed) = (0usize, 0usize);
+    for r in &rows {
+        if let (Some(f), Some(o)) = (r.fab.ms, r.oracle.ms) {
+            both += 1;
+            fab_total += f;
+            orc_total += o;
+            ratios.push(o as f64 / (f as f64).max(1.0));
+        }
+        if r.agree == Some(true) {
+            agreed += 1;
+        }
+    }
+    ratios.sort_by(f64::total_cmp);
+    let median = ratios.get(ratios.len() / 2).copied().unwrap_or(f64::NAN);
+    let fab_solid = rows.iter().filter(|r| r.fab.kind == "solid").count();
+    let orc_solid = rows.iter().filter(|r| r.oracle.kind == "solid").count();
+    eprintln!("\n=== BOSL2 examples summary ===");
+    eprintln!("files: {}", rows.len());
+    eprintln!("fab-scad rendered a solid: {fab_solid} | OpenSCAD rendered a solid: {orc_solid}");
+    eprintln!("both rendered a solid (the timed common set): {both}");
+    if both > 0 {
+        eprintln!(
+            "wall totals on the common set: fab-scad {:.2}s vs OpenSCAD {:.2}s (ratio {:.2}× — >1 means fab-scad faster)",
+            fab_total as f64 / 1e3,
+            orc_total as f64 / 1e3,
+            orc_total as f64 / fab_total.max(1) as f64,
+        );
+        eprintln!("median per-example oracle/fab ratio: {median:.2}×");
+        eprintln!("agree with the oracle (genus + residual < 1e-3): {agreed}/{both}");
+    }
+
+    // ── Persist the run (the public artifact) ────────────────────────────────────────────────────
+    let run = BoslPerfRun {
+        schema: 1,
+        captured_epoch_s: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs(),
+        budget_s: budget.as_secs(),
+        rows,
+    };
+    let out_path = std::env::var_os("FAB_BOSL2_OUT")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| manifest.join("perf/bosl2-examples.json"));
+    if let Some(parent) = out_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    std::fs::write(&out_path, serde_json::to_string_pretty(&run).unwrap()).unwrap();
+    eprintln!("\nrun written: {}", out_path.display());
+
+    // The gate: SOME example must render on our side (a total wipe-out is a real regression).
+    assert!(
+        fab_solid > 0,
+        "fab-scad rendered no BOSL2 example — the leg is broken"
+    );
+}

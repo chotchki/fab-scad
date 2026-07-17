@@ -553,3 +553,102 @@ added 2026-07-16.
   - [x] T.2b.4 - T.2b.4 - co-pack all parts onto shared plates + full verify (headless screenshot/script + tests)
 - [x] T.3 - T.3 - best_up prefer-flat policy: stop tilting structured pieces to 45° over a stable flat face
 
+---
+
+## 2026-07-17
+
+## Phase I - scad-rs: evaluator core
+  Meta - Cranelift is the NATIVE JIT rung (chotchki's find: VERY approachable, and it's determinism-friendly — no auto-FMA, transcendentals stay CALLS to our own math, so the fixed-accumulation doctrine survives). NOT a replacement for the interpreter: the wasm/browser target can't JIT in-sandbox (the bet's #1 differentiator needs ONE implementation everywhere), and the interpreter is the bit-identical baseline the JIT validates against (fast==slow extends to fast==JIT). Spiked at I.8 (one hot function, prove bit-identical); the JIT-vs-intrinsics PROMOTE decision lands at Phase L with data.
+added 2026-07-06.
+- [x] I.1 - Value model full: enum + NumList fast path + interned strings + lazy ranges; fast==slow BITWISE property via the shared fixed 4-lane accumulation order
+  - [x] I.1.1 - Heterogeneous List(Rc<[Value]>) alongside the NumList fast path: nested lists, indexing, eq/order per Value.cc
+  - [x] I.1.2 - Lazy Range value (start/step/end): inclusive-end iteration, element cap + warning, range-as-value
+  - [x] I.1.3 - Function values / closures (params + body + captured env) — the currency I.2's calls spend
+  - [x] I.1.4 - Interned strings (deterministic intern table) + string indexing / char access
+  - [x] I.1.5 - Fixed 4-lane accumulation order + the fast==slow BITWISE proptest (NumList fast path == List slow path)
+- [x] I.2 - Scoping engine: lexical envs, dynamic $-variables, children()/late binding, module+function call machinery on the explicit stack; + the use/include LOADER (file resolution + include-splice + use-import — parser stays zero-IO, this is where H's use/include AST nodes get resolved)
+  - [x] I.2.1 - Lexical env chain (vars) + frame repr — DECISION: Rc<Frame> chain (correctness-first, single-threaded, the browser can't thread anyway; closures capture ONE Rc clone; $-scoping walks the chain). The frame-arena is a profiled I.6 opt, not now. PARALLELISM (captured 2026-07-04): it's not tree-vs-stack, it's a TREE OF STACK-MACHINES — fork independent units, each a sequential deterministic stack machine, join in FIXED order. Task-parallelism lives in the geometry DAG (6.1) + a parallel-comprehension MAP driver (fan iterations, assemble BY INDEX), NOT a rebuilt evaluator. Rc→Arc is the 3rd axis: parallel comprehensions need Send values+env (Arc taxes the sequential fast path for a benefit only they collect) — defer to a profiled I.6/intrinsics call; the swap is mechanical but crate-wide, internal to Value. Any parallelism MUST preserve a fixed reduction order (the 4-lane accumulation IS that) + buffered echo/warning order (else I.5's string-equal-vs-oracle breaks).
+  - [x] I.2.2 - Dynamic $-variables: down-the-call-tree propagation + per-call override + the reaching-$-context
+  - [x] I.2.3 - Function-call machinery ON THE EXPLICIT STACK: resolve + arg-match (positional/named/default) + body eval + return, no host recursion
+    - [x] I.2.3.1 - Per-task scope + eval-context (function store) plumbing — Task carries its Scope so a call's body evals in the callee's scope while the caller's continuation waits; thread a Ctx (name→&'prog FunctionDef) through eval. Refactor only, all tests stay green.
+    - [x] I.2.3.2 - User function calls on the explicit stack: resolve name→FunctionDef, arg-match (positional/named/default), push body eval in the call frame, return the value — no host recursion. The corner_brace-class deep-recursion (f(n)=f(n-1), 100k deep) proof lands here.
+    - [x] I.2.3.3 - Function-literal VALUES / closures: Value::Function (params + body + captured Rc<Frame> env), function(x)body evaluates to it, calling a function value reuses I.2.3.2's machinery. Folds in I.1.3 (#70).
+  - [x] I.2.4 - Module-call machinery on the explicit stack: resolve user module + arg-bind + children eval → geometry tree
+    - [x] I.2.4.1 - Loader: collect module defs (ModStore) through use/include, like functions
+    - [x] I.2.4.2 - Ctx.modules + thread global through the statement side (module bodies = global.child + params, OpenSCAD hygiene)
+    - [x] I.2.4.3 - Module-call arm: resolve user module + arg-bind (positional/named/default/$-args) + depth-guarded body eval → GeoNode
+  - [x] I.2.5 - children() / $children late binding (refers to the call-site children, late-bound)
+  - [x] I.2.6 - use/include LOADER: path resolution + include-splice + use-import (resolves H's zero-IO AST nodes; parser stays zero-IO)
+  - [x] I.2.7 - Whole-scope variable binding — hoist top-level assignments, last-assignment-wins (OpenSCAD), not sequential
+  - [x] I.2.8 - Differential vs the OpenSCAD oracle: use/include file-based cases (two-driver harness landed 04b8f1d)
+- [x] I.3 - Control flow + comprehensions + recursion bounded by memory — corner_brace-class deep recursion as the standing regression proof
+  - [x] I.3.1 - let-expression `let(a=1,b=2) body` (ExprKind::Let): bind args left-to-right in a child scope, evaluate body there. Pure expression — deferred here from I.2.3.3. Reused by the comprehension `let`.
+  - [x] I.3.2 - List comprehensions on the explicit stack: LcFor (iterate range/list), LcForC (C-style), LcEach (splice), LcIf/else (filter), lc-let — produce a List, nesting arbitrarily. Uses the I.1.2 range iterator; the element cap + warning ride here.
+  - [x] I.3.3 - STATEMENT control flow (if/for producing geometry → the CSG tree) — GEOMETRY-COUPLED, deferred to sit with Phase J (needs transforms/booleans/multi-child union). The expression-level halves (I.3.1/I.3.2) land now; this is the statement half.
+- [x] I.4 - Builtin function library (~80: math/list/string/type predicates), each landing with its semantics/ test
+  - [x] I.4.1 - Math builtins: abs/sign, sin/cos/tan/asin/acos/atan/atan2 (DEGREES, reuse trig.rs), floor/ceil/round, ln/log/exp/pow/sqrt, min/max, norm/cross. Bug-for-bug func.cc. (rands is non-deterministic → deferred separately.)
+  - [x] I.4.2 - List + string builtins: len, concat, str, chr, ord, lookup, search, reverse — the glue BOSL2 lives on.
+  - [x] I.4.3 - Type-predicate builtins: is_undef, is_bool, is_num, is_string, is_list, is_function — + version/version_num. rands as a SEEDED deterministic builtin (or a loud defer if the seed threading isn't ready).
+- [x] I.5 - undef propagation + warning/echo text bug-for-bug (string-equal vs oracle)
+- [x] I.6 - tracing spans on the call path + aggregating benchmark layer; release builds compile it out; overhead measured
+- [x] I.7 - Kani proofs: stack-machine push/pop discipline, range-iteration termination
+
+- [x] I.8 - Cranelift JIT spike: after the interpreter core, JIT one hot numeric function, measure speedup vs interpreter, PROVE bit-identical (fast==JIT); bank the float-discipline recipe — de-risks the L JIT-vs-intrinsics decision
+  - [x] I.8.1 - fab-jit crate scaffold: cranelift-jit deps, native-only, the single documented unsafe seam (fn-ptr call)
+  - [x] I.8.2 - Expr → Cranelift IR compiler for the numeric subset, fixed left-to-right order matching the interpreter
+  - [x] I.8.3 - Ops Cranelift lacks → external CALLS to our Rust math (% → a%b, ^ → a.powf(b)) — the determinism recipe
+  - [x] I.8.4 - fast==JIT BITWISE differential (corpus + coeff-proptest) + the speedup benchmark
+  - [x] I.8.5 - Bank the float-discipline recipe (doc) — feeds the Phase-L JIT-vs-intrinsics promote decision
+- [x] I.9 - fixing BOSL2 — evaluator bring-up (parse ✓ 56/56; short-circuit ✓; burn down the eval divergences)
+  - [x] I.9.1 - Member access .x/.y/.z on vectors (ExprKind::Member) — deferred at I.1, now the next BOSL2 eval blocker
+  - [x] I.9.2 - BOSL2 cyl → "Invalid transformation matrix" — a matrix helper (down/skew/up/multmatrix chain) diverges
+  - [x] I.9.3 - BOSL2 cuboid → "Input to sum is non-numeric or inconsistent" — a list-build feeds sum() a non-numeric
+  - [x] I.9.4 - BOSL2 sphere → "Bad arguments" — an arg-normalization assert fires (spherical primitive / attachable)
+  - [x] I.9.5 - BOSL2 sphere/cyl/cuboid → "user-module recursion too deep" — unbounded recursion on the attachable path
+  - [x] I.9.6 - BOSL2 attachable → `let(...) children()` used as a STATEMENT (module-form let)
+
+## Phase J - scad-rs: geometry surface + cache
+added 2026-07-05.
+- [x] J.1 - Geometry backend trait; interface suite runs miri-on-mock AND ASAN-on-real-Manifold in CI (the split that replaced raw miri-on-FFI)
+  - [x] J.1.1 - GeometryBackend trait + MockBackend + ManifoldBackend + the generic interface suite (both green under cargo test)
+  - [x] J.1.2 - Run the interface suite under miri (mock) + ASAN (real Manifold) in CI — the split that replaces miri-on-FFI
+- [x] J.2 - 3D: primitives, multmatrix, booleans through Manifold; polyhedron with oracle-matching validation semantics
+  - [x] J.2.1 - GeoNode CSG tree + evaluator produces it: primitives→Leaf, transforms→Transform, implicit top-level Union
+  - [x] J.2.2 - Boolean modules union/difference/intersection → the boolean GeoNodes over children
+  - [x] J.2.3 - fab-scad tree-walker: GeoNode → Solid via GeometryBackend; rewire the FabLang differential driver through it
+  - [x] J.2.6 - polyhedron() primitive + oracle-matching validation semantics
+    - [x] J.2.6.1 - polyhedron(points,faces,convexity) → Mesh Leaf in fab-lang: raw verts + fan-triangulated n-gon faces (OpenSCAD tessellation), no backend needed
+    - [x] J.2.6.2 - polyhedron validation bug-for-bug: out-of-range face index / <3-vertex face / non-manifold → OpenSCAD warn-and-render vs error
+    - [x] J.2.6.3 - Differential: spheroid + a VNF shape vs oracle (boolean-residual / vertex-multiset)
+  - [x] J.2.7 - Differential: CSG programs (transforms/booleans/multi-object/polyhedron) vs the oracle via boolean-residual
+    - [x] J.2.7.1 - Harness: oracle-side re-import uses f32 MeshGL → boolean-result meshes fail; blocks the boolean differential
+  - [x] J.2.8 - color() module → GeoNode::Color + Rgba vocab + CSS named-color table (BOSL2-critical)
+  - [x] J.2.9 - Color propagation through Manifold (vertex props survive booleans) + oracle capture + differential
+- [x] J.3 - 2D subsystem on Clipper2: square/circle/polygon/offset/projection + linear/rotate_extrude bridging 2D→3D with tessellation parity
+  - Comment: Is clipper2 the right library for this? could manifold do it?
+  - [x] J.3.1 - DECISION + 2D backend seam: Manifold CrossSection for all 2D/hull/extrude/projection (zero new geometry deps — bundles Clipper2, the lib OpenSCAD 2021+ uses). GeoNode↔CrossSection; note in SPEC
+  - [x] J.3.2 - 2D primitives square/circle/polygon → Shape2D node; circle uses our $fn fragment math for parity
+    - [x] J.3.2.1 - J.3.2.1 - eval-wire: recognize 2D primitives + thread Geo{D2,D3} through the geometry pass
+  - [x] J.3.3 - 2D booleans + offset over 2D children (CrossSection ops)
+  - [x] J.3.4 - linear_extrude (height/twist/scale/slices) → 3D; tessellation parity MEASURED vs oracle (Manifold's if the metric tolerates, else our loft)
+    - [x] J.3.4.1 - J.3.4.1 - twisted linear_extrude loft: match OpenSCAD's profile-resampling + slice interpolation
+  - [x] J.3.5 - rotate_extrude (angle, $fn) → 3D; reuse the ring/segment math
+  - [x] J.3.6 - projection(cut) 3D→2D via slice_to_cross_section
+  - [x] J.3.7 - Differential: path/region-derived BOSL2 2D shapes vs oracle
+- [x] J.4 - hull; import() via our STL/3MF readers; text/minkowski/surface = LOUD deferred stubs (blow up, complain, never silently wrong)
+  - Comment: Text could be handled by https://github.com/pop-os/cosmic-text . I'm still researching minkowski.
+  - [x] J.4.1 - hull() → Manifold hull/batch_hull over children (2D + 3D); unblocks cuboid chamfer/rounding + masks
+  - [x] J.4.2 - import() via our STL/3MF readers (threemf/zip/quick-xml deps already present)
+    - [>] J.4.2.1 - J.4.2.1 - import() eval + backend wiring (STL/3MF readers → Leaf)
+    - [>] J.4.2.2 - J.4.2.2 - import() differential vs oracle (round-trip a known STL + 3MF)
+  - [x] J.4.3 - text() LANDED via rustybuzz (shaping, the pure-Rust harfbuzz port — matches OpenSCAD's harfbuzz) + ttf-parser (glyph OUTLINES) over a BUNDLED Liberation Sans (OpenSCAD's default, SIL OFL, pinned at src/eval/fonts/). NOT cosmic-text — that rasterizes to pixels + does system-font lookup (fontconfig = non-deterministic, banned); we need vector contours from a pinned face. Pipeline: shape → per-glyph outline → $fn-flatten Béziers → placed/scaled contours → Shape2D::Polygon (even-odd fill, so glyph HOLES resolve for free). halign/valign/spacing/direction/script/language honored; `font=` accepts but ships one face (system fonts = a later opt-in). Deterministic (pure Rust + pinned font) + oracle-matchable (same glyphs as OpenSCAD → volume-residual). Validated: 'O' fills as a RING not a box; multi-glyph advance; empty→empty. Used across the models/ tree (part numbers, version stamps, labels) → unblocks L.3.
+  - [x] J.4.4 - minkowski() LANDED via Manifold's NATIVE `minkowski_sum` (manifold3d 0.3.3 clean drop-in — same manifold-csg lineage, no migration; wraps Manifold C++ PR #666's tiered hull+union). `GeoNode::Minkowski` folds the binary sum with the empty-ANNIHILATOR rule (A⊕∅=∅); 2D LOUD-deferred to Clipper2 like 2D hull. Validated: box⊕box=summed box (1728 exact, oracle-free) + volume-residual for the rounding case; test_cyl clears → corpus 99.1%, 0 assertion / 0 unimplemented. Research + design writeup: docs/minkowski-design.md. (surface() stays a LOUD-deferred stub.)
+  - [x] J.4.5 - DETERMINISM: native geometry runs Manifold with TBB (`parallel` feature ON) = non-deterministic parallel reduction; wasm is single-threaded. Doctrine #36 needs bit-identical output cross-platform — build native with `parallel` OFF (`MANIFOLD_PAR=NONE`, matching wasm) + re-baseline, OR prove TBB reduction is deterministic. Surfaced by the minkowski research (manifold#666 CI: non-convex² broke Mac/Windows on non-CCW triangulation even with `deterministic=true`). Affects ALL geometry, not just minkowski. — RESOLVED: the manifold-rs rewrite runs rayon, not C++ TBB, so this cross-platform TBB concern is moot; run-to-run same-platform determinism is tracked separately in S.4.
+- [x] J.5 - Content-addressed CSG cache: node hash = subtree + resolved params + reaching $-context; in-memory tier + hit-rate counters (the on-disk tier stays a storage decision)
+
+  - [x] J.5.1 - Module-redundancy probe: measure the CSG cache-hit ceiling
+  - [x] J.5.2 - Module memo rung 2a: naive full-$-context (body, params, all-$ctx) → Geo, ~42% safe
+  - [>] J.5.2b - Module memo rung 2b: read-set-precise $-context (key only $-vars each module reads), chase 42%→~99%
+  - [x] J.5.3 - Correctness gate: cache-on==off differential + exclusion validation tests
+- [x] J.6 - Unify fab-scad's geom::V3 ([f64;3] orientation helpers) + printer-domain [f64;3] into fab_lang::Vec3
+

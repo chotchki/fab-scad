@@ -16,7 +16,10 @@ pub struct Config {
     /// Route numeric user-function calls through the Cranelift JIT (desktop only; needs a
     /// [`NumericJitFactory`](super::NumericJitFactory) — wasm passes none, so this is a no-op there). `FAB_JIT`.
     pub jit: bool,
-    /// Memoize user-FUNCTION-call results (N.2c). `FAB_EVAL_CACHE`.
+    /// Memoize user-FUNCTION-call results (N.2c). OPT-IN (`FAB_EVAL_CACHE=1`), OFF by default everywhere — the
+    /// default-on flip was validated + DECLINED (N.2c.2.3): bit-identical, but a net WASH (the N.2c.2.2 auto-off
+    /// caps the downside yet can't catch high-hit-rate/cheap-body models). Enable per-model where it's measured
+    /// to pay. `FAB_EVAL_CACHE`.
     pub eval_cache: bool,
     /// Skip memoizing a function call whose args exceed this shallow element count — a big key isn't worth
     /// hashing every lookup. `FAB_EVAL_CACHE_ARGCAP` (default 256).
@@ -66,12 +69,15 @@ impl Config {
     /// execution accelerators are strict `=1` OPT-IN (a new eval path stays off unless explicitly enabled),
     /// matching the per-module gates this replaces; the caps parse-or-default.
     ///
-    /// NOTE (N.2c.2.3, updated at BU.8): the csg cache is default-ON here — rung 2b removed the
-    /// deep-recursion pathology that reverted the first flip (verified: `module_recursion_bound` cache-on
-    /// == off), and the flip's gate was the FULL suite + gauntlet + bitwise STL diffs, per the task's own
-    /// terms. `FAB_CSG_CACHE=0` opts out. The EVAL cache stays opt-in (`FAB_EVAL_CACHE=1`) — its win
-    /// profile is model-dependent (`under_sink_guide` measured net-negative in N.2c.2.1) and its auto-off
-    /// (N.2c.2.2) hasn't been revalidated at default-on; that half of N.2c.2.3 remains open.
+    /// NOTE (N.2c.2.3, both halves RESOLVED): the CSG cache is default-ON — rung 2b (BU.8) removed the
+    /// deep-recursion pathology that reverted the first flip; bit-identical on vs off (STL-diffed + corpus A/B)
+    /// and never-worse. `FAB_CSG_CACHE=0` opts out. The EVAL cache stays OPT-IN (`FAB_EVAL_CACHE=1`) — the
+    /// default-on flip was BUILT + VALIDATED and DECLINED (chotchki, 2026-07-17): it's bit-identical (901/901
+    /// gauntlet cache-on == off, geo-fingerprint A/B) and the N.2c.2.2 auto-off kills the `under_sink_guide`
+    /// −17% catastrophe (→ neutral), but the auto-off's hit-RATE proxy can't catch a model that hits OFTEN yet
+    /// skips CHEAP bodies (`shoe_holder`/`ashtray` stay Live, lose ~3-5%). Net a WASH — ~+2% on the cacheable
+    /// class, ~−3-5% on the cheap-body class — so it's not worth flipping the default; opt-in for a model
+    /// measured to benefit. (A body-cost signal was tried in N.2c.2.2 and FAILED — the weighing IS the cost.)
     #[must_use]
     pub fn from_env() -> Self {
         let d = Self::default();
@@ -115,10 +121,11 @@ fn env_u64_opt(name: &str) -> Option<u64> {
 mod tests {
     use super::Config;
 
-    /// The CONSERVATIVE baseline is all-off, and `from_env` too (both caches are opt-in `FAB_*=1` after the
-    /// N.2c.2.3 default-on flip was reverted — the csg-cache-vs-deep-recursion pathology blocks it).
+    /// The CONSERVATIVE baseline ([`Config::default`]) is all-off — the A/B differential's reference lane, and
+    /// what the raw-AST/oracle tests run on. The app path ([`Config::from_env`]) defaults the CSG cache ON
+    /// (N.2c.2.3); the eval cache + JIT stay opt-in there. Here everything is off.
     #[test]
-    fn default_and_from_env_are_opt_in() {
+    fn default_is_all_off() {
         let d = Config::default();
         assert!(!d.jit && !d.eval_cache && !d.csg_cache && d.eval_budget.is_none());
     }

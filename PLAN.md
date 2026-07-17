@@ -198,7 +198,7 @@ added 2026-07-07.
 - [x] O.7 - O.7 - Residual band 5 (medium bodies, ~7s): _find_anchor? _group_sort_by_index, _vnf_centroid, rot, _get_ear, vector_axis, affine3d_rot_from_to + small fry (in_list, is_path, constrain, apply) — OR route to P.1.6 JIT list ABI; the monsters (_region_region_intersections+_point_dist 14.2s) decide the JIT-vs-intrinsic split
 - [x] O.8 - O.8 - Value-const guard: Entry.consts_v (name, fn()->Value) bit-compared against the home-scope binding at arm time — unlocks the non-numeric-constant tier (_NO_ARG, UP, RIGHT) for hand intrinsics (wasm gets every win, unlike the JIT)
 - [x] O.9 - O.9 - The unlocked band: vector_axis, affine3d_rot_from_to (+v_theta/v_abs/point2d/affine3d_identity deps), then apply (determinant/det2-4 + vnf_reverse_faces + BOSL2-reverse chain), then rot (move/rot_inverse/affine3d_rot_by_axis + _NO_ARG) — cut per dep-tree, each with battery + wire check
-- [ ] O.10 - O.10 - The region-monster band: _region_region_intersections + its full reachable closure as hand intrinsics (the P.1.6 resolution — ~9.7s/6 calls on shoe_holder)
+- [x] O.10 - O.10 - The region-monster band: _region_region_intersections + its full reachable closure as hand intrinsics (the P.1.6 resolution — ~9.7s/6 calls on shoe_holder)
 ## Phase P - P - Cranelift JIT + CSG cache (desktop)
 added 2026-07-16.
 - [ ] P.1 - P.1 - Cranelift JIT for the numeric long tail (desktop)

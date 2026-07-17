@@ -2742,10 +2742,7 @@ fn hoisted_bindings<'a>(stmts: &[&'a Stmt]) -> Vec<HoistItem<'a>> {
 /// letrec GROUP — the sibling list each body function carries so it can call the others regardless of
 /// textual order (L.5.4). `None` when the body defines no functions (the overwhelmingly common block, so
 /// the group machinery costs nothing there).
-fn register_fn_group<'a>(
-    items: &[HoistItem<'a>],
-    ctx: &Ctx<'a>,
-) -> Option<Rc<[value::SiblingFn]>> {
+fn register_fn_group<'a>(items: &[HoistItem<'a>], ctx: &Ctx<'a>) -> Option<Rc<[value::SiblingFn]>> {
     let mut group: Vec<value::SiblingFn> = Vec::new();
     for item in items {
         if let HoistItem::Func(name, params, body) = *item {

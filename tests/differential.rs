@@ -269,13 +269,19 @@ fn nested_mutually_recursive_functions_match_the_oracle() {
     // would leave the call `undef` → a mis-sized/positioned primitive → the residual blows, so driving
     // geometry from the result validates the group binding against the real binary.
     // forward reference: g (first) calls h (defined 1 line BELOW it) — the `_gather_contiguous_edges` pattern.
-    agree("module m() { function g(n) = h(n) + 1; function h(n) = n * 2; translate([g(3), 0, 0]) cube(2); } m();");
+    agree(
+        "module m() { function g(n) = h(n) + 1; function h(n) = n * 2; translate([g(3), 0, 0]) cube(2); } m();",
+    );
     // mutual recursion: even/odd ping-pong between two body functions.
-    agree("module m() { function ev(n) = n == 0 ? true : od(n - 1); function od(n) = n == 0 ? false : ev(n - 1); translate([ev(6) ? 8 : 0, 0, 0]) cube(2); } m();");
+    agree(
+        "module m() { function ev(n) = n == 0 ? true : od(n - 1); function od(n) = n == 0 ? false : ev(n - 1); translate([ev(6) ? 8 : 0, 0, 0]) cube(2); } m();",
+    );
     // a body function reading an ENCLOSING local (the L.2.8m capture) still works alongside the group.
     agree("module m() { k = 4; function scaled(n) = n * k; cube(scaled(3)); } m();"); // cube(12)
     // self-recursion (the self_name path) next to a sibling call — both must resolve.
-    agree("module m() { function fact(n) = n <= 1 ? 1 : n * fact(n - 1); function twice(n) = fact(n) * 2; cube(twice(3)); } m();"); // cube(12)
+    agree(
+        "module m() { function fact(n) = n <= 1 ? 1 : n * fact(n - 1); function twice(n) = fact(n) * 2; cube(twice(3)); } m();",
+    ); // cube(12)
 }
 
 #[test]

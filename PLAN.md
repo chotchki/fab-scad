@@ -41,15 +41,15 @@ deferred from J.5.2b on 2026-07-10.
   Implementation note, we should determine whether an intrinsic matches based on its original AST. That will help survive reformats or code comment changes.
 added 2026-07-07.
 - [x] L.1 - Pinned BOSL2 test suite through scad-rs; divergences triaged into named buckets
-- [ ] L.2 - Burn-down: fixes land as semantics/ tests; expect this to expose evaluator gaps — that's the point
+- [x] L.2 - Burn-down: fixes land as semantics/ tests; expect this to expose evaluator gaps — that's the point
   - [x] L.2.1 - L.2.1 - Name the divergences: sharpen the generic clusters into a per-symbol worklist
-  - [ ] L.2.2 - L.2.2 - Missing builtins: implement the functions the corpus names
-  - [ ] L.2.3 - L.2.3 - Missing modules: the unknown-module tests
-  - [ ] L.2.4 - L.2.4 - Builtin correctness bugs: named singletons that return the wrong value
-  - [ ] L.2.5 - L.2.5 - Domain assert families: beziers, screw tables, polyhedra
-  - [ ] L.2.6 - L.2.6 - The got==expected long tail: individual math divergences
+  - [x] L.2.2 - L.2.2 - Missing builtins: implement the functions the corpus names
+  - [x] L.2.3 - L.2.3 - Missing modules: the unknown-module tests
+  - [x] L.2.4 - L.2.4 - Builtin correctness bugs: named singletons that return the wrong value
+  - [x] L.2.5 - L.2.5 - Domain assert families: beziers, screw tables, polyhedra
+  - [x] L.2.6 - L.2.6 - The got==expected long tail: individual math divergences
   - [x] L.2.7 - L.2.7 - Timeouts: 6 of 8 CLEARED (893→899, 99.8%) by a FOUNDATIONAL scope perf fix — NOT hull/region hangs but per-call $-context COPYING. Every user function/module call copied the caller's reaching $-context into the call scope (`caller.specials()` → O(#$-vars)); BOSL2 sets 42 top-level $-vars, so call-heavy geometry paid 42 clones+inserts PER CALL. Fix: split the DYNAMIC $-chain from the LEXICAL chain in Scope — a call frame inherits the caller's $-context BY REFERENCE (`dynamic_parent`), O(1) call setup; iterative `Frame::Drop` keeps deep recursion heap-bounded (the dynamic chain is now deep). Cleared gears×3, circle_3points, exclusive_or, rot, vnf_area. gaussian_rands 52s→~12s. Remaining 2: gaussian_rands (borderline — passes solo, times out under the parallel sweep; a JIT/intrinsics target — 300k-element sqrt/ln/cos comprehension, per chotchki) + spheroid (investigate).
-  - [ ] L.2.7a - L.2.7a - spheroid timeout: investigate the last non-JIT timeout (high-$fn sphere geometry). gaussian_rands is deferred to the JIT/intrinsics tier (rung 2/3) — the numeric-comprehension hot path it exemplifies is exactly what optimized_functions/Cranelift target.
+  - [x] L.2.7a - L.2.7a - spheroid timeout: investigate the last non-JIT timeout (high-$fn sphere geometry). gaussian_rands is deferred to the JIT/intrinsics tier (rung 2/3) — the numeric-comprehension hot path it exemplifies is exactly what optimized_functions/Cranelift target.
   - [x] L.2.8 - L.2.8 - Recursive function-literals (letrec): a closure must see its own binding
   - [x] L.2.8a - L.2.8a - Island-global bootstrapping: a top-level constant's fn call sees the constants hoisted so far (modular_hose +5)
   - [x] L.2.8b - L.2.8b - Empty-statement $children: a lone `;` is not a child (screw/attachable family +5)
@@ -68,14 +68,14 @@ added 2026-07-07.
   - [x] L.2.8o - L.2.8o - parent_module(n) / $parent_modules (L.2.2 missing builtin): the module-instantiation NAME stack — `call_user_module` pushes/pops the callee name, `parent_module(n)` reads `stack[len-1-n]` (0=self, 1=parent), `$parent_modules`=ancestor count. BOSL2's `deprecate()` echoes `parent_module(1)` → test_rounding_angled_edge_mask/_corner_mask +2 (887→888). With this the whole "unknown function/module" CLASS is cleared — unimplemented is JUST the deferred minkowski, so L.2.2 (missing builtins) + L.2.3 (missing modules) are effectively DONE.
   - [x] L.2.8p - L.2.8p - children() sees the CURRENT dynamic $-context (foundational): `children()` rendered the call-site children in the caller's LEXICAL scope but WITHOUT overlaying the $-vars in effect where `children()` is instantiated. $-vars are dynamically scoped, so BOSL2's `attachable()` (which sets `$parent_geom`/`$parent_parts` in its body right before `children()`) had those read back as undef by `parent()`/`desc_dist`/`parent_part` and the `ring_hook` orient → a zero-size default geom. Fix: overlay the current scope's specials onto the caller's lexical scope in `eval_children` (propagates transitively through forwarding `children()`). ONE fix cleared ALL 3 remaining assertions (parent_part, desc_dist, ring_hook) → the ASSERTION BUCKET IS NOW ZERO (890→891, 98.9%). Every correctness/math divergence resolved; only the deferred minkowski + the L.2.7 hull/region timeouts remain.
 - [x] L.3 - models/ tree end-to-end (teardrop/onion/screw_hole, corner_brace, Underdesk); benchmark corpus captured via the tracing layer on every run
-  - [ ] L.3.1 - L.3.1 - models-surfaced evaluator gaps: resize/render modules + attachable×3
+  - [x] L.3.1 - L.3.1 - models-surfaced evaluator gaps: resize/render modules + attachable×3
   - [x] L.3.2 - L.3.2 - `* ! % #` instantiation modifiers honored in eval (the #1 divergence)
   - [x] L.3.3 - L.3.3 - assert/echo are passthrough: render child geometry (BOSL2 left/fwd fix)
   - [x] L.3.4 - L.3.4 - BOSL2 `sweep()`/VNF returns empty → chamfer/rounding/teardrop/rotate_sweep render nothing (14/19 divergences)
   - [x] L.3.5 - L.3.5 - Manifold version parity: coincident-face genus divergences (ours 3.5.x vs OpenSCAD 3.4.1)
   - [x] L.3.6 - L.3.6 - text() 100/72 DPI scale (was rendering glyphs 0.72× too small)
   - [x] L.3.8 - L.3.8 - color() on 2D geometry tags the color (Shape2D::Color) — the 343× BOSL2-example bucket
-- [ ] L.4 - Exit review: divergences zero-or-documented, perf-vs-oracle published; rung 2/3 (intrinsics, JIT) phase cut FROM THIS DATA
+- [x] L.4 - Exit review: divergences zero-or-documented, perf-vs-oracle published; rung 2/3 (intrinsics, JIT) phase cut FROM THIS DATA
 - [ ] L.5 - L.5 - Evaluator-gap closure: BOSL2 examples + models/ render clean (the perf-blog gate)
   - [x] L.5.1 - L.5.1 - render() + resize() builtin modules
   - [x] L.5.2 - L.5.2 - children(i) interleaved-assignment child-scope + $children fix

@@ -2,8 +2,8 @@
 //!
 //! UNLIKE [`crate::bambu`] (a Bambu PROJECT `.3mf`: a plate grid + a slicer `project_settings.config`),
 //! this emits a PLAIN standard 3MF — ONE `<object>` at the origin — that any conforming reader opens,
-//! specifically the site's three.js `3MFLoader`. Color rides CORE 3MF `<basematerials>` (`displaycolor`
-//! + a per-triangle `pid`/`p1` material ref), NOT a slicer paint extension (Bambu MMU) the viewer can't
+//! specifically the site's three.js `3MFLoader`. Color rides CORE 3MF `<basematerials>` (a `displaycolor`
+//! plus a per-triangle `pid`/`p1` material ref), NOT a slicer paint extension (Bambu MMU) the viewer can't
 //! read. So the per-vertex RGBA the kernel carries (`Solid::vertex_colors`, survives every boolean)
 //! collapses to a small DISTINCT-COLOR material table.
 //!

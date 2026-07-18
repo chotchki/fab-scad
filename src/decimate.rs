@@ -43,8 +43,8 @@ impl Quadric {
 
     fn add(&self, o: &Quadric) -> Quadric {
         let mut q = self.0;
-        for i in 0..10 {
-            q[i] += o.0[i];
+        for (a, b) in q.iter_mut().zip(o.0) {
+            *a += b;
         }
         Quadric(q)
     }

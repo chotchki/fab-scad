@@ -293,10 +293,14 @@ fn ranges_are_first_class_values() {
 }
 
 #[test]
-fn deferred_constructs_are_loud() {
-    assert!(matches!(ev_err("f(1)"), Error::Unknown(m) if m.contains("function `f`"))); // missing/typo fn
-    // (function literals + calling a function VALUE now evaluate — I.2.3.3; let → I.3.1; list
-    // comprehensions → I.3.2; assert / echo → I.5; member access → I.9.1 below.)
+fn an_unknown_function_warns_and_undefs() {
+    // L.5.7: a missing/typo'd function is NOT loud — OpenSCAD warns "Ignoring unknown function 'f'"
+    // and the call evaluates to undef, so a corpus that names a newer-BOSL2 function still renders the
+    // REST instead of hard-failing. (function literals + calling a function VALUE evaluate — I.2.3.3;
+    // let → I.3.1; comprehensions → I.3.2; assert / echo → I.5; member access → I.9.1 below.)
+    assert_eq!(ev("f(1)"), Value::Undef);
+    let full = fab_lang::evaluate_full("v = f(1);").expect("warn-and-continue");
+    assert_eq!(full.warnings(), ["Ignoring unknown function 'f'"]);
 }
 
 #[test]
@@ -354,16 +358,18 @@ fn echo_and_assert_evaluate() {
     assert_eq!(ev("echo(1) 2"), num(2.0));
     assert_eq!(ev("echo(1)"), Value::Undef); // no trailing body → undef
     assert_eq!(ev("assert(true)"), Value::Undef);
-    assert!(matches!(ev_err("assert(false)"), Error::Eval(_)));
+    // A falsy assert raises Error::Assert (L.5.8: a DISTINCT variant from Error::Eval, so the top-level
+    // geometry driver can catch it → warn + keep the pre-assert partial rather than hard-fail).
+    assert!(matches!(ev_err("assert(false)"), Error::Assert(_)));
     // assert arg forms: named condition/message, an unknown named (dropped), a non-string message.
     assert!(matches!(
         ev_err("assert(condition = false, message = \"m\")"),
-        Error::Eval(m) if m.contains('m')
+        Error::Assert(m) if m.contains('m')
     ));
-    assert!(matches!(ev_err("assert(false, foo = 1)"), Error::Eval(_))); // unknown named dropped
+    assert!(matches!(ev_err("assert(false, foo = 1)"), Error::Assert(_))); // unknown named dropped
     assert!(matches!(
         ev_err("assert(false, 42)"),
-        Error::Eval(m) if m.contains("42") // non-string message
+        Error::Assert(m) if m.contains("42") // non-string message
     ));
     // Echo OUTPUT via the program path — evaluate_full captures the ordered message log; numbers are
     // formatted bug-for-bug (0.333333), strings quoted, named args as `a = 5`.
@@ -377,12 +383,18 @@ fn echo_and_assert_evaluate() {
         .expect("evaluates");
     assert_eq!(w.warnings(), ["Ignoring unknown variable 'nope'"]);
     assert_eq!(w.console()[0], "WARNING: Ignoring unknown variable 'nope'"); // full rendered line
-    // A top-level assert/echo is NOT geometry; a falsy assert is loud.
+    // A top-level assert/echo is NOT geometry. A falsy top-level assert is LOUD in the CONSOLE but
+    // NON-fatal (L.5.8): OpenSCAD warns + exports the geometry built BEFORE the assert, so `evaluate`
+    // returns Ok with the pre-assert partial (here the leading cube; the post-assert one never runs).
     assert!(fab_lang::evaluate("assert(true); sphere(1, $fn = 8);").is_ok());
-    assert!(matches!(
-        fab_lang::evaluate("assert(1 == 2, \"nope\");"),
-        Err(Error::Eval(_))
-    ));
+    assert_eq!(
+        fab_lang::evaluate("cube(2); assert(1 == 2, \"nope\"); cube(1);")
+            .expect("a failed top-level assert exports the pre-assert geometry, not an Err")
+            .tri_count(),
+        12 // just the leading cube; the assert halts before the second
+    );
+    let loud = fab_lang::evaluate_full("cube(2); assert(1 == 2, \"nope\"); cube(1);").expect("renders");
+    assert_eq!(loud.warnings(), ["assertion failed: nope [assert((1 == 2))]"]);
 }
 
 #[test]
@@ -568,8 +580,8 @@ fn math_builtins() {
     // that lets BOSL2 call `search(..., index_col_num=1)`: the name is decorative, the position is real.)
     assert_eq!(ev("abs(x = -5)"), Value::Num(5.0));
     // a user function may SHADOW a builtin (resolution order).
-    // (unimplemented/unknown functions stay LOUD until I.5's warn-and-undef.)
-    assert!(matches!(ev_err("nope_fn(1)"), Error::Unknown(m) if m.contains("function `nope_fn`")));
+    // An unimplemented/unknown function is warn-and-undef (I.5/L.5.7, OpenSCAD-faithful), not loud.
+    assert_eq!(ev("nope_fn(1)"), Value::Undef);
 }
 
 #[test]
@@ -867,25 +879,25 @@ fn recursive_function_literals() {
 }
 
 #[test]
-fn program_level_defers_are_loud() {
-    // Constructs that parse (H.2) but eval defers loudly. NOTE the moving line: as of I.2.4 a user
-    // module DEFINITION and its INSTANTIATION both work (see module_corpus.rs); what's still loud here is
-    // an UNKNOWN module (a typo / unimplemented builtin) and a RAW eval_program on `use`/`include` (the
-    // loader resolves those via evaluate_file / evaluate_with_base — happy path in loader_corpus.rs).
-    // Unknown SYMBOLS (typo / missing builtin) → Error::Unknown, which NAMES the symbol.
-    for (src, needle) in [
-        ("nope_module();", "module `nope_module`"), // an unknown module name — loud
-        ("x = zz(1);", "function `zz`"), // an erroring assignment RHS (unknown fn) propagates out of eval_stmt
-        ("{ y = zz(1); }", "function `zz`"), // …and out of a block's inner statement
+fn program_level_unknowns_warn_use_include_still_defers() {
+    // L.5.7: an unknown module/function that PARSES (a typo / unimplemented builtin) is NOT loud — it
+    // warns "Ignoring unknown module/function 'name'" and yields nothing / undef, so eval SUCCEEDS and
+    // renders the rest (a corpus using a newer-BOSL2 symbol still loads). The named symbol surfaces in
+    // the console for the evaluator-gap worklist. (A user module DEFINITION + INSTANTIATION both work —
+    // see module_corpus.rs.)
+    for (src, warning) in [
+        ("nope_module();", "Ignoring unknown module 'nope_module'"),
+        ("x = zz(1);", "Ignoring unknown function 'zz'"), // an unknown-fn assignment RHS
+        ("{ y = zz(1); }", "Ignoring unknown function 'zz'"), // …inside a block too
     ] {
-        let prog = parse(src).expect("parses");
-        let err = eval_program(&prog, &Scope::new()).unwrap_err();
+        let full = fab_lang::evaluate_full(src).expect("warn-and-continue, not an error");
         assert!(
-            matches!(&err, Error::Unknown(m) if m.contains(needle)),
-            "expected Unknown(…{needle}…) for {src:?}, got {err:?}"
+            full.warnings().contains(&warning),
+            "expected warning {warning:?} for {src:?}, got {:?}",
+            full.warnings()
         );
     }
-    // A raw `eval_program` can't resolve `use`/`include` (the loader does) → still a deferred-path defer.
+    // A raw `eval_program` still can't resolve `use`/`include` (the loader does) → an actual defer.
     for src in ["use <lib.scad>", "include <lib.scad>"] {
         let prog = parse(src).expect("parses");
         let err = eval_program(&prog, &Scope::new()).unwrap_err();

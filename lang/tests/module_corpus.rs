@@ -92,11 +92,12 @@ fn module_body_local_definitions() {
         ),
         4.0
     );
-    // a body-local function does NOT leak to the file scope — calling it outside its module is unknown
-    assert!(matches!(
-        evaluate("module m() { function local_only() = 1; } x = local_only(); cube(x);"),
-        Err(Error::Unknown(msg)) if msg.contains("local_only")
-    ));
+    // a body-local function does NOT leak to the file scope — calling it outside its module is unknown,
+    // now warn-and-undef (L.5.7): the call yields undef + an "Ignoring unknown function" warning (were
+    // it leaked, it would resolve to 1 and warn nothing).
+    let full = fab_lang::evaluate_full("module m() { function local_only() = 1; } echo(local_only());")
+        .expect("warn-and-continue");
+    assert!(full.warnings().contains(&"Ignoring unknown function 'local_only'"));
 }
 
 /// `parent_module(n)` / `$parent_modules` (L.2.2, `control.cc`): the module instantiation stack, innermost
@@ -229,13 +230,12 @@ fn runaway_module_recursion_is_loud() {
     );
 }
 
-/// An UNKNOWN module (typo, or a builtin still deferred) is LOUD — never silently nothing.
+/// An UNKNOWN module (typo, or a builtin still deferred) is warn-and-undef (L.5.7): OpenSCAD warns
+/// "Ignoring unknown module 'x'" and renders NOTHING, rather than hard-failing the whole tree.
 #[test]
-fn unknown_module_is_loud() {
-    assert!(matches!(
-        evaluate_geometry("not_a_module();").unwrap_err(),
-        Error::Unknown(m) if m.contains("module `not_a_module`")
-    ));
+fn unknown_module_warns_and_renders_empty() {
+    let full = fab_lang::evaluate_full("not_a_module();").expect("warn-and-continue");
+    assert_eq!(full.warnings(), ["Ignoring unknown module 'not_a_module'"]);
 }
 
 /// `let(...) children` as a STATEMENT (I.9.6): binds vars for its children SEQUENTIALLY (a later binding
@@ -259,14 +259,16 @@ fn statement_let_binds_children() {
     ));
 }
 
-/// An error inside a `for` body doesn't get swallowed by the iteration — it propagates LOUD out of the
-/// loop (the `for_product` `?`), same as anywhere else. A single deferred/unknown child kills the render.
+/// An unknown child inside a `for` body is warn-and-undef (L.5.7), not loud — but the loop still
+/// EVALUATES each iteration, so the warning surfaces (the body isn't silently skipped).
 #[test]
-fn for_body_error_propagates() {
-    assert!(matches!(
-        evaluate_geometry("for (i = [0, 1]) not_a_module();").unwrap_err(),
-        Error::Unknown(m) if m.contains("module `not_a_module`")
-    ));
+fn for_body_unknowns_warn_not_swallowed() {
+    let full = fab_lang::evaluate_full("for (i = [0, 1]) not_a_module();").expect("warn-and-continue");
+    assert!(
+        full.warnings().iter().any(|w| w.contains("not_a_module")),
+        "the for body evaluated + warned: {:?}",
+        full.warnings()
+    );
 }
 
 /// A statement-level `$special = value;` assignment parses AND scopes (BOSL2 leans on it heavily —

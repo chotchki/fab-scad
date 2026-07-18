@@ -80,16 +80,19 @@ fn every_import_reaches_the_reader_in_one_round() {
 }
 
 #[test]
-fn a_reader_error_fails_loud() {
-    // The reader can't produce the file → the driver propagates it LOUD (never a silently-empty mesh).
-    let err = resolve("import(\"gone.stl\");", |raw| {
+fn a_reader_error_warns_and_empties() {
+    // A reader that can't produce the file is TOLERATED (L.5.7, OpenSCAD-faithful): the driver warns
+    // "Can't open import file '…': …" and substitutes an EMPTY mesh, so the rest of the model still
+    // renders — never a hard error, but never a SILENT drop either (the diagnostic survives as a warning,
+    // io.rs). Here the whole model IS the import, so it collapses to an empty leaf.
+    let geo = resolve("import(\"gone.stl\");", |raw| {
         Err(Error::Load(format!("cannot read {raw}")))
     })
-    .unwrap_err();
-    assert!(
-        matches!(&err, Error::Load(m) if m.contains("gone.stl")),
-        "got {err:?}"
-    );
+    .expect("a reader error is warn-and-empty, not a hard error");
+    match geo {
+        Geo::D3(GeoNode::Leaf(ref leaf)) => assert_eq!(leaf.tri_count(), 0, "empty placeholder"),
+        other => panic!("expected an empty 3D leaf, got {other:?}"),
+    }
 }
 
 #[test]
@@ -129,19 +132,20 @@ fn resolve_geometry_file_reads_the_root_then_the_mesh() {
 }
 
 #[test]
-fn the_no_reader_entries_are_loud_not_silent() {
-    // The convenience entries carry NO reader, so an import through them fails LOUD naming the file (never
-    // a silently-empty mesh) — the M.4 behavior over the old blanket "import() Unimplemented".
-    for res in [
-        evaluate_geometry("import(\"a.stl\");"),
-        evaluate("import(\"a.stl\");").map(|_| Geo::D3(GeoNode::Empty)),
-    ] {
-        assert!(
-            matches!(&res, Err(Error::Load(m)) if m.contains("a.stl")),
-            "expected a LOUD Load error naming a.stl, got {res:?}"
-        );
-    }
-    // The raw AST path (`eval_program`) guards it too — no eval path swallows an import into empty geometry.
+fn the_convenience_entries_warn_and_empty_raw_eval_is_loud() {
+    // The convenience entries (evaluate / evaluate_geometry) carry NO reader, so an import through them
+    // is TOLERATED (L.5.7, OpenSCAD-faithful): warn "Can't open import file 'a.stl'" + an EMPTY mesh, so
+    // the rest of the model still renders rather than hard-failing.
+    assert!(evaluate_geometry("import(\"a.stl\");").is_ok());
+    assert_eq!(
+        evaluate("import(\"a.stl\");")
+            .expect("warn-and-empty, not an error")
+            .tri_count(),
+        0
+    );
+    // The RAW AST path (`eval_program`) can't invent a reader → still LOUD, naming the file, so a dev who
+    // reaches for it (no reader) is told to route through resolve_geometry_* instead of silently rendering
+    // empty geometry.
     let prog = parse("import(\"a.stl\");").expect("parses");
     assert!(matches!(
         eval_program(&prog, &Scope::new()),

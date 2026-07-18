@@ -338,18 +338,24 @@ fn a_broken_used_file_warns_and_renders() {
 #[test]
 fn library_path_is_only_searched_after_the_local_dir() {
     // pathlib lives in lib/, unreachable from the root dir. WITH the lib path it resolves → `pr()` = 4 →
-    // sphere(4) renders. WITHOUT it, the `use` is tolerantly DROPPED (warn, M.6.1), but then `pr()` is an
-    // UNKNOWN function — still a LOUD defer in our engine (unknown-function → undef is a SEPARATE divergence,
-    // #94-adjacent, not the loader's job). So the file still fails, now on the unknown call rather than the
-    // missing lib — which is itself the proof pathlib is unreachable without the lib path (local dir first).
+    // sphere(4) renders. WITHOUT it, the `use` is tolerantly DROPPED (warn, M.6.1) and `pr()` is then an
+    // UNKNOWN function → warn-and-undef (L.5.7): the file still EVALUATES (Ok), but `sphere(undef)` renders
+    // NOTHING — an empty mesh where WITH the lib path there was geometry, which is itself the proof pathlib
+    // is unreachable without the lib path (local dir first).
     let with_lib = evaluate_file(&root().join("use_via_libpath.scad"), &[root().join("lib")])
         .expect("with the lib path, pr() resolves");
-    assert!(with_lib.tri_count() > 0, "sphere(4) renders");
-    let err = evaluate_file(&root().join("use_via_libpath.scad"), &[]).unwrap_err();
-    assert!(
-        matches!(&err, Error::Unknown(m) if m.contains("pr")),
-        "got {err:?}"
-    );
+    let without = evaluate_file(&root().join("use_via_libpath.scad"), &[])
+        .expect("warn-and-continue, not a hard error");
+    // `$fn = 8` fixes the tri count, so SIZE is the tell: WITH the lib path pr() = 4 → sphere(4); WITHOUT,
+    // pr() is unresolved → warn-and-undef, and sphere(undef) falls back to the DEFAULT radius (~1). The
+    // shrink proves pathlib is unreachable without the lib path (local dir first).
+    let ext = |m: &fab_lang::Mesh| {
+        m.verts
+            .iter()
+            .fold(0f64, |a, v| a.max(v[0].abs()).max(v[1].abs()).max(v[2].abs()))
+    };
+    assert!(ext(&with_lib) > 3.5, "pr() = 4 → sphere(4)");
+    assert!(ext(&without) < 2.0, "pr() unresolved → sphere(undef) at the default radius, not 4");
 }
 
 #[test]
@@ -380,12 +386,18 @@ fn a_missing_root_file_is_loud() {
 #[test]
 fn use_is_not_transitive() {
     // lib_uses_inner `use`s lib_inner; a file that `use`s lib_uses_inner sees lu_r() but NOT inner_r()
-    // (`use` doesn't re-export). Reaching for inner_r() is an unknown function → LOUD.
-    let err = evaluate_file(&root().join("use_nontransitive_reach.scad"), &[]).unwrap_err();
-    assert!(
-        matches!(&err, Error::Unknown(m) if m.contains("inner_r")),
-        "got {err:?}"
-    );
+    // (`use` doesn't re-export). Reaching for inner_r() is an unknown function → warn-and-undef (L.5.7):
+    // the file evaluates (Ok) but `sphere(inner_r())` renders NOTHING (inner_r() → undef), proving `use`
+    // didn't re-export the transitively-used lib.
+    let mesh = evaluate_file(&root().join("use_nontransitive_reach.scad"), &[])
+        .expect("warn-and-continue, not a hard error");
+    // inner_r() = 3 lives in lib_inner, which lib_uses_inner `use`s but does NOT re-export → inner_r() is
+    // unresolved → warn-and-undef, so sphere(inner_r()) falls back to the DEFAULT radius (~1), not 3.
+    let ext = mesh
+        .verts
+        .iter()
+        .fold(0f64, |a, v| a.max(v[0].abs()).max(v[1].abs()).max(v[2].abs()));
+    assert!(ext < 2.0, "inner_r() (=3) unresolved → default radius ~1 — proof `use` isn't transitive");
 }
 
 /// Write a chain of `count` files `chain_0..chain_{count-1}` under a fresh subdir: each links the next

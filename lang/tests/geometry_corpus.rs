@@ -152,19 +152,17 @@ fn program_eval() {
 
 #[test]
 fn beyond_the_subset_is_loud() {
+    // Geometry needing the BACKEND (implicit union, transforms, booleans) is still LOUD in the pure-eval
+    // subset — Error::Unimplemented points you at evaluate_geometry (J.2). (Unknown SYMBOLS are no longer
+    // loud — warn-and-undef, L.5.7 — see the module/loader corpora.)
     assert!(matches!(
         err("sphere(1); cube(1);"),
         Error::Unimplemented(_)
     )); // implicit union
-    assert!(matches!(err("foo();"), Error::Unknown(m) if m.contains("module `foo`"))); // unknown module
     assert!(matches!(
         err("translate([1,0,0]) cube(1);"),
         Error::Unimplemented(_)
     )); // transform
-    assert!(matches!(
-        err("v = 1; sphere(bogus_fn(v));"),
-        Error::Unknown(m) if m.contains("function `bogus_fn`")
-    )); // an UNKNOWN function in an arg (builtin/known-function calls in args now work — I.4)
 }
 
 #[test]
@@ -367,7 +365,9 @@ fn assert_and_echo_pass_through_to_child_geometry() {
     // EMPTY (the single biggest missing-geometry cause in the L.3 models sweep — those transforms are ubiquitous).
     assert_eq!(mesh("assert(true) cube(10);").vert_count(), 8); // passing guard → child renders
     assert_eq!(mesh("echo(\"hi\") cube(10);").vert_count(), 8);
-    assert!(evaluate("assert(1 > 2) cube(10);").is_err()); // a FAILING guard still errors (child unreached)
+    // a FAILING guard is LOUD in the console but NON-fatal (L.5.8): it halts before the child — so the
+    // mesh is EMPTY here — and warns, rather than erroring the whole render.
+    assert_eq!(mesh("assert(1 > 2) cube(10);").vert_count(), 0); // child unreached → empty, not an Err
     // (a guard over a TRANSFORMED child needs the backend → oracle-tested in fab-scad `differential`)
     // the statement form (semicolon, no child) is unchanged — a pure check/emit, no geometry:
     assert_eq!(mesh("assert(true); cube(10);").vert_count(), 8); // the cube is a SIBLING here, still one object

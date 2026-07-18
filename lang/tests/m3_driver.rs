@@ -54,20 +54,19 @@ fn root_modifier_diverts_only_its_subtree() {
     );
 }
 
-/// A3/A5 + INVARIANT 4 — first-error-wins: the two-class drain runs the FIRST failing assert and DISCARDS every
-/// later work task, so the error is "first", never "second" (a re-dispatching drain would run the second
-/// assert → a different error).
+/// A3/A5 + INVARIANT 4 — first-error-wins: the two-class drain runs the FIRST failing assert and DISCARDS
+/// every later work task. A failed assert is non-fatal now (L.5.8: warn + pre-assert partial), so the
+/// evidence is the CONSOLE — it carries "first" and NEVER "second" (a re-dispatching drain would run the
+/// second assert too).
 #[test]
 fn first_error_wins_the_drain_discards_the_rest() {
-    let err = evaluate_geometry("union() { assert(false, \"first\"); assert(false, \"second\"); }")
-        .unwrap_err();
-    let msg = format!("{err}");
+    let (_, msgs) =
+        fab_lang::evaluate_geometry_full("union() { assert(false, \"first\"); assert(false, \"second\"); }")
+            .expect("a failed assert is non-fatal — warn-and-continue");
+    let log = format!("{msgs:?}");
+    assert!(log.contains("first"), "expected the FIRST assert's message, got {log:?}");
     assert!(
-        msg.contains("first"),
-        "expected the FIRST assert's error, got {msg:?}"
-    );
-    assert!(
-        !msg.contains("second"),
-        "the second assert must NOT run (the drain discards it): {msg:?}"
+        !log.contains("second"),
+        "the second assert must NOT run (the drain discards it): {log:?}"
     );
 }

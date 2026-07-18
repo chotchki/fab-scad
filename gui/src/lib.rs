@@ -57,6 +57,10 @@ mod jobs;
 #[cfg(any(target_arch = "wasm32", test))]
 mod lib_fetch;
 mod panel;
+// Web save-back target derivation (W.5) — pure URL logic (native-tested), no web-sys. Derives the
+// `PUT /media/<ref>/variants` target from the `?model=` deep-link; the wasm boot reads the param.
+#[cfg(any(target_arch = "wasm32", test))]
+mod save_target;
 mod print;
 mod scene;
 mod screenshot;
@@ -184,8 +188,9 @@ fn run_windowed(scene: SceneCfg, shot: Option<PathBuf>) {
     .init_resource::<Pipeline>()
     .init_resource::<AutoJob>()
     .init_resource::<PublishJob>()
-    // W.5.7: the save-back target (from `?ref=` on wasm; always None on desktop → no Save affordance).
-    .init_resource::<MediaRef>()
+    // W.5.7: the save-back target (derived from `?model=` on wasm; always None on desktop → no Save
+    // affordance).
+    .init_resource::<SaveTarget>()
     .init_resource::<Tab>()
     .init_resource::<theme::ThemeReady>()
     .init_resource::<EditorBuf>()
@@ -270,12 +275,17 @@ fn run_windowed(scene: SceneCfg, shot: Option<PathBuf>) {
             .chain(),
     );
     // Browser-only file-IO surface (W.3.12): the `?model=` fetch resource + its landing system, plus
-    // the save-back (W.5.7/.8): read `?ref=` into MediaRef (gates the Save affordance) and run the
-    // save-mesh export + upload job.
+    // the save-back (W.5.7/.8): derive the `PUT /media/<ref>/variants` target from the SAME `?model=`
+    // deep-link (the stable ref rides its path — no separate param), which gates the Save affordance,
+    // and run the save-mesh export + upload job.
     #[cfg(target_arch = "wasm32")]
     app.init_resource::<jobs::ModelFetch>()
         .init_resource::<jobs::SaveJob>()
-        .insert_resource(MediaRef(crate::web_host::query_param("ref")))
+        .insert_resource(SaveTarget(
+            crate::web_host::query_param("model")
+                .as_deref()
+                .and_then(save_target::derive),
+        ))
         .add_systems(
             Update,
             (jobs::poll_model_fetch, jobs::save_action, jobs::poll_save),

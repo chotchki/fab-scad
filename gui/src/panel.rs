@@ -28,7 +28,7 @@ pub(crate) struct PanelView<'w> {
     pub(crate) platform: Res<'w, Platform>,
     pub(crate) pipeline: Res<'w, Pipeline>,
     /// The save-back target (W.5.7): `Some` ⇒ show the "Save to hotchkiss.io" affordance.
-    pub(crate) media_ref: Res<'w, MediaRef>,
+    pub(crate) save_target: Res<'w, SaveTarget>,
 }
 
 /// The whole control panel (U.3), immediate-mode: an app-wide top tab bar + bottom status bar +
@@ -248,10 +248,10 @@ pub(crate) fn panel_ui(
                             );
                         }
                     });
-                    // Save back to the site (W.5.8): web only, and only when the deep-link carried a
-                    // media_ref (else there's no item to update in place). Gold CTA; the status bar
+                    // Save back to the site (W.5.8): web only, and only when the deep-link named a
+                    // media item (else there's no item to update in place). Gold CTA; the status bar
                     // reports progress + result (gui-reactive-standard).
-                    if view.media_ref.0.is_some()
+                    if view.save_target.0.is_some()
                         && ui
                             .add(
                                 egui::Button::new(

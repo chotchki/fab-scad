@@ -1,96 +1,103 @@
 # Web save-back — the fab-scad side of the round-trip (W.5)
 
-The counterpart to the shipped `?model=` LOAD (W.3.12): the wasm app POSTs an edited model back to
-hotchkiss.io. The USER-facing contract lives in the site repo (`hotchkiss-io/docs/fab-scad-roundtrip.md`)
-— this doc is the CODE-facing half: the exact wire fab-gui builds against, pinned against the real
-server, with the cross-repo gaps called out so nobody re-discovers them.
+The counterpart to the shipped `?model=` LOAD (W.3.12): the wasm app writes an edited model back to
+hotchkiss.io. The USER-facing contract lives in the site repo (`hotchkiss-io/docs/media-design.md` —
+§5 the resource, §4 auth, §10 the 3D round-trip); this doc is the CODE-facing half: the exact wire
+fab-gui builds against, pinned to that contract.
 
 ## The split — who owns what
 
-- **fab-scad (here):** produce the three variants, POST them, gate the Save affordance. W.5.2–.8.
-- **hotchkiss-io (chotchki's cross-repo track):** the update-in-place endpoint, the `?ref=` param on
-  the editor deep-link, the replace-vs-version call. As of the W.5.1 recon **none of these exist yet**
-  — the site shipped only the LOAD half (Phase DN). So the app is built against the PROPOSED contract
-  with a configurable endpoint, and every Save affordance is gated on `?ref=` being present (absent ⇒
-  no button, so the app never dangles against a route that isn't there).
+- **fab-scad (here):** produce the three variants, PUT them, gate the Save affordance. W.5.2–.8.
+- **hotchkiss-io (chotchki's repo, SHIPPED — Phases DN/DP/DQ):** the load deep-link, the write
+  endpoint, the auth. All of it is live: the site's media subsystem was rationalized onto a uniform
+  HATEOAS resource, and the round-trip is a first-class part of it (nothing model-special). **No
+  cross-repo blocker remains** — the earlier gap (the deep-link not carrying the ref) is closed.
+
+## One `?model=` drives both load and save
+
+The site's embed "Open in the slicer" button links **`?model=/media/<ref>?format=scad`** — the stable
+`media_ref` rides the model URL's PATH.
+
+- **Load:** the app `fetch_text`s the `?model=` value; the negotiated `GET /media/<ref>?format=scad`
+  307-redirects to the SCAD source (W.3.12, unchanged).
+- **Save target:** derived from the SAME value by **dropping the query and appending `/variants`** →
+  **`PUT /media/<ref>/variants`**. This is §10's blessed derivation ("the SAVE target is derivable by
+  dropping the query … or via the OPTIONS manifest"). `gui/src/save_target.rs::derive` does it, pure +
+  native-tested; the wasm boot reads `?model=` and stores the result in the `SaveTarget` resource.
+
+Why derive instead of a separate `?ref=` param: the site OWNS its URLs and hands us the item's path;
+we follow it (HATEOAS) rather than reconstruct one from a memorized vocabulary. A path-prefixed deploy
+(`/app/media/<ref>`) or an absolute same-origin URL survives the derivation untouched — no
+`data-media-base` config needed. A `?model=` that ISN'T a single item — a generic external `.scad`
+(the plain W.3.12 load), a `/media/file/<url_key>` byte URL, or an already-a-collection URL — yields
+`None` ⇒ **no Save button**, so the app never dangles a write against a non-item URL.
 
 ## What the app sends
 
-Three files, `multipart/form-data`, one **`PATCH /media/<ref>`** — the ref is in the URL, NOT the body:
+Three files, `multipart/form-data`, one **`PUT /media/<ref>/variants`** — the ref is in the URL, NOT
+the body:
 
 | part | how the server keys it | notes |
 |---|---|---|
-| source SCAD | **filename ending `.scad`** | the editor buffer's current text |
+| source SCAD | **filename ending `.scad`** | the editor buffer's current text (config baked in, W.3.8) |
 | low-res mesh | **filename ending `.stl` or `.3mf`** | decimated; same format as high (W.5.6) |
 | full-res mesh | **filename ending `.stl` or `.3mf`** | whole solid; colored ⇒ 3MF (W.5.4/.5) |
 
-The critical, non-obvious server behavior (frozen Phase-DO contract):
+The critical, non-obvious server behavior (media-design.md §5/§7):
 
-- **Files are classified by FILENAME EXTENSION, not by part name or Content-Type.** The handler
-  streams any part that carries a `file_name()` and types it by extension (`.scad`→
-  `application/x-openscad`, `.stl`→`model/stl`, `.3mf`→`model/3mf`). So: give each file part the right
-  extension, and **do NOT set a per-part `Content-Type`** — web-sys `FormData` omitting it is exactly
-  right (it also lets the browser own the multipart boundary, which a manual header would break).
-- **Non-file fields are IGNORED** — the `media_ref` rides the URL path, not a form field. And PATCH is a
-  COMPLETE replacement, so send ALL THREE variants every save (a partial would drop the omitted ones).
+- **Files are classified by FILENAME EXTENSION, not by part name or Content-Type.** The shared
+  `ingest_multipart` streams any part carrying a `file_name()` and types it by extension
+  (`.scad`→`application/x-openscad`, `.stl`→`model/stl`, `.3mf`→`model/3mf`). So give each file part
+  the right extension, and **do NOT set a per-part `Content-Type`** — web-sys `FormData` omitting it is
+  exactly right (it also lets the browser own the multipart boundary, which a manual header breaks).
+- **PUT `…/variants` is a COMPLETE replacement of the variant COLLECTION** — the uploaded set becomes
+  the item's whole variant set (wiped + re-inserted in one transaction). So send ALL THREE variants
+  every save; a partial drops the omitted ones. The item's identity (`media_ref`, `title`, `min_role`
+  gate) lives on the PARENT `/media/<ref>` and is untouched — which is exactly why the collection
+  sub-resource beats DO's old PATCH-that-remembers-to-preserve-metadata.
 
 ## Auth — ambient cookie, no token
 
 - Session cookie **`id`** (tower-sessions default name), `HttpOnly`, `SameSite=Lax`, signed, `Secure`
-  in release. The editor is **same-origin**, and Lax sends the cookie on a same-site PATCH, so a
+  in release. The editor is **same-origin**, and Lax sends the cookie on a same-site PUT, so a
   logged-in session's save is authed automatically.
-- **No CSRF token anywhere** in the server — the write-protection is `SameSite=Lax` +
-  `require_admin_for_mutations` (fail-closed: every non-GET needs an authenticated **Admin**). So Save
-  works only for an admin session (chotchki's), which is the intent — but the app should surface a
-  401/403 as "log in as admin on the site", not a generic failure.
-- fab-gui sends `credentials: 'same-origin'` (or `'include'`) on the fetch — the default already
-  carries the cookie; COOP/COEP isolation on the editor doc does NOT strip a same-origin cookie.
-- **Alt path (non-browser):** an `Authorization: Bearer hio_…` API key resolves to an Admin session
-  with no cookie (how `fab publish` authenticates) — available if the app ever POSTs from outside a
-  logged-in browser.
+- **No CSRF token anywhere** in the server — the write-protection is the site-wide fail-closed
+  mutation gate (`require_admin_for_mutations`, §4a): every non-safe method (PUT here) needs an
+  authenticated **Admin**. So Save works only for an admin session (chotchki's), which is the intent.
+  The app surfaces a 401 as "log in as admin", a 403 as "not an admin".
+- fab-gui sends `credentials: 'same-origin'` on the fetch — the default already carries the cookie;
+  COOP/COEP isolation on the editor doc does NOT strip a same-origin cookie.
+- **Alt path (non-browser):** an `Authorization: Bearer hio_…` API key resolves to an Admin with no
+  cookie (how `fab publish` authenticates) — available if the app ever writes from outside a logged-in
+  browser.
 
-## The URL params
+## The endpoint — `PUT /media/<ref>/variants` (SHIPPED, Phase DQ.1)
 
-- `?model=/media/file/<url_key>` — SHIPPED. The SCAD bytes URL; the app `fetch_text`s it. `url_key`
-  is a per-variant HMAC token, **NOT** the `media_ref`.
-- `?ref=<media_ref>` — **does not exist yet** (site Half-2). The stable UUIDv7 item token the upload
-  targets. The app reads it at boot (W.5.7); **absent ⇒ no Save affordance.** (Alternative the site
-  may choose instead: resolve the ref server-side from the `url_key` — then the app wouldn't need
-  `?ref=` at all. Either way the app degrades cleanly when it can't see a ref.)
+Re-verbed from DO's `PATCH /media/<ref>` as part of the site's HATEOAS rationalization: writes are
+idempotent PUTs (replace) except the two server-assigns-identity creates (POST); **there is no PATCH.**
+`…/variants` is the item's variant COLLECTION, and replace-all is a PUT on it. Same-origin + relative,
+so the ambient session cookie rides. The fail-closed mutation layer gates it to Admin automatically —
+no bespoke guard, no CSRF token.
 
-## The endpoint — FROZEN (Phase DO)
+- **Body:** `multipart/form-data`, same shape as create — one file part per file, typed by filename
+  EXTENSION. Non-file fields ignored. No manual `Content-Type`.
+- **Response:** `200` + the item **manifest** JSON `{ref, kind, title, min_role, variants:[{type, bytes,
+  href, …}], controls?}` — the final set, confirming the swap. `404` unknown ref (deleted since load),
+  `400` empty body (a replace-to-nothing is a DELETE; the app always sends three, so never hits it).
+- **`url_key` churn:** replacing bytes mints new per-variant `HMAC(sha)` `url_key`s, so a pasted
+  `/media/file/<url_key>` link goes stale — but every `![](/media/<ref>)` embed resolves live across
+  the save (the whole point of the stable ref). Embed by ref, never by `url_key`.
 
-**`PATCH /media/<ref>`** — the ref IS the resource, in the URL PATH (not a form field). Same-origin +
-relative, so the ambient session cookie rides. The app builds it via `web_host::media_patch_url(ref)` =
-`{data-media-base or "/media"}/{ref}`; the `data-media-base` attr only matters for a path-prefixed
-deploy. The fail-closed mutation layer gates any non-GET to Admin automatically — no bespoke guard, no
-CSRF token.
+The pure-HATEOAS alternative to the drop-the-query derivation is `OPTIONS /media/<ref>` →
+`controls.replace-all.href` (§5's manifest). Both are sanctioned by §10; the derivation avoids the
+extra round-trip and the Admin-gated controls block, so that's what the app does.
 
-- **Body:** `multipart/form-data`, same shape as the mint upload — one file part per file, typed by
-  filename EXTENSION (`.scad`→`application/x-openscad`, `.3mf`→`model/3mf`, `.stl`→`model/stl`). Non-file
-  fields are ignored (so the `media_ref` is NOT in the body). No manual `Content-Type`.
-- **Semantics — COMPLETE replacement:** the uploaded set BECOMES the item's entire variant set (wiped +
-  re-inserted in one transaction). Identity — `media_ref`, `title`, `min_role` gate — is preserved, so
-  every `![](/media/<ref>)` embed survives; anything not re-uploaded is DROPPED. So the app MUST send all
-  three variants every save (source + low + high), never a partial.
-- **Response:** `200` JSON `{media_ref, kind, variants:[{url_key, mime, bytes}...]}` — the final set, to
-  confirm the swap. `404` unknown ref (deleted since load), `400` empty body.
-- **`url_key` churn:** replacing bytes changes the per-variant `HMAC(sha)` `url_key`, so a pasted
-  `/media/file/<url_key>` link goes stale — but `![](/media/<ref>)` embeds resolve live. Embed by ref.
+## Status: the client half is DONE and matches the shipped contract
 
-## The ONE remaining blocker (chotchki, site-side)
-
-Recon of the shipped site code (Phase DO) confirmed the PATCH endpoint above is real and matches this
-contract **exactly** — but found the load side still open, and the site's own doc contradicts its code:
-
-- **The editor deep-link carries NO ref.** `open_in_slicer_button` (`hotchkiss-io/src/web/features/media.rs:549`)
-  emits only `/3d/editor?model=/media/file/<scad_url_key>`. That `url_key` is an `HMAC(sha)` of the SCAD
-  variant's bytes — NOT the `media_ref` — and it CHANGES on every save, with no reverse `url_key→ref`
-  map. So the app currently has no way to learn the `media_ref` at boot, and the round-trip can't close.
-- **The fix (site):** add the ref to that link — `?model=…&ref=<media_ref>` — where `<media_ref>` is the
-  raw 32-char hex UUIDv7 (`media.rs:296`, `Uuid::now_v7().simple()`). The app reads it verbatim via
-  `web_host::query_param("ref")` (W.5.7) and PATCHes to `/media/<ref>` unchanged — no encoding, no
-  normalization (the route matches the raw string, `media.rs:374`).
-- Until then the app is READY and inert: no `?ref=` ⇒ no Save button (`MediaRef` is `None`), so it never
-  dangles against the live endpoint. The whole client half (W.5.1–.8) is done and verified against the
-  frozen contract; only this one site-side link change gates the live round-trip.
+W.5.1–.8 are complete and verified against `media-design.md`. The in-process wire e2e
+(`save_back_pipeline_through_the_wire`) exercises the whole render→decimate→emit→envelope path; the
+URL derivation is unit-tested (`save_target::tests`). The only thing not yet exercised end-to-end is
+the **browser leg** (W.5.9): a real headless-Chrome load-`?model=` → click Save → PUT-with-cookie,
+which folds into W.6.2's headless-Chrome refresh (it needs the parallel worker + a DOM-automation
+driver the console-grep boot gate lacks). Nothing blocks it cross-repo anymore — it's purely a
+test-harness gap on this side.

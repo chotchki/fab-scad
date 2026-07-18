@@ -41,27 +41,15 @@ pub(crate) fn query_param(name: &str) -> Option<String> {
     params.get(name)
 }
 
-/// The save-back target URL for a `media_ref` (W.5.8) — the FROZEN Phase-DO contract is `PATCH
-/// /media/<ref>`: the ref IS the resource, in the URL PATH (not a form field). Same-origin + relative,
-/// so the ambient session cookie rides. `data-media-base` on the `#fab-gui` canvas overrides the `/media`
-/// prefix for a path-prefixed deploy; default is the contract's `/media`. See `docs/web-save-back.md`.
-pub(crate) fn media_patch_url(media_ref: &str) -> String {
-    let base = web_sys::window()
-        .and_then(|w| w.document())
-        .and_then(|d| d.get_element_by_id("fab-gui"))
-        .and_then(|c| c.get_attribute("data-media-base"))
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "/media".to_string());
-    format!("{}/{media_ref}", base.trim_end_matches('/'))
-}
-
-/// PATCH the save-back variants to `url` as `multipart/form-data` (W.5.8, frozen Phase-DO contract).
-/// Each file rides as a `Blob` with a FILENAME — the site types each by its filename EXTENSION, not the
-/// part name or declared Content-Type, so the extension is what matters (the MIME is a courtesy); non-file
-/// fields are ignored, so the `media_ref` lives in the URL, not the body. PATCH = complete variant-set
-/// replacement in one transaction (item identity preserved). Credentials are `same-origin` so the ambient
-/// session cookie (`id`, SameSite=Lax) authenticates the Admin — no token, no CSRF header (none exists
-/// server-side). NO manual `Content-Type`: the browser owns the multipart boundary. `Err(msg)` on failure.
+/// PUT the save-back variants to `url` as `multipart/form-data` (W.5.8, shipped `PUT /media/<ref>/variants`
+/// contract — media-design.md §5/§10, re-verbed from DO's PATCH). Each file rides as a `Blob` with a
+/// FILENAME — the site types each by its filename EXTENSION, not the part name or declared Content-Type,
+/// so the extension is what matters (the MIME is a courtesy); non-file fields are ignored, so the
+/// `media_ref` lives in the URL PATH, not the body. PUT = COMPLETE variant-collection replacement in one
+/// transaction (item identity — ref/title/min_role — preserved on the parent). Credentials are
+/// `same-origin` so the ambient session cookie (`id`, SameSite=Lax) authenticates the Admin — no token,
+/// no CSRF header (none exists server-side). NO manual `Content-Type`: the browser owns the multipart
+/// boundary. `Err(msg)` on failure.
 pub(crate) async fn upload_multipart(
     url: &str,
     files: &[(&str, &str, &str, &[u8])], // (field name, filename, mime, bytes)
@@ -83,7 +71,7 @@ pub(crate) async fn upload_multipart(
     let form = build().ok_or_else(|| "could not assemble the upload form".to_string())?;
 
     let init = web_sys::RequestInit::new();
-    init.set_method("PATCH");
+    init.set_method("PUT");
     init.set_body(&form);
     init.set_credentials(web_sys::RequestCredentials::SameOrigin);
 

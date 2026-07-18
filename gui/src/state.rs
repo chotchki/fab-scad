@@ -520,17 +520,19 @@ pub(crate) enum PanelCmd {
     ToggleView,
     Publish,
     Export,
-    /// Save the edited model back to hotchkiss.io (W.5.8) — web only, and only when a `media_ref` is
-    /// present (the button that writes this is gated on [`MediaRef`]).
+    /// Save the edited model back to hotchkiss.io (W.5.8) — web only, and only when a save target was
+    /// derived from the deep-link (the button that writes this is gated on [`SaveTarget`]).
     SaveToSite,
 }
 
-/// The hotchkiss.io media item this session edits (W.5.7), carried in from the editor deep-link's
-/// `?ref=`. `Some` only on the web when the site links WITH a ref — it gates the "Save to
-/// hotchkiss.io" affordance (absent ⇒ no save target ⇒ no button, so the app never dangles against a
-/// write endpoint that isn't wired). Always `None` on desktop (no URL params).
+/// The round-trip SAVE target for the hotchkiss.io media item this session edits (W.5.7): the
+/// `PUT /media/<ref>/variants` URL, derived from the editor deep-link's `?model=` path (the stable
+/// `media_ref` rides it — [`save_target::derive`](crate::save_target::derive)). `Some` only on the web
+/// when `?model=` names a single media item — it gates the "Save to hotchkiss.io" affordance (a generic
+/// external `.scad`, or no param, ⇒ `None` ⇒ no button, so the app never dangles a write against a URL
+/// that isn't an item). Always `None` on desktop (no URL params).
 #[derive(Resource, Default)]
-pub(crate) struct MediaRef(pub(crate) Option<String>);
+pub(crate) struct SaveTarget(pub(crate) Option<String>);
 
 /// Panel → seam outputs, written by `panel_ui` each frame and read by the 3D systems: `over_ui`
 /// yields the camera orbit when the pointer is on a panel; `width_px`/`top_px`/`bottom_px` inset the

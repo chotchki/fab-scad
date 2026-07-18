@@ -1026,16 +1026,18 @@ pub(crate) struct SaveJob(pub(crate) Option<Task<Result<String, String>>>);
 
 /// Save the edited model back to hotchkiss.io (W.5.8): bake the config block into the source (exactly
 /// the download path), then off-thread — full-res render (mints a handle) -> SaveMeshes off it (colored
-/// -> both 3MF, else both STL) -> Free the handle -> multipart POST {source, low, high} to the save
-/// endpoint under the ambient session cookie. All three are the SAME format (the roundtrip rule). The
-/// button is gated on a `media_ref`, so this only fires when there's an item to update in place.
+/// -> both 3MF, else both STL) -> Free the handle -> multipart PUT {source, low, high} to the item's
+/// variant collection under the ambient session cookie (a COMPLETE replace). All three are the SAME
+/// format (the roundtrip rule). The button is gated on a derived save target, so this only fires when
+/// the deep-link named an item to update in place.
 #[cfg(target_arch = "wasm32")]
+#[allow(clippy::too_many_arguments)] // a Bevy system — params are dependencies, not a smell
 pub(crate) fn save_action(
     mut ev: MessageReader<PanelCmd>,
     editor: Res<EditorBuf>,
     parts: Res<Parts>,
     scene: Res<SceneCfg>,
-    media_ref: Res<MediaRef>,
+    save_target: Res<SaveTarget>,
     pool: Res<GeomPool>,
     mut job: ResMut<SaveJob>,
     mut status: ResMut<Status>,
@@ -1047,8 +1049,8 @@ pub(crate) fn save_action(
         status.0 = "already saving…".into();
         return;
     }
-    let Some(media_ref) = media_ref.0.clone() else {
-        status.0 = "no ?ref= — nothing to save back to".into();
+    let Some(url) = save_target.0.clone() else {
+        status.0 = "this model isn't a saveable hotchkiss.io item".into();
         return;
     };
     // Bake the live slicing config + bed into the source, same as the .scad download (W.3.8), so a
@@ -1064,8 +1066,7 @@ pub(crate) fn save_action(
         .filter(|n| !n.is_empty())
         .unwrap_or("model.scad");
     let stem = name.strip_suffix(".scad").unwrap_or(name).to_string();
-    // Frozen Phase-DO contract: PATCH /media/<ref> — the ref rides the URL PATH, not the body.
-    let url = crate::web_host::media_patch_url(&media_ref);
+    // `url` is the `PUT /media/<ref>/variants` target, derived from `?model=` at boot (SaveTarget).
     let pool = pool.clone();
 
     let task = AsyncComputeTaskPool::get().spawn(async move {

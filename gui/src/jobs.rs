@@ -1018,6 +1018,129 @@ pub(crate) fn poll_publish(mut job: ResMut<PublishJob>, mut status: ResMut<Statu
     }
 }
 
+/// The in-flight save-back job (W.5.8) — render full-res, export the two mesh variants, upload all
+/// three files. Yields the endpoint's response body or an error. Web only (web-sys FormData + fetch).
+#[cfg(target_arch = "wasm32")]
+#[derive(Resource, Default)]
+pub(crate) struct SaveJob(pub(crate) Option<Task<Result<String, String>>>);
+
+/// Save the edited model back to hotchkiss.io (W.5.8): bake the config block into the source (exactly
+/// the download path), then off-thread — full-res render (mints a handle) -> SaveMeshes off it (colored
+/// -> both 3MF, else both STL) -> Free the handle -> multipart POST {source, low, high} to the save
+/// endpoint under the ambient session cookie. All three are the SAME format (the roundtrip rule). The
+/// button is gated on a `media_ref`, so this only fires when there's an item to update in place.
+#[cfg(target_arch = "wasm32")]
+pub(crate) fn save_action(
+    mut ev: MessageReader<PanelCmd>,
+    editor: Res<EditorBuf>,
+    parts: Res<Parts>,
+    scene: Res<SceneCfg>,
+    media_ref: Res<MediaRef>,
+    pool: Res<GeomPool>,
+    mut job: ResMut<SaveJob>,
+    mut status: ResMut<Status>,
+) {
+    if !ev.read().any(|c| *c == PanelCmd::SaveToSite) {
+        return;
+    }
+    if job.0.is_some() {
+        status.0 = "already saving…".into();
+        return;
+    }
+    let Some(media_ref) = media_ref.0.clone() else {
+        status.0 = "no ?ref= — nothing to save back to".into();
+        return;
+    };
+    // Bake the live slicing config + bed into the source, same as the .scad download (W.3.8), so a
+    // reload restores the plan. This IS the source variant we upload.
+    let printer = config::PrinterCfg {
+        bed: [scene.bed[0] as f64, scene.bed[1] as f64, scene.bed[2] as f64],
+    };
+    let baked = config::with_config_block(&editor.text, &parts.0, Some(printer));
+    let name = editor
+        .path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .filter(|n| !n.is_empty())
+        .unwrap_or("model.scad");
+    let stem = name.strip_suffix(".scad").unwrap_or(name).to_string();
+    let endpoint = crate::web_host::save_endpoint();
+    let pool = pool.clone();
+
+    let task = AsyncComputeTaskPool::get().spawn(async move {
+        let main = baked.into_bytes();
+        let libs = crate::lib_fetch::lib_closure(&String::from_utf8_lossy(&main)).await;
+
+        // 1. Full-res render → held handle.
+        let id = match pool
+            .call(Request::RenderWhole {
+                source: Source::Bytes {
+                    main: main.clone(),
+                    libs,
+                },
+                root: None,
+                preview: false,
+            })
+            .await
+        {
+            Ok(Response::Rendered { id, .. }) => id,
+            Ok(Response::Failed { error }) => return Err(format!("render failed: {error}")),
+            Ok(_) => return Err("render: unexpected service response".into()),
+            Err(e) => return Err(format!("render transport: {e}")),
+        };
+
+        // 2. Produce the two mesh variants off the handle; 3. drop the handle regardless.
+        let meshes = pool
+            .call(Request::SaveMeshes {
+                base: id,
+                budget: 20_000,
+            })
+            .await;
+        let _ = pool.call(Request::Free { ids: vec![id] }).await;
+
+        let (low, high, ext) = match meshes {
+            Ok(Response::SavedMeshes { low, high, ext }) => (low, high, ext),
+            Ok(Response::Failed { error }) => return Err(format!("mesh export failed: {error}")),
+            Ok(_) => return Err("save-meshes: unexpected service response".into()),
+            Err(e) => return Err(format!("save-meshes transport: {e}")),
+        };
+
+        // 4. Upload all three — same format for low+high, cookie-authenticated.
+        let mesh_mime = if ext == "3mf" { "model/3mf" } else { "model/stl" };
+        let src_name = format!("{stem}.scad");
+        let low_name = format!("{stem}_low.{ext}");
+        let high_name = format!("{stem}.{ext}");
+        let files = [
+            ("source", src_name.as_str(), "application/x-openscad", main.as_slice()),
+            ("low", low_name.as_str(), mesh_mime, low.as_slice()),
+            ("high", high_name.as_str(), mesh_mime, high.as_slice()),
+        ];
+        crate::web_host::upload_multipart(&endpoint, &media_ref, &files).await
+    });
+    job.0 = Some(task);
+    status.0 = "saving to hotchkiss.io…".into();
+}
+
+/// Land the save-back job: report success or the error (per gui-reactive-standard — the status bar is
+/// the feedback surface, no modal).
+#[cfg(target_arch = "wasm32")]
+pub(crate) fn poll_save(mut job: ResMut<SaveJob>, mut status: ResMut<Status>) {
+    let Some(task) = job.0.as_mut() else {
+        return;
+    };
+    let Some(result) = block_on(future::poll_once(task)) else {
+        return;
+    };
+    job.0 = None;
+    match result {
+        Ok(_) => {
+            status.0 = "saved to hotchkiss.io".into();
+            info!("{}", status.0);
+        }
+        Err(e) => status.0 = format!("save failed: {e}"),
+    }
+}
+
 /// Open the active `.scad` source in the OpenSCAD GUI (detached) so you can edit it; the file-watch
 /// re-renders here on save.
 /// "Reset to auto" (the `PanelCmd::AutoSlice` button): wipe the active part's cuts + connectors and

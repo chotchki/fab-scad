@@ -78,6 +78,10 @@ web-sys = { version = "0.3", features = [
     "UrlSearchParams",
     "HtmlAnchorElement",
     "Response",
+    # Save-back upload (W.5.8): multipart POST of the three variants, same-origin cookie.
+    "FormData",
+    "RequestInit",
+    "RequestCredentials",
     "Storage",
     "Worker",
     "WorkerOptions",

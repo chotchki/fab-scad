@@ -184,6 +184,8 @@ fn run_windowed(scene: SceneCfg, shot: Option<PathBuf>) {
     .init_resource::<Pipeline>()
     .init_resource::<AutoJob>()
     .init_resource::<PublishJob>()
+    // W.5.7: the save-back target (from `?ref=` on wasm; always None on desktop → no Save affordance).
+    .init_resource::<MediaRef>()
     .init_resource::<Tab>()
     .init_resource::<theme::ThemeReady>()
     .init_resource::<EditorBuf>()
@@ -267,10 +269,17 @@ fn run_windowed(scene: SceneCfg, shot: Option<PathBuf>) {
         )
             .chain(),
     );
-    // Browser-only file-IO surface (W.3.12): the `?model=` fetch resource + its landing system.
+    // Browser-only file-IO surface (W.3.12): the `?model=` fetch resource + its landing system, plus
+    // the save-back (W.5.7/.8): read `?ref=` into MediaRef (gates the Save affordance) and run the
+    // save-mesh export + upload job.
     #[cfg(target_arch = "wasm32")]
     app.init_resource::<jobs::ModelFetch>()
-        .add_systems(Update, jobs::poll_model_fetch);
+        .init_resource::<jobs::SaveJob>()
+        .insert_resource(MediaRef(crate::web_host::query_param("ref")))
+        .add_systems(
+            Update,
+            (jobs::poll_model_fetch, jobs::save_action, jobs::poll_save),
+        );
     app.run();
 }
 

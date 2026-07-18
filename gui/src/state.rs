@@ -520,7 +520,17 @@ pub(crate) enum PanelCmd {
     ToggleView,
     Publish,
     Export,
+    /// Save the edited model back to hotchkiss.io (W.5.8) — web only, and only when a `media_ref` is
+    /// present (the button that writes this is gated on [`MediaRef`]).
+    SaveToSite,
 }
+
+/// The hotchkiss.io media item this session edits (W.5.7), carried in from the editor deep-link's
+/// `?ref=`. `Some` only on the web when the site links WITH a ref — it gates the "Save to
+/// hotchkiss.io" affordance (absent ⇒ no save target ⇒ no button, so the app never dangles against a
+/// write endpoint that isn't wired). Always `None` on desktop (no URL params).
+#[derive(Resource, Default)]
+pub(crate) struct MediaRef(pub(crate) Option<String>);
 
 /// Panel → seam outputs, written by `panel_ui` each frame and read by the 3D systems: `over_ui`
 /// yields the camera orbit when the pointer is on a panel; `width_px`/`top_px`/`bottom_px` inset the

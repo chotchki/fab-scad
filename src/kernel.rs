@@ -397,6 +397,21 @@ impl Solid {
         out
     }
 
+    /// Serialize to a standard 3MF (core + `<basematerials>` color) — the whole model as ONE object at
+    /// the origin, for the web save-back's mesh variant (W.5). Carries the per-vertex color the kernel
+    /// holds ([`vertex_colors`](Self::vertex_colors), which survives every boolean) as a distinct-color
+    /// material table; an uncolored solid emits a plain mesh. In-memory, the 3MF twin of
+    /// [`to_stl_bytes`](Self::to_stl_bytes). See [`crate::threemf_out`] for the format + the seam caveat.
+    pub fn to_3mf_bytes(&self) -> Vec<u8> {
+        let (verts, tris) = self.to_indexed();
+        let v: Vec<[f64; 3]> = verts.iter().map(|p| p.to_array()).collect();
+        let t: Vec<[u32; 3]> = tris.iter().map(|tri| tri.indices()).collect();
+        let colors = self
+            .vertex_colors()
+            .map(|cs| cs.iter().map(|c| [c.r, c.g, c.b, c.a]).collect::<Vec<[f64; 4]>>());
+        crate::threemf_out::to_3mf_bytes(&v, &t, colors.as_deref())
+    }
+
     /// Indexed mesh: deduped vertices + 0-based triangle indices (for exporters that want indexed
     /// geometry, e.g. the Bambu writer).
     pub fn to_indexed(&self) -> (Vec<Vec3>, Vec<Tri>) {
@@ -1195,6 +1210,54 @@ mod tests {
                 .iter()
                 .all(|&c| c == blue)
         );
+    }
+
+    #[test]
+    fn to_3mf_bytes_carries_the_real_mesh_and_distinct_colors() {
+        use std::io::Read;
+        let read_model = |bytes: &[u8]| -> String {
+            let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes.to_vec())).unwrap();
+            let mut f = zip.by_name("3D/3dmodel.model").unwrap();
+            let mut s = String::new();
+            f.read_to_string(&mut s).unwrap();
+            s
+        };
+
+        // Two DISJOINT colored cubes (translated apart → no boolean seam, so colors stay exactly
+        // red/blue — a clean two-material check on a real Manifold mesh).
+        let red = Rgba::opaque(1.0, 0.0, 0.0);
+        let blue = Rgba::opaque(0.0, 0.0, 1.0);
+        let red_cube = Solid::cube(10.0, 10.0, 10.0, false).with_color(red);
+        let blue_cube = Solid::cube(6.0, 6.0, 6.0, false)
+            .translate(Vec3::new(20.0, 0.0, 0.0))
+            .with_color(blue);
+        let both = red_cube.union(&blue_cube);
+
+        let (verts, tris) = both.to_indexed();
+        let model = read_model(&both.to_3mf_bytes());
+        assert_eq!(
+            model.matches("<vertex ").count(),
+            verts.len(),
+            "every kernel vertex emitted"
+        );
+        assert_eq!(
+            model.matches("<triangle ").count(),
+            tris.len(),
+            "every kernel triangle emitted"
+        );
+        assert_eq!(
+            model.matches("<base ").count(),
+            2,
+            "red + blue survive as two materials"
+        );
+        assert!(
+            model.contains("displaycolor=\"#FF0000FF\"")
+                && model.contains("displaycolor=\"#0000FFFF\"")
+        );
+
+        // An uncolored solid → a plain mesh, no materials resource.
+        let plain = Solid::cube(5.0, 5.0, 5.0, false).to_3mf_bytes();
+        assert!(!read_model(&plain).contains("basematerials"));
     }
 
     #[test]

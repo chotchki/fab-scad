@@ -24,10 +24,18 @@ mod geo_hash;
 // the wasm app for in-process co-pack + export (W.3.4). `kernel` implies `mesh-io`, so native is unchanged.
 #[cfg(feature = "mesh-io")]
 pub mod bambu;
+// Standard 3MF (core + basematerials color) whole-model writer — the web save-back's mesh variant
+// (W.5). Mesh-only (no Solid), so it rides `mesh-io` like `bambu`, reachable on the wasm worker.
+#[cfg(feature = "mesh-io")]
+pub mod threemf_out;
 // BOSL2 test corpus runner (K.1 tier 2): needs fab-lang (eval) + toml + std::fs — a native dev/CI tool.
 #[cfg(feature = "native")]
 pub mod corpus;
 pub mod cross_section;
+// QEM mesh decimation (W.5) — the web save-back's low-res mesh variant. Mesh-only (no Solid), so it
+// rides `mesh-io` like `threemf_out` and runs on the wasm geom worker.
+#[cfg(feature = "mesh-io")]
+pub mod decimate;
 pub mod deps;
 // Pure onion-joint feasibility + slab math (W.3.4) — no Solid, so it rides `geometry` (reachable on
 // the wasm app for the live joint-downgrade flag). Extracted from `slicing`; the kernel slicer reuses it.
@@ -44,6 +52,12 @@ pub mod geomsvc;
 pub mod import;
 #[cfg(feature = "kernel")]
 pub mod kernel;
+// Browser-wasm thread-pool initializer (W.6): re-exported up the crate chain so the geom worker's final
+// cdylib (fab-geom) carries wasm-bindgen-rayon's `initThreadPool` JS export. The worker MUST
+// `await initThreadPool(navigator.hardwareConcurrency)` before the first kernel call, on a
+// cross-origin-isolated (COOP/COEP) page. Native + serial wasm: absent (OS threads / serial).
+#[cfg(all(feature = "kernel-par", target_arch = "wasm32", target_os = "unknown"))]
+pub use fab_manifold::init_thread_pool;
 pub mod manifest;
 pub mod num;
 #[cfg(feature = "native")]

@@ -16,6 +16,12 @@ use wasm_bindgen::prelude::*;
 
 use fab_scad::geomsvc::{SolidStore, handle_with_store};
 
+// W.6: carry wasm-bindgen-rayon's `initThreadPool` JS export into THIS cdylib (the worker's wasm) so
+// the worker JS can `await initThreadPool(...)` before the first `handle()` call. Present only on the
+// threaded browser build (`par`); native + serial wasm don't have it.
+#[cfg(all(feature = "par", target_arch = "wasm32", target_os = "unknown"))]
+pub use fab_scad::init_thread_pool;
+
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen(start)]
 fn start() {

@@ -9,6 +9,12 @@ license = "GPL-2.0-or-later"
 [lib]
 crate-type = ["cdylib", "rlib"]
 
+# W.6: `par` builds the worker's wasm with fab-manifold's rayon-over-wasm-bindgen-rayon pool (threaded
+# boolean kernel). build-wasm.sh passes it with nightly `-Z build-std` + atomics; native
+# `cargo test -p fab-geom` never needs it (native fab-manifold is `par` unconditionally).
+[features]
+par = ["fab-scad/kernel-par"]
+
 [dependencies]
 fab-scad = { path = "..", default-features = false, features = ["kernel"] }
 wasm-bindgen = "0.2"

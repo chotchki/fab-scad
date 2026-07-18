@@ -24,16 +24,22 @@ if [[ "$profile" == "release" ]] && command -v wasm-opt >/dev/null; then
   wasm-opt -Oz -o gui/web/fab_gui_bg.wasm gui/web/fab_gui_bg.wasm
 fi
 
-# The geometry Worker (W.3.6): the kernel-only fab-geom wasm (Manifold via wasm-cxx-shim) in its own
-# Web Worker. Needs LLVM-21 for the C++ build — prepend it (override with LLVM_BIN=… on other setups).
-LLVM_BIN="${LLVM_BIN:-/opt/homebrew/opt/llvm@21/bin}"
-echo "building fab-geom worker (manifold-wasm, LLVM-21)…"
-PATH="$LLVM_BIN:$PATH" cargo build -p fab-geom --release --target wasm32-unknown-unknown
+# The geometry Worker (W.3.6 → W.6): the kernel-only fab-geom wasm — now PURE-RUST fab-manifold (the
+# C++ manifold3d/wasm-cxx-shim was CUT at M.7.4), so NO LLVM/C++ toolchain. Built THREADED (W.6):
+# fab-manifold `par` over wasm-bindgen-rayon needs shared-memory wasm — nightly `-Z build-std` with
+# +atomics — so the worker runs the boolean kernel in parallel. The threaded wasm REQUIRES a
+# cross-origin-isolated (COOP/COEP) page to instantiate (SharedArrayBuffer); the worker JS awaits
+# `initThreadPool` before the first call.
+echo "building fab-geom worker (fab-manifold, threaded: nightly build-std + atomics)…"
+RUSTFLAGS='-C target-feature=+atomics,+bulk-memory,+mutable-globals' \
+  cargo +nightly build -p fab-geom --release --target wasm32-unknown-unknown \
+  --features par -Z build-std=panic_abort,std
 mkdir -p gui/web/geom
 wasm-bindgen --target web --no-typescript --out-name fab_geom --out-dir gui/web/geom \
   "target/wasm32-unknown-unknown/$dir/fab_geom.wasm"
 if [[ "$profile" == "release" ]] && command -v wasm-opt >/dev/null; then
-  wasm-opt -Oz --enable-reference-types --enable-bulk-memory \
+  # --enable-threads keeps the atomics/shared-memory ops through the opt pass.
+  wasm-opt -Oz --enable-threads --enable-reference-types --enable-bulk-memory \
     -o gui/web/geom/fab_geom_bg.wasm gui/web/geom/fab_geom_bg.wasm
 fi
 cp packaging/web/geom-worker.js gui/web/geom/
@@ -45,4 +51,6 @@ python3 packaging/web/pack_scad_libs.py gui/web/libs.json
 sz=$(du -h gui/web/fab_gui_bg.wasm | cut -f1)
 gsz=$(du -h gui/web/geom/fab_geom_bg.wasm | cut -f1)
 echo "built -> gui/web/fab_gui.js + fab_gui_bg.wasm ($sz) + geom/fab_geom_bg.wasm ($gsz)"
-echo "serve:  python3 -m http.server --directory gui/web 8080   # then open http://localhost:8080"
+# MUST serve with COOP/COEP now: the threaded geom worker needs SharedArrayBuffer (cross-origin
+# isolation) or it won't instantiate. dev-server.py sets both headers; plain http.server does NOT.
+echo "serve:  python3 packaging/web/dev-server.py gui/web 8080   # COOP/COEP on -> http://127.0.0.1:8080"

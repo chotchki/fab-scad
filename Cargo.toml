@@ -74,6 +74,10 @@ kernel = [
     "dep:quick-xml",
     "dep:usvg",
 ]
+# Threaded kernel on BROWSER wasm (W.6): turn on fab-manifold's rayon-over-wasm-bindgen-rayon pool. The
+# geom worker's wasm build opts in (fab-geom `par`); native already gets `par` unconditionally (the
+# target-scoped dep below). Carries manifold's `initThreadPool` JS export into the final cdylib.
+kernel-par = ["kernel", "fab-manifold/par"]
 # The Bambu `.3mf` WRITER (`bambu`): an OPC zip of hand-written XML + indexed meshes — mesh-only, no
 # Solid, no C++ kernel. Split out of `kernel` (W.3.4) so the wasm fab-gui app can co-pack + export
 # in-process without the Manifold toolchain, while the miri-lean `geometry` build stays zip-free.

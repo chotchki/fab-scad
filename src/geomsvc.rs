@@ -98,9 +98,11 @@ pub fn handle_with_store(store: &mut SolidStore, req: Request) -> Response {
             Request::Section { objects, axis, at } => Ok(Response::Sectioned {
                 loops: rotated_union(&objects)?.cross_section(axis, at),
             }),
-            Request::RenderWhole { source, root } => {
-                render_whole_svc(store, &source, root.as_deref())
-            }
+            Request::RenderWhole {
+                source,
+                root,
+                preview,
+            } => render_whole_svc(store, &source, root.as_deref(), preview),
             Request::RenderParts { source, root } => {
                 render_parts_svc(store, &source, root.as_deref())
             }
@@ -125,6 +127,7 @@ pub fn handle_with_store(store: &mut SolidStore, req: Request) -> Response {
                 cuts,
                 connectors,
             } => print_layout_svc(store, base, &cuts, &connectors),
+            Request::SaveMeshes { base, budget } => save_meshes_svc(store, base, budget),
             Request::Free { ids } => {
                 store.free(&ids);
                 Ok(Response::Freed)
@@ -287,25 +290,27 @@ fn rotated_union(objects: &[GeomObject]) -> Result<Solid> {
 // --- fab-gui ops (W.3): base solids MINTED into / READ from the store. Render is fs-coupled (the
 // scad-rs `import` loader), hence native-gated; the wasm source-bytes eval lands at W.3.6. ---
 
-/// Eval the source at PREVIEW quality (the `$preview=true` wrapper takes `$fn=$preview?lo:hi`'s fast
-/// path). `Source::Path` uses the native fs loader (`crate::import`, which is JIT-coupled → native);
-/// `Source::Bytes` evals IN-MEMORY via `fab_lang` directly — no fs, no JIT — the fs-less wasm-worker
-/// render path (W.3.6). Returns the tree + the source PATH when there is one (bytes have none → `None`,
-/// so provenance names are skipped downstream).
+/// Eval the source with `$preview` set to `preview` (so `$fn=$preview?lo:hi` takes the fast facet
+/// path when `true`, the full-res path when `false` — the W.5.2 save-mesh render). `Source::Path` uses
+/// the native fs loader (`crate::import`, which is JIT-coupled → native); `Source::Bytes` evals
+/// IN-MEMORY via `fab_lang` directly — no fs, no JIT — the fs-less wasm-worker render path (W.3.6).
+/// Returns the tree + the source PATH when there is one (bytes have none → `None`, so provenance names
+/// are skipped downstream).
 #[cfg(feature = "kernel")]
-fn eval_preview(
+fn eval_source(
     source: &Source,
     root: Option<&str>,
+    preview: bool,
 ) -> Result<(fab_lang::Geo, Option<std::path::PathBuf>)> {
     match source {
-        Source::Path(path) => eval_path(path, root),
+        Source::Path(path) => eval_path(path, root, preview),
         Source::Bytes { main, libs } => {
             // The wasm worker has no fs — `use`/`include` resolve against the IN-MEMORY lib closure the
             // app gathered (W.3.6 Stage 2), keyed by normalized relative path. Empty = a no-include
             // model. import()/surface() from bytes still isn't wired.
             let _ = root;
             let src = String::from_utf8_lossy(main);
-            let wrap = format!("$preview = true;\n{src}\n");
+            let wrap = format!("$preview = {preview};\n{src}\n");
             let sources: std::collections::BTreeMap<std::path::PathBuf, String> = libs
                 .iter()
                 .filter_map(|(p, b)| {
@@ -337,6 +342,7 @@ fn eval_preview(
 fn eval_path(
     path: &str,
     root: Option<&str>,
+    preview: bool,
 ) -> Result<(fab_lang::Geo, Option<std::path::PathBuf>)> {
     let src = std::path::PathBuf::from(path);
     let abs = src
@@ -346,7 +352,7 @@ fn eval_path(
         .parent()
         .unwrap_or_else(|| std::path::Path::new("."))
         .to_path_buf();
-    let wrap = format!("$preview = true;\ninclude <{}>;\n", abs.display());
+    let wrap = format!("$preview = {preview};\ninclude <{}>;\n", abs.display());
     let libs: Vec<std::path::PathBuf> = root
         .map(|r| {
             let r = std::path::Path::new(r);
@@ -368,6 +374,7 @@ fn eval_path(
 fn eval_path(
     _path: &str,
     _root: Option<&str>,
+    _preview: bool,
 ) -> Result<(fab_lang::Geo, Option<std::path::PathBuf>)> {
     anyhow::bail!(
         "Path source needs the native fs loader; the wasm worker renders from Source::Bytes"
@@ -379,9 +386,10 @@ fn render_whole_svc(
     store: &mut SolidStore,
     source: &Source,
     root: Option<&str>,
+    preview: bool,
 ) -> Result<Response> {
     use crate::backend::{ManifoldBackend, build_geo};
-    let (tree, _src) = eval_preview(source, root)?;
+    let (tree, _src) = eval_source(source, root, preview)?;
     let solid = build_geo(&tree, &ManifoldBackend)
         .filter(|s| !s.is_empty())
         .context("scad-rs rendered EMPTY geometry (no faces)")?;
@@ -407,7 +415,8 @@ fn render_parts_svc(
     root: Option<&str>,
 ) -> Result<Response> {
     use crate::backend::{ManifoldBackend, build_geo_parts};
-    let (tree, src) = eval_preview(source, root)?;
+    // Parts are the interactive view → always preview quality.
+    let (tree, src) = eval_source(source, root, true)?;
     let mut staged: Vec<StagedPart> = Vec::new();
     for solid in build_geo_parts(&tree, &ManifoldBackend)
         .into_iter()
@@ -568,6 +577,44 @@ fn print_layout_svc(
     Ok(Response::LaidOut { pieces: out })
 }
 
+/// The web save-back's two mesh variants off a held FULL-RES base (W.5.6). Format is decided by the
+/// solid's color: colored → BOTH 3MF (so per-region color survives — the roundtrip same-format rule),
+/// uncolored → BOTH STL. `high` is the whole solid serialized as-is; `low` is a QEM-decimated copy at
+/// the `budget` triangle target (the conditional skip inside `decimate_mesh` leaves an already-lean
+/// mesh alone). The whole model decimates as ONE mesh — one coherent per-vertex color array, fully
+/// deterministic; the per-part rayon path ([`crate::decimate::decimate_parts`]) is for callers that
+/// already hold disjoint parts.
+fn save_meshes_svc(store: &SolidStore, base: SolidId, budget: u32) -> Result<Response> {
+    let solid = store.get(base)?;
+    let (verts, tris) = solid.to_indexed();
+    let colors = solid.vertex_colors();
+    let colored = colors.is_some();
+    let v: Vec<[f64; 3]> = verts.iter().map(|p| p.to_array()).collect();
+    let t: Vec<[u32; 3]> = tris.iter().map(|tri| tri.indices()).collect();
+    let c: Option<Vec<[f64; 4]>> =
+        colors.map(|cs| cs.iter().map(|x| [x.r, x.g, x.b, x.a]).collect());
+    let low = crate::decimate::decimate_mesh(&v, &t, c.as_deref(), budget as usize);
+
+    let (low, high, ext) = if colored {
+        (
+            crate::threemf_out::to_3mf_bytes(&low.verts, &low.tris, low.colors.as_deref()),
+            solid.to_3mf_bytes(),
+            "3mf",
+        )
+    } else {
+        (
+            stl::binary_from_indexed(&low.verts, &low.tris),
+            solid.to_stl_bytes(),
+            "stl",
+        )
+    };
+    Ok(Response::SavedMeshes {
+        low,
+        high,
+        ext: ext.to_string(),
+    })
+}
+
 /// A cuts-only `[slicing]` spec — the shared base for the per-piece render + orientation sweep.
 fn cuts_spec(cuts: &[(char, f64)]) -> Slicing {
     Slicing {
@@ -652,6 +699,7 @@ mod tests {
             Response::Resliced { .. } => "Resliced",
             Response::Planned { .. } => "Planned",
             Response::LaidOut { .. } => "LaidOut",
+            Response::SavedMeshes { .. } => "SavedMeshes",
             Response::Freed => "Freed",
             Response::Failed { .. } => "Failed",
         }
@@ -926,6 +974,7 @@ mod tests {
                     libs: vec![],
                 },
                 root: None,
+                preview: true,
             },
         )
         else {
@@ -975,6 +1024,7 @@ mod tests {
                     libs: vec![("lib/box.scad".to_string(), lib)],
                 },
                 root: None,
+                preview: true,
             },
         ) else {
             panic!("render with an include failed")
@@ -984,6 +1034,77 @@ mod tests {
         assert!(
             (max[0] - 25.0).abs() < 0.01 && (min[1] + 15.0).abs() < 0.01,
             "unexpected bbox {min:?}..{max:?}"
+        );
+    }
+
+    #[test]
+    fn save_meshes_picks_format_from_color_and_decimates_low() {
+        // W.5.6: a COLORED base → BOTH 3MF (color survives), low-res decimated below the high-res.
+        // Runs by minting straight into the store (no .scad render), so it holds under the wasm
+        // worker's kernel-without-native config too.
+        use fab_lang::Rgba;
+        let mut store = SolidStore::new(0);
+        let sphere = Solid::sphere(10.0, 32).with_color(Rgba::opaque(1.0, 0.0, 0.0));
+        let id = store.mint(sphere);
+        let Response::SavedMeshes { low, high, ext } =
+            handle_with_store(&mut store, Request::SaveMeshes { base: id, budget: 100 })
+        else {
+            panic!("save (colored) failed")
+        };
+        assert_eq!(ext, "3mf", "colored → 3MF");
+        assert_eq!(&high[..2], b"PK", "3MF is an OPC zip");
+        assert_eq!(&low[..2], b"PK", "low-res is the SAME format");
+        assert!(
+            low.len() < high.len(),
+            "decimated low-res ({}) is smaller than full-res ({})",
+            low.len(),
+            high.len()
+        );
+
+        // An UNCOLORED base → BOTH STL; a cube (12 tris) is under budget → low == high (skip).
+        let cid = store.mint(Solid::cube(20.0, 20.0, 20.0, true));
+        let Response::SavedMeshes { low, high, ext } =
+            handle_with_store(&mut store, Request::SaveMeshes { base: cid, budget: 1000 })
+        else {
+            panic!("save (uncolored) failed")
+        };
+        assert_eq!(ext, "stl", "uncolored → STL");
+        assert_ne!(&high[..2], b"PK", "STL is not a zip");
+        let hi_n = u32::from_le_bytes(high[80..84].try_into().unwrap());
+        let lo_n = u32::from_le_bytes(low[80..84].try_into().unwrap());
+        assert_eq!(hi_n, lo_n, "under budget → low == high tri count (conditional skip)");
+    }
+
+    #[test]
+    fn render_whole_full_res_beats_preview() {
+        // W.5.2: the same source, once at preview and once at full-res. A model that keys its facet
+        // count off $preview (as BOSL2/library models do) must tessellate DENSER at full-res — that
+        // heavier mesh is what the save-back serializes. Runs on the bytes path (no fs), so it also
+        // guards the wasm worker's config.
+        let src = b"$fn = $preview ? 6 : 48;\nsphere(r = 10);".to_vec();
+        let render = |preview: bool| -> u32 {
+            let mut store = SolidStore::new(0);
+            let Response::Rendered { stl, .. } = handle_with_store(
+                &mut store,
+                Request::RenderWhole {
+                    source: Source::Bytes {
+                        main: src.clone(),
+                        libs: vec![],
+                    },
+                    root: None,
+                    preview,
+                },
+            ) else {
+                panic!("render failed (preview={preview})")
+            };
+            // Binary STL triangle count lives in bytes 80..84.
+            u32::from_le_bytes(stl[80..84].try_into().expect("stl header"))
+        };
+        let (lo, hi) = (render(true), render(false));
+        assert!(lo > 0 && hi > 0, "both quality levels render ({lo}, {hi})");
+        assert!(
+            hi > lo,
+            "full-res ({hi} tris) must exceed preview ({lo} tris)"
         );
     }
 }

@@ -166,6 +166,7 @@ pub(crate) fn setup_offscreen_model(
     let (base, min, max, whole_mesh) = match block_on(pool.call(Request::RenderWhole {
         source: Source::Path(src.to_string_lossy().into_owned()),
         root,
+        preview: true,
     })) {
         Ok(Response::Rendered { id, stl, min, max }) => {
             (id, min, max, mesh_from_bytes(meshes, &stl))

@@ -141,10 +141,13 @@ pub enum Request {
     },
 
     // --- fab-gui ops (W.3): base solids held by handle; only these touch a Solid. ---
-    /// Render the source WHOLE at preview quality → mints 1 handle.
+    /// Render the source WHOLE → mints 1 handle. `preview` sets `$preview`: `true` = the fast
+    /// low-facet path the interactive view uses; `false` = full-res (the web save-back's mesh source,
+    /// W.5.2).
     RenderWhole {
         source: Source,
         root: Option<String>,
+        preview: bool,
     },
     /// Render the source into TOP-LEVEL parts (T.2b) → mints N handles.
     RenderParts {
@@ -174,6 +177,10 @@ pub enum Request {
         cuts: Vec<(char, f64)>,
         connectors: Vec<WireConn>,
     },
+    /// Produce the web save-back's two mesh variants off a held base (W.5.6): a full-res mesh + a
+    /// decimated low-res mesh, BOTH in one format — 3MF if the solid is colored (so color survives),
+    /// STL otherwise. `budget` is the low-res triangle target. Reads `base` (a FULL-RES render, W.5.2).
+    SaveMeshes { base: SolidId, budget: u32 },
     /// Drop held base solids (reload / file-switch / part-count change).
     Free { ids: Vec<SolidId> },
 }
@@ -225,6 +232,13 @@ pub enum Response {
     },
     LaidOut {
         pieces: Vec<WirePiece>,
+    },
+    /// The save-back mesh pair (W.5.6). `low`/`high` are the same format, named by `ext` ("stl" |
+    /// "3mf") — which is also the multipart filename extension the site classifies the variant by.
+    SavedMeshes {
+        low: Vec<u8>,
+        high: Vec<u8>,
+        ext: String,
     },
     Freed,
 

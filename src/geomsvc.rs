@@ -1038,6 +1038,45 @@ mod tests {
     }
 
     #[test]
+    fn save_back_pipeline_through_the_wire() {
+        // W.5.9 (in-process e2e): the EXACT worker path the browser Save drives — a full-res COLORED
+        // render (preview=false, from source bytes) -> SaveMeshes off the held handle -> both 3MF —
+        // through the bincode wire codec, on a persistent store like the worker's. The browser adds
+        // only the multipart fetch on top of this (its own leg, W.5.9b). Runs under kernel-without-
+        // native too (the wasm worker's config).
+        let mut store = SolidStore::new(0);
+        let src = b"$fn = $preview ? 6 : 40;\ncolor(\"red\") sphere(r = 10);".to_vec();
+
+        let req = decode_request(&encode_request(&Request::RenderWhole {
+            source: Source::Bytes {
+                main: src,
+                libs: vec![],
+            },
+            root: None,
+            preview: false,
+        }))
+        .unwrap();
+        let Response::Rendered { id, .. } = handle_with_store(&mut store, req) else {
+            panic!("full-res render failed")
+        };
+
+        let req =
+            decode_request(&encode_request(&Request::SaveMeshes { base: id, budget: 500 })).unwrap();
+        let Response::SavedMeshes { low, high, ext } = handle_with_store(&mut store, req) else {
+            panic!("save-meshes failed")
+        };
+        assert_eq!(ext, "3mf", "a color()'d model saves BOTH variants as 3MF");
+        assert_eq!(&high[..2], b"PK", "full-res is a 3MF OPC zip");
+        assert_eq!(&low[..2], b"PK", "low-res is the SAME format");
+        assert!(
+            low.len() < high.len(),
+            "decimated low-res ({}) < full-res ({})",
+            low.len(),
+            high.len()
+        );
+    }
+
+    #[test]
     fn save_meshes_picks_format_from_color_and_decimates_low() {
         // W.5.6: a COLORED base → BOTH 3MF (color survives), low-res decimated below the high-res.
         // Runs by minting straight into the store (no .scad render), so it holds under the wasm

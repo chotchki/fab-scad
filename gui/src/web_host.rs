@@ -41,28 +41,29 @@ pub(crate) fn query_param(name: &str) -> Option<String> {
     params.get(name)
 }
 
-/// The save-back endpoint (W.5.8), from the host page's `data-save-url` on the `#fab-gui` canvas — the
-/// site configures it in its Half-2 wiring (the endpoint the app POSTs the three variants to). Absent
-/// ⇒ a documented same-origin default. Relative URLs resolve against the page, so the ambient session
-/// cookie rides (same-origin). See `docs/web-save-back.md` — the exact route is chotchki's site-side call.
-pub(crate) fn save_endpoint() -> String {
-    web_sys::window()
+/// The save-back target URL for a `media_ref` (W.5.8) — the FROZEN Phase-DO contract is `PATCH
+/// /media/<ref>`: the ref IS the resource, in the URL PATH (not a form field). Same-origin + relative,
+/// so the ambient session cookie rides. `data-media-base` on the `#fab-gui` canvas overrides the `/media`
+/// prefix for a path-prefixed deploy; default is the contract's `/media`. See `docs/web-save-back.md`.
+pub(crate) fn media_patch_url(media_ref: &str) -> String {
+    let base = web_sys::window()
         .and_then(|w| w.document())
         .and_then(|d| d.get_element_by_id("fab-gui"))
-        .and_then(|c| c.get_attribute("data-save-url"))
+        .and_then(|c| c.get_attribute("data-media-base"))
         .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "/admin/media/update".to_string())
+        .unwrap_or_else(|| "/media".to_string());
+    format!("{}/{media_ref}", base.trim_end_matches('/'))
 }
 
-/// POST the save-back variants as `multipart/form-data` (W.5.8). Each file rides as a named `Blob`
-/// with a FILENAME — the site classifies by extension, not part name or Content-Type (recon), so the
-/// filename's extension is what matters; the declared MIME is a courtesy. `media_ref` is a text field
-/// naming the item to update in place. Credentials are `same-origin` so the ambient session cookie
-/// (`id`, SameSite=Lax) authenticates the Admin — no token, no CSRF header (none exists server-side).
-/// NO manual `Content-Type`: the browser owns the multipart boundary. `Err(msg)` on any failure.
+/// PATCH the save-back variants to `url` as `multipart/form-data` (W.5.8, frozen Phase-DO contract).
+/// Each file rides as a `Blob` with a FILENAME — the site types each by its filename EXTENSION, not the
+/// part name or declared Content-Type, so the extension is what matters (the MIME is a courtesy); non-file
+/// fields are ignored, so the `media_ref` lives in the URL, not the body. PATCH = complete variant-set
+/// replacement in one transaction (item identity preserved). Credentials are `same-origin` so the ambient
+/// session cookie (`id`, SameSite=Lax) authenticates the Admin — no token, no CSRF header (none exists
+/// server-side). NO manual `Content-Type`: the browser owns the multipart boundary. `Err(msg)` on failure.
 pub(crate) async fn upload_multipart(
-    endpoint: &str,
-    media_ref: &str,
+    url: &str,
     files: &[(&str, &str, &str, &[u8])], // (field name, filename, mime, bytes)
 ) -> Result<String, String> {
     use wasm_bindgen_futures::JsFuture;
@@ -77,29 +78,29 @@ pub(crate) async fn upload_multipart(
                 web_sys::Blob::new_with_buffer_source_sequence_and_options(&parts, &opts).ok()?;
             form.append_with_blob_and_filename(field, &blob, filename).ok()?;
         }
-        form.append_with_str("media_ref", media_ref).ok()?;
         Some(form)
     };
     let form = build().ok_or_else(|| "could not assemble the upload form".to_string())?;
 
     let init = web_sys::RequestInit::new();
-    init.set_method("POST");
+    init.set_method("PATCH");
     init.set_body(&form);
     init.set_credentials(web_sys::RequestCredentials::SameOrigin);
 
     let win = web_sys::window().ok_or_else(|| "no window".to_string())?;
-    let resp = JsFuture::from(win.fetch_with_str_and_init(endpoint, &init))
+    let resp = JsFuture::from(win.fetch_with_str_and_init(url, &init))
         .await
         .map_err(|_| "upload request failed (network / offline?)".to_string())?;
     let resp: web_sys::Response = resp
         .dyn_into()
         .map_err(|_| "upload: not a Response".to_string())?;
     if !resp.ok() {
-        // 401/403 = not a logged-in admin on the site; surface it so the UX can say so.
+        // 401/403 = not a logged-in admin; 404 = the ref no longer exists (deleted since load).
         return Err(match resp.status() {
-            401 => "upload rejected (401) — log in as admin on hotchkiss.io first".to_string(),
-            403 => "upload rejected (403) — this session isn't an admin".to_string(),
-            s => format!("upload rejected: HTTP {s}"),
+            401 => "save rejected (401) — log in as admin on hotchkiss.io first".to_string(),
+            403 => "save rejected (403) — this session isn't an admin".to_string(),
+            404 => "save rejected (404) — this model no longer exists on the site".to_string(),
+            s => format!("save rejected: HTTP {s}"),
         });
     }
     let text = JsFuture::from(resp.text().map_err(|_| "no response body".to_string())?)

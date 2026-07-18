@@ -1064,7 +1064,8 @@ pub(crate) fn save_action(
         .filter(|n| !n.is_empty())
         .unwrap_or("model.scad");
     let stem = name.strip_suffix(".scad").unwrap_or(name).to_string();
-    let endpoint = crate::web_host::save_endpoint();
+    // Frozen Phase-DO contract: PATCH /media/<ref> — the ref rides the URL PATH, not the body.
+    let url = crate::web_host::media_patch_url(&media_ref);
     let pool = pool.clone();
 
     let task = AsyncComputeTaskPool::get().spawn(async move {
@@ -1115,7 +1116,7 @@ pub(crate) fn save_action(
             ("low", low_name.as_str(), mesh_mime, low.as_slice()),
             ("high", high_name.as_str(), mesh_mime, high.as_slice()),
         ];
-        crate::web_host::upload_multipart(&endpoint, &media_ref, &files).await
+        crate::web_host::upload_multipart(&url, &files).await
     });
     job.0 = Some(task);
     status.0 = "saving to hotchkiss.io…".into();

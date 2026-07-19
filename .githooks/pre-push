@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
-# Pre-push preflight — mirror the CI fmt + compile gates so a red push (the web-v0.15.0 fmt miss that
-# reddened CI *after* the tag was live) never leaves the machine. Fast enough to run every push from a warm
-# cache; bypass with `git push --no-verify` when you deliberately need to (a WIP branch, a docs-only push).
+# Pre-push preflight — mirror the CI fmt + clippy gates so a red push (the web-v0.15.0 fmt miss that
+# reddened CI *after* the tag was live) never leaves the machine. clippy (not bare `check`) because the
+# CI `build` job runs `clippy --workspace --all-targets -- -D warnings`, whose LINT-only failures
+# (doc_lazy_continuation, unnecessary_sort_by, …) never surface in the local nextest gate and reddened
+# CI twice. clippy compiles too, so it subsumes `cargo check` — one pass, both gates. Fast enough from a
+# warm cache; bypass with `git push --no-verify` when you deliberately need to (a WIP/docs-only push).
 #
 # Enable once per clone (git won't trust a repo hooks dir automatically):
 #   git config core.hooksPath .githooks
@@ -13,7 +16,7 @@ cd "$(git rev-parse --show-toplevel)"
 echo "pre-push: cargo fmt --check …"
 cargo fmt --all -- --check
 
-echo "pre-push: cargo check …"
-cargo check --workspace --all-targets
+echo "pre-push: cargo clippy -D warnings …"
+cargo clippy --workspace --all-targets -- -D warnings
 
 echo "pre-push: OK ✓"

@@ -10,13 +10,14 @@ PORT="${1:-8791}"
 TIMEOUT="${2:-1200}"
 RESULT="$BD/results.json"
 
-# name|path — light win → heavy win → the one loss → an OpenSCAD-native-TIMEOUT crasher.
+# name|path — light win → heavy win → an OpenSCAD-wasm stack-overflow → an OpenSCAD-native-TIMEOUT.
+# (bowtie/second_approach is omitted: it import()s an external SVG asset the bench doesn't mount, so
+# BOTH engines fail on it — it stays the honest loss in the NATIVE table, not this browser one.)
 MODELS='corner_brace|models/cart_brace/corner_brace.scad
 ashtray|models/ashtray/ashtray.scad
 angled_laptop_holder|models/Underdesk/angled_laptop_holder.scad
 garage_door|models/garage_door/garage_door.scad
 pill_holder|models/pill_holder/pill_holder.scad
-bowtie_second_approach|models/bowtie/second_approach.scad
 traced_holder|models/controller_charger_holder/traced_holder.scad'
 
 for f in "$BD/vendor/geom/fab_geom.js" "$BD/vendor/openscad.wasm" "$BD/vendor/openscad.js" \

@@ -125,7 +125,12 @@ pub fn render_scad_stl(main: &str, libs_json: &str) -> Result<Vec<u8>, JsError> 
         root: None,
         preview: false,
     };
-    match STORE.with(|s| handle_with_store(&mut s.borrow_mut(), req)) {
+    // A FRESH store per call = COLD render (empty content-addressed CSG cache). Reusing the persistent
+    // STORE would serve cache HITS on a repeated render — measuring fab's interactive re-render path, not
+    // a first render. The head-to-head wants cold-vs-cold: OpenSCAD makes a fresh instance every render
+    // (no cross-render cache) and the native harness renders each model once cold, so fab must too.
+    let mut store = SolidStore::new(0);
+    match handle_with_store(&mut store, req) {
         Response::Rendered { stl, .. } => Ok(stl),
         Response::Failed { error } => Err(JsError::new(&error)),
         _ => Err(JsError::new("render_scad_stl: unexpected response variant")),

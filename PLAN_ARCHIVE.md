@@ -689,3 +689,25 @@ deferred from J.5.2b on 2026-07-10.
 - [x] N.2d - N.2d - Vec-frame Scope LANDED: adaptive VarMap (Vec small / BTreeMap-spill for island globals); slice_parts eval -4.6% (8925→8517ms), corpus 901/901 (cleared spheroid+gaussian_rands); residual per-bind String-key alloc → N.2b
 - [x] N.2e - N.2e - NumList COW buffer reuse LANDED (ceiling-verified): zip_reuse/map_reuse recycle a refcount-1 Rc<[f64]>; ~0% slice_parts (falsified the theory — its alloc is comprehension result-lists) but ~11% on vector-arithmetic-heavy; bit-identical, corpus 901/901
 
+---
+
+## 2026-07-19
+
+## Phase X - Live customizer + content-addressed CSG cache
+- [x] X.1 - X.1 - Persistent cross-render CSG cache (CONDITIONAL — build only if X.2.5 shows the live loop lags on a heavy model). GeoMemo (src/backend.rs) already dedupes duplicated items WITHIN a render default-on; net-new = lift its key(geo_hash)+serve/store into a persistent LRU on SolidStore so unchanged branches survive across slider ticks. Keep the fresh_instance provenance re-mint; owned-GeoNode-clone-or-128bit-hash for the cross-build verify.
+  - [x] X.1.1 - X.1.1 - Cache key: op-tree content-hash carried AS geometry lowers (f(op, child_keys, transform, $fn/$fa/$fs)); NOT mesh-byte hashing (the eval_cache gate-overhead trap)
+  - [x] X.1.2 - X.1.2 - Cache store worker-side: native GeomPool thread + wasm Web Worker (persist across render requests), LRU by total mesh bytes, wasm ~1GB-ceiling aware
+  - [x] X.1.3 - X.1.3 - Correctness gate: byte-golden cache-on == cache-off (par==serial makes content-addressing sound); a deliberate stale-key/wrong-geometry test
+  - [x] X.1.4 - X.1.4 - Validate on a RENDER-PATH warm-cache benchmark (render heavy parametric model, change 1 param, measure the recompute) — NOT slice_parts (that's a different path: auto_slice cut-booleans, GeoMemo never sees it; filed to backlog)
+- [x] X.2 - X.2 - Customizer wire-up: the existing lang/src/customizer.rs → egui widgets + conditional tab — native + web
+  - [x] X.2.1 - X.2.1 - Conditional Customize tab between Model and Parts (Tab enum + left-panel branch; appears only when customize(source) yields >=1 param)
+  - [x] X.2.2 - X.2.2 - Widget mapping: CustomParam.constraint -> egui (Range=slider, Dropdown=combo, bool=checkbox, Num/Str=DragValue/text, vector=fields); group by /* [Group] */ into collapsing sections
+  - [x] X.2.3 - X.2.3 - Source-splice re-render: replace_range(editor.text, value_span) -> set edited_at -> existing debounced preview_edited_buffer (native temp-file + wasm bytes paths both inherited); faithful value->source formatting (no float noise)
+  - [x] X.2.4 - X.2.4 - Per-param reset-to-default (remember first-parse default) + reactive polish (loading pulse, no Apply button) per gui-reactive-standard
+  - [x] X.2.5 - X.2.5 - Measure the live loop — SUPERSEDED by X.1.4: chotchki chose to build X.1 unconditionally ("push on with X.1"), and the X.1.4 kernel bench measured the cross-render win directly (cold 70ms → warm 15.2ms, 4.6× on a one-param-moved render). An end-to-end in-GUI slider-drag timing remains a nice-to-have but its gating decision is moot.
+- [x] X.3 - X.3 - Persistence + native/web parity: customized values ride in the source (buffer saves free); verify round-trip through native Save + web save-back (PUT /variants); explicit native+web parity pass
+- [x] X.4 - X.4 - 2D hull() so real models render (B): wire hull() over 2D children — the gap that blocks parametric_trinket_shelf (chotchki's wife's part)
+  - [x] X.4.1 - X.4.1 - Recon: where "hull() over 2D children is not yet wired" originates (the eval→2D-backend seam), the Shape2D representation, and CRUCIALLY whether fab-manifold's CrossSection already exposes a hull op (decides small=wire-it vs medium=hand-roll a monotone-chain 2D convex hull over the union of children's contour points)
+  - [x] X.4.2 - X.4.2 - Implement the 2D hull op: GeometryBackend 2D-hull method (CrossSection::hull if it exists, else Andrew's monotone-chain over the children's contour vertices) + a Shape2D::Hull node + the fab-lang lowering for hull() with 2D children; deterministic (total-order the hull points)
+  - [x] X.4.3 - X.4.3 - Validate: parametric_trinket_shelf renders end-to-end (the wife's model, in the Customize tab), a 2D-hull unit test (square + offset circle → known hull), native + wasm compile + fmt/tests green
+

@@ -24,22 +24,33 @@ if [[ "$profile" == "release" ]] && command -v wasm-opt >/dev/null; then
   wasm-opt -Oz -o gui/web/fab_gui_bg.wasm gui/web/fab_gui_bg.wasm
 fi
 
-# The geometry Worker (W.3.6): the kernel-only fab-geom wasm — PURE-RUST fab-manifold (the C++
-# manifold3d/wasm-cxx-shim was CUT at M.7.4), so NO LLVM/C++ toolchain. Built SERIAL (always --release,
-# the perf-critical kernel): the THREADED build (fab-manifold `par` over wasm-bindgen-rayon: nightly
-# `-Z build-std` + atomics) compiles but is runtime-BROKEN in-browser — its wasm Memory isn't actually
-# shared, so `initThreadPool`'s postMessage of that Memory to the rayon sub-workers throws
-# DataCloneError and NO geometry renders (W.5.9 headless-e2e finding). Re-enabling threading + fixing the
-# shared-memory setup + measuring the speedup is W.6.2; the serial worker is the working shippable state.
-# geom-worker.js tolerates BOTH builds (namespace import + best-effort pool spin-up), so no page-side
-# change is needed when threading returns.
-echo "building fab-geom worker (fab-manifold, serial — threading parked at W.6.2)…"
-cargo build -p fab-geom --release --target wasm32-unknown-unknown
+# The geometry Worker (W.3.6 → W.6): the kernel-only fab-geom wasm — PURE-RUST fab-manifold (C++ cut at
+# M.7.4, no LLVM). Built THREADED (always --release, the perf-critical kernel): fab-manifold `par` over
+# wasm-bindgen-rayon runs the boolean kernel on a rayon pool. Needs nightly + rust-src + a cross-origin-
+# isolated (COOP/COEP) page for SharedArrayBuffer. TWO W.6.2 fixes (both REQUIRED — validated by the W.5.9
+# headless e2e):
+#  (1) SHARED MEMORY link-args: --shared-memory + --max-memory + --import-memory make wasm-ld emit an
+#      IMPORTED SHARED memory. Without them the memory is non-shared → initThreadPool's postMessage of the
+#      Memory to the rayon sub-workers throws DataCloneError → no geometry renders. The __tls_*/__heap_*
+#      exports are what wasm-bindgen's thread transform needs (it errors "failed to find __heap_base" else).
+#  (2) The workerHelpers.js `import('../../..')` PATCH below.
+echo "building fab-geom worker (fab-manifold, threaded: nightly build-std + shared memory)…"
+RUSTFLAGS='-C target-feature=+atomics,+bulk-memory,+mutable-globals -C link-arg=--shared-memory -C link-arg=--max-memory=1073741824 -C link-arg=--import-memory -C link-arg=--export=__wasm_init_tls -C link-arg=--export=__tls_size -C link-arg=--export=__tls_align -C link-arg=--export=__tls_base -C link-arg=--export=__heap_base -C link-arg=--export=__heap_end' \
+  cargo +nightly build -p fab-geom --release --target wasm32-unknown-unknown \
+  --features par -Z build-std=panic_abort,std
 mkdir -p gui/web/geom
 wasm-bindgen --target web --no-typescript --out-name fab_geom --out-dir gui/web/geom \
   "target/wasm32-unknown-unknown/release/fab_geom.wasm"
+# wasm-bindgen-rayon's workerHelpers.js does `import('../../..')` — a bundler/package.json assumption that
+# resolves to the out-DIR, not a module. Raw `--target web` has no bundler, so point the sub-worker's
+# dynamic import at the real entry; else every rayon sub-worker fails to load and initThreadPool HANGS
+# (no error — the pool just never reports ready). `sed -i.bak` is portable across BSD (macOS) + GNU (CI).
+for wh in gui/web/geom/snippets/wasm-bindgen-rayon-*/src/workerHelpers.js; do
+  [[ -f "$wh" ]] && sed -i.bak "s#import('\.\./\.\./\.\.')#import('../../../fab_geom.js')#" "$wh" && rm -f "$wh.bak"
+done
 if [[ "$profile" == "release" ]] && command -v wasm-opt >/dev/null; then
-  wasm-opt -Oz --enable-reference-types --enable-bulk-memory \
+  # --enable-threads preserves the atomics/shared-memory ops through the opt pass.
+  wasm-opt -Oz --enable-threads --enable-reference-types --enable-bulk-memory \
     -o gui/web/geom/fab_geom_bg.wasm gui/web/geom/fab_geom_bg.wasm
 fi
 cp packaging/web/geom-worker.js gui/web/geom/
@@ -51,6 +62,7 @@ python3 packaging/web/pack_scad_libs.py gui/web/libs.json
 sz=$(du -h gui/web/fab_gui_bg.wasm | cut -f1)
 gsz=$(du -h gui/web/geom/fab_geom_bg.wasm | cut -f1)
 echo "built -> gui/web/fab_gui.js + fab_gui_bg.wasm ($sz) + geom/fab_geom_bg.wasm ($gsz)"
-# dev-server.py sets COOP/COEP (harmless for the serial worker; REQUIRED once threading returns at
-# W.6.2 — SharedArrayBuffer). For the save-back round-trip e2e instead: packaging/web/e2e-save.sh gui/web
-echo "serve:  python3 packaging/web/dev-server.py gui/web 8080   # -> http://127.0.0.1:8080"
+# MUST serve with COOP/COEP: the threaded geom worker needs SharedArrayBuffer (cross-origin isolation)
+# or initThreadPool can't create the shared memory. dev-server.py sets both; plain http.server does NOT.
+# For the save-back round-trip e2e instead: packaging/web/e2e-save.sh gui/web
+echo "serve:  python3 packaging/web/dev-server.py gui/web 8080   # COOP/COEP on -> http://127.0.0.1:8080"

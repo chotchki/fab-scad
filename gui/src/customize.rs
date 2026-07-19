@@ -262,4 +262,31 @@ mod tests {
         }
         assert_eq!(src, "a = 1; b = 2;\nc = 3;\n");
     }
+
+    /// X.3: a customized value persists through a save/load round-trip. Customized values live in the
+    /// SOURCE assignments (source-splice), and both save paths carry the source — native Save wraps it
+    /// in a fab:config block (stripped on reload; the block holds printer/slicing config, not params),
+    /// web save-back PUTs it verbatim. So a customized `width` survives the block strip and re-extracts.
+    #[test]
+    fn customized_value_survives_save_load_round_trip() {
+        let mut text = "width = 20; // [10:60]\nheight = 5;\n".to_string();
+        let span = extract(&text)
+            .into_iter()
+            .find(|p| p.name == "width")
+            .expect("width")
+            .value_span;
+        text.replace_range(span, "42"); // the customizer's splice
+        // A saved file appends a fab:config block (native Save); reload strips it.
+        let saved = format!("{text}// fab:config v2 {{\"parts\":[]}}\n");
+        let reloaded = crate::config::strip_config_block(&saved);
+        assert!(
+            reloaded.contains("width = 42"),
+            "customized value must survive the config-block strip"
+        );
+        let width = extract(&reloaded)
+            .into_iter()
+            .find(|p| p.name == "width")
+            .expect("width re-extracts");
+        assert_eq!(reloaded[width.value_span].trim(), "42");
+    }
 }

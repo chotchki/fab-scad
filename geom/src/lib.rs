@@ -104,6 +104,34 @@ pub fn handle(request: &[u8]) -> Vec<u8> {
     fab_scad::geomsg::encode_reply(&response, &logs)
 }
 
+/// W.3.17 bench export (the browser perf head-to-head, blog p2): render one whole model to STL bytes
+/// through the SAME path the app uses (`handle_with_store` → `RenderWhole`, full-res), but with a
+/// JS-friendly signature — `main` is the .scad source, `libs_json` the `{path: text}` include pack
+/// (fab's `libs.json`). Lets a harness time a render without hand-rolling the bincode `Request`. Runs on
+/// the caller (drive it FROM a worker so the `par` build's rayon join can block). `bench`-gated: absent
+/// from the shipped worker. Ok(stl) on success; a JS exception carrying the eval/kernel error otherwise.
+#[cfg(feature = "bench")]
+#[wasm_bindgen]
+pub fn render_scad_stl(main: &str, libs_json: &str) -> Result<Vec<u8>, JsError> {
+    use fab_scad::geomsg::{Request, Response, Source};
+    let map: std::collections::BTreeMap<String, String> =
+        serde_json::from_str(libs_json).map_err(|e| JsError::new(&format!("libs parse: {e}")))?;
+    let libs = map.into_iter().map(|(k, v)| (k, v.into_bytes())).collect();
+    let req = Request::RenderWhole {
+        source: Source::Bytes {
+            main: main.as_bytes().to_vec(),
+            libs,
+        },
+        root: None,
+        preview: false,
+    };
+    match STORE.with(|s| handle_with_store(&mut s.borrow_mut(), req)) {
+        Response::Rendered { stl, .. } => Ok(stl),
+        Response::Failed { error } => Err(JsError::new(&error)),
+        _ => Err(JsError::new("render_scad_stl: unexpected response variant")),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use fab_scad::geomsg::{self, Request, Response};

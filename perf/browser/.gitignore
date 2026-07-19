@@ -1,0 +1,11 @@
+# W.3.17 bench: build/run artifacts are out; source + the recovered MIT worker glue stay tracked.
+# OpenSCAD-wasm GPL snapshot — re-fetchable by SHA (see OPENSCAD-NOTICE.txt), not vendored into git.
+vendor/openscad.js
+vendor/openscad.wasm
+# generated lib packs, built fab wasm, staged models, run output
+vendor/osc-libs.json
+vendor/fab-libs.json
+vendor/geom/
+vendor/models/
+vendor/models.json
+results.json

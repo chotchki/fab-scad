@@ -1,0 +1,133 @@
+<!doctype html>
+<meta charset="utf-8" />
+<title>fab-scad vs OpenSCAD — browser perf head-to-head (W.3.17)</title>
+<body style="font:14px monospace;background:#0f182d;color:#e8eaed;padding:1rem">
+<pre id="out">booting…</pre>
+<script type="module">
+// W.3.17: drive fab-scad-wasm (threaded) and OpenSCAD-wasm in the SAME headless Chrome, render each
+// model on both, wall-clock the render-only span. Emits `PERF …` lines + a final `PERF_JSON {…}` blob
+// and `PERF DONE` for the driver to scrape. Both engines are timed render-only (fab: warm worker;
+// OpenSCAD: callMain-only, with the fresh-instance instantiation reported separately for honesty).
+
+const out = document.getElementById("out");
+const lines = [];
+const say = (s) => { lines.push(s); out.textContent = lines.join("\n"); console.log(s); };
+
+const N = 3;            // timed runs per model (median)
+const CAP_MS = 25000;  // stop adding timed runs once cumulative timed work passes this (bounds heavy models)
+const BUDGET_MS = 90000; // per-render wall budget; breach = TIMEOUT/CRASH, worker respawned
+
+const median = (a) => { const s = [...a].sort((x, y) => x - y); return s[(s.length - 1) >> 1]; };
+const r1 = (x) => Math.round(x);
+
+if (!self.crossOriginIsolated) say("WARN: NOT cross-origin isolated — fab threads will be OFF (serial)");
+
+// ── workers ───────────────────────────────────────────────────────────────────────────────────────
+let fab, fabReady, fabThreads = 0;
+function spawnFab() {
+  fab = new Worker("fab-bench-worker.js", { type: "module" });
+  fabReady = new Promise((res) => {
+    fab.addEventListener("message", (e) => {
+      if (e.data.boot === "ready") { fabThreads = e.data.threads; res(); }
+      else if (e.data.boot === "warn") say("fab: " + e.data.msg);
+    });
+  });
+}
+let osc;
+function spawnOsc() { osc = new Worker("osc-bench-worker.js", { type: "module" }); }
+
+let seq = 0;
+// One-shot RPC with a wall budget. On timeout, resolves {timeout:true}; caller respawns the worker.
+function call(worker, msg, budget) {
+  return new Promise((resolve) => {
+    const id = ++seq;
+    let done = false;
+    const to = setTimeout(() => { if (!done) { done = true; resolve({ timeout: true }); } }, budget);
+    const onMsg = (e) => {
+      if (e.data.id !== id) return;
+      done = true; clearTimeout(to); worker.removeEventListener("message", onMsg); resolve(e.data);
+    };
+    worker.addEventListener("message", onMsg);
+    worker.postMessage({ ...msg, id });
+  });
+}
+
+// ── per-engine timing (warmup + median, budget-capped) ──────────────────────────────────────────────
+async function timeFab(main, libs) {
+  // Probe = warmup (first render on a fresh worker touches thread-pool + first-alloc); a timeout/error
+  // here decides the model in ONE budget, not three. Discarded from the median unless it's all we got.
+  const probe = await call(fab, { main, libs }, BUDGET_MS);
+  if (probe.timeout) { fab.terminate(); spawnFab(); await fabReady; return { status: "TIMEOUT" }; }
+  if (!probe.ok) return { status: "ERROR", error: probe.error };
+  const runs = []; let len = probe.len, cum = 0;
+  while (runs.length < N && cum < CAP_MS) {
+    const r = await call(fab, { main, libs }, BUDGET_MS);
+    if (r.timeout) { fab.terminate(); spawnFab(); await fabReady; break; }
+    if (!r.ok) break;
+    runs.push(r.ms); cum += r.ms; len = r.len;
+  }
+  const s = runs.length ? runs : [probe.ms];
+  return { status: "ok", ms: median(s), len, runs: s.map(r1) };
+}
+
+async function timeOsc(source, files) {
+  // OpenSCAD makes a FRESH instance per render (no warm state) — but the first instance also compiles the
+  // 10MB module in Chrome, so the probe's ROUND-TRIP is inflated (excluded from the rt median); its
+  // callMain-only renderMs is compile-independent, so it counts as a render sample.
+  const t0 = performance.now();
+  const probe = await call(osc, { source, files }, BUDGET_MS);
+  const prt = performance.now() - t0;
+  if (probe.timeout) { osc.terminate(); spawnOsc(); return { status: "TIMEOUT" }; }
+  if (!probe.ok) { osc.terminate(); spawnOsc(); return { status: "CRASH", error: probe.error }; }
+  const render = [probe.renderMs], round = []; let len = probe.len, cum = prt;
+  while (render.length < N && cum < CAP_MS) {
+    const t = performance.now();
+    const r = await call(osc, { source, files }, BUDGET_MS);
+    const rt = performance.now() - t;
+    if (r.timeout || !r.ok) { osc.terminate(); spawnOsc(); break; }
+    render.push(r.renderMs); round.push(rt); len = r.len; cum += rt;
+  }
+  return { status: "ok", ms: median(render), rt: median(round.length ? round : [prt]), len, runs: render.map(r1) };
+}
+
+// ── main ────────────────────────────────────────────────────────────────────────────────────────────
+(async () => {
+  const models = await (await fetch("vendor/models.json")).json();
+  const fabLibs = await (await fetch("vendor/fab-libs.json")).text();   // TEXT — passed to render_scad_stl
+  const oscLibs = await (await fetch("vendor/osc-libs.json")).json();   // {path: text}
+  say(`loaded ${models.length} models; fab-libs ${(fabLibs.length / 1e6).toFixed(1)}MB, osc-libs ${Object.keys(oscLibs).length} files`);
+
+  spawnFab(); spawnOsc();
+  await fabReady;
+  say(`fab worker ready (${fabThreads} threads, xoi=${self.crossOriginIsolated})`);
+
+  const results = [];
+  for (const m of models) {
+    const src = await (await fetch(m.url)).text();
+    say(`--- ${m.name} (${src.length}B) ---`);
+    const f = await timeFab(src, fabLibs);
+    const o = await timeOsc(src, oscLibs);
+    const ratio = (f.status === "ok" && o.status === "ok") ? (o.ms / f.ms) : null;
+    const row = {
+      model: m.name,
+      fab_ms: f.status === "ok" ? r1(f.ms) : null, fab_status: f.status, fab_err: f.error || null, fab_len: f.len || null,
+      osc_ms: o.status === "ok" ? r1(o.ms) : null, osc_rt_ms: o.status === "ok" ? r1(o.rt) : null,
+      osc_status: o.status, osc_err: o.error || null, osc_len: o.len || null,
+      ratio: ratio ? +ratio.toFixed(2) : null,
+    };
+    results.push(row);
+    say(`PERF ${m.name} fab=${row.fab_ms ?? f.status} osc=${row.osc_ms ?? o.status} rt=${row.osc_rt_ms ?? "-"} ratio=${row.ratio ?? "-"}`);
+  }
+  const payload = { threads: fabThreads, xoi: self.crossOriginIsolated, rows: results };
+  say("PERF_JSON " + JSON.stringify(payload));
+  // Report SERVER-SIDE (ground truth) — headless-Chrome console routing is unreliable.
+  try { await fetch("/__result", { method: "POST", body: JSON.stringify(payload) }); } catch (e) { say("POST failed " + e); }
+  say("PERF DONE");
+})().catch(async (e) => {
+  const payload = { fatal: "" + (e && e.stack || e), rows: [] };
+  say("PERF FATAL " + payload.fatal);
+  try { await fetch("/__result", { method: "POST", body: JSON.stringify(payload) }); } catch (_) {}
+  say("PERF DONE");
+});
+</script>
+</body>

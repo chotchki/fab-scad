@@ -3,6 +3,7 @@
 //!   - [`Kind::Scad`]: the model's own `echo(...)` + warnings + render errors — plumbed back from the
 //!     evaluator in the geom `Response` (works native AND web; the worker returns them).
 //!   - [`Kind::Log`]: the app's `tracing` stream (a `LogPlugin` custom layer) — the "Full" extra.
+//!
 //! The panel's [Full | SCAD] toggle filters between the two.
 //!
 //! The buffer is a process GLOBAL (`OnceLock<Arc<Mutex<…>>>`), not a Bevy resource, because the tracing

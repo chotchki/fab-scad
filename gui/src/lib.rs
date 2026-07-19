@@ -48,6 +48,7 @@ pub(crate) use std::path::{Path, PathBuf};
 pub(crate) use fab_lang::{Dims, Vec3 as FVec3};
 
 mod config;
+mod customize;
 mod cuts;
 // Web lib-closure delivery (W.3.6 Stage 2) — pure scan/normalize/BFS (native-tested) + the wasm fetch.
 #[cfg(test)]

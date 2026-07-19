@@ -554,6 +554,9 @@ pub(crate) struct PanelSeam {
 pub(crate) enum Tab {
     #[default]
     Model,
+    /// The OpenSCAD-style Customizer (X.2) — shown between Model and Parts only when the model exposes
+    /// parameters. Not a pipeline STAGE: a param edit is a Model re-render, so it shares Model's index.
+    Customize,
     Parts,
     Orientation,
     Export,
@@ -570,7 +573,8 @@ impl Tab {
     /// Pipeline-order index — indexes [`Pipeline::dirty`] (Model 0 → Export 3).
     pub(crate) fn index(self) -> usize {
         match self {
-            Tab::Model => 0,
+            // Customize shares Model's pipeline slot — its edits dirty/spin the Model stage.
+            Tab::Model | Tab::Customize => 0,
             Tab::Parts => 1,
             Tab::Orientation => 2,
             Tab::Export => 3,

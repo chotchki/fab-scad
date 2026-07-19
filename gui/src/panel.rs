@@ -59,6 +59,9 @@ pub(crate) fn panel_ui(
     let Ok(ctx) = contexts.ctx_mut() else {
         return;
     };
+    // X.2: the customizer params for the current buffer (owned, so it doesn't hold `editor`'s borrow).
+    // Drives the conditional Customize tab + its widgets. Cheap — `customize` parses only the buffer.
+    let cv_params = crate::customize::extract(&editor.text);
     // A delete defers past the row loop (index stability), tagged with the PART it belongs to (T.2b).
     let mut to_remove: Option<(usize, usize)> = None;
     // A per-piece "reset to auto" (U.3.4) likewise defers past the Orientation list's `parts` borrow.
@@ -93,7 +96,16 @@ pub(crate) fn panel_ui(
                         .color(theme::TEXT_MUTED),
                 );
                 ui.separator();
+                // The Customize tab (X.2) slots in after Model, but ONLY when the model exposes
+                // parameters — an empty customizer is a wart, so the tab appears with the content.
+                let mut bar: Vec<(Tab, &'static str)> = Vec::with_capacity(5);
                 for (t, label) in Tab::ALL {
+                    bar.push((t, label));
+                    if t == Tab::Model && !cv_params.is_empty() {
+                        bar.push((Tab::Customize, "Customize"));
+                    }
+                }
+                for (t, label) in bar {
                     let on = *tab == t;
                     let caption = theme::chrome(label, 15.0).color(if on {
                         theme::GOLD
@@ -304,6 +316,16 @@ pub(crate) fn panel_ui(
                                 editor.edited_at = Some(time.elapsed_secs_f64());
                             }
                         });
+                }
+                Tab::Customize => {
+                    // Params → widgets → source-splice back into the buffer (X.2); the debounced
+                    // preview re-render (shared with the editor) does the rest.
+                    crate::customize::customize_panel(
+                        ui,
+                        &cv_params,
+                        &mut editor,
+                        time.elapsed_secs_f64(),
+                    );
                 }
                 Tab::Parts => {
                     // Printer bed (W.3.8): the build volume every part slices + packs against — a

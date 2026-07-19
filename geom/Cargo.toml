@@ -21,3 +21,7 @@ wasm-bindgen = "0.2"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 console_error_panic_hook = "0.1"
+# W.3.16: the worker captures its own `tracing` (a minimal Subscriber) and ships it back in the reply
+# envelope so it reaches the app's "Full" console — the wasm Worker is a separate context the
+# main-thread subscriber can't see. wasm-only (native worker tracing rides the app's shared subscriber).
+tracing = { version = "0.1", default-features = false, features = ["std"] }

@@ -488,20 +488,23 @@ impl ModCache {
         TEST_STATS.with(|s| s.set((self.hits, self.misses)));
         let lookups = self.hits + self.misses;
         if lookups == 0 {
-            eprintln!("[csg-cache] no child-less module lookups (nothing eligible)");
+            tracing::debug!("[csg-cache] no child-less module lookups (nothing eligible)");
             return;
         }
         let rate = 100.0 * self.hits as f64 / lookups as f64;
-        eprintln!(
+        tracing::debug!(
             "[csg-cache] lookups {lookups}  hits {}  ({rate:.1}%)  misses {}  stored {}  live-keys {}",
             self.hits,
             self.misses,
             self.stores,
             self.hot.len() + self.cold.len(),
         );
-        eprintln!(
+        tracing::debug!(
             "[csg-cache] declined stores by reason: messages {}  rand-draws {}  impure-reads {}  read-set-too-wide {}",
-            self.declined_msg, self.declined_draws, self.declined_impure, self.declined_wide,
+            self.declined_msg,
+            self.declined_draws,
+            self.declined_impure,
+            self.declined_wide,
         );
     }
 

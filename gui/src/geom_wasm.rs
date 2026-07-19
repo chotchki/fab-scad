@@ -97,6 +97,12 @@ impl GeomPool {
             return Err(anyhow!("geometry worker: {e}"));
         }
         let out = get("buf").ok_or_else(|| anyhow!("geometry worker: empty reply"))?;
-        geomsg::decode_response(&js_sys::Uint8Array::new(&out).to_vec())
+        let (response, logs) = geomsg::decode_reply(&js_sys::Uint8Array::new(&out).to_vec())?;
+        // W.3.16: the worker's captured tracing → the Full console (the main-thread subscriber can't
+        // see the worker's separate wasm context).
+        for line in logs {
+            crate::console::push(crate::console::Kind::Log, line);
+        }
+        Ok(response)
     }
 }

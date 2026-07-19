@@ -264,3 +264,14 @@ pub fn encode_response(r: &Response) -> Vec<u8> {
 pub fn decode_response(b: &[u8]) -> Result<Response> {
     bincode::deserialize(b).map_err(|e| anyhow!("bad response: {e}"))
 }
+
+/// The wasm Worker's REPLY envelope (W.3.16): the [`Response`] PLUS the `tracing` lines the worker
+/// captured during the call, for the app's "Full" console. On WEB the worker is a separate wasm context
+/// so its logs can't reach the main-thread subscriber — this carries them back. (Native runs the worker
+/// in-process, so its tracing already rides the shared subscriber; only the wasm transport uses this.)
+pub fn encode_reply(response: &Response, logs: &[String]) -> Vec<u8> {
+    bincode::serialize(&(response, logs)).expect("wire types are bincode-total")
+}
+pub fn decode_reply(b: &[u8]) -> Result<(Response, Vec<String>)> {
+    bincode::deserialize(b).map_err(|e| anyhow!("bad reply: {e}"))
+}

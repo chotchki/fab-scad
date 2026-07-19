@@ -81,12 +81,17 @@ fn time_boolean(a: &Mesh, b: &Mesh, op: OpType, iters: u32) -> Duration {
 fn par_speedup_heavy_booleans() {
     // Under par_live rayon's default pool sizes to available_parallelism; serial is a single thread.
     let threads = if cfg!(par_live) {
-        std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1)
+        std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1)
     } else {
         1
     };
 
-    println!("\n=== par_speedup: par_live={} threads={threads} ===", cfg!(par_live));
+    println!(
+        "\n=== par_speedup: par_live={} threads={threads} ===",
+        cfg!(par_live)
+    );
 
     // Heavy pairs that cross the 10k seam threshold — the only regime where threading can pay.
     let cases: &[(&str, &str, &str, OpType)] = &[

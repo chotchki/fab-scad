@@ -30,8 +30,8 @@ fuzz_target!(|data: &[u8]| {
     // first `evaluate`, so every input — including the first — is bounded.
     INIT.call_once(|| {
         if std::env::var_os("FAB_EVAL_BUDGET").is_none() {
-            // edition 2021: `set_var` is safe here; set once at startup before any eval, no env race.
-            std::env::set_var("FAB_EVAL_BUDGET", "2000000");
+            // edition 2024: `set_var` is unsafe; sound here — set once at startup before any eval, no race.
+            unsafe { std::env::set_var("FAB_EVAL_BUDGET", "2000000") };
         }
     });
     if let Ok(src) = std::str::from_utf8(data) {

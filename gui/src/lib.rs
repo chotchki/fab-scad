@@ -286,9 +286,18 @@ fn run_windowed(scene: SceneCfg, shot: Option<PathBuf>) {
                 .as_deref()
                 .and_then(save_target::derive),
         ))
+        // W.5.9: `?e2e=save` auto-fires the Save once the model renders (headless boot-gate hook).
+        .insert_resource(jobs::E2eSave(
+            crate::web_host::query_param("e2e").as_deref() == Some("save"),
+        ))
         .add_systems(
             Update,
-            (jobs::poll_model_fetch, jobs::save_action, jobs::poll_save),
+            (
+                jobs::poll_model_fetch,
+                jobs::save_action,
+                jobs::poll_save,
+                jobs::e2e_autosave,
+            ),
         );
     app.run();
 }

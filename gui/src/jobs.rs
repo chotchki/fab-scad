@@ -1024,6 +1024,15 @@ pub(crate) fn poll_publish(mut job: ResMut<PublishJob>, mut status: ResMut<Statu
 #[derive(Resource, Default)]
 pub(crate) struct SaveJob(pub(crate) Option<Task<Result<String, String>>>);
 
+/// The headless-Chrome save-round-trip hook (W.5.9): `?e2e=save` on the page URL makes the app auto-fire
+/// the Save ONCE the model has loaded + rendered, so the console-grep boot gate can drive the whole
+/// save pipeline in a browser WITHOUT a DOM/canvas click (egui buttons are canvas pixels, not DOM — and
+/// egui exposes no accessibility node on wasm, so a11y-driven clicking isn't available either). Default
+/// `false` on every real load. See `packaging/web/e2e-save.sh` + `docs/web-save-back.md`.
+#[cfg(target_arch = "wasm32")]
+#[derive(Resource, Default)]
+pub(crate) struct E2eSave(pub(crate) bool);
+
 /// Save the edited model back to hotchkiss.io (W.5.8): bake the config block into the source (exactly
 /// the download path), then off-thread — full-res render (mints a handle) -> SaveMeshes off it (colored
 /// -> both 3MF, else both STL) -> Free the handle -> multipart PUT {source, low, high} to the item's
@@ -1123,8 +1132,35 @@ pub(crate) fn save_action(
     status.0 = "saving to hotchkiss.io…".into();
 }
 
+/// The `?e2e=save` hook (W.5.9): once the deep-linked model has loaded + rendered through the geom
+/// worker (a part holds a base handle — the same condition under which the real Save button is
+/// clickable), fire `PanelCmd::SaveToSite` EXACTLY ONCE. Drives the whole save pipeline in headless
+/// Chrome with no DOM/canvas click; the sentinel + `poll_save`'s outcome log are what the boot gate
+/// greps. Inert unless `?e2e=save` was on the page URL.
+#[cfg(target_arch = "wasm32")]
+pub(crate) fn e2e_autosave(
+    e2e: Res<E2eSave>,
+    save_target: Res<SaveTarget>,
+    parts: Res<Parts>,
+    mut fired: Local<bool>,
+    mut cmd: MessageWriter<PanelCmd>,
+) {
+    if *fired || !e2e.0 {
+        return;
+    }
+    // The enable-gate (`?model=` named an item) AND a completed worker round-trip (a part has a base
+    // handle) — exactly what gates the real button, so the hook can't fire before Save would be live.
+    if save_target.0.is_none() || !parts.0.iter().any(|p| p.base.is_some()) {
+        return;
+    }
+    *fired = true;
+    cmd.write(PanelCmd::SaveToSite);
+    info!("fab-gui e2e: save dispatched");
+}
+
 /// Land the save-back job: report success or the error (per gui-reactive-standard — the status bar is
-/// the feedback surface, no modal).
+/// the feedback surface, no modal). Both outcomes LOG (not just set status) so the W.5.9 headless boot
+/// gate can grep a save success/failure off the console.
 #[cfg(target_arch = "wasm32")]
 pub(crate) fn poll_save(mut job: ResMut<SaveJob>, mut status: ResMut<Status>) {
     let Some(task) = job.0.as_mut() else {
@@ -1139,7 +1175,10 @@ pub(crate) fn poll_save(mut job: ResMut<SaveJob>, mut status: ResMut<Status>) {
             status.0 = "saved to hotchkiss.io".into();
             info!("{}", status.0);
         }
-        Err(e) => status.0 = format!("save failed: {e}"),
+        Err(e) => {
+            status.0 = format!("save failed: {e}");
+            error!("{}", status.0);
+        }
     }
 }
 

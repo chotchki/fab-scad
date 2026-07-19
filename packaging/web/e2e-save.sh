@@ -42,7 +42,9 @@ STUB_PID=""; CHROME_PID=""
 cleanup() {
   [[ -n "$CHROME_PID" ]] && kill "$CHROME_PID" 2>/dev/null || true
   [[ -n "$STUB_PID" ]] && kill "$STUB_PID" 2>/dev/null || true
-  rm -rf "$PROFILE" "$CONSOLE"
+  # `|| true`: Chrome's lingering child procs can re-touch the profile dir, so `rm -rf` may hit a
+  # transient "Directory not empty" — that must NOT flip a passing run to a failure via the EXIT trap.
+  rm -rf "$PROFILE" "$CONSOLE" 2>/dev/null || true
 }
 trap cleanup EXIT
 

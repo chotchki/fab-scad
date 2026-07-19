@@ -135,7 +135,7 @@ added 2026-07-07.
   - [x] W.6.1 - Enable manifold `par` on the wasm geom-worker build: nightly -Zbuild-std=panic_abort,std + RUSTFLAGS +atomics,+bulk-memory,+mutable-globals in build-wasm.sh; a fab-scad wasm-par feature flowing fab-manifold/par through geom; worker awaits init_thread_pool before any kernel call. (Runtime SharedArrayBuffer/COOP-COEP confirmation folds into W.6.2's browser boot gate.) DONE + compile-verified: threaded fab-geom wasm builds clean (nightly build-std + atomics, 20s), wasm-bindgen glue exports initThreadPool alongside handle/start, wasm-opt --enable-threads survives (5.3→3.6M), LLVM-21/C++ path DROPPED (worker is pure-Rust fab-manifold now), worker JS awaits initThreadPool, build-wasm.sh serve hint repointed at the COOP/COEP dev-server.py
   - [x] W.6.2 - W.6.2 - threaded geom worker SHIPPED: release-web builds threaded (nightly + build-std + shared-memory link-args + workerHelpers sed + wasm-opt --enable-threads + COOP/COEP boot gate; CI green end-to-end). par==serial goldens CONFIRMED (native A/B: serial default vs --features par both reproduce the frozen byte goldens). Threading ROI MEASURED — ~11× on a heavy real boolean (Generic_Twin 7226→612 ms), the anti-jit-neutral result (booleans ARE the geometry work). Bench: manifold/tests/par_speedup.rs.
 ## Phase Y - Y - Verification hardening: 100%-Rust re-derivation — shrink the unsafe surface, aim each tier where it uniquely covers
-- [ ] Y.1 - Y.1 - Recon: the verification-tier map (Workflow, wide)
+- [x] Y.1 - Y.1 - Recon: the verification-tier map (Workflow, wide)
 - [ ] Y.2 - Y.2 - Shrink the unsafe surface (delete-before-test)
 - [ ] Y.3 - Y.3 - Resurrect the lang fuzz campaign
 - [ ] Y.4 - Y.4 - Re-aim ASan at the JIT (its unique target)

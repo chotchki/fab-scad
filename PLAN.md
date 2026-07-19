@@ -136,13 +136,14 @@ added 2026-07-07.
   - [x] W.6.2 - W.6.2 - threaded geom worker SHIPPED: release-web builds threaded (nightly + build-std + shared-memory link-args + workerHelpers sed + wasm-opt --enable-threads + COOP/COEP boot gate; CI green end-to-end). par==serial goldens CONFIRMED (native A/B: serial default vs --features par both reproduce the frozen byte goldens). Threading ROI MEASURED — ~11× on a heavy real boolean (Generic_Twin 7226→612 ms), the anti-jit-neutral result (booleans ARE the geometry work). Bench: manifold/tests/par_speedup.rs.
 ## Phase Y - Y - Verification hardening: 100%-Rust re-derivation — shrink the unsafe surface, aim each tier where it uniquely covers
 - [x] Y.1 - Y.1 - Recon: the verification-tier map (Workflow, wide)
-- [ ] Y.2 - Y.2 - Shrink the unsafe surface (delete-before-test)
-- [ ] Y.3 - Y.3 - Resurrect the lang fuzz campaign
+- [x] Y.2 - Y.2 - Shrink the unsafe surface (delete-before-test)
+- [x] Y.3 - Y.3 - Resurrect the lang fuzz campaign
 - [ ] Y.4 - Y.4 - Re-aim ASan at the JIT (its unique target)
 - [ ] Y.5 - Y.5 - Widen miri to the kernel unsafe
-- [ ] Y.6 - Y.6 - TSan / race detection for surviving Send/Sync + S.4
-- [ ] Y.7 - Y.7 - Fuzz the geometry-lowering seam (new target)
-- [ ] Y.8 - Y.8 - Audit + wire the kernel fuzz coverage
+- [>] Y.6 - Y.6 - TSan / race detection for surviving Send/Sync + S.4
+- [x] Y.7 - Y.7 - Fuzz the geometry-lowering seam (new target)
+- [x] Y.8 - Y.8 - Audit + wire the kernel fuzz coverage
+- [ ] Y.9 - Y.9 - Extend kernel fuzz coverage (csg_tree random-op + new op targets)
 
 ## Backlog (not yet phased)
 
@@ -199,3 +200,4 @@ Parked 2026-07-04 for the scad-rs pivot — the workflow tool works and stays in
 - **gui module imports: tighten `use crate::*` globs (U.4 refactor artifact) to explicit imports, then prune the uniform pub(crate) to the real cross-module surface** — added 2026-07-12.
 - **Evaluate grcov swap: line-level coverage exclusion (GRCOV_EXCL_LINE) → parser/lexer gate back to 100%** — added 2026-07-12.
 - **slice_parts cut-boolean caching: the auto_slice nested-partitioning redundancy (ipad >5min timeout) is a SEPARATE path from GeoMemo (post-build cut booleans on the held base Solid, not the GeoNode build() tree). Needs its own memoization lever — not X.1's render-path cache. Was mis-scoped into X.1.4.** — added 2026-07-19.
+- **Y.6 - TSan / race detection for surviving Send/Sync + S.4** — deferred from Y.6 on 2026-07-19.

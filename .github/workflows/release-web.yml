@@ -21,9 +21,13 @@ jobs:
       # libs/ only (BOSL2 pin for the lib pack) — models/ is a separate private-ish submodule
       # and the wasm build needs neither it nor scad-lib beyond the working tree.
       - run: git submodule update --init libs/BOSL2
-      - uses: dtolnay/rust-toolchain@stable
+      # NIGHTLY + rust-src: the geom worker is THREADED (W.6.2), which needs -Zbuild-std to rebuild std
+      # with atomics/shared-memory. The app itself is stable-clean; nightly builds it fine (superset).
+      # Pin a date here if a nightly regression ever bites — the boot + save e2e gates below would catch it.
+      - uses: dtolnay/rust-toolchain@nightly
         with:
           targets: wasm32-unknown-unknown
+          components: rust-src
       - uses: Swatinem/rust-cache@v2
       - name: Install bundle tools (wasm-bindgen pinned to the lockfile, PINNED binaryen, brotli)
         run: |
@@ -34,11 +38,21 @@ jobs:
           curl -sL https://github.com/WebAssembly/binaryen/releases/download/version_130/binaryen-version_130-x86_64-linux.tar.gz | tar xz
           echo "$PWD/binaryen-version_130/bin" >> "$GITHUB_PATH"
           sudo apt-get update && sudo apt-get install -y brotli
-      # Both crates are pure-Rust wasm now (the C++ Manifold kernel was cut at M.7.4 — no LLVM). fab-gui
-      # --lib is the cdylib (the native bin is skipped); fab-geom is the SERIAL geom worker (threading is
-      # runtime-broken in-browser — DataCloneError — and parked at W.6.2; W.5.9). One invocation, both.
-      - name: Build the wasm app + geom worker
-        run: cargo build --release --target wasm32-unknown-unknown -p fab-gui --lib -p fab-geom
+      # Both crates are pure-Rust wasm now (the C++ Manifold kernel was cut at M.7.4 — no LLVM). Two
+      # SEPARATE builds because the geom worker needs different RUSTFLAGS + build-std than the app:
+      #  - fab-gui --lib: the cdylib app, main-thread bevy_egui, NO threading → plain wasm.
+      #  - fab-geom: the THREADED geom worker (W.6.2). fab-manifold `par` over wasm-bindgen-rayon needs
+      #    build-std + shared-memory link-args so wasm-ld emits an IMPORTED SHARED memory — else
+      #    initThreadPool's postMessage of the Memory to the rayon sub-workers throws DataCloneError and
+      #    no geometry renders. The __tls_*/__heap_* exports are what wasm-bindgen's thread transform needs
+      #    ("failed to find __heap_base" otherwise). Mirrors gui/web/build-wasm.sh exactly.
+      - name: Build the wasm app (serial) + geom worker (threaded)
+        run: |
+          set -euo pipefail
+          cargo build --release --target wasm32-unknown-unknown -p fab-gui --lib
+          RUSTFLAGS='-C target-feature=+atomics,+bulk-memory,+mutable-globals -C link-arg=--shared-memory -C link-arg=--max-memory=1073741824 -C link-arg=--import-memory -C link-arg=--export=__wasm_init_tls -C link-arg=--export=__tls_size -C link-arg=--export=__tls_align -C link-arg=--export=__tls_base -C link-arg=--export=__heap_base -C link-arg=--export=__heap_end' \
+            cargo build -p fab-geom --release --target wasm32-unknown-unknown \
+            --features par -Z build-std=panic_abort,std
       - name: Stage the bundle (docs/web-embed.md contract)
         run: |
           set -euo pipefail
@@ -59,11 +73,20 @@ jobs:
           brotli -q 11 -kf "$STAGE/fab_gui_bg.wasm"
           gzip -9 -kf "$STAGE/fab_gui_bg.wasm"
 
-          # The geometry worker (W.3.6): the kernel-only fab-geom wasm in its own Web Worker.
+          # The geometry worker (W.3.6): the kernel-only fab-geom wasm in its own Web Worker (THREADED).
           mkdir -p "$STAGE/geom"
           wasm-bindgen --target web --no-typescript --out-name fab_geom --out-dir "$STAGE/geom" \
             target/wasm32-unknown-unknown/release/fab_geom.wasm
-          wasm-opt -Oz --enable-reference-types --enable-bulk-memory \
+          # wasm-bindgen-rayon's workerHelpers.js does import('../../..') — a bundler/package.json assumption
+          # that resolves to the out-DIR, not a module. Raw --target web has no bundler, so point the
+          # sub-worker's dynamic import at the real entry; else every rayon sub-worker fails to load and
+          # initThreadPool HANGS (no error — the pool just never reports ready). Mirrors build-wasm.sh.
+          for wh in "$STAGE"/geom/snippets/wasm-bindgen-rayon-*/src/workerHelpers.js; do
+            [[ -f "$wh" ]] && sed -i "s#import('\.\./\.\./\.\.')#import('../../../fab_geom.js')#" "$wh"
+          done
+          # --enable-threads preserves the atomics/shared-memory ops through the -Oz pass (else wasm-opt
+          # would strip them and the shared memory would be invalid).
+          wasm-opt -Oz --enable-threads --enable-reference-types --enable-bulk-memory \
             -o "$STAGE/geom/fab_geom_bg.wasm.opt" "$STAGE/geom/fab_geom_bg.wasm"
           mv "$STAGE/geom/fab_geom_bg.wasm.opt" "$STAGE/geom/fab_geom_bg.wasm"
           brotli -q 11 -kf "$STAGE/geom/fab_geom_bg.wasm"
@@ -101,7 +124,10 @@ jobs:
         run: |
           STAGE=target/fab-gui/stage
           cp "$STAGE/index.reference.html" "$STAGE/index.html"
-          (cd "$STAGE" && python3 -m http.server 8899 &>/dev/null &)
+          # COOP/COEP is now REQUIRED, not just nice-to-have: the THREADED geom worker can't even
+          # instantiate without SharedArrayBuffer (cross-origin isolation), so plain `http.server` would
+          # fail the gate. dev-server.py sets both headers — the same headers the site serves in prod.
+          python3 packaging/web/dev-server.py "$STAGE" 8899 &>/dev/null &
           sleep 1
           # SwiftShader software WebGL2 for bevy (no GPU on the runner). REAL wall-clock poll, not
           # --virtual-time-budget: the demo renders through the geom WORKER, and virtual time races real

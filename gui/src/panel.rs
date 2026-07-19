@@ -633,16 +633,44 @@ pub(crate) fn panel_ui(
                     {
                         writers.cmd.write(PanelCmd::Export);
                     }
-                    if ui
-                        .add(
-                            egui::Button::new(
-                                theme::chrome("Publish -> hotchkiss.io", 14.0).color(theme::NAVY),
-                            )
-                            .fill(theme::GOLD),
-                        )
-                        .clicked()
+                    // Desktop: publish a NEW hotchkiss.io gallery item (shells OpenSCAD + native HTTP).
+                    #[cfg(not(target_arch = "wasm32"))]
                     {
-                        writers.cmd.write(PanelCmd::Publish);
+                        if ui
+                            .add(
+                                egui::Button::new(
+                                    theme::chrome("Publish -> hotchkiss.io", 14.0)
+                                        .color(theme::NAVY),
+                                )
+                                .fill(theme::GOLD),
+                            )
+                            .clicked()
+                        {
+                            writers.cmd.write(PanelCmd::Publish);
+                        }
+                    }
+                    // Web (W.3.18): push the finished result back to the item it came from — the save-back
+                    // (source + mesh variants + the printable plate, since the pieces live on this tab).
+                    // Only when opened from a media item (save_target set); creating a NEW item stays
+                    // desktop-only.
+                    #[cfg(target_arch = "wasm32")]
+                    {
+                        if view.save_target.0.is_some()
+                            && ui
+                                .add(
+                                    egui::Button::new(
+                                        theme::chrome("Update -> hotchkiss.io", 14.0)
+                                            .color(theme::NAVY),
+                                    )
+                                    .fill(theme::GOLD),
+                                )
+                                .on_hover_text(
+                                    "update this model's files on hotchkiss.io (meshes + plate)",
+                                )
+                                .clicked()
+                        {
+                            writers.cmd.write(PanelCmd::SaveToSite);
+                        }
                     }
                 }
             }

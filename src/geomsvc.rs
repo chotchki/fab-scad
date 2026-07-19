@@ -587,41 +587,31 @@ fn print_layout_svc(
     Ok(Response::LaidOut { pieces: out })
 }
 
-/// The web save-back's two mesh variants off a held FULL-RES base (W.5.6). Format is decided by the
-/// solid's color: colored → BOTH 3MF (so per-region color survives — the roundtrip same-format rule),
-/// uncolored → BOTH STL. `high` is the whole solid serialized as-is; `low` is a QEM-decimated copy at
-/// the `budget` triangle target (the conditional skip inside `decimate_mesh` leaves an already-lean
-/// mesh alone). The whole model decimates as ONE mesh — one coherent per-vertex color array, fully
-/// deterministic; the per-part rayon path ([`crate::decimate::decimate_parts`]) is for callers that
-/// already hold disjoint parts.
+/// The web save-back's two mesh variants off a held FULL-RES base (W.5.6). ALWAYS 3MF (W.3.18): the
+/// site wants a consistent 3MF variant, not STL-when-uncolored. Per-vertex color survives as a material
+/// table when the solid carries it; an uncolored solid emits a plain-geometry 3MF. `high` is the whole
+/// solid serialized as-is; `low` is a QEM-decimated copy at the `budget` triangle target (the
+/// conditional skip inside `decimate_mesh` leaves an already-lean mesh alone). The whole model decimates
+/// as ONE mesh — one coherent per-vertex color array, fully deterministic; the per-part rayon path
+/// ([`crate::decimate::decimate_parts`]) is for callers that already hold disjoint parts.
 fn save_meshes_svc(store: &SolidStore, base: SolidId, budget: u32) -> Result<Response> {
     let solid = store.get(base)?;
     let (verts, tris) = solid.to_indexed();
     let colors = solid.vertex_colors();
-    let colored = colors.is_some();
     let v: Vec<[f64; 3]> = verts.iter().map(|p| p.to_array()).collect();
     let t: Vec<[u32; 3]> = tris.iter().map(|tri| tri.indices()).collect();
     let c: Option<Vec<[f64; 4]>> =
         colors.map(|cs| cs.iter().map(|x| [x.r, x.g, x.b, x.a]).collect());
-    let low = crate::decimate::decimate_mesh(&v, &t, c.as_deref(), budget as usize);
+    let low_mesh = crate::decimate::decimate_mesh(&v, &t, c.as_deref(), budget as usize);
 
-    let (low, high, ext) = if colored {
-        (
-            crate::threemf_out::to_3mf_bytes(&low.verts, &low.tris, low.colors.as_deref()),
-            solid.to_3mf_bytes(),
-            "3mf",
-        )
-    } else {
-        (
-            stl::binary_from_indexed(&low.verts, &low.tris),
-            solid.to_stl_bytes(),
-            "stl",
-        )
-    };
     Ok(Response::SavedMeshes {
-        low,
-        high,
-        ext: ext.to_string(),
+        low: crate::threemf_out::to_3mf_bytes(
+            &low_mesh.verts,
+            &low_mesh.tris,
+            low_mesh.colors.as_deref(),
+        ),
+        high: solid.to_3mf_bytes(),
+        ext: "3mf".to_string(),
     })
 }
 
@@ -1090,10 +1080,10 @@ mod tests {
     }
 
     #[test]
-    fn save_meshes_picks_format_from_color_and_decimates_low() {
-        // W.5.6: a COLORED base → BOTH 3MF (color survives), low-res decimated below the high-res.
-        // Runs by minting straight into the store (no .scad render), so it holds under the wasm
-        // worker's kernel-without-native config too.
+    fn save_meshes_always_3mf_and_decimates_low() {
+        // W.5.6 + W.3.18: ALWAYS 3MF now (color survives when present, geometry-only otherwise), low-res
+        // decimated below the high-res. Runs by minting straight into the store (no .scad render), so it
+        // holds under the wasm worker's kernel-without-native config too.
         use fab_lang::Rgba;
         let mut store = SolidStore::new(0);
         let sphere = Solid::sphere(10.0, 32).with_color(Rgba::opaque(1.0, 0.0, 0.0));
@@ -1107,7 +1097,7 @@ mod tests {
         ) else {
             panic!("save (colored) failed")
         };
-        assert_eq!(ext, "3mf", "colored → 3MF");
+        assert_eq!(ext, "3mf", "always 3MF");
         assert_eq!(&high[..2], b"PK", "3MF is an OPC zip");
         assert_eq!(&low[..2], b"PK", "low-res is the SAME format");
         assert!(
@@ -1117,7 +1107,8 @@ mod tests {
             high.len()
         );
 
-        // An UNCOLORED base → BOTH STL; a cube (12 tris) is under budget → low == high (skip).
+        // An UNCOLORED base → 3MF too now (W.3.18, no more STL branch); a cube (12 tris) is under budget
+        // → decimation skips → low is the same mesh as high (same serialized size).
         let cid = store.mint(Solid::cube(20.0, 20.0, 20.0, true));
         let Response::SavedMeshes { low, high, ext } = handle_with_store(
             &mut store,
@@ -1128,13 +1119,13 @@ mod tests {
         ) else {
             panic!("save (uncolored) failed")
         };
-        assert_eq!(ext, "stl", "uncolored → STL");
-        assert_ne!(&high[..2], b"PK", "STL is not a zip");
-        let hi_n = u32::from_le_bytes(high[80..84].try_into().unwrap());
-        let lo_n = u32::from_le_bytes(low[80..84].try_into().unwrap());
+        assert_eq!(ext, "3mf", "uncolored is 3MF too now (W.3.18)");
+        assert_eq!(&high[..2], b"PK", "uncolored 3MF is still an OPC zip");
+        assert_eq!(&low[..2], b"PK", "low-res is 3MF too");
         assert_eq!(
-            hi_n, lo_n,
-            "under budget → low == high tri count (conditional skip)"
+            low.len(),
+            high.len(),
+            "under budget → decimation skipped → identical mesh, same 3MF size"
         );
     }
 

@@ -238,8 +238,9 @@ pub enum Response {
     LaidOut {
         pieces: Vec<WirePiece>,
     },
-    /// The save-back mesh pair (W.5.6). `low`/`high` are the same format, named by `ext` ("stl" |
-    /// "3mf") — which is also the multipart filename extension the site classifies the variant by.
+    /// The save-back mesh pair (W.5.6). `low`/`high` are always 3MF now (W.3.18 — color survives when
+    /// present, geometry-only otherwise); `ext` is the multipart filename extension the site classifies
+    /// the variant by (kept in the wire for forward-compat, currently always `"3mf"`).
     SavedMeshes {
         low: Vec<u8>,
         high: Vec<u8>,

@@ -538,6 +538,39 @@ pub(crate) fn export_plates_action(
     }
 }
 
+/// Co-pack the current print pieces into a Bambu multi-plate `.3mf` (bytes) for the web save-back's
+/// plate variant (W.3.18) — the same layout/pack/emit as the Export button, factored so `save_action`
+/// doesn't re-plumb the ref/ups + preset. `None` when nothing is staged yet (no pieces sliced/oriented)
+/// OR the pack fails: the plate is best-effort, it must never sink the mesh + source upload.
+#[cfg(target_arch = "wasm32")]
+pub(crate) fn plate_3mf_bytes(
+    pieces: &PrintPieces,
+    parts: &Parts,
+    scene: &SceneCfg,
+) -> Option<Vec<u8>> {
+    let list = pieces.0.as_ref().filter(|l| !l.is_empty())?;
+    let refs: Vec<&fab::PiecePrint> = list.iter().map(|(_, pp)| pp).collect();
+    let ups: Vec<[f64; 3]> = list
+        .iter()
+        .map(|(part, pp)| {
+            let u = parts.0[*part].orient.up_or((pp.piece, pp.comp), pp.up);
+            [u[0] as f64, u[1] as f64, u[2] as f64]
+        })
+        .collect();
+    let bed = [scene.bed[0] as f64, scene.bed[1] as f64];
+    let plate = [scene.plate[0] as f64, scene.plate[1] as f64];
+    fab::export_plates_bytes(
+        &refs,
+        &ups,
+        bed,
+        plate,
+        PLATE_GAP,
+        default_bambu_preset().as_ref(),
+    )
+    .ok()
+    .map(|(_, bytes)| bytes)
+}
+
 /// Reactively recompute the co-pack preview summary (U.3.5) whenever the print pieces or their
 /// orientations change — the Export tab's `plates · pieces · fits WxH` metric, no button. Cheap: a
 /// footprint-only bin-pack (`fab::copack_summary`), no 3mf written. Clears the summary when there are

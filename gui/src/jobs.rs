@@ -1004,13 +1004,11 @@ pub(crate) fn publish_action(
     status.0 = "publishing…".into();
 }
 
-/// wasm has no OpenSCAD subprocess or blocking HTTP — publish is a desktop feature (say so, don't spawn).
+/// wasm has no OpenSCAD subprocess or blocking HTTP, so publishing a NEW hotchkiss.io item is
+/// desktop-only — the button is cfg'd off the web build (W.3.18; the web pushes via the Update save-back
+/// instead). This inert twin exists only so the shared system registration (lib.rs) compiles on wasm.
 #[cfg(target_arch = "wasm32")]
-pub(crate) fn publish_action(mut ev: MessageReader<PanelCmd>, mut status: ResMut<Status>) {
-    if ev.read().any(|c| *c == PanelCmd::Publish) {
-        status.0 = "publish is desktop-only".into();
-    }
-}
+pub(crate) fn publish_action() {}
 
 /// Land the publish job: show the URL, or the error.
 pub(crate) fn poll_publish(mut job: ResMut<PublishJob>, mut status: ResMut<Status>) {
@@ -1057,6 +1055,7 @@ pub(crate) fn save_action(
     mut ev: MessageReader<PanelCmd>,
     editor: Res<EditorBuf>,
     parts: Res<Parts>,
+    pieces: Res<crate::print::PrintPieces>,
     scene: Res<SceneCfg>,
     save_target: Res<SaveTarget>,
     pool: Res<GeomPool>,
@@ -1091,6 +1090,11 @@ pub(crate) fn save_action(
         .filter(|n| !n.is_empty())
         .unwrap_or("model.scad");
     let stem = name.strip_suffix(".scad").unwrap_or(name).to_string();
+    // W.3.18: also push the printable Bambu plate when a plan has been staged (pieces only exist once
+    // sliced/oriented on the Export tab). Built here — a quick in-memory zip, same as the Export button —
+    // then moved into the upload; best-effort, a `None` (no pieces or a pack error) still saves the rest.
+    let plate = crate::print::plate_3mf_bytes(&pieces, &parts, &scene);
+    let plate_name = format!("{stem}-plates.3mf");
     // `url` is the `PUT /media/<ref>/variants` target, derived from `?model=` at boot (SaveTarget).
     let pool = pool.clone();
 
@@ -1141,7 +1145,7 @@ pub(crate) fn save_action(
         let src_name = format!("{stem}.scad");
         let low_name = format!("{stem}_low.{ext}");
         let high_name = format!("{stem}.{ext}");
-        let files = [
+        let mut files: Vec<(&str, &str, &str, &[u8])> = vec![
             (
                 "source",
                 src_name.as_str(),
@@ -1151,6 +1155,10 @@ pub(crate) fn save_action(
             ("low", low_name.as_str(), mesh_mime, low.as_slice()),
             ("high", high_name.as_str(), mesh_mime, high.as_slice()),
         ];
+        // The printable plate rides along when a plan was staged (W.3.18).
+        if let Some(ref pb) = plate {
+            files.push(("plate", plate_name.as_str(), "model/3mf", pb.as_slice()));
+        }
         crate::web_host::upload_multipart(&url, &files).await
     });
     job.0 = Some(task);

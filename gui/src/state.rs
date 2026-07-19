@@ -518,6 +518,10 @@ pub(crate) const AUTOSLICE_DEBOUNCE: f32 = 0.35;
 pub(crate) enum PanelCmd {
     AutoSlice,
     ToggleView,
+    /// Publish a NEW hotchkiss.io gallery item (cover + preview + mesh). Desktop only — the button that
+    /// writes it is cfg'd off the web build (W.3.18; the web pushes via [`SaveToSite`] instead), so on
+    /// wasm the variant is never constructed.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     Publish,
     Export,
     /// Save the edited model back to hotchkiss.io (W.5.8) — web only, and only when a save target was

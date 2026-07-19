@@ -25,12 +25,6 @@ jobs:
         with:
           targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
-      # The Manifold kernel's wasm-uu build (fab-geom worker) needs LLVM 20+ with wasm-ld; ubuntu ships 18.
-      - name: Install LLVM 21 + lld + libc++
-        run: |
-          wget -qO- https://apt.llvm.org/llvm.sh | sudo bash -s -- 21
-          # wasm-cxx-shim's probe wants clang++ AND libc++ headers under the same prefix.
-          sudo apt-get install -y lld-21 libc++-21-dev libc++abi-21-dev
       - name: Install bundle tools (wasm-bindgen pinned to the lockfile, PINNED binaryen, brotli)
         run: |
           V=$(grep -A1 'name = "wasm-bindgen"' Cargo.lock | grep version | head -1 | cut -d'"' -f2)
@@ -40,8 +34,9 @@ jobs:
           curl -sL https://github.com/WebAssembly/binaryen/releases/download/version_130/binaryen-version_130-x86_64-linux.tar.gz | tar xz
           echo "$PWD/binaryen-version_130/bin" >> "$GITHUB_PATH"
           sudo apt-get update && sudo apt-get install -y brotli
-      # fab-gui (--lib = the cdylib; the native bin is skipped) is pure-Rust wasm; fab-geom carries the
-      # C++ Manifold kernel and needs the LLVM 21 above. One invocation, both crates.
+      # Both crates are pure-Rust wasm now (the C++ Manifold kernel was cut at M.7.4 — no LLVM). fab-gui
+      # --lib is the cdylib (the native bin is skipped); fab-geom is the SERIAL geom worker (threading is
+      # runtime-broken in-browser — DataCloneError — and parked at W.6.2; W.5.9). One invocation, both.
       - name: Build the wasm app + geom worker
         run: cargo build --release --target wasm32-unknown-unknown -p fab-gui --lib -p fab-geom
       - name: Stage the bundle (docs/web-embed.md contract)
@@ -128,6 +123,12 @@ jobs:
           grep -qE "fab-gui render complete: [1-9]" /tmp/console.log \
             || { echo "::error::demo never rendered through the geom worker"; tail -30 /tmp/console.log; exit 1; }
           echo "boot gate: OK (bundle boots + kernel renders the demo)"
+      # SAVE-BACK ROUND-TRIP GATE (W.5.9): the staged bundle already carries index.html (copied above).
+      # e2e-save.sh serves it behind the stub hotchkiss.io (COOP/COEP + a PUT recorder), boots headless
+      # Chrome at ?model=…&e2e=save, and asserts the 3-variant PUT /media/<ref>/variants landed with the
+      # session cookie — the whole save pipeline exercised in a browser, not just the sourceless demo.
+      - name: Save round-trip in Chrome (W.5.9)
+        run: bash packaging/web/e2e-save.sh target/fab-gui/stage 8898 180
       - uses: actions/upload-artifact@v4
         with:
           name: fab-gui-${{ env.VERSION }}

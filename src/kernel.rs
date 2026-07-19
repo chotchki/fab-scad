@@ -783,13 +783,34 @@ impl Solid {
             }
             true
         });
-        // Geometric, S.4-stable order: bbox-min corner (x,y,z lexicographic) then triangle count.
+        // Geometric, S.4-stable order — a SELF-CONTAINED key, not a lean on decompose()'s input order.
+        // bbox corners (position + extent), then topology counts, then volume. `total_cmp` (not
+        // `partial_cmp().unwrap_or(Equal)`) makes each f64 comparison itself a total order — no NaN/±0
+        // collapse to Equal. Two DISTINCT pieces tie here only if congruent at the same bbox (identical
+        // both corners, both counts, AND volume) — geometrically impossible for disjoint solids —
+        // so a future parallel/unstable decompose() can't reintroduce S.4 through this sort on any real
+        // input; the residual exact tie falls back to decompose order (serial + deterministic today).
         solids.sort_by(|a, b| {
-            let key = |s: &Solid| s.bbox().map_or([f64::INFINITY; 3], |(m, _)| m.to_array());
-            key(a)
-                .partial_cmp(&key(b))
-                .unwrap_or(std::cmp::Ordering::Equal)
-                .then(a.num_tri().cmp(&b.num_tri()))
+            let corners = |s: &Solid| {
+                s.bbox()
+                    .map_or(([f64::INFINITY; 3], [f64::INFINITY; 3]), |(m, x)| {
+                        (m.to_array(), x.to_array())
+                    })
+            };
+            let cmp3 = |x: &[f64; 3], y: &[f64; 3]| {
+                x.iter()
+                    .zip(y)
+                    .map(|(p, q)| p.total_cmp(q))
+                    .find(|o| o.is_ne())
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            };
+            let (amin, amax) = corners(a);
+            let (bmin, bmax) = corners(b);
+            cmp3(&amin, &bmin)
+                .then_with(|| cmp3(&amax, &bmax))
+                .then_with(|| a.num_tri().cmp(&b.num_tri()))
+                .then_with(|| a.num_vert().cmp(&b.num_vert()))
+                .then_with(|| a.volume().total_cmp(&b.volume()))
         });
         solids
     }

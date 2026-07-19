@@ -69,6 +69,16 @@ jobs:
       # that actually build geometry). FAB_EVAL_BUDGET is set inside the target.
       - name: fuzz geo_lower
         run: cargo fuzz run geo_lower --fuzz-dir fuzz --target "$FUZZ_TARGET" lang/fuzz/corpus/eval -- -max_total_time=240 -rss_limit_mb=4096 -max_len=2048 -timeout=25
+      # Y.8 — the KERNEL fuzzers (fab-manifold), structure-aware (`arbitrary`) over the boolean core +
+      # 2D triangulation, ASan on the same get_unchecked unsafe. These targets EXISTED but were never run
+      # in any workflow (workspace-excluded, manual-only) — zero continuous coverage, violating the K.5
+      # "24h / 0 trophies" clause that lives in that very crate. Now wired into the nightly.
+      - name: fuzz csg_tree (kernel booleans)
+        working-directory: manifold
+        run: cargo fuzz run csg_tree --target "$FUZZ_TARGET" -- -max_total_time=240 -rss_limit_mb=4096 -timeout=25
+      - name: fuzz polygon (2D triangulation)
+        working-directory: manifold
+        run: cargo fuzz run polygon --target "$FUZZ_TARGET" -- -max_total_time=120 -rss_limit_mb=2048 -timeout=15
       # Minimize the accumulated corpus to a coverage-minimal set + publish it, so the next run (and
       # anyone reproducing locally) starts from the best-known corpus.
       - name: minimize corpus
@@ -84,7 +94,10 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: fab-lang-fuzz-corpus
-          path: lang/fuzz/corpus
+          path: |
+            lang/fuzz/corpus
+            fuzz/corpus
+            manifold/fuzz/corpus
           retention-days: 30
       - name: upload crash reproducers
         if: failure()
@@ -94,4 +107,5 @@ jobs:
           path: |
             lang/fuzz/artifacts
             fuzz/artifacts
+            manifold/fuzz/artifacts
           retention-days: 90

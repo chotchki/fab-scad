@@ -25,6 +25,10 @@ pub struct SolidStore {
     next: u32,
     cap: usize,
     map: HashMap<SolidId, Solid>,
+    /// X.1: the persistent cross-render geometry cache — lives HERE (per execution context) so it
+    /// survives across renders, unlike the per-build P.2 memo. The render arms thread it into
+    /// `build_geo_cached`, so a live customizer reuses subtrees unchanged since the last render.
+    geo_cache: crate::backend::GeoCache<Option<Solid>>,
 }
 
 impl SolidStore {
@@ -34,6 +38,7 @@ impl SolidStore {
             next: 0,
             cap: 64,
             map: HashMap::new(),
+            geo_cache: crate::backend::GeoCache::new(),
         }
     }
 
@@ -388,9 +393,9 @@ fn render_whole_svc(
     root: Option<&str>,
     preview: bool,
 ) -> Result<Response> {
-    use crate::backend::{ManifoldBackend, build_geo};
+    use crate::backend::{ManifoldBackend, build_geo_cached};
     let (tree, _src) = eval_source(source, root, preview)?;
-    let solid = build_geo(&tree, &ManifoldBackend)
+    let solid = build_geo_cached(&tree, &ManifoldBackend, &mut store.geo_cache)
         .filter(|s| !s.is_empty())
         .context("scad-rs rendered EMPTY geometry (no faces)")?;
     let (mn, mx) = solid.bbox().context("rendered solid has no bbox")?;
@@ -414,15 +419,14 @@ fn render_parts_svc(
     source: &Source,
     root: Option<&str>,
 ) -> Result<Response> {
-    use crate::backend::{ManifoldBackend, build_geo_parts};
+    use crate::backend::{ManifoldBackend, build_geo_parts_cached};
     // Parts are the interactive view → always preview quality.
     let (tree, src) = eval_source(source, root, true)?;
     let mut staged: Vec<StagedPart> = Vec::new();
-    for solid in build_geo_parts(&tree, &ManifoldBackend)
-        .into_iter()
-        .flatten()
-        .filter(|s| !s.is_empty())
-    {
+    // Materialize the parts BEFORE the loop: the `&mut store.geo_cache` borrow must end before the body
+    // touches `store.mint` (a for-loop's iterator temporaries otherwise live to the end of the loop).
+    let parts = build_geo_parts_cached(&tree, &ManifoldBackend, &mut store.geo_cache);
+    for solid in parts.into_iter().flatten().filter(|s| !s.is_empty()) {
         let Some((mn, mx)) = solid.bbox() else {
             continue;
         };

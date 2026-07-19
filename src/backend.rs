@@ -69,6 +69,11 @@ pub trait GeometryBackend {
     fn to_mesh(&self, s: &Self::Solid) -> Mesh;
     /// Whether the solid is empty (no geometry) — the differential's `Empty` outcome.
     fn is_empty(&self, s: &Self::Solid) -> bool;
+    /// Approximate triangle count — the X.1 persistent cache's LRU size proxy (cheap: a kernel with a
+    /// native count overrides; the default extracts the mesh, so only pay it on a backend without one).
+    fn approx_tris(&self, s: &Self::Solid) -> usize {
+        self.to_mesh(s).tris.len()
+    }
     /// The axis-aligned bounding box `(lo, hi)` of the solid, or `None` when it's empty. `resize()` needs
     /// the child's MEASURED extent to fix its scale factors — unlike a plain transform it can't fold to an
     /// `Affine` at tree-build time (L.5.1).
@@ -107,7 +112,17 @@ pub trait GeometryBackend {
 /// 3D solid, so on this axis it lowers to the empty solid (its 2D region is reached by matching the
 /// [`Geo::D2`] and calling [`build_2d`] on the `Shape2D` — the extrude/projection path, J.3).
 pub fn build_geo<B: GeometryBackend>(geo: &Geo, backend: &B) -> B::Solid {
-    build_geo_gated(geo, backend, geo_cache_enabled())
+    build_geo_gated(geo, backend, geo_cache_enabled(), None)
+}
+
+/// [`build_geo`] threading the X.1 PERSISTENT cross-render cache — the render arms' entry, so a live
+/// customizer reuses subtrees unchanged since the last render instead of recomputing them.
+pub fn build_geo_cached<B: GeometryBackend>(
+    geo: &Geo,
+    backend: &B,
+    cache: &mut GeoCache<B::Solid>,
+) -> B::Solid {
+    build_geo_gated(geo, backend, geo_cache_enabled(), Some(cache))
 }
 
 /// The P.2 gate read once per build: on unless `FAB_GEO_CACHE=0`.
@@ -135,14 +150,19 @@ fn geo_cache_verify() -> bool {
 
 /// [`build_geo`] with the P.2 memo gate explicit — the A/B tests toggle it here instead of racing
 /// the process-global env.
-fn build_geo_gated<B: GeometryBackend>(geo: &Geo, backend: &B, cache: bool) -> B::Solid {
+fn build_geo_gated<B: GeometryBackend>(
+    geo: &Geo,
+    backend: &B,
+    cache: bool,
+    persistent: Option<&mut GeoCache<B::Solid>>,
+) -> B::Solid {
     // The redundancy probe owns its own wall clock, INSIDE its armed state — an unconditional
     // `Instant::now()` here panicked the wasm geom worker on every render (std::time is unsupported
     // on wasm32-unknown-unknown; the web-v0.13.0 boot gate caught it). Disarmed = no clock at all.
     crate::geo_redundancy::reset();
     let out = match geo {
         Geo::D3(node) => {
-            let mut memo = GeoMemo::new(cache);
+            let mut memo = GeoMemo::new(cache, persistent);
             memo.prepass(node);
             build_inner(node, backend, &mut memo)
         }
@@ -168,7 +188,7 @@ pub fn build_geo_parts<B: GeometryBackend>(geo: &Geo, backend: &B) -> Vec<B::Sol
         Geo::D3(GeoNode::Union(kids)) if kids.len() > 1 => {
             // ONE memo across every part: a sliced model shares its base subtree BETWEEN parts
             // (part = base ∩ half), which per-part memos would rebuild per part.
-            let mut memo = GeoMemo::new(geo_cache_enabled());
+            let mut memo = GeoMemo::new(geo_cache_enabled(), None);
             for k in kids {
                 memo.prepass(k);
             }
@@ -177,6 +197,28 @@ pub fn build_geo_parts<B: GeometryBackend>(geo: &Geo, backend: &B) -> Vec<B::Sol
                 .collect()
         }
         _ => vec![build_geo(geo, backend)],
+    }
+}
+
+/// [`build_geo_parts`] threading the X.1 PERSISTENT cross-render cache (the render arms' per-part entry).
+/// The single shared memo across parts already deduped WITHIN a render; the persistent cache extends that
+/// reuse ACROSS renders, so a slider tick re-slices without recomputing every part's base geometry.
+pub fn build_geo_parts_cached<B: GeometryBackend>(
+    geo: &Geo,
+    backend: &B,
+    cache: &mut GeoCache<B::Solid>,
+) -> Vec<B::Solid> {
+    match geo {
+        Geo::D3(GeoNode::Union(kids)) if kids.len() > 1 => {
+            let mut memo = GeoMemo::new(geo_cache_enabled(), Some(cache));
+            for k in kids {
+                memo.prepass(k);
+            }
+            kids.iter()
+                .map(|k| build_inner(k, backend, &mut memo))
+                .collect()
+        }
+        _ => vec![build_geo_cached(geo, backend, cache)],
     }
 }
 
@@ -282,9 +324,133 @@ fn part_names_of(text: &str) -> Vec<Option<String>> {
 // remaining-use counts stay high and their entries live to end-of-build — memory only, bounded by
 // the model's distinct shared content.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
-struct GeoMemo<'t, B: GeometryBackend> {
+// ─────────────────────────── X.1: the PERSISTENT cross-render Solid cache ──────────────────────────
+//
+// GeoMemo (above) dedupes WITHIN one build and dies with it, so a live customizer re-renders the whole
+// model on every slider tick even though one param moved. GeoCache lives on the geom worker's SolidStore
+// (one per execution context — native shard thread / wasm Worker, both !Send-local), so it SURVIVES
+// across renders: an unchanged subtree serves instead of recomputing. Keyed by the 128-bit content hash
+// (no deep-eq — a cross-build cache can't hold a borrowed &GeoNode verifier and an owned clone would
+// duplicate every Leaf mesh); `fresh_instance` re-mints provenance on every serve; LRU-bounded by an
+// approximate mesh-byte budget. Layered BEHIND GeoMemo and consulted only for EXPENSIVE ops.
+
+/// ~bytes per triangle for the LRU budget (3 verts × 3 f64 + an index triple, rounded up) — a proxy,
+/// not exact; the cache bounds RETAINED work, not RAM to the byte.
+const CACHE_BYTES_PER_TRI: usize = 48;
+/// Default cache budget: 128 MiB of approximate mesh bytes. Conservative enough for the wasm heap
+/// ceiling; native could hold more, but one bound keeps both platforms identical (X.1.2 may tune).
+const CACHE_CAP_BYTES: usize = 128 << 20;
+
+struct GeoCacheEntry<S> {
+    solid: S,
+    bytes: usize,
+    /// Monotonic access stamp — the LRU victim is the smallest.
+    used: u64,
+}
+
+/// The persistent content-addressed Solid cache (X.1). `enabled` mirrors `FAB_GEO_CACHE`.
+pub struct GeoCache<S> {
+    map: HashMap<u128, GeoCacheEntry<S>>,
+    bytes: usize,
+    cap_bytes: usize,
+    tick: u64,
+    enabled: bool,
+    hits: u64,
+    misses: u64,
+    stores: u64,
+}
+
+impl<S: Clone> GeoCache<S> {
+    /// A cache with the default budget, gated on `FAB_GEO_CACHE` like the per-build memo.
+    pub fn new() -> Self {
+        Self {
+            map: HashMap::new(),
+            bytes: 0,
+            cap_bytes: CACHE_CAP_BYTES,
+            tick: 0,
+            enabled: geo_cache_enabled(),
+            hits: 0,
+            misses: 0,
+            stores: 0,
+        }
+    }
+
+    /// `(hits, misses, stores, entries, bytes)` — the `[csg-cache]` readout + the tests' reuse gate.
+    pub fn stats(&self) -> (u64, u64, u64, usize, usize) {
+        (
+            self.hits,
+            self.misses,
+            self.stores,
+            self.map.len(),
+            self.bytes,
+        )
+    }
+
+    /// Serve a cached solid by content hash, refreshing its LRU stamp. `None` on a miss.
+    fn get(&mut self, h: u128) -> Option<&S> {
+        self.tick += 1;
+        let t = self.tick;
+        if let Some(e) = self.map.get_mut(&h) {
+            e.used = t;
+            self.hits += 1;
+            Some(&e.solid)
+        } else {
+            self.misses += 1;
+            None
+        }
+    }
+
+    /// Store a rendered solid, then evict least-recently-used entries until under the byte budget. A
+    /// re-store of a live key is a no-op (the first render already banked it).
+    fn insert(&mut self, h: u128, solid: S, tris: usize) {
+        if self.map.contains_key(&h) {
+            return;
+        }
+        let bytes = tris.saturating_mul(CACHE_BYTES_PER_TRI);
+        self.tick += 1;
+        let used = self.tick;
+        self.map.insert(h, GeoCacheEntry { solid, bytes, used });
+        self.bytes += bytes;
+        self.stores += 1;
+        while self.bytes > self.cap_bytes && self.map.len() > 1 {
+            let victim = self.map.iter().min_by_key(|(_, e)| e.used).map(|(&k, _)| k);
+            match victim {
+                Some(k) => {
+                    if let Some(e) = self.map.remove(&k) {
+                        self.bytes -= e.bytes;
+                    }
+                }
+                None => break,
+            }
+        }
+    }
+}
+
+impl<S: Clone> Default for GeoCache<S> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Which nodes the persistent cache retains — the EXPENSIVE ops (real kernel work). Cheap wrappers
+/// (Transform/Color) and leaves aren't cached: their child (if expensive) already is, and caching a
+/// Leaf just duplicates a mesh we'd rebuild in microseconds.
+fn cacheable(node: &GeoNode) -> bool {
+    matches!(
+        node,
+        GeoNode::Union(_)
+            | GeoNode::Difference(_)
+            | GeoNode::Intersection(_)
+            | GeoNode::Hull(_)
+            | GeoNode::Minkowski(_)
+            | GeoNode::Extrude { .. }
+            | GeoNode::Resize { .. }
+    )
+}
+
+struct GeoMemo<'t, 'c, B: GeometryBackend> {
     /// Subtree hash → REMAINING expected builds (prepass count, decremented per visit; entry + any
     /// stored solids evict at 0).
     counts: BTreeMap<u64, u32>,
@@ -293,15 +459,22 @@ struct GeoMemo<'t, B: GeometryBackend> {
     /// Node address → subtree hash (shared with the prepass; O(tree) hashing total).
     hashes: BTreeMap<usize, u64>,
     enabled: bool,
+    /// X.1: node address → 128-bit hash memo for the persistent cache (per build, like `hashes`).
+    hashes128: BTreeMap<usize, u128>,
+    /// X.1: the persistent cross-render cache, threaded in from the SolidStore. `None` on the plain
+    /// per-build path (slicing, tests) — then this behaves exactly like the P.2-only memo.
+    persistent: Option<&'c mut GeoCache<B::Solid>>,
 }
 
-impl<'t, B: GeometryBackend> GeoMemo<'t, B> {
-    fn new(enabled: bool) -> Self {
+impl<'t, 'c, B: GeometryBackend> GeoMemo<'t, 'c, B> {
+    fn new(enabled: bool, persistent: Option<&'c mut GeoCache<B::Solid>>) -> Self {
         Self {
             counts: BTreeMap::new(),
             ready: BTreeMap::new(),
             hashes: BTreeMap::new(),
             enabled,
+            hashes128: BTreeMap::new(),
+            persistent,
         }
     }
 
@@ -334,17 +507,77 @@ impl<'t, B: GeometryBackend> GeoMemo<'t, B> {
 /// the integration seam: fab-lang builds the backend-agnostic tree, the backend does the real CSG.
 /// Recursion is bounded by the tree depth (the parser's `MAX_DEPTH`), so it can't overflow the stack.
 pub fn build<B: GeometryBackend>(node: &GeoNode, backend: &B) -> B::Solid {
-    let mut memo = GeoMemo::new(geo_cache_enabled());
+    let mut memo = GeoMemo::new(geo_cache_enabled(), None);
     memo.prepass(node);
     build_inner(node, backend, &mut memo)
 }
 
-/// The memoizing recursion behind [`build`]: serve a repeated subtree from the P.2 memo (deep-eq
-/// verified), render + store a first-of-many, render plain a singleton.
-fn build_inner<'t, B: GeometryBackend>(
+/// Lower a node: the X.1 persistent cross-render cache first (a subtree unchanged since the last render
+/// serves instead of recomputing), then the per-build P.2 memo. Children recurse back through here, so
+/// every expensive subtree gets both layers.
+fn build_inner<'t, 'c, B: GeometryBackend>(
     node: &'t GeoNode,
     backend: &B,
-    memo: &mut GeoMemo<'t, B>,
+    memo: &mut GeoMemo<'t, 'c, B>,
+) -> B::Solid {
+    if let Some(out) = serve_persistent(node, backend, memo) {
+        return out;
+    }
+    let out = build_inner_memo(node, backend, memo);
+    store_persistent(node, &out, backend, memo);
+    out
+}
+
+/// X.1: serve `node` from the persistent cache (expensive ops only), re-minting provenance. `None` on a
+/// miss, a cheap node, a disabled/absent cache. `FAB_GEO_CACHE=verify` re-renders uncached and bitwise-
+/// compares the served solid — the deterministic gate that a 128-bit hit is really the same geometry.
+fn serve_persistent<'t, 'c, B: GeometryBackend>(
+    node: &'t GeoNode,
+    backend: &B,
+    memo: &mut GeoMemo<'t, 'c, B>,
+) -> Option<B::Solid> {
+    if !cacheable(node) || !memo.persistent.as_ref().is_some_and(|c| c.enabled) {
+        return None;
+    }
+    let h = crate::geo_hash::hash_node_128(node, &mut memo.hashes128);
+    let out = backend.fresh_instance(memo.persistent.as_deref_mut()?.get(h)?);
+    if geo_cache_verify() {
+        let fresh = {
+            let mut scratch = GeoMemo::new(false, None);
+            render_node(node, backend, &mut scratch)
+        };
+        assert!(
+            meshes_bit_eq(&backend.to_mesh(&out), &backend.to_mesh(&fresh)),
+            "FAB_GEO_CACHE=verify: X.1 cache serve != uncached fresh render (hash {h:#034x})"
+        );
+    }
+    Some(out)
+}
+
+/// X.1: store a freshly-rendered expensive subtree into the persistent cache (a no-op for cheap nodes /
+/// disabled cache; a re-store of a live key is ignored inside `insert`).
+fn store_persistent<'t, 'c, B: GeometryBackend>(
+    node: &'t GeoNode,
+    out: &B::Solid,
+    backend: &B,
+    memo: &mut GeoMemo<'t, 'c, B>,
+) {
+    if !cacheable(node) || !memo.persistent.as_ref().is_some_and(|c| c.enabled) {
+        return;
+    }
+    let h = crate::geo_hash::hash_node_128(node, &mut memo.hashes128);
+    let tris = backend.approx_tris(out);
+    if let Some(pc) = memo.persistent.as_deref_mut() {
+        pc.insert(h, out.clone(), tris);
+    }
+}
+
+/// The memoizing recursion behind [`build`]: serve a repeated subtree from the P.2 memo (deep-eq
+/// verified), render + store a first-of-many, render plain a singleton.
+fn build_inner_memo<'t, 'c, B: GeometryBackend>(
+    node: &'t GeoNode,
+    backend: &B,
+    memo: &mut GeoMemo<'t, 'c, B>,
 ) -> B::Solid {
     if memo.enabled {
         let h = crate::geo_hash::hash_node(node, &mut memo.hashes);
@@ -365,7 +598,7 @@ fn build_inner<'t, B: GeometryBackend>(
                     // perturbation, no circular serve reuse); compared BITWISE (PartialEq is
                     // sign-of-zero-blind, the kernel's shadow predicates are not).
                     let fresh = {
-                        let mut scratch = GeoMemo::new(false);
+                        let mut scratch = GeoMemo::new(false, None);
                         render_node(node, backend, &mut scratch)
                     };
                     assert!(
@@ -390,10 +623,10 @@ fn build_inner<'t, B: GeometryBackend>(
 }
 
 /// One node's actual backend lowering (the pre-P.2 `build` body); children recurse through the memo.
-fn render_node<'t, B: GeometryBackend>(
+fn render_node<'t, 'c, B: GeometryBackend>(
     node: &'t GeoNode,
     backend: &B,
-    memo: &mut GeoMemo<'t, B>,
+    memo: &mut GeoMemo<'t, 'c, B>,
 ) -> B::Solid {
     // BU.7 probe (no-op unless FAB_GEO_REDUNDANCY=1): subtree hash + inclusive render time. Sits on
     // the RENDER path, so with the memo live it reports the RESIDUAL waste the memo didn't catch.
@@ -546,10 +779,10 @@ fn reduce_2d<B: GeometryBackend>(
 
 /// Fold children left-to-right with `combine` (the empty algebra lives in the backend ops). An empty
 /// child list → the empty solid; for `difference` the fold is `first − rest`.
-fn reduce<'t, B: GeometryBackend>(
+fn reduce<'t, 'c, B: GeometryBackend>(
     kids: &'t [GeoNode],
     backend: &B,
-    memo: &mut GeoMemo<'t, B>,
+    memo: &mut GeoMemo<'t, 'c, B>,
     combine: impl Fn(&B, &B::Solid, &B::Solid) -> B::Solid,
 ) -> B::Solid {
     let mut kids = kids.iter();
@@ -656,6 +889,11 @@ impl GeometryBackend for ManifoldBackend {
             }
             None => Mesh::new(),
         }
+    }
+
+    /// X.1 LRU size proxy — the kernel's own triangle count, no mesh extraction.
+    fn approx_tris(&self, s: &Self::Solid) -> usize {
+        s.as_ref().map_or(0, super::kernel::Solid::num_tri)
     }
 
     fn color(&self, s: &Self::Solid, rgba: Rgba) -> Self::Solid {
@@ -1102,7 +1340,7 @@ mod tests {
                 inner: MockBackend,
                 leaves: &leaves,
             };
-            let solid = super::build_geo_gated(&geo, &b, cache);
+            let solid = super::build_geo_gated(&geo, &b, cache, None);
             (leaves.get(), solid.mesh)
         };
         let (leaves_off, mesh_off) = count(false);
@@ -1114,6 +1352,48 @@ mod tests {
         assert_eq!(
             mesh_on, mesh_off,
             "the memo must not change the output mesh"
+        );
+    }
+
+    /// X.1: the persistent cache must not change the output — cache-on == cache-off, byte for byte.
+    #[test]
+    fn x1_persistent_cache_matches_uncached() {
+        // A repeated EXPENSIVE subtree (a difference, not a bare leaf) — the cacheable regime.
+        let geo = fab_lang::evaluate_geometry(
+            "module w(){ difference(){ cube(10, center=true); sphere(6, $fn=16); } }\n\
+             w(); translate([20,0,0]) w();",
+        )
+        .expect("evaluates");
+        let off = super::build_geo(&geo, &MockBackend);
+        let mut cache = super::GeoCache::new();
+        let on = super::build_geo_cached(&geo, &MockBackend, &mut cache);
+        assert_eq!(
+            on.mesh, off.mesh,
+            "X.1 cache must not alter the output mesh"
+        );
+    }
+
+    /// X.1: a second render on the SAME cache reuses the first render's subtrees (the cross-render win).
+    #[test]
+    fn x1_persistent_cache_reuses_across_renders() {
+        let geo = fab_lang::evaluate_geometry(
+            "module w(){ difference(){ cube(10, center=true); sphere(6, $fn=16); } }\n\
+             w(); translate([20,0,0]) w();",
+        )
+        .expect("evaluates");
+        let mut cache = super::GeoCache::new();
+        let cold = super::build_geo_cached(&geo, &MockBackend, &mut cache);
+        let (hits_cold, _, _, _, _) = cache.stats();
+        // A byte-identical re-render (a slider tick that changed nothing) must serve entirely from cache.
+        let warm = super::build_geo_cached(&geo, &MockBackend, &mut cache);
+        let (hits_warm, _, _, _, _) = cache.stats();
+        assert!(
+            hits_warm > hits_cold,
+            "the warm re-render must hit the cache more than the cold one ({hits_warm} vs {hits_cold})"
+        );
+        assert_eq!(
+            cold.mesh, warm.mesh,
+            "warm re-render must match the cold one"
         );
     }
 

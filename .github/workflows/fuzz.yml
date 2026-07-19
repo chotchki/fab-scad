@@ -19,7 +19,13 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: recursive # BOSL2 — the seed corpus for eval/jit_diff is sliced from it
+      # rust-src is REQUIRED: cargo-fuzz (0.13+) defaults to -Zbuild-std to rebuild std WITH the
+      # sanitizer, which needs the std source. Without it every `cargo fuzz run` dies at build
+      # ("can't find crate for `core`" + "sanitizer is incompatible with statically linked libc") —
+      # the campaign never fuzzes a single input. Mirrors release-web.yml's rust-src component.
       - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rust-src
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-fuzz

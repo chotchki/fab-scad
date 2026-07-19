@@ -348,6 +348,9 @@ fn run_screenshot(scene: SceneCfg, png: PathBuf) {
         .init_resource::<CoPack>()
         .init_resource::<Platform>()
         .init_resource::<Pipeline>()
+        // panel_ui reads SaveTarget (W.5); the harness apps must init it too (default None = no Save
+        // affordance) or panel_ui panics on a missing resource.
+        .init_resource::<SaveTarget>()
         .insert_resource(Status("rendering".into()))
         .add_message::<ReSlice>()
         .add_message::<AutoPlace>()
@@ -400,6 +403,7 @@ fn run_scripted(scene: SceneCfg, actions: Vec<Action>) {
         .init_resource::<Platform>()
         .init_resource::<AutoJob>() // sync_pipeline reads it for the busy/loading feedback
         .init_resource::<Pipeline>()
+        .init_resource::<SaveTarget>() // panel_ui reads it (W.5); default None = no Save affordance
         .init_resource::<Tab>()
         .init_resource::<theme::ThemeReady>()
         .init_resource::<EditorBuf>()

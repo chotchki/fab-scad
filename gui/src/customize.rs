@@ -22,7 +22,7 @@ pub(crate) fn extract(source: &str) -> Vec<CustomParam> {
 
 /// Render the Customize tab: a widget per param grouped by `/* [Group] */`, splicing at most one edit
 /// per frame back into `editor.text` at the param's `value_span` (a slider drag emits one change per
-/// frame, applied sequentially — spans stay fresh because `sync_customizer` re-parses after each edit).
+/// frame, applied sequentially — spans stay fresh because `panel_ui` re-`extract`s the params each frame).
 pub(crate) fn customize_panel(
     ui: &mut egui::Ui,
     params: &[CustomParam],
@@ -33,7 +33,14 @@ pub(crate) fn customize_panel(
     // `editor` — the splice below needs it mutably.
     let curs: Vec<String> = params
         .iter()
-        .map(|p| editor.text.get(p.value_span.clone()).unwrap_or("").trim().to_string())
+        .map(|p| {
+            editor
+                .text
+                .get(p.value_span.clone())
+                .unwrap_or("")
+                .trim()
+                .to_string()
+        })
         .collect();
 
     // Cluster params into groups in source order (group = the last `/* [Group] */` before them).
@@ -183,7 +190,7 @@ fn fmt_num(v: f64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::fmt_num;
+    use super::{extract, fmt_num};
 
     #[test]
     fn fmt_num_is_clean() {
@@ -191,5 +198,20 @@ mod tests {
         assert_eq!(fmt_num(25.5), "25.5");
         assert_eq!(fmt_num(0.1 + 0.2), "0.3"); // the classic float-noise case
         assert_eq!(fmt_num(-3.0), "-3");
+    }
+
+    #[test]
+    fn splice_rewrites_only_the_value() {
+        // The X.2.3 contract: a widget change rewrites the value slice in place, leaving the
+        // annotation + the rest of the source untouched, and re-extraction still finds the params.
+        let mut src = "width = 20; // box width [10:60]\nheight = 5;\n".to_string();
+        let span = extract(&src)
+            .into_iter()
+            .find(|p| p.name == "width")
+            .expect("width param")
+            .value_span;
+        src.replace_range(span, &fmt_num(42.0));
+        assert_eq!(src, "width = 42; // box width [10:60]\nheight = 5;\n");
+        assert_eq!(extract(&src).len(), 2); // spans re-derive cleanly after the edit
     }
 }

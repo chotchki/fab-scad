@@ -77,6 +77,7 @@ pub(crate) fn parse_script(s: &str) -> Vec<Action> {
                 "export" => Some(Action::Export),
                 "tab" => match it.next()? {
                     "model" => Some(Action::Tab(Tab::Model)),
+                    "customize" => Some(Action::Tab(Tab::Customize)),
                     "parts" => Some(Action::Tab(Tab::Parts)),
                     "orientation" => Some(Action::Tab(Tab::Orientation)),
                     "export" => Some(Action::Tab(Tab::Export)),

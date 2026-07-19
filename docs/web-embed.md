@@ -91,7 +91,9 @@ the canvas (its wordmark is dropped in embed mode — the site already says wher
 The **boot splash** is the site's, not the app's: an ~8 MiB bevy bundle takes real seconds to download +
 instantiate, and a blank canvas reads as broken. Show a themed (navy/gold) splash over the canvas from
 page load, and remove it on the ready signal below. This is the condition for accepting the bundle size
-([[gui-reactive-standard]] — never a blank page).
+([[gui-reactive-standard]] — never a blank page). `index.reference.html` ships a WORKING one to crib:
+navy/gold field, a streaming download-progress bar (it prefetches the wasm to feed the bar, then hands
+init the bytes), removed on `fab-gui:ready`.
 
 ## What the WASM provides back
 

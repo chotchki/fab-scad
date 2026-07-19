@@ -1,23 +1,150 @@
-<!-- fab-gui wasm dev loader (W.3.5/W.3.7) — standalone (the hotchkiss.io page owns the real chrome).
-     The load-bearing pieces, per docs/web-embed.md:
+<!-- fab-gui wasm loader (W.3.5/W.3.7/W.3.7a) — standalone + the RELEASE reference (release-web.yml
+     ships this as both index.html and index.reference.html; the hotchkiss.io page cribs it but owns the
+     real chrome). Load-bearing pieces, per docs/web-embed.md:
        1. <canvas id="fab-gui"> MUST exist before init() — the app binds to it (window_plugin); missing
-          = panic. data-base points at the bundle members (geom/, libs.json); "" = document-relative.
-       2. init().catch swallows winit's control-flow exception (App::run exits via a JS throw that
-          would otherwise read as a crash).
-       3. `fab-gui:ready` (CustomEvent on document) fires when the first UI frame paints — a real host
-          removes its boot splash here; standalone we just log it. -->
+          = panic. data-base points at the bundle members (geom/, libs.json), MUST end in "/"; "" =
+          document-relative. The wasm prefetch below resolves against it too.
+       2. THE BOOT SPLASH (W.3.7a): an ~8 MiB bundle takes real seconds to download + instantiate, and a
+          blank canvas reads as broken. A themed navy/gold splash covers the canvas from page load,
+          shows live download progress, and is removed on `fab-gui:ready` (the first painted frame) — the
+          condition for accepting the bundle size: never a blank page (gui-reactive-standard).
+       3. We PREFETCH fab_gui_bg.wasm ourselves (streaming, to drive the progress bar) and hand init()
+          the bytes — real progress, no double download. init(undefined) is the fallback if the prefetch
+          fails; it self-fetches the wasm.
+       4. init().catch swallows winit's control-flow exception (App::run exits via a JS throw that would
+          otherwise read as a crash). -->
 <!doctype html>
 <meta charset="utf-8">
-<title>fab-gui — wasm</title>
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>fab-gui</title>
 <style>
-  html, body { margin: 0; height: 100%; background: #0f182d; } /* navy viewport, pre-boot */
-  canvas { display: block; width: 100%; height: 100%; }
+  /* Palette = theme.rs tokens: viewport-well navy #0f182d, gold #ffc935, div-grey #e5e5e5, muted #5b6377. */
+  html, body { margin: 0; height: 100%; background: #0f182d; }
+  canvas#fab-gui { display: block; width: 100%; height: 100%; }
+
+  #fab-splash {
+    position: fixed; inset: 0; z-index: 10;
+    display: flex; align-items: center; justify-content: center;
+    background: #0f182d; color: #e5e5e5;
+    font-family: 'Oswald', 'Arial Narrow', 'Helvetica Neue', system-ui, sans-serif;
+    transition: opacity .38s ease;
+  }
+  #fab-splash.done { opacity: 0; pointer-events: none; }
+  .fab-splash-col { display: flex; flex-direction: column; align-items: center; gap: 20px; }
+  .fab-mark {
+    font-size: 2.6rem; font-weight: 600; letter-spacing: .28em;
+    text-transform: uppercase; color: #ffc935; padding-left: .28em; /* offset the trailing tracking */
+    user-select: none;
+  }
+  .fab-mark .dot { color: #5b6377; margin: 0 .04em; }
+  .fab-bar {
+    position: relative; width: 240px; height: 4px; border-radius: 2px; overflow: hidden;
+    background: rgba(255, 201, 53, .16); /* faint gold track */
+  }
+  .fab-bar-fill {
+    height: 100%; width: 0%; background: #ffc935; border-radius: 2px;
+    transition: width .2s ease;
+  }
+  /* Indeterminate: the compressed transfer makes byte-% unknowable, so slide a partial bar instead. */
+  .fab-bar-fill.indeterminate {
+    width: 34%; transition: none;
+    animation: fab-slide 1.15s ease-in-out infinite;
+  }
+  @keyframes fab-slide {
+    0%   { transform: translateX(-120%); }
+    100% { transform: translateX(390%); }
+  }
+  .fab-status {
+    font-size: .8rem; letter-spacing: .12em; text-transform: uppercase; color: #8a93a8;
+    min-height: 1em; font-variant-numeric: tabular-nums;
+  }
+  .fab-status.error { color: #ffc935; }
+  @media (prefers-reduced-motion: reduce) {
+    .fab-bar-fill.indeterminate { animation: none; }
+    #fab-splash { transition: none; }
+  }
 </style>
+
 <canvas id="fab-gui" data-base=""></canvas>
+
+<div id="fab-splash" role="status" aria-live="polite" aria-label="Loading fab-gui">
+  <div class="fab-splash-col">
+    <div class="fab-mark">Fab<span class="dot">&middot;</span>Gui</div>
+    <div class="fab-bar"><div id="fab-bar-fill" class="fab-bar-fill"></div></div>
+    <div id="fab-status" class="fab-status">Loading&hellip;</div>
+  </div>
+</div>
+
 <script type="module">
-  document.addEventListener('fab-gui:ready', () => console.info('fab-gui: ready'), { once: true });
   import init from './fab_gui.js';
-  init().catch((e) => {
-    if (!`${e}`.includes('Using exceptions for control flow')) console.error('fab-gui init:', e);
-  });
+
+  const splash = document.getElementById('fab-splash');
+  const fill = document.getElementById('fab-bar-fill');
+  const statusEl = document.getElementById('fab-status');
+
+  // data-base: the bundle-member root the wasm resolves against; keep the prefetch in lockstep.
+  let base = document.getElementById('fab-gui').getAttribute('data-base') || '';
+  if (base && !base.endsWith('/')) base += '/';
+
+  // Remove the splash on the first painted frame (docs/web-embed.md contract). NOT on geometry-ready —
+  // the app shows its OWN loading pulse for the worker round-trip after (gui-reactive-standard).
+  document.addEventListener('fab-gui:ready', () => {
+    console.info('fab-gui: ready');
+    splash.classList.add('done');
+    setTimeout(() => splash.remove(), 420);
+  }, { once: true });
+
+  const mb = (b) => (b / 1048576).toFixed(1);
+
+  // Stream the app wasm so the bar reflects real bytes; return an ArrayBuffer for init() (no 2nd fetch).
+  // The served wasm is brotli/gzip-encoded, so the decompressed stream OUTGROWS Content-Length — once it
+  // does, flip the bar to indeterminate and keep the honest "N MB" counter.
+  async function prefetchWasm() {
+    const resp = await fetch(base + 'fab_gui_bg.wasm');
+    if (!resp.ok || !resp.body) throw new Error('wasm fetch ' + resp.status);
+    const total = Number(resp.headers.get('content-length')) || 0;
+    const reader = resp.body.getReader();
+    const chunks = [];
+    let received = 0;
+    let determinate = total > 0;
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      chunks.push(value);
+      received += value.length;
+      if (determinate && received > total) {
+        determinate = false;
+        fill.classList.add('indeterminate');
+      }
+      if (determinate) fill.style.width = ((received / total) * 100).toFixed(1) + '%';
+      statusEl.textContent = 'Loading… ' + mb(received) + ' MB';
+    }
+    fill.classList.remove('indeterminate');
+    fill.style.width = '100%';
+    statusEl.textContent = 'Starting…';
+    const bytes = new Uint8Array(received);
+    let off = 0;
+    for (const c of chunks) { bytes.set(c, off); off += c.length; }
+    return bytes.buffer;
+  }
+
+  (async () => {
+    let wasm;
+    try {
+      wasm = await prefetchWasm();
+    } catch (e) {
+      // Progress is best-effort — on any prefetch hiccup, let init() self-fetch the wasm.
+      console.warn('fab-gui: progress prefetch failed, init() will self-fetch:', e);
+      statusEl.textContent = 'Starting…';
+    }
+    try {
+      await init(wasm);
+    } catch (e) {
+      if (`${e}`.includes('Using exceptions for control flow')) return; // winit's normal exit
+      console.error('fab-gui init:', e);
+      statusEl.textContent = 'Failed to load — see console';
+      statusEl.classList.add('error');
+      fill.classList.remove('indeterminate');
+    }
+  })();
 </script>

@@ -51,6 +51,11 @@ python3 perf/browser/pack_libs.py perf/browser/vendor/osc-libs.json
 # 2. build fab's threaded + bench-gated worker
 bash perf/browser/build-fab-wasm.sh
 
-# 3. run (headless Chrome; ONLY=<name> to smoke one model)
+# 3. run the render-only head-to-head (headless Chrome; ONLY=<name> to smoke one model)
 bash perf/browser/run.sh
 ```
+
+`bootrun.sh` is the bonus: the WHOLE cold start (app download + boot + worker spawn + first render),
+driving the shipped `gui/web` bundle via its `?model=` link — `bash perf/browser/bootrun.sh <model.scad>`.
+~4s on localhost, near-flat across models (the first on-screen render is the cheap interactive preview,
+the rest is fixed boot cost).

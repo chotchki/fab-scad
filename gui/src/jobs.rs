@@ -579,22 +579,34 @@ fn spawn_render(
 /// (Path) and wasm (Bytes) render front doors.
 fn render_result(resp: anyhow::Result<Response>, fresh: bool) -> Result<JobResult, String> {
     match resp {
-        Ok(Response::PartsRendered { parts }) => Ok(JobResult::Rendered {
-            fresh,
-            parts: parts
-                .into_iter()
-                .map(|w| RenderedPart {
-                    base: w.id,
-                    stl: w.stl,
-                    min: w.min,
-                    max: w.max,
-                    name: w.name,
-                })
-                .collect(),
-        }),
-        Ok(Response::Failed { error }) => Err(error),
+        Ok(Response::PartsRendered { parts, messages }) => {
+            // W.3.16: the model's echo/warnings land in the in-app console (the only place to see them
+            // on web). This is the shared render consume point, so both platforms get them.
+            crate::console::push_scad_messages(&messages);
+            Ok(JobResult::Rendered {
+                fresh,
+                parts: parts
+                    .into_iter()
+                    .map(|w| RenderedPart {
+                        base: w.id,
+                        stl: w.stl,
+                        min: w.min,
+                        max: w.max,
+                        name: w.name,
+                    })
+                    .collect(),
+            })
+        }
+        Ok(Response::Failed { error }) => {
+            crate::console::push(crate::console::Kind::Scad, format!("render error: {error}"));
+            Err(error)
+        }
         Ok(_) => Err("render: unexpected service response".to_string()),
-        Err(e) => Err(format!("{e:#}")),
+        Err(e) => {
+            let msg = format!("{e:#}");
+            crate::console::push(crate::console::Kind::Scad, format!("render error: {msg}"));
+            Err(msg)
+        }
     }
 }
 

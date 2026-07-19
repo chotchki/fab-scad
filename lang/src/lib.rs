@@ -299,6 +299,51 @@ where
     Ok(eval::io::drive_from_map(source, sources, jit_factory, config, mesh_reader)?.0)
 }
 
+/// Like [`resolve_geometry_with_base`], but ALSO returns the ordered `echo`/warning [`Message`]s — the
+/// render path drops them via the plain fn, and the GUI console (W.3.16) wants them back.
+///
+/// # Errors
+/// As [`resolve_geometry_with_base`].
+pub fn resolve_geometry_with_base_full<R>(
+    source: &str,
+    base_dir: &Path,
+    library_paths: &[PathBuf],
+    jit_factory: Option<&dyn NumericJitFactory>,
+    config: Config,
+    mesh_reader: R,
+) -> Result<(Geo, Vec<Message>)>
+where
+    R: FnMut(&str) -> Result<Imported>,
+{
+    eval::io::drive(
+        source,
+        base_dir,
+        None,
+        library_paths,
+        jit_factory,
+        config,
+        mesh_reader,
+    )
+}
+
+/// Like [`resolve_geometry_from_sources`], but ALSO returns the ordered `echo`/warning [`Message`]s —
+/// the GUI console on WEB (W.3.16), where the worker evals from the in-memory source map.
+///
+/// # Errors
+/// As [`resolve_geometry_from_sources`].
+pub fn resolve_geometry_from_sources_full<R>(
+    source: &str,
+    sources: &std::collections::BTreeMap<PathBuf, String>,
+    jit_factory: Option<&dyn NumericJitFactory>,
+    config: Config,
+    mesh_reader: R,
+) -> Result<(Geo, Vec<Message>)>
+where
+    R: FnMut(&str) -> Result<Imported>,
+{
+    eval::io::drive_from_map(source, sources, jit_factory, config, mesh_reader)
+}
+
 /// Like [`resolve_geometry_with_base`], but for a `.scad` FILE — resolving its `use`/`include` graph AND
 /// its `import`/`surface` meshes (through `mesh_reader`). The root file is read here.
 ///

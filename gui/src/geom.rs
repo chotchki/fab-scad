@@ -116,7 +116,7 @@ mod tests {
         std::fs::write(&src, "cube([60,40,30], center=true);").unwrap();
 
         let pool = GeomPool::new(1);
-        let Response::PartsRendered { parts } = block_on(pool.call(Request::RenderParts {
+        let Response::PartsRendered { parts, .. } = block_on(pool.call(Request::RenderParts {
             source: Source::Path(src.to_string_lossy().into_owned()),
             root: None,
         }))

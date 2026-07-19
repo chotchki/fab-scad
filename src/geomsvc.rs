@@ -306,7 +306,7 @@ fn eval_source(
     source: &Source,
     root: Option<&str>,
     preview: bool,
-) -> Result<(fab_lang::Geo, Option<std::path::PathBuf>)> {
+) -> Result<(fab_lang::Geo, Option<std::path::PathBuf>, Vec<String>)> {
     match source {
         Source::Path(path) => eval_path(path, root, preview),
         Source::Bytes { main, libs } => {
@@ -325,7 +325,7 @@ fn eval_source(
                     ))
                 })
                 .collect();
-            let tree = fab_lang::resolve_geometry_from_sources(
+            let (tree, messages) = fab_lang::resolve_geometry_from_sources_full(
                 &wrap,
                 &sources,
                 None, // no JIT on the wasm worker — interp only (the web execution tier)
@@ -337,7 +337,7 @@ fn eval_source(
                 },
             )
             .context("scad-rs eval of source bytes")?;
-            Ok((tree, None))
+            Ok((tree, None, messages.iter().map(|m| m.render()).collect()))
         }
     }
 }
@@ -348,7 +348,7 @@ fn eval_path(
     path: &str,
     root: Option<&str>,
     preview: bool,
-) -> Result<(fab_lang::Geo, Option<std::path::PathBuf>)> {
+) -> Result<(fab_lang::Geo, Option<std::path::PathBuf>, Vec<String>)> {
     let src = std::path::PathBuf::from(path);
     let abs = src
         .canonicalize()
@@ -364,14 +364,18 @@ fn eval_path(
             vec![r.join("libs"), r.join("scad-lib")]
         })
         .unwrap_or_default();
-    let tree = crate::import::resolve_geometry_with_base(
+    let (tree, messages) = crate::import::resolve_geometry_with_base_full(
         &wrap,
         &base,
         &libs,
         fab_lang::Config::from_env(),
     )
     .with_context(|| format!("scad-rs eval of {path}"))?;
-    Ok((tree, Some(src)))
+    Ok((
+        tree,
+        Some(src),
+        messages.iter().map(|m| m.render()).collect(),
+    ))
 }
 
 /// wasm worker: no fs, so a `Source::Path` render can't resolve — the app sends `Source::Bytes` there.
@@ -380,7 +384,7 @@ fn eval_path(
     _path: &str,
     _root: Option<&str>,
     _preview: bool,
-) -> Result<(fab_lang::Geo, Option<std::path::PathBuf>)> {
+) -> Result<(fab_lang::Geo, Option<std::path::PathBuf>, Vec<String>)> {
     anyhow::bail!(
         "Path source needs the native fs loader; the wasm worker renders from Source::Bytes"
     )
@@ -394,7 +398,7 @@ fn render_whole_svc(
     preview: bool,
 ) -> Result<Response> {
     use crate::backend::{ManifoldBackend, build_geo_cached};
-    let (tree, _src) = eval_source(source, root, preview)?;
+    let (tree, _src, messages) = eval_source(source, root, preview)?;
     let solid = build_geo_cached(&tree, &ManifoldBackend, &mut store.geo_cache)
         .filter(|s| !s.is_empty())
         .context("scad-rs rendered EMPTY geometry (no faces)")?;
@@ -406,6 +410,7 @@ fn render_whole_svc(
         stl,
         min: mn.to_array(),
         max: mx.to_array(),
+        messages,
     })
 }
 
@@ -421,7 +426,7 @@ fn render_parts_svc(
 ) -> Result<Response> {
     use crate::backend::{ManifoldBackend, build_geo_parts_cached};
     // Parts are the interactive view → always preview quality.
-    let (tree, src) = eval_source(source, root, true)?;
+    let (tree, src, messages) = eval_source(source, root, true)?;
     let mut staged: Vec<StagedPart> = Vec::new();
     // Materialize the parts BEFORE the loop: the `&mut store.geo_cache` borrow must end before the body
     // touches `store.mint` (a for-loop's iterator temporaries otherwise live to the end of the loop).
@@ -451,6 +456,7 @@ fn render_parts_svc(
                 name,
             })
             .collect(),
+        messages,
     })
 }
 
@@ -797,7 +803,7 @@ mod tests {
         std::fs::write(&src, "cube([60,40,30], center=true);").unwrap();
 
         let mut store = SolidStore::new(0);
-        let Response::PartsRendered { parts } = handle_with_store(
+        let Response::PartsRendered { parts, .. } = handle_with_store(
             &mut store,
             Request::RenderParts {
                 source: Source::Path(src.to_string_lossy().into_owned()),

@@ -168,9 +168,9 @@ pub(crate) fn setup_offscreen_model(
         root,
         preview: true,
     })) {
-        Ok(Response::Rendered { id, stl, min, max }) => {
-            (id, min, max, mesh_from_bytes(meshes, &stl))
-        }
+        Ok(Response::Rendered {
+            id, stl, min, max, ..
+        }) => (id, min, max, mesh_from_bytes(meshes, &stl)),
         Ok(Response::Failed { error }) => {
             error!("{error}");
             return load_model(meshes, None);

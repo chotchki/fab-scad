@@ -12,7 +12,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use fab_lang::{Error, Geo, Imported, Mesh, Tri, Vec3};
+use fab_lang::{Error, Geo, Imported, Mesh, Message, Tri, Vec3};
 
 /// Read an `import()`/`surface()` file → a dimension-tagged [`Imported`] — the reader fab-lang's fixpoint
 /// hands each `File` need to. Dispatch is by EXTENSION (OpenSCAD's own import demux): `.stl`/`.3mf`/`.dat`
@@ -65,6 +65,24 @@ pub fn resolve_geometry_with_base(
     config: fab_lang::Config,
 ) -> Result<Geo, Error> {
     fab_lang::resolve_geometry_with_base(
+        source,
+        base_dir,
+        library_paths,
+        jit_factory(),
+        config,
+        |raw| read_import(base_dir, raw),
+    )
+}
+
+/// Like [`resolve_geometry_with_base`], but ALSO returns the eval's `echo`/warning [`Message`]s — the
+/// GUI console (W.3.16) surfaces them where a terminal can't (web).
+pub fn resolve_geometry_with_base_full(
+    source: &str,
+    base_dir: &Path,
+    library_paths: &[PathBuf],
+    config: fab_lang::Config,
+) -> Result<(Geo, Vec<Message>), Error> {
+    fab_lang::resolve_geometry_with_base_full(
         source,
         base_dir,
         library_paths,

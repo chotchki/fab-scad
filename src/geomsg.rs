@@ -218,9 +218,14 @@ pub enum Response {
         stl: Vec<u8>,
         min: [f64; 3],
         max: [f64; 3],
+        /// The eval's `echo`/warning console lines (already `ECHO: …` / `WARNING: …`), for the GUI
+        /// console (W.3.16) — the only way to see them on web, where the eval runs in the worker.
+        messages: Vec<String>,
     },
     PartsRendered {
         parts: Vec<WirePart>,
+        /// `echo`/warning lines from the whole-model eval (W.3.16).
+        messages: Vec<String>,
     },
     Resliced {
         stl: Vec<u8>,

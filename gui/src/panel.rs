@@ -16,6 +16,9 @@ pub(crate) struct PanelWriters<'w> {
     pub(crate) switch: MessageWriter<'w, SwitchFile>,
     pub(crate) autoplace: MessageWriter<'w, AutoPlace>,
     pub(crate) cmd: MessageWriter<'w, PanelCmd>,
+    /// W.3.16 console UI state — folded in here (not a separate `panel_ui` param) to stay under Bevy's
+    /// 16-param cap. The console CONTENT lives in a global buffer (`crate::console`), not the ECS.
+    pub(crate) console: ResMut<'w, crate::console::ConsoleUi>,
 }
 
 /// The read-only display inputs the tabs render, bundled so `panel_ui` stays under Bevy's 16-param cap
@@ -160,24 +163,43 @@ pub(crate) fn panel_ui(
     // BOTTOM BAR (U.3): the status line — a gold spinner + navy activity label while a job runs (the
     // pipeline's ACCURATE activity, never the possibly-stale imperative `Status`); the imperative
     // status shows only when idle (the last result / error / "ready").
-    let bottom = egui::Panel::bottom("statusbar")
-        .frame(panel_frame())
-        .show(&mut viewport, |ui| match &view.pipeline.activity {
-            Some(activity) if view.pipeline.busy => {
-                ui.horizontal(|ui| {
+    // W.3.16: the status bar expands into a CONSOLE. Collapsed = one status row; expanded = a resizable
+    // panel with the echo/warnings (+ optional tracing) below. Size decided from last frame's state so
+    // the panel height and its content agree (a fresh toggle lands next frame — imperceptible).
+    let console_expanded = writers.console.expanded;
+    let mut statusbar = egui::Panel::bottom("statusbar").frame(panel_frame());
+    if console_expanded {
+        statusbar = statusbar
+            .resizable(true)
+            .default_size(220.0)
+            .min_size(96.0)
+            .max_size(480.0);
+    }
+    let bottom = statusbar.show(&mut viewport, |ui| {
+        // Status ROW: the pipeline's accurate activity while busy (never the possibly-stale imperative
+        // Status), else the imperative status — with the console controls right-aligned.
+        ui.horizontal(|ui| {
+            match &view.pipeline.activity {
+                Some(activity) if view.pipeline.busy => {
                     ui.add(egui::Spinner::new().size(14.0).color(theme::GOLD));
                     ui.colored_label(theme::NAVY, activity.as_str());
-                });
-                ui.ctx().request_repaint();
+                    ui.ctx().request_repaint();
+                }
+                _ => {
+                    ui.label(status.0.as_str());
+                }
             }
-            _ => {
-                ui.label(status.0.as_str());
-            }
+            crate::console::controls(ui, &mut writers.console);
         });
+        if console_expanded {
+            ui.separator();
+            crate::console::log_view(ui, writers.console.full);
+        }
+    });
     // LEFT PANEL (U.3): the active tab's controls.
     let panel = egui::Panel::left("panel")
         .resizable(true)
-        .default_size(220.0)
+        .default_size(440.0)
         .frame(panel_frame())
         .show(&mut viewport, |ui| {
             match *tab {

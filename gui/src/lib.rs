@@ -48,6 +48,7 @@ pub(crate) use std::path::{Path, PathBuf};
 pub(crate) use fab_lang::{Dims, Vec3 as FVec3};
 
 mod config;
+mod console; // W.3.16 — the in-app console (echo/warnings + tracing), a bottom-panel expander
 mod customize;
 mod cuts;
 // Web lib-closure delivery (W.3.6 Stage 2) — pure scan/normalize/BFS (native-tested) + the wasm fetch.
@@ -159,7 +160,15 @@ pub fn start() {
 fn run_windowed(scene: SceneCfg, shot: Option<PathBuf>) {
     let mut app = App::new();
     app.add_plugins((
-        DefaultPlugins.set(assets_dir()).set(window_plugin()),
+        DefaultPlugins
+            .set(assets_dir())
+            .set(window_plugin())
+            // W.3.16: mirror the tracing stream into the in-app console (the "Full" feed) — the only
+            // way to see the app's logs on web, where there's no terminal.
+            .set(bevy::log::LogPlugin {
+                custom_layer: console::log_layer,
+                ..default()
+            }),
         MeshPickingPlugin,
         EguiPlugin::default(),
     ))
@@ -192,6 +201,7 @@ fn run_windowed(scene: SceneCfg, shot: Option<PathBuf>) {
     // W.5.7: the save-back target (derived from `?model=` on wasm; always None on desktop → no Save
     // affordance).
     .init_resource::<SaveTarget>()
+    .init_resource::<console::ConsoleUi>()
     .init_resource::<Tab>()
     .init_resource::<theme::ThemeReady>()
     .init_resource::<EditorBuf>()
@@ -348,9 +358,10 @@ fn run_screenshot(scene: SceneCfg, png: PathBuf) {
         .init_resource::<CoPack>()
         .init_resource::<Platform>()
         .init_resource::<Pipeline>()
-        // panel_ui reads SaveTarget (W.5); the harness apps must init it too (default None = no Save
-        // affordance) or panel_ui panics on a missing resource.
+        // panel_ui reads SaveTarget (W.5) + ConsoleUi (W.3.16); the harness apps must init them too or
+        // panel_ui panics on a missing resource.
         .init_resource::<SaveTarget>()
+        .init_resource::<console::ConsoleUi>()
         .insert_resource(Status("rendering".into()))
         .add_message::<ReSlice>()
         .add_message::<AutoPlace>()
@@ -404,6 +415,7 @@ fn run_scripted(scene: SceneCfg, actions: Vec<Action>) {
         .init_resource::<AutoJob>() // sync_pipeline reads it for the busy/loading feedback
         .init_resource::<Pipeline>()
         .init_resource::<SaveTarget>() // panel_ui reads it (W.5); default None = no Save affordance
+        .init_resource::<console::ConsoleUi>() // panel_ui reads it (W.3.16)
         .init_resource::<Tab>()
         .init_resource::<theme::ThemeReady>()
         .init_resource::<EditorBuf>()

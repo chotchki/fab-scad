@@ -77,7 +77,7 @@ pub(crate) fn customize_panel(
                 .iter()
                 .map(|&i| (params[i].value_span.clone(), &defaults[&params[i].name]))
                 .collect();
-            edits.sort_by(|a, b| b.0.start.cmp(&a.0.start));
+            edits.sort_by_key(|b| std::cmp::Reverse(b.0.start));
             for (span, val) in edits {
                 if editor.text.get(span.clone()).is_some() {
                     editor.text.replace_range(span, val);
@@ -256,7 +256,7 @@ mod tests {
             .into_iter()
             .map(|p| (p.value_span, defaults[&p.name].clone()))
             .collect();
-        edits.sort_by(|a, b| b.0.start.cmp(&a.0.start));
+        edits.sort_by_key(|b| std::cmp::Reverse(b.0.start));
         for (span, val) in edits {
             src.replace_range(span, &val);
         }

@@ -1429,6 +1429,7 @@ mod tests {
     /// model is unchanged. A heavy, param-INDEPENDENT shell + a light param-dependent part; the warm
     /// render (param moved) should serve the heavy shell from the cache instead of recomputing it.
     ///   cargo test -p fab-scad --release x1_cache_warm_bench -- --ignored --nocapture
+    #[cfg(feature = "kernel")]
     #[test]
     #[ignore = "timing, not correctness — run with --release -- --ignored --nocapture"]
     fn x1_cache_warm_bench() {

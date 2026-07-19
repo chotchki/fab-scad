@@ -1090,7 +1090,6 @@ dependencies = [
  "bevy_transform",
  "bevy_ui",
  "bevy_ui_render",
- "bevy_ui_widgets",
  "bevy_utils",
  "bevy_window",
  "bevy_winit",
@@ -2944,21 +2943,6 @@ dependencies = [
 [[package]]
 name = "fab-types"
 version = "0.1.0"
-
-[[package]]
-name = "fab-web"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "bevy",
- "console_error_panic_hook",
- "fab-scad",
- "js-sys",
- "rfd",
- "wasm-bindgen",
- "wasm-bindgen-futures",
- "web-sys",
-]
 
 [[package]]
 name = "fastrand"

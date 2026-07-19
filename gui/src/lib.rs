@@ -133,7 +133,7 @@ fn flag_value(args: &[String], flag: &str) -> Option<String> {
 }
 
 /// wasm entry (W.3.5): the browser calls this on module load. Binds Bevy to the page's
-/// `<canvas id="fab-web">` (via [`window_plugin`]) and boots the SAME windowed app as desktop over an
+/// `<canvas id="fab-gui">` (via [`window_plugin`]) and boots the SAME windowed app as desktop over an
 /// EMPTY scene — geometry lands when the W.3.6 Worker fills the `GeomPool` stub. The panic hook routes
 /// Rust panics to the console (a bare wasm trap is otherwise opaque). This is the egui-on-wasm smoke.
 #[cfg(target_arch = "wasm32")]

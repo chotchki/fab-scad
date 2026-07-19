@@ -85,13 +85,12 @@ fn section_or_empty(
 
 /// A closed, manifold 3D solid — the unit every kernel op consumes and produces.
 ///
-/// **!Send/!Sync by construction** (the `PhantomData<*const ()>`). The upstream binding declares
-/// `unsafe impl Send/Sync for Manifold`, but it isn't airtight: `clone` SHARES the underlying
-/// `CsgNode`, and `CsgLeafNode::GetImpl()` bakes a pending transform via an UNLOCKED mutation of a
-/// `mutable` member — so a transform-pending leaf shared across threads (via clone) and evaluated
-/// concurrently is a data race (UB). Rather than depend on that, we forbid moving a `Solid` across
-/// threads at the type level: thread boundaries must carry inert mesh data (STL bytes / vertex
-/// buffers) and rebuild the `Solid` on the far side. See `docs/manifold-thread-safety.md`.
+/// **!Send/!Sync by construction.** `Solid` wraps `Rc<Mesh>`, which is already `!Send`; the
+/// `PhantomData<*const ()>` locks that in independently of the field, so a later `Rc`→`Arc` switch
+/// (SPEC OPEN #3) can't silently make it `Send`. Deliberate: thread boundaries carry inert mesh DATA
+/// (STL bytes / vertex buffers) and rebuild the `Solid` on the far side. (The old rationale — a C++
+/// `Manifold` whose `clone` shared a `CsgNode` with an unlocked pending-transform mutation — is gone;
+/// the kernel is pure Rust since M.7.4, and `Mesh` is a plain deep value type.)
 ///
 /// The !Send guarantee is locked in — this must NOT compile:
 /// ```compile_fail
@@ -873,14 +872,6 @@ impl Solid {
     }
 }
 
-/// A 2D region — the unit the 2D subsystem (J.3) consumes and produces, a typed newtype over Manifold's
-/// `CrossSection` (which bundles Clipper2, the same 2D lib OpenSCAD 2021+ uses). The 2D analogue of
-/// [`Solid`]: the evaluator's [`Shape2D`](fab_lang::Shape2D) tree lowers to one of these, extrusion
-/// bridges it to a `Solid`, and `projection` bridges a `Solid` back to one.
-///
-/// **!Send/!Sync by construction**, same discipline as [`Solid`] — cross threads with polygon data
-/// (`to_polygons`), never a live handle. `CrossSection`'s upstream `unsafe impl Send` shares state on
-/// `clone` the same way `Manifold` does; we don't lean on it.
 /// Resample each contour of a 2D profile for a TWISTED [`extrude`](Section::extrude), matching OpenSCAD:
 /// split each edge into `round(edge_len / perimeter · facets)` even segments (min 1), corners preserved,
 /// so the swept helical walls line up. `facets` is `$fn`; when unset (< 3) OpenSCAD fragments by `$fs`
@@ -920,13 +911,22 @@ fn resample_for_twist(polygons: &[Vec<[f64; 2]>], facets: u32) -> Vec<Vec<[f64; 
         .collect()
 }
 
+/// A 2D region — the unit the 2D subsystem (J.3) consumes and produces, a typed newtype over Manifold's
+/// `CrossSection` (which bundles Clipper2, the same 2D lib OpenSCAD 2021+ uses). The 2D analogue of
+/// [`Solid`]: the evaluator's [`Shape2D`](fab_lang::Shape2D) tree lowers to one of these, extrusion
+/// bridges it to a `Solid`, and `projection` bridges a `Solid` back to one.
+///
+/// Unlike [`Solid`] (whose `Rc<Mesh>` keeps it thread-local), a `Section` is a plain `Send + Sync`
+/// value type: `CrossSection` is deep-owned `Vec` contour data with no shared handle. It used to be
+/// `!Send` to mirror the C++ `CrossSection`'s clone-shares-state hazard — gone since the kernel went
+/// pure Rust (M.7.4).
 #[derive(Clone)]
-pub struct Section(CrossSection, PhantomData<*const ()>);
+pub struct Section(CrossSection);
 
 impl Section {
-    /// The single construction point — keeps the !Send marker consistent everywhere.
+    /// The single construction point.
     fn wrap(c: CrossSection) -> Self {
-        Section(c, PhantomData)
+        Section(c)
     }
 
     /// The empty region (no area) — the 2D identity for union, absorbing for intersection.

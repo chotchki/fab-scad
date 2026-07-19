@@ -193,11 +193,19 @@ const FIXTURES: &[(&str, &str)] = &[
     ),
 ];
 
-/// Materialize the fixture graph once into `CARGO_TARGET_TMPDIR/loader` and hand back its path.
+/// Materialize the fixture graph once into a per-PROCESS `CARGO_TARGET_TMPDIR/loader-<pid>` dir and
+/// hand back its path. Per-process is load-bearing: nextest runs each `#[test]` in its OWN process,
+/// but `CARGO_TARGET_TMPDIR` is ONE dir shared by the whole crate — so N loader tests materializing
+/// concurrently would `fs::write` (truncate-then-write) the SAME fixture files while a sibling reads
+/// them, and a reader catching an `include` mid-truncation sees an EMPTY file → the diamond loses an
+/// arm → a flaky wrong result (the `a_diamond_re_splices_shared_geometry` intermittent Ok). A
+/// pid-scoped dir gives every process its own isolated copy, no cross-process write race. (Under
+/// `cargo test` all tests share one process, so the `OnceLock` materializes exactly once regardless.)
 fn root() -> &'static Path {
     static ROOT: OnceLock<PathBuf> = OnceLock::new();
     ROOT.get_or_init(|| {
-        let base = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("loader");
+        let base = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+            .join(format!("loader-{}", std::process::id()));
         for (rel, contents) in FIXTURES {
             let path = base.join(rel);
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -408,7 +416,10 @@ fn use_is_not_transitive() {
 /// Write a chain of `count` files `chain_0..chain_{count-1}` under a fresh subdir: each links the next
 /// `fanout` times (1 = a deep linear chain, 2 = a fan-out bomb), the leaf is geometry. Returns the root.
 fn write_chain(subdir: &str, count: usize, fanout: usize) -> PathBuf {
-    let base = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(subdir);
+    // pid-scoped for the same cross-process reason as `root()` — no two test processes share a
+    // writable fixture path (here each subdir already has a single writer, but keep the invariant).
+    let base =
+        PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("{subdir}-{}", std::process::id()));
     std::fs::create_dir_all(&base).unwrap();
     for k in 0..count {
         let body = if k + 1 < count {

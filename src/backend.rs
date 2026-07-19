@@ -1397,6 +1397,42 @@ mod tests {
         );
     }
 
+    /// X.1.4 — the ROI measurement (real kernel). The customizer's shape: move ONE knob and most of the
+    /// model is unchanged. A heavy, param-INDEPENDENT shell + a light param-dependent part; the warm
+    /// render (param moved) should serve the heavy shell from the cache instead of recomputing it.
+    ///   cargo test -p fab-scad --release x1_cache_warm_bench -- --ignored --nocapture
+    #[test]
+    #[ignore = "timing, not correctness — run with --release -- --ignored --nocapture"]
+    fn x1_cache_warm_bench() {
+        use std::time::Instant;
+        let src = |h: u32| {
+            format!(
+                "module shell(){{ difference(){{ sphere(20,$fn=128); sphere(19,$fn=128); }} }}\n\
+                 union(){{ shell(); translate([0,0,30]) cube({h}); }}"
+            )
+        };
+        let g1 = fab_lang::evaluate_geometry(&src(5)).expect("evaluates");
+        let g2 = fab_lang::evaluate_geometry(&src(6)).expect("evaluates"); // one param moved
+
+        let mut cache = super::GeoCache::new();
+        let t = Instant::now();
+        let cold = super::build_geo_cached(&g1, &super::ManifoldBackend, &mut cache);
+        let cold_ms = t.elapsed().as_secs_f64() * 1e3;
+        std::hint::black_box(&cold);
+
+        let t = Instant::now();
+        let warm = super::build_geo_cached(&g2, &super::ManifoldBackend, &mut cache);
+        let warm_ms = t.elapsed().as_secs_f64() * 1e3;
+        std::hint::black_box(&warm);
+
+        let (hits, miss, stores, entries, _bytes) = cache.stats();
+        println!(
+            "\nX.1.4 warm-cache bench: cold {cold_ms:.1} ms   warm(1 param moved) {warm_ms:.1} ms   \
+             ({:.1}x)\n  cache after: hits {hits} miss {miss} stores {stores} entries {entries}",
+            cold_ms / warm_ms.max(1e-9)
+        );
+    }
+
     #[test]
     fn part_names_descend_wrappers_and_flag_anonymous() {
         // a module DEF (no geometry), a wrapped call, a bare primitive, an anonymous `if` block.

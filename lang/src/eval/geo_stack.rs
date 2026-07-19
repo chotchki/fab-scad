@@ -91,12 +91,9 @@ impl Combinator {
             Combinator::Boolean(kind) => boolean_of(kind.name(), children, ctx),
             Combinator::Hull => match partition_children(children, ctx) {
                 Children::D3(kids) => Geo::D3(GeoNode::Hull(kids)),
-                Children::D2(_) => {
-                    return Err(crate::Error::Unimplemented(
-                        "hull() over 2D children is not yet wired (the 2D backend has no hull op) — a J.3 \
-                         follow-up",
-                    ));
-                }
+                // 2D hull pools every child's contour points through Manifold's `CrossSection::hull_of`
+                // (X.4) — the same monotone-chain the 3D path uses one dimension up.
+                Children::D2(kids) => Geo::D2(Shape2D::Hull(kids)),
             },
             Combinator::Minkowski => match partition_children(children, ctx) {
                 Children::D3(kids) => Geo::D3(GeoNode::Minkowski(kids)),

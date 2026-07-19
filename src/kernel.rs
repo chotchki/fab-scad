@@ -965,6 +965,15 @@ impl Section {
         Section::wrap(self.0.intersection(&other.0))
     }
 
+    /// The convex hull of many regions COMBINED (`hull()` over 2D children, X.4) — pools every section's
+    /// contour points and runs Manifold's `CrossSection::hull_of` (an Andrew monotone-chain, deterministic
+    /// via its internal `total_cmp` sort). An empty region contributes no points; all-empty → empty. The
+    /// 2D twin of [`Solid::batch_hull`].
+    pub fn hull_of(sections: &[Section]) -> Section {
+        let cs: Vec<CrossSection> = sections.iter().map(|s| s.0.clone()).collect();
+        Section::wrap(CrossSection::hull_of(&cs))
+    }
+
     /// `offset()` — inflate the outline by `delta` (negative shrinks), finishing convex corners per
     /// `join`. `segments` is the Round join's facet count (`$fn`-resolved upstream; ignored otherwise);
     /// the miter limit is Clipper2's default of 2.0.

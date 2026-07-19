@@ -386,12 +386,25 @@ fn an_empty_block_is_dimension_neutral_and_drops_out() {
 // ─────────────────────────────── LOUD deferrals + no-backend flattening ───────────────────────────────
 
 #[test]
-fn hull_over_2d_is_loud() {
-    // 2D hull has no Shape2D node yet (the 2D backend surface lacks a hull op) — LOUD, never silently
-    // wrong. (3D hull works; that's `geometry_tree.rs`.)
+fn hull_over_2d_builds_the_hull_node() {
+    // X.4: `hull()` over 2D children lowers to `Shape2D::Hull` (was a LOUD Unimplemented) — the geometry
+    // (Manifold `CrossSection::hull_of`) is checked by area in `backend.rs`. Here we assert the TREE: two
+    // 2D children pooled under one Hull node, no mixing warning. (3D hull is `geometry_tree.rs`.)
+    let src = "hull() { circle(5, $fn = 8); translate([10, 0]) circle(3, $fn = 8); }";
+    match d2(src) {
+        Shape2D::Hull(ref c) => assert_eq!(c.len(), 2),
+        other => panic!("hull() over 2D should build Shape2D::Hull of two, got {other:?}"),
+    }
+    assert!(warnings(src).is_empty());
+}
+
+#[test]
+fn minkowski_over_2d_is_still_loud() {
+    // 2D minkowski stays deferred (Clipper2 `MinkowskiSum` — a separate J.3 follow-up, out of X.4 scope) —
+    // LOUD, never silently wrong.
     assert!(matches!(
-        evaluate_geometry("hull() { circle(5, $fn = 8); translate([10, 0]) circle(3, $fn = 8); }").unwrap_err(),
-        Error::Unimplemented(m) if m.contains("2D") && m.contains("hull")
+        evaluate_geometry("minkowski() { square(4); circle(1, $fn = 8); }").unwrap_err(),
+        Error::Unimplemented(m) if m.contains("2D") && m.contains("minkowski")
     ));
 }
 

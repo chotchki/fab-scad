@@ -44,7 +44,10 @@ fn drain_shape2d(shape: &mut Shape2D, work: &mut Vec<Sub>) {
         | Shape2D::Color { child, .. } => {
             work.push(Sub::D2(std::mem::replace(&mut **child, Shape2D::Empty)));
         }
-        Shape2D::Union(v) | Shape2D::Difference(v) | Shape2D::Intersection(v) => {
+        Shape2D::Union(v)
+        | Shape2D::Difference(v)
+        | Shape2D::Intersection(v)
+        | Shape2D::Hull(v) => {
             work.extend(std::mem::take(v).into_iter().map(Sub::D2));
         }
         Shape2D::Projection { child, .. } => {

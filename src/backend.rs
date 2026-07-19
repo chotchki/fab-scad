@@ -90,6 +90,9 @@ pub trait GeometryBackend {
     fn difference_2d(&self, a: &Self::Shape, b: &Self::Shape) -> Self::Shape;
     /// 2D boolean intersection.
     fn intersection_2d(&self, a: &Self::Shape, b: &Self::Shape) -> Self::Shape;
+    /// Convex hull of the 2D regions COMBINED (`hull()` over 2D children) — N-ary, pooling every region's
+    /// contour points. An empty list, or all-empty regions, → the empty region. The 2D twin of [`Self::hull`].
+    fn hull_2d(&self, shapes: &[Self::Shape]) -> Self::Shape;
     /// `offset()` — inflate by `delta` (negative shrinks), finishing convex corners per `join`.
     /// `segments` is the `Round` join's facet count (`$fn`-resolved upstream; ignored by miter/bevel).
     fn offset_2d(&self, s: &Self::Shape, delta: f64, join: Join2D, segments: u32) -> Self::Shape;
@@ -746,6 +749,12 @@ pub fn build_2d<B: GeometryBackend>(shape: &Shape2D, backend: &B) -> B::Shape {
         Shape2D::Union(kids) => reduce_2d(kids, backend, B::union_2d),
         Shape2D::Difference(kids) => reduce_2d(kids, backend, B::difference_2d),
         Shape2D::Intersection(kids) => reduce_2d(kids, backend, B::intersection_2d),
+        // Hull is N-ary (pool ALL children's points), not a pairwise fold — build every child, then one
+        // hull over the set (mirrors the 3D `GeoNode::Hull` arm in `build`).
+        Shape2D::Hull(kids) => {
+            let shapes: Vec<B::Shape> = kids.iter().map(|k| build_2d(k, backend)).collect();
+            backend.hull_2d(&shapes)
+        }
         Shape2D::Offset {
             delta,
             join,
@@ -922,6 +931,10 @@ impl GeometryBackend for ManifoldBackend {
 
     fn intersection_2d(&self, a: &Self::Shape, b: &Self::Shape) -> Self::Shape {
         a.intersection(b)
+    }
+
+    fn hull_2d(&self, shapes: &[Self::Shape]) -> Self::Shape {
+        crate::kernel::Section::hull_of(shapes)
     }
 
     fn offset_2d(&self, s: &Self::Shape, delta: f64, join: Join2D, segments: u32) -> Self::Shape {
@@ -1164,6 +1177,18 @@ impl GeometryBackend for MockBackend {
         }
     }
 
+    fn hull_2d(&self, shapes: &[Self::Shape]) -> Self::Shape {
+        // Mirror the 3D `hull` mock: pool the NON-empty operands' contours (structure, not a real hull) +
+        // bump ops, honoring the empty algebra (all-empty → empty). Real hull lives in ManifoldBackend.
+        let contours: Vec<Vec<[f64; 2]>> = shapes
+            .iter()
+            .filter(|s| !s.is_empty())
+            .flat_map(|s| s.contours.iter().cloned())
+            .collect();
+        let ops = shapes.iter().map(|s| s.ops).sum::<u32>() + 1;
+        MockShape { contours, ops }
+    }
+
     fn offset_2d(
         &self,
         s: &Self::Shape,
@@ -1302,6 +1327,9 @@ mod tests {
             }
             fn intersection_2d(&self, a: &Self::Shape, b: &Self::Shape) -> Self::Shape {
                 self.inner.intersection_2d(a, b)
+            }
+            fn hull_2d(&self, shapes: &[Self::Shape]) -> Self::Shape {
+                self.inner.hull_2d(shapes)
             }
             fn offset_2d(
                 &self,
@@ -1665,6 +1693,38 @@ mod tests {
             o > 5.0 && o < 60.0,
             "O area {o} should be a ring, not a filled box"
         );
+    }
+
+    // X.4 — `hull()` over 2D children lowers through Manifold's `CrossSection::hull_of` (an Andrew
+    // monotone-chain). Areas are checked against KNOWN hulls: convex → itself, and two squares sharing a
+    // y-extent whose hull is exactly their bounding rectangle.
+    #[cfg(feature = "kernel")]
+    #[test]
+    fn hull_2d_measures_correct_area() {
+        use fab_lang::{Geo, evaluate_geometry};
+        let area = |scad: &str| -> f64 {
+            match evaluate_geometry(scad).expect("evaluates") {
+                Geo::D2(shape) => super::build_2d(&shape, &super::ManifoldBackend).area(),
+                other => panic!("expected a 2D result, got {other:?}"),
+            }
+        };
+        // A convex shape is its own hull: hull() of one square is the square (area 16).
+        assert!((area("hull() square(4);") - 16.0).abs() < 1e-9);
+        // Two 4×4 squares at [0,4]² and [10,14]×[0,4] share the y-extent [0,4], so their convex hull is
+        // EXACTLY the enclosing rectangle [0,14]×[0,4] — the (4,·) and (10,·) corners fall collinear on the
+        // top/bottom edges and drop out. Area 14·4 = 56. (Bridging them: strictly bigger than 2·16 = 32.)
+        assert!((area("hull() { square(4); translate([10, 0]) square(4); }") - 56.0).abs() < 1e-9);
+        // A hull is CONVEX and ENVELOPING: hull of two separated circles (a stadium) exceeds either circle
+        // and both are enclosed. r = 5, $fn = 64 → each ≈ π·25; the stadium is far larger.
+        let one_circle = area("circle(5, $fn = 64);");
+        let stadium =
+            area("hull() { circle(5, $fn = 64); translate([20, 0]) circle(5, $fn = 64); }");
+        assert!(
+            stadium > 2.0 * one_circle,
+            "stadium {stadium} should envelop both circles ({one_circle} each) plus the bridge"
+        );
+        // An empty child contributes no points; all-empty → empty (the 3D hull's empty algebra, one dim up).
+        assert!(area("hull() { square(0); }").abs() < 1e-9);
     }
 
     // J.2.3/J.2.7 — the tree-walker lowers CSG booleans + transforms through the REAL Manifold backend

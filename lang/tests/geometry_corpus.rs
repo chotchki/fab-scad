@@ -168,14 +168,9 @@ fn beyond_the_subset_is_loud() {
 #[test]
 fn deferred_builtins_name_their_feature() {
     // A still-deferred construct blows up NAMING itself + its follow-up, never a silent nothing or a
-    // misleading "unknown module — a typo?". The module-level holdouts left this club (import/surface →
-    // File NEEDs; text()/minkowski() → implemented); the current LOUD-defers are the 2D hull/minkowski
-    // paths (the CrossSection backend has no 2D hull op yet).
-    assert!(
-        matches!(&err("hull() square(5);"), Error::Unimplemented(m) if m.contains("hull")),
-        "expected a LOUD defer naming hull, got {:?}",
-        err("hull() square(5);")
-    );
+    // misleading "unknown module — a typo?". The holdouts kept leaving this club (import/surface → File
+    // NEEDs; text() → implemented; 2D hull() → implemented X.4). The last LOUD-defer is 2D minkowski
+    // (Clipper2's MinkowskiSum, a separate J.3 follow-up).
     assert!(
         matches!(&err("minkowski() square(5);"), Error::Unimplemented(m) if m.contains("minkowski")),
         "expected a LOUD defer naming minkowski, got {:?}",

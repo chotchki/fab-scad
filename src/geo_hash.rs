@@ -248,7 +248,10 @@ fn hash_shape_128_into(shape: &Shape2D, h: &mut Fnv128) {
                 }
             }
         }
-        Shape2D::Union(kids) | Shape2D::Difference(kids) | Shape2D::Intersection(kids) => {
+        Shape2D::Union(kids)
+        | Shape2D::Difference(kids)
+        | Shape2D::Intersection(kids)
+        | Shape2D::Hull(kids) => {
             for k in kids {
                 hash_shape_128_into(k, h);
             }
@@ -297,7 +300,10 @@ fn hash_shape_into(shape: &Shape2D, h: &mut FnvHasher) {
                 }
             }
         }
-        Shape2D::Union(kids) | Shape2D::Difference(kids) | Shape2D::Intersection(kids) => {
+        Shape2D::Union(kids)
+        | Shape2D::Difference(kids)
+        | Shape2D::Intersection(kids)
+        | Shape2D::Hull(kids) => {
             for k in kids {
                 hash_shape_into(k, h);
             }

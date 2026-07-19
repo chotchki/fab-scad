@@ -39,6 +39,10 @@ pub enum Shape2D {
     Difference(Vec<Shape2D>),
     /// `intersection()` over 2D children — the common area.
     Intersection(Vec<Shape2D>),
+    /// `hull()` over 2D children — the convex hull of every child's contour points pooled together
+    /// (Manifold `CrossSection::hull_of`, an Andrew monotone-chain). N-ary, not a pairwise fold; an
+    /// empty child contributes no points, all-empty → empty. The 2D twin of [`GeoNode::Hull`].
+    Hull(Vec<Shape2D>),
     /// `offset()` — grow (`delta > 0`) or shrink the child by `delta`, with a corner-[`Join2D`] style.
     Offset {
         /// Signed distance to inflate the outline by.
@@ -98,9 +102,10 @@ impl Shape2D {
                     fold(&mut contours.iter().flatten().map(|p| m.apply(*p).x))
                 }
                 Shape2D::Transform { matrix, child } => walk(child, &m.compose(matrix)),
-                Shape2D::Union(kids) | Shape2D::Difference(kids) | Shape2D::Intersection(kids) => {
-                    fold(&mut kids.iter().filter_map(|c| walk(c, m)))
-                }
+                Shape2D::Union(kids)
+                | Shape2D::Difference(kids)
+                | Shape2D::Intersection(kids)
+                | Shape2D::Hull(kids) => fold(&mut kids.iter().filter_map(|c| walk(c, m))),
                 Shape2D::Offset { delta, child, .. } => walk(child, m).map(|x| x + delta.max(0.0)),
                 Shape2D::Color { child, .. } => walk(child, m), // color moves no point
                 Shape2D::Projection { .. } | Shape2D::Empty => None,

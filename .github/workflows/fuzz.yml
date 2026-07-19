@@ -61,6 +61,14 @@ jobs:
       - name: fuzz jit_diff
         working-directory: lang
         run: cargo fuzz run jit_diff --target "$FUZZ_TARGET" -- -max_total_time=300 -rss_limit_mb=2048 -max_len=4096 -timeout=10
+      # Y.7 — the GEOMETRY-LOWERING seam (fab-scad fuzz crate at the repo root): evaluate_geometry ->
+      # build_geo/build_2d through the REAL Manifold kernel, so the kernel's get_unchecked unsafe + the
+      # X.4 2D-hull path get ASan on fuzzer geometry. Heavier per-exec than the lang targets (real CSG),
+      # so a shorter budget + higher rss/timeout + a small max_len (a tiny program can ask for a huge $fn).
+      # --fuzz-dir fuzz: cargo-fuzz would otherwise find lang/fuzz. Seed from the eval corpus (programs
+      # that actually build geometry). FAB_EVAL_BUDGET is set inside the target.
+      - name: fuzz geo_lower
+        run: cargo fuzz run geo_lower --fuzz-dir fuzz --target "$FUZZ_TARGET" lang/fuzz/corpus/eval -- -max_total_time=240 -rss_limit_mb=4096 -max_len=2048 -timeout=25
       # Minimize the accumulated corpus to a coverage-minimal set + publish it, so the next run (and
       # anyone reproducing locally) starts from the best-known corpus.
       - name: minimize corpus
@@ -83,5 +91,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: fab-lang-fuzz-crashes
-          path: lang/fuzz/artifacts
+          path: |
+            lang/fuzz/artifacts
+            fuzz/artifacts
           retention-days: 90

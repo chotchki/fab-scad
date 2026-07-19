@@ -1,0 +1,38 @@
+# cargo-fuzz project for fab-scad — the GEOMETRY-LOWERING seam (Y.7). Where lang/fuzz stops at
+# fab-lang's no-backend mesh (leaf tessellation only), this drives the whole eval -> GeoNode -> Solid
+# path through the REAL Manifold kernel: `evaluate_geometry` -> `build_geo`/`build_2d` -> mesh. That
+# puts the kernel's 13 `get_unchecked` unsafe blocks (boolean3/collider) AND the X.4 2D-hull path under
+# ASan on fuzzer-driven geometry — the eval->kernel integration that nothing fuzzed before.
+#
+# Standalone `[workspace]` (cargo-fuzz convention) so the stable root build/test/clippy never compiles
+# nightly+libFuzzer. `features = ["kernel"]` (NOT "native") = serial ManifoldBackend without the OS-heavy
+# reqwest/clap deps. Run: `cargo +nightly fuzz run geo_lower` (CI pins --target the gnu host, see fuzz.yml).
+[package]
+name = "fab-scad-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[workspace]
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.fab-scad]
+path = ".."
+default-features = false
+features = ["kernel"]
+
+# Named directly for `Geo`/`evaluate_geometry` — same path fab-scad pulls, so the types unify.
+[dependencies.fab-lang]
+path = "../lang"
+
+[[bin]]
+name = "geo_lower"
+path = "fuzz_targets/geo_lower.rs"
+test = false
+doc = false
+bench = false

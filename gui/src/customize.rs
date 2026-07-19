@@ -28,6 +28,7 @@ pub(crate) fn customize_panel(
     params: &[CustomParam],
     editor: &mut EditorBuf,
     now: f64,
+    defaults: Option<&std::collections::HashMap<String, String>>,
 ) {
     // Snapshot each param's current value text UP FRONT (owned) so the widget closures don't borrow
     // `editor` — the splice below needs it mutably.
@@ -63,6 +64,32 @@ pub(crate) fn customize_panel(
     };
 
     ui.add_space(4.0);
+
+    // Reset-to-default (X.2.4): "default" = each param's value when the file was loaded (captured by
+    // panel_ui). A single Reset restores every changed param — batch-spliced in DESCENDING span order so
+    // an earlier rewrite can't shift a later span. Takes priority over a widget change this frame.
+    if let Some(defaults) = defaults {
+        let changed: Vec<usize> = (0..params.len())
+            .filter(|&i| defaults.get(&params[i].name).is_some_and(|d| d != &curs[i]))
+            .collect();
+        if !changed.is_empty() && ui.button("Reset to defaults").clicked() {
+            let mut edits: Vec<(std::ops::Range<usize>, &String)> = changed
+                .iter()
+                .map(|&i| (params[i].value_span.clone(), &defaults[&params[i].name]))
+                .collect();
+            edits.sort_by(|a, b| b.0.start.cmp(&a.0.start));
+            for (span, val) in edits {
+                if editor.text.get(span.clone()).is_some() {
+                    editor.text.replace_range(span, val);
+                }
+            }
+            editor.dirty = true;
+            editor.edited_at = Some(now);
+            return;
+        }
+        ui.add_space(2.0);
+    }
+
     for (group, idxs) in &groups {
         match group {
             Some(name) => {
@@ -213,5 +240,26 @@ mod tests {
         src.replace_range(span, &fmt_num(42.0));
         assert_eq!(src, "width = 42; // box width [10:60]\nheight = 5;\n");
         assert_eq!(extract(&src).len(), 2); // spans re-derive cleanly after the edit
+    }
+
+    #[test]
+    fn reset_restores_defaults_descending() {
+        // The X.2.4 reset: batch-splice defaults in DESCENDING span order so an earlier rewrite can't
+        // shift a later span — the correctness crux of restoring several params at once.
+        use std::collections::HashMap;
+        let mut src = "a = 99; b = 88;\nc = 77;\n".to_string();
+        let defaults: HashMap<String, String> = [("a", "1"), ("b", "2"), ("c", "3")]
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        let mut edits: Vec<_> = extract(&src)
+            .into_iter()
+            .map(|p| (p.value_span, defaults[&p.name].clone()))
+            .collect();
+        edits.sort_by(|a, b| b.0.start.cmp(&a.0.start));
+        for (span, val) in edits {
+            src.replace_range(span, &val);
+        }
+        assert_eq!(src, "a = 1; b = 2;\nc = 3;\n");
     }
 }

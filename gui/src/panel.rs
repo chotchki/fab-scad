@@ -55,6 +55,11 @@ pub(crate) fn panel_ui(
     view: PanelView,
     mut writers: PanelWriters,
     mut seam: ResMut<PanelSeam>,
+    // X.2.4 reset-to-default: per-file map of param name → as-loaded value. A `Local` (not a resource)
+    // so it needs no per-app init and captures automatically in every app that runs `panel_ui`.
+    mut cust_defaults: Local<
+        std::collections::HashMap<std::path::PathBuf, std::collections::HashMap<String, String>>,
+    >,
 ) {
     let Ok(ctx) = contexts.ctx_mut() else {
         return;
@@ -62,6 +67,23 @@ pub(crate) fn panel_ui(
     // X.2: the customizer params for the current buffer (owned, so it doesn't hold `editor`'s borrow).
     // Drives the conditional Customize tab + its widgets. Cheap — `customize` parses only the buffer.
     let cv_params = crate::customize::extract(&editor.text);
+    // Capture the as-loaded defaults the first time we see this file (first frame ⇒ still the file's own
+    // values, before any customization). Keyed by path, so a file switch captures fresh defaults.
+    cust_defaults.entry(editor.path.clone()).or_insert_with(|| {
+        cv_params
+            .iter()
+            .map(|p| {
+                let v = editor
+                    .text
+                    .get(p.value_span.clone())
+                    .unwrap_or("")
+                    .trim()
+                    .to_string();
+                (p.name.clone(), v)
+            })
+            .collect()
+    });
+    let cv_defaults = cust_defaults.get(&editor.path);
     // A delete defers past the row loop (index stability), tagged with the PART it belongs to (T.2b).
     let mut to_remove: Option<(usize, usize)> = None;
     // A per-piece "reset to auto" (U.3.4) likewise defers past the Orientation list's `parts` borrow.
@@ -325,6 +347,7 @@ pub(crate) fn panel_ui(
                         &cv_params,
                         &mut editor,
                         time.elapsed_secs_f64(),
+                        cv_defaults,
                     );
                 }
                 Tab::Parts => {

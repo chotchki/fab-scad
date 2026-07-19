@@ -1065,7 +1065,11 @@ pub(crate) fn save_action(
     // Bake the live slicing config + bed into the source, same as the .scad download (W.3.8), so a
     // reload restores the plan. This IS the source variant we upload.
     let printer = config::PrinterCfg {
-        bed: [scene.bed[0] as f64, scene.bed[1] as f64, scene.bed[2] as f64],
+        bed: [
+            scene.bed[0] as f64,
+            scene.bed[1] as f64,
+            scene.bed[2] as f64,
+        ],
     };
     let baked = config::with_config_block(&editor.text, &parts.0, Some(printer));
     let name = editor
@@ -1117,12 +1121,21 @@ pub(crate) fn save_action(
         };
 
         // 4. Upload all three — same format for low+high, cookie-authenticated.
-        let mesh_mime = if ext == "3mf" { "model/3mf" } else { "model/stl" };
+        let mesh_mime = if ext == "3mf" {
+            "model/3mf"
+        } else {
+            "model/stl"
+        };
         let src_name = format!("{stem}.scad");
         let low_name = format!("{stem}_low.{ext}");
         let high_name = format!("{stem}.{ext}");
         let files = [
-            ("source", src_name.as_str(), "application/x-openscad", main.as_slice()),
+            (
+                "source",
+                src_name.as_str(),
+                "application/x-openscad",
+                main.as_slice(),
+            ),
             ("low", low_name.as_str(), mesh_mime, low.as_slice()),
             ("high", high_name.as_str(), mesh_mime, high.as_slice()),
         ];

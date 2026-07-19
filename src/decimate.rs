@@ -200,11 +200,7 @@ impl Mesh {
         let mut vfaces: Vec<Vec<u32>> = vec![Vec::new(); n];
         for (fi, t) in tris.iter().enumerate() {
             let [ia, ib, ic] = *t;
-            let (a, b, c) = (
-                verts[ia as usize],
-                verts[ib as usize],
-                verts[ic as usize],
-            );
+            let (a, b, c) = (verts[ia as usize], verts[ib as usize], verts[ic as usize]);
             let nrm = face_normal(a, b, c);
             let len = dot(nrm, nrm).sqrt();
             if len > 0.0 {
@@ -386,7 +382,11 @@ impl Mesh {
             if !self.falive[fi] {
                 continue;
             }
-            let [a, b, c] = [remap[t[0] as usize], remap[t[1] as usize], remap[t[2] as usize]];
+            let [a, b, c] = [
+                remap[t[0] as usize],
+                remap[t[1] as usize],
+                remap[t[2] as usize],
+            ];
             // A live face only ever references live verts, but a degenerate (repeated index) is
             // dropped defensively.
             if a != u32::MAX && b != u32::MAX && c != u32::MAX && a != b && b != c && a != c {
@@ -487,9 +487,8 @@ pub fn decimate_parts(parts: Vec<Part>, total_target: usize) -> Vec<Decimated> {
         })
         .collect();
 
-    let one = |(p, budget): (&Part, usize)| {
-        decimate_mesh(&p.verts, &p.tris, p.colors.as_deref(), budget)
-    };
+    let one =
+        |(p, budget): (&Part, usize)| decimate_mesh(&p.verts, &p.tris, p.colors.as_deref(), budget);
 
     #[cfg(feature = "native")]
     {
@@ -502,7 +501,11 @@ pub fn decimate_parts(parts: Vec<Part>, total_target: usize) -> Vec<Decimated> {
     }
     #[cfg(not(feature = "native"))]
     {
-        parts.iter().zip(budgets).map(|(p, b)| one((p, b))).collect()
+        parts
+            .iter()
+            .zip(budgets)
+            .map(|(p, b)| one((p, b)))
+            .collect()
     }
 }
 
@@ -534,7 +537,8 @@ mod tests {
             [0, 3, 5],
         ];
         for _ in 0..k {
-            let mut mid: std::collections::HashMap<(u32, u32), u32> = std::collections::HashMap::new();
+            let mut mid: std::collections::HashMap<(u32, u32), u32> =
+                std::collections::HashMap::new();
             let mut next = Vec::new();
             let mut midpoint = |a: u32, b: u32, verts: &mut Vec<[f64; 3]>| -> u32 {
                 let key = (a.min(b), a.max(b));
@@ -579,12 +583,18 @@ mod tests {
 
     fn assert_wellformed(d: &Decimated) {
         for v in &d.verts {
-            assert!(v.iter().all(|c| c.is_finite()), "vertex has non-finite coord: {v:?}");
+            assert!(
+                v.iter().all(|c| c.is_finite()),
+                "vertex has non-finite coord: {v:?}"
+            );
         }
         let n = d.verts.len() as u32;
         for t in &d.tris {
             assert!(t.iter().all(|&i| i < n), "tri index out of range: {t:?}");
-            assert!(t[0] != t[1] && t[1] != t[2] && t[0] != t[2], "degenerate tri: {t:?}");
+            assert!(
+                t[0] != t[1] && t[1] != t[2] && t[0] != t[2],
+                "degenerate tri: {t:?}"
+            );
         }
     }
 
@@ -603,7 +613,11 @@ mod tests {
         let d = decimate_mesh(&v, &t, None, 300);
         assert_wellformed(&d);
         assert!(d.tris.len() <= 300, "hit the budget: {} tris", d.tris.len());
-        assert!(d.tris.len() > 50, "didn't collapse to nothing: {} tris", d.tris.len());
+        assert!(
+            d.tris.len() > 50,
+            "didn't collapse to nothing: {} tris",
+            d.tris.len()
+        );
         // A unit sphere: the decimated silhouette stays within a hair of the unit box.
         let (mn, mx) = bbox(&d.verts);
         assert!(
@@ -634,14 +648,19 @@ mod tests {
         let (v, t) = octasphere(4);
         let red = [1.0, 0.0, 0.0, 1.0];
         let blue = [0.0, 0.0, 1.0, 1.0];
-        let colors: Vec<[f64; 4]> = v.iter().map(|p| if p[2] >= 0.0 { red } else { blue }).collect();
+        let colors: Vec<[f64; 4]> = v
+            .iter()
+            .map(|p| if p[2] >= 0.0 { red } else { blue })
+            .collect();
         let d = decimate_mesh(&v, &t, Some(&colors), 300);
         assert_wellformed(&d);
         let out = d.colors.expect("colored in → colored out");
         assert_eq!(out.len(), d.verts.len(), "colors index-aligned to verts");
         let distinct: HashSet<[u8; 4]> = out.iter().map(|&c| qcolor(c)).collect();
         assert!(
-            distinct.iter().all(|c| *c == qcolor(red) || *c == qcolor(blue)),
+            distinct
+                .iter()
+                .all(|c| *c == qcolor(red) || *c == qcolor(blue)),
             "a blended color leaked in: {distinct:?}"
         );
         assert_eq!(distinct.len(), 2, "both regions survive: {distinct:?}");
@@ -652,8 +671,16 @@ mod tests {
         // Two independent spheres → one combined budget, proportionally shared.
         let (v, t) = octasphere(3); // 512 tris each
         let parts = vec![
-            Part { verts: v.clone(), tris: t.clone(), colors: None },
-            Part { verts: v.clone(), tris: t.clone(), colors: None },
+            Part {
+                verts: v.clone(),
+                tris: t.clone(),
+                colors: None,
+            },
+            Part {
+                verts: v.clone(),
+                tris: t.clone(),
+                colors: None,
+            },
         ];
         let out = decimate_parts(parts, 200);
         assert_eq!(out.len(), 2);

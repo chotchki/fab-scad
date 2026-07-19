@@ -95,9 +95,13 @@ fn module_body_local_definitions() {
     // a body-local function does NOT leak to the file scope — calling it outside its module is unknown,
     // now warn-and-undef (L.5.7): the call yields undef + an "Ignoring unknown function" warning (were
     // it leaked, it would resolve to 1 and warn nothing).
-    let full = fab_lang::evaluate_full("module m() { function local_only() = 1; } echo(local_only());")
-        .expect("warn-and-continue");
-    assert!(full.warnings().contains(&"Ignoring unknown function 'local_only'"));
+    let full =
+        fab_lang::evaluate_full("module m() { function local_only() = 1; } echo(local_only());")
+            .expect("warn-and-continue");
+    assert!(
+        full.warnings()
+            .contains(&"Ignoring unknown function 'local_only'")
+    );
 }
 
 /// `parent_module(n)` / `$parent_modules` (L.2.2, `control.cc`): the module instantiation stack, innermost
@@ -263,7 +267,8 @@ fn statement_let_binds_children() {
 /// EVALUATES each iteration, so the warning surfaces (the body isn't silently skipped).
 #[test]
 fn for_body_unknowns_warn_not_swallowed() {
-    let full = fab_lang::evaluate_full("for (i = [0, 1]) not_a_module();").expect("warn-and-continue");
+    let full =
+        fab_lang::evaluate_full("for (i = [0, 1]) not_a_module();").expect("warn-and-continue");
     assert!(
         full.warnings().iter().any(|w| w.contains("not_a_module")),
         "the for body evaluated + warned: {:?}",

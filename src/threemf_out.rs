@@ -182,7 +182,10 @@ mod tests {
         assert_eq!(model.matches("<vertex ").count(), 4);
         assert_eq!(model.matches("<triangle ").count(), 4);
         assert!(!model.contains("basematerials"), "uncolored → no materials");
-        assert!(!model.contains("pid="), "uncolored → no per-triangle material ref");
+        assert!(
+            !model.contains("pid="),
+            "uncolored → no per-triangle material ref"
+        );
     }
 
     #[test]
@@ -201,8 +204,11 @@ mod tests {
         let red = [1., 0., 0., 1.];
         let blue = [0., 0., 1., 1.];
         let colors = vec![red, red, red, blue, blue, blue];
-        let model = read_entry(&to_3mf_bytes(&verts, &tris, Some(&colors)), "3D/3dmodel.model")
-            .expect("model part");
+        let model = read_entry(
+            &to_3mf_bytes(&verts, &tris, Some(&colors)),
+            "3D/3dmodel.model",
+        )
+        .expect("model part");
         assert_eq!(model.matches("<base ").count(), 2, "two distinct colors");
         assert!(model.contains("displaycolor=\"#FF0000FF\""));
         assert!(model.contains("displaycolor=\"#0000FFFF\""));

@@ -1060,8 +1060,11 @@ mod tests {
             panic!("full-res render failed")
         };
 
-        let req =
-            decode_request(&encode_request(&Request::SaveMeshes { base: id, budget: 500 })).unwrap();
+        let req = decode_request(&encode_request(&Request::SaveMeshes {
+            base: id,
+            budget: 500,
+        }))
+        .unwrap();
         let Response::SavedMeshes { low, high, ext } = handle_with_store(&mut store, req) else {
             panic!("save-meshes failed")
         };
@@ -1085,9 +1088,13 @@ mod tests {
         let mut store = SolidStore::new(0);
         let sphere = Solid::sphere(10.0, 32).with_color(Rgba::opaque(1.0, 0.0, 0.0));
         let id = store.mint(sphere);
-        let Response::SavedMeshes { low, high, ext } =
-            handle_with_store(&mut store, Request::SaveMeshes { base: id, budget: 100 })
-        else {
+        let Response::SavedMeshes { low, high, ext } = handle_with_store(
+            &mut store,
+            Request::SaveMeshes {
+                base: id,
+                budget: 100,
+            },
+        ) else {
             panic!("save (colored) failed")
         };
         assert_eq!(ext, "3mf", "colored → 3MF");
@@ -1102,16 +1109,23 @@ mod tests {
 
         // An UNCOLORED base → BOTH STL; a cube (12 tris) is under budget → low == high (skip).
         let cid = store.mint(Solid::cube(20.0, 20.0, 20.0, true));
-        let Response::SavedMeshes { low, high, ext } =
-            handle_with_store(&mut store, Request::SaveMeshes { base: cid, budget: 1000 })
-        else {
+        let Response::SavedMeshes { low, high, ext } = handle_with_store(
+            &mut store,
+            Request::SaveMeshes {
+                base: cid,
+                budget: 1000,
+            },
+        ) else {
             panic!("save (uncolored) failed")
         };
         assert_eq!(ext, "stl", "uncolored → STL");
         assert_ne!(&high[..2], b"PK", "STL is not a zip");
         let hi_n = u32::from_le_bytes(high[80..84].try_into().unwrap());
         let lo_n = u32::from_le_bytes(low[80..84].try_into().unwrap());
-        assert_eq!(hi_n, lo_n, "under budget → low == high tri count (conditional skip)");
+        assert_eq!(
+            hi_n, lo_n,
+            "under budget → low == high tri count (conditional skip)"
+        );
     }
 
     #[test]

@@ -406,9 +406,11 @@ impl Solid {
         let (verts, tris) = self.to_indexed();
         let v: Vec<[f64; 3]> = verts.iter().map(|p| p.to_array()).collect();
         let t: Vec<[u32; 3]> = tris.iter().map(|tri| tri.indices()).collect();
-        let colors = self
-            .vertex_colors()
-            .map(|cs| cs.iter().map(|c| [c.r, c.g, c.b, c.a]).collect::<Vec<[f64; 4]>>());
+        let colors = self.vertex_colors().map(|cs| {
+            cs.iter()
+                .map(|c| [c.r, c.g, c.b, c.a])
+                .collect::<Vec<[f64; 4]>>()
+        });
         crate::threemf_out::to_3mf_bytes(&v, &t, colors.as_deref())
     }
 

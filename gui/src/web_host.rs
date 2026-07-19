@@ -64,7 +64,8 @@ pub(crate) async fn upload_multipart(
             opts.set_type(mime);
             let blob =
                 web_sys::Blob::new_with_buffer_source_sequence_and_options(&parts, &opts).ok()?;
-            form.append_with_blob_and_filename(field, &blob, filename).ok()?;
+            form.append_with_blob_and_filename(field, &blob, filename)
+                .ok()?;
         }
         Some(form)
     };

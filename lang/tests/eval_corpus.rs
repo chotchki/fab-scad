@@ -393,8 +393,12 @@ fn echo_and_assert_evaluate() {
             .tri_count(),
         12 // just the leading cube; the assert halts before the second
     );
-    let loud = fab_lang::evaluate_full("cube(2); assert(1 == 2, \"nope\"); cube(1);").expect("renders");
-    assert_eq!(loud.warnings(), ["assertion failed: nope [assert((1 == 2))]"]);
+    let loud =
+        fab_lang::evaluate_full("cube(2); assert(1 == 2, \"nope\"); cube(1);").expect("renders");
+    assert_eq!(
+        loud.warnings(),
+        ["assertion failed: nope [assert((1 == 2))]"]
+    );
 }
 
 #[test]

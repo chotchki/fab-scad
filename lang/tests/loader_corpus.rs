@@ -350,12 +350,15 @@ fn library_path_is_only_searched_after_the_local_dir() {
     // pr() is unresolved → warn-and-undef, and sphere(undef) falls back to the DEFAULT radius (~1). The
     // shrink proves pathlib is unreachable without the lib path (local dir first).
     let ext = |m: &fab_lang::Mesh| {
-        m.verts
-            .iter()
-            .fold(0f64, |a, v| a.max(v[0].abs()).max(v[1].abs()).max(v[2].abs()))
+        m.verts.iter().fold(0f64, |a, v| {
+            a.max(v[0].abs()).max(v[1].abs()).max(v[2].abs())
+        })
     };
     assert!(ext(&with_lib) > 3.5, "pr() = 4 → sphere(4)");
-    assert!(ext(&without) < 2.0, "pr() unresolved → sphere(undef) at the default radius, not 4");
+    assert!(
+        ext(&without) < 2.0,
+        "pr() unresolved → sphere(undef) at the default radius, not 4"
+    );
 }
 
 #[test]
@@ -393,11 +396,13 @@ fn use_is_not_transitive() {
         .expect("warn-and-continue, not a hard error");
     // inner_r() = 3 lives in lib_inner, which lib_uses_inner `use`s but does NOT re-export → inner_r() is
     // unresolved → warn-and-undef, so sphere(inner_r()) falls back to the DEFAULT radius (~1), not 3.
-    let ext = mesh
-        .verts
-        .iter()
-        .fold(0f64, |a, v| a.max(v[0].abs()).max(v[1].abs()).max(v[2].abs()));
-    assert!(ext < 2.0, "inner_r() (=3) unresolved → default radius ~1 — proof `use` isn't transitive");
+    let ext = mesh.verts.iter().fold(0f64, |a, v| {
+        a.max(v[0].abs()).max(v[1].abs()).max(v[2].abs())
+    });
+    assert!(
+        ext < 2.0,
+        "inner_r() (=3) unresolved → default radius ~1 — proof `use` isn't transitive"
+    );
 }
 
 /// Write a chain of `count` files `chain_0..chain_{count-1}` under a fresh subdir: each links the next

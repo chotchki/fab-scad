@@ -60,11 +60,15 @@ fn root_modifier_diverts_only_its_subtree() {
 /// second assert too).
 #[test]
 fn first_error_wins_the_drain_discards_the_rest() {
-    let (_, msgs) =
-        fab_lang::evaluate_geometry_full("union() { assert(false, \"first\"); assert(false, \"second\"); }")
-            .expect("a failed assert is non-fatal — warn-and-continue");
+    let (_, msgs) = fab_lang::evaluate_geometry_full(
+        "union() { assert(false, \"first\"); assert(false, \"second\"); }",
+    )
+    .expect("a failed assert is non-fatal — warn-and-continue");
     let log = format!("{msgs:?}");
-    assert!(log.contains("first"), "expected the FIRST assert's message, got {log:?}");
+    assert!(
+        log.contains("first"),
+        "expected the FIRST assert's message, got {log:?}"
+    );
     assert!(
         !log.contains("second"),
         "the second assert must NOT run (the drain discards it): {log:?}"

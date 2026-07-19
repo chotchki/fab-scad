@@ -367,3 +367,63 @@ Layered, cheapest-first; each layer catches what the previous can't:
    aggregating layer turns spans into the per-call benchmark corpus, and release builds
    compile it out entirely (`release_max_level_off` / feature gate). Dual use for free:
    the same spans ARE the evaluator's structured debugging story.
+
+## Phase X — Live customizer + content-addressed CSG cache (2026-07-18)
+
+**What.** An OpenSCAD-style Customizer: a *Customize* tab (between Model and Parts) that reads a model's
+top-level parametric variables + their annotations and renders form widgets — drag a slider, the 3D preview
+updates live. Plus the geometry-result cache (the long-earmarked "J.5") that keeps that live loop fast on
+real models. Native AND web, one codebase.
+
+Do NOT confuse this with the Non-goal above ("the preview/CSG-cache/OpenCSG rendering path"): that rules out
+OpenSCAD's OpenCSG *preview renderer*. Phase X's cache is a content-addressed GEOMETRY-RESULT memoization
+(skip a boolean whose inputs we already computed) — we still render meshes, full stop. Different thing,
+same two words.
+
+**Why now.** scad-rs makes the customizer an AST walk (backlogged as B.6), and the extractor is ALREADY
+BUILT: `lang/src/customizer.rs` (tested, exported, UNWIRED) turns source into
+`CustomParam{name, group, description, constraint, value_span}` off the lexer's preserved comment tokens. So
+the UI is wiring. The heavy/risky piece is the cache — and the customizer's per-tick re-render is exactly the
+workload it was designed for. It's also the FORCING FUNCTION that finally makes the cache pay off visibly.
+
+**The cache (X.1 — CACHE-FIRST).**
+- KEY ON THE OP-TREE, NOT THE MESHES. A node's key = `f(op, child_keys, transform, $fn/$fa/$fs)`, carried AS
+  geometry lowers — never hashing mesh bytes (that's the eval_cache "gate overhead IS the cost" trap that
+  made it default-off). Cheap keys or the whole thing goes net-negative.
+- SOUND because par==serial determinism is CONFIRMED (W.6.2): identical inputs → identical bytes, the exact
+  precondition content-addressing needs.
+- Lives WHERE THE KERNEL RUNS (Solid is `!Send`): the geom worker — native GeomPool thread + wasm Web Worker,
+  both persist across render requests. LRU-bounded by total mesh bytes (wasm's ~1 GB ceiling is the hard cap).
+- Two wins: duplicated items WITHIN a render (a for-loop of N identical parts → 1 compute + N−1 hits, and
+  content-addressing catches it even when the duplication isn't syntactic — module-called-twice ≡ for-loop),
+  and unchanged-branch reuse ACROSS slider ticks (move one param → only its branch recomputes).
+- VALIDATE cache-first on the `slice_parts` timeout (ipad >5 min today) — a concrete before/after, and
+  stale-geometry bugs surface on slice GOLDENS (byte-equal cache-on vs cache-off) not as a confusing
+  customizer glitch. A wrong key is WRONG GEOMETRY — a correctness bug, worse than slow.
+
+**The customizer (X.2 — wire-up).**
+- Conditional Customize tab (appears only when `customize(source)` yields ≥1 param — 91/143 models have
+  top-level vars, but most render inferred-default widgets; only a couple carry rich `[min:max]`/`[Group]`
+  metadata today, `models/new_desk_v2/RoundedCornerJig.scad` the standout).
+- `CustomParam.constraint` → egui: Range→slider, Dropdown→combo, bool→checkbox, Num/Str→DragValue/text,
+  vector→fields; group by `/* [Group] */` into collapsing sections.
+- Override = SOURCE-SPLICE (DECIDED). A widget writes the new value into `EditorBuf.text` at `value_span` →
+  sets `edited_at` → the existing debounced `preview_edited_buffer` re-renders (native temp-file + wasm bytes
+  paths inherited free). Chosen over a `-D` eval seam BECAUSE the live code editor sits on the Model tab:
+  splice keeps code↔model COHERENT — a `-D` override desyncs (editor says 10, model renders 25, which is
+  OpenSCAD's own well-known confusion). Persistence comes FREE (the buffer is what saves — native Save + web
+  save-back both ride it). One fiddly bit: faithful value→source formatting (a float slider writes `25`,
+  never `25.00000001`).
+- Per-param reset-to-default (remember the first-parse default). Reactive per the gui-reactive standard —
+  loading pulse, no Apply button.
+
+**Native + web (requirement, woven through).** The egui UI is identical on both. The re-render already has
+both paths (native temp `.scad`, wasm `Source::Bytes`). The cache must live worker-side on BOTH (GeomPool
+thread / Web Worker). An explicit parity task closes it.
+
+**Open questions for X.**
+- Cache eviction tuning: LRU by bytes vs count; per-model vs global; clear-on-model-switch?
+- value→source formatting rules for vectors/ranges (numbers/bool/string are trivial).
+- Does an interpreter-bound re-eval (the ipad/nail_polish class — interp cost, not geometry cost) still lag
+  even with the cache? If so the cache helps geometry, not interp; JIT/eval-cache is a separate lever, OUT of
+  scope for X but worth naming when a model shows it.

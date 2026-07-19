@@ -134,6 +134,18 @@ added 2026-07-07.
 - [x] W.6 - Geom-worker parallel on wasm (save-back prerequisite; W.5 depends on this)
   - [x] W.6.1 - Enable manifold `par` on the wasm geom-worker build: nightly -Zbuild-std=panic_abort,std + RUSTFLAGS +atomics,+bulk-memory,+mutable-globals in build-wasm.sh; a fab-scad wasm-par feature flowing fab-manifold/par through geom; worker awaits init_thread_pool before any kernel call. (Runtime SharedArrayBuffer/COOP-COEP confirmation folds into W.6.2's browser boot gate.) DONE + compile-verified: threaded fab-geom wasm builds clean (nightly build-std + atomics, 20s), wasm-bindgen glue exports initThreadPool alongside handle/start, wasm-opt --enable-threads survives (5.3→3.6M), LLVM-21/C++ path DROPPED (worker is pure-Rust fab-manifold now), worker JS awaits initThreadPool, build-wasm.sh serve hint repointed at the COOP/COEP dev-server.py
   - [x] W.6.2 - W.6.2 - threaded geom worker SHIPPED: release-web builds threaded (nightly + build-std + shared-memory link-args + workerHelpers sed + wasm-opt --enable-threads + COOP/COEP boot gate; CI green end-to-end). par==serial goldens CONFIRMED (native A/B: serial default vs --features par both reproduce the frozen byte goldens). Threading ROI MEASURED — ~11× on a heavy real boolean (Generic_Twin 7226→612 ms), the anti-jit-neutral result (booleans ARE the geometry work). Bench: manifold/tests/par_speedup.rs.
+## Phase X - Live customizer + content-addressed CSG cache
+- [ ] X.1 - X.1 - CSG cache: content-addressed geometry memoization (op-tree-hash keying, worker-side, LRU-bounded) — native + web
+  - [ ] X.1.1 - X.1.1 - Cache key: op-tree content-hash carried AS geometry lowers (f(op, child_keys, transform, $fn/$fa/$fs)); NOT mesh-byte hashing (the eval_cache gate-overhead trap)
+  - [ ] X.1.2 - X.1.2 - Cache store worker-side: native GeomPool thread + wasm Web Worker (persist across render requests), LRU by total mesh bytes, wasm ~1GB-ceiling aware
+  - [ ] X.1.3 - X.1.3 - Correctness gate: byte-golden cache-on == cache-off (par==serial makes content-addressing sound); a deliberate stale-key/wrong-geometry test
+  - [ ] X.1.4 - X.1.4 - Validate cache-first on the slice_parts timeout (ipad >5min) + a duplicated-item dedup benchmark (for-loop of N identical parts) — concrete before/after
+- [ ] X.2 - X.2 - Customizer wire-up: the existing lang/src/customizer.rs → egui widgets + conditional tab — native + web
+  - [ ] X.2.1 - X.2.1 - Conditional Customize tab between Model and Parts (Tab enum + left-panel branch; appears only when customize(source) yields >=1 param)
+  - [ ] X.2.2 - X.2.2 - Widget mapping: CustomParam.constraint -> egui (Range=slider, Dropdown=combo, bool=checkbox, Num/Str=DragValue/text, vector=fields); group by /* [Group] */ into collapsing sections
+  - [ ] X.2.3 - X.2.3 - Source-splice re-render: replace_range(editor.text, value_span) -> set edited_at -> existing debounced preview_edited_buffer (native temp-file + wasm bytes paths both inherited); faithful value->source formatting (no float noise)
+  - [ ] X.2.4 - X.2.4 - Per-param reset-to-default (remember first-parse default) + reactive polish (loading pulse, no Apply button) per gui-reactive-standard
+- [ ] X.3 - X.3 - Persistence + native/web parity: customized values ride in the source (buffer saves free); verify round-trip through native Save + web save-back (PUT /variants); explicit native+web parity pass
 
 ## Backlog (not yet phased)
 

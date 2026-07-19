@@ -13,7 +13,9 @@ import init, * as glue from "./fab_geom.js";
 // BEST-EFFORT (W.5.9 runtime finding): a non-threaded build has no `initThreadPool`, and a mis-shared
 // memory makes the pool spin-up throw `DataCloneError` when it postMessages the wasm Memory to its
 // rayon sub-workers. Either way, fall back to SERIAL geometry rather than bricking the worker — the
-// module still `handle`s requests, just single-threaded. (Perf, not correctness; threading is W.6.2.)
+// module still `handle`s requests, just single-threaded. Threading ships ON by default now (W.6.2:
+// ~11× on a heavy boolean); this fallback is the safety net for a page that isn't cross-origin-isolated,
+// not a TODO. (Perf, not correctness — a serial worker renders the same bytes, just slower.)
 let ready = null;
 const ensure = () =>
   (ready ??= init()

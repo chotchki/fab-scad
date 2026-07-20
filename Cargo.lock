@@ -2871,6 +2871,7 @@ dependencies = [
  "console_error_panic_hook",
  "fab-lang",
  "fab-scad",
+ "image",
  "js-sys",
  "rfd",
  "serde",

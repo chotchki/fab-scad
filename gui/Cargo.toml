@@ -67,6 +67,9 @@ console_error_panic_hook = "0.1"
 js-sys = "0.3"
 # Bridge the async clipboard read (W.3.29.7 editor paste) back to a Bevy system; Send+Sync ends = Resource-safe.
 async-channel = "2"
+# Encode the offscreen cover render target to PNG bytes for the web publish (W.3.29.3) — the byte twin of
+# the desktop screenshot's fs save. Pinned to Bevy's `image` version so `Image::try_into_dynamic` lines up.
+image = { version = "0.25", default-features = false, features = ["png"] }
 web-sys = { version = "0.3", features = [
     "Window",
     "Location",

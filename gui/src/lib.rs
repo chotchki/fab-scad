@@ -51,6 +51,7 @@ pub(crate) use fab_lang::{Dims, Vec3 as FVec3};
 mod clipboard; // W.3.29.7 — editor PASTE bridge (bevy_egui's own paste event is dead on desktop web); wasm only
 mod config;
 mod console; // W.3.16 — the in-app console (echo/warnings + tracing), a bottom-panel expander
+mod cover; // W.3.29.3 — the offscreen gallery-cover scene, shared by desktop + web publish
 mod customize;
 mod cuts;
 #[cfg(test)]
@@ -333,7 +334,8 @@ fn run_windowed(scene: SceneCfg, shot: Option<PathBuf>) {
     #[cfg(target_arch = "wasm32")]
     app.init_resource::<jobs::ModelFetch>()
         .init_resource::<jobs::SaveJob>()
-        .init_resource::<publish_web::PubWebJob>()
+        .init_resource::<publish_web::PubWebFlow>()
+        .init_resource::<publish_web::CoverSink>()
         .init_resource::<publish_dialog::PublishDialog>()
         .init_resource::<clipboard::WebPaste>()
         .insert_resource(SaveTarget(
@@ -352,9 +354,10 @@ fn run_windowed(scene: SceneCfg, shot: Option<PathBuf>) {
                 jobs::save_action,
                 jobs::poll_save,
                 jobs::e2e_autosave,
-                // W.3.29.4: the web Publish flow (create a NEW /3d item) — distinct from the save-back.
+                // W.3.29.4/.3: the web Publish flow (create a NEW /3d item, with cover) — distinct from
+                // the save-back. A phased state machine: render → offscreen cover → capture → upload.
                 publish_web::publish_web_kick,
-                publish_web::poll_publish_web,
+                publish_web::publish_web_flow,
                 // W.3.29.7: bridge Cmd/Ctrl+V into egui (bevy_egui's own paste event is dead on desktop web).
                 clipboard::web_paste_kick,
                 clipboard::web_paste_apply,

@@ -124,13 +124,24 @@ pub(crate) fn publish_web_kick(
         ],
     };
     let baked = config::with_config_block(&editor.text, &parts.0, Some(printer));
-    let name = editor
+    // Name the source from the deep-linked model's basename when there is one; else (a pasted buffer with no
+    // `?model=`) from the provided TITLE — so the published `.scad` reads `<title-slug>.scad`, matching the
+    // desktop path (W.3.33). Everything downstream (`src_name`, mesh + plate + cover names) keys off `stem`.
+    let stem = editor
         .path
         .file_name()
         .and_then(|n| n.to_str())
+        .map(|n| n.strip_suffix(".scad").unwrap_or(n))
         .filter(|n| !n.is_empty())
-        .unwrap_or("model.scad");
-    let stem = name.strip_suffix(".scad").unwrap_or(name).to_string();
+        .map(str::to_string)
+        .unwrap_or_else(|| {
+            let slug = contract::slugify(&title);
+            if slug.is_empty() {
+                "model".into()
+            } else {
+                slug
+            }
+        });
 
     // The printable Bambu plate, if a plan was staged — a standalone download item, same as the save-back.
     let plate = crate::print::plate_3mf_bytes(&pieces, &parts, &scene);

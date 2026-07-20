@@ -66,8 +66,10 @@ pub(crate) enum PubFlow {
 
 /// On the Publish command: resolve the key (no key ⇒ pop Settings, the W.3.27 loud cue), snapshot the
 /// live camera angle, and kick the off-thread kernel render. No OpenSCAD.
+#[allow(clippy::too_many_arguments)] // a Bevy system — params are dependencies, not a smell
 pub(crate) fn publish_kick(
     scene: Res<SceneCfg>,
+    editor: Res<EditorBuf>,
     pool: Res<GeomPool>,
     mut flow: ResMut<PubFlow>,
     mut dialog: ResMut<crate::publish_dialog::PublishDialog>,
@@ -84,11 +86,6 @@ pub(crate) fn publish_kick(
         status.0 = "already publishing…".into();
         return;
     }
-    let Some(src) = scene.source.clone() else {
-        status.0 = "no .scad to publish".into();
-        console::push(Kind::Scad, "publish: no .scad open");
-        return;
-    };
     let resolved = fab_scad::credentials::resolve();
     let Some(key) = resolved.api_key else {
         settings.request_open();
@@ -110,25 +107,61 @@ pub(crate) fn publish_kick(
             Vec3::ZERO,
         ));
 
-    // The FILE stem names the scratch artifacts; the page TITLE/description come from the dialog (the
-    // user's, pre-filled from the manifest/filename). A blank title can't happen (the dialog requires it),
-    // but fall back to the stem defensively.
-    let stem = src
-        .file_stem()
-        .map(|s| s.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "model".into());
+    // The page TITLE/description come from the dialog (the user's, pre-filled from the manifest/filename).
+    // A blank title can't happen (the dialog requires it), but fall back to the opened file's stem, then a
+    // generic name, defensively.
     let title = {
         let t = dialog.title.trim();
-        if t.is_empty() {
-            stem.clone()
-        } else {
+        if !t.is_empty() {
             t.to_string()
+        } else {
+            scene
+                .source
+                .as_deref()
+                .and_then(|s| s.file_stem())
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "model".into())
         }
     };
     let description = dialog.description.clone();
     let out_dir = scene.tmp.join("publish");
+
+    // Resolve the publish source: an opened `.scad` on disk, else the editor BUFFER staged to a temp file
+    // named from the provided TITLE (W.3.33 — a pasted model has no file). `src` is a real path either way:
+    // the render reads it and the `.scad` upload rides it, and since the upload names the source part by
+    // its file NAME, the pasted case ships `<title-slug>.scad` (chotchki's call) — not a temp hash. `stem`
+    // names the scratch cover/mesh artifacts.
+    let (src, stem) = match scene.source.clone() {
+        Some(src) => {
+            let stem = src
+                .file_stem()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "model".into());
+            (src, stem)
+        }
+        None => {
+            let slug = fab_scad::publish_contract::slugify(&title);
+            let slug = if slug.is_empty() {
+                "model".into()
+            } else {
+                slug
+            };
+            if let Err(e) = std::fs::create_dir_all(&out_dir) {
+                status.0 = format!("publish: scratch dir failed ({e})");
+                return;
+            }
+            let staged = out_dir.join(format!("{slug}.scad"));
+            if let Err(e) = std::fs::write(&staged, editor.text.as_bytes()) {
+                status.0 = format!("publish: couldn't stage the pasted model ({e})");
+                console::push(Kind::Scad, format!("publish: stage buffer failed: {e}"));
+                return;
+            }
+            (staged, slug)
+        }
+    };
     let cover_png = out_dir.join(format!("{stem}-cover.png"));
-    // The printable plate .3mf, if `fab make` / the Export tab left one beside the source (best-effort).
+    // The printable plate .3mf, if `fab make` / the Export tab left one beside the source (best-effort; a
+    // staged buffer sits in the scratch dir with no sibling plate, so this is None there).
     let plates = src.with_file_name(format!("{stem}-plates.3mf"));
     let plates = plates.exists().then_some(plates);
 

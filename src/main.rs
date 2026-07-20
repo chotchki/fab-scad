@@ -406,9 +406,14 @@ fn publish_cmd(target: &Path, url: Option<String>, api_key: Option<String>) -> R
     std::fs::write(&low, low_b)?;
     std::fs::write(&high, high_b)?;
 
+    let mut downloads = Vec::new();
+    // The source .scad — a published design ships remixable source, not just meshes.
+    downloads.push(fab_scad::publish::Media {
+        path: target,
+        title: format!("{title} — source (.scad)"),
+    });
     // The printable plate .3mf, if `fab make` left one beside the source (best-effort standalone download).
     let plates = target.with_file_name(format!("{stem}-plates.3mf"));
-    let mut downloads = Vec::new();
     if plates.exists() {
         downloads.push(fab_scad::publish::Media {
             path: &plates,

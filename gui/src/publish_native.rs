@@ -43,6 +43,8 @@ pub(crate) struct PubMeta {
     key: String,
     orbit: (f32, f32, f32, Vec3),
     cover_png: std::path::PathBuf,
+    /// The model's `.scad` source — uploaded as a download so a published design ships remixable source.
+    source: std::path::PathBuf,
     plates: Option<std::path::PathBuf>,
 }
 
@@ -203,6 +205,7 @@ pub(crate) fn publish_kick(
             key,
             orbit,
             cover_png,
+            source: src,
             plates,
         },
     };
@@ -412,10 +415,18 @@ fn spawn_cover_scene(
     (target, ents)
 }
 
-/// Upload the cover + the two mesh variants (+ the plate, if any) off-thread via the pure-upload path.
+/// Upload the cover + the two mesh variants + the `.scad` source (+ the plate, if any) off-thread via the
+/// pure-upload path.
 fn spawn_upload(meta: PubMeta, arts: Arts) -> Task<Result<String, String>> {
     AsyncComputeTaskPool::get().spawn(async move {
         let mut downloads = Vec::new();
+        // The source .scad — so a published design ships remixable source, not just meshes.
+        if meta.source.exists() {
+            downloads.push(fab_scad::publish::Media {
+                path: &meta.source,
+                title: format!("{} — source (.scad)", meta.title),
+            });
+        }
         if let Some(p) = &meta.plates {
             downloads.push(fab_scad::publish::Media {
                 path: p,

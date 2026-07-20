@@ -78,15 +78,17 @@ pub(crate) enum PubFlow {
 /// On the Publish command: resolve the key (no key ⇒ pop Settings, the W.3.27 loud cue), snapshot the
 /// live camera angle, and kick the off-thread kernel render. No OpenSCAD.
 pub(crate) fn publish_kick(
-    mut ev: MessageReader<PanelCmd>,
     scene: Res<SceneCfg>,
     pool: Res<GeomPool>,
     mut flow: ResMut<PubFlow>,
+    mut dialog: ResMut<crate::publish_dialog::PublishDialog>,
     mut settings: ResMut<crate::settings::SettingsUi>,
     mut status: ResMut<Status>,
     cams: Query<&Orbit>,
 ) {
-    if !ev.read().any(|c| *c == PanelCmd::Publish) {
+    // The Publish DIALOG (W.3.29.6) supplies the title/description and raises `confirmed` on commit; take
+    // it (one-shot) to start. The button → dialog → this: no auto-publish.
+    if !std::mem::take(&mut dialog.confirmed) {
         return;
     }
     if !matches!(*flow, PubFlow::Idle) {
@@ -119,17 +121,22 @@ pub(crate) fn publish_kick(
             Vec3::ZERO,
         ));
 
+    // The FILE stem names the scratch artifacts; the page TITLE/description come from the dialog (the
+    // user's, pre-filled from the manifest/filename). A blank title can't happen (the dialog requires it),
+    // but fall back to the stem defensively.
     let stem = src
         .file_stem()
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_else(|| "model".into());
-    let (title, description) = match fab_scad::manifest::Manifest::load_near(&src) {
-        Ok(m) => (
-            m.title().to_string(),
-            m.publish.map(|p| p.description).unwrap_or_default(),
-        ),
-        Err(_) => (stem.clone(), String::new()),
+    let title = {
+        let t = dialog.title.trim();
+        if t.is_empty() {
+            stem.clone()
+        } else {
+            t.to_string()
+        }
     };
+    let description = dialog.description.clone();
     let out_dir = scene.tmp.join("publish");
     let cover_png = out_dir.join(format!("{stem}-cover.png"));
     // The printable plate .3mf, if `fab make` / the Export tab left one beside the source (best-effort).

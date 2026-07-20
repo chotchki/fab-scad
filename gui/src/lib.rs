@@ -61,6 +61,8 @@ mod lib_fetch;
 mod panel;
 mod print;
 #[cfg(not(target_arch = "wasm32"))]
+mod publish_dialog; // W.3.29.6 — the Publish dialog (editable title/desc); cross-platform, native-registered for now
+#[cfg(not(target_arch = "wasm32"))]
 mod publish_native; // W.3.28 — desktop Publish via fab's own kernel/renderer (no OpenSCAD); native only
 mod render_quality; // W.3.25.2 — the live view's Draft|Final quality (a global the render kicks read)
 #[cfg(not(target_arch = "wasm32"))]
@@ -313,6 +315,14 @@ fn run_windowed(scene: SceneCfg, shot: Option<PathBuf>) {
         Update,
         (publish_native::publish_kick, publish_native::publish_flow).chain(),
     );
+    // W.3.29.6: the Publish dialog (editable title/description). Draws in the egui pass; its `confirmed`
+    // flag is what `publish_kick` fires off.
+    #[cfg(not(target_arch = "wasm32"))]
+    app.init_resource::<publish_dialog::PublishDialog>()
+        .add_systems(
+            EguiPrimaryContextPass,
+            publish_dialog::publish_dialog.run_if(theme::theme_ready),
+        );
     // Browser-only file-IO surface (W.3.12): the `?model=` fetch resource + its landing system, plus
     // the save-back (W.5.7/.8): derive the `PUT /media/<ref>/variants` target from the SAME `?model=`
     // deep-link (the stable ref rides its path — no separate param), which gates the Save affordance,
@@ -515,12 +525,18 @@ fn run_scripted(scene: SceneCfg, actions: Vec<Action>) {
         EguiPrimaryContextPass,
         settings::settings_modal.run_if(theme::theme_ready),
     );
-    // W.3.28: the Publish flow in the scripted harness — a headless check of the kernel render + the
-    // offscreen cover (the `publish` verb fires it). Native only.
+    // W.3.28/.29.6: the Publish flow + dialog in the scripted harness — the `publish` verb opens the
+    // dialog (headless render check of the modal); confirm feeds publish_kick. Native only.
     #[cfg(not(target_arch = "wasm32"))]
-    app.init_resource::<publish_native::PubFlow>().add_systems(
-        Update,
-        (publish_native::publish_kick, publish_native::publish_flow).chain(),
-    );
+    app.init_resource::<publish_native::PubFlow>()
+        .init_resource::<publish_dialog::PublishDialog>()
+        .add_systems(
+            Update,
+            (publish_native::publish_kick, publish_native::publish_flow).chain(),
+        )
+        .add_systems(
+            EguiPrimaryContextPass,
+            publish_dialog::publish_dialog.run_if(theme::theme_ready),
+        );
     app.run();
 }

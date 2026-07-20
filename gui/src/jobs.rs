@@ -512,7 +512,7 @@ pub(crate) fn kick_render_bytes(
             pool.call(Request::RenderParts {
                 source: Source::Bytes { main, libs },
                 root: None,
-                quality: Quality::Draft,
+                quality: crate::render_quality::current(),
             })
             .await,
             fresh,
@@ -584,7 +584,7 @@ fn spawn_render(
             pool.call(Request::RenderParts {
                 source,
                 root,
-                quality: Quality::Draft,
+                quality: crate::render_quality::current(),
             })
             .await,
             fresh,

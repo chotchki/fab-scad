@@ -60,6 +60,7 @@ mod jobs;
 mod lib_fetch;
 mod panel;
 mod print;
+mod render_quality; // W.3.25.2 — the live view's Draft|Final quality (a global the render kicks read)
 // Web save-back target derivation (W.5) — pure URL logic (native-tested), no web-sys. Derives the
 // `PUT /media/<ref>/variants` target from the `?model=` deep-link; the wasm boot reads the param.
 #[cfg(any(target_arch = "wasm32", test))]

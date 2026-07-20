@@ -189,6 +189,17 @@ pub(crate) fn panel_ui(
                     ui.label(status.0.as_str());
                 }
             }
+            ui.separator();
+            // W.3.25.2: live-view quality — Draft (fast) / Final (see the real smoothness). Session-only;
+            // export always renders Final. Flipping it re-renders the buffer (bumps edited_at).
+            let mut want_final = crate::render_quality::is_final();
+            let before = want_final;
+            ui.selectable_value(&mut want_final, false, "Draft");
+            ui.selectable_value(&mut want_final, true, "Final");
+            if want_final != before {
+                crate::render_quality::set(want_final);
+                editor.edited_at = Some(time.elapsed_secs_f64());
+            }
             crate::console::controls(ui, &mut writers.console);
         });
         if console_expanded {

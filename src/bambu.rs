@@ -103,6 +103,17 @@ fn project_settings_config(plate_size: [f64; 2], preset: Option<&BambuPreset>) -
 // The plate-grid tiling (`grid_cols` + `plate_origin`) lives in `crate::pack` — one source of truth
 // so the 3mf writer here, the co-pack summary, and the GUI's 3D preview all place plates identically.
 
+/// Create a `.3mf` file, making any missing parent directories first (W.3.31). A save must not fail just
+/// because the target dir doesn't exist yet — the desktop export fell into exactly this when writing to
+/// the scratch `fab-gui` tmp dir that nothing had `mkdir`'d.
+fn create_file(path: &Path) -> Result<std::fs::File> {
+    if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating dir {}", parent.display()))?;
+    }
+    std::fs::File::create(path).with_context(|| format!("creating 3mf {}", path.display()))
+}
+
 /// Write `plates` as a Bambu multi-plate project `.3mf` at `path`. Each element is one plate; its
 /// pieces are positioned within that plate's cell by their `at`. `plate_size` is the REAL printer
 /// plate `[x, y]` in mm (the `printable_area`, e.g. `[350, 320]` for an H2D) — it sets the plate-grid
@@ -115,9 +126,7 @@ pub fn write_project(
     plate_size: [f64; 2],
     preset: Option<&BambuPreset>,
 ) -> Result<()> {
-    let file =
-        std::fs::File::create(path).with_context(|| format!("creating 3mf {}", path.display()))?;
-    write_project_to(file, plates, plate_size, preset)
+    write_project_to(create_file(path)?, plates, plate_size, preset)
 }
 
 /// The writer-generic twin of [`write_project`] — the browser build streams the project into a
@@ -275,9 +284,7 @@ pub fn export_plates(
     gap: f64,
     preset: Option<&BambuPreset>,
 ) -> Result<ExportSummary> {
-    let file =
-        std::fs::File::create(path).with_context(|| format!("creating 3mf {}", path.display()))?;
-    export_plates_to(file, pieces, bed, plate, gap, preset)
+    export_plates_to(create_file(path)?, pieces, bed, plate, gap, preset)
 }
 
 /// The writer-generic twin of [`export_plates`] — same layout/pack/emit, any `Write + Seek` sink.
@@ -586,6 +593,26 @@ mod tests {
         assert_eq!(settings.matches("<plate>").count(), 1, "one shared plate");
 
         let _ = std::fs::remove_file(&tmp);
+    }
+
+    #[test]
+    fn export_creates_missing_parent_dirs() {
+        // W.3.31: writing into a dir that doesn't exist yet must succeed (create_dir_all), not fail the
+        // save — the desktop export hit this writing to an un-mkdir'd scratch dir.
+        let base = std::env::temp_dir().join(format!("bambu_missing_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base); // ensure it does NOT exist
+        let out = base.join("nested/deeper/plates.3mf");
+        assert!(!out.parent().unwrap().exists());
+        let pieces = vec![PieceToPlace {
+            mesh: unit_cube(),
+            up: [0.0, 0.0, 1.0],
+        }];
+        export_plates(&out, pieces, [256.0, 256.0], [256.0, 256.0], 3.0, None).unwrap();
+        assert!(
+            out.exists(),
+            "the export created the missing dirs and wrote the file"
+        );
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]

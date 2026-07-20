@@ -54,6 +54,7 @@ mod console; // W.3.16 — the in-app console (echo/warnings + tracing), a botto
 mod cover; // W.3.29.3 — the offscreen gallery-cover scene, shared by desktop + web publish
 mod customize;
 mod cuts;
+mod editor_indent; // W.3.35 — Tab/Shift+Tab re-indents the editor selection (pure transform, unit-tested)
 #[cfg(test)]
 mod harness_tests;
 mod highlight;

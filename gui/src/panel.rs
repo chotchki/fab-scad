@@ -381,8 +381,43 @@ pub(crate) fn panel_ui(
                             // height so a short file doesn't leave it half-empty (what add_sized gave).
                             let row_h = ui.text_style_height(&egui::TextStyle::Monospace);
                             let rows = (ui.available_height() / row_h).floor().max(1.0) as usize;
+                            // W.3.35: Tab / Shift+Tab re-indents the SELECTION. Intercept it BEFORE the
+                            // widget — egui's default Tab moves focus (and `.code_editor()`'s would insert a
+                            // lone `\t`), neither of which is what a code editor wants. `consume_key` pulls the
+                            // event so focus stays put; we drive the pure transform + write the new selection
+                            // back into the cursor state. Check SHIFT first — `consume_key` matches modifiers
+                            // LOGICALLY (an extra Shift is ignored), so plain-Tab would otherwise eat Shift+Tab.
+                            let editor_id = ui.make_persistent_id("fab_model_editor");
+                            if ui.memory(|m| m.has_focus(editor_id)) {
+                                let untab = ui.input_mut(|i| {
+                                    i.consume_key(egui::Modifiers::SHIFT, egui::Key::Tab)
+                                });
+                                let tab = !untab
+                                    && ui.input_mut(|i| {
+                                        i.consume_key(egui::Modifiers::NONE, egui::Key::Tab)
+                                    });
+                                if (tab || untab)
+                                    && let Some(mut st) =
+                                        egui::text_edit::TextEditState::load(ui.ctx(), editor_id)
+                                    && let Some(mut range) = st.cursor.char_range()
+                                {
+                                    let (a, b) = (range.primary.index.0, range.secondary.index.0);
+                                    let (new_text, na, nb) =
+                                        crate::editor_indent::reindent(&editor.text, a, b, untab);
+                                    if new_text != editor.text {
+                                        editor.text = new_text;
+                                        editor.dirty = true;
+                                        editor.edited_at = Some(time.elapsed_secs_f64());
+                                    }
+                                    range.primary.index = na.into();
+                                    range.secondary.index = nb.into();
+                                    st.cursor.set_char_range(Some(range));
+                                    st.store(ui.ctx(), editor_id);
+                                }
+                            }
                             let resp = ui.add(
                                 egui::TextEdit::multiline(&mut editor.text)
+                                    .id(editor_id)
                                     .code_editor()
                                     .desired_width(f32::INFINITY)
                                     .desired_rows(rows)

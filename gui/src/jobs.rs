@@ -656,17 +656,26 @@ pub(crate) fn preview_edited_buffer(
         );
     }
     // native: write the buffer to a hidden temp beside the real file (so relative `include`s resolve)
-    // and render that path.
+    // and render that path. With NO opened file (a fresh launch the user PASTED into — W.3.33) there's no
+    // parent dir to sit beside, so fall back to the scratch dir: `<BOSL2/…>` still resolves via the
+    // packed lib root on `scene.root`, and a pasted standalone model has no sibling files to miss.
     #[cfg(not(target_arch = "wasm32"))]
     {
-        let Some(dir) = editor.path.parent() else {
-            return;
-        };
+        let dir = editor
+            .path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .map(std::path::Path::to_path_buf)
+            .unwrap_or_else(|| scene.tmp.clone());
         let stem = editor
             .path
             .file_stem()
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_else(|| "preview".into());
+        if std::fs::create_dir_all(&dir).is_err() {
+            status.0 = "preview dir failed".into();
+            return;
+        }
         let preview = dir.join(format!(".fab-preview-{stem}.scad"));
         if std::fs::write(&preview, editor.text.as_bytes()).is_err() {
             status.0 = "preview write failed".into();

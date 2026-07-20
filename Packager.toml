@@ -24,3 +24,15 @@ path = "fab"
 [[resources]]
 src = "gui/assets"
 target = "assets"
+
+# The scad libraries (BOSL2 + fab's own scad-lib). Land in Contents/Resources/{libs,scad-lib} — the
+# app's PACKED lib root (fab::packed_lib_root, W.3.33), so a pasted model resolves `<BOSL2/…>` with no
+# opened file to walk up from. geomsvc's OPENSCADPATH joins root/libs + root/scad-lib, so the two dirs
+# must sit side by side under Resources.
+[[resources]]
+src = "libs"
+target = "libs"
+
+[[resources]]
+src = "scad-lib"
+target = "scad-lib"

@@ -120,12 +120,15 @@ pub fn native_entry() {
     // Prefer the OPENED MODEL's location for the workspace root over cwd (W.3.21): a double-clicked
     // `.app` launches with cwd `/`, so a cwd-based `find_root` returns None → no library paths → BOSL2
     // unresolvable → every module undefined → empty render. Walk up from the .scad's dir first; fall
-    // back to cwd for a sourceless launch (dev `cargo run` from the workspace).
+    // back to cwd for a sourceless launch (dev `cargo run` from the workspace); then the app's OWN bundled
+    // lib root (W.3.33) so a sourceless `.app` — where a PASTED model has no file to walk up from — still
+    // resolves `<BOSL2/…>` against the shipped scad-lib.
     let root = source
         .as_deref()
         .and_then(|p| p.parent())
         .and_then(fab::find_root_from)
-        .or_else(fab::find_root);
+        .or_else(fab::find_root)
+        .or_else(fab::packed_lib_root);
     let cfg = SceneCfg {
         source,
         stl: args.iter().find(|a| a.ends_with(".stl")).map(PathBuf::from),

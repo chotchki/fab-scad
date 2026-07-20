@@ -1181,6 +1181,36 @@ mod tests {
     }
 
     #[test]
+    fn bosl2_path_resolves_against_a_supplied_root() {
+        // W.3.33 (inverse of `empty_render_names_the_missing_library`): the packed-lib-root fallback lets a
+        // PASTED model render with no opened file. Prove the tail of that chain — a `Source::Path` sitting
+        // OUTSIDE any workspace (temp dir), whose only libs come from `root/{libs,scad-lib}`, resolves BOSL2
+        // and produces real geometry. `CARGO_MANIFEST_DIR` is the repo root here (fab_scad is the root
+        // crate), the dev arm of what `fab::packed_lib_root` returns.
+        let mut store = SolidStore::new(0);
+        let dir = std::env::temp_dir().join(format!("fab-paste-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("paste.scad");
+        std::fs::write(&path, b"include <BOSL2/std.scad>\ncyl(d=10, h=5);").unwrap();
+        let src = Source::Path(path.to_string_lossy().into_owned());
+        let ok = matches!(
+            render_whole_svc(
+                &mut store,
+                &src,
+                Some(env!("CARGO_MANIFEST_DIR")),
+                false,
+                Quality::Draft,
+            ),
+            Ok(Response::Rendered { .. })
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            ok,
+            "BOSL2 cyl() should render when root supplies libs + scad-lib"
+        );
+    }
+
+    #[test]
     fn web_svg_import_resolves_from_the_lib_pack() {
         // W.3.24: import("x.svg") on the bytes (web) path resolves the asset from the closure by BASENAME
         // (a model-relative "../x.svg" can't normalize against a rootless main). A 30x40 rect extruded →

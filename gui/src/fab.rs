@@ -147,6 +147,24 @@ pub fn find_root() -> Option<PathBuf> {
     find_root_from(&std::env::current_dir().ok()?)
 }
 
+/// The BUNDLED library root — the dir holding `libs/` (BOSL2) + `scad-lib/` that ships WITH the app, so a
+/// PASTED model resolves `<BOSL2/std.scad>` with no opened file (⇒ no workspace root) to walk up to
+/// (W.3.33). The last-resort fallback in `native_entry`'s root chain. Mirrors [`crate::scene::assets_dir`]'s
+/// dev-vs-bundle split: dev is the repo root (this crate's parent, which carries both dirs); a packaged
+/// `.app` copies them into `Contents/Resources` (Packager.toml). Only ever CALLED from the native entry —
+/// but kept ungated (like [`find_root`]) so the lib still type-checks on wasm, where it returns `None`
+/// (no exe path, no fs). `None` if neither layout has the dirs (then a rootless render stays empty).
+pub fn packed_lib_root() -> Option<PathBuf> {
+    // dev: CARGO_MANIFEST_DIR is `…/fab-scad/gui`; its parent (the repo root) holds libs/ + scad-lib/.
+    let dev = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent();
+    if let Some(dev) = dev.filter(|d| d.join("scad-lib").is_dir()) {
+        return Some(dev.to_path_buf());
+    }
+    // packaged: the binary sits in Contents/MacOS; cargo-packager lands the resources in ../Resources.
+    let res = std::env::current_exe().ok()?.parent()?.join("../Resources");
+    res.join("scad-lib").is_dir().then_some(res)
+}
+
 /// One printable piece for the print-orientation preview, rebuilt from the service's `WirePiece`
 /// (W.3.3): its slab multi-index, its connected-COMPONENT index within that slab (0 when the slab is
 /// one solid; >0 splits a presliced blob into its real pieces — T.2a), the mesh (WITH its joints
@@ -310,6 +328,19 @@ mod tests {
         assert_eq!(find_root_from(&nested).as_deref(), Some(tmp.as_path()));
         assert_eq!(find_root_from(std::path::Path::new("/")), None);
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn packed_lib_root_finds_the_shipped_libs() {
+        // W.3.33: the sourceless-`.app` fallback must point at a dir carrying BOTH `libs/` (BOSL2) and
+        // `scad-lib/` — that's what geomsvc's OPENSCADPATH joins onto. In this test (run from the
+        // workspace) that resolves to the repo root, the dev arm of the dev-vs-bundle split.
+        let root = packed_lib_root().expect("packed lib root resolves from the workspace build");
+        assert!(root.join("scad-lib").is_dir(), "no scad-lib under {root:?}");
+        assert!(
+            root.join("libs").join("BOSL2").is_dir(),
+            "no libs/BOSL2 under {root:?}"
+        );
     }
 
     /// A unit tetrahedron as STL triangle soup — the smallest closed mesh with a real footprint.

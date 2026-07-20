@@ -60,6 +60,8 @@ mod jobs;
 mod lib_fetch;
 mod panel;
 mod print;
+#[cfg(not(target_arch = "wasm32"))]
+mod publish_native; // W.3.28 — desktop Publish via fab's own kernel/renderer (no OpenSCAD); native only
 mod render_quality; // W.3.25.2 — the live view's Draft|Final quality (a global the render kicks read)
 #[cfg(not(target_arch = "wasm32"))]
 mod settings; // W.3.27 — the desktop Settings modal (hotchkiss.io publish key); native only
@@ -217,7 +219,6 @@ fn run_windowed(scene: SceneCfg, shot: Option<PathBuf>) {
     .init_resource::<Platform>()
     .init_resource::<Pipeline>()
     .init_resource::<AutoJob>()
-    .init_resource::<PublishJob>()
     // W.5.7: the save-back target (derived from `?model=` on wasm; always None on desktop → no Save
     // affordance).
     .init_resource::<SaveTarget>()
@@ -255,7 +256,6 @@ fn run_windowed(scene: SceneCfg, shot: Option<PathBuf>) {
             // Auto-on-open: a fresh too-big model auto-slices + connects (kick), then the plan
             // lands and seeds cuts + connectors (poll). After poll_job so bounds are set.
             (kick_auto_plan, poll_auto_plan).chain().after(poll_job),
-            poll_publish,
             (
                 poll_open_dialog,
                 apply_switch_file,
@@ -271,12 +271,7 @@ fn run_windowed(scene: SceneCfg, shot: Option<PathBuf>) {
             (auto_reslice, revert_on_edit),
             (auto_scale, split_viewport, seat_bed, resize_bed),
             // The panel's button commands (heavy actions the egui `panel_ui` writes as PanelCmd).
-            (
-                toggle_view,
-                publish_action,
-                auto_slice_action,
-                export_plates_action,
-            ),
+            (toggle_view, auto_slice_action, export_plates_action),
             (
                 sync_tab_modes,
                 enforce_exclusive_modes,
@@ -311,6 +306,12 @@ fn run_windowed(scene: SceneCfg, shot: Option<PathBuf>) {
     app.init_resource::<settings::SettingsUi>().add_systems(
         EguiPrimaryContextPass,
         settings::settings_modal.run_if(theme::theme_ready),
+    );
+    // W.3.28: the desktop Publish flow (kernel render + offscreen cover + upload). Native only.
+    #[cfg(not(target_arch = "wasm32"))]
+    app.init_resource::<publish_native::PubFlow>().add_systems(
+        Update,
+        (publish_native::publish_kick, publish_native::publish_flow).chain(),
     );
     // Browser-only file-IO surface (W.3.12): the `?model=` fetch resource + its landing system, plus
     // the save-back (W.5.7/.8): derive the `PUT /media/<ref>/variants` target from the SAME `?model=`
@@ -513,6 +514,13 @@ fn run_scripted(scene: SceneCfg, actions: Vec<Action>) {
     app.init_resource::<settings::SettingsUi>().add_systems(
         EguiPrimaryContextPass,
         settings::settings_modal.run_if(theme::theme_ready),
+    );
+    // W.3.28: the Publish flow in the scripted harness — a headless check of the kernel render + the
+    // offscreen cover (the `publish` verb fires it). Native only.
+    #[cfg(not(target_arch = "wasm32"))]
+    app.init_resource::<publish_native::PubFlow>().add_systems(
+        Update,
+        (publish_native::publish_kick, publish_native::publish_flow).chain(),
     );
     app.run();
 }

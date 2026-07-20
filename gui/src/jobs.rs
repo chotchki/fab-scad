@@ -25,11 +25,6 @@ type AutoPlanResult = Result<(Vec<(char, f64)>, Vec<WireConn>, usize), String>;
 #[derive(Resource, Default)]
 pub(crate) struct AutoJob(pub(crate) Option<(usize, Task<AutoPlanResult>)>);
 
-/// The in-flight publish job (render artifacts + upload to hotchkiss.io, off-thread). Yields the
-/// published page URL or an error string.
-#[derive(Resource, Default)]
-pub(crate) struct PublishJob(pub(crate) Option<Task<Result<String, String>>>);
-
 /// A content hash of EXACTLY the inputs the slice depends on — the enabled cuts, the placed
 /// connectors, and the per-piece orientations — quantised so float jitter doesn't churn it, and
 /// deliberately EXCLUDING UI state like the active cut. `auto_reslice` keys the rebuild on this, not
@@ -963,94 +958,9 @@ pub(crate) fn despawn_part_models(
     }
 }
 
-/// Publish the active model to hotchkiss.io off-thread: render the cover + low-`$fn` preview + full
-/// STL and upload them via `fab_scad::publish::publish_model`, reusing the CLI's exact path. Auth +
-/// base URL come from `$HIO_API_KEY` / `$HIO_URL`; title/description from the project.toml. Desktop
-/// only — it shells out to OpenSCAD + uploads over blocking reqwest (the wasm stub just says so).
-#[cfg(not(target_arch = "wasm32"))]
-pub(crate) fn publish_action(
-    mut ev: MessageReader<PanelCmd>,
-    scene: Res<SceneCfg>,
-    mut job: ResMut<PublishJob>,
-    mut status: ResMut<Status>,
-    mut settings: ResMut<crate::settings::SettingsUi>,
-) {
-    if !ev.read().any(|c| *c == PanelCmd::Publish) {
-        return;
-    }
-    if job.0.is_some() {
-        status.0 = "already publishing…".into();
-        return;
-    }
-    let Some(src) = scene.source.clone() else {
-        status.0 = "no .scad to publish".into();
-        return;
-    };
-    // W.3.27: the key resolves from $HIO_API_KEY OR the saved credentials.toml now. No key ⇒ pop Settings
-    // open (the LOUD cue) and say where to fix it — never the silent status-line no-op again.
-    let resolved = fab_scad::credentials::resolve();
-    let Some(key) = resolved.api_key else {
-        settings.request_open();
-        status.0 = "no hotchkiss.io key — add one in Settings (just opened)".into();
-        return;
-    };
-    let base = resolved.url;
-    let (root, out) = (scene.root.clone(), scene.tmp.join("publish"));
-    let task = AsyncComputeTaskPool::get().spawn(async move {
-        let oscad = fab_scad::openscad::Openscad::discover(root.as_deref())
-            .map_err(|e| format!("{e:#}"))?;
-        // Title/description from the nearest project.toml; fall back to the file stem.
-        let (title, description) = match fab_scad::manifest::Manifest::load_near(&src) {
-            Ok(m) => {
-                let title = m.title().to_string();
-                (title, m.publish.map(|p| p.description).unwrap_or_default())
-            }
-            Err(_) => (
-                src.file_stem()
-                    .map(|s| s.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| "model".into()),
-                String::new(),
-            ),
-        };
-        fab_scad::publish::publish_model(
-            &oscad,
-            &src,
-            &title,
-            &description,
-            &base,
-            &key,
-            &out,
-            std::time::Duration::from_secs(180),
-        )
-        .map_err(|e| format!("{e:#}"))
-    });
-    job.0 = Some(task);
-    status.0 = "publishing…".into();
-}
-
-/// wasm has no OpenSCAD subprocess or blocking HTTP, so publishing a NEW hotchkiss.io item is
-/// desktop-only — the button is cfg'd off the web build (W.3.18; the web pushes via the Update save-back
-/// instead). This inert twin exists only so the shared system registration (lib.rs) compiles on wasm.
-#[cfg(target_arch = "wasm32")]
-pub(crate) fn publish_action() {}
-
-/// Land the publish job: show the URL, or the error.
-pub(crate) fn poll_publish(mut job: ResMut<PublishJob>, mut status: ResMut<Status>) {
-    let Some(task) = job.0.as_mut() else {
-        return;
-    };
-    let Some(result) = block_on(future::poll_once(task)) else {
-        return;
-    };
-    job.0 = None;
-    match result {
-        Ok(url) => {
-            status.0 = format!("published -> {url}");
-            info!("{}", status.0);
-        }
-        Err(e) => status.0 = format!("publish failed: {e}"),
-    }
-}
+// W.3.28: the desktop Publish flow moved to `publish_native` — it renders the model AND the cover through
+// fab's OWN kernel/renderer (no external OpenSCAD) as a phased state machine. The old OpenSCAD-shelling
+// publish_action + poll_publish (+ PublishJob) are gone.
 
 /// The in-flight save-back job (W.5.8) — render full-res, export the two mesh variants, upload all
 /// three files. Yields the endpoint's response body or an error. Web only (web-sys FormData + fetch).

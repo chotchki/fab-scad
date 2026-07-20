@@ -28,6 +28,7 @@ pub(crate) enum Action {
     Tab(Tab),      // switch the active workflow tab: model|parts|orientation|export (U.3.8)
     EditText(String), // append a snippet to the editor buffer → debounced buffer re-render (U.3.8)
     Settings,      // open the Settings modal (W.3.27) — headless verify of the publish-key screen
+    Publish,       // fire Publish (W.3.28) — headless verify of the kernel render + offscreen cover
 }
 
 #[derive(Resource)]
@@ -77,6 +78,7 @@ pub(crate) fn parse_script(s: &str) -> Vec<Action> {
                 "part" => it.next()?.parse().ok().map(Action::Part),
                 "export" => Some(Action::Export),
                 "settings" => Some(Action::Settings),
+                "publish" => Some(Action::Publish),
                 "tab" => match it.next()? {
                     "model" => Some(Action::Tab(Tab::Model)),
                     "customize" => Some(Action::Tab(Tab::Customize)),
@@ -390,6 +392,12 @@ pub(crate) fn run_script(
                 cmd_w.write(PanelCmd::OpenSettings); // settings_modal opens on the next egui pass
             }
             runner.timer >= 3 // let the modal draw before the next shot
+        }
+        Action::Publish => {
+            if runner.timer == 1 {
+                cmd_w.write(PanelCmd::Publish); // publish_kick renders + captures the cover, then uploads
+            }
+            runner.timer >= 3 // the flow runs async across many frames; a following `wait` covers it
         }
         Action::Tab(t) => {
             if runner.timer == 1 {

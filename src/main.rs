@@ -72,16 +72,9 @@ enum Commands {
         /// Output STL (default: <dir>/out/<stem>-sliced.stl).
         #[arg(long)]
         out: Option<PathBuf>,
-        /// Also write a PNG thumbnail.
-        #[arg(long)]
-        png: bool,
         /// Export a multi-object 3mf, pieces bin-packed onto the printer bed, instead of a merged STL.
         #[arg(long = "3mf")]
         threemf: bool,
-        /// Slice in-process via the Manifold kernel (Track C) instead of the OpenSCAD codegen path.
-        /// OpenSCAD still renders the base mesh once; slicing + connectors run in-process.
-        #[arg(long)]
-        kernel: bool,
         /// Printer whose bed the --3mf plate targets (default: [slicing].printer, else printers.toml's default).
         #[arg(long)]
         printer: Option<String>,
@@ -164,12 +157,10 @@ fn main() -> Result<()> {
             target,
             spread,
             out,
-            png,
             threemf,
-            kernel,
             printer,
             gap,
-        } => slice_cmd(&target, spread, out, png, threemf, kernel, printer, gap),
+        } => slice_cmd(&target, spread, out, threemf, printer, gap),
         Commands::Make {
             target,
             printer,
@@ -305,20 +296,28 @@ fn coupon_cmd(
     std::fs::write(&scad, driver).with_context(|| format!("writing {}", scad.display()))?;
     println!("wrote {}", scad.display());
 
-    let oscad = Openscad::discover(Some(&root))?;
-    let timeout = Duration::from_secs(120);
     let stl = scad.with_extension("stl");
     println!("render {} -> {}", scad.display(), stl.display());
-    let r = oscad.render(&scad, &stl, timeout)?;
-    print_report(&r);
-    let png = scad.with_extension("png");
-    let t = oscad.thumbnail(&scad, &png, (640, 360), timeout)?;
-    print_report(&t);
-
-    if !r.ok {
-        bail!("coupon render failed");
+    // Render the driver through fab's OWN kernel (W.3.30) — no OpenSCAD, no PNG thumbnail (the kernel has
+    // no headless image renderer). `<coupon.scad>` resolves against the workspace libs via `root`.
+    #[cfg(feature = "kernel")]
+    {
+        let root_str = root.to_string_lossy().into_owned();
+        let solid = fab_scad::geomsvc::render_source_to_solid(
+            &fab_scad::geomsg::Source::Path(scad.to_string_lossy().into_owned()),
+            Some(&root_str),
+        )?;
+        solid
+            .write_stl(&stl)
+            .with_context(|| format!("writing {}", stl.display()))?;
+        println!("  -> {}", stl.display());
+        Ok(())
     }
-    Ok(())
+    #[cfg(not(feature = "kernel"))]
+    {
+        let _ = (root, stl);
+        bail!("fab coupon needs the `kernel` feature (built without it)");
+    }
 }
 
 fn parse_slops(s: &str) -> Result<Vec<f64>> {
@@ -443,7 +442,6 @@ fn make_cmd(target: &Path, printer: Option<String>, out: Option<PathBuf>, gap: f
         bail!("no such file: {}", target.display());
     }
     let root = require_root()?;
-    let oscad = Openscad::discover(Some(&root))?;
     let profiles = printers::load(&root.join("printers.toml"))?;
     let pr = printers::select(&profiles, printer.as_deref())?;
     let stem = target
@@ -451,7 +449,6 @@ fn make_cmd(target: &Path, printer: Option<String>, out: Option<PathBuf>, gap: f
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_else(|| "part".into());
     let out_3mf = out.unwrap_or_else(|| target.with_file_name(format!("{stem}-plates.3mf")));
-    let out_dir = root.join("out").join("make");
     let f = |x: f64| {
         if x.fract() == 0.0 {
             format!("{}", x as i64)
@@ -467,13 +464,12 @@ fn make_cmd(target: &Path, printer: Option<String>, out: Option<PathBuf>, gap: f
         f(pr.bed[1]),
         f(pr.bed[2])
     );
+    let root_str = root.to_string_lossy().into_owned();
     let sum = fab_scad::auto::make(
-        &oscad,
         target,
+        Some(&root_str),
         fab_lang::Dims::from_array(pr.bed),
         &out_3mf,
-        &out_dir,
-        Duration::from_secs(120),
         gap,
     )?;
     println!(
@@ -496,9 +492,7 @@ fn slice_cmd(
     target: &Path,
     spread: f64,
     out: Option<PathBuf>,
-    png: bool,
     threemf: bool,
-    kernel: bool,
     printer: Option<String>,
     gap: f64,
 ) -> Result<()> {
@@ -571,77 +565,38 @@ fn slice_cmd(
         bail!("per-part slicing ([[slicing.part]]) needs the `kernel` feature (built without it)");
     }
 
-    let oscad = Openscad::discover(root.as_deref())?;
-    let timeout = Duration::from_secs(120);
-    let outdir = target
-        .parent()
-        .unwrap_or_else(|| Path::new("."))
-        .join("out");
-    let stem = target
-        .file_stem()
-        .map(|s| s.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "part".into());
-
-    // In-process kernel path (Track C, opt-in) — OpenSCAD renders the base mesh once, the rest runs
-    // in-process. Same output shape (merged STL or a multi-object 3mf), no per-piece spawn.
-    if kernel {
-        #[cfg(feature = "kernel")]
-        {
-            println!(
-                "slice {} -> {} (kernel)",
-                target.display(),
-                if threemf { "3mf" } else { "stl" }
-            );
-            let produced =
-                slicing::slice_part_kernel(&oscad, target, spec, spread, &outdir, timeout, plate)?;
-            let final_out = match out {
-                Some(o) => {
-                    std::fs::copy(&produced, &o)
-                        .with_context(|| format!("writing {}", o.display()))?;
-                    o
-                }
-                None => produced,
-            };
-            println!("  -> {}", final_out.display());
-            return Ok(());
-        }
-        #[cfg(not(feature = "kernel"))]
-        bail!("--kernel needs the `kernel` feature (built without it)");
-    }
-
-    // 3mf path: pieces as separate objects on a plate (6.3) — no PNG/STL-copy branch below.
-    if threemf {
-        println!("slice {} -> 3mf", target.display());
-        let plate = slicing::slice_part_3mf(&oscad, target, spec, spread, &outdir, timeout)?;
+    // The one and only flat-spec slice path (W.3.30 retired the OpenSCAD scad-driver): fab's kernel renders
+    // the base AND slices in-process — no OpenSCAD. `plate` (from --3mf) bin-packs onto the bed; otherwise
+    // a merged STL fanned by `spread`.
+    #[cfg(feature = "kernel")]
+    {
+        let outdir = target
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join("out");
+        println!(
+            "slice {} -> {}",
+            target.display(),
+            if threemf { "3mf" } else { "stl" }
+        );
+        let root_str = root.as_ref().map(|r| r.to_string_lossy().into_owned());
+        let produced =
+            slicing::slice_part_kernel(target, root_str.as_deref(), spec, spread, &outdir, plate)?;
         let final_out = match out {
             Some(o) => {
-                std::fs::copy(&plate, &o).with_context(|| format!("writing {}", o.display()))?;
+                std::fs::copy(&produced, &o).with_context(|| format!("writing {}", o.display()))?;
                 o
             }
-            None => plate,
+            None => produced,
         };
         println!("  -> {}", final_out.display());
-        return Ok(());
+        Ok(())
     }
-
-    println!("slice {}", target.display());
-    let sliced = slicing::slice_part(&oscad, target, spec, spread, &outdir, timeout)?;
-    let final_out = match out {
-        Some(o) => {
-            std::fs::copy(&sliced, &o).with_context(|| format!("writing {}", o.display()))?;
-            o
-        }
-        None => sliced,
-    };
-    println!("  -> {}", final_out.display());
-
-    if png {
-        let driver = outdir.join(format!("{stem}-sliced.scad"));
-        let thumb = final_out.with_extension("png");
-        let t = oscad.thumbnail(&driver, &thumb, (512, 512), timeout)?;
-        print_report(&t);
+    #[cfg(not(feature = "kernel"))]
+    {
+        let _ = (spread, out, threemf, plate, spec);
+        bail!("fab slice needs the `kernel` feature (built without it)");
     }
-    Ok(())
 }
 
 /// Walk up from a target file to the nearest `project.toml`.

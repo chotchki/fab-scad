@@ -6,8 +6,6 @@
 use fab_lang::VecExt;
 #[cfg(feature = "native")]
 use std::path::{Path, PathBuf};
-#[cfg(feature = "native")]
-use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 
@@ -15,100 +13,25 @@ use crate::feasibility::{OnionAxis, axes_sorted, onion_resolution, piece_up};
 #[cfg(feature = "kernel")]
 use crate::kernel::Solid;
 use crate::manifest::{Connector, Slicing};
-// PartSlicing feeds only `slice_model_parts` (native OpenSCAD codegen) — unused on the wasm worker.
+// PartSlicing feeds only `slice_model_parts` (the native per-part kernel slice) — unused on the wasm worker.
 #[cfg(feature = "native")]
 use crate::manifest::PartSlicing;
-#[cfg(feature = "native")]
-use crate::openscad::Openscad;
 use fab_lang::{Affine, Vec3};
 
 const AXIS: [&str; 3] = ["RIGHT", "BACK", "UP"];
 
-/// Freeze `source` to a mesh, generate the slicer driver from `spec`, render the pieces.
-/// Returns the sliced STL path. The shared slice flow — `fab slice` and the GUI both call it.
-#[cfg(feature = "native")]
-pub fn slice_part(
-    oscad: &Openscad,
-    source: &Path,
-    spec: &Slicing,
-    spread: f64,
-    out_dir: &Path,
-    timeout: Duration,
-) -> Result<PathBuf> {
-    std::fs::create_dir_all(out_dir).with_context(|| format!("creating {}", out_dir.display()))?;
-    let stem = source
-        .file_stem()
-        .map(|s| s.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "part".into());
-
-    // Freeze the source to a mesh (slicing the frozen STL stays linear — no 2^N).
-    let source_stl = out_dir.join(format!("{stem}.stl"));
-    let f = oscad.render(source, &source_stl, timeout)?;
-    if !f.ok {
-        bail!("source render failed: {}", source.display());
-    }
-
-    // Generate the driver from the spec (imports the frozen mesh by name) and render it.
-    let driver = driver_scad(spec, &format!("{stem}.stl"), spread)?;
-    let driver_path = out_dir.join(format!("{stem}-sliced.scad"));
-    std::fs::write(&driver_path, driver)
-        .with_context(|| format!("writing {}", driver_path.display()))?;
-    let sliced = out_dir.join(format!("{stem}-sliced.stl"));
-    let r = oscad.render(&driver_path, &sliced, timeout)?;
-    if !r.ok {
-        bail!("slice render failed");
-    }
-    Ok(sliced)
-}
-
-/// Like `slice_part`, but emits the pieces as SEPARATE objects in a multi-object `.3mf` (6.3) — the
-/// printable plate. Same frozen mesh; a multipart driver rendered with lazy-union.
-#[cfg(feature = "native")]
-pub fn slice_part_3mf(
-    oscad: &Openscad,
-    source: &Path,
-    spec: &Slicing,
-    spread: f64,
-    out_dir: &Path,
-    timeout: Duration,
-) -> Result<PathBuf> {
-    std::fs::create_dir_all(out_dir).with_context(|| format!("creating {}", out_dir.display()))?;
-    let stem = source
-        .file_stem()
-        .map(|s| s.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "part".into());
-
-    let source_stl = out_dir.join(format!("{stem}.stl"));
-    let f = oscad.render(source, &source_stl, timeout)?;
-    if !f.ok {
-        bail!("source render failed: {}", source.display());
-    }
-
-    let driver = multipart_driver_scad(spec, &format!("{stem}.stl"), spread)?;
-    let driver_path = out_dir.join(format!("{stem}-multipart.scad"));
-    std::fs::write(&driver_path, driver)
-        .with_context(|| format!("writing {}", driver_path.display()))?;
-    let out_3mf = out_dir.join(format!("{stem}.3mf"));
-    let r = oscad.render_multipart(&driver_path, &out_3mf, timeout)?;
-    if !r.ok {
-        bail!("3mf render failed");
-    }
-    Ok(out_3mf)
-}
-
-/// Slice IN-PROCESS via the Manifold kernel (Track C 11.9) instead of the scad driver. OpenSCAD is
-/// still the front-door — it renders the base model to a mesh ONCE — then import, slice, connectors and
-/// export all happen in-process (no per-piece spawn). `plate = Some((bed, gap))` bin-packs the pieces
-/// onto `bed`-sized plates and writes a Bambu 3mf (U.3.14 Phase E); `None` fans each piece by its slab
-/// index × `spread` and writes one merged STL.
+/// Slice IN-PROCESS via the Manifold kernel — `fab slice`'s one and only path (W.3.30 retired the old
+/// OpenSCAD scad-driver). fab's OWN kernel renders the base model to a `Solid` (the shared render core),
+/// then import, slice, connectors and export all happen in-process (no per-piece spawn, no OpenSCAD).
+/// `plate = Some((bed, gap))` bin-packs the pieces onto `bed`-sized plates and writes a Bambu 3mf (U.3.14
+/// Phase E); `None` fans each piece by its slab index × `spread` and writes one merged STL.
 #[cfg(all(feature = "kernel", feature = "native"))]
 pub fn slice_part_kernel(
-    oscad: &Openscad,
     source: &Path,
+    root: Option<&str>,
     spec: &Slicing,
     spread: f64,
     out_dir: &Path,
-    timeout: Duration,
     plate: Option<([f64; 2], f64)>,
 ) -> Result<PathBuf> {
     std::fs::create_dir_all(out_dir).with_context(|| format!("creating {}", out_dir.display()))?;
@@ -117,14 +40,12 @@ pub fn slice_part_kernel(
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_else(|| "part".into());
 
-    // The one OpenSCAD spawn: freeze the base model to a mesh.
-    let source_stl = out_dir.join(format!("{stem}.stl"));
-    let f = oscad.render(source, &source_stl, timeout)?;
-    if !f.ok {
-        bail!("source render failed: {}", source.display());
-    }
-
-    let base = Solid::from_stl_file(&source_stl)?;
+    // Render the base model to a Solid through fab's OWN kernel (W.3.30) — the SAME core the GUI + web run.
+    // No OpenSCAD.
+    let base = crate::geomsvc::render_source_to_solid(
+        &crate::geomsg::Source::Path(source.to_string_lossy().into_owned()),
+        root,
+    )?;
     let pieces = slice_solid(spec, &base)?;
     if pieces.is_empty() {
         bail!("slice produced no pieces");

@@ -7,8 +7,6 @@
 
 #[cfg(all(feature = "kernel", feature = "native"))]
 use std::path::Path;
-#[cfg(all(feature = "kernel", feature = "native"))]
-use std::time::Duration;
 
 #[cfg(feature = "kernel")]
 use anyhow::Result;
@@ -18,8 +16,6 @@ use crate::cross_section;
 use crate::manifest::Connector;
 #[cfg(feature = "kernel")]
 use crate::num::Num;
-#[cfg(all(feature = "kernel", feature = "native"))]
-use crate::openscad::Openscad;
 #[cfg(feature = "kernel")]
 use fab_lang::{Dims, Vec3};
 
@@ -175,29 +171,20 @@ pub fn plan(base: &crate::kernel::Solid, min: Vec3, max: Vec3, bed: Dims) -> Res
 /// so CLI and GUI produce the same result. Returns the export summary (plates, pieces, fill).
 #[cfg(all(feature = "kernel", feature = "native"))]
 pub fn make(
-    oscad: &Openscad,
     source: &Path,
+    root: Option<&str>,
     bed: Dims,
     out_3mf: &Path,
-    out_dir: &Path,
-    timeout: Duration,
     gap: f64,
 ) -> Result<crate::bambu::ExportSummary> {
-    use crate::kernel::Solid;
-    use anyhow::{Context, bail};
+    use anyhow::Context;
 
-    std::fs::create_dir_all(out_dir)?;
-    let stem = source
-        .file_stem()
-        .map(|s| s.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "part".into());
-
-    // Front-door: render the base model to a mesh once.
-    let base_stl = out_dir.join(format!("{stem}.stl"));
-    if !oscad.render(source, &base_stl, timeout)?.ok {
-        bail!("source render failed: {}", source.display());
-    }
-    let base = Solid::from_stl_file(&base_stl)?;
+    // Front-door: render the base model to a Solid through fab's OWN kernel (W.3.30) — the SAME
+    // eval->build core the GUI + web run, so all three front-ends share one render path. No OpenSCAD.
+    let base = crate::geomsvc::render_source_to_solid(
+        &crate::geomsg::Source::Path(source.to_string_lossy().into_owned()),
+        root,
+    )?;
     let out = std::fs::File::create(out_3mf)
         .with_context(|| format!("creating {}", out_3mf.display()))?;
     make_solid(base, bed, out, gap)
@@ -363,22 +350,20 @@ mod tests {
 
     #[test]
     #[cfg(all(feature = "kernel", feature = "native"))]
-    #[ignore = "needs OpenSCAD; run with --ignored"]
     fn make_produces_a_multi_plate_bambu_project() {
+        // W.3.30: renders in-process through fab's own kernel — no OpenSCAD, so it's no longer #[ignore].
+        // A bare `cube()` needs no libs, so `root` is None.
         let tmp = std::env::temp_dir().join(format!("auto_make_{}", std::process::id()));
         std::fs::create_dir_all(&tmp).unwrap();
         let scad = tmp.join("bigbox.scad");
         std::fs::write(&scad, "cube([700,120,60]);").unwrap(); // 700mm > a 256 bed → must be cut
-        let oscad = Openscad::discover(None).unwrap();
         let out = tmp.join("bigbox-plates.3mf");
 
         let sum = make(
-            &oscad,
             &scad,
+            None,
             Dims::from_array([256.0, 256.0, 256.0]),
             &out,
-            &tmp,
-            Duration::from_secs(60),
             5.0,
         )
         .unwrap();

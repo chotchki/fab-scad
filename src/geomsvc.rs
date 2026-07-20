@@ -469,6 +469,27 @@ fn render_whole_svc(
     })
 }
 
+/// Render a `.scad` source straight to a kernel [`Solid`] — the SHARED base-render core (W.3.30). This is
+/// the same `eval_source` → `build_geo_cached` the GUI pool and web worker run through [`render_whole_svc`],
+/// just handed back as a `Solid` instead of a stored handle + STL bytes. It's what the native CLI
+/// (`fab make`/`slice`/`coupon`) renders through, so all three front-ends — GUI, web, CLI — share ONE
+/// render path and OpenSCAD is gone from production (it survives only in the differential test oracle).
+/// Always full-res (`preview=false`, `Quality::Final`): the headless CLI has no draft toggle. Fresh cache
+/// per call — a one-shot render doesn't reuse subtrees.
+#[cfg(feature = "kernel")]
+pub fn render_source_to_solid(source: &Source, root: Option<&str>) -> Result<Solid> {
+    use crate::backend::{GeoCache, ManifoldBackend, build_geo_cached};
+    let (tree, _src, messages) = eval_source(source, root, false, Quality::Final)?;
+    build_geo_cached(&tree, &ManifoldBackend, &mut GeoCache::new())
+        .filter(|s| !s.is_empty())
+        .with_context(|| {
+            format!(
+                "scad-rs rendered EMPTY geometry (no faces){}",
+                empty_hint(&messages)
+            )
+        })
+}
+
 /// A rendered part staged for the wire response: its held `SolidId`, STL bytes, and bbox min/max.
 #[cfg(feature = "kernel")]
 type StagedPart = (SolidId, Vec<u8>, [f64; 3], [f64; 3]);

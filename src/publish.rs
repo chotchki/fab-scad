@@ -53,10 +53,12 @@ pub struct Media<'a> {
 pub struct Project<'a> {
     pub title: &'a str,
     pub description_md: &'a str,
-    pub cover_png: &'a Path,
+    /// The gallery cover image. `None` = don't set one (the site keeps any existing / renders its own
+    /// from the mesh) — the headless `fab publish` path, which has no 3D view to capture (W.3.28).
+    pub cover_png: Option<&'a Path>,
     /// Mesh variants (LOD) uploaded as ONE media item — the site makes a variant per file in a
     /// single request. Order low-res → full-res: the viewer renders the light one, the full one is
-    /// the download. Both COLORED 3MF (OpenSCAD carries `color()` into base materials).
+    /// the download. Both COLORED 3MF (the kernel carries `color()` into base materials).
     pub mesh_variants: Vec<&'a Path>,
     /// Extra standalone downloads (e.g. the print-plates `.3mf`), each its own media item.
     pub downloads: Vec<Media<'a>>,
@@ -175,14 +177,21 @@ impl Client {
     }
 
     /// Write the page's markdown body + cover.
-    fn update_page(&self, slug: &str, title: &str, markdown: &str, cover_ref: &str) -> Result<()> {
+    fn update_page(
+        &self,
+        slug: &str,
+        title: &str,
+        markdown: &str,
+        cover_ref: Option<&str>,
+    ) -> Result<()> {
         let url = format!("{}/pages/projects/{}", self.base, slug);
         let resp = self.send_retry("page update", || {
             Ok(self.http.put(&url).bearer_auth(&self.key).form(&[
                 ("page_title", title),
                 ("page_category", ""),
                 ("page_markdown", markdown),
-                ("page_cover_media_ref", cover_ref),
+                // empty = leave the cover unset (or keep whatever the site already has).
+                ("page_cover_media_ref", cover_ref.unwrap_or("")),
                 ("page_order", "0"),
                 ("page_creation_date", ""),
             ]))
@@ -203,7 +212,10 @@ pub fn publish(client: &Client, p: &Project) -> Result<String> {
         bail!("project title {:?} has no slug-able characters", p.title);
     }
 
-    let cover = client.upload_media(p.cover_png, &format!("{} — cover", p.title))?;
+    let cover = match p.cover_png {
+        Some(png) => Some(client.upload_media(png, &format!("{} — cover", p.title))?),
+        None => None,
+    };
     // The mesh: all LOD variants in ONE request → one item (viewer renders the light variant, the
     // full one downloads). Uploading them separately would make them unrelated items.
     let model = client.upload_media_multi(&p.mesh_variants, &format!("{} — model", p.title))?;
@@ -216,8 +228,32 @@ pub fn publish(client: &Client, p: &Project) -> Result<String> {
     if !client.page_exists(&slug)? {
         client.create_page(p.title)?;
     }
-    client.update_page(&slug, p.title, &markdown, &cover)?;
+    client.update_page(&slug, p.title, &markdown, cover.as_deref())?;
     Ok(format!("{}/pages/projects/{}", client.base, slug))
+}
+
+/// Publish PRE-RENDERED artifacts — the kernel-first entry (W.3.28): the caller renders the cover +
+/// mesh variants (via fab's own renderer, not OpenSCAD) to files, then hands the paths here. Builds the
+/// [`Client`] + [`Project`] and uploads. `cover` is optional (headless `fab publish` has no 3D view).
+#[allow(clippy::too_many_arguments)]
+pub fn upload_model(
+    base: &str,
+    key: &str,
+    title: &str,
+    description: &str,
+    cover: Option<&Path>,
+    mesh_variants: &[&Path],
+    downloads: Vec<Media<'_>>,
+) -> Result<String> {
+    let client = Client::new(base, key)?;
+    let project = Project {
+        title,
+        description_md: description,
+        cover_png: cover,
+        mesh_variants: mesh_variants.to_vec(),
+        downloads,
+    };
+    publish(&client, &project)
 }
 
 /// Render the publish artifacts for `target` and publish them: a cover thumbnail, the full-res STL,
@@ -280,7 +316,7 @@ pub fn publish_model(
     let project = Project {
         title,
         description_md: description,
-        cover_png: &cover,
+        cover_png: Some(&cover),
         // low-res (viewer) first, then full-res (download) — one item, LOD variants.
         mesh_variants: vec![&viewer, &full],
         downloads,

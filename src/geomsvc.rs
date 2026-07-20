@@ -390,6 +390,26 @@ fn eval_path(
     )
 }
 
+/// A diagnostic suffix for an EMPTY render (W.3.22). The usual cause is unresolved libraries — a missing
+/// workspace root ⇒ no search paths ⇒ every module undefined — which is far more actionable than a bare
+/// "EMPTY". Pull the first "Can't open library" warning, else count the "Ignoring unknown module" ones.
+#[cfg(feature = "kernel")]
+fn empty_hint(messages: &[String]) -> String {
+    if let Some(w) = messages.iter().find(|m| m.contains("Can't open library")) {
+        return format!(
+            " — libraries not found: {w} (is the workspace root — scad-lib + libs — reachable?)"
+        );
+    }
+    let unknown = messages
+        .iter()
+        .filter(|m| m.contains("Ignoring unknown module"))
+        .count();
+    if unknown > 0 {
+        return format!(" — {unknown} undefined module(s); likely a missing library or a typo");
+    }
+    String::new()
+}
+
 #[cfg(feature = "kernel")]
 fn render_whole_svc(
     store: &mut SolidStore,
@@ -401,7 +421,12 @@ fn render_whole_svc(
     let (tree, _src, messages) = eval_source(source, root, preview)?;
     let solid = build_geo_cached(&tree, &ManifoldBackend, &mut store.geo_cache)
         .filter(|s| !s.is_empty())
-        .context("scad-rs rendered EMPTY geometry (no faces)")?;
+        .with_context(|| {
+            format!(
+                "scad-rs rendered EMPTY geometry (no faces){}",
+                empty_hint(&messages)
+            )
+        })?;
     let (mn, mx) = solid.bbox().context("rendered solid has no bbox")?;
     let stl = solid.to_stl_bytes();
     let id = store.mint(solid);
@@ -441,7 +466,8 @@ fn render_parts_svc(
     }
     ensure!(
         !staged.is_empty(),
-        "scad-rs rendered EMPTY geometry (no parts)"
+        "scad-rs rendered EMPTY geometry (no parts){}",
+        empty_hint(&messages)
     );
     let names = part_names_for(&src, staged.len());
     Ok(Response::PartsRendered {
@@ -1076,6 +1102,25 @@ mod tests {
             "decimated low-res ({}) < full-res ({})",
             low.len(),
             high.len()
+        );
+    }
+
+    #[test]
+    fn empty_render_names_the_missing_library() {
+        // W.3.22: a model that includes BOSL2 with NO libs provided → every module undefined → empty.
+        // The error must NAME the missing library, not just say "EMPTY" (the homepod_mount dogfood).
+        let mut store = SolidStore::new(0);
+        let src = Source::Bytes {
+            main: b"include <BOSL2/std.scad>\ncyl(d=10, h=5);".to_vec(),
+            libs: vec![],
+        };
+        let msg = match render_whole_svc(&mut store, &src, None, false) {
+            Err(e) => format!("{e:#}"),
+            Ok(_) => panic!("expected an empty-render error, got geometry"),
+        };
+        assert!(
+            msg.contains("libraries not found") && msg.contains("BOSL2/std.scad"),
+            "empty error should name the missing library, got: {msg}"
         );
     }
 

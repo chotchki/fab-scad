@@ -237,6 +237,7 @@ fn run_windowed(scene: SceneCfg, shot: Option<PathBuf>) {
     .init_resource::<DraggingCut>()
     .init_resource::<FileList>()
     .init_resource::<OpenDialog>()
+    .init_resource::<print::ExportJob>()
     .init_resource::<Watch>()
     .init_resource::<SliceInBackground>()
     .init_resource::<PendingConfig>()
@@ -277,7 +278,12 @@ fn run_windowed(scene: SceneCfg, shot: Option<PathBuf>) {
             (auto_reslice, revert_on_edit),
             (auto_scale, split_viewport, seat_bed, resize_bed),
             // The panel's button commands (heavy actions the egui `panel_ui` writes as PanelCmd).
-            (toggle_view, auto_slice_action, export_plates_action),
+            (
+                toggle_view,
+                auto_slice_action,
+                export_plates_action,
+                poll_export,
+            ),
             (
                 sync_tab_modes,
                 enforce_exclusive_modes,
@@ -491,6 +497,7 @@ fn run_scripted(scene: SceneCfg, actions: Vec<Action>) {
     .init_resource::<Feas>()
     .init_resource::<FileList>()
     .init_resource::<OpenDialog>()
+    .init_resource::<print::ExportJob>()
     .init_resource::<Watch>()
     .init_resource::<SliceInBackground>()
     .init_resource::<PendingConfig>()

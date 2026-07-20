@@ -460,15 +460,43 @@ pub(crate) fn rotated_bounds(positions: &[[f32; 3]], rot: Quat) -> (Vec3, Vec3) 
 /// Between-piece + edge spacing left on the export plates (mm).
 pub(crate) const PLATE_GAP: f64 = 5.0;
 
-/// Export the print-oriented pieces as a Bambu multi-plate project `.3mf` next to the source. Runs
-/// inline — a handful of piece meshes to a zip is quick — and the status line reports the plate
-/// count + fill so you can see how tight it packed. The bed comes from the loaded scene, so it must
-/// match the printer the project opens on (Bambu bins pieces to plates by position).
+/// The in-flight desktop Save-As export (W.3.32): the native Save dialog + the 3mf write run off-thread
+/// (rfd's dialog can't block Bevy's event loop), yielding the status message. Empty until a windowed
+/// Export fires; the headless harness never uses it (it writes to a fixed path with no dialog). Present
+/// but inert on the web — that export downloads a Blob, no dialog/task.
+#[derive(Resource, Default)]
+pub(crate) struct ExportJob(pub(crate) Option<Task<Result<String, String>>>);
+
+/// Land the Save-As export: report where it saved, an error, or the cancel. Both outcomes touch only the
+/// status line (gui-reactive-standard). No-op on the web (no task is ever spawned there).
+pub(crate) fn poll_export(mut job: ResMut<ExportJob>, mut status: ResMut<Status>) {
+    let Some(task) = job.0.as_mut() else {
+        return;
+    };
+    let Some(result) = block_on(future::poll_once(task)) else {
+        return;
+    };
+    job.0 = None;
+    match result {
+        Ok(msg) => {
+            status.0 = msg;
+            info!("{}", status.0);
+        }
+        Err(e) => status.0 = e,
+    }
+}
+
+/// Export the print-oriented pieces as a Bambu multi-plate project `.3mf`. In the windowed app it pops a
+/// native Save-As dialog (W.3.32 — the expected UX, esp. for a web-opened model with no on-disk home);
+/// the headless harness (no window) writes to a fixed path inline. The bed comes from the loaded scene, so
+/// it must match the printer the project opens on (Bambu bins pieces to plates by position).
 pub(crate) fn export_plates_action(
     mut ev: MessageReader<PanelCmd>,
     pieces: Res<PrintPieces>,
     parts: Res<Parts>,
     scene: Res<SceneCfg>,
+    #[cfg(not(target_arch = "wasm32"))] windows: Query<&Window>,
+    #[cfg(not(target_arch = "wasm32"))] mut export_job: ResMut<ExportJob>,
     mut status: ResMut<Status>,
 ) {
     if !ev.read().any(|c| *c == PanelCmd::Export) {
@@ -497,26 +525,77 @@ pub(crate) fn export_plates_action(
     // Same layout/pack/emit either way (`bambu::export_plates_to` under both).
     #[cfg(not(target_arch = "wasm32"))]
     {
-        let out = match &scene.source {
-            Some(s) => {
-                let stem = s.file_stem().and_then(|n| n.to_str()).unwrap_or("part");
-                s.with_file_name(format!("{stem}-plates.3mf"))
+        let stem = scene
+            .source
+            .as_ref()
+            .and_then(|s| s.file_stem())
+            .and_then(|n| n.to_str())
+            .unwrap_or("model");
+        let filename = format!("{stem}-plates.3mf");
+
+        // Headless harness (no window) → write to a fixed path inline; a Save-As dialog would hang it.
+        if windows.is_empty() {
+            let out = match &scene.source {
+                Some(s) => s.with_file_name(&filename),
+                None => scene.tmp.join(&filename),
+            };
+            match fab::export_plates(&refs, &ups, bed, plate, PLATE_GAP, preset.as_ref(), &out) {
+                Ok(sum) => {
+                    status.0 = format!(
+                        "exported {} piece(s) on {} plate(s), {}% full -> {}",
+                        sum.pieces,
+                        sum.plates,
+                        (sum.fill * 100.0).round() as i32,
+                        out.display()
+                    );
+                    info!("{}", status.0);
+                }
+                Err(e) => status.0 = format!("export failed: {e:#}"),
             }
-            None => scene.tmp.join("plates.3mf"),
-        };
-        match fab::export_plates(&refs, &ups, bed, plate, PLATE_GAP, preset.as_ref(), &out) {
-            Ok(sum) => {
-                status.0 = format!(
-                    "exported {} piece(s) on {} plate(s), {}% full -> {}",
-                    sum.pieces,
-                    sum.plates,
-                    (sum.fill * 100.0).round() as i32,
-                    out.display()
-                );
-                info!("{}", status.0);
-            }
-            Err(e) => status.0 = format!("export failed: {e:#}"),
+            return;
         }
+
+        // Windowed: pop a native Save-As. Build the bytes HERE (the piece borrows can't cross into the
+        // task), then dialog + write off-thread so rfd doesn't block Bevy's event loop.
+        if export_job.0.is_some() {
+            status.0 = "already exporting…".into();
+            return;
+        }
+        let (sum, bytes) =
+            match fab::export_plates_bytes(&refs, &ups, bed, plate, PLATE_GAP, preset.as_ref()) {
+                Ok(x) => x,
+                Err(e) => {
+                    status.0 = format!("export failed: {e:#}");
+                    return;
+                }
+            };
+        let summary = (sum.pieces, sum.plates, (sum.fill * 100.0).round() as i32);
+        let dir = scene
+            .source
+            .as_ref()
+            .and_then(|s| s.parent())
+            .map(|p| p.to_path_buf());
+        export_job.0 = Some(AsyncComputeTaskPool::get().spawn(async move {
+            let mut dlg = rfd::AsyncFileDialog::new()
+                .add_filter("Bambu 3mf", &["3mf"])
+                .set_file_name(&filename);
+            if let Some(d) = dir {
+                dlg = dlg.set_directory(d);
+            }
+            let Some(handle) = dlg.save_file().await else {
+                return Err("export cancelled".to_string());
+            };
+            let path = handle.path();
+            std::fs::write(path, &bytes).map_err(|e| format!("writing {}: {e}", path.display()))?;
+            Ok(format!(
+                "exported {} piece(s) on {} plate(s), {}% full -> {}",
+                summary.0,
+                summary.1,
+                summary.2,
+                path.display()
+            ))
+        }));
+        status.0 = "export: choose where to save…".into();
     }
     #[cfg(target_arch = "wasm32")]
     {

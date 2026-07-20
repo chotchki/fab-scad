@@ -154,7 +154,7 @@ added 2026-07-07.
     - [x] W.3.28.9 - W.3.28.9 - Publish also uploads the .scad source (download); low==high dedup for small models is expected
     - [x] W.3.28.10 - W.3.28.10 - Upload .scad + mesh as ONE media item's variants (single /media/ref embed = spinning model + fab-scad-web source link)
   - [ ] W.3.29 - W.3.29 - Share publish with the web: create-new /3d gallery publish from the browser (the desktop-specific parts were just OpenSCAD + blocking HTTP, both gone)
-    - [ ] W.3.29.1 - W.3.29.1 - Extract the transport-agnostic publish CONTRACT from publish.rs (endpoints/SECTION, multipart field rules, compose_markdown, slugify, Project) so native reqwest + wasm fetch share it; native Client implements it
+    - [x] W.3.29.1 - W.3.29.1 - Extract the transport-agnostic publish CONTRACT from publish.rs (endpoints/SECTION, multipart field rules, compose_markdown, slugify, Project) so native reqwest + wasm fetch share it; native Client implements it
     - [ ] W.3.29.2 - W.3.29.2 - Wasm fetch transport (web-sys FormData + fetch, ambient same-origin cookie auth) implementing POST /media + POST/PUT/GET /pages/3d; reuse the save-back's fetch machinery (jobs.rs save_action)
     - [ ] W.3.29.3 - W.3.29.3 - Cover-to-BYTES on wasm (no fs): capture the offscreen render target to PNG bytes for the upload; verify the layer-2 cover camera works on the wasm canvas build
     - [ ] W.3.29.4 - W.3.29.4 - Web Publish flow + button: wasm GeomPool render -> cover bytes -> fetch upload the model item (scad+mesh variants) + page; distinct from the Update save-back; admin-only, loud on 401/403
@@ -242,3 +242,25 @@ Parked 2026-07-04 for the scad-rs pivot — the workflow tool works and stays in
 - **Evaluate grcov swap: line-level coverage exclusion (GRCOV_EXCL_LINE) → parser/lexer gate back to 100%** — added 2026-07-12.
 - **slice_parts cut-boolean caching: the auto_slice nested-partitioning redundancy (ipad >5min timeout) is a SEPARATE path from GeoMemo (post-build cut booleans on the held base Solid, not the GeoNode build() tree). Needs its own memoization lever — not X.1's render-path cache. Was mis-scoped into X.1.4.** — added 2026-07-19.
 - **Y.6 - TSan / race detection for surviving Send/Sync + S.4** — deferred from Y.6 on 2026-07-19.
+
+<!-- W.3.29 handoff (autonomous session, .6+.1 done; .2/.3/.4 need a live-dogfood session) -->
+<!--
+W.3.29.2/.4 blueprint (coverless first) — mirror the save-back, it does 90% of this:
+  - Transport: generalize gui/src/web_host.rs::upload_multipart → take a METHOD + return (status, body).
+    Add a form-urlencoded helper (URLSearchParams body + Accept: application/json) for the page endpoints,
+    and reuse fetch_text/GET for the existence check. Parse the POST /media response `ref` with js_sys::JSON
+    (serde_json is dev-only) keyed on contract::MEDIA_REF_FIELD.
+  - Flow (new gui/src/publish_web.rs, wasm): dialog.confirmed → spawn a Task (save_action is the template):
+    bake editor buffer → RenderWhole(full) + SaveMeshes on the wasm GeomPool → files=[source.scad, low.3mf,
+    high.3mf] → POST contract::media_url → ref; (plate as a separate item if staged); markdown =
+    contract::compose_markdown; slug = contract::slugify; GET contract::page_url (exists?) → POST
+    contract::create_page_url if new → PUT contract::page_url (contract::PAGE_* fields). Cover: NONE for now.
+  - Button: a wasm "Publish" on the Export tab (panel.rs), DISTINCT from the "Update" save-back. It opens
+    the W.3.29.6 dialog (register publish_dialog on wasm too — drop its native-only gate). Loud on 401/403
+    (not logged in as admin) via web_host's existing status mapping.
+  - Auth: the ambient same-origin session cookie (RequestCredentials::SameOrigin) — no key, no Settings gear.
+W.3.29.3 (cover on wasm): DEFERRED. save_to_disk is native-only; needs a render-target→PNG-bytes readback
+  (Bevy Screenshot observer → image bytes → encode) that I couldn't verify headlessly. Coverless publishes
+  fine (the site renders its own thumbnail, like `fab publish`). Add the cover once the coverless path
+  dogfoods green, so the readback is the only new variable.
+-->

@@ -299,3 +299,29 @@ pub fn encode_reply(response: &Response, logs: &[String]) -> Vec<u8> {
 pub fn decode_reply(b: &[u8]) -> Result<(Response, Vec<String>)> {
     bincode::deserialize(b).map_err(|e| anyhow!("bad reply: {e}"))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// W.3.25.3 parity pin: Draft MUST inject fab_lang's own unset defaults (`$fa=12`, `$fs=2`, the same
+    /// numbers `eval::scope` seeds and OpenSCAD ships). That equality is the whole reason "fab owns quality"
+    /// is a no-op for un-annotated geometry — scad-lib and every model that never set a facet var render
+    /// byte-for-byte as they did before the wrap. Drift these and Draft silently re-tessellates the entire
+    /// library (and breaks the oracle differential); this fails first and forces the reckoning.
+    #[test]
+    fn draft_quality_is_the_unset_default() {
+        assert_eq!(
+            Quality::Draft.fa_fs(),
+            (12.0, 2.0),
+            "Draft must stay == the fab_lang/OpenSCAD unset default, or it stops being a no-op"
+        );
+        // And Final must be strictly finer on both knobs, or the toggle does nothing useful.
+        let (dfa, dfs) = Quality::Draft.fa_fs();
+        let (ffa, ffs) = Quality::Final.fa_fs();
+        assert!(
+            ffa < dfa && ffs < dfs,
+            "Final must be finer than Draft on both $fa and $fs"
+        );
+    }
+}

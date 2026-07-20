@@ -60,10 +60,11 @@ mod jobs;
 mod lib_fetch;
 mod panel;
 mod print;
-#[cfg(not(target_arch = "wasm32"))]
-mod publish_dialog; // W.3.29.6 — the Publish dialog (editable title/desc); cross-platform, native-registered for now
+mod publish_dialog; // W.3.29.6 — the Publish dialog (editable title/desc); shared native + web
 #[cfg(not(target_arch = "wasm32"))]
 mod publish_native; // W.3.28 — desktop Publish via fab's own kernel/renderer (no OpenSCAD); native only
+#[cfg(target_arch = "wasm32")]
+mod publish_web; // W.3.29.4 — web Publish (fetch + session cookie, no OpenSCAD, no cover yet); wasm only
 mod render_quality; // W.3.25.2 — the live view's Draft|Final quality (a global the render kicks read)
 #[cfg(not(target_arch = "wasm32"))]
 mod settings; // W.3.27 — the desktop Settings modal (hotchkiss.io publish key); native only
@@ -330,6 +331,8 @@ fn run_windowed(scene: SceneCfg, shot: Option<PathBuf>) {
     #[cfg(target_arch = "wasm32")]
     app.init_resource::<jobs::ModelFetch>()
         .init_resource::<jobs::SaveJob>()
+        .init_resource::<publish_web::PubWebJob>()
+        .init_resource::<publish_dialog::PublishDialog>()
         .insert_resource(SaveTarget(
             crate::web_host::query_param("model")
                 .as_deref()
@@ -346,7 +349,16 @@ fn run_windowed(scene: SceneCfg, shot: Option<PathBuf>) {
                 jobs::save_action,
                 jobs::poll_save,
                 jobs::e2e_autosave,
+                // W.3.29.4: the web Publish flow (create a NEW /3d item) — distinct from the save-back.
+                publish_web::publish_web_kick,
+                publish_web::poll_publish_web,
             ),
+        )
+        // W.3.29.6: the Publish dialog draws in the egui pass; its `confirmed` flag is what
+        // `publish_web_kick` fires off (the web mirror of the desktop registration above).
+        .add_systems(
+            EguiPrimaryContextPass,
+            publish_dialog::publish_dialog.run_if(theme::theme_ready),
         );
     app.run();
 }

@@ -682,10 +682,29 @@ pub(crate) fn panel_ui(
                             writers.cmd.write(PanelCmd::Publish);
                         }
                     }
+                    // Web (W.3.29.4): publish a NEW /3d gallery item from the browser (fetch + session
+                    // cookie, no OpenSCAD) — the dialog names it, admin-only server-side (loud on 401/403).
+                    // The parity of the desktop Publish; distinct from the save-back Update below.
+                    #[cfg(target_arch = "wasm32")]
+                    {
+                        if ui
+                            .add(
+                                egui::Button::new(
+                                    theme::chrome("Publish -> hotchkiss.io", 14.0)
+                                        .color(theme::NAVY),
+                                )
+                                .fill(theme::GOLD),
+                            )
+                            .on_hover_text("create a NEW /3d gallery item (admin only)")
+                            .clicked()
+                        {
+                            writers.cmd.write(PanelCmd::Publish);
+                        }
+                    }
                     // Web (W.3.18): push the finished result back to the item it came from — the save-back
                     // (source + mesh variants + the printable plate, since the pieces live on this tab).
-                    // Only when opened from a media item (save_target set); creating a NEW item stays
-                    // desktop-only.
+                    // Only when opened from a media item (save_target set); this UPDATES in place, distinct
+                    // from the Publish button above which mints a new item.
                     #[cfg(target_arch = "wasm32")]
                     {
                         if view.save_target.0.is_some()

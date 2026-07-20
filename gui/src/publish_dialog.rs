@@ -10,7 +10,7 @@ use bevy::prelude::*;
 use bevy_egui::{EguiContexts, egui};
 
 use crate::PanelCmd;
-use crate::state::SceneCfg;
+use crate::state::{EditorBuf, SceneCfg};
 use crate::theme;
 
 /// The Publish dialog's state. `title`/`description` are edited in place; `confirmed` is a one-shot the
@@ -39,6 +39,7 @@ pub(crate) fn publish_dialog(
     mut ev: MessageReader<PanelCmd>,
     mut dialog: ResMut<PublishDialog>,
     scene: Res<SceneCfg>,
+    editor: Res<EditorBuf>,
 ) {
     if ev.read().any(|c| *c == PanelCmd::Publish) {
         dialog.request_open();
@@ -52,7 +53,7 @@ pub(crate) fn publish_dialog(
 
     // Pre-fill once from the manifest/filename (don't stomp in-progress typing).
     if !dialog.loaded {
-        let (t, d) = default_meta(&scene);
+        let (t, d) = default_meta(&scene, &editor);
         dialog.title = t;
         dialog.description = d;
         dialog.loaded = true;
@@ -116,12 +117,16 @@ pub(crate) fn publish_dialog(
 }
 
 /// The pre-filled title + description: the nearest `project.toml` (title + publish.description), else the
-/// file stem. On wasm there's no fs manifest — fall back to the source's stem (from `?model=`), blank desc.
-fn default_meta(scene: &SceneCfg) -> (String, String) {
+/// file stem. Native reads the manifest off `scene.source`; wasm has no fs manifest — the model name lives
+/// on `editor.path` (the `?model=` basename; `scene.source` is unset in the browser), so fall back there.
+fn default_meta(scene: &SceneCfg, editor: &EditorBuf) -> (String, String) {
+    // The best filename we have on either platform: the loaded source path (native) or the editor's
+    // model basename (wasm), minus its extension.
     let stem = || {
         scene
             .source
             .as_deref()
+            .or(Some(editor.path.as_path()))
             .and_then(|p| p.file_stem())
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_default()

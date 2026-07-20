@@ -333,7 +333,11 @@ fn parse_slops(s: &str) -> Result<Vec<f64>> {
     Ok(v)
 }
 
+#[cfg(feature = "kernel")]
 fn publish_cmd(target: &Path, url: Option<String>, api_key: Option<String>) -> Result<()> {
+    use fab_scad::geomsg::{Quality, Request, Response, Source};
+    use fab_scad::geomsvc::{SolidStore, handle_with_store};
+
     if !target.exists() {
         bail!("no such file: {}", target.display());
     }
@@ -353,29 +357,83 @@ fn publish_cmd(target: &Path, url: Option<String>, api_key: Option<String>) -> R
     )?;
     let base = url.unwrap_or(resolved.url);
 
-    let root = find_root();
-    let oscad = Openscad::discover(root.as_deref())?;
+    let root = find_root().map(|r| r.to_string_lossy().into_owned());
+    let stem = target
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "part".into());
     let out = target
         .parent()
         .unwrap_or_else(|| Path::new("."))
         .join("out")
         .join("publish");
+    std::fs::create_dir_all(&out)?;
+
     println!(
-        "publishing {} to {base}… (rendering cover + full + preview meshes)",
+        "publishing {} to {base}… (kernel render → mesh variants)",
         target.display()
     );
-    let page_url = fab_scad::publish::publish_model(
-        &oscad,
-        target,
-        &title,
-        &description,
+
+    // W.3.28: render the mesh variants through fab's OWN geometry service — the SAME `handle_with_store`
+    // the GUI's pool drives — NOT external OpenSCAD. `fab publish` no longer needs `openscad` on PATH.
+    let mut store = SolidStore::new(0);
+    let id = match handle_with_store(
+        &mut store,
+        Request::RenderWhole {
+            source: Source::Path(target.to_string_lossy().into_owned()),
+            root,
+            preview: false,
+            quality: Quality::Final,
+        },
+    ) {
+        Response::Rendered { id, .. } => id,
+        Response::Failed { error } => bail!("render failed: {error}"),
+        _ => bail!("render: unexpected service response"),
+    };
+    let (low_b, high_b, ext) = match handle_with_store(
+        &mut store,
+        Request::SaveMeshes {
+            base: id,
+            budget: 20_000,
+        },
+    ) {
+        Response::SavedMeshes { low, high, ext } => (low, high, ext),
+        Response::Failed { error } => bail!("mesh export failed: {error}"),
+        _ => bail!("save-meshes: unexpected service response"),
+    };
+    let low = out.join(format!("{stem}-preview.{ext}"));
+    let high = out.join(format!("{stem}.{ext}"));
+    std::fs::write(&low, low_b)?;
+    std::fs::write(&high, high_b)?;
+
+    // The printable plate .3mf, if `fab make` left one beside the source (best-effort standalone download).
+    let plates = target.with_file_name(format!("{stem}-plates.3mf"));
+    let mut downloads = Vec::new();
+    if plates.exists() {
+        downloads.push(fab_scad::publish::Media {
+            path: &plates,
+            title: format!("{title} — print plates (.3mf)"),
+        });
+    }
+
+    // Coverless from the CLI — there's no 3D view to capture (the GUI Publish button supplies one). The
+    // site keeps any existing cover or renders its own from the mesh.
+    let page_url = fab_scad::publish::upload_model(
         &base,
         &key,
-        &out,
-        Duration::from_secs(120),
+        &title,
+        &description,
+        None,
+        &[&low, &high],
+        downloads,
     )?;
     println!("published → {page_url}");
     Ok(())
+}
+
+#[cfg(not(feature = "kernel"))]
+fn publish_cmd(_: &Path, _: Option<String>, _: Option<String>) -> Result<()> {
+    bail!("fab publish needs the `kernel` feature (built without it)")
 }
 
 #[cfg(feature = "kernel")]

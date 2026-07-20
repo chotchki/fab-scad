@@ -65,6 +65,8 @@ wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
 console_error_panic_hook = "0.1"
 js-sys = "0.3"
+# Bridge the async clipboard read (W.3.29.7 editor paste) back to a Bevy system; Send+Sync ends = Resource-safe.
+async-channel = "2"
 web-sys = { version = "0.3", features = [
     "Window",
     "Location",
@@ -91,4 +93,8 @@ web-sys = { version = "0.3", features = [
     # `fab-gui:ready` splash-removal signal (W.3.7): a CustomEvent dispatched on the document.
     "CustomEvent",
     "EventTarget",
+    # Editor paste (W.3.29.7): read the system clipboard on Cmd/Ctrl+V — bevy_egui's own paste event
+    # never fires on desktop web (its text-agent input is focused only on mobile).
+    "Navigator",
+    "Clipboard",
 ] }

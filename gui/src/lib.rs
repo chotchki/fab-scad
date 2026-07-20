@@ -47,15 +47,17 @@ pub(crate) use std::path::{Path, PathBuf};
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) use fab_lang::{Dims, Vec3 as FVec3};
 
+#[cfg(target_arch = "wasm32")]
+mod clipboard; // W.3.29.7 — editor PASTE bridge (bevy_egui's own paste event is dead on desktop web); wasm only
 mod config;
 mod console; // W.3.16 — the in-app console (echo/warnings + tracing), a bottom-panel expander
 mod customize;
 mod cuts;
-// Web lib-closure delivery (W.3.6 Stage 2) — pure scan/normalize/BFS (native-tested) + the wasm fetch.
 #[cfg(test)]
 mod harness_tests;
 mod highlight;
 mod jobs;
+// Web lib-closure delivery (W.3.6 Stage 2) — pure scan/normalize/BFS (native-tested) + the wasm fetch.
 #[cfg(any(target_arch = "wasm32", test))]
 mod lib_fetch;
 mod panel;
@@ -333,6 +335,7 @@ fn run_windowed(scene: SceneCfg, shot: Option<PathBuf>) {
         .init_resource::<jobs::SaveJob>()
         .init_resource::<publish_web::PubWebJob>()
         .init_resource::<publish_dialog::PublishDialog>()
+        .init_resource::<clipboard::WebPaste>()
         .insert_resource(SaveTarget(
             crate::web_host::query_param("model")
                 .as_deref()
@@ -352,6 +355,9 @@ fn run_windowed(scene: SceneCfg, shot: Option<PathBuf>) {
                 // W.3.29.4: the web Publish flow (create a NEW /3d item) — distinct from the save-back.
                 publish_web::publish_web_kick,
                 publish_web::poll_publish_web,
+                // W.3.29.7: bridge Cmd/Ctrl+V into egui (bevy_egui's own paste event is dead on desktop web).
+                clipboard::web_paste_kick,
+                clipboard::web_paste_apply,
             ),
         )
         // W.3.29.6: the Publish dialog draws in the egui pass; its `confirmed` flag is what

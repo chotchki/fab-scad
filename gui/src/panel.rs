@@ -193,7 +193,7 @@ pub(crate) fn panel_ui(
         });
         if console_expanded {
             ui.separator();
-            crate::console::log_view(ui, writers.console.full);
+            crate::console::log_view(ui, writers.console.full, writers.console.level);
         }
     });
     // LEFT PANEL (U.3): the active tab's controls.

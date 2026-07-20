@@ -177,6 +177,13 @@ fn run_windowed(scene: SceneCfg, shot: Option<PathBuf>) {
             // way to see the app's logs on web, where there's no terminal.
             .set(bevy::log::LogPlugin {
                 custom_layer: console::log_layer,
+                // W.3.23: admit DEBUG from OUR crates so the console's level dropdown can reach it; keep
+                // bevy/wgpu at their defaults so DEBUG doesn't flood. (The console still shows INFO by
+                // default; on native the terminal also gets fab DEBUG — a dev-tool tradeoff, and the web
+                // has no terminal.)
+                filter: "wgpu=error,naga=warn,fab_scad=debug,fab_lang=debug,fab_gui=debug,\
+                         fab_manifold=debug,fab_geom=debug"
+                    .into(),
                 ..default()
             }),
         MeshPickingPlugin,

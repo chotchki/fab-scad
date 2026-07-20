@@ -32,6 +32,9 @@ pub(crate) enum Kind {
 
 struct Line {
     kind: Kind,
+    /// Severity for Log lines; Scad + worker lines are pushed at INFO (always visible). The console's
+    /// level dropdown (W.3.23) hides Log lines more verbose than the picked level.
+    level: bevy::log::Level,
     text: String,
 }
 
@@ -41,17 +44,20 @@ fn buffer() -> &'static Arc<Mutex<VecDeque<Line>>> {
     CONSOLE.get_or_init(|| Arc::new(Mutex::new(VecDeque::new())))
 }
 
-/// Append a line, dropping the oldest past [`CAP`]. Poison-tolerant (a panicked writer must not wedge
-/// the console for the rest of the session).
-pub(crate) fn push(kind: Kind, text: impl Into<String>) {
+/// Append a line at `level`, dropping the oldest past [`CAP`]. Poison-tolerant (a panicked writer must
+/// not wedge the console for the rest of the session).
+fn push_line(kind: Kind, level: bevy::log::Level, text: String) {
     let mut b = buffer().lock().unwrap_or_else(|e| e.into_inner());
-    b.push_back(Line {
-        kind,
-        text: text.into(),
-    });
+    b.push_back(Line { kind, level, text });
     while b.len() > CAP {
         b.pop_front();
     }
+}
+
+/// Append a line at INFO severity — the SCAD echo/warning feed + the worker's forwarded logs, always
+/// visible regardless of the level dropdown.
+pub(crate) fn push(kind: Kind, text: impl Into<String>) {
+    push_line(kind, bevy::log::Level::INFO, text.into());
 }
 
 /// Push each rendered eval message (already `ECHO: …` / `WARNING: …`) as a SCAD line.
@@ -94,8 +100,9 @@ impl<S: bevy::log::tracing::Subscriber> Layer<S> for ConsoleLayer {
             return;
         }
         let meta = event.metadata();
-        push(
+        push_line(
             Kind::Log,
+            *meta.level(),
             format!("{} {}: {}", meta.level(), meta.target(), grab.0),
         );
     }
@@ -108,11 +115,35 @@ pub(crate) fn log_layer(_app: &mut App) -> Option<BoxedLayer> {
 
 // ── UI ────────────────────────────────────────────────────────────────────────────────────────────
 
-/// The console's UI STATE (a resource): collapsed by default; `full` = show `tracing` too, else SCAD only.
-#[derive(Resource, Default)]
+/// The console's UI STATE (a resource): collapsed by default; `full` = show `tracing` too, else SCAD
+/// only; `level` = the least-severe tracing line shown in Full mode (W.3.23 — INFO by default, crank to
+/// DEBUG to diagnose).
+#[derive(Resource)]
 pub(crate) struct ConsoleUi {
     pub(crate) expanded: bool,
     pub(crate) full: bool,
+    pub(crate) level: bevy::log::Level,
+}
+
+impl Default for ConsoleUi {
+    fn default() -> Self {
+        Self {
+            expanded: false,
+            full: false,
+            level: bevy::log::Level::INFO,
+        }
+    }
+}
+
+/// Short label for the level dropdown (tracing's `Display` is SHOUTY: "ERROR" etc).
+fn level_label(level: bevy::log::Level) -> &'static str {
+    match level {
+        bevy::log::Level::ERROR => "Error",
+        bevy::log::Level::WARN => "Warn",
+        bevy::log::Level::INFO => "Info",
+        bevy::log::Level::DEBUG => "Debug",
+        bevy::log::Level::TRACE => "Trace",
+    }
 }
 
 /// Right-aligned status-bar controls. Collapsed: a "Console" button. Expanded: the [Full|SCAD] toggle +
@@ -129,6 +160,23 @@ pub(crate) fn controls(ui: &mut egui::Ui, state: &mut ConsoleUi) {
             ui.separator();
             ui.selectable_value(&mut state.full, false, "SCAD");
             ui.selectable_value(&mut state.full, true, "Full");
+            // W.3.23: in Full mode, pick the least-severe tracing line to show (INFO default → DEBUG).
+            if state.full {
+                egui::ComboBox::from_id_salt("console_level")
+                    .selected_text(level_label(state.level))
+                    .width(70.0)
+                    .show_ui(ui, |ui| {
+                        for lvl in [
+                            bevy::log::Level::ERROR,
+                            bevy::log::Level::WARN,
+                            bevy::log::Level::INFO,
+                            bevy::log::Level::DEBUG,
+                        ] {
+                            ui.selectable_value(&mut state.level, lvl, level_label(lvl));
+                        }
+                    });
+                ui.separator();
+            }
         } else if ui.button("Console").clicked() {
             state.expanded = true;
         }
@@ -137,14 +185,19 @@ pub(crate) fn controls(ui: &mut egui::Ui, state: &mut ConsoleUi) {
 
 /// The scrolling line list (drawn below the status row when expanded). Sticks to the bottom so the
 /// newest output is always in view; monospace; warnings + errors gold, `tracing` muted.
-pub(crate) fn log_view(ui: &mut egui::Ui, full: bool) {
+pub(crate) fn log_view(ui: &mut egui::Ui, full: bool, level: bevy::log::Level) {
     egui::ScrollArea::vertical()
         .stick_to_bottom(true)
         .auto_shrink([false, false])
         .show(ui, |ui| {
             let b = buffer().lock().unwrap_or_else(|e| e.into_inner());
             let mut any = false;
-            for line in b.iter().filter(|l| full || l.kind == Kind::Scad) {
+            // SCAD echo/warnings always show; tracing lines only in Full mode, at/above the picked
+            // severity (Level Ord is ERROR < WARN < INFO < DEBUG, so `<=` keeps this level + worse).
+            for line in b.iter().filter(|l| match l.kind {
+                Kind::Scad => true,
+                Kind::Log => full && l.level <= level,
+            }) {
                 any = true;
                 let color = match line.kind {
                     Kind::Log => crate::theme::TEXT_MUTED,

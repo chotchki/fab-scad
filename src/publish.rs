@@ -1,12 +1,13 @@
 //! Publish a project to hotchkiss.io (Phase 15): upload the cover + meshes as media, then
 //! create-or-update a page under `/projects`, authenticated with an `hio_` API key.
 //!
-//! The site's contract (mapped from the hotchkiss-io source):
+//! The site's contract (mapped from the hotchkiss-io source, re-verified W.3.28.6):
 //!   - Auth: `Authorization: Bearer hio_…` — the key delegates its user's role (admin), so it can
-//!     hit the admin mutation routes headless.
-//!   - Media: `POST /admin/media/upload` (multipart: a `file` part + optional `title`) → JSON
-//!     `{media_id, media_ref, markdown}`. STL is `kind=stl`, 3mf/other → `file`, PNG → image. No
-//!     size limit. Content-addressed, so re-uploading the same bytes dedups.
+//!     hit the admin-gated mutation routes headless. `Accept: application/json` gets JSON envelopes.
+//!   - Media: `POST /media` (multipart: ANY part with a filename is ingested — multiple files per
+//!     request become LOD variants of ONE item; optional `title` text field) → 201 + a manifest whose
+//!     minted ref is the `ref` field. Embed/reference media in markdown + `page_cover_media_ref` by the
+//!     bare ref or `/media/<ref>` (NOT `/media/file/<…>`, which takes a re-mintable url_key).
 //!   - Page: `POST /pages/projects` (form `page_title`, server slugifies) then
 //!     `PUT /pages/projects/{slug}` (form: `page_markdown`, `page_cover_media_ref`, `page_order`, …).
 //!   - No upsert route, so we derive the slug locally (mirroring the server's slugify), GET to check,
@@ -62,8 +63,12 @@ pub struct Project<'a> {
     pub downloads: Vec<Media<'a>>,
 }
 
+/// The `POST /media` 201 manifest — we only need the minted ref, which the server emits as `ref`
+/// (`#[serde(rename = "ref")]` on the site side); the rest of the manifest (self, kind, variants…) is
+/// ignored. NOT `media_ref` — that older key never existed on this server (the dogfood 404's sibling bug).
 #[derive(Deserialize)]
 struct UploadResp {
+    #[serde(rename = "ref")]
     media_ref: String,
 }
 
@@ -77,8 +82,17 @@ pub struct Client {
 impl Client {
     /// Client for `base` (e.g. `https://hotchkiss.io`) authing with an `hio_` API `key`.
     pub fn new(base: &str, key: &str) -> Result<Self> {
+        // `Accept: application/json` on every request: the page-write endpoints fork on the client kind
+        // and return a 303-to-HTML for a browser but a JSON envelope for an API client (hotchkiss-io
+        // responder.rs). We're the latter — ask for JSON so status codes are unambiguous.
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(
+            reqwest::header::ACCEPT,
+            reqwest::header::HeaderValue::from_static("application/json"),
+        );
         let http = reqwest::blocking::Client::builder()
             .timeout(Duration::from_secs(180))
+            .default_headers(headers)
             .build()
             .context("building HTTP client")?;
         Ok(Self {
@@ -122,7 +136,10 @@ impl Client {
     /// request, so multiple files become LOD variants of one item (viewer picks the light one).
     /// Returns the item's `media_ref`.
     fn upload_media_multi(&self, files: &[&Path], title: &str) -> Result<String> {
-        let url = format!("{}/admin/media/upload", self.base);
+        // `POST /media` (hotchkiss-io media_router): any multipart part WITH a filename is ingested; all
+        // files in one request become LOD variants of ONE item. Admin-gated — the `hio_` Bearer key
+        // satisfies it. Returns 201 + a manifest whose ref field is `ref` (see [`UploadResp`]).
+        let url = format!("{}/media", self.base);
         let resp = self.send_retry("media upload", || {
             let mut form =
                 reqwest::blocking::multipart::Form::new().text("title", title.to_string());
@@ -262,13 +279,13 @@ fn compose_markdown(description: &str, viewer_ref: &str, downloads: &[(String, S
         md.push_str(description.trim());
         md.push_str("\n\n");
     }
-    md.push_str(&format!(
-        "![Interactive preview](/media/file/{viewer_ref})\n\n"
-    ));
+    // Embed by `/media/<ref>` — the ref-based form the server rewrites to a per-viewer HTMX embed. NOT
+    // `/media/file/<…>` (that path takes a re-mintable url_key, never a ref) — the dogfood-surfaced bug.
+    md.push_str(&format!("![Interactive preview](/media/{viewer_ref})\n\n"));
     if !downloads.is_empty() {
         md.push_str("## Downloads\n\n");
         for (title, r) in downloads {
-            md.push_str(&format!("- [{title}](/media/file/{r})\n"));
+            md.push_str(&format!("- [{title}](/media/{r})\n"));
         }
     }
     md
@@ -304,15 +321,26 @@ mod tests {
             ],
         );
         assert!(md.starts_with("A desk mount.\n\n"));
-        assert!(md.contains("![Interactive preview](/media/file/cover123)"));
+        assert!(md.contains("![Interactive preview](/media/cover123)"));
         assert!(md.contains("## Downloads"));
-        assert!(md.contains("- [Full STL](/media/file/full456)"));
-        assert!(md.contains("- [Plates 3mf](/media/file/plates789)"));
+        assert!(md.contains("- [Full STL](/media/full456)"));
+        assert!(md.contains("- [Plates 3mf](/media/plates789)"));
     }
 
     #[test]
     fn markdown_without_downloads_or_description() {
         let md = compose_markdown("", "v1", &[]);
-        assert_eq!(md, "![Interactive preview](/media/file/v1)\n\n");
+        assert_eq!(md, "![Interactive preview](/media/v1)\n\n");
+    }
+
+    #[test]
+    fn upload_response_reads_the_ref_field() {
+        // hotchkiss-io's `POST /media` 201 manifest names the minted ref `ref` (not `media_ref`) and
+        // carries extra fields we ignore. This pins the deserialization — the dogfood 404's sibling bug.
+        let resp: UploadResp = serde_json::from_str(
+            r#"{"ref":"0191abcd","self":"/media/0191abcd","kind":"model","title":"x","variants":[]}"#,
+        )
+        .unwrap();
+        assert_eq!(resp.media_ref, "0191abcd");
     }
 }

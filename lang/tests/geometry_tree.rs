@@ -61,8 +61,16 @@ fn transform_wraps_its_child_with_the_matrix() {
 }
 
 #[test]
-fn multiple_objects_are_an_implicit_union() {
+fn multiple_objects_are_the_top_level_parts() {
+    // W.3.34: separate top-level objects are the implicit union — MARKED `Parts` so the parts splitter gives
+    // each its own printable piece. Geometrically identical to a `Union` (the whole render merges them).
     match d3(evaluate_geometry("cube(10); sphere(5, $fn = 8);").unwrap()) {
+        GeoNode::Parts(ref children) => assert_eq!(children.len(), 2),
+        other => panic!("expected Parts, got {other:?}"),
+    }
+    // An EXPLICIT `union(){…}` as the sole top-level statement is the user merging them — stays a plain
+    // `Union` (one part), NOT `Parts`. This is the distinction the trash_can dogfood needed.
+    match d3(evaluate_geometry("union(){ cube(10); sphere(5, $fn = 8); }").unwrap()) {
         GeoNode::Union(ref children) => assert_eq!(children.len(), 2),
         other => panic!("expected Union, got {other:?}"),
     }

@@ -166,6 +166,7 @@ fn kind_of(node: &GeoNode) -> &'static str {
         GeoNode::Leaf(_) => "Leaf",
         GeoNode::Transform { .. } => "Transform",
         GeoNode::Union(_) => "Union",
+        GeoNode::Parts(_) => "Parts",
         GeoNode::Difference(_) => "Difference",
         GeoNode::Intersection(_) => "Intersection",
         GeoNode::Hull(_) => "Hull",

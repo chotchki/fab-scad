@@ -25,6 +25,7 @@ fn drain_geonode(node: &mut GeoNode, work: &mut Vec<Sub>) {
             work.push(Sub::D3(std::mem::replace(&mut **child, GeoNode::Empty)));
         }
         GeoNode::Union(v)
+        | GeoNode::Parts(v)
         | GeoNode::Difference(v)
         | GeoNode::Intersection(v)
         | GeoNode::Hull(v)

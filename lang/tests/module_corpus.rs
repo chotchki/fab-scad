@@ -165,10 +165,10 @@ fn module_body_is_full_geometry() {
         d3(evaluate_geometry("module two() { cube(1); sphere(1, $fn = 8); } two();").unwrap()),
         GeoNode::Union(ref c) if c.len() == 2
     ));
-    // instantiated twice → two objects → an implicit union at the top level.
+    // instantiated twice → two top-level statements → the marked `Parts` union (W.3.34), one part each.
     assert!(matches!(
         d3(evaluate_geometry("module u() cube(1); u(); translate([3, 0, 0]) u();").unwrap()),
-        GeoNode::Union(ref c) if c.len() == 2
+        GeoNode::Parts(ref c) if c.len() == 2
     ));
 }
 

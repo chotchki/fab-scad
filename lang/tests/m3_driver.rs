@@ -27,14 +27,15 @@ fn block_mark_drain_takes_only_its_own_children() {
     // 4 statements, exactly ONE of which produces geometry: `x = 1` hoists, `*cube(1)` is disabled, `echo` is a
     // side effect, `sphere` is the lone real child.
     match d3("cube(5); { x = 1; *cube(1); echo(\"h\"); sphere(2, $fn = 8); }") {
-        GeoNode::Union(ref kids) => {
+        // Two top-level statements → the marked `Parts` union (W.3.34), one part each.
+        GeoNode::Parts(ref kids) => {
             assert_eq!(
                 kids.len(),
                 2,
                 "the cube sibling + the block's single sphere"
             );
         }
-        other => panic!("expected a top-level Union of 2, got {other:?}"),
+        other => panic!("expected a top-level Parts of 2, got {other:?}"),
     }
     // ...and the block itself collapses to exactly that one real child — bit-identical to the child bare.
     assert_eq!(

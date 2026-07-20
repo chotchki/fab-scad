@@ -40,8 +40,15 @@ pub enum GeoNode {
         /// The transformed subtree.
         child: Box<GeoNode>,
     },
-    /// Union of children (also the implicit union of multiple top-level objects + a block's children).
+    /// Union of children (an explicit `union(){…}` + a block's implicit group).
     Union(Vec<GeoNode>),
+    /// The IMPLICIT union of MULTIPLE top-level statements (W.3.34) — geometrically identical to
+    /// [`Union`](Self::Union) (the whole render unions the kids), but marked distinctly so the parts
+    /// splitter ([`build_geo_parts`](../../../fab_scad/backend/fn.build_geo_parts.html)) treats each kid as
+    /// its OWN printable part while an explicit `union()` the user wrote stays ONE part. Only `eval_top`
+    /// mints it, and only when ≥2 top-level statements survive to the root — a single statement (even an
+    /// explicit `union()`) never becomes `Parts`.
+    Parts(Vec<GeoNode>),
     /// `difference()` — the first child minus the rest.
     Difference(Vec<GeoNode>),
     /// `intersection()` — the common volume of all children.

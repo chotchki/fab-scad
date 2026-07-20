@@ -75,6 +75,7 @@ fn hash_node_into(node: &GeoNode, memo: &mut BTreeMap<usize, u64>, h: &mut FnvHa
             h.write(&hash_node(child, memo).to_le_bytes());
         }
         GeoNode::Union(kids)
+        | GeoNode::Parts(kids)
         | GeoNode::Difference(kids)
         | GeoNode::Intersection(kids)
         | GeoNode::Hull(kids)
@@ -194,6 +195,7 @@ fn hash_node_128_into(node: &GeoNode, memo: &mut BTreeMap<usize, u128>, h: &mut 
             h.write(&hash_node_128(child, memo).to_le_bytes());
         }
         GeoNode::Union(kids)
+        | GeoNode::Parts(kids)
         | GeoNode::Difference(kids)
         | GeoNode::Intersection(kids)
         | GeoNode::Hull(kids)

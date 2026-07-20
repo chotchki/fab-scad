@@ -175,20 +175,20 @@ fn build_geo_gated<B: GeometryBackend>(
     out
 }
 
-/// Split a [`Geo`] result into its TOP-LEVEL PARTS — one backend solid per implicit-union child at
-/// the root (T.2b). A model's top-level statements are implicitly unioned, so a `Geo::D3(Union(kids))`
-/// root yields one part per top-level item (the `wall_sliced()` / `frame_sliced()` / … calls); each
-/// part slices + orients + packs on its own, then all co-pack. Any other root — a lone statement, a
-/// transform, a leaf, a 2D result — is ONE part.
+/// Split a [`Geo`] result into its TOP-LEVEL PARTS — one backend solid per top-level STATEMENT (T.2b,
+/// W.3.34). A model's separate top-level statements lower to a [`GeoNode::Parts`] root (the marked
+/// implicit union), so this yields one part per statement (the `wall_sliced()` / `frame_sliced()` / …
+/// calls); each part slices + orients + packs on its own, then all co-pack. Any other root — a lone
+/// statement, an EXPLICIT `union(){…}` the user wrote, a transform, a leaf, a 2D result — is ONE part
+/// (an explicit union is the user saying "merge these", so it never over-splits).
 ///
-/// LIMIT: the implicit top-level union and an EXPLICIT `union(){…}` written as the sole top-level
-/// statement lower to the same `Union` node, so this splits BOTH — a wrap-everything-in-`union()`
-/// model over-splits. Top-level module calls (the presliced legacy class) are the target; restructure
-/// if the split is unwanted. Building a part per child (vs one merged solid) is the whole point: the
-/// parts are then sliced/oriented independently, which a single `build_geo` merge would foreclose.
+/// The distinction lives in the node: only `eval_top` mints `Parts`, and only for ≥2 top-level statements
+/// — a single statement (even an explicit `union()`) stays a plain node. Building a part per child (vs one
+/// merged solid) is the whole point: the parts slice/orient independently, which a `build_geo` merge would
+/// foreclose.
 pub fn build_geo_parts<B: GeometryBackend>(geo: &Geo, backend: &B) -> Vec<B::Solid> {
     match geo {
-        Geo::D3(GeoNode::Union(kids)) if kids.len() > 1 => {
+        Geo::D3(GeoNode::Parts(kids)) => {
             // ONE memo across every part: a sliced model shares its base subtree BETWEEN parts
             // (part = base ∩ half), which per-part memos would rebuild per part.
             let mut memo = GeoMemo::new(geo_cache_enabled(), None);
@@ -212,7 +212,7 @@ pub fn build_geo_parts_cached<B: GeometryBackend>(
     cache: &mut GeoCache<B::Solid>,
 ) -> Vec<B::Solid> {
     match geo {
-        Geo::D3(GeoNode::Union(kids)) if kids.len() > 1 => {
+        Geo::D3(GeoNode::Parts(kids)) => {
             let mut memo = GeoMemo::new(geo_cache_enabled(), Some(cache));
             for k in kids {
                 memo.prepass(k);
@@ -494,6 +494,7 @@ impl<'t, 'c, B: GeometryBackend> GeoMemo<'t, 'c, B> {
             | GeoNode::Color { child, .. }
             | GeoNode::Resize { child, .. } => self.prepass(child),
             GeoNode::Union(kids)
+            | GeoNode::Parts(kids)
             | GeoNode::Difference(kids)
             | GeoNode::Intersection(kids)
             | GeoNode::Hull(kids)
@@ -643,7 +644,9 @@ fn render_node<'t, 'c, B: GeometryBackend>(
         // Union is N-ary via the backend's batch strategy; difference = first − union(rest) — the
         // same set (A−B−C ≡ A−(B∪C)) and the same shape the C++ csg tree evaluates, so one big
         // subtract replaces a quadratic fold over the accumulating base.
-        GeoNode::Union(kids) => {
+        // `Parts` is the top-level implicit union of separate statements (W.3.34) — the WHOLE render unions
+        // them exactly like `Union`; only the parts splitter treats the kids as distinct printable parts.
+        GeoNode::Union(kids) | GeoNode::Parts(kids) => {
             backend.batch_union(kids.iter().map(|k| build_inner(k, backend, memo)).collect())
         }
         GeoNode::Difference(kids) => match kids.split_first() {
@@ -1488,6 +1491,27 @@ mod tests {
             build_geo_parts(&one, &MockBackend).len(),
             1,
             "single item → one part"
+        );
+        // W.3.34: an EXPLICIT top-level `union(){…}` is the user merging them — ONE part, NOT split, even
+        // though it wraps two objects (the trash_can dogfood: two hinge blocks unioned came back as 2 parts).
+        let merged = fab_lang::evaluate_geometry(
+            "union(){ cube(10); translate([50,0,0]) sphere(6,$fn=16); }",
+        )
+        .expect("evaluates");
+        assert_eq!(
+            build_geo_parts(&merged, &MockBackend).len(),
+            1,
+            "explicit union() of two objects → one part"
+        );
+        // But TWO of them at the top level are two statements → two parts (the split still works).
+        let two_unions = fab_lang::evaluate_geometry(
+            "union(){ cube(10); } union(){ translate([50,0,0]) sphere(6,$fn=16); }",
+        )
+        .expect("evaluates");
+        assert_eq!(
+            build_geo_parts(&two_unions, &MockBackend).len(),
+            2,
+            "two top-level union() statements → two parts"
         );
     }
 

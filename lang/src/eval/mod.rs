@@ -2270,7 +2270,25 @@ fn eval_top<'a>(stmts: &[&'a Stmt], global: &Scope, ctx: &Ctx<'a>) -> crate::Res
     // discarded — `eval_stmt` diverted them into `root_override`). Otherwise the implicit union of top-level
     // objects. `split_off(0)` drains the buffer so a re-run starts clean.
     let root = ctx.root_override.borrow_mut().split_off(0);
-    Ok(union_of(if root.is_empty() { nodes } else { root }, ctx))
+    let items = if root.is_empty() { nodes } else { root };
+    // MARK the implicit union of MULTIPLE top-level statements as `Parts` (W.3.34): geometrically it's the
+    // same union `union_of` builds, but the marker lets the parts splitter treat each top-level item as its
+    // own printable part WITHOUT splitting an explicit `union(){…}` the user wrote as a single statement.
+    // Only ≥2 items qualify — a lone statement (even an explicit union) is one part, so it stays a plain
+    // node. If `union_of` collapsed the ≥2 items to a single non-`Union` (all but one were Empty), there's
+    // nothing to split, so leave it be.
+    let multi = items.len() > 1;
+    let mut merged = union_of(items, ctx);
+    // `GeoNode` has a custom (iterative) `Drop`, so the kids can't be moved out by pattern — `mem::take`
+    // the Vec (ends the borrow), then rebuild as `Parts`.
+    let parts_kids = match &mut merged {
+        Geo::D3(GeoNode::Union(kids)) if multi => Some(std::mem::take(kids)),
+        _ => None,
+    };
+    if let Some(kids) = parts_kids {
+        merged = Geo::D3(GeoNode::Parts(kids));
+    }
+    Ok(merged)
 }
 
 /// Collect the scope-LOCAL `module` definitions of a statement list (last-wins by name) — the module-side

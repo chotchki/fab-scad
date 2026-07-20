@@ -126,8 +126,10 @@ pub fn to_wire_orient(orient: &[Orient3]) -> Vec<WireOrient> {
 }
 
 /// Walk up to the fab-scad root (the dir with `printers.toml` + `scad-lib/`) for OPENSCADPATH.
-pub fn find_root() -> Option<PathBuf> {
-    let mut dir = std::env::current_dir().ok()?;
+/// Walk up from `start` for the workspace root — the dir holding `printers.toml` + `scad-lib/`, which
+/// carries the library search paths BOSL2 resolves against. `None` if no ancestor qualifies.
+pub fn find_root_from(start: &std::path::Path) -> Option<PathBuf> {
+    let mut dir = start.to_path_buf();
     loop {
         if dir.join("printers.toml").exists() && dir.join("scad-lib").is_dir() {
             return Some(dir);
@@ -136,6 +138,13 @@ pub fn find_root() -> Option<PathBuf> {
             return None;
         }
     }
+}
+
+/// The workspace root from the CURRENT directory — right for the CLI/dev entry (cwd IS the workspace).
+/// A double-clicked `.app` opens with cwd `/`, so `native_entry` walks up from the OPENED MODEL instead
+/// (W.3.21) — without a root there are no library paths and every BOSL2 module goes undefined → empty.
+pub fn find_root() -> Option<PathBuf> {
+    find_root_from(&std::env::current_dir().ok()?)
 }
 
 /// One printable piece for the print-orientation preview, rebuilt from the service's `WirePiece`
@@ -287,6 +296,21 @@ pub fn copack_summary(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn find_root_from_walks_up_to_the_workspace() {
+        // W.3.21: a double-clicked .app has cwd `/`, so root must be found from the OPENED model's
+        // location. A temp workspace (printers.toml + scad-lib/) with a nested model dir → find_root_from
+        // a deep child returns the workspace root; a dir with no such ancestor → None.
+        let tmp = std::env::temp_dir().join(format!("fab-root-test-{}", std::process::id()));
+        let nested = tmp.join("models").join("thing");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::create_dir_all(tmp.join("scad-lib")).unwrap();
+        std::fs::write(tmp.join("printers.toml"), "").unwrap();
+        assert_eq!(find_root_from(&nested).as_deref(), Some(tmp.as_path()));
+        assert_eq!(find_root_from(std::path::Path::new("/")), None);
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
 
     /// A unit tetrahedron as STL triangle soup — the smallest closed mesh with a real footprint.
     fn tet() -> StlMesh {

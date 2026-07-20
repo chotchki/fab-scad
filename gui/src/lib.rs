@@ -102,15 +102,25 @@ pub(crate) use geom_wasm::GeomPool;
 pub fn native_entry() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let (bed, plate) = bed_size().unwrap_or(([256.0; 3], [256.0; 3]));
+    let source = args
+        .iter()
+        .find(|a| a.ends_with(".scad"))
+        .map(PathBuf::from);
+    // Prefer the OPENED MODEL's location for the workspace root over cwd (W.3.21): a double-clicked
+    // `.app` launches with cwd `/`, so a cwd-based `find_root` returns None → no library paths → BOSL2
+    // unresolvable → every module undefined → empty render. Walk up from the .scad's dir first; fall
+    // back to cwd for a sourceless launch (dev `cargo run` from the workspace).
+    let root = source
+        .as_deref()
+        .and_then(|p| p.parent())
+        .and_then(fab::find_root_from)
+        .or_else(fab::find_root);
     let cfg = SceneCfg {
-        source: args
-            .iter()
-            .find(|a| a.ends_with(".scad"))
-            .map(PathBuf::from),
+        source,
         stl: args.iter().find(|a| a.ends_with(".stl")).map(PathBuf::from),
         bed: [bed[0] as f32, bed[1] as f32, bed[2] as f32],
         plate: [plate[0] as f32, plate[1] as f32],
-        root: fab::find_root(),
+        root,
         tmp: std::env::temp_dir().join("fab-gui"),
         reslice_on_start: args.iter().any(|a| a == "--reslice"),
         cut_pct: flag_value(&args, "--cut")

@@ -302,6 +302,19 @@ pub(crate) fn apply_switch_file(
     };
     files.active = Some(i);
     scene.source = Some(path.clone());
+    // Re-derive the workspace root from the OPENED model (W.3.21): a sourceless `.app` launch left root
+    // None (cwd `/`), so opening a model that lives under a workspace must pick up its BOSL2/scad-lib
+    // search paths — else every module goes undefined and the render comes back empty. Native only (the
+    // web build ignores root; it renders the buffer as Source::Bytes against the fetched lib pack).
+    #[cfg(not(target_arch = "wasm32"))]
+    if let Some(r) = std::fs::canonicalize(&path)
+        .ok()
+        .as_deref()
+        .and_then(|p| p.parent())
+        .and_then(fab::find_root_from)
+    {
+        scene.root = Some(r);
+    }
     // The new file's disk text (minus its fab:config block, W.3.8) becomes the editor buffer; the
     // stashed block applies in poll_job once the fresh parts are built.
     pending_config.0 = read_into_editor(&mut editor, &path);

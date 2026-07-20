@@ -420,19 +420,15 @@ fn spawn_cover_scene(
 fn spawn_upload(meta: PubMeta, arts: Arts) -> Task<Result<String, String>> {
     AsyncComputeTaskPool::get().spawn(async move {
         let mut downloads = Vec::new();
-        // The source .scad — so a published design ships remixable source, not just meshes.
-        if meta.source.exists() {
-            downloads.push(fab_scad::publish::Media {
-                path: &meta.source,
-                title: format!("{} — source (.scad)", meta.title),
-            });
-        }
         if let Some(p) = &meta.plates {
             downloads.push(fab_scad::publish::Media {
                 path: p,
                 title: format!("{} — print plates (.3mf)", meta.title),
             });
         }
+        // The .scad source rides the SAME model item (a variant), so the embed offers "Open in the
+        // slicer" — not a standalone download item.
+        let source = meta.source.exists().then_some(meta.source.as_path());
         fab_scad::publish::upload_model(
             &meta.base_url,
             &meta.key,
@@ -440,6 +436,7 @@ fn spawn_upload(meta: PubMeta, arts: Arts) -> Task<Result<String, String>> {
             &meta.description,
             Some(&meta.cover_png),
             &[&arts.low, &arts.high],
+            source,
             downloads,
         )
         .map_err(|e| format!("{e:#}"))

@@ -407,11 +407,6 @@ fn publish_cmd(target: &Path, url: Option<String>, api_key: Option<String>) -> R
     std::fs::write(&high, high_b)?;
 
     let mut downloads = Vec::new();
-    // The source .scad — a published design ships remixable source, not just meshes.
-    downloads.push(fab_scad::publish::Media {
-        path: target,
-        title: format!("{title} — source (.scad)"),
-    });
     // The printable plate .3mf, if `fab make` left one beside the source (best-effort standalone download).
     let plates = target.with_file_name(format!("{stem}-plates.3mf"));
     if plates.exists() {
@@ -422,7 +417,7 @@ fn publish_cmd(target: &Path, url: Option<String>, api_key: Option<String>) -> R
     }
 
     // Coverless from the CLI — there's no 3D view to capture (the GUI Publish button supplies one). The
-    // site keeps any existing cover or renders its own from the mesh.
+    // `.scad` source rides the model item (a variant) so the embed offers "Open in the slicer".
     let page_url = fab_scad::publish::upload_model(
         &base,
         &key,
@@ -430,6 +425,7 @@ fn publish_cmd(target: &Path, url: Option<String>, api_key: Option<String>) -> R
         &description,
         None,
         &[&low, &high],
+        Some(target),
         downloads,
     )?;
     println!("published → {page_url}");

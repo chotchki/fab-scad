@@ -60,10 +60,13 @@ pub struct Project<'a> {
     /// The gallery cover image. `None` = don't set one (the site keeps any existing / renders its own
     /// from the mesh) — the headless `fab publish` path, which has no 3D view to capture (W.3.28).
     pub cover_png: Option<&'a Path>,
-    /// Mesh variants (LOD) uploaded as ONE media item — the site makes a variant per file in a
-    /// single request. Order low-res → full-res: the viewer renders the light one, the full one is
-    /// the download. Both COLORED 3MF (the kernel carries `color()` into base materials).
+    /// Mesh variants (LOD) — COLORED 3MF (the kernel carries `color()` into base materials). Uploaded
+    /// as part of the ONE model item (with [`Self::source`]); the viewer picks the smallest 3MF, the
+    /// download the largest.
     pub mesh_variants: Vec<&'a Path>,
+    /// The `.scad` source, folded into the SAME model item as a variant (not a standalone download), so
+    /// the embed's "Open in the slicer" button appears. `None` skips it.
+    pub source: Option<&'a Path>,
     /// Extra standalone downloads (e.g. the print-plates `.3mf`), each its own media item.
     pub downloads: Vec<Media<'a>>,
 }
@@ -236,9 +239,17 @@ pub fn publish(client: &Client, p: &Project) -> Result<String> {
         Some(png) => Some(client.upload_media(png, &format!("{} — cover", p.title))?),
         None => None,
     };
-    // The mesh: all LOD variants in ONE request → one item (viewer renders the light variant, the
-    // full one downloads). Uploading them separately would make them unrelated items.
-    let model = client.upload_media_multi(&p.mesh_variants, &format!("{} — model", p.title))?;
+    // The model item: the mesh LOD variants AND the `.scad` source, uploaded in ONE request → ONE media
+    // item. The site's embed renders the three.js viewer + download from the mesh AND — because a `.scad`
+    // variant is present — appends an "Open in the slicer" button that deep-links the source into the
+    // fab-gui web editor (`/3d/editor?model=/media/<ref>?format=scad`). A SEPARATE `.scad` item would be
+    // invisible to that embed, so the source must ride the same item. Kinds come from the filename
+    // extensions (`.3mf`/`.stl` → mesh, `.scad` → source), and identical bytes dedup by content hash.
+    let mut model_files: Vec<&Path> = p.mesh_variants.clone();
+    if let Some(src) = p.source {
+        model_files.push(src);
+    }
+    let model = client.upload_media_multi(&model_files, &format!("{} — model", p.title))?;
     let mut downloads = Vec::with_capacity(p.downloads.len());
     for d in &p.downloads {
         downloads.push((d.title.clone(), client.upload_media(d.path, &d.title)?));
@@ -263,6 +274,7 @@ pub fn upload_model(
     description: &str,
     cover: Option<&Path>,
     mesh_variants: &[&Path],
+    source: Option<&Path>,
     downloads: Vec<Media<'_>>,
 ) -> Result<String> {
     let client = Client::new(base, key)?;
@@ -271,6 +283,7 @@ pub fn upload_model(
         description_md: description,
         cover_png: cover,
         mesh_variants: mesh_variants.to_vec(),
+        source,
         downloads,
     };
     publish(&client, &project)

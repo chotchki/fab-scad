@@ -365,6 +365,15 @@ fn run_windowed(scene: SceneCfg, shot: Option<PathBuf>) {
         .add_systems(
             EguiPrimaryContextPass,
             publish_dialog::publish_dialog.run_if(theme::theme_ready),
+        )
+        // W.3.29.8: sync bevy_egui's modifier state to the browser's ground truth (metaKey/etc off key
+        // events) so a dropped Cmd/Ctrl keyup can't leave text input blocked forever (winit never fires
+        // the KeyboardFocusLost that would reset it on web). Before the keyboard reader → same-frame fix.
+        .add_systems(Startup, clipboard::install_modifier_watch)
+        .add_systems(
+            PreUpdate,
+            clipboard::sync_modifiers
+                .before(bevy_egui::input::write_keyboard_input_messages_system),
         );
     app.run();
 }

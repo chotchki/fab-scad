@@ -97,4 +97,7 @@ web-sys = { version = "0.3", features = [
     # never fires on desktop web (its text-agent input is focused only on mobile).
     "Navigator",
     "Clipboard",
+    # Modifier unstick (W.3.29.8): read metaKey/ctrlKey/etc off key events — ground truth even when a
+    # keyup is dropped (macOS Cmd-keyup swallow), which bevy_egui's event tracking can't recover from.
+    "KeyboardEvent",
 ] }

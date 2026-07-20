@@ -49,13 +49,19 @@ const BEZIER_SEGMENTS: u32 = 20;
 /// [`Error::Load`] if the file can't be read or usvg can't parse it.
 pub fn svg_contours(path: &Path) -> Result<Vec<Contour>, Error> {
     let bytes = std::fs::read(path).map_err(|e| Error::Load(format!("{}: {e}", path.display())))?;
+    svg_contours_bytes(&bytes)
+}
+
+/// [`svg_contours`] from BYTES — the fs-less twin the wasm worker's `import()` uses (W.3.24). SVG is
+/// UTF-8 text, so it rides the web lib pack; usvg is pure Rust, so the parse runs the same in the worker.
+pub fn svg_contours_bytes(bytes: &[u8]) -> Result<Vec<Contour>, Error> {
     // dpi=72 to match OpenSCAD's SVG importer; the `text` feature is compiled out (no fontdb), so <text>
     // elements contribute nothing — exactly OpenSCAD's behavior.
     let options = usvg::Options {
         dpi: 72.0,
         ..Default::default()
     };
-    let tree = usvg::Tree::from_data(&bytes, &options)
+    let tree = usvg::Tree::from_data(bytes, &options)
         .map_err(|e| Error::Load(format!("SVG parse: {e}")))?;
     let height = f64::from(tree.size().height());
     let mut contours = Vec::new();

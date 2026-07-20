@@ -53,6 +53,49 @@ pub fn read_import(base_dir: &Path, raw: &str) -> Result<Imported, Error> {
     }
 }
 
+/// Parse `import()`/`surface()` BYTES → [`Imported`], dispatched by `raw`'s extension — the fs-less twin
+/// of [`read_import`] the wasm worker uses (W.3.24), fed asset bytes from the lib pack. A JSON text pack
+/// carries SVG (+ ASCII STL); binary STL/3MF would need a byte channel it lacks, `dat`/`png` stay
+/// deferred. LOUD (never silently empty) on anything it can't do.
+///
+/// # Errors
+/// [`Error::Load`] for a deferred/unknown extension or a malformed mesh/vector.
+pub fn read_import_bytes(raw: &str, bytes: &[u8]) -> Result<Imported, Error> {
+    let ext = Path::new(raw)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    match ext.as_str() {
+        "stl" => crate::stl::load_stl_bytes(bytes)
+            .map(|soup| Imported::Mesh(index_soup(&soup.positions)))
+            .map_err(|e| Error::Load(format!("import '{raw}': {e:#}"))),
+        "3mf" => {
+            let objects = crate::threemf_in::parse_3mf(bytes)
+                .map_err(|e| Error::Load(format!("import '{raw}': {e:#}")))?;
+            let mut mesh = Mesh::new();
+            for obj in objects {
+                let base = u32::try_from(mesh.verts.len()).unwrap_or(u32::MAX);
+                mesh.verts
+                    .extend(obj.verts.into_iter().map(Vec3::from_array));
+                mesh.tris.extend(
+                    obj.tris
+                        .into_iter()
+                        .map(|[a, b, c]| Tri::new(a + base, b + base, c + base)),
+                );
+            }
+            Ok(Imported::Mesh(mesh))
+        }
+        "svg" => crate::svg::svg_contours_bytes(bytes)
+            .map(Imported::Contours)
+            .map_err(|e| Error::Load(format!("import '{raw}': {e:#}"))),
+        _ => loud(
+            raw,
+            "web import supports stl, 3mf, or svg (dat/png/dxf/off are deferred)",
+        ),
+    }
+}
+
 /// Evaluate in-memory `source` to a geometry [`Geo`] tree, resolving `import`/`surface` files via
 /// [`read_import`] against `base_dir`. The native driver behind an unsaved-buffer render.
 ///

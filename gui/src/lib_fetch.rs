@@ -33,6 +33,31 @@ fn scan_refs(text: &str) -> Vec<String> {
             }
         }
     }
+    // W.3.24: import("path") / surface("path") reference ASSET files by a QUOTED path — pull those too so
+    // the closure carries the asset bytes (the worker matches by basename). Over-inclusion is harmless:
+    // a non-file string just misses the pack.
+    for kw in ["import", "surface"] {
+        let mut from = 0;
+        while let Some(rel) = text[from..].find(kw) {
+            let pos = from + rel;
+            from = pos + kw.len();
+            let before_ok = text[..pos]
+                .chars()
+                .next_back()
+                .is_none_or(|c| !c.is_alphanumeric() && c != '_');
+            if !before_ok {
+                continue;
+            }
+            let after = &text[from..];
+            // The first quoted string before the call's `)` is the file path (import("x") / file="x").
+            let close = after.find(')').unwrap_or(after.len());
+            if let Some(q1) = after[..close].find('"')
+                && let Some(q2) = after[q1 + 1..close].find('"')
+            {
+                out.push(after[q1 + 1..q1 + 1 + q2].trim().to_string());
+            }
+        }
+    }
     out
 }
 
@@ -149,6 +174,29 @@ mod tests {
         let refs = scan_refs(src);
         assert!(refs.contains(&"BOSL2/std.scad".to_string()));
         assert!(refs.contains(&"helpers.scad".to_string()));
+    }
+
+    #[test]
+    fn scan_and_closure_pull_import_assets_by_basename() {
+        // W.3.24: import("../FamilyLogo.svg") / surface("hm.dat") are found by scan_refs, and the closure
+        // carries the packed asset — matched by basename since normalize drops the `..` to "FamilyLogo.svg".
+        let refs =
+            scan_refs("linear_extrude(1) import(\"../FamilyLogo.svg\");\nsurface(\"hm.dat\");");
+        assert!(
+            refs.contains(&"../FamilyLogo.svg".to_string()),
+            "found the import path, got {refs:?}"
+        );
+        assert!(
+            refs.contains(&"hm.dat".to_string()),
+            "found the surface path"
+        );
+        let mut pack = HashMap::new();
+        pack.insert("FamilyLogo.svg".to_string(), "<svg/>".to_string());
+        let got = closure("import(\"../FamilyLogo.svg\");", &pack);
+        assert!(
+            got.iter().any(|(k, _)| k == "FamilyLogo.svg"),
+            "closure should carry the imported svg, got {got:?}"
+        );
     }
 
     #[test]

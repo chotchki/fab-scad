@@ -15,6 +15,11 @@ for f in sorted(glob.glob("libs/BOSL2/*.scad")):
     libs["BOSL2/" + os.path.basename(f)] = open(f, encoding="utf-8", errors="replace").read()
 for f in sorted(glob.glob("scad-lib/*.scad")):
     libs[os.path.basename(f)] = open(f, encoding="utf-8", errors="replace").read()
+# W.3.24: scad-lib ASSET files (SVG — FamilyLogo etc) so import()/surface() resolves them on the web,
+# matched by basename in the worker. SVG is UTF-8 text so it rides this JSON pack; binary meshes
+# (stl/3mf) would need a byte channel a text pack lacks (deferred).
+for f in sorted(glob.glob("scad-lib/*.svg")):
+    libs[os.path.basename(f)] = open(f, encoding="utf-8", errors="replace").read()
 # The web demo lib (a tiny self-contained module the sourceless web boot renders — proves the
 # fetch->closure->worker path without betting on full BOSL2 eval).
 for f in sorted(glob.glob("packaging/web/web-demo/*.scad")):

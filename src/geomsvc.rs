@@ -312,7 +312,7 @@ fn eval_source(
         Source::Bytes { main, libs } => {
             // The wasm worker has no fs — `use`/`include` resolve against the IN-MEMORY lib closure the
             // app gathered (W.3.6 Stage 2), keyed by normalized relative path. Empty = a no-include
-            // model. import()/surface() from bytes still isn't wired.
+            // model. import()/surface() ASSETS ride the same closure (W.3.24), matched by basename.
             let _ = root;
             let src = String::from_utf8_lossy(main);
             let wrap = format!("$preview = {preview};\n{src}\n");
@@ -331,9 +331,18 @@ fn eval_source(
                 None, // no JIT on the wasm worker — interp only (the web execution tier)
                 fab_lang::Config::from_env(),
                 |raw| {
-                    Err(fab_lang::Error::Load(format!(
-                        "import(\"{raw}\") is not supported on the wasm worker yet"
-                    )))
+                    // import()/surface() asset (W.3.24): the app packs referenced assets into the closure
+                    // (scad-lib's .svg etc); match by BASENAME since a model-relative "../x" can't
+                    // normalize against a rootless main. A text pack ⇒ SVG works on the web.
+                    let want = std::path::Path::new(raw).file_name().and_then(|n| n.to_str());
+                    match libs.iter().find(|(p, _)| {
+                        std::path::Path::new(p).file_name().and_then(|n| n.to_str()) == want
+                    }) {
+                        Some((_, bytes)) => crate::import::read_import_bytes(raw, bytes),
+                        None => Err(fab_lang::Error::Load(format!(
+                            "import(\"{raw}\"): asset not in the web pack (only scad-lib assets resolve on the web)"
+                        ))),
+                    }
                 },
             )
             .context("scad-rs eval of source bytes")?;
@@ -1121,6 +1130,27 @@ mod tests {
         assert!(
             msg.contains("libraries not found") && msg.contains("BOSL2/std.scad"),
             "empty error should name the missing library, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn web_svg_import_resolves_from_the_lib_pack() {
+        // W.3.24: import("x.svg") on the bytes (web) path resolves the asset from the closure by BASENAME
+        // (a model-relative "../x.svg" can't normalize against a rootless main). A 30x40 rect extruded →
+        // a real solid, so the reader parsed the SVG rather than erroring as "not supported".
+        let mut store = SolidStore::new(0);
+        let svg = br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><rect x="10" y="20" width="30" height="40" fill="black"/></svg>"#;
+        let src = Source::Bytes {
+            main: b"linear_extrude(5) import(\"../FamilyLogo.svg\");".to_vec(),
+            libs: vec![("FamilyLogo.svg".to_string(), svg.to_vec())],
+        };
+        let ok = matches!(
+            render_whole_svc(&mut store, &src, None, false),
+            Ok(Response::Rendered { .. })
+        );
+        assert!(
+            ok,
+            "an SVG import resolved from the lib pack should render a solid"
         );
     }
 

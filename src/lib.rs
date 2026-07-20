@@ -46,9 +46,10 @@ pub mod feasibility;
 pub mod geomsg;
 #[cfg(feature = "kernel")]
 pub mod geomsvc;
-// import()/surface() mesh readers (M.5): needs stl (native) + threemf_in (kernel) + fab-lang, same gate
-// as differ. The impure side of fab-lang's needs fixpoint.
-#[cfg(all(feature = "native", feature = "kernel"))]
+// import()/surface() mesh readers (M.5): the impure side of fab-lang's needs fixpoint. Kernel-gated —
+// its deps (stl/threemf_in/svg/surface) are all kernel; the fs `read_import` is native-USED, and
+// `read_import_bytes` serves the wasm worker's Source::Bytes imports (W.3.24).
+#[cfg(feature = "kernel")]
 pub mod import;
 #[cfg(feature = "kernel")]
 pub mod kernel;

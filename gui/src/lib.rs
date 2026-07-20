@@ -61,6 +61,8 @@ mod lib_fetch;
 mod panel;
 mod print;
 mod render_quality; // W.3.25.2 — the live view's Draft|Final quality (a global the render kicks read)
+#[cfg(not(target_arch = "wasm32"))]
+mod settings; // W.3.27 — the desktop Settings modal (hotchkiss.io publish key); native only
 // Web save-back target derivation (W.5) — pure URL logic (native-tested), no web-sys. Derives the
 // `PUT /media/<ref>/variants` target from the `?model=` deep-link; the wasm boot reads the param.
 #[cfg(any(target_arch = "wasm32", test))]
@@ -303,6 +305,13 @@ fn run_windowed(scene: SceneCfg, shot: Option<PathBuf>) {
         )
             .chain(),
     );
+    // W.3.27: the desktop Settings modal (hotchkiss.io publish key). Native only — the web publishes via
+    // the site session cookie, so there's no key to set there. Draws its own egui Modal in the egui pass.
+    #[cfg(not(target_arch = "wasm32"))]
+    app.init_resource::<settings::SettingsUi>().add_systems(
+        EguiPrimaryContextPass,
+        settings::settings_modal.run_if(theme::theme_ready),
+    );
     // Browser-only file-IO surface (W.3.12): the `?model=` fetch resource + its landing system, plus
     // the save-back (W.5.7/.8): derive the `PUT /media/<ref>/variants` target from the SAME `?model=`
     // deep-link (the stable ref rides its path — no separate param), which gates the Save affordance,
@@ -396,107 +405,114 @@ fn run_screenshot(scene: SceneCfg, png: PathBuf) {
 
 /// Headless, but runs the FULL windowed systems + an offscreen camera, then walks the script.
 fn run_scripted(scene: SceneCfg, actions: Vec<Action>) {
-    App::new()
-        .add_plugins(
-            DefaultPlugins
-                .set(assets_dir())
-                .set(WindowPlugin {
-                    primary_window: None,
-                    exit_condition: ExitCondition::DontExit,
-                    ..default()
-                })
-                .disable::<WinitPlugin>(),
-        )
-        .add_plugins(ScheduleRunnerPlugin::run_loop(
-            std::time::Duration::from_secs_f64(1.0 / 60.0),
-        ))
-        .add_plugins(EguiPlugin::default())
-        // U.3.9: explicit primary context (see run_windowed) — no auto-attach lottery.
-        .insert_resource(EguiGlobalSettings {
-            auto_create_primary_context: false,
-            ..default()
-        })
-        .insert_resource(ClearColor(theme::VIEWPORT))
-        .insert_resource(scene)
-        .insert_resource(GeomPool::new(1)) // the geometry service (W.3.3); setup_script + the poll loop drive it
-        .init_resource::<Job>()
-        .insert_resource(Parts(vec![Part::default()]))
-        .init_resource::<ActivePart>()
-        .init_resource::<ActiveConn>()
-        .init_resource::<EditCut>()
-        .init_resource::<XSection>()
-        .init_resource::<PrintView>()
-        .init_resource::<PrintJob>()
-        .init_resource::<PrintPieces>()
-        .init_resource::<CoPack>()
-        .init_resource::<Platform>()
-        .init_resource::<AutoJob>() // sync_pipeline reads it for the busy/loading feedback
-        .init_resource::<Pipeline>()
-        .init_resource::<SaveTarget>() // panel_ui reads it (W.5); default None = no Save affordance
-        .init_resource::<console::ConsoleUi>() // panel_ui reads it (W.3.16)
-        .init_resource::<Tab>()
-        .init_resource::<theme::ThemeReady>()
-        .init_resource::<EditorBuf>()
-        .init_resource::<PrevCam>()
-        .init_resource::<Feas>()
-        .init_resource::<FileList>()
-        .init_resource::<OpenDialog>()
-        .init_resource::<Watch>()
-        .init_resource::<SliceInBackground>()
-        .init_resource::<PendingConfig>()
-        .init_resource::<PanelSeam>()
-        .insert_resource(Status("rendering".into()))
-        .insert_resource(ScriptRunner {
-            actions,
-            idx: 0,
-            timer: 0,
-        })
-        .add_message::<ReSlice>()
-        .add_message::<AutoPlace>()
-        .add_message::<SwitchFile>()
-        .add_message::<PanelCmd>()
-        .add_systems(Startup, setup_script)
-        .add_systems(
-            Update,
+    let mut app = App::new();
+    app.add_plugins(
+        DefaultPlugins
+            .set(assets_dir())
+            .set(WindowPlugin {
+                primary_window: None,
+                exit_condition: ExitCondition::DontExit,
+                ..default()
+            })
+            .disable::<WinitPlugin>(),
+    )
+    .add_plugins(ScheduleRunnerPlugin::run_loop(
+        std::time::Duration::from_secs_f64(1.0 / 60.0),
+    ))
+    .add_plugins(EguiPlugin::default())
+    // U.3.9: explicit primary context (see run_windowed) — no auto-attach lottery.
+    .insert_resource(EguiGlobalSettings {
+        auto_create_primary_context: false,
+        ..default()
+    })
+    .insert_resource(ClearColor(theme::VIEWPORT))
+    .insert_resource(scene)
+    .insert_resource(GeomPool::new(1)) // the geometry service (W.3.3); setup_script + the poll loop drive it
+    .init_resource::<Job>()
+    .insert_resource(Parts(vec![Part::default()]))
+    .init_resource::<ActivePart>()
+    .init_resource::<ActiveConn>()
+    .init_resource::<EditCut>()
+    .init_resource::<XSection>()
+    .init_resource::<PrintView>()
+    .init_resource::<PrintJob>()
+    .init_resource::<PrintPieces>()
+    .init_resource::<CoPack>()
+    .init_resource::<Platform>()
+    .init_resource::<AutoJob>() // sync_pipeline reads it for the busy/loading feedback
+    .init_resource::<Pipeline>()
+    .init_resource::<SaveTarget>() // panel_ui reads it (W.5); default None = no Save affordance
+    .init_resource::<console::ConsoleUi>() // panel_ui reads it (W.3.16)
+    .init_resource::<Tab>()
+    .init_resource::<theme::ThemeReady>()
+    .init_resource::<EditorBuf>()
+    .init_resource::<PrevCam>()
+    .init_resource::<Feas>()
+    .init_resource::<FileList>()
+    .init_resource::<OpenDialog>()
+    .init_resource::<Watch>()
+    .init_resource::<SliceInBackground>()
+    .init_resource::<PendingConfig>()
+    .init_resource::<PanelSeam>()
+    .insert_resource(Status("rendering".into()))
+    .insert_resource(ScriptRunner {
+        actions,
+        idx: 0,
+        timer: 0,
+    })
+    .add_message::<ReSlice>()
+    .add_message::<AutoPlace>()
+    .add_message::<SwitchFile>()
+    .add_message::<PanelCmd>()
+    .add_systems(Startup, setup_script)
+    .add_systems(
+        Update,
+        (
+            request_reslice,
+            poll_job,
+            // Auto-on-open (kick) + the plan landing (poll) — the offscreen harness ran WITHOUT
+            // these, so it never auto-sliced an overflowing part (unfaithful to run_windowed).
+            (kick_auto_plan, poll_auto_plan).chain().after(poll_job),
+            apply_switch_file,
+            watch_source,
+            preview_edited_buffer,
+            sync_overlays,
+            sync_overlay_visuals,
+            sync_dim_labels,
+            sync_conn_markers,
+            edit_mode,
+            draw_profile,
+            auto_reslice,
+            revert_on_edit,
             (
-                request_reslice,
-                poll_job,
-                // Auto-on-open (kick) + the plan landing (poll) — the offscreen harness ran WITHOUT
-                // these, so it never auto-sliced an overflowing part (unfaithful to run_windowed).
-                (kick_auto_plan, poll_auto_plan).chain().after(poll_job),
-                apply_switch_file,
-                watch_source,
-                preview_edited_buffer,
-                sync_overlays,
-                sync_overlay_visuals,
-                sync_dim_labels,
-                sync_conn_markers,
-                edit_mode,
-                draw_profile,
-                auto_reslice,
-                revert_on_edit,
-                (
-                    sync_tab_modes,
-                    enforce_exclusive_modes,
-                    apply_view_visibility,
-                    manage_view_camera,
-                    enter_exit_print,
-                    // poll seeds the auto-orient, then sync_orientation lays out + flags downgrades.
-                    (poll_print_job, sync_orientation).chain(),
-                    color_conn_markers,
-                    do_auto_place,
-                    split_viewport,
-                    seat_bed,
-                    resize_bed,
-                    export_plates_action, // the `export` script verb → co-pack .3mf (T.2b.4)
-                ),
-                sync_pipeline, // U.3.7 feedback: keep the offscreen harness faithful to run_windowed
-                run_script,
+                sync_tab_modes,
+                enforce_exclusive_modes,
+                apply_view_visibility,
+                manage_view_camera,
+                enter_exit_print,
+                // poll seeds the auto-orient, then sync_orientation lays out + flags downgrades.
+                (poll_print_job, sync_orientation).chain(),
+                color_conn_markers,
+                do_auto_place,
+                split_viewport,
+                seat_bed,
+                resize_bed,
+                export_plates_action, // the `export` script verb → co-pack .3mf (T.2b.4)
             ),
-        )
-        .add_systems(
-            EguiPrimaryContextPass,
-            (theme::install_theme, panel_ui.run_if(theme::theme_ready)).chain(),
-        )
-        .run();
+            sync_pipeline, // U.3.7 feedback: keep the offscreen harness faithful to run_windowed
+            run_script,
+        ),
+    )
+    .add_systems(
+        EguiPrimaryContextPass,
+        (theme::install_theme, panel_ui.run_if(theme::theme_ready)).chain(),
+    );
+    // W.3.27: the Settings modal in the scripted harness — a headless real-frame check of the publish
+    // key screen (the `settings` verb opens it). Native only (settings/credentials are desktop-only).
+    #[cfg(not(target_arch = "wasm32"))]
+    app.init_resource::<settings::SettingsUi>().add_systems(
+        EguiPrimaryContextPass,
+        settings::settings_modal.run_if(theme::theme_ready),
+    );
+    app.run();
 }

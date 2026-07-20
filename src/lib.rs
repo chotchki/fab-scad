@@ -31,6 +31,10 @@ pub mod threemf_out;
 // BOSL2 test corpus runner (K.1 tier 2): needs fab-lang (eval) + toml + std::fs — a native dev/CI tool.
 #[cfg(feature = "native")]
 pub mod corpus;
+// The desktop publish credential (W.3.27): env-then-file resolution + a 0600 config store. Native only —
+// the web publishes via the site session cookie, no API key.
+#[cfg(feature = "native")]
+pub mod credentials;
 pub mod cross_section;
 // QEM mesh decimation (W.5) — the web save-back's low-res mesh variant. Mesh-only (no Solid), so it
 // rides `mesh-io` like `threemf_out` and runs on the wasm geom worker.

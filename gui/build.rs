@@ -32,6 +32,7 @@ const MANIFEST: &[(&str, u32)] = &[
     ("RESTART", 0xe5d5),       // refresh / reset-to-auto
     ("DOT", 0xe061), // fiber_manual_record — filled status dot (stale-tab badge + unsaved)
     ("CHECK", 0xe668), // check — affirmative tick ("flat ✓" → flat CHECK)
+    ("SETTINGS", 0xe8b8), // gear — the header Settings entry (W.3.27; publish credentials)
 ];
 
 /// Latin subset for the UI text fonts: Basic Latin + Latin-1 + the typographic marks the app renders

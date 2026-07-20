@@ -27,6 +27,7 @@ pub(crate) enum Action {
     Export,        // export the print-oriented pieces to a Bambu .3mf (co-pack all parts, T.2b.4)
     Tab(Tab),      // switch the active workflow tab: model|parts|orientation|export (U.3.8)
     EditText(String), // append a snippet to the editor buffer → debounced buffer re-render (U.3.8)
+    Settings,      // open the Settings modal (W.3.27) — headless verify of the publish-key screen
 }
 
 #[derive(Resource)]
@@ -75,6 +76,7 @@ pub(crate) fn parse_script(s: &str) -> Vec<Action> {
                 "edit" => it.next()?.parse().ok().map(Action::Edit),
                 "part" => it.next()?.parse().ok().map(Action::Part),
                 "export" => Some(Action::Export),
+                "settings" => Some(Action::Settings),
                 "tab" => match it.next()? {
                     "model" => Some(Action::Tab(Tab::Model)),
                     "customize" => Some(Action::Tab(Tab::Customize)),
@@ -382,6 +384,12 @@ pub(crate) fn run_script(
                 cmd_w.write(PanelCmd::Export); // export_plates_action co-packs all parts inline
             }
             runner.timer >= 3 // let the inline export write + status update
+        }
+        Action::Settings => {
+            if runner.timer == 1 {
+                cmd_w.write(PanelCmd::OpenSettings); // settings_modal opens on the next egui pass
+            }
+            runner.timer >= 3 // let the modal draw before the next shot
         }
         Action::Tab(t) => {
             if runner.timer == 1 {

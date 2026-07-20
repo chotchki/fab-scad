@@ -158,6 +158,28 @@ pub(crate) fn panel_ui(
                         ui.colored_label(theme::GOLD_DIM, icons::DOT);
                     }
                 }
+                // W.3.27: the Settings gear, pushed to the far RIGHT of the header. Desktop only — the
+                // web has no publish key to set (its save-back rides the site session). icons::SETTINGS
+                // is a Material Symbols glyph (a raw ⚙ would tofu — see gui/CLAUDE.md).
+                // Right-align the gear the same way `console::controls` right-aligns the Console button.
+                // (egui's two-pass sizing logs a benign "changed id between passes" for right-aligned
+                // widgets — a pre-existing quirk the Console button shares; the interaction is fine.)
+                #[cfg(not(target_arch = "wasm32"))]
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let gear = egui::Button::new(
+                        egui::RichText::new(icons::SETTINGS)
+                            .size(16.0)
+                            .color(theme::DIV_GREY),
+                    )
+                    .fill(theme::NAVY);
+                    if ui
+                        .add(gear)
+                        .on_hover_text("Settings — hotchkiss.io publish key")
+                        .clicked()
+                    {
+                        writers.cmd.write(PanelCmd::OpenSettings);
+                    }
+                });
             });
         });
     // BOTTOM BAR (U.3): the status line — a gold spinner + navy activity label while a job runs (the

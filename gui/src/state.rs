@@ -527,6 +527,10 @@ pub(crate) enum PanelCmd {
     /// Save the edited model back to hotchkiss.io (W.5.8) — web only, and only when a save target was
     /// derived from the deep-link (the button that writes this is gated on [`SaveTarget`]).
     SaveToSite,
+    /// Open the Settings modal (W.3.27) — the header gear. Desktop only (the publish key it edits is
+    /// desktop-only), so the gear that writes it is cfg'd off wasm.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    OpenSettings,
 }
 
 /// The round-trip SAVE target for the hotchkiss.io media item this session edits (W.5.7): the

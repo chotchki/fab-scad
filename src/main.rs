@@ -13,7 +13,7 @@ use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand, ValueEnum};
 
 use fab_scad::openscad::{self, Openscad};
-use fab_scad::{manifest, printers, project, slicing};
+use fab_scad::{credentials, manifest, printers, project, slicing};
 
 #[derive(Parser)]
 #[command(
@@ -345,12 +345,13 @@ fn publish_cmd(target: &Path, url: Option<String>, api_key: Option<String>) -> R
         .unwrap_or_else(|| m.project.name.clone());
     let description = m.publish.map(|p| p.description).unwrap_or_default();
 
-    let key = api_key
-        .or_else(|| std::env::var("HIO_API_KEY").ok())
-        .context("no API key — pass --api-key or set HIO_API_KEY")?;
-    let base = url
-        .or_else(|| std::env::var("HIO_URL").ok())
-        .unwrap_or_else(|| "https://hotchkiss.io".to_string());
+    // --api-key/--url flags win; else resolve env-then-saved-file (W.3.27) — the same store the GUI
+    // Settings screen writes, so a key saved there also unblocks the CLI.
+    let resolved = credentials::resolve();
+    let key = api_key.or(resolved.api_key).context(
+        "no API key — pass --api-key, set HIO_API_KEY, or save one in fab-gui Settings (credentials.toml)",
+    )?;
+    let base = url.unwrap_or(resolved.url);
 
     let root = find_root();
     let oscad = Openscad::discover(root.as_deref())?;

@@ -138,6 +138,8 @@ reqwest = { version = "0.12", default-features = false, optional = true, feature
 tracing-subscriber = { version = "0.3", default-features = false, features = ["registry", "std"] }
 # The BU.6 perf harness's run/baseline artifacts (perf/) — test-only writer.
 serde_json = "1"
+# credentials.rs tests sandbox $HOME to a throwaway dir (env vars are process-global).
+tempfile = "3"
 
 # The kernel per target (18.4): native gets the default `parallel` (TBB); wasm32 swaps to the
 # provisional `unstable-wasm-uu` backend (C++ via wasm-cxx-shim, single-threaded, no exceptions).

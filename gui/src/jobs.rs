@@ -973,6 +973,7 @@ pub(crate) fn publish_action(
     scene: Res<SceneCfg>,
     mut job: ResMut<PublishJob>,
     mut status: ResMut<Status>,
+    mut settings: ResMut<crate::settings::SettingsUi>,
 ) {
     if !ev.read().any(|c| *c == PanelCmd::Publish) {
         return;
@@ -985,11 +986,15 @@ pub(crate) fn publish_action(
         status.0 = "no .scad to publish".into();
         return;
     };
-    let Ok(key) = std::env::var("HIO_API_KEY") else {
-        status.0 = "set $HIO_API_KEY to publish".into();
+    // W.3.27: the key resolves from $HIO_API_KEY OR the saved credentials.toml now. No key ⇒ pop Settings
+    // open (the LOUD cue) and say where to fix it — never the silent status-line no-op again.
+    let resolved = fab_scad::credentials::resolve();
+    let Some(key) = resolved.api_key else {
+        settings.request_open();
+        status.0 = "no hotchkiss.io key — add one in Settings (just opened)".into();
         return;
     };
-    let base = std::env::var("HIO_URL").unwrap_or_else(|_| "https://hotchkiss.io".to_string());
+    let base = resolved.url;
     let (root, out) = (scene.root.clone(), scene.tmp.join("publish"));
     let task = AsyncComputeTaskPool::get().spawn(async move {
         let oscad = fab_scad::openscad::Openscad::discover(root.as_deref())

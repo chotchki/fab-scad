@@ -113,7 +113,7 @@ pub fn handle(request: &[u8]) -> Vec<u8> {
 #[cfg(feature = "bench")]
 #[wasm_bindgen]
 pub fn render_scad_stl(main: &str, libs_json: &str) -> Result<Vec<u8>, JsError> {
-    use fab_scad::geomsg::{Request, Response, Source};
+    use fab_scad::geomsg::{Quality, Request, Response, Source};
     let map: std::collections::BTreeMap<String, String> =
         serde_json::from_str(libs_json).map_err(|e| JsError::new(&format!("libs parse: {e}")))?;
     let libs = map.into_iter().map(|(k, v)| (k, v.into_bytes())).collect();
@@ -124,6 +124,7 @@ pub fn render_scad_stl(main: &str, libs_json: &str) -> Result<Vec<u8>, JsError> 
         },
         root: None,
         preview: false,
+        quality: Quality::Final,
     };
     // A FRESH store per call = COLD render (empty content-addressed CSG cache). Reusing the persistent
     // STORE would serve cache HITS on a repeated render — measuring fab's interactive re-render path, not

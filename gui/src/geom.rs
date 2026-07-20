@@ -106,7 +106,7 @@ impl GeomPool {
 mod tests {
     use super::*;
     use bevy::tasks::block_on;
-    use fab_scad::geomsg::{Request, Response, Source};
+    use fab_scad::geomsg::{Quality, Request, Response, Source};
 
     #[test]
     fn pool_renders_reslices_off_the_held_handle_then_frees() {
@@ -119,6 +119,7 @@ mod tests {
         let Response::PartsRendered { parts, .. } = block_on(pool.call(Request::RenderParts {
             source: Source::Path(src.to_string_lossy().into_owned()),
             root: None,
+            quality: Quality::Draft,
         }))
         .unwrap() else {
             panic!("render over the transport failed")

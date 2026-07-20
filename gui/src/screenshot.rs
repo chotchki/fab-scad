@@ -167,6 +167,7 @@ pub(crate) fn setup_offscreen_model(
         source: Source::Path(src.to_string_lossy().into_owned()),
         root,
         preview: true,
+        quality: Quality::Draft,
     })) {
         Ok(Response::Rendered {
             id, stl, min, max, ..

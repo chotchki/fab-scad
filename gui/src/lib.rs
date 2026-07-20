@@ -38,7 +38,7 @@ pub(crate) use fab_scad::stl;
 // The geometry-service WIRE types (W.3): ungated (no kernel), so they name the seam on BOTH targets.
 // `SolidId` is the base-solid handle a `Part` holds; the rest are the request/response envelope the
 // task bodies drive `GeomPool` with. The Solid itself lives in the service, never here.
-pub(crate) use fab_scad::geomsg::{Request, Response, SolidId, Source, WireConn};
+pub(crate) use fab_scad::geomsg::{Quality, Request, Response, SolidId, Source, WireConn};
 pub(crate) use std::collections::{HashMap, HashSet};
 pub(crate) use std::path::{Path, PathBuf};
 // The shared geometry types the auto-slice/planner APIs take (J.6 unified on `fab_lang`'s Vec3). Aliased

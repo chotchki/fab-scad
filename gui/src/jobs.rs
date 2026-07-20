@@ -512,6 +512,7 @@ pub(crate) fn kick_render_bytes(
             pool.call(Request::RenderParts {
                 source: Source::Bytes { main, libs },
                 root: None,
+                quality: Quality::Draft,
             })
             .await,
             fresh,
@@ -580,7 +581,12 @@ fn spawn_render(
     let pool = pool.clone();
     let task = AsyncComputeTaskPool::get().spawn(async move {
         render_result(
-            pool.call(Request::RenderParts { source, root }).await,
+            pool.call(Request::RenderParts {
+                source,
+                root,
+                quality: Quality::Draft,
+            })
+            .await,
             fresh,
         )
     });
@@ -1124,6 +1130,7 @@ pub(crate) fn save_action(
                 },
                 root: None,
                 preview: false,
+                quality: Quality::Final,
             })
             .await
         {

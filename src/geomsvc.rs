@@ -107,10 +107,13 @@ pub fn handle_with_store(store: &mut SolidStore, req: Request) -> Response {
                 source,
                 root,
                 preview,
-            } => render_whole_svc(store, &source, root.as_deref(), preview),
-            Request::RenderParts { source, root } => {
-                render_parts_svc(store, &source, root.as_deref())
-            }
+                quality,
+            } => render_whole_svc(store, &source, root.as_deref(), preview, quality),
+            Request::RenderParts {
+                source,
+                root,
+                quality,
+            } => render_parts_svc(store, &source, root.as_deref(), quality),
             Request::Reslice {
                 base,
                 cuts,
@@ -298,6 +301,16 @@ fn rotated_union(objects: &[GeomObject]) -> Result<Solid> {
 /// Eval the source with `$preview` set to `preview` (so `$fn=$preview?lo:hi` takes the fast facet
 /// path when `true`, the full-res path when `false` — the W.5.2 save-mesh render). `Source::Path` uses
 /// the native fs loader (`crate::import`, which is JIT-coupled → native); `Source::Bytes` evals
+/// The header fab injects before every model (W.3.25): `$preview` FIRST (fab-lang honors the leading
+/// special-var config there), then the fab-OWNED tessellation quality (`$fa`/`$fs`, adaptive with
+/// `$fn = 0`). Both precede the model, so a model's own `$fn`/`$fa` — or an un-migrated
+/// `$fn = $preview ? …` — still overrides (graceful migration; local overrides win).
+#[cfg(feature = "kernel")]
+fn wrap_header(preview: bool, quality: Quality) -> String {
+    let (fa, fs) = quality.fa_fs();
+    format!("$preview = {preview};\n$fn = 0; $fa = {fa}; $fs = {fs};\n")
+}
+
 /// IN-MEMORY via `fab_lang` directly — no fs, no JIT — the fs-less wasm-worker render path (W.3.6).
 /// Returns the tree + the source PATH when there is one (bytes have none → `None`, so provenance names
 /// are skipped downstream).
@@ -306,16 +319,17 @@ fn eval_source(
     source: &Source,
     root: Option<&str>,
     preview: bool,
+    quality: Quality,
 ) -> Result<(fab_lang::Geo, Option<std::path::PathBuf>, Vec<String>)> {
     match source {
-        Source::Path(path) => eval_path(path, root, preview),
+        Source::Path(path) => eval_path(path, root, preview, quality),
         Source::Bytes { main, libs } => {
             // The wasm worker has no fs — `use`/`include` resolve against the IN-MEMORY lib closure the
             // app gathered (W.3.6 Stage 2), keyed by normalized relative path. Empty = a no-include
             // model. import()/surface() ASSETS ride the same closure (W.3.24), matched by basename.
             let _ = root;
             let src = String::from_utf8_lossy(main);
-            let wrap = format!("$preview = {preview};\n{src}\n");
+            let wrap = format!("{}{src}\n", wrap_header(preview, quality));
             let sources: std::collections::BTreeMap<std::path::PathBuf, String> = libs
                 .iter()
                 .filter_map(|(p, b)| {
@@ -357,6 +371,7 @@ fn eval_path(
     path: &str,
     root: Option<&str>,
     preview: bool,
+    quality: Quality,
 ) -> Result<(fab_lang::Geo, Option<std::path::PathBuf>, Vec<String>)> {
     let src = std::path::PathBuf::from(path);
     let abs = src
@@ -366,7 +381,11 @@ fn eval_path(
         .parent()
         .unwrap_or_else(|| std::path::Path::new("."))
         .to_path_buf();
-    let wrap = format!("$preview = {preview};\ninclude <{}>;\n", abs.display());
+    let wrap = format!(
+        "{}include <{}>;\n",
+        wrap_header(preview, quality),
+        abs.display()
+    );
     let libs: Vec<std::path::PathBuf> = root
         .map(|r| {
             let r = std::path::Path::new(r);
@@ -393,6 +412,7 @@ fn eval_path(
     _path: &str,
     _root: Option<&str>,
     _preview: bool,
+    _quality: Quality,
 ) -> Result<(fab_lang::Geo, Option<std::path::PathBuf>, Vec<String>)> {
     anyhow::bail!(
         "Path source needs the native fs loader; the wasm worker renders from Source::Bytes"
@@ -425,9 +445,10 @@ fn render_whole_svc(
     source: &Source,
     root: Option<&str>,
     preview: bool,
+    quality: Quality,
 ) -> Result<Response> {
     use crate::backend::{ManifoldBackend, build_geo_cached};
-    let (tree, _src, messages) = eval_source(source, root, preview)?;
+    let (tree, _src, messages) = eval_source(source, root, preview, quality)?;
     let solid = build_geo_cached(&tree, &ManifoldBackend, &mut store.geo_cache)
         .filter(|s| !s.is_empty())
         .with_context(|| {
@@ -457,10 +478,11 @@ fn render_parts_svc(
     store: &mut SolidStore,
     source: &Source,
     root: Option<&str>,
+    quality: Quality,
 ) -> Result<Response> {
     use crate::backend::{ManifoldBackend, build_geo_parts_cached};
-    // Parts are the interactive view → always preview quality.
-    let (tree, src, messages) = eval_source(source, root, true)?;
+    // Parts are the interactive view → always $preview=true; the quality (Draft/Final) rides the toggle.
+    let (tree, src, messages) = eval_source(source, root, true, quality)?;
     let mut staged: Vec<StagedPart> = Vec::new();
     // Materialize the parts BEFORE the loop: the `&mut store.geo_cache` borrow must end before the body
     // touches `store.mint` (a for-loop's iterator temporaries otherwise live to the end of the loop).
@@ -833,6 +855,7 @@ mod tests {
             Request::RenderParts {
                 source: Source::Path(src.to_string_lossy().into_owned()),
                 root: None,
+                quality: Quality::Draft,
             },
         ) else {
             panic!("render failed")
@@ -1010,6 +1033,7 @@ mod tests {
                 },
                 root: None,
                 preview: true,
+                quality: Quality::Draft,
             },
         )
         else {
@@ -1060,6 +1084,7 @@ mod tests {
                 },
                 root: None,
                 preview: true,
+                quality: Quality::Draft,
             },
         ) else {
             panic!("render with an include failed")
@@ -1089,6 +1114,7 @@ mod tests {
             },
             root: None,
             preview: false,
+            quality: Quality::Final,
         }))
         .unwrap();
         let Response::Rendered { id, .. } = handle_with_store(&mut store, req) else {
@@ -1123,7 +1149,7 @@ mod tests {
             main: b"include <BOSL2/std.scad>\ncyl(d=10, h=5);".to_vec(),
             libs: vec![],
         };
-        let msg = match render_whole_svc(&mut store, &src, None, false) {
+        let msg = match render_whole_svc(&mut store, &src, None, false, Quality::Draft) {
             Err(e) => format!("{e:#}"),
             Ok(_) => panic!("expected an empty-render error, got geometry"),
         };
@@ -1145,12 +1171,61 @@ mod tests {
             libs: vec![("FamilyLogo.svg".to_string(), svg.to_vec())],
         };
         let ok = matches!(
-            render_whole_svc(&mut store, &src, None, false),
+            render_whole_svc(&mut store, &src, None, false, Quality::Final),
             Ok(Response::Rendered { .. })
         );
         assert!(
             ok,
             "an SVG import resolved from the lib pack should render a solid"
+        );
+    }
+
+    #[test]
+    fn fab_owned_quality_drives_facet_count() {
+        // W.3.25: with NO model $fn, fab's injected $fa/$fs sets tessellation — Final (fine) yields MORE
+        // triangles than Draft (coarse) on a bare sphere. fab OWNS the quality.
+        let src = Source::Bytes {
+            main: b"sphere(r=10);".to_vec(),
+            libs: vec![],
+        };
+        let tris = |q: Quality| -> u32 {
+            let mut store = SolidStore::new(0);
+            match render_whole_svc(&mut store, &src, None, true, q) {
+                Ok(Response::Rendered { stl, .. }) => {
+                    u32::from_le_bytes(stl[80..84].try_into().unwrap())
+                }
+                _ => panic!("render failed"),
+            }
+        };
+        assert!(
+            tris(Quality::Final) > tris(Quality::Draft),
+            "Final ({}) should out-tessellate Draft ({})",
+            tris(Quality::Final),
+            tris(Quality::Draft)
+        );
+    }
+
+    #[test]
+    fn a_model_fn_overrides_fab_quality() {
+        // W.3.25 graceful migration: a model that pins $fn wins over fab's injected default, so Draft and
+        // Final tessellate IDENTICALLY — an un-migrated `$fn = …` model is unaffected.
+        let src = Source::Bytes {
+            main: b"$fn = 20;\nsphere(r=10);".to_vec(),
+            libs: vec![],
+        };
+        let tris = |q: Quality| -> u32 {
+            let mut store = SolidStore::new(0);
+            match render_whole_svc(&mut store, &src, None, true, q) {
+                Ok(Response::Rendered { stl, .. }) => {
+                    u32::from_le_bytes(stl[80..84].try_into().unwrap())
+                }
+                _ => panic!("render failed"),
+            }
+        };
+        assert_eq!(
+            tris(Quality::Draft),
+            tris(Quality::Final),
+            "a model's own $fn overrides fab's quality"
         );
     }
 
@@ -1222,6 +1297,7 @@ mod tests {
                     },
                     root: None,
                     preview,
+                    quality: Quality::Draft,
                 },
             ) else {
                 panic!("render failed (preview={preview})")

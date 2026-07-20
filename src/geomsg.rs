@@ -110,6 +110,27 @@ pub enum Source {
     },
 }
 
+/// Tessellation quality fab OWNS (W.3.25): injected as `$fa`/`$fs` (adaptive — `$fn` stays 0) at the top
+/// of the render wrap, so models drop the `$fn = $preview ? draft : final` boilerplate. Draft = coarse
+/// (interactive), Final = fine (export + the "Final" preview toggle). Injected BEFORE the model, so a
+/// model's own `$fn`/`$fa` still overrides — graceful migration; local overrides win.
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Quality {
+    Draft,
+    Final,
+}
+
+impl Quality {
+    /// The `($fa, $fs)` fab injects for this quality. Draft = OpenSCAD's own defaults (coarse, fast);
+    /// Final = fine enough that facets don't show on a print.
+    pub fn fa_fs(self) -> (f64, f64) {
+        match self {
+            Quality::Draft => (12.0, 2.0),
+            Quality::Final => (6.0, 0.5),
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize)]
 pub enum Request {
     /// Parse an upload (.stl or .3mf by `name`), weld, rotate-to-fit, auto-plan.
@@ -148,11 +169,13 @@ pub enum Request {
         source: Source,
         root: Option<String>,
         preview: bool,
+        quality: Quality,
     },
     /// Render the source into TOP-LEVEL parts (T.2b) → mints N handles.
     RenderParts {
         source: Source,
         root: Option<String>,
+        quality: Quality,
     },
     /// Slice one part off its held base → the (spread, unioned) preview STL. Reads `base`.
     Reslice {

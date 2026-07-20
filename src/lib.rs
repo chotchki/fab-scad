@@ -73,8 +73,11 @@ pub mod pack;
 pub mod printers;
 #[cfg(feature = "native")]
 pub mod project;
+// The publish CONTRACT (W.3.29.1) — pure endpoint/field/slug/markdown knowledge, UNGATED so the native
+// reqwest client AND the wasm fetch client (fab-gui) share it and can't drift.
 #[cfg(feature = "native")]
 pub mod publish;
+pub mod publish_contract;
 #[cfg(feature = "kernel")]
 pub mod slicing;
 #[cfg(feature = "native")]

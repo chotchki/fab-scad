@@ -19,33 +19,12 @@ use std::time::Duration;
 use anyhow::{Context, Result, anyhow, bail};
 use serde::Deserialize;
 
+// The transport-independent contract (W.3.29.1): endpoints, field names, slug, markdown — shared with the
+// wasm fetch client so they can't drift.
+use crate::publish_contract as contract;
+
 /// Max attempts for a transient (connection / timeout / 5xx) failure — chotchki's "overload retry".
 const RETRIES: u32 = 5;
-
-/// The content-tree SECTION fab publishes under (W.3.28.7): the `3d` gallery, not `projects`. Pages nest
-/// as `/pages/<SECTION>/<slug>` (create `POST /pages/<SECTION>`); the browsable detail URL is that same
-/// `/pages/3d/<slug>` (there's no bare `/3d/<slug>` route — `/3d` is the gallery index that LISTS it).
-const SECTION: &str = "3d";
-
-/// URL-safe slug from a title — a byte-for-byte mirror of the server's `web::util::slug::slugify`
-/// (lowercase, non-alphanumeric runs collapse to a single `-`, edges trimmed), so client and server
-/// agree on a page's address for idempotent create-or-update.
-pub fn slugify(input: &str) -> String {
-    let mut out = String::new();
-    let mut pending_dash = false;
-    for c in input.trim().chars().flat_map(|c| c.to_lowercase()) {
-        if c.is_ascii_alphanumeric() {
-            if pending_dash {
-                out.push('-');
-                pending_dash = false;
-            }
-            out.push(c);
-        } else if !out.is_empty() {
-            pending_dash = true;
-        }
-    }
-    out
-}
 
 /// One media file to publish + the human title it gets.
 pub struct Media<'a> {
@@ -147,13 +126,13 @@ impl Client {
         // `POST /media` (hotchkiss-io media_router): any multipart part WITH a filename is ingested; all
         // files in one request become LOD variants of ONE item. Admin-gated — the `hio_` Bearer key
         // satisfies it. Returns 201 + a manifest whose ref field is `ref` (see [`UploadResp`]).
-        let url = format!("{}/media", self.base);
+        let url = contract::media_url(&self.base);
         let resp = self.send_retry("media upload", || {
-            let mut form =
-                reqwest::blocking::multipart::Form::new().text("title", title.to_string());
+            let mut form = reqwest::blocking::multipart::Form::new()
+                .text(contract::MEDIA_TITLE_FIELD, title.to_string());
             for f in files {
                 form = form
-                    .file("file", f)
+                    .file(contract::MEDIA_FILE_FIELD, f)
                     .with_context(|| format!("reading {}", f.display()))?;
             }
             Ok(self.http.post(&url).bearer_auth(&self.key).multipart(form))
@@ -174,7 +153,7 @@ impl Client {
 
     /// Does a project page already exist at this slug? (GET is public; 2xx = yes.)
     fn page_exists(&self, slug: &str) -> Result<bool> {
-        let url = format!("{}/pages/{}/{}", self.base, SECTION, slug);
+        let url = contract::page_url(&self.base, slug);
         let resp = self.send_retry("page check", || {
             Ok(self.http.get(&url).bearer_auth(&self.key))
         })?;
@@ -184,13 +163,13 @@ impl Client {
     /// Create an (empty) page from its title; the server slugifies + nests it under the `3d` section.
     /// With `Accept: application/json` the server returns the created-page envelope (not a 303).
     fn create_page(&self, title: &str) -> Result<()> {
-        let url = format!("{}/pages/{}", self.base, SECTION);
+        let url = contract::create_page_url(&self.base);
         let resp = self.send_retry("page create", || {
             Ok(self
                 .http
                 .post(&url)
                 .bearer_auth(&self.key)
-                .form(&[("page_title", title)]))
+                .form(&[(contract::PAGE_TITLE_FIELD, title)]))
         })?;
         let s = resp.status();
         if !(s.is_success() || s.is_redirection()) {
@@ -207,15 +186,15 @@ impl Client {
         markdown: &str,
         cover_ref: Option<&str>,
     ) -> Result<()> {
-        let url = format!("{}/pages/{}/{}", self.base, SECTION, slug);
+        let url = contract::page_url(&self.base, slug);
         let resp = self.send_retry("page update", || {
             Ok(self.http.put(&url).bearer_auth(&self.key).form(&[
-                ("page_title", title),
+                (contract::PAGE_TITLE_FIELD, title),
                 ("page_category", ""),
-                ("page_markdown", markdown),
+                (contract::PAGE_MARKDOWN_FIELD, markdown),
                 // empty = leave the cover unset (or keep whatever the site already has).
-                ("page_cover_media_ref", cover_ref.unwrap_or("")),
-                ("page_order", "0"),
+                (contract::PAGE_COVER_FIELD, cover_ref.unwrap_or("")),
+                (contract::PAGE_ORDER_FIELD, "0"),
                 ("page_creation_date", ""),
             ]))
         })?;
@@ -230,7 +209,7 @@ impl Client {
 /// create the page if it's new, then write its body. Returns the published page URL. Idempotent —
 /// re-publishing the same title updates the existing page.
 pub fn publish(client: &Client, p: &Project) -> Result<String> {
-    let slug = slugify(p.title);
+    let slug = contract::slugify(p.title);
     if slug.is_empty() {
         bail!("project title {:?} has no slug-able characters", p.title);
     }
@@ -255,12 +234,12 @@ pub fn publish(client: &Client, p: &Project) -> Result<String> {
         downloads.push((d.title.clone(), client.upload_media(d.path, &d.title)?));
     }
 
-    let markdown = compose_markdown(p.description_md, &model, &downloads);
+    let markdown = contract::compose_markdown(p.description_md, &model, &downloads);
     if !client.page_exists(&slug)? {
         client.create_page(p.title)?;
     }
     client.update_page(&slug, p.title, &markdown, cover.as_deref())?;
-    Ok(format!("{}/pages/{}/{}", client.base, SECTION, slug))
+    Ok(contract::public_url(&client.base, &slug))
 }
 
 /// Publish PRE-RENDERED artifacts — the kernel-first entry (W.3.28): the caller renders the cover +
@@ -289,67 +268,9 @@ pub fn upload_model(
     publish(&client, &project)
 }
 
-/// Compose the page body: the description, the embedded interactive preview mesh, then a downloads
-/// list. Media is referenced by `/media/<ref>` — the server swaps each embed at render time.
-fn compose_markdown(description: &str, viewer_ref: &str, downloads: &[(String, String)]) -> String {
-    let mut md = String::new();
-    if !description.trim().is_empty() {
-        md.push_str(description.trim());
-        md.push_str("\n\n");
-    }
-    // Embed by `/media/<ref>` — the ref-based form the server rewrites to a per-viewer HTMX embed. NOT
-    // `/media/file/<…>` (that path takes a re-mintable url_key, never a ref) — the dogfood-surfaced bug.
-    md.push_str(&format!("![Interactive preview](/media/{viewer_ref})\n\n"));
-    if !downloads.is_empty() {
-        md.push_str("## Downloads\n\n");
-        for (title, r) in downloads {
-            md.push_str(&format!("- [{title}](/media/{r})\n"));
-        }
-    }
-    md
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn slugify_mirrors_the_server() {
-        // The exact cases from hotchkiss-io's slug.rs test — the mirror must not drift.
-        assert_eq!(
-            slugify("How I Make AI Write Software I Trust"),
-            "how-i-make-ai-write-software-i-trust"
-        );
-        assert_eq!(slugify("  Hello,   World!!!  "), "hello-world");
-        assert_eq!(slugify("already-a-slug"), "already-a-slug");
-        assert_eq!(slugify("--Edge--"), "edge");
-        assert_eq!(slugify(""), "");
-        assert_eq!(slugify("!!!"), "");
-        assert_eq!(slugify("Underdesk Mount v2"), "underdesk-mount-v2");
-    }
-
-    #[test]
-    fn markdown_embeds_preview_and_lists_downloads() {
-        let md = compose_markdown(
-            "A desk mount.",
-            "cover123",
-            &[
-                ("Full STL".into(), "full456".into()),
-                ("Plates 3mf".into(), "plates789".into()),
-            ],
-        );
-        assert!(md.starts_with("A desk mount.\n\n"));
-        assert!(md.contains("![Interactive preview](/media/cover123)"));
-        assert!(md.contains("## Downloads"));
-        assert!(md.contains("- [Full STL](/media/full456)"));
-        assert!(md.contains("- [Plates 3mf](/media/plates789)"));
-    }
-
-    #[test]
-    fn markdown_without_downloads_or_description() {
-        let md = compose_markdown("", "v1", &[]);
-        assert_eq!(md, "![Interactive preview](/media/v1)\n\n");
-    }
 
     #[test]
     fn upload_response_reads_the_ref_field() {

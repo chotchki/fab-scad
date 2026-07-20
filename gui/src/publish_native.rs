@@ -18,13 +18,18 @@ use crate::*;
 /// The private render layer the cover scene lives on — the main cameras render `[0, 1]` (model + gizmos),
 /// so layer 2 is ours alone: the cover camera sees only the mesh + lights we spawn here.
 const COVER_LAYER: usize = 2;
-const COVER_W: u32 = 1200;
-const COVER_H: u32 = 900;
+// W.3.28.8: a WIDE letterbox (~3:1), not 4:3 — the site's page banner is a fixed-height, full-width,
+// center-cropped band, so a tall cover loses its top+bottom. 3:1 survives both the banner and the ~3:1
+// index card; ≥1536 wide keeps the largest resize-ladder variant crisp at full desktop width.
+const COVER_W: u32 = 1600;
+const COVER_H: u32 = 540;
 
-/// Kernel-rendered artifacts headed for upload: the display STL (drives the cover mesh) + the two mesh
-/// variant files already written to the scratch dir.
+/// Kernel-rendered artifacts headed for upload: the display STL (drives the cover mesh) + its bounds
+/// (to frame the cover) + the two mesh variant files already written to the scratch dir.
 pub(crate) struct Arts {
     stl: Vec<u8>,
+    min: [f64; 3],
+    max: [f64; 3],
     low: std::path::PathBuf,
     high: std::path::PathBuf,
 }
@@ -140,7 +145,7 @@ pub(crate) fn publish_kick(
     let task = AsyncComputeTaskPool::get().spawn(async move {
         std::fs::create_dir_all(&out2).map_err(|e| format!("scratch dir: {e}"))?;
         // 1. full-res whole render → base handle + the display STL (the cover mesh source).
-        let (base, stl) = match pool
+        let (base, stl, min, max) = match pool
             .call(Request::RenderWhole {
                 source: Source::Path(src_path),
                 root,
@@ -149,7 +154,9 @@ pub(crate) fn publish_kick(
             })
             .await
         {
-            Ok(Response::Rendered { id, stl, .. }) => (id, stl),
+            Ok(Response::Rendered {
+                id, stl, min, max, ..
+            }) => (id, stl, min, max),
             Ok(Response::Failed { error }) => return Err(format!("render failed: {error}")),
             Ok(_) => return Err("render: unexpected service response".into()),
             Err(e) => return Err(format!("render transport: {e}")),
@@ -172,7 +179,13 @@ pub(crate) fn publish_kick(
         let high = out2.join(format!("{stem2}.{ext}"));
         std::fs::write(&low, low_b).map_err(|e| format!("write preview mesh: {e}"))?;
         std::fs::write(&high, high_b).map_err(|e| format!("write full mesh: {e}"))?;
-        Ok(Arts { stl, low, high })
+        Ok(Arts {
+            stl,
+            min,
+            max,
+            low,
+            high,
+        })
     });
 
     status.0 = format!("publishing {stem}: rendering…");
@@ -212,13 +225,17 @@ pub(crate) fn publish_flow(
         PubFlow::Rendering { mut task, meta } => match block_on(future::poll_once(&mut task)) {
             None => *flow = PubFlow::Rendering { task, meta },
             Some(Ok(arts)) => {
+                // Frame the cover at the live ANGLE (yaw/pitch) but a bounds-derived distance + center, so
+                // it's not hostage to the user's zoom and the model lands inside the wide letterbox's safe
+                // center square (W.3.28.8).
+                let orbit = cover_orbit(meta.orbit.0, meta.orbit.1, arts.min, arts.max);
                 let (target, ents) = spawn_cover_scene(
                     &mut commands,
                     &mut images,
                     &mut meshes,
                     &mut materials,
                     &arts.stl,
-                    meta.orbit,
+                    orbit,
                 );
                 status.0 = "publishing: cover…".into();
                 *flow = PubFlow::Cover {
@@ -313,8 +330,26 @@ fn fail(flow: &mut PubFlow, status: &mut Status, stage: &str, err: &str) {
     *flow = PubFlow::Idle;
 }
 
+/// Frame the cover: keep the user's ANGLE (`yaw`/`pitch`) but derive the target + distance from the model
+/// BOUNDS, so the cover is independent of the live zoom and the model sits inside the wide letterbox's
+/// safe center square. Fits the bounding sphere within the camera's vertical FOV with margin (the banner
+/// shows only a short center stripe; the mobile banner crops the SIDES to ~square — the center square
+/// survives both).
+fn cover_orbit(yaw: f32, pitch: f32, min: [f64; 3], max: [f64; 3]) -> (f32, f32, f32, Vec3) {
+    let mn = Vec3::new(min[0] as f32, min[1] as f32, min[2] as f32);
+    let mx = Vec3::new(max[0] as f32, max[1] as f32, max[2] as f32);
+    let center = (mn + mx) * 0.5;
+    let bound_radius = ((mx - mn).length() * 0.5).max(1.0); // bounding sphere ≈ AABB diagonal / 2
+    // Bevy's PerspectiveProjection default vertical FOV is π/4. distance to fit the sphere's vertical
+    // extent within the view, times a margin so it lands in the center square (≈ half the frame height).
+    const FOV_V: f32 = std::f32::consts::FRAC_PI_4;
+    const MARGIN: f32 = 1.9;
+    let dist = bound_radius * MARGIN / (FOV_V * 0.5).tan();
+    (yaw, pitch, dist, center)
+}
+
 /// Build the OFFSCREEN cover scene on [`COVER_LAYER`]: an image render target, a fresh mesh from the
-/// rendered STL, two lights (mirroring `spawn_environment`), and a camera at the live orbit. Everything's
+/// rendered STL, two lights (mirroring `spawn_environment`), and a camera at the framed orbit. Everything's
 /// on the private layer, so the main cameras don't draw it and it doesn't draw the live scene. Returns the
 /// target to screenshot + the entities to despawn.
 fn spawn_cover_scene(

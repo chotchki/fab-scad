@@ -1,5 +1,5 @@
 //! Publish a project to hotchkiss.io (Phase 15): upload the cover + meshes as media, then
-//! create-or-update a page under `/projects`, authenticated with an `hio_` API key.
+//! create-or-update a page under the `3d` gallery (`/pages/3d/<slug>`), authenticated with an `hio_` key.
 //!
 //! The site's contract (mapped from the hotchkiss-io source, re-verified W.3.28.6):
 //!   - Auth: `Authorization: Bearer hio_…` — the key delegates its user's role (admin), so it can
@@ -8,8 +8,8 @@
 //!     request become LOD variants of ONE item; optional `title` text field) → 201 + a manifest whose
 //!     minted ref is the `ref` field. Embed/reference media in markdown + `page_cover_media_ref` by the
 //!     bare ref or `/media/<ref>` (NOT `/media/file/<…>`, which takes a re-mintable url_key).
-//!   - Page: `POST /pages/projects` (form `page_title`, server slugifies) then
-//!     `PUT /pages/projects/{slug}` (form: `page_markdown`, `page_cover_media_ref`, `page_order`, …).
+//!   - Page: `POST /pages/3d` (form `page_title`, server slugifies) then
+//!     `PUT /pages/3d/{slug}` (form: `page_markdown`, `page_cover_media_ref`, `page_order`, …).
 //!   - No upsert route, so we derive the slug locally (mirroring the server's slugify), GET to check,
 //!     create if missing, then PUT the content.
 
@@ -21,6 +21,11 @@ use serde::Deserialize;
 
 /// Max attempts for a transient (connection / timeout / 5xx) failure — chotchki's "overload retry".
 const RETRIES: u32 = 5;
+
+/// The content-tree SECTION fab publishes under (W.3.28.7): the `3d` gallery, not `projects`. Pages nest
+/// as `/pages/<SECTION>/<slug>` (create `POST /pages/<SECTION>`); the browsable detail URL is that same
+/// `/pages/3d/<slug>` (there's no bare `/3d/<slug>` route — `/3d` is the gallery index that LISTS it).
+const SECTION: &str = "3d";
 
 /// URL-safe slug from a title — a byte-for-byte mirror of the server's `web::util::slug::slugify`
 /// (lowercase, non-alphanumeric runs collapse to a single `-`, edges trimmed), so client and server
@@ -166,17 +171,17 @@ impl Client {
 
     /// Does a project page already exist at this slug? (GET is public; 2xx = yes.)
     fn page_exists(&self, slug: &str) -> Result<bool> {
-        let url = format!("{}/pages/projects/{}", self.base, slug);
+        let url = format!("{}/pages/{}/{}", self.base, SECTION, slug);
         let resp = self.send_retry("page check", || {
             Ok(self.http.get(&url).bearer_auth(&self.key))
         })?;
         Ok(resp.status().is_success())
     }
 
-    /// Create an (empty) project page from its title; the server slugifies + nests it under
-    /// `/projects`. reqwest follows the create redirect to the edit page.
+    /// Create an (empty) page from its title; the server slugifies + nests it under the `3d` section.
+    /// With `Accept: application/json` the server returns the created-page envelope (not a 303).
     fn create_page(&self, title: &str) -> Result<()> {
-        let url = format!("{}/pages/projects", self.base);
+        let url = format!("{}/pages/{}", self.base, SECTION);
         let resp = self.send_retry("page create", || {
             Ok(self
                 .http
@@ -199,7 +204,7 @@ impl Client {
         markdown: &str,
         cover_ref: Option<&str>,
     ) -> Result<()> {
-        let url = format!("{}/pages/projects/{}", self.base, slug);
+        let url = format!("{}/pages/{}/{}", self.base, SECTION, slug);
         let resp = self.send_retry("page update", || {
             Ok(self.http.put(&url).bearer_auth(&self.key).form(&[
                 ("page_title", title),
@@ -244,7 +249,7 @@ pub fn publish(client: &Client, p: &Project) -> Result<String> {
         client.create_page(p.title)?;
     }
     client.update_page(&slug, p.title, &markdown, cover.as_deref())?;
-    Ok(format!("{}/pages/projects/{}", client.base, slug))
+    Ok(format!("{}/pages/{}/{}", client.base, SECTION, slug))
 }
 
 /// Publish PRE-RENDERED artifacts — the kernel-first entry (W.3.28): the caller renders the cover +

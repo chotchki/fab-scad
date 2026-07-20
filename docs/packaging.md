@@ -7,9 +7,21 @@ caused zero friction.
 
 ## Local build
 
+One command for local dogfooding — builds the release bins, packages just the `.app` (skips the DMG),
+and ad-hoc signs it so it launches on this machine:
+
+```
+bash packaging/macos/build-app.sh          # → target/packager/fab-scad.app, ad-hoc signed
+```
+
+Ad-hoc (`codesign -s -`) is enough to RUN it here; it is NOT Developer-ID / notarized, so `spctl` still
+rejects it for Gatekeeper distribution — that paid path (Apple Developer $99/yr + rcodesign) stays W.2.2.
+
+The raw steps the script wraps (e.g. to also emit the DMG):
+
 ```
 cargo build --release --workspace --bins   # packager does NOT build — binaries must exist
-cargo packager --release                   # reads Packager.toml → target/packager/
+cargo packager --release                   # reads Packager.toml → target/packager/ (app + dmg)
 ```
 
 Artifacts: `target/packager/fab-scad.app` (~115 MB) and `fab-scad_0.1.0_aarch64.dmg` (~40 MB

@@ -236,6 +236,15 @@ pub(crate) fn spawn_environment(
         },
         Transform::from_xyz(-120.0, 100.0, 60.0).looking_at(Vec3::ZERO, Vec3::Z),
     ));
+    // Ambient FILL so no face ever renders near-black. Both key lights come from ABOVE, so an upright
+    // piece (the print-orientation preview stands parts on end) had its vertical faces catching almost
+    // nothing — Bevy's default ambient is only 80, ~1% of the key. A generous fill keeps the model
+    // readable at any orientation on both platforms (the desktop/wasm illumination gap chotchki hit —
+    // desktop happened to be a FLAT part catching the key, wasm an upright one that wasn't). W.3.36.
+    commands.insert_resource(GlobalAmbientLight {
+        brightness: 1800.0,
+        ..default()
+    });
 }
 
 /// Load an STL into a mesh and its AABB (None on failure → placeholder mesh, no bounds).

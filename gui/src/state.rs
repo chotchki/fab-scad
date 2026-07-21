@@ -65,22 +65,15 @@ pub(crate) struct ReSlice;
 #[derive(Message)]
 pub(crate) struct AutoPlace;
 
-/// A file-list row click / the `open` script verb / the picker landing → "make file <i> the active
-/// source": wipe the old model's state and render the new one (`apply_switch_file`).
+/// A Project-tab file-row click / the `open` script verb / the picker landing → "make file `i` the active
+/// (viewed) file": the switch indexes [`ProjectDoc`](crate::project::ProjectDoc)`.native_paths()` and
+/// re-hydrates the editor; a container keeps rendering its entry, a loose switch renders the switched file
+/// (`apply_switch_file`). Z.3.6 retired the old `FileList` — ProjectDoc IS the file model now.
 #[derive(Message, Clone, Copy)]
 pub(crate) struct SwitchFile(pub(crate) usize);
 
-/// The browsable source list (5.3.2): every `.scad` the picker turned up, plus which one is active.
-/// `SceneCfg.source` stays the single source of truth for "what's loaded" — this just adds the list
-/// the panel shows and the switch machinery indexes. Empty until the first Open.
-#[derive(Resource, Default)]
-pub(crate) struct FileList {
-    pub(crate) files: Vec<PathBuf>,
-    pub(crate) active: Option<usize>,
-}
-
-/// The in-flight native folder pick (5.3.1), off the main thread like a render job. `Some(path)` on
-/// pick, `None` if the user cancelled; `poll_open_dialog` drains it into `FileList`.
+/// The in-flight native file pick (5.3.1), off the main thread like a render job. `Some(path)` on
+/// pick, `None` if the user cancelled; `poll_open_dialog` drains it into a [`ProjectDoc`].
 #[derive(Resource, Default)]
 pub(crate) struct OpenDialog(pub(crate) Option<Task<Option<PathBuf>>>);
 

@@ -83,8 +83,8 @@ impl ProjectDoc {
     /// siblings, or a `.scadproj` freshly materialized to a temp dir). `paths` are absolute; each
     /// file's project-relative name is its path minus `base_dir`. `entry` is the path that renders.
     /// The render reads straight from `base_dir` (`Source::Path`), so a loose model's `include`s and
-    /// its Save both resolve in place — no second copy.
-    #[cfg(not(target_arch = "wasm32"))]
+    /// its Save both resolve in place — no second copy. (Pure path logic; only `native_paths` is
+    /// native-gated. The `--script` harness compiles on both targets, so this must too.)
     pub(crate) fn from_disk(base_dir: PathBuf, paths: &[PathBuf], entry: &std::path::Path) -> Self {
         let rel = |p: &std::path::Path| -> String {
             p.strip_prefix(&base_dir)

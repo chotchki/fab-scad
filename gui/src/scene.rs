@@ -70,7 +70,6 @@ pub(crate) fn setup_windowed(
     mut status: ResMut<Status>,
     mut gizmo_cfg: ResMut<GizmoConfigStore>,
     mut editor: ResMut<EditorBuf>,
-    mut files: ResMut<FileList>,
     mut project: ResMut<crate::project::ProjectDoc>,
     mut pending_config: ResMut<PendingConfig>,
     #[cfg(target_arch = "wasm32")] mut model_fetch: ResMut<crate::jobs::ModelFetch>,
@@ -80,11 +79,9 @@ pub(crate) fn setup_windowed(
     // Seed the file-tab + editor from the launch source (U.3.2): a folder pick repopulates both. The
     // source's fab:config block (W.3.8) is stripped from the buffer + stashed for poll_job to apply.
     // Phase Z: the open document is a PROJECT — a lone launch source is a one-file project whose
-    // `base_dir` is its real folder (render + save resolve in place). FileList is its path projection.
+    // `base_dir` is its real folder (render + save resolve in place). ProjectDoc IS the file model now.
     if let Some(src) = scene.source.clone() {
         pending_config.0 = read_into_editor(&mut editor, &src);
-        files.files = vec![src.clone()];
-        files.active = Some(0);
         let name = src
             .file_name()
             .map(|s| s.to_string_lossy().into_owned())

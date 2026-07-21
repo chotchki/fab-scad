@@ -283,7 +283,6 @@ impl ModelState<'_> {
 #[allow(clippy::too_many_arguments)] // a Bevy system — params are dependencies, not a smell
 pub(crate) fn apply_switch_file(
     mut ev: MessageReader<SwitchFile>,
-    mut files: ResMut<FileList>,
     mut project: ResMut<crate::project::ProjectDoc>,
     mut scene: ResMut<SceneCfg>,
     mut job: ResMut<Job>,
@@ -303,7 +302,6 @@ pub(crate) fn apply_switch_file(
     #[cfg(target_arch = "wasm32")]
     {
         let _ = (
-            &mut files,
             &mut scene,
             &mut job,
             &mut status,
@@ -327,11 +325,11 @@ pub(crate) fn apply_switch_file(
         }
         return;
     }
-    // Native: FileList carries the render paths (ProjectDoc's projection). The whole tail is native — it
-    // reads a real path + kicks a Source::Path render — so it's cfg'd off wasm (which returned above).
+    // Native: the render paths ARE ProjectDoc's native projection (base_dir/name per file). The whole
+    // tail is native — it reads a real path + kicks a Source::Path render — so it's cfg'd off wasm.
     #[cfg(not(target_arch = "wasm32"))]
     {
-        let Some(path) = files.files.get(i).cloned() else {
+        let Some(path) = project.native_paths().get(i).cloned() else {
             return;
         };
         // A `.scadproj` is a real project: ONE entry renders, the rest are libs/parts. Switching a file
@@ -358,7 +356,6 @@ pub(crate) fn apply_switch_file(
                 let _ = write_under(&base, &name, editor.text.as_bytes());
             }
         }
-        files.active = Some(i);
         project.set_active(i);
         // The render target: a container always renders its ENTRY (from the temp materialization); a loose
         // switch renders the switched file. The editor still shows the VIEWED file either way.
@@ -409,7 +406,6 @@ pub(crate) fn apply_switch_file(
 #[cfg_attr(target_arch = "wasm32", allow(unused_variables, unused_mut))]
 pub(crate) fn poll_open_dialog(
     mut dlg: ResMut<OpenDialog>,
-    mut files: ResMut<FileList>,
     mut project: ResMut<crate::project::ProjectDoc>,
     mut switch: MessageWriter<SwitchFile>,
     mut status: ResMut<Status>,
@@ -435,7 +431,6 @@ pub(crate) fn poll_open_dialog(
     {
         match unpack_scadproj(&picked, &scene.tmp) {
             Ok(doc) => {
-                files.files = doc.native_paths();
                 let active = doc.entry;
                 *project = doc;
                 switch.write(SwitchFile(active));
@@ -455,7 +450,6 @@ pub(crate) fn poll_open_dialog(
             return;
         }
         let doc = crate::project::ProjectDoc::from_disk(dir, &scads, &picked);
-        files.files = doc.native_paths();
         let active = doc.entry;
         *project = doc;
         switch.write(SwitchFile(active));
@@ -570,7 +564,6 @@ fn materialize_all(
 pub(crate) fn project_files_action(
     mut ev: MessageReader<PanelCmd>,
     mut project: ResMut<crate::project::ProjectDoc>,
-    mut files: ResMut<FileList>,
     mut add_dialog: ResMut<AddFileDialog>,
     mut rename: ResMut<crate::state::RenameUi>,
     mut editor: ResMut<EditorBuf>,
@@ -588,8 +581,6 @@ pub(crate) fn project_files_action(
         let base = project.base_dir.clone();
         if let Some(old) = project.rename_file(i, &new_name) {
             let new = project.files.get(i).map(|f| f.name.clone()).unwrap_or(new_name);
-            files.files = project.native_paths();
-            files.active = Some(project.active);
             if let Some(base) = base.as_ref() {
                 let _ = std::fs::rename(base.join(&old), base.join(&new)); // missing source? a never-materialized file
                 // Recompute the render target with the CURRENT names + re-render.
@@ -626,7 +617,6 @@ pub(crate) fn project_files_action(
                 if let Some(base) = project.base_dir.clone() {
                     let _ = materialize_all(&project, &base);
                 }
-                files.files = project.native_paths();
                 switch.write(SwitchFile(idx)); // view the new file (entry unchanged → no re-render)
             }
             PanelCmd::DeleteFile(i) => {
@@ -636,14 +626,12 @@ pub(crate) fn project_files_action(
                     status.0 = "can't delete the project's only file".into();
                     continue;
                 };
-                files.files = project.native_paths();
-                files.active = Some(project.active);
                 if container {
                     // A container OWNS its files (temp scratch): drop the deleted copy so the entry
                     // re-renders WITHOUT it, and re-hydrate the editor from whatever's active now.
                     if let Some(base) = base.as_ref() {
                         let _ = std::fs::remove_file(base.join(&name));
-                        if let Some(p) = files.files.get(project.active).cloned() {
+                        if let Some(p) = project.native_paths().get(project.active).cloned() {
                             let _ = read_into_editor(&mut editor, &p); // config stays the entry's
                         }
                     }
@@ -670,13 +658,12 @@ pub(crate) fn project_files_action(
 }
 
 /// Drain the "Add files" multi-pick (Z.3.3): read each picked file's bytes into the project (text →
-/// editable, binary → asset, names de-duplicated), materialize to the render root, and re-derive
-/// FileList. Adding files doesn't re-render — a new file isn't `include`d by the entry until you say so.
+/// editable, binary → asset, names de-duplicated) + materialize to the render root. Adding files doesn't
+/// re-render — a new file isn't `include`d by the entry until you say so.
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn poll_add_dialog(
     mut dlg: ResMut<AddFileDialog>,
     mut project: ResMut<crate::project::ProjectDoc>,
-    mut files: ResMut<FileList>,
     mut status: ResMut<Status>,
 ) {
     let Some(task) = dlg.0.as_mut() else {
@@ -707,7 +694,6 @@ pub(crate) fn poll_add_dialog(
         if let Some(base) = project.base_dir.clone() {
             let _ = materialize_all(&project, &base);
         }
-        files.files = project.native_paths();
         status.0 = format!("added {added} file(s) to the project");
     }
 }
@@ -779,7 +765,6 @@ pub(crate) fn save_as_project_action(
 pub(crate) fn poll_save_project(
     mut save_job: ResMut<crate::state::SaveProjJob>,
     mut project: ResMut<crate::project::ProjectDoc>,
-    mut files: ResMut<FileList>,
     mut editor: ResMut<EditorBuf>,
     mut scene: ResMut<SceneCfg>,
     mut status: ResMut<Status>,
@@ -802,7 +787,7 @@ pub(crate) fn poll_save_project(
     info!("{}", status.0);
     project.home = crate::project::ProjectHome::ScadProj(path.clone());
     // Re-root to a temp materialization (like an opened .scadproj), so container-preview writes the temp,
-    // not the user's real loose files. FileList + scene.source + the editor path all follow the new root.
+    // not the user's real loose files. scene.source + the editor path follow the new root.
     let stem = path
         .file_stem()
         .map(|s| s.to_string_lossy().into_owned())
@@ -811,8 +796,6 @@ pub(crate) fn poll_save_project(
     let _ = std::fs::remove_dir_all(&dir);
     if materialize_all(&project, &dir).is_ok() {
         project.base_dir = Some(dir.clone());
-        files.files = project.native_paths();
-        files.active = Some(project.active);
         if let Some(f) = project.files.get(project.entry) {
             scene.source = Some(dir.join(&f.name));
         }

@@ -83,14 +83,22 @@ pub(crate) fn setup_offscreen(
     scene: Res<SceneCfg>,
     png: Res<ScreenshotPng>,
     mut editor: ResMut<EditorBuf>,
-    mut files: ResMut<FileList>,
+    mut project: ResMut<crate::project::ProjectDoc>,
     pool: Res<GeomPool>,
 ) {
     spawn_environment(&mut commands, &mut meshes, &mut materials, &scene);
     if let Some(src) = scene.source.clone() {
         read_into_editor(&mut editor, &src);
-        files.files = vec![src];
-        files.active = Some(0);
+        let name = src
+            .file_name()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "model.scad".into());
+        *project = crate::project::ProjectDoc::single(
+            name,
+            editor.text.clone(),
+            crate::project::ProjectHome::ScadFile(src.clone()),
+        );
+        project.base_dir = src.parent().map(std::path::Path::to_path_buf);
     }
     // Synchronous here — no UI to freeze. Render whole for bounds + the cut plane, then
     // (if asked) slice at the chosen cut so the PNG verifies an off-center cut.

@@ -125,7 +125,7 @@ pub(crate) fn setup_script(
     mut job: ResMut<Job>,
     mut status: ResMut<Status>,
     mut editor: ResMut<EditorBuf>,
-    mut files: ResMut<FileList>,
+    mut project: ResMut<crate::project::ProjectDoc>,
     mut pending_config: ResMut<PendingConfig>,
     pool: Res<GeomPool>,
 ) {
@@ -134,8 +134,16 @@ pub(crate) fn setup_script(
         // Stash the source's fab:config for poll_job to apply (per-part cuts + the printer) — mirrors
         // setup_windowed so the offscreen harness is faithful to run_windowed (it silently dropped it).
         pending_config.0 = read_into_editor(&mut editor, &src);
-        files.files = vec![src];
-        files.active = Some(0);
+        let name = src
+            .file_name()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "model.scad".into());
+        *project = crate::project::ProjectDoc::single(
+            name,
+            editor.text.clone(),
+            crate::project::ProjectHome::ScadFile(src.clone()),
+        );
+        project.base_dir = src.parent().map(std::path::Path::to_path_buf);
     }
     let (w, h) = (960u32, 720u32);
     let mut img = Image::new_target_texture(w, h, TextureFormat::Rgba8UnormSrgb, None);
@@ -198,7 +206,7 @@ pub(crate) fn run_script(
     mut exit: MessageWriter<AppExit>,
     // Bundled: Bevy caps a system at 16 params, and a tuple counts as one.
     mut sw: (
-        ResMut<FileList>,
+        ResMut<crate::project::ProjectDoc>,
         MessageWriter<SwitchFile>,
         ResMut<ActiveConn>,
         ResMut<EditorBuf>,
@@ -352,16 +360,22 @@ pub(crate) fn run_script(
         }
         Action::Open(path) => {
             if runner.timer == 1 {
-                let list = if path.is_dir() {
-                    scad_files(&path)
+                let (dir, list) = if path.is_dir() {
+                    (path.clone(), scad_files(&path))
                 } else {
-                    vec![path.clone()]
+                    (
+                        path.parent().unwrap_or(&path).to_path_buf(),
+                        vec![path.clone()],
+                    )
                 };
-                if list.is_empty() {
-                    eprintln!("script: open — no .scad under {}", path.display());
-                } else {
-                    sw.0.files = list;
-                    sw.1.write(SwitchFile(0));
+                match list.first().cloned() {
+                    None => eprintln!("script: open — no .scad under {}", path.display()),
+                    Some(entry) => {
+                        let doc = crate::project::ProjectDoc::from_disk(dir, &list, &entry);
+                        let active = doc.entry;
+                        *sw.0 = doc;
+                        sw.1.write(SwitchFile(active));
+                    }
                 }
             }
             // apply_switch_file clears bounds → None; the top guard pauses run_script until the new

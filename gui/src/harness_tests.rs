@@ -58,7 +58,6 @@ fn harness() -> App {
         .init_resource::<PrintJob>()
         .init_resource::<Tab>()
         .init_resource::<EditorBuf>()
-        .init_resource::<FileList>()
         .init_resource::<crate::project::ProjectDoc>()
         .init_resource::<crate::state::RenameUi>()
         .insert_resource(Status("test".into()))

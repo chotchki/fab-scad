@@ -71,6 +71,7 @@ pub(crate) fn setup_windowed(
     mut gizmo_cfg: ResMut<GizmoConfigStore>,
     mut editor: ResMut<EditorBuf>,
     mut files: ResMut<FileList>,
+    mut project: ResMut<crate::project::ProjectDoc>,
     mut pending_config: ResMut<PendingConfig>,
     #[cfg(target_arch = "wasm32")] mut model_fetch: ResMut<crate::jobs::ModelFetch>,
     pool: Res<GeomPool>,
@@ -78,10 +79,22 @@ pub(crate) fn setup_windowed(
     spawn_environment(&mut commands, &mut meshes, &mut materials, &scene);
     // Seed the file-tab + editor from the launch source (U.3.2): a folder pick repopulates both. The
     // source's fab:config block (W.3.8) is stripped from the buffer + stashed for poll_job to apply.
+    // Phase Z: the open document is a PROJECT — a lone launch source is a one-file project whose
+    // `base_dir` is its real folder (render + save resolve in place). FileList is its path projection.
     if let Some(src) = scene.source.clone() {
         pending_config.0 = read_into_editor(&mut editor, &src);
-        files.files = vec![src];
+        files.files = vec![src.clone()];
         files.active = Some(0);
+        let name = src
+            .file_name()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "model.scad".into());
+        *project = crate::project::ProjectDoc::single(
+            name,
+            editor.text.clone(),
+            crate::project::ProjectHome::ScadFile(src.clone()),
+        );
+        project.base_dir = src.parent().map(std::path::Path::to_path_buf);
     }
     // Web boot source (W.3.6 + W.3.12): a `?model=<url>` page parameter fetches that .scad into the
     // editor (poll_model_fetch lands it — async, so the fetch spawns here and the seed happens there);
@@ -107,6 +120,11 @@ pub(crate) fn setup_windowed(
         } else {
             editor.text = WEB_DEMO.to_string();
             editor.edited_at = Some(0.0);
+            *project = crate::project::ProjectDoc::single(
+                "demo.scad",
+                WEB_DEMO,
+                crate::project::ProjectHome::Fresh,
+            );
         }
     }
     let radius = scene.bed[0].max(scene.bed[1]).max(80.0);

@@ -63,6 +63,13 @@ fn save_buffer(editor: &mut EditorBuf, parts: &[Part], bed: [f32; 3]) {
     }
 }
 
+/// The file name of `p` (its last component) for a project-home readout — falls back to the whole path.
+fn base(p: &std::path::Path) -> String {
+    p.file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| p.to_string_lossy().into_owned())
+}
+
 /// The whole control panel (U.3), immediate-mode: an app-wide top tab bar + bottom status bar +
 /// a left egui panel whose contents route on the active `Tab` (Model / Parts / Orientation / Export).
 /// Cheap edits mutate in place; a heavy action (needing params beyond the panel's own) writes a
@@ -78,7 +85,7 @@ pub(crate) fn panel_ui(
     mut active: ResMut<ActiveConn>,
     mut edit: ResMut<EditCut>,
     mut tab: ResMut<Tab>,
-    files: Res<FileList>,
+    project: Res<crate::project::ProjectDoc>,
     status: Res<Status>,
     mut open_dialog: ResMut<OpenDialog>,
     mut editor: ResMut<EditorBuf>,
@@ -164,7 +171,9 @@ pub(crate) fn panel_ui(
                 ui.separator();
                 // The Customize tab (X.2) slots in after Model, but ONLY when the model exposes
                 // parameters — an empty customizer is a wart, so the tab appears with the content.
-                let mut bar: Vec<(Tab, &'static str)> = Vec::with_capacity(5);
+                let mut bar: Vec<(Tab, &'static str)> = Vec::with_capacity(6);
+                // Project is always first (Phase Z) — the document's files live here, ahead of the pipeline.
+                bar.push((Tab::Project, "Project"));
                 for (t, label) in Tab::ALL {
                     bar.push((t, label));
                     if t == Tab::Model && !cv_params.is_empty() {
@@ -292,52 +301,84 @@ pub(crate) fn panel_ui(
         .frame(panel_frame())
         .show(&mut viewport, |ui| {
             match *tab {
-                Tab::Model => {
-                    // FILE TABS (U.3.2): the open files as tabs + a ＋ that reopens the folder picker.
-                    ui.horizontal_wrapped(|ui| {
-                        for (i, path) in files.files.iter().enumerate() {
-                            let name = path
-                                .file_name()
-                                .map(|s| s.to_string_lossy().into_owned())
-                                .unwrap_or_else(|| "?".into());
-                            let on = files.active == Some(i);
-                            // Selected file = navy text on the gold selection pill (selection.bg_fill);
-                            // filenames stay mixed-case (readouts, not chrome). No green, no fake-bold.
-                            if ui.selectable_label(on, name).clicked() {
+                Tab::Project => {
+                    // The project's files (Phase Z). The ENTRY renders; the rest are libs / parts /
+                    // assets. Click a file to view + edit it on the Model tab. Save follows the home: a
+                    // loose `.scad` writes in place, a `.scadproj` re-zips, the web downloads.
+                    ui.label(theme::chrome("Project files", 16.0).color(theme::NAVY));
+                    let home_hint = match &project.home {
+                        crate::project::ProjectHome::ScadProj(p) => {
+                            format!("{} — a .scadproj (a zip; rename to .zip to peek)", base(p))
+                        }
+                        crate::project::ProjectHome::ScadFile(p) => {
+                            format!("{} — a loose .scad (saves in place)", base(p))
+                        }
+                        crate::project::ProjectHome::WebModel(n) => format!("{n} — from the web"),
+                        crate::project::ProjectHome::Fresh => {
+                            "unsaved — one file saves as .scad, two-or-more as .scadproj".into()
+                        }
+                    };
+                    ui.label(
+                        egui::RichText::new(home_hint)
+                            .font(theme::quattro(12.0))
+                            .color(theme::TEXT_MUTED),
+                    );
+                    ui.separator();
+                    // File rows: the entry carries a gold render-pointer; the active (editor-shown) row
+                    // is the selected pill. A dirty file shows the unsaved dot.
+                    for (i, f) in project.files.iter().enumerate() {
+                        ui.horizontal(|ui| {
+                            if i == project.entry {
+                                ui.label(egui::RichText::new(icons::CHEVRON_RIGHT).color(theme::GOLD))
+                                    .on_hover_text("entry — the project's render target");
+                            } else {
+                                ui.add_space(14.0); // align names under the entry pointer
+                            }
+                            if ui
+                                .selectable_label(project.active == i, &f.name)
+                                .clicked()
+                            {
                                 writers.switch.write(SwitchFile(i));
                             }
-                        }
-                        // The ＋ opens a .scad file picker — DESKTOP only (U.3.6). On web there's one
-                        // presupplied file and no fs access, so the picker is hidden entirely. The
-                        // picked file's FOLDER becomes the tab set (its siblings), that file active —
-                        // so you open the model you're looking at, not just its containing directory.
-                        if view.platform.shows_picker()
-                            && ui
-                                .button(icons::ADD)
-                                .on_hover_text("open a .scad model or a .scadproj project")
-                                .clicked()
-                            && open_dialog.0.is_none()
-                        {
-                            // rfd's pick_file→path() is desktop-only; on wasm file-open is an
-                            // <input type=file> byte read (W.3.4 host surface) and the picker's hidden
-                            // anyway (shows_picker() == false), so this branch never runs there.
-                            #[cfg(not(target_arch = "wasm32"))]
-                            {
-                                open_dialog.0 =
-                                    Some(AsyncComputeTaskPool::get().spawn(async move {
-                                        rfd::AsyncFileDialog::new()
-                                            .add_filter(
-                                                "OpenSCAD source or project",
-                                                &["scad", "scadproj"],
-                                            )
-                                            .pick_file()
-                                            .await
-                                            .map(|h| h.path().to_path_buf())
-                                    }));
+                            if f.dirty {
+                                ui.colored_label(theme::GOLD_DIM, icons::DOT)
+                                    .on_hover_text("unsaved");
                             }
-                        }
-                    });
+                        });
+                    }
+                    // Binary assets ride along (import()/surface()) — listed, not editable.
+                    for name in project.assets.keys() {
+                        ui.horizontal(|ui| {
+                            ui.add_space(14.0);
+                            ui.label(
+                                egui::RichText::new(name.as_str()).color(theme::TEXT_MUTED),
+                            )
+                            .on_hover_text("binary asset (import/surface) — rides the project, not editable");
+                        });
+                    }
                     ui.separator();
+                    // Open a .scad or .scadproj — DESKTOP only (the web has no fs picker). Same picker the
+                    // Model-tab ＋ used to host (U.3.2), relocated here now that files live on this tab.
+                    if view.platform.shows_picker()
+                        && ui
+                            .button(format!("{}  Open…", icons::ADD))
+                            .on_hover_text("open a .scad model or a .scadproj project")
+                            .clicked()
+                        && open_dialog.0.is_none()
+                    {
+                        #[cfg(not(target_arch = "wasm32"))]
+                        {
+                            open_dialog.0 = Some(AsyncComputeTaskPool::get().spawn(async move {
+                                rfd::AsyncFileDialog::new()
+                                    .add_filter("OpenSCAD source or project", &["scad", "scadproj"])
+                                    .pick_file()
+                                    .await
+                                    .map(|h| h.path().to_path_buf())
+                            }));
+                        }
+                    }
+                }
+                Tab::Model => {
                     // Save (explicit): the buffer renders live, but the file on disk only changes here or
                     // via Cmd/Ctrl+S (W.3.40). The write itself — config-block bake + per-platform
                     // delivery — lives in `save_buffer`.

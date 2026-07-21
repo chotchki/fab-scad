@@ -242,6 +242,7 @@ fn run_windowed(scene: SceneCfg, shot: Option<PathBuf>) {
     .init_resource::<Feas>()
     .init_resource::<DraggingCut>()
     .init_resource::<FileList>()
+    .init_resource::<project::ProjectDoc>()
     .init_resource::<OpenDialog>()
     .init_resource::<print::ExportJob>()
     .init_resource::<Watch>()
@@ -419,6 +420,7 @@ fn run_screenshot(scene: SceneCfg, png: PathBuf) {
         .insert_resource(GeomPool::new(1)) // the geometry service (W.3.3); setup_offscreen renders through it
         .insert_resource(ScreenshotPng(png))
         .init_resource::<FileList>()
+        .init_resource::<project::ProjectDoc>()
         .init_resource::<OpenDialog>()
         .insert_resource(Parts(vec![Part::default()]))
         .init_resource::<ActivePart>()
@@ -502,6 +504,7 @@ fn run_scripted(scene: SceneCfg, actions: Vec<Action>) {
     .init_resource::<PrevCam>()
     .init_resource::<Feas>()
     .init_resource::<FileList>()
+    .init_resource::<project::ProjectDoc>()
     .init_resource::<OpenDialog>()
     .init_resource::<print::ExportJob>()
     .init_resource::<Watch>()

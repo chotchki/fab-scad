@@ -52,6 +52,10 @@ pub(crate) struct ProjectDoc {
     /// Index into `files` of the file the editor currently shows.
     pub(crate) active: usize,
     pub(crate) home: ProjectHome,
+    /// Native only: the on-disk root the render reads from — the REAL folder for a loose `.scad`
+    /// (no copy, `include`s + save resolve in place) or a temp materialization dir for a `.scadproj`.
+    /// `None` on the web (in-memory, rendered via [`render_pack`](Self::render_pack) + `Source::Bytes`).
+    pub(crate) base_dir: Option<PathBuf>,
 }
 
 impl ProjectDoc {
@@ -71,6 +75,70 @@ impl ProjectDoc {
             entry: 0,
             active: 0,
             home,
+            base_dir: None,
+        }
+    }
+
+    /// A native project from files ALREADY on disk under `base_dir` (a loose `.scad` + its folder
+    /// siblings, or a `.scadproj` freshly materialized to a temp dir). `paths` are absolute; each
+    /// file's project-relative name is its path minus `base_dir`. `entry` is the path that renders.
+    /// The render reads straight from `base_dir` (`Source::Path`), so a loose model's `include`s and
+    /// its Save both resolve in place — no second copy.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn from_disk(base_dir: PathBuf, paths: &[PathBuf], entry: &std::path::Path) -> Self {
+        let rel = |p: &std::path::Path| -> String {
+            p.strip_prefix(&base_dir)
+                .unwrap_or(p)
+                .to_string_lossy()
+                .replace('\\', "/")
+        };
+        let files: Vec<ProjectFile> = paths
+            .iter()
+            .map(|p| ProjectFile {
+                name: rel(p),
+                // The active file's live text is the editor's; the rest load lazily from disk on
+                // switch. Seed empty — a switch hydrates from disk when the buffer is clean.
+                text: String::new(),
+                dirty: false,
+            })
+            .collect();
+        let entry = paths.iter().position(|p| p == entry).unwrap_or(0);
+        let home = ProjectHome::ScadFile(base_dir.join(&files[entry.min(files.len().saturating_sub(1))].name));
+        ProjectDoc {
+            files,
+            assets: BTreeMap::new(),
+            entry,
+            active: entry,
+            home,
+            base_dir: Some(base_dir),
+        }
+    }
+
+    /// Native render paths — `base_dir.join(name)` per file, in `files` order (so a `FileList` derived
+    /// from this aligns index-for-index with `active`/`entry`). Empty when `base_dir` is unset (web).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn native_paths(&self) -> Vec<PathBuf> {
+        let Some(base) = self.base_dir.as_ref() else {
+            return Vec::new();
+        };
+        self.files.iter().map(|f| base.join(&f.name)).collect()
+    }
+
+    /// Flush the editor's live text back into `files[active]` before a switch, so a per-file edit
+    /// survives moving away and back. Marks the file dirty when the text actually changed.
+    pub(crate) fn flush_active(&mut self, text: &str) {
+        if let Some(f) = self.files.get_mut(self.active) {
+            if f.text != text {
+                f.dirty = true;
+            }
+            f.text = text.to_string();
+        }
+    }
+
+    /// Make file `i` the active (editor-shown) one. No-op when out of range.
+    pub(crate) fn set_active(&mut self, i: usize) {
+        if i < self.files.len() {
+            self.active = i;
         }
     }
 
@@ -106,6 +174,7 @@ impl ProjectDoc {
             entry,
             active: entry,
             home,
+            base_dir: None,
         })
     }
 

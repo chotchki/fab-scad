@@ -59,6 +59,7 @@ fn harness() -> App {
         .init_resource::<Tab>()
         .init_resource::<EditorBuf>()
         .init_resource::<FileList>()
+        .init_resource::<crate::project::ProjectDoc>()
         .insert_resource(Status("test".into()))
         .insert_resource(RenderTargetImage(Handle::default())) // dummy: only the Shot verb reads it
         .insert_resource(Parts(vec![seeded_part(vec![x_cut(0.0)])]))

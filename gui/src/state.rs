@@ -560,6 +560,9 @@ pub(crate) struct PanelSeam {
 /// slice pipeline (source → cut → seat → pack); see docs/workflow-tabs-mockup.html.
 #[derive(Resource, Clone, Copy, PartialEq, Eq, Default, Debug)]
 pub(crate) enum Tab {
+    /// The project's files (Phase Z, always first): the file list + entry marker + open/add/rename. Not a
+    /// pipeline STAGE — document management, orthogonal to Model→Export — so it shares Model's index.
+    Project,
     #[default]
     Model,
     /// The OpenSCAD-style Customizer (X.2) — shown between Model and Parts only when the model exposes
@@ -571,7 +574,8 @@ pub(crate) enum Tab {
 }
 
 impl Tab {
-    /// The four tabs in pipeline order with their bar labels.
+    /// The pipeline tabs in order with their bar labels — Project + Customize slot in around them (both
+    /// conditional-or-first, inserted by the bar builder), so they're NOT in this fixed array.
     pub(crate) const ALL: [(Tab, &'static str); 4] = [
         (Tab::Model, "Model"),
         (Tab::Parts, "Parts"),
@@ -581,8 +585,8 @@ impl Tab {
     /// Pipeline-order index — indexes [`Pipeline::dirty`] (Model 0 → Export 3).
     pub(crate) fn index(self) -> usize {
         match self {
-            // Customize shares Model's pipeline slot — its edits dirty/spin the Model stage.
-            Tab::Model | Tab::Customize => 0,
+            // Project + Customize share Model's pipeline slot — neither is a distinct stage.
+            Tab::Project | Tab::Model | Tab::Customize => 0,
             Tab::Parts => 1,
             Tab::Orientation => 2,
             Tab::Export => 3,

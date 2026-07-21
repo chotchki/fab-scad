@@ -280,6 +280,7 @@ impl ModelState<'_> {
 pub(crate) fn apply_switch_file(
     mut ev: MessageReader<SwitchFile>,
     mut files: ResMut<FileList>,
+    mut project: ResMut<crate::project::ProjectDoc>,
     mut scene: ResMut<SceneCfg>,
     mut job: ResMut<Job>,
     mut status: ResMut<Status>,
@@ -296,6 +297,10 @@ pub(crate) fn apply_switch_file(
         return;
     };
     files.active = Some(i);
+    // Keep the ProjectDoc's active file in step (FileList is its path projection, so `i` aligns) — the
+    // Project tab highlights off this. Render still follows the switched file this slice; entry-vs-active
+    // (render the entry while viewing a lib) lands with the ProjectDoc render path.
+    project.set_active(i);
     scene.source = Some(path.clone());
     // Re-derive the workspace root from the OPENED model (W.3.21): a sourceless `.app` launch left root
     // None (cwd `/`), so opening a model that lives under a workspace must pick up its BOSL2/scad-lib
@@ -320,11 +325,15 @@ pub(crate) fn apply_switch_file(
     info!("open: {}", path.display());
 }
 
-/// Drain the native `.scad` file pick: expand the chosen file's FOLDER into the tab set (its sibling
-/// `.scad`) and switch to the picked file; on cancel, nothing. The dialog future was spawned by the ＋.
+/// Drain the native file pick into a [`ProjectDoc`] (Phase Z): a loose `.scad` opens its FOLDER as the
+/// project (siblings become files, that file the entry); a `.scadproj` materializes + opens as a project.
+/// FileList is the doc's native path projection. On cancel, nothing. The whole body is native — on wasm
+/// the picker is hidden (no fs) so the dialog never has a task and every param reads unused.
+#[cfg_attr(target_arch = "wasm32", allow(unused_variables, unused_mut))]
 pub(crate) fn poll_open_dialog(
     mut dlg: ResMut<OpenDialog>,
     mut files: ResMut<FileList>,
+    mut project: ResMut<crate::project::ProjectDoc>,
     mut switch: MessageWriter<SwitchFile>,
     mut status: ResMut<Status>,
     #[allow(unused_variables)] scene: Res<SceneCfg>,
@@ -339,47 +348,57 @@ pub(crate) fn poll_open_dialog(
     let Some(picked) = result else {
         return; // cancelled
     };
-    // A `.scadproj` (Phase Z): UNPACK it to a scratch dir and open THAT folder with the existing
-    // folder-open machinery — the container becomes a real temp project, so `Source::Path` + the sibling
-    // tabs + BOSL2 (via the untouched `scene.root`) all resolve exactly as for a normal on-disk project.
+    // A `.scadproj` (Phase Z): materialize it to a scratch dir and open it as a project rooted there,
+    // so `Source::Path` + BOSL2 (via `scene.root`) resolve exactly as for a normal on-disk project. The
+    // ProjectDoc holds the canonical bytes (its `home` re-zips on save); `base_dir` is the temp render root.
     #[cfg(not(target_arch = "wasm32"))]
     if picked
         .extension()
         .is_some_and(|e| e.eq_ignore_ascii_case("scadproj"))
     {
         match unpack_scadproj(&picked, &scene.tmp) {
-            Ok((scads, active)) => {
-                files.files = scads;
+            Ok(doc) => {
+                files.files = doc.native_paths();
+                let active = doc.entry;
+                *project = doc;
                 switch.write(SwitchFile(active));
             }
             Err(e) => status.0 = format!("open .scadproj: {e}"),
         }
         return;
     }
-    // Open the picked model's folder as tabs (both flat + `src/`-nested layouts), that file active.
-    let dir = picked.parent().unwrap_or(picked.as_path());
-    let scads = scad_files(dir);
-    if scads.is_empty() {
-        status.0 = format!("no .scad under {}", dir.display());
-        return;
+    // A loose `.scad`: open its FOLDER as the project (both flat + `src/`-nested layouts), that file the
+    // entry. `base_dir` is the REAL folder — render + save both resolve in place, no temp copy.
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let dir = picked.parent().unwrap_or(picked.as_path()).to_path_buf();
+        let scads = scad_files(&dir);
+        if scads.is_empty() {
+            status.0 = format!("no .scad under {}", dir.display());
+            return;
+        }
+        let doc = crate::project::ProjectDoc::from_disk(dir, &scads, &picked);
+        files.files = doc.native_paths();
+        let active = doc.entry;
+        *project = doc;
+        switch.write(SwitchFile(active));
     }
-    let active = scads.iter().position(|p| p == &picked).unwrap_or(0);
-    files.files = scads;
-    switch.write(SwitchFile(active));
 }
 
-/// Unpack a `.scadproj` to a scratch dir under `tmp` and return its `.scad` files (a [`FileList`] set) +
-/// the index of the ENTRY (`SwitchFile` target). Reuses the native folder-open flow — the container
-/// becomes a real directory, so nothing downstream (render/switch/save) needs to know it was a zip yet.
-/// Save-back INTO the `.scadproj` is Z.3.5; today this edits the unpacked copy.
+/// Materialize a `.scadproj` under `tmp` and return the [`ProjectDoc`] rooted there — text files editable,
+/// binary assets ride-along, `base_dir` the temp render root, `home` the original `.scadproj` (so save
+/// re-zips it, Z.3.5). The unpacked copy is a render scratch; the ProjectDoc's bytes are the truth.
 #[cfg(not(target_arch = "wasm32"))]
 fn unpack_scadproj(
     path: &std::path::Path,
     tmp: &std::path::Path,
-) -> anyhow::Result<(Vec<std::path::PathBuf>, usize)> {
+) -> anyhow::Result<crate::project::ProjectDoc> {
     use anyhow::Context;
     let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
-    let project = fab_scad::scadproj::read_scadproj(&bytes)?;
+    let mut doc = crate::project::ProjectDoc::from_scadproj(
+        &bytes,
+        crate::project::ProjectHome::ScadProj(path.to_path_buf()),
+    )?;
     let stem = path
         .file_stem()
         .map(|s| s.to_string_lossy().into_owned())
@@ -387,23 +406,30 @@ fn unpack_scadproj(
     let dir = tmp.join("scadproj").join(&stem);
     let _ = std::fs::remove_dir_all(&dir); // a clean re-open
     std::fs::create_dir_all(&dir)?;
-    for (rel, body) in &project.files {
-        let dest = dir.join(rel);
-        if let Some(parent) = dest.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        std::fs::write(&dest, body)?;
+    // Write every file (text + binary asset) so `include`/`use` + `import`/`surface` all resolve from
+    // the render root. The ProjectDoc keeps the canonical copies; this is the disk mirror the render reads.
+    for f in &doc.files {
+        write_under(&dir, &f.name, f.text.as_bytes())?;
     }
-    let scads = scad_files(&dir);
-    if scads.is_empty() {
+    for (name, body) in &doc.assets {
+        write_under(&dir, name, body)?;
+    }
+    if doc.files.is_empty() {
         anyhow::bail!("no .scad in {}", path.display());
     }
-    // Render the manifest's entry first; PathBuf::ends_with matches on whole path components.
-    let active = scads
-        .iter()
-        .position(|p| p.ends_with(&project.manifest.entry))
-        .unwrap_or(0);
-    Ok((scads, active))
+    doc.base_dir = Some(dir);
+    Ok(doc)
+}
+
+/// Write `body` to `base/rel`, creating parent dirs. Shared by the `.scadproj` materialize + save-back.
+#[cfg(not(target_arch = "wasm32"))]
+fn write_under(base: &std::path::Path, rel: &str, body: &[u8]) -> anyhow::Result<()> {
+    let dest = base.join(rel);
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(&dest, body)?;
+    Ok(())
 }
 
 /// Auto-reload (5.3.3): if the active source's mtime advanced since its last load, re-render the
@@ -591,6 +617,7 @@ pub(crate) struct ModelFetch {
 pub(crate) fn poll_model_fetch(
     mut fetch: ResMut<ModelFetch>,
     mut editor: ResMut<EditorBuf>,
+    mut project: ResMut<crate::project::ProjectDoc>,
     mut pending_config: ResMut<PendingConfig>,
     mut status: ResMut<Status>,
 ) {
@@ -607,10 +634,22 @@ pub(crate) fn poll_model_fetch(
             editor.text = config::strip_config_block(&raw);
             editor.path = std::path::PathBuf::from(&fetch.name);
             status.0 = format!("loaded {}", fetch.name);
+            // Phase Z: the fetched `?model=` .scad is a one-file project (a `.scadproj` deep-link is
+            // Z.3.4). WebModel home carries the deep-link name for the download/save-back filename.
+            *project = crate::project::ProjectDoc::single(
+                fetch.name.clone(),
+                editor.text.clone(),
+                crate::project::ProjectHome::WebModel(fetch.name.clone()),
+            );
         }
         None => {
             editor.text = crate::scene::WEB_DEMO.to_string();
             status.0 = "model fetch failed (URL reachable? CORS/CORP?) — rendering the demo".into();
+            *project = crate::project::ProjectDoc::single(
+                "demo.scad",
+                crate::scene::WEB_DEMO,
+                crate::project::ProjectHome::Fresh,
+            );
         }
     }
     editor.dirty = false;

@@ -56,4 +56,56 @@ pub enum Error {
     /// one generic "unknown function" cluster into a per-symbol burn-down worklist (L.2).
     #[error("unknown {0}")]
     Unknown(String),
+
+    /// A fault stamped with the SOURCE SPAN of the TOP-LEVEL construct that triggered it (W.3.37): the eval
+    /// driver + the top-level hoist wrap the error as it unwinds past the failing statement / assignment, so
+    /// a caller can map the span to the user's line and point the editor at it. Display DELEGATES to the
+    /// inner error, so the console/log message text is byte-for-byte unchanged — the span rides alongside,
+    /// invisible to text consumers, read via [`Error::span`].
+    #[error("{source}")]
+    Spanned {
+        /// Byte range into the eval'd source of the failing top-level construct.
+        span: core::ops::Range<usize>,
+        /// The underlying fault, whose message this delegates to.
+        #[source]
+        source: Box<Error>,
+    },
+}
+
+impl Error {
+    /// Stamp `span` onto this error, IF it doesn't already carry one. The innermost stamp wins (the two
+    /// top-level seams — hoist + geometry driver — never nest, so a later outer stamp is a harmless no-op),
+    /// and an already-`Spanned` error passes through unchanged. Never wraps an [`Assert`](Error::Assert)
+    /// naked so the driver's L.5.8 warn-and-continue match still sees a raw `Assert` — callers stamp only
+    /// the fatal (non-Assert) paths.
+    #[must_use]
+    pub fn at(self, span: core::ops::Range<usize>) -> Error {
+        match self {
+            Error::Spanned { .. } => self,
+            other => Error::Spanned {
+                span,
+                source: Box::new(other),
+            },
+        }
+    }
+
+    /// The source span stamped onto this error (the failing top-level construct), if any.
+    #[must_use]
+    pub fn span(&self) -> Option<core::ops::Range<usize>> {
+        match self {
+            Error::Spanned { span, .. } => Some(span.clone()),
+            _ => None,
+        }
+    }
+
+    /// The underlying fault, peeling any [`Spanned`](Error::Spanned) wrapper — match on THIS to classify by
+    /// variant (the corpus bucketing) without a `Spanned` arm swallowing every stamped error into the
+    /// catch-all. Display already delegates, so text consumers never need it.
+    #[must_use]
+    pub fn root(&self) -> &Error {
+        match self {
+            Error::Spanned { source, .. } => source.root(),
+            other => other,
+        }
+    }
 }

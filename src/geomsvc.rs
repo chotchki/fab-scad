@@ -8,6 +8,15 @@ use std::collections::HashMap;
 use crate::auto_orient;
 use crate::geomsg::*;
 use crate::kernel::Solid;
+
+thread_local! {
+    /// The EDITOR line a stamped eval error mapped to (W.3.37), stashed by `record_err_line` and drained by
+    /// `handle_with_store` into `Response::Failed.line`. A thread-local because the service is single-threaded
+    /// per store (kernel thread natively, Worker on wasm) and the error flattens to a String at ONE central
+    /// catch — this rides the line there without threading a return through every render arm. Cleared per
+    /// request so a stale line from a prior render never leaks onto a different failure.
+    static ERR_LINE: std::cell::Cell<Option<u32>> = const { std::cell::Cell::new(None) };
+}
 use crate::manifest::{Connector, Cut, PieceOrient, Slicing};
 use crate::num::Num;
 use crate::{auto, auto_slice, slicing, stl, threemf_in};
@@ -84,6 +93,9 @@ pub fn handle(req: Request) -> Response {
 
 /// The service: never panics outward, never errors the transport — failures are a Response.
 pub fn handle_with_store(store: &mut SolidStore, req: Request) -> Response {
+    // Clear the per-request error-line carrier (W.3.37) so a stale line from a PRIOR render never rides a
+    // later, different failure. Only an eval error sets it.
+    ERR_LINE.set(None);
     let run = |store: &mut SolidStore| -> Result<Response> {
         match req {
             Request::Analyze { name, bytes, bed } => analyze(&name, &bytes, Dims::from_array(bed)),
@@ -144,6 +156,7 @@ pub fn handle_with_store(store: &mut SolidStore, req: Request) -> Response {
     };
     run(store).unwrap_or_else(|e| Response::Failed {
         error: format!("{e:#}"),
+        line: ERR_LINE.take(),
     })
 }
 
@@ -305,6 +318,18 @@ fn rotated_union(objects: &[GeomObject]) -> Result<Solid> {
 /// special-var config there), then the fab-OWNED tessellation quality (`$fa`/`$fs`, adaptive with
 /// `$fn = 0`). Both precede the model, so a model's own `$fn`/`$fa` — or an un-migrated
 /// `$fn = $preview ? …` — still overrides (graceful migration; local overrides win).
+/// Stash the EDITOR line for a stamped eval error (W.3.37): map the error's source `span.start` through
+/// `source` (the string eval actually parsed) and subtract `header_lines` — the fab-injected `$fa/$fs` wrap
+/// prepends 2 lines on the Bytes path; the Path path `include`s the user file separately, so its spans are
+/// file-local (0). No span (a parse error, a non-eval fault) ⇒ no line. Clamped to ≥ 1.
+#[cfg(feature = "kernel")]
+fn record_err_line(source: &str, header_lines: u32, err: &fab_lang::Error) {
+    if let Some(span) = err.span() {
+        let line = fab_lang::offset_to_line(source, span.start).saturating_sub(header_lines);
+        ERR_LINE.set(Some(line.max(1)));
+    }
+}
+
 #[cfg(feature = "kernel")]
 fn wrap_header(preview: bool, quality: Quality) -> String {
     let (fa, fs) = quality.fa_fs();
@@ -359,6 +384,8 @@ fn eval_source(
                     }
                 },
             )
+            // Bytes: the user source is inline in `wrap`, after the 2-line `$fa/$fs` header (W.3.37).
+            .inspect_err(|e| record_err_line(&wrap, 2, e))
             .context("scad-rs eval of source bytes")?;
             Ok((tree, None, messages.iter().map(|m| m.render()).collect()))
         }
@@ -398,6 +425,16 @@ fn eval_path(
         &libs,
         fab_lang::Config::from_env(),
     )
+    // Path: the user file is `include`d separately, so a stamped span is file-LOCAL (header 0), mapped
+    // against the file's own text — which for the GUI preview is the editor buffer written verbatim, so the
+    // line lands exactly (W.3.37). Read lazily, only on error.
+    .inspect_err(|e| {
+        if e.span().is_some()
+            && let Ok(txt) = std::fs::read_to_string(&abs)
+        {
+            record_err_line(&txt, 0, e);
+        }
+    })
     .with_context(|| format!("scad-rs eval of {path}"))?;
     Ok((
         tree,
@@ -479,7 +516,14 @@ fn render_whole_svc(
 #[cfg(feature = "kernel")]
 pub fn render_source_to_solid(source: &Source, root: Option<&str>) -> Result<Solid> {
     use crate::backend::{GeoCache, ManifoldBackend, build_geo_cached};
-    let (tree, _src, messages) = eval_source(source, root, false, Quality::Final)?;
+    // W.3.37: the CLI (`fab make`) doesn't go through the service's Failed-response line plumbing, so read
+    // the stamped editor line off the thread-local and prefix it here — `eval_source` set it on the record.
+    ERR_LINE.set(None);
+    let (tree, _src, messages) =
+        eval_source(source, root, false, Quality::Final).map_err(|e| match ERR_LINE.take() {
+            Some(l) => e.context(format!("line {l}")),
+            None => e,
+        })?;
     build_geo_cached(&tree, &ManifoldBackend, &mut GeoCache::new())
         .filter(|s| !s.is_empty())
         .with_context(|| {

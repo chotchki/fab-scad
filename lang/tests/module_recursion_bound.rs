@@ -88,7 +88,7 @@ fn runaway_module_recursion_is_loud_not_a_crash() {
     // instead of the process SIGABRT'ing on a stack overflow.
     let err = on_big_stack(|| evaluate_geometry("module r() { r(); } r();").unwrap_err());
     assert!(
-        matches!(&err, Error::Unimplemented(m) if m.contains("recursion too deep")),
+        matches!(err.root(), Error::Unimplemented(m) if m.contains("recursion too deep")),
         "expected the LOUD module-depth guard, got {err:?}"
     );
 }

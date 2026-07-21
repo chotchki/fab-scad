@@ -386,7 +386,11 @@ fn publish_cmd(target: &Path, url: Option<String>, api_key: Option<String>) -> R
         },
     ) {
         Response::Rendered { id, .. } => id,
-        Response::Failed { error } => bail!("render failed: {error}"),
+        // W.3.37: surface the failing user line when the eval error mapped to one.
+        Response::Failed { error, line } => {
+            let at = line.map(|l| format!("line {l}: ")).unwrap_or_default();
+            bail!("render failed: {at}{error}")
+        }
         _ => bail!("render: unexpected service response"),
     };
     let (low_b, high_b, ext) = match handle_with_store(
@@ -397,7 +401,7 @@ fn publish_cmd(target: &Path, url: Option<String>, api_key: Option<String>) -> R
         },
     ) {
         Response::SavedMeshes { low, high, ext } => (low, high, ext),
-        Response::Failed { error } => bail!("mesh export failed: {error}"),
+        Response::Failed { error, .. } => bail!("mesh export failed: {error}"),
         _ => bail!("save-meshes: unexpected service response"),
     };
     let low = out.join(format!("{stem}-preview.{ext}"));

@@ -228,7 +228,8 @@ pub fn run_script(script: &str, tests_dir: &Path) -> (Bucket, u128, String) {
 /// Map an [`Error`] to its [`Bucket`] — the `assertion failed` message (from a falsy `assert`) is the one
 /// that means our MATH diverged, so it gets its own bucket separate from other eval errors.
 fn classify(e: &Error) -> Bucket {
-    match e {
+    // Peel any W.3.37 `Spanned` wrapper so the classification reads the ROOT fault, not the catch-all.
+    match e.root() {
         Error::Parse(_) => Bucket::Parse,
         // A failed `assert` — its own bucket (it means our MATH diverged). Now a distinct Error::Assert
         // variant (L.5.8); the legacy Eval-message check stays for any pre-variant assert string.

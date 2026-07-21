@@ -172,7 +172,7 @@ pub(crate) fn setup_offscreen_model(
         Ok(Response::Rendered {
             id, stl, min, max, ..
         }) => (id, min, max, mesh_from_bytes(meshes, &stl)),
-        Ok(Response::Failed { error }) => {
+        Ok(Response::Failed { error, .. }) => {
             error!("{error}");
             return load_model(meshes, None);
         }
@@ -207,7 +207,7 @@ pub(crate) fn setup_offscreen_model(
         spread: SPREAD,
     })) {
         Ok(Response::Resliced { stl }) => mesh_from_bytes(meshes, &stl),
-        Ok(Response::Failed { error }) => {
+        Ok(Response::Failed { error, .. }) => {
             error!("{error}");
             whole_mesh
         }

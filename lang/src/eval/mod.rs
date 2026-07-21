@@ -2362,7 +2362,17 @@ fn hoist_scope_publishing<'a>(
 ) -> crate::Result<Scope> {
     let mut scope = scope.clone();
     for (name, expr) in hoisted_assignments(stmts) {
-        let value = name_closure(eval_with_ctx(expr, &scope, ctx)?, name);
+        // W.3.37: stamp the ROOT file's top-level assignment span so a hoist-time fault (a bad value fed
+        // deep into a library fn — e.g. `p = bezpath_curve(pts, $fn, 2)` with $fn=0) points at the USER's
+        // line, not a library one. Root (island 0) ONLY — a use-island's spans are library-file-local and
+        // would mis-map against the editor buffer. `at` is a no-op if the error is already spanned.
+        let evaluated = eval_with_ctx(expr, &scope, ctx);
+        let evaluated = if island == 0 {
+            evaluated.map_err(|e| e.at(expr.span.clone()))?
+        } else {
+            evaluated?
+        };
+        let value = name_closure(evaluated, name);
         trace::bind('=', name, &value);
         scope.bind(name.to_string(), value);
         if let Some(slot) = ctx.island_globals.borrow_mut().get_mut(island) {
@@ -3412,7 +3422,7 @@ mod tests {
     #[test]
     fn budget_stops_the_range_comprehension_trophy() {
         let err = eval_budgeted("x = [for (i = [0:9e9]) i];", Some(1_000)).unwrap_err();
-        match err {
+        match err.root() {
             crate::Error::Eval(m) => assert!(m.contains("budget exceeded"), "got {m}"),
             other => panic!("expected Error::Eval, got {other:?}"),
         }
@@ -3427,7 +3437,7 @@ mod tests {
             Some(3_000_000),
         )
         .unwrap_err();
-        assert!(matches!(err, crate::Error::Eval(_)), "got {err:?}");
+        assert!(matches!(err.root(), crate::Error::Eval(_)), "got {err:?}");
     }
 
     /// `each <huge range>` splices in bulk with no per-element eval — charged up front like a `for`, so it's
@@ -3435,7 +3445,7 @@ mod tests {
     #[test]
     fn budget_stops_each_splice() {
         let err = eval_budgeted("x = [each [0:9e9]];", Some(1_000)).unwrap_err();
-        assert!(matches!(err, crate::Error::Eval(_)), "got {err:?}");
+        assert!(matches!(err.root(), crate::Error::Eval(_)), "got {err:?}");
     }
 
     /// A program WITHIN budget yields exactly the unbounded result — the bound only ever converts a

@@ -299,7 +299,7 @@ fn a_diamond_re_splices_shared_geometry() {
     // error — so this fails LOUD if the loader ever stops re-splicing. (Flip to a 2-object union
     // assertion when J.2 lands.)
     let err = evaluate_file(&root().join("dup_geom_top.scad"), &[]).unwrap_err();
-    assert!(matches!(err, Error::Unimplemented(_)), "got {err:?}");
+    assert!(matches!(err.root(), Error::Unimplemented(_)), "got {err:?}");
 }
 
 #[test]

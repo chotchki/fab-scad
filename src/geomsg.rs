@@ -273,6 +273,11 @@ pub enum Response {
 
     Failed {
         error: String,
+        /// 1-based EDITOR line the fault maps to (W.3.37), when an eval error carried a source span — the
+        /// GUI points the editor + status at it. `None` for non-eval failures (transport, unknown handle)
+        /// or when the span couldn't be mapped. Additive bincode field (tolerated by older peers).
+        #[serde(default)]
+        line: Option<u32>,
     },
 }
 

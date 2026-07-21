@@ -229,7 +229,7 @@ fn runaway_module_recursion_is_loud() {
         .join()
         .unwrap();
     assert!(
-        matches!(&err, Error::Unimplemented(m) if m.contains("recursion too deep")),
+        matches!(err.root(), Error::Unimplemented(m) if m.contains("recursion too deep")),
         "expected a LOUD depth-guard error, got {err:?}"
     );
 }

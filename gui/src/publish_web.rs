@@ -188,7 +188,7 @@ pub(crate) fn publish_web_kick(
             Ok(Response::Rendered {
                 id, stl, min, max, ..
             }) => (id, stl, min, max),
-            Ok(Response::Failed { error }) => return Err(format!("render failed: {error}")),
+            Ok(Response::Failed { error, .. }) => return Err(format!("render failed: {error}")),
             Ok(_) => return Err("render: unexpected service response".into()),
             Err(e) => return Err(format!("render transport: {e}")),
         };
@@ -203,7 +203,9 @@ pub(crate) fn publish_web_kick(
         let _ = pool.call(Request::Free { ids: vec![id] }).await;
         let (low, high, ext) = match meshes {
             Ok(Response::SavedMeshes { low, high, ext }) => (low, high, ext),
-            Ok(Response::Failed { error }) => return Err(format!("mesh export failed: {error}")),
+            Ok(Response::Failed { error, .. }) => {
+                return Err(format!("mesh export failed: {error}"));
+            }
             Ok(_) => return Err("save-meshes: unexpected service response".into()),
             Err(e) => return Err(format!("save-meshes transport: {e}")),
         };

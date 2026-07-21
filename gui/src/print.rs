@@ -143,7 +143,7 @@ pub(crate) fn kick_print_job(
                         ));
                     }
                 }
-                Ok(Response::Failed { error }) => return Err(error),
+                Ok(Response::Failed { error, .. }) => return Err(error),
                 Ok(_) => return Err("print layout: unexpected service response".to_string()),
                 Err(e) => return Err(format!("{e:#}")),
             }

@@ -906,7 +906,7 @@ fn program_level_unknowns_warn_use_include_still_defers() {
         let prog = parse(src).expect("parses");
         let err = eval_program(&prog, &Scope::new()).unwrap_err();
         assert!(
-            matches!(&err, Error::Unimplemented(m) if m.contains("use/include")),
+            matches!(err.root(), Error::Unimplemented(m) if m.contains("use/include")),
             "expected Unimplemented(…use/include…) for {src:?}, got {err:?}"
         );
     }

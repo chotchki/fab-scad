@@ -403,7 +403,7 @@ fn minkowski_over_2d_is_still_loud() {
     // 2D minkowski stays deferred (Clipper2 `MinkowskiSum` — a separate J.3 follow-up, out of X.4 scope) —
     // LOUD, never silently wrong.
     assert!(matches!(
-        evaluate_geometry("minkowski() { square(4); circle(1, $fn = 8); }").unwrap_err(),
+        evaluate_geometry("minkowski() { square(4); circle(1, $fn = 8); }").unwrap_err().root(),
         Error::Unimplemented(m) if m.contains("2D") && m.contains("minkowski")
     ));
 }
@@ -537,7 +537,7 @@ fn linear_extrude_builds_the_2d_to_3d_bridge() {
 fn a_2d_result_has_no_mesh_without_a_backend() {
     // evaluate() flattens via the no-backend `mesh_of`; a 2D result can't become a 3D mesh → LOUD.
     assert!(
-        matches!(evaluate("circle(5);").unwrap_err(), Error::Unimplemented(m) if m.contains("2D"))
+        matches!(evaluate("circle(5);").unwrap_err().root(), Error::Unimplemented(m) if m.contains("2D"))
     );
     // ...same for a 2D-winning mixed program (the 3D child was dropped, leaving 2D).
     assert!(evaluate("circle(5); cube(2);").is_err());

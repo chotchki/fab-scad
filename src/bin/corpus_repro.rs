@@ -109,7 +109,8 @@ fn print_messages(messages: &[fab_lang::Message]) {
 /// with the roster. (The FULL error text prints alongside, unlike the sweep's first-line-only detail.)
 fn classify_display(e: &fab_lang::Error) -> &'static str {
     use fab_lang::Error;
-    match e {
+    // Peel any W.3.37 `Spanned` wrapper so the label reads the ROOT fault (mirrors the sweep's `classify`).
+    match e.root() {
         Error::Parse(_) => Bucket::Parse.label(),
         Error::Eval(m) if m.starts_with("assertion failed") => Bucket::Assertion.label(),
         Error::Eval(_) => Bucket::Eval.label(),

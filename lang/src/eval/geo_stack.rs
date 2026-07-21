@@ -244,8 +244,10 @@ pub(super) fn eval_geometry_driver<'a>(
                     ctx.warn(msg);
                     break;
                 }
-                // A genuine evaluation/parse/lower fault stays LOUD.
-                other => return Err(other),
+                // A genuine evaluation/parse/lower fault stays LOUD — stamped with THIS top-level
+                // statement's span (W.3.37) so the GUI points at the user's line. `at` no-ops if the
+                // error already carries a span (an inner stamp wins).
+                other => return Err(other.at(stmt.span.clone())),
             }
         }
     }

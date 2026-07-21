@@ -83,6 +83,14 @@ pub fn tier_eq(a: f64, b: f64) -> bool {
     a.to_bits() == b.to_bits() || (a.is_nan() && b.is_nan())
 }
 
+/// 1-based SOURCE LINE containing byte offset `byte` (clamped to the source length) — the map that turns an
+/// [`Error::span`] into an editor line (W.3.37). A `\n`-count up to the offset; correct for any UTF-8 source.
+#[must_use]
+pub fn offset_to_line(source: &str, byte: usize) -> u32 {
+    let byte = byte.min(source.len());
+    u32::try_from(source[..byte].bytes().filter(|&b| b == b'\n').count()).unwrap_or(u32::MAX) + 1
+}
+
 use std::path::{Path, PathBuf};
 
 /// Evaluate OpenSCAD source to a triangle [`Mesh`] — the end-to-end tracer-bullet spine.
@@ -411,7 +419,7 @@ mod tests {
     fn evaluate_defers_transforms_loud() {
         // Beyond the G.3.5 subset (a transform) → LOUD, never silently wrong.
         let err = evaluate("translate([1,0,0]) cube(1);").unwrap_err();
-        assert!(matches!(err, Error::Unimplemented(_)), "got {err:?}");
+        assert!(matches!(err.root(), Error::Unimplemented(_)), "got {err:?}");
     }
 
     #[test]

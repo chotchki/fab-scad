@@ -536,6 +536,7 @@ pub(crate) fn edit_mode(
         })),
         None => Ok(Response::Failed {
             error: "not rendered yet".into(),
+            line: None,
         }),
     };
     match result {
@@ -548,7 +549,7 @@ pub(crate) fn edit_mode(
             );
             status.0 = format!("editing connectors on {} cut", axis.label());
         }
-        Ok(Response::Failed { error }) => {
+        Ok(Response::Failed { error, .. }) => {
             status.0 = format!("cross-section failed: {error}");
             xsection.0 = None;
         }

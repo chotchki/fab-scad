@@ -611,9 +611,15 @@ fn render_result(resp: anyhow::Result<Response>, fresh: bool) -> Result<JobResul
                     .collect(),
             })
         }
-        Ok(Response::Failed { error }) => {
-            crate::console::push(crate::console::Kind::Scad, format!("render error: {error}"));
-            Err(error)
+        Ok(Response::Failed { error, line }) => {
+            // W.3.37: prefix the failing USER line when the eval error mapped to one, so the console AND the
+            // status bar (both surface this Err string) point the user straight at it.
+            let msg = match line {
+                Some(l) => format!("line {l}: {error}"),
+                None => error,
+            };
+            crate::console::push(crate::console::Kind::Scad, format!("render error: {msg}"));
+            Err(msg)
         }
         Ok(_) => Err("render: unexpected service response".to_string()),
         Err(e) => {
@@ -714,7 +720,7 @@ pub(crate) fn kick_reslice(
             .await
         {
             Ok(Response::Resliced { stl }) => Ok(JobResult::Resliced { part, stl }),
-            Ok(Response::Failed { error }) => Err(error),
+            Ok(Response::Failed { error, .. }) => Err(error),
             Ok(_) => Err("reslice: unexpected service response".to_string()),
             Err(e) => Err(format!("{e:#}")),
         }
@@ -1059,7 +1065,7 @@ pub(crate) fn save_action(
             .await
         {
             Ok(Response::Rendered { id, .. }) => id,
-            Ok(Response::Failed { error }) => return Err(format!("render failed: {error}")),
+            Ok(Response::Failed { error, .. }) => return Err(format!("render failed: {error}")),
             Ok(_) => return Err("render: unexpected service response".into()),
             Err(e) => return Err(format!("render transport: {e}")),
         };
@@ -1075,7 +1081,9 @@ pub(crate) fn save_action(
 
         let (low, high, ext) = match meshes {
             Ok(Response::SavedMeshes { low, high, ext }) => (low, high, ext),
-            Ok(Response::Failed { error }) => return Err(format!("mesh export failed: {error}")),
+            Ok(Response::Failed { error, .. }) => {
+                return Err(format!("mesh export failed: {error}"));
+            }
             Ok(_) => return Err("save-meshes: unexpected service response".into()),
             Err(e) => return Err(format!("save-meshes transport: {e}")),
         };
@@ -1251,7 +1259,7 @@ pub(crate) fn kick_auto_plan(
                     connectors,
                     pieces,
                 }) => Ok((cuts, connectors, pieces)),
-                Ok(Response::Failed { error }) => Err(error),
+                Ok(Response::Failed { error, .. }) => Err(error),
                 Ok(_) => Err("auto-plan: unexpected service response".to_string()),
                 Err(e) => Err(format!("{e:#}")),
             }

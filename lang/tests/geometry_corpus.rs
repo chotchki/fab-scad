@@ -156,11 +156,11 @@ fn beyond_the_subset_is_loud() {
     // subset — Error::Unimplemented points you at evaluate_geometry (J.2). (Unknown SYMBOLS are no longer
     // loud — warn-and-undef, L.5.7 — see the module/loader corpora.)
     assert!(matches!(
-        err("sphere(1); cube(1);"),
+        err("sphere(1); cube(1);").root(),
         Error::Unimplemented(_)
     )); // implicit union
     assert!(matches!(
-        err("translate([1,0,0]) cube(1);"),
+        err("translate([1,0,0]) cube(1);").root(),
         Error::Unimplemented(_)
     )); // transform
 }
@@ -172,7 +172,7 @@ fn deferred_builtins_name_their_feature() {
     // NEEDs; text() → implemented; 2D hull() → implemented X.4). The last LOUD-defer is 2D minkowski
     // (Clipper2's MinkowskiSum, a separate J.3 follow-up).
     assert!(
-        matches!(&err("minkowski() square(5);"), Error::Unimplemented(m) if m.contains("minkowski")),
+        matches!(err("minkowski() square(5);").root(), Error::Unimplemented(m) if m.contains("minkowski")),
         "expected a LOUD defer naming minkowski, got {:?}",
         err("minkowski() square(5);")
     );

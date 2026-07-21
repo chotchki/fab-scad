@@ -38,6 +38,7 @@ impl Shard {
                     }))
                     .unwrap_or_else(|_| Response::Failed {
                         error: "geometry kernel panicked".into(),
+                        line: None,
                     });
                     // A superseded (coalesced) call dropped its receiver — harmless. NEVER unwrap here:
                     // that would kill the loop on the routine cut-drag-debounce case.

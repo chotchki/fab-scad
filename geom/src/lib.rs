@@ -96,6 +96,7 @@ pub fn handle(request: &[u8]) -> Vec<u8> {
         Ok(req) => STORE.with(|s| handle_with_store(&mut s.borrow_mut(), req)),
         Err(e) => fab_scad::geomsg::Response::Failed {
             error: format!("{e:#}"),
+            line: None,
         },
     };
     // Drain the tracing this call captured → ship it back in the reply for the Full console (W.3.16).

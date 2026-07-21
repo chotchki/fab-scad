@@ -29,8 +29,9 @@ pub(crate) fn reindent(
     }
 }
 
-/// Byte offset of the `char_idx`-th character (clamped to the end).
-fn char_to_byte(text: &str, char_idx: usize) -> usize {
+/// Byte offset of the `char_idx`-th character (clamped to the end). `pub(crate)` so the bracket matcher
+/// (W.3.38) shares this one char→byte crossing — egui hands CHAR carets, the lexer + text are byte-native.
+pub(crate) fn char_to_byte(text: &str, char_idx: usize) -> usize {
     text.char_indices()
         .nth(char_idx)
         .map(|(b, _)| b)

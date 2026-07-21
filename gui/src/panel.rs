@@ -363,32 +363,15 @@ pub(crate) fn panel_ui(
                     egui::ScrollArea::both()
                         .auto_shrink([false, false])
                         .show(ui, |ui| {
-                            // SCAD syntax highlighting (U.3.13): a layouter that lexes the buffer and
-                            // paints each token by kind (fab-lang's own lexer → colors track the grammar).
-                            let mut layouter =
-                                |ui: &egui::Ui, buf: &dyn egui::TextBuffer, _w: f32| {
-                                    let font = egui::TextStyle::Monospace.resolve(ui.style());
-                                    let job = crate::highlight::scad_job(
-                                        buf.as_str(),
-                                        font,
-                                        ui.visuals().text_color(),
-                                    );
-                                    ui.fonts_mut(|f| f.layout_job(job))
-                                };
-                            // `ui.add` (NOT `add_sized`): add_sized centres/justifies its child, which
-                            // scrolls a long line to its MIDDLE on open — a code editor must sit at
-                            // column 0 and scroll right from there. `desired_rows` fills the panel
-                            // height so a short file doesn't leave it half-empty (what add_sized gave).
-                            let row_h = ui.text_style_height(&egui::TextStyle::Monospace);
-                            let rows = (ui.available_height() / row_h).floor().max(1.0) as usize;
+                            let editor_id = ui.make_persistent_id("fab_model_editor");
+                            let focused = ui.memory(|m| m.has_focus(editor_id));
                             // W.3.35: Tab / Shift+Tab re-indents the SELECTION. Intercept it BEFORE the
                             // widget — egui's default Tab moves focus (and `.code_editor()`'s would insert a
                             // lone `\t`), neither of which is what a code editor wants. `consume_key` pulls the
                             // event so focus stays put; we drive the pure transform + write the new selection
                             // back into the cursor state. Check SHIFT first — `consume_key` matches modifiers
                             // LOGICALLY (an extra Shift is ignored), so plain-Tab would otherwise eat Shift+Tab.
-                            let editor_id = ui.make_persistent_id("fab_model_editor");
-                            if ui.memory(|m| m.has_focus(editor_id)) {
+                            if focused {
                                 let untab = ui.input_mut(|i| {
                                     i.consume_key(egui::Modifiers::SHIFT, egui::Key::Tab)
                                 });
@@ -415,6 +398,41 @@ pub(crate) fn panel_ui(
                                     st.store(ui.ctx(), editor_id);
                                 }
                             }
+                            // W.3.38: the bracket pair to highlight — the (post-Tab) caret's adjacent bracket
+                            // and its balanced partner, ONLY with an empty selection (a highlight while a
+                            // range is selected is noise). Computed here so the layouter below captures it.
+                            let bracket_hl = focused
+                                .then(|| egui::text_edit::TextEditState::load(ui.ctx(), editor_id))
+                                .flatten()
+                                .and_then(|st| st.cursor.char_range())
+                                .filter(|r| r.primary.index == r.secondary.index)
+                                .and_then(|r| {
+                                    let caret = crate::editor_indent::char_to_byte(
+                                        &editor.text,
+                                        r.primary.index.0,
+                                    );
+                                    crate::editor_brackets::match_bracket(&editor.text, caret)
+                                });
+                            // SCAD syntax highlighting (U.3.13): a layouter that lexes the buffer and paints
+                            // each token by kind (fab-lang's own lexer → colors track the grammar), plus the
+                            // W.3.38 bracket-match background.
+                            let mut layouter =
+                                |ui: &egui::Ui, buf: &dyn egui::TextBuffer, _w: f32| {
+                                    let font = egui::TextStyle::Monospace.resolve(ui.style());
+                                    let job = crate::highlight::scad_job(
+                                        buf.as_str(),
+                                        font,
+                                        ui.visuals().text_color(),
+                                        bracket_hl,
+                                    );
+                                    ui.fonts_mut(|f| f.layout_job(job))
+                                };
+                            // `ui.add` (NOT `add_sized`): add_sized centres/justifies its child, which
+                            // scrolls a long line to its MIDDLE on open — a code editor must sit at
+                            // column 0 and scroll right from there. `desired_rows` fills the panel
+                            // height so a short file doesn't leave it half-empty (what add_sized gave).
+                            let row_h = ui.text_style_height(&egui::TextStyle::Monospace);
+                            let rows = (ui.available_height() / row_h).floor().max(1.0) as usize;
                             let resp = ui.add(
                                 egui::TextEdit::multiline(&mut editor.text)
                                     .id(editor_id)

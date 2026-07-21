@@ -203,7 +203,10 @@ pub enum Request {
     /// Produce the web save-back's two mesh variants off a held base (W.5.6): a full-res mesh + a
     /// decimated low-res mesh, BOTH in one format — 3MF if the solid is colored (so color survives),
     /// STL otherwise. `budget` is the low-res triangle target. Reads `base` (a FULL-RES render, W.5.2).
-    SaveMeshes { base: SolidId, budget: u32 },
+    /// Emit the two mesh variants off a held full-res base: `high` as-is, `low` QEM-decimated. `budget`
+    /// = `None` picks the adaptive preview budget from the full tri count (W.3.41 — `decimate::preview_budget`);
+    /// `Some(n)` forces `n` triangles (the tests, to force decimation on tiny meshes).
+    SaveMeshes { base: SolidId, budget: Option<u32> },
     /// Drop held base solids (reload / file-switch / part-count change).
     Free { ids: Vec<SolidId> },
 }

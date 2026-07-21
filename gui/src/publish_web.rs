@@ -197,7 +197,7 @@ pub(crate) fn publish_web_kick(
         let meshes = pool
             .call(Request::SaveMeshes {
                 base: id,
-                budget: 20_000,
+                budget: None,
             })
             .await;
         let _ = pool.call(Request::Free { ids: vec![id] }).await;

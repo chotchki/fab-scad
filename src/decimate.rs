@@ -401,6 +401,17 @@ impl Mesh {
     }
 }
 
+/// The publish/save-back PREVIEW-mesh triangle budget, picked from the full mesh's triangle count (W.3.41).
+/// A FIXED count is the wrong lever: measured on real parts, 20K is 6% of a detailed holder (visibly
+/// faceted, ~1.2mm mean surface error) but 21% of a simple one (fine) — quality tracks the budget/full
+/// RATIO, both models converging to ~0.10% mean deviation (of bbox diagonal) around a quarter of full. So:
+/// a quarter of the full mesh, FLOORED so simple parts still read clean and CAPPED so a dense part's embed
+/// payload stays bounded (~8 MB 3MF at 100K tris vs 30 MB at full). `decimate_mesh`'s conditional-skip
+/// leaves an already-sub-budget mesh untouched, so tiny models pass through this unaffected.
+pub fn preview_budget(full_tris: usize) -> usize {
+    (full_tris / 4).clamp(40_000, 100_000)
+}
+
 /// Decimate one indexed mesh to at most `target` triangles via QEM edge-collapse. Below the budget
 /// already → returned unchanged (the conditional skip). `colors` (per-vertex RGBA 0..1, index-aligned
 /// to `verts`; a length mismatch is treated as uncolored) rides through and is preserved region-wise.
@@ -596,6 +607,18 @@ mod tests {
                 "degenerate tri: {t:?}"
             );
         }
+    }
+
+    #[test]
+    fn preview_budget_is_a_clamped_quarter() {
+        // Below the floor: a simple part gets the 40K floor, not full_tris/4.
+        assert_eq!(preview_budget(95_000), 40_000); // shower_holder_mini: 23.7K → floor
+        // In-band: a quarter of full (the shower_holder case — was faceted at a fixed 20K).
+        assert_eq!(preview_budget(342_320), 85_580);
+        // Above the ceiling: a dense part is capped so the embed payload stays bounded.
+        assert_eq!(preview_budget(2_000_000), 100_000);
+        // Degenerate: an empty mesh still yields the floor (harmless — decimate skips it anyway).
+        assert_eq!(preview_budget(0), 40_000);
     }
 
     #[test]

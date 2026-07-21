@@ -397,7 +397,7 @@ fn publish_cmd(target: &Path, url: Option<String>, api_key: Option<String>) -> R
         &mut store,
         Request::SaveMeshes {
             base: id,
-            budget: 20_000,
+            budget: None,
         },
     ) {
         Response::SavedMeshes { low, high, ext } => (low, high, ext),

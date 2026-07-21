@@ -712,11 +712,12 @@ fn print_layout_svc(
 /// The web save-back's two mesh variants off a held FULL-RES base (W.5.6). ALWAYS 3MF (W.3.18): the
 /// site wants a consistent 3MF variant, not STL-when-uncolored. Per-vertex color survives as a material
 /// table when the solid carries it; an uncolored solid emits a plain-geometry 3MF. `high` is the whole
-/// solid serialized as-is; `low` is a QEM-decimated copy at the `budget` triangle target (the
-/// conditional skip inside `decimate_mesh` leaves an already-lean mesh alone). The whole model decimates
+/// solid serialized as-is; `low` is a QEM-decimated copy. `budget = None` picks the adaptive preview
+/// budget from the full tri count (W.3.41 — a fixed count faceted detailed parts); `Some(n)` forces `n`.
+/// The conditional skip inside `decimate_mesh` leaves an already-lean mesh alone. The whole model decimates
 /// as ONE mesh — one coherent per-vertex color array, fully deterministic; the per-part rayon path
 /// ([`crate::decimate::decimate_parts`]) is for callers that already hold disjoint parts.
-fn save_meshes_svc(store: &SolidStore, base: SolidId, budget: u32) -> Result<Response> {
+fn save_meshes_svc(store: &SolidStore, base: SolidId, budget: Option<u32>) -> Result<Response> {
     let solid = store.get(base)?;
     let (verts, tris) = solid.to_indexed();
     let colors = solid.vertex_colors();
@@ -724,7 +725,10 @@ fn save_meshes_svc(store: &SolidStore, base: SolidId, budget: u32) -> Result<Res
     let t: Vec<[u32; 3]> = tris.iter().map(|tri| tri.indices()).collect();
     let c: Option<Vec<[f64; 4]>> =
         colors.map(|cs| cs.iter().map(|x| [x.r, x.g, x.b, x.a]).collect());
-    let low_mesh = crate::decimate::decimate_mesh(&v, &t, c.as_deref(), budget as usize);
+    let target = budget
+        .map(|b| b as usize)
+        .unwrap_or_else(|| crate::decimate::preview_budget(t.len()));
+    let low_mesh = crate::decimate::decimate_mesh(&v, &t, c.as_deref(), target);
 
     Ok(Response::SavedMeshes {
         low: crate::threemf_out::to_3mf_bytes(
@@ -1188,7 +1192,7 @@ mod tests {
 
         let req = decode_request(&encode_request(&Request::SaveMeshes {
             base: id,
-            budget: 500,
+            budget: Some(500),
         }))
         .unwrap();
         let Response::SavedMeshes { low, high, ext } = handle_with_store(&mut store, req) else {
@@ -1337,7 +1341,7 @@ mod tests {
             &mut store,
             Request::SaveMeshes {
                 base: id,
-                budget: 100,
+                budget: Some(100),
             },
         ) else {
             panic!("save (colored) failed")
@@ -1359,7 +1363,7 @@ mod tests {
             &mut store,
             Request::SaveMeshes {
                 base: cid,
-                budget: 1000,
+                budget: Some(1000),
             },
         ) else {
             panic!("save (uncolored) failed")

@@ -193,12 +193,7 @@ pub(crate) fn publish_kick(
             Err(e) => return Err(format!("render transport: {e}")),
         };
         // 2. the two colored-3MF mesh variants off the handle; 3. free it regardless.
-        let variants = pool
-            .call(Request::SaveMeshes {
-                base,
-                budget: 20_000,
-            })
-            .await;
+        let variants = pool.call(Request::SaveMeshes { base, budget: None }).await;
         let _ = pool.call(Request::Free { ids: vec![base] }).await;
         let (low_b, high_b, ext) = match variants {
             Ok(Response::SavedMeshes { low, high, ext }) => (low, high, ext),

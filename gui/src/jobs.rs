@@ -1074,7 +1074,7 @@ pub(crate) fn save_action(
         let meshes = pool
             .call(Request::SaveMeshes {
                 base: id,
-                budget: 20_000,
+                budget: None,
             })
             .await;
         let _ = pool.call(Request::Free { ids: vec![id] }).await;

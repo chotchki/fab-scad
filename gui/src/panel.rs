@@ -35,15 +35,41 @@ pub(crate) struct PanelView<'w> {
 }
 
 /// Bake the live slicing config into the buffer and persist it — the ONE local-save path, driven by both
-/// the Save button and the Cmd/Ctrl+S shortcut (W.3.40). Native writes the file; the browser downloads
-/// the same config-baked bytes (W.3.13). `with_config_block` strips any prior block first, so re-saving
-/// REPLACES rather than stacks. Clears `dirty` only on a successful write.
-fn save_buffer(editor: &mut EditorBuf, parts: &[Part], bed: [f32; 3]) {
+/// the Save button and the Cmd/Ctrl+S shortcut (W.3.40). Save follows the project HOME (Z.3.5): a
+/// `.scadproj` container RE-ZIPS the whole project back to itself; a loose/single file writes just the
+/// active file's config-baked `.scad` (native) or downloads it (web). `with_config_block` strips any prior
+/// block first, so re-saving REPLACES rather than stacks. Clears `dirty` only on a successful write.
+fn save_buffer(
+    editor: &mut EditorBuf,
+    parts: &[Part],
+    bed: [f32; 3],
+    project: &mut crate::project::ProjectDoc,
+) {
     // Bake the CURRENT bed into the block too (W.3.8) — the model carries its own printer, so a web
     // reload with no printers.toml still sizes right.
     let printer = config::PrinterCfg {
         bed: [bed[0] as f64, bed[1] as f64, bed[2] as f64],
     };
+    // Container: re-zip the WHOLE project back to its `.scadproj` home (Z.3.5). Native only for now — a
+    // web `.scadproj` save-back rides Z.3.4. On success every file is clean, not just the active one.
+    #[cfg(not(target_arch = "wasm32"))]
+    if let crate::project::ProjectHome::ScadProj(path) = project.home.clone() {
+        project.flush_active(&editor.text); // sync the live active buffer into the file set first
+        match rezip_project(project, parts, printer) {
+            Ok(bytes) => {
+                if std::fs::write(&path, bytes).is_ok() {
+                    editor.dirty = false;
+                    for f in &mut project.files {
+                        f.dirty = false;
+                    }
+                } else {
+                    error!("save .scadproj: writing {} failed", path.display());
+                }
+            }
+            Err(e) => error!("save .scadproj {}: {e:#}", path.display()),
+        }
+        return;
+    }
     let baked = config::with_config_block(&editor.text, parts, Some(printer));
     #[cfg(not(target_arch = "wasm32"))]
     if std::fs::write(&editor.path, baked).is_ok() {
@@ -51,6 +77,7 @@ fn save_buffer(editor: &mut EditorBuf, parts: &[Part], bed: [f32; 3]) {
     }
     #[cfg(target_arch = "wasm32")]
     {
+        let _ = project; // web save-back into a project is Z.3.4; today the web is single-file
         let name = editor
             .path
             .file_name()
@@ -61,6 +88,38 @@ fn save_buffer(editor: &mut EditorBuf, parts: &[Part], bed: [f32; 3]) {
             editor.dirty = false;
         }
     }
+}
+
+/// Re-zip the whole project to `.scadproj` bytes (Z.3.5): the ENTRY carries the baked `fab:config` block
+/// (so a reopen restores the bed), every other file + binary asset goes verbatim from the ProjectDoc's
+/// current (flushed) state. The manifest keeps the original entry; the title stays whatever it was.
+#[cfg(not(target_arch = "wasm32"))]
+fn rezip_project(
+    project: &crate::project::ProjectDoc,
+    parts: &[Part],
+    printer: config::PrinterCfg,
+) -> anyhow::Result<Vec<u8>> {
+    use fab_scad::scadproj;
+    let entry_name = project.entry_name().to_string();
+    // Bake config into the entry ONCE (outside the loop so `printer` is used once, not per file).
+    let entry_baked = project
+        .files
+        .get(project.entry)
+        .map(|f| config::with_config_block(&f.text, parts, Some(printer)));
+    let mut files: std::collections::BTreeMap<String, Vec<u8>> = std::collections::BTreeMap::new();
+    for (i, f) in project.files.iter().enumerate() {
+        let bytes = if i == project.entry {
+            entry_baked.clone().unwrap_or_else(|| f.text.clone()).into_bytes()
+        } else {
+            f.text.clone().into_bytes()
+        };
+        files.insert(f.name.clone(), bytes);
+    }
+    for (name, body) in &project.assets {
+        files.insert(name.clone(), body.clone());
+    }
+    let proj = scadproj::project_from_files(files, Some(entry_name), None)?;
+    scadproj::write_scadproj(&proj)
 }
 
 /// Seconds of hold to fire a [`hold_to_delete`] — long enough to be deliberate, short enough not to nag.
@@ -125,7 +184,7 @@ pub(crate) fn panel_ui(
     mut active: ResMut<ActiveConn>,
     mut edit: ResMut<EditCut>,
     mut tab: ResMut<Tab>,
-    project: Res<crate::project::ProjectDoc>,
+    mut project: ResMut<crate::project::ProjectDoc>,
     status: Res<Status>,
     mut open_dialog: ResMut<OpenDialog>,
     mut editor: ResMut<EditorBuf>,
@@ -153,6 +212,7 @@ pub(crate) fn panel_ui(
             &mut editor,
             &parts.0,
             [scene.bed[0], scene.bed[1], scene.bed[2]],
+            &mut project,
         );
     }
     // X.2: the customizer params for the current buffer (owned, so it doesn't hold `editor`'s borrow).
@@ -501,6 +561,7 @@ pub(crate) fn panel_ui(
                                 &mut editor,
                                 &parts.0,
                                 [scene.bed[0], scene.bed[1], scene.bed[2]],
+                                &mut project,
                             );
                         }
                         if editor.dirty {

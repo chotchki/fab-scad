@@ -169,13 +169,14 @@ added 2026-07-07.
   - [x] W.3.34 - W.3.34 - Explicit union() at top level is ONE part (don't split a single statement's union)
   - [x] W.3.35 - W.3.35 - Editor: Tab indents / Shift-Tab unindents the selected lines
   - [x] W.3.36 - W.3.36 - Ambient fill so the model isn't near-black at upright orientations (desktop/wasm illumination)
-  - [ ] W.3.37 - W.3.37 - Editor surfaces the error LINE (eval/parse errors point at the source line)
+  - [x] W.3.37 - W.3.37 - Editor surfaces the error LINE (eval/parse errors point at the source line)
     - [x] W.3.37.1 - W.3.37.1 - Error carries an optional span; eval driver stamps the failing top-level stmt's span
     - [x] W.3.37.2 - W.3.37.2 - geomsvc maps span->user line (expose diag::locate), structured Response::Failed{error, line}
     - [x] W.3.37.3 - W.3.37.3 - GUI surfaces the error line (console/status "line N: msg") + tests/dogfood
-  - [ ] W.3.38 - W.3.38 - Editor bracket matching (highlight balanced parens/braces/brackets)
+  - [x] W.3.38 - W.3.38 - Editor bracket matching (highlight balanced parens/braces/brackets)
     - [x] W.3.38.1 - W.3.38.1 - Pure match_bracket module (fab_lang::lex token stream, string/comment-skip), unit-tested
     - [x] W.3.38.2 - W.3.38.2 - Wire bracket highlight: panel caret->match->scad_job background section + tests/dogfood
+  - [ ] W.3.39 - W.3.39 - Editor line-number gutter (so "line N" errors are findable)
 - [x] W.4 - dogfood: `Solid::components()` cavity regression. window_light_blocker whole-mode collapsed to a SINGLE plate with the magnet pockets pulled out. ROOT CAUSE: components() hand-rolled a union-find over the EXPORTED mesh, then rebuilt each shell via `from_mesh_f64`. On this model (1 body + 88 fully-enclosed magnet pockets) Manifold's mesh carries coincident-but-DISTINCT verts along the BOSL2 boolean seams, so the by-INDEX union-find over-segmented (188 shells vs ~88 real), the rebuilt fragments were OPEN → NotManifold, and every one got SILENTLY dropped (`.ok()` → `None`) → ZERO components. Downstream, `comps.len().max(1)` masked the 0, the giant sheet never decomposed, and the pockets surfaced as extracted nubs. FIX: rip out the mesh surgery, use Manifold's native `Decompose()` (manifold-csg 0.3.3 exposes it — the "0.3.1 has no Decompose" comment was STALE). Decompose splits a solid-with-void into an outer body (+vol) plus each void as an INVERTED shell (−vol); one body ⇒ the whole is handed back untouched (voids intact, `num_tri` preserved), many bodies ⇒ carve each as `original ∩ body` minus any nested body. Every piece is a checked 2-manifold — and a non-manifold result now SHOUTS at `tracing::warn!` instead of vanishing (chotchki's rule; `tracing` promoted dev-dep → dep). 4 kernel unit tests (2 new: grid-of-pockets, two-disjoint-hollow-bodies) + a BOSL2-guarded whole-model regression test. Verified end-to-end: `fab make` went 0 → **15 pieces on 4 plates**, pockets carved.
 - [x] W.5 - Web save-back round-trip (all 3 variants, colored full-res 3MF) — the W.3.12 load-path counterpart
   - [x] W.5.1 - Contract + site recon: re-run the hotchkiss-io API recon (no rigid schema); pin the update-variants-by-ref endpoint (path/method/multipart fields), session-cookie auth, and the media_ref URL param; write a fab-scad-side contract doc. Site Half-2 + the 3MF/color format is chotchki's cross-repo track

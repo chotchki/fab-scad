@@ -201,28 +201,43 @@ pub(crate) fn panel_ui(
         // Status ROW: the pipeline's accurate activity while busy (never the possibly-stale imperative
         // Status), else the imperative status — with the console controls right-aligned.
         ui.horizontal(|ui| {
-            match &view.pipeline.activity {
-                Some(activity) if view.pipeline.busy => {
-                    ui.add(egui::Spinner::new().size(14.0).color(theme::GOLD));
-                    ui.colored_label(theme::NAVY, activity.as_str());
-                    ui.ctx().request_repaint();
+            // Right-align the controls FIRST so a long status — a W.3.37 "line N: assertion failed […]"
+            // can run long — can't shove Draft/Final + the console controls off the screen. The status then
+            // TRUNCATES into whatever width is left (the full text still lives in the console).
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                crate::console::controls(ui, &mut writers.console);
+                // W.3.25.2: live-view quality — Draft (fast) / Final (see the real smoothness). Session-only;
+                // export always renders Final. Flipping it re-renders the buffer (bumps edited_at).
+                let mut want_final = crate::render_quality::is_final();
+                let before = want_final;
+                // right_to_left lays out in reverse, so add Final THEN Draft to read "Draft Final" L→R.
+                ui.selectable_value(&mut want_final, true, "Final");
+                ui.selectable_value(&mut want_final, false, "Draft");
+                if want_final != before {
+                    crate::render_quality::set(want_final);
+                    editor.edited_at = Some(time.elapsed_secs_f64());
                 }
-                _ => {
-                    ui.label(status.0.as_str());
-                }
-            }
-            ui.separator();
-            // W.3.25.2: live-view quality — Draft (fast) / Final (see the real smoothness). Session-only;
-            // export always renders Final. Flipping it re-renders the buffer (bumps edited_at).
-            let mut want_final = crate::render_quality::is_final();
-            let before = want_final;
-            ui.selectable_value(&mut want_final, false, "Draft");
-            ui.selectable_value(&mut want_final, true, "Final");
-            if want_final != before {
-                crate::render_quality::set(want_final);
-                editor.edited_at = Some(time.elapsed_secs_f64());
-            }
-            crate::console::controls(ui, &mut writers.console);
+                ui.separator();
+                // The leftover width (left): the status/activity, truncated so it never pushes the controls.
+                ui.with_layout(
+                    egui::Layout::left_to_right(egui::Align::Center),
+                    |ui| match &view.pipeline.activity {
+                        Some(activity) if view.pipeline.busy => {
+                            ui.add(egui::Spinner::new().size(14.0).color(theme::GOLD));
+                            ui.add(
+                                egui::Label::new(
+                                    egui::RichText::new(activity.as_str()).color(theme::NAVY),
+                                )
+                                .truncate(),
+                            );
+                            ui.ctx().request_repaint();
+                        }
+                        _ => {
+                            ui.add(egui::Label::new(status.0.as_str()).truncate());
+                        }
+                    },
+                );
+            });
         });
         if console_expanded {
             ui.separator();
@@ -433,14 +448,48 @@ pub(crate) fn panel_ui(
                             // height so a short file doesn't leave it half-empty (what add_sized gave).
                             let row_h = ui.text_style_height(&egui::TextStyle::Monospace);
                             let rows = (ui.available_height() / row_h).floor().max(1.0) as usize;
-                            let resp = ui.add(
-                                egui::TextEdit::multiline(&mut editor.text)
-                                    .id(editor_id)
-                                    .code_editor()
-                                    .desired_width(f32::INFINITY)
-                                    .desired_rows(rows)
-                                    .layouter(&mut layouter),
+                            // W.3.39: a line-number gutter so a W.3.37 "line N" error is findable. Right-
+                            // justified muted monospace (same TextStyle::Monospace as the editor → identical
+                            // row height, no drift), non-selectable; the 2px top space matches the TextEdit's
+                            // default vertical margin so line 1 aligns. It rides inside the same both()-scroll,
+                            // so a long line scrolls it horizontally too — fine for SCAD's short lines.
+                            let line_count =
+                                editor.text.bytes().filter(|&b| b == b'\n').count() + 1;
+                            let digits = line_count.to_string().len();
+                            let nums = (1..=line_count).fold(
+                                String::with_capacity(line_count * (digits + 1)),
+                                |mut s, n| {
+                                    if n > 1 {
+                                        s.push('\n');
+                                    }
+                                    use std::fmt::Write;
+                                    let _ = write!(s, "{n:>digits$}");
+                                    s
+                                },
                             );
+                            let resp = ui
+                                .horizontal_top(|ui| {
+                                    ui.vertical(|ui| {
+                                        ui.add_space(2.0);
+                                        ui.add(
+                                            egui::Label::new(
+                                                egui::RichText::new(nums)
+                                                    .monospace()
+                                                    .color(theme::TEXT_MUTED),
+                                            )
+                                            .selectable(false),
+                                        );
+                                    });
+                                    ui.add(
+                                        egui::TextEdit::multiline(&mut editor.text)
+                                            .id(editor_id)
+                                            .code_editor()
+                                            .desired_width(f32::INFINITY)
+                                            .desired_rows(rows)
+                                            .layouter(&mut layouter),
+                                    )
+                                })
+                                .inner;
                             if resp.changed() {
                                 editor.dirty = true;
                                 editor.edited_at = Some(time.elapsed_secs_f64());

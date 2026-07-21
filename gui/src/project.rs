@@ -142,6 +142,89 @@ impl ProjectDoc {
         }
     }
 
+    /// Make file `i` the render ENTRY (the "primary render target"). No-op when out of range.
+    pub(crate) fn set_entry(&mut self, i: usize) {
+        if i < self.files.len() {
+            self.entry = i;
+        }
+    }
+
+    /// A project-relative name not already taken by a file OR an asset — `stem.scad`, else `stem-1.scad`,
+    /// `stem-2.scad`, … So an added/renamed file never silently overwrites a sibling.
+    pub(crate) fn unique_name(&self, want: &str) -> String {
+        let taken = |n: &str| {
+            self.files.iter().any(|f| f.name == n) || self.assets.contains_key(n)
+        };
+        if !taken(want) {
+            return want.to_string();
+        }
+        let (stem, ext) = match want.rsplit_once('.') {
+            Some((s, e)) => (s.to_string(), format!(".{e}")),
+            None => (want.to_string(), String::new()),
+        };
+        (1..)
+            .map(|n| format!("{stem}-{n}{ext}"))
+            .find(|n| !taken(n))
+            .unwrap_or_else(|| want.to_string())
+    }
+
+    /// Add a TEXT file to the project (name de-duplicated), returning its index. Marked dirty — it's a
+    /// change the next save persists. The caller materializes it to `base_dir` on native.
+    pub(crate) fn add_file(&mut self, name: &str, text: String) -> usize {
+        let name = self.unique_name(name);
+        self.files.push(ProjectFile {
+            name,
+            text,
+            dirty: true,
+        });
+        self.files.len() - 1
+    }
+
+    /// Import raw bytes under `name` — a UTF-8 text file (.scad + the text formats) becomes an editable
+    /// file, anything else a binary asset. Returns the FINAL (de-duplicated) project-relative name so the
+    /// caller can materialize it. Marks a text import dirty (a change to persist on save).
+    pub(crate) fn import(&mut self, name: &str, bytes: Vec<u8>) -> String {
+        let uniq = self.unique_name(name);
+        if is_text_file(&uniq) {
+            match String::from_utf8(bytes) {
+                Ok(text) => {
+                    self.files.push(ProjectFile {
+                        name: uniq.clone(),
+                        text,
+                        dirty: true,
+                    });
+                }
+                // A "text" name that isn't UTF-8 rides as an opaque asset rather than corrupting.
+                Err(e) => {
+                    self.assets.insert(uniq.clone(), e.into_bytes());
+                }
+            }
+        } else {
+            self.assets.insert(uniq.clone(), bytes);
+        }
+        uniq
+    }
+
+    /// Remove file `i`, returning its name (for the caller to delete its on-disk/temp copy). Refuses to
+    /// drop the LAST file (a project needs an entry) and fixes up the `entry`/`active` indices — a delete
+    /// of the entry re-homes it to file 0. `None` when out of range or it's the sole file.
+    pub(crate) fn remove_file(&mut self, i: usize) -> Option<String> {
+        if i >= self.files.len() || self.files.len() <= 1 {
+            return None;
+        }
+        let removed = self.files.remove(i);
+        let fix = |idx: &mut usize| {
+            if *idx > i {
+                *idx -= 1;
+            } else if *idx == i {
+                *idx = 0; // the removed slot's referent is gone — fall back to the first file
+            }
+        };
+        fix(&mut self.entry);
+        fix(&mut self.active);
+        Some(removed.name)
+    }
+
     /// From a `.scadproj` archive's bytes: text files → editable `files`, binary → `assets`, entry from
     /// the manifest (or the lone `.scad` when manifest-less — `read_scadproj` resolves that).
     pub(crate) fn from_scadproj(bytes: &[u8], home: ProjectHome) -> anyhow::Result<Self> {
@@ -322,6 +405,61 @@ mod tests {
         assert_eq!(main, b"include <hook.scad>\nhook();"); // the entry, unchanged
         let hook = libs.iter().find(|(k, _)| k == "hook.scad").unwrap();
         assert_eq!(hook.1, b"module hook(){cube(99);}"); // the LIVE edit, not the stored text
+    }
+
+    #[test]
+    fn unique_name_dedups_against_files_and_assets() {
+        let mut d = ProjectDoc::single("main.scad", "", ProjectHome::Fresh);
+        d.assets.insert("logo.svg".into(), vec![1]);
+        assert_eq!(d.unique_name("hook.scad"), "hook.scad"); // free
+        assert_eq!(d.unique_name("main.scad"), "main-1.scad"); // file taken
+        assert_eq!(d.unique_name("logo.svg"), "logo-1.svg"); // asset taken
+    }
+
+    #[test]
+    fn add_new_and_delete_keep_entry_active_consistent() {
+        let mut d = ProjectDoc::single("main.scad", "cube(1);", ProjectHome::Fresh);
+        // add two files; entry/active stay on main (index 0)
+        let a = d.add_file("a.scad", "//a".into());
+        let b = d.add_file("b.scad", "//b".into());
+        assert_eq!((a, b), (1, 2));
+        assert!(d.files[a].dirty && d.files[b].dirty);
+        assert_eq!(d.entry, 0);
+        // make `b` the entry + active, then delete `a` (a lower index) — both shift down by one.
+        d.set_entry(b);
+        d.set_active(b);
+        assert_eq!(d.remove_file(a).as_deref(), Some("a.scad"));
+        assert_eq!(d.files.len(), 2);
+        assert_eq!(d.entry_name(), "b.scad"); // entry followed the shift
+        assert_eq!(d.files[d.active].name, "b.scad"); // active too
+    }
+
+    #[test]
+    fn delete_refuses_the_only_file_and_rehomes_a_deleted_entry() {
+        let mut d = ProjectDoc::single("only.scad", "", ProjectHome::Fresh);
+        assert_eq!(d.remove_file(0), None); // a project needs an entry
+        d.add_file("lib.scad", "".into());
+        d.set_entry(1);
+        d.set_active(1);
+        // delete the ENTRY itself → entry + active fall back to file 0.
+        assert_eq!(d.remove_file(1).as_deref(), Some("lib.scad"));
+        assert_eq!(d.entry, 0);
+        assert_eq!(d.active, 0);
+    }
+
+    #[test]
+    fn import_routes_text_to_files_and_binary_to_assets() {
+        let mut d = ProjectDoc::single("main.scad", "", ProjectHome::Fresh);
+        assert_eq!(d.import("hook.scad", b"module hook(){}".to_vec()), "hook.scad");
+        assert!(d.files.iter().any(|f| f.name == "hook.scad"));
+        // a PNG (binary) → assets, not a garbled String.
+        assert_eq!(
+            d.import("map.png", vec![0x89, b'P', b'N', b'G']),
+            "map.png"
+        );
+        assert!(d.assets.contains_key("map.png"));
+        // a name collision de-dups.
+        assert_eq!(d.import("hook.scad", b"// two".to_vec()), "hook-1.scad");
     }
 
     #[test]

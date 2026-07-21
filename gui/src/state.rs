@@ -531,7 +531,26 @@ pub(crate) enum PanelCmd {
     /// desktop-only), so the gear that writes it is cfg'd off wasm.
     #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     OpenSettings,
+    /// Project-tab file management (Phase Z, Z.3.3): make file `i` the render ENTRY (primary target).
+    SetEntry(usize),
+    /// Remove file `i` from the project (container: dropped from the re-zip; loose: out of the session view).
+    DeleteFile(usize),
+    /// Add a fresh empty `.scad` to the project + switch to it.
+    NewFile,
+    /// Open the multi-file picker to import existing files into the project (spawns [`AddFileDialog`]).
+    /// Desktop only — the web has no fs picker.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    AddFiles,
 }
+
+/// The in-flight "Add files to the project" pick (Z.3.3) — a MULTI-file picker off the main thread, twin
+/// of [`OpenDialog`]. `Some(paths)` on pick (empty vec if the user picked nothing), `None` if cancelled;
+/// `poll_add_dialog` drains it, importing each file (text → editable, binary → asset) into the project.
+#[derive(Resource, Default)]
+// Native-only: the drainer (`poll_add_dialog`) + the panel's Add button are both desktop-gated, so on
+// wasm the field is inited-but-unread until web file management lands (Z.3.4).
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+pub(crate) struct AddFileDialog(pub(crate) Option<Task<Option<Vec<PathBuf>>>>);
 
 /// The round-trip SAVE target for the hotchkiss.io media item this session edits (W.5.7): the
 /// `PUT /media/<ref>/variants` URL, derived from the editor deep-link's `?model=` path (the stable

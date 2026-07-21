@@ -324,15 +324,29 @@ pub(crate) fn panel_ui(
                             .color(theme::TEXT_MUTED),
                     );
                     ui.separator();
-                    // File rows: the entry carries a gold render-pointer; the active (editor-shown) row
-                    // is the selected pill. A dirty file shows the unsaved dot.
+                    // File rows: the entry carries a gold render-pointer; a NON-entry row's grey pointer is
+                    // a button that promotes it (set render target). The active (editor-shown) row is the
+                    // selected pill; a dirty file shows the unsaved dot; a trash button removes it (never
+                    // the entry, never the last file).
+                    let multi = project.files.len() > 1;
                     for (i, f) in project.files.iter().enumerate() {
                         ui.horizontal(|ui| {
-                            if i == project.entry {
+                            let is_entry = i == project.entry;
+                            if is_entry {
                                 ui.label(egui::RichText::new(icons::CHEVRON_RIGHT).color(theme::GOLD))
                                     .on_hover_text("entry — the project's render target");
-                            } else {
-                                ui.add_space(14.0); // align names under the entry pointer
+                            } else if ui
+                                .add(
+                                    egui::Button::new(
+                                        egui::RichText::new(icons::CHEVRON_RIGHT)
+                                            .color(theme::DIV_GREY),
+                                    )
+                                    .frame(false),
+                                )
+                                .on_hover_text("set as the render target")
+                                .clicked()
+                            {
+                                writers.cmd.write(PanelCmd::SetEntry(i));
                             }
                             if ui
                                 .selectable_label(project.active == i, &f.name)
@@ -343,6 +357,21 @@ pub(crate) fn panel_ui(
                             if f.dirty {
                                 ui.colored_label(theme::GOLD_DIM, icons::DOT)
                                     .on_hover_text("unsaved");
+                            }
+                            if multi
+                                && !is_entry
+                                && ui
+                                    .add(
+                                        egui::Button::new(
+                                            egui::RichText::new(icons::DELETE)
+                                                .color(theme::TEXT_MUTED),
+                                        )
+                                        .frame(false),
+                                    )
+                                    .on_hover_text("remove from the project")
+                                    .clicked()
+                            {
+                                writers.cmd.write(PanelCmd::DeleteFile(i));
                             }
                         });
                     }
@@ -357,25 +386,48 @@ pub(crate) fn panel_ui(
                         });
                     }
                     ui.separator();
-                    // Open a .scad or .scadproj — DESKTOP only (the web has no fs picker). Same picker the
-                    // Model-tab ＋ used to host (U.3.2), relocated here now that files live on this tab.
-                    if view.platform.shows_picker()
-                        && ui
-                            .button(format!("{}  Open…", icons::ADD))
-                            .on_hover_text("open a .scad model or a .scadproj project")
-                            .clicked()
-                        && open_dialog.0.is_none()
-                    {
-                        #[cfg(not(target_arch = "wasm32"))]
-                        {
-                            open_dialog.0 = Some(AsyncComputeTaskPool::get().spawn(async move {
-                                rfd::AsyncFileDialog::new()
-                                    .add_filter("OpenSCAD source or project", &["scad", "scadproj"])
-                                    .pick_file()
-                                    .await
-                                    .map(|h| h.path().to_path_buf())
-                            }));
-                        }
+                    // Project actions — DESKTOP only (the web has no fs picker; web multi-file management
+                    // rides Z.3.4). Open replaces the project; Add imports existing files into it; New adds
+                    // a blank .scad. Open still hosts the picker inline (like the old Model-tab ＋);
+                    // Add/New write a PanelCmd that `project_files_action` handles.
+                    if view.platform.shows_picker() {
+                        ui.horizontal(|ui| {
+                            if ui
+                                .button(format!("{}  Open…", icons::ADD))
+                                .on_hover_text("open a .scad model or a .scadproj project")
+                                .clicked()
+                                && open_dialog.0.is_none()
+                            {
+                                #[cfg(not(target_arch = "wasm32"))]
+                                {
+                                    open_dialog.0 =
+                                        Some(AsyncComputeTaskPool::get().spawn(async move {
+                                            rfd::AsyncFileDialog::new()
+                                                .add_filter(
+                                                    "OpenSCAD source or project",
+                                                    &["scad", "scadproj"],
+                                                )
+                                                .pick_file()
+                                                .await
+                                                .map(|h| h.path().to_path_buf())
+                                        }));
+                                }
+                            }
+                            if ui
+                                .button(format!("{}  Add…", icons::ADD))
+                                .on_hover_text("add existing files to this project")
+                                .clicked()
+                            {
+                                writers.cmd.write(PanelCmd::AddFiles);
+                            }
+                            if ui
+                                .button("New file")
+                                .on_hover_text("add a new empty .scad")
+                                .clicked()
+                            {
+                                writers.cmd.write(PanelCmd::NewFile);
+                            }
+                        });
                     }
                 }
                 Tab::Model => {

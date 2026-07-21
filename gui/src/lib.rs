@@ -244,6 +244,7 @@ fn run_windowed(scene: SceneCfg, shot: Option<PathBuf>) {
     .init_resource::<FileList>()
     .init_resource::<project::ProjectDoc>()
     .init_resource::<OpenDialog>()
+    .init_resource::<AddFileDialog>()
     .init_resource::<print::ExportJob>()
     .init_resource::<Watch>()
     .init_resource::<SliceInBackground>()
@@ -319,6 +320,11 @@ fn run_windowed(scene: SceneCfg, shot: Option<PathBuf>) {
         )
             .chain(),
     );
+    // Z.3.3: the Project-tab file management (set entry, add/new/delete files). Native only — the ops
+    // materialize to the render root + drive the rfd multi-picker; web file management rides Z.3.4's
+    // render_pack path. Registered ahead of nothing in particular; SwitchFiles it emits land next frame.
+    #[cfg(not(target_arch = "wasm32"))]
+    app.add_systems(Update, (project_files_action, poll_add_dialog));
     // W.3.27: the desktop Settings modal (hotchkiss.io publish key). Native only — the web publishes via
     // the site session cookie, so there's no key to set there. Draws its own egui Modal in the egui pass.
     #[cfg(not(target_arch = "wasm32"))]
@@ -422,6 +428,7 @@ fn run_screenshot(scene: SceneCfg, png: PathBuf) {
         .init_resource::<FileList>()
         .init_resource::<project::ProjectDoc>()
         .init_resource::<OpenDialog>()
+        .init_resource::<AddFileDialog>()
         .insert_resource(Parts(vec![Part::default()]))
         .init_resource::<ActivePart>()
         .init_resource::<ActiveConn>()
@@ -506,6 +513,7 @@ fn run_scripted(scene: SceneCfg, actions: Vec<Action>) {
     .init_resource::<FileList>()
     .init_resource::<project::ProjectDoc>()
     .init_resource::<OpenDialog>()
+    .init_resource::<AddFileDialog>()
     .init_resource::<print::ExportJob>()
     .init_resource::<Watch>()
     .init_resource::<SliceInBackground>()

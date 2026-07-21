@@ -473,6 +473,141 @@ fn write_under(base: &std::path::Path, rel: &str, body: &[u8]) -> anyhow::Result
     Ok(())
 }
 
+/// Materialize every project file + asset under `base` — the disk mirror the native render reads
+/// (`Source::Path`). Shared by add-file / new-file so a change reaches the render root.
+#[cfg(not(target_arch = "wasm32"))]
+fn materialize_all(
+    project: &crate::project::ProjectDoc,
+    base: &std::path::Path,
+) -> anyhow::Result<()> {
+    for f in &project.files {
+        write_under(base, &f.name, f.text.as_bytes())?;
+    }
+    for (name, body) in &project.assets {
+        write_under(base, name, body)?;
+    }
+    Ok(())
+}
+
+/// Project-tab file management (Z.3.3): set the render entry, and add / new / delete files. Each
+/// structural change re-derives FileList (the ProjectDoc's native path projection, so switch-indices
+/// stay aligned) and materializes to the render root. Native only — the ops touch the fs + the rfd
+/// picker; web file management rides Z.3.4's render_pack. Runs alongside apply_switch_file; a SwitchFile
+/// it emits lands within a frame or two (messages are double-buffered).
+#[cfg(not(target_arch = "wasm32"))]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn project_files_action(
+    mut ev: MessageReader<PanelCmd>,
+    mut project: ResMut<crate::project::ProjectDoc>,
+    mut files: ResMut<FileList>,
+    mut add_dialog: ResMut<AddFileDialog>,
+    mut editor: ResMut<EditorBuf>,
+    mut switch: MessageWriter<SwitchFile>,
+    mut job: ResMut<Job>,
+    mut status: ResMut<Status>,
+    pool: Res<GeomPool>,
+    scene: Res<SceneCfg>,
+    mut state: ModelState,
+) {
+    // Snapshot the frame's commands (PanelCmd is Copy) so the reader borrow ends before we mutate.
+    for cmd in ev.read().copied().collect::<Vec<_>>() {
+        match cmd {
+            PanelCmd::SetEntry(i) => {
+                project.set_entry(i);
+                // Make it active too + let apply_switch_file render it (the target changed → it will).
+                switch.write(SwitchFile(i));
+            }
+            PanelCmd::NewFile => {
+                let idx = project.add_file("untitled.scad", String::new());
+                if let Some(base) = project.base_dir.clone() {
+                    let _ = materialize_all(&project, &base);
+                }
+                files.files = project.native_paths();
+                switch.write(SwitchFile(idx)); // view the new file (entry unchanged → no re-render)
+            }
+            PanelCmd::DeleteFile(i) => {
+                let container = matches!(project.home, crate::project::ProjectHome::ScadProj(_));
+                let base = project.base_dir.clone();
+                let Some(name) = project.remove_file(i) else {
+                    status.0 = "can't delete the project's only file".into();
+                    continue;
+                };
+                files.files = project.native_paths();
+                files.active = Some(project.active);
+                if container {
+                    // A container OWNS its files (temp scratch): drop the deleted copy so the entry
+                    // re-renders WITHOUT it, and re-hydrate the editor from whatever's active now.
+                    if let Some(base) = base.as_ref() {
+                        let _ = std::fs::remove_file(base.join(&name));
+                        if let Some(p) = files.files.get(project.active).cloned() {
+                            let _ = read_into_editor(&mut editor, &p); // config stays the entry's
+                        }
+                    }
+                    free_bases(&pool, state.parts.0.iter().filter_map(|p| p.base).collect());
+                    state.reset();
+                    kick_render(&pool, &mut job, &mut status, &scene, true);
+                } else {
+                    // A loose folder's files are the user's REAL files — never rm behind their back;
+                    // delete is a session-view removal. Re-view the active file (re-renders if it moved).
+                    switch.write(SwitchFile(project.active));
+                }
+            }
+            PanelCmd::AddFiles if add_dialog.0.is_none() => {
+                add_dialog.0 = Some(AsyncComputeTaskPool::get().spawn(async move {
+                    rfd::AsyncFileDialog::new()
+                        .pick_files()
+                        .await
+                        .map(|hs| hs.into_iter().map(|h| h.path().to_path_buf()).collect())
+                }));
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Drain the "Add files" multi-pick (Z.3.3): read each picked file's bytes into the project (text →
+/// editable, binary → asset, names de-duplicated), materialize to the render root, and re-derive
+/// FileList. Adding files doesn't re-render — a new file isn't `include`d by the entry until you say so.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn poll_add_dialog(
+    mut dlg: ResMut<AddFileDialog>,
+    mut project: ResMut<crate::project::ProjectDoc>,
+    mut files: ResMut<FileList>,
+    mut status: ResMut<Status>,
+) {
+    let Some(task) = dlg.0.as_mut() else {
+        return;
+    };
+    let Some(result) = block_on(future::poll_once(task)) else {
+        return; // picker still open
+    };
+    dlg.0 = None;
+    let Some(paths) = result else {
+        return; // cancelled
+    };
+    let mut added = 0;
+    for p in paths {
+        match std::fs::read(&p) {
+            Ok(bytes) => {
+                let name = p
+                    .file_name()
+                    .map(|s| s.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| "file".into());
+                project.import(&name, bytes);
+                added += 1;
+            }
+            Err(e) => status.0 = format!("add {}: {e}", p.display()),
+        }
+    }
+    if added > 0 {
+        if let Some(base) = project.base_dir.clone() {
+            let _ = materialize_all(&project, &base);
+        }
+        files.files = project.native_paths();
+        status.0 = format!("added {added} file(s) to the project");
+    }
+}
+
 /// Auto-reload (5.3.3): if the active source's mtime advanced since its last load, re-render the
 /// whole model — an external editor / OpenSCAD saved it. Fires only when no job is in flight (which
 /// debounces multi-write saves); the cut stack is PRESERVED (re-slice to refresh the exploded view).

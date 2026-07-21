@@ -138,6 +138,29 @@ enum Commands {
         #[arg(long)]
         api_key: Option<String>,
     },
+    /// Pack a project DIRECTORY into a `.scadproj` — the portable multi-file unit the web app opens like a
+    /// folder. It's just a stored zip; rename it to `.zip` to peek inside.
+    Pack {
+        /// The project directory to pack (its `.scad` files + assets).
+        dir: PathBuf,
+        /// Output `.scadproj` (default: `<dirname>.scadproj`).
+        #[arg(long, short)]
+        out: Option<PathBuf>,
+        /// The entry `.scad` to render, relative to <dir> (default: the lone `.scad`).
+        #[arg(long)]
+        entry: Option<String>,
+        /// Project title for publish (default: the directory name).
+        #[arg(long)]
+        title: Option<String>,
+    },
+    /// Unpack a `.scadproj` back into a directory (it's just a zip).
+    Unpack {
+        /// The `.scadproj` to unpack.
+        file: PathBuf,
+        /// Output directory (default: the archive's stem).
+        #[arg(long, short)]
+        out: Option<PathBuf>,
+    },
 }
 
 fn main() -> Result<()> {
@@ -193,6 +216,13 @@ fn main() -> Result<()> {
             url,
             api_key,
         } => publish_cmd(&target, url, api_key),
+        Commands::Pack {
+            dir,
+            out,
+            entry,
+            title,
+        } => pack_cmd(&dir, out, entry, title),
+        Commands::Unpack { file, out } => unpack_cmd(&file, out),
     }
 }
 
@@ -1075,6 +1105,125 @@ fn dir_has_contents(p: &Path) -> bool {
         .unwrap_or(false)
 }
 
+/// Recursively gather regular files under `dir` into a `{relative-path → bytes}` map (forward slashes),
+/// skipping dotfiles and dotdirs (`.git`, `.fab`, …) so packing a project doesn't sweep in VCS junk.
+#[cfg(feature = "mesh-io")]
+fn collect_project_files(dir: &Path) -> Result<std::collections::BTreeMap<String, Vec<u8>>> {
+    fn walk(
+        base: &Path,
+        cur: &Path,
+        out: &mut std::collections::BTreeMap<String, Vec<u8>>,
+    ) -> Result<()> {
+        for entry in std::fs::read_dir(cur).with_context(|| format!("reading {}", cur.display()))? {
+            let entry = entry?;
+            if entry.file_name().to_string_lossy().starts_with('.') {
+                continue; // skip .git / .fab / dotfiles
+            }
+            let path = entry.path();
+            let ft = entry.file_type()?;
+            if ft.is_dir() {
+                walk(base, &path, out)?;
+            } else if ft.is_file() {
+                let rel = path
+                    .strip_prefix(base)
+                    .unwrap_or(&path)
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                let bytes =
+                    std::fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
+                out.insert(rel, bytes);
+            }
+        }
+        Ok(())
+    }
+    let mut out = std::collections::BTreeMap::new();
+    walk(dir, dir, &mut out)?;
+    Ok(out)
+}
+
+/// `fab pack <dir>` — zip a project directory into a `.scadproj`.
+#[cfg(feature = "mesh-io")]
+fn pack_cmd(
+    dir: &Path,
+    out: Option<PathBuf>,
+    entry: Option<String>,
+    title: Option<String>,
+) -> Result<()> {
+    use fab_scad::scadproj;
+    if !dir.is_dir() {
+        bail!("{} is not a directory", dir.display());
+    }
+    let dirname = dir
+        .file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "project".into());
+    let title = title.or_else(|| Some(dirname.clone()));
+    let out = out.unwrap_or_else(|| PathBuf::from(format!("{dirname}.{}", scadproj::PROJECT_EXT)));
+
+    let files = collect_project_files(dir)?;
+    if files.is_empty() {
+        bail!("no files to pack under {}", dir.display());
+    }
+    let project = scadproj::project_from_files(files, entry, title)?;
+    let bytes = scadproj::write_scadproj(&project)?;
+    std::fs::write(&out, &bytes).with_context(|| format!("writing {}", out.display()))?;
+    println!(
+        "packed {} files ({} bytes) -> {} (entry: {})",
+        project.files.len(),
+        bytes.len(),
+        out.display(),
+        project.manifest.entry
+    );
+    Ok(())
+}
+
+#[cfg(not(feature = "mesh-io"))]
+fn pack_cmd(
+    _dir: &Path,
+    _out: Option<PathBuf>,
+    _entry: Option<String>,
+    _title: Option<String>,
+) -> Result<()> {
+    bail!("fab pack needs the `mesh-io` feature (built without it)")
+}
+
+/// `fab unpack <file.scadproj>` — extract a project back into a directory (+ a regenerated manifest).
+#[cfg(feature = "mesh-io")]
+fn unpack_cmd(file: &Path, out: Option<PathBuf>) -> Result<()> {
+    use fab_scad::scadproj;
+    let bytes = std::fs::read(file).with_context(|| format!("reading {}", file.display()))?;
+    let project = scadproj::read_scadproj(&bytes)?;
+    let out = out.unwrap_or_else(|| {
+        PathBuf::from(
+            file.file_stem()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "project".into()),
+        )
+    });
+    std::fs::create_dir_all(&out).with_context(|| format!("creating {}", out.display()))?;
+    let manifest = serde_json::to_vec_pretty(&project.manifest)?;
+    std::fs::write(out.join(scadproj::MANIFEST_ENTRY), manifest)?;
+    for (rel, body) in &project.files {
+        let dest = out.join(rel);
+        if let Some(parent) = dest.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(&dest, body).with_context(|| format!("writing {}", dest.display()))?;
+    }
+    println!(
+        "unpacked {} files -> {}/ (entry: {})",
+        project.files.len(),
+        out.display(),
+        project.manifest.entry
+    );
+    Ok(())
+}
+
+#[cfg(not(feature = "mesh-io"))]
+fn unpack_cmd(_file: &Path, _out: Option<PathBuf>) -> Result<()> {
+    bail!("fab unpack needs the `mesh-io` feature (built without it)")
+}
+
 #[cfg(test)]
 mod tests {
     use super::Cli;
@@ -1083,5 +1232,46 @@ mod tests {
     #[test]
     fn cli_definition_is_valid() {
         Cli::command().debug_assert();
+    }
+
+    /// Pack a real directory tree, unpack it elsewhere, and assert the files survive byte-for-byte.
+    #[cfg(feature = "mesh-io")]
+    #[test]
+    fn pack_unpack_round_trips_a_directory() {
+        let src = tempfile::tempdir().unwrap();
+        std::fs::write(
+            src.path().join("main.scad"),
+            b"include <hook.scad>\ncube(1);\n",
+        )
+        .unwrap();
+        std::fs::write(src.path().join("hook.scad"), b"module hook(){}\n").unwrap();
+        std::fs::create_dir(src.path().join("assets")).unwrap();
+        std::fs::write(src.path().join("assets/logo.svg"), b"<svg/>").unwrap();
+        std::fs::create_dir(src.path().join(".git")).unwrap();
+        std::fs::write(src.path().join(".git/HEAD"), b"junk").unwrap();
+
+        let zip = src.path().join("out.scadproj");
+        super::pack_cmd(
+            src.path(),
+            Some(zip.clone()),
+            Some("main.scad".into()),
+            None,
+        )
+        .unwrap();
+
+        let dst = tempfile::tempdir().unwrap();
+        super::unpack_cmd(&zip, Some(dst.path().to_path_buf())).unwrap();
+
+        assert_eq!(
+            std::fs::read(dst.path().join("main.scad")).unwrap(),
+            b"include <hook.scad>\ncube(1);\n"
+        );
+        assert_eq!(
+            std::fs::read(dst.path().join("assets/logo.svg")).unwrap(),
+            b"<svg/>"
+        );
+        // dotdirs are skipped on pack
+        assert!(!dst.path().join(".git").exists());
+        assert!(dst.path().join("fab-project.json").exists());
     }
 }

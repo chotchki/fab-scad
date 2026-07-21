@@ -81,7 +81,7 @@ kernel-par = ["kernel", "fab-manifold/par"]
 # The Bambu `.3mf` WRITER (`bambu`): an OPC zip of hand-written XML + indexed meshes — mesh-only, no
 # Solid, no C++ kernel. Split out of `kernel` (W.3.4) so the wasm fab-gui app can co-pack + export
 # in-process without the Manifold toolchain, while the miri-lean `geometry` build stays zip-free.
-mesh-io = ["geometry", "dep:zip"]
+mesh-io = ["geometry", "dep:zip", "dep:serde_json"]
 # Everything that needs an OS (18.3): the OpenSCAD spawn, publish (blocking reqwest), project
 # scaffolding, the smoke sweep, and the CLI-only deps. `--no-default-features` is the wasm32-safe
 # core — pure geometry/slicing/spec logic, no process spawn, no network.
@@ -122,6 +122,9 @@ usvg = { version = "0.45", optional = true, default-features = false }
 bincode = "1"
 # Stored (no compression) only — default features pull bzip2/zstd backends we don't need.
 zip = { version = "8", optional = true, default-features = false }
+# The `.scadproj` manifest (fab-project.json) ser/de — rides `mesh-io` with `zip` (Phase Z). Also a
+# dev-dependency (the publish tests use it under `native`-without-`kernel`), which coexists.
+serde_json = { version = "1", optional = true }
 # Publish client (fab publish → hotchkiss.io). Blocking (the CLI/GUI aren't async here); rustls so
 # we don't drag in system OpenSSL. multipart for media upload, json for the upload response.
 reqwest = { version = "0.12", default-features = false, optional = true, features = [

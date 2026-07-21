@@ -66,7 +66,12 @@ impl Project {
         self.files
             .get(&self.manifest.entry)
             .map(Vec::as_slice)
-            .ok_or_else(|| anyhow!("manifest entry {:?} is not in the project", self.manifest.entry))
+            .ok_or_else(|| {
+                anyhow!(
+                    "manifest entry {:?} is not in the project",
+                    self.manifest.entry
+                )
+            })
     }
 }
 
@@ -155,7 +160,10 @@ pub fn read_scadproj(bytes: &[u8]) -> Result<Project> {
     let mut zip =
         zip::ZipArchive::new(Cursor::new(bytes)).map_err(|e| anyhow!("not a readable zip: {e}"))?;
     if zip.len() > MAX_ENTRIES {
-        bail!("scadproj has too many entries ({} > {MAX_ENTRIES})", zip.len());
+        bail!(
+            "scadproj has too many entries ({} > {MAX_ENTRIES})",
+            zip.len()
+        );
     }
 
     let mut files: BTreeMap<String, Vec<u8>> = BTreeMap::new();
@@ -267,7 +275,10 @@ mod tests {
         assert_eq!(back, p);
         assert_eq!(back.manifest.entry, "shower_holder.scad");
         assert_eq!(back.manifest.title.as_deref(), Some("Demo"));
-        assert_eq!(back.entry_bytes().unwrap(), b"include <hook.scad>\ncube(1);\n");
+        assert_eq!(
+            back.entry_bytes().unwrap(),
+            b"include <hook.scad>\ncube(1);\n"
+        );
     }
 
     #[test]
@@ -286,7 +297,10 @@ mod tests {
 
     #[test]
     fn writer_output_is_deterministic() {
-        let p = proj(&[("a.scad", b"cube(1);"), ("b.scad", b"sphere(1);")], "a.scad");
+        let p = proj(
+            &[("a.scad", b"cube(1);"), ("b.scad", b"sphere(1);")],
+            "a.scad",
+        );
         assert_eq!(write_scadproj(&p).unwrap(), write_scadproj(&p).unwrap());
     }
 
@@ -381,7 +395,10 @@ mod tests {
     #[test]
     fn normalize_rel_sanitizes() {
         assert_eq!(normalize_rel("hook.scad").as_deref(), Some("hook.scad"));
-        assert_eq!(normalize_rel("sub/hook.scad").as_deref(), Some("sub/hook.scad"));
+        assert_eq!(
+            normalize_rel("sub/hook.scad").as_deref(),
+            Some("sub/hook.scad")
+        );
         assert_eq!(normalize_rel("./a/./b.scad").as_deref(), Some("a/b.scad"));
         assert_eq!(normalize_rel("a\\b.scad").as_deref(), Some("a/b.scad"));
         assert_eq!(normalize_rel("../escape"), None);

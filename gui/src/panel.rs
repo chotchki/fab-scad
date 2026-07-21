@@ -653,9 +653,11 @@ pub(crate) fn panel_ui(
                         }
                     });
                     // Save back to the site (W.5.8): web only, and only when the deep-link named a
-                    // media item (else there's no item to update in place). Gold CTA; the status bar
-                    // reports progress + result (gui-reactive-standard).
+                    // media item (else there's no item to update in place). Hidden for a MULTI-FILE
+                    // project (Z.3.5 guard) — a single-file PUT would wipe the .scadproj (see save_action).
+                    // Gold CTA; the status bar reports progress + result (gui-reactive-standard).
                     if view.save_target.0.is_some()
+                        && !project.is_multifile()
                         && ui
                             .add(
                                 egui::Button::new(

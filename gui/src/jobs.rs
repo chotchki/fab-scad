@@ -1571,6 +1571,7 @@ pub(crate) fn save_action(
     pieces: Res<crate::print::PrintPieces>,
     scene: Res<SceneCfg>,
     save_target: Res<SaveTarget>,
+    project: Res<crate::project::ProjectDoc>,
     pool: Res<GeomPool>,
     mut job: ResMut<SaveJob>,
     mut status: ResMut<Status>,
@@ -1580,6 +1581,16 @@ pub(crate) fn save_action(
     }
     if job.0.is_some() {
         status.0 = "already saving…".into();
+        return;
+    }
+    // Z.3.5 landmine guard (hotchkiss-io feedback): PUT /variants is a COMPLETE replace. For a multi-file
+    // project (opened via Z.3.4), uploading just {entry.scad, meshes} would DELETE the .scadproj archive +
+    // every non-entry file, flipping the item to STL. Suppress until the web re-zip save exists (Z.3.8).
+    if project.is_multifile() {
+        status.0 =
+            "project save-back isn't on the web yet — it would overwrite the .scadproj. Save from \
+             the desktop app for now."
+                .into();
         return;
     }
     let Some(url) = save_target.0.clone() else {

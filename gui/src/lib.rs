@@ -65,6 +65,7 @@ mod jobs;
 mod lib_fetch;
 mod panel;
 mod print;
+mod project; // Phase Z — the everything-is-a-project document model (ProjectDoc); EditorBuf is its active-file view
 mod publish_dialog; // W.3.29.6 — the Publish dialog (editable title/desc); shared native + web
 #[cfg(not(target_arch = "wasm32"))]
 mod publish_native; // W.3.28 — desktop Publish via fab's own kernel/renderer (no OpenSCAD); native only

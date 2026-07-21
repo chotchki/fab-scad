@@ -635,6 +635,24 @@ pub(crate) fn panel_ui(
                                 format!("{} unsaved", icons::DOT), // icons::DOT — a raw bullet is tofu
                             );
                         }
+                        // Set-entry from the editor (Z.3.6): viewing a file that ISN'T the render
+                        // target, one click makes it the entry — no trip back to the Project tab.
+                        // Desktop for now (the SetEntry handler is native).
+                        if view.platform.shows_picker()
+                            && project.is_multifile()
+                            && project.active != project.entry
+                            && ui
+                                .add(
+                                    egui::Button::new(
+                                        theme::chrome("Set as entry", 13.0).color(theme::NAVY),
+                                    )
+                                    .fill(theme::GOLD),
+                                )
+                                .on_hover_text("render THIS file as the project's entry point")
+                                .clicked()
+                        {
+                            writers.cmd.write(PanelCmd::SetEntry(project.active));
+                        }
                     });
                     // Save back to the site (W.5.8): web only, and only when the deep-link named a
                     // media item (else there's no item to update in place). Gold CTA; the status bar

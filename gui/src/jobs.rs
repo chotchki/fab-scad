@@ -327,6 +327,7 @@ pub(crate) fn poll_open_dialog(
     mut files: ResMut<FileList>,
     mut switch: MessageWriter<SwitchFile>,
     mut status: ResMut<Status>,
+    #[allow(unused_variables)] scene: Res<SceneCfg>,
 ) {
     let Some(task) = dlg.0.as_mut() else {
         return;
@@ -338,6 +339,23 @@ pub(crate) fn poll_open_dialog(
     let Some(picked) = result else {
         return; // cancelled
     };
+    // A `.scadproj` (Phase Z): UNPACK it to a scratch dir and open THAT folder with the existing
+    // folder-open machinery — the container becomes a real temp project, so `Source::Path` + the sibling
+    // tabs + BOSL2 (via the untouched `scene.root`) all resolve exactly as for a normal on-disk project.
+    #[cfg(not(target_arch = "wasm32"))]
+    if picked
+        .extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("scadproj"))
+    {
+        match unpack_scadproj(&picked, &scene.tmp) {
+            Ok((scads, active)) => {
+                files.files = scads;
+                switch.write(SwitchFile(active));
+            }
+            Err(e) => status.0 = format!("open .scadproj: {e}"),
+        }
+        return;
+    }
     // Open the picked model's folder as tabs (both flat + `src/`-nested layouts), that file active.
     let dir = picked.parent().unwrap_or(picked.as_path());
     let scads = scad_files(dir);
@@ -348,6 +366,44 @@ pub(crate) fn poll_open_dialog(
     let active = scads.iter().position(|p| p == &picked).unwrap_or(0);
     files.files = scads;
     switch.write(SwitchFile(active));
+}
+
+/// Unpack a `.scadproj` to a scratch dir under `tmp` and return its `.scad` files (a [`FileList`] set) +
+/// the index of the ENTRY (`SwitchFile` target). Reuses the native folder-open flow — the container
+/// becomes a real directory, so nothing downstream (render/switch/save) needs to know it was a zip yet.
+/// Save-back INTO the `.scadproj` is Z.3.5; today this edits the unpacked copy.
+#[cfg(not(target_arch = "wasm32"))]
+fn unpack_scadproj(
+    path: &std::path::Path,
+    tmp: &std::path::Path,
+) -> anyhow::Result<(Vec<std::path::PathBuf>, usize)> {
+    use anyhow::Context;
+    let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
+    let project = fab_scad::scadproj::read_scadproj(&bytes)?;
+    let stem = path
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "project".into());
+    let dir = tmp.join("scadproj").join(&stem);
+    let _ = std::fs::remove_dir_all(&dir); // a clean re-open
+    std::fs::create_dir_all(&dir)?;
+    for (rel, body) in &project.files {
+        let dest = dir.join(rel);
+        if let Some(parent) = dest.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(&dest, body)?;
+    }
+    let scads = scad_files(&dir);
+    if scads.is_empty() {
+        anyhow::bail!("no .scad in {}", path.display());
+    }
+    // Render the manifest's entry first; PathBuf::ends_with matches on whole path components.
+    let active = scads
+        .iter()
+        .position(|p| p.ends_with(&project.manifest.entry))
+        .unwrap_or(0);
+    Ok((scads, active))
 }
 
 /// Auto-reload (5.3.3): if the active source's mtime advanced since its last load, re-render the

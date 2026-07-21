@@ -314,7 +314,7 @@ pub(crate) fn panel_ui(
                         if view.platform.shows_picker()
                             && ui
                                 .button(icons::ADD)
-                                .on_hover_text("open a .scad model")
+                                .on_hover_text("open a .scad model or a .scadproj project")
                                 .clicked()
                             && open_dialog.0.is_none()
                         {
@@ -326,7 +326,10 @@ pub(crate) fn panel_ui(
                                 open_dialog.0 =
                                     Some(AsyncComputeTaskPool::get().spawn(async move {
                                         rfd::AsyncFileDialog::new()
-                                            .add_filter("OpenSCAD source", &["scad"])
+                                            .add_filter(
+                                                "OpenSCAD source or project",
+                                                &["scad", "scadproj"],
+                                            )
                                             .pick_file()
                                             .await
                                             .map(|h| h.path().to_path_buf())

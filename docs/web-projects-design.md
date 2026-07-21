@@ -53,7 +53,7 @@ The schema, following the OPC / EPUB precedent fab already lives in (3MF is a zi
 - **`mimetype` as the FIRST entry, uncompressed at offset 0** — the EPUB trick. Contains
   `application/x-openscad-project`. This makes the type BYTE-SNIFFABLE (read ~40 bytes, no unzip) and
   positively identifiable even when a browser insists the blob is `application/zip`.
-- **`fab-project.toml` at the root** — the manifest. Declares `entry` (the root `.scad` to render), plus
+- **`fab-project.json` at the root** — the manifest. Declares `entry` (the root `.scad` to render), plus
   `title` / `version` for publish. The entry-point is genuinely needed: a project can hold several
   top-level `.scad` and the app can't guess which one renders. Fallback for hand-zipped projects with no
   manifest: the single `.scad` that no other file `include`s/`use`s.
@@ -121,26 +121,30 @@ the project archive when the source is multi-file.
 - **UTF-8 for `.scad`:** the include map is `String`-keyed (`geomsvc.rs:363` drops non-UTF-8 silently);
   a `.scad` that isn't UTF-8 should fail LOUD, not vanish.
 
-## Open decisions
+## Decisions (resolved 2026-07-21, chotchki)
 
-- **Multi-file editing UX (Z.3).** Minimal: the web editor shows the ENTRY file, includes resolve silently
-  (edit-the-entry, like shower_holder where `hook.scad` is a stable lib). Full: a project file-switcher
-  (native already has `FileList`). Recommend starting minimal, add the switcher when a real project needs
-  it.
-- **Manifest format.** `fab-project.toml` (matches `printers.toml` / the fab:config idiom) vs JSON (matches
-  the wire). Leaning TOML for human-authoring.
-- **`.scadproj` vs `.scad.zip`.** Recommend `.scadproj` (clean single suffix, no `.zip` collision).
+- **A `.scadproj` is a FOLDER, not an entry-point (Z.3).** Treat it exactly like a project folder is
+  treated today: unzip into the web app's file list (the desktop already has `FileList`), let the user
+  switch between and edit ANY file, and re-zip on save. NOT "edit the entry, includes read-only" — the
+  whole project is live. The manifest's `entry` only names which file RENDERS; every file is editable.
+- **Manifest is JSON** — `fab-project.json` at the root. Matches the browser's native format (and the app
+  already parses JSON for `libs.json`). No TOML.
+- **Extension `.scadproj`, and SAY it's a zip.** The distinct suffix is the disambiguator (no collision
+  with a random `.zip`), but the UX LOUDLY tells people a `.scadproj` is just a zip they can rename and
+  unzip — in the file-open filter, the docs, and a tooltip. No magic, no lock-in: it's their folder in a
+  zip.
 
 ## Phase Z sequence
 
 1. **Z.1 — the `.scadproj` container.** Schema + reader/writer in fab-scad (stored zip, `mimetype`
-   first-entry, `fab-project.toml` manifest, entry-point resolution + the single-`.scad` fallback, path
+   first-entry, `fab-project.json` manifest, entry-point resolution + the single-`.scad` fallback, path
    sanitize). Pure + unit-tested. Native `fab pack` / `fab open`.
 2. **Z.2 — project VFS into the render pack.** Merge project files (relative-path keyed) into the
    include/asset pack; byte-clean the web producer so binary assets survive. Unblocks project-local
    includes AND binary `import()`/`surface()` on native + web. (Subsumes the W.3.24 transport residual.)
 3. **Z.3 — fab-gui web open/save.** Open a `.scadproj` (drag-drop / file-open / `?model=` fetch) → in-memory
-   project → editor on the entry file; Save / publish re-zip. Minimal single-file editing first.
+   project in the file list (FOLDER treatment, like native `FileList`) → switch + edit any file; Save /
+   publish re-zip. The open-file UX says plainly it's a zip.
 4. **Z.4 — hotchkiss-io kind.** `MediaKind::OpenscadProject` + probe extension + embed arm + format token +
    `ext_for_mime` (their repo, no migration).
 5. **Z.5 — publish round-trip + validate.** Publish a project zip, re-open it from the gallery; e2e;

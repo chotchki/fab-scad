@@ -246,7 +246,6 @@ fn run_windowed(scene: SceneCfg, shot: Option<PathBuf>) {
     .init_resource::<OpenDialog>()
     .init_resource::<AddFileDialog>()
     .init_resource::<print::ExportJob>()
-    .init_resource::<Watch>()
     .init_resource::<SliceInBackground>()
     .init_resource::<PendingConfig>()
     .init_resource::<PanelSeam>()
@@ -274,7 +273,6 @@ fn run_windowed(scene: SceneCfg, shot: Option<PathBuf>) {
             (
                 poll_open_dialog,
                 apply_switch_file,
-                watch_source,
                 preview_edited_buffer,
             ),
             sync_overlays,
@@ -523,7 +521,6 @@ fn run_scripted(scene: SceneCfg, actions: Vec<Action>) {
     .init_resource::<OpenDialog>()
     .init_resource::<AddFileDialog>()
     .init_resource::<print::ExportJob>()
-    .init_resource::<Watch>()
     .init_resource::<SliceInBackground>()
     .init_resource::<PendingConfig>()
     .init_resource::<PanelSeam>()
@@ -547,7 +544,6 @@ fn run_scripted(scene: SceneCfg, actions: Vec<Action>) {
             // these, so it never auto-sliced an overflowing part (unfaithful to run_windowed).
             (kick_auto_plan, poll_auto_plan).chain().after(poll_job),
             apply_switch_file,
-            watch_source,
             preview_edited_buffer,
             sync_overlays,
             sync_overlay_visuals,

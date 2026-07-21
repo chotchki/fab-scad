@@ -1,20 +1,10 @@
-//! Async render/slice/publish/auto-plan orchestration + source file IO/watch.
+//! Async render/slice/publish/auto-plan orchestration + source file IO.
 
 use crate::*;
 
 /// Idle seconds after the last editor keystroke before the buffer re-renders (U.3.2). Long enough
 /// that typing doesn't kick a render mid-word, short enough to feel live.
 pub(crate) const EDIT_DEBOUNCE: f64 = 0.5;
-
-/// Auto-reload watch (5.3.3 + the DAG): the latest mtime across the source's whole include CLOSURE
-/// (`fab_scad::deps`), and that closure cached. `watch_source` polls it each frame and re-renders
-/// when ANY dep advances — edit an `include`d module and the preview rebuilds, not just the open
-/// file. mtime-poll, not the `notify` crate — trivial syscalls, no thread/dep, same effect.
-#[derive(Resource, Default)]
-pub(crate) struct Watch {
-    pub(crate) mtime: Option<std::time::SystemTime>,
-    pub(crate) closure: Vec<PathBuf>,
-}
 
 /// An off-thread auto-plan's payload: the fit-to-bed cuts + WIRE connectors + the part's component
 /// count, straight off the service's `Planned` response (W.3.3).
@@ -255,7 +245,6 @@ pub(crate) struct ModelState<'w> {
     pub(crate) print_job: ResMut<'w, PrintJob>,
     pub(crate) print_pieces: ResMut<'w, PrintPieces>,
     pub(crate) feas: ResMut<'w, Feas>,
-    pub(crate) watch: ResMut<'w, Watch>,
 }
 
 #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
@@ -263,7 +252,7 @@ impl ModelState<'_> {
     /// Reset to a clean slate for a freshly-loaded source: no cuts/connectors/orientations, bounds
     /// cleared so `poll_job` re-seeds the first cut, modes exited, cached meshes dropped (the whole/
     /// sliced handles live in `Part` now, so resetting `Parts` drops them), any in-flight print job
-    /// cancelled, and the watch disarmed so `watch_source` records the new file's mtime.
+    /// cancelled.
     pub(crate) fn reset(&mut self) {
         *self.parts = Parts(vec![Part::default()]);
         self.active.0 = 0;
@@ -273,7 +262,6 @@ impl ModelState<'_> {
         *self.print_job = PrintJob::default();
         *self.print_pieces = PrintPieces::default();
         *self.feas = Feas::default();
-        *self.watch = Watch::default();
     }
 }
 
@@ -837,69 +825,6 @@ pub(crate) fn poll_save_project(
     }
 }
 
-/// Auto-reload (5.3.3): if the active source's mtime advanced since its last load, re-render the
-/// whole model — an external editor / OpenSCAD saved it. Fires only when no job is in flight (which
-/// debounces multi-write saves); the cut stack is PRESERVED (re-slice to refresh the exploded view).
-pub(crate) fn watch_source(
-    scene: Res<SceneCfg>,
-    project: Res<crate::project::ProjectDoc>,
-    mut watch: ResMut<Watch>,
-    mut job: ResMut<Job>,
-    mut status: ResMut<Status>,
-    pool: Res<GeomPool>,
-) {
-    // Z.3.6: every project now renders from a temp render-ROOT (a container's temp OR a loose folder's
-    // shadow) the app rewrites on every preview — its mtime advancing is OUR write, not an external
-    // editor, so watching it would spuriously re-render in a loop. Only a base_dir-less paste is watched
-    // (and it has no file anyway). Project-level external-edit reload (watch the REAL folder) is a
-    // Z.3.6 follow-on; for now editing outside the app doesn't auto-reload a project.
-    if project.base_dir.is_some() {
-        return;
-    }
-    let Some(src) = scene.source.as_deref() else {
-        return;
-    };
-    // Resolve the include closure once per (re)load (empty = first sight after a reset); it's
-    // re-derived on a real change below so newly added/removed `include`s are tracked.
-    if watch.closure.is_empty() {
-        watch.closure = dep_closure(src, &scene);
-    }
-    // Latest mtime across the WHOLE closure — editing any included module advances it.
-    let mtime = watch
-        .closure
-        .iter()
-        .filter_map(|p| std::fs::metadata(p).and_then(|m| m.modified()).ok())
-        .max();
-    match (watch.mtime, mtime) {
-        (None, m) => watch.mtime = m, // first sight: arm, don't render (the load already did)
-        // A render in flight (mtime advanced but job busy) falls through to `_` and does nothing —
-        // the next idle frame retries, so a save mid-render is never lost.
-        (Some(prev), Some(m)) if m > prev && job.0.is_none() => {
-            watch.mtime = Some(m);
-            watch.closure = dep_closure(src, &scene); // the edit may have changed the include set
-            info!(
-                "reload {} (+{} deps)",
-                src.display(),
-                watch.closure.len().saturating_sub(1)
-            );
-            // Reload (fresh = false): refresh geometry in place, keep each part's cuts/connectors.
-            kick_render(&pool, &mut job, &mut status, &scene, false);
-        }
-        _ => {}
-    }
-}
-
-/// The transitive `include`/`use` closure of `src`, resolved against the workspace OPENSCADPATH
-/// (`root/libs` + `root/scad-lib`) — the files whose edits should trigger a rebuild.
-pub(crate) fn dep_closure(src: &Path, scene: &SceneCfg) -> Vec<PathBuf> {
-    let search: Vec<PathBuf> = scene
-        .root
-        .as_ref()
-        .map(|r| vec![r.join("libs"), r.join("scad-lib")])
-        .unwrap_or_default();
-    fab_scad::deps::closure(src, &search).into_iter().collect()
-}
-
 /// Every `.scad` under `dir` (recursive), sorted, skipping generated/VCS/hidden dirs. The picker's
 /// project→files expansion — handles both flat (`foo/bar.scad`) and `src/`-nested layouts.
 pub(crate) fn scad_files(dir: &Path) -> Vec<PathBuf> {
@@ -968,9 +893,8 @@ pub(crate) fn kick_render(
 }
 
 /// Whole-render an EXPLICIT source path (U.3.2) — `cfg` still supplies root/tmp, but the content +
-/// include base come from `src`, not `cfg.source`. The editor buffer's preview renders its hidden
-/// temp this way WITHOUT repointing `cfg.source`, so `watch_source` keeps watching the real file and
-/// never fights the preview.
+/// include base come from `src`, not `cfg.source`. The preview renders a project's render-root entry
+/// this way without repointing `cfg.source` at every keystroke.
 pub(crate) fn kick_render_from(
     pool: &GeomPool,
     job: &mut Job,
@@ -1742,8 +1666,6 @@ pub(crate) fn poll_save(mut job: ResMut<SaveJob>, mut status: ResMut<Status>) {
     }
 }
 
-/// Open the active `.scad` source in the OpenSCAD GUI (detached) so you can edit it; the file-watch
-/// re-renders here on save.
 /// "Reset to auto" (the `PanelCmd::AutoSlice` button): wipe the active part's cuts + connectors and
 /// re-arm `kick_auto_plan` to re-derive the FULL plan — fit-to-bed cuts + auto-placed connectors, or
 /// WHOLE if the part fits. The reactive loop reslices. (U.3.15: the old action re-derived cuts only

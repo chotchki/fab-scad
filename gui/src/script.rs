@@ -22,7 +22,6 @@ pub(crate) enum Action {
     AutoPlace,             // auto-place connectors across the open cut's cross-section
     ConnType(fab::ConnKind), // set the active connector kind for new placements (onion|bolt)
     Open(PathBuf), // switch the active source to <path> (a dir → its .scad; a file → itself)
-    Touch(PathBuf), // bump <path>'s mtime (rewrite same bytes) → exercise watch_source reload
     Part(usize),   // make top-level part <i> the active one (T.2b multi-part switch)
     Export,        // export the print-oriented pieces to a Bambu .3mf (co-pack all parts, T.2b.4)
     Tab(Tab),      // switch the active workflow tab: model|parts|orientation|export (U.3.8)
@@ -64,7 +63,6 @@ pub(crate) fn parse_script(s: &str) -> Vec<Action> {
                     _ => None,
                 },
                 "open" => it.next().map(|p| Action::Open(PathBuf::from(p))),
-                "touch" => it.next().map(|p| Action::Touch(PathBuf::from(p))),
                 "reslice" => Some(Action::Reslice),
                 "shot" => it.next().map(|p| Action::Shot(PathBuf::from(p))),
                 "wait" => it.next()?.parse().ok().map(Action::Wait),
@@ -396,16 +394,6 @@ pub(crate) fn run_script(
             // apply_switch_file clears bounds → None; the top guard pauses run_script until the new
             // whole render lands (bounds Some again + job idle).
             runner.timer >= 2 && job.0.is_none()
-        }
-        Action::Touch(path) => {
-            if runner.timer == 1 {
-                // Rewrite identical bytes to bump the mtime — watch_source should catch it and
-                // re-render. Fails quietly if the path is gone (the test asserts on the log).
-                let _ = std::fs::read(&path).and_then(|b| std::fs::write(&path, b));
-            }
-            // Generous fixed floor so watch_source detects + the reload render completes; if watch
-            // never fires, job stays idle and this still ends — the log grep is the real assertion.
-            runner.timer >= 90 && job.0.is_none()
         }
         // Handled by the early-return block above (before the active-part borrow); never reached here.
         Action::Part(_) => true,

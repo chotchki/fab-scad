@@ -155,12 +155,6 @@ mod web {
         serde_json::from_str(&text).ok()
     }
 
-    /// Fetch the pack (once) and compute `main`'s include closure — the bytes the Worker needs.
-    pub(crate) async fn lib_closure(main: &str) -> Vec<(String, Vec<u8>)> {
-        let pack = fetch_pack().await;
-        super::closure(main, pack.as_ref())
-    }
-
     /// The full worker `libs` for a PROJECT render (Z.3.4): `main`'s library closure PLUS, for each file
     /// in the project `pack`, that file itself AND its OWN library closure — so a project lib that
     /// `include`s BOSL2 pulls BOSL2 too. Binary assets ride verbatim (matched by basename in the worker).
@@ -185,7 +179,7 @@ mod web {
     }
 }
 #[cfg(target_arch = "wasm32")]
-pub(crate) use web::{lib_closure, project_libs};
+pub(crate) use web::project_libs;
 
 #[cfg(test)]
 mod tests {

@@ -35,6 +35,10 @@ pub(crate) struct WebMeta {
     description: String,
     base: String,
     stem: String,
+    /// The source variant to upload (Z.5): `<stem>.scadproj`+project-mime for a project, else
+    /// `<stem>.scad` — the filename extension tells the server the kind.
+    source_name: String,
+    source_mime: &'static str,
     source: Vec<u8>,
     orbit: (f32, f32, f32, Vec3),
     plate: Option<Vec<u8>>,
@@ -93,6 +97,7 @@ pub(crate) fn publish_web_kick(
     parts: Res<Parts>,
     pieces: Res<crate::print::PrintPieces>,
     scene: Res<SceneCfg>,
+    project: Res<crate::project::ProjectDoc>,
     pool: Res<GeomPool>,
     cams: Query<&Orbit>,
     mut dialog: ResMut<crate::publish_dialog::PublishDialog>,
@@ -114,8 +119,6 @@ pub(crate) fn publish_web_kick(
     }
     let description = dialog.description.clone();
 
-    // Bake the live slicing config + bed into the source (exactly the .scad download / save-back path), so
-    // the published, remixable source restores the plan on reload. This IS the source variant we upload.
     let printer = config::PrinterCfg {
         bed: [
             scene.bed[0] as f64,
@@ -123,15 +126,13 @@ pub(crate) fn publish_web_kick(
             scene.bed[2] as f64,
         ],
     };
-    let baked = config::with_config_block(&editor.text, &parts.0, Some(printer));
     // Name the source from the deep-linked model's basename when there is one; else (a pasted buffer with no
-    // `?model=`) from the provided TITLE — so the published `.scad` reads `<title-slug>.scad`, matching the
-    // desktop path (W.3.33). Everything downstream (`src_name`, mesh + plate + cover names) keys off `stem`.
+    // `?model=`) from the provided TITLE — so the published source reads `<title-slug>.scad`, matching the
+    // desktop path (W.3.33). Everything downstream (mesh + plate + cover names) keys off `stem`.
     let stem = editor
         .path
-        .file_name()
+        .file_stem()
         .and_then(|n| n.to_str())
-        .map(|n| n.strip_suffix(".scad").unwrap_or(n))
         .filter(|n| !n.is_empty())
         .map(str::to_string)
         .unwrap_or_else(|| {
@@ -142,6 +143,16 @@ pub(crate) fn publish_web_kick(
                 slug
             }
         });
+    // The uploaded SOURCE variant (Z.5): a `.scadproj` for a project — the gallery item re-opens as a real
+    // project — else a config-baked `.scad`. The mesh renders from the FULL project (render_pack).
+    let (source_name, source_mime, source) =
+        match crate::jobs::project_source_variant(&project, &parts.0, printer, &editor.text, &stem) {
+            Ok(v) => v,
+            Err(e) => {
+                status.0 = format!("publish failed: {e:#}");
+                return;
+            }
+        };
 
     // The printable Bambu plate, if a plan was staged — a standalone download item, same as the save-back.
     let plate = crate::print::plate_3mf_bytes(&pieces, &parts, &scene);
@@ -165,18 +176,18 @@ pub(crate) fn publish_web_kick(
         .and_then(|w| w.location().origin().ok())
         .unwrap_or_default();
 
-    // `main` (the baked source bytes) feeds BOTH the render source and the uploaded `.scad` variant.
-    let main = baked.into_bytes();
-    let source = main.clone();
+    // The mesh renders from the whole PROJECT (entry + its files); the uploaded source is the variant above.
+    let (render_main, render_pack) = project.render_pack(&editor.text);
     let pool = pool.clone();
     let task = AsyncComputeTaskPool::get().spawn(async move {
-        let libs = crate::lib_fetch::lib_closure(&String::from_utf8_lossy(&main)).await;
+        let main_str = String::from_utf8_lossy(&render_main).into_owned();
+        let libs = crate::lib_fetch::project_libs(&main_str, render_pack).await;
 
         // 1. full-res render → held handle + display STL + bounds.
         let (id, stl, min, max) = match pool
             .call(Request::RenderWhole {
                 source: Source::Bytes {
-                    main: main.clone(),
+                    main: render_main,
                     libs,
                 },
                 root: None,
@@ -229,6 +240,8 @@ pub(crate) fn publish_web_kick(
             description,
             base,
             stem,
+            source_name,
+            source_mime,
             source,
             orbit,
             plate,
@@ -388,6 +401,8 @@ fn spawn_upload(
             &meta.title,
             &meta.description,
             &meta.stem,
+            &meta.source_name,
+            meta.source_mime,
             &meta.source,
             &arts.low,
             &arts.high,
@@ -410,6 +425,8 @@ async fn upload(
     title: &str,
     description: &str,
     stem: &str,
+    source_name: &str,
+    source_mime: &str,
     source: &[u8],
     low: &[u8],
     high: &[u8],
@@ -427,7 +444,6 @@ async fn upload(
     } else {
         "model/stl"
     };
-    let src_name = format!("{stem}.scad");
     let low_name = format!("{stem}_low.{ext}");
     let high_name = format!("{stem}.{ext}");
 
@@ -447,12 +463,7 @@ async fn upload(
             mesh_mime,
             high,
         ),
-        (
-            contract::MEDIA_FILE_FIELD,
-            src_name.as_str(),
-            "application/x-openscad",
-            source,
-        ),
+        (contract::MEDIA_FILE_FIELD, source_name, source_mime, source),
     ];
     let model_ref = post_media(base, &model_files, &format!("{title} — model")).await?;
 

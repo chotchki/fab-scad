@@ -522,7 +522,7 @@ fn write_under(base: &std::path::Path, rel: &str, body: &[u8]) -> anyhow::Result
 /// Re-zip the whole project to `.scadproj` bytes (Z.3.5): the ENTRY carries the baked `fab:config` block
 /// (so a reopen restores the bed), every other file + binary asset goes verbatim from the ProjectDoc's
 /// current (flushed) state. The manifest keeps the original entry; the title stays whatever it was.
-#[cfg(not(target_arch = "wasm32"))]
+/// Cross-platform (Z.3.8): `scadproj` write works on wasm too, so the web save/publish can re-zip.
 pub(crate) fn rezip_project(
     project: &crate::project::ProjectDoc,
     parts: &[Part],
@@ -552,6 +552,29 @@ pub(crate) fn rezip_project(
     }
     let proj = scadproj::project_from_files(files, Some(entry_name), None)?;
     scadproj::write_scadproj(&proj)
+}
+
+/// The SOURCE variant to upload for the current document (Z.3.8 save-back / Z.5 publish): a `.scadproj`
+/// for a MULTI-FILE project — the site ingests it as `OpenscadProject` via its `.scadproj` probe (Z.4),
+/// so the gallery item re-opens as a real project — else a config-baked `.scad`. Returns
+/// `(filename, mime, bytes)`; `stem` names the file, `entry_text` is the live single-file source. The web
+/// upload paths carry bytes; native publish rezips to a temp file for `upload_model`'s path API instead.
+#[cfg(target_arch = "wasm32")]
+pub(crate) fn project_source_variant(
+    project: &crate::project::ProjectDoc,
+    parts: &[Part],
+    printer: config::PrinterCfg,
+    entry_text: &str,
+    stem: &str,
+) -> anyhow::Result<(String, &'static str, Vec<u8>)> {
+    use fab_scad::scadproj::{PROJECT_EXT, PROJECT_MIME};
+    if project.is_multifile() {
+        let bytes = rezip_project(project, parts, printer)?;
+        Ok((format!("{stem}.{PROJECT_EXT}"), PROJECT_MIME, bytes))
+    } else {
+        let baked = config::with_config_block(entry_text, parts, Some(printer));
+        Ok((format!("{stem}.scad"), "application/x-openscad", baked.into_bytes()))
+    }
 }
 
 /// Materialize every project file + asset under `base` — the disk mirror the native render reads
@@ -1507,22 +1530,10 @@ pub(crate) fn save_action(
         status.0 = "already saving…".into();
         return;
     }
-    // Z.3.5 landmine guard (hotchkiss-io feedback): PUT /variants is a COMPLETE replace. For a multi-file
-    // project (opened via Z.3.4), uploading just {entry.scad, meshes} would DELETE the .scadproj archive +
-    // every non-entry file, flipping the item to STL. Suppress until the web re-zip save exists (Z.3.8).
-    if project.is_multifile() {
-        status.0 =
-            "project save-back isn't on the web yet — it would overwrite the .scadproj. Save from \
-             the desktop app for now."
-                .into();
-        return;
-    }
     let Some(url) = save_target.0.clone() else {
         status.0 = "this model isn't a saveable hotchkiss.io item".into();
         return;
     };
-    // Bake the live slicing config + bed into the source, same as the .scad download (W.3.8), so a
-    // reload restores the plan. This IS the source variant we upload.
     let printer = config::PrinterCfg {
         bed: [
             scene.bed[0] as f64,
@@ -1530,14 +1541,29 @@ pub(crate) fn save_action(
             scene.bed[2] as f64,
         ],
     };
-    let baked = config::with_config_block(&editor.text, &parts.0, Some(printer));
     let name = editor
         .path
         .file_name()
         .and_then(|n| n.to_str())
         .filter(|n| !n.is_empty())
         .unwrap_or("model.scad");
-    let stem = name.strip_suffix(".scad").unwrap_or(name).to_string();
+    let stem = name
+        .strip_suffix(".scad")
+        .or_else(|| name.strip_suffix(".scadproj"))
+        .unwrap_or(name)
+        .to_string();
+    // Z.3.8: the SOURCE variant is the whole `.scadproj` for a project (lifts the destructive-save guard —
+    // PUT /variants replaces the set, and now the set carries the archive), else the config-baked `.scad`.
+    let (src_name, src_mime, src_bytes) =
+        match project_source_variant(&project, &parts.0, printer, &editor.text, &stem) {
+            Ok(v) => v,
+            Err(e) => {
+                status.0 = format!("save failed: {e:#}");
+                return;
+            }
+        };
+    // The mesh renders from the FULL project (entry + its files), so a project's meshes match its geometry.
+    let (render_main, render_pack) = project.render_pack(&editor.text);
     // W.3.18: also push the printable Bambu plate when a plan has been staged (pieces only exist once
     // sliced/oriented on the Export tab). Built here — a quick in-memory zip, same as the Export button —
     // then moved into the upload; best-effort, a `None` (no pieces or a pack error) still saves the rest.
@@ -1547,14 +1573,14 @@ pub(crate) fn save_action(
     let pool = pool.clone();
 
     let task = AsyncComputeTaskPool::get().spawn(async move {
-        let main = baked.into_bytes();
-        let libs = crate::lib_fetch::lib_closure(&String::from_utf8_lossy(&main)).await;
+        let main_str = String::from_utf8_lossy(&render_main).into_owned();
+        let libs = crate::lib_fetch::project_libs(&main_str, render_pack).await;
 
         // 1. Full-res render → held handle.
         let id = match pool
             .call(Request::RenderWhole {
                 source: Source::Bytes {
-                    main: main.clone(),
+                    main: render_main,
                     libs,
                 },
                 root: None,
@@ -1587,22 +1613,17 @@ pub(crate) fn save_action(
             Err(e) => return Err(format!("save-meshes transport: {e}")),
         };
 
-        // 4. Upload all three — same format for low+high, cookie-authenticated.
+        // 4. Upload all three — same format for low+high, cookie-authenticated. The source variant is the
+        // `.scadproj`/`.scad` decided up front (Z.3.8); its filename extension tells the server the kind.
         let mesh_mime = if ext == "3mf" {
             "model/3mf"
         } else {
             "model/stl"
         };
-        let src_name = format!("{stem}.scad");
         let low_name = format!("{stem}_low.{ext}");
         let high_name = format!("{stem}.{ext}");
         let mut files: Vec<(&str, &str, &str, &[u8])> = vec![
-            (
-                "source",
-                src_name.as_str(),
-                "application/x-openscad",
-                main.as_slice(),
-            ),
+            ("source", src_name.as_str(), src_mime, src_bytes.as_slice()),
             ("low", low_name.as_str(), mesh_mime, low.as_slice()),
             ("high", high_name.as_str(), mesh_mime, high.as_slice()),
         ];

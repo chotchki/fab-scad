@@ -99,22 +99,33 @@ fn save_buffer(
         }
         return;
     }
-    let baked = config::with_config_block(&editor.text, parts, Some(printer));
+    // Fresh/pasted (native, no home to write in place) or the web (download). A multi-file doc becomes a
+    // `.scadproj` download (Z.3.8), a single file a `.scad` — via the shared source-variant helper.
     #[cfg(not(target_arch = "wasm32"))]
-    if std::fs::write(&editor.path, baked).is_ok() {
-        editor.dirty = false;
+    {
+        let baked = config::with_config_block(&editor.text, parts, Some(printer));
+        if std::fs::write(&editor.path, baked).is_ok() {
+            editor.dirty = false;
+        }
     }
     #[cfg(target_arch = "wasm32")]
     {
-        let _ = project; // web save-back into a project is Z.3.4; today the web is single-file
-        let name = editor
+        let stem = editor
             .path
-            .file_name()
+            .file_stem()
             .and_then(|n| n.to_str())
             .filter(|n| !n.is_empty())
-            .unwrap_or("model.scad");
-        if crate::web_host::download_bytes(name, "application/x-openscad", baked.as_bytes()) {
-            editor.dirty = false;
+            .unwrap_or("model");
+        match crate::jobs::project_source_variant(project, parts, printer, &editor.text, stem) {
+            Ok((name, mime, bytes)) => {
+                if crate::web_host::download_bytes(&name, mime, &bytes) {
+                    editor.dirty = false;
+                    for f in &mut project.files {
+                        f.dirty = false;
+                    }
+                }
+            }
+            Err(e) => error!("save: {e:#}"),
         }
     }
 }
@@ -652,12 +663,10 @@ pub(crate) fn panel_ui(
                             writers.cmd.write(PanelCmd::SetEntry(project.active));
                         }
                     });
-                    // Save back to the site (W.5.8): web only, and only when the deep-link named a
-                    // media item (else there's no item to update in place). Hidden for a MULTI-FILE
-                    // project (Z.3.5 guard) — a single-file PUT would wipe the .scadproj (see save_action).
-                    // Gold CTA; the status bar reports progress + result (gui-reactive-standard).
+                    // Save back to the site (W.5.8): web only, and only when the deep-link named a media
+                    // item (else there's no item to update in place). Z.3.8: a project PUTs its whole
+                    // `.scadproj` now (the guard is gone). Gold CTA; the status bar reports progress.
                     if view.save_target.0.is_some()
-                        && !project.is_multifile()
                         && ui
                             .add(
                                 egui::Button::new(

@@ -70,6 +70,8 @@ pub(crate) enum PubFlow {
 pub(crate) fn publish_kick(
     scene: Res<SceneCfg>,
     editor: Res<EditorBuf>,
+    parts: Res<Parts>,
+    project: Res<crate::project::ProjectDoc>,
     pool: Res<GeomPool>,
     mut flow: ResMut<PubFlow>,
     mut dialog: ResMut<crate::publish_dialog::PublishDialog>,
@@ -159,6 +161,31 @@ pub(crate) fn publish_kick(
             (staged, slug)
         }
     };
+    // The uploaded SOURCE variant (Z.5): a project ships its whole `.scadproj` (rezipped to a temp file so
+    // upload_model can point at it — the `.scadproj` extension tells the server it's a project), else the
+    // `.scad` at `src`. The RENDER still reads `src` (the shadow entry), so a project's mesh is complete.
+    let upload_source = if project.is_multifile() {
+        let printer = config::PrinterCfg {
+            bed: [scene.bed[0] as f64, scene.bed[1] as f64, scene.bed[2] as f64],
+        };
+        match rezip_project(&project, &parts.0, printer) {
+            Ok(bytes) => {
+                let _ = std::fs::create_dir_all(&out_dir);
+                let path = out_dir.join(format!("{stem}.scadproj"));
+                if let Err(e) = std::fs::write(&path, bytes) {
+                    status.0 = format!("publish: staging the .scadproj failed ({e})");
+                    return;
+                }
+                path
+            }
+            Err(e) => {
+                status.0 = format!("publish: re-zipping the project failed ({e:#})");
+                return;
+            }
+        }
+    } else {
+        src.clone()
+    };
     let cover_png = out_dir.join(format!("{stem}-cover.png"));
     // The printable plate .3mf, if `fab make` / the Export tab left one beside the source (best-effort; a
     // staged buffer sits in the scratch dir with no sibling plate, so this is None there).
@@ -231,7 +258,7 @@ pub(crate) fn publish_kick(
             key,
             orbit,
             cover_png,
-            source: src,
+            source: upload_source,
             plates,
         },
     };

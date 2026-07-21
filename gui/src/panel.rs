@@ -63,6 +63,46 @@ fn save_buffer(editor: &mut EditorBuf, parts: &[Part], bed: [f32; 3]) {
     }
 }
 
+/// Seconds of hold to fire a [`hold_to_delete`] — long enough to be deliberate, short enough not to nag.
+const HOLD_SECS: f32 = 0.6;
+
+/// A press-and-HOLD delete (no modal — chotchki hates them): a trash button that FILLS with danger-red
+/// as you hold it; release early and the fill drains, hold to full and it fires (returns `true` that
+/// frame). The hold progress lives in egui memory keyed by `id` (transient, per-widget), so it needs no
+/// Bevy param — `panel_ui` is at its 16-param cap. Right-align the caller's layout to seat it at the edge.
+fn hold_to_delete(ui: &mut egui::Ui, id: egui::Id, hover: &str) -> bool {
+    let resp = ui
+        .add(egui::Button::new(egui::RichText::new(icons::DELETE).color(theme::DANGER)).small())
+        .on_hover_text(hover);
+    let dt = ui.input(|i| i.stable_dt);
+    let mut prog: f32 = ui.data(|d| d.get_temp(id).unwrap_or(0.0));
+    if resp.is_pointer_button_down_on() {
+        prog += dt / HOLD_SECS;
+        ui.ctx().request_repaint(); // animate the fill while held
+    } else {
+        // Drain fast on release (a flicked press shouldn't leave a half-charged button next time).
+        prog -= dt / (HOLD_SECS * 0.5);
+    }
+    prog = prog.clamp(0.0, 1.0);
+    // The charging fill: a translucent danger sweep left→right across the button, glyph showing through.
+    if prog > 0.0 {
+        let r = resp.rect;
+        let fill = egui::Rect::from_min_size(r.min, egui::vec2(r.width() * prog, r.height()));
+        ui.painter().rect_filled(
+            fill,
+            2.0,
+            egui::Color32::from_rgba_unmultiplied(220, 38, 38, 110),
+        );
+        ui.ctx().request_repaint(); // keep animating while it drains, too
+    }
+    if prog >= 1.0 {
+        ui.data_mut(|d| d.insert_temp(id, 0.0_f32));
+        return true;
+    }
+    ui.data_mut(|d| d.insert_temp(id, prog));
+    false
+}
+
 /// The file name of `p` (its last component) for a project-home readout — falls back to the whole path.
 fn base(p: &std::path::Path) -> String {
     p.file_name()
@@ -323,11 +363,23 @@ pub(crate) fn panel_ui(
                             .font(theme::quattro(12.0))
                             .color(theme::TEXT_MUTED),
                     );
+                    // Self-documenting: the gold ▸ is the render target; a navy ▸ button moves it.
+                    if project.files.len() > 1 {
+                        ui.label(
+                            egui::RichText::new(format!(
+                                "{} marks what renders — click a file's {} to make it the target",
+                                icons::CHEVRON_RIGHT,
+                                icons::CHEVRON_RIGHT
+                            ))
+                            .font(theme::quattro(11.0))
+                            .color(theme::TEXT_MUTED),
+                        );
+                    }
                     ui.separator();
-                    // File rows: the entry carries a gold render-pointer; a NON-entry row's grey pointer is
-                    // a button that promotes it (set render target). The active (editor-shown) row is the
-                    // selected pill; a dirty file shows the unsaved dot; a trash button removes it (never
-                    // the entry, never the last file).
+                    // File rows: the entry carries the GOLD render-pointer (a static label); every OTHER
+                    // row leads with a NAVY ▸ button that promotes it to the render target. The active
+                    // (editor-shown) row is the selected pill; a dirty file shows the unsaved dot; a red
+                    // trash button removes it (never the entry, never the last file).
                     let multi = project.files.len() > 1;
                     for (i, f) in project.files.iter().enumerate() {
                         ui.horizontal(|ui| {
@@ -339,11 +391,11 @@ pub(crate) fn panel_ui(
                                 .add(
                                     egui::Button::new(
                                         egui::RichText::new(icons::CHEVRON_RIGHT)
-                                            .color(theme::DIV_GREY),
+                                            .color(theme::NAVY),
                                     )
-                                    .frame(false),
+                                    .small(),
                                 )
-                                .on_hover_text("set as the render target")
+                                .on_hover_text("set as the render target (entry)")
                                 .clicked()
                             {
                                 writers.cmd.write(PanelCmd::SetEntry(i));
@@ -358,20 +410,20 @@ pub(crate) fn panel_ui(
                                 ui.colored_label(theme::GOLD_DIM, icons::DOT)
                                     .on_hover_text("unsaved");
                             }
-                            if multi
-                                && !is_entry
-                                && ui
-                                    .add(
-                                        egui::Button::new(
-                                            egui::RichText::new(icons::DELETE)
-                                                .color(theme::TEXT_MUTED),
-                                        )
-                                        .frame(false),
-                                    )
-                                    .on_hover_text("remove from the project")
-                                    .clicked()
-                            {
-                                writers.cmd.write(PanelCmd::DeleteFile(i));
+                            // Delete: RIGHT-aligned column, HOLD to fire (destructive → deliberate).
+                            if multi && !is_entry {
+                                ui.with_layout(
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
+                                        if hold_to_delete(
+                                            ui,
+                                            egui::Id::new(("proj_del", i)),
+                                            "hold to remove from the project",
+                                        ) {
+                                            writers.cmd.write(PanelCmd::DeleteFile(i));
+                                        }
+                                    },
+                                );
                             }
                         });
                     }

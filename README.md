@@ -29,10 +29,11 @@ Two reimplementations, and no OpenSCAD binary in the flagship render path:
   no clang, no FFI. Two pillars — deterministic parallelism (bit-identical output every run, native OR
   wasm) and portable transcendentals (so native and wasm agree to the bit).
 
-The GUI and web app render ENTIRELY in-process — OpenSCAD is only the test oracle there. (A few CLI
-verbs still call the OpenSCAD binary by default — `fab render` without `--engine scad-rs`, plus
-`publish` — but that's a choice, not a dependency.) It's faster than OpenSCAD on nearly all of my real
-models, and it renders heavy BOSL2 pieces that OpenSCAD times out on — the whole reason it exists.
+The GUI and web app render ENTIRELY in-process — OpenSCAD is only the test oracle there, and the whole
+production workflow (`make` / `slice` / `coupon` / `publish`) is pure-Rust too. The one verb that still
+shells the binary by default is `fab render` — it's the differential ORACLE, so defaulting to the real
+thing is the point (`--engine scad-rs` runs our pipeline). It's faster than OpenSCAD on nearly all of my
+real models, and it renders heavy BOSL2 pieces that OpenSCAD times out on — the whole reason it exists.
 
 ## Using it
 

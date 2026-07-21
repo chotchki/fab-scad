@@ -441,24 +441,31 @@ pub(crate) fn panel_ui(
                     // (editor-shown) row is the selected pill; a dirty file shows the unsaved dot; a red
                     // trash button removes it (never the entry, never the last file).
                     let multi = project.files.len() > 1;
+                    // File MANAGEMENT (set-entry / delete) is desktop-only for now — its handler
+                    // (`project_files_action`) is native. On the web the list is view + switch + edit.
+                    let manage = view.platform.shows_picker();
                     for (i, f) in project.files.iter().enumerate() {
                         ui.horizontal(|ui| {
                             let is_entry = i == project.entry;
                             if is_entry {
                                 ui.label(egui::RichText::new(icons::CHEVRON_RIGHT).color(theme::GOLD))
                                     .on_hover_text("entry — the project's render target");
-                            } else if ui
-                                .add(
-                                    egui::Button::new(
-                                        egui::RichText::new(icons::CHEVRON_RIGHT)
-                                            .color(theme::NAVY),
+                            } else if manage {
+                                if ui
+                                    .add(
+                                        egui::Button::new(
+                                            egui::RichText::new(icons::CHEVRON_RIGHT)
+                                                .color(theme::NAVY),
+                                        )
+                                        .small(),
                                     )
-                                    .small(),
-                                )
-                                .on_hover_text("set as the render target (entry)")
-                                .clicked()
-                            {
-                                writers.cmd.write(PanelCmd::SetEntry(i));
+                                    .on_hover_text("set as the render target (entry)")
+                                    .clicked()
+                                {
+                                    writers.cmd.write(PanelCmd::SetEntry(i));
+                                }
+                            } else {
+                                ui.add_space(14.0); // align names under the entry pointer
                             }
                             if ui
                                 .selectable_label(project.active == i, &f.name)
@@ -471,7 +478,7 @@ pub(crate) fn panel_ui(
                                     .on_hover_text("unsaved");
                             }
                             // Delete: RIGHT-aligned column, HOLD to fire (destructive → deliberate).
-                            if multi && !is_entry {
+                            if manage && multi && !is_entry {
                                 ui.with_layout(
                                     egui::Layout::right_to_left(egui::Align::Center),
                                     |ui| {

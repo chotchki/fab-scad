@@ -160,9 +160,32 @@ mod web {
         let pack = fetch_pack().await;
         super::closure(main, pack.as_ref())
     }
+
+    /// The full worker `libs` for a PROJECT render (Z.3.4): `main`'s library closure PLUS, for each file
+    /// in the project `pack`, that file itself AND its OWN library closure — so a project lib that
+    /// `include`s BOSL2 pulls BOSL2 too. Binary assets ride verbatim (matched by basename in the worker).
+    /// The fetched lib pack is BORROWED per file (no clone), and the worker's BTreeMap dedups + lets the
+    /// project keys win on collision.
+    pub(crate) async fn project_libs(
+        main: &str,
+        pack: Vec<(String, Vec<u8>)>,
+    ) -> Vec<(String, Vec<u8>)> {
+        let libs = fetch_pack().await;
+        let mut out = super::closure(main, libs.as_ref());
+        for (name, bytes) in pack {
+            match String::from_utf8(bytes.clone()) {
+                Ok(text) => {
+                    out.extend(super::closure(&text, libs.as_ref()));
+                    out.push((name, bytes));
+                }
+                Err(_) => out.push((name, bytes)), // binary asset — no include scan
+            }
+        }
+        out
+    }
 }
 #[cfg(target_arch = "wasm32")]
-pub(crate) use web::lib_closure;
+pub(crate) use web::{lib_closure, project_libs};
 
 #[cfg(test)]
 mod tests {

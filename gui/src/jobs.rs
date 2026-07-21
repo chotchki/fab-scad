@@ -243,6 +243,9 @@ pub(crate) fn request_reslice(
 /// (Bevy caps a system at 16 params; a `SystemParam` struct counts as one). Everything here is a
 /// pure function of the current source + user edits — stale the instant a different `.scad` loads.
 #[derive(SystemParam)]
+// On wasm `apply_switch_file`'s native tail is cfg'd out and `project_files_action` doesn't compile, so
+// nothing reads these fields there — the struct stays (it's a param of the cross-platform switch system).
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 pub(crate) struct ModelState<'w> {
     pub(crate) parts: ResMut<'w, Parts>,
     pub(crate) active: ResMut<'w, ActivePart>,
@@ -255,6 +258,7 @@ pub(crate) struct ModelState<'w> {
     pub(crate) watch: ResMut<'w, Watch>,
 }
 
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 impl ModelState<'_> {
     /// Reset to a clean slate for a freshly-loaded source: no cuts/connectors/orientations, bounds
     /// cleared so `poll_job` re-seeds the first cut, modes exited, cached meshes dropped (the whole/
@@ -293,76 +297,108 @@ pub(crate) fn apply_switch_file(
     let Some(SwitchFile(i)) = ev.read().copied().last() else {
         return;
     };
-    let Some(path) = files.files.get(i).cloned() else {
-        return;
-    };
-    // A `.scadproj` is a real project: ONE entry renders, the rest are libs/parts. Switching a file
-    // changes the editor VIEW, not the render target — so viewing a lib keeps the entry on screen, and
-    // only the ENTRY's content changing (a fresh open, or a later set-entry) re-renders. A loose folder
-    // keeps folder-browser semantics: every file is its own model, so a switch renders the switched file.
-    let container = matches!(project.home, crate::project::ProjectHome::ScadProj(_));
-    // Persist the OUTGOING file's live edit before moving off it — but ONLY when the editor actually
-    // holds the current active file (a within-project switch). On a FRESH open the editor still carries
-    // the PREVIOUS project's text, and flushing that would clobber the new entry.
-    let holds_active = project.files.get(project.active).is_some_and(|f| {
-        let expected = match project.base_dir.as_ref() {
-            Some(b) => b.join(&f.name),
-            None => std::path::PathBuf::from(&f.name),
-        };
-        expected == editor.path
-    });
-    if holds_active {
-        project.flush_active(&editor.text);
-        #[cfg(not(target_arch = "wasm32"))]
-        if let (true, Some(base)) = (container, project.base_dir.clone())
-            && let Some(cur) = project.files.get(project.active)
-        {
-            let name = cur.name.clone();
-            let _ = write_under(&base, &name, editor.text.as_bytes());
-        }
-    }
-    files.active = Some(i);
-    project.set_active(i);
-    // The render target: a container always renders its ENTRY (from the temp materialization); a loose
-    // switch renders the switched file. The editor still shows the VIEWED file either way.
-    let render_path = if container {
-        project
-            .base_dir
-            .as_ref()
-            .and_then(|b| project.files.get(project.entry).map(|f| b.join(&f.name)))
-            .unwrap_or_else(|| path.clone())
-    } else {
-        path.clone()
-    };
-    // Only a CHANGE of render target is a re-render — a container view-switch (entry unchanged) just
-    // swaps the editor, no geometry churn. A loose switch always changes it (each file is a target).
-    let changed = scene.source.as_deref() != Some(render_path.as_path());
-    scene.source = Some(render_path.clone());
-    // Re-derive the workspace root from the RENDERED model (W.3.21): a sourceless `.app` launch left root
-    // None (cwd `/`), so opening a model that lives under a workspace must pick up its BOSL2/scad-lib
-    // search paths — else every module goes undefined and the render comes back empty. Native only (the
-    // web build ignores root; it renders the buffer as Source::Bytes against the fetched lib pack).
-    #[cfg(not(target_arch = "wasm32"))]
-    if let Some(r) = std::fs::canonicalize(&render_path)
-        .ok()
-        .as_deref()
-        .and_then(|p| p.parent())
-        .and_then(fab::find_root_from)
+    // Web (Z.3.4): no file paths — a switch operates on the ProjectDoc directly (FileList is native-only).
+    // It just swaps the editor VIEW; the render target is the ENTRY (via render_pack), unaffected by a
+    // view-switch, so no re-render — editing the newly-viewed file re-renders it through the preview.
+    #[cfg(target_arch = "wasm32")]
     {
-        scene.root = Some(r);
+        let _ = (
+            &mut files,
+            &mut scene,
+            &mut job,
+            &mut status,
+            &pool,
+            &mut state,
+            &mut pending_config,
+        );
+        let holds = project
+            .files
+            .get(project.active)
+            .is_some_and(|f| std::path::PathBuf::from(&f.name) == editor.path);
+        if holds {
+            project.flush_active(&editor.text);
+        }
+        project.set_active(i);
+        if let Some(f) = project.files.get(i) {
+            editor.text = f.text.clone();
+            editor.path = std::path::PathBuf::from(&f.name);
+            editor.dirty = f.dirty;
+            editor.edited_at = None;
+        }
+        return;
     }
-    // The VIEWED file's disk text (minus its fab:config block, W.3.8) becomes the editor buffer.
-    let view_cfg = read_into_editor(&mut editor, &path);
-    if changed {
-        // The stashed block applies in poll_job once the fresh parts are built. On a container's fresh
-        // open the viewed file IS the entry, so its config is the entry's; a loose switch renders the
-        // viewed file, so its own config is right. (A render-free view-switch leaves parts untouched.)
-        pending_config.0 = view_cfg;
-        // Drop the outgoing model's held base solids before wiping — a file switch abandons them.
-        free_bases(&pool, state.parts.0.iter().filter_map(|p| p.base).collect());
-        state.reset();
-        kick_render(&pool, &mut job, &mut status, &scene, true);
-        info!("open: {}", render_path.display());
+    // Native: FileList carries the render paths (ProjectDoc's projection). The whole tail is native — it
+    // reads a real path + kicks a Source::Path render — so it's cfg'd off wasm (which returned above).
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let Some(path) = files.files.get(i).cloned() else {
+            return;
+        };
+        // A `.scadproj` is a real project: ONE entry renders, the rest are libs/parts. Switching a file
+        // changes the editor VIEW, not the render target — viewing a lib keeps the entry on screen, and
+        // only the ENTRY's content changing (a fresh open, or a later set-entry) re-renders. A loose folder
+        // keeps folder-browser semantics: every file is its own model, so a switch renders it.
+        let container = matches!(project.home, crate::project::ProjectHome::ScadProj(_));
+        // Persist the OUTGOING file's live edit before moving off it — but ONLY when the editor actually
+        // holds the current active file (a within-project switch). On a FRESH open the editor still carries
+        // the PREVIOUS project's text, and flushing that would clobber the new entry.
+        let holds_active = project.files.get(project.active).is_some_and(|f| {
+            let expected = match project.base_dir.as_ref() {
+                Some(b) => b.join(&f.name),
+                None => std::path::PathBuf::from(&f.name),
+            };
+            expected == editor.path
+        });
+        if holds_active {
+            project.flush_active(&editor.text);
+            if let (true, Some(base)) = (container, project.base_dir.clone())
+                && let Some(cur) = project.files.get(project.active)
+            {
+                let name = cur.name.clone();
+                let _ = write_under(&base, &name, editor.text.as_bytes());
+            }
+        }
+        files.active = Some(i);
+        project.set_active(i);
+        // The render target: a container always renders its ENTRY (from the temp materialization); a loose
+        // switch renders the switched file. The editor still shows the VIEWED file either way.
+        let render_path = if container {
+            project
+                .base_dir
+                .as_ref()
+                .and_then(|b| project.files.get(project.entry).map(|f| b.join(&f.name)))
+                .unwrap_or_else(|| path.clone())
+        } else {
+            path.clone()
+        };
+        // Only a CHANGE of render target is a re-render — a container view-switch (entry unchanged) just
+        // swaps the editor, no geometry churn. A loose switch always changes it (each file is a target).
+        let changed = scene.source.as_deref() != Some(render_path.as_path());
+        scene.source = Some(render_path.clone());
+        // Re-derive the workspace root from the RENDERED model (W.3.21): a sourceless `.app` launch left
+        // root None (cwd `/`), so opening a model under a workspace must pick up its BOSL2/scad-lib search
+        // paths — else every module goes undefined and the render comes back empty.
+        if let Some(r) = std::fs::canonicalize(&render_path)
+            .ok()
+            .as_deref()
+            .and_then(|p| p.parent())
+            .and_then(fab::find_root_from)
+        {
+            scene.root = Some(r);
+        }
+        // The VIEWED file's disk text (minus its fab:config block, W.3.8) becomes the editor buffer.
+        let view_cfg = read_into_editor(&mut editor, &path);
+        if changed {
+            // The stashed block applies in poll_job once the fresh parts are built. On a container's fresh
+            // open the viewed file IS the entry, so its config is the entry's; a loose switch renders the
+            // viewed file, so its own config is right. (A render-free view-switch leaves parts untouched.)
+            pending_config.0 = view_cfg;
+            // Drop the outgoing model's held base solids before wiping — a file switch abandons them.
+            free_bases(&pool, state.parts.0.iter().filter_map(|p| p.base).collect());
+            state.reset();
+            kick_render(&pool, &mut job, &mut status, &scene, true);
+            info!("open: {}", render_path.display());
+        }
     }
 }
 
@@ -762,12 +798,15 @@ pub(crate) fn kick_render_bytes(
     job: &mut Job,
     status: &mut Status,
     main: Vec<u8>,
+    pack: Vec<(String, Vec<u8>)>,
     fresh: bool,
 ) {
     let pool = pool.clone();
     let task = AsyncComputeTaskPool::get().spawn(async move {
         let main_str = String::from_utf8_lossy(&main).into_owned();
-        let libs = crate::lib_fetch::lib_closure(&main_str).await;
+        // Z.3.4: the worker libs are `main`'s closure PLUS the project pack (each file + its own lib
+        // closure + binary assets). For a single-file project `pack` is empty → identical to before.
+        let libs = crate::lib_fetch::project_libs(&main_str, pack).await;
         render_result(
             pool.call(Request::RenderParts {
                 source: Source::Bytes { main, libs },
@@ -788,7 +827,7 @@ pub(crate) fn kick_render_bytes(
 #[cfg(target_arch = "wasm32")]
 #[derive(Resource, Default)]
 pub(crate) struct ModelFetch {
-    pub task: Option<bevy::tasks::Task<Option<String>>>,
+    pub task: Option<bevy::tasks::Task<Option<Vec<u8>>>>,
     pub name: String,
 }
 
@@ -811,18 +850,55 @@ pub(crate) fn poll_model_fetch(
         return; // still fetching
     };
     fetch.task = None;
+    let name = fetch.name.clone();
     match result {
-        Some(raw) => {
+        // A `.scadproj` deep-link (Z.3.4): the bytes are a zip (PK magic) → open it as a multi-file
+        // project. The entry file seeds the editor (config block stripped + stashed); render_pack sends
+        // the whole project to the worker. A bad zip falls through to the text path.
+        Some(bytes) if bytes.starts_with(b"PK\x03\x04") => {
+            match crate::project::ProjectDoc::from_scadproj(
+                &bytes,
+                crate::project::ProjectHome::WebModel(name.clone()),
+            ) {
+                Ok(mut doc) => {
+                    let entry_raw = doc
+                        .files
+                        .get(doc.entry)
+                        .map(|f| f.text.clone())
+                        .unwrap_or_default();
+                    pending_config.0 = config::read_config_block(&entry_raw);
+                    let stripped = config::strip_config_block(&entry_raw);
+                    editor.text = stripped.clone();
+                    editor.path = std::path::PathBuf::from(doc.entry_name());
+                    // Keep the ProjectDoc's entry text in step with the editor (both stripped).
+                    if let Some(f) = doc.files.get_mut(doc.entry) {
+                        f.text = stripped;
+                    }
+                    status.0 = format!("loaded project {name}");
+                    *project = doc;
+                }
+                Err(e) => {
+                    editor.text = crate::scene::WEB_DEMO.to_string();
+                    status.0 = format!("bad .scadproj ({e:#}) — rendering the demo");
+                    *project = crate::project::ProjectDoc::single(
+                        "demo.scad",
+                        crate::scene::WEB_DEMO,
+                        crate::project::ProjectHome::Fresh,
+                    );
+                }
+            }
+        }
+        Some(bytes) => {
+            let raw = String::from_utf8_lossy(&bytes).into_owned();
             pending_config.0 = config::read_config_block(&raw);
             editor.text = config::strip_config_block(&raw);
-            editor.path = std::path::PathBuf::from(&fetch.name);
-            status.0 = format!("loaded {}", fetch.name);
-            // Phase Z: the fetched `?model=` .scad is a one-file project (a `.scadproj` deep-link is
-            // Z.3.4). WebModel home carries the deep-link name for the download/save-back filename.
+            editor.path = std::path::PathBuf::from(&name);
+            status.0 = format!("loaded {name}");
+            // A plain `.scad` deep-link is a one-file project; WebModel carries the download/save name.
             *project = crate::project::ProjectDoc::single(
-                fetch.name.clone(),
+                name.clone(),
                 editor.text.clone(),
-                crate::project::ProjectHome::WebModel(fetch.name.clone()),
+                crate::project::ProjectHome::WebModel(name),
             );
         }
         None => {
@@ -928,17 +1004,14 @@ pub(crate) fn preview_edited_buffer(
         return; // still typing, or a render's already running — retry next idle frame
     }
     editor.edited_at = None;
-    // wasm: no fs — the buffer IS the source, sent as Source::Bytes to the geom Worker (W.3.6).
+    // wasm: no fs — the PROJECT is the source (Z.3.4). render_pack gives the ENTRY bytes (with the live
+    // active text spliced) + the pack (other files + assets), sent as Source::Bytes to the geom Worker.
+    // A single-file project → (editor.text, []) → identical to the pre-project web render.
     #[cfg(target_arch = "wasm32")]
     {
-        let _ = (&scene, &project);
-        kick_render_bytes(
-            &pool,
-            &mut job,
-            &mut status,
-            editor.text.as_bytes().to_vec(),
-            false,
-        );
+        let _ = &scene;
+        let (main, pack) = project.render_pack(&editor.text);
+        kick_render_bytes(&pool, &mut job, &mut status, main, pack, false);
     }
     // native container (`.scadproj`): write the edited file into its temp copy so `include`s see it,
     // then render the ENTRY — editing ANY project file re-renders the entry with the edit (Z.3.4). The

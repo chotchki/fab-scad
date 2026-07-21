@@ -154,11 +154,12 @@ async fn send(url: &str, init: &web_sys::RequestInit) -> Result<(u16, String), S
     Ok((status, body))
 }
 
-/// Fetch `url` as text (W.3.12) — the `?model=` .scad body. Relative URLs resolve against the PAGE
-/// (not the bundle base), so a host page can point at its own assets; same-origin always works under
-/// the bundle's COOP/COEP, cross-origin needs CORS + CORP on the model host (docs/web-embed.md).
+/// Fetch `url` as raw BYTES (Z.3.4) — the `?model=` body. Relative URLs resolve against the PAGE (not the
+/// bundle base), so a host page can point at its own assets; same-origin always works under the bundle's
+/// COOP/COEP, cross-origin needs CORS + CORP on the model host (docs/web-embed.md). Bytes (not text) so a
+/// `.scadproj` (a zip) survives — a `.scad` round-trips fine (its bytes decode back to the same text).
 /// `None` on any failure — the caller reports and falls back to the demo.
-pub(crate) async fn fetch_text(url: &str) -> Option<String> {
+pub(crate) async fn fetch_bytes(url: &str) -> Option<Vec<u8>> {
     use wasm_bindgen_futures::JsFuture;
     let win = web_sys::window()?;
     let resp = JsFuture::from(win.fetch_with_str(url)).await.ok()?;
@@ -166,5 +167,6 @@ pub(crate) async fn fetch_text(url: &str) -> Option<String> {
     if !resp.ok() {
         return None;
     }
-    JsFuture::from(resp.text().ok()?).await.ok()?.as_string()
+    let buf = JsFuture::from(resp.array_buffer().ok()?).await.ok()?;
+    Some(js_sys::Uint8Array::new(&buf).to_vec())
 }

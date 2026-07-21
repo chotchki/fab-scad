@@ -115,7 +115,9 @@ pub(crate) fn setup_windowed(
                 .to_string();
             model_fetch.task = Some(
                 bevy::tasks::AsyncComputeTaskPool::get()
-                    .spawn(async move { crate::web_host::fetch_text(&url).await }),
+                    // Z.3.4: fetch BYTES — a `?model=` may point at a `.scadproj` (a zip), which
+                    // `fetch_text`'s UTF-8 lossy decode would corrupt. A `.scad` round-trips fine.
+                    .spawn(async move { crate::web_host::fetch_bytes(&url).await }),
             );
         } else {
             editor.text = WEB_DEMO.to_string();

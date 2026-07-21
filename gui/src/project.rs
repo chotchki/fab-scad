@@ -205,6 +205,21 @@ impl ProjectDoc {
         uniq
     }
 
+    /// Rename file `i` to `new_name` (de-duplicated, keeping the entry/active indices — same slot, new
+    /// name), returning the OLD name so the caller can move its on-disk/temp copy. `None` when out of
+    /// range, blank, or unchanged. NOTE: this does NOT rewrite `include`/`use` refs in sibling files — a
+    /// rename can break a reference, exactly as it would in a folder; the user updates the reference.
+    pub(crate) fn rename_file(&mut self, i: usize, new_name: &str) -> Option<String> {
+        let new_name = new_name.trim();
+        if new_name.is_empty() || i >= self.files.len() || self.files[i].name == new_name {
+            return None;
+        }
+        let uniq = self.unique_name(new_name);
+        let old = std::mem::replace(&mut self.files[i].name, uniq);
+        self.files[i].dirty = true;
+        Some(old)
+    }
+
     /// Remove file `i`, returning its name (for the caller to delete its on-disk/temp copy). Refuses to
     /// drop the LAST file (a project needs an entry) and fixes up the `entry`/`active` indices — a delete
     /// of the entry re-homes it to file 0. `None` when out of range or it's the sole file.
@@ -445,6 +460,23 @@ mod tests {
         assert_eq!(d.remove_file(1).as_deref(), Some("lib.scad"));
         assert_eq!(d.entry, 0);
         assert_eq!(d.active, 0);
+    }
+
+    #[test]
+    fn rename_dedups_keeps_indices_and_returns_the_old_name() {
+        let mut d = ProjectDoc::single("main.scad", "", ProjectHome::Fresh);
+        d.add_file("hook.scad", "".into());
+        d.set_entry(1);
+        d.set_active(1);
+        // rename the entry file; the entry/active indices stay on slot 1, now "part.scad".
+        assert_eq!(d.rename_file(1, "part.scad").as_deref(), Some("hook.scad"));
+        assert_eq!(d.entry_name(), "part.scad");
+        assert_eq!(d.entry, 1);
+        // a blank / unchanged rename is a no-op; a collision de-dups.
+        assert_eq!(d.rename_file(1, "   "), None);
+        assert_eq!(d.rename_file(1, "part.scad"), None);
+        assert_eq!(d.rename_file(1, "main.scad").as_deref(), Some("part.scad")); // collides → main-1
+        assert_eq!(d.files[1].name, "main-1.scad");
     }
 
     #[test]

@@ -552,6 +552,18 @@ pub(crate) enum PanelCmd {
 #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 pub(crate) struct AddFileDialog(pub(crate) Option<Task<Option<Vec<PathBuf>>>>);
 
+/// Inline file-rename state for the Project tab (Z.3.3): `editing` is the row currently showing a text
+/// field (double-click a filename to start), `buf` its live text, `commit` the `(row, new-name)` set on
+/// Enter for `project_files_action` to apply. Folded into `PanelWriters` (panel_ui is at its param cap).
+#[derive(Resource, Default)]
+pub(crate) struct RenameUi {
+    pub(crate) editing: Option<usize>,
+    pub(crate) buf: String,
+    pub(crate) commit: Option<(usize, String)>,
+    /// Request keyboard focus on the next frame the rename field renders (set when editing starts).
+    pub(crate) focus: bool,
+}
+
 /// The round-trip SAVE target for the hotchkiss.io media item this session edits (W.5.7): the
 /// `PUT /media/<ref>/variants` URL, derived from the editor deep-link's `?model=` path (the stable
 /// `media_ref` rides it — [`save_target::derive`](crate::save_target::derive)). `Some` only on the web

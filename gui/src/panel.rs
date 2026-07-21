@@ -19,6 +19,8 @@ pub(crate) struct PanelWriters<'w> {
     /// W.3.16 console UI state — folded in here (not a separate `panel_ui` param) to stay under Bevy's
     /// 16-param cap. The console CONTENT lives in a global buffer (`crate::console`), not the ECS.
     pub(crate) console: ResMut<'w, crate::console::ConsoleUi>,
+    /// Z.3.3 inline file-rename state — likewise folded in to stay under the param cap.
+    pub(crate) rename: ResMut<'w, RenameUi>,
 }
 
 /// The read-only display inputs the tabs render, bundled so `panel_ui` stays under Bevy's 16-param cap
@@ -467,11 +469,42 @@ pub(crate) fn panel_ui(
                             } else {
                                 ui.add_space(14.0); // align names under the entry pointer
                             }
-                            if ui
-                                .selectable_label(project.active == i, &f.name)
-                                .clicked()
-                            {
-                                writers.switch.write(SwitchFile(i));
+                            // Name cell: a text field while renaming THIS row (double-click to start,
+                            // Enter commits, Esc / click-away cancels), else the selectable pill.
+                            if manage && writers.rename.editing == Some(i) {
+                                let resp = ui.add(
+                                    egui::TextEdit::singleline(&mut writers.rename.buf)
+                                        .desired_width(180.0),
+                                );
+                                if writers.rename.focus {
+                                    resp.request_focus();
+                                    writers.rename.focus = false;
+                                }
+                                let enter = ui.input(|inp| inp.key_pressed(egui::Key::Enter));
+                                let esc = ui.input(|inp| inp.key_pressed(egui::Key::Escape));
+                                if esc {
+                                    writers.rename.editing = None;
+                                } else if resp.lost_focus() {
+                                    if enter {
+                                        writers.rename.commit =
+                                            Some((i, writers.rename.buf.clone()));
+                                    }
+                                    writers.rename.editing = None; // commit-on-enter or cancel-on-blur
+                                }
+                            } else {
+                                let resp = ui.selectable_label(project.active == i, &f.name);
+                                if resp.clicked() {
+                                    writers.switch.write(SwitchFile(i));
+                                }
+                                if manage
+                                    && resp
+                                        .on_hover_text("double-click to rename")
+                                        .double_clicked()
+                                {
+                                    writers.rename.editing = Some(i);
+                                    writers.rename.buf = f.name.clone();
+                                    writers.rename.focus = true;
+                                }
                             }
                             if f.dirty {
                                 ui.colored_label(theme::GOLD_DIM, icons::DOT)

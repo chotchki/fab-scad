@@ -537,14 +537,47 @@ pub(crate) fn project_files_action(
     mut project: ResMut<crate::project::ProjectDoc>,
     mut files: ResMut<FileList>,
     mut add_dialog: ResMut<AddFileDialog>,
+    mut rename: ResMut<crate::state::RenameUi>,
     mut editor: ResMut<EditorBuf>,
     mut switch: MessageWriter<SwitchFile>,
     mut job: ResMut<Job>,
     mut status: ResMut<Status>,
     pool: Res<GeomPool>,
-    scene: Res<SceneCfg>,
+    mut scene: ResMut<SceneCfg>,
     mut state: ModelState,
 ) {
+    // Inline rename (Z.3.3): apply the committed (row, new-name) — rename in the ProjectDoc, MOVE the
+    // on-disk/temp copy, then re-render (the render target's name may have changed, and a rename can
+    // break a sibling's `include`, which the re-render surfaces).
+    if let Some((i, new_name)) = rename.commit.take() {
+        let base = project.base_dir.clone();
+        if let Some(old) = project.rename_file(i, &new_name) {
+            let new = project.files.get(i).map(|f| f.name.clone()).unwrap_or(new_name);
+            files.files = project.native_paths();
+            files.active = Some(project.active);
+            if let Some(base) = base.as_ref() {
+                let _ = std::fs::rename(base.join(&old), base.join(&new)); // missing source? a never-materialized file
+                // Recompute the render target with the CURRENT names + re-render.
+                let target = if matches!(project.home, crate::project::ProjectHome::ScadProj(_)) {
+                    project.entry
+                } else {
+                    project.active
+                };
+                if let Some(f) = project.files.get(target) {
+                    scene.source = Some(base.join(&f.name));
+                }
+                // The active file's path changed if IT was renamed — keep the editor pointed at it.
+                if i == project.active
+                    && let Some(f) = project.files.get(i)
+                {
+                    editor.path = base.join(&f.name);
+                }
+                free_bases(&pool, state.parts.0.iter().filter_map(|p| p.base).collect());
+                state.reset();
+                kick_render(&pool, &mut job, &mut status, &scene, true);
+            }
+        }
+    }
     // Snapshot the frame's commands (PanelCmd is Copy) so the reader borrow ends before we mutate.
     for cmd in ev.read().copied().collect::<Vec<_>>() {
         match cmd {

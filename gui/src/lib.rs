@@ -325,7 +325,15 @@ fn run_windowed(scene: SceneCfg, shot: Option<PathBuf>) {
     // materialize to the render root + drive the rfd multi-picker; web file management rides Z.3.4's
     // render_pack path. Registered ahead of nothing in particular; SwitchFiles it emits land next frame.
     #[cfg(not(target_arch = "wasm32"))]
-    app.add_systems(Update, (project_files_action, poll_add_dialog));
+    app.init_resource::<state::SaveProjJob>().add_systems(
+        Update,
+        (
+            project_files_action,
+            poll_add_dialog,
+            save_as_project_action,
+            poll_save_project,
+        ),
+    );
     // W.3.27: the desktop Settings modal (hotchkiss.io publish key). Native only — the web publishes via
     // the site session cookie, so there's no key to set there. Draws its own egui Modal in the egui pass.
     #[cfg(not(target_arch = "wasm32"))]

@@ -52,11 +52,12 @@ fn save_buffer(
     let printer = config::PrinterCfg {
         bed: [bed[0] as f64, bed[1] as f64, bed[2] as f64],
     };
+    // Sync the live active buffer into the file set first, so every save path sees the latest edit.
+    project.flush_active(&editor.text);
     // Container: re-zip the WHOLE project back to its `.scadproj` home (Z.3.5). Native only for now — a
     // web `.scadproj` save-back rides Z.3.4. On success every file is clean, not just the active one.
     #[cfg(not(target_arch = "wasm32"))]
     if let crate::project::ProjectHome::ScadProj(path) = project.home.clone() {
-        project.flush_active(&editor.text); // sync the live active buffer into the file set first
         match rezip_project(project, parts, printer) {
             Ok(bytes) => {
                 if std::fs::write(&path, bytes).is_ok() {
@@ -69,6 +70,34 @@ fn save_buffer(
                 }
             }
             Err(e) => error!("save .scadproj {}: {e:#}", path.display()),
+        }
+        return;
+    }
+    // Loose MULTI-file (a folder open, or a single file that grew): write EVERY dirty file back to its
+    // place — the config block bakes into the ACTIVE (rendered) file only. Persisting just the active file
+    // would drop in-memory edits to the others (they survive a switch now but aren't on disk). The
+    // "Save as .scadproj" CTA is the OTHER option (pack them into one portable file) — this keeps loose.
+    #[cfg(not(target_arch = "wasm32"))]
+    if project.is_multifile()
+        && let Some(base) = project.base_dir.clone()
+    {
+        let active = project.active;
+        for (i, f) in project.files.iter().enumerate() {
+            if !f.dirty {
+                continue;
+            }
+            let text = if i == active {
+                config::with_config_block(&f.text, parts, Some(printer))
+            } else {
+                f.text.clone()
+            };
+            if let Err(e) = std::fs::write(base.join(&f.name), text) {
+                error!("save {}: {e}", f.name);
+            }
+        }
+        editor.dirty = false;
+        for f in &mut project.files {
+            f.dirty = false;
         }
         return;
     }
@@ -90,38 +119,6 @@ fn save_buffer(
             editor.dirty = false;
         }
     }
-}
-
-/// Re-zip the whole project to `.scadproj` bytes (Z.3.5): the ENTRY carries the baked `fab:config` block
-/// (so a reopen restores the bed), every other file + binary asset goes verbatim from the ProjectDoc's
-/// current (flushed) state. The manifest keeps the original entry; the title stays whatever it was.
-#[cfg(not(target_arch = "wasm32"))]
-fn rezip_project(
-    project: &crate::project::ProjectDoc,
-    parts: &[Part],
-    printer: config::PrinterCfg,
-) -> anyhow::Result<Vec<u8>> {
-    use fab_scad::scadproj;
-    let entry_name = project.entry_name().to_string();
-    // Bake config into the entry ONCE (outside the loop so `printer` is used once, not per file).
-    let entry_baked = project
-        .files
-        .get(project.entry)
-        .map(|f| config::with_config_block(&f.text, parts, Some(printer)));
-    let mut files: std::collections::BTreeMap<String, Vec<u8>> = std::collections::BTreeMap::new();
-    for (i, f) in project.files.iter().enumerate() {
-        let bytes = if i == project.entry {
-            entry_baked.clone().unwrap_or_else(|| f.text.clone()).into_bytes()
-        } else {
-            f.text.clone().into_bytes()
-        };
-        files.insert(f.name.clone(), bytes);
-    }
-    for (name, body) in &project.assets {
-        files.insert(name.clone(), body.clone());
-    }
-    let proj = scadproj::project_from_files(files, Some(entry_name), None)?;
-    scadproj::write_scadproj(&proj)
 }
 
 /// Seconds of hold to fire a [`hold_to_delete`] — long enough to be deliberate, short enough not to nag.
@@ -408,9 +405,18 @@ pub(crate) fn panel_ui(
                     // assets. Click a file to view + edit it on the Model tab. Save follows the home: a
                     // loose `.scad` writes in place, a `.scadproj` re-zips, the web downloads.
                     ui.label(theme::chrome("Project files", 16.0).color(theme::NAVY));
+                    // A loose/fresh project that has grown past one file is in .scadproj territory (Z.3.7):
+                    // it still saves loose, but the portable option is to pack it into a single .scadproj.
+                    let needs_promote = project.is_multifile()
+                        && !matches!(project.home, crate::project::ProjectHome::ScadProj(_));
                     let home_hint = match &project.home {
                         crate::project::ProjectHome::ScadProj(p) => {
                             format!("{} — a .scadproj (a zip; rename to .zip to peek)", base(p))
+                        }
+                        _ if needs_promote => {
+                            "loose files — Save writes them in place; pack them into one portable \
+                             .scadproj below"
+                                .into()
                         }
                         crate::project::ProjectHome::ScadFile(p) => {
                             format!("{} — a loose .scad (saves in place)", base(p))
@@ -580,6 +586,25 @@ pub(crate) fn panel_ui(
                                 writers.cmd.write(PanelCmd::NewFile);
                             }
                         });
+                        // The promote CTA (Z.3.7): pack a loose multi-file project into one portable
+                        // .scadproj (a native Save-As; then it saves as a container in place). Gold, so it
+                        // reads as the deliberate step, not a routine button.
+                        if needs_promote {
+                            ui.add_space(4.0);
+                            if ui
+                                .add(
+                                    egui::Button::new(
+                                        theme::chrome("Save as .scadproj…", 14.0)
+                                            .color(theme::NAVY),
+                                    )
+                                    .fill(theme::GOLD),
+                                )
+                                .on_hover_text("pack these files into one portable .scadproj")
+                                .clicked()
+                            {
+                                writers.cmd.write(PanelCmd::SaveAsProject);
+                            }
+                        }
                     }
                 }
                 Tab::Model => {

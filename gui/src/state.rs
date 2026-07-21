@@ -541,7 +541,18 @@ pub(crate) enum PanelCmd {
     /// Desktop only — the web has no fs picker.
     #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     AddFiles,
+    /// Save a multi-file project that has no `.scadproj` home yet (a loose `.scad` that grew a second
+    /// file, Z.3.7) — pops a native Save-As `.scadproj` dialog, then adopts that path as the home.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    SaveAsProject,
 }
+
+/// The in-flight Save-As `.scadproj` (Z.3.7) — the native Save dialog + the zip write run off-thread (rfd
+/// can't block Bevy's loop), yielding the chosen path so [`poll_save_project`](crate::poll_save_project)
+/// can adopt it as the project home. Twin of [`ExportJob`]. Native-only.
+#[derive(Resource, Default)]
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+pub(crate) struct SaveProjJob(pub(crate) Option<Task<Result<PathBuf, String>>>);
 
 /// The in-flight "Add files to the project" pick (Z.3.3) — a MULTI-file picker off the main thread, twin
 /// of [`OpenDialog`]. `Some(paths)` on pick (empty vec if the user picked nothing), `None` if cancelled;

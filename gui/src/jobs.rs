@@ -509,6 +509,41 @@ fn write_under(base: &std::path::Path, rel: &str, body: &[u8]) -> anyhow::Result
     Ok(())
 }
 
+/// Re-zip the whole project to `.scadproj` bytes (Z.3.5): the ENTRY carries the baked `fab:config` block
+/// (so a reopen restores the bed), every other file + binary asset goes verbatim from the ProjectDoc's
+/// current (flushed) state. The manifest keeps the original entry; the title stays whatever it was.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn rezip_project(
+    project: &crate::project::ProjectDoc,
+    parts: &[Part],
+    printer: config::PrinterCfg,
+) -> anyhow::Result<Vec<u8>> {
+    use fab_scad::scadproj;
+    let entry_name = project.entry_name().to_string();
+    // Bake config into the entry ONCE (outside the loop so `printer` is used once, not per file).
+    let entry_baked = project
+        .files
+        .get(project.entry)
+        .map(|f| config::with_config_block(&f.text, parts, Some(printer)));
+    let mut files: std::collections::BTreeMap<String, Vec<u8>> = std::collections::BTreeMap::new();
+    for (i, f) in project.files.iter().enumerate() {
+        let bytes = if i == project.entry {
+            entry_baked
+                .clone()
+                .unwrap_or_else(|| f.text.clone())
+                .into_bytes()
+        } else {
+            f.text.clone().into_bytes()
+        };
+        files.insert(f.name.clone(), bytes);
+    }
+    for (name, body) in &project.assets {
+        files.insert(name.clone(), body.clone());
+    }
+    let proj = scadproj::project_from_files(files, Some(entry_name), None)?;
+    scadproj::write_scadproj(&proj)
+}
+
 /// Materialize every project file + asset under `base` — the disk mirror the native render reads
 /// (`Source::Path`). Shared by add-file / new-file so a change reaches the render root.
 #[cfg(not(target_arch = "wasm32"))]
@@ -674,6 +709,120 @@ pub(crate) fn poll_add_dialog(
         }
         files.files = project.native_paths();
         status.0 = format!("added {added} file(s) to the project");
+    }
+}
+
+/// Save-As `.scadproj` for a project with no container home yet (Z.3.7 — a loose `.scad` that grew a
+/// second file): build the zip bytes NOW (the live active edit flushed in), then pop a native Save dialog
+/// + write off-thread (rfd can't block Bevy's loop). [`poll_save_project`] adopts the chosen path as home.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn save_as_project_action(
+    mut ev: MessageReader<PanelCmd>,
+    mut project: ResMut<crate::project::ProjectDoc>,
+    parts: Res<Parts>,
+    scene: Res<SceneCfg>,
+    editor: Res<EditorBuf>,
+    mut save_job: ResMut<crate::state::SaveProjJob>,
+    mut status: ResMut<Status>,
+) {
+    if !ev.read().any(|c| *c == PanelCmd::SaveAsProject) {
+        return;
+    }
+    if save_job.0.is_some() {
+        status.0 = "already saving…".into();
+        return;
+    }
+    project.flush_active(&editor.text); // capture the live active edit in the file set
+    let printer = config::PrinterCfg {
+        bed: [scene.bed[0] as f64, scene.bed[1] as f64, scene.bed[2] as f64],
+    };
+    let bytes = match rezip_project(&project, &parts.0, printer) {
+        Ok(b) => b,
+        Err(e) => {
+            status.0 = format!("save failed: {e:#}");
+            return;
+        }
+    };
+    let default_name = format!(
+        "{}.scadproj",
+        std::path::Path::new(project.entry_name())
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("project")
+    );
+    let dir = scene
+        .source
+        .as_ref()
+        .and_then(|s| s.parent())
+        .map(std::path::Path::to_path_buf);
+    save_job.0 = Some(AsyncComputeTaskPool::get().spawn(async move {
+        let mut dlg = rfd::AsyncFileDialog::new()
+            .add_filter("OpenSCAD project", &["scadproj"])
+            .set_file_name(&default_name);
+        if let Some(d) = dir {
+            dlg = dlg.set_directory(d);
+        }
+        let Some(handle) = dlg.save_file().await else {
+            return Err("save cancelled".to_string());
+        };
+        let path = handle.path().to_path_buf();
+        std::fs::write(&path, &bytes).map_err(|e| format!("writing {}: {e}", path.display()))?;
+        Ok(path)
+    }));
+    status.0 = "save as .scadproj: choose where…".into();
+}
+
+/// Land the Save-As `.scadproj` (Z.3.7): adopt the chosen path as the ScadProj home AND re-root the render
+/// to a fresh temp materialization — so from here on the promoted project behaves exactly like an opened
+/// `.scadproj` (preview writes the temp, never the user's real loose files) and Save re-zips in place.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn poll_save_project(
+    mut save_job: ResMut<crate::state::SaveProjJob>,
+    mut project: ResMut<crate::project::ProjectDoc>,
+    mut files: ResMut<FileList>,
+    mut editor: ResMut<EditorBuf>,
+    mut scene: ResMut<SceneCfg>,
+    mut status: ResMut<Status>,
+) {
+    let Some(task) = save_job.0.as_mut() else {
+        return;
+    };
+    let Some(result) = block_on(future::poll_once(task)) else {
+        return;
+    };
+    save_job.0 = None;
+    let path = match result {
+        Ok(p) => p,
+        Err(e) => {
+            status.0 = e;
+            return;
+        }
+    };
+    status.0 = format!("saved -> {}", path.display());
+    info!("{}", status.0);
+    project.home = crate::project::ProjectHome::ScadProj(path.clone());
+    // Re-root to a temp materialization (like an opened .scadproj), so container-preview writes the temp,
+    // not the user's real loose files. FileList + scene.source + the editor path all follow the new root.
+    let stem = path
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "project".into());
+    let dir = scene.tmp.join("scadproj").join(&stem);
+    let _ = std::fs::remove_dir_all(&dir);
+    if materialize_all(&project, &dir).is_ok() {
+        project.base_dir = Some(dir.clone());
+        files.files = project.native_paths();
+        files.active = Some(project.active);
+        if let Some(f) = project.files.get(project.entry) {
+            scene.source = Some(dir.join(&f.name));
+        }
+        if let Some(f) = project.files.get(project.active) {
+            editor.path = dir.join(&f.name);
+        }
+    }
+    editor.dirty = false;
+    for f in &mut project.files {
+        f.dirty = false;
     }
 }
 

@@ -134,16 +134,26 @@ pub(crate) fn setup_script(
         // Stash the source's fab:config for poll_job to apply (per-part cuts + the printer) — mirrors
         // setup_windowed so the offscreen harness is faithful to run_windowed (it silently dropped it).
         pending_config.0 = read_into_editor(&mut editor, &src);
-        let name = src
-            .file_name()
-            .map(|s| s.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "model.scad".into());
-        *project = crate::project::ProjectDoc::single(
-            name,
-            editor.text.clone(),
-            crate::project::ProjectHome::ScadFile(src.clone()),
-        );
-        project.base_dir = src.parent().map(std::path::Path::to_path_buf);
+        // Z.3.6: open as a loose project rooted at a SHADOW so an `edittext` script's preview writes the
+        // shadow, never the real model file. Native — the script harness is a native CLI (this compiles
+        // but never runs on wasm; the fallback keeps it building there).
+        #[cfg(not(target_arch = "wasm32"))]
+        match crate::jobs::open_loose(&src, &scene.tmp) {
+            Ok(doc) => *project = doc,
+            Err(e) => eprintln!("script setup: {e}"),
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            let name = src
+                .file_name()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "model.scad".into());
+            *project = crate::project::ProjectDoc::single(
+                name,
+                editor.text.clone(),
+                crate::project::ProjectHome::ScadFile(src.clone()),
+            );
+        }
     }
     let (w, h) = (960u32, 720u32);
     let mut img = Image::new_target_texture(w, h, TextureFormat::Rgba8UnormSrgb, None);
@@ -211,6 +221,7 @@ pub(crate) fn run_script(
         ResMut<ActiveConn>,
         ResMut<EditorBuf>,
         Res<Time>,
+        Res<SceneCfg>,
     ),
 ) {
     // The part-switch action rebinds what "active" means, so handle it BEFORE the active-part borrow
@@ -360,22 +371,26 @@ pub(crate) fn run_script(
         }
         Action::Open(path) => {
             if runner.timer == 1 {
-                let (dir, list) = if path.is_dir() {
-                    (path.clone(), scad_files(&path))
+                // Z.3.6: open through the SHADOW path so a later `edittext` preview can't mutate a real
+                // file. For a dir, the first `.scad` is the entry.
+                let entry = if path.is_dir() {
+                    scad_files(&path).into_iter().next()
                 } else {
-                    (
-                        path.parent().unwrap_or(&path).to_path_buf(),
-                        vec![path.clone()],
-                    )
+                    Some(path.clone())
                 };
-                match list.first().cloned() {
+                match entry {
                     None => eprintln!("script: open — no .scad under {}", path.display()),
-                    Some(entry) => {
-                        let doc = crate::project::ProjectDoc::from_disk(dir, &list, &entry);
-                        let active = doc.entry;
-                        *sw.0 = doc;
-                        sw.1.write(SwitchFile(active));
-                    }
+                    #[cfg(not(target_arch = "wasm32"))]
+                    Some(f) => match crate::jobs::open_loose(&f, &sw.5.tmp) {
+                        Ok(doc) => {
+                            let active = doc.entry;
+                            *sw.0 = doc;
+                            sw.1.write(SwitchFile(active));
+                        }
+                        Err(e) => eprintln!("script open: {e}"),
+                    },
+                    #[cfg(target_arch = "wasm32")]
+                    Some(_) => {}
                 }
             }
             // apply_switch_file clears bounds → None; the top guard pauses run_script until the new

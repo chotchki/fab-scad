@@ -61,6 +61,18 @@ fn harness() -> App {
         .init_resource::<crate::project::ProjectDoc>()
         .init_resource::<crate::state::RenameUi>()
         .insert_resource(Status("test".into()))
+        // run_script's bundle reads SceneCfg (Z.3.6, for the `open` verb's shadow tmp) — the state tests
+        // never fire `open`, so a minimal one suffices.
+        .insert_resource(SceneCfg {
+            source: None,
+            stl: None,
+            bed: [256.0; 3],
+            plate: [256.0; 2],
+            root: None,
+            tmp: std::env::temp_dir().join("fab-gui-test"),
+            reslice_on_start: false,
+            cut_pct: 50.0,
+        })
         .insert_resource(RenderTargetImage(Handle::default())) // dummy: only the Shot verb reads it
         .insert_resource(Parts(vec![seeded_part(vec![x_cut(0.0)])]))
         .insert_resource(ScriptRunner {

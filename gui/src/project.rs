@@ -96,9 +96,10 @@ impl ProjectDoc {
             .iter()
             .map(|p| ProjectFile {
                 name: rel(p),
-                // The active file's live text is the editor's; the rest load lazily from disk on
-                // switch. Seed empty — a switch hydrates from disk when the buffer is clean.
-                text: String::new(),
+                // Load the content now (Z.3.6): the project materializes to a shadow render-root, so the
+                // bytes must be present, not lazy. A raw entry keeps its fab:config block (a comment the
+                // render ignores; the editor strips it for display, save re-bakes it).
+                text: std::fs::read_to_string(p).unwrap_or_default(),
                 dirty: false,
             })
             .collect();

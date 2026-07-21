@@ -65,12 +65,14 @@ pub(crate) fn setup_windowed(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
-    scene: Res<SceneCfg>,
+    #[cfg_attr(target_arch = "wasm32", allow(unused_mut))] mut scene: ResMut<SceneCfg>,
     mut job: ResMut<Job>,
     mut status: ResMut<Status>,
     mut gizmo_cfg: ResMut<GizmoConfigStore>,
     mut editor: ResMut<EditorBuf>,
     mut project: ResMut<crate::project::ProjectDoc>,
+    // On wasm the native boot block (its only user) is cfg'd out; the `?model=` fetch sets it later.
+    #[cfg_attr(target_arch = "wasm32", allow(unused_mut, unused_variables))]
     mut pending_config: ResMut<PendingConfig>,
     #[cfg(target_arch = "wasm32")] mut model_fetch: ResMut<crate::jobs::ModelFetch>,
     pool: Res<GeomPool>,
@@ -78,20 +80,29 @@ pub(crate) fn setup_windowed(
     spawn_environment(&mut commands, &mut meshes, &mut materials, &scene);
     // Seed the file-tab + editor from the launch source (U.3.2): a folder pick repopulates both. The
     // source's fab:config block (W.3.8) is stripped from the buffer + stashed for poll_job to apply.
-    // Phase Z: the open document is a PROJECT — a lone launch source is a one-file project whose
-    // `base_dir` is its real folder (render + save resolve in place). ProjectDoc IS the file model now.
+    // Phase Z / Z.3.6: a launched `.scad` opens as a loose PROJECT rooted at a temp SHADOW (so the live
+    // preview writes the shadow, never the user's real files), homed at the real file so Save writes back
+    // in place. The render source repoints at the shadow entry; the editor shows it (config stripped).
+    #[cfg(not(target_arch = "wasm32"))]
     if let Some(src) = scene.source.clone() {
-        pending_config.0 = read_into_editor(&mut editor, &src);
-        let name = src
-            .file_name()
-            .map(|s| s.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "model.scad".into());
-        *project = crate::project::ProjectDoc::single(
-            name,
-            editor.text.clone(),
-            crate::project::ProjectHome::ScadFile(src.clone()),
-        );
-        project.base_dir = src.parent().map(std::path::Path::to_path_buf);
+        match crate::jobs::open_loose(&src, &scene.tmp) {
+            Ok(doc) => {
+                let entry_path = doc
+                    .base_dir
+                    .as_ref()
+                    .zip(doc.files.get(doc.entry))
+                    .map(|(b, f)| b.join(&f.name));
+                *project = doc;
+                if let Some(ep) = entry_path {
+                    pending_config.0 = read_into_editor(&mut editor, &ep);
+                    scene.source = Some(ep); // render from the shadow, not the real file
+                }
+            }
+            Err(e) => {
+                status.0 = format!("open: {e}");
+                pending_config.0 = read_into_editor(&mut editor, &src);
+            }
+        }
     }
     // Web boot source (W.3.6 + W.3.12): a `?model=<url>` page parameter fetches that .scad into the
     // editor (poll_model_fetch lands it — async, so the fetch spawns here and the seed happens there);

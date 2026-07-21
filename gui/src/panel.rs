@@ -73,25 +73,23 @@ fn save_buffer(
         }
         return;
     }
-    // Loose MULTI-file (a folder open, or a single file that grew): write EVERY dirty file back to its
-    // place — the config block bakes into the ACTIVE (rendered) file only. Persisting just the active file
-    // would drop in-memory edits to the others (they survive a switch now but aren't on disk). The
-    // "Save as .scadproj" CTA is the OTHER option (pack them into one portable file) — this keeps loose.
+    // Loose (Z.3.6): write back to the REAL folder — NOT base_dir, which is now the render SHADOW. The
+    // ENTRY is always written (config baked in, since it renders); every OTHER dirty file too, so
+    // in-memory edits to non-active files (they survive a switch) aren't dropped. The "Save as .scadproj"
+    // CTA is the OTHER option (pack them into one portable file); this keeps them loose in the folder.
     #[cfg(not(target_arch = "wasm32"))]
-    if project.is_multifile()
-        && let Some(base) = project.base_dir.clone()
-    {
-        let active = project.active;
+    if let Some(real_dir) = crate::jobs::loose_save_dir(project) {
+        let entry = project.entry;
         for (i, f) in project.files.iter().enumerate() {
-            if !f.dirty {
-                continue;
+            if i != entry && !f.dirty {
+                continue; // skip clean non-entry files (the entry is always re-written for its config)
             }
-            let text = if i == active {
+            let text = if i == entry {
                 config::with_config_block(&f.text, parts, Some(printer))
             } else {
                 f.text.clone()
             };
-            if let Err(e) = std::fs::write(base.join(&f.name), text) {
+            if let Err(e) = std::fs::write(real_dir.join(&f.name), text) {
                 error!("save {}: {e}", f.name);
             }
         }

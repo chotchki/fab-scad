@@ -332,11 +332,8 @@ pub(crate) fn apply_switch_file(
         let Some(path) = project.native_paths().get(i).cloned() else {
             return;
         };
-        // A `.scadproj` is a real project: ONE entry renders, the rest are libs/parts. Switching a file
-        // changes the editor VIEW, not the render target — viewing a lib keeps the entry on screen, and
-        // only the ENTRY's content changing (a fresh open, or a later set-entry) re-renders. A loose folder
-        // keeps folder-browser semantics: every file is its own model, so a switch renders it.
-        let container = matches!(project.home, crate::project::ProjectHome::ScadProj(_));
+        // Z.3.6 option A: EVERY project renders its ENTRY. Switching a file changes the editor VIEW, not
+        // the render target — view a lib and the entry stays on screen; set-entry to change what renders.
         // Persist the OUTGOING file's live edit before moving off it — but ONLY when the editor actually
         // holds the current active file (a within-project switch). On a FRESH open the editor still carries
         // the PREVIOUS project's text, and flushing that would clobber the new entry.
@@ -349,7 +346,8 @@ pub(crate) fn apply_switch_file(
         });
         if holds_active {
             project.flush_active(&editor.text);
-            if let (true, Some(base)) = (container, project.base_dir.clone())
+            // Sync the flushed edit into the render-root so the entry render sees it.
+            if let Some(base) = project.base_dir.clone()
                 && let Some(cur) = project.files.get(project.active)
             {
                 let name = cur.name.clone();
@@ -357,44 +355,38 @@ pub(crate) fn apply_switch_file(
             }
         }
         project.set_active(i);
-        // The render target: a container always renders its ENTRY (from the temp materialization); a loose
-        // switch renders the switched file. The editor still shows the VIEWED file either way.
-        let render_path = if container {
-            project
-                .base_dir
-                .as_ref()
-                .and_then(|b| project.files.get(project.entry).map(|f| b.join(&f.name)))
-                .unwrap_or_else(|| path.clone())
-        } else {
-            path.clone()
-        };
-        // Only a CHANGE of render target is a re-render — a container view-switch (entry unchanged) just
-        // swaps the editor, no geometry churn. A loose switch always changes it (each file is a target).
+        // The render target is ALWAYS the entry, read from the render-root (shadow / temp).
+        let render_path = project
+            .base_dir
+            .as_ref()
+            .zip(project.files.get(project.entry))
+            .map(|(b, f)| b.join(&f.name))
+            .unwrap_or_else(|| path.clone());
+        // Only a CHANGE of render target re-renders — a view-switch (entry unchanged) just swaps the editor.
         let changed = scene.source.as_deref() != Some(render_path.as_path());
         scene.source = Some(render_path.clone());
-        // Re-derive the workspace root from the RENDERED model (W.3.21): a sourceless `.app` launch left
-        // root None (cwd `/`), so opening a model under a workspace must pick up its BOSL2/scad-lib search
-        // paths — else every module goes undefined and the render comes back empty.
-        if let Some(r) = std::fs::canonicalize(&render_path)
-            .ok()
-            .as_deref()
-            .and_then(|p| p.parent())
-            .and_then(fab::find_root_from)
+        // Re-derive the workspace root from the REAL folder (Z.3.6), NOT the render-root: the shadow lives
+        // under `tmp/`, so walking up from it would lose BOSL2/scad-lib. A container has no real workspace
+        // (loose_save_dir None) → root stays the boot value (packed lib root).
+        if let Some(real_dir) = loose_save_dir(&project)
+            && let Some(r) = std::fs::canonicalize(&real_dir)
+                .ok()
+                .as_deref()
+                .and_then(fab::find_root_from)
         {
             scene.root = Some(r);
         }
         // The VIEWED file's disk text (minus its fab:config block, W.3.8) becomes the editor buffer.
         let view_cfg = read_into_editor(&mut editor, &path);
         if changed {
-            // The stashed block applies in poll_job once the fresh parts are built. On a container's fresh
-            // open the viewed file IS the entry, so its config is the entry's; a loose switch renders the
-            // viewed file, so its own config is right. (A render-free view-switch leaves parts untouched.)
+            // The stashed block applies in poll_job once the fresh parts are built. On a fresh open the
+            // viewed file IS the entry, so its config is the entry's. (A view-switch leaves parts untouched.)
             pending_config.0 = view_cfg;
             // Drop the outgoing model's held base solids before wiping — a file switch abandons them.
             free_bases(&pool, state.parts.0.iter().filter_map(|p| p.base).collect());
             state.reset();
             kick_render(&pool, &mut job, &mut status, &scene, true);
-            info!("open: {}", render_path.display());
+            info!("render: {}", render_path.display());
         }
     }
 }
@@ -439,20 +431,17 @@ pub(crate) fn poll_open_dialog(
         }
         return;
     }
-    // A loose `.scad`: open its FOLDER as the project (both flat + `src/`-nested layouts), that file the
-    // entry. `base_dir` is the REAL folder — render + save both resolve in place, no temp copy.
+    // A loose `.scad` (Z.3.6, option A): open its FOLDER as a project rooted at a temp SHADOW (so preview
+    // never touches the real files), homed at the real file so Save writes back in place. The entry
+    // renders; other files are views/libs.
     #[cfg(not(target_arch = "wasm32"))]
-    {
-        let dir = picked.parent().unwrap_or(picked.as_path()).to_path_buf();
-        let scads = scad_files(&dir);
-        if scads.is_empty() {
-            status.0 = format!("no .scad under {}", dir.display());
-            return;
+    match open_loose(&picked, &scene.tmp) {
+        Ok(doc) => {
+            let active = doc.entry;
+            *project = doc;
+            switch.write(SwitchFile(active));
         }
-        let doc = crate::project::ProjectDoc::from_disk(dir, &scads, &picked);
-        let active = doc.entry;
-        *project = doc;
-        switch.write(SwitchFile(active));
+        Err(e) => status.0 = format!("open: {e}"),
     }
 }
 
@@ -490,6 +479,45 @@ fn unpack_scadproj(
     }
     doc.base_dir = Some(dir);
     Ok(doc)
+}
+
+/// Open a loose `.scad` as a project (Z.3.6, option A): `from_disk` loads the FOLDER's `.scad`, then we
+/// re-root to a temp SHADOW so preview writes the shadow, never the user's real files (killing
+/// `.fab-preview`). `home` stays `ScadFile(real path)` so Save writes back to the REAL folder. The loose
+/// twin of [`unpack_scadproj`] — same shape, the home + save target differ.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn open_loose(
+    picked: &std::path::Path,
+    tmp: &std::path::Path,
+) -> anyhow::Result<crate::project::ProjectDoc> {
+    let dir = picked.parent().unwrap_or(picked).to_path_buf();
+    let scads = scad_files(&dir);
+    if scads.is_empty() {
+        anyhow::bail!("no .scad under {}", dir.display());
+    }
+    // from_disk loads the content + homes at the real entry path; we override base_dir to the shadow.
+    let mut doc = crate::project::ProjectDoc::from_disk(dir, &scads, picked);
+    let stem = picked
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "model".into());
+    let shadow = tmp.join("loose").join(&stem);
+    let _ = std::fs::remove_dir_all(&shadow); // a clean re-open
+    materialize_all(&doc, &shadow)?;
+    doc.base_dir = Some(shadow);
+    Ok(doc)
+}
+
+/// The REAL on-disk folder a loose project saves back to — its `home` `ScadFile` path's parent (the
+/// shadow `base_dir` is a render scratch; save must NOT write there). `None` for a container / web / paste.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn loose_save_dir(project: &crate::project::ProjectDoc) -> Option<std::path::PathBuf> {
+    match &project.home {
+        crate::project::ProjectHome::ScadFile(p) => {
+            Some(p.parent().unwrap_or(p.as_path()).to_path_buf())
+        }
+        _ => None,
+    }
 }
 
 /// Write `body` to `base/rel`, creating parent dirs. Shared by the `.scadproj` materialize + save-back.
@@ -820,10 +848,12 @@ pub(crate) fn watch_source(
     mut status: ResMut<Status>,
     pool: Res<GeomPool>,
 ) {
-    // A `.scadproj` renders from a temp materialization the app itself rewrites on every preview — its
-    // mtime advancing is OUR write, not an external editor, so watching it would spuriously re-render in
-    // a loop. External-edit reload is a loose/on-disk concern only.
-    if matches!(project.home, crate::project::ProjectHome::ScadProj(_)) {
+    // Z.3.6: every project now renders from a temp render-ROOT (a container's temp OR a loose folder's
+    // shadow) the app rewrites on every preview — its mtime advancing is OUR write, not an external
+    // editor, so watching it would spuriously re-render in a loop. Only a base_dir-less paste is watched
+    // (and it has no file anyway). Project-level external-edit reload (watch the REAL folder) is a
+    // Z.3.6 follow-on; for now editing outside the app doesn't auto-reload a project.
+    if project.base_dir.is_some() {
         return;
     }
     let Some(src) = scene.source.as_deref() else {
@@ -1178,14 +1208,11 @@ pub(crate) fn preview_edited_buffer(
         let (main, pack) = project.render_pack(&editor.text);
         kick_render_bytes(&pool, &mut job, &mut status, main, pack, false);
     }
-    // native container (`.scadproj`): write the edited file into its temp copy so `include`s see it,
-    // then render the ENTRY — editing ANY project file re-renders the entry with the edit (Z.3.4). The
-    // temp is the render truth; save re-zips it. Only a container takes this path; loose/single fall
-    // through to the `.fab-preview` path unchanged (byte-identical single-file render).
+    // native, ANY project with a render-root (Z.3.6): write the edited file into the root (a container's
+    // temp OR a loose folder's shadow), then render the ENTRY — editing ANY project file re-renders the
+    // entry with the edit. The root is the render truth (never the user's real files); save persists it.
     #[cfg(not(target_arch = "wasm32"))]
-    if matches!(project.home, crate::project::ProjectHome::ScadProj(_))
-        && let Some(base) = project.base_dir.clone()
-    {
+    if let Some(base) = project.base_dir.clone() {
         if let Some(active) = project.files.get(project.active) {
             let name = active.name.clone();
             if write_under(&base, &name, editor.text.as_bytes()).is_err() {
@@ -1199,10 +1226,9 @@ pub(crate) fn preview_edited_buffer(
         }
         return;
     }
-    // native (loose/single): write the buffer to a hidden temp beside the real file (so relative
-    // `include`s resolve) and render that path. With NO opened file (a fresh launch the user PASTED into
-    // — W.3.33) there's no parent dir to sit beside, so fall back to the scratch dir: `<BOSL2/…>` still
-    // resolves via the packed lib root on `scene.root`, and a pasted standalone model has no siblings.
+    // native, NO render-root (a fresh launch the user PASTED into — W.3.33, base_dir None): write the
+    // buffer to a hidden temp in the scratch dir and render that. `<BOSL2/…>` still resolves via the
+    // packed lib root on `scene.root`; a pasted standalone model has no siblings to miss.
     #[cfg(not(target_arch = "wasm32"))]
     {
         let dir = editor

@@ -34,6 +34,35 @@ pub(crate) struct PanelView<'w> {
     pub(crate) save_target: Res<'w, SaveTarget>,
 }
 
+/// Bake the live slicing config into the buffer and persist it — the ONE local-save path, driven by both
+/// the Save button and the Cmd/Ctrl+S shortcut (W.3.40). Native writes the file; the browser downloads
+/// the same config-baked bytes (W.3.13). `with_config_block` strips any prior block first, so re-saving
+/// REPLACES rather than stacks. Clears `dirty` only on a successful write.
+fn save_buffer(editor: &mut EditorBuf, parts: &[Part], bed: [f32; 3]) {
+    // Bake the CURRENT bed into the block too (W.3.8) — the model carries its own printer, so a web
+    // reload with no printers.toml still sizes right.
+    let printer = config::PrinterCfg {
+        bed: [bed[0] as f64, bed[1] as f64, bed[2] as f64],
+    };
+    let baked = config::with_config_block(&editor.text, parts, Some(printer));
+    #[cfg(not(target_arch = "wasm32"))]
+    if std::fs::write(&editor.path, baked).is_ok() {
+        editor.dirty = false;
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        let name = editor
+            .path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .filter(|n| !n.is_empty())
+            .unwrap_or("model.scad");
+        if crate::web_host::download_bytes(name, "application/x-openscad", baked.as_bytes()) {
+            editor.dirty = false;
+        }
+    }
+}
+
 /// The whole control panel (U.3), immediate-mode: an app-wide top tab bar + bottom status bar +
 /// a left egui panel whose contents route on the active `Tab` (Model / Parts / Orientation / Export).
 /// Cheap edits mutate in place; a heavy action (needing params beyond the panel's own) writes a
@@ -67,6 +96,18 @@ pub(crate) fn panel_ui(
     let Ok(ctx) = contexts.ctx_mut() else {
         return;
     };
+    // W.3.40: Cmd/Ctrl+S saves, from ANY tab — COMMAND is egui's platform primary (⌘ on macOS, Ctrl
+    // elsewhere). Consumed unconditionally (so the editor never also sees it), saved only when dirty —
+    // matching the Save button's enabled-gate. Checked before the tab match so it fires even when the
+    // Save button (Model tab only) is off screen. On web the browser's own save-page dialog is already
+    // suppressed by the window's `prevent_default_event_handling` (see clipboard.rs).
+    if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::S)) && editor.dirty {
+        save_buffer(
+            &mut editor,
+            &parts.0,
+            [scene.bed[0], scene.bed[1], scene.bed[2]],
+        );
+    }
     // X.2: the customizer params for the current buffer (owned, so it doesn't hold `editor`'s borrow).
     // Drives the conditional Customize tab + its widgets. Cheap — `customize` parses only the buffer.
     let cv_params = crate::customize::extract(&editor.text);
@@ -294,15 +335,10 @@ pub(crate) fn panel_ui(
                         }
                     });
                     ui.separator();
-                    // Save (explicit, desktop) + jump to OpenSCAD. The buffer renders live; the file
-                    // on disk only changes here. On save the live slicing config is BAKED into the
-                    // .scad as a trailing `fab:config` comment block (W.3.8) — the one persistence
-                    // mechanism both platforms share (web downloads the same bytes). `with_config_block`
-                    // strips any prior block first, so re-saving replaces, never stacks.
+                    // Save (explicit): the buffer renders live, but the file on disk only changes here or
+                    // via Cmd/Ctrl+S (W.3.40). The write itself — config-block bake + per-platform
+                    // delivery — lives in `save_buffer`.
                     ui.horizontal(|ui| {
-                        // Save delivery splits per platform (W.3.13): native writes the file; the
-                        // browser downloads the SAME config-baked bytes (there is no disk — this is
-                        // W.3.8's "web downloads the same bytes", finally wired).
                         let save_hover = if cfg!(target_arch = "wasm32") {
                             "download .scad"
                         } else {
@@ -313,37 +349,11 @@ pub(crate) fn panel_ui(
                             .on_hover_text(save_hover)
                             .clicked()
                         {
-                            // Bake the CURRENT bed into the block too (W.3.8) — the model carries its
-                            // own printer, so a web reload with no printers.toml still sizes right.
-                            let printer = config::PrinterCfg {
-                                bed: [
-                                    scene.bed[0] as f64,
-                                    scene.bed[1] as f64,
-                                    scene.bed[2] as f64,
-                                ],
-                            };
-                            let baked =
-                                config::with_config_block(&editor.text, &parts.0, Some(printer));
-                            #[cfg(not(target_arch = "wasm32"))]
-                            if std::fs::write(&editor.path, baked).is_ok() {
-                                editor.dirty = false;
-                            }
-                            #[cfg(target_arch = "wasm32")]
-                            {
-                                let name = editor
-                                    .path
-                                    .file_name()
-                                    .and_then(|n| n.to_str())
-                                    .filter(|n| !n.is_empty())
-                                    .unwrap_or("model.scad");
-                                if crate::web_host::download_bytes(
-                                    name,
-                                    "application/x-openscad",
-                                    baked.as_bytes(),
-                                ) {
-                                    editor.dirty = false;
-                                }
-                            }
+                            save_buffer(
+                                &mut editor,
+                                &parts.0,
+                                [scene.bed[0], scene.bed[1], scene.bed[2]],
+                            );
                         }
                         if editor.dirty {
                             ui.colored_label(

@@ -146,7 +146,8 @@ pub(crate) fn publish_web_kick(
     // The uploaded SOURCE variant (Z.5): a `.scadproj` for a project — the gallery item re-opens as a real
     // project — else a config-baked `.scad`. The mesh renders from the FULL project (render_pack).
     let (source_name, source_mime, source) =
-        match crate::jobs::project_source_variant(&project, &parts.0, printer, &editor.text, &stem) {
+        match crate::jobs::project_source_variant(&project, &parts.0, printer, &editor.text, &stem)
+        {
             Ok(v) => v,
             Err(e) => {
                 status.0 = format!("publish failed: {e:#}");

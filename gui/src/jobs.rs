@@ -573,7 +573,11 @@ pub(crate) fn project_source_variant(
         Ok((format!("{stem}.{PROJECT_EXT}"), PROJECT_MIME, bytes))
     } else {
         let baked = config::with_config_block(entry_text, parts, Some(printer));
-        Ok((format!("{stem}.scad"), "application/x-openscad", baked.into_bytes()))
+        Ok((
+            format!("{stem}.scad"),
+            "application/x-openscad",
+            baked.into_bytes(),
+        ))
     }
 }
 
@@ -619,7 +623,11 @@ pub(crate) fn project_files_action(
     if let Some((i, new_name)) = rename.commit.take() {
         let base = project.base_dir.clone();
         if let Some(old) = project.rename_file(i, &new_name) {
-            let new = project.files.get(i).map(|f| f.name.clone()).unwrap_or(new_name);
+            let new = project
+                .files
+                .get(i)
+                .map(|f| f.name.clone())
+                .unwrap_or(new_name);
             if let Some(base) = base.as_ref() {
                 let _ = std::fs::rename(base.join(&old), base.join(&new)); // missing source? a never-materialized file
                 // Recompute the render target with the CURRENT names + re-render.
@@ -759,7 +767,11 @@ pub(crate) fn save_as_project_action(
     }
     project.flush_active(&editor.text); // capture the live active edit in the file set
     let printer = config::PrinterCfg {
-        bed: [scene.bed[0] as f64, scene.bed[1] as f64, scene.bed[2] as f64],
+        bed: [
+            scene.bed[0] as f64,
+            scene.bed[1] as f64,
+            scene.bed[2] as f64,
+        ],
     };
     let bytes = match rezip_project(&project, &parts.0, printer) {
         Ok(b) => b,

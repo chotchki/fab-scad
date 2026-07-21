@@ -270,11 +270,7 @@ fn run_windowed(scene: SceneCfg, shot: Option<PathBuf>) {
             // Auto-on-open: a fresh too-big model auto-slices + connects (kick), then the plan
             // lands and seeds cuts + connectors (poll). After poll_job so bounds are set.
             (kick_auto_plan, poll_auto_plan).chain().after(poll_job),
-            (
-                poll_open_dialog,
-                apply_switch_file,
-                preview_edited_buffer,
-            ),
+            (poll_open_dialog, apply_switch_file, preview_edited_buffer),
             sync_overlays,
             sync_overlay_visuals,
             sync_dim_labels,

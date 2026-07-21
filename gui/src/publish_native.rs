@@ -166,7 +166,11 @@ pub(crate) fn publish_kick(
     // `.scad` at `src`. The RENDER still reads `src` (the shadow entry), so a project's mesh is complete.
     let upload_source = if project.is_multifile() {
         let printer = config::PrinterCfg {
-            bed: [scene.bed[0] as f64, scene.bed[1] as f64, scene.bed[2] as f64],
+            bed: [
+                scene.bed[0] as f64,
+                scene.bed[1] as f64,
+                scene.bed[2] as f64,
+            ],
         };
         match rezip_project(&project, &parts.0, printer) {
             Ok(bytes) => {

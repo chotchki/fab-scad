@@ -104,7 +104,9 @@ impl ProjectDoc {
             })
             .collect();
         let entry = paths.iter().position(|p| p == entry).unwrap_or(0);
-        let home = ProjectHome::ScadFile(base_dir.join(&files[entry.min(files.len().saturating_sub(1))].name));
+        let home = ProjectHome::ScadFile(
+            base_dir.join(&files[entry.min(files.len().saturating_sub(1))].name),
+        );
         ProjectDoc {
             files,
             assets: BTreeMap::new(),
@@ -153,9 +155,7 @@ impl ProjectDoc {
     /// A project-relative name not already taken by a file OR an asset — `stem.scad`, else `stem-1.scad`,
     /// `stem-2.scad`, … So an added/renamed file never silently overwrites a sibling.
     pub(crate) fn unique_name(&self, want: &str) -> String {
-        let taken = |n: &str| {
-            self.files.iter().any(|f| f.name == n) || self.assets.contains_key(n)
-        };
+        let taken = |n: &str| self.files.iter().any(|f| f.name == n) || self.assets.contains_key(n);
         if !taken(want) {
             return want.to_string();
         }
@@ -483,13 +483,13 @@ mod tests {
     #[test]
     fn import_routes_text_to_files_and_binary_to_assets() {
         let mut d = ProjectDoc::single("main.scad", "", ProjectHome::Fresh);
-        assert_eq!(d.import("hook.scad", b"module hook(){}".to_vec()), "hook.scad");
+        assert_eq!(
+            d.import("hook.scad", b"module hook(){}".to_vec()),
+            "hook.scad"
+        );
         assert!(d.files.iter().any(|f| f.name == "hook.scad"));
         // a PNG (binary) → assets, not a garbled String.
-        assert_eq!(
-            d.import("map.png", vec![0x89, b'P', b'N', b'G']),
-            "map.png"
-        );
+        assert_eq!(d.import("map.png", vec![0x89, b'P', b'N', b'G']), "map.png");
         assert!(d.assets.contains_key("map.png"));
         // a name collision de-dups.
         assert_eq!(d.import("hook.scad", b"// two".to_vec()), "hook-1.scad");

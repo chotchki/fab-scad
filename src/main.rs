@@ -161,6 +161,15 @@ enum Commands {
         #[arg(long, short)]
         out: Option<PathBuf>,
     },
+    /// Render a `.scadproj`'s entry `.scad` to an STL — project-local includes resolve from the archive,
+    /// workspace libraries (BOSL2 …) from the fab tree.
+    Open {
+        /// The `.scadproj` to render.
+        file: PathBuf,
+        /// Output STL (default: `<stem>.stl`).
+        #[arg(long, short)]
+        out: Option<PathBuf>,
+    },
 }
 
 fn main() -> Result<()> {
@@ -223,6 +232,7 @@ fn main() -> Result<()> {
             title,
         } => pack_cmd(&dir, out, entry, title),
         Commands::Unpack { file, out } => unpack_cmd(&file, out),
+        Commands::Open { file, out } => open_cmd(&file, out),
     }
 }
 
@@ -1222,6 +1232,61 @@ fn unpack_cmd(file: &Path, out: Option<PathBuf>) -> Result<()> {
 #[cfg(not(feature = "mesh-io"))]
 fn unpack_cmd(_file: &Path, _out: Option<PathBuf>) -> Result<()> {
     bail!("fab unpack needs the `mesh-io` feature (built without it)")
+}
+
+/// `fab open <file.scadproj>` — render the project's entry `.scad` to an STL. Unpacks to a scratch dir so
+/// the native fs resolver handles BOTH the project's own files (its `include <hook.scad>`) AND the
+/// workspace libraries (BOSL2 …) that live OUTSIDE the zip — the web path feeds a byte pack instead, but
+/// reusing `Source::Path` here resolves libraries for free.
+#[cfg(all(feature = "mesh-io", feature = "kernel"))]
+fn open_cmd(file: &Path, out: Option<PathBuf>) -> Result<()> {
+    use fab_scad::geomsg::Source;
+    use fab_scad::{geomsvc, scadproj};
+
+    let bytes = std::fs::read(file).with_context(|| format!("reading {}", file.display()))?;
+    let project = scadproj::read_scadproj(&bytes)?;
+
+    let stem = file
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "project".into());
+    let scratch = std::env::temp_dir().join(format!("fab-open-{stem}-{}", std::process::id()));
+    std::fs::create_dir_all(&scratch)?;
+    for (rel, body) in &project.files {
+        let dest = scratch.join(rel);
+        if let Some(parent) = dest.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(&dest, body)?;
+    }
+
+    let entry_path = scratch.join(&project.manifest.entry);
+    let root = find_root().map(|r| r.to_string_lossy().into_owned());
+    // Render, then clean the scratch dir REGARDLESS of the outcome (it has served its purpose either way).
+    let rendered = geomsvc::render_source_to_solid(
+        &Source::Path(entry_path.to_string_lossy().into_owned()),
+        root.as_deref(),
+    );
+    let _ = std::fs::remove_dir_all(&scratch);
+    let solid = rendered?;
+
+    let out = out.unwrap_or_else(|| PathBuf::from(format!("{stem}.stl")));
+    solid
+        .write_stl(&out)
+        .with_context(|| format!("writing {}", out.display()))?;
+    println!(
+        "rendered {} (entry {}) -> {} ({} tris)",
+        file.display(),
+        project.manifest.entry,
+        out.display(),
+        solid.to_indexed().1.len()
+    );
+    Ok(())
+}
+
+#[cfg(not(all(feature = "mesh-io", feature = "kernel")))]
+fn open_cmd(_file: &Path, _out: Option<PathBuf>) -> Result<()> {
+    bail!("fab open needs the `mesh-io` + `kernel` features (built without them)")
 }
 
 #[cfg(test)]

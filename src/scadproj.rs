@@ -30,6 +30,10 @@ pub const MANIFEST_ENTRY: &str = "fab-project.json";
 /// The conventional extension. A distinct suffix is the disambiguator (never collides with a random zip).
 pub const PROJECT_EXT: &str = "scadproj";
 
+/// An include/asset pack: `(relative-path, bytes)` pairs — `.scad` neighbors + assets. Mirrors the wire's
+/// `Source::Bytes.libs`, which the resolver already consumes.
+pub type FilePack = Vec<(String, Vec<u8>)>;
+
 /// A zip-bomb backstop: a real project is a handful of small text files + a few assets.
 const MAX_ENTRIES: usize = 10_000;
 /// A zip-bomb backstop on total unpacked size (512 MiB — generous for meshes, far below a bomb).
@@ -99,6 +103,22 @@ pub fn project_from_files(
         },
         files,
     })
+}
+
+/// Split a project into the render inputs the kernel wants: the entry `.scad`'s bytes (the `main`) and
+/// every OTHER file as a `(relative-path, bytes)` pair — the in-memory include/asset pack the resolver
+/// runs against (Z.2). `.scad` neighbors resolve by relative path (`include <hook.scad>` → `"hook.scad"`),
+/// binary assets by basename; the caller merges the library closure (BOSL2 …) into the same `libs` list.
+/// This is the ONE seam both the CLI and the web GUI build a `Source::Bytes` from.
+pub fn project_render_sources(project: &Project) -> Result<(Vec<u8>, FilePack)> {
+    let main = project.entry_bytes()?.to_vec();
+    let libs = project
+        .files
+        .iter()
+        .filter(|(k, _)| *k != &project.manifest.entry)
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+    Ok((main, libs))
 }
 
 /// Pick the render entry when there's no manifest: the single `.scad`. Multiple `.scad` are AMBIGUOUS —
@@ -279,6 +299,36 @@ mod tests {
             back.entry_bytes().unwrap(),
             b"include <hook.scad>\ncube(1);\n"
         );
+    }
+
+    #[test]
+    fn preserves_binary_asset_bytes() {
+        // A binary asset (non-UTF-8 bytes — a stand-in for a PNG heightmap / binary STL) must survive the
+        // container intact; the stored zip is the byte channel a text pack lacked (W.3.24 residual).
+        let bin: Vec<u8> = vec![0x00, 0xFF, 0x80, 0x01, 0xFE, b'P', b'K', 0x03];
+        let mut files: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+        files.insert("part.scad".into(), b"cube(1);".to_vec());
+        files.insert("heightmap.png".into(), bin.clone());
+        let p = project_from_files(files, Some("part.scad".into()), None).unwrap();
+        let back = read_scadproj(&write_scadproj(&p).unwrap()).unwrap();
+        assert_eq!(back.files.get("heightmap.png"), Some(&bin));
+    }
+
+    #[test]
+    fn project_render_sources_splits_entry_from_the_rest() {
+        let p = proj(
+            &[
+                ("main.scad", b"include <hook.scad>"),
+                ("hook.scad", b"module hook(){}"),
+                ("logo.svg", b"<svg/>"),
+            ],
+            "main.scad",
+        );
+        let (main, libs) = project_render_sources(&p).unwrap();
+        assert_eq!(main, b"include <hook.scad>");
+        // the entry is the `main`, never repeated in the pack; the neighbors + assets ARE.
+        let keys: Vec<&str> = libs.iter().map(|(k, _)| k.as_str()).collect();
+        assert_eq!(keys, ["hook.scad", "logo.svg"]);
     }
 
     #[test]

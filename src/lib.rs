@@ -28,6 +28,11 @@ pub mod bambu;
 // (W.5). Mesh-only (no Solid), so it rides `mesh-io` like `bambu`, reachable on the wasm worker.
 #[cfg(feature = "mesh-io")]
 pub mod threemf_out;
+// The `.scadproj` project container (Phase Z): a multi-file OpenSCAD project as one stored zip, so the
+// fs-less web app opens a project like the desktop opens a folder. Byte-based reader/writer, so it rides
+// `mesh-io` like `bambu`/`threemf_out` and runs on the wasm worker.
+#[cfg(feature = "mesh-io")]
+pub mod scadproj;
 // BOSL2 test corpus runner (K.1 tier 2): needs fab-lang (eval) + toml + std::fs — a native dev/CI tool.
 #[cfg(feature = "native")]
 pub mod corpus;

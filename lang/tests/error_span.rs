@@ -1,8 +1,15 @@
 //! W.3.37: a fatal eval error carries the SOURCE SPAN of the top-level construct that triggered it, so the
 //! GUI can point the editor at the user's line. The seam that matters in practice is the top-level HOIST: a
-//! `x = f(...)` whose RHS faults deep in a called function (the webcam_holder class — `p = bezpath_curve(pts,
-//! $fn, 2)` with $fn=0). Geometry-statement asserts are CAUGHT (L.5.8 warn-and-continue) and unknown symbols
-//! warn, so the driver seam rarely fires; it stamps identically (`Error::at`) when a non-assert fault does.
+//! `x = f(...)` whose RHS faults deep in a called function (the `webcam_holder` class — a
+//! `p = bezpath_curve(pts, N, 2)` with `N == 0`). Geometry-statement asserts are CAUGHT (L.5.8
+//! warn-and-continue) and unknown symbols warn, so the driver seam rarely fires; it stamps identically
+//! (`Error::at`) when a non-assert fault does.
+
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "integration test: unwrap/expect ARE the assertions"
+)]
 
 use fab_lang::{Error, evaluate_geometry, offset_to_line};
 

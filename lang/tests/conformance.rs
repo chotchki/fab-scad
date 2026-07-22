@@ -182,3 +182,15 @@ fn eot_marker_is_an_empty_statement() {
     let prog = parse("\u{3}").expect("EOT parses");
     assert!(matches!(prog.stmts.as_slice(), [s] if matches!(s.kind, StmtKind::Empty)));
 }
+
+/// AA.5: non-UTF-8 source decodes via the Latin-1 fallback at the fs seam — a raw `0xA0` NBSP byte
+/// becomes U+00A0, which lexes as whitespace (oracle-verified on the nbsp twin tests: `ECHO: 1`,
+/// clean run). fab-lang's core stays str/UTF-8; only the byte→text decode is lenient.
+#[test]
+fn latin1_source_decodes_and_parses() {
+    let latin1: Vec<u8> = b"a\xa0=\xa01;\xa0//\xa0nbsp\necho(a);\n".to_vec();
+    let src = fab_lang::decode_scad_source(latin1);
+    assert!(src.contains('\u{a0}'), "0xA0 maps to U+00A0, not U+FFFD");
+    let p = parse(&src).expect("latin-1 NBSP source parses (NBSP is whitespace)");
+    assert_eq!(p.stmts.len(), 2);
+}

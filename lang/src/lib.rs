@@ -304,6 +304,15 @@ pub fn intrinsic_matrix(
     eval::io::drive_intrinsic_matrix(source, base_dir, library_paths)
 }
 
+/// Decode `.scad` source bytes the way the fs seam does (AA.5): UTF-8, with a LATIN-1 fallback when
+/// the bytes aren't valid UTF-8 — upstream's lexer is byte-lenient (a raw `0xA0` NBSP is whitespace),
+/// and Latin-1 is the only 8-bit encoding `.scad` files exist in. Harnesses reading source themselves
+/// (the sustainment sweep) call this so every path shares one decode doctrine.
+#[must_use]
+pub fn decode_scad_source(bytes: Vec<u8>) -> String {
+    eval::io::decode_source(bytes)
+}
+
 /// Like [`resolve_geometry_with_base`], but resolves `use`/`include` from an IN-MEMORY source MAP
 /// instead of the filesystem — the wasm/browser entry (W.3.6 Stage 2). `sources` is a virtual lib tree
 /// keyed by NORMALIZED relative path ("BOSL2/std.scad", …); there is no disk and no `library_paths`.

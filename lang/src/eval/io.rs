@@ -32,8 +32,22 @@ fn empty_program() -> Program {
 /// # Errors
 /// [`Error::Load`](crate::Error::Load) if the path can't be read.
 pub(crate) fn read_source(path: &Path) -> crate::Result<String> {
-    std::fs::read_to_string(path)
-        .map_err(|e| crate::Error::Load(format!("{}: {e}", path.display())))
+    let bytes =
+        std::fs::read(path).map_err(|e| crate::Error::Load(format!("{}: {e}", path.display())))?;
+    Ok(decode_source(bytes))
+}
+
+/// Decode source bytes: UTF-8, with a LATIN-1 fallback when the bytes aren't valid UTF-8 (AA.5,
+/// chotchki's call — nbsp-latin1-test.scad). Upstream's lexer is byte-lenient (a raw `0xA0` NBSP is
+/// whitespace to it); mapping each non-UTF-8 byte to its Latin-1 codepoint reproduces that for the
+/// only 8-bit encoding .scad files exist in, while fab-lang's core stays `str`/UTF-8 — the fallback
+/// lives ONLY at this fs seam. Lossy U+FFFD would still lex-error (looking handled while staying
+/// red); Latin-1 actually closes the file.
+pub(crate) fn decode_source(bytes: Vec<u8>) -> String {
+    match String::from_utf8(bytes) {
+        Ok(s) => s,
+        Err(e) => e.into_bytes().iter().map(|&b| char::from(b)).collect(),
+    }
 }
 
 /// Drive the needs fixpoint to completion — the outer loop behind every native entry point. Loops the pure
@@ -315,11 +329,10 @@ where
                 );
                 return Ok(());
             };
-            let text = std::fs::read_to_string(&id).map_err(|e| {
-                // TOCTOU: `resolve` already canonicalized this as a readable file, so a failure here is a
-                // race (deleted / perms flipped). Off the pure core's coverage — this module is the seam.
-                crate::Error::Load(format!("{}: {e}", id.display()))
-            })?;
+            // TOCTOU: `resolve` already canonicalized this as a readable file, so a failure here is a
+            // race (deleted / perms flipped). Off the pure core's coverage — this module is the seam.
+            // `read_source` also gives included libs the AA.5 Latin-1 fallback, same as the root.
+            let text = read_source(&id)?;
             let dir = id.parent().unwrap_or(Path::new(".")).to_path_buf();
             // A parse-broken USED/INCLUDED file is ALSO tolerated (warn + empty) — OpenSCAD renders on. The
             // root's parse (in `resolve_source`) is the only one that stays LOUD.

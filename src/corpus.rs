@@ -281,15 +281,15 @@ pub fn enumerate_files(manifest: &Path) -> Result<Vec<TestCase>> {
     paths.sort_unstable();
     let mut cases = Vec::new();
     for p in paths {
-        // LOSSY decode, deliberately: the openscad corpus contains encoding-torture files
-        // (nbsp-latin1-test.scad is Latin-1 on purpose). A strict read would abort the WHOLE sweep on
-        // one of them; lossy keeps the case, and the replacement chars turn into an honest per-file
-        // parse verdict ("we don't handle this encoding") both parent- and worker-side identically.
+        // Decode via the fs-seam doctrine (AA.5): UTF-8 with a Latin-1 fallback — the same read a
+        // real `fab render` would do, so the sweep's verdicts match production (nbsp-latin1-test.scad
+        // is Latin-1 on purpose, and upstream's lexer is byte-lenient). Deterministic both
+        // parent- and worker-side.
         let bytes = std::fs::read(p).with_context(|| format!("reading listed file {p}"))?;
         cases.push(TestCase {
             file: p.to_string(),
             name: "eval".to_string(),
-            script: String::from_utf8_lossy(&bytes).into_owned(),
+            script: fab_lang::decode_scad_source(bytes),
             expect_success: true,
         });
     }

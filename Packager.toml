@@ -36,3 +36,14 @@ target = "libs"
 [[resources]]
 src = "scad-lib"
 target = "scad-lib"
+
+# CFBundleVersion pin (W.2.2.1) — without this, cargo-packager stamps a build timestamp and no two
+# builds match. The plist MERGES over the generated one (its keys win); it must carry the same
+# version as this file — build-app.sh + release-native.yml enforce that.
+#
+# KEEP THIS SECTION LAST: release-native.yml appends `signing-identity = "…"` to the END of this
+# file when the signing secrets exist (a duplicate [macos] header would be a TOML parse error, so
+# the append relies on landing inside THIS table). Identity is deliberately not committed — local
+# builds and secretless CI dispatches stay unsigned-but-working (see docs/packaging.md "signing").
+[macos]
+info-plist-path = "packaging/macos/Info.plist"

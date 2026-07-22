@@ -12,6 +12,15 @@ command -v cargo-packager >/dev/null 2>&1 || {
   exit 1
 }
 
+# Version-sync guard (W.2.2.1): the pinned CFBundleVersion in Info.plist must track Packager.toml's
+# version — the pin exists for reproducible builds, a stale pin ships the WRONG build number.
+PKG_VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' Packager.toml)
+PLIST_VERSION=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' packaging/macos/Info.plist)
+[[ "$PKG_VERSION" == "$PLIST_VERSION" ]] || {
+  echo "version drift: Packager.toml=$PKG_VERSION but Info.plist CFBundleVersion=$PLIST_VERSION — bump them together" >&2
+  exit 1
+}
+
 echo "1/3 building release binaries (fab-gui app + fab CLI)…"
 cargo build --release --workspace --bins
 
@@ -22,7 +31,8 @@ APP="target/packager/fab-scad.app"
 [[ -d "$APP" ]] || { echo "no .app at $APP — did cargo-packager change its out-dir?" >&2; exit 1; }
 
 # Ad-hoc sign (-s -): a valid but anonymous signature so macOS lets it run locally. NOT Developer-ID /
-# notarized — `spctl` will still reject it for GATEKEEPER-distribution (W.2.2's $99/yr + rcodesign call).
+# notarized — `spctl` will still reject it for GATEKEEPER-distribution (that's release-native.yml's
+# secrets-gated signing path, docs/packaging.md "signing").
 # Clearing the quarantine xattr keeps a locally-built app from nagging on first open.
 echo "3/3 ad-hoc signing…"
 codesign --deep --force --sign - "$APP"

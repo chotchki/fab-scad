@@ -1,7 +1,10 @@
-# PARKED (18.2, web-first decision 2026-07-03): native installers (mac .app+DMG, Windows NSIS)
-# are proven locally (docs/packaging.md) but the channel is deliberately idle while the wasm/web
-# path integrates into hotchkiss.io. No automatic trigger — dispatch by hand when native resumes.
-# Signing bill + gaps before a real release: docs/packaging.md.
+# Native installers (mac .app+DMG, Windows NSIS) — proven locally (docs/packaging.md), signing
+# wired (W.2.2). Dispatch-only until the first SIGNED run verifies Gatekeeper end-to-end
+# (W.2.2.4 then adds the `v*` tag trigger).
+#
+# macOS signing is SECRETS-GATED: all six secrets set → Developer-ID signed + notarized + stapled
+# (app AND dmg); any missing → unsigned build, same artifacts, warnings only. The secret ceremony
+# (Apple Developer enrollment, cert, API key) is documented in docs/packaging.md "signing".
 name: release-native
 
 on:
@@ -18,14 +21,56 @@ jobs:
           - os: windows-latest
             formats: nsis
     runs-on: ${{ matrix.os }}
+    env:
+      # cargo-packager reads APPLE_CERTIFICATE(+_PASSWORD) itself (temp-keychain import) and
+      # notarytool reads APPLE_API_KEY/_ISSUER/_KEY_PATH — names are its API, don't rename.
+      APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+      APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+      APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+      APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+      APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+      APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      # The CFBundleVersion pin (packaging/macos/Info.plist) exists for reproducible builds — a
+      # stale pin ships the wrong build number, so drift fails the run before the long build.
+      - name: CFBundleVersion pin matches Packager.toml
+        if: runner.os == 'macOS'
+        run: |
+          PKG=$(sed -n 's/^version = "\(.*\)"/\1/p' Packager.toml)
+          PLIST=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' packaging/macos/Info.plist)
+          [ "$PKG" = "$PLIST" ] || { echo "version drift: Packager.toml=$PKG Info.plist=$PLIST — bump them together"; exit 1; }
+      # Appending a bare key relies on [macos] being the LAST table in Packager.toml (a second
+      # [macos] header would be a TOML parse error) — the file says so where it counts.
+      # cargo-packager takes it from there: codesign (hardened runtime + timestamp) → notarytool
+      # submit → staple, then signs the DMG it wraps the stapled .app into.
+      - name: Enable signing (secrets present)
+        if: runner.os == 'macOS' && env.APPLE_SIGNING_IDENTITY != ''
+        run: |
+          printf '\nsigning-identity = "%s"\n' "$APPLE_SIGNING_IDENTITY" >> Packager.toml
+          printf '%s\n' "$APPLE_API_KEY_P8" > "$RUNNER_TEMP/AuthKey.p8"
+          echo "APPLE_API_KEY_PATH=$RUNNER_TEMP/AuthKey.p8" >> "$GITHUB_ENV"
       # cargo-packager does NOT build — binaries must exist first.
       - run: cargo build --release --workspace --bins
       - run: cargo install cargo-packager --locked
       - run: cargo packager --release --formats ${{ matrix.formats }}
+      # cargo-packager staples the .app but only SIGNS the dmg — notarize+staple the dmg too, so
+      # Gatekeeper clears it before the user ever reaches the .app inside.
+      - name: Notarize + staple DMG
+        if: runner.os == 'macOS' && env.APPLE_SIGNING_IDENTITY != ''
+        run: |
+          xcrun notarytool submit target/packager/*.dmg \
+            --key "$APPLE_API_KEY_PATH" --key-id "$APPLE_API_KEY" --issuer "$APPLE_API_ISSUER" \
+            --wait
+          xcrun stapler staple target/packager/*.dmg
+      # The point of the whole exercise: Gatekeeper must accept both artifacts, in CI, every run.
+      - name: Gatekeeper assessment
+        if: runner.os == 'macOS' && env.APPLE_SIGNING_IDENTITY != ''
+        run: |
+          spctl -a -t open --context context:primary-signature -vv target/packager/*.dmg
+          spctl -a -t exec -vv target/packager/fab-scad.app
       - uses: actions/upload-artifact@v4
         with:
           name: fab-scad-${{ matrix.os }}

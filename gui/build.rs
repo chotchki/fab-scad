@@ -122,7 +122,12 @@ fn main() {
     generate_consts();
 
     let want = stamp_string(&jobs);
-    let have = std::fs::read_to_string(&stamp).unwrap_or_default();
+    // Normalize CRLF: Windows checkouts (runner git ships autocrlf=true) rewrite the committed
+    // stamp's line endings, which must not read as "pins changed" — the regen path needs unix
+    // tools a Windows runner doesn't have. Belt to .gitattributes' suspenders.
+    let have = std::fs::read_to_string(&stamp)
+        .unwrap_or_default()
+        .replace("\r\n", "\n");
     let all_present = jobs.iter().all(|j| manifest_dir.join(j.out_rel).exists());
     if all_present && have == want {
         return; // cache hit — every committed subset is current. No network, no tools.

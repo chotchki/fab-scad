@@ -1,0 +1,5 @@
+# The font-subset stamp is compared BYTE-WISE by gui/build.rs — a CRLF checkout (Windows runner
+# git ships autocrlf=true) must not rewrite it into "the pins changed", because the regen path
+# needs unix-only dev tools. build.rs also normalizes CRLF on read; this stops the mangling at
+# the source.
+gui/assets/fonts/.subset-stamp -text

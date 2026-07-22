@@ -65,7 +65,9 @@ jobs:
           # BOSL2: newest tag by version sort (they tag every revision).
           bosl2_latest=$(git ls-remote --tags https://github.com/BelfrySCAD/BOSL2.git \
             | awk -F/ '{print $NF}' | grep -E '^v[0-9]' | grep -v '\^{}' | sort -V | tail -1)
-          bosl2_pinned=$(git -C libs/BOSL2 describe --tags --exact-match 2>/dev/null || git -C libs/BOSL2 describe --tags)
+          # The pinned version comes from BOSL2's own version.scad — the runner's submodule checkout
+          # has no tag refs (actions/checkout fetches submodules tagless), so git-describe can't.
+          bosl2_pinned="v$(sed -n 's/^BOSL_VERSION = \[\(.*\)\];/\1/p' libs/BOSL2/version.scad | tr -d ' ' | tr ',' '.')"
           # openscad: the corpus-path tree SHAs on master (change iff contents change) + HEAD for diffing.
           os_head=$(gh api repos/openscad/openscad/branches/master --jq .commit.sha)
           os_corpus=$(gh api "repos/openscad/openscad/git/trees/$os_head?recursive=1" \

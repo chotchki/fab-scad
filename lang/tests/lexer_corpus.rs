@@ -263,17 +263,29 @@ fn non_ascii_identifier_is_a_hard_error() {
 
 #[test]
 fn unterminated_constructs_error_with_context() {
+    // Comment + string stay HARD errors — upstream also rejects both ("Unterminated comment" /
+    // "Unterminated string", oracle-verified on the issue1890 corpus).
     let e = lex("/* unterminated").expect_err("unterminated block comment"); // #25
     assert!(e.to_string().contains("*/"), "want '*/' in {e}");
 
     let e = lex("\"unterminated").expect_err("unterminated string"); // #26
     assert!(e.to_string().contains('"'), "want quote in {e}");
+}
 
-    let e = lex("use <no-close").expect_err("unterminated use path");
-    assert!(e.to_string().contains('>'), "want '>' in {e}");
-
-    let e = lex("include <no-close").expect_err("unterminated include path");
-    assert!(e.to_string().contains('>'), "want '>' in {e}");
+#[test]
+fn unterminated_use_include_swallow_to_eof() {
+    // AA.2 (issue1890): upstream consumes an unterminated `<…` to EOF and accepts — no parse error,
+    // the rest of the file is path content. Our lexer emits the token with the swallowed path.
+    for src in ["use <no-close", "include <no-close\nmore"] {
+        let lexed = lex(src).expect("unterminated use/include lexes (upstream accepts too)");
+        assert!(
+            lexed
+                .all
+                .iter()
+                .any(|t| matches!(t.kind, TokenKind::Use(_) | TokenKind::Include(_))),
+            "want a Use/Include token in {src:?}"
+        );
+    }
 }
 
 // ─────────────────────────────── properties (H.5 will generalize) ───────────────────────

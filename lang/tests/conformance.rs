@@ -21,6 +21,36 @@ fn ok(production: &str, src: &str) {
     }
 }
 
+/// Assert a snippet is REJECTED — for shapes upstream also hard-errors on (verdict parity).
+#[track_caller]
+fn rejected(production: &str, src: &str) {
+    assert!(
+        parse(src).is_err(),
+        "production {production} — {src:?} must NOT parse (upstream errors too)"
+    );
+}
+
+/// AA.2 (issue1890): an unterminated `include <`/`use <` at EOF swallows the REST OF THE FILE as
+/// path content and the program still parses — one directive statement, nothing after it (the
+/// `sphere()` never becomes a statement). Oracle-verified: upstream accepts + discards the same way.
+#[test]
+fn unterminated_include_swallows_to_eof() {
+    let p = parse("include <file.scad\n\nsphere();\n").expect("parses");
+    assert_eq!(p.stmts.len(), 1, "the swallowed sphere is path, not a stmt");
+    match &p.stmts[0].kind {
+        StmtKind::Include(path) => assert!(path.contains("sphere()"), "path {path:?}"),
+        k => panic!("expected Include, got {k:?}"),
+    }
+}
+
+/// AA.2's other half: unterminated COMMENT and STRING stay HARD parse errors — upstream errors on
+/// both ("Unterminated comment" / "Unterminated string"), so rejection IS the parity.
+#[test]
+fn unterminated_comment_and_string_stay_rejected() {
+    rejected("comment:unterminated", "/* comment\n\nsphere();\n");
+    rejected("string:unterminated", "a = \"text;\n\ntext(a);\n");
+}
+
 #[test]
 fn every_production_parses() {
     // ── top level + statements (parser.y:174-232) ──
@@ -58,6 +88,15 @@ fn every_production_parses() {
         "include\n< line 6\nline 7\nline 8\n>\ncube(1);",
     );
     ok("use:newlines-inside-brackets", "use\n< a\nb\n>");
+    // Unterminated `<…` at EOF (AA.2, issue1890): upstream consumes to EOF and discards the
+    // directive with NO parse error (oracle-verified) — we accept it too, the rest of the file
+    // becoming path content. (Unterminated COMMENT and STRING stay hard parse errors — upstream
+    // errors on those as well: "Unterminated comment"/"Unterminated string".)
+    ok(
+        "include:unterminated-at-eof",
+        "include <file.scad\n\nsphere();\n",
+    );
+    ok("use:unterminated-at-eof", "use <file.scad\n\nsphere();\n");
     ok("child_statement:';'", "translate([0,0,0]);");
     ok("child_statement:block", "translate([0,0,0]) { a(); b(); }");
     for id in ["for", "let", "assert", "echo", "each"] {

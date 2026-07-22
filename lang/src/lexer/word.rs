@@ -5,8 +5,8 @@
 //! `use`/`include` are keywords ONLY when directly followed (modulo whitespace) by `<`.
 
 use winnow::Parser;
-use winnow::combinator::{cut_err, opt, peek, trace};
-use winnow::error::{ModalResult, StrContext, StrContextValue};
+use winnow::combinator::{opt, peek, trace};
+use winnow::error::ModalResult;
 use winnow::token::{literal, one_of, take_while};
 
 use super::Input;
@@ -58,13 +58,13 @@ fn lex_use_or_include<'s>(word: &'s str, i: &mut Input<'s>) -> ModalResult<Token
         }
         (take_while(0.., is_use_ws), '<').void().parse_next(i)?; // consume ws + '<' — commit point
         let path = take_while(0.., |c: char| c != '>').parse_next(i)?;
-        cut_err(literal(">").context(StrContext::Expected(StrContextValue::CharLiteral('>'))))
-            .context(StrContext::Label(if word == "use" {
-                "use path"
-            } else {
-                "include path"
-            }))
-            .parse_next(i)?;
+        // Unterminated `<…` at EOF (AA.2, issue1890): upstream consumes to EOF and silently DISCARDS
+        // the directive — no parse error, no resolution attempt (oracle-verified; only per-newline
+        // warnings). We emit the token with the swallowed path instead: the loader's tolerated
+        // can't-open warning is then the one observable delta — a warning where they have a
+        // different warning, same empty contribution. `take_while` only stops at `>` or EOF, so a
+        // missing `>` here IS the at-EOF case.
+        let _ = opt(literal(">")).parse_next(i)?;
         Ok(if word == "use" {
             TokenKind::Use(path)
         } else {

@@ -255,6 +255,7 @@ fn run_windowed(scene: SceneCfg, shot: Option<PathBuf>) {
     // panel_ui runs, or the Res lookup panics.
     .init_resource::<MediaItem>()
     .init_resource::<ItemRenameUi>()
+    .init_resource::<BackLink>()
     .init_resource::<OpenDialog>()
     .init_resource::<AddFileDialog>()
     .init_resource::<print::ExportJob>()
@@ -395,6 +396,12 @@ fn run_windowed(scene: SceneCfg, shot: Option<PathBuf>) {
                 .as_deref()
                 .and_then(save_target::item),
         ))
+        // W.3.7.4: `?back=<path>` makes the wordmark the way home, for a host page that gives the tool
+        // the whole viewport and so has no nav of its own left on screen. Validated to a relative
+        // same-origin path — the raw value ends up in `location.href`.
+        .insert_resource(BackLink::from_param(
+            crate::web_host::query_param("back").as_deref(),
+        ))
         // W.5.9: `?e2e=save` auto-fires the Save once the model renders (headless boot-gate hook).
         .insert_resource(jobs::E2eSave(
             crate::web_host::query_param("e2e").as_deref() == Some("save"),
@@ -469,6 +476,7 @@ fn run_screenshot(scene: SceneCfg, png: PathBuf) {
         // panel_ui runs, or the Res lookup panics.
         .init_resource::<MediaItem>()
         .init_resource::<ItemRenameUi>()
+        .init_resource::<BackLink>()
         .init_resource::<OpenDialog>()
         .init_resource::<AddFileDialog>()
         .insert_resource(Parts(vec![Part::default()]))
@@ -559,6 +567,7 @@ fn run_scripted(scene: SceneCfg, actions: Vec<Action>) {
     // panel_ui runs, or the Res lookup panics.
     .init_resource::<MediaItem>()
     .init_resource::<ItemRenameUi>()
+    .init_resource::<BackLink>()
     .init_resource::<OpenDialog>()
     .init_resource::<AddFileDialog>()
     .init_resource::<print::ExportJob>()

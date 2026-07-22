@@ -38,6 +38,8 @@ pub(crate) struct PanelView<'w> {
     pub(crate) save_target: Res<'w, SaveTarget>,
     /// The media ITEM (Z.3.10): `Some` ⇒ show the rename-on-the-site affordance.
     pub(crate) media_item: Res<'w, MediaItem>,
+    /// Where the wordmark navigates home to (W.3.7.4): `Some` ⇒ it's a link, not a label.
+    pub(crate) back_link: Res<'w, BackLink>,
 }
 
 /// Bake the live slicing config into the buffer and persist it — the ONE local-save path, driven by both
@@ -287,7 +289,33 @@ pub(crate) fn panel_ui(
         .frame(panel_frame())
         .show(&mut viewport, |ui| {
             ui.horizontal(|ui| {
-                ui.label(theme::chrome("fab-gui", 22.0).color(theme::NAVY));
+                // W.3.7.4: with a `?back=` the wordmark IS the way home. A host that hands the tool the
+                // whole viewport has no nav left on screen, so the app has to carry it — and the
+                // wordmark is where a user already looks for "back to the site". Without one it stays
+                // the plain label it has always been (every desktop run, and any embed that keeps its
+                // own chrome), so this adds a control only where one is actually missing.
+                match view.back_link.0.as_deref() {
+                    Some(url) => {
+                        // Reachable only on the web — `BackLink` has no source on desktop (no page URL),
+                        // so it is always None there and this arm never runs.
+                        #[cfg(not(target_arch = "wasm32"))]
+                        let _ = url;
+                        if ui
+                            .add(
+                                egui::Label::new(theme::chrome("fab-gui", 22.0).color(theme::NAVY))
+                                    .sense(egui::Sense::click()),
+                            )
+                            .on_hover_text("back to the site")
+                            .clicked()
+                        {
+                            #[cfg(target_arch = "wasm32")]
+                            crate::web_host::navigate(url);
+                        }
+                    }
+                    None => {
+                        ui.label(theme::chrome("fab-gui", 22.0).color(theme::NAVY));
+                    }
+                }
                 // the site's serif voice — a Quattrocento tagline beside the wordmark
                 ui.label(
                     egui::RichText::new("slice · orient · pack")

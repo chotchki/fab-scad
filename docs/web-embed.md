@@ -137,6 +137,19 @@ document.addEventListener('fab-gui:ready', () => splash.remove(), { once: true }
   `plates.3mf` (zipped in memory — `bambu::export_plates_to` into a `Cursor`, byte-identical to the
   desktop file). The host wires up nothing; it just must not sandbox downloads away.
 
+### 4b. Carries its own way home — `?back=<path>` (W.3.7.4)
+
+A host that gives the tool the whole viewport also takes away its own nav, so the app has to carry the
+way back. `?back=/3d` turns the in-app **fab-gui wordmark** into a link to that path; without the
+param it stays the plain label it is on desktop, so a host that keeps its own chrome gets no redundant
+second control. The app stays host-agnostic — it never guesses a home page.
+
+Only a RELATIVE SAME-ORIGIN path is accepted: it must start with `/` and must not start with `//`
+(protocol-relative — `//evil.com` is a different origin wearing a path's clothes) or contain a
+backslash. Anything else is ignored and the wordmark stays a label. The value lands in
+`location.href`, so an unvalidated one would make the editor an open redirect carrying the host's
+chrome — a credible phishing step, not a theoretical one.
+
 ### 5. Loads a model from the page URL — `?model=<url>` (W.3.12)
 
 The deep-link surface: `index.html?model=path/to/part.scad` fetches that `.scad` at boot, lands it in

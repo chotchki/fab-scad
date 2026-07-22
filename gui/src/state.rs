@@ -607,6 +607,33 @@ pub(crate) struct SaveTarget(pub(crate) Option<String>);
 #[derive(Resource, Default)]
 pub(crate) struct MediaItem(pub(crate) Option<String>);
 
+/// Where the app's wordmark navigates HOME to, from the page URL's `?back=` parameter (W.3.7.4).
+///
+/// A host page that gives the tool the whole viewport also takes away its own nav, so the app has to
+/// carry the way back. It stays HOST-AGNOSTIC about where that is (fab-gui is embeddable — see
+/// `docs/web-embed.md`): no `?back=`, no link, and the wordmark renders exactly as it does on desktop.
+///
+/// The value is attacker-reachable — anyone can hand someone a `/3d/editor?back=…` URL — and it ends up
+/// in `location.href`, so [`Self::from_param`] admits ONLY a relative same-origin path. Otherwise the
+/// editor becomes an open redirect wearing the site's chrome, which is a credible phishing step.
+#[derive(Resource, Default)]
+pub(crate) struct BackLink(pub(crate) Option<String>);
+
+impl BackLink {
+    /// Accept `raw` only as a SAME-ORIGIN RELATIVE path: it must start with `/` and must not start
+    /// with `//` (protocol-relative — `//evil.com` is a different ORIGIN despite looking like a path)
+    /// or `/\` (which several engines normalize to `//`). Absolute URLs are refused outright rather
+    /// than origin-checked: the app can't know the host's canonical origin, and "looks like our
+    /// domain" is exactly the check phishing beats.
+    #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))] // only the wasm boot reads a page URL
+    pub(crate) fn from_param(raw: Option<&str>) -> Self {
+        let ok = raw.map(str::trim).filter(|v| {
+            v.starts_with('/') && !v.starts_with("//") && !v.starts_with("/\\") && !v.contains('\\')
+        });
+        BackLink(ok.map(str::to_string))
+    }
+}
+
 /// Inline rename state for the media ITEM's title (Z.3.10) — the document-level twin of [`RenameUi`],
 /// which renames files INSIDE the project. `commit` is the typed title, taken by the handler that PUTs
 /// it. Folded into `PanelWriters` for the same param-cap reason.
@@ -707,4 +734,40 @@ pub(crate) fn resolve_conns(cuts: &Cuts, conns: &Conns) -> Vec<fab::Conn> {
                 })
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `?back=` reaches `location.href`, so the gate is "relative same-origin path or nothing".
+    #[test]
+    fn back_link_takes_relative_paths_only() {
+        assert_eq!(BackLink::from_param(Some("/3d")).0.as_deref(), Some("/3d"));
+        assert_eq!(
+            BackLink::from_param(Some("/3d/gallery?page=2"))
+                .0
+                .as_deref(),
+            Some("/3d/gallery?page=2"),
+        );
+        // Absent → no link at all; the wordmark stays the plain label it is on desktop.
+        assert_eq!(BackLink::from_param(None).0, None);
+
+        // Every off-origin shape is refused. `//evil.com` is protocol-relative — a DIFFERENT origin
+        // that merely looks like a path, and the reason a bare `starts_with('/')` is not enough.
+        for bad in [
+            "//evil.com",
+            "//evil.com/3d",
+            "/\\evil.com",
+            "/\\/evil.com",
+            "https://evil.com",
+            "http://evil.com",
+            "javascript:alert(1)",
+            "3d",
+            "",
+            "   ",
+        ] {
+            assert_eq!(BackLink::from_param(Some(bad)).0, None, "admitted {bad:?}");
+        }
+    }
 }

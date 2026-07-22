@@ -86,6 +86,20 @@ pub(crate) fn pick_files(tx: async_channel::Sender<Vec<(String, Vec<u8>)>>) {
     }
 }
 
+/// Navigate the page to `url` (W.3.7.4) — the wordmark's way back to the host site, for a host that
+/// gave the tool the whole viewport and so has no nav of its own on screen. A full navigation, not a
+/// history hop: a deep link opened in a fresh tab has no history to go back to.
+///
+/// Callers MUST pass a value that came through [`crate::state::BackLink::from_param`] — this sets
+/// `location.href` verbatim, so an unvalidated `?back=` here is an open redirect.
+pub(crate) fn navigate(url: &str) {
+    if let Some(win) = web_sys::window()
+        && win.location().set_href(url).is_err()
+    {
+        bevy::log::error!("could not navigate to {url}");
+    }
+}
+
 /// The page URL's `?name=` query value, percent-decoded (W.3.12) — how a host page hands the app a
 /// model reference (`?model=<url>`). `None` when absent or the URL machinery is unavailable.
 pub(crate) fn query_param(name: &str) -> Option<String> {

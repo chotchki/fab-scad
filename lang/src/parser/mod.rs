@@ -13,6 +13,7 @@ mod ast;
 mod diag;
 mod expr;
 pub(crate) mod print;
+mod spine;
 mod stmt;
 
 pub use ast::{

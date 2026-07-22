@@ -141,44 +141,62 @@ impl Eq for Key {}
 
 /// Hash a `Value` BIT-EXACTLY (matches [`value_bits_eq`]). Shared with the CSG-memo cache
 /// ([`mod_cache`](super::mod_cache)) so both caches key `Value`s by the identical bit-exact rule.
+///
+/// ITERATIVE over the `List` spine (AA.4.3): this keys EVERY user-module call, and issue4172-class
+/// programs build arg values thousands of levels deep — per-level recursion here overflowed before
+/// any eval guard could fire. The worklist walks the exact recursive PRE-ORDER, so the byte stream
+/// (and every hash) is unchanged.
 pub(super) fn hash_value_bits<H: Hasher>(v: &Value, h: &mut H) {
-    std::mem::discriminant(v).hash(h);
-    match v {
-        Value::Undef => {}
-        Value::Bool(b) => b.hash(h),
-        Value::Num(n) => h.write_u64(n.to_bits()),
-        Value::Str(s) => s.hash(h),
-        Value::NumList(xs) => {
-            for x in xs.iter() {
-                h.write_u64(x.to_bits());
+    let mut work = vec![v];
+    while let Some(v) = work.pop() {
+        std::mem::discriminant(v).hash(h);
+        match v {
+            Value::Undef => {}
+            Value::Bool(b) => b.hash(h),
+            Value::Num(n) => h.write_u64(n.to_bits()),
+            Value::Str(s) => s.hash(h),
+            Value::NumList(xs) => {
+                for x in xs.iter() {
+                    h.write_u64(x.to_bits());
+                }
             }
-        }
-        Value::List(xs) => {
-            for e in xs.iter() {
-                hash_value_bits(e, h);
+            Value::List(xs) => work.extend(xs.iter().rev()),
+            Value::Range { start, step, end } => {
+                h.write_u64(start.to_bits());
+                h.write_u64(step.to_bits());
+                h.write_u64(end.to_bits());
             }
-        }
-        Value::Range { start, step, end } => {
-            h.write_u64(start.to_bits());
-            h.write_u64(step.to_bits());
-            h.write_u64(end.to_bits());
-        }
-        // A closure arg: identity is (closure_id, self_name) — closure_id carries its env + params, self_name
-        // pins a tagged/untagged pair of the same id apart. NEVER Value::== (no Function arm).
-        Value::Function {
-            closure_id,
-            self_name,
-            ..
-        } => {
-            closure_id.hash(h);
-            self_name.hash(h);
+            // A closure arg: identity is (closure_id, self_name) — closure_id carries its env + params,
+            // self_name pins a tagged/untagged pair of the same id apart. NEVER Value::== (no Function arm).
+            Value::Function {
+                closure_id,
+                self_name,
+                ..
+            } => {
+                closure_id.hash(h);
+                self_name.hash(h);
+            }
         }
     }
 }
 
 /// Bit-exact `Value` equality for the key (`+0`≠`-0`, `NaN`==`NaN`) — stricter than `Value::==`, so it never
 /// yields a wrong hit. Shared with the CSG-memo cache ([`mod_cache`](super::mod_cache)).
+///
+/// ITERATIVE over the `List` spine, same AA.4.3 reasoning as [`hash_value_bits`] — key comparison
+/// runs on cache probes with the same pathologically-deep values.
 pub(super) fn value_bits_eq(a: &Value, b: &Value) -> bool {
+    let mut work = vec![(a, b)];
+    while let Some((a, b)) = work.pop() {
+        if !leaf_bits_eq(a, b, &mut work) {
+            return false;
+        }
+    }
+    true
+}
+
+/// One node's bit-eq verdict; `List` pairs defer their children onto `work` (length checked here).
+fn leaf_bits_eq<'v>(a: &'v Value, b: &'v Value, work: &mut Vec<(&'v Value, &'v Value)>) -> bool {
     match (a, b) {
         (Value::Undef, Value::Undef) => true,
         (Value::Bool(x), Value::Bool(y)) => x == y,
@@ -191,7 +209,11 @@ pub(super) fn value_bits_eq(a: &Value, b: &Value) -> bool {
                     .all(|(a, b)| a.to_bits() == b.to_bits())
         }
         (Value::List(x), Value::List(y)) => {
-            x.len() == y.len() && x.iter().zip(y.iter()).all(|(a, b)| value_bits_eq(a, b))
+            if x.len() != y.len() {
+                return false;
+            }
+            work.extend(x.iter().zip(y.iter()));
+            true
         }
         (
             Value::Range {

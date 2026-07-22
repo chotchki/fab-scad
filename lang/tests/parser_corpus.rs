@@ -382,9 +382,10 @@ fn comprehension_syntax_errors() {
     assert!(err("v=[for(i=0; i<5 i=i+1) i];").contains(';')); // missing ';' between C-clauses
     assert!(err("v=[if(x) 1;").contains(')')); // missing ')' of comprehension if
     assert!(err("v=[(for(i=r) i];").contains(')')); // missing ')' of a parenthesized comprehension
-    // a pathologically-nested comprehension errors LOUD via the depth guard, never overflows.
+    // Nested `each` is grammatical upstream (parser.y:588 recurses) — the old depth-guard error here
+    // pinned OUR budget, not their grammar. The AA.4 spine parses it on O(1) host stack.
     let deep = format!("v=[{}x];", "each ".repeat(80));
-    assert!(err(&deep).contains("deeply"));
+    assert!(parse(&deep).is_ok(), "deep each parses on the spine");
 }
 
 #[test]
@@ -564,37 +565,45 @@ fn def_syntax_errors() {
 // ─────────────────────────────── depth guards (nesting → LOUD, not overflow) ────────────────────
 
 #[test]
-fn deep_nesting_errors_not_overflows() {
+fn deep_nesting_parses_on_the_spine_statements_still_guard() {
+    // AA.4: EXPRESSION nesting is heap-framed (the iterative spine) — deep parens/unary PARSE where
+    // the old cascade's MAX_DEPTH errored. Parsing at 500 deep IS the no-overflow proof (and the
+    // teardown rides the non-recursive Drop).
     let deep_parens = format!("v={}1{};", "(".repeat(500), ")".repeat(500));
-    assert!(err(&deep_parens).contains("deeply")); // expr guard
+    assert!(
+        parse(&deep_parens).is_ok(),
+        "deep parens parse on the spine"
+    );
     let deep_unary = format!("v={}1;", "-".repeat(500));
-    assert!(err(&deep_unary).contains("deeply")); // unary guard
+    assert!(parse(&deep_unary).is_ok(), "deep unary parses on the spine");
+    // STATEMENT nesting keeps MAX_DEPTH — a legitimately-bounded shape.
     let deep_blocks = format!("{}a();{}", "group(){".repeat(500), "}".repeat(500));
     assert!(err(&deep_blocks).contains("deeply")); // statement guard
     // arg-less chain so nothing recurses through `expr` — isolates the module_instantiation guard
     // (a chain WITH args like `translate([…])` hits the expr guard via the args first).
     let deep_children = format!("{}cube();", "a() ".repeat(500));
     assert!(err(&deep_children).contains("module calls")); // module_instantiation guard
+    // The spine's ONLY expression ceiling: the adversarial-input sanity bound, erroring LOUD (never
+    // an overflow) far past anything a real program reaches.
+    let absurd = format!("v={}1{};", "(".repeat(120_000), ")".repeat(120_000));
+    assert!(err(&absurd).contains("sanity ceiling"));
 }
 
 // ─────────────────────────────── depth guards, EVERY recursive construct ────────────────────────
 
 #[test]
-fn every_recursive_construct_guards_depth() {
-    // Each self-nesting parser path must trip a MAX_DEPTH guard (error contains "deeply"), never
-    // overflow — the Safari-cliff discipline, per construct. A broken `depth + 1` on any of these is
-    // a real stack-overflow vuln (cargo-mutants H.5.4 surfaced them): a mutant that stops the depth
-    // growing recurses the full input, which either parses (so `err` panics on the unexpected Ok) or
-    // overflows — caught either way.
+fn every_deep_expression_construct_parses_on_the_spine() {
+    // AA.4 flipped this suite's polarity: each self-nesting EXPRESSION path used to pin the MAX_DEPTH
+    // guard; the iterative spine heap-frames them all, so deep now PARSES — and parsing + dropping at
+    // n=300 IS the no-overflow proof (the old mutant-catching purpose survives: a broken spine either
+    // fails to parse, mis-shapes the AST, or overflows — all caught). Statement-tier nesting (the
+    // module-def row below) keeps its guard.
     let n = 300;
     let deep: Vec<(String, &str)> = vec![
         (
             format!("v={}0;", "function(x) ".repeat(n)),
             "function-literal",
         ),
-        // A let/assert/echo prefix CHAIN parses iteratively (asserted below) — but genuine NESTING still
-        // recurses + must still guard. Parenthesizing each body BREAKS the chain (the `(` isn't a chain
-        // prefix), forcing per-level recursion: `let(a=1)(let(a=1)(…0…))`. Same for a let bound to a let.
         (
             format!("v={}0{};", "let(a=1)(".repeat(n), ")".repeat(n)),
             "nested (non-chain) let",
@@ -626,17 +635,17 @@ fn every_recursive_construct_guards_depth() {
             format!("v=[{}0];", "let(a=1) ".repeat(n)),
             "comprehension let",
         ),
-        (
-            format!("{}cube();", "module m() ".repeat(n)),
-            "module def body",
-        ),
     ];
     for (src, what) in deep {
-        assert!(
-            err(&src).contains("deeply"),
-            "{what} must trip the depth guard, never overflow"
-        );
+        let prog = parse(&src).unwrap_or_else(|e| panic!("{what} must parse on the spine: {e}"));
+        drop(prog); // teardown rides the non-recursive Drop — no overflow
     }
+    // Statement-tier nesting still guards (module bodies recurse the statement parser).
+    let module_bodies = format!("{}cube();", "module m() ".repeat(n));
+    assert!(
+        err(&module_bodies).contains("deeply"),
+        "module def bodies keep the statement guard"
+    );
 
     // let/assert/echo prefix CHAINS parse ITERATIVELY (OpenSCAD's series-of-statements idiom — a
     // single-expression function chains `let(…) assert(…) echo(…)` 50-100+ deep to fake local variables;

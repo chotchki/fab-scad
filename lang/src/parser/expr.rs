@@ -10,9 +10,15 @@
 use winnow::error::ModalResult;
 use winnow::stream::Location;
 
-use super::ast::{Arg, BinOp, Expr, ExprKind, Parameter, UnOp};
-use super::{MAX_DEPTH, Tokens, bail, bump, expect, labeled, peek_kind, peek_kind2};
-use crate::lexer::{TokenKind, decode_str, num_value};
+use super::ast::{Arg, BinOp, Expr, Parameter};
+#[cfg(test)]
+use super::ast::{ExprKind, UnOp};
+#[cfg(test)]
+use super::{MAX_DEPTH, expect};
+use super::{Tokens, bail, bump, labeled, peek_kind, peek_kind2};
+use crate::lexer::TokenKind;
+#[cfg(test)]
+use crate::lexer::{decode_str, num_value};
 
 /// Parse a full expression (parser.y:334). The prefix forms (`function`/`let`/`assert`/`echo`) sit at
 /// the TOP of the `expr` grammar, ABOVE the ternary/binary cascade — so their body greedily consumes
@@ -20,6 +26,14 @@ use crate::lexer::{TokenKind, decode_str, num_value};
 /// inside the cascade (`1 + function(x) x` is a syntax error), which falls out because the cascade
 /// enters at `ternary`, never re-entering `expr`.
 pub(crate) fn expr(i: &mut Tokens<'_, '_>, depth: usize) -> ModalResult<Expr> {
+    super::spine::expr(i, depth)
+}
+
+/// The RECURSIVE cascade — retired from production by the AA.4 spine, retained as the test-only
+/// differential ORACLE (the fast==slow doctrine, parser edition): the spine must produce
+/// byte-identical ASTs (kinds AND spans) to this on every corpus program shallow enough for it.
+#[cfg(test)]
+pub(crate) fn expr_recursive(i: &mut Tokens<'_, '_>, depth: usize) -> ModalResult<Expr> {
     if depth >= MAX_DEPTH {
         return bail(i, "expression nested too deeply");
     }
@@ -31,13 +45,14 @@ pub(crate) fn expr(i: &mut Tokens<'_, '_>, depth: usize) -> ModalResult<Expr> {
 }
 
 /// A function-literal expression `function(params) body` (parser.y:336).
+#[cfg(test)]
 fn function_literal(i: &mut Tokens<'_, '_>, depth: usize) -> ModalResult<Expr> {
     let start = i.current_token_start();
     bump(i)?; // 'function'
     expect(i, TokenKind::LParen, "'(' after `function`")?;
-    let params = param_list(i, depth + 1)?;
+    let params = param_list_rec(i, depth + 1)?;
     expect(i, TokenKind::RParen, "closing ')' of the parameter list")?;
-    let body = expr(i, depth + 1)?;
+    let body = expr_recursive(i, depth + 1)?;
     Ok(Expr {
         kind: ExprKind::FunctionLiteral {
             params,
@@ -56,6 +71,7 @@ fn function_literal(i: &mut Tokens<'_, '_>, depth: usize) -> ModalResult<Expr> {
 /// — they fold identically. BOSL2 writes them 50-100 deep to emulate locals, and recursing once per link
 /// would blow the expression depth cap; the loop keeps parse depth O(1). Consecutive `let`s additionally
 /// MERGE into one multi-binding node (`let(a) let(b)` == `let(a, b)`, same left-to-right binding).
+#[cfg(test)]
 fn chain_expr(i: &mut Tokens<'_, '_>, depth: usize) -> ModalResult<Expr> {
     enum Step {
         Let(Vec<Arg>),
@@ -69,7 +85,7 @@ fn chain_expr(i: &mut Tokens<'_, '_>, depth: usize) -> ModalResult<Expr> {
             Some(TokenKind::Let) => {
                 bump(i)?; // 'let'
                 expect(i, TokenKind::LParen, "'(' after `let`")?;
-                let bindings = arg_list(i, depth + 1)?;
+                let bindings = arg_list_rec(i, depth + 1)?;
                 expect(i, TokenKind::RParen, "closing ')' of the `let` bindings")?;
                 match steps.last_mut() {
                     Some((Step::Let(prev), _)) => prev.extend(bindings), // fold a `let` run flat
@@ -79,7 +95,7 @@ fn chain_expr(i: &mut Tokens<'_, '_>, depth: usize) -> ModalResult<Expr> {
             Some(k @ (TokenKind::Assert | TokenKind::Echo)) => {
                 bump(i)?; // 'assert' / 'echo'
                 expect(i, TokenKind::LParen, "'(' after `assert`/`echo`")?;
-                let args = arg_list(i, depth + 1)?;
+                let args = arg_list_rec(i, depth + 1)?;
                 expect(i, TokenKind::RParen, "closing ')' of the arguments")?;
                 let step = if k == TokenKind::Echo {
                     Step::Echo(args)
@@ -95,7 +111,7 @@ fn chain_expr(i: &mut Tokens<'_, '_>, depth: usize) -> ModalResult<Expr> {
     // `assert`/`echo` (whose body is optional); a `let` with no body errors when it's folded below.
     let mut body: Option<Expr> = if starts_expr(peek_kind(i)) {
         Some(labeled(i, "a `let`/`assert`/`echo` body", |i| {
-            expr(i, depth + 1)
+            expr_recursive(i, depth + 1)
         })?)
     } else {
         None
@@ -131,7 +147,7 @@ fn chain_expr(i: &mut Tokens<'_, '_>, depth: usize) -> ModalResult<Expr> {
 
 /// Whether `k` can begin an expression — the lookahead for `expr_or_empty`. Every token an `expr` can
 /// start with; anything else (`;`, `)`, `]`, `,`, `:`, `}`, EOF, …) means "no body".
-fn starts_expr(k: Option<TokenKind<'_>>) -> bool {
+pub(super) fn starts_expr(k: Option<TokenKind<'_>>) -> bool {
     matches!(
         k,
         Some(
@@ -158,6 +174,7 @@ fn starts_expr(k: Option<TokenKind<'_>>) -> bool {
 
 /// C-style ternary `cond ? then : els`, right-associative; the condition is a binary-level
 /// expression (parser.y:341).
+#[cfg(test)]
 fn ternary(i: &mut Tokens<'_, '_>, depth: usize) -> ModalResult<Expr> {
     let start = i.current_token_start();
     let cond = binary(i, 0, depth)?;
@@ -165,9 +182,9 @@ fn ternary(i: &mut Tokens<'_, '_>, depth: usize) -> ModalResult<Expr> {
         return Ok(cond);
     }
     bump(i)?; // '?'  — commit point
-    let then = expr(i, depth + 1)?;
+    let then = expr_recursive(i, depth + 1)?;
     expect(i, TokenKind::Colon, "':' of a ternary")?;
-    let els = expr(i, depth + 1)?;
+    let els = expr_recursive(i, depth + 1)?;
     let end = i.previous_token_end();
     Ok(Expr {
         kind: ExprKind::Ternary {
@@ -181,6 +198,7 @@ fn ternary(i: &mut Tokens<'_, '_>, depth: usize) -> ModalResult<Expr> {
 
 /// Precedence climbing over the left-associative binary tiers (parser.y:362-464). `min_bp` is the
 /// minimum binding power to keep consuming; the loop is iterative, so `a-b-c-…` never recurses.
+#[cfg(test)]
 fn binary(i: &mut Tokens<'_, '_>, min_bp: u8, depth: usize) -> ModalResult<Expr> {
     let start = i.current_token_start();
     let mut lhs = unary(i, depth)?;
@@ -205,7 +223,7 @@ fn binary(i: &mut Tokens<'_, '_>, min_bp: u8, depth: usize) -> ModalResult<Expr>
 
 /// Map a token kind to a left-associative binary operator + binding power (parser.y tier order:
 /// bitwise `|`/`&` sit BETWEEN comparison and shift, not below comparison).
-fn binop(k: TokenKind<'_>) -> Option<(BinOp, u8)> {
+pub(super) fn binop(k: TokenKind<'_>) -> Option<(BinOp, u8)> {
     let pair = match k {
         TokenKind::OrOr => (BinOp::Or, 2),
         TokenKind::AndAnd => (BinOp::And, 3),
@@ -230,6 +248,7 @@ fn binop(k: TokenKind<'_>) -> Option<(BinOp, u8)> {
 }
 
 /// Prefix unary `- + ! ~`, right-recursive (parser.y:467-491).
+#[cfg(test)]
 fn unary(i: &mut Tokens<'_, '_>, depth: usize) -> ModalResult<Expr> {
     if depth >= MAX_DEPTH {
         return bail(i, "expression nested too deeply");
@@ -256,6 +275,7 @@ fn unary(i: &mut Tokens<'_, '_>, depth: usize) -> ModalResult<Expr> {
 
 /// Power `^`, right-associative, sits between unary and call so `-2^2` == `-(2^2)` and `2^-3` works
 /// (the right operand is a `unary`) (parser.y:494-500).
+#[cfg(test)]
 fn exponent(i: &mut Tokens<'_, '_>, depth: usize) -> ModalResult<Expr> {
     let start = i.current_token_start();
     let base = call(i, depth)?;
@@ -277,6 +297,7 @@ fn exponent(i: &mut Tokens<'_, '_>, depth: usize) -> ModalResult<Expr> {
 
 /// Postfix chain: call `(args)`, index `[i]`, member `.field` — left-assoc, tightest (parser.y:502-518).
 /// No depth guard: the chain LOOP is iterative, and its sub-expressions route through `expr` (guarded).
+#[cfg(test)]
 fn call(i: &mut Tokens<'_, '_>, depth: usize) -> ModalResult<Expr> {
     let start = i.current_token_start();
     let mut node = primary(i, depth)?;
@@ -284,7 +305,7 @@ fn call(i: &mut Tokens<'_, '_>, depth: usize) -> ModalResult<Expr> {
         let kind = match peek_kind(i) {
             Some(TokenKind::LParen) => {
                 bump(i)?;
-                let args = arg_list(i, depth + 1)?;
+                let args = arg_list_rec(i, depth + 1)?;
                 expect(i, TokenKind::RParen, "closing ')' of a call")?;
                 ExprKind::Call {
                     callee: Box::new(node),
@@ -293,7 +314,7 @@ fn call(i: &mut Tokens<'_, '_>, depth: usize) -> ModalResult<Expr> {
             }
             Some(TokenKind::LBracket) => {
                 bump(i)?;
-                let index = expr(i, depth + 1)?;
+                let index = expr_recursive(i, depth + 1)?;
                 expect(i, TokenKind::RBracket, "closing ']' of an index")?;
                 ExprKind::Index {
                     base: Box::new(node),
@@ -319,6 +340,7 @@ fn call(i: &mut Tokens<'_, '_>, depth: usize) -> ModalResult<Expr> {
 }
 
 /// The identifier after a `.` (parser.y:513 `call '.' TOK_ID`).
+#[cfg(test)]
 fn member_name(i: &mut Tokens<'_, '_>) -> ModalResult<String> {
     match peek_kind(i) {
         Some(TokenKind::Ident(n) | TokenKind::DollarIdent(n)) => {
@@ -332,6 +354,7 @@ fn member_name(i: &mut Tokens<'_, '_>) -> ModalResult<String> {
 
 /// Atoms: literals, identifiers, `(expr)`, and `[…]` vectors/ranges (parser.y:520-567). The deferred
 /// expression forms (`function`/`let`/`assert`/`echo`) fail LOUD here.
+#[cfg(test)]
 fn primary(i: &mut Tokens<'_, '_>, depth: usize) -> ModalResult<Expr> {
     let start = i.current_token_start();
     let kind = match peek_kind(i) {
@@ -343,7 +366,7 @@ fn primary(i: &mut Tokens<'_, '_>, depth: usize) -> ModalResult<Expr> {
         Some(TokenKind::Ident(n) | TokenKind::DollarIdent(n)) => ExprKind::Ident(n.to_string()),
         Some(TokenKind::LParen) => {
             bump(i)?;
-            let inner = expr(i, depth + 1)?;
+            let inner = expr_recursive(i, depth + 1)?;
             expect(i, TokenKind::RParen, "closing ')'")?;
             return Ok(inner); // OpenSCAD returns the inner expr; no paren node
         }
@@ -362,6 +385,7 @@ fn primary(i: &mut Tokens<'_, '_>, depth: usize) -> ModalResult<Expr> {
 
 /// After `[`: an empty vector, a range (`[a:b]` / `[a:step:b]` — middle is the STEP), or a comma
 /// vector. List-comprehension elements (`for`/`each`/`let`/`if`) are deferred LOUD (parser.y:551-563).
+#[cfg(test)]
 fn vector_or_range(i: &mut Tokens<'_, '_>, depth: usize) -> ModalResult<Expr> {
     // No depth guard: reached from `primary` at the same depth, so the `expr` guard already fired;
     // the elements route back through `expr` (guarded).
@@ -377,10 +401,10 @@ fn vector_or_range(i: &mut Tokens<'_, '_>, depth: usize) -> ModalResult<Expr> {
     let first = vector_element(i, depth + 1)?;
     if peek_kind(i) == Some(TokenKind::Colon) {
         bump(i)?; // ':'
-        let second = expr(i, depth + 1)?;
+        let second = expr_recursive(i, depth + 1)?;
         if peek_kind(i) == Some(TokenKind::Colon) {
             bump(i)?; // ':'  → [start : step : end]
-            let third = expr(i, depth + 1)?;
+            let third = expr_recursive(i, depth + 1)?;
             expect(i, TokenKind::RBracket, "closing ']' of a range")?;
             return Ok(Expr {
                 kind: ExprKind::Range {
@@ -419,6 +443,7 @@ fn vector_or_range(i: &mut Tokens<'_, '_>, depth: usize) -> ModalResult<Expr> {
 /// A vector element (parser.y:640): a comprehension generator (`for`/`each`/`if`/`let`, or one
 /// wrapped in parens) OR a plain expression. Comprehensions NEST — every `body` is itself a
 /// vector element.
+#[cfg(test)]
 fn vector_element(i: &mut Tokens<'_, '_>, depth: usize) -> ModalResult<Expr> {
     if depth >= MAX_DEPTH {
         return bail(i, "list comprehension nested too deeply");
@@ -442,21 +467,22 @@ fn vector_element(i: &mut Tokens<'_, '_>, depth: usize) -> ModalResult<Expr> {
             expect(i, TokenKind::RParen, "closing ')' of a comprehension")?;
             Ok(inner)
         }
-        _ => expr(i, depth),
+        _ => expr_recursive(i, depth),
     }
 }
 
 /// `for (bindings) body` or the C-style `for (init; cond; update) body` (parser.y:592-602).
+#[cfg(test)]
 fn lc_for(i: &mut Tokens<'_, '_>, depth: usize) -> ModalResult<Expr> {
     let start = i.current_token_start();
     bump(i)?; // 'for'
     expect(i, TokenKind::LParen, "'(' after `for`")?;
-    let init = arg_list(i, depth + 1)?;
+    let init = arg_list_rec(i, depth + 1)?;
     let kind = if peek_kind(i) == Some(TokenKind::Semi) {
         bump(i)?; // ';'  → C-style
-        let cond = expr(i, depth + 1)?;
+        let cond = expr_recursive(i, depth + 1)?;
         expect(i, TokenKind::Semi, "';' between the C-style `for` clauses")?;
-        let update = arg_list(i, depth + 1)?;
+        let update = arg_list_rec(i, depth + 1)?;
         expect(i, TokenKind::RParen, "closing ')' of the `for` clauses")?;
         let body = vector_element(i, depth + 1)?;
         ExprKind::LcForC {
@@ -480,6 +506,7 @@ fn lc_for(i: &mut Tokens<'_, '_>, depth: usize) -> ModalResult<Expr> {
 }
 
 /// `each body` — splice `body`'s list into the enclosing vector (parser.y:588).
+#[cfg(test)]
 fn lc_each(i: &mut Tokens<'_, '_>, depth: usize) -> ModalResult<Expr> {
     let start = i.current_token_start();
     bump(i)?; // 'each'
@@ -492,11 +519,12 @@ fn lc_each(i: &mut Tokens<'_, '_>, depth: usize) -> ModalResult<Expr> {
 
 /// A comprehension `if (cond) then [else els]` (parser.y:603-607) — the else binds greedily, as with
 /// the statement `if`.
+#[cfg(test)]
 fn lc_if(i: &mut Tokens<'_, '_>, depth: usize) -> ModalResult<Expr> {
     let start = i.current_token_start();
     bump(i)?; // 'if'
     expect(i, TokenKind::LParen, "'(' after `if` in a comprehension")?;
-    let cond = expr(i, depth + 1)?;
+    let cond = expr_recursive(i, depth + 1)?;
     expect(i, TokenKind::RParen, "closing ')' of a comprehension `if`")?;
     let then = vector_element(i, depth + 1)?;
     let els = if peek_kind(i) == Some(TokenKind::Else) {
@@ -518,11 +546,12 @@ fn lc_if(i: &mut Tokens<'_, '_>, depth: usize) -> ModalResult<Expr> {
 /// `let (bindings) body` as a comprehension element (parser.y:583). Reuses [`ExprKind::Let`] — a
 /// vector `let` is semantically the let-EXPRESSION (bind, then evaluate the body); the only twist is
 /// its body is a vector element, so it may be a nested comprehension.
+#[cfg(test)]
 fn lc_let(i: &mut Tokens<'_, '_>, depth: usize) -> ModalResult<Expr> {
     let start = i.current_token_start();
     bump(i)?; // 'let'
     expect(i, TokenKind::LParen, "'(' after `let`")?;
-    let bindings = arg_list(i, depth + 1)?;
+    let bindings = arg_list_rec(i, depth + 1)?;
     expect(i, TokenKind::RParen, "closing ')' of the `let` bindings")?;
     let body = vector_element(i, depth + 1)?;
     Ok(Expr {
@@ -612,6 +641,92 @@ fn argument(i: &mut Tokens<'_, '_>, depth: usize) -> ModalResult<Arg> {
         });
     }
     let value = expr(i, depth + 1)?;
+    Ok(Arg {
+        name: None,
+        value,
+        span: start..i.previous_token_end(),
+    })
+}
+
+// ─── Recursive twins of the argument/parameter helpers — the ORACLE's half (cfg(test)). The
+// production `arg_list`/`param_list` above route through the spine via `expr`; these route through
+// `expr_recursive`, so the oracle is recursive end-to-end. Bodies mirror their production twins.
+
+#[cfg(test)]
+fn arg_list_rec(i: &mut Tokens<'_, '_>, depth: usize) -> ModalResult<Vec<Arg>> {
+    let mut args = Vec::new();
+    if peek_kind(i) == Some(TokenKind::RParen) {
+        return Ok(args);
+    }
+    loop {
+        args.push(labeled(i, "a call argument", |i| argument_rec(i, depth))?);
+        if peek_kind(i) != Some(TokenKind::Comma) {
+            break;
+        }
+        bump(i)?;
+        if peek_kind(i) == Some(TokenKind::RParen) {
+            break;
+        }
+    }
+    Ok(args)
+}
+
+#[cfg(test)]
+fn param_list_rec(i: &mut Tokens<'_, '_>, depth: usize) -> ModalResult<Vec<Parameter>> {
+    let mut params = Vec::new();
+    if peek_kind(i) == Some(TokenKind::RParen) {
+        return Ok(params);
+    }
+    loop {
+        params.push(parameter_rec(i, depth)?);
+        if peek_kind(i) != Some(TokenKind::Comma) {
+            break;
+        }
+        bump(i)?;
+        if peek_kind(i) == Some(TokenKind::RParen) {
+            break;
+        }
+    }
+    Ok(params)
+}
+
+#[cfg(test)]
+fn parameter_rec(i: &mut Tokens<'_, '_>, depth: usize) -> ModalResult<Parameter> {
+    let start = i.current_token_start();
+    let name: std::rc::Rc<str> = match peek_kind(i) {
+        Some(TokenKind::Ident(n) | TokenKind::DollarIdent(n)) => n.into(),
+        _ => return bail(i, "a parameter name"),
+    };
+    bump(i)?;
+    let default = if peek_kind(i) == Some(TokenKind::Eq) {
+        bump(i)?;
+        Some(expr_recursive(i, depth + 1)?)
+    } else {
+        None
+    };
+    Ok(Parameter {
+        name,
+        default,
+        span: start..i.previous_token_end(),
+    })
+}
+
+#[cfg(test)]
+fn argument_rec(i: &mut Tokens<'_, '_>, depth: usize) -> ModalResult<Arg> {
+    let start = i.current_token_start();
+    if let Some(TokenKind::Ident(name) | TokenKind::DollarIdent(name)) = peek_kind(i)
+        && peek_kind2(i) == Some(TokenKind::Eq)
+    {
+        bump(i)?;
+        bump(i)?;
+        let value = expr_recursive(i, depth + 1)?;
+        return Ok(Arg {
+            name: Some(name.into()),
+            value,
+            span: start..i.previous_token_end(),
+        });
+    }
+    let value = expr_recursive(i, depth + 1)?;
     Ok(Arg {
         name: None,
         value,

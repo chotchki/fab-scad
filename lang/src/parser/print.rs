@@ -6,10 +6,12 @@
 //! parenthesized (`(for …)`), which re-parses via the `list_comprehension_elements_p` paren form when
 //! it sits in a vector element.
 //!
-//! SCOPE: recursive, for the BOUNDED asts the roundtrip generator + the customizer produce. It is NOT
-//! hardened against an adversarial deep-left-chain ast (a 200k-deep `Binary` spine would overflow) —
-//! that path is the PARSER's (guarded) and `Drop`'s (non-recursive) to own; the printer only ever
-//! prints asts we built. If the customizer ever needs to emit deep exprs, make this iterative then.
+//! SCOPE: recursive, for the BOUNDED asts the roundtrip generator + the customizer produce — the
+//! ACCEPTED remaining cliff after AA.4 (the parser spine now ACCEPTS arbitrarily deep exprs, so a
+//! parsed-deep ast COULD reach here via the customizer's default-expr printing). Deliberate: the
+//! always-on deep-value paths (parse, eval, echo/str formatting, fingerprint, Drop, cache keys) are
+//! all iterative; the printer runs only on customizer params + test roundtrips, where a 100k-deep
+//! literal is beyond pathological. If that stops being true, make this iterative like the rest.
 
 use std::cell::Cell;
 

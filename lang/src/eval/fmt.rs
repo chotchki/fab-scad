@@ -14,14 +14,47 @@ use super::value::Value;
 
 /// A value's OpenSCAD string form — the NESTED/echo representation: strings are QUOTED, a list is
 /// `[a, b, c]`, a range is `[start : step : end]`. `str()`'s top-level raw-string case is its caller's.
+///
+/// ITERATIVE over the `List` spine (AA.4.3): `echo` of a pathologically-deep value must render on
+/// O(1) host stack — issue4172 builds a ~15k-deep vector through module recursion, and rendering it
+/// recursively was upstream's ORIGINAL bug ("stack exhaust trying to create the echo string"). An
+/// explicit work stack of value-refs and closer texts replaces the per-level recursion.
 pub(super) fn format_value(v: &Value) -> String {
+    enum W<'v> {
+        Val(&'v Value),
+        Text(&'static str),
+    }
+    let mut out = String::new();
+    let mut stack = vec![W::Val(v)];
+    while let Some(w) = stack.pop() {
+        match w {
+            W::Text(t) => out.push_str(t),
+            W::Val(Value::List(xs)) => {
+                out.push('[');
+                stack.push(W::Text("]"));
+                for (idx, x) in xs.iter().enumerate().rev() {
+                    stack.push(W::Val(x));
+                    if idx > 0 {
+                        stack.push(W::Text(", "));
+                    }
+                }
+            }
+            W::Val(leaf) => out.push_str(&format_leaf(leaf)),
+        }
+    }
+    out
+}
+
+/// One non-`List` value's string form (`List` is handled by [`format_value`]'s work stack — a
+/// `List` reaching here is a bug, but it renders correctly anyway via the recursive fallback).
+fn format_leaf(v: &Value) -> String {
     match v {
         Value::Undef => "undef".to_string(),
         Value::Bool(b) => b.to_string(), // "true" / "false"
         Value::Num(n) => format_number(*n),
         Value::Str(s) => format!("\"{}\"", escape_string(s)), // quoted + escaped (QuotedString)
         Value::NumList(xs) => format_list(xs.iter().map(|n| format_number(*n))),
-        Value::List(xs) => format_list(xs.iter().map(format_value)),
+        Value::List(_) => format_value(v),
         Value::Range { start, step, end } => format!(
             "[{} : {} : {}]",
             format_number(*start),

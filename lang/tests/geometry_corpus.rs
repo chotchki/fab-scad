@@ -410,3 +410,18 @@ fn assert_and_echo_pass_through_to_child_geometry() {
     // the statement form (semicolon, no child) is unchanged — a pure check/emit, no geometry:
     assert_eq!(mesh("assert(true); cube(10);").vert_count(), 8); // the cube is a SIBLING here, still one object
 }
+
+/// AA.4.3 end-to-end: a value far past the old 64-deep parser cliff parses, EVALS, and `str()`s —
+/// the whole deep-value pipeline (spine parse → explicit-stack eval → iterative formatter → cache
+/// keys → iterative Drop) on one program. 2000 deep ≈ 30× the old cliff.
+#[test]
+fn deep_value_parses_evals_and_formats() {
+    let n = 2000;
+    let src = format!(
+        "v = {}1{}; echo(len = len(str(v)));cube(1);",
+        "[".repeat(n),
+        "]".repeat(n)
+    );
+    let m = mesh(&src);
+    assert_eq!(m.vert_count(), 8, "the cube still renders alongside");
+}

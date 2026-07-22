@@ -41,8 +41,13 @@ pub(crate) fn lex_word<'s>(i: &mut Input<'s>) -> ModalResult<TokenKind<'s>> {
 }
 
 /// `use`/`include` are keywords ONLY when the next non-whitespace char is `<` (flex `use[ \t\r\n]*"<"`);
-/// otherwise a plain identifier. Inside `<…>`: SPACE is allowed; delimiters are TAB/CR/LF/`>`; the
-/// WHOLE path is captured (no `/` split — that's H.2). Unterminated ⇒ hard error via `cut_err`.
+/// otherwise a plain identifier. Inside `<…>` the ONLY terminator is `>` (AA.3, linenumber.scad):
+/// SPACE, TAB and NEWLINES are all path content. Upstream's flex ignores `\t\r\n` here and keeps the
+/// LAST newline-separated segment as the filename — while warning that newlines in `include<>` are
+/// "not defined - behavior may change"; we keep the RAW slice instead (zero-copy, and the loader's
+/// can't-open warning then shows exactly what the source said). Divergent only in the munging of a
+/// construct upstream itself declares undefined. The WHOLE path is captured (no `/` split — that's
+/// H.2). Unterminated ⇒ hard error via `cut_err` (recovery is AA.2's issue1890 territory).
 fn lex_use_or_include<'s>(word: &'s str, i: &mut Input<'s>) -> ModalResult<TokenKind<'s>> {
     trace("use-or-include", |i: &mut Input<'s>| {
         let is_file = opt(peek((take_while(0.., is_use_ws), '<')))
@@ -52,8 +57,7 @@ fn lex_use_or_include<'s>(word: &'s str, i: &mut Input<'s>) -> ModalResult<Token
             return Ok(TokenKind::Ident(word)); // `use x;` → Ident("use")
         }
         (take_while(0.., is_use_ws), '<').void().parse_next(i)?; // consume ws + '<' — commit point
-        let path =
-            take_while(0.., |c: char| !matches!(c, '>' | '\t' | '\r' | '\n')).parse_next(i)?;
+        let path = take_while(0.., |c: char| c != '>').parse_next(i)?;
         cut_err(literal(">").context(StrContext::Expected(StrContextValue::CharLiteral('>'))))
             .context(StrContext::Label(if word == "use" {
                 "use path"

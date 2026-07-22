@@ -49,6 +49,15 @@ fn every_production_parses() {
     ok("ifelse_statement:'%'", "%if (x) a(); else b();");
     ok("ifelse_statement:stacked-mods", "%*if (x) a();");
     ok("ifelse_statement:spaced-mod", "* if (x) a();");
+
+    // ── include/use path lexing (AA.3, linenumber.scad) — `>` is the ONLY terminator inside `<…>` ──
+    ok("include:space-in-path", "use <line 1> include <line 1>");
+    ok("include:newline-before-bracket", "include\n<a.scad>");
+    ok(
+        "include:newlines-inside-brackets",
+        "include\n< line 6\nline 7\nline 8\n>\ncube(1);",
+    );
+    ok("use:newlines-inside-brackets", "use\n< a\nb\n>");
     ok("child_statement:';'", "translate([0,0,0]);");
     ok("child_statement:block", "translate([0,0,0]) { a(); b(); }");
     for id in ["for", "let", "assert", "echo", "each"] {

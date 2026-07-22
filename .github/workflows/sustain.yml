@@ -1,0 +1,173 @@
+# Sustainment nightly (Phase SU): we hand-recreated OpenSCAD + BOSL2, so parity is a MOVING target —
+# this watches both upstreams and re-proves parity against what changed. REPORT-ONLY by design
+# (chotchki 2026-07-22): no auto-PR, no auto-merge — the run maintains ONE rolling issue whose body
+# carries a machine-readable watermark (`<!-- sustain-state {...} -->`), so the nightly never commits
+# to the repo. A human bumps pins with the report in hand. Full design: docs/sustainment.md.
+#
+# Probes (cheap, short-circuit when nothing moved):
+#   BOSL2   — newest upstream tag vs the state's `bosl2_tag` (BOSL2 tags every revision).
+#   openscad — the `tests/data/scad/` + `examples/` TREE SHAs on master vs the state's `openscad_corpus`
+#              ("most of the change we don't care about" — only corpus paths matter to us).
+# Evaluation (only for what moved): the SU.2 intrinsic matrix + the SU.3 corpus differential against
+# a candidate BOSL2 checkout; the SU.4 files-lane sweep over new/changed openscad corpus files.
+name: sustain
+
+on:
+  schedule:
+    - cron: "30 6 * * *" # nightly 06:30 UTC (fuzz owns 06:00)
+  workflow_dispatch:
+    inputs:
+      rewind:
+        description: "Ignore the stored watermark and evaluate everything (the SU.6 e2e lever)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      ISSUE_TITLE: "Sustainment watch: upstream OpenSCAD + BOSL2"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      # The rolling issue IS the database: find it (or create it empty) and pull the state block.
+      - name: Load watermark from the rolling issue
+        id: state
+        run: |
+          set -euo pipefail
+          num=$(gh issue list --state open --search "in:title \"$ISSUE_TITLE\"" --json number,title \
+                --jq "first(.[] | select(.title == \"$ISSUE_TITLE\")) | .number // empty")
+          if [ -z "$num" ]; then
+            num=$(gh issue create --title "$ISSUE_TITLE" \
+              --body "Bootstrapping — the first sustain run fills this in." \
+              | grep -oE '[0-9]+$')
+          fi
+          echo "issue=$num" >> "$GITHUB_OUTPUT"
+          body=$(gh issue view "$num" --json body --jq .body)
+          state=$(printf '%s' "$body" | sed -n 's/.*<!-- sustain-state \(.*\) -->.*/\1/p' | head -1)
+          if [ "${{ inputs.rewind }}" = "true" ] || [ -z "$state" ]; then
+            state='{}'
+          fi
+          echo "state=$state" >> "$GITHUB_OUTPUT"
+          echo "watermark: $state (issue #$num)"
+
+      - name: Probe upstreams
+        id: probe
+        run: |
+          set -euo pipefail
+          # BOSL2: newest tag by version sort (they tag every revision).
+          bosl2_latest=$(git ls-remote --tags https://github.com/BelfrySCAD/BOSL2.git \
+            | awk -F/ '{print $NF}' | grep -E '^v[0-9]' | grep -v '\^{}' | sort -V | tail -1)
+          bosl2_pinned=$(git -C libs/BOSL2 describe --tags --exact-match 2>/dev/null || git -C libs/BOSL2 describe --tags)
+          # openscad: the corpus-path tree SHAs on master (change iff contents change) + HEAD for diffing.
+          os_head=$(gh api repos/openscad/openscad/branches/master --jq .commit.sha)
+          os_corpus=$(gh api "repos/openscad/openscad/git/trees/$os_head?recursive=1" \
+            --jq '[.tree[] | select(.path=="examples" or .path=="tests/data/scad") | "\(.path)=\(.sha)"] | sort | join(",")')
+          {
+            echo "bosl2_latest=$bosl2_latest"
+            echo "bosl2_pinned=$bosl2_pinned"
+            echo "os_head=$os_head"
+            echo "os_corpus=$os_corpus"
+          } >> "$GITHUB_OUTPUT"
+          state='${{ steps.state.outputs.state }}'
+          seen_tag=$(printf '%s' "$state" | jq -r '.bosl2_tag // empty')
+          seen_corpus=$(printf '%s' "$state" | jq -r '.openscad_corpus // empty')
+          bosl2_moved=false; os_moved=false
+          [ "$bosl2_latest" != "$seen_tag" ] && bosl2_moved=true
+          [ "$os_corpus" != "$seen_corpus" ] && os_moved=true
+          echo "bosl2_moved=$bosl2_moved" >> "$GITHUB_OUTPUT"
+          echo "os_moved=$os_moved" >> "$GITHUB_OUTPUT"
+          echo "BOSL2 $bosl2_pinned pinned, $bosl2_latest upstream (seen: ${seen_tag:-never}) → moved=$bosl2_moved"
+          echo "openscad corpus $os_corpus (seen: ${seen_corpus:-never}) → moved=$os_moved"
+
+      # Everything below only runs when an upstream actually moved.
+      - uses: dtolnay/rust-toolchain@stable
+        if: steps.probe.outputs.bosl2_moved == 'true' || steps.probe.outputs.os_moved == 'true'
+      - uses: Swatinem/rust-cache@v2
+        if: steps.probe.outputs.bosl2_moved == 'true' || steps.probe.outputs.os_moved == 'true'
+      - name: Build the sustainment tools
+        if: steps.probe.outputs.bosl2_moved == 'true' || steps.probe.outputs.os_moved == 'true'
+        run: cargo build --release --bin fab --bin corpus_worker
+
+      - name: Evaluate BOSL2 candidate
+        if: steps.probe.outputs.bosl2_moved == 'true'
+        run: |
+          set -euo pipefail
+          tag='${{ steps.probe.outputs.bosl2_latest }}'
+          git clone --depth 1 --branch "$tag" https://github.com/BelfrySCAD/BOSL2.git /tmp/bosl2-candidate
+          {
+            echo "## BOSL2 ${{ steps.probe.outputs.bosl2_pinned }} (pinned) → $tag (upstream)"
+            echo
+            ./target/release/fab intrinsics --bosl2 /tmp/bosl2-candidate --md || true
+            echo
+            ./target/release/fab corpus-diff --candidate /tmp/bosl2-candidate --md || true
+          } > /tmp/report-bosl2.md
+
+      - name: Evaluate openscad corpus delta
+        if: steps.probe.outputs.os_moved == 'true'
+        run: |
+          set -euo pipefail
+          git clone --depth 1 --filter=blob:none --sparse https://github.com/openscad/openscad.git /tmp/openscad
+          git -C /tmp/openscad sparse-checkout set tests/data/scad examples
+          state='${{ steps.state.outputs.state }}'
+          seen_head=$(printf '%s' "$state" | jq -r '.openscad_head // empty')
+          if [ -n "$seen_head" ]; then
+            # Changed corpus .scad files since the watermark commit (compare API; 300-file cap is fine
+            # for corpus-path churn — a bigger delta than that deserves the full-sweep fallback anyway).
+            gh api "repos/openscad/openscad/compare/$seen_head...${{ steps.probe.outputs.os_head }}" \
+              --jq '.files[].filename' 2>/dev/null \
+              | grep -E '^(tests/data/scad|examples)/.*\.scad$' \
+              | sed 's|^|/tmp/openscad/|' > /tmp/manifest.txt || true
+          else
+            find /tmp/openscad/tests/data/scad /tmp/openscad/examples -name '*.scad' > /tmp/manifest.txt
+          fi
+          # Only files that still exist (a compare delta can name deletions).
+          grep -vxF "" /tmp/manifest.txt | while read -r f; do [ -f "$f" ] && echo "$f"; done \
+            > /tmp/manifest-live.txt || true
+          {
+            echo "## openscad corpus (master, ${{ steps.probe.outputs.os_head }})"
+            echo
+            if [ -s /tmp/manifest-live.txt ]; then
+              ./target/release/fab scad-sweep --manifest /tmp/manifest-live.txt --md
+            else
+              echo "Corpus paths changed, but no surviving \`.scad\` files to sweep."
+            fi
+          } > /tmp/report-openscad.md
+
+      - name: Update the rolling issue
+        if: steps.probe.outputs.bosl2_moved == 'true' || steps.probe.outputs.os_moved == 'true'
+        run: |
+          set -euo pipefail
+          state=$(jq -cn \
+            --arg tag '${{ steps.probe.outputs.bosl2_latest }}' \
+            --arg corpus '${{ steps.probe.outputs.os_corpus }}' \
+            --arg head '${{ steps.probe.outputs.os_head }}' \
+            '{bosl2_tag: $tag, openscad_corpus: $corpus, openscad_head: $head}')
+          {
+            echo "<!-- sustain-state $state -->"
+            echo
+            echo "_Last evaluation: $(date -u +%Y-%m-%dT%H:%MZ) · [run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) · report-only: pins bump by hand (docs/sustainment.md)_"
+            echo
+            [ -f /tmp/report-bosl2.md ] && cat /tmp/report-bosl2.md
+            [ -f /tmp/report-openscad.md ] && { echo; cat /tmp/report-openscad.md; }
+          } > /tmp/issue-body.md
+          gh issue edit '${{ steps.state.outputs.issue }}' --body-file /tmp/issue-body.md
+          cat /tmp/issue-body.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: No movement
+        if: steps.probe.outputs.bosl2_moved == 'false' && steps.probe.outputs.os_moved == 'false'
+        run: echo "No upstream movement — issue untouched." | tee -a "$GITHUB_STEP_SUMMARY"
+
+      # The watcher must not fail SILENTLY — a broken probe is itself drift.
+      - name: Surface a workflow failure on the issue
+        if: failure() && steps.state.outputs.issue != ''
+        run: |
+          gh issue comment '${{ steps.state.outputs.issue }}' --body \
+            "⚠️ sustain run [${{ github.run_id }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) FAILED — the watcher itself needs attention."

@@ -92,7 +92,7 @@ added 2026-07-07.
 - [x] Y.8 - Y.8 - Audit + wire the kernel fuzz coverage
 - [ ] Y.9 - Y.9 - Extend kernel fuzz coverage (csg_tree random-op + new op targets)
 
-## Phase E - Grammar gaps from the sustainment census: the 12-file parse bucket goes green
+## Phase AA - Grammar gaps from the sustainment census: the 12-file parse bucket goes green
 <!-- Source: the SU.7 bootstrap census (issue #1, 523/576) — the parse bucket, root-caused 2026-07-22:
      (1) modifiers on `if` — CONFIRMED by local probe: all four `* ! % #` fail on `if` specifically, while
          for/let/module-calls take them fine (L.3.2 built EVAL semantics only; the parser never accepted
@@ -105,12 +105,12 @@ added 2026-07-07.
      (5) nbsp-latin1 — non-UTF-8 source, a doctrine call not a bug.
      OUT OF SCOPE (stay on the census worklist in issue #1): 10 assertion (semantics), 8 timeout (perf),
      18 load (text()/fonts + MCAD), 5 unimplemented (2D minkowski = J.3 follow-up). -->
-- [ ] E.1 - Modifiers on `if`: parser accepts `* ! % #` before an `if` instantiation (with/without else); plumb the modifier onto the IfElse node so L.3.2's eval semantics apply; the 5 modifier corpus files go green; semantics/ tests pin all four modifiers × if/if-else, oracle-verified against OpenSCAD
-- [ ] E.2 - issue1890 warn-and-recover lexing: unterminated block comment, string, `include <`, `use <` at EOF match OpenSCAD's exact recovery (run their binary on the 4 files first — pin the ORACLE behavior, then implement; the loader's tolerated-lib warnings stay separate)
-- [ ] E.3 - Literal-to-`>` include/use paths (linenumber.scad): newlines/spaces inside `< >`, multiple directives per line — match their lexer's take-everything-to-the-bracket rule; careful not to regress the loader's path normalization
-- [ ] E.4 - Parser depth (issue4172): the deeply-nested vector literal parses without stack death — iterative expression spine or an explicit budget ≥ theirs (the M-phase heap-bounded doctrine, parser edition); fuzz already covers the lexer, add a depth-shaped corpus seed
-- [ ] E.5 - nbsp/Latin-1 doctrine call: match OpenSCAD's byte-lenient reads (lossy-decode at the fs seam, like the SU sweep does) or document the accepted divergence in docs/sustainment.md — DECIDE, implement or record, either closes the file
-- [ ] E.6 - Exit gate: local full-census re-sweep (`fab scad-sweep` over the openscad corpus) shows the parse bucket at ≤1 (only an E.5-accepted divergence may remain); every fix is a semantics/ test; the next sustain nightly's report reflects the new baseline
+- [ ] AA.1 - Modifiers on `if`: parser accepts `* ! % #` before an `if` instantiation (with/without else); plumb the modifier onto the IfElse node so L.3.2's eval semantics apply; the 5 modifier corpus files go green; semantics/ tests pin all four modifiers × if/if-else, oracle-verified against OpenSCAD
+- [ ] AA.2 - issue1890 warn-and-recover lexing: unterminated block comment, string, `include <`, `use <` at EOF match OpenSCAD's exact recovery (run their binary on the 4 files first — pin the ORACLE behavior, then implement; the loader's tolerated-lib warnings stay separate)
+- [ ] AA.3 - Literal-to-`>` include/use paths (linenumber.scad): newlines/spaces inside `< >`, multiple directives per line — match their lexer's take-everything-to-the-bracket rule; careful not to regress the loader's path normalization
+- [ ] AA.4 - Parser depth (issue4172): the deeply-nested vector literal parses without stack death — iterative expression spine or an explicit budget ≥ theirs (the M-phase heap-bounded doctrine, parser edition); fuzz already covers the lexer, add a depth-shaped corpus seed
+- [ ] AA.5 - nbsp/Latin-1 doctrine call: match OpenSCAD's byte-lenient reads (lossy-decode at the fs seam, like the SU sweep does) or document the accepted divergence in docs/sustainment.md — DECIDE, implement or record, either closes the file
+- [ ] AA.6 - Exit gate: local full-census re-sweep (`fab scad-sweep` over the openscad corpus) shows the parse bucket at ≤1 (only an AA.5-accepted divergence may remain); every fix is a semantics/ test; the next sustain nightly's report reflects the new baseline
 
 ## Backlog (not yet phased)
 

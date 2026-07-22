@@ -4,7 +4,7 @@
 name = "fab-scad"
 product-name = "fab-scad"
 identifier = "io.hotchkiss.fab-scad"
-version = "0.1.0"
+version = "1.0.0"
 out-dir = "target/packager"
 binaries-dir = "target/release"
 formats = ["app", "dmg"]

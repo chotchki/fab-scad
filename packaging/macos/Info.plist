@@ -1,12 +1,8 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<!-- W.2.2.1: pins CFBundleVersion — cargo-packager generates a build TIMESTAMP (now_utc in its
-     app/mod.rs), which breaks reproducible builds. This file merges over the generated plist
-     (user keys are inserted last → they win), replacing only the keys listed here.
-     MUST match `version` in Packager.toml — build-app.sh and release-native.yml enforce it. -->
 <plist version="1.0">
 <dict>
 	<key>CFBundleVersion</key>
-	<string>0.1.0</string>
+	<string>1.0.0</string>
 </dict>
 </plist>

@@ -1,6 +1,6 @@
 [package]
 name = "fab-gui"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2024"
 description = "Bevy GUI for fab-scad: set cut planes, place connectors, preview piece-vs-bed"
 license = "GPL-2.0-or-later"

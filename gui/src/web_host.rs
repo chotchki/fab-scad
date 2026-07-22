@@ -41,6 +41,12 @@ pub(crate) fn download_bytes(filename: &str, mime: &str, bytes: &[u8]) -> bool {
 /// The `<input>` is never attached to the DOM, exactly like the download anchor above — one less node to
 /// clean up on the cancel path, which has no event to hang the cleanup off. Bytes come from
 /// `Blob::array_buffer` (a `File` IS a `Blob`), so no `FileReader` and no extra web-sys feature.
+///
+/// `click()` needs TRANSIENT USER ACTIVATION, and this runs from a Bevy `Update` system — one
+/// requestAnimationFrame tick after the DOM click that egui turned into a `PanelCmd`, not inside the
+/// event callstack. That still lands inside the browser's activation window (it's time-bounded, ~5s,
+/// not callstack-bounded), and it is VERIFIED WORKING in a real browser as of web-v0.27.0. Noted
+/// because the hop looks wrong on paper: don't "fix" it by reaching for the picker from the egui pass.
 pub(crate) fn pick_files(tx: async_channel::Sender<Vec<(String, Vec<u8>)>>) {
     let go = || -> Option<()> {
         let document = web_sys::window()?.document()?;

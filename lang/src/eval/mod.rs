@@ -645,6 +645,87 @@ enum Task<'a> {
         func: intrinsics::Intrinsic,
         nargs: usize,
     },
+    /// AB.2: pop `args.len()` evaluated echo-arg values, emit the `ECHO:` line, then schedule `body`
+    /// (or push undef). Scheduling the body as a TASK is the point — an `echo(…) body` chain (or a
+    /// recursive function whose body is one) used to re-enter the evaluator on the HOST stack per
+    /// link, which is exactly how tail-recursion-tests.scad overflowed.
+    EchoEmit {
+        args: &'a [Arg],
+        body: Option<&'a Expr>,
+        scope: Scope,
+    },
+    /// AB.2: pop the assert's evaluated CONDITION (iff one was scheduled), evaluate the message
+    /// (eagerly, impure-reads rolled back — a documented depth-1 re-entry; recursion routed through
+    /// an assert MESSAGE stays cliffy and absurd), fail LOUD on falsy, else schedule `body`.
+    AssertCheck {
+        cond: Option<&'a Expr>,
+        msg: Option<&'a Expr>,
+        body: Option<&'a Expr>,
+        scope: Scope,
+    },
+    /// AB.3: dispatch ONE comprehension element. A GENERATOR (`for`/`each`/`if`, or a `let` whose
+    /// body is one) leaves its CONTRIBUTION VECTOR on the value stack; a PLAIN element leaves its
+    /// raw value. Consumers know which statically via [`is_comprehension`].
+    LcElem(&'a Expr, Scope),
+    /// AB.3: pop a plain element's value and wrap it as a one-element contribution vector — used
+    /// where a GENERATOR result is contractually required (an `if` branch, a bindingless `for` body).
+    WrapContribution,
+    /// AB.3: pop the comprehension-`if` condition; schedule the taken branch's contribution (or push
+    /// the empty contribution).
+    LcIfBranch {
+        then: &'a Expr,
+        els: Option<&'a Expr>,
+        scope: Scope,
+    },
+    /// AB.3: pop the `each` inner result and splice ONE level; `splice_inner` = the inner was a
+    /// generator (its result is a contribution vector whose ELEMENTS are the contributions).
+    LcEachSplice { splice_inner: bool },
+    /// AB.3: a `for` binding chain — split the next binding (evaluating its iterable via a task
+    /// would reorder against `charge_iterable`; the iterable evals here as a bounded re-entry), or
+    /// schedule the body when none remain.
+    LcForBindings {
+        bindings: &'a [Arg],
+        body: &'a Expr,
+        scope: Scope,
+    },
+    /// AB.3: one `for` binding level mid-iteration. `pending` = the previous item's result awaits
+    /// popping into `acc` (`splice_item` says splice-vs-append); then bind the next item into the
+    /// REUSED `frame` (N.2 in-place rebind) and schedule its work, or push `acc` when exhausted.
+    LcForNext {
+        rest: &'a [Arg],
+        body: &'a Expr,
+        var: Rc<str>,
+        items: std::vec::IntoIter<Value>,
+        frame: Scope,
+        acc: Vec<Value>,
+        splice_item: bool,
+        pending: bool,
+    },
+    /// AB.3: a C-style `for` iteration head — build the loop scope, test `cond`, schedule body +
+    /// update (clause exprs evaluate as bounded re-entries; loop NESTING is task-framed).
+    LcForCStep {
+        cond: &'a Expr,
+        update: &'a [Arg],
+        body: &'a Expr,
+        outer: Scope,
+        vars: Vec<(String, Value)>,
+        iterations: u64,
+        acc: Vec<Value>,
+        splice_item: bool,
+    },
+    /// AB.3: after a C-style body — pop its result into `acc`, apply the update clause
+    /// SEQUENTIALLY, and loop.
+    LcForCUpdate {
+        cond: &'a Expr,
+        update: &'a [Arg],
+        body: &'a Expr,
+        outer: Scope,
+        loop_scope: Scope,
+        vars: Vec<(String, Value)>,
+        iterations: u64,
+        acc: Vec<Value>,
+        splice_item: bool,
+    },
     /// Pop the just-evaluated binding value, bind it as `name` in a child of `scope`, then either
     /// evaluate the next `let` binding in that scope or (no bindings left) evaluate `body`. `let`
     /// bindings are SEQUENTIAL — a later one sees the earlier ones.
@@ -891,7 +972,7 @@ fn eval_with_global<'a>(
         // 10s/2GB trips the budget in bounded steps instead. No-op unless a bound is set (default None).
         ctx.charge(1)?;
         match task {
-            Task::Eval(e, s) => eval_node(e, &s, &global, ctx, &mut tasks, &mut values)?,
+            Task::Eval(e, s) => eval_node(e, &s, ctx, &mut tasks, &mut values)?,
             Task::Const(v) => values.push(v),
             Task::Binary(op) => {
                 // pop order: rhs was pushed after lhs, so it's on top.
@@ -1154,6 +1235,290 @@ fn eval_with_global<'a>(
                 values.truncate(start);
                 values.push(result);
             }
+            Task::EchoEmit { args, body, scope } => {
+                let vals = values.split_off(values.len().saturating_sub(args.len()));
+                ctx.messages
+                    .borrow_mut()
+                    .push(Message::Echo(format_echo_line(args, &vals)));
+                match body {
+                    Some(b) => tasks.push(Task::Eval(b, scope)),
+                    None => values.push(Value::Undef),
+                }
+            }
+            Task::AssertCheck {
+                cond,
+                msg,
+                body,
+                scope,
+            } => {
+                let cond_val = cond.map(|_| values.pop().unwrap_or(Value::Undef));
+                assert_verdict(cond, cond_val.as_ref(), msg, &scope, &global, ctx)?;
+                match body {
+                    Some(b) => tasks.push(Task::Eval(b, scope)),
+                    None => values.push(Value::Undef),
+                }
+            }
+            Task::LcElem(e, scope) => match &e.kind {
+                ExprKind::LcFor { bindings, body } => tasks.push(Task::LcForBindings {
+                    bindings,
+                    body,
+                    scope,
+                }),
+                ExprKind::LcForC {
+                    init,
+                    cond,
+                    update,
+                    body,
+                } => {
+                    // Init assignments bind SEQUENTIALLY (`let`-style): a later one sees the
+                    // earlier ones, so `for(a=1, b=a+1; …)` gives `b==2`.
+                    let mut vars: Vec<(String, Value)> = Vec::new();
+                    let mut init_scope = scope.child();
+                    for arg in init {
+                        let name = arg.name.as_deref().unwrap_or("_").to_string();
+                        let value = eval_with_global(&arg.value, &init_scope, &global, ctx)?;
+                        init_scope.bind(name.clone(), value.clone());
+                        vars.push((name, value));
+                    }
+                    let splice_item = is_comprehension(body);
+                    tasks.push(Task::LcForCStep {
+                        cond,
+                        update,
+                        body,
+                        outer: scope,
+                        vars,
+                        iterations: 0,
+                        acc: Vec::new(),
+                        splice_item,
+                    });
+                }
+                // `each E` splices ONE level; `E` is itself an element (`each if(c) X` distributes
+                // the splice INTO the guard/loop).
+                ExprKind::LcEach(inner) => {
+                    tasks.push(Task::LcEachSplice {
+                        splice_inner: is_comprehension(inner),
+                    });
+                    tasks.push(Task::LcElem(inner, scope));
+                }
+                ExprKind::LcIf { cond, then, els } => {
+                    tasks.push(Task::LcIfBranch {
+                        then,
+                        els: els.as_deref(),
+                        scope: scope.clone(),
+                    });
+                    tasks.push(Task::Eval(cond, scope));
+                }
+                // A `let` element is TRANSPARENT (splices iff its body does — is_comprehension
+                // follows the body), so the body's own result shape is exactly right.
+                ExprKind::Let { bindings, body } => {
+                    let inner = comprehension_let_scope(bindings, &scope, &global, ctx)?;
+                    tasks.push(Task::LcElem(body, inner));
+                }
+                // A plain element — its raw value (N.2: no wrapper).
+                _ => tasks.push(Task::Eval(e, scope)),
+            },
+            Task::WrapContribution => {
+                let v = values.pop().unwrap_or(Value::Undef);
+                values.push(build_vector(vec![v]));
+            }
+            Task::LcIfBranch { then, els, scope } => {
+                let cond = values.pop().unwrap_or(Value::Undef);
+                let taken = if cond.is_truthy() { Some(then) } else { els };
+                match taken {
+                    Some(branch) if is_comprehension(branch) => {
+                        tasks.push(Task::LcElem(branch, scope));
+                    }
+                    Some(branch) => {
+                        // A plain branch's value wraps into a one-element contribution.
+                        tasks.push(Task::WrapContribution);
+                        tasks.push(Task::Eval(branch, scope));
+                    }
+                    None => values.push(build_vector(Vec::new())),
+                }
+            }
+            Task::LcEachSplice { splice_inner } => {
+                let inner = values.pop().unwrap_or(Value::Undef);
+                let contributions: Vec<Value> = if splice_inner {
+                    iter_values(&inner)
+                } else {
+                    vec![inner]
+                };
+                let mut out = Vec::new();
+                for contribution in contributions {
+                    // Q.5: `each <range/list>` splices bulk elements with NO per-element eval —
+                    // charge the splice count so a giant `each [0:9e9]` stays bounded.
+                    ctx.charge_iterable(&contribution)?;
+                    out.extend(iter_values(&contribution));
+                }
+                values.push(build_vector(out));
+            }
+            Task::LcForBindings {
+                bindings,
+                body,
+                scope,
+            } => match bindings.split_first() {
+                None => {
+                    // `for()` — the body's contribution IS the for's (wrap a plain body's value).
+                    if is_comprehension(body) {
+                        tasks.push(Task::LcElem(body, scope));
+                    } else {
+                        tasks.push(Task::WrapContribution);
+                        tasks.push(Task::Eval(body, scope));
+                    }
+                }
+                Some((binding, rest)) => {
+                    // The loop var as an `Rc<str>` computed ONCE per binding level (N.2b).
+                    let var: Rc<str> = binding.name.clone().unwrap_or_else(|| Rc::from("_"));
+                    let iterable = eval_with_global(&binding.value, &scope, &global, ctx)?;
+                    // Q.5: charge BEFORE `iter_values` materializes the range.
+                    ctx.charge_iterable(&iterable)?;
+                    let splice_item = !rest.is_empty() || is_comprehension(body);
+                    // ONE child frame, REUSED across iterations (N.2): `bind` is `Rc::make_mut` —
+                    // in-place while uniquely held, cloned the instant an iteration's work (or a
+                    // captured closure) still holds it. Bit-identical to a fresh frame per item.
+                    let frame = scope.child();
+                    tasks.push(Task::LcForNext {
+                        rest,
+                        body,
+                        var,
+                        items: iter_values(&iterable).into_iter(),
+                        frame,
+                        acc: Vec::new(),
+                        splice_item,
+                        pending: false,
+                    });
+                }
+            },
+            Task::LcForNext {
+                rest,
+                body,
+                var,
+                mut items,
+                mut frame,
+                mut acc,
+                splice_item,
+                pending,
+            } => {
+                if pending {
+                    let result = values.pop().unwrap_or(Value::Undef);
+                    if splice_item {
+                        acc.extend(iter_values(&result));
+                    } else {
+                        acc.push(result);
+                    }
+                }
+                match items.next() {
+                    Some(value) => {
+                        frame.bind(Rc::clone(&var), value);
+                        let iter_scope = frame.clone();
+                        // Self BELOW the item's work: the item runs first, then the next iteration.
+                        tasks.push(Task::LcForNext {
+                            rest,
+                            body,
+                            var,
+                            items,
+                            frame,
+                            acc,
+                            splice_item,
+                            pending: true,
+                        });
+                        if rest.is_empty() {
+                            if is_comprehension(body) {
+                                tasks.push(Task::LcElem(body, iter_scope));
+                            } else {
+                                tasks.push(Task::Eval(body, iter_scope));
+                            }
+                        } else {
+                            tasks.push(Task::LcForBindings {
+                                bindings: rest,
+                                body,
+                                scope: iter_scope,
+                            });
+                        }
+                    }
+                    None => values.push(build_vector(acc)),
+                }
+            }
+            Task::LcForCStep {
+                cond,
+                update,
+                body,
+                outer,
+                vars,
+                iterations,
+                acc,
+                splice_item,
+            } => {
+                let mut loop_scope = outer.child();
+                for (name, value) in &vars {
+                    loop_scope.bind(name.clone(), value.clone());
+                }
+                if eval_with_global(cond, &loop_scope, &global, ctx)?.is_truthy() {
+                    tasks.push(Task::LcForCUpdate {
+                        cond,
+                        update,
+                        body,
+                        outer,
+                        loop_scope: loop_scope.clone(),
+                        vars,
+                        iterations,
+                        acc,
+                        splice_item,
+                    });
+                    if splice_item {
+                        tasks.push(Task::LcElem(body, loop_scope));
+                    } else {
+                        tasks.push(Task::Eval(body, loop_scope));
+                    }
+                } else {
+                    values.push(build_vector(acc));
+                }
+            }
+            Task::LcForCUpdate {
+                cond,
+                update,
+                body,
+                outer,
+                mut loop_scope,
+                mut vars,
+                iterations,
+                mut acc,
+                splice_item,
+            } => {
+                let result = values.pop().unwrap_or(Value::Undef);
+                if splice_item {
+                    acc.extend(iter_values(&result));
+                } else {
+                    acc.push(result);
+                }
+                // Update assignments bind SEQUENTIALLY within the clause: `x=i*10, y=x+1` lets `y`
+                // see the NEW `x` (OpenSCAD-verified; BOSL2's `_dp_distance_row` DP relies on it).
+                for arg in update {
+                    let name = arg.name.as_deref().unwrap_or("_");
+                    let value = eval_with_global(&arg.value, &loop_scope, &global, ctx)?;
+                    loop_scope.bind(name.to_string(), value.clone());
+                    match vars.iter_mut().find(|(n, _)| n == name) {
+                        Some(entry) => entry.1 = value,
+                        None => vars.push((name.to_string(), value)),
+                    }
+                }
+                let iterations = iterations + 1;
+                if iterations >= RANGE_MAX {
+                    // The runaway-`for(i=0; 1; …)` guard — defensive, RANGE_MAX real iterations away.
+                    values.push(build_vector(acc));
+                } else {
+                    tasks.push(Task::LcForCStep {
+                        cond,
+                        update,
+                        body,
+                        outer,
+                        vars,
+                        iterations,
+                        acc,
+                        splice_item,
+                    });
+                }
+            }
             Task::PushUndef => values.push(Value::Undef),
             Task::ShortCircuit { op, rhs, scope } => {
                 let lhs = values.pop().unwrap_or(Value::Undef);
@@ -1182,7 +1547,6 @@ fn eval_with_global<'a>(
 fn eval_node<'a>(
     e: &'a Expr,
     scope: &Scope,
-    global: &Scope,
     ctx: &Ctx<'a>,
     tasks: &mut Vec<Task<'a>>,
     values: &mut Vec<Value>,
@@ -1281,33 +1645,43 @@ fn eval_node<'a>(
             None => tasks.push(Task::Eval(body, scope.clone())), // `let() body` → just the body
         },
         ExprKind::Echo { args, body } => {
-            // `echo(args) body?` — emit the ECHO line (side effect), then yield `body` (or undef). The
-            // args + body sub-evaluate off the stack (bounded, like comprehensions); echo is rare + cold.
-            emit_echo(args, scope, global, ctx)?;
-            let value = match body {
-                Some(b) => eval_with_global(b, scope, global, ctx)?,
-                None => Value::Undef,
-            };
-            values.push(value);
+            // `echo(args) body?` — args evaluate as TASKS (left-to-right), then `EchoEmit` pops
+            // them, prints, and schedules the body. Fully on the machine (AB.2): chains and
+            // echo-bodied recursion cost heap, never host stack.
+            tasks.push(Task::EchoEmit {
+                args,
+                body: body.as_deref(),
+                scope: scope.clone(),
+            });
+            for arg in args.iter().rev() {
+                tasks.push(Task::Eval(&arg.value, scope.clone()));
+            }
         }
         ExprKind::Assert { args, body } => {
-            // `assert(cond, msg?) body?` — LOUD on a falsy condition, else yield `body` (or undef).
-            check_assert(args, scope, global, ctx)?;
-            let value = match body {
-                Some(b) => eval_with_global(b, scope, global, ctx)?,
-                None => Value::Undef,
-            };
-            values.push(value);
+            // `assert(cond, msg?) body?` — the condition evaluates as a TASK, then `AssertCheck`
+            // verdicts and schedules the body (AB.2: assert-chained recursion cost heap, not host
+            // stack — the tail-recursion-tests crasher).
+            let (cond, msg) = split_assert_args(args);
+            tasks.push(Task::AssertCheck {
+                cond,
+                msg,
+                body: body.as_deref(),
+                scope: scope.clone(),
+            });
+            if let Some(c) = cond {
+                tasks.push(Task::Eval(c, scope.clone()));
+            }
         }
         ExprKind::LcFor { .. }
         | ExprKind::LcForC { .. }
         | ExprKind::LcEach(_)
         | ExprKind::LcIf { .. } => {
             // a comprehension element evaluates to its CONTRIBUTION list (spliced by the enclosing
-            // VectorSplice). Only reached as a vector element (parser invariant).
-            let mut contribution = Vec::new();
-            eval_comprehension(e, scope, global, ctx, &mut contribution)?;
-            values.push(build_vector(contribution));
+            // VectorSplice). Only reached as a vector element (parser invariant). Scheduled ON the
+            // main machine (AB.3): generator nesting AND vector/generator ALTERNATION cost heap,
+            // never host stack — the old eval_comprehension↔eval_node alternation was one host
+            // frame per nesting level, a cliff once the AA.4 spine made deep elements parseable.
+            tasks.push(Task::LcElem(e, scope.clone()));
         }
     }
     Ok(())
@@ -1598,7 +1972,20 @@ fn is_comprehension(e: &Expr) -> bool {
         // `splice_into` then removes), a bare `let` evaluates its body DIRECTLY, so the splice decision
         // has to follow the body, not the `let` node. Without this, `(let(i) [pt])` in a path builder (e.g.
         // BOSL2's trapezoid corners) unwrapped its single-point list and flattened the whole path.
-        ExprKind::Let { body, .. } => is_comprehension(body),
+        ExprKind::Let { .. } => {
+            // Loop, not recursion — deep let-chains are parseable post-AA.4.
+            let mut cur = e;
+            loop {
+                match &cur.kind {
+                    ExprKind::Let { body, .. } => cur = body,
+                    ExprKind::LcFor { .. }
+                    | ExprKind::LcForC { .. }
+                    | ExprKind::LcEach(_)
+                    | ExprKind::LcIf { .. } => return true,
+                    _ => return false,
+                }
+            }
+        }
         _ => false,
     }
 }
@@ -1625,167 +2012,6 @@ fn iter_values(v: &Value) -> Vec<Value> {
         Value::Str(s) => s.chars().map(|c| Value::string(c.to_string())).collect(),
         other => vec![other.clone()],
     }
-}
-
-/// Evaluate a comprehension element to its CONTRIBUTION — the values it splices into the enclosing
-/// vector. A plain expr contributes `[value]`; `for`/`each`/`if`/`let` flatmap/splice/filter/scope.
-///
-/// Comprehension NESTING is parse-bounded (`MAX_DEPTH`), so this bounded host recursion can't overflow;
-/// iteration is capped (`RANGE_MAX`, list length). Each sub-expression re-enters the explicit-stack
-/// evaluator carrying the TOP-LEVEL `global` (so a function called in a body resolves against globals,
-/// not the loop scope) — a fresh stack per step; folding it onto one explicit stack is a deferred perf
-/// optimization, and the element-cap WARNING text is I.5.
-fn eval_comprehension<'a>(
-    elem: &'a Expr,
-    scope: &Scope,
-    global: &Scope,
-    ctx: &Ctx<'a>,
-    out: &mut Vec<Value>,
-) -> crate::Result<()> {
-    match &elem.kind {
-        ExprKind::LcFor { bindings, body } => lc_for(bindings, body, scope, global, ctx, out),
-        ExprKind::LcForC {
-            init,
-            cond,
-            update,
-            body,
-        } => lc_for_c(init, cond, update, body, scope, global, ctx, out),
-        // `each E` splices ONE level: for every value element `E` would contribute, iterate it in. `E`
-        // is itself a comprehension element, so evaluate it as one — `each if(c) X` / `each for(…) X`
-        // must distribute the splice INTO the guard/loop (OpenSCAD: `each if(true) [1,2,3]` → `[1,2,3]`,
-        // not `[[1,2,3]]`). Evaluating `E` as a plain expression (the old path) wrapped an `if`'s
-        // contribution in a vector, so `each` only peeled the wrapper and left the list nested. The temp
-        // `inner` is per-`each` (we splice its elements), not per-element.
-        ExprKind::LcEach(e) => {
-            let mut inner = Vec::new();
-            eval_comprehension(e, scope, global, ctx, &mut inner)?;
-            for contribution in inner {
-                // Q.5: `each <range/list>` splices bulk elements with NO per-element eval (unlike a plain
-                // body), so the task-loop charge would miss them — charge the splice count up front so a
-                // giant `each [0:9e9]` is bounded like a `for` loop is.
-                ctx.charge_iterable(&contribution)?;
-                out.extend(iter_values(&contribution));
-            }
-            Ok(())
-        }
-        ExprKind::LcIf { cond, then, els } => {
-            if eval_with_global(cond, scope, global, ctx)?.is_truthy() {
-                eval_comprehension(then, scope, global, ctx, out)
-            } else {
-                match els {
-                    Some(e) => eval_comprehension(e, scope, global, ctx, out),
-                    None => Ok(()),
-                }
-            }
-        }
-        ExprKind::Let { bindings, body } => {
-            let inner = comprehension_let_scope(bindings, scope, global, ctx)?;
-            eval_comprehension(body, &inner, global, ctx, out)
-        }
-        // A plain element → PUSH its value directly (N.2): no per-element `vec![…]`, which was one tiny heap
-        // alloc PER comprehension element (millions in a real model) that `out.extend` then copied + dropped.
-        _ => {
-            out.push(eval_with_global(elem, scope, global, ctx)?);
-            Ok(())
-        }
-    }
-}
-
-/// `for (name = iterable, …) body` — iterate each binding (multiple bindings NEST), evaluate `body`'s
-/// contribution per step, concatenate.
-fn lc_for<'a>(
-    bindings: &'a [Arg],
-    body: &'a Expr,
-    scope: &Scope,
-    global: &Scope,
-    ctx: &Ctx<'a>,
-    out: &mut Vec<Value>,
-) -> crate::Result<()> {
-    match bindings.split_first() {
-        None => eval_comprehension(body, scope, global, ctx, out),
-        Some((binding, rest)) => {
-            // The loop var as an `Rc<str>` computed ONCE per binding, so the per-ITERATION bind is a refcount
-            // bump, not a fresh `String` (N.2b) — `lc_for` is the hottest bind path (64% of a real model).
-            let var: Rc<str> = binding.name.clone().unwrap_or_else(|| Rc::from("_"));
-            let iterable = eval_with_global(&binding.value, scope, global, ctx)?;
-            // Q.5: charge the loop's element count BEFORE `iter_values` materializes the (RANGE_MAX-bounded)
-            // range into a Vec — so `for(i=[0:9e9])` is rejected up front under a budget, not after the alloc.
-            ctx.charge_iterable(&iterable)?;
-            // ONE child frame, REUSED across iterations (N.2): `bind` is `Rc::make_mut`, so it rebinds the loop
-            // var IN PLACE while the frame is uniquely held (the common case — a value-producing body captures
-            // nothing), and CLONES it the instant a closure/escaping child holds the frame (each captured
-            // iteration then keeps its OWN loop-var value — bit-identical to a fresh frame per iteration). This
-            // kills the per-iteration `Rc<Frame>` alloc+drop that dominates comprehension-heavy models. Results
-            // PUSH straight into the caller's `out` accumulator — no per-level result `Vec` (N.2).
-            let mut inner = scope.child();
-            for value in iter_values(&iterable) {
-                inner.bind(Rc::clone(&var), value);
-                lc_for(rest, body, &inner, global, ctx, out)?;
-            }
-            Ok(())
-        }
-    }
-}
-
-/// C-style `for (init; cond; update) body`: the loop variables live in a flat map (each iteration a
-/// fresh `scope.child()`, so no chain accumulation), `cond`/`update` see the current values, and
-/// `update` MERGES into them (unmentioned vars persist). Capped at `RANGE_MAX` iterations.
-#[allow(
-    clippy::too_many_arguments,
-    reason = "threaded eval context (init/cond/update/body + scope/global/ctx/out) — same shape as dispatch_module"
-)]
-fn lc_for_c<'a>(
-    init: &'a [Arg],
-    cond: &'a Expr,
-    update: &'a [Arg],
-    body: &'a Expr,
-    scope: &Scope,
-    global: &Scope,
-    ctx: &Ctx<'a>,
-    out: &mut Vec<Value>,
-) -> crate::Result<()> {
-    // Init assignments bind SEQUENTIALLY (`let`-style): a later one sees the earlier ones, so
-    // `for(a=1, b=a+1; …)` gives `b==2`. Accumulate into a child scope as we go.
-    let mut vars: Vec<(String, Value)> = Vec::new();
-    let mut init_scope = scope.child();
-    for arg in init {
-        let name = arg.name.as_deref().unwrap_or("_").to_string();
-        let value = eval_with_global(&arg.value, &init_scope, global, ctx)?;
-        init_scope.bind(name.clone(), value.clone());
-        vars.push((name, value));
-    }
-    let mut iterations = 0u64;
-    loop {
-        let mut loop_scope = scope.child();
-        for (name, value) in &vars {
-            loop_scope.bind(name.clone(), value.clone());
-        }
-        if !eval_with_global(cond, &loop_scope, global, ctx)?.is_truthy() {
-            break;
-        }
-        eval_comprehension(body, &loop_scope, global, ctx, out)?;
-        // Update assignments also bind SEQUENTIALLY within the clause: `x=i*10, y=x+1` must let `y`
-        // see the NEW `x` (OpenSCAD-verified; BOSL2's `_dp_distance_row` DP does exactly this with
-        // `costs=…, newrow=…min(costs)…`). Bind each into `loop_scope` as we go so the next update sees
-        // it; `vars` carries the results to the next iteration.
-        for arg in update {
-            let name = arg.name.as_deref().unwrap_or("_");
-            let value = eval_with_global(&arg.value, &loop_scope, global, ctx)?;
-            loop_scope.bind(name.to_string(), value.clone());
-            match vars.iter_mut().find(|(n, _)| n == name) {
-                Some(entry) => entry.1 = value,
-                None => vars.push((name.to_string(), value)),
-            }
-        }
-        iterations += 1;
-        if iterations >= RANGE_MAX {
-            // The runaway-`for(i=0; 1; …)` guard. Reaching it needs RANGE_MAX (1e7) real iterations, so
-            // it's the single line the corpus can't cover — a defensive limit, equivalent-mutant class.
-            // (Eval isn't under the parser/lexer mandatory-100% rule; the warning TEXT is I.5.)
-            break;
-        }
-    }
-    Ok(())
 }
 
 /// Bind a comprehension `let`'s bindings SEQUENTIALLY (a later one sees the earlier), returning the
@@ -2904,18 +3130,29 @@ fn emit_echo<'a>(
     global: &Scope,
     ctx: &Ctx<'a>,
 ) -> crate::Result<()> {
-    let mut parts = Vec::with_capacity(args.len());
+    let mut vals = Vec::with_capacity(args.len());
     for arg in args {
-        let value = eval_with_global(&arg.value, scope, global, ctx)?;
-        parts.push(match &arg.name {
-            Some(name) => format!("{name} = {}", fmt::format_value(&value)),
-            None => fmt::format_value(&value),
-        });
+        vals.push(eval_with_global(&arg.value, scope, global, ctx)?);
     }
     ctx.messages
         .borrow_mut()
-        .push(Message::Echo(parts.join(", ")));
+        .push(Message::Echo(format_echo_line(args, &vals)));
     Ok(())
+}
+
+/// Format an `ECHO:` line from pre-evaluated arg values — named args render `name = value`,
+/// positional just `value`, joined by `, `. Shared by the statement path ([`emit_echo`]) and the
+/// task path ([`Task::EchoEmit`]) so the two can't drift.
+fn format_echo_line(args: &[Arg], vals: &[Value]) -> String {
+    let parts: Vec<String> = args
+        .iter()
+        .zip(vals)
+        .map(|(arg, value)| match &arg.name {
+            Some(name) => format!("{name} = {}", fmt::format_value(value)),
+            None => fmt::format_value(value),
+        })
+        .collect();
+    parts.join(", ")
 }
 
 /// Evaluate an `assert`'s arguments and fail LOUD if the condition is falsy: `assert(cond)`,
@@ -2927,11 +3164,18 @@ fn check_assert<'a>(
     global: &Scope,
     ctx: &Ctx<'a>,
 ) -> crate::Result<()> {
-    // Split the condition from the message SLOT. OpenSCAD evaluates BOTH eagerly, in source order, and fires
-    // any WARNING the message triggers even on a PASS (verified: `assert(true, some_undef_var)` warns "Ignoring
-    // unknown variable"), so we do too — bug-for-bug on the console stream. `condition` keeps its EXPR so a
-    // failure pretty-prints it (`print_expr`) as a grep-able `[assert(…)]` locator (BOSL2's asserts are usually
-    // message-LESS). Named `condition`/`message` beat the positional slots (params are `condition`, `message`).
+    let (cond_expr, msg_expr) = split_assert_args(args);
+    let cond_val = match cond_expr {
+        Some(e) => Some(eval_with_global(e, scope, global, ctx)?),
+        None => None,
+    };
+    assert_verdict(cond_expr, cond_val.as_ref(), msg_expr, scope, global, ctx)
+}
+
+/// Split an assert's condition from its message SLOT — static, no evaluation. Named
+/// `condition`/`message` beat the positional slots (OpenSCAD's params are `condition`, `message`);
+/// unknown named args and extras drop, as OpenSCAD arg-matching does.
+fn split_assert_args(args: &[Arg]) -> (Option<&Expr>, Option<&Expr>) {
     let mut cond_expr: Option<&Expr> = None;
     let mut msg_expr: Option<&Expr> = None;
     let mut positional = 0;
@@ -2939,21 +3183,33 @@ fn check_assert<'a>(
         match arg.name.as_deref() {
             Some("condition") => cond_expr = Some(&arg.value),
             Some("message") => msg_expr = Some(&arg.value),
-            Some(_) => {} // unknown named arg — dropped, as OpenSCAD arg-matching does
+            Some(_) => {}
             None => {
                 match positional {
                     0 if cond_expr.is_none() => cond_expr = Some(&arg.value),
                     1 if msg_expr.is_none() => msg_expr = Some(&arg.value),
-                    _ => {} // assert takes at most (condition, message); extras dropped
+                    _ => {}
                 }
                 positional += 1;
             }
         }
     }
-    let cond_val = match cond_expr {
-        Some(e) => Some(eval_with_global(e, scope, global, ctx)?),
-        None => None,
-    };
+    (cond_expr, msg_expr)
+}
+
+/// The assert's verdict half: evaluate the MESSAGE (eagerly, impure-reads rolled back — OpenSCAD
+/// fires its warnings even on a PASS, verified bug-for-bug), trace, and fail LOUD on a falsy
+/// condition with the pretty-printed `[assert(…)]` locator. Shared by the statement path
+/// ([`check_assert`]) and the task path ([`Task::AssertCheck`]); the message eval is a documented
+/// depth-1 host re-entry (recursion routed through an assert MESSAGE stays out of scope — AB.2).
+fn assert_verdict<'a>(
+    cond_expr: Option<&Expr>,
+    cond_val: Option<&Value>,
+    msg_expr: Option<&'a Expr>,
+    scope: &Scope,
+    global: &Scope,
+    ctx: &Ctx<'a>,
+) -> crate::Result<()> {
     // Evaluate the message EAGERLY (OpenSCAD does — its warnings must fire on a pass), but ROLL BACK impure_reads
     // around it: the message VALUE is discarded on a pass and eval ABORTS on a fail, so a `parent_module` read
     // in it (BOSL2's `no_children`/`req_children` name themselves via `parent_module(1)` in the message) can

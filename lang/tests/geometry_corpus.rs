@@ -425,3 +425,32 @@ fn deep_value_parses_evals_and_formats() {
     let m = mesh(&src);
     assert_eq!(m.vert_count(), 8, "the cube still renders alongside");
 }
+
+/// AB.3 end-to-end: comprehension NESTING and vector/generator ALTERNATION both cost heap now —
+/// 5000-deep `each`-of-vector chains (the exact alternation that overflowed post-AA.4) and
+/// bindingless-`for` nesting evaluate clean. ~75× the old 64-deep cliff.
+#[test]
+fn deep_comprehensions_eval_on_the_machine() {
+    let n = 5000;
+    let each = format!(
+        "v=[{}1{}]; echo(len(v)); cube(1);",
+        "each [".repeat(n),
+        "]".repeat(n)
+    );
+    assert_eq!(mesh(&each).vert_count(), 8);
+    let for_nest = format!(
+        "v=[{}1{}]; echo(len(v)); cube(1);",
+        "for(i=[0:0]) [".repeat(n),
+        "]".repeat(n)
+    );
+    assert_eq!(mesh(&for_nest).vert_count(), 8);
+}
+
+/// AB.2 end-to-end: assert/echo-chained RECURSION (the tail-recursion-tests crasher shape) evals on
+/// the machine — 10k levels of let+assert+echo+ternary recursion return clean.
+#[test]
+fn assert_echo_chained_recursion_evals() {
+    let src = "function f(n) = let(x = n) assert(x >= 0) n == 0 ? 42 : f(n - 1);\n\
+               echo(f = f(10000)); cube(1);";
+    assert_eq!(mesh(src).vert_count(), 8);
+}

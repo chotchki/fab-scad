@@ -6,9 +6,11 @@
 //! assertion held, which means our evaluator matched BOSL2 bit-for-bit. No oracle needed; the asserts ARE
 //! the spec. (Tier 2 of K.1's three; the OpenSCAD suite + `models/` are tiers 1 and 3.)
 //!
-//! ISOLATION + PARALLELISM: a script can overflow the host stack (BOSL2's `fnliterals` builds deeply
-//! recursive partial-application closures — the deferred #141 "Safari cliff"), and a stack overflow is a
-//! `SIGABRT` — UNCATCHABLE, no `catch_unwind` survives it. So an in-process sweep would let one bad test
+//! ISOLATION + PARALLELISM: a script could historically overflow the host stack (#141's "Safari
+//! cliff" — RESOLVED by Phase AB 2026-07-22: the real seams were the Echo/Assert body re-entries +
+//! comprehension nesting, both task-framed now; closures/calls were always framed), and a stack
+//! overflow is a `SIGABRT` — UNCATCHABLE, no `catch_unwind` survives it, so the isolation stays as
+//! the belt for whatever the NEXT cliff turns out to be. So an in-process sweep would let one bad test
 //! abort all 900+. [`run_bosl2_corpus_isolated`] splits the suite into one chunk per CPU and runs each in a
 //! `corpus_worker` subprocess that evaluates its range IN-PROCESS (fast — binary + BOSL2 parse paid once per
 //! chunk, not per test) and streams results back; a worker that dies buckets the crasher as [`Bucket::Crash`]

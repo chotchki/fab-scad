@@ -1150,7 +1150,12 @@ fn corpus_diff_cmd(candidate: &Path, committed: &Path, md: bool) -> Result<()> {
         std::fs::create_dir_all(&stage).context("creating the staging dir")?;
         let link = stage.join("BOSL2");
         let _ = std::fs::remove_file(&link);
+        // Per-platform symlink APIs — the v1.0.1 Windows release build caught the unix-only call
+        // (first Windows compile of this code path; the sweep itself only runs on the ubuntu nightly).
+        #[cfg(unix)]
         std::os::unix::fs::symlink(&candidate, &link).context("staging the candidate")?;
+        #[cfg(windows)]
+        std::os::windows::fs::symlink_dir(&candidate, &link).context("staging the candidate")?;
         (Some(Cleanup(stage.clone())), link)
     };
 

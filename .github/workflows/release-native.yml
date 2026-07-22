@@ -1,6 +1,6 @@
-# Native installers (mac .app+DMG, Windows NSIS) — proven locally (docs/packaging.md), signing
-# wired (W.2.2). Dispatch-only until the first SIGNED run verifies Gatekeeper end-to-end
-# (W.2.2.4 then adds the `v*` tag trigger).
+# Native installers (mac .app+DMG, Windows NSIS) — UN-PARKED (W.2.2). A `v*` tag builds both
+# and attaches them to the tag's GitHub Release; release-web fires on the same tag and adds the
+# wasm bundle — ONE release, three artifacts. Manual dispatch → CI artifacts only, no release.
 #
 # macOS signing is SECRETS-GATED: all six secrets set → Developer-ID signed + notarized + stapled
 # (app AND dmg); any missing → unsigned build, same artifacts, warnings only. The secret ceremony
@@ -9,6 +9,11 @@ name: release-native
 
 on:
   workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
 
 jobs:
   package:
@@ -34,6 +39,15 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      # A `vX.Y.Z` tag must BE Packager.toml's version — a mismatched tag would publish artifacts
+      # whose embedded version contradicts the release they hang off.
+      - name: Tag matches Packager.toml version
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        run: |
+          PKG=$(sed -n 's/^version = "\(.*\)"/\1/p' Packager.toml)
+          TAG="${GITHUB_REF_NAME#v}"
+          [ "$PKG" = "$TAG" ] || { echo "tag/version drift: tag=v$TAG but Packager.toml=$PKG"; exit 1; }
       # The CFBundleVersion pin (packaging/macos/Info.plist) exists for reproducible builds — a
       # stale pin ships the wrong build number, so drift fails the run before the long build.
       - name: CFBundleVersion pin matches Packager.toml
@@ -78,3 +92,18 @@ jobs:
             target/packager/*.dmg
             target/packager/*.exe
           if-no-files-found: error
+      # Tags publish: each matrix job attaches its installer to the tag's release (created by
+      # whichever job lands first; release-web adds the wasm bundle to the same one).
+      - name: Release (tags only)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          prerelease: false
+          make_latest: true
+          files: |
+            target/packager/*.dmg
+            target/packager/*.exe
+          body: |
+            fab-scad native installers — macOS DMG (Developer-ID signed + notarized + stapled) and
+            Windows NSIS (unsigned — winget pins SHA256, docs/packaging.md "signing bill").
+            The matching wasm bundle (fab-gui-*.tar.gz) is attached by release-web.

@@ -36,8 +36,11 @@ EXECUTABLE, not Resources — the fallback bridges that (bevy#15618, closed-as-w
 
 ## CI (`release-native.yml`, signing wired W.2.2)
 
-`workflow_dispatch`-only until the first signed run verifies Gatekeeper end-to-end (then the `v*`
-tag trigger comes back); macos-14 → app+dmg, windows-latest → NSIS. `packaging/winget/` holds the
+A product `vX.Y.Z` tag builds macos-14 → signed app+dmg and windows-latest → NSIS, and attaches
+both installers to the tag's GitHub Release; `release-web.yml` fires on the same tag and adds the
+wasm bundle — ONE release, three artifacts (the site's `web-v*` channel is separate and
+untouched). The tag must equal Packager.toml's version (checked in CI, as is the CFBundleVersion
+pin). Manual dispatch still works → CI artifacts only, no release. `packaging/winget/` holds the
 draft winget-pkgs manifests (placeholders for the release URL + SHA256; unsigned NSIS is
 accepted — only MSIX requires Authenticode).
 

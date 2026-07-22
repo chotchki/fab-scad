@@ -1,6 +1,8 @@
 # The web channel (W.3.7): build the fab-gui wasm bundle and attach it to a GitHub release —
 # the artifact hotchkiss-io's build.rs fetches (contract: docs/web-embed.md).
 # Tag `web-vX.Y.Z` → the Latest release with fab-gui-X.Y.Z.tar.gz. Manual dispatch → CI artifact only.
+# A product `vX.Y.Z` tag (W.2.2.5) ALSO fires this — the wasm bundle joins release-native's
+# dmg+exe on the tag's one release. The site keeps pinning web-v* tags; nothing moves for it.
 # Payload: the ONE fab-gui app (desktop + web from one codebase, W.3) + the fab-geom kernel worker.
 # The fab-web payload + the OpenSCAD side-module are GONE — scad-rs+Manifold render everywhere now.
 name: release-web
@@ -8,7 +10,7 @@ name: release-web
 on:
   workflow_dispatch:
   push:
-    tags: ["web-v*"]
+    tags: ["web-v*", "v*"]
 
 permissions:
   contents: write
@@ -58,6 +60,7 @@ jobs:
           set -euo pipefail
           case "$GITHUB_REF" in
             refs/tags/web-v*) VERSION="${GITHUB_REF_NAME#web-v}" ;;
+            refs/tags/v*)     VERSION="${GITHUB_REF_NAME#v}" ;;
             *) VERSION="dev-${GITHUB_SHA::7}" ;;
           esac
           echo "VERSION=$VERSION" >> "$GITHUB_ENV"
@@ -161,7 +164,7 @@ jobs:
           path: target/fab-gui/out/*.tar.gz
           if-no-files-found: error
       - name: Release (tags only)
-        if: startsWith(github.ref, 'refs/tags/web-v')
+        if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
           # Full releases, not prereleases: the web bundle is ACTIVELY DOGFOODED (pre-1.0, but real —

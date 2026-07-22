@@ -211,24 +211,6 @@ added 2026-07-07.
 - [x] Y.7 - Y.7 - Fuzz the geometry-lowering seam (new target)
 - [x] Y.8 - Y.8 - Audit + wire the kernel fuzz coverage
 - [ ] Y.9 - Y.9 - Extend kernel fuzz coverage (csg_tree random-op + new op targets)
-## Phase Z - Multi-file SCAD projects on the web (the .scadproj zip container)
-- [x] Z.1 - Z.1 - The .scadproj container: stored-zip schema (mimetype first-entry + fab-project.json manifest + entry-point resolution + path sanitize); reader/writer in fab-scad; native fab pack / fab open
-- [x] Z.2 - Z.2 - Project VFS into the render pack: merge project files (relative-path keyed) into the include/asset pack; byte-clean the web producer so binary assets survive (subsumes the W.3.24 transport residual)
-- [ ] Z.3 - Z.3 - fab-gui web open/save: open a .scadproj -> in-memory project in the file list (FOLDER treatment, like native FileList), switch+edit any file; Save/publish re-zip; open-file UX says it's a zip
-  - [x] Z.3.1 - Z.3.1 - Project document model: in-memory Project resource (files{relpath->buf} + entry + active + origin); EditorBuf becomes the active-file view; assemble->(entry_bytes, pack) render seam. A bare .scad = a 1-file project.
-  - [x] Z.3.2 - Z.3.2 - Open funnels to a Project: single .scad -> 1-file project, .scadproj -> N-file (read_scadproj); wire every entry point (native launch/rfd, web ?model= fetch, paste, drag-drop)
-  - [x] Z.3.3 - Z.3.3 - Project tab (first, always present): file list click-to-switch (folder treatment), entry marker + set-entry, add/rename/delete file, New; open-file UX says a .scadproj is a zip
-  - [x] Z.3.4 - Z.3.4 - Render the ENTRY from project state (edit any file -> re-render entry): native (all project files reachable) + web (lib_fetch merges project files + byte-clean binary assets, closing the W.3.24 transport residual)
-  - [x] Z.3.5 - Z.3.5 - Save/publish project-aware: 1 file -> .scad (today's path), >=2 -> .scadproj (write_scadproj); native fs write + web download + web save-back PUT variants + publish upload
-  - [x] Z.3.6 - Z.3.6 - native render-source unification (one render-root per project)
-  - [x] Z.3.7 - Z.3.7 - loose .scad grows into a project: clear promotion + Save-As .scadproj
-  - [x] Z.3.8 - Z.3.8 - web .scadproj save-back (re-zip) — lift the Z.3.5 destructive-save guard
-- [x] Z.3.9 - Z.3.9 - web model NAME from the response, not the URL (Z.5 dogfood): `?model=` points at a media ITEM, so its URL leaf is an opaque `media_ref` hash — read `Content-Disposition` instead (header -> basename -> model.scad), strip publish's ` — model` title suffix, and name uploads/downloads off the DOCUMENT (`ProjectDoc::doc_stem`) not the active file
-- [x] Z.3.10 - Z.3.10 - web project file MANAGEMENT (rename/new/delete/set-entry/add): `project_files_action` was native-only, so a bad entry name inside a loaded `.scadproj` couldn't be fixed in the browser at all. Rules extracted to `file_ops` (cfg-free, unit-tested — the wasm handler is a shim, since the repo has no wasm test harness); browser `<input type=file>` replaces rfd for Add; `Platform::manages_files()` splits document editing from the fs-bound picker
-- [x] Z.3.12 - Z.3.12 - rename the hotchkiss.io media ITEM from the editor: `PUT /media/<ref>` JSON `{title}` (the site's shipped DQ.4 metadata control, admin-gated by the same session cookie as the save-back). Re-applies publish's ` — model` suffix so the published trio stays grouped; adopts the new name locally so the header/download/publish stem agree without a reload
-- [ ] Z.3.11 - Z.3.11 - web plate export filename: `print.rs` hardcodes `plates.3mf` on wasm while native uses the source stem — every web export lands on the same name. One-liner off `doc_stem()`
-- [x] Z.4 - Z.4 - hotchkiss-io kind: MediaKind::OpenscadProject + probe extension + render_embed_html editor arm + ?format=project token + ext_for_mime (their repo, no migration)
-- [ ] Z.5 - Z.5 - Publish round-trip + validate: publish a project zip, re-open from the gallery; e2e; native+wasm+fmt/clippy/tests green; dogfood shower_holder end-to-end on the web
 
 ## Backlog (not yet phased)
 

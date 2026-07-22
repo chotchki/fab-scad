@@ -497,6 +497,9 @@ pub(crate) fn export_plates_action(
     scene: Res<SceneCfg>,
     #[cfg(not(target_arch = "wasm32"))] windows: Query<&Window>,
     #[cfg(not(target_arch = "wasm32"))] mut export_job: ResMut<ExportJob>,
+    // Z.3.11: the web download's name. Native reads `scene.source`, which the browser doesn't have —
+    // the DOCUMENT is the only name there is.
+    #[cfg(target_arch = "wasm32")] project: Res<crate::project::ProjectDoc>,
     mut status: ResMut<Status>,
 ) {
     if !ev.read().any(|c| *c == PanelCmd::Export) {
@@ -599,12 +602,15 @@ pub(crate) fn export_plates_action(
     }
     #[cfg(target_arch = "wasm32")]
     {
+        // Z.3.11: name it after the DOCUMENT, matching native's `<source stem>-plates.3mf`. It used to
+        // be the literal `plates.3mf` for every model, so exporting two projects in a session left you
+        // with `plates.3mf` and `plates (1).3mf` in Downloads with nothing to tell them apart.
+        let stem = project.doc_stem().unwrap_or_else(|| "model".into());
+        let filename = format!("{stem}-plates.3mf");
         match fab::export_plates_bytes(&refs, &ups, bed, plate, PLATE_GAP, preset.as_ref()) {
-            Ok((sum, bytes))
-                if crate::web_host::download_bytes("plates.3mf", "model/3mf", &bytes) =>
-            {
+            Ok((sum, bytes)) if crate::web_host::download_bytes(&filename, "model/3mf", &bytes) => {
                 status.0 = format!(
-                    "exported {} piece(s) on {} plate(s), {}% full -> plates.3mf downloaded",
+                    "exported {} piece(s) on {} plate(s), {}% full -> {filename} downloaded",
                     sum.pieces,
                     sum.plates,
                     (sum.fill * 100.0).round() as i32,

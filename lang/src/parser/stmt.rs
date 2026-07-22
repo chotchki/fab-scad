@@ -56,7 +56,9 @@ fn statement(i: &mut Tokens<'_, '_>, depth: usize, allow_defs: bool) -> ModalRes
         }
         Some(TokenKind::Module) => module_def(i, depth),
         Some(TokenKind::Function) => function_def(i, depth),
-        Some(TokenKind::If) => ifelse_statement(i, depth),
+        Some(TokenKind::If) => {
+            ifelse_statement(i, depth, i.current_token_start(), Modifiers::default())
+        }
         Some(TokenKind::Use(path)) => {
             let kind = StmtKind::Use(path.to_string());
             bump(i)?;
@@ -182,6 +184,12 @@ fn module_instantiation(i: &mut Tokens<'_, '_>, depth: usize) -> ModalResult<Stm
         }
         bump(i)?;
     }
+    // `if` IS a module_instantiation upstream (ifelse_statement, parser.y:271) — so the `! # % *`
+    // prefixes apply to it too. The sustainment census caught this (AA.1): `*if (true) …` parsed
+    // nowhere, while every other instantiation took modifiers fine.
+    if peek_kind(i) == Some(TokenKind::If) {
+        return ifelse_statement(i, depth, start, modifiers);
+    }
     let name = module_id(i)?;
     expect(i, TokenKind::LParen, "'(' after a module name")?;
     let args = arg_list(i, depth + 1)?;
@@ -222,7 +230,12 @@ fn child_statement(i: &mut Tokens<'_, '_>, depth: usize) -> ModalResult<Vec<Stmt
             Ok(Vec::new())
         }
         Some(TokenKind::LBrace) => block(i, depth, false), // a child block is `child_statements`
-        Some(TokenKind::If) => Ok(vec![ifelse_statement(i, depth + 1)?]),
+        Some(TokenKind::If) => Ok(vec![ifelse_statement(
+            i,
+            depth + 1,
+            i.current_token_start(),
+            Modifiers::default(),
+        )?]),
         _ => {
             let child = module_instantiation(i, depth + 1)?;
             Ok(vec![child])
@@ -233,11 +246,18 @@ fn child_statement(i: &mut Tokens<'_, '_>, depth: usize) -> ModalResult<Vec<Stmt
 /// `if (cond) then [else els]` (parser.y:271-298). The `else` is bound greedily to the NEAREST `if`
 /// — bison resolves the dangling-else the same way (`%prec NO_ELSE` shifts `else`). `else if` chains
 /// recurse (each `else` re-enters via [`child_statement`]), so the depth guard is load-bearing.
-fn ifelse_statement(i: &mut Tokens<'_, '_>, depth: usize) -> ModalResult<Stmt> {
+/// `start`/`modifiers` come from the caller: [`module_instantiation`] routes `*if`/`#if`/… here with
+/// the flags it already consumed (and the span start of the first modifier); the bare-`if` arms pass
+/// the `if` token's start and no flags.
+fn ifelse_statement(
+    i: &mut Tokens<'_, '_>,
+    depth: usize,
+    start: usize,
+    modifiers: Modifiers,
+) -> ModalResult<Stmt> {
     if depth >= MAX_DEPTH {
         return bail(i, "if/else nested too deeply");
     }
-    let start = i.current_token_start();
     bump(i)?; // 'if'
     expect(i, TokenKind::LParen, "'(' after `if`")?;
     let cond = expr(i, depth + 1)?;
@@ -250,7 +270,12 @@ fn ifelse_statement(i: &mut Tokens<'_, '_>, depth: usize) -> ModalResult<Stmt> {
         Vec::new()
     };
     Ok(Stmt {
-        kind: StmtKind::If { cond, then, els },
+        kind: StmtKind::If {
+            modifiers,
+            cond,
+            then,
+            els,
+        },
         span: start..i.previous_token_end(),
     })
 }

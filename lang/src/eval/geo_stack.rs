@@ -439,7 +439,24 @@ fn dispatch_stmt<'a>(
             Ok(())
         }
         // A6 — `if (cond) A else B` contributes the TAKEN branch's geometry (the untaken branch is inert).
-        StmtKind::If { cond, then, els } => {
+        StmtKind::If {
+            modifiers,
+            cond,
+            then,
+            els,
+        } => {
+            // `if` is grammatically an instantiation, so its modifiers mirror `dispatch_module`
+            // EXACTLY (AA.1): `!` captures the subtree as the root override; `*`/`%` drop the
+            // geometry AND the side effects (the condition never evaluates, like a disabled call's
+            // args); `#` is preview-only, a render no-op.
+            if modifiers.root {
+                work.push(GTask::CaptureRoot {
+                    mark: results.len(),
+                });
+            }
+            if modifiers.disable || modifiers.background {
+                return Ok(());
+            }
             let branch = if eval_with_ctx(cond, &scope, ctx)?.is_truthy() {
                 then
             } else {

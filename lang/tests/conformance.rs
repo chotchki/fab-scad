@@ -41,6 +41,14 @@ fn every_production_parses() {
     ok("single_module_instantiation", "translate([1,0,0]) cube(1);");
     ok("ifelse_statement:if", "if (x) a();");
     ok("ifelse_statement:if-else", "if (x) a(); else b();");
+    // `if` IS a module_instantiation (parser.y:271), so the `! # % *` prefixes apply to it — the
+    // AA.1 sustainment-census gap (openscad's disable/highlight/background-modifier corpus files).
+    ok("ifelse_statement:'*'", "*if (x) a();");
+    ok("ifelse_statement:'!'", "!if (x) a();");
+    ok("ifelse_statement:'#'", "#if (x) a(); else b();");
+    ok("ifelse_statement:'%'", "%if (x) a(); else b();");
+    ok("ifelse_statement:stacked-mods", "%*if (x) a();");
+    ok("ifelse_statement:spaced-mod", "* if (x) a();");
     ok("child_statement:';'", "translate([0,0,0]);");
     ok("child_statement:block", "translate([0,0,0]) { a(); b(); }");
     for id in ["for", "let", "assert", "echo", "each"] {

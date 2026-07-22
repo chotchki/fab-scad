@@ -74,10 +74,13 @@ pub enum StmtKind {
     /// node carrying the raw path and splice in I.2's loader (parse stays zero-IO).
     Include(String),
     /// `if (cond) then [else els]` (parser.y:271-298). Grammatically an `ifelse_statement`, itself a
-    /// `module_instantiation` — so `if` is legal wherever a module call is (top level OR a child).
+    /// `module_instantiation` — so `if` is legal wherever a module call is (top level OR a child),
+    /// AND the `! # % *` prefixes apply to it (AA.1 — the sustainment census caught `*if` rejected).
     /// `then`/`els` are child-statement lists (0/1/many, like module children); an empty `els` means
     /// no `else`. `else if` chains fall out naturally: `els` is `[If { … }]`.
     If {
+        /// The `! # % *` prefixes (same semantics as on a module call; they stack).
+        modifiers: Modifiers,
         /// The condition expression.
         cond: Expr,
         /// The then-branch children.

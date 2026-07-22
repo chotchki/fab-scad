@@ -203,14 +203,24 @@ impl Gen {
                 format!("for ({i} = [0:{n}]) {body}")
             }
             _ => {
-                // if(cond) child [else child]
+                // if(cond) child [else child] — sometimes with an instantiation modifier prefix:
+                // `if` takes `! # % *` like any module call (the AA.1 census gap), so the fuzzer
+                // keeps that grammar corner exercised. `!` stays rare — root-capture rewrites the
+                // whole render's output, which starves every other statement of coverage.
+                let m = if self.chance(0.2) {
+                    self.pick_str(&["*", "#", "%", "*#", "%*"])
+                } else if self.chance(0.02) {
+                    "!"
+                } else {
+                    ""
+                };
                 let c = self.expr();
                 let then = self.geometry(d + 1);
                 if self.chance(0.5) {
                     let els = self.geometry(d + 1);
-                    format!("if ({c}) {then} else {els}")
+                    format!("{m}if ({c}) {then} else {els}")
                 } else {
-                    format!("if ({c}) {then}")
+                    format!("{m}if ({c}) {then}")
                 }
             }
         }

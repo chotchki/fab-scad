@@ -99,7 +99,13 @@ fn write_stmt(out: &mut String, s: &Stmt) {
             write_expr(out, body);
             out.push(';');
         }
-        StmtKind::If { cond, then, els } => {
+        StmtKind::If {
+            modifiers,
+            cond,
+            then,
+            els,
+        } => {
+            write_modifiers(out, *modifiers);
             out.push_str("if (");
             write_expr(out, cond);
             out.push_str(") ");
@@ -133,21 +139,25 @@ fn write_block(out: &mut String, stmts: &[Stmt]) {
     out.push('}');
 }
 
-fn write_module_inst(out: &mut String, mi: &ModuleInstantiation) {
-    // Modifiers print in a fixed order; they're order-independent FLAGS, so any input order
-    // reconstructs the same `Modifiers`.
-    if mi.modifiers.root {
+/// The `! # % *` prefixes in a fixed order; they're order-independent FLAGS, so any input order
+/// reconstructs the same `Modifiers`. Shared by module instantiations and `if` (AA.1 — same grammar).
+fn write_modifiers(out: &mut String, m: super::ast::Modifiers) {
+    if m.root {
         out.push('!');
     }
-    if mi.modifiers.highlight {
+    if m.highlight {
         out.push('#');
     }
-    if mi.modifiers.background {
+    if m.background {
         out.push('%');
     }
-    if mi.modifiers.disable {
+    if m.disable {
         out.push('*');
     }
+}
+
+fn write_module_inst(out: &mut String, mi: &ModuleInstantiation) {
+    write_modifiers(out, mi.modifiers);
     out.push_str(&mi.name);
     out.push('(');
     write_args(out, &mi.args);

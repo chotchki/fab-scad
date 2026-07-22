@@ -335,6 +335,49 @@ fn hash_highlight_is_a_render_no_op() {
     );
 }
 
+// Modifiers on `if` (AA.1): `if` is grammatically an instantiation, so each modifier behaves exactly
+// as on a module call. All four ORACLE-VERIFIED 2026-07-22 against OpenSCAD (same programs, bbox +
+// vert equality) — including `!if` dropping the ancestor transform, mirroring bang_root below.
+
+#[test]
+fn star_disable_on_if_drops_the_subtree() {
+    let m = mesh("cube(10); *if (true) sphere(20, $fn = 8);");
+    assert_eq!(m.vert_count(), mesh("cube(10);").vert_count());
+    assert_eq!(bbox(&m), ([0.0; 3], [10.0; 3]));
+}
+
+#[test]
+fn percent_background_on_if_excluded_from_output() {
+    assert_eq!(
+        bbox(&mesh("cube(10); %if (true) sphere(20, $fn = 8);")),
+        ([0.0; 3], [10.0; 3])
+    );
+}
+
+#[test]
+fn hash_highlight_on_if_is_a_render_no_op() {
+    assert_eq!(
+        mesh("#if (true) cube(10);").vert_count(),
+        mesh("cube(10);").vert_count()
+    );
+}
+
+#[test]
+fn bang_root_on_if_renders_only_its_subtree() {
+    // The ancestor `translate` AND the sibling sphere are discarded — the cube lands at the origin.
+    let m = mesh("translate([50, 0, 0]) !if (true) cube(10); sphere(20, $fn = 8);");
+    assert_eq!(m.vert_count(), 8);
+    assert_eq!(bbox(&m), ([0.0; 3], [10.0; 3]));
+}
+
+#[test]
+fn disabled_if_condition_never_evaluates() {
+    // `*` drops side effects too: a condition that would ERROR (unknown function) is never reached —
+    // mirrors a disabled call's unevaluated args.
+    let m = mesh("cube(10); *if (no_such_function()) sphere(20, $fn = 8);");
+    assert_eq!(bbox(&m), ([0.0; 3], [10.0; 3]));
+}
+
 #[test]
 fn bang_root_renders_only_its_subtree() {
     // `!` renders ONLY its subtree — the ancestor `translate` AND the sibling `sphere` are discarded, so the

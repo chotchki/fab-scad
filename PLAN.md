@@ -117,6 +117,24 @@ added 2026-07-07.
 - [x] AA.6 - Exit gate MET (census re-sweep 2026-07-22): the parse bucket is EXACTLY {issue1890-comment, issue1890-string} — the verdict-parity set, upstream rejects both. 527/576 eval-clean (was 523; +5 modifier files +nbsp +issue4172-out-of-parse, −2 into load by design). Every fix pinned by tests; the next sustain nightly carries the new baseline. Residual buckets: 10 assertion, 5 unimplemented (2D minkowski = J.3), 21 load (fonts/MCAD/deliberately-missing), 10 timeout (recursion-limit probes + issue4172 economics), 1 crash (#141's known function-recursion cliff — pre-existing class, backlogged)
 - [x] AA.7 - Release v1.0.1 SHIPPED (see the tag): bump 1.0.0→1.0.1 across the four carriers + lock, tagged after AA.6's gates — the W.2.2.5 machinery assembled dmg+exe+wasm on one release
 
+## Phase AB - Eval re-entry burn-down: the host-recursive seams AA.4 exposed
+<!-- Evidence (2026-07-22): tail-recursion-tests.scad's census crash BISECTED to ftail_mixed(10000) —
+     the ExprKind::Echo/Assert eval arms host-recurse into their BODIES (eval_with_global; the code
+     comments call it "bounded... echo is rare + cold"), so a recursive function whose body is an
+     assert/echo chain re-enters the evaluator per recursion level. 50k-deep plain/let/str recursion
+     evals CLEAN (Task::Apply/LetStep/CallValue are already heap-framed — the M machine holds); the
+     1.5GB peak RSS on f2a(50000) is real-but-survivable retained-scope memory (no TCO), not the
+     crash. SECOND seam: eval_comprehension's "comprehension nesting is parse-bounded" invariant was
+     BROKEN by the AA.4 spine (deep comprehensions now parse). The #141 "function-call host
+     recursion" backlog framing is likely WRONG — calls are framed; fnliterals presumably crashes
+     through these same body-re-entry seams (AB.1 confirms, then the backlog entry dies). -->
+- [ ] AB.1 - Recon: audit ALL ~25 `eval_with_global`/`eval_with_ctx` re-entry sites; classify each task-ify / bounded-with-rationale / dead; re-test the #141 fnliterals repro to confirm it routes through the same seams (calls themselves are framed — proven by 50k-deep clean evals)
+- [ ] AB.2 - Echo/Assert task-ification (the proven crasher): `Task::EchoEmit`/`Task::AssertCheck` pop pre-evaluated arg values (args currently ALSO re-enter via emit_echo/check_assert), then schedule the body as a task; the helpers restructured to consume values + arg-name metadata (echo's `n = 5` form, assert's span-bearing error); tail-recursion-tests.scad census crash → pass
+- [ ] AB.3 - Comprehension eval de-recursion: `eval_comprehension` folded onto the task machine — the spine made deep `for`/`each`/`if`/`let` elements PARSEABLE, so "parse-bounded" no longer bounds the eval's per-nesting host recursion; deep-comprehension eval pin at ≥10× the old cliff
+- [ ] AB.4 - The rest of AB.1's audit: every remaining re-entry site task-ified or explicitly documented as bounded (with the bound named); AST walkers (is_comprehension + kin) checked at spine depths
+- [ ] AB.5 - Gates: tail-recursion-tests passes; the fnliterals #141 repro re-run (the corpus.rs deferral note updated or deleted); full census re-sweep + BOSL2 901 ratchet + deep-eval pins in geometry_corpus; the sweep's "worker aborted (stack overflow?)" label gains an OOM-vs-overflow distinction if cheap
+- [ ] AB.6 - Release v1.0.2 (timing = chotchki's call): parser spine (v1.0.1) + eval de-recursion ship as the recursion-hardening pair
+
 ## Backlog (not yet phased)
 
 - **#141 function-call host recursion (the Safari cliff) — now census-visible.** User-FUNCTION recursion still costs host stack per call (corpus.rs documents the deferral); AA.4's iterative walkers made per-call work cheaper, so tail-recursion-tests.scad now REACHES the cliff inside the sweep budget (timeout→crash). The fix is the M-doctrine applied to function calls (trampolined call frames) — a real phase, not a patch; the corpus worker's crash isolation contains it meanwhile.

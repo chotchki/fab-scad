@@ -10,10 +10,10 @@ parity against the CANDIDATE version, and reports — a human merges pins, never
 - **Report-only.** The nightly maintains ONE rolling GitHub issue. No auto-PR, no auto-merge —
   pin bumps happen by hand with the report in hand (the same pin-churn wariness that deferred the
   BOSL2 transpiler).
-- **OpenSCAD: track `main`, watch only the corpus.** No stable release in 5 years, so version
-  polling is meaningless. Most main-branch churn is also irrelevant to us — what matters is their
-  `testdata/` + `examples/` trees (new/changed .scad = new parity obligations). We diff those
-  paths, not the repo.
+- **OpenSCAD: track `master`, watch only the corpus.** No stable release in 5 years, so version
+  polling is meaningless. Most branch churn is also irrelevant to us — what matters is their
+  corpus trees: **`tests/data/scad/` + `examples/`** (the design draft guessed `testdata/`;
+  probing the real repo corrected it). We diff those paths' tree SHAs, not the repo.
 - **BOSL2: track tags.** BOSL2 tags every revision (v2.0.746 = rev 746), so "new tag" fires
   often — fine under report-only: an evaluation is minutes and the issue just updates in place.
 - **The bar is render-clean + values.** Every harvested corpus file must parse, eval, and render
@@ -48,17 +48,23 @@ mangling the block just triggers one redundant re-evaluation.
 
 ## What an evaluation runs
 
-1. **Intrinsic matrix** (SU.2): fingerprint audit against the candidate BOSL2 checkout →
-   per-intrinsic status JSON + table. The same tool runs in normal CI against the COMMITTED pin,
-   where anything but 100% matched fails the build (guards accidental libs/ edits + registry
-   drift). This is the K.4 "intrinsic matrix" artifact.
-2. **BOSL2 corpus** (SU.3): harvest the CANDIDATE checkout's `tests/` (assertion tests — the
-   values bar) + `examples/` (render-clean + non-empty geometry). A reasoned skip-list (2D-only,
-   font-dependent, etc.) is logged in the report, never silent. The harness runs committed AND
-   candidate pins in the same job — a REGRESSION is fails-on-candidate-only; upstream files that
-   fail on both are pre-existing gaps, listed separately, not noise.
-3. **OpenSCAD corpus** (SU.4): only the NEW/CHANGED files under `testdata/` + `examples/` since
-   the watermark, same bar. Churn outside those paths short-circuits to a no-op.
+1. **Intrinsic matrix** (SU.2): `fab intrinsics --bosl2 <root> [--json|--md]` — fingerprint audit
+   against the candidate BOSL2 checkout, per-intrinsic `matched|changed|missing`, non-matched
+   exits 1. The same audit gates normal CI against the COMMITTED pin two ways:
+   `tests/intrinsic_matrix.rs` (rides every `cargo test`) and a `$GITHUB_STEP_SUMMARY` step.
+   This is the K.4 "intrinsic matrix" artifact.
+2. **BOSL2 corpus** (SU.3): `fab corpus-diff --candidate <root> [--md]` — the crash-isolated K.1
+   sweep generalized over a `Lane`: `tests/` `.scadtest` assertions (the values bar) +
+   `examples/*.scad` (render-clean: eval no-error AND non-null geometry; a missing-library
+   warning buckets `load` so a vacuous empty-program pass is impossible). Committed AND candidate
+   sweep in one job; **no static skip-list** — the committed run IS the baseline, so pre-existing
+   failures (e.g. worldmap's heightfield) land in `still_failing` and never gate. What exits 1:
+   REGRESSIONS (pass→fail) and NEW-FAILING (new upstream case we fail).
+3. **OpenSCAD corpus** (SU.4): `fab scad-sweep --manifest <file> [--md]` over only the
+   NEW/CHANGED corpus files since the watermark (compare API → sparse checkout). Eval-clean is
+   the whole bar — their corpus is full of 2D/echo-only files and carries no expectations we can
+   hold ourselves to, so the sweep is REPORT-ONLY (exit 0); the report is the signal. Churn
+   outside the corpus paths short-circuits to a no-op.
 
 ## Report shape (the rolling issue body)
 

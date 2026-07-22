@@ -83,6 +83,10 @@ distribution needs NO App ID registered in the portal (that's App Store / provis
    mount + copy the .app with quarantine intact, `spctl -a -t exec -vv` says
    `source=Notarized Developer ID`, first open shows no warning.
 
+DONE + PROVEN 2026-07-22 by the v1.0.0 release: fresh quarantined download of the released
+DMG → `spctl` accepted BOTH the dmg (`-t open --context context:primary-signature`) and the
+.app copied out of it (`-t exec`) as `Notarized Developer ID`, staples valid on each.
+
 Once the cert is in the login keychain, local `cargo packager` builds can sign too (add the
 identity via `-c` or a temp append) — but ad-hoc `build-app.sh` stays the dogfood default.
 

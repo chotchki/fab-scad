@@ -52,9 +52,10 @@ pub use eval::jit_abi::{jit_math, jit_math_id};
 pub use eval::rng::RandStream;
 pub use eval::{
     Config, Contour, Evaluation, ExtrudeKind, FileTable, FnOracle, Geo, GeoNode, Imported,
-    JitConst, JitDef, JitOutcome, Join2D, Message, NumericJit, NumericJitFactory, RANGE_MAX,
-    RangeIter, Resolution, Scope, Shape2D, SourceNeed, Value, bench_intrinsic, eval_expr,
-    eval_program, evaluate_geometry_metered, fragments, interpret_fn, range_iter, range_len,
+    IntrinsicMatrixRow, IntrinsicMatrixStatus, JitConst, JitDef, JitOutcome, Join2D, Message,
+    NumericJit, NumericJitFactory, RANGE_MAX, RangeIter, Resolution, Scope, Shape2D, SourceNeed,
+    Value, bench_intrinsic, eval_expr, eval_program, evaluate_geometry_metered, fragments,
+    interpret_fn, range_iter, range_len,
 };
 pub use geom::{Affine, Affine2, Dims, Rgba, Tri, Vec2, Vec3, VecExt};
 pub use lexer::{Lexed, Token, TokenKind, decode_str, lex, num_value};
@@ -284,6 +285,23 @@ where
         mesh_reader,
     )?
     .0)
+}
+
+/// SU.2 (sustainment): audit the intrinsic registry against the library `source` loads — per
+/// registered intrinsic (and dep PIN), does the library's definition still fingerprint to the verified
+/// reference? `Changed`/`Missing` rows are the drift signal: the intrinsic silently stops dispatching
+/// on that library (interpreted fallback — correct, just slow). Loads via the SAME loader as
+/// evaluation (include order, last-wins redefinitions), but nothing executes — this is a static audit.
+///
+/// # Errors
+/// [`Error::Parse`] for a malformed root `source`; [`Error::Load`] when any `use`/`include` in the
+/// closure is missing or unparseable — a tolerant load would audit the WRONG tree, so it's strict.
+pub fn intrinsic_matrix(
+    source: &str,
+    base_dir: &Path,
+    library_paths: &[PathBuf],
+) -> Result<Vec<IntrinsicMatrixRow>> {
+    eval::io::drive_intrinsic_matrix(source, base_dir, library_paths)
 }
 
 /// Like [`resolve_geometry_with_base`], but resolves `use`/`include` from an IN-MEMORY source MAP

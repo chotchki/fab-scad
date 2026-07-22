@@ -1902,6 +1902,31 @@ fn pin_table() -> &'static [(&'static str, u64)] {
     })
 }
 
+/// SU.2 (sustainment): every audited `(name, reference-fingerprint, is_pin)` — registry entries first,
+/// then the [`PINS`]. The parity matrix walks these against whatever library a program actually loaded;
+/// the fingerprints are the SAME cached ones dispatch uses, so the audit can never disagree with the
+/// wire gate about what "matched" means. The `_fab_` namespace (the O.1 proof-of-concept trio) is
+/// fab-authored — no upstream defines it, so upstream parity doesn't apply and it's excluded.
+pub(super) fn matrix_targets() -> impl Iterator<Item = (&'static str, u64, bool)> {
+    table()
+        .iter()
+        .filter(|(_, e)| !e.name.starts_with("_fab_"))
+        .map(|(fp, e)| (e.name, *fp, false))
+        .chain(pin_table().iter().map(|&(n, fp)| (n, fp, true)))
+}
+
+/// Test-only: every MATRIX-AUDITED reference source (entries + pins, `_fab_` POC excluded to mirror
+/// [`matrix_targets`]) — the matrix tests assemble a synthetic library at exactly the pinned revision.
+#[cfg(test)]
+pub(super) fn all_reference_sources() -> Vec<(&'static str, &'static str)> {
+    REGISTRY
+        .iter()
+        .filter(|e| !e.name.starts_with("_fab_"))
+        .map(|e| (e.name, e.reference))
+        .chain(PINS.iter().copied())
+        .collect()
+}
+
 /// The reference fingerprint a DEP name must match to satisfy an entry's dep pin: the dep's own registry
 /// entry if it has one, else its [`PINS`] row. `None` = the dep isn't anchored anywhere — a registry
 /// authoring bug the depending entry then never wires over.

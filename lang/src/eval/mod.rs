@@ -138,6 +138,95 @@ pub enum Resolution {
     },
 }
 
+/// SU.2 (sustainment): how one audited intrinsic (or dep PIN) relates to the library a program loaded.
+/// The matrix is the drift detector for a BOSL2 bump: `Changed`/`Missing` mean the intrinsic silently
+/// stops dispatching there — correct (the interpreter runs upstream's real body) but slow.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IntrinsicMatrixStatus {
+    /// The library defines this name and it fingerprints to the registered reference — dispatch fires.
+    Matched,
+    /// Defined, but the body/params drifted from the reference — the intrinsic no longer dispatches.
+    Changed,
+    /// The library defines no function of this name at all (renamed or removed upstream).
+    Missing,
+}
+
+/// SU.2: one row of the intrinsic parity matrix. `pin` rows are reference-only dep anchors (no native
+/// impl of their own, but a `Changed`/`Missing` pin blocks every entry that dep-pins it).
+#[derive(Debug, Clone)]
+pub struct IntrinsicMatrixRow {
+    /// The audited function name.
+    pub name: String,
+    /// Reference-only dep anchor (true) vs a real registry entry (false).
+    pub pin: bool,
+    /// The verdict for this name against the loaded library.
+    pub status: IntrinsicMatrixStatus,
+    /// What the library's definition fingerprints to (`None` when [`IntrinsicMatrixStatus::Missing`]).
+    pub defined_fp: Option<u64>,
+    /// The fingerprint the intrinsic was verified against — the one dispatch demands.
+    pub reference_fp: u64,
+}
+
+/// [`resolve_intrinsic_matrix`]'s outcome — the matrix, or the sources still needed to load the library.
+#[derive(Debug)]
+enum MatrixResolution {
+    /// The `use`/`include` graph closed; here's the audit.
+    Complete(Vec<IntrinsicMatrixRow>),
+    /// Still-missing sources, exactly as [`Resolution::Incomplete`].
+    Incomplete {
+        /// The sources this pass asked for and couldn't get.
+        needs: Vec<SourceNeed>,
+    },
+}
+
+/// SU.2: audit the intrinsic registry against the library `source` loads — the STATIC half of
+/// [`resolve_source`] (close the `use`/`include` graph, hoist the function map) with the matrix walk in
+/// place of evaluation. Nothing executes, so `File` needs can't surface and no geometry exists; the map
+/// audited here is byte-for-byte the one [`build_intrinsics`] would consume, include order, last-wins
+/// redefinitions and all.
+fn resolve_intrinsic_matrix(
+    source: &str,
+    base_dir: &std::path::Path,
+    scad_sources: &loader::SourceMap,
+) -> crate::Result<MatrixResolution> {
+    let loaded = match loader::resolve_graph(source, base_dir, None, scad_sources)? {
+        loader::GraphOutcome::Complete(loaded) => loaded,
+        loader::GraphOutcome::Incomplete(scad_needs) => {
+            return Ok(MatrixResolution::Incomplete {
+                needs: scad_needs
+                    .into_iter()
+                    .map(|n| SourceNeed::Scad {
+                        from_dir: n.from_dir,
+                        raw: n.raw,
+                    })
+                    .collect(),
+            });
+        }
+    };
+    let islands = loader::islands(&loaded);
+    let functions = tagged_functions(&islands);
+    let rows = intrinsics::matrix_targets()
+        .map(|(name, reference_fp, pin)| {
+            let defined_fp = functions
+                .get(name)
+                .map(|&((params, body), _home)| intrinsics::fingerprint(params, body));
+            let status = match defined_fp {
+                Some(fp) if fp == reference_fp => IntrinsicMatrixStatus::Matched,
+                Some(_) => IntrinsicMatrixStatus::Changed,
+                None => IntrinsicMatrixStatus::Missing,
+            };
+            IntrinsicMatrixRow {
+                name: name.to_string(),
+                pin,
+                status,
+                defined_fp,
+                reference_fp,
+            }
+        })
+        .collect();
+    Ok(MatrixResolution::Complete(rows))
+}
+
 /// A desktop-only numeric JIT hook (P.1.2). The interpreter offers a user-function call to this BEFORE
 /// interpreting the body, but ONLY when the call is all-positional and arity-exact (a named arg sets
 /// `jit=None` at dispatch). The hook itself decides whether the ARGUMENTS are scalarizable — a number or a
@@ -3282,6 +3371,90 @@ mod tests {
         );
         // Override: the guard DECLINES, the interpreter answers per 1e-6 → 5e-7 is near-zero now.
         assert_eq!(run(&format!("_EPSILON = 1e-6;\n{poc}")), "ECHO: true, true");
+    }
+
+    /// SU.2: a synthetic library built from EVERY registered reference source (entries + pins) audits as
+    /// 100% Matched — the matrix agrees with the dispatch gate on what "the pinned revision" means.
+    #[test]
+    fn intrinsic_matrix_all_matched_on_reference_library() {
+        let lib = super::intrinsics::all_reference_sources().iter().fold(
+            String::new(),
+            |mut acc, &(_, src)| {
+                acc.push_str(src);
+                acc.push('\n');
+                acc
+            },
+        );
+        let rows = super::io::drive_intrinsic_matrix(&lib, std::path::Path::new("."), &[])
+            .expect("audits");
+        assert!(!rows.is_empty(), "registry can't be empty");
+        for row in &rows {
+            assert_eq!(
+                row.status,
+                super::IntrinsicMatrixStatus::Matched,
+                "{} (pin={}) should match its own reference: {row:?}",
+                row.name,
+                row.pin
+            );
+        }
+    }
+
+    /// SU.2: drift shapes. A LAST-WINS redefinition with a different body flags `Changed` (the upstream-
+    /// revised-a-function case); a reference absent from the library flags `Missing` (renamed/removed).
+    #[test]
+    fn intrinsic_matrix_flags_changed_and_missing() {
+        use std::fmt::Write as _;
+
+        let refs = super::intrinsics::all_reference_sources();
+        let (dropped, _) = refs[0];
+        let (revised, revised_src) = refs[1];
+        let mut lib = refs
+            .iter()
+            .skip(1) // refs[0] never defined → Missing
+            .fold(String::new(), |mut acc, &(_, src)| {
+                acc.push_str(src);
+                acc.push('\n');
+                acc
+            });
+        // Same name, structurally different body, defined LAST → last-wins → Changed.
+        let _ = writeln!(lib, "function {revised}() = \"sustainment-drift\";");
+        let rows = super::io::drive_intrinsic_matrix(&lib, std::path::Path::new("."), &[])
+            .expect("audits");
+        let status = |name: &str| {
+            rows.iter()
+                .find(|r| r.name == name)
+                .expect("row exists")
+                .status
+        };
+        assert_eq!(status(dropped), super::IntrinsicMatrixStatus::Missing);
+        assert_eq!(status(revised), super::IntrinsicMatrixStatus::Changed);
+        // The perturbations are targeted: everything else still matches.
+        let off: Vec<_> = rows
+            .iter()
+            .filter(|r| {
+                r.status != super::IntrinsicMatrixStatus::Matched
+                    && r.name != dropped
+                    && r.name != revised
+            })
+            .collect();
+        assert!(off.is_empty(), "collateral drift: {off:?}");
+        let _ = revised_src;
+    }
+
+    /// SU.2 strictness: an unresolvable `include` must ERROR the audit, not report everything Missing
+    /// against a half-loaded tree (the mistyped-root failure mode).
+    #[test]
+    fn intrinsic_matrix_loud_on_missing_library() {
+        let err = super::io::drive_intrinsic_matrix(
+            "include <no-such-dir/std.scad>\n",
+            std::path::Path::new("."),
+            &[],
+        )
+        .expect_err("must refuse a broken tree");
+        assert!(
+            format!("{err}").contains("complete library tree"),
+            "unexpected error: {err}"
+        );
     }
 
     /// The PURE inner step ([`super::resolve_source`], M.4): with empty source tables it surfaces NEEDS

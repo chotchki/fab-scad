@@ -30,6 +30,21 @@ struct Cli {
 enum Commands {
     /// Environment preflight: OpenSCAD, Manifold, submodules, NAS, OPENSCADPATH.
     Doctor,
+    /// SU.2 (sustainment): audit the intrinsic registry against a BOSL2 tree — per intrinsic +
+    /// dep pin, does the library's definition still fingerprint-match the verified reference?
+    /// Changed/Missing rows mean the intrinsic silently stops dispatching there (interpreted
+    /// fallback — correct, just slow). Any non-matched row exits nonzero.
+    Intrinsics {
+        /// BOSL2 root (the directory holding std.scad). Default: the committed pin.
+        #[arg(long, default_value = "libs/BOSL2")]
+        bosl2: PathBuf,
+        /// Emit the full matrix as JSON (the sustainment nightly's machine format).
+        #[arg(long)]
+        json: bool,
+        /// Emit GitHub-flavored markdown (for `$GITHUB_STEP_SUMMARY` + the sustainment issue).
+        #[arg(long, conflicts_with = "json")]
+        md: bool,
+    },
     /// Set the active project (or show it with no arg) so later commands need no name.
     Focus { project: Option<String> },
     /// Scaffold a new project (minimal manifest + starter scad) and focus it.
@@ -175,6 +190,7 @@ enum Commands {
 fn main() -> Result<()> {
     match Cli::parse().command {
         Commands::Doctor => doctor(),
+        Commands::Intrinsics { bosl2, json, md } => intrinsics_cmd(&bosl2, json, md),
         Commands::Focus { project } => project::focus_cmd(&require_root()?, project),
         Commands::New { name } => project::new_cmd(&require_root()?, &name),
         Commands::Plan { size, printer } => plan_cmd(&size, printer),
@@ -967,6 +983,114 @@ enum Level {
 }
 
 type Check = (Level, String, String);
+
+/// SU.2: the intrinsic parity matrix against `bosl2`. Human mode prints counts + only the drifted rows
+/// (matched is the quiet default); `--json` prints every row; `--md` prints a GitHub-flavored summary
+/// (drifted rows as a table, the full matrix behind `<details>`) for `$GITHUB_STEP_SUMMARY` and the
+/// sustainment issue. Any non-matched row exits nonzero — the CI gate and the nightly both key off
+/// that. JSON is hand-formatted: five ASCII-identifier fields per row (serde_json is feature-gated
+/// behind mesh-io, and this must audit on every build shape).
+fn intrinsics_cmd(bosl2: &Path, json: bool, md: bool) -> Result<()> {
+    let rows = fab_lang::intrinsic_matrix("include <std.scad>\n", bosl2, &[])
+        .map_err(|e| anyhow::anyhow!("intrinsic audit against {}: {e}", bosl2.display()))?;
+    let status = |r: &fab_lang::IntrinsicMatrixRow| match r.status {
+        fab_lang::IntrinsicMatrixStatus::Matched => "matched",
+        fab_lang::IntrinsicMatrixStatus::Changed => "changed",
+        fab_lang::IntrinsicMatrixStatus::Missing => "missing",
+    };
+    let kind = |r: &fab_lang::IntrinsicMatrixRow| if r.pin { "pin" } else { "intrinsic" };
+    let fp_or = |fp: Option<u64>, absent: &str| {
+        fp.map_or_else(|| absent.to_string(), |fp| format!("{fp:#018x}"))
+    };
+    let drifted: Vec<_> = rows
+        .iter()
+        .filter(|r| r.status != fab_lang::IntrinsicMatrixStatus::Matched)
+        .collect();
+    if json {
+        let body: Vec<String> = rows
+            .iter()
+            .map(|r| {
+                format!(
+                    "  {{\"name\": \"{}\", \"pin\": {}, \"status\": \"{}\", \"defined_fp\": {}, \
+                     \"reference_fp\": \"{:#018x}\"}}",
+                    r.name,
+                    r.pin,
+                    status(r),
+                    r.defined_fp
+                        .map_or("null".into(), |fp| format!("\"{fp:#018x}\"")),
+                    r.reference_fp,
+                )
+            })
+            .collect();
+        println!("[\n{}\n]", body.join(",\n"));
+    } else if md {
+        println!("### Intrinsic matrix vs `{}`", bosl2.display());
+        println!();
+        println!(
+            "**{} audited — {} matched, {} drifted.**{}",
+            rows.len(),
+            rows.len() - drifted.len(),
+            drifted.len(),
+            if drifted.is_empty() {
+                " Every intrinsic dispatches on this tree. ✅"
+            } else {
+                " Drifted intrinsics silently fall back to the interpreter on this tree \
+                 (correct, but the speedup is gone). ⚠️"
+            }
+        );
+        if !drifted.is_empty() {
+            println!();
+            println!("| name | kind | status | defined fp | reference fp |");
+            println!("|---|---|---|---|---|");
+            for r in &drifted {
+                println!(
+                    "| `{}` | {} | **{}** | `{}` | `{}` |",
+                    r.name,
+                    kind(r),
+                    status(r),
+                    fp_or(r.defined_fp, "(absent)"),
+                    fp_or(Some(r.reference_fp), ""),
+                );
+            }
+        }
+        println!();
+        println!(
+            "<details><summary>Full matrix ({} rows)</summary>\n",
+            rows.len()
+        );
+        println!("| name | kind | status |");
+        println!("|---|---|---|");
+        for r in &rows {
+            println!("| `{}` | {} | {} |", r.name, kind(r), status(r));
+        }
+        println!("\n</details>");
+    } else {
+        println!(
+            "intrinsic matrix vs {}: {} audited, {} matched, {} drifted",
+            bosl2.display(),
+            rows.len(),
+            rows.len() - drifted.len(),
+            drifted.len(),
+        );
+        for r in &drifted {
+            println!(
+                "  {} {}{} — defined {} vs reference {:#018x} → INTERPRETED there",
+                status(r),
+                r.name,
+                if r.pin { " (pin)" } else { "" },
+                fp_or(r.defined_fp, "(absent)"),
+                r.reference_fp,
+            );
+        }
+    }
+    if !drifted.is_empty() {
+        bail!(
+            "{} intrinsic(s) do not match this BOSL2 tree",
+            drifted.len()
+        );
+    }
+    Ok(())
+}
 
 fn doctor() -> Result<()> {
     let mut checks: Vec<Check> = Vec::new();

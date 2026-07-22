@@ -95,6 +95,51 @@ where
     }
 }
 
+/// SU.2 (sustainment): drive the STATIC needs fixpoint for the intrinsic parity matrix — the same
+/// loader loop as [`drive`], but resolution stops after the hoist (nothing executes; `File` needs can't
+/// surface) and returns the audit instead of geometry. STRICT where [`drive`] is tolerant: a missing or
+/// unparseable library here means the audit would silently report everything `Missing`/`Changed` against
+/// the WRONG tree (a mistyped root, a half checkout), so any loader warning is promoted to a hard
+/// [`Error::Load`](crate::Error::Load).
+pub(crate) fn drive_intrinsic_matrix(
+    source: &str,
+    base_dir: &Path,
+    library_paths: &[PathBuf],
+) -> crate::Result<Vec<super::IntrinsicMatrixRow>> {
+    let mut scad = SourceMap::new();
+    let mut files = FileTable::new();
+    let mut warnings: Vec<Message> = Vec::new();
+    let mut reader = no_import_reader;
+    loop {
+        match super::resolve_intrinsic_matrix(source, base_dir, &scad)? {
+            super::MatrixResolution::Complete(rows) => {
+                let broken = warnings.iter().find_map(|m| match m {
+                    Message::Warning(w) => Some(w.as_str()),
+                    Message::Echo(_) => None,
+                });
+                if let Some(w) = broken {
+                    return Err(crate::Error::Load(format!(
+                        "intrinsic matrix needs a complete library tree: {w}"
+                    )));
+                }
+                return Ok(rows);
+            }
+            super::MatrixResolution::Incomplete { needs } => {
+                for need in needs {
+                    fulfill(
+                        need,
+                        library_paths,
+                        &mut reader,
+                        &mut scad,
+                        &mut files,
+                        &mut warnings,
+                    )?;
+                }
+            }
+        }
+    }
+}
+
 /// Drive the needs fixpoint from an IN-MEMORY source map — the fs-FREE twin of [`drive`] for the wasm
 /// host (the browser has no filesystem; the geom worker renders from bytes, W.3.6 Stage 2). A
 /// `use`/`include` resolves against `sources` — a virtual lib tree keyed by NORMALIZED relative path

@@ -28,6 +28,12 @@ jobs:
       # behind it keeps them gated.
       - run: cargo nextest run --workspace
       - run: cargo test --workspace --doc
+      # SU.2 (sustainment): the intrinsic parity matrix vs the COMMITTED BOSL2 pin, rendered into the
+      # job summary so a drift is READ, not excavated from logs. The hard gate is the
+      # tests/intrinsic_matrix.rs integration test in the nextest run above — this step makes the same
+      # verdict visible (and fails redundantly on drift, exit-code preserved through the pipe).
+      - name: Intrinsic matrix → job summary
+        run: set -o pipefail; cargo run --quiet --bin fab -- intrinsics --md | tee -a "$GITHUB_STEP_SUMMARY"
       # scad-rs (fab-lang) ratchet lane: pedantic + missing_docs + the determinism bans already ride
       # the workspace clippy above; this pass adds --all-features (`trace`) so the observability
       # wiring stays lint-clean too. Its tests ride the workspace nextest run (trace only un-gates

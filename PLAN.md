@@ -92,6 +92,22 @@ added 2026-07-07.
 - [x] Y.8 - Y.8 - Audit + wire the kernel fuzz coverage
 - [ ] Y.9 - Y.9 - Extend kernel fuzz coverage (csg_tree random-op + new op targets)
 
+## Phase SU - Sustainment: hand-recreated OpenSCAD+BOSL2 parity is a MOVING target — track upstream nightly
+<!-- Decisions (chotchki 2026-07-22): REPORT-ONLY (one rolling GitHub issue; no auto-PR/merge — pins bump by hand
+     with the report in hand). OpenSCAD: track MAIN (no stable in 5 years), but watch only the CORPUS paths
+     (testdata/ + examples/) — "most of the change we don't care about". Corpus bar: render-clean + values
+     (parse/eval/render no-error + non-empty geometry; their assertion tests must pass) — mesh differential
+     stays R.2. State lives IN the rolling issue (machine block = the watermark) so the nightly commits nothing.
+     Leverage: the O-phase AST fingerprint already detects intrinsic loss (mismatch = silent no-dispatch =
+     perf regression, not wrongness); BOSL2's tests/+examples/ ARE the corpus (harvest the CANDIDATE's, not ours). -->
+- [x] SU.1 - Design doc `docs/sustainment.md` WRITTEN (2026-07-22): watch sources (BOSL2 tags — they tag every rev, fine under report-only; openscad main corpus-path tree-diff), rolling-issue state block (`<!-- sustain-state {json} -->` = the watermark, nightly commits nothing), report shape (deltas only, matched/no-op is quiet), the intrinsic-loss model (fingerprint mismatch ⇒ fallback-to-interp ⇒ slow-not-wrong, correctness self-heals), committed+candidate same-job diff (regression = candidate-only failure)
+- [ ] SU.2 - Intrinsic matrix tool: fingerprint audit of the registry against an ARBITRARY BOSL2 root → per-intrinsic {matched|changed|missing} JSON + table; wired into ci.yml against the committed pin (100% matched or fail) — the K.4 matrix artifact starts here
+- [ ] SU.3 - Corpus harness: harvest a BOSL2 checkout's tests/ (assertions = the values bar) + examples/ (render-clean + non-empty geometry), reasoned skip-list (2D/text/fonts), runs against committed AND candidate pins in one job — regression = fails-on-candidate-only; feeds L.5.6's corpus half
+- [ ] SU.4 - OpenSCAD corpus lane: diff openscad@main testdata/+examples/ vs the watermark; only NEW/CHANGED .scad files run the same harness bar; repo churn outside those paths = no-op
+- [ ] SU.5 - `sustain.yml` nightly: probe upstreams → short-circuit green when nothing moved → else evaluate (SU.2+SU.3 on candidate BOSL2, SU.4 on changed corpus) → update the ONE rolling issue (state block + human-readable delta report); workflow self-failures surface on the same issue
+- [ ] SU.6 - e2e: rewind the watermark → live run detects + evaluates + updates the issue; deliberately perturb a candidate BOSL2 function → matrix reports it "changed"; docs current
+- [ ] SU.7 - First real cycle: evaluate BOSL2 v2.0.746→latest + init the openscad watermark; chotchki hand-bumps with the report in hand — the loop is closed when the first bump merges green
+
 ## Backlog (not yet phased)
 
 - **Evaluate the M.3.1 spectral-norm SHORTCUT (chotchki, 2026-07-14).** `Mat3::spectral_norm` uses deterministic power iteration on MᵀM (32 iters + IEEE sqrt) instead of porting Manifold's iterative Jacobi SVD (`svd.h`, ~304 LOC). Justified because `SpectralNorm` is used ONLY for `epsilon *= SpectralNorm` (a tolerance invisible to a transform's output geometry — positions/tris/normals are exact). REVISIT if: (a) a compound-op differential (`transform(x).union(y)`) fails on an epsilon-driven near-degenerate merge tracing to a spectral-norm ULP divergence vs C++, or (b) the M.6 native≡wasm bit-for-bit corpus sweep flags it. Neither bites ⇒ shortcut was worth it (~300 LOC of Jacobi SVD avoided); if it bites ⇒ port `svd.h` verbatim. (Task #4 logged; bridge id-collided with K.2 so tracked here.)

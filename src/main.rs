@@ -45,6 +45,34 @@ enum Commands {
         #[arg(long, conflicts_with = "json")]
         md: bool,
     },
+    /// SU.3 (sustainment): sweep upstream BOSL2's OWN corpus (tests/ assertions + examples/) through
+    /// scad-rs at the COMMITTED pin and at a CANDIDATE checkout, and diff. The committed run is the
+    /// baseline, so pre-existing failures never gate — the verdicts that exit nonzero are REGRESSIONS
+    /// (passed committed, fails candidate) and NEW-FAILING (new upstream case we fail).
+    CorpusDiff {
+        /// The candidate BOSL2 checkout to evaluate (any path — staged under a `BOSL2` symlink
+        /// automatically so `include <BOSL2/…>` resolves).
+        #[arg(long)]
+        candidate: PathBuf,
+        /// The baseline BOSL2 tree (default: the committed pin).
+        #[arg(long, default_value = "libs/BOSL2")]
+        committed: PathBuf,
+        /// Emit GitHub-flavored markdown (for `$GITHUB_STEP_SUMMARY` + the sustainment issue).
+        #[arg(long)]
+        md: bool,
+    },
+    /// SU.4 (sustainment): sweep an arbitrary MANIFEST of `.scad` files (one path per line) through
+    /// scad-rs with crash isolation — the openscad-corpus lane. Eval-clean is the bar; the sweep is
+    /// REPORT-ONLY (exit 0 regardless), because upstream's corpus carries no expectations we can
+    /// hold ourselves to — the report is the signal.
+    ScadSweep {
+        /// Manifest file: one `.scad` path per line (`#` comments + blanks skipped).
+        #[arg(long)]
+        manifest: PathBuf,
+        /// Emit GitHub-flavored markdown (for `$GITHUB_STEP_SUMMARY` + the sustainment issue).
+        #[arg(long)]
+        md: bool,
+    },
     /// Set the active project (or show it with no arg) so later commands need no name.
     Focus { project: Option<String> },
     /// Scaffold a new project (minimal manifest + starter scad) and focus it.
@@ -191,6 +219,12 @@ fn main() -> Result<()> {
     match Cli::parse().command {
         Commands::Doctor => doctor(),
         Commands::Intrinsics { bosl2, json, md } => intrinsics_cmd(&bosl2, json, md),
+        Commands::CorpusDiff {
+            candidate,
+            committed,
+            md,
+        } => corpus_diff_cmd(&candidate, &committed, md),
+        Commands::ScadSweep { manifest, md } => scad_sweep_cmd(&manifest, md),
         Commands::Focus { project } => project::focus_cmd(&require_root()?, project),
         Commands::New { name } => project::new_cmd(&require_root()?, &name),
         Commands::Plan { size, printer } => plan_cmd(&size, printer),
@@ -1090,6 +1124,167 @@ fn intrinsics_cmd(bosl2: &Path, json: bool, md: bool) -> Result<()> {
         );
     }
     Ok(())
+}
+
+/// SU.3: the corpus differential — upstream's tests/ + examples/ swept at the committed pin AND a
+/// candidate checkout, diffed per lane. Regressions + new-failing exit nonzero; pre-existing failures
+/// are baseline, not noise. The candidate is staged under a `BOSL2`-named symlink when needed (the
+/// examples lane's `include <BOSL2/…>` resolves against the checkout's parent).
+fn corpus_diff_cmd(candidate: &Path, committed: &Path, md: bool) -> Result<()> {
+    use fab_scad::corpus::{Lane, check_worker, diff_results, run_corpus_isolated};
+
+    let worker = std::env::current_exe()
+        .context("locating fab")?
+        .with_file_name("corpus_worker");
+    check_worker(&worker)?;
+
+    // Stage: the examples lane needs the checkout AT `…/BOSL2`. A candidate already named that runs
+    // in place; anything else gets a throwaway parent holding a `BOSL2` symlink to it.
+    let candidate = candidate
+        .canonicalize()
+        .with_context(|| format!("candidate {}", candidate.display()))?;
+    let (_stage, candidate_root) = if candidate.file_name().is_some_and(|n| n == "BOSL2") {
+        (None, candidate)
+    } else {
+        let stage = std::env::temp_dir().join(format!("fab-sustain-{}", std::process::id()));
+        std::fs::create_dir_all(&stage).context("creating the staging dir")?;
+        let link = stage.join("BOSL2");
+        let _ = std::fs::remove_file(&link);
+        std::os::unix::fs::symlink(&candidate, &link).context("staging the candidate")?;
+        (Some(Cleanup(stage.clone())), link)
+    };
+
+    let mut gate_failures = 0usize;
+    for lane in [Lane::Tests, Lane::Examples] {
+        eprintln!("sweeping {} lane (committed)…", lane.label());
+        let base = run_corpus_isolated(committed, &worker, lane)?;
+        eprintln!("sweeping {} lane (candidate)…", lane.label());
+        let cand = run_corpus_isolated(&candidate_root, &worker, lane)?;
+        let d = diff_results(&base, &cand);
+        gate_failures += d.regressions.len() + d.new_failing.len();
+        let (bp, bt, cp, ct) = d.counts;
+        if md {
+            println!("### Corpus `{}` lane", lane.label());
+            println!();
+            println!(
+                "**committed {bp}/{bt} pass → candidate {cp}/{ct} pass** — {} regression(s), \
+                 {} new-failing, {} fixed, {} still-failing, {} removed.",
+                d.regressions.len(),
+                d.new_failing.len(),
+                d.fixed.len(),
+                d.still_failing,
+                d.removed.len(),
+            );
+            if !(d.regressions.is_empty() && d.new_failing.is_empty()) {
+                println!();
+                println!("| case | verdict | bucket | detail |");
+                println!("|---|---|---|---|");
+                for (file, name, bucket, detail) in &d.regressions {
+                    println!(
+                        "| `{file}` :: {name} | **regression** | {} | {detail} |",
+                        bucket.label()
+                    );
+                }
+                for (file, name, bucket, detail) in &d.new_failing {
+                    println!(
+                        "| `{file}` :: {name} | new-failing | {} | {detail} |",
+                        bucket.label()
+                    );
+                }
+            }
+            println!();
+        } else {
+            println!(
+                "{} lane: committed {bp}/{bt} → candidate {cp}/{ct} | {} regressions, {} new-failing, \
+                 {} fixed, {} still-failing, {} removed",
+                lane.label(),
+                d.regressions.len(),
+                d.new_failing.len(),
+                d.fixed.len(),
+                d.still_failing,
+                d.removed.len(),
+            );
+            for (file, name, bucket, detail) in &d.regressions {
+                println!(
+                    "  REGRESSION {file} :: {name} [{}] {detail}",
+                    bucket.label()
+                );
+            }
+            for (file, name, bucket, detail) in &d.new_failing {
+                println!(
+                    "  new-failing {file} :: {name} [{}] {detail}",
+                    bucket.label()
+                );
+            }
+        }
+    }
+    if gate_failures > 0 {
+        bail!("{gate_failures} corpus regression(s)/new-failure(s) on the candidate");
+    }
+    Ok(())
+}
+
+/// SU.4: the manifest sweep — every listed `.scad` through scad-rs, crash-isolated, bucketed.
+/// Report-only by design: upstream's corpus carries no expectations we can hold ourselves to, so the
+/// report IS the deliverable (the nightly pastes it into the sustainment issue) and the exit is 0.
+fn scad_sweep_cmd(manifest: &Path, md: bool) -> Result<()> {
+    use fab_scad::corpus::{Bucket, Lane, check_worker, histogram, run_corpus_isolated};
+
+    let worker = std::env::current_exe()
+        .context("locating fab")?
+        .with_file_name("corpus_worker");
+    check_worker(&worker)?;
+    let results = run_corpus_isolated(manifest, &worker, Lane::Files)?;
+    let h = histogram(&results);
+    let passed = h.get(&Bucket::Pass).copied().unwrap_or(0);
+    let summary: Vec<String> = h
+        .iter()
+        .filter(|(b, _)| **b != Bucket::Pass)
+        .map(|(b, n)| format!("{} {}", n, b.label()))
+        .collect();
+    if md {
+        println!("### scad sweep — {} file(s)", results.len());
+        println!();
+        println!(
+            "**{passed}/{} eval clean.**{}",
+            results.len(),
+            if summary.is_empty() {
+                String::new()
+            } else {
+                format!(" Failures: {}.", summary.join(", "))
+            }
+        );
+        if passed < results.len() {
+            println!();
+            println!("| file | bucket | detail |");
+            println!("|---|---|---|");
+            for r in results.iter().filter(|r| r.bucket != Bucket::Pass) {
+                println!("| `{}` | {} | {} |", r.file, r.bucket.label(), r.detail);
+            }
+        }
+    } else {
+        println!(
+            "scad sweep: {passed}/{} eval clean{}",
+            results.len(),
+            if summary.is_empty() {
+                String::new()
+            } else {
+                format!(" ({})", summary.join(", "))
+            }
+        );
+        for r in results.iter().filter(|r| r.bucket != Bucket::Pass) {
+            println!("  {} {} — {}", r.bucket.label(), r.file, r.detail);
+        }
+    }
+    Ok(())
+}
+
+/// Best-effort staging-dir removal on drop (the sweep can bail anywhere).
+struct Cleanup(PathBuf);
+impl Drop for Cleanup {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
 }
 
 fn doctor() -> Result<()> {

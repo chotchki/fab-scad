@@ -51,6 +51,9 @@ pub enum Bucket {
     Load,
     /// A geometry node couldn't lower to a solid.
     Lower,
+    /// Evaluated cleanly but produced NULL geometry (SU.3, examples lane only) — "renders" nothing,
+    /// which for an upstream example that used to produce a model is a failure, not a pass.
+    Empty,
     /// The worker subprocess died (a stack overflow / abort) — an isolation-only outcome.
     Crash,
     /// The test ran past the per-test wall-clock budget (a hang or pathological slowness) and was killed.
@@ -69,6 +72,7 @@ impl Bucket {
             Bucket::Parse => "parse",
             Bucket::Load => "load",
             Bucket::Lower => "lower",
+            Bucket::Empty => "empty",
             Bucket::Crash => "crash",
             Bucket::Timeout => "timeout",
         }
@@ -85,11 +89,50 @@ impl Bucket {
             Bucket::Parse,
             Bucket::Load,
             Bucket::Lower,
+            Bucket::Empty,
             Bucket::Crash,
             Bucket::Timeout,
         ]
         .into_iter()
         .find(|b| b.label() == s)
+    }
+}
+
+/// Which upstream corpus a sweep runs (SU.3). `Tests` = the `.scadtest` assertion suite (the VALUES
+/// bar — a clean eval means every assert held). `Examples` = `examples/*.scad` (the RENDER-CLEAN bar —
+/// eval with no error and non-null geometry; mesh-level differential stays R.2's).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Lane {
+    /// `tests/*.scadtest` — upstream's own assertions.
+    Tests,
+    /// `examples/*.scad` — upstream's showcase models.
+    Examples,
+    /// An arbitrary `.scad` file list from a MANIFEST (SU.4: the openscad corpus lane — the nightly
+    /// tree-diffs upstream's `testdata/`+`examples/` and sweeps only the new/changed files). The sweep's
+    /// "root" argument is the manifest path, one absolute `.scad` path per line; each file evals with
+    /// its own parent as base (relative includes resolve in the sparse checkout). Eval-clean is the
+    /// whole bar — no null-geometry check (their corpus is full of 2D/echo-only files) and no verdict
+    /// inversion; there's no expectation spec to hold it to, only "does our evaluator survive it".
+    Files,
+}
+
+impl Lane {
+    /// Stable label — the worker argv + report key.
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Lane::Tests => "tests",
+            Lane::Examples => "examples",
+            Lane::Files => "files",
+        }
+    }
+
+    /// Parse a [`label`](Lane::label) back (the worker argv format).
+    #[must_use]
+    pub fn from_label(s: &str) -> Option<Lane> {
+        [Lane::Tests, Lane::Examples, Lane::Files]
+            .into_iter()
+            .find(|l| l.label() == s)
     }
 }
 
@@ -185,6 +228,166 @@ pub fn enumerate_tests(bosl2_dir: &Path) -> Result<Vec<TestCase>> {
     Ok(cases)
 }
 
+/// Enumerate `examples/*.scad` under `bosl2_dir` into the same flattened [`TestCase`] list shape as the
+/// test suite (files sorted; one case per file, `name` = "render"). The script is the file's content;
+/// its `include <BOSL2/std.scad>` resolves via the library path the runner passes ([`run_example`]).
+///
+/// # Errors
+/// Fails if `examples/` can't be read.
+pub fn enumerate_examples(bosl2_dir: &Path) -> Result<Vec<TestCase>> {
+    let dir = bosl2_dir.join("examples");
+    let mut files: Vec<_> = std::fs::read_dir(&dir)
+        .with_context(|| format!("reading {}", dir.display()))?
+        .filter_map(std::result::Result::ok)
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|x| x == "scad"))
+        .collect();
+    files.sort();
+
+    let mut cases = Vec::new();
+    for path in files {
+        let file = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("?")
+            .to_string();
+        let script = std::fs::read_to_string(&path)
+            .with_context(|| format!("reading {}", path.display()))?;
+        cases.push(TestCase {
+            file,
+            name: "render".to_string(),
+            script,
+            expect_success: true,
+        });
+    }
+    Ok(cases)
+}
+
+/// Enumerate a [`Lane::Files`] MANIFEST: one `.scad` path per line (blank lines + `#` comments
+/// skipped), each becoming a case whose `file` is the FULL path (the runner needs it for base-dir
+/// resolution) — sorted for parent/worker index agreement.
+///
+/// # Errors
+/// Fails if the manifest or any listed file can't be read — a sweep against half a corpus would
+/// under-report, so it's strict.
+pub fn enumerate_files(manifest: &Path) -> Result<Vec<TestCase>> {
+    let text = std::fs::read_to_string(manifest)
+        .with_context(|| format!("reading manifest {}", manifest.display()))?;
+    let mut paths: Vec<&str> = text
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .collect();
+    paths.sort_unstable();
+    let mut cases = Vec::new();
+    for p in paths {
+        let script =
+            std::fs::read_to_string(p).with_context(|| format!("reading listed file {p}"))?;
+        cases.push(TestCase {
+            file: p.to_string(),
+            name: "eval".to_string(),
+            script,
+            expect_success: true,
+        });
+    }
+    Ok(cases)
+}
+
+/// Run one MANIFEST-listed file (SU.4): eval with the file's own parent as base so its relative
+/// includes resolve. Eval-clean is the bar — see [`Lane::Files`] — EXCEPT a missing-library warning,
+/// which buckets [`Bucket::Load`]: the tolerant loader would otherwise eval an EMPTY program and
+/// report a vacuous pass (a file whose includes never loaded proved nothing).
+#[must_use]
+pub fn run_file(script: &str, path: &Path) -> (Bucket, u128, String) {
+    let base = path.parent().unwrap_or(Path::new("."));
+    let start = Instant::now();
+    let result = fab_lang::evaluate_geometry_with_base_full(script, base, &[]);
+    let ms = start.elapsed().as_millis();
+    match result {
+        Ok((_, messages)) => {
+            let verdict = messages.iter().find_map(|m| match m {
+                Message::Warning(w) if w.starts_with("Can't open library") => {
+                    Some((Bucket::Load, w))
+                }
+                Message::Warning(w) if w.starts_with("assertion failed") => {
+                    Some((Bucket::Assertion, w))
+                }
+                _ => None,
+            });
+            match verdict {
+                Some((bucket, w)) => (bucket, ms, w.lines().next().unwrap_or_default().to_string()),
+                None => (Bucket::Pass, ms, String::new()),
+            }
+        }
+        Err(e) => {
+            let first = format!("{e}")
+                .lines()
+                .next()
+                .unwrap_or_default()
+                .to_string();
+            (classify(&e), ms, first)
+        }
+    }
+}
+
+/// Enumerate `lane`'s corpus — the ONE enumeration parent + worker both call, so their indices agree.
+/// For [`Lane::Files`], `bosl2_dir` is the MANIFEST path, not a BOSL2 tree.
+///
+/// # Errors
+/// As [`enumerate_tests`] / [`enumerate_examples`] / [`enumerate_files`].
+pub fn enumerate_lane(bosl2_dir: &Path, lane: Lane) -> Result<Vec<TestCase>> {
+    match lane {
+        Lane::Tests => enumerate_tests(bosl2_dir),
+        Lane::Examples => enumerate_examples(bosl2_dir),
+        Lane::Files => enumerate_files(bosl2_dir),
+    }
+}
+
+/// Run one EXAMPLE in-process (SU.3, the render-clean bar): base = `examples/`, library path =
+/// `bosl2_dir`'s PARENT so `include <BOSL2/std.scad>` resolves. Verdicts beyond [`run_script`]'s:
+/// a missing-library warning buckets [`Bucket::Load`] (the loader tolerates it with an empty program,
+/// which would otherwise "pass" VACUOUSLY — an example that never loaded BOSL2 proved nothing), and a
+/// clean eval whose geometry is NULL buckets [`Bucket::Empty`] (an upstream showcase model that
+/// produces nothing is a failure even without an error).
+#[must_use]
+pub fn run_example(script: &str, bosl2_dir: &Path) -> (Bucket, u128, String) {
+    let start = Instant::now();
+    let examples_dir = bosl2_dir.join("examples");
+    let lib_root = bosl2_dir.parent().unwrap_or(Path::new(".")).to_path_buf();
+    let result = fab_lang::evaluate_geometry_with_base_full(script, &examples_dir, &[lib_root]);
+    let ms = start.elapsed().as_millis();
+    match result {
+        Ok((geo, messages)) => {
+            let verdict = messages.iter().find_map(|m| match m {
+                Message::Warning(w) if w.starts_with("Can't open library") => {
+                    Some((Bucket::Load, w))
+                }
+                Message::Warning(w) if w.starts_with("assertion failed") => {
+                    Some((Bucket::Assertion, w))
+                }
+                _ => None,
+            });
+            match verdict {
+                Some((bucket, w)) => (bucket, ms, w.lines().next().unwrap_or_default().to_string()),
+                None if geo.is_null() => (
+                    Bucket::Empty,
+                    ms,
+                    "evaluated cleanly but produced NULL geometry".to_string(),
+                ),
+                None => (Bucket::Pass, ms, String::new()),
+            }
+        }
+        Err(e) => {
+            let first = format!("{e}")
+                .lines()
+                .next()
+                .unwrap_or_default()
+                .to_string();
+            (classify(&e), ms, first)
+        }
+    }
+}
+
 /// Run one test `script` in-process (base dir = `tests_dir`, so its `include <../std.scad>` resolves) → its
 /// bucket + wall-time (ms) + first-line detail. Uses the geometry entry so a script that builds geometry
 /// AFTER its asserts still counts as a pass (we only care whether EVAL — hence every assert — succeeded).
@@ -258,7 +461,29 @@ fn classify(e: &Error) -> Bucket {
 /// Fails only if the suite can't be enumerated — per-worker spawn/abort failures are absorbed as crash
 /// buckets, never propagated (a broken corpus is data, not a harness error).
 pub fn run_bosl2_corpus_isolated(bosl2_dir: &Path, worker_exe: &Path) -> Result<Vec<TestResult>> {
-    let cases = enumerate_tests(bosl2_dir)?;
+    run_corpus_isolated(bosl2_dir, worker_exe, Lane::Tests)
+}
+
+/// [`run_bosl2_corpus_isolated`] generalized over the [`Lane`] (SU.3): the same crash-and-timeout-
+/// resilient parallel sweep, over either upstream corpus. The examples lane REQUIRES `bosl2_dir` to be
+/// named `BOSL2` — examples `include <BOSL2/std.scad>`, which resolves against the checkout's PARENT,
+/// so any other basename would vacuous-fail every example (stage a candidate under a `BOSL2` symlink).
+///
+/// # Errors
+/// As [`run_bosl2_corpus_isolated`], plus the examples-lane basename check.
+pub fn run_corpus_isolated(
+    bosl2_dir: &Path,
+    worker_exe: &Path,
+    lane: Lane,
+) -> Result<Vec<TestResult>> {
+    if lane == Lane::Examples && bosl2_dir.file_name().is_none_or(|n| n != "BOSL2") {
+        bail!(
+            "examples lane needs the checkout AT a directory named BOSL2 (include <BOSL2/…> resolves \
+             against its parent); got {}",
+            bosl2_dir.display()
+        );
+    }
+    let cases = enumerate_lane(bosl2_dir, lane)?;
     let n = cases.len();
     let workers = std::thread::available_parallelism()
         .map_or(1, std::num::NonZero::get)
@@ -272,7 +497,7 @@ pub fn run_bosl2_corpus_isolated(bosl2_dir: &Path, worker_exe: &Path) -> Result<
             .map(|w| {
                 let lo = w * chunk;
                 let hi = ((w + 1) * chunk).min(n);
-                s.spawn(move || run_range(worker_exe, bosl2_dir, lo, hi))
+                s.spawn(move || run_range(worker_exe, bosl2_dir, lo, hi, lane))
             })
             .collect();
         handles
@@ -328,6 +553,7 @@ fn run_range(
     bosl2_dir: &Path,
     lo: usize,
     hi: usize,
+    lane: Lane,
 ) -> Vec<(usize, RunOutcome)> {
     let mut out = Vec::new();
     let mut next = lo;
@@ -336,6 +562,7 @@ fn run_range(
             .arg(bosl2_dir)
             .arg(next.to_string())
             .arg(hi.to_string())
+            .arg(lane.label())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .spawn();
@@ -428,19 +655,98 @@ fn parse_stream_line(line: &str) -> Option<(usize, RunOutcome)> {
 ///
 /// # Errors
 /// Fails if the suite can't be enumerated.
-pub fn worker_main(bosl2_dir: &Path, start: usize, end: usize) -> Result<()> {
+pub fn worker_main(bosl2_dir: &Path, start: usize, end: usize, lane: Lane) -> Result<()> {
     let tests_dir = bosl2_dir.join("tests");
-    let cases = enumerate_tests(bosl2_dir)?;
+    let cases = enumerate_lane(bosl2_dir, lane)?;
     let end = end.min(cases.len());
     let mut out = std::io::stdout();
     for (idx, case) in cases.iter().enumerate().take(end).skip(start) {
-        let (bucket, ms, detail) = run_script(&case.script, &tests_dir);
+        let (bucket, ms, detail) = match lane {
+            Lane::Tests => run_script(&case.script, &tests_dir),
+            Lane::Examples => run_example(&case.script, bosl2_dir),
+            Lane::Files => run_file(&case.script, Path::new(&case.file)),
+        };
         // Tabs/newlines in the detail would corrupt the single-line wire format — flatten them.
         let detail = detail.replace(['\t', '\n', '\r'], " ");
         writeln!(out, "{idx}\t{}\t{ms}\t{detail}", bucket.label()).ok();
         out.flush().ok(); // per-test flush: the last line the parent sees pinpoints a crasher
     }
     Ok(())
+}
+
+/// SU.3: pairwise verdicts between a COMMITTED-pin sweep and a CANDIDATE-pin sweep of the same lane,
+/// keyed `(file, name)`. The load-bearing sets: `regressions` (passed committed, fails candidate — the
+/// new upstream version BROKE us) and `new_failing` (a test/example that only exists upstream now, and
+/// we fail it — a fresh gap). `fixed` + `still_failing` complete the picture; `removed` names what
+/// upstream deleted.
+#[derive(Debug, Default)]
+pub struct CorpusDiff {
+    /// Passed on committed, fails on candidate: `(file, name, candidate bucket, detail)`.
+    pub regressions: Vec<(String, String, Bucket, String)>,
+    /// Exists only on candidate and fails there: `(file, name, bucket, detail)`.
+    pub new_failing: Vec<(String, String, Bucket, String)>,
+    /// Failed on committed, passes on candidate.
+    pub fixed: Vec<(String, String)>,
+    /// Fails on both — the pre-existing gap, not this bump's fault.
+    pub still_failing: usize,
+    /// Exists only on committed (upstream removed it).
+    pub removed: Vec<(String, String)>,
+    /// Pass counts as `(committed passed, committed total, candidate passed, candidate total)`.
+    pub counts: (usize, usize, usize, usize),
+}
+
+/// Diff two sweeps of the same [`Lane`] (SU.3) — committed pin vs candidate. Pure; order-insensitive.
+#[must_use]
+pub fn diff_results(committed: &[TestResult], candidate: &[TestResult]) -> CorpusDiff {
+    let key = |r: &TestResult| (r.file.clone(), r.name.clone());
+    let committed_map: std::collections::BTreeMap<_, _> =
+        committed.iter().map(|r| (key(r), r)).collect();
+    let candidate_map: std::collections::BTreeMap<_, _> =
+        candidate.iter().map(|r| (key(r), r)).collect();
+
+    let mut d = CorpusDiff {
+        counts: (
+            committed
+                .iter()
+                .filter(|r| r.bucket == Bucket::Pass)
+                .count(),
+            committed.len(),
+            candidate
+                .iter()
+                .filter(|r| r.bucket == Bucket::Pass)
+                .count(),
+            candidate.len(),
+        ),
+        ..CorpusDiff::default()
+    };
+    for (k, cand) in &candidate_map {
+        match committed_map.get(k) {
+            Some(comm) => match (comm.bucket == Bucket::Pass, cand.bucket == Bucket::Pass) {
+                (true, false) => d.regressions.push((
+                    cand.file.clone(),
+                    cand.name.clone(),
+                    cand.bucket,
+                    cand.detail.clone(),
+                )),
+                (false, true) => d.fixed.push((cand.file.clone(), cand.name.clone())),
+                (false, false) => d.still_failing += 1,
+                (true, true) => {}
+            },
+            None if cand.bucket != Bucket::Pass => d.new_failing.push((
+                cand.file.clone(),
+                cand.name.clone(),
+                cand.bucket,
+                cand.detail.clone(),
+            )),
+            None => {}
+        }
+    }
+    for k in committed_map.keys() {
+        if !candidate_map.contains_key(k) {
+            d.removed.push((k.0.clone(), k.1.clone()));
+        }
+    }
+    d
 }
 
 /// Tally results by bucket, in `Bucket` order — the divergence histogram for the report.
@@ -478,4 +784,77 @@ pub fn check_worker(worker_exe: &Path) -> Result<()> {
         bail!("corpus worker binary not found at {}", worker_exe.display());
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Bucket, Lane, TestResult, diff_results};
+
+    fn r(file: &str, name: &str, bucket: Bucket) -> TestResult {
+        TestResult {
+            file: file.to_string(),
+            name: name.to_string(),
+            bucket,
+            ms: 1,
+            detail: if bucket == Bucket::Pass {
+                String::new()
+            } else {
+                "boom".to_string()
+            },
+        }
+    }
+
+    /// SU.3: every pairwise verdict lands in its set — regression (pass→fail), fixed (fail→pass),
+    /// still-failing (fail→fail), new-failing (candidate-only fail), removed (committed-only). A
+    /// candidate-only PASS (a new upstream test we handle) is silently fine.
+    #[test]
+    fn diff_classifies_every_shape() {
+        let committed = vec![
+            r("a", "t1", Bucket::Pass),      // → fails on candidate = regression
+            r("a", "t2", Bucket::Eval),      // → passes on candidate = fixed
+            r("a", "t3", Bucket::Assertion), // → still failing
+            r("a", "t4", Bucket::Pass),      // absent on candidate = removed
+            r("a", "t5", Bucket::Pass),      // stays passing
+        ];
+        let candidate = vec![
+            r("a", "t1", Bucket::Assertion),
+            r("a", "t2", Bucket::Pass),
+            r("a", "t3", Bucket::Timeout),
+            r("a", "t5", Bucket::Pass),
+            r("a", "t6", Bucket::Eval), // new upstream test, we fail it
+            r("a", "t7", Bucket::Pass), // new upstream test, we pass it
+        ];
+        let d = diff_results(&committed, &candidate);
+        assert_eq!(
+            d.regressions,
+            vec![(
+                "a".to_string(),
+                "t1".to_string(),
+                Bucket::Assertion,
+                "boom".to_string()
+            )]
+        );
+        assert_eq!(d.fixed, vec![("a".to_string(), "t2".to_string())]);
+        assert_eq!(d.still_failing, 1);
+        assert_eq!(
+            d.new_failing,
+            vec![(
+                "a".to_string(),
+                "t6".to_string(),
+                Bucket::Eval,
+                "boom".to_string()
+            )]
+        );
+        assert_eq!(d.removed, vec![("a".to_string(), "t4".to_string())]);
+        assert_eq!(d.counts, (3, 5, 3, 6));
+    }
+
+    /// The worker argv lane labels round-trip (the parent↔worker wire format).
+    #[test]
+    fn lane_labels_round_trip() {
+        for lane in [Lane::Tests, Lane::Examples] {
+            assert_eq!(Lane::from_label(lane.label()), Some(lane));
+        }
+        assert_eq!(Lane::from_label("nope"), None);
+    }
 }

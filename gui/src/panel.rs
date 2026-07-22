@@ -21,6 +21,8 @@ pub(crate) struct PanelWriters<'w> {
     pub(crate) console: ResMut<'w, crate::console::ConsoleUi>,
     /// Z.3.3 inline file-rename state — likewise folded in to stay under the param cap.
     pub(crate) rename: ResMut<'w, RenameUi>,
+    /// Z.3.10 inline rename of the hotchkiss.io ITEM's title (the document, not a file in it).
+    pub(crate) item_rename: ResMut<'w, ItemRenameUi>,
 }
 
 /// The read-only display inputs the tabs render, bundled so `panel_ui` stays under Bevy's 16-param cap
@@ -34,6 +36,8 @@ pub(crate) struct PanelView<'w> {
     pub(crate) pipeline: Res<'w, Pipeline>,
     /// The save-back target (W.5.7): `Some` ⇒ show the "Save to hotchkiss.io" affordance.
     pub(crate) save_target: Res<'w, SaveTarget>,
+    /// The media ITEM (Z.3.10): `Some` ⇒ show the rename-on-the-site affordance.
+    pub(crate) media_item: Res<'w, MediaItem>,
 }
 
 /// Bake the live slicing config into the buffer and persist it — the ONE local-save path, driven by both
@@ -110,13 +114,18 @@ fn save_buffer(
     }
     #[cfg(target_arch = "wasm32")]
     {
-        let stem = editor
-            .path
-            .file_stem()
-            .and_then(|n| n.to_str())
-            .filter(|n| !n.is_empty())
-            .unwrap_or("model");
-        match crate::jobs::project_source_variant(project, parts, printer, &editor.text, stem) {
+        // Z.3.9: the DOCUMENT's name, not the active file's — a multi-file project downloaded while
+        // viewing `lib.scad` used to land as `lib.scadproj`.
+        let stem = project.doc_stem().unwrap_or_else(|| {
+            editor
+                .path
+                .file_stem()
+                .and_then(|n| n.to_str())
+                .filter(|n| !n.is_empty())
+                .unwrap_or("model")
+                .to_string()
+        });
+        match crate::jobs::project_source_variant(project, parts, printer, &editor.text, &stem) {
             Ok((name, mime, bytes)) => {
                 if crate::web_host::download_bytes(&name, mime, &bytes) {
                     editor.dirty = false;
@@ -226,6 +235,15 @@ pub(crate) fn panel_ui(
     // X.2: the customizer params for the current buffer (owned, so it doesn't hold `editor`'s borrow).
     // Drives the conditional Customize tab + its widgets. Cheap — `customize` parses only the buffer.
     let cv_params = crate::customize::extract(&editor.text);
+    // Z.3.10: a rename MOVES this map's key. Without the move the renamed file misses its own entry and
+    // `or_insert_with` below re-captures "as-loaded" defaults from the buffer as it stands NOW — i.e.
+    // already customized — so Reset-to-default would forever reset to whatever was last dialled in. The
+    // renaming handler is a different system and can't reach a `Local`, so it reports the move instead.
+    if let Some((old, new)) = writers.rename.renamed.take()
+        && let Some(v) = cust_defaults.remove(&old)
+    {
+        cust_defaults.insert(new, v);
+    }
     // Capture the as-loaded defaults the first time we see this file (first frame ⇒ still the file's own
     // values, before any customization). Keyed by path, so a file switch captures fresh defaults.
     cust_defaults.entry(editor.path.clone()).or_insert_with(|| {
@@ -422,6 +440,11 @@ pub(crate) fn panel_ui(
                         crate::project::ProjectHome::ScadProj(p) => {
                             format!("{} — a .scadproj (a zip; rename to .zip to peek)", base(p))
                         }
+                        // Z.3.9: WebModel BEFORE the promote guard. `needs_promote` is
+                        // `is_multifile() && !ScadProj`, which a multi-file WEB project also satisfies —
+                        // so the guard used to swallow this arm and tell a web user to "Save in place"
+                        // and use a pack button that's desktop-only. The web never promotes; it re-zips.
+                        crate::project::ProjectHome::WebModel(n) => format!("{n} — from the web"),
                         _ if needs_promote => {
                             "loose files — Save writes them in place; pack them into one portable \
                              .scadproj below"
@@ -430,7 +453,6 @@ pub(crate) fn panel_ui(
                         crate::project::ProjectHome::ScadFile(p) => {
                             format!("{} — a loose .scad (saves in place)", base(p))
                         }
-                        crate::project::ProjectHome::WebModel(n) => format!("{n} — from the web"),
                         crate::project::ProjectHome::Fresh => {
                             "unsaved — one file saves as .scad, two-or-more as .scadproj".into()
                         }
@@ -440,6 +462,47 @@ pub(crate) fn panel_ui(
                             .font(theme::quattro(12.0))
                             .color(theme::TEXT_MUTED),
                     );
+                    // Z.3.10: rename the ITEM on hotchkiss.io — the DOCUMENT's name (what the gallery
+                    // shows and what every future download/publish is called), as opposed to the file
+                    // rows below, which rename files INSIDE it. Gated on a derived MediaItem, exactly
+                    // like the Save button: the app can't know it's an admin without another round
+                    // trip, so it attempts the write and reports a 401/403 plainly.
+                    if view.media_item.0.is_some() {
+                        if writers.item_rename.editing {
+                            ui.horizontal(|ui| {
+                                let resp = ui.add(
+                                    egui::TextEdit::singleline(&mut writers.item_rename.buf)
+                                        .desired_width(220.0),
+                                );
+                                if writers.item_rename.focus {
+                                    resp.request_focus();
+                                    writers.item_rename.focus = false;
+                                }
+                                let enter = ui.input(|inp| inp.key_pressed(egui::Key::Enter));
+                                let esc = ui.input(|inp| inp.key_pressed(egui::Key::Escape));
+                                if esc {
+                                    writers.item_rename.editing = false;
+                                } else if resp.lost_focus() {
+                                    if enter {
+                                        writers.item_rename.commit =
+                                            Some(writers.item_rename.buf.clone());
+                                        writers.cmd.write(PanelCmd::RenameOnSite);
+                                    }
+                                    writers.item_rename.editing = false; // commit-on-enter or cancel-on-blur
+                                }
+                            });
+                        } else if ui
+                            .small_button("Rename on hotchkiss.io…")
+                            .on_hover_text("change this model's title on the site (admin only)")
+                            .clicked()
+                        {
+                            // Seed with the CURRENT name, minus its extension — the field edits a
+                            // title, not a filename.
+                            writers.item_rename.buf = project.doc_stem().unwrap_or_default();
+                            writers.item_rename.editing = true;
+                            writers.item_rename.focus = true;
+                        }
+                    }
                     // Self-documenting: the gold ▸ is the render target; a navy ▸ button moves it.
                     if project.files.len() > 1 {
                         ui.label(
@@ -458,9 +521,11 @@ pub(crate) fn panel_ui(
                     // (editor-shown) row is the selected pill; a dirty file shows the unsaved dot; a red
                     // trash button removes it (never the entry, never the last file).
                     let multi = project.files.len() > 1;
-                    // File MANAGEMENT (set-entry / delete) is desktop-only for now — its handler
-                    // (`project_files_action`) is native. On the web the list is view + switch + edit.
-                    let manage = view.platform.shows_picker();
+                    // Z.3.10: file MANAGEMENT (rename / set-entry / delete) is available on BOTH
+                    // platforms now — every one of these is a pure ProjectDoc edit, handled natively by
+                    // `project_files_action` and on the web by `project_files_action_web`. Only the
+                    // genuinely fs-bound affordances below still ask `shows_picker()`.
+                    let manage = view.platform.manages_files();
                     for (i, f) in project.files.iter().enumerate() {
                         ui.horizontal(|ui| {
                             let is_entry = i == project.entry;
@@ -553,48 +618,50 @@ pub(crate) fn panel_ui(
                         });
                     }
                     ui.separator();
-                    // Project actions — DESKTOP only (the web has no fs picker; web multi-file management
-                    // rides Z.3.4). Open replaces the project; Add imports existing files into it; New adds
-                    // a blank .scad. Open still hosts the picker inline (like the old Model-tab ＋);
-                    // Add/New write a PanelCmd that `project_files_action` handles.
-                    if view.platform.shows_picker() {
-                        ui.horizontal(|ui| {
-                            if ui
+                    // Project actions. Add/New work on BOTH platforms (Z.3.10) — Add reads bytes through
+                    // the browser's own file input on web and rfd on desktop, New is a pure ProjectDoc
+                    // edit; both write a PanelCmd that `project_files_action{,_web}` handles. OPEN stays
+                    // desktop-only: it replaces the whole document, and on the web the document is
+                    // whatever `?model=` handed us — swapping it out would orphan the save-back target.
+                    ui.horizontal(|ui| {
+                        if view.platform.shows_picker()
+                            && ui
                                 .button(format!("{}  Open…", icons::ADD))
                                 .on_hover_text("open a .scad model or a .scadproj project")
                                 .clicked()
-                                && open_dialog.0.is_none()
+                            && open_dialog.0.is_none()
+                        {
+                            #[cfg(not(target_arch = "wasm32"))]
                             {
-                                #[cfg(not(target_arch = "wasm32"))]
-                                {
-                                    open_dialog.0 =
-                                        Some(AsyncComputeTaskPool::get().spawn(async move {
-                                            rfd::AsyncFileDialog::new()
-                                                .add_filter(
-                                                    "OpenSCAD source or project",
-                                                    &["scad", "scadproj"],
-                                                )
-                                                .pick_file()
-                                                .await
-                                                .map(|h| h.path().to_path_buf())
-                                        }));
-                                }
+                                open_dialog.0 =
+                                    Some(AsyncComputeTaskPool::get().spawn(async move {
+                                        rfd::AsyncFileDialog::new()
+                                            .add_filter(
+                                                "OpenSCAD source or project",
+                                                &["scad", "scadproj"],
+                                            )
+                                            .pick_file()
+                                            .await
+                                            .map(|h| h.path().to_path_buf())
+                                    }));
                             }
-                            if ui
-                                .button(format!("{}  Add…", icons::ADD))
-                                .on_hover_text("add existing files to this project")
-                                .clicked()
-                            {
-                                writers.cmd.write(PanelCmd::AddFiles);
-                            }
-                            if ui
-                                .button("New file")
-                                .on_hover_text("add a new empty .scad")
-                                .clicked()
-                            {
-                                writers.cmd.write(PanelCmd::NewFile);
-                            }
-                        });
+                        }
+                        if ui
+                            .button(format!("{}  Add…", icons::ADD))
+                            .on_hover_text("add existing files to this project")
+                            .clicked()
+                        {
+                            writers.cmd.write(PanelCmd::AddFiles);
+                        }
+                        if ui
+                            .button("New file")
+                            .on_hover_text("add a new empty .scad")
+                            .clicked()
+                        {
+                            writers.cmd.write(PanelCmd::NewFile);
+                        }
+                    });
+                    if view.platform.shows_picker() {
                         // The promote CTA (Z.3.7): pack a loose multi-file project into one portable
                         // .scadproj (a native Save-As; then it saves as a container in place). Gold, so it
                         // reads as the deliberate step, not a routine button.
@@ -646,8 +713,9 @@ pub(crate) fn panel_ui(
                         }
                         // Set-entry from the editor (Z.3.6): viewing a file that ISN'T the render
                         // target, one click makes it the entry — no trip back to the Project tab.
-                        // Desktop for now (the SetEntry handler is native).
-                        if view.platform.shows_picker()
+                        // Both platforms since Z.3.10 — `project_files_action_web` handles SetEntry
+                        // in the browser.
+                        if view.platform.manages_files()
                             && project.is_multifile()
                             && project.active != project.entry
                             && ui

@@ -297,17 +297,13 @@ pub(crate) fn apply_switch_file(
             &mut state,
             &mut pending_config,
         );
-        let holds = project
-            .files
-            .get(project.active)
-            .is_some_and(|f| std::path::PathBuf::from(&f.name) == editor.path);
-        if holds {
+        if project.editor_holds(&editor.path) {
             project.flush_active(&editor.text);
         }
         project.set_active(i);
         if let Some(f) = project.files.get(i) {
             editor.text = f.text.clone();
-            editor.path = std::path::PathBuf::from(&f.name);
+            editor.path = project.editor_path(i);
             editor.dirty = f.dirty;
             editor.edited_at = None;
         }
@@ -325,14 +321,7 @@ pub(crate) fn apply_switch_file(
         // Persist the OUTGOING file's live edit before moving off it — but ONLY when the editor actually
         // holds the current active file (a within-project switch). On a FRESH open the editor still carries
         // the PREVIOUS project's text, and flushing that would clobber the new entry.
-        let holds_active = project.files.get(project.active).is_some_and(|f| {
-            let expected = match project.base_dir.as_ref() {
-                Some(b) => b.join(&f.name),
-                None => std::path::PathBuf::from(&f.name),
-            };
-            expected == editor.path
-        });
-        if holds_active {
+        if project.editor_holds(&editor.path) {
             project.flush_active(&editor.text);
             // Sync the flushed edit into the render-root so the entry render sees it.
             if let Some(base) = project.base_dir.clone()
@@ -599,8 +588,9 @@ fn materialize_all(
 
 /// Project-tab file management (Z.3.3): set the render entry, and add / new / delete files. Each
 /// structural change re-derives FileList (the ProjectDoc's native path projection, so switch-indices
-/// stay aligned) and materializes to the render root. Native only — the ops touch the fs + the rfd
-/// picker; web file management rides Z.3.4's render_pack. Runs alongside apply_switch_file; a SwitchFile
+/// stay aligned) and materializes to the render root. The NATIVE half — the ops touch the fs + the rfd
+/// picker; the web half is [`project_files_action_web`], which shares the document rules via
+/// [`crate::file_ops`]. Runs alongside apply_switch_file; a SwitchFile
 /// it emits lands within a frame or two (messages are double-buffered).
 #[cfg(not(target_arch = "wasm32"))]
 #[allow(clippy::too_many_arguments)]
@@ -620,31 +610,24 @@ pub(crate) fn project_files_action(
     // Inline rename (Z.3.3): apply the committed (row, new-name) — rename in the ProjectDoc, MOVE the
     // on-disk/temp copy, then re-render (the render target's name may have changed, and a rename can
     // break a sibling's `include`, which the re-render surfaces).
-    if let Some((i, new_name)) = rename.commit.take() {
+    if let Some((i, want)) = rename.commit.take() {
         let base = project.base_dir.clone();
-        if let Some(old) = project.rename_file(i, &new_name) {
-            let new = project
-                .files
-                .get(i)
-                .map(|f| f.name.clone())
-                .unwrap_or(new_name);
-            if let Some(base) = base.as_ref() {
-                let _ = std::fs::rename(base.join(&old), base.join(&new)); // missing source? a never-materialized file
+        // Z.3.10: the ProjectDoc + editor half is `file_ops::rename` — shared with the web handler, so
+        // the `editor.path` re-point (the invariant a rename is most likely to break) has ONE
+        // implementation and one set of tests. What stays here is the native tail: move the file on
+        // disk, re-aim the render root, kick a path render.
+        if let Some(r) = crate::file_ops::rename(&mut project, &mut editor, i, &want) {
+            rename.renamed = Some((r.old.clone(), r.new.clone()));
+            if base.is_some() {
+                // Both are already rooted under `base_dir` (`file_ops::Renamed`), so this is the move.
+                let _ = std::fs::rename(&r.old, &r.new); // missing source? a never-materialized file
                 // Recompute the render target with the CURRENT names + re-render.
                 let target = if matches!(project.home, crate::project::ProjectHome::ScadProj(_)) {
                     project.entry
                 } else {
                     project.active
                 };
-                if let Some(f) = project.files.get(target) {
-                    scene.source = Some(base.join(&f.name));
-                }
-                // The active file's path changed if IT was renamed — keep the editor pointed at it.
-                if i == project.active
-                    && let Some(f) = project.files.get(i)
-                {
-                    editor.path = base.join(&f.name);
-                }
+                scene.source = Some(project.editor_path(target));
                 free_bases(&pool, state.parts.0.iter().filter_map(|p| p.base).collect());
                 state.reset();
                 kick_render(&pool, &mut job, &mut status, &scene, true);
@@ -700,6 +683,133 @@ pub(crate) fn project_files_action(
                 }));
             }
             _ => {}
+        }
+    }
+}
+
+/// The async bridge from the browser's file picker (off in a JS event + promise) back to a Bevy system
+/// (Z.3.10) — `async-channel` because its ends are `Send + Sync` (Resource-safe), unbounded so the send
+/// never blocks. The wasm twin of [`AddFileDialog`]'s rfd task; same landing point,
+/// [`ProjectDoc::import`](crate::project::ProjectDoc::import).
+#[cfg(target_arch = "wasm32")]
+#[derive(Resource)]
+pub(crate) struct WebFilePick {
+    tx: async_channel::Sender<Vec<(String, Vec<u8>)>>,
+    rx: async_channel::Receiver<Vec<(String, Vec<u8>)>>,
+}
+
+#[cfg(target_arch = "wasm32")]
+impl Default for WebFilePick {
+    fn default() -> Self {
+        let (tx, rx) = async_channel::unbounded();
+        Self { tx, rx }
+    }
+}
+
+/// Land a browser file pick (Z.3.10): import each file into the project — text becomes an editable file,
+/// binary an asset, names de-duplicated — exactly as `poll_add_dialog` does on desktop. Adding files
+/// doesn't re-render: nothing `include`s them until you say so. It DOES dirty the document, since the
+/// saved `.scadproj` now carries more than it did.
+#[cfg(target_arch = "wasm32")]
+pub(crate) fn poll_web_file_pick(
+    bridge: Res<WebFilePick>,
+    mut project: ResMut<crate::project::ProjectDoc>,
+    mut editor: ResMut<EditorBuf>,
+    mut status: ResMut<Status>,
+) {
+    let Ok(picked) = bridge.rx.try_recv() else {
+        return; // nothing picked this frame
+    };
+    let added = picked.len();
+    for (name, bytes) in picked {
+        project.import(&name, bytes);
+    }
+    if added > 0 {
+        editor.dirty = true;
+        status.0 = format!("added {added} file(s) to the project");
+    }
+}
+
+/// Project-tab file management on the WEB (Z.3.10) — the twin of [`project_files_action`] for a document
+/// with no `base_dir`. Every mutation it performs is the same cross-platform [`ProjectDoc`] call; what
+/// differs is everything AROUND them, which is why this is a separate system rather than `cfg` blocks
+/// inside one (the native signature carries five params — rfd, `SceneCfg`, `GeomPool` — that mean nothing
+/// here).
+///
+/// Three things this must get right, each of which is a silent-corruption bug if missed:
+///
+/// 1. **`editor.path` is the buffer's OWNERSHIP TOKEN on web**, not a path. `apply_switch_file` flushes
+///    the live text back into `files[active]` only when `path == files[active].name`; let them diverge
+///    and the next row-click discards every unsaved edit without a word. So a rename of the ACTIVE file
+///    re-points it — at the POST-dedup name, since `rename_file` may return `foo-1.scad` for a typed
+///    `foo.scad`.
+/// 2. **It rehydrates the editor ITSELF instead of writing `SwitchFile`.** `apply_switch_file`'s wasm
+///    branch clears `edited_at`, and the two systems are registered unordered — emitting a switch AND
+///    arming the render is a coin flip on whether the render ever happens.
+/// 3. **The render kick is the armed debounce** (`edited_at = Some(0.0)`), not a direct
+///    [`kick_render_bytes`]: it inherits the "a render is already in flight" guard and needs neither
+///    `GeomPool` nor `Job`. It must be the LAST write to `editor` in the frame.
+#[cfg(target_arch = "wasm32")]
+#[allow(clippy::too_many_arguments)] // a Bevy system — params are dependencies, not a smell
+pub(crate) fn project_files_action_web(
+    mut ev: MessageReader<PanelCmd>,
+    mut project: ResMut<crate::project::ProjectDoc>,
+    mut rename: ResMut<crate::state::RenameUi>,
+    mut editor: ResMut<EditorBuf>,
+    mut pending_config: ResMut<PendingConfig>,
+    mut status: ResMut<Status>,
+    mut state: ModelState,
+    picker: Res<WebFilePick>,
+) {
+    use crate::file_ops::{self, Rerender};
+
+    // The strongest re-render owed this frame; paid once, at the end.
+    let mut owed = Rerender::No;
+    let mut escalate = |r: Rerender| {
+        if r == Rerender::Target || owed == Rerender::No {
+            owed = r;
+        }
+    };
+
+    if let Some((i, want)) = rename.commit.take()
+        && let Some(r) = file_ops::rename(&mut project, &mut editor, i, &want)
+    {
+        // Tell `panel_ui` to move this file's customizer-defaults entry with it.
+        rename.renamed = Some((r.old, r.new));
+        // A rename can orphan a sibling's `use <old.scad>`, and the worker drops a missing ref
+        // silently — so re-render to surface it. Geometry is otherwise untouched: keep the cuts.
+        escalate(Rerender::Same);
+    }
+    // Snapshot the frame's commands (PanelCmd is Copy) so the reader borrow ends before we mutate.
+    for cmd in ev.read().copied().collect::<Vec<_>>() {
+        match cmd {
+            PanelCmd::SetEntry(i) => {
+                escalate(file_ops::set_entry(
+                    &mut project,
+                    &mut editor,
+                    &mut pending_config,
+                    i,
+                ));
+            }
+            PanelCmd::NewFile => {
+                file_ops::new_file(&mut project, &mut editor);
+            }
+            PanelCmd::DeleteFile(i) => match file_ops::delete(&mut project, &mut editor, i) {
+                Ok(r) => escalate(r),
+                Err(e) => status.0 = e.into(),
+            },
+            // The browser's own picker stands in for rfd; `poll_web_file_pick` lands the bytes.
+            PanelCmd::AddFiles => crate::web_host::pick_files(picker.tx.clone()),
+            _ => {}
+        }
+    }
+    match owed {
+        Rerender::No => {}
+        Rerender::Same => editor.edited_at = Some(0.0),
+        Rerender::Target => {
+            // A different model renders now — the old one's parts/cuts/print state is meaningless.
+            state.reset();
+            editor.edited_at = Some(0.0);
         }
     }
 }
@@ -975,14 +1085,17 @@ pub(crate) fn kick_render_bytes(
     status.0 = "rendering".into();
 }
 
-/// The `?model=` fetch in flight (W.3.12): the .scad text arriving from the page URL's `model`
-/// parameter, plus the basename it gives the editor path (so the tab + Save-download carry the real
-/// model name). Spawned by `setup_windowed`, landed by [`poll_model_fetch`].
+/// The `?model=` fetch in flight (W.3.12): the bytes arriving from the page URL's `model` parameter,
+/// plus that URL. The NAME is derived on arrival, not here (Z.3.9) — it prefers the response's
+/// `Content-Disposition` filename and only falls back to the URL, so it can't be computed until the
+/// response lands. Spawned by `setup_windowed`, landed by [`poll_model_fetch`].
 #[cfg(target_arch = "wasm32")]
 #[derive(Resource, Default)]
 pub(crate) struct ModelFetch {
-    pub task: Option<bevy::tasks::Task<Option<Vec<u8>>>>,
-    pub name: String,
+    /// `(bytes, Content-Disposition)` — see [`crate::web_host::fetch_bytes`].
+    pub task: Option<bevy::tasks::Task<Option<crate::web_host::FetchedModel>>>,
+    /// The `?model=` URL, kept for the name fallback when the header is absent/unreadable.
+    pub url: String,
 }
 
 /// Land the `?model=` fetch (W.3.12): on arrival the text seeds the editor exactly like a native file
@@ -1004,8 +1117,11 @@ pub(crate) fn poll_model_fetch(
         return; // still fetching
     };
     fetch.task = None;
-    let name = fetch.name.clone();
-    match result {
+    // Z.3.9: name the document from the RESPONSE (`Content-Disposition`) when it says something, else
+    // from the URL — a `?model=/media/<ref>` basename is an opaque hash, not a name.
+    let name =
+        crate::web_name::model_name(result.as_ref().and_then(|(_, d)| d.as_deref()), &fetch.url);
+    match result.map(|(bytes, _)| bytes) {
         // A `.scadproj` deep-link (Z.3.4): the bytes are a zip (PK magic) → open it as a multi-file
         // project. The entry file seeds the editor (config block stripped + stashed); render_pack sends
         // the whole project to the worker. A bad zip falls through to the text path.
@@ -1553,17 +1669,22 @@ pub(crate) fn save_action(
             scene.bed[2] as f64,
         ],
     };
-    let name = editor
-        .path
-        .file_name()
-        .and_then(|n| n.to_str())
-        .filter(|n| !n.is_empty())
-        .unwrap_or("model.scad");
-    let stem = name
-        .strip_suffix(".scad")
-        .or_else(|| name.strip_suffix(".scadproj"))
-        .unwrap_or(name)
-        .to_string();
+    // Z.3.9: every uploaded part is named off the DOCUMENT, not off `editor.path` (the ACTIVE file) —
+    // which for a `.scadproj` was the archive's inside name, and for a multi-file project was whichever
+    // file the editor happened to be showing. These names are load-bearing: the site types each part by
+    // its extension (see `upload_multipart`).
+    let stem = project.doc_stem().unwrap_or_else(|| {
+        let name = editor
+            .path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .filter(|n| !n.is_empty())
+            .unwrap_or("model.scad");
+        name.strip_suffix(".scad")
+            .or_else(|| name.strip_suffix(".scadproj"))
+            .unwrap_or(name)
+            .to_string()
+    });
     // Z.3.8: the SOURCE variant is the whole `.scadproj` for a project (lifts the destructive-save guard —
     // PUT /variants replaces the set, and now the set carries the archive), else the config-baked `.scad`.
     let (src_name, src_mime, src_bytes) =
@@ -1673,6 +1794,118 @@ pub(crate) fn e2e_autosave(
     *fired = true;
     cmd.write(PanelCmd::SaveToSite);
     info!("fab-gui e2e: save dispatched");
+}
+
+/// The in-flight item-rename job (Z.3.10) — `PUT /media/<ref>` with a JSON title. Yields the new local
+/// document name on success (the handler already knows it) or an error string.
+#[cfg(target_arch = "wasm32")]
+#[derive(Resource, Default)]
+pub(crate) struct RenameItemJob(pub(crate) Option<Task<Result<String, String>>>);
+
+/// The suffix `publish_web` gives the MODEL item of a published trio (`"{title} — model"`, alongside
+/// `— print plates` and `— cover`). A rename re-applies it so the three stay grouped in the gallery;
+/// [`crate::web_name`] strips it back off on load, so the editor only ever shows the bare title.
+#[cfg(target_arch = "wasm32")]
+const ITEM_TITLE_SUFFIX: &str = " — model";
+
+/// Rename the hotchkiss.io media item (Z.3.10): `PUT /media/<ref>` a JSON `{title}` under the ambient
+/// session cookie. The metadata twin of [`save_action`]'s byte write — same origin, same cookie, same
+/// Admin gate (the site's `require_admin_for_mutations` catches every non-safe method), so the failure
+/// modes and their wording match. An absent field KEEPS its value server-side, so sending only `title`
+/// can never disturb the item's visibility.
+///
+/// The affordance is gated on a derived [`MediaItem`], not on being Admin — the app can't know its own
+/// role without an extra round trip, and the existing Save button already takes the same bet: attempt
+/// the write, report the 401/403 plainly. Better a clear rejection than a hidden button.
+#[cfg(target_arch = "wasm32")]
+pub(crate) fn rename_item_action(
+    mut ev: MessageReader<PanelCmd>,
+    mut ui_state: ResMut<crate::state::ItemRenameUi>,
+    item: Res<crate::state::MediaItem>,
+    project: Res<crate::project::ProjectDoc>,
+    mut job: ResMut<RenameItemJob>,
+    mut status: ResMut<Status>,
+) {
+    if !ev.read().any(|c| *c == PanelCmd::RenameOnSite) {
+        return;
+    }
+    let Some(title) = ui_state.commit.take().map(|t| t.trim().to_string()) else {
+        return;
+    };
+    if title.is_empty() {
+        status.0 = "a title is required".into();
+        return;
+    }
+    if job.0.is_some() {
+        status.0 = "already renaming…".into();
+        return;
+    }
+    let Some(url) = item.0.clone() else {
+        status.0 = "this model isn't a hotchkiss.io item".into();
+        return;
+    };
+    // Keep the document's EXTENSION — `ProjectHome::WebModel` holds a filename (Z.3.9) and `doc_stem`
+    // takes its stem, so dropping the extension here would rename the next upload to `<title>` with no
+    // suffix at all.
+    let ext = match &project.home {
+        crate::project::ProjectHome::WebModel(n) => std::path::Path::new(n)
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("scad")
+            .to_string(),
+        _ => "scad".to_string(),
+    };
+    let local = format!("{title}.{ext}");
+    // Serialized by hand: one field, and pulling serde_json into the wasm bundle for it would be silly.
+    // A title can contain `"` and `\`, both of which MUST be escaped or the body is malformed JSON.
+    let body = format!(
+        "{{\"title\":\"{}\"}}",
+        format!("{title}{ITEM_TITLE_SUFFIX}")
+            .replace('\\', "\\\\")
+            .replace('"', "\\\"")
+    );
+    status.0 = format!("renaming to {title}…");
+    job.0 = Some(AsyncComputeTaskPool::get().spawn(async move {
+        let (code, _body) = crate::web_host::fetch_json("PUT", &url, &body).await?;
+        match code {
+            200..=299 => Ok(local),
+            401 => Err("rename rejected (401) — log in as admin on hotchkiss.io first".into()),
+            403 => Err("rename rejected (403) — this session isn't an admin".into()),
+            404 => Err("rename rejected (404) — this model no longer exists on the site".into()),
+            s => Err(format!("rename rejected: HTTP {s}")),
+        }
+    }));
+}
+
+/// Land the item rename (Z.3.10): on success adopt the new name LOCALLY too, so the Project-tab header,
+/// the Save download filename and the publish stem (all of which read `ProjectHome` via
+/// [`ProjectDoc::doc_stem`](crate::project::ProjectDoc::doc_stem)) agree with the site immediately —
+/// rather than waiting for a reload, which the byte route's year-long immutable cache would answer with
+/// the OLD name anyway.
+#[cfg(target_arch = "wasm32")]
+pub(crate) fn poll_rename_item(
+    mut job: ResMut<RenameItemJob>,
+    mut project: ResMut<crate::project::ProjectDoc>,
+    mut status: ResMut<Status>,
+) {
+    let Some(task) = job.0.as_mut() else {
+        return;
+    };
+    let Some(result) = block_on(future::poll_once(task)) else {
+        return;
+    };
+    job.0 = None;
+    match result {
+        Ok(local) => {
+            project.home = crate::project::ProjectHome::WebModel(local);
+            status.0 = "renamed on hotchkiss.io".into();
+            info!("{}", status.0);
+        }
+        Err(e) => {
+            status.0 = e;
+            error!("{}", status.0);
+        }
+    }
 }
 
 /// Land the save-back job: report success or the error (per gui-reactive-standard — the status bar is

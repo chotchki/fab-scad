@@ -83,6 +83,13 @@ web-sys = { version = "0.3", features = [
     "UrlSearchParams",
     "HtmlAnchorElement",
     "Response",
+    # Z.3.9: read `Content-Disposition` off the `?model=` response — the model's human name.
+    "Headers",
+    # Z.3.10: the browser file picker behind the Project tab's "Add…" — the wasm twin of rfd's
+    # multi-pick. `File` extends `Blob`, so its bytes come from the `Blob` feature already above.
+    "HtmlInputElement",
+    "File",
+    "FileList",
     # Save-back upload (W.5.8): multipart POST of the three variants, same-origin cookie.
     "FormData",
     "RequestInit",

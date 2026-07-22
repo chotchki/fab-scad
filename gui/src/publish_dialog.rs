@@ -40,6 +40,7 @@ pub(crate) fn publish_dialog(
     mut dialog: ResMut<PublishDialog>,
     scene: Res<SceneCfg>,
     editor: Res<EditorBuf>,
+    project: Res<crate::project::ProjectDoc>,
 ) {
     if ev.read().any(|c| *c == PanelCmd::Publish) {
         dialog.request_open();
@@ -53,7 +54,7 @@ pub(crate) fn publish_dialog(
 
     // Pre-fill once from the manifest/filename (don't stomp in-progress typing).
     if !dialog.loaded {
-        let (t, d) = default_meta(&scene, &editor);
+        let (t, d) = default_meta(&scene, &editor, &project);
         dialog.title = t;
         dialog.description = d;
         dialog.loaded = true;
@@ -118,17 +119,28 @@ pub(crate) fn publish_dialog(
 
 /// The pre-filled title + description: the nearest `project.toml` (title + publish.description), else the
 /// file stem. Native reads the manifest off `scene.source`; wasm has no fs manifest — the model name lives
-/// on `editor.path` (the `?model=` basename; `scene.source` is unset in the browser), so fall back there.
-fn default_meta(scene: &SceneCfg, editor: &EditorBuf) -> (String, String) {
-    // The best filename we have on either platform: the loaded source path (native) or the editor's
-    // model basename (wasm), minus its extension.
+/// on the DOCUMENT (Z.3.9: the `?model=` item's real title, via `ProjectHome`), with `editor.path` (the
+/// active file) as the last resort.
+fn default_meta(
+    scene: &SceneCfg,
+    editor: &EditorBuf,
+    project: &crate::project::ProjectDoc,
+) -> (String, String) {
+    // The best name we have on either platform: the loaded source path (native), the document's own name
+    // (web), or the editor's active-file basename — minus its extension.
     let stem = || {
         scene
             .source
             .as_deref()
-            .or(Some(editor.path.as_path()))
             .and_then(|p| p.file_stem())
             .map(|s| s.to_string_lossy().into_owned())
+            .or_else(|| project.doc_stem())
+            .or_else(|| {
+                editor
+                    .path
+                    .file_stem()
+                    .map(|s| s.to_string_lossy().into_owned())
+            })
             .unwrap_or_default()
     };
     #[cfg(not(target_arch = "wasm32"))]

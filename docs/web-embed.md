@@ -132,7 +132,8 @@ document.addEventListener('fab-gui:ready', () => splash.remove(), { once: true }
   hidden on web; `?model=` below is the load path that ships first.)
 - **Save / Export** (LIVE since W.3.13): the app builds a `Blob` and triggers an anchor-click
   download — the browser's own save dialog. Save downloads the `.scad` with the live `fab:config`
-  block baked in (named by the loaded model's basename); Export downloads the Bambu multi-plate
+  block baked in — or the whole `.scadproj` for a multi-file project, named by the DOCUMENT (Z.3.9),
+  not by whichever file the editor happens to be showing; Export downloads the Bambu multi-plate
   `plates.3mf` (zipped in memory — `bambu::export_plates_to` into a `Cursor`, byte-identical to the
   desktop file). The host wires up nothing; it just must not sandbox downloads away.
 
@@ -146,7 +147,16 @@ through the worker. No param → the built-in demo, as before.
   a project page deep-links its published model into the tool with a plain `<a href>`.
 - Same-origin fetches just work under the bundle's COOP/COEP. A CROSS-origin model host must send
   CORS (`Access-Control-Allow-Origin`) **and** CORP (`Cross-Origin-Resource-Policy: cross-origin`) —
-  COEP blocks the response without the latter.
+  COEP blocks the response without the latter. NOTE: hotchkiss.io itself is **not** usable as a
+  cross-origin model host today — its `/media` byte route sends CORP but no CORS headers at all
+  (no `CorsLayer` is installed), so only the same-origin `/3d/editor` embed can fetch it.
+- The model's NAME comes off the response, not the URL (Z.3.9): `Content-Disposition:
+  …; filename="<name>"`, read after any redirect. `?model=` points at a media ITEM, whose URL leaf is
+  an opaque `media_ref` — naming the document from that basename put the hash in the panel header, the
+  Save download, and the publish stem. A host that wants its models named must add
+  `Access-Control-Expose-Headers: Content-Disposition` when cross-origin (same-origin needs nothing).
+  Without a readable header the chain falls back to the URL basename, then `model.scad` — degraded,
+  never broken.
 - A failed fetch (404, missing CORS/CORP) reports in the status line and falls back to the demo — the
   app never boots to a dead editor.
 - Includes resolve against the packed lib tree (`libs.json`: BOSL2 + scad-lib), same as editor

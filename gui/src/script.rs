@@ -78,6 +78,10 @@ pub(crate) fn parse_script(s: &str) -> Vec<Action> {
                 "settings" => Some(Action::Settings),
                 "publish" => Some(Action::Publish),
                 "tab" => match it.next()? {
+                    // Phase Z added the Project tab but not its verb, so the file list was the one
+                    // tab the screenshot harness couldn't reach (Z.3.10 needs it — that's where
+                    // rename/new/delete live).
+                    "project" => Some(Action::Tab(Tab::Project)),
                     "model" => Some(Action::Tab(Tab::Model)),
                     "customize" => Some(Action::Tab(Tab::Customize)),
                     "parts" => Some(Action::Tab(Tab::Parts)),
@@ -455,6 +459,11 @@ mod tests {
             acts.as_slice(),
             [Action::Tab(Tab::Parts), Action::EditText(s), Action::Tab(Tab::Model)]
             if s.as_str() == "cube([8, 8, 8])"
+        ));
+        // Z.3.10: the Project tab is reachable too — it's where file management renders.
+        assert!(matches!(
+            parse_script("tab project").as_slice(),
+            [Action::Tab(Tab::Project)]
         ));
     }
 

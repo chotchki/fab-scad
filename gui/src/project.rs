@@ -127,6 +127,26 @@ impl ProjectDoc {
         self.files.iter().map(|f| base.join(&f.name)).collect()
     }
 
+    /// The [`EditorBuf`](crate::state::EditorBuf) path for file `i`: the real on-disk path on native,
+    /// the bare project-relative NAME on the web. The browser has no filesystem, so there `editor.path`
+    /// isn't a location at all — it's an identity TOKEN answering "does the live buffer belong to
+    /// `files[active]`?". One place decides, so the two can't drift.
+    pub(crate) fn editor_path(&self, i: usize) -> PathBuf {
+        let name = self.files.get(i).map(|f| f.name.as_str()).unwrap_or("");
+        match self.base_dir.as_ref() {
+            Some(base) => base.join(name),
+            None => PathBuf::from(name),
+        }
+    }
+
+    /// Does `path` still name `files[active]`? The flush-before-switch predicate: when it's false the
+    /// live buffer is NOT this file's, so flushing it would write one file's text over another's.
+    /// A rename that forgets to re-point `editor.path` silently turns this false, and the next switch
+    /// then discards every unsaved edit — which is why both callers go through here.
+    pub(crate) fn editor_holds(&self, path: &std::path::Path) -> bool {
+        self.active < self.files.len() && self.editor_path(self.active) == path
+    }
+
     /// Flush the editor's live text back into `files[active]` before a switch, so a per-file edit
     /// survives moving away and back. Marks the file dirty when the text actually changed.
     pub(crate) fn flush_active(&mut self, text: &str) {
@@ -280,6 +300,28 @@ impl ProjectDoc {
     /// More than one file (or any asset) ⇒ it saves as a `.scadproj`, not a bare `.scad`.
     pub(crate) fn is_multifile(&self) -> bool {
         self.files.len() + self.assets.len() > 1
+    }
+
+    /// The DOCUMENT's name stem (Z.3.9) — what the whole project is called when it leaves as ONE file:
+    /// a web Save download, a save-back / publish upload, the Publish dialog's pre-filled title. This is
+    /// deliberately NOT a file's name. `editor.path` (what those callers used to read) is the ACTIVE
+    /// file, so a multi-file project published while viewing `lib.scad` uploaded `lib.scadproj`; and for
+    /// a `.scadproj` the entry keeps its own inside-the-archive name (`main.scad`), which is not the
+    /// identity the site knows the item by. `None` for a [`ProjectHome::Fresh`] document — it has no name
+    /// of its own yet, so the caller supplies the fallback (the publish title's slug, or `model`).
+    pub(crate) fn doc_stem(&self) -> Option<String> {
+        let stem_of = |p: &std::path::Path| {
+            p.file_stem()
+                .and_then(|s| s.to_str())
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+        };
+        match &self.home {
+            // The `?model=` name, now the item's real title (Z.3.9) rather than its `media_ref` hash.
+            ProjectHome::WebModel(n) => stem_of(std::path::Path::new(n)),
+            ProjectHome::ScadProj(p) | ProjectHome::ScadFile(p) => stem_of(p),
+            ProjectHome::Fresh => None,
+        }
     }
 
     /// The entry file's project-relative name.
@@ -461,6 +503,36 @@ mod tests {
         assert_eq!(d.remove_file(1).as_deref(), Some("lib.scad"));
         assert_eq!(d.entry, 0);
         assert_eq!(d.active, 0);
+    }
+
+    /// Z.3.9: the document's name is the HOME's, never the active/entry file's — a `.scadproj` keeps its
+    /// own `main.scad` inside, and the archive is still called what the site knows it by.
+    #[test]
+    fn doc_stem_names_the_document_not_the_file() {
+        let mut d = ProjectDoc::single("main.scad", "cube(1);", ProjectHome::Fresh);
+        // Fresh has no name of its own — the caller owns the fallback.
+        assert_eq!(d.doc_stem(), None);
+
+        d.home = ProjectHome::WebModel("Shower Holder.scadproj".into());
+        assert_eq!(d.doc_stem().as_deref(), Some("Shower Holder"));
+        // A web `.scad` deep-link, and the degraded (extension-less basename) fallback path.
+        d.home = ProjectHome::WebModel("Shower Holder.scad".into());
+        assert_eq!(d.doc_stem().as_deref(), Some("Shower Holder"));
+        d.home = ProjectHome::WebModel("019f81dd2c3b72839333a1b5ec961d64".into());
+        assert_eq!(
+            d.doc_stem().as_deref(),
+            Some("019f81dd2c3b72839333a1b5ec961d64")
+        );
+
+        // Native homes read their path, not the entry — even when the two disagree.
+        d.home = ProjectHome::ScadProj(PathBuf::from("/models/Trash Can Brace.scadproj"));
+        assert_eq!(d.doc_stem().as_deref(), Some("Trash Can Brace"));
+        d.home = ProjectHome::ScadFile(PathBuf::from("/models/hook.scad"));
+        assert_eq!(d.doc_stem().as_deref(), Some("hook"));
+
+        // A home with no file component is no name at all.
+        d.home = ProjectHome::WebModel(String::new());
+        assert_eq!(d.doc_stem(), None);
     }
 
     #[test]

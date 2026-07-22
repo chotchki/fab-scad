@@ -433,6 +433,16 @@ impl Platform {
     pub(crate) fn shows_picker(self) -> bool {
         matches!(self, Platform::Desktop)
     }
+
+    /// Whether the Project tab offers file MANAGEMENT — rename / new / delete / set-entry (Z.3.10).
+    /// True everywhere: these are pure [`ProjectDoc`](crate::project::ProjectDoc) edits with no
+    /// filesystem in them, and the web needs rename most of all — a `.scadproj` published before
+    /// Z.3.9 can carry a `media_ref` hash as its entry filename, and the browser was the ONLY place
+    /// you could open it and the ONE place you couldn't fix it. Deliberately a separate predicate from
+    /// [`Self::shows_picker`], which still gates the genuinely fs-bound Open / Save-As affordances.
+    pub(crate) fn manages_files(self) -> bool {
+        true
+    }
 }
 
 /// The co-pack preview summary (U.3.5): the plate/piece count + fill of packing the current print
@@ -530,10 +540,14 @@ pub(crate) enum PanelCmd {
     DeleteFile(usize),
     /// Add a fresh empty `.scad` to the project + switch to it.
     NewFile,
-    /// Open the multi-file picker to import existing files into the project (spawns [`AddFileDialog`]).
-    /// Desktop only — the web has no fs picker.
-    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    /// Open the multi-file picker to import existing files into the project — rfd on desktop
+    /// ([`AddFileDialog`]), the browser's own `<input type=file>` on the web (Z.3.10).
     AddFiles,
+    /// Rename the hotchkiss.io media ITEM this session opened (Z.3.10) — `PUT /media/<ref>` with a JSON
+    /// title, the metadata sibling of [`SaveToSite`]'s byte write. Web only, and only with a derived
+    /// [`MediaItem`]. The new title rides [`ItemRenameUi::commit`], since `PanelCmd` is `Copy`.
+    #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+    RenameOnSite,
     /// Save a multi-file project that has no `.scadproj` home yet (a loose `.scad` that grew a second
     /// file, Z.3.7) — pops a native Save-As `.scadproj` dialog, then adopts that path as the home.
     #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
@@ -552,7 +566,8 @@ pub(crate) struct SaveProjJob(pub(crate) Option<Task<Result<PathBuf, String>>>);
 /// `poll_add_dialog` drains it, importing each file (text → editable, binary → asset) into the project.
 #[derive(Resource, Default)]
 // Native-only: the drainer (`poll_add_dialog`) + the panel's Add button are both desktop-gated, so on
-// wasm the field is inited-but-unread until web file management lands (Z.3.4).
+// wasm this resource is unused entirely: the browser picker (Z.3.10) bridges through
+// `jobs::WebFilePick` instead, since a DOM event can't be polled as a Task.
 #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 pub(crate) struct AddFileDialog(pub(crate) Option<Task<Option<Vec<PathBuf>>>>);
 
@@ -566,6 +581,13 @@ pub(crate) struct RenameUi {
     pub(crate) commit: Option<(usize, String)>,
     /// Request keyboard focus on the next frame the rename field renders (set when editing starts).
     pub(crate) focus: bool,
+    /// The `(old, new)` name of the last APPLIED rename, for `panel_ui` to re-key its per-file
+    /// customizer-defaults map (Z.3.10). That map is a `Local` keyed by `editor.path`, so a rename
+    /// used to miss its own entry and re-capture "as-loaded" defaults from the already-customized
+    /// buffer — permanently poisoning Reset-to-default for that file. The handler that renames is a
+    /// different system and can't reach a `Local`, so it reports the move here instead. Carries the
+    /// POST-dedup name: `rename_file` may hand back `foo-1.scad` when the user typed `foo.scad`.
+    pub(crate) renamed: Option<(PathBuf, PathBuf)>,
 }
 
 /// The round-trip SAVE target for the hotchkiss.io media item this session edits (W.5.7): the
@@ -576,6 +598,26 @@ pub(crate) struct RenameUi {
 /// that isn't an item). Always `None` on desktop (no URL params).
 #[derive(Resource, Default)]
 pub(crate) struct SaveTarget(pub(crate) Option<String>);
+
+/// The media ITEM this session edits (Z.3.10): the `/media/<ref>` URL, one level up from [`SaveTarget`]
+/// and derived from the same `?model=` by the same gate ([`save_target::item`](crate::save_target::item)).
+/// The item owns the WRITABLE METADATA — `PUT` it a JSON title to rename — while its `/variants` child
+/// owns the bytes. `Some` under exactly the same conditions as [`SaveTarget`]; it gates the rename
+/// affordance so the app never dangles a write against a URL that isn't an item.
+#[derive(Resource, Default)]
+pub(crate) struct MediaItem(pub(crate) Option<String>);
+
+/// Inline rename state for the media ITEM's title (Z.3.10) — the document-level twin of [`RenameUi`],
+/// which renames files INSIDE the project. `commit` is the typed title, taken by the handler that PUTs
+/// it. Folded into `PanelWriters` for the same param-cap reason.
+#[derive(Resource, Default)]
+pub(crate) struct ItemRenameUi {
+    pub(crate) editing: bool,
+    pub(crate) buf: String,
+    /// Request keyboard focus on the next frame the field renders (set when editing starts).
+    pub(crate) focus: bool,
+    pub(crate) commit: Option<String>,
+}
 
 /// Panel → seam outputs, written by `panel_ui` each frame and read by the 3D systems: `over_ui`
 /// yields the camera orbit when the pointer is on a panel; `width_px`/`top_px`/`bottom_px` inset the

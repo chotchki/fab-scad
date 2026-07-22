@@ -112,15 +112,9 @@ pub(crate) fn setup_windowed(
     if scene.source.is_none() {
         if let Some(url) = crate::web_host::query_param("model") {
             status.0 = format!("fetching {url}");
-            model_fetch.name = url
-                .rsplit('/')
-                .next()
-                .filter(|n| !n.is_empty())
-                .unwrap_or("model.scad")
-                .split('?')
-                .next()
-                .unwrap_or("model.scad")
-                .to_string();
+            // Z.3.9: keep the URL, not a name derived from it — `poll_model_fetch` names the document
+            // from the response's `Content-Disposition` and only falls back to this basename.
+            model_fetch.url = url.clone();
             model_fetch.task = Some(
                 bevy::tasks::AsyncComputeTaskPool::get()
                     // Z.3.4: fetch BYTES — a `?model=` may point at a `.scadproj` (a zip), which
@@ -129,6 +123,12 @@ pub(crate) fn setup_windowed(
             );
         } else {
             editor.text = WEB_DEMO.to_string();
+            // Z.3.10: `editor.path` NAMES the buffer's owning file on the web — `apply_switch_file`
+            // flushes the live text back only when `path == files[active].name` (jobs.rs). The demo
+            // seeded the buffer without it, so the very first switch away silently dropped whatever
+            // had been typed into the demo. Harmless while the web had no way to add a second file;
+            // not harmless now that it does.
+            editor.path = std::path::PathBuf::from("demo.scad");
             editor.edited_at = Some(0.0);
             *project = crate::project::ProjectDoc::single(
                 "demo.scad",

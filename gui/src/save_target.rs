@@ -16,6 +16,15 @@
 /// survives untouched, so a prefixed deploy needs no config. Already-a-collection (`/media/<ref>/variants`)
 /// and byte URLs (`/media/file/<key>`) fall through to None (never double-append, never write bytes).
 pub(crate) fn derive(model_url: &str) -> Option<String> {
+    item(model_url).map(|path| format!("{path}/variants"))
+}
+
+/// The ITEM resource itself (`/media/<ref>`) for a `?model=` value — the same gate as [`derive`], one
+/// level up. This is the `PUT …{title}` metadata target (Z.3.10, media-design.md §5 `controls.metadata`)
+/// and the `DELETE` target: the item's WRITABLE METADATA lives on the item, its BYTES on `/variants`.
+/// Kept as the single place that decides "is this `?model=` a media item at all", so the rename and the
+/// save-back can never disagree about which URLs are writable.
+pub(crate) fn item(model_url: &str) -> Option<String> {
     // The item resource is the bare path — drop the query and any fragment.
     let path = model_url
         .split(['?', '#'])
@@ -27,7 +36,7 @@ pub(crate) fn derive(model_url: &str) -> Option<String> {
     let mut tail = path.rsplitn(3, '/');
     let last = tail.next().unwrap_or("");
     let prev = tail.next().unwrap_or("");
-    (prev == "media" && !last.is_empty() && last != "file").then(|| format!("{path}/variants"))
+    (prev == "media" && !last.is_empty() && last != "file").then(|| path.to_string())
 }
 
 #[cfg(test)]
@@ -59,6 +68,30 @@ mod tests {
             derive("https://hotchkiss.io/media/xyz").as_deref(),
             Some("https://hotchkiss.io/media/xyz/variants"),
         );
+    }
+
+    /// Z.3.10: the metadata (rename) target is the ITEM, the bytes target its `/variants` child — one
+    /// gate, so the two can never disagree about which `?model=` URLs are writable.
+    #[test]
+    fn item_is_the_bytes_target_one_level_up() {
+        assert_eq!(
+            item("/media/0198f0deadbeef?format=project").as_deref(),
+            Some("/media/0198f0deadbeef"),
+        );
+        assert_eq!(
+            item("https://hotchkiss.io/media/xyz").as_deref(),
+            Some("https://hotchkiss.io/media/xyz"),
+        );
+        // Same refusals as `derive` — nothing is renameable that isn't saveable.
+        for url in [
+            "/media/file/deadbeefdeadbeef",
+            "/media/abc/variants",
+            "https://example.com/thing.scad",
+            "/media/",
+        ] {
+            assert_eq!(item(url), None, "{url}");
+            assert_eq!(derive(url), None, "{url}");
+        }
     }
 
     #[test]

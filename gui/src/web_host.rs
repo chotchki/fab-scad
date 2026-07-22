@@ -33,6 +33,53 @@ pub(crate) fn download_bytes(filename: &str, mime: &str, bytes: &[u8]) -> bool {
     ok
 }
 
+/// Open the browser's file picker and send every chosen file's `(name, bytes)` down `tx` (Z.3.10) — the
+/// wasm twin of the desktop rfd multi-picker, feeding the same `ProjectDoc::import`. A cancelled pick
+/// fires no `change` event, so nothing is ever sent and the caller simply keeps waiting; there is no
+/// in-flight guard because a second picker is harmless.
+///
+/// The `<input>` is never attached to the DOM, exactly like the download anchor above — one less node to
+/// clean up on the cancel path, which has no event to hang the cleanup off. Bytes come from
+/// `Blob::array_buffer` (a `File` IS a `Blob`), so no `FileReader` and no extra web-sys feature.
+pub(crate) fn pick_files(tx: async_channel::Sender<Vec<(String, Vec<u8>)>>) {
+    let go = || -> Option<()> {
+        let document = web_sys::window()?.document()?;
+        let input: web_sys::HtmlInputElement =
+            document.create_element("input").ok()?.dyn_into().ok()?;
+        input.set_type("file");
+        input.set_multiple(true);
+        let el = input.clone();
+        // `once_into_js` — the picker fires `change` at most once, and the closure frees itself after.
+        let handler = wasm_bindgen::closure::Closure::once_into_js(move |_: web_sys::Event| {
+            let files = el.files();
+            wasm_bindgen_futures::spawn_local(async move {
+                let mut out = Vec::new();
+                for i in 0..files.as_ref().map_or(0, |l| l.length()) {
+                    let Some(file) = files.as_ref().and_then(|l| l.get(i)) else {
+                        continue;
+                    };
+                    let name = file.name();
+                    match wasm_bindgen_futures::JsFuture::from(file.array_buffer()).await {
+                        Ok(buf) => out.push((name, js_sys::Uint8Array::new(&buf).to_vec())),
+                        // One unreadable file doesn't sink the others — report it and carry on.
+                        Err(_) => bevy::log::error!("could not read {name} from the file picker"),
+                    }
+                }
+                // Unbounded, so this can only fail if the app is tearing down — nothing to do then.
+                let _ = tx.try_send(out);
+            });
+        });
+        input
+            .add_event_listener_with_callback("change", handler.unchecked_ref())
+            .ok()?;
+        input.click();
+        Some(())
+    };
+    if go().is_none() {
+        bevy::log::error!("could not open the browser file picker");
+    }
+}
+
 /// The page URL's `?name=` query value, percent-decoded (W.3.12) — how a host page hands the app a
 /// model reference (`?model=<url>`). `None` when absent or the URL machinery is unavailable.
 pub(crate) fn query_param(name: &str) -> Option<String> {
@@ -124,6 +171,30 @@ pub(crate) async fn fetch_form(
     send(url, &init).await
 }
 
+/// PUT/POST a JSON body to `url`, returning `(status, body)`. The item-metadata route
+/// (`PUT /media/<ref>`, media-design.md §5 `controls.metadata`) takes JSON, not a form — unlike the
+/// variant routes — so it needs an explicit `Content-Type`: axum's `Json` extractor 415s without one.
+/// That's the only reason this can't reuse [`fetch_form`]. Same-origin cookie auth, as above; the route
+/// is Admin-gated by the site's `require_admin_for_mutations` (any non-safe method), so a logged-out
+/// caller gets a 401/403 rather than a silent no-op.
+pub(crate) async fn fetch_json(
+    method: &str,
+    url: &str,
+    body: &str,
+) -> Result<(u16, String), String> {
+    let headers =
+        web_sys::Headers::new().map_err(|_| "could not build request headers".to_string())?;
+    headers
+        .set("content-type", "application/json")
+        .map_err(|_| "could not set the JSON content-type".to_string())?;
+    let init = web_sys::RequestInit::new();
+    init.set_method(method);
+    init.set_body(&wasm_bindgen::JsValue::from_str(body));
+    init.set_headers(&headers);
+    init.set_credentials(web_sys::RequestCredentials::SameOrigin);
+    send(url, &init).await
+}
+
 /// GET `url`, returning just the HTTP status code — the page-exists check before create-or-update. Public
 /// (no admin needed) but sent same-origin so any auth-gated variant still resolves.
 pub(crate) async fn fetch_status(url: &str) -> Result<u16, String> {
@@ -154,12 +225,22 @@ async fn send(url: &str, init: &web_sys::RequestInit) -> Result<(u16, String), S
     Ok((status, body))
 }
 
+/// A fetched `?model=` body plus the response's raw `Content-Disposition` value (Z.3.9) — the model's
+/// bytes and the name the serving host gave them.
+pub(crate) type FetchedModel = (Vec<u8>, Option<String>);
+
 /// Fetch `url` as raw BYTES (Z.3.4) — the `?model=` body. Relative URLs resolve against the PAGE (not the
 /// bundle base), so a host page can point at its own assets; same-origin always works under the bundle's
 /// COOP/COEP, cross-origin needs CORS + CORP on the model host (docs/web-embed.md). Bytes (not text) so a
 /// `.scadproj` (a zip) survives — a `.scad` round-trips fine (its bytes decode back to the same text).
 /// `None` on any failure — the caller reports and falls back to the demo.
-pub(crate) async fn fetch_bytes(url: &str) -> Option<Vec<u8>> {
+///
+/// Also returns the response's `Content-Disposition` value (Z.3.9), which is where the model's REAL name
+/// lives: `?model=` points at a media ITEM, so its URL basename is an opaque hash. `fetch` follows the
+/// site's 307 to the byte route, so this reads the header off that FINAL response. `None` for the header
+/// on a cross-origin host that doesn't send `Access-Control-Expose-Headers: Content-Disposition` — the
+/// caller's fallback chain ([`crate::web_name::model_name`]) then lands on today's basename.
+pub(crate) async fn fetch_bytes(url: &str) -> Option<FetchedModel> {
     use wasm_bindgen_futures::JsFuture;
     let win = web_sys::window()?;
     let resp = JsFuture::from(win.fetch_with_str(url)).await.ok()?;
@@ -167,6 +248,9 @@ pub(crate) async fn fetch_bytes(url: &str) -> Option<Vec<u8>> {
     if !resp.ok() {
         return None;
     }
+    // Read the header BEFORE draining the body — `headers()` is cheap and infallible-ish, but doing it
+    // first keeps the failure of one from costing the other.
+    let disposition = resp.headers().get("content-disposition").ok().flatten();
     let buf = JsFuture::from(resp.array_buffer().ok()?).await.ok()?;
-    Some(js_sys::Uint8Array::new(&buf).to_vec())
+    Some((js_sys::Uint8Array::new(&buf).to_vec(), disposition))
 }

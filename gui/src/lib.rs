@@ -56,6 +56,9 @@ mod customize;
 mod cuts;
 mod editor_brackets; // W.3.38 — bracket matching (pure token-based matcher, unit-tested)
 mod editor_indent; // W.3.35 — Tab/Shift+Tab re-indents the editor selection (pure transform, unit-tested)
+// Z.3.10 — Project-tab document mutations (rename/new/delete/set-entry) as cfg-free, unit-tested pure
+// functions. The per-platform handlers are wiring shims over these; the RULES live here.
+mod file_ops;
 #[cfg(test)]
 mod harness_tests;
 mod highlight;
@@ -84,6 +87,10 @@ mod script;
 mod state;
 mod theme; // W.1 — central egui Visuals/Style + fonts + the 3D palette, ported from hotchkiss.io
 mod view; // U.3.11 — headless script-driven state-assertion tests for the Parts drill
+// Web model NAMING (Z.3.9) — pure string logic (native-tested), no web-sys. Prefers the response's
+// `Content-Disposition` filename over the `?model=` basename, which is an opaque `media_ref` hash.
+#[cfg(any(target_arch = "wasm32", test))]
+mod web_name;
 #[allow(unused_imports)]
 // each module re-exports its whole surface; the builders below use most of it
 pub(crate) use {
@@ -243,6 +250,11 @@ fn run_windowed(scene: SceneCfg, shot: Option<PathBuf>) {
     .init_resource::<DraggingCut>()
     .init_resource::<project::ProjectDoc>()
     .init_resource::<RenameUi>()
+    // Z.3.10: panel_ui reads both on EVERY platform (the rename affordance is gated on
+    // MediaItem being Some, which it only is on the web) — so both must exist everywhere
+    // panel_ui runs, or the Res lookup panics.
+    .init_resource::<MediaItem>()
+    .init_resource::<ItemRenameUi>()
     .init_resource::<OpenDialog>()
     .init_resource::<AddFileDialog>()
     .init_resource::<print::ExportJob>()
@@ -314,9 +326,10 @@ fn run_windowed(scene: SceneCfg, shot: Option<PathBuf>) {
         )
             .chain(),
     );
-    // Z.3.3: the Project-tab file management (set entry, add/new/delete files). Native only — the ops
-    // materialize to the render root + drive the rfd multi-picker; web file management rides Z.3.4's
-    // render_pack path. Registered ahead of nothing in particular; SwitchFiles it emits land next frame.
+    // Z.3.3: the Project-tab file management (set entry, add/new/delete files). This is the NATIVE
+    // half — the ops materialize to the render root + drive the rfd multi-picker; the web half is
+    // `project_files_action_web` (registered above), sharing the document rules via `file_ops`.
+    // Registered ahead of nothing in particular; SwitchFiles it emits land next frame.
     #[cfg(not(target_arch = "wasm32"))]
     app.init_resource::<state::SaveProjJob>().add_systems(
         Update,
@@ -352,6 +365,15 @@ fn run_windowed(scene: SceneCfg, shot: Option<PathBuf>) {
     // the save-back (W.5.7/.8): derive the `PUT /media/<ref>/variants` target from the SAME `?model=`
     // deep-link (the stable ref rides its path — no separate param), which gates the Save affordance,
     // and run the save-mesh export + upload job.
+    // Z.3.10: the web twin of `project_files_action` — rename / new / delete / set-entry against the
+    // in-memory ProjectDoc. Registered here rather than beside its native sibling because the two take
+    // different params (no rfd, no render root); see its doc comment for the ordering hazard that keeps
+    // it from reusing `SwitchFile`.
+    #[cfg(target_arch = "wasm32")]
+    app.init_resource::<jobs::WebFilePick>().add_systems(
+        Update,
+        (jobs::project_files_action_web, jobs::poll_web_file_pick),
+    );
     #[cfg(target_arch = "wasm32")]
     app.init_resource::<jobs::ModelFetch>()
         .init_resource::<jobs::SaveJob>()
@@ -359,10 +381,19 @@ fn run_windowed(scene: SceneCfg, shot: Option<PathBuf>) {
         .init_resource::<publish_web::CoverSink>()
         .init_resource::<publish_dialog::PublishDialog>()
         .init_resource::<clipboard::WebPaste>()
+        .init_resource::<jobs::RenameItemJob>()
         .insert_resource(SaveTarget(
             crate::web_host::query_param("model")
                 .as_deref()
                 .and_then(save_target::derive),
+        ))
+        // Z.3.10: the ITEM behind that same `?model=` — its metadata (the title) is a `PUT` on the item
+        // itself, one level up from the `/variants` bytes. Same gate, so rename and save-back can never
+        // disagree about which URLs are writable.
+        .insert_resource(MediaItem(
+            crate::web_host::query_param("model")
+                .as_deref()
+                .and_then(save_target::item),
         ))
         // W.5.9: `?e2e=save` auto-fires the Save once the model renders (headless boot-gate hook).
         .insert_resource(jobs::E2eSave(
@@ -375,6 +406,10 @@ fn run_windowed(scene: SceneCfg, shot: Option<PathBuf>) {
                 jobs::save_action,
                 jobs::poll_save,
                 jobs::e2e_autosave,
+                // Z.3.10: rename the media ITEM on the site (PUT /media/<ref> {title}) — the metadata
+                // twin of the save-back's byte write.
+                jobs::rename_item_action,
+                jobs::poll_rename_item,
                 // W.3.29.4/.3: the web Publish flow (create a NEW /3d item, with cover) — distinct from
                 // the save-back. A phased state machine: render → offscreen cover → capture → upload.
                 publish_web::publish_web_kick,
@@ -429,6 +464,11 @@ fn run_screenshot(scene: SceneCfg, png: PathBuf) {
         .insert_resource(ScreenshotPng(png))
         .init_resource::<project::ProjectDoc>()
         .init_resource::<RenameUi>()
+        // Z.3.10: panel_ui reads both on EVERY platform (the rename affordance is gated on
+        // MediaItem being Some, which it only is on the web) — so both must exist everywhere
+        // panel_ui runs, or the Res lookup panics.
+        .init_resource::<MediaItem>()
+        .init_resource::<ItemRenameUi>()
         .init_resource::<OpenDialog>()
         .init_resource::<AddFileDialog>()
         .insert_resource(Parts(vec![Part::default()]))
@@ -514,6 +554,11 @@ fn run_scripted(scene: SceneCfg, actions: Vec<Action>) {
     .init_resource::<Feas>()
     .init_resource::<project::ProjectDoc>()
     .init_resource::<RenameUi>()
+    // Z.3.10: panel_ui reads both on EVERY platform (the rename affordance is gated on
+    // MediaItem being Some, which it only is on the web) — so both must exist everywhere
+    // panel_ui runs, or the Res lookup panics.
+    .init_resource::<MediaItem>()
+    .init_resource::<ItemRenameUi>()
     .init_resource::<OpenDialog>()
     .init_resource::<AddFileDialog>()
     .init_resource::<print::ExportJob>()

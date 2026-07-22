@@ -126,15 +126,21 @@ pub(crate) fn publish_web_kick(
             scene.bed[2] as f64,
         ],
     };
-    // Name the source from the deep-linked model's basename when there is one; else (a pasted buffer with no
-    // `?model=`) from the provided TITLE — so the published source reads `<title-slug>.scad`, matching the
-    // desktop path (W.3.33). Everything downstream (mesh + plate + cover names) keys off `stem`.
-    let stem = editor
-        .path
-        .file_stem()
-        .and_then(|n| n.to_str())
-        .filter(|n| !n.is_empty())
-        .map(str::to_string)
+    // Name the source from the DOCUMENT when it has a name of its own (Z.3.9 — the deep-linked model's
+    // real title, or the on-disk container; NOT `editor.path`, which is the active file); else (a pasted
+    // buffer with no `?model=`) from the provided TITLE — so the published source reads
+    // `<title-slug>.scad`, matching the desktop path (W.3.33). Everything downstream (mesh + plate +
+    // cover names) keys off `stem`.
+    let stem = project
+        .doc_stem()
+        .or_else(|| {
+            editor
+                .path
+                .file_stem()
+                .and_then(|n| n.to_str())
+                .filter(|n| !n.is_empty())
+                .map(str::to_string)
+        })
         .unwrap_or_else(|| {
             let slug = contract::slugify(&title);
             if slug.is_empty() {

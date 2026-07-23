@@ -6,7 +6,7 @@
 //! geometry path bit-for-bit. `rands` (non-deterministic) is deliberately NOT here — it needs the
 //! seeded-RNG discipline (I.4.3). Names here MUST match [`is_builtin`].
 //!
-//! The list/string group (I.4.2) is the glue BOSL2 lives on: `len`/`concat`/`reverse` are vector
+//! The list/string group (I.4.2) is the glue BOSL2 lives on: `len`/`concat` are vector
 //! surgery, `chr`/`ord` bridge codepoints↔strings, `str` routes through the shared [`fmt`](super::fmt)
 //! formatter (so echo at I.5 refines ONE place), and `lookup`/`search` are the table primitives —
 //! `lookup` linear-interpolates + clamps at the ends, `search` follows `func.cc`'s per-match protocol
@@ -57,7 +57,6 @@ pub(super) fn is_builtin(name: &str) -> bool {
             | "str"
             | "chr"
             | "ord"
-            | "reverse"
             | "lookup"
             | "search"
             | "rands"
@@ -136,7 +135,6 @@ pub(super) fn apply(name: &str, pos: &[Value]) -> Value {
         "str" => str_concat(pos),
         "chr" => chr(pos),
         "ord" => ord(pos),
-        "reverse" => reverse(pos),
         "lookup" => lookup(pos),
         "search" => search(pos),
         // `rands` is intercepted by `run_builtin` (it needs the evaluator's advancing RandStream for the
@@ -505,16 +503,6 @@ fn ord(pos: &[Value]) -> Value {
             Some(c) => Value::Num(f64::from(c as u32)),
             None => Value::Undef, // ord("") → undef
         },
-        _ => Value::Undef,
-    }
-}
-
-/// `reverse(x)` — a list or string reversed. Number / range / undef / function → `undef`.
-fn reverse(pos: &[Value]) -> Value {
-    match pos.first() {
-        Some(Value::NumList(xs)) => Value::num_list(xs.iter().rev().copied().collect::<Vec<_>>()),
-        Some(Value::List(xs)) => Value::list(xs.iter().rev().cloned().collect::<Vec<_>>()),
-        Some(Value::Str(s)) => Value::string(s.chars().rev().collect::<String>()),
         _ => Value::Undef,
     }
 }

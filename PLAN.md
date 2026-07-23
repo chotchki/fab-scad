@@ -94,8 +94,6 @@ added 2026-07-07.
 
 ## Backlog (not yet phased)
 
-- **Parser gap (AJ finding #1, 2026-07-23): `let`/`assert`/`echo` chains only parse at expression-HEAD position** — `x = 2 * let(a = 1) a;` is "expected an expression" for us but valid upstream (bison folds the chain as any operand, consuming rightward). Found by the fattened generator's first run; no corpus file exercises it (the sweep would have caught it), so it's unpinned-but-real. Fix belongs in BOTH parsers (recursive + spine) with the differential oracle guarding; the generator emits parenthesized chains meanwhile.
-
 - **Expression-import VALUES: `import("data.json")` → object + `dxf_dim()`/`dxf_cross()` (the last two fixable echo-diff families, 2026-07-23).** Both are import-SUBSYSTEM work, not evaluator gaps: JSON import needs the needs-fixpoint to carry a VALUE need (today it resolves scad sources + meshes only) plus a JSON parser (dep decision: serde_json vs hand-rolled — wasm + dep-policy call for chotchki), and dxf_dim reads dimension entities out of a DXF (the legacy surface next to the J.4.2 import backlog). Goldens exist for both (import-json ×2, dim-all) so acceptance is ready-made. Sequence with the J.4.2.x import items.
 
 

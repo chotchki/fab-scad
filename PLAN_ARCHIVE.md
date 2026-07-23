@@ -1055,3 +1055,13 @@ deferred from J.5.2b on 2026-07-10.
 - [x] AJ.6 - gen_diff fuzz target live (bytes→seed→whole-surface program→cache A/B bit-identity; 18,341 runs/26s local smoke, clean) + fuzz.yml nightly carries it; parse corpus seeded with 12 generated whole-surface programs
 - [x] AJ.7 - soak: 4000-seed parse-validity 100% (gate + parse tests), 300-seed cache-A/B with bit-identical messages AND STL bytes as a standing CI test (tests/gen_ab.rs, 3s), 200-seed oracle diff, 18k fuzz execs — findings: the parser chain-operand gap (backlogged), the generator 2D-mixing bug (fixed), the oracle version skew (classified in-harness)
 
+---
+
+## 2026-07-23
+
+## Phase AK - gen-diff fix cycles (chotchki 2026-07-23: "a few cycles of this ahead of ourselves")
+  Meta - triage of the AJ findings KILLED both as engine bugs: (1) chain-as-operand (`a * let(…) b`) — the oracle REJECTS it too (probed all positions: binary/unary operands illegal, vector-element/ternary-branch/paren legal and we match) → the backlog entry was wrong, removed; (2) dimension mixing — partition_children already implements first-child-wins + warn-and-drop, pinned by the mixing_* tests; the seed-18 "failure" was the oracle's OFF EXPORT refusing a 2D top-level result AFTER an eval that agreed with ours. The real gap is the HARNESS: oracle::run discards echo when the render fails, so agreement was invisible. AK = fix the harness lens, then crank the cycle.
+- [x] AK.1 - backlog corrected (chain-operand entry removed — upstream rejects `a * let(…) b` too, probed on every position; we match on all the legal ones); generator comment updated
+- [x] AK.2 - harness lens: gen-diff uses the raw oracle Report — echo compares even when the EXPORT fails (2D top level etc.), counted as match-with-asterisk; timeouts stay OracleFailed; RAW timing medians + startup shown (the adjusted median saturated to 0); version-skew rows auto-classified when the program uses multi-letter swizzles
+- [x] AK.3 - THREE cycles run. Findings: (1) `%` background modifier EVALUATES upstream (echoes fire; only geometry is excluded) — our AA.1 assumption that % matched * was oracle-refuted; fixed via GTask::DiscardAbove (evaluate, then drop the subtree geometry) at both the module and if sites; (2) `reverse` is NOT a core builtin ("Ignoring unknown function" upstream — it is BOSL2's) — removed from builtins/generator/pins, census 94/94 unchanged proving BOSL2 unaffected; (3) seed-209-class order gaps were consequence of (1). FINAL: 3000 seeds → 2983 exact echo-match + 17 auto-classified skew + 25 export-fail-with-agreeing-eval + 0 diverged + 0 failed either side. Raw timing: ours 2.4ms vs oracle 55ms/seed (≈ all process startup)
+

@@ -25,15 +25,21 @@ const ORACLE_FLAGS: &[&str] = &["textmetrics", "object-function"];
 
 /// One seed's outcome.
 enum Outcome {
-    /// Echo streams match; timing captured (ours, oracle-minus-baseline).
-    Match { ours_ms: f64, oracle_ms: f64 },
+    /// Echo streams match; timing captured (ours, oracle-minus-baseline). `export_failed` marks
+    /// a run whose EVAL agreed but whose oracle EXPORT refused the result (e.g. a 2D top level →
+    /// "not a 3D object") — agreement, with an asterisk, counted separately.
+    Match {
+        ours_ms: f64,
+        oracle_ms: f64,
+        export_failed: bool,
+    },
     /// First differing echo line.
     Diverge {
         line: usize,
         ours: String,
         oracle: String,
     },
-    /// The oracle refused the program (timeout / render failure) — counted, not compared.
+    /// The oracle produced NOTHING comparable (timeout / spawn failure) — counted, not compared.
     OracleFailed(String),
     /// OUR side errored (a generated program must never do that — a generator/evaluator bug).
     OursFailed(String),
@@ -71,21 +77,39 @@ pub fn run(seeds: u32, timeout_secs: u64, md: bool) -> Result<()> {
     }
 
     let mut matches = 0u32;
+    let mut export_fails = 0u32;
     let mut ours_times = Vec::new();
     let mut oracle_times = Vec::new();
     let mut diverges: Vec<(u32, usize, String, String)> = Vec::new();
+    let mut skew: Vec<u32> = Vec::new();
     let mut oracle_fails: Vec<(u32, String)> = Vec::new();
     let mut ours_fails: Vec<(u32, String)> = Vec::new();
 
     for seed in 0..seeds {
         let src = fab_gen::generate(seed);
-        match diff_one(&src, timeout, flags, baseline) {
-            Outcome::Match { ours_ms, oracle_ms } => {
+        match diff_one(&src, timeout, flags) {
+            Outcome::Match {
+                ours_ms,
+                oracle_ms,
+                export_failed,
+            } => {
                 matches += 1;
+                export_fails += u32::from(export_failed);
                 ours_times.push(ours_ms);
                 oracle_times.push(oracle_ms);
             }
-            Outcome::Diverge { line, ours, oracle } => diverges.push((seed, line, ours, oracle)),
+            Outcome::Diverge { line, ours, oracle } => {
+                // Version-skew classification: a pre-July-2026 oracle lacks multi-letter swizzles,
+                // so a divergence in a program that USES one is skew, not a finding.
+                let multi_swizzle = [".wy", ".rgba", ".xyz", ".xyxy", ".xr"]
+                    .iter()
+                    .any(|m| src.contains(m));
+                if skew_swizzles && multi_swizzle {
+                    skew.push(seed);
+                } else {
+                    diverges.push((seed, line, ours, oracle));
+                }
+            }
             Outcome::OracleFailed(why) => oracle_fails.push((seed, why)),
             Outcome::OursFailed(why) => ours_fails.push((seed, why)),
         }
@@ -116,16 +140,22 @@ pub fn run(seeds: u32, timeout_secs: u64, md: bool) -> Result<()> {
     }
     println!();
     println!(
-        "{}{matches}/{seeds} echo-match. {} diverged, {} oracle-failed, {} ours-failed.",
+        "{}{matches}/{seeds} echo-match ({export_fails} oracle-export-failed with agreeing eval). {} diverged, {} version-skew (multi-swizzle), {} oracle-failed, {} ours-failed.",
         if md { "**" } else { "" },
         diverges.len(),
+        skew.len(),
         oracle_fails.len(),
         ours_fails.len(),
     );
+    let base_ms = baseline.as_secs_f64() * 1e3;
     println!(
-        "timing (median, startup-adjusted): ours {ours_med:.1} ms, oracle {oracle_med:.1} ms → oracle/ours {ratio:.2}x{}",
+        "timing (medians, RAW): ours {ours_med:.1} ms, oracle {oracle_med:.1} ms (incl. ~{base_ms:.0} ms process startup; adjusted ≈ {:.1} ms) → raw oracle/ours {ratio:.2}x{}",
+        (oracle_med - base_ms).max(0.0),
         if md { "**" } else { "" }
     );
+    if !skew.is_empty() {
+        println!("  skew seeds (oracle predates multi-swizzles): {skew:?}");
+    }
     for (seed, line, ours, oracle) in &diverges {
         println!("  seed {seed}: echo line {line} — ours `{ours}` vs oracle `{oracle}`");
     }
@@ -139,7 +169,7 @@ pub fn run(seeds: u32, timeout_secs: u64, md: bool) -> Result<()> {
 }
 
 /// Diff one program: ours (eval + mesh lower, timed) vs the oracle (timed, baseline-adjusted).
-fn diff_one(src: &str, timeout: Duration, flags: &[&str], baseline: Duration) -> Outcome {
+fn diff_one(src: &str, timeout: Duration, flags: &[&str]) -> Outcome {
     use crate::backend::{ManifoldBackend, build_geo};
 
     // OURS — the same span the oracle's render covers: parse → eval → lower to a mesh.
@@ -158,8 +188,10 @@ fn diff_one(src: &str, timeout: Duration, flags: &[&str], baseline: Duration) ->
     let _solid = build_geo(&tree, &ManifoldBackend); // None (empty) is fine — timing parity is the point
     let ours_ms = start.elapsed().as_secs_f64() * 1e3;
 
-    // ORACLE.
-    let run = match oracle::run_with_flags(src, timeout, flags) {
+    // ORACLE — the raw Report, so a failed EXPORT (2D top level, empty result) still hands us
+    // the eval's echo for comparison (AK.2: agreement was invisible through run_with_flags's
+    // throw-away-on-failure). Only a timeout / spawn failure is uncomparable.
+    let report = match oracle_report(src, timeout, flags) {
         Ok(r) => r,
         Err(e) => {
             let first = format!("{e}")
@@ -170,7 +202,10 @@ fn diff_one(src: &str, timeout: Duration, flags: &[&str], baseline: Duration) ->
             return Outcome::OracleFailed(first);
         }
     };
-    let oracle_ms = run.duration.saturating_sub(baseline).as_secs_f64() * 1e3;
+    if report.timed_out {
+        return Outcome::OracleFailed("timeout".to_string());
+    }
+    let oracle_ms = report.duration.as_secs_f64() * 1e3;
 
     // Echo comparison — LINE streams on both sides (a raw multi-line echo splits into lines, which
     // is exactly how the oracle's console emits it).
@@ -182,7 +217,7 @@ fn diff_one(src: &str, timeout: Duration, flags: &[&str], baseline: Duration) ->
         })
         .flat_map(|s| s.lines().map(String::from).collect::<Vec<_>>())
         .collect();
-    let oracle_echo: Vec<String> = run
+    let oracle_echo: Vec<String> = report
         .echo
         .iter()
         .map(|l| l.strip_prefix("ECHO: ").unwrap_or(l).to_string())
@@ -200,5 +235,27 @@ fn diff_one(src: &str, timeout: Duration, flags: &[&str], baseline: Duration) ->
             };
         }
     }
-    Outcome::Match { ours_ms, oracle_ms }
+    Outcome::Match {
+        ours_ms,
+        oracle_ms,
+        export_failed: !report.ok,
+    }
+}
+
+/// Run the oracle on `src` and return the RAW [`crate::openscad::Report`] — echo + timing survive
+/// an export failure, unlike [`oracle::run_with_flags`]'s all-or-nothing result.
+fn oracle_report(src: &str, timeout: Duration, flags: &[&str]) -> Result<crate::openscad::Report> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let osc = crate::openscad::Openscad::discover(None)?;
+    let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+    let dir = std::env::temp_dir();
+    let stem = format!("fab-gendiff-{}-{seq}", std::process::id());
+    let scad = dir.join(format!("{stem}.scad"));
+    let off = dir.join(format!("{stem}.off"));
+    std::fs::write(&scad, src).with_context(|| format!("writing {}", scad.display()))?;
+    let report = osc.render_with_flags(&scad, &off, timeout, flags);
+    let _ = std::fs::remove_file(&scad);
+    let _ = std::fs::remove_file(&off);
+    report
 }

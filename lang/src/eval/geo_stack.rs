@@ -160,6 +160,9 @@ impl Combinator {
 /// infallible ctx side-effects that MUST run on both the happy AND the error-drain path (LIFO), so the driver
 /// keys its error handling on this WORK/CLEANUP split, never on a name or a push/pop heuristic.
 enum GTask<'a> {
+    /// CLEANUP — drop every result above `mark` (AK.3 `%` background): the subtree EVALUATED (its
+    /// echoes/asserts/rands fired, matching upstream), but its geometry is excluded from output.
+    DiscardAbove { mark: usize },
     /// WORK — dispatch ONE statement (native arm, or the shim for a still-recursive arm).
     Stmt {
         stmt: &'a Stmt,
@@ -364,6 +367,10 @@ fn dispatch_work<'a>(
         }
         // The `!` root subtree resolved above `mark`; consume it into the program-global root override (so an
         // ancestor `Collect` sees zero there, and `run_stmts` renders ONLY the `!`-tagged subtrees).
+        GTask::DiscardAbove { mark } => {
+            results.truncate(mark);
+            Ok(())
+        }
         GTask::CaptureRoot { mark } => {
             let captured = results.split_off(mark);
             ctx.root_override.borrow_mut().extend(captured);
@@ -442,16 +449,24 @@ fn dispatch_stmt<'a>(
             els,
         } => {
             // `if` is grammatically an instantiation, so its modifiers mirror `dispatch_module`
-            // EXACTLY (AA.1): `!` captures the subtree as the root override; `*`/`%` drop the
-            // geometry AND the side effects (the condition never evaluates, like a disabled call's
-            // args); `#` is preview-only, a render no-op.
+            // EXACTLY: `!` captures the subtree as the root override; `*` drops geometry AND side
+            // effects (the condition never evaluates); `%` EVALUATES but excludes the geometry
+            // (AK.3 — the AA.1 assumption that % matched * was oracle-refuted); `#` is
+            // preview-only, a render no-op.
             if modifiers.root {
                 work.push(GTask::CaptureRoot {
                     mark: results.len(),
                 });
             }
-            if modifiers.disable || modifiers.background {
+            if modifiers.disable {
                 return Ok(());
+            }
+            // `%` background: the CONDITION + taken branch still evaluate (upstream-probed — the
+            // seed-209 gen-diff finding); only the geometry is excluded from output.
+            if modifiers.background {
+                work.push(GTask::DiscardAbove {
+                    mark: results.len(),
+                });
             }
             let branch = if eval_with_ctx(cond, &scope, ctx)?.is_truthy() {
                 then
@@ -513,9 +528,16 @@ fn dispatch_module<'a>(
             mark: results.len(),
         });
     }
-    // `*` DISABLE / `%` BACKGROUND — no geometry AND no side effects, before ANY name dispatch.
-    if mi.modifiers.disable || mi.modifiers.background {
+    // `*` DISABLE — no geometry AND no side effects, before ANY name dispatch. `%` BACKGROUND is
+    // DIFFERENT (AK.3, oracle-probed): the subtree still EVALUATES (echoes fire, `%cube([echo(…)…`
+    // prints upstream) — only its GEOMETRY is excluded from the render output.
+    if mi.modifiers.disable {
         return Ok(());
+    }
+    if mi.modifiers.background {
+        work.push(GTask::DiscardAbove {
+            mark: results.len(),
+        });
     }
     let name = mi.name.as_str();
     super::fnprofile::record_module(name); // dev probe (FAB_PROFILE_FNS): per-name module-call counts

@@ -642,14 +642,9 @@ fn list_string_builtins() {
     assert_eq!(ev(r#"ord("")"#), Value::Undef); // empty → undef
     assert_eq!(ev("ord(5)"), Value::Undef); // non-string → undef
 
-    // reverse — list or string.
-    assert_eq!(ev("reverse([1, 2, 3])"), list(&[3.0, 2.0, 1.0]));
-    assert_eq!(ev(r#"reverse("abc")"#), str("cba"));
-    assert_eq!(
-        ev(r#"reverse(["a", 1])"#),
-        Value::list(vec![num(1.0), str("a")])
-    );
-    assert_eq!(ev("reverse(5)"), Value::Undef); // not a list/string
+    // reverse is NOT a core builtin (AK.3, oracle-probed: "Ignoring unknown function 'reverse'"
+    // upstream) — it's BOSL2's function, which resolves as a user fn when BOSL2 is loaded. Bare:
+    assert_eq!(ev("reverse([1, 2, 3])"), Value::Undef);
 
     // lookup — linear interpolation, CLAMPED at the ends.
     assert_eq!(

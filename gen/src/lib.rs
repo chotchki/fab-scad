@@ -58,7 +58,6 @@ const BUILTINS: &[(&str, usize)] = &[
     ("chr", 1),
     ("ord", 1),
     ("concat", 2),
-    ("reverse", 1),
     ("search", 2),
     ("lookup", 2),
     // type predicates
@@ -615,10 +614,10 @@ impl Gen {
     }
 
     /// `let`/`assert`/`echo` EXPRESSION chains (AJ.3) — assert conds always-true, and an
-    /// occasional DUPLICATE let name (the AH.2.3 first-wins rule). PARENTHESIZED: our parser only
-    /// accepts a chain at expression-head position (bare `a * let(…) b` is a filed gap vs
-    /// upstream's bison grammar — AJ finding #1), and valid-by-construction is this crate's
-    /// contract.
+    /// occasional DUPLICATE let name (the AH.2.3 first-wins rule). PARENTHESIZED: chains are
+    /// legal only at expression-HEAD positions — UPSTREAM TOO (AK.1 probed the oracle: binary/
+    /// unary operand positions are syntax errors there as well), so the parens are the honest
+    /// grammar, not a workaround.
     fn chain_expr(&mut self) -> String {
         match self.below(4) {
             0 => {
@@ -885,7 +884,6 @@ mod tests {
             ("search", "search("),
             ("lookup", "lookup("),
             ("concat", "concat("),
-            ("reverse", "reverse("),
             ("seeded rands", "rands("),
             ("type predicate", "is_num("),
             ("expression import", "import("),

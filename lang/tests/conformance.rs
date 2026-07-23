@@ -194,3 +194,13 @@ fn latin1_source_decodes_and_parses() {
     let p = parse(&src).expect("latin-1 NBSP source parses (NBSP is whitespace)");
     assert_eq!(p.stmts.len(), 2);
 }
+
+/// AA.4 coverage sweep: statement-depth overflow INTO an expression position — 63 chained module
+/// calls put the ARG at the expr entry's depth limit, so the spine's statement-tier guard (its one
+/// depth bail) fires with the "expression" wording, not the module-chain one.
+#[test]
+fn expr_entry_depth_guard_fires_from_deep_statement_chains() {
+    let src = format!("{}b(1);", "a() ".repeat(63));
+    let e = parse(&src).expect_err("must bail");
+    assert!(format!("{e}").contains("deeply"), "got: {e}");
+}

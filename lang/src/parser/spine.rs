@@ -1341,6 +1341,10 @@ mod tests {
     /// production. The cascade is the ORACLE (fast==slow, parser edition); programs here stay
     /// shallow enough for its MAX_DEPTH.
     #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the corpus IS the test — one row per grammar shape, splitting it hides coverage"
+    )]
     fn spine_matches_recursive_oracle() {
         let corpus: &[&str] = &[
             // atoms + postfix
@@ -1438,6 +1442,21 @@ mod tests {
             "echo(x)",
             "let(a = 1) assert(a) echo(a) a + 1",
             "let(a = 1) f(a) ? 1 : 2",
+            // trailing commas + empty arg-lists (the fold arms the base corpus missed)
+            "f(1, 2,)",
+            "f(x = 1,)",
+            "let(a = 1,) a",
+            "echo(1,) 2",
+            "assert(true,) 1",
+            "[for (i = [0:1],) i]",
+            "[for (i = 0; false;) 1]",
+            "[for (i = 0; i < 2; i = i + 1,) i]",
+            "[let (a = 1,) a]",
+            "[for () 1]",
+            "[let () 1]",
+            "[each [1,]]",
+            "function(a, b = 2,) a",
+            "function(a,) a",
             // kitchen-sink composites
             "f([for (i = [0:2:10]) i * 2], x = a ? -b : c[1].d) + 2 ^ g(3)",
             "[for (i = r) if (i.x > f(i)[0]) let (v = -i) v else [i : 2 : j]]",
@@ -1453,6 +1472,23 @@ mod tests {
         }
     }
 
+    /// The retired cascade's depth guards still fire (its own contract as the oracle — it may
+    /// only run on inputs shallow enough for it, and these prove the guards that keep that honest).
+    /// The spine parses all three shapes fine.
+    #[test]
+    fn oracle_depth_guards_still_fire_where_the_spine_parses() {
+        let deep_parens = format!("{}1{}", "(".repeat(80), ")".repeat(80));
+        let deep_unary = format!("{}1", "-".repeat(80));
+        let deep_comp = format!("[{}1{}]", "each [".repeat(80), "]".repeat(80));
+        for src in [deep_parens, deep_unary, deep_comp] {
+            let lexed = crate::lex(&src).expect("lexes");
+            let spine = super::expr(&mut TokenSlice::new(&lexed.code), 0);
+            let oracle = super::super::expr::expr_recursive(&mut TokenSlice::new(&lexed.code), 0);
+            assert!(spine.is_ok(), "spine parses {}…", &src[..20]);
+            assert!(oracle.is_err(), "oracle guards {}…", &src[..20]);
+        }
+    }
+
     /// Both parsers must also agree on REJECTION for the operand-position prefix forms.
     #[test]
     fn spine_matches_oracle_on_rejections() {
@@ -1465,6 +1501,11 @@ mod tests {
             "[1, 2",
             "a ? b",
             "[0:",
+            "let(a = 1)",     // a `let` needs a body
+            "function(1) 2",  // a parameter must be a name
+            "a.(",            // a member must be a name
+            "[for (i = r i]", // missing ')' of the for bindings
+            "assert(",
         ] {
             let lexed = crate::lex(src).expect("lexes");
             let spine = super::expr(&mut TokenSlice::new(&lexed.code), 0);

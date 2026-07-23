@@ -498,6 +498,22 @@ fn too_many_range_elements_warns_and_skips() {
     assert!(ok.warnings().is_empty());
 }
 
+/// AD.4: the C-style-for iteration limit, oracle-probed at BOTH edges — exactly 1,000,000 iterations
+/// complete clean, 1,000,001 (and the census's infinite `for(b=0; b!=1; b=0)`) is upstream's hard
+/// "For loop counter exceeded limit". Was: a silent `RANGE_MAX` break returning a 10M-element partial.
+#[test]
+fn c_style_for_counter_limit_matches_the_oracle() {
+    let ok =
+        evaluate_full("x = [for (i = 0; i < 1000000; i = i + 1) 0]; echo(n = len(x)); cube(1);")
+            .expect("exactly the limit is clean");
+    assert_eq!(ok.echos(), ["n = 1e+6"]);
+    let e = err("x = [for (b = 0; b != 1; b = 0) b]; cube(1);");
+    assert!(
+        e.to_string().contains("For loop counter exceeded limit"),
+        "wanted upstream's verdict, got: {e}"
+    );
+}
+
 /// AD.2, the shape that rules out arg-cycle detection: `sin(x) = sin()` re-enters with x=undef every
 /// call (issue3118-recur-limit.scad — a user function shadowing the builtin, called argless). The call
 /// is arity-defaulted (not JIT-eligible) so the error takes the nameless form; still "Recursion detected".

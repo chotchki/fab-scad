@@ -605,6 +605,13 @@ const MAX_MODULE_DEPTH: usize = 100_000;
 /// upstream's; the corpus's deepest LEGIT recursion (the 500 k mutual-closure chain) sits at 2× headroom.
 const MAX_CALL_DEPTH: u32 = 1_000_000;
 
+/// AD.4: upstream's C-style-for iteration limit, oracle-probed EXACTLY — 1,000,000 iterations complete
+/// clean, 1,000,001 is "ERROR: For loop counter exceeded limit". Replaces the old silent `RANGE_MAX`
+/// break, which returned a 10M-element PARTIAL result for an infinite `for(b=0; b!=1; b=0)` — slow AND
+/// wrong twice over (upstream errors, and a silent truncation is the never-silently-wrong doctrine's
+/// exact villain).
+const MAX_CFOR_ITERATIONS: u64 = 1_000_000;
+
 /// One step on the evaluator's explicit work-stack. Each `Eval` carries the [`Scope`] it evaluates
 /// in (an `Rc<Frame>` clone — cheap), so a call's body can evaluate in the callee's scope while the
 /// caller's continuation waits on the same stack (I.2.3). Value-combining tasks need no scope.
@@ -1551,21 +1558,22 @@ fn eval_with_global<'a>(
                     }
                 }
                 let iterations = iterations + 1;
-                if iterations >= RANGE_MAX {
-                    // The runaway-`for(i=0; 1; …)` guard — defensive, RANGE_MAX real iterations away.
-                    values.push(build_vector(acc));
-                } else {
-                    tasks.push(Task::LcForCStep {
-                        cond,
-                        update,
-                        body,
-                        outer,
-                        vars,
-                        iterations,
-                        acc,
-                        splice_item,
-                    });
+                if iterations > MAX_CFOR_ITERATIONS {
+                    // AD.4: upstream's hard limit, verbatim verdict (boundary probed: 1e6 ok, 1e6+1 errors).
+                    return Err(crate::Error::Eval(
+                        "For loop counter exceeded limit".to_string(),
+                    ));
                 }
+                tasks.push(Task::LcForCStep {
+                    cond,
+                    update,
+                    body,
+                    outer,
+                    vars,
+                    iterations,
+                    acc,
+                    splice_item,
+                });
             }
             Task::PushUndef => values.push(Value::Undef),
             Task::ShortCircuit { op, rhs, scope } => {

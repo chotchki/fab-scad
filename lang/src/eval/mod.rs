@@ -1294,7 +1294,7 @@ fn eval_with_global<'a>(
                 let vals = values.split_off(values.len().saturating_sub(args.len()));
                 ctx.messages
                     .borrow_mut()
-                    .push(Message::Echo(format_echo_line(args, &vals)));
+                    .push(Message::Echo(format_echo_line(args, &vals)?));
                 match body {
                     Some(b) => tasks.push(Task::Eval(b, scope)),
                     None => values.push(Value::Undef),
@@ -3230,14 +3230,50 @@ fn emit_echo<'a>(
     }
     ctx.messages
         .borrow_mut()
-        .push(Message::Echo(format_echo_line(args, &vals)));
+        .push(Message::Echo(format_echo_line(args, &vals)?));
     Ok(())
+}
+
+/// AD.5: how deep a value may nest before echo REFUSES to render it — upstream's `EchoString` seam, made
+/// deterministic. OpenSCAD converts echo values to string HOST-RECURSIVELY and stack-exhausts on deep
+/// nesting ("Stack exhausted while trying to convert a vector to `EchoString`" — issue4172's whole point,
+/// and recursion-test-vector's eventual death rattle). Our formatter is iterative (AA.4.3) and could
+/// render ANY depth — but a growing-value echo LOOP (issue4172 adds 12 levels per module call) then costs
+/// O(depth) per call, quadratic total, and the message BUFFER eats gigabytes before the 100k module guard
+/// is reached. Erroring at the same seam upstream does keeps the verdict AND the economics. 10k is 5× the
+/// deepest legit formatted value in the corpus (the 2000-deep `deep_value` conformance case); real
+/// echo output nests < 100.
+const MAX_ECHO_NESTING: usize = 10_000;
+
+/// Does `v` nest `List`s deeper than `limit`? Iterative DFS carrying depth, early-exit on the first
+/// too-deep node — visits only `List` spines, so a big FLAT echo arg costs nothing extra.
+fn nests_deeper_than(v: &Value, limit: usize) -> bool {
+    let mut stack = vec![(v, 1usize)];
+    while let Some((v, depth)) = stack.pop() {
+        if let Value::List(xs) = v {
+            if depth >= limit {
+                return true;
+            }
+            stack.extend(
+                xs.iter()
+                    .filter(|x| matches!(x, Value::List(_)))
+                    .map(|x| (x, depth + 1)),
+            );
+        }
+    }
+    false
 }
 
 /// Format an `ECHO:` line from pre-evaluated arg values — named args render `name = value`,
 /// positional just `value`, joined by `, `. Shared by the statement path ([`emit_echo`]) and the
-/// task path ([`Task::EchoEmit`]) so the two can't drift.
-fn format_echo_line(args: &[Arg], vals: &[Value]) -> String {
+/// task path ([`Task::EchoEmit`]) so the two can't drift. Errs on a past-[`MAX_ECHO_NESTING`] value
+/// (upstream's `EchoString` stack exhaust, as a deterministic bound).
+fn format_echo_line(args: &[Arg], vals: &[Value]) -> crate::Result<String> {
+    if vals.iter().any(|v| nests_deeper_than(v, MAX_ECHO_NESTING)) {
+        return Err(crate::Error::Eval(format!(
+            "echo value nests deeper than {MAX_ECHO_NESTING} levels (upstream stack-exhausts converting this to an EchoString)"
+        )));
+    }
     let parts: Vec<String> = args
         .iter()
         .zip(vals)
@@ -3246,7 +3282,7 @@ fn format_echo_line(args: &[Arg], vals: &[Value]) -> String {
             None => fmt::format_value(value),
         })
         .collect();
-    parts.join(", ")
+    Ok(parts.join(", "))
 }
 
 /// Evaluate an `assert`'s arguments and fail LOUD if the condition is falsy: `assert(cond)`,

@@ -514,6 +514,25 @@ fn c_style_for_counter_limit_matches_the_oracle() {
     );
 }
 
+/// AD.5: echoing a past-10k-nested value errors at the `EchoString` seam — upstream stack-exhausts
+/// converting it ("Stack exhausted while trying to convert a vector to `EchoString`", issue4172's whole
+/// point); our formatter is iterative so the bound is deterministic instead of stack-luck. This is what
+/// lets issue4172's growing-echo loop die in milliseconds rather than grinding a quadratic to the 100k
+/// module guard.
+#[test]
+fn echo_of_an_absurdly_nested_value_errors_at_the_seam() {
+    let e = err("function d(n, a) = n == 0 ? a : d(n - 1, [a]);\necho(d(10001, 1));\ncube(1);");
+    assert!(
+        e.to_string().contains("nests deeper than"),
+        "wanted the EchoString-seam guard, got: {e}"
+    );
+    // …while a deep-but-sane value still echoes verbatim.
+    let ok =
+        evaluate_full("function d(n, a) = n == 0 ? a : d(n - 1, [a]); echo(d(3, 1)); cube(1);")
+            .expect("evaluates");
+    assert_eq!(ok.echos(), ["[[[1]]]"]);
+}
+
 /// AD.2, the shape that rules out arg-cycle detection: `sin(x) = sin()` re-enters with x=undef every
 /// call (issue3118-recur-limit.scad — a user function shadowing the builtin, called argless). The call
 /// is arity-defaulted (not JIT-eligible) so the error takes the nameless form; still "Recursion detected".

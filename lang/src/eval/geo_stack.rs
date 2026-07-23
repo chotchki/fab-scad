@@ -753,9 +753,12 @@ fn push_user_module<'a>(
     let (params, body) = def;
     let depth = ctx.module_depth.get();
     if depth >= super::MAX_MODULE_DEPTH {
-        return Err(crate::Error::Unimplemented(
-            "user-module recursion too deep (the statement-eval depth guard — a runaway recursive module)",
-        ));
+        // AD.5: upstream's verdict class ("Recursion detected calling module 'rec'"), not Unimplemented —
+        // this guard is a deliberate semantic bound on a runaway recursive module, not a missing feature.
+        return Err(crate::Error::Eval(format!(
+            "Recursion detected calling module '{}'",
+            mi.name
+        )));
     }
     let body_ptr = std::ptr::from_ref(body).cast::<()>();
     // The body's lexical base is the module's HOME ISLAND global (a scope-local module carries its captured

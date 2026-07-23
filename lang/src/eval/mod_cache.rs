@@ -66,14 +66,16 @@ const GEN_CAP: usize = 1 << 15;
 /// of growing.
 const MAX_ENTRIES_PER_KEY: usize = 8;
 
-/// Shallow key size: top-level element count over the resolved params, against `cap`
-/// ([`Config::csg_cache_keycap`]). A param holding a huge list makes the per-call key hash a loss the
-/// body-skip may not repay. O(#params), short-circuits at cap. (Rung 2b: the reaching `$`-context left the
-/// key, so the gate is params-only; the READ SET gets the same cap at store time — [`reads_within_cap`].)
+/// DEEP key size via [`super::eval_cache::bounded_weight`] (AD.5): nested element count over the resolved
+/// params, against `cap` ([`Config::csg_cache_keycap`]) — O(min(size, cap)), short-circuits at cap.
+/// Shallow counting here was recursion-test-vector's quadratic: `rec([a,10,10])` weighed 3 at every depth,
+/// so `ModKey` hashed the whole growing vector each call and the 100k depth guard sat behind an O(n²)
+/// grind. (Rung 2b: the reaching `$`-context left the key, so the gate is params-only; the READ SET gets
+/// the same cap at store time — [`reads_within_cap`].)
 pub(super) fn worth_caching(params: &[Value], cap: usize) -> bool {
     let mut total = 0usize;
     for v in params {
-        total += value_weight(v);
+        total = total.saturating_add(super::eval_cache::bounded_weight(v, cap - total));
         if total > cap {
             return false;
         }
@@ -86,24 +88,15 @@ pub(super) fn worth_caching(params: &[Value], cap: usize) -> bool {
 fn reads_within_cap(reads: &[(Rc<str>, ReadValue)], cap: usize) -> bool {
     let mut total = 0usize;
     for (_, rv) in reads {
-        total += match rv {
-            ReadValue::Bound(v) => value_weight(v),
+        total = total.saturating_add(match rv {
+            ReadValue::Bound(v) => super::eval_cache::bounded_weight(v, cap - total),
             ReadValue::Unbound => 1,
-        };
+        });
         if total > cap {
             return false;
         }
     }
     true
-}
-
-fn value_weight(v: &Value) -> usize {
-    match v {
-        Value::NumList(xs) => xs.len(),
-        Value::List(xs) => xs.len(),
-        Value::Str(s) => s.len(),
-        _ => 1,
-    }
 }
 
 type FixedHasher = BuildHasherDefault<std::collections::hash_map::DefaultHasher>;

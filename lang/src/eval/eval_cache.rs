@@ -40,20 +40,50 @@ use super::value::Value;
 /// (10 keys = 22–61% of calls), so a modest cap captures most of the win.
 const GEN_CAP: usize = 1 << 16;
 
+/// A value's element count INCLUDING nested lists, walked with a budget: the walk gives up (returning a
+/// past-`cap` total) the moment the running count passes `cap`, so it costs O(min(size, cap)) — never the
+/// full traversal the gate exists to avoid. Iterative (no host recursion — the deep values this guards
+/// against are exactly the ones that would blow a recursive walk); the work stack only ever grows while
+/// the budget holds, so it too is `cap`-bounded. SHALLOW counting was AD.5's quadratic: a module arg
+/// `[a, 10, 10]` weighed 3 while `a` nested 100k levels deep, so the gate said "cacheable" and
+/// `ModKey`/`Key` bit-hashed the FULL depth every call — O(n²) total, the recursion-test-vector grind.
+pub(super) fn bounded_weight(v: &Value, cap: usize) -> usize {
+    let mut total = 0usize;
+    let mut stack = vec![v];
+    while let Some(v) = stack.pop() {
+        match v {
+            Value::NumList(xs) => total += xs.len(),
+            Value::Str(s) => total += s.len(),
+            Value::List(xs) => {
+                total += xs.len();
+                if total > cap {
+                    return total;
+                }
+                stack.extend(
+                    xs.iter().filter(|x| {
+                        matches!(x, Value::List(_) | Value::NumList(_) | Value::Str(_))
+                    }),
+                );
+            }
+            _ => total += 1,
+        }
+        if total > cap {
+            return total;
+        }
+    }
+    total
+}
+
 /// Is this call's argument list small enough to be worth memoizing? `cap` is [`Config::eval_cache_argcap`]:
 /// cloning + bit-hashing a huge list arg on every call is overhead the body-skip may never repay (it's what
 /// tips low-redundancy stress tests — `gaussian_rands`' 300k-element comprehension, high-`$fn` vertex math —
-/// over budget while the redundant SMALL-key calls sail through). Shallow element count (top-level list/string
-/// lengths, O(#args)); over the cap → don't cache.
+/// over budget while the redundant SMALL-key calls sail through). DEEP element count via
+/// [`bounded_weight`] (AD.5 — a deeply-NESTED arg is exactly as unhashable as a long flat one), still
+/// O(min(size, cap)) per call.
 pub(super) fn worth_caching(args: &[Value], cap: usize) -> bool {
     let mut total = 0usize;
     for v in args {
-        total += match v {
-            Value::NumList(xs) => xs.len(),
-            Value::List(xs) => xs.len(),
-            Value::Str(s) => s.len(),
-            _ => 1,
-        };
+        total = total.saturating_add(bounded_weight(v, cap - total));
         if total > cap {
             return false;
         }
@@ -67,12 +97,7 @@ pub(super) fn worth_caching(args: &[Value], cap: usize) -> bool {
 pub(super) fn key_work(args: &[Value], cap: usize) -> u64 {
     let mut total = 0usize;
     for v in args {
-        total += match v {
-            Value::NumList(xs) => xs.len(),
-            Value::List(xs) => xs.len(),
-            Value::Str(s) => s.len(),
-            _ => 1,
-        };
+        total = total.saturating_add(bounded_weight(v, cap - total));
         if total >= cap {
             return cap as u64;
         }
@@ -390,7 +415,38 @@ pub(super) type CacheCell = RefCell<Cache>;
 
 #[cfg(test)]
 mod tests {
-    use super::{Cache, CacheState, MIN_HIT_PERMILLE, WARMUP_PROBES};
+    use super::{
+        Cache, CacheState, MIN_HIT_PERMILLE, WARMUP_PROBES, bounded_weight, worth_caching,
+    };
+    use crate::eval::value::Value;
+
+    /// AD.5: the gate weight sees NESTED size, not just top-level arity — `[a, 10, 10]` with a deep `a`
+    /// must weigh its whole depth (up to the cap), or the key hash pays that depth every call
+    /// (recursion-test-vector's quadratic). And the walk is budget-bounded: a huge value costs ~cap, not
+    /// its full size.
+    #[test]
+    fn bounded_weight_counts_nesting_and_stops_at_the_cap() {
+        // 1000 levels of [[…[1]…]] — one element per level.
+        let mut deep = Value::Num(1.0);
+        for _ in 0..1000 {
+            deep = Value::list(vec![deep]);
+        }
+        // Shallow arity is 3, but the nested count passes a 256 cap immediately…
+        let arg = Value::list(vec![deep.clone(), Value::Num(10.0), Value::Num(10.0)]);
+        assert!(
+            !worth_caching(&[arg], 256),
+            "deep nesting must decline the gate"
+        );
+        // …while the bounded walk never pays the full traversal: past-cap totals stop near the cap.
+        let w = bounded_weight(&deep, 64);
+        assert!(w > 64 && w < 200, "budget-bounded, not a full walk: {w}");
+        // Under the cap, the weight is the true nested count (1000 one-element levels).
+        assert_eq!(bounded_weight(&deep, 100_000), 1000);
+        // Flat values keep their old weights: a 100-element NumList weighs 100 (no recursion to find).
+        let flat = Value::num_list((0..100).map(f64::from).collect::<Vec<_>>());
+        assert_eq!(bounded_weight(&flat, 256), 100);
+        assert!(worth_caching(&[flat], 256));
+    }
 
     /// N.2c.2 auto-off: after the warmup window, a LOW-hit-rate program disables (the `under_sink_guide`
     /// class) while a HIGH-hit-rate one stays LIVE (the `pill_holder` class); before the window closes it's

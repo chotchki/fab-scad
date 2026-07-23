@@ -229,8 +229,8 @@ fn runaway_module_recursion_is_loud() {
         .join()
         .unwrap();
     assert!(
-        matches!(err.root(), Error::Unimplemented(m) if m.contains("recursion too deep")),
-        "expected a LOUD depth-guard error, got {err:?}"
+        matches!(err.root(), Error::Eval(m) if m.contains("Recursion detected calling module 'inf'")),
+        "expected a LOUD depth-guard error (upstream's verdict class, AD.5), got {err:?}"
     );
 }
 

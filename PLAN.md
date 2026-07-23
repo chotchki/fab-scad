@@ -100,7 +100,7 @@ added 2026-07-07.
 - [ ] AF.4 - object() constructor forms: named args, copy, list-of-pairs, copy-with-edits (`[["k"]]` removes, `[["k",v]]` sets), empty-string keys; len(); has_key(); key iteration in for/comprehensions (insertion order)
 - [ ] AF.5 - the `this` mechanic (the hairy half — method dispatch, not data): trailing `this` param = method, receiver bound at member access, binding survives extraction (`f = o.f; f()`) and storage into other objects, per-object `this` under mutual recursion, global `this` never leaks into non-method calls
 - [ ] AF.6 - seams: bounded_weight Object arm (eval + CSG cache gates), JIT ABI exclusion, fuzzer grammar arm, wire/echo repro tools
-- [ ] AF.7 - acceptance: golden echo diff on object-tests.scad + conformance tests in semantics/; census re-run stays 550+/576 with object-tests moving to clean
+- [ ] AF.7 - acceptance: golden echo diff on object-tests.scad (via the AH lane) + conformance tests in semantics/; census re-run stays 550+/576 with object-tests moving to clean
 
 ## Phase AG - textmetrics() + fontmetrics() (needs AF.1/AF.2 — both return objects)
   Meta - upstream-experimental since ~2019 and universally depended on (the textmetrics precedent IS the object() adoption argument). Everything needed is already in-process: rustybuzz shaping + ttf_parser face (ascender already read for text() alignment), bundled Liberation Sans — and upstream's test FORCES font="Liberation Sans", so tests/regression/echo/text-metrics-test-expected.echo pins exact expected numbers for our exact face. Same acceptance caveat as AF: both metrics test files currently PASS the census (unknown fn → warn → undef → eval-clean) — the bar that proves this phase is the golden diff.
@@ -108,7 +108,14 @@ added 2026-07-07.
 - [ ] AG.2 - fontmetrics(): nominal/max ascent+descent, interline, font family/style — NESTED object result
 - [ ] AG.3 - arg validation verbatim: the golden pins exact per-arg warnings (`textmetrics(..., size=[]) Invalid type: expected number, found vector`) + the all-zero degenerate result on bad args; fontmetrics rejects text=
 - [ ] AG.4 - `use <font.ttf>` tolerated as a font-load no-op (we ship the ONE deterministic face; the test use<>'s the same family) — doctrine note in text.rs
-- [ ] AG.5 - acceptance: golden echo diff on text-metrics-test.scad (misc/) + 2D/features/text-metrics.scad renders; conformance tests; census re-run
+- [ ] AG.5 - acceptance: golden echo diff on text-metrics-test.scad via the AH lane (misc/) + 2D/features/text-metrics.scad renders; conformance tests; census re-run
+
+## Phase AH - Golden-echo lane: automate output checking (EXECUTES FIRST — AF.7/AG.5 acceptance rides on it)
+  Meta - the AG discovery is the proof the eval-clean bar isn't enough: textmetrics/fontmetrics are ENTIRELY unimplemented yet both test files pass the census (unknown fn → warn → undef → clean eval). Upstream ships the oracle's recorded output — tests/regression/echo/*-expected.echo (119 files), already in our sparse checkout for the AE classifier — and WE already have the code (Message::render() is console-format `ECHO: …`, echo_repro is the manual tool since L.3.4); this phase automates the two together. CI needs no OpenSCAD binary: the goldens ARE the oracle. v1 diffs ECHO lines only — warning-text word-for-word parity stays the deferred I.5 backlog half, and ERROR semantics stay owned by the AE expected-classifier. Report-only per the sustain doctrine.
+- [ ] AH.1 - sweep echo-diff: Files lane with --upstream diffs our rendered `ECHO:` lines against the golden's `ECHO:` lines when `<stem>-expected.echo` exists — per-file match/diverge + first-diverging line, new census/sustain report section
+- [ ] AH.2 - initial divergence triage: run the lane over the full census, bucket-name every diverging file (expected: the object/textmetrics families until AF/AG land; anything else = real value-formatting/semantics drift this lane just caught)
+- [ ] AH.3 - sustain.yml + docs/sustainment.md carry the echo-diff section nightly
+- [ ] AH.4 - Lane::Files doc corrected: "no expectation spec to hold ourselves to" is FALSE now — the goldens are the spec; note the three-bar ladder (eval-clean < expected-classified < echo-match)
 
 ## Backlog (not yet phased)
 

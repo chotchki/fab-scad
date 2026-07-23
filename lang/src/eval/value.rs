@@ -30,6 +30,10 @@ pub enum Value {
     /// so the deep-nesting iterative `Drop` lives on the PAYLOAD, not on `Value` — a `Drop` on `Value` itself
     /// forbids the by-value field moves the arithmetic hot path (`ops.rs`) relies on (E0509). M.1b.
     List(ValueList),
+    /// A first-class OBJECT (Phase AF): an insertion-ordered string→Value map (`ObjectType`
+    /// upstream — experimental there, always-on here). Shared + immutable like every payload;
+    /// the `object()` constructor's copy-with-edit forms build a NEW map.
+    Object(Rc<super::object::ObjectMap>),
     /// A LAZY range `[start : step : end]` — a first-class value (assignable, iterable), NOT
     /// materialized. Iterate with [`range_iter`]. `Value.cc`/`RangeType`.
     Range {
@@ -64,6 +68,11 @@ pub enum Value {
         /// body scope at call time from this list. `None`/empty for a lone body function or a plain literal.
         /// L.5.4.
         group: Option<Rc<[SiblingFn]>>,
+        /// The bound RECEIVER (AF.5): `Some` on a value extracted from an object member (`o.f` /
+        /// `o["f"]`) — injected into a param named `this` at call time (the opt-in method
+        /// mechanic; a function with no `this` param never sees it). Binding is part of the
+        /// value's IDENTITY: `osc3.f != osc.f` when the receivers differ (object-tests golden).
+        bound_this: Option<Rc<super::object::ObjectMap>>,
     },
 }
 
@@ -158,6 +167,9 @@ impl Value {
             Value::NumList(xs) => !xs.is_empty(),
             Value::List(xs) => !xs.is_empty(),
             Value::Range { .. } | Value::Function { .. } => true, // ranges + functions are truthy
+            // An EMPTY object is falsy by analogy with ""/[] (no golden pins this yet — revisit
+            // if one appears).
+            Value::Object(o) => !o.is_empty(),
         }
     }
 
@@ -172,6 +184,7 @@ impl Value {
             Value::NumList(_) | Value::List(_) => "list",
             Value::Range { .. } => "range",
             Value::Function { .. } => "function",
+            Value::Object(_) => "object",
         }
     }
 }
@@ -222,14 +235,28 @@ impl PartialEq for Value {
                 Value::Function {
                     closure_id: c1,
                     env: e1,
+                    bound_this: t1,
                     ..
                 },
                 Value::Function {
                     closure_id: c2,
                     env: e2,
+                    bound_this: t2,
                     ..
                 },
-            ) => c1 == c2 && e1.same_frame(e2),
+            ) => {
+                c1 == c2
+                    && e1.same_frame(e2)
+                    // AF.5: a bound method's receiver is part of its identity.
+                    && match (t1, t2) {
+                        (None, None) => true,
+                        (Some(a), Some(b)) => Rc::ptr_eq(a, b),
+                        _ => false,
+                    }
+            }
+            // Objects: structural, order-insensitive (AF.1) — same key set, per-key equal values;
+            // the ptr shortcut makes self-comparison of a 100k-member object O(1).
+            (Value::Object(a), Value::Object(b)) => Rc::ptr_eq(a, b) || a == b,
             _ => false, // cross-type is never equal
         }
     }

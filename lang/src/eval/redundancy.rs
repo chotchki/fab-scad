@@ -70,6 +70,12 @@ fn hash_value<H: Hasher>(v: &Value, h: &mut H, elems: &mut u64) {
                 hash_value(e, h, elems);
             }
         }
+        Value::Object(o) => {
+            for (name, val) in o.iter() {
+                name.hash(h);
+                hash_value(val, h, elems);
+            }
+        }
         Value::Range { start, step, end } => {
             h.write_u64(start.to_bits());
             h.write_u64(step.to_bits());

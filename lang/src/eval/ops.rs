@@ -365,7 +365,44 @@ fn list_get(v: &Value, i: usize) -> Value {
     clippy::cast_sign_loss,
     reason = "guarded: i is finite and >= 0 here, so `as usize` truncates like OpenSCAD's size_t cast (huge → saturates → out of range → undef)"
 )]
+/// Bind an extracted FUNCTION member to its owning object (AF.5): `o.f` / `o["f"]` produce a
+/// METHOD — the receiver rides the value and fills a `this` param at call time. Re-extraction
+/// re-binds (a function stored into another object becomes THAT object's method); non-functions
+/// pass through untouched.
+fn bind_receiver(v: Value, receiver: &std::rc::Rc<super::object::ObjectMap>) -> Value {
+    match v {
+        Value::Function {
+            closure_id,
+            env,
+            self_name,
+            repr,
+            group,
+            ..
+        } => Value::Function {
+            closure_id,
+            env,
+            self_name,
+            repr,
+            group,
+            bound_this: Some(std::rc::Rc::clone(receiver)),
+        },
+        other => other,
+    }
+}
+
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "i is checked non-negative + finite above the cast; an out-of-range index reads Undef"
+)]
 pub(crate) fn index(base: Value, index: &Value) -> Value {
+    // Objects index by STRING key (AF.3): `o["key"]` → the member, missing → undef.
+    if let Value::Object(o) = &base {
+        return match index {
+            Value::Str(k) => bind_receiver(o.get(k).cloned().unwrap_or(Value::Undef), o),
+            _ => Value::Undef,
+        };
+    }
     let &Value::Num(i) = index else {
         return Value::Undef;
     };
@@ -393,14 +430,52 @@ pub(crate) fn index(base: Value, index: &Value) -> Value {
 /// Member access `v.x` / `v.y` / `v.z` → index 0 / 1 / 2 — OpenSCAD's named vector components (the only
 /// members it defines). Any other name → `undef`; the base rules (non-list, out-of-range → `undef`) are
 /// [`index`]'s. BOSL2 reads coordinates this way everywhere (`corner.x`, `shift.y`, `v.z`).
+#[allow(
+    clippy::needless_pass_by_value,
+    reason = "the Task::Member handler pops an owned base; swizzle picks clone it per component"
+)]
 pub(crate) fn member(base: Value, field: &str) -> Value {
-    let axis = match field {
-        "x" => 0.0,
-        "y" => 1.0,
-        "z" => 2.0,
-        _ => return Value::Undef,
+    // Objects: member lookup by NAME (AF.3) — `o.a`, `$`-named members (`o.$fs`) included;
+    // missing → undef. A FUNCTION member binds its receiver at extraction (AF.5).
+    if let Value::Object(o) = &base {
+        return bind_receiver(o.get(field).cloned().unwrap_or(Value::Undef), o);
+    }
+    // Vector SWIZZLES (AF.3, the vector-swizzling golden): 1-4 letters from xyzw/rgba (sets mix
+    // freely), each naming component 0-3; one letter yields the element, several the picked
+    // vector. Undef for a non-vector base, >4 letters, a non-swizzle letter, or ANY out-of-range
+    // component ("indices out of range will return undef").
+    if !matches!(base, Value::NumList(_) | Value::List(_)) {
+        return Value::Undef;
+    }
+    // One set per swizzle — the golden pins `v.xr` (mixed) as undef despite the test's own
+    // comment claiming otherwise; the golden wins.
+    let comp = if field.chars().all(|c| "xyzw".contains(c)) {
+        |c: char| "xyzw".find(c)
+    } else if field.chars().all(|c| "rgba".contains(c)) {
+        |c: char| "rgba".find(c)
+    } else {
+        return Value::Undef;
     };
-    index(base, &Value::Num(axis))
+    let n = field.chars().count();
+    if n == 0 || n > 4 {
+        return Value::Undef;
+    }
+    let mut picks = Vec::with_capacity(n);
+    for c in field.chars() {
+        let Some(i) = comp(c) else {
+            return Value::Undef;
+        };
+        #[allow(clippy::cast_precision_loss, reason = "i is 0..=3")]
+        let v = index(base.clone(), &Value::Num(i as f64));
+        if matches!(v, Value::Undef) {
+            return Value::Undef;
+        }
+        picks.push(v);
+    }
+    match picks.len() {
+        1 => picks.remove(0),
+        _ => super::build_vector(picks),
+    }
 }
 
 fn bitwise(lhs: Value, rhs: Value, combine: impl Fn(i64, i64) -> i64) -> Value {

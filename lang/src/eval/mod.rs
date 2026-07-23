@@ -29,6 +29,7 @@ mod message;
 mod mod_cache;
 mod mod_redundancy;
 mod module;
+mod object;
 mod ops;
 mod redundancy;
 pub(crate) mod rng;
@@ -509,6 +510,7 @@ impl<'a> Ctx<'a> {
                 n => n.min(RANGE_MAX),
             },
             Value::Str(s) => s.chars().count() as u64,
+            Value::Object(o) => o.len() as u64, // key iteration (AF.4)
             _ => 1, // a scalar iterates as a single element (iter_values' `other` arm)
         };
         self.charge(n)
@@ -1202,8 +1204,13 @@ fn eval_with_global<'a>(
                         env,
                         self_name,
                         group,
+                        bound_this,
                         ..
                     } => {
+                        // AF.5: an extracted method carries its receiver — hand it to push_call so
+                        // a `this` param binds it.
+                        let this_receiver =
+                            bound_this.as_ref().map(|o| Value::Object(Rc::clone(o)));
                         let (params, body) = ctx.closures.borrow()[*closure_id];
                         // a closure's body is lexically scoped to its captured env, not the caller's. Re-inject
                         // the letrec bindings NOW, where we hold the closure value (our COW frames can't
@@ -1230,7 +1237,16 @@ fn eval_with_global<'a>(
                             env.clone()
                         };
                         // A closure has no static name to look up in the JIT registry → never JIT-eligible.
-                        push_call(params, body, args, &caller, &base, None, &mut tasks);
+                        push_call(
+                            params,
+                            body,
+                            args,
+                            &caller,
+                            &base,
+                            None,
+                            this_receiver,
+                            &mut tasks,
+                        );
                     }
                     _ => values.push(Value::Undef), // calling a non-function → undef
                 }
@@ -1702,7 +1718,8 @@ fn eval_node<'a>(
                 self_name: None, // set when bound to a name (`g = function…`) — see `name_closure`
                 // OpenSCAD's `str()` rendering, computed here where the AST is in hand (str can't reach it).
                 repr: crate::parser::print::function_value_repr(params, body).into(),
-                group: None, // a plain literal has no letrec siblings (L.5.4)
+                group: None,      // a plain literal has no letrec siblings (L.5.4)
+                bound_this: None, // binding happens at member EXTRACTION (AF.5)
             });
         }
         ExprKind::Let { bindings, body } => {
@@ -1778,7 +1795,11 @@ fn run_builtin(name: &str, args: &[Arg], values: &mut Vec<Value>, ctx: &Ctx<'_>)
     let start = values.len().saturating_sub(args.len());
     // `rands` is the one STATEFUL builtin: seedless draws advance the evaluator's `rand_stream` (I.2.8b),
     // so it's routed here where the `Ctx` is in scope rather than through the pure `builtins::apply`.
-    let result = if name == "rands" {
+    let result = if name == "object" {
+        // `object()` is the ONE builtin that reads argument NAMES (AF.4): `object(a=1, b=2)`'s
+        // member names ARE the names. Routed here where the `Arg` list is in hand.
+        builtins::object(args, &values[start..])
+    } else if name == "rands" {
         builtins::rands(&values[start..], &mut ctx.rand_stream.borrow_mut())
     } else if name == "parent_module" {
         // Reads the live module-instantiation name stack (control.cc) — stateful, like `rands`. This read
@@ -1918,7 +1939,16 @@ fn dispatch_call<'a>(
             // the FINAL param-order slot values `push_call` bound, so how the caller SPELLED the args is
             // invisible to the compiled body. The one real arity hazard — `$`-args appending to `names`
             // past the params — is `push_call`'s own gate (it clears the name when dollars exist).
-            push_call(params, body, args, scope, &base, Some(name.as_str()), tasks);
+            push_call(
+                params,
+                body,
+                args,
+                scope,
+                &base,
+                Some(name.as_str()),
+                None,
+                tasks,
+            );
             return Ok(());
         }
         if builtins::is_builtin(name) {
@@ -1995,6 +2025,12 @@ fn fill_arg_slots<'a>(params: &'a [Parameter], args: &'a [Arg]) -> (ArgSlots<'a>
     (arg_slots, dollars)
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    clippy::needless_pass_by_value,
+    reason = "the call context, one slot per concern — the AF.5 receiver made it seven; the \
+              receiver is cloned per this-slot schedule, an owned Option is the honest shape"
+)]
 fn push_call<'a>(
     params: &'a [Parameter],
     body: &'a Expr,
@@ -2002,12 +2038,21 @@ fn push_call<'a>(
     caller: &Scope,
     base: &Scope,
     name: Option<&'a str>,
+    this_value: Option<Value>,
     tasks: &mut Vec<Task<'a>>,
 ) {
     // Which explicit-arg expr fills each param slot ([`fill_arg_slots`]). `None` = the param takes
     // its default / undef. Kept separate from defaults so a DUPLICATE param name binds
     // arg-over-default in the two-phase `Task::Apply` (an unfilled second slot can't clobber a real arg).
     let (arg_slots, dollars) = fill_arg_slots(params, args);
+    // AF.5: a bound method's receiver fills a param NAMED `this` — iff declared and not
+    // explicitly passed (the opt-in mechanic; an explicit arg wins, a this-less fn never sees it).
+    let this_idx = this_value.as_ref().and_then(|_| {
+        params
+            .iter()
+            .position(|p| &*p.name == "this")
+            .filter(|&i| arg_slots[i].is_none())
+    });
     // bind order: params first, then $-args (bound last → they override the inherited $-context). A param
     // filled by an arg is `provided`; a param on its default (or a defaultless-unfilled undef) is not.
     // `$`-args are always provided. `Task::Apply` binds the non-provided (defaults) before the provided.
@@ -2015,6 +2060,9 @@ fn push_call<'a>(
     let mut names: Vec<Rc<str>> = params.iter().map(|p| Rc::clone(&p.name)).collect();
     names.extend(dollars.iter().map(|(name, _)| Rc::clone(name)));
     let mut provided: Vec<bool> = arg_slots.iter().map(Option::is_some).collect();
+    if let Some(i) = this_idx {
+        provided[i] = true; // the injected receiver counts as a passed arg
+    }
     provided.extend(std::iter::repeat_n(true, dollars.len()));
     // A `$`-arg appends names beyond the params, so `names.len()` would no longer equal the compiled
     // function's arity — clear the name (the JIT-offer key) in that (rare) case so an eligible call is
@@ -2034,7 +2082,12 @@ fn push_call<'a>(
     for (_, expr) in dollars.iter().rev() {
         tasks.push(Task::Eval(expr, caller.clone()));
     }
-    for (slot, param) in arg_slots.into_iter().zip(params).rev() {
+    for (i, (slot, param)) in arg_slots.into_iter().zip(params).enumerate().rev() {
+        if Some(i) == this_idx {
+            // the receiver is already a VALUE — no expr to evaluate.
+            tasks.push(Task::Const(this_value.clone().unwrap_or(Value::Undef)));
+            continue;
+        }
         match (slot, &param.default) {
             (Some(expr), _) => tasks.push(Task::Eval(expr, caller.clone())),
             (None, Some(default)) => tasks.push(Task::Eval(default, base.clone())),
@@ -2094,6 +2147,9 @@ fn iter_values(v: &Value, ctx: &Ctx) -> Vec<Value> {
         Value::List(xs) => xs.to_vec(),
         Value::Range { start, step, end } => range_values(*start, *step, *end, ctx),
         Value::Str(s) => s.chars().map(|c| Value::string(c.to_string())).collect(),
+        // An OBJECT iterates its KEYS in insertion order (AF.4, the object-tests golden's
+        // `[for (i = o1) i]`).
+        Value::Object(o) => o.keys().map(|k| Value::Str(Rc::clone(k))).collect(),
         other => vec![other.clone()],
     }
 }
@@ -2167,12 +2223,14 @@ fn name_closure(value: Value, name: &str) -> Value {
             self_name: None,
             repr,
             group,
+            bound_this,
         } => Value::Function {
             closure_id,
             env,
             self_name: Some(std::rc::Rc::from(name)),
             repr,
             group,
+            bound_this,
         },
         other => other,
     }
@@ -3122,6 +3180,8 @@ fn iterate_values(v: &Value, ctx: &Ctx) -> Vec<Value> {
         // `for (j = undef)` iterates ZERO times upstream (special-consts golden: an invalid
         // `[a:b]` range collapses to undef and the loop is silent) — undef is not a scalar value.
         Value::Undef => Vec::new(),
+        // An OBJECT iterates its KEYS in insertion order (AF.4).
+        Value::Object(o) => o.keys().map(|k| Value::Str(Rc::clone(k))).collect(),
         other => vec![other.clone()],
     }
 }
@@ -3282,6 +3342,7 @@ fn nested_fn_value(
         self_name: Some(Rc::clone(&s.name)),
         repr: Rc::clone(&s.repr),
         group: group.cloned(),
+        bound_this: None,
     }
 }
 

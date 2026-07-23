@@ -59,11 +59,26 @@ pub(super) fn bounded_weight(v: &Value, cap: usize) -> usize {
                 if total > cap {
                     return total;
                 }
-                stack.extend(
-                    xs.iter().filter(|x| {
-                        matches!(x, Value::List(_) | Value::NumList(_) | Value::Str(_))
-                    }),
-                );
+                stack.extend(xs.iter().filter(|x| {
+                    matches!(
+                        x,
+                        Value::List(_) | Value::NumList(_) | Value::Str(_) | Value::Object(_)
+                    )
+                }));
+            }
+            // Objects weigh members + their container children (AF.6): a growing nested object
+            // arg must not repeat the AD.5 shallow-gate quadratic.
+            Value::Object(o) => {
+                total += o.len();
+                if total > cap {
+                    return total;
+                }
+                stack.extend(o.iter().map(|(_, v)| v).filter(|x| {
+                    matches!(
+                        x,
+                        Value::List(_) | Value::NumList(_) | Value::Str(_) | Value::Object(_)
+                    )
+                }));
             }
             _ => total += 1,
         }
@@ -186,6 +201,14 @@ pub(super) fn hash_value_bits<H: Hasher>(v: &Value, h: &mut H) {
                 }
             }
             Value::List(xs) => work.extend(xs.iter().rev()),
+            // Object: member NAMES hash inline (insertion order), values join the worklist —
+            // names-then-values pre-order, deterministic, still O(1) host stack.
+            Value::Object(o) => {
+                for name in o.keys() {
+                    name.hash(h);
+                }
+                work.extend(o.iter().rev().map(|(_, v)| v));
+            }
             Value::Range { start, step, end } => {
                 h.write_u64(start.to_bits());
                 h.write_u64(step.to_bits());

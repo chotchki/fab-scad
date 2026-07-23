@@ -61,6 +61,10 @@ pub(super) fn is_builtin(name: &str) -> bool {
             | "lookup"
             | "search"
             | "rands"
+            // objects (AF.4)
+            | "object"
+            | "is_object"
+            | "has_key"
             // type predicates + version (I.4.3)
             | "is_undef"
             | "is_bool"
@@ -141,6 +145,14 @@ pub(super) fn apply(name: &str, pos: &[Value]) -> Value {
         "is_string" => pred(pos, |v| matches!(v, Value::Str(_))),
         "is_list" => pred(pos, |v| matches!(v, Value::NumList(_) | Value::List(_))),
         "is_function" => pred(pos, |v| matches!(v, Value::Function { .. })),
+        "is_object" => pred(pos, |v| matches!(v, Value::Object(_))),
+        // `object` itself never reaches this pure dispatch — `run_builtin` intercepts it (it
+        // needs the argument NAMES, which every other builtin drops).
+        "has_key" => match pos {
+            [Value::Object(o), Value::Str(k)] => Value::Bool(o.has_key(k)),
+            [_, _] => Value::Bool(false),
+            _ => Value::Undef,
+        },
         "version" => Value::num_list(vec![2021.0, 1.0, 0.0]),
         "version_num" => Value::Num(20_210_100.0),
         _ => Value::Undef,
@@ -265,8 +277,50 @@ fn len(pos: &[Value]) -> Value {
         [Value::NumList(xs)] => Value::Num(count(xs.len())),
         [Value::List(xs)] => Value::Num(count(xs.len())),
         [Value::Str(s)] => Value::Num(count(s.chars().count())),
+        [Value::Object(o)] => Value::Num(count(o.len())), // member count (AF.4)
         _ => Value::Undef,
     }
+}
+
+/// `object(...)` — build an object, accumulating LEFT TO RIGHT (AF.4, upstream's experimental
+/// `object()` always-on): a NAMED arg sets that member (`$`-named ones included — `$this=42` is a
+/// member); a positional OBJECT merges its members in order (the copy form); a positional LIST is
+/// an EDIT list — each element `[k]` removes `k`, `[k, v]` sets it; anything else contributes
+/// nothing. `args` carries the names (this is why `run_builtin` routes here specially), `pos` the
+/// evaluated values, index-aligned.
+pub(super) fn object(args: &[crate::parser::Arg], pos: &[Value]) -> Value {
+    let mut map = super::object::ObjectMap::new();
+    for (arg, value) in args.iter().zip(pos) {
+        match (&arg.name, value) {
+            (Some(name), v) => map.set(std::rc::Rc::clone(name), v.clone()),
+            (None, Value::Object(o)) => {
+                for (k, v) in o.iter() {
+                    map.set(std::rc::Rc::clone(k), v.clone());
+                }
+            }
+            (None, Value::NumList(xs)) if xs.is_empty() => {} // an empty edit list is a no-op
+            (None, Value::List(edits)) => {
+                for edit in edits.iter() {
+                    // Every entry must be a `[key]` (remove) or `[key, value]` (set) pair with a
+                    // STRING key — ANY malformed entry invalidates the WHOLE call (the
+                    // object-warning-tests golden: bool/undef keys, over-long or empty pairs,
+                    // undef entries all yield undef, not a partial object).
+                    let Value::List(pair) = edit else {
+                        return Value::Undef;
+                    };
+                    match (pair.first(), pair.get(1), pair.len()) {
+                        (Some(Value::Str(k)), None, 1) => map.remove(k),
+                        (Some(Value::Str(k)), Some(v), 2) => {
+                            map.set(std::rc::Rc::clone(k), v.clone());
+                        }
+                        _ => return Value::Undef,
+                    }
+                }
+            }
+            _ => return Value::Undef, // a positional non-object/non-edit-list poisons the call
+        }
+    }
+    Value::Object(std::rc::Rc::new(map))
 }
 
 /// `concat(a, b, …)` — flatten ONE level: a list arg contributes its elements, anything else (number,

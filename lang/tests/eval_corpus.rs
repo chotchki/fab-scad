@@ -744,6 +744,81 @@ fn search_num_returns_one_miss_asymmetry() {
     assert_eq!(ev(r#"lookup(1, "abc")"#), Value::Undef); // no pairs in a string table
 }
 
+/// Phase AF: `object()` semantics, pinned from the object-tests + object-warning-tests goldens
+/// (the full files are covered by the AH echo lane; these are the load-bearing distillates).
+#[test]
+fn object_values() {
+    let t = Value::Bool(true);
+    let f = Value::Bool(false);
+    // constructor forms + member access (dot, index, $-named)
+    assert_eq!(ev("object(a=1, b=2).a"), num(1.0));
+    assert_eq!(ev(r#"object(a=1)["a"]"#), num(1.0));
+    assert_eq!(ev("object(a=1).zz"), Value::Undef);
+    assert_eq!(ev("object($fs = 42).$fs"), num(42.0));
+    assert_eq!(ev("object(this = 42).this"), num(42.0));
+    // copy + edit list: [[k]] removes, [[k,v]] sets, later wins, empty lists are no-ops
+    assert_eq!(
+        ev(r#"object(object(a=1,b=2), [["a"],["b",4]], [], c=9).b"#),
+        num(4.0)
+    );
+    assert_eq!(
+        ev(r#"has_key(object(object(a=1),[["a"]]), "a")"#),
+        f.clone()
+    );
+    // malformed edits poison the WHOLE call (object-warning-tests)
+    assert_eq!(ev("object(object(a=1), [[true,5]])"), Value::Undef);
+    assert_eq!(ev("object(object(a=1), undef)"), Value::Undef);
+    assert_eq!(ev("object(object(a=1), [[1,2,3,4]])"), Value::Undef);
+    // len / has_key / is_object / iteration (keys, insertion order)
+    assert_eq!(ev("len(object(a=1,b=2))"), num(2.0));
+    assert_eq!(ev("len(object())"), num(0.0));
+    assert_eq!(ev(r#"has_key(object(a=1), "a")"#), t.clone());
+    assert_eq!(ev("is_object(object())"), t.clone());
+    assert_eq!(ev("is_object(5)"), f.clone());
+    assert_eq!(ev("is_list(object(a=1))"), f.clone());
+    assert_eq!(ev("[for (k = object(a=1,b=2)) k]"), ev(r#"["a", "b"]"#));
+    // equality: structural; empty-key removal round-trips
+    assert_eq!(ev("object(a=1) == object(a=1)"), t.clone());
+    assert_eq!(ev("object(a=1) == object(a=2)"), f.clone());
+    assert_eq!(
+        ev(r#"object() == object(object([["","e"]]), [[""]])"#),
+        t.clone()
+    );
+    // the `this` mechanic: receiver bound at extraction, survives storage, opt-in by param name
+    assert_eq!(ev("object(a=42, f=function(this) this.a).f()"), num(42.0));
+    assert_eq!(
+        ev("object(a=42, fout=function() this.a).fout()"),
+        Value::Undef
+    );
+    assert_eq!(
+        ev("let(g = object(a=7, f=function(this) this.a).f) g()"),
+        num(7.0)
+    );
+    assert_eq!(
+        ev("object(f=function(n,this) n > 1 ? n*this.f(n-1) : 1).f(5)"),
+        num(120.0)
+    );
+    // extracted methods carry receiver IDENTITY: same fn, different copies → unequal
+    assert_eq!(
+        ev(
+            r#"let(o = object(a=42, f=function(this) this.a), o2 = object(o, [["a",43]])) o2.f == o.f"#
+        ),
+        f.clone()
+    );
+    assert_eq!(
+        ev(
+            r#"let(o = object(a=42, f=function(this) this.a), o2 = object(o, [["a",43]])) [o.f(), o2.f()]"#
+        ),
+        ev("[42, 43]")
+    );
+    // vector swizzles (the vector-swizzling golden): sets don't mix, >4 letters undef, oob undef
+    assert_eq!(ev("[10,20,30,40].wy"), ev("[40, 20]"));
+    assert_eq!(ev("[10,20,30,40].rgba"), ev("[10, 20, 30, 40]"));
+    assert_eq!(ev("[10,20,30,40].xr"), Value::Undef);
+    assert_eq!(ev("[10,20,30,40].xyxyx"), Value::Undef);
+    assert_eq!(ev("[1,2].z"), Value::Undef);
+}
+
 #[test]
 fn type_predicate_builtins() {
     let t = Value::Bool(true);

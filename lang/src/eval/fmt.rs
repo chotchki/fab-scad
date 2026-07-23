@@ -23,12 +23,18 @@ pub(super) fn format_value(v: &Value) -> String {
     enum W<'v> {
         Val(&'v Value),
         Text(&'static str),
+        /// A member name — objects render `name = value; ` and names are dynamic (AF.2).
+        Name(&'v str),
     }
     let mut out = String::new();
     let mut stack = vec![W::Val(v)];
     while let Some(w) = stack.pop() {
         match w {
             W::Text(t) => out.push_str(t),
+            W::Name(n) => {
+                out.push_str(n);
+                out.push_str(" = ");
+            }
             W::Val(Value::List(xs)) => {
                 out.push('[');
                 stack.push(W::Text("]"));
@@ -37,6 +43,17 @@ pub(super) fn format_value(v: &Value) -> String {
                     if idx > 0 {
                         stack.push(W::Text(", "));
                     }
+                }
+            }
+            // `{ a = 1; b = 2; }` / `{ }` — the object-tests golden shape, nesting through the
+            // same walker (`Wilma = { spouse = { }; }`).
+            W::Val(Value::Object(o)) => {
+                out.push_str("{ ");
+                stack.push(W::Text("}"));
+                for (name, val) in o.iter().rev() {
+                    stack.push(W::Text("; "));
+                    stack.push(W::Val(val));
+                    stack.push(W::Name(name));
                 }
             }
             W::Val(leaf) => out.push_str(&format_leaf(leaf)),
@@ -58,7 +75,7 @@ fn format_leaf(v: &Value) -> String {
         // goldens pin the raw form.
         Value::Str(s) => format!("\"{s}\""),
         Value::NumList(xs) => format_list(xs.iter().map(|n| format_number(*n))),
-        Value::List(_) => format_value(v),
+        Value::List(_) | Value::Object(_) => format_value(v),
         Value::Range { start, step, end } => format!(
             "[{} : {} : {}]",
             format_number(*start),

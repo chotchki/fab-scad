@@ -533,22 +533,48 @@ fn column(elem: &Value, i: usize) -> Option<Value> {
 /// two `rands()` calls to make a non-degenerate line). Called via the [`run_builtin`](super::run_builtin)
 /// seam that holds the stream, not the pure `apply` dispatch.
 pub(super) fn rands(pos: &[Value], stream: &mut super::rng::RandStream) -> Value {
-    let (Some(&Value::Num(min)), Some(&Value::Num(max))) = (pos.first(), pos.get(1)) else {
+    // Upstream's argument treatment verbatim (AH.2.11, the rands golden's bizarro sweep):
+    // arity 3-or-4, all numbers; a non-finite BOUND substitutes ±DBL_MAX/2 (warn + reset), then
+    // min/max swap if reversed; count is |count|, non-finite → 1; the SEED is any double, mapped
+    // through CPython's float hash ([`super::rng::seed_from_double`]) — never a truncation.
+    if !(3..=4).contains(&pos.len()) {
+        return Value::Undef;
+    }
+    let (Some(&Value::Num(min0)), Some(&Value::Num(max0)), Some(&Value::Num(count0))) =
+        (pos.first(), pos.get(1), pos.get(2))
+    else {
         return Value::Undef;
     };
-    let Some(count) = pos.get(2).and_then(as_index) else {
-        return Value::Undef;
+    let seed = match pos.get(3) {
+        Some(&Value::Num(s)) => Some(super::rng::seed_from_double(s)),
+        Some(_) => return Value::Undef,
+        None => None,
+    };
+    let mut min = if min0.is_finite() {
+        min0
+    } else {
+        -f64::MAX / 2.0
+    };
+    let mut max = if max0.is_finite() {
+        max0
+    } else {
+        f64::MAX / 2.0
+    };
+    if max < min {
+        std::mem::swap(&mut min, &mut max);
+    }
+    let n = if count0.is_finite() {
+        count0.abs()
+    } else {
+        1.0
     };
     #[allow(
         clippy::cast_possible_truncation,
         clippy::cast_sign_loss,
-        reason = "boost seeds mt19937 with the value cast to the engine's 32-bit result_type; the BOSL2 \
-                  seeds are small positive ints"
+        reason = "n is finite and non-negative; a beyond-usize count saturates (upstream's \
+                  boost_numeric_cast would throw — a count that size is pathological either way)"
     )]
-    let seed = match pos.get(3) {
-        Some(&Value::Num(s)) if s.is_finite() => Some(s as u32),
-        _ => None,
-    };
+    let count = n as usize;
     let draws = match seed {
         Some(s) => super::rng::rands(min, max, count, Some(s)), // seeded → fresh engine, oracle-exact
         None => stream.draw(min, max, count), // seedless → advance the eval's stream

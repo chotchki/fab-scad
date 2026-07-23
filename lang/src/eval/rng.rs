@@ -83,11 +83,100 @@ impl Mt19937 {
 /// `count` draws uniformly in `[min, max)` from a boost-compatible MT19937 seeded with `seed` (or
 /// [`DEFAULT_SEED`] when `None`). The stream matches OpenSCAD's `rands()` word-for-word. This is the
 /// SEEDED path — a fresh engine per call, so `rands(…, seed=k)` is a pure function of its args.
+/// `min == max` yields `min` repeatedly WITHOUT consuming draws (upstream skips the distribution —
+/// `uniform_real_distribution` doesn't allow an empty span).
 #[must_use]
 pub fn rands(min: f64, max: f64, count: usize, seed: Option<u32>) -> Vec<f64> {
+    if min >= max {
+        return vec![min; count];
+    }
     let mut rng = Mt19937::new(seed.unwrap_or(DEFAULT_SEED));
     let span = max - min;
     (0..count).map(|_| min + span * rng.canonical()).collect()
+}
+
+/// OpenSCAD's SEED mapping (AH.2.11): `static_cast<uint32_t>(hash_floating_point(seed))`, where
+/// `hash_floating_point` is `CPython`'s float hash transliterated at 31 bits (`geometry/linalg.cc`)
+/// — so a fractional/huge/negative seed (`4.1`, `-4.1e100`, `1/0`) lands exactly where upstream's
+/// does instead of truncating. Infinities hash to `±314159`, NaN to `0`.
+#[must_use]
+pub fn seed_from_double(v: f64) -> u32 {
+    hash_floating_point(v).cast_unsigned()
+}
+
+/// `CPython`'s `_Py_HashDouble` at 31 bits, as vendored by upstream (`linalg.cc`): fold the
+/// mantissa 28 bits at a time modulo `2³¹ − 1`, rotate by the exponent, negate on sign.
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_possible_wrap,
+    clippy::many_single_char_names,
+    reason = "reference transliteration: the C algorithm's own names (m/e/x/y) and its exact \
+              unsigned↔signed casts — the mantissa chunk is < 2^28 by construction, and the final \
+              wrap IS the C `(Py_hash_t)x` conversion"
+)]
+fn hash_floating_point(v: f64) -> i32 {
+    const BITS: u32 = 31;
+    const MODULUS: u32 = (1u32 << BITS) - 1;
+    const INF: i32 = 314_159;
+    if !v.is_finite() {
+        if v.is_infinite() {
+            return if v > 0.0 { INF } else { -INF };
+        }
+        return 0; // NaN
+    }
+    let (mut m, mut e) = frexp(v);
+    let negative = m < 0.0;
+    if negative {
+        m = -m;
+    }
+    let mut x: u32 = 0;
+    while m != 0.0 {
+        x = ((x << 28) & MODULUS) | (x >> (BITS - 28));
+        m *= 268_435_456.0; // 2^28
+        e -= 28;
+        let y = m as u32; // integer part, < 2^28
+        m -= f64::from(y);
+        x += y; // < MODULUS + 2^28 — no u32 overflow
+        if x >= MODULUS {
+            x -= MODULUS;
+        }
+    }
+    // reduce the exponent modulo BITS, then rotate. e == 0 → the right shift is by 31 (legal on u32,
+    // and x < 2^31 so it contributes 0).
+    let e = if e >= 0 {
+        (e % BITS as i32) as u32
+    } else {
+        BITS - 1 - ((-1 - e) as u32 % BITS)
+    };
+    x = ((x << e) & MODULUS) | (x >> (BITS - e));
+    if negative {
+        x = x.wrapping_neg(); // C's unsigned `x * sign`, then the int cast
+    }
+    x as i32
+}
+
+/// `frexp(v)` — the C mantissa/exponent split (`v = m·2^e`, `0.5 ≤ |m| < 1`), absent from Rust's
+/// std. Bit-level: exact for normals; subnormals pre-scale by `2⁶⁴`.
+#[allow(
+    clippy::many_single_char_names,
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    reason = "libm's own signature (v → (m, e)); the exponent field is 11 bits, far inside i32"
+)]
+fn frexp(v: f64) -> (f64, i32) {
+    if v == 0.0 || !v.is_finite() {
+        return (v, 0);
+    }
+    let bits = v.to_bits();
+    let exp_field = ((bits >> 52) & 0x7ff) as i32;
+    if exp_field == 0 {
+        let (m, e) = frexp(v * 2f64.powi(64)); // subnormal: one re-scale, then normal
+        return (m, e - 64);
+    }
+    let e = exp_field - 1022;
+    let m = f64::from_bits((bits & !(0x7ffu64 << 52)) | (1022u64 << 52));
+    (m, e)
 }
 
 /// A LIVE MT19937 for SEEDLESS `rands`. OpenSCAD draws every seedless call from ONE global engine, so
@@ -147,7 +236,12 @@ impl RandStream {
     }
 
     /// `count` draws in `[min, max)`, ADVANCING the stream so the next call continues the sequence.
+    /// `min == max` yields `min` repeatedly WITHOUT advancing (AH.2.11 — upstream never constructs
+    /// the distribution for an empty span, so the global stream position is untouched).
     pub(crate) fn draw(&mut self, min: f64, max: f64, count: usize) -> Vec<f64> {
+        if min >= max {
+            return vec![min; count];
+        }
         (0..count).map(|_| self.next_one(min, max)).collect()
     }
 

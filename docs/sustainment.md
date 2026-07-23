@@ -72,8 +72,17 @@ mangling the block just triggers one redundant re-evaluation.
    can't-open-library wall, or it's a `templates/` `configure_file` input never run raw. The
    workflow also clones MCAD (an openscad submodule the sparse clone skips) and exports
    `OPENSCADPATH=/tmp/openscad/libraries` — the corpus `include <MCAD/…>`s it, the fonts lesson
-   again. Full-census baseline (2026-07-23): 550/576 clean, 24 expected, 2 genuine
-   (experimental `object()`, one include-fragment).
+   again.
+   The bar is a LADDER (AH): eval-clean < expected-classified < **echo-match** — a passing file
+   under `tests/data/scad/` with a golden `tests/regression/echo/<stem>-expected.echo` must also
+   MATCH its recorded `ECHO:` output (goldens with `ERROR:` lines are the classifier's; WARNING
+   text stays v1-excluded; the sweep runs `preview: true` since upstream's echo tests never
+   `--render`). Divergence buckets as `echo-diff` with the first differing line; the summary's
+   "Echo goldens: N/M matched" is the lane's coverage. This bar is what caught two entirely
+   unimplemented builtins "passing" eval-clean — and then a dozen real semantics bugs (AH.2).
+   Full-census baseline (2026-07-23, post-AH.2): 543/576 eval clean, 24 expected, echo goldens
+   86/93 matched — the 7 open diffs are the AF/AG feature burn-down + the macOS-local libm
+   inverse-trig bits (Linux CI is the judge).
 
 ## Report shape (the rolling issue body)
 

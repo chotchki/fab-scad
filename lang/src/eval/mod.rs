@@ -26,6 +26,7 @@ pub(crate) mod io;
 pub(crate) mod jit_abi;
 mod loader;
 mod message;
+mod metrics;
 mod mod_cache;
 mod mod_redundancy;
 mod module;
@@ -1795,7 +1796,11 @@ fn run_builtin(name: &str, args: &[Arg], values: &mut Vec<Value>, ctx: &Ctx<'_>)
     let start = values.len().saturating_sub(args.len());
     // `rands` is the one STATEFUL builtin: seedless draws advance the evaluator's `rand_stream` (I.2.8b),
     // so it's routed here where the `Ctx` is in scope rather than through the pure `builtins::apply`.
-    let result = if name == "object" {
+    let result = if name == "textmetrics" || name == "fontmetrics" {
+        // AG: the metrics builtins have DECLARED named parameters upstream (unlike every other
+        // builtin) — routed here where the `Arg` names are in hand, like `object`.
+        builtins::metrics_call(name, args, &values[start..], &mut ctx.messages.borrow_mut())
+    } else if name == "object" {
         // `object()` is the ONE builtin that reads argument NAMES (AF.4): `object(a=1, b=2)`'s
         // member names ARE the names. Routed here where the `Arg` list is in hand.
         builtins::object(args, &values[start..])

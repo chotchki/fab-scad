@@ -21,7 +21,7 @@ use super::geo2d::Contour;
 
 /// Liberation Sans (OpenSCAD's default `text()` font; SIL OFL, see `fonts/LiberationSans-LICENSE.txt`),
 /// bundled so glyph outlines are deterministic + oracle-matching without touching the host's fonts.
-static LIBERATION_SANS: &[u8] = include_bytes!("fonts/LiberationSans-Regular.ttf");
+pub(super) static LIBERATION_SANS: &[u8] = include_bytes!("fonts/LiberationSans-Regular.ttf");
 
 /// The parsed `text()` arguments (OpenSCAD `TextModule`/`FreetypeRenderer`). `font` is accepted but only
 /// the bundled face is honored for now (see the module determinism note).
@@ -243,7 +243,7 @@ impl ttf_parser::OutlineBuilder for OutlineCollector {
 }
 
 /// OpenSCAD `direction` → rustybuzz [`Direction`](rustybuzz::Direction). Unknown → `None` (keep the guess).
-fn parse_direction(dir: &str) -> Option<rustybuzz::Direction> {
+pub(super) fn parse_direction(dir: &str) -> Option<rustybuzz::Direction> {
     match dir {
         "ltr" => Some(rustybuzz::Direction::LeftToRight),
         "rtl" => Some(rustybuzz::Direction::RightToLeft),
@@ -254,7 +254,7 @@ fn parse_direction(dir: &str) -> Option<rustybuzz::Direction> {
 }
 
 /// OpenSCAD `script` (an ISO-15924 tag like "latn"/"arab") → a rustybuzz [`Script`](rustybuzz::Script).
-fn script_tag(script: &str) -> Option<rustybuzz::Script> {
+pub(super) fn script_tag(script: &str) -> Option<rustybuzz::Script> {
     let bytes = script.as_bytes();
     if bytes.len() == 4 {
         rustybuzz::Script::from_iso15924_tag(ttf_parser::Tag::from_bytes(&[

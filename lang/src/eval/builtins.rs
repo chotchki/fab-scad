@@ -65,6 +65,9 @@ pub(super) fn is_builtin(name: &str) -> bool {
             | "object"
             | "is_object"
             | "has_key"
+            // text metrics (AG) — named-param builtins, intercepted in run_builtin
+            | "textmetrics"
+            | "fontmetrics"
             // type predicates + version (I.4.3)
             | "is_undef"
             | "is_bool"
@@ -280,6 +283,109 @@ fn len(pos: &[Value]) -> Value {
         [Value::Object(o)] => Value::Num(count(o.len())), // member count (AF.4)
         _ => Value::Undef,
     }
+}
+
+/// `textmetrics(...)` / `fontmetrics(...)` (AG) — the two builtins with DECLARED named parameters
+/// upstream. Binding: positionals fill the declaration order, named args their slot, an unknown
+/// name warns "not specified as parameter" and is ignored, and a WRONG-TYPED value warns
+/// "Invalid type" and falls back to the default (the golden's all-zero textmetrics case is just
+/// empty-text metrics). Returns an OBJECT (the golden shapes) — see [`super::metrics`].
+pub(super) fn metrics_call(
+    name: &str,
+    args: &[crate::parser::Arg],
+    pos: &[Value],
+    messages: &mut Vec<super::Message>,
+) -> Value {
+    let params: &[&str] = if name == "textmetrics" {
+        &[
+            "text",
+            "size",
+            "font",
+            "direction",
+            "language",
+            "script",
+            "halign",
+            "valign",
+            "spacing",
+        ]
+    } else {
+        &["size", "font"]
+    };
+    let mut bound: std::collections::BTreeMap<&str, &Value> = std::collections::BTreeMap::new();
+    let mut next_positional = 0usize;
+    for (arg, value) in args.iter().zip(pos) {
+        match &arg.name {
+            None => {
+                if let Some(&slot) = params.get(next_positional) {
+                    bound.insert(slot, value);
+                }
+                next_positional += 1;
+            }
+            Some(n) => match params.iter().find(|&&p| p == &**n) {
+                Some(&slot) => {
+                    bound.insert(slot, value);
+                }
+                None => messages.push(super::Message::Warning(format!(
+                    "variable \"{n}\" not specified as parameter"
+                ))),
+            },
+        }
+    }
+    // upstream's parameter type names ("vector", not "list").
+    let upstream_type = |v: &Value| match v {
+        Value::NumList(_) | Value::List(_) => "vector",
+        other => other.type_name(),
+    };
+    let mut warn_bad = |param: &str, v: &Value, want: &str| {
+        messages.push(super::Message::Warning(format!(
+            "{name}(..., {param}={}) Invalid type: expected {want}, found {}",
+            format_value(v),
+            upstream_type(v)
+        )));
+    };
+    let mut take_num = |param: &str, default: f64| match bound.get(param) {
+        Some(Value::Num(n)) => *n,
+        Some(v) => {
+            warn_bad(param, v, "number");
+            default
+        }
+        None => default,
+    };
+    let size = take_num("size", 10.0);
+    if name == "fontmetrics" {
+        // font is type-checked (string) but only the bundled face is honored.
+        if let Some(v) = bound.get("font")
+            && !matches!(v, Value::Str(_))
+        {
+            warn_bad("font", v, "string");
+        }
+        return super::metrics::fontmetrics(size);
+    }
+    let spacing = take_num("spacing", 1.0);
+    let mut take_str = |param: &str, default: &str| match bound.get(param) {
+        Some(Value::Str(s)) => s.to_string(),
+        Some(v) => {
+            warn_bad(param, v, "string");
+            default.to_string()
+        }
+        None => default.to_string(),
+    };
+    let p = super::metrics::MetricsParams {
+        text: take_str("text", ""),
+        size,
+        spacing,
+        direction: take_str("direction", ""),
+        language: take_str("language", "en"),
+        script: take_str("script", ""),
+        halign: take_str("halign", "default"),
+        valign: take_str("valign", "default"),
+    };
+    if let Some(v) = bound.get("font")
+        && !matches!(v, Value::Str(_))
+    {
+        warn_bad("font", v, "string");
+    }
+    super::metrics::textmetrics(&p)
 }
 
 /// `object(...)` — build an object, accumulating LEFT TO RIGHT (AF.4, upstream's experimental

@@ -26,6 +26,16 @@ fn empty_program() -> Program {
     Program { stmts: Vec::new() }
 }
 
+/// Is this `use`/`include` path a FONT file (AC.1)? Extension check, case-insensitive — the shapes
+/// OpenSCAD's font registration accepts (`.ttf`/`.otf`/`.ttc`).
+fn is_font_path(raw: &str) -> bool {
+    Path::new(raw.trim()).extension().is_some_and(|ext| {
+        ["ttf", "otf", "ttc"]
+            .iter()
+            .any(|f| ext.eq_ignore_ascii_case(f))
+    })
+}
+
 /// Read a root `.scad` file to source text — the entry read behind [`evaluate_file`](crate::evaluate_file)
 /// and kin. Split out here so the crate's every `std::fs` call lives in this one module.
 ///
@@ -221,6 +231,20 @@ where
 {
     match need {
         SourceNeed::Scad { from_dir, raw } => {
+            // Fonts contribute the empty program silently — same doctrine as the fs loader (AC.1).
+            if is_font_path(&raw) {
+                let key = (from_dir.clone(), raw.clone());
+                let id = from_dir.join(&raw);
+                scad.insert(
+                    key,
+                    ProvidedSource {
+                        id,
+                        dir: from_dir,
+                        program: empty_program(),
+                    },
+                );
+                return Ok(());
+            }
             let key = (from_dir.clone(), raw.clone());
             if scad.contains_key(&key) {
                 return Ok(());
@@ -310,6 +334,23 @@ where
             let key = (from_dir.clone(), raw.clone());
             if scad.contains_key(&key) {
                 return Ok(()); // duplicate reference surfaced this round — already fulfilled
+            }
+            // `use <font.ttf>` (AC.1): OpenSCAD silently REGISTERS the font for `text()` — it is
+            // not scad source. We contribute the empty program silently (no warning — upstream has
+            // none); the registration half is a documented no-op: `text()` draws the BUNDLED
+            // Liberation face regardless (the determinism doctrine bans host font lookup), so a
+            // `font=` naming the used face still renders — with our deterministic glyphs.
+            if is_font_path(&raw) {
+                let id = from_dir.join(&raw);
+                scad.insert(
+                    key,
+                    ProvidedSource {
+                        id,
+                        dir: from_dir,
+                        program: empty_program(),
+                    },
+                );
+                return Ok(());
             }
             let Some(id) = resolve(&from_dir, &raw, library_paths) else {
                 // TOLERANT (M.6.1): a missing library → warn + an EMPTY program (no statements, no defs), so

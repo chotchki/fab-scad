@@ -92,6 +92,11 @@ added 2026-07-07.
 - [x] Y.8 - Y.8 - Audit + wire the kernel fuzz coverage
 - [ ] Y.9 - Y.9 - Extend kernel fuzz coverage (csg_tree random-op + new op targets)
 
+## Phase AC - Census burn-down: the buckets chotchki called (fonts, then 2D minkowski)
+- [x] AC.1 - Font files (chotchki: "we probably need to copy the fonts too") DONE — two layers: `use <font.ttf>` now contributes the EMPTY program SILENTLY in both loaders (upstream registers fonts silently; ours is a documented no-op — `text()` draws the bundled Liberation face regardless, determinism doctrine) instead of attempting to parse TTF bytes as scad; sustain.yml + the local sparse checkout gain `tests/data/ttf`. KEY prior fact: `text()` EXISTS (J.4.3, pure-Rust, embedded font) — these files were blocked ONLY on the unresolvable use. Census **529→541** (load 21→8, the residue is MCAD + kin); conformance pin: real dummy .ttf, silent, cube renders
+- [ ] AC.2 - 2D minkowski (the 5 `unimplemented` census files): recon our 2D boolean/offset machinery post-M.7 (the old note says "Clipper2's MinkowskiSum via the CrossSection binding" — that was the C++ plan; the kernel is OURS now), then implement minkowski() over 2D children + oracle-verify; the 5 files go green
+- [ ] AC.3 - Re-baseline: local census + the next sustain report reflect the new numbers; remaining buckets each have a named owner (assertion→semantics worklist, MCAD→decide ship-or-skip, timeouts→recursion-probe economics, parse→verdict parity)
+
 ## Backlog (not yet phased)
 
 - **Evaluate the M.3.1 spectral-norm SHORTCUT (chotchki, 2026-07-14).** `Mat3::spectral_norm` uses deterministic power iteration on MᵀM (32 iters + IEEE sqrt) instead of porting Manifold's iterative Jacobi SVD (`svd.h`, ~304 LOC). Justified because `SpectralNorm` is used ONLY for `epsilon *= SpectralNorm` (a tolerance invisible to a transform's output geometry — positions/tris/normals are exact). REVISIT if: (a) a compound-op differential (`transform(x).union(y)`) fails on an epsilon-driven near-degenerate merge tracing to a spectral-norm ULP divergence vs C++, or (b) the M.6 native≡wasm bit-for-bit corpus sweep flags it. Neither bites ⇒ shortcut was worth it (~300 LOC of Jacobi SVD avoided); if it bites ⇒ port `svd.h` verbatim. (Task #4 logged; bridge id-collided with K.2 so tracked here.)

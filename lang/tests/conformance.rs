@@ -204,3 +204,31 @@ fn expr_entry_depth_guard_fires_from_deep_statement_chains() {
     let e = parse(&src).expect_err("must bail");
     assert!(format!("{e}").contains("deeply"), "got: {e}");
 }
+
+/// AC.1: `use <font.ttf>` is a FONT registration upstream, not scad source — our loader contributes
+/// the empty program SILENTLY (no can't-open, no parse-failed warning; `text()` draws the bundled
+/// Liberation face regardless, per the determinism doctrine). Pinned against a real dummy file so
+/// the resolve path runs, not the tolerated-missing path.
+#[test]
+fn use_of_a_font_file_is_a_silent_no_op() {
+    let dir = std::env::temp_dir().join(format!("fab-font-noop-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("mk temp");
+    std::fs::write(dir.join("fake-font.ttf"), b"\x00\x01\x00\x00not-scad").expect("write ttf");
+    let scad = dir.join("uses-font.scad");
+    std::fs::write(&scad, "use <fake-font.ttf>\ncube(1);").expect("write scad");
+    let (geo, messages) = fab_lang::resolve_geometry_with_base_full(
+        &std::fs::read_to_string(&scad).expect("read"),
+        &dir,
+        &[],
+        None,
+        fab_lang::Config::default(),
+        |_| Err(fab_lang::Error::Load("no meshes in this test".into())),
+    )
+    .expect("evaluates");
+    assert!(!geo.is_null(), "the cube renders");
+    assert!(
+        messages.is_empty(),
+        "font use is SILENT (upstream registers silently): {messages:?}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -117,7 +117,7 @@ jobs:
         run: |
           set -euo pipefail
           git clone --depth 1 --filter=blob:none --sparse https://github.com/openscad/openscad.git /tmp/openscad
-          git -C /tmp/openscad sparse-checkout set tests/data/scad examples
+          git -C /tmp/openscad sparse-checkout set tests/data/scad tests/data/ttf examples
           state='${{ steps.state.outputs.state }}'
           seen_head=$(printf '%s' "$state" | jq -r '.openscad_head // empty')
           if [ -n "$seen_head" ]; then

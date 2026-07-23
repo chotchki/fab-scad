@@ -52,7 +52,11 @@ fn format_leaf(v: &Value) -> String {
         Value::Undef => "undef".to_string(),
         Value::Bool(b) => b.to_string(), // "true" / "false"
         Value::Num(n) => format_number(*n),
-        Value::Str(s) => format!("\"{}\"", escape_string(s)), // quoted + escaped (QuotedString)
+        // Quoted with RAW contents (AH.2.2): console echo is `toEchoStringNoThrow` — quotes added,
+        // NOTHING escaped (a tab prints as a tab, an inner `"` as `"`). The escaping `QuotedString`
+        // form is for upstream's CSG/AST dumps, not `ECHO:` — the search/string/unicode-test
+        // goldens pin the raw form.
+        Value::Str(s) => format!("\"{s}\""),
         Value::NumList(xs) => format_list(xs.iter().map(|n| format_number(*n))),
         Value::List(_) => format_value(v),
         Value::Range { start, step, end } => format!(
@@ -108,23 +112,6 @@ fn trim_fraction(s: &str) -> String {
     }
 }
 
-/// Escape a string for the QUOTED echo form, matching OpenSCAD's `QuotedString` (`Value.cc`): the five
-/// escapes `\t \n \r \" \\`; everything else (incl. non-ASCII) passes through verbatim.
-fn escape_string(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for c in s.chars() {
-        match c {
-            '\t' => out.push_str("\\t"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            _ => out.push(c),
-        }
-    }
-    out
-}
-
 /// Join pre-formatted items as `[a, b, c]` (empty → `[]`).
 fn format_list(items: impl Iterator<Item = String>) -> String {
     let mut s = String::from("[");
@@ -174,12 +161,13 @@ mod tests {
     }
 
     #[test]
-    fn strings_are_quoted_and_escaped() {
+    fn strings_are_quoted_with_raw_contents() {
         assert_eq!(format_value(&Value::string("hi")), "\"hi\"");
-        // QuotedString escapes: tab, newline, CR, quote, backslash.
+        // AH.2.2 (string-test/search-tests goldens): echo NEVER escapes — a tab is a tab, an
+        // inner quote an inner quote. Upstream's escaping `QuotedString` is for CSG dumps.
         assert_eq!(
             format_value(&Value::string("a\tb\nc\rd\"e\\f")),
-            "\"a\\tb\\nc\\rd\\\"e\\\\f\""
+            "\"a\tb\nc\rd\"e\\f\""
         );
     }
 

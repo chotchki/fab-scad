@@ -14,6 +14,12 @@ use std::f64::consts::{FRAC_1_SQRT_2, PI};
 /// `M_SQRT3_4` = √3/2 (the `f64` nearest to `sqrt(3.0)/2.0`, matching OpenSCAD's constant).
 const SQRT3_4: f64 = 0.866_025_403_784_438_6;
 
+/// `M_SQRT3` = √3, upstream's literal (`degree_trig.h`: `1.73205080756887719318`).
+const SQRT3: f64 = 1.732_050_807_568_877_2;
+
+/// `M_SQRT1_3` = √(1/3) = √3/3, upstream's literal (`degree_trig.h`: `0.57735026918962573106`).
+const SQRT1_3: f64 = 0.577_350_269_189_625_7;
+
 /// `deg2rad(x) = x * M_DEG2RAD`, with `M_DEG2RAD = PI/180`.
 fn deg2rad(x: f64) -> f64 {
     x * (PI / 180.0)
@@ -119,6 +125,49 @@ pub(crate) fn sin_degrees(x: f64) -> f64 {
         SQRT3_4
     } else {
         deg2rad(90.0 - x).cos()
+    };
+    if oppose { -y } else { y }
+}
+
+/// `tan` of an angle in DEGREES — upstream's DEDICATED case split (`degree_trig.cc`
+/// `tan_degrees`), NOT the sin/cos quotient: the signed zero and signed infinity hang off the raw
+/// half-turn count (`tan(-180)` is `-0`, `tan(-90)` is `-inf` — AH.2.9, the trig-tests golden),
+/// which a quotient of folded sin/cos can't recover. The `TRIG_HUGE_VAL` guard upstream is dead
+/// (never defined), so it isn't ported. Parity via f64 `%` (fmod): past 2⁵³ half-turns parity is
+/// unknowable either way — upstream's `(int)floor` is UB there.
+#[must_use]
+#[allow(
+    clippy::float_cmp,
+    reason = "exact `==` on the special angles IS OpenSCAD's exact-quadrant algorithm"
+)]
+pub(crate) fn tan_degrees(x: f64) -> f64 {
+    let cycles = (x / 180.0).floor();
+    let mut x = if (0.0..180.0).contains(&x) {
+        x
+    } else {
+        x - 180.0 * cycles
+    };
+    let oppose = x > 90.0;
+    if oppose {
+        x = 180.0 - x;
+    }
+    let even = cycles % 2.0 == 0.0;
+    let y = if x == 0.0 {
+        if even { 0.0 } else { -0.0 }
+    } else if x == 30.0 {
+        SQRT1_3
+    } else if x == 45.0 {
+        1.0
+    } else if x == 60.0 {
+        SQRT3
+    } else if x == 90.0 {
+        if even {
+            f64::INFINITY
+        } else {
+            f64::NEG_INFINITY
+        }
+    } else {
+        deg2rad(x).tan()
     };
     if oppose { -y } else { y }
 }

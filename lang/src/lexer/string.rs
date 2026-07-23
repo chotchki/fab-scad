@@ -102,7 +102,11 @@ fn decode_unicode(chars: &mut core::str::Chars<'_>, out: &mut String, n: usize, 
         val = val * 16 + d;
     }
     *chars = probe;
-    if let Some(ch) = char::from_u32(val) {
+    // Codepoint 0 becomes a SPACE, same as `\x00` above (AH.2.2, the unicode-tests golden):
+    // upstream can't carry a NUL through its C strings and substitutes ' '.
+    if val == 0 {
+        out.push(' ');
+    } else if let Some(ch) = char::from_u32(val) {
         out.push(ch);
     }
 }

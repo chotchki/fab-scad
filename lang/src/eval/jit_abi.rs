@@ -35,7 +35,7 @@ static MATH: &[(&str, u8, MathFn)] = &[
     ("sign", 1, |a, _| sign(a)),
     ("sin", 1, |a, _| trig::sin_degrees(a)),
     ("cos", 1, |a, _| trig::cos_degrees(a)),
-    ("tan", 1, |a, _| trig::sin_degrees(a) / trig::cos_degrees(a)),
+    ("tan", 1, |a, _| trig::tan_degrees(a)),
     ("asin", 1, |a, _| trig::asin_degrees(a)),
     ("acos", 1, |a, _| trig::acos_degrees(a)),
     ("atan", 1, |a, _| a.atan().to_degrees()),

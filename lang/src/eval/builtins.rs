@@ -103,7 +103,7 @@ pub(super) fn apply(name: &str, pos: &[Value]) -> Value {
         "sign" => num1(pos, sign),
         "sin" => num1(pos, trig::sin_degrees),
         "cos" => num1(pos, trig::cos_degrees),
-        "tan" => num1(pos, |x| trig::sin_degrees(x) / trig::cos_degrees(x)),
+        "tan" => num1(pos, trig::tan_degrees),
         // asin/acos snap to EXACT degrees at the nice sines/cosines (glibc's correctly-rounded value),
         // else libm — so `acos(-0.5)` is exactly 120, not `120.0000…01` (BOSL2's exact-`==` f_acos). atan/
         // atan2 stay on `to_degrees` (their nice angles are already exact here, and no test needs a snap).
@@ -436,6 +436,16 @@ fn search(pos: &[Value]) -> Value {
         Value::Num(_) | Value::Bool(_) => build_vector(hits(find, &rows, num_returns, index_col)),
         // A STRING match drops misses (`search("abe","abc",1)` = `[0,1]` — 'e' vanishes)…
         Value::Str(s) => {
+            // …and over a LIST table, a malformed (non-list) row invalidates the WHOLE call:
+            // upstream warns per bad row and returns [] overall (AH.2.2, search-tests golden —
+            // `search("a", [["a",1],123], num_returns_per_match=0)` is `[]`, not `[[0]]`).
+            if matches!(table, Value::NumList(_) | Value::List(_))
+                && rows
+                    .iter()
+                    .any(|r| !matches!(r, Value::NumList(_) | Value::List(_)))
+            {
+                return build_vector(Vec::new());
+            }
             let keys: Vec<Value> = s.chars().map(|c| Value::string(c.to_string())).collect();
             build_vector(per_key_search(&keys, &rows, num_returns, index_col, false))
         }

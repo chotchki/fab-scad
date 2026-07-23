@@ -88,13 +88,29 @@ pub fn golden_echo_lines(echo_dir: &Path, file: &str) -> Option<Vec<String>> {
     if golden.lines().any(|l| l.starts_with("ERROR:")) {
         return None;
     }
-    Some(
-        golden
-            .lines()
-            .filter(|l| l.starts_with("ECHO:"))
-            .map(|l| l.trim_end().to_string())
-            .collect(),
-    )
+    // One entry per ECHO UNIT, not per physical line: echo never escapes (AH.2.2), so a string
+    // containing newlines prints across several golden lines — continuation lines (no message
+    // prefix) re-attach to the ECHO above them. Lines under a WARNING/TRACE stay dropped.
+    let prefixed = |l: &str| {
+        ["WARNING:", "ERROR:", "TRACE:", "DEPRECATED:", "FONT-"]
+            .iter()
+            .any(|p| l.starts_with(p))
+    };
+    let mut echoes: Vec<String> = Vec::new();
+    let mut in_echo = false;
+    for line in golden.lines() {
+        let l = line.trim_end_matches('\r');
+        if l.starts_with("ECHO:") {
+            echoes.push(l.to_string());
+            in_echo = true;
+        } else if prefixed(l) {
+            in_echo = false;
+        } else if in_echo && let Some(last) = echoes.last_mut() {
+            last.push('\n');
+            last.push_str(l);
+        }
+    }
+    Some(echoes)
 }
 
 /// First divergence between our rendered `ECHO:` lines and the golden's, as a one-line report
@@ -103,12 +119,14 @@ pub fn golden_echo_lines(echo_dir: &Path, file: &str) -> Option<Vec<String>> {
 #[must_use]
 pub fn first_echo_divergence(ours: &[String], golden: &[String]) -> Option<String> {
     fn cap(s: &str) -> String {
+        // Wire detail is ONE line — fold real newlines back to visible escapes for the report.
+        let s = s.replace('\n', "\\n");
         // char-boundary safe: the corpus echoes unicode (utf8-tests et al).
         if s.chars().count() > 120 {
             let head: String = s.chars().take(117).collect();
             format!("{head}…")
         } else {
-            s.to_string()
+            s
         }
     }
     let n = ours.len().max(golden.len());
@@ -207,6 +225,16 @@ add_failing_test(parsererrors SUFFIX stl FILES ${FAILING_FILES} ARGS --retval=1)
             golden_echo_lines(&dir, "/c/tests/data/scad/misc/mixed.scad"),
             Some(vec!["ECHO: 1".to_string(), "ECHO: \"two\"".to_string()]),
             "only ECHO lines survive"
+        );
+        std::fs::write(
+            dir.join("multiline-expected.echo"),
+            "ECHO: \"a\nb\"\nWARNING: w in file x\nc-not-attached\nECHO: 2\n",
+        )
+        .unwrap();
+        assert_eq!(
+            golden_echo_lines(&dir, "/c/tests/data/scad/misc/multiline.scad"),
+            Some(vec!["ECHO: \"a\nb\"".to_string(), "ECHO: 2".to_string()]),
+            "continuation lines re-attach to their ECHO; lines under a WARNING drop"
         );
         assert_eq!(
             golden_echo_lines(&dir, "/c/tests/data/scad/misc/failing.scad"),

@@ -261,7 +261,9 @@ mod tests {
     fn mesh_of(imported: Imported) -> fab_lang::Mesh {
         match imported {
             Imported::Mesh(mesh) => mesh,
-            Imported::Contours(_) => panic!("expected a 3D mesh payload, got 2D contours"),
+            Imported::Contours(_) | Imported::Bytes(_) => {
+                panic!("expected a 3D mesh payload")
+            }
         }
     }
 

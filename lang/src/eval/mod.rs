@@ -12,6 +12,7 @@
 
 mod builtins;
 mod config;
+mod dxfdim;
 mod eval_cache;
 mod fmt;
 mod fnprofile;
@@ -24,6 +25,7 @@ mod geometry;
 mod intrinsics;
 pub(crate) mod io;
 pub(crate) mod jit_abi;
+mod json;
 mod loader;
 mod message;
 mod metrics;
@@ -75,6 +77,10 @@ pub enum Imported {
     /// holes are all just contours in the one vec (the backend's fill rule resolves them), exactly like the
     /// glyph outlines `text()` produces.
     Contours(Vec<Contour>),
+    /// RAW file bytes (AI.1) — the [`SourceNeed::Data`] payload for the file-VALUE builtins
+    /// (expression `import()`, `dxf_dim`/`dxf_cross`). Parsing happens in fab-lang (pure);
+    /// the shell only reads.
+    Bytes(Rc<[u8]>),
 }
 
 impl Imported {
@@ -116,6 +122,13 @@ pub enum SourceNeed {
     File {
         /// The literal `file=` path the call named.
         raw: String,
+    },
+    /// A RAW-BYTES file (AI.1): the file-value builtins' channel. `path` is ALREADY resolved
+    /// against the calling file's dir (the eval joins lexically — pure), so the shell reads it
+    /// as-is; the same string keys the [`FileTable`] entry ([`Imported::Bytes`]).
+    Data {
+        /// The resolved path to read.
+        path: String,
     },
 }
 
@@ -385,6 +398,9 @@ pub(super) struct Ctx<'a> {
     /// gates control flow). A `BTreeSet` dedups + orders them deterministically; drained into
     /// [`Resolution::Incomplete`] (or a LOUD error on the no-table entries).
     file_needs: RefCell<BTreeSet<String>>,
+    /// The RAW-BYTES paths this run requested but the table lacks (AI.1) — drained alongside
+    /// `file_needs` into [`SourceNeed::Data`]s.
+    data_needs: RefCell<BTreeSet<String>>,
     /// Live user-module call depth — the Safari-cliff guard. Statement eval is HOST-recursive (a module
     /// body re-enters `eval_stmt`), so a self-recursive module could overflow; this bounds it, LOUD
     /// ([`MAX_MODULE_DEPTH`]), never a silent stack crash.
@@ -578,13 +594,80 @@ impl<'a> Ctx<'a> {
         }
     }
 
-    /// Drain the File needs discovered this run into the ordered [`SourceNeed`] set (M.3). Empty → the run
-    /// closed; non-empty → the caller must supply the meshes and evaluate again.
+    /// Resolve a file-value builtin's path to its RAW BYTES (AI.1): the table's [`Imported::Bytes`]
+    /// if present, else record a [`SourceNeed::Data`] and return `None` (the caller reads + re-runs;
+    /// this pass's result for the expression is `undef`, replaced on the closing pass).
+    fn request_data(&self, path: String) -> Option<Rc<[u8]>> {
+        match self.files.and_then(|t| t.get(&path)) {
+            Some(Imported::Bytes(b)) => Some(Rc::clone(b)),
+            Some(_) => None, // key collision with a mesh entry — treat as unreadable
+            None => {
+                self.data_needs.borrow_mut().insert(path);
+                None
+            }
+        }
+    }
+
+    /// Drain the File + Data needs discovered this run into the ordered [`SourceNeed`] set (M.3 +
+    /// AI.1). Empty → the run closed; non-empty → the caller must supply them and evaluate again.
     fn take_file_needs(&self) -> Vec<SourceNeed> {
-        std::mem::take(&mut *self.file_needs.borrow_mut())
+        let mut needs: Vec<SourceNeed> = std::mem::take(&mut *self.file_needs.borrow_mut())
             .into_iter()
             .map(|raw| SourceNeed::File { raw })
-            .collect()
+            .collect();
+        needs.extend(
+            std::mem::take(&mut *self.data_needs.borrow_mut())
+                .into_iter()
+                .map(|path| SourceNeed::Data { path }),
+        );
+        needs
+    }
+}
+
+/// The ROOT island's starting scope: preview-seeded plus the root file's dir (AI.1).
+fn root_scope_with_dir(ctx: &Ctx<'_>) -> Scope {
+    let mut scope = Scope::new_with_preview(ctx.config.preview);
+    bind_file_dir(&mut scope, &ctx.islands[0].dir);
+    scope
+}
+
+/// Bind [`FILE_DIR_VAR`] into an island's global scope (AI.1) — skipped for the raw-AST paths
+/// (no file, empty dir), where a relative import stays relative and the shell reads it against
+/// the process cwd (or fails tolerantly).
+fn bind_file_dir(scope: &mut Scope, dir: &std::path::Path) {
+    if !dir.as_os_str().is_empty() {
+        scope.bind(
+            FILE_DIR_VAR,
+            Value::string(dir.to_string_lossy().into_owned()),
+        );
+    }
+}
+
+/// The hidden per-island binding carrying the island FILE's directory (AI.1): bound into every
+/// island global so a function body's LEXICAL lookup finds the dir of the file it was DEFINED in —
+/// upstream resolves `import()`/`dxf_dim` paths against `loc.filePath().parent_path()`, i.e. the
+/// call site's file. Underscore-prefixed to stay out of any real program's namespace.
+const FILE_DIR_VAR: &str = "__fab_file_dir__";
+
+/// Which file-value builtin a [`Task::FileFn`] applies.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FileFnKind {
+    /// Expression-position `import()` — `.json` → a [`Value::Object`] tree (AI.2).
+    ImportValue,
+    /// `dxf_dim(file, layer, origin, scale, name)` — a DIMENSION entity's measurement (AI.3).
+    DxfDim,
+    /// `dxf_cross(file, layer, origin, scale)` — the intersection of two LINEs on a layer (AI.3).
+    DxfCross,
+}
+
+impl FileFnKind {
+    fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "import" => Some(FileFnKind::ImportValue),
+            "dxf_dim" => Some(FileFnKind::DxfDim),
+            "dxf_cross" => Some(FileFnKind::DxfCross),
+            _ => None,
+        }
     }
 }
 
@@ -668,6 +751,15 @@ enum Task<'a> {
     CallValue { args: &'a [Arg], caller: Scope },
     /// Pop the builtin's argument values, split into positional/named, and apply the builtin `name`.
     Builtin { name: &'a str, args: &'a [Arg] },
+    /// Apply a FILE-VALUE builtin (AI.1 — expression `import()` / `dxf_dim` / `dxf_cross`): pop the
+    /// arg values (evaluated like `Builtin`), bind them to the declared param names, resolve the
+    /// path against `dir` (the CALLING file's directory, from the hidden [`FILE_DIR_VAR`] island
+    /// binding), and read the file through the [`SourceNeed::Data`] fixpoint channel.
+    FileFn {
+        kind: FileFnKind,
+        args: &'a [Arg],
+        dir: Option<Rc<str>>,
+    },
     /// Apply a registered INTRINSIC (O.1): pop its `nargs` positional arg values (evaluated by the preceding
     /// `Eval` tasks, exactly like `Builtin`), call the native impl, push its result. Reached only for an
     /// all-positional call to a function whose body fingerprint-matched the registry.
@@ -898,12 +990,14 @@ impl<'a> FnOracle<'a> {
                 functions: BTreeMap::new(),
                 assignments: Vec::new(),
                 uses: Vec::new(),
+                dir: std::path::PathBuf::new(), // raw-AST eval: no file, no dir (import stays relative)
             }],
             closures: RefCell::default(),
             messages: RefCell::default(),
             root_override: RefCell::default(),
             files: None,
             file_needs: RefCell::default(),
+            data_needs: RefCell::default(),
             module_depth: Cell::default(),
             children_stack: RefCell::default(),
             local_modules: RefCell::default(),
@@ -1315,6 +1409,12 @@ fn eval_with_global<'a>(
                 }
             }
             Task::Builtin { name, args } => run_builtin(name, args, &mut values, ctx),
+            Task::FileFn { kind, args, dir } => {
+                let start = values.len().saturating_sub(args.len());
+                let result = run_file_fn(kind, args, &values[start..], dir.as_deref(), ctx);
+                values.truncate(start);
+                values.push(result);
+            }
             Task::Intrinsic { func, nargs } => {
                 // Same shape as run_builtin: the args are the top `nargs` of the value stack. Fallible — an
                 // intrinsic for a function with an inline `assert` raises exactly where the interpreted body
@@ -1779,6 +1879,142 @@ fn eval_node<'a>(
     Ok(())
 }
 
+/// Apply a FILE-VALUE builtin (AI.1): bind the declared params (named or positional, in
+/// declaration order), resolve the `file` path against the calling file's `dir`, pull the bytes
+/// through the [`SourceNeed::Data`] fixpoint channel, and parse. `undef` on the discovery pass
+/// (bytes not yet read — the closing pass replaces it), on a missing/bad file (warned), or on a
+/// bad argument.
+#[allow(
+    clippy::too_many_lines,
+    reason = "one arm per file-value builtin — the dispatch + param binding IS the function"
+)]
+fn run_file_fn(
+    kind: FileFnKind,
+    args: &[Arg],
+    vals: &[Value],
+    dir: Option<&str>,
+    ctx: &Ctx<'_>,
+) -> Value {
+    let params: &[&str] = match kind {
+        FileFnKind::ImportValue => &["file"],
+        FileFnKind::DxfDim => &["file", "layer", "origin", "scale", "name"],
+        FileFnKind::DxfCross => &["file", "layer", "origin", "scale"],
+    };
+    let mut bound: std::collections::BTreeMap<&str, &Value> = std::collections::BTreeMap::new();
+    let mut next_positional = 0usize;
+    for (arg, value) in args.iter().zip(vals) {
+        match &arg.name {
+            None => {
+                if let Some(&slot) = params.get(next_positional) {
+                    bound.insert(slot, value);
+                }
+                next_positional += 1;
+            }
+            Some(n) => {
+                if let Some(&slot) = params.iter().find(|&&p| p == &**n) {
+                    bound.insert(slot, value);
+                } else {
+                    ctx.warn(format!("variable \"{n}\" not specified as parameter"));
+                }
+            }
+        }
+    }
+    let Some(Value::Str(raw)) = bound.get("file") else {
+        ctx.warn(format!("{} requires a file parameter", kind_name(kind)));
+        return Value::Undef;
+    };
+    // Resolve against the CALLING file's dir (upstream: `loc.filePath().parent_path()`) — a pure
+    // lexical join; the io shell reads the joined path as-is. The joined STRING is the table key.
+    let resolved = match dir {
+        Some(d) if !std::path::Path::new(&**raw).is_absolute() => std::path::Path::new(d)
+            .join(&**raw)
+            .to_string_lossy()
+            .into_owned(),
+        _ => raw.to_string(),
+    };
+    let Some(bytes) = ctx.request_data(resolved.clone()) else {
+        return Value::Undef; // discovery pass — the re-run has the bytes
+    };
+    if bytes.is_empty() {
+        // the tolerant unreadable-file marker (the shell already warned "Can't open file")
+        return Value::Undef;
+    }
+    match kind {
+        FileFnKind::ImportValue => {
+            let ext = std::path::Path::new(&**raw)
+                .extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or_default()
+                .to_ascii_lowercase();
+            if ext != "json" {
+                ctx.warn(format!(
+                    "import() as an expression supports .json only, got '{raw}'"
+                ));
+                return Value::Undef;
+            }
+            match json::value_from_json(&bytes) {
+                Ok(v) => v,
+                Err(why) => {
+                    ctx.warn(format!("Can't parse JSON file '{raw}': {why}"));
+                    Value::Undef
+                }
+            }
+        }
+        FileFnKind::DxfDim | FileFnKind::DxfCross => {
+            let layer = match bound.get("layer") {
+                Some(Value::Str(s)) => s.to_string(),
+                _ => String::new(),
+            };
+            let (xorigin, yorigin) = match bound.get("origin") {
+                Some(Value::NumList(xs)) if xs.len() == 2 => (xs[0], xs[1]),
+                _ => (0.0, 0.0),
+            };
+            let scale = match bound.get("scale") {
+                Some(Value::Num(n)) => *n,
+                _ => 1.0,
+            };
+            let text = String::from_utf8_lossy(&bytes);
+            let (dims, lines) = dxfdim::parse(&text, &layer, xorigin, yorigin, scale);
+            if kind == FileFnKind::DxfCross {
+                if let Some([x, y]) = dxfdim::cross(&lines) {
+                    return Value::num_list(vec![x, y]);
+                }
+                ctx.warn(format!("Can't find cross in '{raw}', layer '{layer}'!"));
+                return Value::Undef;
+            }
+            let name = match bound.get("name") {
+                Some(Value::Str(s)) => s.to_string(),
+                _ => String::new(),
+            };
+            for d in &dims {
+                if !name.is_empty() && d.name != name {
+                    continue;
+                }
+                if let Some(v) = dxfdim::dim_value(d) {
+                    return Value::Num(v);
+                }
+                ctx.warn(format!(
+                    "Dimension '{name}' in '{raw}', layer '{layer}' has unsupported type!"
+                ));
+                return Value::Undef;
+            }
+            ctx.warn(format!(
+                "Can't find dimension '{name}' in '{raw}', layer '{layer}'!"
+            ));
+            Value::Undef
+        }
+    }
+}
+
+/// The user-facing name of a [`FileFnKind`] (warnings).
+fn kind_name(kind: FileFnKind) -> &'static str {
+    match kind {
+        FileFnKind::ImportValue => "import",
+        FileFnKind::DxfDim => "dxf_dim",
+        FileFnKind::DxfCross => "dxf_cross",
+    }
+}
+
 /// Pop a builtin call's argument values, split them into positional/named, and push the builtin result.
 fn run_builtin(name: &str, args: &[Arg], values: &mut Vec<Value>, ctx: &Ctx<'_>) {
     // A benchmark span per builtin application (I.6); `builtin` field lets a layer break cost down by
@@ -1954,6 +2190,22 @@ fn dispatch_call<'a>(
                 None,
                 tasks,
             );
+            return Ok(());
+        }
+        // AI.1 — the FILE-VALUE builtins (`import()` in expression position, `dxf_dim`,
+        // `dxf_cross`): they resolve their path against the CALLING file's directory (upstream's
+        // `loc.filePath().parent_path()`), which rides the hidden per-island binding
+        // [`FILE_DIR_VAR`] — looked up LEXICALLY here, so a `use`d submodule's `get_data()`
+        // resolves from ITS OWN dir (the import-json-relative-path golden).
+        if let Some(kind) = FileFnKind::from_name(name) {
+            let dir = match scope.lookup_opt(FILE_DIR_VAR) {
+                Some(Value::Str(d)) => Some(d),
+                _ => None,
+            };
+            tasks.push(Task::FileFn { kind, args, dir });
+            for arg in args.iter().rev() {
+                tasks.push(Task::Eval(&arg.value, scope.clone()));
+            }
             return Ok(());
         }
         if builtins::is_builtin(name) {
@@ -2395,13 +2647,26 @@ fn resolve_source(
         intrinsics,
         jit,
         // Island 0 (root) is filled by `run_stmts`; the rest are seeded empty and built just below.
-        island_globals: RefCell::new(vec![Scope::new_with_preview(config.preview); n]),
+        // Each placeholder carries its island's FILE DIR already (AI.1): a root CONSTANT calling a
+        // use-island function during the root hoist (the L.2.8a ordering gap) sees the placeholder
+        // as its lexical base — the dir is a constant of the FILE, so it must be there even then.
+        island_globals: RefCell::new(
+            islands
+                .iter()
+                .map(|isl| {
+                    let mut s = Scope::new_with_preview(config.preview);
+                    bind_file_dir(&mut s, &isl.dir);
+                    s
+                })
+                .collect(),
+        ),
         islands,
         closures: RefCell::default(),
         messages: RefCell::default(),
         root_override: RefCell::default(),
         files: Some(files),
         file_needs: RefCell::default(),
+        data_needs: RefCell::default(),
         module_depth: Cell::default(),
         children_stack: RefCell::default(),
         local_modules: RefCell::default(),
@@ -2425,8 +2690,7 @@ fn resolve_source(
     // twice — the double-build that tips a borderline model over its budget. (The reverse — a root constant
     // calling a not-yet-built use-island function — stays a gap; a lazy/fixpoint island build is the general
     // answer, but root-homed BOSL2 is the overwhelmingly common case.)
-    let global =
-        hoist_scope_publishing(&exec, &Scope::new_with_preview(ctx.config.preview), &ctx, 0)?;
+    let global = hoist_scope_publishing(&exec, &root_scope_with_dir(&ctx), &ctx, 0)?;
     for i in 1..n {
         let island_global = build_island_global(i, &ctx)?;
         if let Some(slot) = ctx.island_globals.borrow_mut().get_mut(i) {
@@ -2723,6 +2987,7 @@ fn arm_guarded_intrinsics<'a>(ctx: &Ctx<'a>) -> Vec<(&'a str, intrinsics::Intrin
 /// global follows (`n = 1; n = n + 1;` → undef).
 fn build_island_global(island: usize, ctx: &Ctx<'_>) -> crate::Result<Scope> {
     let mut scope = Scope::new_with_preview(ctx.config.preview);
+    bind_file_dir(&mut scope, &ctx.islands[island].dir);
     for &(name, expr) in &ctx.islands[island].assignments {
         let value = name_closure(eval_with_ctx(expr, &scope, ctx)?, name);
         scope.bind(name.to_string(), value);
@@ -3548,6 +3813,7 @@ fn build_ctx(program: &Program, config: Config) -> Ctx<'_> {
             functions: BTreeMap::new(),
             assignments: Vec::new(),
             uses: Vec::new(),
+            dir: std::path::PathBuf::new(), // raw-AST eval: no file, no dir
         }],
         closures: RefCell::default(),
         messages: RefCell::default(),
@@ -3556,6 +3822,7 @@ fn build_ctx(program: &Program, config: Config) -> Ctx<'_> {
         // rejects LOUD (a silently-empty mesh is the thing the doctrine forbids).
         files: None,
         file_needs: RefCell::default(),
+        data_needs: RefCell::default(),
         module_depth: Cell::default(),
         children_stack: RefCell::default(),
         local_modules: RefCell::default(),

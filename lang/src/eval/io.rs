@@ -13,6 +13,7 @@
 //! without this module wait for the first wasm consumer — fab-web — to keep an unused gate from rotting.)
 
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 
 use super::loader::{ProvidedSource, SourceMap};
 use super::{
@@ -291,6 +292,18 @@ where
                 }
             }
         }
+        SourceNeed::Data { path } => {
+            // RAW BYTES for the file-value builtins (AI.1): `path` arrives ALREADY resolved
+            // against the calling file's dir, so read it as-is. TOLERANT like the arms above —
+            // unreadable → warn + empty bytes (the parser then warns + yields undef), and the
+            // fixpoint still closes.
+            if let Ok(bytes) = std::fs::read(&path) {
+                files.insert(path, Imported::Bytes(Rc::from(bytes)));
+            } else {
+                warnings.push(Message::Warning(format!("Can't open file '{path}'.")));
+                files.insert(path, Imported::Bytes(Rc::from(Vec::new())));
+            }
+        }
     }
     Ok(())
 }
@@ -401,6 +414,15 @@ where
                     let empty = Imported::empty_for(&raw);
                     files.insert(raw, empty);
                 }
+            }
+        }
+        SourceNeed::Data { path } => {
+            // Same tolerant RAW-BYTES read as `fulfill_from_map`'s twin arm (AI.1).
+            if let Ok(bytes) = std::fs::read(&path) {
+                files.insert(path, Imported::Bytes(Rc::from(bytes)));
+            } else {
+                warnings.push(Message::Warning(format!("Can't open file '{path}'.")));
+                files.insert(path, Imported::Bytes(Rc::from(Vec::new())));
             }
         }
     }

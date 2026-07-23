@@ -82,6 +82,10 @@ pub(super) fn eval_module<'a>(
         "import" => Ok(match ctx.request_file(file_arg(&positional, &named)) {
             Imported::Mesh(mesh) => leaf3(mesh),
             Imported::Contours(contours) => poly2(contours),
+            // Bytes only fulfill the EXPRESSION-import channel (AI.1) — a geometry `import()`
+            // never requests them (its table keys are raw mesh paths), so this arm is a
+            // key-collision safety: render nothing rather than something wrong.
+            Imported::Bytes(_) => leaf3(Mesh::new()),
         }),
         // surface() is import's heightmap sibling, plus `center` — a pure XY translate the path-only reader
         // can't do, so it's applied HERE from the eval arg (M.5.2). (`invert` is PNG-only → deferred.) A
@@ -89,7 +93,7 @@ pub(super) fn eval_module<'a>(
         "surface" => {
             let mesh = match ctx.request_file(file_arg(&positional, &named)) {
                 Imported::Mesh(mesh) => mesh,
-                Imported::Contours(_) => Mesh::new(),
+                Imported::Contours(_) | Imported::Bytes(_) => Mesh::new(),
             };
             let map = bind(&positional, &named, &["file", "center"]);
             Ok(leaf3(if is_true(&map, "center") {

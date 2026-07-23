@@ -119,7 +119,9 @@ jobs:
           git clone --depth 1 --filter=blob:none --sparse https://github.com/openscad/openscad.git /tmp/openscad
           # regression/echo = upstream's golden console outputs, the sweep's expected-failure source
           # (cone mode also brings tests/CMakeLists.txt, whose FAILING_FILES is the other source).
-          git -C /tmp/openscad sparse-checkout set tests/data/scad tests/data/ttf tests/regression/echo examples
+          # tests/data/json holds the json-import corpus DATA (outside tests/data/scad — the MCAD
+          # lesson, file flavor); the .scad tests import from it.
+          git -C /tmp/openscad sparse-checkout set tests/data/scad tests/data/ttf tests/data/json tests/regression/echo examples
           # MCAD is an openscad SUBMODULE (libraries/MCAD) the sparse clone never materializes — the
           # corpus includes it (`include <MCAD/fonts.scad>`), so wire it like upstream's harness does.
           git clone --depth 1 https://github.com/openscad/MCAD.git /tmp/openscad/libraries/MCAD

@@ -254,6 +254,10 @@ pub(super) struct Island<'a> {
     /// the textually-last `use` wins (matching OpenSCAD's front-inserted `usedlibs`). Non-transitive:
     /// resolution looks only at a used island's OWN `modules`, never its `uses`.
     pub uses: Vec<usize>,
+    /// The island root FILE's directory (AI.1) — the base the file-value builtins (`import()` as
+    /// expression, `dxf_dim`) resolve their paths against, bound into the island global as the
+    /// hidden dir var so a `use`d file's functions resolve from THEIR OWN dir.
+    pub dir: std::path::PathBuf,
 }
 
 /// The module scope islands of a load graph: index 0 is the ROOT file; each distinct `use` target gets
@@ -466,6 +470,7 @@ pub(super) fn islands(loaded: &Loaded) -> Islands<'_> {
             functions: scope.functions,
             assignments: scope.assignments,
             uses: scope.uses,
+            dir: loaded.programs[root_node].dir.clone(),
         });
     }
     islands

@@ -30,6 +30,11 @@ thiserror = "2"
 # Evaluator/parse observability, treated exactly like a logger: the macros live here, the level
 # and subscriber are the linking binary's call. See the crate docs for the compile-out story.
 tracing = "0.1"
+# JSON import → object values (AI.2, chotchki's serde call 2026-07-23). DEFAULT features on
+# purpose: the default BTreeMap-backed map SORTS keys — exactly upstream's nlohmann std::map
+# behavior the goldens pin — so preserve_order/indexmap stays out of the tree. Pure parsing,
+# wasm-safe; the io shell reads bytes, this only converts them.
+serde_json = "1"
 # text() glyph shaping + outlines (J.4.3). rustybuzz is the pure-Rust harfbuzz port — it matches
 # OpenSCAD's own harfbuzz shaping (glyph selection, kerning, GPOS/GSUB) — and re-exports ttf-parser
 # for the glyph OUTLINE API (Béziers → our $fn-flattened 2D contours). Both pure Rust + wasm-clean +

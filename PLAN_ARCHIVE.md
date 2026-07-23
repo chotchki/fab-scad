@@ -1075,3 +1075,12 @@ deferred from J.5.2b on 2026-07-10.
 - [x] AL.3 - rolling issue updates EVERY night: fresh gen-diff section + carry-over of unmoved BOSL2/openscad sections from the previous body (No-movement fast-path retired)
 - [x] AL.4 - e2e proof: rewind dispatch green; issue #1 carries the gen-diff section naming the AppImage oracle; docs/sustainment.md covers the lane
 
+---
+
+## 2026-07-23
+
+## Phase AM - releases require green CI (the v1.1.0 lesson, mechanized)
+- [x] AM.1 - tag ruleset: pushing `v*`/`web-v*` requires the commit's five CI checks green (build/kani/miri/asan/boot-gate) — the tag can't land red, so no release workflow ever fires
+- [x] AM.2 - defense-in-depth gate job in release-native + release-web: verify the tagged SHA's checks before packaging (covers ruleset bypass/removal)
+- [x] AM.3 - proof: pushing a test tag on the red v1.1.0 commit is REJECTED; docs/packaging.md records the gate
+

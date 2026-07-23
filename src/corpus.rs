@@ -60,6 +60,10 @@ pub enum Bucket {
     Crash,
     /// The test ran past the per-test wall-clock budget (a hang or pathological slowness) and was killed.
     Timeout,
+    /// Evaluated cleanly but the `ECHO:` output diverges from upstream's recorded golden (the AH
+    /// lane, Files only). The bar that eval-clean can't provide: an unknown function warns and
+    /// yields `undef`, so an entirely-unimplemented builtin still "passes" — the golden catches it.
+    EchoDiff,
 }
 
 impl Bucket {
@@ -77,6 +81,7 @@ impl Bucket {
             Bucket::Empty => "empty",
             Bucket::Crash => "crash",
             Bucket::Timeout => "timeout",
+            Bucket::EchoDiff => "echo-diff",
         }
     }
 
@@ -94,6 +99,7 @@ impl Bucket {
             Bucket::Empty,
             Bucket::Crash,
             Bucket::Timeout,
+            Bucket::EchoDiff,
         ]
         .into_iter()
         .find(|b| b.label() == s)
@@ -112,9 +118,12 @@ pub enum Lane {
     /// An arbitrary `.scad` file list from a MANIFEST (SU.4: the openscad corpus lane — the nightly
     /// tree-diffs upstream's `testdata/`+`examples/` and sweeps only the new/changed files). The sweep's
     /// "root" argument is the manifest path, one absolute `.scad` path per line; each file evals with
-    /// its own parent as base (relative includes resolve in the sparse checkout). Eval-clean is the
-    /// whole bar — no null-geometry check (their corpus is full of 2D/echo-only files) and no verdict
-    /// inversion; there's no expectation spec to hold it to, only "does our evaluator survive it".
+    /// its own parent as base (relative includes resolve in the sparse checkout). No null-geometry
+    /// check (their corpus is full of 2D/echo-only files) and no verdict inversion. The bar is a
+    /// LADDER (AH.4 corrected the old "no expectation spec" claim — upstream's goldens ARE a spec):
+    /// eval-clean < expected-classified (`sweep_expect`, the AE must-fail verdicts) < echo-match
+    /// (`FAB_ECHO_GOLDEN_DIR` diffs a passing file's `ECHO:` stream against
+    /// `tests/regression/echo/<stem>-expected.echo` → [`Bucket::EchoDiff`] on divergence).
     Files,
 }
 
@@ -333,7 +342,10 @@ pub fn run_file(script: &str, path: &Path) -> (Bucket, u128, String) {
             });
             match verdict {
                 Some((bucket, w)) => (bucket, ms, w.lines().next().unwrap_or_default().to_string()),
-                None => (Bucket::Pass, ms, String::new()),
+                None => match echo_divergence(&messages, path) {
+                    Some(d) => (Bucket::EchoDiff, ms, d),
+                    None => (Bucket::Pass, ms, String::new()),
+                },
             }
         }
         Err(e) => {
@@ -345,6 +357,26 @@ pub fn run_file(script: &str, path: &Path) -> (Bucket, u128, String) {
             (classify(&e), ms, first)
         }
     }
+}
+
+/// The AH lane's parent→worker hand-off: `scad-sweep --upstream` stamps this once, and every
+/// worker spawn carries it as `FAB_ECHO_GOLDEN_DIR` (a `OnceLock` instead of `env::set_var` —
+/// edition-2024 `set_var` is unsafe, and a global the spawn site reads is the same contract
+/// without the footgun). Unset → the lane stays pure eval-clean.
+pub static ECHO_GOLDEN_DIR: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+
+/// The AH golden-echo bar, worker half: `FAB_ECHO_GOLDEN_DIR` points at upstream's
+/// `tests/regression/echo`; a file that evals clean AND has an eligible golden must also MATCH
+/// its recorded `ECHO:` lines. Unset → pure eval-clean (local runs without an upstream checkout).
+fn echo_divergence(messages: &[Message], path: &Path) -> Option<String> {
+    let dir = std::env::var_os("FAB_ECHO_GOLDEN_DIR")?;
+    let golden = crate::sweep_expect::golden_echo_lines(Path::new(&dir), path.to_str()?)?;
+    let ours: Vec<String> = messages
+        .iter()
+        .filter(|m| matches!(m, Message::Echo(_)))
+        .map(Message::render)
+        .collect();
+    crate::sweep_expect::first_echo_divergence(&ours, &golden)
 }
 
 /// Enumerate `lane`'s corpus — the ONE enumeration parent + worker both call, so their indices agree.
@@ -575,7 +607,11 @@ fn run_range(
     let mut out = Vec::new();
     let mut next = lo;
     while next < hi {
-        let spawned = Command::new(worker_exe)
+        let mut cmd = Command::new(worker_exe);
+        if let Some(dir) = ECHO_GOLDEN_DIR.get() {
+            cmd.env("FAB_ECHO_GOLDEN_DIR", dir);
+        }
+        let spawned = cmd
             .arg(bosl2_dir)
             .arg(next.to_string())
             .arg(hi.to_string())

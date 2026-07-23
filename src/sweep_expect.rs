@@ -75,6 +75,58 @@ impl UpstreamExpectations {
     }
 }
 
+/// The golden's `ECHO:` lines, when `file` has an ELIGIBLE golden — one that exists and records a
+/// SUCCESS run. A golden containing an `ERROR:` line documents a failing run, and a passing run's
+/// full echo stream can't be expected to match a failure's prefix, so those are skipped (their
+/// semantics belong to [`UpstreamExpectations::classify`]). v1 of the AH lane compares `ECHO:`
+/// lines only: `WARNING:`/`TRACE:` lines carry file paths and the word-for-word warning-text
+/// parity that's still the deferred I.5 backlog half.
+#[must_use]
+pub fn golden_echo_lines(echo_dir: &Path, file: &str) -> Option<Vec<String>> {
+    let stem = Path::new(file).file_stem()?.to_str()?;
+    let golden = std::fs::read_to_string(echo_dir.join(format!("{stem}-expected.echo"))).ok()?;
+    if golden.lines().any(|l| l.starts_with("ERROR:")) {
+        return None;
+    }
+    Some(
+        golden
+            .lines()
+            .filter(|l| l.starts_with("ECHO:"))
+            .map(|l| l.trim_end().to_string())
+            .collect(),
+    )
+}
+
+/// First divergence between our rendered `ECHO:` lines and the golden's, as a one-line report
+/// (the sweep's wire detail is single-line); `None` = every line matches. Sides are capped so a
+/// monster echo (a full VNF) can't blow up the report table.
+#[must_use]
+pub fn first_echo_divergence(ours: &[String], golden: &[String]) -> Option<String> {
+    fn cap(s: &str) -> String {
+        // char-boundary safe: the corpus echoes unicode (utf8-tests et al).
+        if s.chars().count() > 120 {
+            let head: String = s.chars().take(117).collect();
+            format!("{head}…")
+        } else {
+            s.to_string()
+        }
+    }
+    let n = ours.len().max(golden.len());
+    for i in 0..n {
+        let a = ours.get(i).map(|s| s.trim_end());
+        let b = golden.get(i).map(|s| s.trim_end());
+        if a != b {
+            return Some(format!(
+                "echo line {} diverges — ours: {} · golden: {}",
+                i + 1,
+                a.map_or("<none>".to_string(), cap),
+                b.map_or("<none>".to_string(), cap),
+            ));
+        }
+    }
+    None
+}
+
 /// Extract `FAILING_FILES` entries from upstream's `tests/CMakeLists.txt`: every
 /// `set(FAILING_FILES`/`list(APPEND FAILING_FILES` block, one `${VAR}/path.scad` entry per line,
 /// returned as the '/'-rooted tail after the variable. Line-based on purpose — the blocks are
@@ -135,6 +187,55 @@ add_failing_test(parsererrors SUFFIX stl FILES ${FAILING_FILES} ARGS --retval=1)
             ],
             "only FAILING_FILES entries, variable-stripped, other lists ignored"
         );
+    }
+
+    #[test]
+    fn golden_echo_lines_strip_warnings_and_skip_error_goldens() {
+        let dir = std::env::temp_dir().join(format!("echo-golden-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("mixed-expected.echo"),
+            "WARNING: something in file x, line 1\nECHO: 1\nTRACE: called by y\nECHO: \"two\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("failing-expected.echo"),
+            "ECHO: 1\nERROR: Assertion failed in file x, line 2\n",
+        )
+        .unwrap();
+        assert_eq!(
+            golden_echo_lines(&dir, "/c/tests/data/scad/misc/mixed.scad"),
+            Some(vec!["ECHO: 1".to_string(), "ECHO: \"two\"".to_string()]),
+            "only ECHO lines survive"
+        );
+        assert_eq!(
+            golden_echo_lines(&dir, "/c/tests/data/scad/misc/failing.scad"),
+            None,
+            "an ERROR golden documents a failing run — not this lane's to check"
+        );
+        assert_eq!(
+            golden_echo_lines(&dir, "/c/tests/data/scad/misc/nogolden.scad"),
+            None
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn echo_divergence_finds_the_first_mismatch_and_caps_monsters() {
+        let ours = vec!["ECHO: 1".to_string(), "ECHO: undef".to_string()];
+        let golden = vec!["ECHO: 1".to_string(), "ECHO: { a = 1; }".to_string()];
+        let d = first_echo_divergence(&ours, &golden).expect("diverges");
+        assert!(d.contains("echo line 2") && d.contains("undef") && d.contains("{ a = 1; }"));
+
+        assert_eq!(first_echo_divergence(&ours, &ours.clone()), None);
+
+        let short = vec!["ECHO: 1".to_string()];
+        let d = first_echo_divergence(&short, &golden).expect("length mismatch diverges");
+        assert!(d.contains("<none>"), "missing side reads <none>: {d}");
+
+        let monster = vec![format!("ECHO: {}", "x".repeat(500))];
+        let d = first_echo_divergence(&monster, &golden).expect("diverges");
+        assert!(d.len() < 400, "capped, not 500+ chars: {}", d.len());
     }
 
     /// Build a throwaway openscad-root with a CMakeLists + goldens, exercising every classify rule.

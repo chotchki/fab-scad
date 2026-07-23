@@ -1250,6 +1250,10 @@ fn scad_sweep_cmd(manifest: &Path, upstream: Option<&Path>, md: bool) -> Result<
         .with_file_name("corpus_worker");
     check_worker(&worker)?;
     let expectations = upstream.map(UpstreamExpectations::load).transpose()?;
+    if let Some(root) = upstream {
+        // AH lane: workers diff passing files' ECHO output against upstream's recorded goldens.
+        let _ = fab_scad::corpus::ECHO_GOLDEN_DIR.set(root.join("tests/regression/echo"));
+    }
     let results = run_corpus_isolated(manifest, &worker, Lane::Files)?;
 
     // Split failures into genuine vs upstream-parity (AE.1) — a failure upstream's harness DEMANDS
@@ -1280,6 +1284,24 @@ fn scad_sweep_cmd(manifest: &Path, upstream: Option<&Path>, md: bool) -> Result<
     } else {
         format!(" {} expected-fail (upstream parity).", expected.len())
     };
+    // The AH lane's coverage line: how many swept files were actually held to a golden. Diverged
+    // counts from the buckets; checked recomputes worker-side eligibility (golden exists, no
+    // ERROR line) so "129 files have goldens" can't be misread as "129 were checked".
+    let echo_cover = upstream.map_or(String::new(), |root| {
+        let dir = root.join("tests").join("regression").join("echo");
+        let diverged = results
+            .iter()
+            .filter(|r| r.bucket == Bucket::EchoDiff)
+            .count();
+        let checked = results
+            .iter()
+            .filter(|r| {
+                matches!(r.bucket, Bucket::Pass | Bucket::EchoDiff)
+                    && fab_scad::sweep_expect::golden_echo_lines(&dir, &r.file).is_some()
+            })
+            .count();
+        format!(" Echo goldens: {}/{checked} matched.", checked - diverged)
+    });
     // "Genuine" is a filtered-run claim — an unfiltered sweep only knows "failures".
     let failure_word = if expectations.is_some() {
         "Genuine failures"
@@ -1290,7 +1312,7 @@ fn scad_sweep_cmd(manifest: &Path, upstream: Option<&Path>, md: bool) -> Result<
         println!("### scad sweep — {} file(s)", results.len());
         println!();
         println!(
-            "**{passed}/{} eval clean.**{parity}{}",
+            "**{passed}/{} eval clean.**{parity}{echo_cover}{}",
             results.len(),
             if summary.is_empty() {
                 String::new()
@@ -1323,7 +1345,7 @@ fn scad_sweep_cmd(manifest: &Path, upstream: Option<&Path>, md: bool) -> Result<
         }
     } else {
         println!(
-            "scad sweep: {passed}/{} eval clean{}{}",
+            "scad sweep: {passed}/{} eval clean{}{}{}",
             results.len(),
             if expected.is_empty() {
                 String::new()
@@ -1334,7 +1356,8 @@ fn scad_sweep_cmd(manifest: &Path, upstream: Option<&Path>, md: bool) -> Result<
                 String::new()
             } else {
                 format!(" ({})", summary.join(", "))
-            }
+            },
+            echo_cover
         );
         for r in &genuine {
             println!("  {} {} — {}", r.bucket.label(), r.file, r.detail);

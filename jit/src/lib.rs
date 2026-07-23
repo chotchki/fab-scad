@@ -2797,7 +2797,8 @@ fn needs_runtime_env(expr: &Expr) -> bool {
 ///   with a SEQUENTIAL `fold(head, …)` through the `jit_fmin`/`jit_fmax` helper (NaN-ignoring, unlike native).
 ///
 /// A non-numeric arg, a wrong arity, a named arg, a cross of non-2/3-vectors, or a `min`/`max` of nothing
-/// DECLINES (the interpreter would yield `undef`, which the JIT can't represent).
+/// DECLINES (the interpreter would yield `undef`, which the JIT can't represent). `cross` of a NaN/inf
+/// component is `undef` too (AH.2.1) — a runtime VALUE condition, so that one RAISES instead.
 fn compile_vec_builtin(
     fb: &mut FunctionBuilder,
     name: &str,
@@ -2888,11 +2889,37 @@ fn compile_vec_builtin(
                 let p2 = fb.ins().fmul(z, w);
                 fb.ins().fsub(p1, p2)
             };
+            // AH.2.1 parity: the interpreter yields `undef` when ANY component is NaN/inf — a
+            // runtime VALUE condition the scalarized lanes can't represent, so a non-finite
+            // operand RAISES (dispatch's `None` → the interpreter re-runs and mints the undef).
+            // Finite iff |x| < +inf (NaN compares unordered → false).
+            let raise_unless_finite = |fb: &mut FunctionBuilder, ops: &[Value]| {
+                let inf = fb.ins().f64const(f64::INFINITY);
+                let mut all = fb.ins().iconst(types::I8, 1);
+                for &x in ops {
+                    let ax = fb.ins().fabs(x);
+                    let fin = fb.ins().fcmp(FloatCC::LessThan, ax, inf);
+                    all = fb.ins().band(all, fin);
+                }
+                let bail = fb.create_block();
+                let ok = fb.create_block();
+                fb.ins().brif(all, ok, &[], bail, &[]);
+                fb.seal_block(bail);
+                fb.seal_block(ok);
+                fb.switch_to_block(bail);
+                let one_flag = fb.ins().iconst(types::I8, 1);
+                fb.ins()
+                    .store(MemFlagsData::trusted(), one_flag, lower.raised_ptr, 0);
+                let bail_ret = fb.ins().f64const(0.0);
+                fb.ins().return_(&[bail_ret]);
+                fb.switch_to_block(ok);
+            };
             match (a.as_slice(), b.as_slice()) {
                 // 3D cross → a VECTOR (`ops::cross`'s [a1·b2−a2·b1, a2·b0−a0·b2, a0·b1−a1·b0]).
                 ([a0, a1, a2], [b0, b1, b2]) => {
                     let (a0, a1, a2) = (a0.num(fb)?, a1.num(fb)?, a2.num(fb)?);
                     let (b0, b1, b2) = (b0.num(fb)?, b1.num(fb)?, b2.num(fb)?);
+                    raise_unless_finite(fb, &[a0, a1, a2, b0, b1, b2]);
                     let x = sub_of_products(fb, a1, b2, a2, b1);
                     let y = sub_of_products(fb, a2, b0, a0, b2);
                     let z = sub_of_products(fb, a0, b1, a1, b0);
@@ -2905,6 +2932,7 @@ fn compile_vec_builtin(
                 // 2D cross → a SCALAR (`a0·b1 − a1·b0`).
                 ([a0, a1], [b0, b1]) => {
                     let (a0, a1, b0, b1) = (a0.num(fb)?, a1.num(fb)?, b0.num(fb)?, b1.num(fb)?);
+                    raise_unless_finite(fb, &[a0, a1, b0, b1]);
                     Ok(Lowered::Num(sub_of_products(fb, a0, b1, a1, b0)))
                 }
                 _ => Err(JitError::Unsupported("cross of non-2/3-vectors")),

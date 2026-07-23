@@ -94,6 +94,8 @@ added 2026-07-07.
 
 ## Backlog (not yet phased)
 
+- **Phase-exit test runs MUST be `--workspace` (+ the kani lane)** — the AH.2 cross/range changes broke fab-jit's `fast==JIT` differential and two kani range proofs, and CI sat red for a day unnoticed because local `cargo test` covers only the DEFAULT member (fab-scad) — jit tests + kani are CI-only. Options: make `cargo nextest run --workspace` the phase-exit habit, or wire jit into default-members, or a pre-push tier that runs the workspace suite on release tags at minimum. Pairs with the existing "CI covers only fab-scad" clippy item. — added 2026-07-23.
+
 - **Expression-import VALUES: `import("data.json")` → object + `dxf_dim()`/`dxf_cross()` (the last two fixable echo-diff families, 2026-07-23).** Both are import-SUBSYSTEM work, not evaluator gaps: JSON import needs the needs-fixpoint to carry a VALUE need (today it resolves scad sources + meshes only) plus a JSON parser (dep decision: serde_json vs hand-rolled — wasm + dep-policy call for chotchki), and dxf_dim reads dimension entities out of a DXF (the legacy surface next to the J.4.2 import backlog). Goldens exist for both (import-json ×2, dim-all) so acceptance is ready-made. Sequence with the J.4.2.x import items.
 
 

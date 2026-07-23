@@ -341,6 +341,12 @@ pub fn range_len(start: f64, step: f64, end: f64) -> u64 {
     } else if start > end {
         return 0;
     }
+    // An INFINITE step in the legal direction reaches only `start` — returning WITHOUT dividing
+    // is bit-identical (a finite span / inf is ±0.0 → count 1; an OVERFLOWED span would be
+    // inf/inf = NaN → cast 0 → 1) and keeps the division below provably NaN-free (kani).
+    if step.is_infinite() {
+        return 1;
+    }
     let n = (end - start) / step;
     // Upstream's one-ULP bump (`std::nextafter(steps, max)` in `RangeType::numValues`):
     // a fractional step whose quotient lands JUST below a whole number — `[0:1/93:1]` computes

@@ -876,7 +876,7 @@ fn for_scopes<'a>(
         Some((arg, rest)) => {
             let name = arg.name.as_deref().unwrap_or("");
             let iterable = eval_with_ctx(&arg.value, scope, ctx)?;
-            for value in super::iterate_values(&iterable) {
+            for value in super::iterate_values(&iterable, ctx) {
                 // child(), not clone+COW — keeps the loop bind below any capture boundary (BU.8).
                 let mut child = scope.child();
                 child.bind(name, value);

@@ -4,7 +4,7 @@ use super::shape::is_matrix;
 use super::vectors::{unit, v_theta, vector_angle, vector_axis};
 use super::{bosl_assert, is_vector_core, v_is_finite};
 use crate::eval::value::{self, Value};
-use crate::eval::{build_range, build_vector, builtins, iter_values, ops};
+use crate::eval::{build_range, build_vector, builtins, iter_values_raw, ops};
 use crate::parser::BinOp;
 
 /// BOSL2 `is_2d_transform(t)` — the affine matrix's z-action is trivial (with the zscale carve-out). Pure
@@ -84,7 +84,7 @@ pub(super) fn apply_transform(args: &[Value]) -> crate::Result<Value> {
     }
     let matrix = ops::apply_binary(BinOp::Div, build_vector(rows), scale);
     if tdim == datadim {
-        let aug: Vec<Value> = iter_values(&points)
+        let aug: Vec<Value> = iter_values_raw(&points)
             .iter()
             .map(|p| builtins::apply("concat", &[p.clone(), Value::Num(1.0)]))
             .collect();
@@ -96,7 +96,7 @@ pub(super) fn apply_transform(args: &[Value]) -> crate::Result<Value> {
                 "_apply: transform is 3D and acts on Z, but points are 2D",
             ));
         }
-        let aug: Vec<Value> = iter_values(&points)
+        let aug: Vec<Value> = iter_values_raw(&points)
             .iter()
             .map(|p| builtins::apply("concat", &[p.clone(), Value::num_list(vec![0.0, 1.0])]))
             .collect();
@@ -112,7 +112,7 @@ pub(super) fn ident(args: &[Value]) -> crate::Result<Value> {
     let n = args.first().cloned().unwrap_or(Value::Undef);
     let end = ops::apply_binary(BinOp::Sub, n, Value::Num(1.0));
     let range = build_range(&Value::Num(0.0), &Value::Num(1.0), &end);
-    let is_idx = iter_values(&range);
+    let is_idx = iter_values_raw(&range);
     let mut rows: Vec<Value> = Vec::new();
     for i in &is_idx {
         let row: Vec<Value> = is_idx
@@ -365,7 +365,7 @@ fn reverse_val(list: &Value) -> crate::Result<Value> {
         Value::Num(1.0),
     );
     let range = build_range(&last_idx, &Value::Num(-1.0), &Value::Num(0.0));
-    let elems: Vec<Value> = iter_values(&range)
+    let elems: Vec<Value> = iter_values_raw(&range)
         .iter()
         .map(|i| ops::index(list.clone(), i))
         .collect();
@@ -410,7 +410,7 @@ pub(super) fn apply(args: &[Value]) -> crate::Result<Value> {
             return Ok(newvnf);
         }
         let rev_faces: crate::Result<Vec<Value>> =
-            iter_values(&faces).iter().map(reverse_val).collect();
+            iter_values_raw(&faces).iter().map(reverse_val).collect();
         return Ok(build_vector(vec![
             ops::index(newvnf, &Value::Num(0.0)),
             build_vector(rev_faces?),
@@ -422,7 +422,7 @@ pub(super) fn apply(args: &[Value]) -> crate::Result<Value> {
         && super::shape::is_vector(std::slice::from_ref(&ops::index(p0, &Value::Num(0.0))))?
             .is_truthy()
     {
-        let rows: crate::Result<Vec<Value>> = iter_values(&points)
+        let rows: crate::Result<Vec<Value>> = iter_values_raw(&points)
             .iter()
             .map(|x| apply_transform(&[transform.clone(), x.clone()]))
             .collect();
@@ -554,7 +554,7 @@ fn rot_inverse_val(t: &Value) -> crate::Result<Value> {
         &Value::Num(1.0),
         &ops::apply_binary(BinOp::Sub, n.clone(), Value::Num(2.0)),
     );
-    let idxs = iter_values(&idx_range);
+    let idxs = iter_values_raw(&idx_range);
     let rotpart = build_vector(
         idxs.iter()
             .map(|i| build_vector(idxs.iter().map(|j| at(j, i)).collect()))
@@ -572,17 +572,17 @@ fn rot_inverse_val(t: &Value) -> crate::Result<Value> {
     );
     let mut rows: Vec<Value> = Vec::new();
     for row in &idxs {
-        let mut cells: Vec<Value> = iter_values(&ops::index(rotpart.clone(), row));
+        let mut cells: Vec<Value> = iter_values_raw(&ops::index(rotpart.clone(), row));
         let b = ops::index(back.clone(), row);
         match b {
-            Value::NumList(_) | Value::List(_) => cells.extend(iter_values(&b)),
+            Value::NumList(_) | Value::List(_) => cells.extend(iter_values_raw(&b)),
             other => cells.push(other),
         }
         rows.push(build_vector(cells));
     }
     // the bottom row: [for(i=[2:n]) 0, 1]
     let zrange = build_range(&Value::Num(2.0), &Value::Num(1.0), &n);
-    let mut bottom: Vec<Value> = iter_values(&zrange)
+    let mut bottom: Vec<Value> = iter_values_raw(&zrange)
         .iter()
         .map(|_| Value::Num(0.0))
         .collect();

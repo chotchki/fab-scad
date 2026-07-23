@@ -44,7 +44,7 @@ pub use geo::GeoNode;
 pub use geo2d::{Contour, ExtrudeKind, Geo, Join2D, Shape2D};
 pub use message::{Evaluation, Message};
 pub use scope::Scope;
-pub use value::{RANGE_MAX, RangeIter, Value, range_iter, range_len};
+pub use value::{RANGE_MAX, RANGE_TOO_MANY, RangeIter, Value, range_iter, range_len};
 
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
@@ -504,7 +504,10 @@ impl<'a> Ctx<'a> {
         let n = match iterable {
             Value::NumList(xs) => xs.len() as u64,
             Value::List(xs) => xs.len() as u64,
-            Value::Range { start, step, end } => range_len(*start, *step, *end).min(RANGE_MAX),
+            Value::Range { start, step, end } => match range_len(*start, *step, *end) {
+                n if n >= RANGE_TOO_MANY => 0, // AD.3: expansion warns + yields nothing — charge nothing
+                n => n.min(RANGE_MAX),
+            },
             Value::Str(s) => s.chars().count() as u64,
             _ => 1, // a scalar iterates as a single element (iter_values' `other` arm)
         };
@@ -1384,7 +1387,7 @@ fn eval_with_global<'a>(
             Task::LcEachSplice { splice_inner } => {
                 let inner = values.pop().unwrap_or(Value::Undef);
                 let contributions: Vec<Value> = if splice_inner {
-                    iter_values(&inner)
+                    iter_values(&inner, ctx)
                 } else {
                     vec![inner]
                 };
@@ -1393,7 +1396,7 @@ fn eval_with_global<'a>(
                     // Q.5: `each <range/list>` splices bulk elements with NO per-element eval —
                     // charge the splice count so a giant `each [0:9e9]` stays bounded.
                     ctx.charge_iterable(&contribution)?;
-                    out.extend(iter_values(&contribution));
+                    out.extend(iter_values(&contribution, ctx));
                 }
                 values.push(build_vector(out));
             }
@@ -1426,7 +1429,7 @@ fn eval_with_global<'a>(
                         rest,
                         body,
                         var,
-                        items: iter_values(&iterable).into_iter(),
+                        items: iter_values(&iterable, ctx).into_iter(),
                         frame,
                         acc: Vec::new(),
                         splice_item,
@@ -1447,7 +1450,7 @@ fn eval_with_global<'a>(
                 if pending {
                     let result = values.pop().unwrap_or(Value::Undef);
                     if splice_item {
-                        acc.extend(iter_values(&result));
+                        acc.extend(iter_values(&result, ctx));
                     } else {
                         acc.push(result);
                     }
@@ -1532,7 +1535,7 @@ fn eval_with_global<'a>(
             } => {
                 let result = values.pop().unwrap_or(Value::Undef);
                 if splice_item {
-                    acc.extend(iter_values(&result));
+                    acc.extend(iter_values(&result, ctx));
                 } else {
                     acc.push(result);
                 }
@@ -2056,8 +2059,22 @@ fn splice_into(val: Value, out: &mut Vec<Value>) {
 }
 
 /// The values a `for`/`each` iterable yields: a list's elements, a range's values (capped by
-/// `range_iter`), a string's characters, or a scalar as a single value.
-fn iter_values(v: &Value) -> Vec<Value> {
+/// `range_iter`), a string's characters, or a scalar as a single value. A range past
+/// [`RANGE_TOO_MANY`] warns and yields NOTHING (AD.3 — upstream's warn-and-skip).
+fn iter_values(v: &Value, ctx: &Ctx) -> Vec<Value> {
+    match v {
+        Value::NumList(xs) => xs.iter().map(|&x| Value::Num(x)).collect(),
+        Value::List(xs) => xs.to_vec(),
+        Value::Range { start, step, end } => range_values(*start, *step, *end, ctx),
+        Value::Str(s) => s.chars().map(|c| Value::string(c.to_string())).collect(),
+        other => vec![other.clone()],
+    }
+}
+
+/// [`iter_values`] minus the too-many-elements warning — the builtins' (`chr`/`lookup`/`search`) and
+/// intrinsics' expansion seam. Those aren't "for statement" contexts upstream, so they keep the plain
+/// `RANGE_MAX`-capped expansion; only the for/each seams get AD.3's warn-and-skip.
+fn iter_values_raw(v: &Value) -> Vec<Value> {
     match v {
         Value::NumList(xs) => xs.iter().map(|&x| Value::Num(x)).collect(),
         Value::List(xs) => xs.to_vec(),
@@ -2067,6 +2084,20 @@ fn iter_values(v: &Value) -> Vec<Value> {
         Value::Str(s) => s.chars().map(|c| Value::string(c.to_string())).collect(),
         other => vec![other.clone()],
     }
+}
+
+/// Expand a range for iteration, or warn + empty when its count overflows uint32 (upstream's
+/// "too many elements" verdict — see [`RANGE_TOO_MANY`]). The one range→values seam both
+/// [`iter_values`] and [`iterate_values`] share.
+fn range_values(start: f64, step: f64, end: f64, ctx: &Ctx) -> Vec<Value> {
+    let len = range_len(start, step, end);
+    if len >= RANGE_TOO_MANY {
+        ctx.warn(format!(
+            "Bad range parameter in for statement: too many elements ({len})"
+        ));
+        return Vec::new();
+    }
+    range_iter(start, step, end).map(Value::Num).collect()
 }
 
 /// Bind a comprehension `let`'s bindings SEQUENTIALLY (a later one sees the earlier), returning the
@@ -3038,12 +3069,11 @@ fn bind_module_scope<'a>(
 }
 
 /// The values a `for` binding iterates: a range → its (capped) values, a vector → its elements, a
-/// scalar → a single iteration (OpenSCAD's `for(i = 5)`).
-fn iterate_values(v: &Value) -> Vec<Value> {
+/// scalar → a single iteration (OpenSCAD's `for(i = 5)`). A too-many range warns + iterates zero
+/// times, like [`iter_values`].
+fn iterate_values(v: &Value, ctx: &Ctx) -> Vec<Value> {
     match v {
-        Value::Range { start, step, end } => {
-            range_iter(*start, *step, *end).map(Value::Num).collect()
-        }
+        Value::Range { start, step, end } => range_values(*start, *step, *end, ctx),
         Value::NumList(xs) => xs.iter().map(|&n| Value::Num(n)).collect(),
         Value::List(xs) => xs.to_vec(),
         other => vec![other.clone()],
@@ -3902,12 +3932,14 @@ mod tests {
         assert_eq!(v, Value::Num(200_001.0));
     }
 
-    /// The exact eval trophy (TROPHIES.md): `[for(i=[0:9e9]) i]` builds a RANGE_MAX-capped 10M-element list
-    /// (>10s / lots of RAM) — but under a budget it's rejected UP FRONT (`charge_iterable` charges the ~1e7
-    /// count before `iter_values` even allocates), LOUD, not a hang.
+    /// The eval-trophy class (TROPHIES.md): a huge-range comprehension builds a RANGE_MAX-capped
+    /// 10M-element list (>10s / lots of RAM) — but under a budget it's rejected UP FRONT
+    /// (`charge_iterable` charges the ~1e7 count before `iter_values` even allocates), LOUD, not a
+    /// hang. The range sits BELOW `RANGE_TOO_MANY` on purpose: the original `[0:9e9]` trophy input is
+    /// now AD.3's warn-and-skip (zero iterations, no budget needed) — see the too-many tests.
     #[test]
     fn budget_stops_the_range_comprehension_trophy() {
-        let err = eval_budgeted("x = [for (i = [0:9e9]) i];", Some(1_000)).unwrap_err();
+        let err = eval_budgeted("x = [for (i = [0:2e9]) i];", Some(1_000)).unwrap_err();
         match err.root() {
             crate::Error::Eval(m) => assert!(m.contains("budget exceeded"), "got {m}"),
             other => panic!("expected Error::Eval, got {other:?}"),
@@ -3927,10 +3959,10 @@ mod tests {
     }
 
     /// `each <huge range>` splices in bulk with no per-element eval — charged up front like a `for`, so it's
-    /// bounded too (the second charge site).
+    /// bounded too (the second charge site). Below `RANGE_TOO_MANY`, same as the trophy test.
     #[test]
     fn budget_stops_each_splice() {
-        let err = eval_budgeted("x = [each [0:9e9]];", Some(1_000)).unwrap_err();
+        let err = eval_budgeted("x = [each [0:2e9]];", Some(1_000)).unwrap_err();
         assert!(matches!(err.root(), crate::Error::Eval(_)), "got {err:?}");
     }
 
@@ -3975,8 +4007,9 @@ mod tests {
         // Deterministic: same program, same cost.
         assert_eq!(big, cost("x = len([for (i = [0:10000]) i]);", 50_000_000));
         // Bounded: a past-budget program caps at ~budget — above any completing program's cost, so it sorts
-        // to the top of the ranking rather than running away.
-        let capped = cost("x = [for (i = [0:9e9]) i];", 10_000);
+        // to the top of the ranking rather than running away. (Below `RANGE_TOO_MANY` on purpose: a
+        // `[0:9e9]` range is AD.3's warn-and-skip now — zero iterations, nothing to meter.)
+        let capped = cost("x = [for (i = [0:2e9]) i];", 10_000);
         assert!(
             capped >= 10_000 && capped > big,
             "budget-hit caps high (worst-case rank): {capped}"

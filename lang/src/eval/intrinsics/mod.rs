@@ -671,7 +671,7 @@ static REGISTRY: &[Entry] = &[
     // ── O.5.2, the SHAPE band (utility.scad / lists.scad) ────────────────────────────────────────────────
     // The `is_consistent`/`_list_pattern`/`same_shape` bundle is ~4.7s of self time across the O.4 four
     // (every BOSL2 path/vector assert funnels through it), `num_defined`/`force_list` are its cheap leaf
-    // companions. All verbatim; every op routes through the interpreter's own primitives (`iter_values` for
+    // companions. All verbatim; every op routes through the interpreter's own primitives (`iter_values_raw` for
     // comprehension iteration, `build_vector` for result coalescing, `apply_binary`/`index` for ops), so
     // variant identity (NumList vs List) and exotic-input behavior match by construction.
     Entry {

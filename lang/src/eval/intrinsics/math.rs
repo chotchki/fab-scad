@@ -1,7 +1,7 @@
 use super::shape::{is_consistent, is_matrix};
 use super::{bosl_assert, is_vector_core, no_progress, non_terminating, v_is_finite, v_is_list};
 use crate::eval::value::Value;
-use crate::eval::{build_vector, builtins, iter_values, ops};
+use crate::eval::{build_vector, builtins, iter_values_raw, ops};
 use crate::parser::BinOp;
 
 /// BOSL2 `approx(a,b,eps=_EPSILON)` — tolerant equality, recursing into lists. The num fast path requires
@@ -35,8 +35,8 @@ pub(super) fn approx_val(a: &Value, b: &Value, eps: &Value) -> crate::Result<Val
         });
     }
     if v_is_list(a) && v_is_list(b) {
-        let av = iter_values(a);
-        let bv = iter_values(b);
+        let av = iter_values_raw(a);
+        let bv = iter_values_raw(b);
         if av.len() == bv.len() {
             for (aa, bb) in av.iter().zip(bv.iter()) {
                 let mismatch = if let (Num(x), Num(y)) = (aa, bb)
@@ -98,7 +98,7 @@ pub(super) fn sum(args: &[Value]) -> crate::Result<Value> {
     }
     let v0 = ops::index(v.clone(), &Value::Num(0.0));
     if v_is_finite(&v0) || is_vector_core(&v0) {
-        let n = iter_values(&v).len();
+        let n = iter_values_raw(&v).len();
         let ones = build_vector(vec![Value::Num(1.0); n]);
         return Ok(ops::apply_binary(BinOp::Mul, ones, v));
     }
@@ -150,17 +150,17 @@ pub(super) fn constrain_clamp(v: &Value, minval: f64, maxval: f64) -> crate::Res
     match v {
         Value::Num(n) if !n.is_nan() => Ok(clamp1(v)),
         _ if is_vector_core(v) => {
-            let out: Vec<Value> = iter_values(v).iter().map(clamp1).collect();
+            let out: Vec<Value> = iter_values_raw(v).iter().map(clamp1).collect();
             Ok(build_vector(out))
         }
         _ if is_matrix(std::slice::from_ref(v))?.is_truthy() => Err(crate::Error::Eval(
             "constrain: matrix input unreachable from vector_angle (intrinsic guard)".to_string(),
         )),
         Value::List(_) | Value::NumList(_) => {
-            let out: Vec<Value> = iter_values(v)
+            let out: Vec<Value> = iter_values_raw(v)
                 .iter()
                 .map(|vec| {
-                    let row: Vec<Value> = iter_values(vec).iter().map(clamp1).collect();
+                    let row: Vec<Value> = iter_values_raw(vec).iter().map(clamp1).collect();
                     build_vector(row)
                 })
                 .collect();

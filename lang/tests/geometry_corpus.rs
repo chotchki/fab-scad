@@ -470,6 +470,34 @@ fn zero_progress_recursion_is_detected() {
     );
 }
 
+/// AD.3: a `for` range whose element count overflows uint32 warns "too many elements" and iterates
+/// ZERO times — upstream's verdict, pinned by for-tests.scad's own annotations (`[0:1:4294967294]`,
+/// count exactly `u32::MAX`, already warns). Was: a silent 10M-capped grind (the census's 26s/53s
+/// timeouts). All three iteration seams: statement-for, comprehension-for, `each`.
+#[test]
+fn too_many_range_elements_warns_and_skips() {
+    let ev = evaluate_full(
+        "for (i = [0:1:4294967296]) { echo(i); }\n\
+         a = [for (i = [0:1:8589934592]) i];\n\
+         b = [each [0:1:4294967296]];\n\
+         echo(lens = [len(a), len(b)]);\n\
+         cube(1);",
+    )
+    .expect("evaluates");
+    assert_eq!(
+        ev.echos(),
+        ["lens = [0, 0]"],
+        "every seam iterates zero times"
+    );
+    let warnings = ev.warnings();
+    assert_eq!(warnings.len(), 3, "one warning per seam: {warnings:?}");
+    assert!(warnings.iter().all(|w| w.contains("too many elements")));
+    // for-tests' "Correct" case stays correct: a big-but-legal range still iterates.
+    let ok = evaluate_full("echo(len([for (i = [0:1:5000]) i])); cube(1);").expect("evaluates");
+    assert_eq!(ok.echos(), ["5001"]);
+    assert!(ok.warnings().is_empty());
+}
+
 /// AD.2, the shape that rules out arg-cycle detection: `sin(x) = sin()` re-enters with x=undef every
 /// call (issue3118-recur-limit.scad — a user function shadowing the builtin, called argless). The call
 /// is arity-defaulted (not JIT-eligible) so the error takes the nameless form; still "Recursion detected".

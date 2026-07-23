@@ -23,7 +23,7 @@
 use super::fmt::format_value;
 use super::trig;
 use super::value::Value;
-use super::{build_vector, iter_values};
+use super::{build_vector, iter_values_raw};
 
 /// Is `name` a builtin we implement? Checked at a call site AFTER user functions, BEFORE "unknown"
 /// (so a user function may shadow a builtin, per OpenSCAD).
@@ -296,7 +296,7 @@ fn chr(pos: &[Value]) -> Value {
         return Value::Undef;
     };
     let mut s = String::new();
-    for value in iter_values(source) {
+    for value in iter_values_raw(source) {
         if let Value::Num(n) = value
             && let Some(c) = code_to_char(n)
         {
@@ -350,7 +350,7 @@ fn lookup(pos: &[Value]) -> Value {
         _ => return Value::Undef,
     };
     let table = match pos.get(1) {
-        Some(t) => iter_values(t),
+        Some(t) => iter_values_raw(t),
         None => return Value::Undef,
     };
     // low = the pair with the largest x <= key; high = the smallest x >= key.
@@ -413,7 +413,7 @@ fn search(pos: &[Value]) -> Value {
     };
     let num_returns = pos.get(2).and_then(as_index).unwrap_or(1);
     let index_col = pos.get(3).and_then(as_index).unwrap_or(0);
-    let rows = iter_values(table);
+    let rows = iter_values_raw(table);
     match find {
         // a numeric search is always a flat list of hit indices, capped by num_returns (0 = all).
         Value::Num(_) | Value::Bool(_) => build_vector(hits(find, &rows, num_returns, index_col)),
@@ -426,7 +426,7 @@ fn search(pos: &[Value]) -> Value {
         // That asymmetry is an OpenSCAD quirk (verified vs the oracle), and BOSL2's `list_remove` leans on
         // it — `if (sres[i] == [])` needs the misses positional. Dropping them broke list_remove → str_split.
         Value::NumList(_) | Value::List(_) => build_vector(per_key_search(
-            &iter_values(find),
+            &iter_values_raw(find),
             &rows,
             num_returns,
             index_col,

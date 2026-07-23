@@ -3,7 +3,7 @@ use super::math::{approx, sum};
 use super::shape::is_vector;
 use super::{bosl_assert, no_progress, non_terminating, v_is_list};
 use crate::eval::value::Value;
-use crate::eval::{build_range, build_vector, builtins, iter_values, ops};
+use crate::eval::{build_range, build_vector, builtins, iter_values_raw, ops};
 use crate::parser::BinOp;
 
 /// A finite-or-not 2D point view: `Some([x, y])` iff the value is a 2-element `NumList` (any bits — the
@@ -245,7 +245,7 @@ pub(super) fn get_ear(args: &[Value]) -> crate::Result<Value> {
         // whiskers: adjacent-but-one vertices closer than eps
         let jrange = idx(std::slice::from_ref(&ind))?;
         let mut ws: Vec<Value> = Vec::new();
-        for j in iter_values(&jrange) {
+        for j in iter_values_raw(&jrange) {
             let far = ops::apply_binary(
                 BinOp::Mod,
                 ops::apply_binary(BinOp::Add, j.clone(), Value::Num(2.0)),
@@ -287,7 +287,7 @@ pub(super) fn point_dist(args: &[Value]) -> crate::Result<Value> {
     let end = ops::apply_binary(BinOp::Sub, ll, Value::Num(1.0));
     let range = build_range(&Value::Num(0.0), &Value::Num(1.0), &end);
     let mut dists: Vec<Value> = Vec::new();
-    for iv in iter_values(&range) {
+    for iv in iter_values_raw(&range) {
         let pi = ops::index(path.clone(), &iv);
         let v = ops::apply_binary(BinOp::Sub, pt.clone(), pi.clone());
         let ui = ops::index(unit.clone(), &iv);
@@ -428,7 +428,7 @@ pub(super) fn vnf_centroid(args: &[Value]) -> crate::Result<Value> {
         return Err(bosl_assert("_vnf_centroid: invalid or empty VNF"));
     }
     let mut pairs: Vec<Value> = Vec::new();
-    for face in iter_values(&faces) {
+    for face in iter_values_raw(&faces) {
         let jr = build_range(
             &Value::Num(1.0),
             &Value::Num(1.0),
@@ -438,7 +438,7 @@ pub(super) fn vnf_centroid(args: &[Value]) -> crate::Result<Value> {
                 Value::Num(2.0),
             ),
         );
-        for j in iter_values(&jr) {
+        for j in iter_values_raw(&jr) {
             let vat = |idx: &Value| ops::index(verts.clone(), &ops::index(face.clone(), idx));
             let v0 = vat(&Value::Num(0.0));
             let v1 = vat(&j);

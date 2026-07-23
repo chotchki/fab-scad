@@ -1,7 +1,7 @@
 use super::math::posmod;
 use super::{bosl_assert, v_is_finite, v_is_list};
 use crate::eval::value::{self, Value};
-use crate::eval::{build_range, build_vector, builtins, iter_values, ops};
+use crate::eval::{build_range, build_vector, builtins, iter_values_raw, ops};
 use crate::parser::BinOp;
 
 /// BOSL2 `last(list) = list[len(list)-1]` — the final element. `len` is `undef` for anything but a
@@ -38,7 +38,7 @@ pub(super) fn default(args: &[Value]) -> crate::Result<Value> {
 /// function in BOSL2's path/list layer. Bit-identical BY CONSTRUCTION: every operation routes through the
 /// interpreter's OWN primitives — the wrap math via [`ops::apply_binary`]'s `%`/`+`, indexing via
 /// [`ops::index`], range iteration via [`value::range_iter`], element iteration via
-/// [`iter_values`], and result coalescing via [`build_vector`] (all-`Num` → `NumList`, else
+/// [`iter_values_raw`], and result coalescing via [`build_vector`] (all-`Num` → `NumList`, else
 /// `List`) — so no float-modulo/index/coalesce semantics are re-derived. The win is skipping the per-call
 /// function/scope machinery plus the `is_num`/`is_vector`/`is_range`/`is_finite`/`len` sub-dispatch the
 /// interpreted body pays on EVERY call. Reproduces all three assert raise-sites: (1) a non-list/string
@@ -73,7 +73,7 @@ pub(super) fn select(args: &[Value]) -> crate::Result<Value> {
                 return Err(select_assert("Invalid start parameter"));
             }
             // [for (i=start) list[ (i%l+l)%l ]]
-            let out = iter_values(&start)
+            let out = iter_values_raw(&start)
                 .into_iter()
                 .map(|i| index(list.clone(), &wrap(i, &lv)))
                 .collect();
@@ -208,13 +208,16 @@ pub(super) fn force_list(args: &[Value]) -> crate::Result<Value> {
     match args.get(2) {
         None | Some(Value::Undef) => {
             let range = build_range(&one, &one, &n);
-            let out: Vec<Value> = iter_values(&range).iter().map(|_| value.clone()).collect();
+            let out: Vec<Value> = iter_values_raw(&range)
+                .iter()
+                .map(|_| value.clone())
+                .collect();
             Ok(build_vector(out))
         }
         Some(fill) => {
             let range = build_range(&Value::Num(2.0), &one, &n);
             let mut out = vec![value];
-            out.extend(iter_values(&range).iter().map(|_| fill.clone()));
+            out.extend(iter_values_raw(&range).iter().map(|_| fill.clone()));
             Ok(build_vector(out))
         }
     }
@@ -295,7 +298,7 @@ pub(super) fn in_list(args: &[Value]) -> crate::Result<Value> {
         ),
         &Value::Num(0.0),
     );
-    for hit in iter_values(&allhits) {
+    for hit in iter_values_raw(&allhits) {
         if ops::apply_binary(BinOp::Eq, hit_item(&hit), val.clone()).is_truthy() {
             return Ok(Value::Bool(true));
         }
@@ -340,7 +343,7 @@ pub(super) fn group_sort_by_index(args: &[Value]) -> crate::Result<Value> {
         let mut equal: Vec<Value> = Vec::new();
         let mut lesser: Vec<Value> = Vec::new();
         let mut greater: Vec<Value> = Vec::new();
-        for li in iter_values(&l) {
+        for li in iter_values_raw(&l) {
             let key = ops::index(li.clone(), &idx);
             if ops::apply_binary(BinOp::Eq, key.clone(), pivot.clone()).is_truthy() {
                 equal.push(li);

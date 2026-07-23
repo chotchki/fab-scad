@@ -3,7 +3,7 @@ use super::math::constrain_clamp;
 use super::shape::{is_consistent, is_vector, same_shape};
 use super::{bosl_assert, is_vector_core, v_is_list};
 use crate::eval::value::Value;
-use crate::eval::{build_vector, builtins, iter_values, ops};
+use crate::eval::{build_vector, builtins, iter_values_raw, ops};
 use crate::parser::BinOp;
 
 /// BOSL2 `unit(v, error=[[["ASSERT"]]])` — `v/norm(v)`, raising on a non-vector and (by default) on a
@@ -178,7 +178,7 @@ pub(super) fn v_abs(args: &[Value]) -> crate::Result<Value> {
     if !is_vector_core(&v) {
         return Err(bosl_assert("v_abs: invalid vector"));
     }
-    let out: Vec<Value> = iter_values(&v)
+    let out: Vec<Value> = iter_values_raw(&v)
         .iter()
         .map(|x| builtins::apply("abs", std::slice::from_ref(x)))
         .collect();
@@ -240,7 +240,7 @@ pub(super) fn bt_search(args: &[Value]) -> crate::Result<Value> {
             if !(empty_ok || is_vector_core(&t0)) {
                 return Err(bosl_assert("_bt_search: the tree is invalid"));
             }
-            for iv in iter_values(&t0) {
+            for iv in iter_values_raw(&t0) {
                 let d =
                     ops::apply_binary(BinOp::Sub, ops::index(points.clone(), &iv), query.clone());
                 if ops::apply_binary(

@@ -1,7 +1,7 @@
 use super::lists::{force_list, in_list};
 use super::{bosl_assert, is_vector_core, v_is_finite, v_is_list};
 use crate::eval::value::Value;
-use crate::eval::{build_vector, builtins, iter_values, ops};
+use crate::eval::{build_vector, builtins, iter_values_raw, ops};
 use crate::parser::BinOp;
 
 /// BOSL2 `is_def(x) = !is_undef(x)` — true iff `x` is anything but `undef`. Only the first positional arg
@@ -60,7 +60,7 @@ pub(super) fn list_pattern(args: &[Value]) -> crate::Result<Value> {
 }
 pub(super) fn list_pattern_of(v: &Value) -> Value {
     if v_is_list(v) {
-        let out: Vec<Value> = iter_values(v).iter().map(list_pattern_of).collect();
+        let out: Vec<Value> = iter_values_raw(v).iter().map(list_pattern_of).collect();
         build_vector(out)
     } else {
         Value::Num(0.0)
@@ -84,7 +84,7 @@ pub(super) fn same_shape(args: &[Value]) -> crate::Result<Value> {
 
 /// BOSL2 `is_consistent(list, pattern)` — is every element of `list` shaped like `pattern` (default: like
 /// `list[0]`)? The reference compares each entry of `0*list` against the pattern with `!=`; both the zeroing
-/// and the compare route through `apply_binary`, iteration through `iter_values` — so a heterogeneous list
+/// and the compare route through `apply_binary`, iteration through `iter_values_raw` — so a heterogeneous list
 /// (where `0*entry` is undef) answers exactly as interpreted.
 pub(super) fn is_consistent(args: &[Value]) -> crate::Result<Value> {
     let list = args.first().cloned().unwrap_or(Value::Undef);
@@ -104,14 +104,14 @@ pub(super) fn is_consistent(args: &[Value]) -> crate::Result<Value> {
         Some(p) => list_pattern_of(p),
     };
     let zeroed = ops::apply_binary(BinOp::Mul, Value::Num(0.0), list);
-    let ok = iter_values(&zeroed)
+    let ok = iter_values_raw(&zeroed)
         .into_iter()
         .all(|entry| !ops::apply_binary(BinOp::Ne, entry, pattern.clone()).is_truthy());
     Ok(Value::Bool(ok))
 }
 
 /// BOSL2 `num_defined(v) = len([for(vi=v) if(!is_undef(vi)) 1])` — how many entries are defined? Iteration
-/// via `iter_values` (the interpreter's own `for` expansion: a scalar iterates once, a range expands), count
+/// via `iter_values_raw` (the interpreter's own `for` expansion: a scalar iterates once, a range expands), count
 /// as the `len` builtin would report it.
 #[allow(
     clippy::cast_precision_loss,
@@ -119,7 +119,7 @@ pub(super) fn is_consistent(args: &[Value]) -> crate::Result<Value> {
 )]
 pub(super) fn num_defined(args: &[Value]) -> crate::Result<Value> {
     let v = args.first().cloned().unwrap_or(Value::Undef);
-    let count = iter_values(&v)
+    let count = iter_values_raw(&v)
         .iter()
         .filter(|vi| !matches!(vi, Value::Undef))
         .count();
@@ -201,7 +201,7 @@ pub(super) fn all_nonzero(args: &[Value]) -> crate::Result<Value> {
     if !is_vector_core(&x) {
         return Ok(Value::Bool(false)); // is_vector(x) && … short-circuits
     }
-    let near_zero = iter_values(&x).into_iter().any(|xx| match (&xx, &eps) {
+    let near_zero = iter_values_raw(&x).into_iter().any(|xx| match (&xx, &eps) {
         (Value::Num(n), Value::Num(e)) => n.abs() < *e,
         _ => ops::apply_binary(
             BinOp::Lt,

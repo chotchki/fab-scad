@@ -236,6 +236,13 @@ fn float_id(a: f64, b: f64) -> bool {
 /// caps too (the warning TEXT is I.5); this is chosen well above any real model's range length.
 pub const RANGE_MAX: u64 = 10_000_000;
 
+/// AD.3, upstream's boundary for a range in a `for`/`each`: an element count that overflows `uint32`
+/// (their `RangeType::numValues` return type) warns "too many elements" and iterates ZERO times —
+/// for-tests.scad's own annotations pin the edge (`[0:1:4294967294]`, count exactly `u32::MAX`, already
+/// warns). The evaluator's expansion seams check this BEFORE the [`RANGE_MAX`] cap, so a billion-element
+/// range matches the oracle's warn-and-skip instead of silently grinding out 10 M capped values.
+pub const RANGE_TOO_MANY: u64 = u32::MAX as u64;
+
 /// The values of a range `[start : step : end]`, INDEX-BASED (`start + i*step`) to match OpenSCAD's
 /// `RangeType` and avoid float-accumulation drift. Ascending (`step > 0`) runs while `<= end`,
 /// descending (`step < 0`) while `>= end`; a `0`/non-finite step or wrong direction yields nothing.

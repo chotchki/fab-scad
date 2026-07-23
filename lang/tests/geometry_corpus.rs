@@ -455,3 +455,29 @@ fn assert_echo_chained_recursion_evals() {
                echo(f = f(10000)); cube(1);";
     assert_eq!(mesh(src).vert_count(), 8);
 }
+
+/// AD.2: zero-progress recursion errors LOUD ("Recursion detected", upstream's verdict) instead of
+/// grinding for hours. The task machine tail-collapses `crash() = crash()` (the outer body-eval IS the
+/// inner dispatch — no task-stack growth), so the guard counts calls IN FLIGHT, not stack depth.
+/// Census: recursion-test-function.scad / recursion-test-function2.scad.
+#[test]
+fn zero_progress_recursion_is_detected() {
+    let e = err("function crash() = crash();\necho(crash());\ncube(1);");
+    let msg = e.to_string();
+    assert!(
+        msg.contains("Recursion detected calling function 'crash'"),
+        "wanted upstream's verdict, got: {msg}"
+    );
+}
+
+/// AD.2, the shape that rules out arg-cycle detection: `sin(x) = sin()` re-enters with x=undef every
+/// call (issue3118-recur-limit.scad — a user function shadowing the builtin, called argless). The call
+/// is arity-defaulted (not JIT-eligible) so the error takes the nameless form; still "Recursion detected".
+#[test]
+fn argless_self_call_through_a_builtin_shadow_is_detected() {
+    let e = err("function sin(x) = sin();\necho(sin(30));\ncube(1);");
+    assert!(
+        e.to_string().contains("Recursion detected"),
+        "wanted the recursion verdict, got: {e}"
+    );
+}

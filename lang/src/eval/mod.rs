@@ -438,6 +438,11 @@ pub(super) struct Ctx<'a> {
     /// at 0. No-op when the budget is `None` (the default), so the trusted path pays only one predictable
     /// not-taken branch per task.
     eval_steps: std::cell::Cell<u64>,
+    /// Count of user-function calls currently IN FLIGHT (a [`Task::Apply`] committed to interpreting its
+    /// body, not yet balanced by its [`Task::CallReturn`]) — the runaway-recursion detector's accumulator,
+    /// checked against [`MAX_CALL_DEPTH`]. JIT hits and cache hits never enter (their result lands
+    /// immediately), so the count is exactly the interpreted call depth. A `Cell`, same as the others.
+    live_calls: std::cell::Cell<u32>,
     /// The desktop numeric-JIT hook (P.1.2), or `None` (wasm, or a program with nothing compiled). Built
     /// ONCE at setup by the caller-supplied [`NumericJitFactory`] and OWNED here — the registry CLONES the
     /// AST it needs (P.1.6 rung B on-demand recompile), so a `Box<dyn NumericJit>` still needs no `'a`. When
@@ -586,6 +591,17 @@ impl<'a> Ctx<'a> {
 /// matters for deep attachable chains.) A memory/step budget could replace this later.
 const MAX_MODULE_DEPTH: usize = 100_000;
 
+/// Max IN-FLIGHT user-function calls (entered, result not yet landed) before we bail with upstream's
+/// "Recursion detected" verdict. The task machine accidentally TAIL-COLLAPSES a call whose body IS the
+/// next call (`function crash() = crash();` — the outer body-eval BECOMES the inner dispatch, so the
+/// task stack never grows), which is why no stack/depth guard ever fired on the census's zero-progress
+/// recursion files: they grind flat for hours, growing only the dynamic scope chain. Counting calls
+/// IN FLIGHT catches them all — zero-progress AND progressing-but-unbounded (`add_up_to(-1)` changes
+/// its arg every call, so cycle detection on args would miss it; upstream still errors, proving THEIR
+/// guard is a counter too: the 2026 TCO loop caps at 1,000,000 "Recursion detected"). Ceiling matches
+/// upstream's; the corpus's deepest LEGIT recursion (the 500 k mutual-closure chain) sits at 2× headroom.
+const MAX_CALL_DEPTH: u32 = 1_000_000;
+
 /// One step on the evaluator's explicit work-stack. Each `Eval` carries the [`Scope`] it evaluates
 /// in (an `Rc<Frame>` clone — cheap), so a call's body can evaluate in the callee's scope while the
 /// caller's continuation waits on the same stack (I.2.3). Value-combining tasks need no scope.
@@ -626,11 +642,12 @@ enum Task<'a> {
         body: &'a Expr,
         base: Scope,
         caller: Scope,
-        /// The function's NAME when this call is numeric-JIT-eligible (all-positional, exact arity), else
-        /// `None` (a closure, a defaulted/named/variadic call). When `Some` AND every evaluated arg is a
-        /// `Num`, [`Ctx::jit`] gets first refusal before the body is interpreted (P.1.2). Only a shape
-        /// hint — the JIT still checks its own registry and the runtime `all-Num` guard.
-        jit: Option<&'a str>,
+        /// The called function's NAME, or `None` for a closure / a `$`-arg call (`push_call` clears it
+        /// when dollars append past the params — the one JIT arity hazard). Two consumers: the numeric-JIT
+        /// offer (P.1.2 — [`Ctx::jit`] gets first refusal when this is `Some`; only a shape hint, the JIT
+        /// still checks its own registry + the runtime `all-Num` guard) and the AD.2 recursion verdict
+        /// (upstream names the function in "Recursion detected calling function 'x'").
+        name: Option<&'a str>,
     },
     /// Pop an evaluated CALLEE; if it's a [`Value::Function`], invoke it (its body evaluates in the
     /// captured env). Anything else → `undef` (calling a non-function). The dynamic-callee path:
@@ -765,6 +782,12 @@ enum Task<'a> {
         key: eval_cache::Key,
         snap: PuritySnap,
     },
+    /// AD.2: balance the [`Ctx::live_calls`] increment an interpreted [`Task::Apply`] made — pushed below
+    /// the body (like [`FnTimeReturn`]) so it fires the instant the call's result lands. The error path
+    /// abandons the task stack WITHOUT firing these; fine, because a fatal `Eval` error ends the whole
+    /// evaluation — the counter dies with the run (and an inflated count could only ever fire the guard
+    /// EARLIER, never wrongly pass a runaway).
+    CallReturn,
 }
 
 /// The side-effect counters snapshotted at a memoizable call's MISS; [`Task::CacheStore`] re-reads them when
@@ -876,6 +899,7 @@ impl<'a> FnOracle<'a> {
             config: Config::default(),
             impure_reads: std::cell::Cell::new(0),
             eval_steps: std::cell::Cell::new(0),
+            live_calls: std::cell::Cell::new(0),
             jit: None, // the oracle IS the interpreter baseline — never route it through the JIT
         };
         // Publish the constants into island 0's global (whole-scope, last-wins, first-occurrence order), so a
@@ -1028,7 +1052,7 @@ fn eval_with_global<'a>(
                 body,
                 base,
                 caller,
-                jit,
+                name,
             } => {
                 let vals = values.split_off(values.len().saturating_sub(names.len()));
                 // Numeric-JIT fast path (P.1.2): a compiled numeric function, offered the call BEFORE any
@@ -1042,7 +1066,7 @@ fn eval_with_global<'a>(
                 // `as_ptr()` hands out the cell's pointer WITHOUT a `borrow`, so no `RefMut` guard aliases the
                 // `&mut` the helper transiently makes — sound because the compiled function is the sole
                 // (single-threaded) accessor while it runs, and a non-rands body never dereferences it.
-                if let (Some(name), Some(j)) = (jit, ctx.jit.as_deref())
+                if let (Some(name), Some(j)) = (name, ctx.jit.as_deref())
                     && let Some(out) = j.call_numeric(
                         name,
                         &vals,
@@ -1117,6 +1141,23 @@ fn eval_with_global<'a>(
                     }
                     None
                 };
+                // AD.2 runaway-recursion guard: this call is COMMITTED to interpretation (JIT and cache
+                // hits `continue`d above), so it goes in flight. See [`MAX_CALL_DEPTH`] for why in-flight
+                // count (not task depth — tail-collapse; not arg cycles — `add_up_to(-1)` progresses) is
+                // the guard that matches upstream's "Recursion detected".
+                let depth = ctx.live_calls.get() + 1;
+                if depth > MAX_CALL_DEPTH {
+                    return Err(crate::Error::Eval(match name {
+                        Some(name) => format!("Recursion detected calling function '{name}'"),
+                        None => format!(
+                            "Recursion detected calling function (over {MAX_CALL_DEPTH} calls in flight)"
+                        ),
+                    }));
+                }
+                ctx.live_calls.set(depth);
+                // Fires LAST of the call's completion tasks (LIFO; below CacheStore) → the decrement
+                // brackets the whole call including its memoization.
+                tasks.push(Task::CallReturn);
                 if let Some((key, snap)) = store {
                     // Pushed BEFORE the body eval → fires (LIFO) once the result lands, like `TraceReturn`.
                     tasks.push(Task::CacheStore { key, snap });
@@ -1187,6 +1228,10 @@ fn eval_with_global<'a>(
                 }
             }
             Task::FnTimeReturn => fnprofile::exit_fn(),
+            Task::CallReturn => {
+                // The call's result landed — it's no longer in flight. Never touches the value stack.
+                ctx.live_calls.set(ctx.live_calls.get() - 1);
+            }
             Task::CacheStore { key, snap } => {
                 // Peek the result (never consume — the caller reads it, like `TraceReturn`). Store ONLY if the
                 // body left NO observable side effect: unchanged message log, RNG draw count, closure table,
@@ -1856,16 +1901,13 @@ fn dispatch_call<'a>(
             // the caller's `global` — the use-scope fix. For a root-defined function home is 0 (the root
             // global), so this is a no-op there; for a `use`d function it swaps in the library's constants.
             let base = ctx.island_globals.borrow()[home].clone();
-            // JIT-eligible whenever a hook is present — named args included (P.1.4 recut, task #66): the
-            // hook fires in `Task::Apply` on `vals`, which are the FINAL param-order slot values
-            // `push_call` bound (positional by position, named by name, defaults evaluated interpreter-side
-            // in the right scope), so how the caller SPELLED the args is invisible to the compiled body.
-            // The old all-positional gate was v1 conservatism that turned out to gate out essentially all
-            // of BOSL2 (named-arg calls everywhere → the P.1.5 fires report read `offered 0`). The one real
-            // arity hazard — `$`-args appending to `names` past the params — is `push_call`'s own gate
-            // (it clears the hint when dollars exist). A `None` hook (wasm / raw-AST) → interpret.
-            let jit = ctx.jit.is_some().then_some(name.as_str());
-            push_call(params, body, args, scope, &base, jit, tasks);
+            // The name rides into `Task::Apply` unconditionally (AD.2 wants it for the recursion
+            // verdict); the JIT offer there re-gates on `ctx.jit` being present, so this stays exactly
+            // the P.1.4-recut eligibility — named args included (task #66): the hook fires on `vals`,
+            // the FINAL param-order slot values `push_call` bound, so how the caller SPELLED the args is
+            // invisible to the compiled body. The one real arity hazard — `$`-args appending to `names`
+            // past the params — is `push_call`'s own gate (it clears the name when dollars exist).
+            push_call(params, body, args, scope, &base, Some(name.as_str()), tasks);
             return Ok(());
         }
         if builtins::is_builtin(name) {
@@ -1910,7 +1952,7 @@ fn push_call<'a>(
     args: &'a [Arg],
     caller: &Scope,
     base: &Scope,
-    jit: Option<&'a str>,
+    name: Option<&'a str>,
     tasks: &mut Vec<Task<'a>>,
 ) {
     // Which explicit-arg expr fills each param slot (positional by position, named by name). `None` = the
@@ -1945,16 +1987,16 @@ fn push_call<'a>(
     let mut provided: Vec<bool> = arg_slots.iter().map(Option::is_some).collect();
     provided.extend(std::iter::repeat_n(true, dollars.len()));
     // A `$`-arg appends names beyond the params, so `names.len()` would no longer equal the compiled
-    // function's arity — clear the JIT hint in that (rare) case so an eligible call is only ever an
-    // all-positional one. The caller already passes `None` for closures; this guards the dollar path.
-    let jit = if dollars.is_empty() { jit } else { None };
+    // function's arity — clear the name (the JIT-offer key) in that (rare) case so an eligible call is
+    // only ever a param-shaped one. The caller already passes `None` for closures; this guards dollars.
+    let name = if dollars.is_empty() { name } else { None };
     tasks.push(Task::Apply {
         names,
         provided,
         body,
         base: base.clone(),
         caller: caller.clone(),
-        jit,
+        name,
     });
     // push evals so the popped run is [params.., dollars..]: dollars first (deeper → on top), then
     // params reversed (param 0 evaluates first, lands at the bottom of the run). An arg evaluates in the
@@ -2242,6 +2284,7 @@ fn resolve_source(
         config,
         impure_reads: std::cell::Cell::new(0),
         eval_steps: std::cell::Cell::new(0),
+        live_calls: std::cell::Cell::new(0),
     };
     // Hoist the ROOT (island 0) FIRST, THEN the `use`-island constant scopes. ORDER is load-bearing: the
     // root's include-flattened functions (all of BOSL2's) are tagged home=0, so a `use`-island constant that
@@ -3313,6 +3356,7 @@ fn build_ctx(program: &Program, config: Config) -> Ctx<'_> {
         config,
         impure_reads: std::cell::Cell::new(0),
         eval_steps: std::cell::Cell::new(0),
+        live_calls: std::cell::Cell::new(0),
         jit: None, // the raw-AST path (no loader) is interpreter-only; the JIT rides the loader entry
     }
 }

@@ -251,13 +251,13 @@ fn call_position_precedence_matches_the_oracle() {
     assert!(echoes("function f() = 1; f = function() 2; echo(p = f());").contains("p = 1"));
     assert!(echoes("f = function() 2; function f() = 1; echo(p = f());").contains("p = 1"));
     // p3: the let-bound closure shadows the ENCLOSING function's own name (the census hang).
-    assert!(
-        echoes("function g() = let(g = function() 5) g(); echo(p = g());").contains("p = 5")
-    );
+    assert!(echoes("function g() = let(g = function() 5) g(); echo(p = g());").contains("p = 5"));
     // p6/p9: module-local closures shadow.
     assert!(
-        echoes("function outer() = 1; module m() { outer = function() 2; echo(p = outer()); } m();")
-            .contains("p = 2")
+        echoes(
+            "function outer() = 1; module m() { outer = function() 2; echo(p = outer()); } m();"
+        )
+        .contains("p = 2")
     );
     // p8: a NON-function local does not shadow.
     assert!(

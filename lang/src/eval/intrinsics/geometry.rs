@@ -49,6 +49,11 @@ pub(super) fn tri_class_val(tri: &Value, eps: &Value) -> Value {
     if let (Value::Num(e), Value::List(xs)) = (eps, tri)
         && xs.len() == 3
         && let (Some(t0), Some(t1), Some(t2)) = (as_p2(&xs[0]), as_p2(&xs[1]), as_p2(&xs[2]))
+        // The builtin `cross` is undef on a non-finite input component (AH.2.1) — the routed path
+        // reproduces that chain, so the fast scalar path only takes FINITE difference vectors.
+        && [t1[0] - t2[0], t1[1] - t2[1], t0[0] - t2[0], t0[1] - t2[1]]
+            .iter()
+            .all(|x| x.is_finite())
     {
         return Value::Num(tri_class_2d(t0, t1, t2, *e));
     }
@@ -92,6 +97,11 @@ pub(super) fn is_at_left_val(pt: &Value, line: &Value, eps: &Value) -> Value {
     if let (Value::Num(e), Some(p), Value::List(ls)) = (eps, as_p2(pt), line)
         && ls.len() == 2
         && let (Some(l0), Some(l1)) = (as_p2(&ls[0]), as_p2(&ls[1]))
+        // Same finite-differences gate as [`tri_class_val`]: the builtin `cross` in the routed
+        // chain is undef on a non-finite component (AH.2.1), so those shapes must route.
+        && [l0[0] - l1[0], l0[1] - l1[1], p[0] - l1[0], p[1] - l1[1]]
+            .iter()
+            .all(|x| x.is_finite())
     {
         return Value::Bool(tri_class_2d(p, l0, l1, *e) <= 0.0);
     }

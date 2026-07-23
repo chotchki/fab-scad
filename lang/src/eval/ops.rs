@@ -301,6 +301,7 @@ fn same_orderable_type(a: &Value, b: &Value) -> bool {
         (Value::Num(_), Value::Num(_))
             | (Value::Str(_), Value::Str(_))
             | (Value::Bool(_), Value::Bool(_))
+            | (Value::Range { .. }, Value::Range { .. })
     ) || (list_len(a).is_some() && list_len(b).is_some())
 }
 
@@ -313,6 +314,16 @@ fn value_cmp(a: &Value, b: &Value) -> Option<Ordering> {
         (Value::Num(x), Value::Num(y)) => x.partial_cmp(y),
         (Value::Str(x), Value::Str(y)) => Some(x.cmp(y)),
         (Value::Bool(x), Value::Bool(y)) => Some(x.cmp(y)), // false < true
+        // AH.2.1 (operators-tests golden): two RANGES order as the SEQUENCES they iterate —
+        // `[0:1:3] >= [0:1:3]` is true, `[1:-1:3] < [1:-1:-1]` is true (empty < non-empty).
+        (
+            Value::Range { start, step, end },
+            Value::Range {
+                start: s2,
+                step: t2,
+                end: e2,
+            },
+        ) => super::value::range_seq_cmp((*start, *step, *end), (*s2, *t2, *e2)),
 
         _ => {
             let (la, lb) = (list_len(a)?, list_len(b)?);

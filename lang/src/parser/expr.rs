@@ -87,10 +87,10 @@ fn chain_expr(i: &mut Tokens<'_, '_>, depth: usize) -> ModalResult<Expr> {
                 expect(i, TokenKind::LParen, "'(' after `let`")?;
                 let bindings = arg_list_rec(i, depth + 1)?;
                 expect(i, TokenKind::RParen, "closing ')' of the `let` bindings")?;
-                match steps.last_mut() {
-                    Some((Step::Let(prev), _)) => prev.extend(bindings), // fold a `let` run flat
-                    _ => steps.push((Step::Let(bindings), at)),
-                }
+                // Each syntactic `let` stays its OWN node (no run-folding): a duplicate name in
+                // ONE let is ignored first-wins (AH.2.3), while `let(a=1) let(a=2)` legitimately
+                // shadows — folding the run flat would turn the shadow into an ignored duplicate.
+                steps.push((Step::Let(bindings), at));
             }
             Some(k @ (TokenKind::Assert | TokenKind::Echo)) => {
                 bump(i)?; // 'assert' / 'echo'

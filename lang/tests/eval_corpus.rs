@@ -630,7 +630,10 @@ fn list_string_builtins() {
     assert_eq!(ev("chr([97:99])"), str("abc")); // a range of codepoints
     assert_eq!(ev("chr(0)"), str("")); // codepoint < 1 → skipped
     assert_eq!(ev("chr(1114112)"), str("")); // above U+10FFFF → not a scalar → skipped
-    assert_eq!(ev(r#"chr("A")"#), Value::Undef); // chr wants numbers
+    assert_eq!(ev(r#"chr("A")"#), str("")); // non-numbers contribute NOTHING (chr-tests golden), not undef
+    assert_eq!(ev("chr()"), str("")); // no args → empty string
+    assert_eq!(ev("chr(90, 89, 88)"), str("ZYX")); // every argument contributes
+    assert_eq!(ev("chr([65,[66,[67]]])"), str("ABC")); // nested lists flatten recursively
 
     // ord — first char's codepoint.
     assert_eq!(ev(r#"ord("A")"#), num(65.0));
@@ -746,10 +749,16 @@ fn type_predicate_builtins() {
     let t = Value::Bool(true);
     let f = Value::Bool(false);
 
-    // is_undef treats a MISSING or unbound arg as undef; the positive predicates need the value present.
+    // is_undef answers over a PRESENT value (unbound names read as undef); an ARITY mismatch —
+    // no args, or extras — is undef itself, upstream's missing-parameter path (AH.2.1, the
+    // is*-test goldens: `is_num()` and `is_num(1,2,3)` both warn + undef).
     assert_eq!(ev("is_undef(undef)"), t);
     assert_eq!(ev("is_undef(nope)"), t); // an unbound name is undef
-    assert_eq!(ev("is_undef()"), t); // no arg → undef-like
+    assert_eq!(ev("is_undef()"), Value::Undef);
+    assert_eq!(ev("is_undef(1, 2)"), Value::Undef);
+    assert_eq!(ev("is_num()"), Value::Undef);
+    assert_eq!(ev("is_num(1, 2, 3)"), Value::Undef);
+    assert_eq!(ev(r#"is_undef(len("a", "b"))"#), t); // len is arity-1 too — the isundef golden's trick
     assert_eq!(ev("is_undef(5)"), f);
 
     assert_eq!(ev("is_bool(true)"), t);
@@ -759,7 +768,6 @@ fn type_predicate_builtins() {
     assert_eq!(ev("is_num(0/0)"), f); // NaN is NOT is_num in OpenSCAD (`type==NUMBER && !isnan`) → is_nan catches it
     assert_eq!(ev(r#"is_num("a")"#), f);
     assert_eq!(ev("is_num([1, 2])"), f);
-    assert_eq!(ev("is_num()"), f); // no arg → false
 
     assert_eq!(ev(r#"is_string("a")"#), t);
     assert_eq!(ev("is_string(5)"), f);
@@ -805,7 +813,12 @@ fn let_expressions() {
     assert_eq!(ev("let(a = 1) a + 1"), num(2.0));
     assert_eq!(ev("let(a = 1, b = 2) a + b"), num(3.0));
     assert_eq!(ev("let(a = 1, b = a + 1) b"), num(2.0)); // SEQUENTIAL: b sees a
-    assert_eq!(ev("let(a = 1, a = 2) a"), num(2.0)); // a later binding shadows an earlier one
+    // AH.2.3 (oracle golden let-tests): a duplicate in the SAME let is IGNORED — first wins,
+    // upstream warns "Ignoring duplicate variable assignment". A NESTED let still shadows.
+    assert_eq!(ev("let(a = 1, a = 2) a"), num(1.0));
+    assert_eq!(ev("let($a=2, b=3, $a=4) $a*b"), num(6.0)); // the let-tests line-9 case
+    assert_eq!(ev("let($a=2, b=3, $a=4, b=5) $a*b"), num(6.0));
+    assert_eq!(ev("let(a = 1) let(a = 2) a"), num(2.0)); // nested shadowing is NOT a duplicate
     assert_eq!(ev("let() 5"), num(5.0)); // no bindings → just the body
     assert_eq!(ev("let(a = 10) let(b = a) b"), num(10.0)); // nested lets: inner sees the outer binding
     assert_eq!(ev("let(a = 1) (a) + nope"), Value::Undef); // a bound inside; an outer-unbound name is undef

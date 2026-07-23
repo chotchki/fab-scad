@@ -208,28 +208,46 @@ impl PartialEq for Value {
                     step: p1,
                     end: e1,
                 },
-                // STRUCTURAL (not IEEE): a range equals another iff its three fields match bitwise-ish,
-                // with `NaN` treated equal to `NaN` — so a range EQUALS ITSELF even with a `NaN` step. That
-                // asymmetry vs lists (`[NaN] != [NaN]`, IEEE) is the oracle's: BOSL2's `typeof([0:NAN:INF])`
-                // is `"invalid"`, which needs `is_nan(r) = (r != r)` to be FALSE — i.e. the degenerate range
-                // is self-equal, so `typeof` falls through `is_range` (false: a field isn't finite) to
-                // `"invalid"` instead of reporting `"nan"`.
-            ) => float_id(*s0, *s1) && float_id(*p0, *p1) && float_id(*e0, *e1),
+                // SEQUENCE equality (AH.2.1, operators-tests golden): two ranges are equal iff they
+                // ITERATE the same — `[1:-1:3] == [-1:-1:1]` is true (both empty, fields be damned).
+                // Computed from the arithmetic parameters, never by expansion. This also keeps the
+                // L.2.8k pin: `[0:NAN:INF]` is empty, so it EQUALS ITSELF (`is_nan(r)` false) and
+                // BOSL2's `typeof` still falls through `is_range` to `"invalid"`.
+            ) => range_seq_cmp((*s0, *p0, *e0), (*s1, *p1, *e1)) == Some(std::cmp::Ordering::Equal),
             _ => false, // cross-type is never equal
         }
     }
 }
 
-/// IDENTITY equality for a range field: IEEE `==` PLUS `NaN == NaN`, so a range's `NaN` step doesn't make
-/// the range differ from itself (see the [`PartialEq`] range arm). `-0.0 == 0.0` (IEEE) — ranges never
-/// hinge on signed zero, so the coarser "same value" is fine and matches `==` for every non-`NaN` field.
-#[allow(
-    clippy::float_cmp,
-    reason = "EXACT equality is the point — a range equals another iff its fields are identical, matching \
-              OpenSCAD's fieldwise `RangeType` compare; an epsilon margin would wrongly equate distinct ranges"
-)]
-fn float_id(a: f64, b: f64) -> bool {
-    a == b || (a.is_nan() && b.is_nan())
+/// Compare two ranges AS THE SEQUENCES THEY ITERATE, lexicographically, in O(1) — no expansion.
+/// Arithmetic sequences agree on a prefix iff they share start (and step, once both have a second
+/// element), so the first difference is decided by start, then step, then length; empty sequences
+/// are all equal and precede everything non-empty. `None` never actually escapes: a NaN bound
+/// makes a range EMPTY (`range_len` → 0), so the `partial_cmp`s below only see comparable floats.
+pub(crate) fn range_seq_cmp(
+    (s1, p1, e1): (f64, f64, f64),
+    (s2, p2, e2): (f64, f64, f64),
+) -> Option<std::cmp::Ordering> {
+    use std::cmp::Ordering;
+    let n1 = range_len(s1, p1, e1);
+    let n2 = range_len(s2, p2, e2);
+    match (n1 == 0, n2 == 0) {
+        (true, true) => return Some(Ordering::Equal),
+        (true, false) => return Some(Ordering::Less),
+        (false, true) => return Some(Ordering::Greater),
+        (false, false) => {}
+    }
+    match s1.partial_cmp(&s2) {
+        Some(Ordering::Equal) => {}
+        other => return other, // first elements differ
+    }
+    if n1 >= 2 && n2 >= 2 {
+        match p1.partial_cmp(&p2) {
+            Some(Ordering::Equal) => {}
+            other => return other, // second elements (start + step) differ
+        }
+    }
+    Some(n1.cmp(&n2)) // equal common prefix — the shorter sequence orders first
 }
 
 /// A runaway range (`[0:1e12]`) must not hang the evaluator, so iteration is capped. OpenSCAD warns +

@@ -753,12 +753,15 @@ enum Task<'a> {
         acc: Vec<Value>,
         splice_item: bool,
     },
-    /// Pop the just-evaluated binding value, bind it as `name` in a child of `scope`, then either
-    /// evaluate the next `let` binding in that scope or (no bindings left) evaluate `body`. `let`
-    /// bindings are SEQUENTIAL — a later one sees the earlier ones.
+    /// Pop the just-evaluated binding value for `bindings[idx]`, bind it in a child of `scope`,
+    /// then either evaluate the next `let` binding in that scope or (no bindings left) evaluate
+    /// `body`. `let` bindings are SEQUENTIAL — a later one sees the earlier ones — EXCEPT a
+    /// duplicate of a name already bound in this SAME `let`, which upstream IGNORES (first wins,
+    /// warning; AH.2.3 — `let($a=2,b=3,$a=4) $a*b` is 6, not 12). The full slice + index ride
+    /// along so the duplicate check is a static look-back, no runtime name set.
     LetStep {
-        name: Rc<str>,
-        rest: &'a [Arg],
+        bindings: &'a [Arg],
+        idx: usize,
         body: &'a Expr,
         scope: Scope,
     },
@@ -1258,26 +1261,40 @@ fn eval_with_global<'a>(
                 }
             }
             Task::LetStep {
-                name,
-                rest,
+                bindings,
+                idx,
                 body,
                 scope,
             } => {
+                let binding = &bindings[idx];
+                let name: Rc<str> = binding.name.clone().unwrap_or_else(|| Rc::from("_"));
                 let value = name_closure(values.pop().unwrap_or(Value::Undef), &name);
-                trace::bind('l', &name, &value);
-                let mut inner = scope.child();
-                inner.bind(name, value);
-                match rest.split_first() {
-                    Some((next, remaining)) => {
-                        tasks.push(Task::LetStep {
-                            name: next.name.clone().unwrap_or_else(|| Rc::from("_")),
-                            rest: remaining,
-                            body,
-                            scope: inner.clone(),
-                        });
-                        tasks.push(Task::Eval(&next.value, inner));
-                    }
-                    None => tasks.push(Task::Eval(body, inner)),
+                // AH.2.3: a duplicate of a name already bound in this SAME let is IGNORED (first
+                // wins, upstream warns) — the RHS still evaluated above, only the bind is dropped.
+                // Unnamed bindings (`_`) are exempt: they were never addressable to begin with.
+                let dup = binding.name.is_some()
+                    && bindings[..idx].iter().any(|b| b.name == binding.name);
+                let inner = if dup {
+                    ctx.messages.borrow_mut().push(Message::Warning(format!(
+                        "Ignoring duplicate variable assignment \"{name}\""
+                    )));
+                    scope
+                } else {
+                    trace::bind('l', &name, &value);
+                    let mut inner = scope.child();
+                    inner.bind(name, value);
+                    inner
+                };
+                if idx + 1 < bindings.len() {
+                    tasks.push(Task::LetStep {
+                        bindings,
+                        idx: idx + 1,
+                        body,
+                        scope: inner.clone(),
+                    });
+                    tasks.push(Task::Eval(&bindings[idx + 1].value, inner));
+                } else {
+                    tasks.push(Task::Eval(body, inner));
                 }
             }
             Task::Builtin { name, args } => run_builtin(name, args, &mut values, ctx),
@@ -1688,18 +1705,19 @@ fn eval_node<'a>(
                 group: None, // a plain literal has no letrec siblings (L.5.4)
             });
         }
-        ExprKind::Let { bindings, body } => match bindings.split_first() {
-            Some((first, rest)) => {
+        ExprKind::Let { bindings, body } => {
+            if bindings.is_empty() {
+                tasks.push(Task::Eval(body, scope.clone())); // `let() body` → just the body
+            } else {
                 tasks.push(Task::LetStep {
-                    name: first.name.clone().unwrap_or_else(|| Rc::from("_")),
-                    rest,
+                    bindings,
+                    idx: 0,
                     body,
                     scope: scope.clone(),
                 });
-                tasks.push(Task::Eval(&first.value, scope.clone()));
+                tasks.push(Task::Eval(&bindings[0].value, scope.clone()));
             }
-            None => tasks.push(Task::Eval(body, scope.clone())), // `let() body` → just the body
-        },
+        }
         ExprKind::Echo { args, body } => {
             // `echo(args) body?` — args evaluate as TASKS (left-to-right), then `EchoEmit` pops
             // them, prints, and schedules the body. Fully on the machine (AB.2): chains and
@@ -2117,9 +2135,16 @@ fn comprehension_let_scope<'a>(
     ctx: &Ctx<'a>,
 ) -> crate::Result<Scope> {
     let mut s = scope.clone();
-    for binding in bindings {
+    for (i, binding) in bindings.iter().enumerate() {
         let name: Rc<str> = binding.name.clone().unwrap_or_else(|| Rc::from("_"));
         let value = name_closure(eval_with_global(&binding.value, &s, global, ctx)?, &name);
+        // AH.2.3: same first-wins duplicate rule as [`Task::LetStep`] — RHS evaluated, bind dropped.
+        if binding.name.is_some() && bindings[..i].iter().any(|b| b.name == binding.name) {
+            ctx.messages.borrow_mut().push(Message::Warning(format!(
+                "Ignoring duplicate variable assignment \"{name}\""
+            )));
+            continue;
+        }
         let mut next = s.child();
         next.bind(name, value);
         s = next;

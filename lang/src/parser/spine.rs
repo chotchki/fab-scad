@@ -512,12 +512,10 @@ fn chain_begin(
     chain_body_or_fold(i, frames, steps)
 }
 
-/// A chain step completed (its `)` consumed): merge consecutive `let`s flat, per the cascade.
+/// A chain step completed (its `)` consumed). Consecutive `let`s stay SEPARATE nodes (the old
+/// run-fold died with AH.2.3): a duplicate inside one `let` is ignored first-wins, while
+/// `let(a=1) let(a=2)` legitimately shadows — flattening conflates the two.
 fn push_chain_step(steps: &mut Vec<(ChainStep, usize)>, step: ChainStep, at: usize) {
-    if let (ChainStep::Let(bindings), Some((ChainStep::Let(prev), _))) = (&step, steps.last_mut()) {
-        prev.extend(bindings.iter().cloned());
-        return;
-    }
     steps.push((step, at));
 }
 

@@ -133,7 +133,7 @@ pub(super) fn apply(name: &str, pos: &[Value]) -> Value {
         "search" => search(pos),
         // `rands` is intercepted by `run_builtin` (it needs the evaluator's advancing RandStream for the
         // seedless case) and never reaches this pure dispatch.
-        "is_undef" => Value::Bool(matches!(pos.first(), None | Some(Value::Undef))),
+        "is_undef" => pred(pos, |v| matches!(v, Value::Undef)),
         "is_bool" => pred(pos, |v| matches!(v, Value::Bool(_))),
         // A NaN is NOT `is_num` in OpenSCAD: `func.cc` guards `type()==NUMBER && !isnan(x)`, so
         // `is_num(0/0)` is `false` (BOSL2's `f_is_num` test pins `[NAN, false]`). `is_nan` catches those.
@@ -210,15 +210,22 @@ fn norm(pos: &[Value]) -> Value {
 /// `cross(a, b)` — the 3D cross product (a 3-vector), or the 2D cross (a scalar). Anything else → `undef`.
 fn cross(pos: &[Value]) -> Value {
     match (pos.first(), pos.get(1)) {
-        (Some(Value::NumList(a)), Some(Value::NumList(b))) => match (&a[..], &b[..]) {
-            ([a0, a1, a2], [b0, b1, b2]) => Value::num_list(vec![
-                a1 * b2 - a2 * b1,
-                a2 * b0 - a0 * b2,
-                a0 * b1 - a1 * b0,
-            ]),
-            ([a0, a1], [b0, b1]) => Value::Num(a0 * b1 - a1 * b0),
-            _ => Value::Undef,
-        },
+        (Some(Value::NumList(a)), Some(Value::NumList(b))) => {
+            // A NaN/inf component is `undef` upstream (AH.2.1, cross-tests golden: "Invalid value
+            // (NaN/INF) in parameter vector for cross()"), not a NaN-propagated vector.
+            if a.iter().chain(b.iter()).any(|x| !x.is_finite()) {
+                return Value::Undef;
+            }
+            match (&a[..], &b[..]) {
+                ([a0, a1, a2], [b0, b1, b2]) => Value::num_list(vec![
+                    a1 * b2 - a2 * b1,
+                    a2 * b0 - a0 * b2,
+                    a0 * b1 - a1 * b0,
+                ]),
+                ([a0, a1], [b0, b1]) => Value::Num(a0 * b1 - a1 * b0),
+                _ => Value::Undef,
+            }
+        }
         _ => Value::Undef,
     }
 }
@@ -252,10 +259,12 @@ fn as_index(v: &Value) -> Option<usize> {
 /// `len(x)` — element count of a list, or CHARACTER count of a string (Unicode scalars, not bytes).
 /// A number / bool / undef / range / function has no length → `undef`.
 fn len(pos: &[Value]) -> Value {
-    match pos.first() {
-        Some(Value::NumList(xs)) => Value::Num(count(xs.len())),
-        Some(Value::List(xs)) => Value::Num(count(xs.len())),
-        Some(Value::Str(s)) => Value::Num(count(s.chars().count())),
+    // Exactly one argument — `len("test","upps")` is an arity warning + undef upstream (AH.2.1,
+    // the isundef-test golden leans on it).
+    match pos {
+        [Value::NumList(xs)] => Value::Num(count(xs.len())),
+        [Value::List(xs)] => Value::Num(count(xs.len())),
+        [Value::Str(s)] => Value::Num(count(s.chars().count())),
         _ => Value::Undef,
     }
 }
@@ -290,17 +299,25 @@ fn str_concat(pos: &[Value]) -> Value {
 /// `chr(n | [n…] | range)` — Unicode codepoints → a string. Codepoints below `1`, non-finite, or not a
 /// valid scalar value are SKIPPED (`func.cc`). A string / bool / undef arg → `undef` (chr wants numbers).
 fn chr(pos: &[Value]) -> Value {
-    let Some(source @ (Value::Num(_) | Value::NumList(_) | Value::List(_) | Value::Range { .. })) =
-        pos.first()
-    else {
-        return Value::Undef;
-    };
+    // EVERY argument contributes (AH.2.1, chr-tests golden): `chr(90, 89, 88)` is `"ZYX"`, a
+    // vector/range argument splices its elements — RECURSIVELY, `chr([65,[66,[67]]])` is `"ABC"` —
+    // and anything unconvertible (a string, a bool, an out-of-range code) contributes NOTHING.
+    // `chr()` with no args is `""`, not undef. Iterative walk: corpus nesting is shallow, but the
+    // evaluator's no-host-recursion doctrine holds anyway.
     let mut s = String::new();
-    for value in iter_values_raw(source) {
-        if let Value::Num(n) = value
-            && let Some(c) = code_to_char(n)
-        {
-            s.push(c);
+    let mut stack: Vec<Value> = pos.iter().rev().cloned().collect();
+    while let Some(v) = stack.pop() {
+        match v {
+            Value::Num(n) => {
+                if let Some(c) = code_to_char(n) {
+                    s.push(c);
+                }
+            }
+            Value::NumList(_) | Value::List(_) | Value::Range { .. } => {
+                let kids = iter_values_raw(&v);
+                stack.extend(kids.into_iter().rev());
+            }
+            _ => {}
         }
     }
     Value::string(s)
@@ -529,8 +546,14 @@ pub(super) fn rands(pos: &[Value], stream: &mut super::rng::RandStream) -> Value
 /// A positive type predicate (`is_bool`/`is_num`/…): the first arg is present AND satisfies `f`. A
 /// missing arg → `false` (there is no value of that type). `is_undef` is the one that treats absence
 /// as `undef` (→ `true`), so it doesn't go through here.
+/// A type predicate over exactly ONE argument. An arity mismatch — no args, or extras — is `undef`
+/// upstream (AH.2.1, the is*-test goldens: `is_num()` AND `is_num(1,2,3)` both warn + undef),
+/// distinct from `is_*(undef)` = a real answer over a real (undefined) value.
 fn pred(pos: &[Value], f: impl Fn(&Value) -> bool) -> Value {
-    Value::Bool(pos.first().is_some_and(f))
+    match pos {
+        [v] => Value::Bool(f(v)),
+        _ => Value::Undef,
+    }
 }
 
 #[cfg(test)]

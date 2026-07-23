@@ -44,6 +44,25 @@ pin). Manual dispatch still works → CI artifacts only, no release. `packaging/
 draft winget-pkgs manifests (placeholders for the release URL + SHA256; unsigned NSIS is
 accepted — only MSIX requires Authenticode).
 
+## The release gate: no green CI, no release (AM, post-v1.1.0)
+
+v1.1.0 shipped from a commit whose CI was red — nobody noticed because the release workflows
+never look at CI. Two layers now make that impossible:
+
+1. **Tag ruleset** ("release tags require green CI", repo ruleset 19646314, bypass: nobody):
+   pushing a `v*` or `web-v*` tag requires the tagged commit's five CI checks
+   (`build`/`kani`/`miri`/`asan`/`boot-gate`) to be COMPLETED + SUCCESS — a red or still-running
+   commit REJECTS the tag push itself, so no release workflow ever fires. Created via
+   `gh api repos/chotchki/fab-scad/rulesets` (it's repo config, not a file — re-create from this
+   section if the repo is ever rebuilt). Practical effect: after landing on main, WAIT for CI
+   before tagging; a too-early tag just bounces, retag when green.
+2. **`gate` job** in release-native + release-web (defense-in-depth for a deleted/bypassed
+   ruleset or API-created tags): every packaging job `needs: gate`, which queries the tagged
+   SHA's check-runs and fails unless all five are green. Non-tag dispatches (CI artifacts only,
+   no publish) pass through ungated.
+
+Proof: pushing a test tag on the red v1.1.0 commit is rejected at the ruleset (AM.3).
+
 macOS signing is SECRETS-GATED: with all six secrets set the run produces a Developer-ID-signed,
 notarized, STAPLED .app and DMG and `spctl`-asserts both in CI; with any missing it builds
 unsigned (warnings, same artifacts). The pipeline is cargo-packager's own — it imports the .p12

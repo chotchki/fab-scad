@@ -92,6 +92,11 @@ added 2026-07-07.
 - [x] Y.8 - Y.8 - Audit + wire the kernel fuzz coverage
 - [ ] Y.9 - Y.9 - Extend kernel fuzz coverage (csg_tree random-op + new op targets)
 
+## Phase AM - releases require green CI (the v1.1.0 lesson, mechanized)
+- [x] AM.1 - tag ruleset: pushing `v*`/`web-v*` requires the commit's five CI checks green (build/kani/miri/asan/boot-gate) — the tag can't land red, so no release workflow ever fires
+- [x] AM.2 - defense-in-depth gate job in release-native + release-web: verify the tagged SHA's checks before packaging (covers ruleset bypass/removal)
+- [x] AM.3 - proof: pushing a test tag on the red v1.1.0 commit is REJECTED; docs/packaging.md records the gate
+
 ## Backlog (not yet phased)
 
 - **Phase-exit test runs MUST be `--workspace` (+ the kani lane)** — the AH.2 cross/range changes broke fab-jit's `fast==JIT` differential and two kani range proofs, and CI sat red for a day unnoticed because local `cargo test` covers only the DEFAULT member (fab-scad) — jit tests + kani are CI-only. Options: make `cargo nextest run --workspace` the phase-exit habit, or wire jit into default-members, or a pre-push tier that runs the workspace suite on release tags at minimum. Pairs with the existing "CI covers only fab-scad" clippy item. — added 2026-07-23.

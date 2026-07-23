@@ -16,7 +16,36 @@ permissions:
   contents: write
 
 jobs:
+  # AM.2 — defense-in-depth behind the tag ruleset ("release tags require green CI", repo ruleset
+  # 19646314): a red tag can't even be PUSHED, so this gate normally sees green instantly. It exists
+  # for the ruleset's failure modes (deleted/bypassed ruleset, API-created tags) — a release must
+  # never package from a commit whose CI is red. Non-tag runs (manual dispatch = CI artifacts only,
+  # no publish) pass through ungated.
+  gate:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Require green CI on the tagged commit
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_REF" != refs/tags/* ]]; then
+            echo "not a tag — no publish happens, no gate needed"
+            exit 0
+          fi
+          runs=$(gh api "repos/$GITHUB_REPOSITORY/commits/$GITHUB_SHA/check-runs?per_page=100" \
+            --paginate --jq '.check_runs[] | "\(.name)=\(.conclusion)"')
+          fail=0
+          for c in build kani miri asan boot-gate; do
+            if ! grep -qx "$c=success" <<< "$runs"; then
+              echo "::error::required CI check '$c' is not green on $GITHUB_SHA — release blocked"
+              fail=1
+            fi
+          done
+          exit "$fail"
+
   bundle:
+    needs: gate
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

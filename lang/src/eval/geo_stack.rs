@@ -55,7 +55,7 @@ enum Combinator {
     Boolean(BoolKind),
     /// The convex hull of the children (3D only; 2D is LOUD-deferred).
     Hull,
-    /// The Minkowski sum of the children (3D only; 2D is LOUD-deferred).
+    /// The Minkowski sum of the children (both dimensions since AC.2).
     Minkowski,
     /// `offset()` — grow/shrink the 2D outline of its (force-2D'd) child.
     Offset {
@@ -82,9 +82,9 @@ enum Combinator {
 
 impl Combinator {
     /// Apply this combinator to the child `Geo`s a [`GTask::Collect`] drained (in source order), producing ONE
-    /// node. Fallible: 2D hull/minkowski are LOUD-deferred (same error text as the recursive dispatch).
-    fn apply(self, children: Vec<Geo>, ctx: &Ctx<'_>) -> crate::Result<Geo> {
-        Ok(match self {
+    /// node. Infallible since AC.2 closed the last LOUD-deferral (2D minkowski).
+    fn apply(self, children: Vec<Geo>, ctx: &Ctx<'_>) -> Geo {
+        match self {
             Combinator::Union => union_of(children, ctx),
             Combinator::Intersection => intersection_of(children, ctx),
             Combinator::Transform(matrix) => transform_of(matrix, union_of(children, ctx)),
@@ -97,12 +97,8 @@ impl Combinator {
             },
             Combinator::Minkowski => match partition_children(children, ctx) {
                 Children::D3(kids) => Geo::D3(GeoNode::Minkowski(kids)),
-                Children::D2(_) => {
-                    return Err(crate::Error::Unimplemented(
-                        "minkowski() over 2D children is not yet wired (Clipper2's MinkowskiSum, via the \
-                         CrossSection binding) — a J.3 follow-up",
-                    ));
-                }
+                // 2D minkowski (AC.2): the kernel's tiered hull+union, one dimension down.
+                Children::D2(kids) => Geo::D2(Shape2D::Minkowski(kids)),
             },
             Combinator::Offset {
                 delta,
@@ -156,7 +152,7 @@ impl Combinator {
                 auto,
                 child: Box::new(force_3d(union_of(children, ctx), ctx)),
             }),
-        })
+        }
     }
 }
 
@@ -363,7 +359,7 @@ fn dispatch_work<'a>(
         // order — and apply the combinator, pushing ONE node.
         GTask::Collect { mark, comb } => {
             let children = results.split_off(mark);
-            results.push(comb.apply(children, ctx)?);
+            results.push(comb.apply(children, ctx));
             Ok(())
         }
         // The `!` root subtree resolved above `mark`; consume it into the program-global root override (so an

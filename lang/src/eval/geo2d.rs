@@ -43,6 +43,10 @@ pub enum Shape2D {
     /// (Manifold `CrossSection::hull_of`, an Andrew monotone-chain). N-ary, not a pairwise fold; an
     /// empty child contributes no points, all-empty → empty. The 2D twin of [`GeoNode::Hull`].
     Hull(Vec<Shape2D>),
+    /// `minkowski()` over 2D children (AC.2) — the N-ary fold of the binary sum; any empty child
+    /// annihilates (mirrors the 3D `GeoNode::Minkowski` backend semantics). The sum itself is the
+    /// kernel's tiered hull+union, one dimension down (`CrossSection::minkowski_sum`).
+    Minkowski(Vec<Shape2D>),
     /// `offset()` — grow (`delta > 0`) or shrink the child by `delta`, with a corner-[`Join2D`] style.
     Offset {
         /// Signed distance to inflate the outline by.
@@ -106,6 +110,15 @@ impl Shape2D {
                 | Shape2D::Difference(kids)
                 | Shape2D::Intersection(kids)
                 | Shape2D::Hull(kids) => fold(&mut kids.iter().filter_map(|c| walk(c, m))),
+                // Minkowski ADDS coordinates: the sum's extent is the children's extents SUMMED;
+                // any empty child annihilates the whole sum (→ None).
+                Shape2D::Minkowski(kids) => kids
+                    .iter()
+                    .map(|c| walk(c, m))
+                    .try_fold(None, |acc: Option<f64>, x| {
+                        x.map(|x| Some(acc.map_or(x, |a| a + x)))
+                    })
+                    .flatten(),
                 Shape2D::Offset { delta, child, .. } => walk(child, m).map(|x| x + delta.max(0.0)),
                 Shape2D::Color { child, .. } => walk(child, m), // color moves no point
                 Shape2D::Projection { .. } | Shape2D::Empty => None,

@@ -166,15 +166,16 @@ fn beyond_the_subset_is_loud() {
 }
 
 #[test]
-fn deferred_builtins_name_their_feature() {
-    // A still-deferred construct blows up NAMING itself + its follow-up, never a silent nothing or a
-    // misleading "unknown module — a typo?". The holdouts kept leaving this club (import/surface → File
-    // NEEDs; text() → implemented; 2D hull() → implemented X.4). The last LOUD-defer is 2D minkowski
-    // (Clipper2's MinkowskiSum, a separate J.3 follow-up).
+fn deferred_builtins_club_is_empty() {
+    // The LOUD-defer club's history: import/surface → File NEEDs; text() → implemented; 2D hull() →
+    // implemented (X.4); 2D minkowski → implemented (AC.2, the kernel's tiered sum). This tombstone
+    // pins that the LAST member left: a 2D minkowski no longer defers naming itself — it builds the
+    // Shape2D node (whose lowering needs the real backend, like every composite; that generic
+    // needs-a-backend message is a different, correct error on this backend-free path).
+    let e = err("minkowski() square(5);");
     assert!(
-        matches!(err("minkowski() square(5);").root(), Error::Unimplemented(m) if m.contains("minkowski")),
-        "expected a LOUD defer naming minkowski, got {:?}",
-        err("minkowski() square(5);")
+        !format!("{e}").contains("not yet wired"),
+        "2D minkowski must not LOUD-defer anymore, got {e:?}"
     );
 }
 

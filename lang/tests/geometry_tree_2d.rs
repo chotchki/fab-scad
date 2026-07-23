@@ -399,13 +399,15 @@ fn hull_over_2d_builds_the_hull_node() {
 }
 
 #[test]
-fn minkowski_over_2d_is_still_loud() {
-    // 2D minkowski stays deferred (Clipper2 `MinkowskiSum` — a separate J.3 follow-up, out of X.4 scope) —
-    // LOUD, never silently wrong.
-    assert!(matches!(
-        evaluate_geometry("minkowski() { square(4); circle(1, $fn = 8); }").unwrap_err().root(),
-        Error::Unimplemented(m) if m.contains("2D") && m.contains("minkowski")
-    ));
+fn minkowski_over_2d_builds_the_node() {
+    // 2D minkowski is IMPLEMENTED (AC.2, the kernel's tiered hull+union one dimension down) — the
+    // eval builds the `Shape2D::Minkowski` node; the sum itself runs at backend lowering (pinned
+    // oracle-exact in fab-scad's differential suite). This flipped from the LOUD-defer it pinned
+    // pre-AC.2.
+    match &d2("minkowski() { square(4); circle(1, $fn = 8); }") {
+        Shape2D::Minkowski(kids) => assert_eq!(kids.len(), 2),
+        other => panic!("expected a Minkowski node, got {other:?}"),
+    }
 }
 
 #[test]

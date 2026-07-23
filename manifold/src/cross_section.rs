@@ -503,6 +503,125 @@ impl CrossSection {
         Self::hull_of_valid_points(pts)
     }
 
+    /// Minkowski sum `self ⊕ other` (AC.2) — the 2D twin of [`Mesh::minkowski_sum`]'s tiered
+    /// hull+union (Manifold PR #666, one dimension down). Manifold's own `CrossSection` has NO
+    /// minkowski (OpenSCAD routes 2D through Clipper2's path-based `MinkowskiSum`), so this is the
+    /// same TRUE-sum construction as our 3D port rather than a Clipper2 transliteration:
+    ///
+    /// - **Tier 0** convex×convex: one hull over all pairwise vertex sums.
+    /// - **Tier 1** nonconvex×convex: sweep the convex operand along each boundary EDGE of the
+    ///   other (the 2D boundary element, where 3D sweeps triangle faces), union the per-edge hulls.
+    /// - **Tier 2** nonconvex×nonconvex: triangulate both (the shared robust triangulator — the
+    ///   triangulation IS the convex decomposition, the 3D port's key trick), hull the 6 vertex
+    ///   sums per triangle pair, union.
+    ///
+    /// The original `self` seeds the union (fills the core), mirroring the 3D composition. Sequential
+    /// per-piece hulls (the pieces are tiny; determinism first — the 3D tiers' `par` seam is a later
+    /// perf pass if a profile ever asks). Degenerate piece hulls contribute nothing, like 3D's
+    /// coplanar skip. Empty operands are identities, exactly as 3D.
+    #[must_use]
+    pub fn minkowski_sum(&self, other: &Self) -> Self {
+        use crate::boolean::polygon::{PolyVert, is_convex, triangulate};
+
+        let (mut a, mut b) = (self, other);
+        if b.is_empty() {
+            return a.clone();
+        }
+        if a.is_empty() {
+            return b.clone();
+        }
+        let to_polyverts = |cs: &CrossSection| -> Vec<Vec<PolyVert>> {
+            let mut idx = 0i32;
+            cs.contours
+                .iter()
+                .map(|c| {
+                    c.iter()
+                        .map(|&pos| {
+                            let v = PolyVert { pos, idx };
+                            idx += 1;
+                            v
+                        })
+                        .collect()
+                })
+                .collect()
+        };
+        let mut a_pv = to_polyverts(a);
+        let mut b_pv = to_polyverts(b);
+        // Auto-epsilon (-1), the bridge's triangulation setting — resolved inside the triangulator.
+        let mut a_convex = is_convex(&a_pv, -1.0);
+        let mut b_convex = is_convex(&b_pv, -1.0);
+        // Put the convex operand second, so the tier dispatch only branches on `b_convex` (3D's swap).
+        if a_convex && !b_convex {
+            std::mem::swap(&mut a, &mut b);
+            std::mem::swap(&mut a_pv, &mut b_pv);
+            std::mem::swap(&mut a_convex, &mut b_convex);
+        }
+
+        let b_verts: Vec<Vec2> = b.contours.iter().flatten().copied().collect();
+        let mut hulls: Vec<CrossSection> = vec![a.clone()];
+        let push_hull = |pts: Vec<Vec2>, hulls: &mut Vec<CrossSection>| {
+            if let Ok(h) = Self::hull_of_points(&pts)
+                && !h.is_empty()
+            {
+                hulls.push(h);
+            }
+        };
+        if a_convex && b_convex {
+            // Tier 0 — one hull over every pairwise vertex sum.
+            let a_verts: Vec<Vec2> = a.contours.iter().flatten().copied().collect();
+            let mut sums = Vec::with_capacity(a_verts.len() * b_verts.len());
+            for &av in &a_verts {
+                for &bv in &b_verts {
+                    sums.push(av + bv);
+                }
+            }
+            push_hull(sums, &mut hulls);
+        } else if b_convex {
+            // Tier 1 — sweep convex B along each boundary edge of A.
+            for contour in &a.contours {
+                for (i, &v) in contour.iter().enumerate() {
+                    let next = contour[(i + 1) % contour.len()];
+                    let mut sums = Vec::with_capacity(2 * b_verts.len());
+                    for &bv in &b_verts {
+                        sums.push(v + bv);
+                        sums.push(next + bv);
+                    }
+                    push_hull(sums, &mut hulls);
+                }
+            }
+        } else {
+            // Tier 2 — triangulate both; per triangle pair, hull the 6 vertex sums.
+            let flat = |pv: &[Vec<PolyVert>]| -> Vec<Vec2> {
+                pv.iter().flatten().map(|v| v.pos).collect()
+            };
+            let (a_flat, b_flat) = (flat(&a_pv), flat(&b_pv));
+            let tris_a = triangulate(&a_pv, -1.0);
+            let tris_b = triangulate(&b_pv, -1.0);
+            for ta in &tris_a {
+                let av = [
+                    a_flat[ta[0] as usize],
+                    a_flat[ta[1] as usize],
+                    a_flat[ta[2] as usize],
+                ];
+                for tb in &tris_b {
+                    let bv = [
+                        b_flat[tb[0] as usize],
+                        b_flat[tb[1] as usize],
+                        b_flat[tb[2] as usize],
+                    ];
+                    let mut sums = Vec::with_capacity(9);
+                    for &ap in &av {
+                        for &bp in &bv {
+                            sums.push(ap + bp);
+                        }
+                    }
+                    push_hull(sums, &mut hulls);
+                }
+            }
+        }
+        Self::batch_boolean(&hulls, OpType::Add)
+    }
+
     /// Convex hull of a RAW point set (Manifold `Hull(SimplePolygon)`) — the ingesting variant, so
     /// non-finite points are rejected.
     pub fn hull_of_points(pts: &[Vec2]) -> Result<Self, Error> {
@@ -1109,5 +1228,95 @@ mod tests {
             "offset retains CW: area {}",
             grown.area()
         );
+    }
+}
+
+#[cfg(test)]
+mod minkowski_tests {
+    #![allow(
+        clippy::expect_used,
+        clippy::unwrap_used,
+        reason = "test harness: expect/unwrap ARE the assertions"
+    )]
+    use super::*;
+
+    /// Tier 0: square ⊕ square = the summed square — exact area `(a+b)²`.
+    #[test]
+    fn convex_convex_squares_sum() {
+        let a = CrossSection::square(Vec2::new(2.0, 2.0), false).expect("a");
+        let b = CrossSection::square(Vec2::new(3.0, 3.0), false).expect("b");
+        let m = a.minkowski_sum(&b);
+        assert!((m.area() - 25.0).abs() < 1e-9, "area {}", m.area());
+    }
+
+    /// Tier 0 rounding: square ⊕ circle = rounded square — area `s² + 4·s·r + π·r²` at the
+    /// polygonized circle's area (use the POLYGON's area, not π, for exactness).
+    #[test]
+    fn convex_convex_square_circle_rounds() {
+        let s = 4.0;
+        let r = 1.0;
+        let a = CrossSection::square(Vec2::new(s, s), false).expect("a");
+        let b = CrossSection::circle(r, 64).expect("b");
+        let m = a.minkowski_sum(&b);
+        let expected = s * s + 4.0 * s * r / 2.0 * 2.0 + b.area();
+        assert!(
+            (m.area() - expected).abs() < 1e-6,
+            "area {} vs {expected}",
+            m.area()
+        );
+    }
+
+    /// Tier 1: a CONCAVE L ⊕ the unit square. Closed-form check — `A ⊕ [0,1]²` is `A` smeared
+    /// right+up by 1: `([0,4]×[0,2]) ∪ ([0,2]×[2,4])` becomes `([0,5]×[0,3]) ∪ ([0,3]×[2,5])`,
+    /// area `15 + 9 − 3` (the `[0,3]×[2,3]` overlap) `= 21`.
+    #[test]
+    fn concave_convex_l_shape_smears() {
+        let l = CrossSection::from_polygons(&[vec![
+            Vec2::new(0.0, 0.0),
+            Vec2::new(4.0, 0.0),
+            Vec2::new(4.0, 2.0),
+            Vec2::new(2.0, 2.0),
+            Vec2::new(2.0, 4.0),
+            Vec2::new(0.0, 4.0),
+        ]])
+        .expect("L");
+        let b = CrossSection::square(Vec2::new(1.0, 1.0), false).expect("b");
+        let m = l.minkowski_sum(&b);
+        assert!((m.area() - 21.0).abs() < 1e-9, "area {}", m.area());
+    }
+
+    /// Tier 2: BOTH concave — two L-shapes. Pinned against the tier-1 result via distributivity:
+    /// `L ⊕ L` computed tier-2 must contain both translated Ls and match the union-of-translates
+    /// area computed from the same machinery over L's convex pieces. Cheap invariant instead: the
+    /// sum's area can never be less than `area(L) + area(hull-sweep lower bound)`; pin the exact
+    /// value once computed and cross-checked against the ORACLE in the lang-level test.
+    #[test]
+    fn concave_concave_runs_and_contains_the_core() {
+        let mk_l = || {
+            CrossSection::from_polygons(&[vec![
+                Vec2::new(0.0, 0.0),
+                Vec2::new(4.0, 0.0),
+                Vec2::new(4.0, 2.0),
+                Vec2::new(2.0, 2.0),
+                Vec2::new(2.0, 4.0),
+                Vec2::new(0.0, 4.0),
+            ]])
+            .expect("L")
+        };
+        let m = mk_l().minkowski_sum(&mk_l());
+        // Distributivity ground truth: L = R1 ∪ R2 (rects) ⇒ L⊕L = ∪ᵢⱼ (Ri⊕Rj), all rect sums:
+        // R1=[0,4]×[0,2], R2=[0,2]×[2,4] → R1⊕R1=[0,8]×[0,4], R1⊕R2=[0,6]×[2,6],
+        // R2⊕R2=[0,4]×[4,8] (R2⊕R1 = R1⊕R2). Union area (inclusion-exclusion) = 32+24+16
+        // − (R11∩R12=6·2=12) − (R11∩R22=0... [0,4]×[4,4] zero) − (R12∩R22=4·2=8) + (triple 0) = 52.
+        assert!((m.area() - 52.0).abs() < 1e-9, "area {}", m.area());
+    }
+
+    /// Empty operands are identities, mirroring the 3D tiers.
+    #[test]
+    fn empty_is_identity() {
+        let a = CrossSection::square(Vec2::new(2.0, 2.0), false).expect("a");
+        let e = CrossSection::new();
+        assert!((a.minkowski_sum(&e).area() - a.area()).abs() < 1e-12);
+        assert!((e.minkowski_sum(&a).area() - a.area()).abs() < 1e-12);
     }
 }

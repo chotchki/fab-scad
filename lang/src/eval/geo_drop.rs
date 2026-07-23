@@ -48,7 +48,8 @@ fn drain_shape2d(shape: &mut Shape2D, work: &mut Vec<Sub>) {
         Shape2D::Union(v)
         | Shape2D::Difference(v)
         | Shape2D::Intersection(v)
-        | Shape2D::Hull(v) => {
+        | Shape2D::Hull(v)
+        | Shape2D::Minkowski(v) => {
             work.extend(std::mem::take(v).into_iter().map(Sub::D2));
         }
         Shape2D::Projection { child, .. } => {

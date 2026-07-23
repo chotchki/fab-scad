@@ -93,6 +93,9 @@ pub trait GeometryBackend {
     /// Convex hull of the 2D regions COMBINED (`hull()` over 2D children) — N-ary, pooling every region's
     /// contour points. An empty list, or all-empty regions, → the empty region. The 2D twin of [`Self::hull`].
     fn hull_2d(&self, shapes: &[Self::Shape]) -> Self::Shape;
+    /// 2D minkowski (AC.2): the N-ary left fold of the binary sum; ANY empty operand annihilates
+    /// (`A ⊕ ∅ = ∅` in list position), mirroring [`Self::minkowski`]'s 3D semantics.
+    fn minkowski_2d(&self, shapes: &[Self::Shape]) -> Self::Shape;
     /// `offset()` — inflate by `delta` (negative shrinks), finishing convex corners per `join`.
     /// `segments` is the `Round` join's facet count (`$fn`-resolved upstream; ignored by miter/bevel).
     fn offset_2d(&self, s: &Self::Shape, delta: f64, join: Join2D, segments: u32) -> Self::Shape;
@@ -758,6 +761,10 @@ pub fn build_2d<B: GeometryBackend>(shape: &Shape2D, backend: &B) -> B::Shape {
             let shapes: Vec<B::Shape> = kids.iter().map(|k| build_2d(k, backend)).collect();
             backend.hull_2d(&shapes)
         }
+        Shape2D::Minkowski(kids) => {
+            let shapes: Vec<B::Shape> = kids.iter().map(|k| build_2d(k, backend)).collect();
+            backend.minkowski_2d(&shapes)
+        }
         Shape2D::Offset {
             delta,
             join,
@@ -938,6 +945,19 @@ impl GeometryBackend for ManifoldBackend {
 
     fn hull_2d(&self, shapes: &[Self::Shape]) -> Self::Shape {
         crate::kernel::Section::hull_of(shapes)
+    }
+
+    fn minkowski_2d(&self, shapes: &[Self::Shape]) -> Self::Shape {
+        // ANY empty operand annihilates; else left-fold the kernel's binary sum (one operand → itself).
+        if shapes.is_empty() || shapes.iter().any(crate::kernel::Section::is_empty) {
+            return crate::kernel::Section::empty();
+        }
+        let mut it = shapes.iter();
+        let first = it
+            .next()
+            .cloned()
+            .unwrap_or_else(crate::kernel::Section::empty);
+        it.fold(first, |acc, s| acc.minkowski_sum(s))
     }
 
     fn offset_2d(&self, s: &Self::Shape, delta: f64, join: Join2D, segments: u32) -> Self::Shape {
@@ -1192,6 +1212,19 @@ impl GeometryBackend for MockBackend {
         MockShape { contours, ops }
     }
 
+    fn minkowski_2d(&self, shapes: &[Self::Shape]) -> Self::Shape {
+        // Mirror the real backend's algebra: any empty operand annihilates; else pool structure.
+        if shapes.is_empty() || shapes.iter().any(MockShape::is_empty) {
+            return MockShape::default();
+        }
+        let contours: Vec<Vec<[f64; 2]>> = shapes
+            .iter()
+            .flat_map(|s| s.contours.iter().cloned())
+            .collect();
+        let ops = shapes.iter().map(|s| s.ops).sum::<u32>() + 1;
+        MockShape { contours, ops }
+    }
+
     fn offset_2d(
         &self,
         s: &Self::Shape,
@@ -1303,6 +1336,9 @@ mod tests {
             }
             fn minkowski(&self, solids: &[Self::Solid]) -> Self::Solid {
                 self.inner.minkowski(solids)
+            }
+            fn minkowski_2d(&self, shapes: &[Self::Shape]) -> Self::Shape {
+                self.inner.minkowski_2d(shapes)
             }
             fn transform(&self, s: &Self::Solid, m: &fab_lang::Affine) -> Self::Solid {
                 self.inner.transform(s, m)

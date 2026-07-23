@@ -990,6 +990,12 @@ impl Section {
     /// contour points and runs Manifold's `CrossSection::hull_of` (an Andrew monotone-chain, deterministic
     /// via its internal `total_cmp` sort). An empty region contributes no points; all-empty → empty. The
     /// 2D twin of [`Solid::batch_hull`].
+    /// Minkowski sum `self ⊕ other` (AC.2) — the kernel's tiered hull+union, 2D edition.
+    #[must_use]
+    pub fn minkowski_sum(&self, other: &Section) -> Section {
+        Section(self.0.minkowski_sum(&other.0))
+    }
+
     pub fn hull_of(sections: &[Section]) -> Section {
         let cs: Vec<CrossSection> = sections.iter().map(|s| s.0.clone()).collect();
         Section::wrap(CrossSection::hull_of(&cs))

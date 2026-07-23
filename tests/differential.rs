@@ -730,3 +730,46 @@ fn no_test_bypasses_a_driver() {
         );
     }
 }
+
+/// AC.2: 2D minkowski through the FULL stack (eval → Shape2D::Minkowski → kernel tiered sum →
+/// extrude). Volumes ORACLE-PINNED (OpenSCAD 2026.06.12 rendered the same programs): square⊕circle
+/// = 35.121…, concave-L⊕unit-square = exactly 21 (the closed-form smear).
+#[test]
+fn minkowski_2d_volumes_match_the_oracle() {
+    let base = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("mink2d");
+    std::fs::create_dir_all(&base).unwrap();
+    let fab = &drivers()[0];
+
+    let round = base.join("round.scad");
+    std::fs::write(
+        &round,
+        "linear_extrude(1) minkowski() { square(4); circle(1, $fn = 32); }\n",
+    )
+    .unwrap();
+    let Outcome::Solid(solid) = fab.eval_file(&round, &[]) else {
+        panic!("square+circle minkowski must render");
+    };
+    assert!(
+        (solid.volume() - 35.121).abs() < 1e-3,
+        "rounded-square volume {} != oracle 35.121",
+        solid.volume()
+    );
+    assert!(solid.is_manifold());
+
+    let concave = base.join("concave.scad");
+    std::fs::write(
+        &concave,
+        "p = [[0,0],[4,0],[4,2],[2,2],[2,4],[0,4]];\n\
+         linear_extrude(1) minkowski() { polygon(p); square(1); }\n",
+    )
+    .unwrap();
+    let Outcome::Solid(solid) = fab.eval_file(&concave, &[]) else {
+        panic!("concave minkowski must render");
+    };
+    assert!(
+        (solid.volume() - 21.0).abs() < 1e-9,
+        "L-smear volume {} != 21",
+        solid.volume()
+    );
+    assert!(solid.is_manifold());
+}

@@ -252,6 +252,21 @@ pub fn evaluate_geometry_with_base_full(
     eval::evaluate_source(source, base_dir, None, library_paths, Config::from_env())
 }
 
+/// [`evaluate_geometry_with_base_full`] with an EXPLICIT [`Config`] instead of the ambient env —
+/// the harness seam (AH.2.10): the golden-echo lane runs `preview: true` because upstream's echo
+/// tests run without `--render`, and an env flag would leak that mode into unrelated evals.
+///
+/// # Errors
+/// As [`evaluate_geometry_with_base`].
+pub fn evaluate_geometry_with_base_config(
+    source: &str,
+    base_dir: &Path,
+    library_paths: &[PathBuf],
+    config: Config,
+) -> Result<(Geo, Vec<Message>)> {
+    eval::evaluate_source(source, base_dir, None, library_paths, config)
+}
+
 /// Evaluate `source` to a geometry [`Geo`] tree, resolving `import`/`surface` meshes through `mesh_reader`
 /// (M.4) — the native driver over the whole needs fixpoint. `import`/`surface` paths are RUNTIME
 /// expressions, discovered only by executing; each one the run reaches is handed to `mesh_reader` (the

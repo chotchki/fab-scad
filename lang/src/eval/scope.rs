@@ -186,7 +186,18 @@ impl Scope {
     /// (arguably-antipattern) class — but there they match the oracle.
     #[must_use]
     pub fn new() -> Self {
+        Self::new_with_preview(false)
+    }
+
+    /// [`Scope::new`] with `$preview` seeded to `preview` (AH.2.10): `false` is a real render
+    /// (`openscad -o` semantics — fab ALWAYS truly renders), `true` models upstream's F5/echo-lane
+    /// preview runs (the golden-echo harness). Seeding a concrete bool (previously unset → undef)
+    /// is behavior-preserving for the `$fn = $preview ? draft : final` idiom (undef was falsy) and
+    /// makes `echo($preview)` match the oracle.
+    #[must_use]
+    pub fn new_with_preview(preview: bool) -> Self {
         let mut specials = BTreeMap::new();
+        specials.insert(Rc::from("$preview"), Value::Bool(preview));
         specials.insert(Rc::from("$fn"), Value::Num(0.0));
         specials.insert(Rc::from("$fa"), Value::Num(12.0));
         specials.insert(Rc::from("$fs"), Value::Num(2.0));

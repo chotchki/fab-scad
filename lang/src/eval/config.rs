@@ -12,6 +12,11 @@
 /// The execution configuration threaded through [`Ctx`](super::Ctx). Construct with [`Config::from_env`] (the
 /// harness/CLI path — reads the `FAB_*` gates) or a literal (the embedder path). All-off is [`Config::default`].
 #[derive(Debug, Clone, Copy)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "independent execution gates (JIT/caches/preview), not an encoded state machine — a \
+              typed enum would fuse knobs that vary freely"
+)]
 pub struct Config {
     /// Route numeric user-function calls through the Cranelift JIT (desktop only; needs a
     /// [`NumericJitFactory`](super::NumericJitFactory) — wasm passes none, so this is a no-op there). `FAB_JIT`.
@@ -47,6 +52,12 @@ pub struct Config {
     /// later — set an explicit bound where the untrusted input actually enters; trusted CLI/desktop stays
     /// unbounded (Ctrl-C, like OpenSCAD).
     pub eval_budget: Option<u64>,
+    /// Seed `$preview = true` (upstream's F5/echo-lane mode) instead of the `false` a real render
+    /// gets (AH.2.10). fab always truly renders, so this is `false` everywhere except harnesses
+    /// that model upstream's PREVIEW runs — the golden-echo lane sets it because upstream's echo
+    /// tests run without `--render`. Like `eval_budget` this can change OUTPUT (`$preview` is a
+    /// readable value), but only deterministically. `FAB_PREVIEW=1`.
+    pub preview: bool,
 }
 
 impl Default for Config {
@@ -60,6 +71,7 @@ impl Default for Config {
             csg_cache: false,
             csg_cache_keycap: 2048,
             eval_budget: None, // UNLIMITED — OpenSCAD parity; the untrusted paths opt into a bound
+            preview: false, // fab really renders — `$preview` is true only for harnessed preview runs
         }
     }
 }
@@ -88,6 +100,7 @@ impl Config {
             csg_cache: !env_is("FAB_CSG_CACHE", "0"),
             csg_cache_keycap: env_usize("FAB_CSG_CACHE_KEYCAP", d.csg_cache_keycap),
             eval_budget: env_u64_opt("FAB_EVAL_BUDGET"),
+            preview: env_on("FAB_PREVIEW"),
         }
     }
 }

@@ -326,8 +326,14 @@ fn openscadpath() -> Vec<std::path::PathBuf> {
 pub fn run_file(script: &str, path: &Path) -> (Bucket, u128, String) {
     let base = path.parent().unwrap_or(Path::new("."));
     let libs = openscadpath();
+    // PREVIEW mode (AH.2.10): upstream's echo lane runs without `--render`, so its goldens carry
+    // `$preview = true` — this lane models that run, explicitly (not via env, which would leak).
+    let config = fab_lang::Config {
+        preview: true,
+        ..fab_lang::Config::from_env()
+    };
     let start = Instant::now();
-    let result = fab_lang::evaluate_geometry_with_base_full(script, base, &libs);
+    let result = fab_lang::evaluate_geometry_with_base_config(script, base, &libs, config);
     let ms = start.elapsed().as_millis();
     match result {
         Ok((_, messages)) => {

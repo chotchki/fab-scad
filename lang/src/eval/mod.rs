@@ -1975,28 +1975,25 @@ fn dispatch_call<'a>(
 /// are dropped). Two documented first-cut simplifications: `$`-arg injection is I.2.2, and defaults
 /// evaluate in the definition scope, not the partially-bound call scope (so a default can't reference
 /// an earlier param — rare; defaults are usually constants).
-fn push_call<'a>(
-    params: &'a [Parameter],
-    body: &'a Expr,
-    args: &'a [Arg],
-    caller: &Scope,
-    base: &Scope,
-    name: Option<&'a str>,
-    tasks: &mut Vec<Task<'a>>,
-) {
-    // Which explicit-arg expr fills each param slot (positional by position, named by name). `None` = the
-    // param takes its default / undef. Kept separate from defaults so a DUPLICATE param name binds
-    // arg-over-default in the two-phase `Task::Apply` (an unfilled second slot can't clobber a real arg).
+/// Which explicit-arg expr fills each param slot — `None` = the slot falls to its default/undef.
+type ArgSlots<'a> = Vec<Option<&'a Expr>>;
+/// `$`-args split out of a call: per-call dynamic `$`-var injections, not param-matched.
+type DollarArgs<'a> = Vec<(Rc<str>, &'a Expr)>;
+
+/// Fill each param slot from the call args, LEFT TO RIGHT (AH.2.4, the arg-permutations golden):
+/// a named arg takes its slot (a later duplicate overwrites), a `$`-arg splits out as a dynamic
+/// injection, and a POSITIONAL fills the LOWEST currently-unfilled slot — `f(a=1,2)` puts `2` in
+/// `b`, and `f(a=1,3,b=2)` lands `3` on `b` only for `b=2` to overwrite it. A positional with no
+/// unfilled slot left is dropped (upstream warns "too many arguments").
+fn fill_arg_slots<'a>(params: &'a [Parameter], args: &'a [Arg]) -> (ArgSlots<'a>, DollarArgs<'a>) {
     let mut arg_slots: Vec<Option<&'a Expr>> = vec![None; params.len()];
-    let mut dollars: Vec<(Rc<str>, &'a Expr)> = Vec::new(); // $-args → dynamic $-var injections
-    let mut positional = 0;
+    let mut dollars: Vec<(Rc<str>, &'a Expr)> = Vec::new();
     for arg in args {
         match &arg.name {
             None => {
-                if let Some(slot) = arg_slots.get_mut(positional) {
+                if let Some(slot) = arg_slots.iter_mut().find(|s| s.is_none()) {
                     *slot = Some(&arg.value);
                 }
-                positional += 1;
             }
             // a $-arg is a per-call dynamic override — injected into the call scope, not param-matched.
             Some(name) if name.starts_with('$') => dollars.push((Rc::clone(name), &arg.value)),
@@ -2007,6 +2004,22 @@ fn push_call<'a>(
             }
         }
     }
+    (arg_slots, dollars)
+}
+
+fn push_call<'a>(
+    params: &'a [Parameter],
+    body: &'a Expr,
+    args: &'a [Arg],
+    caller: &Scope,
+    base: &Scope,
+    name: Option<&'a str>,
+    tasks: &mut Vec<Task<'a>>,
+) {
+    // Which explicit-arg expr fills each param slot ([`fill_arg_slots`]). `None` = the param takes
+    // its default / undef. Kept separate from defaults so a DUPLICATE param name binds
+    // arg-over-default in the two-phase `Task::Apply` (an unfilled second slot can't clobber a real arg).
+    let (arg_slots, dollars) = fill_arg_slots(params, args);
     // bind order: params first, then $-args (bound last → they override the inherited $-context). A param
     // filled by an arg is `provided`; a param on its default (or a defaultless-unfilled undef) is not.
     // `$`-args are always provided. `Task::Apply` binds the non-provided (defaults) before the provided.
@@ -2331,7 +2344,7 @@ fn resolve_source(
         intrinsics,
         jit,
         // Island 0 (root) is filled by `run_stmts`; the rest are seeded empty and built just below.
-        island_globals: RefCell::new(vec![Scope::new(); n]),
+        island_globals: RefCell::new(vec![Scope::new_with_preview(config.preview); n]),
         islands,
         closures: RefCell::default(),
         messages: RefCell::default(),
@@ -2361,7 +2374,8 @@ fn resolve_source(
     // twice — the double-build that tips a borderline model over its budget. (The reverse — a root constant
     // calling a not-yet-built use-island function — stays a gap; a lazy/fixpoint island build is the general
     // answer, but root-homed BOSL2 is the overwhelmingly common case.)
-    let global = hoist_scope_publishing(&exec, &Scope::new(), &ctx, 0)?;
+    let global =
+        hoist_scope_publishing(&exec, &Scope::new_with_preview(ctx.config.preview), &ctx, 0)?;
     for i in 1..n {
         let island_global = build_island_global(i, &ctx)?;
         if let Some(slot) = ctx.island_globals.borrow_mut().get_mut(i) {
@@ -2657,7 +2671,7 @@ fn arm_guarded_intrinsics<'a>(ctx: &Ctx<'a>) -> Vec<(&'a str, intrinsics::Intrin
 /// (only constants bound BEFORE it are published) — the same whole-scope forward-reference rule the root
 /// global follows (`n = 1; n = n + 1;` → undef).
 fn build_island_global(island: usize, ctx: &Ctx<'_>) -> crate::Result<Scope> {
-    let mut scope = Scope::new();
+    let mut scope = Scope::new_with_preview(ctx.config.preview);
     for &(name, expr) in &ctx.islands[island].assignments {
         let value = name_closure(eval_with_ctx(expr, &scope, ctx)?, name);
         scope.bind(name.to_string(), value);
@@ -3047,27 +3061,9 @@ fn bind_module_scope<'a>(
     global: &Scope,
     ctx: &Ctx<'a>,
 ) -> crate::Result<Scope> {
-    // Which explicit-arg expr fills each param slot (positional by position, named by name). `None` = the
-    // param took no arg → it falls to its default in phase 1.
-    let mut arg_slots: Vec<Option<&'a Expr>> = vec![None; params.len()];
-    let mut dollars: Vec<(Rc<str>, &'a Expr)> = Vec::new();
-    let mut positional = 0;
-    for arg in args {
-        match &arg.name {
-            None => {
-                if let Some(slot) = arg_slots.get_mut(positional) {
-                    *slot = Some(&arg.value);
-                }
-                positional += 1;
-            }
-            Some(name) if name.starts_with('$') => dollars.push((Rc::clone(name), &arg.value)),
-            Some(name) => {
-                if let Some(i) = params.iter().position(|p| p.name == *name) {
-                    arg_slots[i] = Some(&arg.value);
-                }
-            }
-        }
-    }
+    // Which explicit-arg expr fills each param slot ([`fill_arg_slots`] — positionals take the
+    // lowest unfilled slot, AH.2.4). `None` = the param took no arg → its default in phase 1.
+    let (arg_slots, dollars) = fill_arg_slots(params, args);
 
     // Lexically a child of the module's home `global` (hygiene), dynamically a child of `caller` (inherits
     // the caller's $-context by reference — no per-call $-copy). $-args (bound last) shadow the inherited.

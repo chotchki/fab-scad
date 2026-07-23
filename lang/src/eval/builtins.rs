@@ -362,6 +362,11 @@ fn reverse(pos: &[Value]) -> Value {
 /// (below the lowest `x` → its `y`, above the highest → its `y`), matching `func.cc`. Non-numeric key
 /// or no valid pairs → `undef`. The table need not be sorted: the bracketing pair is found by scan.
 fn lookup(pos: &[Value]) -> Value {
+    // Strict arity-2 (AH.2.8, the errors-warnings golden): `lookup(1, table, 3)` is a too-many-
+    // arguments warning + undef upstream, not a computed interpolation.
+    if pos.len() != 2 {
+        return Value::Undef;
+    }
     let key = match pos.first() {
         Some(&Value::Num(k)) if k.is_finite() => k,
         _ => return Value::Undef,

@@ -2760,21 +2760,26 @@ fn hoist_scope<'a>(stmts: &[&'a Stmt], scope: &Scope, ctx: &Ctx<'a>) -> crate::R
     // single forward iterator stays aligned with the `Func` arms below — no per-name lookup, no `expect`.
     let mut siblings = group.iter().flat_map(|g| g.iter());
     for item in &items {
-        // sigil `=` for an assignment, `f` for a hoisted function def (so the trace tells them apart).
-        let (sigil, name, value) = match *item {
-            HoistItem::Assign(name, expr) => (
+        // sigil `=` for an assignment, `f` for a hoisted fn-shaped binding (so the trace tells
+        // them apart). A module-body-LOCAL `function f(x)=…` — or an assignment whose RHS is a
+        // function LITERAL ([`fn_shape`], AH.2.7) — becomes a closure VALUE in the body scope,
+        // capturing the CURRENT scope so it sees the enclosing locals hoisted before it (BOSL2's
+        // `make_path` closes over `steps`/`ang`), PLUS the shared group so it reaches every
+        // sibling (`self_name` still gives it direct self-recursion). `dispatch_call`'s
+        // function-value path applies it.
+        let (sigil, name, value) = if let Some((name, ..)) = fn_shape(item) {
+            match siblings.next() {
+                Some(s) => ('f', name, nested_fn_value(s, &scope, group.as_ref())),
+                None => continue, // register_fn_group emits one entry per fn-shape — unreachable
+            }
+        } else if let HoistItem::Assign(name, expr) = *item {
+            (
                 '=',
                 name,
                 name_closure(eval_with_ctx(expr, &scope, ctx)?, name),
-            ),
-            // A module-body-LOCAL `function f(x)=…` becomes a closure VALUE in the body scope, capturing the
-            // CURRENT scope so it sees the enclosing locals hoisted before it (BOSL2's `make_path` closes over
-            // `steps`/`ang`), PLUS the shared group so it reaches every sibling (`self_name` still gives it
-            // direct self-recursion). `dispatch_call`'s function-value path applies it.
-            HoistItem::Func(name, ..) => match siblings.next() {
-                Some(s) => ('f', name, nested_fn_value(s, &scope, group.as_ref())),
-                None => continue, // register_fn_group emits one entry per Func — this arm is unreachable
-            },
+            )
+        } else {
+            continue; // Func is always fn-shaped — unreachable
         };
         trace::bind(sigil, name, &value);
         scope.bind(name.to_string(), value);
@@ -2798,18 +2803,36 @@ fn hoist_scope_publishing<'a>(
     island: usize,
 ) -> crate::Result<Scope> {
     let mut scope = scope.clone();
-    for (name, expr) in hoisted_assignments(stmts) {
-        // W.3.37: stamp the ROOT file's top-level assignment span so a hoist-time fault (a bad value fed
-        // deep into a library fn — e.g. `p = bezpath_curve(pts, $fn, 2)` with $fn=0) points at the USER's
-        // line, not a library one. Root (island 0) ONLY — a use-island's spans are library-file-local and
-        // would mis-map against the editor buffer. `at` is a no-op if the error is already spanned.
-        let evaluated = eval_with_ctx(expr, &scope, ctx);
-        let evaluated = if island == 0 {
-            evaluated.map_err(|e| e.at(expr.span.clone()))?
+    let items: Vec<HoistItem> = hoisted_assignments(stmts)
+        .into_iter()
+        .map(|(n, e)| HoistItem::Assign(n, e))
+        .collect();
+    // Top-level function-LITERAL assignments form a letrec group too (AH.2.7): upstream's shared
+    // file context makes `chaining1 = function(x) … chaining2(x-1)` resolve a sibling defined
+    // BELOW it at call time — same mechanism as module-body nested defs.
+    let group = register_fn_group(&items, ctx);
+    let mut siblings = group.iter().flat_map(|g| g.iter());
+    for item in &items {
+        let (name, value) = if let Some((name, ..)) = fn_shape(item) {
+            match siblings.next() {
+                Some(s) => (name, nested_fn_value(s, &scope, group.as_ref())),
+                None => continue, // register_fn_group emits one entry per fn-shape — unreachable
+            }
+        } else if let HoistItem::Assign(name, expr) = *item {
+            // W.3.37: stamp the ROOT file's top-level assignment span so a hoist-time fault (a bad value fed
+            // deep into a library fn — e.g. `p = bezpath_curve(pts, $fn, 2)` with $fn=0) points at the USER's
+            // line, not a library one. Root (island 0) ONLY — a use-island's spans are library-file-local and
+            // would mis-map against the editor buffer. `at` is a no-op if the error is already spanned.
+            let evaluated = eval_with_ctx(expr, &scope, ctx);
+            let evaluated = if island == 0 {
+                evaluated.map_err(|e| e.at(expr.span.clone()))?
+            } else {
+                evaluated?
+            };
+            (name, name_closure(evaluated, name))
         } else {
-            evaluated?
+            continue; // Func never comes through hoisted_assignments
         };
-        let value = name_closure(evaluated, name);
         trace::bind('=', name, &value);
         scope.bind(name.to_string(), value);
         if let Some(slot) = ctx.island_globals.borrow_mut().get_mut(island) {
@@ -3093,6 +3116,12 @@ fn iterate_values(v: &Value, ctx: &Ctx) -> Vec<Value> {
         Value::Range { start, step, end } => range_values(*start, *step, *end, ctx),
         Value::NumList(xs) => xs.iter().map(|&n| Value::Num(n)).collect(),
         Value::List(xs) => xs.to_vec(),
+        // AH.2.6 (the for-tests golden): `for (c = "a↑b😀")` iterates CHARACTERS (each a one-char
+        // string); an empty string iterates ZERO times — never the scalar one-iteration fallback.
+        Value::Str(s) => s.chars().map(|c| Value::string(c.to_string())).collect(),
+        // `for (j = undef)` iterates ZERO times upstream (special-consts golden: an invalid
+        // `[a:b]` range collapses to undef and the loop is silent) — undef is not a scalar value.
+        Value::Undef => Vec::new(),
         other => vec![other.clone()],
     }
 }
@@ -3206,10 +3235,24 @@ fn hoisted_bindings<'a>(stmts: &[&'a Stmt]) -> Vec<HoistItem<'a>> {
 /// letrec GROUP — the sibling list each body function carries so it can call the others regardless of
 /// textual order (L.5.4). `None` when the body defines no functions (the overwhelmingly common block, so
 /// the group machinery costs nothing there).
+/// The fn-shaped half of a [`HoistItem`]: a nested `function f(x)=…` def, or an ASSIGNMENT whose
+/// RHS is syntactically a function LITERAL (`f = function(x) …`) — upstream's shared-context
+/// letrec makes those mutually visible too (AH.2.7: `chaining1 = function(x) … chaining2(x-1)`
+/// with `chaining2` defined BELOW resolves at call time).
+fn fn_shape<'a>(item: &HoistItem<'a>) -> Option<(&'a str, &'a [Parameter], &'a Expr)> {
+    match *item {
+        HoistItem::Func(name, params, body) => Some((name, params, body)),
+        HoistItem::Assign(name, expr) => match &expr.kind {
+            ExprKind::FunctionLiteral { params, body } => Some((name, params.as_slice(), body)),
+            _ => None,
+        },
+    }
+}
+
 fn register_fn_group<'a>(items: &[HoistItem<'a>], ctx: &Ctx<'a>) -> Option<Rc<[value::SiblingFn]>> {
     let mut group: Vec<value::SiblingFn> = Vec::new();
     for item in items {
-        if let HoistItem::Func(name, params, body) = *item {
+        if let Some((name, params, body)) = fn_shape(item) {
             let closure_id = {
                 let mut closures = ctx.closures.borrow_mut();
                 closures.push((params, body));

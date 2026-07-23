@@ -83,6 +83,13 @@ impl UpstreamExpectations {
 /// parity that's still the deferred I.5 backlog half.
 #[must_use]
 pub fn golden_echo_lines(echo_dir: &Path, file: &str) -> Option<Vec<String>> {
+    // The echo lane covers `tests/data/scad/` ONLY: upstream's ECHO_FILES all live there, and an
+    // EXAMPLE whose stem happens to match a golden trips on stale/version-noisy recordings
+    // (examples/Functions/echo.scad vs echo-expected.echo — one bare `ECHO:` from a normalized
+    // `version()` line, nothing like the example's real output).
+    if !file.contains("/tests/data/scad/") {
+        return None;
+    }
     let stem = Path::new(file).file_stem()?.to_str()?;
     let golden = std::fs::read_to_string(echo_dir.join(format!("{stem}-expected.echo"))).ok()?;
     if golden.lines().any(|l| l.starts_with("ERROR:")) {

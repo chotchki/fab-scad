@@ -214,6 +214,22 @@ impl PartialEq for Value {
                 // L.2.8k pin: `[0:NAN:INF]` is empty, so it EQUALS ITSELF (`is_nan(r)` false) and
                 // BOSL2's `typeof` still falls through `is_range` to `"invalid"`.
             ) => range_seq_cmp((*s0, *p0, *e0), (*s1, *p1, *e1)) == Some(std::cmp::Ordering::Equal),
+            // Function equality is OBJECT IDENTITY (AH.2.7, the function-literal-compare golden):
+            // `b = a` is equal; a SECOND evaluation of the same literal — same closure_id, fresh
+            // captured env — is not ("might have captured different values, which are not checked
+            // against"). Both env Rcs are held by the operands, so the pointer identity can't ABA.
+            (
+                Value::Function {
+                    closure_id: c1,
+                    env: e1,
+                    ..
+                },
+                Value::Function {
+                    closure_id: c2,
+                    env: e2,
+                    ..
+                },
+            ) => c1 == c2 && e1.same_frame(e2),
             _ => false, // cross-type is never equal
         }
     }
@@ -284,14 +300,26 @@ pub fn range_iter(start: f64, step: f64, end: f64) -> RangeIter {
     reason = "n is checked finite/NaN-free and >= 0; `as u64` saturates a huge n (then RANGE_MAX caps), no UB"
 )]
 pub fn range_len(start: f64, step: f64, end: f64) -> u64 {
-    if step == 0.0 || !start.is_finite() || !step.is_finite() || !end.is_finite() {
+    // An INFINITE step is legal upstream (AH.2.6, the for-tests golden): `[0:inf:0]` yields
+    // exactly ONE value (the quotient below is 0 → count 1); only a 0/NaN step or non-finite
+    // BOUNDS yield nothing. Direction is checked EXPLICITLY, upstream's way — a wrong-direction
+    // infinite step gives a `-0.0` quotient the `n < 0` test can't see.
+    if step == 0.0 || step.is_nan() || !start.is_finite() || !end.is_finite() {
+        return 0;
+    }
+    if step < 0.0 {
+        if start < end {
+            return 0;
+        }
+    } else if start > end {
         return 0;
     }
     let n = (end - start) / step;
-    if n.is_nan() || n < 0.0 {
-        return 0;
-    }
-    (n.floor() as u64).saturating_add(1)
+    // Upstream's one-ULP bump (`std::nextafter(steps, max)` in `RangeType::numValues`):
+    // a fractional step whose quotient lands JUST below a whole number — `[0:1/93:1]` computes
+    // 92.99999… — must still count the endpoint (the range-tests golden sweeps d=1..1000 and
+    // expects zero misses).
+    (n.next_up().floor() as u64).saturating_add(1)
 }
 
 /// Index-based iterator over a range's values (see [`range_iter`]).
@@ -314,7 +342,13 @@ impl Iterator for RangeIter {
         if self.i >= self.len {
             return None;
         }
-        let v = self.start + (self.i as f64) * self.step;
+        // Index 0 is `start` DIRECTLY: with an infinite step (one-value ranges, AH.2.6) the
+        // index-based form would compute `0 * inf = NaN`.
+        let v = if self.i == 0 {
+            self.start
+        } else {
+            self.start + (self.i as f64) * self.step
+        };
         self.i += 1;
         Some(v)
     }
@@ -383,7 +417,14 @@ mod tests {
         assert_eq!(range_len(0.0, 1.0, 5.0), 6);
         assert_eq!(range_len(0.0, 1.0, -1.0), 0); // wrong direction
         assert_eq!(range_len(0.0, 0.0, 5.0), 0); // zero step
-        assert_eq!(range_len(0.0, f64::INFINITY, 5.0), 0); // non-finite step
+        // an INFINITE step yields exactly ONE value in the valid direction (AH.2.6, for-tests
+        // golden `[0:inf:0]`); wrong-way infinite still yields nothing.
+        assert_eq!(range_len(0.0, f64::INFINITY, 5.0), 1);
+        assert_eq!(range_len(0.0, f64::NEG_INFINITY, 5.0), 0);
+        assert_eq!(range_len(1.0, f64::NEG_INFINITY, 0.0), 1);
+        assert_eq!(range_len(0.0, f64::NAN, 5.0), 0); // NaN step
+        // the one-ULP endpoint compensation (upstream's nextafter): [0:1/93:1] counts 94.
+        assert_eq!(range_len(0.0, 1.0 / 93.0, 1.0), 94);
         // a runaway range is CAPPED, not iterated to its (enormous) length.
         assert_eq!(
             u64::try_from(range_iter(0.0, 1.0, 1e12).count()).unwrap_or(0),

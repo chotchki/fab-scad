@@ -111,13 +111,14 @@ pub(super) fn apply(name: &str, pos: &[Value]) -> Value {
         "sin" => num1(pos, trig::sin_degrees),
         "cos" => num1(pos, trig::cos_degrees),
         "tan" => num1(pos, trig::tan_degrees),
-        // asin/acos snap to EXACT degrees at the nice sines/cosines (glibc's correctly-rounded value),
-        // else libm — so `acos(-0.5)` is exactly 120, not `120.0000…01` (BOSL2's exact-`==` f_acos). atan/
-        // atan2 stay on `to_degrees` (their nice angles are already exact here, and no test needs a snap).
+        // Inverse trig snaps by upstream's GENERAL whole-degree round-trip rule (degree_trig.cc,
+        // AH.2.12 follow-through): any input that is exactly the sin/cos/tan of an integer angle
+        // returns that integer — `acos(-0.5)` is exactly 120, and `asin(sin(n)) == n` for every
+        // integer degree (the trig-tests inverse sweep). atan2 snaps within 3e-14 of a whole.
         "asin" => num1(pos, trig::asin_degrees),
         "acos" => num1(pos, trig::acos_degrees),
-        "atan" => num1(pos, |x| x.atan().to_degrees()),
-        "atan2" => num2(pos, |y, x| y.atan2(x).to_degrees()),
+        "atan" => num1(pos, trig::atan_degrees),
+        "atan2" => num2(pos, trig::atan2_degrees),
         "floor" => num1(pos, f64::floor),
         "ceil" => num1(pos, f64::ceil),
         "round" => num1(pos, f64::round), // half AWAY from zero — same as OpenSCAD

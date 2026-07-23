@@ -25,77 +25,70 @@ fn deg2rad(x: f64) -> f64 {
     x * (PI / 180.0)
 }
 
-/// `acos(x)` in DEGREES, EXACT at the nice cosines. The inverse analogue of the exact-quadrant `sin`/`cos`
-/// above: a correctly-rounded `acos` (glibc's) lands on exactly `0/30/45/60/90/120/135/150/180` at
-/// `x = 1, √3/2, √2/2, 1/2, 0, -1/2, -√2/2, -√3/2, -1`, but macOS/musl libm are 1-2 ULP off at some of them,
-/// so `acos(-0.5)·rad2deg` is `120.00000000000001` — failing BOSL2's exact-`==` `f_acos` test. Snapping at
-/// the EXACT nice inputs restores the oracle's value; a non-nice input (e.g. `acos(-0.707107)`, `0.707107`
-/// being a ROUNDED literal, NOT the exact `√2/2` constant) still routes to libm, so geometry that samples
-/// near-but-not-exact angles (the `glued_circles` arc) is untouched. Deterministic — same on every platform.
+/// `acos(x)` in DEGREES with upstream's GENERAL whole-degree snap (`degree_trig.cc`): compute
+/// `rad2deg(acos(x))`, round to the nearest whole degree, and return the WHOLE degree iff
+/// `cos_degrees(whole) == x` — i.e. any input that is EXACTLY the cosine of an integer angle
+/// round-trips to that integer (the trig-tests inverse sweep pins every integer angle). This
+/// SUBSUMES the old L.2.8i nice-angle table (`cos_degrees(120) == -0.5` exactly via the quadrant
+/// table, so `acos(-0.5)` is exactly `120`, not `120.00000000000001`); a non-exact input
+/// (`0.707107`, a rounded literal) fails the round-trip check and keeps the libm value, so
+/// near-but-not-exact geometry (the `glued_circles` arc) stays untouched. Deterministic.
 #[must_use]
 #[allow(
     clippy::float_cmp,
-    reason = "exact `==` on the nice cosines IS the snap — matching a rounded literal is neither intended nor possible"
+    reason = "the exact `==` round-trip check IS upstream's snap"
 )]
 pub(crate) fn acos_degrees(x: f64) -> f64 {
-    if x == 1.0 {
-        0.0
-    } else if x == SQRT3_4 {
-        30.0
-    } else if x == FRAC_1_SQRT_2 {
-        45.0
-    } else if x == 0.5 {
-        60.0
-    } else if x == 0.0 {
-        90.0
-    } else if x == -0.5 {
-        120.0
-    } else if x == -FRAC_1_SQRT_2 {
-        135.0
-    } else if x == -SQRT3_4 {
-        150.0
-    } else if x == -1.0 {
-        180.0
-    } else {
-        x.acos().to_degrees()
-    }
+    let degs = x.acos().to_degrees();
+    let whole = degs.round();
+    if cos_degrees(whole) == x { whole } else { degs }
 }
 
-/// `asin(x)` in DEGREES, EXACT at the nice sines — the `acos_degrees` companion (`asin(x) = 90 - acos(x)`),
-/// snapping `x = -1, -√3/2, -√2/2, -1/2, 1/2, √2/2, √3/2, 1` to `-90/-60/-45/-30/30/45/60/90`. `x = 0` falls
-/// through so `asin(-0.0)` keeps its `-0.0` (degrees, so `-0° == 0°` anyway). Same platform-exactness gain.
+/// `asin(x)` in DEGREES — the [`acos_degrees`] companion, same whole-degree round-trip snap.
 #[must_use]
 #[allow(
     clippy::float_cmp,
-    reason = "exact `==` on the nice sines IS the snap — see acos_degrees"
+    reason = "the exact `==` round-trip check IS upstream's snap"
 )]
 pub(crate) fn asin_degrees(x: f64) -> f64 {
-    if x == 1.0 {
-        90.0
-    } else if x == SQRT3_4 {
-        60.0
-    } else if x == FRAC_1_SQRT_2 {
-        45.0
-    } else if x == 0.5 {
-        30.0
-    } else if x == -0.5 {
-        -30.0
-    } else if x == -FRAC_1_SQRT_2 {
-        -45.0
-    } else if x == -SQRT3_4 {
-        -60.0
-    } else if x == -1.0 {
-        -90.0
+    let degs = x.asin().to_degrees();
+    let whole = degs.round();
+    if sin_degrees(whole) == x { whole } else { degs }
+}
+
+/// `atan(x)` in DEGREES — same whole-degree round-trip snap against [`tan_degrees`].
+#[must_use]
+#[allow(
+    clippy::float_cmp,
+    reason = "the exact `==` round-trip check IS upstream's snap"
+)]
+pub(crate) fn atan_degrees(x: f64) -> f64 {
+    let degs = x.atan().to_degrees();
+    let whole = degs.round();
+    if tan_degrees(whole) == x { whole } else { degs }
+}
+
+/// `atan2(y, x)` in DEGREES — upstream snaps to a whole degree within `3e-14` (a tolerance, not a
+/// round-trip: `tan` can't distinguish the quadrants `atan2` resolves).
+pub(crate) fn atan2_degrees(y: f64, x: f64) -> f64 {
+    let degs = y.atan2(x).to_degrees();
+    let whole = degs.round();
+    if (degs - whole).abs() < 3.0e-14 {
+        whole
     } else {
-        x.asin().to_degrees()
+        degs
     }
 }
 
 /// Reduce an angle to `[0, 360)` (non-finite → `NaN`, matching the effective flex behavior).
+/// `TRIG_HUGE_VAL` (`degree_trig.cc`): past `2²⁶ · 360 · 2²⁶` the 52-bit mantissa can't resolve a
+/// revolution — reduction is meaningless, upstream returns NaN.
+const TRIG_HUGE_VAL: f64 = 67_108_864.0 * 360.0 * 67_108_864.0; // (1<<26)·360·(1<<26), exact in f64
+
 fn reduce_360(x: f64) -> f64 {
     if (0.0..360.0).contains(&x) {
         x
-    } else if x.is_finite() {
+    } else if x.is_finite() && x.abs() < TRIG_HUGE_VAL {
         x - 360.0 * (x / 360.0).floor()
     } else {
         f64::NAN
@@ -132,15 +125,19 @@ pub(crate) fn sin_degrees(x: f64) -> f64 {
 /// `tan` of an angle in DEGREES — upstream's DEDICATED case split (`degree_trig.cc`
 /// `tan_degrees`), NOT the sin/cos quotient: the signed zero and signed infinity hang off the raw
 /// half-turn count (`tan(-180)` is `-0`, `tan(-90)` is `-inf` — AH.2.9, the trig-tests golden),
-/// which a quotient of folded sin/cos can't recover. The `TRIG_HUGE_VAL` guard upstream is dead
-/// (never defined), so it isn't ported. Parity via f64 `%` (fmod): past 2⁵³ half-turns parity is
-/// unknowable either way — upstream's `(int)floor` is UB there.
+/// which a quotient of folded sin/cos can't recover. The `TRIG_HUGE_VAL` guard applies here too
+/// (defined in `degree_trig.cc` — the .h grep that called it dead was wrong). Parity via f64 `%`
+/// (fmod): past 2⁵³ half-turns parity is unknowable either way — upstream's `(int)floor` is UB
+/// there.
 #[must_use]
 #[allow(
     clippy::float_cmp,
     reason = "exact `==` on the special angles IS OpenSCAD's exact-quadrant algorithm"
 )]
 pub(crate) fn tan_degrees(x: f64) -> f64 {
+    if x.is_finite() && x.abs() >= TRIG_HUGE_VAL {
+        return f64::NAN; // total loss of accuracy — upstream's guard
+    }
     let cycles = (x / 180.0).floor();
     let mut x = if (0.0..180.0).contains(&x) {
         x

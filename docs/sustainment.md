@@ -80,15 +80,28 @@ mangling the block just triggers one redundant re-evaluation.
    `--render`). Divergence buckets as `echo-diff` with the first differing line; the summary's
    "Echo goldens: N/M matched" is the lane's coverage. This bar is what caught two entirely
    unimplemented builtins "passing" eval-clean — and then a dozen real semantics bugs (AH.2).
-   Full-census baseline (2026-07-23, post-AH.2): 543/576 eval clean, 24 expected, echo goldens
-   86/93 matched — the 7 open diffs are the AF/AG feature burn-down + the macOS-local libm
-   inverse-trig bits (Linux CI is the judge).
+   Full-census baseline (2026-07-23, post-AI): 551/576 eval clean, 24 expected, echo goldens
+   94/94 matched — every open diff burned down (the AF/AG features + AI's value imports landed);
+   the one genuine failure left is `misc/sub1/included.scad`, an include-FRAGMENT upstream never
+   runs standalone.
+4. **Generated-program differential** (AL): `fab gen-diff --seeds 1000 --md` — the AJ.8 oracle
+   differential folded into the nightly, and the one lane that is NOT movement-gated: it runs
+   EVERY night because its oracle is the newest upstream **Linux nightly AppImage** (picked
+   newest-by-date from files.openscad.org/snapshots, `--appimage-extract`ed, wired in via the
+   `OPENSCAD` env override, `xvfb-run` + `fonts-liberation` so both sides shape the same
+   Liberation Sans). The Linux nightlies are FRESHER than any macOS install (their mac pipeline
+   is the broken one), so this lane diffs fab-gen's whole-language programs against an oracle
+   newer than local dev ever sees — the watch for holes that are non-obvious from their examples.
+   Report-only (exit 0); the report header names the oracle version so skew rows date themselves.
 
 ## Report shape (the rolling issue body)
 
 Per upstream: version delta (pinned → candidate), intrinsic matrix delta (changed/missing only —
 matched is the quiet default), corpus regression table (file, stage failed, one-line error),
-pre-existing-failure count, skip-list. Nothing moved ⇒ the nightly leaves the issue untouched.
+pre-existing-failure count, skip-list. The issue updates EVERY night since AL: the gen-diff
+section is always fresh (new oracle nightly, new run), while corpus sections refresh only when
+their upstream moved — an unmoved lane's section carries over verbatim from the previous body,
+so the issue stays the complete database on quiet nights.
 
 ## Adoption (manual, deliberate)
 

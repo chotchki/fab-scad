@@ -51,6 +51,7 @@ jobs:
           fi
           echo "issue=$num" >> "$GITHUB_OUTPUT"
           body=$(gh issue view "$num" --json body --jq .body)
+          printf '%s' "$body" > /tmp/prev-body.md
           state=$(printf '%s' "$body" | sed -n 's/.*<!-- sustain-state \(.*\) -->.*/\1/p' | head -1)
           if [ "${{ inputs.rewind }}" = "true" ] || [ -z "$state" ]; then
             state='{}'
@@ -89,14 +90,42 @@ jobs:
           echo "BOSL2 $bosl2_pinned pinned, $bosl2_latest upstream (seen: ${seen_tag:-never}) → moved=$bosl2_moved"
           echo "openscad corpus $os_corpus (seen: ${seen_corpus:-never}) → moved=$os_moved"
 
-      # Everything below only runs when an upstream actually moved.
+      # The corpus lanes below stay movement-gated; the BUILD is unconditional since AL — the
+      # gen-diff lane runs EVERY night (its oracle is the newest upstream nightly, so each run is
+      # a fresh differential regardless of corpus movement).
       - uses: dtolnay/rust-toolchain@stable
-        if: steps.probe.outputs.bosl2_moved == 'true' || steps.probe.outputs.os_moved == 'true'
       - uses: Swatinem/rust-cache@v2
-        if: steps.probe.outputs.bosl2_moved == 'true' || steps.probe.outputs.os_moved == 'true'
       - name: Build the sustainment tools
-        if: steps.probe.outputs.bosl2_moved == 'true' || steps.probe.outputs.os_moved == 'true'
         run: cargo build --release --bin fab --bin corpus_worker
+
+      # AL — the generated-program differential (chotchki 2026-07-22: "an idea if we have a hole
+      # that's non-obvious from their examples"): fab-gen programs through OUR engine AND the
+      # NEWEST upstream Linux nightly AppImage, echo-diffed + timed. Report-only, like everything
+      # here. Linux nightlies are FRESHER than any macOS install (their mac pipeline is the broken
+      # one) — this lane diffs against a newer oracle than local dev ever sees, and the report's
+      # version line says who judged. The name regex spans BOTH snapshot naming schemes (the
+      # `.aiNNNNN` build segment was dropped in early 2026); sort key = the date field.
+      # xvfb: the AppImage wants a display even for -o exports.
+      - name: Generated-program differential vs the upstream nightly
+        run: |
+          set -euo pipefail
+          # fonts-liberation: our engine BUNDLES Liberation Sans (determinism doctrine #36); the
+          # AppImage resolves its default font via fontconfig — same face on both sides or the
+          # metrics arms diverge for boring reasons.
+          sudo apt-get update -q && sudo apt-get install -y -q xvfb fonts-liberation > /dev/null
+          img=$(curl -s https://files.openscad.org/snapshots/ \
+            | grep -oE 'OpenSCAD-[0-9]{4}\.[0-9]{2}\.[0-9]{2}(\.ai[0-9]+)?-x86_64\.AppImage' \
+            | sort -u -t- -k2,2 | tail -1)
+          echo "oracle nightly: $img"
+          curl -sL "https://files.openscad.org/snapshots/$img" -o /tmp/openscad.AppImage
+          chmod +x /tmp/openscad.AppImage
+          (cd /tmp && ./openscad.AppImage --appimage-extract > /dev/null)
+          export OPENSCAD=/tmp/squashfs-root/AppRun
+          {
+            echo "## gen-diff — generated programs vs $img"
+            echo
+            xvfb-run -a ./target/release/fab gen-diff --seeds 1000 --md || echo "gen-diff harness failed (see run log)"
+          } > /tmp/report-gendiff.md
 
       - name: Evaluate BOSL2 candidate
         if: steps.probe.outputs.bosl2_moved == 'true'
@@ -151,8 +180,10 @@ jobs:
             fi
           } > /tmp/report-openscad.md
 
+      # The issue updates EVERY night now (gen-diff always produces a fresh section). Corpus
+      # sections use tonight's report when a lane RAN, else carry over from the previous body —
+      # the issue stays the complete database on quiet nights.
       - name: Update the rolling issue
-        if: steps.probe.outputs.bosl2_moved == 'true' || steps.probe.outputs.os_moved == 'true'
         run: |
           set -euo pipefail
           state=$(jq -cn \
@@ -160,20 +191,25 @@ jobs:
             --arg corpus '${{ steps.probe.outputs.os_corpus }}' \
             --arg head '${{ steps.probe.outputs.os_head }}' \
             '{bosl2_tag: $tag, openscad_corpus: $corpus, openscad_head: $head}')
+          # Carry-over: a lane that DIDN'T run tonight keeps its section from the previous body
+          # (order there: gen-diff, BOSL2, openscad — the sed bounds rely on it).
+          if [ ! -f /tmp/report-bosl2.md ]; then
+            sed -n '/^## BOSL2/,/^## openscad/{/^## openscad/!p;}' /tmp/prev-body.md > /tmp/report-bosl2.md || true
+          fi
+          if [ ! -f /tmp/report-openscad.md ]; then
+            sed -n '/^## openscad/,$p' /tmp/prev-body.md > /tmp/report-openscad.md || true
+          fi
           {
             echo "<!-- sustain-state $state -->"
             echo
             echo "_Last evaluation: $(date -u +%Y-%m-%dT%H:%MZ) · [run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) · report-only: pins bump by hand (docs/sustainment.md)_"
             echo
-            [ -f /tmp/report-bosl2.md ] && cat /tmp/report-bosl2.md
-            [ -f /tmp/report-openscad.md ] && { echo; cat /tmp/report-openscad.md; }
+            cat /tmp/report-gendiff.md
+            if [ -s /tmp/report-bosl2.md ]; then echo; cat /tmp/report-bosl2.md; fi
+            if [ -s /tmp/report-openscad.md ]; then echo; cat /tmp/report-openscad.md; fi
           } > /tmp/issue-body.md
           gh issue edit '${{ steps.state.outputs.issue }}' --body-file /tmp/issue-body.md
           cat /tmp/issue-body.md >> "$GITHUB_STEP_SUMMARY"
-
-      - name: No movement
-        if: steps.probe.outputs.bosl2_moved == 'false' && steps.probe.outputs.os_moved == 'false'
-        run: echo "No upstream movement — issue untouched." | tee -a "$GITHUB_STEP_SUMMARY"
 
       # The watcher must not fail SILENTLY — a broken probe is itself drift.
       - name: Surface a workflow failure on the issue

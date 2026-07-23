@@ -130,8 +130,12 @@ pub fn run(seeds: u32, timeout_secs: u64, md: bool) -> Result<()> {
         0.0
     };
 
+    let oracle_version = crate::openscad::Openscad::discover(None)
+        .ok()
+        .and_then(|o| o.tool_version())
+        .unwrap_or_else(|| "unknown".to_string());
     let h = if md { "### " } else { "" };
-    println!("{h}gen-diff — {seeds} seed(s), oracle flags: {flags:?}");
+    println!("{h}gen-diff — {seeds} seed(s), oracle: {oracle_version}, flags: {flags:?}");
     if skew_swizzles {
         println!(
             "note: this oracle predates multi-letter swizzles — swizzle-family divergences are \

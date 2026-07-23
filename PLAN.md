@@ -102,7 +102,7 @@ added 2026-07-07.
      name; upstream returns 5, we loop); 1+issue4172 = guard-economics (100k module guard unreachable
      behind quadratic per-call costs). 500k mutual closure recursion passes in 0s — speed is not the issue,
      SEMANTICS of bounded failure are. -->
-- [ ] AD.1 - The `scope_capture` resolution-precedence bug: oracle-probe the call-position precedence table (let-closure vs named function vs builtin; plain non-function variable in call position; module-scope shadowing), then fix `dispatch_call`'s order; function-literal-tests goes green
+- [x] AD.1 - The `scope_capture` resolution-precedence bug: oracle-probe the call-position precedence table (let-closure vs named function vs builtin; plain non-function variable in call position; module-scope shadowing), then fix `dispatch_call`'s order; function-literal-tests goes green
 - [ ] AD.2 - Zero-progress recursion → "Recursion detected": in-flight cycle detection (same function + env + args re-entered while still evaluating ⇒ upstream-parity error) — deterministic, provably inert for progressing recursion (the 500k chain changes args every call); crash()/issue3118 + kin go green
 - [ ] AD.3 - Range too-many-elements: `range_len > u32::MAX` ⇒ warn + ZERO iterations (upstream's exact behavior, documented in for-tests' own comments); for-tests + errors-warnings-included drop from 26s/53s to fast passes
 - [ ] AD.4 - C-style-for cap: hard error at 1,000,000 iterations ("for loop counter exceeded" class, the probed boundary) replacing the silent RANGE_MAX break; for-c-style-infinite-loop becomes a fast verdict-parity error

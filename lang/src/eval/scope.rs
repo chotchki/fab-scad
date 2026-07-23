@@ -276,6 +276,26 @@ impl Scope {
     /// genuinely-unknown name warns, an explicit `x = undef;` (or an unfilled defaultless param) stays
     /// silent. Same child→parent walk as `lookup`.
     #[must_use]
+    /// AD.1 (oracle-pinned precedence): the innermost LOCAL binding of `name` holding a FUNCTION
+    /// value, or `None`. "Local" = any frame before the first parentless one — global frames (the
+    /// root and every island global) are parentless, and top-level variable closures do NOT shadow
+    /// named functions (probes p1/p2), while let/param/module-body closures DO (p3/p6/p11). A local
+    /// binding holding a NON-function stops the walk without shadowing (p8: `f = 5` leaves `f()`
+    /// resolving to the named function).
+    pub(super) fn lookup_local_function(&self, name: &str) -> Option<Value> {
+        let mut cur = Some(&self.frame);
+        while let Some(f) = cur {
+            if f.parent.is_none() {
+                return None; // a parentless frame IS a global — locals exhausted
+            }
+            if let Some(v) = f.vars.get(name) {
+                return matches!(v, Value::Function { .. }).then(|| v.clone());
+            }
+            cur = f.parent.as_ref();
+        }
+        None
+    }
+
     pub fn lookup_opt(&self, name: &str) -> Option<Value> {
         // `$`-names live in `specials` and follow the DYNAMIC chain; everything else is in `vars` on the
         // LEXICAL chain. Route by prefix, then walk that chain child→parent (inner shadows outer).

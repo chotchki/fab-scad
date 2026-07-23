@@ -1759,6 +1759,19 @@ fn dispatch_call<'a>(
     tasks: &mut Vec<Task<'a>>,
 ) -> crate::Result<()> {
     if let ExprKind::Ident(name) = &callee.kind {
+        // AD.1 (oracle-pinned): an INNER-scope binding holding a function value shadows a named
+        // function in call position — let-bound (p3), module-local (p6/p9) and PARAMETER (p11)
+        // closures all win; top-level variable closures do NOT (p1/p2 — global frames are excluded
+        // by `lookup_local_function`), and a non-function local doesn't shadow either (p8). Routing
+        // through the dynamic-callee task keeps one closure-call path.
+        if let Some(f) = scope.lookup_local_function(name) {
+            tasks.push(Task::CallValue {
+                args,
+                caller: scope.clone(),
+            });
+            tasks.push(Task::Const(f));
+            return Ok(());
+        }
         // resolution order (OpenSCAD): a user function may shadow a builtin.
         if let Some(&((params, body), home)) = ctx.functions.get(name.as_str()) {
             // O.1: a registered intrinsic replaces the interpreted body — but ONLY for an all-positional

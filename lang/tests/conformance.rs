@@ -232,3 +232,42 @@ fn use_of_a_font_file_is_a_silent_no_op() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// AD.1: the call-position resolution-precedence table, oracle-pinned (OpenSCAD 2026.06.12, probes
+/// p1–p11): innermost LOCAL bindings holding function values shadow named functions (let p3,
+/// module-local p6, PARAMETER p11); top-level variable closures do NOT (p1/p2) but do shadow
+/// builtins when no named function exists (p5); non-function locals never shadow (p8).
+#[test]
+fn call_position_precedence_matches_the_oracle() {
+    let echoes = |src: &str| -> String {
+        let (_, messages) = fab_lang::evaluate_geometry_full(src).expect("evaluates");
+        messages
+            .iter()
+            .map(|m| format!("{m:?}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    // p1/p2: top-level closure loses to the named function, either order.
+    assert!(echoes("function f() = 1; f = function() 2; echo(p = f());").contains("p = 1"));
+    assert!(echoes("f = function() 2; function f() = 1; echo(p = f());").contains("p = 1"));
+    // p3: the let-bound closure shadows the ENCLOSING function's own name (the census hang).
+    assert!(
+        echoes("function g() = let(g = function() 5) g(); echo(p = g());").contains("p = 5")
+    );
+    // p6/p9: module-local closures shadow.
+    assert!(
+        echoes("function outer() = 1; module m() { outer = function() 2; echo(p = outer()); } m();")
+            .contains("p = 2")
+    );
+    // p8: a NON-function local does not shadow.
+    assert!(
+        echoes("function f() = 1; module m() { f = 5; echo(p = f()); } m();").contains("p = 1")
+    );
+    // p11: a PARAMETER holding a closure shadows the same-named function (was silently wrong).
+    assert!(
+        echoes("function f() = 1; function g(f) = f(); echo(p = g(function() 9));")
+            .contains("p = 9")
+    );
+    // p10: callback params keep working.
+    assert!(echoes("function f(cb) = cb(); echo(p = f(function() 42));").contains("p = 42"));
+}

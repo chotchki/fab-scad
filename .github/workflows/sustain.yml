@@ -105,14 +105,15 @@ jobs:
       # one) — this lane diffs against a newer oracle than local dev ever sees, and the report's
       # version line says who judged. The name regex spans BOTH snapshot naming schemes (the
       # `.aiNNNNN` build segment was dropped in early 2026); sort key = the date field.
-      # xvfb: the AppImage wants a display even for -o exports.
+      # NO display needed: -o exports render fine headless once the host GL libs exist (probed) —
+      # libegl1/libopengl0 are the AppImage's ONLY unbundled deps (GL is host-owned by convention).
       - name: Generated-program differential vs the upstream nightly
         run: |
           set -euo pipefail
           # fonts-liberation: our engine BUNDLES Liberation Sans (determinism doctrine #36); the
           # AppImage resolves its default font via fontconfig — same face on both sides or the
           # metrics arms diverge for boring reasons.
-          sudo apt-get update -q && sudo apt-get install -y -q xvfb fonts-liberation > /dev/null
+          sudo apt-get update -q && sudo apt-get install -y -q libegl1 libopengl0 fonts-liberation > /dev/null
           img=$(curl -s https://files.openscad.org/snapshots/ \
             | grep -oE 'OpenSCAD-[0-9]{4}\.[0-9]{2}\.[0-9]{2}(\.ai[0-9]+)?-x86_64\.AppImage' \
             | sort -u -t- -k2,2 | tail -1)
@@ -124,7 +125,7 @@ jobs:
           {
             echo "## gen-diff — generated programs vs $img"
             echo
-            xvfb-run -a ./target/release/fab gen-diff --seeds 1000 --md || echo "gen-diff harness failed (see run log)"
+            ./target/release/fab gen-diff --seeds 1000 --md || echo "gen-diff harness failed (see run log)"
           } > /tmp/report-gendiff.md
 
       - name: Evaluate BOSL2 candidate

@@ -21,7 +21,15 @@ use anyhow::{Context, Result};
 use crate::oracle;
 
 /// The `--enable` flags handed to the oracle so both sides speak the same (experimental) surface.
-const ORACLE_FLAGS: &[&str] = &["textmetrics", "object-function"];
+/// An oracle that predates a flag just WARNS "unknown feature" and runs (probed on 2026.07.20) —
+/// so listing newer flags is safe on old oracles; the swizzle skew-probe below detects what the
+/// binary actually speaks. `vector-swizzle` + `import-function` gate surfaces we ship always-on.
+const ORACLE_FLAGS: &[&str] = &[
+    "textmetrics",
+    "object-function",
+    "vector-swizzle",
+    "import-function",
+];
 
 /// One seed's outcome.
 enum Outcome {
@@ -60,9 +68,10 @@ pub fn run(seeds: u32, timeout_secs: u64, md: bool) -> Result<()> {
         &[]
     };
 
-    // Capability probe: a pre-July-2026 oracle predates multi-letter swizzles (v.wy) — its
-    // divergences on that family are VERSION SKEW against the master goldens we implement, not
-    // findings. Detected once and labeled in the report.
+    // Capability probe: an oracle without `vector-swizzle` (the flag or the feature — pre-July-2026
+    // builds lack both) yields undef on v.wy — its divergences on that family are VERSION SKEW
+    // against the master goldens we implement, not findings. Detected once, labeled in the report;
+    // on an oracle that speaks the flag this comes back false and the family compares for real.
     let skew_swizzles = matches!(
         oracle::run_with_flags("echo(([1, 2, 3, 4]).wy); cube(1);", timeout, flags),
         Ok(r) if r.echo.iter().any(|l| l.contains("undef"))

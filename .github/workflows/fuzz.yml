@@ -61,6 +61,12 @@ jobs:
       - name: fuzz jit_diff
         working-directory: lang
         run: cargo fuzz run jit_diff --target "$FUZZ_TARGET" -- -max_total_time=300 -rss_limit_mb=2048 -max_len=4096 -timeout=10
+      # AJ.6 — the GENERATOR x Config A/B: fuzzer bytes pick a seed, the seed builds a whole-surface
+      # valid program (the AJ.1 coverage gate guards the grammar), and eval must be bit-identical with
+      # the caches off and on. Deep VALID programs, cheap; the Config contract as the semantic oracle.
+      - name: fuzz gen_diff
+        working-directory: lang
+        run: cargo fuzz run gen_diff --target "$FUZZ_TARGET" -- -max_total_time=240 -rss_limit_mb=2048 -max_len=8 -timeout=15
       # Y.7 — the GEOMETRY-LOWERING seam (fab-scad fuzz crate at the repo root): evaluate_geometry ->
       # build_geo/build_2d through the REAL Manifold kernel, so the kernel's get_unchecked unsafe + the
       # X.4 2D-hull path get ASan on fuzzer geometry. Heavier per-exec than the lang targets (real CSG),

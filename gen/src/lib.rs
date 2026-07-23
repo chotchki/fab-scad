@@ -206,8 +206,13 @@ impl Gen {
                 format!("intersection_for ({i} = [0:{n}]) {body}")
             }
             6 => {
-                // a 2D top-level tree (whole-program 2D renders fine; never mixed into 3D booleans)
-                self.geometry2(0)
+                // a 2D tree — EXTRUDED at top level: the program always ends with a 3D statement,
+                // and the oracle refuses mixed 2D+3D top-level unions (gen-diff seed 18 finding).
+                format!(
+                    "linear_extrude(height = {}) {}",
+                    self.int_between(1, 6),
+                    self.geometry2(0)
+                )
             }
             _ => self.geometry3(0), // weight 3D geometry highest for render diversity
         }

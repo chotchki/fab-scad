@@ -22,6 +22,11 @@ path = ".."
 [dependencies.fab-jit]
 path = "../../jit"
 
+# The `gen_diff` target (AJ.6) drives the grammar generator from fuzzer bytes and A/Bs the eval
+# across cache configs — the Config bit-identity contract as a continuous oracle.
+[dependencies.fab-gen]
+path = "../../gen"
+
 [[bin]]
 name = "parse"
 path = "fuzz_targets/parse.rs"
@@ -48,6 +53,13 @@ bench = false
 [[bin]]
 name = "jit_diff"
 path = "fuzz_targets/jit_diff.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "gen_diff"
+path = "fuzz_targets/gen_diff.rs"
 test = false
 doc = false
 bench = false

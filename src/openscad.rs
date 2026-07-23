@@ -110,14 +110,26 @@ impl Openscad {
 
     /// Render geometry (format inferred from `output`'s extension) via Manifold.
     pub fn render(&self, input: &Path, output: &Path, timeout: Duration) -> Result<Report> {
+        self.render_with_flags(input, output, timeout, &[])
+    }
+
+    /// [`Self::render`] with extra `--enable=…` feature flags (AJ.8: the gen-diff oracle runs with
+    /// the experimental features our evaluator ships always-on — textmetrics, object-function).
+    pub fn render_with_flags(
+        &self,
+        input: &Path,
+        output: &Path,
+        timeout: Duration,
+        flags: &[&str],
+    ) -> Result<Report> {
         ensure_parent(output)?;
-        let args = [
-            OsString::from("--backend"),
-            OsString::from("Manifold"),
-            OsString::from("-o"),
-            output.as_os_str().to_owned(),
-            input.as_os_str().to_owned(),
-        ];
+        let mut args = vec![OsString::from("--backend"), OsString::from("Manifold")];
+        for f in flags {
+            args.push(OsString::from(format!("--enable={f}")));
+        }
+        args.push(OsString::from("-o"));
+        args.push(output.as_os_str().to_owned());
+        args.push(input.as_os_str().to_owned());
         let mut r = self.run(&args, output, timeout)?;
         r.ok = r.ok && file_nonempty(output);
         Ok(r)

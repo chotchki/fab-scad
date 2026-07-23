@@ -91,12 +91,14 @@ geometry = ["dep:fab-lang"]
 # The desktop Cranelift JIT (P.1) — pulls fab-jit (cranelift) alongside the evaluator. Its OWN feature (not
 # folded into `geometry`) so the lean/miri geometry build never compiles cranelift; `native` implies it.
 jit = ["geometry", "dep:fab-jit"]
-native = ["dep:reqwest", "dep:clap", "dep:rayon", "jit", "geometry"]
+native = ["dep:reqwest", "dep:clap", "dep:rayon", "dep:fab-gen", "jit", "geometry"]
 
 [dependencies]
 # scad-rs, our OpenSCAD reimplementation — the differential harness's OTHER engine (G.3.7). Pure
 # Rust + wasm-clean, but only the native differ uses it for now, so gate it behind `native`.
 fab-lang = { path = "lang", optional = true }
+# AJ.8 gen-diff: the grammar generator feeding the oracle differential (native harness only).
+fab-gen = { path = "gen", optional = true }
 # The desktop numeric JIT (P.1) — native-only (cranelift can't JIT in-wasm), so gated behind `jit`/`native`.
 fab-jit = { path = "jit", optional = true }
 clap = { version = "4", features = ["derive"], optional = true }
@@ -138,6 +140,9 @@ reqwest = { version = "0.12", default-features = false, optional = true, feature
 # (the intrinsic worklist L.4 cuts the JIT phase from) — the subscriber side, test-only, so the shipped
 # lib stays subscriber-agnostic + wasm never sees it. `registry` gives the span store the layer times.
 [dev-dependencies]
+# AJ.7 gen_ab soak: generated programs A/B'd across cache configs (also a normal dep under
+# `native` for the gen-diff oracle harness — listed here so tests build without feature games).
+fab-gen = { path = "gen" }
 tracing-subscriber = { version = "0.3", default-features = false, features = ["registry", "std"] }
 # The BU.6 perf harness's run/baseline artifacts (perf/) — test-only writer.
 serde_json = "1"

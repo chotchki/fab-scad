@@ -65,6 +65,19 @@ enum Commands {
     /// scad-rs with crash isolation — the openscad-corpus lane. Eval-clean is the bar; the sweep is
     /// REPORT-ONLY (exit 0 regardless), because upstream's corpus carries no expectations we can
     /// hold ourselves to — the report is the signal.
+    /// AJ.8: run generated programs through OUR engine AND the local OpenSCAD, diff echo output
+    /// and compare wall time (startup-adjusted). Seed-deterministic — a divergent seed replays.
+    GenDiff {
+        /// How many seeds (0..N) to run.
+        #[arg(long, default_value_t = 200)]
+        seeds: u32,
+        /// Per-program oracle timeout (seconds).
+        #[arg(long, default_value_t = 20)]
+        timeout: u64,
+        /// Emit GitHub-flavored markdown.
+        #[arg(long)]
+        md: bool,
+    },
     ScadSweep {
         /// Manifest file: one `.scad` path per line (`#` comments + blanks skipped).
         #[arg(long)]
@@ -229,6 +242,7 @@ fn main() -> Result<()> {
             committed,
             md,
         } => corpus_diff_cmd(&candidate, &committed, md),
+        Commands::GenDiff { seeds, timeout, md } => fab_scad::gendiff::run(seeds, timeout, md),
         Commands::ScadSweep {
             manifest,
             upstream,

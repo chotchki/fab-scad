@@ -44,7 +44,11 @@ pub mod sweep_expect;
 // the web publishes via the site session cookie, no API key.
 #[cfg(feature = "native")]
 pub mod credentials;
+// AJ.8 gen-diff: the generated-program oracle differential (echo + timing). Native only — it
+// spawns the OpenSCAD binary.
 pub mod cross_section;
+#[cfg(feature = "native")]
+pub mod gendiff;
 // QEM mesh decimation (W.5) — the web save-back's low-res mesh variant. Mesh-only (no Solid), so it
 // rides `mesh-io` like `threemf_out` and runs on the wasm geom worker.
 #[cfg(feature = "mesh-io")]

@@ -80,6 +80,9 @@ pub struct OracleRun {
     pub echo: Vec<String>,
     pub warnings: Vec<String>,
     pub version: Option<String>,
+    /// The oracle process's wall time (AJ.8 timing comparison — subtract an empty-program
+    /// baseline to remove startup cost).
+    pub duration: Duration,
 }
 
 /// Per-process temp-file discriminator, so parallel test threads (same pid) don't clobber each other.
@@ -90,6 +93,12 @@ static SEQ: AtomicU64 = AtomicU64::new(0);
 /// # Errors
 /// Fails if OpenSCAD can't be located, the render times out / errors, or the OFF can't be parsed.
 pub fn run(source: &str, timeout: Duration) -> Result<OracleRun> {
+    run_with_flags(source, timeout, &[])
+}
+
+/// [`run`] with extra `--enable=…` oracle flags (AJ.8's gen-diff runs the oracle with the
+/// experimental features our evaluator ships always-on).
+pub fn run_with_flags(source: &str, timeout: Duration, flags: &[&str]) -> Result<OracleRun> {
     let osc = Openscad::discover(None)?;
     let version = osc.tool_version();
 
@@ -100,7 +109,7 @@ pub fn run(source: &str, timeout: Duration) -> Result<OracleRun> {
     let off = dir.join(format!("{stem}.off"));
 
     std::fs::write(&scad, source).with_context(|| format!("writing {}", scad.display()))?;
-    let report = osc.render(&scad, &off, timeout);
+    let report = osc.render_with_flags(&scad, &off, timeout, flags);
     let _ = std::fs::remove_file(&scad);
     let report = report?;
     ensure!(
@@ -120,6 +129,7 @@ pub fn run(source: &str, timeout: Duration) -> Result<OracleRun> {
         echo: report.echo,
         warnings: report.warnings,
         version,
+        duration: report.duration,
     })
 }
 

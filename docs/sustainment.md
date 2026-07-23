@@ -60,11 +60,20 @@ mangling the block just triggers one redundant re-evaluation.
    sweep in one job; **no static skip-list** — the committed run IS the baseline, so pre-existing
    failures (e.g. worldmap's heightfield) land in `still_failing` and never gate. What exits 1:
    REGRESSIONS (pass→fail) and NEW-FAILING (new upstream case we fail).
-3. **OpenSCAD corpus** (SU.4): `fab scad-sweep --manifest <file> [--md]` over only the
-   NEW/CHANGED corpus files since the watermark (compare API → sparse checkout). Eval-clean is
-   the whole bar — their corpus is full of 2D/echo-only files and carries no expectations we can
-   hold ourselves to, so the sweep is REPORT-ONLY (exit 0); the report is the signal. Churn
-   outside the corpus paths short-circuits to a no-op.
+3. **OpenSCAD corpus** (SU.4): `fab scad-sweep --manifest <file> [--upstream <root>] [--md]` over
+   only the NEW/CHANGED corpus files since the watermark (compare API → sparse checkout).
+   Eval-clean is the whole bar — their corpus is full of 2D/echo-only files and carries no
+   SUCCESS expectations we can hold ourselves to, so the sweep is REPORT-ONLY (exit 0); the
+   report is the signal. Churn outside the corpus paths short-circuits to a no-op.
+   `--upstream` (AE.1) filters on upstream's own MUST-FAIL verdicts so the failure table shows
+   genuine divergence only: a failure classifies as expected (upstream parity) when the golden
+   `tests/regression/echo/<stem>-expected.echo` contains an `ERROR:` line, the file is in
+   `FAILING_FILES` (tests/CMakeLists.txt, `--retval=1` renders), the golden documents the same
+   can't-open-library wall, or it's a `templates/` `configure_file` input never run raw. The
+   workflow also clones MCAD (an openscad submodule the sparse clone skips) and exports
+   `OPENSCADPATH=/tmp/openscad/libraries` — the corpus `include <MCAD/…>`s it, the fonts lesson
+   again. Full-census baseline (2026-07-23): 550/576 clean, 24 expected, 2 genuine
+   (experimental `object()`, one include-fragment).
 
 ## Report shape (the rolling issue body)
 

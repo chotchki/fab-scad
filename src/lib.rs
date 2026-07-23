@@ -36,6 +36,10 @@ pub mod scadproj;
 // BOSL2 test corpus runner (K.1 tier 2): needs fab-lang (eval) + toml + std::fs — a native dev/CI tool.
 #[cfg(feature = "native")]
 pub mod corpus;
+// Upstream-expectation filter for the sustain sweep (AE.1): classifies corpus failures against
+// openscad's own must-fail verdicts. Report-side companion to `corpus`, same native gate.
+#[cfg(feature = "native")]
+pub mod sweep_expect;
 // The desktop publish credential (W.3.27): env-then-file resolution + a 0600 config store. Native only —
 // the web publishes via the site session cookie, no API key.
 #[cfg(feature = "native")]

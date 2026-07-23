@@ -92,6 +92,14 @@ added 2026-07-07.
 - [x] Y.8 - Y.8 - Audit + wire the kernel fuzz coverage
 - [ ] Y.9 - Y.9 - Extend kernel fuzz coverage (csg_tree random-op + new op targets)
 
+## Phase AE - Sustain report fidelity: upstream-expected failures filtered, environment gaps closed
+  Meta - the v1.0.3 sustain sweep reports 28 failures but ~24 are files upstream ALSO fails (their harness demands it: golden `tests/regression/echo/*-expected.echo` containing `ERROR:`, or `FAILING_FILES` in tests/CMakeLists.txt) plus 2 MCAD environment gaps (the fonts theme again — MCAD is an openscad submodule our sparse clone never checks out). Filter on upstream intent so the report shows GENUINE divergence only.
+- [x] AE.1 - scad-sweep learns upstream intent: `--upstream <openscad-root>` classifies failures as expected via (a) golden echo contains `ERROR:`, (b) `FAILING_FILES` membership, (c) Load-detail parity (golden documents the same can't-open), (d) `templates/` = CMake configure_file inputs, never standalone; report splits genuine vs expected + unit tests — src/sweep_expect.rs, report-side only (buckets + wire format untouched)
+- [x] AE.2 - Files lane honors OPENSCADPATH (harness-side per the lang doctrine: the crate stays pure, run_file reads the env) so `include <MCAD/fonts.scad>` can resolve
+- [x] AE.3 - sustain.yml environment parity: sparse-checkout += tests/regression/echo (cone mode brings tests/CMakeLists.txt free), clone MCAD → libraries/, export OPENSCADPATH, pass --upstream
+- [x] AE.4 - Local full-census validation: 576-file sweep → 550 clean (MCAD pair passes wired), 24 expected-fail (every reason upstream-owned; linenumber's golden even carries a deliberate `ERROR: Assertion '(false && "line 50")'`), 2 genuine: object-tests (experimental object() gap) + included.scad (include-fragment upstream never runs standalone)
+- [ ] AE.5 - docs/sustainment.md updated; rewind-dispatch sustain; issue #1 shows the filtered report
+
 ## Backlog (not yet phased)
 
 - **Evaluate the M.3.1 spectral-norm SHORTCUT (chotchki, 2026-07-14).** `Mat3::spectral_norm` uses deterministic power iteration on MᵀM (32 iters + IEEE sqrt) instead of porting Manifold's iterative Jacobi SVD (`svd.h`, ~304 LOC). Justified because `SpectralNorm` is used ONLY for `epsilon *= SpectralNorm` (a tolerance invisible to a transform's output geometry — positions/tris/normals are exact). REVISIT if: (a) a compound-op differential (`transform(x).union(y)`) fails on an epsilon-driven near-degenerate merge tracing to a spectral-norm ULP divergence vs C++, or (b) the M.6 native≡wasm bit-for-bit corpus sweep flags it. Neither bites ⇒ shortcut was worth it (~300 LOC of Jacobi SVD avoided); if it bites ⇒ port `svd.h` verbatim. (Task #4 logged; bridge id-collided with K.2 so tracked here.)

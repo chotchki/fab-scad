@@ -298,15 +298,27 @@ pub fn enumerate_files(manifest: &Path) -> Result<Vec<TestCase>> {
     Ok(cases)
 }
 
+/// The harness half of the `OPENSCADPATH` contract (AE.2): `fab_lang` stays PURE — it never reads
+/// env — so the Files lane reads it here, exactly like upstream's harness exports it for the corpus
+/// (`include <MCAD/fonts.scad>` resolves iff the caller wires the libraries dir).
+/// `split_paths` gives the platform separator (`:`/`;`), matching OpenSCAD's own split.
+fn openscadpath() -> Vec<std::path::PathBuf> {
+    std::env::var_os("OPENSCADPATH")
+        .map(|v| std::env::split_paths(&v).collect())
+        .unwrap_or_default()
+}
+
 /// Run one MANIFEST-listed file (SU.4): eval with the file's own parent as base so its relative
-/// includes resolve. Eval-clean is the bar — see [`Lane::Files`] — EXCEPT a missing-library warning,
-/// which buckets [`Bucket::Load`]: the tolerant loader would otherwise eval an EMPTY program and
-/// report a vacuous pass (a file whose includes never loaded proved nothing).
+/// includes resolve, plus any `OPENSCADPATH` libraries. Eval-clean is the bar — see [`Lane::Files`]
+/// — EXCEPT a missing-library warning, which buckets [`Bucket::Load`]: the tolerant loader would
+/// otherwise eval an EMPTY program and report a vacuous pass (a file whose includes never loaded
+/// proved nothing).
 #[must_use]
 pub fn run_file(script: &str, path: &Path) -> (Bucket, u128, String) {
     let base = path.parent().unwrap_or(Path::new("."));
+    let libs = openscadpath();
     let start = Instant::now();
-    let result = fab_lang::evaluate_geometry_with_base_full(script, base, &[]);
+    let result = fab_lang::evaluate_geometry_with_base_full(script, base, &libs);
     let ms = start.elapsed().as_millis();
     match result {
         Ok((_, messages)) => {

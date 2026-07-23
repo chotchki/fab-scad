@@ -69,6 +69,11 @@ enum Commands {
         /// Manifest file: one `.scad` path per line (`#` comments + blanks skipped).
         #[arg(long)]
         manifest: PathBuf,
+        /// An openscad checkout root (AE.1): failures upstream's own harness expects (golden
+        /// `tests/regression/echo` errors, `FAILING_FILES`, `templates/`) report as upstream-parity
+        /// instead of genuine. Omit to report every failure raw.
+        #[arg(long)]
+        upstream: Option<PathBuf>,
         /// Emit GitHub-flavored markdown (for `$GITHUB_STEP_SUMMARY` + the sustainment issue).
         #[arg(long)]
         md: bool,
@@ -224,7 +229,11 @@ fn main() -> Result<()> {
             committed,
             md,
         } => corpus_diff_cmd(&candidate, &committed, md),
-        Commands::ScadSweep { manifest, md } => scad_sweep_cmd(&manifest, md),
+        Commands::ScadSweep {
+            manifest,
+            upstream,
+            md,
+        } => scad_sweep_cmd(&manifest, upstream.as_deref(), md),
         Commands::Focus { project } => project::focus_cmd(&require_root()?, project),
         Commands::New { name } => project::new_cmd(&require_root()?, &name),
         Commands::Plan { size, printer } => plan_cmd(&size, printer),
@@ -1232,53 +1241,106 @@ fn corpus_diff_cmd(candidate: &Path, committed: &Path, md: bool) -> Result<()> {
 /// SU.4: the manifest sweep — every listed `.scad` through scad-rs, crash-isolated, bucketed.
 /// Report-only by design: upstream's corpus carries no expectations we can hold ourselves to, so the
 /// report IS the deliverable (the nightly pastes it into the sustainment issue) and the exit is 0.
-fn scad_sweep_cmd(manifest: &Path, md: bool) -> Result<()> {
-    use fab_scad::corpus::{Bucket, Lane, check_worker, histogram, run_corpus_isolated};
+fn scad_sweep_cmd(manifest: &Path, upstream: Option<&Path>, md: bool) -> Result<()> {
+    use fab_scad::corpus::{Bucket, Lane, check_worker, run_corpus_isolated};
+    use fab_scad::sweep_expect::UpstreamExpectations;
 
     let worker = std::env::current_exe()
         .context("locating fab")?
         .with_file_name("corpus_worker");
     check_worker(&worker)?;
+    let expectations = upstream.map(UpstreamExpectations::load).transpose()?;
     let results = run_corpus_isolated(manifest, &worker, Lane::Files)?;
-    let h = histogram(&results);
-    let passed = h.get(&Bucket::Pass).copied().unwrap_or(0);
-    let summary: Vec<String> = h
+
+    // Split failures into genuine vs upstream-parity (AE.1) — a failure upstream's harness DEMANDS
+    // is agreement, not divergence, and burying the 2 real gaps under 24 expected ones is how a
+    // report stops being read.
+    let mut genuine = Vec::new();
+    let mut expected = Vec::new();
+    for r in results.iter().filter(|r| r.bucket != Bucket::Pass) {
+        match expectations
+            .as_ref()
+            .and_then(|e| e.classify(&r.file, r.bucket, &r.detail))
+        {
+            Some(reason) => expected.push((r, reason)),
+            None => genuine.push(r),
+        }
+    }
+    let passed = results.len() - genuine.len() - expected.len();
+    let mut counts: std::collections::BTreeMap<Bucket, usize> = std::collections::BTreeMap::new();
+    for r in &genuine {
+        *counts.entry(r.bucket).or_default() += 1;
+    }
+    let summary: Vec<String> = counts
         .iter()
-        .filter(|(b, _)| **b != Bucket::Pass)
         .map(|(b, n)| format!("{} {}", n, b.label()))
         .collect();
+    let parity = if expected.is_empty() {
+        String::new()
+    } else {
+        format!(" {} expected-fail (upstream parity).", expected.len())
+    };
+    // "Genuine" is a filtered-run claim — an unfiltered sweep only knows "failures".
+    let failure_word = if expectations.is_some() {
+        "Genuine failures"
+    } else {
+        "Failures"
+    };
     if md {
         println!("### scad sweep — {} file(s)", results.len());
         println!();
         println!(
-            "**{passed}/{} eval clean.**{}",
+            "**{passed}/{} eval clean.**{parity}{}",
             results.len(),
             if summary.is_empty() {
                 String::new()
             } else {
-                format!(" Failures: {}.", summary.join(", "))
+                format!(" {failure_word}: {}.", summary.join(", "))
             }
         );
-        if passed < results.len() {
+        if !genuine.is_empty() {
             println!();
             println!("| file | bucket | detail |");
             println!("|---|---|---|");
-            for r in results.iter().filter(|r| r.bucket != Bucket::Pass) {
+            for r in &genuine {
                 println!("| `{}` | {} | {} |", r.file, r.bucket.label(), r.detail);
             }
         }
+        if !expected.is_empty() {
+            println!();
+            println!(
+                "<details><summary>Expected failures ({}) — upstream also fails these</summary>",
+                expected.len()
+            );
+            println!();
+            println!("| file | bucket | why upstream expects it |");
+            println!("|---|---|---|");
+            for (r, reason) in &expected {
+                println!("| `{}` | {} | {reason} |", r.file, r.bucket.label());
+            }
+            println!();
+            println!("</details>");
+        }
     } else {
         println!(
-            "scad sweep: {passed}/{} eval clean{}",
+            "scad sweep: {passed}/{} eval clean{}{}",
             results.len(),
+            if expected.is_empty() {
+                String::new()
+            } else {
+                format!(", {} expected-fail", expected.len())
+            },
             if summary.is_empty() {
                 String::new()
             } else {
                 format!(" ({})", summary.join(", "))
             }
         );
-        for r in results.iter().filter(|r| r.bucket != Bucket::Pass) {
+        for r in &genuine {
             println!("  {} {} — {}", r.bucket.label(), r.file, r.detail);
+        }
+        for (r, reason) in &expected {
+            println!("  expected {} {} — {}", r.bucket.label(), r.file, reason);
         }
     }
     Ok(())

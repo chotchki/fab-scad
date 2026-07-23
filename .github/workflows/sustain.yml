@@ -117,7 +117,12 @@ jobs:
         run: |
           set -euo pipefail
           git clone --depth 1 --filter=blob:none --sparse https://github.com/openscad/openscad.git /tmp/openscad
-          git -C /tmp/openscad sparse-checkout set tests/data/scad tests/data/ttf examples
+          # regression/echo = upstream's golden console outputs, the sweep's expected-failure source
+          # (cone mode also brings tests/CMakeLists.txt, whose FAILING_FILES is the other source).
+          git -C /tmp/openscad sparse-checkout set tests/data/scad tests/data/ttf tests/regression/echo examples
+          # MCAD is an openscad SUBMODULE (libraries/MCAD) the sparse clone never materializes — the
+          # corpus includes it (`include <MCAD/fonts.scad>`), so wire it like upstream's harness does.
+          git clone --depth 1 https://github.com/openscad/MCAD.git /tmp/openscad/libraries/MCAD
           state='${{ steps.state.outputs.state }}'
           seen_head=$(printf '%s' "$state" | jq -r '.openscad_head // empty')
           if [ -n "$seen_head" ]; then
@@ -137,7 +142,8 @@ jobs:
             echo "## openscad corpus (master, ${{ steps.probe.outputs.os_head }})"
             echo
             if [ -s /tmp/manifest-live.txt ]; then
-              ./target/release/fab scad-sweep --manifest /tmp/manifest-live.txt --md
+              OPENSCADPATH=/tmp/openscad/libraries \
+                ./target/release/fab scad-sweep --manifest /tmp/manifest-live.txt --upstream /tmp/openscad --md
             else
               echo "Corpus paths changed, but no surviving \`.scad\` files to sweep."
             fi

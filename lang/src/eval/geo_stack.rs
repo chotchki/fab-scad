@@ -569,10 +569,12 @@ fn dispatch_module<'a>(
             group(work, Combinator::Minkowski, scope);
             Ok(())
         }
-        // A5' — render() forces a CGAL/nef evaluation in OpenSCAD; in our Manifold-backed pipeline every node
-        // is already an exact manifold, so it's semantically identity — group its children (its `convexity` arg
-        // is a render hint with no bearing on geometry). Unblocks BOSL2's cubetruss_corner() + slicer_module.scad.
-        "render" => {
+        // group() — upstream's explicit no-op grouping module (AH.2.5; scope-assignment-tests uses
+        // it as a scoping probe). A5' — render() forces a CGAL/nef evaluation in OpenSCAD; in our
+        // Manifold-backed pipeline every node is already an exact manifold, so it's semantically
+        // identity — group its children (its `convexity` arg is a render hint with no bearing on
+        // geometry). Unblocks BOSL2's cubetruss_corner() + slicer_module.scad. Both = child union.
+        "group" | "render" => {
             group(work, Combinator::Union, scope);
             Ok(())
         }
@@ -664,12 +666,30 @@ fn dispatch_module<'a>(
                     .iter()
                     .filter_map(|&i| super::child_at(i).and_then(|i| frame.stmts.get(i).copied()))
                     .collect(),
+                // AH.2.5 (children-tests golden): `children([0:4])` selects by RANGE too — same
+                // per-index bounds rules as the vector form; a wrong-way range yields nothing.
+                Some(Value::Range { start, step, end }) => {
+                    super::value::range_iter(*start, *step, *end)
+                        .filter_map(|i| {
+                            super::child_at(i).and_then(|i| frame.stmts.get(i).copied())
+                        })
+                        .collect()
+                }
                 _ => Vec::new(),
             };
             // The caller's LEXICAL scope (frame.scope) with the CURRENT dynamic $-context overlaid (`call_frame`,
             // by reference), the caller's module island, and the CURRENT global (where children() is written).
             let caller_island = frame.island;
-            let child_scope = Scope::call_frame(&frame.scope, &scope);
+            let mut child_scope = Scope::call_frame(&frame.scope, &scope);
+            // `$children`/`$parent_modules` are per-CALL bookkeeping, not inheritable $-context
+            // (AH.2.5, the variable-scope-tests golden): a rendered child sees the counts of the
+            // module call it was WRITTEN in — the caller's — not the callee's, so re-pin them over
+            // the dynamic overlay the L.5.2/L.2.8p rules otherwise inherit.
+            for var in ["$children", "$parent_modules"] {
+                if let Some(v) = frame.scope.lookup_opt(var) {
+                    child_scope.bind(var, v);
+                }
+            }
             // L.5.2 — the block's sibling assignments bind into the child scope FIRST: prepend them so
             // `hoist_scope` (whole-scope, last-wins) picks them up, then the selected geometry renders SEEING
             // those locals (BOSL2logo's `path_sweep(bezpath_curve(sbez))` reads a sibling `sbez = …`). Empty
@@ -784,11 +804,13 @@ fn push_user_module<'a>(
         "$children",
         Value::Num(super::child_count(child_stmts.len())),
     );
-    // `$parent_modules` = the ancestor count BEFORE pushing self (bound now so it's in the memo key + readable
-    // by the body); the module-name push happens on the MISS path below, next to the children frame.
+    // `$parent_modules` = the instantiation-stack size INCLUDING this call (AH.2.5, the
+    // parent_module-tests golden: `print` called from `test` sees 2, so `[1:$parent_modules-1]`
+    // reaches the outermost name). Self isn't pushed yet — the push happens on the MISS path
+    // below, next to the children frame — hence the +1. Bound now so it's in the memo key.
     call.bind(
         "$parent_modules",
-        Value::Num(super::child_count(ctx.module_stack.borrow().len())),
+        Value::Num(super::child_count(ctx.module_stack.borrow().len() + 1)),
     );
     // Dev probe (off unless FAB_CSG_REDUNDANCY=1, J.5.1): the fully-bound `call` frame carries the params +
     // reaching $-context; count repeats vs distinct to gauge the memo ceiling. Suppressed: its `specials()`

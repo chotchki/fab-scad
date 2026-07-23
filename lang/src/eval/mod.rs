@@ -1867,34 +1867,16 @@ fn dispatch_call<'a>(
                 }
                 // O.6: NAMED-ARG rebind — BOSL2 calls the hot predicates with named args (`is_vector(v,
                 // zero=true)`, `unit(v, error=…)`), which the v1 all-positional gate sent to the
-                // interpreter. Mirror `push_call`'s slot filling exactly: positional by position, named
-                // by name (last wins), unknown/extra args dropped UNEVALUATED; a hole evaluates the
-                // param's real DEFAULT expr in the definition `base` (bit-identical to the baked value —
-                // the const guard proved it) or pushes undef for a defaultless slot. Value-sources
-                // evaluate in PARAM order, `push_call`'s own order. `$`-args decline to the interpreter:
-                // their exprs must both evaluate AND inject dynamically, which the flat ABI can't honor.
-                if !args
-                    .iter()
-                    .any(|a| a.name.as_deref().is_some_and(|n| n.starts_with('$')))
-                {
+                // interpreter. [`fill_arg_slots`] mirrors `push_call` exactly (incl. the AH.2.4
+                // lowest-unfilled positional rule); a hole evaluates the param's real DEFAULT expr
+                // in the definition `base` (bit-identical to the baked value — the const guard
+                // proved it) or pushes undef for a defaultless slot. Value-sources evaluate in
+                // PARAM order, `push_call`'s own order. Any INJECTION — a `$`-arg or an unknown
+                // named arg — declines to the interpreter: both must evaluate AND bind into a real
+                // call scope, which the flat ABI can't honor.
+                let (arg_slots, injections) = fill_arg_slots(params, args);
+                if injections.is_empty() {
                     fnprofile::record_intrinsic(name.as_str());
-                    let mut arg_slots: Vec<Option<&'a Expr>> = vec![None; params.len()];
-                    let mut positional = 0;
-                    for arg in args {
-                        match &arg.name {
-                            None => {
-                                if let Some(slot) = arg_slots.get_mut(positional) {
-                                    *slot = Some(&arg.value);
-                                }
-                                positional += 1;
-                            }
-                            Some(n) => {
-                                if let Some(i) = params.iter().position(|p| p.name == *n) {
-                                    arg_slots[i] = Some(&arg.value);
-                                }
-                            }
-                        }
-                    }
                     let base = ctx.island_globals.borrow()[home].clone();
                     tasks.push(Task::Intrinsic {
                         func,
@@ -1977,7 +1959,10 @@ fn dispatch_call<'a>(
 /// an earlier param — rare; defaults are usually constants).
 /// Which explicit-arg expr fills each param slot — `None` = the slot falls to its default/undef.
 type ArgSlots<'a> = Vec<Option<&'a Expr>>;
-/// `$`-args split out of a call: per-call dynamic `$`-var injections, not param-matched.
+/// Args that bind into the call scope OUTSIDE the param slots: `$`-args (per-call dynamic
+/// `$`-var injections) and named args matching NO declared param — upstream binds those as plain
+/// call-scope variables anyway ("variable not specified as parameter" + usable; AH.2.5, the
+/// variable-scope-tests golden's `undeclared_var(d=6)`). `Scope::bind` routes each by prefix.
 type DollarArgs<'a> = Vec<(Rc<str>, &'a Expr)>;
 
 /// Fill each param slot from the call args, LEFT TO RIGHT (AH.2.4, the arg-permutations golden):
@@ -2000,6 +1985,9 @@ fn fill_arg_slots<'a>(params: &'a [Parameter], args: &'a [Arg]) -> (ArgSlots<'a>
             Some(name) => {
                 if let Some(i) = params.iter().position(|p| p.name == *name) {
                     arg_slots[i] = Some(&arg.value);
+                } else {
+                    // No such param — still binds as a call-scope variable (upstream warns + uses).
+                    dollars.push((Rc::clone(name), &arg.value));
                 }
             }
         }
@@ -2745,7 +2733,7 @@ fn eval_top<'a>(stmts: &[&'a Stmt], global: &Scope, ctx: &Ctx<'a>) -> crate::Res
 /// the result for the block's eval so a body-local `module f(){…}` resolves (L.2.8m).
 fn collect_module_defs<'a>(stmts: &[&'a Stmt]) -> loader::ModStore<'a> {
     let mut store = loader::ModStore::new();
-    for stmt in stmts {
+    for stmt in flatten_blocks(stmts) {
         if let StmtKind::ModuleDef { name, params, body } = &stmt.kind {
             store.insert(name.as_str(), (params.as_slice(), body.as_ref()));
         }
@@ -3139,10 +3127,28 @@ pub(crate) fn mesh_of(mut tree: Geo) -> crate::Result<Mesh> {
 /// overwrites a duplicate's expr in place, keeping its position) feeding `ScopeContext::init`, which
 /// evaluates them in that order. The caller evaluates + binds; keeping the ORDER pure makes the
 /// last-assignment-wins + forward-ref-is-undef rules unit-testable without a scope.
+/// The statement list with bare `{ … }` blocks flattened INLINE (AH.2.5, the scope-assignment
+/// golden): upstream "anonymous scopes are not supported" — a bare block is geometry GROUPING,
+/// never a variable scope, so its assignments and nested defs participate in the ENCLOSING
+/// scope's whole-scope last-wins hoist (`{ f=2; }` overwrites an outer `f=1`). Iterative — a
+/// fuzzer-deep block nest must not cost host stack.
+pub(crate) fn flatten_blocks<'a>(stmts: &[&'a Stmt]) -> Vec<&'a Stmt> {
+    let mut out = Vec::new();
+    let mut stack: Vec<&'a Stmt> = stmts.iter().rev().copied().collect();
+    while let Some(s) = stack.pop() {
+        if let StmtKind::Block(inner) = &s.kind {
+            stack.extend(inner.iter().rev());
+        } else {
+            out.push(s);
+        }
+    }
+    out
+}
+
 fn hoisted_assignments<'a>(stmts: &[&'a Stmt]) -> Vec<(&'a str, &'a Expr)> {
     let mut order: Vec<(&'a str, &'a Expr)> = Vec::new();
     let mut index: BTreeMap<&'a str, usize> = BTreeMap::new();
-    for stmt in stmts {
+    for stmt in flatten_blocks(stmts) {
         if let StmtKind::Assignment { name, value } = &stmt.kind {
             if let Some(&i) = index.get(&**name) {
                 order[i].1 = value; // seen: last expr wins, first-occurrence position kept
@@ -3174,7 +3180,7 @@ enum HoistItem<'a> {
 fn hoisted_bindings<'a>(stmts: &[&'a Stmt]) -> Vec<HoistItem<'a>> {
     let mut order: Vec<HoistItem<'a>> = Vec::new();
     let mut index: BTreeMap<&'a str, usize> = BTreeMap::new();
-    for stmt in stmts {
+    for stmt in flatten_blocks(stmts) {
         let (name, item) = match &stmt.kind {
             StmtKind::Assignment { name, value } => (&**name, HoistItem::Assign(name, value)),
             StmtKind::FunctionDef { name, params, body } => (
@@ -3668,7 +3674,9 @@ mod tests {
         // Side-effect parity with the interpreter: dropped args must not advance the rand stream. Each
         // program's echoed draw must equal the interpreted twin's.
         let cases = [
-            "x = point3d([1,2,3], junk=rands(0,1,1)); echo(rands(0,1,1));", // unknown named: dropped
+            // unknown named: BINDS + evaluates since AH.2.5 — the intrinsic declines to the
+            // interpreter (an injection), so both sides draw identically.
+            "x = point3d([1,2,3], junk=rands(0,1,1)); echo(rands(0,1,1));",
             "x = point3d([1,2,3], 0, rands(0,1,1)); echo(rands(0,1,1));", // extra positional: dropped
             "x = point3d(rands(0,1,1), p=[1]); echo(rands(0,1,1));", // overwritten positional: dropped
             "x = point3d(fill=rands(0,1,1)[0], p=[1,undef,3]); echo(rands(0,1,1));", // named DOES evaluate

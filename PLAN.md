@@ -92,6 +92,15 @@ added 2026-07-07.
 - [x] Y.8 - Y.8 - Audit + wire the kernel fuzz coverage
 - [ ] Y.9 - Y.9 - Extend kernel fuzz coverage (csg_tree random-op + new op targets)
 
+## Phase AI - Expression imports: JSON (serde) + DXF dimensions — the last echo-diff family
+  Meta - goldens ready-made (import-json ×2, dim-all → target: echo goldens 94/94, genuine failures = the included.scad fragment only). TWO scope-shaping facts probed 2026-07-23: (1) upstream SORTS JSON keys (nlohmann's std::map — the golden echoes alphabetically, NOT file order), so serde_json's DEFAULT BTreeMap map is the exact match — no preserve_order feature, one lean dep (serde: chotchki's call); (2) import-json-relative-path pins PER-CONTAINING-FILE resolution (a use'd submodule resolves ../../../json/data.json from ITS OWN dir — `loc.filePath().parent_path()` upstream), which fixes the recorded per-run-base-dir divergence for the FUNCTION form (module import() gets the same treatment via the shared need).
+- [ ] AI.1 - value-need plumbing: expression-position `import()` (extension-dispatched builtin); the needs fixpoint carries a RAW-FILE need with from_dir = the CALLING file's dir (island-anchored — thread the island's source dir to the call site); fab-lang stays IO-pure, the io shell + fab-scad readers supply bytes; web/wasm async fixpoint noted (native-first)
+- [ ] AI.2 - JSON → Value: serde_json (default features) — object → sorted-key Value::Object, array → list, number → f64, bool/string direct, null → undef; parse/read errors warn + undef; conformance tests incl. the ☠-data.json unicode-filename case
+- [ ] AI.3 - dxf_dim + dxf_cross: focused DXF group-code parser for DIMENSION (+ LINE for dxf_cross) entities — dxfdim.cc's `type & 7` case split transliterated (0 linear-projected via cos/sin_degrees, aligned, ordinate x/y by type&64, radius, diameter, arc angle); named params like the AG builtins; NOT the geometry-import path
+- [ ] AI.4 - Files-lane readers: the sweep evaluates with the real value-readers so the goldens judge; sustain.yml sparse-checkout += tests/data/json (data.json lives OUTSIDE tests/data/scad — the MCAD lesson, file flavor)
+- [ ] AI.5 - acceptance: import-json ×2 + dim-all match verbatim via the AH lane; census re-run; docs/sustainment.md baseline updated; conformance tests in eval_corpus
+
+
 ## Backlog (not yet phased)
 
 - **Expression-import VALUES: `import("data.json")` → object + `dxf_dim()`/`dxf_cross()` (the last two fixable echo-diff families, 2026-07-23).** Both are import-SUBSYSTEM work, not evaluator gaps: JSON import needs the needs-fixpoint to carry a VALUE need (today it resolves scad sources + meshes only) plus a JSON parser (dep decision: serde_json vs hand-rolled — wasm + dep-policy call for chotchki), and dxf_dim reads dimension entities out of a DXF (the legacy surface next to the J.4.2 import backlog). Goldens exist for both (import-json ×2, dim-all) so acceptance is ready-made. Sequence with the J.4.2.x import items.

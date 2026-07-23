@@ -92,12 +92,6 @@ added 2026-07-07.
 - [x] Y.8 - Y.8 - Audit + wire the kernel fuzz coverage
 - [ ] Y.9 - Y.9 - Extend kernel fuzz coverage (csg_tree random-op + new op targets)
 
-## Phase AL - gen-diff joins the nightly sustainment (the non-obvious-hole watch)
-- [x] AL.1 - gen-diff report header names its oracle (version line via `Openscad::tool_version`)
-- [x] AL.2 - sustain.yml: unconditional build + nightly gen-diff lane vs the NEWEST upstream Linux AppImage (pick-newest from files.openscad.org/snapshots, `--appimage-extract` + `OPENSCAD` env override, xvfb + fonts-liberation)
-- [x] AL.3 - rolling issue updates EVERY night: fresh gen-diff section + carry-over of unmoved BOSL2/openscad sections from the previous body (No-movement fast-path retired)
-- [ ] AL.4 - e2e proof: rewind dispatch green; issue #1 carries the gen-diff section naming the AppImage oracle; docs/sustainment.md covers the lane
-
 ## Backlog (not yet phased)
 
 - **Expression-import VALUES: `import("data.json")` → object + `dxf_dim()`/`dxf_cross()` (the last two fixable echo-diff families, 2026-07-23).** Both are import-SUBSYSTEM work, not evaluator gaps: JSON import needs the needs-fixpoint to carry a VALUE need (today it resolves scad sources + meshes only) plus a JSON parser (dep decision: serde_json vs hand-rolled — wasm + dep-policy call for chotchki), and dxf_dim reads dimension entities out of a DXF (the legacy surface next to the J.4.2 import backlog). Goldens exist for both (import-json ×2, dim-all) so acceptance is ready-made. Sequence with the J.4.2.x import items.

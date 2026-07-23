@@ -1065,3 +1065,13 @@ deferred from J.5.2b on 2026-07-10.
 - [x] AK.2 - harness lens: gen-diff uses the raw oracle Report — echo compares even when the EXPORT fails (2D top level etc.), counted as match-with-asterisk; timeouts stay OracleFailed; RAW timing medians + startup shown (the adjusted median saturated to 0); version-skew rows auto-classified when the program uses multi-letter swizzles
 - [x] AK.3 - THREE cycles run. Findings: (1) `%` background modifier EVALUATES upstream (echoes fire; only geometry is excluded) — our AA.1 assumption that % matched * was oracle-refuted; fixed via GTask::DiscardAbove (evaluate, then drop the subtree geometry) at both the module and if sites; (2) `reverse` is NOT a core builtin ("Ignoring unknown function" upstream — it is BOSL2's) — removed from builtins/generator/pins, census 94/94 unchanged proving BOSL2 unaffected; (3) seed-209-class order gaps were consequence of (1). FINAL: 3000 seeds → 2983 exact echo-match + 17 auto-classified skew + 25 export-fail-with-agreeing-eval + 0 diverged + 0 failed either side. Raw timing: ours 2.4ms vs oracle 55ms/seed (≈ all process startup)
 
+---
+
+## 2026-07-23
+
+## Phase AL - gen-diff joins the nightly sustainment (the non-obvious-hole watch)
+- [x] AL.1 - gen-diff report header names its oracle (version line via `Openscad::tool_version`)
+- [x] AL.2 - sustain.yml: unconditional build + nightly gen-diff lane vs the NEWEST upstream Linux AppImage (pick-newest from files.openscad.org/snapshots, `--appimage-extract` + `OPENSCAD` env override, xvfb + fonts-liberation)
+- [x] AL.3 - rolling issue updates EVERY night: fresh gen-diff section + carry-over of unmoved BOSL2/openscad sections from the previous body (No-movement fast-path retired)
+- [x] AL.4 - e2e proof: rewind dispatch green; issue #1 carries the gen-diff section naming the AppImage oracle; docs/sustainment.md covers the lane
+

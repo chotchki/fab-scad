@@ -92,6 +92,23 @@ added 2026-07-07.
 - [x] Y.8 - Y.8 - Audit + wire the kernel fuzz coverage
 - [ ] Y.9 - Y.9 - Extend kernel fuzz coverage (csg_tree random-op + new op targets)
 
+## Phase AD - Timeout-bucket burn-down: the census's slow tail, profiled first (all ten causes named)
+<!-- Profile (2026-07-23, uncapped release timings + oracle probes): 3 terminate slowly (for-tests 26s +
+     errors-warnings 53s = billion-element ranges ground at RANGE_MAX where upstream warns-and-skips;
+     c-style-infinite 4.6s = our silent 10M break vs upstream's HARD ERROR at exactly 1,000,000 — boundary
+     probed 999,999-ok/1,000,001-error). 6 never terminate: 4 = zero-progress recursion with NO default
+     budget (upstream: instant "Recursion detected"); 1 = the scope_capture SCOPING BUG (dispatch_call
+     checks ctx.functions before scope closures — a let-bound closure must shadow the enclosing function
+     name; upstream returns 5, we loop); 1+issue4172 = guard-economics (100k module guard unreachable
+     behind quadratic per-call costs). 500k mutual closure recursion passes in 0s — speed is not the issue,
+     SEMANTICS of bounded failure are. -->
+- [ ] AD.1 - The `scope_capture` resolution-precedence bug: oracle-probe the call-position precedence table (let-closure vs named function vs builtin; plain non-function variable in call position; module-scope shadowing), then fix `dispatch_call`'s order; function-literal-tests goes green
+- [ ] AD.2 - Zero-progress recursion → "Recursion detected": in-flight cycle detection (same function + env + args re-entered while still evaluating ⇒ upstream-parity error) — deterministic, provably inert for progressing recursion (the 500k chain changes args every call); crash()/issue3118 + kin go green
+- [ ] AD.3 - Range too-many-elements: `range_len > u32::MAX` ⇒ warn + ZERO iterations (upstream's exact behavior, documented in for-tests' own comments); for-tests + errors-warnings-included drop from 26s/53s to fast passes
+- [ ] AD.4 - C-style-for cap: hard error at 1,000,000 iterations ("for loop counter exceeded" class, the probed boundary) replacing the silent RANGE_MAX break; for-c-style-infinite-loop becomes a fast verdict-parity error
+- [ ] AD.5 - Guard economics (chotchki's trade-off): MAX_MODULE_DEPTH 100k vs upstream's effective ~5-8k — lowering is what makes growing-value recursion (recursion-test-vector, issue4172) REACH the guard before the economics kill the run; bring data + recommendation, decide, implement
+- [ ] AD.6 - Re-baseline: census re-sweep (expect ~8 of 10 timeouts → fast passes or verdict-parity errors), sustain nightly carries it; release-worthiness call (v1.0.3?) at the end
+
 ## Backlog (not yet phased)
 
 - **Evaluate the M.3.1 spectral-norm SHORTCUT (chotchki, 2026-07-14).** `Mat3::spectral_norm` uses deterministic power iteration on MᵀM (32 iters + IEEE sqrt) instead of porting Manifold's iterative Jacobi SVD (`svd.h`, ~304 LOC). Justified because `SpectralNorm` is used ONLY for `epsilon *= SpectralNorm` (a tolerance invisible to a transform's output geometry — positions/tris/normals are exact). REVISIT if: (a) a compound-op differential (`transform(x).union(y)`) fails on an epsilon-driven near-degenerate merge tracing to a spectral-norm ULP divergence vs C++, or (b) the M.6 native≡wasm bit-for-bit corpus sweep flags it. Neither bites ⇒ shortcut was worth it (~300 LOC of Jacobi SVD avoided); if it bites ⇒ port `svd.h` verbatim. (Task #4 logged; bridge id-collided with K.2 so tracked here.)

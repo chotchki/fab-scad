@@ -2481,7 +2481,9 @@ fn compile_expr(fb: &mut FunctionBuilder, expr: &Expr, lower: &Lower) -> Result<
                         // silently STOOD IN for the parameter (`r = 5; function inner(r) = r + 1;
                         // inner()` inlined as 6, where upstream is undef). The interpreter binds `undef`
                         // here, which this tier can't represent, so the whole inline declines.
-                        return Err(JitError::Unsupported("unfilled parameter without a default"));
+                        return Err(JitError::Unsupported(
+                            "unfilled parameter without a default",
+                        ));
                     }
                 }
                 let mut stack = lower.inlining.to_vec();

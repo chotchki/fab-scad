@@ -70,11 +70,7 @@ fn echos_with(src: &str, sources: &BTreeMap<PathBuf, String>, jit: bool) -> Vec<
 fn named_arg_calls_fast_eq_jit_end_to_end() {
     let interp = echos(PROBE, false);
     let jit = echos(PROBE, true);
-    assert_eq!(
-        interp.len(),
-        3,
-        "the probe echoes three lines: {interp:?}"
-    );
+    assert_eq!(interp.len(), 3, "the probe echoes three lines: {interp:?}");
     // Each line echoes the named spelling next to its positional twin — they must agree WITHIN a tier…
     for line in interp.iter().chain(&jit) {
         let (named, positional) = line.split_once(", ").expect("two values per echo");

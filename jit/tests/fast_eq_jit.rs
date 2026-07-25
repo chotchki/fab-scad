@@ -242,7 +242,11 @@ fn duplicate_let_binding_declines() {
         compile_function(&names, body).is_err(),
         "a duplicate let name must decline, not compile to the last-wins reading"
     );
-    assert_eq!(interp(&names, body, &[1.0]), 1.0, "interpreter is first-wins");
+    assert_eq!(
+        interp(&names, body, &[1.0]),
+        1.0,
+        "interpreter is first-wins"
+    );
 
     // The fuzzer's actual reproducer (a BOSL2 function it mutated into duplicate `s`/`rho` bindings).
     // OpenSCAD echoes -2.00339 for f(1); the last-wins reading would be exactly -2.

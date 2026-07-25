@@ -226,6 +226,75 @@ fn let_bindings_fast_eq_jit() {
     assert_fast_eq_jit("function f(x) = let(x = x + 10) x * 2;", EDGE);
 }
 
+/// jit_diff fuzz trophy: a REPEATED name inside ONE `let` is FIRST-wins upstream (verified against
+/// OpenSCAD 2026.06.12, which also warns "Ignoring duplicate variable assignment"), matching the
+/// interpreter's AH.2.3 rule. The JIT's `locals` is a `BTreeMap`, so a bare insert did the opposite —
+/// LAST wins — and the fuzzer caught it on a mutated BOSL2 `_squircle_se_exponent` where the two
+/// readings differ by far more than a ULP (-2.0034 vs exactly -2). The JIT can't emit the warning
+/// either, so the fix DECLINES the function outright and the interpreter runs it: parity on the number
+/// AND on the message. Ordinary shadowing (an outer binding, a nested `let`) must still compile.
+#[test]
+fn duplicate_let_binding_declines() {
+    // The reduced case: first wins, so this is 1, not 2.
+    let prog = program("function f(x) = let(a = x, a = x + 1) a;");
+    let (names, body) = func(&prog);
+    assert!(
+        compile_function(&names, body).is_err(),
+        "a duplicate let name must decline, not compile to the last-wins reading"
+    );
+    assert_eq!(interp(&names, body, &[1.0]), 1.0, "interpreter is first-wins");
+
+    // The fuzzer's actual reproducer (a BOSL2 function it mutated into duplicate `s`/`rho` bindings).
+    // OpenSCAD echoes -2.00339 for f(1); the last-wins reading would be exactly -2.
+    let prog = program(
+        "function _squircle_se_exponent(squareness) =
+             let(
+                 s = min(0.998, squareness),
+                 rho = 1 + s*(sqrt(2)-1),
+                 s = min(1.998, squareness),
+                 rho = 1 + s*(sqrt(2)-1),
+                 x = rho / sqrt(1)
+             )
+             log(0.5) / log(x);",
+    );
+    let (names, body) = func(&prog);
+    assert!(compile_function(&names, body).is_err());
+    assert_eq!(interp(&names, body, &[1.0]), -2.003387161984982);
+
+    // NOT over-broad: the same name in a NESTED let, or shadowing a param, is ordinary shadowing and
+    // still compiles bit-identically (the decline is scoped to repeats within ONE binding list).
+    assert_fast_eq_jit("function f(x) = let(a = x) let(a = a + 1) a;", EDGE);
+    assert_fast_eq_jit("function f(a) = let(a = a * 2) a;", EDGE);
+}
+
+/// The SIBLING site the duplicate-`let` trophy exposed: a repeated PARAMETER name. Same
+/// BTreeMap-overwrite root, but a different upstream rule — params are arg-over-default, not
+/// first-wins (`function dd(a, a=5) = a; dd(1)` is `1`; `function g(a, a) = a; g(1, 2)` is `2`), and
+/// this tier never learns WHICH slots the caller filled, so it can't reproduce either. It declines.
+///
+/// Not reachable by the `jit_diff` fuzzer, which is why this needed finding by hand: that harness binds
+/// params positionally, so both tiers land on last-wins and agree. The divergence only appears through
+/// the real dispatch, where an unfilled default rides along in `vals`.
+#[test]
+fn duplicate_param_name_declines() {
+    for src in [
+        "function dd(a, a = 5) = a;",   // the default beat the real arg (5 vs 1)
+        "function g(a, a) = a;",        // both provided — agreed by luck, still can't be modelled
+        "function t(a, b, a = 1) = a;", // non-adjacent repeat
+    ] {
+        let prog = program(src);
+        let (names, body) = func(&prog);
+        assert!(
+            compile_function(&names, body).is_err(),
+            "a repeated parameter name must decline: {src}"
+        );
+    }
+    // Distinct names are untouched — this must not cost ordinary functions their compilation.
+    let prog = program("function ok(a, b) = a * b;");
+    let (names, body) = func(&prog);
+    assert!(compile_function(&names, body).is_ok());
+}
+
 #[test]
 fn scalar_math_builtins_fast_eq_jit() {
     // P.1.4b: `sqrt`/`sin`/`cos`/`abs`/… inline to a call into OUR math (degrees + snapping via trig.rs),

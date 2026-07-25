@@ -14,26 +14,32 @@ use std::path::PathBuf;
 
 use fab_jit::{JitFactory, JitRegistry};
 use fab_lang::{
-    Config, Expr, JitOutcome, NumericJit, NumericJitFactory, Parameter, Program, RandStream,
-    StmtKind, Value, parse, resolve_geometry_from_sources,
+    Config, Expr, JitOutcome, Message, NumericJit, NumericJitFactory, Parameter, Program,
+    RandStream, StmtKind, Value, parse, resolve_geometry_from_sources_full,
 };
 
 /// Named-arg spellings of numeric calls, asserted in-scad against their positional twins — under the
-/// JIT the named call must take the SAME path and produce the SAME bits, or the assert raises and the
-/// resolve errors. `holes` exercises a named arg PLUS a defaulted hole (the default evaluates
-/// interpreter-side and lands in `vals` before the hook sees them).
+/// JIT the named call must take the SAME path and produce the SAME VALUE. `poly` exercises a named arg
+/// PLUS a defaulted hole (the default evaluates interpreter-side and lands in `vals` before the hook
+/// sees them).
+///
+/// The values are ECHOED, not `assert`ed. An in-scad `assert` is useless as a gate here: a failing
+/// top-level assert does NOT make `resolve_geometry_from_sources` return `Err` (verified — a bare
+/// `assert(1 == 2)` still resolves `Ok`), so the original assert-based version of this test passed
+/// whatever the JIT returned. Comparing the echo text against the interpreter's own is what actually
+/// fails when a tier diverges.
 const PROBE: &str = "\
 function poly(x, k = 3) = x*x + k;
 function hyp(a, b) = sqrt(a*a + b*b);
-assert(poly(x = 5) == poly(5), \"named == positional (defaulted hole)\");
-assert(poly(k = 10, x = 2) == poly(2, 10), \"named out of order == positional\");
-assert(hyp(b = 4, a = 3) == hyp(3, 4), \"two named, swapped order\");
+echo(poly(x = 5), poly(5));
+echo(poly(k = 10, x = 2), poly(2, 10));
+echo(hyp(b = 4, a = 3), hyp(3, 4));
 cube(1);
 ";
 
 /// Run `src` through the full loader/eval pipeline (no fs, no imports), with or without the real
-/// Cranelift factory. `Ok` means every in-scad assert held.
-fn run(src: &str, jit: bool) -> fab_lang::Result<fab_lang::Geo> {
+/// Cranelift factory, returning its ECHO lines in order.
+fn echos(src: &str, jit: bool) -> Vec<String> {
     let sources: BTreeMap<PathBuf, String> = BTreeMap::new();
     let factory = JitFactory;
     let hook: Option<&dyn NumericJitFactory> = jit.then_some(&factory);
@@ -41,17 +47,38 @@ fn run(src: &str, jit: bool) -> fab_lang::Result<fab_lang::Geo> {
         jit,
         ..Config::default()
     };
-    resolve_geometry_from_sources(src, &sources, hook, config, |path| {
-        Err(fab_lang::Error::Load(format!(
-            "probe has no imports, asked for {path}"
-        )))
-    })
+    let (_, messages) =
+        resolve_geometry_from_sources_full(src, &sources, hook, config, |path| {
+            Err(fab_lang::Error::Load(format!(
+                "probe has no imports, asked for {path}"
+            )))
+        })
+        .expect("the probe resolves");
+    messages
+        .iter()
+        .filter_map(|m| match m {
+            Message::Echo(s) => Some(s.clone()),
+            _ => None,
+        })
+        .collect()
 }
 
 #[test]
 fn named_arg_calls_fast_eq_jit_end_to_end() {
-    run(PROBE, false).expect("interpreter baseline: the asserts are tautologies there");
-    run(PROBE, true).expect("JIT: named-arg spellings must be bit-identical to positional ones");
+    let interp = echos(PROBE, false);
+    let jit = echos(PROBE, true);
+    assert_eq!(
+        interp.len(),
+        3,
+        "the probe echoes three lines: {interp:?}"
+    );
+    // Each line echoes the named spelling next to its positional twin — they must agree WITHIN a tier…
+    for line in interp.iter().chain(&jit) {
+        let (named, positional) = line.split_once(", ").expect("two values per echo");
+        assert_eq!(named, positional, "named != positional in {line:?}");
+    }
+    // …and the JIT must reproduce the interpreter's lines exactly.
+    assert_eq!(jit, interp, "JIT echo diverged from the interpreter");
 }
 
 /// `(name, params, body)` + `(name, value)` collectors over a parsed program (the corpus_diff shape).

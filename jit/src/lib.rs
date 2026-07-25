@@ -1356,6 +1356,25 @@ fn define_one(
     globals: &Globals,
     helpers: &Helpers,
 ) -> Result<(FuncId, Ret), JitError> {
+    // A REPEATED parameter name declines before any codegen. This tier sees only the flat `vals` array,
+    // never WHICH slots the caller actually filled, so it cannot reproduce the interpreter's two-phase
+    // bind (`Task::Apply`: every unprovided name first, then every provided one — so a real arg beats a
+    // later duplicate's default). Two ways that went wrong, both wrong ANSWERS on valid input:
+    // `function dd(a, a=5) = a; dd(1)` → the `index` BTreeMap overwrite resolves `a` to the LAST slot, so
+    // the unfilled default 5 won where upstream says 1; and with mixed shapes a vector param lands in
+    // `locals` while its like-named scalar lands in `index`, which the `Ident` arm reads second, so
+    // `mm([1,2], 3)` yielded the VECTOR where upstream says 3. Declining hands both back to the
+    // interpreter. Sibling of the duplicate-`let` decline below — same BTreeMap-overwrite root, different
+    // upstream rule (params are arg-over-default, NOT first-wins), which is exactly why one guard can't
+    // serve both. Note the `jit_diff` fuzzer is BLIND here: it binds params positionally, so both tiers
+    // land on last-wins and agree — this needs a dispatch-level differential to catch.
+    if params
+        .iter()
+        .enumerate()
+        .any(|(i, (name, _))| params[..i].iter().any(|(prior, _)| prior == name))
+    {
+        return Err(JitError::Unsupported("duplicate parameter name"));
+    }
     let cl = |e: ModuleError| JitError::Cranelift(e.to_string());
     let ptr_ty = module.target_config().pointer_type();
     let mut ctx = module.make_context();
@@ -2339,11 +2358,23 @@ fn compile_expr(fb: &mut FunctionBuilder, expr: &Expr, lower: &Lower) -> Result<
         // no store, no slot. The body sees every binding. (Unlocks the 24.8% `let` blocker.)
         ExprKind::Let { bindings, body } => {
             let mut locals = lower.locals.clone();
+            let mut bound: Vec<&str> = Vec::with_capacity(bindings.len());
             for b in bindings {
                 let name = b
                     .name
                     .as_deref()
                     .ok_or(JitError::Unsupported("let binding without a name"))?;
+                // A REPEATED name inside ONE `let` is first-wins upstream (AH.2.3, matching the
+                // interpreter's `Task::LetStep`) AND emits an "Ignoring duplicate variable assignment"
+                // warning — a message this tier has no way to raise. A bare `locals.insert` did the
+                // opposite (BTreeMap overwrite = LAST wins), which is the jit_diff divergence. Getting the
+                // NUMBER right would still swallow the warning, so DECLINE the whole function instead and
+                // let the interpreter run it — the same treatment `echo` gets, and parity on both axes.
+                // Only same-`let` repeats: shadowing an OUTER binding is ordinary and stays compiled.
+                if bound.contains(&name) {
+                    return Err(JitError::Unsupported("duplicate name in one let"));
+                }
+                bound.push(name);
                 let scoped = Lower {
                     locals: &locals,
                     ..*lower

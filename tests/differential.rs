@@ -614,6 +614,27 @@ fn echo_output_matches_the_oracle() {
     agree_echo("echo([1.5, \"a\", true, undef]);"); // heterogeneous list
 }
 
+#[test]
+fn duplicate_binding_rules_match_the_oracle() {
+    // The CONTRACT half of the jit_diff fuzz trophy: a repeated name inside ONE `let` is FIRST-wins
+    // upstream, but a repeated PARAMETER is LAST-wins — two OPPOSITE rules that look like one problem,
+    // which is exactly how the JIT got it wrong (a `BTreeMap` insert is right for params, backwards for
+    // `let`). These cases nail the rules to the real binary so neither can drift. Scope note: the driver
+    // evaluates with `jit: false`, so this is the INTERPRETER vs the oracle — the JIT-tier half of the
+    // trophy is pinned separately by `fast_eq_jit::duplicate_let_binding_declines`.
+    agree_echo("echo(let(a = 1, a = 2) a);"); // first wins → 1
+    agree_echo("echo([for (i = [0:0]) let(a = 1, a = 2) a]);"); // same rule in a comprehension
+    agree_echo("function g(a, a) = a; echo(g(1, 2));"); // params: LAST wins → 2
+    agree_echo("echo(let(a = 1) let(a = 2) a);"); // ordinary shadowing is untouched → 2
+    // The reduced trophy body itself: the two readings differ far past a ULP (-2.0034 vs exactly -2).
+    agree_echo(
+        "function sq(s) = let(x = min(0.998, s), r = 1 + x*(sqrt(2)-1),
+                              x = min(1.998, s), r = 1 + x*(sqrt(2)-1))
+                          log(0.5) / log(r);
+         echo(sq(1));",
+    );
+}
+
 // ─────────────────────── enforcement (the discipline, AS tests) ──────────────────────────────────
 
 #[test]

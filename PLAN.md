@@ -10,6 +10,29 @@ dead. Cardinal rule unchanged: nothing deleted before it's archived AND validate
 Driven by `claude-plan-bridge` (FORMATv2). Hand-authored; run
 `claude-plan-bridge baseline` after a rewrite to resync the state file.
 -->
+## Phase AN - Tier binding-semantics divergences (the jit_diff trophy's family: who wins a repeated name)
+- [x] AN.1 - JIT: decline a duplicate `let` binding name (the jit_diff trophy — upstream is first-wins + warns)
+- [x] AN.2 - JIT: decline a duplicate PARAMETER name — dd(a,a=5) gave 5, upstream 1; mm([1,2],3) gave the vector, upstream 3
+- [ ] AN.3 - JIT inlining: an unfilled defaultless param falls through to a like-named GLOBAL instead of undef (outer(1) → 7, upstream undef)
+- [ ] AN.4 - JIT inlining: positional args use a monotonic counter, not lowest-unfilled-slot, so a positional clobbers an earlier named arg (callit(1) → 27, upstream 12)
+- [ ] AN.5 - JIT globals are the ROOT's flat constant view, so a root assignment overrides a `use`d library's own constant inside that library's functions
+- [ ] AN.6 - interp: duplicate parameter DEFAULTS resolve last-declared; upstream is FIRST-declared (g(a=5,a,a=9) → 9, upstream 5)
+- [ ] AN.7 - interp: statement-level `let(a=1,a=2)` is LAST-wins; expression-level is correctly first-wins (AH.2.3 never reached geo_stack.rs)
+- [ ] AN.8 - interp: C-style comprehension `for(init; cond; update)` skips the first-wins duplicate rule in BOTH lists (yields [] / [0] where upstream yields [0,1,2])
+- [ ] AN.9 - interp: an UNNAMED positional let/for binding binds a real, readable variable named `_`, clobbering a user's `_`
+- [ ] AN.10 - intrinsics: is_vector's `all_nonzero` PARAMETER shadows the like-named FUNCTION in call position; the intrinsic hardcodes the function
+- [ ] AN.11 - intrinsics: the const guard is checked only in the entry's home island, but the native also bakes its DEPS' constant defaults
+- [ ] AN.12 - diagnostics: the upstream duplicate-binding WARNINGS are missing at call sites/assignments (values agree — diagnostics-only)
+- [ ] AN.13 - harness gap: jit_diff binds params positionally so it is BLIND to dispatch-level binding bugs; add a dispatch-level differential + make diff_echo compare WARNINGS, not just ECHO lines
+## Phase AO - Generated-model PERF differential vs OpenSCAD (the heavy lane — today's corpus is too trivial to time)
+- [ ] AO.1 - Parameterize the generator's bounds into a Profile — `cheap` (today's gen-diff constants, unchanged bit-for-bit) vs `heavy` (dialed); same seed replays deterministically per profile
+- [ ] AO.2 - Heavy profile: geometry-weighted grammar (high-$fn primitives, deep boolean trees, extrudes over many-vertex profiles, comprehension-driven polyhedra); value-only statements suppressed as timing noise
+- [ ] AO.3 - Blowup guards for the heavy lane: hard cap on minkowski/hull nesting + per-seed oracle timeout + Config::eval_budget set, so one seed can't eat the nightly
+- [ ] AO.4 - Kill the startup confound: scale the dial until oracle wall time is >=1s (55ms fork drops under 5%), and report RAW alongside startup-adjusted instead of only the adjusted median that saturated to 0 in AK.2
+- [ ] AO.5 - Cold-render discipline: fab timings run on a FRESH SolidStore / FAB_CSG_CACHE=0 (the W.3.17 cache-warm trap — generated seeds repeat shapes, so a warm cache measures re-renders not renders)
+- [ ] AO.6 - Correctness gates the timing: a timed seed must first AGREE with the oracle (echo + geometry residual, viable now that S.4 closed) — a fast wrong answer scores nothing
+- [ ] AO.7 - Publish a SCALING CURVE (time vs complexity dial), not a single median — shows where we win/lose asymptotically; lands with K.4's per-run artifacts next to the divergence trend
+- [ ] AO.8 - Wire the heavy lane into nightly sustainment beside gen-diff (AL.2) on its own slower cadence; keep it distinct from the REAL-model perf (perf/baseline.json, L.5.6) — generated buys unbiased shape coverage + scaling, real models buy representativeness
 ## Phase K - scad-rs: differential harness + semantics corpus
 - [ ] K.1 - Harness v1: both engines, metric gate per model class, corpus tiers 1-3 wired in CI (OpenSCAD suite, BOSL2 tests, models/)
   - [x] K.1.1 - K.1.1 - BOSL2 test corpus tier: sweep the .scadtest suite through scad-rs

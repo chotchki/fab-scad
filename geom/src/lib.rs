@@ -134,7 +134,10 @@ pub fn render_scad_stl(main: &str, libs_json: &str) -> Result<Vec<u8>, JsError> 
     let mut store = SolidStore::new(0);
     match handle_with_store(&mut store, req) {
         Response::Rendered { stl, .. } => Ok(stl),
-        Response::Failed { error } => Err(JsError::new(&error)),
+        // `..` because `Failed` also carries the W.3.37 editor `line`, which this bench path has no use
+        // for. Without it this arm is an E0027 — and since nothing builds `--features bench` in CI, the
+        // crate has simply not compiled under that feature since `line` landed.
+        Response::Failed { error, .. } => Err(JsError::new(&error)),
         _ => Err(JsError::new("render_scad_stl: unexpected response variant")),
     }
 }

@@ -168,8 +168,14 @@ fn label(src: &str) -> Label {
 }
 
 fn class_of(e: &Error) -> &'static str {
-    match e {
+    // Peel the W.3.37 `Spanned` wrapper first — matching the raw error sent EVERY span-stamped fault
+    // (which is every fatal one the eval driver unwinds) into the catch-all, so the whole label set read
+    // `err_other`. `src/corpus.rs::classify` has always peeled; this one drifted.
+    match e.root() {
         Error::Parse(_) => "err_parse",
+        // A failed user `assert` is its own class, not generic eval: it means the MATH diverged, which is
+        // the signal this generator exists to find.
+        Error::Assert(_) => "err_assert",
         Error::Eval(_) => "err_eval",
         Error::Lower(_) => "err_lower",
         Error::Load(_) => "err_load",

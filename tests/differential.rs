@@ -698,7 +698,9 @@ function is_vector(v, length, zero, all_nonzero=false, eps=_EPSILON) =
     agree_echo(&format!(
         "{BOSL2_SHAPED}echo(is_vector([1, 2], all_nonzero = true), is_vector([1, 0], all_nonzero = true));"
     ));
-    agree_echo(&format!("{BOSL2_SHAPED}echo(is_vector([1, 2]), is_vector([]));"));
+    agree_echo(&format!(
+        "{BOSL2_SHAPED}echo(is_vector([1, 2]), is_vector([]));"
+    ));
 }
 
 #[test]
@@ -723,6 +725,15 @@ fn duplicate_binding_warnings_match_the_oracle() {
     agree_warnings("function f(a, b) = [a, b]; echo(f(a = 1, a = 2));"); // supplied more than once
     agree_warnings("function f(a, b) = [a, b]; echo(f(1, a = 2));"); // overrides positional argument
     agree_warnings("function f(a, b) = [a, b]; echo(f(1, 2, 3));"); // Too many unnamed arguments
+    // Overflow warns ONCE PER CALL, not once per surplus arg — the single-extra case above passed
+    // even while the walk emitted per-argument, so it took a two-extra call to expose it.
+    agree_warnings("module m(x) { echo(x); } m(1, 2, 3);");
+    agree_warnings("module m(x) { echo(x); } m(1, 2, 3, 4, 5);");
+    agree_warnings("function f(a) = a; echo(f(1, 2, 3, 4));");
+    // …and it keeps its POSITION among the named-arg diagnostics: whichever event the argument list
+    // reaches first is printed first, so these two orders are opposites.
+    agree_warnings("module m(a) { echo(a); } m(1, x = 9, 2, 3);"); // not-specified, THEN overflow
+    agree_warnings("module m(a) { echo(a); } m(1, 2, x = 9);"); // overflow, THEN not-specified
     agree_warnings("function g() = 1; echo(g(x = 1));"); // not specified as parameter
     agree_warnings("function g() = 1; echo(g($x = 1));"); // a $-arg is EXEMPT — no warning at all
     agree_warnings("function f(a, b) = [a, b]; echo(f(a = 1, 2));"); // no warning: 2 takes b
@@ -735,6 +746,54 @@ fn duplicate_binding_warnings_match_the_oracle() {
                           log(0.5) / log(r);
          echo(sq(1));",
     );
+}
+
+#[test]
+fn a_parameter_shadowed_by_a_literal_warns_like_the_oracle() {
+    // AN.15.2. Upstream fires this when a module body assigns one of its OWN parameter names to a
+    // statically-decidable value — the argument the caller passed is dead before the body reads it.
+    agree_warnings("module m(x = 1) { x = 5; echo(x); } m();");
+    agree_warnings("module m(x) { x = 5; echo(x); } m();"); // a defaultless param counts too
+    agree_warnings("module m(x = 1) { { x = 5; } echo(x); } m();"); // a bare block FOLDS IN
+    agree_warnings("module m(x = 1) { x = 5; echo(x); } m(); m();"); // once per INSTANTIATION, not per module
+    // Order is the body's FIRST-occurrence order, not the parameter declaration order.
+    agree_warnings("module m(x = 1, y = 2) { y = 6; x = 5; echo(x, y); } m();");
+    // The two silences that pin what "a literal" means. A binary op never qualifies however constant
+    // it looks, and the check reads the HOISTED (last-wins) expression — so which of the two
+    // assignments comes last decides it, and only one of these two programs warns.
+    agree_warnings("y = 1; module m(x = 0) { x = y + 1; echo(x); } m();"); // silent: not a literal
+    agree_warnings("y = 1; module m(x = 0) { x = y + 1; x = 5; echo(x); } m();"); // warns: last IS
+    agree_warnings("y = 1; module m(x = 0) { x = 5; x = y + 1; echo(x); } m();"); // silent: last is NOT
+    // Unary ops forward to their operand; a vector/range needs EVERY element literal.
+    agree_warnings("module m(x = 0) { x = -5; echo(x); } m();");
+    agree_warnings("module m(x = 0) { x = [1, 2]; echo(x); } m();");
+    agree_warnings("y = 1; module m(x = 0) { x = [1, y]; echo(x); } m();"); // silent
+    // Two scopes that do NOT collide: an `if` branch is its own, and a FUNCTION has no such warning.
+    agree_warnings("module m(x = 1) { if (true) { x = 5; echo(x); } } m();"); // silent
+    agree_warnings("function f(x = 1) = let(x = 5) x; echo(f());"); // silent
+    // Against the AN.14 call-site diagnostics: those come FIRST, so this pins the interleaving of two
+    // independently-emitted warning families, not just each one's presence.
+    agree_warnings("module m(x) { x = 5; echo(x); } m(1, 2, 3);");
+    agree_warnings("module m(x) { x = 5; echo(x); } m(q = 9);");
+}
+
+#[test]
+fn an_overwritten_assignment_warns_like_the_oracle() {
+    // AN.15.1. A STATIC pass, which these cases are chosen to prove rather than assume: the message
+    // names the FIRST assignment's line, so a real line table has to reach the emission point.
+    agree_warnings("a = 1;\nb = 2;\na = 3;\necho(a);");
+    agree_warnings("a = 1;\na = 2;\na = 3;\necho(a);"); // twice, BOTH citing line 1
+    agree_warnings("module m() { a = 1;\na = 3; }"); // an UNCALLED body — eval could never see this
+    agree_warnings("echo(\"first\");\na = 1;\na = 2;"); // lands AHEAD of an echo on line 1
+    // Emission order is the OVERWRITING site's, across scopes — `b` (line 2) before `a` (line 3),
+    // though `a`'s scope is the outer one. A scope-at-a-time walk would print these backwards.
+    agree_warnings("a = 1;\nmodule m() { b = 1; b = 2; }\na = 2;");
+    // Scope boundaries: an `if` branch and a module body are their own, a bare block is NOT.
+    agree_warnings("a = 1;\nif (true) { a = 2; echo(a); }\necho(a);"); // silent
+    agree_warnings("a = 1;\nmodule m() { a = 2; }\necho(a);"); // silent
+    agree_warnings("a = 1;\n{ a = 2; }\necho(a);"); // warns — the block folds in
+    agree_warnings("if (true) { a = 1; a = 2; echo(a); }"); // each nested scope scanned on its own
+    agree_warnings("translate([0, 0, 0]) { a = 1; a = 2; cube(a); }"); // children are a scope too
 }
 
 // ─────────────────────── enforcement (the discipline, AS tests) ──────────────────────────────────

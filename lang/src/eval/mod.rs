@@ -37,6 +37,7 @@ mod ops;
 mod redundancy;
 pub(crate) mod rng;
 mod scope;
+mod static_diag;
 mod text;
 mod trace;
 mod trig;
@@ -1405,7 +1406,11 @@ fn eval_with_global<'a>(
                     }
                     // AH.2.3: a duplicate of a name already bound in this SAME let is IGNORED (first
                     // wins, upstream warns) — the RHS still evaluated above, only the bind is dropped.
-                    Some(name) if bindings[..idx].iter().any(|b| b.name.as_ref() == Some(name)) => {
+                    Some(name)
+                        if bindings[..idx]
+                            .iter()
+                            .any(|b| b.name.as_ref() == Some(name)) =>
+                    {
                         ctx.messages.borrow_mut().push(Message::Warning(format!(
                             "Ignoring duplicate variable assignment \"{name}\" = {}",
                             fmt::format_value(&raw)
@@ -2361,6 +2366,12 @@ fn fill_arg_slots<'a>(
     let mut filled_by: Vec<Option<FilledBy>> = vec![None; params.len()];
     let mut dollars: Vec<(Rc<str>, &'a Expr)> = Vec::new();
     let mut diagnostics = ArgDiagnostics::new();
+    // Upstream warns about overflow ONCE PER CALL, not once per surplus argument: `m(1,2,3)` and
+    // `m(1,2,3,4,5)` against a one-param module each print exactly one line. Emitting on the FIRST
+    // overflow (and muting the rest) also keeps its POSITION right — the warning interleaves with the
+    // named-arg diagnostics by argument order, so `m(1, x=9, 2, 3)` prints the `x` line first while
+    // `m(1, 2, x=9)` prints the overflow first.
+    let mut overflowed = false;
     for arg in args {
         match &arg.name {
             None => match arg_slots.iter().position(Option::is_none) {
@@ -2368,15 +2379,21 @@ fn fill_arg_slots<'a>(
                     arg_slots[i] = Some(&arg.value);
                     filled_by[i] = Some(FilledBy::Positional);
                 }
-                None => diagnostics.push("Too many unnamed arguments supplied".to_string()),
+                None if !overflowed => {
+                    overflowed = true;
+                    diagnostics.push("Too many unnamed arguments supplied".to_string());
+                }
+                None => {}
             },
             // a $-arg is a per-call dynamic override — injected into the call scope, not param-matched.
             Some(name) if name.starts_with('$') => dollars.push((Rc::clone(name), &arg.value)),
             Some(name) => {
                 if let Some(i) = params.iter().position(|p| p.name == *name) {
                     match filled_by[i] {
-                        Some(FilledBy::Named) => diagnostics
-                            .push(format!("argument \"{name}\" supplied more than once")),
+                        Some(FilledBy::Named) => {
+                            diagnostics
+                                .push(format!("argument \"{name}\" supplied more than once"));
+                        }
                         Some(FilledBy::Positional) => diagnostics
                             .push(format!("argument \"{name}\" overrides positional argument")),
                         None => {}
@@ -2698,6 +2715,23 @@ pub fn evaluate_geometry_metered(program: &Program, budget: u64) -> (crate::Resu
     (result, ctx.eval_steps.get())
 }
 
+/// The `island_globals` a fresh [`Ctx`] starts with: one placeholder scope per island.
+///
+/// Island 0 (the root) is filled by `run_stmts` and the rest are built right after the `Ctx` exists, but
+/// each placeholder already carries its island's FILE DIR (AI.1) — a root CONSTANT that calls a
+/// use-island function during the root hoist (the L.2.8a ordering gap) sees the placeholder as its
+/// lexical base, and the dir is a constant of the FILE, so it has to be there even that early.
+fn placeholder_island_globals(islands: &loader::Islands<'_>, preview: bool) -> Vec<Scope> {
+    islands
+        .iter()
+        .map(|isl| {
+            let mut s = Scope::new_with_preview(preview);
+            bind_file_dir(&mut s, &isl.dir);
+            s
+        })
+        .collect()
+}
+
 /// Resolve `source` against caller-supplied source tables to a [`Resolution`] — the PURE inner step of the
 /// needs fixpoint (M.4). ZERO IO: it consults `scad_sources` (the `use`/`include` graph the shell has read
 /// so far) and `files` (the `import`/`surface` meshes) and NAMES what's still missing. Three outcomes,
@@ -2775,23 +2809,15 @@ fn resolve_source(
         functions,
         intrinsics,
         jit,
-        // Island 0 (root) is filled by `run_stmts`; the rest are seeded empty and built just below.
-        // Each placeholder carries its island's FILE DIR already (AI.1): a root CONSTANT calling a
-        // use-island function during the root hoist (the L.2.8a ordering gap) sees the placeholder
-        // as its lexical base — the dir is a constant of the FILE, so it must be there even then.
-        island_globals: RefCell::new(
-            islands
-                .iter()
-                .map(|isl| {
-                    let mut s = Scope::new_with_preview(config.preview);
-                    bind_file_dir(&mut s, &isl.dir);
-                    s
-                })
-                .collect(),
-        ),
+        island_globals: RefCell::new(placeholder_island_globals(&islands, config.preview)),
         islands,
         closures: RefCell::default(),
-        messages: RefCell::default(),
+        // AN.15.1 — the STATIC warnings are the log's first ENTRIES, not its first emissions: upstream
+        // raises them as the parser reduces, ahead of all console output. Seeding here reproduces that.
+        messages: RefCell::new(static_diag::overwritten_assignments(
+            loaded.root_stmts(),
+            source,
+        )),
         root_override: RefCell::default(),
         files: Some(files),
         file_needs: RefCell::default(),

@@ -115,6 +115,16 @@ pub(super) struct Loaded {
     programs: Vec<Node>,
 }
 
+impl Loaded {
+    /// The ROOT file's own statements — node 0, BEFORE `include` splicing. The static-diagnostics pass
+    /// (AN.15.1) needs exactly this: `flatten`'s executable stream mixes in every included file's
+    /// statements, whose spans index THEIR source, not the root's, so resolving a line against the root
+    /// text there would name an unrelated line. Scanning node 0 alone keeps every span on one line table.
+    pub(super) fn root_stmts(&self) -> &[Stmt] {
+        self.programs.first().map_or(&[], |n| &n.program.stmts)
+    }
+}
+
 /// Whether a scanned top-level file-reference statement was a `use` or an `include`.
 enum RefKind {
     Include,

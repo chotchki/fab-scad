@@ -19,7 +19,7 @@ use super::{
     transform_of, union_of,
 };
 use crate::geom::{Affine, Rgba};
-use crate::parser::StmtKind;
+use crate::parser::{Parameter, StmtKind};
 
 /// Which CSG boolean — a name-free tag so [`Combinator`] carries no lifetime.
 #[derive(Clone, Copy)]
@@ -790,6 +790,31 @@ fn dispatch_module<'a>(
     }
 }
 
+/// Warn for each of `body`'s assignments that shadows one of the module's own PARAMETERS with a literal
+/// (`Parameter "x" is overwritten with a literal`) — the argument the caller passed is dead, statically.
+///
+/// Runs over the HOISTED view of the body, which is the whole subtlety: upstream checks the deduped
+/// scope, so `x = y+1; x = 5` warns (last expr wins, and it IS a literal) while `x = 5; x = y+1` stays
+/// silent, and two shadowed params report in FIRST-occurrence order regardless of which was declared
+/// first. [`hoisted_assignments`](super::hoisted_assignments) already implements exactly that rule, so
+/// the check is a filter over it rather than a second walk with its own idea of precedence.
+///
+/// Scope is the body's flattened top level only: a bare `{ }` folds in, but an `if` branch is its own
+/// scope and never warns. Modules only — the function-call path has no such warning upstream.
+fn warn_params_overwritten<'a>(params: &'a [Parameter], body: &'a Stmt, ctx: &Ctx<'a>) {
+    // Overwhelmingly the common case: a body that assigns nothing, or no parameter to collide with.
+    if params.is_empty() {
+        return;
+    }
+    for (name, value) in super::hoisted_assignments(&[body]) {
+        if value.is_literal() && params.iter().any(|p| &*p.name == name) {
+            ctx.warn(format!(
+                "Parameter \"{name}\" is overwritten with a literal"
+            ));
+        }
+    }
+}
+
 /// B1 — schedule a USER-module call on the work stack (the recursion-removing analogue of `call_user_module`).
 /// The setup is EAGER + ordering-sensitive (the depth guard, the `$children`/`$parent_modules` binds, the three
 /// `Ctx` frame pushes), exactly mirroring the recursive path; then it pushes bottom→top `PopModuleFrame{depth}`
@@ -827,6 +852,11 @@ fn push_user_module<'a>(
     // defining scope as `base` instead); args, though, bind in the CALLER's scope.
     let home_global = base.unwrap_or_else(|| ctx.island_globals.borrow()[home].clone());
     let mut call = super::bind_module_scope(params, &mi.args, &caller, &home_global, ctx)?;
+    // AN.15.2 — `Parameter "x" is overwritten with a literal`: the body assigns a name that is also one of
+    // this module's parameters, with a statically-decidable RHS, so the passed argument is dead on arrival.
+    // Emitted HERE, before the CSG memo below, because upstream fires it once per INSTANTIATION (two calls,
+    // two warnings) — a memo hit skips the body, and this warning is about the call, not the body's output.
+    warn_params_overwritten(params, body, ctx);
     // `$children` = the call-site child count; the children are stashed for `children()` to render LATE in the
     // CALLER's scope + island. Lone-`;` empties AND child-block assignments are NOT children (either would
     // misalign the count + `children(i)`); the assignments are kept separately so their bindings still reach

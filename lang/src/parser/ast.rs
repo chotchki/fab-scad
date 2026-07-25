@@ -157,6 +157,40 @@ pub struct Expr {
     pub span: Span,
 }
 
+impl Expr {
+    /// Is this expression a compile-time LITERAL — upstream's `Expression::isLiteral()` virtual?
+    ///
+    /// A pure syntax question (no eval, no scope), which is why it lives on the AST. Only one caller
+    /// today: the `Parameter "x" is overwritten with a literal` warning, which upstream fires only when
+    /// the shadowing assignment can be decided statically. The rules are upstream's, each oracle-checked:
+    /// a scalar literal is one; a UNARY op forwards to its operand (`-5` and `!true` warn, so does `--5`);
+    /// a vector or range is one iff EVERY element is (`[1,2]` warns, `[1,y]` does not); and a BINARY op
+    /// never is, however constant it looks (`1+1` does not warn). Everything else — a call, an index, a
+    /// comprehension, an identifier, `$fn` — is not.
+    /// Walks an explicit stack rather than the host one: an `Expr` tree is attacker-shaped (a vector of
+    /// vectors nests as deep as the source says), and this crate's rule is that AST walks don't recurse.
+    #[must_use]
+    pub fn is_literal(&self) -> bool {
+        let mut stack = vec![self];
+        while let Some(expr) = stack.pop() {
+            match &expr.kind {
+                ExprKind::Num(_) | ExprKind::Str(_) | ExprKind::Bool(_) | ExprKind::Undef => {}
+                ExprKind::Unary { operand, .. } => stack.push(operand),
+                ExprKind::Vector(items) => stack.extend(items.iter()),
+                ExprKind::Range { start, step, end } => {
+                    stack.push(start);
+                    stack.push(end);
+                    stack.extend(step.as_deref());
+                }
+                // Anything with a runtime component — a call, an index, an identifier, a comprehension,
+                // and notably a BINARY op however constant it looks — makes the whole tree non-literal.
+                _ => return false,
+            }
+        }
+        true
+    }
+}
+
 /// The classification of an expression (parser.y:334-567).
 ///
 /// `Default` (= [`ExprKind::Undef`]) exists only so the non-recursive [`Drop`] for [`Expr`] can

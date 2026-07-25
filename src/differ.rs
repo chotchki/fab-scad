@@ -285,18 +285,41 @@ impl Driver for FabLang {
         ))
     }
     fn echo(&self, scad: &str) -> Vec<String> {
-        fab_lang::evaluate_full(scad)
-            .map(|e| {
-                e.echos()
-                    .into_iter()
-                    .map(|c| format!("ECHO: {c}"))
-                    .collect()
+        Self::messages(scad)
+            .iter()
+            .filter_map(|m| match m {
+                fab_lang::Message::Echo(c) => Some(format!("ECHO: {c}")),
+                fab_lang::Message::Warning(_) => None,
             })
-            .unwrap_or_default()
+            .collect()
     }
     fn warnings(&self, scad: &str) -> Vec<String> {
-        fab_lang::evaluate_full(scad)
-            .map(|e| e.warnings().into_iter().map(normalize_warning).collect())
+        Self::messages(scad)
+            .iter()
+            .filter_map(|m| match m {
+                fab_lang::Message::Warning(c) => Some(normalize_warning(c)),
+                fab_lang::Message::Echo(_) => None,
+            })
+            .collect()
+    }
+}
+
+impl FabLang {
+    /// The console messages `scad` produces, through the geometry-TREE entry point.
+    ///
+    /// The tree, NOT `evaluate_full`'s mesh, and that distinction is load-bearing: `evaluate_full`
+    /// flattens through the no-backend `mesh_of`, which LOUD-rejects any 3D tree carrying a transform
+    /// or a boolean — so `translate(…) { … }` errored, the error became an empty `Vec` below, and both
+    /// console channels reported "no output" for a program that had plenty. Indistinguishable from a
+    /// genuine silence, which is how it survived: a case where the oracle is ALSO quiet passes
+    /// vacuously. AN.15.1's `translate` case was the first to put a warning behind a transform and
+    /// catch it. `evaluate_geometry_full` never flattens, so the messages come back for any program.
+    ///
+    /// The `unwrap_or_default` remains a known soft spot — a fab-lang error still reads as an empty
+    /// console rather than failing the comparison. Narrowing that is its own task.
+    fn messages(scad: &str) -> Vec<fab_lang::Message> {
+        fab_lang::evaluate_geometry_full(scad)
+            .map(|(_tree, messages)| messages)
             .unwrap_or_default()
     }
 }
@@ -345,12 +368,7 @@ impl Driver for OpenScad {
     }
     fn warnings(&self, scad: &str) -> Vec<String> {
         oracle::run(scad, Duration::from_secs(30))
-            .map(|run| {
-                run.warnings
-                    .iter()
-                    .map(|l| normalize_warning(l))
-                    .collect()
-            })
+            .map(|run| run.warnings.iter().map(|l| normalize_warning(l)).collect())
             .unwrap_or_default()
     }
 }

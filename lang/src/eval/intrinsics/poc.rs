@@ -20,6 +20,16 @@ pub(super) fn poc_near0(args: &[Value]) -> crate::Result<Value> {
     Ok(ops::apply_binary(BinOp::Lt, a, Value::Num(1e-9)))
 }
 
+/// The DEP-const POC (AN.17): `_fab_poc_outer(x) = _fab_poc_near0(x);`.
+///
+/// Carries NO constant of its own — it INLINES the dep, and the dep is what bakes `_EPSILON` at 1e-9.
+/// That is the whole point: it models the registry's real shape (`select`, `is_matrix`, `sum`, `v_abs`
+/// and friends all have empty `consts` and a dep that carries one), so the only thing that can veto it is
+/// a check on its DEP's island.
+pub(super) fn poc_outer(args: &[Value]) -> crate::Result<Value> {
+    poc_near0(args) // the baked-1e-9 reading, exactly as a real native inlines its dep
+}
+
 /// The Value-const guard POC's expected `UP` — built like the `[0,0,1]` literal would (a `NumList`).
 pub(super) fn poc_up_value() -> Value {
     Value::num_list(vec![0.0, 0.0, 1.0])

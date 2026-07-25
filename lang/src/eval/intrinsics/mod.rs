@@ -656,6 +656,17 @@ static REGISTRY: &[Entry] = &[
         builtins: &["abs"],
         func: poc::poc_near0,
     },
+    // The DEP-const POC (AN.17): empty `consts` of its own, but a dep that carries one. Exists to pin the
+    // case AN.11's guard was written for and could not reach — see `arm_guarded_intrinsics`.
+    Entry {
+        name: "_fab_poc_outer",
+        reference: "function _fab_poc_outer(x) = _fab_poc_near0(x);",
+        consts: &[],
+        consts_v: &[],
+        deps: &["_fab_poc_near0"],
+        builtins: &[],
+        func: poc::poc_outer,
+    },
     // The VALUE-const guard POC (O.8): bakes the vector constant `UP` — wires only when the home scope's
     // `UP` is bit-exactly `[0,0,1]` AS A NumList ([`value_bits_eq`] is variant-exact). The real consumers
     // (vector_axis's UP/RIGHT, rot's _NO_ARG sentinel) are O.9.
@@ -1975,6 +1986,16 @@ pub(super) fn resolve(name: &str, params: &[Parameter], body: &Expr) -> Option<&
         .iter()
         .find(|(f, e)| e.name == name && *f == fp)
         .map(|(_, e)| *e)
+}
+
+/// A registry entry by NAME alone — no fingerprint, no program.
+///
+/// Deliberately weaker than [`resolve`]: the question it answers is about the REGISTRY's shape ("does this
+/// dep bake a constant?"), not about a particular program's definitions, and it is asked in
+/// `build_intrinsics` before any island scope exists to check a constant against (AN.17's
+/// `needs_post_hoist`). A name is unique in the registry even though fingerprints are not.
+pub(super) fn entry_by_name(name: &str) -> Option<&'static Entry> {
+    REGISTRY.iter().find(|e| e.name == name)
 }
 
 /// Test-only access to a registry entry's reference source, for the fast==slow harness.

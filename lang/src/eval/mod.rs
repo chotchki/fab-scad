@@ -3031,6 +3031,35 @@ fn tagged_globals<'a>(islands: &loader::Islands<'a>) -> BTreeMap<&'a str, &'a Ex
 /// builtin-shadow check (a user fn shadowing a builtin the reference leans on reroutes the interpreted body
 /// while the native keeps the real builtin — BOSL2 itself shadows `reverse`, so this is a per-entry check,
 /// never a blanket). Returns the EXPLAIN reason the entry can't wire, or `None` when clear.
+/// Must this entry wait for [`arm_guarded_intrinsics`] (post-hoist), rather than wiring at build time?
+///
+/// True when it bakes a constant — its OWN (`consts`/`consts_v`), **or one its DEPS bake** (AN.17). That
+/// second clause is the fix: a native inlines its deps, so it bakes their constants too, and an entry with
+/// an empty `consts` of its own is not therefore constant-free. Eleven registry entries are exactly that
+/// shape (`select`, `is_matrix`, `sum`, `_apply`, `_bt_search`, `vector_angle`, `_point_dist`, `is_path`,
+/// `v_abs`, `v_theta`, `apply`), every one via a dep baking `_EPSILON`.
+///
+/// Before this, they wired in [`build_intrinsics`] behind [`guard_veto`] alone — which checks that a dep is
+/// defined, fingerprint-matches its pin, isn't parameter-shadowed (AN.10) and doesn't shadow a builtin, but
+/// nothing about the dep's CONSTANTS. AN.11 added that check, but put it in the post-hoist pass these
+/// entries never reached, so it could not fire for them. Demonstrated in
+/// `lang/tests/intrinsic_dep_islands.rs`: the native answered `1e-6 < 1e-9` while the dep's own island
+/// bound `_EPSILON = 1e-3`.
+///
+/// It has to be a DEFERRAL rather than a check in place: `build_intrinsics` runs while the `Ctx` is being
+/// built, before any island global exists, so there is nothing to compare a constant against yet.
+///
+/// ONE HOP, matching the dep-fingerprint pin and the dep-const check themselves — a dep-of-a-dep's
+/// constants stay unchecked. Sound while deps are leaf predicates; revisit together if that stops holding.
+fn needs_post_hoist(entry: &intrinsics::Entry) -> bool {
+    !entry.consts.is_empty()
+        || !entry.consts_v.is_empty()
+        || entry.deps.iter().any(|&dep| {
+            intrinsics::entry_by_name(dep)
+                .is_some_and(|d| !d.consts.is_empty() || !d.consts_v.is_empty())
+        })
+}
+
 fn guard_veto<'a>(
     entry: &intrinsics::Entry,
     params: &[Parameter],
@@ -3105,8 +3134,8 @@ fn build_intrinsics<'a>(
         let Some(entry) = intrinsics::resolve(name, params, body) else {
             continue;
         };
-        if !entry.consts.is_empty() || !entry.consts_v.is_empty() {
-            continue; // const-guarded (numeric or Value): arms post-hoist (arm_guarded_intrinsics)
+        if needs_post_hoist(entry) {
+            continue; // const-guarded, directly or through a dep: arms in `arm_guarded_intrinsics`
         }
         match guard_veto(entry, params, functions) {
             None => {
@@ -3140,8 +3169,8 @@ fn arm_guarded_intrinsics<'a>(ctx: &Ctx<'a>) -> Vec<(&'a str, intrinsics::Intrin
         let Some(entry) = intrinsics::resolve(name, params, body) else {
             continue;
         };
-        if entry.consts.is_empty() && entry.consts_v.is_empty() {
-            continue; // unguarded: already wired (or vetoed) at build_intrinsics
+        if !needs_post_hoist(entry) {
+            continue; // genuinely unguarded: already wired (or vetoed) at build_intrinsics
         }
         if let Some(why) = guard_veto(entry, params, &ctx.functions) {
             if explain {
@@ -4199,10 +4228,38 @@ mod tests {
         );
         let full = parse(&full).unwrap();
         let ctx = build_ctx(&full, crate::Config::default());
+        // AN.17 — `select` no longer wires at BUILD time. Its own `consts` are empty, but its dep
+        // `is_vector` bakes `_EPSILON`, and a native inlines its deps — so it has to wait for the
+        // post-hoist pass, where an island global exists to check that constant against. Asserting the
+        // timing here on purpose: before the fix `select` wired straight into `ctx.intrinsics` and the
+        // dep-constant check never ran for it.
         assert!(
-            ctx.intrinsics.contains_key("select"),
-            "all deps verbatim → select wires"
+            !ctx.intrinsics.contains_key("select"),
+            "select bakes its dep's _EPSILON, so it defers past build_intrinsics"
         );
+        // With `_EPSILON` bound to the baked 1e-9, the deferred entry arms.
+        let bind_eps = |v: Value| {
+            let mut g = Scope::new();
+            g.bind("_EPSILON".to_string(), v);
+            *ctx.island_globals.borrow_mut().first_mut().unwrap() = g;
+        };
+        bind_eps(Value::Num(1e-9));
+        assert!(
+            super::arm_guarded_intrinsics(&ctx)
+                .iter()
+                .any(|(n, _)| *n == "select"),
+            "all deps verbatim + the dep's constant intact → select arms post-hoist"
+        );
+        // …and does NOT when the dep's island disagrees about it. This is the guard AN.11 wrote and
+        // AN.17 made reachable, exercised on a REAL registry entry rather than the POC pair.
+        bind_eps(Value::Num(1e-3));
+        assert!(
+            !super::arm_guarded_intrinsics(&ctx)
+                .iter()
+                .any(|(n, _)| *n == "select"),
+            "dep's _EPSILON is not the baked 1e-9 → select declines"
+        );
+
         let sans_vector = format!(
             "{}\n{}\n{}\n{}",
             reference_of("select").unwrap(),
@@ -4212,13 +4269,18 @@ mod tests {
         );
         let sans_vector = parse(&sans_vector).unwrap();
         let ctx = build_ctx(&sans_vector, crate::Config::default());
+        let mut g = Scope::new();
+        g.bind("_EPSILON".to_string(), Value::Num(1e-9));
+        *ctx.island_globals.borrow_mut().first_mut().unwrap() = g;
         assert!(
-            !ctx.intrinsics.contains_key("select"),
-            "missing is_vector → select declines"
+            !super::arm_guarded_intrinsics(&ctx)
+                .iter()
+                .any(|(n, _)| *n == "select"),
+            "missing is_vector → select declines (the dep-FINGERPRINT guard, unchanged)"
         );
         assert!(
             ctx.intrinsics.contains_key("is_finite"),
-            "the other entries keep wiring independently"
+            "the other entries keep wiring independently — is_finite bakes nothing, directly or via a dep"
         );
     }
 

@@ -816,7 +816,10 @@ enum Task<'a> {
     LcForNext {
         rest: &'a [Arg],
         body: &'a Expr,
-        var: Rc<str>,
+        /// `None` for a POSITIONAL generator (`[for([7,8]) …]`): it still ITERATES — driving the element
+        /// count — but binds no name, so the body reads whatever the enclosing scope had. Upstream emits
+        /// no warning here (unlike the `let` case, which does). AN.9.
+        var: Option<Rc<str>>,
         items: std::vec::IntoIter<Value>,
         frame: Scope,
         acc: Vec<Value>,
@@ -1277,16 +1280,24 @@ fn eval_with_global<'a>(
                 // reference (no per-call $-copy — the L.2.7 fix). A call's own $-args (bound below) land in
                 // this frame's specials, shadowing the inherited ones.
                 let mut call = Scope::call_frame(&base, &caller);
-                // Two-phase (OpenSCAD): bind DEFAULTS first, then the passed ARGS, so an arg wins over a
-                // default even when a param NAME repeats (a defaultless duplicate can't clobber a real arg).
+                // Upstream's model, which is NOT symmetric between the two halves (AN.6): the passed ARGS
+                // are set first, in order, a later duplicate OVERWRITING (`g(a,a); g(1,2)` is 2) — then
+                // each STILL-UNSET param takes its default in DECLARATION order, a later duplicate being
+                // SKIPPED (`g(a=5,a,a=9)` is 5, and `g(a,b,a=9); g(b=2)` leaves `a` undef rather than 9).
+                // An arg still beats a default either way, since the default half only fills what the arg
+                // half left empty. Binding defaults FIRST and letting them overwrite made both halves
+                // last-wins, so a repeated param resolved to its LAST declaration.
+                let mut set: Vec<&Rc<str>> = Vec::with_capacity(names.len());
                 for ((name, &prov), value) in names.iter().zip(&provided).zip(&vals) {
-                    if !prov {
+                    if prov {
                         call.bind(Rc::clone(name), value.clone());
+                        set.push(name);
                     }
                 }
-                for ((name, prov), value) in names.iter().zip(provided).zip(vals) {
-                    if prov {
-                        call.bind(Rc::clone(name), value);
+                for ((name, &prov), value) in names.iter().zip(&provided).zip(&vals) {
+                    if !prov && !set.contains(&name) {
+                        call.bind(Rc::clone(name), value.clone());
+                        set.push(name);
                     }
                 }
                 tasks.push(Task::Eval(body, call));
@@ -1378,23 +1389,35 @@ fn eval_with_global<'a>(
                 scope,
             } => {
                 let binding = &bindings[idx];
-                let name: Rc<str> = binding.name.clone().unwrap_or_else(|| Rc::from("_"));
-                let value = name_closure(values.pop().unwrap_or(Value::Undef), &name);
-                // AH.2.3: a duplicate of a name already bound in this SAME let is IGNORED (first
-                // wins, upstream warns) — the RHS still evaluated above, only the bind is dropped.
-                // Unnamed bindings (`_`) are exempt: they were never addressable to begin with.
-                let dup = binding.name.is_some()
-                    && bindings[..idx].iter().any(|b| b.name == binding.name);
-                let inner = if dup {
-                    ctx.messages.borrow_mut().push(Message::Warning(format!(
-                        "Ignoring duplicate variable assignment \"{name}\""
-                    )));
-                    scope
-                } else {
-                    trace::bind('l', &name, &value);
-                    let mut inner = scope.child();
-                    inner.bind(name, value);
-                    inner
+                let raw = values.pop().unwrap_or(Value::Undef);
+                let inner = match &binding.name {
+                    // AN.9: a POSITIONAL binding — `let(5)` — binds NOTHING upstream; it warns and moves
+                    // on. Parking it under a synthetic `_` was wrong twice over: `_` is a LEGAL identifier
+                    // a user can hold a real value in, so the placeholder CLOBBERED it (`_ = 42;
+                    // let(99) _` read 99 where upstream reads 42).
+                    None => {
+                        ctx.messages.borrow_mut().push(Message::Warning(format!(
+                            "Assignment without variable name {}",
+                            fmt::format_value(&raw)
+                        )));
+                        scope
+                    }
+                    // AH.2.3: a duplicate of a name already bound in this SAME let is IGNORED (first
+                    // wins, upstream warns) — the RHS still evaluated above, only the bind is dropped.
+                    Some(name) if bindings[..idx].iter().any(|b| b.name.as_ref() == Some(name)) => {
+                        ctx.messages.borrow_mut().push(Message::Warning(format!(
+                            "Ignoring duplicate variable assignment \"{name}\" = {}",
+                            fmt::format_value(&raw)
+                        )));
+                        scope
+                    }
+                    Some(name) => {
+                        let value = name_closure(raw, name);
+                        trace::bind('l', name, &value);
+                        let mut inner = scope.child();
+                        inner.bind(name.clone(), value);
+                        inner
+                    }
                 };
                 if idx + 1 < bindings.len() {
                     tasks.push(Task::LetStep {
@@ -1463,11 +1486,28 @@ fn eval_with_global<'a>(
                     // earlier ones, so `for(a=1, b=a+1; …)` gives `b==2`.
                     let mut vars: Vec<(String, Value)> = Vec::new();
                     let mut init_scope = scope.child();
-                    for arg in init {
-                        let name = arg.name.as_deref().unwrap_or("_").to_string();
+                    for (i, arg) in init.iter().enumerate() {
                         let value = eval_with_global(&arg.value, &init_scope, &global, ctx)?;
-                        init_scope.bind(name.clone(), value.clone());
-                        vars.push((name, value));
+                        // AN.8/AN.9: the clause lists obey the SAME rules as `let` — a positional binding
+                        // binds nothing, a repeat is first-wins, both warn. Last-wins here changed the loop
+                        // itself, not just a value: `for(i=0, i=10; i<3; …)` started at 10, so the
+                        // condition was false immediately and the comprehension came back EMPTY.
+                        let Some(name) = arg.name.as_deref() else {
+                            ctx.warn(format!(
+                                "Assignment without variable name {}",
+                                fmt::format_value(&value)
+                            ));
+                            continue;
+                        };
+                        if init[..i].iter().any(|a| a.name.as_deref() == Some(name)) {
+                            ctx.warn(format!(
+                                "Ignoring duplicate variable assignment \"{name}\" = {}",
+                                fmt::format_value(&value)
+                            ));
+                            continue;
+                        }
+                        init_scope.bind(name.to_string(), value.clone());
+                        vars.push((name.to_string(), value));
                     }
                     let splice_item = is_comprehension(body);
                     tasks.push(Task::LcForCStep {
@@ -1556,8 +1596,9 @@ fn eval_with_global<'a>(
                     }
                 }
                 Some((binding, rest)) => {
-                    // The loop var as an `Rc<str>` computed ONCE per binding level (N.2b).
-                    let var: Rc<str> = binding.name.clone().unwrap_or_else(|| Rc::from("_"));
+                    // The loop var as an `Rc<str>` computed ONCE per binding level (N.2b); `None` when the
+                    // generator is positional (AN.9 — iterate, bind nothing).
+                    let var: Option<Rc<str>> = binding.name.clone();
                     let iterable = eval_with_global(&binding.value, &scope, &global, ctx)?;
                     // Q.5: charge BEFORE `iter_values` materializes the range.
                     ctx.charge_iterable(&iterable)?;
@@ -1598,7 +1639,9 @@ fn eval_with_global<'a>(
                 }
                 match items.next() {
                     Some(value) => {
-                        frame.bind(Rc::clone(&var), value);
+                        if let Some(v) = &var {
+                            frame.bind(Rc::clone(v), value);
+                        }
                         let iter_scope = frame.clone();
                         // Self BELOW the item's work: the item runs first, then the next iteration.
                         tasks.push(Task::LcForNext {
@@ -1682,9 +1725,25 @@ fn eval_with_global<'a>(
                 }
                 // Update assignments bind SEQUENTIALLY within the clause: `x=i*10, y=x+1` lets `y`
                 // see the NEW `x` (OpenSCAD-verified; BOSL2's `_dp_distance_row` DP relies on it).
-                for arg in update {
-                    let name = arg.name.as_deref().unwrap_or("_");
+                for (i, arg) in update.iter().enumerate() {
                     let value = eval_with_global(&arg.value, &loop_scope, &global, ctx)?;
+                    // AN.8/AN.9: same rules as the init clause — and the warnings repeat EVERY iteration,
+                    // which is what upstream does. Last-wins here also broke the loop rather than a value:
+                    // `for(a=0; a<3; a=a+1, a=a+100)` advanced by 101 and terminated after one pass.
+                    let Some(name) = arg.name.as_deref() else {
+                        ctx.warn(format!(
+                            "Assignment without variable name {}",
+                            fmt::format_value(&value)
+                        ));
+                        continue;
+                    };
+                    if update[..i].iter().any(|a| a.name.as_deref() == Some(name)) {
+                        ctx.warn(format!(
+                            "Ignoring duplicate variable assignment \"{name}\" = {}",
+                            fmt::format_value(&value)
+                        ));
+                        continue;
+                    }
                     loop_scope.bind(name.to_string(), value.clone());
                     match vars.iter_mut().find(|(n, _)| n == name) {
                         Some(entry) => entry.1 = value,
@@ -2450,17 +2509,27 @@ fn comprehension_let_scope<'a>(
 ) -> crate::Result<Scope> {
     let mut s = scope.clone();
     for (i, binding) in bindings.iter().enumerate() {
-        let name: Rc<str> = binding.name.clone().unwrap_or_else(|| Rc::from("_"));
-        let value = name_closure(eval_with_global(&binding.value, &s, global, ctx)?, &name);
-        // AH.2.3: same first-wins duplicate rule as [`Task::LetStep`] — RHS evaluated, bind dropped.
-        if binding.name.is_some() && bindings[..i].iter().any(|b| b.name == binding.name) {
+        let raw = eval_with_global(&binding.value, &s, global, ctx)?;
+        // AN.9: a POSITIONAL binding binds NOTHING upstream (it warns) — see [`Task::LetStep`] for why
+        // the old synthetic `_` was a real bug and not just a naming choice.
+        let Some(name) = binding.name.as_ref() else {
             ctx.messages.borrow_mut().push(Message::Warning(format!(
-                "Ignoring duplicate variable assignment \"{name}\""
+                "Assignment without variable name {}",
+                fmt::format_value(&raw)
+            )));
+            continue;
+        };
+        // AH.2.3: same first-wins duplicate rule as [`Task::LetStep`] — RHS evaluated, bind dropped.
+        if bindings[..i].iter().any(|b| b.name.as_ref() == Some(name)) {
+            ctx.messages.borrow_mut().push(Message::Warning(format!(
+                "Ignoring duplicate variable assignment \"{name}\" = {}",
+                fmt::format_value(&raw)
             )));
             continue;
         }
+        let value = name_closure(raw, name);
         let mut next = s.child();
-        next.bind(name, value);
+        next.bind(name.clone(), value);
         s = next;
     }
     Ok(s)
@@ -2807,19 +2876,36 @@ fn tagged_functions<'a>(
 /// filtering here keeps the registry from even holding one. The interpreter's own hoist reads
 /// [`loader::Island::assignments`] directly, so top-level `$`-bindings still work everywhere else.
 fn tagged_globals<'a>(islands: &loader::Islands<'a>) -> BTreeMap<&'a str, &'a Expr> {
+    // AN.5: a name assigned in MORE THAN ONE island has no single right answer here. The registry holds
+    // ONE flat constant view, but upstream gives each file's functions its OWN file's value — so the old
+    // "root wins" flattening let a root assignment silently override a `use`d library's own constant
+    // INSIDE that library's functions (`EPS = 100;` at the root changed what `lib.scad`'s `shrink()`
+    // subtracted). Ambiguous names are dropped rather than guessed: a body reading one declines and stays
+    // interpreted, which IS island-correct. A repeat WITHIN one island is not ambiguous — file scope is
+    // last-wins, so that's simply its value.
     let mut out = BTreeMap::new();
+    let mut owner: BTreeMap<&'a str, usize> = BTreeMap::new();
+    let mut ambiguous: BTreeSet<&'a str> = BTreeSet::new();
     if let Some(root) = islands.first() {
+        let mut sources: Vec<(usize, &[(&'a str, &'a Expr)])> = Vec::new();
         for &u in &root.uses {
-            for &(name, expr) in &islands[u].assignments {
-                if !name.starts_with('$') {
-                    out.insert(name, expr);
-                }
-            }
+            sources.push((u, &islands[u].assignments));
         }
-        for &(name, expr) in &root.assignments {
-            if !name.starts_with('$') {
+        sources.push((0, &root.assignments)); // the root island is index 0
+        for (idx, assignments) in sources {
+            for &(name, expr) in assignments {
+                if name.starts_with('$') {
+                    continue;
+                }
+                if owner.get(name).is_some_and(|&prev| prev != idx) {
+                    ambiguous.insert(name);
+                }
+                owner.insert(name, idx);
                 out.insert(name, expr);
             }
+        }
+        for name in &ambiguous {
+            out.remove(name);
         }
     }
     out
@@ -3412,14 +3498,30 @@ fn bind_module_scope<'a>(
     // when a param NAME is DUPLICATED (BOSL2's `rounding_edge_mask` lists `r` twice, once defaultless): the
     // unfilled second `r` writes `undef` in phase 1, and the explicit `r=2` overwrites it in phase 2. A
     // single interleaved pass instead let that trailing `undef` clobber the real value → get_radius(undef).
-    // Phase 1 — defaults (eval'd in the library global) / undef for a defaultless unfilled param.
+    // AN.6: which names phase 2 will fill, known UP FRONT so phase 1 can skip binding them without
+    // reordering EVALUATION — a default's side effects (an `echo`, a seedless `rands` draw) still happen
+    // in declaration order, which is the one thing we can't move.
+    let provided_names: BTreeSet<&str> = params
+        .iter()
+        .zip(&arg_slots)
+        .filter(|(_, slot)| slot.is_some())
+        .map(|(p, _)| &*p.name)
+        .collect();
+    let mut set: Vec<&str> = Vec::with_capacity(params.len());
+    // Phase 1 — defaults (eval'd in the library global) / undef for a defaultless unfilled param. A name
+    // an arg will fill, or one an EARLIER duplicate already took, is evaluated and then DROPPED: defaults
+    // are FIRST-declared-wins upstream, so `module m(l, r, ang=90, d, r=0)` called as `m(l=1)` leaves `r`
+    // undef, not 0. Binding every one of them let the LAST duplicate win instead.
     for (param, slot) in params.iter().zip(&arg_slots) {
         if slot.is_none() {
             let value = match &param.default {
                 Some(default) => eval_with_ctx(default, global, ctx)?,
                 None => Value::Undef,
             };
-            call.bind(Rc::clone(&param.name), value);
+            if !provided_names.contains(&*param.name) && !set.contains(&&*param.name) {
+                set.push(&param.name);
+                call.bind(Rc::clone(&param.name), value);
+            }
         }
     }
     // Phase 2 — passed args (eval'd in the caller scope) override, in declaration order.

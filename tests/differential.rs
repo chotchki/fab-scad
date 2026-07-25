@@ -32,6 +32,15 @@ fn agree_within(scad: &str, max: f64) {
     }
 }
 
+/// Assert a snippet's WARNING output agrees across every driver, in order (AN.13's second string-equal
+/// channel). Same `cube` trick as [`agree_echo`] so the oracle's export succeeds.
+fn agree_warnings(scad: &str) {
+    let with_geometry = format!("{scad}\ncube(1);");
+    if let Err(why) = fab_scad::differ::diff_warnings(&with_geometry) {
+        panic!("warning divergence: {why}");
+    }
+}
+
 /// Assert a snippet's ECHO output agrees across every driver — the I.5 string-equal gate. A `cube` is
 /// appended so the ORACLE's render (which captures echo alongside a mesh EXPORT) succeeds; a
 /// geometry-less program has nothing to export. The echo lines are identical either way.
@@ -626,6 +635,55 @@ fn duplicate_binding_rules_match_the_oracle() {
     agree_echo("echo([for (i = [0:0]) let(a = 1, a = 2) a]);"); // same rule in a comprehension
     agree_echo("function g(a, a) = a; echo(g(1, 2));"); // params: LAST wins → 2
     agree_echo("echo(let(a = 1) let(a = 2) a);"); // ordinary shadowing is untouched → 2
+    // AN.9: a POSITIONAL binding binds NOTHING. `_` is a legal identifier, so parking the value under a
+    // synthetic `_` clobbered a user's own — these read the OUTER `_`, and the `for` still iterates.
+    agree_echo("_ = 42; echo(let(99) _);"); // → 42, not 99
+    agree_echo("_ = 42; echo(let(1, 2) _);"); // → 42
+    agree_echo("_ = 1; echo([for ([7, 8]) _]);"); // → [1,1]: iterates twice, binds nothing
+    agree_echo("_ = 1; echo([for (i = [0:1], [5, 6]) i]);"); // → [0,0,1,1]
+    // AN.7: the STATEMENT `let` obeys the same first-wins rule as the expression one.
+    agree_echo("let(a = 1, a = 2) echo(a);"); // → 1
+    agree_echo("let($fn = 3, $fn = 5) echo($fn);"); // → 3, the rule covers $-vars
+    agree_echo("let(a = 1, a = 2, a = 3) { echo(a); }"); // → 1, a braced child block
+    // Statement-level `for` is NOT first-wins — the generators nest, so the inner rebinds per iteration.
+    agree_echo("for (i = [0:1], i = [8, 9]) echo(i);"); // → 8,9,8,9
+    // AN.8: the C-style clause lists too. Last-wins here broke the LOOP, not just a value — a bad init
+    // made the condition false immediately (empty), a bad update overshot and terminated after one pass.
+    agree_echo("echo([for (i = 0, i = 10; i < 3; i = i + 1) i]);"); // → [0,1,2], not []
+    agree_echo("echo([for (a = 0; a < 3; a = a + 1, a = a + 100) a]);"); // → [0,1,2], not [0]
+    agree_echo("_ = 1; echo([for (i = 0; i < 2; i = i + 1, 99) [i, _]]);"); // → [[0,1],[1,1]]
+    agree_echo("_ = 1; echo([for (i = 0, 77; i < 2; i = i + 1) [i, _]]);"); // → [[0,1],[1,1]]
+    // AN.6: duplicate PARAMS are asymmetric — args set in order (last wins), then each still-unset
+    // param takes its default in declaration order (FIRST wins). Both halves used to be last-wins.
+    agree_echo("function g(a = 5, a, a = 9) = a; echo(g());"); // → 5, not 9
+    agree_echo("function g(a = 7, a = 5) = a; echo(g());"); // → 7
+    agree_echo("function g(a, b, a = 9) = [a, b]; echo(g(b = 2));"); // → [undef,2], not [9,2]
+    agree_echo("function g(a, a) = a; echo(g(1, 2));"); // → 2, args stay last-wins
+    agree_echo("function g(a, a = 5) = a; echo(g(1));"); // → 1, an arg beats a later default
+    agree_echo("function g(a = 1, a = 2) = a; echo(g(a = 9));"); // → 9
+    // MODULES bind on a separate path with the same rule — including the BOSL2-shaped case that
+    // motivated the original two-phase comment (a param listed twice, once defaultless).
+    agree_echo("module m(l, r, ang = 90, d, r = 0) { echo(r); } m(l = 1);"); // → undef, not 0
+    agree_echo("module m(a = 5, a, a = 9) { echo(a); } m();"); // → 5
+    agree_echo("module m(a, a = 5) { echo(a); } m(1);"); // → 1, an arg still beats a default
+}
+
+#[test]
+fn duplicate_binding_warnings_match_the_oracle() {
+    // AN.12/AN.13: the VALUE channel is blind to a whole class of divergence — these cases all agree on
+    // what they compute and differ only in what they SAY. `agree_echo` would pass every one of them
+    // even with the diagnostics deleted, which is exactly how they went missing. Scoped on purpose: our
+    // warning coverage isn't upstream-complete, so this gate names the rules it owns rather than
+    // sweeping every warning in the language.
+    agree_warnings("echo(let(a = 1, a = 2) a);"); // Ignoring duplicate variable assignment "a" = 2
+    agree_warnings("let(a = 1, a = 2, a = 3) { echo(a); }"); // twice, in order
+    agree_warnings("_ = 42; echo(let(99) _);"); // Assignment without variable name 99
+    agree_warnings("_ = 42; echo(let(1, 2) _);"); // twice
+    agree_warnings("let(7) echo(1);"); // the STATEMENT form warns too
+    agree_warnings("echo([for (i = 0, i = 10; i < 3; i = i + 1) i]);"); // the C-style init clause
+    agree_warnings("echo([for (a = 0; a < 3; a = a + 1, a = a + 100) a]);"); // update: one per iteration
+    agree_warnings("_ = 1; echo([for (i = 0; i < 2; i = i + 1, 99) [i, _]]);");
+    agree_warnings("echo([for (i = [0:0]) let(a = 1, a = 2) a]);"); // the comprehension `let`
     // The reduced trophy body itself: the two readings differ far past a ULP (-2.0034 vs exactly -2).
     agree_echo(
         "function sq(s) = let(x = min(0.998, s), r = 1 + x*(sqrt(2)-1),

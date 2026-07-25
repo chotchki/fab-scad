@@ -40,20 +40,23 @@ cube(1);
 /// Run `src` through the full loader/eval pipeline (no fs, no imports), with or without the real
 /// Cranelift factory, returning its ECHO lines in order.
 fn echos(src: &str, jit: bool) -> Vec<String> {
-    let sources: BTreeMap<PathBuf, String> = BTreeMap::new();
+    echos_with(src, &BTreeMap::new(), jit)
+}
+
+/// [`echos`] over a virtual `use`/`include` graph — `sources` maps a path to its text.
+fn echos_with(src: &str, sources: &BTreeMap<PathBuf, String>, jit: bool) -> Vec<String> {
     let factory = JitFactory;
     let hook: Option<&dyn NumericJitFactory> = jit.then_some(&factory);
     let config = Config {
         jit,
         ..Config::default()
     };
-    let (_, messages) =
-        resolve_geometry_from_sources_full(src, &sources, hook, config, |path| {
-            Err(fab_lang::Error::Load(format!(
-                "probe has no imports, asked for {path}"
-            )))
-        })
-        .expect("the probe resolves");
+    let (_, messages) = resolve_geometry_from_sources_full(src, sources, hook, config, |path| {
+        Err(fab_lang::Error::Load(format!(
+            "probe has no mesh imports, asked for {path}"
+        )))
+    })
+    .expect("the probe resolves");
     messages
         .iter()
         .filter_map(|m| match m {
@@ -79,6 +82,57 @@ fn named_arg_calls_fast_eq_jit_end_to_end() {
     }
     // …and the JIT must reproduce the interpreter's lines exactly.
     assert_eq!(jit, interp, "JIT echo diverged from the interpreter");
+}
+
+/// AN.3 + AN.4 — binding parity on the INLINING path. Neither bug is reachable from `compile_function`
+/// (which never inlines) or from `jit_diff` (which binds params positionally), so the only harness that
+/// sees them is the real registry through the real dispatch: same source, jit off vs on, identical echo.
+#[test]
+fn inlined_call_binding_matches_the_interpreter() {
+    // AN.3: `inner()` leaves `r` unfilled and defaultless. The interpreter binds undef, so the whole
+    // expression is undef — but the JIT left the name unbound, and an unbound name resolves onward to
+    // the GLOBALS, where `r = 5` was sitting. It inlined 5 and echoed 7.
+    const UNFILLED: &str = "\
+r = 5;
+function inner(r) = r + 1;
+function outer(q) = q + inner();
+echo(outer(1));
+cube(1);
+";
+    assert_eq!(echos(UNFILLED, true), echos(UNFILLED, false));
+    assert_eq!(echos(UNFILLED, false), ["undef"]);
+
+    // AN.4: a positional arg fills the LOWEST UNFILLED slot. The JIT used a monotonic counter, so the
+    // `2` landed back on `a` (already taken by the named arg) and `b` kept its default → 27, not 12.
+    const POSITIONAL_AFTER_NAMED: &str = "\
+function fpn(a, b = 7) = a * 10 + b;
+function callit(z) = fpn(a = z, 2);
+echo(callit(1));
+cube(1);
+";
+    assert_eq!(
+        echos(POSITIONAL_AFTER_NAMED, true),
+        echos(POSITIONAL_AFTER_NAMED, false)
+    );
+    assert_eq!(echos(POSITIONAL_AFTER_NAMED, false), ["12"]);
+}
+
+/// AN.5 — a constant a `use`d library defines FOR ITSELF is not the root's to redefine. The registry
+/// holds one flat const view built root-wins, so `EPS = 100;` at the root changed what the library's own
+/// `shrink()` subtracted. Ambiguous names are now dropped from that view and the body stays interpreted.
+#[test]
+fn a_root_constant_does_not_override_a_librarys_own() {
+    let mut sources = BTreeMap::new();
+    sources.insert(
+        PathBuf::from("lib.scad"),
+        "EPS = 0.5;\nfunction shrink(x) = x - EPS;\n".to_string(),
+    );
+    const SRC: &str = "use <lib.scad>\nEPS = 100;\necho(shrink(10));\ncube(1);\n";
+    assert_eq!(
+        echos_with(SRC, &sources, true),
+        echos_with(SRC, &sources, false)
+    );
+    assert_eq!(echos_with(SRC, &sources, false), ["9.5"]);
 }
 
 /// `(name, params, body)` + `(name, value)` collectors over a parsed program (the corpus_diff shape).

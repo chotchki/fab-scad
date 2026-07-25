@@ -246,6 +246,23 @@ pub trait Driver {
     fn eval_file(&self, root: &Path, library_paths: &[PathBuf]) -> Outcome;
     /// The `ECHO:` console lines `scad` produces, trimmed, in order — the I.5 string-equal channel.
     fn echo(&self, scad: &str) -> Vec<String>;
+    /// The WARNING lines `scad` produces, in order, NORMALIZED to bare text — no `WARNING:` prefix and
+    /// no ` in file …, line N` locator, so the two engines are comparable without us reproducing
+    /// upstream's file/line bookkeeping. A second string-equal channel beside [`Driver::echo`]: some
+    /// divergences (a duplicate-binding rule, say) agree on every value and differ only in what they
+    /// SAY about it, which the echo channel is blind to by construction (AN.13).
+    fn warnings(&self, scad: &str) -> Vec<String>;
+}
+
+/// Strip the `WARNING: ` prefix and the trailing ` in file …, line N` locator from an oracle warning,
+/// leaving the bare message our own warnings are written as.
+fn normalize_warning(line: &str) -> String {
+    let text = line.trim();
+    let text = text.strip_prefix("WARNING:").unwrap_or(text).trim();
+    match text.rfind(" in file ") {
+        Some(cut) => text[..cut].to_string(),
+        None => text.to_string(),
+    }
 }
 
 /// scad-rs's own pure-Rust evaluator — the baseline.
@@ -275,6 +292,11 @@ impl Driver for FabLang {
                     .map(|c| format!("ECHO: {c}"))
                     .collect()
             })
+            .unwrap_or_default()
+    }
+    fn warnings(&self, scad: &str) -> Vec<String> {
+        fab_lang::evaluate_full(scad)
+            .map(|e| e.warnings().into_iter().map(normalize_warning).collect())
             .unwrap_or_default()
     }
 }
@@ -319,6 +341,16 @@ impl Driver for OpenScad {
     fn echo(&self, scad: &str) -> Vec<String> {
         oracle::run(scad, Duration::from_secs(30))
             .map(|run| run.echo.iter().map(|l| l.trim().to_string()).collect())
+            .unwrap_or_default()
+    }
+    fn warnings(&self, scad: &str) -> Vec<String> {
+        oracle::run(scad, Duration::from_secs(30))
+            .map(|run| {
+                run.warnings
+                    .iter()
+                    .map(|l| normalize_warning(l))
+                    .collect()
+            })
             .unwrap_or_default()
     }
 }
@@ -399,6 +431,31 @@ pub fn diff_echo(scad: &str) -> std::result::Result<(), String> {
         if base != other {
             return Err(format!(
                 "{scad:?}: {} echo {base:?} vs {} echo {other:?}",
+                drivers[0].name(),
+                d.name()
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Run `scad` through every registered driver and check their WARNINGS agree, in order and verbatim
+/// (modulo the locator [`normalize_warning`] strips).
+///
+/// This is deliberately a SEPARATE gate from [`diff_echo`] rather than folded into it: our warning
+/// coverage is not upstream-complete, so a blanket comparison would fail broadly on cases whose VALUES
+/// are perfectly correct. Point it at the rules where the diagnostic is the point.
+///
+/// # Errors
+/// The first `(baseline vs driver)` disagreement, as a human-readable reason.
+pub fn diff_warnings(scad: &str) -> std::result::Result<(), String> {
+    let drivers = drivers();
+    let base = drivers[0].warnings(scad);
+    for d in &drivers[1..] {
+        let other = d.warnings(scad);
+        if base != other {
+            return Err(format!(
+                "{scad:?}: {} warnings {base:?} vs {} warnings {other:?}",
                 drivers[0].name(),
                 d.name()
             ));

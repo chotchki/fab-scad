@@ -661,9 +661,29 @@ fn dispatch_module<'a>(
         // A6 — `let(a=…) children` binds SEQUENTIALLY into a child scope, then the children render there.
         "let" => {
             let mut child = scope.child();
+            let mut bound: Vec<&str> = Vec::with_capacity(mi.args.len());
             for arg in &mi.args {
                 let value = eval_with_ctx(&arg.value, &child, ctx)?;
-                child.bind(arg.name.as_deref().unwrap_or(""), value);
+                // AN.7: AH.2.3's first-wins rule reached the EXPRESSION `let` and stopped there, so the
+                // statement form read `let(a=1, a=2) echo(a)` as 2 where upstream reads 1 (and warns).
+                // Both spellings now share the rule. The old `unwrap_or("")` for a positional binding was
+                // right by accident — no identifier can spell `""` — but it warns now, like upstream.
+                let Some(name) = arg.name.as_deref() else {
+                    ctx.warn(format!(
+                        "Assignment without variable name {}",
+                        super::fmt::format_value(&value)
+                    ));
+                    continue;
+                };
+                if bound.contains(&name) {
+                    ctx.warn(format!(
+                        "Ignoring duplicate variable assignment \"{name}\" = {}",
+                        super::fmt::format_value(&value)
+                    ));
+                    continue;
+                }
+                bound.push(name);
+                child.bind(name, value);
             }
             group(work, Combinator::Union, child);
             Ok(())

@@ -2430,15 +2430,18 @@ fn compile_expr(fb: &mut FunctionBuilder, expr: &Expr, lower: &Lower) -> Result<
                 // — the interpreter's eval order — so a nested `rands` draws the same sequence whatever the
                 // call-site arg order (P.1.6: named args, the `call` blocker's cheap slice).
                 let mut arg_slots: Vec<Option<&Expr>> = vec![None; cparams.len()];
-                let mut positional = 0usize;
                 for arg in args {
                     match &arg.name {
                         None => {
+                            // AN.4: the LOWEST CURRENTLY-UNFILLED slot, which is what `fill_arg_slots`
+                            // does — not a monotonic counter. The counter ignored slots a named arg had
+                            // already taken, so `fpn(a = z, 2)` dropped the 2 back onto `a` and left `b`
+                            // on its default (27 instead of 12).
                             let slot = arg_slots
-                                .get_mut(positional)
+                                .iter_mut()
+                                .find(|s| s.is_none())
                                 .ok_or(JitError::Unsupported("extra positional arg"))?;
                             *slot = Some(&arg.value);
-                            positional += 1;
                         }
                         Some(n) if n.starts_with('$') => {
                             return Err(JitError::Unsupported("$-arg"));
@@ -2471,9 +2474,15 @@ fn compile_expr(fb: &mut FunctionBuilder, expr: &Expr, lower: &Lower) -> Result<
                         };
                         let v = compile_expr(fb, default, &def_lower)?;
                         callee_env.insert(pname, v);
+                    } else {
+                        // AN.3: no arg, no default. This USED to fall through with the name left unbound,
+                        // on the theory that the body would then decline — but an unbound name doesn't
+                        // decline, it resolves onward to `globals`, so a like-named top-level constant
+                        // silently STOOD IN for the parameter (`r = 5; function inner(r) = r + 1;
+                        // inner()` inlined as 6, where upstream is undef). The interpreter binds `undef`
+                        // here, which this tier can't represent, so the whole inline declines.
+                        return Err(JitError::Unsupported("unfilled parameter without a default"));
                     }
-                    // else: no arg, no default → leave `pname` unbound; the body DECLINES if it uses it (the
-                    // interpreter would see `undef` there, which the numeric JIT can't represent anyway).
                 }
                 let mut stack = lower.inlining.to_vec();
                 stack.push(name.as_str());

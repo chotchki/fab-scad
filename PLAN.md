@@ -11,6 +11,7 @@ Driven by `claude-plan-bridge` (FORMATv2). Hand-authored; run
 `claude-plan-bridge baseline` after a rewrite to resync the state file.
 -->
 ## Phase AN - Tier binding-semantics divergences (the jit_diff trophy's family: who wins a repeated name)
+<parameter name="description">AN.17
 - [x] AN.1 - JIT: decline a duplicate `let` binding name (the jit_diff trophy — upstream is first-wins + warns)
 - [x] AN.2 - JIT: decline a duplicate PARAMETER name — dd(a,a=5) gave 5, upstream 1; mm([1,2],3) gave the vector, upstream 3
 - [x] AN.3 - JIT inlining: an unfilled defaultless param falls through to a like-named GLOBAL instead of undef (outer(1) → 7, upstream undef)
@@ -20,13 +21,14 @@ Driven by `claude-plan-bridge` (FORMATv2). Hand-authored; run
 - [x] AN.7 - interp: statement-level `let(a=1,a=2)` is LAST-wins; expression-level is correctly first-wins (AH.2.3 never reached geo_stack.rs)
 - [x] AN.8 - interp: C-style comprehension `for(init; cond; update)` skips the first-wins duplicate rule in BOTH lists (yields [] / [0] where upstream yields [0,1,2])
 - [x] AN.9 - interp: an UNNAMED positional let/for binding binds a real, readable variable named `_`, clobbering a user's `_`
-- [ ] AN.10 - intrinsics: is_vector's `all_nonzero` PARAMETER shadows the like-named FUNCTION in call position; the intrinsic hardcodes the function
-- [ ] AN.11 - intrinsics: the const guard is checked only in the entry's home island, but the native also bakes its DEPS' constant defaults
+- [x] AN.10 - intrinsics: is_vector's `all_nonzero` PARAMETER shadows the like-named FUNCTION in call position; the intrinsic hardcodes the function
+- [x] AN.11 - intrinsics: const guard now also checks each DEP's consts against the DEP's own island (one hop) — sound by construction, but NOT demonstrated by a failing repro; see AN.17
 - [x] AN.12 - diagnostics: the duplicate/positional BINDING warnings (let, comprehension let, statement let, both C-style for clauses) + the upstream ` = &lt;value&gt;` suffix — all oracle-verified
 - [x] AN.13 - harness: the WARNING string-equal channel (Driver::warnings + differ::diff_warnings + agree_warnings) — the value channel was blind to diagnostics-only divergence by construction
-- [ ] AN.14 - diagnostics, call sites: `argument "a" supplied more than once` + `variable "x" not specified as parameter` — values already agree; needs ctx threaded into push_call (2 callers) via a warn-only helper, NOT fill_arg_slots (the intrinsic gate calls it too and would double-warn)
+- [x] AN.14 - diagnostics, call sites: `argument "a" supplied more than once` + `variable "x" not specified as parameter` — values already agree; needs ctx threaded into push_call (2 callers) via a warn-only helper, NOT fill_arg_slots (the intrinsic gate calls it too and would double-warn)
 - [ ] AN.15 - diagnostics needing SPAN plumbing: `"a" was assigned on line N but was overwritten` + `Parameter "x" is overwritten with a literal` — both carry a line number, so they ride on W.3.37's error-span work rather than the message text alone
-- [ ] AN.16 - fuzz: a DISPATCH-level differential target (jit=off vs jit=on over generated programs) — jit_diff binds params positionally and calls compile_function directly, so it structurally cannot see AN.2/AN.3/AN.4/AN.5; all four needed hand-finding
+- [x] AN.16 - fuzz: a DISPATCH-level differential target (jit=off vs jit=on over generated programs) — jit_diff binds params positionally and calls compile_function directly, so it structurally cannot see AN.2/AN.3/AN.4/AN.5; all four needed hand-finding
+- [ ] AN.17 - AN.11 follow-up: build a REPRO for the cross-island dep-constant case — its known one went through is_vector, which AN.10 now vetoes outright; posmod/approx diverges only via an assert, which diff_echo can't see (both sides go empty). Needs a value-carrying dep, or an error-comparing channel
 ## Phase AO - Generated-model PERF differential vs OpenSCAD (the heavy lane — today's corpus is too trivial to time)
 - [ ] AO.1 - Parameterize the generator's bounds into a Profile — `cheap` (today's gen-diff constants, unchanged bit-for-bit) vs `heavy` (dialed); same seed replays deterministically per profile
 - [ ] AO.2 - Heavy profile: geometry-weighted grammar (high-$fn primitives, deep boolean trees, extrudes over many-vertex profiles, comprehension-driven polyhedra); value-only statements suppressed as timing noise

@@ -1351,6 +1351,7 @@ fn eval_with_global<'a>(
                             &base,
                             None,
                             this_receiver,
+                            ctx,
                             &mut tasks,
                         );
                     }
@@ -2180,6 +2181,12 @@ fn dispatch_call<'a>(
                     // slot filling — evaluating them here would fire side effects (echo, seedless rands)
                     // the interpreter never runs.
                     let nargs = args.len().min(params.len());
+                    // AN.14: this all-positional fast path RUNS the call too, so it owes the same
+                    // diagnostic the interpreted twin prints. `nargs` is a `min`, so the only warning
+                    // reachable here is the overflow one — there are no named args to duplicate.
+                    if args.len() > params.len() {
+                        ctx.warn("Too many unnamed arguments supplied".to_string());
+                    }
                     tasks.push(Task::Intrinsic { func, nargs });
                     for arg in args[..nargs].iter().rev() {
                         tasks.push(Task::Eval(&arg.value, scope.clone()));
@@ -2195,8 +2202,15 @@ fn dispatch_call<'a>(
                 // PARAM order, `push_call`'s own order. Any INJECTION — a `$`-arg or an unknown
                 // named arg — declines to the interpreter: both must evaluate AND bind into a real
                 // call scope, which the flat ABI can't honor.
-                let (arg_slots, injections) = fill_arg_slots(params, args);
+                let (arg_slots, injections, diagnostics) = fill_arg_slots(params, args);
                 if injections.is_empty() {
+                    // AN.14: this branch RUNS the call (native intrinsic, never reaching `push_call`),
+                    // so it has to emit the arg warnings itself or a call that happens to resolve to an
+                    // intrinsic goes quiet where the interpreted one warns. The other branch falls
+                    // through to the interpreter, which warns there — exactly once either way.
+                    for d in diagnostics {
+                        ctx.warn(d);
+                    }
                     fnprofile::record_intrinsic(name.as_str());
                     let base = ctx.island_globals.borrow()[home].clone();
                     tasks.push(Task::Intrinsic {
@@ -2247,6 +2261,7 @@ fn dispatch_call<'a>(
                 &base,
                 Some(name.as_str()),
                 None,
+                ctx,
                 tasks,
             );
             return Ok(());
@@ -2311,34 +2326,72 @@ type ArgSlots<'a> = Vec<Option<&'a Expr>>;
 /// variable-scope-tests golden's `undeclared_var(d=6)`). `Scope::bind` routes each by prefix.
 type DollarArgs<'a> = Vec<(Rc<str>, &'a Expr)>;
 
+/// The arg-matching WARNINGS a call site earns (AN.14). Upstream has four, and which one fires turns
+/// on HOW the slot was already filled, so they're collected on the single matching walk rather than
+/// re-derived — a second walk would drift from the rules below. Empty (and non-allocating) for the
+/// overwhelming majority of calls, which is what keeps this off the hot path.
+type ArgDiagnostics = Vec<String>;
+
+/// How a param slot got filled — the state `argument … overrides positional argument` needs, and the
+/// reason a plain `Option<&Expr>` isn't enough to pick the right message.
+#[derive(Clone, Copy, PartialEq)]
+enum FilledBy {
+    Positional,
+    Named,
+}
+
 /// Fill each param slot from the call args, LEFT TO RIGHT (AH.2.4, the arg-permutations golden):
 /// a named arg takes its slot (a later duplicate overwrites), a `$`-arg splits out as a dynamic
 /// injection, and a POSITIONAL fills the LOWEST currently-unfilled slot — `f(a=1,2)` puts `2` in
-/// `b`, and `f(a=1,3,b=2)` lands `3` on `b` only for `b=2` to overwrite it. A positional with no
-/// unfilled slot left is dropped (upstream warns "too many arguments").
-fn fill_arg_slots<'a>(params: &'a [Parameter], args: &'a [Arg]) -> (ArgSlots<'a>, DollarArgs<'a>) {
+/// `b`, and `f(a=1,3,b=2)` lands `3` on `b` only for `b=2` to overwrite it.
+///
+/// Also returns the upstream diagnostics for the call (AN.14), which are all about the SAME
+/// overwrite/overflow events this walk already detects:
+/// - a positional with no unfilled slot left → `Too many unnamed arguments supplied` (and it's dropped)
+/// - a named arg onto a slot a NAMED arg filled → `argument "a" supplied more than once`
+/// - a named arg onto a slot a POSITIONAL filled → `argument "a" overrides positional argument`
+///   (a genuinely DIFFERENT message for what looks like the same event — `f(1, a=2)` vs `f(a=1, a=2)`)
+/// - a named arg matching no param → `variable "x" not specified as parameter`; `$`-args are EXEMPT
+///   (they're dynamic injections, not mis-typed parameter names, and upstream says nothing about them)
+fn fill_arg_slots<'a>(
+    params: &'a [Parameter],
+    args: &'a [Arg],
+) -> (ArgSlots<'a>, DollarArgs<'a>, ArgDiagnostics) {
     let mut arg_slots: Vec<Option<&'a Expr>> = vec![None; params.len()];
+    let mut filled_by: Vec<Option<FilledBy>> = vec![None; params.len()];
     let mut dollars: Vec<(Rc<str>, &'a Expr)> = Vec::new();
+    let mut diagnostics = ArgDiagnostics::new();
     for arg in args {
         match &arg.name {
-            None => {
-                if let Some(slot) = arg_slots.iter_mut().find(|s| s.is_none()) {
-                    *slot = Some(&arg.value);
+            None => match arg_slots.iter().position(Option::is_none) {
+                Some(i) => {
+                    arg_slots[i] = Some(&arg.value);
+                    filled_by[i] = Some(FilledBy::Positional);
                 }
-            }
+                None => diagnostics.push("Too many unnamed arguments supplied".to_string()),
+            },
             // a $-arg is a per-call dynamic override — injected into the call scope, not param-matched.
             Some(name) if name.starts_with('$') => dollars.push((Rc::clone(name), &arg.value)),
             Some(name) => {
                 if let Some(i) = params.iter().position(|p| p.name == *name) {
+                    match filled_by[i] {
+                        Some(FilledBy::Named) => diagnostics
+                            .push(format!("argument \"{name}\" supplied more than once")),
+                        Some(FilledBy::Positional) => diagnostics
+                            .push(format!("argument \"{name}\" overrides positional argument")),
+                        None => {}
+                    }
                     arg_slots[i] = Some(&arg.value);
+                    filled_by[i] = Some(FilledBy::Named);
                 } else {
                     // No such param — still binds as a call-scope variable (upstream warns + uses).
+                    diagnostics.push(format!("variable \"{name}\" not specified as parameter"));
                     dollars.push((Rc::clone(name), &arg.value));
                 }
             }
         }
     }
-    (arg_slots, dollars)
+    (arg_slots, dollars, diagnostics)
 }
 
 #[allow(
@@ -2355,12 +2408,19 @@ fn push_call<'a>(
     base: &Scope,
     name: Option<&'a str>,
     this_value: Option<Value>,
+    ctx: &Ctx<'a>,
     tasks: &mut Vec<Task<'a>>,
 ) {
     // Which explicit-arg expr fills each param slot ([`fill_arg_slots`]). `None` = the param takes
     // its default / undef. Kept separate from defaults so a DUPLICATE param name binds
     // arg-over-default in the two-phase `Task::Apply` (an unfilled second slot can't clobber a real arg).
-    let (arg_slots, dollars) = fill_arg_slots(params, args);
+    let (arg_slots, dollars, diagnostics) = fill_arg_slots(params, args);
+    // AN.14: this is the INTERPRETED call path, so it owns the arg warnings. (The intrinsic gate in
+    // `dispatch_call` runs the same match to decide eligibility — it emits them only on the branch
+    // that bypasses us, so a call warns exactly once whichever tier ends up running it.)
+    for d in diagnostics {
+        ctx.warn(d);
+    }
     // AF.5: a bound method's receiver fills a param NAMED `this` — iff declared and not
     // explicitly passed (the opt-in mechanic; an explicit arg wins, a this-less fn never sees it).
     let this_idx = this_value.as_ref().and_then(|_| {
@@ -2918,6 +2978,7 @@ fn tagged_globals<'a>(islands: &loader::Islands<'a>) -> BTreeMap<&'a str, &'a Ex
 /// never a blanket). Returns the EXPLAIN reason the entry can't wire, or `None` when clear.
 fn guard_veto<'a>(
     entry: &intrinsics::Entry,
+    params: &[Parameter],
     functions: &BTreeMap<&'a str, (loader::FnDef<'a>, usize)>,
 ) -> Option<String> {
     for &dep in entry.deps {
@@ -2926,6 +2987,20 @@ fn guard_veto<'a>(
         };
         if intrinsics::anchor_fp(dep) != Some(intrinsics::fingerprint(p, b)) {
             return Some(format!("dep `{dep}` drifted from its pinned reference"));
+        }
+        // AN.10: the function's OWN PARAMETER shares a name with a dep the native calls. Per AD.1 a
+        // local holding a FUNCTION VALUE wins in call position, so a caller passing one redirects that
+        // inner call — while the native, which resolved the dep statically, keeps calling the real
+        // function. BOSL2's `is_vector(v, length, zero, all_nonzero=false, …)` is exactly this: it
+        // declares `all_nonzero` AND calls `all_nonzero(v)`, so `is_vector([1,2], all_nonzero =
+        // function(x) false)` answered `true` where upstream says `false`. Same rationale as the
+        // builtin-shadow veto below — a name the native froze at build time can move at runtime — and
+        // it can't be caught later: the intrinsic ABI has no runtime defer, the args are already
+        // evaluated onto the stack by the time a value-type check could see them.
+        if params.iter().any(|p| &*p.name == dep) {
+            return Some(format!(
+                "parameter `{dep}` shadows the like-named function this intrinsic calls"
+            ));
         }
     }
     for &b in entry.builtins {
@@ -2978,7 +3053,7 @@ fn build_intrinsics<'a>(
         if !entry.consts.is_empty() || !entry.consts_v.is_empty() {
             continue; // const-guarded (numeric or Value): arms post-hoist (arm_guarded_intrinsics)
         }
-        match guard_veto(entry, functions) {
+        match guard_veto(entry, params, functions) {
             None => {
                 out.insert(name, entry.func);
             }
@@ -3013,7 +3088,7 @@ fn arm_guarded_intrinsics<'a>(ctx: &Ctx<'a>) -> Vec<(&'a str, intrinsics::Intrin
         if entry.consts.is_empty() && entry.consts_v.is_empty() {
             continue; // unguarded: already wired (or vetoed) at build_intrinsics
         }
-        if let Some(why) = guard_veto(entry, &ctx.functions) {
+        if let Some(why) = guard_veto(entry, params, &ctx.functions) {
             if explain {
                 eprintln!("+ [intrinsic GUARD-DECLINED] {name} — {why} → INTERPRETED");
             }
@@ -3023,6 +3098,38 @@ fn arm_guarded_intrinsics<'a>(ctx: &Ctx<'a>) -> Vec<(&'a str, intrinsics::Intrin
         let Some(scope) = globals.get(home) else {
             continue;
         };
+        // AN.11: the native doesn't only bake ITS island's constants — it inlines its DEPS, so it bakes
+        // each dep's constant DEFAULTS too (`all_nonzero(x, eps=_EPSILON)` contributes the `_EPSILON`
+        // its OWN file sees). Checking only `home` therefore armed a program where a dep lives in an
+        // island whose `_EPSILON` differs from the caller's, and the native answered with the wrong
+        // tolerance. Each dep's consts are now checked against THAT DEP'S home scope.
+        //
+        // ONE HOP, matching the dep-fingerprint pin right above it in `guard_veto` — a dep-of-a-dep's
+        // constants are still unchecked. Sound for the registry as it stands (deps are leaf predicates),
+        // but if a dep ever grows deps of its own this needs to go transitive.
+        let dep_const_veto = entry.deps.iter().find_map(|&dep| {
+            let &((p, b), dep_home) = ctx.functions.get(dep)?;
+            let dep_entry = intrinsics::resolve(dep, p, b)?;
+            let dep_scope = globals.get(dep_home)?;
+            let bad = dep_entry.consts.iter().any(|&(cname, expected)| {
+                !matches!(dep_scope.lookup_opt(cname), Some(Value::Num(n)) if n.to_bits() == expected.to_bits())
+            });
+            let bad_v = dep_entry.consts_v.iter().any(|&(cname, expected)| {
+                !dep_scope
+                    .lookup_opt(cname)
+                    .is_some_and(|v| intrinsics::value_bits_eq(&v, &expected()))
+            });
+            (bad || bad_v).then(|| dep.to_string())
+        });
+        if let Some(dep) = dep_const_veto {
+            if explain {
+                eprintln!(
+                    "+ [intrinsic CONST-DECLINED] {name} — dep `{dep}` sees different constants in ITS \
+                     home island than the intrinsic baked → INTERPRETED"
+                );
+            }
+            continue;
+        }
         let bad = entry.consts.iter().find(|&&(cname, expected)| {
             !matches!(scope.lookup_opt(cname), Some(Value::Num(n)) if n.to_bits() == expected.to_bits())
         });
@@ -3488,7 +3595,11 @@ fn bind_module_scope<'a>(
 ) -> crate::Result<Scope> {
     // Which explicit-arg expr fills each param slot ([`fill_arg_slots`] — positionals take the
     // lowest unfilled slot, AH.2.4). `None` = the param took no arg → its default in phase 1.
-    let (arg_slots, dollars) = fill_arg_slots(params, args);
+    let (arg_slots, dollars, diagnostics) = fill_arg_slots(params, args);
+    // AN.14: the MODULE call path binds here directly (no `push_call`), so it emits its own.
+    for d in diagnostics {
+        ctx.warn(d);
+    }
 
     // Lexically a child of the module's home `global` (hygiene), dynamically a child of `caller` (inherits
     // the caller's $-context by reference — no per-call $-copy). $-args (bound last) shadow the inherited.
@@ -4138,10 +4249,11 @@ mod tests {
             run_echo(&format!("{point3d}\necho(point3d(p=[1]));")),
             "ECHO: [1, 0, 0]"
         );
-        // named overrides positional; the overwritten positional never evaluates
+        // named overrides positional; the overwritten positional never evaluates. AN.14 added the
+        // warning upstream prints here (verified against the binary) — the value was always right.
         assert_eq!(
             run_echo(&format!("{point3d}\necho(point3d([9,9,9], p=[1]));")),
-            "ECHO: [1, 0, 0]"
+            "WARNING: argument \"p\" overrides positional argument\nECHO: [1, 0, 0]"
         );
         // a `$`-arg declines to the interpreter — same value either way
         assert_eq!(

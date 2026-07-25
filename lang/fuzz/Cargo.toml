@@ -63,3 +63,13 @@ path = "fuzz_targets/gen_diff.rs"
 test = false
 doc = false
 bench = false
+
+# The tier differential ONE LEVEL UP from `jit_diff`: a whole generated program through the real
+# dispatch, jit off vs on. `jit_diff` calls `compile_function` directly with positional binding, so it
+# cannot see a call-machinery divergence — the AN.16 gap that let four binding bugs through.
+[[bin]]
+name = "jit_dispatch_diff"
+path = "fuzz_targets/jit_dispatch_diff.rs"
+test = false
+doc = false
+bench = false

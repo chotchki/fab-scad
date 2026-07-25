@@ -668,6 +668,39 @@ fn duplicate_binding_rules_match_the_oracle() {
     agree_echo("module m(a, a = 5) { echo(a); } m(1);"); // → 1, an arg still beats a default
 }
 
+/// AN.10 — the INTRINSIC tier's version of the shadowing question. BOSL2's `is_vector` declares a
+/// parameter named `all_nonzero` AND calls a FUNCTION named `all_nonzero`; per AD.1 a local holding a
+/// function value wins in call position, so passing one redirects that inner call. The native impl
+/// hardcodes the real function, so it answered as though the parameter weren't there.
+#[test]
+fn a_parameter_shadowing_an_intrinsics_own_dep_matches_the_oracle() {
+    const BOSL2_SHAPED: &str = "\
+_EPSILON = 1e-9;
+function is_nan(x) = (x!=x);
+function is_finite(x) = is_num(x) && !is_nan(0*x);
+function all_nonzero(x, eps=_EPSILON) =
+    is_finite(x)? abs(x)>eps :
+    is_vector(x) && [for (xx=x) if(abs(xx)<eps) 1] == [];
+function is_vector(v, length, zero, all_nonzero=false, eps=_EPSILON) =
+    is_list(v) && len(v)>0 && []==[for(vi=v) if(!is_finite(vi)) 0]
+    && (is_undef(length) || (assert(is_num(length))len(v)==length))
+    && (is_undef(zero) || ((norm(v) >= eps) == !zero))
+    && (!all_nonzero || all_nonzero(v)) ;
+";
+    // A function value in the shadowing slot — both spellings, named and positional.
+    agree_echo(&format!(
+        "{BOSL2_SHAPED}echo(is_vector([1, 2], all_nonzero = function(x) false));"
+    ));
+    agree_echo(&format!(
+        "{BOSL2_SHAPED}echo(is_vector([1, 2], undef, undef, function(x) false));"
+    ));
+    // The ordinary bool spellings must keep working — whatever the fix, it can't break these.
+    agree_echo(&format!(
+        "{BOSL2_SHAPED}echo(is_vector([1, 2], all_nonzero = true), is_vector([1, 0], all_nonzero = true));"
+    ));
+    agree_echo(&format!("{BOSL2_SHAPED}echo(is_vector([1, 2]), is_vector([]));"));
+}
+
 #[test]
 fn duplicate_binding_warnings_match_the_oracle() {
     // AN.12/AN.13: the VALUE channel is blind to a whole class of divergence — these cases all agree on
@@ -684,6 +717,17 @@ fn duplicate_binding_warnings_match_the_oracle() {
     agree_warnings("echo([for (a = 0; a < 3; a = a + 1, a = a + 100) a]);"); // update: one per iteration
     agree_warnings("_ = 1; echo([for (i = 0; i < 2; i = i + 1, 99) [i, _]]);");
     agree_warnings("echo([for (i = [0:0]) let(a = 1, a = 2) a]);"); // the comprehension `let`
+    // AN.14, the CALL-SITE four. Note the third and fourth: the same "a named arg landed on a taken
+    // slot" event gets a DIFFERENT message depending on how the slot was taken, which is why the
+    // matching walk tracks positional-vs-named rather than just filled-or-not.
+    agree_warnings("function f(a, b) = [a, b]; echo(f(a = 1, a = 2));"); // supplied more than once
+    agree_warnings("function f(a, b) = [a, b]; echo(f(1, a = 2));"); // overrides positional argument
+    agree_warnings("function f(a, b) = [a, b]; echo(f(1, 2, 3));"); // Too many unnamed arguments
+    agree_warnings("function g() = 1; echo(g(x = 1));"); // not specified as parameter
+    agree_warnings("function g() = 1; echo(g($x = 1));"); // a $-arg is EXEMPT — no warning at all
+    agree_warnings("function f(a, b) = [a, b]; echo(f(a = 1, 2));"); // no warning: 2 takes b
+    agree_warnings("module m(p) { echo(p); } m(q = 5);"); // modules warn on the same rules
+    agree_warnings("module m(p) { echo(p); } m(p = 1, p = 2);");
     // The reduced trophy body itself: the two readings differ far past a ULP (-2.0034 vs exactly -2).
     agree_echo(
         "function sq(s) = let(x = min(0.998, s), r = 1 + x*(sqrt(2)-1),

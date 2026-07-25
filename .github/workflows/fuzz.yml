@@ -67,6 +67,15 @@ jobs:
       - name: fuzz gen_diff
         working-directory: lang
         run: cargo fuzz run gen_diff --target "$FUZZ_TARGET" -- -max_total_time=240 -rss_limit_mb=2048 -max_len=8 -timeout=15
+      # AN.16 — the tier differential ONE LEVEL UP from jit_diff. That target calls compile_function
+      # directly and binds params POSITIONALLY, so it structurally cannot see a divergence that lives in
+      # the CALL MACHINERY; Phase AN found four such bugs by hand, every one invisible to it. This runs a
+      # whole generated program through the real dispatch with the JIT off vs on and compares the console
+      # verbatim — warnings included, since a tier that computes the right number while swallowing a
+      # diagnostic still diverges. Same -max_len=8 as gen_diff: the bytes are just a seed.
+      - name: fuzz jit_dispatch_diff
+        working-directory: lang
+        run: cargo fuzz run jit_dispatch_diff --target "$FUZZ_TARGET" -- -max_total_time=240 -rss_limit_mb=4096 -max_len=8 -timeout=15
       # Y.7 — the GEOMETRY-LOWERING seam (fab-scad fuzz crate at the repo root): evaluate_geometry ->
       # build_geo/build_2d through the REAL Manifold kernel, so the kernel's get_unchecked unsafe + the
       # X.4 2D-hull path get ASan on fuzzer geometry. Heavier per-exec than the lang targets (real CSG),

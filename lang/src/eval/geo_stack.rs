@@ -240,7 +240,11 @@ pub(super) fn eval_geometry_driver<'a>(
                 // either (verified vs the oracle: `cube(10); assert(false); cube(5);` → exports cube(10)).
                 crate::Error::Assert(msg) => {
                     results.truncate(mark);
-                    ctx.warn(msg);
+                    // AP.7 — reported as an ERROR, not a warning: upstream prints `ERROR: Assertion …`
+                    // and halts here too. The non-fatal CONTROL FLOW below is unchanged and stays
+                    // oracle-matched (`cube(10); assert(false); cube(5);` exports the cube(10), exit 0);
+                    // only the level was wrong, which understated a halted render as a warning.
+                    ctx.error(msg);
                     break;
                 }
                 // A genuine evaluation/parse/lower fault stays LOUD — stamped with THIS top-level

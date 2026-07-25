@@ -395,10 +395,15 @@ fn echo_and_assert_evaluate() {
     );
     let loud =
         fab_lang::evaluate_full("cube(2); assert(1 == 2, \"nope\"); cube(1);").expect("renders");
-    assert_eq!(
-        loud.warnings(),
-        ["assertion failed: nope [assert((1 == 2))]"]
+    // AP.7 — reported at ERROR level, matching upstream's `ERROR: Assertion … failed`. It is still not
+    // FATAL (the pre-assert cube exported above), so it rides the `Evaluation` console rather than a
+    // `Failure`; the level and the control flow are independent, and only the level moved.
+    assert!(
+        loud.warnings().is_empty(),
+        "not a warning: {:?}",
+        loud.warnings()
     );
+    assert_eq!(loud.errors(), ["assertion failed: nope [assert((1 == 2))]"]);
 }
 
 #[test]

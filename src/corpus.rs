@@ -341,7 +341,11 @@ pub fn run_file(script: &str, path: &Path) -> (Bucket, u128, String) {
                 Message::Warning(w) if w.starts_with("Can't open library") => {
                     Some((Bucket::Load, w))
                 }
-                Message::Warning(w) if w.starts_with("assertion failed") => {
+                // AP.7 — a failed assert is reported as an ERROR now (upstream prints `ERROR:` and
+                // halts while keeping prior geometry). This arm HAD to move with it: the match ends in
+                // `_ => None`, so leaving it on `Warning` would have silently stopped bucketing every
+                // assertion failure in the sweep, with nothing red to show for it.
+                Message::Error(w) if w.starts_with("assertion failed") => {
                     Some((Bucket::Assertion, w))
                 }
                 _ => None,
@@ -417,7 +421,11 @@ pub fn run_example(script: &str, bosl2_dir: &Path) -> (Bucket, u128, String) {
                 Message::Warning(w) if w.starts_with("Can't open library") => {
                     Some((Bucket::Load, w))
                 }
-                Message::Warning(w) if w.starts_with("assertion failed") => {
+                // AP.7 — a failed assert is reported as an ERROR now (upstream prints `ERROR:` and
+                // halts while keeping prior geometry). This arm HAD to move with it: the match ends in
+                // `_ => None`, so leaving it on `Warning` would have silently stopped bucketing every
+                // assertion failure in the sweep, with nothing red to show for it.
+                Message::Error(w) if w.starts_with("assertion failed") => {
                     Some((Bucket::Assertion, w))
                 }
                 _ => None,
@@ -461,7 +469,8 @@ pub fn run_script(script: &str, tests_dir: &Path) -> (Bucket, u128, String) {
     match result {
         Ok((_, messages)) => {
             match messages.iter().find_map(|m| match m {
-                Message::Warning(w) if w.starts_with("assertion failed") => Some(w),
+                // AP.7 — see above: the assert verdict rides `Message::Error` now.
+                Message::Error(w) if w.starts_with("assertion failed") => Some(w),
                 _ => None,
             }) {
                 Some(w) => (

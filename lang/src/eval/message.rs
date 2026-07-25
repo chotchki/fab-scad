@@ -14,9 +14,14 @@ pub enum Message {
     Echo(String),
     /// A warning's content. Emitted, but not (yet) matched to the oracle word-for-word.
     Warning(String),
-    /// The TERMINAL fault's content. Never produced during eval — [`Failure::console`](crate::Failure::console)
-    /// synthesizes it from the error when a caller wants the run's console as one sequence. Upstream prints
-    /// at most one and prints nothing after it, so this is always the last element when present.
+    /// A fault's content, rendered `ERROR: …` as upstream prints it. Always LAST when present — upstream
+    /// prints at most one and nothing after it.
+    ///
+    /// Two producers, matching upstream's two ways of reaching an `ERROR:` line:
+    /// [`Failure::console`](crate::Failure::console) synthesizes it for a fault that ABORTED the run, and
+    /// eval emits one directly for a statement-position `assert`, which reports an error and halts but
+    /// still exports the geometry accumulated before it (L.5.8/AP.7). Both stop the program; they differ
+    /// only in whether anything survives to export, which is why one is a `Failure` and one is not.
     Error(String),
 }
 
@@ -91,8 +96,22 @@ impl Evaluation {
             .collect()
     }
 
-    /// Every message as its full console line (`ECHO: …` / `WARNING: …`), in order — for a whole-console
-    /// comparison against the oracle's captured output.
+    /// The ERROR contents in order — in practice 0 or 1, since a fault stops the run. Non-empty here only
+    /// for the non-fatal-but-reported case (a statement-position `assert`, L.5.8/AP.7); a fault that
+    /// aborted never produces an [`Evaluation`] at all, it produces a [`Failure`](crate::Failure).
+    #[must_use]
+    pub fn errors(&self) -> Vec<&str> {
+        self.messages
+            .iter()
+            .filter_map(|m| match m {
+                Message::Error(s) => Some(s.as_str()),
+                Message::Echo(_) | Message::Warning(_) => None,
+            })
+            .collect()
+    }
+
+    /// Every message as its full console line (`ECHO: …` / `WARNING: …` / `ERROR: …`), in order — for a
+    /// whole-console comparison against the oracle's captured output.
     #[must_use]
     pub fn console(&self) -> Vec<String> {
         self.messages.iter().map(Message::render).collect()

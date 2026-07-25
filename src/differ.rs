@@ -372,7 +372,20 @@ impl Driver for OpenScad {
     }
     fn warnings(&self, scad: &str) -> Vec<String> {
         oracle::run(scad, Duration::from_secs(30))
-            .map(|run| run.warnings.iter().map(|l| normalize_warning(l)).collect())
+            .map(|run| {
+                run.warnings
+                    .iter()
+                    // `oracle::run` captures WARNING **and** ERROR lines in one vec (it is the
+                    // diagnostics feed for a failed render). This channel is warnings-only, so drop the
+                    // errors — otherwise it compares our warnings against their warnings PLUS errors and
+                    // reports a divergence for every program that faults. Errors are deliberately not
+                    // compared here: our fault TEXT is not upstream-worded and matching it word-for-word
+                    // is an agreed non-goal (`check_assert`), so an error channel could only ever compare
+                    // PRESENCE — worth building for AN.17, but it is not this channel.
+                    .filter(|l| !l.trim_start().starts_with("ERROR:"))
+                    .map(|l| normalize_warning(l))
+                    .collect()
+            })
             .unwrap_or_default()
     }
 }

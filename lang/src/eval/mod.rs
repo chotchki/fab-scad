@@ -575,6 +575,17 @@ impl<'a> Ctx<'a> {
         self.messages.borrow_mut().push(Message::Warning(message));
     }
 
+    /// Push a [`Message::Error`] onto the same ordered log (AP.7).
+    ///
+    /// For the ONE fault that is reported without being fatal: a statement-position `assert`, which
+    /// upstream prints as `ERROR:` while still exporting the geometry accumulated before it (L.5.8). That
+    /// used to go through [`Ctx::warn`], which got the control flow right and the LEVEL wrong — a failed
+    /// assert halted the render but showed in the console as a warning, understating it to the user.
+    /// Every other fault leaves through [`Failure`](crate::Failure) instead.
+    fn error(&self, message: String) {
+        self.messages.borrow_mut().push(Message::Error(message));
+    }
+
     /// Resolve an `import`/`surface` `file=` path to an [`Imported`] payload (M.3): the caller-supplied one
     /// if the [`FileTable`] has it, else an EMPTY placeholder of the extension's dimension ([`Imported::empty_for`])
     /// — recording `raw` as a [`SourceNeed::File`] so the caller can read it and re-run. A `None` path (an

@@ -96,15 +96,16 @@ fn the_error_is_not_stored_twice() {
 #[test]
 fn an_assert_statement_is_not_fatal_at_all() {
     // L.5.8, and the reason the tests above use hoist faults. A STATEMENT-position assert is caught in
-    // `geo_stack`, converted to a warning, and evaluation STOPS while keeping the geometry accumulated
-    // before it — matching upstream's partial render. So this is `Ok`, not a `Failure`, and the failed
-    // assert shows up as a WARNING rather than the terminal ERROR upstream prints.
+    // `geo_stack` and evaluation STOPS while KEEPING the geometry accumulated before it — matching
+    // upstream, which for `cube(10); assert(false); cube(5);` exports the cube(10), drops the cube(5),
+    // and exits 0. So this is `Ok`, not a `Failure` — but it is still reported as an ERROR (AP.7),
+    // because a warning understates a render that halted.
     let (_, messages) = evaluate_geometry_full("cube(10);\nassert(false);\ncube(5);\n")
         .expect("a statement-position assert is not fatal (L.5.8)");
     let rendered: Vec<String> = messages.iter().map(Message::render).collect();
     assert!(
-        rendered.iter().any(|l| l.starts_with("WARNING: ")),
-        "the failed assert is reported as a warning: {rendered:?}"
+        rendered.iter().any(|l| l.starts_with("ERROR: ")),
+        "a failed assert reports at ERROR level even though it is not fatal: {rendered:?}"
     );
 }
 

@@ -287,19 +287,15 @@ impl Driver for FabLang {
     fn echo(&self, scad: &str) -> Vec<String> {
         Self::messages(scad)
             .iter()
-            .filter_map(|m| match m {
-                fab_lang::Message::Echo(c) => Some(format!("ECHO: {c}")),
-                fab_lang::Message::Warning(_) => None,
-            })
+            .filter_map(fab_lang::Message::echo)
+            .map(|c| format!("ECHO: {c}"))
             .collect()
     }
     fn warnings(&self, scad: &str) -> Vec<String> {
         Self::messages(scad)
             .iter()
-            .filter_map(|m| match m {
-                fab_lang::Message::Warning(c) => Some(normalize_warning(c)),
-                fab_lang::Message::Echo(_) => None,
-            })
+            .filter_map(fab_lang::Message::warning)
+            .map(normalize_warning)
             .collect()
     }
 }
@@ -315,12 +311,20 @@ impl FabLang {
     /// vacuously. AN.15.1's `translate` case was the first to put a warning behind a transform and
     /// catch it. `evaluate_geometry_full` never flattens, so the messages come back for any program.
     ///
-    /// The `unwrap_or_default` remains a known soft spot — a fab-lang error still reads as an empty
-    /// console rather than failing the comparison. Narrowing that is its own task.
+    /// A FAILED eval yields its console too (AP.5, closing AN.18). `Failure` carries what the program had
+    /// printed before the fault, and `Failure::console()` appends the fault itself as the terminal
+    /// `ERROR:` line — so a program that dies partway is compared on everything it said, and the death is
+    /// just the last line. That kills the old `unwrap_or_default()`, under which "errored" and "printed
+    /// nothing" were the same observation and any case where the oracle was ALSO quiet passed vacuously.
+    ///
+    /// This is why the error belongs IN the console rather than beside it: the differential's unit is a
+    /// line of text, so the fault compares against the oracle's `ERROR:` line by the same rule as every
+    /// warning, with no second comparison contract to invent.
     fn messages(scad: &str) -> Vec<fab_lang::Message> {
-        fab_lang::evaluate_geometry_full(scad)
-            .map(|(_tree, messages)| messages)
-            .unwrap_or_default()
+        match fab_lang::evaluate_geometry_full(scad) {
+            Ok((_tree, messages)) => messages,
+            Err(failure) => failure.console(),
+        }
     }
 }
 

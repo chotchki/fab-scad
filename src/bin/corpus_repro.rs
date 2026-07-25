@@ -85,8 +85,12 @@ fn main() -> anyhow::Result<()> {
                 print_messages(&messages);
             }
             Err(e) => {
-                let bucket = classify_display(&e);
+                let bucket = classify_display(&e.error);
                 println!("RESULT: {bucket} — {e}");
+                // A failed run has a console too now (AP.2) — and for a REPRO tool that's the whole
+                // story: the echoes the program got through before it died are the trail to the
+                // divergence, and printing only the fault threw them away.
+                print_messages(&e.console());
             }
         }
     }

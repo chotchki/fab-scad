@@ -224,10 +224,7 @@ fn diff_one(src: &str, timeout: Duration, flags: &[&str]) -> Outcome {
     // is exactly how the oracle's console emits it).
     let ours_echo: Vec<String> = messages
         .iter()
-        .filter_map(|m| match m {
-            fab_lang::Message::Echo(s) => Some(s.clone()),
-            fab_lang::Message::Warning(_) => None,
-        })
+        .filter_map(fab_lang::Message::echo)
         .flat_map(|s| s.lines().map(String::from).collect::<Vec<_>>())
         .collect();
     let oracle_echo: Vec<String> = report

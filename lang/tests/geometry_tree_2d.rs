@@ -37,10 +37,8 @@ fn warnings(src: &str) -> Vec<String> {
     let (_, messages) = evaluate_geometry_full(src).unwrap();
     messages
         .iter()
-        .filter_map(|m| match m {
-            fab_lang::Message::Warning(s) => Some(s.clone()),
-            fab_lang::Message::Echo(_) => None,
-        })
+        .filter_map(fab_lang::Message::warning)
+        .map(str::to_string)
         .collect()
 }
 

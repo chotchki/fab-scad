@@ -2715,6 +2715,21 @@ pub fn evaluate_geometry_metered(program: &Program, budget: u64) -> (crate::Resu
     (result, ctx.eval_steps.get())
 }
 
+/// Attach the console `ctx` has accumulated so far to an escaping error (AP.2) — the seam that turns a
+/// bare interior [`Error`](crate::Error) into a [`Failure`](crate::Failure) carrying what the program had
+/// already printed.
+///
+/// Only the three fallible steps that run AFTER the `Ctx` exists go through here; everything before it
+/// (closing the `use`/`include` graph, flattening) genuinely has no console yet and rides the blanket
+/// `From<Error>` with an empty one. Draining rather than cloning is deliberate: the run is over on this
+/// path, and the messages belong to the failure now.
+fn with_console<T>(result: crate::Result<T>, ctx: &Ctx<'_>) -> crate::RunResult<T> {
+    result.map_err(|error| crate::Failure {
+        error,
+        messages: ctx.messages.take(),
+    })
+}
+
 /// The `island_globals` a fresh [`Ctx`] starts with: one placeholder scope per island.
 ///
 /// Island 0 (the root) is filled by `run_stmts` and the rest are built right after the `Ctx` exists, but
@@ -2754,7 +2769,7 @@ fn resolve_source(
     files: &FileTable,
     jit_factory: Option<&dyn NumericJitFactory>,
     config: Config,
-) -> crate::Result<Resolution> {
+) -> crate::RunResult<Resolution> {
     let _span = tracing::trace_span!("eval_program").entered();
     // Phase 1 (STATIC): close the `use`/`include` graph. A reference not yet in the source table surfaces as
     // a `Scad` need and we return BEFORE eval — the program can't execute until its libraries are present.
@@ -2845,9 +2860,12 @@ fn resolve_source(
     // twice — the double-build that tips a borderline model over its budget. (The reverse — a root constant
     // calling a not-yet-built use-island function — stays a gap; a lazy/fixpoint island build is the general
     // answer, but root-homed BOSL2 is the overwhelmingly common case.)
-    let global = hoist_scope_publishing(&exec, &root_scope_with_dir(&ctx), &ctx, 0)?;
+    let global = with_console(
+        hoist_scope_publishing(&exec, &root_scope_with_dir(&ctx), &ctx, 0),
+        &ctx,
+    )?;
     for i in 1..n {
-        let island_global = build_island_global(i, &ctx)?;
+        let island_global = with_console(build_island_global(i, &ctx), &ctx)?;
         if let Some(slot) = ctx.island_globals.borrow_mut().get_mut(i) {
             *slot = island_global;
         }
@@ -2861,7 +2879,7 @@ fn resolve_source(
     mod_redundancy::reset(); // dev probe (J.5.1): fresh module-call ceiling per run (FAB_CSG_REDUNDANCY)
     mod_cache::reset_thread_state(); // a panic-unwound PRIOR eval on a reused thread must not leak captures
     fnprofile::reset(); // dev probe: same — fresh per-name call counts per run (FAB_PROFILE_FNS)
-    let tree = eval_top(&exec, &global, &ctx)?;
+    let tree = with_console(eval_top(&exec, &global, &ctx), &ctx)?;
     redundancy::report(); // prints to stderr only under FAB_REDUNDANCY=1
     mod_redundancy::report(); // prints to stderr only under FAB_CSG_REDUNDANCY=1
     if ctx.config.csg_cache {
@@ -2897,7 +2915,7 @@ pub(crate) fn evaluate_source(
     root_path: Option<&std::path::Path>,
     library_paths: &[std::path::PathBuf],
     config: Config,
-) -> crate::Result<(Geo, Vec<Message>)> {
+) -> crate::RunResult<(Geo, Vec<Message>)> {
     // The no-import spine (tests + the pure-geometry `evaluate*` sugar) is interpreter-only — its callers
     // are fab-lang-internal and can't build a JIT. The desktop JIT rides the import-capable
     // `resolve_geometry_*` entries the native shell drives models through.

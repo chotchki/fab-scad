@@ -8,8 +8,91 @@
 
 use thiserror::Error;
 
-/// The crate result alias.
+use crate::eval::Message;
+
+/// The crate result alias — the INTERIOR one, unchanged. Every `?` in the evaluator keeps propagating a
+/// bare [`Error`]; only the public entry points widen to [`RunResult`], so threading the console cost the
+/// interior nothing.
 pub type Result<T> = std::result::Result<T, Error>;
+
+/// The result of a whole evaluation RUN: the value plus its console on success, a [`Failure`] carrying the
+/// fault AND the console it had already printed on failure.
+pub type RunResult<T> = std::result::Result<T, Failure>;
+
+/// A fault plus the console output that preceded it.
+///
+/// The console is an OUTPUT of evaluation, not a reward for succeeding. Before this existed, warnings and
+/// echoes lived in a `Ctx` side buffer that only escaped on the success path — so the moment a `?` fired,
+/// everything the program had printed was discarded. Callers then could not tell "this program printed
+/// nothing" from "this program failed", which is precisely how `differ`'s `unwrap_or_default()` managed to
+/// hide a whole class of divergence (AN.18).
+///
+/// A STRUCT wrapping [`Error`], deliberately not a new `Error` VARIANT. The variant would have been a
+/// smaller diff and a worse one: `Error` is `#[non_exhaustive]`, so every `match` over it already ends in a
+/// `_ =>` arm, and a new variant slides into those catch-alls silently — mis-bucketing without a compile
+/// error, exactly the trap `gen/src/main.rs` was already sitting in. A new TYPE makes every call site that
+/// must now say `.error` a compile failure instead. Loud beats small.
+///
+/// The `ERROR:` console line is NOT stored here — [`Failure::console`] derives it from `error`, so the fault
+/// has one representation rather than two that can drift.
+#[derive(Debug)]
+pub struct Failure {
+    /// The fault that stopped the run.
+    pub error: Error,
+    /// Echo + warnings emitted BEFORE the fault, in order. Never contains the fault itself.
+    pub messages: Vec<Message>,
+}
+
+impl Failure {
+    /// The full console this run produced, fault included as the final line.
+    ///
+    /// Appending is faithful rather than a simplification: upstream's `ERROR:` is TERMINAL — evaluation
+    /// halts, at most one is ever printed, nothing follows it, and no geometry is exported (verified
+    /// against the binary: a failing assert inside `for (i = [0:3])` prints two echoes, one ERROR, then
+    /// stops). A `WARNING:` is the opposite — any number, interleaved, and the render still completes.
+    #[must_use]
+    pub fn console(&self) -> Vec<Message> {
+        let mut out = self.messages.clone();
+        out.push(Message::Error(self.error.to_string()));
+        out
+    }
+}
+
+impl std::fmt::Display for Failure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.error.fmt(f)
+    }
+}
+
+impl std::error::Error for Failure {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.error)
+    }
+}
+
+/// Lets a bare [`Error`] cross a `?` into a [`RunResult`] — with an EMPTY console, since a raw error is by
+/// definition one nobody had a console to attach. The seam that owns the `Ctx` attaches the real one; this
+/// impl exists so the paths that genuinely have no console (loader/IO failures before eval starts) stay
+/// one-line `?` propagation instead of ceremony.
+impl From<Error> for Failure {
+    fn from(error: Error) -> Self {
+        Failure {
+            error,
+            messages: Vec::new(),
+        }
+    }
+}
+
+/// Drop the console back off a [`Failure`], for the entry points that don't deal in one.
+///
+/// The `evaluate_geometry` / `resolve_geometry_*` family returns geometry ALONE — it discards the console
+/// on success, so discarding it on failure is the same contract, not a loss. Callers that want it ask for
+/// the `_full` sibling, which is exactly the choice they already make today.
+impl From<Failure> for Error {
+    fn from(failure: Failure) -> Self {
+        failure.error
+    }
+}
 
 /// A failure somewhere in the parse → evaluate → lower pipeline.
 #[derive(Debug, Error)]

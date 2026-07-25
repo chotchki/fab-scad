@@ -47,7 +47,7 @@ mod parser;
 mod webcolors;
 
 pub use customizer::{Constraint, CustomParam, Customizer, DropdownItem, customize};
-pub use error::{Error, Result};
+pub use error::{Error, Failure, Result, RunResult};
 pub use eval::jit_abi::{jit_math, jit_math_id};
 pub use eval::rng::RandStream;
 pub use eval::{
@@ -105,7 +105,7 @@ use std::path::{Path, PathBuf};
 /// [`Error::Parse`] for malformed source, [`Error::Load`] for an unresolvable `use`/`include`, and
 /// [`Error::Unimplemented`] for a well-formed program that uses a construct beyond the current subset.
 pub fn evaluate(source: &str) -> Result<Mesh> {
-    evaluate_full(source).map(|e| e.mesh)
+    evaluate_full(source).map(|e| e.mesh).map_err(Error::from)
 }
 
 /// Like [`evaluate`], but returns the full [`Evaluation`] — the mesh PLUS the ordered `echo`/warning
@@ -113,7 +113,7 @@ pub fn evaluate(source: &str) -> Result<Mesh> {
 ///
 /// # Errors
 /// As [`evaluate`].
-pub fn evaluate_full(source: &str) -> Result<Evaluation> {
+pub fn evaluate_full(source: &str) -> RunResult<Evaluation> {
     evaluate_with_base_full(source, Path::new("."), &[])
 }
 
@@ -128,14 +128,16 @@ pub fn evaluate_full(source: &str) -> Result<Evaluation> {
 /// [`Error::Load`] if the file or any `use`/`include` target can't be read/resolved, [`Error::Parse`]
 /// for malformed source, and [`Error::Unimplemented`] for constructs beyond the current subset.
 pub fn evaluate_file(path: &Path, library_paths: &[PathBuf]) -> Result<Mesh> {
-    evaluate_file_full(path, library_paths).map(|e| e.mesh)
+    evaluate_file_full(path, library_paths)
+        .map(|e| e.mesh)
+        .map_err(Error::from)
 }
 
 /// Like [`evaluate_file`], but returns the full [`Evaluation`] (mesh + `echo`/warning messages).
 ///
 /// # Errors
 /// As [`evaluate_file`].
-pub fn evaluate_file_full(path: &Path, library_paths: &[PathBuf]) -> Result<Evaluation> {
+pub fn evaluate_file_full(path: &Path, library_paths: &[PathBuf]) -> RunResult<Evaluation> {
     let source = eval::io::read_source(path)?;
     // The including-file dir. An empty parent (a bare `foo.scad`) resolves relative to CWD via the
     // loader's canonicalize, so no special-casing is needed beyond the parent-less root (`.`).
@@ -147,10 +149,20 @@ pub fn evaluate_file_full(path: &Path, library_paths: &[PathBuf]) -> Result<Eval
         library_paths,
         Config::from_env(),
     )?;
-    Ok(Evaluation {
-        mesh: eval::mesh_of(tree)?,
-        messages,
-    })
+    flattened(tree, messages)
+}
+
+/// Flatten an evaluated tree to a mesh, KEEPING the console if the flatten fails.
+///
+/// `mesh_of` is the no-backend flattener, and it LOUD-rejects any 3D tree carrying a transform or a
+/// boolean. A bare `?` here would convert that into a console-less `Failure` and throw away messages we
+/// are literally holding — the same discard that made `differ`'s warning channel blind to every program
+/// with a `translate` in it. So the failure is built by hand with the messages attached.
+fn flattened(tree: Geo, messages: Vec<Message>) -> RunResult<Evaluation> {
+    match eval::mesh_of(tree) {
+        Ok(mesh) => Ok(Evaluation { mesh, messages }),
+        Err(error) => Err(Failure { error, messages }),
+    }
 }
 
 /// Evaluate in-memory `source` as if it lived in `base_dir` — a GUI's unsaved buffer for the file it's
@@ -165,7 +177,9 @@ pub fn evaluate_with_base(
     base_dir: &Path,
     library_paths: &[PathBuf],
 ) -> Result<Mesh> {
-    evaluate_with_base_full(source, base_dir, library_paths).map(|e| e.mesh)
+    evaluate_with_base_full(source, base_dir, library_paths)
+        .map(|e| e.mesh)
+        .map_err(Error::from)
 }
 
 /// Like [`evaluate_with_base`], but returns the full [`Evaluation`] (mesh + `echo`/warning messages).
@@ -176,13 +190,10 @@ pub fn evaluate_with_base_full(
     source: &str,
     base_dir: &Path,
     library_paths: &[PathBuf],
-) -> Result<Evaluation> {
+) -> RunResult<Evaluation> {
     let (tree, messages) =
         eval::evaluate_source(source, base_dir, None, library_paths, Config::from_env())?;
-    Ok(Evaluation {
-        mesh: eval::mesh_of(tree)?,
-        messages,
-    })
+    flattened(tree, messages)
 }
 
 /// Evaluate OpenSCAD `source` to a dimension-tagged geometry TREE ([`Geo`]) — the J.2/J.3 output. A
@@ -233,7 +244,7 @@ pub fn evaluate_geometry_with_base(
 ///
 /// # Errors
 /// As [`evaluate_geometry`].
-pub fn evaluate_geometry_full(source: &str) -> Result<(Geo, Vec<Message>)> {
+pub fn evaluate_geometry_full(source: &str) -> RunResult<(Geo, Vec<Message>)> {
     eval::evaluate_source(source, Path::new("."), None, &[], Config::from_env())
 }
 
@@ -248,7 +259,7 @@ pub fn evaluate_geometry_with_base_full(
     source: &str,
     base_dir: &Path,
     library_paths: &[PathBuf],
-) -> Result<(Geo, Vec<Message>)> {
+) -> RunResult<(Geo, Vec<Message>)> {
     eval::evaluate_source(source, base_dir, None, library_paths, Config::from_env())
 }
 
@@ -263,7 +274,7 @@ pub fn evaluate_geometry_with_base_config(
     base_dir: &Path,
     library_paths: &[PathBuf],
     config: Config,
-) -> Result<(Geo, Vec<Message>)> {
+) -> RunResult<(Geo, Vec<Message>)> {
     eval::evaluate_source(source, base_dir, None, library_paths, config)
 }
 
@@ -361,7 +372,7 @@ pub fn resolve_geometry_with_base_full<R>(
     jit_factory: Option<&dyn NumericJitFactory>,
     config: Config,
     mesh_reader: R,
-) -> Result<(Geo, Vec<Message>)>
+) -> RunResult<(Geo, Vec<Message>)>
 where
     R: FnMut(&str) -> Result<Imported>,
 {
@@ -387,7 +398,7 @@ pub fn resolve_geometry_from_sources_full<R>(
     jit_factory: Option<&dyn NumericJitFactory>,
     config: Config,
     mesh_reader: R,
-) -> Result<(Geo, Vec<Message>)>
+) -> RunResult<(Geo, Vec<Message>)>
 where
     R: FnMut(&str) -> Result<Imported>,
 {

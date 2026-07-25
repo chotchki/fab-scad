@@ -385,7 +385,7 @@ fn eval_source(
                 },
             )
             // Bytes: the user source is inline in `wrap`, after the 2-line `$fa/$fs` header (W.3.37).
-            .inspect_err(|e| record_err_line(&wrap, 2, e))
+            .inspect_err(|e| record_err_line(&wrap, 2, &e.error))
             .context("scad-rs eval of source bytes")?;
             Ok((tree, None, messages.iter().map(|m| m.render()).collect()))
         }
@@ -429,10 +429,10 @@ fn eval_path(
     // against the file's own text — which for the GUI preview is the editor buffer written verbatim, so the
     // line lands exactly (W.3.37). Read lazily, only on error.
     .inspect_err(|e| {
-        if e.span().is_some()
+        if e.error.span().is_some()
             && let Ok(txt) = std::fs::read_to_string(&abs)
         {
-            record_err_line(&txt, 0, e);
+            record_err_line(&txt, 0, &e.error);
         }
     })
     .with_context(|| format!("scad-rs eval of {path}"))?;

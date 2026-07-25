@@ -80,7 +80,7 @@ pub(crate) fn drive<R>(
     jit_factory: Option<&dyn NumericJitFactory>,
     config: super::Config,
     mut mesh_reader: R,
-) -> crate::Result<(Geo, Vec<Message>)>
+) -> crate::RunResult<(Geo, Vec<Message>)>
 where
     R: FnMut(&str) -> crate::Result<Imported>,
 {
@@ -91,7 +91,13 @@ where
     // echoes — so we accumulate them across rounds and prepend them to the eval messages when the run closes.
     let mut warnings: Vec<Message> = Vec::new();
     loop {
-        match resolve_source(
+        // AP.2 — the FAILURE paths carry the console out too, and both of them owe it the loader warnings
+        // this loop has been accumulating: those were printed before eval even started, so they belong in
+        // front of whatever the failing round had emitted. Only the messages of the round that FAILED come
+        // back — an earlier `Incomplete` round deliberately reports none (it re-runs from scratch and would
+        // otherwise double-count), which is exactly why a caller-owned sink threaded IN would have been
+        // wrong here.
+        let resolution = match resolve_source(
             source,
             base_dir,
             root_id.as_deref(),
@@ -99,25 +105,38 @@ where
             &files,
             jit_factory,
             config,
-        )? {
+        ) {
+            Ok(resolution) => resolution,
+            Err(failure) => return Err(behind(warnings, failure)),
+        };
+        match resolution {
             Resolution::Complete { geo, messages } => {
                 warnings.extend(messages);
                 return Ok((geo, warnings));
             }
             Resolution::Incomplete { needs } => {
                 for need in needs {
-                    fulfill(
+                    if let Err(error) = fulfill(
                         need,
                         library_paths,
                         &mut mesh_reader,
                         &mut scad,
                         &mut files,
                         &mut warnings,
-                    )?;
+                    ) {
+                        return Err(behind(warnings, error.into()));
+                    }
                 }
             }
         }
     }
+}
+
+/// Put `prior` in FRONT of `failure`'s console — the loader warnings happened first, so they read first.
+fn behind(mut prior: Vec<Message>, mut failure: crate::Failure) -> crate::Failure {
+    prior.append(&mut failure.messages);
+    failure.messages = prior;
+    failure
 }
 
 /// SU.2 (sustainment): drive the STATIC needs fixpoint for the intrinsic parity matrix — the same
@@ -140,7 +159,10 @@ pub(crate) fn drive_intrinsic_matrix(
             super::MatrixResolution::Complete(rows) => {
                 let broken = warnings.iter().find_map(|m| match m {
                     Message::Warning(w) => Some(w.as_str()),
-                    Message::Echo(_) => None,
+                    // Echo can't reach this buffer (nothing executes on the matrix path) and a terminal
+                    // Error never lands in one — it rides the `Failure` instead. Named rather than
+                    // caught by a wildcard so a future variant has to be considered here too.
+                    Message::Echo(_) | Message::Error(_) => None,
                 });
                 if let Some(w) = broken {
                     return Err(crate::Error::Load(format!(
@@ -181,7 +203,7 @@ pub(crate) fn drive_from_map<R>(
     jit_factory: Option<&dyn NumericJitFactory>,
     config: super::Config,
     mut mesh_reader: R,
-) -> crate::Result<(Geo, Vec<Message>)>
+) -> crate::RunResult<(Geo, Vec<Message>)>
 where
     R: FnMut(&str) -> crate::Result<Imported>,
 {

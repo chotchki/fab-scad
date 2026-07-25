@@ -14,15 +14,42 @@ pub enum Message {
     Echo(String),
     /// A warning's content. Emitted, but not (yet) matched to the oracle word-for-word.
     Warning(String),
+    /// The TERMINAL fault's content. Never produced during eval — [`Failure::console`](crate::Failure::console)
+    /// synthesizes it from the error when a caller wants the run's console as one sequence. Upstream prints
+    /// at most one and prints nothing after it, so this is always the last element when present.
+    Error(String),
 }
 
 impl Message {
-    /// The full console line as OpenSCAD prints it — `ECHO: …` / `WARNING: …`.
+    /// This message's text if it's an `echo`, else `None` — `msgs.iter().filter_map(Message::echo)`.
+    ///
+    /// Exists so callers stop hand-writing an exhaustive `match` just to pick one variant out of a
+    /// `Vec<Message>`: half a dozen of them did, and every one became a compile error the day `Error`
+    /// was added. Selecting through an accessor means the next variant costs them nothing.
+    #[must_use]
+    pub fn echo(&self) -> Option<&str> {
+        match self {
+            Message::Echo(s) => Some(s),
+            _ => None,
+        }
+    }
+
+    /// This message's text if it's a warning, else `None`.
+    #[must_use]
+    pub fn warning(&self) -> Option<&str> {
+        match self {
+            Message::Warning(s) => Some(s),
+            _ => None,
+        }
+    }
+
+    /// The full console line as OpenSCAD prints it — `ECHO: …` / `WARNING: …` / `ERROR: …`.
     #[must_use]
     pub fn render(&self) -> String {
         match self {
             Message::Echo(s) => format!("ECHO: {s}"),
             Message::Warning(s) => format!("WARNING: {s}"),
+            Message::Error(s) => format!("ERROR: {s}"),
         }
     }
 }
@@ -46,19 +73,20 @@ impl Evaluation {
             .iter()
             .filter_map(|m| match m {
                 Message::Echo(s) => Some(s.as_str()),
-                Message::Warning(_) => None,
+                Message::Warning(_) | Message::Error(_) => None,
             })
             .collect()
     }
 
-    /// The warning CONTENTS in order, echo dropped.
+    /// The warning CONTENTS in order, echo dropped. A terminal `Error` is NOT a warning and never appears
+    /// here — an [`Evaluation`] only exists on the success path anyway, so it cannot hold one.
     #[must_use]
     pub fn warnings(&self) -> Vec<&str> {
         self.messages
             .iter()
             .filter_map(|m| match m {
                 Message::Warning(s) => Some(s.as_str()),
-                Message::Echo(_) => None,
+                Message::Echo(_) | Message::Error(_) => None,
             })
             .collect()
     }

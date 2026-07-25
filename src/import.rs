@@ -124,7 +124,7 @@ pub fn resolve_geometry_with_base_full(
     base_dir: &Path,
     library_paths: &[PathBuf],
     config: fab_lang::Config,
-) -> Result<(Geo, Vec<Message>), Error> {
+) -> fab_lang::RunResult<(Geo, Vec<Message>)> {
     fab_lang::resolve_geometry_with_base_full(
         source,
         base_dir,

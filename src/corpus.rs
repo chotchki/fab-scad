@@ -360,7 +360,7 @@ pub fn run_file(script: &str, path: &Path) -> (Bucket, u128, String) {
                 .next()
                 .unwrap_or_default()
                 .to_string();
-            (classify(&e), ms, first)
+            (classify(&e.error), ms, first)
         }
     }
 }
@@ -438,7 +438,7 @@ pub fn run_example(script: &str, bosl2_dir: &Path) -> (Bucket, u128, String) {
                 .next()
                 .unwrap_or_default()
                 .to_string();
-            (classify(&e), ms, first)
+            (classify(&e.error), ms, first)
         }
     }
 }
@@ -478,7 +478,7 @@ pub fn run_script(script: &str, tests_dir: &Path) -> (Bucket, u128, String) {
                 .next()
                 .unwrap_or_default()
                 .to_string();
-            (classify(&e), ms, first)
+            (classify(&e.error), ms, first)
         }
     }
 }

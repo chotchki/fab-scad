@@ -167,6 +167,21 @@ pub fn resolve_geometry_file(
     })
 }
 
+/// Like [`resolve_geometry_file`], but ALSO returns the console (AQ.1) — the file-rooted warning channel.
+///
+/// # Errors
+/// As [`resolve_geometry_file`].
+pub fn resolve_geometry_file_full(
+    path: &Path,
+    library_paths: &[PathBuf],
+    config: fab_lang::Config,
+) -> fab_lang::RunResult<(Geo, Vec<Message>)> {
+    let base_dir = path.parent().unwrap_or(Path::new(".")).to_path_buf();
+    fab_lang::resolve_geometry_file_full(path, library_paths, jit_factory(), config, |raw| {
+        read_import(&base_dir, raw)
+    })
+}
+
 /// Join a relative `raw` onto `base_dir`; an absolute `raw` is used as-is (OpenSCAD `find_valid_path` for
 /// imports, minus the library search — imports are file-relative only).
 fn resolve(base_dir: &Path, raw: &str) -> PathBuf {

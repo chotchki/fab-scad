@@ -252,6 +252,9 @@ pub trait Driver {
     /// divergences (a duplicate-binding rule, say) agree on every value and differ only in what they
     /// SAY about it, which the echo channel is blind to by construction (AN.13).
     fn warnings(&self, scad: &str) -> Vec<String>;
+    /// [`Driver::warnings`] for a `.scad` FILE and its `use`/`include` graph (AQ.1). A diagnostic that
+    /// NAMES a file can only arise from a real graph, so the string-rooted channel cannot reach it.
+    fn warnings_file(&self, root: &Path, library_paths: &[PathBuf]) -> Vec<String>;
 }
 
 /// Strip the `WARNING: ` prefix and the trailing ` in file …, line N` locator from an oracle warning,
@@ -293,6 +296,21 @@ impl Driver for FabLang {
     }
     fn warnings(&self, scad: &str) -> Vec<String> {
         Self::messages(scad)
+            .iter()
+            .filter_map(fab_lang::Message::warning)
+            .map(normalize_warning)
+            .collect()
+    }
+    fn warnings_file(&self, root: &Path, library_paths: &[PathBuf]) -> Vec<String> {
+        let console = match crate::import::resolve_geometry_file_full(
+            root,
+            library_paths,
+            fab_lang::Config::from_env(),
+        ) {
+            Ok((_tree, messages)) => messages,
+            Err(failure) => failure.console(), // a failed run still reports what it printed (AP.5)
+        };
+        console
             .iter()
             .filter_map(fab_lang::Message::warning)
             .map(normalize_warning)
@@ -369,6 +387,29 @@ impl Driver for OpenScad {
         oracle::run(scad, Duration::from_secs(30))
             .map(|run| run.echo.iter().map(|l| l.trim().to_string()).collect())
             .unwrap_or_default()
+    }
+    fn warnings_file(&self, root: &Path, library_paths: &[PathBuf]) -> Vec<String> {
+        let os = if library_paths.is_empty() {
+            crate::openscad::Openscad::discover(None)
+        } else {
+            crate::openscad::Openscad::with_library_paths(library_paths)
+        };
+        let Ok(os) = os else { return Vec::new() };
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let out = std::env::temp_dir().join(format!("fab-oracle-warn-{seq}.stl"));
+        let report = os.render(root, &out, Duration::from_secs(30));
+        let _ = std::fs::remove_file(&out);
+        report.map_or_else(
+            |_| Vec::new(),
+            |r| {
+                r.warnings
+                    .iter()
+                    .filter(|l| !l.trim_start().starts_with("ERROR:"))
+                    .map(|l| normalize_warning(l))
+                    .collect()
+            },
+        )
     }
     fn warnings(&self, scad: &str) -> Vec<String> {
         oracle::run(scad, Duration::from_secs(30))
@@ -491,6 +532,31 @@ pub fn diff_warnings(scad: &str) -> std::result::Result<(), String> {
         if base != other {
             return Err(format!(
                 "{scad:?}: {} warnings {base:?} vs {} warnings {other:?}",
+                drivers[0].name(),
+                d.name()
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// [`diff_warnings`] for a `.scad` FILE and its `use`/`include` graph (AQ.1) — the only channel that can
+/// see a diagnostic which NAMES a file, since such a message only arises from a real graph.
+///
+/// # Errors
+/// The first `(baseline vs driver)` disagreement, as a human-readable reason.
+pub fn diff_warnings_file(
+    root: &Path,
+    library_paths: &[PathBuf],
+) -> std::result::Result<(), String> {
+    let drivers = drivers();
+    let base = drivers[0].warnings_file(root, library_paths);
+    for d in &drivers[1..] {
+        let other = d.warnings_file(root, library_paths);
+        if base != other {
+            return Err(format!(
+                "{}: {} warnings {base:?} vs {} warnings {other:?}",
+                root.display(),
                 drivers[0].name(),
                 d.name()
             ));

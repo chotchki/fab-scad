@@ -264,6 +264,7 @@ where
                         id,
                         dir: from_dir,
                         program: empty_program(),
+                        source: Rc::from(""),
                     },
                 );
                 return Ok(());
@@ -287,6 +288,7 @@ where
                         id: from_dir.join(&raw),
                         dir: from_dir,
                         program: empty_program(),
+                        source: Rc::from(""),
                     },
                 );
                 return Ok(());
@@ -297,7 +299,16 @@ where
                 warnings.push(Message::Warning(format!("Failed to parse '{raw}'.")));
                 empty_program()
             });
-            scad.insert(key, ProvidedSource { id, dir, program });
+            let source = Rc::from(text.as_str());
+            scad.insert(
+                key,
+                ProvidedSource {
+                    id,
+                    dir,
+                    program,
+                    source,
+                },
+            );
         }
         SourceNeed::File { raw } => {
             // TOLERANT (L.5.7), like `fulfill` + the `Scad` arm: a missing/broken import → warn + EMPTY mesh.
@@ -383,6 +394,7 @@ where
                         id,
                         dir: from_dir,
                         program: empty_program(),
+                        source: Rc::from(""),
                     },
                 );
                 return Ok(());
@@ -401,6 +413,7 @@ where
                         id,
                         dir: from_dir,
                         program: empty_program(),
+                        source: Rc::from(""),
                     },
                 );
                 return Ok(());
@@ -416,7 +429,16 @@ where
                 warnings.push(Message::Warning(format!("Failed to parse '{raw}'.")));
                 empty_program()
             });
-            scad.insert(key, ProvidedSource { id, dir, program });
+            let source = Rc::from(text.as_str());
+            scad.insert(
+                key,
+                ProvidedSource {
+                    id,
+                    dir,
+                    program,
+                    source,
+                },
+            );
         }
         SourceNeed::File { raw } => {
             // No dedup guard needed: `Ctx::request_file` accumulates File needs in a `BTreeSet`, so each

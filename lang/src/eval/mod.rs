@@ -2831,6 +2831,17 @@ fn resolve_source(
         f.compile(&defs, &consts, config.jit)
     });
     let n = islands.len();
+    // AQ.1 — the static dup-assignment scan needs, per file, its TEXT (to turn a span into a line) and
+    // the name upstream would print. Built here because `loaded` is still in scope; the ROOT scope has
+    // its `include`s spliced in, so a collision that straddles two files keeps both sides' provenance.
+    let mut scopes = vec![loaded.root_scope()];
+    scopes.extend(loaded.used_scopes());
+    let diag_files: Vec<static_diag::FileInfo<'_>> = (0..loaded.file_count())
+        .map(|i| static_diag::FileInfo {
+            source: loaded.source_of(i),
+            path: loaded.display_path(i),
+        })
+        .collect();
     let mut ctx = Ctx {
         functions,
         intrinsics,
@@ -2840,10 +2851,7 @@ fn resolve_source(
         closures: RefCell::default(),
         // AN.15.1 — the STATIC warnings are the log's first ENTRIES, not its first emissions: upstream
         // raises them as the parser reduces, ahead of all console output. Seeding here reproduces that.
-        messages: RefCell::new(static_diag::overwritten_assignments(
-            loaded.root_stmts(),
-            source,
-        )),
+        messages: RefCell::new(static_diag::overwritten_assignments(scopes, &diag_files)),
         root_override: RefCell::default(),
         files: Some(files),
         file_needs: RefCell::default(),

@@ -405,6 +405,37 @@ where
     eval::io::drive_from_map(source, sources, jit_factory, config, mesh_reader)
 }
 
+/// Like [`resolve_geometry_file`], but ALSO returns the ordered `echo`/warning [`Message`]s (AP.4/AQ.1).
+///
+/// The file-rooted entries were console-blind even on SUCCESS, which is a gap in its own right: a
+/// diagnostic that names a file (`… was assigned on line 1 of "sub/lib.scad" …`) can only ARISE from a
+/// real file graph, so it was unreachable through the string-rooted entries and therefore untestable.
+///
+/// # Errors
+/// As [`resolve_geometry_file`].
+pub fn resolve_geometry_file_full<R>(
+    path: &Path,
+    library_paths: &[PathBuf],
+    jit_factory: Option<&dyn NumericJitFactory>,
+    config: Config,
+    mesh_reader: R,
+) -> RunResult<(Geo, Vec<Message>)>
+where
+    R: FnMut(&str) -> Result<Imported>,
+{
+    let source = eval::io::read_source(path)?;
+    let base_dir = path.parent().unwrap_or(Path::new("."));
+    eval::io::drive(
+        &source,
+        base_dir,
+        Some(path),
+        library_paths,
+        jit_factory,
+        config,
+        mesh_reader,
+    )
+}
+
 /// Like [`resolve_geometry_with_base`], but for a `.scad` FILE — resolving its `use`/`include` graph AND
 /// its `import`/`surface` meshes (through `mesh_reader`). The root file is read here.
 ///

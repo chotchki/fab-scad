@@ -53,6 +53,7 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 
 use crate::parser::{Expr, Parameter, Program, Stmt, StmtKind, parse};
 
@@ -105,6 +106,11 @@ struct Node {
     dir: PathBuf,
     /// stmt-index → resolved target. Only top-level `use`/`include` statements appear here.
     links: BTreeMap<usize, Link>,
+    /// This file's TEXT — the line table for a diagnostic whose span points into THIS file (AQ.1).
+    source: Rc<str>,
+    /// This file's canonical path. `None` only for a ROOT supplied as a bare string (a GUI buffer),
+    /// which has a `dir` but no name of its own.
+    path: Option<PathBuf>,
 }
 
 /// The frozen file graph: the root at index 0, every transitively-reachable `use`/`include` target
@@ -116,12 +122,93 @@ pub(super) struct Loaded {
 }
 
 impl Loaded {
-    /// The ROOT file's own statements — node 0, BEFORE `include` splicing. The static-diagnostics pass
-    /// (AN.15.1) needs exactly this: `flatten`'s executable stream mixes in every included file's
-    /// statements, whose spans index THEIR source, not the root's, so resolving a line against the root
-    /// text there would name an unrelated line. Scanning node 0 alone keeps every span on one line table.
-    pub(super) fn root_stmts(&self) -> &[Stmt] {
-        self.programs.first().map_or(&[], |n| &n.program.stmts)
+    /// How many files the closed graph holds.
+    pub(super) fn file_count(&self) -> usize {
+        self.programs.len()
+    }
+
+    /// This file's TEXT — the line table for a span that points into it.
+    pub(super) fn source_of(&self, file: usize) -> &str {
+        self.programs.get(file).map_or("", |n| &n.source)
+    }
+
+    /// How upstream NAMES this file in a diagnostic: its path made relative to the MAIN file's parent
+    /// directory (`fs_uncomplete(p, mainFilePath.parent_path())` in `parser.y`). That is why the rendered
+    /// path is invariant under the process CWD — verified by running the same graph from three different
+    /// working directories and getting `sub/dup.scad` every time.
+    ///
+    /// `None` when the graph has no path for this file (a ROOT handed in as a bare string).
+    pub(super) fn display_path(&self, file: usize) -> Option<String> {
+        let path = self.programs.get(file)?.path.as_ref()?;
+        let main_dir = &self.programs.first()?.dir;
+        let rel = path.strip_prefix(main_dir).unwrap_or(path);
+        Some(rel.to_string_lossy().replace('\\', "/"))
+    }
+
+    /// The ROOT scope's statements with the FILE each came from — `include` splicing applied.
+    ///
+    /// `include` is a token splice upstream, so an included file's statements land in the INCLUDING
+    /// file's scope: a duplicate assignment can therefore straddle two files, and upstream's rule keys on
+    /// which file each side came from. `flatten` already does this walk but discards the provenance;
+    /// this keeps it. `use` contributes nothing here (it executes no statements) — a `use`d file's own
+    /// top-level scope is separate, see [`Loaded::used_scopes`].
+    ///
+    /// Cycles break on the visited stack exactly as `expand` does; the depth/budget caps are `flatten`'s
+    /// job and a graph that blew them never reaches this pass.
+    pub(super) fn root_scope(&self) -> Vec<(&Stmt, usize)> {
+        let mut out = Vec::new();
+        let mut stack = Vec::new();
+        self.splice(0, &mut out, &mut stack);
+        out
+    }
+
+    /// Each DIRECTLY-`use`d file's own top-level scope, in the order upstream reports them: REVERSE of
+    /// the `use` statements' source order, because `registerUse` FRONT-inserts into `usedlibs`.
+    ///
+    /// A `use`d file executes nothing, but it is still parsed, so its own internal duplicates warn.
+    /// TRANSITIVE uses are not walked — `use` is not transitive for defs, and their diagnostic ordering
+    /// is unprobed; a graph that relies on it will under-report rather than mis-report.
+    pub(super) fn used_scopes(&self) -> Vec<Vec<(&Stmt, usize)>> {
+        let Some(root) = self.programs.first() else {
+            return Vec::new();
+        };
+        let mut targets: Vec<usize> = root
+            .links
+            .values()
+            .filter_map(|l| match l {
+                Link::Use(t) => Some(*t),
+                Link::Include(_) => None,
+            })
+            .collect();
+        targets.reverse();
+        targets
+            .into_iter()
+            .map(|t| {
+                let mut out = Vec::new();
+                let mut stack = Vec::new();
+                self.splice(t, &mut out, &mut stack);
+                out
+            })
+            .collect()
+    }
+
+    /// Append `file`'s statements to `out`, tagged with their origin, recursing through `include` links.
+    fn splice<'a>(&'a self, file: usize, out: &mut Vec<(&'a Stmt, usize)>, stack: &mut Vec<usize>) {
+        if stack.contains(&file) {
+            return; // cycle: the same silent break `expand` takes
+        }
+        let Some(node) = self.programs.get(file) else {
+            return;
+        };
+        stack.push(file);
+        for (i, stmt) in node.program.stmts.iter().enumerate() {
+            match node.links.get(&i) {
+                Some(Link::Include(target)) => self.splice(*target, out, stack),
+                Some(Link::Use(_)) => {} // executes nothing, contributes no statements to THIS scope
+                None => out.push((stmt, file)),
+            }
+        }
+        stack.pop();
     }
 }
 
@@ -146,6 +233,9 @@ pub(super) struct ProvidedSource {
     pub id: PathBuf,
     pub dir: PathBuf,
     pub program: Program,
+    /// The file's TEXT, kept so a diagnostic can resolve a byte span in THIS file to a line (AQ.1).
+    /// The shell already holds it to parse; an `Rc` so the per-pass graph clone stays a refcount bump.
+    pub source: Rc<str>,
 }
 
 /// The sources the shell has supplied so far, keyed by the `(requesting dir, raw ref)` the resolver asks
@@ -175,6 +265,8 @@ pub(super) fn resolve_graph(
         program: parse(source)?,
         dir: base_dir.to_path_buf(),
         links: BTreeMap::new(),
+        source: Rc::from(source),
+        path: root_id.map(Path::to_path_buf),
     }];
     let mut index: BTreeMap<PathBuf, usize> = BTreeMap::new();
     if let Some(id) = root_id {
@@ -205,6 +297,8 @@ pub(super) fn resolve_graph(
                     program: src.program.clone(), // shell parsed it once; clone ≪ re-parse per pass
                     dir: src.dir.clone(),
                     links: BTreeMap::new(),
+                    source: Rc::clone(&src.source),
+                    path: Some(src.id.clone()),
                 };
                 let i = programs.len();
                 programs.push(node);

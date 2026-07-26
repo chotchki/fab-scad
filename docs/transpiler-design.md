@@ -248,3 +248,22 @@ Sequencing note: builtins become surface #1 by rewriting `const BUILTINS: &[(&st
 then surface #2 with NO new generation machinery — same trait, same call builder. That is the whole
 argument for declaring the surface before writing the transpiler rather than after: do it in the
 other order and the call generator gets written twice.
+
+### What shipped (AR.3/AR.4, `gen/src/lib.rs`) — three deltas from the sketch above
+
+1. **`Decl` grew a `ret: Domain`.** Without a return domain every argument bottoms out at a literal
+   after one hop; with it, calls COMPOSE (`asin(sin(…))` — `sin` declares `ret: Unit`, `asin` wants
+   `Unit`), and composition is where eval work comes from. The scalar domains nest one way
+   (`Unit`/`Pos`/`Deg` stand in for `Num`, any scalar is a usable angle), never the other.
+2. **Domains are GENERATION domains, not acceptance claims.** They answer "what argument makes this
+   call compute", which is NARROWER than what the builtin tolerates: `len` accepts anything and
+   measures only sized values, so it declares `VecN`; `asin` accepts any number and is NaN outside
+   `[-1, 1]`, so it declares `Unit`; `search`'s key is pinned to `Num` because a string key over a
+   non-string column ABORTS the oracle (`docs/openscad-search-crash.md`) — a pin that outlives
+   nothing: cheap's arbitrary arguments still cover the whole mismatch space, in the lane built to
+   handle crashes. The shipped enum is the builtin subset (`Num Pos Unit Deg Bool Str Vec3 VecN List
+   Table Any`); BOSL2's `Path`/`Region`/`Vnf` arrive with the transpiled surface.
+3. **The contract is a TEST, not a convention:** `every_declared_call_computes` generates every
+   decl's call from its domains and asserts the result is never `undef` — the "did no work" tell.
+   If a decl's domains drift into uselessness, that fails by name instead of the heavy lane silently
+   going back to measuring error handling.

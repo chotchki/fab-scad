@@ -72,6 +72,16 @@ pub struct Profile {
     /// version of `minkowski(cube, sphere($fn=6))`, it is a different order of magnitude. The pin is the
     /// guard; the existing hardcoded `6` was already doing this job informally.
     pub minkowski_fn: i64,
+    /// Domain-typed builtin arguments (AR.4).
+    ///
+    /// OFF, a builtin call's arguments are arbitrary expressions — the cheap lane's frozen bytes, and
+    /// where the type-mismatch FINDINGS live. ON, each argument is drawn from the parameter's declared
+    /// [`Domain`] so the call COMPUTES: a wrong-typed argument returns `undef` in ~0 time, so a
+    /// domain-blind corpus measures error handling while looking like it measures work — and a
+    /// regression in call-generation quality reads as a performance WIN, because failing calls get
+    /// faster. Like [`Profile::prim_fn`], the flag gates the RNG draws as well as the text, so the
+    /// cheap stream is untouched.
+    pub domains: bool,
 }
 
 impl Profile {
@@ -86,6 +96,7 @@ impl Profile {
         hull_operands: 2,
         prim_fn: false,
         minkowski_fn: 6,
+        domains: false,
     };
 
     /// A program heavy enough to TIME, scaled by `dial` (1 = mildly heavy; higher = more work).
@@ -118,6 +129,8 @@ impl Profile {
             prim_fn: true,
             // PINNED at every dial — see the field docs. Multiplicative cost does not get a dial.
             minkowski_fn: Self::CHEAP.minkowski_fn,
+            // Heavy calls must DO WORK to be worth timing — see the field docs.
+            domains: true,
         }
     }
 }
@@ -143,16 +156,42 @@ impl Default for Profile {
 pub enum Domain {
     /// A scalar.
     Num,
+    /// A POSITIVE integer — `sqrt`/`ln` (a negative is instant NaN) and `chr` (a codepoint).
+    Pos,
+    /// A number in `[-1, 1]` — `asin`/`acos`'s real domain; anything wider is NaN half the time.
+    Unit,
     /// Degrees — a `Num`, but flagged so a generator can stay in a sane angular range.
     Deg,
+    /// A boolean.
+    Bool,
     /// A string.
     Str,
+    /// A numeric vector of EXACTLY 3 — `cross`, where mismatched lengths are undef and 2-vectors
+    /// change the return type to a scalar.
+    Vec3,
     /// A numeric vector of any length.
     VecN,
-    /// A list of anything (including nested lists — `search`'s table, `lookup`'s pairs).
+    /// A flat list of anything.
     List,
+    /// A `[[key, value], …]` pairs table, keys ascending — `lookup`'s pairs, and the shape
+    /// `search` indexes by column.
+    Table,
     /// Genuinely any value.
     Any,
+}
+
+/// May a call RETURNING `ret` stand where `want` is expected? The scalar domains nest — a `Unit`,
+/// `Pos` or `Deg` value IS a `Num`, and any scalar is a usable angle — which is what lets trig
+/// compose (`sin(acos(…))`: `acos` returns degrees, `sin` wants them). Deliberately asymmetric:
+/// a `Num` is not a `Unit`, and nothing stands in for `Pos` (no builtin's return is provably
+/// positive AND integral — `chr` needs a codepoint, not `exp`'s 20.08).
+fn satisfies(ret: Domain, want: Domain) -> bool {
+    match want {
+        Domain::Num | Domain::Deg => {
+            matches!(ret, Domain::Num | Domain::Deg | Domain::Unit | Domain::Pos)
+        }
+        _ => ret == want,
+    }
 }
 
 /// Function or module — a module takes CHILDREN, a function does not.
@@ -191,6 +230,11 @@ pub struct Decl {
     pub name: &'static str,
     /// Function or module.
     pub kind: Kind,
+    /// What a WELL-TYPED call returns — what makes calls COMPOSE. A generator needing a `Num` can
+    /// nest any `Num`-returning call (`sin(acos(…))`), which is where eval work comes from; without
+    /// this field every argument bottoms out at a literal after one hop. Declared conservatively:
+    /// `sin`/`cos` return [`Domain::Unit`], `asin`..`atan2` return degrees.
+    pub ret: Domain,
     /// Do parameter NAMES bind? FALSE for builtins (verified against the oracle — see [`Param::name`]),
     /// true for user/library functions. The whole AN.1/AN.2/AN.3/AN.14 diagnostic family is
     /// unreachable when this is false, so a generator that ignores the flag will believe it has
@@ -220,11 +264,12 @@ const fn p(name: &'static str, domain: Domain) -> Param {
 }
 
 /// A builtin FUNCTION declaration — `names_bind: false` for every one of them, verified.
-const fn bf(name: &'static str, params: &'static [Param]) -> Decl {
+const fn bf(name: &'static str, ret: Domain, params: &'static [Param]) -> Decl {
     Decl {
         name,
         kind: Kind::Function,
         names_bind: false,
+        ret,
         params,
     }
 }
@@ -234,50 +279,94 @@ const fn bf(name: &'static str, params: &'static [Param]) -> Decl {
 /// ORDER AND LENGTH ARE FROZEN: `pick_builtin` indexes this table with the RNG, so reordering or
 /// resizing it moves every subsequent draw and breaks the `cheap` corpus digest. The migration from
 /// `&[(&str, usize)]` to `&[Decl]` was deliberately output-NEUTRAL — same entries, same order, same
-/// arity, still called positionally — so the names and domains are recorded now and consumed later.
+/// arity, still called positionally in the cheap lane.
+///
+/// The DOMAINS here are GENERATION domains, not acceptance claims: they answer "what argument makes
+/// this call compute" (AR.4), which is narrower than what the builtin tolerates. `len` accepts
+/// anything and measures only sized values, so it declares `VecN`; `asin` accepts any number and is
+/// NaN outside `[-1, 1]`, so it declares `Unit`. Only the heavy lane reads them — cheap's arbitrary
+/// arguments still cover the mismatch space, where the FINDINGS live.
 const BUILTINS: &[Decl] = &[
-    bf("sin", &[p("x", Domain::Deg)]),
-    bf("cos", &[p("x", Domain::Deg)]),
-    bf("tan", &[p("x", Domain::Deg)]),
-    bf("asin", &[p("x", Domain::Num)]),
-    bf("acos", &[p("x", Domain::Num)]),
-    bf("atan", &[p("x", Domain::Num)]),
-    bf("sqrt", &[p("x", Domain::Num)]),
-    bf("abs", &[p("x", Domain::Num)]),
-    bf("floor", &[p("x", Domain::Num)]),
-    bf("ceil", &[p("x", Domain::Num)]),
-    bf("round", &[p("x", Domain::Num)]),
-    bf("ln", &[p("x", Domain::Num)]),
-    bf("exp", &[p("x", Domain::Num)]),
-    bf("sign", &[p("x", Domain::Num)]),
-    bf("norm", &[p("v", Domain::VecN)]),
-    bf("len", &[p("value", Domain::Any)]),
-    bf("pow", &[p("base", Domain::Num), p("exponent", Domain::Num)]),
-    bf("atan2", &[p("y", Domain::Num), p("x", Domain::Num)]),
+    bf("sin", Domain::Unit, &[p("x", Domain::Deg)]),
+    bf("cos", Domain::Unit, &[p("x", Domain::Deg)]),
+    bf("tan", Domain::Num, &[p("x", Domain::Deg)]),
+    bf("asin", Domain::Deg, &[p("x", Domain::Unit)]),
+    bf("acos", Domain::Deg, &[p("x", Domain::Unit)]),
+    bf("atan", Domain::Deg, &[p("x", Domain::Num)]),
+    bf("sqrt", Domain::Num, &[p("x", Domain::Pos)]),
+    bf("abs", Domain::Num, &[p("x", Domain::Num)]),
+    bf("floor", Domain::Num, &[p("x", Domain::Num)]),
+    bf("ceil", Domain::Num, &[p("x", Domain::Num)]),
+    bf("round", Domain::Num, &[p("x", Domain::Num)]),
+    bf("ln", Domain::Num, &[p("x", Domain::Pos)]),
+    bf("exp", Domain::Num, &[p("x", Domain::Num)]),
+    bf("sign", Domain::Num, &[p("x", Domain::Num)]),
+    bf("norm", Domain::Num, &[p("v", Domain::VecN)]),
+    // VecN, not Any: `len(5)` is undef upstream — a generated call must MEASURE something.
+    bf("len", Domain::Num, &[p("value", Domain::VecN)]),
+    // base Pos: a negative base under a fractional exponent is NaN.
+    bf(
+        "pow",
+        Domain::Num,
+        &[p("base", Domain::Pos), p("exponent", Domain::Num)],
+    ),
+    bf(
+        "atan2",
+        Domain::Deg,
+        &[p("y", Domain::Num), p("x", Domain::Num)],
+    ),
     // VARIADIC upstream; pinned at 2 because that is what the corpus has always generated.
-    bf("min", &[p("a", Domain::Num), p("b", Domain::Num)]),
-    bf("max", &[p("a", Domain::Num), p("b", Domain::Num)]),
-    bf("cross", &[p("a", Domain::VecN), p("b", Domain::VecN)]),
+    bf(
+        "min",
+        Domain::Num,
+        &[p("a", Domain::Num), p("b", Domain::Num)],
+    ),
+    bf(
+        "max",
+        Domain::Num,
+        &[p("a", Domain::Num), p("b", Domain::Num)],
+    ),
+    bf(
+        "cross",
+        Domain::Vec3,
+        &[p("a", Domain::Vec3), p("b", Domain::Vec3)],
+    ),
     // list + string group (AJ.4)
-    bf("str", &[p("a", Domain::Any), p("b", Domain::Any)]),
-    bf("chr", &[p("n", Domain::Num)]),
-    bf("ord", &[p("c", Domain::Str)]),
-    bf("concat", &[p("a", Domain::Any), p("b", Domain::Any)]),
+    bf(
+        "str",
+        Domain::Str,
+        &[p("a", Domain::Any), p("b", Domain::Any)],
+    ),
+    bf("chr", Domain::Str, &[p("n", Domain::Pos)]),
+    bf("ord", Domain::Num, &[p("c", Domain::Str)]),
+    bf(
+        "concat",
+        Domain::List,
+        &[p("a", Domain::Any), p("b", Domain::Any)],
+    ),
     bf(
         "search",
+        Domain::List,
         &[
-            p("match_value", Domain::Any),
-            p("string_or_vector", Domain::List),
+            // Num, NOT Any — a STRING key over a non-string column ABORTS the oracle (upstream
+            // #5017, docs/openscad-search-crash.md). A generation choice until their fix ships:
+            // cheap's arbitrary args still reach the crash shape, in the lane that handles crashes.
+            p("match_value", Domain::Num),
+            p("string_or_vector", Domain::Table),
         ],
     ),
-    bf("lookup", &[p("key", Domain::Num), p("pairs", Domain::List)]),
+    bf(
+        "lookup",
+        Domain::Num,
+        &[p("key", Domain::Num), p("pairs", Domain::Table)],
+    ),
     // type predicates — genuinely Any, that is the point of them
-    bf("is_num", &[p("value", Domain::Any)]),
-    bf("is_undef", &[p("value", Domain::Any)]),
-    bf("is_string", &[p("value", Domain::Any)]),
-    bf("is_list", &[p("value", Domain::Any)]),
-    bf("is_bool", &[p("value", Domain::Any)]),
-    bf("is_object", &[p("value", Domain::Any)]),
+    bf("is_num", Domain::Bool, &[p("value", Domain::Any)]),
+    bf("is_undef", Domain::Bool, &[p("value", Domain::Any)]),
+    bf("is_string", Domain::Bool, &[p("value", Domain::Any)]),
+    bf("is_list", Domain::Bool, &[p("value", Domain::Any)]),
+    bf("is_bool", Domain::Bool, &[p("value", Domain::Any)]),
+    bf("is_object", Domain::Bool, &[p("value", Domain::Any)]),
 ];
 
 /// The builtin call surface (AR.3) — exposed so tests and, later, the heavy lane can walk it.
@@ -996,11 +1085,105 @@ impl Gen {
     /// A call to a KNOWN builtin (arity-correct), so it never trips the unknown-call error.
     fn builtin_call(&mut self) -> String {
         let d = *self.pick_builtin();
-        // POSITIONAL, still — builtin names do not bind (`pow(exp=3, base=2)` is 9), so a named form
-        // here would test nothing new about binding, and changing the emitted text would move the
-        // frozen `cheap` corpus. The declared names/domains are consumed by the heavy lane later.
-        let args: Vec<String> = (0..d.arity()).map(|_| self.expr()).collect();
+        // POSITIONAL in both lanes — builtin names do not bind (`pow(exp=3, base=2)` is 9), so a
+        // named form would test nothing new about binding.
+        let args: Vec<String> = if self.profile.domains {
+            // Domain-typed (AR.4): the call COMPUTES. A wrong-typed argument is an instant `undef`
+            // that times as ~0, so a domain-blind heavy corpus measures error handling while
+            // looking like it measures work.
+            d.params
+                .iter()
+                .map(|pm| self.domain_expr(pm.domain))
+                .collect()
+        } else {
+            // Arbitrary expressions — cheap's frozen bytes, and the type-MISMATCH coverage.
+            (0..d.arity()).map(|_| self.expr()).collect()
+        };
         format!("{}({})", d.name, args.join(", "))
+    }
+
+    /// An argument VALUE-CONFORMANT to `want` (AR.4): literal-leaning, with COMPOSITION where a
+    /// builtin's declared return fits — nesting (`asin(sin(…))`) is where eval work comes from,
+    /// and without it every argument bottoms out at a literal after one hop.
+    fn domain_expr(&mut self, want: Domain) -> String {
+        if self.depth < self.profile.max_expr_depth
+            && self.chance(0.3)
+            && let Some(call) = self.compose_call(want)
+        {
+            return call;
+        }
+        match want {
+            Domain::Num => {
+                if self.chance(0.3) {
+                    let n = self.int_between(-500, 500);
+                    format!("{}.{}", n / 10, n.abs() % 10)
+                } else {
+                    self.int_between(-50, 50).to_string()
+                }
+            }
+            Domain::Pos => self.int_between(1, 50).to_string(),
+            // A tenths FRACTION rather than a decimal literal: exact in [-1, 1] by construction.
+            Domain::Unit => format!("({} / 10)", self.int_between(-10, 10)),
+            Domain::Deg => self.int_between(-360, 360).to_string(),
+            Domain::Bool => if self.chance(0.5) { "true" } else { "false" }.to_string(),
+            // Non-empty on purpose: `ord("")` is undef, and the empty string is cheap's beat.
+            Domain::Str => format!("\"{}\"", self.pick_str(&["a", "x", "hello", "fab", "A9"])),
+            Domain::Vec3 => format!(
+                "[{}, {}, {}]",
+                self.domain_expr(Domain::Num),
+                self.domain_expr(Domain::Num),
+                self.domain_expr(Domain::Num)
+            ),
+            Domain::VecN => {
+                let k = self.int_between(2, 4);
+                let items: Vec<String> = (0..k).map(|_| self.domain_expr(Domain::Num)).collect();
+                format!("[{}]", items.join(", "))
+            }
+            // Flat + shallow: elements draw from the scalar domains only, so an `Any → List → Any`
+            // cycle cannot recurse unboundedly.
+            Domain::List => {
+                let k = self.int_between(2, 4);
+                let items: Vec<String> = (0..k)
+                    .map(|_| match self.below(3) {
+                        0 => self.domain_expr(Domain::Num),
+                        1 => self.domain_expr(Domain::Str),
+                        _ => self.domain_expr(Domain::Bool),
+                    })
+                    .collect();
+                format!("[{}]", items.join(", "))
+            }
+            // Keys ASCENDING — `lookup` interpolates over ordered keys.
+            Domain::Table => {
+                let k = self.int_between(2, 4);
+                let base = self.int_between(-20, 20);
+                let rows: Vec<String> = (0..k)
+                    .map(|i| format!("[{}, {}]", base + 3 * i, self.int_between(-50, 50)))
+                    .collect();
+                format!("[{}]", rows.join(", "))
+            }
+            Domain::Any => match self.below(5) {
+                0 => self.domain_expr(Domain::Num),
+                1 => self.domain_expr(Domain::Str),
+                2 => self.domain_expr(Domain::Bool),
+                3 => self.domain_expr(Domain::Vec3),
+                _ => self.domain_expr(Domain::List),
+            },
+        }
+    }
+
+    /// A nested call whose declared return fits `want`, if any builtin qualifies. Depth-bounded on
+    /// the same counter as `expr`, so composition cannot outrun the profile's nesting cap.
+    fn compose_call(&mut self, want: Domain) -> Option<String> {
+        let fits: Vec<&'static Decl> = BUILTINS.iter().filter(|d| satisfies(d.ret, want)).collect();
+        let d = *fits.get(self.below(fits.len()))?;
+        self.depth += 1;
+        let args: Vec<String> = d
+            .params
+            .iter()
+            .map(|pm| self.domain_expr(pm.domain))
+            .collect();
+        self.depth -= 1;
+        Some(format!("{}({})", d.name, args.join(", ")))
     }
 
     fn pick_builtin(&mut self) -> &'static Decl {
@@ -1062,7 +1245,7 @@ impl Gen {
 
 #[cfg(test)]
 mod tests {
-    use super::generate;
+    use super::{BUILTINS, Gen, Profile, generate};
 
     /// Determinism: a seed maps to exactly one program, always (the reproducible-replay guarantee).
     #[test]
@@ -1177,6 +1360,43 @@ mod tests {
             missing.len(),
             families.len()
         );
+    }
+
+    /// AR.4, made executable per-decl: a domain-generated call to EVERY builtin evaluates to a
+    /// VALUE, never `undef`. This is the whole point of carrying domains — a wrong-typed argument
+    /// is an instant `undef` that times as ~0, so if any decl's domains drift into producing undef,
+    /// the heavy lane silently goes back to measuring error handling. NaN/inf stay legal (`tan(90)`
+    /// is a number); `undef` is the "did no work" tell.
+    #[test]
+    fn every_declared_call_computes() {
+        use fab_lang::{Scope, StmtKind, Value, eval_expr, parse};
+        let profile = Profile::heavy(2);
+        for (i, d) in BUILTINS.iter().enumerate() {
+            for seed in 0..40u32 {
+                #[allow(
+                    clippy::cast_possible_truncation,
+                    reason = "i is a table index under 64"
+                )]
+                let mut g = Gen::with_profile(seed * 100 + i as u32, profile);
+                let args: Vec<String> =
+                    d.params.iter().map(|pm| g.domain_expr(pm.domain)).collect();
+                let call = format!("{}({})", d.name, args.join(", "));
+                let src = format!("function __t() = {call};");
+                let prog = parse(&src)
+                    .unwrap_or_else(|e| panic!("{}: `{call}` fails to parse: {e:?}", d.name));
+                let StmtKind::FunctionDef { body, .. } = &prog.stmts[0].kind else {
+                    panic!("{src} did not parse as a function def");
+                };
+                let v = eval_expr(body, &Scope::new())
+                    .unwrap_or_else(|e| panic!("{}: `{call}` errored: {e:?}", d.name));
+                assert!(
+                    !matches!(v, Value::Undef),
+                    "{}: `{call}` evaluated to undef — a timed call that did NO work (AR.4); its \
+                     declared domains have drifted out of usefulness",
+                    d.name
+                );
+            }
+        }
     }
 
     /// Every generated program PARSES — the "valid by construction" contract. If this ever fails, the grammar

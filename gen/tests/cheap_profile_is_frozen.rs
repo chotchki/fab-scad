@@ -183,6 +183,19 @@ fn the_dial_lands_on_the_primitives() {
 /// `the_cheap_corpus_has_not_moved` still guards the bytes; this names the knob.
 const _: () = assert!(!fab_gen::Profile::CHEAP.prim_fn);
 
+/// Same freeze, same reasoning, for AR.4's knob: `domains` gates RNG draws as well as text, so ON
+/// in `cheap` would shift every subsequent value in the stream.
+const _: () = assert!(!fab_gen::Profile::CHEAP.domains);
+
+/// Heavy must keep `domains` ON at every dial — that lane's numbers are only meaningful while its
+/// calls COMPUTE (`every_declared_call_computes`); off, it regresses to timing error handling.
+#[test]
+fn every_dial_generates_domain_typed_calls() {
+    for dial in 1..=8u32 {
+        assert!(fab_gen::Profile::heavy(dial).domains, "dial {dial}");
+    }
+}
+
 /// The builtin surface's invariants (AR.3), each for a reason that has already bitten something.
 ///
 /// LENGTH is frozen because `pick_builtin` indexes the table with the RNG: adding or removing an

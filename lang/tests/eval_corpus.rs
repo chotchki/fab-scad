@@ -817,6 +817,16 @@ fn object_values() {
     assert_eq!(ev("[10,20,30,40].xr"), Value::Undef);
     assert_eq!(ev("[10,20,30,40].xyxyx"), Value::Undef);
     assert_eq!(ev("[1,2].z"), Value::Undef);
+
+    // A swizzle is a pure index PERMUTATION — element type never enters into it, so an `undef`
+    // element rides through rather than poisoning the result (AO.4, seed 204: we answered a bare
+    // undef, upstream the vector, which flipped a ternary and diverged the whole program). Only an
+    // OUT-OF-RANGE component is undef, and a single-letter pick is just the element.
+    assert_eq!(ev("[undef,2,3,4].rgba"), ev("[undef, 2, 3, 4]"));
+    assert_eq!(ev("[undef,2,3,4].xy"), ev("[undef, 2]"));
+    assert_eq!(ev("[undef,2].xy"), ev("[undef, 2]"));
+    assert_eq!(ev("[undef,2,3,4].x"), Value::Undef);
+    assert_eq!(ev("[undef,2].z"), Value::Undef);
 }
 
 #[test]

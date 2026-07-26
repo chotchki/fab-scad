@@ -444,9 +444,11 @@ pub(crate) fn member(base: Value, field: &str) -> Value {
     // freely), each naming component 0-3; one letter yields the element, several the picked
     // vector. Undef for a non-vector base, >4 letters, a non-swizzle letter, or ANY out-of-range
     // component ("indices out of range will return undef").
-    if !matches!(base, Value::NumList(_) | Value::List(_)) {
-        return Value::Undef;
-    }
+    let len = match &base {
+        Value::NumList(v) => v.len(),
+        Value::List(v) => v.len(),
+        _ => return Value::Undef,
+    };
     // One set per swizzle — the golden pins `v.xr` (mixed) as undef despite the test's own
     // comment claiming otherwise; the golden wins.
     let comp = if field.chars().all(|c| "xyzw".contains(c)) {
@@ -465,12 +467,16 @@ pub(crate) fn member(base: Value, field: &str) -> Value {
         let Some(i) = comp(c) else {
             return Value::Undef;
         };
-        #[allow(clippy::cast_precision_loss, reason = "i is 0..=3")]
-        let v = index(base.clone(), &Value::Num(i as f64));
-        if matches!(v, Value::Undef) {
+        // RANGE-check explicitly rather than inferring out-of-range from an undef RESULT. `index`
+        // answers undef for both "past the end" and "that element IS undef", so the old undef-sniff
+        // poisoned the whole swizzle when any picked element was legitimately undef —
+        // `([undef,2,3,4]).rgba` gave undef where upstream gives `[undef, 2, 3, 4]`. A swizzle is a
+        // pure index permutation upstream; element TYPE never enters into it (AO.4, seed 204).
+        if i >= len {
             return Value::Undef;
         }
-        picks.push(v);
+        #[allow(clippy::cast_precision_loss, reason = "i is 0..=3")]
+        picks.push(index(base.clone(), &Value::Num(i as f64)));
     }
     match picks.len() {
         1 => picks.remove(0),

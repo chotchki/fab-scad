@@ -65,6 +65,14 @@ pub struct Report {
     pub duration: Duration,
     pub timed_out: bool,
     pub ok: bool,
+    /// The process died by SIGNAL — it aborted or segfaulted rather than exiting with a status.
+    ///
+    /// Distinct from `!ok`, which a clean nonzero exit (a failed export, a fatal assert) also sets.
+    /// A differential harness MUST tell them apart: a crashed oracle produced no answer at all, so
+    /// scoring it as a DISAGREEMENT buries the real divergences under the crashes. AO.4 found
+    /// `search("a", [[1,2]])` aborts OpenSCAD 2026.06.12 outright (unguarded `toStrUtf8Wrapper` on a
+    /// non-string table column, builtin_functions.cc:747) — a one-liner any .scad can carry.
+    pub crashed: bool,
     pub warnings: Vec<String>,
     /// `ECHO:` lines from the run, in order — the oracle's console output (G.3.6 differential harness).
     pub echo: Vec<String>,
@@ -233,15 +241,30 @@ impl Openscad {
             .collect();
 
         let ok = !timed_out && status.map(|s| s.success()).unwrap_or(false);
+        let crashed = status.is_some_and(signalled);
         Ok(Report {
             output: output.to_path_buf(),
             duration,
             timed_out,
             ok,
+            crashed,
             warnings,
             echo,
         })
     }
+}
+
+/// Did the child die by a signal rather than exiting? Unix-only in practice — on other platforms
+/// there is no signal to report, so nothing ever reads as crashed.
+#[cfg(unix)]
+fn signalled(s: std::process::ExitStatus) -> bool {
+    use std::os::unix::process::ExitStatusExt;
+    s.signal().is_some()
+}
+
+#[cfg(not(unix))]
+fn signalled(_s: std::process::ExitStatus) -> bool {
+    false
 }
 
 fn ensure_parent(p: &Path) -> Result<()> {

@@ -172,7 +172,9 @@ fn one_seed(
     let Ok(report) = crate::gendiff::oracle_report(&src, timeout, flags) else {
         return Seed::OracleFailed;
     };
-    if report.timed_out {
+    // A CRASHED oracle answered nothing — scoring it as a disagreement would bury the real
+    // divergences under upstream's own aborts (AO.4 found one: `search("a", [[1,2]])`).
+    if report.timed_out || report.crashed {
         return Seed::OracleFailed;
     }
 

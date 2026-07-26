@@ -78,6 +78,28 @@ enum Commands {
         #[arg(long)]
         md: bool,
     },
+    /// AO.4: the HEAVY perf lane — fab vs the OpenSCAD binary on programs big enough to time.
+    /// `gen-diff`'s programs are deliberately cheap, so its oracle number is mostly process fork;
+    /// this one dials complexity up until rendering dominates. Budgeted in WALL CLOCK, not seeds,
+    /// because a heavy seed's cost varies by orders of magnitude.
+    GenPerf {
+        /// Complexity dials to sweep, comma-separated — several give AO.7's SCALING CURVE, which is
+        /// the part a single median can't show. The budget splits evenly between them.
+        #[arg(long, default_value = "4")]
+        dials: String,
+        /// Total wall-clock budget for the lane (seconds).
+        #[arg(long, default_value_t = 300)]
+        budget: u64,
+        /// Per-program oracle timeout (seconds) — half the blowup guard.
+        #[arg(long, default_value_t = 60)]
+        timeout: u64,
+        /// Our side's eval-step budget — the other half. 0 means unlimited.
+        #[arg(long, default_value_t = 0)]
+        eval_budget: u64,
+        /// Emit GitHub-flavored markdown.
+        #[arg(long)]
+        md: bool,
+    },
     ScadSweep {
         /// Manifest file: one `.scad` path per line (`#` comments + blanks skipped).
         #[arg(long)]
@@ -233,6 +255,22 @@ enum Commands {
     },
 }
 
+/// Parse `--dials 1,2,4,8` — every entry must be a positive integer, so a typo fails LOUD instead of
+/// silently sweeping a shorter curve than asked for.
+fn parse_dials(s: &str) -> Result<Vec<u32>> {
+    let dials: Vec<u32> = s
+        .split(',')
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+        .map(|p| {
+            p.parse::<u32>()
+                .map_err(|_| anyhow::anyhow!("--dials: `{p}` is not a positive integer"))
+        })
+        .collect::<Result<_>>()?;
+    anyhow::ensure!(!dials.is_empty(), "--dials: no dials given");
+    Ok(dials)
+}
+
 fn main() -> Result<()> {
     match Cli::parse().command {
         Commands::Doctor => doctor(),
@@ -243,6 +281,19 @@ fn main() -> Result<()> {
             md,
         } => corpus_diff_cmd(&candidate, &committed, md),
         Commands::GenDiff { seeds, timeout, md } => fab_scad::gendiff::run(seeds, timeout, md),
+        Commands::GenPerf {
+            dials,
+            budget,
+            timeout,
+            eval_budget,
+            md,
+        } => fab_scad::genperf::run(
+            &parse_dials(&dials)?,
+            std::time::Duration::from_secs(budget),
+            std::time::Duration::from_secs(timeout),
+            (eval_budget > 0).then_some(eval_budget),
+            md,
+        ),
         Commands::ScadSweep {
             manifest,
             upstream,

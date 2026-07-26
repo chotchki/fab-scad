@@ -53,6 +53,24 @@ enum Outcome {
     OursFailed(String),
 }
 
+/// What `--enable` flags this oracle actually accepts.
+///
+/// Probe: can it take ours? An old build rejecting `--enable=object-function` downgrades the run to
+/// flagless — the object/metrics arms will then diverge, VISIBLY, rather than silently.
+///
+/// Shared with the AO.4 perf lane deliberately. Its first cut hardcoded `&[]` and duly reported 25
+/// "correctness divergences" that were one missing flag: upstream answers `undef` for every
+/// `object()` call unless the experimental feature is enabled, and the generator emits `object()`
+/// constantly. A differential harness that doesn't negotiate the SAME language surface on both legs
+/// isn't measuring the implementation, it's measuring the flags.
+pub(crate) fn negotiate_flags(timeout: Duration) -> &'static [&'static str] {
+    if oracle::run_with_flags("cube(1);", timeout, ORACLE_FLAGS).is_ok() {
+        ORACLE_FLAGS
+    } else {
+        &[]
+    }
+}
+
 /// Run the differential over seeds `0..seeds`.
 ///
 /// # Errors
@@ -60,13 +78,7 @@ enum Outcome {
 pub fn run(seeds: u32, timeout_secs: u64, md: bool) -> Result<()> {
     let timeout = Duration::from_secs(timeout_secs);
 
-    // Probe: can this oracle take our flags? (An old build rejecting --enable=object-function
-    // downgrades the run to flagless — the object/metrics arms will then diverge, visibly.)
-    let flags: &[&str] = if oracle::run_with_flags("cube(1);", timeout, ORACLE_FLAGS).is_ok() {
-        ORACLE_FLAGS
-    } else {
-        &[]
-    };
+    let flags = negotiate_flags(timeout);
 
     // Capability probe: an oracle without `vector-swizzle` (the flag or the feature — pre-July-2026
     // builds lack both) yields undef on v.wy — its divergences on that family are VERSION SKEW
@@ -220,30 +232,8 @@ fn diff_one(src: &str, timeout: Duration, flags: &[&str]) -> Outcome {
     }
     let oracle_ms = report.duration.as_secs_f64() * 1e3;
 
-    // Echo comparison — LINE streams on both sides (a raw multi-line echo splits into lines, which
-    // is exactly how the oracle's console emits it).
-    let ours_echo: Vec<String> = messages
-        .iter()
-        .filter_map(fab_lang::Message::echo)
-        .flat_map(|s| s.lines().map(String::from).collect::<Vec<_>>())
-        .collect();
-    let oracle_echo: Vec<String> = report
-        .echo
-        .iter()
-        .map(|l| l.strip_prefix("ECHO: ").unwrap_or(l).to_string())
-        .collect();
-
-    let n = ours_echo.len().max(oracle_echo.len());
-    for i in 0..n {
-        let a = ours_echo.get(i).map_or("<none>", |s| s.trim_end());
-        let b = oracle_echo.get(i).map_or("<none>", |s| s.trim_end());
-        if a != b {
-            return Outcome::Diverge {
-                line: i + 1,
-                ours: a.chars().take(120).collect(),
-                oracle: b.chars().take(120).collect(),
-            };
-        }
+    if let Some((line, ours, oracle)) = first_echo_divergence(&messages, &report.echo) {
+        return Outcome::Diverge { line, ours, oracle };
     }
     Outcome::Match {
         ours_ms,
@@ -252,9 +242,49 @@ fn diff_one(src: &str, timeout: Duration, flags: &[&str]) -> Outcome {
     }
 }
 
+/// The first differing ECHO line between our console and the oracle's, or `None` when the streams
+/// match. Returns `(1-based line, ours, oracle)` with each side clipped for reporting.
+///
+/// ONE comparison shared by `gen-diff` and the AO.4 perf lane, deliberately: the perf lane's first cut
+/// rolled its own and reported a 10% disagreement rate that was entirely its own missing multi-line
+/// split. Two implementations of "do these agree" is two chances to be subtly wrong about it.
+pub(crate) fn first_echo_divergence(
+    ours: &[fab_lang::Message],
+    oracle: &[String],
+) -> Option<(usize, String, String)> {
+    // LINE streams on both sides — a raw multi-line echo splits into lines, which is exactly how the
+    // oracle's console emits it.
+    let mine: Vec<String> = ours
+        .iter()
+        .filter_map(fab_lang::Message::echo)
+        .flat_map(|s| s.lines().map(String::from).collect::<Vec<_>>())
+        .collect();
+    let theirs: Vec<String> = oracle
+        .iter()
+        .map(|l| l.strip_prefix("ECHO: ").unwrap_or(l).to_string())
+        .collect();
+
+    let n = mine.len().max(theirs.len());
+    (0..n).find_map(|i| {
+        let a = mine.get(i).map_or("<none>", |s| s.trim_end());
+        let b = theirs.get(i).map_or("<none>", |s| s.trim_end());
+        (a != b).then(|| {
+            (
+                i + 1,
+                a.chars().take(120).collect(),
+                b.chars().take(120).collect(),
+            )
+        })
+    })
+}
+
 /// Run the oracle on `src` and return the RAW [`crate::openscad::Report`] — echo + timing survive
 /// an export failure, unlike [`oracle::run_with_flags`]'s all-or-nothing result.
-fn oracle_report(src: &str, timeout: Duration, flags: &[&str]) -> Result<crate::openscad::Report> {
+pub(crate) fn oracle_report(
+    src: &str,
+    timeout: Duration,
+    flags: &[&str],
+) -> Result<crate::openscad::Report> {
     use std::sync::atomic::{AtomicU64, Ordering};
     static SEQ: AtomicU64 = AtomicU64::new(0);
     let osc = crate::openscad::Openscad::discover(None)?;

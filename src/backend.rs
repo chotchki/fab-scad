@@ -121,6 +121,14 @@ pub fn build_geo<B: GeometryBackend>(geo: &Geo, backend: &B) -> B::Solid {
     build_geo_gated(geo, backend, geo_cache_enabled(), None)
 }
 
+/// [`build_geo`] with the env gate REMOVED — the within-program CSG memo on, no persistent cache.
+///
+/// The AO.4 perf lane's entry (`genperf`). A benchmark must not read `FAB_GEO_CACHE` to decide what it
+/// is measuring; this states it instead.
+pub(crate) fn build_geo_cold<B: GeometryBackend>(geo: &Geo, backend: &B) -> B::Solid {
+    build_geo_gated(geo, backend, true, None)
+}
+
 /// [`build_geo`] threading the X.1 PERSISTENT cross-render cache — the render arms' entry, so a live
 /// customizer reuses subtrees unchanged since the last render instead of recomputing them.
 pub fn build_geo_cached<B: GeometryBackend>(

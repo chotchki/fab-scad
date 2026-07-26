@@ -3,6 +3,7 @@
 //!
 //!   scad-gen --count 50000 --out gen/out          # generate + label a corpus
 //!   scad-gen --replay 12345                        # print the exact program a seed produces (repro)
+//!   scad-gen --replay 112 --dial 1                 # ...under Profile::heavy(1), the AO.4 perf lane's
 //!   scad-gen --count 1e6 --max-time 3600 --out …   # bounded by count OR wall-clock, whichever first
 //!
 //! Each program lands at `<out>/scad/<seed>.scad`; each label is one line of `<out>/manifest.jsonl`:
@@ -31,6 +32,9 @@ struct Args {
     out: PathBuf,
     max_time: Option<u64>,
     replay: Option<u32>,
+    /// Replay under `Profile::heavy(dial)` instead of the cheap default — the AO.4 perf lane's seeds
+    /// live on a dial, and a divergence you can't reproduce is not actionable.
+    dial: Option<u32>,
 }
 
 fn parse_args() -> Args {
@@ -40,6 +44,7 @@ fn parse_args() -> Args {
         out: PathBuf::from("gen/out"),
         max_time: None,
         replay: None,
+        dial: None,
     };
     let mut it = std::env::args().skip(1);
     while let Some(flag) = it.next() {
@@ -50,6 +55,7 @@ fn parse_args() -> Args {
             "--out" => a.out = PathBuf::from(val()),
             "--max-time" => a.max_time = Some(u64::from(parse_num(&val()))),
             "--replay" => a.replay = Some(parse_num(&val())),
+            "--dial" => a.dial = Some(parse_num(&val())),
             other => panic!("unknown flag {other}"),
         }
     }
@@ -69,7 +75,11 @@ fn main() {
     let args = parse_args();
 
     if let Some(seed) = args.replay {
-        print!("{}", fab_gen::generate(seed));
+        let src = match args.dial {
+            Some(d) => fab_gen::generate_with(seed, fab_gen::Profile::heavy(d)),
+            None => fab_gen::generate(seed),
+        };
+        print!("{src}");
         return;
     }
 

@@ -49,6 +49,7 @@ pub mod credentials;
 pub mod cross_section;
 #[cfg(feature = "native")]
 pub mod gendiff;
+pub mod genperf;
 // QEM mesh decimation (W.5) — the web save-back's low-res mesh variant. Mesh-only (no Solid), so it
 // rides `mesh-io` like `threemf_out` and runs on the wasm geom worker.
 #[cfg(feature = "mesh-io")]

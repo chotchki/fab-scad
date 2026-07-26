@@ -93,6 +93,21 @@ mangling the block just triggers one redundant re-evaluation.
    is the broken one), so this lane diffs fab-gen's whole-language programs against an oracle
    newer than local dev ever sees — the watch for holes that are non-obvious from their examples.
    Report-only (exit 0); the report header names the oracle version so skew rows date themselves.
+5. **Heavy generated perf lane** (AO.8): `fab gen-perf --dials 2,4,8,16 --budget 600 --md` —
+   WEEKLY (Sundays, or any manual dispatch), reusing the AppImage lane 4 already extracted. Where
+   gen-diff runs a THOUSAND cheap programs for echo coverage, this runs FEW BIG ones and reports
+   what a render costs on each side across a complexity dial.
+
+   Read the `fork %` column BEFORE the ratio. The oracle pays a process fork per program, and the
+   lane reports how much of its number that fork was; a row still in the tens of percent is
+   measuring startup, not rendering. It currently is, at every dial — today's dial grows program
+   TEXT rather than geometry, which is AO.12's finding and AO.2's job to fix. So the timing half
+   of this lane is PROVISIONAL and nobody should quote the ratio yet.
+
+   It earns its slot on the DIVERGENCE half, which is not provisional: a timed seed must first
+   agree with the oracle, disagreements are named with their seed (replay with
+   `scad-gen --replay <seed> --dial <n>`), and the first 12-minute run found a real swizzle bug in
+   fab plus an upstream abort (docs/openscad-search-crash.md). Report-only, like everything here.
 
 ## Report shape (the rolling issue body)
 
@@ -101,7 +116,8 @@ matched is the quiet default), corpus regression table (file, stage failed, one-
 pre-existing-failure count, skip-list. The issue updates EVERY night since AL: the gen-diff
 section is always fresh (new oracle nightly, new run), while corpus sections refresh only when
 their upstream moved — an unmoved lane's section carries over verbatim from the previous body,
-so the issue stays the complete database on quiet nights.
+so the issue stays the complete database on quiet nights. The gen-perf section carries over the
+same way on the six nights a week it doesn't run.
 
 ## Adoption (manual, deliberate)
 

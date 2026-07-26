@@ -87,6 +87,10 @@ jobs:
           [ "$os_corpus" != "$seen_corpus" ] && os_moved=true
           echo "bosl2_moved=$bosl2_moved" >> "$GITHUB_OUTPUT"
           echo "os_moved=$os_moved" >> "$GITHUB_OUTPUT"
+          # AO.8: the heavy perf lane is WEEKLY, not nightly — ~10 min of oracle forks for a
+          # different question than gen-diff asks. Sunday, or any manual dispatch.
+          weekly=false; [ "$(date -u +%u)" = "7" ] && weekly=true
+          echo "weekly=$weekly" >> "$GITHUB_OUTPUT"
           echo "BOSL2 $bosl2_pinned pinned, $bosl2_latest upstream (seen: ${seen_tag:-never}) → moved=$bosl2_moved"
           echo "openscad corpus $os_corpus (seen: ${seen_corpus:-never}) → moved=$os_moved"
 
@@ -127,6 +131,34 @@ jobs:
             echo
             ./target/release/fab gen-diff --seeds 1000 --md || echo "gen-diff harness failed (see run log)"
           } > /tmp/report-gendiff.md
+
+      # AO.8 — the HEAVY generated lane, weekly rather than nightly: it costs ~10 min of oracle
+      # forks and its value is not the same as gen-diff's. gen-diff runs a thousand CHEAP programs
+      # for broad echo coverage; this runs FEW BIG ones and reports what a real render costs on
+      # each side, plus a scaling curve across the complexity dial.
+      #
+      # HONEST CAVEAT, and the reason nobody should quote the ratio yet (AO.12): today's dial grows
+      # program TEXT, not geometry, so the oracle never gets far enough from its own process fork
+      # for the adjusted number to mean much — the `fork %` column says exactly how much of its
+      # time was startup, and it is still tens of percent. The lane earns its slot RIGHT NOW on the
+      # divergence channel, which found a real swizzle bug in fab and an upstream abort
+      # (docs/openscad-search-crash.md) in one 12-minute run. Timing goes honest after AO.2.
+      #
+      # Reuses the AppImage the gen-diff step extracted — same oracle, one download.
+      - name: Heavy generated perf lane vs the upstream nightly
+        if: github.event_name == 'workflow_dispatch' || fromJSON(steps.probe.outputs.weekly)
+        run: |
+          set -euo pipefail
+          export OPENSCAD=/tmp/squashfs-root/AppRun
+          {
+            echo "## gen-perf — heavy generated programs, fab vs the upstream nightly"
+            echo
+            echo "_Weekly. Read \`fork %\` before the ratio: a row whose oracle time is mostly"
+            echo "process startup is not measuring rendering (AO.4/AO.12)._"
+            echo
+            ./target/release/fab gen-perf --dials 2,4,8,16 --budget 600 --timeout 60 --md \
+              || echo "gen-perf harness failed (see run log)"
+          } > /tmp/report-genperf.md
 
       - name: Evaluate BOSL2 candidate
         if: steps.probe.outputs.bosl2_moved == 'true'
@@ -193,7 +225,13 @@ jobs:
             --arg head '${{ steps.probe.outputs.os_head }}' \
             '{bosl2_tag: $tag, openscad_corpus: $corpus, openscad_head: $head}')
           # Carry-over: a lane that DIDN'T run tonight keeps its section from the previous body
-          # (order there: gen-diff, BOSL2, openscad — the sed bounds rely on it).
+          # (order there: gen-diff, gen-perf, BOSL2, openscad — the sed bounds rely on it).
+          # Bounded on "the next ## heading, whatever it is" rather than on a NAMED one: a sed
+          # range whose closing pattern is absent runs to EOF and swallows every later section.
+          # The neighbours below predate this and carry that risk; this one doesn't.
+          if [ ! -f /tmp/report-genperf.md ]; then
+            awk '/^## /{f = ($0 ~ /^## gen-perf/)} f' /tmp/prev-body.md > /tmp/report-genperf.md || true
+          fi
           if [ ! -f /tmp/report-bosl2.md ]; then
             sed -n '/^## BOSL2/,/^## openscad/{/^## openscad/!p;}' /tmp/prev-body.md > /tmp/report-bosl2.md || true
           fi
@@ -206,6 +244,7 @@ jobs:
             echo "_Last evaluation: $(date -u +%Y-%m-%dT%H:%MZ) · [run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) · report-only: pins bump by hand (docs/sustainment.md)_"
             echo
             cat /tmp/report-gendiff.md
+            if [ -s /tmp/report-genperf.md ]; then echo; cat /tmp/report-genperf.md; fi
             if [ -s /tmp/report-bosl2.md ]; then echo; cat /tmp/report-bosl2.md; fi
             if [ -s /tmp/report-openscad.md ]; then echo; cat /tmp/report-openscad.md; fi
           } > /tmp/issue-body.md

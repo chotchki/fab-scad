@@ -823,9 +823,16 @@ fn render_scadrs_cmd(
     let libs = scadrs_libs();
     let stl = out.unwrap_or_else(|| default_out(target, "stl"));
 
+    // Timed in TWO halves, because "how long did it take" is the less useful question. EVAL is the
+    // language tier — the interpreter, the intrinsics, and whatever replaces them; GEOMETRY is the
+    // Manifold kernel, which is broadly the same algorithm OpenSCAD runs. Only the eval half is
+    // addressable by a transpiler (AR), so the split IS that bet's ceiling: a model that is 90%
+    // kernel cannot be rescued by compiling its language tier, however fast the compiler.
     let start = std::time::Instant::now();
     let tree = fab_scad::import::resolve_geometry_file(target, &libs, fab_lang::Config::from_env())
         .with_context(|| format!("scad-rs eval of {}", target.display()))?;
+    let eval_ms = start.elapsed().as_millis();
+    let build_start = std::time::Instant::now();
     let solid = build_geo(&tree, &ManifoldBackend)
         .filter(|s| !s.is_empty())
         .with_context(|| {
@@ -834,11 +841,21 @@ fn render_scadrs_cmd(
                 target.display()
             )
         })?;
+    let geo_ms = build_start.elapsed().as_millis();
     let ms = start.elapsed().as_millis();
     std::fs::write(&stl, solid.to_stl_bytes())
         .with_context(|| format!("writing {}", stl.display()))?;
+    #[allow(
+        clippy::cast_precision_loss,
+        reason = "a percentage of a millisecond count; precision past 1% is noise"
+    )]
+    let eval_pct = if ms == 0 {
+        0.0
+    } else {
+        eval_ms as f64 / ms as f64 * 100.0
+    };
     println!(
-        "scad-rs  {} -> {}  (vol {:.3}, genus {}, {ms} ms)",
+        "scad-rs  {} -> {}  (vol {:.3}, genus {}, {ms} ms = {eval_ms} eval + {geo_ms} geo, {eval_pct:.0}% eval)",
         target.display(),
         stl.display(),
         solid.volume(),

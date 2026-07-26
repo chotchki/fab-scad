@@ -18,8 +18,26 @@ use super::value::Value;
 use crate::parser::{BinOp, UnOp};
 
 /// Apply a binary operator to two already-evaluated values. Infallible (bad types → `Undef`).
+///
+/// The SILENT wrapper: intrinsics use this as a value algebra on well-typed intermediates, and
+/// element-wise recursion must not warn per element (`[1,2]+[3,"a"]` is `[4, undef]` with NO
+/// warning upstream) — both get silence by construction. The interpreter's one binop site calls
+/// [`apply_binary_traced`], which is where the SV warning family surfaces.
 #[must_use]
 pub fn apply_binary(op: BinOp, a: Value, b: Value) -> Value {
+    apply_binary_traced(op, a, b, &mut None)
+}
+
+/// [`apply_binary`] plus upstream's diagnostic (SV): identical values bit-for-bit, and on a
+/// type-error path `warn` receives the message OpenSCAD prints — every string oracle-pinned
+/// (2026.06.12). First-write-wins, so nested failure sites can't clobber the outermost message.
+#[must_use]
+pub(crate) fn apply_binary_traced(
+    op: BinOp,
+    a: Value,
+    b: Value,
+    warn: &mut Option<String>,
+) -> Value {
     use Value::{List, Num, NumList};
     match op {
         BinOp::Add => match (a, b) {
@@ -33,7 +51,7 @@ pub fn apply_binary(op: BinOp, a: Value, b: Value) -> Value {
             (a, b) if list_len(&a).is_some() && list_len(&b).is_some() => {
                 elementwise(BinOp::Add, &a, &b)
             }
-            _ => Value::Undef,
+            (a, b) => undef_op(BinOp::Add, &a, &b, warn),
         },
         BinOp::Sub => match (a, b) {
             (Num(x), Num(y)) => Num(x - y),
@@ -41,26 +59,23 @@ pub fn apply_binary(op: BinOp, a: Value, b: Value) -> Value {
             (a, b) if list_len(&a).is_some() && list_len(&b).is_some() => {
                 elementwise(BinOp::Sub, &a, &b)
             }
-            _ => Value::Undef,
+            (a, b) => undef_op(BinOp::Sub, &a, &b, warn),
         },
         BinOp::Mul => match (a, b) {
             (Num(x), Num(y)) => Num(x * y),
             (Num(s), NumList(v)) | (NumList(v), Num(s)) => Value::NumList(map_reuse(v, |e| e * s)),
             // scalar × a NESTED / heterogeneous list broadcasts element-wise, RECURSIVELY (OpenSCAD's
             // `multvecnum` multiplies each entry via `*`, so `0*[[..],[..]]` = `[0*[..], 0*[..]]`).
+            // The recursion is the SILENT wrapper — upstream's `2*[1,"a"]` is `[2, undef]`, no warning.
             (Num(s), List(v)) | (List(v), Num(s)) => Value::list(
                 v.iter()
                     .map(|e| apply_binary(BinOp::Mul, Num(s), e.clone()))
                     .collect::<Vec<_>>(),
             ),
-            // equal-length non-empty number vectors → DOT PRODUCT (a scalar), NOT element-wise
-            (NumList(x), NumList(y)) if !x.is_empty() && x.len() == y.len() => Num(dot(&x, &y)),
-            // linear algebra on vectors (NumList) and matrices (List-of-NumList), per OpenSCAD's
-            // `multiply_visitor`: vector×matrix, matrix×vector, matrix×matrix. Empty → undef.
-            (NumList(v), List(m)) if !v.is_empty() && !m.is_empty() => vec_times_mat(&v, &m),
-            (List(m), NumList(v)) if !m.is_empty() && !v.is_empty() => mat_times_vec(&m, &v),
-            (List(x), List(y)) if !x.is_empty() && !y.is_empty() => mat_times_mat(&x, &y),
-            _ => Value::Undef,
+            // both sides are vectors/matrices — the linear-algebra lattice, per OpenSCAD's
+            // `multiply_visitor`: dot, vector×matrix, matrix×vector, matrix×matrix.
+            (a, b) if list_len(&a).is_some() && list_len(&b).is_some() => mul_vectors(&a, &b, warn),
+            (a, b) => undef_op(BinOp::Mul, &a, &b, warn),
         },
         BinOp::Div => match (a, b) {
             (Num(x), Num(y)) => Num(x / y), // IEEE: 1/0 → inf, 0/0 → NaN
@@ -77,34 +92,42 @@ pub fn apply_binary(op: BinOp, a: Value, b: Value) -> Value {
                     .map(|e| apply_binary(BinOp::Div, Num(s), e.clone()))
                     .collect::<Vec<_>>(),
             ),
-            _ => Value::Undef,
+            (a, b) => undef_op(BinOp::Div, &a, &b, warn),
         },
         BinOp::Mod => match (a, b) {
             (Num(x), Num(y)) => Num(x % y), // Rust f64 `%` == C fmod (sign of dividend)
-            _ => Value::Undef,
+            (a, b) => undef_op(BinOp::Mod, &a, &b, warn),
         },
         BinOp::Pow => match (a, b) {
             (Num(x), Num(y)) => Num(x.powf(y)),
-            _ => Value::Undef,
+            (a, b) => undef_op(BinOp::Pow, &a, &b, warn),
         },
         BinOp::Eq => Value::Bool(a == b), // Value's custom PartialEq IS OpenSCAD `==` (no coercion)
         BinOp::Ne => Value::Bool(a != b),
-        BinOp::Lt => order(&a, &b, |o| o == Ordering::Less),
-        BinOp::Le => order(&a, &b, |o| o != Ordering::Greater),
-        BinOp::Gt => order(&a, &b, |o| o == Ordering::Greater),
-        BinOp::Ge => order(&a, &b, |o| o != Ordering::Less),
+        BinOp::Lt => order(BinOp::Lt, &a, &b, |o| o == Ordering::Less, warn),
+        BinOp::Le => order(BinOp::Le, &a, &b, |o| o != Ordering::Greater, warn),
+        BinOp::Gt => order(BinOp::Gt, &a, &b, |o| o == Ordering::Greater, warn),
+        BinOp::Ge => order(BinOp::Ge, &a, &b, |o| o != Ordering::Less, warn),
         BinOp::And => Value::Bool(a.is_truthy() && b.is_truthy()),
         BinOp::Or => Value::Bool(a.is_truthy() || b.is_truthy()),
-        BinOp::BitOr => bitwise(a, b, |x, y| x | y),
-        BinOp::BitAnd => bitwise(a, b, |x, y| x & y),
-        BinOp::Shl => shift(a, b, true),
-        BinOp::Shr => shift(a, b, false),
+        BinOp::BitOr => bitwise(BinOp::BitOr, a, b, |x, y| x | y, warn),
+        BinOp::BitAnd => bitwise(BinOp::BitAnd, a, b, |x, y| x & y, warn),
+        BinOp::Shl => shift(a, b, true, warn),
+        BinOp::Shr => shift(a, b, false, warn),
     }
 }
 
-/// Apply a prefix unary operator. Infallible (bad type → `Undef`).
+/// Apply a prefix unary operator. Infallible (bad type → `Undef`). The SILENT wrapper — see
+/// [`apply_binary`]; upstream's `-[1,"a"]` is `[-1, undef]` with no warning, so the element-wise
+/// recursion routes through here.
 #[must_use]
 pub fn apply_unary(op: UnOp, v: Value) -> Value {
+    apply_unary_traced(op, v, &mut None)
+}
+
+/// [`apply_unary`] plus upstream's diagnostic — unary messages are SPACELESS: `(-string)`, `(~undefined)`.
+#[must_use]
+pub(crate) fn apply_unary_traced(op: UnOp, v: Value, warn: &mut Option<String>) -> Value {
     match op {
         UnOp::Neg => match v {
             Value::Num(x) => Value::Num(-x),
@@ -119,15 +142,79 @@ pub fn apply_unary(op: UnOp, v: Value) -> Value {
                     .map(|e| apply_unary(UnOp::Neg, e.clone()))
                     .collect::<Vec<_>>(),
             ),
-            _ => Value::Undef,
+            v => {
+                set_warn(warn, || format!("undefined operation (-{})", type_name(&v)));
+                Value::Undef
+            }
         },
         UnOp::Pos => v, // no-op (parser.y:469)
         UnOp::Not => Value::Bool(!v.is_truthy()),
         UnOp::BitNot => match v {
             Value::Num(x) => Value::Num(int_to_f64(!f64_to_int(x))),
-            _ => Value::Undef,
+            v => {
+                set_warn(warn, || format!("undefined operation (~{})", type_name(&v)));
+                Value::Undef
+            }
         },
     }
+}
+
+/// Upstream's type vocabulary for diagnostics — both list representations are "vector".
+fn type_name(v: &Value) -> &'static str {
+    match v {
+        Value::Undef => "undefined",
+        Value::Bool(_) => "bool",
+        Value::Num(_) => "number",
+        Value::Str(_) => "string",
+        Value::NumList(_) | Value::List(_) => "vector",
+        Value::Object(_) => "object",
+        Value::Range { .. } => "range",
+        Value::Function { .. } => "function",
+    }
+}
+
+/// The operator as it prints inside a diagnostic.
+fn op_symbol(op: BinOp) -> &'static str {
+    match op {
+        BinOp::Add => "+",
+        BinOp::Sub => "-",
+        BinOp::Mul => "*",
+        BinOp::Div => "/",
+        BinOp::Mod => "%",
+        BinOp::Pow => "^",
+        BinOp::Eq => "==",
+        BinOp::Ne => "!=",
+        BinOp::Lt => "<",
+        BinOp::Le => "<=",
+        BinOp::Gt => ">",
+        BinOp::Ge => ">=",
+        BinOp::And => "&&",
+        BinOp::Or => "||",
+        BinOp::BitOr => "|",
+        BinOp::BitAnd => "&",
+        BinOp::Shl => "<<",
+        BinOp::Shr => ">>",
+    }
+}
+
+/// First-write-wins warning slot — the OUTERMOST failure names the operation, nested sites keep quiet.
+fn set_warn(warn: &mut Option<String>, msg: impl FnOnce() -> String) {
+    if warn.is_none() {
+        *warn = Some(msg());
+    }
+}
+
+/// The generic family message + `Undef`: `undefined operation (T op T)`, SURFACE op and operand order.
+fn undef_op(op: BinOp, a: &Value, b: &Value, warn: &mut Option<String>) -> Value {
+    set_warn(warn, || {
+        format!(
+            "undefined operation ({} {} {})",
+            type_name(a),
+            op_symbol(op),
+            type_name(b)
+        )
+    });
+    Value::Undef
 }
 
 /// Element-wise combine, truncating to the shorter operand (OpenSCAD's silent-truncate).
@@ -225,14 +312,116 @@ fn num_row(v: &Value) -> Option<&[f64]> {
     }
 }
 
+/// The vector/matrix `*` lattice (both operands lists, both non-empty checked by the caller's
+/// empties gate). VALUES are identical to the pre-SV arm structure — this exists so each failure
+/// path can say WHY, with the counts upstream interpolates. Messages follow upstream's dispatch by
+/// SHAPE (a flat mixed operand is a VECTOR even in `List` repr, so its failure is a dot's, not a
+/// matrix's); mixed-shape cells beyond the probed set are best-effort and deliberately untested.
+fn mul_vectors(a: &Value, b: &Value, warn: &mut Option<String>) -> Value {
+    if list_len(a) == Some(0) || list_len(b) == Some(0) {
+        // Checked FIRST upstream: `[] * [1,2]` gets this message, not the length mismatch.
+        set_warn(warn, || {
+            "Multiplication is undefined on empty vectors".to_string()
+        });
+        return Value::Undef;
+    }
+    match (a, b) {
+        (Value::NumList(x), Value::NumList(y)) => {
+            if x.len() == y.len() {
+                Value::Num(dot(x, y))
+            } else {
+                set_warn(warn, || {
+                    format!(
+                        "vector*vector requires matching lengths ({} != {})",
+                        x.len(),
+                        y.len()
+                    )
+                });
+                Value::Undef
+            }
+        }
+        (Value::NumList(v), Value::List(m)) => vec_times_mat(v, m, warn),
+        (Value::List(m), Value::NumList(v)) => mat_times_vec(m, v, warn),
+        (Value::List(x), Value::List(y)) => mat_times_mat(x, y, warn),
+        // list_len admits only the two list reprs, and Num pairs peeled off in the Mul arm.
+        _ => Value::Undef,
+    }
+}
+
+/// Is this list element itself a list — i.e. does its parent read as a MATRIX in upstream's dispatch?
+fn is_row(v: &Value) -> bool {
+    matches!(v, Value::NumList(_) | Value::List(_))
+}
+
+/// Upstream's non-numeric-element message; `i` is the offending index.
+fn vector_numbers_msg(i: usize) -> String {
+    format!("Vector must contain only numbers. Problem at index {i}")
+}
+
+/// Index + type of the first non-number in a flat list, if any.
+fn first_non_num(m: &[Value]) -> Option<(usize, &'static str)> {
+    m.iter().enumerate().find_map(|(i, e)| match e {
+        Value::Num(_) => None,
+        e => Some((i, type_name(e))),
+    })
+}
+
+/// The message for a matrix whose row fails [`num_row`]: a List row names the first non-number
+/// INSIDE it (upstream's `Problem at index 1` for `[[1,"a"]]`); a scalar row (mixed shapes,
+/// unprobed upstream) names its own index. NOTE upstream prints this line TWICE (an artifact of
+/// warning at two stack levels) — we emit once, a documented count divergence.
+fn bad_row_msg(mat: &[Value]) -> String {
+    for (i, row) in mat.iter().enumerate() {
+        match row {
+            Value::NumList(_) => {}
+            Value::List(items) => {
+                if let Some((j, _)) = first_non_num(items) {
+                    return vector_numbers_msg(j);
+                }
+            }
+            _ => return vector_numbers_msg(i),
+        }
+    }
+    vector_numbers_msg(0) // unreachable: called only when some row failed
+}
+
 /// Matrix × vector: `out[i] = mat[i] · vec` (OpenSCAD `multmatvec`). Every row must be numeric and
 /// `vec`-length (rectangular); otherwise `undef`. The per-row `dot` is the lane-based (vectorizable) one.
-fn mat_times_vec(mat: &[Value], vec: &[f64]) -> Value {
+fn mat_times_vec(mat: &[Value], vec: &[f64], warn: &mut Option<String>) -> Value {
+    if !is_row(&mat[0]) {
+        // Flat MIXED left: upstream dispatched vec·vec — length first, then the failing pair,
+        // LEFT element's type first (`[1,"a"] * [1,2]` is `(string * number)`).
+        if mat.len() != vec.len() {
+            set_warn(warn, || {
+                format!(
+                    "vector*vector requires matching lengths ({} != {})",
+                    mat.len(),
+                    vec.len()
+                )
+            });
+        } else if let Some((_, t)) = first_non_num(mat) {
+            set_warn(warn, || format!("undefined operation ({t} * number)"));
+        }
+        return Value::Undef;
+    }
     let mut out = Vec::with_capacity(mat.len());
     for row in mat {
         match num_row(row) {
             Some(r) if r.len() == vec.len() => out.push(dot(r, vec)),
-            _ => return Value::Undef,
+            Some(r) => {
+                set_warn(warn, || {
+                    format!(
+                        "matrix*vector requires matrix column count to match vector length ({} != {})",
+                        r.len(),
+                        vec.len()
+                    )
+                });
+                return Value::Undef;
+            }
+            None => {
+                set_warn(warn, || bad_row_msg(mat));
+                return Value::Undef;
+            }
         }
     }
     Value::num_list(out)
@@ -241,16 +430,39 @@ fn mat_times_vec(mat: &[Value], vec: &[f64]) -> Value {
 /// Vector × matrix: `out[j] = Σ_i vec[i]·mat[i][j]` (OpenSCAD `multvecmat`). Requires `vec.len() ==
 /// mat.len()` (vector length == matrix row count) and a rectangular, all-numeric matrix. Columns are
 /// gathered so the reduction reuses the lane-based `dot`.
-fn vec_times_mat(vec: &[f64], mat: &[Value]) -> Value {
+fn vec_times_mat(vec: &[f64], mat: &[Value], warn: &mut Option<String>) -> Value {
+    if !is_row(&mat[0]) {
+        // Flat MIXED right: upstream's vec·vec — `[1,2] * [1,"a"]` is `(number * string)`.
+        if vec.len() != mat.len() {
+            set_warn(warn, || {
+                format!(
+                    "vector*vector requires matching lengths ({} != {})",
+                    vec.len(),
+                    mat.len()
+                )
+            });
+        } else if let Some((_, t)) = first_non_num(mat) {
+            set_warn(warn, || format!("undefined operation (number * {t})"));
+        }
+        return Value::Undef;
+    }
     if vec.len() != mat.len() {
+        set_warn(warn, || {
+            format!(
+                "vector*matrix requires vector length to match matrix row count ({} != {})",
+                vec.len(),
+                mat.len()
+            )
+        });
         return Value::Undef;
     }
     let Some(rows) = mat.iter().map(num_row).collect::<Option<Vec<&[f64]>>>() else {
+        set_warn(warn, || bad_row_msg(mat));
         return Value::Undef;
     };
     let cols = rows[0].len();
     if rows.iter().any(|r| r.len() != cols) {
-        return Value::Undef;
+        return Value::Undef; // ragged matrix — silent undef (unprobed upstream)
     }
     let mut col = vec![0.0; rows.len()];
     let mut out = Vec::with_capacity(cols);
@@ -265,13 +477,32 @@ fn vec_times_mat(vec: &[f64], mat: &[Value]) -> Value {
 
 /// Matrix × matrix: each left ROW is a vector times the right matrix (OpenSCAD folds it exactly this
 /// way). Left column count must match right row count; a non-numeric row → `undef`.
-fn mat_times_mat(a: &[Value], b: &[Value]) -> Value {
+fn mat_times_mat(a: &[Value], b: &[Value], warn: &mut Option<String>) -> Value {
+    if !is_row(&a[0]) {
+        // Flat MIXED left × matrix: upstream's vec×mat over a non-numeric vector (exact text
+        // unprobed; the element message is the honest nearest).
+        if let Some((i, _)) = first_non_num(a) {
+            set_warn(warn, || vector_numbers_msg(i));
+        }
+        return Value::Undef;
+    }
     let mut out = Vec::with_capacity(a.len());
     for row in a {
         let Some(r) = num_row(row) else {
+            set_warn(warn, || bad_row_msg(a));
             return Value::Undef;
         };
-        match vec_times_mat(r, b) {
+        if r.len() != b.len() {
+            set_warn(warn, || {
+                format!(
+                    "matrix*matrix requires left operand column count to match right operand row count ({} != {})",
+                    r.len(),
+                    b.len()
+                )
+            });
+            return Value::Undef;
+        }
+        match vec_times_mat(r, b, warn) {
             Value::Undef => return Value::Undef,
             v => out.push(v),
         }
@@ -284,15 +515,54 @@ fn mat_times_mat(a: &[Value], b: &[Value]) -> Value {
 /// (`[1, 2] < [1, "b"]`), which is `undef` upstream too, not `false` (AR.4's heavy lane caught us
 /// collapsing it; oracle-pinned in `eval_corpus`). A NaN is NOT a mismatch: top-level it compares
 /// IEEE-false (`(0/0) < 1`), inside a vector it TIES — see [`value_cmp`].
-fn order(a: &Value, b: &Value, want: impl Fn(Ordering) -> bool) -> Value {
+///
+/// Diagnostics (SV, all oracle-pinned): a mismatch INSIDE the vectors prints the leaf pair plus one
+/// `in vector comparison at index N` frame per nesting level, innermost first — and the leaf pair
+/// follows upstream's DESUGAR (`<`/`>=` run `a<b`; `<=`/`>` run `b<a`, so their leaf types swap; the
+/// printed op is always `<`). Top-level failures keep the SURFACE op and order, and the same-type
+/// unorderable pairs (undef, object, function) get upstream's reversed wording, `operation undefined`.
+fn order(
+    op: BinOp,
+    a: &Value,
+    b: &Value,
+    want: impl Fn(Ordering) -> bool,
+    warn: &mut Option<String>,
+) -> Value {
     if same_orderable_type(a, b) {
         match value_cmp(a, b) {
             Cmp::Ord(o) => Value::Bool(want(o)),
             Cmp::Nan => Value::Bool(false),
-            Cmp::Mismatch => Value::Undef,
+            Cmp::Mismatch {
+                frames,
+                left,
+                right,
+            } => {
+                let (l, r) = match op {
+                    BinOp::Le | BinOp::Gt => (right, left),
+                    _ => (left, right),
+                };
+                set_warn(warn, || {
+                    let mut msg = format!("undefined operation ({l} < {r})");
+                    for i in frames {
+                        use std::fmt::Write;
+                        let _ = write!(msg, "\n\tin vector comparison at index {i}");
+                    }
+                    msg
+                });
+                Value::Undef
+            }
         }
     } else {
-        Value::Undef // cross-type ordering is a type error (a value)
+        // cross-type ordering is a type error (a value). `type_name` equality here IS the quirk set:
+        // the only same-named pairs that reach this branch are undef/object/function.
+        let (l, r) = (type_name(a), type_name(b));
+        let head = if l == r {
+            "operation undefined"
+        } else {
+            "undefined operation"
+        };
+        set_warn(warn, || format!("{head} ({l} {} {r})", op_symbol(op)));
+        Value::Undef
     }
 }
 
@@ -320,8 +590,15 @@ enum Cmp {
     /// TIES — upstream's element walk probes `a < b` and `b < a`, both fail, and equal-and-continue
     /// falls out: `[0/0] <= [0/0]` is true, `[1, 0/0, 5] < [1, 2, 9]` is decided at index 2.
     Nan,
-    /// Differently-typed operands (`1` vs `"a"`), at any depth. Upstream: warned `undef`.
-    Mismatch,
+    /// Differently-typed operands (`1` vs `"a"`), at any depth. Upstream: warned `undef`. Carries
+    /// what the warning needs: the LEAF pair's type names (in `a<b` walk order — the caller swaps
+    /// for the desugared ops) and the index at each nesting level, pushed on unwind so the vec
+    /// reads innermost-first — exactly upstream's frame print order.
+    Mismatch {
+        frames: Vec<usize>,
+        left: &'static str,
+        right: &'static str,
+    },
 }
 
 /// A total-ish order over values: numbers numerically, strings lexicographically, bools `false < true`,
@@ -347,12 +624,28 @@ fn value_cmp(a: &Value, b: &Value) -> Cmp {
 
         _ => {
             let (Some(la), Some(lb)) = (list_len(a), list_len(b)) else {
-                return Cmp::Mismatch;
+                return Cmp::Mismatch {
+                    frames: Vec::new(),
+                    left: type_name(a),
+                    right: type_name(b),
+                };
             };
             for i in 0..la.min(lb) {
                 match value_cmp(&list_get(a, i), &list_get(b, i)) {
                     Cmp::Ord(Ordering::Equal) | Cmp::Nan => {} // NaN ties inside vectors — see Cmp
-                    non_eq @ (Cmp::Ord(_) | Cmp::Mismatch) => return non_eq,
+                    non_eq @ Cmp::Ord(_) => return non_eq,
+                    Cmp::Mismatch {
+                        mut frames,
+                        left,
+                        right,
+                    } => {
+                        frames.push(i); // pushed on unwind → innermost-first, upstream's print order
+                        return Cmp::Mismatch {
+                            frames,
+                            left,
+                            right,
+                        };
+                    }
                 }
             }
             Cmp::Ord(la.cmp(&lb))
@@ -506,21 +799,32 @@ pub(crate) fn member(base: Value, field: &str) -> Value {
     }
 }
 
-fn bitwise(lhs: Value, rhs: Value, combine: impl Fn(i64, i64) -> i64) -> Value {
+fn bitwise(
+    op: BinOp,
+    lhs: Value,
+    rhs: Value,
+    combine: impl Fn(i64, i64) -> i64,
+    warn: &mut Option<String>,
+) -> Value {
     match (lhs, rhs) {
         (Value::Num(x), Value::Num(y)) => {
             Value::Num(int_to_f64(combine(f64_to_int(x), f64_to_int(y))))
         }
-        _ => Value::Undef,
+        (a, b) => undef_op(op, &a, &b, warn),
     }
 }
 
-fn shift(lhs: Value, rhs: Value, left: bool) -> Value {
+fn shift(lhs: Value, rhs: Value, left: bool, warn: &mut Option<String>) -> Value {
     match (lhs, rhs) {
         (Value::Num(x), Value::Num(y)) => {
             let by = f64_to_int(y);
-            if !(0..64).contains(&by) {
-                return Value::Undef; // negative or >=64 shift → undef
+            if by < 0 {
+                set_warn(warn, || "negative shift".to_string());
+                return Value::Undef;
+            }
+            if by >= 64 {
+                set_warn(warn, || "shift too large".to_string());
+                return Value::Undef;
             }
             let xi = f64_to_int(x);
             #[allow(
@@ -535,7 +839,7 @@ fn shift(lhs: Value, rhs: Value, left: bool) -> Value {
             };
             Value::Num(int_to_f64(shifted))
         }
-        _ => Value::Undef,
+        (a, b) => undef_op(if left { BinOp::Shl } else { BinOp::Shr }, &a, &b, warn),
     }
 }
 

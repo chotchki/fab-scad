@@ -704,6 +704,38 @@ function is_vector(v, length, zero, all_nonzero=false, eps=_EPSILON) =
 }
 
 #[test]
+fn undefined_operation_warnings_match_the_oracle() {
+    // SV: the binop type-error family — long SILENT on our side while the oracle warned on every
+    // cell, and invisible because the seed lanes compare echo only. The comparable channel is the
+    // first line, bare (the oracle collector drops `\t` frame continuations, the normalizer strips
+    // locators), which is exactly what these round-trip. Deliberately NOT here: the
+    // `Vector must contain only numbers` cell — upstream prints it TWICE (a two-stack-levels
+    // artifact), we emit once; pinned in fab-lang's `undefined_operation_warnings` suite instead.
+    agree_warnings("echo(1 + \"a\");");
+    agree_warnings("echo(\"a\" + \"b\");");
+    agree_warnings("echo(1 + undef);");
+    agree_warnings("echo([1,2] + [3,\"a\"]);"); // SILENT both sides — element-wise undef doesn't warn
+    agree_warnings("echo([1,2] * [3,4,5]);"); // the real lengths interpolate: (2 != 3)
+    agree_warnings("echo([] * []);"); // empties beat the length check
+    agree_warnings("echo([1,\"a\"] * [1,2]);"); // flat-mixed dispatches as a DOT upstream
+    agree_warnings("echo([[1,2]] * [[1,2]]);"); // matrix*matrix, with counts
+    agree_warnings("echo([[1,2],[3,4]] * [1,2,3]);"); // matrix*vector
+    agree_warnings("echo([1,2,3] * [[1],[2]]);"); // vector*matrix
+    agree_warnings("echo(-\"a\");"); // unary is spaceless: (-string)
+    agree_warnings("echo(1 << 64); echo(1 << -1);"); // the shift specials
+    agree_warnings("echo(undef | 1);");
+    agree_warnings("echo([1,2] <= 3);"); // top-level: surface op, surface operand order
+    agree_warnings("echo(undef < undef);"); // the reversed-wording quirk: operation undefined (…)
+    // NOT the object/function quirk cells: this harness's oracle leg runs without
+    // `--enable=object-function`, so upstream never parses the call (it warns "Experimental builtin
+    // … not enabled" and compares undef<undef). Those wordings are pinned from flagged probes in
+    // fab-lang's `undefined_operation_warnings` suite instead.
+    agree_warnings("echo([1,2] <= [1,\"b\"]);"); // desugared leaf pair; frames drop out of the channel
+    agree_warnings("echo([[1,2],[\"a\",4]] < [[1,2],[9,9]]);"); // nested — same first line survives
+    agree_warnings("for (i=[0:2]) echo(1 + \"a\");"); // NO dedup: three passes, three warnings
+}
+
+#[test]
 fn duplicate_binding_warnings_match_the_oracle() {
     // AN.12/AN.13: the VALUE channel is blind to a whole class of divergence — these cases all agree on
     // what they compute and differ only in what they SAY. `agree_echo` would pass every one of them

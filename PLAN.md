@@ -133,6 +133,21 @@ added 2026-07-07.
 - [x] S.2 - S.2 - test B: native MANIFOLD_PAR=ON vs a PAR=OFF rebuild — confirm parallel ≡ serial output bit-for-bit
 - [ ] S.3 - S.3 - test C: native (arm64) vs wasm cross-platform check — DEFERRED (needs a headless wasm mesh harness that doesn't exist yet; wasm is browser-only wasm32-uu). Predicted outcome: polyhedra match, curved primitives diverge on libm → collapses into libm-transcendental-divergence (fix = libm crate), NOT a Manifold issue
 - [x] S.4 - S.4 - RESOLVED by the pure-Rust kernel (2026-07-19) — the C++ S.4 died at M.7.4. The reopened non-determinism was a C++-Manifold-CORE defect (atomic-slot races in disjoint-write assembly + a non-total-order `EdgePos` comparator, `boolean_result.cpp:197`), UNREACHABLE from outside the kernel — owning it in Rust is exactly what let us design the class out (the payoff W.3.9 predicted). `fab_manifold::par` is determinism-BY-CONSTRUCTION: rayon is clippy-banned outside par.rs (one door), a `CommutativeAssociative` compile-gate (non-associative float reduce WON'T COMPILE → `reduce_serial` Kahan), index-order `map_collect` (the serial/par crossover moves, never a byte), total-order sorts (`morton.then(idx)` — the M.4 tiebreak flag, landed), `SortGeometry` canonicalizes on POSITION before output so `mesh_id`/`tri_ref` are never emitted (the global `MESH_ID_COUNTER` atomic can't reach bytes; `build_geo_parts` is sequential regardless). VERIFIED two ways: (a) EMPIRICAL — garage_door + window_light_blocker + pill_holder + ashtray all bit-identical run-to-run, par on 16 cores (`tests/determinism_render.rs`, kept as the standing regression guard — determinism-by-construction is only as good as the proof no future edit opens a SECOND parallelism door); (b) AUDIT — a 5-lens adversarial Workflow (unordered-iteration / parallel-reduce / sort-tiebreak / global-atomic / float) × per-finding skeptical verify found 0 surviving over 6 candidates. Hardened the ONE non-total-order comparator the audit surfaced — `Solid::components()` (`bbox-min.then(num_tri)` → self-contained: both bbox corners + num_tri + num_vert + volume, all `total_cmp`) so a future PARALLEL `decompose()` can't reintroduce it; output-neutral on real models (no ties). Doctrine #36 holds same-platform run-to-run; cross-platform (native vs wasm libm) is S.3, a separate axis.
+## Phase SV - The undefined-operation warning family: every binop type error warns like upstream
+Promoted from backlog 2026-07-26 (chotchki: "stay closer to upstream" — before the AR surface trait).
+Found while triaging the AR.4 disagreements: fab emits ZERO of upstream's "undefined operation"
+warnings — every binop type error is a silent Undef. Oracle-pinned so far: `WARNING: undefined
+operation (vector <= number) in file X, line N` top-level; a TWO-LINE indexed variant for element
+mismatches inside vector comparison (`\tin vector comparison at index 1 in file X, line N`); and a
+word-order QUIRK for undef operands (`operation undefined (undefined < undefined)` — two upstream
+code paths). Type names: number/string/bool/vector/range/undefined. Values already agree after the
+ops.rs Cmp fix — this phase is the DIAGNOSTIC channel only, and the failure direction to guard is
+OVER-warning (fab warning where upstream is silent), which would light up the gen-diff warning
+channel as new divergence.
+- [x] SV.1 - SV.1 - Oracle probe matrix: the full warning surface before any code
+- [ ] SV.2 - SV.2 - Thread a warning sink into ops.rs (the #33-lite plumbing)
+- [ ] SV.3 - SV.3 - Emit the family with upstream's exact text + corpus tests per probed cell
+- [ ] SV.4 - SV.4 - Differential validation both directions + tier equality
 ## Phase V - V - Multi-part parallelism (per-part render/slice/pack on independent worker threads; Solids stay thread-local, mesh data crosses)
 - [ ] V.1 - V.1 - per-part parallelism: render/slice/print-layout each part on its own worker thread
 ## Phase Y - Y - Verification hardening: 100%-Rust re-derivation — shrink the unsafe surface, aim each tier where it uniquely covers
@@ -225,4 +240,3 @@ W.3.29.3 (cover on wasm): DEFERRED. save_to_disk is native-only; needs a render-
   fine (the site renders its own thumbnail, like `fab publish`). Add the cover once the coverless path
   dogfoods green, so the readback is the only new variable.
 -->
-- **The `undefined operation` WARNING family — every binop type error is silent in fab, warned upstream** — added 2026-07-26.

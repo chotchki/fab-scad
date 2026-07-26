@@ -258,9 +258,12 @@ pub trait Driver {
 }
 
 /// Strip the `WARNING: ` prefix and the trailing ` in file …, line N` locator from an oracle warning,
-/// leaving the bare message our own warnings are written as.
+/// leaving the bare message our own warnings are written as. FIRST LINE only, both legs: the oracle
+/// collector's per-line grep already drops upstream's `\t` continuation frames (`in vector comparison
+/// at index N` — SV), so a fab warning that carries them in one multi-line string must shed them
+/// here or the channel diverges on our own fidelity.
 fn normalize_warning(line: &str) -> String {
-    let text = line.trim();
+    let text = line.lines().next().unwrap_or("").trim();
     let text = text.strip_prefix("WARNING:").unwrap_or(text).trim();
     match text.rfind(" in file ") {
         Some(cut) => text[..cut].to_string(),

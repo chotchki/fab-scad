@@ -1127,11 +1127,22 @@ fn eval_with_global<'a>(
                 // pop order: rhs was pushed after lhs, so it's on top.
                 let rhs = values.pop().unwrap_or(Value::Undef);
                 let lhs = values.pop().unwrap_or(Value::Undef);
-                values.push(ops::apply_binary(op, lhs, rhs));
+                // The ONE warning seam (SV): upstream warns per top-level operation, so the traced
+                // variant lives here and nowhere else — intrinsics and element-wise recursion stay
+                // silent through the pure `apply_binary`.
+                let mut warn = None;
+                values.push(ops::apply_binary_traced(op, lhs, rhs, &mut warn));
+                if let Some(w) = warn {
+                    ctx.warn(w);
+                }
             }
             Task::Unary(op) => {
                 let v = values.pop().unwrap_or(Value::Undef);
-                values.push(ops::apply_unary(op, v));
+                let mut warn = None;
+                values.push(ops::apply_unary_traced(op, v, &mut warn));
+                if let Some(w) = warn {
+                    ctx.warn(w);
+                }
             }
             Task::VectorSplice(elems) => {
                 let vals = values.split_off(values.len().saturating_sub(elems.len()));

@@ -182,3 +182,43 @@ fn the_dial_lands_on_the_primitives() {
 /// and no one can flip it and discover the consequence from a red digest later.
 /// `the_cheap_corpus_has_not_moved` still guards the bytes; this names the knob.
 const _: () = assert!(!fab_gen::Profile::CHEAP.prim_fn);
+
+/// The builtin surface's invariants (AR.3), each for a reason that has already bitten something.
+///
+/// LENGTH is frozen because `pick_builtin` indexes the table with the RNG: adding or removing an
+/// entry moves every subsequent draw and rewrites the whole `cheap` corpus. The digest test would
+/// catch that, but as a hash — this says WHICH change did it.
+///
+/// `names_bind` is FALSE for every builtin, and that is a verified fact about upstream rather than a
+/// convention: `pow(exp=3, base=2)` is 9, not 8, because the names are discarded and the arguments
+/// bind positionally (`builtin_argument_names_are_ignored` in fab-lang pins the behaviour). A future
+/// entry flipping this to true would tell a call generator that named builtin calls exercise the
+/// AN.14 diagnostic family, which they cannot.
+#[test]
+fn the_builtin_surface_holds_its_shape() {
+    let decls = fab_gen::builtins();
+    assert_eq!(
+        decls.len(),
+        33,
+        "the builtin table is RNG-indexed, so its length is frozen — changing it moves every \
+         subsequent draw and rewrites the cheap corpus"
+    );
+    for d in decls {
+        assert!(
+            !d.names_bind,
+            "{}: builtin argument names do NOT bind upstream (pow(exp=3, base=2) == 9)",
+            d.name
+        );
+        assert!(
+            d.arity() > 0,
+            "{}: a zero-arity entry would generate `f()`, which the corpus has never contained",
+            d.name
+        );
+        assert_eq!(
+            d.arity(),
+            d.params.len(),
+            "{}: arity is params.len()",
+            d.name
+        );
+    }
+}

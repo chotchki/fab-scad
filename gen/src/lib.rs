@@ -128,45 +128,166 @@ impl Default for Profile {
     }
 }
 
-/// Builtins SAFE to call with any args (a type mismatch yields `undef`, never an error), with
-/// arity. Calling only these (plus generated functions) keeps programs eval-clean.
-const BUILTINS: &[(&str, usize)] = &[
-    ("sin", 1),
-    ("cos", 1),
-    ("tan", 1),
-    ("asin", 1),
-    ("acos", 1),
-    ("atan", 1),
-    ("sqrt", 1),
-    ("abs", 1),
-    ("floor", 1),
-    ("ceil", 1),
-    ("round", 1),
-    ("ln", 1),
-    ("exp", 1),
-    ("sign", 1),
-    ("norm", 1),
-    ("len", 1),
-    ("pow", 2),
-    ("atan2", 2),
-    ("min", 2),
-    ("max", 2),
-    ("cross", 2),
+/// What KIND of value a parameter accepts — the type information a call generator needs in order to
+/// produce a call that does WORK rather than one that returns `undef`.
+///
+/// This is the AR.4 trap made structural: a wrongly-typed argument costs nothing, renders nothing and
+/// times as ~0, so a domain-blind corpus measures ERROR HANDLING while looking like it measures
+/// geometry — and the failure is invisible, because the programs still run, still agree with the
+/// oracle and still report a ratio.
+///
+/// `Any` is used HONESTLY, for builtins that genuinely accept anything (the `is_*` predicates,
+/// `str`) — not as a shrug. A guessed domain would generate confidently wrong calls, which is worse
+/// than a general one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Domain {
+    /// A scalar.
+    Num,
+    /// Degrees — a `Num`, but flagged so a generator can stay in a sane angular range.
+    Deg,
+    /// A string.
+    Str,
+    /// A numeric vector of any length.
+    VecN,
+    /// A list of anything (including nested lists — `search`'s table, `lookup`'s pairs).
+    List,
+    /// Genuinely any value.
+    Any,
+}
+
+/// Function or module — a module takes CHILDREN, a function does not.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Kind {
+    /// Callable in expression position.
+    Function,
+    /// Callable in statement position, may take children.
+    Module,
+}
+
+/// One parameter of a declared callable.
+#[derive(Clone, Copy, Debug)]
+pub struct Param {
+    /// The declared name. DECORATIVE on builtins — upstream discards builtin argument names and binds
+    /// POSITIONALLY (`pow(exp=3, base=2)` is 9, not 8; `sin(bogus=30)` is accepted). It is load-bearing
+    /// only where [`Decl::names_bind`], i.e. on user-defined functions, which is what BOSL2 is.
+    pub name: &'static str,
+    /// What this parameter accepts.
+    pub domain: Domain,
+    /// No default — AN.3's case. An unfilled defaultless param must be `undef` and must NOT fall
+    /// through to a like-named global, so a generator that never OMITS an argument cannot catch that
+    /// regression.
+    pub required: bool,
+}
+
+/// One callable a surface hosts, as DECLARED rather than rediscovered by each consumer.
+///
+/// See `docs/transpiler-design.md`. The point of declaring it once: the AO fuzzer, AR.1's
+/// transpiled-library fuzzing, and the dispatch registry all want the same facts, and
+/// `intrinsics::Entry` already carries the DISPATCH half (may this native be used here?) while
+/// nothing carries the CALL half (how do I build a call that works?).
+#[derive(Clone, Copy, Debug)]
+pub struct Decl {
+    /// The callable's name.
+    pub name: &'static str,
+    /// Function or module.
+    pub kind: Kind,
+    /// Do parameter NAMES bind? FALSE for builtins (verified against the oracle — see [`Param::name`]),
+    /// true for user/library functions. The whole AN.1/AN.2/AN.3/AN.14 diagnostic family is
+    /// unreachable when this is false, so a generator that ignores the flag will believe it has
+    /// covered the named-argument path without ever exercising it.
+    pub names_bind: bool,
+    /// The parameters, in DECLARATION order — which is the order positional args fill.
+    pub params: &'static [Param],
+}
+
+impl Decl {
+    /// How many arguments a generator should supply. Note several builtins (`str`, `concat`, `min`,
+    /// `max`) are genuinely VARIADIC upstream; the surface pins them at the arity the corpus has
+    /// always generated, so this stays a generation choice rather than a claim about the language.
+    #[must_use]
+    pub fn arity(&self) -> usize {
+        self.params.len()
+    }
+}
+
+/// Shorthand for a required parameter.
+const fn p(name: &'static str, domain: Domain) -> Param {
+    Param {
+        name,
+        domain,
+        required: true,
+    }
+}
+
+/// A builtin FUNCTION declaration — `names_bind: false` for every one of them, verified.
+const fn bf(name: &'static str, params: &'static [Param]) -> Decl {
+    Decl {
+        name,
+        kind: Kind::Function,
+        names_bind: false,
+        params,
+    }
+}
+
+/// Builtins SAFE to call with any args (a type mismatch yields `undef`, never an error), as DECLS.
+///
+/// ORDER AND LENGTH ARE FROZEN: `pick_builtin` indexes this table with the RNG, so reordering or
+/// resizing it moves every subsequent draw and breaks the `cheap` corpus digest. The migration from
+/// `&[(&str, usize)]` to `&[Decl]` was deliberately output-NEUTRAL — same entries, same order, same
+/// arity, still called positionally — so the names and domains are recorded now and consumed later.
+const BUILTINS: &[Decl] = &[
+    bf("sin", &[p("x", Domain::Deg)]),
+    bf("cos", &[p("x", Domain::Deg)]),
+    bf("tan", &[p("x", Domain::Deg)]),
+    bf("asin", &[p("x", Domain::Num)]),
+    bf("acos", &[p("x", Domain::Num)]),
+    bf("atan", &[p("x", Domain::Num)]),
+    bf("sqrt", &[p("x", Domain::Num)]),
+    bf("abs", &[p("x", Domain::Num)]),
+    bf("floor", &[p("x", Domain::Num)]),
+    bf("ceil", &[p("x", Domain::Num)]),
+    bf("round", &[p("x", Domain::Num)]),
+    bf("ln", &[p("x", Domain::Num)]),
+    bf("exp", &[p("x", Domain::Num)]),
+    bf("sign", &[p("x", Domain::Num)]),
+    bf("norm", &[p("v", Domain::VecN)]),
+    bf("len", &[p("value", Domain::Any)]),
+    bf("pow", &[p("base", Domain::Num), p("exponent", Domain::Num)]),
+    bf("atan2", &[p("y", Domain::Num), p("x", Domain::Num)]),
+    // VARIADIC upstream; pinned at 2 because that is what the corpus has always generated.
+    bf("min", &[p("a", Domain::Num), p("b", Domain::Num)]),
+    bf("max", &[p("a", Domain::Num), p("b", Domain::Num)]),
+    bf("cross", &[p("a", Domain::VecN), p("b", Domain::VecN)]),
     // list + string group (AJ.4)
-    ("str", 2),
-    ("chr", 1),
-    ("ord", 1),
-    ("concat", 2),
-    ("search", 2),
-    ("lookup", 2),
-    // type predicates
-    ("is_num", 1),
-    ("is_undef", 1),
-    ("is_string", 1),
-    ("is_list", 1),
-    ("is_bool", 1),
-    ("is_object", 1),
+    bf("str", &[p("a", Domain::Any), p("b", Domain::Any)]),
+    bf("chr", &[p("n", Domain::Num)]),
+    bf("ord", &[p("c", Domain::Str)]),
+    bf("concat", &[p("a", Domain::Any), p("b", Domain::Any)]),
+    bf(
+        "search",
+        &[
+            p("match_value", Domain::Any),
+            p("string_or_vector", Domain::List),
+        ],
+    ),
+    bf("lookup", &[p("key", Domain::Num), p("pairs", Domain::List)]),
+    // type predicates — genuinely Any, that is the point of them
+    bf("is_num", &[p("value", Domain::Any)]),
+    bf("is_undef", &[p("value", Domain::Any)]),
+    bf("is_string", &[p("value", Domain::Any)]),
+    bf("is_list", &[p("value", Domain::Any)]),
+    bf("is_bool", &[p("value", Domain::Any)]),
+    bf("is_object", &[p("value", Domain::Any)]),
 ];
+
+/// The builtin call surface (AR.3) — exposed so tests and, later, the heavy lane can walk it.
+///
+/// Read-only on purpose: the table's ORDER and LENGTH are load-bearing (`pick_builtin` indexes it
+/// with the RNG), so it is published as a slice rather than something a caller could rearrange.
+#[must_use]
+pub fn builtins() -> &'static [Decl] {
+    BUILTINS
+}
 
 /// The generator state: the RNG plus the lexical scope it's building up.
 pub struct Gen {
@@ -874,12 +995,15 @@ impl Gen {
 
     /// A call to a KNOWN builtin (arity-correct), so it never trips the unknown-call error.
     fn builtin_call(&mut self) -> String {
-        let (name, arity) = *self.pick_builtin();
-        let args: Vec<String> = (0..arity).map(|_| self.expr()).collect();
-        format!("{name}({})", args.join(", "))
+        let d = *self.pick_builtin();
+        // POSITIONAL, still — builtin names do not bind (`pow(exp=3, base=2)` is 9), so a named form
+        // here would test nothing new about binding, and changing the emitted text would move the
+        // frozen `cheap` corpus. The declared names/domains are consumed by the heavy lane later.
+        let args: Vec<String> = (0..d.arity()).map(|_| self.expr()).collect();
+        format!("{}({})", d.name, args.join(", "))
     }
 
-    fn pick_builtin(&mut self) -> &'static (&'static str, usize) {
+    fn pick_builtin(&mut self) -> &'static Decl {
         &BUILTINS[self.below(BUILTINS.len())]
     }
 

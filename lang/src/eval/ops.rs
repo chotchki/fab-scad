@@ -280,11 +280,17 @@ fn mat_times_mat(a: &[Value], b: &[Value]) -> Value {
 }
 
 /// Ordering comparison. CROSS-type (`1 < "a"`) is `undef` — a type error. SAME orderable type
-/// (num/num, str/str, list/list) always yields a BOOL: a well-typed comparison that's IEEE-incomparable
-/// (a `NaN` anywhere) is `false`, matching OpenSCAD (`(0/0) < 1` is `false`, not `undef`).
+/// (num/num, str/str, list/list) yields a BOOL — unless a type mismatch hides INSIDE the lists
+/// (`[1, 2] < [1, "b"]`), which is `undef` upstream too, not `false` (AR.4's heavy lane caught us
+/// collapsing it; oracle-pinned in `eval_corpus`). A NaN is NOT a mismatch: top-level it compares
+/// IEEE-false (`(0/0) < 1`), inside a vector it TIES — see [`value_cmp`].
 fn order(a: &Value, b: &Value, want: impl Fn(Ordering) -> bool) -> Value {
     if same_orderable_type(a, b) {
-        Value::Bool(value_cmp(a, b).is_some_and(want)) // NaN → None → false
+        match value_cmp(a, b) {
+            Cmp::Ord(o) => Value::Bool(want(o)),
+            Cmp::Nan => Value::Bool(false),
+            Cmp::Mismatch => Value::Undef,
+        }
     } else {
         Value::Undef // cross-type ordering is a type error (a value)
     }
@@ -305,15 +311,28 @@ fn same_orderable_type(a: &Value, b: &Value) -> bool {
     ) || (list_len(a).is_some() && list_len(b).is_some())
 }
 
+/// A three-way comparison OUTCOME — richer than `Option<Ordering>` because the two failure modes
+/// part ways at the surface: an IEEE-incomparable pair is a FALSE comparison upstream, while a
+/// TYPE mismatch is `undef`. Collapsing both to `None` is exactly the bug `order` used to have.
+enum Cmp {
+    Ord(Ordering),
+    /// A NaN met a number. Top-level this makes every comparison false (IEEE); INSIDE a vector it
+    /// TIES — upstream's element walk probes `a < b` and `b < a`, both fail, and equal-and-continue
+    /// falls out: `[0/0] <= [0/0]` is true, `[1, 0/0, 5] < [1, 2, 9]` is decided at index 2.
+    Nan,
+    /// Differently-typed operands (`1` vs `"a"`), at any depth. Upstream: warned `undef`.
+    Mismatch,
+}
+
 /// A total-ish order over values: numbers numerically, strings lexicographically, bools `false < true`,
-/// lists element-wise-lexicographically (recursively, across BOTH list representations). `None` =
-/// incomparable (cross-type, `NaN`, `undef`). Recurses on nested lists (parse-bounded here;
+/// lists element-wise-lexicographically (recursively, across BOTH list representations), with the
+/// length as tiebreak (`[1] < [1, 2]`). Recurses on nested lists (parse-bounded here;
 /// deep-list ordering joins the explicit-stack work if comprehensions ever build one).
-fn value_cmp(a: &Value, b: &Value) -> Option<Ordering> {
+fn value_cmp(a: &Value, b: &Value) -> Cmp {
     match (a, b) {
-        (Value::Num(x), Value::Num(y)) => x.partial_cmp(y),
-        (Value::Str(x), Value::Str(y)) => Some(x.cmp(y)),
-        (Value::Bool(x), Value::Bool(y)) => Some(x.cmp(y)), // false < true
+        (Value::Num(x), Value::Num(y)) => x.partial_cmp(y).map_or(Cmp::Nan, Cmp::Ord),
+        (Value::Str(x), Value::Str(y)) => Cmp::Ord(x.cmp(y)),
+        (Value::Bool(x), Value::Bool(y)) => Cmp::Ord(x.cmp(y)), // false < true
         // AH.2.1 (operators-tests golden): two RANGES order as the SEQUENCES they iterate —
         // `[0:1:3] >= [0:1:3]` is true, `[1:-1:3] < [1:-1:-1]` is true (empty < non-empty).
         (
@@ -323,17 +342,20 @@ fn value_cmp(a: &Value, b: &Value) -> Option<Ordering> {
                 step: t2,
                 end: e2,
             },
-        ) => super::value::range_seq_cmp((*start, *step, *end), (*s2, *t2, *e2)),
+        ) => super::value::range_seq_cmp((*start, *step, *end), (*s2, *t2, *e2))
+            .map_or(Cmp::Nan, Cmp::Ord),
 
         _ => {
-            let (la, lb) = (list_len(a)?, list_len(b)?);
+            let (Some(la), Some(lb)) = (list_len(a), list_len(b)) else {
+                return Cmp::Mismatch;
+            };
             for i in 0..la.min(lb) {
-                match value_cmp(&list_get(a, i), &list_get(b, i))? {
-                    Ordering::Equal => {}
-                    non_eq => return Some(non_eq),
+                match value_cmp(&list_get(a, i), &list_get(b, i)) {
+                    Cmp::Ord(Ordering::Equal) | Cmp::Nan => {} // NaN ties inside vectors — see Cmp
+                    non_eq @ (Cmp::Ord(_) | Cmp::Mismatch) => return non_eq,
                 }
             }
-            Some(la.cmp(&lb))
+            Cmp::Ord(la.cmp(&lb))
         }
     }
 }

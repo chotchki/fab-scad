@@ -131,7 +131,6 @@ fn ordering() {
     assert_eq!(ev("[1,2]<[1,2]"), Value::Bool(false)); // equal
     assert_eq!(ev("1<\"a\""), Value::Undef); // cross-type ordering → undef
     assert_eq!(ev("(0/0)<1"), Value::Bool(false)); // NaN comparison → false
-    assert_eq!(ev("[0/0,1]<[1,2]"), Value::Bool(false)); // NaN in a list → false
     // Bools ARE orderable (false < true, coerced 0/1) — BOSL2's `compare_vals(true,false)>0` needs it.
     assert_eq!(ev("false<true"), Value::Bool(true));
     assert_eq!(ev("true>false"), Value::Bool(true));
@@ -139,6 +138,34 @@ fn ordering() {
     assert_eq!(ev("false>=false"), Value::Bool(true));
     assert_eq!(ev("true<1"), Value::Undef); // but bool-vs-num is still CROSS-type → undef
     assert_eq!(ev("[true]<[false]"), Value::Bool(false)); // element-wise: true>false, so [true]>[false]
+}
+
+/// Every line here is ORACLE-verified (2026.06.12), probed while triaging the two AR.4 heavy-lane
+/// disagreements — both were this one bug: a type mismatch INSIDE a vector comparison came out
+/// `false` where upstream gives (warned) `undef`. The old `[0/0,1]<[1,2] → false` pin above lived
+/// here too: it was a snapshot of our own behavior, and the oracle says TRUE, because a NaN pair
+/// TIES inside a vector walk (upstream probes `a<b` and `b<a`, both fail, equal-and-continue)
+/// while staying IEEE-false at top level. Same operands, two rules, depth decides.
+#[test]
+fn ordering_mismatch_is_undef_and_nan_ties_inside_vectors() {
+    // mismatch at TOP level — already undef before the fix, kept as the contrast
+    assert_eq!(ev("[1,2]<=3"), Value::Undef);
+    assert_eq!(ev("3<[1,2]"), Value::Undef);
+    assert_eq!(ev("undef<undef"), Value::Undef);
+    // mismatch INSIDE the vectors — the bug: these were `false`
+    assert_eq!(ev("[1,2]<[1,\"b\"]"), Value::Undef);
+    assert_eq!(ev("[1,undef]<[1,2]"), Value::Undef);
+    assert_eq!(ev("[[1],2]<[[1],[2]]"), Value::Undef); // list vs num at index 1
+    // same-type elements keep comparing, MIXED lists included
+    assert_eq!(ev("[1,\"a\"]<[1,\"b\"]"), Value::Bool(true));
+    assert_eq!(ev("[[1],[2]]<[[1],[3]]"), Value::Bool(true)); // recursive
+    assert_eq!(ev("[]<[1]"), Value::Bool(true)); // length tiebreak from empty
+    // NaN ties inside a vector, IEEE-false at top level
+    assert_eq!(ev("[0/0,1]<[1,2]"), Value::Bool(true)); // tie at 0, decided by 1<2
+    assert_eq!(ev("[0/0]<=[0/0]"), Value::Bool(true)); // all ties → equal → <= holds
+    assert_eq!(ev("[1,0/0,5]<[1,2,9]"), Value::Bool(true)); // tie mid-walk, decided at index 2
+    assert_eq!(ev("[0/0,9]<[0/0,3]"), Value::Bool(false)); // tie at 0, then 9<3 fails
+    assert_eq!(ev("(0/0)<=1"), Value::Bool(false)); // top level stays IEEE
 }
 
 #[test]

@@ -1107,3 +1107,19 @@ fn let_assert_echo_chain_evaluates_as_a_series() {
     // a FAILING assert in the chain aborts eval — LOUD, never a wrong value.
     let _ = ev_err("let(a=1) assert(a==2) a");
 }
+
+/// Builtin parameter names are DECORATIVE — upstream binds them POSITIONALLY and ignores the name.
+///
+/// Oracle-verified (2026-07-26, OpenSCAD 2026.06.12): `pow(exp=3, base=2)` is 9, not 8 — the names
+/// are discarded and the args land in declaration order, so it computes 3^2. A nonsense name is
+/// accepted the same way. This is worth pinning because it is COUNTER-INTUITIVE and because AR.3's
+/// library surface depends on it: named-argument BINDING (and therefore the whole AN.1/AN.2/AN.14
+/// diagnostic family) exists only for USER-defined functions. A fuzzer that generated named builtin
+/// calls and saw them "work" would conclude the named-arg path was covered when it never ran.
+#[test]
+fn builtin_argument_names_are_ignored() {
+    assert_eq!(ev("pow(exp = 3, base = 2)"), ev("9"));
+    assert_eq!(ev("pow(base = 2, exp = 3)"), ev("8"));
+    assert_eq!(ev("pow(2, exp = 3)"), ev("8"));
+    assert_eq!(ev("sin(bogus = 30)"), ev("sin(30)"));
+}

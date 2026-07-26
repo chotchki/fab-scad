@@ -135,8 +135,9 @@ Plus doctrine #36's NaN carve-out: compare with `fab_lang::tier_eq`, never raw `
 ## AR.3: the library surface (the piece everything else needs)
 
 Today the generator picks from `const BUILTINS: &[(&str, usize)]` — name and ARITY only. That cannot
-describe a library, so it cannot fuzz one, and it cannot generate a named-arg call at all (which is
-where AN.14's entire diagnostic family lives).
+describe a library, so it cannot fuzz one, and it cannot generate a named-argument call at all. On
+builtins that would not matter much (names are ignored there — see the sketch below), but BOSL2 is
+USER-defined code, where names DO bind and where the whole AN.14 diagnostic family lives.
 
 What is needed is a declaration carrying, per function/module: its name, and per parameter a NAME and
 a DOMAIN (number / vector / path / VNF / region / bool). Three consumers, ONE declaration:
@@ -160,6 +161,9 @@ State these now, so the answer is not negotiated later:
 
 - **the corpus median eval share is small.** Then the speed pitch is dead and AR must be argued on
   tier-collapse + maintenance alone. It might still be worth it; it must not be SOLD on speed.
+  ANSWERED, 50 models: median 60%, so the speed case CLEARS the bar that was set in advance — but
+  only just, and a quarter of the corpus sits at 23% or below. This bullet is retired as a killer and
+  demoted to a scoping constraint: AR is a majority-of-models win, not a universal one.
 - **transpiled output cannot be proven equal to the interpreter.** The AN family says equality is
   subtle and the failure mode is silent. If the retargeted suites cannot be made to pass, the tier is
   not shippable at any speed — a tier whose contract is "agrees with the interpreter" cannot have a
@@ -182,11 +186,31 @@ fuzzer asks:
 A transpiler reads the library once and can emit both. Today the first is hand-written and the second
 does not exist; the generator makes do with `(&str, usize)`.
 
+**Names bind for USER functions and are IGNORED for builtins — verified, not assumed.** This shapes
+the whole design, so it was tested against the oracle first:
+
+```openscad
+pow(exp = 3, base = 2)  ->  9     // NOT 8: names ignored, bound positionally (3^2, not 2^3)
+sin(bogus = 30)         ->  0.5   // a nonsense parameter name is accepted and bound positionally
+pow(2, exp = 3)         ->  8     // mixed positional + named
+```
+
+fab reproduces all three exactly. So a builtin's parameter names are DECORATIVE: emitting them is
+still worth doing (it checks that we ignore them the same way upstream does — `pow(exp=3, base=2)`
+returning 9 is a conformance fact worth a corpus case), but no AN.14 diagnostic can fire there.
+Named-argument BINDING, and therefore the whole AN.1/AN.2/AN.3/AN.14 family, exists only on
+user-defined functions and modules — which is what BOSL2 is. The surface must mark which it is, or a
+generator will happily produce named builtin calls, see them bind positionally, and conclude the
+named-arg path is covered when it has never been exercised.
+
 ```rust
 /// One callable a library hosts, as DECLARED rather than rediscovered by every consumer.
 pub struct Decl {
     pub name:   &'static str,
     pub kind:   Kind,               // Function | Module — modules take children, functions do not
+    /// Do parameter NAMES bind? False for builtins (verified above), true for user/library
+    /// functions. The AN.14 diagnostic family is unreachable when this is false.
+    pub names_bind: bool,
     pub params: &'static [Param],
 }
 
@@ -214,7 +238,8 @@ What the generator does with it, and why each matters:
   the AR.4 trap made structural: wrong-typed args return `undef` in ~0 time, so a domain-blind corpus
   measures error handling while looking like it measures work.
 - sometimes pass by NAME, sometimes positionally, sometimes MIX → reaches AN.2 (positional takes the
-  lowest unfilled slot, not the next counter).
+  lowest unfilled slot, not the next counter). Only meaningful where `names_bind`; on a builtin the
+  same call shape instead checks that we ignore the name exactly as upstream does.
 - sometimes pass the same name TWICE, sometimes omit a `required` one → reaches AN.14 and AN.3.
 - `Kind::Module` gets children generated; `Kind::Function` does not.
 

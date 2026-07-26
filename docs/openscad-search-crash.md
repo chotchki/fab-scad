@@ -14,6 +14,12 @@ gracefully. Batch and CI usage is systematically less protected than interactive
 
 fab answers `[]` and lives.
 
+UPSTREAM: this is [issue #5017](https://github.com/openscad/openscad/issues/5017), open since
+2024-02-26, and it is a REGRESSION — 2022.03.07 returned a result, 2024.02.22 started throwing.
+jordanbrown0 has a PR in flight that "silently treats type mismatches as not-equal ... the same as
+what `==` does". chotchki has commented our CLI half onto the thread; every prior report on it saw
+only the GUI's clean `ERROR:`, so the abort was not part of the discussion.
+
 Found by the AO.4 heavy perf lane, which was measuring render times, not hunting crashes. The
 GUI-vs-CLI split is chotchki's — pasting the repro into the GUI is what showed the abort is not
 inherent to the exception. Written up here because it needs to go upstream and because the harness
@@ -182,8 +188,20 @@ Two, independently useful:
    This is the fix that covers the NEXT one of these, whatever it turns out to be — and it makes the
    headless path report what the GUI already reports.
 
-## What fab does
+## What fab does — and why it is not a guess
 
-Returns `[]` for every crashing form. Worth stating plainly that `[]` is a GUESS — the oracle
-can't confirm it, because asking the question kills the oracle. If upstream fixes this with
-different semantics (coerce the column, or skip the row), fab follows upstream.
+The obvious worry is that fab's answer here is unfalsifiable: the oracle can't confirm it, because
+asking the question kills the oracle. But #5017 supplies two independent references — the
+PRE-REGRESSION behaviour, and the semantics of the PR that fixes it — and fab matches both:
+
+| probe | fab | reference |
+|---|---|---|
+| `search("ab", [[0,0],["a",1],["b",2],["c",3]])` | `[1, 2]` | 2022.03.07 gave `[1, 2]`; the issue and the wiki agree that's correct |
+| `search("a", [[1, 2]])` | `[]` | PR: type mismatch is not-equal, so no match |
+| `search("0", [[0,1]])` | `[]` | PR declines the legacy stringify, which WOULD have matched here |
+| `"0" == 0` | `false` | consistent with treating mismatch as not-equal |
+
+So fab already implements what upstream is converging on: mismatch compares not-equal exactly like
+`==`, with none of the old `toString()` coercion that jordanbrown0 explicitly rejects. No change
+needed on our side when the PR lands. If upstream instead picks different semantics, we follow —
+but the guess is now a match against two references rather than a shrug.

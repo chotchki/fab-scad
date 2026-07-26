@@ -107,9 +107,40 @@ OpenSCAD            FunctionCall::evaluate(...)
 `UnknownExceptionCleanup` (MainWindow.cc:2356) logs `Compilation aborted by exception: %1$s` — which
 is exactly the console line the GUI shows. `parseDocument` gets the same treatment at :3141.
 
-`src/openscad.cc` has nine catch blocks and NOT ONE of them is around evaluation — its
-`catch (const std::exception&)` sits on `po::store(...)`, commented "Catches e.g. unknown options".
-The headless render path runs bare.
+`src/openscad.cc` DOES wrap the headless run — it just catches one third of what the GUI catches.
+At :1180 (master, fetched 2026-07-25 — same line numbers as 1f65580cb):
+
+```cpp
+      rc |= cmdline(cmd);
+    }
+  }
+} catch (const HardWarningException&) {
+  rc = 1;
+}
+```
+
+That is the GUI's FIRST clause and neither of its other two. A `std::exception` escaping evaluation
+has nothing to land on, so it reaches the default terminate handler. The other eight catches in the
+file guard option parsing (`po::store`, three `boost::bad_lexical_cast` sites) and offscreen-view
+setup — none of them are on the evaluation path.
+
+Where it throws, from the crash report's own stack (not inferred):
+
+```
+openscad_main
+  do_export                                      openscad.cc:390
+    SourceFile::instantiate                      openscad.cc:418   <-- throws here
+      LocalScope::instantiateModules
+        BuiltinModule::instantiate
+          ... FunctionCall::evaluate
+                builtin_search                   builtin_functions.cc:747
+                  Value::toStrUtf8Wrapper
+                    __throw_bad_variant_access
+```
+
+Note the stage: `instantiate`, i.e. AST evaluation — the GUI's "Compiling design (CSG Tree
+generation)". `do_export`'s later `geomevaluator.evaluateGeometry` at :492 is equally unguarded but
+never runs, because the program is already dead.
 
 ## Why it matters
 
@@ -133,9 +164,23 @@ Two, independently useful:
 1. **`builtin_search`** — guard the column the way the function already guards its other inputs:
    check the type before converting and fall through to the existing no-match path (with the usual
    `WARNING:`) instead of converting blind.
-2. **`openscad.cc`** — give the headless path the net the GUI already has, so an escaped exception
-   is a diagnosed `ERROR:` and a nonzero exit rather than `abort()`. This is the fix that covers the
-   next one of these, whatever it turns out to be.
+2. **`openscad.cc:1182`** — the try block is ALREADY THERE and already catches
+   `HardWarningException`. It needs the GUI's other two clauses:
+
+   ```cpp
+   } catch (const HardWarningException&) {
+     rc = 1;
+   } catch (const std::exception& e) {          // <-- add
+     LOG(message_group::Error, "Aborted by exception: %1$s", e.what());
+     rc = 1;
+   } catch (...) {                              // <-- add
+     LOG(message_group::Error, "Aborted by unknown exception");
+     rc = 1;
+   }
+   ```
+
+   This is the fix that covers the NEXT one of these, whatever it turns out to be — and it makes the
+   headless path report what the GUI already reports.
 
 ## What fab does
 

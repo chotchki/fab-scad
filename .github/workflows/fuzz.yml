@@ -23,6 +23,30 @@ jobs:
       # Pin the host gnu target (dynamic libc, std present) so the sanitizer links. Every cargo-fuzz
       # invocation below passes --target "$FUZZ_TARGET".
       FUZZ_TARGET: x86_64-unknown-linux-gnu
+      # AO.9 — ONE knob for the whole campaign (chotchki: target ~1h total job time).
+      #
+      # This was nine independent `-max_total_time` literals summing to 2100s that nothing tracked, so
+      # "make it an hour" was a nine-line edit with the arithmetic living in someone's head. Now every
+      # target takes a documented SHARE of this budget and the sum is visible below.
+      #
+      # CALIBRATION, not arithmetic: this budget covers FUZZING only. Job wall time also pays the ASan
+      # build (sanitizer-instrumented, uncached across runs), the BOSL2 corpus seeding, and the closing
+      # `cmin` minimize pass. Those cannot be computed from here — set the budget, read the ACTUAL job
+      # duration from a real run, adjust. Starting at 2400s (40min) leaves ~20min for the rest against
+      # the 1h target; if the job lands short or long, this is the single number to move.
+      FUZZ_BUDGET_S: 2400
+      # Shares in PERCENT, summing to 100. Weighted by where the bugs have actually come from: the three
+      # differential targets (eval, jit_diff, jit_dispatch_diff) carry the doctrine-#36 contract and get
+      # the most; lex is a thin tokenizer over a corpus that has long since stopped yielding.
+      SHARE_PARSE: 14
+      SHARE_LEX: 5
+      SHARE_EVAL: 14
+      SHARE_JIT_DIFF: 14
+      SHARE_GEN_DIFF: 11
+      SHARE_JIT_DISPATCH: 11
+      SHARE_GEO_LOWER: 11
+      SHARE_CSG_TREE: 14
+      SHARE_POLYGON: 6
     steps:
       - uses: actions/checkout@v4
         with:
@@ -37,36 +61,49 @@ jobs:
       # Seed the eval/jit_diff corpora from ~1300 real BOSL2 function defs before fuzzing — starts the
       # campaign on dense, valid numeric/list bodies (took jit_diff coverage ~1k → ~13k on the first run)
       # instead of rediscovering SCAD syntax from raw bytes. No-op for parse/lex (their corpora are curated).
+      # AO.9 — the shares are a BUDGET ALLOCATION, so they have to sum to the whole budget. Checked in CI
+      # because the failure is silent otherwise: shares summing to 90 quietly gives back 10% of the
+      # campaign, and shares summing to 130 quietly overruns the job's time target. Neither shows up as
+      # anything except a job that mysteriously takes the wrong amount of time.
+      - name: fuzz budget shares sum to 100
+        run: |
+          total=$(( SHARE_PARSE + SHARE_LEX + SHARE_EVAL + SHARE_JIT_DIFF + SHARE_GEN_DIFF \
+                  + SHARE_JIT_DISPATCH + SHARE_GEO_LOWER + SHARE_CSG_TREE + SHARE_POLYGON ))
+          echo "fuzz budget ${FUZZ_BUDGET_S}s split across shares totalling ${total}%"
+          if [ "$total" -ne 100 ]; then
+            echo "::error::fuzz shares sum to ${total}, not 100 — the campaign would run short or long"
+            exit 1
+          fi
       - name: seed fuzz corpora from BOSL2
         run: cargo run -p fab-lang --example seed_fuzz_from_bosl2
       # A crash makes `cargo fuzz run` exit non-zero → the job FAILS → the reproducer is uploaded and
       # goes into TROPHIES.md as a regression test. Budgets are per-target wall-clock.
       - name: fuzz parse
         working-directory: lang
-        run: cargo fuzz run parse --target "$FUZZ_TARGET" -- -max_total_time=300 -rss_limit_mb=2048
+        run: cargo fuzz run parse --target "$FUZZ_TARGET" -- -max_total_time=$(( FUZZ_BUDGET_S * SHARE_PARSE / 100 )) -rss_limit_mb=2048
       - name: fuzz lex
         working-directory: lang
-        run: cargo fuzz run lex --target "$FUZZ_TARGET" -- -max_total_time=120 -rss_limit_mb=2048
+        run: cargo fuzz run lex --target "$FUZZ_TARGET" -- -max_total_time=$(( FUZZ_BUDGET_S * SHARE_LEX / 100 )) -rss_limit_mb=2048
       # The evaluator (miri can't be its checker here — this + ASan is): parse → eval → geometry → mesh,
       # exercising the value machinery + both iterative Drops. The eval target sets FAB_EVAL_BUDGET (Q.5) so a
       # runaway comprehension can't hang; -max_len keeps exec/s high (real programs are small — huge inputs
       # are slow garbage that adds no coverage), -timeout is the belt.
       - name: fuzz eval
         working-directory: lang
-        run: cargo fuzz run eval --target "$FUZZ_TARGET" -- -max_total_time=300 -rss_limit_mb=2048 -max_len=4096 -timeout=10
+        run: cargo fuzz run eval --target "$FUZZ_TARGET" -- -max_total_time=$(( FUZZ_BUDGET_S * SHARE_EVAL / 100 )) -rss_limit_mb=2048 -max_len=4096 -timeout=10
       # The JIT vs the interpreter, BITWISE — the only tool that executes the JIT's native code (miri/Kani
       # can't). A divergence is a doctrine-#36 violation, a crash under ASan is a memory bug in the JIT seam.
       # No in-target size guard (Q.7 made compile crash-proof — a deep body DECLINES, never overflows); -max_len
       # is the THROUGHPUT knob (a numeric function is small, so a large input is slow garbage, not coverage).
       - name: fuzz jit_diff
         working-directory: lang
-        run: cargo fuzz run jit_diff --target "$FUZZ_TARGET" -- -max_total_time=300 -rss_limit_mb=2048 -max_len=4096 -timeout=10
+        run: cargo fuzz run jit_diff --target "$FUZZ_TARGET" -- -max_total_time=$(( FUZZ_BUDGET_S * SHARE_JIT_DIFF / 100 )) -rss_limit_mb=2048 -max_len=4096 -timeout=10
       # AJ.6 — the GENERATOR x Config A/B: fuzzer bytes pick a seed, the seed builds a whole-surface
       # valid program (the AJ.1 coverage gate guards the grammar), and eval must be bit-identical with
       # the caches off and on. Deep VALID programs, cheap; the Config contract as the semantic oracle.
       - name: fuzz gen_diff
         working-directory: lang
-        run: cargo fuzz run gen_diff --target "$FUZZ_TARGET" -- -max_total_time=240 -rss_limit_mb=2048 -max_len=8 -timeout=15
+        run: cargo fuzz run gen_diff --target "$FUZZ_TARGET" -- -max_total_time=$(( FUZZ_BUDGET_S * SHARE_GEN_DIFF / 100 )) -rss_limit_mb=2048 -max_len=8 -timeout=15
       # AN.16 — the tier differential ONE LEVEL UP from jit_diff. That target calls compile_function
       # directly and binds params POSITIONALLY, so it structurally cannot see a divergence that lives in
       # the CALL MACHINERY; Phase AN found four such bugs by hand, every one invisible to it. This runs a
@@ -75,7 +112,7 @@ jobs:
       # diagnostic still diverges. Same -max_len=8 as gen_diff: the bytes are just a seed.
       - name: fuzz jit_dispatch_diff
         working-directory: lang
-        run: cargo fuzz run jit_dispatch_diff --target "$FUZZ_TARGET" -- -max_total_time=240 -rss_limit_mb=4096 -max_len=8 -timeout=15
+        run: cargo fuzz run jit_dispatch_diff --target "$FUZZ_TARGET" -- -max_total_time=$(( FUZZ_BUDGET_S * SHARE_JIT_DISPATCH / 100 )) -rss_limit_mb=4096 -max_len=8 -timeout=15
       # Y.7 — the GEOMETRY-LOWERING seam (fab-scad fuzz crate at the repo root): evaluate_geometry ->
       # build_geo/build_2d through the REAL Manifold kernel, so the kernel's get_unchecked unsafe + the
       # X.4 2D-hull path get ASan on fuzzer geometry. Heavier per-exec than the lang targets (real CSG),
@@ -83,17 +120,17 @@ jobs:
       # --fuzz-dir fuzz: cargo-fuzz would otherwise find lang/fuzz. Seed from the eval corpus (programs
       # that actually build geometry). FAB_EVAL_BUDGET is set inside the target.
       - name: fuzz geo_lower
-        run: cargo fuzz run geo_lower --fuzz-dir fuzz --target "$FUZZ_TARGET" lang/fuzz/corpus/eval -- -max_total_time=240 -rss_limit_mb=4096 -max_len=2048 -timeout=25
+        run: cargo fuzz run geo_lower --fuzz-dir fuzz --target "$FUZZ_TARGET" lang/fuzz/corpus/eval -- -max_total_time=$(( FUZZ_BUDGET_S * SHARE_GEO_LOWER / 100 )) -rss_limit_mb=4096 -max_len=2048 -timeout=25
       # Y.8 — the KERNEL fuzzers (fab-manifold), structure-aware (`arbitrary`) over the boolean core +
       # 2D triangulation, ASan on the same get_unchecked unsafe. These targets EXISTED but were never run
       # in any workflow (workspace-excluded, manual-only) — zero continuous coverage, violating the K.5
       # "24h / 0 trophies" clause that lives in that very crate. Now wired into the nightly.
       - name: fuzz csg_tree (kernel booleans)
         working-directory: manifold
-        run: cargo fuzz run csg_tree --target "$FUZZ_TARGET" -- -max_total_time=240 -rss_limit_mb=4096 -timeout=25
+        run: cargo fuzz run csg_tree --target "$FUZZ_TARGET" -- -max_total_time=$(( FUZZ_BUDGET_S * SHARE_CSG_TREE / 100 )) -rss_limit_mb=4096 -timeout=25
       - name: fuzz polygon (2D triangulation)
         working-directory: manifold
-        run: cargo fuzz run polygon --target "$FUZZ_TARGET" -- -max_total_time=120 -rss_limit_mb=2048 -timeout=15
+        run: cargo fuzz run polygon --target "$FUZZ_TARGET" -- -max_total_time=$(( FUZZ_BUDGET_S * SHARE_POLYGON / 100 )) -rss_limit_mb=2048 -timeout=15
       # Minimize the accumulated corpus to a coverage-minimal set + publish it, so the next run (and
       # anyone reproducing locally) starts from the best-known corpus.
       - name: minimize corpus

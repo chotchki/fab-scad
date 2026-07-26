@@ -47,6 +47,7 @@ Driven by `claude-plan-bridge` (FORMATv2). Hand-authored; run
 - [x] AO.12 - AO.2 is the BLOCKER for a meaningful ratio — the dial grows text, not geometry
 - [ ] AO.13 - Triage the ~70 echo divergences the heavy lane surfaced
 - [ ] AO.14 - RETRACTED then re-measured: fab leads 2.6-10.7x, and the lead GROWS with size
+- [ ] AO.15 - Make the measured ENGINE impossible to get wrong
 ## Phase AP - Diagnostics threading - the console survives failure (chotchki: keep Result so `?` keeps working)
 - [x] AP.1 - `Failure { error: Error, console: Vec<Message> }` + `crate::Result<T> = Result<T, Failure>` + `From<Error> for Failure` (empty console) so every interior `?` keeps compiling untouched. A STRUCT wrapping Error, deliberately NOT a new Error variant: a variant slides silently into the `_ =>` catch-alls in src/corpus.rs and src/bin/corpus_repro.rs (the error-span-plumbing trap, which gen/src/main.rs:171 is already sitting in), a new type forces a compile error at every matcher instead
 - [x] AP.2 - Attach the drained console at the ONE escape point: split resolve_source so `Ctx` is built before the fallible remainder, then map the Err arm into `Failure` with `ctx.messages.take()`. Single attach site is sound because an ERROR is unique + terminal (oracle-verified: `for(i=[0:3]) m(i)` with a failing assert gives ECHO 0, ECHO 1, ONE ERROR, halt, exit 1, no export) — nothing can follow it, so there is no ordering to preserve beyond "last"

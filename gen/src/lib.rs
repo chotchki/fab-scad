@@ -23,11 +23,64 @@
 
 use fab_lang::RandStream;
 
-/// Bounds that keep every generated program small + cheap to evaluate.
-const MAX_EXPR_DEPTH: u32 = 4;
-const START_FUEL: u32 = 90;
-const MAX_STMTS: i64 = 9;
-const RANGE_BOUND: i64 = 32; // range endpoints stay in [-RANGE_BOUND, RANGE_BOUND] → tiny comprehensions
+/// The bounds a generation runs under (AO.1) — what used to be four `const`s, so a second, HEAVIER
+/// profile can exist without forking the grammar.
+///
+/// [`Profile::CHEAP`] is the original set, and it is FROZEN: `gen_diff` and `jit_dispatch_diff` seed their
+/// corpora from these programs and the AJ.1 coverage gate asserts against them, so a shifted bound does not
+/// fail anything — it silently moves what those campaigns explore. `cheap_profile_is_frozen` hashes 2000
+/// seeds to make that checkable rather than assumed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Profile {
+    /// Expression nesting cap.
+    pub max_expr_depth: u32,
+    /// Total emission budget; the walk stops when it runs out.
+    pub start_fuel: u32,
+    /// Upper bound on top-level statements.
+    pub max_stmts: i64,
+    /// Range endpoints stay in `[-range_bound, range_bound]`.
+    pub range_bound: i64,
+    /// Upper bound on an emitted `$fn` — the facet count, and so the main dial on CURVED geometry cost.
+    pub max_fn: i64,
+}
+
+impl Profile {
+    /// The original bounds. Every field here is load-bearing for an existing corpus; see the type docs.
+    pub const CHEAP: Self = Self {
+        max_expr_depth: 4,
+        start_fuel: 90,
+        max_stmts: 9,
+        range_bound: 32,
+        max_fn: 12,
+    };
+
+    /// A program heavy enough to TIME, scaled by `dial` (1 = mildly heavy; higher = more work).
+    ///
+    /// `dial` is the x-axis of AO.7's scaling curve, so the knobs it moves have to make cost grow for a
+    /// reason we can name. `max_fn` is the big one: facets per curve drive real tessellation and then real
+    /// boolean work. `max_stmts` and `start_fuel` buy more geometry rather than bigger geometry.
+    ///
+    /// `range_bound` deliberately does NOT scale. Widening it inflates comprehension LISTS, and then the
+    /// lane measures list evaluation — the value-side cost AO.2 exists to suppress as timing noise. Cost
+    /// has to come from geometry or the number means nothing.
+    #[must_use]
+    pub fn heavy(dial: u32) -> Self {
+        let d = dial.max(1);
+        Self {
+            max_expr_depth: Self::CHEAP.max_expr_depth + d,
+            start_fuel: Self::CHEAP.start_fuel * d,
+            max_stmts: 6 * i64::from(d),
+            range_bound: Self::CHEAP.range_bound,
+            max_fn: 16 * i64::from(d),
+        }
+    }
+}
+
+impl Default for Profile {
+    fn default() -> Self {
+        Self::CHEAP
+    }
+}
 
 /// Builtins SAFE to call with any args (a type mismatch yields `undef`, never an error), with
 /// arity. Calling only these (plus generated functions) keeps programs eval-clean.
@@ -72,6 +125,8 @@ const BUILTINS: &[(&str, usize)] = &[
 /// The generator state: the RNG plus the lexical scope it's building up.
 pub struct Gen {
     rng: RandStream,
+    /// The bounds this walk runs under (AO.1).
+    profile: Profile,
     fuel: u32,
     depth: u32,
     vars: Vec<String>,                 // in-scope variable names
@@ -81,17 +136,30 @@ pub struct Gen {
 }
 
 /// Generate the program for `seed` — deterministic + reproducible (same seed → same bytes, every platform).
+///
+/// Runs under [`Profile::CHEAP`], which is frozen: this function's output feeds the fuzz corpora and the
+/// AJ.1 coverage gate, so it must keep producing the exact bytes it always has.
 #[must_use]
 pub fn generate(seed: u32) -> String {
-    Gen::new(seed).program()
+    generate_with(seed, Profile::CHEAP)
+}
+
+/// [`generate`] under an explicit [`Profile`] — the heavy lane's entry (AO.1).
+///
+/// A seed replays deterministically WITHIN a profile; the same seed under two profiles is two different
+/// programs, which is the point (AO.7 plots the same seeds across dials).
+#[must_use]
+pub fn generate_with(seed: u32, profile: Profile) -> String {
+    Gen::with_profile(seed, profile).program()
 }
 
 impl Gen {
     #[must_use]
-    fn new(seed: u32) -> Self {
+    fn with_profile(seed: u32, profile: Profile) -> Self {
         Self {
             rng: RandStream::seeded(seed),
-            fuel: START_FUEL,
+            profile,
+            fuel: profile.start_fuel,
             depth: 0,
             vars: Vec::new(),
             funcs: Vec::new(),
@@ -156,12 +224,12 @@ impl Gen {
         let mut out = String::new();
         // $-assignments (dynamic-scope fallbacks) — SMALL $fn so any circle stays cheap.
         if self.chance(0.4) {
-            out.push_str(&format!("$fn = {};\n", self.int_between(0, 12)));
+            out.push_str(&format!("$fn = {};\n", self.int_between(0, self.profile.max_fn)));
         }
         if self.chance(0.15) {
             out.push_str("$fa = 12;\n$fs = 2;\n");
         }
-        let n = self.int_between(1, MAX_STMTS);
+        let n = self.int_between(1, self.profile.max_stmts);
         for _ in 0..n {
             if self.fuel == 0 {
                 break;
@@ -510,7 +578,7 @@ impl Gen {
 
     fn expr(&mut self) -> String {
         self.fuel = self.fuel.saturating_sub(1);
-        if self.depth >= MAX_EXPR_DEPTH || self.fuel == 0 || self.chance(0.3) {
+        if self.depth >= self.profile.max_expr_depth || self.fuel == 0 || self.chance(0.3) {
             return self.atom();
         }
         self.depth += 1;
@@ -564,8 +632,8 @@ impl Gen {
 
     /// `[lo:hi]` or `[lo:step:hi]` with SMALL, bounded endpoints — never a runaway range.
     fn range(&mut self) -> String {
-        let lo = self.int_between(-RANGE_BOUND, RANGE_BOUND);
-        let hi = self.int_between(lo, lo + RANGE_BOUND);
+        let lo = self.int_between(-self.profile.range_bound, self.profile.range_bound);
+        let hi = self.int_between(lo, lo + self.profile.range_bound);
         if self.chance(0.5) {
             format!("[{lo}:{}:{hi}]", self.int_between(1, 4))
         } else {

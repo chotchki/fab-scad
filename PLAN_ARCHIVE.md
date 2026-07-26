@@ -1084,3 +1084,23 @@ deferred from J.5.2b on 2026-07-10.
 - [x] AM.2 - defense-in-depth gate job in release-native + release-web: verify the tagged SHA's checks before packaging (covers ruleset bypass/removal)
 - [x] AM.3 - proof: pushing a test tag on the red v1.1.0 commit is REJECTED; docs/packaging.md records the gate
 
+---
+
+## 2026-07-26
+
+## Phase SV - The undefined-operation warning family: every binop type error warns like upstream
+Promoted from backlog 2026-07-26 (chotchki: "stay closer to upstream" — before the AR surface trait).
+Found while triaging the AR.4 disagreements: fab emits ZERO of upstream's "undefined operation"
+warnings — every binop type error is a silent Undef. Oracle-pinned so far: `WARNING: undefined
+operation (vector <= number) in file X, line N` top-level; a TWO-LINE indexed variant for element
+mismatches inside vector comparison (`\tin vector comparison at index 1 in file X, line N`); and a
+word-order QUIRK for undef operands (`operation undefined (undefined < undefined)` — two upstream
+code paths). Type names: number/string/bool/vector/range/undefined. Values already agree after the
+ops.rs Cmp fix — this phase is the DIAGNOSTIC channel only, and the failure direction to guard is
+OVER-warning (fab warning where upstream is silent), which would light up the gen-diff warning
+channel as new divergence.
+- [x] SV.1 - SV.1 - Oracle probe matrix: the full warning surface before any code
+- [x] SV.2 - SV.2 - Thread a warning sink into ops.rs (the #33-lite plumbing)
+- [x] SV.3 - SV.3 - Emit the family with upstream's exact text + corpus tests per probed cell
+- [x] SV.4 - SV.4 - Differential validation both directions + tier equality
+

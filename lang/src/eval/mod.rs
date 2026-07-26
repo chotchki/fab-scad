@@ -40,6 +40,7 @@ mod scope;
 mod static_diag;
 mod text;
 mod trace;
+mod transpile;
 mod trig;
 mod value;
 

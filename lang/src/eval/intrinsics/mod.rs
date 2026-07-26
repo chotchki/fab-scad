@@ -93,7 +93,9 @@ pub(super) struct Entry {
     /// The function name the intrinsic implements (registry bucket key).
     pub(super) name: &'static str,
     /// The verbatim reference source of that function — fingerprinted + run as the harness oracle.
-    reference: &'static str,
+    /// `pub(super)` for the transpiler (AR.5): the analysis pass derives the guard sets below FROM
+    /// this source, and the registry's hand lists are its acceptance oracle.
+    pub(super) reference: &'static str,
     /// Named TOP-LEVEL CONSTANTS the reference hardcodes (default exprs like `eps=_EPSILON`, or body reads
     /// — `PI` counts too, it's just a seeded binding), with the value the native impl bakes in. Empty =
     /// self-contained. Non-empty makes the entry CONST-GUARDED (O.5.1): the fingerprint proves the FUNCTION
@@ -128,7 +130,7 @@ pub(super) struct Entry {
 /// Reference-only dependency anchors: BOSL2 functions we PIN (verbatim source → fingerprint) because a
 /// registry entry's reference calls them, without shipping a native impl of our own. [`anchor_fp`] resolves
 /// a dep name against entries first, then here.
-static PINS: &[(&str, &str)] = &[
+pub(super) static PINS: &[(&str, &str)] = &[
     // O.10 band dep (vectors.scad).
     (
         "vector_search",
@@ -520,7 +522,7 @@ static PINS: &[(&str, &str)] = &[
 /// `is_finite` (34.6% of user-fn calls) and `is_nan` (21.3%) alone are 56% of all calls, and both are hot
 /// BECAUSE every BOSL2 assert validates its inputs through them. Intrinsic-ing `is_finite` ALSO erases its
 /// `is_num`/`is_nan` sub-calls (the interpreted body dispatches them; the native body computes directly).
-static REGISTRY: &[Entry] = &[
+pub(super) static REGISTRY: &[Entry] = &[
     Entry {
         name: "_fab_poc_sq",
         reference: "function _fab_poc_sq(x) = x * x;",
@@ -664,7 +666,12 @@ static REGISTRY: &[Entry] = &[
         consts: &[],
         consts_v: &[],
         deps: &["_fab_poc_near0"],
-        builtins: &[],
+        // `abs` arrives THROUGH the dep, and it must be here anyway (the "or a pinned dep" half of
+        // the builtins contract): outer's native calls `poc_near0` as a plain Rust fn, so the dep's
+        // own abs-shadow veto never runs for OUTER — with this empty, a user `function abs(x)` would
+        // reroute the interpreted body while the native kept the real builtin. Found by the AR.5
+        // analyzer's registry comparison (`transpile::tests`), the first hand-list gap it caught.
+        builtins: &["abs"],
         func: poc::poc_outer,
     },
     // The VALUE-const guard POC (O.8): bakes the vector constant `UP` — wires only when the home scope's
@@ -771,7 +778,7 @@ static REGISTRY: &[Entry] = &[
         reference: "function posmod(x,m) =
     assert( is_finite(x) && is_finite(m) && !approx(m,0) , \"\\nInput must be finite numbers. The divisor cannot be zero.\")
     (x%m+m)%m;",
-        consts: &[("_EPSILON", 1e-9)],
+        consts: &[],
         consts_v: &[],
         deps: &["is_finite", "is_nan", "approx"],
         builtins: &["is_num", "abs", "is_bool"],
@@ -787,7 +794,7 @@ static REGISTRY: &[Entry] = &[
         _s = posmod(s,ll),
         _e = posmod(e,ll)
     ) [_s : step : _e];",
-        consts: &[("_EPSILON", 1e-9)],
+        consts: &[],
         consts_v: &[],
         deps: &["posmod", "is_finite", "is_nan", "approx"],
         builtins: &["is_list", "is_string", "len", "is_num", "abs", "is_bool"],
@@ -801,7 +808,7 @@ static REGISTRY: &[Entry] = &[
         consts: &[("_EPSILON", 1e-9)],
         consts_v: &[],
         deps: &["is_finite", "is_nan", "is_vector"],
-        builtins: &["is_num", "abs", "is_list", "len", "is_undef"],
+        builtins: &["is_num", "abs", "is_list", "len", "is_undef", "norm"],
         func: shape::all_nonzero,
     },
     Entry {
@@ -1239,7 +1246,7 @@ static REGISTRY: &[Entry] = &[
     // poly has no ears, look for wiskers
     let( wiskers = [for(j=idx(ind)) if(norm(poly[ind[j]]-poly[ind[(j+2)%lind]])<eps) j ] )
     wiskers==[] ? undef : [wiskers[0]];",
-        consts: &[("_EPSILON", 1e-9)],
+        consts: &[],
         consts_v: &[],
         deps: &[
             "_tri_class",
@@ -1400,7 +1407,7 @@ static REGISTRY: &[Entry] = &[
                    : (norm(v_abs(w2)-UP) > eps)? UP
                    : RIGHT
             ) unit(cross(w1,w3));",
-        consts: &[("_EPSILON", 1e-9)],
+        consts: &[],
         consts_v: &[("UP", vectors::bosl_up), ("RIGHT", vectors::bosl_right)],
         deps: &[
             "is_vector",
@@ -1444,8 +1451,8 @@ static REGISTRY: &[Entry] = &[
         [u.z*u.x*c2-u.y*s, u.z*u.y*c2+u.x*s, u.z*u.z*c2+c    , 0],
         [               0,                0,                0, 1]
     ];",
-        consts: &[("_EPSILON", 1e-9)],
-        consts_v: &[("UP", vectors::bosl_up), ("RIGHT", vectors::bosl_right)],
+        consts: &[],
+        consts_v: &[],
         deps: &[
             "is_vector",
             "is_finite",
@@ -1560,7 +1567,7 @@ static REGISTRY: &[Entry] = &[
         [u.z*u.x*c2-u.y*s, u.z*u.y*c2+u.x*s, u.z*u.z*c2+c    , 0],
         [               0,                0,                0, 1]
     ];",
-        consts: &[("_EPSILON", 1e-9)],
+        consts: &[],
         consts_v: &[("UP", vectors::bosl_up)],
         deps: &[
             "is_finite",
@@ -1608,12 +1615,8 @@ static REGISTRY: &[Entry] = &[
             ) m3
     )
     p==_NO_ARG ? m : apply(m, p);",
-        consts: &[("_EPSILON", 1e-9)],
-        consts_v: &[
-            ("_NO_ARG", no_arg_value),
-            ("UP", vectors::bosl_up),
-            ("RIGHT", vectors::bosl_right),
-        ],
+        consts: &[],
+        consts_v: &[("_NO_ARG", no_arg_value)],
         deps: &[
             "point3d",
             "affine3d_rot_from_to",
@@ -1753,43 +1756,7 @@ static REGISTRY: &[Entry] = &[
        [for(i=[0:1]) [for(j=counts[i]) _sort_vectors(select(risect[i],pathind[i][j]))]];",
         consts: &[("_EPSILON", 1e-9)],
         consts_v: &[],
-        deps: &[
-            "idx",
-            "list_wrap",
-            "are_ends_equal",
-            "approx",
-            "is_finite",
-            "is_nan",
-            "posmod",
-            "_general_line_intersection",
-            "flatten",
-            "vector_search",
-            "_bt_tree",
-            "_bt_search",
-            "pointlist_bounds",
-            "ident",
-            "transpose",
-            "is_path",
-            "is_matrix",
-            "is_vector",
-            "is_consistent",
-            "_list_pattern",
-            "same_shape",
-            "in_list",
-            "force_list",
-            "all_nonzero",
-            "is_range",
-            "max_index",
-            "min_index",
-            "mean",
-            "sum",
-            "_sum",
-            "column",
-            "is_int",
-            "count",
-            "select",
-            "_sort_vectors",
-        ],
+        deps: &["idx", "list_wrap", "are_ends_equal", "approx", "is_finite", "is_nan", "posmod", "_general_line_intersection", "flatten", "vector_search", "_bt_tree", "_bt_search", "pointlist_bounds", "ident", "transpose", "is_path", "is_matrix", "is_vector", "is_consistent", "_list_pattern", "in_list", "force_list", "all_nonzero", "is_range", "max_index", "min_index", "mean", "sum", "_sum", "column", "is_int", "count", "select", "_sort_vectors"],
         builtins: &[
             "norm", "sign", "cross", "search", "max", "min", "abs", "floor", "round", "concat",
             "len", "is_list", "is_num", "is_undef",

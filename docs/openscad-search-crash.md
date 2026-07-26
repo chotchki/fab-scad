@@ -47,6 +47,26 @@ search("a", [[1, 2]]);                  // NO crash — parsed as a module call
 So the condition is precise: a STRING key against a column that isn't a string. A number key over
 the same table is fine, which matches the source — only the string-key path converts the column.
 
+### The command line, copy-pasteable
+
+```console
+$ printf 'echo(search("a", [[1, 2]]));\n' > crash.scad
+
+$ openscad -o out.stl crash.scad; echo "exit=$?"
+libc++abi: terminating due to uncaught exception of type std::bad_variant_access: bad_variant_access
+exit=134
+```
+
+Exit 134 is 128+6, i.e. SIGABRT. Note what is NOT there: no `ERROR:`, no file, no line number,
+nothing a build log could act on. `--export-format echo` aborts identically, so it is the
+evaluation that dies, not the exporter.
+
+Open the SAME file in the GUI and it prints, in the console, and keeps running:
+
+```
+ERROR: Compilation aborted by exception: bad_variant_access
+```
+
 Version: OpenSCAD 2026.06.12 (git 0a66508c, macOS arm64). Source read at `1f65580cb`.
 
 ## Cause

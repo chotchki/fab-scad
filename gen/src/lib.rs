@@ -42,6 +42,21 @@ pub struct Profile {
     pub range_bound: i64,
     /// Upper bound on an emitted `$fn` — the facet count, and so the main dial on CURVED geometry cost.
     pub max_fn: i64,
+    /// Geometry TREE depth cap (AO.3).
+    ///
+    /// EXPONENTIAL, unlike the others: a boolean level emits 2-3 children that each recurse, so leaves
+    /// grow ~3^depth. Depth 3 is ≤27 primitives, depth 6 already ≤729 — which is why the curve is driven
+    /// by `max_fn` (linear in facets) and this moves in coarse, capped steps.
+    pub max_geo_depth: u32,
+    /// Operands a generated `hull()` gets. Safe to scale — hull is ~O(n log n) in its input points.
+    pub hull_operands: i64,
+    /// `$fn` for MINKOWSKI operands, which deliberately does NOT scale with the dial (AO.3).
+    ///
+    /// Minkowski cost is MULTIPLICATIVE in the operands' vertex counts, so letting these follow `max_fn`
+    /// turns one seed into a nightly-eating outlier — `minkowski(cube, sphere($fn=256))` is not a bigger
+    /// version of `minkowski(cube, sphere($fn=6))`, it is a different order of magnitude. The pin is the
+    /// guard; the existing hardcoded `6` was already doing this job informally.
+    pub minkowski_fn: i64,
 }
 
 impl Profile {
@@ -52,6 +67,9 @@ impl Profile {
         max_stmts: 9,
         range_bound: 32,
         max_fn: 12,
+        max_geo_depth: 3,
+        hull_operands: 2,
+        minkowski_fn: 6,
     };
 
     /// A program heavy enough to TIME, scaled by `dial` (1 = mildly heavy; higher = more work).
@@ -69,9 +87,19 @@ impl Profile {
         Self {
             max_expr_depth: Self::CHEAP.max_expr_depth + d,
             start_fuel: Self::CHEAP.start_fuel * d,
-            max_stmts: 6 * i64::from(d),
+            // Every knob is CHEAP-plus-something, never a bare multiple: `6 * d` read fine and gave 6 at
+            // dial 1, BELOW cheap's 9, so the first dial step emitted LIGHTER programs than the profile it
+            // is supposed to exceed. Nothing caught it — the freeze test only guards `cheap`, and the parse
+            // and coverage tests only run `cheap`. `heavy` was unverified code until it was measured.
+            max_stmts: Self::CHEAP.max_stmts + 6 * i64::from(d),
             range_bound: Self::CHEAP.range_bound,
             max_fn: 16 * i64::from(d),
+            // Coarse + CAPPED: leaves grow ~3^depth, so this is the one knob that can turn a dial step
+            // into an outlier that eats the nightly budget on its own.
+            max_geo_depth: (Self::CHEAP.max_geo_depth + d / 2).min(6),
+            hull_operands: Self::CHEAP.hull_operands + i64::from(d),
+            // PINNED at every dial — see the field docs. Multiplicative cost does not get a dial.
+            minkowski_fn: Self::CHEAP.minkowski_fn,
         }
     }
 }
@@ -224,7 +252,10 @@ impl Gen {
         let mut out = String::new();
         // $-assignments (dynamic-scope fallbacks) — SMALL $fn so any circle stays cheap.
         if self.chance(0.4) {
-            out.push_str(&format!("$fn = {};\n", self.int_between(0, self.profile.max_fn)));
+            out.push_str(&format!(
+                "$fn = {};\n",
+                self.int_between(0, self.profile.max_fn)
+            ));
         }
         if self.chance(0.15) {
             out.push_str("$fa = 12;\n$fs = 2;\n");
@@ -372,7 +403,7 @@ impl Gen {
     /// A 3D geometry statement/child at nesting `d`: a leaf primitive, a wrapper, a boolean of a
     /// couple of children, an extrusion of a 2D tree, or a bounded `for`/`if`.
     fn geometry3(&mut self, d: u32) -> String {
-        if d >= 3 || self.fuel == 0 || self.chance(0.3) {
+        if d >= self.profile.max_geo_depth || self.fuel == 0 || self.chance(0.3) {
             return self.primitive3();
         }
         self.fuel = self.fuel.saturating_sub(1);
@@ -450,8 +481,21 @@ impl Gen {
                             self.geometry3(d + 1)
                         )
                     }
-                    4 => format!("hull() {{ {} {} }}", self.primitive3(), self.primitive3()),
-                    _ => "minkowski() { cube(2); sphere(r = 1, $fn = 6); }".to_string(),
+                    4 => {
+                        let n = self.profile.hull_operands.max(2);
+                        let mut kids = String::new();
+                        for _ in 0..n {
+                            kids.push_str(&self.primitive3());
+                            kids.push(' ');
+                        }
+                        format!("hull() {{ {} }}", kids.trim_end())
+                    }
+                    // The operands stay PINNED at `minkowski_fn` on every dial — multiplicative cost
+                    // (AO.3). Everything else here scales; this deliberately does not.
+                    _ => format!(
+                        "minkowski() {{ cube(2); sphere(r = 1, $fn = {}); }}",
+                        self.profile.minkowski_fn
+                    ),
                 }
             }
             _ => {
@@ -479,7 +523,7 @@ impl Gen {
 
     /// A 2D geometry tree (used top-level or under an extrusion — NEVER mixed into a 3D boolean).
     fn geometry2(&mut self, d: u32) -> String {
-        if d >= 3 || self.fuel == 0 || self.chance(0.4) {
+        if d >= self.profile.max_geo_depth || self.fuel == 0 || self.chance(0.4) {
             return self.primitive2();
         }
         self.fuel = self.fuel.saturating_sub(1);

@@ -110,3 +110,75 @@ fn the_multiplicative_knob_never_moves() {
     // The depth cap is exponential in leaves (~3^depth), so it stays bounded however far the dial goes.
     assert_eq!(fab_gen::Profile::heavy(64).max_geo_depth, 6);
 }
+
+/// The dial has to reach the MESH, not just the program text.
+///
+/// AO.12 measured a flat performance curve and the cause was here: `max_fn` was the documented "main
+/// dial on curved geometry cost", but nothing put it on a primitive. The only `$fn` was a program-level
+/// statement that fired in 39% of seeds and drew UNIFORM FROM ZERO, so its mean was half the cap and
+/// the other 61% of programs tessellated at `$fa`/`$fs` defaults at every dial. Raising the knob moved
+/// a number that mostly never reached geometry, and every test passed the whole time because they all
+/// ran `cheap`.
+///
+/// So this asserts the MECHANISM, not the wall clock: heavy seeds must put `$fn` on curved primitives,
+/// and those values must sit in the top half of the dial's cap.
+///
+/// MINKOWSKI operands are excluded on purpose. Their `$fn` is PINNED at `minkowski_fn` on every dial
+/// (AO.3) because minkowski cost is multiplicative in its operands' vertex counts — the one place the
+/// dial deliberately must NOT reach. A test that demanded a floor there would be demanding the blowup
+/// this profile exists to prevent.
+#[test]
+fn the_dial_lands_on_the_primitives() {
+    for dial in [1u32, 4, 16] {
+        let profile = fab_gen::Profile::heavy(dial);
+        let cap = profile.max_fn;
+        let (mut curved, mut with_fn) = (0usize, 0usize);
+        for seed in 0..200u32 {
+            let src = fab_gen::generate_with(seed, profile);
+            for line in src.split([';', '\n']) {
+                if line.contains("minkowski") || line.contains("r = 1, $fn = 6") {
+                    continue; // pinned by AO.3 — see the doc comment
+                }
+                if !(line.contains("sphere(")
+                    || line.contains("cylinder(")
+                    || line.contains("circle("))
+                {
+                    continue;
+                }
+                curved += 1;
+                let Some(rest) = line.split("$fn = ").nth(1) else {
+                    continue;
+                };
+                let val: i64 = rest
+                    .trim_matches(|c: char| !c.is_ascii_digit())
+                    .parse()
+                    .unwrap_or(-1);
+                assert!(
+                    val >= cap / 2 && val <= cap,
+                    "dial {dial}: $fn {val} outside the top half of cap {cap} — the dial is meant to \
+                     be a FLOOR on facets, not an average of one: {line}"
+                );
+                with_fn += 1;
+            }
+        }
+        assert!(
+            curved > 0,
+            "dial {dial}: no curved primitives generated at all"
+        );
+        assert_eq!(
+            curved,
+            with_fn,
+            "dial {dial}: {} of {curved} curved primitives carry no $fn — those tessellate at the \
+             $fa/$fs defaults however high the dial goes, which IS the AO.12 plateau",
+            curved - with_fn
+        );
+    }
+}
+
+/// `cheap` must not grow a per-primitive `$fn`: `gen-diff`'s corpus is frozen, and the flag gates an
+/// RNG DRAW as well as the emitted text, so flipping it would shift every subsequent value.
+///
+/// A CONST assertion, not a test — the field is a `const`, so this fails the BUILD rather than a run,
+/// and no one can flip it and discover the consequence from a red digest later.
+/// `the_cheap_corpus_has_not_moved` still guards the bytes; this names the knob.
+const _: () = assert!(!fab_gen::Profile::CHEAP.prim_fn);

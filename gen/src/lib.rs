@@ -50,6 +50,21 @@ pub struct Profile {
     pub max_geo_depth: u32,
     /// Operands a generated `hull()` gets. Safe to scale — hull is ~O(n log n) in its input points.
     pub hull_operands: i64,
+    /// Put `$fn` on the PRIMITIVE, not just the program (AO.2).
+    ///
+    /// This is the knob that actually lands the dial on the mesh, and its absence is why AO.12 measured a
+    /// flat curve. Measured over 300 seeds per dial: the global `$fn = …` statement fires in only 118 of
+    /// them (39%), and when it fires it draws UNIFORM FROM ZERO, so its mean is half the cap — 15/32 at
+    /// dial 2, 124/256 at dial 16. The other 61% of programs tessellate at the `$fa`/`$fs` defaults no
+    /// matter how high the dial goes, and `cube`/`sphere`/`cylinder` never carried a `$fn` of their own at
+    /// all. Raising `max_fn` was therefore moving a number that mostly did not reach the geometry.
+    ///
+    /// ON, every curved primitive draws its own `$fn` from the TOP HALF of `max_fn` — a floor, not a
+    /// uniform draw, so the dial is a lower bound on facets rather than an average of one.
+    ///
+    /// OFF in [`Profile::CHEAP`], which is frozen bit-for-bit by `the_cheap_corpus_has_not_moved`: the
+    /// flag gates the extra RNG draw as well as the extra text, so the cheap stream is untouched.
+    pub prim_fn: bool,
     /// `$fn` for MINKOWSKI operands, which deliberately does NOT scale with the dial (AO.3).
     ///
     /// Minkowski cost is MULTIPLICATIVE in the operands' vertex counts, so letting these follow `max_fn`
@@ -69,6 +84,7 @@ impl Profile {
         max_fn: 12,
         max_geo_depth: 3,
         hull_operands: 2,
+        prim_fn: false,
         minkowski_fn: 6,
     };
 
@@ -98,6 +114,8 @@ impl Profile {
             // into an outlier that eats the nightly budget on its own.
             max_geo_depth: (Self::CHEAP.max_geo_depth + d / 2).min(6),
             hull_operands: Self::CHEAP.hull_operands + i64::from(d),
+            // The dial reaches the MESH through this, not through max_fn alone — see the field docs.
+            prim_fn: true,
             // PINNED at every dial — see the field docs. Multiplicative cost does not get a dial.
             minkowski_fn: Self::CHEAP.minkowski_fn,
         }
@@ -556,13 +574,28 @@ impl Gen {
     fn primitive3(&mut self) -> String {
         match self.below(3) {
             0 => format!("cube({});", self.vec3_pos_small()),
-            1 => format!("sphere(r = {});", self.int_between(1, 20)),
-            _ => format!(
-                "cylinder(h = {}, r = {});",
-                self.int_between(1, 20),
-                self.int_between(1, 10)
-            ),
+            1 => {
+                let r = self.int_between(1, 20);
+                format!("sphere(r = {r}{});", self.prim_fn_arg())
+            }
+            _ => {
+                let h = self.int_between(1, 20);
+                let r = self.int_between(1, 10);
+                format!("cylinder(h = {h}, r = {r}{});", self.prim_fn_arg())
+            }
         }
+    }
+
+    /// `, $fn = N` for a curved primitive, or nothing when the profile leaves it to the program.
+    ///
+    /// Drawn from the TOP HALF of `max_fn` so the dial is a floor on facets. Emits NOTHING — and draws
+    /// NOTHING — under [`Profile::CHEAP`], which keeps that corpus's RNG stream bit-identical.
+    fn prim_fn_arg(&mut self) -> String {
+        if !self.profile.prim_fn {
+            return String::new();
+        }
+        let cap = self.profile.max_fn.max(4);
+        format!(", $fn = {}", self.int_between(cap / 2, cap))
     }
 
     /// A 2D leaf primitive — square / circle / polygon / text, all tiny.
@@ -573,11 +606,19 @@ impl Gen {
                 self.int_between(1, 12),
                 self.int_between(1, 12)
             ),
-            1 => format!(
-                "circle(r = {}, $fn = {});",
-                self.int_between(1, 10),
-                self.int_between(3, 10)
-            ),
+            1 => {
+                let r = self.int_between(1, 10);
+                // A circle is the profile an extrude sweeps, so its facet count multiplies into the
+                // solid's triangle count. Hardcoding it at 3..10 capped every extrusion in the corpus
+                // no matter what the dial said.
+                let fn_ = if self.profile.prim_fn {
+                    let cap = self.profile.max_fn.max(4);
+                    self.int_between(cap / 2, cap)
+                } else {
+                    self.int_between(3, 10)
+                };
+                format!("circle(r = {r}, $fn = {fn_});")
+            }
             2 => {
                 let w = self.int_between(2, 10);
                 let h = self.int_between(2, 10);

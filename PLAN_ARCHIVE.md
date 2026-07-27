@@ -1143,3 +1143,16 @@ channel as new divergence.
 ## Phase AQ - Multi-file diagnostic conformance (the AN.15.3 tail, unblocked by reading upstream)
 - [x] AQ.1 - Implement the multi-file dup-assignment warning — RULE NOW KNOWN, derived from upstream src/core/parser.y `handle_assignment` (checkout at /Users/chotchki/workspace/openscad, 1f65580cb, matches the 2026.06.12 binary). Four-branch rule, in order: (1) `fileEnded` → silent; (2) prev AND curr both in the MAIN file → warn with NO path; (3) `fs_uncomplete(curr) == fs_uncomplete(prev)` i.e. same file → warn WITH path, but ONLY when the two firstLines DIFFER (the equal-line case is upstream's explicit guard for a file included multiple times — this is why double-include warns zero times); (4) prev in MAIN and curr NOT → warn WITH path, naming MAIN's uncompleted path (this is why a root-then-include collision names the ROOT). There is deliberately NO else, so prev-not-in-main + curr-in-main is SILENT — which is why a root's own duplicate goes quiet once an include precedes it. Paths are `fs_uncomplete(p, mainFilePath.parent_path())`, i.e. relative to the MAIN FILE'S PARENT DIR (matches the empirical cwd-invariance). Needs loader plumbing that does not exist: `Node` carries neither the file's source text (for its line table) nor its path — add both, then walk per-file. Corpus impact is still NIL (real BOSL2 emits zero of these), so this is conformance completeness, not a live fix
 
+---
+
+## 2026-07-27
+
+## Phase SW - Native preview without the shadow: desktop renders from-sources like web
+added 2026-07-27.
+- [x] SW.1 - lang hybrid loader: `drive` takes an optional in-memory sources overlay consulted BEFORE the fs for use/include (project files), with library_paths fs fallback intact (BOSL2/scad-lib) — the chain drive/drive_from_map lack today. Tests: overlay-hit, fs-fallback, overlay-shadows-fs, missing-lib warn parity with both existing drivers
+- [x] SW.2 - geomsvc Source::Pack native variant {files, entry, asset_dir, root}: entry evals against the pack via the hybrid loader, imports via read_import(REAL asset_dir), libs from root; error-span header-offset mapping (W.3.37) preserved
+- [x] SW.3 - gui: loose + .scadproj render via the pack built from ProjectDoc (+ flushed live buffer); DELETE the shadow re-root, the write_under edit-sync, materialize-on-switch. PASTE keeps the scratch-file path render (no base_dir to root a pack at). collect_assets is RETARGETED, not deleted: it now feeds packaging (loose_sibling_assets -> .scadproj/publish), which the render no longer needs
+- [x] SW.4 - save/publish/script audit: loose_save_dir + home semantics unchanged (save still writes the REAL dir), publish_native shadow references retargeted, --script harness, paste flow keeps packed_lib_root (W.3.33)
+- [x] SW.5 - e2e verify: frame_upper.scad renders WITH FamilyLogo.svg via offscreen --script AND windowed --shot (gui-real-window-verify); full print flow on wall_screen (slice → plates → 3mf); wasm pack path unaffected
+- [x] SW.6 - docs + memory updated (shadow design note superseded), phase summary swept to PLAN_ARCHIVE.md
+

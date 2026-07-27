@@ -472,8 +472,24 @@ pub(crate) fn open_loose(
     if scads.is_empty() {
         anyhow::bail!("no .scad under {}", dir.display());
     }
+    // Sibling ASSETS ride along too — the shadow is the only place the entry's relative
+    // import("logo.svg") can resolve, so a .scad-only mirror ENOENTs every GUI import that the
+    // CLI (reading the real folder) serves fine (backlog #6, frame_upper's FamilyLogo.svg).
+    let mut asset_paths = Vec::new();
+    collect_assets(&dir, &mut asset_paths);
+    let rel = |p: &std::path::Path| -> String {
+        p.strip_prefix(&dir)
+            .unwrap_or(p)
+            .to_string_lossy()
+            .replace('\\', "/")
+    };
+    let assets: Vec<(String, Vec<u8>)> = asset_paths
+        .iter()
+        .filter_map(|p| Some((rel(p), std::fs::read(p).ok()?)))
+        .collect();
     // from_disk loads the content + homes at the real entry path; we override base_dir to the shadow.
     let mut doc = crate::project::ProjectDoc::from_disk(dir, &scads, picked);
+    doc.assets.extend(assets);
     let stem = picked
         .file_stem()
         .map(|s| s.to_string_lossy().into_owned())
@@ -998,6 +1014,36 @@ pub(crate) fn collect_scads(dir: &Path, out: &mut Vec<PathBuf>) {
             .is_some_and(|x| x.eq_ignore_ascii_case("scad"))
             && !name.starts_with('.')
         // hidden files aren't source — this also hides the editor's `.fab-preview-*.scad` (U.3.2)
+        {
+            out.push(p);
+        }
+    }
+}
+
+/// The `import()`/`surface()` formats the render reads (the demux in `fab::import::read_import`) —
+/// what [`collect_assets`] carries into a loose open so relative imports resolve in the shadow.
+const ASSET_EXTS: &[&str] = &["svg", "dxf", "stl", "3mf", "off", "dat", "png"];
+
+/// [`collect_scads`]'s asset twin: every sibling file a model could `import()`/`surface()`, same
+/// skip rules (hidden files/dirs and generated-output dirs are never source).
+pub(crate) fn collect_assets(dir: &Path, out: &mut Vec<PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for e in entries.flatten() {
+        let p = e.path();
+        let name = e.file_name();
+        let name = name.to_string_lossy();
+        if p.is_dir() {
+            if name.starts_with('.') || matches!(name.as_ref(), "out" | "renders" | "target") {
+                continue;
+            }
+            collect_assets(&p, out);
+        } else if p
+            .extension()
+            .and_then(|x| x.to_str())
+            .is_some_and(|x| ASSET_EXTS.iter().any(|a| x.eq_ignore_ascii_case(a)))
+            && !name.starts_with('.')
         {
             out.push(p);
         }
@@ -2101,4 +2147,53 @@ pub(crate) fn poll_auto_plan(
         conns.list.len()
     );
     info!("{}", status.0);
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "test harness: unwrap/expect ARE the assertions"
+)]
+mod tests {
+    /// backlog #6: a loose open's shadow render-root must carry the folder's import assets, or the
+    /// entry's relative `import("logo.svg")` resolves against the shadow and ENOENTs (the CLI,
+    /// reading the real folder, worked — the GUI didn't). Generated-output dirs and hidden files
+    /// stay out, exactly as `collect_scads` rules them out for source.
+    #[test]
+    fn a_loose_open_carries_sibling_assets_into_the_shadow() {
+        let real = std::env::temp_dir().join(format!("fab_loose_assets_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&real);
+        std::fs::create_dir_all(real.join("things")).unwrap();
+        std::fs::create_dir_all(real.join("out")).unwrap();
+        std::fs::write(real.join("model.scad"), "import(\"logo.svg\");\n").unwrap();
+        std::fs::write(real.join("logo.svg"), "<svg/>").unwrap();
+        std::fs::write(real.join("things/part.stl"), b"solid t\nendsolid t\n").unwrap();
+        std::fs::write(real.join("out/render.stl"), b"solid o\nendsolid o\n").unwrap();
+        std::fs::write(real.join(".hidden.svg"), "<svg/>").unwrap();
+
+        let tmp = real.join("tmp");
+        let doc = super::open_loose(&real.join("model.scad"), &tmp).expect("opens");
+
+        let keys: Vec<&str> = doc.assets.keys().map(String::as_str).collect();
+        assert_eq!(
+            keys,
+            ["logo.svg", "things/part.stl"],
+            "siblings ride, out/ + hidden don't"
+        );
+        let shadow = doc.base_dir.expect("loose opens re-root to the shadow");
+        assert!(
+            shadow.join("logo.svg").is_file(),
+            "the shadow serves the entry's relative import"
+        );
+        assert!(
+            shadow.join("things/part.stl").is_file(),
+            "subdir assets keep their relative path"
+        );
+        assert!(
+            !shadow.join("out").exists(),
+            "generated output never enters the render-root"
+        );
+        let _ = std::fs::remove_dir_all(&real);
+    }
 }

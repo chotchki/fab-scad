@@ -564,7 +564,7 @@ pub(super) static REGISTRY: &[Entry] = &[
         consts_v: &[],
         deps: &[],
         builtins: &[],
-        func: shape::is_nan,
+        func: generated::is_nan,
     },
     Entry {
         name: "is_finite",
@@ -573,7 +573,7 @@ pub(super) static REGISTRY: &[Entry] = &[
         consts_v: &[],
         deps: &["is_nan"],
         builtins: &["is_num"],
-        func: shape::is_finite,
+        func: generated::is_finite,
     },
     // BOSL2 `last` (9.6% of user-fn calls) + `default` (2.5%) — the next two down the profile. Both call only
     // builtins (`len`, `is_undef`), so the plain interpreter is their oracle. Verbatim from lists.scad /

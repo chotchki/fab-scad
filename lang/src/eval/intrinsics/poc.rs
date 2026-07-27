@@ -1,7 +1,7 @@
 //! What remains of the O.1/O.8 hand-written proof-of-concept intrinsics. The four natives that
 //! lived here (`poc_sq`, `poc_near0`, `poc_outer`, `poc_isup`) were the FIRST hand code the AR.6
 //! transpiler deleted: `generated.rs` now carries mechanically-derived equivalents, and the swap
-//! FIXED a latent fast_eq violation — the hand `poc_sq` answered `Undef` for an equal-length
+//! FIXED a latent `fast_eq` violation — the hand `poc_sq` answered `Undef` for an equal-length
 //! numeric list where the interpreted reference (`x * x`) takes the DOT PRODUCT; the generated
 //! native routes through `ops::apply_binary` and cannot make that class of mistake.
 

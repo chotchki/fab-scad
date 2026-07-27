@@ -5,9 +5,17 @@
 // native is bit-identical to interpreting its reference BY CONSTRUCTION — the win is the
 // deleted interpretation overhead, not different math.
 
+#![allow(
+    clippy::unreadable_literal,
+    clippy::cloned_ref_to_slice_refs,
+    clippy::used_underscore_items,
+    reason = "generated code: bit-exact from_bits literals, mechanical clones, and \
+              upstream's underscore-prefixed names are the emitter's idiom"
+)]
+
 use crate::eval::value::Value;
 use crate::eval::{builtins, ops};
-use crate::parser::BinOp;
+use crate::parser::{BinOp, UnOp};
 
 /// Generated native for `_fab_poc_sq` — semantics route through the interpreter's own value
 /// algebra (`ops::`/`builtins::`), bit-identical to the interpreted reference by construction.
@@ -38,6 +46,22 @@ pub(super) fn _fab_poc_outer(args: &[Value]) -> crate::Result<Value> {
 pub(super) fn _fab_poc_isup(args: &[Value]) -> crate::Result<Value> {
     let p_v = args.first().cloned().unwrap_or(Value::Undef);
     let out = ops::apply_binary(BinOp::Eq, p_v.clone(), Value::num_list(vec![f64::from_bits(0x0_u64), f64::from_bits(0x0_u64), f64::from_bits(0x3ff0000000000000_u64)]));
+    Ok(out)
+}
+
+/// Generated native for `is_nan` — semantics route through the interpreter's own value
+/// algebra (`ops::`/`builtins::`), bit-identical to the interpreted reference by construction.
+pub(super) fn is_nan(args: &[Value]) -> crate::Result<Value> {
+    let p_x = args.first().cloned().unwrap_or(Value::Undef);
+    let out = ops::apply_binary(BinOp::Ne, p_x.clone(), p_x.clone());
+    Ok(out)
+}
+
+/// Generated native for `is_finite` — semantics route through the interpreter's own value
+/// algebra (`ops::`/`builtins::`), bit-identical to the interpreted reference by construction.
+pub(super) fn is_finite(args: &[Value]) -> crate::Result<Value> {
+    let p_x = args.first().cloned().unwrap_or(Value::Undef);
+    let out = Value::Bool(builtins::apply("is_num", &[p_x.clone()]).is_truthy() && ops::apply_unary(UnOp::Not, is_nan(&[ops::apply_binary(BinOp::Mul, Value::Num(f64::from_bits(0x0_u64)), p_x.clone())])?).is_truthy());
     Ok(out)
 }
 

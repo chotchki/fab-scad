@@ -18,31 +18,6 @@ pub(super) fn is_str(args: &[Value]) -> crate::Result<Value> {
     Ok(Value::Bool(matches!(args.first(), Some(Value::Str(_)))))
 }
 
-/// BOSL2 `is_nan(x) = (x!=x)` — a value equals itself EXCEPT `NaN`, so this is true iff `x` is `NaN`. The hot
-/// scalar path is native (`f64::is_nan`); any other type routes through the interpreter's own `!=` so the
-/// intrinsic can't diverge from `x!=x` on an exotic input (e.g. a `NaN` inside a list, where element-wise `!=`
-/// makes `[nan]!=[nan]` TRUE — a case the native scalar check would miss, but the op reproduces exactly).
-pub(super) fn is_nan(args: &[Value]) -> crate::Result<Value> {
-    Ok(match args.first() {
-        Some(Value::Num(n)) => Value::Bool(n.is_nan()),
-        other => {
-            let x = other.cloned().unwrap_or(Value::Undef);
-            ops::apply_binary(BinOp::Ne, x.clone(), x)
-        }
-    })
-}
-
-/// BOSL2 `is_finite(x) = is_num(x) && !is_nan(0*x)` — true iff `x` is a finite number. `0*x` is `NaN` when `x`
-/// is `±inf`/`NaN` and `0` when finite, so the whole expression collapses to `f64::is_finite` on a number and
-/// `false` on any non-number (the `is_num` short-circuit). Computing it directly erases the reference's
-/// `is_num`/`is_nan`/`*` sub-evaluation — the point of the intrinsic. Proven bit-identical by the harness,
-/// which interprets the reference WITH `is_nan` defined (the dependency-aware oracle).
-pub(super) fn is_finite(args: &[Value]) -> crate::Result<Value> {
-    Ok(Value::Bool(
-        matches!(args.first(), Some(Value::Num(n)) if n.is_finite()),
-    ))
-}
-
 /// BOSL2 `_is_liststr(s) = is_list(s) || is_str(s)` — true iff `s` is a list (either representation) or a
 /// string. A pure leaf: `is_list` is true for `List`/`NumList`, `is_str` for `Str`.
 pub(super) fn is_liststr(args: &[Value]) -> crate::Result<Value> {

@@ -19,6 +19,7 @@
 )]
 
 use std::collections::BTreeSet;
+use std::fmt::Write;
 
 use super::value::Value;
 use crate::parser::{Arg, Expr, ExprKind, Parameter, StmtKind, parse};
@@ -146,6 +147,10 @@ fn emit_num(n: f64) -> String {
 /// clippy-clean (an unconditional import block would trip `unused_imports` the first time a
 /// generated set doesn't use one).
 #[derive(Default)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "four independent import FLAGS, not a state machine — a bitset would obscure them"
+)]
 struct Uses {
     ops: bool,
     builtins: bool,
@@ -184,11 +189,12 @@ pub(crate) fn generate_native(
         dep_fns,
     };
     let mut out = String::new();
-    out.push_str(&format!(
+    let _ = write!(
+        out,
         "/// Generated native for `{name}` — semantics route through the interpreter's own value\n\
          /// algebra (`ops::`/`builtins::`), bit-identical to the interpreted reference by construction.\n\
          pub(super) fn {name}(args: &[Value]) -> crate::Result<Value> {{\n"
-    ));
+    );
     for (i, p) in params.iter().enumerate() {
         let getter = if i == 0 {
             "args.first()".to_string()
@@ -206,12 +212,12 @@ pub(crate) fn generate_native(
         } else {
             format!("{getter}.cloned().unwrap_or_else(|| {default})")
         };
-        out.push_str(&format!("    let p_{} = {bind};\n", p.name));
+        let _ = writeln!(out, "    let p_{} = {bind};", p.name);
     }
     let body_expr = emit_expr(body, &cx, &mut uses).map_err(|e| format!("{name}: {e}"))?;
     // The `let out` shape keeps clippy quiet when the whole body is a fallible sibling call
     // (`Ok(f(..)?)` would be needless_question_mark).
-    out.push_str(&format!("    let out = {body_expr};\n    Ok(out)\n}}\n"));
+    let _ = writeln!(out, "    let out = {body_expr};\n    Ok(out)\n}}");
     Ok(out)
 }
 
@@ -352,6 +358,13 @@ pub(crate) fn generate_module(entry_names: &[&str]) -> Result<String, String> {
          // Every operation routes through the interpreter's own value algebra, so a generated\n\
          // native is bit-identical to interpreting its reference BY CONSTRUCTION — the win is the\n\
          // deleted interpretation overhead, not different math.\n\n\
+         #![allow(\n\
+         \x20   clippy::unreadable_literal,\n\
+         \x20   clippy::cloned_ref_to_slice_refs,\n\
+         \x20   clippy::used_underscore_items,\n\
+         \x20   reason = \"generated code: bit-exact from_bits literals, mechanical clones, and \\\n\
+         \x20             upstream's underscore-prefixed names are the emitter's idiom\"\n\
+         )]\n\n\
          use crate::eval::value::Value;\n",
     );
     match (uses.ops, uses.builtins) {
@@ -378,6 +391,11 @@ pub(crate) const GENERATED_ENTRIES: &[&str] = &[
     "_fab_poc_near0",
     "_fab_poc_outer",
     "_fab_poc_isup",
+    // AR.7 — the first REAL BOSL2 intrinsics through the pipeline: the two hottest functions on
+    // the model profile (56% of user-fn calls between them). `is_nan` first: `is_finite`'s
+    // reference calls it, and a sibling call may only reach EARLIER entries.
+    "is_nan",
+    "is_finite",
 ];
 
 /// Record a CALL by name: builtin or user dep. Deliberately IGNORES the lexical scope — a name

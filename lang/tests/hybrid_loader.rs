@@ -38,16 +38,11 @@ fn overlay(entries: &[(&str, &str)]) -> BTreeMap<PathBuf, String> {
 /// Run the hybrid entry with no JIT and a reader that refuses (no test here imports meshes),
 /// returning the run's messages. Panics on failure — every case here is expected to render.
 fn run(source: &str, base_dir: &Path, ovl: &BTreeMap<PathBuf, String>) -> Vec<Message> {
-    let (_, messages) = resolve_geometry_hybrid_full(
-        source,
-        base_dir,
-        ovl,
-        &[],
-        None,
-        Config::default(),
-        |raw| panic!("unexpected import of '{raw}'"),
-    )
-    .expect("hybrid run renders");
+    let (_, messages) =
+        resolve_geometry_hybrid_full(source, base_dir, ovl, &[], None, Config::default(), |raw| {
+            panic!("unexpected import of '{raw}'")
+        })
+        .expect("hybrid run renders");
     messages
 }
 
@@ -64,7 +59,10 @@ fn the_overlay_serves_a_live_buffer() {
     let dir = fixture_dir("overlay_hit");
     let ovl = overlay(&[("lib.scad", "function s() = 3;\n")]);
     let messages = run("use <lib.scad>\necho(s());\n", &dir, &ovl);
-    assert!(echoed(&messages, "3"), "overlay lib must bind: {messages:?}");
+    assert!(
+        echoed(&messages, "3"),
+        "overlay lib must bind: {messages:?}"
+    );
 }
 
 /// A disk-only library binds through the fs fallback — both `base_dir`-relative and via a
@@ -153,7 +151,10 @@ fn a_dot_prefixed_overlay_key_still_matches() {
     let dir = fixture_dir("dot_key");
     let ovl = overlay(&[("./lib.scad", "function s() = 3;\n")]);
     let messages = run("use <lib.scad>\necho(s());\n", &dir, &ovl);
-    assert!(echoed(&messages, "3"), "normalized key must bind: {messages:?}");
+    assert!(
+        echoed(&messages, "3"),
+        "normalized key must bind: {messages:?}"
+    );
 }
 
 /// A case-mismatched ref on a case-insensitive fs (APFS default) must still land on the LIVE

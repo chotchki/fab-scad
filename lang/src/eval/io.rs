@@ -413,8 +413,8 @@ where
             // OVERLAY first — but only from a VIRTUAL dir. A disk-resolved library's `from_dir` is
             // absolute, and its internal includes must never see a like-named project buffer.
             if from_dir.is_relative()
-                && let Some(id) = normalize_lexical(&from_dir.join(&raw))
-                    .filter(|p| overlay.contains_key(p))
+                && let Some(id) =
+                    normalize_lexical(&from_dir.join(&raw)).filter(|p| overlay.contains_key(p))
             {
                 let text = overlay[&id];
                 insert_parsed(scad, key, id, text, &raw, warnings);

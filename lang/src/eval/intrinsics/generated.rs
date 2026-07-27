@@ -65,3 +65,45 @@ pub(super) fn is_finite(args: &[Value]) -> crate::Result<Value> {
     Ok(out)
 }
 
+/// Generated native for `_fab_poc_band2` — semantics route through the interpreter's own value
+/// algebra (`ops::`/`builtins::`), bit-identical to the interpreted reference by construction.
+pub(super) fn _fab_poc_band2(args: &[Value]) -> crate::Result<Value> {
+    let p_v = args.first().cloned().unwrap_or(Value::Undef);
+    let p_i = args.get(1).cloned().unwrap_or_else(|| Value::Num(f64::from_bits(0x0_u64)));
+    let out = { let l0_n = ops::index(p_v.clone(), &p_i.clone()); { if !(builtins::apply("is_num", &[l0_n.clone()])).is_truthy() { return Err(super::bosl_assert("generated")); } ops::apply_binary(BinOp::Mul, l0_n.clone(), Value::Num(f64::from_bits(0x4000000000000000_u64))) } };
+    Ok(out)
+}
+
+/// Generated native for `is_def` — semantics route through the interpreter's own value
+/// algebra (`ops::`/`builtins::`), bit-identical to the interpreted reference by construction.
+pub(super) fn is_def(args: &[Value]) -> crate::Result<Value> {
+    let p_x = args.first().cloned().unwrap_or(Value::Undef);
+    let out = ops::apply_unary(UnOp::Not, builtins::apply("is_undef", &[p_x.clone()]));
+    Ok(out)
+}
+
+/// Generated native for `is_str` — semantics route through the interpreter's own value
+/// algebra (`ops::`/`builtins::`), bit-identical to the interpreted reference by construction.
+pub(super) fn is_str(args: &[Value]) -> crate::Result<Value> {
+    let p_x = args.first().cloned().unwrap_or(Value::Undef);
+    let out = builtins::apply("is_string", &[p_x.clone()]);
+    Ok(out)
+}
+
+/// Generated native for `default` — semantics route through the interpreter's own value
+/// algebra (`ops::`/`builtins::`), bit-identical to the interpreted reference by construction.
+pub(super) fn default(args: &[Value]) -> crate::Result<Value> {
+    let p_v = args.first().cloned().unwrap_or(Value::Undef);
+    let p_dflt = args.get(1).cloned().unwrap_or(Value::Undef);
+    let out = if builtins::apply("is_undef", &[p_v.clone()]).is_truthy() { p_dflt.clone() } else { p_v.clone() };
+    Ok(out)
+}
+
+/// Generated native for `last` — semantics route through the interpreter's own value
+/// algebra (`ops::`/`builtins::`), bit-identical to the interpreted reference by construction.
+pub(super) fn last(args: &[Value]) -> crate::Result<Value> {
+    let p_list = args.first().cloned().unwrap_or(Value::Undef);
+    let out = ops::index(p_list.clone(), &ops::apply_binary(BinOp::Sub, builtins::apply("len", &[p_list.clone()]), Value::Num(f64::from_bits(0x3ff0000000000000_u64))));
+    Ok(out)
+}
+

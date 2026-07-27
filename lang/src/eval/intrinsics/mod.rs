@@ -544,7 +544,7 @@ pub(super) static REGISTRY: &[Entry] = &[
         consts_v: &[],
         deps: &[],
         builtins: &["is_undef"],
-        func: shape::is_def,
+        func: generated::is_def,
     },
     Entry {
         name: "is_str",
@@ -553,7 +553,7 @@ pub(super) static REGISTRY: &[Entry] = &[
         consts_v: &[],
         deps: &[],
         builtins: &["is_string"],
-        func: shape::is_str,
+        func: generated::is_str,
     },
     // BOSL2 `is_nan`/`is_finite` — the #1 and #2 hottest user functions on the model profile (56% of calls
     // combined), the workhorses of BOSL2's input validation. Verbatim from libs/BOSL2/utility.scad.
@@ -585,7 +585,7 @@ pub(super) static REGISTRY: &[Entry] = &[
         consts_v: &[],
         deps: &[],
         builtins: &["len"],
-        func: lists::last,
+        func: generated::last,
     },
     Entry {
         name: "default",
@@ -594,7 +594,7 @@ pub(super) static REGISTRY: &[Entry] = &[
         consts_v: &[],
         deps: &[],
         builtins: &["is_undef"],
-        func: lists::default,
+        func: generated::default,
     },
     // `_is_liststr` (2.2%) — a pure leaf (calls only the `is_str` intrinsic + the `is_list` builtin), from
     // strings.scad. `point3d` (1.8%) from coords.scad — the first intrinsic with an inline `assert` (raises on
@@ -688,6 +688,18 @@ pub(super) static REGISTRY: &[Entry] = &[
         deps: &[],
         builtins: &[],
         func: generated::_fab_poc_isup,
+    },
+    // The AR.8 band-2 mechanism POC: `let` (with a param SHADOW), inline `assert` (the fallible
+    // ABI's raise path), INDEXING, and a defaulted parameter — every construct the band adds,
+    // in one synthetic entry, so none of the new emitter paths ships unexercised.
+    Entry {
+        name: "_fab_poc_band2",
+        reference: "function _fab_poc_band2(v, i=0) = let(n = v[i]) assert(is_num(n)) n * 2;",
+        consts: &[],
+        consts_v: &[],
+        deps: &[],
+        builtins: &["is_num"],
+        func: generated::_fab_poc_band2,
     },
     // ── O.5.2, the SHAPE band (utility.scad / lists.scad) ────────────────────────────────────────────────
     // The `is_consistent`/`_list_pattern`/`same_shape` bundle is ~4.7s of self time across the O.4 four

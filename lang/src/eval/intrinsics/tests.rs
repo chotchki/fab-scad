@@ -220,6 +220,32 @@ fn fast_equals_slow_bit_for_bit() {
     );
 }
 
+/// AR.8 — the band-2 constructs (`let` with a shadow-capable scope, inline `assert`'s raise path,
+/// indexing, a defaulted parameter), all in one synthetic entry, proven against the interpreter
+/// over shapes that exercise each: a hit, an out-of-range index (undef → assert RAISES both
+/// sides), a missing second arg (the default binds), a non-list base.
+#[test]
+fn generated_band2_matches_the_interpreter() {
+    let reference = reference_of("_fab_poc_band2").expect("registered");
+    let (params, body) = parse_fn(reference);
+    let func = resolve("_fab_poc_band2", &params, &body)
+        .expect("its own reference must register")
+        .func;
+    let cases: &[&[Value]] = &[
+        &[Value::num_list(vec![5.0, 7.0]), Value::Num(1.0)], // hit: 14
+        &[Value::num_list(vec![5.0])],                       // default i=0: 10
+        &[Value::num_list(vec![5.0]), Value::Num(9.0)],      // out of range → assert raises
+        &[Value::string("nope")],                            // non-list base → assert raises
+        &[],                                                 // no args at all
+    ];
+    for input in cases {
+        assert!(
+            same_result(&func(input), &interpret(reference, input)),
+            "band2 diverged on {input:?}"
+        );
+    }
+}
+
 /// AR.6 — the LIST case the deleted hand `poc_sq` got WRONG: `x * x` with an equal-length numeric
 /// list is the interpreter's DOT PRODUCT, and the hand native answered `Undef`. It sat unnoticed
 /// because no battery input was a list. The generated native routes through `ops::apply_binary`,

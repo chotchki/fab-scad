@@ -442,7 +442,7 @@ pub(super) fn affine3d_translate(args: &[Value]) -> crate::Result<Value> {
         return Err(bosl_assert("affine3d_translate: v must be a list"));
     }
     let slot = |i: f64| -> crate::Result<Value> {
-        super::lists::default(&[ops::index(v.clone(), &Value::Num(i)), Value::Num(0.0)])
+        super::generated::default(&[ops::index(v.clone(), &Value::Num(i)), Value::Num(0.0)])
     };
     let (vx, vy, vz) = (slot(0.0)?, slot(1.0)?, slot(2.0)?);
     let z = || Value::Num(0.0);

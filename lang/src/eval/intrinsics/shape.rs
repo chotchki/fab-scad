@@ -4,20 +4,6 @@ use crate::eval::value::Value;
 use crate::eval::{build_vector, builtins, iter_values_raw, ops};
 use crate::parser::BinOp;
 
-/// BOSL2 `is_def(x) = !is_undef(x)` — true iff `x` is anything but `undef`. Only the first positional arg
-/// binds to `x` (extras are ignored, per OpenSCAD); zero args → `x` is `undef` → `false`.
-pub(super) fn is_def(args: &[Value]) -> crate::Result<Value> {
-    Ok(Value::Bool(!matches!(
-        args.first(),
-        None | Some(Value::Undef)
-    )))
-}
-
-/// BOSL2 `is_str(x) = is_string(x)` — true iff `x` is a string.
-pub(super) fn is_str(args: &[Value]) -> crate::Result<Value> {
-    Ok(Value::Bool(matches!(args.first(), Some(Value::Str(_)))))
-}
-
 /// BOSL2 `_is_liststr(s) = is_list(s) || is_str(s)` — true iff `s` is a list (either representation) or a
 /// string. A pure leaf: `is_list` is true for `List`/`NumList`, `is_str` for `Str`.
 pub(super) fn is_liststr(args: &[Value]) -> crate::Result<Value> {

@@ -179,14 +179,12 @@ pub(crate) fn generate_native(
         return Err("reference holds no function definition".into());
     };
 
-    let mut uses = Uses::default();
-    let cx = EmitCx {
-        params: &params
-            .iter()
-            .map(|p| p.name.to_string())
-            .collect::<Vec<_>>(),
+    let mut em = Emitter {
         baked,
         dep_fns,
+        locals: Vec::new(),
+        fresh: 0,
+        uses: Uses::default(),
     };
     let mut out = String::new();
     let _ = write!(
@@ -201,9 +199,12 @@ pub(crate) fn generate_native(
         } else {
             format!("args.get({i})")
         };
+        // Defaults see the parameters bound BEFORE them (the walk order matches the interpreter's
+        // binding environment) — the scope grows as each parameter lands.
         let default = match &p.default {
             None => "Value::Undef".to_string(),
-            Some(d) => emit_expr(d, &cx, &mut uses)
+            Some(d) => em
+                .expr(d)
                 .map_err(|e| format!("{name}: default of `{}`: {e}", p.name))?,
         };
         // A cheap default binds eagerly (`unwrap_or`); a constructing one stays lazy.
@@ -213,103 +214,180 @@ pub(crate) fn generate_native(
             format!("{getter}.cloned().unwrap_or_else(|| {default})")
         };
         let _ = writeln!(out, "    let p_{} = {bind};", p.name);
+        em.locals
+            .push((p.name.to_string(), format!("p_{}", p.name)));
     }
-    let body_expr = emit_expr(body, &cx, &mut uses).map_err(|e| format!("{name}: {e}"))?;
+    let body_expr = em.expr(body).map_err(|e| format!("{name}: {e}"))?;
     // The `let out` shape keeps clippy quiet when the whole body is a fallible sibling call
     // (`Ok(f(..)?)` would be needless_question_mark).
     let _ = writeln!(out, "    let out = {body_expr};\n    Ok(out)\n}}");
     Ok(out)
 }
 
-struct EmitCx<'a> {
-    params: &'a [String],
+/// Emission state: the baked constants and callable siblings, plus the LEXICAL SCOPE — scad name to
+/// Rust ident, innermost last, so `let` shadowing resolves exactly as the interpreter's scope does.
+struct Emitter<'a> {
     baked: &'a [(&'a str, Baked)],
     dep_fns: &'a [&'a str],
+    locals: Vec<(String, String)>,
+    fresh: usize,
+    uses: Uses,
 }
 
-fn emit_expr(e: &Expr, cx: &EmitCx<'_>, uses: &mut Uses) -> Result<String, String> {
-    use crate::parser::BinOp;
-    match &e.kind {
-        ExprKind::Num(n) => Ok(emit_num(*n)),
-        ExprKind::Bool(b) => Ok(format!("Value::Bool({b})")),
-        ExprKind::Undef => Ok("Value::Undef".to_string()),
-        ExprKind::Ident(name) => {
-            if cx.params.iter().any(|p| p == name) {
-                Ok(format!("p_{name}.clone()"))
-            } else if let Some((_, b)) = cx.baked.iter().find(|(n, _)| n == name) {
-                Ok(b.emit())
-            } else {
-                Err(format!("free read `{name}` has no baked value"))
+impl Emitter<'_> {
+    /// A collision-proof Rust ident for a `let`-bound scad name (shadowing gets a new number).
+    fn fresh_ident(&mut self, name: &str) -> String {
+        let id = self.fresh;
+        self.fresh += 1;
+        format!("l{id}_{name}")
+    }
+
+    fn expr(&mut self, e: &Expr) -> Result<String, String> {
+        use crate::parser::BinOp;
+        match &e.kind {
+            ExprKind::Num(n) => Ok(emit_num(*n)),
+            ExprKind::Bool(b) => Ok(format!("Value::Bool({b})")),
+            ExprKind::Undef => Ok("Value::Undef".to_string()),
+            ExprKind::Ident(name) => {
+                if let Some((_, ident)) = self.locals.iter().rev().find(|(n, _)| n == name) {
+                    Ok(format!("{ident}.clone()"))
+                } else if let Some((_, b)) = self.baked.iter().find(|(n, _)| n == name) {
+                    Ok(b.emit())
+                } else {
+                    Err(format!("free read `{name}` has no baked value"))
+                }
             }
-        }
-        ExprKind::Unary { op, operand } => {
-            uses.ops = true;
-            uses.unop = true;
-            Ok(format!(
-                "ops::apply_unary(UnOp::{op:?}, {})",
-                emit_expr(operand, cx, uses)?
-            ))
-        }
-        // `&&`/`||` SHORT-CIRCUIT in the interpreter (the stack machine's ShortCircuit task);
-        // `apply_binary`'s And/Or arms are the both-evaluated case only. Rust's own `&&`/`||`
-        // mirror the laziness exactly.
-        ExprKind::Binary {
-            op: op @ (BinOp::And | BinOp::Or),
-            lhs,
-            rhs,
-        } => {
-            let sym = if matches!(op, BinOp::And) { "&&" } else { "||" };
-            Ok(format!(
-                "Value::Bool({}.is_truthy() {sym} {}.is_truthy())",
-                emit_expr(lhs, cx, uses)?,
-                emit_expr(rhs, cx, uses)?
-            ))
-        }
-        ExprKind::Binary { op, lhs, rhs } => {
-            uses.ops = true;
-            uses.binop = true;
-            Ok(format!(
-                "ops::apply_binary(BinOp::{op:?}, {}, {})",
-                emit_expr(lhs, cx, uses)?,
-                emit_expr(rhs, cx, uses)?
-            ))
-        }
-        ExprKind::Ternary { cond, then, els } => Ok(format!(
-            "if {}.is_truthy() {{ {} }} else {{ {} }}",
-            emit_expr(cond, cx, uses)?,
-            emit_expr(then, cx, uses)?,
-            emit_expr(els, cx, uses)?
-        )),
-        ExprKind::Call { callee, args } => {
-            let ExprKind::Ident(name) = &callee.kind else {
-                return Err("computed callee".into());
-            };
-            if args.iter().any(|a| a.name.is_some()) {
-                return Err(format!("named argument in call to `{name}`"));
-            }
-            let emitted: Vec<String> = args
-                .iter()
-                .map(|a| emit_expr(&a.value, cx, uses))
-                .collect::<Result<_, _>>()?;
-            if super::builtins::is_builtin(name) {
-                uses.builtins = true;
+            ExprKind::Unary { op, operand } => {
+                self.uses.ops = true;
+                self.uses.unop = true;
                 Ok(format!(
-                    "builtins::apply(\"{name}\", &[{}])",
-                    emitted.join(", ")
-                ))
-            } else if cx.dep_fns.contains(&name.as_str()) {
-                // a sibling generated native — direct call, fallible ABI threads through
-                Ok(format!("{name}(&[{}])?", emitted.join(", ")))
-            } else {
-                Err(format!(
-                    "call to `{name}` (not a builtin or generated sibling)"
+                    "ops::apply_unary(UnOp::{op:?}, {})",
+                    self.expr(operand)?
                 ))
             }
+            // `&&`/`||` SHORT-CIRCUIT in the interpreter (the stack machine's ShortCircuit task);
+            // `apply_binary`'s And/Or arms are the both-evaluated case only. Rust's own `&&`/`||`
+            // mirror the laziness exactly.
+            ExprKind::Binary {
+                op: op @ (BinOp::And | BinOp::Or),
+                lhs,
+                rhs,
+            } => {
+                let sym = if matches!(op, BinOp::And) { "&&" } else { "||" };
+                Ok(format!(
+                    "Value::Bool({}.is_truthy() {sym} {}.is_truthy())",
+                    self.expr(lhs)?,
+                    self.expr(rhs)?
+                ))
+            }
+            ExprKind::Binary { op, lhs, rhs } => {
+                self.uses.ops = true;
+                self.uses.binop = true;
+                Ok(format!(
+                    "ops::apply_binary(BinOp::{op:?}, {}, {})",
+                    self.expr(lhs)?,
+                    self.expr(rhs)?
+                ))
+            }
+            ExprKind::Ternary { cond, then, els } => Ok(format!(
+                "if {}.is_truthy() {{ {} }} else {{ {} }}",
+                self.expr(cond)?,
+                self.expr(then)?,
+                self.expr(els)?
+            )),
+            // `list[i]` — the interpreter's own index op carries the semantics (negative /
+            // out-of-range → undef, string indexing, both list reprs).
+            ExprKind::Index { base, index } => {
+                self.uses.ops = true;
+                Ok(format!(
+                    "ops::index({}, &{})",
+                    self.expr(base)?,
+                    self.expr(index)?
+                ))
+            }
+            ExprKind::Member { base, field } => {
+                self.uses.ops = true;
+                Ok(format!("ops::member({}, {field:?})", self.expr(base)?))
+            }
+            // Expression `let`: sequential bindings, each seeing the ones before it, gone after the
+            // body — a Rust block with shadow-proof idents is exactly that scope discipline.
+            // DUPLICATE names decline: upstream is first-wins-with-a-warning (AH.2.3) and the
+            // duplicate's RHS still evaluates — reproducing that faithfully buys nothing, since no
+            // registry reference contains one.
+            ExprKind::Let { bindings, body } => {
+                let mark = self.locals.len();
+                let mut block = String::from("{ ");
+                let mut seen: Vec<&str> = Vec::new();
+                for b in bindings {
+                    let Some(bn) = &b.name else {
+                        return Err("unnamed let binding".into());
+                    };
+                    if seen.contains(&&**bn) {
+                        self.locals.truncate(mark);
+                        return Err(format!("duplicate let binding `{bn}`"));
+                    }
+                    seen.push(bn);
+                    let val = self.expr(&b.value)?;
+                    let ident = self.fresh_ident(bn);
+                    let _ = write!(block, "let {ident} = {val}; ");
+                    self.locals.push((bn.to_string(), ident));
+                }
+                let body_s = self.expr(body);
+                self.locals.truncate(mark);
+                let _ = write!(block, "{} }}", body_s?);
+                Ok(block)
+            }
+            // Expression `assert`: the control-flow contract (Entry doc) — raise where the
+            // interpreter raises; the diagnostic string is a locator, not output, and the message
+            // args are NOT evaluated (matches the hand natives; upstream only evaluates them on
+            // failure, and no registry reference carries a side-effectful message).
+            ExprKind::Assert { args, body } => {
+                let Some(cond) = args.first() else {
+                    return Err("assert with no condition".into());
+                };
+                if cond.name.is_some() {
+                    return Err("named assert condition".into());
+                }
+                let c = self.expr(&cond.value)?;
+                let b = match body {
+                    Some(b) => self.expr(b)?,
+                    None => "Value::Undef".to_string(),
+                };
+                Ok(format!(
+                    "{{ if !({c}).is_truthy() {{ return Err(super::bosl_assert(\"generated\")); }} {b} }}"
+                ))
+            }
+            ExprKind::Call { callee, args } => {
+                let ExprKind::Ident(name) = &callee.kind else {
+                    return Err("computed callee".into());
+                };
+                if args.iter().any(|a| a.name.is_some()) {
+                    return Err(format!("named argument in call to `{name}`"));
+                }
+                let emitted: Vec<String> = args
+                    .iter()
+                    .map(|a| self.expr(&a.value))
+                    .collect::<Result<_, _>>()?;
+                if super::builtins::is_builtin(name) {
+                    self.uses.builtins = true;
+                    Ok(format!(
+                        "builtins::apply(\"{name}\", &[{}])",
+                        emitted.join(", ")
+                    ))
+                } else if self.dep_fns.contains(&name.as_str()) {
+                    // a sibling generated native — direct call, fallible ABI threads through
+                    Ok(format!("{name}(&[{}])?", emitted.join(", ")))
+                } else {
+                    Err(format!(
+                        "call to `{name}` (not a builtin or generated sibling)"
+                    ))
+                }
+            }
+            other => Err(format!("construct outside the v0 subset: {other:?}")
+                .chars()
+                .take(120)
+                .collect()),
         }
-        other => Err(format!("construct outside the v0 subset: {other:?}")
-            .chars()
-            .take(120)
-            .collect()),
     }
 }
 
@@ -396,6 +474,14 @@ pub(crate) const GENERATED_ENTRIES: &[&str] = &[
     // reference calls it, and a sibling call may only reach EARLIER entries.
     "is_nan",
     "is_finite",
+    // AR.8 band 2 — `let`/`assert`/indexing live. The poc entry exercises every new construct;
+    // the four real entries are the profile's next tier (last 9.6% of user-fn calls, default 2.5%,
+    // is_def/is_str the hot optional-arg guards). posmod/idx wait on approx (comprehensions).
+    "_fab_poc_band2",
+    "is_def",
+    "is_str",
+    "default",
+    "last",
 ];
 
 /// Record a CALL by name: builtin or user dep. Deliberately IGNORES the lexical scope — a name

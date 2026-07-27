@@ -4,36 +4,6 @@ use crate::eval::value::{self, Value};
 use crate::eval::{build_range, build_vector, builtins, iter_values_raw, ops};
 use crate::parser::BinOp;
 
-/// BOSL2 `last(list) = list[len(list)-1]` — the final element. `len` is `undef` for anything but a
-/// list/string (numbers, ranges, `undef`), and `undef-1` then indexes to `undef`, so a non-indexable arg is
-/// `undef` here too; an EMPTY list gives `len 0 → index -1 → undef` (out of range), matching the interpreter.
-/// The length uses the SAME `count = n as f64` the `len` builtin does, so `list[n-1]` routes through the real
-/// [`ops::index`] with a bit-identical index.
-pub(super) fn last(args: &[Value]) -> crate::Result<Value> {
-    let list = args.first().cloned().unwrap_or(Value::Undef);
-    let n = match &list {
-        Value::NumList(xs) => xs.len(),
-        Value::List(xs) => xs.len(),
-        Value::Str(s) => s.chars().count(),
-        _ => return Ok(Value::Undef), // len(x) is undef → undef-1 → index(_, undef) → undef
-    };
-    #[allow(
-        clippy::cast_precision_loss,
-        reason = "matches the `len` builtin's `count(n) = n as f64`; a list past 2^52 elements is unreachable"
-    )]
-    Ok(ops::index(list, &Value::Num(n as f64 - 1.0)))
-}
-
-/// BOSL2 `default(v, dflt=undef) = is_undef(v) ? dflt : v` — `v` unless it's `undef`, then the fallback. A
-/// 1-arg call leaves `dflt` at its `undef` default (so `default(undef)` is `undef`); the dispatch gate only
-/// routes all-positional calls here, so the slice is `[v]` or `[v, dflt]`.
-pub(super) fn default(args: &[Value]) -> crate::Result<Value> {
-    Ok(match args.first() {
-        None | Some(Value::Undef) => args.get(1).cloned().unwrap_or(Value::Undef),
-        Some(v) => v.clone(),
-    })
-}
-
 /// BOSL2 `select(list, start, end)` — one or more items with WRAPAROUND indexing (`(i%l+l)%l`), the hottest
 /// function in BOSL2's path/list layer. Bit-identical BY CONSTRUCTION: every operation routes through the
 /// interpreter's OWN primitives — the wrap math via [`ops::apply_binary`]'s `%`/`+`, indexing via

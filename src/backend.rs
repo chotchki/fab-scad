@@ -124,7 +124,9 @@ pub fn build_geo<B: GeometryBackend>(geo: &Geo, backend: &B) -> B::Solid {
 /// [`build_geo`] with the env gate REMOVED — the within-program CSG memo on, no persistent cache.
 ///
 /// The AO.4 perf lane's entry (`genperf`). A benchmark must not read `FAB_GEO_CACHE` to decide what it
-/// is measuring; this states it instead.
+/// is measuring; this states it instead. Gated with its one caller — that lane spawns the OpenSCAD
+/// binary, so it's native-only.
+#[cfg(feature = "native")]
 pub(crate) fn build_geo_cold<B: GeometryBackend>(geo: &Geo, backend: &B) -> B::Solid {
     build_geo_gated(geo, backend, true, None)
 }

@@ -133,19 +133,26 @@ pub(crate) fn setup_script(
 ) {
     spawn_environment(&mut commands, &mut meshes, &mut materials, &scene);
     if let Some(src) = scene.source.clone() {
-        // Stash the source's fab:config for poll_job to apply (per-part cuts + the printer) — mirrors
-        // setup_windowed so the offscreen harness is faithful to run_windowed (it silently dropped it).
-        pending_config.0 = read_into_editor(&mut editor, &src);
-        // Z.3.6: open as a loose project rooted at a SHADOW so an `edittext` script's preview writes the
-        // shadow, never the real model file. Native — the script harness is a native CLI (this compiles
-        // but never runs on wasm; the fallback keeps it building there).
+        // SW.3: open as a loose project at its REAL dir — an `edittext` script's preview rides the
+        // pack render (no disk writes at all) — then hydrate the editor from the DOC, so path identity
+        // and text come from one place, exactly as `setup_windowed` does. The stashed fab:config is what
+        // poll_job applies (per-part cuts + the printer); the harness dropped it silently before W.3.8.
+        // Native — the script harness is a native CLI (this compiles but never runs on wasm; the
+        // fallback keeps it building there).
         #[cfg(not(target_arch = "wasm32"))]
-        match crate::jobs::open_loose(&src, &scene.tmp) {
-            Ok(doc) => *project = doc,
-            Err(e) => eprintln!("script setup: {e}"),
+        match crate::jobs::open_loose(&src) {
+            Ok(doc) => {
+                *project = doc;
+                pending_config.0 = doc_into_editor(&mut editor, &project, project.entry);
+            }
+            Err(e) => {
+                eprintln!("script setup: {e}");
+                pending_config.0 = read_into_editor(&mut editor, &src);
+            }
         }
         #[cfg(target_arch = "wasm32")]
         {
+            pending_config.0 = read_into_editor(&mut editor, &src);
             let name = src
                 .file_name()
                 .map(|s| s.to_string_lossy().into_owned())
@@ -195,6 +202,9 @@ pub(crate) fn setup_script(
     ));
     commands.insert_resource(PrevCam(Some((-0.7, 0.5, radius, Vec3::ZERO))));
     commands.insert_resource(RenderTargetImage(target));
+    #[cfg(not(target_arch = "wasm32"))]
+    crate::jobs::kick_render_pack(&pool, &mut job, &mut status, &scene, &project, None, true);
+    #[cfg(target_arch = "wasm32")]
     kick_render(&pool, &mut job, &mut status, &scene, true);
 }
 
@@ -373,8 +383,8 @@ pub(crate) fn run_script(
         }
         Action::Open(path) => {
             if runner.timer == 1 {
-                // Z.3.6: open through the SHADOW path so a later `edittext` preview can't mutate a real
-                // file. For a dir, the first `.scad` is the entry.
+                // SW.3: a loose open keeps the REAL dir; a later `edittext` preview rides the pack,
+                // so no real file can be mutated. For a dir, the first `.scad` is the entry.
                 let entry = if path.is_dir() {
                     scad_files(&path).into_iter().next()
                 } else {
@@ -383,7 +393,7 @@ pub(crate) fn run_script(
                 match entry {
                     None => eprintln!("script: open — no .scad under {}", path.display()),
                     #[cfg(not(target_arch = "wasm32"))]
-                    Some(f) => match crate::jobs::open_loose(&f, &sw.5.tmp) {
+                    Some(f) => match crate::jobs::open_loose(&f) {
                         Ok(doc) => {
                             let active = doc.entry;
                             *sw.0 = doc;

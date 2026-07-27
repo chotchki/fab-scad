@@ -103,6 +103,31 @@ pub(crate) fn read_into_editor(editor: &mut EditorBuf, path: &Path) -> Option<co
     cfg
 }
 
+/// [`read_into_editor`]'s DOC-based twin (SW.3): hydrate the editor from project file `i` — once a
+/// project is open the DOC is the text truth (an unsaved edit to a non-active file lives only
+/// there; disk changes on Save), so view-switch hydration must read it, not a possibly-stale disk
+/// path. Same fab:config strip; `editor.path` keeps the native path identity (`editor_holds`),
+/// and the file's own dirty flag survives the round-trip. The strip is DISPLAY-only — the block
+/// survives the write-back because
+/// [`flush_active`](crate::project::ProjectDoc::flush_active) carries it across.
+pub(crate) fn doc_into_editor(
+    editor: &mut EditorBuf,
+    project: &crate::project::ProjectDoc,
+    i: usize,
+) -> Option<config::FabConfig> {
+    editor.path = project.editor_path(i);
+    let (raw, dirty) = project
+        .files
+        .get(i)
+        .map(|f| (f.text.clone(), f.dirty))
+        .unwrap_or_default();
+    let cfg = config::read_config_block(&raw);
+    editor.text = config::strip_config_block(&raw);
+    editor.dirty = dirty;
+    editor.edited_at = None;
+    cfg
+}
+
 /// The `fab:config` block parsed from a freshly-loaded source (W.3.8), waiting for `poll_job` to apply it
 /// once the parts are built (the block loads BEFORE the render that makes the parts): the per-part
 /// slicing binds back to the parts, and the optional printer overwrites [`SceneCfg::bed`]. `read_into_editor`

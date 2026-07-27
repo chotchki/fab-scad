@@ -149,3 +149,49 @@ the project archive when the source is multi-file.
    `ext_for_mime` (their repo, no migration).
 5. **Z.5 — publish round-trip + validate.** Publish a project zip, re-open it from the gallery; e2e;
    native + wasm + fmt/clippy/tests green; dogfood shower_holder end to end on the web.
+
+## Phase SW — native renders from-sources too (supersedes the SHADOW)
+
+**Verdict: the browser had the better architecture the whole time, and desktop was carrying a mirror it
+didn't need.** Z.3.6 gave a loose `.scad` open a temp SHADOW: copy the folder's `.scad` into `tmp/loose/`,
+point `base_dir` there, render `Source::Path` at the shadow entry, and re-write the edited file into the
+shadow on every debounced keystroke. It solved the real problem (a live preview must not scribble in the
+user's folder — the `.fab-preview-*.scad` litter) but paid for it with a SECOND COPY of the truth, and
+every bug in that era was the same bug: the copy and the document disagreeing.
+
+Backlog #6 was the loudest instance. `import("FamilyLogo.svg")` resolved against the shadow, which only
+mirrored `.scad`, so the GUI ENOENT'd on a model the CLI rendered fine. The first fix mirrored the assets
+too — which works until the ref reaches OUTSIDE the folder (`import("../FamilyLogo.svg")`, which
+`models/wall_screen` actually used), and a folder-shaped mirror structurally cannot serve that.
+
+The fix is to stop mirroring. `Source::Pack { files, entry, asset_dir }` (SW.2) hands the kernel the
+document's live buffers as the hybrid loader's OVERLAY (SW.1: overlay first, then the fs, so BOSL2 and
+scad-lib still come off disk), and roots `import()` at the entry's real directory. So:
+
+- **`base_dir` for a loose open is the user's REAL folder.** Assets resolve where they live, `../` included.
+- **The preview writes NOTHING, anywhere.** Not the real folder, not a temp. There is no second copy to go
+  stale, which retires the whole disagreement class rather than fixing instances of it.
+- **The document is the text truth.** Editor hydration reads the doc (`doc_into_editor`), not disk — a disk
+  read would silently drop an unsaved edit to a non-active file.
+- **Desktop and web are now the same shape**: doc → pack → kernel. `hybrid_pack` and `render_pack` differ
+  only in that the browser must ship asset BYTES (no disk to lean on) while native leaves them on disk.
+
+Two things the shadow was quietly doing that had to be replaced deliberately, not deleted:
+
+- **Packaging.** A `.scadproj` (Save-As, publish upload) is a SELF-CONTAINED archive, and a loose document's
+  assets are no longer inside it. `collect_assets` survives, retargeted: `loose_sibling_assets` sweeps the
+  folder at serialization time and the bytes go into the ZIP, never into the live document (an earlier cut
+  absorbed them and every folder STL showed up as a Project-tab row the user never added).
+- **Publish liveness.** Publish rendered `Source::Path(scene.source)`, which under the shadow WAS the live
+  text because the preview kept writing it. Post-SW that path is the last-SAVED file, so publish renders the
+  pack like everything else and stages the baked live entry text as the upload — the mesh and the source
+  can't disagree.
+
+**Doctrine, stated once so it stops being re-derived:** the PREVIEW never writes. Explicit file operations
+— Save, Add-files, Rename — do write the user's real folder, because that is what the user asked for; they
+carry a no-clobber guard (`unique_name` only knows the document, which for a loose open is `.scad` only, so
+it is blind to every real asset sitting next to it). DELETE stays view-only: `rm` is the one that can't be
+undone.
+
+The paste flow (W.3.33) keeps its scratch-file path render — a pasted buffer has no `base_dir` for a pack to
+root at, and nothing to be stale against.

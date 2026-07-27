@@ -80,12 +80,12 @@ pub(crate) fn setup_windowed(
     spawn_environment(&mut commands, &mut meshes, &mut materials, &scene);
     // Seed the file-tab + editor from the launch source (U.3.2): a folder pick repopulates both. The
     // source's fab:config block (W.3.8) is stripped from the buffer + stashed for poll_job to apply.
-    // Phase Z / Z.3.6: a launched `.scad` opens as a loose PROJECT rooted at a temp SHADOW (so the live
-    // preview writes the shadow, never the user's real files), homed at the real file so Save writes back
-    // in place. The render source repoints at the shadow entry; the editor shows it (config stripped).
+    // Phase Z / Z.3.6 + SW.3: a launched `.scad` opens as a loose PROJECT rooted at its own REAL folder
+    // and homed at the real file, so Save writes back in place. The render rides `Source::Pack` — the
+    // doc's live buffers ARE the render truth — so no temp shadow exists and the preview writes nothing.
     #[cfg(not(target_arch = "wasm32"))]
     if let Some(src) = scene.source.clone() {
-        match crate::jobs::open_loose(&src, &scene.tmp) {
+        match crate::jobs::open_loose(&src) {
             Ok(doc) => {
                 let entry_path = doc
                     .base_dir
@@ -94,8 +94,8 @@ pub(crate) fn setup_windowed(
                     .map(|(b, f)| b.join(&f.name));
                 *project = doc;
                 if let Some(ep) = entry_path {
-                    pending_config.0 = read_into_editor(&mut editor, &ep);
-                    scene.source = Some(ep); // render from the shadow, not the real file
+                    pending_config.0 = doc_into_editor(&mut editor, &project, project.entry);
+                    scene.source = Some(ep); // the entry's REAL path — identity, not content
                 }
             }
             Err(e) => {
@@ -186,6 +186,10 @@ pub(crate) fn setup_windowed(
     // normal-view frame still has something to hand back (manage_view_camera).
     commands.insert_resource(PrevCam(Some((-0.7, 0.5, radius, Vec3::ZERO))));
     // Render the model's parts off-thread; poll_job seeds each part + its first cut when bounds land.
+    // Native: the project pack (live buffers, SW.3); wasm (or no project): the path/buffer flows.
+    #[cfg(not(target_arch = "wasm32"))]
+    crate::jobs::kick_render_pack(&pool, &mut job, &mut status, &scene, &project, None, true);
+    #[cfg(target_arch = "wasm32")]
     kick_render(&pool, &mut job, &mut status, &scene, true);
 }
 

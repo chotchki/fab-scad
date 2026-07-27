@@ -301,12 +301,10 @@ pub(crate) fn apply_switch_file(
             project.flush_active(&editor.text);
         }
         project.set_active(i);
-        if let Some(f) = project.files.get(i) {
-            editor.text = f.text.clone();
-            editor.path = project.editor_path(i);
-            editor.dirty = f.dirty;
-            editor.edited_at = None;
-        }
+        // Same doc-hydration as native (SW.3) — one implementation, so the web can't drift. It also
+        // strips the viewed file's `fab:config` block, which the hand-rolled web copy never did:
+        // switching tabs on the browser used to surface the block as editable text.
+        doc_into_editor(&mut editor, &project, i);
         return;
     }
     // Native: the render paths ARE ProjectDoc's native projection (base_dir/name per file). The whole
@@ -320,19 +318,13 @@ pub(crate) fn apply_switch_file(
         // the render target — view a lib and the entry stays on screen; set-entry to change what renders.
         // Persist the OUTGOING file's live edit before moving off it — but ONLY when the editor actually
         // holds the current active file (a within-project switch). On a FRESH open the editor still carries
-        // the PREVIOUS project's text, and flushing that would clobber the new entry.
+        // the PREVIOUS project's text, and flushing that would clobber the new entry. The flush lands in
+        // the DOC only (SW.3) — the pack render reads the doc, so no render-root sync exists to write.
         if project.editor_holds(&editor.path) {
             project.flush_active(&editor.text);
-            // Sync the flushed edit into the render-root so the entry render sees it.
-            if let Some(base) = project.base_dir.clone()
-                && let Some(cur) = project.files.get(project.active)
-            {
-                let name = cur.name.clone();
-                let _ = write_under(&base, &name, editor.text.as_bytes());
-            }
         }
         project.set_active(i);
-        // The render target is ALWAYS the entry, read from the render-root (shadow / temp).
+        // The render identity is the entry's REAL path (provenance/UI); the render CONTENT is the pack.
         let render_path = project
             .base_dir
             .as_ref()
@@ -342,9 +334,9 @@ pub(crate) fn apply_switch_file(
         // Only a CHANGE of render target re-renders — a view-switch (entry unchanged) just swaps the editor.
         let changed = scene.source.as_deref() != Some(render_path.as_path());
         scene.source = Some(render_path.clone());
-        // Re-derive the workspace root from the REAL folder (Z.3.6), NOT the render-root: the shadow lives
-        // under `tmp/`, so walking up from it would lose BOSL2/scad-lib. A container has no real workspace
-        // (loose_save_dir None) → root stays the boot value (packed lib root).
+        // Re-derive the workspace root by walking up from the REAL folder — that's where BOSL2/scad-lib
+        // live. A container's `base_dir` is a temp under `tmp/` with no workspace above it
+        // (loose_save_dir None), so its root stays the boot value (the packed lib root).
         if let Some(real_dir) = loose_save_dir(&project)
             && let Some(r) = std::fs::canonicalize(&real_dir)
                 .ok()
@@ -353,8 +345,9 @@ pub(crate) fn apply_switch_file(
         {
             scene.root = Some(r);
         }
-        // The VIEWED file's disk text (minus its fab:config block, W.3.8) becomes the editor buffer.
-        let view_cfg = read_into_editor(&mut editor, &path);
+        // The VIEWED file's DOC text (minus its fab:config block, W.3.8) becomes the editor buffer —
+        // the doc is the truth (SW.3): a disk read here would drop unsaved edits made before the switch.
+        let view_cfg = doc_into_editor(&mut editor, &project, i);
         if changed {
             // The stashed block applies in poll_job once the fresh parts are built. On a fresh open the
             // viewed file IS the entry, so its config is the entry's. (A view-switch leaves parts untouched.)
@@ -362,7 +355,7 @@ pub(crate) fn apply_switch_file(
             // Drop the outgoing model's held base solids before wiping — a file switch abandons them.
             free_bases(&pool, state.parts.0.iter().filter_map(|p| p.base).collect());
             state.reset();
-            kick_render(&pool, &mut job, &mut status, &scene, true);
+            kick_render_pack(&pool, &mut job, &mut status, &scene, &project, None, true);
             info!("render: {}", render_path.display());
         }
     }
@@ -391,8 +384,8 @@ pub(crate) fn poll_open_dialog(
         return; // cancelled
     };
     // A `.scadproj` (Phase Z): materialize it to a scratch dir and open it as a project rooted there,
-    // so `Source::Path` + BOSL2 (via `scene.root`) resolve exactly as for a normal on-disk project. The
-    // ProjectDoc holds the canonical bytes (its `home` re-zips on save); `base_dir` is the temp render root.
+    // so its `import()` assets have a real directory to resolve against. The ProjectDoc holds the
+    // canonical bytes (its `home` re-zips on save); `base_dir` is that temp asset root.
     #[cfg(not(target_arch = "wasm32"))]
     if picked
         .extension()
@@ -408,11 +401,11 @@ pub(crate) fn poll_open_dialog(
         }
         return;
     }
-    // A loose `.scad` (Z.3.6, option A): open its FOLDER as a project rooted at a temp SHADOW (so preview
-    // never touches the real files), homed at the real file so Save writes back in place. The entry
-    // renders; other files are views/libs.
+    // A loose `.scad` (Z.3.6 option A, re-rooted by SW.3): open its FOLDER as a project rooted at that
+    // very folder — the preview renders the doc's live buffers, so nothing has to be copied anywhere for
+    // it to stay off the real files. The entry renders; other files are views/libs.
     #[cfg(not(target_arch = "wasm32"))]
-    match open_loose(&picked, &scene.tmp) {
+    match open_loose(&picked) {
         Ok(doc) => {
             let active = doc.entry;
             *project = doc;
@@ -423,8 +416,9 @@ pub(crate) fn poll_open_dialog(
 }
 
 /// Materialize a `.scadproj` under `tmp` and return the [`ProjectDoc`] rooted there — text files editable,
-/// binary assets ride-along, `base_dir` the temp render root, `home` the original `.scadproj` (so save
-/// re-zips it, Z.3.5). The unpacked copy is a render scratch; the ProjectDoc's bytes are the truth.
+/// binary assets ride-along, `base_dir` the temp ASSET root, `home` the original `.scadproj` (so save
+/// re-zips it, Z.3.5). The ProjectDoc's bytes are the truth; since SW.3 the unpacked copy only has to
+/// serve `import()`/`surface()`, because the loader gets its `.scad` from the pack.
 #[cfg(not(target_arch = "wasm32"))]
 fn unpack_scadproj(
     path: &std::path::Path,
@@ -443,14 +437,10 @@ fn unpack_scadproj(
     let dir = tmp.join("scadproj").join(&stem);
     let _ = std::fs::remove_dir_all(&dir); // a clean re-open
     std::fs::create_dir_all(&dir)?;
-    // Write every file (text + binary asset) so `include`/`use` + `import`/`surface` all resolve from
-    // the render root. The ProjectDoc keeps the canonical copies; this is the disk mirror the render reads.
-    for f in &doc.files {
-        write_under(&dir, &f.name, f.text.as_bytes())?;
-    }
-    for (name, body) in &doc.assets {
-        write_under(&dir, name, body)?;
-    }
+    // Write the WHOLE unpacked image, not just the importables: a container's temp is also what the
+    // user sees if they go looking, and what a crash leaves behind to recover from. The ProjectDoc
+    // keeps the canonical copies.
+    materialize_all(&doc, &dir)?;
     if doc.files.is_empty() {
         anyhow::bail!("no .scad in {}", path.display());
     }
@@ -458,51 +448,26 @@ fn unpack_scadproj(
     Ok(doc)
 }
 
-/// Open a loose `.scad` as a project (Z.3.6, option A): `from_disk` loads the FOLDER's `.scad`, then we
-/// re-root to a temp SHADOW so preview writes the shadow, never the user's real files (killing
-/// `.fab-preview`). `home` stays `ScadFile(real path)` so Save writes back to the REAL folder. The loose
-/// twin of [`unpack_scadproj`] — same shape, the home + save target differ.
+/// Open a loose `.scad` as a project (SW.3): `from_disk` loads the FOLDER's `.scad` files and
+/// `base_dir` stays the REAL folder — the render rides `Source::Pack` (live buffers as the hybrid
+/// overlay), so nothing is ever mirrored to a temp and preview writes NO file anywhere. Assets
+/// (`import("logo.svg")`, STLs) resolve from the real dir, where they actually live — including
+/// `../` refs the folder-shaped shadow could never have served. `home` is `ScadFile(real path)`, so
+/// Save writes back in place.
 #[cfg(not(target_arch = "wasm32"))]
-pub(crate) fn open_loose(
-    picked: &std::path::Path,
-    tmp: &std::path::Path,
-) -> anyhow::Result<crate::project::ProjectDoc> {
+pub(crate) fn open_loose(picked: &std::path::Path) -> anyhow::Result<crate::project::ProjectDoc> {
     let dir = picked.parent().unwrap_or(picked).to_path_buf();
     let scads = scad_files(&dir);
     if scads.is_empty() {
         anyhow::bail!("no .scad under {}", dir.display());
     }
-    // Sibling ASSETS ride along too — the shadow is the only place the entry's relative
-    // import("logo.svg") can resolve, so a .scad-only mirror ENOENTs every GUI import that the
-    // CLI (reading the real folder) serves fine (backlog #6, frame_upper's FamilyLogo.svg).
-    let mut asset_paths = Vec::new();
-    collect_assets(&dir, &mut asset_paths);
-    let rel = |p: &std::path::Path| -> String {
-        p.strip_prefix(&dir)
-            .unwrap_or(p)
-            .to_string_lossy()
-            .replace('\\', "/")
-    };
-    let assets: Vec<(String, Vec<u8>)> = asset_paths
-        .iter()
-        .filter_map(|p| Some((rel(p), std::fs::read(p).ok()?)))
-        .collect();
-    // from_disk loads the content + homes at the real entry path; we override base_dir to the shadow.
-    let mut doc = crate::project::ProjectDoc::from_disk(dir, &scads, picked);
-    doc.assets.extend(assets);
-    let stem = picked
-        .file_stem()
-        .map(|s| s.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "model".into());
-    let shadow = tmp.join("loose").join(&stem);
-    let _ = std::fs::remove_dir_all(&shadow); // a clean re-open
-    materialize_all(&doc, &shadow)?;
-    doc.base_dir = Some(shadow);
-    Ok(doc)
+    Ok(crate::project::ProjectDoc::from_disk(dir, &scads, picked))
 }
 
-/// The REAL on-disk folder a loose project saves back to — its `home` `ScadFile` path's parent (the
-/// shadow `base_dir` is a render scratch; save must NOT write there). `None` for a container / web / paste.
+/// The REAL on-disk folder a loose project saves back to — its `home` `ScadFile` path's parent.
+/// `None` for a container / web / paste. Since SW.3 this equals `base_dir` for a loose doc, but the
+/// two are asked DIFFERENT questions ("where does Save write?" vs "what does the render root at?")
+/// and a container answers them differently, so they stay separate lookups.
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn loose_save_dir(project: &crate::project::ProjectDoc) -> Option<std::path::PathBuf> {
     match &project.home {
@@ -528,10 +493,15 @@ fn write_under(base: &std::path::Path, rel: &str, body: &[u8]) -> anyhow::Result
 /// (so a reopen restores the bed), every other file + binary asset goes verbatim from the ProjectDoc's
 /// current (flushed) state. The manifest keeps the original entry; the title stays whatever it was.
 /// Cross-platform (Z.3.8): `scadproj` write works on wasm too, so the web save/publish can re-zip.
+///
+/// `extra` are assets that belong in the ARCHIVE but not in the document — a loose project's on-disk
+/// siblings ([`loose_sibling_assets`]), which SW.3 deliberately stopped copying into the doc. The
+/// doc's own copies win on a name collision.
 pub(crate) fn rezip_project(
     project: &crate::project::ProjectDoc,
     parts: &[Part],
     printer: config::PrinterCfg,
+    extra: &std::collections::BTreeMap<String, Vec<u8>>,
 ) -> anyhow::Result<Vec<u8>> {
     use fab_scad::scadproj;
     let entry_name = project.entry_name().to_string();
@@ -540,7 +510,8 @@ pub(crate) fn rezip_project(
         .files
         .get(project.entry)
         .map(|f| config::with_config_block(&f.text, parts, Some(printer)));
-    let mut files: std::collections::BTreeMap<String, Vec<u8>> = std::collections::BTreeMap::new();
+    // `extra` first, so a doc-owned name of the same path overwrites it.
+    let mut files: std::collections::BTreeMap<String, Vec<u8>> = extra.clone();
     for (i, f) in project.files.iter().enumerate() {
         let bytes = if i == project.entry {
             entry_baked
@@ -574,7 +545,8 @@ pub(crate) fn project_source_variant(
 ) -> anyhow::Result<(String, &'static str, Vec<u8>)> {
     use fab_scad::scadproj::{PROJECT_EXT, PROJECT_MIME};
     if project.is_multifile() {
-        let bytes = rezip_project(project, parts, printer)?;
+        // No `extra`: the browser has no disk to sweep — a web document already holds every byte it owns.
+        let bytes = rezip_project(project, parts, printer, &std::collections::BTreeMap::new())?;
         Ok((format!("{stem}.{PROJECT_EXT}"), PROJECT_MIME, bytes))
     } else {
         let baked = config::with_config_block(entry_text, parts, Some(printer));
@@ -586,8 +558,9 @@ pub(crate) fn project_source_variant(
     }
 }
 
-/// Materialize every project file + asset under `base` — the disk mirror the native render reads
-/// (`Source::Path`). Shared by add-file / new-file so a change reaches the render root.
+/// Materialize every project file + asset under `base` — the CONTAINER temp's disk image (a
+/// `.scadproj` unpacks here; its assets are what the pack render's `read_import` reads). Loose
+/// projects never call this (SW.3): their real dir already holds everything.
 #[cfg(not(target_arch = "wasm32"))]
 fn materialize_all(
     project: &crate::project::ProjectDoc,
@@ -602,9 +575,34 @@ fn materialize_all(
     Ok(())
 }
 
+/// The IMPORTABLE half alone (SW.3): everything `import()`/`surface()` could reach, which is
+/// everything the render can't serve from the pack. The pack covers `use`/`include` only — the
+/// import reader is a plain fs read — so a `.svg`/`.json`/`.csv` counts even though
+/// [`ProjectDoc::import`](crate::project::ProjectDoc::import) classified it TEXT and filed it under
+/// `files`. Getting that split wrong is how backlog #6 comes back through a different door.
+///
+/// KNOWN LIMIT: this fires on add, not on edit. Editing an importable text file in the editor
+/// leaves the disk copy behind until Save — acceptable while the editor is a `.scad` editor, and
+/// the alternative (a preview write) is the whole thing SW.3 deleted.
+#[cfg(not(target_arch = "wasm32"))]
+fn materialize_imports(
+    project: &crate::project::ProjectDoc,
+    base: &std::path::Path,
+) -> anyhow::Result<()> {
+    for f in &project.files {
+        if !f.name.to_ascii_lowercase().ends_with(".scad") {
+            write_under(base, &f.name, f.text.as_bytes())?;
+        }
+    }
+    for (name, body) in &project.assets {
+        write_under(base, name, body)?;
+    }
+    Ok(())
+}
+
 /// Project-tab file management (Z.3.3): set the render entry, and add / new / delete files. Each
 /// structural change re-derives FileList (the ProjectDoc's native path projection, so switch-indices
-/// stay aligned) and materializes to the render root. The NATIVE half — the ops touch the fs + the rfd
+/// stay aligned) and re-renders from the pack. The NATIVE half — the ops touch the fs + the rfd
 /// picker; the web half is [`project_files_action_web`], which shares the document rules via
 /// [`crate::file_ops`]. Runs alongside apply_switch_file; a SwitchFile
 /// it emits lands within a frame or two (messages are double-buffered).
@@ -623,30 +621,49 @@ pub(crate) fn project_files_action(
     mut scene: ResMut<SceneCfg>,
     mut state: ModelState,
 ) {
+    // SW.3: the DOC is the text truth AND the render source, so the live buffer must land in it
+    // before ANY command reads or reshuffles the file set. Under the old shadow the preview kept a
+    // disk mirror current, which papered over the missing flush — a delete then re-hydrated the
+    // editor from that mirror and the unsaved edit survived by accident. With the mirror gone, an
+    // unflushed edit is simply lost (and the pack renders the stale text). One flush, up front.
+    if project.editor_holds(&editor.path) {
+        project.flush_active(&editor.text);
+    }
     // Inline rename (Z.3.3): apply the committed (row, new-name) — rename in the ProjectDoc, MOVE the
     // on-disk/temp copy, then re-render (the render target's name may have changed, and a rename can
     // break a sibling's `include`, which the re-render surfaces).
     if let Some((i, want)) = rename.commit.take() {
         let base = project.base_dir.clone();
+        // The rename MOVES a real file (SW.3 made `base_dir` the user's folder), so refuse rather than
+        // land on top of something. `unique_name` can't catch this: it de-duplicates against the
+        // DOCUMENT, which for a loose open holds only `.scad` — every other file in that folder is
+        // invisible to it, and `fs::rename` overwrites the destination silently on Unix.
+        let trimmed = want.trim();
+        let clashes = !trimmed.is_empty()
+            && base.as_ref().is_some_and(|b| {
+                let dest = b.join(trimmed);
+                dest.exists() && project.files.get(i).is_none_or(|f| b.join(&f.name) != dest)
+            });
         // Z.3.10: the ProjectDoc + editor half is `file_ops::rename` — shared with the web handler, so
         // the `editor.path` re-point (the invariant a rename is most likely to break) has ONE
         // implementation and one set of tests. What stays here is the native tail: move the file on
-        // disk, re-aim the render root, kick a path render.
-        if let Some(r) = crate::file_ops::rename(&mut project, &mut editor, i, &want) {
+        // disk, re-aim the render identity, kick a fresh render.
+        if clashes {
+            status.0 = format!("rename: {trimmed} already exists — pick another name");
+        } else if let Some(r) = crate::file_ops::rename(&mut project, &mut editor, i, &want) {
             rename.renamed = Some((r.old.clone(), r.new.clone()));
             if base.is_some() {
                 // Both are already rooted under `base_dir` (`file_ops::Renamed`), so this is the move.
-                let _ = std::fs::rename(&r.old, &r.new); // missing source? a never-materialized file
-                // Recompute the render target with the CURRENT names + re-render.
-                let target = if matches!(project.home, crate::project::ProjectHome::ScadProj(_)) {
-                    project.entry
-                } else {
-                    project.active
-                };
-                scene.source = Some(project.editor_path(target));
+                // A missing source is a never-materialized file (added but not yet saved) — fine.
+                let _ = std::fs::rename(&r.old, &r.new);
+                // Re-aim the render IDENTITY at the entry's current name. Always the ENTRY, both
+                // homes: the pack renders the entry, so pointing `scene.source` at the ACTIVE file
+                // (as this did for loose) left the two disagreeing and made the next view-switch
+                // read `changed` and throw away every part for nothing.
+                scene.source = Some(project.editor_path(project.entry));
                 free_bases(&pool, state.parts.0.iter().filter_map(|p| p.base).collect());
                 state.reset();
-                kick_render(&pool, &mut job, &mut status, &scene, true);
+                kick_render_pack(&pool, &mut job, &mut status, &scene, &project, None, true);
             }
         }
     }
@@ -659,10 +676,9 @@ pub(crate) fn project_files_action(
                 switch.write(SwitchFile(i));
             }
             PanelCmd::NewFile => {
+                // No disk write (SW.3): the new file exists in the DOC, rides the pack render, and
+                // hydrates from the doc on switch — it reaches disk on an explicit Save, not before.
                 let idx = project.add_file("untitled.scad", String::new());
-                if let Some(base) = project.base_dir.clone() {
-                    let _ = materialize_all(&project, &base);
-                }
                 switch.write(SwitchFile(idx)); // view the new file (entry unchanged → no re-render)
             }
             PanelCmd::DeleteFile(i) => {
@@ -673,17 +689,16 @@ pub(crate) fn project_files_action(
                     continue;
                 };
                 if container {
-                    // A container OWNS its files (temp scratch): drop the deleted copy so the entry
-                    // re-renders WITHOUT it, and re-hydrate the editor from whatever's active now.
+                    // A container OWNS its files (temp scratch): drop the deleted copy (tidy — the
+                    // pack no longer reads it), re-hydrate the editor from the DOC, re-render. The
+                    // hydrate is only safe because of the flush at the top of this system.
                     if let Some(base) = base.as_ref() {
                         let _ = std::fs::remove_file(base.join(&name));
-                        if let Some(p) = project.native_paths().get(project.active).cloned() {
-                            let _ = read_into_editor(&mut editor, &p); // config stays the entry's
-                        }
                     }
+                    let _ = doc_into_editor(&mut editor, &project, project.active); // config stays the entry's
                     free_bases(&pool, state.parts.0.iter().filter_map(|p| p.base).collect());
                     state.reset();
-                    kick_render(&pool, &mut job, &mut status, &scene, true);
+                    kick_render_pack(&pool, &mut job, &mut status, &scene, &project, None, true);
                 } else {
                     // A loose folder's files are the user's REAL files — never rm behind their back;
                     // delete is a session-view removal. Re-view the active file (re-renders if it moved).
@@ -831,8 +846,8 @@ pub(crate) fn project_files_action_web(
 }
 
 /// Drain the "Add files" multi-pick (Z.3.3): read each picked file's bytes into the project (text →
-/// editable, binary → asset, names de-duplicated) + materialize to the render root. Adding files doesn't
-/// re-render — a new file isn't `include`d by the entry until you say so.
+/// editable, binary → asset, names de-duplicated) + materialize whatever `import()` will need onto
+/// disk. Adding files doesn't re-render — a new file isn't `include`d by the entry until you say so.
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn poll_add_dialog(
     mut dlg: ResMut<AddFileDialog>,
@@ -849,6 +864,7 @@ pub(crate) fn poll_add_dialog(
     let Some(paths) = result else {
         return; // cancelled
     };
+    let base = project.base_dir.clone();
     let mut added = 0;
     for p in paths {
         match std::fs::read(&p) {
@@ -857,6 +873,11 @@ pub(crate) fn poll_add_dialog(
                     .file_name()
                     .map(|s| s.to_string_lossy().into_owned())
                     .unwrap_or_else(|| "file".into());
+                // `ProjectDoc::import` de-duplicates against the DOCUMENT, which for a loose open
+                // knows only `.scad` — every other file in the user's folder is invisible to it. So
+                // pre-uniquify against DISK too, or adding a second `logo.svg` writes over the real
+                // one below with no prompt and no undo.
+                let name = free_on_disk(&project, base.as_deref(), &name);
                 project.import(&name, bytes);
                 added += 1;
             }
@@ -864,11 +885,115 @@ pub(crate) fn poll_add_dialog(
         }
     }
     if added > 0 {
-        if let Some(base) = project.base_dir.clone() {
-            let _ = materialize_all(&project, &base);
+        // `.scad` rides the pack render — no write. Everything else has to be on disk where
+        // `read_import` looks (the real dir for loose — an explicit add IS a Save-class action —
+        // or the container's temp), so only those materialize (SW.3).
+        if let Some(base) = base {
+            let _ = materialize_imports(&project, &base);
         }
         status.0 = format!("added {added} file(s) to the project");
     }
+}
+
+/// [`ProjectDoc::unique_name`](crate::project::ProjectDoc::unique_name) extended to the filesystem:
+/// a name free in the document AND absent from `base` on disk. The document alone isn't enough since
+/// SW.3, because `base` is the user's REAL folder for a loose project and holds files the document
+/// never loaded (anything that isn't `.scad`). Same `stem-1.ext` shape, so the two agree.
+#[cfg(not(target_arch = "wasm32"))]
+fn free_on_disk(
+    project: &crate::project::ProjectDoc,
+    base: Option<&std::path::Path>,
+    want: &str,
+) -> String {
+    let Some(base) = base else {
+        return want.to_string();
+    };
+    let taken = |n: &str| base.join(n).exists();
+    let first = project.unique_name(want);
+    if !taken(&first) {
+        return first;
+    }
+    let (stem, ext) = match want.rsplit_once('.') {
+        Some((s, e)) => (s.to_string(), format!(".{e}")),
+        None => (want.to_string(), String::new()),
+    };
+    (1..)
+        .map(|n| project.unique_name(&format!("{stem}-{n}{ext}")))
+        .find(|n| !taken(n))
+        .unwrap_or(first)
+}
+
+/// The `import()`/`surface()` formats the render reads (the demux in `fab::import::read_import`) —
+/// what [`loose_sibling_assets`] sweeps out of the folder when a loose project gets PACKAGED. Native
+/// only: the browser has no folder to sweep.
+#[cfg(not(target_arch = "wasm32"))]
+const ASSET_EXTS: &[&str] = &["svg", "dxf", "stl", "3mf", "off", "dat", "png"];
+
+/// [`collect_scads`]'s asset twin: every file under `dir` a model could `import()`/`surface()`, same
+/// skip rules (hidden files/dirs and generated-output dirs are never source).
+#[cfg(not(target_arch = "wasm32"))]
+fn collect_assets(dir: &Path, out: &mut Vec<PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for e in entries.flatten() {
+        let p = e.path();
+        let name = e.file_name();
+        let name = name.to_string_lossy();
+        if p.is_dir() {
+            if name.starts_with('.') || matches!(name.as_ref(), "out" | "renders" | "target") {
+                continue;
+            }
+            collect_assets(&p, out);
+        } else if p
+            .extension()
+            .and_then(|x| x.to_str())
+            .is_some_and(|x| ASSET_EXTS.iter().any(|a| x.eq_ignore_ascii_case(a)))
+            && !name.starts_with('.')
+        {
+            out.push(p);
+        }
+    }
+}
+
+/// A LOOSE project's on-disk sibling assets, for the PACKAGING step — the only thing SW.3 still needs
+/// `collect_assets` for. Rendering doesn't: `read_import` reads the real folder directly, which is the
+/// whole point of killing the shadow. But a `.scadproj` (Save-As, and the publish upload) is a
+/// self-contained archive, and a document whose `assets` are empty because the files "are already on
+/// disk" produces one that renders nothing on the other end.
+///
+/// Returns rather than absorbing, deliberately: this is serialization state, not document state. An
+/// earlier cut of it wrote straight into `doc.assets` and every folder STL showed up as a Project-tab
+/// row the user never added — including when they cancelled the save dialog.
+///
+/// LIMIT: folder-scoped, like every other loose sweep here. A model reaching OUTSIDE its folder
+/// (`import("../logo.svg")`) can't be made self-contained without rewriting the ref, so it isn't.
+/// Empty for a container (its assets already live in the doc) and for the web (nothing on disk).
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn loose_sibling_assets(
+    project: &crate::project::ProjectDoc,
+) -> std::collections::BTreeMap<String, Vec<u8>> {
+    let mut out = std::collections::BTreeMap::new();
+    let Some(dir) = loose_save_dir(project) else {
+        return out;
+    };
+    let mut paths = Vec::new();
+    collect_assets(&dir, &mut paths);
+    for p in paths {
+        let name = p
+            .strip_prefix(&dir)
+            .unwrap_or(&p)
+            .to_string_lossy()
+            .replace('\\', "/");
+        // A name the doc already carries stays as it is — the doc's copy is the live one.
+        if project.assets.contains_key(&name) || project.files.iter().any(|f| f.name == name) {
+            continue;
+        }
+        if let Ok(bytes) = std::fs::read(&p) {
+            out.insert(name, bytes);
+        }
+    }
+    out
 }
 
 /// Save-As `.scadproj` for a project with no container home yet (Z.3.7 — a loose `.scad` that grew a
@@ -892,6 +1017,8 @@ pub(crate) fn save_as_project_action(
         return;
     }
     project.flush_active(&editor.text); // capture the live active edit in the file set
+    // A `.scadproj` is self-contained; a loose doc's assets sit on disk, so sweep them into the archive.
+    let extra = loose_sibling_assets(&project);
     let printer = config::PrinterCfg {
         bed: [
             scene.bed[0] as f64,
@@ -899,7 +1026,7 @@ pub(crate) fn save_as_project_action(
             scene.bed[2] as f64,
         ],
     };
-    let bytes = match rezip_project(&project, &parts.0, printer) {
+    let bytes = match rezip_project(&project, &parts.0, printer, &extra) {
         Ok(b) => b,
         Err(e) => {
             status.0 = format!("save failed: {e:#}");
@@ -962,9 +1089,15 @@ pub(crate) fn poll_save_project(
     };
     status.0 = format!("saved -> {}", path.display());
     info!("{}", status.0);
+    // NOW the document takes ownership of the loose folder's assets — the user committed to a
+    // container, and after the re-root below their real folder is no longer what `read_import` sees.
+    // Must run BEFORE `home` changes, since that's what identifies the folder to sweep.
+    let absorbed = loose_sibling_assets(&project);
+    project.assets.extend(absorbed);
     project.home = crate::project::ProjectHome::ScadProj(path.clone());
-    // Re-root to a temp materialization (like an opened .scadproj), so container-preview writes the temp,
-    // not the user's real loose files. scene.source + the editor path follow the new root.
+    // Re-root to a temp materialization, exactly as an opened `.scadproj` does: the document is a
+    // CONTAINER now, its assets live in that temp, and Save re-zips rather than writing loose files
+    // back. scene.source + the editor path follow the new root.
     let stem = path
         .file_stem()
         .map(|s| s.to_string_lossy().into_owned())
@@ -1020,36 +1153,6 @@ pub(crate) fn collect_scads(dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
-/// The `import()`/`surface()` formats the render reads (the demux in `fab::import::read_import`) —
-/// what [`collect_assets`] carries into a loose open so relative imports resolve in the shadow.
-const ASSET_EXTS: &[&str] = &["svg", "dxf", "stl", "3mf", "off", "dat", "png"];
-
-/// [`collect_scads`]'s asset twin: every sibling file a model could `import()`/`surface()`, same
-/// skip rules (hidden files/dirs and generated-output dirs are never source).
-pub(crate) fn collect_assets(dir: &Path, out: &mut Vec<PathBuf>) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    for e in entries.flatten() {
-        let p = e.path();
-        let name = e.file_name();
-        let name = name.to_string_lossy();
-        if p.is_dir() {
-            if name.starts_with('.') || matches!(name.as_ref(), "out" | "renders" | "target") {
-                continue;
-            }
-            collect_assets(&p, out);
-        } else if p
-            .extension()
-            .and_then(|x| x.to_str())
-            .is_some_and(|x| ASSET_EXTS.iter().any(|a| x.eq_ignore_ascii_case(a)))
-            && !name.starts_with('.')
-        {
-            out.push(p);
-        }
-    }
-}
-
 /// Fire-and-forget: tell the geometry service to drop these held base solids (W.3.3). Detached so a
 /// frame never blocks on the reply — freeing is a cheap map removal, and a missed free only costs a
 /// bounded-store eviction (an op on an evicted handle self-heals as a re-render). No-op when empty.
@@ -1084,8 +1187,9 @@ pub(crate) fn kick_render(
 }
 
 /// Whole-render an EXPLICIT source path (U.3.2) — `cfg` still supplies root/tmp, but the content +
-/// include base come from `src`, not `cfg.source`. The preview renders a project's render-root entry
-/// this way without repointing `cfg.source` at every keystroke.
+/// include base come from `src`, not `cfg.source`. Since SW.3 the one caller is the PASTE preview
+/// (no project on disk, so its buffer goes to a scratch file); every project render goes through
+/// [`kick_render_pack`] instead.
 pub(crate) fn kick_render_from(
     pool: &GeomPool,
     job: &mut Job,
@@ -1095,6 +1199,39 @@ pub(crate) fn kick_render_from(
     fresh: bool,
 ) {
     let source = Source::Path(src.to_string_lossy().into_owned());
+    let root = cfg.root.as_ref().map(|r| r.to_string_lossy().into_owned());
+    spawn_render(pool, job, status, source, root, fresh);
+}
+
+/// Whole-render the PROJECT as a `Source::Pack` (SW.3): the doc's live buffers ride as the hybrid
+/// overlay — optionally with `live` spliced over the ACTIVE file (the debounced-edit case) — and
+/// imports/fs-fallback root at `base_dir` (the REAL folder for a loose open, the materialized
+/// asset root for a container). No disk mirror, no shadow: the pack IS the render truth. A doc
+/// with no `base_dir` (a paste, W.3.33) falls back to the path render of `cfg.source`.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn kick_render_pack(
+    pool: &GeomPool,
+    job: &mut Job,
+    status: &mut Status,
+    cfg: &SceneCfg,
+    project: &crate::project::ProjectDoc,
+    live: Option<&str>,
+    fresh: bool,
+) {
+    let (Some(base), false) = (project.base_dir.as_ref(), project.files.is_empty()) else {
+        kick_render(pool, job, status, cfg, fresh);
+        return;
+    };
+    let active_text = live
+        .map(str::to_string)
+        .or_else(|| project.files.get(project.active).map(|f| f.text.clone()))
+        .unwrap_or_default();
+    let (files, entry) = project.hybrid_pack(&active_text);
+    let source = Source::Pack {
+        files,
+        entry,
+        asset_dir: base.to_string_lossy().into_owned(),
+    };
     let root = cfg.root.as_ref().map(|r| r.to_string_lossy().into_owned());
     spawn_render(pool, job, status, source, root, fresh);
 }
@@ -1301,9 +1438,11 @@ fn render_result(resp: anyhow::Result<Response>, fresh: bool) -> Result<JobResul
 }
 
 /// Debounced live preview (U.3.2): once the editor buffer has sat un-touched for `EDIT_DEBOUNCE` and
-/// no render is in flight, write it to a hidden temp beside the real file (so relative `include`s
-/// resolve) and whole-render it (`fresh = false` — keep each part's cuts/connectors). The buffer,
-/// not the disk file, is the truth; the disk file only changes on an explicit Save.
+/// no render is in flight, whole-render it (`fresh = false` — keep each part's cuts/connectors). The
+/// buffer, not the disk file, is the truth; the disk file only changes on an explicit Save. Since
+/// SW.3 that's literal on every path with a project — the buffer IS the render input. Only a PASTE
+/// (no project on disk at all) still stages to a scratch file, because a path is all the paste flow
+/// has to hand the renderer.
 pub(crate) fn preview_edited_buffer(
     mut editor: ResMut<EditorBuf>,
     scene: Res<SceneCfg>,
@@ -1329,22 +1468,20 @@ pub(crate) fn preview_edited_buffer(
         let (main, pack) = project.render_pack(&editor.text);
         kick_render_bytes(&pool, &mut job, &mut status, main, pack, false);
     }
-    // native, ANY project with a render-root (Z.3.6): write the edited file into the root (a container's
-    // temp OR a loose folder's shadow), then render the ENTRY — editing ANY project file re-renders the
-    // entry with the edit. The root is the render truth (never the user's real files); save persists it.
+    // native, ANY project with a base (SW.3): the live buffers ride the Source::Pack overlay —
+    // editing ANY project file re-renders the entry with the edit spliced, NO disk write anywhere
+    // (the shadow died with the pack; the user's real files change only on an explicit Save).
     #[cfg(not(target_arch = "wasm32"))]
-    if let Some(base) = project.base_dir.clone() {
-        if let Some(active) = project.files.get(project.active) {
-            let name = active.name.clone();
-            if write_under(&base, &name, editor.text.as_bytes()).is_err() {
-                status.0 = "preview write failed".into();
-                return;
-            }
-        }
-        if let Some(entry) = project.files.get(project.entry) {
-            let entry_path = base.join(&entry.name);
-            kick_render_from(&pool, &mut job, &mut status, &scene, &entry_path, false);
-        }
+    if project.base_dir.is_some() {
+        kick_render_pack(
+            &pool,
+            &mut job,
+            &mut status,
+            &scene,
+            &project,
+            Some(&editor.text),
+            false,
+        );
         return;
     }
     // native, NO render-root (a fresh launch the user PASTED into — W.3.33, base_dir None): write the
@@ -2156,13 +2293,38 @@ pub(crate) fn poll_auto_plan(
     reason = "test harness: unwrap/expect ARE the assertions"
 )]
 mod tests {
-    /// backlog #6: a loose open's shadow render-root must carry the folder's import assets, or the
-    /// entry's relative `import("logo.svg")` resolves against the shadow and ENOENTs (the CLI,
-    /// reading the real folder, worked — the GUI didn't). Generated-output dirs and hidden files
-    /// stay out, exactly as `collect_scads` rules them out for source.
+    /// SW.3 — the shadow is DEAD: a loose open keeps `base_dir` at the REAL folder (the render
+    /// rides `Source::Pack`, assets resolve where they live) and writes NOTHING anywhere — the
+    /// user's dir is untouched and no temp mirror exists to go stale (the whole backlog-#6 class,
+    /// killed structurally).
     #[test]
-    fn a_loose_open_carries_sibling_assets_into_the_shadow() {
-        let real = std::env::temp_dir().join(format!("fab_loose_assets_{}", std::process::id()));
+    fn a_loose_open_keeps_the_real_dir_and_writes_nothing() {
+        let real = std::env::temp_dir().join(format!("fab_loose_real_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&real);
+        std::fs::create_dir_all(&real).unwrap();
+        std::fs::write(real.join("model.scad"), "import(\"logo.svg\");\n").unwrap();
+        std::fs::write(real.join("logo.svg"), "<svg/>").unwrap();
+        let before = std::fs::read_dir(&real).unwrap().flatten().count();
+
+        let doc = super::open_loose(&real.join("model.scad")).expect("opens");
+
+        assert_eq!(
+            doc.base_dir.as_deref(),
+            Some(real.as_path()),
+            "base_dir IS the real folder — no shadow re-root"
+        );
+        assert!(doc.assets.is_empty(), "no byte-copies: assets stay on disk");
+        let after = std::fs::read_dir(&real).unwrap().flatten().count();
+        assert_eq!(before, after, "the real folder is untouched");
+        let _ = std::fs::remove_dir_all(&real);
+    }
+
+    /// The sweep rules that used to decide what a loose open MIRRORED now decide what a `.scadproj`
+    /// (Save-As, publish upload) CONTAINS — a shipped archive, so getting them wrong is worse than it
+    /// was. Same assertions the shadow-era test made, re-aimed at the surviving code.
+    #[test]
+    fn the_packaging_sweep_takes_siblings_and_skips_generated_output() {
+        let real = std::env::temp_dir().join(format!("fab_sweep_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&real);
         std::fs::create_dir_all(real.join("things")).unwrap();
         std::fs::create_dir_all(real.join("out")).unwrap();
@@ -2172,28 +2334,57 @@ mod tests {
         std::fs::write(real.join("out/render.stl"), b"solid o\nendsolid o\n").unwrap();
         std::fs::write(real.join(".hidden.svg"), "<svg/>").unwrap();
 
-        let tmp = real.join("tmp");
-        let doc = super::open_loose(&real.join("model.scad"), &tmp).expect("opens");
-
-        let keys: Vec<&str> = doc.assets.keys().map(String::as_str).collect();
+        let mut doc = super::open_loose(&real.join("model.scad")).expect("opens");
+        let swept = super::loose_sibling_assets(&doc);
+        let keys: Vec<&str> = swept.keys().map(String::as_str).collect();
         assert_eq!(
             keys,
             ["logo.svg", "things/part.stl"],
-            "siblings ride, out/ + hidden don't"
-        );
-        let shadow = doc.base_dir.expect("loose opens re-root to the shadow");
-        assert!(
-            shadow.join("logo.svg").is_file(),
-            "the shadow serves the entry's relative import"
+            "siblings ride (subdir keeps its relative path); out/ + hidden don't"
         );
         assert!(
-            shadow.join("things/part.stl").is_file(),
-            "subdir assets keep their relative path"
+            doc.assets.is_empty(),
+            "the sweep RETURNS, it doesn't absorb"
         );
-        assert!(
-            !shadow.join("out").exists(),
-            "generated output never enters the render-root"
+
+        // A name the document already owns is the document's — the sweep never shadows a live copy.
+        doc.assets.insert("logo.svg".into(), b"live".to_vec());
+        assert_eq!(
+            super::loose_sibling_assets(&doc)
+                .keys()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            ["things/part.stl"]
         );
+
+        // A container has no loose folder to sweep.
+        doc.home = crate::project::ProjectHome::ScadProj(real.join("p.scadproj"));
+        assert!(super::loose_sibling_assets(&doc).is_empty());
+        let _ = std::fs::remove_dir_all(&real);
+    }
+
+    /// Adding a file must not land on top of one the DOCUMENT can't see — a loose doc holds `.scad`
+    /// only, so `unique_name` alone would happily reuse an existing `logo.svg` and `write_under` would
+    /// overwrite the user's real asset with no prompt and no undo.
+    #[test]
+    fn an_added_name_dedups_against_disk_not_just_the_document() {
+        let real = std::env::temp_dir().join(format!("fab_addname_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&real);
+        std::fs::create_dir_all(&real).unwrap();
+        std::fs::write(real.join("model.scad"), "cube(1);\n").unwrap();
+        std::fs::write(real.join("logo.svg"), "<svg/>").unwrap();
+
+        let doc = super::open_loose(&real.join("model.scad")).expect("opens");
+        assert_eq!(
+            doc.unique_name("logo.svg"),
+            "logo.svg",
+            "the document is blind to it — this is the trap"
+        );
+        assert_eq!(
+            super::free_on_disk(&doc, Some(&real), "logo.svg"),
+            "logo-1.svg"
+        );
+        assert_eq!(super::free_on_disk(&doc, Some(&real), "new.svg"), "new.svg");
         let _ = std::fs::remove_dir_all(&real);
     }
 }

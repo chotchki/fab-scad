@@ -328,7 +328,7 @@ fn run_windowed(scene: SceneCfg, shot: Option<PathBuf>) {
             .chain(),
     );
     // Z.3.3: the Project-tab file management (set entry, add/new/delete files). This is the NATIVE
-    // half — the ops materialize to the render root + drive the rfd multi-picker; the web half is
+    // half — the ops touch the fs + drive the rfd multi-picker; the web half is
     // `project_files_action_web` (registered above), sharing the document rules via `file_ops`.
     // Registered ahead of nothing in particular; SwitchFiles it emits land next frame.
     #[cfg(not(target_arch = "wasm32"))]
@@ -368,7 +368,7 @@ fn run_windowed(scene: SceneCfg, shot: Option<PathBuf>) {
     // and run the save-mesh export + upload job.
     // Z.3.10: the web twin of `project_files_action` — rename / new / delete / set-entry against the
     // in-memory ProjectDoc. Registered here rather than beside its native sibling because the two take
-    // different params (no rfd, no render root); see its doc comment for the ordering hazard that keeps
+    // different params (no rfd, no fs); see its doc comment for the ordering hazard that keeps
     // it from reusing `SwitchFile`.
     #[cfg(target_arch = "wasm32")]
     app.init_resource::<jobs::WebFilePick>().add_systems(

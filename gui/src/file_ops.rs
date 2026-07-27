@@ -1,9 +1,9 @@
 //! Project-tab document MUTATIONS (Z.3.10) — rename / new / delete / set-entry, as pure functions over
 //! [`ProjectDoc`] + [`EditorBuf`].
 //!
-//! Why a module instead of code inside the handlers: the handlers are per-platform (native drives a
-//! filesystem render root and the rfd picker; the web drives an in-memory `render_pack`), but the RULES
-//! are identical, and the rules are where the bugs live. This repo has no wasm test harness, so anything
+//! Why a module instead of code inside the handlers: the handlers are per-platform (native drives real
+//! files and the rfd picker; the web drives an in-memory `render_pack`), but the RULES are identical,
+//! and the rules are where the bugs live. This repo has no wasm test harness, so anything
 //! that ends up inside `#[cfg(target_arch = "wasm32")]` ships unexercised by CI. Everything here is
 //! cfg-free and unit-tested on the native target; the wasm system is a wiring shim over it.
 //!
@@ -13,9 +13,9 @@
 //! edits (the buffer is judged to belong to some other file, so it's never written back).
 
 // The native build only calls `rename` from here — its other handlers still route New/Delete/SetEntry
-// through `SwitchFile`, which is right on a platform with a real render root to materialize into. The
-// rest is live on wasm and exercised by the tests below on BOTH targets, which is the point: this is
-// where the rules get tested, precisely because the wasm handler can't be.
+// through `SwitchFile`, which is right on a platform whose switch also re-aims the render identity and
+// the workspace root. The rest is live on wasm and exercised by the tests below on BOTH targets, which
+// is the point: this is where the rules get tested, precisely because the wasm handler can't be.
 #![allow(dead_code)]
 
 use crate::project::ProjectDoc;
@@ -138,20 +138,17 @@ pub(crate) fn set_entry(
     Rerender::Target
 }
 
-/// Flush the live buffer back into its owning file, then hydrate the editor VIEW from `files[i]` — the
-/// in-memory twin of native's `read_into_editor`. The flush is conditional on [`ProjectDoc::editor_holds`]:
-/// if the buffer doesn't belong to `files[active]`, writing it there would overwrite one file with
-/// another's text.
+/// Flush the live buffer back into its owning file, then hydrate the editor VIEW from `files[i]`. The
+/// flush is conditional on [`ProjectDoc::editor_holds`]: if the buffer doesn't belong to `files[active]`,
+/// writing it there would overwrite one file with another's text. Hydration goes through
+/// [`doc_into_editor`](crate::state::doc_into_editor) — ONE hydrator for every path on both platforms,
+/// so the `fab:config` strip can't apply on some switches and not others.
 fn switch(project: &mut ProjectDoc, editor: &mut EditorBuf, i: usize) {
     if project.editor_holds(&editor.path) {
         project.flush_active(&editor.text);
     }
     project.set_active(i);
-    if let Some(f) = project.files.get(i) {
-        editor.text = f.text.clone();
-        editor.dirty = f.dirty;
-    }
-    editor.path = project.editor_path(i);
+    crate::state::doc_into_editor(editor, project, i);
 }
 
 #[cfg(test)]

@@ -71,7 +71,7 @@ pub(crate) fn publish_kick(
     scene: Res<SceneCfg>,
     editor: Res<EditorBuf>,
     parts: Res<Parts>,
-    project: Res<crate::project::ProjectDoc>,
+    mut project: ResMut<crate::project::ProjectDoc>,
     pool: Res<GeomPool>,
     mut flow: ResMut<PubFlow>,
     mut dialog: ResMut<crate::publish_dialog::PublishDialog>,
@@ -161,18 +161,30 @@ pub(crate) fn publish_kick(
             (staged, slug)
         }
     };
+    // What gets published is what's ON SCREEN, so the live buffer lands in the document first — the
+    // render below reads the document, and so does the archive. (Under the old shadow this happened by
+    // accident: the preview wrote the shadow file that publish then re-read.)
+    if project.editor_holds(&editor.path) {
+        project.flush_active(&editor.text);
+    }
+    // The archive has to be SELF-CONTAINED, so a loose project's on-disk sibling assets ride along —
+    // they aren't in the document, precisely because the render reads them off the real folder (SW.3).
+    // Swept BEFORE the multifile test, not inside it: a folder holding one `.scad` and its `logo.svg`
+    // is single-file by `files.len() + assets.len()` and would otherwise publish a bare `.scad` whose
+    // import resolves to nothing on the far end.
+    let extra = crate::jobs::loose_sibling_assets(&project);
+    let printer = config::PrinterCfg {
+        bed: [
+            scene.bed[0] as f64,
+            scene.bed[1] as f64,
+            scene.bed[2] as f64,
+        ],
+    };
     // The uploaded SOURCE variant (Z.5): a project ships its whole `.scadproj` (rezipped to a temp file so
-    // upload_model can point at it — the `.scadproj` extension tells the server it's a project), else the
-    // `.scad` at `src`. The RENDER still reads `src` (the shadow entry), so a project's mesh is complete.
-    let upload_source = if project.is_multifile() {
-        let printer = config::PrinterCfg {
-            bed: [
-                scene.bed[0] as f64,
-                scene.bed[1] as f64,
-                scene.bed[2] as f64,
-            ],
-        };
-        match rezip_project(&project, &parts.0, printer) {
+    // upload_model can point at it — the `.scadproj` extension tells the server it's a project), else a
+    // config-baked `.scad` staged from the LIVE entry text.
+    let upload_source = if project.is_multifile() || !extra.is_empty() {
+        match rezip_project(&project, &parts.0, printer, &extra) {
             Ok(bytes) => {
                 let _ = std::fs::create_dir_all(&out_dir);
                 let path = out_dir.join(format!("{stem}.scadproj"));
@@ -188,7 +200,21 @@ pub(crate) fn publish_kick(
             }
         }
     } else {
-        src.clone()
+        // Stage the baked LIVE entry text rather than uploading `src`, which is the last-SAVED bytes.
+        // The mesh below is built from the same document, so source and geometry can't disagree.
+        let entry_text = project
+            .files
+            .get(project.entry)
+            .map(|f| f.text.clone())
+            .unwrap_or_else(|| editor.text.clone());
+        let baked = config::with_config_block(&entry_text, &parts.0, Some(printer));
+        let _ = std::fs::create_dir_all(&out_dir);
+        let staged = out_dir.join(format!("{stem}.scad"));
+        if let Err(e) = std::fs::write(&staged, baked) {
+            status.0 = format!("publish: staging the model failed ({e})");
+            return;
+        }
+        staged
     };
     let cover_png = out_dir.join(format!("{stem}-cover.png"));
     // The printable plate .3mf, if `fab make` / the Export tab left one beside the source (best-effort; a
@@ -200,7 +226,20 @@ pub(crate) fn publish_kick(
         .root
         .as_ref()
         .map(|r| r.to_string_lossy().into_owned());
-    let src_path = src.to_string_lossy().into_owned();
+    // The mesh + cover render the DOCUMENT, not the disk (SW.4): the same `Source::Pack` every preview
+    // uses, so what publishes is what the viewport showed. A pasted model has no `base_dir` to root a
+    // pack at, and its buffer was already staged to `src` above, so that one still goes by path.
+    let render_source = match project.base_dir.as_ref() {
+        Some(base) if !project.files.is_empty() => {
+            let (files, entry) = project.hybrid_pack(&editor.text);
+            Source::Pack {
+                files,
+                entry,
+                asset_dir: base.to_string_lossy().into_owned(),
+            }
+        }
+        _ => Source::Path(src.to_string_lossy().into_owned()),
+    };
     let pool = pool.clone();
     let out2 = out_dir.clone();
     let stem2 = stem.clone();
@@ -209,7 +248,7 @@ pub(crate) fn publish_kick(
         // 1. full-res whole render → base handle + the display STL (the cover mesh source).
         let (base, stl, min, max) = match pool
             .call(Request::RenderWhole {
-                source: Source::Path(src_path),
+                source: render_source,
                 root,
                 preview: false,
                 quality: Quality::Final,

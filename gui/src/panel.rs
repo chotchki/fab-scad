@@ -64,7 +64,9 @@ fn save_buffer(
     // web `.scadproj` save-back rides Z.3.4. On success every file is clean, not just the active one.
     #[cfg(not(target_arch = "wasm32"))]
     if let crate::project::ProjectHome::ScadProj(path) = project.home.clone() {
-        match rezip_project(project, parts, printer) {
+        // No `extra`: a container's assets already live in the document (the loose folder's were
+        // absorbed at the Save-As that promoted it).
+        match rezip_project(project, parts, printer, &std::collections::BTreeMap::new()) {
             Ok(bytes) => {
                 if std::fs::write(&path, bytes).is_ok() {
                     editor.dirty = false;
@@ -79,7 +81,9 @@ fn save_buffer(
         }
         return;
     }
-    // Loose (Z.3.6): write back to the REAL folder — NOT base_dir, which is now the render SHADOW. The
+    // Loose (Z.3.6): write back to the REAL folder — `loose_save_dir`, which answers "where does Save
+    // write?" rather than "what does the render root at?" (they agree since SW.3, but a container is
+    // exactly the case where they don't, and it returns above). The
     // ENTRY is always written (config baked in, since it renders); every OTHER dirty file too, so
     // in-memory edits to non-active files (they survive a switch) aren't dropped. The "Save as .scadproj"
     // CTA is the OTHER option (pack them into one portable file); this keeps them loose in the folder.

@@ -82,9 +82,10 @@ impl ProjectDoc {
     /// A native project from files ALREADY on disk under `base_dir` (a loose `.scad` + its folder
     /// siblings, or a `.scadproj` freshly materialized to a temp dir). `paths` are absolute; each
     /// file's project-relative name is its path minus `base_dir`. `entry` is the path that renders.
-    /// The render reads straight from `base_dir` (`Source::Path`), so a loose model's `include`s and
-    /// its Save both resolve in place — no second copy. (Pure path logic; only `native_paths` is
-    /// native-gated. The `--script` harness compiles on both targets, so this must too.)
+    /// `base_dir` roots the render's `import()`/`surface()` and its library fs fallback, and for a
+    /// loose project it IS the user's folder — so a model's assets and its Save both resolve in
+    /// place, no second copy. (Pure path logic; only `native_paths` is native-gated. The `--script`
+    /// harness compiles on both targets, so this must too.)
     pub(crate) fn from_disk(base_dir: PathBuf, paths: &[PathBuf], entry: &std::path::Path) -> Self {
         let rel = |p: &std::path::Path| -> String {
             p.strip_prefix(&base_dir)
@@ -96,9 +97,9 @@ impl ProjectDoc {
             .iter()
             .map(|p| ProjectFile {
                 name: rel(p),
-                // Load the content now (Z.3.6): the project materializes to a shadow render-root, so the
-                // bytes must be present, not lazy. A raw entry keeps its fab:config block (a comment the
-                // render ignores; the editor strips it for display, save re-bakes it).
+                // Load the content now (SW.3): the doc IS the render source, so the bytes must be
+                // present, not lazy. A raw entry keeps its fab:config block (a comment the render
+                // ignores; the editor strips it for display, save re-bakes it).
                 text: std::fs::read_to_string(p).unwrap_or_default(),
                 dirty: false,
             })
@@ -149,12 +150,18 @@ impl ProjectDoc {
 
     /// Flush the editor's live text back into `files[active]` before a switch, so a per-file edit
     /// survives moving away and back. Marks the file dirty when the text actually changed.
+    ///
+    /// The incoming text is the editor buffer, which is `fab:config`-STRIPPED — so the stored file's
+    /// block is carried across rather than flushed away ([`config::reattach_config_block`]). Two things
+    /// fall out: the doc keeps the persisted slicing plan (the shadow file used to hold the only other
+    /// copy), and merely OPENING a model with a block and clicking another tab no longer marks it dirty.
     pub(crate) fn flush_active(&mut self, text: &str) {
         if let Some(f) = self.files.get_mut(self.active) {
-            if f.text != text {
+            let merged = crate::config::reattach_config_block(&f.text, text);
+            if f.text != merged {
                 f.dirty = true;
             }
-            f.text = text.to_string();
+            f.text = merged;
         }
     }
 
@@ -190,7 +197,8 @@ impl ProjectDoc {
     }
 
     /// Add a TEXT file to the project (name de-duplicated), returning its index. Marked dirty — it's a
-    /// change the next save persists. The caller materializes it to `base_dir` on native.
+    /// change the next save persists. It reaches disk on that Save, not before: a `.scad` renders
+    /// straight out of the doc via [`hybrid_pack`](Self::hybrid_pack).
     pub(crate) fn add_file(&mut self, name: &str, text: String) -> usize {
         let name = self.unique_name(name);
         self.files.push(ProjectFile {
@@ -332,11 +340,41 @@ impl ProjectDoc {
             .unwrap_or("model.scad")
     }
 
-    /// Assemble the render inputs from the CURRENT project state: `(entry bytes, pack)` where the pack is
+    /// The NATIVE render pack (SW.3): `(every file as (project-relative name, text), the entry's name)`
+    /// — `Source::Pack`'s shape, and the hybrid loader's overlay. `active_text` is the editor's LIVE
+    /// text for `files[active]` (which may be ahead of the stored `files[active].text` before a flush),
+    /// so a preview reflects an unsaved edit to ANY file, not just the entry.
+    ///
+    /// Assets stay OUT deliberately: natively they already sit on disk — at the real project dir for a
+    /// loose open, at the materialized temp for a container — which is exactly where `read_import`
+    /// looks, so copying their bytes into every render request would buy nothing. That is the whole
+    /// difference from [`render_pack`](Self::render_pack), whose browser has no disk to lean on.
+    pub(crate) fn hybrid_pack(&self, active_text: &str) -> (Vec<(String, String)>, String) {
+        let files = self
+            .files
+            .iter()
+            .enumerate()
+            .map(|(i, f)| {
+                let text = if i == self.active {
+                    active_text.to_string()
+                } else {
+                    f.text.clone()
+                };
+                (f.name.clone(), text)
+            })
+            .collect();
+        let entry = self
+            .files
+            .get(self.entry)
+            .map(|f| f.name.clone())
+            .unwrap_or_default();
+        (files, entry)
+    }
+
+    /// The WEB render inputs from the CURRENT project state: `(entry bytes, pack)` where the pack is
     /// every OTHER file + all assets, keyed by project-relative path — exactly what the kernel's
-    /// `Source::Bytes` resolver consumes. `active_text` is the editor's LIVE text for `files[active]`
-    /// (which may be ahead of the stored `files[active].text` before a flush), so a preview reflects an
-    /// unsaved edit to ANY file. The caller merges the library closure (BOSL2 …) into the pack.
+    /// `Source::Bytes` resolver consumes. `active_text` splices the live buffer as in
+    /// [`hybrid_pack`](Self::hybrid_pack). The caller merges the library closure (BOSL2 …) into the pack.
     pub(crate) fn render_pack(&self, active_text: &str) -> (Vec<u8>, FilePack) {
         let text_at = |i: usize| -> String {
             if i == self.active {
@@ -445,6 +483,33 @@ mod tests {
         );
     }
 
+    /// The editor buffer is `fab:config`-stripped, so a naive flush would delete the persisted slicing
+    /// plan from the document — and since SW.3 the document is the only copy of it until Save. Two
+    /// consequences pinned here: the block survives a flush, and an untouched file doesn't go dirty
+    /// just because the block isn't in the buffer.
+    #[test]
+    fn flush_keeps_the_config_block_the_editor_never_shows() {
+        const BLOCK: &str = "// fab:config v2 {\"printer\":null,\"parts\":[]}";
+        let raw = format!("cube(1);\n\n{BLOCK}\n");
+        let mut d = ProjectDoc::single("main.scad", raw, ProjectHome::Fresh);
+
+        d.flush_active("cube(1);\n"); // what the editor holds: stripped
+        assert!(
+            d.files[0].text.contains(BLOCK),
+            "the block rode through the flush"
+        );
+        assert!(!d.files[0].dirty, "an unchanged file is not dirtied by it");
+
+        d.flush_active("cube(2);\n"); // a real edit
+        assert!(d.files[0].text.starts_with("cube(2);"));
+        assert!(d.files[0].text.contains(BLOCK), "still carried");
+        assert!(d.files[0].dirty);
+
+        // A block the user typed themselves wins — this never resurrects a deleted one.
+        d.flush_active("cube(3);\n// fab:config v2 {\"printer\":null,\"parts\":[\"mine\"]}\n");
+        assert!(!d.files[0].text.contains(BLOCK));
+    }
+
     #[test]
     fn render_pack_reflects_a_live_edit_to_a_non_entry_file() {
         let mut d = ProjectDoc::single(
@@ -463,6 +528,49 @@ mod tests {
         assert_eq!(main, b"include <hook.scad>\nhook();"); // the entry, unchanged
         let hook = libs.iter().find(|(k, _)| k == "hook.scad").unwrap();
         assert_eq!(hook.1, b"module hook(){cube(99);}"); // the LIVE edit, not the stored text
+    }
+
+    /// `hybrid_pack`'s native twin of the test above, pinning the same entry-vs-active split — the one
+    /// the old disk mirror used to mask, since the render read a file rather than these indices. Swap
+    /// `active` for `entry` in the splice and this is what catches it.
+    #[test]
+    fn hybrid_pack_splices_the_live_edit_at_active_and_names_the_entry() {
+        let mut d = ProjectDoc::single(
+            "main.scad",
+            "include <hook.scad>\nhook();",
+            ProjectHome::Fresh,
+        );
+        d.files.push(ProjectFile {
+            name: "hook.scad".into(),
+            text: "module hook(){cube(1);}".into(),
+            dirty: false,
+        });
+        d.assets.insert("logo.svg".into(), vec![1, 2, 3]);
+        d.active = 1; // editing the sibling; the ENTRY is still main.scad
+
+        let (files, entry) = d.hybrid_pack("module hook(){cube(99);}");
+        assert_eq!(
+            entry, "main.scad",
+            "the pack renders the ENTRY, not the view"
+        );
+        assert_eq!(
+            files,
+            vec![
+                (
+                    "main.scad".to_string(),
+                    "include <hook.scad>\nhook();".to_string()
+                ),
+                (
+                    "hook.scad".to_string(),
+                    "module hook(){cube(99);}".to_string()
+                ),
+            ],
+            "the live text lands on the ACTIVE file and nowhere else"
+        );
+        assert!(
+            !files.iter().any(|(n, _)| n == "logo.svg"),
+            "assets stay on disk — no byte-copies ride a native render"
+        );
     }
 
     #[test]

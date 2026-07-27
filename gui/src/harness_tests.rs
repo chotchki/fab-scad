@@ -61,8 +61,8 @@ fn harness() -> App {
         .init_resource::<crate::project::ProjectDoc>()
         .init_resource::<crate::state::RenameUi>()
         .insert_resource(Status("test".into()))
-        // run_script's bundle reads SceneCfg (Z.3.6, for the `open` verb's shadow tmp) — the state tests
-        // never fire `open`, so a minimal one suffices.
+        // run_script's bundle reads SceneCfg — the state tests never fire `open`, so a minimal one
+        // suffices.
         .insert_resource(SceneCfg {
             source: None,
             stl: None,

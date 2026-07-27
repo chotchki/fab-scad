@@ -197,6 +197,35 @@ pub(crate) fn strip_config_block(text: &str) -> String {
     s
 }
 
+/// Carry `stored`'s `fab:config` block across onto `edited`, which is the config-STRIPPED editor buffer.
+///
+/// The editor never shows the block, so flushing the buffer straight into the document would delete it —
+/// and since SW.3 the document is the ONLY copy until Save (the old shadow file was an accidental
+/// backstop). Losing it means a set-entry away and back re-derives an auto slicing plan, and the next
+/// Save bakes THAT over the user's tuned cuts. `edited` wins whenever it carries a block of its own, so
+/// this can't resurrect one the user deliberately deleted by hand.
+pub(crate) fn reattach_config_block(stored: &str, edited: &str) -> String {
+    if edited
+        .lines()
+        .any(|l| l.trim_start().starts_with("// fab:config"))
+    {
+        return edited.to_string();
+    }
+    let Some(block) = stored
+        .lines()
+        .rev()
+        .find(|l| l.trim_start().starts_with("// fab:config"))
+    else {
+        return edited.to_string();
+    };
+    let sep = if edited.is_empty() || edited.ends_with('\n') {
+        ""
+    } else {
+        "\n"
+    };
+    format!("{edited}{sep}\n{}\n", block.trim_start())
+}
+
 /// Append (or replace) a model's `fab:config` block — strip any existing block, then add the fresh one
 /// with a blank-line separator. This is what desktop Save writes to the `.scad` and web download bakes
 /// into the bytes. No config to persist → just the clean model.
@@ -326,6 +355,32 @@ fn placed_to_connector(pc: &PlacedConn, cut: usize) -> Connector {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `strip` then `reattach` is the flush round-trip (SW.3): the editor shows the clean model, the
+    /// document keeps the block. It must survive an edit, and must not fight a block the user typed.
+    #[test]
+    fn reattach_restores_what_strip_hid_and_yields_to_a_typed_block() {
+        let parts = [part_with(Some("p"), &[(Axis::Z, 40.0, true)], &[])];
+        let stored = with_config_block("cube(1);\n", &parts, None);
+        assert!(stored.contains("// fab:config v2 "));
+        let shown = strip_config_block(&stored);
+        assert!(!shown.contains("fab:config"), "the editor never sees it");
+
+        // Round-trip: unchanged buffer in, byte-identical file out (so the flush can't dirty it).
+        assert_eq!(reattach_config_block(&stored, &shown), stored);
+        // An edit keeps the block, and it still parses.
+        let edited = reattach_config_block(&stored, "cube(2);\n");
+        assert!(edited.starts_with("cube(2);"));
+        assert!(read_config_block(&edited).is_some());
+        // A block in the incoming text wins — deleting it by hand STAYS deleted.
+        let typed = "cube(3);\n// fab:config v2 {\"printer\":null,\"parts\":[]}\n";
+        assert_eq!(reattach_config_block(&stored, typed), typed);
+        // Nothing to carry across is a no-op.
+        assert_eq!(
+            reattach_config_block("cube(1);\n", "cube(2);\n"),
+            "cube(2);\n"
+        );
+    }
 
     fn part_named(name: &str) -> Part {
         Part {

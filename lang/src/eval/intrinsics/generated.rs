@@ -9,13 +9,17 @@
     clippy::unreadable_literal,
     clippy::cloned_ref_to_slice_refs,
     clippy::used_underscore_items,
-    reason = "generated code: bit-exact from_bits literals, mechanical clones, and \
-              upstream's underscore-prefixed names are the emitter's idiom"
+    clippy::possible_missing_else,
+    clippy::collapsible_else_if,
+    reason = "generated code: bit-exact from_bits literals, mechanical clones, \
+              upstream's underscore-prefixed names, and one-line block emission \
+              are the emitter's idiom"
 )]
 
 use crate::eval::value::Value;
 use crate::eval::{builtins, ops};
 use crate::parser::{BinOp, UnOp};
+use crate::eval::{build_range, build_vector, iter_values_native};
 
 /// Generated native for `_fab_poc_sq` — semantics route through the interpreter's own value
 /// algebra (`ops::`/`builtins::`), bit-identical to the interpreted reference by construction.
@@ -104,6 +108,46 @@ pub(super) fn default(args: &[Value]) -> crate::Result<Value> {
 pub(super) fn last(args: &[Value]) -> crate::Result<Value> {
     let p_list = args.first().cloned().unwrap_or(Value::Undef);
     let out = ops::index(p_list.clone(), &ops::apply_binary(BinOp::Sub, builtins::apply("len", &[p_list.clone()]), Value::Num(f64::from_bits(0x3ff0000000000000_u64))));
+    Ok(out)
+}
+
+/// Generated native for `_fab_poc_band3` — semantics route through the interpreter's own value
+/// algebra (`ops::`/`builtins::`), bit-identical to the interpreted reference by construction.
+pub(super) fn _fab_poc_band3(args: &[Value]) -> crate::Result<Value> {
+    let p_n = args.first().cloned().unwrap_or(Value::Undef);
+    let out = { let mut l0_acc: Vec<Value> = Vec::new(); for l1_i in iter_values_native(&build_range(&Value::Num(f64::from_bits(0x0_u64)), &Value::Num(f64::from_bits(0x3ff0000000000000_u64)), &p_n.clone())) { { let l2_d = ops::apply_binary(BinOp::Mul, l1_i.clone(), Value::Num(f64::from_bits(0x4000000000000000_u64))); if (ops::apply_binary(BinOp::Gt, l2_d.clone(), Value::Num(f64::from_bits(0x4000000000000000_u64)))).is_truthy() { l0_acc.push(l2_d.clone());
+         }  } } for l3_each in iter_values_native(&build_vector(vec![Value::Num(f64::from_bits(0x4020000000000000_u64)), Value::Num(f64::from_bits(0x4022000000000000_u64))])) { l0_acc.push(l3_each); } build_vector(l0_acc) };
+    Ok(out)
+}
+
+/// Generated native for `approx` — semantics route through the interpreter's own value
+/// algebra (`ops::`/`builtins::`), bit-identical to the interpreted reference by construction.
+pub(super) fn approx(args: &[Value]) -> crate::Result<Value> {
+    let p_a = args.first().cloned().unwrap_or(Value::Undef);
+    let p_b = args.get(1).cloned().unwrap_or(Value::Undef);
+    let p_eps = args.get(2).cloned().unwrap_or_else(|| Value::Num(f64::from_bits(0x3e112e0be826d695_u64)));
+    let out = if ops::apply_binary(BinOp::Eq, p_a.clone(), p_b.clone()).is_truthy() { ops::apply_binary(BinOp::Eq, builtins::apply("is_bool", &[p_a.clone()]), builtins::apply("is_bool", &[p_b.clone()])) } else { if Value::Bool(builtins::apply("is_num", &[p_a.clone()]).is_truthy() && builtins::apply("is_num", &[p_b.clone()]).is_truthy()).is_truthy() { ops::apply_binary(BinOp::Le, builtins::apply("abs", &[ops::apply_binary(BinOp::Sub, p_a.clone(), p_b.clone())]), p_eps.clone()) } else { if Value::Bool(Value::Bool(builtins::apply("is_list", &[p_a.clone()]).is_truthy() && builtins::apply("is_list", &[p_b.clone()]).is_truthy()).is_truthy() && ops::apply_binary(BinOp::Eq, builtins::apply("len", &[p_a.clone()]), builtins::apply("len", &[p_b.clone()])).is_truthy()).is_truthy() { ops::apply_binary(BinOp::Eq, build_vector(vec![]), { let mut l0_acc: Vec<Value> = Vec::new(); for l1_i in iter_values_native(&idx(&[p_a.clone()])?) { { let l2_aa = ops::index(p_a.clone(), &l1_i.clone()); let l3_bb = ops::index(p_b.clone(), &l1_i.clone()); if (if Value::Bool(builtins::apply("is_num", &[l2_aa.clone()]).is_truthy() && builtins::apply("is_num", &[l3_bb.clone()]).is_truthy()).is_truthy() { ops::apply_binary(BinOp::Gt, builtins::apply("abs", &[ops::apply_binary(BinOp::Sub, l2_aa.clone(), l3_bb.clone())]), p_eps.clone()) } else { ops::apply_unary(UnOp::Not, approx(&[l2_aa.clone(), l3_bb.clone(), p_eps.clone()])?) }).is_truthy() { l0_acc.push(Value::Num(f64::from_bits(0x3ff0000000000000_u64)));
+         }  } } build_vector(l0_acc) }) } else { Value::Bool(false) } } };
+    Ok(out)
+}
+
+/// Generated native for `posmod` — semantics route through the interpreter's own value
+/// algebra (`ops::`/`builtins::`), bit-identical to the interpreted reference by construction.
+pub(super) fn posmod(args: &[Value]) -> crate::Result<Value> {
+    let p_x = args.first().cloned().unwrap_or(Value::Undef);
+    let p_m = args.get(1).cloned().unwrap_or(Value::Undef);
+    let out = { if !(Value::Bool(Value::Bool(is_finite(&[p_x.clone()])?.is_truthy() && is_finite(&[p_m.clone()])?.is_truthy()).is_truthy() && ops::apply_unary(UnOp::Not, approx(&[p_m.clone(), Value::Num(f64::from_bits(0x0_u64))])?).is_truthy())).is_truthy() { return Err(super::bosl_assert("generated")); } ops::apply_binary(BinOp::Mod, ops::apply_binary(BinOp::Add, ops::apply_binary(BinOp::Mod, p_x.clone(), p_m.clone()), p_m.clone()), p_m.clone()) };
+    Ok(out)
+}
+
+/// Generated native for `idx` — semantics route through the interpreter's own value
+/// algebra (`ops::`/`builtins::`), bit-identical to the interpreted reference by construction.
+pub(super) fn idx(args: &[Value]) -> crate::Result<Value> {
+    let p_list = args.first().cloned().unwrap_or(Value::Undef);
+    let p_s = args.get(1).cloned().unwrap_or_else(|| Value::Num(f64::from_bits(0x0_u64)));
+    let p_e = args.get(2).cloned().unwrap_or_else(|| ops::apply_unary(UnOp::Neg, Value::Num(f64::from_bits(0x3ff0000000000000_u64))));
+    let p_step = args.get(3).cloned().unwrap_or_else(|| Value::Num(f64::from_bits(0x3ff0000000000000_u64)));
+    let out = { if !(Value::Bool(builtins::apply("is_list", &[p_list.clone()]).is_truthy() || builtins::apply("is_string", &[p_list.clone()]).is_truthy())).is_truthy() { return Err(super::bosl_assert("generated")); } { let l0_ll = builtins::apply("len", &[p_list.clone()]); if ops::apply_binary(BinOp::Eq, l0_ll.clone(), Value::Num(f64::from_bits(0x0_u64))).is_truthy() { build_range(&Value::Num(f64::from_bits(0x0_u64)), &Value::Num(f64::from_bits(0x3ff0000000000000_u64)), &ops::apply_binary(BinOp::Sub, l0_ll.clone(), Value::Num(f64::from_bits(0x3ff0000000000000_u64)))) } else { { let l1_s = posmod(&[p_s.clone(), l0_ll.clone()])?; let l2_e = posmod(&[p_e.clone(), l0_ll.clone()])?; build_range(&l1_s.clone(), &p_step.clone(), &l2_e.clone()) } } } };
     Ok(out)
 }
 

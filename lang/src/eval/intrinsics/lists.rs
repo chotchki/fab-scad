@@ -1,4 +1,3 @@
-use super::math::posmod;
 use super::{bosl_assert, v_is_finite, v_is_list};
 use crate::eval::value::{self, Value};
 use crate::eval::{build_range, build_vector, builtins, iter_values_raw, ops};
@@ -191,31 +190,6 @@ pub(super) fn force_list(args: &[Value]) -> crate::Result<Value> {
             Ok(build_vector(out))
         }
     }
-}
-
-/// BOSL2 `idx(list, s=0, e=-1, step=1)` — the index RANGE of a list (`[0:1:len-1]` for the defaults; an
-/// empty list yields the empty `[0:1:-1]`). Start/end wrap through the real [`posmod`] (so its assert raises
-/// on a non-finite `s`/`e` exactly like the reference), the range builds through the interpreter's
-/// `build_range`.
-pub(super) fn idx(args: &[Value]) -> crate::Result<Value> {
-    let list = args.first().cloned().unwrap_or(Value::Undef);
-    if !(v_is_list(&list) || matches!(list, Value::Str(_))) {
-        return Err(bosl_assert("idx: invalid input"));
-    }
-    let ll = builtins::apply("len", &[list]);
-    let s = args.get(1).cloned().unwrap_or(Value::Num(0.0));
-    let e = args.get(2).cloned().unwrap_or(Value::Num(-1.0));
-    let step = args.get(3).cloned().unwrap_or(Value::Num(1.0));
-    if matches!(ll, Value::Num(n) if n == 0.0) {
-        return Ok(build_range(
-            &Value::Num(0.0),
-            &Value::Num(1.0),
-            &Value::Num(-1.0),
-        ));
-    }
-    let s2 = posmod(&[s, ll.clone()])?;
-    let e2 = posmod(&[e, ll])?;
-    Ok(build_range(&s2, &step, &e2))
 }
 
 /// BOSL2 `in_list(val, list, idx)` — membership via the REAL `search` builtin (its named args are

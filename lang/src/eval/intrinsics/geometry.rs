@@ -1,5 +1,7 @@
-use super::lists::{force_list, idx, select};
-use super::math::{approx, sum};
+use super::generated::approx;
+use super::generated::idx;
+use super::lists::{force_list, select};
+use super::math::sum;
 use super::shape::is_vector;
 use super::{bosl_assert, no_progress, non_terminating, v_is_list};
 use crate::eval::value::Value;

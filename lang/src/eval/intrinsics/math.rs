@@ -1,87 +1,13 @@
 use super::shape::{is_consistent, is_matrix};
-use super::{bosl_assert, is_vector_core, no_progress, non_terminating, v_is_finite, v_is_list};
+use super::{bosl_assert, is_vector_core, no_progress, non_terminating, v_is_finite};
 use crate::eval::value::Value;
 use crate::eval::{build_vector, builtins, iter_values_raw, ops};
 use crate::parser::BinOp;
 
-/// BOSL2 `approx(a,b,eps=_EPSILON)` — tolerant equality, recursing into lists. The num fast path requires
-/// BOTH operands non-NaN (`is_num(NaN)` is false, so the interpreter routes NaN past that branch to the
-/// list-check → `false`); an exotic (non-num) `eps` routes the compare through the interpreter's own op so
-/// its undef-propagation survives. The list branch iterates pairwise (the reference's `idx(a)` is
-/// `[0:1:len-1]` here — `posmod`'s assert can't fire, `len>0` when this branch differs from the `a==b` one).
-pub(super) fn approx(args: &[Value]) -> crate::Result<Value> {
-    let a = args.first().cloned().unwrap_or(Value::Undef);
-    let b = args.get(1).cloned().unwrap_or(Value::Undef);
-    let eps = args.get(2).cloned().unwrap_or(Value::Num(1e-9));
-    approx_val(&a, &b, &eps)
-}
+/// Value-level `approx` for native callers (regions) — a SHIM over the GENERATED native, so the
+/// semantics live in exactly one place. The clones are the slice ABI's price at this seam.
 pub(super) fn approx_val(a: &Value, b: &Value, eps: &Value) -> crate::Result<Value> {
-    use Value::{Bool, Num};
-    if ops::apply_binary(BinOp::Eq, a.clone(), b.clone()).is_truthy() {
-        return Ok(Bool(matches!(a, Bool(_)) == matches!(b, Bool(_))));
-    }
-    if let (Num(x), Num(y)) = (a, b)
-        && !x.is_nan()
-        && !y.is_nan()
-    {
-        return Ok(if let Num(e) = eps {
-            Bool((x - y).abs() <= *e)
-        } else {
-            ops::apply_binary(
-                BinOp::Le,
-                builtins::apply("abs", &[Num(x - y)]),
-                eps.clone(),
-            )
-        });
-    }
-    if v_is_list(a) && v_is_list(b) {
-        let av = iter_values_raw(a);
-        let bv = iter_values_raw(b);
-        if av.len() == bv.len() {
-            for (aa, bb) in av.iter().zip(bv.iter()) {
-                let mismatch = if let (Num(x), Num(y)) = (aa, bb)
-                    && !x.is_nan()
-                    && !y.is_nan()
-                {
-                    if let Num(e) = eps {
-                        (x - y).abs() > *e
-                    } else {
-                        ops::apply_binary(
-                            BinOp::Gt,
-                            builtins::apply("abs", &[Num(x - y)]),
-                            eps.clone(),
-                        )
-                        .is_truthy()
-                    }
-                } else {
-                    !approx_val(aa, bb, eps)?.is_truthy()
-                };
-                if mismatch {
-                    return Ok(Bool(false)); // one collected entry → `[] == [..]` is false
-                }
-            }
-            return Ok(Bool(true));
-        }
-    }
-    Ok(Bool(false))
-}
-
-/// BOSL2 `posmod(x,m)` — the always-positive modulo. The assert passes iff both are finite numbers and
-/// `approx(m,0)` (default eps) is false — i.e. `|m| > 1e-9`; then `(x%m+m)%m` routes through the
-/// interpreter's own `%`/`+`.
-pub(super) fn posmod(args: &[Value]) -> crate::Result<Value> {
-    let x = args.first().cloned().unwrap_or(Value::Undef);
-    let m = args.get(1).cloned().unwrap_or(Value::Undef);
-    let ok = matches!(&x, Value::Num(n) if n.is_finite())
-        && matches!(&m, Value::Num(n) if n.is_finite() && n.abs() > 1e-9);
-    if !ok {
-        return Err(bosl_assert(
-            "posmod: input must be finite numbers, divisor nonzero",
-        ));
-    }
-    let r = ops::apply_binary(BinOp::Mod, x, m.clone());
-    let r = ops::apply_binary(BinOp::Add, r, m.clone());
-    Ok(ops::apply_binary(BinOp::Mod, r, m))
+    super::generated::approx(&[a.clone(), b.clone(), eps.clone()])
 }
 
 /// BOSL2 `sum(v, dflt=0)` — the numeric/vector fast lane is the reference's own trick: `[for(i=v) 1]*v`

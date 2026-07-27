@@ -1,5 +1,5 @@
+use super::generated::approx;
 use super::geometry::{point2d, point3d};
-use super::math::approx;
 use super::shape::is_matrix;
 use super::vectors::{unit, v_theta, vector_angle, vector_axis};
 use super::{bosl_assert, is_vector_core, v_is_finite};

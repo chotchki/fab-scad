@@ -171,7 +171,7 @@ struct Uses {
 pub(crate) fn generate_native(
     reference: &str,
     baked: &[(&str, Baked)],
-    dep_fns: &[&str],
+    siblings: &[(String, Vec<String>)],
 ) -> Result<String, String> {
     let prog = parse(reference).map_err(|e| format!("reference does not parse: {e:?}"))?;
     let Some(StmtKind::FunctionDef { name, params, body }) = prog.stmts.first().map(|s| &s.kind)
@@ -181,7 +181,7 @@ pub(crate) fn generate_native(
 
     let mut em = Emitter {
         baked,
-        dep_fns,
+        siblings,
         locals: Vec::new(),
         fresh: 0,
         uses: Uses::default(),
@@ -224,11 +224,13 @@ pub(crate) fn generate_native(
     Ok(out)
 }
 
-/// Emission state: the baked constants and callable siblings, plus the LEXICAL SCOPE — scad name to
-/// Rust ident, innermost last, so `let` shadowing resolves exactly as the interpreter's scope does.
+/// Emission state: the baked constants and callable siblings (name + DECLARED PARAMS, self
+/// included — that is how self- and mutual recursion resolve, and how named sibling arguments bind
+/// at COMPILE time), plus the LEXICAL SCOPE — scad name to Rust ident, innermost last, so `let`
+/// shadowing resolves exactly as the interpreter's scope does.
 struct Emitter<'a> {
     baked: &'a [(&'a str, Baked)],
-    dep_fns: &'a [&'a str],
+    siblings: &'a [(String, Vec<String>)],
     locals: Vec<(String, String)>,
     fresh: usize,
     uses: Uses,
@@ -239,7 +241,9 @@ impl Emitter<'_> {
     fn fresh_ident(&mut self, name: &str) -> String {
         let id = self.fresh;
         self.fresh += 1;
-        format!("l{id}_{name}")
+        // scad names may lead with `_` (idx's `_s`) — `l1__s` trips non_snake_case, and the
+        // counter already guarantees uniqueness, so the underscores add nothing.
+        format!("l{id}_{}", name.trim_start_matches('_'))
     }
 
     fn expr(&mut self, e: &Expr) -> Result<String, String> {
@@ -309,34 +313,7 @@ impl Emitter<'_> {
                 self.uses.ops = true;
                 Ok(format!("ops::member({}, {field:?})", self.expr(base)?))
             }
-            // Expression `let`: sequential bindings, each seeing the ones before it, gone after the
-            // body — a Rust block with shadow-proof idents is exactly that scope discipline.
-            // DUPLICATE names decline: upstream is first-wins-with-a-warning (AH.2.3) and the
-            // duplicate's RHS still evaluates — reproducing that faithfully buys nothing, since no
-            // registry reference contains one.
-            ExprKind::Let { bindings, body } => {
-                let mark = self.locals.len();
-                let mut block = String::from("{ ");
-                let mut seen: Vec<&str> = Vec::new();
-                for b in bindings {
-                    let Some(bn) = &b.name else {
-                        return Err("unnamed let binding".into());
-                    };
-                    if seen.contains(&&**bn) {
-                        self.locals.truncate(mark);
-                        return Err(format!("duplicate let binding `{bn}`"));
-                    }
-                    seen.push(bn);
-                    let val = self.expr(&b.value)?;
-                    let ident = self.fresh_ident(bn);
-                    let _ = write!(block, "let {ident} = {val}; ");
-                    self.locals.push((bn.to_string(), ident));
-                }
-                let body_s = self.expr(body);
-                self.locals.truncate(mark);
-                let _ = write!(block, "{} }}", body_s?);
-                Ok(block)
-            }
+            ExprKind::Let { bindings, body } => self.let_expr(bindings, body),
             // Expression `assert`: the control-flow contract (Entry doc) — raise where the
             // interpreter raises; the diagnostic string is a locator, not output, and the message
             // args are NOT evaluated (matches the hand natives; upstream only evaluates them on
@@ -357,31 +334,23 @@ impl Emitter<'_> {
                     "{{ if !({c}).is_truthy() {{ return Err(super::bosl_assert(\"generated\")); }} {b} }}"
                 ))
             }
+            // `[start : step? : end]` with computed endpoints — the interpreter's own constructor
+            // carries the coercion rules.
+            ExprKind::Range { start, step, end } => {
+                let s = self.expr(start)?;
+                let t = match step {
+                    Some(t) => self.expr(t)?,
+                    None => "Value::Num(f64::from_bits(0x3ff0000000000000_u64))".to_string(),
+                };
+                let e2 = self.expr(end)?;
+                Ok(format!("build_range(&{s}, &{t}, &{e2})"))
+            }
+            ExprKind::Vector(items) => self.vector(items),
             ExprKind::Call { callee, args } => {
                 let ExprKind::Ident(name) = &callee.kind else {
                     return Err("computed callee".into());
                 };
-                if args.iter().any(|a| a.name.is_some()) {
-                    return Err(format!("named argument in call to `{name}`"));
-                }
-                let emitted: Vec<String> = args
-                    .iter()
-                    .map(|a| self.expr(&a.value))
-                    .collect::<Result<_, _>>()?;
-                if super::builtins::is_builtin(name) {
-                    self.uses.builtins = true;
-                    Ok(format!(
-                        "builtins::apply(\"{name}\", &[{}])",
-                        emitted.join(", ")
-                    ))
-                } else if self.dep_fns.contains(&name.as_str()) {
-                    // a sibling generated native — direct call, fallible ABI threads through
-                    Ok(format!("{name}(&[{}])?", emitted.join(", ")))
-                } else {
-                    Err(format!(
-                        "call to `{name}` (not a builtin or generated sibling)"
-                    ))
-                }
+                self.call(name, args)
             }
             other => Err(format!("construct outside the v0 subset: {other:?}")
                 .chars()
@@ -389,11 +358,222 @@ impl Emitter<'_> {
                 .collect()),
         }
     }
+
+    /// Expression `let`: sequential bindings, each seeing the ones before it, gone after the
+    /// body — a Rust block with shadow-proof idents is exactly that scope discipline. DUPLICATE
+    /// names decline: upstream is first-wins-with-a-warning (AH.2.3) and the duplicate's RHS
+    /// still evaluates — reproducing that faithfully buys nothing, since no registry reference
+    /// contains one.
+    fn let_expr(&mut self, bindings: &[Arg], body: &Expr) -> Result<String, String> {
+        let mark = self.locals.len();
+        let mut block = String::from("{ ");
+        let mut seen: Vec<&str> = Vec::new();
+        for b in bindings {
+            let Some(bn) = &b.name else {
+                return Err("unnamed let binding".into());
+            };
+            if seen.contains(&&**bn) {
+                self.locals.truncate(mark);
+                return Err(format!("duplicate let binding `{bn}`"));
+            }
+            seen.push(bn);
+            let val = self.expr(&b.value)?;
+            let ident = self.fresh_ident(bn);
+            let _ = write!(block, "let {ident} = {val}; ");
+            self.locals.push((bn.to_string(), ident));
+        }
+        let body_s = self.expr(body);
+        self.locals.truncate(mark);
+        let _ = write!(block, "{} }}", body_s?);
+        Ok(block)
+    }
+
+    /// A vector literal. All-plain elements go straight through `build_vector` (the stack
+    /// machine's repr normalization — all-numeric collapses to `NumList`); any comprehension
+    /// element switches to the accumulator block the interpreter's `LcFor` walk mirrors.
+    fn vector(&mut self, items: &[Expr]) -> Result<String, String> {
+        let plain = items.iter().all(|i| {
+            !matches!(
+                i.kind,
+                ExprKind::LcFor { .. }
+                    | ExprKind::LcForC { .. }
+                    | ExprKind::LcIf { .. }
+                    | ExprKind::LcEach(_)
+            )
+        });
+        if plain {
+            let emitted: Vec<String> = items
+                .iter()
+                .map(|i| self.expr(i))
+                .collect::<Result<_, _>>()?;
+            return Ok(format!("build_vector(vec![{}])", emitted.join(", ")));
+        }
+        let acc = self.fresh_ident("acc");
+        let mut block = format!("{{ let mut {acc}: Vec<Value> = Vec::new(); ");
+        for i in items {
+            let _ = write!(block, "{}", self.element(i, &acc)?);
+        }
+        let _ = write!(block, "build_vector({acc}) }}");
+        Ok(block)
+    }
+
+    /// A call by NAME. Resolution order is the AN.10 lesson made structural: a name that is
+    /// lexically BOUND here (a parameter or `let` holding a function value) resolves to the
+    /// BINDING at runtime — `is_vector`'s `all_nonzero` parameter shadowing the like-named
+    /// function is exactly this — and a compiled sibling call would recreate the AN.10 bug, so
+    /// it DECLINES. Then builtins (names decorative, AR.3 — arguments bind positionally in arg
+    /// order), then generated siblings with the full compile-time binding rules.
+    fn call(&mut self, name: &str, args: &[Arg]) -> Result<String, String> {
+        if self.locals.iter().any(|(n, _)| n == name) {
+            return Err(format!(
+                "call through the local binding `{name}` (the AN.10 shape) resolves at runtime"
+            ));
+        }
+        if super::builtins::is_builtin(name) {
+            let emitted: Vec<String> = args
+                .iter()
+                .map(|a| self.expr(&a.value))
+                .collect::<Result<_, _>>()?;
+            self.uses.builtins = true;
+            return Ok(format!(
+                "builtins::apply(\"{name}\", &[{}])",
+                emitted.join(", ")
+            ));
+        }
+        let Some((_, params)) = self.siblings.iter().find(|(n, _)| n == name) else {
+            return Err(format!(
+                "call to `{name}` (not a builtin or generated sibling)"
+            ));
+        };
+        // A generated sibling: everything is static, so the FULL binding rules run at COMPILE
+        // time — a positional takes the lowest unfilled slot (AN.2), a named arg its declared
+        // slot. The flat-slice ABI can only express a contiguous PREFIX of filled slots
+        // (trailing unfilled fall to the callee's defaults); anything else declines.
+        let params = params.clone();
+        let mut slots: Vec<Option<String>> = vec![None; params.len()];
+        for a in args {
+            let v = self.expr(&a.value)?;
+            let slot = if let Some(n) = &a.name {
+                if n.starts_with('$') {
+                    return Err(format!("$-arg in sibling call `{name}`"));
+                }
+                let Some(i) = params.iter().position(|p| p == &**n) else {
+                    return Err(format!("named arg `{n}` unknown to sibling `{name}`"));
+                };
+                if slots[i].is_some() {
+                    return Err(format!("arg `{n}` supplied more than once to `{name}`"));
+                }
+                i
+            } else {
+                let Some(i) = slots.iter().position(Option::is_none) else {
+                    return Err(format!("too many args to sibling `{name}`"));
+                };
+                i
+            };
+            slots[slot] = Some(v);
+        }
+        let filled = slots.iter().take_while(|s| s.is_some()).count();
+        if slots[filled..].iter().any(Option::is_some) {
+            return Err(format!(
+                "non-contiguous arg fill for sibling `{name}` — the slice ABI can't hole"
+            ));
+        }
+        let vals: Vec<String> = slots.into_iter().flatten().collect();
+        Ok(format!("{name}(&[{}])?", vals.join(", ")))
+    }
+
+    /// One VECTOR ELEMENT as statements pushing into `acc` — the compiled mirror of the stack
+    /// machine's `LcFor` walk: `for` nests per binding, `if` contributes conditionally, `each`
+    /// splices through the same iteration seam, an element-position `let` binds and recurses.
+    fn element(&mut self, e: &Expr, acc: &str) -> Result<String, String> {
+        match &e.kind {
+            ExprKind::LcFor { bindings, body } => {
+                let mark = self.locals.len();
+                let mut open = String::new();
+                let mut depth = 0;
+                for b in bindings {
+                    let Some(bn) = &b.name else {
+                        return Err("unnamed comprehension binding".into());
+                    };
+                    // Each iterable is emitted INSIDE the enclosing loops, so a later binding's
+                    // iterable sees the earlier binders — the interpreter's nesting order.
+                    let iter = self.expr(&b.value)?;
+                    let ident = self.fresh_ident(bn);
+                    let _ = write!(open, "for {ident} in iter_values_native(&{iter}) {{ ");
+                    self.locals.push((bn.to_string(), ident));
+                    depth += 1;
+                }
+                let inner = self.element(body, acc);
+                self.locals.truncate(mark);
+                let mut out = open;
+                let _ = write!(out, "{}", inner?);
+                out.push_str(&"} ".repeat(depth));
+                Ok(out)
+            }
+            ExprKind::LcIf { cond, then, els } => {
+                let c = self.expr(cond)?;
+                let t = self.element(then, acc)?;
+                match els {
+                    Some(e2) => {
+                        let e2s = self.element(e2, acc)?;
+                        Ok(format!("if ({c}).is_truthy() {{ {t} }} else {{ {e2s} }} "))
+                    }
+                    None => Ok(format!("if ({c}).is_truthy() {{ {t} }} ")),
+                }
+            }
+            ExprKind::LcEach(inner) => {
+                let v = self.expr(inner)?;
+                let each = self.fresh_ident("each");
+                Ok(format!(
+                    "for {each} in iter_values_native(&{v}) {{ {acc}.push({each}); }} "
+                ))
+            }
+            // an element-position `let` (approx's `let(aa=…, bb=…) if(…) 1`)
+            ExprKind::Let { bindings, body } => {
+                let mark = self.locals.len();
+                let mut out = String::new();
+                let mut seen: Vec<&str> = Vec::new();
+                for b in bindings {
+                    let Some(bn) = &b.name else {
+                        return Err("unnamed let binding".into());
+                    };
+                    if seen.contains(&&**bn) {
+                        self.locals.truncate(mark);
+                        return Err(format!("duplicate let binding `{bn}`"));
+                    }
+                    seen.push(bn);
+                    let val = self.expr(&b.value)?;
+                    let ident = self.fresh_ident(bn);
+                    let _ = write!(out, "let {ident} = {val}; ");
+                    self.locals.push((bn.to_string(), ident));
+                }
+                let body_s = self.element(body, acc);
+                self.locals.truncate(mark);
+                let _ = write!(out, "{}", body_s?);
+                // Scope the binders to this element: a sibling element must not see them.
+                Ok(format!("{{ {out} }} "))
+            }
+            ExprKind::LcForC { .. } => Err("C-style comprehension outside the subset".into()),
+            _ => Ok(format!("{acc}.push({});\n        ", self.expr(e)?)),
+        }
+    }
 }
 
 /// The whole generated FILE for a set of registry entries, header + minimal imports included.
 /// Deterministic: same registry state → same bytes (the regen test's contract).
 pub(crate) fn generate_module(entry_names: &[&str]) -> Result<String, String> {
+    // The sibling table FIRST, whole batch, self included: mutual recursion (approx ↔ idx ↔
+    // posmod is a real 3-cycle) forward-references freely in Rust, and named sibling arguments
+    // bind against these declared param lists at compile time.
+    let mut siblings: Vec<(String, Vec<String>)> = Vec::new();
+    for &name in entry_names {
+        let entry = super::intrinsics::REGISTRY
+            .iter()
+            .find(|e| e.name == name)
+            .ok_or_else(|| format!("`{name}` is not a registry entry"))?;
+        let a = analyze_function(entry.reference)?;
+        siblings.push((a.name, a.params));
+    }
     let mut fns = String::new();
     let mut uses = Uses::default();
     for &name in entry_names {
@@ -417,10 +597,7 @@ pub(crate) fn generate_module(entry_names: &[&str]) -> Result<String, String> {
                 }
             }
         }
-        // Any earlier entry in THIS generation set is callable as a sibling.
-        let older: Vec<&str> =
-            entry_names[..entry_names.iter().position(|n| *n == name).unwrap_or(0)].to_vec();
-        fns.push_str(&generate_native(entry.reference, &baked, &older)?);
+        fns.push_str(&generate_native(entry.reference, &baked, &siblings)?);
         fns.push('\n');
         // regenerate the Uses by scanning the emitted text — cheaper than threading it out, and
         // the regen test pins the final bytes either way
@@ -440,8 +617,11 @@ pub(crate) fn generate_module(entry_names: &[&str]) -> Result<String, String> {
          \x20   clippy::unreadable_literal,\n\
          \x20   clippy::cloned_ref_to_slice_refs,\n\
          \x20   clippy::used_underscore_items,\n\
-         \x20   reason = \"generated code: bit-exact from_bits literals, mechanical clones, and \\\n\
-         \x20             upstream's underscore-prefixed names are the emitter's idiom\"\n\
+         \x20   clippy::possible_missing_else,\n\
+         \x20   clippy::collapsible_else_if,\n\
+         \x20   reason = \"generated code: bit-exact from_bits literals, mechanical clones, \\\n\
+         \x20             upstream's underscore-prefixed names, and one-line block emission \\\n\
+         \x20             are the emitter's idiom\"\n\
          )]\n\n\
          use crate::eval::value::Value;\n",
     );
@@ -456,6 +636,26 @@ pub(crate) fn generate_module(entry_names: &[&str]) -> Result<String, String> {
         (true, false) => header.push_str("use crate::parser::BinOp;\n"),
         (false, true) => header.push_str("use crate::parser::UnOp;\n"),
         (false, false) => {}
+    }
+    // The eval-private helpers (visible here because generated.rs is eval's descendant): the
+    // stack machine's own vector/range construction and the pure iteration seam (AR.9).
+    let helpers: Vec<&str> = [
+        ("build_range", "build_range("),
+        ("build_vector", "build_vector("),
+        ("iter_values_native", "iter_values_native("),
+    ]
+    .iter()
+    .filter(|(_, probe)| fns.contains(probe))
+    .map(|(name, _)| *name)
+    .collect();
+    match helpers.as_slice() {
+        [] => {}
+        [one] => {
+            let _ = writeln!(header, "use crate::eval::{one};");
+        }
+        many => {
+            let _ = writeln!(header, "use crate::eval::{{{}}};", many.join(", "));
+        }
     }
     header.push('\n');
     Ok(header + &fns)
@@ -482,6 +682,13 @@ pub(crate) const GENERATED_ENTRIES: &[&str] = &[
     "is_str",
     "default",
     "last",
+    // AR.9 band 3 — comprehensions live. approx/posmod/idx are a real 3-CYCLE (approx's list
+    // branch calls idx, idx wraps offsets through posmod, posmod's assert calls approx), which is
+    // why siblings resolve batch-wide rather than earlier-only.
+    "_fab_poc_band3",
+    "approx",
+    "posmod",
+    "idx",
 ];
 
 /// Record a CALL by name: builtin or user dep. Deliberately IGNORES the lexical scope — a name

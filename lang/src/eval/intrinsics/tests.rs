@@ -246,6 +246,31 @@ fn generated_band2_matches_the_interpreter() {
     }
 }
 
+/// AR.9 — the comprehension constructs (a `for` over a RANGE literal, an element-position `let`,
+/// a no-else `if`, an `each` splice mixed into the same vector), proven against the interpreter
+/// over the shapes that exercise each arm — including empty and non-numeric iterable bounds.
+#[test]
+fn generated_band3_matches_the_interpreter() {
+    let reference = reference_of("_fab_poc_band3").expect("registered");
+    let (params, body) = parse_fn(reference);
+    let func = resolve("_fab_poc_band3", &params, &body)
+        .expect("its own reference must register")
+        .func;
+    let cases: &[&[Value]] = &[
+        &[Value::Num(4.0)],  // [4, 6, 8, 8, 9] — filter drops 0 and 2
+        &[Value::Num(0.0)],  // filter drops everything → [8, 9]
+        &[Value::Num(-1.0)], // empty range → [8, 9]
+        &[Value::Undef],     // undef bound — the range constructor's coercion, both sides
+        &[],
+    ];
+    for input in cases {
+        assert!(
+            same_result(&func(input), &interpret(reference, input)),
+            "band3 diverged on {input:?}"
+        );
+    }
+}
+
 /// AR.6 — the LIST case the deleted hand `poc_sq` got WRONG: `x * x` with an equal-length numeric
 /// list is the interpreter's DOT PRODUCT, and the hand native answered `Undef`. It sat unnoticed
 /// because no battery input was a list. The generated native routes through `ops::apply_binary`,

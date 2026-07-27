@@ -2558,10 +2558,32 @@ fn splice_into(val: Value, out: &mut Vec<Value>) {
 /// `range_iter`), a string's characters, or a scalar as a single value. A range past
 /// [`RANGE_TOO_MANY`] warns and yields NOTHING (AD.3 — upstream's warn-and-skip).
 fn iter_values(v: &Value, ctx: &Ctx) -> Vec<Value> {
+    if let Value::Range { start, step, end } = v
+        && range_len(*start, *step, *end) >= RANGE_TOO_MANY
+    {
+        ctx.warn(format!(
+            "Bad range parameter in for statement: too many elements ({})",
+            range_len(*start, *step, *end)
+        ));
+        return Vec::new();
+    }
+    iter_values_native(v)
+}
+
+/// [`iter_values`]'s pure core — every arm lives HERE so the two cannot drift; the ctx wrapper
+/// above adds only the too-many-elements WARNING. This is the seam GENERATED natives iterate
+/// through (AR.9): they have no ctx, and the native tier not warning is the standing contract
+/// (no hand native warns either) — the too-many case still yields nothing, so values agree.
+fn iter_values_native(v: &Value) -> Vec<Value> {
     match v {
         Value::NumList(xs) => xs.iter().map(|&x| Value::Num(x)).collect(),
         Value::List(xs) => xs.to_vec(),
-        Value::Range { start, step, end } => range_values(*start, *step, *end, ctx),
+        Value::Range { start, step, end } => {
+            if range_len(*start, *step, *end) >= RANGE_TOO_MANY {
+                return Vec::new();
+            }
+            range_iter(*start, *step, *end).map(Value::Num).collect()
+        }
         Value::Str(s) => s.chars().map(|c| Value::string(c.to_string())).collect(),
         // An OBJECT iterates its KEYS in insertion order (AF.4, the object-tests golden's
         // `[for (i = o1) i]`).

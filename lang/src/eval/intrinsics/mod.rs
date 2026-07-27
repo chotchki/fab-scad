@@ -60,14 +60,16 @@ use affine::{
 #[cfg(test)]
 use generated::{_fab_poc_isup as poc_isup, _fab_poc_near0 as poc_near0, _fab_poc_sq as poc_sq};
 #[cfg(test)]
+use generated::{approx, idx, posmod};
+#[cfg(test)]
 use geometry::{
     get_ear, is_at_left, is_point_on_line, none_inside, point_dist, point2d, tri_class,
     vnf_centroid,
 };
 #[cfg(test)]
-use lists::{force_list, group_sort_by_index, idx, in_list};
+use lists::{force_list, group_sort_by_index, in_list};
 #[cfg(test)]
-use math::{approx, posmod, sum, sum_tail};
+use math::{sum, sum_tail};
 #[cfg(test)]
 use shape::{
     all_nonzero, is_consistent, is_matrix, is_path, is_vector, list_pattern, num_defined,
@@ -701,6 +703,18 @@ pub(super) static REGISTRY: &[Entry] = &[
         builtins: &["is_num"],
         func: generated::_fab_poc_band2,
     },
+    // The AR.9 band-3 mechanism POC: a comprehension (`for` over a RANGE literal, an
+    // element-position `let`, a no-else `if`) MIXED with an `each` splice in one vector — every
+    // construct the comprehension band adds, none shipping unexercised.
+    Entry {
+        name: "_fab_poc_band3",
+        reference: "function _fab_poc_band3(n) = [for (i = [0:n]) let(d = i * 2) if (d > 2) d, each [8, 9]];",
+        consts: &[],
+        consts_v: &[],
+        deps: &[],
+        builtins: &[],
+        func: generated::_fab_poc_band3,
+    },
     // ── O.5.2, the SHAPE band (utility.scad / lists.scad) ────────────────────────────────────────────────
     // The `is_consistent`/`_list_pattern`/`same_shape` bundle is ~4.7s of self time across the O.4 four
     // (every BOSL2 path/vector assert funnels through it), `num_defined`/`force_list` are its cheap leaf
@@ -786,7 +800,7 @@ pub(super) static REGISTRY: &[Entry] = &[
         consts_v: &[],
         deps: &["idx", "posmod", "is_finite", "is_nan"],
         builtins: &["is_bool", "is_num", "abs", "is_list", "is_string", "len"],
-        func: math::approx,
+        func: generated::approx,
     },
     Entry {
         name: "posmod",
@@ -797,7 +811,7 @@ pub(super) static REGISTRY: &[Entry] = &[
         consts_v: &[],
         deps: &["is_finite", "is_nan", "approx"],
         builtins: &["is_num", "abs", "is_bool"],
-        func: math::posmod,
+        func: generated::posmod,
     },
     Entry {
         name: "idx",
@@ -813,7 +827,7 @@ pub(super) static REGISTRY: &[Entry] = &[
         consts_v: &[],
         deps: &["posmod", "is_finite", "is_nan", "approx"],
         builtins: &["is_list", "is_string", "len", "is_num", "abs", "is_bool"],
-        func: lists::idx,
+        func: generated::idx,
     },
     Entry {
         name: "all_nonzero",

@@ -100,13 +100,24 @@ pub struct WireOrient {
 }
 
 /// The source a render evaluates. `Path` (native fs loader) is what desktop sends today; `Bytes`
-/// carries the main file + its import/lib closure in-memory for the fs-less wasm Worker (wired at W.3.6).
+/// carries the main file + its import/lib closure in-memory for the fs-less wasm Worker (wired at
+/// W.3.6). `Pack` (SW.2) is the native PROJECT render: the live buffers ride as an overlay the
+/// hybrid loader consults before the fs, so unsaved edits render with NO shadow mirror — imports
+/// and workspace libraries resolve from the REAL dirs.
 #[derive(Serialize, Deserialize, Clone)]
 pub enum Source {
     Path(String),
     Bytes {
         main: Vec<u8>,
         libs: Vec<(String, Vec<u8>)>,
+    },
+    Pack {
+        /// The project's live buffers: (project-relative path, text) — the hybrid overlay.
+        files: Vec<(String, String)>,
+        /// The overlay key that renders (the project entry).
+        entry: String,
+        /// The REAL project dir: `import()`/`surface()` assets + the loader's fs fallback root.
+        asset_dir: String,
     },
 }
 

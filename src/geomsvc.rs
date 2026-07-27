@@ -348,6 +348,11 @@ fn eval_source(
 ) -> Result<(fab_lang::Geo, Option<std::path::PathBuf>, Vec<String>)> {
     match source {
         Source::Path(path) => eval_path(path, root, preview, quality),
+        Source::Pack {
+            files,
+            entry,
+            asset_dir,
+        } => eval_pack(files, entry, asset_dir, root, preview, quality),
         Source::Bytes { main, libs } => {
             // The wasm worker has no fs — `use`/`include` resolve against the IN-MEMORY lib closure the
             // app gathered (W.3.6 Stage 2), keyed by normalized relative path. Empty = a no-include
@@ -453,6 +458,72 @@ fn eval_path(
 ) -> Result<(fab_lang::Geo, Option<std::path::PathBuf>, Vec<String>)> {
     anyhow::bail!(
         "Path source needs the native fs loader; the wasm worker renders from Source::Bytes"
+    )
+}
+
+/// `Source::Pack` eval (SW.2) — the native PROJECT render: live buffers as the hybrid overlay,
+/// entry wrapped as `include <entry>` (the loader's ROOT CONTRACT: the wrapper is what lets a
+/// dependency's back-include of the entry dedup to the overlay's node instead of splicing twice),
+/// imports + fs fallback rooted at the REAL project dir, workspace libs from `root`. The returned
+/// provenance path is the entry's REAL location, so part naming matches a `Source::Path` render.
+#[cfg(all(feature = "kernel", feature = "native"))]
+fn eval_pack(
+    files: &[(String, String)],
+    entry: &str,
+    asset_dir: &str,
+    root: Option<&str>,
+    preview: bool,
+    quality: Quality,
+) -> Result<(fab_lang::Geo, Option<std::path::PathBuf>, Vec<String>)> {
+    let overlay: std::collections::BTreeMap<std::path::PathBuf, String> = files
+        .iter()
+        .map(|(p, s)| (std::path::PathBuf::from(p), s.clone()))
+        .collect();
+    let base = std::path::PathBuf::from(asset_dir);
+    let wrap = format!("{}include <{entry}>;\n", wrap_header(preview, quality));
+    let libs: Vec<std::path::PathBuf> = root
+        .map(|r| {
+            let r = std::path::Path::new(r);
+            vec![r.join("libs"), r.join("scad-lib")]
+        })
+        .unwrap_or_default();
+    let (tree, messages) = crate::import::resolve_geometry_hybrid_full(
+        &wrap,
+        &base,
+        &overlay,
+        &libs,
+        fab_lang::Config::from_env(),
+    )
+    // Same span rule as `eval_path`: the entry is `include`d separately, so a stamped span is
+    // file-LOCAL (header 0) — mapped against the entry's LIVE buffer (the overlay text IS what
+    // rendered, unlike a disk read which could be stale). Read lazily, only on error.
+    .inspect_err(|e| {
+        if e.error.span().is_some()
+            && let Some(txt) = overlay.get(std::path::Path::new(entry))
+        {
+            record_err_line(txt, 0, &e.error);
+        }
+    })
+    .with_context(|| format!("scad-rs eval of pack entry {entry}"))?;
+    Ok((
+        tree,
+        Some(base.join(entry)),
+        messages.iter().map(|m| m.render()).collect(),
+    ))
+}
+
+/// wasm worker: the hybrid loader is fs-backed — the app sends `Source::Bytes` there instead.
+#[cfg(all(feature = "kernel", not(feature = "native")))]
+fn eval_pack(
+    _files: &[(String, String)],
+    _entry: &str,
+    _asset_dir: &str,
+    _root: Option<&str>,
+    _preview: bool,
+    _quality: Quality,
+) -> Result<(fab_lang::Geo, Option<std::path::PathBuf>, Vec<String>)> {
+    anyhow::bail!(
+        "Pack source needs the native fs fallback; the wasm worker renders from Source::Bytes"
     )
 }
 
@@ -906,6 +977,93 @@ mod tests {
             bed: [40.0; 3],
         });
         assert!(matches!(r, Response::Failed { .. }));
+    }
+
+    // SW.2: a Pack source renders the LIVE BUFFERS over the fs — the overlay entry (not the
+    // stale 3-part disk copy) is what evaluates, its `use` hits the overlay sibling, and
+    // `import()` reads the REAL project dir. 2 parts proves all three at once: the disk copy
+    // would give 3, and a failed svg import would collapse the extrude to 1.
+    #[cfg(feature = "native")]
+    #[test]
+    fn pack_renders_live_buffers_and_real_assets() {
+        let tmp = std::env::temp_dir().join(format!("geomsvc_pack_{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        std::fs::write(
+            tmp.join("model.scad"),
+            "cube(5); translate([20,0,0]) cube(5); translate([40,0,0]) cube(5);",
+        )
+        .unwrap();
+        std::fs::write(
+            tmp.join("stamp.svg"),
+            r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"><rect x="1" y="1" width="8" height="8" fill="black"/></svg>"#,
+        )
+        .unwrap();
+        let files = vec![
+            (
+                "model.scad".to_string(),
+                "use <lib.scad>\ncube(s());\ntranslate([30,0,0]) linear_extrude(2) import(\"stamp.svg\");\n"
+                    .to_string(),
+            ),
+            ("lib.scad".to_string(), "function s() = 6;\n".to_string()),
+        ];
+        let mut store = SolidStore::new(0);
+        let Response::PartsRendered { parts, .. } = handle_with_store(
+            &mut store,
+            Request::RenderParts {
+                source: Source::Pack {
+                    files,
+                    entry: "model.scad".into(),
+                    asset_dir: tmp.to_string_lossy().into_owned(),
+                },
+                root: None,
+                quality: Quality::Draft,
+            },
+        ) else {
+            panic!("pack render failed")
+        };
+        assert_eq!(
+            parts.len(),
+            2,
+            "live buffer (cube + svg extrude), not the 3-part disk copy"
+        );
+    }
+
+    // The ROOT CONTRACT pinned by SW.1's review, tested at the seam that owns it: the Pack wrap
+    // (`include <entry>`) makes the entry an overlay-keyed node, so a dependency's back-include
+    // of the entry DEDUPS instead of splicing its statements twice (which would double the
+    // W.3.34 statement-boundary parts).
+    #[cfg(feature = "native")]
+    #[test]
+    fn pack_back_include_of_the_entry_dedups() {
+        let tmp = std::env::temp_dir().join(format!("geomsvc_packcycle_{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let files = vec![
+            (
+                "main.scad".to_string(),
+                "include <helper.scad>\ncube(5);\ntranslate([20,0,0]) cube(5);\n".to_string(),
+            ),
+            ("helper.scad".to_string(), "include <main.scad>\n".to_string()),
+        ];
+        let mut store = SolidStore::new(0);
+        let Response::PartsRendered { parts, .. } = handle_with_store(
+            &mut store,
+            Request::RenderParts {
+                source: Source::Pack {
+                    files,
+                    entry: "main.scad".into(),
+                    asset_dir: tmp.to_string_lossy().into_owned(),
+                },
+                root: None,
+                quality: Quality::Draft,
+            },
+        ) else {
+            panic!("pack render failed")
+        };
+        assert_eq!(
+            parts.len(),
+            2,
+            "the entry's statements splice ONCE — a doubled splice would give 4"
+        );
     }
 
     // The stateful fab-gui path (W.3): render MINTS a handle, reads REUSE it, Free drops it, and an op

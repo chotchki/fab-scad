@@ -135,6 +135,28 @@ pub fn resolve_geometry_with_base_full(
     )
 }
 
+/// The HYBRID entry (SW.2): `use`/`include` consult `overlay` (the project's live buffers, keyed
+/// project-relative) before the fs; imports + the fs fallback root at `base_dir` — the REAL
+/// project dir, so `import("logo.svg")` reads where the asset actually lives. The seam the
+/// no-shadow native render drives.
+pub fn resolve_geometry_hybrid_full(
+    source: &str,
+    base_dir: &Path,
+    overlay: &std::collections::BTreeMap<PathBuf, String>,
+    library_paths: &[PathBuf],
+    config: fab_lang::Config,
+) -> fab_lang::RunResult<(Geo, Vec<Message>)> {
+    fab_lang::resolve_geometry_hybrid_full(
+        source,
+        base_dir,
+        overlay,
+        library_paths,
+        jit_factory(),
+        config,
+        |raw| read_import(base_dir, raw),
+    )
+}
+
 /// The desktop numeric-JIT factory the eval entry threads into `Ctx` (P.1) — `Some` on a `jit` build (which
 /// `native` implies), `None` on a lean/miri build so cranelift is never a dependency there. The JIT is a
 /// pure native accelerator: `fast == JIT` is bit-identical, so its presence only changes speed. The RUN gate is

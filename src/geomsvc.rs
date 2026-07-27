@@ -464,8 +464,9 @@ fn eval_path(
 /// `Source::Pack` eval (SW.2) — the native PROJECT render: live buffers as the hybrid overlay,
 /// entry wrapped as `include <entry>` (the loader's ROOT CONTRACT: the wrapper is what lets a
 /// dependency's back-include of the entry dedup to the overlay's node instead of splicing twice),
-/// imports + fs fallback rooted at the REAL project dir, workspace libs from `root`. The returned
-/// provenance path is the entry's REAL location, so part naming matches a `Source::Path` render.
+/// fs fallback rooted at the REAL project dir, `import()` at the ENTRY's dir (matching `eval_path`),
+/// workspace libs from `root`. The returned provenance path is the entry's REAL location, so part
+/// naming matches a `Source::Path` render.
 #[cfg(all(feature = "kernel", feature = "native"))]
 fn eval_pack(
     files: &[(String, String)],
@@ -480,6 +481,13 @@ fn eval_pack(
         .map(|(p, s)| (std::path::PathBuf::from(p), s.clone()))
         .collect();
     let base = std::path::PathBuf::from(asset_dir);
+    // `import()` roots at the ENTRY's own dir, matching `eval_path` (and so `fab render` on the same
+    // file); the overlay/include world roots at the project. Equal for a flat project, different the
+    // moment the entry sits in a subdir.
+    let import_dir = base
+        .join(entry)
+        .parent()
+        .map_or_else(|| base.clone(), std::path::Path::to_path_buf);
     let wrap = format!("{}include <{entry}>;\n", wrap_header(preview, quality));
     let libs: Vec<std::path::PathBuf> = root
         .map(|r| {
@@ -490,6 +498,7 @@ fn eval_pack(
     let (tree, messages) = crate::import::resolve_geometry_hybrid_full(
         &wrap,
         &base,
+        &import_dir,
         &overlay,
         &libs,
         fab_lang::Config::from_env(),
@@ -1028,6 +1037,47 @@ mod tests {
         );
     }
 
+    // A NESTED entry roots `import()` at its own dir, not the project root — the same place
+    // `eval_path` (and so `fab render <that file>`) would look. The asset exists ONLY beside the
+    // entry, so a project-root rooting fails the import and collapses the extrude to 1 part.
+    #[cfg(feature = "native")]
+    #[test]
+    fn pack_roots_imports_at_a_nested_entrys_own_dir() {
+        let tmp = std::env::temp_dir().join(format!("geomsvc_packnest_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(tmp.join("sub")).unwrap();
+        std::fs::write(
+            tmp.join("sub/stamp.svg"),
+            r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"><rect x="1" y="1" width="8" height="8" fill="black"/></svg>"#,
+        )
+        .unwrap();
+        let files = vec![(
+            "sub/model.scad".to_string(),
+            "cube(5);\ntranslate([30,0,0]) linear_extrude(2) import(\"stamp.svg\");\n".to_string(),
+        )];
+        let mut store = SolidStore::new(0);
+        let Response::PartsRendered { parts, .. } = handle_with_store(
+            &mut store,
+            Request::RenderParts {
+                source: Source::Pack {
+                    files,
+                    entry: "sub/model.scad".into(),
+                    asset_dir: tmp.to_string_lossy().into_owned(),
+                },
+                root: None,
+                quality: Quality::Draft,
+            },
+        ) else {
+            panic!("pack render failed")
+        };
+        assert_eq!(
+            parts.len(),
+            2,
+            "the svg beside the nested entry resolved — a project-root rooting would give 1"
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
     // The ROOT CONTRACT pinned by SW.1's review, tested at the seam that owns it: the Pack wrap
     // (`include <entry>`) makes the entry an overlay-keyed node, so a dependency's back-include
     // of the entry DEDUPS instead of splicing its statements twice (which would double the
@@ -1042,7 +1092,10 @@ mod tests {
                 "main.scad".to_string(),
                 "include <helper.scad>\ncube(5);\ntranslate([20,0,0]) cube(5);\n".to_string(),
             ),
-            ("helper.scad".to_string(), "include <main.scad>\n".to_string()),
+            (
+                "helper.scad".to_string(),
+                "include <main.scad>\n".to_string(),
+            ),
         ];
         let mut store = SolidStore::new(0);
         let Response::PartsRendered { parts, .. } = handle_with_store(

@@ -136,12 +136,19 @@ pub fn resolve_geometry_with_base_full(
 }
 
 /// The HYBRID entry (SW.2): `use`/`include` consult `overlay` (the project's live buffers, keyed
-/// project-relative) before the fs; imports + the fs fallback root at `base_dir` — the REAL
-/// project dir, so `import("logo.svg")` reads where the asset actually lives. The seam the
-/// no-shadow native render drives.
+/// project-relative) before the fs; the fs fallback roots at `base_dir` — the REAL project dir,
+/// which is also what the overlay keys are relative to. The seam the no-shadow native render drives.
+///
+/// `import_dir` is DELIBERATELY separate from `base_dir`. Overlay keys are project-relative, so the
+/// include world has to root at the project; `import()`/`surface()` root at the file doing the
+/// importing, which for the render's wrapper is the ENTRY's own directory. They coincide for a flat
+/// project and diverge the moment the entry is nested (a `.scadproj` with `src/main.scad`, or a
+/// set-entry onto a subdir sibling) — conflating them made the GUI resolve `import("thing.dat")`
+/// somewhere `fab render` on the same file would not.
 pub fn resolve_geometry_hybrid_full(
     source: &str,
     base_dir: &Path,
+    import_dir: &Path,
     overlay: &std::collections::BTreeMap<PathBuf, String>,
     library_paths: &[PathBuf],
     config: fab_lang::Config,
@@ -153,7 +160,7 @@ pub fn resolve_geometry_hybrid_full(
         library_paths,
         jit_factory(),
         config,
-        |raw| read_import(base_dir, raw),
+        |raw| read_import(import_dir, raw),
     )
 }
 

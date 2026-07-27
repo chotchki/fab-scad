@@ -220,6 +220,28 @@ fn fast_equals_slow_bit_for_bit() {
     );
 }
 
+/// AR.6 — the LIST case the deleted hand `poc_sq` got WRONG: `x * x` with an equal-length numeric
+/// list is the interpreter's DOT PRODUCT, and the hand native answered `Undef`. It sat unnoticed
+/// because no battery input was a list. The generated native routes through `ops::apply_binary`,
+/// so it cannot disagree with the interpreter on dispatch shape — the transpiler's first CORRECTED
+/// divergence, pinned.
+#[test]
+fn generated_poc_sq_matches_the_interpreter_on_lists() {
+    let reference = reference_of("_fab_poc_sq").expect("POC registered");
+    for v in [
+        Value::num_list(vec![1.0, 2.0, 3.0]), // dot with itself: 14
+        Value::num_list(vec![]),              // empty: the empties rule
+        Value::Undef,
+    ] {
+        let input = [v];
+        assert!(
+            same_result(&poc_sq(&input), &interpret(reference, &input)),
+            "generated vs interpreter diverged on {:?}",
+            input[0]
+        );
+    }
+}
+
 /// The SLOW side for a reference that reads a TOP-LEVEL CONSTANT (`_EPSILON`): like [`interpret`], plus
 /// the named constants bound into the scope first — in a real program they'd resolve from the home-island
 /// global, and the const GUARD (O.5.1) is what certifies the bound value matches the intrinsic's bake.

@@ -20,6 +20,7 @@
 
 use std::collections::BTreeSet;
 
+use super::value::Value;
 use crate::parser::{Arg, Expr, ExprKind, Parameter, StmtKind, parse};
 
 /// What one function's reference source reaches, by name — the raw material for an `Entry`'s guard
@@ -112,6 +113,272 @@ pub(crate) fn analyze_closed(
     out.deps.remove(&own);
     Ok(out)
 }
+
+/// A constant value a generated native BAKES, in a form that can be emitted bit-exactly
+/// (`f64::from_bits`) — never a decimal round-trip.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum Baked {
+    Num(f64),
+    NumList(Vec<f64>),
+}
+
+impl Baked {
+    /// The Rust expression constructing this value, bit-exact.
+    fn emit(&self) -> String {
+        match self {
+            Self::Num(n) => emit_num(*n),
+            Self::NumList(xs) => format!(
+                "Value::num_list(vec![{}])",
+                xs.iter()
+                    .map(|x| format!("f64::from_bits({:#x}_u64)", x.to_bits()))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        }
+    }
+}
+
+fn emit_num(n: f64) -> String {
+    format!("Value::Num(f64::from_bits({:#x}_u64))", n.to_bits())
+}
+
+/// What the emitter pulled in — drives the generated file's `use` lines so they stay minimal and
+/// clippy-clean (an unconditional import block would trip `unused_imports` the first time a
+/// generated set doesn't use one).
+#[derive(Default)]
+struct Uses {
+    ops: bool,
+    builtins: bool,
+    binop: bool,
+    unop: bool,
+}
+
+/// AR.6 — generate the Rust native for one `function name(params) = body;` reference, in the
+/// `poc.rs` IDIOM: every operation routes through `ops::apply_binary` / `builtins::apply` — the
+/// interpreter's own value algebra — so composition is bit-identical BY CONSTRUCTION and what
+/// compilation deletes is the interpretation overhead (scope maps become locals, dispatch becomes
+/// direct calls). `baked` supplies the constant VALUES the entry's guards prove at arm time;
+/// `dep_fns` names sibling GENERATED natives a dep call may bind to directly.
+///
+/// # Errors
+/// A construct outside the v0 subset (strings, `let`, comprehensions, indexing, asserts …)
+/// declines LOUDLY with the construct named — a partial native would be a wrong native.
+pub(crate) fn generate_native(
+    reference: &str,
+    baked: &[(&str, Baked)],
+    dep_fns: &[&str],
+) -> Result<String, String> {
+    let prog = parse(reference).map_err(|e| format!("reference does not parse: {e:?}"))?;
+    let Some(StmtKind::FunctionDef { name, params, body }) = prog.stmts.first().map(|s| &s.kind)
+    else {
+        return Err("reference holds no function definition".into());
+    };
+
+    let mut uses = Uses::default();
+    let cx = EmitCx {
+        params: &params
+            .iter()
+            .map(|p| p.name.to_string())
+            .collect::<Vec<_>>(),
+        baked,
+        dep_fns,
+    };
+    let mut out = String::new();
+    out.push_str(&format!(
+        "/// Generated native for `{name}` — semantics route through the interpreter's own value\n\
+         /// algebra (`ops::`/`builtins::`), bit-identical to the interpreted reference by construction.\n\
+         pub(super) fn {name}(args: &[Value]) -> crate::Result<Value> {{\n"
+    ));
+    for (i, p) in params.iter().enumerate() {
+        let getter = if i == 0 {
+            "args.first()".to_string()
+        } else {
+            format!("args.get({i})")
+        };
+        let default = match &p.default {
+            None => "Value::Undef".to_string(),
+            Some(d) => emit_expr(d, &cx, &mut uses)
+                .map_err(|e| format!("{name}: default of `{}`: {e}", p.name))?,
+        };
+        // A cheap default binds eagerly (`unwrap_or`); a constructing one stays lazy.
+        let bind = if default == "Value::Undef" {
+            format!("{getter}.cloned().unwrap_or(Value::Undef)")
+        } else {
+            format!("{getter}.cloned().unwrap_or_else(|| {default})")
+        };
+        out.push_str(&format!("    let p_{} = {bind};\n", p.name));
+    }
+    let body_expr = emit_expr(body, &cx, &mut uses).map_err(|e| format!("{name}: {e}"))?;
+    // The `let out` shape keeps clippy quiet when the whole body is a fallible sibling call
+    // (`Ok(f(..)?)` would be needless_question_mark).
+    out.push_str(&format!("    let out = {body_expr};\n    Ok(out)\n}}\n"));
+    Ok(out)
+}
+
+struct EmitCx<'a> {
+    params: &'a [String],
+    baked: &'a [(&'a str, Baked)],
+    dep_fns: &'a [&'a str],
+}
+
+fn emit_expr(e: &Expr, cx: &EmitCx<'_>, uses: &mut Uses) -> Result<String, String> {
+    use crate::parser::BinOp;
+    match &e.kind {
+        ExprKind::Num(n) => Ok(emit_num(*n)),
+        ExprKind::Bool(b) => Ok(format!("Value::Bool({b})")),
+        ExprKind::Undef => Ok("Value::Undef".to_string()),
+        ExprKind::Ident(name) => {
+            if cx.params.iter().any(|p| p == name) {
+                Ok(format!("p_{name}.clone()"))
+            } else if let Some((_, b)) = cx.baked.iter().find(|(n, _)| n == name) {
+                Ok(b.emit())
+            } else {
+                Err(format!("free read `{name}` has no baked value"))
+            }
+        }
+        ExprKind::Unary { op, operand } => {
+            uses.ops = true;
+            uses.unop = true;
+            Ok(format!(
+                "ops::apply_unary(UnOp::{op:?}, {})",
+                emit_expr(operand, cx, uses)?
+            ))
+        }
+        // `&&`/`||` SHORT-CIRCUIT in the interpreter (the stack machine's ShortCircuit task);
+        // `apply_binary`'s And/Or arms are the both-evaluated case only. Rust's own `&&`/`||`
+        // mirror the laziness exactly.
+        ExprKind::Binary {
+            op: op @ (BinOp::And | BinOp::Or),
+            lhs,
+            rhs,
+        } => {
+            let sym = if matches!(op, BinOp::And) { "&&" } else { "||" };
+            Ok(format!(
+                "Value::Bool({}.is_truthy() {sym} {}.is_truthy())",
+                emit_expr(lhs, cx, uses)?,
+                emit_expr(rhs, cx, uses)?
+            ))
+        }
+        ExprKind::Binary { op, lhs, rhs } => {
+            uses.ops = true;
+            uses.binop = true;
+            Ok(format!(
+                "ops::apply_binary(BinOp::{op:?}, {}, {})",
+                emit_expr(lhs, cx, uses)?,
+                emit_expr(rhs, cx, uses)?
+            ))
+        }
+        ExprKind::Ternary { cond, then, els } => Ok(format!(
+            "if {}.is_truthy() {{ {} }} else {{ {} }}",
+            emit_expr(cond, cx, uses)?,
+            emit_expr(then, cx, uses)?,
+            emit_expr(els, cx, uses)?
+        )),
+        ExprKind::Call { callee, args } => {
+            let ExprKind::Ident(name) = &callee.kind else {
+                return Err("computed callee".into());
+            };
+            if args.iter().any(|a| a.name.is_some()) {
+                return Err(format!("named argument in call to `{name}`"));
+            }
+            let emitted: Vec<String> = args
+                .iter()
+                .map(|a| emit_expr(&a.value, cx, uses))
+                .collect::<Result<_, _>>()?;
+            if super::builtins::is_builtin(name) {
+                uses.builtins = true;
+                Ok(format!(
+                    "builtins::apply(\"{name}\", &[{}])",
+                    emitted.join(", ")
+                ))
+            } else if cx.dep_fns.contains(&name.as_str()) {
+                // a sibling generated native — direct call, fallible ABI threads through
+                Ok(format!("{name}(&[{}])?", emitted.join(", ")))
+            } else {
+                Err(format!(
+                    "call to `{name}` (not a builtin or generated sibling)"
+                ))
+            }
+        }
+        other => Err(format!("construct outside the v0 subset: {other:?}")
+            .chars()
+            .take(120)
+            .collect()),
+    }
+}
+
+/// The whole generated FILE for a set of registry entries, header + minimal imports included.
+/// Deterministic: same registry state → same bytes (the regen test's contract).
+pub(crate) fn generate_module(entry_names: &[&str]) -> Result<String, String> {
+    let mut fns = String::new();
+    let mut uses = Uses::default();
+    for &name in entry_names {
+        let entry = super::intrinsics::REGISTRY
+            .iter()
+            .find(|e| e.name == name)
+            .ok_or_else(|| format!("`{name}` is not a registry entry"))?;
+        let mut baked: Vec<(&str, Baked)> = entry
+            .consts
+            .iter()
+            .map(|&(n, v)| (n, Baked::Num(v)))
+            .collect();
+        for &(n, build) in entry.consts_v {
+            match build() {
+                Value::Num(x) => baked.push((n, Baked::Num(x))),
+                Value::NumList(xs) => baked.push((n, Baked::NumList(xs.to_vec()))),
+                other => {
+                    return Err(format!(
+                        "{name}: consts_v `{n}` bakes {other:?} — not emittable in v0"
+                    ));
+                }
+            }
+        }
+        // Any earlier entry in THIS generation set is callable as a sibling.
+        let older: Vec<&str> =
+            entry_names[..entry_names.iter().position(|n| *n == name).unwrap_or(0)].to_vec();
+        fns.push_str(&generate_native(entry.reference, &baked, &older)?);
+        fns.push('\n');
+        // regenerate the Uses by scanning the emitted text — cheaper than threading it out, and
+        // the regen test pins the final bytes either way
+        uses.ops |= fns.contains("ops::");
+        uses.builtins |= fns.contains("builtins::apply");
+        uses.binop |= fns.contains("BinOp::");
+        uses.unop |= fns.contains("UnOp::");
+    }
+    let mut header = String::from(
+        "// GENERATED by `eval::transpile::generate_module` (AR.6) — DO NOT EDIT.\n\
+         // Refresh: FAB_REGEN=1 cargo nextest run -p fab-lang -E 'test(generated_file_is_current)'\n\
+         //\n\
+         // Every operation routes through the interpreter's own value algebra, so a generated\n\
+         // native is bit-identical to interpreting its reference BY CONSTRUCTION — the win is the\n\
+         // deleted interpretation overhead, not different math.\n\n\
+         use crate::eval::value::Value;\n",
+    );
+    match (uses.ops, uses.builtins) {
+        (true, true) => header.push_str("use crate::eval::{builtins, ops};\n"),
+        (true, false) => header.push_str("use crate::eval::ops;\n"),
+        (false, true) => header.push_str("use crate::eval::builtins;\n"),
+        (false, false) => {}
+    }
+    match (uses.binop, uses.unop) {
+        (true, true) => header.push_str("use crate::parser::{BinOp, UnOp};\n"),
+        (true, false) => header.push_str("use crate::parser::BinOp;\n"),
+        (false, true) => header.push_str("use crate::parser::UnOp;\n"),
+        (false, false) => {}
+    }
+    header.push('\n');
+    Ok(header + &fns)
+}
+
+/// The entries the generated module currently covers, in DEPENDENCY order (a sibling call may
+/// only reach entries earlier in this list). Growing this list is how an intrinsic migrates from
+/// hand-written to generated (AR.7).
+pub(crate) const GENERATED_ENTRIES: &[&str] = &[
+    "_fab_poc_sq",
+    "_fab_poc_near0",
+    "_fab_poc_outer",
+    "_fab_poc_isup",
+];
 
 /// Record a CALL by name: builtin or user dep. Deliberately IGNORES the lexical scope — a name
 /// that is also a binding is the AN.10 shape (a parameter shadowing a function in call position),
@@ -400,6 +667,27 @@ mod tests {
             "{} guard-list deltas:\n{}",
             deltas.len(),
             deltas.join("\n")
+        );
+    }
+
+    /// The generated file is BYTE-IDENTICAL to what the generator produces from today's registry —
+    /// the checked-in-output contract that answers the design doc's build-cost kill risk (no
+    /// build.rs; contributors pay nothing; drift is a red test, refreshed explicitly).
+    #[test]
+    fn generated_file_is_current() {
+        let want = super::generate_module(super::GENERATED_ENTRIES).expect("generates");
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/eval/intrinsics/generated.rs"
+        );
+        if std::env::var_os("FAB_REGEN").is_some() {
+            std::fs::write(path, &want).expect("write generated.rs");
+            return;
+        }
+        let have = include_str!("intrinsics/generated.rs");
+        assert_eq!(
+            have, want,
+            "generated.rs is stale — refresh with FAB_REGEN=1 (see the file header)"
         );
     }
 

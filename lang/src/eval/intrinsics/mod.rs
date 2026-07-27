@@ -27,6 +27,9 @@ use crate::parser::{Expr, Parameter};
 
 mod affine;
 mod fingerprint;
+// Generated code keeps its emitter's exact bytes — the regen test pins them; fmt stays out.
+#[rustfmt::skip]
+mod generated;
 mod geometry;
 mod lists;
 mod math;
@@ -55,6 +58,8 @@ use affine::{
     rot,
 };
 #[cfg(test)]
+use generated::{_fab_poc_isup as poc_isup, _fab_poc_near0 as poc_near0, _fab_poc_sq as poc_sq};
+#[cfg(test)]
 use geometry::{
     get_ear, is_at_left, is_point_on_line, none_inside, point_dist, point2d, tri_class,
     vnf_centroid,
@@ -63,8 +68,6 @@ use geometry::{
 use lists::{force_list, group_sort_by_index, idx, in_list};
 #[cfg(test)]
 use math::{approx, posmod, sum, sum_tail};
-#[cfg(test)]
-use poc::{poc_isup, poc_near0, poc_sq};
 #[cfg(test)]
 use shape::{
     all_nonzero, is_consistent, is_matrix, is_path, is_vector, list_pattern, num_defined,
@@ -530,7 +533,7 @@ pub(super) static REGISTRY: &[Entry] = &[
         consts_v: &[],
         deps: &[],
         builtins: &[],
-        func: poc::poc_sq,
+        func: generated::_fab_poc_sq,
     },
     // BOSL2 `is_def`/`is_str` — the two hottest LEAF predicates (called in nearly every optional-arg check
     // and string guard). Verbatim from libs/BOSL2/builtins.scad.
@@ -656,7 +659,7 @@ pub(super) static REGISTRY: &[Entry] = &[
         consts_v: &[],
         deps: &[],
         builtins: &["abs"],
-        func: poc::poc_near0,
+        func: generated::_fab_poc_near0,
     },
     // The DEP-const POC (AN.17): empty `consts` of its own, but a dep that carries one. Exists to pin the
     // case AN.11's guard was written for and could not reach — see `arm_guarded_intrinsics`.
@@ -672,7 +675,7 @@ pub(super) static REGISTRY: &[Entry] = &[
         // reroute the interpreted body while the native kept the real builtin. Found by the AR.5
         // analyzer's registry comparison (`transpile::tests`), the first hand-list gap it caught.
         builtins: &["abs"],
-        func: poc::poc_outer,
+        func: generated::_fab_poc_outer,
     },
     // The VALUE-const guard POC (O.8): bakes the vector constant `UP` — wires only when the home scope's
     // `UP` is bit-exactly `[0,0,1]` AS A NumList ([`value_bits_eq`] is variant-exact). The real consumers
@@ -684,7 +687,7 @@ pub(super) static REGISTRY: &[Entry] = &[
         consts_v: &[("UP", poc::poc_up_value)],
         deps: &[],
         builtins: &[],
-        func: poc::poc_isup,
+        func: generated::_fab_poc_isup,
     },
     // ── O.5.2, the SHAPE band (utility.scad / lists.scad) ────────────────────────────────────────────────
     // The `is_consistent`/`_list_pattern`/`same_shape` bundle is ~4.7s of self time across the O.4 four

@@ -1,43 +1,15 @@
+//! What remains of the O.1/O.8 hand-written proof-of-concept intrinsics. The four natives that
+//! lived here (`poc_sq`, `poc_near0`, `poc_outer`, `poc_isup`) were the FIRST hand code the AR.6
+//! transpiler deleted: `generated.rs` now carries mechanically-derived equivalents, and the swap
+//! FIXED a latent fast_eq violation — the hand `poc_sq` answered `Undef` for an equal-length
+//! numeric list where the interpreted reference (`x * x`) takes the DOT PRODUCT; the generated
+//! native routes through `ops::apply_binary` and cannot make that class of mistake.
+
 use crate::eval::value::Value;
-use crate::eval::{builtins, ops};
-use crate::parser::BinOp;
-
-/// The POC intrinsic: `x * x`. Mirrors the interpreter's `Num * Num` (and `undef` for a non-number arg, as
-/// `apply_binary` yields). Deliberately trivial — it exists to exercise the mechanism, not to be fast.
-pub(super) fn poc_sq(args: &[Value]) -> crate::Result<Value> {
-    Ok(match args {
-        [Value::Num(x)] => Value::Num(x * x),
-        _ => Value::Undef,
-    })
-}
-
-/// The const-guard POC: `abs(x) < _EPSILON` with `_EPSILON` baked as 1e-9 (the guard proves the bake).
-/// Routes through the REAL `abs` builtin + the interpreter's own `<`, so it can't diverge on exotic inputs
-/// (`abs` of a list/undef, `undef < num`) — bit-identical by construction, like `select`.
-pub(super) fn poc_near0(args: &[Value]) -> crate::Result<Value> {
-    let x = args.first().cloned().unwrap_or(Value::Undef);
-    let a = builtins::apply("abs", &[x]);
-    Ok(ops::apply_binary(BinOp::Lt, a, Value::Num(1e-9)))
-}
-
-/// The DEP-const POC (AN.17): `_fab_poc_outer(x) = _fab_poc_near0(x);`.
-///
-/// Carries NO constant of its own — it INLINES the dep, and the dep is what bakes `_EPSILON` at 1e-9.
-/// That is the whole point: it models the registry's real shape (`select`, `is_matrix`, `sum`, `v_abs`
-/// and friends all have empty `consts` and a dep that carries one), so the only thing that can veto it is
-/// a check on its DEP's island.
-pub(super) fn poc_outer(args: &[Value]) -> crate::Result<Value> {
-    poc_near0(args) // the baked-1e-9 reading, exactly as a real native inlines its dep
-}
 
 /// The Value-const guard POC's expected `UP` — built like the `[0,0,1]` literal would (a `NumList`).
+/// Stays hand-written: it is the `consts_v` EXPECTATION the arm-time guard compares against, not a
+/// native implementation.
 pub(super) fn poc_up_value() -> Value {
     Value::num_list(vec![0.0, 0.0, 1.0])
-}
-
-/// The Value-const-guard POC: `v == UP` with `UP` baked as `[0,0,1]` (the `consts_v` guard proves the bake).
-/// The `==` routes through the interpreter's own op — exotic `v` compares exactly as interpreted.
-pub(super) fn poc_isup(args: &[Value]) -> crate::Result<Value> {
-    let v = args.first().cloned().unwrap_or(Value::Undef);
-    Ok(ops::apply_binary(BinOp::Eq, v, poc_up_value()))
 }

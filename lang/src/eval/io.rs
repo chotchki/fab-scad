@@ -212,25 +212,284 @@ where
     let mut files = FileTable::new();
     let mut warnings: Vec<Message> = Vec::new();
     loop {
-        match resolve_source(source, base_dir, None, &scad, &files, jit_factory, config)? {
+        // AP.2 parity with `drive`: a failing round owes the console the loader warnings this loop
+        // accumulated — they printed before eval started, so they read first (a bare `?` dropped them).
+        let resolution =
+            match resolve_source(source, base_dir, None, &scad, &files, jit_factory, config) {
+                Ok(resolution) => resolution,
+                Err(failure) => return Err(behind(warnings, failure)),
+            };
+        match resolution {
             Resolution::Complete { geo, messages } => {
                 warnings.extend(messages);
                 return Ok((geo, warnings));
             }
             Resolution::Incomplete { needs } => {
                 for need in needs {
-                    fulfill_from_map(
+                    if let Err(error) = fulfill_from_map(
                         need,
                         sources,
                         &mut mesh_reader,
                         &mut scad,
                         &mut files,
                         &mut warnings,
-                    )?;
+                    ) {
+                        return Err(behind(warnings, error.into()));
+                    }
                 }
             }
         }
     }
+}
+
+/// Drive the needs fixpoint from an in-memory OVERLAY backed by the filesystem — the HYBRID driver
+/// (SW.1) native project renders use. The overlay holds the project's LIVE buffers, keyed by
+/// project-relative path (exactly [`drive_from_map`]'s map shape); everything it doesn't hold —
+/// workspace libraries (BOSL2, scad-lib), absolute references — falls through to the fs loader
+/// (`resolve` against `base_dir` + `library_paths`). This is what lets the GUI render unsaved
+/// edits with NO disk mirror: project refs hit the overlay, libraries come off disk, and
+/// `import`/`surface` still flow through `mesh_reader` (the caller roots it at the REAL project
+/// dir, so relative assets read from where they actually live).
+///
+/// The precedence rule is load-bearing in BOTH directions: a VIRTUAL (relative) `from_dir`
+/// consults the overlay first, then the fs; a REAL (absolute) `from_dir` — a library resolved
+/// from disk — NEVER consults the overlay, so a project file named like a library's internal
+/// include can't shadow it. One refinement closes the loop (the SW.1 review's subtree finding):
+/// an fs hit that canonicalizes INSIDE the project re-enters the virtual world — its id goes
+/// project-relative (one graph node however it was reached, whatever the ref's case) and the
+/// overlay's live buffer beats the disk bytes if it holds that key.
+///
+/// ROOT CONTRACT (same as [`drive_from_map`], pinned by the review): the root has no id, so a
+/// dependency including the ENTRY back dedups only if `source` is a synthetic wrapper
+/// (`include <entry.scad>` — the geomsvc idiom) rather than the entry's own text; a raw-text root
+/// that the overlay also holds would splice twice on a back-include.
+///
+/// # Errors
+/// [`Error::Parse`](crate::Error::Parse) for a malformed ROOT source, a `mesh_reader` failure, or
+/// any evaluation error. (A missing/broken lib is tolerated — warn + empty — as in both sibling
+/// drivers.)
+pub(crate) fn drive_hybrid<R>(
+    source: &str,
+    base_dir: &Path,
+    overlay: &std::collections::BTreeMap<PathBuf, String>,
+    library_paths: &[PathBuf],
+    jit_factory: Option<&dyn NumericJitFactory>,
+    config: super::Config,
+    mut mesh_reader: R,
+) -> crate::RunResult<(Geo, Vec<Message>)>
+where
+    R: FnMut(&str) -> crate::Result<Imported>,
+{
+    // Key shape is a CONTRACT the probes depend on (every probe is a `normalize_lexical` output),
+    // so normalize the caller's keys once here — a `./util.scad` key must match, not silently
+    // miss into the fs fallback. Values borrow; only the keys re-derive.
+    let overlay: std::collections::BTreeMap<PathBuf, &str> = overlay
+        .iter()
+        .filter_map(|(k, v)| normalize_lexical(k).map(|nk| (nk, v.as_str())))
+        .collect();
+    // The root lives in the OVERLAY world: its refs carry the virtual root dir (""), so they
+    // consult the overlay first. `base_dir` (the REAL project dir) enters only at fs fallback —
+    // canonicalized ONCE so under-project hits can re-enter the virtual world (true-case).
+    let canon_base = std::fs::canonicalize(base_dir).ok();
+    let virtual_root = Path::new("");
+    let mut scad = SourceMap::new();
+    let mut files = FileTable::new();
+    let mut warnings: Vec<Message> = Vec::new();
+    loop {
+        let resolution = match resolve_source(
+            source,
+            virtual_root,
+            None,
+            &scad,
+            &files,
+            jit_factory,
+            config,
+        ) {
+            Ok(resolution) => resolution,
+            Err(failure) => return Err(behind(warnings, failure)),
+        };
+        match resolution {
+            Resolution::Complete { geo, messages } => {
+                warnings.extend(messages);
+                return Ok((geo, warnings));
+            }
+            Resolution::Incomplete { needs } => {
+                for need in needs {
+                    if let Err(error) = fulfill_hybrid(
+                        need,
+                        base_dir,
+                        canon_base.as_deref(),
+                        &overlay,
+                        library_paths,
+                        &mut mesh_reader,
+                        &mut scad,
+                        &mut files,
+                        &mut warnings,
+                    ) {
+                        return Err(behind(warnings, error.into()));
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Parse-tolerant [`ProvidedSource`] insert — the one shape every hybrid arm lands through
+/// (overlay hit, project re-entry, disk library): warn + empty on a broken lib (M.6.1), dir =
+/// the id's parent (`""` for a root-level virtual id; an absolute id always has a real parent).
+fn insert_parsed(
+    scad: &mut SourceMap,
+    key: (PathBuf, String),
+    id: PathBuf,
+    text: &str,
+    raw: &str,
+    warnings: &mut Vec<Message>,
+) {
+    let dir = id.parent().unwrap_or(Path::new("")).to_path_buf();
+    let program = parse(text).unwrap_or_else(|_| {
+        warnings.push(Message::Warning(format!("Failed to parse '{raw}'.")));
+        empty_program()
+    });
+    scad.insert(
+        key,
+        ProvidedSource {
+            id,
+            dir,
+            program,
+            source: Rc::from(text),
+        },
+    );
+}
+
+/// [`fulfill`]'s hybrid sibling (SW.1): the overlay serves virtual-dir `Scad` refs first, the fs
+/// serves everything else — font, dedup, and warn-and-render tolerance doctrine identical to both
+/// existing twins. The overlay probe is `normalize(from_dir.join(raw))` ONLY — no bare-raw tier:
+/// `drive_from_map`'s second probe is its LIBRARY-root rule, and transplanting it here would grant
+/// the project root a search tier the fs driver doesn't have (a subdir's `include <colors.scad>`
+/// silently binding a root buffer where the CLI reaches a workspace library — the review's
+/// blocker). An fs hit that canonicalizes under `canon_base` re-enters the virtual world instead:
+/// project-relative id (one node however the file is reached, whatever the ref's case — APFS
+/// canonicalize is true-case) and the overlay's live buffer beats the disk bytes when it holds
+/// that key.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the fulfill-twin signature plus the hybrid's three roots (overlay + real/canonical \
+              base); a params struct would obscure the sibling symmetry the three fulfills share"
+)]
+fn fulfill_hybrid<R>(
+    need: SourceNeed,
+    base_dir: &Path,
+    canon_base: Option<&Path>,
+    overlay: &std::collections::BTreeMap<PathBuf, &str>,
+    library_paths: &[PathBuf],
+    mesh_reader: &mut R,
+    scad: &mut SourceMap,
+    files: &mut FileTable,
+    warnings: &mut Vec<Message>,
+) -> crate::Result<()>
+where
+    R: FnMut(&str) -> crate::Result<Imported>,
+{
+    match need {
+        SourceNeed::Scad { from_dir, raw } => {
+            let key = (from_dir.clone(), raw.clone());
+            if scad.contains_key(&key) {
+                return Ok(());
+            }
+            // Fonts contribute the empty program silently — same doctrine as both twins (AC.1).
+            if is_font_path(&raw) {
+                let id = from_dir.join(&raw);
+                scad.insert(
+                    key,
+                    ProvidedSource {
+                        id,
+                        dir: from_dir,
+                        program: empty_program(),
+                        source: Rc::from(""),
+                    },
+                );
+                return Ok(());
+            }
+            // OVERLAY first — but only from a VIRTUAL dir. A disk-resolved library's `from_dir` is
+            // absolute, and its internal includes must never see a like-named project buffer.
+            if from_dir.is_relative()
+                && let Some(id) = normalize_lexical(&from_dir.join(&raw))
+                    .filter(|p| overlay.contains_key(p))
+            {
+                let text = overlay[&id];
+                insert_parsed(scad, key, id, text, &raw, warnings);
+                return Ok(());
+            }
+            // fs fallback: the requesting file's REAL dir sits under `base_dir` when virtual.
+            let real_from = if from_dir.is_relative() {
+                base_dir.join(&from_dir)
+            } else {
+                from_dir.clone()
+            };
+            let Some(id) = resolve(&real_from, &raw, library_paths) else {
+                // TOLERANT (M.6.1), same as both twins: warn + empty program, render on.
+                warnings.push(Message::Warning(format!("Can't open library '{raw}'.")));
+                let id = from_dir.join(&raw);
+                scad.insert(
+                    key,
+                    ProvidedSource {
+                        id,
+                        dir: from_dir,
+                        program: empty_program(),
+                        source: Rc::from(""),
+                    },
+                );
+                return Ok(());
+            };
+            // A hit INSIDE the project re-enters the virtual world: project-relative id (one graph
+            // node however it was reached — dedup can't split into fresh-vs-stale twins) and the
+            // live buffer wins over the disk bytes if the overlay holds that true-case key.
+            if let Some(rel) = canon_base.and_then(|b| id.strip_prefix(b).ok()) {
+                let rel = rel.to_path_buf();
+                if let Some(text) = overlay.get(&rel) {
+                    insert_parsed(scad, key, rel, text, &raw, warnings);
+                } else {
+                    let text = read_source(&id)?;
+                    insert_parsed(scad, key, rel, &text, &raw, warnings);
+                }
+                return Ok(());
+            }
+            let text = read_source(&id)?;
+            insert_parsed(scad, key, id, &text, &raw, warnings);
+        }
+        SourceNeed::File { raw } => {
+            // TOLERANT (L.5.7), identical to both twins: missing/broken import → warn + empty.
+            match mesh_reader(&raw) {
+                Ok(imported) => {
+                    files.insert(raw, imported);
+                }
+                Err(why) => {
+                    warnings.push(Message::Warning(format!(
+                        "Can't open import file '{raw}': {why}"
+                    )));
+                    let empty = Imported::empty_for(&raw);
+                    files.insert(raw, empty);
+                }
+            }
+        }
+        SourceNeed::Data { path } => {
+            // `path` arrives resolved against the CALLING file's dir — virtual for overlay files,
+            // so a relative one rebases onto the REAL project dir; a disk lib's absolute path
+            // reads as-is. Keyed by the ORIGINAL path (what the eval asked for), tolerant as ever.
+            let real = if Path::new(&path).is_relative() {
+                base_dir.join(&path)
+            } else {
+                PathBuf::from(&path)
+            };
+            if let Ok(bytes) = std::fs::read(&real) {
+                files.insert(path, Imported::Bytes(Rc::from(bytes)));
+            } else {
+                warnings.push(Message::Warning(format!("Can't open file '{path}'.")));
+                files.insert(path, Imported::Bytes(Rc::from(Vec::new())));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// [`fulfill`]'s fs-free twin: a `Scad` reference resolves against the virtual `sources` map

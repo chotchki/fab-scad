@@ -18,14 +18,17 @@ use crate::eval::value::Value;
 /// everything past it runs on the interpreter's explicit stack.
 pub(super) const MAX_NATIVE_DEPTH: u32 = 64;
 
+/// One parsed island per distinct `FALLBACK_SOURCES` identity — keyed by the `&'static str`'s
+/// (ptr, len), `None` for an island whose parse failed (cached so it doesn't re-parse per decline).
+type IslandCache = Vec<((usize, usize), Option<Rc<crate::Program>>)>;
+
 thread_local! {
     static DEPTH: Cell<u32> = const { Cell::new(0) };
     // Parsed fallback programs, keyed by the SOURCES' identity (ptr+len of the `&'static str`) —
     // NOT first-comer-wins. Each generated module carries its own `FALLBACK_SOURCES` island, and a
     // declining native must interpret ITS island: an unkeyed cache would pin whichever module
     // declined first on the thread and serve its program to every other module's natives.
-    static FALLBACK: RefCell<Vec<((usize, usize), Option<Rc<crate::Program>>)>> =
-        const { RefCell::new(Vec::new()) };
+    static FALLBACK: RefCell<IslandCache> = const { RefCell::new(Vec::new()) };
 }
 
 /// RAII depth ticket: `enter` refuses past the budget, `Drop` gives the level back — early

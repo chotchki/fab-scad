@@ -405,6 +405,47 @@ where
     eval::io::drive_from_map(source, sources, jit_factory, config, mesh_reader)
 }
 
+/// Like [`resolve_geometry_with_base_full`], but `use`/`include` consult an in-memory OVERLAY
+/// before the filesystem — the HYBRID entry (SW.1) native project renders drive. `overlay` is the
+/// project's LIVE buffers keyed by project-relative path (keys are lexically normalized at the
+/// driver, so a stray `./` prefix still matches); `base_dir` is the REAL project directory the fs
+/// fallback resolves against, then `library_paths` (BOSL2, scad-lib) in order. Resolution parity
+/// with the fs driver is the design center: the overlay serves only the ref the fs would serve
+/// (requesting-dir-relative — no phantom project-root search tier), a disk-resolved library's own
+/// includes never consult the overlay, and an fs hit that canonicalizes inside the project comes
+/// back as its project-relative self (live buffer first). `import`/`surface` flow through
+/// `mesh_reader` — root it at `base_dir` so relative assets read from where they actually live.
+///
+/// ROOT CONTRACT: pass a synthetic wrapper (`include <entry.scad>`, the geomsvc idiom) as
+/// `source` rather than the entry's own text — the root has no id, so a dependency including the
+/// entry BACK dedups only through the wrapper's overlay-keyed node (same rule as
+/// [`resolve_geometry_from_sources`]).
+///
+/// # Errors
+/// As [`resolve_geometry_with_base_full`].
+pub fn resolve_geometry_hybrid_full<R>(
+    source: &str,
+    base_dir: &Path,
+    overlay: &std::collections::BTreeMap<PathBuf, String>,
+    library_paths: &[PathBuf],
+    jit_factory: Option<&dyn NumericJitFactory>,
+    config: Config,
+    mesh_reader: R,
+) -> RunResult<(Geo, Vec<Message>)>
+where
+    R: FnMut(&str) -> Result<Imported>,
+{
+    eval::io::drive_hybrid(
+        source,
+        base_dir,
+        overlay,
+        library_paths,
+        jit_factory,
+        config,
+        mesh_reader,
+    )
+}
+
 /// Like [`resolve_geometry_file`], but ALSO returns the ordered `echo`/warning [`Message`]s (AP.4/AQ.1).
 ///
 /// The file-rooted entries were console-blind even on SUCCESS, which is a gap in its own right: a

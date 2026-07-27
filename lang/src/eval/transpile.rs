@@ -1150,11 +1150,15 @@ mod tests {
         assert!(err.contains("duplicate parameter `a`"), "{err}");
     }
 
-    /// The NumList const arm refuses non-finite elements as loudly as the scalar arm: `{:?}`
+    /// The `NumList` const arm refuses non-finite elements as loudly as the scalar arm: `{:?}`
     /// prints `inf`/`NaN`, which lex as IDENTIFIERS in scad — the fallback island would silently
     /// bind undef where the native bakes real bits.
     #[test]
     fn a_non_finite_numlist_const_declines() {
+        #[allow(
+            clippy::unnecessary_wraps,
+            reason = "Entry.func's required Intrinsic signature — the wrap is the contract"
+        )]
         fn noop(_: &[crate::Value]) -> crate::Result<crate::Value> {
             Ok(crate::Value::Undef)
         }

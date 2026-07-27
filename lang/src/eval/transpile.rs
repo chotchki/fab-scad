@@ -191,16 +191,33 @@ pub(crate) fn generate_native(
         out,
         "/// Generated native for `{name}` — semantics route through the interpreter's own value\n\
          /// algebra (`ops::`/`builtins::`), bit-identical to the interpreted reference by construction.\n\
-         pub(super) fn {name}(args: &[Value]) -> crate::Result<Value> {{\n"
+         pub(super) fn {name}(args: &[Value]) -> crate::Result<Value> {{\n\
+         \x20   // AR.10: past the depth budget, DECLINE to the pure interpreter — explicit stack,\n\
+         \x20   // same proven semantics; recursion cannot ride the Rust stack unbounded.\n\
+         \x20   let Some(_depth) = super::native_rt::DepthGuard::enter() else {{\n\
+         \x20       return super::native_rt::run_interpreted(FALLBACK_SOURCES, \"{name}\", args);\n\
+         \x20   }};\n"
     );
     for (i, p) in params.iter().enumerate() {
+        // A duplicate name has NO native shape: `Task::Apply` binds it two-phase (a provided arg
+        // beats a later slot's default, AN.6), while Rust `let` shadowing would take the LAST
+        // slot unconditionally. Decline; the entry stays interpreted.
+        if params[..i].iter().any(|q| q.name == p.name) {
+            return Err(format!(
+                "{name}: duplicate parameter `{}` — AN.6 two-phase binding has no native shape",
+                p.name
+            ));
+        }
         let getter = if i == 0 {
             "args.first()".to_string()
         } else {
             format!("args.get({i})")
         };
-        // Defaults see the parameters bound BEFORE them (the walk order matches the interpreter's
-        // binding environment) — the scope grows as each parameter lands.
+        // Defaults evaluate in the function's lexical BASE, never the growing call scope:
+        // `push_call` evals an unfilled slot's default in `base` (the island globals), so `f(a,
+        // b=a)` reads the GLOBAL `a` there — not the argument. `em.locals` stays empty until every
+        // bind is emitted, which resolves exactly that scope: a baked const binds, a param name
+        // declines LOUDLY as a free read.
         let default = match &p.default {
             None => "Value::Undef".to_string(),
             Some(d) => em
@@ -214,6 +231,8 @@ pub(crate) fn generate_native(
             format!("{getter}.cloned().unwrap_or_else(|| {default})")
         };
         let _ = writeln!(out, "    let p_{} = {bind};", p.name);
+    }
+    for p in params {
         em.locals
             .push((p.name.to_string(), format!("p_{}", p.name)));
     }
@@ -559,6 +578,64 @@ impl Emitter<'_> {
     }
 }
 
+/// One entry's baked constants (`consts` + `consts_v`), merged into the batch's fallback-program
+/// constant table. A name baking DIFFERENTLY across entries is a hard error, not last-wins — the
+/// fallback is ONE island, so a conflict means two entries disagree about the same binding.
+fn bake_entry<'a>(
+    entry: &'a super::intrinsics::Entry,
+    fallback_consts: &mut std::collections::BTreeMap<String, String>,
+) -> Result<Vec<(&'a str, Baked)>, String> {
+    let name = entry.name;
+    let mut baked: Vec<(&str, Baked)> = entry
+        .consts
+        .iter()
+        .map(|&(n, v)| (n, Baked::Num(v)))
+        .collect();
+    for &(n, build) in entry.consts_v {
+        match build() {
+            Value::Num(x) => baked.push((n, Baked::Num(x))),
+            Value::NumList(xs) => baked.push((n, Baked::NumList(xs.to_vec()))),
+            other => {
+                return Err(format!(
+                    "{name}: consts_v `{n}` bakes {other:?} — not emittable in v0"
+                ));
+            }
+        }
+    }
+    for (n, b) in &baked {
+        let scad = match b {
+            Baked::Num(v) if v.is_finite() => format!("{v:?}"),
+            Baked::Num(v) => return Err(format!("{name}: const `{n}` bakes non-finite {v}")),
+            // Elements need the same finiteness gate as scalars: `{:?}` prints `inf`/`NaN`, which
+            // LEX AS IDENTIFIERS in scad — the fallback island would silently bind undef where
+            // the native baked real bits (and every NaN payload formats alike, blinding the
+            // cross-batch conflict check).
+            Baked::NumList(xs) => match xs.iter().find(|x| !x.is_finite()) {
+                Some(bad) => {
+                    return Err(format!(
+                        "{name}: const `{n}` bakes non-finite element {bad}"
+                    ));
+                }
+                None => format!(
+                    "[{}]",
+                    xs.iter()
+                        .map(|x| format!("{x:?}"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+            },
+        };
+        if let Some(prev) = fallback_consts.insert((*n).to_string(), scad.clone())
+            && prev != scad
+        {
+            return Err(format!(
+                "const `{n}` baked differently across the batch ({prev} vs {scad})"
+            ));
+        }
+    }
+    Ok(baked)
+}
+
 /// The whole generated FILE for a set of registry entries, header + minimal imports included.
 /// Deterministic: same registry state → same bytes (the regen test's contract).
 pub(crate) fn generate_module(entry_names: &[&str]) -> Result<String, String> {
@@ -574,6 +651,12 @@ pub(crate) fn generate_module(entry_names: &[&str]) -> Result<String, String> {
         let a = analyze_function(entry.reference)?;
         siblings.push((a.name, a.params));
     }
+    // The AR.10 fallback program: every baked constant (deduped, conflicts LOUD) followed by the
+    // verbatim references — one interpretable island whose bindings equal the bakes.
+    let mut fallback_consts: std::collections::BTreeMap<String, String> =
+        std::collections::BTreeMap::new();
+    let mut fallback_refs = String::new();
+
     let mut fns = String::new();
     let mut uses = Uses::default();
     for &name in entry_names {
@@ -581,22 +664,15 @@ pub(crate) fn generate_module(entry_names: &[&str]) -> Result<String, String> {
             .iter()
             .find(|e| e.name == name)
             .ok_or_else(|| format!("`{name}` is not a registry entry"))?;
-        let mut baked: Vec<(&str, Baked)> = entry
-            .consts
-            .iter()
-            .map(|&(n, v)| (n, Baked::Num(v)))
-            .collect();
-        for &(n, build) in entry.consts_v {
-            match build() {
-                Value::Num(x) => baked.push((n, Baked::Num(x))),
-                Value::NumList(xs) => baked.push((n, Baked::NumList(xs.to_vec()))),
-                other => {
-                    return Err(format!(
-                        "{name}: consts_v `{n}` bakes {other:?} — not emittable in v0"
-                    ));
-                }
-            }
+        let baked = bake_entry(entry, &mut fallback_consts)?;
+        if entry.reference.contains("\"#") {
+            return Err(format!(
+                "{name}: reference contains `\"#` — raw string emission breaks"
+            ));
         }
+        fallback_refs.push_str(entry.reference);
+        fallback_refs.push('\n');
+
         fns.push_str(&generate_native(entry.reference, &baked, &siblings)?);
         fns.push('\n');
         // regenerate the Uses by scanning the emitted text — cheaper than threading it out, and
@@ -658,6 +734,19 @@ pub(crate) fn generate_module(entry_names: &[&str]) -> Result<String, String> {
         }
     }
     header.push('\n');
+    // The AR.10 fallback program: baked constants then verbatim references, one island whose
+    // bindings equal the bakes — what a declining native interprets instead of recursing.
+    header.push_str(
+        "/// Every baked constant + the batch's verbatim references as ONE interpretable program —\n\
+         /// the AR.10 depth fallback's target (see `native_rt`). Constants print via Rust's\n\
+         /// roundtrip-exact float formatting, so the interpreted bindings equal the bakes bit-for-bit.\n\
+         pub(super) const FALLBACK_SOURCES: &str = r#\"\n",
+    );
+    for (n, scad) in &fallback_consts {
+        let _ = writeln!(header, "{n} = {scad};");
+    }
+    header.push_str(&fallback_refs);
+    header.push_str("\"#;\n\n");
     Ok(header + &fns)
 }
 
@@ -1040,5 +1129,49 @@ mod tests {
         .expect("analyzes");
         // the trailing `+ i` is OUTSIDE both comprehensions: a free read.
         assert_eq!(a.consts, ["i"].map(String::from).into_iter().collect());
+    }
+
+    /// A default reading a PRIOR PARAM has no native shape: `push_call` evaluates an unfilled
+    /// slot's default in the lexical BASE (island globals), so compiling `b=a` to the argument's
+    /// value would read a different program than the interpreter — the AN family's exact failure.
+    #[test]
+    fn a_param_referencing_default_declines() {
+        let err =
+            super::generate_native("function t(a, b=a) = b;", &[], &[]).expect_err("declines");
+        assert!(err.contains("free read `a`"), "{err}");
+    }
+
+    /// Duplicate parameter names bind two-phase in the machine (AN.6, arg-over-default); Rust
+    /// `let` shadowing would take the LAST slot unconditionally. No native shape — decline.
+    #[test]
+    fn a_duplicate_parameter_declines() {
+        let err =
+            super::generate_native("function t(a, a=9) = a;", &[], &[]).expect_err("declines");
+        assert!(err.contains("duplicate parameter `a`"), "{err}");
+    }
+
+    /// The NumList const arm refuses non-finite elements as loudly as the scalar arm: `{:?}`
+    /// prints `inf`/`NaN`, which lex as IDENTIFIERS in scad — the fallback island would silently
+    /// bind undef where the native bakes real bits.
+    #[test]
+    fn a_non_finite_numlist_const_declines() {
+        fn noop(_: &[crate::Value]) -> crate::Result<crate::Value> {
+            Ok(crate::Value::Undef)
+        }
+        fn inf_list() -> crate::Value {
+            crate::Value::num_list(vec![1.0, f64::INFINITY])
+        }
+        let entry = super::super::intrinsics::Entry {
+            name: "t",
+            reference: "function t() = C;",
+            consts: &[],
+            consts_v: &[("C", inf_list)],
+            deps: &[],
+            builtins: &[],
+            func: noop,
+        };
+        let mut consts = std::collections::BTreeMap::new();
+        let err = super::bake_entry(&entry, &mut consts).expect_err("declines");
+        assert!(err.contains("non-finite element"), "{err}");
     }
 }

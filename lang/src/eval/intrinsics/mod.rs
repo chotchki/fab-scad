@@ -33,6 +33,7 @@ mod generated;
 mod geometry;
 mod lists;
 mod math;
+mod native_rt;
 mod poc;
 mod regions;
 mod shape;

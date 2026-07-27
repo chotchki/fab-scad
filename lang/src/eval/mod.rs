@@ -959,6 +959,33 @@ pub fn interpret_fn(program: &Program, name: &str, args: &[Value]) -> crate::Res
     FnOracle::new(&functions, &globals)?.call(name, args)
 }
 
+/// [`interpret_fn`] with the intrinsics table EMPTIED — the fully-interpreted path, one machine,
+/// explicit stack all the way down. The AR.10 depth fallback REQUIRES this: a generated native
+/// that declines must interpret its reference without any interior dispatch bouncing back to a
+/// (still-declining) native, which would rebuild a machine per recursion level — unbounded host
+/// frames, the exact class the fallback exists to remove.
+pub(crate) fn interpret_fn_pure(
+    program: &Program,
+    name: &str,
+    args: &[Value],
+) -> crate::Result<Value> {
+    let functions: Vec<(&str, &[Parameter], &Expr)> = program
+        .stmts
+        .iter()
+        .filter_map(|s| match &s.kind {
+            StmtKind::FunctionDef { name, params, body } => {
+                Some((name.as_str(), params.as_slice(), body))
+            }
+            _ => None,
+        })
+        .collect();
+    let stmt_refs: Vec<&Stmt> = program.stmts.iter().collect();
+    let globals = hoisted_assignments(&stmt_refs);
+    let mut oracle = FnOracle::new(&functions, &globals)?;
+    oracle.ctx.intrinsics.clear();
+    oracle.call(name, args)
+}
+
 /// A build-ONCE interpreter oracle for the numeric-JIT differential (`fast == JIT`): construct it from a
 /// program's functions + top-level constants once, then interpret any function many times. The battery
 /// hammers each compiled function across dozens of input rows, and rebuilding the function store + republishing
@@ -1055,6 +1082,13 @@ impl<'a> FnOracle<'a> {
 
     /// Interpret `name(args)` — the slow side of the differential. Params bind onto the published constant
     /// scope (shadowing a like-named constant), then the body evaluates with calls + constants resolving.
+    /// A param past `args.len()` follows `push_call`'s rule: its declared default evaluates in the
+    /// LEXICAL base (the published constants, not the part-bound call scope), defaultless → undef — the
+    /// AR.10 decline path hands over the natives' contiguous-prefix arg slices, so the tail is live.
+    /// Mirrors the machine exactly on the AN.6 corners too: every unfilled slot's default EVALUATES
+    /// (a raising default raises even when a duplicate name later skips its bind), then binding is
+    /// two-phase — provided args first (a later duplicate overwrites), defaults fill only the
+    /// still-unset names (a later duplicate is skipped; an arg beats a default either way).
     ///
     /// # Errors
     /// [`Error::Unknown`](crate::Error::Unknown) if `name` isn't defined; any body evaluation error (an
@@ -1063,9 +1097,27 @@ impl<'a> FnOracle<'a> {
         let Some(&(params, body)) = self.functions.get(name) else {
             return Err(crate::Error::Unknown(format!("function `{name}`")));
         };
+        let mut vals: Vec<Value> = Vec::with_capacity(params.len());
+        for (i, p) in params.iter().enumerate() {
+            vals.push(match (args.get(i), &p.default) {
+                (Some(v), _) => v.clone(),
+                (None, Some(default)) => eval_with_ctx(default, &self.global, &self.ctx)?,
+                (None, None) => Value::Undef,
+            });
+        }
         let mut scope = self.global.clone();
-        for (p, v) in params.iter().zip(args) {
-            scope.bind(p.name.clone(), v.clone());
+        let mut set: Vec<&Rc<str>> = Vec::with_capacity(params.len());
+        for (i, p) in params.iter().enumerate() {
+            if args.get(i).is_some() {
+                scope.bind(Rc::clone(&p.name), vals[i].clone());
+                set.push(&p.name);
+            }
+        }
+        for (i, p) in params.iter().enumerate() {
+            if args.get(i).is_none() && !set.contains(&&p.name) {
+                scope.bind(Rc::clone(&p.name), vals[i].clone());
+                set.push(&p.name);
+            }
         }
         eval_with_ctx(body, &scope, &self.ctx)
     }
@@ -4720,6 +4772,40 @@ mod tests {
             }
         }
         last
+    }
+
+    /// The AR.10 decline-path oracle ([`super::interpret_fn`]/`FnOracle::call`) binds EXACTLY like
+    /// the machine on the AN.6 corners: a partial-arity call takes defaults, and duplicate param
+    /// names bind two-phase (a provided arg beats a later slot's default; among unset slots the
+    /// FIRST default wins). The pre-review single-pass loop returned 9 for `g(a, a=9)` called
+    /// with 1 — a later duplicate's default clobbering a real arg.
+    #[test]
+    fn the_oracle_binds_params_like_the_machine() {
+        for (src, call, args, label) in [
+            (
+                "function g(a, b=1) = a + b;",
+                "r = g(5);",
+                vec![Value::Num(5.0)],
+                "partial arity takes the default",
+            ),
+            (
+                "function g(a, a=9) = a;",
+                "r = g(1);",
+                vec![Value::Num(1.0)],
+                "a provided arg beats a later duplicate's default",
+            ),
+            (
+                "function g(a=5, a, a=9) = a;",
+                "r = g();",
+                vec![],
+                "among unset duplicates the FIRST default wins",
+            ),
+        ] {
+            let machine = eval_last(&format!("{src}\n{call}"));
+            let oracle = super::interpret_fn(&parse(src).expect("parses"), "g", &args)
+                .expect("oracle evaluates");
+            assert_eq!(machine, oracle, "{label}");
+        }
     }
 
     /// Like [`eval_last`] but with an explicit Q.5 `eval_budget` and the eval `Result` PROPAGATED (not

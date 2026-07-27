@@ -30,7 +30,10 @@ fn fp(src: &str) -> u64 {
 /// intrinsic's error, not a panic.
 fn interpret(reference: &str, inputs: &[Value]) -> crate::Result<Value> {
     let (params, body) = parse_fn(reference);
-    let mut scope = Scope::new();
+    // Defaults evaluate in the lexical BASE (`push_call` rule) — never against the params bound so
+    // far, so the oracle can't hand a param-referencing default the call value the machine denies.
+    let base = Scope::new();
+    let mut scope = base.clone();
     for (i, p) in params.iter().enumerate() {
         // A provided arg fills the slot; an unprovided one takes the param's DEFAULT (else undef) — the
         // real call path binds defaults, so an oracle that skipped them would run a short call with the
@@ -38,7 +41,7 @@ fn interpret(reference: &str, inputs: &[Value]) -> crate::Result<Value> {
         let v = match inputs.get(i) {
             Some(v) => v.clone(),
             None => match &p.default {
-                Some(d) => eval_expr(d, &scope)?,
+                Some(d) => eval_expr(d, &base)?,
                 None => Value::Undef,
             },
         };
@@ -72,12 +75,14 @@ fn interpret_with_deps(target: &str, deps: &[&str], inputs: &[Value]) -> crate::
         StmtKind::FunctionDef { params, body, .. } => (params, body),
         other => panic!("target is not a function def: {other:?}"),
     };
-    let mut scope = Scope::new();
+    // Defaults evaluate in the lexical BASE (`push_call` rule), not the growing param scope.
+    let base = Scope::new();
+    let mut scope = base.clone();
     for (i, p) in params.iter().enumerate() {
         let v = match inputs.get(i) {
             Some(v) => v.clone(),
             None => match &p.default {
-                Some(d) => crate::eval::eval_with_ctx(d, &scope, &ctx)?,
+                Some(d) => crate::eval::eval_with_ctx(d, &base, &ctx)?,
                 None => Value::Undef,
             },
         };
@@ -246,6 +251,49 @@ fn generated_band2_matches_the_interpreter() {
     }
 }
 
+/// AR.10 — the depth budget, end to end: `approx` over lists nested far past `MAX_NATIVE_DEPTH`
+/// must DECLINE to the pure interpreter (explicit stack) and still bit-match it — never ride the
+/// Rust stack unbounded. Depth 300 is ~5x the budget: without the guard this recursed 300 heavy
+/// native frames; with it, level 64 falls back and the rest runs on the machine. The structures
+/// differ at the INNERMOST leaf so the `a == b` fast path can't short-circuit the recursion.
+#[test]
+fn deep_nesting_declines_to_the_interpreter() {
+    fn nest(depth: usize, leaf: f64) -> Value {
+        let mut v = Value::num_list(vec![leaf]);
+        for _ in 0..depth {
+            v = Value::list(vec![v]);
+        }
+        v
+    }
+    let reference = reference_of("approx").expect("registered");
+    let (params, body) = parse_fn(reference);
+    let func = resolve("approx", &params, &body)
+        .expect("its own reference must register")
+        .func;
+    let a = nest(300, 1.0);
+    let b = nest(300, 2.0);
+    let deps = [
+        reference_of("idx").expect("registered"),
+        reference_of("posmod").expect("registered"),
+        reference_of("is_finite").expect("registered"),
+        reference_of("is_nan").expect("registered"),
+    ];
+    let input = [a, b];
+    let fast = func(&input);
+    assert!(
+        same_result(
+            &fast,
+            &interpret_with_deps_consts(
+                reference,
+                &deps,
+                &[("_EPSILON", Value::Num(1e-9))],
+                &input
+            ),
+        ),
+        "deep nesting must decline to the interpreter and still agree; fast: {fast:?}"
+    );
+}
+
 /// AR.9 — the comprehension constructs (a `for` over a RANGE literal, an element-position `let`,
 /// a no-else `if`, an `each` splice mixed into the same vector), proven against the interpreter
 /// over the shapes that exercise each arm — including empty and non-numeric iterable bounds.
@@ -368,11 +416,14 @@ fn interpret_with_deps_consts(
     if let Some(slot) = ctx.island_globals.borrow_mut().first_mut() {
         *slot = scope.clone();
     }
+    // The consts-only snapshot IS the lexical base: the target's own defaults evaluate there
+    // (`push_call` rule), never against the params bound so far.
+    let base = scope.clone();
     for (i, p) in params.iter().enumerate() {
         let v = match inputs.get(i) {
             Some(v) => v.clone(),
             None => match &p.default {
-                Some(d) => crate::eval::eval_with_ctx(d, &scope, &ctx)?,
+                Some(d) => crate::eval::eval_with_ctx(d, &base, &ctx)?,
                 None => Value::Undef,
             },
         };

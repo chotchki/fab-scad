@@ -924,6 +924,165 @@ mod tests {
     use super::super::intrinsics::{PINS, REGISTRY};
     use super::{analyze_closed, analyze_function};
 
+    /// AR.11 — how much of the pinned BOSL2 the emitter actually owns, as a RATCHET. Runs the
+    /// codegen over every top-level function in the library and asserts the emit count never
+    /// falls; the decline histogram it prints alongside is the phase roadmap, because each
+    /// decline names the construct the emitter does not yet handle and the counts rank them.
+    ///
+    /// A FLOOR rather than a report for the AR.3.3 reason: an emitter that quietly stops handling
+    /// a construct does not fail, it falls back to interpretation, and every other test still
+    /// passes. Only a number that must not drop can see that.
+    ///
+    /// Read the roadmap with:
+    /// `cargo nextest run -p fab-lang -E 'test(bosl2_codegen_coverage)' --no-capture`
+    #[test]
+    fn bosl2_codegen_coverage_holds_its_floor() {
+        use std::collections::BTreeMap;
+
+        /// Functions the v0 emitter compiles TODAY (2026-07-28), out of 1335. Raise this as bands
+        /// land — AR.15 strings, AR.16 constants, AR.17 first-class functions. Lowering it is a
+        /// deliberate act that needs a reason next to it, which is the whole point of the ratchet.
+        const FLOOR: usize = 632;
+
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("workspace root")
+            .join("libs/BOSL2");
+        if !root.join("std.scad").exists() {
+            eprintln!("skipping: libs/BOSL2 submodule not checked out");
+            return;
+        }
+        let mut files: Vec<_> = std::fs::read_dir(&root)
+            .expect("BOSL2 checked out")
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| p.extension().is_some_and(|x| x == "scad"))
+            .collect();
+        files.sort();
+
+        // Pass 1: every function in the library, so a sibling call resolves library-wide.
+        let mut sources: Vec<(String, String)> = Vec::new(); // (file, text)
+        for f in &files {
+            let text = std::fs::read_to_string(f).expect("readable");
+            sources.push((f.file_name().expect("named").to_string_lossy().into(), text));
+        }
+        let mut siblings: Vec<(String, Vec<String>)> = Vec::new();
+        let mut refs: Vec<(String, String, String)> = Vec::new(); // (file, name, source)
+        let mut unparsed_files = 0_usize;
+        for (file, text) in &sources {
+            let Ok(prog) = crate::parser::parse(text) else {
+                unparsed_files += 1;
+                continue;
+            };
+            for stmt in &prog.stmts {
+                if let crate::parser::StmtKind::FunctionDef {
+                    name,
+                    params,
+                    body: _,
+                } = &stmt.kind
+                {
+                    siblings.push((
+                        name.clone(),
+                        params.iter().map(|p| p.name.to_string()).collect(),
+                    ));
+                    refs.push((
+                        file.clone(),
+                        name.clone(),
+                        text[stmt.span.clone()].to_string(),
+                    ));
+                }
+            }
+        }
+
+        // Pass 2: try to emit each one.
+        let mut ok = 0_usize;
+        let mut by_reason: BTreeMap<String, (usize, String)> = BTreeMap::new();
+        for (file, name, src) in &refs {
+            match super::generate_native(src, &[], &siblings) {
+                Ok(_) => ok += 1,
+                Err(e) => {
+                    let reason = classify(&e);
+                    let slot = by_reason.entry(reason).or_insert((0, String::new()));
+                    slot.0 += 1;
+                    if slot.1.is_empty() {
+                        slot.1 = format!("{file}:{name}");
+                    }
+                }
+            }
+        }
+
+        let total = refs.len();
+        let mut hist: Vec<_> = by_reason.into_iter().collect();
+        hist.sort_by_key(|(_, (n, _))| std::cmp::Reverse(*n));
+        println!("\n=== BOSL2 codegen coverage ===");
+        println!(
+            "files {} ({unparsed_files} unparsed), functions {total}",
+            files.len()
+        );
+        // Integer tenths-of-a-percent: no usize→f64 cast to justify for one printed number.
+        let tenths = ok * 1000 / total.max(1);
+        println!(
+            "EMIT {ok}/{total} ({}.{}%), floor {FLOOR}",
+            tenths / 10,
+            tenths % 10
+        );
+        // FIRST-DECLINE-WINS, so every count is a LOWER bound on that construct's real prevalence:
+        // a function that trips on a free read may hold three strings behind it. Ranking is still
+        // sound — clearing a band re-runs the survivors against whatever they hit next.
+        for (reason, (n, ex)) in &hist {
+            println!("  {n:5}  {reason}   e.g. {ex}");
+        }
+        assert!(
+            ok >= FLOOR,
+            "codegen coverage REGRESSED: {ok} functions emit, floor is {FLOOR}. \
+             The emitter lost a construct — see the histogram above. It does not fail loudly on \
+             its own, it just falls back to interpreting, which is why this number is a gate."
+        );
+        assert!(
+            unparsed_files == 0,
+            "{unparsed_files} BOSL2 files no longer parse — that is a PARSER regression, not a \
+             codegen one, and it silently shrinks every count in this report"
+        );
+    }
+
+    /// Collapse a decline message to its CONSTRUCT — the emitter names what it hit, but embeds
+    /// identifiers; the histogram wants the shape, not the instance. Order matters: the first
+    /// probe that matches wins, so the specific AST-variant names come before the generic
+    /// "outside the v0 subset" they are all phrased with.
+    fn classify(e: &str) -> String {
+        for (probe, bucket) in [
+            ("Str(", "string literal"),
+            ("FunctionLiteral", "function literal"),
+            (
+                "computed callee",
+                "computed callee (fn value in call position)",
+            ),
+            ("the AN.10 shape", "call through a local binding (AN.10)"),
+            ("free read", "free read (an unbaked library constant)"),
+            (
+                "non-contiguous arg fill",
+                "non-contiguous named args to a sibling",
+            ),
+            ("too many args", "too many args to a sibling"),
+            ("C-style comprehension", "C-style comprehension"),
+            ("Echo {", "echo"),
+            (
+                "duplicate parameter",
+                "duplicate parameter (AN.6, correct decline)",
+            ),
+            ("does not parse", "reference does not parse"),
+            ("Assert {", "assert form outside the subset"),
+            ("Let {", "let form outside the subset"),
+            ("Range {", "range form outside the subset"),
+            ("Lookup", "lookup"),
+        ] {
+            if e.contains(probe) {
+                return bucket.to_string();
+            }
+        }
+        let tail = e.rsplit_once(": ").map_or(e, |(_, t)| t);
+        format!("other — {}", tail.chars().take(50).collect::<String>())
+    }
+
     /// Names the syntactic walk reaches that the HAND lists prune, each with the reason. A pruned
     /// name is unreachable FOR THAT ENTRY's accepted arg shapes, so its whole SUBTREE is pruned —
     /// the comparison's resolver refuses to walk it, exactly as the author's transitive exclusion

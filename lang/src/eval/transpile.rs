@@ -932,50 +932,44 @@ mod tests {
     /// answer wrong; a name missing from DERIVED is a red test and an analyzer bug.
     fn pruned_by_author(entry: &str) -> &'static [&'static str] {
         match entry {
-            // select's fixed 1-arg `is_vector(start)` call can never take the 2-arg path that
-            // reaches `all_nonzero` — the author's reachability pruning (Entry doc, O.5.2). The
-            // same argument covers every entry below: their is_vector calls never pass the
-            // `all_nonzero=` parameter, so that branch (and its whole subtree) is dead for them.
-            "select"
-            | "is_matrix"
-            | "_none_inside"
-            | "sum"
-            | "unit"
-            | "_apply"
-            | "_bt_search"
-            | "vector_angle"
-            | "_point_dist"
-            | "_vnf_centroid"
-            | "_get_ear"
-            | "is_path"
-            | "v_abs"
-            | "v_theta"
-            | "vector_axis"
-            | "apply"
-            | "affine3d_rot_by_axis" => &["all_nonzero"],
+            // ── the `is_vector` family ───────────────────────────────────────────────────────────
+            // `is_vector(v, length, zero, all_nonzero=false, eps=_EPSILON)` has two dead tails for
+            // every entry here, because none of them passes anything past the SECOND parameter:
+            //   * `zero` stays undef, so `is_undef(zero) ||` short-circuits before `norm(v)`;
+            //   * `all_nonzero` keeps its `false` default, so `!all_nonzero ||` short-circuits before
+            //     `all_nonzero(v)` — and with it that function's own `abs`.
+            // A pruned name prunes its whole SUBTREE, which is why `abs`/`norm` come along. AR.5a
+            // adjudicated each of these against the entry's accepted arg shapes; the per-entry arms
+            // below are DELIBERATELY not collapsed into one, because the sets differ and a shared arm
+            // would silently prune a name for an entry nobody checked.
+            "select" | "_none_inside" | "_get_ear" | "vector_axis" => &["all_nonzero"],
+            "unit" | "_bt_search" | "_point_dist" => &["all_nonzero", "abs"],
+            "_vnf_centroid" | "v_abs" => &["all_nonzero", "norm"],
+            "is_matrix" | "sum" | "_apply" | "is_path" | "v_theta" => {
+                &["all_nonzero", "abs", "norm"]
+            }
+            // `apply` adds the sum family: its `is_matrix`/`is_vector` shape tests never reach the
+            // point-list branch that would call `sum`/`_sum`.
+            "apply" => &["all_nonzero", "abs", "norm", "sum", "_sum"],
+            // `vector_angle`/`affine3d_rot_from_to` reach `flatten`/`list_to_matrix` only through a
+            // `list_to_matrix` branch their fixed call shapes never take.
+            "vector_angle" => &["all_nonzero", "abs", "flatten", "list_to_matrix"],
+            "affine3d_rot_from_to" => &["flatten", "list_to_matrix"],
             // posmod's `approx(m, 0)` sits behind `is_finite(m) &&` — the short-circuit proves
             // approx only ever sees SCALARS from posmod. `idx` lives in approx's list branch, and
             // `is_list`/`len` are that branch's own guard condition, equally dead for numbers
             // (evaluation reaches `is_num(a) && is_num(b)?` first and takes it).
             "posmod" => &["idx", "is_list", "len"],
-            _ => &[],
-        }
-    }
-
-    /// Deltas surfaced by the closure that are NOT yet adjudicated — each needs its reference's
-    /// branch structure read against the entry's accepted arg shapes before it becomes either a
-    /// documented pruning above or a hand-list fix (AR.5a). Tracked EXACTLY (its own test below)
-    /// so a new delta or a silently resolved one is loud; parked here is visible, not forgotten.
-    fn unadjudicated(entry: &str, kind: &str) -> &'static [&'static str] {
-        match (entry, kind) {
-            ("is_matrix" | "sum" | "_apply" | "is_path" | "v_theta" | "apply", "builtins") => {
-                &["abs", "norm"]
-            }
-            ("unit" | "_bt_search" | "vector_angle" | "_point_dist", "builtins") => &["abs"],
-            ("_vnf_centroid" | "v_abs", "builtins") => &["norm"],
-            ("vector_angle" | "affine3d_rot_from_to", "deps") => &["flatten", "list_to_matrix"],
-            ("apply", "deps") => &["_sum", "sum"],
-            ("rot", "deps") => &[
+            // affine3d_rot_by_axis takes the SCALAR approx lane only (`assert(is_finite(ang))` pins
+            // it), so approx's list branch — `idx`, and `posmod`/`is_string` under it — is dead.
+            // NOTE `abs` is NOT here: that one is reachable, and AR.5a moved it into the hand list.
+            "affine3d_rot_by_axis" => &["all_nonzero", "idx", "posmod", "is_string"],
+            // `rot` is a DISPATCHER: its body picks one affine lane per call shape, and the
+            // point-list lane (centroid/mean/pointlist_bounds/transpose/in_list/force_list/sum/_sum/
+            // flatten/list_to_matrix/_all_func/is_path, plus the `search` builtin) belongs to the
+            // `p=` argument the native declines.
+            "rot" => &[
+                "search",
                 "_all_func",
                 "_sum",
                 "centroid",
@@ -989,13 +983,24 @@ mod tests {
                 "sum",
                 "transpose",
             ],
-            ("rot", "builtins") => &["search"],
-            ("affine3d_rot_by_axis", "deps") => &["idx", "posmod"],
-            ("affine3d_rot_by_axis", "builtins") => &["abs", "is_string"],
-            ("_region_region_intersections", "deps") => &["is_def"],
-            ("_region_region_intersections", "builtins") => &["is_bool", "is_string"],
+            // `is_def` is reached only through a defaulted parameter this entry always supplies.
+            "_region_region_intersections" => &["is_def"],
             _ => &[],
         }
+    }
+
+    /// AR.5a: this table is EMPTY, and that is the point. It parked derived-minus-hand deltas that
+    /// nobody had reasoned about yet; every one has now been adjudicated into either a documented
+    /// pruning above or a hand-list FIX (three were real missing guards — `affine3d_rot_by_axis`
+    /// wanted `abs`, `_region_region_intersections` wanted `is_bool` + `is_string`).
+    ///
+    /// It stays as a named seam rather than being deleted, because the next widening of the codegen
+    /// subset will surface new deltas and they should land HERE — visible and tracked — rather than
+    /// in `pruned_by_author`, which is for names somebody proved unreachable. The two directions are
+    /// not symmetric: a wrong pruning deletes a correctness guard and lets a native wire where the
+    /// interpreter would diverge; a wrong hand-list entry only makes the guard check more.
+    fn unadjudicated(_entry: &str, _kind: &str) -> &'static [&'static str] {
+        &[]
     }
 
     /// The acceptance oracle for the whole pass: every hand-maintained guard list in the registry,

@@ -1609,7 +1609,10 @@ pub(super) static REGISTRY: &[Entry] = &[
             "ident",
         ],
         builtins: &[
-            "is_num", "is_list", "len", "is_undef", "norm", "sin", "cos", "is_bool",
+            // AR.5a: `abs` is REACHED, not incidental — the reference's `approx(ang,0)?` is the live
+            // scalar lane, and approx's `is_num(a) && is_num(b)? abs(a-b) <= eps` arm fires for every
+            // non-identity angle, which is every call that does any work. It was missing.
+            "is_num", "is_list", "len", "is_undef", "norm", "sin", "cos", "is_bool", "abs",
         ],
         func: affine::affine3d_rot_by_axis,
     },
@@ -1788,8 +1791,15 @@ pub(super) static REGISTRY: &[Entry] = &[
         consts_v: &[],
         deps: &["idx", "list_wrap", "are_ends_equal", "approx", "is_finite", "is_nan", "posmod", "_general_line_intersection", "flatten", "vector_search", "_bt_tree", "_bt_search", "pointlist_bounds", "ident", "transpose", "is_path", "is_matrix", "is_vector", "is_consistent", "_list_pattern", "in_list", "force_list", "all_nonzero", "is_range", "max_index", "min_index", "mean", "sum", "_sum", "column", "is_int", "count", "select", "_sort_vectors"],
         builtins: &[
+            // AR.5a, both missing: `is_bool` via TWO independent live paths (list_wrap ->
+            // are_ends_equal -> approx, and _general_line_intersection -> approx) — approx's
+            // `a == b? is_bool(a) == is_bool(b)` is the UNGUARDED head of its ternary chain, so an
+            // already-closed input path reaches it. `is_string` via `idx`/`select`, whose bodies open
+            // `assert(is_list(x) || is_string(x))`: the `||` short-circuits on a list, but the native
+            // ERRORS rather than declining on the shapes that don't, so the interpreter would evaluate
+            // it where the native does not.
             "norm", "sign", "cross", "search", "max", "min", "abs", "floor", "round", "concat",
-            "len", "is_list", "is_num", "is_undef",
+            "len", "is_list", "is_num", "is_undef", "is_bool", "is_string",
         ],
         func: regions::rri_val,
     },

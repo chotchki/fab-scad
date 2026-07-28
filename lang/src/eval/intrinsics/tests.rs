@@ -3367,3 +3367,87 @@ fn the_dep_graph_really_does_contain_cycles() {
         );
     }
 }
+
+/// AR.20.1 — the module ABI, forced through the same fast==slow discipline bands 1-4 got.
+///
+/// The POC renders `children()` behind a bound parameter, which is the smallest module that
+/// exercises everything the function side has no analogue for: an argument already matched by the
+/// evaluator's two-phase rule, the call-site child COUNT, and children rendered LATE in the
+/// caller's scope. Compared as MESHES rather than values, because a module's output is geometry.
+#[test]
+fn the_module_native_matches_the_interpreter() {
+    // The SAME program twice, with the compiled tier ON and then OFF. That is the only honest
+    // comparison: an earlier version of this test used two DIFFERENT sources and caught itself —
+    // wrapping the body in `union()` changes the tree legitimately, so it was measuring a source
+    // difference and calling it a tier difference.
+    let src = "module _fab_poc_mod(k=1) { children(); }\n\
+               _fab_poc_mod() { cube([2,3,4]); sphere(r=1); }";
+
+    let run = |intrinsics: bool| {
+        let config = crate::Config {
+            intrinsics,
+            ..crate::Config::default()
+        };
+        let (geo, _) =
+            crate::evaluate_geometry_with_base_config(src, std::path::Path::new("."), &[], config)
+                .expect("renders");
+        format!("{geo:?}")
+    };
+
+    let compiled = run(true);
+    let interpreted = run(false);
+    assert_eq!(
+        compiled, interpreted,
+        "the compiled module and the interpreted one built different geometry"
+    );
+    assert!(
+        compiled.contains("Leaf"),
+        "the POC produced no geometry — the comparison would hold on two empty trees: {compiled}"
+    );
+}
+
+/// The drift gate, on the MODULE path: a definition that does not match the reference the native
+/// was generated from must NOT wire. Without this the native would answer for a module whose body
+/// somebody changed, which is a wrong answer rather than a missed compilation.
+#[test]
+fn a_drifted_module_definition_does_not_wire() {
+    use super::resolve_module;
+    use crate::parser::{StmtKind, parse};
+
+    let pinned = "module _fab_poc_mod(k=1) { children(); }";
+    let moved = "module _fab_poc_mod(k=1) { union() { children(); } }";
+    let renamed_param = "module _fab_poc_mod(j=1) { children(); }";
+    // Reformatting is NOT drift: the fingerprint is over structure, spans excluded.
+    let reformatted = "module _fab_poc_mod( k = 1 )\n{\n  children();\n}";
+
+    let of = |src: &str| {
+        let prog = parse(src).expect("parses");
+        let stmt = prog.stmts.into_iter().next().expect("one stmt");
+        match stmt.kind {
+            StmtKind::ModuleDef { params, body, .. } => (params, *body),
+            other => panic!("expected a module def, got {other:?}"),
+        }
+    };
+
+    let (p, b) = of(pinned);
+    assert!(
+        resolve_module("_fab_poc_mod", &p, &b).is_some(),
+        "the pinned definition must wire"
+    );
+    let (p, b) = of(reformatted);
+    assert!(
+        resolve_module("_fab_poc_mod", &p, &b).is_some(),
+        "reformatting is not drift — the fingerprint excludes spans"
+    );
+    for (label, src) in [("body moved", moved), ("param renamed", renamed_param)] {
+        let (p, b) = of(src);
+        assert!(
+            resolve_module("_fab_poc_mod", &p, &b).is_none(),
+            "{label}: a drifted definition must NOT wire"
+        );
+    }
+    assert!(
+        resolve_module("no_such_module", &p, &b).is_none(),
+        "an unregistered name never wires"
+    );
+}

@@ -819,6 +819,75 @@ fn warn_params_overwritten<'a>(params: &'a [Parameter], body: &'a Stmt, ctx: &Ct
     }
 }
 
+/// Split a call site's child block into the GEOMETRY children and the child-block ASSIGNMENTS.
+///
+/// Neither an empty statement nor an assignment is a child in OpenSCAD: counting either would
+/// misalign both `$children` and `children(i)`. L.5.2 — `{ shape; x = 5; shape; }` is two children,
+/// not three, and `children(1)` is the second SHAPE. It is also what BOSL2's `attachable(){ shape;
+/// union(){}; }` needs to read as exactly two (the terminating `;` after the empty union is not a
+/// third). The assignments come back separately because their bindings ARE in scope for every
+/// geometry child.
+fn split_children(mi: &crate::parser::ModuleInstantiation) -> (Vec<&Stmt>, Vec<&Stmt>) {
+    let mut stmts = Vec::new();
+    let mut assigns = Vec::new();
+    for s in &mi.children {
+        match s.kind {
+            StmtKind::Empty => {}
+            StmtKind::Assignment { .. } => assigns.push(s),
+            _ => stmts.push(s),
+        }
+    }
+    (stmts, assigns)
+}
+/// AR.20.1 — run this call as a COMPILED module, or `None` to let the interpreter have it.
+///
+/// Placed after the CSG memo (a hit short-circuits both paths) and before the frame setup, because
+/// a native does its own scoping: it receives the bound call scope and the raw children rather than
+/// the interpreter's three frames.
+///
+/// Declining is always safe — the interpreted path is the same semantics — and there are two
+/// reasons to decline. The definition may have DRIFTED from the reference the native was generated
+/// against, and the compiled path may be out of DEPTH: `fractal_tree` nests 139 deep, so recursive
+/// geometry reaching the budget is expected rather than exceptional, and the interpreter's explicit
+/// stack handles `100_000`.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the module-call context, mirroring push_user_module's own threaded arguments"
+)]
+fn try_native_module<'a>(
+    mi: &'a crate::parser::ModuleInstantiation,
+    params: &[crate::parser::Parameter],
+    body: &Stmt,
+    call: &Scope,
+    child_stmts: &[&'a Stmt],
+    child_assigns: &[&'a Stmt],
+    caller: &Scope,
+    island: usize,
+    ctx: &Ctx<'a>,
+) -> crate::Result<Option<Geo>> {
+    // The AR.2 run gate covers MODULE natives too, and must: a differential that cannot turn the
+    // compiled tier off has no interpreter oracle to compare against, which is the exact hole AR.2
+    // was opened to close on the function side.
+    if !ctx.config.intrinsics {
+        return Ok(None);
+    }
+    let Some(native) = super::intrinsics::resolve_module(&mi.name, params, body) else {
+        return Ok(None);
+    };
+    let Some(_depth_ticket) = super::module_rt::ModuleDepthGuard::enter() else {
+        return Ok(None);
+    };
+    let mut mctx = super::module_rt::NativeModuleCtx {
+        args: super::module_rt::bound_args(params, call),
+        child_stmts: child_stmts.to_vec(),
+        child_assigns: child_assigns.to_vec(),
+        caller_scope: caller.clone(),
+        caller_island: island,
+        call_scope: call.clone(),
+        ctx,
+    };
+    native(&mut mctx).map(Some)
+}
 /// B1 — schedule a USER-module call on the work stack (the recursion-removing analogue of `call_user_module`).
 /// The setup is EAGER + ordering-sensitive (the depth guard, the `$children`/`$parent_modules` binds, the three
 /// `Ctx` frame pushes), exactly mirroring the recursive path; then it pushes bottom→top `PopModuleFrame{depth}`
@@ -865,16 +934,7 @@ fn push_user_module<'a>(
     // CALLER's scope + island. Lone-`;` empties AND child-block assignments are NOT children (either would
     // misalign the count + `children(i)`); the assignments are kept separately so their bindings still reach
     // every geometry child (L.5.2).
-    let child_stmts: Vec<&Stmt> = mi
-        .children
-        .iter()
-        .filter(|s| !matches!(s.kind, StmtKind::Empty | StmtKind::Assignment { .. }))
-        .collect();
-    let child_assigns: Vec<&Stmt> = mi
-        .children
-        .iter()
-        .filter(|s| matches!(s.kind, StmtKind::Assignment { .. }))
-        .collect();
+    let (child_stmts, child_assigns) = split_children(mi);
     let childless = child_stmts.is_empty();
     call.bind(
         "$children",
@@ -927,6 +987,21 @@ fn push_user_module<'a>(
     } else {
         None
     };
+    // AR.20.1 — a COMPILED module, if one is armed for this exact definition.
+    if let Some(geo) = try_native_module(
+        mi,
+        params,
+        body,
+        &call,
+        &child_stmts,
+        &child_assigns,
+        &caller,
+        island,
+        ctx,
+    )? {
+        results.push(geo);
+        return Ok(());
+    }
     // MISS (or ineligible): the full three-frame setup + body. The depth bump lands HERE (a hit is not a
     // recursion level). The children are stashed for `children()`; the module name pushed for `parent_module`.
     ctx.module_depth.set(depth + 1);

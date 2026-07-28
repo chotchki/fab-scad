@@ -2093,3 +2093,126 @@ pub(super) fn explain_on() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
     *ON.get_or_init(|| std::env::var_os("FAB_EXPLAIN").is_some())
 }
+
+// ── AR.20.1: the MODULE registry ─────────────────────────────────────────────────────────────────
+//
+// Separate from `REGISTRY` because a module native is a different animal (it reaches back into the
+// evaluator for children and `$`-vars — see `crate::surface::ModuleCtx`), and because the two lists
+// are genuinely different lengths: 1335 declared functions against 742 compiled, and 416 modules on
+// their own curve. AR.14.4 folds both into the generated crate's `LibrarySurface::natives`; this is
+// the proving ground until then.
+
+/// A compiled module: geometry out, with the evaluator reachable through `ModuleCtx`.
+pub(super) type ModuleNative =
+    fn(&mut dyn crate::surface::ModuleCtx) -> crate::Result<super::geo2d::Geo>;
+
+/// One module the registry implements natively.
+pub(super) struct ModuleEntry {
+    /// The module name dispatch keys on.
+    pub(super) name: &'static str,
+    /// Verbatim source of the module it stands in for — fingerprinted, and run as the harness
+    /// oracle. Same contract as `Entry::reference`: the native wires only against a definition that
+    /// matches this structurally.
+    pub(super) reference: &'static str,
+    /// The compiled implementation.
+    pub(super) func: ModuleNative,
+}
+
+/// AR.20.1 proof-of-concept: `args` in, `children()` out. Deliberately the smallest module that
+/// exercises every part of the ABI that has no analogue on the function side — a bound parameter,
+/// the call-site child count, and a child rendered LATE in the caller's scope.
+///
+/// `k` is read and discarded, which is the point: it proves the argument arrives already bound by
+/// the evaluator's two-phase rule rather than re-matched by the native.
+fn poc_mod_children(ctx: &mut dyn crate::surface::ModuleCtx) -> crate::Result<super::geo2d::Geo> {
+    let _k = ctx.args().first().cloned().unwrap_or(crate::Value::Undef);
+    if ctx.child_count() == 0 {
+        return Ok(super::geo2d::Geo::D3(super::geo::GeoNode::Empty));
+    }
+    ctx.children()
+}
+
+pub(super) static MODULE_REGISTRY: &[ModuleEntry] = &[ModuleEntry {
+    name: "_fab_poc_mod",
+    reference: "module _fab_poc_mod(k=1) { children(); }",
+    func: poc_mod_children,
+}];
+
+/// The compiled module for `name`, IFF one is registered and the definition in this program
+/// fingerprints to the reference it was generated from.
+///
+/// Same wire-only-if-proven contract as [`resolve`]: a library that drifted from the pinned source
+/// interprets instead, so the worst case stays a missed compilation rather than a wrong answer.
+pub(super) fn resolve_module(
+    name: &str,
+    params: &[Parameter],
+    body: &crate::parser::Stmt,
+) -> Option<ModuleNative> {
+    let &(fp, func) = module_table().get(name)?;
+    (module_fingerprint(params, body) == fp).then_some(func)
+}
+
+/// `name → (reference fingerprint, native)`, parsed and fingerprinted ONCE per process — the module
+/// twin of [`table`].
+///
+/// PERF NOTE, deliberately left rather than hidden: the CALLER's body is still fingerprinted on
+/// every instantiation, because this hook sits in the per-call path while the function side resolves
+/// once at `Ctx` build. Fine for AR.20.1, whose job is proving the ABI; AR.20.5 moves module
+/// resolution to build time alongside `build_intrinsics`, where it belongs.
+fn module_table() -> &'static BTreeMap<&'static str, (crate::surface::Fingerprint, ModuleNative)> {
+    static TABLE: OnceLock<BTreeMap<&'static str, (crate::surface::Fingerprint, ModuleNative)>> =
+        OnceLock::new();
+    TABLE.get_or_init(|| {
+        let mut map = BTreeMap::new();
+        for entry in MODULE_REGISTRY {
+            let Some((params, body)) = parse_module_reference(entry.reference) else {
+                continue;
+            };
+            let prior = map.insert(entry.name, (module_fingerprint(&params, &body), entry.func));
+            debug_assert!(
+                prior.is_none(),
+                "module registry declares `{}` twice",
+                entry.name
+            );
+        }
+        map
+    })
+}
+
+/// A module reference parsed to its `(params, body)` — the shape the fingerprint takes.
+fn parse_module_reference(reference: &str) -> Option<(Vec<Parameter>, crate::parser::Stmt)> {
+    let program = crate::parser::parse(reference).ok()?;
+    let stmt = program.stmts.into_iter().next()?;
+    let crate::parser::StmtKind::ModuleDef { params, body, .. } = stmt.kind else {
+        debug_assert!(
+            false,
+            "module reference is not a single module def: {reference}"
+        );
+        return None;
+    };
+    Some((params, *body))
+}
+
+/// A module's structural identity. Distinct from the expression fingerprint because a module's body
+/// is a STATEMENT, not an expression — but the same idea and the same guarantee: spans excluded, so
+/// reformatting and comment edits survive while a semantic change does not.
+fn module_fingerprint(
+    params: &[Parameter],
+    body: &crate::parser::Stmt,
+) -> crate::surface::Fingerprint {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    params.len().hash(&mut h);
+    for p in params {
+        p.name.hash(&mut h);
+        p.default.is_some().hash(&mut h);
+    }
+    // The body via the parser's own printer: a canonical, span-free rendering of the statement tree.
+    // Cheaper to trust than a hand-written statement walk, which is the thing AR.3.3 caught going
+    // quietly stale when it stopped seeing a node type.
+    let as_program = crate::parser::Program {
+        stmts: vec![body.clone()],
+    };
+    crate::parser::print(&as_program).hash(&mut h);
+    crate::surface::Fingerprint::new(h.finish())
+}

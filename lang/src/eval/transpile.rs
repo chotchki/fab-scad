@@ -128,6 +128,30 @@ pub(crate) enum Baked {
 }
 
 impl Baked {
+    /// This value as SCAD source — what the AR.10 fallback island binds so its bindings equal the
+    /// native's bakes bit-for-bit.
+    ///
+    /// # Errors
+    /// A non-finite number: `{:?}` prints `inf`/`NaN`, which LEX AS IDENTIFIERS in scad, so the
+    /// island would silently bind `undef` where the native baked real bits. Every NaN payload also
+    /// formats alike, which would blind the cross-batch conflict check.
+    fn to_scad(&self) -> Result<String, String> {
+        match self {
+            Self::Num(v) if v.is_finite() => Ok(format!("{v:?}")),
+            Self::Num(v) => Err(format!("bakes non-finite {v}")),
+            Self::NumList(xs) => match xs.iter().find(|x| !x.is_finite()) {
+                Some(bad) => Err(format!("bakes non-finite element {bad}")),
+                None => Ok(format!(
+                    "[{}]",
+                    xs.iter()
+                        .map(|x| format!("{x:?}"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )),
+            },
+        }
+    }
+
     /// The Rust expression constructing this value, bit-exact.
     fn emit(&self) -> String {
         match self {
@@ -583,28 +607,9 @@ fn bake_entry<'a>(
         }
     }
     for (n, b) in &baked {
-        let scad = match b {
-            Baked::Num(v) if v.is_finite() => format!("{v:?}"),
-            Baked::Num(v) => return Err(format!("{name}: const `{n}` bakes non-finite {v}")),
-            // Elements need the same finiteness gate as scalars: `{:?}` prints `inf`/`NaN`, which
-            // LEX AS IDENTIFIERS in scad — the fallback island would silently bind undef where
-            // the native baked real bits (and every NaN payload formats alike, blinding the
-            // cross-batch conflict check).
-            Baked::NumList(xs) => match xs.iter().find(|x| !x.is_finite()) {
-                Some(bad) => {
-                    return Err(format!(
-                        "{name}: const `{n}` bakes non-finite element {bad}"
-                    ));
-                }
-                None => format!(
-                    "[{}]",
-                    xs.iter()
-                        .map(|x| format!("{x:?}"))
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                ),
-            },
-        };
+        let scad = b
+            .to_scad()
+            .map_err(|e| format!("{name}: const `{n}` {e}"))?;
         if let Some(prev) = fallback_consts.insert((*n).to_string(), scad.clone())
             && prev != scad
         {
@@ -616,19 +621,88 @@ fn bake_entry<'a>(
     Ok(baked)
 }
 
-/// The whole generated FILE for a set of registry entries, header + minimal imports included.
-/// Deterministic: same registry state → same bytes (the regen test's contract).
+/// The generated file for a set of REGISTRY entry names — the bootstrap path, and what the regen
+/// gate still drives. Its subjects carry the hand-maintained `consts`/`consts_v` bakes.
+///
+/// # Errors
+/// An unknown entry name, or anything [`generate_batch`] declines.
 pub(crate) fn generate_module(entry_names: &[&str]) -> Result<String, String> {
-    // The sibling table FIRST, whole batch, self included: mutual recursion (approx ↔ idx ↔
-    // posmod is a real 3-cycle) forward-references freely in Rust, and named sibling arguments
-    // bind against these declared param lists at compile time.
-    let mut siblings: Vec<(String, Vec<String>)> = Vec::new();
+    let mut sink = std::collections::BTreeMap::new();
+    let mut subjects = Vec::with_capacity(entry_names.len());
     for &name in entry_names {
         let entry = super::intrinsics::REGISTRY
             .iter()
             .find(|e| e.name == name)
             .ok_or_else(|| format!("`{name}` is not a registry entry"))?;
-        let a = analyze_function(entry.reference)?;
+        subjects.push(Subject {
+            name: entry.name,
+            source: entry.reference,
+            // `bake_entry` also fills a fallback-const map, which `generate_batch` rebuilds from
+            // the subjects; the throwaway `sink` keeps that side effect out of the way.
+            baked: bake_entry(entry, &mut sink)?,
+        });
+    }
+    generate_batch(&subjects)
+}
+
+/// AR.12.2 — the generated file for named functions read out of a LIBRARY, with no hand-maintained
+/// anything. This is what a transpiled crate is actually built from, and the reason the emitter
+/// stopped reading `intrinsics::REGISTRY`: a transpiler that depends on the table it exists to
+/// delete cannot be moved out of fab-lang, and cannot describe a library it has no entry for.
+///
+/// Bakes are EMPTY for now, which bounds this to functions that read no library constant — the 742
+/// of BOSL2's 1335 the coverage ratchet already measures, since it probes with empty bakes too.
+/// AR.16 fills them from the library's own top level and the number moves.
+///
+/// # Errors
+/// A name the library does not unambiguously declare (a collision counts as not declared), or
+/// anything [`generate_batch`] declines.
+pub(crate) fn generate_from_library(
+    lib: &super::library::Library,
+    names: &[&str],
+) -> Result<String, String> {
+    let mut subjects = Vec::with_capacity(names.len());
+    for &name in names {
+        let f = lib
+            .functions
+            .get(name)
+            .ok_or_else(|| format!("`{name}` is not an unambiguous function in this library"))?;
+        subjects.push(Subject {
+            name: &f.name,
+            source: &f.source,
+            baked: Vec::new(),
+        });
+    }
+    generate_batch(&subjects)
+}
+
+/// One function the emitter has been asked to compile: what it is called, its VERBATIM source, and
+/// the constants it bakes.
+///
+/// AR.12.2 — the seam that decouples the emitter from `intrinsics::REGISTRY`. The transpiler used to
+/// read the hand registry directly, which made it depend on the very thing it exists to delete, and
+/// made moving it into its own crate impossible. A subject can come from a registry entry or
+/// straight out of a [`super::library::Library`]; the emitter cannot tell and must not care.
+pub(crate) struct Subject<'a> {
+    pub(crate) name: &'a str,
+    pub(crate) source: &'a str,
+    pub(crate) baked: Vec<(&'a str, Baked)>,
+}
+
+/// The whole generated FILE for a batch of subjects, header + imports included.
+/// Deterministic: same subjects → same bytes (the regen test's contract).
+///
+/// # Errors
+/// A subject whose source does not parse to a single function definition, or that uses a construct
+/// outside the emitter's subset — declines LOUDLY with the construct named, because a partial native
+/// would be a wrong native.
+pub(crate) fn generate_batch(subjects: &[Subject<'_>]) -> Result<String, String> {
+    // The sibling table FIRST, whole batch, self included: mutual recursion (approx ↔ idx ↔
+    // posmod is a real 3-cycle) forward-references freely in Rust, and named sibling arguments
+    // bind against these declared param lists at compile time.
+    let mut siblings: Vec<(String, Vec<String>)> = Vec::new();
+    for subject in subjects {
+        let a = analyze_function(subject.source)?;
         siblings.push((a.name, a.params));
     }
     // The AR.10 fallback program: every baked constant (deduped, conflicts LOUD) followed by the
@@ -638,21 +712,29 @@ pub(crate) fn generate_module(entry_names: &[&str]) -> Result<String, String> {
     let mut fallback_refs = String::new();
 
     let mut fns = String::new();
-    for &name in entry_names {
-        let entry = super::intrinsics::REGISTRY
-            .iter()
-            .find(|e| e.name == name)
-            .ok_or_else(|| format!("`{name}` is not a registry entry"))?;
-        let baked = bake_entry(entry, &mut fallback_consts)?;
-        if entry.reference.contains("\"#") {
+    for subject in subjects {
+        let name = subject.name;
+        for (n, b) in &subject.baked {
+            let scad = b
+                .to_scad()
+                .map_err(|e| format!("{name}: const `{n}` {e}"))?;
+            if let Some(prev) = fallback_consts.insert((*n).to_string(), scad.clone())
+                && prev != scad
+            {
+                return Err(format!(
+                    "const `{n}` baked differently across the batch ({prev} vs {scad})"
+                ));
+            }
+        }
+        if subject.source.contains("\"#") {
             return Err(format!(
                 "{name}: reference contains `\"#` — raw string emission breaks"
             ));
         }
-        fallback_refs.push_str(entry.reference);
+        fallback_refs.push_str(subject.source);
         fallback_refs.push('\n');
 
-        fns.push_str(&generate_native(entry.reference, &baked, &siblings)?);
+        fns.push_str(&generate_native(subject.source, &subject.baked, &siblings)?);
         fns.push('\n');
     }
     let mut header = String::from(
@@ -1242,6 +1324,51 @@ mod tests {
     fn a_shadowed_call_name_is_still_a_dep() {
         let a = analyze_function("function t(f) = f(1);").expect("analyzes");
         assert_eq!(a.deps, ["f"].map(String::from).into_iter().collect());
+    }
+
+    /// AR.12.2 — the emitter produces the SAME natives whether its subjects come from the hand
+    /// registry or straight out of the library read. That is the equivalence the whole crate split
+    /// rests on: if the two inputs disagreed, moving the transpiler off `REGISTRY` would silently
+    /// change what gets compiled.
+    ///
+    /// Compares the emitted FUNCTIONS, not the whole file, and the reason is itself a finding: the
+    /// AR.10 fallback island embeds the VERBATIM source, so a hand reference that was transcribed
+    /// with different whitespace produces a byte-different `FALLBACK_SOURCES` while the natives
+    /// above it are identical. Formatting-independence is a property of the emitter, not of the
+    /// file it writes.
+    #[test]
+    fn library_subjects_emit_the_same_natives_as_registry_subjects() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("workspace root")
+            .join("libs/BOSL2");
+        if !dir.join("std.scad").exists() {
+            eprintln!("skipping: libs/BOSL2 submodule not checked out");
+            return;
+        }
+        let lib = super::super::library::Library::read(&dir).expect("BOSL2 reads");
+
+        // Const-free entries that BOSL2 declares and the registry also carries, so both inputs can
+        // describe them. A function needing a baked constant is AR.16's business, not this test's.
+        let names = ["is_nan", "is_def", "is_str", "last"];
+        let from_registry = super::generate_module(&names).expect("registry path generates");
+        let from_library =
+            super::generate_from_library(&lib, &names).expect("library path generates");
+
+        // Past the fallback island — see the doc above.
+        let natives = |text: &str| {
+            text.rsplit_once("\"#;")
+                .map_or_else(|| text.to_string(), |(_, tail)| tail.to_string())
+        };
+        assert_eq!(
+            natives(&from_registry),
+            natives(&from_library),
+            "the same functions compiled differently depending on where the emitter read them"
+        );
+        assert!(
+            natives(&from_library).contains("pub(super) fn is_nan"),
+            "the comparison would hold on two empty strings"
+        );
     }
 
     /// AR.13 — generated code names `rt` and NOTHING else from fab-lang. This is the property that

@@ -510,6 +510,256 @@ mod tests {
         assert!(err.contains("no roots given"), "{err}");
     }
 
+    use crate::parser::{Expr, ExprKind, Stmt, StmtKind};
+
+    /// AR.20 census helper: which of the module-only features does this expression reach?
+    fn walk_expr(e: &Expr, seen: &mut std::collections::BTreeSet<&'static str>) {
+        match &e.kind {
+            ExprKind::Num(_) | ExprKind::Str(_) | ExprKind::Bool(_) | ExprKind::Undef => {}
+            ExprKind::Ident(n) => {
+                if n.starts_with('$') {
+                    seen.insert("reads a $-var");
+                }
+            }
+            ExprKind::Unary { operand, .. } => walk_expr(operand, seen),
+            ExprKind::Binary { lhs, rhs, .. } => {
+                walk_expr(lhs, seen);
+                walk_expr(rhs, seen);
+            }
+            ExprKind::Ternary { cond, then, els } => {
+                walk_expr(cond, seen);
+                walk_expr(then, seen);
+                walk_expr(els, seen);
+            }
+            ExprKind::Index { base, index } => {
+                walk_expr(base, seen);
+                walk_expr(index, seen);
+            }
+            ExprKind::Member { base, .. } => walk_expr(base, seen),
+            ExprKind::Call { callee, args } => {
+                if let ExprKind::Ident(n) = &callee.kind
+                    && (n == "$children" || n == "children")
+                {
+                    seen.insert("children()/$children");
+                }
+                walk_expr(callee, seen);
+                for a in args {
+                    walk_expr(&a.value, seen);
+                }
+            }
+            ExprKind::Vector(items) => {
+                for i in items {
+                    walk_expr(i, seen);
+                }
+            }
+            ExprKind::Range { start, step, end } => {
+                walk_expr(start, seen);
+                if let Some(s) = step {
+                    walk_expr(s, seen);
+                }
+                walk_expr(end, seen);
+            }
+            ExprKind::FunctionLiteral { params, body } => {
+                for p in params {
+                    if let Some(d) = &p.default {
+                        walk_expr(d, seen);
+                    }
+                }
+                walk_expr(body, seen);
+            }
+            ExprKind::Let { bindings, body } | ExprKind::LcFor { bindings, body } => {
+                for b in bindings {
+                    walk_expr(&b.value, seen);
+                }
+                walk_expr(body, seen);
+            }
+            ExprKind::Assert { args, body } | ExprKind::Echo { args, body } => {
+                for a in args {
+                    walk_expr(&a.value, seen);
+                }
+                if let Some(b) = body {
+                    walk_expr(b, seen);
+                }
+            }
+            ExprKind::LcForC {
+                init,
+                cond,
+                update,
+                body,
+            } => {
+                for b in init.iter().chain(update.iter()) {
+                    walk_expr(&b.value, seen);
+                }
+                walk_expr(cond, seen);
+                walk_expr(body, seen);
+            }
+            ExprKind::LcEach(inner) => walk_expr(inner, seen),
+            ExprKind::LcIf { cond, then, els } => {
+                walk_expr(cond, seen);
+                walk_expr(then, seen);
+                if let Some(e2) = els {
+                    walk_expr(e2, seen);
+                }
+            }
+        }
+    }
+
+    /// The statement half of the census walk — see [`walk_expr`].
+    fn walk_stmt(s: &Stmt, seen: &mut std::collections::BTreeSet<&'static str>) {
+        match &s.kind {
+            // Nothing module-specific in any of these: an empty statement, and the two
+            // file-level forms the census reads from the top level rather than from a body.
+            StmtKind::Empty | StmtKind::Use(_) | StmtKind::Include(_) => {}
+            StmtKind::Assignment { value, .. } => walk_expr(value, seen),
+            StmtKind::Block(kids) => {
+                for k in kids {
+                    walk_stmt(k, seen);
+                }
+            }
+            StmtKind::If {
+                cond, then, els, ..
+            } => {
+                seen.insert("statement `if`");
+                walk_expr(cond, seen);
+                for k in then.iter().chain(els.iter()) {
+                    walk_stmt(k, seen);
+                }
+            }
+            StmtKind::Module(m) => {
+                match m.name.as_str() {
+                    "children" => {
+                        seen.insert("children()/$children");
+                    }
+                    "for" | "intersection_for" => {
+                        seen.insert("statement `for`");
+                    }
+                    "let" => {
+                        seen.insert("statement `let`");
+                    }
+                    "assert" | "echo" => {
+                        seen.insert("statement assert/echo");
+                    }
+                    _ => {
+                        seen.insert("calls another module");
+                    }
+                }
+                let md = m.modifiers;
+                if md.root || md.highlight || md.background || md.disable {
+                    seen.insert("modifier `! # % *`");
+                }
+                for a in &m.args {
+                    if a.name.as_ref().is_some_and(|n| n.starts_with('$')) {
+                        seen.insert("passes a $-var");
+                    }
+                    walk_expr(&a.value, seen);
+                }
+                for k in &m.children {
+                    walk_stmt(k, seen);
+                }
+            }
+            StmtKind::ModuleDef { body, .. } => {
+                seen.insert("nested module def");
+                walk_stmt(body, seen);
+            }
+            StmtKind::FunctionDef { body, .. } => {
+                seen.insert("nested function def");
+                walk_expr(body, seen);
+            }
+        }
+    }
+
+    /// AR.20's work list. Modules are IN SCOPE (chotchki: "yes modules are completely in scope and
+    /// BOSL2 is worthless without them"), and the emission model has none of the evaluator context
+    /// they need — so before designing that, count what they actually use.
+    ///
+    /// Same move that reframed the function side: the v0 emitter turned out to already handle 47%
+    /// of functions, and the residual was four named bands rather than an open problem. This is the
+    /// equivalent census for the statement half.
+    ///
+    /// `cargo nextest run -p fab-lang -E 'test(module_census)' --no-capture`
+    #[test]
+    fn the_module_census_says_what_statement_support_costs() {
+        use std::collections::BTreeMap;
+
+        let dir = bosl2();
+        if !dir.join("std.scad").exists() {
+            eprintln!("skipping: libs/BOSL2 submodule not checked out");
+            return;
+        }
+
+        // Tally per FEATURE, counting the modules that use it at least once — "how many modules
+        // does this construct block" is the schedulable number, not the raw occurrence count.
+        let mut used: BTreeMap<&'static str, usize> = BTreeMap::new();
+        // (module name, its feature set) — the histogram says what is common, this says which
+        // modules can be attempted FIRST.
+        let mut combos: Vec<(String, std::collections::BTreeSet<&'static str>)> = Vec::new();
+        let mut modules = 0_usize;
+        let mut files = 0_usize;
+
+        let mut paths: Vec<_> = std::fs::read_dir(&dir)
+            .expect("BOSL2 checked out")
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| p.extension().is_some_and(|x| x == "scad"))
+            .collect();
+        paths.sort();
+
+        for path in &paths {
+            let Ok(text) = std::fs::read_to_string(path) else {
+                continue;
+            };
+            let Ok(prog) = crate::parser::parse(&text) else {
+                continue;
+            };
+            files += 1;
+            for stmt in &prog.stmts {
+                let StmtKind::ModuleDef { name, body, .. } = &stmt.kind else {
+                    continue;
+                };
+                modules += 1;
+                let mut seen: std::collections::BTreeSet<&'static str> =
+                    std::collections::BTreeSet::new();
+                walk_stmt(body, &mut seen);
+                for f in &seen {
+                    *used.entry(*f).or_default() += 1;
+                }
+                combos.push((name.clone(), seen));
+            }
+        }
+
+        let mut hist: Vec<_> = used.into_iter().collect();
+        hist.sort_by_key(|(_, n)| std::cmp::Reverse(*n));
+        println!("\n=== BOSL2 module census ===\n{modules} modules across {files} files");
+        for (feature, n) in &hist {
+            let pct = n * 100 / modules.max(1);
+            println!("  {n:4} ({pct:3}%)  {feature}");
+        }
+        // THE SCHEDULING NUMBER. The per-feature counts above say what is common; this says
+        // whether an INCREMENTAL start exists at all. On the function side it did — 47% compiled
+        // before anything was widened — so bands could land one at a time. A module that neither
+        // takes children nor calls another module is the equivalent starting set.
+        let leaves: Vec<&str> = combos
+            .iter()
+            .filter(|(_, f)| {
+                !f.contains("children()/$children") && !f.contains("calls another module")
+            })
+            .map(|(n, _)| n.as_str())
+            .collect();
+        let no_children: usize = combos
+            .iter()
+            .filter(|(_, f)| !f.contains("children()/$children"))
+            .count();
+        println!(
+            "\nLEAF SET (no children, calls no module): {} of {modules}\n  {}",
+            leaves.len(),
+            leaves.join(", ")
+        );
+        println!("no children at all: {no_children} of {modules}");
+        assert!(
+            modules > 300,
+            "BOSL2 has ~416 modules; found {modules} — the walk is not seeing them"
+        );
+    }
+
     /// AR.16's work list, derived rather than guessed: of the names BOSL2 functions read freely,
     /// which ones does the library DECLARE as a top-level constant (bakeable, once the emitter can
     /// evaluate them) and which does it not (a genuinely free read — a `$`-var, an upstream typo,

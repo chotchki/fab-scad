@@ -392,7 +392,11 @@ pub fn builtins() -> &'static [Decl] {
 /// (a separate surface, chosen explicitly) rather than something merged into `BUILTINS`.
 pub trait Surface {
     /// The callables this surface hosts, in a stable order.
-    fn decls(&self) -> &[Decl];
+    ///
+    /// `'static` on purpose: the generator holds the slice for its whole walk and indexes it with the
+    /// RNG. A borrowed surface would push a lifetime through every `Gen` method for a table that is
+    /// built once per process — [`NativeSurface`] leaks its derived decls rather than pay that.
+    fn decls(&self) -> &'static [Decl];
 
     /// SCAD that must precede a generated call — a library's `include`/`use`, or its definitions
     /// inline. Empty for builtins, which need no preamble. Without this a generated program calls
@@ -408,7 +412,7 @@ pub trait Surface {
 pub struct Builtins;
 
 impl Surface for Builtins {
-    fn decls(&self) -> &[Decl] {
+    fn decls(&self) -> &'static [Decl] {
         BUILTINS
     }
 }
@@ -431,7 +435,7 @@ impl Surface for Builtins {
 /// trap: a corpus that looks like it measures geometry while measuring error handling), so tightening
 /// these is the next increment, not something to fake here.
 pub struct NativeSurface {
-    decls: Vec<Decl>,
+    decls: &'static [Decl],
     preamble: String,
 }
 
@@ -441,7 +445,7 @@ impl NativeSurface {
     /// generator for a table built once.
     #[must_use]
     pub fn from_registry(preamble: impl Into<String>) -> Self {
-        let decls = fab_lang::native_surface()
+        let decls: Vec<Decl> = fab_lang::native_surface()
             .into_iter()
             .map(|f| {
                 let params: Vec<Param> = f
@@ -461,17 +465,17 @@ impl NativeSurface {
                     params: Box::leak(params.into_boxed_slice()),
                 }
             })
-            .collect();
+            .collect::<Vec<Decl>>();
         NativeSurface {
-            decls,
+            decls: Box::leak(decls.into_boxed_slice()),
             preamble: preamble.into(),
         }
     }
 }
 
 impl Surface for NativeSurface {
-    fn decls(&self) -> &[Decl] {
-        &self.decls
+    fn decls(&self) -> &'static [Decl] {
+        self.decls
     }
     fn preamble(&self) -> &str {
         &self.preamble
@@ -485,6 +489,12 @@ pub struct Gen {
     profile: Profile,
     fuel: u32,
     depth: u32,
+    /// The call surface this walk generates against (AR.3.2). `Builtins` by default, so every
+    /// pre-existing seed keeps its meaning — the RNG indexes this slice, so swapping it silently
+    /// re-points the accumulated corpora at different programs.
+    surface: &'static [Decl],
+    /// Source the surface needs before its calls resolve (a library's `include`). Empty for builtins.
+    preamble: String,
     vars: Vec<String>,                 // in-scope variable names
     funcs: Vec<(String, Vec<String>)>, // defined functions (name, param names)
     mods: Vec<(String, usize)>,        // defined modules (name, arity)
@@ -498,6 +508,22 @@ pub struct Gen {
 #[must_use]
 pub fn generate(seed: u32) -> String {
     generate_with(seed, Profile::CHEAP)
+}
+
+/// [`generate_with`] against an explicit call SURFACE (AR.3.2) — how a transpiled library gets fuzzed.
+///
+/// The surface's preamble is emitted first, so its calls actually resolve; without it every generated
+/// program fails identically on both legs of a differential, which reads as agreement.
+///
+/// A seed means something DIFFERENT under a different surface, by construction — the RNG indexes the
+/// decl table. That is why this is a separate entry point rather than a parameter on [`generate`]:
+/// the existing corpora belong to the builtin surface and must keep meaning what they meant.
+#[must_use]
+pub fn generate_against(seed: u32, profile: Profile, surface: &dyn Surface) -> String {
+    let mut g = Gen::with_profile(seed, profile);
+    g.surface = surface.decls();
+    g.preamble = surface.preamble().to_string();
+    g.program()
 }
 
 /// [`generate`] under an explicit [`Profile`] — the heavy lane's entry (AO.1).
@@ -517,6 +543,8 @@ impl Gen {
             profile,
             fuel: profile.start_fuel,
             depth: 0,
+            surface: BUILTINS,
+            preamble: String::new(),
             vars: Vec::new(),
             funcs: Vec::new(),
             mods: Vec::new(),
@@ -578,6 +606,14 @@ impl Gen {
     #[must_use]
     fn program(&mut self) -> String {
         let mut out = String::new();
+        // AR.3.2 — the surface's own definitions first, or its calls resolve to nothing. Emitted
+        // BEFORE any RNG draw, so a preamble cannot shift what a seed generates.
+        if !self.preamble.is_empty() {
+            out.push_str(&self.preamble);
+            if !self.preamble.ends_with('\n') {
+                out.push('\n');
+            }
+        }
         // $-assignments (dynamic-scope fallbacks) — SMALL $fn so any circle stays cheap.
         if self.chance(0.4) {
             out.push_str(&format!(
@@ -1274,7 +1310,11 @@ impl Gen {
     /// A nested call whose declared return fits `want`, if any builtin qualifies. Depth-bounded on
     /// the same counter as `expr`, so composition cannot outrun the profile's nesting cap.
     fn compose_call(&mut self, want: Domain) -> Option<String> {
-        let fits: Vec<&'static Decl> = BUILTINS.iter().filter(|d| satisfies(d.ret, want)).collect();
+        let fits: Vec<&'static Decl> = self
+            .surface
+            .iter()
+            .filter(|d| satisfies(d.ret, want))
+            .collect();
         let d = *fits.get(self.below(fits.len()))?;
         self.depth += 1;
         let args: Vec<String> = d
@@ -1287,7 +1327,7 @@ impl Gen {
     }
 
     fn pick_builtin(&mut self) -> &'static Decl {
-        &BUILTINS[self.below(BUILTINS.len())]
+        &self.surface[self.below(self.surface.len())]
     }
 
     /// A call to a previously-defined function (arity-correct) if any exist, else fall back to an
@@ -1563,5 +1603,40 @@ mod tests {
             "every decl names itself"
         );
         assert!(s.preamble().contains("BOSL2"), "the preamble rides along");
+    }
+
+    /// AR.3.2 — generating INTO a surface, the thing the whole declaration exists for. A program that
+    /// calls the natives by name, with their real parameter names, is what a transpiled-library
+    /// differential needs; before this the generator could only ever call builtins.
+    #[test]
+    fn generating_against_the_native_surface_calls_the_natives() {
+        let surface = NativeSurface::from_registry("include <BOSL2/std.scad>\n");
+        let names: Vec<&str> = surface.decls().iter().map(|d| d.name).collect();
+        let mut saw_a_native = false;
+        for seed in 0u32..40 {
+            let src = super::generate_against(seed, Profile::CHEAP, &surface);
+            assert!(
+                src.starts_with("include <BOSL2/std.scad>"),
+                "seed {seed}: the preamble must lead, or the calls resolve to nothing"
+            );
+            if names.iter().any(|n| src.contains(&format!("{n}("))) {
+                saw_a_native = true;
+            }
+        }
+        assert!(
+            saw_a_native,
+            "40 seeds against the native surface and not one call into it — the surface is not wired"
+        );
+    }
+
+    /// A surface swap MUST change what a seed means, and that is why `generate_against` is a separate
+    /// entry point rather than a parameter on `generate`: the accumulated corpora belong to the builtin
+    /// surface. If this ever passes by accident (identical output), the surface isn't reaching the RNG.
+    #[test]
+    fn a_seed_means_something_different_under_a_different_surface() {
+        let native = NativeSurface::from_registry("");
+        let differ = (0u32..20)
+            .any(|seed| super::generate_against(seed, Profile::CHEAP, &native) != generate(seed));
+        assert!(differ, "the surface never reached the generator");
     }
 }

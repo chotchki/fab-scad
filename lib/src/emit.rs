@@ -779,6 +779,75 @@ impl Emitter<'_> {
                 };
                 Ok(format!("    parts.push({sel});\n"))
             }
+            // Statement `for` — the same nesting the comprehension side already emits, but each
+            // iteration's body contributes GEOMETRY rather than elements. 69 of 416 modules.
+            "for" => {
+                let mark = self.locals.len();
+                let mut out = String::new();
+                let mut depth = 0;
+                for b in &mi.args {
+                    let Some(bn) = &b.name else {
+                        return Err("an unnamed `for` binding".into());
+                    };
+                    if bn.starts_with('$') {
+                        return Err("a `$`-binding in a statement `for`".into());
+                    }
+                    // Each iterable is emitted INSIDE the enclosing loops, so a later binding sees
+                    // the earlier binders — the interpreter's nesting order.
+                    let iter = self.expr(&b.value)?;
+                    let ident = self.fresh_ident(bn);
+                    let _ = writeln!(out, "    for {ident} in rt::iter_values_native(&{iter}) {{");
+                    self.locals.push((bn.to_string(), ident));
+                    depth += 1;
+                }
+                for k in &mi.children {
+                    out.push_str(&self.stmt(k)?);
+                }
+                for _ in 0..depth {
+                    out.push_str("    }\n");
+                }
+                self.locals.truncate(mark);
+                Ok(out)
+            }
+            // Statement `let`: binds for its CHILDREN only, then the bindings leave scope. 8 of 416.
+            "let" => {
+                let mark = self.locals.len();
+                let mut out = String::new();
+                for b in &mi.args {
+                    let Some(bn) = &b.name else {
+                        return Err("an unnamed `let` binding".into());
+                    };
+                    if bn.starts_with('$') {
+                        // A `$`-binding is a DYNAMIC one — it reaches every callee, not just the
+                        // lexical children — so it is AR.20.3's business, not a local.
+                        return Err("a `$`-binding in a statement `let`".into());
+                    }
+                    let v = self.expr(&b.value)?;
+                    let ident = self.fresh_ident(bn);
+                    let _ = writeln!(out, "    let {ident} = {v};");
+                    self.locals.push((bn.to_string(), ident));
+                }
+                for k in &mi.children {
+                    out.push_str(&self.stmt(k)?);
+                }
+                self.locals.truncate(mark);
+                Ok(out)
+            }
+            // `assert` in statement position: the condition gates the CHILDREN, and a failure is a
+            // raise. The message is a diagnostic locator, matching the expression side.
+            "assert" => {
+                let Some(cond) = mi.args.first() else {
+                    return Err("an `assert` with no condition".into());
+                };
+                let c = self.expr(&cond.value)?;
+                let mut out = format!(
+                    "    if !({c}).is_truthy() {{ return Err(rt::bosl_assert(\"generated\")); }}\n"
+                );
+                for k in &mi.children {
+                    out.push_str(&self.stmt(k)?);
+                }
+                Ok(out)
+            }
             other => Err(format!("a call to module `{other}` (AR.20.5 dispatch)")),
         }
     }
@@ -1638,6 +1707,42 @@ mod tests {
             let err = super::generate_module_native(src, &[], &[])
                 .expect_err(&format!("must decline: {src}"));
             assert!(err.contains(want), "expected `{want}` in `{err}` for {src}");
+        }
+    }
+
+    /// AR.20.4 — the statement bands the census counted, each generating rather than declining.
+    #[test]
+    fn the_statement_bands_generate() {
+        for (label, src, want) in [
+            (
+                "statement for (69 modules)",
+                "module m(n) { for (i = [0:n]) children(i); }",
+                "_i in rt::iter_values_native(",
+            ),
+            (
+                "statement let (8 modules)",
+                "module m(n) { let (d = n * 2) children(); }",
+                "_d =",
+            ),
+            (
+                "statement assert (part of the 89 assert/echo)",
+                "module m(n) { assert(n > 0) children(); }",
+                "return Err(rt::bosl_assert(",
+            ),
+            (
+                "nested for, inner iterable sees the outer binder",
+                "module m(n) { for (i = [0:n], j = [0:i]) children(j); }",
+                "_j in rt::iter_values_native(",
+            ),
+            (
+                "children(i) selects rather than rendering all",
+                "module m(n) { for (i = [0:n]) children(i); }",
+                "fx.child_at(",
+            ),
+        ] {
+            let code = super::generate_module_native(src, &[], &[])
+                .unwrap_or_else(|e| panic!("{label}: declined: {e}"));
+            assert!(code.contains(want), "{label}: missing `{want}` in:\n{code}");
         }
     }
 

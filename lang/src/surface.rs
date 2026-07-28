@@ -376,11 +376,20 @@ pub enum Children<'a> {
     /// The call supplies no children — a `;` body.
     None,
     /// Forward the children this module itself received, untouched. The overwhelmingly common
-    /// shape in BOSL2, where a wrapper module re-emits what it was given.
+    /// shape in BOSL2, where a wrapper re-emits what it was given.
     Inherited,
-    /// Geometry this module already built, handed down as a finished subtree. Used where a native
-    /// synthesizes a child rather than forwarding one.
-    Built(&'a [Geo]),
+    /// A COMPILED child block: one thunk per geometry child, in source order.
+    ///
+    /// CORRECTED from a `&[Geo]` of already-built subtrees, which was wrong and would have been
+    /// wrong quietly. A callee may instantiate its children ZERO times or MANY — `if` guards them,
+    /// `for` repeats them — and each instantiation happens fresh. Handing down finished geometry
+    /// flattens exactly the laziness that makes `children()` mean what it means, so a callee that
+    /// rendered its children twice would get one subtree duplicated rather than two evaluations,
+    /// and a callee that rendered them zero times would still have paid for them.
+    ///
+    /// A SLICE rather than one thunk because `children(i)` selects, `$children` counts, and neither
+    /// is answerable from a single closure over the whole block.
+    Compiled(&'a [&'a dyn Fn(&mut dyn ModuleCtx) -> crate::Result<Geo>]),
 }
 
 /// One callable this library COMPILED, with everything that has to be true for it to be legal.

@@ -55,6 +55,9 @@ mod parser;
 /// carries no promise to anyone but the transpiler that emits the calls.
 #[doc(hidden)]
 pub mod rt;
+/// AR.14.1 — what a library declares: constants, functions and modules, in the one place every
+/// consumer can see. Implemented by transpiled library crates and by the builtin table.
+pub mod surface;
 mod webcolors;
 
 pub use customizer::{Constraint, CustomParam, Customizer, DropdownItem, customize};

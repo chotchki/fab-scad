@@ -141,118 +141,13 @@ impl Default for Profile {
     }
 }
 
-/// What KIND of value a parameter accepts — the type information a call generator needs in order to
-/// produce a call that does WORK rather than one that returns `undef`.
-///
-/// This is the AR.4 trap made structural: a wrongly-typed argument costs nothing, renders nothing and
-/// times as ~0, so a domain-blind corpus measures ERROR HANDLING while looking like it measures
-/// geometry — and the failure is invisible, because the programs still run, still agree with the
-/// oracle and still report a ratio.
-///
-/// `Any` is used HONESTLY, for builtins that genuinely accept anything (the `is_*` predicates,
-/// `str`) — not as a shrug. A guessed domain would generate confidently wrong calls, which is worse
-/// than a general one.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Domain {
-    /// A scalar.
-    Num,
-    /// A POSITIVE integer — `sqrt`/`ln` (a negative is instant NaN) and `chr` (a codepoint).
-    Pos,
-    /// A number in `[-1, 1]` — `asin`/`acos`'s real domain; anything wider is NaN half the time.
-    Unit,
-    /// Degrees — a `Num`, but flagged so a generator can stay in a sane angular range.
-    Deg,
-    /// A boolean.
-    Bool,
-    /// A string.
-    Str,
-    /// A numeric vector of EXACTLY 3 — `cross`, where mismatched lengths are undef and 2-vectors
-    /// change the return type to a scalar.
-    Vec3,
-    /// A numeric vector of any length.
-    VecN,
-    /// A flat list of anything.
-    List,
-    /// A `[[key, value], …]` pairs table, keys ascending — `lookup`'s pairs, and the shape
-    /// `search` indexes by column.
-    Table,
-    /// Genuinely any value.
-    Any,
-}
-
-/// May a call RETURNING `ret` stand where `want` is expected? The scalar domains nest — a `Unit`,
-/// `Pos` or `Deg` value IS a `Num`, and any scalar is a usable angle — which is what lets trig
-/// compose (`sin(acos(…))`: `acos` returns degrees, `sin` wants them). Deliberately asymmetric:
-/// a `Num` is not a `Unit`, and nothing stands in for `Pos` (no builtin's return is provably
-/// positive AND integral — `chr` needs a codepoint, not `exp`'s 20.08).
-fn satisfies(ret: Domain, want: Domain) -> bool {
-    match want {
-        Domain::Num | Domain::Deg => {
-            matches!(ret, Domain::Num | Domain::Deg | Domain::Unit | Domain::Pos)
-        }
-        _ => ret == want,
-    }
-}
-
-/// Function or module — a module takes CHILDREN, a function does not.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Kind {
-    /// Callable in expression position.
-    Function,
-    /// Callable in statement position, may take children.
-    Module,
-}
-
-/// One parameter of a declared callable.
-#[derive(Clone, Copy, Debug)]
-pub struct Param {
-    /// The declared name. DECORATIVE on builtins — upstream discards builtin argument names and binds
-    /// POSITIONALLY (`pow(exp=3, base=2)` is 9, not 8; `sin(bogus=30)` is accepted). It is load-bearing
-    /// only where [`Decl::names_bind`], i.e. on user-defined functions, which is what BOSL2 is.
-    pub name: &'static str,
-    /// What this parameter accepts.
-    pub domain: Domain,
-    /// No default — AN.3's case. An unfilled defaultless param must be `undef` and must NOT fall
-    /// through to a like-named global, so a generator that never OMITS an argument cannot catch that
-    /// regression.
-    pub required: bool,
-}
-
-/// One callable a surface hosts, as DECLARED rather than rediscovered by each consumer.
-///
-/// See `docs/transpiler-design.md`. The point of declaring it once: the AO fuzzer, AR.1's
-/// transpiled-library fuzzing, and the dispatch registry all want the same facts, and
-/// `intrinsics::Entry` already carries the DISPATCH half (may this native be used here?) while
-/// nothing carries the CALL half (how do I build a call that works?).
-#[derive(Clone, Copy, Debug)]
-pub struct Decl {
-    /// The callable's name.
-    pub name: &'static str,
-    /// Function or module.
-    pub kind: Kind,
-    /// What a WELL-TYPED call returns — what makes calls COMPOSE. A generator needing a `Num` can
-    /// nest any `Num`-returning call (`sin(acos(…))`), which is where eval work comes from; without
-    /// this field every argument bottoms out at a literal after one hop. Declared conservatively:
-    /// `sin`/`cos` return [`Domain::Unit`], `asin`..`atan2` return degrees.
-    pub ret: Domain,
-    /// Do parameter NAMES bind? FALSE for builtins (verified against the oracle — see [`Param::name`]),
-    /// true for user/library functions. The whole AN.1/AN.2/AN.3/AN.14 diagnostic family is
-    /// unreachable when this is false, so a generator that ignores the flag will believe it has
-    /// covered the named-argument path without ever exercising it.
-    pub names_bind: bool,
-    /// The parameters, in DECLARATION order — which is the order positional args fill.
-    pub params: &'static [Param],
-}
-
-impl Decl {
-    /// How many arguments a generator should supply. Note several builtins (`str`, `concat`, `min`,
-    /// `max`) are genuinely VARIADIC upstream; the surface pins them at the arity the corpus has
-    /// always generated, so this stays a generation choice rather than a claim about the language.
-    #[must_use]
-    pub fn arity(&self) -> usize {
-        self.params.len()
-    }
-}
+// AR.14.1 — the declaration types live in fab-lang now, because a GENERATED library crate has to
+// implement this trait and must not depend on the fuzzer to describe itself. Re-exported rather
+// than re-declared: two copies of `Domain` in one tree is precisely the drift this phase exists to
+// kill, and the AR.5a finding is what it costs when three hand-kept lists disagree.
+pub use fab_lang::surface::{
+    ConstDecl, Decl, Domain, Kind, LibrarySurface, Param, Root, satisfies,
+};
 
 /// Shorthand for a required parameter.
 const fn p(name: &'static str, domain: Domain) -> Param {
@@ -1607,6 +1502,48 @@ mod tests {
             assert_eq!(a, b, "generation is deterministic");
             assert!(!a.is_empty(), "seed {seed} generated nothing");
         }
+    }
+
+    /// AR.14.1 — seed stability ACROSS VERSIONS, which the determinism test above cannot see: it
+    /// compares a run against itself, so a refactor that re-points every seed at a different
+    /// program passes it unchanged.
+    ///
+    /// That is not hypothetical. `pick_builtin` indexes the surface with the RNG, so ANY change to
+    /// the decl table's contents or order silently re-points every accumulated fuzz corpus — the
+    /// seeds still generate, still label, still report a ratio, and no longer mean what they meant
+    /// when they were minimized. Pinning the bytes is the only thing that notices.
+    ///
+    /// Baselined 2026-07-28 against commit 4f49c264, before the declaration types moved into
+    /// fab-lang. A deliberate generation change updates these hashes IN THE SAME COMMIT that
+    /// explains why; an accidental one fails here by name.
+    #[test]
+    fn seeds_still_generate_the_same_bytes() {
+        // (seed, len, first 16 bytes) — a cheap fingerprint that needs no hasher dependency and
+        // still pins both the shape and the content of the emitted program.
+        const PINNED: &[(u32, usize, &str)] = &[
+            (0, 838, "union() {\n  sphe"),
+            (7, 582, "$fn = 4;\ncube([6"),
+            (42, 854, "intersection_for"),
+            (1337, 800, "v2 = [for (i0 = "),
+            (99_991, 545, "$fn = 9;\nv0 = -2"),
+        ];
+        let mut drifted = Vec::new();
+        for &(seed, len, head) in PINNED {
+            let got = generate(seed);
+            let got_head: String = got.chars().take(16).collect();
+            if got.len() != len || got_head != head {
+                drifted.push(format!(
+                    "seed {seed}: len {} head {got_head:?} (pinned len {len} head {head:?})",
+                    got.len()
+                ));
+            }
+        }
+        assert!(
+            drifted.is_empty(),
+            "generated programs CHANGED — every accumulated fuzz corpus now means something \
+             different than when it was minimized:\n  {}",
+            drifted.join("\n  ")
+        );
     }
 
     /// AR.3's payoff: the native surface is DERIVED, so it describes the registry without anyone

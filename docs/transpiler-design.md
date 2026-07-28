@@ -267,3 +267,199 @@ other order and the call generator gets written twice.
    decl's call from its domains and asserts the result is never `undef` — the "did no work" tell.
    If a decl's domains drift into uselessness, that fails by name instead of the heavy lane silently
    going back to measuring error handling.
+
+---
+
+# The shape, settled 2026-07-28
+
+Everything above was written before the transpiler had ever been pointed at a library. It has now,
+and four things changed — three because chotchki decided them, one because measuring beat guessing.
+
+## Measure first: 47.3% of BOSL2 already compiled
+
+Before any of the design below, the v0 emitter was run over every top-level function in the pinned
+BOSL2. **632 of 1335 compiled** — with no baked constants and no widening at all. String literals
+(`Value::Str` was simply never emittable) took that to **742, or 55.5%**, in about an hour of work.
+
+That number reframes the phase. The remaining half is not open-ended research, it is four named
+bands with counts attached:
+
+| declines | band |
+|---|---|
+| 375 | unbaked library constants — `_EPSILON` 131, `UP` 106, `CENTER` 70, `_NO_ARG` 43 |
+| 73 | computed callee (a function value in call position) |
+| 73 | non-contiguous named args to a sibling |
+| 40 | function literals + call-through-a-local-binding |
+| ~20 | C-style comprehension, `echo`, and a tail |
+
+The histogram is FIRST-DECLINE-WINS, so every count is a lower bound — clearing a band re-runs its
+survivors against whatever they hit next, which is why the constant band GREW when strings landed.
+
+It is a ratchet, not a report (`bosl2_codegen_coverage_holds_its_floor`). An emitter that quietly
+stops handling a construct does not fail; it falls back to interpreting, and every other test still
+passes. Only a number that must not drop can see that. Same reasoning as AR.3.3's domain floor.
+
+## The transpiler is a proc macro; the library crate is its output
+
+chotchki: *"I'm kinda expecting fab-lib-bosl2 to be a huge proc macro when all is said and done"* —
+then, clarifying — *"errr the transpiler to be a huge proc macro, fab-lib-bosl2 will be the output of
+a huge `fab_transpile!("BOSL2/std.scad")`"*, and *"it may need to be an array"*.
+
+So `fab-lib-bosl2` is a crate whose entire content is one macro invocation over an array of ROOTS:
+
+```rust
+fab_transpile!(["BOSL2/std.scad", "BOSL2/gears.scad"]);
+```
+
+This costs nothing to keep open **provided `fab-lib` stays a pure function from library-source to
+Rust-source, with no opinion on delivery**. Then checked-in generation and a proc macro are the same
+transpiler with a different consumer, and switching between them is not a rewrite. Ship checked-in
+first (reviewable, no build-time transpiler dependency), convert once the emitter stops moving.
+
+The reviewability objection against a macro turns out not to bite: the diff worth reading when BOSL2
+bumps is the SUBMODULE's, and the regression that matters — functions falling out of coverage — is
+caught by the ratchet, which is a test rather than an artifact.
+
+What does gate the conversion, and must be measured rather than argued, is **expansion cost**.
+Parsing 85K lines of OpenSCAD and handing rustc ~1.7 MB of tokens would run on every clean build of
+every consumer, where checked-in output costs only the rustc half. Second wrinkle: a proc macro is
+not re-run when a file it reads changes unless that file is `include_str!`d, so the macro needs an
+explicit list of the 56 `.scad` files rather than a glob — which is fine, and arguably better, since
+a silently-dropped library file is the failure mode where a missing input costs a PART, not an error.
+
+## A root is not a directory, and `include` means far more than one file
+
+The first library read globbed `*.scad` from a directory. That describes a program nobody has.
+
+`std.scad` reaches **30 of BOSL2's 56 files**; gears, screws, threading, nurbs and the rest are
+OPT-IN roots a user includes separately. And BOSL2's opt-in files do not include `std.scad` back —
+`gears.scad` has no includes at all, it simply assumes std is already there. So the closures
+**compose rather than nest**, which is exactly why the macro takes an array.
+
+Measured, both units kept:
+
+| unit | functions | constants | files |
+|---|---|---|---|
+| `std.scad` closure | 934 | 106 | 32 |
+| `gears.scad` closure | 39 | 0 | 1 |
+| whole directory | 1329 | 169 | 56 |
+
+`include` versus `use` is honored: `include` splices a file whole, `use` imports its modules and
+functions and deliberately NOT its variables. Getting that backwards would let the constant band bake
+a value the consumer's program never binds — the native would answer with a number where the
+interpreter says `undef`.
+
+## The registry carries PROVENANCE
+
+chotchki: *"the registry needs to know what root emitted what, so when a downstream consumer includes
+it, it gets what it asked for, which make include more than just itself"*.
+
+So a declaration is not just `name → decl`. Each ROOT keeps its own closure, keyed by the path a
+consumer writes in its `include` line. This is not bookkeeping — it is what makes the surface
+answerable, and it is wrong in both directions without it. A generated program that includes only
+`std.scad` and calls `spur_gear` is broken; one restricted to the handful of names `std.scad` itself
+declares misses 934 functions it should be exercising. And a missing function costs a silently-absent
+PART rather than an error, which is the hardest failure to notice.
+
+## One trait, three kinds of declaration
+
+chotchki: *"the fab-lib-bosl2 library should be exporting the implementation of a library surface
+trait that includes constants/functions/modules, that trait is what the fuzzer/fab-gui/etc should be
+consuming"*.
+
+Today there are THREE overlapping descriptions of the same thing, maintained separately:
+
+- `fab_gen::Decl` — the fuzzer's view, already carrying `Kind::{Function, Module}`
+- `fab_lang::SurfaceFn` — derived from references at runtime, then `Box::leak`ed to get `'static`
+- `intrinsics::Entry` — the dispatch view
+
+These collapse into one trait in **fab-lang**, because every other crate already depends on it and a
+generated library crate must not depend on the fuzzer. The runtime derivation and its leak both
+disappear: a generated library declares itself at build time instead of being read back at startup.
+
+Two lists on the trait, deliberately NOT one list with an `Option`:
+
+- `callables()` — pure DECLARATION: name, kind, params with names, domains and required-ness
+- `natives()` — IMPLEMENTATION: reference, fingerprint, guard sets, function pointer
+
+They are different lengths on purpose. BOSL2 declares 1335 functions and we compile 742. Folding them
+together would assert those are the same set, which is precisely the drift this phase exists to kill.
+
+Declaring MODULES buys something before a single module is transpiled: the fuzzer can generate calls
+against BOSL2's 416-module surface as soon as it is declared. That coverage is not gated on the
+question of whether modules ever get natives.
+
+## The registry accumulates, and is passed in
+
+The dependency inversion is forced: `fab-lib-bosl2` depends on `fab-lang`, so `fab-lang` cannot
+depend on it, so `intrinsics::REGISTRY` — a static that dispatch reads directly — has no home.
+
+Two shapes were on the table: thread `Config` to every dispatch site, or install libraries once into
+a global. chotchki picked neither: *"I think its reasonable for those modules to be expect to be
+given a registry of loaded stuff that keeps getting built up"* — an ACCUMULATING registry the
+consumer builds and passes in.
+
+That is better than either, for a reason neither option weighed: **it composes**. BOSL2 plus
+machineblocks plus a user's own library is the normal case, and both alternatives quietly assumed
+exactly one library. It also kills the global-init ordering hazard outright instead of documenting
+around it.
+
+`Config::intrinsics` stays as the per-evaluation toggle — AR.2's differential has to turn natives off
+WITHOUT changing which libraries are present, so the two are not the same knob.
+
+The hard part is not the type. `table()`, `anchor_fp`, `entry_by_name` and `classify` are all reached
+from call sites with no `Config` in hand, and `table()` in particular is a process-lifetime `OnceLock`
+keyed on nothing — sound only while there is exactly one immutable registry in the process. Per-registry
+caching, or none.
+
+## The emission ABI is named, and it is small
+
+Generated code used to reach `crate::eval::{ops, builtins, …}` and `super::{bosl_assert, native_rt}`,
+which resolved only because `generated.rs` happened to live inside `eval`. It now names
+`fab_lang::rt` and nothing else — **10 functions and 3 types**, all pure value algebra with no
+evaluator context to thread.
+
+Enforced by scanning the emitted TEXT, not by trusting the emitter: paths are decided in ~25 separate
+format strings, and one of them reverting is a one-character diff the compiler accepts right up until
+the file moves.
+
+`extern crate self as fab_lang` makes that path resolve inside fab-lang too, so moving `generated.rs`
+into its own crate cannot change a byte of what it moves. A move that rewrites what it moves is a
+move nobody can diff.
+
+Adding to `rt` is a deliberate act. Every addition widens what a generated native can do without
+going through the value algebra, and the bit-identity argument rests entirely on it not doing that.
+
+## What the library read found that 55 hand-written references could not
+
+- **Zero drift.** All 52 registry entries that BOSL2 declares still fingerprint-match their
+  transcribed reference. First real evidence for the maintenance thesis.
+- **BOSL2 declares three names twice** at column 0 in one file: `_sort_vectors` (the known last-wins
+  trap that already cost a bug), plus `_get_cp` and `_list_shape_recurse` — both same-arity, so
+  almost certainly upstream dead code. A colliding name is REFUSED, not resolved: which body a user
+  gets depends on their include graph, not ours.
+- **An analyzer bug.** A C-style comprehension's update clause BINDS, it does not only reassign —
+  `_dp_distance_array` introduces `newrow` there and reads it from two later update bindings. Walking
+  update as plain args reported that loop variable as a free GLOBAL read; 19 phantom free names
+  collapsed to 6. No hand reference uses that form.
+- **An upstream bug.** `gear_shorten_skew` reads `helical` while declaring `helical1`/`helical2`, so
+  it returns `undef`. Five functions read names nothing declares, which also means those names still
+  need a GUARD rather than a bake — a user can define the missing name at top level and change what
+  the function means.
+
+## Still open
+
+- **Modules.** "A fully working copy of BOSL2" — the 1335 functions, or the 416 modules too? Every
+  existing intrinsic is a pure function, so the deletion of the JIT and the intrinsics is satisfiable
+  on FUNCTION parity alone. Modules need `children()`, the `$`-var dynamic chain and the attachment
+  stack, which is evaluator context the emission model deliberately has none of. Recommendation:
+  functions first, modules as their own phase.
+- **The fallback island does not scale.** AR.10's decline-to-interpreter path interprets a
+  `FALLBACK_SOURCES` string holding the batch's verbatim references, cached per THREAD keyed on the
+  string's `(ptr, len)`. At 14 functions that is 4 KB nobody notices; at library scale it is all 85K
+  lines of BOSL2, so the first depth-exceeded call on each worker pays a full library parse and every
+  thread then holds its own AST. Three ways out and they are not equivalent: split per generated
+  module (bounded, but a declining function's deps can live in another file), share one parse behind a
+  lock (contention on the path that is already the slow one), or drop the embedded copy and interpret
+  against the USER's island (free, but gives up the guarantee that interpreted bindings equal the
+  bakes bit-for-bit, which is the whole reason the copy is embedded).

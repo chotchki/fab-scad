@@ -321,11 +321,29 @@ pub trait ModuleCtx {
     /// Whatever evaluating that child raises.
     fn child(&mut self, i: usize) -> crate::Result<Geo>;
 
+    /// Render the children a `children(i)` / `children([i:j])` / `children([a,b])` selects.
+    ///
+    /// Takes a `Value` rather than an index because upstream accepts all three selector shapes and
+    /// the index rules (out of range renders nothing, a wrong-way range yields nothing) are the
+    /// evaluator's, not the caller's.
+    ///
+    /// # Errors
+    /// Whatever evaluating the selected children raises.
+    fn child_at(&mut self, selector: &Value) -> crate::Result<Geo>;
+
     /// Render every child, unioned — bare `children()`.
     ///
     /// # Errors
     /// Whatever evaluating the children raises.
     fn children(&mut self) -> crate::Result<Geo>;
+
+    /// The implicit UNION of a statement list — what a `{ … }` block means in OpenSCAD, and what a
+    /// module body's several statements collapse to.
+    ///
+    /// On the ctx rather than in `rt` because it needs the evaluator: 2D and 3D children partition
+    /// differently and mixing them warns, which is behaviour a generated module must inherit rather
+    /// than reimplement.
+    fn group(&self, parts: Vec<Geo>) -> Geo;
 
     /// Read a `$`-variable off the inherited dynamic chain. `undef` when unbound, as in the
     /// interpreter — a missing `$`-var is not an error.

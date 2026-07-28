@@ -21,7 +21,7 @@
 use std::collections::BTreeSet;
 use std::fmt::Write;
 
-use fab_lang::{Arg, Expr, ExprKind, Parameter, StmtKind, parse};
+use fab_lang::{Arg, Expr, ExprKind, Parameter, Stmt, StmtKind, parse};
 
 /// What one function's reference source reaches, by name — the raw material for an `Entry`'s guard
 /// sets (names only; the guard VALUES are resolved against the island at arm time, not here).
@@ -137,6 +137,74 @@ pub struct Sibling {
     /// Per parameter: the emitted default, or `None` where the emitter could not produce one. A
     /// hole landing on a `None` declines the CALL rather than guessing.
     pub defaults: Vec<Option<String>>,
+}
+
+/// AR.20.4 — generate the Rust native for one `module name(params) body`.
+///
+/// The statement half of the emitter. A module returns GEOMETRY rather than a value, so the body
+/// emits statements that push into a parts list which the ctx then groups — exactly the implicit
+/// union a `{ … }` block means in OpenSCAD.
+///
+/// Everything a module can do that a function cannot goes through [`fab_lang::surface::ModuleCtx`]:
+/// children render by re-entering interpretation (they are the USER's source and can never be
+/// compiled), `$`-vars read through the inherited chain rather than a snapshot, and a module call
+/// DISPATCHES. See that trait for why each is shaped the way it is.
+///
+/// # Errors
+/// A construct outside the subset declines LOUDLY with the construct named — a partial native would
+/// be a wrong native, and for a module that means silently missing geometry.
+pub fn generate_module_native(
+    reference: &str,
+    baked: &[(&str, Baked)],
+    siblings: &[Sibling],
+) -> Result<String, String> {
+    let prog =
+        fab_lang::parse(reference).map_err(|e| format!("reference does not parse: {e:?}"))?;
+    let Some(fab_lang::StmtKind::ModuleDef { name, params, body }) =
+        prog.stmts.first().map(|s| &s.kind)
+    else {
+        return Err("reference holds no module definition".into());
+    };
+
+    let mut em = Emitter {
+        baked,
+        siblings,
+        locals: Vec::new(),
+        fresh: 0,
+    };
+    let mut out = String::new();
+    let _ = write!(
+        out,
+        "/// Generated native for module `{name}` — geometry through the interpreter's own\n\
+         /// construction, so a generated module is what interpreting its reference builds.\n\
+         pub(super) fn {name}(fx: &mut dyn rt::ModuleCtx) -> rt::Result<rt::Geo> {{\n"
+    );
+    // Parameters bind from the ctx's already-matched args — the evaluator applied OpenSCAD's
+    // two-phase rule (all defaults, then arguments over them) and the AN.6 duplicate precedence, so
+    // a native that re-derived them would be reimplementing exactly the semantics AN documents
+    // getting wrong.
+    for (i, p) in params.iter().enumerate() {
+        if params[..i].iter().any(|q| q.name == p.name) {
+            return Err(format!(
+                "{name}: duplicate parameter `{}` — AN.6 two-phase binding has no native shape",
+                p.name
+            ));
+        }
+        let _ = writeln!(
+            out,
+            "    let p_{} = fx.args().get({i}).cloned().unwrap_or(rt::Value::Undef);",
+            p.name
+        );
+    }
+    for p in params {
+        em.locals
+            .push((p.name.to_string(), format!("p_{}", p.name)));
+    }
+    let _ = writeln!(out, "    let mut parts: Vec<rt::Geo> = Vec::new();");
+    let body_code = em.stmt(body).map_err(|e| format!("{name}: {e}"))?;
+    out.push_str(&body_code);
+    let _ = writeln!(out, "    Ok(fx.group(parts))\n}}");
+    Ok(out)
 }
 
 /// What KIND of expression sits in call position, for the coverage histogram. A `computed callee`
@@ -633,7 +701,89 @@ impl Emitter<'_> {
         Ok(format!("{name}(&[{}])?", vals.join(", ")))
     }
 
-    /// One VECTOR ELEMENT as statements pushing into `acc` — the compiled mirror of the stack
+    /// AR.20.4 — one STATEMENT as Rust that pushes any geometry it makes into `parts`.
+    ///
+    /// The statement mirror of [`Emitter::expr`]. Declines name the construct, because a module
+    /// that silently skipped a statement would render MISSING GEOMETRY while still succeeding —
+    /// the failure shape this phase keeps finding.
+    fn stmt(&mut self, s: &Stmt) -> Result<String, String> {
+        match &s.kind {
+            // A lone `;` is not a child and contributes nothing (L.5.2).
+            StmtKind::Empty => Ok(String::new()),
+            // A block is an implicit GROUP: its own statements union, and that union is one part.
+            StmtKind::Block(kids) => {
+                // A block is an implicit GROUP: its statements union into ONE part of the
+                // enclosing list. Its own list gets a fresh name so it cannot shadow the parent's.
+                let mark = self.locals.len();
+                let inner = self.fresh_ident("blk");
+                let mut out = format!(
+                    "    let {inner} = {{\n        let mut parts: Vec<rt::Geo> = Vec::new();\n"
+                );
+                for k in kids {
+                    out.push_str(&self.stmt(k)?);
+                }
+                let _ = write!(
+                    out,
+                    "        fx.group(parts)\n    }};\n    parts.push({inner});\n"
+                );
+                self.locals.truncate(mark);
+                Ok(out)
+            }
+            StmtKind::Assignment { name, value } => {
+                let v = self.expr(value)?;
+                let id = self.fresh_ident(name);
+                let out = format!("    let {id} = {v};\n");
+                self.locals.push((name.to_string(), id));
+                Ok(out)
+            }
+            StmtKind::If {
+                cond, then, els, ..
+            } => {
+                let c = self.expr(cond)?;
+                let mut out = format!("    if ({c}).is_truthy() {{\n");
+                for k in then {
+                    out.push_str(&self.stmt(k)?);
+                }
+                out.push_str("    } else {\n");
+                for k in els {
+                    out.push_str(&self.stmt(k)?);
+                }
+                out.push_str("    }\n");
+                Ok(out)
+            }
+            StmtKind::Module(mi) => self.module_call(mi),
+            StmtKind::ModuleDef { .. } => Err("a nested module definition".into()),
+            StmtKind::FunctionDef { .. } => Err("a nested function definition".into()),
+            StmtKind::Use(_) | StmtKind::Include(_) => {
+                Err("a use/include inside a module body".into())
+            }
+        }
+    }
+
+    /// A module INSTANTIATION in statement position.
+    fn module_call(&mut self, mi: &fab_lang::ModuleInstantiation) -> Result<String, String> {
+        let md = mi.modifiers;
+        if md.root || md.highlight || md.background || md.disable {
+            // 8 of 416 modules use one. Cheap to add later; wrong to ignore now, since `*` DISABLES
+            // a subtree and silently rendering it would be geometry the program said not to draw.
+            return Err("a `! # % *` modifier".into());
+        }
+        match mi.name.as_str() {
+            "children" => {
+                let sel = match mi.args.first() {
+                    None => "fx.children()?".to_string(),
+                    Some(a) => {
+                        let i = self.expr(&a.value)?;
+                        format!("fx.child_at(&{i})?")
+                    }
+                };
+                Ok(format!("    parts.push({sel});\n"))
+            }
+            other => Err(format!("a call to module `{other}` (AR.20.5 dispatch)")),
+        }
+    }
+
+    /// One VECTOR ELEMENT as statements pushing into `acc`    /// One VECTOR ELEMENT as statements pushing into `acc` — the compiled mirror of the stack
     /// machine's `LcFor` walk: `for` nests per binding, `if` contributes conditionally, `each`
     /// splices through the same iteration seam, an element-position `let` binds and recurses.
     fn element(&mut self, e: &Expr, acc: &str) -> Result<String, String> {
@@ -1451,6 +1601,44 @@ mod tests {
             natives(&from_library).contains("pub(super) fn is_nan"),
             "the comparison would hold on two empty strings"
         );
+    }
+
+    /// AR.20.4 — the statement emitter produces a module native, and it is the SAME module the
+    /// hand-written POC implements. Printed rather than only asserted: this is the first generated
+    /// module in the project, and its shape is the thing to look at.
+    #[test]
+    fn a_module_body_generates() {
+        let src = "module _fab_poc_mod(k=1) { children(); }";
+        let code = super::generate_module_native(src, &[], &[]).expect("generates");
+        println!("\n=== generated module native ===\n{code}");
+        for want in [
+            "fn _fab_poc_mod(fx: &mut dyn rt::ModuleCtx) -> rt::Result<rt::Geo>",
+            "let p_k = fx.args().get(0)",
+            "parts.push(fx.children()?)",
+            "Ok(fx.group(parts))",
+        ] {
+            assert!(code.contains(want), "missing `{want}` in:\n{code}");
+        }
+    }
+
+    /// The statement subset declines by NAME. A module that silently skipped a statement would
+    /// render MISSING GEOMETRY while still succeeding, which is the failure shape this phase keeps
+    /// finding — so every unsupported construct says which one it was.
+    #[test]
+    fn module_statements_outside_the_subset_decline_by_name() {
+        for (src, want) in [
+            ("module m() { cube(1); }", "module `cube`"),
+            ("module m() { #cube(1); }", "modifier"),
+            (
+                "module m() { module inner() { children(); } }",
+                "nested module",
+            ),
+            ("module m() { function f(x) = x; }", "nested function"),
+        ] {
+            let err = super::generate_module_native(src, &[], &[])
+                .expect_err(&format!("must decline: {src}"));
+            assert!(err.contains(want), "expected `{want}` in `{err}` for {src}");
+        }
     }
 
     /// AR.13 — generated code names `rt` and NOTHING else from fab-lang. This is the property that

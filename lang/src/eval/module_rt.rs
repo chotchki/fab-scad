@@ -130,9 +130,36 @@ impl ModuleCtx for NativeModuleCtx<'_, '_> {
         self.render(&[stmt])
     }
 
+    fn child_at(&mut self, selector: &Value) -> crate::Result<Geo> {
+        // The evaluator's own index rules, not a reimplementation: a number picks one, a list picks
+        // several, a range picks a span, and anything out of range renders NOTHING rather than
+        // erroring — which is what upstream does and what `children()` in the interpreter does.
+        let picked: Vec<&Stmt> = match selector {
+            Value::Num(i) => super::child_at(*i)
+                .and_then(|i| self.child_stmts.get(i).copied())
+                .into_iter()
+                .collect(),
+            Value::NumList(xs) => xs
+                .iter()
+                .filter_map(|&i| super::child_at(i).and_then(|i| self.child_stmts.get(i).copied()))
+                .collect(),
+            Value::Range { start, step, end } => super::value::range_iter(*start, *step, *end)
+                .filter_map(|i| super::child_at(i).and_then(|i| self.child_stmts.get(i).copied()))
+                .collect(),
+            _ => Vec::new(),
+        };
+        self.render(&picked)
+    }
+
     fn children(&mut self) -> crate::Result<Geo> {
         let all = self.child_stmts.clone();
         self.render(&all)
+    }
+
+    fn group(&self, parts: Vec<Geo>) -> Geo {
+        // The interpreter's OWN grouping, so 2D/3D partitioning and the mixing warning are
+        // inherited rather than reimplemented.
+        super::union_of(parts, self.ctx)
     }
 
     fn dollar(&self, name: &str) -> Value {

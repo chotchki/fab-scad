@@ -25,6 +25,7 @@
 //! calls against BOSL2's 416-module surface as soon as it is declared. That coverage is not gated on
 //! whether modules ever get natives.
 
+use crate::eval::geo2d::Geo;
 use crate::eval::value::Value;
 
 /// What KIND of value a parameter accepts — the type information a call generator needs in order to
@@ -203,6 +204,21 @@ pub trait LibrarySurface: Send + Sync {
         &[]
     }
 
+    /// What this library actually COMPILED, as opposed to what it declares.
+    ///
+    /// Deliberately a different list from [`LibrarySurface::callables`], and deliberately a
+    /// different LENGTH: BOSL2 declares 1335 functions and the emitter compiles 742 of them, plus
+    /// 416 modules on their own curve. Folding the two into one list with an optional function
+    /// pointer would assert they are the same set, which is exactly the drift this phase exists to
+    /// kill — and it is the drift AR.5a found three times in the hand-maintained guard lists.
+    ///
+    /// Every entry carries the guards that decide whether it may WIRE at all. None of that is
+    /// optional: the fingerprint proves the definition, the const guards prove the values it baked,
+    /// and the dep/builtin guards prove nothing it calls has been shadowed.
+    fn natives(&self) -> &'static [Native] {
+        &[]
+    }
+
     /// Everything callable, functions AND modules, in a stable order.
     ///
     /// `'static` on purpose: the generator holds the slice for its whole walk and indexes it with
@@ -264,5 +280,138 @@ impl std::fmt::Display for Fingerprint {
     /// nobody can diff against the previous run.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{:#018x}", self.0)
+    }
+}
+
+/// What a generated MODULE is handed, and the only way it reaches back into the evaluator.
+///
+/// AR.20.1. A module is not a function with a different return type — three things it needs are
+/// impossible to hand over as plain data, and each one shapes this trait:
+///
+/// **Children are a CALLBACK, and that is correct rather than a compromise.** `children()` may run
+/// zero times or many, and it renders in the CALLER's scope and island, so the evaluator stashes
+/// the child statements UNEVALUATED. They are the user's source and never the library's, so they
+/// can never be compiled — rendering one means re-entering interpretation, by construction.
+///
+/// **The `$`-chain is inherited by reference, never copied.** L.2.7 is the scar: every call used to
+/// clone the caller's reaching `$`-context, BOSL2 sets 42 of them at top level, and call-heavy
+/// geometry paid 42 clones per call. A native that snapshots the chain reintroduces exactly that,
+/// in compiled form where it is far harder to notice.
+///
+/// **Module calls DISPATCH.** chotchki: *"I really want dispatch, otherwise we're making an
+/// interpreter with extra steps"* — a generated module that emitted work-stack tasks would keep
+/// every bit of the interpretation overhead this phase exists to delete. So [`ModuleCtx::call`]
+/// resolves through the registry and lands on another native where one exists. The cost is host
+/// stack depth, which the interpreter's explicit stack deliberately does not use, so it is bounded
+/// the same way AR.10 bounds function natives: a depth budget, and past it a decline back to the
+/// interpreter, whose own limit is `100_000` because its depth is heap.
+pub trait ModuleCtx {
+    /// The call's bound arguments, already matched to parameters (positional fill, named, defaults)
+    /// by the evaluator's own two-phase rule — the AN.1/AN.2/AN.6 semantics a native must not
+    /// reimplement.
+    fn args(&self) -> &[Value];
+
+    /// `$children` — how many geometry children the CALL SITE supplied. Empty statements and
+    /// child-block assignments are not children; counting them would misalign `children(i)`.
+    fn child_count(&self) -> usize;
+
+    /// Render child `i` in the caller's scope. Out of range renders nothing, matching upstream.
+    ///
+    /// # Errors
+    /// Whatever evaluating that child raises.
+    fn child(&mut self, i: usize) -> crate::Result<Geo>;
+
+    /// Render every child, unioned — bare `children()`.
+    ///
+    /// # Errors
+    /// Whatever evaluating the children raises.
+    fn children(&mut self) -> crate::Result<Geo>;
+
+    /// Read a `$`-variable off the inherited dynamic chain. `undef` when unbound, as in the
+    /// interpreter — a missing `$`-var is not an error.
+    fn dollar(&self, name: &str) -> Value;
+
+    /// Call another module BY NAME, dispatching through the registry: another native where one is
+    /// armed, the interpreter otherwise. `dollars` are the `$`-overrides this call site sets, which
+    /// bind LAST so they shadow the inherited chain.
+    ///
+    /// By name rather than by pointer for the same reason a function dep is (see the registry
+    /// index): the name has to be resolvable against the user's program, not just against ours.
+    ///
+    /// # Errors
+    /// Whatever the called module raises, including the depth-budget decline.
+    fn call(
+        &mut self,
+        name: &str,
+        args: &[Value],
+        dollars: &[(&str, Value)],
+        children: Children<'_>,
+    ) -> crate::Result<Geo>;
+}
+
+/// The children a generated module passes ALONG to a module it calls.
+///
+/// Not a rendered `Geo`: passing geometry would flatten the laziness that makes `children()` mean
+/// what it means upstream, where a callee may instantiate its children zero times or many and each
+/// instantiation happens in ITS caller's scope.
+pub enum Children<'a> {
+    /// The call supplies no children — a `;` body.
+    None,
+    /// Forward the children this module itself received, untouched. The overwhelmingly common
+    /// shape in BOSL2, where a wrapper module re-emits what it was given.
+    Inherited,
+    /// Geometry this module already built, handed down as a finished subtree. Used where a native
+    /// synthesizes a child rather than forwarding one.
+    Built(&'a [Geo]),
+}
+
+/// One callable this library COMPILED, with everything that has to be true for it to be legal.
+pub struct Native {
+    /// The name it stands in for — the registry's dispatch key.
+    pub name: &'static str,
+    /// The structural identity of the definition it was generated FROM. It wires only against a
+    /// definition that fingerprints to exactly this; anything else is library drift and interprets.
+    pub fingerprint: Fingerprint,
+    /// Named top-level constants whose value this native BAKED. The fingerprint proves the
+    /// function, never the constants it names, so a user rebinding one has to disarm it.
+    pub consts: &'static [&'static str],
+    /// User-function names the body can reach. Each must be defined AND fingerprint to its own
+    /// pinned reference, because the native bakes the dep's semantics without the dep's own gate
+    /// ever being consulted at dispatch.
+    pub deps: &'static [&'static str],
+    /// Builtin names the body can reach. A user function may SHADOW a builtin — BOSL2 itself
+    /// shadows `reverse` — which would reroute the interpreted body while the native keeps calling
+    /// the real one.
+    pub builtins: &'static [&'static str],
+    /// The compiled implementation.
+    pub imp: NativeImpl,
+}
+
+/// The two shapes a compiled callable comes in. Split rather than unified because they are not
+/// variations on a theme: a function is a pure map from values to a value, and a module reaches
+/// back into the evaluator for its children and its `$`-chain (see [`ModuleCtx`]).
+pub enum NativeImpl {
+    /// Values in, a value out. No evaluator context, which is what made the function side
+    /// tractable — composition is bit-identical BY CONSTRUCTION because the body routes every
+    /// operation through the interpreter's own value algebra.
+    Function(fn(&[Value]) -> crate::Result<Value>),
+    /// Geometry out, with the evaluator reachable through [`ModuleCtx`] for children, `$`-vars and
+    /// module dispatch.
+    Module(fn(&mut dyn ModuleCtx) -> crate::Result<Geo>),
+}
+
+impl std::fmt::Debug for Native {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Native")
+            .field("name", &self.name)
+            .field("fingerprint", &self.fingerprint)
+            .field(
+                "kind",
+                &match self.imp {
+                    NativeImpl::Function(_) => "function",
+                    NativeImpl::Module(_) => "module",
+                },
+            )
+            .finish_non_exhaustive()
     }
 }

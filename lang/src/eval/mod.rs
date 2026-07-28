@@ -18,7 +18,7 @@ mod fmt;
 mod fnprofile;
 mod fragments;
 mod geo;
-mod geo2d;
+pub(crate) mod geo2d;
 mod geo_drop;
 mod geo_stack;
 mod geometry;

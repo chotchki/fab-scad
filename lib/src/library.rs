@@ -809,3 +809,117 @@ mod tests {
         }
     }
 }
+
+impl Library {
+    /// AR.16 — every top-level constant this library binds, FOLDED to a value.
+    ///
+    /// Evaluated with the interpreter's own `eval_expr`, which is the only way to get this right:
+    /// BOSL2's constants are not literals. `UP = TOP` and `CTR = CENTER` are references, `INF = 1/0`
+    /// is arithmetic, `_NO_ARG = [true,[123232345],false]` is a heterogeneous list used as a
+    /// sentinel. Re-implementing that evaluation here would be a second, worse interpreter.
+    ///
+    /// A FIXPOINT rather than a topological sort, because the dependency order is not declared
+    /// anywhere and computing it needs the same free-variable walk the fold would do anyway: bind
+    /// what resolves, repeat while progress is made, stop. Anything still unresolved after that
+    /// reads something the library does not bind at top level, or calls a function — both of which
+    /// simply stay unbaked, so the functions reading them keep interpreting. The safe direction.
+    #[must_use]
+    pub fn fold_constants(&self) -> BTreeMap<String, fab_lang::Value> {
+        let mut scope = fab_lang::Scope::new();
+        let mut out: BTreeMap<String, fab_lang::Value> = BTreeMap::new();
+        let mut pending: Vec<&LibConst> = self.constants.values().collect();
+        loop {
+            let before = out.len();
+            pending.retain(|c| {
+                // An expression that reads an unbound name evaluates to `undef` rather than
+                // failing, so "did it resolve" cannot be read off the Result. Require a DEFINED
+                // value, and let a genuinely-undef constant stay unbaked — baking `undef` buys
+                // nothing and would mask a fold that silently saw nothing.
+                match fab_lang::eval_expr(&c.value, &scope) {
+                    Ok(v) if v != fab_lang::Value::Undef => {
+                        scope.bind(c.name.clone(), v.clone());
+                        out.insert(c.name.clone(), v);
+                        false
+                    }
+                    _ => true,
+                }
+            });
+            if out.len() == before {
+                return out;
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used, reason = "test harness: expect IS the assertion")]
+mod fold_tests {
+    use super::Library;
+
+    /// AR.16 — what the constant fold actually resolves, and in what SHAPES. The shape census is
+    /// the schedulable part: `Baked` can emit numbers and numeric lists, so anything else is a
+    /// function that stays interpreted until the bake vocabulary widens.
+    ///
+    /// `cargo nextest run -p fab-lib -E 'test(constant_fold)' --no-capture`
+    #[test]
+    fn the_constant_fold_reports_what_it_resolved() {
+        use std::collections::BTreeMap;
+
+        let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../libs/BOSL2");
+        if !dir.join("std.scad").exists() {
+            eprintln!("skipping: libs/BOSL2 submodule not checked out");
+            return;
+        }
+        let lib = Library::read(&dir).expect("BOSL2 reads");
+        let folded = lib.fold_constants();
+
+        let mut shapes: BTreeMap<&'static str, usize> = BTreeMap::new();
+        for v in folded.values() {
+            *shapes.entry(shape_of(v)).or_default() += 1;
+        }
+        println!(
+            "\n=== BOSL2 constant fold ===\n{} of {} constants folded",
+            folded.len(),
+            lib.constants.len()
+        );
+        let mut hist: Vec<_> = shapes.into_iter().collect();
+        hist.sort_by_key(|(_, n)| std::cmp::Reverse(*n));
+        for (shape, n) in &hist {
+            println!("  {n:4}  {shape}");
+        }
+        // The names the coverage histogram said matter most, with what they folded to.
+        for name in [
+            "_EPSILON",
+            "UP",
+            "CENTER",
+            "_NO_ARG",
+            "BACK",
+            "RIGHT",
+            "INF",
+            "CTR",
+            "EMPTY_VNF",
+        ] {
+            let got = folded
+                .get(name)
+                .map_or_else(|| "UNRESOLVED".to_string(), |v| shape_of(v).to_string());
+            println!("  {name:12} {got}");
+        }
+        assert!(
+            folded.contains_key("_EPSILON"),
+            "the single most-read constant in the library did not fold"
+        );
+    }
+
+    fn shape_of(v: &fab_lang::Value) -> &'static str {
+        match v {
+            fab_lang::Value::Num(n) if n.is_finite() => "Num",
+            fab_lang::Value::Num(_) => "Num (NON-FINITE)",
+            fab_lang::Value::Bool(_) => "Bool",
+            fab_lang::Value::Str(_) => "Str",
+            fab_lang::Value::NumList(_) => "NumList",
+            fab_lang::Value::List(_) => "List (heterogeneous)",
+            fab_lang::Value::Range { .. } => "Range",
+            _ => "other",
+        }
+    }
+}

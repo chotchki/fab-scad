@@ -118,52 +118,159 @@ pub fn analyze_closed<'r>(
     Ok(out)
 }
 
-/// A constant value a generated native BAKES, in a form that can be emitted bit-exactly
-/// (`f64::from_bits`) — never a decimal round-trip.
+/// What the emitter knows about a sibling it may call directly: its name, its parameters in
+/// declaration order, and each parameter's DEFAULT already emitted as a Rust expression.
+///
+/// AR.18 — the defaults are what let a call with a HOLE compile. `f(x, c=3)` against `f(a,b,c)`
+/// fills slots 0 and 2 and leaves 1 empty, and the positional `&[Value]` ABI cannot say "slot 1 was
+/// not supplied". Passing `Value::Undef` would be WRONG: `args.get(1)` then returns `Some`, the
+/// callee's `unwrap_or(default)` never fires, and an explicit undef silently overrides a real
+/// default — AN.3's bug, in compiled form. So the hole is filled with the callee's OWN default.
+///
+/// Sound because a default evaluates in the callee's LEXICAL BASE, never the caller's scope, and an
+/// emitted default references only literals and baked constants — anything else and the callee
+/// itself would have declined. So the expression means the same thing wherever it is written.
+#[derive(Debug, Clone)]
+pub struct Sibling {
+    pub name: String,
+    pub params: Vec<String>,
+    /// Per parameter: the emitted default, or `None` where the emitter could not produce one. A
+    /// hole landing on a `None` declines the CALL rather than guessing.
+    pub defaults: Vec<Option<String>>,
+}
+
+/// What KIND of expression sits in call position, for the coverage histogram. A `computed callee`
+/// decline covers several unrelated shapes — indexing a table of function literals, an immediately
+/// applied lambda, a ternary picking between two functions — and they do not all cost the same to
+/// support, so the histogram has to tell them apart.
+fn callee_shape(callee: &Expr) -> &'static str {
+    match &callee.kind {
+        ExprKind::Index { .. } => "index (a table of function values)",
+        ExprKind::FunctionLiteral { .. } => "an immediately applied literal",
+        ExprKind::Ternary { .. } => "a ternary picking a function",
+        ExprKind::Call { .. } => "the result of another call",
+        ExprKind::Member { .. } => "a member access",
+        ExprKind::Let { .. } => "a let binding a function",
+        other => {
+            // Deliberately not a catch-all label: an unnamed shape here is one nobody has looked
+            // at, and it should read that way in the report.
+            let _ = other;
+            "some other expression"
+        }
+    }
+}
+
+/// A constant a generated native BAKES: the VALUE it compiles in, and the SCAD that binds the same
+/// thing in the AR.10 fallback island.
+///
+/// The two are carried separately rather than one derived from the other, and that is AR.16's key
+/// correction. Re-rendering a value back to scad has a hole with a name: `INF` is `1/0`, and `{:?}`
+/// on infinity prints `inf`, which LEXES AS AN IDENTIFIER in scad — so the island would silently
+/// bind `undef` where the native baked real bits. 27 BOSL2 functions read `INF`.
+///
+/// Carrying the library's VERBATIM source instead sidesteps that entirely and is more faithful
+/// besides: the island binds exactly what the library wrote, so the two cannot disagree about what
+/// the constant means. The bootstrap path, whose registry entries carry values rather than source,
+/// still re-renders — and still refuses non-finite, because there it genuinely has nothing better.
 #[derive(Debug, Clone, PartialEq)]
-pub enum Baked {
-    Num(f64),
-    NumList(Vec<f64>),
+pub struct Baked {
+    /// The value the native compiles in.
+    pub value: fab_lang::Value,
+    /// What the fallback island binds. The library's own source where there is one.
+    pub scad: String,
 }
 
 impl Baked {
-    /// This value as SCAD source — what the AR.10 fallback island binds so its bindings equal the
-    /// native's bakes bit-for-bit.
-    ///
-    /// # Errors
-    /// A non-finite number: `{:?}` prints `inf`/`NaN`, which LEX AS IDENTIFIERS in scad, so the
-    /// island would silently bind `undef` where the native baked real bits. Every NaN payload also
-    /// formats alike, which would blind the cross-batch conflict check.
-    fn to_scad(&self) -> Result<String, String> {
-        match self {
-            Self::Num(v) if v.is_finite() => Ok(format!("{v:?}")),
-            Self::Num(v) => Err(format!("bakes non-finite {v}")),
-            Self::NumList(xs) => match xs.iter().find(|x| !x.is_finite()) {
-                Some(bad) => Err(format!("bakes non-finite element {bad}")),
-                None => Ok(format!(
-                    "[{}]",
-                    xs.iter()
-                        .map(|x| format!("{x:?}"))
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                )),
-            },
+    /// From a library constant: the folded value, and the verbatim source that produced it.
+    #[must_use]
+    pub fn from_source(value: fab_lang::Value, scad: impl Into<String>) -> Self {
+        Self {
+            value,
+            scad: scad.into(),
         }
     }
 
+    /// From a bare value, re-rendering the scad. The bootstrap path only.
+    ///
+    /// # Errors
+    /// A non-finite number, or a value with no scad literal form — see the type doc.
+    pub fn from_value(value: fab_lang::Value) -> Result<Self, String> {
+        let scad = value_to_scad(&value)?;
+        Ok(Self { value, scad })
+    }
+
     /// The Rust expression constructing this value, bit-exact.
-    fn emit(&self) -> String {
-        match self {
-            Self::Num(n) => emit_num(*n),
-            Self::NumList(xs) => format!(
-                "rt::Value::num_list(vec![{}])",
+    fn emit(&self) -> Result<String, String> {
+        emit_value(&self.value)
+    }
+}
+
+/// A value as a Rust expression that rebuilds it exactly. Floats go through `from_bits` — never a
+/// decimal round-trip — so a baked constant is the same bits the interpreter folded.
+///
+/// # Errors
+/// A value the emitter has no constructor for. Declines by NAME rather than emitting something
+/// approximate, because a native holding a subtly different constant is a wrong answer.
+fn emit_value(v: &fab_lang::Value) -> Result<String, String> {
+    Ok(match v {
+        fab_lang::Value::Num(n) => emit_num(*n),
+        fab_lang::Value::Bool(b) => format!("rt::Value::Bool({b})"),
+        fab_lang::Value::Str(s) => format!("rt::Value::string({:?})", &**s),
+        fab_lang::Value::Undef => "rt::Value::Undef".to_string(),
+        fab_lang::Value::NumList(xs) => format!(
+            "rt::Value::num_list(vec![{}])",
+            xs.iter()
+                .map(|x| format!("f64::from_bits({:#x}_u64)", x.to_bits()))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        fab_lang::Value::List(items) => format!(
+            "rt::Value::list(vec![{}])",
+            items
+                .iter()
+                .map(emit_value)
+                .collect::<Result<Vec<_>, _>>()?
+                .join(", ")
+        ),
+        other => return Err(format!("no bake form for {other:?}")),
+    })
+}
+
+/// A value as SCAD source — the bootstrap path's re-render. See [`Baked`] for why the library path
+/// does not use this.
+///
+/// # Errors
+/// A non-finite number: `{:?}` prints `inf`/`NaN`, which lex as IDENTIFIERS in scad, so the island
+/// would silently bind `undef` where the native baked real bits. Every NaN payload also formats
+/// alike, which would blind the cross-batch conflict check.
+fn value_to_scad(v: &fab_lang::Value) -> Result<String, String> {
+    Ok(match v {
+        fab_lang::Value::Num(n) if n.is_finite() => format!("{n:?}"),
+        fab_lang::Value::Num(n) => return Err(format!("bakes non-finite {n}")),
+        fab_lang::Value::Bool(b) => b.to_string(),
+        fab_lang::Value::Str(s) => format!("{:?}", &**s),
+        fab_lang::Value::NumList(xs) => {
+            if let Some(bad) = xs.iter().find(|x| !x.is_finite()) {
+                return Err(format!("bakes non-finite element {bad}"));
+            }
+            format!(
+                "[{}]",
                 xs.iter()
-                    .map(|x| format!("f64::from_bits({:#x}_u64)", x.to_bits()))
+                    .map(|x| format!("{x:?}"))
                     .collect::<Vec<_>>()
                     .join(", ")
-            ),
+            )
         }
-    }
+        fab_lang::Value::List(items) => format!(
+            "[{}]",
+            items
+                .iter()
+                .map(value_to_scad)
+                .collect::<Result<Vec<_>, _>>()?
+                .join(", ")
+        ),
+        other => return Err(format!("no scad form for {other:?}")),
+    })
 }
 
 fn emit_num(n: f64) -> String {
@@ -183,7 +290,7 @@ fn emit_num(n: f64) -> String {
 pub fn generate_native(
     reference: &str,
     baked: &[(&str, Baked)],
-    siblings: &[(String, Vec<String>)],
+    siblings: &[Sibling],
 ) -> Result<String, String> {
     let prog = parse(reference).map_err(|e| format!("reference does not parse: {e:?}"))?;
     let Some(StmtKind::FunctionDef { name, params, body }) = prog.stmts.first().map(|s| &s.kind)
@@ -260,7 +367,7 @@ pub fn generate_native(
 /// shadowing resolves exactly as the interpreter's scope does.
 struct Emitter<'a> {
     baked: &'a [(&'a str, Baked)],
-    siblings: &'a [(String, Vec<String>)],
+    siblings: &'a [Sibling],
     locals: Vec<(String, String)>,
     fresh: usize,
 }
@@ -291,7 +398,7 @@ impl Emitter<'_> {
                 if let Some((_, ident)) = self.locals.iter().rev().find(|(n, _)| n == name) {
                     Ok(format!("{ident}.clone()"))
                 } else if let Some((_, b)) = self.baked.iter().find(|(n, _)| n == name) {
-                    Ok(b.emit())
+                    b.emit()
                 } else {
                     Err(format!("free read `{name}` has no baked value"))
                 }
@@ -371,7 +478,9 @@ impl Emitter<'_> {
             ExprKind::Vector(items) => self.vector(items),
             ExprKind::Call { callee, args } => {
                 let ExprKind::Ident(name) = &callee.kind else {
-                    return Err("computed callee".into());
+                    // Name the SHAPE: "computed callee" alone says a call was not a plain
+                    // identifier, which is true of several unrelated things and does not schedule.
+                    return Err(format!("computed callee: {}", callee_shape(callee)));
                 };
                 self.call(name, args)
             }
@@ -462,7 +571,7 @@ impl Emitter<'_> {
                 emitted.join(", ")
             ));
         }
-        let Some((_, params)) = self.siblings.iter().find(|(n, _)| n == name) else {
+        let Some(sib) = self.siblings.iter().find(|s| s.name == name) else {
             return Err(format!(
                 "call to `{name}` (not a builtin or generated sibling)"
             ));
@@ -471,7 +580,8 @@ impl Emitter<'_> {
         // time — a positional takes the lowest unfilled slot (AN.2), a named arg its declared
         // slot. The flat-slice ABI can only express a contiguous PREFIX of filled slots
         // (trailing unfilled fall to the callee's defaults); anything else declines.
-        let params = params.clone();
+        let params = sib.params.clone();
+        let defaults = sib.defaults.clone();
         let mut slots: Vec<Option<String>> = vec![None; params.len()];
         for a in args {
             let v = self.expr(&a.value)?;
@@ -494,13 +604,32 @@ impl Emitter<'_> {
             };
             slots[slot] = Some(v);
         }
-        let filled = slots.iter().take_while(|s| s.is_some()).count();
-        if slots[filled..].iter().any(Option::is_some) {
-            return Err(format!(
-                "non-contiguous arg fill for sibling `{name}` — the slice ABI can't hole"
-            ));
+        // AR.18 — a HOLE (an unfilled slot with a filled one after it) gets the callee's OWN
+        // default, which is exactly what the callee would bind for itself. `Value::Undef` would
+        // NOT do: `args.get(i)` would then return `Some`, the callee's `unwrap_or(default)` would
+        // never fire, and an explicit undef would silently override a real default — AN.3's bug in
+        // compiled form. See `Sibling` for why inlining the default here is position-independent.
+        let last_filled = slots.iter().rposition(Option::is_some);
+        let Some(last) = last_filled else {
+            return Ok(format!("{name}(&[])?"));
+        };
+        let mut vals: Vec<String> = Vec::with_capacity(last + 1);
+        for (i, slot) in slots.into_iter().enumerate().take(last + 1) {
+            match slot {
+                Some(v) => vals.push(v),
+                // A defaultless param binds `undef` when unfilled (AN.3), which the callee's own
+                // `unwrap_or(rt::Value::Undef)` already does — so passing it explicitly agrees.
+                None => match defaults.get(i) {
+                    Some(Some(d)) => vals.push(d.clone()),
+                    Some(None) => vals.push("rt::Value::Undef".to_string()),
+                    None => {
+                        return Err(format!(
+                            "hole at slot {i} of sibling `{name}` with no declared parameter"
+                        ));
+                    }
+                },
+            }
         }
-        let vals: Vec<String> = slots.into_iter().flatten().collect();
         Ok(format!("{name}(&[{}])?", vals.join(", ")))
     }
 
@@ -592,15 +721,23 @@ fn bake_bootstrap<'a>(
     let mut baked: Vec<(&str, Baked)> = subject
         .nums
         .iter()
-        .map(|&(n, v)| (n, Baked::Num(v)))
+        .map(|&(n, v)| (n, Baked::from_value(fab_lang::Value::Num(v))))
+        .collect::<Vec<_>>()
+        .into_iter()
+        .map(|(n, r)| r.map(|b| (n, b)))
+        .collect::<Result<Vec<_>, String>>()
+        .map_err(|e| format!("{name}: {e}"))?
+        .into_iter()
         .collect();
     for (n, xs) in &subject.lists {
-        baked.push((*n, Baked::NumList(xs.clone())));
+        baked.push((
+            *n,
+            Baked::from_value(fab_lang::Value::num_list(xs.clone()))
+                .map_err(|e| format!("{name}: const `{n}` {e}"))?,
+        ));
     }
     for (n, b) in &baked {
-        let scad = b
-            .to_scad()
-            .map_err(|e| format!("{name}: const `{n}` {e}"))?;
+        let scad = b.scad.clone();
         if let Some(prev) = fallback_consts.insert((*n).to_string(), scad.clone())
             && prev != scad
         {
@@ -610,6 +747,43 @@ fn bake_bootstrap<'a>(
         }
     }
     Ok(baked)
+}
+
+/// Describe one subject as a callable SIBLING: its parameters, and each parameter's default already
+/// emitted as a Rust expression against that subject's OWN bakes.
+///
+/// The bakes matter and are the subtle part. A default is evaluated in the callee's lexical base,
+/// so `is_vector(v, l, zero, all_nonzero=false, eps=_EPSILON)` resolves `_EPSILON` against
+/// `is_vector`'s island — AN.11's exact lesson. Emitting it here with the SUBJECT's bakes preserves
+/// that; emitting it with the caller's would be the bug that family fixed.
+///
+/// # Errors
+/// A source that does not parse to a single function definition. A default the emitter cannot
+/// produce is NOT an error — it records `None`, and only a call that actually leaves a hole there
+/// declines.
+fn sibling_of(subject: &Subject<'_>) -> Result<Sibling, String> {
+    let a = analyze_function(subject.source)?;
+    let prog = fab_lang::parse(subject.source)
+        .map_err(|e| format!("{}: does not parse: {e:?}", subject.name))?;
+    let Some(fab_lang::StmtKind::FunctionDef { params, .. }) = prog.stmts.first().map(|s| &s.kind)
+    else {
+        return Err(format!("{}: holds no function definition", subject.name));
+    };
+    let mut em = Emitter {
+        baked: &subject.baked,
+        siblings: &[],
+        locals: Vec::new(),
+        fresh: 0,
+    };
+    let defaults = params
+        .iter()
+        .map(|p| p.default.as_ref().and_then(|d| em.expr(d).ok()))
+        .collect();
+    Ok(Sibling {
+        name: a.name,
+        params: a.params,
+        defaults,
+    })
 }
 
 /// The generated file for a set of REGISTRY entry names — the bootstrap path, and what the regen
@@ -650,6 +824,7 @@ pub fn generate_from_library(
     lib: &crate::library::Library,
     names: &[&str],
 ) -> Result<String, String> {
+    let folded = lib.fold_constants();
     let mut subjects = Vec::with_capacity(names.len());
     for &name in names {
         let f = lib
@@ -659,10 +834,37 @@ pub fn generate_from_library(
         subjects.push(Subject {
             name: &f.name,
             source: &f.source,
-            baked: Vec::new(),
+            baked: bake_reads(&f.source, lib, &folded)?,
         });
     }
     generate_batch(&subjects)
+}
+
+/// AR.16 — the constants THIS function reads, folded and paired with the library's own source.
+///
+/// Derived from the same analysis walk the guard sets come from, so a native bakes exactly what its
+/// body reaches and nothing else. A name the fold could not resolve, or one the library does not
+/// declare at top level, is simply left out — the emitter then declines that function on the free
+/// read, which is the outcome it had before and never a wrong one.
+fn bake_reads<'a>(
+    source: &str,
+    lib: &'a crate::library::Library,
+    folded: &std::collections::BTreeMap<String, fab_lang::Value>,
+) -> Result<Vec<(&'a str, Baked)>, String> {
+    let analysis = analyze_function(source)?;
+    let mut out = Vec::new();
+    for read in &analysis.consts {
+        let (Some(value), Some(decl)) = (folded.get(read), lib.constants.get(read)) else {
+            continue;
+        };
+        // The bake VALUE comes from the fold; the island's binding comes from the library's OWN
+        // source. See `Baked` for why those are deliberately not the same rendering.
+        out.push((
+            decl.name.as_str(),
+            Baked::from_source(value.clone(), &decl.source),
+        ));
+    }
+    Ok(out)
 }
 
 /// One function the emitter has been asked to compile: what it is called, its VERBATIM source, and
@@ -689,10 +891,9 @@ pub fn generate_batch(subjects: &[Subject<'_>]) -> Result<String, String> {
     // The sibling table FIRST, whole batch, self included: mutual recursion (approx ↔ idx ↔
     // posmod is a real 3-cycle) forward-references freely in Rust, and named sibling arguments
     // bind against these declared param lists at compile time.
-    let mut siblings: Vec<(String, Vec<String>)> = Vec::new();
+    let mut siblings: Vec<Sibling> = Vec::new();
     for subject in subjects {
-        let a = analyze_function(subject.source)?;
-        siblings.push((a.name, a.params));
+        siblings.push(sibling_of(subject)?);
     }
     // The AR.10 fallback program: every baked constant (deduped, conflicts LOUD) followed by the
     // verbatim references — one interpretable island whose bindings equal the bakes.
@@ -704,9 +905,7 @@ pub fn generate_batch(subjects: &[Subject<'_>]) -> Result<String, String> {
     for subject in subjects {
         let name = subject.name;
         for (n, b) in &subject.baked {
-            let scad = b
-                .to_scad()
-                .map_err(|e| format!("{name}: const `{n}` {e}"))?;
+            let scad = b.scad.clone();
             if let Some(prev) = fallback_consts.insert((*n).to_string(), scad.clone())
                 && prev != scad
             {
@@ -797,6 +996,10 @@ pub const GENERATED_ENTRIES: &[&str] = &[
     // phase: `Value::Str` was simply never emittable, so every `style="default"` parameter and
     // every anchor-name comparison declined on a construct with no semantics to get wrong.
     "_fab_poc_band4",
+    // AR.18 band 5 — a sibling call with a HOLE. The pair is the test: the caller fills slots 0
+    // and 2, so slot 1 must come back as the callee's default (7) rather than undef.
+    "_fab_poc_sib",
+    "_fab_poc_hole",
 ];
 
 /// Record a CALL by name: builtin or user dep. Deliberately IGNORES the lexical scope — a name
@@ -963,10 +1166,13 @@ mod tests {
         use std::collections::BTreeMap;
 
         /// Functions the emitter compiles TODAY (2026-07-28), out of 1335 — 632 at AR.11, 742 once
-        /// AR.15 made `Value::Str` emittable. Raise this as bands
-        /// land — AR.16 constants, AR.17 first-class functions. Lowering it is a deliberate act
-        /// that needs a reason next to it, which is the whole point of the ratchet.
-        const FLOOR: usize = 742;
+        /// 632 at AR.11, 742 once AR.15 made `Value::Str`
+        /// emittable, 936 once AR.16 baked the library's own constants, 1072 once AR.18 filled a
+        /// sibling call's holes with the callee's defaults. Raise it as bands land — first-class
+        /// functions (AR.17) are the biggest left, at 75 computed callees plus 34 literals plus 32
+        /// AN.10 shapes. Lowering it is a deliberate act that needs a reason next to it, which is
+        /// the whole point of the ratchet.
+        const FLOOR: usize = 1072;
 
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
@@ -989,7 +1195,6 @@ mod tests {
             let text = std::fs::read_to_string(f).expect("readable");
             sources.push((f.file_name().expect("named").to_string_lossy().into(), text));
         }
-        let mut siblings: Vec<(String, Vec<String>)> = Vec::new();
         let mut refs: Vec<(String, String, String)> = Vec::new(); // (file, name, source)
         let mut unparsed_files = 0_usize;
         for (file, text) in &sources {
@@ -1004,10 +1209,7 @@ mod tests {
                     body: _,
                 } = &stmt.kind
                 {
-                    siblings.push((
-                        name.clone(),
-                        params.iter().map(|p| p.name.to_string()).collect(),
-                    ));
+                    let _ = params;
                     refs.push((
                         file.clone(),
                         name.clone(),
@@ -1017,11 +1219,30 @@ mod tests {
             }
         }
 
-        // Pass 2: try to emit each one.
+        // Pass 2: try to emit each one, WITH the constants it reads baked — the same path
+        // `generate_from_library` takes. Probing with empty bakes measured a transpiler nobody
+        // runs, and would have shown AR.16 as no change at all.
+        let lib = crate::library::Library::read(&root).expect("BOSL2 reads");
+        let folded = lib.fold_constants();
+        // The sibling table needs each callee's BAKED defaults (AR.18), so it is built the same
+        // way `generate_batch` builds it — through `sibling_of`, with that subject's own bakes.
+        let siblings: Vec<super::Sibling> = refs
+            .iter()
+            .filter_map(|(_, _, src)| {
+                let baked = super::bake_reads(src, &lib, &folded).unwrap_or_default();
+                super::sibling_of(&super::Subject {
+                    name: "",
+                    source: src,
+                    baked,
+                })
+                .ok()
+            })
+            .collect();
         let mut ok = 0_usize;
         let mut by_reason: BTreeMap<String, (usize, String)> = BTreeMap::new();
         for (file, name, src) in &refs {
-            match super::generate_native(src, &[], &siblings) {
+            let baked = super::bake_reads(src, &lib, &folded).unwrap_or_default();
+            match super::generate_native(src, &baked, &siblings) {
                 Ok(_) => ok += 1,
                 Err(e) => {
                     let reason = classify(&e);
@@ -1079,7 +1300,9 @@ mod tests {
         for (probe, bucket) in [
             (
                 "computed callee",
-                "computed callee (fn value in call position)",
+                // Empty = keep the emitter's OWN detail: the shapes behind this probe cost
+                // different amounts to support, so one bucket does not schedule anything.
+                "",
             ),
             ("the AN.10 shape", "call through a local binding (AN.10)"),
             ("free read", "free read (an unbaked library constant)"),
@@ -1104,6 +1327,13 @@ mod tests {
             ("Str(", "string literal"),
         ] {
             if e.contains(probe) {
+                if bucket.is_empty() {
+                    // Keep the emitter's OWN detail — everything from the probe onward. Used where
+                    // one probe covers several shapes that cost different amounts to support.
+                    return e
+                        .rfind(probe)
+                        .map_or_else(|| probe.to_string(), |i| e[i..].to_string());
+                }
                 return bucket.to_string();
             }
         }
@@ -1186,9 +1416,23 @@ mod tests {
         }
         let lib = crate::library::Library::read(&dir).expect("BOSL2 reads");
 
-        // Const-free entries that BOSL2 declares and the registry also carries, so both inputs can
-        // describe them. A function needing a baked constant is AR.16's business, not this test's.
-        let names = ["is_nan", "is_def", "is_str", "last"];
+        // Entries BOSL2 declares that the registry also carries, so both inputs can describe
+        // them. `approx` is the one that matters since AR.16: it BAKES `_EPSILON`, so this now
+        // proves the library fold and the hand-written `Entry.consts` agree on the value — a
+        // disagreement there is a native answering with a different epsilon, which is a wrong
+        // answer rather than a missed compilation.
+        // approx/posmod/idx are a real 3-CYCLE and a sibling call may only bind inside the batch,
+        // so they come as a set or not at all.
+        let names = [
+            "is_nan",
+            "is_finite",
+            "is_def",
+            "is_str",
+            "last",
+            "approx",
+            "posmod",
+            "idx",
+        ];
         let from_registry = super::generate_module(&names).expect("registry path generates");
         let from_library =
             super::generate_from_library(&lib, &names).expect("library path generates");

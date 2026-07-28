@@ -3451,3 +3451,38 @@ fn a_drifted_module_definition_does_not_wire() {
         "an unregistered name never wires"
     );
 }
+
+/// AR.18 — a sibling call with a HOLE binds the callee's own default, not `undef`.
+///
+/// `_fab_poc_hole(x)` calls `_fab_poc_sib(x, c=3)`, filling slots 0 and 2 and leaving slot 1
+/// empty. The positional `&[Value]` ABI cannot say "slot 1 was not supplied", so the emitter fills
+/// it with `b`'s declared default. The distinction is the whole test: passing `Value::Undef`
+/// instead would compile, run, and return `[x, undef, 3]` — a wrong ANSWER that looks like a
+/// working native. That is AN.3's bug in compiled form.
+#[test]
+fn a_sibling_call_with_a_hole_takes_the_callees_default() {
+    let reference = reference_of("_fab_poc_hole").expect("registered");
+    let (params, body) = parse_fn(reference);
+    let func = resolve("_fab_poc_hole", &params, &body)
+        .expect("its own reference must register")
+        .func;
+    let deps = [reference_of("_fab_poc_sib").expect("registered")];
+    for input in [
+        &[Value::Num(1.0)][..],
+        &[Value::Num(-2.5)][..],
+        &[Value::Undef][..],
+        &[][..],
+    ] {
+        let fast = func(input);
+        let slow = interpret_with_deps(reference, &deps, input);
+        assert!(
+            same_result(&fast, &slow),
+            "hole-filled sibling call diverged on {input:?}: fast {fast:?}"
+        );
+        // Pin the VALUE too, not just agreement — both tiers returning `undef` for `b` would
+        // agree with each other and still be wrong against upstream.
+        if let Ok(Value::NumList(xs)) = &fast {
+            assert_eq!(xs[1], 7.0, "the hole must carry `b`'s default, got {xs:?}");
+        }
+    }
+}

@@ -737,6 +737,29 @@ pub(super) static REGISTRY: &[Entry] = &[
         builtins: &["len", "str"],
         func: generated::_fab_poc_band4,
     },
+    // The AR.18 hole POC. `_fab_poc_hole` calls its sibling filling slots 0 and 2 and leaving
+    // slot 1 EMPTY, which the positional `&[Value]` ABI cannot express — so the emitter fills the
+    // hole with the CALLEE's own default. The two entries exist as a pair: the test's whole point
+    // is that `b` comes back as 7 and not `undef`, and passing `Value::Undef` for the hole would
+    // give `undef` while still compiling, running and looking right.
+    Entry {
+        name: "_fab_poc_sib",
+        reference: "function _fab_poc_sib(a, b=7, c=1) = [a, b, c];",
+        consts: &[],
+        consts_v: &[],
+        deps: &[],
+        builtins: &[],
+        func: generated::_fab_poc_sib,
+    },
+    Entry {
+        name: "_fab_poc_hole",
+        reference: "function _fab_poc_hole(x) = _fab_poc_sib(x, c=3);",
+        consts: &[],
+        consts_v: &[],
+        deps: &["_fab_poc_sib"],
+        builtins: &[],
+        func: generated::_fab_poc_hole,
+    },
     // ── O.5.2, the SHAPE band (utility.scad / lists.scad) ────────────────────────────────────────────────
     // The `is_consistent`/`_list_pattern`/`same_shape` bundle is ~4.7s of self time across the O.4 four
     // (every BOSL2 path/vector assert funnels through it), `num_defined`/`force_list` are its cheap leaf

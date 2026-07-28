@@ -64,6 +64,8 @@ function idx(list, s=0, e=-1, step=1) =
         _e = posmod(e,ll)
     ) [_s : step : _e];
 function _fab_poc_band4(s, tag="q\"b\\c\nd") = [s == tag, str("x=", s, tag), len(tag), "αβ"];
+function _fab_poc_sib(a, b=7, c=1) = [a, b, c];
+function _fab_poc_hole(x) = _fab_poc_sib(x, c=3);
 "#;
 
 /// Generated native for `_fab_poc_sq` — semantics route through the interpreter's own value
@@ -282,6 +284,34 @@ pub(super) fn _fab_poc_band4(args: &[rt::Value]) -> rt::Result<rt::Value> {
     let p_s = args.first().cloned().unwrap_or(rt::Value::Undef);
     let p_tag = args.get(1).cloned().unwrap_or_else(|| rt::Value::string("q\"b\\c\nd"));
     let out = rt::build_vector(vec![rt::apply_binary(rt::BinOp::Eq, p_s.clone(), p_tag.clone()), rt::builtin("str", &[rt::Value::string("x="), p_s.clone(), p_tag.clone()]), rt::builtin("len", &[p_tag.clone()]), rt::Value::string("αβ")]);
+    Ok(out)
+}
+
+/// Generated native for `_fab_poc_sib` — semantics route through the interpreter's own value
+/// algebra (`ops::`/`builtins::`), bit-identical to the interpreted reference by construction.
+pub(super) fn _fab_poc_sib(args: &[rt::Value]) -> rt::Result<rt::Value> {
+    // AR.10: past the depth budget, DECLINE to the pure interpreter — explicit stack,
+    // same proven semantics; recursion cannot ride the Rust stack unbounded.
+    let Some(_depth) = rt::DepthGuard::enter() else {
+        return rt::run_interpreted(FALLBACK_SOURCES, "_fab_poc_sib", args);
+    };
+    let p_a = args.first().cloned().unwrap_or(rt::Value::Undef);
+    let p_b = args.get(1).cloned().unwrap_or_else(|| rt::Value::Num(f64::from_bits(0x401c000000000000_u64)));
+    let p_c = args.get(2).cloned().unwrap_or_else(|| rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64)));
+    let out = rt::build_vector(vec![p_a.clone(), p_b.clone(), p_c.clone()]);
+    Ok(out)
+}
+
+/// Generated native for `_fab_poc_hole` — semantics route through the interpreter's own value
+/// algebra (`ops::`/`builtins::`), bit-identical to the interpreted reference by construction.
+pub(super) fn _fab_poc_hole(args: &[rt::Value]) -> rt::Result<rt::Value> {
+    // AR.10: past the depth budget, DECLINE to the pure interpreter — explicit stack,
+    // same proven semantics; recursion cannot ride the Rust stack unbounded.
+    let Some(_depth) = rt::DepthGuard::enter() else {
+        return rt::run_interpreted(FALLBACK_SOURCES, "_fab_poc_hole", args);
+    };
+    let p_x = args.first().cloned().unwrap_or(rt::Value::Undef);
+    let out = _fab_poc_sib(&[p_x.clone(), rt::Value::Num(f64::from_bits(0x401c000000000000_u64)), rt::Value::Num(f64::from_bits(0x4008000000000000_u64))])?;
     Ok(out)
 }
 

@@ -32,7 +32,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
-use fab_lang::{Expr, Parameter, StmtKind, parse};
+use fab_lang::{Expr, Parameter, Stmt, StmtKind, parse};
 
 /// One top-level `function` the library declares.
 #[derive(Debug, Clone)]
@@ -48,6 +48,28 @@ pub struct LibFn {
     pub params: Vec<Parameter>,
     /// The body expression.
     pub body: Expr,
+}
+
+/// One top-level `module` the library declares.
+///
+/// AR.20.8. Held for a reason the function side does not need: the emitter POSITIONALISES a module
+/// call's named arguments at compile time (AR.18), which it cannot do without the callee's declared
+/// parameter list. `body` is a statement rather than an expression — that is the whole difference
+/// between a module and a function here.
+#[derive(Debug, Clone)]
+pub struct LibMod {
+    /// The declared name.
+    pub name: String,
+    /// The file it came from, for diagnostics and for grouping generated output.
+    pub file: String,
+    /// Verbatim source of the whole `module … { … }` statement — the same bytes the fingerprint
+    /// gate would see, so a generated native and its reference cannot describe different code.
+    pub source: String,
+    /// Declared parameters, in declaration order. This is what makes AR.18's hole-filling possible
+    /// for a module call, and what the AN.10 guard compares against at runtime.
+    pub params: Vec<Parameter>,
+    /// The body statement.
+    pub body: Stmt,
 }
 
 /// One top-level `name = expr;` the library declares — the raw material for AR.16's const bakes.
@@ -67,12 +89,25 @@ pub struct Library {
     pub functions: BTreeMap<String, LibFn>,
     /// Unambiguous top-level constants, by name.
     pub constants: BTreeMap<String, LibConst>,
+    /// Unambiguous top-level modules, by name. Same collision RULE as `functions` — a name declared
+    /// twice is withdrawn rather than guessed at — but tracked separately, see `module_collisions`.
+    pub modules: BTreeMap<String, LibMod>,
     /// Names declared more than once, each with every site that declared it. These are held OUT
     /// of `functions`/`constants` — see the module note; resolving them would be a guess.
     pub collisions: BTreeMap<String, Vec<String>>,
     /// Files that failed to parse, with the reason. Not fatal: a library may carry a file our
     /// grammar doesn't accept yet, and the rest of it is still transpilable.
     pub unparsed: Vec<(String, String)>,
+    /// Module names declared more than once, each with every site — the module twin of
+    /// `collisions`.
+    ///
+    /// SEPARATE from `collisions` rather than merged into it, because OpenSCAD keeps the function
+    /// and module namespaces apart and BOSL2 relies on that: `trapezoid` is a function in
+    /// shapes2d.scad AND a module in both shapes2d.scad and bosl1compat.scad. The module is
+    /// genuinely ambiguous; the function is not. Folding both into one name-keyed map withdrew a
+    /// perfectly good function because a module somewhere else shared its name — coverage lost to
+    /// a bookkeeping choice, which is the kind of loss the ratchet exists to notice.
+    pub module_collisions: BTreeMap<String, Vec<String>>,
     /// PROVENANCE: what each ROOT brings, keyed by the path a consumer writes in its `include`.
     ///
     /// Not bookkeeping — it is what makes a surface answerable. A user who writes
@@ -242,6 +277,7 @@ impl Library {
         // one that collides inside a file. Kept separate from the output maps because a colliding
         // name has to LEAVE the output, and it may already have been inserted.
         let mut fn_sites: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        let mut mod_sites: BTreeMap<String, Vec<String>> = BTreeMap::new();
         let mut const_sites: BTreeMap<String, Vec<String>> = BTreeMap::new();
 
         for (path, take_consts) in files {
@@ -278,6 +314,19 @@ impl Library {
                             },
                         );
                     }
+                    StmtKind::ModuleDef { name, params, body } => {
+                        mod_sites.entry(name.clone()).or_default().push(file.clone());
+                        out.modules.insert(
+                            name.clone(),
+                            LibMod {
+                                name: name.clone(),
+                                file: file.clone(),
+                                source: text[stmt.span.clone()].to_string(),
+                                params: params.clone(),
+                                body: (**body).clone(),
+                            },
+                        );
+                    }
                     // `use <f>` imports a file's modules and functions and deliberately NOT its
                     // variables (lexer.l:153). Recording them anyway would let AR.16 bake a value
                     // the consumer's program never binds — the native would answer with a constant
@@ -305,6 +354,12 @@ impl Library {
         // Withdraw every ambiguous name. Done as a second pass because a collision is only known
         // once the whole library has been read, and the first definition was inserted before the
         // second one existed to contradict it.
+        for (name, sites) in mod_sites {
+            if sites.len() > 1 {
+                out.modules.remove(&name);
+                out.module_collisions.insert(name, sites);
+            }
+        }
         for (name, sites) in fn_sites {
             if sites.len() > 1 {
                 out.functions.remove(&name);
@@ -712,6 +767,48 @@ mod tests {
     ///
     /// The split matters because the two have opposite fixes. A declared name is a bake plus a
     /// const guard. An undeclared one can NEVER be baked, so those functions stay interpreted no
+    /// AR.20.8 — the library reads MODULES, which is what lets the emitter positionalise a module
+    /// call's named arguments (AR.18 needs the callee's parameter list, and BOSL2 calls modules by
+    /// name constantly).
+    ///
+    /// Asserted as a FLOOR rather than an exact count, for the same reason the codegen ratchet is:
+    /// a harvest that silently stopped seeing `ModuleDef` would not error, it would just go back to
+    /// making every module call unpositionalisable while still passing.
+    #[test]
+    fn the_library_read_harvests_modules() {
+        let lib = Library::read(&bosl2()).expect("BOSL2 reads");
+        assert!(
+            lib.modules.len() > 400,
+            "BOSL2 declares ~414 unambiguous modules; got {} — the ModuleDef arm stopped seeing them",
+            lib.modules.len()
+        );
+        // A known one, checked for its PARAMETERS rather than its presence: the parameter list is
+        // the entire reason modules are held, so a harvest that kept names and dropped params would
+        // pass a presence check and still be useless.
+        let cyl = lib.modules.get("cyl").expect("BOSL2 declares `cyl`");
+        assert!(
+            cyl.params.iter().any(|p| &*p.name == "h"),
+            "`cyl` should declare `h`; got {:?}",
+            cyl.params.iter().map(|p| &*p.name).collect::<Vec<_>>()
+        );
+        // Modules and functions share the collision RULE — a name declared twice is withdrawn, not
+        // guessed at, because picking one would wire a native against a body the user may not have
+        // — but not the same namespace. BOSL2 declares `trapezoid` as a function once and as a
+        // module twice; the module is ambiguous and the function is not, and merging the two maps
+        // withdrew the function for no reason.
+        for name in lib.module_collisions.keys() {
+            assert!(
+                !lib.modules.contains_key(name),
+                "`{name}` collides and must not be offered as an unambiguous module"
+            );
+        }
+        assert!(
+            lib.module_collisions.contains_key("trapezoid") && lib.functions.contains_key("trapezoid"),
+            "BOSL2's `trapezoid` is an ambiguous MODULE and an unambiguous FUNCTION; the two \
+             namespaces must not withdraw each other"
+        );
+    }
+
     /// matter how good the emitter gets, and counting them tells us where AR.16's ceiling is.
     #[test]
     fn the_free_reads_split_into_bakeable_and_not() {
@@ -923,3 +1020,4 @@ mod fold_tests {
         }
     }
 }
+

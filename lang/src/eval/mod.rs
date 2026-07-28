@@ -2430,6 +2430,10 @@ enum FilledBy {
     Named,
 }
 
+/// What [`fill_slots`] decided: one slot per parameter (`None` = took its default), the `$`-args
+/// split out as dynamic injections, and upstream's per-call diagnostics.
+type FilledSlots<T> = (Vec<Option<T>>, Vec<(Rc<str>, T)>, ArgDiagnostics);
+
 /// Fill each param slot from the call args, LEFT TO RIGHT (AH.2.4, the arg-permutations golden):
 /// a named arg takes its slot (a later duplicate overwrites), a `$`-arg splits out as a dynamic
 /// injection, and a POSITIONAL fills the LOWEST currently-unfilled slot — `f(a=1,2)` puts `2` in
@@ -2442,14 +2446,21 @@ enum FilledBy {
 /// - a named arg onto a slot a POSITIONAL filled → `argument "a" overrides positional argument`
 ///   (a genuinely DIFFERENT message for what looks like the same event — `f(1, a=2)` vs `f(a=1, a=2)`)
 /// - a named arg matching no param → `variable "x" not specified as parameter`; `$`-args are EXEMPT
-///   (they're dynamic injections, not mis-typed parameter names, and upstream says nothing about them)
-fn fill_arg_slots<'a>(
-    params: &'a [Parameter],
-    args: &'a [Arg],
-) -> (ArgSlots<'a>, DollarArgs<'a>, ArgDiagnostics) {
-    let mut arg_slots: Vec<Option<&'a Expr>> = vec![None; params.len()];
+///
+/// GENERIC OVER THE PAYLOAD, and that is AR.20.8 rather than taste. The interpreter fills slots with
+/// argument EXPRESSIONS; a compiled module has already evaluated its arguments and fills them with
+/// `Value`s. Matching a name to a slot is identical either way — and it is the one part of binding
+/// that a compiled caller must NOT do at compile time, because the emitter matches against the
+/// LIBRARY's parameter list while this runs against whatever the USER's program actually resolved
+/// to. Two implementations of this rule would disagree exactly when somebody shadows a library
+/// module, which renders rather than errors.
+fn fill_slots<'n, T>(
+    params: &[Parameter],
+    args: impl IntoIterator<Item = (Option<&'n Rc<str>>, T)>,
+) -> FilledSlots<T> {
+    let mut arg_slots: Vec<Option<T>> = (0..params.len()).map(|_| None).collect();
     let mut filled_by: Vec<Option<FilledBy>> = vec![None; params.len()];
-    let mut dollars: Vec<(Rc<str>, &'a Expr)> = Vec::new();
+    let mut dollars: Vec<(Rc<str>, T)> = Vec::new();
     let mut diagnostics = ArgDiagnostics::new();
     // Upstream warns about overflow ONCE PER CALL, not once per surplus argument: `m(1,2,3)` and
     // `m(1,2,3,4,5)` against a one-param module each print exactly one line. Emitting on the FIRST
@@ -2457,11 +2468,11 @@ fn fill_arg_slots<'a>(
     // named-arg diagnostics by argument order, so `m(1, x=9, 2, 3)` prints the `x` line first while
     // `m(1, 2, x=9)` prints the overflow first.
     let mut overflowed = false;
-    for arg in args {
-        match &arg.name {
+    for (name, payload) in args {
+        match name {
             None => match arg_slots.iter().position(Option::is_none) {
                 Some(i) => {
-                    arg_slots[i] = Some(&arg.value);
+                    arg_slots[i] = Some(payload);
                     filled_by[i] = Some(FilledBy::Positional);
                 }
                 None if !overflowed => {
@@ -2471,7 +2482,7 @@ fn fill_arg_slots<'a>(
                 None => {}
             },
             // a $-arg is a per-call dynamic override — injected into the call scope, not param-matched.
-            Some(name) if name.starts_with('$') => dollars.push((Rc::clone(name), &arg.value)),
+            Some(name) if name.starts_with('$') => dollars.push((Rc::clone(name), payload)),
             Some(name) => {
                 if let Some(i) = params.iter().position(|p| p.name == *name) {
                     match filled_by[i] {
@@ -2483,17 +2494,25 @@ fn fill_arg_slots<'a>(
                             .push(format!("argument \"{name}\" overrides positional argument")),
                         None => {}
                     }
-                    arg_slots[i] = Some(&arg.value);
+                    arg_slots[i] = Some(payload);
                     filled_by[i] = Some(FilledBy::Named);
                 } else {
                     // No such param — still binds as a call-scope variable (upstream warns + uses).
                     diagnostics.push(format!("variable \"{name}\" not specified as parameter"));
-                    dollars.push((Rc::clone(name), &arg.value));
+                    dollars.push((Rc::clone(name), payload));
                 }
             }
         }
     }
     (arg_slots, dollars, diagnostics)
+}
+
+/// [`fill_slots`] over AST arguments — the interpreter's spelling.
+fn fill_arg_slots<'a>(
+    params: &'a [Parameter],
+    args: &'a [Arg],
+) -> (ArgSlots<'a>, DollarArgs<'a>, ArgDiagnostics) {
+    fill_slots(params, args.iter().map(|a| (a.name.as_ref(), &a.value)))
 }
 
 #[allow(

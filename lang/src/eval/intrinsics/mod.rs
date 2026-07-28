@@ -2173,13 +2173,11 @@ fn poc_mod_wrap(ctx: &dyn crate::surface::ModuleCtx) -> crate::Result<super::geo
     // reason `Children` carries closures.
     let forward: &dyn Fn(&dyn crate::surface::ModuleCtx) -> crate::Result<super::geo2d::Geo> =
         &|caller| caller.children();
-    ctx.call(
-        "_fab_poc_mod",
-        &[k],
-        &[],
-        &[],
-        crate::surface::Children::Compiled(&[forward]),
-    )
+    ctx.call(&crate::surface::ModuleCall {
+        name: "_fab_poc_mod",
+        args: &[(None, k)],
+        children: crate::surface::Children::Compiled(&[forward]),
+    })
 }
 
 /// AR.20.6 proof-of-concept: a compiled module that calls BUILTINS — a transform wrapping a
@@ -2191,23 +2189,22 @@ fn poc_mod_wrap(ctx: &dyn crate::surface::ModuleCtx) -> crate::Result<super::geo
 fn poc_mod_prim(ctx: &dyn crate::surface::ModuleCtx) -> crate::Result<super::geo2d::Geo> {
     let s = ctx.args().first().cloned().unwrap_or(Value::Num(1.0));
     let cube = |c: &dyn crate::surface::ModuleCtx| {
-        c.call(
-            "cube",
-            &[],
-            &[("size", s.clone()), ("center", Value::Bool(true))],
-            &[],
-            crate::surface::Children::None,
-        )
+        c.call(&crate::surface::ModuleCall {
+            name: "cube",
+            args: &[
+                (Some("size"), s.clone()),
+                (Some("center"), Value::Bool(true)),
+            ],
+            children: crate::surface::Children::None,
+        })
     };
     let cube: crate::surface::ChildThunk<'_> = &cube;
     let offset = super::build_vector(vec![s.clone(), Value::Num(0.0), Value::Num(0.0)]);
-    ctx.call(
-        "translate",
-        &[offset],
-        &[],
-        &[],
-        crate::surface::Children::Compiled(&[cube]),
-    )
+    ctx.call(&crate::surface::ModuleCall {
+        name: "translate",
+        args: &[(None, offset)],
+        children: crate::surface::Children::Compiled(&[cube]),
+    })
 }
 
 pub(super) static MODULE_REGISTRY: &[ModuleEntry] = &[

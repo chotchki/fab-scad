@@ -3545,6 +3545,77 @@ fn a_compiled_module_calling_builtins_matches_the_interpreter() {
     );
 }
 
+/// AR.20.8 — AN.10 on the MODULE path: a compiled caller must bind against the parameters the
+/// callee ACTUALLY has, not the ones it was compiled against.
+///
+/// This is the test that killed the first design. `ModuleCall` used to carry arguments already
+/// positionalised, with the callee's defaults BAKED IN to fill holes, plus the parameter names the
+/// emitter assumed so the runtime could check them. Writing this case showed the check was
+/// insufficient: `_fab_poc_mod`'s parameter is still named `k`, so a name comparison passes, while
+/// the DEFAULT moved — and a baked default is exactly what a compiled caller would have been
+/// carrying. Matching at runtime instead means there is no assumption left to violate.
+///
+/// The wrapper here calls `_fab_poc_mod(k)` with `k` supplied, so the shadowed default is reached
+/// through the CALLEE's own body. Compiled and interpreted must agree on which default that is.
+#[test]
+fn a_compiled_caller_binds_against_the_callee_the_program_actually_has() {
+    // `_fab_poc_mod` DRIFTED (it echoes), so it interprets while the wrapper still compiles — and
+    // its `k` carries a default the wrapper was never built with.
+    let src = "module _fab_poc_mod(k=99) { echo(k=k); children(); }\n\
+               module _fab_poc_wrap(k=1) { _fab_poc_mod(k) children(); }\n\
+               _fab_poc_wrap() { cube([2,3,4]); }";
+
+    let run = |intrinsics: bool| {
+        let config = crate::Config {
+            intrinsics,
+            ..crate::Config::default()
+        };
+        let (geo, msgs) =
+            crate::evaluate_geometry_with_base_config(src, std::path::Path::new("."), &[], config)
+                .expect("renders");
+        (format!("{geo:?}"), format!("{msgs:?}"))
+    };
+
+    let (geo_on, msgs_on) = run(true);
+    let (geo_off, msgs_off) = run(false);
+    assert_eq!(geo_on, geo_off, "the two tiers built different geometry");
+    assert_eq!(
+        msgs_on, msgs_off,
+        "the compiled caller bound a different `k` than the interpreter — it matched arguments \
+         against a parameter list the program does not have"
+    );
+    assert!(
+        msgs_on.contains("k = 1"),
+        "`k` should be the wrapper's 1, passed through: {msgs_on}"
+    );
+
+    // And the shadowed DEFAULT is reached when the wrapper does NOT supply it. Same source, but the
+    // wrapper's own default is what flows in, so this pins that a default is evaluated from the
+    // callee's real definition rather than from anything baked at compile time.
+    let defaulted = "module _fab_poc_mod(k=99) { echo(k=k); children(); }\n\
+                     module _fab_poc_wrap(k=1) { _fab_poc_mod() children(); }\n\
+                     _fab_poc_wrap() { cube([2,3,4]); }";
+    let run2 = |intrinsics: bool| {
+        let config = crate::Config {
+            intrinsics,
+            ..crate::Config::default()
+        };
+        let (_, msgs) = crate::evaluate_geometry_with_base_config(
+            defaulted,
+            std::path::Path::new("."),
+            &[],
+            config,
+        )
+        .expect("renders");
+        format!("{msgs:?}")
+    };
+    assert_eq!(
+        run2(true),
+        run2(false),
+        "an unsupplied parameter must take the CALLEE's default, whichever tier ran the call"
+    );
+}
+
 /// The drift gate, on the MODULE path: a definition that does not match the reference the native
 /// was generated from must NOT wire. Without this the native would answer for a module whose body
 /// somebody changed, which is a wrong answer rather than a missed compilation.

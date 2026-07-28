@@ -349,34 +349,48 @@ pub trait ModuleCtx {
     /// interpreter — a missing `$`-var is not an error.
     fn dollar(&self, name: &str) -> Value;
 
-    /// Call another module BY NAME, dispatching through the registry: another native where one is
-    /// armed, the interpreter otherwise. `dollars` are the `$`-overrides this call site sets, which
-    /// bind LAST so they shadow the inherited chain.
-    ///
-    /// By name rather than by pointer for the same reason a function dep is (see the registry
-    /// index): the name has to be resolvable against the user's program, not just against ours.
-    ///
-    /// `'static` on the name is not a restriction, it is the honest type. A generated module emits
-    /// its callees as string LITERALS — knowing them at compile time is what makes this dispatch
-    /// rather than interpretation — and the evaluator's instantiation stack (`parent_module(i)`)
-    /// borrows the name for the length of the call, which a shorter lifetime could not satisfy.
-    ///
-    /// `args` are POSITIONAL and `named` is everything passed by name. For a USER module the
-    /// emitter knows the parameter list and positionalises at compile time (AR.18), so `named` is
-    /// empty; for a BUILTIN it cannot — `cube(size=…, center=true)`, `cylinder(r1=…, r2=…)` — because
-    /// the binding tables are the evaluator's and upstream lets a primitive take arbitrary named
-    /// arguments. Hence two channels rather than one.
+    /// Call another module, dispatching through the registry: another native where one is armed,
+    /// the interpreter otherwise.
     ///
     /// # Errors
     /// Whatever the called module raises, including the depth-budget decline.
-    fn call(
-        &self,
-        name: &'static str,
-        args: &[Value],
-        named: &[(&'static str, Value)],
-        dollars: &[(&str, Value)],
-        children: Children<'_>,
-    ) -> crate::Result<Geo>;
+    fn call(&self, call: &ModuleCall<'_>) -> crate::Result<Geo>;
+}
+
+/// One module call a generated module makes — the call site as WRITTEN, with its arguments
+/// evaluated and nothing else decided.
+///
+/// The shape is deliberate and it is the second design this went through. The first carried
+/// arguments already POSITIONALISED against the callee's parameter list, plus the parameter names
+/// the emitter had assumed so the runtime could check them. That check turned out to be
+/// insufficient while writing its own test, which is the useful part: matching parameter NAMES does
+/// not catch a shadowing module that keeps the names and changes a DEFAULT, and the emitter had
+/// baked the library's defaults into the argument list to fill holes. A user redefining
+/// `module cyl(h, r=5)` as `module cyl(h, r=99)` would have taken the compiled path and silently
+/// got `5`.
+///
+/// So the assumption is GONE rather than guarded. Slot matching happens at RUNTIME against whatever
+/// the name actually resolved to, through the same `fill_slots` the interpreter uses, and unfilled
+/// parameters take the REAL callee's defaults. There is no claim about the callee left to violate,
+/// which is a better property than any check: AN.10 says a name can move at runtime, and this
+/// simply does not care if it does.
+pub struct ModuleCall<'a> {
+    /// The callee.
+    ///
+    /// `'static` is the honest type, not a restriction — a generated module emits its callees as
+    /// string LITERALS (knowing them at compile time is what makes this dispatch rather than
+    /// interpretation), and the evaluator's instantiation stack borrows the name for the length of
+    /// the call, which a shorter lifetime could not satisfy.
+    pub name: &'static str,
+    /// The arguments, IN SOURCE ORDER, each with the name it was written with if any.
+    ///
+    /// One list rather than three because that is what a call site is. A `None` name is positional,
+    /// a `Some` name binds to that parameter, and a `Some` name starting with `$` is a dynamic
+    /// override — exactly the partition `module::eval_args` and `fill_slots` already make, so a
+    /// generated call needs no separate channels for named arguments or `$`-args.
+    pub args: &'a [(Option<&'static str>, Value)],
+    /// The children this call site supplies.
+    pub children: Children<'a>,
 }
 
 /// The children a generated module passes ALONG to a module it calls.

@@ -19,7 +19,7 @@ use super::geo2d::Geo;
 use super::scope::Scope;
 use super::value::Value;
 use crate::parser::Stmt;
-use crate::surface::{Children, ModuleCtx};
+use crate::surface::{Children, ModuleCall, ModuleCtx};
 
 /// How deep the compiled module path is allowed to nest before it hands back to the interpreter.
 ///
@@ -251,22 +251,24 @@ impl<'a> NativeModuleCtx<'a, '_, '_> {
     fn call_builtin(
         &self,
         name: &str,
-        args: &[Value],
-        named: &[(&'static str, Value)],
-        dollars: &[(&str, Value)],
+        args: &[(Option<&'static str>, Value)],
         children: Children<'_>,
     ) -> crate::Result<Geo> {
-        // The `$`-arg scope `module::eval_args` builds: the instantiation scope with THIS call's
-        // `$`-overrides on top. `$fn`/`$fa`/`$fs` resolve through it, so a primitive tessellates at
-        // the caller's resolution — `sphere(1, $fn=64)` has to mean 64 here as well.
+        // The same partition `module::eval_args` makes: positional, named, and `$`-args into a child
+        // scope. No parameter matching, because a builtin has no declared parameter list to match
+        // against — its binding tables are the evaluator's.
         let mut child_scope = self.call_scope.child();
-        for (n, v) in dollars {
-            child_scope.bind(*n, v.clone());
+        let mut positional = Vec::new();
+        let mut named = std::collections::BTreeMap::new();
+        for (n, v) in args {
+            match n {
+                Some(n) if n.starts_with('$') => child_scope.bind(*n, v.clone()),
+                Some(n) => {
+                    named.insert((*n).to_string(), v.clone());
+                }
+                None => positional.push(v.clone()),
+            }
         }
-        let named: std::collections::BTreeMap<String, Value> = named
-            .iter()
-            .map(|(n, v)| ((*n).to_string(), v.clone()))
-            .collect();
 
         if super::geo_stack::combinator_name(name) {
             let parts = match children {
@@ -276,12 +278,12 @@ impl<'a> NativeModuleCtx<'a, '_, '_> {
                     .map(|thunk| thunk(self))
                     .collect::<crate::Result<Vec<Geo>>>()?,
             };
-            let comb = super::geo_stack::combinator_for(name, args, &named, &child_scope);
+            let comb = super::geo_stack::combinator_for(name, &positional, &named, &child_scope);
             return Ok(comb.apply(parts, self.ctx));
         }
         Ok(super::module::eval_primitive(
             name,
-            args,
+            &positional,
             &named,
             &child_scope,
             self.ctx,
@@ -347,21 +349,20 @@ impl ModuleCtx for NativeModuleCtx<'_, '_, '_> {
         self.call_scope.lookup(name)
     }
 
-    fn call(
-        &self,
-        name: &'static str,
-        args: &[Value],
-        named: &[(&'static str, Value)],
-        dollars: &[(&str, Value)],
-        children: Children<'_>,
-    ) -> crate::Result<Geo> {
+    fn call(&self, call: &ModuleCall<'_>) -> crate::Result<Geo> {
+        let &ModuleCall {
+            name,
+            args,
+            children,
+        } = call;
         // AR.20.5 — dispatch, which is what makes this a compiler rather than an interpreter with
         // extra steps. chotchki: "I really want dispatch, otherwise we're making an interpreter
         // with extra steps."
         //
         // The setup below MIRRORS `push_user_module` deliberately and in its order, because the two
-        // tiers have to be indistinguishable: same recursion verdict, same bookkeeping binds, same
-        // instantiation stack. Where a step is shared it is CALLED rather than copied.
+        // tiers have to be indistinguishable: same recursion verdict, same argument matching, same
+        // bookkeeping binds, same instantiation stack. Where a step is shared it is CALLED rather
+        // than copied.
         //
         // DECLINING IS SAFE HERE, and that is load-bearing rather than incidental: `try_native_module`
         // treats `Unimplemented` out of a native as a decline and re-runs the whole call interpreted,
@@ -369,29 +370,9 @@ impl ModuleCtx for NativeModuleCtx<'_, '_, '_> {
         let Some((def, home, base)) = self.ctx.resolve_module(self.home_island, name) else {
             // No USER module by that name, so the call is a BUILTIN — `cube`, `translate`, `union`,
             // which is what every leaf module is made of.
-            return self.call_builtin(name, args, named, dollars, children);
+            return self.call_builtin(name, args, children);
         };
         let (params, body) = def;
-        if !named.is_empty() {
-            // The emitter positionalises a user call at compile time (AR.18), so reaching here means
-            // it could not — and matching names to parameters at runtime would be reimplementing the
-            // two-phase rule the AN family documents getting wrong. Decline instead.
-            return Err(crate::Error::Unimplemented(
-                "named arguments to a USER module from compiled code (the emitter positionalises)",
-            ));
-        }
-        if has_duplicate_params(params) {
-            return Err(crate::Error::Unimplemented(
-                "a module declaring a parameter name twice, called from compiled code (AN.6)",
-            ));
-        }
-        // Resolved ONCE: whether the callee compiles decides both which tier runs it and whether a
-        // compiled child block can be handed over at all.
-        let native = if self.ctx.config.intrinsics {
-            super::intrinsics::resolve_module(name, params, body)
-        } else {
-            None
-        };
 
         // The interpreter's recursion bound, with its verdict class — this guard is a semantic
         // limit on runaway recursion (AD.5), not a missing feature, so it must not read as one.
@@ -402,16 +383,35 @@ impl ModuleCtx for NativeModuleCtx<'_, '_, '_> {
             )));
         }
 
+        // Which argument fills which parameter slot, decided HERE against the parameters the name
+        // actually resolved to — never against what the emitter assumed. See `ModuleCall`.
+        let owned: Vec<(Option<std::rc::Rc<str>>, Value)> = args
+            .iter()
+            .map(|(n, v)| (n.map(std::rc::Rc::from), v.clone()))
+            .collect();
+        let (slots, dollars, diagnostics) =
+            super::fill_slots(params, owned.iter().map(|(n, v)| (n.as_ref(), v.clone())));
+        // AN.14 — the arg diagnostics belong to whichever path BOUND the call, and this path did.
+        for d in diagnostics {
+            self.ctx.warn(d);
+        }
+
         // Args bind in the CALLER's scope; the body's lexical base is the callee's HOME island
         // global (or its captured defining scope, for a scope-local def).
         let home_global = base.unwrap_or_else(|| self.ctx.island_globals.borrow()[home].clone());
-        let mut call = bind_values(params, args, dollars, &self.call_scope, &home_global, self.ctx)?;
+        let mut call = bind_values(params, &slots, &dollars, &self.call_scope, &home_global, self.ctx)?;
         super::geo_stack::warn_params_overwritten(params, body, self.ctx);
         let n_children = match children {
             Children::None => 0,
             Children::Compiled(thunks) => thunks.len(),
         };
         super::bind_call_bookkeeping(&mut call, n_children, self.ctx);
+
+        let native = if self.ctx.config.intrinsics {
+            super::intrinsics::resolve_module(name, params, body)
+        } else {
+            None
+        };
 
         // The fast path, and the reason this is dispatch rather than task emission: another native.
         // A compiled child block can only be handed over HERE, because a native carries its children
@@ -494,26 +494,29 @@ pub(super) fn bound_args(params: &[crate::parser::Parameter], call: &Scope) -> V
     params.iter().map(|p| call.lookup(&p.name)).collect()
 }
 
-/// Bind a callee's call scope from PRE-EVALUATED positional arguments.
+/// Bind a callee's call scope from slot-matched, ALREADY-EVALUATED arguments.
 ///
-/// AR.20.5. The interpreter's `bind_module_scope` takes AST argument expressions and applies
-/// OpenSCAD's two-phase rule to them; a compiled caller has already done that half at COMPILE time
-/// — the emitter fills slots by name and position and plugs the callee's own defaults into holes
-/// (AR.18) — so what arrives here is a positional list with no gaps.
+/// AR.20.8. This is `bind_module_scope`'s rule with the evaluation already done, and it follows that
+/// function step for step ON PURPOSE — the earlier version took a positional list and bound in ONE
+/// interleaved pass, which is exactly the trap the interpreter carries a comment about falling into
+/// once already.
 ///
-/// What still happens at runtime: parameters past the supplied list take their DEFAULTS, evaluated
-/// in the callee's lexical base rather than the caller's scope and IN DECLARATION ORDER (a default
-/// may echo or draw, and those side effects are ordered), and `$`-args bind LAST so they shadow the
-/// inherited dynamic context.
+/// OpenSCAD binds in TWO phases: every default first, in declaration order, then the passed
+/// arguments over them. The ordering is load-bearing when a parameter NAME is DUPLICATED — BOSL2's
+/// `rounding_edge_mask` lists `r` twice, once defaultless — because the unfilled second `r` writes
+/// `undef` in phase 1 and the explicit `r=2` overwrites it in phase 2. Phase 1 also SKIPS a name an
+/// argument will fill, or one an earlier duplicate already took, since defaults are
+/// first-declared-wins: `module m(l, r, ang=90, d, r=0)` called as `m(l=1)` leaves `r` undef, not 0.
+/// The default is still EVALUATED before being dropped, because its side effects (an `echo`, a
+/// seedless `rands` draw) happen in declaration order and that is the one thing we cannot move.
 ///
 /// # Errors
-/// Whatever evaluating a default raises. Deliberately propagated rather than folded to `undef`: a
-/// default is arbitrary library code, and swallowing its failure would bind a plausible wrong value
-/// instead of failing.
+/// Whatever evaluating a default raises. Propagated rather than folded to `undef`: a default is
+/// arbitrary library code, and swallowing its failure would bind a plausible wrong value.
 fn bind_values<'a>(
     params: &'a [crate::parser::Parameter],
-    args: &[Value],
-    dollars: &[(&str, Value)],
+    slots: &[Option<Value>],
+    dollars: &[(std::rc::Rc<str>, Value)],
     caller: &Scope,
     global: &Scope,
     ctx: &super::Ctx<'a>,
@@ -521,40 +524,37 @@ fn bind_values<'a>(
     // Lexically a child of the callee's home global (hygiene), dynamically a child of the caller —
     // inheriting the `$`-context BY REFERENCE. L.2.7: copying it per call is the 42-clones bug.
     let mut call = Scope::call_frame(global, caller);
-    for (i, p) in params.iter().enumerate() {
-        let value = match args.get(i) {
-            Some(v) => v.clone(),
-            // A default evaluates in the lexical BASE, never the growing call scope.
-            None => match &p.default {
-                Some(d) => super::eval_with_ctx(d, global, ctx)?,
-                // AN.3: an unfilled defaultless parameter is `undef` and must NOT fall through to
-                // a like-named global.
+    let provided: std::collections::BTreeSet<&str> = params
+        .iter()
+        .zip(slots)
+        .filter(|(_, slot)| slot.is_some())
+        .map(|(p, _)| &*p.name)
+        .collect();
+    let mut set: Vec<&str> = Vec::with_capacity(params.len());
+    // Phase 1 — defaults, evaluated in the callee's lexical BASE rather than the growing call scope.
+    for (param, slot) in params.iter().zip(slots) {
+        if slot.is_none() {
+            let value = match &param.default {
+                Some(default) => super::eval_with_ctx(default, global, ctx)?,
+                // AN.3: an unfilled defaultless parameter is `undef` and must NOT fall through to a
+                // like-named global.
                 None => Value::Undef,
-            },
-        };
-        call.bind(std::rc::Rc::clone(&p.name), value);
+            };
+            if !provided.contains(&*param.name) && !set.contains(&&*param.name) {
+                set.push(&param.name);
+                call.bind(std::rc::Rc::clone(&param.name), value);
+            }
+        }
     }
+    // Phase 2 — the passed arguments override, in declaration order.
+    for (param, slot) in params.iter().zip(slots) {
+        if let Some(value) = slot {
+            call.bind(std::rc::Rc::clone(&param.name), value.clone());
+        }
+    }
+    // `$`-args bind LAST, so they shadow the inherited dynamic context.
     for (n, v) in dollars {
-        call.bind(*n, v.clone());
+        call.bind(std::rc::Rc::clone(n), v.clone());
     }
     Ok(call)
-}
-
-/// Does this parameter list declare a name TWICE?
-///
-/// AN.6, and the reason it is a decline rather than a special case here. Upstream binds a call in
-/// two phases — every default first, then the passed arguments over them — and that ordering is
-/// load-bearing exactly when a name is duplicated: BOSL2's `rounding_edge_mask` lists `r` twice,
-/// once defaultless, and FIRST-declared wins. The single positional pass [`bind_values`] runs is
-/// equivalent to the two-phase rule for every list WITHOUT a duplicate, and quietly wrong for one
-/// with (the trailing slot's default clobbers the value the caller passed to the earlier slot —
-/// the interpreter carries a comment about getting exactly this wrong once already).
-///
-/// So the compiled path refuses the shape instead of reimplementing the rule for it. Rare enough to
-/// cost nothing, and a decline is free now that `try_native_module` re-interprets.
-fn has_duplicate_params(params: &[crate::parser::Parameter]) -> bool {
-    params
-        .iter()
-        .enumerate()
-        .any(|(i, p)| params[..i].iter().any(|q| q.name == p.name))
 }

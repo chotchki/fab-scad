@@ -61,17 +61,37 @@ pub(super) fn eval_module<'a>(
     // subscriber-less build pays one atomic load and `release_max_level_off` strips it entirely.
     let _span = tracing::trace_span!("module", module = mi.name.as_str()).entered();
     let (positional, named, child) = eval_args(mi, scope, ctx)?;
-    match mi.name.as_str() {
+    Ok(eval_primitive(mi.name.as_str(), &positional, &named, &child, ctx))
+}
+
+/// [`eval_module`] with the arguments ALREADY evaluated — the entry a COMPILED module reaches.
+///
+/// AR.20.6. The split is the whole change: everything below this line was already value-shaped (the
+/// primitive evaluators take `&[Value]`, a named map and a scope), and only the `eval_args` call
+/// above it needed an AST. A generated module holds `Value`s, not expressions, and synthesising an
+/// instantiation to hand back would be the wrong direction — arbitrary values have no literal form,
+/// and the nodes would need an arena outliving the call.
+///
+/// `child` is the `$`-arg scope: `$fn`/`$fa`/`$fs` reads resolve through it, so a caller must pass
+/// the call's `$`-overrides layered on the reaching dynamic chain, exactly as [`eval_args`] builds it.
+pub(super) fn eval_primitive(
+    name: &str,
+    positional: &[Value],
+    named: &BTreeMap<String, Value>,
+    child: &Scope,
+    ctx: &Ctx<'_>,
+) -> Geo {
+    match name {
         // 3D primitives → a tessellated mesh Leaf.
-        "sphere" => Ok(leaf3(eval_sphere(&positional, &named, &child))),
-        "cube" => Ok(leaf3(eval_cube(&positional, &named))),
-        "cylinder" => Ok(leaf3(eval_cylinder(&positional, &named, &child))),
-        "polyhedron" => Ok(leaf3(eval_polyhedron(&positional, &named, ctx))),
+        "sphere" => leaf3(eval_sphere(positional, named, child)),
+        "cube" => leaf3(eval_cube(positional, named)),
+        "cylinder" => leaf3(eval_cylinder(positional, named, child)),
+        "polyhedron" => leaf3(eval_polyhedron(positional, named, ctx)),
         // 2D primitives → a contour polygon (the Shape2D leaf, J.3.2).
-        "square" => Ok(poly2(eval_square(&positional, &named))),
-        "circle" => Ok(poly2(eval_circle(&positional, &named, &child))),
-        "polygon" => Ok(poly2(eval_polygon(&positional, &named))),
-        "text" => Ok(poly2(eval_text(&positional, &named, &child))),
+        "square" => poly2(eval_square(positional, named)),
+        "circle" => poly2(eval_circle(positional, named, child)),
+        "polygon" => poly2(eval_polygon(positional, named)),
+        "text" => poly2(eval_text(positional, named, child)),
         // import()/surface() reference a FILE by a RUNTIME path — resolvable only by EXECUTING to here (the
         // path is an expression, not a static `<...>` token like use/include). Ask the caller's table (M.3):
         // its payload if present, else an EMPTY placeholder + a recorded File need so the run keeps going and
@@ -79,28 +99,28 @@ pub(super) fn eval_module<'a>(
         // fixpoint in one more round). The reader that fills the table is caller-side (M.5). The payload is
         // dimension-TAGGED ([`Imported`]): a `.stl`/`.3mf` → a 3D mesh leaf, a `.svg`/`.dxf` → a 2D contour
         // polygon (Q.4) — so `import` wraps whichever the reader (or the placeholder) decided by extension.
-        "import" => Ok(match ctx.request_file(file_arg(&positional, &named)) {
+        "import" => match ctx.request_file(file_arg(positional, named)) {
             Imported::Mesh(mesh) => leaf3(mesh),
             Imported::Contours(contours) => poly2(contours),
             // Bytes only fulfill the EXPRESSION-import channel (AI.1) — a geometry `import()`
             // never requests them (its table keys are raw mesh paths), so this arm is a
             // key-collision safety: render nothing rather than something wrong.
             Imported::Bytes(_) => leaf3(Mesh::new()),
-        }),
+        },
         // surface() is import's heightmap sibling, plus `center` — a pure XY translate the path-only reader
         // can't do, so it's applied HERE from the eval arg (M.5.2). (`invert` is PNG-only → deferred.) A
         // heightmap is always 3D; a 2D payload here (a misnamed `.svg`) can't be a surface → empty, not wrong.
         "surface" => {
-            let mesh = match ctx.request_file(file_arg(&positional, &named)) {
+            let mesh = match ctx.request_file(file_arg(positional, named)) {
                 Imported::Mesh(mesh) => mesh,
                 Imported::Contours(_) | Imported::Bytes(_) => Mesh::new(),
             };
-            let map = bind(&positional, &named, &["file", "center"]);
-            Ok(leaf3(if is_true(&map, "center") {
+            let map = bind(positional, named, &["file", "center"]);
+            leaf3(if is_true(&map, "center") {
                 center_xy(mesh)
             } else {
                 mesh
-            }))
+            })
         }
         // KNOWN-but-deferred builtins — recognized so the error NAMES the feature + its task instead of a
         // misleading "typo?". These stay LOUD-deferred stubs: blow up naming the feature, never silently
@@ -118,7 +138,7 @@ pub(super) fn eval_module<'a>(
         // differential catches (empty here vs the oracle's real node), never a silent pass.
         other => {
             ctx.warn(format!("Ignoring unknown module '{other}'"));
-            Ok(Geo::D3(GeoNode::Empty))
+            Geo::D3(GeoNode::Empty)
         }
     }
 }

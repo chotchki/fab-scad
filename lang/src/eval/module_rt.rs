@@ -235,6 +235,59 @@ impl<'a> NativeModuleCtx<'a, '_, '_> {
         }
     }
 
+    /// A call whose callee is a BUILTIN, not a user module — AR.20.6.
+    ///
+    /// Two shapes, and the split is the interpreter's own: a name that COMBINES its children
+    /// (transforms, booleans, hull, the extrudes, offset, projection, resize, color, the no-op
+    /// groupings) resolves to a `Combinator` and applies it to the rendered children; everything
+    /// else is a PRIMITIVE, which takes no children at all. Both destinations are reached through
+    /// the same functions `dispatch_module` uses — `combinator_for` and `eval_primitive` — because
+    /// two name tables that agree until somebody edits one is exactly how a compiled `translate`
+    /// would quietly become a union and still RENDER.
+    ///
+    /// A primitive's children are dropped WITHOUT being rendered, matching the interpreter: it never
+    /// schedules them, so `cube(1) { sphere(); }` is a cube and the sphere costs nothing. Running the
+    /// thunks here would invent side effects the interpreted program does not have.
+    fn call_builtin(
+        &self,
+        name: &str,
+        args: &[Value],
+        named: &[(&'static str, Value)],
+        dollars: &[(&str, Value)],
+        children: Children<'_>,
+    ) -> crate::Result<Geo> {
+        // The `$`-arg scope `module::eval_args` builds: the instantiation scope with THIS call's
+        // `$`-overrides on top. `$fn`/`$fa`/`$fs` resolve through it, so a primitive tessellates at
+        // the caller's resolution — `sphere(1, $fn=64)` has to mean 64 here as well.
+        let mut child_scope = self.call_scope.child();
+        for (n, v) in dollars {
+            child_scope.bind(*n, v.clone());
+        }
+        let named: std::collections::BTreeMap<String, Value> = named
+            .iter()
+            .map(|(n, v)| ((*n).to_string(), v.clone()))
+            .collect();
+
+        if super::geo_stack::combinator_name(name) {
+            let parts = match children {
+                Children::None => Vec::new(),
+                Children::Compiled(thunks) => thunks
+                    .iter()
+                    .map(|thunk| thunk(self))
+                    .collect::<crate::Result<Vec<Geo>>>()?,
+            };
+            let comb = super::geo_stack::combinator_for(name, args, &named, &child_scope);
+            return Ok(comb.apply(parts, self.ctx));
+        }
+        Ok(super::module::eval_primitive(
+            name,
+            args,
+            &named,
+            &child_scope,
+            self.ctx,
+        ))
+    }
+
     /// The child indices a `children(i)` / `children([i:j])` / `children([a,b])` selects.
     ///
     /// The evaluator's own index rules, not a reimplementation: a number picks one, a list picks
@@ -298,6 +351,7 @@ impl ModuleCtx for NativeModuleCtx<'_, '_, '_> {
         &self,
         name: &'static str,
         args: &[Value],
+        named: &[(&'static str, Value)],
         dollars: &[(&str, Value)],
         children: Children<'_>,
     ) -> crate::Result<Geo> {
@@ -313,16 +367,19 @@ impl ModuleCtx for NativeModuleCtx<'_, '_, '_> {
         // treats `Unimplemented` out of a native as a decline and re-runs the whole call interpreted,
         // the module twin of AR.10. So the gaps below cost speed, never an answer.
         let Some((def, home, base)) = self.ctx.resolve_module(self.home_island, name) else {
-            // No USER module by that name, so the call is a builtin primitive — `cube`, `translate`
-            // and the rest of what leaf modules are made of. That path takes an AST instantiation
-            // and evaluates the arguments itself (`module::eval_module`), so it needs a
-            // value-shaped entry point that does not exist yet: AR.20.6, and the reason a leaf
-            // module still declines today.
-            return Err(crate::Error::Unimplemented(
-                "a builtin primitive called from a compiled module (AR.20.6)",
-            ));
+            // No USER module by that name, so the call is a BUILTIN — `cube`, `translate`, `union`,
+            // which is what every leaf module is made of.
+            return self.call_builtin(name, args, named, dollars, children);
         };
         let (params, body) = def;
+        if !named.is_empty() {
+            // The emitter positionalises a user call at compile time (AR.18), so reaching here means
+            // it could not — and matching names to parameters at runtime would be reimplementing the
+            // two-phase rule the AN family documents getting wrong. Decline instead.
+            return Err(crate::Error::Unimplemented(
+                "named arguments to a USER module from compiled code (the emitter positionalises)",
+            ));
+        }
         if has_duplicate_params(params) {
             return Err(crate::Error::Unimplemented(
                 "a module declaring a parameter name twice, called from compiled code (AN.6)",

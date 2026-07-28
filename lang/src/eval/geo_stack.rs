@@ -23,7 +23,7 @@ use crate::parser::{Parameter, StmtKind};
 
 /// Which CSG boolean — a name-free tag so [`Combinator`] carries no lifetime.
 #[derive(Clone, Copy)]
-enum BoolKind {
+pub(super) enum BoolKind {
     Union,
     Difference,
     Intersection,
@@ -44,7 +44,7 @@ impl BoolKind {
 /// the SAME wrap helper the recursive dispatch uses, so the produced node is bit-identical. Args that don't
 /// depend on the evaluated children resolve EAGERLY at dispatch (the payloads here); `RotateExtrude` is the one
 /// that needs the child first (its segment count reads the profile's `max_x`), so it carries the raw args.
-enum Combinator {
+pub(super) enum Combinator {
     /// Bare block / implicit group — `union_of` handles the null/one/many collapse + the 2D/3D mixing.
     Union,
     /// `intersection_for`'s per-iteration collapse — intersect the iterations.
@@ -83,7 +83,7 @@ enum Combinator {
 impl Combinator {
     /// Apply this combinator to the child `Geo`s a [`GTask::Collect`] drained (in source order), producing ONE
     /// node. Infallible since AC.2 closed the last LOUD-deferral (2D minkowski).
-    fn apply(self, children: Vec<Geo>, ctx: &Ctx<'_>) -> Geo {
+    pub(super) fn apply(self, children: Vec<Geo>, ctx: &Ctx<'_>) -> Geo {
         match self {
             Combinator::Union => union_of(children, ctx),
             Combinator::Intersection => intersection_of(children, ctx),
@@ -570,96 +570,15 @@ fn dispatch_module<'a>(
             }
             Ok(())
         }
-        // A4 — an affine transform wraps the union of its children ($-args don't reach it → child scope dropped).
-        _ if geo::is_transform(name) => {
-            let (positional, named, _child_scope) = module::eval_args(mi, &scope, ctx)?;
-            let matrix = geo::transform_matrix(name, &positional, &named);
-            group(work, Combinator::Transform(matrix), scope);
-            Ok(())
-        }
-        // A5 — CSG booleans / hull / minkowski over the children.
-        _ if geo::is_boolean(name) => {
-            let kind = match name {
-                "difference" => BoolKind::Difference,
-                "intersection" => BoolKind::Intersection,
-                _ => BoolKind::Union,
-            };
-            group(work, Combinator::Boolean(kind), scope);
-            Ok(())
-        }
-        "hull" => {
-            group(work, Combinator::Hull, scope);
-            Ok(())
-        }
-        "minkowski" => {
-            group(work, Combinator::Minkowski, scope);
-            Ok(())
-        }
-        // group() — upstream's explicit no-op grouping module (AH.2.5; scope-assignment-tests uses
-        // it as a scoping probe). A5' — render() forces a CGAL/nef evaluation in OpenSCAD; in our
-        // Manifold-backed pipeline every node is already an exact manifold, so it's semantically
-        // identity — group its children (its `convexity` arg is a render hint with no bearing on
-        // geometry). Unblocks BOSL2's cubetruss_corner() + slicer_module.scad. Both = child union.
-        "group" | "render" => {
-            group(work, Combinator::Union, scope);
-            Ok(())
-        }
-        // resize() scales the child so its bbox hits `newsize` per axis — the scale needs the BUILT child's
-        // bbox, so it resolves in the backend (like RotateExtrude defers to apply). newsize/auto resolve eagerly.
-        "resize" => {
-            let (positional, named, _child_scope) = module::eval_args(mi, &scope, ctx)?;
-            let (newsize, auto) = geo::resolve_resize(&positional, &named);
-            group(work, Combinator::Resize { newsize, auto }, scope);
-            Ok(())
-        }
-        // A6 — the fixed-dimension bridges + color, each resolving its params eagerly off the child scope.
-        "offset" => {
+        // A4/A5 — everything that COMBINES its children: affine transforms, CSG booleans, hull /
+        // minkowski, the extrudes, offset, projection, resize, color, and the no-op groupings. Each
+        // one resolves its parameters eagerly off the evaluated args and then defers to the same
+        // `Combinator`, so the choice is factored into `combinator_for` — which is what a COMPILED
+        // caller needs too (AR.20.6), and keeping one chooser is what stops the two tiers drifting.
+        _ if combinator_name(name) => {
             let (positional, named, child_scope) = module::eval_args(mi, &scope, ctx)?;
-            let (delta, join, segments) = geo::resolve_offset(&positional, &named, &child_scope);
-            group(
-                work,
-                Combinator::Offset {
-                    delta,
-                    join,
-                    segments,
-                },
-                scope,
-            );
-            Ok(())
-        }
-        "linear_extrude" => {
-            let (positional, named, child_scope) = module::eval_args(mi, &scope, ctx)?;
-            let kind = geo::resolve_linear_extrude(&positional, &named, &child_scope);
-            group(work, Combinator::LinearExtrude(kind), scope);
-            Ok(())
-        }
-        "rotate_extrude" => {
-            // The segment count needs the profile's `max_x`, so resolve the kind in `apply` (after the child).
-            let (positional, named, child_scope) = module::eval_args(mi, &scope, ctx)?;
-            group(
-                work,
-                Combinator::RotateExtrude {
-                    positional,
-                    named,
-                    child_scope,
-                },
-                scope,
-            );
-            Ok(())
-        }
-        "projection" => {
-            let (positional, named, _child_scope) = module::eval_args(mi, &scope, ctx)?;
-            let cut = matches!(
-                named.get("cut").or_else(|| positional.first()),
-                Some(Value::Bool(true))
-            );
-            group(work, Combinator::Projection { cut }, scope);
-            Ok(())
-        }
-        "color" => {
-            let (positional, named, _child_scope) = module::eval_args(mi, &scope, ctx)?;
-            let color = geo::resolve_color(&positional, &named);
-            group(work, Combinator::Color(color), scope);
+            let comb = combinator_for(name, &positional, &named, &child_scope);
+            group(work, comb, scope);
             Ok(())
         }
         // A6 — `let(a=…) children` binds SEQUENTIALLY into a child scope, then the children render there.
@@ -791,6 +710,99 @@ fn dispatch_module<'a>(
                 Ok(())
             }
         }
+    }
+}
+
+/// Does `name` COMBINE its children — i.e. is it one of the modules [`combinator_for`] answers for?
+///
+/// Split from the chooser so dispatch can ask the question without evaluating arguments: the
+/// interpreter's match needs a guard, and a compiled caller needs to know whether to build children
+/// at all before it commits to this path.
+pub(super) fn combinator_name(name: &str) -> bool {
+    geo::is_transform(name)
+        || geo::is_boolean(name)
+        || matches!(
+            name,
+            "hull"
+                | "minkowski"
+                | "group"
+                | "render"
+                | "resize"
+                | "offset"
+                | "linear_extrude"
+                | "rotate_extrude"
+                | "projection"
+                | "color"
+        )
+}
+
+/// The [`Combinator`] a child-combining builtin resolves to, given its ALREADY-EVALUATED arguments.
+///
+/// AR.20.6 — one chooser for both tiers. The interpreter reaches it from `dispatch_module` and a
+/// generated module from `ModuleCtx::call`, which matters because the alternative is two tables of
+/// module names that agree until somebody edits one: a compiled `translate` that quietly resolved to
+/// a union would RENDER, just in the wrong place.
+///
+/// Every arm resolves eagerly EXCEPT `rotate_extrude`, whose segment count needs the built profile's
+/// `max_x` — so it carries its arguments through to `apply`, and is the one case that clones them.
+pub(super) fn combinator_for(
+    name: &str,
+    positional: &[Value],
+    named: &std::collections::BTreeMap<String, Value>,
+    child_scope: &Scope,
+) -> Combinator {
+    if geo::is_transform(name) {
+        // `$`-args don't reach a transform, so the child scope is not consulted here.
+        return Combinator::Transform(geo::transform_matrix(name, positional, named));
+    }
+    if geo::is_boolean(name) {
+        return Combinator::Boolean(match name {
+            "difference" => BoolKind::Difference,
+            "intersection" => BoolKind::Intersection,
+            _ => BoolKind::Union,
+        });
+    }
+    match name {
+        "hull" => Combinator::Hull,
+        "minkowski" => Combinator::Minkowski,
+        "resize" => {
+            // resize() scales the child so its bbox hits `newsize` per axis — the scale needs the
+            // BUILT child's bbox, so it resolves in the backend; newsize/auto resolve eagerly.
+            let (newsize, auto) = geo::resolve_resize(positional, named);
+            Combinator::Resize { newsize, auto }
+        }
+        "offset" => {
+            let (delta, join, segments) = geo::resolve_offset(positional, named, child_scope);
+            Combinator::Offset {
+                delta,
+                join,
+                segments,
+            }
+        }
+        "linear_extrude" => {
+            Combinator::LinearExtrude(geo::resolve_linear_extrude(positional, named, child_scope))
+        }
+        "rotate_extrude" => Combinator::RotateExtrude {
+            positional: positional.to_vec(),
+            named: named.clone(),
+            child_scope: child_scope.clone(),
+        },
+        "projection" => Combinator::Projection {
+            cut: matches!(
+                named.get("cut").or_else(|| positional.first()),
+                Some(Value::Bool(true))
+            ),
+        },
+        "color" => Combinator::Color(geo::resolve_color(positional, named)),
+        // group() is upstream's explicit no-op grouping module (AH.2.5; scope-assignment-tests uses
+        // it as a scoping probe). render() forces a CGAL/nef evaluation in OpenSCAD; in our
+        // Manifold-backed pipeline every node is already an exact manifold, so it is semantically
+        // identity (its `convexity` arg is a render hint with no bearing on geometry). Unblocks
+        // BOSL2's cubetruss_corner() + slicer_module.scad. Both = child union.
+        //
+        // The catch-all is `group`/`render` rather than an error because `combinator_name` is the
+        // gate: a name that does not combine never reaches here.
+        _ => Combinator::Union,
     }
 }
 

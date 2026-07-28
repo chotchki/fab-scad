@@ -361,12 +361,19 @@ pub trait ModuleCtx {
     /// rather than interpretation — and the evaluator's instantiation stack (`parent_module(i)`)
     /// borrows the name for the length of the call, which a shorter lifetime could not satisfy.
     ///
+    /// `args` are POSITIONAL and `named` is everything passed by name. For a USER module the
+    /// emitter knows the parameter list and positionalises at compile time (AR.18), so `named` is
+    /// empty; for a BUILTIN it cannot — `cube(size=…, center=true)`, `cylinder(r1=…, r2=…)` — because
+    /// the binding tables are the evaluator's and upstream lets a primitive take arbitrary named
+    /// arguments. Hence two channels rather than one.
+    ///
     /// # Errors
     /// Whatever the called module raises, including the depth-budget decline.
     fn call(
         &self,
         name: &'static str,
         args: &[Value],
+        named: &[(&'static str, Value)],
         dollars: &[(&str, Value)],
         children: Children<'_>,
     ) -> crate::Result<Geo>;
@@ -386,6 +393,7 @@ pub trait ModuleCtx {
 /// `$children` report the expanded count, so `module w() { foo() children(); } w() { a(); b(); }`
 /// saw 2 inside foo where the interpreter says 1. Caught by the console differential, which is the
 /// argument for diffing echoes and not just meshes — the geometry happened to match.
+#[derive(Clone, Copy)]
 pub enum Children<'a> {
     /// The call supplies no children — a `;` body.
     None,

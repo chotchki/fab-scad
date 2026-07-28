@@ -2177,7 +2177,36 @@ fn poc_mod_wrap(ctx: &dyn crate::surface::ModuleCtx) -> crate::Result<super::geo
         "_fab_poc_mod",
         &[k],
         &[],
+        &[],
         crate::surface::Children::Compiled(&[forward]),
+    )
+}
+
+/// AR.20.6 proof-of-concept: a compiled module that calls BUILTINS — a transform wrapping a
+/// primitive, which is what essentially every LEAF module in BOSL2 bottoms out in.
+///
+/// Exercises the three things user-module dispatch never touches: a `Combinator` chosen from
+/// evaluated arguments (`translate`), a primitive reached with no children (`cube`), and the NAMED
+/// argument channel, which exists precisely because the emitter cannot positionalise a builtin.
+fn poc_mod_prim(ctx: &dyn crate::surface::ModuleCtx) -> crate::Result<super::geo2d::Geo> {
+    let s = ctx.args().first().cloned().unwrap_or(Value::Num(1.0));
+    let cube = |c: &dyn crate::surface::ModuleCtx| {
+        c.call(
+            "cube",
+            &[],
+            &[("size", s.clone()), ("center", Value::Bool(true))],
+            &[],
+            crate::surface::Children::None,
+        )
+    };
+    let cube: crate::surface::ChildThunk<'_> = &cube;
+    let offset = super::build_vector(vec![s.clone(), Value::Num(0.0), Value::Num(0.0)]);
+    ctx.call(
+        "translate",
+        &[offset],
+        &[],
+        &[],
+        crate::surface::Children::Compiled(&[cube]),
     )
 }
 
@@ -2191,6 +2220,11 @@ pub(super) static MODULE_REGISTRY: &[ModuleEntry] = &[
         name: "_fab_poc_wrap",
         reference: "module _fab_poc_wrap(k=1) { _fab_poc_mod(k) children(); }",
         func: poc_mod_wrap,
+    },
+    ModuleEntry {
+        name: "_fab_poc_prim",
+        reference: "module _fab_poc_prim(s=1) { translate([s,0,0]) cube(size=s, center=true); }",
+        func: poc_mod_prim,
     },
 ];
 

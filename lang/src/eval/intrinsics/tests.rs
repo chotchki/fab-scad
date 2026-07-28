@@ -3496,6 +3496,55 @@ fn a_compiled_module_dispatching_matches_the_interpreter() {
     );
 }
 
+/// AR.20.6 — dispatch to BUILTINS, which is what makes the compiled tier able to build anything at
+/// all: a leaf module is a transform wrapping a primitive, and until this worked every generated
+/// module declined the moment it reached `cube`.
+///
+/// The POC is `translate([s,0,0]) cube(size=s, center=true)` — a `Combinator` chosen from evaluated
+/// arguments, a primitive reached through the NAMED channel (the emitter cannot positionalise a
+/// builtin), and the child handed over as a thunk. Compared tier-on against tier-off, mesh and
+/// console both, exactly like the user-module case.
+#[test]
+fn a_compiled_module_calling_builtins_matches_the_interpreter() {
+    let src = "module _fab_poc_prim(s=1) { translate([s,0,0]) cube(size=s, center=true); }\n\
+               _fab_poc_prim(3);";
+
+    let run = |intrinsics: bool| {
+        let config = crate::Config {
+            intrinsics,
+            ..crate::Config::default()
+        };
+        let (geo, msgs) =
+            crate::evaluate_geometry_with_base_config(src, std::path::Path::new("."), &[], config)
+                .expect("renders");
+        (format!("{geo:?}"), format!("{msgs:?}"))
+    };
+
+    let (geo_on, msgs_on) = run(true);
+    let (geo_off, msgs_off) = run(false);
+    assert_eq!(
+        geo_on, geo_off,
+        "the compiled module built different geometry than interpreting it — a builtin reached \
+         through `combinator_for`/`eval_primitive` disagreeing with `dispatch_module`"
+    );
+    assert_eq!(msgs_on, msgs_off, "the two tiers wrote different consoles");
+    assert!(
+        geo_on.contains("Transform") && geo_on.contains("Leaf"),
+        "the POC did not produce a transformed primitive, so this compared two trivial trees: \
+         {geo_on}"
+    );
+
+    // Non-vacuity: an equality holds just as well when nothing compiled. Prove the native wired.
+    let program = crate::parser::parse(src).expect("parses");
+    assert!(
+        program.stmts.iter().any(|s| matches!(&s.kind,
+            crate::parser::StmtKind::ModuleDef { name, params, body }
+                if &**name == "_fab_poc_prim"
+                    && super::resolve_module("_fab_poc_prim", params, body).is_some())),
+        "`_fab_poc_prim` did not arm, so the builtin path was never entered"
+    );
+}
+
 /// The drift gate, on the MODULE path: a definition that does not match the reference the native
 /// was generated from must NOT wire. Without this the native would answer for a module whose body
 /// somebody changed, which is a wrong answer rather than a missed compilation.

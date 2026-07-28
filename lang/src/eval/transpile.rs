@@ -90,9 +90,13 @@ pub(crate) fn analyze_function(reference: &str) -> Result<Analysis, String> {
 /// is exactly the bug that family fixed), so `select` reaching `_EPSILON` through `is_vector` puts
 /// the name on `is_vector`'s analysis, never on `select`'s. The registry comparison caught this
 /// pass doing the flatten and the hand lists were RIGHT.
-pub(crate) fn analyze_closed(
+/// The `'r` is load-bearing: the resolved source must outlive the call, but it must NOT be tied to
+/// the queried NAME's lifetime (elision would infer exactly that and reject every real resolver).
+/// A registry-backed resolver hands back `&'static str`; a [`super::library::Library`]-backed one
+/// hands back a slice of the file it read, and both satisfy this.
+pub(crate) fn analyze_closed<'r>(
     reference: &str,
-    resolve: &dyn Fn(&str) -> Option<&'static str>,
+    resolve: &dyn Fn(&str) -> Option<&'r str>,
 ) -> Result<Analysis, String> {
     let mut out = analyze_function(reference)?;
     let mut queue: Vec<String> = out.deps.iter().cloned().collect();
@@ -129,7 +133,7 @@ impl Baked {
         match self {
             Self::Num(n) => emit_num(*n),
             Self::NumList(xs) => format!(
-                "Value::num_list(vec![{}])",
+                "rt::Value::num_list(vec![{}])",
                 xs.iter()
                     .map(|x| format!("f64::from_bits({:#x}_u64)", x.to_bits()))
                     .collect::<Vec<_>>()
@@ -140,22 +144,7 @@ impl Baked {
 }
 
 fn emit_num(n: f64) -> String {
-    format!("Value::Num(f64::from_bits({:#x}_u64))", n.to_bits())
-}
-
-/// What the emitter pulled in — drives the generated file's `use` lines so they stay minimal and
-/// clippy-clean (an unconditional import block would trip `unused_imports` the first time a
-/// generated set doesn't use one).
-#[derive(Default)]
-#[allow(
-    clippy::struct_excessive_bools,
-    reason = "four independent import FLAGS, not a state machine — a bitset would obscure them"
-)]
-struct Uses {
-    ops: bool,
-    builtins: bool,
-    binop: bool,
-    unop: bool,
+    format!("rt::Value::Num(f64::from_bits({:#x}_u64))", n.to_bits())
 }
 
 /// AR.6 — generate the Rust native for one `function name(params) = body;` reference, in the
@@ -184,18 +173,17 @@ pub(crate) fn generate_native(
         siblings,
         locals: Vec::new(),
         fresh: 0,
-        uses: Uses::default(),
     };
     let mut out = String::new();
     let _ = write!(
         out,
         "/// Generated native for `{name}` — semantics route through the interpreter's own value\n\
          /// algebra (`ops::`/`builtins::`), bit-identical to the interpreted reference by construction.\n\
-         pub(super) fn {name}(args: &[Value]) -> crate::Result<Value> {{\n\
+         pub(super) fn {name}(args: &[rt::Value]) -> rt::Result<rt::Value> {{\n\
          \x20   // AR.10: past the depth budget, DECLINE to the pure interpreter — explicit stack,\n\
          \x20   // same proven semantics; recursion cannot ride the Rust stack unbounded.\n\
-         \x20   let Some(_depth) = super::native_rt::DepthGuard::enter() else {{\n\
-         \x20       return super::native_rt::run_interpreted(FALLBACK_SOURCES, \"{name}\", args);\n\
+         \x20   let Some(_depth) = rt::DepthGuard::enter() else {{\n\
+         \x20       return rt::run_interpreted(FALLBACK_SOURCES, \"{name}\", args);\n\
          \x20   }};\n"
     );
     for (i, p) in params.iter().enumerate() {
@@ -219,14 +207,14 @@ pub(crate) fn generate_native(
         // bind is emitted, which resolves exactly that scope: a baked const binds, a param name
         // declines LOUDLY as a free read.
         let default = match &p.default {
-            None => "Value::Undef".to_string(),
+            None => "rt::Value::Undef".to_string(),
             Some(d) => em
                 .expr(d)
                 .map_err(|e| format!("{name}: default of `{}`: {e}", p.name))?,
         };
         // A cheap default binds eagerly (`unwrap_or`); a constructing one stays lazy.
-        let bind = if default == "Value::Undef" {
-            format!("{getter}.cloned().unwrap_or(Value::Undef)")
+        let bind = if default == "rt::Value::Undef" {
+            format!("{getter}.cloned().unwrap_or(rt::Value::Undef)")
         } else {
             format!("{getter}.cloned().unwrap_or_else(|| {default})")
         };
@@ -252,7 +240,6 @@ struct Emitter<'a> {
     siblings: &'a [(String, Vec<String>)],
     locals: Vec<(String, String)>,
     fresh: usize,
-    uses: Uses,
 }
 
 impl Emitter<'_> {
@@ -269,8 +256,14 @@ impl Emitter<'_> {
         use crate::parser::BinOp;
         match &e.kind {
             ExprKind::Num(n) => Ok(emit_num(*n)),
-            ExprKind::Bool(b) => Ok(format!("Value::Bool({b})")),
-            ExprKind::Undef => Ok("Value::Undef".to_string()),
+            ExprKind::Bool(b) => Ok(format!("rt::Value::Bool({b})")),
+            ExprKind::Undef => Ok("rt::Value::Undef".to_string()),
+            // The AST string is already DECODED (the lexer resolved `\n`/`\u{…}` before it got
+            // here — the interpreter does `Value::string(s.as_str())` with no further work), so
+            // the emitter's job is purely to re-escape it as a Rust literal. `{:?}` is exactly
+            // that and it round-trips: every escape `escape_debug` emits is also valid Rust and
+            // decodes back to the same bytes.
+            ExprKind::Str(s) => Ok(format!("rt::Value::string({s:?})")),
             ExprKind::Ident(name) => {
                 if let Some((_, ident)) = self.locals.iter().rev().find(|(n, _)| n == name) {
                     Ok(format!("{ident}.clone()"))
@@ -280,14 +273,10 @@ impl Emitter<'_> {
                     Err(format!("free read `{name}` has no baked value"))
                 }
             }
-            ExprKind::Unary { op, operand } => {
-                self.uses.ops = true;
-                self.uses.unop = true;
-                Ok(format!(
-                    "ops::apply_unary(UnOp::{op:?}, {})",
-                    self.expr(operand)?
-                ))
-            }
+            ExprKind::Unary { op, operand } => Ok(format!(
+                "rt::apply_unary(rt::UnOp::{op:?}, {})",
+                self.expr(operand)?
+            )),
             // `&&`/`||` SHORT-CIRCUIT in the interpreter (the stack machine's ShortCircuit task);
             // `apply_binary`'s And/Or arms are the both-evaluated case only. Rust's own `&&`/`||`
             // mirror the laziness exactly.
@@ -298,20 +287,16 @@ impl Emitter<'_> {
             } => {
                 let sym = if matches!(op, BinOp::And) { "&&" } else { "||" };
                 Ok(format!(
-                    "Value::Bool({}.is_truthy() {sym} {}.is_truthy())",
+                    "rt::Value::Bool({}.is_truthy() {sym} {}.is_truthy())",
                     self.expr(lhs)?,
                     self.expr(rhs)?
                 ))
             }
-            ExprKind::Binary { op, lhs, rhs } => {
-                self.uses.ops = true;
-                self.uses.binop = true;
-                Ok(format!(
-                    "ops::apply_binary(BinOp::{op:?}, {}, {})",
-                    self.expr(lhs)?,
-                    self.expr(rhs)?
-                ))
-            }
+            ExprKind::Binary { op, lhs, rhs } => Ok(format!(
+                "rt::apply_binary(rt::BinOp::{op:?}, {}, {})",
+                self.expr(lhs)?,
+                self.expr(rhs)?
+            )),
             ExprKind::Ternary { cond, then, els } => Ok(format!(
                 "if {}.is_truthy() {{ {} }} else {{ {} }}",
                 self.expr(cond)?,
@@ -320,16 +305,12 @@ impl Emitter<'_> {
             )),
             // `list[i]` — the interpreter's own index op carries the semantics (negative /
             // out-of-range → undef, string indexing, both list reprs).
-            ExprKind::Index { base, index } => {
-                self.uses.ops = true;
-                Ok(format!(
-                    "ops::index({}, &{})",
-                    self.expr(base)?,
-                    self.expr(index)?
-                ))
-            }
+            ExprKind::Index { base, index } => Ok(format!(
+                "rt::index({}, &{})",
+                self.expr(base)?,
+                self.expr(index)?
+            )),
             ExprKind::Member { base, field } => {
-                self.uses.ops = true;
                 Ok(format!("ops::member({}, {field:?})", self.expr(base)?))
             }
             ExprKind::Let { bindings, body } => self.let_expr(bindings, body),
@@ -347,10 +328,10 @@ impl Emitter<'_> {
                 let c = self.expr(&cond.value)?;
                 let b = match body {
                     Some(b) => self.expr(b)?,
-                    None => "Value::Undef".to_string(),
+                    None => "rt::Value::Undef".to_string(),
                 };
                 Ok(format!(
-                    "{{ if !({c}).is_truthy() {{ return Err(super::bosl_assert(\"generated\")); }} {b} }}"
+                    "{{ if !({c}).is_truthy() {{ return Err(rt::bosl_assert(\"generated\")); }} {b} }}"
                 ))
             }
             // `[start : step? : end]` with computed endpoints — the interpreter's own constructor
@@ -359,10 +340,10 @@ impl Emitter<'_> {
                 let s = self.expr(start)?;
                 let t = match step {
                     Some(t) => self.expr(t)?,
-                    None => "Value::Num(f64::from_bits(0x3ff0000000000000_u64))".to_string(),
+                    None => "rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64))".to_string(),
                 };
                 let e2 = self.expr(end)?;
-                Ok(format!("build_range(&{s}, &{t}, &{e2})"))
+                Ok(format!("rt::build_range(&{s}, &{t}, &{e2})"))
             }
             ExprKind::Vector(items) => self.vector(items),
             ExprKind::Call { callee, args } => {
@@ -425,14 +406,14 @@ impl Emitter<'_> {
                 .iter()
                 .map(|i| self.expr(i))
                 .collect::<Result<_, _>>()?;
-            return Ok(format!("build_vector(vec![{}])", emitted.join(", ")));
+            return Ok(format!("rt::build_vector(vec![{}])", emitted.join(", ")));
         }
         let acc = self.fresh_ident("acc");
-        let mut block = format!("{{ let mut {acc}: Vec<Value> = Vec::new(); ");
+        let mut block = format!("{{ let mut {acc}: Vec<rt::Value> = Vec::new(); ");
         for i in items {
             let _ = write!(block, "{}", self.element(i, &acc)?);
         }
-        let _ = write!(block, "build_vector({acc}) }}");
+        let _ = write!(block, "rt::build_vector({acc}) }}");
         Ok(block)
     }
 
@@ -453,9 +434,8 @@ impl Emitter<'_> {
                 .iter()
                 .map(|a| self.expr(&a.value))
                 .collect::<Result<_, _>>()?;
-            self.uses.builtins = true;
             return Ok(format!(
-                "builtins::apply(\"{name}\", &[{}])",
+                "rt::builtin(\"{name}\", &[{}])",
                 emitted.join(", ")
             ));
         }
@@ -518,7 +498,7 @@ impl Emitter<'_> {
                     // iterable sees the earlier binders — the interpreter's nesting order.
                     let iter = self.expr(&b.value)?;
                     let ident = self.fresh_ident(bn);
-                    let _ = write!(open, "for {ident} in iter_values_native(&{iter}) {{ ");
+                    let _ = write!(open, "for {ident} in rt::iter_values_native(&{iter}) {{ ");
                     self.locals.push((bn.to_string(), ident));
                     depth += 1;
                 }
@@ -544,7 +524,7 @@ impl Emitter<'_> {
                 let v = self.expr(inner)?;
                 let each = self.fresh_ident("each");
                 Ok(format!(
-                    "for {each} in iter_values_native(&{v}) {{ {acc}.push({each}); }} "
+                    "for {each} in rt::iter_values_native(&{v}) {{ {acc}.push({each}); }} "
                 ))
             }
             // an element-position `let` (approx's `let(aa=…, bb=…) if(…) 1`)
@@ -658,7 +638,6 @@ pub(crate) fn generate_module(entry_names: &[&str]) -> Result<String, String> {
     let mut fallback_refs = String::new();
 
     let mut fns = String::new();
-    let mut uses = Uses::default();
     for &name in entry_names {
         let entry = super::intrinsics::REGISTRY
             .iter()
@@ -675,12 +654,6 @@ pub(crate) fn generate_module(entry_names: &[&str]) -> Result<String, String> {
 
         fns.push_str(&generate_native(entry.reference, &baked, &siblings)?);
         fns.push('\n');
-        // regenerate the Uses by scanning the emitted text — cheaper than threading it out, and
-        // the regen test pins the final bytes either way
-        uses.ops |= fns.contains("ops::");
-        uses.builtins |= fns.contains("builtins::apply");
-        uses.binop |= fns.contains("BinOp::");
-        uses.unop |= fns.contains("UnOp::");
     }
     let mut header = String::from(
         "// GENERATED by `eval::transpile::generate_module` (AR.6) — DO NOT EDIT.\n\
@@ -699,41 +672,11 @@ pub(crate) fn generate_module(entry_names: &[&str]) -> Result<String, String> {
          \x20             upstream's underscore-prefixed names, and one-line block emission \\\n\
          \x20             are the emitter's idiom\"\n\
          )]\n\n\
-         use crate::eval::value::Value;\n",
+         // AR.13: `rt` is the ONLY thing generated code names. `extern crate self as fab_lang`\n\
+         // makes this path resolve inside fab-lang too, so moving this file into its own crate\n\
+         // cannot change a byte of what follows.\n\
+         use fab_lang::rt;\n\n",
     );
-    match (uses.ops, uses.builtins) {
-        (true, true) => header.push_str("use crate::eval::{builtins, ops};\n"),
-        (true, false) => header.push_str("use crate::eval::ops;\n"),
-        (false, true) => header.push_str("use crate::eval::builtins;\n"),
-        (false, false) => {}
-    }
-    match (uses.binop, uses.unop) {
-        (true, true) => header.push_str("use crate::parser::{BinOp, UnOp};\n"),
-        (true, false) => header.push_str("use crate::parser::BinOp;\n"),
-        (false, true) => header.push_str("use crate::parser::UnOp;\n"),
-        (false, false) => {}
-    }
-    // The eval-private helpers (visible here because generated.rs is eval's descendant): the
-    // stack machine's own vector/range construction and the pure iteration seam (AR.9).
-    let helpers: Vec<&str> = [
-        ("build_range", "build_range("),
-        ("build_vector", "build_vector("),
-        ("iter_values_native", "iter_values_native("),
-    ]
-    .iter()
-    .filter(|(_, probe)| fns.contains(probe))
-    .map(|(name, _)| *name)
-    .collect();
-    match helpers.as_slice() {
-        [] => {}
-        [one] => {
-            let _ = writeln!(header, "use crate::eval::{one};");
-        }
-        many => {
-            let _ = writeln!(header, "use crate::eval::{{{}}};", many.join(", "));
-        }
-    }
-    header.push('\n');
     // The AR.10 fallback program: baked constants then verbatim references, one island whose
     // bindings equal the bakes — what a declining native interprets instead of recursing.
     header.push_str(
@@ -778,6 +721,11 @@ pub(crate) const GENERATED_ENTRIES: &[&str] = &[
     "approx",
     "posmod",
     "idx",
+    // AR.15 band 4 — string literals live. Worth +110 BOSL2 functions on its own (47.3% → 55.5%
+    // of the library emits), which is the best ratio of unlocked functions to thinking in the
+    // phase: `Value::Str` was simply never emittable, so every `style="default"` parameter and
+    // every anchor-name comparison declined on a construct with no semantics to get wrong.
+    "_fab_poc_band4",
 ];
 
 /// Record a CALL by name: builtin or user dep. Deliberately IGNORES the lexical scope — a name
@@ -894,10 +842,17 @@ fn walk(e: &Expr, scope: &mut Vec<String>, out: &mut Analysis) {
             update,
             body,
         } => {
+            // The update clause BINDS, it does not merely rebind. `_dp_distance_array`
+            // (skin.scad) introduces `newrow` in the update and then reads it from two later
+            // update bindings — so walking update as plain args reported a loop variable as a
+            // free global read. Update is walked BEFORE cond/body because everything the loop
+            // binds, from either clause, is in scope for both; and `walk_bindings` pushes each
+            // name only after walking its own value, which is the sequential binding L.2.8e
+            // pinned for this exact form.
             let mark = scope.len();
             let _ = walk_bindings(init, scope, out);
+            let _ = walk_bindings(update, scope, out);
             walk(cond, scope, out);
-            walk_args(update, scope, out); // update rebinds names already in scope
             walk(body, scope, out);
             scope.truncate(mark);
         }
@@ -939,10 +894,11 @@ mod tests {
     fn bosl2_codegen_coverage_holds_its_floor() {
         use std::collections::BTreeMap;
 
-        /// Functions the v0 emitter compiles TODAY (2026-07-28), out of 1335. Raise this as bands
-        /// land — AR.15 strings, AR.16 constants, AR.17 first-class functions. Lowering it is a
-        /// deliberate act that needs a reason next to it, which is the whole point of the ratchet.
-        const FLOOR: usize = 632;
+        /// Functions the emitter compiles TODAY (2026-07-28), out of 1335 — 632 at AR.11, 742 once
+        /// AR.15 made `Value::Str` emittable. Raise this as bands
+        /// land — AR.16 constants, AR.17 first-class functions. Lowering it is a deliberate act
+        /// that needs a reason next to it, which is the whole point of the ratchet.
+        const FLOOR: usize = 742;
 
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
@@ -1045,13 +1001,14 @@ mod tests {
     }
 
     /// Collapse a decline message to its CONSTRUCT — the emitter names what it hit, but embeds
-    /// identifiers; the histogram wants the shape, not the instance. Order matters: the first
-    /// probe that matches wins, so the specific AST-variant names come before the generic
-    /// "outside the v0 subset" they are all phrased with.
+    /// identifiers; the histogram wants the shape, not the instance.
+    ///
+    /// Order is load-bearing and the probes are NOT disjoint: a decline names the construct it hit
+    /// by `{:?}`-printing the node, so an `echo("…")` message contains `Str(` too. Every enclosing
+    /// CONSTRUCT is probed before any literal payload it might carry — otherwise the histogram
+    /// credits the wrong band and the roadmap points at work already done.
     fn classify(e: &str) -> String {
         for (probe, bucket) in [
-            ("Str(", "string literal"),
-            ("FunctionLiteral", "function literal"),
             (
                 "computed callee",
                 "computed callee (fn value in call position)",
@@ -1074,6 +1031,9 @@ mod tests {
             ("Let {", "let form outside the subset"),
             ("Range {", "range form outside the subset"),
             ("Lookup", "lookup"),
+            // Literal payloads LAST — see the ordering note above.
+            ("FunctionLiteral", "function literal"),
+            ("Str(", "string literal"),
         ] {
             if e.contains(probe) {
                 return bucket.to_string();
@@ -1282,6 +1242,57 @@ mod tests {
     fn a_shadowed_call_name_is_still_a_dep() {
         let a = analyze_function("function t(f) = f(1);").expect("analyzes");
         assert_eq!(a.deps, ["f"].map(String::from).into_iter().collect());
+    }
+
+    /// AR.13 — generated code names `rt` and NOTHING else from fab-lang. This is the property that
+    /// makes AR.14's crate move a move rather than a rewrite: a generated file that reaches
+    /// `crate::eval::…` compiles today only because it happens to live inside `eval`, and would
+    /// stop compiling the moment it did not.
+    ///
+    /// Checked against the emitted TEXT rather than by trusting the emitter, because the emitter
+    /// has ~25 separate format strings that each decide a path independently. One of them
+    /// reverting is a one-character diff that the compiler is perfectly happy with right up until
+    /// the file moves.
+    #[test]
+    fn generated_code_names_only_the_rt_abi() {
+        let text = super::generate_module(super::GENERATED_ENTRIES).expect("the batch generates");
+        // Everything after the fallback-sources blob: the `r#"…"#` island is verbatim SCAD, and
+        // scad identifiers are not Rust paths — `crate::` cannot appear there, but a name like
+        // `super::` could in principle, so the scan starts past it.
+        let code = text
+            .rsplit_once("\"#;")
+            .map_or(text.as_str(), |(_, tail)| tail);
+        for forbidden in ["crate::eval", "crate::parser", "super::", "crate::Result"] {
+            assert!(
+                !code.contains(forbidden),
+                "generated code reaches `{forbidden}` — that resolves only while this file lives \
+                 inside fab-lang. Route it through `fab_lang::rt` (adding to `rt` if it is not \
+                 there yet, which is a deliberate act — see that module's note)."
+            );
+        }
+        assert!(
+            code.contains("rt::apply_binary") && code.contains("rt::builtin"),
+            "the scan found no rt calls at all, so it would pass on an empty file"
+        );
+    }
+
+    /// A C-style comprehension's UPDATE clause introduces bindings, it does not only reassign
+    /// them — `_dp_distance_array` in BOSL2's skin.scad binds `newrow` there and reads it from two
+    /// later update bindings. Walking update as plain args reported that loop variable as a free
+    /// global read, which put it on the guard set and would have declined the function for a
+    /// constant that does not exist. Found by the AR.12 library census, not by any hand entry:
+    /// none of the ~55 transcribed references uses this form.
+    #[test]
+    fn a_c_style_update_binding_is_not_a_free_read() {
+        let a = analyze_function(
+            "function t(n) = [for (i = 0; i < n; nxt = i * 2, i = nxt + 1) if (i > 2) i];",
+        )
+        .expect("analyzes");
+        assert!(
+            a.consts.is_empty(),
+            "`nxt` is bound by the update clause, not read from the island: {:?}",
+            a.consts
+        );
     }
 
     /// Comprehension + function-literal binders leave scope when their expression ends.

@@ -37,6 +37,12 @@
 //! License: GPL-2.0-or-later — OpenSCAD's exact license, on purpose (frictionless upstreaming; v3
 //! rules apply in distributed builds via Apache-2.0 Manifold). See `README.md`.
 
+// AR.13 — so `fab_lang::rt::…` resolves INSIDE fab-lang too. Generated code names itself the same
+// way wherever it lives, which means AR.14's move of `generated.rs` into its own crate cannot
+// change a single byte of the emitted text. A move that rewrites what it moves is a move whose
+// result nobody can diff.
+extern crate self as fab_lang;
+
 mod customizer;
 mod error;
 mod eval;
@@ -44,6 +50,11 @@ mod geom;
 mod lexer;
 mod mesh;
 mod parser;
+/// AR.13 — the runtime ABI transpiled libraries are generated against. Public because a sibling
+/// crate has to call it; hidden because it is the interpreter's internals under a stable name and
+/// carries no promise to anyone but the transpiler that emits the calls.
+#[doc(hidden)]
+pub mod rt;
 mod webcolors;
 
 pub use customizer::{Constraint, CustomParam, Customizer, DropdownItem, customize};

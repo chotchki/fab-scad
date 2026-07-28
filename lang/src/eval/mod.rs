@@ -10,7 +10,7 @@
 //! heterogeneous/nested vectors fail LOUD ([`Error::Unimplemented`](crate::Error::Unimplemented)) —
 //! I.1/I.4. Arithmetic/undef semantics are bug-for-bug OpenSCAD (`ops`).
 
-mod builtins;
+pub(crate) mod builtins;
 mod config;
 mod dxfdim;
 mod eval_cache;
@@ -26,6 +26,7 @@ pub(crate) mod intrinsics;
 pub(crate) mod io;
 pub(crate) mod jit_abi;
 mod json;
+mod library;
 mod loader;
 mod message;
 mod metrics;
@@ -33,7 +34,7 @@ mod mod_cache;
 mod mod_redundancy;
 mod module;
 mod object;
-mod ops;
+pub(crate) mod ops;
 mod redundancy;
 pub(crate) mod rng;
 mod scope;
@@ -42,7 +43,7 @@ mod text;
 mod trace;
 mod transpile;
 mod trig;
-mod value;
+pub(crate) mod value;
 
 pub use config::Config;
 pub use fragments::fragments;
@@ -2626,7 +2627,7 @@ fn iter_values(v: &Value, ctx: &Ctx) -> Vec<Value> {
 /// above adds only the too-many-elements WARNING. This is the seam GENERATED natives iterate
 /// through (AR.9): they have no ctx, and the native tier not warning is the standing contract
 /// (no hand native warns either) — the too-many case still yields nothing, so values agree.
-fn iter_values_native(v: &Value) -> Vec<Value> {
+pub fn iter_values_native(v: &Value) -> Vec<Value> {
     match v {
         Value::NumList(xs) => xs.iter().map(|&x| Value::Num(x)).collect(),
         Value::List(xs) => xs.to_vec(),
@@ -2736,7 +2737,12 @@ fn name_closure(value: Value, name: &str) -> Value {
     }
 }
 
-fn build_vector(items: Vec<Value>) -> Value {
+/// Coalesce evaluated elements into a vector value, picking the REPRESENTATION the interpreter
+/// would pick: all-numeric collapses to the packed `NumList`, anything else stays a general `List`.
+/// Variant identity is observable (`typeof`, equality, downstream fast paths), so a generated
+/// native has to build its vectors here rather than choosing a variant itself.
+#[must_use]
+pub fn build_vector(items: Vec<Value>) -> Value {
     match items.iter().map(as_num).collect::<Option<Vec<f64>>>() {
         Some(nums) => Value::num_list(nums),
         None => Value::list(items),
@@ -2753,7 +2759,8 @@ fn as_num(v: &Value) -> Option<f64> {
 
 /// Build a range value from its (already-evaluated) bounds — non-numeric bounds make the whole range
 /// `undef` (OpenSCAD requires numeric range bounds).
-fn build_range(start: &Value, step: &Value, end: &Value) -> Value {
+#[must_use]
+pub fn build_range(start: &Value, step: &Value, end: &Value) -> Value {
     match (start, step, end) {
         (&Value::Num(start), &Value::Num(step), &Value::Num(end)) => {
             Value::Range { start, step, end }

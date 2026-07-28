@@ -16,10 +16,10 @@
               are the emitter's idiom"
 )]
 
-use crate::eval::value::Value;
-use crate::eval::{builtins, ops};
-use crate::parser::{BinOp, UnOp};
-use crate::eval::{build_range, build_vector, iter_values_native};
+// AR.13: `rt` is the ONLY thing generated code names. `extern crate self as fab_lang`
+// makes this path resolve inside fab-lang too, so moving this file into its own crate
+// cannot change a byte of what follows.
+use fab_lang::rt;
 
 /// Every baked constant + the batch's verbatim references as ONE interpretable program —
 /// the AR.10 depth fallback's target (see `native_rt`). Constants print via Rust's
@@ -63,210 +63,225 @@ function idx(list, s=0, e=-1, step=1) =
         _s = posmod(s,ll),
         _e = posmod(e,ll)
     ) [_s : step : _e];
+function _fab_poc_band4(s, tag="q\"b\\c\nd") = [s == tag, str("x=", s, tag), len(tag), "αβ"];
 "#;
 
 /// Generated native for `_fab_poc_sq` — semantics route through the interpreter's own value
 /// algebra (`ops::`/`builtins::`), bit-identical to the interpreted reference by construction.
-pub(super) fn _fab_poc_sq(args: &[Value]) -> crate::Result<Value> {
+pub(super) fn _fab_poc_sq(args: &[rt::Value]) -> rt::Result<rt::Value> {
     // AR.10: past the depth budget, DECLINE to the pure interpreter — explicit stack,
     // same proven semantics; recursion cannot ride the Rust stack unbounded.
-    let Some(_depth) = super::native_rt::DepthGuard::enter() else {
-        return super::native_rt::run_interpreted(FALLBACK_SOURCES, "_fab_poc_sq", args);
+    let Some(_depth) = rt::DepthGuard::enter() else {
+        return rt::run_interpreted(FALLBACK_SOURCES, "_fab_poc_sq", args);
     };
-    let p_x = args.first().cloned().unwrap_or(Value::Undef);
-    let out = ops::apply_binary(BinOp::Mul, p_x.clone(), p_x.clone());
+    let p_x = args.first().cloned().unwrap_or(rt::Value::Undef);
+    let out = rt::apply_binary(rt::BinOp::Mul, p_x.clone(), p_x.clone());
     Ok(out)
 }
 
 /// Generated native for `_fab_poc_near0` — semantics route through the interpreter's own value
 /// algebra (`ops::`/`builtins::`), bit-identical to the interpreted reference by construction.
-pub(super) fn _fab_poc_near0(args: &[Value]) -> crate::Result<Value> {
+pub(super) fn _fab_poc_near0(args: &[rt::Value]) -> rt::Result<rt::Value> {
     // AR.10: past the depth budget, DECLINE to the pure interpreter — explicit stack,
     // same proven semantics; recursion cannot ride the Rust stack unbounded.
-    let Some(_depth) = super::native_rt::DepthGuard::enter() else {
-        return super::native_rt::run_interpreted(FALLBACK_SOURCES, "_fab_poc_near0", args);
+    let Some(_depth) = rt::DepthGuard::enter() else {
+        return rt::run_interpreted(FALLBACK_SOURCES, "_fab_poc_near0", args);
     };
-    let p_x = args.first().cloned().unwrap_or(Value::Undef);
-    let out = ops::apply_binary(BinOp::Lt, builtins::apply("abs", &[p_x.clone()]), Value::Num(f64::from_bits(0x3e112e0be826d695_u64)));
+    let p_x = args.first().cloned().unwrap_or(rt::Value::Undef);
+    let out = rt::apply_binary(rt::BinOp::Lt, rt::builtin("abs", &[p_x.clone()]), rt::Value::Num(f64::from_bits(0x3e112e0be826d695_u64)));
     Ok(out)
 }
 
 /// Generated native for `_fab_poc_outer` — semantics route through the interpreter's own value
 /// algebra (`ops::`/`builtins::`), bit-identical to the interpreted reference by construction.
-pub(super) fn _fab_poc_outer(args: &[Value]) -> crate::Result<Value> {
+pub(super) fn _fab_poc_outer(args: &[rt::Value]) -> rt::Result<rt::Value> {
     // AR.10: past the depth budget, DECLINE to the pure interpreter — explicit stack,
     // same proven semantics; recursion cannot ride the Rust stack unbounded.
-    let Some(_depth) = super::native_rt::DepthGuard::enter() else {
-        return super::native_rt::run_interpreted(FALLBACK_SOURCES, "_fab_poc_outer", args);
+    let Some(_depth) = rt::DepthGuard::enter() else {
+        return rt::run_interpreted(FALLBACK_SOURCES, "_fab_poc_outer", args);
     };
-    let p_x = args.first().cloned().unwrap_or(Value::Undef);
+    let p_x = args.first().cloned().unwrap_or(rt::Value::Undef);
     let out = _fab_poc_near0(&[p_x.clone()])?;
     Ok(out)
 }
 
 /// Generated native for `_fab_poc_isup` — semantics route through the interpreter's own value
 /// algebra (`ops::`/`builtins::`), bit-identical to the interpreted reference by construction.
-pub(super) fn _fab_poc_isup(args: &[Value]) -> crate::Result<Value> {
+pub(super) fn _fab_poc_isup(args: &[rt::Value]) -> rt::Result<rt::Value> {
     // AR.10: past the depth budget, DECLINE to the pure interpreter — explicit stack,
     // same proven semantics; recursion cannot ride the Rust stack unbounded.
-    let Some(_depth) = super::native_rt::DepthGuard::enter() else {
-        return super::native_rt::run_interpreted(FALLBACK_SOURCES, "_fab_poc_isup", args);
+    let Some(_depth) = rt::DepthGuard::enter() else {
+        return rt::run_interpreted(FALLBACK_SOURCES, "_fab_poc_isup", args);
     };
-    let p_v = args.first().cloned().unwrap_or(Value::Undef);
-    let out = ops::apply_binary(BinOp::Eq, p_v.clone(), Value::num_list(vec![f64::from_bits(0x0_u64), f64::from_bits(0x0_u64), f64::from_bits(0x3ff0000000000000_u64)]));
+    let p_v = args.first().cloned().unwrap_or(rt::Value::Undef);
+    let out = rt::apply_binary(rt::BinOp::Eq, p_v.clone(), rt::Value::num_list(vec![f64::from_bits(0x0_u64), f64::from_bits(0x0_u64), f64::from_bits(0x3ff0000000000000_u64)]));
     Ok(out)
 }
 
 /// Generated native for `is_nan` — semantics route through the interpreter's own value
 /// algebra (`ops::`/`builtins::`), bit-identical to the interpreted reference by construction.
-pub(super) fn is_nan(args: &[Value]) -> crate::Result<Value> {
+pub(super) fn is_nan(args: &[rt::Value]) -> rt::Result<rt::Value> {
     // AR.10: past the depth budget, DECLINE to the pure interpreter — explicit stack,
     // same proven semantics; recursion cannot ride the Rust stack unbounded.
-    let Some(_depth) = super::native_rt::DepthGuard::enter() else {
-        return super::native_rt::run_interpreted(FALLBACK_SOURCES, "is_nan", args);
+    let Some(_depth) = rt::DepthGuard::enter() else {
+        return rt::run_interpreted(FALLBACK_SOURCES, "is_nan", args);
     };
-    let p_x = args.first().cloned().unwrap_or(Value::Undef);
-    let out = ops::apply_binary(BinOp::Ne, p_x.clone(), p_x.clone());
+    let p_x = args.first().cloned().unwrap_or(rt::Value::Undef);
+    let out = rt::apply_binary(rt::BinOp::Ne, p_x.clone(), p_x.clone());
     Ok(out)
 }
 
 /// Generated native for `is_finite` — semantics route through the interpreter's own value
 /// algebra (`ops::`/`builtins::`), bit-identical to the interpreted reference by construction.
-pub(super) fn is_finite(args: &[Value]) -> crate::Result<Value> {
+pub(super) fn is_finite(args: &[rt::Value]) -> rt::Result<rt::Value> {
     // AR.10: past the depth budget, DECLINE to the pure interpreter — explicit stack,
     // same proven semantics; recursion cannot ride the Rust stack unbounded.
-    let Some(_depth) = super::native_rt::DepthGuard::enter() else {
-        return super::native_rt::run_interpreted(FALLBACK_SOURCES, "is_finite", args);
+    let Some(_depth) = rt::DepthGuard::enter() else {
+        return rt::run_interpreted(FALLBACK_SOURCES, "is_finite", args);
     };
-    let p_x = args.first().cloned().unwrap_or(Value::Undef);
-    let out = Value::Bool(builtins::apply("is_num", &[p_x.clone()]).is_truthy() && ops::apply_unary(UnOp::Not, is_nan(&[ops::apply_binary(BinOp::Mul, Value::Num(f64::from_bits(0x0_u64)), p_x.clone())])?).is_truthy());
+    let p_x = args.first().cloned().unwrap_or(rt::Value::Undef);
+    let out = rt::Value::Bool(rt::builtin("is_num", &[p_x.clone()]).is_truthy() && rt::apply_unary(rt::UnOp::Not, is_nan(&[rt::apply_binary(rt::BinOp::Mul, rt::Value::Num(f64::from_bits(0x0_u64)), p_x.clone())])?).is_truthy());
     Ok(out)
 }
 
 /// Generated native for `_fab_poc_band2` — semantics route through the interpreter's own value
 /// algebra (`ops::`/`builtins::`), bit-identical to the interpreted reference by construction.
-pub(super) fn _fab_poc_band2(args: &[Value]) -> crate::Result<Value> {
+pub(super) fn _fab_poc_band2(args: &[rt::Value]) -> rt::Result<rt::Value> {
     // AR.10: past the depth budget, DECLINE to the pure interpreter — explicit stack,
     // same proven semantics; recursion cannot ride the Rust stack unbounded.
-    let Some(_depth) = super::native_rt::DepthGuard::enter() else {
-        return super::native_rt::run_interpreted(FALLBACK_SOURCES, "_fab_poc_band2", args);
+    let Some(_depth) = rt::DepthGuard::enter() else {
+        return rt::run_interpreted(FALLBACK_SOURCES, "_fab_poc_band2", args);
     };
-    let p_v = args.first().cloned().unwrap_or(Value::Undef);
-    let p_i = args.get(1).cloned().unwrap_or_else(|| Value::Num(f64::from_bits(0x0_u64)));
-    let out = { let l0_n = ops::index(p_v.clone(), &p_i.clone()); { if !(builtins::apply("is_num", &[l0_n.clone()])).is_truthy() { return Err(super::bosl_assert("generated")); } ops::apply_binary(BinOp::Mul, l0_n.clone(), Value::Num(f64::from_bits(0x4000000000000000_u64))) } };
+    let p_v = args.first().cloned().unwrap_or(rt::Value::Undef);
+    let p_i = args.get(1).cloned().unwrap_or_else(|| rt::Value::Num(f64::from_bits(0x0_u64)));
+    let out = { let l0_n = rt::index(p_v.clone(), &p_i.clone()); { if !(rt::builtin("is_num", &[l0_n.clone()])).is_truthy() { return Err(rt::bosl_assert("generated")); } rt::apply_binary(rt::BinOp::Mul, l0_n.clone(), rt::Value::Num(f64::from_bits(0x4000000000000000_u64))) } };
     Ok(out)
 }
 
 /// Generated native for `is_def` — semantics route through the interpreter's own value
 /// algebra (`ops::`/`builtins::`), bit-identical to the interpreted reference by construction.
-pub(super) fn is_def(args: &[Value]) -> crate::Result<Value> {
+pub(super) fn is_def(args: &[rt::Value]) -> rt::Result<rt::Value> {
     // AR.10: past the depth budget, DECLINE to the pure interpreter — explicit stack,
     // same proven semantics; recursion cannot ride the Rust stack unbounded.
-    let Some(_depth) = super::native_rt::DepthGuard::enter() else {
-        return super::native_rt::run_interpreted(FALLBACK_SOURCES, "is_def", args);
+    let Some(_depth) = rt::DepthGuard::enter() else {
+        return rt::run_interpreted(FALLBACK_SOURCES, "is_def", args);
     };
-    let p_x = args.first().cloned().unwrap_or(Value::Undef);
-    let out = ops::apply_unary(UnOp::Not, builtins::apply("is_undef", &[p_x.clone()]));
+    let p_x = args.first().cloned().unwrap_or(rt::Value::Undef);
+    let out = rt::apply_unary(rt::UnOp::Not, rt::builtin("is_undef", &[p_x.clone()]));
     Ok(out)
 }
 
 /// Generated native for `is_str` — semantics route through the interpreter's own value
 /// algebra (`ops::`/`builtins::`), bit-identical to the interpreted reference by construction.
-pub(super) fn is_str(args: &[Value]) -> crate::Result<Value> {
+pub(super) fn is_str(args: &[rt::Value]) -> rt::Result<rt::Value> {
     // AR.10: past the depth budget, DECLINE to the pure interpreter — explicit stack,
     // same proven semantics; recursion cannot ride the Rust stack unbounded.
-    let Some(_depth) = super::native_rt::DepthGuard::enter() else {
-        return super::native_rt::run_interpreted(FALLBACK_SOURCES, "is_str", args);
+    let Some(_depth) = rt::DepthGuard::enter() else {
+        return rt::run_interpreted(FALLBACK_SOURCES, "is_str", args);
     };
-    let p_x = args.first().cloned().unwrap_or(Value::Undef);
-    let out = builtins::apply("is_string", &[p_x.clone()]);
+    let p_x = args.first().cloned().unwrap_or(rt::Value::Undef);
+    let out = rt::builtin("is_string", &[p_x.clone()]);
     Ok(out)
 }
 
 /// Generated native for `default` — semantics route through the interpreter's own value
 /// algebra (`ops::`/`builtins::`), bit-identical to the interpreted reference by construction.
-pub(super) fn default(args: &[Value]) -> crate::Result<Value> {
+pub(super) fn default(args: &[rt::Value]) -> rt::Result<rt::Value> {
     // AR.10: past the depth budget, DECLINE to the pure interpreter — explicit stack,
     // same proven semantics; recursion cannot ride the Rust stack unbounded.
-    let Some(_depth) = super::native_rt::DepthGuard::enter() else {
-        return super::native_rt::run_interpreted(FALLBACK_SOURCES, "default", args);
+    let Some(_depth) = rt::DepthGuard::enter() else {
+        return rt::run_interpreted(FALLBACK_SOURCES, "default", args);
     };
-    let p_v = args.first().cloned().unwrap_or(Value::Undef);
-    let p_dflt = args.get(1).cloned().unwrap_or(Value::Undef);
-    let out = if builtins::apply("is_undef", &[p_v.clone()]).is_truthy() { p_dflt.clone() } else { p_v.clone() };
+    let p_v = args.first().cloned().unwrap_or(rt::Value::Undef);
+    let p_dflt = args.get(1).cloned().unwrap_or(rt::Value::Undef);
+    let out = if rt::builtin("is_undef", &[p_v.clone()]).is_truthy() { p_dflt.clone() } else { p_v.clone() };
     Ok(out)
 }
 
 /// Generated native for `last` — semantics route through the interpreter's own value
 /// algebra (`ops::`/`builtins::`), bit-identical to the interpreted reference by construction.
-pub(super) fn last(args: &[Value]) -> crate::Result<Value> {
+pub(super) fn last(args: &[rt::Value]) -> rt::Result<rt::Value> {
     // AR.10: past the depth budget, DECLINE to the pure interpreter — explicit stack,
     // same proven semantics; recursion cannot ride the Rust stack unbounded.
-    let Some(_depth) = super::native_rt::DepthGuard::enter() else {
-        return super::native_rt::run_interpreted(FALLBACK_SOURCES, "last", args);
+    let Some(_depth) = rt::DepthGuard::enter() else {
+        return rt::run_interpreted(FALLBACK_SOURCES, "last", args);
     };
-    let p_list = args.first().cloned().unwrap_or(Value::Undef);
-    let out = ops::index(p_list.clone(), &ops::apply_binary(BinOp::Sub, builtins::apply("len", &[p_list.clone()]), Value::Num(f64::from_bits(0x3ff0000000000000_u64))));
+    let p_list = args.first().cloned().unwrap_or(rt::Value::Undef);
+    let out = rt::index(p_list.clone(), &rt::apply_binary(rt::BinOp::Sub, rt::builtin("len", &[p_list.clone()]), rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64))));
     Ok(out)
 }
 
 /// Generated native for `_fab_poc_band3` — semantics route through the interpreter's own value
 /// algebra (`ops::`/`builtins::`), bit-identical to the interpreted reference by construction.
-pub(super) fn _fab_poc_band3(args: &[Value]) -> crate::Result<Value> {
+pub(super) fn _fab_poc_band3(args: &[rt::Value]) -> rt::Result<rt::Value> {
     // AR.10: past the depth budget, DECLINE to the pure interpreter — explicit stack,
     // same proven semantics; recursion cannot ride the Rust stack unbounded.
-    let Some(_depth) = super::native_rt::DepthGuard::enter() else {
-        return super::native_rt::run_interpreted(FALLBACK_SOURCES, "_fab_poc_band3", args);
+    let Some(_depth) = rt::DepthGuard::enter() else {
+        return rt::run_interpreted(FALLBACK_SOURCES, "_fab_poc_band3", args);
     };
-    let p_n = args.first().cloned().unwrap_or(Value::Undef);
-    let out = { let mut l0_acc: Vec<Value> = Vec::new(); for l1_i in iter_values_native(&build_range(&Value::Num(f64::from_bits(0x0_u64)), &Value::Num(f64::from_bits(0x3ff0000000000000_u64)), &p_n.clone())) { { let l2_d = ops::apply_binary(BinOp::Mul, l1_i.clone(), Value::Num(f64::from_bits(0x4000000000000000_u64))); if (ops::apply_binary(BinOp::Gt, l2_d.clone(), Value::Num(f64::from_bits(0x4000000000000000_u64)))).is_truthy() { l0_acc.push(l2_d.clone());
-         }  } } for l3_each in iter_values_native(&build_vector(vec![Value::Num(f64::from_bits(0x4020000000000000_u64)), Value::Num(f64::from_bits(0x4022000000000000_u64))])) { l0_acc.push(l3_each); } build_vector(l0_acc) };
+    let p_n = args.first().cloned().unwrap_or(rt::Value::Undef);
+    let out = { let mut l0_acc: Vec<rt::Value> = Vec::new(); for l1_i in rt::iter_values_native(&rt::build_range(&rt::Value::Num(f64::from_bits(0x0_u64)), &rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64)), &p_n.clone())) { { let l2_d = rt::apply_binary(rt::BinOp::Mul, l1_i.clone(), rt::Value::Num(f64::from_bits(0x4000000000000000_u64))); if (rt::apply_binary(rt::BinOp::Gt, l2_d.clone(), rt::Value::Num(f64::from_bits(0x4000000000000000_u64)))).is_truthy() { l0_acc.push(l2_d.clone());
+         }  } } for l3_each in rt::iter_values_native(&rt::build_vector(vec![rt::Value::Num(f64::from_bits(0x4020000000000000_u64)), rt::Value::Num(f64::from_bits(0x4022000000000000_u64))])) { l0_acc.push(l3_each); } rt::build_vector(l0_acc) };
     Ok(out)
 }
 
 /// Generated native for `approx` — semantics route through the interpreter's own value
 /// algebra (`ops::`/`builtins::`), bit-identical to the interpreted reference by construction.
-pub(super) fn approx(args: &[Value]) -> crate::Result<Value> {
+pub(super) fn approx(args: &[rt::Value]) -> rt::Result<rt::Value> {
     // AR.10: past the depth budget, DECLINE to the pure interpreter — explicit stack,
     // same proven semantics; recursion cannot ride the Rust stack unbounded.
-    let Some(_depth) = super::native_rt::DepthGuard::enter() else {
-        return super::native_rt::run_interpreted(FALLBACK_SOURCES, "approx", args);
+    let Some(_depth) = rt::DepthGuard::enter() else {
+        return rt::run_interpreted(FALLBACK_SOURCES, "approx", args);
     };
-    let p_a = args.first().cloned().unwrap_or(Value::Undef);
-    let p_b = args.get(1).cloned().unwrap_or(Value::Undef);
-    let p_eps = args.get(2).cloned().unwrap_or_else(|| Value::Num(f64::from_bits(0x3e112e0be826d695_u64)));
-    let out = if ops::apply_binary(BinOp::Eq, p_a.clone(), p_b.clone()).is_truthy() { ops::apply_binary(BinOp::Eq, builtins::apply("is_bool", &[p_a.clone()]), builtins::apply("is_bool", &[p_b.clone()])) } else { if Value::Bool(builtins::apply("is_num", &[p_a.clone()]).is_truthy() && builtins::apply("is_num", &[p_b.clone()]).is_truthy()).is_truthy() { ops::apply_binary(BinOp::Le, builtins::apply("abs", &[ops::apply_binary(BinOp::Sub, p_a.clone(), p_b.clone())]), p_eps.clone()) } else { if Value::Bool(Value::Bool(builtins::apply("is_list", &[p_a.clone()]).is_truthy() && builtins::apply("is_list", &[p_b.clone()]).is_truthy()).is_truthy() && ops::apply_binary(BinOp::Eq, builtins::apply("len", &[p_a.clone()]), builtins::apply("len", &[p_b.clone()])).is_truthy()).is_truthy() { ops::apply_binary(BinOp::Eq, build_vector(vec![]), { let mut l0_acc: Vec<Value> = Vec::new(); for l1_i in iter_values_native(&idx(&[p_a.clone()])?) { { let l2_aa = ops::index(p_a.clone(), &l1_i.clone()); let l3_bb = ops::index(p_b.clone(), &l1_i.clone()); if (if Value::Bool(builtins::apply("is_num", &[l2_aa.clone()]).is_truthy() && builtins::apply("is_num", &[l3_bb.clone()]).is_truthy()).is_truthy() { ops::apply_binary(BinOp::Gt, builtins::apply("abs", &[ops::apply_binary(BinOp::Sub, l2_aa.clone(), l3_bb.clone())]), p_eps.clone()) } else { ops::apply_unary(UnOp::Not, approx(&[l2_aa.clone(), l3_bb.clone(), p_eps.clone()])?) }).is_truthy() { l0_acc.push(Value::Num(f64::from_bits(0x3ff0000000000000_u64)));
-         }  } } build_vector(l0_acc) }) } else { Value::Bool(false) } } };
+    let p_a = args.first().cloned().unwrap_or(rt::Value::Undef);
+    let p_b = args.get(1).cloned().unwrap_or(rt::Value::Undef);
+    let p_eps = args.get(2).cloned().unwrap_or_else(|| rt::Value::Num(f64::from_bits(0x3e112e0be826d695_u64)));
+    let out = if rt::apply_binary(rt::BinOp::Eq, p_a.clone(), p_b.clone()).is_truthy() { rt::apply_binary(rt::BinOp::Eq, rt::builtin("is_bool", &[p_a.clone()]), rt::builtin("is_bool", &[p_b.clone()])) } else { if rt::Value::Bool(rt::builtin("is_num", &[p_a.clone()]).is_truthy() && rt::builtin("is_num", &[p_b.clone()]).is_truthy()).is_truthy() { rt::apply_binary(rt::BinOp::Le, rt::builtin("abs", &[rt::apply_binary(rt::BinOp::Sub, p_a.clone(), p_b.clone())]), p_eps.clone()) } else { if rt::Value::Bool(rt::Value::Bool(rt::builtin("is_list", &[p_a.clone()]).is_truthy() && rt::builtin("is_list", &[p_b.clone()]).is_truthy()).is_truthy() && rt::apply_binary(rt::BinOp::Eq, rt::builtin("len", &[p_a.clone()]), rt::builtin("len", &[p_b.clone()])).is_truthy()).is_truthy() { rt::apply_binary(rt::BinOp::Eq, rt::build_vector(vec![]), { let mut l0_acc: Vec<rt::Value> = Vec::new(); for l1_i in rt::iter_values_native(&idx(&[p_a.clone()])?) { { let l2_aa = rt::index(p_a.clone(), &l1_i.clone()); let l3_bb = rt::index(p_b.clone(), &l1_i.clone()); if (if rt::Value::Bool(rt::builtin("is_num", &[l2_aa.clone()]).is_truthy() && rt::builtin("is_num", &[l3_bb.clone()]).is_truthy()).is_truthy() { rt::apply_binary(rt::BinOp::Gt, rt::builtin("abs", &[rt::apply_binary(rt::BinOp::Sub, l2_aa.clone(), l3_bb.clone())]), p_eps.clone()) } else { rt::apply_unary(rt::UnOp::Not, approx(&[l2_aa.clone(), l3_bb.clone(), p_eps.clone()])?) }).is_truthy() { l0_acc.push(rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64)));
+         }  } } rt::build_vector(l0_acc) }) } else { rt::Value::Bool(false) } } };
     Ok(out)
 }
 
 /// Generated native for `posmod` — semantics route through the interpreter's own value
 /// algebra (`ops::`/`builtins::`), bit-identical to the interpreted reference by construction.
-pub(super) fn posmod(args: &[Value]) -> crate::Result<Value> {
+pub(super) fn posmod(args: &[rt::Value]) -> rt::Result<rt::Value> {
     // AR.10: past the depth budget, DECLINE to the pure interpreter — explicit stack,
     // same proven semantics; recursion cannot ride the Rust stack unbounded.
-    let Some(_depth) = super::native_rt::DepthGuard::enter() else {
-        return super::native_rt::run_interpreted(FALLBACK_SOURCES, "posmod", args);
+    let Some(_depth) = rt::DepthGuard::enter() else {
+        return rt::run_interpreted(FALLBACK_SOURCES, "posmod", args);
     };
-    let p_x = args.first().cloned().unwrap_or(Value::Undef);
-    let p_m = args.get(1).cloned().unwrap_or(Value::Undef);
-    let out = { if !(Value::Bool(Value::Bool(is_finite(&[p_x.clone()])?.is_truthy() && is_finite(&[p_m.clone()])?.is_truthy()).is_truthy() && ops::apply_unary(UnOp::Not, approx(&[p_m.clone(), Value::Num(f64::from_bits(0x0_u64))])?).is_truthy())).is_truthy() { return Err(super::bosl_assert("generated")); } ops::apply_binary(BinOp::Mod, ops::apply_binary(BinOp::Add, ops::apply_binary(BinOp::Mod, p_x.clone(), p_m.clone()), p_m.clone()), p_m.clone()) };
+    let p_x = args.first().cloned().unwrap_or(rt::Value::Undef);
+    let p_m = args.get(1).cloned().unwrap_or(rt::Value::Undef);
+    let out = { if !(rt::Value::Bool(rt::Value::Bool(is_finite(&[p_x.clone()])?.is_truthy() && is_finite(&[p_m.clone()])?.is_truthy()).is_truthy() && rt::apply_unary(rt::UnOp::Not, approx(&[p_m.clone(), rt::Value::Num(f64::from_bits(0x0_u64))])?).is_truthy())).is_truthy() { return Err(rt::bosl_assert("generated")); } rt::apply_binary(rt::BinOp::Mod, rt::apply_binary(rt::BinOp::Add, rt::apply_binary(rt::BinOp::Mod, p_x.clone(), p_m.clone()), p_m.clone()), p_m.clone()) };
     Ok(out)
 }
 
 /// Generated native for `idx` — semantics route through the interpreter's own value
 /// algebra (`ops::`/`builtins::`), bit-identical to the interpreted reference by construction.
-pub(super) fn idx(args: &[Value]) -> crate::Result<Value> {
+pub(super) fn idx(args: &[rt::Value]) -> rt::Result<rt::Value> {
     // AR.10: past the depth budget, DECLINE to the pure interpreter — explicit stack,
     // same proven semantics; recursion cannot ride the Rust stack unbounded.
-    let Some(_depth) = super::native_rt::DepthGuard::enter() else {
-        return super::native_rt::run_interpreted(FALLBACK_SOURCES, "idx", args);
+    let Some(_depth) = rt::DepthGuard::enter() else {
+        return rt::run_interpreted(FALLBACK_SOURCES, "idx", args);
     };
-    let p_list = args.first().cloned().unwrap_or(Value::Undef);
-    let p_s = args.get(1).cloned().unwrap_or_else(|| Value::Num(f64::from_bits(0x0_u64)));
-    let p_e = args.get(2).cloned().unwrap_or_else(|| ops::apply_unary(UnOp::Neg, Value::Num(f64::from_bits(0x3ff0000000000000_u64))));
-    let p_step = args.get(3).cloned().unwrap_or_else(|| Value::Num(f64::from_bits(0x3ff0000000000000_u64)));
-    let out = { if !(Value::Bool(builtins::apply("is_list", &[p_list.clone()]).is_truthy() || builtins::apply("is_string", &[p_list.clone()]).is_truthy())).is_truthy() { return Err(super::bosl_assert("generated")); } { let l0_ll = builtins::apply("len", &[p_list.clone()]); if ops::apply_binary(BinOp::Eq, l0_ll.clone(), Value::Num(f64::from_bits(0x0_u64))).is_truthy() { build_range(&Value::Num(f64::from_bits(0x0_u64)), &Value::Num(f64::from_bits(0x3ff0000000000000_u64)), &ops::apply_binary(BinOp::Sub, l0_ll.clone(), Value::Num(f64::from_bits(0x3ff0000000000000_u64)))) } else { { let l1_s = posmod(&[p_s.clone(), l0_ll.clone()])?; let l2_e = posmod(&[p_e.clone(), l0_ll.clone()])?; build_range(&l1_s.clone(), &p_step.clone(), &l2_e.clone()) } } } };
+    let p_list = args.first().cloned().unwrap_or(rt::Value::Undef);
+    let p_s = args.get(1).cloned().unwrap_or_else(|| rt::Value::Num(f64::from_bits(0x0_u64)));
+    let p_e = args.get(2).cloned().unwrap_or_else(|| rt::apply_unary(rt::UnOp::Neg, rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64))));
+    let p_step = args.get(3).cloned().unwrap_or_else(|| rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64)));
+    let out = { if !(rt::Value::Bool(rt::builtin("is_list", &[p_list.clone()]).is_truthy() || rt::builtin("is_string", &[p_list.clone()]).is_truthy())).is_truthy() { return Err(rt::bosl_assert("generated")); } { let l0_ll = rt::builtin("len", &[p_list.clone()]); if rt::apply_binary(rt::BinOp::Eq, l0_ll.clone(), rt::Value::Num(f64::from_bits(0x0_u64))).is_truthy() { rt::build_range(&rt::Value::Num(f64::from_bits(0x0_u64)), &rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64)), &rt::apply_binary(rt::BinOp::Sub, l0_ll.clone(), rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64)))) } else { { let l1_s = posmod(&[p_s.clone(), l0_ll.clone()])?; let l2_e = posmod(&[p_e.clone(), l0_ll.clone()])?; rt::build_range(&l1_s.clone(), &p_step.clone(), &l2_e.clone()) } } } };
+    Ok(out)
+}
+
+/// Generated native for `_fab_poc_band4` — semantics route through the interpreter's own value
+/// algebra (`ops::`/`builtins::`), bit-identical to the interpreted reference by construction.
+pub(super) fn _fab_poc_band4(args: &[rt::Value]) -> rt::Result<rt::Value> {
+    // AR.10: past the depth budget, DECLINE to the pure interpreter — explicit stack,
+    // same proven semantics; recursion cannot ride the Rust stack unbounded.
+    let Some(_depth) = rt::DepthGuard::enter() else {
+        return rt::run_interpreted(FALLBACK_SOURCES, "_fab_poc_band4", args);
+    };
+    let p_s = args.first().cloned().unwrap_or(rt::Value::Undef);
+    let p_tag = args.get(1).cloned().unwrap_or_else(|| rt::Value::string("q\"b\\c\nd"));
+    let out = rt::build_vector(vec![rt::apply_binary(rt::BinOp::Eq, p_s.clone(), p_tag.clone()), rt::builtin("str", &[rt::Value::string("x="), p_s.clone(), p_tag.clone()]), rt::builtin("len", &[p_tag.clone()]), rt::Value::string("αβ")]);
     Ok(out)
 }
 

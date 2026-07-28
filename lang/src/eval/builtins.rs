@@ -103,7 +103,7 @@ pub(super) fn parent_module(pos: &[Value], stack: &[&str]) -> Value {
 /// Apply a builtin by name to its args. OpenSCAD builtins have no declared parameter names, so `pos` is
 /// the WHOLE argument list in source order (a named arg's name is dropped upstream in [`run_builtin`]);
 /// e.g. `search`'s `num_returns_per_match`/`index_col_num` are just positions 2 and 3 here.
-pub(super) fn apply(name: &str, pos: &[Value]) -> Value {
+pub fn apply(name: &str, pos: &[Value]) -> Value {
     match name {
         "abs" => num1(pos, f64::abs),
         "sign" => num1(pos, sign),

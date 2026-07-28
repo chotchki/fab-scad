@@ -26,14 +26,14 @@ use super::value::Value;
 use crate::parser::{Expr, Parameter};
 
 mod affine;
-mod fingerprint;
+pub(in crate::eval) mod fingerprint;
 // Generated code keeps its emitter's exact bytes — the regen test pins them; fmt stays out.
 #[rustfmt::skip]
 mod generated;
 mod geometry;
 mod lists;
 mod math;
-mod native_rt;
+pub(crate) mod native_rt;
 mod poc;
 mod regions;
 mod shape;
@@ -717,6 +717,23 @@ pub(super) static REGISTRY: &[Entry] = &[
         deps: &[],
         builtins: &[],
         func: generated::_fab_poc_band3,
+    },
+    // The AR.15 band-4 mechanism POC: STRING literals, in every position the emitter treats
+    // differently. Two escape layers stack here and both have to survive — scad's lexer decodes
+    // the source (`\"` → `"`, `\\` → `\`, `\n` → newline) and the emitter re-encodes the DECODED
+    // text as a Rust literal — so the escaped quote, the escaped backslash, the newline and the
+    // non-ASCII pair are each here to catch a different re-encoding bug. `tag`'s default covers
+    // the separate default-emission path; `s == tag` covers string EQUALITY (a `Value::Str`
+    // through `ops::apply_binary`, not a numeric compare); `str`/`len` cover a string reaching
+    // the builtin bridge.
+    Entry {
+        name: "_fab_poc_band4",
+        reference: "function _fab_poc_band4(s, tag=\"q\\\"b\\\\c\\nd\") = [s == tag, str(\"x=\", s, tag), len(tag), \"αβ\"];",
+        consts: &[],
+        consts_v: &[],
+        deps: &[],
+        builtins: &["len", "str"],
+        func: generated::_fab_poc_band4,
     },
     // ── O.5.2, the SHAPE band (utility.scad / lists.scad) ────────────────────────────────────────────────
     // The `is_consistent`/`_list_pattern`/`same_shape` bundle is ~4.7s of self time across the O.4 four
@@ -1824,7 +1841,8 @@ fn v_is_list(v: &Value) -> bool {
 
 /// A raised BOSL2 `assert(…)` — the message is a diagnostic LOCATOR (fast==slow matches "both raised", not
 /// text), same contract as [`select_assert`].
-fn bosl_assert(msg: &str) -> crate::Error {
+#[must_use]
+pub fn bosl_assert(msg: &str) -> crate::Error {
     crate::Error::Eval(format!("assert failed: {msg}"))
 }
 

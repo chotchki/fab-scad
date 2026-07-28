@@ -33,10 +33,13 @@ thread_local! {
 
 /// RAII depth ticket: `enter` refuses past the budget, `Drop` gives the level back — early
 /// returns (assert raises, `?` on sibling calls) can't leak depth.
-pub(super) struct DepthGuard;
+pub struct DepthGuard;
 
 impl DepthGuard {
-    pub(super) fn enter() -> Option<Self> {
+    /// Take one level of the budget, or `None` when it is spent. A generated native that gets
+    /// `None` must DECLINE — see [`run_interpreted`] — rather than recurse anyway.
+    #[must_use]
+    pub fn enter() -> Option<Self> {
         DEPTH.with(|d| {
             if d.get() >= MAX_NATIVE_DEPTH {
                 None
@@ -60,11 +63,12 @@ impl Drop for DepthGuard {
 /// its (ptr, len), which only identifies a program if the bytes can never be freed and readdressed.
 /// Parse failure is impossible by construction (the sources are the registry references that
 /// already parsed for codegen), but the no-panic doctrine gets an error, not an unwrap.
-pub(super) fn run_interpreted(
-    sources: &'static str,
-    name: &str,
-    args: &[Value],
-) -> crate::Result<Value> {
+///
+/// # Errors
+/// Whatever interpreting `name` raises — an `assert` in the reference propagates exactly as it
+/// would from the native, which is the point of the fallback. Also errors if `sources` fails to
+/// parse, which the caller's own codegen already ruled out.
+pub fn run_interpreted(sources: &'static str, name: &str, args: &[Value]) -> crate::Result<Value> {
     let key = (sources.as_ptr() as usize, sources.len());
     let program = FALLBACK.with(|cell| {
         let mut cache = cell.borrow_mut();

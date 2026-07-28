@@ -319,6 +319,39 @@ fn generated_band3_matches_the_interpreter() {
     }
 }
 
+/// AR.15 — string literals, proven against the interpreter rather than merely compiled. Two
+/// escape layers stack in this reference (scad's lexer DECODES the source, then the emitter
+/// RE-ENCODES the decoded text as a Rust literal), and a bug in either one produces a native that
+/// builds fine and answers with subtly different bytes — so the cases below feed the default's
+/// exact text back in, which only matches if both layers round-tripped.
+#[test]
+fn generated_band4_matches_the_interpreter() {
+    let reference = reference_of("_fab_poc_band4").expect("registered");
+    let (params, body) = parse_fn(reference);
+    let func = resolve("_fab_poc_band4", &params, &body)
+        .expect("its own reference must register")
+        .func;
+    let cases: &[&[Value]] = &[
+        // The default's DECODED text, byte for byte: an escaped quote, an escaped backslash and a
+        // real newline. Equality here is the round-trip proof — either escape layer getting this
+        // wrong makes `s == tag` false in the native and true in the interpreter.
+        &[Value::string("q\"b\\c\nd")],
+        &[Value::string("")],   // empty: falsy, and `str` of it is a no-op
+        &[Value::string("αβ")], // non-ASCII in, non-ASCII out
+        &[Value::Num(3.0)],     // cross-TYPE equality: a number never equals a string
+        &[Value::Undef],
+        &[Value::string("x"), Value::string("x")], // default overridden, both slots strings
+        &[Value::string("x"), Value::Num(1.0)],    // a NUMBER where the default is a string
+        &[],
+    ];
+    for input in cases {
+        assert!(
+            same_result(&func(input), &interpret(reference, input)),
+            "band4 diverged on {input:?}"
+        );
+    }
+}
+
 /// AR.6 — the LIST case the deleted hand `poc_sq` got WRONG: `x * x` with an equal-length numeric
 /// list is the interpreter's DOT PRODUCT, and the hand native answered `Undef`. It sat unnoticed
 /// because no battery input was a list. The generated native routes through `ops::apply_binary`,

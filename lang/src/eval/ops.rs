@@ -705,12 +705,15 @@ fn bind_receiver(v: Value, receiver: &std::rc::Rc<super::object::ObjectMap>) -> 
     }
 }
 
+/// OpenSCAD's `base[index]`, every shape of it: an object indexes by STRING key, a list/string by
+/// numeric position, and anything out of range or wrongly typed reads `undef` rather than raising.
+#[must_use]
 #[allow(
     clippy::cast_possible_truncation,
     clippy::cast_sign_loss,
     reason = "i is checked non-negative + finite above the cast; an out-of-range index reads Undef"
 )]
-pub(crate) fn index(base: Value, index: &Value) -> Value {
+pub fn index(base: Value, index: &Value) -> Value {
     // Objects index by STRING key (AF.3): `o["key"]` → the member, missing → undef.
     if let Value::Object(o) = &base {
         return match index {

@@ -1023,7 +1023,7 @@ impl<'a> FnOracle<'a> {
             .iter()
             .map(|&(n, p, b)| (n, ((p, b), 0usize)))
             .collect();
-        let intrinsics = build_intrinsics(&ctx_functions);
+        let intrinsics = build_intrinsics(&ctx_functions, Config::default().intrinsics);
         let mut ctx = Ctx {
             functions: ctx_functions,
             intrinsics,
@@ -2891,7 +2891,7 @@ fn resolve_source(
     let (exec, _defs) = loader::flatten(&loaded)?;
     let islands = loader::islands(&loaded);
     let functions = tagged_functions(&islands);
-    let intrinsics = build_intrinsics(&functions);
+    let intrinsics = build_intrinsics(&functions, config.intrinsics);
     // Build the numeric-JIT registry ONCE, now the graph is closed and every function is known (P.1.2b).
     // The factory (native fab-jit) compiles the numeric-subset bodies and returns a `NumericJit`; `None`
     // when there's no factory (wasm / raw path) or nothing compiled. Done here, borrowing `functions`
@@ -3197,9 +3197,20 @@ fn guard_veto<'a>(
 /// `consts`) never wire here — they arm post-hoist in [`arm_guarded_intrinsics`].
 fn build_intrinsics<'a>(
     functions: &BTreeMap<&'a str, (loader::FnDef<'a>, usize)>,
+    enabled: bool,
 ) -> BTreeMap<&'a str, intrinsics::Intrinsic> {
     let explain = intrinsics::explain_on();
     let mut out = BTreeMap::new();
+    // AR.2 — the run gate. `FAB_INTRINSICS=0` wires NOTHING, so the same program evaluates on the pure
+    // interpreter and becomes the oracle a dispatch-level differential diffs the native tier against.
+    // Gated HERE rather than at the call sites because this and `arm_guarded_intrinsics` are the only
+    // two doors, and a third one added later should have to notice this comment.
+    if !enabled {
+        if explain {
+            eprintln!("+ [intrinsics DISABLED] FAB_INTRINSICS=0 — every function INTERPRETED");
+        }
+        return out;
+    }
     for (&name, &((params, body), _home)) in functions {
         // EXPLAIN report (O.3): under FAB_EXPLAIN, say whether each registry-covered function will fire
         // natively (WIRED) or silently interprets because its body drifted from the intrinsic's reference
@@ -3259,6 +3270,9 @@ fn build_intrinsics<'a>(
 fn arm_guarded_intrinsics<'a>(ctx: &Ctx<'a>) -> Vec<(&'a str, intrinsics::Intrinsic)> {
     let explain = intrinsics::explain_on();
     let mut out = Vec::new();
+    if !ctx.config.intrinsics {
+        return out; // AR.2 run gate — the post-hoist door, matching `build_intrinsics`.
+    }
     for (&name, &((params, body), home)) in &ctx.functions {
         let Some(entry) = intrinsics::resolve(name, params, body) else {
             continue;
@@ -4194,7 +4208,7 @@ fn build_ctx(program: &Program, config: Config) -> Ctx<'_> {
     // program), used by nothing. Module resolution against island 0 is exactly the old global lookup.
     // The island's own function/assignment stores stay empty — island 0's global (constants) is the root
     // global that `run_stmts` hoists + publishes, not something built from `Island::assignments` here.
-    let intrinsics = build_intrinsics(&functions);
+    let intrinsics = build_intrinsics(&functions, config.intrinsics);
     Ctx {
         functions,
         intrinsics,
@@ -4375,6 +4389,34 @@ mod tests {
         assert!(
             ctx.intrinsics.contains_key("is_finite"),
             "the other entries keep wiring independently — is_finite bakes nothing, directly or via a dep"
+        );
+    }
+
+    /// AR.2 — the run gate closes BOTH doors. `build_intrinsics` is the build-time one and
+    /// `arm_guarded_intrinsics` the post-hoist one; a gate on only one leaves the other tier live, and
+    /// the differential's "interpreter oracle" would quietly be a half-native run.
+    #[test]
+    fn the_intrinsics_run_gate_closes_both_doors() {
+        // The registry's VERBATIM reference — a fingerprint mismatch would wire nothing either way
+        // and the test would pass vacuously.
+        let src = "function is_nan(x) = (x!=x);\n";
+        let program = crate::parse(src).expect("parses");
+
+        let on = super::build_ctx(&program, crate::Config::default());
+        assert!(
+            !on.intrinsics.is_empty(),
+            "the default config still wires natives — this test is only meaningful if it does"
+        );
+
+        let off_cfg = crate::Config {
+            intrinsics: false,
+            ..crate::Config::default()
+        };
+        let off = super::build_ctx(&program, off_cfg);
+        assert!(off.intrinsics.is_empty(), "build door: nothing wired");
+        assert!(
+            super::arm_guarded_intrinsics(&off).is_empty(),
+            "post-hoist door: nothing armed either"
         );
     }
 

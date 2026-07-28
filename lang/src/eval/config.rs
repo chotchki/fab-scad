@@ -21,6 +21,22 @@ pub struct Config {
     /// Route numeric user-function calls through the Cranelift JIT (desktop only; needs a
     /// [`NumericJitFactory`](super::NumericJitFactory) — wasm passes none, so this is a no-op there). `FAB_JIT`.
     pub jit: bool,
+    /// Dispatch registry-covered user functions to their NATIVE implementations — the hand-written
+    /// intrinsics and the transpiler's generated ones (AR). `FAB_INTRINSICS=0` disables.
+    ///
+    /// Unlike every other knob here this defaults ON, because it has been unconditional since O.5 and
+    /// flipping it would silently change what the whole suite exercises. It exists as a knob at all for
+    /// ONE reason (AR.2): without an off-switch there is no INTERPRETER ORACLE to diff the native tier
+    /// against, so "compiled tier == interpreter" — the transpiler's entire contract — is unfalsifiable
+    /// at the dispatch level. The JIT has had `jit` for exactly this since AN.16, and the binding-bug
+    /// family AN found (a duplicate parameter name, a positional arg taking the lowest unfilled slot, a
+    /// parameter shadowing a dep) is invisible to any harness that binds positionally instead of going
+    /// through `Task::Apply`/`push_call`/the registry.
+    ///
+    /// Like the others it is a pure SPEED knob: a native is bit-identical to interpreting its reference
+    /// by construction, so toggling it must never change output. That invariant is the thing the
+    /// differential checks.
+    pub intrinsics: bool,
     /// Memoize user-FUNCTION-call results (N.2c). OPT-IN (`FAB_EVAL_CACHE=1`), OFF by default everywhere — the
     /// default-on flip was validated + DECLINED (N.2c.2.3): bit-identical, but a net WASH (the N.2c.2.2 auto-off
     /// caps the downside yet can't catch high-hit-rate/cheap-body models). Enable per-model where it's measured
@@ -61,11 +77,14 @@ pub struct Config {
 }
 
 impl Default for Config {
-    /// All execution accelerators OFF (pure interpreter), caps at their tuned defaults. The conservative,
-    /// always-correct baseline — the oracle path and raw-AST tests run on this.
+    /// Execution accelerators off (pure interpreter), caps at their tuned defaults. The conservative,
+    /// always-correct baseline — the oracle path and raw-AST tests run on this. `intrinsics` is the one
+    /// exception, ON by default; see its field doc.
     fn default() -> Self {
         Self {
             jit: false,
+            // ON, breaking this block's otherwise-uniform "accelerators off" rule — see the field doc.
+            intrinsics: true,
             eval_cache: false,
             eval_cache_argcap: 256,
             csg_cache: false,
@@ -95,6 +114,7 @@ impl Config {
         let d = Self::default();
         Self {
             jit: env_on("FAB_JIT"),
+            intrinsics: !env_is("FAB_INTRINSICS", "0"),
             eval_cache: env_on("FAB_EVAL_CACHE"),
             eval_cache_argcap: env_usize("FAB_EVAL_CACHE_ARGCAP", d.eval_cache_argcap),
             csg_cache: !env_is("FAB_CSG_CACHE", "0"),

@@ -73,3 +73,13 @@ path = "fuzz_targets/jit_dispatch_diff.rs"
 test = false
 doc = false
 bench = false
+
+# AR.2 — jit_dispatch_diff's twin, aimed at the NATIVE tier: intrinsics off vs on through the real
+# dispatch. Could not exist until `Config::intrinsics` gave the interpreter oracle an off-switch; every
+# other accelerator had one, the ~55 natives did not. Same contract the transpiler will inherit.
+[[bin]]
+name = "intrinsics_dispatch_diff"
+path = "fuzz_targets/intrinsics_dispatch_diff.rs"
+test = false
+doc = false
+bench = false

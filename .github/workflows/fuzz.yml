@@ -35,15 +35,23 @@ jobs:
       # duration from a real run, adjust. Starting at 2400s (40min) leaves ~20min for the rest against
       # the 1h target; if the job lands short or long, this is the single number to move.
       FUZZ_BUDGET_S: 2400
-      # Shares in PERCENT, summing to 100. Weighted by where the bugs have actually come from: the three
-      # differential targets (eval, jit_diff, jit_dispatch_diff) carry the doctrine-#36 contract and get
-      # the most; lex is a thin tokenizer over a corpus that has long since stopped yielding.
+      # Shares in PERCENT, summing to 100. Weighted by where the bugs have actually come from: the
+      # differential targets carry the doctrine-#36 contract and get the most; lex is a thin tokenizer
+      # over a corpus that has long since stopped yielding.
+      #
+      # AR.2 rebalance — the two JIT lanes gave up 7 points to the new intrinsics differential, on the
+      # ground that they guard a tier that SHIPS DISABLED. FAB_JIT is off in released binaries (the L.4
+      # measurement: 34-334x per call and still a wash on real geometry), so jit_diff/jit_dispatch_diff
+      # are a correctness asset for a code path no user executes. The ~55 hand-written natives are ON in
+      # every build, and AR.5a found three of their guard lists WRONG — that is the tier where a
+      # divergence reaches somebody's print.
       SHARE_PARSE: 14
       SHARE_LEX: 5
       SHARE_EVAL: 14
-      SHARE_JIT_DIFF: 14
+      SHARE_JIT_DIFF: 10
       SHARE_GEN_DIFF: 11
-      SHARE_JIT_DISPATCH: 11
+      SHARE_JIT_DISPATCH: 8
+      SHARE_INTRINSICS_DISPATCH: 7
       SHARE_GEO_LOWER: 11
       SHARE_CSG_TREE: 14
       SHARE_POLYGON: 6
@@ -113,6 +121,14 @@ jobs:
       - name: fuzz jit_dispatch_diff
         working-directory: lang
         run: cargo fuzz run jit_dispatch_diff --target "$FUZZ_TARGET" -- -max_total_time=$(( FUZZ_BUDGET_S * SHARE_JIT_DISPATCH / 100 )) -rss_limit_mb=4096 -max_len=8 -timeout=15
+      # AR.2 — jit_dispatch_diff's twin for the NATIVE tier: intrinsics off vs on, whole generated
+      # program, real dispatch, console compared verbatim. Could not exist until `Config::intrinsics`
+      # gave the interpreter oracle an off-switch — every other accelerator had one, the natives did
+      # not, so "compiled tier == interpreter" was unfalsifiable at the dispatch level for the one tier
+      # that actually ships. This is also the contract the AR transpiler inherits wholesale.
+      - name: fuzz intrinsics_dispatch_diff
+        working-directory: lang
+        run: cargo fuzz run intrinsics_dispatch_diff --target "$FUZZ_TARGET" -- -max_total_time=$(( FUZZ_BUDGET_S * SHARE_INTRINSICS_DISPATCH / 100 )) -rss_limit_mb=4096 -max_len=8 -timeout=15
       # Y.7 — the GEOMETRY-LOWERING seam (fab-scad fuzz crate at the repo root): evaluate_geometry ->
       # build_geo/build_2d through the REAL Manifold kernel, so the kernel's get_unchecked unsafe + the
       # X.4 2D-hull path get ASan on fuzzer geometry. Heavier per-exec than the lang targets (real CSG),
@@ -141,6 +157,7 @@ jobs:
           cargo fuzz cmin lex --target "$FUZZ_TARGET"
           cargo fuzz cmin eval --target "$FUZZ_TARGET"
           cargo fuzz cmin jit_diff --target "$FUZZ_TARGET"
+          cargo fuzz cmin intrinsics_dispatch_diff --target "$FUZZ_TARGET"
       - name: upload minimized corpus
         if: always()
         uses: actions/upload-artifact@v4

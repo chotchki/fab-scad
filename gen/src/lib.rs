@@ -378,6 +378,106 @@ pub fn builtins() -> &'static [Decl] {
     BUILTINS
 }
 
+/// What a callable surface DECLARES about itself — the AR.3 seam, so the generator stops being
+/// hardcoded to the builtin table and can be pointed at a library.
+///
+/// The point of a trait rather than a second const: a transpiled library (AR.1) must be able to say
+/// what it hosts without the generator knowing anything about it, and the SAME declaration has to feed
+/// the dispatch registry and the differential. One description, three consumers.
+///
+/// SEED STABILITY IS PART OF THE CONTRACT. `pick_builtin` indexes the surface with the RNG, so a
+/// surface's order and length determine what every seed generates. Changing either re-points the whole
+/// accumulated fuzz corpus at different programs — the inputs survive, their MEANING doesn't. Hence
+/// `decls` returns a slice the implementor promises to keep stable, and a library surface is ADDITIVE
+/// (a separate surface, chosen explicitly) rather than something merged into `BUILTINS`.
+pub trait Surface {
+    /// The callables this surface hosts, in a stable order.
+    fn decls(&self) -> &[Decl];
+
+    /// SCAD that must precede a generated call — a library's `include`/`use`, or its definitions
+    /// inline. Empty for builtins, which need no preamble. Without this a generated program calls
+    /// functions that don't exist and every seed fails identically on both legs of a differential,
+    /// which LOOKS like agreement.
+    fn preamble(&self) -> &str {
+        ""
+    }
+}
+
+/// The builtin surface — today's table, unchanged, so existing seeds keep their meaning.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Builtins;
+
+impl Surface for Builtins {
+    fn decls(&self) -> &[Decl] {
+        BUILTINS
+    }
+}
+
+/// The NATIVE registry's surface, built from `fab_lang::native_surface()` — the AR.3 payoff.
+///
+/// Nobody writes this table. Names and required-ness are PARSED from each entry's `reference`, the
+/// same verbatim source the fingerprint gate checks at dispatch, so the generator's picture of "what
+/// can I call, and with which argument names" cannot drift from what the natives actually answer. That
+/// is the maintenance win the AR bet is for, and AR.5a is why it matters: three of the registry's
+/// hand-maintained guard lists were wrong.
+///
+/// `names_bind: true` on every entry, unlike [`Builtins`] — these stand in for BOSL2 user functions,
+/// where parameter names really do bind. That single flag is what puts AN.1/AN.2/AN.3/AN.14's whole
+/// diagnostic family in reach; a generator pointed only at builtins can never emit a named-arg call
+/// that means anything.
+///
+/// Domains are the half a signature cannot carry, so every parameter is declared [`Domain::Num`] for
+/// now — honest rather than guessed. Wrong-typed arguments return `undef` almost immediately (AR.4's
+/// trap: a corpus that looks like it measures geometry while measuring error handling), so tightening
+/// these is the next increment, not something to fake here.
+pub struct NativeSurface {
+    decls: Vec<Decl>,
+    preamble: String,
+}
+
+impl NativeSurface {
+    /// Build it from the registry. Leaks the derived strings: a `Decl` holds `&'static str`, the
+    /// surface lives for the process, and the alternative is threading a lifetime through the whole
+    /// generator for a table built once.
+    #[must_use]
+    pub fn from_registry(preamble: impl Into<String>) -> Self {
+        let decls = fab_lang::native_surface()
+            .into_iter()
+            .map(|f| {
+                let params: Vec<Param> = f
+                    .params
+                    .iter()
+                    .map(|p| Param {
+                        name: Box::leak(p.name.clone().into_boxed_str()),
+                        domain: Domain::Num,
+                        required: p.required,
+                    })
+                    .collect();
+                Decl {
+                    name: Box::leak(f.name.into_boxed_str()),
+                    kind: Kind::Function,
+                    ret: Domain::Num,
+                    names_bind: true,
+                    params: Box::leak(params.into_boxed_slice()),
+                }
+            })
+            .collect();
+        NativeSurface {
+            decls,
+            preamble: preamble.into(),
+        }
+    }
+}
+
+impl Surface for NativeSurface {
+    fn decls(&self) -> &[Decl] {
+        &self.decls
+    }
+    fn preamble(&self) -> &str {
+        &self.preamble
+    }
+}
+
 /// The generator state: the RNG plus the lexical scope it's building up.
 pub struct Gen {
     rng: RandStream,
@@ -1245,7 +1345,7 @@ impl Gen {
 
 #[cfg(test)]
 mod tests {
-    use super::{BUILTINS, Gen, Profile, generate};
+    use super::{BUILTINS, Builtins, Gen, NativeSurface, Profile, Surface, generate};
 
     /// Determinism: a seed maps to exactly one program, always (the reproducible-replay guarantee).
     #[test]
@@ -1410,5 +1510,58 @@ mod tests {
                 "seed {seed} produced an unparseable program:\n{src}"
             );
         }
+    }
+
+    /// AR.3 — the seam must not have moved the generator. `pick_builtin` indexes the surface with the
+    /// RNG, so if `Builtins` disagreed with the old const by a single position, every accumulated fuzz
+    /// seed would silently start generating a DIFFERENT program: the corpus files survive, their
+    /// meaning doesn't. Cheapest possible guard, and the one that actually matters.
+    #[test]
+    fn the_builtin_surface_is_byte_for_byte_the_old_table() {
+        let s = Builtins;
+        assert_eq!(s.decls().len(), BUILTINS.len());
+        for (a, b) in s.decls().iter().zip(BUILTINS) {
+            assert_eq!(a.name, b.name, "order is load-bearing — RNG indexes it");
+            assert_eq!(a.params.len(), b.params.len());
+        }
+        assert_eq!(s.preamble(), "", "builtins need no preamble");
+    }
+
+    /// The same seeds must still produce the same programs. A surface refactor that changed generated
+    /// output would invalidate every corpus in `lang/fuzz/corpus` without failing anything.
+    #[test]
+    fn seeds_still_generate_the_same_programs() {
+        for seed in [0u32, 1, 7, 42, 1337, 99_991] {
+            let a = generate(seed);
+            let b = generate(seed);
+            assert_eq!(a, b, "generation is deterministic");
+            assert!(!a.is_empty(), "seed {seed} generated nothing");
+        }
+    }
+
+    /// AR.3's payoff: the native surface is DERIVED, so it describes the registry without anyone
+    /// maintaining a second table. The properties that matter downstream are that it is non-empty,
+    /// that names bind (the AN.14 family is unreachable otherwise), and that defaults survived — a
+    /// generator that always fills every argument cannot reach AN.3.
+    #[test]
+    fn the_native_surface_is_derived_from_the_registry() {
+        let s = NativeSurface::from_registry("include <BOSL2/std.scad>\n");
+        assert!(!s.decls().is_empty(), "the registry has entries");
+        assert_eq!(s.decls().len(), fab_lang::native_surface().len());
+        assert!(
+            s.decls().iter().all(|d| d.names_bind),
+            "these stand in for USER functions — names bind, unlike builtins"
+        );
+        assert!(
+            s.decls()
+                .iter()
+                .any(|d| d.params.iter().any(|p| !p.required)),
+            "defaulted params survived the derivation"
+        );
+        assert!(
+            s.decls().iter().all(|d| !d.name.is_empty()),
+            "every decl names itself"
+        );
+        assert!(s.preamble().contains("BOSL2"), "the preamble rides along");
     }
 }

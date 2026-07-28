@@ -37,6 +37,8 @@ mod native_rt;
 mod poc;
 mod regions;
 mod shape;
+/// AR.3 — the registry's call surface, PARSED from the references (see the module doc).
+pub mod surface;
 #[cfg(test)]
 #[allow(
     clippy::expect_used,

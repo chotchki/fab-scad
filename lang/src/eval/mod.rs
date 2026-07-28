@@ -22,7 +22,7 @@ mod geo2d;
 mod geo_drop;
 mod geo_stack;
 mod geometry;
-mod intrinsics;
+pub(crate) mod intrinsics;
 pub(crate) mod io;
 pub(crate) mod jit_abi;
 mod json;

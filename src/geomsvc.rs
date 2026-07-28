@@ -617,7 +617,13 @@ pub fn render_source_to_solid(source: &Source, root: Option<&str>) -> Result<Sol
 
 /// A rendered part staged for the wire response: its held `SolidId`, STL bytes, and bbox min/max.
 #[cfg(feature = "kernel")]
-type StagedPart = (SolidId, Vec<u8>, Option<Vec<[f32; 4]>>, [f64; 3], [f64; 3]);
+type StagedPart = (
+    SolidId,
+    Vec<u8>,
+    Option<Vec<Option<[f32; 4]>>>,
+    [f64; 3],
+    [f64; 3],
+);
 
 #[cfg(feature = "kernel")]
 fn render_parts_svc(

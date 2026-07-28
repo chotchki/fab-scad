@@ -160,10 +160,21 @@ fn distinct_face_colors(solid: &Solid) -> Vec<[u8; 4]> {
     let Some(colors) = solid.vertex_colors() else {
         return Vec::new();
     };
+    // SY.5 — the SYMMETRIC half of the oracle-side default subtraction below. An UNPAINTED face (a
+    // boolean brought it in from a property-less operand, so Manifold zero-filled its rgba) carries no
+    // color the user asked for; the oracle stamps its colorscheme default on exactly those faces and we
+    // drop it there, so dropping them here too is the same normalization, not a second one. Without
+    // this the scad leg reports a phantom `[0,0,0,0]` for every partially-colored model — which is the
+    // shape the case table never had, so nobody found out.
+    let painted = solid.vertex_painted().unwrap_or_default();
+    let is_painted = |i: u32| painted.get(i as usize).copied().unwrap_or(true);
     let (_verts, tris) = solid.to_indexed();
     let mut set: std::collections::BTreeSet<[u8; 4]> = std::collections::BTreeSet::new();
     for t in &tris {
         let [a, b, c] = t.indices();
+        if !(is_painted(a) && is_painted(b) && is_painted(c)) {
+            continue;
+        }
         let q = |i: u32| oracle::quantize_color(colors[i as usize]);
         let (qa, qb, qc) = (q(a), q(b), q(c));
         if qa == qb && qb == qc {
@@ -686,7 +697,7 @@ mod tests {
         }
         let red = [255, 0, 0, 255];
         let blue = [0, 0, 255, 255];
-        let cases: [(&str, Vec<[u8; 4]>); 5] = [
+        let cases: [(&str, Vec<[u8; 4]>); 7] = [
             ("color(\"red\") cube(10);", vec![red]),
             ("cube(10);", vec![]),
             (
@@ -700,6 +711,19 @@ mod tests {
             (
                 "color(\"red\") cube(5); color(\"blue\") translate([20, 0, 0]) cube(5);",
                 vec![blue, red], // sorted: blue < red
+            ),
+            // SY.5 — the PARTIALLY-colored cases, and the reason this phase exists. Every case above
+            // is wholly colored or wholly uncolored, so the mixed shape went unguarded — and it is the
+            // COMMON one, because BOSL2's `color_this()` does not color attached children. Both of
+            // these produce Manifold zero-fill on the uncolored side; before the SY.2 painted mask
+            // they reported a phantom [0,0,0,0] against the oracle's [red] and would FAIL here.
+            (
+                "color(\"red\") cube(10); translate([20, 0, 0]) cube(10);",
+                vec![red], // the uncolored sibling contributes nothing, on both legs
+            ),
+            (
+                "difference() { color(\"red\") cube(10); translate([5, 5, 5]) cube(8); }",
+                vec![red], // the cut faces come from the UNCOLORED subtrahend
             ),
         ];
         for (src, expected) in cases {

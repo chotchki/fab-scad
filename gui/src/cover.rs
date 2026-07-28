@@ -52,7 +52,7 @@ pub(crate) fn spawn_cover_scene(
     materials: &mut Assets<StandardMaterial>,
     stl: &[u8],
     // The model's own per-corner color (SX.3) — the published cover shows what the viewport shows.
-    colors: Option<&[[f32; 4]]>,
+    colors: Option<&[Option<[f32; 4]>]>,
     orbit: (f32, f32, f32, Vec3),
 ) -> (Handle<Image>, Vec<Entity>) {
     let mut img = Image::new_target_texture(COVER_W, COVER_H, TextureFormat::Rgba8UnormSrgb, None);

@@ -19,7 +19,7 @@ pub(crate) struct Arts {
     stl: Vec<u8>,
     /// The render's per-corner model color (SX.3), so the published COVER shows the same colors the
     /// viewport does rather than a gold stand-in.
-    colors: Option<Vec<[f32; 4]>>,
+    colors: Option<Vec<Option<[f32; 4]>>>,
     min: [f64; 3],
     max: [f64; 3],
     low: std::path::PathBuf,

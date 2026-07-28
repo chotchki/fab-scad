@@ -77,10 +77,11 @@ pub struct SolidId {
 pub struct WirePart {
     pub id: SolidId,
     pub stl: Vec<u8>,
-    /// The model's own color, one rgba per STL CORNER (SX.2) — `None` for uncolored geometry, which
-    /// is what lets the viewer keep its default instead of painting black. See
+    /// The model's own color, one entry per STL CORNER (SX.2) — the OUTER `None` for wholly
+    /// uncolored geometry, an INNER `None` for a corner inside a partially-colored solid that was
+    /// never painted (SY.2). Both mean "substitute your own default"; neither means black. See
     /// [`Solid::to_stl_with_colors`](crate::kernel::Solid::to_stl_with_colors) for why it's per-corner.
-    pub colors: Option<Vec<[f32; 4]>>,
+    pub colors: Option<Vec<Option<[f32; 4]>>>,
     pub min: [f64; 3],
     pub max: [f64; 3],
     pub name: Option<String>,
@@ -97,7 +98,7 @@ pub struct WirePiece {
     /// piece RAINBOW instead (SX.4 — that palette exists to tell N pieces apart, and model color would
     /// destroy it the moment two pieces match): the wire stays honest about what the geometry is, and
     /// the view decides what to draw.
-    pub colors: Option<Vec<[f32; 4]>>,
+    pub colors: Option<Vec<Option<[f32; 4]>>>,
     pub up: [f32; 3],
 }
 
@@ -263,7 +264,7 @@ pub enum Response {
         id: SolidId,
         stl: Vec<u8>,
         /// Per-STL-corner model color (SX.2), `None` when uncolored.
-        colors: Option<Vec<[f32; 4]>>,
+        colors: Option<Vec<Option<[f32; 4]>>>,
         min: [f64; 3],
         max: [f64; 3],
         /// The eval's `echo`/warning console lines (already `ECHO: …` / `WARNING: …`), for the GUI
@@ -279,7 +280,7 @@ pub enum Response {
         stl: Vec<u8>,
         /// Per-STL-corner model color (SX.2) — the sliced preview keeps the model's own color, since
         /// it is still the MODEL view, just cut.
-        colors: Option<Vec<[f32; 4]>>,
+        colors: Option<Vec<Option<[f32; 4]>>>,
     },
     Planned {
         cuts: Vec<(char, f64)>,

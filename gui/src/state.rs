@@ -150,7 +150,7 @@ pub(crate) enum JobResult {
     Resliced {
         part: usize,
         stl: Vec<u8>,
-        colors: Option<Vec<[f32; 4]>>,
+        colors: Option<Vec<Option<[f32; 4]>>>,
     },
 }
 
@@ -161,7 +161,7 @@ pub(crate) struct RenderedPart {
     pub(crate) base: SolidId,
     pub(crate) stl: Vec<u8>,
     /// The model's own color, one rgba per STL corner (SX.2); `None` for uncolored geometry.
-    pub(crate) colors: Option<Vec<[f32; 4]>>,
+    pub(crate) colors: Option<Vec<Option<[f32; 4]>>>,
     pub(crate) min: [f64; 3],
     pub(crate) max: [f64; 3],
     pub(crate) name: Option<String>,

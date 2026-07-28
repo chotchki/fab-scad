@@ -299,21 +299,43 @@ pub(crate) fn mesh_and_bounds(
 /// Build a mesh from in-memory STL bytes (the geometry service's render/reslice output, W.3.3) —
 /// the byte twin of [`mesh_and_bounds`], with no disk round-trip. Bounds come from the wire bbox, so
 /// this returns only the handle. A parse failure falls back to a placeholder box (and logs).
-/// Carries the model's own COLOR (SX.3). `colors` is one rgba per STL corner —
-/// the shape [`Solid::to_stl_with_colors`] emits — so it drops straight onto `ATTRIBUTE_COLOR`
-/// alongside the positions with no re-indexing. `None` (or a length that doesn't match the parsed
-/// corner count, which would mean the wire and the mesh disagree) leaves the mesh uncolored, and
-/// [`part_material`] then paints it the default gold.
+/// Carries the model's own COLOR (SX.3). `colors` is one entry per STL corner — the shape
+/// [`Solid::to_stl_with_colors`] emits — so it drops straight onto `ATTRIBUTE_COLOR` alongside the
+/// positions with no re-indexing. An outer `None` (or a length that doesn't match the parsed corner
+/// count, which would mean the wire and the mesh disagree) leaves the mesh uncolored and
+/// [`part_material`] paints it the default gold.
+///
+/// TWO conversions happen here, both load-bearing (SY.3):
+///
+/// 1. An UNPAINTED corner (inner `None`) becomes [`theme::MODEL_GOLD`] — the same default the
+///    fully-uncolored branch uses, so the uncolored half of a MIXED model reads identically to a
+///    model with no colors at all. The kernel deliberately doesn't pick this: "what does uncolored
+///    look like" is the viewer's question. Before SY.2 there was no way to ASK it — Manifold's
+///    zero-fill made unpainted geometry indistinguishable from `color("transparent")`, and the
+///    viewport painted it opaque black.
+/// 2. sRGB → LINEAR. Bevy reads `ATTRIBUTE_COLOR` as linear, while `color("blue")` and our theme
+///    constants are sRGB. Skipping this is invisible on primary colors — 0 and 1 are fixed points of
+///    the transfer curve, which is exactly why `frame_upper`'s blue/white hid it — and washes out
+///    every mid-tone.
 pub(crate) fn mesh_from_bytes(
     meshes: &mut Assets<Mesh>,
     bytes: &[u8],
-    colors: Option<&[[f32; 4]]>,
+    colors: Option<&[Option<[f32; 4]>]>,
 ) -> Handle<Mesh> {
     match stl::load_stl_bytes(bytes) {
         Ok(s) => {
             let mut mesh = build_mesh(&s);
             if let Some(cs) = colors.filter(|c| c.len() == s.positions.len()) {
-                mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, cs.to_vec());
+                let gold = theme::MODEL_GOLD.to_linear().to_f32_array();
+                let linear: Vec<[f32; 4]> = cs
+                    .iter()
+                    .map(|c| {
+                        c.map_or(gold, |[r, g, b, a]| {
+                            Color::srgba(r, g, b, a).to_linear().to_f32_array()
+                        })
+                    })
+                    .collect();
+                mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, linear);
             }
             meshes.add(mesh)
         }

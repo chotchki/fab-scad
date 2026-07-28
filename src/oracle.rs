@@ -47,8 +47,14 @@ impl OracleMesh {
 
     /// The distinct per-face colors present, quantized + sorted + deduped — RAW (includes OpenSCAD's
     /// colorscheme DEFAULT color, which it leaks onto uncolored CSG results). The differential subtracts
-    /// that default (probed dynamically, since it's `249 215 44` on one install, `157 203 81` on another
-    /// — a preference, not semantic).
+    /// those defaults, probed dynamically because they are a colorscheme PREFERENCE, not semantics.
+    ///
+    /// Plural, and it is not an install-to-install thing — MEASURED on one install (SY.6), one uncolored
+    /// `difference()`: the 3MF carries `Default #F9D72CFF` AND `Color 1 #9DCB51FF` together, and only the
+    /// SECOND is referenced by any triangle's `p1`; `#F9D72C` is the object-level `pindex` fallback that
+    /// nothing points at. So the probe returns a Vec on purpose. Read as "one or the other, depending on
+    /// your install" it looks redundant and invites someone to collapse it to a single color — which
+    /// would stop subtracting whichever one that install actually stamps.
     #[must_use]
     pub fn distinct_colors(&self) -> Vec<[u8; 4]> {
         let set: std::collections::BTreeSet<[u8; 4]> = self

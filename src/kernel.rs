@@ -101,6 +101,11 @@ fn section_or_empty(
 #[derive(Clone)]
 pub struct Solid(std::rc::Rc<Mesh>, PhantomData<*const ()>);
 
+/// One rgba per STL CORNER, `None` where the vertex was never painted (SY.2) — the shape both the
+/// display wire and the 3MF exporter consume. Named because it rides four wire carriers, and because
+/// `Option<Vec<Option<[f32; 4]>>>` spelled out is unreadable at every one of them.
+pub type CornerColors = Vec<Option<[f32; 4]>>;
+
 impl Solid {
     /// The single construction point — keeps the !Send marker consistent everywhere. `Rc` restores
     /// the cheap `clone()` the C++ backend's shared handle gave (a `Mesh` is a deep value type, and
@@ -373,31 +378,38 @@ impl Solid {
     /// wants for a vertex-color attribute, no re-indexing at the far end.
     ///
     /// `None` when the solid is uncolored (stride 3, no color property), so an uncolored model keeps
-    /// whatever default the viewer paints instead of being forced to transparent black.
-    pub fn to_stl_with_colors(&self) -> (Vec<u8>, Option<Vec<[f32; 4]>>) {
+    /// whatever default the viewer paints instead of being forced to transparent black. And within a
+    /// PARTIALLY-colored solid, an individual corner is `None` when its vertex was never painted
+    /// (SY.2's flag) — the caller substitutes its own default there. The kernel refuses to invent one:
+    /// "what does uncolored look like" is a VIEWER question (fab's viewport says gold, OpenSCAD's
+    /// colorscheme says #F9D72C), not a geometry one.
+    pub fn to_stl_with_colors(&self) -> (Vec<u8>, Option<CornerColors>) {
         self.stl_inner(true)
     }
 
     /// The shared STL walk. `want_colors` only decides whether the color array is COLLECTED — the
     /// bytes are identical either way, which is what keeps `to_stl_bytes` a pure subset (pinned by
     /// test) rather than a second implementation that can drift.
-    fn stl_inner(&self, want_colors: bool) -> (Vec<u8>, Option<Vec<[f32; 4]>>) {
+    fn stl_inner(&self, want_colors: bool) -> (Vec<u8>, Option<CornerColors>) {
         let gl = self.0.to_mesh_gl();
         let (v, stride, idx) = (gl.vert_properties, gl.num_prop, gl.tri_verts);
         let p = |i: u32| {
             let b = i as usize * stride;
             [v[b] as f32, v[b + 1] as f32, v[b + 2] as f32]
         };
-        // Colors live in properties 3..7 (J.2.9); stride < 7 means this solid never met `color()`.
-        let colored = want_colors && stride >= 7;
+        // Colors live in properties 3..7 with the painted flag at 7 (SY.2); a stride below
+        // COLOR_STRIDE means this solid never met `color()` at all.
+        let colored = want_colors && stride >= Self::COLOR_STRIDE;
         let rgba = |i: u32| {
             let b = i as usize * stride + 3;
-            [
-                v[b] as f32,
-                v[b + 1] as f32,
-                v[b + 2] as f32,
-                v[b + 3] as f32,
-            ]
+            (v[b + 4] >= 0.5).then(|| {
+                [
+                    v[b] as f32,
+                    v[b + 1] as f32,
+                    v[b + 2] as f32,
+                    v[b + 3] as f32,
+                ]
+            })
         };
         let mut colors = colored.then(|| Vec::with_capacity(idx.len()));
         let ntri = (idx.len() / 3) as u32;
@@ -433,18 +445,41 @@ impl Solid {
         (out, colors)
     }
 
+    /// What an UNPAINTED vertex exports as (SY.4). 3MF has no "unpainted" material — every triangle
+    /// resolves to a concrete `displaycolor` — so the export must name a color. This is OpenSCAD's own
+    /// uncolored default, chosen over fab's viewport gold because a `.3mf` is an INTERCHANGE artifact
+    /// read by other people's tools, where matching the ecosystem beats matching our theme.
+    pub const EXPORT_DEFAULT: Rgba = Rgba {
+        r: 249.0 / 255.0,
+        g: 215.0 / 255.0,
+        b: 44.0 / 255.0,
+        a: 1.0,
+    };
+
     /// Serialize to a standard 3MF (core + `<basematerials>` color) — the whole model as ONE object at
     /// the origin, for the web save-back's mesh variant (W.5). Carries the per-vertex color the kernel
     /// holds ([`vertex_colors`](Self::vertex_colors), which survives every boolean) as a distinct-color
     /// material table; an uncolored solid emits a plain mesh. In-memory, the 3MF twin of
     /// [`to_stl_bytes`](Self::to_stl_bytes). See [`crate::threemf_out`] for the format + the seam caveat.
+    ///
+    /// SY.4: a PARTIALLY-colored solid used to ship `displaycolor="#00000000"` for its unpainted half
+    /// (Manifold's zero-fill, exported verbatim), which three.js renders invisible — so the site showed
+    /// a model with holes in it. Unpainted verts now export [`EXPORT_DEFAULT`](Self::EXPORT_DEFAULT).
     pub fn to_3mf_bytes(&self) -> Vec<u8> {
         let (verts, tris) = self.to_indexed();
         let v: Vec<[f64; 3]> = verts.iter().map(|p| p.to_array()).collect();
         let t: Vec<[u32; 3]> = tris.iter().map(|tri| tri.indices()).collect();
+        let painted = self.vertex_painted();
         let colors = self.vertex_colors().map(|cs| {
             cs.iter()
-                .map(|c| [c.r, c.g, c.b, c.a])
+                .enumerate()
+                .map(|(i, c)| {
+                    let c = match painted.as_ref() {
+                        Some(p) if !p[i] => Self::EXPORT_DEFAULT,
+                        _ => *c,
+                    };
+                    [c.r, c.g, c.b, c.a]
+                })
                 .collect::<Vec<[f64; 4]>>()
         });
         crate::threemf_out::to_3mf_bytes(&v, &t, colors.as_deref())
@@ -465,24 +500,47 @@ impl Solid {
         (verts, tris)
     }
 
-    // --- color (J.2.9) — RGBA as 4 EXTRA Manifold vertex properties (numProp 4 → MeshGL stride 7).
-    // Manifold carries properties through every boolean, so a colored subtree keeps its color when
-    // union/difference/intersection'd (seam verts linear-interpolate, which is exact for a uniform color).
+    // --- color (J.2.9, masked in SY.2) — RGBA + a PAINTED flag as 5 extra Manifold vertex properties
+    // (numProp 5 → MeshGL stride 8). Manifold carries properties through every boolean, so a colored
+    // subtree keeps its color when union/difference/intersection'd (seam verts linear-interpolate,
+    // which is exact for a uniform color).
+    //
+    // Why the fifth channel exists. A boolean's output `num_prop` is `max(P, Q)`, and every output
+    // vertex whose source face came from the operand carrying FEWER properties gets 0.0 pushed into
+    // each missing slot. So `color("blue") cube() - cube()` yields a stride-8 solid where the
+    // subtrahend's faces have rgba (0,0,0,0) — indistinguishable, by value, from geometry the user
+    // painted `color("transparent")` (which IS `Rgba{0,0,0,0}`), and worse, a later boolean
+    // barycentrically blends those zeros against real colors and manufactures partial values no
+    // exact-zero test can catch. The flag turns "was this vertex ever painted?" from a guess into a
+    // fact: `with_color` writes 1.0, Manifold zero-fills 0.0 for the unpainted side, and a blended
+    // seam lands strictly between. Callers substitute their OWN default for the unpainted verts —
+    // the kernel deliberately has no opinion about what uncolored should LOOK like.
+
+    /// The property index of the painted flag (SY.2) — rgba occupies 3..7, the flag is slot 7.
+    const PAINTED: usize = 7;
+    /// MeshGL stride of a colored solid: xyz + rgba + the painted flag.
+    const COLOR_STRIDE: usize = 8;
 
     /// Set EVERY vertex's color to `rgba` — the `color()` module's overwrite (outermost wins in
-    /// OpenSCAD, so re-coloring replaces any inner color). Cheap: one `SetProperties` pass.
+    /// OpenSCAD, so re-coloring replaces any inner color). Cheap: one `SetProperties` pass. Also
+    /// stamps the PAINTED flag, so a later boolean against uncolored geometry stays distinguishable.
     pub fn with_color(&self, rgba: Rgba) -> Solid {
-        Solid::wrap(self.0.set_properties(4, move |new, _pos, _old| {
-            new.copy_from_slice(&rgba.to_array());
+        let [r, g, b, a] = rgba.to_array();
+        Solid::wrap(self.0.set_properties(5, move |new, _pos, _old| {
+            new.copy_from_slice(&[r, g, b, a, 1.0]);
         }))
     }
 
     /// Per-vertex colors, index-aligned with [`to_indexed`](Self::to_indexed)'s verts — or `None` when
-    /// the solid is UNCOLORED (no color property: MeshGL stride 3, not 7).
+    /// the solid is UNCOLORED (no color property: MeshGL stride 3, not 8).
+    ///
+    /// RAW: an unpainted vertex reads back as whatever Manifold zero-filled, NOT as a default. Pair it
+    /// with [`vertex_painted`](Self::vertex_painted) — or use
+    /// [`to_stl_with_colors`](Self::to_stl_with_colors), which folds the two together.
     pub fn vertex_colors(&self) -> Option<Vec<Rgba>> {
         let gl = self.0.to_mesh_gl();
         let (v, stride) = (gl.vert_properties, gl.num_prop);
-        if stride < 7 {
+        if stride < Self::COLOR_STRIDE {
             return None; // xyz only — never colored
         }
         Some(
@@ -491,6 +549,23 @@ impl Solid {
                     let p = i * stride + 3;
                     Rgba::new(v[p], v[p + 1], v[p + 2], v[p + 3])
                 })
+                .collect(),
+        )
+    }
+
+    /// Which vertices were actually PAINTED by a `color()` (SY.2), index-aligned with
+    /// [`vertex_colors`](Self::vertex_colors); `None` for an uncolored solid. A boolean seam between
+    /// painted and unpainted geometry interpolates the flag, so the test is `>= 0.5` rather than
+    /// `== 1.0` — a seam vertex counts as painted when it is mostly painted.
+    pub fn vertex_painted(&self) -> Option<Vec<bool>> {
+        let gl = self.0.to_mesh_gl();
+        let (v, stride) = (gl.vert_properties, gl.num_prop);
+        if stride < Self::COLOR_STRIDE {
+            return None;
+        }
+        Some(
+            (0..v.len() / stride)
+                .map(|i| v[i * stride + Self::PAINTED] >= 0.5)
                 .collect(),
         )
     }
@@ -1321,9 +1396,91 @@ mod tests {
         );
         assert_eq!(bytes.len(), 84 + 50 * ntri, "well-formed binary STL");
 
-        let has = |c: [f32; 4]| colors.contains(&c);
+        let has = |c: [f32; 4]| colors.contains(&Some(c));
         assert!(has(red.to_array().map(|x| x as f32)), "red survived");
         assert!(has(blue.to_array().map(|x| x as f32)), "blue survived");
+        assert!(
+            colors.iter().all(Option::is_some),
+            "every corner of a fully-painted union is painted"
+        );
+    }
+
+    /// SY.2 — the painted MASK. This is the bug the SX display shipped: a boolean between a colored
+    /// and an UNCOLORED solid leaves Manifold's zero-fill on the uncolored side, which by VALUE is
+    /// indistinguishable from `color("transparent")` and got painted opaque black. The flag makes the
+    /// distinction a fact rather than a guess.
+    #[test]
+    fn unpainted_geometry_is_distinguishable_from_transparent_black() {
+        let blue = Rgba::opaque(0.0, 0.0, 1.0);
+        let clear = Rgba::new(0.0, 0.0, 0.0, 0.0); // what `color("transparent")` is
+
+        // A colored solid MINUS an uncolored one: the subtrahend's faces are Manifold zero-fill.
+        let mixed = Solid::cube(20.0, 20.0, 20.0, false)
+            .with_color(blue)
+            .difference(
+                &Solid::cube(20.0, 20.0, 20.0, false).translate(Vec3::new(10.0, 10.0, 10.0)),
+            );
+        let painted = mixed.vertex_painted().expect("colored solid → Some");
+        assert!(
+            painted.iter().any(|&p| p) && painted.iter().any(|&p| !p),
+            "a mixed solid has BOTH painted and unpainted verts — that's the whole case"
+        );
+        // By raw VALUE the unpainted verts are (0,0,0,0); only the flag separates them.
+        let raw = mixed.vertex_colors().unwrap();
+        assert!(
+            raw.iter().zip(&painted).any(|(c, &p)| !p && *c == clear),
+            "unpainted reads back as transparent black — hence the mask"
+        );
+
+        // The same shape painted `transparent` on purpose is FULLY painted, despite identical rgba.
+        let deliberate = Solid::cube(20.0, 20.0, 20.0, false)
+            .with_color(clear)
+            .difference(
+                &Solid::cube(20.0, 20.0, 20.0, false).translate(Vec3::new(10.0, 10.0, 10.0)),
+            );
+        let d_painted = deliberate.vertex_painted().unwrap();
+        assert!(
+            d_painted.iter().any(|&p| p),
+            "color(\"transparent\") IS a paint — it must not read as unpainted"
+        );
+
+        // to_stl_with_colors folds the two: unpainted corners come back as None, not as black.
+        let (_, colors) = mixed.to_stl_with_colors();
+        let colors = colors.expect("colored");
+        assert!(colors.iter().any(Option::is_none), "unpainted → None");
+        assert!(
+            !colors.contains(&Some([0.0, 0.0, 0.0, 0.0])),
+            "no corner is handed out as transparent black"
+        );
+    }
+
+    /// SY.4 — the export twin. 3MF has no unpainted material, so the zero-fill used to ship as
+    /// `#00000000`, which three.js renders invisible: a partially-colored model published with holes.
+    #[test]
+    fn a_partially_colored_export_carries_no_transparent_black() {
+        use std::io::Read;
+        let mixed = Solid::cube(20.0, 20.0, 20.0, false)
+            .with_color(Rgba::opaque(0.0, 0.0, 1.0))
+            .difference(
+                &Solid::cube(20.0, 20.0, 20.0, false).translate(Vec3::new(10.0, 10.0, 10.0)),
+            );
+        let bytes = mixed.to_3mf_bytes();
+        let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
+        let mut f = zip.by_name("3D/3dmodel.model").unwrap();
+        let mut model = String::new();
+        f.read_to_string(&mut model).unwrap();
+        assert!(
+            !model.contains("#00000000"),
+            "the unpainted half must not export as invisible:\n{model}"
+        );
+        assert!(
+            model.contains("#0000FFFF"),
+            "the painted half keeps its blue"
+        );
+        assert!(
+            model.contains("#F9D72CFF"),
+            "the unpainted half exports the interchange default"
+        );
     }
 
     #[test]

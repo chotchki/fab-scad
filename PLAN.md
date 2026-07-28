@@ -1,4 +1,4 @@
-<!-- plan-bridge:phase-high-water=SX -->
+<!-- plan-bridge:phase-high-water=SY -->
 # PLAN
 
 PIVOTED 2026-07-04: scad-rs — a GPL Rust implementation of the OpenSCAD language over the
@@ -33,7 +33,7 @@ Driven by `claude-plan-bridge` (FORMATv2). Hand-authored; run
 - [ ] AR.3 - A LIBRARY SURFACE trait — the thing the advanced fuzzer generates calls against, and the transpiler's output contract (chotchki). Today the generator picks from a hardcoded `const BUILTINS: &[(&str, usize)]` (name + arity), which cannot describe a real library and so cannot fuzz one. Needed instead: a trait a transpiled library implements, declaring the functions/modules it hosts with, per parameter, its NAME (so named-arg calls are generatable, which is where AN.14's whole diagnostic family lives) and a DOMAIN. Note `intrinsics::Entry {name, reference, consts, consts_v, deps, builtins, func}` is ALREADY a hand-maintained surface manifest of exactly this kind — the transpiler should GENERATE that description rather than have it hand-written, and the fuzzer consumes the same one. Three consumers, one declaration: the advanced fuzzer (AO), transpiled-library fuzzing (AR.1), and the intrinsic/transpiled dispatch registry itself
 - [x] AR.4 - DOMAINS are load-bearing for a PERFORMANCE fuzzer, not a nicety — the trap AO.2 must design around. A generated call whose argument types are wrong returns `undef` almost immediately: it costs nothing, renders nothing, and times as ~0. So a surface carrying only (name, arity) produces a corpus that measures ERROR HANDLING while looking like it measures geometry — the failure is invisible, because the programs still run, still agree with the oracle, and still report a ratio. That is the same shape as today's blind-channel bugs: not wrong, unfalsifiable. The surface therefore needs enough type information (number / vector / path / VNF / region / bool) to generate calls that actually DO work, and the heavy lane needs a guard asserting that a timed seed produced non-trivial geometry (vert/tri count over a floor, or eval steps over a floor) rather than trusting that it did. Without that guard a regression in call-generation quality reads as a performance WIN, since failing calls get faster
 - [x] AR.5 - AR.5 - fab-transpile crate: reference ANALYSIS pass, validated against all hand Entry lists
-- [ ] AR.5a - AR.5a - Adjudicate the tracked guard-list deltas (the `unadjudicated` table)
+- [x] AR.5a - AR.5a - Adjudicate the tracked guard-list deltas (the `unadjudicated` table)
 - [x] AR.6 - AR.6 - Expression codegen v0: the poc trio, generated + checked in + regen-gated
 - [x] AR.7 - AR.7 - Replace ONE real hand intrinsic with generated code under the full gate
 - [x] AR.8 - AR.8 - Widen the codegen subset: let, assert, indexing — the next intrinsic band

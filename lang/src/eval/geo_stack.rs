@@ -930,6 +930,10 @@ fn push_user_module<'a>(
     // MISS (or ineligible): the full three-frame setup + body. The depth bump lands HERE (a hit is not a
     // recursion level). The children are stashed for `children()`; the module name pushed for `parent_module`.
     ctx.module_depth.set(depth + 1);
+    // High-water mark for AR.20.1's dispatch budget — see `Ctx::peak_module_depth`.
+    if depth + 1 > ctx.peak_module_depth.get() {
+        ctx.peak_module_depth.set(depth + 1);
+    }
     ctx.children_stack.borrow_mut().push(super::ChildrenFrame {
         stmts: child_stmts,
         assigns: child_assigns,

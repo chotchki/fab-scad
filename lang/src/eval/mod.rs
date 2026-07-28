@@ -408,6 +408,15 @@ pub(super) struct Ctx<'a> {
     /// body re-enters `eval_stmt`), so a self-recursive module could overflow; this bounds it, LOUD
     /// ([`MAX_MODULE_DEPTH`]), never a silent stack crash.
     module_depth: Cell<usize>,
+    /// The DEEPEST `module_depth` this run ever reached — a high-water mark, never decremented.
+    ///
+    /// AR.20.1 needs it: a generated module DISPATCHES to the next one with a direct Rust call, so
+    /// it rides the host stack, where the interpreter's explicit stack does not. That is bounded by
+    /// a depth budget with a decline back to the interpreter past it, and the budget is only worth
+    /// having if real geometry sits comfortably under it — a budget real models routinely blow
+    /// gives back an interpreter with extra steps, which is the one outcome the design rejects.
+    /// So the number gets MEASURED rather than assumed.
+    peak_module_depth: Cell<usize>,
     /// The children-frame STACK for `children()` (I.2.5): each active module call pushes its call-site
     /// children + the caller's scope, so a `children()` in the body renders them LATE-bound. A stack, so
     /// nested module calls each see their own children; `children()` pops during eval so a `children()`
@@ -1043,6 +1052,7 @@ impl<'a> FnOracle<'a> {
             file_needs: RefCell::default(),
             data_needs: RefCell::default(),
             module_depth: Cell::default(),
+            peak_module_depth: Cell::default(),
             children_stack: RefCell::default(),
             local_modules: RefCell::default(),
             module_stack: RefCell::default(),
@@ -2865,6 +2875,17 @@ fn placeholder_island_globals(islands: &loader::Islands<'_>, preview: bool) -> V
 /// # Errors
 /// Parse errors and any evaluation error from the flattened program. A missing source is a NEED, not an
 /// error — the shell decides whether it can fulfill it.
+/// Every loaded file as a `(source, display path)` pair — what the STATIC diagnostics pass needs to
+/// point a warning at a line in the right file.
+fn diag_file_infos(loaded: &loader::Loaded) -> Vec<static_diag::FileInfo<'_>> {
+    (0..loaded.file_count())
+        .map(|i| static_diag::FileInfo {
+            source: loaded.source_of(i),
+            path: loaded.display_path(i),
+        })
+        .collect()
+}
+
 fn resolve_source(
     source: &str,
     base_dir: &std::path::Path,
@@ -2929,12 +2950,7 @@ fn resolve_source(
     // its `include`s spliced in, so a collision that straddles two files keeps both sides' provenance.
     let mut scopes = vec![loaded.root_scope()];
     scopes.extend(loaded.used_scopes());
-    let diag_files: Vec<static_diag::FileInfo<'_>> = (0..loaded.file_count())
-        .map(|i| static_diag::FileInfo {
-            source: loaded.source_of(i),
-            path: loaded.display_path(i),
-        })
-        .collect();
+    let diag_files = diag_file_infos(&loaded);
     let mut ctx = Ctx {
         functions,
         intrinsics,
@@ -2950,6 +2966,7 @@ fn resolve_source(
         file_needs: RefCell::default(),
         data_needs: RefCell::default(),
         module_depth: Cell::default(),
+        peak_module_depth: Cell::default(),
         children_stack: RefCell::default(),
         local_modules: RefCell::default(),
         module_stack: RefCell::default(),
@@ -3423,6 +3440,20 @@ fn eval_top<'a>(stmts: &[&'a Stmt], global: &Scope, ctx: &Ctx<'a>) -> crate::Res
     // eval. Top-level statements resolve modules against island 0 (the root file, I.9.5).
     ctx.root_override.borrow_mut().clear();
     let nodes = eval_geometry(stmts, global, global, 0, ctx)?;
+    // AR.20.1 — `FAB_DEPTH=1` reports how deep this program's module nesting actually went. The
+    // number decides whether AR.20's dispatch design is viable: a generated module calls the next
+    // one directly and so rides the HOST stack, bounded by a budget with a decline back to the
+    // interpreter past it. If real models routinely exceed the budget, dispatch declines constantly
+    // and hands back an interpreter with extra steps — the one outcome the design rejects. Placed
+    // in `eval_top` rather than `run_stmts` because the FILE-resolving entry points reach here
+    // directly, and those are the ones that render a real model. Behind an env var: a diagnostic,
+    // not a metric anything depends on.
+    if std::env::var_os("FAB_DEPTH").is_some() {
+        eprintln!(
+            "+ [depth] peak module nesting {}",
+            ctx.peak_module_depth.get()
+        );
+    }
     // `!` ROOT modifier: if any subtree was `!`-tagged, the program renders ONLY those (ancestors + siblings
     // discarded — `eval_stmt` diverted them into `root_override`). Otherwise the implicit union of top-level
     // objects. `split_off(0)` drains the buffer so a re-run starts clean.
@@ -4236,6 +4267,7 @@ fn build_ctx(program: &Program, config: Config) -> Ctx<'_> {
         file_needs: RefCell::default(),
         data_needs: RefCell::default(),
         module_depth: Cell::default(),
+        peak_module_depth: Cell::default(),
         children_stack: RefCell::default(),
         local_modules: RefCell::default(),
         module_stack: RefCell::default(),

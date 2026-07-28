@@ -20,6 +20,9 @@ use fab_scad::publish_contract as contract;
 /// drives the cover mesh + its bounds (to frame the cover) + the two mesh variants as BYTES.
 pub(crate) struct WebArts {
     stl: Vec<u8>,
+    /// The render's per-corner model color (SX.3), so the published COVER shows the same colors the
+    /// viewport does rather than a gold stand-in.
+    colors: Option<Vec<[f32; 4]>>,
     min: [f64; 3],
     max: [f64; 3],
     low: Vec<u8>,
@@ -191,7 +194,7 @@ pub(crate) fn publish_web_kick(
         let libs = crate::lib_fetch::project_libs(&main_str, render_pack).await;
 
         // 1. full-res render → held handle + display STL + bounds.
-        let (id, stl, min, max) = match pool
+        let (id, stl, colors, min, max) = match pool
             .call(Request::RenderWhole {
                 source: Source::Bytes {
                     main: render_main,
@@ -204,8 +207,13 @@ pub(crate) fn publish_web_kick(
             .await
         {
             Ok(Response::Rendered {
-                id, stl, min, max, ..
-            }) => (id, stl, min, max),
+                id,
+                stl,
+                colors,
+                min,
+                max,
+                ..
+            }) => (id, stl, colors, min, max),
             Ok(Response::Failed { error, .. }) => return Err(format!("render failed: {error}")),
             Ok(_) => return Err("render: unexpected service response".into()),
             Err(e) => return Err(format!("render transport: {e}")),
@@ -230,6 +238,7 @@ pub(crate) fn publish_web_kick(
 
         Ok(WebArts {
             stl,
+            colors,
             min,
             max,
             low,
@@ -282,6 +291,7 @@ pub(crate) fn publish_web_flow(
                     &mut meshes,
                     &mut materials,
                     &arts.stl,
+                    arts.colors.as_deref(),
                     orbit,
                 );
                 status.0 = "publishing: cover…".into();

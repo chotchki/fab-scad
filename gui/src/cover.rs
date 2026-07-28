@@ -51,6 +51,8 @@ pub(crate) fn spawn_cover_scene(
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<StandardMaterial>,
     stl: &[u8],
+    // The model's own per-corner color (SX.3) — the published cover shows what the viewport shows.
+    colors: Option<&[[f32; 4]]>,
     orbit: (f32, f32, f32, Vec3),
 ) -> (Handle<Image>, Vec<Entity>) {
     let mut img = Image::new_target_texture(COVER_W, COVER_H, TextureFormat::Rgba8UnormSrgb, None);
@@ -62,8 +64,8 @@ pub(crate) fn spawn_cover_scene(
     let ents = vec![
         commands
             .spawn((
-                Mesh3d(mesh_from_bytes(meshes, stl)),
-                MeshMaterial3d(part_material(materials)),
+                Mesh3d(mesh_from_bytes(meshes, stl, colors)),
+                MeshMaterial3d(part_material(materials, colors.is_some())),
                 layer.clone(),
             ))
             .id(),

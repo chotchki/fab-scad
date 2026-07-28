@@ -299,9 +299,24 @@ pub(crate) fn mesh_and_bounds(
 /// Build a mesh from in-memory STL bytes (the geometry service's render/reslice output, W.3.3) —
 /// the byte twin of [`mesh_and_bounds`], with no disk round-trip. Bounds come from the wire bbox, so
 /// this returns only the handle. A parse failure falls back to a placeholder box (and logs).
-pub(crate) fn mesh_from_bytes(meshes: &mut Assets<Mesh>, bytes: &[u8]) -> Handle<Mesh> {
+/// Carries the model's own COLOR (SX.3). `colors` is one rgba per STL corner —
+/// the shape [`Solid::to_stl_with_colors`] emits — so it drops straight onto `ATTRIBUTE_COLOR`
+/// alongside the positions with no re-indexing. `None` (or a length that doesn't match the parsed
+/// corner count, which would mean the wire and the mesh disagree) leaves the mesh uncolored, and
+/// [`part_material`] then paints it the default gold.
+pub(crate) fn mesh_from_bytes(
+    meshes: &mut Assets<Mesh>,
+    bytes: &[u8],
+    colors: Option<&[[f32; 4]]>,
+) -> Handle<Mesh> {
     match stl::load_stl_bytes(bytes) {
-        Ok(s) => meshes.add(build_mesh(&s)),
+        Ok(s) => {
+            let mut mesh = build_mesh(&s);
+            if let Some(cs) = colors.filter(|c| c.len() == s.positions.len()) {
+                mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, cs.to_vec());
+            }
+            meshes.add(mesh)
+        }
         Err(e) => {
             error!("parsing service STL ({} bytes): {e:#}", bytes.len());
             meshes.add(Cuboid::new(60.0, 40.0, 30.0))
@@ -327,9 +342,21 @@ pub(crate) fn load_model(meshes: &mut Assets<Mesh>, stl: Option<&Path>) -> Handl
     }
 }
 
-pub(crate) fn part_material(materials: &mut Assets<StandardMaterial>) -> Handle<StandardMaterial> {
+/// The Model view's material (SX.3). `colored` says the mesh carries `ATTRIBUTE_COLOR` — the model's
+/// own `color()`/`color_this()`. Bevy MULTIPLIES `base_color` by the vertex color, so a colored mesh
+/// needs a WHITE base or every model color would come out tinted gold; an uncolored one keeps
+/// [`theme::MODEL_GOLD`], which is what the viewport has always shown and what a plain `cube(10);`
+/// should still look like. Roughness stays put either way so the lighting reads the same.
+pub(crate) fn part_material(
+    materials: &mut Assets<StandardMaterial>,
+    colored: bool,
+) -> Handle<StandardMaterial> {
     materials.add(StandardMaterial {
-        base_color: theme::MODEL_GOLD,
+        base_color: if colored {
+            Color::WHITE
+        } else {
+            theme::MODEL_GOLD
+        },
         perceptual_roughness: 0.7,
         ..default()
     })

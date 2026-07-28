@@ -102,10 +102,11 @@ pub(crate) fn setup_offscreen(
     }
     // Synchronous here — no UI to freeze. Render whole for bounds + the cut plane, then
     // (if asked) slice at the chosen cut so the PNG verifies an off-center cut.
-    let display = setup_offscreen_model(&mut commands, &mut meshes, &mut materials, &scene, &pool);
+    let (display, colored) =
+        setup_offscreen_model(&mut commands, &mut meshes, &mut materials, &scene, &pool);
     commands.spawn((
         Mesh3d(display),
-        MeshMaterial3d(part_material(&mut materials)),
+        MeshMaterial3d(part_material(&mut materials, colored)),
         Model,
         PartId(0),
         Pickable::IGNORE, // uniform with the windowed Model spawns (a Model never blocks picking)
@@ -161,9 +162,9 @@ pub(crate) fn setup_offscreen_model(
     materials: &mut Assets<StandardMaterial>,
     scene: &SceneCfg,
     pool: &GeomPool,
-) -> Handle<Mesh> {
+) -> (Handle<Mesh>, bool) {
     let Some(src) = scene.source.as_deref() else {
-        return load_model(meshes, scene.stl.as_deref());
+        return (load_model(meshes, scene.stl.as_deref()), false);
     };
     // Render WHOLE through the service: mints a base handle we then reslice off. block_on drives the
     // reply here while the kernel thread runs it.
@@ -171,28 +172,40 @@ pub(crate) fn setup_offscreen_model(
         .root
         .as_ref()
         .map(|r| r.to_string_lossy().into_owned());
-    let (base, min, max, whole_mesh) = match block_on(pool.call(Request::RenderWhole {
-        source: Source::Path(src.to_string_lossy().into_owned()),
-        root,
-        preview: true,
-        quality: Quality::Draft,
-    })) {
-        Ok(Response::Rendered {
-            id, stl, min, max, ..
-        }) => (id, min, max, mesh_from_bytes(meshes, &stl)),
-        Ok(Response::Failed { error, .. }) => {
-            error!("{error}");
-            return load_model(meshes, None);
-        }
-        Ok(_) => {
-            error!("render: unexpected service response");
-            return load_model(meshes, None);
-        }
-        Err(e) => {
-            error!("{e:#}");
-            return load_model(meshes, None);
-        }
-    };
+    let (base, min, max, whole_mesh, whole_colored) =
+        match block_on(pool.call(Request::RenderWhole {
+            source: Source::Path(src.to_string_lossy().into_owned()),
+            root,
+            preview: true,
+            quality: Quality::Draft,
+        })) {
+            Ok(Response::Rendered {
+                id,
+                stl,
+                colors,
+                min,
+                max,
+                ..
+            }) => (
+                id,
+                min,
+                max,
+                mesh_from_bytes(meshes, &stl, colors.as_deref()),
+                colors.is_some(),
+            ),
+            Ok(Response::Failed { error, .. }) => {
+                error!("{error}");
+                return (load_model(meshes, None), false);
+            }
+            Ok(_) => {
+                error!("render: unexpected service response");
+                return (load_model(meshes, None), false);
+            }
+            Err(e) => {
+                error!("{e:#}");
+                return (load_model(meshes, None), false);
+            }
+        };
     let (mn, mx) = (
         Vec3::new(min[0] as f32, min[1] as f32, min[2] as f32),
         Vec3::new(max[0] as f32, max[1] as f32, max[2] as f32),
@@ -205,7 +218,7 @@ pub(crate) fn setup_offscreen_model(
     };
     spawn_cut_plane(commands, meshes, materials, mn, mx, &cut, 0);
     if !scene.reslice_on_start {
-        return whole_mesh;
+        return (whole_mesh, whole_colored);
     }
     match block_on(pool.call(Request::Reslice {
         base,
@@ -214,18 +227,21 @@ pub(crate) fn setup_offscreen_model(
         orient: vec![],
         spread: SPREAD,
     })) {
-        Ok(Response::Resliced { stl }) => mesh_from_bytes(meshes, &stl),
+        Ok(Response::Resliced { stl, colors }) => {
+            let c = colors.is_some();
+            (mesh_from_bytes(meshes, &stl, colors.as_deref()), c)
+        }
         Ok(Response::Failed { error, .. }) => {
             error!("{error}");
-            whole_mesh
+            (whole_mesh, whole_colored)
         }
         Ok(_) => {
             error!("reslice: unexpected service response");
-            whole_mesh
+            (whole_mesh, whole_colored)
         }
         Err(e) => {
             error!("{e:#}");
-            whole_mesh
+            (whole_mesh, whole_colored)
         }
     }
 }

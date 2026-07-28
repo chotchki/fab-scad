@@ -575,11 +575,12 @@ fn render_whole_svc(
             )
         })?;
     let (mn, mx) = solid.bbox().context("rendered solid has no bbox")?;
-    let stl = solid.to_stl_bytes();
+    let (stl, colors) = solid.to_stl_with_colors();
     let id = store.mint(solid);
     Ok(Response::Rendered {
         id,
         stl,
+        colors,
         min: mn.to_array(),
         max: mx.to_array(),
         messages,
@@ -616,7 +617,7 @@ pub fn render_source_to_solid(source: &Source, root: Option<&str>) -> Result<Sol
 
 /// A rendered part staged for the wire response: its held `SolidId`, STL bytes, and bbox min/max.
 #[cfg(feature = "kernel")]
-type StagedPart = (SolidId, Vec<u8>, [f64; 3], [f64; 3]);
+type StagedPart = (SolidId, Vec<u8>, Option<Vec<[f32; 4]>>, [f64; 3], [f64; 3]);
 
 #[cfg(feature = "kernel")]
 fn render_parts_svc(
@@ -636,9 +637,9 @@ fn render_parts_svc(
         let Some((mn, mx)) = solid.bbox() else {
             continue;
         };
-        let stl = solid.to_stl_bytes();
+        let (stl, colors) = solid.to_stl_with_colors();
         let id = store.mint(solid);
-        staged.push((id, stl, mn.to_array(), mx.to_array()));
+        staged.push((id, stl, colors, mn.to_array(), mx.to_array()));
     }
     ensure!(
         !staged.is_empty(),
@@ -650,9 +651,10 @@ fn render_parts_svc(
         parts: staged
             .into_iter()
             .zip(names)
-            .map(|((id, stl, min, max), name)| WirePart {
+            .map(|((id, stl, colors, min, max), name)| WirePart {
                 id,
                 stl,
+                colors,
                 min,
                 max,
                 name,
@@ -701,9 +703,8 @@ fn reslice_svc(
             ))
         })
         .collect();
-    Ok(Response::Resliced {
-        stl: Solid::batch_union(&laid).to_stl_bytes(),
-    })
+    let (stl, colors) = Solid::batch_union(&laid).to_stl_with_colors();
+    Ok(Response::Resliced { stl, colors })
 }
 
 fn auto_plan_svc(
@@ -772,7 +773,7 @@ fn print_layout_svc(
     let mut out = Vec::new();
     for (piece, cell) in slicing::slice_solid(&spec, solid)? {
         for (comp, csolid) in cell.components().into_iter().enumerate() {
-            let bytes = csolid.to_stl_bytes();
+            let (bytes, colors) = csolid.to_stl_with_colors();
             let mesh = stl::load_stl_bytes(&bytes)?;
             if mesh.positions.is_empty() {
                 continue;
@@ -782,6 +783,7 @@ fn print_layout_svc(
                 piece,
                 comp,
                 stl: bytes,
+                colors,
                 up: [up[0] as f32, up[1] as f32, up[2] as f32],
             });
         }
@@ -1153,7 +1155,7 @@ mod tests {
             spread: 40.0,
         }))
         .unwrap();
-        let Response::Resliced { stl } = handle_with_store(&mut store, req) else {
+        let Response::Resliced { stl, .. } = handle_with_store(&mut store, req) else {
             panic!("reslice failed")
         };
         assert!(stl.len() > 100, "sliced STL has geometry");

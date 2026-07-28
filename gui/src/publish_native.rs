@@ -17,6 +17,9 @@ use crate::*;
 /// (to frame the cover) + the two mesh variant files already written to the scratch dir.
 pub(crate) struct Arts {
     stl: Vec<u8>,
+    /// The render's per-corner model color (SX.3), so the published COVER shows the same colors the
+    /// viewport does rather than a gold stand-in.
+    colors: Option<Vec<[f32; 4]>>,
     min: [f64; 3],
     max: [f64; 3],
     low: std::path::PathBuf,
@@ -246,7 +249,7 @@ pub(crate) fn publish_kick(
     let task = AsyncComputeTaskPool::get().spawn(async move {
         std::fs::create_dir_all(&out2).map_err(|e| format!("scratch dir: {e}"))?;
         // 1. full-res whole render → base handle + the display STL (the cover mesh source).
-        let (base, stl, min, max) = match pool
+        let (base, stl, colors, min, max) = match pool
             .call(Request::RenderWhole {
                 source: render_source,
                 root,
@@ -256,8 +259,13 @@ pub(crate) fn publish_kick(
             .await
         {
             Ok(Response::Rendered {
-                id, stl, min, max, ..
-            }) => (id, stl, min, max),
+                id,
+                stl,
+                colors,
+                min,
+                max,
+                ..
+            }) => (id, stl, colors, min, max),
             Ok(Response::Failed { error, .. }) => return Err(format!("render failed: {error}")),
             Ok(_) => return Err("render: unexpected service response".into()),
             Err(e) => return Err(format!("render transport: {e}")),
@@ -279,6 +287,7 @@ pub(crate) fn publish_kick(
         std::fs::write(&high, high_b).map_err(|e| format!("write full mesh: {e}"))?;
         Ok(Arts {
             stl,
+            colors,
             min,
             max,
             low,
@@ -334,6 +343,7 @@ pub(crate) fn publish_flow(
                     &mut meshes,
                     &mut materials,
                     &arts.stl,
+                    arts.colors.as_deref(),
                     orbit,
                 );
                 status.0 = "publishing: cover…".into();

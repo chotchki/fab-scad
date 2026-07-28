@@ -360,12 +360,46 @@ impl Solid {
 
     /// Serialize to binary STL bytes (per-face normals computed from the winding).
     pub fn to_stl_bytes(&self) -> Vec<u8> {
+        self.stl_inner(false).0
+    }
+
+    /// [`to_stl_bytes`](Self::to_stl_bytes) plus the PER-CORNER colors that go with it (SX.1) — the
+    /// display path's twin of [`to_3mf_bytes`](Self::to_3mf_bytes)'s per-vertex material table.
+    ///
+    /// STL is a triangle SOUP: it repeats a shared vertex once per face, so the per-VERTEX array
+    /// [`vertex_colors`](Self::vertex_colors) returns (indexed like [`to_indexed`](Self::to_indexed))
+    /// does NOT line up with it. This walks the same `to_mesh_gl` in the same order and emits one rgba
+    /// per emitted corner, so `colors[i]` is corner `i` of the STL — which is the shape a renderer
+    /// wants for a vertex-color attribute, no re-indexing at the far end.
+    ///
+    /// `None` when the solid is uncolored (stride 3, no color property), so an uncolored model keeps
+    /// whatever default the viewer paints instead of being forced to transparent black.
+    pub fn to_stl_with_colors(&self) -> (Vec<u8>, Option<Vec<[f32; 4]>>) {
+        self.stl_inner(true)
+    }
+
+    /// The shared STL walk. `want_colors` only decides whether the color array is COLLECTED — the
+    /// bytes are identical either way, which is what keeps `to_stl_bytes` a pure subset (pinned by
+    /// test) rather than a second implementation that can drift.
+    fn stl_inner(&self, want_colors: bool) -> (Vec<u8>, Option<Vec<[f32; 4]>>) {
         let gl = self.0.to_mesh_gl();
         let (v, stride, idx) = (gl.vert_properties, gl.num_prop, gl.tri_verts);
         let p = |i: u32| {
             let b = i as usize * stride;
             [v[b] as f32, v[b + 1] as f32, v[b + 2] as f32]
         };
+        // Colors live in properties 3..7 (J.2.9); stride < 7 means this solid never met `color()`.
+        let colored = want_colors && stride >= 7;
+        let rgba = |i: u32| {
+            let b = i as usize * stride + 3;
+            [
+                v[b] as f32,
+                v[b + 1] as f32,
+                v[b + 2] as f32,
+                v[b + 3] as f32,
+            ]
+        };
+        let mut colors = colored.then(|| Vec::with_capacity(idx.len()));
         let ntri = (idx.len() / 3) as u32;
         let mut out = Vec::with_capacity(84 + 50 * ntri as usize);
         out.extend_from_slice(&[0u8; 80]); // header
@@ -391,9 +425,12 @@ impl Solid {
                     out.extend_from_slice(&comp.to_le_bytes());
                 }
             }
+            if let Some(cs) = colors.as_mut() {
+                cs.extend([rgba(t[0]), rgba(t[1]), rgba(t[2])]);
+            }
             out.extend_from_slice(&[0u8; 2]); // attribute byte count
         }
-        out
+        (out, colors)
     }
 
     /// Serialize to a standard 3MF (core + `<basematerials>` color) — the whole model as ONE object at
@@ -1248,6 +1285,45 @@ mod tests {
                 .iter()
                 .all(|&c| c == blue)
         );
+    }
+
+    /// SX.1 — the display path's color carrier. STL is a triangle SOUP, so the array has to be one
+    /// rgba per CORNER (3 per triangle), not one per deduped vertex, or a renderer handed it as a
+    /// vertex attribute paints the wrong faces. And the bytes must stay a pure subset of
+    /// `to_stl_bytes`, so the two can't drift into two STL writers.
+    #[test]
+    fn to_stl_with_colors_emits_one_rgba_per_corner_and_the_same_bytes() {
+        let red = Rgba::opaque(1.0, 0.0, 0.0);
+        let blue = Rgba::opaque(0.0, 0.0, 1.0);
+        let cube = Solid::cube(10.0, 10.0, 10.0, false);
+
+        // Uncolored → None, so the viewer keeps its own default instead of painting black.
+        let (plain, none) = cube.to_stl_with_colors();
+        assert!(none.is_none(), "an uncolored solid has no color property");
+        assert_eq!(plain, cube.to_stl_bytes(), "same walk, same bytes");
+
+        // A two-color union carries BOTH, one entry per emitted corner.
+        let two = cube.with_color(red).union(
+            &Solid::cube(6.0, 6.0, 6.0, false)
+                .translate(Vec3::new(20.0, 0.0, 0.0))
+                .with_color(blue),
+        );
+        let (bytes, colors) = two.to_stl_with_colors();
+        assert_eq!(bytes, two.to_stl_bytes(), "colors don't perturb the bytes");
+        let colors = colors.expect("a colored solid yields Some");
+
+        // The STL header records the triangle count; the colors must be exactly 3 per triangle.
+        let ntri = u32::from_le_bytes(bytes[80..84].try_into().unwrap()) as usize;
+        assert_eq!(
+            colors.len(),
+            ntri * 3,
+            "one rgba per CORNER, not per vertex"
+        );
+        assert_eq!(bytes.len(), 84 + 50 * ntri, "well-formed binary STL");
+
+        let has = |c: [f32; 4]| colors.contains(&c);
+        assert!(has(red.to_array().map(|x| x as f32)), "red survived");
+        assert!(has(blue.to_array().map(|x| x as f32)), "blue survived");
     }
 
     #[test]

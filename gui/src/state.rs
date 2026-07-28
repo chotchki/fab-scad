@@ -146,7 +146,12 @@ pub(crate) enum JobResult {
         parts: Vec<RenderedPart>,
     },
     /// One part's sliced STL BYTES — the part index it belongs to (its `Model` entity carries `PartId`).
-    Resliced { part: usize, stl: Vec<u8> },
+    /// `colors` is the model's own per-corner color (SX.2): a slice is still the MODEL view, just cut.
+    Resliced {
+        part: usize,
+        stl: Vec<u8>,
+        colors: Option<Vec<[f32; 4]>>,
+    },
 }
 
 /// One rendered top-level part off the wire: its minted base handle, display STL bytes, world-space
@@ -155,6 +160,8 @@ pub(crate) enum JobResult {
 pub(crate) struct RenderedPart {
     pub(crate) base: SolidId,
     pub(crate) stl: Vec<u8>,
+    /// The model's own color, one rgba per STL corner (SX.2); `None` for uncolored geometry.
+    pub(crate) colors: Option<Vec<[f32; 4]>>,
     pub(crate) min: [f64; 3],
     pub(crate) max: [f64; 3],
     pub(crate) name: Option<String>,

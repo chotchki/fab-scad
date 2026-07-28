@@ -1411,6 +1411,7 @@ fn render_result(resp: anyhow::Result<Response>, fresh: bool) -> Result<JobResul
                     .map(|w| RenderedPart {
                         base: w.id,
                         stl: w.stl,
+                        colors: w.colors,
                         min: w.min,
                         max: w.max,
                         name: w.name,
@@ -1541,7 +1542,7 @@ pub(crate) fn kick_reslice(
             })
             .await
         {
-            Ok(Response::Resliced { stl }) => Ok(JobResult::Resliced { part, stl }),
+            Ok(Response::Resliced { stl, colors }) => Ok(JobResult::Resliced { part, stl, colors }),
             Ok(Response::Failed { error, .. }) => Err(error),
             Ok(_) => Err("reslice: unexpected service response".to_string()),
             Err(e) => Err(format!("{e:#}")),
@@ -1601,6 +1602,7 @@ pub(crate) fn poll_job(
                             i,
                             r.base,
                             &r.stl,
+                            r.colors.as_deref(),
                             r.min,
                             r.max,
                             r.name.clone(),
@@ -1640,6 +1642,7 @@ pub(crate) fn poll_job(
                         i,
                         r.base,
                         &r.stl,
+                        r.colors.as_deref(),
                         r.min,
                         r.max,
                         r.name.clone(),
@@ -1655,8 +1658,9 @@ pub(crate) fn poll_job(
             // (U.3.7). `sync_pipeline` compares the live source hash against this each frame.
             pipeline.geo_of = Some(hash_one(&editor.text));
         }
-        Ok(JobResult::Resliced { part, stl }) => {
-            let mesh = mesh_from_bytes(&mut meshes, &stl);
+        Ok(JobResult::Resliced { part, stl, colors }) => {
+            let mesh = mesh_from_bytes(&mut meshes, &stl, colors.as_deref());
+            let colored = colors.is_some();
             let Some(p) = parts.0.get_mut(part) else {
                 return; // the part went away under us (a reload changed the count) — drop the slice
             };
@@ -1668,7 +1672,7 @@ pub(crate) fn poll_job(
                 despawn_part_models(&mut commands, &models, part);
                 commands.spawn((
                     Mesh3d(mesh),
-                    MeshMaterial3d(part_material(&mut materials)),
+                    MeshMaterial3d(part_material(&mut materials, colored)),
                     Model,
                     PartId(part),
                     // The solid Model must be TRANSPARENT to picking: a no-Pickable mesh blocks the
@@ -1704,14 +1708,15 @@ pub(crate) fn build_part(
     i: usize,
     base: SolidId,
     stl: &[u8],
+    colors: Option<&[[f32; 4]]>,
     min: [f64; 3],
     max: [f64; 3],
     name: Option<String>,
 ) -> Part {
-    let mesh = mesh_from_bytes(meshes, stl);
+    let mesh = mesh_from_bytes(meshes, stl, colors);
     commands.spawn((
         Mesh3d(mesh.clone()),
-        MeshMaterial3d(part_material(materials)),
+        MeshMaterial3d(part_material(materials, colors.is_some())),
         Model,
         PartId(i),
         Pickable::IGNORE, // pick-transparent so a cut-plane drag reaches the plane behind the solid
@@ -1741,15 +1746,16 @@ pub(crate) fn refresh_part(
     i: usize,
     base: SolidId,
     stl: &[u8],
+    colors: Option<&[[f32; 4]]>,
     min: [f64; 3],
     max: [f64; 3],
     name: Option<String>,
 ) {
-    let mesh = mesh_from_bytes(meshes, stl);
+    let mesh = mesh_from_bytes(meshes, stl, colors);
     despawn_part_models(commands, models, i);
     commands.spawn((
         Mesh3d(mesh.clone()),
-        MeshMaterial3d(part_material(materials)),
+        MeshMaterial3d(part_material(materials, colors.is_some())),
         Model,
         PartId(i),
         Pickable::IGNORE, // pick-transparent so a cut-plane drag reaches the plane behind the solid

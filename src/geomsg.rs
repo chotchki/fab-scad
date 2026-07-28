@@ -77,6 +77,10 @@ pub struct SolidId {
 pub struct WirePart {
     pub id: SolidId,
     pub stl: Vec<u8>,
+    /// The model's own color, one rgba per STL CORNER (SX.2) — `None` for uncolored geometry, which
+    /// is what lets the viewer keep its default instead of painting black. See
+    /// [`Solid::to_stl_with_colors`](crate::kernel::Solid::to_stl_with_colors) for why it's per-corner.
+    pub colors: Option<Vec<[f32; 4]>>,
     pub min: [f64; 3],
     pub max: [f64; 3],
     pub name: Option<String>,
@@ -89,6 +93,11 @@ pub struct WirePiece {
     pub piece: [usize; 3],
     pub comp: usize,
     pub stl: Vec<u8>,
+    /// Per-STL-corner model color (SX.2). Carried even though the Orientation/Export views paint the
+    /// piece RAINBOW instead (SX.4 — that palette exists to tell N pieces apart, and model color would
+    /// destroy it the moment two pieces match): the wire stays honest about what the geometry is, and
+    /// the view decides what to draw.
+    pub colors: Option<Vec<[f32; 4]>>,
     pub up: [f32; 3],
 }
 
@@ -253,6 +262,8 @@ pub enum Response {
     Rendered {
         id: SolidId,
         stl: Vec<u8>,
+        /// Per-STL-corner model color (SX.2), `None` when uncolored.
+        colors: Option<Vec<[f32; 4]>>,
         min: [f64; 3],
         max: [f64; 3],
         /// The eval's `echo`/warning console lines (already `ECHO: …` / `WARNING: …`), for the GUI
@@ -266,6 +277,9 @@ pub enum Response {
     },
     Resliced {
         stl: Vec<u8>,
+        /// Per-STL-corner model color (SX.2) — the sliced preview keeps the model's own color, since
+        /// it is still the MODEL view, just cut.
+        colors: Option<Vec<[f32; 4]>>,
     },
     Planned {
         cuts: Vec<(char, f64)>,

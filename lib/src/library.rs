@@ -32,47 +32,47 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
-use crate::parser::{Expr, Parameter, StmtKind, parse};
+use fab_lang::{Expr, Parameter, StmtKind, parse};
 
 /// One top-level `function` the library declares.
 #[derive(Debug, Clone)]
-pub(crate) struct LibFn {
+pub struct LibFn {
     /// The declared name.
-    pub(crate) name: String,
+    pub name: String,
     /// The file it came from, for diagnostics and for grouping generated output.
-    pub(crate) file: String,
+    pub file: String,
     /// Verbatim source of the whole `function … ;` statement — the same bytes the fingerprint
     /// gate would see, so a generated native and its reference cannot describe different code.
-    pub(crate) source: String,
+    pub source: String,
     /// Declared parameters, kept parsed so callers don't re-parse to learn the arity.
-    pub(crate) params: Vec<Parameter>,
+    pub params: Vec<Parameter>,
     /// The body expression.
-    pub(crate) body: Expr,
+    pub body: Expr,
 }
 
 /// One top-level `name = expr;` the library declares — the raw material for AR.16's const bakes.
 #[derive(Debug, Clone)]
-pub(crate) struct LibConst {
-    pub(crate) name: String,
-    pub(crate) file: String,
+pub struct LibConst {
+    pub name: String,
+    pub file: String,
     /// Verbatim source of the right-hand side.
-    pub(crate) source: String,
-    pub(crate) value: Expr,
+    pub source: String,
+    pub value: Expr,
 }
 
 /// Everything one library declares at its top level, plus what it declares AMBIGUOUSLY.
 #[derive(Debug, Default)]
-pub(crate) struct Library {
+pub struct Library {
     /// Unambiguous functions, by name.
-    pub(crate) functions: BTreeMap<String, LibFn>,
+    pub functions: BTreeMap<String, LibFn>,
     /// Unambiguous top-level constants, by name.
-    pub(crate) constants: BTreeMap<String, LibConst>,
+    pub constants: BTreeMap<String, LibConst>,
     /// Names declared more than once, each with every site that declared it. These are held OUT
     /// of `functions`/`constants` — see the module note; resolving them would be a guess.
-    pub(crate) collisions: BTreeMap<String, Vec<String>>,
+    pub collisions: BTreeMap<String, Vec<String>>,
     /// Files that failed to parse, with the reason. Not fatal: a library may carry a file our
     /// grammar doesn't accept yet, and the rest of it is still transpilable.
-    pub(crate) unparsed: Vec<(String, String)>,
+    pub unparsed: Vec<(String, String)>,
     /// PROVENANCE: what each ROOT brings, keyed by the path a consumer writes in its `include`.
     ///
     /// Not bookkeeping — it is what makes a surface answerable. A user who writes
@@ -86,16 +86,16 @@ pub(crate) struct Library {
     /// BOSL2's opt-in files do NOT include std.scad — `gears.scad` has no includes at all and
     /// simply assumes std is already there — so these closures COMPOSE rather than nest, which is
     /// why a root read takes a slice.
-    pub(crate) roots: BTreeMap<String, RootClosure>,
+    pub roots: BTreeMap<String, RootClosure>,
 }
 
 /// The names one root's include closure brings into scope.
 #[derive(Debug, Default, Clone)]
-pub(crate) struct RootClosure {
+pub struct RootClosure {
     /// The files reached, in read order — the root itself first.
-    pub(crate) files: Vec<String>,
-    pub(crate) functions: BTreeSet<String>,
-    pub(crate) constants: BTreeSet<String>,
+    pub files: Vec<String>,
+    pub functions: BTreeSet<String>,
+    pub constants: BTreeSet<String>,
 }
 
 impl Library {
@@ -121,7 +121,7 @@ impl Library {
     /// Files reached THROUGH a root are treated the other way: a read or parse failure lands in
     /// [`Library::unparsed`] and the walk continues, because a library may carry one file our
     /// grammar does not accept yet and the rest of it is still transpilable.
-    pub(crate) fn read_from_roots(roots: &[&Path]) -> Result<Self, String> {
+    pub fn read_from_roots(roots: &[&Path]) -> Result<Self, String> {
         if roots.is_empty() {
             return Err("no roots given — a library is read from at least one entry file".into());
         }
@@ -221,7 +221,7 @@ impl Library {
     /// # Errors
     /// The directory must be readable. Individual files that fail to parse are collected into
     /// [`Library::unparsed`] rather than failing the read.
-    pub(crate) fn read(dir: &Path) -> Result<Self, String> {
+    pub fn read(dir: &Path) -> Result<Self, String> {
         let mut files: Vec<_> = std::fs::read_dir(dir)
             .map_err(|e| format!("read {}: {e}", dir.display()))?
             .filter_map(|e| e.ok().map(|e| e.path()))
@@ -325,7 +325,7 @@ impl Library {
     /// COLLIDING name, which the closure then treats as an unresolved dep. That is the safe
     /// direction: an unresolved dep stays on the guard list and the fingerprint gate settles it at
     /// arm time, rather than the analyzer silently closing over a body the user may not have.
-    pub(crate) fn resolver<'a>(&'a self) -> impl Fn(&str) -> Option<&'a str> + 'a {
+    pub fn resolver<'a>(&'a self) -> impl Fn(&str) -> Option<&'a str> + 'a {
         move |name: &str| self.functions.get(name).map(|f| f.source.as_str())
     }
 }
@@ -343,61 +343,6 @@ mod tests {
 
     fn bosl2() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../libs/BOSL2")
-    }
-
-    /// The library read reproduces what the HAND registry says — which is AR.12's whole claim, and
-    /// the only way to know the new input is equivalent to the old one before the old one goes
-    /// away. For every registry entry whose function BOSL2 declares, the pinned `reference` must
-    /// fingerprint identically to what the library read found.
-    ///
-    /// Fingerprint rather than byte-compare on purpose: the hand references were transcribed, so
-    /// some carry reflowed whitespace, and the fingerprint is exactly the identity the dispatch
-    /// gate uses. Two functions fingerprinting equal ARE the same function to us.
-    #[test]
-    fn hand_references_match_the_pinned_library() {
-        let dir = bosl2();
-        if !dir.join("std.scad").exists() {
-            eprintln!("skipping: libs/BOSL2 submodule not checked out");
-            return;
-        }
-        let lib = Library::read(&dir).expect("BOSL2 reads");
-        let mut checked = 0_usize;
-        let mut drifted = Vec::new();
-        for entry in super::super::intrinsics::REGISTRY {
-            let Some(found) = lib.functions.get(entry.name) else {
-                continue; // our own POCs, and anything the library declares ambiguously
-            };
-            let hand = crate::parser::parse(entry.reference).expect("reference parses");
-            let Some(crate::parser::StmtKind::FunctionDef { params, body, .. }) =
-                hand.stmts.first().map(|s| &s.kind)
-            else {
-                panic!("{}: reference holds no function definition", entry.name);
-            };
-            checked += 1;
-            if super::super::intrinsics::fingerprint::fingerprint(params, body)
-                != super::super::intrinsics::fingerprint::fingerprint(&found.params, &found.body)
-            {
-                drifted.push(format!("{} (from {})", entry.name, found.file));
-            }
-        }
-        println!(
-            "\n=== hand references vs pinned BOSL2 ===\n{checked} of {} registry entries resolve \
-             against the library, {} drifted",
-            super::super::intrinsics::REGISTRY.len(),
-            drifted.len()
-        );
-        assert!(
-            drifted.is_empty(),
-            "{} hand reference(s) no longer match the pinned BOSL2: {drifted:?}. \
-             A drifted reference is a native that is gated on source the library does not \
-             contain, so it never wires — a silent dead intrinsic, not a wrong answer.",
-            drifted.len()
-        );
-        assert!(
-            checked > 40,
-            "only {checked} registry entries resolved against the library — the read is finding \
-             far too little to be a meaningful equivalence check"
-        );
     }
 
     /// The ROOT-relative read is a different library from the directory scan, and the difference is
@@ -510,7 +455,7 @@ mod tests {
         assert!(err.contains("no roots given"), "{err}");
     }
 
-    use crate::parser::{Expr, ExprKind, Stmt, StmtKind};
+    use fab_lang::{Expr, ExprKind, Stmt, StmtKind};
 
     /// AR.20 census helper: which of the module-only features does this expression reach?
     fn walk_expr(e: &Expr, seen: &mut std::collections::BTreeSet<&'static str>) {
@@ -707,7 +652,7 @@ mod tests {
             let Ok(text) = std::fs::read_to_string(path) else {
                 continue;
             };
-            let Ok(prog) = crate::parser::parse(&text) else {
+            let Ok(prog) = fab_lang::parse(&text) else {
                 continue;
             };
             files += 1;
@@ -781,7 +726,7 @@ mod tests {
         let mut declared: BTreeMap<String, (usize, String)> = BTreeMap::new();
         let mut undeclared: BTreeMap<String, (usize, String)> = BTreeMap::new();
         for f in lib.functions.values() {
-            let Ok(a) = super::super::transpile::analyze_function(&f.source) else {
+            let Ok(a) = crate::emit::analyze_function(&f.source) else {
                 continue;
             };
             for name in a.consts {

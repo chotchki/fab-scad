@@ -2894,6 +2894,7 @@ dependencies = [
 name = "fab-lang"
 version = "0.1.0"
 dependencies = [
+ "fab-lib",
  "fab-types",
  "proptest",
  "rustybuzz",
@@ -2902,6 +2903,13 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "winnow 1.0.3",
+]
+
+[[package]]
+name = "fab-lib"
+version = "0.1.0"
+dependencies = [
+ "fab-lang",
 ]
 
 [[package]]

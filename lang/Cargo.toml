@@ -44,6 +44,11 @@ serde_json = "1"
 rustybuzz = "0.20"
 
 [dev-dependencies]
+# AR.14.3 — the TRANSPILER, for the regen gate only. A dev-dependency and not a real one: fab-lang
+# does not need a code generator at runtime, because `generated.rs` is checked in. fab-lib depends
+# on fab-lang the normal way; Cargo permits this cycle precisely because dev-deps do not participate
+# in the build graph of the library itself.
+fab-lib = { path = "../lib" }
 # Property testing for the print/parse roundtrip (H.5.2) — seeded + reproducible (its own TestRng,
 # failures persisted to .proptest-regressions), so it respects the determinism doctrine. Dev-only,
 # so it never touches the shipped lib or its wasm profile.

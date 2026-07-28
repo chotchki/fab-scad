@@ -75,6 +75,16 @@ pub use eval::{
     Value, bench_intrinsic, eval_expr, eval_program, evaluate_geometry_metered, fragments,
     interpret_fn, range_iter, range_len,
 };
+/// AR.14.3 — a function's structural identity, for tools that need to ask "is this the same
+/// function" the way dispatch asks it. Spans excluded, so reformatting survives.
+#[must_use]
+pub fn fingerprint_of(params: &[Parameter], body: &Expr) -> surface::Fingerprint {
+    eval::intrinsics::fingerprint::fingerprint(params, body)
+}
+
+/// AR.14.3 — the transpiler's ANALYSIS needs to classify a call as builtin-or-user, which is not
+/// derivable from the AST: it is a property of the language. Published for `fab-lib`.
+pub use eval::builtins::is_builtin;
 pub use geom::{Affine, Affine2, Dims, Rgba, Tri, Vec2, Vec3, VecExt};
 pub use lexer::{Lexed, Token, TokenKind, decode_str, lex, num_value};
 pub use mesh::Mesh;
@@ -570,4 +580,46 @@ mod tests {
         let err = evaluate("\"unterminated").unwrap_err();
         assert!(matches!(err, Error::Parse(_)), "got {err:?}");
     }
+}
+
+/// AR.14.3 — the BOOTSTRAP bridge: what `fab-lib` needs to regenerate `generated.rs` from the hand
+/// registry, without fab-lang exporting the registry itself.
+///
+/// TEMPORARY BY CONSTRUCTION. It exists only so the regen gate keeps working while the registry is
+/// still the emitter's input for the checked-in file, and it goes away at AR.14.4 when the generated
+/// crate replaces the hand table outright. Nothing but that gate should call it.
+#[doc(hidden)]
+#[must_use]
+pub fn bootstrap_subjects(names: &[&str]) -> Option<Vec<BootstrapSubject>> {
+    eval::intrinsics::bootstrap_subjects(names)
+}
+
+/// One registry entry flattened into what an emitter needs: the source to compile, and the constant
+/// values it bakes, already resolved. See [`bootstrap_subjects`].
+#[doc(hidden)]
+#[derive(Debug, Clone)]
+pub struct BootstrapSubject {
+    pub name: &'static str,
+    pub source: &'static str,
+    /// Scalar constants the native bakes, as `(name, value)`.
+    pub nums: Vec<(&'static str, f64)>,
+    /// Numeric-list constants the native bakes — BOSL2's direction vectors and sentinels.
+    pub lists: Vec<(&'static str, Vec<f64>)>,
+    /// EVERY named constant the entry guards, whatever its type — including the ones `nums`/`lists`
+    /// cannot carry, like BOSL2's `_NO_ARG` string sentinel. The AUDIT needs the names; only the
+    /// EMITTER needs values it can bake, and conflating the two made `bootstrap_all` return nothing
+    /// at all the first time, because one unbakeable sentinel refused the whole registry.
+    pub const_names: Vec<&'static str>,
+    /// The hand-maintained USER-FUNCTION guard list — what AR.5a audits against a derived walk.
+    pub deps: &'static [&'static str],
+    /// The hand-maintained BUILTIN guard list, same.
+    pub builtins: &'static [&'static str],
+}
+
+/// AR.14.3 — every registry entry as a bootstrap subject, plus the reference-only [`PINS`] anchors,
+/// for the AR.5a guard audit. Same temporary status as [`bootstrap_subjects`].
+#[doc(hidden)]
+#[must_use]
+pub fn bootstrap_all() -> (Vec<BootstrapSubject>, Vec<(&'static str, &'static str)>) {
+    eval::intrinsics::bootstrap_all()
 }

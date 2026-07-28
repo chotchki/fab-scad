@@ -1,0 +1,12 @@
+[package]
+name = "fab-lib"
+version = "0.1.0"
+edition = "2024"
+description = "The OpenSCAD library transpiler: .scad source in, Rust source out"
+license = "GPL-2.0-or-later"
+publish = false
+
+[dependencies]
+# The parser and the value vocabulary. fab-lib reads what fab-lang parses and emits against
+# `fab_lang::rt`, so the dependency runs THIS way and only this way — see the crate doc.
+fab-lang = { path = "../lang" }

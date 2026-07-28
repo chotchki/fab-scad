@@ -27,7 +27,8 @@ use super::value::Value;
 use crate::parser::{Expr, Parameter};
 
 mod affine;
-pub(in crate::eval) mod fingerprint;
+pub(crate) mod fingerprint;
+
 // Generated code keeps its emitter's exact bytes — the regen test pins them; fmt stays out.
 #[rustfmt::skip]
 mod generated;
@@ -2215,4 +2216,68 @@ fn module_fingerprint(
     };
     crate::parser::print(&as_program).hash(&mut h);
     crate::surface::Fingerprint::new(h.finish())
+}
+
+/// AR.14.3 — the bootstrap bridge's implementation. See [`crate::bootstrap_subjects`] for why this
+/// exists and when it goes away.
+pub(crate) fn bootstrap_subjects(names: &[&str]) -> Option<Vec<crate::BootstrapSubject>> {
+    let mut out = Vec::with_capacity(names.len());
+    for &name in names {
+        let entry = REGISTRY.iter().find(|e| e.name == name)?;
+        let mut nums: Vec<(&'static str, f64)> = entry.consts.to_vec();
+        let mut lists: Vec<(&'static str, Vec<f64>)> = Vec::new();
+        for &(n, build) in entry.consts_v {
+            match build() {
+                Value::Num(x) => nums.push((n, x)),
+                Value::NumList(xs) => lists.push((n, xs.to_vec())),
+                // Anything else is not emittable as a bake, and silently dropping it would let a
+                // native compile against a constant it never actually baked. Refuse the whole batch.
+                _ => return None,
+            }
+        }
+        out.push(crate::BootstrapSubject {
+            name: entry.name,
+            source: entry.reference,
+            nums,
+            lists,
+            const_names: const_names_of(entry),
+            deps: entry.deps,
+            builtins: entry.builtins,
+        });
+    }
+    Some(out)
+}
+
+/// AR.14.3 — see [`crate::bootstrap_all`].
+pub(crate) fn bootstrap_all() -> (
+    Vec<crate::BootstrapSubject>,
+    Vec<(&'static str, &'static str)>,
+) {
+    // Built WITHOUT the emittable-bake filter, deliberately. `bootstrap_subjects` refuses a batch
+    // containing a constant it cannot emit — right for the emitter, and wrong here: BOSL2's
+    // `_NO_ARG` is a string sentinel, so going through that path returned an EMPTY registry and the
+    // audit silently had nothing to check. The audit needs names, not values.
+    let subjects = REGISTRY
+        .iter()
+        .map(|entry| crate::BootstrapSubject {
+            name: entry.name,
+            source: entry.reference,
+            nums: entry.consts.to_vec(),
+            lists: Vec::new(),
+            const_names: const_names_of(entry),
+            deps: entry.deps,
+            builtins: entry.builtins,
+        })
+        .collect();
+    (subjects, PINS.to_vec())
+}
+
+/// Every constant name an entry guards, both the scalar and the value-typed halves.
+fn const_names_of(entry: &Entry) -> Vec<&'static str> {
+    entry
+        .consts
+        .iter()
+        .map(|&(n, _)| n)
+        .chain(entry.consts_v.iter().map(|&(n, _)| n))
+        .collect()
 }

@@ -27,7 +27,8 @@ use super::{build_vector, iter_values_raw};
 
 /// Is `name` a builtin we implement? Checked at a call site AFTER user functions, BEFORE "unknown"
 /// (so a user function may shadow a builtin, per OpenSCAD).
-pub(super) fn is_builtin(name: &str) -> bool {
+#[must_use]
+pub fn is_builtin(name: &str) -> bool {
     matches!(
         name,
         "abs"

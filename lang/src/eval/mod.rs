@@ -26,7 +26,6 @@ pub(crate) mod intrinsics;
 pub(crate) mod io;
 pub(crate) mod jit_abi;
 mod json;
-mod library;
 mod loader;
 mod message;
 mod metrics;
@@ -42,7 +41,6 @@ mod scope;
 mod static_diag;
 mod text;
 mod trace;
-mod transpile;
 mod trig;
 pub(crate) mod value;
 

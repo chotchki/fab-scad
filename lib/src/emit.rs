@@ -21,23 +21,22 @@
 use std::collections::BTreeSet;
 use std::fmt::Write;
 
-use super::value::Value;
-use crate::parser::{Arg, Expr, ExprKind, Parameter, StmtKind, parse};
+use fab_lang::{Arg, Expr, ExprKind, Parameter, StmtKind, parse};
 
 /// What one function's reference source reaches, by name — the raw material for an `Entry`'s guard
 /// sets (names only; the guard VALUES are resolved against the island at arm time, not here).
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
-pub(crate) struct Analysis {
+pub struct Analysis {
     /// The defined function's name.
-    pub(crate) name: String,
+    pub name: String,
     /// Parameter names, in declaration order.
-    pub(crate) params: Vec<String>,
+    pub params: Vec<String>,
     /// Free VALUE-position identifier reads (non-`$`) — the names `consts`/`consts_v` must guard.
-    pub(crate) consts: BTreeSet<String>,
+    pub consts: BTreeSet<String>,
     /// CALL-position names that are not builtins — user-function dependencies (`deps`).
-    pub(crate) deps: BTreeSet<String>,
+    pub deps: BTreeSet<String>,
     /// CALL-position builtin names (`builtins`) — shadowable, hence guarded.
-    pub(crate) builtins: BTreeSet<String>,
+    pub builtins: BTreeSet<String>,
 }
 
 /// Analyze a single `function name(params) = body;` reference.
@@ -45,7 +44,7 @@ pub(crate) struct Analysis {
 /// # Errors
 /// The reference must parse and contain exactly one function definition (the `Entry::reference`
 /// contract) — anything else is a malformed reference, not a valid analysis subject.
-pub(crate) fn analyze_function(reference: &str) -> Result<Analysis, String> {
+pub fn analyze_function(reference: &str) -> Result<Analysis, String> {
     let prog = parse(reference).map_err(|e| format!("reference does not parse: {e:?}"))?;
     let mut defs = prog.stmts.iter().filter_map(|s| match &s.kind {
         StmtKind::FunctionDef { name, params, body } => Some((name, params, body)),
@@ -92,9 +91,9 @@ pub(crate) fn analyze_function(reference: &str) -> Result<Analysis, String> {
 /// pass doing the flatten and the hand lists were RIGHT.
 /// The `'r` is load-bearing: the resolved source must outlive the call, but it must NOT be tied to
 /// the queried NAME's lifetime (elision would infer exactly that and reject every real resolver).
-/// A registry-backed resolver hands back `&'static str`; a [`super::library::Library`]-backed one
+/// A registry-backed resolver hands back `&'static str`; a [`crate::library::Library`]-backed one
 /// hands back a slice of the file it read, and both satisfy this.
-pub(crate) fn analyze_closed<'r>(
+pub fn analyze_closed<'r>(
     reference: &str,
     resolve: &dyn Fn(&str) -> Option<&'r str>,
 ) -> Result<Analysis, String> {
@@ -122,7 +121,7 @@ pub(crate) fn analyze_closed<'r>(
 /// A constant value a generated native BAKES, in a form that can be emitted bit-exactly
 /// (`f64::from_bits`) — never a decimal round-trip.
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) enum Baked {
+pub enum Baked {
     Num(f64),
     NumList(Vec<f64>),
 }
@@ -181,7 +180,7 @@ fn emit_num(n: f64) -> String {
 /// # Errors
 /// A construct outside the v0 subset (strings, `let`, comprehensions, indexing, asserts …)
 /// declines LOUDLY with the construct named — a partial native would be a wrong native.
-pub(crate) fn generate_native(
+pub fn generate_native(
     reference: &str,
     baked: &[(&str, Baked)],
     siblings: &[(String, Vec<String>)],
@@ -277,7 +276,7 @@ impl Emitter<'_> {
     }
 
     fn expr(&mut self, e: &Expr) -> Result<String, String> {
-        use crate::parser::BinOp;
+        use fab_lang::BinOp;
         match &e.kind {
             ExprKind::Num(n) => Ok(emit_num(*n)),
             ExprKind::Bool(b) => Ok(format!("rt::Value::Bool({b})")),
@@ -453,7 +452,7 @@ impl Emitter<'_> {
                 "call through the local binding `{name}` (the AN.10 shape) resolves at runtime"
             ));
         }
-        if super::builtins::is_builtin(name) {
+        if fab_lang::is_builtin(name) {
             let emitted: Vec<String> = args
                 .iter()
                 .map(|a| self.expr(&a.value))
@@ -582,29 +581,21 @@ impl Emitter<'_> {
     }
 }
 
-/// One entry's baked constants (`consts` + `consts_v`), merged into the batch's fallback-program
-/// constant table. A name baking DIFFERENTLY across entries is a hard error, not last-wins — the
-/// fallback is ONE island, so a conflict means two entries disagree about the same binding.
-fn bake_entry<'a>(
-    entry: &'a super::intrinsics::Entry,
+/// A bootstrap subject's baked constants, merged into the batch's fallback-program constant table.
+/// A name baking DIFFERENTLY across entries is a hard error, not last-wins — the fallback is ONE
+/// island, so a conflict means two entries disagree about the same binding.
+fn bake_bootstrap<'a>(
+    subject: &'a fab_lang::BootstrapSubject,
     fallback_consts: &mut std::collections::BTreeMap<String, String>,
 ) -> Result<Vec<(&'a str, Baked)>, String> {
-    let name = entry.name;
-    let mut baked: Vec<(&str, Baked)> = entry
-        .consts
+    let name = subject.name;
+    let mut baked: Vec<(&str, Baked)> = subject
+        .nums
         .iter()
         .map(|&(n, v)| (n, Baked::Num(v)))
         .collect();
-    for &(n, build) in entry.consts_v {
-        match build() {
-            Value::Num(x) => baked.push((n, Baked::Num(x))),
-            Value::NumList(xs) => baked.push((n, Baked::NumList(xs.to_vec()))),
-            other => {
-                return Err(format!(
-                    "{name}: consts_v `{n}` bakes {other:?} — not emittable in v0"
-                ));
-            }
-        }
+    for (n, xs) in &subject.lists {
+        baked.push((*n, Baked::NumList(xs.clone())));
     }
     for (n, b) in &baked {
         let scad = b
@@ -626,20 +617,18 @@ fn bake_entry<'a>(
 ///
 /// # Errors
 /// An unknown entry name, or anything [`generate_batch`] declines.
-pub(crate) fn generate_module(entry_names: &[&str]) -> Result<String, String> {
+pub fn generate_module(entry_names: &[&str]) -> Result<String, String> {
+    let bootstrap = fab_lang::bootstrap_subjects(entry_names)
+        .ok_or_else(|| format!("not all of {entry_names:?} are registry entries"))?;
     let mut sink = std::collections::BTreeMap::new();
-    let mut subjects = Vec::with_capacity(entry_names.len());
-    for &name in entry_names {
-        let entry = super::intrinsics::REGISTRY
-            .iter()
-            .find(|e| e.name == name)
-            .ok_or_else(|| format!("`{name}` is not a registry entry"))?;
+    let mut subjects = Vec::with_capacity(bootstrap.len());
+    for b in &bootstrap {
         subjects.push(Subject {
-            name: entry.name,
-            source: entry.reference,
-            // `bake_entry` also fills a fallback-const map, which `generate_batch` rebuilds from
-            // the subjects; the throwaway `sink` keeps that side effect out of the way.
-            baked: bake_entry(entry, &mut sink)?,
+            name: b.name,
+            source: b.source,
+            // `bake_bootstrap` also fills a fallback-const map, which `generate_batch` rebuilds
+            // from the subjects; the throwaway `sink` keeps that side effect out of the way.
+            baked: bake_bootstrap(b, &mut sink)?,
         });
     }
     generate_batch(&subjects)
@@ -657,8 +646,8 @@ pub(crate) fn generate_module(entry_names: &[&str]) -> Result<String, String> {
 /// # Errors
 /// A name the library does not unambiguously declare (a collision counts as not declared), or
 /// anything [`generate_batch`] declines.
-pub(crate) fn generate_from_library(
-    lib: &super::library::Library,
+pub fn generate_from_library(
+    lib: &crate::library::Library,
     names: &[&str],
 ) -> Result<String, String> {
     let mut subjects = Vec::with_capacity(names.len());
@@ -682,11 +671,11 @@ pub(crate) fn generate_from_library(
 /// AR.12.2 — the seam that decouples the emitter from `intrinsics::REGISTRY`. The transpiler used to
 /// read the hand registry directly, which made it depend on the very thing it exists to delete, and
 /// made moving it into its own crate impossible. A subject can come from a registry entry or
-/// straight out of a [`super::library::Library`]; the emitter cannot tell and must not care.
-pub(crate) struct Subject<'a> {
-    pub(crate) name: &'a str,
-    pub(crate) source: &'a str,
-    pub(crate) baked: Vec<(&'a str, Baked)>,
+/// straight out of a [`crate::library::Library`]; the emitter cannot tell and must not care.
+pub struct Subject<'a> {
+    pub name: &'a str,
+    pub source: &'a str,
+    pub baked: Vec<(&'a str, Baked)>,
 }
 
 /// The whole generated FILE for a batch of subjects, header + imports included.
@@ -696,7 +685,7 @@ pub(crate) struct Subject<'a> {
 /// A subject whose source does not parse to a single function definition, or that uses a construct
 /// outside the emitter's subset — declines LOUDLY with the construct named, because a partial native
 /// would be a wrong native.
-pub(crate) fn generate_batch(subjects: &[Subject<'_>]) -> Result<String, String> {
+pub fn generate_batch(subjects: &[Subject<'_>]) -> Result<String, String> {
     // The sibling table FIRST, whole batch, self included: mutual recursion (approx ↔ idx ↔
     // posmod is a real 3-cycle) forward-references freely in Rust, and named sibling arguments
     // bind against these declared param lists at compile time.
@@ -778,7 +767,7 @@ pub(crate) fn generate_batch(subjects: &[Subject<'_>]) -> Result<String, String>
 /// The entries the generated module currently covers, in DEPENDENCY order (a sibling call may
 /// only reach entries earlier in this list). Growing this list is how an intrinsic migrates from
 /// hand-written to generated (AR.7).
-pub(crate) const GENERATED_ENTRIES: &[&str] = &[
+pub const GENERATED_ENTRIES: &[&str] = &[
     "_fab_poc_sq",
     "_fab_poc_near0",
     "_fab_poc_outer",
@@ -818,7 +807,7 @@ fn record_call(name: &str, out: &mut Analysis) {
     if name.starts_with('$') {
         return;
     }
-    if super::builtins::is_builtin(name) {
+    if fab_lang::is_builtin(name) {
         out.builtins.insert(name.to_string());
     } else {
         out.deps.insert(name.to_string());
@@ -956,10 +945,7 @@ fn walk(e: &Expr, scope: &mut Vec<String>, out: &mut Analysis) {
     reason = "test harness: expect/panic ARE the assertions"
 )]
 mod tests {
-    use std::collections::BTreeSet;
-
-    use super::super::intrinsics::{PINS, REGISTRY};
-    use super::{analyze_closed, analyze_function};
+    use super::analyze_function;
 
     /// AR.11 — how much of the pinned BOSL2 the emitter actually owns, as a RATCHET. Runs the
     /// codegen over every top-level function in the library and asserts the emit count never
@@ -1007,12 +993,12 @@ mod tests {
         let mut refs: Vec<(String, String, String)> = Vec::new(); // (file, name, source)
         let mut unparsed_files = 0_usize;
         for (file, text) in &sources {
-            let Ok(prog) = crate::parser::parse(text) else {
+            let Ok(prog) = fab_lang::parse(text) else {
                 unparsed_files += 1;
                 continue;
             };
             for stmt in &prog.stmts {
-                if let crate::parser::StmtKind::FunctionDef {
+                if let fab_lang::StmtKind::FunctionDef {
                     name,
                     params,
                     body: _,
@@ -1125,172 +1111,24 @@ mod tests {
         format!("other — {}", tail.chars().take(50).collect::<String>())
     }
 
-    /// Names the syntactic walk reaches that the HAND lists prune, each with the reason. A pruned
-    /// name is unreachable FOR THAT ENTRY's accepted arg shapes, so its whole SUBTREE is pruned —
-    /// the comparison's resolver refuses to walk it, exactly as the author's transitive exclusion
-    /// does (select drops `all_nonzero` AND therefore `all_nonzero`'s own `abs`). The direction
-    /// matters: an over-approximation left in place would only make a guard CHECK MORE, never
-    /// answer wrong; a name missing from DERIVED is a red test and an analyzer bug.
-    fn pruned_by_author(entry: &str) -> &'static [&'static str] {
-        match entry {
-            // ── the `is_vector` family ───────────────────────────────────────────────────────────
-            // `is_vector(v, length, zero, all_nonzero=false, eps=_EPSILON)` has two dead tails for
-            // every entry here, because none of them passes anything past the SECOND parameter:
-            //   * `zero` stays undef, so `is_undef(zero) ||` short-circuits before `norm(v)`;
-            //   * `all_nonzero` keeps its `false` default, so `!all_nonzero ||` short-circuits before
-            //     `all_nonzero(v)` — and with it that function's own `abs`.
-            // A pruned name prunes its whole SUBTREE, which is why `abs`/`norm` come along. AR.5a
-            // adjudicated each of these against the entry's accepted arg shapes; the per-entry arms
-            // below are DELIBERATELY not collapsed into one, because the sets differ and a shared arm
-            // would silently prune a name for an entry nobody checked.
-            "select" | "_none_inside" | "_get_ear" | "vector_axis" => &["all_nonzero"],
-            "unit" | "_bt_search" | "_point_dist" => &["all_nonzero", "abs"],
-            "_vnf_centroid" | "v_abs" => &["all_nonzero", "norm"],
-            "is_matrix" | "sum" | "_apply" | "is_path" | "v_theta" => {
-                &["all_nonzero", "abs", "norm"]
-            }
-            // `apply` adds the sum family: its `is_matrix`/`is_vector` shape tests never reach the
-            // point-list branch that would call `sum`/`_sum`.
-            "apply" => &["all_nonzero", "abs", "norm", "sum", "_sum"],
-            // `vector_angle`/`affine3d_rot_from_to` reach `flatten`/`list_to_matrix` only through a
-            // `list_to_matrix` branch their fixed call shapes never take.
-            "vector_angle" => &["all_nonzero", "abs", "flatten", "list_to_matrix"],
-            "affine3d_rot_from_to" => &["flatten", "list_to_matrix"],
-            // posmod's `approx(m, 0)` sits behind `is_finite(m) &&` — the short-circuit proves
-            // approx only ever sees SCALARS from posmod. `idx` lives in approx's list branch, and
-            // `is_list`/`len` are that branch's own guard condition, equally dead for numbers
-            // (evaluation reaches `is_num(a) && is_num(b)?` first and takes it).
-            "posmod" => &["idx", "is_list", "len"],
-            // affine3d_rot_by_axis takes the SCALAR approx lane only (`assert(is_finite(ang))` pins
-            // it), so approx's list branch — `idx`, and `posmod`/`is_string` under it — is dead.
-            // NOTE `abs` is NOT here: that one is reachable, and AR.5a moved it into the hand list.
-            "affine3d_rot_by_axis" => &["all_nonzero", "idx", "posmod", "is_string"],
-            // `rot` is a DISPATCHER: its body picks one affine lane per call shape, and the
-            // point-list lane (centroid/mean/pointlist_bounds/transpose/in_list/force_list/sum/_sum/
-            // flatten/list_to_matrix/_all_func/is_path, plus the `search` builtin) belongs to the
-            // `p=` argument the native declines.
-            "rot" => &[
-                "search",
-                "_all_func",
-                "_sum",
-                "centroid",
-                "flatten",
-                "force_list",
-                "in_list",
-                "is_path",
-                "list_to_matrix",
-                "mean",
-                "pointlist_bounds",
-                "sum",
-                "transpose",
-            ],
-            // `is_def` is reached only through a defaulted parameter this entry always supplies.
-            "_region_region_intersections" => &["is_def"],
-            _ => &[],
-        }
-    }
-
-    /// AR.5a: this table is EMPTY, and that is the point. It parked derived-minus-hand deltas that
-    /// nobody had reasoned about yet; every one has now been adjudicated into either a documented
-    /// pruning above or a hand-list FIX (three were real missing guards — `affine3d_rot_by_axis`
-    /// wanted `abs`, `_region_region_intersections` wanted `is_bool` + `is_string`).
+    /// AR.6 — the checked-in `generated.rs` is CURRENT: regenerating it produces the same
+    /// bytes. The emitter lives in fab-lib now, so this gate reaches ACROSS the crate boundary
+    /// to the file fab-lang ships — which is exactly the relationship AR.14.4 formalises when
+    /// the generated crate replaces the checked-in file.
     ///
-    /// It stays as a named seam rather than being deleted, because the next widening of the codegen
-    /// subset will surface new deltas and they should land HERE — visible and tracked — rather than
-    /// in `pruned_by_author`, which is for names somebody proved unreachable. The two directions are
-    /// not symmetric: a wrong pruning deletes a correctness guard and lets a native wire where the
-    /// interpreter would diverge; a wrong hand-list entry only makes the guard check more.
-    fn unadjudicated(_entry: &str, _kind: &str) -> &'static [&'static str] {
-        &[]
-    }
-
-    /// The acceptance oracle for the whole pass: every hand-maintained guard list in the registry,
-    /// closed over the same dep graph, must be CONTAINED in what the analyzer derives — and the
-    /// over-approximation must be exactly the documented pruning, nothing silent in either
-    /// direction. ~55 AN-audited entries is the strongest ground truth this analysis can get.
-    #[test]
-    fn derived_guards_contain_every_hand_list() {
-        let mut deltas: Vec<String> = Vec::new();
-        for entry in REGISTRY {
-            let allow = pruned_by_author(entry.name);
-            let resolve = |name: &str| -> Option<&'static str> {
-                if allow.contains(&name) {
-                    return None; // author-pruned: this entry never reaches it, subtree and all
-                }
-                REGISTRY
-                    .iter()
-                    .find(|e| e.name == name)
-                    .map(|e| e.reference)
-                    .or_else(|| PINS.iter().find(|(n, _)| *n == name).map(|(_, src)| *src))
-            };
-            let derived = analyze_closed(entry.reference, &resolve)
-                .unwrap_or_else(|e| panic!("{}: {e}", entry.name));
-
-            let hand_consts: BTreeSet<&str> = entry
-                .consts
-                .iter()
-                .map(|(n, _)| *n)
-                .chain(entry.consts_v.iter().map(|(n, _)| *n))
-                .collect();
-            let hand_deps: BTreeSet<&str> = entry.deps.iter().copied().collect();
-            let hand_builtins: BTreeSet<&str> = entry.builtins.iter().copied().collect();
-
-            for (kind, hand, derived_set) in [
-                ("consts", &hand_consts, &derived.consts),
-                ("deps", &hand_deps, &derived.deps),
-                ("builtins", &hand_builtins, &derived.builtins),
-            ] {
-                let missing: Vec<&&str> =
-                    hand.iter().filter(|n| !derived_set.contains(**n)).collect();
-                if !missing.is_empty() {
-                    deltas.push(format!(
-                        "{}: hand {kind} {missing:?} NOT DERIVED — the analyzer failed to reach \
-                         a name the author proved matters (AN territory)",
-                        entry.name
-                    ));
-                }
-                let tracked = unadjudicated(entry.name, kind);
-                let extra: Vec<&String> = derived_set
-                    .iter()
-                    .filter(|n| {
-                        !hand.contains(n.as_str())
-                            && !allow.contains(&n.as_str())
-                            && !tracked.contains(&n.as_str())
-                    })
-                    .collect();
-                if !extra.is_empty() {
-                    deltas.push(format!(
-                        "{}: derived {kind} {extra:?} beyond the hand list and undocumented — \
-                         either the hand list is INCOMPLETE (fix the entry) or the walk needs a \
-                         rule (document it in `pruned_by_author`)",
-                        entry.name
-                    ));
-                }
-            }
-        }
-        assert!(
-            deltas.is_empty(),
-            "{} guard-list deltas:\n{}",
-            deltas.len(),
-            deltas.join("\n")
-        );
-    }
-
-    /// The generated file is BYTE-IDENTICAL to what the generator produces from today's registry —
-    /// the checked-in-output contract that answers the design doc's build-cost kill risk (no
-    /// build.rs; contributors pay nothing; drift is a red test, refreshed explicitly).
+    /// Refresh with `FAB_REGEN=1`.
     #[test]
     fn generated_file_is_current() {
         let want = super::generate_module(super::GENERATED_ENTRIES).expect("generates");
         let path = concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/src/eval/intrinsics/generated.rs"
+            "/../lang/src/eval/intrinsics/generated.rs"
         );
         if std::env::var_os("FAB_REGEN").is_some() {
             std::fs::write(path, &want).expect("write generated.rs");
             return;
         }
-        let have = include_str!("intrinsics/generated.rs");
+        let have = include_str!("../../lang/src/eval/intrinsics/generated.rs");
         assert_eq!(
             have, want,
             "generated.rs is stale — refresh with FAB_REGEN=1 (see the file header)"
@@ -1346,7 +1184,7 @@ mod tests {
             eprintln!("skipping: libs/BOSL2 submodule not checked out");
             return;
         }
-        let lib = super::super::library::Library::read(&dir).expect("BOSL2 reads");
+        let lib = crate::library::Library::read(&dir).expect("BOSL2 reads");
 
         // Const-free entries that BOSL2 declares and the registry also carries, so both inputs can
         // describe them. A function needing a baked constant is AR.16's business, not this test's.
@@ -1389,7 +1227,12 @@ mod tests {
         let code = text
             .rsplit_once("\"#;")
             .map_or(text.as_str(), |(_, tail)| tail);
-        for forbidden in ["crate::eval", "crate::parser", "super::", "crate::Result"] {
+        for forbidden in [
+            "crate::eval",
+            "crate::parser",
+            "super::",
+            "fab_lang::Result",
+        ] {
             assert!(
                 !code.contains(forbidden),
                 "generated code reaches `{forbidden}` — that resolves only while this file lives \
@@ -1457,27 +1300,17 @@ mod tests {
     /// bind undef where the native bakes real bits.
     #[test]
     fn a_non_finite_numlist_const_declines() {
-        #[allow(
-            clippy::unnecessary_wraps,
-            reason = "Entry.func's required Intrinsic signature — the wrap is the contract"
-        )]
-        fn noop(_: &[crate::Value]) -> crate::Result<crate::Value> {
-            Ok(crate::Value::Undef)
-        }
-        fn inf_list() -> crate::Value {
-            crate::Value::num_list(vec![1.0, f64::INFINITY])
-        }
-        let entry = super::super::intrinsics::Entry {
+        let subject = fab_lang::BootstrapSubject {
             name: "t",
-            reference: "function t() = C;",
-            consts: &[],
-            consts_v: &[("C", inf_list)],
+            source: "function t() = C;",
+            nums: Vec::new(),
+            lists: vec![("C", vec![1.0, f64::INFINITY])],
+            const_names: vec!["C"],
             deps: &[],
             builtins: &[],
-            func: noop,
         };
         let mut consts = std::collections::BTreeMap::new();
-        let err = super::bake_entry(&entry, &mut consts).expect_err("declines");
+        let err = super::bake_bootstrap(&subject, &mut consts).expect_err("declines");
         assert!(err.contains("non-finite element"), "{err}");
     }
 }

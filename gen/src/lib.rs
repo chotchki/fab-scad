@@ -430,10 +430,13 @@ impl Surface for Builtins {
 /// diagnostic family in reach; a generator pointed only at builtins can never emit a named-arg call
 /// that means anything.
 ///
-/// Domains are the half a signature cannot carry, so every parameter is declared [`Domain::Num`] for
-/// now — honest rather than guessed. Wrong-typed arguments return `undef` almost immediately (AR.4's
-/// trap: a corpus that looks like it measures geometry while measuring error handling), so tightening
-/// these is the next increment, not something to fake here.
+/// Domains are DERIVED too (AR.3.3), from the type tests each reference applies to its own arguments —
+/// `is_vector`, `is_list`, `is_num`, `len`, indexing, and the scalar-only math builtins. A parameter
+/// the body never tests stays [`Domain::Num`], which is the generator's fallback rather than a claim.
+///
+/// A parameter carries a SET upstream, because these functions are polymorphic on purpose (`approx`
+/// accepts bools, numbers AND lists). `Decl` holds one domain, so the widest observed type wins here —
+/// generating the LIST arm of a polymorphic function exercises more than the scalar arm does.
 pub struct NativeSurface {
     decls: &'static [Decl],
     preamble: String,
@@ -453,7 +456,7 @@ impl NativeSurface {
                     .iter()
                     .map(|p| Param {
                         name: Box::leak(p.name.clone().into_boxed_str()),
-                        domain: Domain::Num,
+                        domain: widest(&p.domains),
                         required: p.required,
                     })
                     .collect();
@@ -471,6 +474,33 @@ impl NativeSurface {
             preamble: preamble.into(),
         }
     }
+}
+
+/// The widest type observed for a parameter, as a generator [`Domain`].
+///
+/// "Widest" rather than "first" because a polymorphic function's LIST arm does more work than its
+/// scalar arm, and work is what the corpus is supposed to be measuring (AR.4). `Indexable` alone means
+/// the body only ever did `len(p)` or `p[i]` — true of a string as well as a list, so it maps to the
+/// list side, which is the useful guess. `Vector` maps to `VecN` rather than `Vec3` — the body
+/// said "numeric list", not "exactly three". An empty set falls back to `Num`.
+fn widest(domains: &[fab_lang::SurfaceDomain]) -> Domain {
+    use fab_lang::SurfaceDomain as S;
+    let mut best = Domain::Num;
+    let mut rank = 0u8;
+    for d in domains {
+        let (cand, r) = match d {
+            S::Bool => (Domain::Bool, 1),
+            S::Str => (Domain::Str, 2),
+            S::Num => (Domain::Num, 3),
+            S::Indexable | S::List => (Domain::List, 4),
+            S::Vector => (Domain::VecN, 5),
+        };
+        if r > rank {
+            best = cand;
+            rank = r;
+        }
+    }
+    best
 }
 
 impl Surface for NativeSurface {
@@ -1385,7 +1415,7 @@ impl Gen {
 
 #[cfg(test)]
 mod tests {
-    use super::{BUILTINS, Builtins, Gen, NativeSurface, Profile, Surface, generate};
+    use super::{BUILTINS, Builtins, Domain, Gen, NativeSurface, Profile, Surface, generate};
 
     /// Determinism: a seed maps to exactly one program, always (the reproducible-replay guarantee).
     #[test]
@@ -1638,5 +1668,46 @@ mod tests {
         let differ = (0u32..20)
             .any(|seed| super::generate_against(seed, Profile::CHEAP, &native) != generate(seed));
         assert!(differ, "the surface never reached the generator");
+    }
+
+    /// AR.3.3 — the derived domains reach the generated CALL. `v_theta`'s body tests `is_vector` on
+    /// its argument, so a heavy-lane call must hand it a numeric vector rather than whatever the RNG
+    /// felt like. This is the difference between a corpus that measures work and one that measures
+    /// `undef` (AR.4): a wrongly-typed argument bails instantly, and the seed still "passes".
+    ///
+    /// Heavy profile on purpose — `CHEAP` sets `domains: false` deliberately, to keep its frozen bytes
+    /// and to cover type MISMATCH. Asserting against CHEAP would test the opposite of the intent.
+    #[test]
+    fn derived_domains_reach_the_generated_call() {
+        let surface = NativeSurface::from_registry("include <BOSL2/std.scad>\n");
+        let vector_params: Vec<&str> = surface
+            .decls()
+            .iter()
+            .filter(|d| d.params.iter().any(|p| p.domain == Domain::VecN))
+            .map(|d| d.name)
+            .collect();
+        assert!(
+            !vector_params.is_empty(),
+            "no native derived a vector parameter — the domain walk is not reaching is_vector"
+        );
+
+        // Over a spread of seeds, at least one call to a vector-taking native must pass a LIST.
+        let mut saw_typed_call = false;
+        for seed in 0u32..60 {
+            let src = super::generate_against(seed, Profile::heavy(2), &surface);
+            for name in &vector_params {
+                if let Some(i) = src.find(&format!("{name}(")) {
+                    let tail = &src[i + name.len() + 1..];
+                    if tail.starts_with('[') {
+                        saw_typed_call = true;
+                    }
+                }
+            }
+        }
+        assert!(
+            saw_typed_call,
+            "60 heavy seeds and not one vector-taking native got a list — domains are not reaching \
+             the call, so the corpus is measuring undef"
+        );
     }
 }

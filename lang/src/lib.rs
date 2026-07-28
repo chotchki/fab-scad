@@ -51,7 +51,7 @@ pub use error::{Error, Failure, Result, RunResult};
 /// AR.3 — the native registry's CALL SURFACE, parsed from the same references the fingerprint gate
 /// checks, so a consumer's picture of "what can I call" cannot drift from what actually dispatches.
 /// The generator (AO), transpiled-library fuzzing (AR.1) and the registry read ONE declaration.
-pub use eval::intrinsics::surface::{SurfaceFn, SurfaceParam, native_surface};
+pub use eval::intrinsics::surface::{SurfaceDomain, SurfaceFn, SurfaceParam, native_surface};
 pub use eval::jit_abi::{jit_math, jit_math_id};
 pub use eval::rng::RandStream;
 pub use eval::{

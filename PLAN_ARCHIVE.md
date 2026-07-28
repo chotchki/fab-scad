@@ -1156,3 +1156,15 @@ added 2026-07-27.
 - [x] SW.5 - e2e verify: frame_upper.scad renders WITH FamilyLogo.svg via offscreen --script AND windowed --shot (gui-real-window-verify); full print flow on wall_screen (slice → plates → 3mf); wasm pack path unaffected
 - [x] SW.6 - docs + memory updated (shadow design note superseded), phase summary swept to PLAN_ARCHIVE.md
 
+---
+
+## 2026-07-28
+
+## Phase SX - Model color reaches the viewport — the kernel already carries it, the display wire drops it
+- [x] SX.1 - kernel: `to_stl_with_colors` — the STL twin that also emits PER-CORNER rgba aligned with the triangle soup (same `to_mesh_gl` walk, same order, so index i of the color array is corner i of the STL). `None` for an uncolored solid (stride 3). Tests: a two-color union gives two distinct corner colors; uncolored gives None; the positions are byte-identical to `to_stl_bytes`
+- [x] SX.2 - geomsg + geomsvc: carry `colors: Option<Vec<[f32; 4]>>` on the four DISPLAY carriers that drop it today — WirePart (Model view), WirePiece (Orientation/Export), Response::Rendered (cover/publish/screenshot), Response::Resliced. Populate at each producer from SX.1. Export carriers (GeomObject, Piece) already have per-object color and stay as they are — this is the display half of A.9
+- [x] SX.3 - gui: `build_mesh` inserts `Mesh::ATTRIBUTE_COLOR` when colors arrive, and `part_material` splits — a vertex-colored mesh gets a WHITE-base StandardMaterial (Bevy multiplies base by vertex color), an uncolored one keeps MODEL_GOLD. Applies to every Model-view spawn site (jobs.rs seed/refresh, screenshot, cover)
+- [x] SX.4 - POLICY, decided up front so it isn't re-litigated: model color owns the MODEL view; the Orientation/Export views KEEP the HSL rainbow (print.rs:377 — hue by piece index, +25° off the navy wedge, 47° stride). That palette exists to tell N pieces apart, and model color would destroy it the moment two pieces share a color. Cut planes/connector overlays keep their own hues (cuts.rs:880) too
+- [x] SX.5 - e2e + wasm: frame_upper.scad shows BLUE in the Model view via offscreen --script (PNG-diff against the pre-SX gold, the discriminator — a uniform-gold render is what the bug looks like); a two-color model shows BOTH; an uncolored model stays gold; the wasm worker path carries colors too (Source::Bytes) and `-p fab-gui --lib -p fab-geom` stays green
+- [x] SX.6 - docs + sweep: record the color model end to end (kernel per-vertex rgba survives booleans -> display wire -> Bevy ATTRIBUTE_COLOR; outermost-color-wins is ORACLE-MATCHED, verified against the OpenSCAD binary on sibling + nested cases, so it is not a bug to chase), plus the color_this/color nesting trap BOSL2 itself warns about; phase summary to PLAN_ARCHIVE.md
+

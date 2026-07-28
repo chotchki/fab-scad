@@ -1,4 +1,4 @@
-<!-- plan-bridge:phase-high-water=SW -->
+<!-- plan-bridge:phase-high-water=SX -->
 # PLAN
 
 PIVOTED 2026-07-04: scad-rs — a GPL Rust implementation of the OpenSCAD language over the

@@ -20,6 +20,7 @@
     reason = "the uniform fallible Intrinsic fn-pointer type; infallible impls wrap in Ok to conform"
 )]
 
+use std::collections::BTreeMap;
 use std::sync::OnceLock;
 
 use super::value::Value;
@@ -1920,23 +1921,40 @@ fn non_terminating(name: &str) -> crate::Error {
 /// fingerprinting its `(params, body)`. Lazy + cached: the parse cost is paid the first time an intrinsic is
 /// looked up in the process, never per call. A `reference` that doesn't parse to a single `function` def is
 /// a registry BUG — it's dropped with a debug assert rather than silently mis-registering.
-fn table() -> &'static [(u64, &'static Entry)] {
-    static TABLE: OnceLock<Vec<(u64, &'static Entry)>> = OnceLock::new();
+fn table() -> &'static BTreeMap<&'static str, (crate::surface::Fingerprint, &'static Entry)> {
+    static TABLE: OnceLock<BTreeMap<&'static str, (crate::surface::Fingerprint, &'static Entry)>> =
+        OnceLock::new();
     TABLE.get_or_init(|| {
-        REGISTRY
-            .iter()
-            .filter_map(|entry| Some((reference_fingerprint(entry.reference)?, entry)))
-            .collect()
+        let mut map = BTreeMap::new();
+        for entry in REGISTRY {
+            let Some(fp) = reference_fingerprint(entry.reference) else {
+                continue;
+            };
+            let prior = map.insert(entry.name, (fp, entry));
+            debug_assert!(
+                prior.is_none(),
+                "registry declares `{}` twice — the index keeps one and dispatch silently loses \
+                 the other",
+                entry.name
+            );
+        }
+        map
     })
 }
 
 /// The [`PINS`] fingerprints, same lazy shape as [`table`].
-fn pin_table() -> &'static [(&'static str, u64)] {
-    static TABLE: OnceLock<Vec<(&'static str, u64)>> = OnceLock::new();
+fn pin_table() -> &'static BTreeMap<&'static str, crate::surface::Fingerprint> {
+    static TABLE: OnceLock<BTreeMap<&'static str, crate::surface::Fingerprint>> = OnceLock::new();
     TABLE.get_or_init(|| {
-        PINS.iter()
-            .filter_map(|&(name, reference)| Some((name, reference_fingerprint(reference)?)))
-            .collect()
+        let mut map = BTreeMap::new();
+        for &(name, reference) in PINS {
+            let Some(fp) = reference_fingerprint(reference) else {
+                continue;
+            };
+            let prior = map.insert(name, fp);
+            debug_assert!(prior.is_none(), "PINS declares `{name}` twice");
+        }
+        map
     })
 }
 
@@ -1945,12 +1963,13 @@ fn pin_table() -> &'static [(&'static str, u64)] {
 /// the fingerprints are the SAME cached ones dispatch uses, so the audit can never disagree with the
 /// wire gate about what "matched" means. The `_fab_` namespace (the O.1 proof-of-concept trio) is
 /// fab-authored — no upstream defines it, so upstream parity doesn't apply and it's excluded.
-pub(super) fn matrix_targets() -> impl Iterator<Item = (&'static str, u64, bool)> {
+pub(super) fn matrix_targets()
+-> impl Iterator<Item = (&'static str, crate::surface::Fingerprint, bool)> {
     table()
-        .iter()
+        .values()
         .filter(|(_, e)| !e.name.starts_with("_fab_"))
         .map(|(fp, e)| (e.name, *fp, false))
-        .chain(pin_table().iter().map(|&(n, fp)| (n, fp, true)))
+        .chain(pin_table().iter().map(|(&n, &fp)| (n, fp, true)))
 }
 
 /// Test-only: every MATRIX-AUDITED reference source (entries + pins, `_fab_` POC excluded to mirror
@@ -1969,22 +1988,16 @@ pub(super) fn all_reference_sources() -> Vec<(&'static str, &'static str)> {
 /// entry if it has one, else its [`PINS`] row. `None` = the dep isn't anchored anywhere — a registry
 /// authoring bug the depending entry then never wires over.
 #[must_use]
-pub(super) fn anchor_fp(name: &str) -> Option<u64> {
+pub(super) fn anchor_fp(name: &str) -> Option<crate::surface::Fingerprint> {
     table()
-        .iter()
-        .find(|(_, e)| e.name == name)
+        .get(name)
         .map(|(fp, _)| *fp)
-        .or_else(|| {
-            pin_table()
-                .iter()
-                .find(|(n, _)| *n == name)
-                .map(|(_, fp)| *fp)
-        })
+        .or_else(|| pin_table().get(name).copied())
 }
 
 /// Parse a registry `reference` (one `function` def) and fingerprint it, or `None` if it isn't exactly that
 /// (a registry authoring bug).
-fn reference_fingerprint(reference: &str) -> Option<u64> {
+fn reference_fingerprint(reference: &str) -> Option<crate::surface::Fingerprint> {
     use crate::parser::{StmtKind, parse};
     let program = parse(reference).ok()?;
     let stmt = program.stmts.into_iter().next()?;
@@ -2009,10 +2022,7 @@ fn reference_fingerprint(reference: &str) -> Option<u64> {
 #[must_use]
 pub(super) fn resolve(name: &str, params: &[Parameter], body: &Expr) -> Option<&'static Entry> {
     let fp = fingerprint(params, body);
-    table()
-        .iter()
-        .find(|(f, e)| e.name == name && *f == fp)
-        .map(|(_, e)| *e)
+    table().get(name).filter(|(f, _)| *f == fp).map(|(_, e)| *e)
 }
 
 /// A registry entry by NAME alone — no fingerprint, no program.
@@ -2022,7 +2032,7 @@ pub(super) fn resolve(name: &str, params: &[Parameter], body: &Expr) -> Option<&
 /// `build_intrinsics` before any island scope exists to check a constant against (AN.17's
 /// `needs_post_hoist`). A name is unique in the registry even though fingerprints are not.
 pub(super) fn entry_by_name(name: &str) -> Option<&'static Entry> {
-    REGISTRY.iter().find(|e| e.name == name)
+    table().get(name).map(|(_, e)| *e)
 }
 
 /// Test-only access to a registry entry's reference source, for the fast==slow harness.
@@ -2057,7 +2067,7 @@ pub(super) enum Plan {
 /// stderr report ([`super::build_intrinsics`]) is just this plus a print.
 #[must_use]
 pub(super) fn classify(name: &str, params: &[Parameter], body: &Expr) -> Plan {
-    if !REGISTRY.iter().any(|e| e.name == name) {
+    if !table().contains_key(name) {
         return Plan::NotRegistered;
     }
     // Fingerprint-level truth: a guarded match is WIRED here (the source matched); whether its deps/consts
@@ -2074,11 +2084,8 @@ pub(super) fn classify(name: &str, params: &[Parameter], body: &Expr) -> Plan {
 /// next to the running function's own fingerprint so an author can SEE how the two differ (stale reference vs
 /// a genuinely different library version). See [`fingerprint`].
 #[must_use]
-pub(super) fn reference_fp(name: &str) -> Option<u64> {
-    table()
-        .iter()
-        .find(|(_, e)| e.name == name)
-        .map(|(fp, _)| *fp)
+pub(super) fn reference_fp(name: &str) -> Option<crate::surface::Fingerprint> {
+    table().get(name).map(|(fp, _)| *fp)
 }
 
 /// Is the `FAB_EXPLAIN` intrinsic-plan report on? Cached once (env read per ctx build would be silly).

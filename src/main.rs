@@ -1133,8 +1133,8 @@ fn intrinsics_cmd(bosl2: &Path, json: bool, md: bool) -> Result<()> {
         fab_lang::IntrinsicMatrixStatus::Missing => "missing",
     };
     let kind = |r: &fab_lang::IntrinsicMatrixRow| if r.pin { "pin" } else { "intrinsic" };
-    let fp_or = |fp: Option<u64>, absent: &str| {
-        fp.map_or_else(|| absent.to_string(), |fp| format!("{fp:#018x}"))
+    let fp_or = |fp: Option<fab_lang::surface::Fingerprint>, absent: &str| {
+        fp.map_or_else(|| absent.to_string(), |fp| fp.to_string())
     };
     let drifted: Vec<_> = rows
         .iter()
@@ -1146,12 +1146,11 @@ fn intrinsics_cmd(bosl2: &Path, json: bool, md: bool) -> Result<()> {
             .map(|r| {
                 format!(
                     "  {{\"name\": \"{}\", \"pin\": {}, \"status\": \"{}\", \"defined_fp\": {}, \
-                     \"reference_fp\": \"{:#018x}\"}}",
+                     \"reference_fp\": \"{}\"}}",
                     r.name,
                     r.pin,
                     status(r),
-                    r.defined_fp
-                        .map_or("null".into(), |fp| format!("\"{fp:#018x}\"")),
+                    r.defined_fp.map_or("null".into(), |fp| format!("\"{fp}\"")),
                     r.reference_fp,
                 )
             })
@@ -1208,7 +1207,7 @@ fn intrinsics_cmd(bosl2: &Path, json: bool, md: bool) -> Result<()> {
         );
         for r in &drifted {
             println!(
-                "  {} {}{} — defined {} vs reference {:#018x} → INTERPRETED there",
+                "  {} {}{} — defined {} vs reference {} → INTERPRETED there",
                 status(r),
                 r.name,
                 if r.pin { " (pin)" } else { "" },

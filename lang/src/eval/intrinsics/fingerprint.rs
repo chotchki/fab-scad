@@ -12,11 +12,14 @@ use crate::parser::{Arg, Expr, ExprKind, Parameter};
 /// a collision would have to hit a same-NAMED, harness-verified function to matter, which the harness would
 /// itself catch. Fingerprint is a fast pre-filter, not the whole proof.
 #[must_use]
-pub(in crate::eval) fn fingerprint(params: &[Parameter], body: &Expr) -> u64 {
+pub(in crate::eval) fn fingerprint(
+    params: &[Parameter],
+    body: &Expr,
+) -> crate::surface::Fingerprint {
     let mut h = std::collections::hash_map::DefaultHasher::new();
     hash_params(params, &mut h);
     hash_expr(body, &mut h);
-    h.finish()
+    crate::surface::Fingerprint::new(h.finish())
 }
 
 /// Hash a parameter list: arity, then each name + whether/how it defaults. Names ARE part of the identity

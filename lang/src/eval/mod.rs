@@ -180,9 +180,9 @@ pub struct IntrinsicMatrixRow {
     /// The verdict for this name against the loaded library.
     pub status: IntrinsicMatrixStatus,
     /// What the library's definition fingerprints to (`None` when [`IntrinsicMatrixStatus::Missing`]).
-    pub defined_fp: Option<u64>,
+    pub defined_fp: Option<crate::surface::Fingerprint>,
     /// The fingerprint the intrinsic was verified against — the one dispatch demands.
-    pub reference_fp: u64,
+    pub reference_fp: crate::surface::Fingerprint,
 }
 
 /// [`resolve_intrinsic_matrix`]'s outcome — the matrix, or the sources still needed to load the library.
@@ -3229,16 +3229,16 @@ fn build_intrinsics<'a>(
             match intrinsics::classify(name, params, body) {
                 intrinsics::Plan::Wired => {
                     eprintln!(
-                        "+ [intrinsic WIRED] {name} (fp {:#018x})",
+                        "+ [intrinsic WIRED] {name} (fp {})",
                         intrinsics::fingerprint(params, body)
                     );
                 }
                 intrinsics::Plan::Drift => eprintln!(
-                    "+ [intrinsic DRIFT] {name} — defined fp {:#018x} != reference fp {} → INTERPRETED \
+                    "+ [intrinsic DRIFT] {name} — defined fp {} != reference fp {} → INTERPRETED \
                      (library drift, or a stale reference)",
                     intrinsics::fingerprint(params, body),
                     intrinsics::reference_fp(name)
-                        .map_or_else(|| "?".to_string(), |fp| format!("{fp:#018x}")),
+                        .map_or_else(|| "?".to_string(), |fp| fp.to_string()),
                 ),
                 intrinsics::Plan::NotRegistered => {}
             }

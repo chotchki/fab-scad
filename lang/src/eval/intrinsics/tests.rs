@@ -19,7 +19,7 @@ fn parse_fn(src: &str) -> (Vec<Parameter>, Expr) {
 }
 
 /// `parse_fn` then fingerprint.
-fn fp(src: &str) -> u64 {
+fn fp(src: &str) -> crate::surface::Fingerprint {
     let (params, body) = parse_fn(src);
     fingerprint(&params, &body)
 }
@@ -3248,6 +3248,108 @@ fn fast_equals_slow_o10_region_monster() {
                 &interpret_with_deps_consts(rri_ref, &deps, &consts, &args)
             ),
             "_rri diverged on closed=({c1:?},{c2:?}) eps={eps:?} r1={r1:?}"
+        );
+    }
+}
+
+/// AR.14.2 — the index AGREES with the linear scan it replaced, name for name.
+///
+/// Six lookups changed from a scan over `REGISTRY`/`PINS` to a `BTreeMap` hit, and a map silently
+/// answers `None` where a scan would have found a duplicate's other copy. So this re-derives every
+/// answer the slow way and demands they match: an index that quietly disagrees with the array it
+/// indexes is a native wiring against a function it does not implement.
+#[test]
+fn the_registry_index_agrees_with_a_linear_scan() {
+    use super::{PINS, REGISTRY, anchor_fp, entry_by_name, reference_fp};
+
+    for entry in REGISTRY {
+        // `entry_by_name` — the scan found the FIRST entry of that name.
+        let scanned = REGISTRY.iter().find(|e| e.name == entry.name);
+        let indexed = entry_by_name(entry.name);
+        assert_eq!(
+            scanned.map(|e| e.name),
+            indexed.map(|e| e.name),
+            "entry_by_name disagrees for `{}`",
+            entry.name
+        );
+        // `reference_fp` / `anchor_fp` — both resolve a name to its reference fingerprint, and
+        // `anchor_fp` falls through to PINS. Every registry name must resolve through both.
+        assert!(
+            reference_fp(entry.name).is_some(),
+            "`{}` is in the registry but its reference does not fingerprint",
+            entry.name
+        );
+        assert_eq!(
+            anchor_fp(entry.name),
+            reference_fp(entry.name),
+            "anchor_fp must prefer the registry entry for `{}`",
+            entry.name
+        );
+    }
+
+    // A PIN resolves only when no registry entry shadows it — the `or_else` arm.
+    for &(name, _) in PINS {
+        assert!(
+            anchor_fp(name).is_some(),
+            "pinned dep `{name}` does not resolve"
+        );
+    }
+}
+
+/// A name must be UNIQUE across the registry, because the index is keyed by it: a second entry with
+/// the same name replaces the first and dispatch loses it with no diagnostic. Checked in release
+/// too, unlike the `debug_assert` in `table()`, since a duplicate is a source-level authoring bug
+/// that should never reach a build of any profile.
+#[test]
+fn registry_and_pin_names_are_unique() {
+    use std::collections::BTreeSet;
+
+    use super::{PINS, REGISTRY};
+
+    let mut seen = BTreeSet::new();
+    for entry in REGISTRY {
+        assert!(
+            seen.insert(entry.name),
+            "`{}` is declared twice in REGISTRY — the index keeps one and dispatch silently \
+             loses the other",
+            entry.name
+        );
+    }
+    let mut pinned = BTreeSet::new();
+    for &(name, _) in PINS {
+        assert!(pinned.insert(name), "`{name}` is declared twice in PINS");
+    }
+}
+
+/// The dep graph REFERENCES ITSELF and the cycles are real — `approx` ↔ `idx` ↔ `posmod` (approx's
+/// list branch calls idx, idx wraps offsets through posmod, posmod's assert calls approx) and
+/// `all_nonzero` ↔ `is_vector`.
+///
+/// Pinned because it is the constraint that decides the registry's shape: a cyclic graph of
+/// `&'static` references cannot be constructed in safe Rust, so the cross-links have to stay
+/// NOMINAL and the index has to be keyed by name. If these cycles ever disappear somebody will be
+/// tempted to replace the names with pointers — this test is the note explaining why that stopped
+/// being impossible, so the change is made deliberately rather than discovered.
+#[test]
+fn the_dep_graph_really_does_contain_cycles() {
+    use super::REGISTRY;
+
+    fn reaches(from: &str, target: &str, depth: usize) -> bool {
+        if depth == 0 {
+            return false;
+        }
+        REGISTRY.iter().find(|e| e.name == from).is_some_and(|e| {
+            e.deps
+                .iter()
+                .any(|&d| d == target || reaches(d, target, depth - 1))
+        })
+    }
+
+    for (a, b) in [("approx", "idx"), ("approx", "posmod")] {
+        assert!(
+            reaches(a, b, 8) && reaches(b, a, 8),
+            "`{a}` and `{b}` are supposed to be mutually reachable — if that is no longer true, \
+             see this test's doc before changing how the registry links itself"
         );
     }
 }

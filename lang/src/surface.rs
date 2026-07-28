@@ -222,3 +222,47 @@ pub struct Root {
     /// only `std.scad` is broken, and a missing function costs a silently absent PART, not an error.
     pub declares: &'static [&'static str],
 }
+
+/// A function's structural identity: a hash over its `(params, body)` AST shape with SPANS
+/// EXCLUDED, so it survives reformatting and comment edits but not a semantic change.
+///
+/// A NEWTYPE rather than a bare `u64` deliberately. This value is the entire basis on which a
+/// native is allowed to stand in for a library function, and it travels through registry lookups,
+/// dep anchors and the sustainment matrix — all of which also carry ordinary `u64`s. Nothing but
+/// the type system stops one being passed where the other belongs, and the failure would be a
+/// native wiring against a function it does not implement, which is a wrong ANSWER rather than a
+/// missed speedup.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Fingerprint(u64);
+
+impl Fingerprint {
+    /// Wrap a hash that was computed by the fingerprint walk. Not public API surface for anyone
+    /// else: constructing one from an arbitrary `u64` is exactly the confusion the newtype exists
+    /// to prevent, which is why this is crate-internal.
+    pub(crate) const fn new(bits: u64) -> Self {
+        Self(bits)
+    }
+
+    /// The underlying bits, for serialization and diagnostics only.
+    #[must_use]
+    pub const fn bits(self) -> u64 {
+        self.0
+    }
+}
+
+impl std::fmt::Debug for Fingerprint {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Hex, because a fingerprint is compared and quoted, never read as a quantity.
+        write!(f, "fp:{:016x}", self.0)
+    }
+}
+
+impl std::fmt::Display for Fingerprint {
+    /// `0x` + 16 hex digits — BYTE-IDENTICAL to the `{:#018x}` every call site used before the
+    /// newtype existed. Deliberate: the type change is a refactor, and a refactor that quietly
+    /// reformats the sustainment matrix and the `FAB_EXPLAIN` report is a refactor whose output
+    /// nobody can diff against the previous run.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:#018x}", self.0)
+    }
+}

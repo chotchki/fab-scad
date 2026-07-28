@@ -3325,11 +3325,25 @@ fn registry_and_pin_names_are_unique() {
 /// list branch calls idx, idx wraps offsets through posmod, posmod's assert calls approx) and
 /// `all_nonzero` ↔ `is_vector`.
 ///
-/// Pinned because it is the constraint that decides the registry's shape: a cyclic graph of
-/// `&'static` references cannot be constructed in safe Rust, so the cross-links have to stay
-/// NOMINAL and the index has to be keyed by name. If these cycles ever disappear somebody will be
-/// tempted to replace the names with pointers — this test is the note explaining why that stopped
-/// being impossible, so the change is made deliberately rather than discovered.
+/// The cycles are NOT why the cross-links are names, and an earlier version of this comment said
+/// they were. Corrected: a cyclic graph of `&'static` references compiles fine in safe Rust, because
+/// statics resolve to addresses at link time and there is no initialization order to get wrong —
+/// `static A: Node = Node { next: &B }; static B: Node = Node { next: &A };` builds and walks.
+/// (`Rc` specifically cannot do this job, but for unrelated reasons: it is neither `Send` nor
+/// `Sync`, so it cannot live in the `static` the table is cached in, and an `Rc` cycle leaks
+/// without `Weak`.)
+///
+/// The real reason a dep stays a NAME is that the name is not addressing anything of ours. Of its
+/// three uses in `guard_veto`, two cannot be a pointer at all: it keys into the USER's function
+/// table (`functions.get(dep)` — a program that does not exist until one is loaded), and it is
+/// compared against the native's own PARAMETER names for the AN.10 shadow check. Only the third
+/// use, fetching the expected fingerprint, addresses the registry.
+///
+/// So the cycles are pinned here for a different reason than first written: they say the dep graph
+/// is a real graph rather than a DAG, which is what makes a topological "resolve deps first" scheme
+/// impossible and forces the guard to work name-at-a-time. A direct `&'static` link alongside the
+/// name is still worth adding — it would make a typo'd dep a COMPILE error rather than a permanent
+/// silent veto — and that is AR.14.4's business, where the macro can emit it.
 #[test]
 fn the_dep_graph_really_does_contain_cycles() {
     use super::REGISTRY;

@@ -3800,6 +3800,23 @@ fn child_count(n: usize) -> f64 {
     n as f64
 }
 
+/// The per-call bookkeeping binds EVERY module call gets, whichever tier runs it.
+///
+/// AR.20.5. Both the interpreted call (`push_user_module`) and the compiled one
+/// (`ModuleCtx::call`) bind these, so they live here rather than twice: a `$children` that agreed
+/// with the interpreter only by coincidence is precisely the drift the AN family documents, and it
+/// would render — BOSL2's attachment system reads `$children` directly.
+///
+/// ORDER IS PART OF THE CONTRACT. `$parent_modules` counts the instantiation stack INCLUDING this
+/// call, and the caller pushes its own name AFTER this runs — hence the `+ 1`.
+fn bind_call_bookkeeping(call: &mut Scope, n_children: usize, ctx: &Ctx) {
+    call.bind("$children", Value::Num(child_count(n_children)));
+    call.bind(
+        "$parent_modules",
+        Value::Num(child_count(ctx.module_stack.borrow().len() + 1)),
+    );
+}
+
 /// A `children(i)` index: a non-negative WHOLE number → its `usize`, else `None` (dropped).
 #[allow(
     clippy::cast_possible_truncation,

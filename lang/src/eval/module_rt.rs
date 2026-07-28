@@ -65,94 +65,221 @@ impl Drop for ModuleDepthGuard {
     }
 }
 
-/// The evaluator state one compiled module call sees.
-pub(super) struct NativeModuleCtx<'a, 'c> {
-    /// Arguments already bound to parameters by the evaluator's own two-phase rule — the
-    /// AN.1/AN.2/AN.6 semantics a native must not reimplement.
-    pub(super) args: Vec<Value>,
-    /// The call-site geometry children, UNEVALUATED. Empty statements and child-block assignments
-    /// are already filtered out upstream: neither is a child, and counting either would misalign
-    /// both `$children` and `children(i)`.
-    pub(super) child_stmts: Vec<&'a Stmt>,
-    /// Child-block assignments — not children, but their bindings are in scope for every geometry
-    /// child, so they are prepended when one is rendered.
-    pub(super) child_assigns: Vec<&'a Stmt>,
-    /// The CALLER's scope: where a child renders, per OpenSCAD's late binding.
-    pub(super) caller_scope: Scope,
-    /// The caller's island, for the same reason.
-    pub(super) caller_island: usize,
-    /// The module's own call scope — where its `$`-vars resolve.
-    pub(super) call_scope: Scope,
-    pub(super) ctx: &'c super::Ctx<'a>,
+/// Holds a name on the evaluator's instantiation stack for the length of a call.
+///
+/// AR.20.5. The interpreted path balances its frames with a scheduled `PopModuleFrame` task; the
+/// compiled path is an ordinary Rust call, so it balances them with `Drop` instead — which also
+/// covers the `?` returns, where a hand-written pop would be skipped exactly when the stack most
+/// needs restoring.
+pub(super) struct ModuleStackGuard<'a, 'c> {
+    ctx: &'c super::Ctx<'a>,
 }
 
-impl<'a> NativeModuleCtx<'a, '_> {
-    /// Render a selection of the call-site children, in the caller's scope, unioned.
-    fn render(&mut self, selected: &[&'a Stmt]) -> crate::Result<Geo> {
-        if selected.is_empty() {
-            return Ok(Geo::D3(GeoNode::Empty));
-        }
-        // The caller's LEXICAL scope with the CURRENT dynamic `$`-context overlaid by reference —
-        // `call_frame`, never a copy. L.2.7: copying the reaching `$`-context per call is what cost
-        // 42 clones a call once BOSL2 sets its top-level vars, and a native that reintroduced it
-        // would be that bug in compiled form.
-        let child_scope = Scope::call_frame(&self.caller_scope, &self.call_scope);
-        // Child-block assignments first: their bindings must reach every geometry child.
-        let mut stmts: Vec<&'a Stmt> = self.child_assigns.clone();
-        stmts.extend_from_slice(selected);
-        let global = self.ctx.island_globals.borrow()[self.caller_island].clone();
-        let parts = super::geo_stack::eval_geometry_driver(
-            &stmts,
-            &child_scope,
-            &global,
-            self.caller_island,
-            self.ctx,
-        )?;
-        // Union, matching the implicit grouping a child block gets in the interpreter.
-        Ok(super::union_of(parts, self.ctx))
+impl<'a, 'c> ModuleStackGuard<'a, 'c> {
+    pub(super) fn push(name: &'a str, ctx: &'c super::Ctx<'a>) -> Self {
+        ctx.module_stack.borrow_mut().push(name);
+        Self { ctx }
     }
 }
 
-impl ModuleCtx for NativeModuleCtx<'_, '_> {
+impl Drop for ModuleStackGuard<'_, '_> {
+    fn drop(&mut self) {
+        self.ctx.module_stack.borrow_mut().pop();
+    }
+}
+
+/// One level of the interpreter's `module_depth`, plus its high-water mark. Same reasoning as
+/// [`ModuleStackGuard`]: the compiled path unwinds through `Drop`, not through a work-stack task.
+struct ModuleDepthTicket<'a, 'c> {
+    ctx: &'c super::Ctx<'a>,
+}
+
+impl<'a, 'c> ModuleDepthTicket<'a, 'c> {
+    fn enter(ctx: &'c super::Ctx<'a>) -> Self {
+        let next = ctx.module_depth.get() + 1;
+        ctx.module_depth.set(next);
+        if next > ctx.peak_module_depth.get() {
+            ctx.peak_module_depth.set(next);
+        }
+        Self { ctx }
+    }
+}
+
+impl Drop for ModuleDepthTicket<'_, '_> {
+    fn drop(&mut self) {
+        let d = self.ctx.module_depth.get();
+        self.ctx.module_depth.set(d.saturating_sub(1));
+    }
+}
+
+/// The callee's children frame, which is what makes its `children()` find the CALL SITE's children.
+struct ChildrenFrameGuard<'a, 'c> {
+    ctx: &'c super::Ctx<'a>,
+}
+
+impl<'a, 'c> ChildrenFrameGuard<'a, 'c> {
+    fn push(frame: super::ChildrenFrame<'a>, ctx: &'c super::Ctx<'a>) -> Self {
+        ctx.children_stack.borrow_mut().push(frame);
+        Self { ctx }
+    }
+}
+
+impl Drop for ChildrenFrameGuard<'_, '_> {
+    fn drop(&mut self) {
+        self.ctx.children_stack.borrow_mut().pop();
+    }
+}
+
+/// Where one module call's children came from, and therefore how rendering one works.
+///
+/// TWO shapes because there are two kinds of call site, and neither can be expressed as the other.
+/// An INTERPRETED site has source statements, held unevaluated so `children()` renders them late in
+/// the scope they were written in. A COMPILED site has already been turned into Rust, so its
+/// children are thunks — closures that re-enter the CALLER to render themselves.
+pub(super) enum CallChildren<'a, 'k> {
+    /// Children written at an interpreted call site.
+    Stmts {
+        /// The geometry children, UNEVALUATED. Empty statements and child-block assignments are
+        /// already filtered out upstream: neither is a child, and counting either would misalign
+        /// both `$children` and `children(i)`.
+        stmts: Vec<&'a Stmt>,
+        /// Child-block assignments — not children, but their bindings are in scope for every
+        /// geometry child, so they are prepended when one is rendered.
+        assigns: Vec<&'a Stmt>,
+        /// The scope the child statements were WRITTEN in: where they render, per OpenSCAD's late
+        /// binding. Forwarded children keep their original site's scope, not the forwarder's.
+        scope: Scope,
+        /// That same site's island, for the same reason.
+        island: usize,
+    },
+    /// Children written at a compiled call site: one thunk per child, in source order.
+    ///
+    /// The thunks run against the CALLER's ctx, which is what makes `foo() children();` expressible
+    /// — its single child is `|c| c.children()`, resolving against the forwarder rather than foo.
+    Compiled {
+        thunks: &'k [crate::surface::ChildThunk<'k>],
+        caller: &'k dyn ModuleCtx,
+    },
+}
+
+impl CallChildren<'_, '_> {
+    /// How many geometry children the call site supplied — `$children`.
+    fn count(&self) -> usize {
+        match self {
+            Self::Stmts { stmts, .. } => stmts.len(),
+            Self::Compiled { thunks, .. } => thunks.len(),
+        }
+    }
+}
+
+/// The evaluator state one compiled module call sees.
+pub(super) struct NativeModuleCtx<'a, 'c, 'k> {
+    /// Arguments already bound to parameters by the evaluator's own two-phase rule — the
+    /// AN.1/AN.2/AN.6 semantics a native must not reimplement.
+    pub(super) args: Vec<Value>,
+    /// The call-site children and how to render them.
+    pub(super) children: CallChildren<'a, 'k>,
+    /// The module's own call scope — where its `$`-vars resolve.
+    pub(super) call_scope: Scope,
+    /// The island this module's OWN calls resolve against: where it was DEFINED, not where it was
+    /// called from. Separate from the children's island (which lives on [`CallChildren::Stmts`])
+    /// because they are genuinely different questions — a library module calling `cube` must find
+    /// the library's `cube`, while its caller's children still render at the caller's site. One
+    /// field used to answer both, which happened to work only while every test defined everything
+    /// in one file.
+    pub(super) home_island: usize,
+    pub(super) ctx: &'c super::Ctx<'a>,
+}
+
+impl<'a> NativeModuleCtx<'a, '_, '_> {
+    /// Render the children at `picked`, unioned — the one place both child shapes resolve.
+    fn render(&self, picked: &[usize]) -> crate::Result<Geo> {
+        if picked.is_empty() {
+            return Ok(Geo::D3(GeoNode::Empty));
+        }
+        match &self.children {
+            CallChildren::Stmts {
+                stmts,
+                assigns,
+                scope,
+                island,
+            } => {
+                // The site's LEXICAL scope with the CURRENT dynamic `$`-context overlaid by
+                // reference — `call_frame`, never a copy. L.2.7: copying the reaching `$`-context
+                // per call is what cost 42 clones a call once BOSL2 sets its top-level vars, and a
+                // native that reintroduced it would be that bug in compiled form.
+                let child_scope = Scope::call_frame(scope, &self.call_scope);
+                // Child-block assignments first: their bindings must reach every geometry child.
+                let mut render: Vec<&'a Stmt> = assigns.clone();
+                render.extend(picked.iter().filter_map(|&i| stmts.get(i).copied()));
+                let global = self.ctx.island_globals.borrow()[*island].clone();
+                let parts = super::geo_stack::eval_geometry_driver(
+                    &render,
+                    &child_scope,
+                    &global,
+                    *island,
+                    self.ctx,
+                )?;
+                // Union, matching the implicit grouping a child block gets in the interpreter.
+                Ok(super::union_of(parts, self.ctx))
+            }
+            CallChildren::Compiled { thunks, caller } => {
+                let mut parts = Vec::with_capacity(picked.len());
+                for &i in picked {
+                    if let Some(thunk) = thunks.get(i) {
+                        parts.push(thunk(*caller)?);
+                    }
+                }
+                Ok(super::union_of(parts, self.ctx))
+            }
+        }
+    }
+
+    /// The child indices a `children(i)` / `children([i:j])` / `children([a,b])` selects.
+    ///
+    /// The evaluator's own index rules, not a reimplementation: a number picks one, a list picks
+    /// several, a range picks a span, and anything out of range picks NOTHING rather than erroring —
+    /// which is what upstream does and what `children()` in the interpreter does.
+    fn indices(&self, selector: &Value) -> Vec<usize> {
+        let n = self.child_count();
+        let keep = |i: usize| (i < n).then_some(i);
+        match selector {
+            Value::Num(i) => super::child_at(*i).and_then(keep).into_iter().collect(),
+            Value::NumList(xs) => xs
+                .iter()
+                .filter_map(|&i| super::child_at(i).and_then(keep))
+                .collect(),
+            Value::Range { start, step, end } => super::value::range_iter(*start, *step, *end)
+                .filter_map(|i| super::child_at(i).and_then(keep))
+                .collect(),
+            _ => Vec::new(),
+        }
+    }
+}
+
+impl ModuleCtx for NativeModuleCtx<'_, '_, '_> {
     fn args(&self) -> &[Value] {
         &self.args
     }
 
     fn child_count(&self) -> usize {
-        self.child_stmts.len()
+        self.children.count()
     }
 
-    fn child(&mut self, i: usize) -> crate::Result<Geo> {
-        let Some(&stmt) = self.child_stmts.get(i) else {
+    fn child(&self, i: usize) -> crate::Result<Geo> {
+        if i >= self.child_count() {
             // Out of range renders nothing, matching upstream — not an error.
             return Ok(Geo::D3(GeoNode::Empty));
-        };
-        self.render(&[stmt])
+        }
+        self.render(&[i])
     }
 
-    fn child_at(&mut self, selector: &Value) -> crate::Result<Geo> {
-        // The evaluator's own index rules, not a reimplementation: a number picks one, a list picks
-        // several, a range picks a span, and anything out of range renders NOTHING rather than
-        // erroring — which is what upstream does and what `children()` in the interpreter does.
-        let picked: Vec<&Stmt> = match selector {
-            Value::Num(i) => super::child_at(*i)
-                .and_then(|i| self.child_stmts.get(i).copied())
-                .into_iter()
-                .collect(),
-            Value::NumList(xs) => xs
-                .iter()
-                .filter_map(|&i| super::child_at(i).and_then(|i| self.child_stmts.get(i).copied()))
-                .collect(),
-            Value::Range { start, step, end } => super::value::range_iter(*start, *step, *end)
-                .filter_map(|i| super::child_at(i).and_then(|i| self.child_stmts.get(i).copied()))
-                .collect(),
-            _ => Vec::new(),
-        };
-        self.render(&picked)
+    fn child_at(&self, selector: &Value) -> crate::Result<Geo> {
+        self.render(&self.indices(selector))
     }
 
-    fn children(&mut self) -> crate::Result<Geo> {
-        let all = self.child_stmts.clone();
+    fn children(&self) -> crate::Result<Geo> {
+        let all: Vec<usize> = (0..self.child_count()).collect();
         self.render(&all)
     }
 
@@ -168,19 +295,133 @@ impl ModuleCtx for NativeModuleCtx<'_, '_> {
     }
 
     fn call(
-        &mut self,
-        _name: &str,
-        _args: &[Value],
-        _dollars: &[(&str, Value)],
-        _children: Children<'_>,
+        &self,
+        name: &'static str,
+        args: &[Value],
+        dollars: &[(&str, Value)],
+        children: Children<'_>,
     ) -> crate::Result<Geo> {
-        // AR.20.5. Dispatch is the item that makes this a compiler rather than an interpreter with
-        // extra steps, and it is deliberately NOT stubbed silently: 97% of BOSL2 modules call
-        // another module, so a native that quietly rendered nothing here would be wrong for almost
-        // the whole library while still producing geometry.
-        Err(crate::Error::Unimplemented(
-            "module-to-module dispatch from a compiled native (AR.20.5)",
-        ))
+        // AR.20.5 — dispatch, which is what makes this a compiler rather than an interpreter with
+        // extra steps. chotchki: "I really want dispatch, otherwise we're making an interpreter
+        // with extra steps."
+        //
+        // The setup below MIRRORS `push_user_module` deliberately and in its order, because the two
+        // tiers have to be indistinguishable: same recursion verdict, same bookkeeping binds, same
+        // instantiation stack. Where a step is shared it is CALLED rather than copied.
+        //
+        // DECLINING IS SAFE HERE, and that is load-bearing rather than incidental: `try_native_module`
+        // treats `Unimplemented` out of a native as a decline and re-runs the whole call interpreted,
+        // the module twin of AR.10. So the gaps below cost speed, never an answer.
+        let Some((def, home, base)) = self.ctx.resolve_module(self.home_island, name) else {
+            // No USER module by that name, so the call is a builtin primitive — `cube`, `translate`
+            // and the rest of what leaf modules are made of. That path takes an AST instantiation
+            // and evaluates the arguments itself (`module::eval_module`), so it needs a
+            // value-shaped entry point that does not exist yet: AR.20.6, and the reason a leaf
+            // module still declines today.
+            return Err(crate::Error::Unimplemented(
+                "a builtin primitive called from a compiled module (AR.20.6)",
+            ));
+        };
+        let (params, body) = def;
+        if has_duplicate_params(params) {
+            return Err(crate::Error::Unimplemented(
+                "a module declaring a parameter name twice, called from compiled code (AN.6)",
+            ));
+        }
+        // Resolved ONCE: whether the callee compiles decides both which tier runs it and whether a
+        // compiled child block can be handed over at all.
+        let native = if self.ctx.config.intrinsics {
+            super::intrinsics::resolve_module(name, params, body)
+        } else {
+            None
+        };
+
+        // The interpreter's recursion bound, with its verdict class — this guard is a semantic
+        // limit on runaway recursion (AD.5), not a missing feature, so it must not read as one.
+        let depth = self.ctx.module_depth.get();
+        if depth >= super::MAX_MODULE_DEPTH {
+            return Err(crate::Error::Eval(format!(
+                "Recursion detected calling module '{name}'"
+            )));
+        }
+
+        // Args bind in the CALLER's scope; the body's lexical base is the callee's HOME island
+        // global (or its captured defining scope, for a scope-local def).
+        let home_global = base.unwrap_or_else(|| self.ctx.island_globals.borrow()[home].clone());
+        let mut call = bind_values(params, args, dollars, &self.call_scope, &home_global, self.ctx)?;
+        super::geo_stack::warn_params_overwritten(params, body, self.ctx);
+        let n_children = match children {
+            Children::None => 0,
+            Children::Compiled(thunks) => thunks.len(),
+        };
+        super::bind_call_bookkeeping(&mut call, n_children, self.ctx);
+
+        // The fast path, and the reason this is dispatch rather than task emission: another native.
+        // A compiled child block can only be handed over HERE, because a native carries its children
+        // as thunks while the interpreter's frame is statement-shaped.
+        //
+        // NOT memoized: `push_user_module` consults the CSG cache at this point, and skipping a
+        // cache can only cost time, never correctness. AR.20.5 leaves it out rather than porting the
+        // eligibility fence to a second call site while the ABI is still moving.
+        if let Some(native) = native
+            && let Some(_ticket) = ModuleDepthGuard::enter()
+        {
+            let _frame = ModuleStackGuard::push(name, self.ctx);
+            let inner = NativeModuleCtx {
+                args: bound_args(params, &call),
+                children: match children {
+                    Children::None => CallChildren::Stmts {
+                        stmts: Vec::new(),
+                        assigns: Vec::new(),
+                        scope: self.call_scope.clone(),
+                        island: home,
+                    },
+                    Children::Compiled(thunks) => CallChildren::Compiled {
+                        thunks,
+                        caller: self,
+                    },
+                },
+                call_scope: call,
+                home_island: home,
+                ctx: self.ctx,
+            };
+            return native(&inner);
+        }
+
+        // INTERPRETED, which also covers a compiled callee that ran out of depth budget. The
+        // interpreter's children frame holds `&Stmt` and its driver renders children by scheduling
+        // work-stack tasks, so a non-empty thunk block has nowhere to go: decline (AR.20.6) rather
+        // than drop it, because a wrapper's children ARE its output.
+        if let Children::Compiled(thunks) = children
+            && !thunks.is_empty()
+        {
+            return Err(crate::Error::Unimplemented(
+                "a compiled child block handed to an interpreted module (AR.20.6)",
+            ));
+        }
+        // The same three frames `push_user_module` sets up, held by RAII so an error out of the body
+        // cannot leave the stack unbalanced — the recursive shape here has no `PopModuleFrame` task
+        // to lean on.
+        let _depth = ModuleDepthTicket::enter(self.ctx);
+        let _frame = ModuleStackGuard::push(name, self.ctx);
+        let _kids = ChildrenFrameGuard::push(
+            super::ChildrenFrame {
+                stmts: Vec::new(),
+                assigns: Vec::new(),
+                scope: self.call_scope.clone(),
+                island: home,
+            },
+            self.ctx,
+        );
+        let parts = super::geo_stack::eval_geometry_driver(
+            std::slice::from_ref(&body),
+            &call,
+            &home_global,
+            home,
+            self.ctx,
+        )?;
+        // The body's statements union, which is what a module body means.
+        Ok(super::union_of(parts, self.ctx))
     }
 }
 
@@ -194,4 +435,69 @@ impl ModuleCtx for NativeModuleCtx<'_, '_> {
 /// documents getting wrong.
 pub(super) fn bound_args(params: &[crate::parser::Parameter], call: &Scope) -> Vec<Value> {
     params.iter().map(|p| call.lookup(&p.name)).collect()
+}
+
+/// Bind a callee's call scope from PRE-EVALUATED positional arguments.
+///
+/// AR.20.5. The interpreter's `bind_module_scope` takes AST argument expressions and applies
+/// OpenSCAD's two-phase rule to them; a compiled caller has already done that half at COMPILE time
+/// — the emitter fills slots by name and position and plugs the callee's own defaults into holes
+/// (AR.18) — so what arrives here is a positional list with no gaps.
+///
+/// What still happens at runtime: parameters past the supplied list take their DEFAULTS, evaluated
+/// in the callee's lexical base rather than the caller's scope and IN DECLARATION ORDER (a default
+/// may echo or draw, and those side effects are ordered), and `$`-args bind LAST so they shadow the
+/// inherited dynamic context.
+///
+/// # Errors
+/// Whatever evaluating a default raises. Deliberately propagated rather than folded to `undef`: a
+/// default is arbitrary library code, and swallowing its failure would bind a plausible wrong value
+/// instead of failing.
+fn bind_values<'a>(
+    params: &'a [crate::parser::Parameter],
+    args: &[Value],
+    dollars: &[(&str, Value)],
+    caller: &Scope,
+    global: &Scope,
+    ctx: &super::Ctx<'a>,
+) -> crate::Result<Scope> {
+    // Lexically a child of the callee's home global (hygiene), dynamically a child of the caller —
+    // inheriting the `$`-context BY REFERENCE. L.2.7: copying it per call is the 42-clones bug.
+    let mut call = Scope::call_frame(global, caller);
+    for (i, p) in params.iter().enumerate() {
+        let value = match args.get(i) {
+            Some(v) => v.clone(),
+            // A default evaluates in the lexical BASE, never the growing call scope.
+            None => match &p.default {
+                Some(d) => super::eval_with_ctx(d, global, ctx)?,
+                // AN.3: an unfilled defaultless parameter is `undef` and must NOT fall through to
+                // a like-named global.
+                None => Value::Undef,
+            },
+        };
+        call.bind(std::rc::Rc::clone(&p.name), value);
+    }
+    for (n, v) in dollars {
+        call.bind(*n, v.clone());
+    }
+    Ok(call)
+}
+
+/// Does this parameter list declare a name TWICE?
+///
+/// AN.6, and the reason it is a decline rather than a special case here. Upstream binds a call in
+/// two phases — every default first, then the passed arguments over them — and that ordering is
+/// load-bearing exactly when a name is duplicated: BOSL2's `rounding_edge_mask` lists `r` twice,
+/// once defaultless, and FIRST-declared wins. The single positional pass [`bind_values`] runs is
+/// equivalent to the two-phase rule for every list WITHOUT a duplicate, and quietly wrong for one
+/// with (the trailing slot's default clobbers the value the caller passed to the earlier slot —
+/// the interpreter carries a comment about getting exactly this wrong once already).
+///
+/// So the compiled path refuses the shape instead of reimplementing the rule for it. Rare enough to
+/// cost nothing, and a decline is free now that `try_native_module` re-interprets.
+fn has_duplicate_params(params: &[crate::parser::Parameter]) -> bool {
+    params
+        .iter()
+        .enumerate()
+        .any(|(i, p)| params[..i].iter().any(|q| q.name == p.name))
 }

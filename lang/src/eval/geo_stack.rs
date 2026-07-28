@@ -805,7 +805,7 @@ fn dispatch_module<'a>(
 ///
 /// Scope is the body's flattened top level only: a bare `{ }` folds in, but an `if` branch is its own
 /// scope and never warns. Modules only — the function-call path has no such warning upstream.
-fn warn_params_overwritten<'a>(params: &'a [Parameter], body: &'a Stmt, ctx: &Ctx<'a>) {
+pub(super) fn warn_params_overwritten<'a>(params: &'a [Parameter], body: &'a Stmt, ctx: &Ctx<'a>) {
     // Overwhelmingly the common case: a body that assigns nothing, or no parameter to collide with.
     if params.is_empty() {
         return;
@@ -863,6 +863,7 @@ fn try_native_module<'a>(
     child_assigns: &[&'a Stmt],
     caller: &Scope,
     island: usize,
+    home: usize,
     ctx: &Ctx<'a>,
 ) -> crate::Result<Option<Geo>> {
     // The AR.2 run gate covers MODULE natives too, and must: a differential that cannot turn the
@@ -877,16 +878,43 @@ fn try_native_module<'a>(
     let Some(_depth_ticket) = super::module_rt::ModuleDepthGuard::enter() else {
         return Ok(None);
     };
-    let mut mctx = super::module_rt::NativeModuleCtx {
+    // The instantiation stack must not depend on WHICH TIER ran the call. A native does not get the
+    // interpreter's three frames, but `parent_module(i)` and `$parent_modules` read this one, so a
+    // compiled module that skipped the push would make its callees see a shorter stack than the same
+    // program interpreted — a differential that renders rather than errors (AR.20.5).
+    let _frame = super::module_rt::ModuleStackGuard::push(&mi.name, ctx);
+    let mctx = super::module_rt::NativeModuleCtx {
         args: super::module_rt::bound_args(params, call),
-        child_stmts: child_stmts.to_vec(),
-        child_assigns: child_assigns.to_vec(),
-        caller_scope: caller.clone(),
-        caller_island: island,
+        children: super::module_rt::CallChildren::Stmts {
+            stmts: child_stmts.to_vec(),
+            assigns: child_assigns.to_vec(),
+            scope: caller.clone(),
+            island,
+        },
         call_scope: call.clone(),
+        // The module's own calls resolve where it was DEFINED — `home`, the same island the
+        // interpreted path schedules the body against.
+        home_island: home,
         ctx,
     };
-    native(&mut mctx).map(Some)
+    // A DECLINE, not a failure: `Unimplemented` out of a native means the compiled tier cannot
+    // express this call (a builtin callee, a compiled child block reaching an interpreted module),
+    // so the interpreter takes it and the answer is unchanged. The module twin of AR.10's
+    // decline-to-interpreter, and what makes every gap in `ModuleCtx::call` cost speed rather than
+    // a render.
+    //
+    // Console messages the native wrote before declining are ROLLED BACK, because the interpreted
+    // re-run emits them again and upstream's console is part of the answer (AR.2 diffs it). What is
+    // NOT rolled back is the random stream: a native that drew before declining has perturbed it.
+    // No module native draws today, and this is the note for the one that first does.
+    let mark = ctx.messages.borrow().len();
+    match native(&mctx) {
+        Err(crate::Error::Unimplemented(_)) => {
+            ctx.messages.borrow_mut().truncate(mark);
+            Ok(None)
+        }
+        other => other.map(Some),
+    }
 }
 /// B1 — schedule a USER-module call on the work stack (the recursion-removing analogue of `call_user_module`).
 /// The setup is EAGER + ordering-sensitive (the depth guard, the `$children`/`$parent_modules` binds, the three
@@ -936,18 +964,11 @@ fn push_user_module<'a>(
     // every geometry child (L.5.2).
     let (child_stmts, child_assigns) = split_children(mi);
     let childless = child_stmts.is_empty();
-    call.bind(
-        "$children",
-        Value::Num(super::child_count(child_stmts.len())),
-    );
     // `$parent_modules` = the instantiation-stack size INCLUDING this call (AH.2.5, the
     // parent_module-tests golden: `print` called from `test` sees 2, so `[1:$parent_modules-1]`
-    // reaches the outermost name). Self isn't pushed yet — the push happens on the MISS path
-    // below, next to the children frame — hence the +1. Bound now so it's in the memo key.
-    call.bind(
-        "$parent_modules",
-        Value::Num(super::child_count(ctx.module_stack.borrow().len() + 1)),
-    );
+    // reaches the outermost name). Bound now so it's in the memo key. SHARED with the compiled
+    // tier — see `bind_call_bookkeeping`.
+    super::bind_call_bookkeeping(&mut call, child_stmts.len(), ctx);
     // Dev probe (off unless FAB_CSG_REDUNDANCY=1, J.5.1): the fully-bound `call` frame carries the params +
     // reaching $-context; count repeats vs distinct to gauge the memo ceiling. Suppressed: its `specials()`
     // walk is diagnostic, not a semantic read — it must not record into an enclosing capture.
@@ -997,6 +1018,7 @@ fn push_user_module<'a>(
         &child_assigns,
         &caller,
         island,
+        home,
         ctx,
     )? {
         results.push(geo);

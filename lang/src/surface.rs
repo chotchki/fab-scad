@@ -319,7 +319,7 @@ pub trait ModuleCtx {
     ///
     /// # Errors
     /// Whatever evaluating that child raises.
-    fn child(&mut self, i: usize) -> crate::Result<Geo>;
+    fn child(&self, i: usize) -> crate::Result<Geo>;
 
     /// Render the children a `children(i)` / `children([i:j])` / `children([a,b])` selects.
     ///
@@ -329,13 +329,13 @@ pub trait ModuleCtx {
     ///
     /// # Errors
     /// Whatever evaluating the selected children raises.
-    fn child_at(&mut self, selector: &Value) -> crate::Result<Geo>;
+    fn child_at(&self, selector: &Value) -> crate::Result<Geo>;
 
     /// Render every child, unioned — bare `children()`.
     ///
     /// # Errors
     /// Whatever evaluating the children raises.
-    fn children(&mut self) -> crate::Result<Geo>;
+    fn children(&self) -> crate::Result<Geo>;
 
     /// The implicit UNION of a statement list — what a `{ … }` block means in OpenSCAD, and what a
     /// module body's several statements collapse to.
@@ -356,11 +356,16 @@ pub trait ModuleCtx {
     /// By name rather than by pointer for the same reason a function dep is (see the registry
     /// index): the name has to be resolvable against the user's program, not just against ours.
     ///
+    /// `'static` on the name is not a restriction, it is the honest type. A generated module emits
+    /// its callees as string LITERALS — knowing them at compile time is what makes this dispatch
+    /// rather than interpretation — and the evaluator's instantiation stack (`parent_module(i)`)
+    /// borrows the name for the length of the call, which a shorter lifetime could not satisfy.
+    ///
     /// # Errors
     /// Whatever the called module raises, including the depth-budget decline.
     fn call(
-        &mut self,
-        name: &str,
+        &self,
+        name: &'static str,
         args: &[Value],
         dollars: &[(&str, Value)],
         children: Children<'_>,
@@ -372,25 +377,43 @@ pub trait ModuleCtx {
 /// Not a rendered `Geo`: passing geometry would flatten the laziness that makes `children()` mean
 /// what it means upstream, where a callee may instantiate its children zero times or many and each
 /// instantiation happens in ITS caller's scope.
+///
+/// TWO variants, not three. An `Inherited` variant sat here — "forward the children I received,
+/// untouched" — and it was deleted because it MODELS NO SOURCE CONSTRUCT. OpenSCAD has no syntax
+/// that splices a caller's children in as a callee's own; the shape it was meant for,
+/// `foo() children();`, passes foo exactly ONE child (the `children()` node), which expands to
+/// however many the caller got only when foo renders it. Forwarding the list directly made
+/// `$children` report the expanded count, so `module w() { foo() children(); } w() { a(); b(); }`
+/// saw 2 inside foo where the interpreter says 1. Caught by the console differential, which is the
+/// argument for diffing echoes and not just meshes — the geometry happened to match.
 pub enum Children<'a> {
     /// The call supplies no children — a `;` body.
     None,
-    /// Forward the children this module itself received, untouched. The overwhelmingly common
-    /// shape in BOSL2, where a wrapper re-emits what it was given.
-    Inherited,
     /// A COMPILED child block: one thunk per geometry child, in source order.
     ///
-    /// CORRECTED from a `&[Geo]` of already-built subtrees, which was wrong and would have been
-    /// wrong quietly. A callee may instantiate its children ZERO times or MANY — `if` guards them,
-    /// `for` repeats them — and each instantiation happens fresh. Handing down finished geometry
-    /// flattens exactly the laziness that makes `children()` mean what it means, so a callee that
-    /// rendered its children twice would get one subtree duplicated rather than two evaluations,
-    /// and a callee that rendered them zero times would still have paid for them.
+    /// CORRECTED once already, from a `&[Geo]` of already-built subtrees. A callee may instantiate
+    /// its children ZERO times or MANY — `if` guards them, `for` repeats them — and each
+    /// instantiation happens fresh. Handing down finished geometry flattens exactly the laziness
+    /// that makes `children()` mean what it means, so a callee that rendered its children twice
+    /// would get one subtree duplicated rather than two evaluations, and a callee that rendered
+    /// them zero times would still have paid for them.
     ///
     /// A SLICE rather than one thunk because `children(i)` selects, `$children` counts, and neither
     /// is answerable from a single closure over the whole block.
-    Compiled(&'a [&'a dyn Fn(&mut dyn ModuleCtx) -> crate::Result<Geo>]),
+    ///
+    /// The thunk receives the CALLER's ctx, not the callee's — that is what makes `foo() children();`
+    /// expressible as `Compiled(&[&|c| c.children()])`, and it is why every method here takes
+    /// `&self`: the callee runs a thunk that reaches back into its caller while the caller's own
+    /// call is still on the stack, which `&mut self` cannot express. The evaluator's state is behind
+    /// `RefCell`/`Cell` already, so shared access is sufficient — the same conclusion the function
+    /// side reached for `FnCtx`.
+    Compiled(&'a [ChildThunk<'a>]),
 }
+
+/// One child of a COMPILED call site: a closure that renders it against the CALLER's ctx.
+///
+/// Named because the bare type appears on both sides of the ABI and reads as noise inline.
+pub type ChildThunk<'a> = &'a dyn Fn(&dyn ModuleCtx) -> crate::Result<Geo>;
 
 /// One callable this library COMPILED, with everything that has to be true for it to be legal.
 pub struct Native {

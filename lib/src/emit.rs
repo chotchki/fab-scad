@@ -177,7 +177,7 @@ pub fn generate_module_native(
         out,
         "/// Generated native for module `{name}` — geometry through the interpreter's own\n\
          /// construction, so a generated module is what interpreting its reference builds.\n\
-         pub(super) fn {name}(fx: &mut dyn rt::ModuleCtx) -> rt::Result<rt::Geo> {{\n"
+         pub(super) fn {name}(fx: &dyn rt::ModuleCtx) -> rt::Result<rt::Geo> {{\n"
     );
     // Parameters bind from the ctx's already-matched args — the evaluator applied OpenSCAD's
     // two-phase rule (all defaults, then arguments over them) and the AN.6 duplicate precedence, so
@@ -1681,7 +1681,7 @@ mod tests {
         let code = super::generate_module_native(src, &[], &[]).expect("generates");
         println!("\n=== generated module native ===\n{code}");
         for want in [
-            "fn _fab_poc_mod(fx: &mut dyn rt::ModuleCtx) -> rt::Result<rt::Geo>",
+            "fn _fab_poc_mod(fx: &dyn rt::ModuleCtx) -> rt::Result<rt::Geo>",
             "let p_k = fx.args().get(0)",
             "parts.push(fx.children()?)",
             "Ok(fx.group(parts))",

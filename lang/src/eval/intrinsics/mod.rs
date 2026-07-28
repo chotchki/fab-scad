@@ -2128,7 +2128,7 @@ pub(super) fn explain_on() -> bool {
 
 /// A compiled module: geometry out, with the evaluator reachable through `ModuleCtx`.
 pub(super) type ModuleNative =
-    fn(&mut dyn crate::surface::ModuleCtx) -> crate::Result<super::geo2d::Geo>;
+    fn(&dyn crate::surface::ModuleCtx) -> crate::Result<super::geo2d::Geo>;
 
 /// One module the registry implements natively.
 pub(super) struct ModuleEntry {
@@ -2148,7 +2148,7 @@ pub(super) struct ModuleEntry {
 ///
 /// `k` is read and discarded, which is the point: it proves the argument arrives already bound by
 /// the evaluator's two-phase rule rather than re-matched by the native.
-fn poc_mod_children(ctx: &mut dyn crate::surface::ModuleCtx) -> crate::Result<super::geo2d::Geo> {
+fn poc_mod_children(ctx: &dyn crate::surface::ModuleCtx) -> crate::Result<super::geo2d::Geo> {
     let _k = ctx.args().first().cloned().unwrap_or(crate::Value::Undef);
     if ctx.child_count() == 0 {
         return Ok(super::geo2d::Geo::D3(super::geo::GeoNode::Empty));
@@ -2156,11 +2156,43 @@ fn poc_mod_children(ctx: &mut dyn crate::surface::ModuleCtx) -> crate::Result<su
     ctx.children()
 }
 
-pub(super) static MODULE_REGISTRY: &[ModuleEntry] = &[ModuleEntry {
-    name: "_fab_poc_mod",
-    reference: "module _fab_poc_mod(k=1) { children(); }",
-    func: poc_mod_children,
-}];
+/// AR.20.5 proof-of-concept: a compiled module that CALLS another module by name.
+///
+/// The census item this stands for is 97% of BOSL2 — a module whose body is mostly other modules —
+/// so the POC is deliberately the wrapper shape rather than a leaf: an argument passed ALONG, and
+/// the call-site children forwarded untouched, which is what `attachable`/`diff`/`tag_scope` all do.
+///
+/// Whether the callee itself compiles is NOT this native's business, and that is the point: `call`
+/// dispatches to a native where one is armed and to the interpreter otherwise, so the same POC
+/// exercises compiled→compiled and compiled→interpreted depending only on what the program defines.
+fn poc_mod_wrap(ctx: &dyn crate::surface::ModuleCtx) -> crate::Result<super::geo2d::Geo> {
+    let k = ctx.args().first().cloned().unwrap_or(crate::Value::Undef);
+    // `_fab_poc_mod(k) children();` — ONE child, which is the `children()` node. Not the caller's
+    // child LIST: the callee's `$children` is 1 here however many the caller received, and the
+    // expansion happens only when the callee renders it. Spelling that as a thunk is the whole
+    // reason `Children` carries closures.
+    let forward: &dyn Fn(&dyn crate::surface::ModuleCtx) -> crate::Result<super::geo2d::Geo> =
+        &|caller| caller.children();
+    ctx.call(
+        "_fab_poc_mod",
+        &[k],
+        &[],
+        crate::surface::Children::Compiled(&[forward]),
+    )
+}
+
+pub(super) static MODULE_REGISTRY: &[ModuleEntry] = &[
+    ModuleEntry {
+        name: "_fab_poc_mod",
+        reference: "module _fab_poc_mod(k=1) { children(); }",
+        func: poc_mod_children,
+    },
+    ModuleEntry {
+        name: "_fab_poc_wrap",
+        reference: "module _fab_poc_wrap(k=1) { _fab_poc_mod(k) children(); }",
+        func: poc_mod_wrap,
+    },
+];
 
 /// The compiled module for `name`, IFF one is registered and the definition in this program
 /// fingerprints to the reference it was generated from.

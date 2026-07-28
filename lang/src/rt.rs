@@ -33,3 +33,8 @@ pub use crate::eval::ops::{apply_binary, apply_unary, index};
 pub use crate::eval::value::Value;
 pub use crate::eval::{build_range, build_vector, iter_values_native};
 pub use crate::parser::{BinOp, UnOp};
+/// The MODULE half of the ABI (AR.20). A generated module takes a `&dyn ModuleCtx` and hands
+/// `Children` to the modules it calls — both have to be nameable through `rt`, or the emitted
+/// signature does not compile outside fab-lang. They were missing here until AR.20.5: module
+/// emission was exercised as generated TEXT, which never proved the text would build.
+pub use crate::surface::{Children, ModuleCtx};

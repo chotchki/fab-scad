@@ -3406,6 +3406,96 @@ fn the_module_native_matches_the_interpreter() {
     );
 }
 
+/// AR.20.5 — DISPATCH, held to the same fast==slow discipline: a compiled module calling another
+/// module must render what interpreting the whole thing renders.
+///
+/// Two programs, because dispatch has two destinations and only one of them is the easy case. The
+/// FIRST has both modules armed (compiled → compiled, the fast path the census cares about); the
+/// SECOND drifts the callee's body so it cannot wire, which makes one render PART compiled and PART
+/// interpreted. That mixed shape is not a curiosity — `fractal_tree` nests 139 deep, so the depth
+/// budget guarantees real renders straddle both tiers, and it is exactly where a call frame set up
+/// two different ways would disagree.
+///
+/// The console is compared alongside the mesh on purpose. Geometry alone would not catch a wrong
+/// `$children` or `$parent_modules` here: the drifted callee ECHOES both, so a compiled caller that
+/// skipped either bind (or pushed the instantiation stack only on the interpreted path) shows up as
+/// a console diff instead of passing quietly.
+#[test]
+fn a_compiled_module_dispatching_matches_the_interpreter() {
+    let run = |src: &str, intrinsics: bool| {
+        let config = crate::Config {
+            intrinsics,
+            ..crate::Config::default()
+        };
+        let (geo, msgs) =
+            crate::evaluate_geometry_with_base_config(src, std::path::Path::new("."), &[], config)
+                .expect("renders");
+        (format!("{geo:?}"), format!("{msgs:?}"))
+    };
+
+    // Both armed: the wrapper's `call` finds a native for `_fab_poc_mod` and dispatches into it.
+    let compiled_callee = "module _fab_poc_mod(k=1) { children(); }\n\
+                           module _fab_poc_wrap(k=1) { _fab_poc_mod(k) children(); }\n\
+                           _fab_poc_wrap() { cube([2,3,4]); sphere(r=1); }";
+    // The callee's body DRIFTED (it echoes), so it does not wire and the compiled wrapper hands it
+    // to the interpreter — while the wrapper itself still compiles.
+    let interpreted_callee =
+        "module _fab_poc_mod(k=1) { echo(pm=$parent_modules, ch=$children); children(); }\n\
+         module _fab_poc_wrap(k=1) { _fab_poc_mod(k) children(); }\n\
+         _fab_poc_wrap() { cube([2,3,4]); sphere(r=1); }";
+
+    for (label, src) in [
+        ("compiled callee", compiled_callee),
+        ("interpreted callee", interpreted_callee),
+    ] {
+        let (geo_on, msgs_on) = run(src, true);
+        let (geo_off, msgs_off) = run(src, false);
+        assert_eq!(
+            geo_on, geo_off,
+            "{label}: dispatching from a compiled module built different geometry than interpreting"
+        );
+        assert_eq!(
+            msgs_on, msgs_off,
+            "{label}: dispatching from a compiled module wrote a different console — a `$children` \
+             or `$parent_modules` bind that only the interpreted path performs"
+        );
+        assert!(
+            geo_on.contains("Leaf"),
+            "{label}: produced no geometry, so the comparison held on two empty trees: {geo_on}"
+        );
+    }
+
+    // The mixed program must actually have ECHOED, or the console half of this test proved nothing.
+    let (_, msgs) = run(interpreted_callee, true);
+    assert!(
+        msgs.contains("pm") && msgs.contains("ch"),
+        "the drifted callee never ran its echo, so the $-var comparison was vacuous: {msgs}"
+    );
+
+    // NON-VACUITY, and this is the part that makes the equalities above mean something: an
+    // equality holds just as well when nothing compiled at all. Prove the tier layout each program
+    // claims, by asking the registry the same question dispatch asks.
+    let wires = |src: &str, name: &str| {
+        let program = crate::parser::parse(src).expect("parses");
+        program.stmts.iter().any(|s| {
+            matches!(&s.kind, crate::parser::StmtKind::ModuleDef { name: n, params, body }
+                if &**n == name && super::resolve_module(name, params, body).is_some())
+        })
+    };
+    assert!(
+        wires(compiled_callee, "_fab_poc_wrap") && wires(compiled_callee, "_fab_poc_mod"),
+        "the compiled-callee program did not arm BOTH modules, so nothing dispatched"
+    );
+    assert!(
+        wires(interpreted_callee, "_fab_poc_wrap"),
+        "the wrapper did not arm, so the mixed program never entered compiled code"
+    );
+    assert!(
+        !wires(interpreted_callee, "_fab_poc_mod"),
+        "the callee was supposed to have DRIFTED out of the registry — the mixed case is not mixed"
+    );
+}
+
 /// The drift gate, on the MODULE path: a definition that does not match the reference the native
 /// was generated from must NOT wire. Without this the native would answer for a module whose body
 /// somebody changed, which is a wrong answer rather than a missed compilation.

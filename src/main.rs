@@ -843,8 +843,17 @@ fn render_scadrs_cmd(
         })?;
     let geo_ms = build_start.elapsed().as_millis();
     let ms = start.elapsed().as_millis();
-    std::fs::write(&stl, solid.to_stl_bytes())
-        .with_context(|| format!("writing {}", stl.display()))?;
+    // Honour the requested EXTENSION (SY.1). This used to hardcode STL, so `--out x.3mf` wrote STL
+    // bytes into a 3mf-named file — and since `--engine openscad` is the default, the only way anyone
+    // ever got a `.3mf` out of `fab render` was the ORACLE writing it. That made "compare fab's colors
+    // against OpenSCAD's" quietly impossible from the CLI: the obvious command compares the oracle
+    // with itself and always agrees. STL carries no color at all, so this is the only route to seeing
+    // what our own kernel actually assigns.
+    let bytes = match stl.extension().and_then(|e| e.to_str()) {
+        Some(e) if e.eq_ignore_ascii_case("3mf") => solid.to_3mf_bytes(),
+        _ => solid.to_stl_bytes(),
+    };
+    std::fs::write(&stl, bytes).with_context(|| format!("writing {}", stl.display()))?;
     #[allow(
         clippy::cast_precision_loss,
         reason = "a percentage of a millisecond count; precision past 1% is noise"

@@ -2053,14 +2053,23 @@ mod tests {
             return;
         }
         let lib = crate::library::Library::read(&root).expect("BOSL2 reads");
-        let mut names: Vec<&str> = Vec::new();
+        let folded = lib.fold_constants();
+        let mut standalone = 0usize;
+        let mut with_bakes: Vec<&str> = Vec::new();
         for m in lib.modules.values() {
             if super::generate_module_native(&m.source, &[], &[]).is_ok() {
-                names.push(&m.name);
+                standalone += 1;
+            } else if super::bake_reads(&m.source, &lib, &folded)
+                .is_ok_and(|b| super::generate_module_native(&m.source, &b, &[]).is_ok())
+            {
+                // band 2: needs baked constants (so const-GUARDS on ModuleEntry), still no
+                // sibling-function calls.
+                with_bakes.push(&m.name);
             }
         }
-        println!("standalone-armable modules: {} of {}", names.len(), lib.modules.len());
-        for n in &names {
+        println!("band 1 (standalone): {standalone} of {}", lib.modules.len());
+        println!("band 2 (bakes, no sibling fns): {}", with_bakes.len());
+        for n in &with_bakes {
             println!("  {n}");
         }
     }

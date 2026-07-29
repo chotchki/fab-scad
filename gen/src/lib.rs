@@ -149,119 +149,59 @@ pub use fab_lang::surface::{
     ConstDecl, Decl, Domain, Kind, LibrarySurface, Param, Root, satisfies,
 };
 
-/// Shorthand for a required parameter.
-const fn p(name: &'static str, domain: Domain) -> Param {
-    Param {
-        name,
-        domain,
-        required: true,
-    }
-}
+use fab_lang::surface::builtin_decl;
 
-/// A builtin FUNCTION declaration — `names_bind: false` for every one of them, verified.
-const fn bf(name: &'static str, ret: Domain, params: &'static [Param]) -> Decl {
-    Decl {
-        name,
-        kind: Kind::Function,
-        names_bind: false,
-        ret,
-        params,
-    }
-}
-
-/// Builtins SAFE to call with any args (a type mismatch yields `undef`, never an error), as DECLS.
+/// Builtins the generator emits calls to — the GENERATION surface, as DECLS.
 ///
-/// ORDER AND LENGTH ARE FROZEN: `pick_builtin` indexes this table with the RNG, so reordering or
-/// resizing it moves every subsequent draw and breaks the `cheap` corpus digest. The migration from
-/// `&[(&str, usize)]` to `&[Decl]` was deliberately output-NEUTRAL — same entries, same order, same
-/// arity, still called positionally in the cheap lane.
+/// ORDER AND LENGTH ARE FROZEN and owned HERE: `pick_builtin` indexes this table with the RNG, so
+/// reordering or resizing it moves every subsequent draw and breaks the `cheap` corpus digest.
+/// Additions are APPEND-ONLY and each is a deliberate re-baseline event — `below(len)` puts the
+/// LENGTH in the RNG math, so even an append re-points accumulated corpora.
 ///
-/// The DOMAINS here are GENERATION domains, not acceptance claims: they answer "what argument makes
-/// this call compute" (AR.4), which is narrower than what the builtin tolerates. `len` accepts
-/// anything and measures only sized values, so it declares `VecN`; `asin` accepts any number and is
-/// NaN outside `[-1, 1]`, so it declares `Unit`. Only the heavy lane reads them — cheap's arbitrary
-/// arguments still cover the mismatch space, where the FINDINGS live.
+/// The CONTENT — name, arity, parameter names, domains — comes from the ONE declaration (AS.5,
+/// `fab_lang::surface::BUILTIN_SURFACE`): a builtin cannot be described here differently from what
+/// the evaluator implements, and a typo'd or vanished name is a COMPILE error, because
+/// [`builtin_decl`] is a const lookup that panics at const-eval. The domains are GENERATION
+/// domains, not acceptance claims — they answer "what argument makes this call compute" (AR.4);
+/// the rationale per entry (`len` wants `VecN`, `pow`'s base is `Pos`, `search`'s key is `Num`
+/// because of upstream #5017) lives ON the declaration rows now. Only the heavy lane reads them —
+/// cheap's arbitrary arguments still cover the mismatch space, where the FINDINGS live.
 const BUILTINS: &[Decl] = &[
-    bf("sin", Domain::Unit, &[p("x", Domain::Deg)]),
-    bf("cos", Domain::Unit, &[p("x", Domain::Deg)]),
-    bf("tan", Domain::Num, &[p("x", Domain::Deg)]),
-    bf("asin", Domain::Deg, &[p("x", Domain::Unit)]),
-    bf("acos", Domain::Deg, &[p("x", Domain::Unit)]),
-    bf("atan", Domain::Deg, &[p("x", Domain::Num)]),
-    bf("sqrt", Domain::Num, &[p("x", Domain::Pos)]),
-    bf("abs", Domain::Num, &[p("x", Domain::Num)]),
-    bf("floor", Domain::Num, &[p("x", Domain::Num)]),
-    bf("ceil", Domain::Num, &[p("x", Domain::Num)]),
-    bf("round", Domain::Num, &[p("x", Domain::Num)]),
-    bf("ln", Domain::Num, &[p("x", Domain::Pos)]),
-    bf("exp", Domain::Num, &[p("x", Domain::Num)]),
-    bf("sign", Domain::Num, &[p("x", Domain::Num)]),
-    bf("norm", Domain::Num, &[p("v", Domain::VecN)]),
-    // VecN, not Any: `len(5)` is undef upstream — a generated call must MEASURE something.
-    bf("len", Domain::Num, &[p("value", Domain::VecN)]),
-    // base Pos: a negative base under a fractional exponent is NaN.
-    bf(
-        "pow",
-        Domain::Num,
-        &[p("base", Domain::Pos), p("exponent", Domain::Num)],
-    ),
-    bf(
-        "atan2",
-        Domain::Deg,
-        &[p("y", Domain::Num), p("x", Domain::Num)],
-    ),
-    // VARIADIC upstream; pinned at 2 because that is what the corpus has always generated.
-    bf(
-        "min",
-        Domain::Num,
-        &[p("a", Domain::Num), p("b", Domain::Num)],
-    ),
-    bf(
-        "max",
-        Domain::Num,
-        &[p("a", Domain::Num), p("b", Domain::Num)],
-    ),
-    bf(
-        "cross",
-        Domain::Vec3,
-        &[p("a", Domain::Vec3), p("b", Domain::Vec3)],
-    ),
+    builtin_decl("sin"),
+    builtin_decl("cos"),
+    builtin_decl("tan"),
+    builtin_decl("asin"),
+    builtin_decl("acos"),
+    builtin_decl("atan"),
+    builtin_decl("sqrt"),
+    builtin_decl("abs"),
+    builtin_decl("floor"),
+    builtin_decl("ceil"),
+    builtin_decl("round"),
+    builtin_decl("ln"),
+    builtin_decl("exp"),
+    builtin_decl("sign"),
+    builtin_decl("norm"),
+    builtin_decl("len"),
+    builtin_decl("pow"),
+    builtin_decl("atan2"),
+    builtin_decl("min"),
+    builtin_decl("max"),
+    builtin_decl("cross"),
     // list + string group (AJ.4)
-    bf(
-        "str",
-        Domain::Str,
-        &[p("a", Domain::Any), p("b", Domain::Any)],
-    ),
-    bf("chr", Domain::Str, &[p("n", Domain::Pos)]),
-    bf("ord", Domain::Num, &[p("c", Domain::Str)]),
-    bf(
-        "concat",
-        Domain::List,
-        &[p("a", Domain::Any), p("b", Domain::Any)],
-    ),
-    bf(
-        "search",
-        Domain::List,
-        &[
-            // Num, NOT Any — a STRING key over a non-string column ABORTS the oracle (upstream
-            // #5017, docs/openscad-search-crash.md). A generation choice until their fix ships:
-            // cheap's arbitrary args still reach the crash shape, in the lane that handles crashes.
-            p("match_value", Domain::Num),
-            p("string_or_vector", Domain::Table),
-        ],
-    ),
-    bf(
-        "lookup",
-        Domain::Num,
-        &[p("key", Domain::Num), p("pairs", Domain::Table)],
-    ),
+    builtin_decl("str"),
+    builtin_decl("chr"),
+    builtin_decl("ord"),
+    builtin_decl("concat"),
+    builtin_decl("search"),
+    builtin_decl("lookup"),
     // type predicates — genuinely Any, that is the point of them
-    bf("is_num", Domain::Bool, &[p("value", Domain::Any)]),
-    bf("is_undef", Domain::Bool, &[p("value", Domain::Any)]),
-    bf("is_string", Domain::Bool, &[p("value", Domain::Any)]),
-    bf("is_list", Domain::Bool, &[p("value", Domain::Any)]),
-    bf("is_bool", Domain::Bool, &[p("value", Domain::Any)]),
-    bf("is_object", Domain::Bool, &[p("value", Domain::Any)]),
+    builtin_decl("is_num"),
+    builtin_decl("is_undef"),
+    builtin_decl("is_string"),
+    builtin_decl("is_list"),
+    builtin_decl("is_bool"),
+    builtin_decl("is_object"),
 ];
 
 /// The builtin call surface (AR.3) — exposed so tests and, later, the heavy lane can walk it.
@@ -308,6 +248,23 @@ pub struct Builtins;
 
 impl Surface for Builtins {
     fn decls(&self) -> &'static [Decl] {
+        BUILTINS
+    }
+}
+
+/// The impl `fab_lang::surface`'s module doc promised (AS.5, closing the D4 gap): builtins as a
+/// [`LibrarySurface`] — no roots, no preamble, no constants, no natives, just callables.
+///
+/// `callables` is the GENERATION-SAFE subset in the frozen corpus order, not the full declared
+/// surface: the trait's contract is a stable RNG-indexable table, and the context builtins
+/// (`rands`, `parent_module`, the metrics pair, `object`) are generated by dedicated productions
+/// instead — see `fab_lang::surface::BUILTIN_SURFACE` for the complete declaration.
+impl LibrarySurface for Builtins {
+    fn name(&self) -> &'static str {
+        "builtins"
+    }
+
+    fn callables(&self) -> &'static [Decl] {
         BUILTINS
     }
 }

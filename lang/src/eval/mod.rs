@@ -2214,9 +2214,11 @@ fn run_builtin(name: &str, args: &[Arg], values: &mut Vec<Value>, ctx: &Ctx<'_>)
     // remember in a parallel list.
     let result = match builtins::context_impl(name) {
         // Argument NAMES in hand: the metrics pair (AG) binds + warns through the console; `object`
-        // (AF.4) turns the names into member names.
+        // (AF.4) turns the names into member names. Names as a bare slice (AR.22) so the
+        // value-shaped `call_fn` dispatch shares the implementation; the Vec is a cold-path alloc.
         Some(builtins::ContextImpl::Named(f)) => {
-            f(args, &values[start..], &mut ctx.messages.borrow_mut())
+            let names: Vec<Option<&str>> = args.iter().map(|a| a.name.as_deref()).collect();
+            f(&names, &values[start..], &mut ctx.messages.borrow_mut())
         }
         // Seedless `rands` draws advance the evaluator's ONE `rand_stream` (I.2.8b).
         Some(builtins::ContextImpl::Stream(f)) => {

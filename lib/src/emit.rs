@@ -770,15 +770,6 @@ impl Emitter<'_> {
         // Emit-time declines remain only for shapes `call_fn` hands straight back to the
         // interpreter — arming a module that declines on its every call would be noise.
         if self.in_module {
-            let named_capability = fab_lang::surface::BUILTIN_SURFACE.iter().any(|b| {
-                b.decl.name == name
-                    && b.capability == fab_lang::surface::BuiltinCapability::Named
-            });
-            if named_capability {
-                return Err(format!(
-                    "a call to `{name}`, a name-binding builtin (call_fn v1 declines it)"
-                ));
-            }
             // The file-value builtins resolve paths off the calling FILE's directory binding —
             // not in `BUILTIN_SURFACE` (they are expression forms of statements), matched by name.
             if matches!(name, "import" | "dxf_dim" | "dxf_cross") {

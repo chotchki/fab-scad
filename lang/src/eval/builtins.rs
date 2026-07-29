@@ -59,8 +59,10 @@ const fn opt(name: &'static str, domain: Domain) -> Param {
 /// remember in N places.
 #[derive(Clone, Copy)]
 pub(super) enum ContextImpl {
-    /// Needs the argument NAMES (and may warn through the console).
-    Named(fn(&[crate::parser::Arg], &[Value], &mut Vec<super::Message>) -> Value),
+    /// Needs the argument NAMES (and may warn through the console). Takes the names as a bare
+    /// slice rather than AST `Arg`s so a VALUE-shaped caller — `ModuleCtx::call_fn`'s dispatch
+    /// (AR.22), which has no AST — shares the one implementation with `run_builtin`.
+    Named(fn(&[Option<&str>], &[Value], &mut Vec<super::Message>) -> Value),
     /// Draws from the evaluator's ONE advancing seedless stream.
     Stream(fn(&[Value], &mut super::rng::RandStream) -> Value),
     /// Reads the live module-instantiation name stack (innermost last).
@@ -544,30 +546,30 @@ pub mod bi {
 /// `textmetrics(...)` in the [`ContextImpl::Named`] shape; [`metrics_call`] carries the binding
 /// logic shared by the metrics pair.
 fn textmetrics_named(
-    args: &[crate::parser::Arg],
+    names: &[Option<&str>],
     pos: &[Value],
     messages: &mut Vec<super::Message>,
 ) -> Value {
-    metrics_call("textmetrics", args, pos, messages)
+    metrics_call("textmetrics", names, pos, messages)
 }
 
 /// `fontmetrics(...)` in the [`ContextImpl::Named`] shape.
 fn fontmetrics_named(
-    args: &[crate::parser::Arg],
+    names: &[Option<&str>],
     pos: &[Value],
     messages: &mut Vec<super::Message>,
 ) -> Value {
-    metrics_call("fontmetrics", args, pos, messages)
+    metrics_call("fontmetrics", names, pos, messages)
 }
 
 /// `object(...)` in the [`ContextImpl::Named`] shape — it reads names but never warns; the unused
 /// messages slot is the price of ONE `Named` signature instead of two.
 fn object_named(
-    args: &[crate::parser::Arg],
+    names: &[Option<&str>],
     pos: &[Value],
     _messages: &mut Vec<super::Message>,
 ) -> Value {
-    object(args, pos)
+    object(names, pos)
 }
 
 /// `parent_module(n)` (`control.cc`) — the NAME of the module `n` levels up the instantiation stack (0 =
@@ -725,7 +727,7 @@ fn len(pos: &[Value]) -> Value {
 /// empty-text metrics). Returns an OBJECT (the golden shapes) — see [`super::metrics`].
 fn metrics_call(
     name: &str,
-    args: &[crate::parser::Arg],
+    args: &[Option<&str>],
     pos: &[Value],
     messages: &mut Vec<super::Message>,
 ) -> Value {
@@ -747,14 +749,14 @@ fn metrics_call(
     let mut bound: std::collections::BTreeMap<&str, &Value> = std::collections::BTreeMap::new();
     let mut next_positional = 0usize;
     for (arg, value) in args.iter().zip(pos) {
-        match &arg.name {
+        match arg {
             None => {
                 if let Some(&slot) = params.get(next_positional) {
                     bound.insert(slot, value);
                 }
                 next_positional += 1;
             }
-            Some(n) => match params.iter().find(|&&p| p == &**n) {
+            Some(n) => match params.iter().find(|&&p| p == *n) {
                 Some(&slot) => {
                     bound.insert(slot, value);
                 }
@@ -827,11 +829,11 @@ fn metrics_call(
 /// an EDIT list — each element `[k]` removes `k`, `[k, v]` sets it; anything else contributes
 /// nothing. `args` carries the names (this is why `run_builtin` routes here specially), `pos` the
 /// evaluated values, index-aligned.
-fn object(args: &[crate::parser::Arg], pos: &[Value]) -> Value {
+fn object(args: &[Option<&str>], pos: &[Value]) -> Value {
     let mut map = super::object::ObjectMap::new();
     for (arg, value) in args.iter().zip(pos) {
-        match (&arg.name, value) {
-            (Some(name), v) => map.set(std::rc::Rc::clone(name), v.clone()),
+        match (arg, value) {
+            (Some(name), v) => map.set(std::rc::Rc::from(*name), v.clone()),
             (None, Value::Object(o)) => {
                 for (k, v) in o.iter() {
                     map.set(std::rc::Rc::clone(k), v.clone());

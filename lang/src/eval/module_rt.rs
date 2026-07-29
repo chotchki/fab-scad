@@ -615,14 +615,16 @@ impl ModuleCtx for NativeModuleCtx<'_, '_, '_> {
             ));
         }
         // Rung 4: builtins, by DECLARED capability (AS.2) — the same partition `run_builtin`
-        // dispatches on, minus the `Named` arm (textmetrics/fontmetrics/object want written arg
-        // names bound with console warnings; v1 declines them back to the interpreter).
+        // dispatches on, `Named` included: the wrappers take bare name-slices, and a `FnCall`
+        // carries every written name.
         if super::builtins::is_builtin(name) {
             let vals: Vec<Value> = fcall.args.iter().map(|(_, v)| v.clone()).collect();
             return match super::builtins::context_impl(name) {
-                Some(super::builtins::ContextImpl::Named(_)) => Err(crate::Error::Unimplemented(
-                    "a name-binding builtin in a compiled body — re-interpreting",
-                )),
+                Some(super::builtins::ContextImpl::Named(f)) => {
+                    let names: Vec<Option<&str>> =
+                        fcall.args.iter().map(|(n, _)| *n).collect();
+                    Ok(f(&names, &vals, &mut ctx.messages.borrow_mut()))
+                }
                 Some(super::builtins::ContextImpl::Stream(f)) => {
                     Ok(f(&vals, &mut ctx.rand_stream.borrow_mut()))
                 }

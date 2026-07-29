@@ -422,9 +422,9 @@ pub trait ModuleCtx {
     /// three files away both just resolve.
     ///
     /// # Errors
-    /// A decline (`Unimplemented`) for the shapes v1 hands back to the interpreter — a
-    /// function-value callee, a `Named`-capability builtin, a file-reading builtin — or whatever
-    /// the resolved body raises (assert failures, the recursion guard).
+    /// A decline (`Unimplemented`) for the shapes handed back to the interpreter — a
+    /// function-value callee, a file-reading builtin — or whatever the resolved body raises
+    /// (assert failures, the recursion guard).
     fn call_fn(&self, call: &FnCall<'_>) -> crate::Result<Value>;
 }
 

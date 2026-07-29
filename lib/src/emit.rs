@@ -251,7 +251,7 @@ pub fn generate_module_native(
     // The module BODY is the outermost hoist scope: bind its whole-scope assignments (blocks
     // flattened, last-wins) before any statement runs — see `Emitter::hoist_prelude`.
     let hoist = em
-        .hoist_prelude(std::slice::from_ref(body))
+        .hoist_prelude(std::slice::from_ref(body), true)
         .map_err(|e| format!("{name}: {e}"))?;
     out.push_str(&hoist);
     let body_code = em.stmt(body).map_err(|e| format!("{name}: {e}"))?;
@@ -861,7 +861,7 @@ impl Emitter<'_> {
     /// an expression the interpreter's dedupe never runs. Every scope the interpreter hoists
     /// (module body, `if` branches, `for` iteration bodies, `let`/`assert`/`echo` children) calls
     /// this before walking statements; the `Assignment` arm below is then a no-op.
-    fn hoist_prelude(&mut self, stmts: &[Stmt]) -> Result<String, String> {
+    fn hoist_prelude(&mut self, stmts: &[Stmt], top: bool) -> Result<String, String> {
         // flatten_blocks + dedupe, mirroring eval's `hoisted_assignments` byte for byte: a `{ }`
         // is NOT an assignment scope upstream — its assignments belong to the enclosing scope.
         let mut flat: Vec<&Stmt> = Vec::new();
@@ -878,11 +878,15 @@ impl Emitter<'_> {
         for s in flat {
             if let StmtKind::Assignment { name, value } = &s.kind {
                 // A `$`-assignment is DYNAMIC — it reaches every callee through the chain, not
-                // just this scope's statements — so a lexical local would be wrong in a way that
-                // renders (the statement `for`/`let` arms decline their `$`-bindings for the same
-                // reason; this is AR.20.3's business).
-                if name.starts_with('$') {
-                    return Err("a `$`-assignment in a module scope (dynamic, reaches every callee)".into());
+                // just this scope's statements. At the BODY's top scope that is exactly
+                // `ModuleCtx::set_dollar` (AR.22, emitted below); in a NESTED scope (an `if`
+                // branch, a `for` body) the bind is branch-scoped, which a write into the call
+                // frame would over-scope — decline.
+                if name.starts_with('$') && !top {
+                    return Err(
+                        "a `$`-assignment in a nested module scope (branch-scoped dynamic bind)"
+                            .into(),
+                    );
                 }
                 if let Some(&i) = index.get(&**name) {
                     order[i].1 = value; // seen: last expr wins, first-occurrence position kept
@@ -895,6 +899,16 @@ impl Emitter<'_> {
         let mut out = String::new();
         for (name, expr) in order {
             let v = self.expr(expr)?;
+            if name.starts_with('$') {
+                // The dynamic bind, in the same first-occurrence/last-wins slot a lexical one
+                // takes — a later prelude binding whose expression reads this `$`-name sees the
+                // NEW value (`fx.dollar` reads the frame just written), matching `hoist_scope`'s
+                // sequential bind. The self-reference rule holds too: THIS binding's own
+                // expression was emitted before the set, so `$x = $x * m` reads the inherited
+                // `$x`.
+                let _ = writeln!(out, "    fx.set_dollar({name:?}, {v});");
+                continue; // NOT a Rust local — body reads ride `fx.dollar`, the existing path.
+            }
             let id = self.fresh_ident(name);
             let _ = writeln!(out, "    let {id} = {v};");
             self.locals.push((name.to_string(), id));
@@ -952,13 +966,13 @@ impl Emitter<'_> {
                 // EvalNodes child scope): its assignments bind for the branch only.
                 let mut out = format!("    if ({c}).is_truthy() {{\n");
                 let mark = self.locals.len();
-                out.push_str(&self.hoist_prelude(then)?);
+                out.push_str(&self.hoist_prelude(then, false)?);
                 for k in then {
                     out.push_str(&self.stmt(k)?);
                 }
                 self.locals.truncate(mark);
                 out.push_str("    } else {\n");
-                out.push_str(&self.hoist_prelude(els)?);
+                out.push_str(&self.hoist_prelude(els, false)?);
                 for k in els {
                     out.push_str(&self.stmt(k)?);
                 }
@@ -1027,7 +1041,7 @@ impl Emitter<'_> {
         let mut out = format!(
             "    let {inner} = {{\n        let mut parts: Vec<rt::Geo> = Vec::new();\n"
         );
-        out.push_str(&self.hoist_prelude(children)?);
+        out.push_str(&self.hoist_prelude(children, false)?);
         for k in children {
             out.push_str(&self.stmt(k)?);
         }
@@ -1113,7 +1127,7 @@ impl Emitter<'_> {
                 }
                 // The body is a fresh hoist scope PER ITERATION (the interpreter pushes one
                 // EvalNodes per iteration) — the prelude sits inside the innermost loop.
-                out.push_str(&self.hoist_prelude(&mi.children)?);
+                out.push_str(&self.hoist_prelude(&mi.children, false)?);
                 for k in &mi.children {
                     out.push_str(&self.stmt(k)?);
                 }
@@ -1142,7 +1156,7 @@ impl Emitter<'_> {
                     self.locals.push((bn.to_string(), ident));
                 }
                 // The children form their own hoist scope under the `let` bindings.
-                out.push_str(&self.hoist_prelude(&mi.children)?);
+                out.push_str(&self.hoist_prelude(&mi.children, false)?);
                 for k in &mi.children {
                     out.push_str(&self.stmt(k)?);
                 }
@@ -1862,6 +1876,11 @@ pub const GENERATED_MODULES: &[&str] = &[
     // through the SAME `call_fn` ladder, so a program's `function max(a,b)=…` shadow resolves
     // exactly as interpreting would. The named arg exercises `fill_slots` through the fn ABI.
     "module _fab_poc_fncall(x=1) { cube(helper(v=x)); sphere(r=max(x, 2)); }",
+    // The `$`-SET, compiled (AR.22): a hoisted in-body `$fab_ds = …` WRITES the dynamic chain —
+    // the self-reference reads the INHERITED value, the echo and the compiled child block read
+    // the NEW one, and the forwarded call-site children read it too (the attachment mechanism:
+    // a parent's `$`-set reaching the children it renders).
+    "module _fab_poc_dollarset(k=1) { $fab_ds = $fab_ds + k; echo(ds=$fab_ds); _fab_poc_mod(k) { cube($fab_ds); children(); } }",
 ];
 
 /// Synthetic bakes for the POC references above — BOSL2's own values, so a tier test that binds
@@ -2918,4 +2937,5 @@ mod tests {
         assert!(err.contains("non-finite element"), "{err}");
     }
 }
+
 

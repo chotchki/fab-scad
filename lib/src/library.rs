@@ -922,7 +922,18 @@ impl Library {
     /// simply stay unbaked, so the functions reading them keep interpreting. The safe direction.
     #[must_use]
     pub fn fold_constants(&self) -> BTreeMap<String, fab_lang::Value> {
-        let mut scope = fab_lang::Scope::new();
+        // The library's OWN functions resolve during the fold (AR.22): BOSL2's `IDENT = ident(4)`
+        // is a function call, and the bare-scope fold left the whole affine family — and every
+        // module baking it — permanently unresolved. The oracle publishes each resolved constant
+        // into its island as it lands, so function bodies read the constants folded so far.
+        let functions: Vec<(&str, &[fab_lang::Parameter], &fab_lang::Expr)> = self
+            .functions
+            .values()
+            .map(|f| (f.name.as_str(), f.params.as_slice(), &f.body))
+            .collect();
+        let Ok(mut oracle) = fab_lang::FnOracle::new(&functions, &[]) else {
+            return BTreeMap::new();
+        };
         let mut out: BTreeMap<String, fab_lang::Value> = BTreeMap::new();
         let mut pending: Vec<&LibConst> = self.constants.values().collect();
         loop {
@@ -931,14 +942,15 @@ impl Library {
                 // An expression that reads an unbound name evaluates to `undef` rather than
                 // failing, so "did it resolve" cannot be read off the Result. Require a DEFINED
                 // value, and let a genuinely-undef constant stay unbaked — baking `undef` buys
-                // nothing and would mask a fold that silently saw nothing.
-                match fab_lang::eval_expr(&c.value, &scope) {
-                    Ok(v) if v != fab_lang::Value::Undef => {
-                        scope.bind(c.name.clone(), v.clone());
+                // nothing and would mask a fold that silently saw nothing. The retain-loop makes
+                // cross-file declaration order a non-issue: a constant whose deps land later
+                // simply resolves on a later pass.
+                match oracle.eval_constant(&c.name, &c.value) {
+                    Some(v) => {
                         out.insert(c.name.clone(), v);
                         false
                     }
-                    _ => true,
+                    None => true,
                 }
             });
             if out.len() == before {

@@ -2248,6 +2248,15 @@ pub(super) static MODULE_REGISTRY: &[ModuleEntry] = &[
         func: generated_modules::_fab_poc_fncall,
         consts: &[],
     },
+    // The `$`-SET poc (AR.22): the hoisted `$fab_ds = $fab_ds + k` writes the dynamic chain —
+    // self-reference reads the INHERITED value, everything after (echo, the compiled child
+    // block, the FORWARDED call-site children) reads the new one. The attachment mechanism.
+    ModuleEntry {
+        name: "_fab_poc_dollarset",
+        reference: "module _fab_poc_dollarset(k=1) { $fab_ds = $fab_ds + k; echo(ds=$fab_ds); _fab_poc_mod(k) { cube($fab_ds); children(); } }",
+        func: generated_modules::_fab_poc_dollarset,
+        consts: &[],
+    },
 ];
 
 /// The compiled module for `name`, IFF one is registered, the definition in this program

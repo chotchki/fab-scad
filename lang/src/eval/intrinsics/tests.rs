@@ -4231,6 +4231,86 @@ fn a_shadowed_builtin_resolves_to_the_shadow_from_a_compiled_body() {
     );
 }
 
+/// AR.22 — a compiled module's `$`-SET writes the dynamic chain like the interpreter's hoisted
+/// bind: the self-reference reads the INHERITED `$fab_ds` (10), the echo and the compiled child
+/// block read the new value (12), and the FORWARDED call-site child (`sphere(r=$fab_ds)`) reads
+/// it too — the attachment mechanism, where a parent's `$`-set reaches the children it renders.
+/// Repeated calls with different arguments prove the set is per-CALL, not sticky.
+#[test]
+fn a_compiled_module_dollar_set_reaches_callees_and_children() {
+    let run = |src: &str, intrinsics: bool| {
+        let config = crate::Config {
+            intrinsics,
+            ..crate::Config::default()
+        };
+        let (geo, msgs) =
+            crate::evaluate_geometry_with_base_config(src, std::path::Path::new("."), &[], config)
+                .expect("renders");
+        (format!("{geo:?}"), format!("{msgs:?}"))
+    };
+    let src = "$fab_ds = 10;\n\
+               module _fab_poc_dollarset(k=1) { $fab_ds = $fab_ds + k; echo(ds=$fab_ds); _fab_poc_mod(k) { cube($fab_ds); children(); } }\n\
+               _fab_poc_dollarset(2) sphere(r=$fab_ds);\n\
+               _fab_poc_dollarset(5) sphere(r=$fab_ds);";
+    let before = crate::eval::module_rt::NATIVE_MODULE_RUNS.with(std::cell::Cell::get);
+    let (geo_on, msgs_on) = run(src, true);
+    let ran = crate::eval::module_rt::NATIVE_MODULE_RUNS.with(std::cell::Cell::get) - before;
+    let (geo_off, msgs_off) = run(src, false);
+    assert_eq!(
+        geo_on, geo_off,
+        "$-set: compiled module rendered different geometry than interpreting"
+    );
+    assert_eq!(msgs_on, msgs_off, "$-set: different console");
+    assert!(
+        msgs_on.contains("ds = 12") && msgs_on.contains("ds = 15"),
+        "the echoes must carry the SET values (inherited 10 + k): {msgs_on}"
+    );
+    assert!(ran > 0, "`_fab_poc_dollarset`'s native never ran to completion");
+}
+
+/// AR.22 — the TAG-FAMILY pipeline end to end, the attachment core's regression pin: `diff()`
+/// hands its children to `hide()`/`show_only()`, each of which `$`-SETS and re-renders them, and
+/// the `tag("remove")`ed cuboid must land in the SUBTRACTED half both tiers alike. This is the
+/// program the OpenSCAD differential caught the render-point bug on: a compiled child thunk that
+/// runs against its CREATOR's dynamic context drops every `$`-frame between creator and renderer
+/// — `hide()`'s `$tags_hidden` never reached the cuboid, and diff() UNIONED what it should have
+/// subtracted. The bridge (render-point scope over creator structure) is what this test pins.
+#[test]
+fn the_tag_family_renders_through_compiled_children_like_the_interpreter() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("workspace root")
+        .join("libs/BOSL2");
+    if !root.join("std.scad").exists() {
+        eprintln!("skipping: libs/BOSL2 submodule not checked out");
+        return;
+    }
+    let run = |intrinsics: bool| {
+        let config = crate::Config {
+            intrinsics,
+            ..crate::Config::default()
+        };
+        let (geo, msgs) = crate::evaluate_geometry_with_base_config(
+            "include <std.scad>\ndiff() cuboid([40, 25, 80]) { tag(\"remove\") left(5) cuboid([10, 10, 90]); };",
+            &root,
+            &[],
+            config,
+        )
+        .expect("renders");
+        (format!("{geo:?}"), format!("{msgs:?}"))
+    };
+    let before = crate::eval::module_rt::NATIVE_MODULE_RUNS.with(std::cell::Cell::get);
+    let (geo_on, msgs_on) = run(true);
+    let ran = crate::eval::module_rt::NATIVE_MODULE_RUNS.with(std::cell::Cell::get) - before;
+    let (geo_off, msgs_off) = run(false);
+    assert_eq!(
+        geo_on, geo_off,
+        "tag family: a $-set was dropped between a thunk's creator and its renderer"
+    );
+    assert_eq!(msgs_on, msgs_off, "tag family: different console");
+    assert!(ran > 0, "no native ran — the tag pipeline never exercised the bridge");
+}
+
 /// The drift gate, on the MODULE path: a definition that does not match the reference the native
 /// was generated from must NOT wire. Without this the native would answer for a module whose body
 /// somebody changed, which is a wrong answer rather than a missed compilation.

@@ -226,3 +226,22 @@ pub(super) fn _fab_poc_fncall(fx: &dyn rt::ModuleCtx) -> rt::Result<rt::Geo> {
     Ok(fx.group(parts))
 }
 
+
+/// Generated native for module `_fab_poc_dollarset` — geometry through the interpreter's own
+/// construction, so a generated module is what interpreting its reference builds.
+pub(super) fn _fab_poc_dollarset(fx: &dyn rt::ModuleCtx) -> rt::Result<rt::Geo> {
+    let p_k = fx.args().get(0).cloned().unwrap_or(rt::Value::Undef);
+    let mut parts: Vec<rt::Geo> = Vec::new();
+    fx.set_dollar("$fab_ds", rt::apply_binary(rt::BinOp::Add, fx.dollar("$fab_ds"), p_k.clone()));
+    let l0_blk = {
+        let mut parts: Vec<rt::Geo> = Vec::new();
+    fx.echo(&[(Some("ds"), fx.dollar("$fab_ds")), ])?;
+    parts.push(fx.call(&rt::ModuleCall { name: "_fab_poc_mod", args: &[(None, p_k.clone()), ], children: rt::Children::Compiled(&[&|fx: &dyn rt::ModuleCtx| { let mut parts: Vec<rt::Geo> = Vec::new();     parts.push(fx.call(&rt::ModuleCall { name: "cube", args: &[(None, fx.dollar("$fab_ds")), ], children: rt::Children::None })?);
+ Ok(fx.group(parts)) }, &|fx: &dyn rt::ModuleCtx| { let mut parts: Vec<rt::Geo> = Vec::new();     parts.push(fx.children()?);
+ Ok(fx.group(parts)) }, ]) })?);
+        fx.group(parts)
+    };
+    parts.push(l0_blk);
+    Ok(fx.group(parts))
+}
+

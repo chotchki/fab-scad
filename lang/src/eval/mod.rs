@@ -1096,6 +1096,27 @@ impl<'a> FnOracle<'a> {
         })
     }
 
+    /// Evaluate a top-level CONSTANT's RHS against the oracle's function store, and PUBLISH the
+    /// binding on success — the library-constant fold's entry (AR.22). BOSL2's `IDENT = ident(4)`
+    /// calls a library function, which the bare [`eval_expr`] fold could never resolve; here the
+    /// call dispatches through the oracle's ctx, and the new binding lands in island 0 exactly as
+    /// [`FnOracle::new`]'s publish does, so later constants (and the bodies they call) read it.
+    /// `None` for an RHS that errors OR resolves `undef` — the fold's retain-loop retries those
+    /// next pass, which is what makes cross-file declaration order a non-issue. A value the fold
+    /// resolves differently than the REAL island load would is caught downstream by the module
+    /// const GUARD (bit-compare at resolve time), so the worst case stays a dead native.
+    pub fn eval_constant(&mut self, name: &str, expr: &'a Expr) -> Option<Value> {
+        let v = eval_with_ctx(expr, &self.global, &self.ctx).ok()?;
+        if v == Value::Undef {
+            return None;
+        }
+        self.global.bind(name.to_string(), name_closure(v.clone(), name));
+        if let Some(slot) = self.ctx.island_globals.borrow_mut().get_mut(0) {
+            *slot = self.global.clone();
+        }
+        Some(v)
+    }
+
     /// Interpret `name(args)` — the slow side of the differential. Params bind onto the published constant
     /// scope (shadowing a like-named constant), then the body evaluates with calls + constants resolving.
     /// A param past `args.len()` follows `push_call`'s rule: its declared default evaluates in the

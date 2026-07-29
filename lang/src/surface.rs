@@ -403,6 +403,15 @@ pub trait ModuleCtx {
     /// Whatever the called module raises, including the depth-budget decline.
     fn call(&self, call: &ModuleCall<'_>) -> crate::Result<Geo>;
 
+    /// Bind a `$`-variable into THIS call's frame (AR.22): the compiled mirror of a hoisted
+    /// in-body `$x = …`, which is a WRITE into the dynamic chain — every callee dispatched after
+    /// it and every child rendered by `children()` sees the new binding, exactly as the
+    /// interpreter's hoisted bind is seen. This is the attachment system's mechanism
+    /// (`$transform`, `$parent_size`, the tag family), which is why the whole transform-wrapper
+    /// chain waits on it. Top-of-body scope only — the emitter declines a `$`-set in a nested
+    /// scope, whose bind would be branch-scoped.
+    fn set_dollar(&self, name: &'static str, value: Value);
+
     /// Call a FUNCTION by name with evaluated arguments, resolving where the interpreted body
     /// would (AR.14.4.3): a local binding holding a function value wins (AD.1 — the emitter
     /// declines the statically-visible case, this catches a runtime injection by DECLINING), then

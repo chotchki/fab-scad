@@ -140,7 +140,9 @@ impl Drop for ChildrenFrameGuard<'_, '_> {
 /// TWO shapes because there are two kinds of call site, and neither can be expressed as the other.
 /// An INTERPRETED site has source statements, held unevaluated so `children()` renders them late in
 /// the scope they were written in. A COMPILED site has already been turned into Rust, so its
-/// children are thunks — closures that re-enter the CALLER to render themselves.
+/// children are thunks, bridged at render time onto the RENDERER's dynamic scope (see `Compiled`).
+/// `Clone` is the bridge's re-borrow: `Stmts` clones its ref-vecs, `Compiled` copies its borrows.
+#[derive(Clone)]
 pub(super) enum CallChildren<'a, 'k> {
     /// Children written at an interpreted call site.
     Stmts {
@@ -159,11 +161,20 @@ pub(super) enum CallChildren<'a, 'k> {
     },
     /// Children written at a compiled call site: one thunk per child, in source order.
     ///
-    /// The thunks run against the CALLER's ctx, which is what makes `foo() children();` expressible
-    /// — its single child is `|c| c.children()`, resolving against the forwarder rather than foo.
+    /// Carries the CREATOR's structural pieces rather than its whole ctx, because the thunks must
+    /// NOT run against the creator's dynamic context (AR.22, the tag-family lesson): the renderer
+    /// bridges these with ITS OWN scope — the render point's chain, which includes every `$`-set
+    /// between creator and renderer — exactly as the interpreter renders children with the chain
+    /// at the render point. The creator's args and stashed children keep `fx.args()` and a
+    /// forwarding `children()` meaning what they meant at the site that wrote the thunk.
     Compiled {
         thunks: &'k [crate::surface::ChildThunk<'k>],
-        caller: &'k dyn ModuleCtx,
+        /// The creator's bound args — the thunk's `fx.args()`.
+        args: &'k [Value],
+        /// The creator's own stashed children, one level up — what a thunk's `children()` renders.
+        children: &'k CallChildren<'a, 'k>,
+        /// The creator's dispatch island — a thunk's `cube()` resolves where the creator's would.
+        home_island: usize,
     },
 }
 
@@ -185,7 +196,7 @@ pub(super) struct NativeModuleCtx<'a, 'c, 'k> {
     /// The call-site children and how to render them.
     pub(super) children: CallChildren<'a, 'k>,
     /// The module's own call scope — where its `$`-vars resolve.
-    pub(super) call_scope: Scope,
+    pub(super) call_scope: std::cell::RefCell<Scope>,
     /// The island this module's OWN calls resolve against: where it was DEFINED, not where it was
     /// called from. Separate from the children's island (which lives on [`CallChildren::Stmts`])
     /// because they are genuinely different questions — a library module calling `cube` must find
@@ -213,7 +224,7 @@ impl<'a> NativeModuleCtx<'a, '_, '_> {
                 // reference — `call_frame`, never a copy. L.2.7: copying the reaching `$`-context
                 // per call is what cost 42 clones a call once BOSL2 sets its top-level vars, and a
                 // native that reintroduced it would be that bug in compiled form.
-                let child_scope = Scope::call_frame(scope, &self.call_scope);
+                let child_scope = Scope::call_frame(scope, &self.call_scope.borrow());
                 // Child-block assignments first: their bindings must reach every geometry child.
                 let mut render: Vec<&'a Stmt> = assigns.clone();
                 render.extend(picked.iter().filter_map(|&i| stmts.get(i).copied()));
@@ -228,11 +239,32 @@ impl<'a> NativeModuleCtx<'a, '_, '_> {
                 // Union, matching the implicit grouping a child block gets in the interpreter.
                 Ok(super::union_of(parts, self.ctx))
             }
-            CallChildren::Compiled { thunks, caller } => {
+            CallChildren::Compiled {
+                thunks,
+                args,
+                children,
+                home_island,
+            } => {
+                // AR.22's tag-family lesson (found by the OpenSCAD differential, not a tier
+                // test): the thunk must NOT run against the creator's own dynamic context. The
+                // interpreter renders children with the chain AT THE RENDER POINT — `hide()`
+                // setting `$tags_hidden` and then rendering the children `diff()` handed it means
+                // the cuboid inside those children SEES the hidden-set. Running `thunk(*caller)`
+                // read the CREATOR's chain instead, silently dropping every `$`-frame between
+                // creator and renderer, and `diff()` unioned what it should have subtracted. So:
+                // bridge — the creator's STRUCTURE (args, stashed children, home island) with
+                // THIS ctx's dynamic scope, which is the render point's chain by construction.
+                let bridged = NativeModuleCtx {
+                    args: args.to_vec(),
+                    children: (*children).clone(),
+                    call_scope: std::cell::RefCell::new(self.call_scope.borrow().clone()),
+                    home_island: *home_island,
+                    ctx: self.ctx,
+                };
                 let mut parts = Vec::with_capacity(picked.len());
                 for &i in picked {
                     if let Some(thunk) = thunks.get(i) {
-                        parts.push(thunk(*caller)?);
+                        parts.push(thunk(&bridged)?);
                     }
                 }
                 Ok(super::union_of(parts, self.ctx))
@@ -275,7 +307,7 @@ impl<'a> NativeModuleCtx<'a, '_, '_> {
         // The same partition `module::eval_args` makes: positional, named, and `$`-args into a child
         // scope. No parameter matching, because a builtin has no declared parameter list to match
         // against — its binding tables are the evaluator's.
-        let mut child_scope = self.call_scope.child();
+        let mut child_scope = self.call_scope.borrow().child();
         let mut positional = Vec::new();
         let mut named = std::collections::BTreeMap::new();
         for (n, v) in args {
@@ -364,7 +396,17 @@ impl ModuleCtx for NativeModuleCtx<'_, '_, '_> {
 
     fn dollar(&self, name: &str) -> Value {
         // Read THROUGH the chain rather than handing one over: see the L.2.7 note on `render`.
-        self.call_scope.lookup(name)
+        self.call_scope.borrow().lookup(name)
+    }
+
+    fn set_dollar(&self, name: &'static str, value: Value) {
+        // AR.22 — the hoisted in-body `$x = …`, bound into THIS call's frame exactly where
+        // `hoist_scope` binds it: below any enclosing capture's boundary (so the memo's read-set
+        // stays caller-facing, structurally — the BU.8 shape), and on the dynamic chain every
+        // later callee and rendered child inherits. `bind` routes the `$`-name to specials and
+        // mints a fresh dyn_ctx node, so scopes cloned BEFORE this set keep their capture-time
+        // view — the interpreter's own CoW rule.
+        self.call_scope.borrow_mut().bind(name, value);
     }
 
     fn echo(&self, args: &[(Option<&'static str>, Value)]) -> crate::Result<()> {
@@ -430,7 +472,7 @@ impl ModuleCtx for NativeModuleCtx<'_, '_, '_> {
         // Args bind in the CALLER's scope; the body's lexical base is the callee's HOME island
         // global (or its captured defining scope, for a scope-local def).
         let home_global = base.unwrap_or_else(|| self.ctx.island_globals.borrow()[home].clone());
-        let mut call = bind_values(params, &slots, &dollars, &self.call_scope, &home_global, self.ctx)?;
+        let mut call = bind_values(params, &slots, &dollars, &self.call_scope.borrow(), &home_global, self.ctx)?;
         super::geo_stack::warn_params_overwritten(params, body, self.ctx);
         let n_children = match children {
             Children::None => 0,
@@ -461,15 +503,17 @@ impl ModuleCtx for NativeModuleCtx<'_, '_, '_> {
                     Children::None => CallChildren::Stmts {
                         stmts: Vec::new(),
                         assigns: Vec::new(),
-                        scope: self.call_scope.clone(),
+                        scope: self.call_scope.borrow().clone(),
                         island: home,
                     },
                     Children::Compiled(thunks) => CallChildren::Compiled {
                         thunks,
-                        caller: self,
+                        args: &self.args,
+                        children: &self.children,
+                        home_island: self.home_island,
                     },
                 },
-                call_scope: call,
+                call_scope: std::cell::RefCell::new(call),
                 home_island: home,
                 ctx: self.ctx,
             };
@@ -500,7 +544,7 @@ impl ModuleCtx for NativeModuleCtx<'_, '_, '_> {
             super::ChildrenFrame {
                 stmts: Vec::new(),
                 assigns: Vec::new(),
-                scope: self.call_scope.clone(),
+                scope: self.call_scope.borrow().clone(),
                 island: home,
             },
             self.ctx,
@@ -528,7 +572,7 @@ impl ModuleCtx for NativeModuleCtx<'_, '_, '_> {
         // in call position. The emitter declines the statically-visible case (a param or local by
         // this name); a runtime injection — an unknown named arg bound into the call frame — can
         // still land one here, so DECLINE and let the whole call re-interpret.
-        if self.call_scope.lookup_local_function(name).is_some() {
+        if self.call_scope.borrow().lookup_local_function(name).is_some() {
             return Err(crate::Error::Unimplemented(
                 "a function value shadows a compiled body's callee (AD.1) — re-interpreting",
             ));
@@ -560,7 +604,7 @@ impl ModuleCtx for NativeModuleCtx<'_, '_, '_> {
             // lexical base is the callee's home-island global, the dynamic parent this module's
             // call scope — so the body reads the caller's reaching `$`-context, as interpreted.
             let home_global = ctx.island_globals.borrow()[home].clone();
-            let call = bind_values(params, &slots, &dollars, &self.call_scope, &home_global, ctx)?;
+            let call = bind_values(params, &slots, &dollars, &self.call_scope.borrow(), &home_global, ctx)?;
             return super::eval_with_ctx(body, &call, ctx);
         }
         // Rung 3: the file-value builtins resolve paths off the calling FILE's directory binding —
@@ -595,7 +639,7 @@ impl ModuleCtx for NativeModuleCtx<'_, '_, '_> {
         // message-identical to the interpreter (L.5.7). A name bound to a VALUE (a top-level
         // closure — callable upstream — or a plain non-function) takes the interpreter's
         // `CallValue` machinery, which v1 does not mirror: decline.
-        if matches!(self.call_scope.lookup(name), Value::Undef) {
+        if matches!(self.call_scope.borrow().lookup(name), Value::Undef) {
             ctx.warn(format!("Ignoring unknown function '{name}'"));
             return Ok(Value::Undef);
         }

@@ -1873,6 +1873,17 @@ pub fn bosl_assert(msg: &str) -> crate::Error {
     crate::Error::Eval(format!("assert failed: {msg}"))
 }
 
+/// A FIRED assert in a compiled MODULE body — a DECLINE, not a verdict (AR.14.4.3). The
+/// interpreter's statement-assert failure is a NON-fatal console error carrying the assert's
+/// source text and evaluated message, none of which generated code can reproduce; declining hands
+/// the call back so the re-run renders the real thing. The success path never pays for this.
+/// Function natives keep [`bosl_assert`]: an expression assert's failure is fatal there, and the
+/// hand intrinsics' dispatch path has no decline catch.
+#[must_use]
+pub fn assert_decline() -> crate::Error {
+    crate::Error::Unimplemented("a failed assert in a compiled module body — re-interpreting")
+}
+
 /// Bit-level `Value` equality — the [`Entry::consts_v`] guard's notion of "unchanged": `f64`s compare by
 /// `to_bits` (same-bits NaNs are EQUAL, `0.0`/`-0.0` are DISTINCT — the determinism doctrine), lists
 /// recurse, and the VARIANT must match exactly (a `NumList` never equals the element-wise-equal `List` —
@@ -2227,6 +2238,15 @@ pub(super) static MODULE_REGISTRY: &[ModuleEntry] = &[
         reference: "module _fab_poc_bake(s=1) { translate(UP*s) cube(_EPSILON*1e9); }",
         func: generated_modules::_fab_poc_bake,
         consts: &[("_EPSILON", poc::poc_eps_value), ("UP", poc::poc_up_value)],
+    },
+    // The FN-DISPATCH poc (AR.14.4.3): `helper` is a user function and `max` a builtin, both
+    // reached through `ModuleCtx::call_fn`'s runtime ladder — no callee fingerprint, no baked
+    // builtin, so a program's `function max(a,b)=…` shadow resolves exactly as interpreting.
+    ModuleEntry {
+        name: "_fab_poc_fncall",
+        reference: "module _fab_poc_fncall(x=1) { cube(helper(v=x)); sphere(r=max(x, 2)); }",
+        func: generated_modules::_fab_poc_fncall,
+        consts: &[],
     },
 ];
 

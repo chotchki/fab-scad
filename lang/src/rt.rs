@@ -28,7 +28,7 @@ pub use crate::error::Result;
 /// a pure arm was a silent `undef` — the AR.20.10 bug class, closed by construction.
 pub use crate::eval::builtins::bi;
 pub use crate::eval::geo2d::Geo;
-pub use crate::eval::intrinsics::bosl_assert;
+pub use crate::eval::intrinsics::{assert_decline, bosl_assert};
 pub use crate::eval::intrinsics::native_rt::{DepthGuard, run_interpreted};
 pub use crate::eval::ops::{apply_binary, apply_unary, index, member};
 pub use crate::eval::value::Value;
@@ -38,4 +38,4 @@ pub use crate::parser::{BinOp, UnOp};
 /// `Children` to the modules it calls — both have to be nameable through `rt`, or the emitted
 /// signature does not compile outside fab-lang. They were missing here until AR.20.5: module
 /// emission was exercised as generated TEXT, which never proved the text would build.
-pub use crate::surface::{ChildThunk, Children, ModuleCall, ModuleCtx};
+pub use crate::surface::{ChildThunk, Children, FnCall, ModuleCall, ModuleCtx};

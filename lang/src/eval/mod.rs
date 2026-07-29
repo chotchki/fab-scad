@@ -3478,9 +3478,12 @@ fn eval_top<'a>(stmts: &[&'a Stmt], global: &Scope, ctx: &Ctx<'a>) -> crate::Res
     // not a metric anything depends on.
     if std::env::var_os("FAB_DEPTH").is_some() {
         eprintln!(
-            "+ [depth] peak module nesting {}; compiled-children declines {}",
+            "+ [depth] peak module nesting {}; compiled-children declines {}; native module runs {}",
             ctx.peak_module_depth.get(),
-            ctx.native_child_declines.get()
+            ctx.native_child_declines.get(),
+            // Thread-local, not per-ctx: completed OUTER native runs on this thread — "armed"
+            // and "RAN" are different facts (the band-1 postmortem), and this is the run half.
+            module_rt::NATIVE_MODULE_RUNS.with(std::cell::Cell::get)
         );
     }
     // `!` ROOT modifier: if any subtree was `!`-tagged, the program renders ONLY those (ancestors + siblings

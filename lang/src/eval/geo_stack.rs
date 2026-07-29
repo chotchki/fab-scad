@@ -918,19 +918,28 @@ fn try_native_module<'a>(
     // a render.
     //
     // Console messages the native wrote before declining are ROLLED BACK, because the interpreted
-    // re-run emits them again and upstream's console is part of the answer (AR.2 diffs it). What is
-    // NOT rolled back is the random stream: a native that drew before declining has perturbed it.
-    // No module native draws today, and this is the note for the one that first does.
+    // re-run emits them again and upstream's console is part of the answer (AR.2 diffs it). The
+    // RANDOM STREAM rolls back too (AR.14.4.3): `call_fn`'s Stream capability lets a native draw
+    // seedless `rands`, and a decline AFTER a draw would otherwise hand the re-run a perturbed
+    // stream — every later draw in the whole program then diverges. The clone is a 624-word
+    // memcpy, noise next to the per-call fingerprint this path already pays.
     let mark = ctx.messages.borrow().len();
+    let rand_mark = ctx.rand_stream.borrow().clone();
     match native(&mctx) {
         // Matched through `root()`, not on the raw variant: the W.3.37 lesson is that a span
         // wrapper stamped anywhere between the decline site and this catch would silently turn
         // every decline into a fatal render error.
         Err(e) if matches!(e.root(), crate::Error::Unimplemented(_)) => {
             ctx.messages.borrow_mut().truncate(mark);
+            *ctx.rand_stream.borrow_mut() = rand_mark;
             Ok(None)
         }
-        other => other.map(Some),
+        other => {
+            if other.is_ok() {
+                super::module_rt::NATIVE_MODULE_RUNS.with(|c| c.set(c.get() + 1));
+            }
+            other.map(Some)
+        }
     }
 }
 /// B1 — schedule a USER-module call on the work stack (the recursion-removing analogue of `call_user_module`).

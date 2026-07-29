@@ -31,6 +31,9 @@ const LOWER: u32 = 0x7fff_ffff;
 const DEFAULT_SEED: u32 = 0;
 
 /// A reference MT19937 seeded boost's way (`init_genrand`). Holds the 624-word state + read index.
+/// `Clone` is the module-native decline rollback (AR.14.4.3): a native that drew from the stream
+/// before declining must hand the interpreter the PRE-DRAW state, or the re-run double-advances.
+#[derive(Clone)]
 struct Mt19937 {
     mt: [u32; N],
     mti: usize,
@@ -187,6 +190,7 @@ fn frexp(v: f64) -> (f64, i32) {
 /// reset per evaluation (→ reproducible, bit-identical) but eval-order-STATEFUL within a run — the one
 /// deliberately-impure builtin (seedless `rands` is non-reproducible in OpenSCAD anyway). Any future
 /// parallelism must draw in the fixed eval order, same as the buffered echo/warning log.
+#[derive(Clone)]
 pub struct RandStream {
     rng: Mt19937,
     /// Monotonic count of values DRAWN — the impurity signal the eval-memo cache (N.2c) reads. A user

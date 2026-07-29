@@ -212,12 +212,13 @@ pub fn generate_module_native(
         fresh: 0,
         in_module: true,
     };
+    let fn_ident = rust_fn_ident(name)?;
     let mut out = String::new();
     let _ = write!(
         out,
         "/// Generated native for module `{name}` — geometry through the interpreter's own\n\
          /// construction, so a generated module is what interpreting its reference builds.\n\
-         pub(super) fn {name}(fx: &dyn rt::ModuleCtx) -> rt::Result<rt::Geo> {{\n"
+         pub(super) fn {fn_ident}(fx: &dyn rt::ModuleCtx) -> rt::Result<rt::Geo> {{\n"
     );
     // Parameters bind from the ctx's already-matched args — the evaluator applied OpenSCAD's
     // two-phase rule (all defaults, then arguments over them) and the AN.6 duplicate precedence, so
@@ -615,8 +616,15 @@ impl Emitter<'_> {
                     Some(b) => self.expr(b)?,
                     None => "rt::Value::Undef".to_string(),
                 };
+                // A fired assert DECLINES in a module body (the interpreted re-run carries the
+                // real message + non-fatality); in a function native it stays the fatal verdict.
+                let raise = if self.in_module {
+                    "rt::assert_decline()"
+                } else {
+                    "rt::bosl_assert(\"generated\")"
+                };
                 Ok(format!(
-                    "{{ if !({c}).is_truthy() {{ return Err(rt::bosl_assert(\"generated\")); }} {b} }}"
+                    "{{ if !({c}).is_truthy() {{ return Err({raise}); }} {b} }}"
                 ))
             }
             // `[start : step? : end]` with computed endpoints — the interpreter's own constructor
@@ -708,12 +716,48 @@ impl Emitter<'_> {
     /// lexically BOUND here (a parameter or `let` holding a function value) resolves to the
     /// BINDING at runtime — `is_vector`'s `all_nonzero` parameter shadowing the like-named
     /// function is exactly this — and a compiled sibling call would recreate the AN.10 bug, so
-    /// it DECLINES. Then builtins (names decorative, AR.3 — arguments bind positionally in arg
-    /// order), then generated siblings with the full compile-time binding rules.
+    /// it DECLINES. In a MODULE body everything else DISPATCHES (`fx.call_fn`, AR.14.4.3); in a
+    /// function native it stays builtins (names decorative, AR.3 — arguments bind positionally in
+    /// arg order) then generated siblings with the full compile-time binding rules.
     fn call(&mut self, name: &str, args: &[Arg]) -> Result<String, String> {
         if self.locals.iter().any(|(n, _)| n == name) {
             return Err(format!(
                 "call through the local binding `{name}` (the AN.10 shape) resolves at runtime"
+            ));
+        }
+        // AR.14.4.3 — a MODULE body's function calls dispatch at RUNTIME through
+        // `ModuleCtx::call_fn`, the same AN.10-safe design module calls ride: the callee is
+        // whatever the program defines, so a user shadow of a builtin resolves correctly (the
+        // fix `rt::bi` could never carry) and a sibling function needs no co-generated table.
+        // Emit-time declines remain only for shapes `call_fn` hands straight back to the
+        // interpreter — arming a module that declines on its every call would be noise.
+        if self.in_module {
+            let named_capability = fab_lang::surface::BUILTIN_SURFACE.iter().any(|b| {
+                b.decl.name == name
+                    && b.capability == fab_lang::surface::BuiltinCapability::Named
+            });
+            if named_capability {
+                return Err(format!(
+                    "a call to `{name}`, a name-binding builtin (call_fn v1 declines it)"
+                ));
+            }
+            // The file-value builtins resolve paths off the calling FILE's directory binding —
+            // not in `BUILTIN_SURFACE` (they are expression forms of statements), matched by name.
+            if matches!(name, "import" | "dxf_dim" | "dxf_cross") {
+                return Err(format!("a call to the file-reading builtin `{name}`"));
+            }
+            let mut pairs: Vec<String> = Vec::with_capacity(args.len());
+            for a in args {
+                let v = self.expr(&a.value)?;
+                let n = match &a.name {
+                    Some(n) => format!("Some({:?})", &**n),
+                    None => "None".to_string(),
+                };
+                pairs.push(format!("({n}, {v})"));
+            }
+            return Ok(format!(
+                "fx.call_fn(&rt::FnCall {{ name: {name:?}, args: &[{}] }})?",
+                pairs.join(", ")
             ));
         }
         if fab_lang::is_builtin(name) {
@@ -1105,15 +1149,17 @@ impl Emitter<'_> {
                 self.locals.truncate(mark);
                 Ok(out)
             }
-            // `assert` in statement position: the condition gates the CHILDREN, and a failure is a
-            // raise. The message is a diagnostic locator, matching the expression side.
+            // `assert` in statement position: the condition gates the CHILDREN, and a FAILURE
+            // DECLINES (AR.14.4.3) — upstream's statement-assert failure is a NON-fatal console
+            // error carrying the assert's source text, which only the interpreted re-run can
+            // reproduce. The passing path (every real render) stays native.
             "assert" => {
                 let Some(cond) = mi.args.first() else {
                     return Err("an `assert` with no condition".into());
                 };
                 let c = self.expr(&cond.value)?;
                 let mut out = format!(
-                    "    if !({c}).is_truthy() {{ return Err(rt::bosl_assert(\"generated\")); }}\n"
+                    "    if !({c}).is_truthy() {{ return Err(rt::assert_decline()); }}\n"
                 );
                 out.push_str(&self.union_part(&mi.children)?);
                 Ok(out)
@@ -1510,7 +1556,10 @@ pub fn generate_standalone_modules(root: &std::path::Path) -> Result<String, Str
         let _ = write!(
             out,
             "    super::ModuleEntry {{\n        name: {:?},\n        reference: {:?},\n        func: {},\n        consts: {},\n    }},\n",
-            m.name, m.source, m.name, consts
+            m.name,
+            m.source,
+            rust_fn_ident(&m.name)?,
+            consts
         );
     }
     out.push_str("];\n");
@@ -1518,11 +1567,32 @@ pub fn generate_standalone_modules(root: &std::path::Path) -> Result<String, Str
 }
 
 /// One module the emitter has been asked to compile — the module twin of [`Subject`]. No sibling
-/// FUNCTION table yet (that is band 3's machinery); a module's outward calls are builtins or user
-/// modules, both resolved at runtime through dispatch.
+/// FUNCTION table (AR.14.4.3): a module's outward calls — modules AND functions — resolve at
+/// runtime through dispatch.
 struct ModuleSubject<'a> {
     source: &'a str,
     baked: Vec<(&'a str, Baked)>,
+}
+
+/// The generated fn ident for a module name: raw-escaped when the name is a Rust KEYWORD (BOSL2
+/// has `module move()`), declined for the few names a raw identifier cannot spell. The fingerprint
+/// gate keys on the scad NAME, so the Rust ident is free to differ.
+///
+/// # Errors
+/// `crate`/`self`/`super`/`Self`, which `r#` cannot escape.
+fn rust_fn_ident(name: &str) -> Result<String, String> {
+    match name {
+        "crate" | "self" | "super" | "Self" => {
+            Err(format!("module name `{name}` cannot be a Rust identifier"))
+        }
+        "as" | "async" | "await" | "break" | "const" | "continue" | "dyn" | "else" | "enum"
+        | "extern" | "false" | "fn" | "for" | "gen" | "if" | "impl" | "in" | "let" | "loop"
+        | "match" | "mod" | "move" | "mut" | "pub" | "ref" | "return" | "static" | "struct"
+        | "trait" | "true" | "try" | "type" | "unsafe" | "use" | "where" | "while" => {
+            Ok(format!("r#{name}"))
+        }
+        _ => Ok(name.to_string()),
+    }
 }
 
 pub fn generate_modules(references: &[&str]) -> Result<String, String> {
@@ -1787,6 +1857,11 @@ pub const GENERATED_MODULES: &[&str] = &[
     // hand `MODULE_REGISTRY` row for the const GUARD that keeps a program rebinding either name
     // from reaching a native with stale bits.
     "module _fab_poc_bake(s=1) { translate(UP*s) cube(_EPSILON*1e9); }",
+    // FUNCTION DISPATCH, compiled (AR.14.4.3): `helper` is a USER function resolved at runtime
+    // (no sibling table, no fingerprint on the callee — dispatch), and `max` is a builtin reached
+    // through the SAME `call_fn` ladder, so a program's `function max(a,b)=…` shadow resolves
+    // exactly as interpreting would. The named arg exercises `fill_slots` through the fn ABI.
+    "module _fab_poc_fncall(x=1) { cube(helper(v=x)); sphere(r=max(x, 2)); }",
 ];
 
 /// Synthetic bakes for the POC references above — BOSL2's own values, so a tier test that binds
@@ -2674,7 +2749,7 @@ mod tests {
             (
                 "statement assert (part of the 89 assert/echo)",
                 "module m(n) { assert(n > 0) children(); }",
-                "return Err(rt::bosl_assert(",
+                "return Err(rt::assert_decline(",
             ),
             (
                 "nested for, inner iterable sees the outer binder",

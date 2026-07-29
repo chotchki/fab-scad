@@ -4109,6 +4109,128 @@ fn armed_bosl2_band_modules_match_the_interpreter() {
     );
 }
 
+/// AR.14.4.2 — a program that SHADOWS a builtin function must not have the armed module answer
+/// with the REAL builtin. Dispatch resolves user functions first (BOSL2 itself shadows
+/// `reverse`), so interpreting `down`'s `assert(is_undef(p), …)` reaches the program's
+/// `is_undef` — here `false`, so the interpreted render ERRORS — while a native body that
+/// compiled the call to `rt::bi::is_undef` sails past the assert and renders geometry. The
+/// function-side natives veto shadows through their `builtins` guard; the module band must be
+/// equally shadow-proof. Compared at the RESULT level because the divergence is error-vs-render.
+#[test]
+fn a_shadowed_builtin_function_does_not_leak_into_an_armed_module() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("workspace root")
+        .join("libs/BOSL2");
+    if !root.join("std.scad").exists() {
+        eprintln!("skipping: libs/BOSL2 submodule not checked out");
+        return;
+    }
+    let run = |intrinsics: bool| {
+        let config = crate::Config {
+            intrinsics,
+            ..crate::Config::default()
+        };
+        match crate::evaluate_geometry_with_base_config(
+            "include <std.scad>\nfunction is_undef(x) = false;\ndown(3) cube(1);",
+            &root,
+            &[],
+            config,
+        ) {
+            Ok((geo, msgs)) => format!("ok geo={geo:?} msgs={msgs:?}"),
+            Err(e) => format!("err {e:?}"),
+        }
+    };
+    let on = run(true);
+    let off = run(false);
+    assert_eq!(
+        on, off,
+        "shadowed `is_undef`: the armed module answered with the REAL builtin"
+    );
+}
+
+/// AR.14.4.3 — a compiled module's FUNCTION calls dispatch at runtime: `helper` resolves to the
+/// PROGRAM's definition (no sibling table, no callee fingerprint) and `max` to the builtin, and
+/// the rendered geometry matches interpreting exactly. Non-vacuity is the resolve check plus the
+/// geometry itself: `helper(v=3)=4` drives cube(4), which interpretation reproduces only by
+/// running the same resolution.
+#[test]
+fn a_compiled_module_dispatches_function_calls_like_the_interpreter() {
+    let run = |src: &str, intrinsics: bool| {
+        let config = crate::Config {
+            intrinsics,
+            ..crate::Config::default()
+        };
+        let (geo, msgs) =
+            crate::evaluate_geometry_with_base_config(src, std::path::Path::new("."), &[], config)
+                .expect("renders");
+        (format!("{geo:?}"), format!("{msgs:?}"))
+    };
+    let src = "function helper(v) = v + 1;\n\
+               module _fab_poc_fncall(x=1) { cube(helper(v=x)); sphere(r=max(x, 2)); }\n\
+               _fab_poc_fncall(3);";
+    let before = crate::eval::module_rt::NATIVE_MODULE_RUNS.with(std::cell::Cell::get);
+    let (geo_on, msgs_on) = run(src, true);
+    let ran = crate::eval::module_rt::NATIVE_MODULE_RUNS.with(std::cell::Cell::get) - before;
+    let (geo_off, msgs_off) = run(src, false);
+    assert_eq!(
+        geo_on, geo_off,
+        "fn dispatch: compiled module rendered different geometry than interpreting"
+    );
+    assert_eq!(msgs_on, msgs_off, "fn dispatch: different console");
+    // RAN, not merely armed — the band-1 postmortem's lesson: a native that resolves and then
+    // declines mid-body leaves every equality above true and the dispatch path untested.
+    assert!(ran > 0, "`_fab_poc_fncall`'s native never ran to completion");
+}
+
+/// AR.14.4.2/.3 — the SHADOW half, and the reason function calls dispatch instead of baking
+/// `rt::bi`: a program's `function max(a,b) = a - b;` must reach the SHADOW from a compiled body,
+/// exactly as dispatch resolves it for the interpreter (user functions first). The module still
+/// ARMS — correctness comes from resolution, not from refusing to compile — and the geometry
+/// (sphere r = 3-2 = 1, not builtin max's 3) proves which function answered.
+#[test]
+fn a_shadowed_builtin_resolves_to_the_shadow_from_a_compiled_body() {
+    let run = |src: &str, intrinsics: bool| {
+        let config = crate::Config {
+            intrinsics,
+            ..crate::Config::default()
+        };
+        let (geo, msgs) =
+            crate::evaluate_geometry_with_base_config(src, std::path::Path::new("."), &[], config)
+                .expect("renders");
+        (format!("{geo:?}"), format!("{msgs:?}"))
+    };
+    let shadowed = "function helper(v) = v + 1;\n\
+                    function max(a, b) = a - b;\n\
+                    module _fab_poc_fncall(x=1) { cube(helper(v=x)); sphere(r=max(x, 2)); }\n\
+                    _fab_poc_fncall(3);";
+    let before = crate::eval::module_rt::NATIVE_MODULE_RUNS.with(std::cell::Cell::get);
+    let (geo_on, msgs_on) = run(shadowed, true);
+    let ran = crate::eval::module_rt::NATIVE_MODULE_RUNS.with(std::cell::Cell::get) - before;
+    let (geo_off, msgs_off) = run(shadowed, false);
+    assert_eq!(
+        geo_on, geo_off,
+        "shadowed `max`: the compiled body answered with the REAL builtin"
+    );
+    assert_eq!(msgs_on, msgs_off, "shadowed `max`: different console");
+
+    // The shadow changed the ANSWER (not just resolution bookkeeping): r = 3-2 = 1 vs builtin 3.
+    let unshadowed = "function helper(v) = v + 1;\n\
+                      module _fab_poc_fncall(x=1) { cube(helper(v=x)); sphere(r=max(x, 2)); }\n\
+                      _fab_poc_fncall(3);";
+    let (geo_plain, _) = run(unshadowed, true);
+    assert_ne!(
+        geo_on, geo_plain,
+        "the shadow probe is vacuous — shadowed and unshadowed renders agree"
+    );
+    // And the native RAN in the shadowed program — the equality above wasn't decline-equality,
+    // so the shadow really did resolve from inside compiled code.
+    assert!(
+        ran > 0,
+        "`_fab_poc_fncall`'s native never ran in the shadowed program"
+    );
+}
+
 /// The drift gate, on the MODULE path: a definition that does not match the reference the native
 /// was generated from must NOT wire. Without this the native would answer for a module whose body
 /// somebody changed, which is a wrong answer rather than a missed compilation.

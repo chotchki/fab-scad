@@ -402,6 +402,32 @@ pub trait ModuleCtx {
     /// # Errors
     /// Whatever the called module raises, including the depth-budget decline.
     fn call(&self, call: &ModuleCall<'_>) -> crate::Result<Geo>;
+
+    /// Call a FUNCTION by name with evaluated arguments, resolving where the interpreted body
+    /// would (AR.14.4.3): a local binding holding a function value wins (AD.1 — the emitter
+    /// declines the statically-visible case, this catches a runtime injection by DECLINING), then
+    /// the island's user functions — which may SHADOW a builtin, the reroute `rt::bi` could never
+    /// honor — then builtins by capability, then OpenSCAD's warn-and-`undef`. This is what makes a
+    /// compiled module's function calls DISPATCH rather than baked assumptions: the callee is
+    /// whatever the program actually defines at runtime, so a shadowed `sin` or a sibling defined
+    /// three files away both just resolve.
+    ///
+    /// # Errors
+    /// A decline (`Unimplemented`) for the shapes v1 hands back to the interpreter — a
+    /// function-value callee, a `Named`-capability builtin, a file-reading builtin — or whatever
+    /// the resolved body raises (assert failures, the recursion guard).
+    fn call_fn(&self, call: &FnCall<'_>) -> crate::Result<Value>;
+}
+
+/// A function call a generated MODULE body makes — the expression twin of [`ModuleCall`], with the
+/// same one-list argument shape and the same runtime-resolution contract (see
+/// [`ModuleCtx::call_fn`]). No children: functions have none.
+pub struct FnCall<'a> {
+    /// The callee, as written. `'static` for [`ModuleCall::name`]'s reason.
+    pub name: &'static str,
+    /// The arguments IN SOURCE ORDER, each with the name it was written with if any. A `Some`
+    /// name starting with `$` is a per-call dynamic override, exactly as in a module call.
+    pub args: &'a [(Option<&'static str>, Value)],
 }
 
 /// One module call a generated module makes — the call site as WRITTEN, with its arguments

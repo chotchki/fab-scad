@@ -38,6 +38,11 @@ thread_local! {
     /// Live compiled-module nesting. Thread-local for the same reason the function-native guard is:
     /// the budget bounds THIS thread's stack, and renders run per-thread.
     static NATIVE_DEPTH: Cell<usize> = const { Cell::new(0) };
+    /// COMPLETED outer native-module runs (AR.14.4.3 diagnostics). "Armed" and "RAN" are different
+    /// facts — the band-1 postmortem: every transform native resolved, then declined at its first
+    /// child-forwarding call, and no tier test could see the difference. A tier test that proves
+    /// equality reads this to prove the native actually answered.
+    pub(crate) static NATIVE_MODULE_RUNS: Cell<u64> = const { Cell::new(0) };
 }
 
 /// RAII ticket on [`MAX_MODULE_NATIVE_DEPTH`]. `enter` refuses past the budget; `Drop` gives the
@@ -509,6 +514,105 @@ impl ModuleCtx for NativeModuleCtx<'_, '_, '_> {
         )?;
         // The body's statements union, which is what a module body means.
         Ok(super::union_of(parts, self.ctx))
+    }
+
+    // AR.14.4.3 — a compiled module's FUNCTION calls dispatch at runtime, mirroring
+    // `dispatch_call`'s resolution ladder rung for rung. This is what makes the band shadow-proof
+    // (a user `function sin(x)=0` resolves HERE, where `rt::bi::sin` would have baked the real
+    // builtin) and what dissolves the sibling-function decline: the callee is whatever the
+    // program defines, fingerprint-free, the same AN.10-safe design module dispatch uses.
+    fn call_fn(&self, fcall: &crate::surface::FnCall<'_>) -> crate::Result<Value> {
+        let ctx = self.ctx;
+        let name = fcall.name;
+        // Rung 1 (AD.1): an inner-scope binding holding a function VALUE shadows a named function
+        // in call position. The emitter declines the statically-visible case (a param or local by
+        // this name); a runtime injection — an unknown named arg bound into the call frame — can
+        // still land one here, so DECLINE and let the whole call re-interpret.
+        if self.call_scope.lookup_local_function(name).is_some() {
+            return Err(crate::Error::Unimplemented(
+                "a function value shadows a compiled body's callee (AD.1) — re-interpreting",
+            ));
+        }
+        // Rung 2: the island's user functions — which SHADOW builtins, per OpenSCAD.
+        if let Some(&((params, body), home)) = ctx.functions.get(name) {
+            // The interpreter's AD.2 runaway guard, with its verdict class. In-flight count, not
+            // host depth: the nested machine below keeps its own body evals heap-shaped, so this
+            // counter is the only thing bounding native-driven recursion chains.
+            let depth = ctx.live_calls.get() + 1;
+            if depth > super::MAX_CALL_DEPTH {
+                return Err(crate::Error::Eval(format!(
+                    "Recursion detected calling function '{name}'"
+                )));
+            }
+            ctx.live_calls.set(depth);
+            let _live = LiveCallTicket(ctx);
+            let owned: Vec<(Option<std::rc::Rc<str>>, Value)> = fcall
+                .args
+                .iter()
+                .map(|(n, v)| (n.map(std::rc::Rc::from), v.clone()))
+                .collect();
+            let (slots, dollars, diagnostics) =
+                super::fill_slots(params, owned.iter().map(|(n, v)| (n.as_ref(), v.clone())));
+            for d in diagnostics {
+                ctx.warn(d);
+            }
+            // Bind through the SAME two-phase binder the module ABI uses (`bind_values`): the
+            // lexical base is the callee's home-island global, the dynamic parent this module's
+            // call scope — so the body reads the caller's reaching `$`-context, as interpreted.
+            let home_global = ctx.island_globals.borrow()[home].clone();
+            let call = bind_values(params, &slots, &dollars, &self.call_scope, &home_global, ctx)?;
+            return super::eval_with_ctx(body, &call, ctx);
+        }
+        // Rung 3: the file-value builtins resolve paths off the calling FILE's directory binding —
+        // rare in a module body, and the flat ABI has no story for it. Decline, loudly.
+        if super::FileFnKind::from_name(name).is_some() {
+            return Err(crate::Error::Unimplemented(
+                "a file-reading builtin in a compiled body — re-interpreting",
+            ));
+        }
+        // Rung 4: builtins, by DECLARED capability (AS.2) — the same partition `run_builtin`
+        // dispatches on, minus the `Named` arm (textmetrics/fontmetrics/object want written arg
+        // names bound with console warnings; v1 declines them back to the interpreter).
+        if super::builtins::is_builtin(name) {
+            let vals: Vec<Value> = fcall.args.iter().map(|(_, v)| v.clone()).collect();
+            return match super::builtins::context_impl(name) {
+                Some(super::builtins::ContextImpl::Named(_)) => Err(crate::Error::Unimplemented(
+                    "a name-binding builtin in a compiled body — re-interpreting",
+                )),
+                Some(super::builtins::ContextImpl::Stream(f)) => {
+                    Ok(f(&vals, &mut ctx.rand_stream.borrow_mut()))
+                }
+                Some(super::builtins::ContextImpl::Stack(f)) => {
+                    // The stack read is invisible to the eval-memo's key — mark impure, as
+                    // `run_builtin` does, so an enclosing memoizable call declines to store.
+                    ctx.impure_reads.set(ctx.impure_reads.get() + 1);
+                    Ok(f(&vals, &ctx.module_stack.borrow()))
+                }
+                None => Ok(super::builtins::apply(name, &vals)),
+            };
+        }
+        // Rung 5: not a function, not a builtin. An UNBOUND name warns and answers `undef`,
+        // message-identical to the interpreter (L.5.7). A name bound to a VALUE (a top-level
+        // closure — callable upstream — or a plain non-function) takes the interpreter's
+        // `CallValue` machinery, which v1 does not mirror: decline.
+        if matches!(self.call_scope.lookup(name), Value::Undef) {
+            ctx.warn(format!("Ignoring unknown function '{name}'"));
+            return Ok(Value::Undef);
+        }
+        Err(crate::Error::Unimplemented(
+            "a value-typed callee in a compiled body — re-interpreting",
+        ))
+    }
+}
+
+/// RAII decrement for [`Ctx::live_calls`] — the balance an interpreted `Task::Apply` gets from
+/// `Task::CallReturn`. Held across the body eval in [`ModuleCtx::call_fn`] so an `Err` out of the
+/// body (an assert, the budget) cannot leave the in-flight count inflated.
+struct LiveCallTicket<'c, 'a>(&'c super::Ctx<'a>);
+
+impl Drop for LiveCallTicket<'_, '_> {
+    fn drop(&mut self) {
+        self.0.live_calls.set(self.0.live_calls.get() - 1);
     }
 }
 

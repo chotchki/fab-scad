@@ -8,6 +8,10 @@
 #   BOSL2   — newest upstream tag vs the state's `bosl2_tag` (BOSL2 tags every revision).
 #   openscad — the `tests/data/scad/` + `examples/` TREE SHAs on master vs the state's `openscad_corpus`
 #              ("most of the change we don't care about" — only corpus paths matter to us).
+#   builtins — the blob SHAs of upstream's builtin-REGISTRATION files vs `openscad_builtins` (AS.7):
+#              a change there is upstream adding/renaming/re-typing a builtin, the one layer beneath
+#              every differential. Tripwire-only (no C++ parsing) — the report pairs the moved file
+#              with OUR declared surface (`fab builtins --md`) so a human diffs a list, not a repo.
 # Evaluation (only for what moved): the SU.2 intrinsic matrix + the SU.3 corpus differential against
 # a candidate BOSL2 checkout; the SU.4 files-lane sweep over new/changed openscad corpus files.
 name: sustain
@@ -70,29 +74,39 @@ jobs:
           # has no tag refs (actions/checkout fetches submodules tagless), so git-describe can't.
           bosl2_pinned="v$(sed -n 's/^BOSL_VERSION = \[\(.*\)\];/\1/p' libs/BOSL2/version.scad | tr -d ' ' | tr ',' '.')"
           # openscad: the corpus-path tree SHAs on master (change iff contents change) + HEAD for diffing.
+          # One recursive tree fetch feeds BOTH the corpus probe and the builtin-file probe.
           os_head=$(gh api repos/openscad/openscad/branches/master --jq .commit.sha)
-          os_corpus=$(gh api "repos/openscad/openscad/git/trees/$os_head?recursive=1" \
-            --jq '[.tree[] | select(.path=="examples" or .path=="tests/data/scad") | "\(.path)=\(.sha)"] | sort | join(",")')
+          gh api "repos/openscad/openscad/git/trees/$os_head?recursive=1" > /tmp/os-tree.json
+          os_corpus=$(jq -r '[.tree[] | select(.path=="examples" or .path=="tests/data/scad") | "\(.path)=\(.sha)"] | sort | join(",")' /tmp/os-tree.json)
+          # AS.7: the files where upstream REGISTERS builtin functions — builtin_functions.cc (the
+          # function table; the #5017 crash citation names it) and control.cc (parent_module + the
+          # control builtins). Blob SHAs, so this moves iff the file contents move.
+          os_builtins=$(jq -r '[.tree[] | select(.path=="src/core/builtin_functions.cc" or .path=="src/core/control.cc") | "\(.path)=\(.sha)"] | sort | join(",")' /tmp/os-tree.json)
           {
             echo "bosl2_latest=$bosl2_latest"
             echo "bosl2_pinned=$bosl2_pinned"
             echo "os_head=$os_head"
             echo "os_corpus=$os_corpus"
+            echo "os_builtins=$os_builtins"
           } >> "$GITHUB_OUTPUT"
           state='${{ steps.state.outputs.state }}'
           seen_tag=$(printf '%s' "$state" | jq -r '.bosl2_tag // empty')
           seen_corpus=$(printf '%s' "$state" | jq -r '.openscad_corpus // empty')
-          bosl2_moved=false; os_moved=false
+          seen_builtins=$(printf '%s' "$state" | jq -r '.openscad_builtins // empty')
+          bosl2_moved=false; os_moved=false; builtins_moved=false
           [ "$bosl2_latest" != "$seen_tag" ] && bosl2_moved=true
           [ "$os_corpus" != "$seen_corpus" ] && os_moved=true
+          [ "$os_builtins" != "$seen_builtins" ] && builtins_moved=true
           echo "bosl2_moved=$bosl2_moved" >> "$GITHUB_OUTPUT"
           echo "os_moved=$os_moved" >> "$GITHUB_OUTPUT"
+          echo "builtins_moved=$builtins_moved" >> "$GITHUB_OUTPUT"
           # AO.8: the heavy perf lane is WEEKLY, not nightly — ~10 min of oracle forks for a
           # different question than gen-diff asks. Sunday, or any manual dispatch.
           weekly=false; [ "$(date -u +%u)" = "7" ] && weekly=true
           echo "weekly=$weekly" >> "$GITHUB_OUTPUT"
           echo "BOSL2 $bosl2_pinned pinned, $bosl2_latest upstream (seen: ${seen_tag:-never}) → moved=$bosl2_moved"
           echo "openscad corpus $os_corpus (seen: ${seen_corpus:-never}) → moved=$os_moved"
+          echo "openscad builtin files $os_builtins (seen: ${seen_builtins:-never}) → moved=$builtins_moved"
 
       # The corpus lanes below stay movement-gated; the BUILD is unconditional since AL — the
       # gen-diff lane runs EVERY night (its oracle is the newest upstream nightly, so each run is
@@ -213,6 +227,30 @@ jobs:
             fi
           } > /tmp/report-openscad.md
 
+      # AS.7 — the builtin-surface lane: upstream touched a registration file, so say WHICH, and
+      # print OUR declared surface next to it. Tripwire + list, no C++ parsing — behavior drift is
+      # gen-diff's job (every night, above); this is the lane that catches an ADDED builtin, which
+      # behaves as a silent `undef` and so never diverges an echo of programs that don't call it.
+      - name: Builtin surface watch
+        if: steps.probe.outputs.builtins_moved == 'true'
+        run: |
+          set -euo pipefail
+          state='${{ steps.state.outputs.state }}'
+          seen=$(printf '%s' "$state" | jq -r '.openscad_builtins // "never seen"')
+          {
+            echo "## builtins — upstream registration files moved"
+            echo
+            echo '```'
+            echo "now:  ${{ steps.probe.outputs.os_builtins }}"
+            echo "seen: $seen"
+            echo '```'
+            echo
+            echo "_A moved file means upstream added, renamed, or re-typed a builtin (or touched"
+            echo "the file for unrelated reasons — the diff on those two paths says which). Ours:_"
+            echo
+            ./target/release/fab builtins --md || echo "fab builtins failed (see run log)"
+          } > /tmp/report-builtins.md
+
       # The issue updates EVERY night now (gen-diff always produces a fresh section). Corpus
       # sections use tonight's report when a lane RAN, else carry over from the previous body —
       # the issue stays the complete database on quiet nights.
@@ -223,20 +261,26 @@ jobs:
             --arg tag '${{ steps.probe.outputs.bosl2_latest }}' \
             --arg corpus '${{ steps.probe.outputs.os_corpus }}' \
             --arg head '${{ steps.probe.outputs.os_head }}' \
-            '{bosl2_tag: $tag, openscad_corpus: $corpus, openscad_head: $head}')
+            --arg builtins '${{ steps.probe.outputs.os_builtins }}' \
+            '{bosl2_tag: $tag, openscad_corpus: $corpus, openscad_head: $head, openscad_builtins: $builtins}')
           # Carry-over: a lane that DIDN'T run tonight keeps its section from the previous body
-          # (order there: gen-diff, gen-perf, BOSL2, openscad — the sed bounds rely on it).
-          # Bounded on "the next ## heading, whatever it is" rather than on a NAMED one: a sed
-          # range whose closing pattern is absent runs to EOF and swallows every later section.
-          # The neighbours below predate this and carry that risk; this one doesn't.
+          # (order there: gen-diff, gen-perf, BOSL2, openscad, builtins). Every carve-out is the
+          # awk shape — bounded on "the next ## heading, whatever it is" — because a sed range
+          # whose closing pattern is absent runs to EOF and swallows every later section; the
+          # `## builtins` section landing AFTER `## openscad` (AS.7) turned that old sed risk on
+          # the openscad lane into a live bug, so the seds are gone.
+          carve() { awk -v h="$1" '/^## /{f = (index($0, h) == 1)} f' /tmp/prev-body.md; }
           if [ ! -f /tmp/report-genperf.md ]; then
-            awk '/^## /{f = ($0 ~ /^## gen-perf/)} f' /tmp/prev-body.md > /tmp/report-genperf.md || true
+            carve "## gen-perf" > /tmp/report-genperf.md || true
           fi
           if [ ! -f /tmp/report-bosl2.md ]; then
-            sed -n '/^## BOSL2/,/^## openscad/{/^## openscad/!p;}' /tmp/prev-body.md > /tmp/report-bosl2.md || true
+            carve "## BOSL2" > /tmp/report-bosl2.md || true
           fi
           if [ ! -f /tmp/report-openscad.md ]; then
-            sed -n '/^## openscad/,$p' /tmp/prev-body.md > /tmp/report-openscad.md || true
+            carve "## openscad corpus" > /tmp/report-openscad.md || true
+          fi
+          if [ ! -f /tmp/report-builtins.md ]; then
+            carve "## builtins" > /tmp/report-builtins.md || true
           fi
           {
             echo "<!-- sustain-state $state -->"
@@ -247,6 +291,7 @@ jobs:
             if [ -s /tmp/report-genperf.md ]; then echo; cat /tmp/report-genperf.md; fi
             if [ -s /tmp/report-bosl2.md ]; then echo; cat /tmp/report-bosl2.md; fi
             if [ -s /tmp/report-openscad.md ]; then echo; cat /tmp/report-openscad.md; fi
+            if [ -s /tmp/report-builtins.md ]; then echo; cat /tmp/report-builtins.md; fi
           } > /tmp/issue-body.md
           gh issue edit '${{ steps.state.outputs.issue }}' --body-file /tmp/issue-body.md
           cat /tmp/issue-body.md >> "$GITHUB_STEP_SUMMARY"

@@ -45,6 +45,15 @@ enum Commands {
         #[arg(long, conflicts_with = "json")]
         md: bool,
     },
+    /// AS.7 (sustainment): print the declared BUILTIN surface — the ONE declaration every consumer
+    /// derives from. The sustainment nightly embeds this table in its report, so upstream ADDING a
+    /// builtin becomes a diff against a list instead of a silent gap that surfaces years later as
+    /// an `undef` in somebody's model.
+    Builtins {
+        /// Emit GitHub-flavored markdown (for `$GITHUB_STEP_SUMMARY` + the sustainment issue).
+        #[arg(long)]
+        md: bool,
+    },
     /// SU.3 (sustainment): sweep upstream BOSL2's OWN corpus (tests/ assertions + examples/) through
     /// scad-rs at the COMMITTED pin and at a CANDIDATE checkout, and diff. The committed run is the
     /// baseline, so pre-existing failures never gate — the verdicts that exit nonzero are REGRESSIONS
@@ -275,6 +284,7 @@ fn main() -> Result<()> {
     match Cli::parse().command {
         Commands::Doctor => doctor(),
         Commands::Intrinsics { bosl2, json, md } => intrinsics_cmd(&bosl2, json, md),
+        Commands::Builtins { md } => builtins_cmd(md),
         Commands::CorpusDiff {
             candidate,
             committed,
@@ -1124,6 +1134,47 @@ type Check = (Level, String, String);
 /// sustainment issue. Any non-matched row exits nonzero — the CI gate and the nightly both key off
 /// that. JSON is hand-formatted: five ASCII-identifier fields per row (serde_json is feature-gated
 /// behind mesh-io, and this must audit on every build shape).
+/// AS.7 — the declared builtin surface as a table: one row per declaration entry, capability
+/// included (an optional param carries `?`). The sustainment issue's `## builtins` section is this
+/// output verbatim; behavior drift is gen-diff's job, this is the SURFACE watch.
+fn builtins_cmd(md: bool) -> Result<()> {
+    let cap = |b: &fab_lang::surface::BuiltinDecl| match b.capability {
+        fab_lang::surface::BuiltinCapability::Pure => "pure",
+        fab_lang::surface::BuiltinCapability::Named => "named (reads argument names)",
+        fab_lang::surface::BuiltinCapability::Stream => "stream (advances the run's RNG)",
+        fab_lang::surface::BuiltinCapability::Stack => "stack (reads the module stack)",
+    };
+    let params = |b: &fab_lang::surface::BuiltinDecl| {
+        b.decl
+            .params
+            .iter()
+            .map(|p| {
+                if p.required {
+                    p.name.to_string()
+                } else {
+                    format!("{}?", p.name)
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let surface = fab_lang::surface::BUILTIN_SURFACE;
+    if md {
+        println!("### Declared builtin surface ({} functions)", surface.len());
+        println!();
+        println!("| builtin | capability |");
+        println!("|---|---|");
+        for b in surface {
+            println!("| `{}({})` | {} |", b.decl.name, params(b), cap(b));
+        }
+    } else {
+        for b in surface {
+            println!("{}({})\t{}", b.decl.name, params(b), cap(b));
+        }
+    }
+    Ok(())
+}
+
 fn intrinsics_cmd(bosl2: &Path, json: bool, md: bool) -> Result<()> {
     let rows = fab_lang::intrinsic_matrix("include <std.scad>\n", bosl2, &[])
         .map_err(|e| anyhow::anyhow!("intrinsic audit against {}: {e}", bosl2.display()))?;

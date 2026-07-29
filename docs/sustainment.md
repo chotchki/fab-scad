@@ -109,6 +109,16 @@ mangling the block just triggers one redundant re-evaluation.
    `scad-gen --replay <seed> --dial <n>`), and the first 12-minute run found a real swizzle bug in
    fab plus an upstream abort (docs/openscad-search-crash.md). Report-only, like everything here.
 
+6. **Builtin surface watch** (AS.7): a blob-SHA TRIPWIRE on upstream's builtin-registration files
+   (`src/core/builtin_functions.cc`, `src/core/control.cc`), movement-gated like the corpus lanes.
+   When one moves, the report prints the moved SHAs next to OUR declared surface
+   (`fab builtins --md`, one row per entry of `fab_lang`'s one declaration, capability included) —
+   so "did upstream add a builtin" is a human diffing a list, not spelunking a repo. No C++
+   parsing, deliberately: BEHAVIOR drift already shows in gen-diff (lane 4) and the AS.6
+   conformance probes; this lane exists for the one change those can't see — an ADDED builtin,
+   which evaluates as a silent `undef` and so never diverges an echo of programs that don't call
+   it.
+
 ## Report shape (the rolling issue body)
 
 Per upstream: version delta (pinned → candidate), intrinsic matrix delta (changed/missing only —

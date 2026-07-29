@@ -3775,6 +3775,91 @@ fn a_compiled_module_hoists_scope_assignments_like_the_interpreter() {
     );
 }
 
+/// AR.20.4's last construct, compiled: statement `echo` pushes through the interpreter's OWN
+/// formatter (a named arg renders `k = 4`), the side effect lands BEFORE geometry (the A3 order
+/// the I.5 gate string-compares), and echo children render as one implicit-union part. Console
+/// equality is the whole point — the old emission dropped the line, warned `Ignoring unknown
+/// module 'echo'`, and never rendered the children.
+#[test]
+fn a_compiled_module_echoes_like_the_interpreter() {
+    let run = |src: &str, intrinsics: bool| {
+        let config = crate::Config {
+            intrinsics,
+            ..crate::Config::default()
+        };
+        let (geo, msgs) =
+            crate::evaluate_geometry_with_base_config(src, std::path::Path::new("."), &[], config)
+                .expect("renders");
+        (format!("{geo:?}"), format!("{msgs:?}"))
+    };
+
+    let src = "module _fab_poc_mod(k=1) { children(); }\n\
+               module _fab_poc_echo(n=1) { echo(\"poc\", n, k=n+1); echo(n) sphere(r=n); _fab_poc_mod(n) cube(n); }\n\
+               _fab_poc_echo(3);";
+    let (geo_on, msgs_on) = run(src, true);
+    let (geo_off, msgs_off) = run(src, false);
+    assert_eq!(geo_on, geo_off, "echo: compiled geometry differs from interpreting");
+    assert_eq!(msgs_on, msgs_off, "echo: different console");
+    // The echoes are actually THERE — equality of two empty consoles proves nothing.
+    assert!(msgs_on.contains("poc"), "the echo line is missing: {msgs_on}");
+    assert!(msgs_on.contains("k = 4"), "the named arg must render `k = 4`: {msgs_on}");
+
+    // NON-VACUITY: both modules arm, so the compiled path really ran end to end.
+    let program = crate::parser::parse(src).expect("parses");
+    for name in ["_fab_poc_echo", "_fab_poc_mod"] {
+        assert!(
+            program.stmts.iter().any(|s| matches!(&s.kind,
+                crate::parser::StmtKind::ModuleDef { name: n, params, body }
+                    if &**n == name && super::resolve_module(name, params, body).is_some())),
+            "`{name}` did not arm, so the compiled path was never entered"
+        );
+    }
+}
+
+/// The console ROLLBACK with a NON-EMPTY delta — the AR.20.5 residual every earlier decline test
+/// exercised only trivially. `_fab_poc_echo` pushes TWO echoes, then its dispatch to a DRIFTED
+/// (unarmed) `_fab_poc_mod` with a compiled child block hits the children-to-interpreted decline:
+/// the truncate must remove the native's echoes and the interpreted retake must re-emit them —
+/// exactly once, in the same order.
+#[test]
+fn a_declining_native_rolls_back_its_echoes_exactly_once() {
+    let run = |src: &str, intrinsics: bool| {
+        let config = crate::Config {
+            intrinsics,
+            ..crate::Config::default()
+        };
+        let (geo, msgs) =
+            crate::evaluate_geometry_with_base_config(src, std::path::Path::new("."), &[], config)
+                .expect("renders");
+        (format!("{geo:?}"), format!("{msgs:?}"))
+    };
+
+    // `_fab_poc_mod` deliberately drifted from its pinned reference — it must NOT arm.
+    let src = "module _fab_poc_mod(k=1) { union() { children(); } }\n\
+               module _fab_poc_echo(n=1) { echo(\"poc\", n, k=n+1); echo(n) sphere(r=n); _fab_poc_mod(n) cube(n); }\n\
+               _fab_poc_echo(3);";
+    let (geo_on, msgs_on) = run(src, true);
+    let (geo_off, msgs_off) = run(src, false);
+    assert_eq!(geo_on, geo_off, "rollback: compiled geometry differs from interpreting");
+    assert_eq!(msgs_on, msgs_off, "rollback: different console");
+    assert_eq!(
+        msgs_on.matches("poc").count(),
+        1,
+        "the rolled-back echo must appear exactly once after the retake: {msgs_on}"
+    );
+
+    // Vacuity guards: the caller armed (so its echoes really were pushed and rolled back), and
+    // the drifted callee did NOT (so the decline really fired).
+    let program = crate::parser::parse(src).expect("parses");
+    let armed = |name: &str| {
+        program.stmts.iter().any(|s| matches!(&s.kind,
+            crate::parser::StmtKind::ModuleDef { name: n, params, body }
+                if &**n == name && super::resolve_module(name, params, body).is_some()))
+    };
+    assert!(armed("_fab_poc_echo"), "the echoing caller must arm");
+    assert!(!armed("_fab_poc_mod"), "the drifted callee must NOT arm");
+}
+
 /// The drift gate, on the MODULE path: a definition that does not match the reference the native
 /// was generated from must NOT wire. Without this the native would answer for a module whose body
 /// somebody changed, which is a wrong answer rather than a missed compilation.

@@ -4146,20 +4146,32 @@ fn nests_deeper_than(v: &Value, limit: usize) -> bool {
     false
 }
 
-/// Format an `ECHO:` line from pre-evaluated arg values — named args render `name = value`,
-/// positional just `value`, joined by `, `. Shared by the statement path ([`emit_echo`]) and the
-/// task path ([`Task::EchoEmit`]) so the two can't drift. Errs on a past-[`MAX_ECHO_NESTING`] value
-/// (upstream's `EchoString` stack exhaust, as a deterministic bound).
+/// Format an `ECHO:` line from pre-evaluated arg values — the `Arg`-shaped door onto
+/// [`format_echo_pairs`], for the statement path ([`emit_echo`]) and the task path
+/// ([`Task::EchoEmit`]).
 fn format_echo_line(args: &[Arg], vals: &[Value]) -> crate::Result<String> {
-    if vals.iter().any(|v| nests_deeper_than(v, MAX_ECHO_NESTING)) {
+    let pairs: Vec<(Option<&str>, &Value)> = args
+        .iter()
+        .zip(vals)
+        .map(|(arg, value)| (arg.name.as_deref(), value))
+        .collect();
+    format_echo_pairs(&pairs)
+}
+
+/// The echo formatter's pair-shaped CORE: named args render `name = value`, positional just
+/// `value`, joined by `, `. Shared by the statement path, the expression task path, and a
+/// generated module's `ModuleCtx::echo` (AR.20.4) — three consumers, one formatter, so none can
+/// drift. Errs on a past-[`MAX_ECHO_NESTING`] value (upstream's `EchoString` stack exhaust, as a
+/// deterministic bound).
+pub(crate) fn format_echo_pairs(pairs: &[(Option<&str>, &Value)]) -> crate::Result<String> {
+    if pairs.iter().any(|(_, v)| nests_deeper_than(v, MAX_ECHO_NESTING)) {
         return Err(crate::Error::Eval(format!(
             "echo value nests deeper than {MAX_ECHO_NESTING} levels (upstream stack-exhausts converting this to an EchoString)"
         )));
     }
-    let parts: Vec<String> = args
+    let parts: Vec<String> = pairs
         .iter()
-        .zip(vals)
-        .map(|(arg, value)| match &arg.name {
+        .map(|(name, value)| match name {
             Some(name) => format!("{name} = {}", fmt::format_value(value)),
             None => fmt::format_value(value),
         })

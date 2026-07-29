@@ -956,6 +956,32 @@ impl Emitter<'_> {
         Ok(ModPlan::Plain)
     }
 
+    /// A statement's CHILDREN as one implicit-union part, in their own hoist scope — the shape the
+    /// interpreter's A3 arm pushes for `echo`/`assert` children (one `Combinator::Union` node, iff
+    /// any children exist). Inlining them into the enclosing parts list instead renders the same
+    /// GEOMETRY but a different TREE, and the tiers must be indistinguishable structurally too —
+    /// the CSG memo keys on the tree.
+    fn union_part(&mut self, children: &[Stmt]) -> Result<String, String> {
+        if children.is_empty() {
+            return Ok(String::new());
+        }
+        let inner = self.fresh_ident("un");
+        let mark = self.locals.len();
+        let mut out = format!(
+            "    let {inner} = {{\n        let mut parts: Vec<rt::Geo> = Vec::new();\n"
+        );
+        out.push_str(&self.hoist_prelude(children)?);
+        for k in children {
+            out.push_str(&self.stmt(k)?);
+        }
+        let _ = write!(
+            out,
+            "        fx.group(parts)\n    }};\n    parts.push({inner});\n"
+        );
+        self.locals.truncate(mark);
+        Ok(out)
+    }
+
     /// A module INSTANTIATION in statement position.
     fn module_call(&mut self, mi: &fab_lang::ModuleInstantiation) -> Result<String, String> {
         match Self::modifier_plan(mi.modifiers)? {
@@ -1057,15 +1083,40 @@ impl Emitter<'_> {
                 let mut out = format!(
                     "    if !({c}).is_truthy() {{ return Err(rt::bosl_assert(\"generated\")); }}\n"
                 );
-                // assert's children render as an implicit union in a fresh scope (the A3 arm).
-                let mark = self.locals.len();
-                out.push_str(&self.hoist_prelude(&mi.children)?);
-                for k in &mi.children {
-                    out.push_str(&self.stmt(k)?);
-                }
-                self.locals.truncate(mark);
+                out.push_str(&self.union_part(&mi.children)?);
                 Ok(out)
             }
+            // Statement `echo` — the console side effect FIRST, then the children (the
+            // interpreter's A3 order). Before this arm existed echo fell to the generic dispatch
+            // arm below and reached the runtime's unknown-module path: the line was silently
+            // DROPPED, a spurious warning appeared, and the children never rendered — a silent
+            // wrong answer in the 11 echo-carrying BOSL2 modules the coverage floor counts.
+            // AR.20.10 recorded a DECLINE verdict but never wired it; its stated hazard — an echo
+            // reading a value assigned below it — died with the hoisting fix, so echo now EMITS.
+            "echo" => {
+                let mut args = String::new();
+                for a in &mi.args {
+                    let v = self.expr(&a.value)?;
+                    match &a.name {
+                        // `$`-named echo args are formatted like any named arg — no special
+                        // channel, matching `format_echo_pairs`.
+                        Some(n) => {
+                            let _ = write!(args, "(Some({:?}), {v}), ", n.as_ref());
+                        }
+                        None => {
+                            let _ = write!(args, "(None, {v}), ");
+                        }
+                    }
+                }
+                let mut out = format!("    fx.echo(&[{args}])?;\n");
+                out.push_str(&self.union_part(&mi.children)?);
+                Ok(out)
+            }
+            // `intersection_for` INTERSECTS its iterations — a different combinator than the
+            // `for` arm's union, and zero BOSL2 modules use it. Decline by name until it earns an
+            // emission; falling to the dispatch arm below would reach the runtime's
+            // unknown-module path instead (the statement-echo bug class).
+            "intersection_for" => Err("an `intersection_for` statement".into()),
             // AR.20.8 — a call to another MODULE, which is 404 of BOSL2's 416 and the arm that
             // makes AR.20.5/AR.20.6's dispatch reachable at all.
             //
@@ -1561,6 +1612,11 @@ pub const GENERATED_MODULES: &[&str] = &[
     // `{ }` — must reach the `sphere` OUTSIDE it, because a block is not an assignment scope
     // upstream. Statement-position emission rendered all three wrong without declining.
     "module _fab_poc_hoist(x=1) { cube(x); x = x + 2; { y = x; } sphere(r=y); }",
+    // Statement ECHO, compiled (AR.20.4's last construct): a named arg renders `k = 2`, the
+    // side effect lands BEFORE geometry, echo children render as ONE implicit-union part, and a
+    // dispatch to another module AFTER the echo makes this the rollback probe too — arm it with
+    // `_fab_poc_mod` DRIFTED and the decline must re-interpret with the echoes appearing ONCE.
+    "module _fab_poc_echo(n=1) { echo(\"poc\", n, k=n+1); echo(n) sphere(r=n); _fab_poc_mod(n) cube(n); }",
 ];
 
 pub const GENERATED_ENTRIES: &[&str] = &[

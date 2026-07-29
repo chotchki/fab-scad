@@ -254,6 +254,19 @@ impl<'a> NativeModuleCtx<'a, '_, '_> {
         args: &[(Option<&'static str>, Value)],
         children: Children<'_>,
     ) -> crate::Result<Geo> {
+        // The statement-form names `dispatch_module` owns arms for can never be dispatched as
+        // builtin MODULES — the emitter intercepts every one — so a name that leaks through (a
+        // future emitter hole; statement `echo` was exactly this before its arm existed, found by
+        // the AR.20 recon) must DECLINE to the interpreter rather than reach `eval_primitive`'s
+        // unknown-module arm and mis-render with a spurious warning.
+        if matches!(
+            name,
+            "echo" | "assert" | "let" | "for" | "intersection_for" | "children"
+        ) {
+            return Err(crate::Error::Unimplemented(
+                "a statement-form module name reached compiled dispatch",
+            ));
+        }
         // The same partition `module::eval_args` makes: positional, named, and `$`-args into a child
         // scope. No parameter matching, because a builtin has no declared parameter list to match
         // against — its binding tables are the evaluator's.
@@ -347,6 +360,19 @@ impl ModuleCtx for NativeModuleCtx<'_, '_, '_> {
     fn dollar(&self, name: &str) -> Value {
         // Read THROUGH the chain rather than handing one over: see the L.2.7 note on `render`.
         self.call_scope.lookup(name)
+    }
+
+    fn echo(&self, args: &[(Option<&'static str>, Value)]) -> crate::Result<()> {
+        // The interpreter's own pair-shaped formatter core, pushed through the ONE ordered
+        // message log — content only, no `ECHO: ` prefix (`Message::render` adds it), so the
+        // echo/warning interleave the I.5 gate string-compares survives untouched.
+        let pairs: Vec<(Option<&str>, &Value)> = args.iter().map(|(n, v)| (*n, v)).collect();
+        let line = super::format_echo_pairs(&pairs)?;
+        self.ctx
+            .messages
+            .borrow_mut()
+            .push(super::Message::Echo(line));
+        Ok(())
     }
 
     fn call(&self, call: &ModuleCall<'_>) -> crate::Result<Geo> {
@@ -453,7 +479,7 @@ impl ModuleCtx for NativeModuleCtx<'_, '_, '_> {
             && !thunks.is_empty()
         {
             return Err(crate::Error::Unimplemented(
-                "a compiled child block handed to an interpreted module (AR.20.6)",
+                "a compiled child block handed to an interpreted module (AR.20.7)",
             ));
         }
         // The same three frames `push_user_module` sets up, held by RAII so an error out of the body

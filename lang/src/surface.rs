@@ -387,6 +387,15 @@ pub trait ModuleCtx {
     /// interpreter — a missing `$`-var is not an error.
     fn dollar(&self, name: &str) -> Value;
 
+    /// Push a statement-`echo` line through the evaluator's console (AR.20.4). Args are
+    /// (written name, value) pairs in SOURCE order — `$`-names included, formatted like any named
+    /// arg — and the side effect lands BEFORE the echo's children render: the interpreter's A3
+    /// order, which the I.5 string-equal console gate pins.
+    ///
+    /// # Errors
+    /// Past the echo nesting guard (AD.5), exactly as the interpreted path errs.
+    fn echo(&self, args: &[(Option<&'static str>, Value)]) -> crate::Result<()>;
+
     /// Call another module, dispatching through the registry: another native where one is armed,
     /// the interpreter otherwise.
     ///

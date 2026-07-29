@@ -149,3 +149,27 @@ pub(super) fn _fab_poc_hoist(fx: &dyn rt::ModuleCtx) -> rt::Result<rt::Geo> {
     Ok(fx.group(parts))
 }
 
+
+/// Generated native for module `_fab_poc_echo` — geometry through the interpreter's own
+/// construction, so a generated module is what interpreting its reference builds.
+pub(super) fn _fab_poc_echo(fx: &dyn rt::ModuleCtx) -> rt::Result<rt::Geo> {
+    let p_n = fx.args().get(0).cloned().unwrap_or(rt::Value::Undef);
+    let mut parts: Vec<rt::Geo> = Vec::new();
+    let l0_blk = {
+        let mut parts: Vec<rt::Geo> = Vec::new();
+    fx.echo(&[(None, rt::Value::string("poc")), (None, p_n.clone()), (Some("k"), rt::apply_binary(rt::BinOp::Add, p_n.clone(), rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64)))), ])?;
+    fx.echo(&[(None, p_n.clone()), ])?;
+    let l1_un = {
+        let mut parts: Vec<rt::Geo> = Vec::new();
+    parts.push(fx.call(&rt::ModuleCall { name: "sphere", args: &[(Some("r"), p_n.clone()), ], children: rt::Children::None })?);
+        fx.group(parts)
+    };
+    parts.push(l1_un);
+    parts.push(fx.call(&rt::ModuleCall { name: "_fab_poc_mod", args: &[(None, p_n.clone()), ], children: rt::Children::Compiled(&[&|fx: &dyn rt::ModuleCtx| { let mut parts: Vec<rt::Geo> = Vec::new();     parts.push(fx.call(&rt::ModuleCall { name: "cube", args: &[(None, p_n.clone()), ], children: rt::Children::None })?);
+ Ok(fx.group(parts)) }, ]) })?);
+        fx.group(parts)
+    };
+    parts.push(l0_blk);
+    Ok(fx.group(parts))
+}
+

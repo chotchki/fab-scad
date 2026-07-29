@@ -32,6 +32,7 @@ pub(crate) mod fingerprint;
 // Generated code keeps its emitter's exact bytes — the regen test pins them; fmt stays out.
 #[rustfmt::skip]
 mod generated;
+mod generated_modules;
 mod geometry;
 mod lists;
 mod math;
@@ -2142,86 +2143,33 @@ pub(super) struct ModuleEntry {
     pub(super) func: ModuleNative,
 }
 
-/// AR.20.1 proof-of-concept: `args` in, `children()` out. Deliberately the smallest module that
-/// exercises every part of the ABI that has no analogue on the function side — a bound parameter,
-/// the call-site child count, and a child rendered LATE in the caller's scope.
+/// The compiled modules, every one of them GENERATED (AR.20.8) — there are no hand-written module
+/// natives, which is the shape the whole phase is aiming at for the function side too.
 ///
-/// `k` is read and discarded, which is the point: it proves the argument arrives already bound by
-/// the evaluator's two-phase rule rather than re-matched by the native.
-fn poc_mod_children(ctx: &dyn crate::surface::ModuleCtx) -> crate::Result<super::geo2d::Geo> {
-    let _k = ctx.args().first().cloned().unwrap_or(crate::Value::Undef);
-    if ctx.child_count() == 0 {
-        return Ok(super::geo2d::Geo::D3(super::geo::GeoNode::Empty));
-    }
-    ctx.children()
-}
-
-/// AR.20.5 proof-of-concept: a compiled module that CALLS another module by name.
+/// Each `reference` must be BYTE-IDENTICAL to its entry in `fab_lib::emit::GENERATED_MODULES`, the
+/// string the body was emitted from: the fingerprint gate compares a program's definition against
+/// these bytes, so a reference that drifted from what generated the body would wire a native to the
+/// wrong module. The differential tests assert the natives actually WIRE for exactly this reason —
+/// a tier comparison passes vacuously when nothing armed.
 ///
-/// The census item this stands for is 97% of BOSL2 — a module whose body is mostly other modules —
-/// so the POC is deliberately the wrapper shape rather than a leaf: an argument passed ALONG, and
-/// the call-site children forwarded untouched, which is what `attachable`/`diff`/`tag_scope` all do.
-///
-/// Whether the callee itself compiles is NOT this native's business, and that is the point: `call`
-/// dispatches to a native where one is armed and to the interpreter otherwise, so the same POC
-/// exercises compiled→compiled and compiled→interpreted depending only on what the program defines.
-fn poc_mod_wrap(ctx: &dyn crate::surface::ModuleCtx) -> crate::Result<super::geo2d::Geo> {
-    let k = ctx.args().first().cloned().unwrap_or(crate::Value::Undef);
-    // `_fab_poc_mod(k) children();` — ONE child, which is the `children()` node. Not the caller's
-    // child LIST: the callee's `$children` is 1 here however many the caller received, and the
-    // expansion happens only when the callee renders it. Spelling that as a thunk is the whole
-    // reason `Children` carries closures.
-    let forward: &dyn Fn(&dyn crate::surface::ModuleCtx) -> crate::Result<super::geo2d::Geo> =
-        &|caller| caller.children();
-    ctx.call(&crate::surface::ModuleCall {
-        name: "_fab_poc_mod",
-        args: &[(None, k)],
-        children: crate::surface::Children::Compiled(&[forward]),
-    })
-}
-
-/// AR.20.6 proof-of-concept: a compiled module that calls BUILTINS — a transform wrapping a
-/// primitive, which is what essentially every LEAF module in BOSL2 bottoms out in.
-///
-/// Exercises the three things user-module dispatch never touches: a `Combinator` chosen from
-/// evaluated arguments (`translate`), a primitive reached with no children (`cube`), and the NAMED
-/// argument channel, which exists precisely because the emitter cannot positionalise a builtin.
-fn poc_mod_prim(ctx: &dyn crate::surface::ModuleCtx) -> crate::Result<super::geo2d::Geo> {
-    let s = ctx.args().first().cloned().unwrap_or(Value::Num(1.0));
-    let cube = |c: &dyn crate::surface::ModuleCtx| {
-        c.call(&crate::surface::ModuleCall {
-            name: "cube",
-            args: &[
-                (Some("size"), s.clone()),
-                (Some("center"), Value::Bool(true)),
-            ],
-            children: crate::surface::Children::None,
-        })
-    };
-    let cube: crate::surface::ChildThunk<'_> = &cube;
-    let offset = super::build_vector(vec![s.clone(), Value::Num(0.0), Value::Num(0.0)]);
-    ctx.call(&crate::surface::ModuleCall {
-        name: "translate",
-        args: &[(None, offset)],
-        children: crate::surface::Children::Compiled(&[cube]),
-    })
-}
-
+/// Between them they cover the module ABI end to end: a bound parameter and `children()`, a call to
+/// another user module forwarding its children, and a call to BUILTINS (a combinator wrapping a
+/// primitive reached with named arguments).
 pub(super) static MODULE_REGISTRY: &[ModuleEntry] = &[
     ModuleEntry {
         name: "_fab_poc_mod",
         reference: "module _fab_poc_mod(k=1) { children(); }",
-        func: poc_mod_children,
+        func: generated_modules::_fab_poc_mod,
     },
     ModuleEntry {
         name: "_fab_poc_wrap",
         reference: "module _fab_poc_wrap(k=1) { _fab_poc_mod(k) children(); }",
-        func: poc_mod_wrap,
+        func: generated_modules::_fab_poc_wrap,
     },
     ModuleEntry {
         name: "_fab_poc_prim",
         reference: "module _fab_poc_prim(s=1) { translate([s,0,0]) cube(size=s, center=true); }",
-        func: poc_mod_prim,
+        func: generated_modules::_fab_poc_prim,
     },
 ];
 

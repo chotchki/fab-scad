@@ -848,11 +848,79 @@ impl Emitter<'_> {
                 }
                 Ok(out)
             }
-            other => Err(format!("a call to module `{other}` (AR.20.5 dispatch)")),
+            // AR.20.8 — a call to another MODULE, which is 404 of BOSL2's 416 and the arm that
+            // makes AR.20.5/AR.20.6's dispatch reachable at all.
+            //
+            // The arguments go out IN SOURCE ORDER carrying the names they were written with, and
+            // nothing is decided here: which slot each one fills is matched at RUNTIME against
+            // whatever the callee resolved to. That is deliberate and it is the second design —
+            // positionalising at compile time meant assuming the callee's parameter list, which
+            // `resolve_module` is free to contradict (AN.10). See `rt::ModuleCall`.
+            other => {
+                let mut args = String::new();
+                for a in &mi.args {
+                    let v = self.expr(&a.value)?;
+                    match &a.name {
+                        // A `$`-arg needs no special channel: it is an argument whose name starts
+                        // with `$`, and the runtime splits it out exactly as the interpreter does.
+                        Some(n) => {
+                            let _ = write!(args, "(Some({:?}), {v}), ", n.as_ref());
+                        }
+                        None => {
+                            let _ = write!(args, "(None, {v}), ");
+                        }
+                    }
+                }
+                let children = self.child_block(mi)?;
+                Ok(format!(
+                    "    parts.push(fx.call(&rt::ModuleCall {{ name: {other:?}, args: &[{args}], children: {children} }})?);\n"
+                ))
+            }
         }
     }
 
-    /// One VECTOR ELEMENT as statements pushing into `acc`    /// One VECTOR ELEMENT as statements pushing into `acc` — the compiled mirror of the stack
+    /// The `children:` field of an emitted `rt::ModuleCall` — one THUNK per geometry child.
+    ///
+    /// A thunk rather than built geometry because a callee may instantiate its children zero times
+    /// or many, and each instantiation happens fresh. Each opens its own `parts` vec and groups it,
+    /// which is what a child block means.
+    ///
+    /// The thunk parameter is NAMED `fx`, shadowing the enclosing module's ctx, and that is correct
+    /// rather than convenient: a thunk is invoked with the CALLER's ctx, and a `children()` written
+    /// inside a child block refers to the enclosing module's children anyway. So the ordinary
+    /// statement emission works unchanged inside it.
+    fn child_block(&mut self, mi: &fab_lang::ModuleInstantiation) -> Result<String, String> {
+        // L.5.2 — neither an empty statement nor an assignment is a CHILD (counting either would
+        // misalign `$children` and `children(i)`), but an assignment's bindings ARE in scope for
+        // every geometry child. Emitting that scoping means hoisting the binding out of the thunks
+        // so each captures it, which is real work; a child block that has one declines rather than
+        // silently dropping a local the children read.
+        let mut kids = Vec::new();
+        for k in &mi.children {
+            match &k.kind {
+                StmtKind::Empty => {}
+                StmtKind::Assignment { .. } => {
+                    return Err("an assignment inside a child block (L.5.2 scoping)".into());
+                }
+                _ => kids.push(k),
+            }
+        }
+        if kids.is_empty() {
+            return Ok("rt::Children::None".to_string());
+        }
+        let mut out = String::from("rt::Children::Compiled(&[");
+        for k in kids {
+            let body = self.stmt(k)?;
+            let _ = write!(
+                out,
+                "&|fx: &dyn rt::ModuleCtx| {{ let mut parts: Vec<rt::Geo> = Vec::new(); {body} Ok(fx.group(parts)) }}, "
+            );
+        }
+        out.push_str("])");
+        Ok(out)
+    }
+
+    /// One VECTOR ELEMENT as statements pushing into `acc` — the compiled mirror of the stack
     /// machine's `LcFor` walk: `for` nests per binding, `if` contributes conditionally, `each`
     /// splices through the same iteration seam, an element-position `let` binds and recurses.
     fn element(&mut self, e: &Expr, acc: &str) -> Result<String, String> {
@@ -1027,6 +1095,57 @@ pub fn generate_module(entry_names: &[&str]) -> Result<String, String> {
     generate_batch(&subjects)
 }
 
+/// AR.20.8 — the generated file of MODULE natives, from their verbatim references.
+///
+/// A SEPARATE file from the function batch rather than a section of it, because the two are
+/// genuinely different artifacts: a function batch shares a `FALLBACK_SOURCES` blob and a baked
+/// constant table (AR.10/AR.16), while a module native carries neither yet. Merging them would mean
+/// one regen path deciding both, and the module half is the one still moving.
+///
+/// THE POINT OF THIS FUNCTION IS THAT ITS OUTPUT IS COMPILED. Module emission had been exercised
+/// only as generated TEXT — asserting that a string contains `fx.call(` proves the emitter ran, not
+/// that rustc would accept what it wrote. Checking the file in puts the emitted text through the
+/// compiler on every build, and through the tier differential on every test run.
+///
+/// # Errors
+/// If any reference declines, naming the construct — the same contract as the function batch.
+pub fn generate_modules(references: &[&str]) -> Result<String, String> {
+    let mut out = String::from(
+        "// GENERATED by `fab_lib::emit::generate_modules` (AR.20.8) — DO NOT EDIT.\n\
+         // Refresh: FAB_REGEN=1 cargo nextest run -p fab-lib -E 'test(generated_modules_are_current)'\n\
+         //\n\
+         // A module native builds GEOMETRY through the interpreter's own construction (`ModuleCtx`),\n\
+         // so what it renders is what interpreting its reference renders — the win is the deleted\n\
+         // interpretation overhead, not different geometry.\n\
+         \n\
+         #![allow(\n\
+         \x20   unused_variables,\n\
+         \x20   clippy::get_first,\n\
+         \x20   clippy::vec_init_then_push,\n\
+         \x20   clippy::unreadable_literal,\n\
+         \x20   clippy::cloned_ref_to_slice_refs,\n\
+         \x20   clippy::used_underscore_items,\n\
+         \x20   clippy::possible_missing_else,\n\
+         \x20   clippy::collapsible_else_if,\n\
+         \x20   reason = \"generated code: a module need not READ every parameter it declares, \\\n\
+         \x20             parameter slots are indexed uniformly (so slot 0 is `get(0)`, not \\\n\
+         \x20             `first()`), and a parts vec grows CONDITIONALLY even when the first \\\n\
+         \x20             push happens to be unconditional — plus bit-exact from_bits literals, \\\n\
+         \x20             mechanical clones, upstream's underscore-prefixed names and one-line \\\n\
+         \x20             block emission\"\n\
+         )]\n\
+         \n\
+         // AR.13: `rt` is the ONLY thing generated code names.\n\
+         use fab_lang::rt;\n",
+    );
+    for reference in references {
+        out.push('\n');
+        out.push_str(&generate_module_native(reference, &[], &[])?);
+        out.push('\n');
+    }
+    Ok(out)
+}
+
 /// AR.12.2 — the generated file for named functions read out of a LIBRARY, with no hand-maintained
 /// anything. This is what a transpiled crate is actually built from, and the reason the emitter
 /// stopped reading `intrinsics::REGISTRY`: a transpiler that depends on the table it exists to
@@ -1185,6 +1304,22 @@ pub fn generate_batch(subjects: &[Subject<'_>]) -> Result<String, String> {
 /// The entries the generated module currently covers, in DEPENDENCY order (a sibling call may
 /// only reach entries earlier in this list). Growing this list is how an intrinsic migrates from
 /// hand-written to generated (AR.7).
+/// AR.20.8 — the MODULE references whose natives are generated into
+/// `lang/src/eval/intrinsics/generated_modules.rs` and wired into `MODULE_REGISTRY`.
+///
+/// Verbatim source, not names, because a module native's fingerprint gate checks THESE bytes: the
+/// registry entry's `reference` and the generated body must come from one string or they can
+/// describe different code.
+pub const GENERATED_MODULES: &[&str] = &[
+    // The ABI POCs, now GENERATED rather than hand-written — which is the AR.20.8 deliverable.
+    // Between them they exercise every part of the module ABI: a bound parameter and `children()`,
+    // a call to another user module forwarding its children, and a call to BUILTINS (a combinator
+    // plus a primitive reached with named arguments).
+    "module _fab_poc_mod(k=1) { children(); }",
+    "module _fab_poc_wrap(k=1) { _fab_poc_mod(k) children(); }",
+    "module _fab_poc_prim(s=1) { translate([s,0,0]) cube(size=s, center=true); }",
+];
+
 pub const GENERATED_ENTRIES: &[&str] = &[
     "_fab_poc_sq",
     "_fab_poc_near0",
@@ -1584,6 +1719,27 @@ mod tests {
         );
     }
 
+    /// AR.20.8 — the generated MODULE file is current, and (because it is checked in and compiled)
+    /// the emitter's module output is known to build rather than merely to contain the right
+    /// substrings.
+    #[test]
+    fn generated_modules_are_current() {
+        let want = super::generate_modules(super::GENERATED_MODULES).expect("generates");
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../lang/src/eval/intrinsics/generated_modules.rs"
+        );
+        if std::env::var_os("FAB_REGEN").is_some() {
+            std::fs::write(path, &want).expect("write generated_modules.rs");
+            return;
+        }
+        let have = include_str!("../../lang/src/eval/intrinsics/generated_modules.rs");
+        assert_eq!(
+            have, want,
+            "generated_modules.rs is stale — refresh with FAB_REGEN=1 (see the file header)"
+        );
+    }
+
     /// The walk's scope rules, on synthetic references where the answer is unambiguous.
     #[test]
     fn scope_rules_classify_reads_and_calls() {
@@ -1696,7 +1852,13 @@ mod tests {
     #[test]
     fn module_statements_outside_the_subset_decline_by_name() {
         for (src, want) in [
-            ("module m() { cube(1); }", "module `cube`"),
+            // NOT here any more: `module m() { cube(1); }` — a module call GENERATES as of
+            // AR.20.8, which is the whole point of that item. Its replacement below is the child
+            // block an assignment makes un-emittable.
+            (
+                "module m() { translate([1,0,0]) { x = 2; cube(x); } }",
+                "assignment inside a child block",
+            ),
             ("module m() { #cube(1); }", "modifier"),
             (
                 "module m() { module inner() { children(); } }",
@@ -1738,6 +1900,34 @@ mod tests {
                 "children(i) selects rather than rendering all",
                 "module m(n) { for (i = [0:n]) children(i); }",
                 "fx.child_at(",
+            ),
+            // AR.20.8 — the module-call arm. The args go out in SOURCE ORDER with their names
+            // attached; nothing is positionalised here, because the callee's parameter list is a
+            // runtime fact (AN.10).
+            (
+                "a module call dispatches",
+                "module m(n) { cyl(h=n, r=2); }",
+                "fx.call(&rt::ModuleCall { name: \"cyl\"",
+            ),
+            (
+                "a named argument keeps its NAME rather than being positionalised",
+                "module m(n) { cyl(h=n, r=2); }",
+                "(Some(\"h\"),",
+            ),
+            (
+                "a `$`-argument is just an argument whose name starts with `$`",
+                "module m(n) { cyl(n, $fn=8); }",
+                "(Some(\"$fn\"),",
+            ),
+            (
+                "a childless call says so",
+                "module m(n) { cyl(n); }",
+                "children: rt::Children::None",
+            ),
+            (
+                "a child block becomes one thunk per geometry child",
+                "module m(n) { translate([n,0,0]) { cube(n); sphere(n); } }",
+                "rt::Children::Compiled(&[",
             ),
         ] {
             let code = super::generate_module_native(src, &[], &[])

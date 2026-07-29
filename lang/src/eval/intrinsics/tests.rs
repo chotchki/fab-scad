@@ -3928,6 +3928,51 @@ fn a_recursive_native_hands_over_to_the_interpreter_past_the_depth_budget() {
     );
 }
 
+/// The first REAL BOSL2 modules through the compiled path (AR.14.4 band 1): `down`, `zrot` and
+/// `hexagon` from the PINNED library — armed by fingerprint match against the include'd
+/// definitions themselves, not transcribed copies — must render and echo exactly as interpreting
+/// them does. Skips when the submodule is absent, like every libs/BOSL2 consumer.
+#[test]
+fn armed_bosl2_band_modules_match_the_interpreter() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("workspace root")
+        .join("libs/BOSL2");
+    if !root.join("std.scad").exists() {
+        eprintln!("skipping: libs/BOSL2 submodule not checked out");
+        return;
+    }
+    let run = |intrinsics: bool| {
+        let config = crate::Config {
+            intrinsics,
+            ..crate::Config::default()
+        };
+        let (geo, msgs) = crate::evaluate_geometry_with_base_config(
+            "include <std.scad>\ndown(3) cube(2);\nzrot(45) cube(1);\nhexagon(r=4);",
+            &root,
+            &[],
+            config,
+        )
+        .expect("renders");
+        (format!("{geo:?}"), format!("{msgs:?}"))
+    };
+    let (geo_on, msgs_on) = run(true);
+    let (geo_off, msgs_off) = run(false);
+    assert_eq!(
+        geo_on, geo_off,
+        "band: compiled BOSL2 modules built different geometry than interpreting them"
+    );
+    assert_eq!(msgs_on, msgs_off, "band: different console");
+
+    // NON-VACUITY: the pinned library's OWN `down` definition fingerprint-matches its native.
+    let transforms = std::fs::read_to_string(root.join("transforms.scad")).expect("reads");
+    let program = crate::parser::parse(&transforms).expect("parses");
+    let armed = program.stmts.iter().any(|s| matches!(&s.kind,
+        crate::parser::StmtKind::ModuleDef { name, params, body }
+            if &**name == "down" && super::resolve_module("down", params, body).is_some()));
+    assert!(armed, "`down` from the pinned library did not arm");
+}
+
 /// The drift gate, on the MODULE path: a definition that does not match the reference the native
 /// was generated from must NOT wire. Without this the native would answer for a module whose body
 /// somebody changed, which is a wrong answer rather than a missed compilation.

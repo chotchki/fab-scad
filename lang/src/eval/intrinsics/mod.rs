@@ -32,6 +32,7 @@ pub(crate) mod fingerprint;
 // Generated code keeps its emitter's exact bytes — the regen test pins them; fmt stays out.
 #[rustfmt::skip]
 mod generated;
+mod generated_bosl2_modules;
 mod generated_modules;
 mod geometry;
 mod lists;
@@ -2229,7 +2230,12 @@ fn module_table() -> &'static BTreeMap<&'static str, (crate::surface::Fingerprin
         OnceLock::new();
     TABLE.get_or_init(|| {
         let mut map = BTreeMap::new();
-        for entry in MODULE_REGISTRY {
+        // POC entries first, then the AR.14.4 standalone BOSL2 band — one namespace, names
+        // disjoint by construction (the debug_assert holds the line).
+        for entry in MODULE_REGISTRY
+            .iter()
+            .chain(generated_bosl2_modules::REGISTRY)
+        {
             let Some((params, body)) = parse_module_reference(entry.reference) else {
                 continue;
             };

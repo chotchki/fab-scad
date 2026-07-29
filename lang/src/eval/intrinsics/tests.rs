@@ -3479,7 +3479,7 @@ fn a_compiled_module_dispatching_matches_the_interpreter() {
         let program = crate::parser::parse(src).expect("parses");
         program.stmts.iter().any(|s| {
             matches!(&s.kind, crate::parser::StmtKind::ModuleDef { name: n, params, body }
-                if &**n == name && super::resolve_module(name, params, body).is_some())
+                if &**n == name && super::resolve_module(name, params, body, &crate::Scope::new()).is_some())
         })
     };
     assert!(
@@ -3540,7 +3540,7 @@ fn a_compiled_module_calling_builtins_matches_the_interpreter() {
         program.stmts.iter().any(|s| matches!(&s.kind,
             crate::parser::StmtKind::ModuleDef { name, params, body }
                 if &**name == "_fab_poc_prim"
-                    && super::resolve_module("_fab_poc_prim", params, body).is_some())),
+                    && super::resolve_module("_fab_poc_prim", params, body, &crate::Scope::new()).is_some())),
         "`_fab_poc_prim` did not arm, so the builtin path was never entered"
     );
 }
@@ -3660,7 +3660,7 @@ fn a_compiled_dollar_read_sees_the_call_site() {
         program.stmts.iter().any(|s| matches!(&s.kind,
             crate::parser::StmtKind::ModuleDef { name, params, body }
                 if &**name == "_fab_poc_dollar"
-                    && super::resolve_module("_fab_poc_dollar", params, body).is_some())),
+                    && super::resolve_module("_fab_poc_dollar", params, body, &crate::Scope::new()).is_some())),
         "`_fab_poc_dollar` did not arm, so the compiled path was never entered"
     );
 }
@@ -3711,7 +3711,7 @@ fn the_compiled_modifiers_match_the_interpreter() {
         assert!(
             program.stmts.iter().any(|s| matches!(&s.kind,
                 crate::parser::StmtKind::ModuleDef { name: n, params, body }
-                    if &**n == name && super::resolve_module(name, params, body).is_some())),
+                    if &**n == name && super::resolve_module(name, params, body, &crate::Scope::new()).is_some())),
             "`{name}` did not arm, so the compiled path was never entered"
         );
     }
@@ -3760,7 +3760,7 @@ fn a_compiled_module_hoists_scope_assignments_like_the_interpreter() {
         program.stmts.iter().any(|s| matches!(&s.kind,
             crate::parser::StmtKind::ModuleDef { name: n, params, body }
                 if &**n == "_fab_poc_hoist"
-                    && super::resolve_module("_fab_poc_hoist", params, body).is_some())),
+                    && super::resolve_module("_fab_poc_hoist", params, body, &crate::Scope::new()).is_some())),
         "`_fab_poc_hoist` did not arm, so the compiled path was never entered"
     );
 
@@ -3810,7 +3810,7 @@ fn a_compiled_module_echoes_like_the_interpreter() {
         assert!(
             program.stmts.iter().any(|s| matches!(&s.kind,
                 crate::parser::StmtKind::ModuleDef { name: n, params, body }
-                    if &**n == name && super::resolve_module(name, params, body).is_some())),
+                    if &**n == name && super::resolve_module(name, params, body, &crate::Scope::new()).is_some())),
             "`{name}` did not arm, so the compiled path was never entered"
         );
     }
@@ -3854,7 +3854,7 @@ fn a_declining_native_rolls_back_its_echoes_exactly_once() {
     let armed = |name: &str| {
         program.stmts.iter().any(|s| matches!(&s.kind,
             crate::parser::StmtKind::ModuleDef { name: n, params, body }
-                if &**n == name && super::resolve_module(name, params, body).is_some()))
+                if &**n == name && super::resolve_module(name, params, body, &crate::Scope::new()).is_some()))
     };
     assert!(armed("_fab_poc_echo"), "the echoing caller must arm");
     assert!(!armed("_fab_poc_mod"), "the drifted callee must NOT arm");
@@ -3885,7 +3885,7 @@ fn a_native_success_inside_a_cacheable_call_does_not_leak_the_capture() {
         program.stmts.iter().any(|s| matches!(&s.kind,
             crate::parser::StmtKind::ModuleDef { name: n, params, body }
                 if &**n == "_fab_poc_hoist"
-                    && super::resolve_module("_fab_poc_hoist", params, body).is_some())),
+                    && super::resolve_module("_fab_poc_hoist", params, body, &crate::Scope::new()).is_some())),
         "`_fab_poc_hoist` did not arm"
     );
 }
@@ -3923,15 +3923,119 @@ fn a_recursive_native_hands_over_to_the_interpreter_past_the_depth_budget() {
         program.stmts.iter().any(|s| matches!(&s.kind,
             crate::parser::StmtKind::ModuleDef { name: n, params, body }
                 if &**n == "_fab_poc_rec"
-                    && super::resolve_module("_fab_poc_rec", params, body).is_some())),
+                    && super::resolve_module("_fab_poc_rec", params, body, &crate::Scope::new()).is_some())),
         "`_fab_poc_rec` did not arm, so no native recursion ever ran"
+    );
+}
+
+/// AR.14.4 band 2 — a module whose emitted body BAKES top-level constants (`UP`, `_EPSILON`)
+/// arms when the program's own bindings bit-match the baked expectations, and renders exactly as
+/// interpreting it does. The guard's positive half; the veto half is the test below.
+#[test]
+fn a_bake_guarded_module_arms_when_the_constants_match() {
+    let run = |src: &str, intrinsics: bool| {
+        let config = crate::Config {
+            intrinsics,
+            ..crate::Config::default()
+        };
+        let (geo, msgs) =
+            crate::evaluate_geometry_with_base_config(src, std::path::Path::new("."), &[], config)
+                .expect("renders");
+        (format!("{geo:?}"), format!("{msgs:?}"))
+    };
+    let src = "UP = [0,0,1];\n\
+               _EPSILON = 1e-9;\n\
+               module _fab_poc_bake(s=1) { translate(UP*s) cube(_EPSILON*1e9); }\n\
+               _fab_poc_bake(3);";
+    let (geo_on, msgs_on) = run(src, true);
+    let (geo_off, msgs_off) = run(src, false);
+    assert_eq!(
+        geo_on, geo_off,
+        "bake guard: compiled module built different geometry than interpreting"
+    );
+    assert_eq!(msgs_on, msgs_off, "bake guard: different console");
+
+    // NON-VACUITY: with the right bindings in the base scope the entry WIRES...
+    let program = crate::parser::parse(src).expect("parses");
+    let (params, body) = program
+        .stmts
+        .iter()
+        .find_map(|s| match &s.kind {
+            crate::parser::StmtKind::ModuleDef { name, params, body } if &**name == "_fab_poc_bake" => {
+                Some((params, body))
+            }
+            _ => None,
+        })
+        .expect("has the def");
+    let mut good = crate::Scope::new();
+    good.bind("UP", Value::num_list(vec![0.0, 0.0, 1.0]));
+    good.bind("_EPSILON", Value::Num(1e-9));
+    assert!(
+        super::resolve_module("_fab_poc_bake", params, body, &good).is_some(),
+        "matching constants must wire — nothing above dispatched natively"
+    );
+    // ...and an EMPTY scope (no such bindings) must not: the guard is live, not decorative.
+    assert!(
+        super::resolve_module("_fab_poc_bake", params, body, &crate::Scope::new()).is_none(),
+        "a scope without the baked constants must NOT wire"
+    );
+}
+
+/// AR.14.4 band 2, the veto half: a program that REBINDS a baked constant must not reach the
+/// native (the fingerprint cannot see the rebind; the const guard must). Both tiers still agree —
+/// on the INTERPRETED answer, which honors the program's own `_EPSILON`.
+#[test]
+fn a_rebound_baked_constant_vetoes_the_module_native() {
+    let run = |src: &str, intrinsics: bool| {
+        let config = crate::Config {
+            intrinsics,
+            ..crate::Config::default()
+        };
+        let (geo, msgs) =
+            crate::evaluate_geometry_with_base_config(src, std::path::Path::new("."), &[], config)
+                .expect("renders");
+        (format!("{geo:?}"), format!("{msgs:?}"))
+    };
+    // `_EPSILON` rebound to 0.5: interpreting renders cube(5e8) — if the stale-baked native
+    // answered instead, it would render cube(1) and the tier equality below would catch it.
+    let src = "UP = [0,0,1];\n\
+               _EPSILON = 0.5;\n\
+               module _fab_poc_bake(s=1) { translate(UP*s) cube(_EPSILON*1e9); }\n\
+               _fab_poc_bake(3);";
+    let (geo_on, msgs_on) = run(src, true);
+    let (geo_off, msgs_off) = run(src, false);
+    assert_eq!(
+        geo_on, geo_off,
+        "a rebound constant leaked into the native: tiers diverged"
+    );
+    assert_eq!(msgs_on, msgs_off, "rebound constant: different console");
+
+    let program = crate::parser::parse(src).expect("parses");
+    let (params, body) = program
+        .stmts
+        .iter()
+        .find_map(|s| match &s.kind {
+            crate::parser::StmtKind::ModuleDef { name, params, body } if &**name == "_fab_poc_bake" => {
+                Some((params, body))
+            }
+            _ => None,
+        })
+        .expect("has the def");
+    let mut rebound = crate::Scope::new();
+    rebound.bind("UP", Value::num_list(vec![0.0, 0.0, 1.0]));
+    rebound.bind("_EPSILON", Value::Num(0.5));
+    assert!(
+        super::resolve_module("_fab_poc_bake", params, body, &rebound).is_none(),
+        "a rebound `_EPSILON` must veto the native"
     );
 }
 
 /// The first REAL BOSL2 modules through the compiled path (AR.14.4 band 1): `down`, `zrot` and
 /// `hexagon` from the PINNED library — armed by fingerprint match against the include'd
 /// definitions themselves, not transcribed copies — must render and echo exactly as interpreting
-/// them does. Skips when the submodule is absent, like every libs/BOSL2 consumer.
+/// them does. Band 2 rides along: `top_half` and `upcube` bake direction vectors, so their rows
+/// carry the const guard and arm only because `std.scad`'s own `TOP`/`BOT`/`CENTER` match.
+/// Skips when the submodule is absent, like every libs/BOSL2 consumer.
 #[test]
 fn armed_bosl2_band_modules_match_the_interpreter() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -3948,7 +4052,8 @@ fn armed_bosl2_band_modules_match_the_interpreter() {
             ..crate::Config::default()
         };
         let (geo, msgs) = crate::evaluate_geometry_with_base_config(
-            "include <std.scad>\ndown(3) cube(2);\nzrot(45) cube(1);\nhexagon(r=4);",
+            "include <std.scad>\ndown(3) cube(2);\nzrot(45) cube(1);\nhexagon(r=4);\n\
+             top_half() sphere(r=3);\nupcube([2,3,4]);",
             &root,
             &[],
             config,
@@ -3969,8 +4074,39 @@ fn armed_bosl2_band_modules_match_the_interpreter() {
     let program = crate::parser::parse(&transforms).expect("parses");
     let armed = program.stmts.iter().any(|s| matches!(&s.kind,
         crate::parser::StmtKind::ModuleDef { name, params, body }
-            if &**name == "down" && super::resolve_module("down", params, body).is_some()));
+            if &**name == "down" && super::resolve_module("down", params, body, &crate::Scope::new()).is_some()));
     assert!(armed, "`down` from the pinned library did not arm");
+
+    // Band-2 non-vacuity: `top_half` (partitions.scad) is CONST-GUARDED on `BACK` + `TOP` (its
+    // `planar` branch reads BACK) — it wires against a scope binding the library's own values,
+    // and must NOT wire against a scope that rebinds one (the guard is live for real library
+    // rows, not just the poc).
+    let partitions = std::fs::read_to_string(root.join("partitions.scad")).expect("reads");
+    let program = crate::parser::parse(&partitions).expect("parses");
+    let (params, body) = program
+        .stmts
+        .iter()
+        .find_map(|s| match &s.kind {
+            crate::parser::StmtKind::ModuleDef { name, params, body } if &**name == "top_half" => {
+                Some((params, body))
+            }
+            _ => None,
+        })
+        .expect("partitions.scad defines top_half");
+    let mut good = crate::Scope::new();
+    good.bind("BACK", Value::num_list(vec![0.0, 1.0, 0.0]));
+    good.bind("TOP", Value::num_list(vec![0.0, 0.0, 1.0]));
+    assert!(
+        super::resolve_module("top_half", params, body, &good).is_some(),
+        "`top_half` with the library's own `BACK`/`TOP` did not arm"
+    );
+    let mut rebound = crate::Scope::new();
+    rebound.bind("BACK", Value::num_list(vec![0.0, 1.0, 0.0]));
+    rebound.bind("TOP", Value::num_list(vec![0.0, 0.0, -1.0]));
+    assert!(
+        super::resolve_module("top_half", params, body, &rebound).is_none(),
+        "`top_half` with a rebound `TOP` must not wire"
+    );
 }
 
 /// The drift gate, on the MODULE path: a definition that does not match the reference the native
@@ -3998,23 +4134,23 @@ fn a_drifted_module_definition_does_not_wire() {
 
     let (p, b) = of(pinned);
     assert!(
-        resolve_module("_fab_poc_mod", &p, &b).is_some(),
+        resolve_module("_fab_poc_mod", &p, &b, &crate::Scope::new()).is_some(),
         "the pinned definition must wire"
     );
     let (p, b) = of(reformatted);
     assert!(
-        resolve_module("_fab_poc_mod", &p, &b).is_some(),
+        resolve_module("_fab_poc_mod", &p, &b, &crate::Scope::new()).is_some(),
         "reformatting is not drift — the fingerprint excludes spans"
     );
     for (label, src) in [("body moved", moved), ("param renamed", renamed_param)] {
         let (p, b) = of(src);
         assert!(
-            resolve_module("_fab_poc_mod", &p, &b).is_none(),
+            resolve_module("_fab_poc_mod", &p, &b, &crate::Scope::new()).is_none(),
             "{label}: a drifted definition must NOT wire"
         );
     }
     assert!(
-        resolve_module("no_such_module", &p, &b).is_none(),
+        resolve_module("no_such_module", &p, &b, &crate::Scope::new()).is_none(),
         "an unregistered name never wires"
     );
 }

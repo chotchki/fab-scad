@@ -871,6 +871,7 @@ fn try_native_module<'a>(
     params: &[crate::parser::Parameter],
     body: &Stmt,
     call: &Scope,
+    home_global: &Scope,
     child_stmts: &[&'a Stmt],
     child_assigns: &[&'a Stmt],
     caller: &Scope,
@@ -884,7 +885,8 @@ fn try_native_module<'a>(
     if !ctx.config.intrinsics {
         return Ok(None);
     }
-    let Some(native) = super::intrinsics::resolve_module(&mi.name, params, body) else {
+    let Some(native) = super::intrinsics::resolve_module(&mi.name, params, body, home_global)
+    else {
         return Ok(None);
     };
     let Some(_depth_ticket) = super::module_rt::ModuleDepthGuard::enter() else {
@@ -1023,6 +1025,7 @@ fn push_user_module<'a>(
         params,
         body,
         &call,
+        &home_global,
         &child_stmts,
         &child_assigns,
         &caller,

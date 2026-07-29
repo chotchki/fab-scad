@@ -2142,6 +2142,14 @@ pub(super) struct ModuleEntry {
     pub(super) reference: &'static str,
     /// The compiled implementation.
     pub(super) func: ModuleNative,
+    /// Named top-level constants the emitted body BAKES (AR.14.4 band 2) — the module twin of
+    /// `Entry::consts_v`, value-typed from the start because the library fold hands back whole
+    /// `Value`s (BOSL2's direction vectors, not just numbers). The fingerprint proves the module's
+    /// SOURCE, not the constants it names, so [`resolve_module`] refuses to wire unless each name's
+    /// binding in the body's lexical base bit-matches the baked expectation. Checked per RESOLUTION
+    /// rather than at a separate arm step, because module dispatch already holds the home scope at
+    /// the call site — there is no earlier moment with more information. Empty = band 1.
+    pub(super) consts: &'static [ValueConst],
 }
 
 /// The compiled modules, every one of them GENERATED (AR.20.8) — there are no hand-written module
@@ -2161,73 +2169,109 @@ pub(super) static MODULE_REGISTRY: &[ModuleEntry] = &[
         name: "_fab_poc_mod",
         reference: "module _fab_poc_mod(k=1) { children(); }",
         func: generated_modules::_fab_poc_mod,
+        consts: &[],
     },
     ModuleEntry {
         name: "_fab_poc_wrap",
         reference: "module _fab_poc_wrap(k=1) { _fab_poc_mod(k) children(); }",
         func: generated_modules::_fab_poc_wrap,
+        consts: &[],
     },
     ModuleEntry {
         name: "_fab_poc_prim",
         reference: "module _fab_poc_prim(s=1) { translate([s,0,0]) cube(size=s, center=true); }",
         func: generated_modules::_fab_poc_prim,
+        consts: &[],
     },
     ModuleEntry {
         name: "_fab_poc_dollar",
         reference: "module _fab_poc_dollar(k=1) { if ($children > 1) children(1); else children(); }",
         func: generated_modules::_fab_poc_dollar,
+        consts: &[],
     },
     ModuleEntry {
         name: "_fab_poc_bg",
         reference: "module _fab_poc_bg(s=1) { %cube(s); sphere(r=s); }",
         func: generated_modules::_fab_poc_bg,
+        consts: &[],
     },
     ModuleEntry {
         name: "_fab_poc_star",
         reference: "module _fab_poc_star(s=1) { _fab_poc_dollar(s) { *cube(s); sphere(r=s); cylinder(r=s,h=s); } }",
         func: generated_modules::_fab_poc_star,
+        consts: &[],
     },
     ModuleEntry {
         name: "_fab_poc_hoist",
         reference: "module _fab_poc_hoist(x=1) { cube(x); x = x + 2; { y = x; } sphere(r=y); }",
         func: generated_modules::_fab_poc_hoist,
+        consts: &[],
     },
     ModuleEntry {
         name: "_fab_poc_echo",
         reference: "module _fab_poc_echo(n=1) { echo(\"poc\", n, k=n+1); echo(n) sphere(r=n); _fab_poc_mod(n) cube(n); }",
         func: generated_modules::_fab_poc_echo,
+        consts: &[],
     },
     ModuleEntry {
         name: "_fab_poc_rec",
         reference: "module _fab_poc_rec(n=1) { if (n > 0) _fab_poc_rec(n - 1); else cube(1); }",
         func: generated_modules::_fab_poc_rec,
+        consts: &[],
+    },
+    // The BAKE poc (AR.14.4 band 2): the body burns in `UP` and `_EPSILON`, so this row carries
+    // the const GUARD — resolve refuses to wire unless the program's own top-level bindings
+    // bit-match these expectations. The values mirror `fab_lib::emit::poc_module_bakes`.
+    ModuleEntry {
+        name: "_fab_poc_bake",
+        reference: "module _fab_poc_bake(s=1) { translate(UP*s) cube(_EPSILON*1e9); }",
+        func: generated_modules::_fab_poc_bake,
+        consts: &[("_EPSILON", poc::poc_eps_value), ("UP", poc::poc_up_value)],
     },
 ];
 
-/// The compiled module for `name`, IFF one is registered and the definition in this program
-/// fingerprints to the reference it was generated from.
+/// The compiled module for `name`, IFF one is registered, the definition in this program
+/// fingerprints to the reference it was generated from, AND every constant the native bakes
+/// bit-matches its binding in `base` — the body's lexical base, the same scope the interpreted
+/// body's free reads resolve against (`bind_values` receives exactly this scope).
 ///
 /// Same wire-only-if-proven contract as [`resolve`]: a library that drifted from the pinned source
 /// interprets instead, so the worst case stays a missed compilation rather than a wrong answer.
+/// A user override of a baked constant (`_EPSILON = 1e-6;`) is the same story one level down —
+/// the fingerprint cannot see it, the guard here can.
 pub(super) fn resolve_module(
     name: &str,
     params: &[Parameter],
     body: &crate::parser::Stmt,
+    base: &super::scope::Scope,
 ) -> Option<ModuleNative> {
-    let &(fp, func) = module_table().get(name)?;
-    (module_fingerprint(params, body) == fp).then_some(func)
+    let &(fp, entry) = module_table().get(name)?;
+    if module_fingerprint(params, body) != fp {
+        return None;
+    }
+    entry
+        .consts
+        .iter()
+        .all(|&(cname, expected)| {
+            base.lookup_opt(cname)
+                .is_some_and(|v| value_bits_eq(&v, &expected()))
+        })
+        .then_some(entry.func)
 }
 
-/// `name → (reference fingerprint, native)`, parsed and fingerprinted ONCE per process — the module
-/// twin of [`table`].
+/// `name → (reference fingerprint, entry)`, parsed and fingerprinted ONCE per process — the module
+/// twin of [`table`]. Carries the whole `&'static ModuleEntry` because [`resolve_module`] needs the
+/// const guard alongside the native.
 ///
 /// PERF NOTE, deliberately left rather than hidden: the CALLER's body is still fingerprinted on
 /// every instantiation, because this hook sits in the per-call path while the function side resolves
 /// once at `Ctx` build. Fine for AR.20.1, whose job is proving the ABI; AR.20.5 moves module
 /// resolution to build time alongside `build_intrinsics`, where it belongs.
-fn module_table() -> &'static BTreeMap<&'static str, (crate::surface::Fingerprint, ModuleNative)> {
-    static TABLE: OnceLock<BTreeMap<&'static str, (crate::surface::Fingerprint, ModuleNative)>> =
-        OnceLock::new();
+fn module_table()
+-> &'static BTreeMap<&'static str, (crate::surface::Fingerprint, &'static ModuleEntry)> {
+    static TABLE: OnceLock<
+        BTreeMap<&'static str, (crate::surface::Fingerprint, &'static ModuleEntry)>,
+    > = OnceLock::new();
     TABLE.get_or_init(|| {
         let mut map = BTreeMap::new();
         // POC entries first, then the AR.14.4 standalone BOSL2 band — one namespace, names
@@ -2239,7 +2283,7 @@ fn module_table() -> &'static BTreeMap<&'static str, (crate::surface::Fingerprin
             let Some((params, body)) = parse_module_reference(entry.reference) else {
                 continue;
             };
-            let prior = map.insert(entry.name, (module_fingerprint(&params, &body), entry.func));
+            let prior = map.insert(entry.name, (module_fingerprint(&params, &body), entry));
             debug_assert!(
                 prior.is_none(),
                 "module registry declares `{}` twice",

@@ -921,7 +921,10 @@ fn try_native_module<'a>(
     // No module native draws today, and this is the note for the one that first does.
     let mark = ctx.messages.borrow().len();
     match native(&mctx) {
-        Err(crate::Error::Unimplemented(_)) => {
+        // Matched through `root()`, not on the raw variant: the W.3.37 lesson is that a span
+        // wrapper stamped anywhere between the decline site and this catch would silently turn
+        // every decline into a fatal render error.
+        Err(e) if matches!(e.root(), crate::Error::Unimplemented(_)) => {
             ctx.messages.borrow_mut().truncate(mark);
             Ok(None)
         }
@@ -994,7 +997,7 @@ fn push_user_module<'a>(
     // runs (the whole point; `get` replays the entry's reads so an ENCLOSING capture still records them). On a
     // MISS, OPEN a read capture on the call frame, snapshot the purity counters, and queue a
     // `CacheStoreModule` that memoizes (node, observed reads) IFF the body was pure.
-    let store = if childless && ctx.config.csg_cache {
+    let store_key = if childless && ctx.config.csg_cache {
         let param_vals: Vec<Value> = params.iter().map(|p| call.lookup(&p.name)).collect();
         if super::mod_cache::worth_caching(&param_vals, ctx.config.csg_cache_keycap) {
             let key = super::mod_cache::ModKey::new(body_ptr, &home_global, &param_vals);
@@ -1002,25 +1005,19 @@ fn push_user_module<'a>(
                 results.push(geo);
                 return Ok(());
             }
-            let entry = call.boundary_id();
-            super::mod_cache::open_capture(entry);
-            Some((
-                key,
-                super::PuritySnap {
-                    messages: ctx.messages.borrow().len(),
-                    draws: ctx.rand_stream.borrow().draws(),
-                    closures: ctx.closures.borrow().len(),
-                    impure_reads: ctx.impure_reads.get(),
-                },
-                entry,
-            ))
+            Some((key, call.boundary_id()))
         } else {
             None
         }
     } else {
         None
     };
-    // AR.20.1 — a COMPILED module, if one is armed for this exact definition.
+    // AR.20.1 — a COMPILED module, if one is armed for this exact definition. The read CAPTURE
+    // opens BELOW, not here: a native success returns without ever reaching `PopModuleFrame` (the
+    // one place `close_capture` runs), so an already-open capture would leak on the thread-local
+    // stack — a LIFO debug-assert in debug builds, forced eval-cache misses in release. The
+    // compiled path deliberately has no CSG memo (module_rt's note), and the interpreted retake
+    // after a DECLINE re-performs every read the result depends on, so opening late loses nothing.
     if let Some(geo) = try_native_module(
         mi,
         params,
@@ -1036,6 +1033,22 @@ fn push_user_module<'a>(
         results.push(geo);
         return Ok(());
     }
+    // MISS + no native answer: open the capture and snapshot purity NOW — after a native decline,
+    // so a native that pushed-then-rolled-back messages (or drew from the stream before declining)
+    // cannot skew the snapshot the store-time purity check compares against.
+    let store = store_key.map(|(key, entry)| {
+        super::mod_cache::open_capture(entry);
+        (
+            key,
+            super::PuritySnap {
+                messages: ctx.messages.borrow().len(),
+                draws: ctx.rand_stream.borrow().draws(),
+                closures: ctx.closures.borrow().len(),
+                impure_reads: ctx.impure_reads.get(),
+            },
+            entry,
+        )
+    });
     // MISS (or ineligible): the full three-frame setup + body. The depth bump lands HERE (a hit is not a
     // recursion level). The children are stashed for `children()`; the module name pushed for `parent_module`.
     ctx.module_depth.set(depth + 1);

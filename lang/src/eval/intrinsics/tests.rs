@@ -3860,6 +3860,74 @@ fn a_declining_native_rolls_back_its_echoes_exactly_once() {
     assert!(!armed("_fab_poc_mod"), "the drifted callee must NOT arm");
 }
 
+/// The CSG-memo capture must not LEAK when an armed native answers a cacheable call (the AR.20
+/// recon's find): the capture used to open BEFORE the native attempt and close only in
+/// `PopModuleFrame` — which a native success never reaches — so the stale capture tripped the
+/// LIFO debug-assert when the ENCLOSING cacheable call closed its own. The capture now opens
+/// after the native attempt; this pins the shape that fired it: an interpreted cacheable OUTER
+/// call whose body makes a cacheable call an armed native answers.
+#[test]
+fn a_native_success_inside_a_cacheable_call_does_not_leak_the_capture() {
+    let config = crate::Config {
+        intrinsics: true,
+        csg_cache: true,
+        ..crate::Config::default()
+    };
+    let src = "module _fab_poc_hoist(x=1) { cube(x); x = x + 2; { y = x; } sphere(r=y); }\n\
+               module _outercache(a=1) { _fab_poc_hoist(a); }\n\
+               _outercache(3);";
+    crate::evaluate_geometry_with_base_config(src, std::path::Path::new("."), &[], config)
+        .expect("renders without tripping the capture LIFO assert");
+
+    // NON-VACUITY: the inner native must arm, or no native success ever met an open capture.
+    let program = crate::parser::parse(src).expect("parses");
+    assert!(
+        program.stmts.iter().any(|s| matches!(&s.kind,
+            crate::parser::StmtKind::ModuleDef { name: n, params, body }
+                if &**n == "_fab_poc_hoist"
+                    && super::resolve_module("_fab_poc_hoist", params, body).is_some())),
+        "`_fab_poc_hoist` did not arm"
+    );
+}
+
+/// The depth-budget HANDOVER, previously untested on the compiled tier: a recursive armed native
+/// dispatches native-to-native until `MAX_MODULE_NATIVE_DEPTH` (64) exhausts, then the REST of
+/// the recursion interprets — childless, so the handover is silent mid-tree and the answer must
+/// be identical either way (the fractal_tree shape AR.20.5 called load-bearing). 100 levels
+/// forces the budget past its edge on every run.
+#[test]
+fn a_recursive_native_hands_over_to_the_interpreter_past_the_depth_budget() {
+    let run = |src: &str, intrinsics: bool| {
+        let config = crate::Config {
+            intrinsics,
+            ..crate::Config::default()
+        };
+        let (geo, msgs) =
+            crate::evaluate_geometry_with_base_config(src, std::path::Path::new("."), &[], config)
+                .expect("renders");
+        (format!("{geo:?}"), format!("{msgs:?}"))
+    };
+
+    let src = "module _fab_poc_rec(n=1) { if (n > 0) _fab_poc_rec(n - 1); else cube(1); }\n\
+               _fab_poc_rec(100);";
+    let (geo_on, msgs_on) = run(src, true);
+    let (geo_off, msgs_off) = run(src, false);
+    assert_eq!(
+        geo_on, geo_off,
+        "depth handover: compiled recursion built different geometry than interpreting"
+    );
+    assert_eq!(msgs_on, msgs_off, "depth handover: different console");
+
+    let program = crate::parser::parse(src).expect("parses");
+    assert!(
+        program.stmts.iter().any(|s| matches!(&s.kind,
+            crate::parser::StmtKind::ModuleDef { name: n, params, body }
+                if &**n == "_fab_poc_rec"
+                    && super::resolve_module("_fab_poc_rec", params, body).is_some())),
+        "`_fab_poc_rec` did not arm, so no native recursion ever ran"
+    );
+}
+
 /// The drift gate, on the MODULE path: a definition that does not match the reference the native
 /// was generated from must NOT wire. Without this the native would answer for a module whose body
 /// somebody changed, which is a wrong answer rather than a missed compilation.

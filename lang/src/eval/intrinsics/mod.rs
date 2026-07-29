@@ -2196,6 +2196,11 @@ pub(super) static MODULE_REGISTRY: &[ModuleEntry] = &[
         reference: "module _fab_poc_echo(n=1) { echo(\"poc\", n, k=n+1); echo(n) sphere(r=n); _fab_poc_mod(n) cube(n); }",
         func: generated_modules::_fab_poc_echo,
     },
+    ModuleEntry {
+        name: "_fab_poc_rec",
+        reference: "module _fab_poc_rec(n=1) { if (n > 0) _fab_poc_rec(n - 1); else cube(1); }",
+        func: generated_modules::_fab_poc_rec,
+    },
 ];
 
 /// The compiled module for `name`, IFF one is registered and the definition in this program

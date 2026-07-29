@@ -416,6 +416,11 @@ pub(super) struct Ctx<'a> {
     /// gives back an interpreter with extra steps, which is the one outcome the design rejects.
     /// So the number gets MEASURED rather than assumed.
     peak_module_depth: Cell<usize>,
+    /// AR.20.7 — how often a compiled caller's CHILDREN met an interpreted callee and the whole
+    /// call declined. The plan holds option (a) — decline, always correct, costs only speed —
+    /// until this measures HIGH on real armed models; that measurement is this counter, reported
+    /// next to the peak under `FAB_DEPTH=1`.
+    native_child_declines: Cell<u64>,
     /// The children-frame STACK for `children()` (I.2.5): each active module call pushes its call-site
     /// children + the caller's scope, so a `children()` in the body renders them LATE-bound. A stack, so
     /// nested module calls each see their own children; `children()` pops during eval so a `children()`
@@ -1052,6 +1057,7 @@ impl<'a> FnOracle<'a> {
             data_needs: RefCell::default(),
             module_depth: Cell::default(),
             peak_module_depth: Cell::default(),
+        native_child_declines: Cell::default(),
             children_stack: RefCell::default(),
             local_modules: RefCell::default(),
             module_stack: RefCell::default(),
@@ -2988,6 +2994,7 @@ fn resolve_source(
         data_needs: RefCell::default(),
         module_depth: Cell::default(),
         peak_module_depth: Cell::default(),
+        native_child_declines: Cell::default(),
         children_stack: RefCell::default(),
         local_modules: RefCell::default(),
         module_stack: RefCell::default(),
@@ -3471,8 +3478,9 @@ fn eval_top<'a>(stmts: &[&'a Stmt], global: &Scope, ctx: &Ctx<'a>) -> crate::Res
     // not a metric anything depends on.
     if std::env::var_os("FAB_DEPTH").is_some() {
         eprintln!(
-            "+ [depth] peak module nesting {}",
-            ctx.peak_module_depth.get()
+            "+ [depth] peak module nesting {}; compiled-children declines {}",
+            ctx.peak_module_depth.get(),
+            ctx.native_child_declines.get()
         );
     }
     // `!` ROOT modifier: if any subtree was `!`-tagged, the program renders ONLY those (ancestors + siblings
@@ -4318,6 +4326,7 @@ fn build_ctx(program: &Program, config: Config) -> Ctx<'_> {
         data_needs: RefCell::default(),
         module_depth: Cell::default(),
         peak_module_depth: Cell::default(),
+        native_child_declines: Cell::default(),
         children_stack: RefCell::default(),
         local_modules: RefCell::default(),
         module_stack: RefCell::default(),

@@ -516,7 +516,7 @@ pub enum NativeImpl {
     Function(fn(&[Value]) -> crate::Result<Value>),
     /// Geometry out, with the evaluator reachable through [`ModuleCtx`] for children, `$`-vars and
     /// module dispatch.
-    Module(fn(&mut dyn ModuleCtx) -> crate::Result<Geo>),
+    Module(fn(&dyn ModuleCtx) -> crate::Result<Geo>),
 }
 
 impl std::fmt::Debug for Native {

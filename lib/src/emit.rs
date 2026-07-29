@@ -1005,14 +1005,33 @@ impl Emitter<'_> {
     fn module_call_body(&mut self, mi: &fab_lang::ModuleInstantiation) -> Result<String, String> {
         match mi.name.as_str() {
             "children" => {
-                let sel = match mi.args.first() {
-                    None => "fx.children()?".to_string(),
-                    Some(a) => {
-                        let i = self.expr(&a.value)?;
-                        format!("fx.child_at(&{i})?")
+                // The interpreter evaluates EVERY argument but selects with the first POSITIONAL
+                // one only (`module::eval_args` + `positional.first()`): `children(c=0)` renders
+                // ALL children. Named args still evaluate — into discarded bindings — for
+                // eval-order parity. Taking `args.first()` regardless of its name selected child
+                // 0 compiled where the interpreter rendered everything.
+                let mut out = String::new();
+                let mut sel: Option<String> = None;
+                for a in &mi.args {
+                    let v = self.expr(&a.value)?;
+                    if a.name.is_none() && sel.is_none() {
+                        let id = self.fresh_ident("sel");
+                        let _ = writeln!(out, "    let {id} = {v};");
+                        sel = Some(id);
+                    } else {
+                        let id = self.fresh_ident("arg");
+                        let _ = writeln!(out, "    let _{id} = {v};");
                     }
-                };
-                Ok(format!("    parts.push({sel});\n"))
+                }
+                match sel {
+                    Some(id) => {
+                        let _ = writeln!(out, "    parts.push(fx.child_at(&{id})?);");
+                    }
+                    None => {
+                        let _ = writeln!(out, "    parts.push(fx.children()?);");
+                    }
+                }
+                Ok(out)
             }
             // Statement `for` — the same nesting the comprehension side already emits, but each
             // iteration's body contributes GEOMETRY rather than elements. 69 of 416 modules.
@@ -1617,6 +1636,10 @@ pub const GENERATED_MODULES: &[&str] = &[
     // dispatch to another module AFTER the echo makes this the rollback probe too — arm it with
     // `_fab_poc_mod` DRIFTED and the decline must re-interpret with the echoes appearing ONCE.
     "module _fab_poc_echo(n=1) { echo(\"poc\", n, k=n+1); echo(n) sphere(r=n); _fab_poc_mod(n) cube(n); }",
+    // RECURSIVE, childless: native-to-native dispatch rides the host stack until the
+    // MAX_MODULE_NATIVE_DEPTH budget exhausts, then hands the REST of the tree to the interpreter
+    // mid-recursion — the fractal_tree shape, and the depth-budget path no test exercised.
+    "module _fab_poc_rec(n=1) { if (n > 0) _fab_poc_rec(n - 1); else cube(1); }",
 ];
 
 pub const GENERATED_ENTRIES: &[&str] = &[

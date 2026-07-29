@@ -81,7 +81,8 @@ pub(super) fn _fab_poc_dollar(fx: &dyn rt::ModuleCtx) -> rt::Result<rt::Geo> {
     let l0_blk = {
         let mut parts: Vec<rt::Geo> = Vec::new();
     if (rt::apply_binary(rt::BinOp::Gt, fx.dollar("$children"), rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64)))).is_truthy() {
-    parts.push(fx.child_at(&rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64)))?);
+    let l1_sel = rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64));
+    parts.push(fx.child_at(&l1_sel)?);
     } else {
     parts.push(fx.children()?);
     }
@@ -167,6 +168,25 @@ pub(super) fn _fab_poc_echo(fx: &dyn rt::ModuleCtx) -> rt::Result<rt::Geo> {
     parts.push(l1_un);
     parts.push(fx.call(&rt::ModuleCall { name: "_fab_poc_mod", args: &[(None, p_n.clone()), ], children: rt::Children::Compiled(&[&|fx: &dyn rt::ModuleCtx| { let mut parts: Vec<rt::Geo> = Vec::new();     parts.push(fx.call(&rt::ModuleCall { name: "cube", args: &[(None, p_n.clone()), ], children: rt::Children::None })?);
  Ok(fx.group(parts)) }, ]) })?);
+        fx.group(parts)
+    };
+    parts.push(l0_blk);
+    Ok(fx.group(parts))
+}
+
+
+/// Generated native for module `_fab_poc_rec` — geometry through the interpreter's own
+/// construction, so a generated module is what interpreting its reference builds.
+pub(super) fn _fab_poc_rec(fx: &dyn rt::ModuleCtx) -> rt::Result<rt::Geo> {
+    let p_n = fx.args().get(0).cloned().unwrap_or(rt::Value::Undef);
+    let mut parts: Vec<rt::Geo> = Vec::new();
+    let l0_blk = {
+        let mut parts: Vec<rt::Geo> = Vec::new();
+    if (rt::apply_binary(rt::BinOp::Gt, p_n.clone(), rt::Value::Num(f64::from_bits(0x0_u64)))).is_truthy() {
+    parts.push(fx.call(&rt::ModuleCall { name: "_fab_poc_rec", args: &[(None, rt::apply_binary(rt::BinOp::Sub, p_n.clone(), rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64)))), ], children: rt::Children::None })?);
+    } else {
+    parts.push(fx.call(&rt::ModuleCall { name: "cube", args: &[(None, rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64))), ], children: rt::Children::None })?);
+    }
         fx.group(parts)
     };
     parts.push(l0_blk);

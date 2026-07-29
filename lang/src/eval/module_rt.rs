@@ -473,11 +473,15 @@ impl ModuleCtx for NativeModuleCtx<'_, '_, '_> {
 
         // INTERPRETED, which also covers a compiled callee that ran out of depth budget. The
         // interpreter's children frame holds `&Stmt` and its driver renders children by scheduling
-        // work-stack tasks, so a non-empty thunk block has nowhere to go: decline (AR.20.6) rather
-        // than drop it, because a wrapper's children ARE its output.
+        // work-stack tasks, so a non-empty thunk block has nowhere to go: decline (AR.20.7) rather
+        // than drop it, because a wrapper's children ARE its output. Counted so the keep-the-
+        // decline decision stays MEASURED on real armed models (`FAB_DEPTH=1` reports it).
         if let Children::Compiled(thunks) = children
             && !thunks.is_empty()
         {
+            self.ctx
+                .native_child_declines
+                .set(self.ctx.native_child_declines.get() + 1);
             return Err(crate::Error::Unimplemented(
                 "a compiled child block handed to an interpreted module (AR.20.7)",
             ));

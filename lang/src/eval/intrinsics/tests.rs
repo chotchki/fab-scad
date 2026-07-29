@@ -3616,6 +3616,55 @@ fn a_compiled_caller_binds_against_the_callee_the_program_actually_has() {
     );
 }
 
+/// AR.20.3 — a `$`-read is answered off the inherited dynamic chain, so it sees the CALL SITE's
+/// value rather than one frozen when the library was transpiled.
+///
+/// `$children` is the sharpest probe available for that: the evaluator binds it into every call
+/// frame, it differs per call site by construction, and a compiled module that baked it would
+/// branch on the wrong count while still rendering geometry. The POC takes a DIFFERENT branch for
+/// one child than for two, so a wrong read shows up as wrong geometry rather than as an error.
+#[test]
+fn a_compiled_dollar_read_sees_the_call_site() {
+    let run = |src: &str, intrinsics: bool| {
+        let config = crate::Config {
+            intrinsics,
+            ..crate::Config::default()
+        };
+        let (geo, _) =
+            crate::evaluate_geometry_with_base_config(src, std::path::Path::new("."), &[], config)
+                .expect("renders");
+        format!("{geo:?}")
+    };
+    let def = "module _fab_poc_dollar(k=1) { if ($children > 1) children(1); else children(); }\n";
+
+    // ONE child takes the `else` branch, TWO takes the `children(1)` branch — two different
+    // renders from one module, decided entirely by a `$`-read.
+    let one = format!("{def}_fab_poc_dollar() {{ cube([2,3,4]); }}");
+    let two = format!("{def}_fab_poc_dollar() {{ cube([2,3,4]); sphere(r=1); }}");
+    for src in [&one, &two] {
+        assert_eq!(
+            run(src, true),
+            run(src, false),
+            "the compiled `$children` read disagreed with the interpreter"
+        );
+    }
+    assert_ne!(
+        run(&one, true),
+        run(&two, true),
+        "both call sites rendered the same thing, so the `$children` branch was never taken and \
+         this test would pass with the read hard-coded"
+    );
+
+    let program = crate::parser::parse(&one).expect("parses");
+    assert!(
+        program.stmts.iter().any(|s| matches!(&s.kind,
+            crate::parser::StmtKind::ModuleDef { name, params, body }
+                if &**name == "_fab_poc_dollar"
+                    && super::resolve_module("_fab_poc_dollar", params, body).is_some())),
+        "`_fab_poc_dollar` did not arm, so the compiled path was never entered"
+    );
+}
+
 /// The drift gate, on the MODULE path: a definition that does not match the reference the native
 /// was generated from must NOT wire. Without this the native would answer for a module whose body
 /// somebody changed, which is a wrong answer rather than a missed compilation.

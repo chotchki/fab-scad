@@ -79,6 +79,45 @@ pub fn analyze_function(reference: &str) -> Result<Analysis, String> {
     Ok(out)
 }
 
+/// [`analyze_function`] for a MODULE reference — the same walk over a body that is a STATEMENT.
+///
+/// AR.20. Split rather than folded into `analyze_function` because the shapes differ where it
+/// matters: a function's body is one expression, a module's is a statement tree whose leaves are
+/// instantiations. Everything after that — parameters in scope for their own defaults, self-calls
+/// not counting as deps — is identical and is written once here by delegating to the same `walk`.
+///
+/// # Errors
+/// If the reference does not parse, or does not hold exactly one module definition.
+pub fn analyze_module(reference: &str) -> Result<Analysis, String> {
+    let prog = parse(reference).map_err(|e| format!("reference does not parse: {e:?}"))?;
+    let mut defs = prog.stmts.iter().filter_map(|s| match &s.kind {
+        StmtKind::ModuleDef { name, params, body } => Some((name, params, body)),
+        _ => None,
+    });
+    let Some((name, params, body)) = defs.next() else {
+        return Err("reference holds no module definition".into());
+    };
+    if defs.next().is_some() {
+        return Err("reference holds more than one module definition".into());
+    }
+
+    let mut out = Analysis {
+        name: name.clone(),
+        params: params.iter().map(|p| p.name.to_string()).collect(),
+        ..Analysis::default()
+    };
+    let mut scope: Vec<String> = out.params.clone();
+    for p in params {
+        if let Some(d) = &p.default {
+            walk(d, &mut scope, &mut out);
+        }
+    }
+    walk_stmt(body, &mut scope, &mut out);
+    let own = out.name.clone();
+    out.deps.remove(&own);
+    Ok(out)
+}
+
 /// One function's analysis, with `deps` and `builtins` closed TRANSITIVELY over a resolver that
 /// maps a dep name to its reference source (the registry + pins, for the comparison test; the
 /// library's own definitions, for a future whole-library transpile). An unresolvable dep stays a
@@ -171,6 +210,7 @@ pub fn generate_module_native(
         siblings,
         locals: Vec::new(),
         fresh: 0,
+        in_module: true,
     };
     let mut out = String::new();
     let _ = write!(
@@ -371,6 +411,7 @@ pub fn generate_native(
         siblings,
         locals: Vec::new(),
         fresh: 0,
+        in_module: false,
     };
     let mut out = String::new();
     let _ = write!(
@@ -438,6 +479,14 @@ struct Emitter<'a> {
     siblings: &'a [Sibling],
     locals: Vec<(String, String)>,
     fresh: usize,
+    /// Emitting a MODULE body (so `fx` is a `ModuleCtx` in scope) rather than a function.
+    ///
+    /// It gates exactly one thing today — whether a `$`-read can be answered by `fx.dollar` — and
+    /// it has to, because a generated FUNCTION has no ctx to ask (AR.17's `FnCtx` is what would
+    /// give it one). Without the flag the function emitter would emit a call to a name that is not
+    /// in scope, which is a build break rather than a decline, and only for the functions that
+    /// happen to read a `$`-var.
+    in_module: bool,
 }
 
 impl Emitter<'_> {
@@ -467,6 +516,21 @@ impl Emitter<'_> {
                     Ok(format!("{ident}.clone()"))
                 } else if let Some((_, b)) = self.baked.iter().find(|(n, _)| n == name) {
                     b.emit()
+                } else if name.starts_with('$') && self.in_module {
+                    // AR.20.3 — a `$`-read is DYNAMIC, so it is answered at run time off the
+                    // inherited chain rather than baked. That is not an optimisation detail: the
+                    // value depends on the CALLER, so baking one would freeze whatever it happened
+                    // to be when the library was transpiled.
+                    //
+                    // `$children` needs no special case even though it is not a library variable —
+                    // the evaluator binds it into every call frame alongside `$parent_modules`
+                    // (`bind_call_bookkeeping`), so reading it through the chain gets the call
+                    // site's real child count.
+                    //
+                    // MODULES ONLY. A generated FUNCTION has no ctx to ask (that is AR.17's
+                    // `FnCtx`), so it keeps declining rather than silently reading a different
+                    // variable.
+                    Ok(format!("fx.dollar({name:?})"))
                 } else {
                     Err(format!("free read `{name}` has no baked value"))
                 }
@@ -1061,6 +1125,7 @@ fn sibling_of(subject: &Subject<'_>) -> Result<Sibling, String> {
         siblings: &[],
         locals: Vec::new(),
         fresh: 0,
+        in_module: false,
     };
     let defaults = params
         .iter()
@@ -1189,7 +1254,15 @@ fn bake_reads<'a>(
     lib: &'a crate::library::Library,
     folded: &std::collections::BTreeMap<String, fab_lang::Value>,
 ) -> Result<Vec<(&'a str, Baked)>, String> {
-    let analysis = analyze_function(source)?;
+    // A reference is a function OR a module, and the analyzers differ only in the body's shape.
+    // Trying both here rather than at every call site is what keeps a module's bakes from being
+    // SILENTLY EMPTY: the module coverage census did exactly that through an `unwrap_or_default`,
+    // and reported the library's own `UP`/`CENTER`/`PI` as unbakeable free reads in ~90 modules.
+    let analysis = match analyze_function(source) {
+        Ok(a) => a,
+        Err(fn_err) => analyze_module(source)
+            .map_err(|mod_err| format!("neither a function ({fn_err}) nor a module ({mod_err})"))?,
+    };
     let mut out = Vec::new();
     for read in &analysis.consts {
         let (Some(value), Some(decl)) = (folded.get(read), lib.constants.get(read)) else {
@@ -1318,6 +1391,11 @@ pub const GENERATED_MODULES: &[&str] = &[
     "module _fab_poc_mod(k=1) { children(); }",
     "module _fab_poc_wrap(k=1) { _fab_poc_mod(k) children(); }",
     "module _fab_poc_prim(s=1) { translate([s,0,0]) cube(size=s, center=true); }",
+    // AR.20.3 — a `$`-read, answered off the inherited dynamic chain rather than baked. Reads
+    // `$children` (which the evaluator binds into every call frame) so the differential covers the
+    // `fx.dollar` path with a value that DEPENDS ON THE CALL SITE, which is the whole point: a
+    // baked one would freeze whatever it was at transpile time.
+    "module _fab_poc_dollar(k=1) { if ($children > 1) children(1); else children(); }",
 ];
 
 pub const GENERATED_ENTRIES: &[&str] = &[
@@ -1390,6 +1468,64 @@ fn walk_bindings(bindings: &[Arg], scope: &mut Vec<String>, out: &mut Analysis) 
         }
     }
     pushed
+}
+
+/// The statement-tree half of [`walk`] — a module BODY's free reads, calls and `$`-uses.
+///
+/// AR.20. Scoping mirrors the emitter's own statement walk exactly, and has to: a `for`/`let`
+/// binding is in scope for its CHILDREN and not after (so the scope is truncated on the way out),
+/// while a bare `assignment` binds for the REST of its block, which is why it is not truncated
+/// here. A walk that got that wrong would report a bound name as a free read and bake a library
+/// constant over a local — the same value in the same slot, silently.
+fn walk_stmt(s: &Stmt, scope: &mut Vec<String>, out: &mut Analysis) {
+    match &s.kind {
+        StmtKind::Empty | StmtKind::Use(_) | StmtKind::Include(_) => {}
+        StmtKind::Block(kids) => {
+            let mark = scope.len();
+            for k in kids {
+                walk_stmt(k, scope, out);
+            }
+            scope.truncate(mark);
+        }
+        // Binds for the rest of the enclosing block — deliberately NOT truncated.
+        StmtKind::Assignment { name, value } => {
+            walk(value, scope, out);
+            scope.push(name.to_string());
+        }
+        StmtKind::If {
+            cond, then, els, ..
+        } => {
+            walk(cond, scope, out);
+            for branch in [then, els] {
+                let mark = scope.len();
+                for k in branch {
+                    walk_stmt(k, scope, out);
+                }
+                scope.truncate(mark);
+            }
+        }
+        StmtKind::Module(mi) => {
+            let mark = scope.len();
+            // `for`/`let` bind their arguments for the CHILDREN; every other module's arguments are
+            // ordinary expressions and its name is a call.
+            let binds = matches!(mi.name.as_str(), "for" | "intersection_for" | "let");
+            for a in &mi.args {
+                walk(&a.value, scope, out);
+                if binds && let Some(n) = &a.name {
+                    scope.push(n.to_string());
+                }
+            }
+            if !binds && !matches!(mi.name.as_str(), "children" | "echo" | "assert") {
+                out.deps.insert(mi.name.to_string());
+            }
+            for k in &mi.children {
+                walk_stmt(k, scope, out);
+            }
+            scope.truncate(mark);
+        }
+        // A nested definition declines at emission; its body is not this module's reads.
+        StmtKind::ModuleDef { .. } | StmtKind::FunctionDef { .. } => {}
+    }
 }
 
 fn walk(e: &Expr, scope: &mut Vec<String>, out: &mut Analysis) {
@@ -1503,6 +1639,93 @@ fn walk(e: &Expr, scope: &mut Vec<String>, out: &mut Analysis) {
 )]
 mod tests {
     use super::analyze_function;
+
+    /// AR.20 — the MODULE half of the coverage ratchet, and the roadmap for what modules need
+    /// next. Same contract as the function ratchet: a floor that must not fall, plus a decline
+    /// histogram that ranks the remaining work by how many modules each construct blocks.
+    ///
+    /// Separate from the function ratchet because the two move independently and a single number
+    /// would hide which half regressed.
+    ///
+    /// Read the roadmap with:
+    /// `cargo nextest run -p fab-lib -E 'test(bosl2_module_coverage)' --no-capture`
+    #[test]
+    fn bosl2_module_coverage_holds_its_floor() {
+        use std::collections::BTreeMap;
+
+        /// Modules the emitter compiles TODAY, out of BOSL2's 414 unambiguous ones. Raise it as
+        /// bands land; lowering it is a deliberate act that needs a reason next to it.
+        const FLOOR: usize = 342;
+
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("workspace root")
+            .join("libs/BOSL2");
+        if !root.join("std.scad").exists() {
+            eprintln!("skipping: libs/BOSL2 submodule not checked out");
+            return;
+        }
+        let lib = crate::library::Library::read(&root).expect("BOSL2 reads");
+        let folded = lib.fold_constants();
+        // BAKES AND SIBLINGS FOR REAL, the same way `generate_batch` builds them. Probing with
+        // empty ones measures a transpiler nobody runs: the first pass of this census reported
+        // 69/414 and blamed `$children`, when most of its declines were library FUNCTIONS that do
+        // emit — the module just had not been handed the sibling table. Same lesson AR.16's ratchet
+        // learned, re-learned one layer up.
+        let siblings: Vec<super::Sibling> = lib
+            .functions
+            .values()
+            .filter_map(|f| {
+                let baked = super::bake_reads(&f.source, &lib, &folded).unwrap_or_default();
+                super::sibling_of(&super::Subject {
+                    name: "",
+                    source: &f.source,
+                    baked,
+                })
+                .ok()
+            })
+            .collect();
+
+        let mut emitted = 0_usize;
+        let mut declines: BTreeMap<String, usize> = BTreeMap::new();
+        for m in lib.modules.values() {
+            // NOT `unwrap_or_default()`. Swallowing a bake failure is what made the first run of
+            // this census report 69/414 and blame `$children`; an empty bake table is a measurement
+            // of a transpiler nobody runs, so a failure here is a decline with its own name.
+            let baked = match super::bake_reads(&m.source, &lib, &folded) {
+                Ok(b) => b,
+                Err(e) => {
+                    *declines.entry(format!("bakes unavailable: {e}")).or_default() += 1;
+                    continue;
+                }
+            };
+            match super::generate_module_native(&m.source, &baked, &siblings) {
+                Ok(_) => emitted += 1,
+                Err(e) => {
+                    // The message is `name: reason`; the reason is the band.
+                    let reason = e.split_once(": ").map_or(e.clone(), |(_, r)| r.to_string());
+                    *declines.entry(reason).or_default() += 1;
+                }
+            }
+        }
+        let total = lib.modules.len();
+        let mut ranked: Vec<_> = declines.iter().collect();
+        ranked.sort_by(|a, b| b.1.cmp(a.1).then(a.0.cmp(b.0)));
+        println!("\n=== BOSL2 MODULE codegen coverage ===");
+        println!(
+            "{emitted}/{total} modules emit ({:.1}%)",
+            100.0 * emitted as f64 / total as f64
+        );
+        for (reason, n) in ranked {
+            println!("  {n:>4}  {reason}");
+        }
+        assert!(
+            emitted >= FLOOR,
+            "module codegen coverage FELL to {emitted} (floor {FLOOR}) — a construct the emitter \
+             used to handle now declines, which does not fail anything else because the decline \
+             just falls back to interpretation"
+        );
+    }
 
     /// AR.11 — how much of the pinned BOSL2 the emitter actually owns, as a RATCHET. Runs the
     /// codegen over every top-level function in the library and asserts the emit count never

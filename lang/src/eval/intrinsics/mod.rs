@@ -2171,6 +2171,11 @@ pub(super) static MODULE_REGISTRY: &[ModuleEntry] = &[
         reference: "module _fab_poc_prim(s=1) { translate([s,0,0]) cube(size=s, center=true); }",
         func: generated_modules::_fab_poc_prim,
     },
+    ModuleEntry {
+        name: "_fab_poc_dollar",
+        reference: "module _fab_poc_dollar(k=1) { if ($children > 1) children(1); else children(); }",
+        func: generated_modules::_fab_poc_dollar,
+    },
 ];
 
 /// The compiled module for `name`, IFF one is registered and the definition in this program

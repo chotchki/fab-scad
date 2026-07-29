@@ -71,3 +71,22 @@ pub(super) fn _fab_poc_prim(fx: &dyn rt::ModuleCtx) -> rt::Result<rt::Geo> {
     Ok(fx.group(parts))
 }
 
+
+/// Generated native for module `_fab_poc_dollar` — geometry through the interpreter's own
+/// construction, so a generated module is what interpreting its reference builds.
+pub(super) fn _fab_poc_dollar(fx: &dyn rt::ModuleCtx) -> rt::Result<rt::Geo> {
+    let p_k = fx.args().get(0).cloned().unwrap_or(rt::Value::Undef);
+    let mut parts: Vec<rt::Geo> = Vec::new();
+    let l0_blk = {
+        let mut parts: Vec<rt::Geo> = Vec::new();
+    if (rt::apply_binary(rt::BinOp::Gt, fx.dollar("$children"), rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64)))).is_truthy() {
+    parts.push(fx.child_at(&rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64)))?);
+    } else {
+    parts.push(fx.children()?);
+    }
+        fx.group(parts)
+    };
+    parts.push(l0_blk);
+    Ok(fx.group(parts))
+}
+

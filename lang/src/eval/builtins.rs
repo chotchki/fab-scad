@@ -1,10 +1,22 @@
-//! OpenSCAD builtin FUNCTIONS (`func.cc`), applied to already-evaluated arguments.
+//! OpenSCAD builtin FUNCTIONS (`func.cc`) — declared ONCE, derived everywhere (AS.2/AS.3).
 //!
 //! A builtin is a leaf operation: its arguments evaluate on the explicit stack, then this dispatches
 //! by name. Ill-typed / missing args yield `undef` (OpenSCAD's undef-propagation), never an error.
 //! Trig is in DEGREES and reuses `trig`'s exact-quadrant `sin`/`cos` so `sin(30)` etc. match the
-//! geometry path bit-for-bit. `rands` (non-deterministic) is deliberately NOT here — it needs the
-//! seeded-RNG discipline (I.4.3). Names here MUST match [`is_builtin`].
+//! geometry path bit-for-bit.
+//!
+//! THE ONE DECLARATION: [`declare_builtins!`] is the single answer to "what is a builtin". Each row
+//! carries the full [`Decl`] (name, return domain, parameter names + domains) AND the
+//! implementation, grouped by CAPABILITY ([`BuiltinCapability`]) — and [`is_builtin`], [`apply`],
+//! [`context_impl`] and [`BUILTIN_SURFACE`] are all generated from the same rows, so membership,
+//! dispatch and the declared surface cannot drift (the AR.20.10 family — a name `is_builtin`
+//! accepts that `apply` answers with silent `undef` — is unrepresentable). `pure` rows are
+//! functions of their argument values, exposed one-per-name in [`bi`], the only builtin surface
+//! generated code may call. `context` rows need what `apply` never receives — argument NAMES
+//! (`textmetrics`/`fontmetrics`/`object`), the run's advancing
+//! [`RandStream`](super::rng::RandStream) (seedless `rands`, the ONE impure builtin), or the live
+//! module-instantiation stack (`parent_module`) — and exist only behind [`context_impl`], so the
+//! pure dispatch simply has no function to hand out for them.
 //!
 //! The list/string group (I.4.2) is the glue BOSL2 lives on: `len`/`concat` are vector
 //! surgery, `chr`/`ord` bridge codepoints↔strings, `str` routes through the shared [`fmt`](super::fmt)
@@ -15,71 +27,547 @@
 //! Type predicates (I.4.3) are trivial variant tests. `version`/`version_num` report a PINNED constant
 //! (last stable `2021.01`), NOT the host build — the oracle is nightly (a build-date version), but the
 //! determinism doctrine forbids env-derived values, so we pin a release that clears BOSL2's minimum and
-//! bucket the oracle's build-date `version()` as a known K divergence. `rands` is a DELIBERATE loud
-//! defer (kept out of [`is_builtin`], so a call hits the unimplemented-builtin error): seedless it is
-//! non-deterministic (banned), and seeded it would have to replicate boost's `mt19937` +
-//! `uniform_real_distribution` bit-for-bit — a K divergence-bucket decision, not this leaf.
+//! bucket the oracle's build-date `version()` as a known K divergence.
 
 use super::fmt::format_value;
 use super::trig;
 use super::value::Value;
 use super::{build_vector, iter_values_raw};
+use crate::surface::{BuiltinCapability, BuiltinDecl, Decl, Domain, Kind, Param};
 
-/// Is `name` a builtin we implement? Checked at a call site AFTER user functions, BEFORE "unknown"
-/// (so a user function may shadow a builtin, per OpenSCAD).
-#[must_use]
-pub fn is_builtin(name: &str) -> bool {
-    matches!(
+/// A required [`Param`] — row shorthand for [`declare_builtins!`].
+const fn p(name: &'static str, domain: Domain) -> Param {
+    Param {
         name,
-        "abs"
-            | "sign"
-            | "sin"
-            | "cos"
-            | "tan"
-            | "asin"
-            | "acos"
-            | "atan"
-            | "atan2"
-            | "floor"
-            | "ceil"
-            | "round"
-            | "ln"
-            | "log"
-            | "exp"
-            | "pow"
-            | "sqrt"
-            | "min"
-            | "max"
-            | "norm"
-            | "cross"
-            // list + string (I.4.2)
-            | "len"
-            | "concat"
-            | "str"
-            | "chr"
-            | "ord"
-            | "lookup"
-            | "search"
-            | "rands"
-            // objects (AF.4)
-            | "object"
-            | "is_object"
-            | "has_key"
-            // text metrics (AG) — named-param builtins, intercepted in run_builtin
-            | "textmetrics"
-            | "fontmetrics"
-            // type predicates + version (I.4.3)
-            | "is_undef"
-            | "is_bool"
-            | "is_num"
-            | "is_string"
-            | "is_list"
-            | "is_function"
-            | "version"
-            | "version_num"
-            // module-instantiation stack introspection (control.cc) — stateful, routed via run_builtin
-            | "parent_module"
-    )
+        domain,
+        required: true,
+    }
+}
+
+/// An optional [`Param`] (an upstream default fills it) — row shorthand for [`declare_builtins!`].
+const fn opt(name: &'static str, domain: Domain) -> Param {
+    Param {
+        name,
+        domain,
+        required: false,
+    }
+}
+
+/// A context builtin's implementation, tagged by the capability it needs — the runtime half of
+/// [`BuiltinCapability`]. `run_builtin` matches on THIS (the one place the evaluator supplies
+/// context), so a sixth context builtin is a new row in [`declare_builtins!`], not a name check to
+/// remember in N places.
+#[derive(Clone, Copy)]
+pub(super) enum ContextImpl {
+    /// Needs the argument NAMES (and may warn through the console).
+    Named(fn(&[crate::parser::Arg], &[Value], &mut Vec<super::Message>) -> Value),
+    /// Draws from the evaluator's ONE advancing seedless stream.
+    Stream(fn(&[Value], &mut super::rng::RandStream) -> Value),
+    /// Reads the live module-instantiation name stack (innermost last).
+    Stack(fn(&[Value], &[&str]) -> Value),
+}
+
+/// THE ONE DECLARATION (AS.2): one row per builtin — its [`Decl`] and its implementation, grouped
+/// by capability. From the SAME rows this derives [`is_builtin`] (membership), [`apply`] (pure
+/// dispatch, one direct statically-dispatched arm per `pure` row — the hot path keeps today's
+/// match-on-name shape), [`context_impl`] (the evaluator's capability dispatch), and
+/// [`BUILTIN_SURFACE`] (the declared surface every other consumer reads). A builtin cannot appear
+/// in one artifact and not the others.
+macro_rules! declare_builtins {
+    (
+        pure {
+            $( $pname:literal => $pf:path, ret $pret:expr, params $pparams:expr; )+
+        }
+        context {
+            $( $cname:literal => $ccap:ident($cf:expr), ret $cret:expr, names_bind $cnb:expr, params $cparams:expr; )+
+        }
+    ) => {
+        /// Is `name` a builtin we implement? Checked at a call site AFTER user functions, BEFORE
+        /// "unknown" (so a user function may shadow a builtin, per OpenSCAD). Derived from
+        /// [`declare_builtins!`].
+        #[must_use]
+        pub fn is_builtin(name: &str) -> bool {
+            matches!(name, $( $pname )|+ $( | $cname )+)
+        }
+
+        /// Apply a PURE builtin by name to its args. OpenSCAD builtins have no declared parameter
+        /// names, so `pos` is the WHOLE argument list in source order (a named arg's name is dropped
+        /// upstream in `run_builtin`); e.g. `search`'s `num_returns_per_match`/`index_col_num` are
+        /// just positions 2 and 3 here. A CONTEXT builtin has no arm — its implementation exists
+        /// only behind [`context_impl`] — and an unknown name is `undef` (this dispatch is gated by
+        /// [`is_builtin`] at every call site).
+        pub fn apply(name: &str, pos: &[Value]) -> Value {
+            match name {
+                $( $pname => $pf(pos), )+
+                _ => Value::Undef,
+            }
+        }
+
+        /// A context builtin's implementation — `None` for a pure (or unknown) name. The evaluator
+        /// matches the capability here instead of comparing names, which is what stops a new
+        /// context builtin being added in one place and forgotten in another.
+        pub(super) fn context_impl(name: &str) -> Option<ContextImpl> {
+            match name {
+                $( $cname => Some(ContextImpl::$ccap($cf)), )+
+                _ => None,
+            }
+        }
+
+        /// The declared builtin surface, one entry per row of [`declare_builtins!`]: membership,
+        /// capability, and the call shape (return domain, parameter names + domains). The emitter
+        /// consults it for callability, the fuzzer for generation, the conformance suite for probe
+        /// domains — all reading the same rows the evaluator dispatches from.
+        pub const BUILTIN_SURFACE: &[BuiltinDecl] = &[
+            $(
+                BuiltinDecl {
+                    decl: Decl {
+                        name: $pname,
+                        kind: Kind::Function,
+                        ret: $pret,
+                        names_bind: false,
+                        params: $pparams,
+                    },
+                    capability: BuiltinCapability::Pure,
+                },
+            )+
+            $(
+                BuiltinDecl {
+                    decl: Decl {
+                        name: $cname,
+                        kind: Kind::Function,
+                        ret: $cret,
+                        names_bind: $cnb,
+                        params: $cparams,
+                    },
+                    capability: BuiltinCapability::$ccap,
+                },
+            )+
+        ];
+    };
+}
+
+declare_builtins! {
+    pure {
+        // ── math (func.cc). Return domains are conservative so calls COMPOSE (`sin` returns a
+        // Unit, `asin` wants one); argument domains are GENERATION domains — what makes a call
+        // compute rather than undef (AR.4) — which is also exactly what a conformance probe needs.
+        "abs" => bi::abs, ret Domain::Num, params &[p("x", Domain::Num)];
+        "sign" => bi::sign, ret Domain::Num, params &[p("x", Domain::Num)];
+        "sin" => bi::sin, ret Domain::Unit, params &[p("x", Domain::Deg)];
+        "cos" => bi::cos, ret Domain::Unit, params &[p("x", Domain::Deg)];
+        "tan" => bi::tan, ret Domain::Num, params &[p("x", Domain::Deg)];
+        "asin" => bi::asin, ret Domain::Deg, params &[p("x", Domain::Unit)];
+        "acos" => bi::acos, ret Domain::Deg, params &[p("x", Domain::Unit)];
+        "atan" => bi::atan, ret Domain::Deg, params &[p("x", Domain::Num)];
+        "atan2" => bi::atan2, ret Domain::Deg, params &[p("y", Domain::Num), p("x", Domain::Num)];
+        "floor" => bi::floor, ret Domain::Num, params &[p("x", Domain::Num)];
+        "ceil" => bi::ceil, ret Domain::Num, params &[p("x", Domain::Num)];
+        "round" => bi::round, ret Domain::Num, params &[p("x", Domain::Num)];
+        // ln/log/sqrt take Pos: a negative argument is instant NaN.
+        "ln" => bi::ln, ret Domain::Num, params &[p("x", Domain::Pos)];
+        "log" => bi::log, ret Domain::Num, params &[p("x", Domain::Pos)];
+        "exp" => bi::exp, ret Domain::Num, params &[p("x", Domain::Num)];
+        // pow's base is Pos: a negative base under a fractional exponent is NaN.
+        "pow" => bi::pow, ret Domain::Num, params &[p("base", Domain::Pos), p("exponent", Domain::Num)];
+        "sqrt" => bi::sqrt, ret Domain::Num, params &[p("x", Domain::Pos)];
+        // min/max (and str/concat below) are VARIADIC upstream, pinned at the arity the corpus has
+        // always generated — a generation choice, not a language claim (see `Decl::arity`).
+        "min" => bi::min, ret Domain::Num, params &[p("a", Domain::Num), p("b", Domain::Num)];
+        "max" => bi::max, ret Domain::Num, params &[p("a", Domain::Num), p("b", Domain::Num)];
+        "norm" => bi::norm, ret Domain::Num, params &[p("v", Domain::VecN)];
+        "cross" => bi::cross, ret Domain::Vec3, params &[p("a", Domain::Vec3), p("b", Domain::Vec3)];
+        // ── list + string (I.4.2) ──
+        // len takes VecN, not Any: `len(5)` is undef upstream.
+        "len" => bi::len, ret Domain::Num, params &[p("value", Domain::VecN)];
+        "concat" => bi::concat, ret Domain::List, params &[p("a", Domain::Any), p("b", Domain::Any)];
+        "str" => bi::str, ret Domain::Str, params &[p("a", Domain::Any), p("b", Domain::Any)];
+        "chr" => bi::chr, ret Domain::Str, params &[p("n", Domain::Pos)];
+        "ord" => bi::ord, ret Domain::Num, params &[p("c", Domain::Str)];
+        "lookup" => bi::lookup, ret Domain::Num, params &[p("key", Domain::Num), p("pairs", Domain::Table)];
+        // search's match_value is Num NOT Any: a string key searched over a non-string column
+        // ABORTS the upstream oracle (openscad#5017; docs/openscad-search-crash.md).
+        "search" => bi::search, ret Domain::List, params &[p("match_value", Domain::Num), p("string_or_vector", Domain::Table)];
+        // ── objects (AF.4) ──
+        "is_object" => bi::is_object, ret Domain::Bool, params &[p("value", Domain::Any)];
+        "has_key" => bi::has_key, ret Domain::Bool, params &[p("object", Domain::Any), p("key", Domain::Str)];
+        // ── type predicates + version (I.4.3) ──
+        "is_undef" => bi::is_undef, ret Domain::Bool, params &[p("value", Domain::Any)];
+        "is_bool" => bi::is_bool, ret Domain::Bool, params &[p("value", Domain::Any)];
+        "is_num" => bi::is_num, ret Domain::Bool, params &[p("value", Domain::Any)];
+        "is_string" => bi::is_string, ret Domain::Bool, params &[p("value", Domain::Any)];
+        "is_list" => bi::is_list, ret Domain::Bool, params &[p("value", Domain::Any)];
+        "is_function" => bi::is_function, ret Domain::Bool, params &[p("value", Domain::Any)];
+        "version" => bi::version, ret Domain::VecN, params &[];
+        "version_num" => bi::version_num, ret Domain::Num, params &[];
+    }
+    context {
+        // The capability partition: each implementation needs something `apply` never receives, so
+        // none of these has a `bi` function and generated code cannot name them.
+        // Seedless `rands` draws from the evaluator's one advancing stream — the ONE impure builtin.
+        "rands" => Stream(rands), ret Domain::VecN, names_bind false, params &[p("min_value", Domain::Num), p("max_value", Domain::Num), p("value_count", Domain::Pos), opt("seed", Domain::Num)];
+        // `object`'s member names ARE the argument names (AF.4) — open-ended, so no declared params.
+        "object" => Named(object_named), ret Domain::Any, names_bind true, params &[];
+        // The metrics pair (AG): upstream's only builtins with DECLARED named parameters. Both
+        // return an OBJECT (no Domain variant models that; `Any` is the honest widening).
+        "textmetrics" => Named(textmetrics_named), ret Domain::Any, names_bind true, params &[opt("text", Domain::Str), opt("size", Domain::Num), opt("font", Domain::Str), opt("direction", Domain::Str), opt("language", Domain::Str), opt("script", Domain::Str), opt("halign", Domain::Str), opt("valign", Domain::Str), opt("spacing", Domain::Num)];
+        "fontmetrics" => Named(fontmetrics_named), ret Domain::Any, names_bind true, params &[opt("size", Domain::Num), opt("font", Domain::Str)];
+        // Module-instantiation stack introspection (control.cc) — impure to the eval memo (N.2c).
+        "parent_module" => Stack(parent_module), ret Domain::Str, names_bind false, params &[opt("n", Domain::Num)];
+    }
+}
+
+/// Look up a builtin's [`Decl`] by name, usable in CONST context — a consumer-side table built as
+/// `&[builtin_decl("sin"), …]` makes a typo'd (or upstream-vanished) name a COMPILE error instead
+/// of a silently absent surface entry. This is how the fuzzer keeps its own seed-frozen ORDER while
+/// the declaration owns the CONTENT (AS.5).
+///
+/// # Panics
+/// On a name that is not a declared builtin — at compile time when used in const position.
+#[must_use]
+#[allow(
+    clippy::panic,
+    reason = "the panic IS the feature: in const position it is a compile error naming the typo"
+)]
+pub const fn builtin_decl(name: &str) -> Decl {
+    let mut i = 0;
+    while i < BUILTIN_SURFACE.len() {
+        if str_eq(BUILTIN_SURFACE[i].decl.name, name) {
+            return BUILTIN_SURFACE[i].decl;
+        }
+        i += 1;
+    }
+    panic!("not a declared builtin")
+}
+
+/// Byte-wise `str` equality in const context (`==` on `&str` is not const).
+const fn str_eq(a: &str, b: &str) -> bool {
+    let (a, b) = (a.as_bytes(), b.as_bytes());
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut i = 0;
+    while i < a.len() {
+        if a[i] != b[i] {
+            return false;
+        }
+        i += 1;
+    }
+    true
+}
+
+/// The PURE builtins as directly-callable functions, one per `pure` row of [`declare_builtins!`] —
+/// re-exported as `rt::bi`, the ONLY builtin surface generated code may reach. A context builtin
+/// has no function here, so emitted code that named one would fail to COMPILE — the silent-`undef`
+/// answer the old string-dispatched `rt::builtin` gave (the AR.20.10 bug class) is unrepresentable
+/// rather than tested-against.
+pub mod bi {
+    use super::Value;
+
+    /// `abs(x)`.
+    #[inline]
+    #[must_use]
+    pub fn abs(pos: &[Value]) -> Value {
+        super::num1(pos, f64::abs)
+    }
+
+    /// `sign(x)` — `-1`/`0`/`1` (zero includes ±0 and NaN, matching `func.cc`).
+    #[inline]
+    #[must_use]
+    pub fn sign(pos: &[Value]) -> Value {
+        super::num1(pos, super::sign)
+    }
+
+    /// `sin(x)` — degrees, exact at quadrant points.
+    #[inline]
+    #[must_use]
+    pub fn sin(pos: &[Value]) -> Value {
+        super::num1(pos, super::trig::sin_degrees)
+    }
+
+    /// `cos(x)` — degrees, exact at quadrant points.
+    #[inline]
+    #[must_use]
+    pub fn cos(pos: &[Value]) -> Value {
+        super::num1(pos, super::trig::cos_degrees)
+    }
+
+    /// `tan(x)` — degrees.
+    #[inline]
+    #[must_use]
+    pub fn tan(pos: &[Value]) -> Value {
+        super::num1(pos, super::trig::tan_degrees)
+    }
+
+    // Inverse trig snaps by upstream's GENERAL whole-degree round-trip rule (degree_trig.cc,
+    // AH.2.12 follow-through): any input that is exactly the sin/cos/tan of an integer angle
+    // returns that integer — `acos(-0.5)` is exactly 120, and `asin(sin(n)) == n` for every
+    // integer degree (the trig-tests inverse sweep). atan2 snaps within 3e-14 of a whole.
+
+    /// `asin(x)` — degrees.
+    #[inline]
+    #[must_use]
+    pub fn asin(pos: &[Value]) -> Value {
+        super::num1(pos, super::trig::asin_degrees)
+    }
+
+    /// `acos(x)` — degrees.
+    #[inline]
+    #[must_use]
+    pub fn acos(pos: &[Value]) -> Value {
+        super::num1(pos, super::trig::acos_degrees)
+    }
+
+    /// `atan(x)` — degrees.
+    #[inline]
+    #[must_use]
+    pub fn atan(pos: &[Value]) -> Value {
+        super::num1(pos, super::trig::atan_degrees)
+    }
+
+    /// `atan2(y, x)` — degrees.
+    #[inline]
+    #[must_use]
+    pub fn atan2(pos: &[Value]) -> Value {
+        super::num2(pos, super::trig::atan2_degrees)
+    }
+
+    /// `floor(x)`.
+    #[inline]
+    #[must_use]
+    pub fn floor(pos: &[Value]) -> Value {
+        super::num1(pos, f64::floor)
+    }
+
+    /// `ceil(x)`.
+    #[inline]
+    #[must_use]
+    pub fn ceil(pos: &[Value]) -> Value {
+        super::num1(pos, f64::ceil)
+    }
+
+    /// `round(x)` — half AWAY from zero, same as OpenSCAD.
+    #[inline]
+    #[must_use]
+    pub fn round(pos: &[Value]) -> Value {
+        super::num1(pos, f64::round)
+    }
+
+    /// `ln(x)`.
+    #[inline]
+    #[must_use]
+    pub fn ln(pos: &[Value]) -> Value {
+        super::num1(pos, f64::ln)
+    }
+
+    /// `log(x)` — base 10 (OpenSCAD's `log`).
+    #[inline]
+    #[must_use]
+    pub fn log(pos: &[Value]) -> Value {
+        super::num1(pos, f64::log10)
+    }
+
+    /// `exp(x)`.
+    #[inline]
+    #[must_use]
+    pub fn exp(pos: &[Value]) -> Value {
+        super::num1(pos, f64::exp)
+    }
+
+    /// `pow(base, exponent)`.
+    #[inline]
+    #[must_use]
+    pub fn pow(pos: &[Value]) -> Value {
+        super::num2(pos, f64::powf)
+    }
+
+    /// `sqrt(x)`.
+    #[inline]
+    #[must_use]
+    pub fn sqrt(pos: &[Value]) -> Value {
+        super::num1(pos, f64::sqrt)
+    }
+
+    /// `min(…)` — several numeric args, or one numeric list.
+    #[inline]
+    #[must_use]
+    pub fn min(pos: &[Value]) -> Value {
+        super::min_max(pos, true)
+    }
+
+    /// `max(…)` — several numeric args, or one numeric list.
+    #[inline]
+    #[must_use]
+    pub fn max(pos: &[Value]) -> Value {
+        super::min_max(pos, false)
+    }
+
+    /// `norm(v)` — Euclidean length of a numeric vector.
+    #[inline]
+    #[must_use]
+    pub fn norm(pos: &[Value]) -> Value {
+        super::norm(pos)
+    }
+
+    /// `cross(a, b)` — 3D cross product, or the 2D scalar cross.
+    #[inline]
+    #[must_use]
+    pub fn cross(pos: &[Value]) -> Value {
+        super::cross(pos)
+    }
+
+    /// `len(x)` — element count of a list, character count of a string.
+    #[inline]
+    #[must_use]
+    pub fn len(pos: &[Value]) -> Value {
+        super::len(pos)
+    }
+
+    /// `concat(…)` — flatten ONE level.
+    #[inline]
+    #[must_use]
+    pub fn concat(pos: &[Value]) -> Value {
+        super::concat(pos)
+    }
+
+    /// `str(…)` — concatenate each arg's string form.
+    #[inline]
+    #[must_use]
+    pub fn str(pos: &[Value]) -> Value {
+        super::str_concat(pos)
+    }
+
+    /// `chr(…)` — codepoints → a string.
+    #[inline]
+    #[must_use]
+    pub fn chr(pos: &[Value]) -> Value {
+        super::chr(pos)
+    }
+
+    /// `ord(s)` — the first character's codepoint.
+    #[inline]
+    #[must_use]
+    pub fn ord(pos: &[Value]) -> Value {
+        super::ord(pos)
+    }
+
+    /// `lookup(key, pairs)` — linear interpolation, clamped at the ends.
+    #[inline]
+    #[must_use]
+    pub fn lookup(pos: &[Value]) -> Value {
+        super::lookup(pos)
+    }
+
+    /// `search(find, table, …)` — `func.cc`'s find-indices primitive.
+    #[inline]
+    #[must_use]
+    pub fn search(pos: &[Value]) -> Value {
+        super::search(pos)
+    }
+
+    /// `is_undef(x)`.
+    #[inline]
+    #[must_use]
+    pub fn is_undef(pos: &[Value]) -> Value {
+        super::pred(pos, |v| matches!(v, Value::Undef))
+    }
+
+    /// `is_bool(x)`.
+    #[inline]
+    #[must_use]
+    pub fn is_bool(pos: &[Value]) -> Value {
+        super::pred(pos, |v| matches!(v, Value::Bool(_)))
+    }
+
+    /// `is_num(x)` — a NaN is NOT a number: `func.cc` guards `type()==NUMBER && !isnan(x)`, so
+    /// `is_num(0/0)` is `false` (BOSL2's `f_is_num` test pins `[NAN, false]`). `is_nan` catches those.
+    #[inline]
+    #[must_use]
+    pub fn is_num(pos: &[Value]) -> Value {
+        super::pred(pos, |v| matches!(v, Value::Num(n) if !n.is_nan()))
+    }
+
+    /// `is_string(x)`.
+    #[inline]
+    #[must_use]
+    pub fn is_string(pos: &[Value]) -> Value {
+        super::pred(pos, |v| matches!(v, Value::Str(_)))
+    }
+
+    /// `is_list(x)`.
+    #[inline]
+    #[must_use]
+    pub fn is_list(pos: &[Value]) -> Value {
+        super::pred(pos, |v| matches!(v, Value::NumList(_) | Value::List(_)))
+    }
+
+    /// `is_function(x)`.
+    #[inline]
+    #[must_use]
+    pub fn is_function(pos: &[Value]) -> Value {
+        super::pred(pos, |v| matches!(v, Value::Function { .. }))
+    }
+
+    /// `is_object(x)`.
+    #[inline]
+    #[must_use]
+    pub fn is_object(pos: &[Value]) -> Value {
+        super::pred(pos, |v| matches!(v, Value::Object(_)))
+    }
+
+    /// `has_key(object, key)` — membership; a non-object/non-string pair is `false`, wrong arity
+    /// `undef`.
+    #[inline]
+    #[must_use]
+    pub fn has_key(pos: &[Value]) -> Value {
+        match pos {
+            [Value::Object(o), Value::Str(k)] => Value::Bool(o.has_key(k)),
+            [_, _] => Value::Bool(false),
+            _ => Value::Undef,
+        }
+    }
+
+    /// `version()` — the PINNED `[2021, 1, 0]` (see the module doc: no env-derived values).
+    #[inline]
+    #[must_use]
+    pub fn version(_pos: &[Value]) -> Value {
+        Value::num_list(vec![2021.0, 1.0, 0.0])
+    }
+
+    /// `version_num()` — `20210100`, same pin as [`version`].
+    #[inline]
+    #[must_use]
+    pub fn version_num(_pos: &[Value]) -> Value {
+        Value::Num(20_210_100.0)
+    }
+}
+
+/// `textmetrics(...)` in the [`ContextImpl::Named`] shape; [`metrics_call`] carries the binding
+/// logic shared by the metrics pair.
+fn textmetrics_named(
+    args: &[crate::parser::Arg],
+    pos: &[Value],
+    messages: &mut Vec<super::Message>,
+) -> Value {
+    metrics_call("textmetrics", args, pos, messages)
+}
+
+/// `fontmetrics(...)` in the [`ContextImpl::Named`] shape.
+fn fontmetrics_named(
+    args: &[crate::parser::Arg],
+    pos: &[Value],
+    messages: &mut Vec<super::Message>,
+) -> Value {
+    metrics_call("fontmetrics", args, pos, messages)
+}
+
+/// `object(...)` in the [`ContextImpl::Named`] shape — it reads names but never warns; the unused
+/// messages slot is the price of ONE `Named` signature instead of two.
+fn object_named(
+    args: &[crate::parser::Arg],
+    pos: &[Value],
+    _messages: &mut Vec<super::Message>,
+) -> Value {
+    object(args, pos)
 }
 
 /// `parent_module(n)` (`control.cc`) — the NAME of the module `n` levels up the instantiation stack (0 =
@@ -87,7 +575,7 @@ pub fn is_builtin(name: &str) -> bool {
 /// (the current module at the end), so index `len-1-n`. A non-integer / negative `n` → `undef`. Stateful
 /// (reads the evaluator's module stack), so it's dispatched from [`run_builtin`](super::run_builtin), not
 /// the pure `apply`. BOSL2's `deprecate()` echoes `parent_module(1)` to name the deprecated module.
-pub(super) fn parent_module(pos: &[Value], stack: &[&str]) -> Value {
+fn parent_module(pos: &[Value], stack: &[&str]) -> Value {
     let n = match pos.first() {
         None => 0,
         Some(v) => match as_index(v) {
@@ -98,67 +586,6 @@ pub(super) fn parent_module(pos: &[Value], stack: &[&str]) -> Value {
     match stack.len().checked_sub(1 + n).and_then(|i| stack.get(i)) {
         Some(name) => Value::string((*name).to_string()),
         None => Value::Undef,
-    }
-}
-
-/// Apply a builtin by name to its args. OpenSCAD builtins have no declared parameter names, so `pos` is
-/// the WHOLE argument list in source order (a named arg's name is dropped upstream in [`run_builtin`]);
-/// e.g. `search`'s `num_returns_per_match`/`index_col_num` are just positions 2 and 3 here.
-pub fn apply(name: &str, pos: &[Value]) -> Value {
-    match name {
-        "abs" => num1(pos, f64::abs),
-        "sign" => num1(pos, sign),
-        "sin" => num1(pos, trig::sin_degrees),
-        "cos" => num1(pos, trig::cos_degrees),
-        "tan" => num1(pos, trig::tan_degrees),
-        // Inverse trig snaps by upstream's GENERAL whole-degree round-trip rule (degree_trig.cc,
-        // AH.2.12 follow-through): any input that is exactly the sin/cos/tan of an integer angle
-        // returns that integer — `acos(-0.5)` is exactly 120, and `asin(sin(n)) == n` for every
-        // integer degree (the trig-tests inverse sweep). atan2 snaps within 3e-14 of a whole.
-        "asin" => num1(pos, trig::asin_degrees),
-        "acos" => num1(pos, trig::acos_degrees),
-        "atan" => num1(pos, trig::atan_degrees),
-        "atan2" => num2(pos, trig::atan2_degrees),
-        "floor" => num1(pos, f64::floor),
-        "ceil" => num1(pos, f64::ceil),
-        "round" => num1(pos, f64::round), // half AWAY from zero — same as OpenSCAD
-        "ln" => num1(pos, f64::ln),
-        "log" => num1(pos, f64::log10), // OpenSCAD `log` is base 10
-        "exp" => num1(pos, f64::exp),
-        "pow" => num2(pos, f64::powf),
-        "sqrt" => num1(pos, f64::sqrt),
-        "min" => min_max(pos, true),
-        "max" => min_max(pos, false),
-        "norm" => norm(pos),
-        "cross" => cross(pos),
-        "len" => len(pos),
-        "concat" => concat(pos),
-        "str" => str_concat(pos),
-        "chr" => chr(pos),
-        "ord" => ord(pos),
-        "lookup" => lookup(pos),
-        "search" => search(pos),
-        // `rands` is intercepted by `run_builtin` (it needs the evaluator's advancing RandStream for the
-        // seedless case) and never reaches this pure dispatch.
-        "is_undef" => pred(pos, |v| matches!(v, Value::Undef)),
-        "is_bool" => pred(pos, |v| matches!(v, Value::Bool(_))),
-        // A NaN is NOT `is_num` in OpenSCAD: `func.cc` guards `type()==NUMBER && !isnan(x)`, so
-        // `is_num(0/0)` is `false` (BOSL2's `f_is_num` test pins `[NAN, false]`). `is_nan` catches those.
-        "is_num" => pred(pos, |v| matches!(v, Value::Num(n) if !n.is_nan())),
-        "is_string" => pred(pos, |v| matches!(v, Value::Str(_))),
-        "is_list" => pred(pos, |v| matches!(v, Value::NumList(_) | Value::List(_))),
-        "is_function" => pred(pos, |v| matches!(v, Value::Function { .. })),
-        "is_object" => pred(pos, |v| matches!(v, Value::Object(_))),
-        // `object` itself never reaches this pure dispatch — `run_builtin` intercepts it (it
-        // needs the argument NAMES, which every other builtin drops).
-        "has_key" => match pos {
-            [Value::Object(o), Value::Str(k)] => Value::Bool(o.has_key(k)),
-            [_, _] => Value::Bool(false),
-            _ => Value::Undef,
-        },
-        "version" => Value::num_list(vec![2021.0, 1.0, 0.0]),
-        "version_num" => Value::Num(20_210_100.0),
-        _ => Value::Undef,
     }
 }
 
@@ -290,7 +717,7 @@ fn len(pos: &[Value]) -> Value {
 /// name warns "not specified as parameter" and is ignored, and a WRONG-TYPED value warns
 /// "Invalid type" and falls back to the default (the golden's all-zero textmetrics case is just
 /// empty-text metrics). Returns an OBJECT (the golden shapes) — see [`super::metrics`].
-pub(super) fn metrics_call(
+fn metrics_call(
     name: &str,
     args: &[crate::parser::Arg],
     pos: &[Value],
@@ -394,7 +821,7 @@ pub(super) fn metrics_call(
 /// an EDIT list — each element `[k]` removes `k`, `[k, v]` sets it; anything else contributes
 /// nothing. `args` carries the names (this is why `run_builtin` routes here specially), `pos` the
 /// evaluated values, index-aligned.
-pub(super) fn object(args: &[crate::parser::Arg], pos: &[Value]) -> Value {
+fn object(args: &[crate::parser::Arg], pos: &[Value]) -> Value {
     let mut map = super::object::ObjectMap::new();
     for (arg, value) in args.iter().zip(pos) {
         match (&arg.name, value) {
@@ -682,7 +1109,7 @@ fn column(elem: &Value, i: usize) -> Option<Value> {
 /// consecutive seedless calls DIFFER (OpenSCAD draws seedless from a single global engine — BOSL2 needs
 /// two `rands()` calls to make a non-degenerate line). Called via the [`run_builtin`](super::run_builtin)
 /// seam that holds the stream, not the pure `apply` dispatch.
-pub(super) fn rands(pos: &[Value], stream: &mut super::rng::RandStream) -> Value {
+fn rands(pos: &[Value], stream: &mut super::rng::RandStream) -> Value {
     // Upstream's argument treatment verbatim (AH.2.11, the rands golden's bizarro sweep):
     // arity 3-or-4, all numbers; a non-finite BOUND substitutes ±DBL_MAX/2 (warn + reset), then
     // min/max swap if reversed; count is |count|, non-finite → 1; the SEED is any double, mapped
@@ -749,11 +1176,76 @@ fn pred(pos: &[Value], f: impl Fn(&Value) -> bool) -> Value {
 
 #[cfg(test)]
 mod tests {
-    use super::{Value, apply};
+    use super::{BUILTIN_SURFACE, ContextImpl, Value, apply, builtin_decl, context_impl, is_builtin};
+    use crate::surface::BuiltinCapability;
 
     #[test]
     fn unknown_name_is_undef() {
         // `apply` is gated by `is_builtin` at every call site, so this fallback is reachable only here.
         assert_eq!(apply("not_a_builtin", &[]), Value::Undef);
+    }
+
+    #[test]
+    fn the_declaration_is_the_membership_list() {
+        // The count is a deliberate pin: a new builtin is a new row, and this number moving is the
+        // reviewable diff (upstream func.cc + control.cc, AS.1's census).
+        assert_eq!(BUILTIN_SURFACE.len(), 43);
+        for b in BUILTIN_SURFACE {
+            assert!(is_builtin(b.decl.name), "{} declared but not a member", b.decl.name);
+        }
+        let mut names: Vec<&str> = BUILTIN_SURFACE.iter().map(|b| b.decl.name).collect();
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(names.len(), BUILTIN_SURFACE.len(), "duplicate declaration row");
+        assert!(!is_builtin("not_a_builtin"));
+    }
+
+    #[test]
+    fn capability_partitions_the_dispatch() {
+        // Structurally: Pure ⇔ no context interception. (Both artifacts derive from the same rows,
+        // so this can only fail if the macro itself regresses — that is what makes it cheap to keep.)
+        for b in BUILTIN_SURFACE {
+            match b.capability {
+                BuiltinCapability::Pure => assert!(
+                    context_impl(b.decl.name).is_none(),
+                    "{} is Pure but intercepted",
+                    b.decl.name
+                ),
+                _ => assert!(
+                    context_impl(b.decl.name).is_some(),
+                    "{} needs context but has no interception",
+                    b.decl.name
+                ),
+            }
+        }
+        // The five context builtins under their exact capability — a row moved to the wrong group
+        // would still compile, so pin the partition itself.
+        assert!(matches!(context_impl("textmetrics"), Some(ContextImpl::Named(_))));
+        assert!(matches!(context_impl("fontmetrics"), Some(ContextImpl::Named(_))));
+        assert!(matches!(context_impl("object"), Some(ContextImpl::Named(_))));
+        assert!(matches!(context_impl("rands"), Some(ContextImpl::Stream(_))));
+        assert!(matches!(context_impl("parent_module"), Some(ContextImpl::Stack(_))));
+        let context_rows = BUILTIN_SURFACE
+            .iter()
+            .filter(|b| b.capability != BuiltinCapability::Pure)
+            .count();
+        assert_eq!(context_rows, 5);
+    }
+
+    #[test]
+    fn builtin_decl_is_const_usable() {
+        // The consumer pattern (AS.5): a const table of lookups, where a typo is a COMPILE error.
+        const SIN: crate::surface::Decl = builtin_decl("sin");
+        assert_eq!(SIN.name, "sin");
+        assert_eq!(SIN.arity(), 1);
+        assert!(matches!(SIN.ret, crate::surface::Domain::Unit));
+    }
+
+    #[test]
+    fn pure_rows_dispatch_through_the_declaration() {
+        // Wiring smoke — semantics are pinned by eval_corpus; this only proves the macro's arms
+        // reach the `bi` implementations.
+        assert_eq!(apply("version_num", &[]), Value::Num(20_210_100.0));
+        assert_eq!(apply("abs", &[Value::Num(-2.0)]), Value::Num(2.0));
     }
 }

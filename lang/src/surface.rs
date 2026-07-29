@@ -142,6 +142,44 @@ impl Decl {
     }
 }
 
+/// The CAPABILITY a builtin needs from the evaluator — in the TYPE, not in a list beside it (AS.2).
+///
+/// The context builtins are not an exception to enumerate, they are a KIND: `textmetrics`/
+/// `fontmetrics` and `object` need the argument NAMES every other builtin drops, `rands` needs the
+/// run's one advancing `RandStream`, `parent_module` needs the live module-instantiation stack.
+/// Before this enum that partition lived in FOUR hand-synced places — `run_builtin`'s if-chain, the
+/// emitter's `CONTEXT_BUILTINS`, the JIT's `rands` special case, and `apply`'s missing arms — and
+/// two of them disagreed about `rands` (the JIT wove the stream correctly while `rt::builtin`
+/// answered `undef`). A consumer now matches on THIS and cannot re-derive the names wrong.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BuiltinCapability {
+    /// A pure function of its argument values — the only kind callable from generated code
+    /// (`rt::bi`).
+    Pure,
+    /// Reads the argument NAMES (and may warn): `textmetrics`/`fontmetrics` (upstream's only
+    /// builtins with DECLARED named parameters) and `object` (member names ARE the arg names).
+    Named,
+    /// Draws from the evaluator's one advancing `RandStream`: seedless `rands`, the ONE impure
+    /// builtin.
+    Stream,
+    /// Reads the live module-instantiation stack: `parent_module`. Impure to the eval memo.
+    Stack,
+}
+
+/// One OpenSCAD builtin as DECLARED once (AS.2) and consumed by everyone: the evaluator derives
+/// membership + dispatch from the same rows, the emitter derives callability-from-generated-code,
+/// the fuzzer derives its generation surface, and a conformance suite derives probe programs from
+/// the parameter domains.
+#[derive(Clone, Copy, Debug)]
+pub struct BuiltinDecl {
+    /// The call surface: name, return domain, parameters with names + domains.
+    pub decl: Decl,
+    /// What the implementation needs from the evaluator.
+    pub capability: BuiltinCapability,
+}
+
+pub use crate::eval::builtins::{BUILTIN_SURFACE, builtin_decl};
+
 /// One top-level constant a library declares.
 ///
 /// The value is a `fn()` rather than a stored `Value` because `Value` holds `Rc`s and so cannot sit

@@ -26,6 +26,11 @@ pub use crate::error::Result;
 /// and `rt::apply_unary` reads like a third member of that family, and it is not one — it is the
 /// name-dispatched call into OpenSCAD's builtin table.
 pub use crate::eval::builtins::apply as builtin;
+/// The PURE builtins as direct functions — `rt::bi::abs(&[…])` (AS.2). Emitted code names a
+/// FUNCTION, so a context builtin — which has none here — is a compile error in generated code
+/// rather than the silent `undef` the string-dispatched [`builtin`] gives for any name without a
+/// pure arm.
+pub use crate::eval::builtins::bi;
 pub use crate::eval::geo2d::Geo;
 pub use crate::eval::intrinsics::bosl_assert;
 pub use crate::eval::intrinsics::native_rt::{DepthGuard, run_interpreted};

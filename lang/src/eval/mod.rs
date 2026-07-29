@@ -2165,7 +2165,8 @@ fn kind_name(kind: FileFnKind) -> &'static str {
     }
 }
 
-/// Pop a builtin call's argument values, split them into positional/named, and push the builtin result.
+/// Pop a builtin call's argument values and push the result — capability-dispatched from the one
+/// declaration ([`builtins::context_impl`] for the context builtins, [`builtins::apply`] for the pure).
 fn run_builtin(name: &str, args: &[Arg], values: &mut Vec<Value>, ctx: &Ctx<'_>) {
     // A benchmark span per builtin application (I.6); `builtin` field lets a layer break cost down by
     // name. All the tracing spans sit at TRACE level — the "compile-out-like-a-logger" doctrine.
@@ -2180,26 +2181,28 @@ fn run_builtin(name: &str, args: &[Arg], values: &mut Vec<Value>, ctx: &Ctx<'_>)
     // truncate the stack back and push the result. (Splitting the NAMED args off — as an even-older cut
     // did — dropped them entirely, silently defaulting `search`'s `index_col_num` to 0; we keep all of them.)
     let start = values.len().saturating_sub(args.len());
-    // `rands` is the one STATEFUL builtin: seedless draws advance the evaluator's `rand_stream` (I.2.8b),
-    // so it's routed here where the `Ctx` is in scope rather than through the pure `builtins::apply`.
-    let result = if name == "textmetrics" || name == "fontmetrics" {
-        // AG: the metrics builtins have DECLARED named parameters upstream (unlike every other
-        // builtin) — routed here where the `Arg` names are in hand, like `object`.
-        builtins::metrics_call(name, args, &values[start..], &mut ctx.messages.borrow_mut())
-    } else if name == "object" {
-        // `object()` is the ONE builtin that reads argument NAMES (AF.4): `object(a=1, b=2)`'s
-        // member names ARE the names. Routed here where the `Arg` list is in hand.
-        builtins::object(args, &values[start..])
-    } else if name == "rands" {
-        builtins::rands(&values[start..], &mut ctx.rand_stream.borrow_mut())
-    } else if name == "parent_module" {
-        // Reads the live module-instantiation name stack (control.cc) — stateful, like `rands`. This read
-        // depends on the module-call context, which the eval-memo cache key does NOT capture, so mark the
-        // subtree impure: the fence then declines to memoize any call that (transitively) reads it (N.2c).
-        ctx.impure_reads.set(ctx.impure_reads.get() + 1);
-        builtins::parent_module(&values[start..], &ctx.module_stack.borrow())
-    } else {
-        builtins::apply(name, &values[start..])
+    // The CAPABILITY partition lives in the declaration (AS.2/AS.3): a context builtin's
+    // implementation exists only behind `context_impl`, matched here — the ONE place the evaluator
+    // supplies context — so a sixth context builtin is a declaration row, not a name check to
+    // remember in a parallel list.
+    let result = match builtins::context_impl(name) {
+        // Argument NAMES in hand: the metrics pair (AG) binds + warns through the console; `object`
+        // (AF.4) turns the names into member names.
+        Some(builtins::ContextImpl::Named(f)) => {
+            f(args, &values[start..], &mut ctx.messages.borrow_mut())
+        }
+        // Seedless `rands` draws advance the evaluator's ONE `rand_stream` (I.2.8b).
+        Some(builtins::ContextImpl::Stream(f)) => {
+            f(&values[start..], &mut ctx.rand_stream.borrow_mut())
+        }
+        // Reads the live module-instantiation name stack (control.cc). That read depends on the
+        // module-call context, which the eval-memo cache key does NOT capture, so mark the subtree
+        // impure: the fence then declines to memoize any call that (transitively) reads it (N.2c).
+        Some(builtins::ContextImpl::Stack(f)) => {
+            ctx.impure_reads.set(ctx.impure_reads.get() + 1);
+            f(&values[start..], &ctx.module_stack.borrow())
+        }
+        None => builtins::apply(name, &values[start..]),
     };
     trace::builtin(name, &values[start..], &result); // gated inside; shows `name(args) => result`
     values.truncate(start);

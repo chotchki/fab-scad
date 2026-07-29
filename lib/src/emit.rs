@@ -470,36 +470,6 @@ pub fn generate_native(
     Ok(out)
 }
 
-/// Emission state: the baked constants and callable siblings (name + DECLARED PARAMS, self
-/// included — that is how self- and mutual recursion resolve, and how named sibling arguments bind
-/// at COMPILE time), plus the LEXICAL SCOPE — scad name to Rust ident, innermost last, so `let`
-/// shadowing resolves exactly as the interpreter's scope does.
-/// Builtins that `rt::builtin` CANNOT answer, and which generated code must therefore not call.
-///
-/// `rt::builtin` is `builtins::apply`, the PURE table. Five builtins never reach it: the evaluator
-/// intercepts them in `run_builtin` first, because each needs something `apply` does not receive —
-/// `textmetrics`/`fontmetrics` need the argument NAMES (they are the only builtins with declared
-/// named parameters upstream), `object` needs them too (its member names ARE the argument names),
-/// `rands` needs the run's random stream, and `parent_module` needs the live module-instantiation
-/// stack.
-///
-/// `is_builtin` says TRUE for all five, so the emitter used to compile them to `rt::builtin(...)`
-/// — which silently returns `Undef`. Not an error, not a warning: a generated function calling
-/// `rands()` got `undef` and carried on. MEASURED, not inferred: `rt::builtin` answers `abs` and
-/// returns `Undef` for every one of these five.
-///
-/// Declining is the fix rather than widening `rt`, and deliberately so. Three of the five are
-/// STATEFUL or context-dependent in ways that the AR.10 fallback and the eval memo already reason
-/// about (`parent_module` marks a subtree impure; `rands` advances a stream whose position is not
-/// in any cache key), so handing them to generated code is a design question, not an export.
-const CONTEXT_BUILTINS: &[&str] = &[
-    "textmetrics",
-    "fontmetrics",
-    "object",
-    "rands",
-    "parent_module",
-];
-
 /// How a subtree's `! # % *` prefixes change its emission — see [`Emitter::modifier_plan`].
 #[derive(Clone, Copy)]
 enum ModPlan {
@@ -511,6 +481,10 @@ enum ModPlan {
     Background,
 }
 
+/// Emission state: the baked constants and callable siblings (name + DECLARED PARAMS, self
+/// included — that is how self- and mutual recursion resolve, and how named sibling arguments bind
+/// at COMPILE time), plus the LEXICAL SCOPE — scad name to Rust ident, innermost last, so `let`
+/// shadowing resolves exactly as the interpreter's scope does.
 struct Emitter<'a> {
     baked: &'a [(&'a str, Baked)],
     siblings: &'a [Sibling],
@@ -731,19 +705,25 @@ impl Emitter<'_> {
             ));
         }
         if fab_lang::is_builtin(name) {
-            if CONTEXT_BUILTINS.contains(&name) {
+            // The capability lives in the DECLARATION (AS.2/AS.4): only a `Pure` builtin has an
+            // `rt::bi` function to call. A context builtin (argument names, the rand stream, the
+            // module stack) has NO function there, so this decline is belt — even a missed check
+            // would emit a path that does not COMPILE, not a call that silently answers `undef`
+            // (the AR.20.10 shape the old CONTEXT_BUILTINS hand list existed to patch).
+            let pure = fab_lang::surface::BUILTIN_SURFACE.iter().any(|b| {
+                b.decl.name == name
+                    && b.capability == fab_lang::surface::BuiltinCapability::Pure
+            });
+            if !pure {
                 return Err(format!(
-                    "a call to `{name}`, which `rt::builtin` cannot answer (context builtin)"
+                    "a call to `{name}`, which needs evaluator context (a non-Pure builtin)"
                 ));
             }
             let emitted: Vec<String> = args
                 .iter()
                 .map(|a| self.expr(&a.value))
                 .collect::<Result<_, _>>()?;
-            return Ok(format!(
-                "rt::builtin(\"{name}\", &[{}])",
-                emitted.join(", ")
-            ));
+            return Ok(format!("rt::bi::{name}(&[{}])", emitted.join(", ")));
         }
         let Some(sib) = self.siblings.iter().find(|s| s.name == name) else {
             return Err(format!(
@@ -2217,71 +2197,6 @@ mod tests {
         );
     }
 
-    /// `CONTEXT_BUILTINS` is not a hand list that can quietly drift from reality — every name on
-    /// it must actually be one `rt::builtin` cannot answer, and every builtin the emitter DOES
-    /// compile must actually be answerable.
-    ///
-    /// This is the test that would have caught the bug in the first place. `is_builtin` says TRUE
-    /// for all five context builtins, so the emitter compiled them to `rt::builtin(...)` and got
-    /// `Undef` back — no error, no warning, six functions silently wrong. Asserting the two sets
-    /// agree, against the REAL `rt::builtin`, is what makes that unrepeatable.
-    #[test]
-    fn the_context_builtin_list_matches_what_rt_can_actually_answer() {
-        // A probe argument that every answerable builtin has SOME answer for. The point is not the
-        // value, it is `Undef` vs not — an unanswerable name returns `Undef` for anything.
-        let probe = [fab_lang::Value::Num(1.0)];
-        for name in super::CONTEXT_BUILTINS {
-            assert!(
-                fab_lang::is_builtin(name),
-                "`{name}` is on the decline list but is not a builtin at all — the list is stale"
-            );
-            assert!(
-                matches!(fab_lang::rt::builtin(name, &probe), fab_lang::Value::Undef),
-                "`{name}` is declined as unanswerable, but `rt::builtin` answers it now — drop it \
-                 from CONTEXT_BUILTINS and let those functions compile"
-            );
-        }
-        // The other direction, which is the one that bit: a builtin the emitter COMPILES must
-        // actually be answerable. Each carries an argument it should answer FOR — `len(1)` is
-        // legitimately `undef` because 1 is not a list, so a single shared probe would report a
-        // type mismatch as a missing implementation.
-        let list = fab_lang::rt::build_vector(vec![
-            fab_lang::Value::Num(1.0),
-            fab_lang::Value::Num(2.0),
-        ]);
-        let cases: &[(&str, Vec<fab_lang::Value>)] = &[
-            ("abs", vec![fab_lang::Value::Num(-1.0)]),
-            ("sin", vec![fab_lang::Value::Num(30.0)]),
-            ("cos", vec![fab_lang::Value::Num(60.0)]),
-            ("sqrt", vec![fab_lang::Value::Num(4.0)]),
-            ("floor", vec![fab_lang::Value::Num(1.5)]),
-            ("ceil", vec![fab_lang::Value::Num(1.5)]),
-            ("pow", vec![fab_lang::Value::Num(2.0), fab_lang::Value::Num(3.0)]),
-            ("max", vec![fab_lang::Value::Num(1.0), fab_lang::Value::Num(2.0)]),
-            ("min", vec![fab_lang::Value::Num(1.0), fab_lang::Value::Num(2.0)]),
-            ("len", vec![list.clone()]),
-            ("norm", vec![list.clone()]),
-            ("concat", vec![list.clone(), list.clone()]),
-            ("str", vec![fab_lang::Value::Num(1.0)]),
-            ("is_undef", vec![fab_lang::Value::Undef]),
-            ("is_num", vec![fab_lang::Value::Num(1.0)]),
-            ("is_list", vec![list.clone()]),
-            ("is_string", vec![fab_lang::Value::Num(1.0)]),
-        ];
-        for (name, args) in cases {
-            assert!(fab_lang::is_builtin(name), "`{name}` should be a builtin");
-            assert!(
-                !super::CONTEXT_BUILTINS.contains(name),
-                "`{name}` is on the decline list but should compile"
-            );
-            assert!(
-                !matches!(fab_lang::rt::builtin(name, args), fab_lang::Value::Undef),
-                "`{name}` compiles to `rt::builtin` but that returns Undef for {args:?} — the SAME \
-                 silent-wrong-answer shape CONTEXT_BUILTINS exists to close"
-            );
-        }
-    }
-
     /// The statement subset declines by NAME. A module that silently skipped a statement would
     /// render MISSING GEOMETRY while still succeeding, which is the failure shape this phase keeps
     /// finding — so every unsupported construct says which one it was.
@@ -2424,7 +2339,7 @@ mod tests {
             );
         }
         assert!(
-            code.contains("rt::apply_binary") && code.contains("rt::builtin"),
+            code.contains("rt::apply_binary") && code.contains("rt::bi::"),
             "the scan found no rt calls at all, so it would pass on an empty file"
         );
     }

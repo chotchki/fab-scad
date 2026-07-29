@@ -90,7 +90,7 @@ pub(super) fn _fab_poc_near0(args: &[rt::Value]) -> rt::Result<rt::Value> {
         return rt::run_interpreted(FALLBACK_SOURCES, "_fab_poc_near0", args);
     };
     let p_x = args.first().cloned().unwrap_or(rt::Value::Undef);
-    let out = rt::apply_binary(rt::BinOp::Lt, rt::builtin("abs", &[p_x.clone()]), rt::Value::Num(f64::from_bits(0x3e112e0be826d695_u64)));
+    let out = rt::apply_binary(rt::BinOp::Lt, rt::bi::abs(&[p_x.clone()]), rt::Value::Num(f64::from_bits(0x3e112e0be826d695_u64)));
     Ok(out)
 }
 
@@ -142,7 +142,7 @@ pub(super) fn is_finite(args: &[rt::Value]) -> rt::Result<rt::Value> {
         return rt::run_interpreted(FALLBACK_SOURCES, "is_finite", args);
     };
     let p_x = args.first().cloned().unwrap_or(rt::Value::Undef);
-    let out = rt::Value::Bool(rt::builtin("is_num", &[p_x.clone()]).is_truthy() && rt::apply_unary(rt::UnOp::Not, is_nan(&[rt::apply_binary(rt::BinOp::Mul, rt::Value::Num(f64::from_bits(0x0_u64)), p_x.clone())])?).is_truthy());
+    let out = rt::Value::Bool(rt::bi::is_num(&[p_x.clone()]).is_truthy() && rt::apply_unary(rt::UnOp::Not, is_nan(&[rt::apply_binary(rt::BinOp::Mul, rt::Value::Num(f64::from_bits(0x0_u64)), p_x.clone())])?).is_truthy());
     Ok(out)
 }
 
@@ -156,7 +156,7 @@ pub(super) fn _fab_poc_band2(args: &[rt::Value]) -> rt::Result<rt::Value> {
     };
     let p_v = args.first().cloned().unwrap_or(rt::Value::Undef);
     let p_i = args.get(1).cloned().unwrap_or_else(|| rt::Value::Num(f64::from_bits(0x0_u64)));
-    let out = { let l0_n = rt::index(p_v.clone(), &p_i.clone()); { if !(rt::builtin("is_num", &[l0_n.clone()])).is_truthy() { return Err(rt::bosl_assert("generated")); } rt::apply_binary(rt::BinOp::Mul, l0_n.clone(), rt::Value::Num(f64::from_bits(0x4000000000000000_u64))) } };
+    let out = { let l0_n = rt::index(p_v.clone(), &p_i.clone()); { if !(rt::bi::is_num(&[l0_n.clone()])).is_truthy() { return Err(rt::bosl_assert("generated")); } rt::apply_binary(rt::BinOp::Mul, l0_n.clone(), rt::Value::Num(f64::from_bits(0x4000000000000000_u64))) } };
     Ok(out)
 }
 
@@ -169,7 +169,7 @@ pub(super) fn is_def(args: &[rt::Value]) -> rt::Result<rt::Value> {
         return rt::run_interpreted(FALLBACK_SOURCES, "is_def", args);
     };
     let p_x = args.first().cloned().unwrap_or(rt::Value::Undef);
-    let out = rt::apply_unary(rt::UnOp::Not, rt::builtin("is_undef", &[p_x.clone()]));
+    let out = rt::apply_unary(rt::UnOp::Not, rt::bi::is_undef(&[p_x.clone()]));
     Ok(out)
 }
 
@@ -182,7 +182,7 @@ pub(super) fn is_str(args: &[rt::Value]) -> rt::Result<rt::Value> {
         return rt::run_interpreted(FALLBACK_SOURCES, "is_str", args);
     };
     let p_x = args.first().cloned().unwrap_or(rt::Value::Undef);
-    let out = rt::builtin("is_string", &[p_x.clone()]);
+    let out = rt::bi::is_string(&[p_x.clone()]);
     Ok(out)
 }
 
@@ -196,7 +196,7 @@ pub(super) fn default(args: &[rt::Value]) -> rt::Result<rt::Value> {
     };
     let p_v = args.first().cloned().unwrap_or(rt::Value::Undef);
     let p_dflt = args.get(1).cloned().unwrap_or(rt::Value::Undef);
-    let out = if rt::builtin("is_undef", &[p_v.clone()]).is_truthy() { p_dflt.clone() } else { p_v.clone() };
+    let out = if rt::bi::is_undef(&[p_v.clone()]).is_truthy() { p_dflt.clone() } else { p_v.clone() };
     Ok(out)
 }
 
@@ -209,7 +209,7 @@ pub(super) fn last(args: &[rt::Value]) -> rt::Result<rt::Value> {
         return rt::run_interpreted(FALLBACK_SOURCES, "last", args);
     };
     let p_list = args.first().cloned().unwrap_or(rt::Value::Undef);
-    let out = rt::index(p_list.clone(), &rt::apply_binary(rt::BinOp::Sub, rt::builtin("len", &[p_list.clone()]), rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64))));
+    let out = rt::index(p_list.clone(), &rt::apply_binary(rt::BinOp::Sub, rt::bi::len(&[p_list.clone()]), rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64))));
     Ok(out)
 }
 
@@ -238,7 +238,7 @@ pub(super) fn approx(args: &[rt::Value]) -> rt::Result<rt::Value> {
     let p_a = args.first().cloned().unwrap_or(rt::Value::Undef);
     let p_b = args.get(1).cloned().unwrap_or(rt::Value::Undef);
     let p_eps = args.get(2).cloned().unwrap_or_else(|| rt::Value::Num(f64::from_bits(0x3e112e0be826d695_u64)));
-    let out = if rt::apply_binary(rt::BinOp::Eq, p_a.clone(), p_b.clone()).is_truthy() { rt::apply_binary(rt::BinOp::Eq, rt::builtin("is_bool", &[p_a.clone()]), rt::builtin("is_bool", &[p_b.clone()])) } else { if rt::Value::Bool(rt::builtin("is_num", &[p_a.clone()]).is_truthy() && rt::builtin("is_num", &[p_b.clone()]).is_truthy()).is_truthy() { rt::apply_binary(rt::BinOp::Le, rt::builtin("abs", &[rt::apply_binary(rt::BinOp::Sub, p_a.clone(), p_b.clone())]), p_eps.clone()) } else { if rt::Value::Bool(rt::Value::Bool(rt::builtin("is_list", &[p_a.clone()]).is_truthy() && rt::builtin("is_list", &[p_b.clone()]).is_truthy()).is_truthy() && rt::apply_binary(rt::BinOp::Eq, rt::builtin("len", &[p_a.clone()]), rt::builtin("len", &[p_b.clone()])).is_truthy()).is_truthy() { rt::apply_binary(rt::BinOp::Eq, rt::build_vector(vec![]), { let mut l0_acc: Vec<rt::Value> = Vec::new(); for l1_i in rt::iter_values_native(&idx(&[p_a.clone()])?) { { let l2_aa = rt::index(p_a.clone(), &l1_i.clone()); let l3_bb = rt::index(p_b.clone(), &l1_i.clone()); if (if rt::Value::Bool(rt::builtin("is_num", &[l2_aa.clone()]).is_truthy() && rt::builtin("is_num", &[l3_bb.clone()]).is_truthy()).is_truthy() { rt::apply_binary(rt::BinOp::Gt, rt::builtin("abs", &[rt::apply_binary(rt::BinOp::Sub, l2_aa.clone(), l3_bb.clone())]), p_eps.clone()) } else { rt::apply_unary(rt::UnOp::Not, approx(&[l2_aa.clone(), l3_bb.clone(), p_eps.clone()])?) }).is_truthy() { l0_acc.push(rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64)));
+    let out = if rt::apply_binary(rt::BinOp::Eq, p_a.clone(), p_b.clone()).is_truthy() { rt::apply_binary(rt::BinOp::Eq, rt::bi::is_bool(&[p_a.clone()]), rt::bi::is_bool(&[p_b.clone()])) } else { if rt::Value::Bool(rt::bi::is_num(&[p_a.clone()]).is_truthy() && rt::bi::is_num(&[p_b.clone()]).is_truthy()).is_truthy() { rt::apply_binary(rt::BinOp::Le, rt::bi::abs(&[rt::apply_binary(rt::BinOp::Sub, p_a.clone(), p_b.clone())]), p_eps.clone()) } else { if rt::Value::Bool(rt::Value::Bool(rt::bi::is_list(&[p_a.clone()]).is_truthy() && rt::bi::is_list(&[p_b.clone()]).is_truthy()).is_truthy() && rt::apply_binary(rt::BinOp::Eq, rt::bi::len(&[p_a.clone()]), rt::bi::len(&[p_b.clone()])).is_truthy()).is_truthy() { rt::apply_binary(rt::BinOp::Eq, rt::build_vector(vec![]), { let mut l0_acc: Vec<rt::Value> = Vec::new(); for l1_i in rt::iter_values_native(&idx(&[p_a.clone()])?) { { let l2_aa = rt::index(p_a.clone(), &l1_i.clone()); let l3_bb = rt::index(p_b.clone(), &l1_i.clone()); if (if rt::Value::Bool(rt::bi::is_num(&[l2_aa.clone()]).is_truthy() && rt::bi::is_num(&[l3_bb.clone()]).is_truthy()).is_truthy() { rt::apply_binary(rt::BinOp::Gt, rt::bi::abs(&[rt::apply_binary(rt::BinOp::Sub, l2_aa.clone(), l3_bb.clone())]), p_eps.clone()) } else { rt::apply_unary(rt::UnOp::Not, approx(&[l2_aa.clone(), l3_bb.clone(), p_eps.clone()])?) }).is_truthy() { l0_acc.push(rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64)));
          }  } } rt::build_vector(l0_acc) }) } else { rt::Value::Bool(false) } } };
     Ok(out)
 }
@@ -269,7 +269,7 @@ pub(super) fn idx(args: &[rt::Value]) -> rt::Result<rt::Value> {
     let p_s = args.get(1).cloned().unwrap_or_else(|| rt::Value::Num(f64::from_bits(0x0_u64)));
     let p_e = args.get(2).cloned().unwrap_or_else(|| rt::apply_unary(rt::UnOp::Neg, rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64))));
     let p_step = args.get(3).cloned().unwrap_or_else(|| rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64)));
-    let out = { if !(rt::Value::Bool(rt::builtin("is_list", &[p_list.clone()]).is_truthy() || rt::builtin("is_string", &[p_list.clone()]).is_truthy())).is_truthy() { return Err(rt::bosl_assert("generated")); } { let l0_ll = rt::builtin("len", &[p_list.clone()]); if rt::apply_binary(rt::BinOp::Eq, l0_ll.clone(), rt::Value::Num(f64::from_bits(0x0_u64))).is_truthy() { rt::build_range(&rt::Value::Num(f64::from_bits(0x0_u64)), &rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64)), &rt::apply_binary(rt::BinOp::Sub, l0_ll.clone(), rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64)))) } else { { let l1_s = posmod(&[p_s.clone(), l0_ll.clone()])?; let l2_e = posmod(&[p_e.clone(), l0_ll.clone()])?; rt::build_range(&l1_s.clone(), &p_step.clone(), &l2_e.clone()) } } } };
+    let out = { if !(rt::Value::Bool(rt::bi::is_list(&[p_list.clone()]).is_truthy() || rt::bi::is_string(&[p_list.clone()]).is_truthy())).is_truthy() { return Err(rt::bosl_assert("generated")); } { let l0_ll = rt::bi::len(&[p_list.clone()]); if rt::apply_binary(rt::BinOp::Eq, l0_ll.clone(), rt::Value::Num(f64::from_bits(0x0_u64))).is_truthy() { rt::build_range(&rt::Value::Num(f64::from_bits(0x0_u64)), &rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64)), &rt::apply_binary(rt::BinOp::Sub, l0_ll.clone(), rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64)))) } else { { let l1_s = posmod(&[p_s.clone(), l0_ll.clone()])?; let l2_e = posmod(&[p_e.clone(), l0_ll.clone()])?; rt::build_range(&l1_s.clone(), &p_step.clone(), &l2_e.clone()) } } } };
     Ok(out)
 }
 
@@ -283,7 +283,7 @@ pub(super) fn _fab_poc_band4(args: &[rt::Value]) -> rt::Result<rt::Value> {
     };
     let p_s = args.first().cloned().unwrap_or(rt::Value::Undef);
     let p_tag = args.get(1).cloned().unwrap_or_else(|| rt::Value::string("q\"b\\c\nd"));
-    let out = rt::build_vector(vec![rt::apply_binary(rt::BinOp::Eq, p_s.clone(), p_tag.clone()), rt::builtin("str", &[rt::Value::string("x="), p_s.clone(), p_tag.clone()]), rt::builtin("len", &[p_tag.clone()]), rt::Value::string("αβ")]);
+    let out = rt::build_vector(vec![rt::apply_binary(rt::BinOp::Eq, p_s.clone(), p_tag.clone()), rt::bi::str(&[rt::Value::string("x="), p_s.clone(), p_tag.clone()]), rt::bi::len(&[p_tag.clone()]), rt::Value::string("αβ")]);
     Ok(out)
 }
 

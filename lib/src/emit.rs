@@ -241,6 +241,12 @@ pub fn generate_module_native(
             .push((p.name.to_string(), format!("p_{}", p.name)));
     }
     let _ = writeln!(out, "    let mut parts: Vec<rt::Geo> = Vec::new();");
+    // The module BODY is the outermost hoist scope: bind its whole-scope assignments (blocks
+    // flattened, last-wins) before any statement runs — see `Emitter::hoist_prelude`.
+    let hoist = em
+        .hoist_prelude(std::slice::from_ref(body))
+        .map_err(|e| format!("{name}: {e}"))?;
+    out.push_str(&hoist);
     let body_code = em.stmt(body).map_err(|e| format!("{name}: {e}"))?;
     out.push_str(&body_code);
     let _ = writeln!(out, "    Ok(fx.group(parts))\n}}");
@@ -792,6 +798,53 @@ impl Emitter<'_> {
     /// The statement mirror of [`Emitter::expr`]. Declines name the construct, because a module
     /// that silently skipped a statement would render MISSING GEOMETRY while still succeeding —
     /// the failure shape this phase keeps finding.
+    /// The hoisted-assignment PRELUDE of one scope — the emitter's mirror of the evaluator's
+    /// `hoisted_assignments` + `hoist_scope` (OpenSCAD's whole-scope, last-assignment-wins rule):
+    /// nested BLOCKS flatten into the enclosing scope, names dedupe to their FIRST-occurrence
+    /// position carrying the LAST expression, and each binding's expression is emitted with only
+    /// the bindings hoisted BEFORE it in scope — a self- or forward-reference therefore reads the
+    /// OUTER binding (a param, a bake), exactly as `hoist_scope`'s sequential bind resolves it.
+    ///
+    /// Emitting assignments at their statement POSITION instead (the first design) was a silent
+    /// tier divergence, not a decline: `module m(x) { cube(x); x = 5; }` rendered `cube(x-arg)`
+    /// compiled where the interpreter renders `cube(5)`, and `x = 1; cube(x); x = 5;` evaluated
+    /// an expression the interpreter's dedupe never runs. Every scope the interpreter hoists
+    /// (module body, `if` branches, `for` iteration bodies, `let`/`assert`/`echo` children) calls
+    /// this before walking statements; the `Assignment` arm below is then a no-op.
+    fn hoist_prelude(&mut self, stmts: &[Stmt]) -> Result<String, String> {
+        // flatten_blocks + dedupe, mirroring eval's `hoisted_assignments` byte for byte: a `{ }`
+        // is NOT an assignment scope upstream — its assignments belong to the enclosing scope.
+        let mut flat: Vec<&Stmt> = Vec::new();
+        let mut stack: Vec<&Stmt> = stmts.iter().rev().collect();
+        while let Some(s) = stack.pop() {
+            if let StmtKind::Block(inner) = &s.kind {
+                stack.extend(inner.iter().rev());
+            } else {
+                flat.push(s);
+            }
+        }
+        let mut order: Vec<(&str, &fab_lang::Expr)> = Vec::new();
+        let mut index: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
+        for s in flat {
+            if let StmtKind::Assignment { name, value } = &s.kind {
+                if let Some(&i) = index.get(&**name) {
+                    order[i].1 = value; // seen: last expr wins, first-occurrence position kept
+                } else {
+                    index.insert(name, order.len());
+                    order.push((name, value));
+                }
+            }
+        }
+        let mut out = String::new();
+        for (name, expr) in order {
+            let v = self.expr(expr)?;
+            let id = self.fresh_ident(name);
+            let _ = writeln!(out, "    let {id} = {v};");
+            self.locals.push((name.to_string(), id));
+        }
+        Ok(out)
+    }
+
     fn stmt(&mut self, s: &Stmt) -> Result<String, String> {
         match &s.kind {
             // A lone `;` is not a child and contributes nothing (L.5.2).
@@ -800,7 +853,9 @@ impl Emitter<'_> {
             StmtKind::Block(kids) => {
                 // A block is an implicit GROUP: its statements union into ONE part of the
                 // enclosing list. Its own list gets a fresh name so it cannot shadow the parent's.
-                let mark = self.locals.len();
+                // NO locals boundary here — a block is not an assignment scope (see
+                // `hoist_prelude`: its assignments were hoisted by the ENCLOSING scope), and
+                // nothing else inside pushes locals that outlive its own arm.
                 let inner = self.fresh_ident("blk");
                 let mut out = format!(
                     "    let {inner} = {{\n        let mut parts: Vec<rt::Geo> = Vec::new();\n"
@@ -812,16 +867,11 @@ impl Emitter<'_> {
                     out,
                     "        fx.group(parts)\n    }};\n    parts.push({inner});\n"
                 );
-                self.locals.truncate(mark);
                 Ok(out)
             }
-            StmtKind::Assignment { name, value } => {
-                let v = self.expr(value)?;
-                let id = self.fresh_ident(name);
-                let out = format!("    let {id} = {v};\n");
-                self.locals.push((name.to_string(), id));
-                Ok(out)
-            }
+            // Bound by the scope's `hoist_prelude` before any statement ran (whole-scope
+            // last-wins); in statement position there is nothing left to emit.
+            StmtKind::Assignment { .. } => Ok(String::new()),
             StmtKind::If {
                 modifiers,
                 cond,
@@ -841,14 +891,21 @@ impl Emitter<'_> {
                     ModPlan::Plain => None,
                 };
                 let c = self.expr(cond)?;
+                // Each branch is its own hoist scope (the interpreter runs a branch as a fresh
+                // EvalNodes child scope): its assignments bind for the branch only.
                 let mut out = format!("    if ({c}).is_truthy() {{\n");
+                let mark = self.locals.len();
+                out.push_str(&self.hoist_prelude(then)?);
                 for k in then {
                     out.push_str(&self.stmt(k)?);
                 }
+                self.locals.truncate(mark);
                 out.push_str("    } else {\n");
+                out.push_str(&self.hoist_prelude(els)?);
                 for k in els {
                     out.push_str(&self.stmt(k)?);
                 }
+                self.locals.truncate(mark);
                 out.push_str("    }\n");
                 if let Some(mark) = bg {
                     // `%` on an `if`: the branch still runs, its geometry does not survive.
@@ -952,6 +1009,9 @@ impl Emitter<'_> {
                     self.locals.push((bn.to_string(), ident));
                     depth += 1;
                 }
+                // The body is a fresh hoist scope PER ITERATION (the interpreter pushes one
+                // EvalNodes per iteration) — the prelude sits inside the innermost loop.
+                out.push_str(&self.hoist_prelude(&mi.children)?);
                 for k in &mi.children {
                     out.push_str(&self.stmt(k)?);
                 }
@@ -979,6 +1039,8 @@ impl Emitter<'_> {
                     let _ = writeln!(out, "    let {ident} = {v};");
                     self.locals.push((bn.to_string(), ident));
                 }
+                // The children form their own hoist scope under the `let` bindings.
+                out.push_str(&self.hoist_prelude(&mi.children)?);
                 for k in &mi.children {
                     out.push_str(&self.stmt(k)?);
                 }
@@ -995,9 +1057,13 @@ impl Emitter<'_> {
                 let mut out = format!(
                     "    if !({c}).is_truthy() {{ return Err(rt::bosl_assert(\"generated\")); }}\n"
                 );
+                // assert's children render as an implicit union in a fresh scope (the A3 arm).
+                let mark = self.locals.len();
+                out.push_str(&self.hoist_prelude(&mi.children)?);
                 for k in &mi.children {
                     out.push_str(&self.stmt(k)?);
                 }
+                self.locals.truncate(mark);
                 Ok(out)
             }
             // AR.20.8 — a call to another MODULE, which is 404 of BOSL2's 416 and the arm that
@@ -1490,6 +1556,11 @@ pub const GENERATED_MODULES: &[&str] = &[
     // and `children(i)` counting, so dropping it would shift every index in the callee.
     "module _fab_poc_bg(s=1) { %cube(s); sphere(r=s); }",
     "module _fab_poc_star(s=1) { _fab_poc_dollar(s) { *cube(s); sphere(r=s); cylinder(r=s,h=s); } }",
+    // Whole-scope HOISTING, compiled: `cube(x)` must see the assignment BELOW it (last-wins), the
+    // self-reference `x + 2` must read the OUTER x (the parameter), and `y` — assigned inside a
+    // `{ }` — must reach the `sphere` OUTSIDE it, because a block is not an assignment scope
+    // upstream. Statement-position emission rendered all three wrong without declining.
+    "module _fab_poc_hoist(x=1) { cube(x); x = x + 2; { y = x; } sphere(r=y); }",
 ];
 
 pub const GENERATED_ENTRIES: &[&str] = &[
@@ -2194,6 +2265,48 @@ mod tests {
         assert!(
             super::generate_module_native(unreachable, &[], &[]).is_ok(),
             "a disabled subtree was walked and declined the whole module"
+        );
+    }
+
+    /// The scope PRELUDE hoists assignments (whole-scope, last-wins, blocks flattened) — the
+    /// text-level half of the razor `a_compiled_module_hoists_scope_assignments_like_the_interpreter`
+    /// pins at tier level. Assertions are on binder NAMES and value bits, never the fresh-ident
+    /// counter (the AR.20.4 brittleness lesson).
+    #[test]
+    fn the_scope_prelude_hoists_assignments() {
+        let out = super::generate_module_native(
+            "module m(x=1) { cube(x); x = x + 2; { y = x; } sphere(r=y); }",
+            &[],
+            &[],
+        )
+        .expect("generates");
+        // The hoisted binding appears BEFORE the statement above it, and its self-reference reads
+        // the PARAM (the outer binding), exactly as `hoist_scope`'s sequential bind resolves it.
+        let bind = out
+            .find("_x = rt::apply_binary")
+            .expect("hoisted x binds from an expression");
+        let cube = out.find("name: \"cube\"").expect("cube call emitted");
+        assert!(bind < cube, "the assignment must bind before the cube that reads it");
+        // `p_x` appears exactly twice: the parameter binding line and the hoist expression — the
+        // cube must read the HOISTED value, not the param.
+        assert_eq!(out.matches("p_x").count(), 2, "a statement read the param through the hoist:\n{out}");
+        // Block-flattened `y` binds at scope level and reaches the sphere outside the block.
+        let y = out.find("_y = ").expect("y hoists out of the block");
+        let sphere = out.find("name: \"sphere\"").expect("sphere call emitted");
+        assert!(y < sphere, "y must bind before the sphere that reads it");
+
+        // Last-wins dedupe: ONE binding, carrying the LAST expression (5.0) — the first is never
+        // evaluated, matching `hoisted_assignments`.
+        let out2 = super::generate_module_native("module m() { x = 1; cube(x); x = 5; }", &[], &[])
+            .expect("generates");
+        assert_eq!(
+            out2.matches("_x = ").count(),
+            1,
+            "last-wins dedupe must emit exactly one binding:\n{out2}"
+        );
+        assert!(
+            out2.contains("0x4014000000000000"), // 5.0 — the LAST expression
+            "the binding must carry the LAST assignment's expression:\n{out2}"
         );
     }
 

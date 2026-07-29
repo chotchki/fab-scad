@@ -3725,6 +3725,56 @@ fn the_compiled_modifiers_match_the_interpreter() {
     );
 }
 
+/// AR.20.4's hoisting razor, compiled: assignments bind WHOLE-SCOPE, last-wins, blocks flattened.
+/// `cube(x)` sits ABOVE `x = x + 2` and must render the reassigned value (whose self-reference
+/// reads the PARAM), and `{ y = x; }` must reach the `sphere` outside the block, because a block
+/// is not an assignment scope upstream. The statement-position emission this replaced rendered
+/// `cube(param)` without declining — the interpreter leg (oracle-pinned by
+/// `whole_scope_hoisting_matches_the_oracle`) is what catches that here.
+#[test]
+fn a_compiled_module_hoists_scope_assignments_like_the_interpreter() {
+    let run = |src: &str, intrinsics: bool| {
+        let config = crate::Config {
+            intrinsics,
+            ..crate::Config::default()
+        };
+        let (geo, msgs) =
+            crate::evaluate_geometry_with_base_config(src, std::path::Path::new("."), &[], config)
+                .expect("renders");
+        (format!("{geo:?}"), format!("{msgs:?}"))
+    };
+
+    let src = "module _fab_poc_hoist(x=1) { cube(x); x = x + 2; { y = x; } sphere(r=y); }\n\
+               _fab_poc_hoist(3);";
+    let (geo_on, msgs_on) = run(src, true);
+    let (geo_off, msgs_off) = run(src, false);
+    assert_eq!(
+        geo_on, geo_off,
+        "hoisting: the compiled module built different geometry than interpreting it"
+    );
+    assert_eq!(msgs_on, msgs_off, "hoisting: different console");
+
+    // NON-VACUITY: the native must actually arm, or the equalities hold on two interpreted runs.
+    let program = crate::parser::parse(src).expect("parses");
+    assert!(
+        program.stmts.iter().any(|s| matches!(&s.kind,
+            crate::parser::StmtKind::ModuleDef { name: n, params, body }
+                if &**n == "_fab_poc_hoist"
+                    && super::resolve_module("_fab_poc_hoist", params, body).is_some())),
+        "`_fab_poc_hoist` did not arm, so the compiled path was never entered"
+    );
+
+    // The assignment is LOAD-BEARING: dropping it changes the interpreted render, so a native
+    // that quietly skipped assignments could not pass the tier equality above.
+    let without = "module _fab_poc_plainh(x=1) { cube(x); { y = x; } sphere(r=y); }\n\
+                   _fab_poc_plainh(3);";
+    assert_ne!(
+        run(src, false).0,
+        run(without, false).0,
+        "the probe's assignment changes nothing, so the tier equality is vacuous"
+    );
+}
+
 /// The drift gate, on the MODULE path: a definition that does not match the reference the native
 /// was generated from must NOT wire. Without this the native would answer for a module whose body
 /// somebody changed, which is a wrong answer rather than a missed compilation.

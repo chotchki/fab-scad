@@ -2186,6 +2186,11 @@ pub(super) static MODULE_REGISTRY: &[ModuleEntry] = &[
         reference: "module _fab_poc_star(s=1) { _fab_poc_dollar(s) { *cube(s); sphere(r=s); cylinder(r=s,h=s); } }",
         func: generated_modules::_fab_poc_star,
     },
+    ModuleEntry {
+        name: "_fab_poc_hoist",
+        reference: "module _fab_poc_hoist(x=1) { cube(x); x = x + 2; { y = x; } sphere(r=y); }",
+        func: generated_modules::_fab_poc_hoist,
+    },
 ];
 
 /// The compiled module for `name`, IFF one is registered and the definition in this program

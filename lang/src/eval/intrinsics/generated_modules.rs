@@ -126,3 +126,26 @@ pub(super) fn _fab_poc_star(fx: &dyn rt::ModuleCtx) -> rt::Result<rt::Geo> {
     Ok(fx.group(parts))
 }
 
+
+/// Generated native for module `_fab_poc_hoist` — geometry through the interpreter's own
+/// construction, so a generated module is what interpreting its reference builds.
+pub(super) fn _fab_poc_hoist(fx: &dyn rt::ModuleCtx) -> rt::Result<rt::Geo> {
+    let p_x = fx.args().get(0).cloned().unwrap_or(rt::Value::Undef);
+    let mut parts: Vec<rt::Geo> = Vec::new();
+    let l0_x = rt::apply_binary(rt::BinOp::Add, p_x.clone(), rt::Value::Num(f64::from_bits(0x4000000000000000_u64)));
+    let l1_y = l0_x.clone();
+    let l2_blk = {
+        let mut parts: Vec<rt::Geo> = Vec::new();
+    parts.push(fx.call(&rt::ModuleCall { name: "cube", args: &[(None, l0_x.clone()), ], children: rt::Children::None })?);
+    let l3_blk = {
+        let mut parts: Vec<rt::Geo> = Vec::new();
+        fx.group(parts)
+    };
+    parts.push(l3_blk);
+    parts.push(fx.call(&rt::ModuleCall { name: "sphere", args: &[(Some("r"), l1_y.clone()), ], children: rt::Children::None })?);
+        fx.group(parts)
+    };
+    parts.push(l2_blk);
+    Ok(fx.group(parts))
+}
+

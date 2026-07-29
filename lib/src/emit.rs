@@ -225,11 +225,14 @@ pub fn generate_module_native(
     // a native that re-derived them would be reimplementing exactly the semantics AN documents
     // getting wrong.
     for (i, p) in params.iter().enumerate() {
-        // A `$`-named parameter is a DYNAMIC binding: it sets the chain every callee reads, which
-        // a lexical `p_{name}` local cannot express (and `$` is not a Rust ident char — the text
-        // census counted these as emitting for months while rustc had never seen one).
+        // A `$`-named parameter (AR.22: `attachable`'s whole family declares `$fn=…` defaults)
+        // needs NO lexical slot: `bind_values` bound it into the call frame's specials before
+        // dispatch — caller arg or declared default, the same two-phase as any param — and every
+        // body read of a `$`-name already rides `fx.dollar`, which reads exactly that frame. `$`
+        // is not a Rust ident char anyway (the text census counted `let p_$tag` as emitting for
+        // months while rustc had never seen one).
         if p.name.starts_with('$') {
-            return Err(format!("{name}: a `$`-named parameter (dynamic scope has no lexical slot)"));
+            continue;
         }
         if params[..i].iter().any(|q| q.name == p.name) {
             return Err(format!(
@@ -244,6 +247,9 @@ pub fn generate_module_native(
         );
     }
     for p in params {
+        if p.name.starts_with('$') {
+            continue; // no lexical slot — body reads ride `fx.dollar` (see the prologue note)
+        }
         em.locals
             .push((p.name.to_string(), format!("p_{}", p.name)));
     }
@@ -744,10 +750,18 @@ impl Emitter<'_> {
     /// function native it stays builtins (names decorative, AR.3 — arguments bind positionally in
     /// arg order) then generated siblings with the full compile-time binding rules.
     fn call(&mut self, name: &str, args: &[Arg]) -> Result<String, String> {
-        if self.locals.iter().any(|(n, _)| n == name) {
-            return Err(format!(
-                "call through the local binding `{name}` (the AN.10 shape) resolves at runtime"
-            ));
+        if let Some((_, ident)) = self.locals.iter().rev().find(|(n, _)| n == name) {
+            // AN.10: the name is lexically bound here. A PARAMETER's binding lives in the CALL
+            // FRAME, where `call_fn`'s rung 1 re-checks it at runtime — a function VALUE declines,
+            // anything else does not shadow a callee (AD.1/p8, `generic_threaded_rod`'s `len`
+            // param over the builtin) — so in a module body a param-named call DISPATCHES. A
+            // HOISTED local is a Rust `let` the frame never sees, so rung 1 cannot guard it:
+            // decline. The `p_` prefix is the param marker (`fresh_ident` never produces it).
+            if !(self.in_module && ident.starts_with("p_")) {
+                return Err(format!(
+                    "call through the local binding `{name}` (the AN.10 shape) resolves at runtime"
+                ));
+            }
         }
         // AR.14.4.3 — a MODULE body's function calls dispatch at RUNTIME through
         // `ModuleCtx::call_fn`, the same AN.10-safe design module calls ride: the callee is
@@ -1149,19 +1163,32 @@ impl Emitter<'_> {
                 let mark = self.locals.len();
                 let mut out = String::new();
                 let mut depth = 0;
+                let mut restores = String::new();
                 for b in &mi.args {
                     let Some(bn) = &b.name else {
                         return Err("an unnamed `for` binding".into());
                     };
-                    if bn.starts_with('$') {
-                        return Err("a `$`-binding in a statement `for`".into());
-                    }
                     // Each iterable is emitted INSIDE the enclosing loops, so a later binding sees
                     // the earlier binders — the interpreter's nesting order.
                     let iter = self.expr(&b.value)?;
-                    let ident = self.fresh_ident(bn);
-                    let _ = writeln!(out, "    for {ident} in rt::iter_values_native(&{iter}) {{");
-                    self.locals.push((bn.to_string(), ident));
+                    if bn.starts_with('$') {
+                        // A `$`-named BINDER (AR.22: the copies family iterates `$idx` so the
+                        // children it renders can read it): per-iteration SET into the frame,
+                        // saved before the loop opens and restored after every loop closes —
+                        // reads inside the body ride `fx.dollar`, so no lexical slot exists.
+                        let save = self.fresh_ident("sd");
+                        let _ = writeln!(out, "    let {save} = fx.dollar({bn:?});");
+                        let ident = self.fresh_ident("dv");
+                        let _ =
+                            writeln!(out, "    for {ident} in rt::iter_values_native(&{iter}) {{");
+                        let _ = writeln!(out, "    fx.set_dollar({bn:?}, {ident}.clone());");
+                        restores = format!("    fx.set_dollar({bn:?}, {save});\n{restores}");
+                    } else {
+                        let ident = self.fresh_ident(bn);
+                        let _ =
+                            writeln!(out, "    for {ident} in rt::iter_values_native(&{iter}) {{");
+                        self.locals.push((bn.to_string(), ident));
+                    }
                     depth += 1;
                 }
                 // The body is a fresh hoist scope PER ITERATION (the interpreter pushes one
@@ -1175,6 +1202,7 @@ impl Emitter<'_> {
                 for _ in 0..depth {
                     out.push_str("    }\n");
                 }
+                out.push_str(&restores);
                 self.locals.truncate(mark);
                 Ok(out)
             }
@@ -1182,19 +1210,27 @@ impl Emitter<'_> {
             "let" => {
                 let mark = self.locals.len();
                 let mut out = String::new();
+                let mut restores = String::new();
                 for b in &mi.args {
                     let Some(bn) = &b.name else {
                         return Err("an unnamed `let` binding".into());
                     };
-                    if bn.starts_with('$') {
-                        // A `$`-binding is a DYNAMIC one — it reaches every callee, not just the
-                        // lexical children — so it is AR.20.3's business, not a local.
-                        return Err("a `$`-binding in a statement `let`".into());
-                    }
                     let v = self.expr(&b.value)?;
-                    let ident = self.fresh_ident(bn);
-                    let _ = writeln!(out, "    let {ident} = {v};");
-                    self.locals.push((bn.to_string(), ident));
+                    if bn.starts_with('$') {
+                        // A `$`-binding is DYNAMIC — it reaches every callee and rendered child,
+                        // not just the lexical children — so it is a frame SET scoped to the
+                        // `let`'s children: save, set, restore after them (AR.22).
+                        let save = self.fresh_ident("sd");
+                        let _ = writeln!(
+                            out,
+                            "    let {save} = fx.dollar({bn:?});\n    fx.set_dollar({bn:?}, {v});"
+                        );
+                        restores = format!("    fx.set_dollar({bn:?}, {save});\n{restores}");
+                    } else {
+                        let ident = self.fresh_ident(bn);
+                        let _ = writeln!(out, "    let {ident} = {v};");
+                        self.locals.push((bn.to_string(), ident));
+                    }
                 }
                 // The children form their own hoist scope under the `let` bindings.
                 let (prelude, epilogue) = self.hoist_prelude(&mi.children, false)?;
@@ -1203,6 +1239,7 @@ impl Emitter<'_> {
                     out.push_str(&self.stmt(k)?);
                 }
                 out.push_str(&epilogue);
+                out.push_str(&restores);
                 self.locals.truncate(mark);
                 Ok(out)
             }
@@ -1296,31 +1333,56 @@ impl Emitter<'_> {
     fn child_block(&mut self, mi: &fab_lang::ModuleInstantiation) -> Result<String, String> {
         // L.5.2 — neither an empty statement nor an assignment is a CHILD (counting either would
         // misalign `$children` and `children(i)`), but an assignment's bindings ARE in scope for
-        // every geometry child. Emitting that scoping means hoisting the binding out of the thunks
-        // so each captures it, which is real work; a child block that has one declines rather than
-        // silently dropping a local the children read.
+        // every geometry child: the interpreter PREPENDS the assigns to every render. Each thunk
+        // mirrors that with its own prelude — a plain name becomes a sequential `let` (source
+        // order, a later duplicate shadows = the interpreter's last-write-wins), a `$`-name a
+        // SAVE + SET (visible to the thunk's own children renders and dispatches through the
+        // frame — `attachable`'s `$parent_*` block is exactly this) with a restore so one
+        // thunk's set cannot leak into the next over the shared render ctx. HONEST LIMIT: the
+        // interpreter evaluates the assigns once per children()-render of the whole block, a
+        // thunk once per CHILD — a side-effecting assign expression (an echo, a rands draw)
+        // would fire more often compiled. No library child-block assign has one; the OpenSCAD
+        // differential and the examples ratchet police the claim.
         let mut kids = Vec::new();
+        let mut assigns: Vec<(&str, &fab_lang::Expr)> = Vec::new();
         for k in &mi.children {
             match &k.kind {
                 StmtKind::Empty => {}
-                StmtKind::Assignment { .. } => {
-                    return Err("an assignment inside a child block (L.5.2 scoping)".into());
-                }
+                StmtKind::Assignment { name, value } => assigns.push((name, value)),
                 _ => kids.push(k),
             }
         }
         if kids.is_empty() {
             return Ok("rt::Children::None".to_string());
         }
+        let mark = self.locals.len();
+        let mut prelude = String::new();
+        let mut epilogue = String::new();
+        for (name, value) in assigns {
+            let v = self.expr(value)?;
+            if name.starts_with('$') {
+                let save = self.fresh_ident("sd");
+                let _ = write!(
+                    prelude,
+                    "let {save} = fx.dollar({name:?}); fx.set_dollar({name:?}, {v}); "
+                );
+                epilogue = format!("fx.set_dollar({name:?}, {save}); {epilogue}");
+            } else {
+                let id = self.fresh_ident(name);
+                let _ = write!(prelude, "let {id} = {v}; ");
+                self.locals.push((name.to_string(), id));
+            }
+        }
         let mut out = String::from("rt::Children::Compiled(&[");
         for k in kids {
             let body = self.stmt(k)?;
             let _ = write!(
                 out,
-                "&|fx: &dyn rt::ModuleCtx| {{ let mut parts: Vec<rt::Geo> = Vec::new(); {body} Ok(fx.group(parts)) }}, "
+                "&|fx: &dyn rt::ModuleCtx| {{ let mut parts: Vec<rt::Geo> = Vec::new(); {prelude}{body} {epilogue}Ok(fx.group(parts)) }}, "
             );
         }
         out.push_str("])");
+        self.locals.truncate(mark);
         Ok(out)
     }
 
@@ -1759,6 +1821,17 @@ fn bake_reads<'a>(
     };
     let mut out = Vec::new();
     for read in &analysis.consts {
+        // `PI` is the LANGUAGE's seeded constant, not the library's — `Scope::new` binds
+        // `std::f64::consts::PI` at the root, so it is never in `lib.constants` and the fold
+        // cannot see it. Baked with the seed's exact bits; the module const guard still compares
+        // against the real chain at resolve time, so a program shadowing `PI` vetoes the native.
+        if read == "PI" {
+            out.push((
+                "PI",
+                Baked::from_value(fab_lang::Value::Num(std::f64::consts::PI))?,
+            ));
+            continue;
+        }
         let (Some(value), Some(decl)) = (folded.get(read), lib.constants.get(read)) else {
             continue;
         };
@@ -2301,7 +2374,7 @@ mod tests {
         }
         let lib = crate::library::Library::read(&root).expect("BOSL2 reads");
         let folded = lib.fold_constants();
-        let mut histo: std::collections::BTreeMap<String, Vec<&str>> =
+        let mut histo: std::collections::BTreeMap<String, Vec<(String, &str)>> =
             std::collections::BTreeMap::new();
         let mut armed = 0usize;
         for m in lib.modules.values() {
@@ -2312,16 +2385,17 @@ mod tests {
                 Err(e) => {
                     let reason = e.split_once(": ").map_or(e.as_str(), |(_, r)| r).to_string();
                     let bucket = reason.split(" `").next().unwrap_or(&reason).to_string();
-                    histo.entry(bucket).or_default().push(&m.name);
+                    histo.entry(bucket).or_default().push((reason, &m.name));
                 }
             }
         }
         println!("armed: {armed} of {}", lib.modules.len());
         let mut rows: Vec<_> = histo.iter().collect();
         rows.sort_by_key(|(_, v)| std::cmp::Reverse(v.len()));
-        for (bucket, names) in rows {
-            let sample: Vec<&&str> = names.iter().take(6).collect();
-            println!("[{}x] {} - e.g. {:?}", names.len(), bucket, sample);
+        for (bucket, entries) in rows {
+            let _ = bucket;
+            let sample: Vec<&&str> = entries.iter().map(|(_, n)| n).take(6).collect();
+            println!("[{}x] {} - e.g. {:?}", entries.len(), entries[0].0, sample);
         }
     }
 
@@ -2775,16 +2849,10 @@ mod tests {
     #[test]
     fn module_statements_outside_the_subset_decline_by_name() {
         for (src, want) in [
-            // NOT here any more: `module m() { cube(1); }` — a module call GENERATES as of
-            // AR.20.8, which is the whole point of that item. Its replacement below is the child
-            // block an assignment makes un-emittable.
-            (
-                "module m() { translate([1,0,0]) { x = 2; cube(x); } }",
-                "assignment inside a child block",
-            ),
-            // `!` is the one modifier that stays declined, under its OWN name so the histogram can
-            // price it: it diverts the subtree into the program-global root override, which no
-            // `ModuleCtx` method reaches. `#`/`%`/`*` all emit now.
+            // NOT here any more: a child-block assignment — it EMITS as a per-thunk prelude as
+            // of AR.22 (attachable's `$parent_*` block). `!` is the one modifier that stays
+            // declined, under its OWN name so the histogram can price it: it diverts the subtree
+            // into the program-global root override, which no `ModuleCtx` method reaches.
             ("module m() { !cube(1); }", "`!` root modifier"),
             (
                 "module m() { module inner() { children(); } }",
@@ -2816,6 +2884,16 @@ mod tests {
                 "statement assert (part of the 89 assert/echo)",
                 "module m(n) { assert(n > 0) children(); }",
                 "return Err(rt::assert_decline(",
+            ),
+            (
+                "child-block assignment (L.5.2) — a per-thunk let",
+                "module m() { translate([1,0,0]) { x = 2; cube(x); } }",
+                "_x = ",
+            ),
+            (
+                "child-block `$`-assignment (AR.22) — save/set/restore around the thunk",
+                "module m(n) { translate([n,0,0]) { $t = n; sphere(1); } }",
+                "fx.set_dollar(\"$t\"",
             ),
             (
                 "nested for, inner iterable sees the outer binder",

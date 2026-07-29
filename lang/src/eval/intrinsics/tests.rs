@@ -4053,7 +4053,9 @@ fn armed_bosl2_band_modules_match_the_interpreter() {
         };
         let (geo, msgs) = crate::evaluate_geometry_with_base_config(
             "include <std.scad>\ndown(3) cube(2);\nzrot(45) cube(1);\nhexagon(r=4);\n\
-             top_half() sphere(r=3);\nupcube([2,3,4]);",
+             top_half() sphere(r=3);\nupcube([2,3,4]);\n\
+             arc_copies(d=40, n=6) sphere(1);\ncuboid([10,20,30]);\n\
+             diff() cuboid([8,8,8]) { tag(\"remove\") cuboid([4,4,10]); };",
             &root,
             &[],
             config,

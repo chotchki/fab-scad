@@ -905,7 +905,7 @@ fn try_native_module<'a>(
             scope: caller.clone(),
             island,
         },
-        call_scope: call.clone(),
+        call_scope: std::cell::RefCell::new(call.clone()),
         // The module's own calls resolve where it was DEFINED — `home`, the same island the
         // interpreted path schedules the body against.
         home_island: home,

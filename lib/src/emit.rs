@@ -250,7 +250,7 @@ pub fn generate_module_native(
     let _ = writeln!(out, "    let mut parts: Vec<rt::Geo> = Vec::new();");
     // The module BODY is the outermost hoist scope: bind its whole-scope assignments (blocks
     // flattened, last-wins) before any statement runs — see `Emitter::hoist_prelude`.
-    let hoist = em
+    let (hoist, _top_epilogue) = em
         .hoist_prelude(std::slice::from_ref(body), true)
         .map_err(|e| format!("{name}: {e}"))?;
     out.push_str(&hoist);
@@ -627,6 +627,30 @@ impl Emitter<'_> {
                     "{{ if !({c}).is_truthy() {{ return Err({raise}); }} {b} }}"
                 ))
             }
+            // `echo(args) body` in EXPRESSION position — the AR.22 census found `cyl`, the most
+            // instantiated shape module in the library, declining on THIS alone (its bool-radius
+            // warning). The console side effect fires when the expression evaluates, then the
+            // body yields (`undef` when absent). Module bodies only: a function native has no
+            // console to reach.
+            ExprKind::Echo { args, body } => {
+                if !self.in_module {
+                    return Err("an echo-expression in a function body".into());
+                }
+                let mut pairs: Vec<String> = Vec::with_capacity(args.len());
+                for a in args {
+                    let v = self.expr(&a.value)?;
+                    let n = match &a.name {
+                        Some(n) => format!("Some({:?})", &**n),
+                        None => "None".to_string(),
+                    };
+                    pairs.push(format!("({n}, {v})"));
+                }
+                let b = match body {
+                    Some(b) => self.expr(b)?,
+                    None => "rt::Value::Undef".to_string(),
+                };
+                Ok(format!("{{ fx.echo(&[{}])?; {b} }}", pairs.join(", ")))
+            }
             // `[start : step? : end]` with computed endpoints — the interpreter's own constructor
             // carries the coercion rules.
             ExprKind::Range { start, step, end } => {
@@ -861,7 +885,12 @@ impl Emitter<'_> {
     /// an expression the interpreter's dedupe never runs. Every scope the interpreter hoists
     /// (module body, `if` branches, `for` iteration bodies, `let`/`assert`/`echo` children) calls
     /// this before walking statements; the `Assignment` arm below is then a no-op.
-    fn hoist_prelude(&mut self, stmts: &[Stmt], top: bool) -> Result<String, String> {
+    /// Returns `(prelude, epilogue)`: the epilogue RESTORES nested `$`-sets at scope exit and
+    /// must be emitted after the scope's statements — empty for the top scope (a top-of-body
+    /// `$`-set persists for the whole call; the frame dies with it) and whenever no `$`-set
+    /// occurred. Error paths that skip it are fine: an `Err` aborts or declines the whole call,
+    /// and the frame's state dies unread.
+    fn hoist_prelude(&mut self, stmts: &[Stmt], top: bool) -> Result<(String, String), String> {
         // flatten_blocks + dedupe, mirroring eval's `hoisted_assignments` byte for byte: a `{ }`
         // is NOT an assignment scope upstream — its assignments belong to the enclosing scope.
         let mut flat: Vec<&Stmt> = Vec::new();
@@ -877,17 +906,6 @@ impl Emitter<'_> {
         let mut index: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
         for s in flat {
             if let StmtKind::Assignment { name, value } = &s.kind {
-                // A `$`-assignment is DYNAMIC — it reaches every callee through the chain, not
-                // just this scope's statements. At the BODY's top scope that is exactly
-                // `ModuleCtx::set_dollar` (AR.22, emitted below); in a NESTED scope (an `if`
-                // branch, a `for` body) the bind is branch-scoped, which a write into the call
-                // frame would over-scope — decline.
-                if name.starts_with('$') && !top {
-                    return Err(
-                        "a `$`-assignment in a nested module scope (branch-scoped dynamic bind)"
-                            .into(),
-                    );
-                }
                 if let Some(&i) = index.get(&**name) {
                     order[i].1 = value; // seen: last expr wins, first-occurrence position kept
                 } else {
@@ -897,6 +915,7 @@ impl Emitter<'_> {
             }
         }
         let mut out = String::new();
+        let mut epilogue = String::new();
         for (name, expr) in order {
             let v = self.expr(expr)?;
             if name.starts_with('$') {
@@ -905,15 +924,29 @@ impl Emitter<'_> {
                 // NEW value (`fx.dollar` reads the frame just written), matching `hoist_scope`'s
                 // sequential bind. The self-reference rule holds too: THIS binding's own
                 // expression was emitted before the set, so `$x = $x * m` reads the inherited
-                // `$x`.
-                let _ = writeln!(out, "    fx.set_dollar({name:?}, {v});");
+                // `$x`. A NESTED scope's set is branch-scoped in the interpreter (its hoist binds
+                // a child scope), which the frame write reproduces as SAVE + SET + scope-exit
+                // RESTORE: everything inside the scope — callees, rendered children — reads the
+                // frame while set, nothing outside reads between set and restore, and a saved
+                // `undef` restoring as bound-undef is observationally the unbound read it was.
+                if top {
+                    let _ = writeln!(out, "    fx.set_dollar({name:?}, {v});");
+                } else {
+                    let save = self.fresh_ident("sd");
+                    let _ = writeln!(
+                        out,
+                        "    let {save} = fx.dollar({name:?});\n    fx.set_dollar({name:?}, {v});"
+                    );
+                    // Restores unwind in REVERSE set order.
+                    epilogue = format!("    fx.set_dollar({name:?}, {save});\n{epilogue}");
+                }
                 continue; // NOT a Rust local — body reads ride `fx.dollar`, the existing path.
             }
             let id = self.fresh_ident(name);
             let _ = writeln!(out, "    let {id} = {v};");
             self.locals.push((name.to_string(), id));
         }
-        Ok(out)
+        Ok((out, epilogue))
     }
 
     fn stmt(&mut self, s: &Stmt) -> Result<String, String> {
@@ -966,16 +999,20 @@ impl Emitter<'_> {
                 // EvalNodes child scope): its assignments bind for the branch only.
                 let mut out = format!("    if ({c}).is_truthy() {{\n");
                 let mark = self.locals.len();
-                out.push_str(&self.hoist_prelude(then, false)?);
+                let (prelude, epilogue) = self.hoist_prelude(then, false)?;
+                out.push_str(&prelude);
                 for k in then {
                     out.push_str(&self.stmt(k)?);
                 }
+                out.push_str(&epilogue);
                 self.locals.truncate(mark);
                 out.push_str("    } else {\n");
-                out.push_str(&self.hoist_prelude(els, false)?);
+                let (prelude, epilogue) = self.hoist_prelude(els, false)?;
+                out.push_str(&prelude);
                 for k in els {
                     out.push_str(&self.stmt(k)?);
                 }
+                out.push_str(&epilogue);
                 self.locals.truncate(mark);
                 out.push_str("    }\n");
                 if let Some(mark) = bg {
@@ -1041,10 +1078,12 @@ impl Emitter<'_> {
         let mut out = format!(
             "    let {inner} = {{\n        let mut parts: Vec<rt::Geo> = Vec::new();\n"
         );
-        out.push_str(&self.hoist_prelude(children, false)?);
+        let (prelude, epilogue) = self.hoist_prelude(children, false)?;
+        out.push_str(&prelude);
         for k in children {
             out.push_str(&self.stmt(k)?);
         }
+        out.push_str(&epilogue);
         let _ = write!(
             out,
             "        fx.group(parts)\n    }};\n    parts.push({inner});\n"
@@ -1127,10 +1166,12 @@ impl Emitter<'_> {
                 }
                 // The body is a fresh hoist scope PER ITERATION (the interpreter pushes one
                 // EvalNodes per iteration) — the prelude sits inside the innermost loop.
-                out.push_str(&self.hoist_prelude(&mi.children, false)?);
+                let (prelude, epilogue) = self.hoist_prelude(&mi.children, false)?;
+                out.push_str(&prelude);
                 for k in &mi.children {
                     out.push_str(&self.stmt(k)?);
                 }
+                out.push_str(&epilogue);
                 for _ in 0..depth {
                     out.push_str("    }\n");
                 }
@@ -1156,10 +1197,12 @@ impl Emitter<'_> {
                     self.locals.push((bn.to_string(), ident));
                 }
                 // The children form their own hoist scope under the `let` bindings.
-                out.push_str(&self.hoist_prelude(&mi.children, false)?);
+                let (prelude, epilogue) = self.hoist_prelude(&mi.children, false)?;
+                out.push_str(&prelude);
                 for k in &mi.children {
                     out.push_str(&self.stmt(k)?);
                 }
+                out.push_str(&epilogue);
                 self.locals.truncate(mark);
                 Ok(out)
             }
@@ -2241,13 +2284,13 @@ mod tests {
         );
     }
 
-    /// SCRATCH band probe (AR.14.4 scoping): how many BOSL2 modules emit against EMPTY bake and
-    /// sibling tables — i.e. need no baked constants and call no library functions? Exactly those
-    /// are armable with the existing fingerprint-only gate. Run:
-    /// `cargo test -p fab-lib standalone_module_band -- --ignored --nocapture`
+    /// The MODULE decline census (AR.14.4 scoping): who is still outside the band, bucketed by
+    /// decline reason — the roadmap, because each bucket names the next capability and the counts
+    /// rank them. Run:
+    /// `cargo test -p fab-lib module_decline_census -- --ignored --nocapture`
     #[test]
     #[ignore = "measurement probe, not a gate"]
-    fn standalone_module_band() {
+    fn module_decline_census() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .expect("workspace root")
@@ -2258,23 +2301,27 @@ mod tests {
         }
         let lib = crate::library::Library::read(&root).expect("BOSL2 reads");
         let folded = lib.fold_constants();
-        let mut standalone = 0usize;
-        let mut with_bakes: Vec<&str> = Vec::new();
+        let mut histo: std::collections::BTreeMap<String, Vec<&str>> =
+            std::collections::BTreeMap::new();
+        let mut armed = 0usize;
         for m in lib.modules.values() {
-            if super::generate_module_native(&m.source, &[], &[]).is_ok() {
-                standalone += 1;
-            } else if super::bake_reads(&m.source, &lib, &folded)
-                .is_ok_and(|b| super::generate_module_native(&m.source, &b, &[]).is_ok())
-            {
-                // band 2: needs baked constants (so const-GUARDS on ModuleEntry), still no
-                // sibling-function calls.
-                with_bakes.push(&m.name);
+            let outcome = super::bake_reads(&m.source, &lib, &folded)
+                .and_then(|baked| super::generate_module_native(&m.source, &baked, &[]));
+            match outcome {
+                Ok(_) => armed += 1,
+                Err(e) => {
+                    let reason = e.split_once(": ").map_or(e.as_str(), |(_, r)| r).to_string();
+                    let bucket = reason.split(" `").next().unwrap_or(&reason).to_string();
+                    histo.entry(bucket).or_default().push(&m.name);
+                }
             }
         }
-        println!("band 1 (standalone): {standalone} of {}", lib.modules.len());
-        println!("band 2 (bakes, no sibling fns): {}", with_bakes.len());
-        for n in &with_bakes {
-            println!("  {n}");
+        println!("armed: {armed} of {}", lib.modules.len());
+        let mut rows: Vec<_> = histo.iter().collect();
+        rows.sort_by_key(|(_, v)| std::cmp::Reverse(v.len()));
+        for (bucket, names) in rows {
+            let sample: Vec<&&str> = names.iter().take(6).collect();
+            println!("[{}x] {} - e.g. {:?}", names.len(), bucket, sample);
         }
     }
 
@@ -2937,5 +2984,6 @@ mod tests {
         assert!(err.contains("non-finite element"), "{err}");
     }
 }
+
 
 

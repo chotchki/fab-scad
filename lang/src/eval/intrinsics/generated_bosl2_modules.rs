@@ -293,6 +293,87 @@ pub(super) fn _honeycomb(fx: &dyn rt::ModuleCtx) -> rt::Result<rt::Geo> {
 }
 
 
+/// Generated native for module `_knuckle_hinge_profile` — geometry through the interpreter's own
+/// construction, so a generated module is what interpreting its reference builds.
+pub(super) fn _knuckle_hinge_profile(fx: &dyn rt::ModuleCtx) -> rt::Result<rt::Geo> {
+    let p_offset = fx.args().get(0).cloned().unwrap_or(rt::Value::Undef);
+    let p_arm_height = fx.args().get(1).cloned().unwrap_or(rt::Value::Undef);
+    let p_arm_angle = fx.args().get(2).cloned().unwrap_or(rt::Value::Undef);
+    let p_knuckle_diam = fx.args().get(3).cloned().unwrap_or(rt::Value::Undef);
+    let p_pin_diam = fx.args().get(4).cloned().unwrap_or(rt::Value::Undef);
+    let p_fill = fx.args().get(5).cloned().unwrap_or(rt::Value::Undef);
+    let p_clear_top = fx.args().get(6).cloned().unwrap_or(rt::Value::Undef);
+    let p_round_bot = fx.args().get(7).cloned().unwrap_or(rt::Value::Undef);
+    let p_round_top = fx.args().get(8).cloned().unwrap_or(rt::Value::Undef);
+    let p_pin_fn = fx.args().get(9).cloned().unwrap_or(rt::Value::Undef);
+    let p_clearance = fx.args().get(10).cloned().unwrap_or(rt::Value::Undef);
+    let p_tearspin = fx.args().get(11).cloned().unwrap_or(rt::Value::Undef);
+    let p_clip = fx.args().get(12).cloned().unwrap_or(rt::Value::Undef);
+    let mut parts: Vec<rt::Geo> = Vec::new();
+    let l0_extra = rt::Value::Num(f64::from_bits(0x3f847ae147ae147b_u64));
+    let l3_skel = fx.call_fn(&rt::FnCall { name: "turtle", args: &[(None, { let mut l1_acc: Vec<rt::Value> = Vec::new(); l1_acc.push(rt::Value::string("left"));
+        l1_acc.push(rt::apply_binary(rt::BinOp::Sub, rt::Value::Num(f64::from_bits(0x4056800000000000_u64)), p_arm_angle.clone()));
+        l1_acc.push(rt::Value::string("untilx"));
+        l1_acc.push(rt::apply_binary(rt::BinOp::Add, p_offset.clone(), l0_extra.clone()));
+        l1_acc.push(rt::Value::string("left"));
+        l1_acc.push(p_arm_angle.clone());
+        if (rt::apply_binary(rt::BinOp::Gt, p_arm_height.clone(), rt::Value::Num(f64::from_bits(0x0_u64)))).is_truthy() { for l2_each in rt::iter_values_native(&rt::build_vector(vec![rt::Value::string("move"), p_arm_height.clone()])) { l1_acc.push(l2_each); }  } rt::build_vector(l1_acc) })] })?;
+    let l4_ofs = rt::apply_binary(rt::BinOp::Add, p_arm_height.clone(), rt::apply_binary(rt::BinOp::Div, p_offset.clone(), fx.call_fn(&rt::FnCall { name: "tan", args: &[(None, p_arm_angle.clone())] })?));
+    let l5_start = if rt::Value::Bool(rt::apply_binary(rt::BinOp::Eq, p_round_bot.clone(), rt::Value::Num(f64::from_bits(0x0_u64))).is_truthy() && rt::apply_binary(rt::BinOp::Eq, p_round_top.clone(), rt::Value::Num(f64::from_bits(0x0_u64))).is_truthy()).is_truthy() { fx.call_fn(&rt::FnCall { name: "os_flat", args: &[(Some("abs_angle"), rt::Value::Num(f64::from_bits(0x4056800000000000_u64)))] })? } else { fx.call_fn(&rt::FnCall { name: "os_round", args: &[(Some("abs_angle"), rt::Value::Num(f64::from_bits(0x4056800000000000_u64))), (Some("cut"), rt::build_vector(vec![rt::apply_unary(rt::UnOp::Neg, p_round_top.clone()), rt::apply_unary(rt::UnOp::Neg, p_round_bot.clone())])), (Some("k"), rt::Value::Num(f64::from_bits(0x3fe999999999999a_u64)))] })? };
+    let l6_blk = {
+        let mut parts: Vec<rt::Geo> = Vec::new();
+    parts.push(fx.call(&rt::ModuleCall { name: "back", args: &[(None, p_clearance.clone()), ], children: rt::Children::Compiled(&[&|fx: &dyn rt::ModuleCtx| { let mut parts: Vec<rt::Geo> = Vec::new();     parts.push(fx.call(&rt::ModuleCall { name: "difference", args: &[], children: rt::Children::Compiled(&[&|fx: &dyn rt::ModuleCtx| { let mut parts: Vec<rt::Geo> = Vec::new();     parts.push(fx.call(&rt::ModuleCall { name: "union", args: &[], children: rt::Children::Compiled(&[&|fx: &dyn rt::ModuleCtx| { let mut parts: Vec<rt::Geo> = Vec::new();     parts.push(fx.call(&rt::ModuleCall { name: "difference", args: &[], children: rt::Children::Compiled(&[&|fx: &dyn rt::ModuleCtx| { let mut parts: Vec<rt::Geo> = Vec::new();     parts.push(fx.call(&rt::ModuleCall { name: "fwd", args: &[(None, l4_ofs.clone()), ], children: rt::Children::Compiled(&[&|fx: &dyn rt::ModuleCtx| { let mut parts: Vec<rt::Geo> = Vec::new();     parts.push(fx.call(&rt::ModuleCall { name: "left", args: &[(None, l0_extra.clone()), ], children: rt::Children::Compiled(&[&|fx: &dyn rt::ModuleCtx| { let mut parts: Vec<rt::Geo> = Vec::new();     parts.push(fx.call(&rt::ModuleCall { name: "offset_stroke", args: &[(None, l3_skel.clone()), (Some("width"), p_knuckle_diam.clone()), (Some("start"), l5_start.clone()), ], children: rt::Children::None })?);
+ Ok(fx.group(parts)) }, ]) })?);
+ Ok(fx.group(parts)) }, &|fx: &dyn rt::ModuleCtx| { let mut parts: Vec<rt::Geo> = Vec::new();     if (p_fill.clone()).is_truthy() {
+    parts.push(fx.call(&rt::ModuleCall { name: "polygon", args: &[(None, { let mut l7_acc: Vec<rt::Value> = Vec::new(); for l8_each in rt::iter_values_native(&fx.call_fn(&rt::FnCall { name: "list_head", args: &[(None, l3_skel.clone()), (None, rt::apply_unary(rt::UnOp::Neg, rt::Value::Num(f64::from_bits(0x4000000000000000_u64))))] })?) { l7_acc.push(l8_each); } l7_acc.push(fx.call_fn(&rt::FnCall { name: "fwd", args: &[(None, p_clearance.clone()), (None, fx.call_fn(&rt::FnCall { name: "last", args: &[(None, l3_skel.clone())] })?)] })?);
+        l7_acc.push(rt::build_vector(vec![rt::apply_unary(rt::UnOp::Neg, l0_extra.clone()), rt::apply_binary(rt::BinOp::Sub, l4_ofs.clone(), p_clearance.clone())]));
+        rt::build_vector(l7_acc) }), ], children: rt::Children::None })?);
+    } else {
+    }
+ Ok(fx.group(parts)) }, ]) })?);
+ Ok(fx.group(parts)) }, &|fx: &dyn rt::ModuleCtx| { let mut parts: Vec<rt::Geo> = Vec::new();     if (rt::Value::Bool(rt::apply_binary(rt::BinOp::Eq, p_clear_top.clone(), rt::Value::Bool(true)).is_truthy() || rt::apply_binary(rt::BinOp::Eq, p_clear_top.clone(), rt::Value::string("all")).is_truthy())).is_truthy() {
+    parts.push(fx.call(&rt::ModuleCall { name: "left", args: &[(None, rt::Value::Num(f64::from_bits(0x3fb999999999999a_u64))), ], children: rt::Children::Compiled(&[&|fx: &dyn rt::ModuleCtx| { let mut parts: Vec<rt::Geo> = Vec::new();     parts.push(fx.call(&rt::ModuleCall { name: "fwd", args: &[(None, p_clearance.clone()), ], children: rt::Children::Compiled(&[&|fx: &dyn rt::ModuleCtx| { let mut parts: Vec<rt::Geo> = Vec::new();     parts.push(fx.call(&rt::ModuleCall { name: "rect", args: &[(None, rt::build_vector(vec![rt::apply_binary(rt::BinOp::Add, p_offset.clone(), p_knuckle_diam.clone()), rt::apply_binary(rt::BinOp::Add, rt::apply_binary(rt::BinOp::Add, p_knuckle_diam.clone(), rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64))), p_clearance.clone())])), (Some("anchor"), rt::apply_binary(rt::BinOp::Add, rt::Value::num_list(vec![f64::from_bits(0x0_u64), f64::from_bits(0x0_u64), f64::from_bits(0xbff0000000000000_u64)]), rt::Value::num_list(vec![f64::from_bits(0xbff0000000000000_u64), f64::from_bits(0x0_u64), f64::from_bits(0x0_u64)]))), ], children: rt::Children::None })?);
+ Ok(fx.group(parts)) }, ]) })?);
+ Ok(fx.group(parts)) }, ]) })?);
+    } else {
+    }
+ Ok(fx.group(parts)) }, &|fx: &dyn rt::ModuleCtx| { let mut parts: Vec<rt::Geo> = Vec::new();     if (fx.call_fn(&rt::FnCall { name: "is_num", args: &[(None, p_clear_top.clone())] })?).is_truthy() {
+    parts.push(fx.call(&rt::ModuleCall { name: "left", args: &[(None, rt::Value::Num(f64::from_bits(0x3fb999999999999a_u64))), ], children: rt::Children::Compiled(&[&|fx: &dyn rt::ModuleCtx| { let mut parts: Vec<rt::Geo> = Vec::new();     parts.push(fx.call(&rt::ModuleCall { name: "fwd", args: &[(None, p_clearance.clone()), ], children: rt::Children::Compiled(&[&|fx: &dyn rt::ModuleCtx| { let mut parts: Vec<rt::Geo> = Vec::new();     parts.push(fx.call(&rt::ModuleCall { name: "rect", args: &[(None, rt::build_vector(vec![rt::apply_binary(rt::BinOp::Add, rt::Value::Num(f64::from_bits(0x3fb999999999999a_u64)), p_clear_top.clone()), rt::apply_binary(rt::BinOp::Add, rt::apply_binary(rt::BinOp::Add, p_knuckle_diam.clone(), rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64))), p_clearance.clone())])), (Some("anchor"), rt::apply_binary(rt::BinOp::Add, rt::Value::num_list(vec![f64::from_bits(0x0_u64), f64::from_bits(0x0_u64), f64::from_bits(0xbff0000000000000_u64)]), rt::Value::num_list(vec![f64::from_bits(0xbff0000000000000_u64), f64::from_bits(0x0_u64), f64::from_bits(0x0_u64)]))), ], children: rt::Children::None })?);
+ Ok(fx.group(parts)) }, ]) })?);
+ Ok(fx.group(parts)) }, ]) })?);
+    } else {
+    }
+ Ok(fx.group(parts)) }, &|fx: &dyn rt::ModuleCtx| { let mut parts: Vec<rt::Geo> = Vec::new();     if (fx.call_fn(&rt::FnCall { name: "is_def", args: &[(None, p_clip.clone())] })?).is_truthy() {
+    parts.push(fx.call(&rt::ModuleCall { name: "fwd", args: &[(None, p_clip.clone()), ], children: rt::Children::Compiled(&[&|fx: &dyn rt::ModuleCtx| { let mut parts: Vec<rt::Geo> = Vec::new();     parts.push(fx.call(&rt::ModuleCall { name: "left", args: &[(None, rt::Value::Num(f64::from_bits(0x3fb999999999999a_u64))), ], children: rt::Children::Compiled(&[&|fx: &dyn rt::ModuleCtx| { let mut parts: Vec<rt::Geo> = Vec::new();     parts.push(fx.call(&rt::ModuleCall { name: "rect", args: &[(None, rt::build_vector(vec![rt::apply_binary(rt::BinOp::Add, p_offset.clone(), p_knuckle_diam.clone()), rt::apply_binary(rt::BinOp::Add, rt::apply_binary(rt::BinOp::Add, rt::apply_binary(rt::BinOp::Add, l4_ofs.clone(), p_round_bot.clone()), p_knuckle_diam.clone()), fx.call_fn(&rt::FnCall { name: "abs", args: &[(None, p_clip.clone())] })?)])), (Some("anchor"), rt::apply_binary(rt::BinOp::Add, rt::Value::num_list(vec![f64::from_bits(0x0_u64), f64::from_bits(0x3ff0000000000000_u64), f64::from_bits(0x0_u64)]), rt::Value::num_list(vec![f64::from_bits(0xbff0000000000000_u64), f64::from_bits(0x0_u64), f64::from_bits(0x0_u64)]))), ], children: rt::Children::None })?);
+ Ok(fx.group(parts)) }, ]) })?);
+ Ok(fx.group(parts)) }, ]) })?);
+    } else {
+    }
+ Ok(fx.group(parts)) }, ]) })?);
+ Ok(fx.group(parts)) }, &|fx: &dyn rt::ModuleCtx| { let mut parts: Vec<rt::Geo> = Vec::new();     parts.push(fx.call(&rt::ModuleCall { name: "right", args: &[(None, p_offset.clone()), ], children: rt::Children::Compiled(&[&|fx: &dyn rt::ModuleCtx| { let mut parts: Vec<rt::Geo> = Vec::new();     parts.push(fx.call(&rt::ModuleCall { name: "ellipse", args: &[(Some("d"), p_knuckle_diam.clone()), (Some("circum"), rt::Value::Bool(true)), ], children: rt::Children::None })?);
+ Ok(fx.group(parts)) }, ]) })?);
+ Ok(fx.group(parts)) }, ]) })?);
+ Ok(fx.group(parts)) }, &|fx: &dyn rt::ModuleCtx| { let mut parts: Vec<rt::Geo> = Vec::new();     if (rt::Value::Bool(fx.call_fn(&rt::FnCall { name: "is_num", args: &[(None, p_pin_diam.clone())] })?.is_truthy() && rt::apply_binary(rt::BinOp::Gt, p_pin_diam.clone(), rt::Value::Num(f64::from_bits(0x0_u64))).is_truthy())).is_truthy() {
+    let l9_sd = fx.dollar("$fn");
+    fx.set_dollar("$fn", fx.call_fn(&rt::FnCall { name: "default", args: &[(None, p_pin_fn.clone()), (None, fx.dollar("$fn"))] })?);
+    parts.push(fx.call(&rt::ModuleCall { name: "right", args: &[(None, p_offset.clone()), ], children: rt::Children::Compiled(&[&|fx: &dyn rt::ModuleCtx| { let mut parts: Vec<rt::Geo> = Vec::new();     if (fx.call_fn(&rt::FnCall { name: "is_def", args: &[(None, p_tearspin.clone())] })?).is_truthy() {
+    parts.push(fx.call(&rt::ModuleCall { name: "teardrop2d", args: &[(Some("d"), rt::apply_binary(rt::BinOp::Add, p_pin_diam.clone(), rt::apply_binary(rt::BinOp::Mul, rt::Value::Num(f64::from_bits(0x4000000000000000_u64)), fx.call_fn(&rt::FnCall { name: "get_slop", args: &[] })?))), (Some("realign"), rt::Value::Bool(true)), (Some("circum"), rt::Value::Bool(true)), (Some("spin"), p_tearspin.clone()), ], children: rt::Children::None })?);
+    } else {
+    parts.push(fx.call(&rt::ModuleCall { name: "ellipse", args: &[(Some("d"), rt::apply_binary(rt::BinOp::Add, p_pin_diam.clone(), rt::apply_binary(rt::BinOp::Mul, rt::Value::Num(f64::from_bits(0x4000000000000000_u64)), fx.call_fn(&rt::FnCall { name: "get_slop", args: &[] })?))), (Some("circum"), rt::Value::Bool(true)), ], children: rt::Children::None })?);
+    }
+ Ok(fx.group(parts)) }, ]) })?);
+    fx.set_dollar("$fn", l9_sd);
+    } else {
+    }
+ Ok(fx.group(parts)) }, ]) })?);
+ Ok(fx.group(parts)) }, ]) })?);
+        fx.group(parts)
+    };
+    parts.push(l6_blk);
+    Ok(fx.group(parts))
+}
+
+
 /// Generated native for module `_multmatrix` — geometry through the interpreter's own
 /// construction, so a generated module is what interpreting its reference builds.
 pub(super) fn _multmatrix(fx: &dyn rt::ModuleCtx) -> rt::Result<rt::Geo> {
@@ -945,6 +1026,71 @@ pub(super) fn acme_threaded_rod(fx: &dyn rt::ModuleCtx) -> rt::Result<rt::Geo> {
 }
 
 
+/// Generated native for module `align` — geometry through the interpreter's own
+/// construction, so a generated module is what interpreting its reference builds.
+pub(super) fn align(fx: &dyn rt::ModuleCtx) -> rt::Result<rt::Geo> {
+    let p_anchor = fx.args().get(0).cloned().unwrap_or(rt::Value::Undef);
+    let p_align = fx.args().get(1).cloned().unwrap_or(rt::Value::Undef);
+    let p_inside = fx.args().get(2).cloned().unwrap_or(rt::Value::Undef);
+    let p_inset = fx.args().get(3).cloned().unwrap_or(rt::Value::Undef);
+    let p_shiftout = fx.args().get(4).cloned().unwrap_or(rt::Value::Undef);
+    let p_overlap = fx.args().get(5).cloned().unwrap_or(rt::Value::Undef);
+    let mut parts: Vec<rt::Geo> = Vec::new();
+    let l0_overlap = rt::apply_binary(rt::BinOp::Mul, if p_inside.clone().is_truthy() { rt::apply_unary(rt::UnOp::Neg, rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64))) } else { rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64)) }, if rt::apply_binary(rt::BinOp::Ne, p_overlap.clone(), rt::Value::Undef).is_truthy() { p_overlap.clone() } else { fx.dollar("$overlap") });
+    let l1_dummy1 = { if !(rt::apply_binary(rt::BinOp::Ne, fx.dollar("$parent_geom"), rt::Value::Undef)).is_truthy() { return Err(rt::assert_decline()); } { if !(fx.call_fn(&rt::FnCall { name: "is_undef", args: &[(None, fx.dollar("$attach_to"))] })?).is_truthy() { return Err(rt::assert_decline()); } { if !(fx.call_fn(&rt::FnCall { name: "is_finite", args: &[(None, l0_overlap.clone())] })?).is_truthy() { return Err(rt::assert_decline()); } rt::Value::Undef } } };
+    let l2_anchor = if fx.call_fn(&rt::FnCall { name: "is_vector", args: &[(None, p_anchor.clone())] })?.is_truthy() { rt::build_vector(vec![p_anchor.clone()]) } else { p_anchor.clone() };
+    let l3_align = if fx.call_fn(&rt::FnCall { name: "is_vector", args: &[(None, p_align.clone())] })?.is_truthy() { rt::build_vector(vec![p_align.clone()]) } else { p_align.clone() };
+    let l4_two_d = fx.call_fn(&rt::FnCall { name: "_attach_geom_2d", args: &[(None, fx.dollar("$parent_geom"))] })?;
+    let l5_factor = rt::apply_binary(rt::BinOp::Mul, if fx.dollar("$anchor_inside").is_truthy() { rt::apply_unary(rt::UnOp::Neg, rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64))) } else { rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64)) }, if p_inside.clone().is_truthy() { rt::apply_unary(rt::UnOp::Neg, rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64))) } else { rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64)) });
+    let l6_blk = {
+        let mut parts: Vec<rt::Geo> = Vec::new();
+    parts.push(fx.call(&rt::ModuleCall { name: "req_children", args: &[(None, fx.dollar("$children")), ], children: rt::Children::None })?);
+    if (rt::Value::Bool(rt::Value::Bool(rt::Value::Bool(fx.call_fn(&rt::FnCall { name: "_is_shown", args: &[] })?.is_truthy() && p_inside.clone().is_truthy()).is_truthy() && rt::apply_binary(rt::BinOp::Ne, l0_overlap.clone(), rt::Value::Num(f64::from_bits(0x0_u64))).is_truthy()).is_truthy() && rt::Value::Bool(fx.call_fn(&rt::FnCall { name: "is_undef", args: &[(None, fx.dollar("$align_msg"))] })?.is_truthy() || fx.dollar("$align_msg").is_truthy()).is_truthy())).is_truthy() {
+    fx.echo(&[(None, rt::Value::string("WARNING: overlap passed to align() with inside=true; handling has changed (May 2026): positive overlap moves child outward (change in sign). Set $align_msg=false to hide this message")), ])?;
+    } else {
+    }
+    for l7_i in rt::iter_values_native(&fx.call_fn(&rt::FnCall { name: "idx", args: &[(None, l2_anchor.clone())] })?) {
+    let l8_sd = fx.dollar("$align_msg");
+    fx.set_dollar("$align_msg", rt::Value::Bool(false));
+    let l9_face = rt::index(l2_anchor.clone(), &l7_i.clone());
+    let l10_sd = fx.dollar("$anchor");
+    fx.set_dollar("$anchor", l9_face.clone());
+    let l11_dummy = { if !(rt::apply_unary(rt::UnOp::Not, fx.call_fn(&rt::FnCall { name: "is_string", args: &[(None, l9_face.clone())] })?)).is_truthy() { return Err(rt::assert_decline()); } { if !(rt::Value::Bool(fx.call_fn(&rt::FnCall { name: "is_vector", args: &[(None, l9_face.clone())] })?.is_truthy() && rt::Value::Bool(rt::apply_binary(rt::BinOp::Eq, fx.call_fn(&rt::FnCall { name: "len", args: &[(None, l9_face.clone())] })?, rt::Value::Num(f64::from_bits(0x4000000000000000_u64))).is_truthy() || rt::apply_binary(rt::BinOp::Eq, fx.call_fn(&rt::FnCall { name: "len", args: &[(None, l9_face.clone())] })?, rt::Value::Num(f64::from_bits(0x4008000000000000_u64))).is_truthy()).is_truthy())).is_truthy() { return Err(rt::assert_decline()); } rt::Value::Undef } };
+    let l12_thisface = if l4_two_d.clone().is_truthy() { fx.call_fn(&rt::FnCall { name: "_force_anchor_2d", args: &[(None, l9_face.clone())] })? } else { fx.call_fn(&rt::FnCall { name: "point3d", args: &[(None, l9_face.clone())] })? };
+    for l13_j in rt::iter_values_native(&fx.call_fn(&rt::FnCall { name: "idx", args: &[(None, l3_align.clone())] })?) {
+    let l14_edge = rt::index(l3_align.clone(), &l13_j.clone());
+    let l15_sd = fx.dollar("$idx");
+    fx.set_dollar("$idx", rt::apply_binary(rt::BinOp::Add, l13_j.clone(), rt::apply_binary(rt::BinOp::Mul, fx.call_fn(&rt::FnCall { name: "len", args: &[(None, l3_align.clone())] })?, l7_i.clone())));
+    let l16_sd = fx.dollar("$align");
+    fx.set_dollar("$align", l14_edge.clone());
+    let l17_dummy1 = { if !(rt::Value::Bool(fx.call_fn(&rt::FnCall { name: "is_vector", args: &[(None, l14_edge.clone())] })?.is_truthy() && rt::Value::Bool(rt::apply_binary(rt::BinOp::Eq, fx.call_fn(&rt::FnCall { name: "len", args: &[(None, l14_edge.clone())] })?, rt::Value::Num(f64::from_bits(0x4000000000000000_u64))).is_truthy() || rt::apply_binary(rt::BinOp::Eq, fx.call_fn(&rt::FnCall { name: "len", args: &[(None, l14_edge.clone())] })?, rt::Value::Num(f64::from_bits(0x4008000000000000_u64))).is_truthy()).is_truthy())).is_truthy() { return Err(rt::assert_decline()); } rt::Value::Undef };
+    let l18_thisedge = if l4_two_d.clone().is_truthy() { fx.call_fn(&rt::FnCall { name: "_force_anchor_2d", args: &[(None, l14_edge.clone())] })? } else { fx.call_fn(&rt::FnCall { name: "point3d", args: &[(None, l14_edge.clone())] })? };
+    let l19_dummy = { if !(fx.call_fn(&rt::FnCall { name: "all_zero", args: &[(None, fx.call_fn(&rt::FnCall { name: "v_mul", args: &[(None, l18_thisedge.clone()), (None, l12_thisface.clone())] })?)] })?).is_truthy() { return Err(rt::assert_decline()); } rt::Value::Undef };
+    let l20_thisface_anch = fx.call_fn(&rt::FnCall { name: "_find_anchor", args: &[(None, l12_thisface.clone()), (None, fx.dollar("$parent_geom"))] })?;
+    let l21_inset_dir = if l4_two_d.clone().is_truthy() { rt::apply_unary(rt::UnOp::Neg, l12_thisface.clone()) } else { rt::apply_binary(rt::BinOp::Add, rt::apply_binary(rt::BinOp::Add, fx.call_fn(&rt::FnCall { name: "unit", args: &[(None, rt::apply_binary(rt::BinOp::Sub, rt::index(l20_thisface_anch.clone(), &rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64))), rt::index(fx.call_fn(&rt::FnCall { name: "_find_anchor", args: &[(None, rt::apply_binary(rt::BinOp::Add, rt::build_vector(vec![rt::member(l18_thisedge.clone(), "x"), rt::Value::Num(f64::from_bits(0x0_u64)), rt::Value::Num(f64::from_bits(0x0_u64))]), l12_thisface.clone())), (None, fx.dollar("$parent_geom"))] })?, &rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64))))), (None, rt::Value::num_list(vec![f64::from_bits(0x0_u64), f64::from_bits(0x0_u64), f64::from_bits(0x0_u64)]))] })?, fx.call_fn(&rt::FnCall { name: "unit", args: &[(None, rt::apply_binary(rt::BinOp::Sub, rt::index(l20_thisface_anch.clone(), &rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64))), rt::index(fx.call_fn(&rt::FnCall { name: "_find_anchor", args: &[(None, rt::apply_binary(rt::BinOp::Add, rt::build_vector(vec![rt::Value::Num(f64::from_bits(0x0_u64)), rt::member(l18_thisedge.clone(), "y"), rt::Value::Num(f64::from_bits(0x0_u64))]), l12_thisface.clone())), (None, fx.dollar("$parent_geom"))] })?, &rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64))))), (None, rt::Value::num_list(vec![f64::from_bits(0x0_u64), f64::from_bits(0x0_u64), f64::from_bits(0x0_u64)]))] })?), fx.call_fn(&rt::FnCall { name: "unit", args: &[(None, rt::apply_binary(rt::BinOp::Sub, rt::index(l20_thisface_anch.clone(), &rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64))), rt::index(fx.call_fn(&rt::FnCall { name: "_find_anchor", args: &[(None, rt::apply_binary(rt::BinOp::Add, rt::build_vector(vec![rt::Value::Num(f64::from_bits(0x0_u64)), rt::Value::Num(f64::from_bits(0x0_u64)), rt::member(l18_thisedge.clone(), "z")]), l12_thisface.clone())), (None, fx.dollar("$parent_geom"))] })?, &rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64))))), (None, rt::Value::num_list(vec![f64::from_bits(0x0_u64), f64::from_bits(0x0_u64), f64::from_bits(0x0_u64)]))] })?) };
+    let l22_pos_anch = fx.call_fn(&rt::FnCall { name: "_find_anchor", args: &[(None, rt::apply_binary(rt::BinOp::Add, l12_thisface.clone(), l18_thisedge.clone())), (None, fx.dollar("$parent_geom"))] })?;
+    let l23_sd = fx.dollar("$attach_alignment");
+    fx.set_dollar("$attach_alignment", rt::apply_binary(rt::BinOp::Sub, l18_thisedge.clone(), rt::apply_binary(rt::BinOp::Mul, l5_factor.clone(), l12_thisface.clone())));
+    let l24_sd = fx.dollar("$attach_anchor");
+    fx.set_dollar("$attach_anchor", fx.call_fn(&rt::FnCall { name: "list_set", args: &[(None, l22_pos_anch.clone()), (None, rt::Value::Num(f64::from_bits(0x4000000000000000_u64))), (None, rt::Value::num_list(vec![f64::from_bits(0x0_u64), f64::from_bits(0x0_u64), f64::from_bits(0x3ff0000000000000_u64)]))] })?);
+    parts.push(fx.call(&rt::ModuleCall { name: "translate", args: &[(None, rt::apply_binary(rt::BinOp::Sub, rt::apply_binary(rt::BinOp::Add, rt::apply_binary(rt::BinOp::Add, rt::index(l22_pos_anch.clone(), &rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64))), rt::apply_binary(rt::BinOp::Mul, p_inset.clone(), l21_inset_dir.clone())), rt::apply_binary(rt::BinOp::Mul, p_shiftout.clone(), rt::apply_binary(rt::BinOp::Sub, rt::index(l20_thisface_anch.clone(), &rt::Value::Num(f64::from_bits(0x4000000000000000_u64))), l21_inset_dir.clone()))), rt::apply_binary(rt::BinOp::Mul, l0_overlap.clone(), rt::index(l20_thisface_anch.clone(), &rt::Value::Num(f64::from_bits(0x4000000000000000_u64)))))), ], children: rt::Children::Compiled(&[&|fx: &dyn rt::ModuleCtx| { let mut parts: Vec<rt::Geo> = Vec::new();     parts.push(fx.call(&rt::ModuleCall { name: "default_tag", args: &[(None, rt::Value::string("remove")), (None, p_inside.clone()), ], children: rt::Children::Compiled(&[&|fx: &dyn rt::ModuleCtx| { let mut parts: Vec<rt::Geo> = Vec::new();     parts.push(fx.children()?);
+ Ok(fx.group(parts)) }, ]) })?);
+ Ok(fx.group(parts)) }, ]) })?);
+    fx.set_dollar("$attach_anchor", l24_sd);
+    fx.set_dollar("$attach_alignment", l23_sd);
+    fx.set_dollar("$align", l16_sd);
+    fx.set_dollar("$idx", l15_sd);
+    }
+    fx.set_dollar("$anchor", l10_sd);
+    fx.set_dollar("$align_msg", l8_sd);
+    }
+        fx.group(parts)
+    };
+    parts.push(l6_blk);
+    Ok(fx.group(parts))
+}
+
+
 /// Generated native for module `apply_folding_hinges_and_snaps` — geometry through the interpreter's own
 /// construction, so a generated module is what interpreting its reference builds.
 pub(super) fn apply_folding_hinges_and_snaps(fx: &dyn rt::ModuleCtx) -> rt::Result<rt::Geo> {
@@ -1101,6 +1247,122 @@ pub(super) fn assert_equal(fx: &dyn rt::ModuleCtx) -> rt::Result<rt::Geo> {
         fx.group(parts)
     };
     parts.push(l0_blk);
+    Ok(fx.group(parts))
+}
+
+
+/// Generated native for module `attach` — geometry through the interpreter's own
+/// construction, so a generated module is what interpreting its reference builds.
+pub(super) fn attach(fx: &dyn rt::ModuleCtx) -> rt::Result<rt::Geo> {
+    let p_parent = fx.args().get(0).cloned().unwrap_or(rt::Value::Undef);
+    let p_child = fx.args().get(1).cloned().unwrap_or(rt::Value::Undef);
+    let p_overlap = fx.args().get(2).cloned().unwrap_or(rt::Value::Undef);
+    let p_align = fx.args().get(3).cloned().unwrap_or(rt::Value::Undef);
+    let p_spin = fx.args().get(4).cloned().unwrap_or(rt::Value::Undef);
+    let p_norot = fx.args().get(5).cloned().unwrap_or(rt::Value::Undef);
+    let p_inset = fx.args().get(6).cloned().unwrap_or(rt::Value::Undef);
+    let p_shiftout = fx.args().get(7).cloned().unwrap_or(rt::Value::Undef);
+    let p_inside = fx.args().get(8).cloned().unwrap_or(rt::Value::Undef);
+    let p_from = fx.args().get(9).cloned().unwrap_or(rt::Value::Undef);
+    let p_to = fx.args().get(10).cloned().unwrap_or(rt::Value::Undef);
+    let mut parts: Vec<rt::Geo> = Vec::new();
+    let l0_dummy3 = { if !(rt::apply_binary(rt::BinOp::Lt, fx.call_fn(&rt::FnCall { name: "num_defined", args: &[(None, rt::build_vector(vec![p_to.clone(), p_child.clone()]))] })?, rt::Value::Num(f64::from_bits(0x4000000000000000_u64)))).is_truthy() { return Err(rt::assert_decline()); } { if !(rt::apply_binary(rt::BinOp::Lt, fx.call_fn(&rt::FnCall { name: "num_defined", args: &[(None, rt::build_vector(vec![p_from.clone(), p_parent.clone()]))] })?, rt::Value::Num(f64::from_bits(0x4000000000000000_u64)))).is_truthy() { return Err(rt::assert_decline()); } { if !(rt::Value::Bool(rt::apply_binary(rt::BinOp::Ne, p_spin.clone(), rt::Value::string("align")).is_truthy() || fx.call_fn(&rt::FnCall { name: "is_def", args: &[(None, p_align.clone())] })?.is_truthy())).is_truthy() { return Err(rt::assert_decline()); } { if !(rt::Value::Bool(fx.call_fn(&rt::FnCall { name: "is_finite", args: &[(None, p_spin.clone())] })?.is_truthy() || rt::apply_binary(rt::BinOp::Eq, p_spin.clone(), rt::Value::string("align")).is_truthy())).is_truthy() { return Err(rt::assert_decline()); } { if !(rt::Value::Bool(rt::Value::Bool(fx.call_fn(&rt::FnCall { name: "is_undef", args: &[(None, p_overlap.clone())] })?.is_truthy() || fx.call_fn(&rt::FnCall { name: "is_finite", args: &[(None, p_overlap.clone())] })?.is_truthy()).is_truthy() && rt::Value::Bool(rt::Value::Bool(fx.call_fn(&rt::FnCall { name: "is_def", args: &[(None, p_overlap.clone())] })?.is_truthy() || fx.call_fn(&rt::FnCall { name: "is_undef", args: &[(None, fx.dollar("$overlap"))] })?.is_truthy()).is_truthy() || fx.call_fn(&rt::FnCall { name: "is_finite", args: &[(None, fx.dollar("$overlap"))] })?.is_truthy()).is_truthy())).is_truthy() { return Err(rt::assert_decline()); } rt::Value::Undef } } } } };
+    let l1_removetag = p_inside.clone();
+    let l2_inside = if fx.dollar("$anchor_inside").is_truthy() { rt::apply_unary(rt::UnOp::Not, p_inside.clone()) } else { p_inside.clone() };
+    let l3_dummy = { if !(rt::apply_binary(rt::BinOp::Ne, fx.dollar("$parent_geom"), rt::Value::Undef)).is_truthy() { return Err(rt::assert_decline()); } { if !(rt::Value::Bool(rt::Value::Bool(fx.call_fn(&rt::FnCall { name: "is_undef", args: &[(None, p_child.clone())] })?.is_truthy() || fx.call_fn(&rt::FnCall { name: "is_string", args: &[(None, p_child.clone())] })?.is_truthy()).is_truthy() || rt::Value::Bool(fx.call_fn(&rt::FnCall { name: "is_vector", args: &[(None, p_child.clone())] })?.is_truthy() && rt::Value::Bool(rt::apply_binary(rt::BinOp::Eq, fx.call_fn(&rt::FnCall { name: "len", args: &[(None, p_child.clone())] })?, rt::Value::Num(f64::from_bits(0x4000000000000000_u64))).is_truthy() || rt::apply_binary(rt::BinOp::Eq, fx.call_fn(&rt::FnCall { name: "len", args: &[(None, p_child.clone())] })?, rt::Value::Num(f64::from_bits(0x4008000000000000_u64))).is_truthy()).is_truthy()).is_truthy())).is_truthy() { return Err(rt::assert_decline()); } { if !(rt::Value::Bool(fx.call_fn(&rt::FnCall { name: "is_undef", args: &[(None, p_align.clone())] })?.is_truthy() || rt::apply_unary(rt::UnOp::Not, fx.call_fn(&rt::FnCall { name: "is_string", args: &[(None, p_child.clone())] })?).is_truthy())).is_truthy() { return Err(rt::assert_decline()); } rt::Value::Undef } } };
+    let l4_two_d = fx.call_fn(&rt::FnCall { name: "_attach_geom_2d", args: &[(None, fx.dollar("$parent_geom"))] })?;
+    let l5_basegeom = if rt::apply_binary(rt::BinOp::Eq, rt::index(fx.dollar("$parent_geom"), &rt::Value::Num(f64::from_bits(0x0_u64))), rt::Value::string("conoid")).is_truthy() { fx.call_fn(&rt::FnCall { name: "attach_geom", args: &[(Some("r"), rt::Value::Num(f64::from_bits(0x4000000000000000_u64))), (Some("h"), rt::Value::Num(f64::from_bits(0x4000000000000000_u64))), (Some("axis"), rt::index(fx.dollar("$parent_geom"), &rt::Value::Num(f64::from_bits(0x4014000000000000_u64))))] })? } else { if rt::apply_binary(rt::BinOp::Eq, rt::index(fx.dollar("$parent_geom"), &rt::Value::Num(f64::from_bits(0x0_u64))), rt::Value::string("prismoid")).is_truthy() { fx.call_fn(&rt::FnCall { name: "attach_geom", args: &[(Some("size"), rt::build_vector(vec![rt::Value::Num(f64::from_bits(0x4000000000000000_u64)), rt::Value::Num(f64::from_bits(0x4000000000000000_u64)), rt::Value::Num(f64::from_bits(0x4000000000000000_u64))])), (Some("axis"), rt::index(fx.dollar("$parent_geom"), &rt::Value::Num(f64::from_bits(0x4010000000000000_u64))))] })? } else { fx.call_fn(&rt::FnCall { name: "attach_geom", args: &[(Some("size"), rt::build_vector(vec![rt::Value::Num(f64::from_bits(0x4000000000000000_u64)), rt::Value::Num(f64::from_bits(0x4000000000000000_u64)), rt::Value::Num(f64::from_bits(0x4000000000000000_u64))]))] })? } };
+    let l6_childgeom = fx.call_fn(&rt::FnCall { name: "attach_geom", args: &[(None, rt::build_vector(vec![rt::Value::Num(f64::from_bits(0x4000000000000000_u64)), rt::Value::Num(f64::from_bits(0x4000000000000000_u64)), rt::Value::Num(f64::from_bits(0x4000000000000000_u64))]))] })?;
+    let l7_child_abstract_anchor = if rt::Value::Bool(fx.call_fn(&rt::FnCall { name: "is_vector", args: &[(None, p_child.clone())] })?.is_truthy() && rt::apply_unary(rt::UnOp::Not, l4_two_d.clone()).is_truthy()).is_truthy() { fx.call_fn(&rt::FnCall { name: "_find_anchor", args: &[(None, fx.call_fn(&rt::FnCall { name: "_make_anchor_legal", args: &[(None, p_child.clone()), (None, l6_childgeom.clone())] })?), (None, l6_childgeom.clone())] })? } else { rt::Value::Undef };
+    let l8_overlap = if rt::apply_binary(rt::BinOp::Ne, p_overlap.clone(), rt::Value::Undef).is_truthy() { p_overlap.clone() } else { fx.dollar("$overlap") };
+    let l9_parent = fx.call_fn(&rt::FnCall { name: "first_defined", args: &[(None, rt::build_vector(vec![p_parent.clone(), p_from.clone()]))] })?;
+    let l10_anchors = if rt::Value::Bool(fx.call_fn(&rt::FnCall { name: "is_vector", args: &[(None, l9_parent.clone())] })?.is_truthy() || fx.call_fn(&rt::FnCall { name: "is_string", args: &[(None, l9_parent.clone())] })?.is_truthy()).is_truthy() { rt::build_vector(vec![l9_parent.clone()]) } else { l9_parent.clone() };
+    let l11_align_list = if fx.call_fn(&rt::FnCall { name: "is_undef", args: &[(None, p_align.clone())] })?.is_truthy() { rt::build_vector(vec![rt::Value::Undef]) } else { if rt::Value::Bool(fx.call_fn(&rt::FnCall { name: "is_vector", args: &[(None, p_align.clone())] })?.is_truthy() || fx.call_fn(&rt::FnCall { name: "is_string", args: &[(None, p_align.clone())] })?.is_truthy()).is_truthy() { rt::build_vector(vec![p_align.clone()]) } else { p_align.clone() } };
+    let l12_dummy4 = { if !(rt::Value::Bool(fx.call_fn(&rt::FnCall { name: "is_string", args: &[(None, l9_parent.clone())] })?.is_truthy() || fx.call_fn(&rt::FnCall { name: "is_list", args: &[(None, l9_parent.clone())] })?.is_truthy())).is_truthy() { return Err(rt::assert_decline()); } { if !(rt::Value::Bool(rt::apply_binary(rt::BinOp::Eq, p_spin.clone(), rt::Value::Num(f64::from_bits(0x0_u64))).is_truthy() || rt::Value::Bool(rt::apply_unary(rt::UnOp::Not, l4_two_d.clone()).is_truthy() || fx.call_fn(&rt::FnCall { name: "is_undef", args: &[(None, p_child.clone())] })?.is_truthy()).is_truthy())).is_truthy() { return Err(rt::assert_decline()); } rt::Value::Undef } };
+    let l13_child_temp = fx.call_fn(&rt::FnCall { name: "first_defined", args: &[(None, rt::build_vector(vec![p_child.clone(), p_to.clone()]))] })?;
+    let l14_child = if l4_two_d.clone().is_truthy() { fx.call_fn(&rt::FnCall { name: "_force_anchor_2d", args: &[(None, l13_child_temp.clone())] })? } else { l13_child_temp.clone() };
+    let l15_dummy2 = { if !(rt::Value::Bool(rt::apply_binary(rt::BinOp::Eq, l11_align_list.clone(), rt::build_vector(vec![rt::Value::Undef])).is_truthy() || fx.call_fn(&rt::FnCall { name: "is_def", args: &[(None, l14_child.clone())] })?.is_truthy())).is_truthy() { return Err(rt::assert_decline()); } { if !(rt::Value::Bool(rt::apply_unary(rt::UnOp::Not, l2_inside.clone()).is_truthy() || fx.call_fn(&rt::FnCall { name: "is_def", args: &[(None, l14_child.clone())] })?.is_truthy())).is_truthy() { return Err(rt::assert_decline()); } { if !(rt::Value::Bool(rt::apply_binary(rt::BinOp::Eq, p_inset.clone(), rt::Value::Num(f64::from_bits(0x0_u64))).is_truthy() || fx.call_fn(&rt::FnCall { name: "is_def", args: &[(None, l14_child.clone())] })?.is_truthy())).is_truthy() { return Err(rt::assert_decline()); } { if !(rt::Value::Bool(rt::apply_binary(rt::BinOp::Eq, p_inset.clone(), rt::Value::Num(f64::from_bits(0x0_u64))).is_truthy() || fx.call_fn(&rt::FnCall { name: "is_def", args: &[(None, p_align.clone())] })?.is_truthy())).is_truthy() { return Err(rt::assert_decline()); } { if !(rt::Value::Bool(rt::apply_binary(rt::BinOp::Eq, p_shiftout.clone(), rt::Value::Num(f64::from_bits(0x0_u64))).is_truthy() || fx.call_fn(&rt::FnCall { name: "is_def", args: &[(None, l14_child.clone())] })?.is_truthy())).is_truthy() { return Err(rt::assert_decline()); } rt::Value::Undef } } } } };
+    let l16_factor = if l2_inside.clone().is_truthy() { rt::apply_unary(rt::UnOp::Neg, rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64))) } else { rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64)) };
+    fx.set_dollar("$attach_to", l14_child.clone());
+    let l17_blk = {
+        let mut parts: Vec<rt::Geo> = Vec::new();
+    if (fx.call_fn(&rt::FnCall { name: "is_def", args: &[(None, p_to.clone())] })?).is_truthy() {
+    fx.echo(&[(None, rt::Value::string("The 'to' option to attach() is deprecated and will be removed in the future.  Use 'child' instead.")), ])?;
+    } else {
+    }
+    if (fx.call_fn(&rt::FnCall { name: "is_def", args: &[(None, p_from.clone())] })?).is_truthy() {
+    fx.echo(&[(None, rt::Value::string("The 'from' option to attach(0 is deprecated and will be removed in the future.  Use 'parent' instead")), ])?;
+    } else {
+    }
+    if (p_norot.clone()).is_truthy() {
+    fx.echo(&[(None, rt::Value::string("The 'norot' option to attach() is deprecated and will be removed in the future.  Use position() instead.")), ])?;
+    } else {
+    }
+    parts.push(fx.call(&rt::ModuleCall { name: "req_children", args: &[(None, fx.dollar("$children")), ], children: rt::Children::None })?);
+    for l18_anch_ind in rt::iter_values_native(&fx.call_fn(&rt::FnCall { name: "idx", args: &[(None, l10_anchors.clone())] })?) {
+    let l19_dummy = { if !(rt::Value::Bool(fx.call_fn(&rt::FnCall { name: "is_string", args: &[(None, rt::index(l10_anchors.clone(), &l18_anch_ind.clone()))] })?.is_truthy() || rt::Value::Bool(fx.call_fn(&rt::FnCall { name: "is_vector", args: &[(None, rt::index(l10_anchors.clone(), &l18_anch_ind.clone()))] })?.is_truthy() && rt::Value::Bool(rt::apply_binary(rt::BinOp::Eq, fx.call_fn(&rt::FnCall { name: "len", args: &[(None, rt::index(l10_anchors.clone(), &l18_anch_ind.clone()))] })?, rt::Value::Num(f64::from_bits(0x4000000000000000_u64))).is_truthy() || rt::apply_binary(rt::BinOp::Eq, fx.call_fn(&rt::FnCall { name: "len", args: &[(None, rt::index(l10_anchors.clone(), &l18_anch_ind.clone()))] })?, rt::Value::Num(f64::from_bits(0x4008000000000000_u64))).is_truthy()).is_truthy()).is_truthy())).is_truthy() { return Err(rt::assert_decline()); } { if !(rt::Value::Bool(rt::apply_binary(rt::BinOp::Eq, l11_align_list.clone(), rt::build_vector(vec![rt::Value::Undef])).is_truthy() || rt::apply_unary(rt::UnOp::Not, fx.call_fn(&rt::FnCall { name: "is_string", args: &[(None, rt::index(l10_anchors.clone(), &l18_anch_ind.clone()))] })?).is_truthy())).is_truthy() { return Err(rt::assert_decline()); } rt::Value::Undef } };
+    let l20_anchor = if fx.call_fn(&rt::FnCall { name: "is_string", args: &[(None, rt::index(l10_anchors.clone(), &l18_anch_ind.clone()))] })?.is_truthy() { rt::index(l10_anchors.clone(), &l18_anch_ind.clone()) } else { if l4_two_d.clone().is_truthy() { fx.call_fn(&rt::FnCall { name: "_force_anchor_2d", args: &[(None, rt::index(l10_anchors.clone(), &l18_anch_ind.clone()))] })? } else { fx.call_fn(&rt::FnCall { name: "point3d", args: &[(None, rt::index(l10_anchors.clone(), &l18_anch_ind.clone()))] })? } };
+    let l21_sd = fx.dollar("$anchor");
+    fx.set_dollar("$anchor", l20_anchor.clone());
+    let l22_anchor_data = fx.call_fn(&rt::FnCall { name: "_find_anchor", args: &[(None, l20_anchor.clone()), (None, fx.dollar("$parent_geom"))] })?;
+    let l23_sd = fx.dollar("$edge_angle");
+    fx.set_dollar("$edge_angle", if rt::apply_binary(rt::BinOp::Eq, fx.call_fn(&rt::FnCall { name: "len", args: &[(None, l22_anchor_data.clone())] })?, rt::Value::Num(f64::from_bits(0x4014000000000000_u64))).is_truthy() { fx.call_fn(&rt::FnCall { name: "struct_val", args: &[(None, rt::index(l22_anchor_data.clone(), &rt::Value::Num(f64::from_bits(0x4010000000000000_u64)))), (None, rt::Value::string("edge_angle"))] })? } else { rt::Value::Undef });
+    let l24_sd = fx.dollar("$edge_length");
+    fx.set_dollar("$edge_length", if rt::apply_binary(rt::BinOp::Eq, fx.call_fn(&rt::FnCall { name: "len", args: &[(None, l22_anchor_data.clone())] })?, rt::Value::Num(f64::from_bits(0x4014000000000000_u64))).is_truthy() { fx.call_fn(&rt::FnCall { name: "struct_val", args: &[(None, rt::index(l22_anchor_data.clone(), &rt::Value::Num(f64::from_bits(0x4010000000000000_u64)))), (None, rt::Value::string("edge_length"))] })? } else { rt::Value::Undef });
+    let l25_sd = fx.dollar("$edge_end1");
+    fx.set_dollar("$edge_end1", if rt::apply_binary(rt::BinOp::Eq, fx.call_fn(&rt::FnCall { name: "len", args: &[(None, l22_anchor_data.clone())] })?, rt::Value::Num(f64::from_bits(0x4014000000000000_u64))).is_truthy() { fx.call_fn(&rt::FnCall { name: "struct_val", args: &[(None, rt::index(l22_anchor_data.clone(), &rt::Value::Num(f64::from_bits(0x4010000000000000_u64)))), (None, rt::Value::string("vec"))] })? } else { rt::Value::Undef });
+    let l26_anchor_pos = rt::index(l22_anchor_data.clone(), &rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64)));
+    let l27_anchor_dir = rt::apply_binary(rt::BinOp::Mul, l16_factor.clone(), rt::index(l22_anchor_data.clone(), &rt::Value::Num(f64::from_bits(0x4000000000000000_u64))));
+    let l29_anchor_spin = if rt::Value::Bool(rt::Value::Bool(rt::Value::Bool(l4_two_d.clone().is_truthy() || rt::apply_unary(rt::UnOp::Not, l2_inside.clone()).is_truthy()).is_truthy() || rt::apply_binary(rt::BinOp::Eq, l20_anchor.clone(), rt::Value::num_list(vec![f64::from_bits(0x0_u64), f64::from_bits(0x0_u64), f64::from_bits(0x3ff0000000000000_u64)])).is_truthy()).is_truthy() || rt::apply_binary(rt::BinOp::Eq, l20_anchor.clone(), rt::Value::num_list(vec![f64::from_bits(0x0_u64), f64::from_bits(0x0_u64), f64::from_bits(0xbff0000000000000_u64)])).is_truthy()).is_truthy() { rt::index(l22_anchor_data.clone(), &rt::Value::Num(f64::from_bits(0x4008000000000000_u64))) } else { { let l28_spin_dir = fx.call_fn(&rt::FnCall { name: "rot", args: &[(None, rt::index(l22_anchor_data.clone(), &rt::Value::Num(f64::from_bits(0x4008000000000000_u64)))), (Some("from"), rt::Value::num_list(vec![f64::from_bits(0x0_u64), f64::from_bits(0x0_u64), f64::from_bits(0x3ff0000000000000_u64)])), (Some("to"), rt::apply_unary(rt::UnOp::Neg, l27_anchor_dir.clone())), (Some("p"), rt::Value::num_list(vec![f64::from_bits(0x0_u64), f64::from_bits(0x3ff0000000000000_u64), f64::from_bits(0x0_u64)]))] })?; fx.call_fn(&rt::FnCall { name: "_compute_spin", args: &[(None, l27_anchor_dir.clone()), (None, l28_spin_dir.clone())] })? } };
+    let l30_parent_abstract_anchor = if rt::Value::Bool(fx.call_fn(&rt::FnCall { name: "is_vector", args: &[(None, l20_anchor.clone())] })?.is_truthy() && rt::apply_unary(rt::UnOp::Not, l4_two_d.clone()).is_truthy()).is_truthy() { fx.call_fn(&rt::FnCall { name: "_find_anchor", args: &[(None, fx.call_fn(&rt::FnCall { name: "_make_anchor_legal", args: &[(None, l20_anchor.clone()), (None, l5_basegeom.clone())] })?), (None, l5_basegeom.clone())] })? } else { rt::Value::Undef };
+    for l31_align_ind in rt::iter_values_native(&fx.call_fn(&rt::FnCall { name: "idx", args: &[(None, l11_align_list.clone())] })?) {
+    let l32_align = if fx.call_fn(&rt::FnCall { name: "is_undef", args: &[(None, rt::index(l11_align_list.clone(), &l31_align_ind.clone()))] })?.is_truthy() { rt::Value::Undef } else { { if !(rt::Value::Bool(fx.call_fn(&rt::FnCall { name: "is_vector", args: &[(None, rt::index(l11_align_list.clone(), &l31_align_ind.clone())), (None, rt::Value::Num(f64::from_bits(0x4000000000000000_u64)))] })?.is_truthy() || fx.call_fn(&rt::FnCall { name: "is_vector", args: &[(None, rt::index(l11_align_list.clone(), &l31_align_ind.clone())), (None, rt::Value::Num(f64::from_bits(0x4008000000000000_u64)))] })?.is_truthy())).is_truthy() { return Err(rt::assert_decline()); } if l4_two_d.clone().is_truthy() { fx.call_fn(&rt::FnCall { name: "_force_anchor_2d", args: &[(None, rt::index(l11_align_list.clone(), &l31_align_ind.clone()))] })? } else { fx.call_fn(&rt::FnCall { name: "point3d", args: &[(None, rt::index(l11_align_list.clone(), &l31_align_ind.clone()))] })? } } };
+    let l37_spin = if fx.call_fn(&rt::FnCall { name: "is_num", args: &[(None, p_spin.clone())] })?.is_truthy() { p_spin.clone() } else { if rt::apply_binary(rt::BinOp::Eq, l32_align.clone(), rt::Value::num_list(vec![f64::from_bits(0x0_u64), f64::from_bits(0x0_u64), f64::from_bits(0x0_u64)])).is_truthy() { rt::Value::Num(f64::from_bits(0x0_u64)) } else { if rt::apply_binary(rt::BinOp::Eq, fx.call_fn(&rt::FnCall { name: "sum", args: &[(None, fx.call_fn(&rt::FnCall { name: "v_abs", args: &[(None, l20_anchor.clone())] })?)] })?, rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64))).is_truthy() { { let l33_spindir = if fx.call_fn(&rt::FnCall { name: "in_list", args: &[(None, l20_anchor.clone()), (None, rt::build_vector(vec![rt::Value::num_list(vec![f64::from_bits(0x0_u64), f64::from_bits(0x0_u64), f64::from_bits(0x3ff0000000000000_u64)]), rt::Value::num_list(vec![f64::from_bits(0x0_u64), f64::from_bits(0x0_u64), f64::from_bits(0xbff0000000000000_u64)])]))] })?.is_truthy() { rt::Value::num_list(vec![f64::from_bits(0x0_u64), f64::from_bits(0x3ff0000000000000_u64), f64::from_bits(0x0_u64)]) } else { rt::Value::num_list(vec![f64::from_bits(0x0_u64), f64::from_bits(0x0_u64), f64::from_bits(0x3ff0000000000000_u64)]) }; let l34_proj = fx.call_fn(&rt::FnCall { name: "project_plane", args: &[(None, fx.call_fn(&rt::FnCall { name: "point4d", args: &[(None, l20_anchor.clone())] })?), (None, rt::build_vector(vec![l33_spindir.clone(), l32_align.clone()]))] })?; let l35_ang = rt::apply_binary(rt::BinOp::Sub, fx.call_fn(&rt::FnCall { name: "v_theta", args: &[(None, rt::index(l34_proj.clone(), &rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64))))] })?, fx.call_fn(&rt::FnCall { name: "v_theta", args: &[(None, rt::index(l34_proj.clone(), &rt::Value::Num(f64::from_bits(0x0_u64))))] })?); l35_ang.clone() } } else { { let l36_nativeback = fx.call_fn(&rt::FnCall { name: "apply", args: &[(None, rt::apply_binary(rt::BinOp::Mul, fx.call_fn(&rt::FnCall { name: "rot", args: &[(Some("to"), rt::index(l30_parent_abstract_anchor.clone(), &rt::Value::Num(f64::from_bits(0x4000000000000000_u64)))), (Some("from"), rt::Value::num_list(vec![f64::from_bits(0x0_u64), f64::from_bits(0x0_u64), f64::from_bits(0x3ff0000000000000_u64)]))] })?, fx.call_fn(&rt::FnCall { name: "affine3d_zrot", args: &[(None, rt::index(l30_parent_abstract_anchor.clone(), &rt::Value::Num(f64::from_bits(0x4008000000000000_u64))))] })?)), (None, rt::Value::num_list(vec![f64::from_bits(0x0_u64), f64::from_bits(0x3ff0000000000000_u64), f64::from_bits(0x0_u64)]))] })?; if rt::apply_binary(rt::BinOp::Lt, rt::apply_binary(rt::BinOp::Mul, l36_nativeback.clone(), l32_align.clone()), rt::Value::Num(f64::from_bits(0x0_u64))).is_truthy() { rt::apply_unary(rt::UnOp::Neg, rt::Value::Num(f64::from_bits(0x4066800000000000_u64))) } else { rt::Value::Num(f64::from_bits(0x0_u64)) } } } } };
+    let l38_sd = fx.dollar("$idx");
+    fx.set_dollar("$idx", rt::apply_binary(rt::BinOp::Add, l31_align_ind.clone(), rt::apply_binary(rt::BinOp::Mul, fx.call_fn(&rt::FnCall { name: "len", args: &[(None, l11_align_list.clone())] })?, l18_anch_ind.clone())));
+    let l39_sd = fx.dollar("$align");
+    fx.set_dollar("$align", l32_align.clone());
+    let l42_goodcyl = if rt::Value::Bool(rt::Value::Bool(rt::apply_binary(rt::BinOp::Ne, rt::index(fx.dollar("$parent_geom"), &rt::Value::Num(f64::from_bits(0x0_u64))), rt::Value::string("conoid")).is_truthy() || fx.call_fn(&rt::FnCall { name: "is_undef", args: &[(None, l32_align.clone())] })?.is_truthy()).is_truthy() || rt::apply_binary(rt::BinOp::Eq, l32_align.clone(), rt::Value::num_list(vec![f64::from_bits(0x0_u64), f64::from_bits(0x0_u64), f64::from_bits(0x0_u64)])).is_truthy()).is_truthy() { rt::Value::Bool(true) } else { { let l40_align = fx.call_fn(&rt::FnCall { name: "rot", args: &[(Some("from"), rt::index(fx.dollar("$parent_geom"), &rt::Value::Num(f64::from_bits(0x4014000000000000_u64)))), (Some("to"), rt::Value::num_list(vec![f64::from_bits(0x0_u64), f64::from_bits(0x0_u64), f64::from_bits(0x3ff0000000000000_u64)])), (Some("p"), l32_align.clone())] })?; let l41_anchor = fx.call_fn(&rt::FnCall { name: "rot", args: &[(Some("from"), rt::index(fx.dollar("$parent_geom"), &rt::Value::Num(f64::from_bits(0x4014000000000000_u64)))), (Some("to"), rt::Value::num_list(vec![f64::from_bits(0x0_u64), f64::from_bits(0x0_u64), f64::from_bits(0x3ff0000000000000_u64)])), (Some("p"), l20_anchor.clone())] })?; rt::Value::Bool(rt::Value::Bool(rt::Value::Bool(rt::apply_binary(rt::BinOp::Eq, l41_anchor.clone(), rt::Value::num_list(vec![f64::from_bits(0x0_u64), f64::from_bits(0x0_u64), f64::from_bits(0x3ff0000000000000_u64)])).is_truthy() || rt::apply_binary(rt::BinOp::Eq, l41_anchor.clone(), rt::Value::num_list(vec![f64::from_bits(0x0_u64), f64::from_bits(0x0_u64), f64::from_bits(0xbff0000000000000_u64)])).is_truthy()).is_truthy() || rt::apply_binary(rt::BinOp::Eq, l40_align.clone(), rt::Value::num_list(vec![f64::from_bits(0x0_u64), f64::from_bits(0x0_u64), f64::from_bits(0x3ff0000000000000_u64)])).is_truthy()).is_truthy() || rt::apply_binary(rt::BinOp::Eq, l40_align.clone(), rt::Value::num_list(vec![f64::from_bits(0x0_u64), f64::from_bits(0x0_u64), f64::from_bits(0xbff0000000000000_u64)])).is_truthy()) } };
+    let l43_badcorner = rt::Value::Bool(rt::Value::Bool(rt::Value::Bool(rt::apply_unary(rt::UnOp::Not, fx.call_fn(&rt::FnCall { name: "in_list", args: &[(None, rt::index(fx.dollar("$parent_geom"), &rt::Value::Num(f64::from_bits(0x0_u64)))), (None, rt::build_vector(vec![rt::Value::string("conoid"), rt::Value::string("spheroid")]))] })?).is_truthy() && rt::apply_unary(rt::UnOp::Not, fx.call_fn(&rt::FnCall { name: "is_undef", args: &[(None, l32_align.clone())] })?).is_truthy()).is_truthy() && rt::apply_binary(rt::BinOp::Ne, l32_align.clone(), rt::Value::num_list(vec![f64::from_bits(0x0_u64), f64::from_bits(0x0_u64), f64::from_bits(0x0_u64)])).is_truthy()).is_truthy() && rt::apply_binary(rt::BinOp::Eq, fx.call_fn(&rt::FnCall { name: "sum", args: &[(None, fx.call_fn(&rt::FnCall { name: "v_abs", args: &[(None, l20_anchor.clone())] })?)] })?, rt::Value::Num(f64::from_bits(0x4008000000000000_u64))).is_truthy());
+    let l44_badsphere = rt::Value::Bool(rt::Value::Bool(rt::apply_binary(rt::BinOp::Eq, rt::index(fx.dollar("$parent_geom"), &rt::Value::Num(f64::from_bits(0x0_u64))), rt::Value::string("spheroid")).is_truthy() && rt::apply_unary(rt::UnOp::Not, fx.call_fn(&rt::FnCall { name: "is_undef", args: &[(None, l32_align.clone())] })?).is_truthy()).is_truthy() && rt::apply_binary(rt::BinOp::Ne, l32_align.clone(), rt::Value::num_list(vec![f64::from_bits(0x0_u64), f64::from_bits(0x0_u64), f64::from_bits(0x0_u64)])).is_truthy());
+    let l45_dummy = { if !(rt::Value::Bool(fx.call_fn(&rt::FnCall { name: "is_undef", args: &[(None, l32_align.clone())] })?.is_truthy() || fx.call_fn(&rt::FnCall { name: "all_zero", args: &[(None, fx.call_fn(&rt::FnCall { name: "v_mul", args: &[(None, l20_anchor.clone()), (None, l32_align.clone())] })?)] })?.is_truthy())).is_truthy() { return Err(rt::assert_decline()); } { if !(l42_goodcyl.clone()).is_truthy() { return Err(rt::assert_decline()); } { if !(rt::apply_unary(rt::UnOp::Not, l43_badcorner.clone())).is_truthy() { return Err(rt::assert_decline()); } { if !(rt::apply_unary(rt::UnOp::Not, l44_badsphere.clone())).is_truthy() { return Err(rt::assert_decline()); } rt::Value::Undef } } } };
+    let l46_pos = if fx.call_fn(&rt::FnCall { name: "is_undef", args: &[(None, l32_align.clone())] })?.is_truthy() { rt::index(l22_anchor_data.clone(), &rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64))) } else { rt::index(fx.call_fn(&rt::FnCall { name: "_find_anchor", args: &[(None, rt::apply_binary(rt::BinOp::Add, l20_anchor.clone(), l32_align.clone())), (None, fx.dollar("$parent_geom"))] })?, &rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64))) };
+    let l47_sd = fx.dollar("$attach_anchor");
+    fx.set_dollar("$attach_anchor", fx.call_fn(&rt::FnCall { name: "list_set", args: &[(None, l22_anchor_data.clone()), (None, rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64))), (None, l46_pos.clone())] })?);
+    let l48_child_adjustment = if fx.call_fn(&rt::FnCall { name: "is_undef", args: &[(None, l32_align.clone())] })?.is_truthy() { rt::Value::num_list(vec![f64::from_bits(0x0_u64), f64::from_bits(0x0_u64), f64::from_bits(0x0_u64)]) } else { if l4_two_d.clone().is_truthy() { fx.call_fn(&rt::FnCall { name: "rot", args: &[(Some("to"), l14_child.clone()), (Some("from"), rt::apply_binary(rt::BinOp::Mul, rt::apply_unary(rt::UnOp::Neg, l16_factor.clone()), l20_anchor.clone())), (Some("p"), l32_align.clone())] })? } else { fx.call_fn(&rt::FnCall { name: "apply", args: &[(None, rt::apply_binary(rt::BinOp::Mul, rt::apply_binary(rt::BinOp::Mul, rt::apply_binary(rt::BinOp::Mul, rt::apply_binary(rt::BinOp::Mul, rt::apply_binary(rt::BinOp::Mul, fx.call_fn(&rt::FnCall { name: "rot", args: &[(Some("to"), rt::index(l7_child_abstract_anchor.clone(), &rt::Value::Num(f64::from_bits(0x4000000000000000_u64)))), (Some("from"), rt::Value::num_list(vec![f64::from_bits(0x0_u64), f64::from_bits(0x0_u64), f64::from_bits(0x3ff0000000000000_u64)]))] })?, fx.call_fn(&rt::FnCall { name: "affine3d_zrot", args: &[(None, rt::index(l7_child_abstract_anchor.clone(), &rt::Value::Num(f64::from_bits(0x4008000000000000_u64))))] })?), fx.call_fn(&rt::FnCall { name: "affine3d_yrot", args: &[(None, if l2_inside.clone().is_truthy() { rt::Value::Num(f64::from_bits(0x0_u64)) } else { rt::Value::Num(f64::from_bits(0x4066800000000000_u64)) })] })?), fx.call_fn(&rt::FnCall { name: "affine3d_zrot", args: &[(None, rt::apply_unary(rt::UnOp::Neg, rt::index(l30_parent_abstract_anchor.clone(), &rt::Value::Num(f64::from_bits(0x4008000000000000_u64)))))] })?), fx.call_fn(&rt::FnCall { name: "rot", args: &[(Some("from"), rt::index(l30_parent_abstract_anchor.clone(), &rt::Value::Num(f64::from_bits(0x4000000000000000_u64)))), (Some("to"), rt::Value::num_list(vec![f64::from_bits(0x0_u64), f64::from_bits(0x0_u64), f64::from_bits(0x3ff0000000000000_u64)]))] })?), fx.call_fn(&rt::FnCall { name: "rot", args: &[(Some("v"), l20_anchor.clone()), (None, rt::apply_unary(rt::UnOp::Neg, l37_spin.clone()))] })?)), (None, l32_align.clone())] })? } };
+    let l49_sd = fx.dollar("$anchor_override");
+    fx.set_dollar("$anchor_override", if fx.call_fn(&rt::FnCall { name: "all_zero", args: &[(None, l48_child_adjustment.clone())] })?.is_truthy() { if l2_inside.clone().is_truthy() { l14_child.clone() } else { rt::Value::Undef } } else { rt::apply_binary(rt::BinOp::Add, l14_child.clone(), l48_child_adjustment.clone()) });
+    let l50_reference = if l4_two_d.clone().is_truthy() { rt::Value::num_list(vec![f64::from_bits(0x0_u64), f64::from_bits(0x3ff0000000000000_u64), f64::from_bits(0x0_u64)]) } else { rt::Value::num_list(vec![f64::from_bits(0x0_u64), f64::from_bits(0x0_u64), f64::from_bits(0x3ff0000000000000_u64)]) };
+    let l51_inset_dir = if fx.call_fn(&rt::FnCall { name: "is_undef", args: &[(None, l32_align.clone())] })?.is_truthy() { rt::Value::num_list(vec![f64::from_bits(0x0_u64), f64::from_bits(0x0_u64), f64::from_bits(0x0_u64)]) } else { if l4_two_d.clone().is_truthy() { fx.call_fn(&rt::FnCall { name: "rot", args: &[(Some("to"), l50_reference.clone()), (Some("from"), l20_anchor.clone()), (Some("p"), l32_align.clone())] })? } else { fx.call_fn(&rt::FnCall { name: "apply", args: &[(None, rt::apply_binary(rt::BinOp::Mul, rt::apply_binary(rt::BinOp::Mul, rt::apply_binary(rt::BinOp::Mul, fx.call_fn(&rt::FnCall { name: "affine3d_yrot", args: &[(None, if l2_inside.clone().is_truthy() { rt::Value::Num(f64::from_bits(0x4066800000000000_u64)) } else { rt::Value::Num(f64::from_bits(0x0_u64)) })] })?, fx.call_fn(&rt::FnCall { name: "affine3d_zrot", args: &[(None, rt::apply_unary(rt::UnOp::Neg, rt::index(l30_parent_abstract_anchor.clone(), &rt::Value::Num(f64::from_bits(0x4008000000000000_u64)))))] })?), fx.call_fn(&rt::FnCall { name: "rot", args: &[(Some("from"), rt::index(l30_parent_abstract_anchor.clone(), &rt::Value::Num(f64::from_bits(0x4000000000000000_u64)))), (Some("to"), rt::Value::num_list(vec![f64::from_bits(0x0_u64), f64::from_bits(0x0_u64), f64::from_bits(0x3ff0000000000000_u64)]))] })?), fx.call_fn(&rt::FnCall { name: "rot", args: &[(Some("v"), l20_anchor.clone()), (None, rt::apply_unary(rt::UnOp::Neg, l37_spin.clone()))] })?)), (None, l32_align.clone())] })? } };
+    let l52_spinaxis = if l4_two_d.clone().is_truthy() { rt::Value::num_list(vec![f64::from_bits(0x0_u64), f64::from_bits(0x0_u64), f64::from_bits(0x3ff0000000000000_u64)]) } else { l27_anchor_dir.clone() };
+    let l53_olap = rt::apply_binary(rt::BinOp::Add, rt::apply_binary(rt::BinOp::Sub, rt::apply_binary(rt::BinOp::Mul, rt::apply_unary(rt::UnOp::Neg, l8_overlap.clone()), l50_reference.clone()), rt::apply_binary(rt::BinOp::Mul, p_inset.clone(), l51_inset_dir.clone())), rt::apply_binary(rt::BinOp::Mul, p_shiftout.clone(), rt::apply_binary(rt::BinOp::Add, l51_inset_dir.clone(), rt::apply_binary(rt::BinOp::Mul, rt::apply_binary(rt::BinOp::Mul, l16_factor.clone(), l50_reference.clone()), if fx.dollar("$anchor_inside").is_truthy() { rt::apply_unary(rt::UnOp::Neg, rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64))) } else { rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64)) }))));
+    if (rt::Value::Bool(p_norot.clone().is_truthy() || rt::Value::Bool(fx.call_fn(&rt::FnCall { name: "approx", args: &[(None, l27_anchor_dir.clone()), (None, l50_reference.clone())] })?.is_truthy() && rt::apply_binary(rt::BinOp::Eq, l29_anchor_spin.clone(), rt::Value::Num(f64::from_bits(0x0_u64))).is_truthy()).is_truthy())).is_truthy() {
+    parts.push(fx.call(&rt::ModuleCall { name: "translate", args: &[(None, l46_pos.clone()), ], children: rt::Children::Compiled(&[&|fx: &dyn rt::ModuleCtx| { let mut parts: Vec<rt::Geo> = Vec::new();     parts.push(fx.call(&rt::ModuleCall { name: "rot", args: &[(Some("v"), l52_spinaxis.clone()), (Some("a"), rt::apply_binary(rt::BinOp::Mul, l16_factor.clone(), l37_spin.clone())), ], children: rt::Children::Compiled(&[&|fx: &dyn rt::ModuleCtx| { let mut parts: Vec<rt::Geo> = Vec::new();     parts.push(fx.call(&rt::ModuleCall { name: "translate", args: &[(None, l53_olap.clone()), ], children: rt::Children::Compiled(&[&|fx: &dyn rt::ModuleCtx| { let mut parts: Vec<rt::Geo> = Vec::new();     parts.push(fx.call(&rt::ModuleCall { name: "default_tag", args: &[(None, rt::Value::string("remove")), (None, l1_removetag.clone()), ], children: rt::Children::Compiled(&[&|fx: &dyn rt::ModuleCtx| { let mut parts: Vec<rt::Geo> = Vec::new();     parts.push(fx.children()?);
+ Ok(fx.group(parts)) }, ]) })?);
+ Ok(fx.group(parts)) }, ]) })?);
+ Ok(fx.group(parts)) }, ]) })?);
+ Ok(fx.group(parts)) }, ]) })?);
+    } else {
+    parts.push(fx.call(&rt::ModuleCall { name: "translate", args: &[(None, l46_pos.clone()), ], children: rt::Children::Compiled(&[&|fx: &dyn rt::ModuleCtx| { let mut parts: Vec<rt::Geo> = Vec::new();     parts.push(fx.call(&rt::ModuleCall { name: "rot", args: &[(Some("v"), l52_spinaxis.clone()), (Some("a"), rt::apply_binary(rt::BinOp::Mul, l16_factor.clone(), l37_spin.clone())), ], children: rt::Children::Compiled(&[&|fx: &dyn rt::ModuleCtx| { let mut parts: Vec<rt::Geo> = Vec::new();     parts.push(fx.call(&rt::ModuleCall { name: "rot", args: &[(None, l29_anchor_spin.clone()), (Some("from"), l50_reference.clone()), (Some("to"), l27_anchor_dir.clone()), ], children: rt::Children::Compiled(&[&|fx: &dyn rt::ModuleCtx| { let mut parts: Vec<rt::Geo> = Vec::new();     parts.push(fx.call(&rt::ModuleCall { name: "translate", args: &[(None, l53_olap.clone()), ], children: rt::Children::Compiled(&[&|fx: &dyn rt::ModuleCtx| { let mut parts: Vec<rt::Geo> = Vec::new();     parts.push(fx.call(&rt::ModuleCall { name: "default_tag", args: &[(None, rt::Value::string("remove")), (None, l1_removetag.clone()), ], children: rt::Children::Compiled(&[&|fx: &dyn rt::ModuleCtx| { let mut parts: Vec<rt::Geo> = Vec::new();     parts.push(fx.children()?);
+ Ok(fx.group(parts)) }, ]) })?);
+ Ok(fx.group(parts)) }, ]) })?);
+ Ok(fx.group(parts)) }, ]) })?);
+ Ok(fx.group(parts)) }, ]) })?);
+ Ok(fx.group(parts)) }, ]) })?);
+    }
+    fx.set_dollar("$anchor_override", l49_sd);
+    fx.set_dollar("$attach_anchor", l47_sd);
+    fx.set_dollar("$align", l39_sd);
+    fx.set_dollar("$idx", l38_sd);
+    }
+    fx.set_dollar("$edge_end1", l25_sd);
+    fx.set_dollar("$edge_length", l24_sd);
+    fx.set_dollar("$edge_angle", l23_sd);
+    fx.set_dollar("$anchor", l21_sd);
+    }
+        fx.group(parts)
+    };
+    parts.push(l17_blk);
     Ok(fx.group(parts))
 }
 
@@ -2744,6 +3006,92 @@ pub(super) fn cubetruss_uclip(fx: &dyn rt::ModuleCtx) -> rt::Result<rt::Geo> {
 }
 
 
+/// Generated native for module `cyl` — geometry through the interpreter's own
+/// construction, so a generated module is what interpreting its reference builds.
+pub(super) fn cyl(fx: &dyn rt::ModuleCtx) -> rt::Result<rt::Geo> {
+    let p_h = fx.args().get(0).cloned().unwrap_or(rt::Value::Undef);
+    let p_r = fx.args().get(1).cloned().unwrap_or(rt::Value::Undef);
+    let p_r2 = fx.args().get(2).cloned().unwrap_or(rt::Value::Undef);
+    let p_center = fx.args().get(3).cloned().unwrap_or(rt::Value::Undef);
+    let p_l = fx.args().get(4).cloned().unwrap_or(rt::Value::Undef);
+    let p_r1 = fx.args().get(5).cloned().unwrap_or(rt::Value::Undef);
+    let p_d = fx.args().get(6).cloned().unwrap_or(rt::Value::Undef);
+    let p_d1 = fx.args().get(7).cloned().unwrap_or(rt::Value::Undef);
+    let p_d2 = fx.args().get(8).cloned().unwrap_or(rt::Value::Undef);
+    let p_length = fx.args().get(9).cloned().unwrap_or(rt::Value::Undef);
+    let p_height = fx.args().get(10).cloned().unwrap_or(rt::Value::Undef);
+    let p_chamfer = fx.args().get(11).cloned().unwrap_or(rt::Value::Undef);
+    let p_chamfer1 = fx.args().get(12).cloned().unwrap_or(rt::Value::Undef);
+    let p_chamfer2 = fx.args().get(13).cloned().unwrap_or(rt::Value::Undef);
+    let p_chamfang = fx.args().get(14).cloned().unwrap_or(rt::Value::Undef);
+    let p_chamfang1 = fx.args().get(15).cloned().unwrap_or(rt::Value::Undef);
+    let p_chamfang2 = fx.args().get(16).cloned().unwrap_or(rt::Value::Undef);
+    let p_rounding = fx.args().get(17).cloned().unwrap_or(rt::Value::Undef);
+    let p_rounding1 = fx.args().get(18).cloned().unwrap_or(rt::Value::Undef);
+    let p_rounding2 = fx.args().get(19).cloned().unwrap_or(rt::Value::Undef);
+    let p_circum = fx.args().get(20).cloned().unwrap_or(rt::Value::Undef);
+    let p_realign = fx.args().get(21).cloned().unwrap_or(rt::Value::Undef);
+    let p_shift = fx.args().get(22).cloned().unwrap_or(rt::Value::Undef);
+    let p_teardrop = fx.args().get(23).cloned().unwrap_or(rt::Value::Undef);
+    let p_clip_angle = fx.args().get(24).cloned().unwrap_or(rt::Value::Undef);
+    let p_from_end = fx.args().get(25).cloned().unwrap_or(rt::Value::Undef);
+    let p_from_end1 = fx.args().get(26).cloned().unwrap_or(rt::Value::Undef);
+    let p_from_end2 = fx.args().get(27).cloned().unwrap_or(rt::Value::Undef);
+    let p_texture = fx.args().get(28).cloned().unwrap_or(rt::Value::Undef);
+    let p_tex_size = fx.args().get(29).cloned().unwrap_or(rt::Value::Undef);
+    let p_tex_reps = fx.args().get(30).cloned().unwrap_or(rt::Value::Undef);
+    let p_tex_counts = fx.args().get(31).cloned().unwrap_or(rt::Value::Undef);
+    let p_tex_inset = fx.args().get(32).cloned().unwrap_or(rt::Value::Undef);
+    let p_tex_rot = fx.args().get(33).cloned().unwrap_or(rt::Value::Undef);
+    let p_tex_scale = fx.args().get(34).cloned().unwrap_or(rt::Value::Undef);
+    let p_tex_depth = fx.args().get(35).cloned().unwrap_or(rt::Value::Undef);
+    let p_tex_samples = fx.args().get(36).cloned().unwrap_or(rt::Value::Undef);
+    let p_tex_taper = fx.args().get(37).cloned().unwrap_or(rt::Value::Undef);
+    let p_style = fx.args().get(38).cloned().unwrap_or(rt::Value::Undef);
+    let p_tex_style = fx.args().get(39).cloned().unwrap_or(rt::Value::Undef);
+    let p_extra = fx.args().get(40).cloned().unwrap_or(rt::Value::Undef);
+    let p_extra1 = fx.args().get(41).cloned().unwrap_or(rt::Value::Undef);
+    let p_extra2 = fx.args().get(42).cloned().unwrap_or(rt::Value::Undef);
+    let p_anchor = fx.args().get(43).cloned().unwrap_or(rt::Value::Undef);
+    let p_spin = fx.args().get(44).cloned().unwrap_or(rt::Value::Undef);
+    let p_orient = fx.args().get(45).cloned().unwrap_or(rt::Value::Undef);
+    let mut parts: Vec<rt::Geo> = Vec::new();
+    let l0_legacy = rt::Value::Bool(fx.call_fn(&rt::FnCall { name: "is_bool", args: &[(None, p_r2.clone())] })?.is_truthy() && fx.call_fn(&rt::FnCall { name: "is_undef", args: &[(None, p_center.clone())] })?.is_truthy());
+    let l1_edummy = if rt::apply_unary(rt::UnOp::Not, l0_legacy.clone()).is_truthy() { rt::Value::Num(f64::from_bits(0x0_u64)) } else { { fx.echo(&[(None, rt::Value::string("You gave a boolean value for r2.  Assuming you gave this value as the 3rd positional parameter."))])?; { fx.echo(&[(None, rt::Value::string("cyl() has changed and has parameters (height, r, r2, center) for improved consistency with"))])?; { fx.echo(&[(None, rt::Value::string("cylinder().  Support for the legacy calling style cyl(height, r, center) will be eliminated"))])?; { fx.echo(&[(None, rt::Value::string("and this will become an error."))])?; rt::Value::Undef } } } } };
+    let l2_center = if l0_legacy.clone().is_truthy() { p_r2.clone() } else { p_center.clone() };
+    let l3_realign = { if !(fx.call_fn(&rt::FnCall { name: "is_bool", args: &[(None, p_circum.clone())] })?).is_truthy() { return Err(rt::assert_decline()); } fx.call_fn(&rt::FnCall { name: "default", args: &[(None, p_realign.clone()), (None, p_circum.clone())] })? };
+    let l4_dummy = { if !(fx.call_fn(&rt::FnCall { name: "is_bool", args: &[(None, l3_realign.clone())] })?).is_truthy() { return Err(rt::assert_decline()); } { if !(rt::apply_binary(rt::BinOp::Lt, fx.call_fn(&rt::FnCall { name: "num_defined", args: &[(None, rt::build_vector(vec![p_anchor.clone(), l2_center.clone()]))] })?, rt::Value::Num(f64::from_bits(0x4000000000000000_u64)))).is_truthy() { return Err(rt::assert_decline()); } { if !(rt::Value::Bool(fx.call_fn(&rt::FnCall { name: "is_undef", args: &[(None, l2_center.clone())] })?.is_truthy() || fx.call_fn(&rt::FnCall { name: "is_bool", args: &[(None, l2_center.clone())] })?.is_truthy())).is_truthy() { return Err(rt::assert_decline()); } { if !(rt::apply_binary(rt::BinOp::Lt, fx.call_fn(&rt::FnCall { name: "num_defined", args: &[(None, rt::build_vector(vec![p_style.clone(), p_tex_style.clone()]))] })?, rt::Value::Num(f64::from_bits(0x4000000000000000_u64)))).is_truthy() { return Err(rt::assert_decline()); } { if !(rt::apply_binary(rt::BinOp::Lt, fx.call_fn(&rt::FnCall { name: "num_defined", args: &[(None, rt::build_vector(vec![p_tex_reps.clone(), p_tex_counts.clone()]))] })?, rt::Value::Num(f64::from_bits(0x4000000000000000_u64)))).is_truthy() { return Err(rt::assert_decline()); } { if !(rt::apply_binary(rt::BinOp::Lt, fx.call_fn(&rt::FnCall { name: "num_defined", args: &[(None, rt::build_vector(vec![p_tex_scale.clone(), p_tex_depth.clone()]))] })?, rt::Value::Num(f64::from_bits(0x4000000000000000_u64)))).is_truthy() { return Err(rt::assert_decline()); } rt::Value::Undef } } } } } };
+    let l5_style = if fx.call_fn(&rt::FnCall { name: "is_def", args: &[(None, p_tex_style.clone())] })?.is_truthy() { { fx.echo(&[(None, rt::Value::string("In cyl() the 'tex_style' parameter is deprecated and has been replaced by 'style'."))])?; p_tex_style.clone() } } else { fx.call_fn(&rt::FnCall { name: "default", args: &[(None, p_style.clone()), (None, rt::Value::string("min_edge"))] })? };
+    let l6_tex_reps = if fx.call_fn(&rt::FnCall { name: "is_def", args: &[(None, p_tex_counts.clone())] })?.is_truthy() { { fx.echo(&[(None, rt::Value::string("In cyl() the 'tex_counts' parameter is deprecated and has been replaced by 'tex_reps'."))])?; p_tex_counts.clone() } } else { p_tex_reps.clone() };
+    let l7_tex_depth = if fx.call_fn(&rt::FnCall { name: "is_def", args: &[(None, p_tex_scale.clone())] })?.is_truthy() { { fx.echo(&[(None, rt::Value::string("In rotate_sweep() the 'tex_scale' parameter is deprecated and has been replaced by 'tex_depth'."))])?; p_tex_scale.clone() } } else { fx.call_fn(&rt::FnCall { name: "default", args: &[(None, p_tex_depth.clone()), (None, rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64)))] })? };
+    let l8_l = fx.call_fn(&rt::FnCall { name: "one_defined", args: &[(None, rt::build_vector(vec![p_l.clone(), p_h.clone(), p_length.clone(), p_height.clone()])), (None, rt::Value::string("l,h,length,height")), (Some("dflt"), rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64)))] })?;
+    let l9_r1 = fx.call_fn(&rt::FnCall { name: "get_radius", args: &[(Some("r1"), p_r1.clone()), (Some("r"), p_r.clone()), (Some("d1"), p_d1.clone()), (Some("d"), p_d.clone()), (Some("dflt"), rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64)))] })?;
+    let l10_r2 = fx.call_fn(&rt::FnCall { name: "get_radius", args: &[(Some("r1"), if l0_legacy.clone().is_truthy() { rt::Value::Undef } else { p_r2.clone() }), (Some("r"), p_r.clone()), (Some("d1"), p_d2.clone()), (Some("d"), p_d.clone()), (Some("dflt"), rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64)))] })?;
+    let l11_sides = fx.call_fn(&rt::FnCall { name: "segs", args: &[(None, fx.call_fn(&rt::FnCall { name: "max", args: &[(None, l9_r1.clone()), (None, l10_r2.clone())] })?)] })?;
+    let l12_sc = if p_circum.clone().is_truthy() { rt::apply_binary(rt::BinOp::Div, rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64)), fx.call_fn(&rt::FnCall { name: "cos", args: &[(None, rt::apply_binary(rt::BinOp::Div, rt::Value::Num(f64::from_bits(0x4066800000000000_u64)), l11_sides.clone()))] })?) } else { rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64)) };
+    let l13_r1 = rt::apply_binary(rt::BinOp::Mul, l9_r1.clone(), l12_sc.clone());
+    let l14_r2 = rt::apply_binary(rt::BinOp::Mul, l10_r2.clone(), l12_sc.clone());
+    let l15_anchor = fx.call_fn(&rt::FnCall { name: "get_anchor", args: &[(None, p_anchor.clone()), (None, l2_center.clone()), (None, rt::Value::num_list(vec![f64::from_bits(0x0_u64), f64::from_bits(0x0_u64), f64::from_bits(0xbff0000000000000_u64)])), (None, rt::Value::num_list(vec![f64::from_bits(0x0_u64), f64::from_bits(0x0_u64), f64::from_bits(0x0_u64)]))] })?;
+    let l16_skmat = rt::apply_binary(rt::BinOp::Mul, rt::apply_binary(rt::BinOp::Mul, fx.call_fn(&rt::FnCall { name: "down", args: &[(None, rt::apply_binary(rt::BinOp::Div, l8_l.clone(), rt::Value::Num(f64::from_bits(0x4000000000000000_u64))))] })?, fx.call_fn(&rt::FnCall { name: "skew", args: &[(Some("sxz"), rt::apply_binary(rt::BinOp::Div, rt::member(p_shift.clone(), "x"), l8_l.clone())), (Some("syz"), rt::apply_binary(rt::BinOp::Div, rt::member(p_shift.clone(), "y"), l8_l.clone()))] })?), fx.call_fn(&rt::FnCall { name: "up", args: &[(None, rt::apply_binary(rt::BinOp::Div, l8_l.clone(), rt::Value::Num(f64::from_bits(0x4000000000000000_u64))))] })?);
+    let l17_blk = {
+        let mut parts: Vec<rt::Geo> = Vec::new();
+    parts.push(fx.call(&rt::ModuleCall { name: "attachable", args: &[(None, l15_anchor.clone()), (None, p_spin.clone()), (None, p_orient.clone()), (Some("r1"), l13_r1.clone()), (Some("r2"), l14_r2.clone()), (Some("l"), l8_l.clone()), (Some("shift"), p_shift.clone()), ], children: rt::Children::Compiled(&[&|fx: &dyn rt::ModuleCtx| { let mut parts: Vec<rt::Geo> = Vec::new();     parts.push(fx.call(&rt::ModuleCall { name: "multmatrix", args: &[(None, l16_skmat.clone()), ], children: rt::Children::Compiled(&[&|fx: &dyn rt::ModuleCtx| { let mut parts: Vec<rt::Geo> = Vec::new();     if (rt::apply_unary(rt::UnOp::Not, fx.call_fn(&rt::FnCall { name: "any_defined", args: &[(None, rt::build_vector(vec![p_chamfer.clone(), p_chamfer1.clone(), p_chamfer2.clone(), p_rounding.clone(), p_rounding1.clone(), p_rounding2.clone(), p_texture.clone(), p_extra1.clone(), p_extra2.clone(), p_extra.clone()]))] })?)).is_truthy() {
+    parts.push(fx.call(&rt::ModuleCall { name: "zrot", args: &[(None, if l3_realign.clone().is_truthy() { rt::apply_binary(rt::BinOp::Div, rt::Value::Num(f64::from_bits(0x4066800000000000_u64)), l11_sides.clone()) } else { rt::Value::Num(f64::from_bits(0x0_u64)) }), ], children: rt::Children::Compiled(&[&|fx: &dyn rt::ModuleCtx| { let mut parts: Vec<rt::Geo> = Vec::new();     parts.push(fx.call(&rt::ModuleCall { name: "cylinder", args: &[(Some("h"), l8_l.clone()), (Some("r1"), l13_r1.clone()), (Some("r2"), l14_r2.clone()), (Some("center"), rt::Value::Bool(true)), (Some("$fn"), l11_sides.clone()), ], children: rt::Children::None })?);
+ Ok(fx.group(parts)) }, ]) })?);
+    } else {
+    let l18_vnf = fx.call_fn(&rt::FnCall { name: "cyl", args: &[(Some("l"), l8_l.clone()), (Some("r1"), l9_r1.clone()), (Some("r2"), l10_r2.clone()), (Some("center"), rt::Value::Bool(true)), (Some("circum"), p_circum.clone()), (Some("realign"), l3_realign.clone()), (Some("chamfer"), p_chamfer.clone()), (Some("chamfer1"), p_chamfer1.clone()), (Some("chamfer2"), p_chamfer2.clone()), (Some("chamfang"), p_chamfang.clone()), (Some("chamfang1"), p_chamfang1.clone()), (Some("chamfang2"), p_chamfang2.clone()), (Some("rounding"), p_rounding.clone()), (Some("rounding1"), p_rounding1.clone()), (Some("rounding2"), p_rounding2.clone()), (Some("from_end"), p_from_end.clone()), (Some("from_end1"), p_from_end1.clone()), (Some("from_end2"), p_from_end2.clone()), (Some("teardrop"), p_teardrop.clone()), (Some("clip_angle"), p_clip_angle.clone()), (Some("texture"), p_texture.clone()), (Some("tex_size"), p_tex_size.clone()), (Some("tex_reps"), l6_tex_reps.clone()), (Some("tex_depth"), l7_tex_depth.clone()), (Some("tex_inset"), p_tex_inset.clone()), (Some("tex_rot"), p_tex_rot.clone()), (Some("style"), l5_style.clone()), (Some("tex_taper"), p_tex_taper.clone()), (Some("tex_samples"), p_tex_samples.clone()), (Some("extra1"), p_extra1.clone()), (Some("extra2"), p_extra2.clone()), (Some("extra"), p_extra.clone())] })?;
+    parts.push(fx.call(&rt::ModuleCall { name: "vnf_polyhedron", args: &[(None, l18_vnf.clone()), (Some("convexity"), if rt::apply_binary(rt::BinOp::Ne, p_texture.clone(), rt::Value::Undef).is_truthy() { rt::Value::Num(f64::from_bits(0x4000000000000000_u64)) } else { rt::Value::Num(f64::from_bits(0x4024000000000000_u64)) }), ], children: rt::Children::None })?);
+    }
+ Ok(fx.group(parts)) }, ]) })?);
+ Ok(fx.group(parts)) }, &|fx: &dyn rt::ModuleCtx| { let mut parts: Vec<rt::Geo> = Vec::new();     parts.push(fx.children()?);
+ Ok(fx.group(parts)) }, ]) })?);
+        fx.group(parts)
+    };
+    parts.push(l17_blk);
+    Ok(fx.group(parts))
+}
+
+
 /// Generated native for module `cylinder` — geometry through the interpreter's own
 /// construction, so a generated module is what interpreting its reference builds.
 pub(super) fn cylinder(fx: &dyn rt::ModuleCtx) -> rt::Result<rt::Geo> {
@@ -2964,6 +3312,107 @@ pub(super) fn debug_bezier_patches(fx: &dyn rt::ModuleCtx) -> rt::Result<rt::Geo
     }
     } else {
     }
+    }
+        fx.group(parts)
+    };
+    parts.push(l0_blk);
+    Ok(fx.group(parts))
+}
+
+
+/// Generated native for module `debug_nurbs` — geometry through the interpreter's own
+/// construction, so a generated module is what interpreting its reference builds.
+pub(super) fn debug_nurbs(fx: &dyn rt::ModuleCtx) -> rt::Result<rt::Geo> {
+    let p_control = fx.args().get(0).cloned().unwrap_or(rt::Value::Undef);
+    let p_degree = fx.args().get(1).cloned().unwrap_or(rt::Value::Undef);
+    let p_splinesteps = fx.args().get(2).cloned().unwrap_or(rt::Value::Undef);
+    let p_width = fx.args().get(3).cloned().unwrap_or(rt::Value::Undef);
+    let p_size = fx.args().get(4).cloned().unwrap_or(rt::Value::Undef);
+    let p_mult = fx.args().get(5).cloned().unwrap_or(rt::Value::Undef);
+    let p_weights = fx.args().get(6).cloned().unwrap_or(rt::Value::Undef);
+    let p_type = fx.args().get(7).cloned().unwrap_or(rt::Value::Undef);
+    let p_knots = fx.args().get(8).cloned().unwrap_or(rt::Value::Undef);
+    let p_show_weights = fx.args().get(9).cloned().unwrap_or(rt::Value::Undef);
+    let p_show_knots = fx.args().get(10).cloned().unwrap_or(rt::Value::Undef);
+    let p_show_index = fx.args().get(11).cloned().unwrap_or(rt::Value::Undef);
+    let p_show_control = fx.args().get(12).cloned().unwrap_or(rt::Value::Undef);
+    let mut parts: Vec<rt::Geo> = Vec::new();
+    let l0_blk = {
+        let mut parts: Vec<rt::Geo> = Vec::new();
+    if (rt::Value::Bool(fx.call_fn(&rt::FnCall { name: "is_list", args: &[(None, p_control.clone())] })?.is_truthy() && fx.call_fn(&rt::FnCall { name: "in_list", args: &[(None, rt::index(p_control.clone(), &rt::Value::Num(f64::from_bits(0x0_u64)))), (None, rt::build_vector(vec![rt::Value::string("closed"), rt::Value::string("open"), rt::Value::string("clamped")]))] })?.is_truthy())).is_truthy() {
+    if !(rt::apply_binary(rt::BinOp::Ge, fx.call_fn(&rt::FnCall { name: "len", args: &[(None, p_control.clone())] })?, rt::Value::Num(f64::from_bits(0x4018000000000000_u64)))).is_truthy() { return Err(rt::assert_decline()); }
+    let l1_un = {
+        let mut parts: Vec<rt::Geo> = Vec::new();
+    if !(rt::apply_binary(rt::BinOp::Eq, fx.call_fn(&rt::FnCall { name: "num_defined", args: &[(None, rt::build_vector(vec![p_degree.clone(), p_mult.clone(), p_weights.clone(), p_knots.clone()]))] })?, rt::Value::Num(f64::from_bits(0x0_u64)))).is_truthy() { return Err(rt::assert_decline()); }
+    let l2_un = {
+        let mut parts: Vec<rt::Geo> = Vec::new();
+    parts.push(fx.call(&rt::ModuleCall { name: "debug_nurbs", args: &[(None, rt::index(p_control.clone(), &rt::Value::Num(f64::from_bits(0x4000000000000000_u64)))), (None, rt::index(p_control.clone(), &rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64)))), (None, p_splinesteps.clone()), (None, p_width.clone()), (None, p_size.clone()), (Some("weights"), rt::index(p_control.clone(), &rt::Value::Num(f64::from_bits(0x4014000000000000_u64)))), (Some("mult"), rt::index(p_control.clone(), &rt::Value::Num(f64::from_bits(0x4010000000000000_u64)))), (Some("type"), rt::index(p_control.clone(), &rt::Value::Num(f64::from_bits(0x0_u64)))), (Some("knots"), rt::index(p_control.clone(), &rt::Value::Num(f64::from_bits(0x4008000000000000_u64)))), (Some("show_weights"), p_show_weights.clone()), (Some("show_knots"), p_show_knots.clone()), (Some("show_index"), p_show_index.clone()), (Some("show_control"), p_show_control.clone()), ], children: rt::Children::None })?);
+        fx.group(parts)
+    };
+    parts.push(l2_un);
+        fx.group(parts)
+    };
+    parts.push(l1_un);
+    } else {
+    let l3_sd = fx.dollar("$fn");
+    fx.set_dollar("$fn", rt::Value::Num(f64::from_bits(0x4020000000000000_u64)));
+    let l4_size = fx.call_fn(&rt::FnCall { name: "default", args: &[(None, p_size.clone()), (None, rt::apply_binary(rt::BinOp::Mul, rt::Value::Num(f64::from_bits(0x4008000000000000_u64)), p_width.clone()))] })?;
+    let l5_show_weights = fx.call_fn(&rt::FnCall { name: "default", args: &[(None, p_show_weights.clone()), (None, fx.call_fn(&rt::FnCall { name: "is_def", args: &[(None, p_weights.clone())] })?)] })?;
+    let l6_N = fx.call_fn(&rt::FnCall { name: "len", args: &[(None, p_control.clone())] })?;
+    let l7_twodim = rt::apply_binary(rt::BinOp::Eq, fx.call_fn(&rt::FnCall { name: "len", args: &[(None, rt::index(p_control.clone(), &rt::Value::Num(f64::from_bits(0x0_u64))))] })?, rt::Value::Num(f64::from_bits(0x4000000000000000_u64)));
+    let l8_curve = fx.call_fn(&rt::FnCall { name: "nurbs_curve", args: &[(Some("control"), p_control.clone()), (Some("degree"), p_degree.clone()), (Some("splinesteps"), p_splinesteps.clone()), (Some("mult"), p_mult.clone()), (Some("weights"), p_weights.clone()), (Some("type"), p_type.clone()), (Some("knots"), p_knots.clone())] })?;
+    parts.push(fx.call(&rt::ModuleCall { name: "stroke", args: &[(None, l8_curve.clone()), (Some("width"), p_width.clone()), (Some("closed"), rt::apply_binary(rt::BinOp::Eq, p_type.clone(), rt::Value::string("closed"))), ], children: rt::Children::None })?);
+    if (p_show_control.clone()).is_truthy() {
+    parts.push(fx.call(&rt::ModuleCall { name: "stroke", args: &[(None, p_control.clone()), (Some("width"), rt::apply_binary(rt::BinOp::Div, p_width.clone(), rt::Value::Num(f64::from_bits(0x4000000000000000_u64)))), (Some("color"), rt::Value::string("white")), (Some("closed"), rt::apply_binary(rt::BinOp::Eq, p_type.clone(), rt::Value::string("closed"))), ], children: rt::Children::None })?);
+    } else {
+    }
+    if (p_show_knots.clone()).is_truthy() {
+    let l9_knotpts = fx.call_fn(&rt::FnCall { name: "nurbs_curve", args: &[(Some("control"), p_control.clone()), (Some("degree"), p_degree.clone()), (Some("splinesteps"), rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64))), (Some("mult"), p_mult.clone()), (Some("weights"), p_weights.clone()), (Some("type"), p_type.clone()), (Some("knots"), p_knots.clone())] })?;
+    fx.echo(&[(None, l9_knotpts.clone()), ])?;
+    parts.push(fx.call(&rt::ModuleCall { name: "color", args: &[(None, rt::build_vector(vec![rt::Value::Num(f64::from_bits(0x0_u64)), rt::Value::Num(f64::from_bits(0x3fe999999999999a_u64)), rt::Value::Num(f64::from_bits(0x0_u64))])), ], children: rt::Children::Compiled(&[&|fx: &dyn rt::ModuleCtx| { let mut parts: Vec<rt::Geo> = Vec::new();     parts.push(fx.call(&rt::ModuleCall { name: "move_copies", args: &[(None, l9_knotpts.clone()), ], children: rt::Children::Compiled(&[&|fx: &dyn rt::ModuleCtx| { let mut parts: Vec<rt::Geo> = Vec::new();     if (l7_twodim.clone()).is_truthy() {
+    parts.push(fx.call(&rt::ModuleCall { name: "union", args: &[], children: rt::Children::Compiled(&[&|fx: &dyn rt::ModuleCtx| { let mut parts: Vec<rt::Geo> = Vec::new();     parts.push(fx.call(&rt::ModuleCall { name: "rect", args: &[(None, rt::build_vector(vec![rt::apply_binary(rt::BinOp::Mul, rt::Value::Num(f64::from_bits(0x4008000000000000_u64)), p_width.clone()), p_width.clone()])), ], children: rt::Children::None })?);
+ Ok(fx.group(parts)) }, &|fx: &dyn rt::ModuleCtx| { let mut parts: Vec<rt::Geo> = Vec::new();     parts.push(fx.call(&rt::ModuleCall { name: "rect", args: &[(None, rt::build_vector(vec![p_width.clone(), rt::apply_binary(rt::BinOp::Mul, rt::Value::Num(f64::from_bits(0x4008000000000000_u64)), p_width.clone())])), ], children: rt::Children::None })?);
+ Ok(fx.group(parts)) }, ]) })?);
+    } else {
+    for l10_i in rt::iter_values_native(&rt::build_range(&rt::Value::Num(f64::from_bits(0x0_u64)), &rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64)), &rt::Value::Num(f64::from_bits(0x4000000000000000_u64)))) {
+    parts.push(fx.call(&rt::ModuleCall { name: "cuboid", args: &[(None, fx.call_fn(&rt::FnCall { name: "list_rotate", args: &[(None, rt::build_vector(vec![rt::apply_binary(rt::BinOp::Mul, rt::Value::Num(f64::from_bits(0x4008000000000000_u64)), p_width.clone()), p_width.clone(), p_width.clone()])), (None, l10_i.clone())] })?), ], children: rt::Children::None })?);
+    }
+    }
+ Ok(fx.group(parts)) }, ]) })?);
+ Ok(fx.group(parts)) }, ]) })?);
+    } else {
+    }
+    parts.push(fx.call(&rt::ModuleCall { name: "color", args: &[(None, rt::Value::string("blue")), ], children: rt::Children::Compiled(&[&|fx: &dyn rt::ModuleCtx| { let mut parts: Vec<rt::Geo> = Vec::new();     if (rt::Value::Bool(p_show_index.clone().is_truthy() && p_show_control.clone().is_truthy())).is_truthy() {
+    parts.push(fx.call(&rt::ModuleCall { name: "move_copies", args: &[(None, p_control.clone()), ], children: rt::Children::Compiled(&[&|fx: &dyn rt::ModuleCtx| { let mut parts: Vec<rt::Geo> = Vec::new();     let l11_label = fx.call_fn(&rt::FnCall { name: "str", args: &[(None, fx.dollar("$idx"))] })?;
+    let l12_anch = if rt::Value::Bool(rt::Value::Bool(l5_show_weights.clone().is_truthy() && fx.call_fn(&rt::FnCall { name: "is_def", args: &[(None, rt::index(p_weights.clone(), &fx.dollar("$idx")))] })?.is_truthy()).is_truthy() && rt::apply_binary(rt::BinOp::Ne, rt::index(p_weights.clone(), &fx.dollar("$idx")), rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64))).is_truthy()).is_truthy() { rt::Value::num_list(vec![f64::from_bits(0x0_u64), f64::from_bits(0xbff0000000000000_u64), f64::from_bits(0x0_u64)]) } else { rt::Value::num_list(vec![f64::from_bits(0x0_u64), f64::from_bits(0x0_u64), f64::from_bits(0x0_u64)]) };
+    if (l7_twodim.clone()).is_truthy() {
+    parts.push(fx.call(&rt::ModuleCall { name: "text", args: &[(Some("text"), l11_label.clone()), (Some("size"), l4_size.clone()), (Some("anchor"), l12_anch.clone()), ], children: rt::Children::None })?);
+    } else {
+    parts.push(fx.call(&rt::ModuleCall { name: "rot", args: &[(None, fx.dollar("$vpr")), ], children: rt::Children::Compiled(&[&|fx: &dyn rt::ModuleCtx| { let mut parts: Vec<rt::Geo> = Vec::new();     parts.push(fx.call(&rt::ModuleCall { name: "text3d", args: &[(Some("text"), l11_label.clone()), (Some("size"), l4_size.clone()), (Some("anchor"), l12_anch.clone()), ], children: rt::Children::None })?);
+ Ok(fx.group(parts)) }, ]) })?);
+    }
+ Ok(fx.group(parts)) }, ]) })?);
+    } else {
+    }
+ Ok(fx.group(parts)) }, ]) })?);
+    parts.push(fx.call(&rt::ModuleCall { name: "color", args: &[(None, rt::Value::string("blue")), ], children: rt::Children::Compiled(&[&|fx: &dyn rt::ModuleCtx| { let mut parts: Vec<rt::Geo> = Vec::new();     if (l5_show_weights.clone()).is_truthy() {
+    parts.push(fx.call(&rt::ModuleCall { name: "move_copies", args: &[(None, p_control.clone()), ], children: rt::Children::Compiled(&[&|fx: &dyn rt::ModuleCtx| { let mut parts: Vec<rt::Geo> = Vec::new();     if (rt::Value::Bool(fx.call_fn(&rt::FnCall { name: "is_def", args: &[(None, rt::index(p_weights.clone(), &fx.dollar("$idx")))] })?.is_truthy() && rt::apply_binary(rt::BinOp::Ne, rt::index(p_weights.clone(), &fx.dollar("$idx")), rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64))).is_truthy())).is_truthy() {
+    let l13_label = fx.call_fn(&rt::FnCall { name: "str", args: &[(None, rt::Value::string("w=")), (None, rt::index(p_weights.clone(), &fx.dollar("$idx")))] })?;
+    let l14_anch = if p_show_index.clone().is_truthy() { rt::Value::num_list(vec![f64::from_bits(0x0_u64), f64::from_bits(0x3ff0000000000000_u64), f64::from_bits(0x0_u64)]) } else { rt::Value::num_list(vec![f64::from_bits(0x0_u64), f64::from_bits(0x0_u64), f64::from_bits(0x0_u64)]) };
+    if (l7_twodim.clone()).is_truthy() {
+    parts.push(fx.call(&rt::ModuleCall { name: "fwd", args: &[(None, rt::apply_binary(rt::BinOp::Mul, rt::apply_binary(rt::BinOp::Div, l4_size.clone(), rt::Value::Num(f64::from_bits(0x4000000000000000_u64))), rt::Value::Num(f64::from_bits(0x0_u64)))), ], children: rt::Children::Compiled(&[&|fx: &dyn rt::ModuleCtx| { let mut parts: Vec<rt::Geo> = Vec::new();     parts.push(fx.call(&rt::ModuleCall { name: "text", args: &[(Some("text"), l13_label.clone()), (Some("size"), l4_size.clone()), (Some("anchor"), l14_anch.clone()), ], children: rt::Children::None })?);
+ Ok(fx.group(parts)) }, ]) })?);
+    } else {
+    parts.push(fx.call(&rt::ModuleCall { name: "rot", args: &[(None, fx.dollar("$vpr")), ], children: rt::Children::Compiled(&[&|fx: &dyn rt::ModuleCtx| { let mut parts: Vec<rt::Geo> = Vec::new();     parts.push(fx.call(&rt::ModuleCall { name: "text3d", args: &[(Some("text"), l13_label.clone()), (Some("size"), l4_size.clone()), (Some("anchor"), l14_anch.clone()), ], children: rt::Children::None })?);
+ Ok(fx.group(parts)) }, ]) })?);
+    }
+    } else {
+    }
+ Ok(fx.group(parts)) }, ]) })?);
+    } else {
+    }
+ Ok(fx.group(parts)) }, ]) })?);
+    fx.set_dollar("$fn", l3_sd);
     }
         fx.group(parts)
     };
@@ -3266,6 +3715,44 @@ pub(super) fn diff(fx: &dyn rt::ModuleCtx) -> rt::Result<rt::Geo> {
         fx.group(parts)
     };
     parts.push(l0_blk);
+    Ok(fx.group(parts))
+}
+
+
+/// Generated native for module `distribute` — geometry through the interpreter's own
+/// construction, so a generated module is what interpreting its reference builds.
+pub(super) fn distribute(fx: &dyn rt::ModuleCtx) -> rt::Result<rt::Geo> {
+    let p_spacing = fx.args().get(0).cloned().unwrap_or(rt::Value::Undef);
+    let p_sizes = fx.args().get(1).cloned().unwrap_or(rt::Value::Undef);
+    let p_dir = fx.args().get(2).cloned().unwrap_or(rt::Value::Undef);
+    let p_l = fx.args().get(3).cloned().unwrap_or(rt::Value::Undef);
+    let mut parts: Vec<rt::Geo> = Vec::new();
+    let l4_gaps = if rt::apply_binary(rt::BinOp::Lt, fx.dollar("$children"), rt::Value::Num(f64::from_bits(0x4000000000000000_u64))).is_truthy() { rt::build_vector(vec![rt::Value::Num(f64::from_bits(0x0_u64))]) } else { if rt::apply_unary(rt::UnOp::Not, fx.call_fn(&rt::FnCall { name: "is_undef", args: &[(None, p_sizes.clone())] })?).is_truthy() { { let mut l0_acc: Vec<rt::Value> = Vec::new(); for l1_i in rt::iter_values_native(&rt::build_range(&rt::Value::Num(f64::from_bits(0x0_u64)), &rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64)), &rt::apply_binary(rt::BinOp::Sub, fx.dollar("$children"), rt::Value::Num(f64::from_bits(0x4000000000000000_u64))))) { l0_acc.push(rt::apply_binary(rt::BinOp::Add, rt::apply_binary(rt::BinOp::Div, rt::index(p_sizes.clone(), &l1_i.clone()), rt::Value::Num(f64::from_bits(0x4000000000000000_u64))), rt::apply_binary(rt::BinOp::Div, rt::index(p_sizes.clone(), &rt::apply_binary(rt::BinOp::Add, l1_i.clone(), rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64)))), rt::Value::Num(f64::from_bits(0x4000000000000000_u64)))));
+        } rt::build_vector(l0_acc) } } else { { let mut l2_acc: Vec<rt::Value> = Vec::new(); for l3_i in rt::iter_values_native(&rt::build_range(&rt::Value::Num(f64::from_bits(0x0_u64)), &rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64)), &rt::apply_binary(rt::BinOp::Sub, fx.dollar("$children"), rt::Value::Num(f64::from_bits(0x4000000000000000_u64))))) { l2_acc.push(rt::Value::Num(f64::from_bits(0x0_u64)));
+        } rt::build_vector(l2_acc) } } };
+    let l5_spc = if rt::apply_unary(rt::UnOp::Not, fx.call_fn(&rt::FnCall { name: "is_undef", args: &[(None, p_l.clone())] })?).is_truthy() { rt::apply_binary(rt::BinOp::Div, rt::apply_binary(rt::BinOp::Sub, p_l.clone(), fx.call_fn(&rt::FnCall { name: "sum", args: &[(None, l4_gaps.clone())] })?), rt::apply_binary(rt::BinOp::Sub, fx.dollar("$children"), rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64)))) } else { fx.call_fn(&rt::FnCall { name: "default", args: &[(None, p_spacing.clone()), (None, rt::Value::Num(f64::from_bits(0x4024000000000000_u64)))] })? };
+    let l8_gaps2 = { let mut l6_acc: Vec<rt::Value> = Vec::new(); for l7_gap in rt::iter_values_native(&l4_gaps.clone()) { l6_acc.push(rt::apply_binary(rt::BinOp::Add, l7_gap.clone(), l5_spc.clone()));
+        } rt::build_vector(l6_acc) };
+    let l9_spos = rt::apply_binary(rt::BinOp::Div, rt::apply_binary(rt::BinOp::Mul, p_dir.clone(), rt::apply_unary(rt::UnOp::Neg, fx.call_fn(&rt::FnCall { name: "sum", args: &[(None, l8_gaps2.clone())] })?)), rt::Value::Num(f64::from_bits(0x4000000000000000_u64)));
+    let l12_spacings = fx.call_fn(&rt::FnCall { name: "cumsum", args: &[(None, { let mut l10_acc: Vec<rt::Value> = Vec::new(); l10_acc.push(rt::Value::Num(f64::from_bits(0x0_u64)));
+        for l11_each in rt::iter_values_native(&l8_gaps2.clone()) { l10_acc.push(l11_each); } rt::build_vector(l10_acc) })] })?;
+    let l13_blk = {
+        let mut parts: Vec<rt::Geo> = Vec::new();
+    parts.push(fx.call(&rt::ModuleCall { name: "req_children", args: &[(None, fx.dollar("$children")), ], children: rt::Children::None })?);
+    for l14_i in rt::iter_values_native(&rt::build_range(&rt::Value::Num(f64::from_bits(0x0_u64)), &rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64)), &rt::apply_binary(rt::BinOp::Sub, fx.dollar("$children"), rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64))))) {
+    let l15_sd = fx.dollar("$pos");
+    fx.set_dollar("$pos", rt::apply_binary(rt::BinOp::Add, l9_spos.clone(), rt::apply_binary(rt::BinOp::Mul, rt::index(l12_spacings.clone(), &l14_i.clone()), p_dir.clone())));
+    let l16_sd = fx.dollar("$idx");
+    fx.set_dollar("$idx", l14_i.clone());
+    parts.push(fx.call(&rt::ModuleCall { name: "translate", args: &[(None, fx.dollar("$pos")), ], children: rt::Children::Compiled(&[&|fx: &dyn rt::ModuleCtx| { let mut parts: Vec<rt::Geo> = Vec::new();     let l17_sel = l14_i.clone();
+    parts.push(fx.child_at(&l17_sel)?);
+ Ok(fx.group(parts)) }, ]) })?);
+    fx.set_dollar("$idx", l16_sd);
+    fx.set_dollar("$pos", l15_sd);
+    }
+        fx.group(parts)
+    };
+    parts.push(l13_blk);
     Ok(fx.group(parts))
 }
 
@@ -5135,6 +5622,36 @@ pub(super) fn leftcube(fx: &dyn rt::ModuleCtx) -> rt::Result<rt::Geo> {
     let p_size = fx.args().get(0).cloned().unwrap_or(rt::Value::Undef);
     let mut parts: Vec<rt::Geo> = Vec::new();
     parts.push(fx.call(&rt::ModuleCall { name: "cube", args: &[(None, p_size.clone()), (Some("anchor"), rt::Value::num_list(vec![f64::from_bits(0x3ff0000000000000_u64), f64::from_bits(0x0_u64), f64::from_bits(0x0_u64)])), ], children: rt::Children::None })?);
+    Ok(fx.group(parts))
+}
+
+
+/// Generated native for module `line_copies` — geometry through the interpreter's own
+/// construction, so a generated module is what interpreting its reference builds.
+pub(super) fn line_copies(fx: &dyn rt::ModuleCtx) -> rt::Result<rt::Geo> {
+    let p_spacing = fx.args().get(0).cloned().unwrap_or(rt::Value::Undef);
+    let p_n = fx.args().get(1).cloned().unwrap_or(rt::Value::Undef);
+    let p_l = fx.args().get(2).cloned().unwrap_or(rt::Value::Undef);
+    let p_p1 = fx.args().get(3).cloned().unwrap_or(rt::Value::Undef);
+    let p_p2 = fx.args().get(4).cloned().unwrap_or(rt::Value::Undef);
+    let mut parts: Vec<rt::Geo> = Vec::new();
+    let l0_pts = fx.call_fn(&rt::FnCall { name: "line_copies", args: &[(Some("spacing"), p_spacing.clone()), (Some("n"), p_n.clone()), (Some("l"), p_l.clone()), (Some("p1"), p_p1.clone()), (Some("p2"), p_p2.clone()), (Some("p"), rt::build_vector(vec![rt::Value::Num(f64::from_bits(0x0_u64)), rt::Value::Num(f64::from_bits(0x0_u64)), rt::Value::Num(f64::from_bits(0x0_u64))]))] })?;
+    let l1_blk = {
+        let mut parts: Vec<rt::Geo> = Vec::new();
+    parts.push(fx.call(&rt::ModuleCall { name: "req_children", args: &[(None, fx.dollar("$children")), ], children: rt::Children::None })?);
+    for l2_i in rt::iter_values_native(&fx.call_fn(&rt::FnCall { name: "idx", args: &[(None, l0_pts.clone())] })?) {
+    let l3_sd = fx.dollar("$idx");
+    fx.set_dollar("$idx", l2_i.clone());
+    let l4_sd = fx.dollar("$pos");
+    fx.set_dollar("$pos", rt::index(l0_pts.clone(), &l2_i.clone()));
+    parts.push(fx.call(&rt::ModuleCall { name: "translate", args: &[(None, fx.dollar("$pos")), ], children: rt::Children::Compiled(&[&|fx: &dyn rt::ModuleCtx| { let mut parts: Vec<rt::Geo> = Vec::new();     parts.push(fx.children()?);
+ Ok(fx.group(parts)) }, ]) })?);
+    fx.set_dollar("$pos", l4_sd);
+    fx.set_dollar("$idx", l3_sd);
+    }
+        fx.group(parts)
+    };
+    parts.push(l1_blk);
     Ok(fx.group(parts))
 }
 
@@ -7219,6 +7736,48 @@ pub(super) fn polygon_edge_mask(fx: &dyn rt::ModuleCtx) -> rt::Result<rt::Geo> {
 }
 
 
+/// Generated native for module `position` — geometry through the interpreter's own
+/// construction, so a generated module is what interpreting its reference builds.
+pub(super) fn position(fx: &dyn rt::ModuleCtx) -> rt::Result<rt::Geo> {
+    let p_at = fx.args().get(0).cloned().unwrap_or(rt::Value::Undef);
+    let p_from = fx.args().get(1).cloned().unwrap_or(rt::Value::Undef);
+    let mut parts: Vec<rt::Geo> = Vec::new();
+    let l0_dummy0 = { if !(rt::apply_binary(rt::BinOp::Eq, fx.call_fn(&rt::FnCall { name: "num_defined", args: &[(None, rt::build_vector(vec![p_at.clone(), p_from.clone()]))] })?, rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64)))).is_truthy() { return Err(rt::assert_decline()); } rt::Value::Undef };
+    let l1_at = fx.call_fn(&rt::FnCall { name: "first_defined", args: &[(None, rt::build_vector(vec![p_at.clone(), p_from.clone()]))] })?;
+    let l2_dummy1 = { if !(rt::apply_binary(rt::BinOp::Ne, fx.dollar("$parent_geom"), rt::Value::Undef)).is_truthy() { return Err(rt::assert_decline()); } rt::Value::Undef };
+    let l3_anchors = if rt::Value::Bool(fx.call_fn(&rt::FnCall { name: "is_vector", args: &[(None, l1_at.clone())] })?.is_truthy() || fx.call_fn(&rt::FnCall { name: "is_string", args: &[(None, l1_at.clone())] })?.is_truthy()).is_truthy() { rt::build_vector(vec![l1_at.clone()]) } else { l1_at.clone() };
+    let l4_two_d = fx.call_fn(&rt::FnCall { name: "_attach_geom_2d", args: &[(None, fx.dollar("$parent_geom"))] })?;
+    let l5_blk = {
+        let mut parts: Vec<rt::Geo> = Vec::new();
+    if (fx.call_fn(&rt::FnCall { name: "is_def", args: &[(None, p_from.clone())] })?).is_truthy() {
+    fx.echo(&[(None, rt::Value::string("'from' argument of position() has changed to 'at' and will be removed in a future version")), ])?;
+    } else {
+    }
+    parts.push(fx.call(&rt::ModuleCall { name: "req_children", args: &[(None, fx.dollar("$children")), ], children: rt::Children::None })?);
+    for l6_anchr in rt::iter_values_native(&l3_anchors.clone()) {
+    let l7_anch = fx.call_fn(&rt::FnCall { name: "_find_anchor", args: &[(None, l6_anchr.clone()), (None, fx.dollar("$parent_geom"))] })?;
+    let l8_sd = fx.dollar("$edge_angle");
+    fx.set_dollar("$edge_angle", if rt::apply_binary(rt::BinOp::Eq, fx.call_fn(&rt::FnCall { name: "len", args: &[(None, l7_anch.clone())] })?, rt::Value::Num(f64::from_bits(0x4014000000000000_u64))).is_truthy() { fx.call_fn(&rt::FnCall { name: "struct_val", args: &[(None, rt::index(l7_anch.clone(), &rt::Value::Num(f64::from_bits(0x4010000000000000_u64)))), (None, rt::Value::string("edge_angle"))] })? } else { rt::Value::Undef });
+    let l9_sd = fx.dollar("$edge_length");
+    fx.set_dollar("$edge_length", if rt::apply_binary(rt::BinOp::Eq, fx.call_fn(&rt::FnCall { name: "len", args: &[(None, l7_anch.clone())] })?, rt::Value::Num(f64::from_bits(0x4014000000000000_u64))).is_truthy() { fx.call_fn(&rt::FnCall { name: "struct_val", args: &[(None, rt::index(l7_anch.clone(), &rt::Value::Num(f64::from_bits(0x4010000000000000_u64)))), (None, rt::Value::string("edge_length"))] })? } else { rt::Value::Undef });
+    let l10_sd = fx.dollar("$attach_to");
+    fx.set_dollar("$attach_to", rt::Value::Undef);
+    let l11_sd = fx.dollar("$attach_anchor");
+    fx.set_dollar("$attach_anchor", l7_anch.clone());
+    parts.push(fx.call(&rt::ModuleCall { name: "translate", args: &[(None, rt::index(l7_anch.clone(), &rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64)))), ], children: rt::Children::Compiled(&[&|fx: &dyn rt::ModuleCtx| { let mut parts: Vec<rt::Geo> = Vec::new();     parts.push(fx.children()?);
+ Ok(fx.group(parts)) }, ]) })?);
+    fx.set_dollar("$attach_anchor", l11_sd);
+    fx.set_dollar("$attach_to", l10_sd);
+    fx.set_dollar("$edge_length", l9_sd);
+    fx.set_dollar("$edge_angle", l8_sd);
+    }
+        fx.group(parts)
+    };
+    parts.push(l5_blk);
+    Ok(fx.group(parts))
+}
+
+
 /// Generated native for module `prism` — geometry through the interpreter's own
 /// construction, so a generated module is what interpreting its reference builds.
 pub(super) fn prism(fx: &dyn rt::ModuleCtx) -> rt::Result<rt::Geo> {
@@ -7779,6 +8338,90 @@ pub(super) fn regular_ngon(fx: &dyn rt::ModuleCtx) -> rt::Result<rt::Geo> {
 }
 
 
+/// Generated native for module `regular_polyhedron` — geometry through the interpreter's own
+/// construction, so a generated module is what interpreting its reference builds.
+pub(super) fn regular_polyhedron(fx: &dyn rt::ModuleCtx) -> rt::Result<rt::Geo> {
+    let p_name = fx.args().get(0).cloned().unwrap_or(rt::Value::Undef);
+    let p_index = fx.args().get(1).cloned().unwrap_or(rt::Value::Undef);
+    let p_type = fx.args().get(2).cloned().unwrap_or(rt::Value::Undef);
+    let p_faces = fx.args().get(3).cloned().unwrap_or(rt::Value::Undef);
+    let p_facetype = fx.args().get(4).cloned().unwrap_or(rt::Value::Undef);
+    let p_hasfaces = fx.args().get(5).cloned().unwrap_or(rt::Value::Undef);
+    let p_side = fx.args().get(6).cloned().unwrap_or(rt::Value::Undef);
+    let p_ir = fx.args().get(7).cloned().unwrap_or(rt::Value::Undef);
+    let p_mr = fx.args().get(8).cloned().unwrap_or(rt::Value::Undef);
+    let p_or = fx.args().get(9).cloned().unwrap_or(rt::Value::Undef);
+    let p_r = fx.args().get(10).cloned().unwrap_or(rt::Value::Undef);
+    let p_d = fx.args().get(11).cloned().unwrap_or(rt::Value::Undef);
+    let p_anchor = fx.args().get(12).cloned().unwrap_or(rt::Value::Undef);
+    let p_rounding = fx.args().get(13).cloned().unwrap_or(rt::Value::Undef);
+    let p_repeat = fx.args().get(14).cloned().unwrap_or(rt::Value::Undef);
+    let p_facedown = fx.args().get(15).cloned().unwrap_or(rt::Value::Undef);
+    let p_draw = fx.args().get(16).cloned().unwrap_or(rt::Value::Undef);
+    let p_rotate_children = fx.args().get(17).cloned().unwrap_or(rt::Value::Undef);
+    let p_stellate = fx.args().get(18).cloned().unwrap_or(rt::Value::Undef);
+    let p_longside = fx.args().get(19).cloned().unwrap_or(rt::Value::Undef);
+    let p_h = fx.args().get(20).cloned().unwrap_or(rt::Value::Undef);
+    let p_height = fx.args().get(21).cloned().unwrap_or(rt::Value::Undef);
+    let mut parts: Vec<rt::Geo> = Vec::new();
+    let l0_dummy = { if !(rt::Value::Bool(fx.call_fn(&rt::FnCall { name: "is_num", args: &[(None, p_rounding.clone())] })?.is_truthy() && rt::apply_binary(rt::BinOp::Ge, p_rounding.clone(), rt::Value::Num(f64::from_bits(0x0_u64))).is_truthy())).is_truthy() { return Err(rt::assert_decline()); } rt::Value::Undef };
+    let l1_entry = fx.call_fn(&rt::FnCall { name: "regular_polyhedron_info", args: &[(None, rt::Value::string("fullentry")), (Some("name"), p_name.clone()), (Some("index"), p_index.clone()), (Some("type"), p_type.clone()), (Some("faces"), p_faces.clone()), (Some("facetype"), p_facetype.clone()), (Some("hasfaces"), p_hasfaces.clone()), (Some("side"), p_side.clone()), (Some("ir"), p_ir.clone()), (Some("mr"), p_mr.clone()), (Some("or"), p_or.clone()), (Some("r"), p_r.clone()), (Some("d"), p_d.clone()), (Some("anchor"), p_anchor.clone()), (Some("facedown"), p_facedown.clone()), (Some("stellate"), p_stellate.clone()), (Some("longside"), p_longside.clone()), (Some("h"), p_h.clone()), (Some("height"), p_height.clone())] })?;
+    let l2_scaled_points = rt::index(l1_entry.clone(), &rt::Value::Num(f64::from_bits(0x0_u64)));
+    let l3_translation = rt::index(l1_entry.clone(), &rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64)));
+    let l4_face_triangles = rt::index(l1_entry.clone(), &rt::Value::Num(f64::from_bits(0x4000000000000000_u64)));
+    let l5_faces = rt::index(l1_entry.clone(), &rt::Value::Num(f64::from_bits(0x4008000000000000_u64)));
+    let l6_face_normals = rt::index(l1_entry.clone(), &rt::Value::Num(f64::from_bits(0x4010000000000000_u64)));
+    let l7_in_radius = rt::index(l1_entry.clone(), &rt::Value::Num(f64::from_bits(0x4014000000000000_u64)));
+    let l8_blk = {
+        let mut parts: Vec<rt::Geo> = Vec::new();
+    if !(rt::apply_binary(rt::BinOp::Gt, fx.call_fn(&rt::FnCall { name: "len", args: &[(None, l1_entry.clone())] })?, rt::Value::Num(f64::from_bits(0x0_u64)))).is_truthy() { return Err(rt::assert_decline()); }
+    parts.push(fx.call(&rt::ModuleCall { name: "translate", args: &[(None, l3_translation.clone()), ], children: rt::Children::Compiled(&[&|fx: &dyn rt::ModuleCtx| { let mut parts: Vec<rt::Geo> = Vec::new();     if (p_draw.clone()).is_truthy() {
+    if (rt::apply_binary(rt::BinOp::Eq, p_rounding.clone(), rt::Value::Num(f64::from_bits(0x0_u64)))).is_truthy() {
+    parts.push(fx.call(&rt::ModuleCall { name: "polyhedron", args: &[(None, l2_scaled_points.clone()), (Some("faces"), l4_face_triangles.clone()), ], children: rt::Children::None })?);
+    } else {
+    let l9_fn = fx.call_fn(&rt::FnCall { name: "segs", args: &[(None, p_rounding.clone())] })?;
+    let l10_rounding = rt::apply_binary(rt::BinOp::Div, p_rounding.clone(), fx.call_fn(&rt::FnCall { name: "cos", args: &[(None, rt::apply_binary(rt::BinOp::Div, rt::Value::Num(f64::from_bits(0x4066800000000000_u64)), l9_fn.clone()))] })?);
+    let l11_adjusted_scale = rt::apply_binary(rt::BinOp::Sub, rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64)), rt::apply_binary(rt::BinOp::Div, l10_rounding.clone(), l7_in_radius.clone()));
+    parts.push(fx.call(&rt::ModuleCall { name: "minkowski", args: &[], children: rt::Children::Compiled(&[&|fx: &dyn rt::ModuleCtx| { let mut parts: Vec<rt::Geo> = Vec::new();     parts.push(fx.call(&rt::ModuleCall { name: "sphere", args: &[(Some("r"), l10_rounding.clone()), (Some("$fn"), l9_fn.clone()), ], children: rt::Children::None })?);
+ Ok(fx.group(parts)) }, &|fx: &dyn rt::ModuleCtx| { let mut parts: Vec<rt::Geo> = Vec::new();     parts.push(fx.call(&rt::ModuleCall { name: "polyhedron", args: &[(None, rt::apply_binary(rt::BinOp::Mul, l11_adjusted_scale.clone(), l2_scaled_points.clone())), (Some("faces"), l4_face_triangles.clone()), ], children: rt::Children::None })?);
+ Ok(fx.group(parts)) }, ]) })?);
+    }
+    } else {
+    }
+ Ok(fx.group(parts)) }, &|fx: &dyn rt::ModuleCtx| { let mut parts: Vec<rt::Geo> = Vec::new();     if (rt::apply_binary(rt::BinOp::Gt, fx.dollar("$children"), rt::Value::Num(f64::from_bits(0x0_u64)))).is_truthy() {
+    let l12_maxrange = if p_repeat.clone().is_truthy() { rt::apply_binary(rt::BinOp::Sub, fx.call_fn(&rt::FnCall { name: "len", args: &[(None, l5_faces.clone())] })?, rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64))) } else { rt::apply_binary(rt::BinOp::Sub, fx.dollar("$children"), rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64))) };
+    for l13_i in rt::iter_values_native(&rt::build_range(&rt::Value::Num(f64::from_bits(0x0_u64)), &rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64)), &l12_maxrange.clone())) {
+    let l14_facepts = fx.call_fn(&rt::FnCall { name: "select", args: &[(None, l2_scaled_points.clone()), (None, rt::index(l5_faces.clone(), &l13_i.clone()))] })?;
+    let l15_sd = fx.dollar("$center");
+    fx.set_dollar("$center", rt::apply_unary(rt::UnOp::Neg, fx.call_fn(&rt::FnCall { name: "mean", args: &[(None, l14_facepts.clone())] })?));
+    let l16_cfacepts = fx.call_fn(&rt::FnCall { name: "move", args: &[(None, fx.dollar("$center")), (Some("p"), l14_facepts.clone())] })?;
+    let l17_sd = fx.dollar("$face");
+    fx.set_dollar("$face", if p_rotate_children.clone().is_truthy() { fx.call_fn(&rt::FnCall { name: "path2d", args: &[(None, fx.call_fn(&rt::FnCall { name: "frame_map", args: &[(Some("z"), rt::index(l6_face_normals.clone(), &l13_i.clone())), (Some("x"), rt::apply_binary(rt::BinOp::Sub, rt::index(l14_facepts.clone(), &rt::Value::Num(f64::from_bits(0x0_u64))), rt::index(l14_facepts.clone(), &rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64))))), (Some("reverse"), rt::Value::Bool(true)), (Some("p"), l16_cfacepts.clone())] })?)] })? } else { l16_cfacepts.clone() });
+    let l18_sd = fx.dollar("$faceindex");
+    fx.set_dollar("$faceindex", l13_i.clone());
+    parts.push(fx.call(&rt::ModuleCall { name: "translate", args: &[(None, rt::apply_unary(rt::UnOp::Neg, fx.dollar("$center"))), ], children: rt::Children::Compiled(&[&|fx: &dyn rt::ModuleCtx| { let mut parts: Vec<rt::Geo> = Vec::new();     if (p_rotate_children.clone()).is_truthy() {
+    parts.push(fx.call(&rt::ModuleCall { name: "frame_map", args: &[(Some("z"), rt::index(l6_face_normals.clone(), &l13_i.clone())), (Some("x"), rt::apply_binary(rt::BinOp::Sub, rt::index(l14_facepts.clone(), &rt::Value::Num(f64::from_bits(0x0_u64))), rt::index(l14_facepts.clone(), &rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64))))), ], children: rt::Children::Compiled(&[&|fx: &dyn rt::ModuleCtx| { let mut parts: Vec<rt::Geo> = Vec::new();     let l19_sel = rt::apply_binary(rt::BinOp::Mod, l13_i.clone(), fx.dollar("$children"));
+    parts.push(fx.child_at(&l19_sel)?);
+ Ok(fx.group(parts)) }, ]) })?);
+    } else {
+    let l20_sel = rt::apply_binary(rt::BinOp::Mod, l13_i.clone(), fx.dollar("$children"));
+    parts.push(fx.child_at(&l20_sel)?);
+    }
+ Ok(fx.group(parts)) }, ]) })?);
+    fx.set_dollar("$faceindex", l18_sd);
+    fx.set_dollar("$face", l17_sd);
+    fx.set_dollar("$center", l15_sd);
+    }
+    } else {
+    }
+ Ok(fx.group(parts)) }, ]) })?);
+        fx.group(parts)
+    };
+    parts.push(l8_blk);
+    Ok(fx.group(parts))
+}
+
+
 /// Generated native for module `regular_prism` — geometry through the interpreter's own
 /// construction, so a generated module is what interpreting its reference builds.
 pub(super) fn regular_prism(fx: &dyn rt::ModuleCtx) -> rt::Result<rt::Geo> {
@@ -7863,6 +8506,43 @@ pub(super) fn req_children(fx: &dyn rt::ModuleCtx) -> rt::Result<rt::Geo> {
     if (rt::apply_binary(rt::BinOp::Gt, fx.dollar("$parent_modules"), rt::Value::Num(f64::from_bits(0x0_u64)))).is_truthy() {
     if !(rt::apply_binary(rt::BinOp::Gt, p_count.clone(), rt::Value::Num(f64::from_bits(0x0_u64)))).is_truthy() { return Err(rt::assert_decline()); }
     } else {
+    }
+        fx.group(parts)
+    };
+    parts.push(l0_blk);
+    Ok(fx.group(parts))
+}
+
+
+/// Generated native for module `restore` — geometry through the interpreter's own
+/// construction, so a generated module is what interpreting its reference builds.
+pub(super) fn restore(fx: &dyn rt::ModuleCtx) -> rt::Result<rt::Geo> {
+    let p_desc = fx.args().get(0).cloned().unwrap_or(rt::Value::Undef);
+    let mut parts: Vec<rt::Geo> = Vec::new();
+    let l0_blk = {
+        let mut parts: Vec<rt::Geo> = Vec::new();
+    parts.push(fx.call(&rt::ModuleCall { name: "req_children", args: &[(None, fx.dollar("$children")), ], children: rt::Children::None })?);
+    if (fx.call_fn(&rt::FnCall { name: "is_undef", args: &[(None, p_desc.clone())] })?).is_truthy() {
+    let l1_T = fx.call_fn(&rt::FnCall { name: "matrix_inverse", args: &[(None, fx.dollar("$transform"))] })?;
+    let l2_sd = fx.dollar("$parent_geom");
+    fx.set_dollar("$parent_geom", fx.call_fn(&rt::FnCall { name: "attach_geom", args: &[(None, rt::build_vector(vec![rt::Value::Num(f64::from_bits(0x0_u64)), rt::Value::Num(f64::from_bits(0x0_u64)), rt::Value::Num(f64::from_bits(0x0_u64))]))] })?);
+    let l3_sd = fx.dollar("$parent_parts");
+    fx.set_dollar("$parent_parts", rt::Value::Undef);
+    parts.push(fx.call(&rt::ModuleCall { name: "multmatrix", args: &[(None, l1_T.clone()), ], children: rt::Children::Compiled(&[&|fx: &dyn rt::ModuleCtx| { let mut parts: Vec<rt::Geo> = Vec::new();     parts.push(fx.children()?);
+ Ok(fx.group(parts)) }, ]) })?);
+    fx.set_dollar("$parent_parts", l3_sd);
+    fx.set_dollar("$parent_geom", l2_sd);
+    } else {
+    let l4_check = { if !(fx.call_fn(&rt::FnCall { name: "is_description", args: &[(None, p_desc.clone())] })?).is_truthy() { return Err(rt::assert_decline()); } rt::Value::Undef };
+    let l5_T = fx.call_fn(&rt::FnCall { name: "linear_solve", args: &[(None, fx.dollar("$transform")), (None, rt::index(p_desc.clone(), &rt::Value::Num(f64::from_bits(0x0_u64))))] })?;
+    let l6_sd = fx.dollar("$parent_geom");
+    fx.set_dollar("$parent_geom", rt::index(p_desc.clone(), &rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64))));
+    let l7_sd = fx.dollar("$parent_parts");
+    fx.set_dollar("$parent_parts", rt::index(p_desc.clone(), &rt::Value::Num(f64::from_bits(0x4000000000000000_u64))));
+    parts.push(fx.call(&rt::ModuleCall { name: "multmatrix", args: &[(None, l5_T.clone()), ], children: rt::Children::Compiled(&[&|fx: &dyn rt::ModuleCtx| { let mut parts: Vec<rt::Geo> = Vec::new();     parts.push(fx.children()?);
+ Ok(fx.group(parts)) }, ]) })?);
+    fx.set_dollar("$parent_parts", l7_sd);
+    fx.set_dollar("$parent_geom", l6_sd);
     }
         fx.group(parts)
     };
@@ -8147,6 +8827,78 @@ pub(super) fn rotate(fx: &dyn rt::ModuleCtx) -> rt::Result<rt::Geo> {
 }
 
 
+/// Generated native for module `rotate_sweep` — geometry through the interpreter's own
+/// construction, so a generated module is what interpreting its reference builds.
+pub(super) fn rotate_sweep(fx: &dyn rt::ModuleCtx) -> rt::Result<rt::Geo> {
+    let p_shape = fx.args().get(0).cloned().unwrap_or(rt::Value::Undef);
+    let p_angle = fx.args().get(1).cloned().unwrap_or(rt::Value::Undef);
+    let p_texture = fx.args().get(2).cloned().unwrap_or(rt::Value::Undef);
+    let p_tex_size = fx.args().get(3).cloned().unwrap_or(rt::Value::Undef);
+    let p_tex_counts = fx.args().get(4).cloned().unwrap_or(rt::Value::Undef);
+    let p_tex_reps = fx.args().get(5).cloned().unwrap_or(rt::Value::Undef);
+    let p_tex_inset = fx.args().get(6).cloned().unwrap_or(rt::Value::Undef);
+    let p_tex_rot = fx.args().get(7).cloned().unwrap_or(rt::Value::Undef);
+    let p_tex_scale = fx.args().get(8).cloned().unwrap_or(rt::Value::Undef);
+    let p_tex_depth = fx.args().get(9).cloned().unwrap_or(rt::Value::Undef);
+    let p_tex_samples = fx.args().get(10).cloned().unwrap_or(rt::Value::Undef);
+    let p_tex_taper = fx.args().get(11).cloned().unwrap_or(rt::Value::Undef);
+    let p_shift = fx.args().get(12).cloned().unwrap_or(rt::Value::Undef);
+    let p_style = fx.args().get(13).cloned().unwrap_or(rt::Value::Undef);
+    let p_caps = fx.args().get(14).cloned().unwrap_or(rt::Value::Undef);
+    let p_closed = fx.args().get(15).cloned().unwrap_or(rt::Value::Undef);
+    let p_tex_extra = fx.args().get(16).cloned().unwrap_or(rt::Value::Undef);
+    let p_tex_aspect = fx.args().get(17).cloned().unwrap_or(rt::Value::Undef);
+    let p_pixel_aspect = fx.args().get(18).cloned().unwrap_or(rt::Value::Undef);
+    let p_cp = fx.args().get(19).cloned().unwrap_or(rt::Value::Undef);
+    let p_convexity = fx.args().get(20).cloned().unwrap_or(rt::Value::Undef);
+    let p_atype = fx.args().get(21).cloned().unwrap_or(rt::Value::Undef);
+    let p_anchor = fx.args().get(22).cloned().unwrap_or(rt::Value::Undef);
+    let p_spin = fx.args().get(23).cloned().unwrap_or(rt::Value::Undef);
+    let p_orient = fx.args().get(24).cloned().unwrap_or(rt::Value::Undef);
+    let p_start = fx.args().get(25).cloned().unwrap_or(rt::Value::Undef);
+    let p__tex_inhibit_y_slicing = fx.args().get(26).cloned().unwrap_or(rt::Value::Undef);
+    let mut parts: Vec<rt::Geo> = Vec::new();
+    let l0_dummy = { if !(rt::Value::Bool(rt::Value::Bool(fx.call_fn(&rt::FnCall { name: "is_num", args: &[(None, p_angle.clone())] })?.is_truthy() && rt::apply_binary(rt::BinOp::Gt, p_angle.clone(), rt::Value::Num(f64::from_bits(0x0_u64))).is_truthy()).is_truthy() && rt::apply_binary(rt::BinOp::Le, p_angle.clone(), rt::Value::Num(f64::from_bits(0x4076800000000000_u64))).is_truthy())).is_truthy() { return Err(rt::assert_decline()); } { if !(rt::apply_binary(rt::BinOp::Lt, fx.call_fn(&rt::FnCall { name: "num_defined", args: &[(None, rt::build_vector(vec![p_closed.clone(), p_caps.clone()]))] })?, rt::Value::Num(f64::from_bits(0x4000000000000000_u64)))).is_truthy() { return Err(rt::assert_decline()); } { if !(rt::apply_binary(rt::BinOp::Lt, fx.call_fn(&rt::FnCall { name: "num_defined", args: &[(None, rt::build_vector(vec![p_tex_reps.clone(), p_tex_counts.clone()]))] })?, rt::Value::Num(f64::from_bits(0x4000000000000000_u64)))).is_truthy() { return Err(rt::assert_decline()); } { if !(rt::apply_binary(rt::BinOp::Lt, fx.call_fn(&rt::FnCall { name: "num_defined", args: &[(None, rt::build_vector(vec![p_tex_scale.clone(), p_tex_depth.clone()]))] })?, rt::Value::Num(f64::from_bits(0x4000000000000000_u64)))).is_truthy() { return Err(rt::assert_decline()); } { if !(rt::Value::Bool(rt::Value::Bool(rt::apply_unary(rt::UnOp::Not, fx.call_fn(&rt::FnCall { name: "is_path", args: &[(None, p_shape.clone())] })?).is_truthy() || p_caps.clone().is_truthy()).is_truthy() || rt::apply_binary(rt::BinOp::Ge, fx.call_fn(&rt::FnCall { name: "len", args: &[(None, p_shape.clone())] })?, rt::Value::Num(f64::from_bits(0x4008000000000000_u64))).is_truthy())).is_truthy() { return Err(rt::assert_decline()); } rt::Value::Undef } } } } };
+    let l1_caps = if fx.call_fn(&rt::FnCall { name: "is_def", args: &[(None, p_caps.clone())] })?.is_truthy() { p_caps.clone() } else { if fx.call_fn(&rt::FnCall { name: "is_def", args: &[(None, p_closed.clone())] })?.is_truthy() { rt::apply_unary(rt::UnOp::Not, p_closed.clone()) } else { rt::Value::Bool(false) } };
+    let l2_tex_reps = if fx.call_fn(&rt::FnCall { name: "is_def", args: &[(None, p_tex_counts.clone())] })?.is_truthy() { { fx.echo(&[(None, rt::Value::string("In rotate_sweep() the 'tex_counts' parameter is deprecated and has been replaced by 'tex_reps'"))])?; p_tex_counts.clone() } } else { p_tex_reps.clone() };
+    let l3_tex_depth = if fx.call_fn(&rt::FnCall { name: "is_def", args: &[(None, p_tex_scale.clone())] })?.is_truthy() { { fx.echo(&[(None, rt::Value::string("In rotate_sweep() the 'tex_scale' parameter is deprecated and has been replaced by 'tex_depth'"))])?; p_tex_scale.clone() } } else { fx.call_fn(&rt::FnCall { name: "default", args: &[(None, p_tex_depth.clone()), (None, rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64)))] })? };
+    let l6_region = if rt::Value::Bool(fx.call_fn(&rt::FnCall { name: "is_path", args: &[(None, p_shape.clone())] })?.is_truthy() && l1_caps.clone().is_truthy()).is_truthy() { fx.call_fn(&rt::FnCall { name: "_force_xplus", args: &[(None, rt::build_vector(vec![fx.call_fn(&rt::FnCall { name: "deduplicate", args: &[(None, { let mut l4_acc: Vec<rt::Value> = Vec::new(); l4_acc.push(rt::build_vector(vec![rt::Value::Num(f64::from_bits(0x0_u64)), rt::member(rt::index(p_shape.clone(), &rt::Value::Num(f64::from_bits(0x0_u64))), "y")]));
+        for l5_each in rt::iter_values_native(&p_shape.clone()) { l4_acc.push(l5_each); } l4_acc.push(rt::build_vector(vec![rt::Value::Num(f64::from_bits(0x0_u64)), rt::member(fx.call_fn(&rt::FnCall { name: "last", args: &[(None, p_shape.clone())] })?, "y")]));
+        rt::build_vector(l4_acc) })] })?]))] })? } else { fx.call_fn(&rt::FnCall { name: "_force_xplus", args: &[(None, fx.call_fn(&rt::FnCall { name: "force_region", args: &[(None, p_shape.clone())] })?)] })? };
+    let l7_ctr2d = fx.call_fn(&rt::FnCall { name: "centroid", args: &[(None, l6_region.clone())] })?;
+    let l8_ctr3d = rt::build_vector(vec![rt::member(l7_ctr2d.clone(), "x"), rt::Value::Num(f64::from_bits(0x0_u64)), rt::member(l7_ctr2d.clone(), "y")]);
+    let l9_namedanch = if rt::apply_binary(rt::BinOp::Eq, p_angle.clone(), rt::Value::Num(f64::from_bits(0x4076800000000000_u64))).is_truthy() { rt::build_vector(vec![]) } else { rt::build_vector(vec![fx.call_fn(&rt::FnCall { name: "named_anchor", args: &[(None, rt::Value::string("start-centroid")), (None, l8_ctr3d.clone()), (None, rt::Value::num_list(vec![f64::from_bits(0x0_u64), f64::from_bits(0xbff0000000000000_u64), f64::from_bits(0x0_u64)]))] })?, fx.call_fn(&rt::FnCall { name: "named_anchor", args: &[(None, rt::Value::string("end-centroid")), (Some("rot"), rt::apply_binary(rt::BinOp::Mul, rt::apply_binary(rt::BinOp::Mul, rt::apply_binary(rt::BinOp::Mul, fx.call_fn(&rt::FnCall { name: "zrot", args: &[(None, p_angle.clone())] })?, fx.call_fn(&rt::FnCall { name: "move", args: &[(None, l8_ctr3d.clone())] })?), fx.call_fn(&rt::FnCall { name: "xrot", args: &[(None, rt::apply_unary(rt::UnOp::Neg, rt::Value::Num(f64::from_bits(0x4056800000000000_u64))))] })?), fx.call_fn(&rt::FnCall { name: "zrot", args: &[(None, rt::Value::Num(f64::from_bits(0x4066800000000000_u64)))] })?))] })?]) };
+    let l10_check = { if !(fx.call_fn(&rt::FnCall { name: "is_region", args: &[(None, l6_region.clone())] })?).is_truthy() { return Err(rt::assert_decline()); } rt::Value::Undef };
+    let l11_bounds = fx.call_fn(&rt::FnCall { name: "pointlist_bounds", args: &[(None, fx.call_fn(&rt::FnCall { name: "flatten", args: &[(None, l6_region.clone())] })?)] })?;
+    let l12_min_x = rt::member(rt::index(l11_bounds.clone(), &rt::Value::Num(f64::from_bits(0x0_u64))), "x");
+    let l13_max_x = rt::member(rt::index(l11_bounds.clone(), &rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64))), "x");
+    let l14_min_y = rt::member(rt::index(l11_bounds.clone(), &rt::Value::Num(f64::from_bits(0x0_u64))), "y");
+    let l15_max_y = rt::member(rt::index(l11_bounds.clone(), &rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64))), "y");
+    let l16_h = rt::apply_binary(rt::BinOp::Sub, l15_max_y.clone(), l14_min_y.clone());
+    let l17_check2 = { if !(rt::apply_binary(rt::BinOp::Ge, l12_min_x.clone(), rt::Value::Num(f64::from_bits(0x0_u64)))).is_truthy() { return Err(rt::assert_decline()); } rt::Value::Undef };
+    let l18_blk = {
+        let mut parts: Vec<rt::Geo> = Vec::new();
+    if (rt::apply_unary(rt::UnOp::Not, fx.call_fn(&rt::FnCall { name: "is_undef", args: &[(None, p_texture.clone())] })?)).is_truthy() {
+    parts.push(fx.call(&rt::ModuleCall { name: "change_anchors", args: &[(Some("named"), l9_namedanch.clone()), ], children: rt::Children::Compiled(&[&|fx: &dyn rt::ModuleCtx| { let mut parts: Vec<rt::Geo> = Vec::new();     parts.push(fx.call(&rt::ModuleCall { name: "_textured_revolution", args: &[(None, p_shape.clone()), (Some("texture"), p_texture.clone()), (Some("tex_size"), p_tex_size.clone()), (Some("counts"), l2_tex_reps.clone()), (Some("tex_scale"), l3_tex_depth.clone()), (Some("inset"), p_tex_inset.clone()), (Some("rot"), p_tex_rot.clone()), (Some("samples"), p_tex_samples.clone()), (Some("taper"), p_tex_taper.clone()), (Some("shift"), p_shift.clone()), (Some("tex_extra"), p_tex_extra.clone()), (Some("tex_aspect"), p_tex_aspect.clone()), (Some("pixel_aspect"), p_pixel_aspect.clone()), (Some("closed"), rt::apply_unary(rt::UnOp::Not, l1_caps.clone())), (Some("inhibit_y_slicing"), p__tex_inhibit_y_slicing.clone()), (Some("angle"), p_angle.clone()), (Some("style"), p_style.clone()), (Some("atype"), p_atype.clone()), (Some("anchor"), p_anchor.clone()), (Some("spin"), p_spin.clone()), (Some("orient"), p_orient.clone()), (Some("start"), p_start.clone()), ], children: rt::Children::Compiled(&[&|fx: &dyn rt::ModuleCtx| { let mut parts: Vec<rt::Geo> = Vec::new();     parts.push(fx.children()?);
+ Ok(fx.group(parts)) }, ]) })?);
+ Ok(fx.group(parts)) }, ]) })?);
+    } else {
+    let l19_steps = rt::apply_binary(rt::BinOp::Add, fx.call_fn(&rt::FnCall { name: "ceil", args: &[(None, rt::apply_binary(rt::BinOp::Div, rt::apply_binary(rt::BinOp::Mul, fx.call_fn(&rt::FnCall { name: "segs", args: &[(None, l13_max_x.clone())] })?, p_angle.clone()), rt::Value::Num(f64::from_bits(0x4076800000000000_u64))))] })?, if rt::apply_binary(rt::BinOp::Lt, p_angle.clone(), rt::Value::Num(f64::from_bits(0x4076800000000000_u64))).is_truthy() { rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64)) } else { rt::Value::Num(f64::from_bits(0x0_u64)) });
+    let l20_skmat = rt::apply_binary(rt::BinOp::Mul, rt::apply_binary(rt::BinOp::Mul, fx.call_fn(&rt::FnCall { name: "down", args: &[(None, l14_min_y.clone())] })?, fx.call_fn(&rt::FnCall { name: "skew", args: &[(Some("sxz"), rt::apply_binary(rt::BinOp::Div, rt::member(p_shift.clone(), "x"), l16_h.clone())), (Some("syz"), rt::apply_binary(rt::BinOp::Div, rt::member(p_shift.clone(), "y"), l16_h.clone()))] })?), fx.call_fn(&rt::FnCall { name: "up", args: &[(None, l14_min_y.clone())] })?);
+    let l24_transforms = { let mut l21_acc: Vec<rt::Value> = Vec::new(); if (rt::apply_binary(rt::BinOp::Eq, p_angle.clone(), rt::Value::Num(f64::from_bits(0x4076800000000000_u64)))).is_truthy() { for l22_i in rt::iter_values_native(&rt::build_range(&rt::Value::Num(f64::from_bits(0x0_u64)), &rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64)), &rt::apply_binary(rt::BinOp::Sub, l19_steps.clone(), rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64))))) { l21_acc.push(rt::apply_binary(rt::BinOp::Mul, l20_skmat.clone(), fx.call_fn(&rt::FnCall { name: "rot", args: &[(None, rt::build_vector(vec![rt::Value::Num(f64::from_bits(0x4056800000000000_u64)), rt::Value::Num(f64::from_bits(0x0_u64)), rt::apply_binary(rt::BinOp::Sub, rt::apply_binary(rt::BinOp::Add, p_start.clone(), rt::Value::Num(f64::from_bits(0x4076800000000000_u64))), rt::apply_binary(rt::BinOp::Div, rt::apply_binary(rt::BinOp::Mul, l22_i.clone(), rt::Value::Num(f64::from_bits(0x4076800000000000_u64))), l19_steps.clone()))]))] })?));
+        }  } if (rt::apply_binary(rt::BinOp::Lt, p_angle.clone(), rt::Value::Num(f64::from_bits(0x4076800000000000_u64)))).is_truthy() { for l23_i in rt::iter_values_native(&rt::build_range(&rt::Value::Num(f64::from_bits(0x0_u64)), &rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64)), &rt::apply_binary(rt::BinOp::Sub, l19_steps.clone(), rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64))))) { l21_acc.push(rt::apply_binary(rt::BinOp::Mul, l20_skmat.clone(), fx.call_fn(&rt::FnCall { name: "rot", args: &[(None, rt::build_vector(vec![rt::Value::Num(f64::from_bits(0x4056800000000000_u64)), rt::Value::Num(f64::from_bits(0x0_u64)), rt::apply_binary(rt::BinOp::Sub, rt::apply_binary(rt::BinOp::Add, p_start.clone(), p_angle.clone()), rt::apply_binary(rt::BinOp::Div, rt::apply_binary(rt::BinOp::Mul, l23_i.clone(), p_angle.clone()), rt::apply_binary(rt::BinOp::Sub, l19_steps.clone(), rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64)))))]))] })?));
+        }  } rt::build_vector(l21_acc) };
+    parts.push(fx.call(&rt::ModuleCall { name: "change_anchors", args: &[(Some("named"), l9_namedanch.clone()), ], children: rt::Children::Compiled(&[&|fx: &dyn rt::ModuleCtx| { let mut parts: Vec<rt::Geo> = Vec::new();     parts.push(fx.call(&rt::ModuleCall { name: "sweep", args: &[(None, l6_region.clone()), (None, l24_transforms.clone()), (Some("closed"), rt::apply_binary(rt::BinOp::Eq, p_angle.clone(), rt::Value::Num(f64::from_bits(0x4076800000000000_u64)))), (Some("caps"), rt::apply_binary(rt::BinOp::Ne, p_angle.clone(), rt::Value::Num(f64::from_bits(0x4076800000000000_u64)))), (Some("style"), p_style.clone()), (Some("cp"), p_cp.clone()), (Some("convexity"), p_convexity.clone()), (Some("atype"), p_atype.clone()), (Some("anchor"), p_anchor.clone()), (Some("spin"), p_spin.clone()), (Some("orient"), p_orient.clone()), ], children: rt::Children::Compiled(&[&|fx: &dyn rt::ModuleCtx| { let mut parts: Vec<rt::Geo> = Vec::new();     parts.push(fx.children()?);
+ Ok(fx.group(parts)) }, ]) })?);
+ Ok(fx.group(parts)) }, ]) })?);
+    }
+        fx.group(parts)
+    };
+    parts.push(l18_blk);
+    Ok(fx.group(parts))
+}
+
+
 /// Generated native for module `round2d` — geometry through the interpreter's own
 /// construction, so a generated module is what interpreting its reference builds.
 pub(super) fn round2d(fx: &dyn rt::ModuleCtx) -> rt::Result<rt::Geo> {
@@ -8423,6 +9175,33 @@ pub(super) fn rrect(fx: &dyn rt::ModuleCtx) -> rt::Result<rt::Geo> {
     let p_center = fx.args().get(2).cloned().unwrap_or(rt::Value::Undef);
     let mut parts: Vec<rt::Geo> = Vec::new();
     parts.push(fx.call(&rt::ModuleCall { name: "cuboid", args: &[(None, p_size.clone()), (Some("rounding"), p_r.clone()), (Some("edges"), rt::Value::string("Z")), (Some("anchor"), if p_center.clone().is_truthy() { rt::Value::num_list(vec![f64::from_bits(0x0_u64), f64::from_bits(0x0_u64), f64::from_bits(0x0_u64)]) } else { rt::Value::num_list(vec![f64::from_bits(0x0_u64), f64::from_bits(0x0_u64), f64::from_bits(0xbff0000000000000_u64)]) }), ], children: rt::Children::None })?);
+    Ok(fx.group(parts))
+}
+
+
+/// Generated native for module `scale` — geometry through the interpreter's own
+/// construction, so a generated module is what interpreting its reference builds.
+pub(super) fn scale(fx: &dyn rt::ModuleCtx) -> rt::Result<rt::Geo> {
+    let p_v = fx.args().get(0).cloned().unwrap_or(rt::Value::Undef);
+    let p_cp = fx.args().get(1).cloned().unwrap_or(rt::Value::Undef);
+    let p_dir = fx.args().get(2).cloned().unwrap_or(rt::Value::Undef);
+    let mut parts: Vec<rt::Geo> = Vec::new();
+    let l0_blk = {
+        let mut parts: Vec<rt::Geo> = Vec::new();
+    if (rt::Value::Bool(rt::apply_binary(rt::BinOp::Ne, p_cp.clone(), rt::build_vector(vec![rt::Value::Num(f64::from_bits(0x0_u64)), rt::Value::Num(f64::from_bits(0x0_u64)), rt::Value::Num(f64::from_bits(0x0_u64))])).is_truthy() || fx.call_fn(&rt::FnCall { name: "is_def", args: &[(None, p_dir.clone())] })?.is_truthy())).is_truthy() {
+    parts.push(fx.call(&rt::ModuleCall { name: "multmatrix", args: &[(None, fx.call_fn(&rt::FnCall { name: "scale", args: &[(None, p_v.clone()), (Some("cp"), p_cp.clone()), (Some("dir"), p_dir.clone())] })?), ], children: rt::Children::Compiled(&[&|fx: &dyn rt::ModuleCtx| { let mut parts: Vec<rt::Geo> = Vec::new();     parts.push(fx.children()?);
+ Ok(fx.group(parts)) }, ]) })?);
+    } else {
+    let l1_s3 = if fx.call_fn(&rt::FnCall { name: "is_finite", args: &[(None, p_v.clone())] })?.is_truthy() { fx.call_fn(&rt::FnCall { name: "affine3d_scale", args: &[(None, rt::build_vector(vec![p_v.clone(), p_v.clone(), p_v.clone()]))] })? } else { if fx.call_fn(&rt::FnCall { name: "is_vector", args: &[(None, p_v.clone())] })?.is_truthy() { fx.call_fn(&rt::FnCall { name: "affine3d_scale", args: &[(None, p_v.clone())] })? } else { rt::Value::list(vec![rt::Value::num_list(vec![f64::from_bits(0x3ff0000000000000_u64), f64::from_bits(0x0_u64), f64::from_bits(0x0_u64), f64::from_bits(0x0_u64)]), rt::Value::num_list(vec![f64::from_bits(0x0_u64), f64::from_bits(0x3ff0000000000000_u64), f64::from_bits(0x0_u64), f64::from_bits(0x0_u64)]), rt::Value::num_list(vec![f64::from_bits(0x0_u64), f64::from_bits(0x0_u64), f64::from_bits(0x3ff0000000000000_u64), f64::from_bits(0x0_u64)]), rt::Value::num_list(vec![f64::from_bits(0x0_u64), f64::from_bits(0x0_u64), f64::from_bits(0x0_u64), f64::from_bits(0x3ff0000000000000_u64)])]) } };
+    let l2_sd = fx.dollar("$transform");
+    fx.set_dollar("$transform", rt::apply_binary(rt::BinOp::Mul, fx.dollar("$transform"), l1_s3.clone()));
+    parts.push(fx.call(&rt::ModuleCall { name: "_scale", args: &[(None, p_v.clone()), ], children: rt::Children::Compiled(&[&|fx: &dyn rt::ModuleCtx| { let mut parts: Vec<rt::Geo> = Vec::new();     parts.push(fx.children()?);
+ Ok(fx.group(parts)) }, ]) })?);
+    fx.set_dollar("$transform", l2_sd);
+    }
+        fx.group(parts)
+    };
+    parts.push(l0_blk);
     Ok(fx.group(parts))
 }
 
@@ -11076,6 +11855,54 @@ pub(super) fn wire_bundle(fx: &dyn rt::ModuleCtx) -> rt::Result<rt::Geo> {
 }
 
 
+/// Generated native for module `xcopies` — geometry through the interpreter's own
+/// construction, so a generated module is what interpreting its reference builds.
+pub(super) fn xcopies(fx: &dyn rt::ModuleCtx) -> rt::Result<rt::Geo> {
+    let p_spacing = fx.args().get(0).cloned().unwrap_or(rt::Value::Undef);
+    let p_n = fx.args().get(1).cloned().unwrap_or(rt::Value::Undef);
+    let p_l = fx.args().get(2).cloned().unwrap_or(rt::Value::Undef);
+    let p_sp = fx.args().get(3).cloned().unwrap_or(rt::Value::Undef);
+    let mut parts: Vec<rt::Geo> = Vec::new();
+    let l0_dir = rt::Value::num_list(vec![f64::from_bits(0x3ff0000000000000_u64), f64::from_bits(0x0_u64), f64::from_bits(0x0_u64)]);
+    let l1_sp = if fx.call_fn(&rt::FnCall { name: "is_finite", args: &[(None, p_sp.clone())] })?.is_truthy() { rt::apply_binary(rt::BinOp::Mul, p_sp.clone(), l0_dir.clone()) } else { p_sp.clone() };
+    let l2_blk = {
+        let mut parts: Vec<rt::Geo> = Vec::new();
+    if !(rt::Value::Bool(fx.call_fn(&rt::FnCall { name: "is_undef", args: &[(None, p_n.clone())] })?.is_truthy() || rt::apply_binary(rt::BinOp::Eq, fx.call_fn(&rt::FnCall { name: "num_defined", args: &[(None, rt::build_vector(vec![p_l.clone(), p_spacing.clone()]))] })?, rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64))).is_truthy())).is_truthy() { return Err(rt::assert_decline()); }
+    let l3_un = {
+        let mut parts: Vec<rt::Geo> = Vec::new();
+    if !(rt::Value::Bool(fx.call_fn(&rt::FnCall { name: "is_def", args: &[(None, p_n.clone())] })?.is_truthy() || rt::apply_binary(rt::BinOp::Ge, fx.call_fn(&rt::FnCall { name: "num_defined", args: &[(None, rt::build_vector(vec![p_l.clone(), p_spacing.clone()]))] })?, rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64))).is_truthy())).is_truthy() { return Err(rt::assert_decline()); }
+    let l4_un = {
+        let mut parts: Vec<rt::Geo> = Vec::new();
+    parts.push(fx.call(&rt::ModuleCall { name: "req_children", args: &[(None, fx.dollar("$children")), ], children: rt::Children::None })?);
+        fx.group(parts)
+    };
+    parts.push(l4_un);
+        fx.group(parts)
+    };
+    parts.push(l3_un);
+    if (fx.call_fn(&rt::FnCall { name: "is_vector", args: &[(None, p_spacing.clone())] })?).is_truthy() {
+    parts.push(fx.call(&rt::ModuleCall { name: "translate", args: &[(None, fx.call_fn(&rt::FnCall { name: "default", args: &[(None, l1_sp.clone()), (None, rt::build_vector(vec![rt::Value::Num(f64::from_bits(0x0_u64)), rt::Value::Num(f64::from_bits(0x0_u64)), rt::Value::Num(f64::from_bits(0x0_u64))]))] })?), ], children: rt::Children::Compiled(&[&|fx: &dyn rt::ModuleCtx| { let mut parts: Vec<rt::Geo> = Vec::new();     for l5_i in rt::iter_values_native(&fx.call_fn(&rt::FnCall { name: "idx", args: &[(None, p_spacing.clone())] })?) {
+    let l6_sd = fx.dollar("$idx");
+    fx.set_dollar("$idx", l5_i.clone());
+    let l7_sd = fx.dollar("$pos");
+    fx.set_dollar("$pos", rt::apply_binary(rt::BinOp::Mul, rt::index(p_spacing.clone(), &l5_i.clone()), l0_dir.clone()));
+    parts.push(fx.call(&rt::ModuleCall { name: "translate", args: &[(None, fx.dollar("$pos")), ], children: rt::Children::Compiled(&[&|fx: &dyn rt::ModuleCtx| { let mut parts: Vec<rt::Geo> = Vec::new();     parts.push(fx.children()?);
+ Ok(fx.group(parts)) }, ]) })?);
+    fx.set_dollar("$pos", l7_sd);
+    fx.set_dollar("$idx", l6_sd);
+    }
+ Ok(fx.group(parts)) }, ]) })?);
+    } else {
+    parts.push(fx.call(&rt::ModuleCall { name: "line_copies", args: &[(Some("l"), fx.call_fn(&rt::FnCall { name: "u_mul", args: &[(None, p_l.clone()), (None, l0_dir.clone())] })?), (Some("spacing"), fx.call_fn(&rt::FnCall { name: "u_mul", args: &[(None, p_spacing.clone()), (None, l0_dir.clone())] })?), (Some("n"), p_n.clone()), (Some("p1"), l1_sp.clone()), ], children: rt::Children::Compiled(&[&|fx: &dyn rt::ModuleCtx| { let mut parts: Vec<rt::Geo> = Vec::new();     parts.push(fx.children()?);
+ Ok(fx.group(parts)) }, ]) })?);
+    }
+        fx.group(parts)
+    };
+    parts.push(l2_blk);
+    Ok(fx.group(parts))
+}
+
+
 /// Generated native for module `xcyl` — geometry through the interpreter's own
 /// construction, so a generated module is what interpreting its reference builds.
 pub(super) fn xcyl(fx: &dyn rt::ModuleCtx) -> rt::Result<rt::Geo> {
@@ -11136,6 +11963,44 @@ pub(super) fn xcyl(fx: &dyn rt::ModuleCtx) -> rt::Result<rt::Geo> {
         fx.group(parts)
     };
     parts.push(l3_blk);
+    Ok(fx.group(parts))
+}
+
+
+/// Generated native for module `xdistribute` — geometry through the interpreter's own
+/// construction, so a generated module is what interpreting its reference builds.
+pub(super) fn xdistribute(fx: &dyn rt::ModuleCtx) -> rt::Result<rt::Geo> {
+    let p_spacing = fx.args().get(0).cloned().unwrap_or(rt::Value::Undef);
+    let p_sizes = fx.args().get(1).cloned().unwrap_or(rt::Value::Undef);
+    let p_l = fx.args().get(2).cloned().unwrap_or(rt::Value::Undef);
+    let mut parts: Vec<rt::Geo> = Vec::new();
+    let l0_dir = rt::Value::num_list(vec![f64::from_bits(0x3ff0000000000000_u64), f64::from_bits(0x0_u64), f64::from_bits(0x0_u64)]);
+    let l5_gaps = if rt::apply_binary(rt::BinOp::Lt, fx.dollar("$children"), rt::Value::Num(f64::from_bits(0x4000000000000000_u64))).is_truthy() { rt::build_vector(vec![rt::Value::Num(f64::from_bits(0x0_u64))]) } else { if rt::apply_unary(rt::UnOp::Not, fx.call_fn(&rt::FnCall { name: "is_undef", args: &[(None, p_sizes.clone())] })?).is_truthy() { { let mut l1_acc: Vec<rt::Value> = Vec::new(); for l2_i in rt::iter_values_native(&rt::build_range(&rt::Value::Num(f64::from_bits(0x0_u64)), &rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64)), &rt::apply_binary(rt::BinOp::Sub, fx.dollar("$children"), rt::Value::Num(f64::from_bits(0x4000000000000000_u64))))) { l1_acc.push(rt::apply_binary(rt::BinOp::Add, rt::apply_binary(rt::BinOp::Div, rt::index(p_sizes.clone(), &l2_i.clone()), rt::Value::Num(f64::from_bits(0x4000000000000000_u64))), rt::apply_binary(rt::BinOp::Div, rt::index(p_sizes.clone(), &rt::apply_binary(rt::BinOp::Add, l2_i.clone(), rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64)))), rt::Value::Num(f64::from_bits(0x4000000000000000_u64)))));
+        } rt::build_vector(l1_acc) } } else { { let mut l3_acc: Vec<rt::Value> = Vec::new(); for l4_i in rt::iter_values_native(&rt::build_range(&rt::Value::Num(f64::from_bits(0x0_u64)), &rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64)), &rt::apply_binary(rt::BinOp::Sub, fx.dollar("$children"), rt::Value::Num(f64::from_bits(0x4000000000000000_u64))))) { l3_acc.push(rt::Value::Num(f64::from_bits(0x0_u64)));
+        } rt::build_vector(l3_acc) } } };
+    let l6_spc = if rt::apply_unary(rt::UnOp::Not, fx.call_fn(&rt::FnCall { name: "is_undef", args: &[(None, p_l.clone())] })?).is_truthy() { rt::apply_binary(rt::BinOp::Div, rt::apply_binary(rt::BinOp::Sub, p_l.clone(), fx.call_fn(&rt::FnCall { name: "sum", args: &[(None, l5_gaps.clone())] })?), rt::apply_binary(rt::BinOp::Sub, fx.dollar("$children"), rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64)))) } else { fx.call_fn(&rt::FnCall { name: "default", args: &[(None, p_spacing.clone()), (None, rt::Value::Num(f64::from_bits(0x4024000000000000_u64)))] })? };
+    let l9_gaps2 = { let mut l7_acc: Vec<rt::Value> = Vec::new(); for l8_gap in rt::iter_values_native(&l5_gaps.clone()) { l7_acc.push(rt::apply_binary(rt::BinOp::Add, l8_gap.clone(), l6_spc.clone()));
+        } rt::build_vector(l7_acc) };
+    let l10_spos = rt::apply_binary(rt::BinOp::Div, rt::apply_binary(rt::BinOp::Mul, l0_dir.clone(), rt::apply_unary(rt::UnOp::Neg, fx.call_fn(&rt::FnCall { name: "sum", args: &[(None, l9_gaps2.clone())] })?)), rt::Value::Num(f64::from_bits(0x4000000000000000_u64)));
+    let l13_spacings = fx.call_fn(&rt::FnCall { name: "cumsum", args: &[(None, { let mut l11_acc: Vec<rt::Value> = Vec::new(); l11_acc.push(rt::Value::Num(f64::from_bits(0x0_u64)));
+        for l12_each in rt::iter_values_native(&l9_gaps2.clone()) { l11_acc.push(l12_each); } rt::build_vector(l11_acc) })] })?;
+    let l14_blk = {
+        let mut parts: Vec<rt::Geo> = Vec::new();
+    parts.push(fx.call(&rt::ModuleCall { name: "req_children", args: &[(None, fx.dollar("$children")), ], children: rt::Children::None })?);
+    for l15_i in rt::iter_values_native(&rt::build_range(&rt::Value::Num(f64::from_bits(0x0_u64)), &rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64)), &rt::apply_binary(rt::BinOp::Sub, fx.dollar("$children"), rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64))))) {
+    let l16_sd = fx.dollar("$pos");
+    fx.set_dollar("$pos", rt::apply_binary(rt::BinOp::Add, l10_spos.clone(), rt::apply_binary(rt::BinOp::Mul, rt::index(l13_spacings.clone(), &l15_i.clone()), l0_dir.clone())));
+    let l17_sd = fx.dollar("$idx");
+    fx.set_dollar("$idx", l15_i.clone());
+    parts.push(fx.call(&rt::ModuleCall { name: "translate", args: &[(None, fx.dollar("$pos")), ], children: rt::Children::Compiled(&[&|fx: &dyn rt::ModuleCtx| { let mut parts: Vec<rt::Geo> = Vec::new();     let l18_sel = l15_i.clone();
+    parts.push(fx.child_at(&l18_sel)?);
+ Ok(fx.group(parts)) }, ]) })?);
+    fx.set_dollar("$idx", l17_sd);
+    fx.set_dollar("$pos", l16_sd);
+    }
+        fx.group(parts)
+    };
+    parts.push(l14_blk);
     Ok(fx.group(parts))
 }
 
@@ -11318,6 +12183,54 @@ pub(super) fn xspread(fx: &dyn rt::ModuleCtx) -> rt::Result<rt::Geo> {
 }
 
 
+/// Generated native for module `ycopies` — geometry through the interpreter's own
+/// construction, so a generated module is what interpreting its reference builds.
+pub(super) fn ycopies(fx: &dyn rt::ModuleCtx) -> rt::Result<rt::Geo> {
+    let p_spacing = fx.args().get(0).cloned().unwrap_or(rt::Value::Undef);
+    let p_n = fx.args().get(1).cloned().unwrap_or(rt::Value::Undef);
+    let p_l = fx.args().get(2).cloned().unwrap_or(rt::Value::Undef);
+    let p_sp = fx.args().get(3).cloned().unwrap_or(rt::Value::Undef);
+    let mut parts: Vec<rt::Geo> = Vec::new();
+    let l0_dir = rt::Value::num_list(vec![f64::from_bits(0x0_u64), f64::from_bits(0x3ff0000000000000_u64), f64::from_bits(0x0_u64)]);
+    let l1_sp = if fx.call_fn(&rt::FnCall { name: "is_finite", args: &[(None, p_sp.clone())] })?.is_truthy() { rt::apply_binary(rt::BinOp::Mul, p_sp.clone(), l0_dir.clone()) } else { p_sp.clone() };
+    let l2_blk = {
+        let mut parts: Vec<rt::Geo> = Vec::new();
+    if !(rt::Value::Bool(fx.call_fn(&rt::FnCall { name: "is_undef", args: &[(None, p_n.clone())] })?.is_truthy() || rt::apply_binary(rt::BinOp::Eq, fx.call_fn(&rt::FnCall { name: "num_defined", args: &[(None, rt::build_vector(vec![p_l.clone(), p_spacing.clone()]))] })?, rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64))).is_truthy())).is_truthy() { return Err(rt::assert_decline()); }
+    let l3_un = {
+        let mut parts: Vec<rt::Geo> = Vec::new();
+    if !(rt::Value::Bool(fx.call_fn(&rt::FnCall { name: "is_def", args: &[(None, p_n.clone())] })?.is_truthy() || rt::apply_binary(rt::BinOp::Ge, fx.call_fn(&rt::FnCall { name: "num_defined", args: &[(None, rt::build_vector(vec![p_l.clone(), p_spacing.clone()]))] })?, rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64))).is_truthy())).is_truthy() { return Err(rt::assert_decline()); }
+    let l4_un = {
+        let mut parts: Vec<rt::Geo> = Vec::new();
+    parts.push(fx.call(&rt::ModuleCall { name: "req_children", args: &[(None, fx.dollar("$children")), ], children: rt::Children::None })?);
+        fx.group(parts)
+    };
+    parts.push(l4_un);
+        fx.group(parts)
+    };
+    parts.push(l3_un);
+    if (fx.call_fn(&rt::FnCall { name: "is_vector", args: &[(None, p_spacing.clone())] })?).is_truthy() {
+    parts.push(fx.call(&rt::ModuleCall { name: "translate", args: &[(None, fx.call_fn(&rt::FnCall { name: "default", args: &[(None, l1_sp.clone()), (None, rt::build_vector(vec![rt::Value::Num(f64::from_bits(0x0_u64)), rt::Value::Num(f64::from_bits(0x0_u64)), rt::Value::Num(f64::from_bits(0x0_u64))]))] })?), ], children: rt::Children::Compiled(&[&|fx: &dyn rt::ModuleCtx| { let mut parts: Vec<rt::Geo> = Vec::new();     for l5_i in rt::iter_values_native(&fx.call_fn(&rt::FnCall { name: "idx", args: &[(None, p_spacing.clone())] })?) {
+    let l6_sd = fx.dollar("$idx");
+    fx.set_dollar("$idx", l5_i.clone());
+    let l7_sd = fx.dollar("$pos");
+    fx.set_dollar("$pos", rt::apply_binary(rt::BinOp::Mul, rt::index(p_spacing.clone(), &l5_i.clone()), l0_dir.clone()));
+    parts.push(fx.call(&rt::ModuleCall { name: "translate", args: &[(None, fx.dollar("$pos")), ], children: rt::Children::Compiled(&[&|fx: &dyn rt::ModuleCtx| { let mut parts: Vec<rt::Geo> = Vec::new();     parts.push(fx.children()?);
+ Ok(fx.group(parts)) }, ]) })?);
+    fx.set_dollar("$pos", l7_sd);
+    fx.set_dollar("$idx", l6_sd);
+    }
+ Ok(fx.group(parts)) }, ]) })?);
+    } else {
+    parts.push(fx.call(&rt::ModuleCall { name: "line_copies", args: &[(Some("l"), fx.call_fn(&rt::FnCall { name: "u_mul", args: &[(None, p_l.clone()), (None, l0_dir.clone())] })?), (Some("spacing"), fx.call_fn(&rt::FnCall { name: "u_mul", args: &[(None, p_spacing.clone()), (None, l0_dir.clone())] })?), (Some("n"), p_n.clone()), (Some("p1"), l1_sp.clone()), ], children: rt::Children::Compiled(&[&|fx: &dyn rt::ModuleCtx| { let mut parts: Vec<rt::Geo> = Vec::new();     parts.push(fx.children()?);
+ Ok(fx.group(parts)) }, ]) })?);
+    }
+        fx.group(parts)
+    };
+    parts.push(l2_blk);
+    Ok(fx.group(parts))
+}
+
+
 /// Generated native for module `ycyl` — geometry through the interpreter's own
 /// construction, so a generated module is what interpreting its reference builds.
 pub(super) fn ycyl(fx: &dyn rt::ModuleCtx) -> rt::Result<rt::Geo> {
@@ -11378,6 +12291,44 @@ pub(super) fn ycyl(fx: &dyn rt::ModuleCtx) -> rt::Result<rt::Geo> {
         fx.group(parts)
     };
     parts.push(l3_blk);
+    Ok(fx.group(parts))
+}
+
+
+/// Generated native for module `ydistribute` — geometry through the interpreter's own
+/// construction, so a generated module is what interpreting its reference builds.
+pub(super) fn ydistribute(fx: &dyn rt::ModuleCtx) -> rt::Result<rt::Geo> {
+    let p_spacing = fx.args().get(0).cloned().unwrap_or(rt::Value::Undef);
+    let p_sizes = fx.args().get(1).cloned().unwrap_or(rt::Value::Undef);
+    let p_l = fx.args().get(2).cloned().unwrap_or(rt::Value::Undef);
+    let mut parts: Vec<rt::Geo> = Vec::new();
+    let l0_dir = rt::Value::num_list(vec![f64::from_bits(0x0_u64), f64::from_bits(0x3ff0000000000000_u64), f64::from_bits(0x0_u64)]);
+    let l5_gaps = if rt::apply_binary(rt::BinOp::Lt, fx.dollar("$children"), rt::Value::Num(f64::from_bits(0x4000000000000000_u64))).is_truthy() { rt::build_vector(vec![rt::Value::Num(f64::from_bits(0x0_u64))]) } else { if rt::apply_unary(rt::UnOp::Not, fx.call_fn(&rt::FnCall { name: "is_undef", args: &[(None, p_sizes.clone())] })?).is_truthy() { { let mut l1_acc: Vec<rt::Value> = Vec::new(); for l2_i in rt::iter_values_native(&rt::build_range(&rt::Value::Num(f64::from_bits(0x0_u64)), &rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64)), &rt::apply_binary(rt::BinOp::Sub, fx.dollar("$children"), rt::Value::Num(f64::from_bits(0x4000000000000000_u64))))) { l1_acc.push(rt::apply_binary(rt::BinOp::Add, rt::apply_binary(rt::BinOp::Div, rt::index(p_sizes.clone(), &l2_i.clone()), rt::Value::Num(f64::from_bits(0x4000000000000000_u64))), rt::apply_binary(rt::BinOp::Div, rt::index(p_sizes.clone(), &rt::apply_binary(rt::BinOp::Add, l2_i.clone(), rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64)))), rt::Value::Num(f64::from_bits(0x4000000000000000_u64)))));
+        } rt::build_vector(l1_acc) } } else { { let mut l3_acc: Vec<rt::Value> = Vec::new(); for l4_i in rt::iter_values_native(&rt::build_range(&rt::Value::Num(f64::from_bits(0x0_u64)), &rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64)), &rt::apply_binary(rt::BinOp::Sub, fx.dollar("$children"), rt::Value::Num(f64::from_bits(0x4000000000000000_u64))))) { l3_acc.push(rt::Value::Num(f64::from_bits(0x0_u64)));
+        } rt::build_vector(l3_acc) } } };
+    let l6_spc = if rt::apply_unary(rt::UnOp::Not, fx.call_fn(&rt::FnCall { name: "is_undef", args: &[(None, p_l.clone())] })?).is_truthy() { rt::apply_binary(rt::BinOp::Div, rt::apply_binary(rt::BinOp::Sub, p_l.clone(), fx.call_fn(&rt::FnCall { name: "sum", args: &[(None, l5_gaps.clone())] })?), rt::apply_binary(rt::BinOp::Sub, fx.dollar("$children"), rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64)))) } else { fx.call_fn(&rt::FnCall { name: "default", args: &[(None, p_spacing.clone()), (None, rt::Value::Num(f64::from_bits(0x4024000000000000_u64)))] })? };
+    let l9_gaps2 = { let mut l7_acc: Vec<rt::Value> = Vec::new(); for l8_gap in rt::iter_values_native(&l5_gaps.clone()) { l7_acc.push(rt::apply_binary(rt::BinOp::Add, l8_gap.clone(), l6_spc.clone()));
+        } rt::build_vector(l7_acc) };
+    let l10_spos = rt::apply_binary(rt::BinOp::Div, rt::apply_binary(rt::BinOp::Mul, l0_dir.clone(), rt::apply_unary(rt::UnOp::Neg, fx.call_fn(&rt::FnCall { name: "sum", args: &[(None, l9_gaps2.clone())] })?)), rt::Value::Num(f64::from_bits(0x4000000000000000_u64)));
+    let l13_spacings = fx.call_fn(&rt::FnCall { name: "cumsum", args: &[(None, { let mut l11_acc: Vec<rt::Value> = Vec::new(); l11_acc.push(rt::Value::Num(f64::from_bits(0x0_u64)));
+        for l12_each in rt::iter_values_native(&l9_gaps2.clone()) { l11_acc.push(l12_each); } rt::build_vector(l11_acc) })] })?;
+    let l14_blk = {
+        let mut parts: Vec<rt::Geo> = Vec::new();
+    parts.push(fx.call(&rt::ModuleCall { name: "req_children", args: &[(None, fx.dollar("$children")), ], children: rt::Children::None })?);
+    for l15_i in rt::iter_values_native(&rt::build_range(&rt::Value::Num(f64::from_bits(0x0_u64)), &rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64)), &rt::apply_binary(rt::BinOp::Sub, fx.dollar("$children"), rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64))))) {
+    let l16_sd = fx.dollar("$pos");
+    fx.set_dollar("$pos", rt::apply_binary(rt::BinOp::Add, l10_spos.clone(), rt::apply_binary(rt::BinOp::Mul, rt::index(l13_spacings.clone(), &l15_i.clone()), l0_dir.clone())));
+    let l17_sd = fx.dollar("$idx");
+    fx.set_dollar("$idx", l15_i.clone());
+    parts.push(fx.call(&rt::ModuleCall { name: "translate", args: &[(None, fx.dollar("$pos")), ], children: rt::Children::Compiled(&[&|fx: &dyn rt::ModuleCtx| { let mut parts: Vec<rt::Geo> = Vec::new();     let l18_sel = l15_i.clone();
+    parts.push(fx.child_at(&l18_sel)?);
+ Ok(fx.group(parts)) }, ]) })?);
+    fx.set_dollar("$idx", l17_sd);
+    fx.set_dollar("$pos", l16_sd);
+    }
+        fx.group(parts)
+    };
+    parts.push(l14_blk);
     Ok(fx.group(parts))
 }
 
@@ -11560,6 +12511,54 @@ pub(super) fn yspread(fx: &dyn rt::ModuleCtx) -> rt::Result<rt::Geo> {
 }
 
 
+/// Generated native for module `zcopies` — geometry through the interpreter's own
+/// construction, so a generated module is what interpreting its reference builds.
+pub(super) fn zcopies(fx: &dyn rt::ModuleCtx) -> rt::Result<rt::Geo> {
+    let p_spacing = fx.args().get(0).cloned().unwrap_or(rt::Value::Undef);
+    let p_n = fx.args().get(1).cloned().unwrap_or(rt::Value::Undef);
+    let p_l = fx.args().get(2).cloned().unwrap_or(rt::Value::Undef);
+    let p_sp = fx.args().get(3).cloned().unwrap_or(rt::Value::Undef);
+    let mut parts: Vec<rt::Geo> = Vec::new();
+    let l0_dir = rt::Value::num_list(vec![f64::from_bits(0x0_u64), f64::from_bits(0x0_u64), f64::from_bits(0x3ff0000000000000_u64)]);
+    let l1_sp = if fx.call_fn(&rt::FnCall { name: "is_finite", args: &[(None, p_sp.clone())] })?.is_truthy() { rt::apply_binary(rt::BinOp::Mul, p_sp.clone(), l0_dir.clone()) } else { p_sp.clone() };
+    let l2_blk = {
+        let mut parts: Vec<rt::Geo> = Vec::new();
+    if !(rt::Value::Bool(fx.call_fn(&rt::FnCall { name: "is_undef", args: &[(None, p_n.clone())] })?.is_truthy() || rt::apply_binary(rt::BinOp::Eq, fx.call_fn(&rt::FnCall { name: "num_defined", args: &[(None, rt::build_vector(vec![p_l.clone(), p_spacing.clone()]))] })?, rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64))).is_truthy())).is_truthy() { return Err(rt::assert_decline()); }
+    let l3_un = {
+        let mut parts: Vec<rt::Geo> = Vec::new();
+    if !(rt::Value::Bool(fx.call_fn(&rt::FnCall { name: "is_def", args: &[(None, p_n.clone())] })?.is_truthy() || rt::apply_binary(rt::BinOp::Ge, fx.call_fn(&rt::FnCall { name: "num_defined", args: &[(None, rt::build_vector(vec![p_l.clone(), p_spacing.clone()]))] })?, rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64))).is_truthy())).is_truthy() { return Err(rt::assert_decline()); }
+    let l4_un = {
+        let mut parts: Vec<rt::Geo> = Vec::new();
+    parts.push(fx.call(&rt::ModuleCall { name: "req_children", args: &[(None, fx.dollar("$children")), ], children: rt::Children::None })?);
+        fx.group(parts)
+    };
+    parts.push(l4_un);
+        fx.group(parts)
+    };
+    parts.push(l3_un);
+    if (fx.call_fn(&rt::FnCall { name: "is_vector", args: &[(None, p_spacing.clone())] })?).is_truthy() {
+    parts.push(fx.call(&rt::ModuleCall { name: "translate", args: &[(None, fx.call_fn(&rt::FnCall { name: "default", args: &[(None, l1_sp.clone()), (None, rt::build_vector(vec![rt::Value::Num(f64::from_bits(0x0_u64)), rt::Value::Num(f64::from_bits(0x0_u64)), rt::Value::Num(f64::from_bits(0x0_u64))]))] })?), ], children: rt::Children::Compiled(&[&|fx: &dyn rt::ModuleCtx| { let mut parts: Vec<rt::Geo> = Vec::new();     for l5_i in rt::iter_values_native(&fx.call_fn(&rt::FnCall { name: "idx", args: &[(None, p_spacing.clone())] })?) {
+    let l6_sd = fx.dollar("$idx");
+    fx.set_dollar("$idx", l5_i.clone());
+    let l7_sd = fx.dollar("$pos");
+    fx.set_dollar("$pos", rt::apply_binary(rt::BinOp::Mul, rt::index(p_spacing.clone(), &l5_i.clone()), l0_dir.clone()));
+    parts.push(fx.call(&rt::ModuleCall { name: "translate", args: &[(None, fx.dollar("$pos")), ], children: rt::Children::Compiled(&[&|fx: &dyn rt::ModuleCtx| { let mut parts: Vec<rt::Geo> = Vec::new();     parts.push(fx.children()?);
+ Ok(fx.group(parts)) }, ]) })?);
+    fx.set_dollar("$pos", l7_sd);
+    fx.set_dollar("$idx", l6_sd);
+    }
+ Ok(fx.group(parts)) }, ]) })?);
+    } else {
+    parts.push(fx.call(&rt::ModuleCall { name: "line_copies", args: &[(Some("l"), fx.call_fn(&rt::FnCall { name: "u_mul", args: &[(None, p_l.clone()), (None, l0_dir.clone())] })?), (Some("spacing"), fx.call_fn(&rt::FnCall { name: "u_mul", args: &[(None, p_spacing.clone()), (None, l0_dir.clone())] })?), (Some("n"), p_n.clone()), (Some("p1"), l1_sp.clone()), ], children: rt::Children::Compiled(&[&|fx: &dyn rt::ModuleCtx| { let mut parts: Vec<rt::Geo> = Vec::new();     parts.push(fx.children()?);
+ Ok(fx.group(parts)) }, ]) })?);
+    }
+        fx.group(parts)
+    };
+    parts.push(l2_blk);
+    Ok(fx.group(parts))
+}
+
+
 /// Generated native for module `zcyl` — geometry through the interpreter's own
 /// construction, so a generated module is what interpreting its reference builds.
 pub(super) fn zcyl(fx: &dyn rt::ModuleCtx) -> rt::Result<rt::Geo> {
@@ -11620,6 +12619,44 @@ pub(super) fn zcyl(fx: &dyn rt::ModuleCtx) -> rt::Result<rt::Geo> {
         fx.group(parts)
     };
     parts.push(l3_blk);
+    Ok(fx.group(parts))
+}
+
+
+/// Generated native for module `zdistribute` — geometry through the interpreter's own
+/// construction, so a generated module is what interpreting its reference builds.
+pub(super) fn zdistribute(fx: &dyn rt::ModuleCtx) -> rt::Result<rt::Geo> {
+    let p_spacing = fx.args().get(0).cloned().unwrap_or(rt::Value::Undef);
+    let p_sizes = fx.args().get(1).cloned().unwrap_or(rt::Value::Undef);
+    let p_l = fx.args().get(2).cloned().unwrap_or(rt::Value::Undef);
+    let mut parts: Vec<rt::Geo> = Vec::new();
+    let l0_dir = rt::Value::num_list(vec![f64::from_bits(0x0_u64), f64::from_bits(0x0_u64), f64::from_bits(0x3ff0000000000000_u64)]);
+    let l5_gaps = if rt::apply_binary(rt::BinOp::Lt, fx.dollar("$children"), rt::Value::Num(f64::from_bits(0x4000000000000000_u64))).is_truthy() { rt::build_vector(vec![rt::Value::Num(f64::from_bits(0x0_u64))]) } else { if rt::apply_unary(rt::UnOp::Not, fx.call_fn(&rt::FnCall { name: "is_undef", args: &[(None, p_sizes.clone())] })?).is_truthy() { { let mut l1_acc: Vec<rt::Value> = Vec::new(); for l2_i in rt::iter_values_native(&rt::build_range(&rt::Value::Num(f64::from_bits(0x0_u64)), &rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64)), &rt::apply_binary(rt::BinOp::Sub, fx.dollar("$children"), rt::Value::Num(f64::from_bits(0x4000000000000000_u64))))) { l1_acc.push(rt::apply_binary(rt::BinOp::Add, rt::apply_binary(rt::BinOp::Div, rt::index(p_sizes.clone(), &l2_i.clone()), rt::Value::Num(f64::from_bits(0x4000000000000000_u64))), rt::apply_binary(rt::BinOp::Div, rt::index(p_sizes.clone(), &rt::apply_binary(rt::BinOp::Add, l2_i.clone(), rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64)))), rt::Value::Num(f64::from_bits(0x4000000000000000_u64)))));
+        } rt::build_vector(l1_acc) } } else { { let mut l3_acc: Vec<rt::Value> = Vec::new(); for l4_i in rt::iter_values_native(&rt::build_range(&rt::Value::Num(f64::from_bits(0x0_u64)), &rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64)), &rt::apply_binary(rt::BinOp::Sub, fx.dollar("$children"), rt::Value::Num(f64::from_bits(0x4000000000000000_u64))))) { l3_acc.push(rt::Value::Num(f64::from_bits(0x0_u64)));
+        } rt::build_vector(l3_acc) } } };
+    let l6_spc = if rt::apply_unary(rt::UnOp::Not, fx.call_fn(&rt::FnCall { name: "is_undef", args: &[(None, p_l.clone())] })?).is_truthy() { rt::apply_binary(rt::BinOp::Div, rt::apply_binary(rt::BinOp::Sub, p_l.clone(), fx.call_fn(&rt::FnCall { name: "sum", args: &[(None, l5_gaps.clone())] })?), rt::apply_binary(rt::BinOp::Sub, fx.dollar("$children"), rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64)))) } else { fx.call_fn(&rt::FnCall { name: "default", args: &[(None, p_spacing.clone()), (None, rt::Value::Num(f64::from_bits(0x4024000000000000_u64)))] })? };
+    let l9_gaps2 = { let mut l7_acc: Vec<rt::Value> = Vec::new(); for l8_gap in rt::iter_values_native(&l5_gaps.clone()) { l7_acc.push(rt::apply_binary(rt::BinOp::Add, l8_gap.clone(), l6_spc.clone()));
+        } rt::build_vector(l7_acc) };
+    let l10_spos = rt::apply_binary(rt::BinOp::Div, rt::apply_binary(rt::BinOp::Mul, l0_dir.clone(), rt::apply_unary(rt::UnOp::Neg, fx.call_fn(&rt::FnCall { name: "sum", args: &[(None, l9_gaps2.clone())] })?)), rt::Value::Num(f64::from_bits(0x4000000000000000_u64)));
+    let l13_spacings = fx.call_fn(&rt::FnCall { name: "cumsum", args: &[(None, { let mut l11_acc: Vec<rt::Value> = Vec::new(); l11_acc.push(rt::Value::Num(f64::from_bits(0x0_u64)));
+        for l12_each in rt::iter_values_native(&l9_gaps2.clone()) { l11_acc.push(l12_each); } rt::build_vector(l11_acc) })] })?;
+    let l14_blk = {
+        let mut parts: Vec<rt::Geo> = Vec::new();
+    parts.push(fx.call(&rt::ModuleCall { name: "req_children", args: &[(None, fx.dollar("$children")), ], children: rt::Children::None })?);
+    for l15_i in rt::iter_values_native(&rt::build_range(&rt::Value::Num(f64::from_bits(0x0_u64)), &rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64)), &rt::apply_binary(rt::BinOp::Sub, fx.dollar("$children"), rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64))))) {
+    let l16_sd = fx.dollar("$pos");
+    fx.set_dollar("$pos", rt::apply_binary(rt::BinOp::Add, l10_spos.clone(), rt::apply_binary(rt::BinOp::Mul, rt::index(l13_spacings.clone(), &l15_i.clone()), l0_dir.clone())));
+    let l17_sd = fx.dollar("$idx");
+    fx.set_dollar("$idx", l15_i.clone());
+    parts.push(fx.call(&rt::ModuleCall { name: "translate", args: &[(None, fx.dollar("$pos")), ], children: rt::Children::Compiled(&[&|fx: &dyn rt::ModuleCtx| { let mut parts: Vec<rt::Geo> = Vec::new();     let l18_sel = l15_i.clone();
+    parts.push(fx.child_at(&l18_sel)?);
+ Ok(fx.group(parts)) }, ]) })?);
+    fx.set_dollar("$idx", l17_sd);
+    fx.set_dollar("$pos", l16_sd);
+    }
+        fx.group(parts)
+    };
+    parts.push(l14_blk);
     Ok(fx.group(parts))
 }
 
@@ -11954,6 +12991,12 @@ pub(super) static REGISTRY: &[super::ModuleEntry] = &[
         consts: &[],
     },
     super::ModuleEntry {
+        name: "_knuckle_hinge_profile",
+        reference: "module _knuckle_hinge_profile(offset, arm_height, arm_angle=45, knuckle_diam=4, pin_diam=1.75, fill=true, clear_top=false, \n                              round_bot=0, round_top=0, pin_fn, clearance=0, tearspin, clip)\n{\n  extra = .01;\n  skel = turtle([\"left\", 90-arm_angle, \"untilx\", offset+extra, \"left\", arm_angle,\n                 if (arm_height>0) each [\"move\", arm_height]]);\n  ofs = arm_height+offset/tan(arm_angle);\n  start=round_bot==0 && round_top==0 ? os_flat(abs_angle=90)\n                                     : os_round(abs_angle=90, cut=[-round_top,-round_bot],k=.8);\n  back(clearance)\n  difference(){\n    union(){\n      difference(){\n        fwd(ofs){\n          left(extra)offset_stroke(skel, width=knuckle_diam, start=start);\n          if (fill) polygon([each list_head(skel,-2), fwd(clearance,last(skel)), [-extra,ofs-clearance]]);\n        }\n        if (clear_top==true || clear_top==\"all\") left(.1)fwd(clearance) rect([offset+knuckle_diam,knuckle_diam+1+clearance],anchor=BOT+LEFT);\n        if (is_num(clear_top)) left(.1)fwd(clearance) rect([.1+clear_top, knuckle_diam+1+clearance], anchor=BOT+LEFT);\n        if (is_def(clip)) fwd(clip) left(.1) rect([offset+knuckle_diam, ofs+round_bot+knuckle_diam+abs(clip)],anchor=BACK+LEFT);\n      }\n      right(offset)ellipse(d=knuckle_diam, circum=true);\n    }\n    if (is_num(pin_diam) && pin_diam>0){\n      $fn = default(pin_fn,$fn);\n      right(offset)\n        if (is_def(tearspin)){\n          teardrop2d(d=pin_diam+2*get_slop(), realign=true, circum=true, spin=tearspin);\n        }\n        else ellipse(d=pin_diam+2*get_slop(), circum=true);\n    }\n  }\n}",
+        func: _knuckle_hinge_profile,
+        consts: &[("BACK", __bake_BACK), ("BOT", __bake_BOT), ("LEFT", __bake_LEFT)],
+    },
+    super::ModuleEntry {
         name: "_multmatrix",
         reference: "module _multmatrix(m) multmatrix(m) children();",
         func: _multmatrix,
@@ -12074,6 +13117,12 @@ pub(super) static REGISTRY: &[super::ModuleEntry] = &[
         consts: &[("INCH", __bake_INCH)],
     },
     super::ModuleEntry {
+        name: "align",
+        reference: "module align(anchor,align=CENTER,inside=false,inset=0,shiftout=0,overlap)\n{\n    req_children($children);\n    overlap = (inside?-1:1)*((overlap!=undef)? overlap : $overlap);\n    dummy1=assert($parent_geom != undef, \"\\nNo object to align to.\")\n           assert(is_undef($attach_to), \"\\nCannot use align() as a child of attach().\")\n           assert(is_finite(overlap), str(\"\\noverlap must be a finite number but is \",overlap));\n    if (_is_shown() && inside && overlap!=0 && (is_undef($align_msg) || $align_msg))\n      echo(\"WARNING: overlap passed to align() with inside=true; handling has changed (May 2026): positive overlap moves child outward (change in sign). Set $align_msg=false to hide this message\");\n\n    anchor = is_vector(anchor) ? [anchor] : anchor;\n    align = is_vector(align) ? [align] : align;\n    two_d = _attach_geom_2d($parent_geom);\n    factor = ($anchor_inside ? -1 : 1)*(inside?-1:1);\n    for (i = idx(anchor)) {\n        $align_msg=false;     // Remove me when removing the message above\n        face = anchor[i];\n        $anchor=face;\n        dummy=\n          assert(!is_string(face),\n                 str(\"\\nNamed anchor \\\"\",face,\"\\\" given for anchor, but align() does not support named anchors.\"))\n          assert(is_vector(face) && (len(face)==2 || len(face)==3),\n                 str(\"\\nInvalid face \",face, \". Must be a 2-vector or 3-vector.\"));\n        thisface = two_d? _force_anchor_2d(face) : point3d(face);\n        for(j = idx(align)) {\n          edge=align[j];\n          $idx = j+len(align)*i;\n          $align=edge;\n          dummy1=assert(is_vector(edge) && (len(edge)==2 || len(edge)==3),\n                        \"\\nalign direction must be a 2-vector or 3-vector.\");\n          thisedge = two_d? _force_anchor_2d(edge) : point3d(edge);\n          dummy=assert(all_zero(v_mul(thisedge,thisface)),\n                       str(\"\\nalign (\",thisedge,\") cannot include component parallel to anchor \",thisface,\".\"));\n          thisface_anch = _find_anchor(thisface, $parent_geom);\n          inset_dir = two_d ? -thisface\n                    : unit(thisface_anch[1]-_find_anchor([thisedge.x,0,0]+thisface, $parent_geom)[1],CTR)\n                       +unit(thisface_anch[1]-_find_anchor([0,thisedge.y,0]+thisface, $parent_geom)[1],CTR)\n                       +unit(thisface_anch[1]-_find_anchor([0,0,thisedge.z]+thisface, $parent_geom)[1],CTR);\n          \n          pos_anch = _find_anchor(thisface+thisedge, $parent_geom);\n          $attach_alignment = thisedge-factor*thisface;\n          $attach_anchor=list_set(pos_anch,2,UP);\n          translate(pos_anch[1]\n                    +inset*inset_dir\n                    +shiftout*(thisface_anch[2]-inset_dir)\n                    -overlap*thisface_anch[2])\n              default_tag(\"remove\",inside) children();                  \n        }\n    }\n}",
+        func: align,
+        consts: &[("CENTER", __bake_CENTER), ("CTR", __bake_CTR), ("UP", __bake_UP)],
+    },
+    super::ModuleEntry {
         name: "apply_folding_hinges_and_snaps",
         reference: "module apply_folding_hinges_and_snaps(thick, foldangle=90, hinges=[], snaps=[], sockets=[], snaplen=5, snapdiam=5, hingegap=undef, layerheight=0.2)\n{\n    hingegap = default(hingegap, layerheight)+2*get_slop();\n    difference() {\n        children();\n        for (hinge = hinges) {\n            translate(hinge[1]) {\n                living_hinge_mask(\n                    l=hinge[0], thick=thick, layerheight=layerheight,\n                    foldangle=foldangle, hingegap=hingegap, spin=hinge[2]\n                );\n            }\n        }\n    }\n    for (snap = snaps) {\n        translate(snap[0]) {\n            snap_lock(\n                thick=thick, snaplen=snaplen, snapdiam=snapdiam,\n                layerheight=layerheight, foldangle=foldangle,\n                hingegap=hingegap, spin=snap[1]\n            );\n        }\n    }\n    for (socket = sockets) {\n        translate(socket[0]) {\n            snap_socket(\n                thick=thick, snaplen=snaplen, snapdiam=snapdiam,\n                layerheight=layerheight, foldangle=foldangle,\n                hingegap=hingegap, spin=socket[1]\n            );\n        }\n    }\n}",
         func: apply_folding_hinges_and_snaps,
@@ -12102,6 +13151,12 @@ pub(super) static REGISTRY: &[super::ModuleEntry] = &[
         reference: "module assert_equal(got, expected, info) {\n    no_children($children);\n    if (got != expected || (is_nan(got) && is_nan(expected))) {\n        echo();\n        echo(str(\"EXPECT: \", _valstr(expected)));\n        echo(str(\"GOT   : \", _valstr(got)));\n        if (same_shape(got, expected)) {\n            echo(str(\"DELTA : \", _valstr(got - expected)));\n        }\n        if (is_def(info)) {\n            echo(str(\"INFO  : \", _valstr(info)));\n        }\n        assert(got == expected);\n    }\n}",
         func: assert_equal,
         consts: &[],
+    },
+    super::ModuleEntry {
+        name: "attach",
+        reference: "module attach(parent, child, overlap, align, spin=0, norot, inset=0, shiftout=0, inside=false, from, to)\n{\n    dummy3=\n      assert(num_defined([to,child])<2, \"\\nCannot combine deprecated 'to' argument with 'child' parameter.\")\n      assert(num_defined([from,parent])<2, \"\\nCannot combine deprecated 'from' argument with 'parent' parameter.\")\n      assert(spin!=\"align\" || is_def(align), \"\\nCan set spin to \\\"align\\\" only when the 'align' parameter is given.\")\n      assert(is_finite(spin) || spin==\"align\", \"\\nSpin must be a number (unless align is given).\")\n      assert((is_undef(overlap) || is_finite(overlap)) && (is_def(overlap) || is_undef($overlap) || is_finite($overlap)),\n             str(\"Provided \",is_def(overlap)?\"\":\"$\",\"overlap is not valid.\"));\n    removetag = inside;\n    inside = $anchor_inside ? !inside : inside;\n    if (is_def(to))\n      echo(\"The 'to' option to attach() is deprecated and will be removed in the future.  Use 'child' instead.\");\n    if (is_def(from))\n      echo(\"The 'from' option to attach(0 is deprecated and will be removed in the future.  Use 'parent' instead\");\n    if (norot)\n      echo(\"The 'norot' option to attach() is deprecated and will be removed in the future.  Use position() instead.\");\n    req_children($children);\n    \n    dummy=assert($parent_geom != undef, \"\\nNo object to attach to!\")\n          assert(is_undef(child) || is_string(child) || (is_vector(child) && (len(child)==2 || len(child)==3)),\n                 \"\\nChild must be a named anchor (a string) or a 2-vector or 3-vector.\")\n          assert(is_undef(align) || !is_string(child), \"\\nChild is a named anchor. Named anchors are not supported with align=.\");\n\n    two_d = _attach_geom_2d($parent_geom);\n    basegeom = $parent_geom[0]==\"conoid\" ? attach_geom(r=2,h=2,axis=$parent_geom[5])\n             : $parent_geom[0]==\"prismoid\" ? attach_geom(size=[2,2,2],axis=$parent_geom[4])\n             : attach_geom(size=[2,2,2]);\n    childgeom = attach_geom([2,2,2]);\n    child_abstract_anchor = is_vector(child) && !two_d ? _find_anchor(_make_anchor_legal(child,childgeom), childgeom) : undef;\n    overlap = (overlap!=undef)? overlap : $overlap;\n    parent = first_defined([parent,from]);\n    anchors = is_vector(parent) || is_string(parent) ? [parent] : parent;\n    align_list = is_undef(align) ? [undef]\n               : is_vector(align) || is_string(align) ? [align] : align;\n    dummy4 = assert(is_string(parent) || is_list(parent), \"\\nInvalid parent anchor or anchor list.\")\n             assert(spin==0 || (!two_d || is_undef(child)), \"\\nspin is not allowed for 2d objects when 'child' is given.\");\n    child_temp = first_defined([child,to]);\n    child = two_d ? _force_anchor_2d(child_temp) : child_temp;\n    dummy2=assert(align_list==[undef] || is_def(child), \"\\nCannot use 'align' without 'child'.\")\n           assert(!inside || is_def(child), \"\\nCannot use 'inside' without 'child'.\")\n           assert(inset==0 || is_def(child), \"\\nCannot specify 'inset' without 'child'.\")\n           assert(inset==0 || is_def(align), \"\\nCannot specify 'inset' without 'align'.\")\n           assert(shiftout==0 || is_def(child), \"\\nCannot specify 'shiftout' without 'child'.\");\n    factor = inside?-1:1;\n    $attach_to = child;\n    for (anch_ind = idx(anchors)) {\n        dummy=assert(is_string(anchors[anch_ind]) || (is_vector(anchors[anch_ind]) && (len(anchors[anch_ind])==2 || len(anchors[anch_ind])==3)),\n                     str(\"\\nParent[\",anch_ind,\"] is \",anchors[anch_ind],\" but it must be a named anchor (string), a 2-vector, or 3-vector.\"))\n              assert(align_list==[undef] || !is_string(anchors[anch_ind]),\n                     str(\"\\nParent[\",anch_ind,\"] is a named anchor (\",anchors[anch_ind],\"), but named anchors are not supported with align=.\"));\n        anchor = is_string(anchors[anch_ind])? anchors[anch_ind]\n               : two_d?_force_anchor_2d(anchors[anch_ind])\n               : point3d(anchors[anch_ind]);\n        $anchor=anchor;\n        anchor_data = _find_anchor(anchor, $parent_geom);\n        $edge_angle = len(anchor_data)==5 ? struct_val(anchor_data[4],\"edge_angle\") : undef;\n        $edge_length = len(anchor_data)==5 ? struct_val(anchor_data[4],\"edge_length\") : undef;\n        $edge_end1 = len(anchor_data)==5 ? struct_val(anchor_data[4],\"vec\") : undef;\n        anchor_pos = anchor_data[1];\n        anchor_dir = factor*anchor_data[2];\n        anchor_spin = two_d || !inside || anchor==TOP || anchor==BOT ? anchor_data[3]\n                    : let(spin_dir = rot(anchor_data[3],from=UP, to=-anchor_dir, p=BACK))\n                      _compute_spin(anchor_dir,spin_dir);\n        parent_abstract_anchor = is_vector(anchor) && !two_d ? _find_anchor(_make_anchor_legal(anchor,basegeom),basegeom) : undef;\n        for(align_ind = idx(align_list)){\n            align = is_undef(align_list[align_ind]) ? undef\n                  : assert(is_vector(align_list[align_ind],2) || is_vector(align_list[align_ind],3), \"\\nAlign direction must be a 2-vector or 3-vector.\")\n                    two_d ? _force_anchor_2d(align_list[align_ind])\n                  : point3d(align_list[align_ind]);\n            spin = is_num(spin) ? spin\n                 : align==CENTER ? 0\n                 : sum(v_abs(anchor))==1 ?   // parent anchor is a face\n                   let(\n                       spindir = in_list(anchor,[TOP,BOT]) ? BACK : UP,\n                       proj = project_plane(point4d(anchor),[spindir,align]),\n                       ang = v_theta(proj[1])-v_theta(proj[0])\n                   )\n                   ang\n                 : // parent anchor is not a face, so must be an edge (corners not allowed)\n                   let(\n                        nativeback = apply(rot(to=parent_abstract_anchor[2],from=UP)\n                                       *affine3d_zrot(parent_abstract_anchor[3]), BACK)\n                    )\n                    nativeback*align<0 ? -180:0;\n            $idx = align_ind+len(align_list)*anch_ind;\n            $align=align;\n            goodcyl = $parent_geom[0] != \"conoid\" || is_undef(align) || align==CTR ? true\n                    : let(\n                           align=rot(from=$parent_geom[5],to=UP,p=align),\n                           anchor=rot(from=$parent_geom[5],to=UP,p=anchor)\n                      )\n                      anchor==TOP || anchor==BOT || align==TOP || align==BOT;\n            badcorner = !in_list($parent_geom[0],[\"conoid\",\"spheroid\"]) && !is_undef(align) && align!=CTR && sum(v_abs(anchor))==3;\n            badsphere = $parent_geom[0]==\"spheroid\" && !is_undef(align) && align!=CTR;\n            dummy=assert(is_undef(align) || all_zero(v_mul(anchor,align)),\n                         str(\"\\nInvalid alignment: align value (\",align,\") includes component parallel to parent anchor (\",anchor,\").\"))\n                  assert(goodcyl, str(\"\\nCannot use align with an anchor on a curved edge or surface of a cylinder at parent anchor (\",anchor,\").\"))\n                  assert(!badcorner, str(\"\\nCannot use align at a corner anchor (\",anchor,\").\"))\n                  assert(!badsphere, \"\\nCannot use align on spheres.\");\n            // Now compute position on the parent (including alignment but not inset) where the child will be anchored\n            pos = is_undef(align) ? anchor_data[1] : _find_anchor(anchor+align, $parent_geom)[1];\n            $attach_anchor = list_set(anchor_data, 1, pos);      // Never used;  For user informational use?  Should this be set at all?\n            // Compute adjustment to the child anchor for position purposes.  This adjustment\n            // accounts for the change in the anchor needed to to alignment.\n            child_adjustment = is_undef(align)? CTR\n                              : two_d ? rot(to=child,from=-factor*anchor,p=align)\n                              : apply(   rot(to=child_abstract_anchor[2],from=UP)\n                                            * affine3d_zrot(child_abstract_anchor[3])\n                                            * affine3d_yrot(inside?0:180)\n                                       * affine3d_zrot(-parent_abstract_anchor[3])\n                                            *  rot(from=parent_abstract_anchor[2],to=UP)\n                                            * rot(v=anchor,-spin),\n                                      align);\n            // The $anchor_override anchor value forces an override of the *position* only for the anchor\n            // used when attachable() places the child\n            $anchor_override = all_zero(child_adjustment)? inside?child:undef\n                             : child+child_adjustment;\n\n            reference = two_d? BACK : UP;\n            // inset_dir is the direction for insetting when alignment is in effect\n            inset_dir = is_undef(align) ? CTR\n                      : two_d ? rot(to=reference, from=anchor,p=align)\n                      : apply(affine3d_yrot(inside?180:0)\n                                * affine3d_zrot(-parent_abstract_anchor[3])\n                                * rot(from=parent_abstract_anchor[2],to=UP)\n                                * rot(v=anchor,-spin),\n                              align);\n            spinaxis = two_d? UP : anchor_dir;\n            olap = - overlap * reference - inset*inset_dir + shiftout * (inset_dir + factor*reference*($anchor_inside?-1:1));\n            if (norot || (approx(anchor_dir,reference) && anchor_spin==0)) \n                translate(pos) rot(v=spinaxis,a=factor*spin) translate(olap) default_tag(\"remove\",removetag) children();\n            else  \n                translate(pos)\n                    rot(v=spinaxis,a=factor*spin)\n                    rot(anchor_spin,from=reference,to=anchor_dir)\n                    translate(olap)\n                    default_tag(\"remove\",removetag) children();\n        }\n    }\n}",
+        func: attach,
+        consts: &[("BACK", __bake_BACK), ("BOT", __bake_BOT), ("CENTER", __bake_CENTER), ("CTR", __bake_CTR), ("TOP", __bake_TOP), ("UP", __bake_UP)],
     },
     super::ModuleEntry {
         name: "attach_part",
@@ -12356,6 +13411,12 @@ pub(super) static REGISTRY: &[super::ModuleEntry] = &[
         consts: &[("BOT", __bake_BOT), ("CENTER", __bake_CENTER), ("UP", __bake_UP)],
     },
     super::ModuleEntry {
+        name: "cyl",
+        reference: "module cyl(\n    h, r, r2, center,\n    l, r1, \n    d, d1, d2,\n    length, height,\n    chamfer, chamfer1, chamfer2,\n    chamfang, chamfang1, chamfang2,\n    rounding, rounding1, rounding2,\n    circum=false, realign, shift=[0,0],\n    teardrop=false, clip_angle=90,\n    from_end, from_end1, from_end2,\n    texture, tex_size=[5,5], tex_reps, tex_counts,\n    tex_inset=false, tex_rot=0,\n    tex_scale, tex_depth, tex_samples, \n    tex_taper, style, tex_style,\n    extra, extra1, extra2, \n    anchor, spin=0, orient=UP\n) {\n    legacy = is_bool(r2) && is_undef(center);\n    edummy = !legacy?0:\n      echo(\"You gave a boolean value for r2.  Assuming you gave this value as the 3rd positional parameter.\")\n      echo(\"cyl() has changed and has parameters (height, r, r2, center) for improved consistency with\")\n      echo(\"cylinder().  Support for the legacy calling style cyl(height, r, center) will be eliminated\")\n      echo(\"and this will become an error.\");\n    center = legacy ? r2 : center;\n    realign = assert(is_bool(circum))\n              default(realign,circum);\n    dummy=\n      assert(is_bool(realign))\n      assert(num_defined([anchor,center])<2, \"\\nCannot give both `anchor` and `center` to cyl()\")\n      assert(is_undef(center) || is_bool(center), \"\\ncenter must be boolean\")\n      assert(num_defined([style,tex_style])<2, \"\\nIn cyl() the 'tex_style' parameters has been replaced by 'style'. You cannot give both.\")\n      assert(num_defined([tex_reps,tex_counts])<2, \"\\nIn cyl() the 'tex_counts' parameters has been replaced by 'tex_reps'. You cannot give both.\")\n      assert(num_defined([tex_scale,tex_depth])<2, \"\\nIn cyl() the 'tex_scale' parameter has been replaced by 'tex_depth'. You cannot give both.\");\n    style = is_def(tex_style)? echo(\"In cyl() the 'tex_style' parameter is deprecated and has been replaced by 'style'.\") tex_style\n          : default(style,\"min_edge\");\n    tex_reps = is_def(tex_counts)? echo(\"In cyl() the 'tex_counts' parameter is deprecated and has been replaced by 'tex_reps'.\")tex_counts\n             : tex_reps;\n    tex_depth = is_def(tex_scale)? echo(\"In rotate_sweep() the 'tex_scale' parameter is deprecated and has been replaced by 'tex_depth'.\")tex_scale\n              : default(tex_depth,1);\n    l = one_defined([l, h, length, height],\"l,h,length,height\",dflt=1);\n    _r1 = get_radius(r1=r1, r=r, d1=d1, d=d, dflt=1);\n    _r2 = get_radius(r1=legacy ? undef : r2, r=r, d1=d2, d=d, dflt=1);\n    sides = segs(max(_r1,_r2));\n    sc = circum? 1/cos(180/sides) : 1;\n    r1 = _r1 * sc;\n    r2 = _r2 * sc;\n    anchor = get_anchor(anchor,center,BOT,CENTER);\n    skmat = down(l/2) * skew(sxz=shift.x/l, syz=shift.y/l) * up(l/2);\n    attachable(anchor,spin,orient, r1=r1, r2=r2, l=l, shift=shift) {\n        multmatrix(skmat) {\n            if (!any_defined([chamfer, chamfer1, chamfer2, rounding, rounding1, rounding2, texture, extra1, extra2, extra])) {\n                zrot(realign? 180/sides : 0) {\n                    cylinder(h=l, r1=r1, r2=r2, center=true, $fn=sides);\n                }\n            } else {\n                vnf = cyl(\n                    l=l, r1=_r1, r2=_r2, center=true,  circum=circum, realign=realign,\n                    chamfer=chamfer, chamfer1=chamfer1, chamfer2=chamfer2,\n                    chamfang=chamfang, chamfang1=chamfang1, chamfang2=chamfang2,\n                    rounding=rounding, rounding1=rounding1, rounding2=rounding2,\n                    from_end=from_end, from_end1=from_end1, from_end2=from_end2,\n                    teardrop=teardrop, clip_angle=clip_angle,\n                    texture=texture, tex_size=tex_size,\n                    tex_reps=tex_reps, tex_depth=tex_depth,\n                    tex_inset=tex_inset, tex_rot=tex_rot,\n                    style=style, tex_taper=tex_taper,\n                    tex_samples=tex_samples,\n                    extra1=extra1,extra2=extra2,extra=extra \n                );\n                vnf_polyhedron(vnf, convexity=texture!=undef? 2 : 10);\n            }\n        }\n        children();\n    }\n}",
+        func: cyl,
+        consts: &[("BOT", __bake_BOT), ("CENTER", __bake_CENTER), ("UP", __bake_UP)],
+    },
+    super::ModuleEntry {
         name: "cylinder",
         reference: "module cylinder(h, r1, r2, center, r, d, d1, d2, anchor, spin=0, orient=UP)\n{\n    dummy = assert(num_defined([anchor,center])<2, \"\\nCannot give both center and anchor.\");\n    anchor = get_anchor(anchor, center, BOTTOM, BOTTOM);\n    r1 = get_radius(r1=r1, r=r, d1=d1, d=d, dflt=1);\n    r2 = get_radius(r1=r2, r=r, d1=d2, d=d, dflt=1);\n    h = default(h,1);\n    dummy2 = assert(is_finite(h) && h>0, \"\\nh must be a positive number.\")\n             assert(is_finite(r1) && r1>=0, \"\\nr1 must be a non-negative number.\")\n             assert(is_finite(r2) && r2>=0, \"\\nr2 must be a non-negative number.\");\n    attachable(anchor,spin,orient, r1=r1, r2=r2, l=h) {\n        _cylinder(h=h, r1=r1, r2=r2, center=true);\n        children();\n    }\n}",
         func: cylinder,
@@ -12384,6 +13445,12 @@ pub(super) static REGISTRY: &[super::ModuleEntry] = &[
         reference: "module debug_bezier_patches(patches=[], size, splinesteps=16, showcps=true, showdots=false, showpatch=true, convexity=10, style=\"default\")\n{\n    no_children($children);\n    assert(is_undef(size)||is_num(size));\n    assert(is_int(splinesteps) && splinesteps>0);\n    assert(is_list(patches) && all([for (patch=patches) is_bezier_patch(patch)]));\n    assert(is_bool(showcps));\n    assert(is_bool(showdots));\n    assert(is_bool(showpatch));\n    assert(is_int(convexity) && convexity>0);\n    for (patch = patches) {\n        size = is_num(size)? size :\n               let( bounds = pointlist_bounds(flatten(patch)) )\n               max(bounds[1]-bounds[0])*0.01;\n        if (showcps) {\n            move_copies(flatten(patch)) color(\"red\") sphere(d=size*2);\n            color(\"cyan\") \n                for (i=[0:1:len(patch)-1], j=[0:1:len(patch[i])-1]) {\n                        if (i<len(patch)-1) extrude_from_to(patch[i][j], patch[i+1][j]) circle(d=size);\n                        if (j<len(patch[i])-1) extrude_from_to(patch[i][j], patch[i][j+1]) circle(d=size);\n                }        \n        }\n        if (showpatch || showdots){\n            vnf = bezier_vnf(patch, splinesteps=splinesteps, style=style);\n            if (showpatch) vnf_polyhedron(vnf, convexity=convexity);\n            if (showdots) color(\"blue\") move_copies(vnf[0]) sphere(d=size);\n        }\n    }\n}",
         func: debug_bezier_patches,
         consts: &[],
+    },
+    super::ModuleEntry {
+        name: "debug_nurbs",
+        reference: "module debug_nurbs(control,degree,splinesteps=16,width=1, size, mult,weights,type=\"clamped\",knots, show_weights, show_knots=false, show_index=true, show_control=true)\n{\n  if (is_list(control) && in_list(control[0], [\"closed\",\"open\",\"clamped\"])) {\n    assert(len(control)>=6, \"Invalid NURBS parameter list\")\n    assert(num_defined([degree,mult,weights,knots])==0,\n           \"Cannot give degree, mult, weights or knots when you provide a NURBS parameter list\")\n    debug_nurbs(control[2], control[1], splinesteps, width, size, weights=control[5],mult=control[4], type=control[0], knots=control[3],\n                show_weights=show_weights, show_knots=show_knots, show_index=show_index, show_control=show_control);\n  }\n  else {\n    $fn=8;\n    size = default(size, 3*width);\n    show_weights = default(show_weights, is_def(weights));\n    N=len(control);\n    twodim = len(control[0])==2;\n    curve = nurbs_curve(control=control,degree=degree,splinesteps=splinesteps, mult=mult,weights=weights, type=type, knots=knots);\n    stroke(curve, width=width, closed=type==\"closed\");//, color=\"green\");\n    if (show_control)\n      stroke(control, width=width/2, color=\"white\", closed=type==\"closed\");\n    if (show_knots){\n      knotpts = nurbs_curve(control=control, degree=degree, splinesteps=1, mult=mult, weights=weights, type=type, knots=knots);\n      echo(knotpts);\n        color([0,.8,0])\n        move_copies(knotpts)\n          if (twodim) union(){rect([3*width,width]); rect([width,3*width]);} //circle(r=width);\n          else for(i=[0:2]) cuboid(list_rotate([3*width,width,width],i));\n    }\n    color(\"blue\")\n      if (show_index && show_control)\n        move_copies(control){\n          let(label = str($idx),\n              anch = show_weights && is_def(weights[$idx]) && weights[$idx]!=1 ? FWD : CENTER)\n            if (twodim) text(text=label, size=size, anchor=anch);\n            else rot($vpr) text3d(text=label, size=size, anchor=anch);\n      }\n    color(\"blue\")\n      if ( show_weights)\n        move_copies(control){\n          if(is_def(weights[$idx]) && weights[$idx]!=1)\n            let(label = str(\"w=\",weights[$idx]), \n                anch = show_index ? BACK : CENTER\n                )\n            if (twodim) fwd(size/2*0)text(text=label, size=size, anchor=anch);\n            else rot($vpr) text3d(text=label, size=size, anchor=anch);\n      }\n  }\n}",
+        func: debug_nurbs,
+        consts: &[("BACK", __bake_BACK), ("CENTER", __bake_CENTER), ("FWD", __bake_FWD)],
     },
     super::ModuleEntry {
         name: "debug_nurbs_interp",
@@ -12425,6 +13492,12 @@ pub(super) static REGISTRY: &[super::ModuleEntry] = &[
         name: "diff",
         reference: "module diff(remove=\"remove\", keep=\"keep\")\n{\n    req_children($children);\n    assert(is_string(remove),\"\\n'remove' must be a string of tags.\");\n    assert(is_string(keep),\"\\n'keep' must be a string of tags.\");\n    if (_is_shown())\n    {\n        difference() {\n            hide(str(remove,\" \",keep)) children();\n            show_only(remove) children();\n        }\n    }\n    show_int(keep)children();\n}",
         func: diff,
+        consts: &[],
+    },
+    super::ModuleEntry {
+        name: "distribute",
+        reference: "module distribute(spacing=undef, sizes=undef, dir=RIGHT, l=undef)\n{\n    req_children($children);  \n    gaps = ($children < 2)? [0] :\n        !is_undef(sizes)? [for (i=[0:1:$children-2]) sizes[i]/2 + sizes[i+1]/2] :\n        [for (i=[0:1:$children-2]) 0];\n    spc = !is_undef(l)? ((l - sum(gaps)) / ($children-1)) : default(spacing, 10);\n    gaps2 = [for (gap = gaps) gap+spc];\n    spos = dir * -sum(gaps2)/2;\n    spacings = cumsum([0, each gaps2]);\n    for (i=[0:1:$children-1]) {\n        $pos = spos + spacings[i] * dir;\n        $idx = i;\n        translate($pos) children(i);\n    }\n}",
+        func: distribute,
         consts: &[],
     },
     super::ModuleEntry {
@@ -12788,6 +13861,12 @@ pub(super) static REGISTRY: &[super::ModuleEntry] = &[
         consts: &[("RIGHT", __bake_RIGHT)],
     },
     super::ModuleEntry {
+        name: "line_copies",
+        reference: "module line_copies(spacing, n, l, p1, p2)\n{\n    req_children($children);\n    pts = line_copies(spacing=spacing, n=n, l=l, p1=p1, p2=p2, p=[0,0,0]);\n    for (i=idx(pts)) {\n        $idx = i;\n        $pos = pts[i];\n        translate($pos) children();\n    }\n}",
+        func: line_copies,
+        consts: &[],
+    },
+    super::ModuleEntry {
         name: "line_of",
         reference: "module line_of(spacing, n, l, p1, p2) {\n    deprecate(\"line_copies\");\n    line_copies(spacing, n, l, p1, p2) children();\n}",
         func: line_of,
@@ -13124,6 +14203,12 @@ pub(super) static REGISTRY: &[super::ModuleEntry] = &[
         consts: &[("CTR", __bake_CTR), ("RIGHT", __bake_RIGHT), ("UP", __bake_UP)],
     },
     super::ModuleEntry {
+        name: "position",
+        reference: "module position(at,from)\n{\n    if (is_def(from)){\n      echo(\"'from' argument of position() has changed to 'at' and will be removed in a future version\");\n    }\n    dummy0=assert(num_defined([at,from])==1, \"\\nCannot give both `at` argument and the deprectated `from` argument to position().\");\n    at = first_defined([at,from]);\n    req_children($children);\n    dummy1=assert($parent_geom != undef, \"\\nNo object to position relative to.\");\n    anchors = (is_vector(at)||is_string(at))? [at] : at;\n    two_d = _attach_geom_2d($parent_geom);\n    for (anchr = anchors) {\n        anch = _find_anchor(anchr, $parent_geom);\n        $edge_angle = len(anch)==5 ? struct_val(anch[4],\"edge_angle\") : undef;\n        $edge_length = len(anch)==5 ? struct_val(anch[4],\"edge_length\") : undef;\n        $attach_to = undef;\n        $attach_anchor = anch;\n        translate(anch[1]) children();\n    }\n}",
+        func: position,
+        consts: &[],
+    },
+    super::ModuleEntry {
         name: "prism",
         reference: "module prism(n=3, h=1, l=1, r, d, circum=false, center=false) {\n    radius = get_radius(r=r, d=d, dflt=l/2/sin(180/n));\n    cyl(r=radius, l=h, circum=circum, $fn=n, realign=true, anchor=center?CENTER:BOT);\n}",
         func: prism,
@@ -13202,6 +14287,12 @@ pub(super) static REGISTRY: &[super::ModuleEntry] = &[
         consts: &[("BACK", __bake_BACK), ("CENTER", __bake_CENTER), ("RIGHT", __bake_RIGHT)],
     },
     super::ModuleEntry {
+        name: "regular_polyhedron",
+        reference: "module regular_polyhedron(\n    name=undef,\n    index=undef,\n    type=undef,\n    faces=undef,\n    facetype=undef,\n    hasfaces=undef,\n    side=undef,\n    ir=undef,\n    mr=undef,\n    or=undef,\n    r=undef,\n    d=undef,\n    anchor=CENTER,\n    rounding=0,\n    repeat=true,\n    facedown=true,\n    draw=true,\n    rotate_children=true,\n    stellate = false,\n    longside=undef,       // special parameter for trapezohedron\n    h=undef,height=undef  // special parameter for trapezohedron\n) {\n    dummy=assert(is_num(rounding) && rounding>=0, \"'rounding' must be nonnegative\");\n    entry = regular_polyhedron_info(\n        \"fullentry\", name=name, index=index,\n        type=type, faces=faces, facetype=facetype,\n        hasfaces=hasfaces, side=side,\n        ir=ir, mr=mr, or=or,\n        r=r, d=d,\n        anchor=anchor, \n        facedown=facedown,\n        stellate=stellate,\n        longside=longside, h=h, height=height\n    );\n    assert(len(entry)>0, \"No polyhedra meet your specification\");\n    scaled_points = entry[0];\n    translation = entry[1];\n    face_triangles = entry[2];\n    faces = entry[3];\n    face_normals = entry[4];\n    in_radius = entry[5];\n    translate(translation){\n        if (draw){\n            if (rounding==0)\n                polyhedron(scaled_points, faces = face_triangles);\n            else {\n                fn = segs(rounding);\n                rounding = rounding/cos(180/fn);\n                adjusted_scale = 1 - rounding / in_radius;\n                minkowski(){\n                    sphere(r=rounding, $fn=fn);\n                    polyhedron(adjusted_scale*scaled_points, faces = face_triangles);\n                }\n            }\n        }\n        if ($children>0) {\n            maxrange = repeat ? len(faces)-1 : $children-1;\n            for(i=[0:1:maxrange]) {\n                // Would like to orient so an edge (longest edge?) is parallel to x axis\n                facepts = select(scaled_points, faces[i]);\n                $center = -mean(facepts);\n                cfacepts = move($center, p=facepts);\n                $face = rotate_children\n                          ? path2d(frame_map(z=face_normals[i], x=facepts[0]-facepts[1], reverse=true, p=cfacepts))\n                          : cfacepts;\n                $faceindex = i;\n                translate(-$center)\n                if (rotate_children) {\n                    frame_map(z=face_normals[i], x=facepts[0]-facepts[1])\n                    children(i % $children);\n                } else {\n                    children(i % $children);\n                }\n            }\n        }\n    }\n}",
+        func: regular_polyhedron,
+        consts: &[],
+    },
+    super::ModuleEntry {
         name: "regular_prism",
         reference: "module regular_prism(n, \n    h, r, center,\n    l, length, height,\n    r1,r2,ir,ir1,ir2,or,or1,or2,side,side1,side2, \n    d, d1, d2,id,id1,id2,od,od1,od2,ang,\n    chamfer, chamfer1, chamfer2,\n    chamfang, chamfang1, chamfang2,\n    rounding, rounding1, rounding2,\n    realign=false, shift=[0,0],\n    teardrop=false, clip_angle=90,\n    from_end, from_end1, from_end2,\n    texture, tex_size=[5,5], tex_reps,\n    tex_inset=false, tex_rot=0,\n    tex_depth, tex_samples, \n    tex_taper, style,\n    anchor, spin=0, orient=UP\n)\n{ \n    vnf_anchors_ovr = regular_prism(n=n,h=h,r=r,center=center, l=l,length=length,height=height,\n                                  r1=r1,r2=r2,ir=ir,ir1=ir1,ir2=ir2,or=or,or1=or1,or2=or2,side=side,side1=side1,side2=side2,\n                                  d=d,d1=d1,d2=d2,id=id,id1=id1,id2=id2,od=od,od1=od1,od2=od2,ang=ang,\n                                  chamfer=chamfer, chamfer1=chamfer1, chamfer2=chamfer2,\n                                  chamfang=chamfang,chamfang1=chamfang1,chamfang2=chamfang2,\n                                  rounding=rounding,rounding1=rounding1, rounding2=rounding2,\n                                  realign=realign, shift=shift,\n                                  teardrop=teardrop, clip_angle=clip_angle,\n                                  from_end=from_end, from_end1=from_end1, from_end2=from_end2,\n                                  texture=texture, tex_size=tex_size, tex_reps=tex_reps,\n                                  tex_inset=tex_inset, tex_rot=tex_rot,\n                                  tex_depth=tex_depth, tex_samples=tex_samples,\n                                  tex_taper=tex_taper, style=style,\n                                  _return_anchors=true);\n    attachable(anchor=anchor, orient=orient, spin=spin, vnf=vnf_anchors_ovr[0], anchors=vnf_anchors_ovr[1],override=vnf_anchors_ovr[2]){\n       vnf_polyhedron(vnf_anchors_ovr[0],convexity=is_def(texture)?10:2);\n       children();\n    }   \n}",
         func: regular_prism,
@@ -13211,6 +14302,12 @@ pub(super) static REGISTRY: &[super::ModuleEntry] = &[
         name: "req_children",
         reference: "module req_children(count) {\n  assert($children==0, \"Module no_children() does not support child modules\");\n  if ($parent_modules>0) {\n      assert(count>0, str(\"Module \",parent_module(1),\"() requires children\"));\n  }\n}",
         func: req_children,
+        consts: &[],
+    },
+    super::ModuleEntry {
+        name: "restore",
+        reference: "module restore(desc)\n{\n   req_children($children);\n   if (is_undef(desc)){\n     T = matrix_inverse($transform);\n     $parent_geom = attach_geom([0,0,0]);\n     $parent_parts = undef;\n     multmatrix(T) children();\n   }\n   else{\n     check=assert(is_description(desc), \"\\nInvalid description.\");\n     T = linear_solve($transform, desc[0]);\n     $parent_geom = desc[1];\n     $parent_parts = desc[2];\n     multmatrix(T) children();\n   }\n}",
+        func: restore,
         consts: &[],
     },
     super::ModuleEntry {
@@ -13274,6 +14371,12 @@ pub(super) static REGISTRY: &[super::ModuleEntry] = &[
         consts: &[("IDENT", __bake_IDENT)],
     },
     super::ModuleEntry {
+        name: "rotate_sweep",
+        reference: "module rotate_sweep(\n    shape, angle=360,\n    texture, tex_size=[5,5], tex_counts, tex_reps,\n    tex_inset=false, tex_rot=0,\n    tex_scale, tex_depth, tex_samples,\n    tex_taper, shift=[0,0],\n    style=\"min_edge\",\n    caps, closed, tex_extra, tex_aspect, pixel_aspect,\n    cp=\"centroid\",\n    convexity=10,\n    atype=\"hull\",\n    anchor=\"origin\",\n    spin=0,\n    orient=UP, start=0, \n    _tex_inhibit_y_slicing=false\n) {\n    dummy =\n       assert(is_num(angle) && angle>0 && angle<=360,\"\\nangle must be a positive number not more than 360\")      \n       assert(num_defined([closed,caps])<2, \"\\nIn rotate_sweep the `closed` parameter has been replaced by `caps` with the opposite meaning.  You cannot give both.\")\n       assert(num_defined([tex_reps,tex_counts])<2, \"\\nIn rotate_sweep() the 'tex_counts' parameters has been replaced by 'tex_reps'.  You cannot give both.\")\n       assert(num_defined([tex_scale,tex_depth])<2, \"\\nIn rotate_sweep() the 'tex_scale' parameter has been replaced by 'tex_depth'.  You cannot give both.\")\n       assert(!is_path(shape) || caps || len(shape)>=3, \"\\n'shape' is a path and caps=false, but a closed path requires three points.\");\n    caps = is_def(caps) ? caps\n         : is_def(closed) ? !closed\n         : false;\n    tex_reps = is_def(tex_counts)? echo(\"In rotate_sweep() the 'tex_counts' parameter is deprecated and has been replaced by 'tex_reps'\")tex_counts\n             : tex_reps;\n    tex_depth = is_def(tex_scale)? echo(\"In rotate_sweep() the 'tex_scale' parameter is deprecated and has been replaced by 'tex_depth'\")tex_scale\n              : default(tex_depth,1);\n    region = is_path(shape) && caps ? _force_xplus([deduplicate([[0,shape[0].y], each shape, [0,last(shape).y]])])\n                                    : _force_xplus(force_region(shape));\n    ctr2d = centroid(region);\n    ctr3d = [ctr2d.x, 0, ctr2d.y];\n    namedanch = angle==360 ? []\n              :[\n                 named_anchor(\"start-centroid\", ctr3d, FWD),\n                 named_anchor(\"end-centroid\", rot = zrot(angle)*move(ctr3d)*xrot(-90)*zrot(180))\n               ];\n    check = assert(is_region(region), \"\\nInput is not a region or polygon.\");\n    bounds = pointlist_bounds(flatten(region));\n    min_x = bounds[0].x;\n    max_x = bounds[1].x;\n    min_y = bounds[0].y;\n    max_y = bounds[1].y;\n    h = max_y - min_y;\n    check2 = assert(min_x>=0, \"\\nInput region must exist entirely in the X+ half-plane.\");\n    if (!is_undef(texture)) {\n        change_anchors(named=namedanch) \n        _textured_revolution(\n            shape,\n            texture=texture,\n            tex_size=tex_size,\n            counts=tex_reps,\n            tex_scale=tex_depth,\n            inset=tex_inset,\n            rot=tex_rot,\n            samples=tex_samples,\n            taper=tex_taper,\n            shift=shift,tex_extra=tex_extra,tex_aspect=tex_aspect, pixel_aspect=pixel_aspect, \n            closed=!caps,\n            inhibit_y_slicing=_tex_inhibit_y_slicing,\n            angle=angle,\n            style=style,\n            atype=atype, anchor=anchor, \n            spin=spin, orient=orient, start=start\n        )\n        children();\n    } else {\n        steps = ceil(segs(max_x) * angle / 360) + (angle<360? 1 : 0);\n        skmat = down(min_y) * skew(sxz=shift.x/h, syz=shift.y/h) * up(min_y);\n        transforms = [\n            if (angle==360) for (i=[0:1:steps-1]) skmat * rot([90,0,start+360-i*360/steps]),\n            if (angle<360) for (i=[0:1:steps-1]) skmat * rot([90,0,start+angle-i*angle/(steps-1)]),\n        ];\n        change_anchors(named=namedanch)\n        sweep(region, transforms,\n              closed=angle==360,\n              caps=angle!=360,\n              style=style, cp=cp,\n              convexity=convexity,\n              atype=atype, anchor=anchor,\n              spin=spin, orient=orient)\n                   children();\n    }\n}",
+        func: rotate_sweep,
+        consts: &[("FWD", __bake_FWD), ("UP", __bake_UP)],
+    },
+    super::ModuleEntry {
         name: "round2d",
         reference: "module round2d(r, or, ir)\n{\n    or = get_radius(r1=or, r=r, dflt=0);\n    ir = get_radius(r1=ir, r=r, dflt=0);\n    offset(or) offset(-ir-or) offset(delta=ir,chamfer=true) children();\n}",
         func: round2d,
@@ -13332,6 +14435,12 @@ pub(super) static REGISTRY: &[super::ModuleEntry] = &[
         reference: "module rrect(size=[1,1,1], r=0.25, center=false) cuboid(size,rounding=r,edges=\"Z\",anchor=center?CENTER:BOT);",
         func: rrect,
         consts: &[("BOT", __bake_BOT), ("CENTER", __bake_CENTER)],
+    },
+    super::ModuleEntry {
+        name: "scale",
+        reference: "module scale(v,cp=[0,0,0],dir)\n{\n  if (cp!=[0,0,0] || is_def(dir))\n    multmatrix(scale(v,cp=cp,dir=dir)) children();\n  else {\n    s3 = is_finite(v) ? affine3d_scale([v,v,v])\n       : is_vector(v) ? affine3d_scale(v)\n       : IDENT;\n    $transform = $transform * s3;\n    _scale(v) children();\n  }  \n}",
+        func: scale,
+        consts: &[("IDENT", __bake_IDENT)],
     },
     super::ModuleEntry {
         name: "screw",
@@ -13748,10 +14857,22 @@ pub(super) static REGISTRY: &[super::ModuleEntry] = &[
         consts: &[],
     },
     super::ModuleEntry {
+        name: "xcopies",
+        reference: "module xcopies(spacing, n, l, sp)\n{\n    assert(is_undef(n) || num_defined([l,spacing])==1, \"When n is given must give exactly one of spacing or l\")\n    assert(is_def(n) || num_defined([l,spacing])>=1, \"When n is not given must give at least one of spacing or l\")  \n    req_children($children);\n    dir = RIGHT;\n    sp = is_finite(sp)? (sp*dir) : sp;\n    if (is_vector(spacing)) {\n        translate(default(sp,[0,0,0])) {\n            for (i = idx(spacing)) {\n                $idx = i;\n                $pos = spacing[i]*dir;\n                translate($pos) children();\n            }\n        }\n    } else {\n        line_copies(\n            l=u_mul(l,dir),\n            spacing=u_mul(spacing,dir),\n            n=n, p1=sp\n        ) children();\n    }\n}",
+        func: xcopies,
+        consts: &[("RIGHT", __bake_RIGHT)],
+    },
+    super::ModuleEntry {
         name: "xcyl",
         reference: "module xcyl(\n    h, r, center,\n    l, r1, r2,\n    d, d1, d2,\n    length, height,\n    chamfer, chamfer1, chamfer2,\n    chamfang, chamfang1, chamfang2,\n    rounding, rounding1, rounding2,\n    circum=false, realign, shift=[0,0],\n    teardrop=false, clip_angle=90,\n    from_end, from_end1, from_end2,\n    texture, tex_size=[5,5], tex_reps, tex_counts,\n    tex_inset=false, tex_rot=0,\n    tex_scale, tex_depth, tex_samples,\n    tex_taper, style, tex_style,\n    extra, extra1, extra2, \n    anchor=CENTER, spin=0\n) {\n    r1 = get_radius(r1=r1, r=r, d1=d1, d=d, dflt=1);\n    r2 = get_radius(r1=r2, r=r, d1=d2, d=d, dflt=1);\n    l = one_defined([l,h,length,height],\"l,h,length,height\",1);\n    attachable(anchor,spin,orient=UP, r1=r1, r2=r2, l=l, axis=RIGHT) {\n        cyl(\n            center=center,\n            l=l, r1=r1, r2=r2,\n            chamfer=chamfer, chamfer1=chamfer1, chamfer2=chamfer2,\n            chamfang=chamfang, chamfang1=chamfang1, chamfang2=chamfang2,\n            rounding=rounding, rounding1=rounding1, rounding2=rounding2,\n            circum=circum, realign=realign, shift=shift,\n            teardrop=teardrop, clip_angle=clip_angle,\n            from_end=from_end, from_end1=from_end1, from_end2=from_end2,\n            texture=texture, tex_size=tex_size, tex_reps=tex_reps, tex_counts=tex_counts,\n            tex_inset=tex_inset, tex_rot=tex_rot,\n            tex_scale=tex_scale, tex_depth=tex_depth, tex_samples=tex_samples,\n            tex_taper=tex_taper, style=style, tex_style=tex_style,\n            extra=extra, extra1=extra1, extra2=extra2, \n            anchor=CENTER, spin=0, orient=RIGHT\n        );\n        children();\n    }\n}",
         func: xcyl,
         consts: &[("CENTER", __bake_CENTER), ("RIGHT", __bake_RIGHT), ("UP", __bake_UP)],
+    },
+    super::ModuleEntry {
+        name: "xdistribute",
+        reference: "module xdistribute(spacing=10, sizes=undef, l=undef)\n{\n    req_children($children);  \n    dir = RIGHT;\n    gaps = ($children < 2)? [0] :\n        !is_undef(sizes)? [for (i=[0:1:$children-2]) sizes[i]/2 + sizes[i+1]/2] :\n        [for (i=[0:1:$children-2]) 0];\n    spc = !is_undef(l)? ((l - sum(gaps)) / ($children-1)) : default(spacing, 10);\n    gaps2 = [for (gap = gaps) gap+spc];\n    spos = dir * -sum(gaps2)/2;\n    spacings = cumsum([0, each gaps2]);\n    for (i=[0:1:$children-1]) {\n        $pos = spos + spacings[i] * dir;\n        $idx = i;\n        translate($pos) children(i);\n    }\n}",
+        func: xdistribute,
+        consts: &[("RIGHT", __bake_RIGHT)],
     },
     super::ModuleEntry {
         name: "xflip",
@@ -13802,10 +14923,22 @@ pub(super) static REGISTRY: &[super::ModuleEntry] = &[
         consts: &[],
     },
     super::ModuleEntry {
+        name: "ycopies",
+        reference: "module ycopies(spacing, n, l, sp)\n{\n    assert(is_undef(n) || num_defined([l,spacing])==1, \"When n is given must give exactly one of spacing or l\")\n    assert(is_def(n) || num_defined([l,spacing])>=1, \"When n is not given must give at least one of spacing or l\")  \n    req_children($children);  \n    dir = BACK;\n    sp = is_finite(sp)? (sp*dir) : sp;\n    if (is_vector(spacing)) {\n        translate(default(sp,[0,0,0])) {\n            for (i = idx(spacing)) {\n                $idx = i;\n                $pos = spacing[i]*dir;\n                translate($pos) children();\n            }\n        }\n    } else {\n        line_copies(\n            l=u_mul(l,dir),\n            spacing=u_mul(spacing,dir),\n            n=n, p1=sp\n        ) children();\n    }\n}",
+        func: ycopies,
+        consts: &[("BACK", __bake_BACK)],
+    },
+    super::ModuleEntry {
         name: "ycyl",
         reference: "module ycyl(\n    h, r, center,\n    l, r1, r2,\n    d, d1, d2,\n    length, height,\n    chamfer, chamfer1, chamfer2,\n    chamfang, chamfang1, chamfang2,\n    rounding, rounding1, rounding2,\n    circum=false, realign, shift=[0,0],\n    teardrop=false, clip_angle=90,\n    from_end, from_end1, from_end2,\n    texture, tex_size=[5,5], tex_reps, tex_counts,\n    tex_inset=false, tex_rot=0,\n    tex_scale, tex_depth, tex_samples,\n    tex_taper, style, tex_style,\n    extra, extra1, extra2, \n    anchor, spin=0\n) {\n    r1 = get_radius(r1=r1, r=r, d1=d1, d=d, dflt=1);\n    r2 = get_radius(r1=r2, r=r, d1=d2, d=d, dflt=1);\n    l = one_defined([l,h,length,height],\"l,h,length,height\",1);\n    attachable(anchor,spin,orient=UP, r1=r1, r2=r2, l=l, axis=BACK) {\n        cyl(\n            center=center,\n            l=l, r1=r1, r2=r2,\n            chamfer=chamfer, chamfer1=chamfer1, chamfer2=chamfer2,\n            chamfang=chamfang, chamfang1=chamfang1, chamfang2=chamfang2,\n            rounding=rounding, rounding1=rounding1, rounding2=rounding2,\n            circum=circum, realign=realign, shift=shift,\n            teardrop=teardrop, clip_angle=clip_angle,\n            from_end=from_end, from_end1=from_end1, from_end2=from_end2,\n            texture=texture, tex_size=tex_size, tex_reps=tex_reps, tex_counts=tex_counts,\n            tex_inset=tex_inset, tex_rot=tex_rot,\n            tex_scale=tex_scale, tex_depth=tex_depth, tex_samples=tex_samples,\n            tex_taper=tex_taper, style=style, tex_style=tex_style,\n            extra=extra, extra1=extra1, extra2=extra2, \n            anchor=CENTER, spin=0, orient=BACK\n        );\n        children();\n    }\n}",
         func: ycyl,
         consts: &[("BACK", __bake_BACK), ("CENTER", __bake_CENTER), ("UP", __bake_UP)],
+    },
+    super::ModuleEntry {
+        name: "ydistribute",
+        reference: "module ydistribute(spacing=10, sizes=undef, l=undef)\n{\n    req_children($children);  \n    dir = BACK;\n    gaps = ($children < 2)? [0] :\n        !is_undef(sizes)? [for (i=[0:1:$children-2]) sizes[i]/2 + sizes[i+1]/2] :\n        [for (i=[0:1:$children-2]) 0];\n    spc = !is_undef(l)? ((l - sum(gaps)) / ($children-1)) : default(spacing, 10);\n    gaps2 = [for (gap = gaps) gap+spc];\n    spos = dir * -sum(gaps2)/2;\n    spacings = cumsum([0, each gaps2]);\n    for (i=[0:1:$children-1]) {\n        $pos = spos + spacings[i] * dir;\n        $idx = i;\n        translate($pos) children(i);\n    }\n}",
+        func: ydistribute,
+        consts: &[("BACK", __bake_BACK)],
     },
     super::ModuleEntry {
         name: "yflip",
@@ -13856,10 +14989,22 @@ pub(super) static REGISTRY: &[super::ModuleEntry] = &[
         consts: &[],
     },
     super::ModuleEntry {
+        name: "zcopies",
+        reference: "module zcopies(spacing, n, l, sp)\n{\n    assert(is_undef(n) || num_defined([l,spacing])==1, \"When n is given must give exactly one of spacing or l\")\n    assert(is_def(n) || num_defined([l,spacing])>=1, \"When n is not given must give at least one of spacing or l\")  \n    req_children($children);  \n    dir = UP;\n    sp = is_finite(sp)? (sp*dir) : sp;\n    if (is_vector(spacing)) {\n        translate(default(sp,[0,0,0])) {\n            for (i = idx(spacing)) {\n                $idx = i;\n                $pos = spacing[i]*dir;\n                translate($pos) children();\n            }\n        }\n    } else {\n        line_copies(\n            l=u_mul(l,dir),\n            spacing=u_mul(spacing,dir),\n            n=n, p1=sp\n        ) children();\n    }\n}",
+        func: zcopies,
+        consts: &[("UP", __bake_UP)],
+    },
+    super::ModuleEntry {
         name: "zcyl",
         reference: "module zcyl(\n    h, r, center,\n    l, r1, r2,\n    d, d1, d2,\n    chamfer, chamfer1, chamfer2,\n    chamfang, chamfang1, chamfang2,\n    rounding, rounding1, rounding2,\n    circum=false, realign, shift=[0,0],\n    teardrop=false, clip_angle=90,\n    from_end, from_end1, from_end2,\n    texture, tex_size=[5,5], tex_reps, tex_counts,\n    tex_inset=false, tex_rot=0,\n    tex_scale, tex_depth, tex_samples, length, height, \n    tex_taper, style, tex_style,\n    extra, extra1, extra2, \n    anchor, spin=0\n) {\n    r1 = get_radius(r1=r1, r=r, d1=d1, d=d, dflt=1);\n    r2 = get_radius(r1=r2, r=r, d1=d2, d=d, dflt=1);\n    l = one_defined([l,h,length,height],\"l,h,length,height\",1);\n    attachable(anchor,spin,orient=UP, r1=r1, r2=r2, l=l) {\n        cyl(\n            center=center,\n            l=l, r1=r1, r2=r2,\n            chamfer=chamfer, chamfer1=chamfer1, chamfer2=chamfer2,\n            chamfang=chamfang, chamfang1=chamfang1, chamfang2=chamfang2,\n            rounding=rounding, rounding1=rounding1, rounding2=rounding2,\n            circum=circum, realign=realign, shift=shift,\n            teardrop=teardrop, clip_angle=clip_angle,\n            from_end=from_end, from_end1=from_end1, from_end2=from_end2,\n            texture=texture, tex_size=tex_size, tex_reps=tex_reps, tex_counts=tex_counts,\n            tex_inset=tex_inset, tex_rot=tex_rot,\n            tex_scale=tex_scale, tex_depth=tex_depth, tex_samples=tex_samples,\n            tex_taper=tex_taper, style=style, tex_style=tex_style,\n            extra=extra, extra1=extra1, extra2=extra2, \n            anchor=CENTER, spin=0, orient=UP\n        );\n        children();\n    }\n}",
         func: zcyl,
         consts: &[("CENTER", __bake_CENTER), ("UP", __bake_UP)],
+    },
+    super::ModuleEntry {
+        name: "zdistribute",
+        reference: "module zdistribute(spacing=10, sizes=undef, l=undef)\n{\n    req_children($children);  \n    dir = UP;\n    gaps = ($children < 2)? [0] :\n        !is_undef(sizes)? [for (i=[0:1:$children-2]) sizes[i]/2 + sizes[i+1]/2] :\n        [for (i=[0:1:$children-2]) 0];\n    spc = !is_undef(l)? ((l - sum(gaps)) / ($children-1)) : default(spacing, 10);\n    gaps2 = [for (gap = gaps) gap+spc];\n    spos = dir * -sum(gaps2)/2;\n    spacings = cumsum([0, each gaps2]);\n    for (i=[0:1:$children-1]) {\n        $pos = spos + spacings[i] * dir;\n        $idx = i;\n        translate($pos) children(i);\n    }\n}",
+        func: zdistribute,
+        consts: &[("UP", __bake_UP)],
     },
     super::ModuleEntry {
         name: "zflip",

@@ -14,7 +14,7 @@ fuzz_target!(|data: &[u8]| {
         return;
     }
     let seed = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
-    let src = fab_gen::generate(seed);
+    let src = fab_gen::generate_ab(seed); // AB surface: cheap + seedless rands (AS.5)
     let tmp = std::env::temp_dir();
     let run = |config: fab_lang::Config| {
         fab_lang::resolve_geometry_with_base_full(&src, &tmp, &[], None, config, |raw: &str| {

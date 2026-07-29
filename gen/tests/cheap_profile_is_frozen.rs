@@ -33,7 +33,7 @@ fn corpus_digest() -> u64 {
 fn the_cheap_corpus_has_not_moved() {
     assert_eq!(
         corpus_digest(),
-        0x52ae_3841_853d_9513,
+        0xd4c4_ae68_e161_32b2,
         "the `cheap` profile's output changed — every gen_diff / jit_dispatch_diff corpus entry and the \
          AJ.1 coverage gate now describe a different program space. Intentional? re-capture. Otherwise \
          the profile refactor leaked."
@@ -187,6 +187,12 @@ const _: () = assert!(!fab_gen::Profile::CHEAP.prim_fn);
 /// in `cheap` would shift every subsequent value in the stream.
 const _: () = assert!(!fab_gen::Profile::CHEAP.domains);
 
+/// Same freeze for AS.5's knob: seedless `rands` is A/B-only — in `cheap` it would both shift the
+/// stream AND poison every oracle-diffed lane (our seedless draws are deterministic, upstream's
+/// are not).
+const _: () = assert!(!fab_gen::Profile::CHEAP.seedless_rands);
+const _: () = assert!(fab_gen::Profile::AB.seedless_rands);
+
 /// Heavy must keep `domains` ON at every dial — that lane's numbers are only meaningful while its
 /// calls COMPUTE (`every_declared_call_computes`); off, it regresses to timing error handling.
 #[test]
@@ -212,9 +218,10 @@ fn the_builtin_surface_holds_its_shape() {
     let decls = fab_gen::builtins();
     assert_eq!(
         decls.len(),
-        33,
+        35,
         "the builtin table is RNG-indexed, so its length is frozen — changing it moves every \
-         subsequent draw and rewrites the cheap corpus"
+         subsequent draw and rewrites the cheap corpus (35 since the 2026-07-28 AS.5 append of \
+         log + is_function, a deliberate re-baseline)"
     );
     for d in decls {
         assert!(

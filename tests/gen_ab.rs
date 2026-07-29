@@ -3,12 +3,13 @@
 //! STL bytes. This is the Config contract ("every field is bit-identity-preserving") used as an
 //! oracle against the fattened AJ grammar, in CI on every `cargo test`.
 //!
-//! A failure names the seed; `cargo run -p fab-gen -- --replay <seed>` prints the exact program.
+//! A failure names the seed; `cargo run -p fab-gen -- --replay <seed>` prints the exact program (NOTE: this soak runs the AB
+//! surface — cheap + seedless rands — so a replay must use `Profile::AB`).
 
 use fab_scad::backend::{ManifoldBackend, build_geo};
 
 fn eval_ab(seed: u32) -> (String, String) {
-    let src = fab_gen::generate(seed);
+    let src = fab_gen::generate_ab(seed); // AB surface: cheap + seedless rands (AS.5)
     let tmp = std::env::temp_dir();
     let run = |config: fab_lang::Config| -> String {
         let (tree, messages) =

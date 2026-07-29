@@ -82,6 +82,18 @@ pub struct Profile {
     /// faster. Like [`Profile::prim_fn`], the flag gates the RNG draws as well as the text, so the
     /// cheap stream is untouched.
     pub domains: bool,
+    /// Emit SEEDLESS 3-arg `rands` (AS.5) — the ONE impure builtin, drawing from the evaluator's
+    /// advancing stream.
+    ///
+    /// OFF in every oracle-diffed lane and ON only in [`Profile::AB`], because the two sides of
+    /// that fence disagree about determinism: OUR seedless stream starts from a fixed seed (the
+    /// determinism doctrine), while upstream's global engine is seeded from entropy — so a seedless
+    /// draw echoed at the oracle is a PERMANENT gen-diff divergence, but echoed across an A/B run
+    /// of our own evaluator it is bit-stable unless something real broke (a cache memoizing across
+    /// a stream advance, a tier compiling the stream wrong). Before this flag NOTHING ever
+    /// generated the seedless form — `compile_seedless_rands` had zero fuzz coverage. Like the
+    /// other flags, OFF gates the RNG draw too, so the cheap stream is untouched.
+    pub seedless_rands: bool,
 }
 
 impl Profile {
@@ -97,6 +109,16 @@ impl Profile {
         prim_fn: false,
         minkowski_fn: 6,
         domains: false,
+        seedless_rands: false,
+    };
+
+    /// The A/B differential surface: CHEAP plus seedless `rands`. The three A/B fuzz targets
+    /// (`gen_diff`, `jit_dispatch_diff`, `intrinsics_dispatch_diff`) generate against THIS — both
+    /// of their legs run our evaluator, where seedless draws are deterministic — while every
+    /// oracle-diffed lane stays on CHEAP. See [`Profile::seedless_rands`] for why the split exists.
+    pub const AB: Self = Self {
+        seedless_rands: true,
+        ..Self::CHEAP
     };
 
     /// A program heavy enough to TIME, scaled by `dial` (1 = mildly heavy; higher = more work).
@@ -131,6 +153,9 @@ impl Profile {
             minkowski_fn: Self::CHEAP.minkowski_fn,
             // Heavy calls must DO WORK to be worth timing — see the field docs.
             domains: true,
+            // Heavy is the gen-perf lane, which diffs echoes against the REAL oracle — where
+            // seedless rands is a permanent divergence. A/B-only, see the field docs.
+            seedless_rands: false,
         }
     }
 }
@@ -202,6 +227,11 @@ const BUILTINS: &[Decl] = &[
     builtin_decl("is_list"),
     builtin_decl("is_bool"),
     builtin_decl("is_object"),
+    // ── APPENDED 2026-07-28 (AS.5): the pure builtins nothing had ever generated a call to.
+    // The append re-pointed every accumulated corpus (below(len) — see the table doc) and the
+    // digest + fingerprints were re-baselined in the same commit, deliberately.
+    builtin_decl("log"),
+    builtin_decl("is_function"),
 ];
 
 /// The builtin call surface (AR.3) — exposed so tests and, later, the heavy lane can walk it.
@@ -390,6 +420,16 @@ pub struct Gen {
 #[must_use]
 pub fn generate(seed: u32) -> String {
     generate_with(seed, Profile::CHEAP)
+}
+
+/// [`generate`] for the A/B differential lanes ([`Profile::AB`]): CHEAP plus seedless `rands`,
+/// which is deterministic when BOTH legs are our evaluator and a permanent divergence against the
+/// real oracle — see [`Profile::seedless_rands`]. A separate entry point for the same reason as
+/// [`generate_against`]: an AB seed and a CHEAP seed are different programs, and each lane's
+/// corpus must keep meaning what it meant.
+#[must_use]
+pub fn generate_ab(seed: u32) -> String {
+    generate_with(seed, Profile::AB)
 }
 
 /// [`generate_with`] against an explicit call SURFACE (AR.3.2) — how a transpiled library gets fuzzed.
@@ -1073,20 +1113,27 @@ impl Gen {
         format!("(function({p}) {body})({})", self.expr())
     }
 
-    /// textmetrics/fontmetrics (deterministic — bundled font) and SEEDED rands.
+    /// textmetrics/fontmetrics (deterministic — bundled font) and rands: SEEDED everywhere (a pure
+    /// function of its args, oracle-exact), SEEDLESS only when the profile allows it (A/B lanes —
+    /// see [`Profile::seedless_rands`] for the determinism fence that keeps it out of oracle runs).
     fn metrics_or_rands(&mut self) -> String {
-        match self.below(4) {
+        let arms = if self.profile.seedless_rands { 5 } else { 4 };
+        match self.below(arms) {
             0 => format!(
                 "textmetrics(\"{}\", size = {}).advance",
                 self.pick_str(&["hi", "fab"]),
                 self.int_between(2, 12)
             ),
             1 => "fontmetrics().interline".to_string(),
-            _ => format!(
+            2 | 3 => format!(
                 "rands(0, 1, {}, {})",
                 self.int_between(1, 3),
                 self.int_between(0, 999)
             ),
+            // Seedless: advances the evaluator's ONE stream — the draw the JIT compiles via
+            // compile_seedless_rands and the eval-memo fences on, neither of which any generated
+            // program exercised before AS.5.
+            _ => format!("rands(0, 1, {})", self.int_between(1, 3)),
         }
     }
 
@@ -1267,7 +1314,9 @@ impl Gen {
 
 #[cfg(test)]
 mod tests {
-    use super::{BUILTINS, Builtins, Domain, Gen, NativeSurface, Profile, Surface, generate};
+    use super::{
+        BUILTINS, Builtins, Domain, Gen, NativeSurface, Profile, Surface, generate, generate_ab,
+    };
 
     /// Determinism: a seed maps to exactly one program, always (the reproducible-replay guarantee).
     #[test]
@@ -1477,11 +1526,14 @@ mod tests {
     fn seeds_still_generate_the_same_bytes() {
         // (seed, len, first 16 bytes) — a cheap fingerprint that needs no hasher dependency and
         // still pins both the shape and the content of the emitted program.
+        // Re-baselined 2026-07-28 (AS.5): appending log/is_function to BUILTINS changed
+        // `floor(u * len)` on builtin picks — seeds 7 and 1337 moved, the other three did not
+        // (the draw COUNT per program is unchanged, only where a pick lands).
         const PINNED: &[(u32, usize, &str)] = &[
             (0, 838, "union() {\n  sphe"),
-            (7, 582, "$fn = 4;\ncube([6"),
+            (7, 649, "$fn = 4;\ncube([6"),
             (42, 854, "intersection_for"),
-            (1337, 800, "v2 = [for (i0 = "),
+            (1337, 798, "v2 = [for (i0 = "),
             (99_991, 545, "$fn = 9;\nv0 = -2"),
         ];
         let mut drifted = Vec::new();
@@ -1501,6 +1553,58 @@ mod tests {
              different than when it was minimized:\n  {}",
             drifted.join("\n  ")
         );
+    }
+
+    /// AS.5's payoff, as a RATCHET: every builtin the ONE declaration lists is REACHABLE by the
+    /// generator — through the RNG-indexed table or a dedicated production — or carries a
+    /// documented exemption. Before this, five pure builtins had never had a generated call and no
+    /// artifact could see it, because nothing ever compared the fuzzer's list to the evaluator's.
+    #[test]
+    fn every_declared_builtin_is_reachable_by_the_generator() {
+        // Emitted by dedicated grammar PRODUCTIONS rather than the table, because each needs a
+        // specific shape: object/has_key (`object_expr`), the metrics pair + rands
+        // (`metrics_or_rands` — seeded everywhere, seedless under `Profile::AB`).
+        const PRODUCTIONS: &[&str] = &["object", "has_key", "textmetrics", "fontmetrics", "rands"];
+        // Deliberately NOT generated, each for a stated reason. Shrink this list; never grow it
+        // silently.
+        // - version/version_num: pinned to 2021.01 while the nightly oracle reports its build
+        //   date, so any generated echo of them is a PERMANENT gen-diff divergence. They are
+        //   constants — pinned by fab-lang's `pure_rows_dispatch_through_the_declaration` instead.
+        // - parent_module: answers off the module-instantiation stack, which a generated program's
+        //   top level does not have — an emitted call would be undef-only, which
+        //   `every_declared_call_computes` rightly rejects. Generatable once the walk emits module
+        //   DEFINITIONS (the AR.20 family's territory).
+        const EXEMPT: &[&str] = &["version", "version_num", "parent_module"];
+        let table: std::collections::BTreeSet<&str> = BUILTINS.iter().map(|d| d.name).collect();
+        for b in fab_lang::surface::BUILTIN_SURFACE {
+            let name = b.decl.name;
+            let covered = usize::from(table.contains(name))
+                + usize::from(PRODUCTIONS.contains(&name))
+                + usize::from(EXEMPT.contains(&name));
+            assert_eq!(
+                covered, 1,
+                "`{name}` must be exactly one of table-generated / production-generated / exempt \
+                 (found {covered} of those) — a new builtin gets a table append (a deliberate \
+                 re-baseline), a production, or a REASON here"
+            );
+        }
+        // The productions really fire: each claimed name appears in emitted AB-surface programs
+        // (AB so the seedless rands arm is reachable). 512 seeds is far past the point where every
+        // production arm has drawn.
+        for name in PRODUCTIONS {
+            let marker = format!("{name}(");
+            assert!(
+                (0..512).any(|s| generate_ab(s).contains(&marker)),
+                "production-claimed `{name}` never appears in 512 AB programs"
+            );
+        }
+        // And the SEEDLESS form specifically (3-arg — no trailing seed argument): the whole reason
+        // Profile::AB exists. Matches `rands(0, 1, N)` where N is a single digit.
+        let seedless = (0..512).map(generate_ab).any(|p| {
+            p.match_indices("rands(0, 1, ")
+                .any(|(i, _)| p[i..].chars().nth(13) == Some(')'))
+        });
+        assert!(seedless, "the seedless rands arm never fired in 512 AB programs");
     }
 
     /// AR.3's payoff: the native surface is DERIVED, so it describes the registry without anyone

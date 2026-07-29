@@ -987,3 +987,138 @@ fn minkowski_2d_volumes_match_the_oracle() {
     );
     assert!(solid.is_manifold());
 }
+
+/// AS.6 — the per-builtin CONFORMANCE differential, GENERATED from the one declaration's own
+/// parameter domains rather than written by hand. Before this there was NO per-builtin check
+/// against upstream: the AH goldens cover builtins only incidentally (whatever recorded programs
+/// happen to call), which is exactly why "eval-clean masks a missing builtin" is a recorded
+/// failure mode. Per probed builtin: staggered in-domain argument tuples, plus each parameter
+/// pushed to its domain's EDGES (a negative under `sqrt`, NaN via `0/0`, a 2-vector under `cross`,
+/// a string under `len`) — echoed and line-diffed against the oracle. Nobody extends it by hand: a
+/// new declaration row is probed the moment it exists, and the count floor below fails if the
+/// generator quietly shrinks.
+///
+/// SKIPPED rows, each for a stated reason (shrink this list, never grow it silently):
+/// - `version`/`version_num`: pinned 2021.01 by the determinism doctrine, vs the oracle's
+///   build-date answer — a permanent, documented K-bucket divergence, pinned by fab-lang's own
+///   `pure_rows_dispatch_through_the_declaration` instead.
+/// - `object`/`has_key`/`is_object`/`textmetrics`/`fontmetrics`: behind upstream `--enable` flags
+///   the `differ` driver deliberately does not pass; conformance lives in the AF.4/AG transcribed
+///   goldens plus gen-diff's flag-NEGOTIATED nightly lane.
+/// - `parent_module`: answers off the live instantiation stack, which a top-level expression does
+///   not have — probed where it answers, in `parent_module_inside_a_module_matches_the_oracle`.
+///
+/// `rands` is NOT skipped: every probe fills all declared params (optionals included), so its
+/// calls are the SEEDED form — a pure function of its args, bug-for-bug oracle-exact by the rng
+/// doctrine. Seedless stays out of every oracle lane (see fab-gen's `Profile::seedless_rands`).
+#[test]
+fn builtin_conformance_matches_the_oracle() {
+    use fab_lang::surface::{BUILTIN_SURFACE, Domain};
+
+    /// Values a WELL-TYPED call computes over — the declaration's generation domains, as literals.
+    fn in_domain(d: Domain) -> &'static [&'static str] {
+        match d {
+            Domain::Num => &["1", "-2.5", "0"],
+            // 7, not 10: `chr(10)` echoes a literal NEWLINE, and the oracle's LIVE echo capture is
+            // line-based — the golden path re-attaches continuation lines (AH.2.2), the live path
+            // cannot safely — so probe values keep the echo stream single-line.
+            Domain::Pos => &["2", "7"],
+            Domain::Unit => &["0.5", "-1"],
+            Domain::Deg => &["30", "-450"],
+            Domain::Bool => &["true", "false"],
+            Domain::Str => &["\"abc\"", "\"\""],
+            Domain::Vec3 => &["[1, 2, 3]", "[-1, 0, 2]"],
+            Domain::VecN => &["[1, 2, 3]", "[]"],
+            Domain::List => &["[1, \"a\", true]"],
+            Domain::Table => &["[[0, 0], [10, 20]]"],
+            Domain::Any => &["1", "\"s\"", "true", "[1, 2]", "undef"],
+        }
+    }
+    /// The values the domain NAMES as its edges — where undef-propagation parity lives. These stay
+    /// within shapes the oracle survives: `search`'s declaration pins its key to `Num` precisely
+    /// because a string key over a non-string column ABORTS upstream (#5017), and these edges
+    /// never cross a parameter's TYPE, only its range.
+    fn edges(d: Domain) -> &'static [&'static str] {
+        match d {
+            Domain::Num | Domain::Deg => &["0/0", "1/0"],
+            Domain::Pos => &["-1", "0", "2.5"],
+            Domain::Unit => &["2", "-3"],
+            Domain::Bool | Domain::Any => &[],
+            Domain::Str => &["5"],
+            Domain::Vec3 => &["[1, 2]", "[1, 2, 3, 4]", "[]"],
+            Domain::VecN => &["5", "\"ab\""],
+            Domain::List => &["7"],
+            Domain::Table => &["[]", "[[5]]", "3"],
+        }
+    }
+
+    const SKIP: &[&str] = &[
+        "version",
+        "version_num",
+        "object",
+        "has_key",
+        "is_object",
+        "textmetrics",
+        "fontmetrics",
+        "parent_module",
+    ];
+    let mut lines: Vec<String> = Vec::new();
+    let mut probed = 0usize;
+    for b in BUILTIN_SURFACE {
+        let d = &b.decl;
+        if SKIP.contains(&d.name) {
+            continue;
+        }
+        probed += 1;
+        let pools: Vec<&[&str]> = d.params.iter().map(|p| in_domain(p.domain)).collect();
+        // Staggered zip (param j reads pool[(i + j) % len]) so two same-domain parameters draw
+        // DIFFERENT values — min(1, -2.5) instead of the degenerate min(1, 1).
+        let width = pools.iter().map(|p| p.len()).max().unwrap_or(0);
+        for i in 0..width {
+            let args: Vec<&str> = pools
+                .iter()
+                .enumerate()
+                .map(|(j, pool)| pool[(i + j) % pool.len()])
+                .collect();
+            lines.push(format!("echo({}({}));", d.name, args.join(", ")));
+        }
+        // One parameter at a time to each of its edges, the others at their first in-domain value.
+        for (j, p) in d.params.iter().enumerate() {
+            for e in edges(p.domain) {
+                let args: Vec<&str> = pools
+                    .iter()
+                    .enumerate()
+                    .map(|(k, pool)| if k == j { *e } else { pool[0] })
+                    .collect();
+                lines.push(format!("echo({}({}));", d.name, args.join(", ")));
+            }
+        }
+    }
+    // The floors make silent shrinkage a failure: every unskipped declaration row must contribute,
+    // and the probe volume can only be grown deliberately.
+    assert_eq!(
+        probed,
+        BUILTIN_SURFACE.len() - SKIP.len(),
+        "a declaration row is neither probed nor on the documented skip list"
+    );
+    assert!(
+        lines.len() >= 150,
+        "only {} probes generated — the generator shrank",
+        lines.len()
+    );
+    for chunk in lines.chunks(40) {
+        agree_echo(&chunk.join("\n"));
+    }
+}
+
+/// AS.6's one hand probe: `parent_module` answers off the live module-instantiation stack, so the
+/// mechanical domain probes above cannot reach it — instantiate a two-deep stack and echo every
+/// level, including one past the top (undef on both sides).
+#[test]
+fn parent_module_inside_a_module_matches_the_oracle() {
+    agree_echo(
+        "module _as6_inner() { echo(parent_module(0)); echo(parent_module(1)); echo(parent_module(9)); }\n\
+         module _as6_outer() { _as6_inner(); }\n\
+         _as6_outer();",
+    );
+}

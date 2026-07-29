@@ -194,18 +194,19 @@ extern "C" fn jit_powf(a: f64, b: f64) -> f64 {
     a.powf(b)
 }
 
-/// `min(a, b)` — the interpreter's `a.min(b)` (`builtins::min_max`'s fold step). Routed as a CALL, NOT
-/// Cranelift's `fmin`: `fmin` PROPAGATES NaN (returns NaN if either operand is NaN), but `f64::min` IGNORES
-/// it (returns the non-NaN operand) — they diverge on NaN (and on signed zero). The call guarantees the
-/// interpreter's exact IEEE-minNum semantics, so `fast == JIT` holds.
-extern "C" fn jit_fmin(a: f64, b: f64) -> f64 {
-    a.min(b)
+/// `min(acc, x)` — the interpreter's `min_max` fold step, EXACTLY: a comparison, not `f64::min`.
+/// Upstream folds `x < acc ? x : acc`, so a NaN accumulator is sticky (every compare false —
+/// `min(0/0, 1)` is nan) while a later NaN is skipped (`min(1, 0/0)` is 1). `f64::min` (IEEE
+/// minNum, NaN-ignoring both ways) answered 1 for both — the AS.6 conformance probes caught it and
+/// both tiers moved together. Still routed as a CALL, not Cranelift's `fmin`, which PROPAGATES NaN
+/// from either side. The call guarantees the interpreter's exact semantics, so `fast == JIT` holds.
+extern "C" fn jit_fmin(acc: f64, x: f64) -> f64 {
+    if x < acc { x } else { acc }
 }
 
-/// `max(a, b)` — the interpreter's `a.max(b)`. Routed as a call for the same reason as [`jit_fmin`]
-/// (`f64::max` is maxNum: ignores NaN; Cranelift `fmax` propagates it).
-extern "C" fn jit_fmax(a: f64, b: f64) -> f64 {
-    a.max(b)
+/// `max(acc, x)` — the interpreter's fold step, same NaN-stickiness reasoning as [`jit_fmin`].
+extern "C" fn jit_fmax(acc: f64, x: f64) -> f64 {
+    if x > acc { x } else { acc }
 }
 
 /// The working-set BUDGET for a JIT'd comprehension (P.1.6 rung-D piece 2). If a loop's element count would

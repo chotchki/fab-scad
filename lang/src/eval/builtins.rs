@@ -633,10 +633,16 @@ fn min_max(pos: &[Value], is_min: bool) -> Value {
         }
     };
     match nums.split_first() {
-        Some((&head, rest)) => Value::Num(
-            rest.iter()
-                .fold(head, |acc, &x| if is_min { acc.min(x) } else { acc.max(x) }),
-        ),
+        // Upstream folds with a COMPARISON (`func.cc`), not fmin/fmax — and the difference is
+        // observable at NaN: every compare against NaN is false, so the accumulator never moves.
+        // A NaN FIRST element therefore poisons the whole fold (`min(0/0, 1)` is nan) while a
+        // later NaN is skipped (`min(1, 0/0)` is 1). `f64::min`/`max` are IEEE minNum/maxNum —
+        // NaN-ignoring in BOTH positions — and answered 1 for both. Caught by AS.6's generated
+        // conformance probes; the JIT's `jit_fmin`/`jit_fmax` fold step moved in the same commit.
+        Some((&head, rest)) => Value::Num(rest.iter().fold(head, |acc, &x| {
+            let take = if is_min { x < acc } else { x > acc };
+            if take { x } else { acc }
+        })),
         None => Value::Undef, // min()/max() with no numbers
     }
 }

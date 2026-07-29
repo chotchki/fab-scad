@@ -474,6 +474,43 @@ pub fn generate_native(
 /// included — that is how self- and mutual recursion resolve, and how named sibling arguments bind
 /// at COMPILE time), plus the LEXICAL SCOPE — scad name to Rust ident, innermost last, so `let`
 /// shadowing resolves exactly as the interpreter's scope does.
+/// Builtins that `rt::builtin` CANNOT answer, and which generated code must therefore not call.
+///
+/// `rt::builtin` is `builtins::apply`, the PURE table. Five builtins never reach it: the evaluator
+/// intercepts them in `run_builtin` first, because each needs something `apply` does not receive —
+/// `textmetrics`/`fontmetrics` need the argument NAMES (they are the only builtins with declared
+/// named parameters upstream), `object` needs them too (its member names ARE the argument names),
+/// `rands` needs the run's random stream, and `parent_module` needs the live module-instantiation
+/// stack.
+///
+/// `is_builtin` says TRUE for all five, so the emitter used to compile them to `rt::builtin(...)`
+/// — which silently returns `Undef`. Not an error, not a warning: a generated function calling
+/// `rands()` got `undef` and carried on. MEASURED, not inferred: `rt::builtin` answers `abs` and
+/// returns `Undef` for every one of these five.
+///
+/// Declining is the fix rather than widening `rt`, and deliberately so. Three of the five are
+/// STATEFUL or context-dependent in ways that the AR.10 fallback and the eval memo already reason
+/// about (`parent_module` marks a subtree impure; `rands` advances a stream whose position is not
+/// in any cache key), so handing them to generated code is a design question, not an export.
+const CONTEXT_BUILTINS: &[&str] = &[
+    "textmetrics",
+    "fontmetrics",
+    "object",
+    "rands",
+    "parent_module",
+];
+
+/// How a subtree's `! # % *` prefixes change its emission — see [`Emitter::modifier_plan`].
+#[derive(Clone, Copy)]
+enum ModPlan {
+    /// `*` — emit nothing, and do not walk the subtree at all.
+    Skip,
+    /// No modifier, or `#` (preview-only, which no evaluation arm reads).
+    Plain,
+    /// `%` — emit the subtree, then drop the geometry it produced.
+    Background,
+}
+
 struct Emitter<'a> {
     baked: &'a [(&'a str, Baked)],
     siblings: &'a [Sibling],
@@ -573,7 +610,7 @@ impl Emitter<'_> {
                 self.expr(index)?
             )),
             ExprKind::Member { base, field } => {
-                Ok(format!("ops::member({}, {field:?})", self.expr(base)?))
+                Ok(format!("rt::member({}, {field:?})", self.expr(base)?))
             }
             ExprKind::Let { bindings, body } => self.let_expr(bindings, body),
             // Expression `assert`: the control-flow contract (Entry doc) — raise where the
@@ -694,6 +731,11 @@ impl Emitter<'_> {
             ));
         }
         if fab_lang::is_builtin(name) {
+            if CONTEXT_BUILTINS.contains(&name) {
+                return Err(format!(
+                    "a call to `{name}`, which `rt::builtin` cannot answer (context builtin)"
+                ));
+            }
             let emitted: Vec<String> = args
                 .iter()
                 .map(|a| self.expr(&a.value))
@@ -801,8 +843,23 @@ impl Emitter<'_> {
                 Ok(out)
             }
             StmtKind::If {
-                cond, then, els, ..
+                modifiers,
+                cond,
+                then,
+                els,
+                ..
             } => {
+                // A statement `if` carries the SAME `! # % *` prefixes a module call does
+                // (`StmtKind::If.modifiers`), and this arm used to destructure them away with `..`.
+                // That is a silent WRONG RENDER, not a missed optimisation: `*if (c) cube(1);`
+                // draws nothing in the interpreter — `*` returns before the condition is even
+                // evaluated (geo_stack.rs) — while the emitted code drew the cube. Verified by
+                // probe: `*if`, `%if` and a bare `if` all produced byte-identical output.
+                let bg = match Self::modifier_plan(*modifiers)? {
+                    ModPlan::Skip => return Ok(String::new()),
+                    ModPlan::Background => Some(self.fresh_ident("bg")),
+                    ModPlan::Plain => None,
+                };
                 let c = self.expr(cond)?;
                 let mut out = format!("    if ({c}).is_truthy() {{\n");
                 for k in then {
@@ -813,6 +870,11 @@ impl Emitter<'_> {
                     out.push_str(&self.stmt(k)?);
                 }
                 out.push_str("    }\n");
+                if let Some(mark) = bg {
+                    // `%` on an `if`: the branch still runs, its geometry does not survive.
+                    out = format!("    let {mark} = parts.len();\n{out}");
+                    let _ = writeln!(out, "    parts.truncate({mark});");
+                }
                 Ok(out)
             }
             StmtKind::Module(mi) => self.module_call(mi),
@@ -824,14 +886,60 @@ impl Emitter<'_> {
         }
     }
 
+    /// What OpenSCAD's `! # % *` prefixes mean for emission. They are NOT symmetric, and this
+    /// mirrors `geo_stack::dispatch_module` in its order.
+    ///
+    /// A DECISION rather than a wrapper taking a closure, because `*` must not merely discard the
+    /// body — it must never WALK it. A disabled subtree cannot be got wrong, so an unsupported
+    /// construct inside one must not decline the module around it.
+    ///
+    /// # Errors
+    /// Naming the modifier, for the one this emitter cannot reproduce.
+    fn modifier_plan(md: fab_lang::Modifiers) -> Result<ModPlan, String> {
+        // `*` DISABLES: no geometry AND no side effects. The interpreter returns before it
+        // evaluates a call's arguments, or an `if`'s condition.
+        if md.disable {
+            return Ok(ModPlan::Skip);
+        }
+        // `!` diverts the subtree into the program-global ROOT override, which no `ModuleCtx`
+        // method reaches. Declined under its own name rather than folded into a four-way bucket,
+        // so the histogram can price it.
+        if md.root {
+            return Err("a `!` root modifier".into());
+        }
+        // `%` BACKGROUND still EVALUATES the subtree — echoes fire, asserts fire, `rands` draws
+        // advance the stream (AK.3, oracle-probed) — and only its GEOMETRY leaves the output.
+        // Treating it like `*` was assumed once before and refuted against the oracle, because
+        // skipping the draws shifts the random stream for everything downstream, so the geometry
+        // that goes wrong ends up somewhere else entirely.
+        if md.background {
+            return Ok(ModPlan::Background);
+        }
+        // `#` HIGHLIGHT is preview-only: no evaluation arm reads it, so it emits as if unwritten.
+        Ok(ModPlan::Plain)
+    }
+
     /// A module INSTANTIATION in statement position.
     fn module_call(&mut self, mi: &fab_lang::ModuleInstantiation) -> Result<String, String> {
-        let md = mi.modifiers;
-        if md.root || md.highlight || md.background || md.disable {
-            // 8 of 416 modules use one. Cheap to add later; wrong to ignore now, since `*` DISABLES
-            // a subtree and silently rendering it would be geometry the program said not to draw.
-            return Err("a `! # % *` modifier".into());
+        match Self::modifier_plan(mi.modifiers)? {
+            ModPlan::Skip => return Ok(String::new()),
+            ModPlan::Background => {
+                let mark = self.fresh_ident("bg");
+                let mut out = format!("    let {mark} = parts.len();\n");
+                out.push_str(&self.module_call_body(mi)?);
+                // AFTER the body, never a scope guard: the interpreter's `DiscardAbove` is a WORK
+                // task, so its error DRAIN throws it away unrun. A `?` inside the emitted body
+                // jumps past this line, which is the same behaviour for free.
+                let _ = writeln!(out, "    parts.truncate({mark});");
+                return Ok(out);
+            }
+            ModPlan::Plain => {}
         }
+        self.module_call_body(mi)
+    }
+
+    /// [`module_call`](Self::module_call) with the modifiers already decided.
+    fn module_call_body(&mut self, mi: &fab_lang::ModuleInstantiation) -> Result<String, String> {
         match mi.name.as_str() {
             "children" => {
                 let sel = match mi.args.first() {
@@ -1185,6 +1293,7 @@ pub fn generate_modules(references: &[&str]) -> Result<String, String> {
          \n\
          #![allow(\n\
          \x20   unused_variables,\n\
+         \x20   unused_mut,\n\
          \x20   clippy::get_first,\n\
          \x20   clippy::vec_init_then_push,\n\
          \x20   clippy::unreadable_literal,\n\
@@ -1396,6 +1505,11 @@ pub const GENERATED_MODULES: &[&str] = &[
     // `fx.dollar` path with a value that DEPENDS ON THE CALL SITE, which is the whole point: a
     // baked one would freeze whatever it was at transpile time.
     "module _fab_poc_dollar(k=1) { if ($children > 1) children(1); else children(); }",
+    // The `% *` modifiers, compiled. `%` must RUN its subtree and drop only the geometry; `*` must
+    // not run it at all — and, crucially, a `*`-disabled statement is still a CHILD for `$children`
+    // and `children(i)` counting, so dropping it would shift every index in the callee.
+    "module _fab_poc_bg(s=1) { %cube(s); sphere(r=s); }",
+    "module _fab_poc_star(s=1) { _fab_poc_dollar(s) { *cube(s); sphere(r=s); cylinder(r=s,h=s); } }",
 ];
 
 pub const GENERATED_ENTRIES: &[&str] = &[
@@ -1655,7 +1769,11 @@ mod tests {
 
         /// Modules the emitter compiles TODAY, out of BOSL2's 414 unambiguous ones. Raise it as
         /// bands land; lowering it is a deliberate act that needs a reason next to it.
-        const FLOOR: usize = 342;
+        ///
+        /// 342 when the ratchet landed, 347 once `# % *` compiled, then 346 — one module lost on
+        /// purpose, because it called `parent_module` and `rt::builtin` answers that with `Undef`
+        /// rather than an error. A decline is worth more than that. See `CONTEXT_BUILTINS`.
+        const FLOOR: usize = 346;
 
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
@@ -1749,7 +1867,14 @@ mod tests {
         /// functions (AR.17) are the biggest left, at 75 computed callees plus 34 literals plus 32
         /// AN.10 shapes. Lowering it is a deliberate act that needs a reason next to it, which is
         /// the whole point of the ratchet.
-        const FLOOR: usize = 1072;
+        ///
+        /// LOWERED ONCE, 1072 -> 1066, and here is the reason. Six functions were compiling calls
+        /// to `textmetrics`/`fontmetrics`/`object`/`rands`/`parent_module` into `rt::builtin(...)`,
+        /// which CANNOT answer them — the evaluator intercepts all five in `run_builtin` before the
+        /// pure table, so `rt::builtin` returned `Undef` with no error and no warning. Those six
+        /// were not coverage, they were six silent wrong answers, and they now decline by name.
+        /// See `CONTEXT_BUILTINS`.
+        const FLOOR: usize = 1066;
 
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
@@ -2069,6 +2194,94 @@ mod tests {
         }
     }
 
+    /// `*` DISABLES a subtree: no geometry AND no side effects. It must emit nothing, and it must
+    /// not even WALK the subtree — an unsupported construct under a `*` is unreachable, so
+    /// declining the module around it would invert what the modifier means.
+    ///
+    /// Asserted as an ABSENCE, which is why it is not in the band table above: those check that a
+    /// construct appears, and the whole point here is that none does.
+    #[test]
+    fn a_disabled_subtree_emits_nothing_and_is_not_walked() {
+        let code = super::generate_module_native("module m(n) { *cube(n); }", &[], &[])
+            .expect("generates");
+        assert!(
+            !code.contains("cube"),
+            "`*cube(n)` was emitted — the program said not to draw it:\n{code}"
+        );
+        // A construct the emitter CANNOT handle, under a `*`. It never runs, so it must not
+        // decline the module.
+        let unreachable = "module m(n) { *if (n) { x = 1; foo(x) bar(); } }";
+        assert!(
+            super::generate_module_native(unreachable, &[], &[]).is_ok(),
+            "a disabled subtree was walked and declined the whole module"
+        );
+    }
+
+    /// `CONTEXT_BUILTINS` is not a hand list that can quietly drift from reality — every name on
+    /// it must actually be one `rt::builtin` cannot answer, and every builtin the emitter DOES
+    /// compile must actually be answerable.
+    ///
+    /// This is the test that would have caught the bug in the first place. `is_builtin` says TRUE
+    /// for all five context builtins, so the emitter compiled them to `rt::builtin(...)` and got
+    /// `Undef` back — no error, no warning, six functions silently wrong. Asserting the two sets
+    /// agree, against the REAL `rt::builtin`, is what makes that unrepeatable.
+    #[test]
+    fn the_context_builtin_list_matches_what_rt_can_actually_answer() {
+        // A probe argument that every answerable builtin has SOME answer for. The point is not the
+        // value, it is `Undef` vs not — an unanswerable name returns `Undef` for anything.
+        let probe = [fab_lang::Value::Num(1.0)];
+        for name in super::CONTEXT_BUILTINS {
+            assert!(
+                fab_lang::is_builtin(name),
+                "`{name}` is on the decline list but is not a builtin at all — the list is stale"
+            );
+            assert!(
+                matches!(fab_lang::rt::builtin(name, &probe), fab_lang::Value::Undef),
+                "`{name}` is declined as unanswerable, but `rt::builtin` answers it now — drop it \
+                 from CONTEXT_BUILTINS and let those functions compile"
+            );
+        }
+        // The other direction, which is the one that bit: a builtin the emitter COMPILES must
+        // actually be answerable. Each carries an argument it should answer FOR — `len(1)` is
+        // legitimately `undef` because 1 is not a list, so a single shared probe would report a
+        // type mismatch as a missing implementation.
+        let list = fab_lang::rt::build_vector(vec![
+            fab_lang::Value::Num(1.0),
+            fab_lang::Value::Num(2.0),
+        ]);
+        let cases: &[(&str, Vec<fab_lang::Value>)] = &[
+            ("abs", vec![fab_lang::Value::Num(-1.0)]),
+            ("sin", vec![fab_lang::Value::Num(30.0)]),
+            ("cos", vec![fab_lang::Value::Num(60.0)]),
+            ("sqrt", vec![fab_lang::Value::Num(4.0)]),
+            ("floor", vec![fab_lang::Value::Num(1.5)]),
+            ("ceil", vec![fab_lang::Value::Num(1.5)]),
+            ("pow", vec![fab_lang::Value::Num(2.0), fab_lang::Value::Num(3.0)]),
+            ("max", vec![fab_lang::Value::Num(1.0), fab_lang::Value::Num(2.0)]),
+            ("min", vec![fab_lang::Value::Num(1.0), fab_lang::Value::Num(2.0)]),
+            ("len", vec![list.clone()]),
+            ("norm", vec![list.clone()]),
+            ("concat", vec![list.clone(), list.clone()]),
+            ("str", vec![fab_lang::Value::Num(1.0)]),
+            ("is_undef", vec![fab_lang::Value::Undef]),
+            ("is_num", vec![fab_lang::Value::Num(1.0)]),
+            ("is_list", vec![list.clone()]),
+            ("is_string", vec![fab_lang::Value::Num(1.0)]),
+        ];
+        for (name, args) in cases {
+            assert!(fab_lang::is_builtin(name), "`{name}` should be a builtin");
+            assert!(
+                !super::CONTEXT_BUILTINS.contains(name),
+                "`{name}` is on the decline list but should compile"
+            );
+            assert!(
+                !matches!(fab_lang::rt::builtin(name, args), fab_lang::Value::Undef),
+                "`{name}` compiles to `rt::builtin` but that returns Undef for {args:?} — the SAME \
+                 silent-wrong-answer shape CONTEXT_BUILTINS exists to close"
+            );
+        }
+    }
+
     /// The statement subset declines by NAME. A module that silently skipped a statement would
     /// render MISSING GEOMETRY while still succeeding, which is the failure shape this phase keeps
     /// finding — so every unsupported construct says which one it was.
@@ -2082,7 +2295,10 @@ mod tests {
                 "module m() { translate([1,0,0]) { x = 2; cube(x); } }",
                 "assignment inside a child block",
             ),
-            ("module m() { #cube(1); }", "modifier"),
+            // `!` is the one modifier that stays declined, under its OWN name so the histogram can
+            // price it: it diverts the subtree into the program-global root override, which no
+            // `ModuleCtx` method reaches. `#`/`%`/`*` all emit now.
+            ("module m() { !cube(1); }", "`!` root modifier"),
             (
                 "module m() { module inner() { children(); } }",
                 "nested module",
@@ -2151,6 +2367,23 @@ mod tests {
                 "a child block becomes one thunk per geometry child",
                 "module m(n) { translate([n,0,0]) { cube(n); sphere(n); } }",
                 "rt::Children::Compiled(&[",
+            ),
+            // The `# % *` band. `#` is preview-only so it emits as if unwritten; `%` runs the
+            // subtree and then drops its geometry; `*` emits nothing at all.
+            (
+                "`#` emits as if it were not written",
+                "module m(n) { #cube(n); }",
+                "name: \"cube\"",
+            ),
+            (
+                "`%` runs the subtree, then truncates its geometry off the parts list",
+                "module m(n) { %cube(n); }",
+                "parts.truncate(",
+            ),
+            (
+                "`%` on a statement `if` too — the branch runs, its geometry does not survive",
+                "module m(n) { %if (n > 0) children(); }",
+                "parts.truncate(",
             ),
         ] {
             let code = super::generate_module_native(src, &[], &[])
@@ -2264,3 +2497,4 @@ mod tests {
         assert!(err.contains("non-finite element"), "{err}");
     }
 }
+

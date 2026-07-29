@@ -29,7 +29,7 @@ pub use crate::eval::builtins::apply as builtin;
 pub use crate::eval::geo2d::Geo;
 pub use crate::eval::intrinsics::bosl_assert;
 pub use crate::eval::intrinsics::native_rt::{DepthGuard, run_interpreted};
-pub use crate::eval::ops::{apply_binary, apply_unary, index};
+pub use crate::eval::ops::{apply_binary, apply_unary, index, member};
 pub use crate::eval::value::Value;
 pub use crate::eval::{build_range, build_vector, iter_values_native};
 pub use crate::parser::{BinOp, UnOp};

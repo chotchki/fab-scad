@@ -3665,6 +3665,66 @@ fn a_compiled_dollar_read_sees_the_call_site() {
     );
 }
 
+/// AR.20 — the `% *` modifiers, compiled. They are the two that RENDER when got wrong, so both are
+/// held to the tier differential rather than to a substring check on the emitted text.
+///
+/// `%` must RUN its subtree (echoes, asserts and `rands` draws all fire — treating it like `*`
+/// shifts the random stream and the geometry that goes wrong ends up somewhere else) and drop only
+/// the geometry. `*` must not run its subtree at all.
+///
+/// The `*` case is the sharper one, and it is a COUNTING hazard rather than a drawing one: a
+/// `*`-disabled statement is still a CHILD, so `$children` and every `children(i)` index in the
+/// callee depend on it staying in the list. `_fab_poc_star` passes three children with the FIRST
+/// disabled, into a callee that selects `children(1)` — so dropping the disabled child instead of
+/// emptying it silently selects the cylinder where the interpreter selects the sphere.
+#[test]
+fn the_compiled_modifiers_match_the_interpreter() {
+    let run = |src: &str, intrinsics: bool| {
+        let config = crate::Config {
+            intrinsics,
+            ..crate::Config::default()
+        };
+        let (geo, msgs) =
+            crate::evaluate_geometry_with_base_config(src, std::path::Path::new("."), &[], config)
+                .expect("renders");
+        (format!("{geo:?}"), format!("{msgs:?}"))
+    };
+
+    let bg = "module _fab_poc_bg(s=1) { %cube(s); sphere(r=s); }\n_fab_poc_bg(3);";
+    let star = "module _fab_poc_dollar(k=1) { if ($children > 1) children(1); else children(); }\n\
+                module _fab_poc_star(s=1) { _fab_poc_dollar(s) { *cube(s); sphere(r=s); cylinder(r=s,h=s); } }\n\
+                _fab_poc_star(3);";
+
+    for (label, src) in [("%", bg), ("*", star)] {
+        let (geo_on, msgs_on) = run(src, true);
+        let (geo_off, msgs_off) = run(src, false);
+        assert_eq!(
+            geo_on, geo_off,
+            "`{label}`: the compiled modifier built different geometry than interpreting it"
+        );
+        assert_eq!(msgs_on, msgs_off, "`{label}`: different console");
+    }
+
+    // NON-VACUITY. Both natives must actually arm, or these equalities hold on two interpreted runs.
+    for (src, name) in [(bg, "_fab_poc_bg"), (star, "_fab_poc_star")] {
+        let program = crate::parser::parse(src).expect("parses");
+        assert!(
+            program.stmts.iter().any(|s| matches!(&s.kind,
+                crate::parser::StmtKind::ModuleDef { name: n, params, body }
+                    if &**n == name && super::resolve_module(name, params, body).is_some())),
+            "`{name}` did not arm, so the compiled path was never entered"
+        );
+    }
+
+    // `%` really discarded something: the same body WITHOUT the modifier renders more.
+    let unmarked = "module _plain(s=1) { cube(s); sphere(r=s); }\n_plain(3);";
+    assert_ne!(
+        run(bg, true).0,
+        run(unmarked, true).0,
+        "`%` changed nothing, so the modifier was ignored rather than honoured"
+    );
+}
+
 /// The drift gate, on the MODULE path: a definition that does not match the reference the native
 /// was generated from must NOT wire. Without this the native would answer for a module whose body
 /// somebody changed, which is a wrong answer rather than a missed compilation.
@@ -3745,3 +3805,4 @@ fn a_sibling_call_with_a_hole_takes_the_callees_default() {
         }
     }
 }
+

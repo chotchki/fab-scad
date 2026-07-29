@@ -752,7 +752,8 @@ pub fn index(base: Value, index: &Value) -> Value {
     clippy::needless_pass_by_value,
     reason = "the Task::Member handler pops an owned base; swizzle picks clone it per component"
 )]
-pub(crate) fn member(base: Value, field: &str) -> Value {
+#[must_use]
+pub fn member(base: Value, field: &str) -> Value {
     // Objects: member lookup by NAME (AF.3) — `o.a`, `$`-named members (`o.$fs`) included;
     // missing → undef. A FUNCTION member binds its receiver at extraction (AF.5).
     if let Value::Object(o) = &base {

@@ -2176,6 +2176,16 @@ pub(super) static MODULE_REGISTRY: &[ModuleEntry] = &[
         reference: "module _fab_poc_dollar(k=1) { if ($children > 1) children(1); else children(); }",
         func: generated_modules::_fab_poc_dollar,
     },
+    ModuleEntry {
+        name: "_fab_poc_bg",
+        reference: "module _fab_poc_bg(s=1) { %cube(s); sphere(r=s); }",
+        func: generated_modules::_fab_poc_bg,
+    },
+    ModuleEntry {
+        name: "_fab_poc_star",
+        reference: "module _fab_poc_star(s=1) { _fab_poc_dollar(s) { *cube(s); sphere(r=s); cylinder(r=s,h=s); } }",
+        func: generated_modules::_fab_poc_star,
+    },
 ];
 
 /// The compiled module for `name`, IFF one is registered and the definition in this program

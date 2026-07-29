@@ -7,6 +7,7 @@
 
 #![allow(
     unused_variables,
+    unused_mut,
     clippy::get_first,
     clippy::vec_init_then_push,
     clippy::unreadable_literal,
@@ -84,6 +85,41 @@ pub(super) fn _fab_poc_dollar(fx: &dyn rt::ModuleCtx) -> rt::Result<rt::Geo> {
     } else {
     parts.push(fx.children()?);
     }
+        fx.group(parts)
+    };
+    parts.push(l0_blk);
+    Ok(fx.group(parts))
+}
+
+
+/// Generated native for module `_fab_poc_bg` — geometry through the interpreter's own
+/// construction, so a generated module is what interpreting its reference builds.
+pub(super) fn _fab_poc_bg(fx: &dyn rt::ModuleCtx) -> rt::Result<rt::Geo> {
+    let p_s = fx.args().get(0).cloned().unwrap_or(rt::Value::Undef);
+    let mut parts: Vec<rt::Geo> = Vec::new();
+    let l0_blk = {
+        let mut parts: Vec<rt::Geo> = Vec::new();
+    let l1_bg = parts.len();
+    parts.push(fx.call(&rt::ModuleCall { name: "cube", args: &[(None, p_s.clone()), ], children: rt::Children::None })?);
+    parts.truncate(l1_bg);
+    parts.push(fx.call(&rt::ModuleCall { name: "sphere", args: &[(Some("r"), p_s.clone()), ], children: rt::Children::None })?);
+        fx.group(parts)
+    };
+    parts.push(l0_blk);
+    Ok(fx.group(parts))
+}
+
+
+/// Generated native for module `_fab_poc_star` — geometry through the interpreter's own
+/// construction, so a generated module is what interpreting its reference builds.
+pub(super) fn _fab_poc_star(fx: &dyn rt::ModuleCtx) -> rt::Result<rt::Geo> {
+    let p_s = fx.args().get(0).cloned().unwrap_or(rt::Value::Undef);
+    let mut parts: Vec<rt::Geo> = Vec::new();
+    let l0_blk = {
+        let mut parts: Vec<rt::Geo> = Vec::new();
+    parts.push(fx.call(&rt::ModuleCall { name: "_fab_poc_dollar", args: &[(None, p_s.clone()), ], children: rt::Children::Compiled(&[&|fx: &dyn rt::ModuleCtx| { let mut parts: Vec<rt::Geo> = Vec::new();  Ok(fx.group(parts)) }, &|fx: &dyn rt::ModuleCtx| { let mut parts: Vec<rt::Geo> = Vec::new();     parts.push(fx.call(&rt::ModuleCall { name: "sphere", args: &[(Some("r"), p_s.clone()), ], children: rt::Children::None })?);
+ Ok(fx.group(parts)) }, &|fx: &dyn rt::ModuleCtx| { let mut parts: Vec<rt::Geo> = Vec::new();     parts.push(fx.call(&rt::ModuleCall { name: "cylinder", args: &[(Some("r"), p_s.clone()), (Some("h"), p_s.clone()), ], children: rt::Children::None })?);
+ Ok(fx.group(parts)) }, ]) })?);
         fx.group(parts)
     };
     parts.push(l0_blk);

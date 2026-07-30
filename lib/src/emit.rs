@@ -211,6 +211,7 @@ pub fn generate_module_native(
         locals: Vec::new(),
         fresh: 0,
         in_module: true,
+        registered_defs: Vec::new(),
     };
     let fn_ident = rust_fn_ident(name)?;
     let mut out = String::new();
@@ -254,12 +255,51 @@ pub fn generate_module_native(
             .push((p.name.to_string(), format!("p_{}", p.name)));
     }
     let _ = writeln!(out, "    let mut parts: Vec<rt::Geo> = Vec::new();");
+    // The body's top-level nested MODULE defs (AR.14.4.5), collected over the same flattened
+    // list the runtime's `collect_module_defs` walks — bare `{}` blocks inline, nothing deeper.
+    // Duplicates keep the last def (both sides are last-wins BTreeMaps), and every top def stmt
+    // becomes a no-op in the statement walk: the one registration call below covers them all.
+    let mut mod_def_names: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
+    {
+        let mut stack: Vec<&fab_lang::Stmt> = vec![body];
+        while let Some(s) = stack.pop() {
+            match &s.kind {
+                fab_lang::StmtKind::Block(inner) => stack.extend(inner.iter().rev()),
+                fab_lang::StmtKind::ModuleDef { name, .. } => {
+                    mod_def_names.insert(name);
+                    em.registered_defs.push((s.span.start, s.span.end));
+                }
+                _ => {}
+            }
+        }
+    }
+    let locals_mark = em.locals.len();
     // The module BODY is the outermost hoist scope: bind its whole-scope assignments (blocks
     // flattened, last-wins) before any statement runs — see `Emitter::hoist_prelude`.
     let (hoist, _top_epilogue) = em
         .hoist_prelude(std::slice::from_ref(body), true)
         .map_err(|e| format!("{name}: {e}"))?;
     out.push_str(&hoist);
+    if !mod_def_names.is_empty() {
+        // AFTER the whole prelude, matching the interpreter's capture of the FULLY-hoisted block
+        // scope: a def textually above a reassignment still sees the final value (cuboid's
+        // `size`/`teardrop`). The frame is every local the top hoist bound; params and `$`-sets
+        // already live in the call frame the runtime builds the capture from.
+        let names = mod_def_names
+            .iter()
+            .map(|n| format!("{n:?}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let frame = em.locals[locals_mark..]
+            .iter()
+            .map(|(n, id)| format!("({n:?}, {id}.clone())"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let _ = writeln!(
+            out,
+            "    fx.register_local_modules(&[{names}], &[{frame}])?;"
+        );
+    }
     let body_code = em.stmt(body).map_err(|e| format!("{name}: {e}"))?;
     out.push_str(&body_code);
     let _ = writeln!(out, "    Ok(fx.group(parts))\n}}");
@@ -431,6 +471,7 @@ pub fn generate_native(
         locals: Vec::new(),
         fresh: 0,
         in_module: false,
+        registered_defs: Vec::new(),
     };
     let mut out = String::new();
     let _ = write!(
@@ -517,6 +558,11 @@ struct Emitter<'a> {
     /// in scope, which is a build break rather than a decline, and only for the functions that
     /// happen to read a `$`-var.
     in_module: bool,
+    /// Spans of the body-top-level nested DEFS this emission registered through the ctx
+    /// (AR.14.4.5) — matched by span in `stmt`, where a registered def is a no-op and any other
+    /// def still declines. Span, not name: a same-named def in a deeper scope is a DIFFERENT
+    /// binding (the interpreter registers per block) and must not ride the top registration.
+    registered_defs: Vec<(usize, usize)>,
 }
 
 impl Emitter<'_> {
@@ -796,8 +842,7 @@ impl Emitter<'_> {
             // would emit a path that does not COMPILE, not a call that silently answers `undef`
             // (the AR.20.10 shape the old CONTEXT_BUILTINS hand list existed to patch).
             let pure = fab_lang::surface::BUILTIN_SURFACE.iter().any(|b| {
-                b.decl.name == name
-                    && b.capability == fab_lang::surface::BuiltinCapability::Pure
+                b.decl.name == name && b.capability == fab_lang::surface::BuiltinCapability::Pure
             });
             if !pure {
                 return Err(format!(
@@ -896,8 +941,16 @@ impl Emitter<'_> {
     /// occurred. Error paths that skip it are fine: an `Err` aborts or declines the whole call,
     /// and the frame's state dies unread.
     fn hoist_prelude(&mut self, stmts: &[Stmt], top: bool) -> Result<(String, String), String> {
-        // flatten_blocks + dedupe, mirroring eval's `hoisted_assignments` byte for byte: a `{ }`
+        // flatten_blocks + dedupe, mirroring eval's `hoisted_bindings` byte for byte: a `{ }`
         // is NOT an assignment scope upstream — its assignments belong to the enclosing scope.
+        // Nested `function` DEFS share the hoist's variable namespace (the interpreter binds a
+        // closure VALUE by the fn's name), so they walk in the SAME first-occurrence order — at
+        // the body's top scope one becomes a `register_local_fn` at its position (AR.14.4.5),
+        // carrying the locals hoisted BEFORE it, which is the interpreter's capture-at-bind view.
+        enum Hoisted<'s> {
+            Assign(&'s fab_lang::Expr),
+            Fn((usize, usize)),
+        }
         let mut flat: Vec<&Stmt> = Vec::new();
         let mut stack: Vec<&Stmt> = stmts.iter().rev().collect();
         while let Some(s) = stack.pop() {
@@ -907,21 +960,68 @@ impl Emitter<'_> {
                 flat.push(s);
             }
         }
-        let mut order: Vec<(&str, &fab_lang::Expr)> = Vec::new();
+        let mut order: Vec<(&str, Hoisted<'_>)> = Vec::new();
         let mut index: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
         for s in flat {
-            if let StmtKind::Assignment { name, value } = &s.kind {
-                if let Some(&i) = index.get(&**name) {
-                    order[i].1 = value; // seen: last expr wins, first-occurrence position kept
-                } else {
-                    index.insert(name, order.len());
-                    order.push((name, value));
+            match &s.kind {
+                StmtKind::Assignment { name, value } => {
+                    if let Some(&i) = index.get(&**name) {
+                        // seen: last expr wins, first-occurrence position kept — unless the slot
+                        // is a nested FN, whose cross-kind last-wins the emitter does not mirror.
+                        if matches!(order[i].1, Hoisted::Fn(_)) {
+                            return Err(format!(
+                                "a nested function definition sharing the hoist slot of `{name}`"
+                            ));
+                        }
+                        order[i].1 = Hoisted::Assign(value);
+                    } else {
+                        index.insert(name, order.len());
+                        order.push((name, Hoisted::Assign(value)));
+                    }
                 }
+                StmtKind::FunctionDef { name, .. } => {
+                    if !top {
+                        return Err(
+                            "a nested function definition below the module body's top level".into(),
+                        );
+                    }
+                    // The interpreter's whole-scope last-wins would rebind the SLOT (an earlier
+                    // assignment or an earlier def of the same name) — a per-position
+                    // registration cannot reproduce that, so any name sharing declines. A
+                    // parameter collision is the same hazard one frame up: the hoisted closure
+                    // shadows the param for the whole body, which the emitted `p_` reads
+                    // would miss.
+                    if index.contains_key(name.as_str())
+                        || self.locals.iter().any(|(n, _)| n == name.as_str())
+                    {
+                        return Err(format!(
+                            "a nested function definition sharing the hoist slot of `{name}`"
+                        ));
+                    }
+                    index.insert(name, order.len());
+                    order.push((name, Hoisted::Fn((s.span.start, s.span.end))));
+                }
+                _ => {}
             }
         }
         let mut out = String::new();
         let mut epilogue = String::new();
-        for (name, expr) in order {
+        // The locals THIS hoist bound so far — what a nested fn at this position captures.
+        let mut pairs: Vec<(String, String)> = Vec::new();
+        for (name, entry) in order {
+            let expr = match entry {
+                Hoisted::Assign(expr) => expr,
+                Hoisted::Fn(span) => {
+                    let frame = pairs
+                        .iter()
+                        .map(|(n, id)| format!("({n:?}, {id}.clone())"))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    let _ = writeln!(out, "    fx.register_local_fn({name:?}, &[{frame}])?;");
+                    self.registered_defs.push(span);
+                    continue;
+                }
+            };
             let v = self.expr(expr)?;
             if name.starts_with('$') {
                 // The dynamic bind, in the same first-occurrence/last-wins slot a lexical one
@@ -949,6 +1049,7 @@ impl Emitter<'_> {
             }
             let id = self.fresh_ident(name);
             let _ = writeln!(out, "    let {id} = {v};");
+            pairs.push((name.to_string(), id.clone()));
             self.locals.push((name.to_string(), id));
         }
         Ok((out, epilogue))
@@ -1028,8 +1129,21 @@ impl Emitter<'_> {
                 Ok(out)
             }
             StmtKind::Module(mi) => self.module_call(mi),
-            StmtKind::ModuleDef { .. } => Err("a nested module definition".into()),
-            StmtKind::FunctionDef { .. } => Err("a nested function definition".into()),
+            // A body-top-level def was REGISTERED (AR.14.4.5) — by `register_local_modules`
+            // after the prelude or `register_local_fn` at its hoist position — so in statement
+            // position there is nothing left to emit. Matched by SPAN: a same-named def in a
+            // deeper scope is a different binding and still declines below.
+            StmtKind::ModuleDef { .. } | StmtKind::FunctionDef { .. }
+                if self.registered_defs.contains(&(s.span.start, s.span.end)) =>
+            {
+                Ok(String::new())
+            }
+            StmtKind::ModuleDef { .. } => {
+                Err("a nested module definition below the body's top level".into())
+            }
+            StmtKind::FunctionDef { .. } => {
+                Err("a nested function definition below the body's top level".into())
+            }
             StmtKind::Use(_) | StmtKind::Include(_) => {
                 Err("a use/include inside a module body".into())
             }
@@ -1080,9 +1194,8 @@ impl Emitter<'_> {
         }
         let inner = self.fresh_ident("un");
         let mark = self.locals.len();
-        let mut out = format!(
-            "    let {inner} = {{\n        let mut parts: Vec<rt::Geo> = Vec::new();\n"
-        );
+        let mut out =
+            format!("    let {inner} = {{\n        let mut parts: Vec<rt::Geo> = Vec::new();\n");
         let (prelude, epilogue) = self.hoist_prelude(children, false)?;
         out.push_str(&prelude);
         for k in children {
@@ -1243,9 +1356,8 @@ impl Emitter<'_> {
                     return Err("an `assert` with no condition".into());
                 };
                 let c = self.expr(&cond.value)?;
-                let mut out = format!(
-                    "    if !({c}).is_truthy() {{ return Err(rt::assert_decline()); }}\n"
-                );
+                let mut out =
+                    format!("    if !({c}).is_truthy() {{ return Err(rt::assert_decline()); }}\n");
                 out.push_str(&self.union_part(&mi.children)?);
                 Ok(out)
             }
@@ -1519,6 +1631,7 @@ fn sibling_of(subject: &Subject<'_>) -> Result<Sibling, String> {
         locals: Vec::new(),
         fresh: 0,
         in_module: false,
+        registered_defs: Vec::new(),
     };
     let defaults = params
         .iter()
@@ -1624,7 +1737,9 @@ pub fn generate_standalone_modules(root: &std::path::Path) -> Result<String, Str
             if let Some(prev) = expectations.insert(n, b)
                 && prev != b
             {
-                return Err(format!("const `{n}` baked differently across the module band"));
+                return Err(format!(
+                    "const `{n}` baked differently across the module band"
+                ));
             }
         }
     }
@@ -1728,6 +1843,10 @@ fn generate_module_file(subjects: &[ModuleSubject]) -> Result<String, String> {
          // so what it renders is what interpreting its reference renders — the win is the deleted\n\
          // interpretation overhead, not different geometry.\n\
          \n\
+         // rustfmt CANNOT format this file: the emitter's one-line expression bodies blow up its\n\
+         // layout search (measured: 5 CPU-minutes without terminating at 402 modules), and the\n\
+         // bytes are regenerated verbatim anyway — reformatting would only fail the currency gate.\n\
+         #![cfg_attr(rustfmt, rustfmt::skip)]\n\
          #![allow(\n\
          \x20   unused_variables,\n\
          \x20   unused_mut,\n\
@@ -1739,12 +1858,18 @@ fn generate_module_file(subjects: &[ModuleSubject]) -> Result<String, String> {
          \x20   clippy::used_underscore_items,\n\
          \x20   clippy::possible_missing_else,\n\
          \x20   clippy::collapsible_else_if,\n\
+         \x20   clippy::similar_names,\n\
+         \x20   clippy::needless_else,\n\
+         \x20   clippy::if_same_then_else,\n\
+         \x20   clippy::too_many_lines,\n\
          \x20   reason = \"generated code: a module need not READ every parameter it declares, \\\n\
          \x20             parameter slots are indexed uniformly (so slot 0 is `get(0)`, not \\\n\
          \x20             `first()`), and a parts vec grows CONDITIONALLY even when the first \\\n\
          \x20             push happens to be unconditional — plus bit-exact from_bits literals, \\\n\
          \x20             mechanical clones, upstream's underscore-prefixed and camelCase names \\\n\
-         \x20             carried verbatim, and one-line block emission\"\n\
+         \x20             carried verbatim, fresh idents that differ by counter (`l1_r`/`l2_r`), \\\n\
+         \x20             upstream's own empty/identical branches, and bodies as long as the \\\n\
+         \x20             module they transcribe\"\n\
          )]\n\
          \n\
          // AR.13: `rt` is the ONLY thing generated code names.\n\
@@ -1752,7 +1877,11 @@ fn generate_module_file(subjects: &[ModuleSubject]) -> Result<String, String> {
     );
     for subject in subjects {
         out.push('\n');
-        out.push_str(&generate_module_native(subject.source, &subject.baked, &[])?);
+        out.push_str(&generate_module_native(
+            subject.source,
+            &subject.baked,
+            &[],
+        )?);
         out.push('\n');
     }
     Ok(out)
@@ -1901,6 +2030,10 @@ pub fn generate_batch(subjects: &[Subject<'_>]) -> Result<String, String> {
          // Every operation routes through the interpreter's own value algebra, so a generated\n\
          // native is bit-identical to interpreting its reference BY CONSTRUCTION — the win is the\n\
          // deleted interpretation overhead, not different math.\n\n\
+         // rustfmt CANNOT format this file: the emitter's one-line expression bodies blow up its\n\
+         // layout search (measured: 5 CPU-minutes without terminating at 402 modules), and the\n\
+         // bytes are regenerated verbatim anyway — reformatting would only fail the currency gate.\n\
+         #![cfg_attr(rustfmt, rustfmt::skip)]\n\
          #![allow(\n\
          \x20   clippy::unreadable_literal,\n\
          \x20   clippy::cloned_ref_to_slice_refs,\n\
@@ -1988,6 +2121,27 @@ pub const GENERATED_MODULES: &[&str] = &[
     // the NEW one, and the forwarded call-site children read it too (the attachment mechanism:
     // a parent's `$`-set reaching the children it renders).
     "module _fab_poc_dollarset(k=1) { $fab_ds = $fab_ds + k; echo(ds=$fab_ds); _fab_poc_mod(k) { cube($fab_ds); children(); } }",
+    // NESTED MODULE DEFS, compiled (AR.14.4.5): `inner` registers onto the interpreter's own
+    // local-module stack with a frame materialized AFTER the whole prelude, so its body — always
+    // INTERPRETED — reads `w` at its post-reassignment value even though the def sits textually
+    // above the assignment (whole-scope last-wins, cuboid's sharpest case). Both calls dispatch
+    // through the ordinary `fx.call`, which must find the LOCAL def before any global sibling.
+    "module _fab_poc_localmod(k=1) { module inner(a) { cube([a, w, 1]); } w = k * 2; inner(3); inner(w); }",
+    // NESTED FUNCTION DEFS, compiled (AR.14.4.5): `pre` calls `f` BEFORE its hoist position —
+    // unknown in both tiers (warn + undef), pinning position-correct registration; `f` captures
+    // the earlier local `b`, calls the sibling `g` defined BELOW it (the letrec group), and `g`
+    // self-recurses. `c` invokes `f` from the PRELUDE, through `call_fn`'s rung-1 invoke.
+    "module _fab_poc_localfn(k=1) { pre = f(k); b = k + 1; function f(x) = g(x) + b; function g(x) = x <= 0 ? 0 : g(x - 1) + 1; c = f(2); cube([c, b, is_undef(pre) ? 1 : 9]); }",
+    // A LOCAL module taking CHILDREN from a compiled call site — half_of's shape. A local def can
+    // never be armed, so the compiled child block meets an interpreted callee and the whole
+    // native DECLINES (AR.20.7): the differential pins that the decline is rolled back and the
+    // interpreted re-run answers identically.
+    "module _fab_poc_localmodkids(k=1) { module wrap() { children(); translate([k*2,0,0]) children(); } wrap() cube(k); }",
+    // A PARAMETER holding a function VALUE, invoked (AD.1): the interpreter's oracle-pinned rule
+    // is that a local binding holding a closure shadows any like-named function in call position.
+    // `call_fn`'s rung 1 used to DECLINE this shape; it now runs the interpreter's `CallValue`
+    // machinery, so the native answers instead of re-interpreting the whole module.
+    "module _fab_poc_callparam(f) { v = f(4); cube([v, 1, 1]); }",
 ];
 
 /// Synthetic bakes for the POC references above — BOSL2's own values, so a tier test that binds
@@ -2136,7 +2290,9 @@ fn walk_stmt(s: &Stmt, scope: &mut Vec<String>, out: &mut Analysis) {
             }
             scope.truncate(mark);
         }
-        // A nested definition declines at emission; its body is not this module's reads.
+        // A nested definition's body is not this module's reads: it registers at runtime
+        // (AR.14.4.5) and is INTERPRETED against the live captured scope, so its free reads
+        // resolve there — never through the enclosing native's bakes.
         StmtKind::ModuleDef { .. } | StmtKind::FunctionDef { .. } => {}
     }
 }
@@ -2274,9 +2430,12 @@ mod tests {
         /// AR.14.4 band 1 put generated text in front of RUSTC for the first time: 55 modules
         /// "emitted" `$`-named parameters/assignments as `let p_$tag = …` — invalid Rust the
         /// text-only census could never see, and semantically wrong anyway (a `$` binding is
-        /// DYNAMIC, it reaches every callee). They decline by name now; emitting real `$`-SETS
-        /// through a ModuleCtx capability is the next big band — the attachment system lives there.
-        const FLOOR: usize = 291;
+        /// DYNAMIC, it reaches every callee). 396 once AR.22 armed the `$`-set band. Then 402
+        /// with AR.14.4.5's nested defs (cuboid, half_of, corner_profile, bounding_box,
+        /// rabbit_clip, edge_profile_asym); the tail is first-class functions (AR.17), two
+        /// honest AN.6 duplicate-param declines, and stroke's `widths` free read — an upstream
+        /// bug (read on a path that never assigns it), so it stays declined on purpose.
+        const FLOOR: usize = 402;
 
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
@@ -2316,7 +2475,9 @@ mod tests {
             let baked = match super::bake_reads(&m.source, &lib, &folded) {
                 Ok(b) => b,
                 Err(e) => {
-                    *declines.entry(format!("bakes unavailable: {e}")).or_default() += 1;
+                    *declines
+                        .entry(format!("bakes unavailable: {e}"))
+                        .or_default() += 1;
                     continue;
                 }
             };
@@ -2374,7 +2535,10 @@ mod tests {
             match outcome {
                 Ok(_) => armed += 1,
                 Err(e) => {
-                    let reason = e.split_once(": ").map_or(e.as_str(), |(_, r)| r).to_string();
+                    let reason = e
+                        .split_once(": ")
+                        .map_or(e.as_str(), |(_, r)| r)
+                        .to_string();
                     let bucket = reason.split(" `").next().unwrap_or(&reason).to_string();
                     histo.entry(bucket).or_default().push((reason, &m.name));
                 }
@@ -2810,10 +2974,17 @@ mod tests {
             .find("_x = rt::apply_binary")
             .expect("hoisted x binds from an expression");
         let cube = out.find("name: \"cube\"").expect("cube call emitted");
-        assert!(bind < cube, "the assignment must bind before the cube that reads it");
+        assert!(
+            bind < cube,
+            "the assignment must bind before the cube that reads it"
+        );
         // `p_x` appears exactly twice: the parameter binding line and the hoist expression — the
         // cube must read the HOISTED value, not the param.
-        assert_eq!(out.matches("p_x").count(), 2, "a statement read the param through the hoist:\n{out}");
+        assert_eq!(
+            out.matches("p_x").count(),
+            2,
+            "a statement read the param through the hoist:\n{out}"
+        );
         // Block-flattened `y` binds at scope level and reaches the sphere outside the block.
         let y = out.find("_y = ").expect("y hoists out of the block");
         let sphere = out.find("name: \"sphere\"").expect("sphere call emitted");
@@ -2845,16 +3016,91 @@ mod tests {
             // declined, under its OWN name so the histogram can price it: it diverts the subtree
             // into the program-global root override, which no `ModuleCtx` method reaches.
             ("module m() { !cube(1); }", "`!` root modifier"),
+            // Nested defs EMIT as of AR.14.4.5 — and the PARSER already confines them to the
+            // body's top level ("not inside a child block"), so the below-top-level decline arms
+            // are defense in depth, unreachable from parseable source. What still declines is a
+            // nested fn whose NAME shares a hoist slot: the interpreter's whole-scope last-wins
+            // would rebind the slot across kinds (or shadow the param for the whole body), which
+            // a per-position registration cannot mirror.
             (
-                "module m() { module inner() { children(); } }",
-                "nested module",
+                "module m() { f = 1; function f(x) = x; cube(f(1)); }",
+                "sharing the hoist slot of `f`",
             ),
-            ("module m() { function f(x) = x; }", "nested function"),
+            (
+                "module m(f) { function f(x) = x; cube(f(1)); }",
+                "sharing the hoist slot of `f`",
+            ),
+            (
+                "module m() { function f(x) = x; function f(x) = x + 1; cube(f(1)); }",
+                "sharing the hoist slot of `f`",
+            ),
         ] {
             let err = super::generate_module_native(src, &[], &[])
                 .expect_err(&format!("must decline: {src}"));
             assert!(err.contains(want), "expected `{want}` in `{err}` for {src}");
         }
+    }
+
+    /// AR.14.4.5 — nested defs at the body's top level REGISTER: a `function` def becomes a
+    /// `register_local_fn` at its hoist POSITION (capturing exactly the locals bound before it),
+    /// module defs become ONE `register_local_modules` AFTER the whole prelude (the interpreter
+    /// captures the fully-hoisted scope, so a def above a reassignment sees the final value).
+    #[test]
+    fn nested_defs_register_in_hoist_order() {
+        let out = super::generate_module_native(
+            "module m(k) { module inner(a) { cube([a, w, 1]); } a = 1; function f(x) = x + a; b = f(2); w = b + k; inner(w); }",
+            &[],
+            &[],
+        )
+        .expect("generates");
+        let bind_a = out.find("_a = ").expect("a hoists");
+        let reg_f = out
+            .find("fx.register_local_fn(\"f\", &[(\"a\", ")
+            .expect("f registers with the locals bound before it — and only those");
+        let bind_b = out.find("_b = ").expect("b hoists");
+        let reg_mods = out
+            .find("fx.register_local_modules(&[\"inner\"], ")
+            .expect("module defs register in one call");
+        let call = out
+            .find("fx.call(&rt::ModuleCall { name: \"inner\"")
+            .expect("the call to the nested module is an ORDINARY dispatch");
+        assert!(
+            bind_a < reg_f && reg_f < bind_b,
+            "f must register at its hoist position — after `a`, before `b`:\n{out}"
+        );
+        assert!(
+            bind_b < reg_mods && reg_mods < call,
+            "module registration must follow the WHOLE prelude and precede the statements:\n{out}"
+        );
+        // `f`'s frame must NOT carry `b` or `w` (hoisted after it) — the interpreter's
+        // capture-at-bind-position view.
+        let f_line = &out[reg_f..out[reg_f..].find('\n').map_or(out.len(), |i| reg_f + i)];
+        assert!(
+            !f_line.contains("\"b\"") && !f_line.contains("\"w\""),
+            "f's frame must stop at its bind position: {f_line}"
+        );
+        // The module frame DOES carry the later locals — `inner` reads `w` post-hoist.
+        let m_line = &out[reg_mods
+            ..out[reg_mods..]
+                .find('\n')
+                .map_or(out.len(), |i| reg_mods + i)];
+        assert!(
+            m_line.contains("\"w\"") && m_line.contains("\"a\""),
+            "the module frame is the full hoisted scope: {m_line}"
+        );
+
+        // A def inside a BARE block registers with the top scope — a `{ }` is not a scope
+        // upstream, and the runtime's `collect_module_defs` flattens it identically.
+        let bare = super::generate_module_native(
+            "module m(k) { { module inner() { cube(k); } } inner(); }",
+            &[],
+            &[],
+        )
+        .expect("generates");
+        assert!(
+            bare.contains("fx.register_local_modules(&[\"inner\"], "),
+            "a bare-block def must ride the top registration:\n{bare}"
+        );
     }
 
     /// AR.20.4 — the statement bands the census counted, each generating rather than declining.
@@ -3053,6 +3299,3 @@ mod tests {
         assert!(err.contains("non-finite element"), "{err}");
     }
 }
-
-
-

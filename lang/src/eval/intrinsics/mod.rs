@@ -2257,6 +2257,35 @@ pub(super) static MODULE_REGISTRY: &[ModuleEntry] = &[
         func: generated_modules::_fab_poc_dollarset,
         consts: &[],
     },
+    // The NESTED-DEF pocs (AR.14.4.5): a local module registered with the fully-hoisted frame
+    // (its interpreted body reads `w` post-reassignment), nested functions registered at their
+    // hoist positions (capture-before, forward sibling, self-recursion, a pre-position call that
+    // must miss), a local module taking compiled children (the AR.20.7 decline, rolled back and
+    // re-interpreted), and a parameter-held closure invoked through `call_fn`'s rung 1.
+    ModuleEntry {
+        name: "_fab_poc_localmod",
+        reference: "module _fab_poc_localmod(k=1) { module inner(a) { cube([a, w, 1]); } w = k * 2; inner(3); inner(w); }",
+        func: generated_modules::_fab_poc_localmod,
+        consts: &[],
+    },
+    ModuleEntry {
+        name: "_fab_poc_localfn",
+        reference: "module _fab_poc_localfn(k=1) { pre = f(k); b = k + 1; function f(x) = g(x) + b; function g(x) = x <= 0 ? 0 : g(x - 1) + 1; c = f(2); cube([c, b, is_undef(pre) ? 1 : 9]); }",
+        func: generated_modules::_fab_poc_localfn,
+        consts: &[],
+    },
+    ModuleEntry {
+        name: "_fab_poc_localmodkids",
+        reference: "module _fab_poc_localmodkids(k=1) { module wrap() { children(); translate([k*2,0,0]) children(); } wrap() cube(k); }",
+        func: generated_modules::_fab_poc_localmodkids,
+        consts: &[],
+    },
+    ModuleEntry {
+        name: "_fab_poc_callparam",
+        reference: "module _fab_poc_callparam(f) { v = f(4); cube([v, 1, 1]); }",
+        func: generated_modules::_fab_poc_callparam,
+        consts: &[],
+    },
 ];
 
 /// The compiled module for `name`, IFF one is registered, the definition in this program

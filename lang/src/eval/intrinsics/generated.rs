@@ -5,6 +5,10 @@
 // native is bit-identical to interpreting its reference BY CONSTRUCTION — the win is the
 // deleted interpretation overhead, not different math.
 
+// rustfmt CANNOT format this file: the emitter's one-line expression bodies blow up its
+// layout search (measured: 5 CPU-minutes without terminating at 402 modules), and the
+// bytes are regenerated verbatim anyway — reformatting would only fail the currency gate.
+#![cfg_attr(rustfmt, rustfmt::skip)]
 #![allow(
     clippy::unreadable_literal,
     clippy::cloned_ref_to_slice_refs,

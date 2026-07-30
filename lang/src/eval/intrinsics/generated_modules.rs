@@ -5,6 +5,10 @@
 // so what it renders is what interpreting its reference renders — the win is the deleted
 // interpretation overhead, not different geometry.
 
+// rustfmt CANNOT format this file: the emitter's one-line expression bodies blow up its
+// layout search (measured: 5 CPU-minutes without terminating at 402 modules), and the
+// bytes are regenerated verbatim anyway — reformatting would only fail the currency gate.
+#![cfg_attr(rustfmt, rustfmt::skip)]
 #![allow(
     unused_variables,
     unused_mut,
@@ -16,12 +20,18 @@
     clippy::used_underscore_items,
     clippy::possible_missing_else,
     clippy::collapsible_else_if,
+    clippy::similar_names,
+    clippy::needless_else,
+    clippy::if_same_then_else,
+    clippy::too_many_lines,
     reason = "generated code: a module need not READ every parameter it declares, \
               parameter slots are indexed uniformly (so slot 0 is `get(0)`, not \
               `first()`), and a parts vec grows CONDITIONALLY even when the first \
               push happens to be unconditional — plus bit-exact from_bits literals, \
               mechanical clones, upstream's underscore-prefixed and camelCase names \
-              carried verbatim, and one-line block emission"
+              carried verbatim, fresh idents that differ by counter (`l1_r`/`l2_r`), \
+              upstream's own empty/identical branches, and bodies as long as the \
+              module they transcribe"
 )]
 
 // AR.13: `rt` is the ONLY thing generated code names.
@@ -242,6 +252,77 @@ pub(super) fn _fab_poc_dollarset(fx: &dyn rt::ModuleCtx) -> rt::Result<rt::Geo> 
         fx.group(parts)
     };
     parts.push(l0_blk);
+    Ok(fx.group(parts))
+}
+
+
+/// Generated native for module `_fab_poc_localmod` — geometry through the interpreter's own
+/// construction, so a generated module is what interpreting its reference builds.
+pub(super) fn _fab_poc_localmod(fx: &dyn rt::ModuleCtx) -> rt::Result<rt::Geo> {
+    let p_k = fx.args().get(0).cloned().unwrap_or(rt::Value::Undef);
+    let mut parts: Vec<rt::Geo> = Vec::new();
+    let l0_w = rt::apply_binary(rt::BinOp::Mul, p_k.clone(), rt::Value::Num(f64::from_bits(0x4000000000000000_u64)));
+    fx.register_local_modules(&["inner"], &[("w", l0_w.clone())])?;
+    let l1_blk = {
+        let mut parts: Vec<rt::Geo> = Vec::new();
+    parts.push(fx.call(&rt::ModuleCall { name: "inner", args: &[(None, rt::Value::Num(f64::from_bits(0x4008000000000000_u64))), ], children: rt::Children::None })?);
+    parts.push(fx.call(&rt::ModuleCall { name: "inner", args: &[(None, l0_w.clone()), ], children: rt::Children::None })?);
+        fx.group(parts)
+    };
+    parts.push(l1_blk);
+    Ok(fx.group(parts))
+}
+
+
+/// Generated native for module `_fab_poc_localfn` — geometry through the interpreter's own
+/// construction, so a generated module is what interpreting its reference builds.
+pub(super) fn _fab_poc_localfn(fx: &dyn rt::ModuleCtx) -> rt::Result<rt::Geo> {
+    let p_k = fx.args().get(0).cloned().unwrap_or(rt::Value::Undef);
+    let mut parts: Vec<rt::Geo> = Vec::new();
+    let l0_pre = fx.call_fn(&rt::FnCall { name: "f", args: &[(None, p_k.clone())] })?;
+    let l1_b = rt::apply_binary(rt::BinOp::Add, p_k.clone(), rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64)));
+    fx.register_local_fn("f", &[("pre", l0_pre.clone()), ("b", l1_b.clone())])?;
+    fx.register_local_fn("g", &[("pre", l0_pre.clone()), ("b", l1_b.clone())])?;
+    let l2_c = fx.call_fn(&rt::FnCall { name: "f", args: &[(None, rt::Value::Num(f64::from_bits(0x4000000000000000_u64)))] })?;
+    let l3_blk = {
+        let mut parts: Vec<rt::Geo> = Vec::new();
+    parts.push(fx.call(&rt::ModuleCall { name: "cube", args: &[(None, rt::build_vector(vec![l2_c.clone(), l1_b.clone(), if fx.call_fn(&rt::FnCall { name: "is_undef", args: &[(None, l0_pre.clone())] })?.is_truthy() { rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64)) } else { rt::Value::Num(f64::from_bits(0x4022000000000000_u64)) }])), ], children: rt::Children::None })?);
+        fx.group(parts)
+    };
+    parts.push(l3_blk);
+    Ok(fx.group(parts))
+}
+
+
+/// Generated native for module `_fab_poc_localmodkids` — geometry through the interpreter's own
+/// construction, so a generated module is what interpreting its reference builds.
+pub(super) fn _fab_poc_localmodkids(fx: &dyn rt::ModuleCtx) -> rt::Result<rt::Geo> {
+    let p_k = fx.args().get(0).cloned().unwrap_or(rt::Value::Undef);
+    let mut parts: Vec<rt::Geo> = Vec::new();
+    fx.register_local_modules(&["wrap"], &[])?;
+    let l0_blk = {
+        let mut parts: Vec<rt::Geo> = Vec::new();
+    parts.push(fx.call(&rt::ModuleCall { name: "wrap", args: &[], children: rt::Children::Compiled(&[&|fx: &dyn rt::ModuleCtx| { let mut parts: Vec<rt::Geo> = Vec::new();     parts.push(fx.call(&rt::ModuleCall { name: "cube", args: &[(None, p_k.clone()), ], children: rt::Children::None })?);
+ Ok(fx.group(parts)) }, ]) })?);
+        fx.group(parts)
+    };
+    parts.push(l0_blk);
+    Ok(fx.group(parts))
+}
+
+
+/// Generated native for module `_fab_poc_callparam` — geometry through the interpreter's own
+/// construction, so a generated module is what interpreting its reference builds.
+pub(super) fn _fab_poc_callparam(fx: &dyn rt::ModuleCtx) -> rt::Result<rt::Geo> {
+    let p_f = fx.args().get(0).cloned().unwrap_or(rt::Value::Undef);
+    let mut parts: Vec<rt::Geo> = Vec::new();
+    let l0_v = fx.call_fn(&rt::FnCall { name: "f", args: &[(None, rt::Value::Num(f64::from_bits(0x4010000000000000_u64)))] })?;
+    let l1_blk = {
+        let mut parts: Vec<rt::Geo> = Vec::new();
+    parts.push(fx.call(&rt::ModuleCall { name: "cube", args: &[(None, rt::build_vector(vec![l0_v.clone(), rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64)), rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64))])), ], children: rt::Children::None })?);
+        fx.group(parts)
+    };
+    parts.push(l1_blk);
     Ok(fx.group(parts))
 }
 

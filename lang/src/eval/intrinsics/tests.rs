@@ -3439,8 +3439,7 @@ fn a_compiled_module_dispatching_matches_the_interpreter() {
                            _fab_poc_wrap() { cube([2,3,4]); sphere(r=1); }";
     // The callee's body DRIFTED (it echoes), so it does not wire and the compiled wrapper hands it
     // to the interpreter — while the wrapper itself still compiles.
-    let interpreted_callee =
-        "module _fab_poc_mod(k=1) { echo(pm=$parent_modules, ch=$children); children(); }\n\
+    let interpreted_callee = "module _fab_poc_mod(k=1) { echo(pm=$parent_modules, ch=$children); children(); }\n\
          module _fab_poc_wrap(k=1) { _fab_poc_mod(k) children(); }\n\
          _fab_poc_wrap() { cube([2,3,4]); sphere(r=1); }";
 
@@ -3798,11 +3797,20 @@ fn a_compiled_module_echoes_like_the_interpreter() {
                _fab_poc_echo(3);";
     let (geo_on, msgs_on) = run(src, true);
     let (geo_off, msgs_off) = run(src, false);
-    assert_eq!(geo_on, geo_off, "echo: compiled geometry differs from interpreting");
+    assert_eq!(
+        geo_on, geo_off,
+        "echo: compiled geometry differs from interpreting"
+    );
     assert_eq!(msgs_on, msgs_off, "echo: different console");
     // The echoes are actually THERE — equality of two empty consoles proves nothing.
-    assert!(msgs_on.contains("poc"), "the echo line is missing: {msgs_on}");
-    assert!(msgs_on.contains("k = 4"), "the named arg must render `k = 4`: {msgs_on}");
+    assert!(
+        msgs_on.contains("poc"),
+        "the echo line is missing: {msgs_on}"
+    );
+    assert!(
+        msgs_on.contains("k = 4"),
+        "the named arg must render `k = 4`: {msgs_on}"
+    );
 
     // NON-VACUITY: both modules arm, so the compiled path really ran end to end.
     let program = crate::parser::parse(src).expect("parses");
@@ -3840,7 +3848,10 @@ fn a_declining_native_rolls_back_its_echoes_exactly_once() {
                _fab_poc_echo(3);";
     let (geo_on, msgs_on) = run(src, true);
     let (geo_off, msgs_off) = run(src, false);
-    assert_eq!(geo_on, geo_off, "rollback: compiled geometry differs from interpreting");
+    assert_eq!(
+        geo_on, geo_off,
+        "rollback: compiled geometry differs from interpreting"
+    );
     assert_eq!(msgs_on, msgs_off, "rollback: different console");
     assert_eq!(
         msgs_on.matches("poc").count(),
@@ -3893,7 +3904,7 @@ fn a_native_success_inside_a_cacheable_call_does_not_leak_the_capture() {
 /// The depth-budget HANDOVER, previously untested on the compiled tier: a recursive armed native
 /// dispatches native-to-native until `MAX_MODULE_NATIVE_DEPTH` (64) exhausts, then the REST of
 /// the recursion interprets — childless, so the handover is silent mid-tree and the answer must
-/// be identical either way (the fractal_tree shape AR.20.5 called load-bearing). 100 levels
+/// be identical either way (the `fractal_tree` shape AR.20.5 called load-bearing). 100 levels
 /// forces the budget past its edge on every run.
 #[test]
 fn a_recursive_native_hands_over_to_the_interpreter_past_the_depth_budget() {
@@ -3961,7 +3972,9 @@ fn a_bake_guarded_module_arms_when_the_constants_match() {
         .stmts
         .iter()
         .find_map(|s| match &s.kind {
-            crate::parser::StmtKind::ModuleDef { name, params, body } if &**name == "_fab_poc_bake" => {
+            crate::parser::StmtKind::ModuleDef { name, params, body }
+                if &**name == "_fab_poc_bake" =>
+            {
                 Some((params, body))
             }
             _ => None,
@@ -4015,7 +4028,9 @@ fn a_rebound_baked_constant_vetoes_the_module_native() {
         .stmts
         .iter()
         .find_map(|s| match &s.kind {
-            crate::parser::StmtKind::ModuleDef { name, params, body } if &**name == "_fab_poc_bake" => {
+            crate::parser::StmtKind::ModuleDef { name, params, body }
+                if &**name == "_fab_poc_bake" =>
+            {
                 Some((params, body))
             }
             _ => None,
@@ -4182,7 +4197,10 @@ fn a_compiled_module_dispatches_function_calls_like_the_interpreter() {
     assert_eq!(msgs_on, msgs_off, "fn dispatch: different console");
     // RAN, not merely armed — the band-1 postmortem's lesson: a native that resolves and then
     // declines mid-body leaves every equality above true and the dispatch path untested.
-    assert!(ran > 0, "`_fab_poc_fncall`'s native never ran to completion");
+    assert!(
+        ran > 0,
+        "`_fab_poc_fncall`'s native never ran to completion"
+    );
 }
 
 /// AR.14.4.2/.3 — the SHADOW half, and the reason function calls dispatch instead of baking
@@ -4267,7 +4285,10 @@ fn a_compiled_module_dollar_set_reaches_callees_and_children() {
         msgs_on.contains("ds = 12") && msgs_on.contains("ds = 15"),
         "the echoes must carry the SET values (inherited 10 + k): {msgs_on}"
     );
-    assert!(ran > 0, "`_fab_poc_dollarset`'s native never ran to completion");
+    assert!(
+        ran > 0,
+        "`_fab_poc_dollarset`'s native never ran to completion"
+    );
 }
 
 /// AR.22 — the TAG-FAMILY pipeline end to end, the attachment core's regression pin: `diff()`
@@ -4275,7 +4296,7 @@ fn a_compiled_module_dollar_set_reaches_callees_and_children() {
 /// the `tag("remove")`ed cuboid must land in the SUBTRACTED half both tiers alike. This is the
 /// program the OpenSCAD differential caught the render-point bug on: a compiled child thunk that
 /// runs against its CREATOR's dynamic context drops every `$`-frame between creator and renderer
-/// — `hide()`'s `$tags_hidden` never reached the cuboid, and diff() UNIONED what it should have
+/// — `hide()`'s `$tags_hidden` never reached the cuboid, and `diff()` UNIONED what it should have
 /// subtracted. The bridge (render-point scope over creator structure) is what this test pins.
 #[test]
 fn the_tag_family_renders_through_compiled_children_like_the_interpreter() {
@@ -4310,7 +4331,10 @@ fn the_tag_family_renders_through_compiled_children_like_the_interpreter() {
         "tag family: a $-set was dropped between a thunk's creator and its renderer"
     );
     assert_eq!(msgs_on, msgs_off, "tag family: different console");
-    assert!(ran > 0, "no native ran — the tag pipeline never exercised the bridge");
+    assert!(
+        ran > 0,
+        "no native ran — the tag pipeline never exercised the bridge"
+    );
 }
 
 /// The drift gate, on the MODULE path: a definition that does not match the reference the native
@@ -4366,6 +4390,237 @@ fn a_drifted_module_definition_does_not_wire() {
 /// it with `b`'s declared default. The distinction is the whole test: passing `Value::Undef`
 /// instead would compile, run, and return `[x, undef, 3]` — a wrong ANSWER that looks like a
 /// working native. That is AN.3's bug in compiled form.
+/// AR.14.4.5 — nested MODULE defs in a native body register onto the interpreter's own
+/// local-module stack and resolve through the ordinary dispatch.
+///
+/// Two programs. The FIRST pins the frame semantics: `inner` sits textually ABOVE the `w`
+/// reassignment and must still see the final value (whole-scope last-wins — cuboid's sharpest
+/// case; the registration is emitted AFTER the whole prelude for exactly this). The SECOND pins
+/// RESOLUTION PRIORITY: the user defines a top-level `inner` that builds a sphere, and the local
+/// def must win in both tiers — a compiled caller that reached the global sibling would render a
+/// sphere while the interpreter renders cubes, which is a silent wrong answer, not a decline.
+#[test]
+fn nested_module_defs_register_and_match_the_interpreter() {
+    let run = |src: &str, intrinsics: bool| {
+        let config = crate::Config {
+            intrinsics,
+            ..crate::Config::default()
+        };
+        let (geo, msgs) =
+            crate::evaluate_geometry_with_base_config(src, std::path::Path::new("."), &[], config)
+                .expect("renders");
+        (format!("{geo:?}"), format!("{msgs:?}"))
+    };
+    let plain = "module _fab_poc_localmod(k=1) { module inner(a) { cube([a, w, 1]); } w = k * 2; inner(3); inner(w); }\n\
+                 _fab_poc_localmod(2);";
+    let shadowing = "module inner(a) { sphere(r=a); }\n\
+                     module _fab_poc_localmod(k=1) { module inner(a) { cube([a, w, 1]); } w = k * 2; inner(3); inner(w); }\n\
+                     _fab_poc_localmod(2);\n\
+                     inner(1);";
+    for (label, src) in [("plain", plain), ("shadowing", shadowing)] {
+        let before = crate::eval::module_rt::NATIVE_MODULE_RUNS.with(std::cell::Cell::get);
+        let (geo_on, msgs_on) = run(src, true);
+        let ran = crate::eval::module_rt::NATIVE_MODULE_RUNS.with(std::cell::Cell::get) - before;
+        let (geo_off, msgs_off) = run(src, false);
+        assert_eq!(geo_on, geo_off, "{label}: nested-def geometry diverged");
+        assert_eq!(msgs_on, msgs_off, "{label}: different console");
+        assert!(
+            ran > 0,
+            "{label}: `_fab_poc_localmod`'s native never ran to completion"
+        );
+        assert!(
+            geo_on.contains("Leaf"),
+            "{label}: no geometry — empty trees would agree"
+        );
+    }
+}
+
+/// AR.14.4.5 — nested FUNCTION defs bind as closures at their hoist positions, through
+/// `register_local_fn` + `call_fn`'s rung-1 invoke.
+///
+/// One program, four pins riding the console/geometry equality: `pre` calls `f` BEFORE its hoist
+/// position (unknown in both tiers — the warning is the position-correctness proof), `f` captures
+/// the EARLIER local `b`, `f` calls the sibling `g` defined BELOW it (the letrec group), and `g`
+/// self-recurses. `c = f(2)` runs in the PRELUDE, so the invoke path is exercised before any
+/// geometry statement.
+#[test]
+fn nested_fn_defs_register_and_match_the_interpreter() {
+    let run = |src: &str, intrinsics: bool| {
+        let config = crate::Config {
+            intrinsics,
+            ..crate::Config::default()
+        };
+        let (geo, msgs) =
+            crate::evaluate_geometry_with_base_config(src, std::path::Path::new("."), &[], config)
+                .expect("renders");
+        (format!("{geo:?}"), format!("{msgs:?}"))
+    };
+    let src = "module _fab_poc_localfn(k=1) { pre = f(k); b = k + 1; function f(x) = g(x) + b; function g(x) = x <= 0 ? 0 : g(x - 1) + 1; c = f(2); cube([c, b, is_undef(pre) ? 1 : 9]); }\n\
+               _fab_poc_localfn(1);";
+    let before = crate::eval::module_rt::NATIVE_MODULE_RUNS.with(std::cell::Cell::get);
+    let (geo_on, msgs_on) = run(src, true);
+    let ran = crate::eval::module_rt::NATIVE_MODULE_RUNS.with(std::cell::Cell::get) - before;
+    let (geo_off, msgs_off) = run(src, false);
+    assert_eq!(geo_on, geo_off, "nested-fn geometry diverged");
+    assert_eq!(msgs_on, msgs_off, "nested-fn console diverged");
+    assert!(
+        msgs_on.contains("Ignoring unknown function 'f'"),
+        "the pre-position call must MISS the not-yet-bound local (both tiers warn): {msgs_on}"
+    );
+    assert!(
+        ran > 0,
+        "`_fab_poc_localfn`'s native never ran to completion"
+    );
+    assert!(
+        geo_on.contains("Leaf"),
+        "no geometry — empty trees would agree"
+    );
+}
+
+/// AR.14.4.5 × AR.20.7 — a LOCAL module taking children from a compiled call site is the decline
+/// path, permanently: a local def can never be armed, so the compiled child block always meets an
+/// interpreted callee. The native must decline (NOT complete — `ran == 0` distinguishes the
+/// decline from a fingerprint miss, which the direct `resolve_module` probe rules out), the
+/// rollback must leave the console clean, and the interpreted re-run must answer identically.
+/// This is `half_of`'s exact shape, so the cost of the decline is measured content, not theory.
+#[test]
+fn a_local_module_taking_compiled_children_declines_and_matches() {
+    use crate::parser::{StmtKind, parse};
+    let def = "module _fab_poc_localmodkids(k=1) { module wrap() { children(); translate([k*2,0,0]) children(); } wrap() cube(k); }";
+    // Armed, provably — otherwise `ran == 0` below would also pass for a drifted reference.
+    let prog = parse(def).expect("parses");
+    let Some(StmtKind::ModuleDef { params, body, .. }) = prog.stmts.first().map(|s| &s.kind) else {
+        panic!("expected a module def");
+    };
+    assert!(
+        super::resolve_module("_fab_poc_localmodkids", params, body, &crate::Scope::new())
+            .is_some(),
+        "the POC must wire before the decline can mean anything"
+    );
+
+    let run = |src: &str, intrinsics: bool| {
+        let config = crate::Config {
+            intrinsics,
+            ..crate::Config::default()
+        };
+        let (geo, msgs) =
+            crate::evaluate_geometry_with_base_config(src, std::path::Path::new("."), &[], config)
+                .expect("renders");
+        (format!("{geo:?}"), format!("{msgs:?}"))
+    };
+    let src = format!("{def}\n_fab_poc_localmodkids(3);");
+    let before = crate::eval::module_rt::NATIVE_MODULE_RUNS.with(std::cell::Cell::get);
+    let (geo_on, msgs_on) = run(&src, true);
+    let ran = crate::eval::module_rt::NATIVE_MODULE_RUNS.with(std::cell::Cell::get) - before;
+    let (geo_off, msgs_off) = run(&src, false);
+    assert_eq!(
+        geo_on, geo_off,
+        "the declined native left different geometry"
+    );
+    assert_eq!(
+        msgs_on, msgs_off,
+        "the declined native left a different console"
+    );
+    assert_eq!(
+        ran, 0,
+        "the native COMPLETED — a compiled child block reached an interpreted local def, \
+         which AR.20.7 says must decline"
+    );
+    assert!(
+        geo_on.contains("Leaf"),
+        "no geometry — empty trees would agree"
+    );
+}
+
+/// AD.1, compiled (AR.14.4.5's rung-1 invoke): a PARAMETER holding a function value is the callee.
+/// The interpreter's oracle-pinned rule is that a local binding holding a closure shadows any
+/// like-named function in call position — `call_fn` used to DECLINE this shape (the whole module
+/// re-interpreted, `ran == 0`); it now runs the interpreter's own `CallValue` machinery, so the
+/// `ran > 0` assertion is what distinguishes the invoke from the old decline.
+#[test]
+fn a_param_holding_a_closure_is_invoked_by_the_native() {
+    let run = |src: &str, intrinsics: bool| {
+        let config = crate::Config {
+            intrinsics,
+            ..crate::Config::default()
+        };
+        let (geo, msgs) =
+            crate::evaluate_geometry_with_base_config(src, std::path::Path::new("."), &[], config)
+                .expect("renders");
+        (format!("{geo:?}"), format!("{msgs:?}"))
+    };
+    let src = "module _fab_poc_callparam(f) { v = f(4); cube([v, 1, 1]); }\n\
+               _fab_poc_callparam(function(x) x + 1);";
+    let before = crate::eval::module_rt::NATIVE_MODULE_RUNS.with(std::cell::Cell::get);
+    let (geo_on, msgs_on) = run(src, true);
+    let ran = crate::eval::module_rt::NATIVE_MODULE_RUNS.with(std::cell::Cell::get) - before;
+    let (geo_off, msgs_off) = run(src, false);
+    assert_eq!(geo_on, geo_off, "closure-param geometry diverged");
+    assert_eq!(msgs_on, msgs_off, "closure-param console diverged");
+    assert!(
+        ran > 0,
+        "the native declined — rung 1 should INVOKE a param-held closure now"
+    );
+    assert!(
+        geo_on.contains("Leaf"),
+        "no geometry — empty trees would agree"
+    );
+}
+
+/// AR.14.4.5 on REAL content: `cuboid` — the most-instantiated module in BOSL2, and the band's
+/// prize — runs COMPILED with its five nested module defs registered (`corner_shape` reads the
+/// post-reassignment `size`/`chamfer`/`rounding`, `xtcyl`/`tsphere` read `teardrop` — all through
+/// the materialized frame). Three argument shapes drive the plain, chamfered and rounded paths;
+/// `half_of` rides along as the real-content decline shape (its nested defs take children, so
+/// equality is the assertion, not `ran`).
+#[test]
+fn bosl2_cuboid_runs_compiled_with_its_nested_defs() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("workspace root")
+        .join("libs/BOSL2");
+    if !root.join("std.scad").exists() {
+        eprintln!("skipping: libs/BOSL2 submodule not checked out");
+        return;
+    }
+    let run = |src: &str, intrinsics: bool| {
+        let config = crate::Config {
+            intrinsics,
+            ..crate::Config::default()
+        };
+        let (geo, msgs) =
+            crate::evaluate_geometry_with_base_config(src, &root, &[], config).expect("renders");
+        (format!("{geo:?}"), format!("{msgs:?}"))
+    };
+    let programs = [
+        ("plain", "include <std.scad>\ncuboid([8, 6, 4]);"),
+        (
+            "chamfered",
+            "include <std.scad>\ncuboid([8, 6, 4], chamfer=1);",
+        ),
+        (
+            "rounded",
+            "include <std.scad>\ncuboid([8, 6, 4], rounding=2, $fn=16);",
+        ),
+        (
+            "half_of",
+            "include <std.scad>\nhalf_of(UP) sphere(d=8, $fn=16);",
+        ),
+    ];
+    for (label, src) in programs {
+        let before = crate::eval::module_rt::NATIVE_MODULE_RUNS.with(std::cell::Cell::get);
+        let (geo_on, msgs_on) = run(src, true);
+        let ran = crate::eval::module_rt::NATIVE_MODULE_RUNS.with(std::cell::Cell::get) - before;
+        let (geo_off, msgs_off) = run(src, false);
+        assert_eq!(geo_on, geo_off, "{label}: compiled BOSL2 render diverged");
+        assert_eq!(msgs_on, msgs_off, "{label}: different console");
+        assert!(geo_on.contains("Leaf"), "{label}: no geometry");
+        if label != "half_of" {
+            assert!(ran > 0, "{label}: no module native completed a run");
+        }
+    }
+}
+
 #[test]
 fn a_sibling_call_with_a_hole_takes_the_callees_default() {
     let reference = reference_of("_fab_poc_hole").expect("registered");
@@ -4393,4 +4648,3 @@ fn a_sibling_call_with_a_hole_takes_the_callees_default() {
         }
     }
 }
-

@@ -413,19 +413,57 @@ pub trait ModuleCtx {
     fn set_dollar(&self, name: &'static str, value: Value);
 
     /// Call a FUNCTION by name with evaluated arguments, resolving where the interpreted body
-    /// would (AR.14.4.3): a local binding holding a function value wins (AD.1 — the emitter
-    /// declines the statically-visible case, this catches a runtime injection by DECLINING), then
-    /// the island's user functions — which may SHADOW a builtin, the reroute `rt::bi` could never
-    /// honor — then builtins by capability, then OpenSCAD's warn-and-`undef`. This is what makes a
-    /// compiled module's function calls DISPATCH rather than baked assumptions: the callee is
-    /// whatever the program actually defines at runtime, so a shadowed `sin` or a sibling defined
-    /// three files away both just resolve.
+    /// would (AR.14.4.3): a local binding holding a function value is INVOKED (AD.1 — the
+    /// interpreter's `CallValue` machinery; this is how a registered nested function, or a
+    /// parameter holding a closure, gets called), then the island's user functions — which may
+    /// SHADOW a builtin, the reroute `rt::bi` could never honor — then builtins by capability,
+    /// then OpenSCAD's warn-and-`undef`. This is what makes a compiled module's function calls
+    /// DISPATCH rather than baked assumptions: the callee is whatever the program actually
+    /// defines at runtime, so a shadowed `sin` or a sibling defined three files away both just
+    /// resolve.
     ///
     /// # Errors
-    /// A decline (`Unimplemented`) for the shapes handed back to the interpreter — a
-    /// function-value callee, a file-reading builtin — or whatever the resolved body raises
-    /// (assert failures, the recursion guard).
+    /// A decline (`Unimplemented`) for the shapes handed back to the interpreter — a bound-method
+    /// value, a file-reading builtin — or whatever the resolved body raises (assert failures, the
+    /// recursion guard).
     fn call_fn(&self, call: &FnCall<'_>) -> crate::Result<Value>;
+
+    /// Register one of this module body's nested `function` definitions (AR.14.4.5), binding a
+    /// closure VALUE by its name into this call's frame — the compiled mirror of the hoisted
+    /// bind `hoist_scope` does at the same first-occurrence position. `frame` carries the body
+    /// locals hoisted BEFORE this definition, materialized from the native's own bindings: the
+    /// closure's lexical env is the call frame plus exactly those, which reproduces the
+    /// interpreter's capture-at-bind-position view (a later hoisted local is invisible, a
+    /// parameter always visible). The definition's AST comes from the runtime's own resolved
+    /// body — the fingerprint gate proved it identical to what the emitter compiled — so the
+    /// body may hold constructs no native could express; it is interpreted at invoke time.
+    ///
+    /// # Errors
+    /// A decline (`Unimplemented`) when the runtime cannot find the named definition at the
+    /// body's flattened top level — drift the gate should have caught, so falling back to the
+    /// interpreter is the safe answer.
+    fn register_local_fn(
+        &self,
+        name: &'static str,
+        frame: &[(&'static str, Value)],
+    ) -> crate::Result<()>;
+
+    /// Register this module body's nested `module` definitions (AR.14.4.5) so calls to them —
+    /// from the compiled body and from anything it calls, the interpreter's dynamically-scoped
+    /// v1 visibility — resolve through `Ctx::resolve_module`'s local rung exactly as if the
+    /// interpreter had pushed them at block entry. `frame` is the body's full hoisted locals
+    /// (the emitter calls this AFTER the whole prelude, matching the interpreter's capture of
+    /// the fully-hoisted block scope — cuboid's nested defs see the post-reassignment `size`).
+    /// The registration lives until the native returns; the dispatch site pops it.
+    ///
+    /// # Errors
+    /// A decline (`Unimplemented`) when the names the emitter compiled against do not match the
+    /// definitions found in the resolved body — the registration would bind the wrong world.
+    fn register_local_modules(
+        &self,
+        names: &[&'static str],
+        frame: &[(&'static str, Value)],
+    ) -> crate::Result<()>;
 }
 
 /// A function call a generated MODULE body makes — the expression twin of [`ModuleCall`], with the

@@ -53,6 +53,9 @@ const fn opt(name: &'static str, domain: Domain) -> Param {
     }
 }
 
+/// A [`ContextImpl::Named`] builtin's shape: written argument names, values, the console.
+type NamedFn = fn(&[Option<&str>], &[Value], &mut Vec<super::Message>) -> Value;
+
 /// A context builtin's implementation, tagged by the capability it needs — the runtime half of
 /// [`BuiltinCapability`]. `run_builtin` matches on THIS (the one place the evaluator supplies
 /// context), so a sixth context builtin is a new row in [`declare_builtins!`], not a name check to
@@ -62,7 +65,7 @@ pub(super) enum ContextImpl {
     /// Needs the argument NAMES (and may warn through the console). Takes the names as a bare
     /// slice rather than AST `Arg`s so a VALUE-shaped caller — `ModuleCtx::call_fn`'s dispatch
     /// (AR.22), which has no AST — shares the one implementation with `run_builtin`.
-    Named(fn(&[Option<&str>], &[Value], &mut Vec<super::Message>) -> Value),
+    Named(NamedFn),
     /// Draws from the evaluator's ONE advancing seedless stream.
     Stream(fn(&[Value], &mut super::rng::RandStream) -> Value),
     /// Reads the live module-instantiation name stack (innermost last).
@@ -1184,7 +1187,9 @@ fn pred(pos: &[Value], f: impl Fn(&Value) -> bool) -> Value {
 
 #[cfg(test)]
 mod tests {
-    use super::{BUILTIN_SURFACE, ContextImpl, Value, apply, builtin_decl, context_impl, is_builtin};
+    use super::{
+        BUILTIN_SURFACE, ContextImpl, Value, apply, builtin_decl, context_impl, is_builtin,
+    };
     use crate::surface::BuiltinCapability;
 
     #[test]
@@ -1199,12 +1204,20 @@ mod tests {
         // reviewable diff (upstream func.cc + control.cc, AS.1's census).
         assert_eq!(BUILTIN_SURFACE.len(), 43);
         for b in BUILTIN_SURFACE {
-            assert!(is_builtin(b.decl.name), "{} declared but not a member", b.decl.name);
+            assert!(
+                is_builtin(b.decl.name),
+                "{} declared but not a member",
+                b.decl.name
+            );
         }
         let mut names: Vec<&str> = BUILTIN_SURFACE.iter().map(|b| b.decl.name).collect();
         names.sort_unstable();
         names.dedup();
-        assert_eq!(names.len(), BUILTIN_SURFACE.len(), "duplicate declaration row");
+        assert_eq!(
+            names.len(),
+            BUILTIN_SURFACE.len(),
+            "duplicate declaration row"
+        );
         assert!(!is_builtin("not_a_builtin"));
     }
 
@@ -1228,11 +1241,26 @@ mod tests {
         }
         // The five context builtins under their exact capability — a row moved to the wrong group
         // would still compile, so pin the partition itself.
-        assert!(matches!(context_impl("textmetrics"), Some(ContextImpl::Named(_))));
-        assert!(matches!(context_impl("fontmetrics"), Some(ContextImpl::Named(_))));
-        assert!(matches!(context_impl("object"), Some(ContextImpl::Named(_))));
-        assert!(matches!(context_impl("rands"), Some(ContextImpl::Stream(_))));
-        assert!(matches!(context_impl("parent_module"), Some(ContextImpl::Stack(_))));
+        assert!(matches!(
+            context_impl("textmetrics"),
+            Some(ContextImpl::Named(_))
+        ));
+        assert!(matches!(
+            context_impl("fontmetrics"),
+            Some(ContextImpl::Named(_))
+        ));
+        assert!(matches!(
+            context_impl("object"),
+            Some(ContextImpl::Named(_))
+        ));
+        assert!(matches!(
+            context_impl("rands"),
+            Some(ContextImpl::Stream(_))
+        ));
+        assert!(matches!(
+            context_impl("parent_module"),
+            Some(ContextImpl::Stack(_))
+        ));
         let context_rows = BUILTIN_SURFACE
             .iter()
             .filter(|b| b.capability != BuiltinCapability::Pure)

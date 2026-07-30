@@ -869,7 +869,7 @@ fn split_children(mi: &crate::parser::ModuleInstantiation) -> (Vec<&Stmt>, Vec<&
 fn try_native_module<'a>(
     mi: &'a crate::parser::ModuleInstantiation,
     params: &[crate::parser::Parameter],
-    body: &Stmt,
+    body: &'a Stmt,
     call: &Scope,
     home_global: &Scope,
     child_stmts: &[&'a Stmt],
@@ -897,6 +897,10 @@ fn try_native_module<'a>(
     // compiled module that skipped the push would make its callees see a shorter stack than the same
     // program interpreted — a differential that renders rather than errors (AR.20.5).
     let _frame = super::module_rt::ModuleStackGuard::push(&mi.name, ctx);
+    // Balances any local-module frame the native registers (AR.14.4.5) — on success, on error,
+    // and on the decline below, where the interpreted re-run is about to push its OWN frame for
+    // the same block.
+    let _defs = super::module_rt::LocalModulesGuard::mark(ctx);
     let mctx = super::module_rt::NativeModuleCtx {
         args: super::module_rt::bound_args(params, call),
         children: super::module_rt::CallChildren::Stmts {
@@ -909,6 +913,9 @@ fn try_native_module<'a>(
         // The module's own calls resolve where it was DEFINED — `home`, the same island the
         // interpreted path schedules the body against.
         home_island: home,
+        // The fingerprint-matched definition body — the AST source for nested-def registration.
+        def_body: Some(body),
+        local_fn_group: std::cell::OnceCell::new(),
         ctx,
     };
     // A DECLINE, not a failure: `Unimplemented` out of a native means the compiled tier cannot

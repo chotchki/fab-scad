@@ -188,6 +188,31 @@ impl CallChildren<'_, '_> {
     }
 }
 
+/// Truncate-to-mark balance for [`Ctx::local_modules`] frames a native REGISTERS (AR.14.4.5).
+///
+/// The interpreter balances its push with a scheduled `PopLocalModules` CLEANUP task; a native is
+/// an ordinary Rust call, so it balances with `Drop` — which also covers the decline path, where
+/// the interpreter is about to re-run the same call and push its OWN frame. Truncate rather than
+/// pop-if-pushed: one native may register zero or one frames, but everything it CALLED must have
+/// balanced already, so restoring the entry mark is exact either way.
+pub(super) struct LocalModulesGuard<'a, 'c> {
+    ctx: &'c super::Ctx<'a>,
+    mark: usize,
+}
+
+impl<'a, 'c> LocalModulesGuard<'a, 'c> {
+    pub(super) fn mark(ctx: &'c super::Ctx<'a>) -> Self {
+        let mark = ctx.local_modules.borrow().len();
+        Self { ctx, mark }
+    }
+}
+
+impl Drop for LocalModulesGuard<'_, '_> {
+    fn drop(&mut self) {
+        self.ctx.local_modules.borrow_mut().truncate(self.mark);
+    }
+}
+
 /// The evaluator state one compiled module call sees.
 pub(super) struct NativeModuleCtx<'a, 'c, 'k> {
     /// Arguments already bound to parameters by the evaluator's own two-phase rule — the
@@ -204,6 +229,16 @@ pub(super) struct NativeModuleCtx<'a, 'c, 'k> {
     /// field used to answer both, which happened to work only while every test defined everything
     /// in one file.
     pub(super) home_island: usize,
+    /// The RESOLVED definition's body — the same `&'a Stmt` the fingerprint gate matched against
+    /// the native's reference, which is what makes it the legitimate AST source for the body's
+    /// nested defs (AR.14.4.5): emitted code cannot carry `'a` references, so the runtime digs
+    /// them out of the body it already proved identical. `None` only for the child-thunk bridge,
+    /// which never registers.
+    pub(super) def_body: Option<&'a Stmt>,
+    /// The body's nested-function letrec group, minted ONCE per call on first registration —
+    /// mirroring `hoist_scope`, which registers the whole group up front so a forward/mutual
+    /// sibling call resolves at invoke time.
+    pub(super) local_fn_group: std::cell::OnceCell<Option<std::rc::Rc<[super::value::SiblingFn]>>>,
     pub(super) ctx: &'c super::Ctx<'a>,
 }
 
@@ -259,6 +294,10 @@ impl<'a> NativeModuleCtx<'a, '_, '_> {
                     children: (*children).clone(),
                     call_scope: std::cell::RefCell::new(self.call_scope.borrow().clone()),
                     home_island: *home_island,
+                    // A thunk is a child BLOCK's body, never a module body — registration is
+                    // emitted only at a body's top scope, so the bridge never needs the AST.
+                    def_body: None,
+                    local_fn_group: std::cell::OnceCell::new(),
                     ctx: self.ctx,
                 };
                 let mut parts = Vec::with_capacity(picked.len());
@@ -338,6 +377,112 @@ impl<'a> NativeModuleCtx<'a, '_, '_> {
             &child_scope,
             self.ctx,
         ))
+    }
+
+    /// Invoke a function VALUE — the native mirror of the interpreter's `Task::CallValue` apply
+    /// (AR.14.4.5): fetch the body from the closure table, rebuild the letrec base (every group
+    /// sibling reconstructed with this env, self LAST so the invoked value's identity wins), bind
+    /// through the same two-phase `bind_values` the named rung uses, and evaluate synchronously.
+    ///
+    /// The recursion verdict is the interpreter's own for a closure call: `push_call` receives
+    /// NO name from `CallValue` (a closure has no static name), so the overflow message is the
+    /// name-less variant — matched exactly, because the console is part of the answer.
+    fn call_value(
+        &self,
+        callee: &Value,
+        fcall: &crate::surface::FnCall<'_>,
+    ) -> crate::Result<Value> {
+        let ctx = self.ctx;
+        let Value::Function {
+            closure_id,
+            env,
+            self_name,
+            group,
+            bound_this,
+            ..
+        } = callee
+        else {
+            // `lookup_local_function` only returns `Value::Function` — but decline rather than
+            // panic if that contract ever moves: the interpreter is always the safe answer.
+            return Err(crate::Error::Unimplemented(
+                "a non-function value in call position — re-interpreting",
+            ));
+        };
+        // AF.5's extracted-method receiver threads through `push_call`'s `this` slot, which this
+        // mirror does not carry. Decline, loudly — a dropped receiver would bind `undef` where
+        // the interpreter binds the object.
+        if bound_this.is_some() {
+            return Err(crate::Error::Unimplemented(
+                "a bound-method callee in a compiled body — re-interpreting",
+            ));
+        }
+        let depth = ctx.live_calls.get() + 1;
+        if depth > super::MAX_CALL_DEPTH {
+            return Err(crate::Error::Eval(format!(
+                "Recursion detected calling function (over {} calls in flight)",
+                super::MAX_CALL_DEPTH
+            )));
+        }
+        ctx.live_calls.set(depth);
+        let _live = LiveCallTicket(ctx);
+        // The closure table holds `'a` borrows — copy them out and DROP the borrow before the
+        // body runs, because the body may itself register closures.
+        let (params, body) = {
+            let closures = ctx.closures.borrow();
+            closures[*closure_id]
+        };
+        // The letrec re-injection, verbatim from `Task::CallValue`: our CoW frames can't
+        // self-reference at capture time, so every call rebuilds NAME→value for the group and
+        // binds self LAST (the exact invoked value, its own group intact, wins over the group's
+        // reconstructed self-entry).
+        let needs_inject = self_name.is_some() || group.as_ref().is_some_and(|g| !g.is_empty());
+        let base = if needs_inject {
+            let mut b = env.child();
+            if let Some(g) = group {
+                for s in g.iter() {
+                    b.bind(
+                        std::rc::Rc::clone(&s.name),
+                        super::nested_fn_value(s, env, Some(g)),
+                    );
+                }
+            }
+            if let Some(n) = self_name {
+                b.bind(std::rc::Rc::clone(n), callee.clone());
+            }
+            b
+        } else {
+            env.clone()
+        };
+        let owned: Vec<(Option<std::rc::Rc<str>>, Value)> = fcall
+            .args
+            .iter()
+            .map(|(n, v)| (n.map(std::rc::Rc::from), v.clone()))
+            .collect();
+        let (slots, dollars, diagnostics) =
+            super::fill_slots(params, owned.iter().map(|(n, v)| (n.as_ref(), v.clone())));
+        for d in diagnostics {
+            ctx.warn(d);
+        }
+        // Defaults evaluate in the closure's lexical `base` (push_call's rule); the dynamic
+        // parent is this module's call scope, so the body reads the caller's reaching
+        // `$`-context, as interpreted.
+        let call = bind_values(
+            params,
+            &slots,
+            &dollars,
+            &self.call_scope.borrow(),
+            &base,
+            ctx,
+        )?;
+        super::eval_with_ctx(body, &call, ctx)
+    }
+
+    /// The flattened top-level statements of the resolved body — the exact list the interpreter's
+    /// `EvalNodes` hoists and collects defs over (bare `{}` blocks flattened inline, nothing
+    /// deeper). `None` when this ctx has no body AST (the child-thunk bridge).
+    fn body_stmts(&self) -> Option<Vec<&'a Stmt>> {
+        let body = self.def_body?;
+        Some(super::flatten_blocks(std::slice::from_ref(&body)))
     }
 
     /// The child indices a `children(i)` / `children([i:j])` / `children([a,b])` selects.
@@ -422,6 +567,11 @@ impl ModuleCtx for NativeModuleCtx<'_, '_, '_> {
         Ok(())
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "push_user_module's setup, mirrored deliberately and in its order — splitting \
+                  it would hide the step-for-step correspondence the comments walk"
+    )]
     fn call(&self, call: &ModuleCall<'_>) -> crate::Result<Geo> {
         let &ModuleCall {
             name,
@@ -472,7 +622,14 @@ impl ModuleCtx for NativeModuleCtx<'_, '_, '_> {
         // Args bind in the CALLER's scope; the body's lexical base is the callee's HOME island
         // global (or its captured defining scope, for a scope-local def).
         let home_global = base.unwrap_or_else(|| self.ctx.island_globals.borrow()[home].clone());
-        let mut call = bind_values(params, &slots, &dollars, &self.call_scope.borrow(), &home_global, self.ctx)?;
+        let mut call = bind_values(
+            params,
+            &slots,
+            &dollars,
+            &self.call_scope.borrow(),
+            &home_global,
+            self.ctx,
+        )?;
         super::geo_stack::warn_params_overwritten(params, body, self.ctx);
         let n_children = match children {
             Children::None => 0,
@@ -497,6 +654,10 @@ impl ModuleCtx for NativeModuleCtx<'_, '_, '_> {
             && let Some(_ticket) = ModuleDepthGuard::enter()
         {
             let _frame = ModuleStackGuard::push(name, self.ctx);
+            // Any local-module frame the callee registers (AR.14.4.5) lives exactly as long as
+            // its run — the truncate covers success, error AND the decline that unwinds through
+            // here to the outermost catch.
+            let _defs = LocalModulesGuard::mark(self.ctx);
             let inner = NativeModuleCtx {
                 args: bound_args(params, &call),
                 children: match children {
@@ -515,6 +676,8 @@ impl ModuleCtx for NativeModuleCtx<'_, '_, '_> {
                 },
                 call_scope: std::cell::RefCell::new(call),
                 home_island: home,
+                def_body: Some(body),
+                local_fn_group: std::cell::OnceCell::new(),
                 ctx: self.ctx,
             };
             return native(&inner);
@@ -569,13 +732,14 @@ impl ModuleCtx for NativeModuleCtx<'_, '_, '_> {
         let ctx = self.ctx;
         let name = fcall.name;
         // Rung 1 (AD.1): an inner-scope binding holding a function VALUE shadows a named function
-        // in call position. The emitter declines the statically-visible case (a param or local by
-        // this name); a runtime injection — an unknown named arg bound into the call frame — can
-        // still land one here, so DECLINE and let the whole call re-interpret.
-        if self.call_scope.borrow().lookup_local_function(name).is_some() {
-            return Err(crate::Error::Unimplemented(
-                "a function value shadows a compiled body's callee (AD.1) — re-interpreting",
-            ));
+        // in call position — a registered nested function (AR.14.4.5), or a parameter holding a
+        // closure. INVOKE it through the interpreter's own `CallValue` rule, which is also what
+        // makes registration position-correct for free: a call hoisted BEFORE the definition
+        // misses here (not bound yet) and falls through to the same outer resolution the
+        // interpreter's ladder takes.
+        let local = self.call_scope.borrow().lookup_local_function(name);
+        if let Some(callee) = local {
+            return self.call_value(&callee, fcall);
         }
         // Rung 2: the island's user functions — which SHADOW builtins, per OpenSCAD.
         if let Some(&((params, body), home)) = ctx.functions.get(name) {
@@ -604,7 +768,14 @@ impl ModuleCtx for NativeModuleCtx<'_, '_, '_> {
             // lexical base is the callee's home-island global, the dynamic parent this module's
             // call scope — so the body reads the caller's reaching `$`-context, as interpreted.
             let home_global = ctx.island_globals.borrow()[home].clone();
-            let call = bind_values(params, &slots, &dollars, &self.call_scope.borrow(), &home_global, ctx)?;
+            let call = bind_values(
+                params,
+                &slots,
+                &dollars,
+                &self.call_scope.borrow(),
+                &home_global,
+                ctx,
+            )?;
             return super::eval_with_ctx(body, &call, ctx);
         }
         // Rung 3: the file-value builtins resolve paths off the calling FILE's directory binding —
@@ -621,8 +792,7 @@ impl ModuleCtx for NativeModuleCtx<'_, '_, '_> {
             let vals: Vec<Value> = fcall.args.iter().map(|(_, v)| v.clone()).collect();
             return match super::builtins::context_impl(name) {
                 Some(super::builtins::ContextImpl::Named(f)) => {
-                    let names: Vec<Option<&str>> =
-                        fcall.args.iter().map(|(n, _)| *n).collect();
+                    let names: Vec<Option<&str>> = fcall.args.iter().map(|(n, _)| *n).collect();
                     Ok(f(&names, &vals, &mut ctx.messages.borrow_mut()))
                 }
                 Some(super::builtins::ContextImpl::Stream(f)) => {
@@ -648,6 +818,86 @@ impl ModuleCtx for NativeModuleCtx<'_, '_, '_> {
         Err(crate::Error::Unimplemented(
             "a value-typed callee in a compiled body — re-interpreting",
         ))
+    }
+
+    fn register_local_fn(
+        &self,
+        name: &'static str,
+        frame: &[(&'static str, Value)],
+    ) -> crate::Result<()> {
+        let Some(stmts) = self.body_stmts() else {
+            return Err(crate::Error::Unimplemented(
+                "a nested-fn registration with no body AST — re-interpreting",
+            ));
+        };
+        // The whole letrec group, minted ONCE per call on first registration — `hoist_scope`
+        // registers every fn-shape up front for the same reason: a sibling defined LATER in the
+        // body must resolve at invoke time, so each closure carries the full set.
+        let group = self.local_fn_group.get_or_init(|| {
+            let items = super::hoisted_bindings(&stmts);
+            super::register_fn_group(&items, self.ctx)
+        });
+        let Some(s) = group
+            .as_ref()
+            .and_then(|g| g.iter().find(|s| &*s.name == name))
+        else {
+            // The fingerprint gate proved the body ≡ the reference the emitter compiled, so a
+            // missing name is drift in the machinery itself — decline to the tier that cannot be
+            // wrong about it.
+            debug_assert!(
+                false,
+                "registered nested fn `{name}` not found in the resolved body"
+            );
+            return Err(crate::Error::Unimplemented(
+                "a nested fn missing from the resolved body — re-interpreting",
+            ));
+        };
+        // The closure's lexical env: the call frame (params, `$`-sets, earlier registrations)
+        // plus the locals hoisted BEFORE this definition — the emitter materializes exactly
+        // those, which reproduces `hoist_scope`'s capture-at-bind-position view under CoW.
+        let mut env = self.call_scope.borrow().child();
+        for (n, v) in frame {
+            env.bind(*n, v.clone());
+        }
+        let value = super::nested_fn_value(s, &env, group.as_ref());
+        self.call_scope.borrow_mut().bind(name, value);
+        Ok(())
+    }
+
+    fn register_local_modules(
+        &self,
+        names: &[&'static str],
+        frame: &[(&'static str, Value)],
+    ) -> crate::Result<()> {
+        let Some(stmts) = self.body_stmts() else {
+            return Err(crate::Error::Unimplemented(
+                "a local-module registration with no body AST — re-interpreting",
+            ));
+        };
+        let store = super::collect_module_defs(&stmts);
+        // The emitter compiled calls against ITS view of the body's defs; if the resolved body
+        // disagrees, binding either world is wrong — decline. Structurally unreachable while the
+        // fingerprint gate holds, which is why it is a debug_assert and not a silent path.
+        let matches = store.len() == names.len() && names.iter().all(|n| store.contains_key(*n));
+        if !matches {
+            debug_assert!(
+                false,
+                "registered local modules diverge from the resolved body"
+            );
+            return Err(crate::Error::Unimplemented(
+                "local-module names diverge from the resolved body — re-interpreting",
+            ));
+        }
+        // The captured defining scope, the interpreter's `(defs, hoisted.clone())`: the call
+        // frame chain plus the body's FULL hoisted locals — the emitter calls this after the
+        // whole prelude, so a def textually above a reassignment still sees the final value
+        // (whole-scope last-wins, cuboid's sharpest case).
+        let mut captured = self.call_scope.borrow().child();
+        for (n, v) in frame {
+            captured.bind(*n, v.clone());
+        }
+        self.ctx.local_modules.borrow_mut().push((store, captured));
+        Ok(())
     }
 }
 

@@ -718,9 +718,28 @@ impl Emitter<'_> {
             ExprKind::Vector(items) => self.vector(items),
             ExprKind::Call { callee, args } => {
                 let ExprKind::Ident(name) = &callee.kind else {
-                    // Name the SHAPE: "computed callee" alone says a call was not a plain
-                    // identifier, which is true of several unrelated things and does not schedule.
-                    return Err(format!("computed callee: {}", callee_shape(callee)));
+                    // AR.17 stage C — a COMPUTED callee (`f(a)(b)` curried application, `fns[i]`
+                    // indexing a table of function values) is a VALUE in call position, and
+                    // invoking a value is exactly the one capability `FnCtx` declares. The
+                    // interpreter's `CallValue` machinery runs it; a non-function value answers
+                    // `undef` there, which `call_value`'s decline reproduces by re-interpreting.
+                    // A function LITERAL in call position still declines below — the value must
+                    // come from somewhere the emitter can already express (a call, an index, a
+                    // parameter), not be MINTED here, which needs the closure table.
+                    if matches!(callee.kind, ExprKind::FunctionLiteral { .. }) {
+                        return Err(format!("computed callee: {}", callee_shape(callee)));
+                    }
+                    let cal = self.expr(callee)?;
+                    let mut pairs: Vec<String> = Vec::with_capacity(args.len());
+                    for a in args {
+                        let v = self.expr(&a.value)?;
+                        let n = match &a.name {
+                            Some(n) => format!("Some({:?})", &**n),
+                            None => "None".to_string(),
+                        };
+                        pairs.push(format!("({n}, {v})"));
+                    }
+                    return Ok(format!("fx.call_value(&{cal}, &[{}])?", pairs.join(", ")));
                 };
                 self.call(name, args)
             }
@@ -792,23 +811,53 @@ impl Emitter<'_> {
     /// A call by NAME. Resolution order is the AN.10 lesson made structural: a name that is
     /// lexically BOUND here (a parameter or `let` holding a function value) resolves to the
     /// BINDING at runtime — `is_vector`'s `all_nonzero` parameter shadowing the like-named
-    /// function is exactly this — and a compiled sibling call would recreate the AN.10 bug, so
-    /// it DECLINES. In a MODULE body everything else DISPATCHES (`fx.call_fn`, AR.14.4.3); in a
-    /// function native it stays builtins (names decorative, AR.3 — arguments bind positionally in
-    /// arg order) then generated siblings with the full compile-time binding rules.
+    /// function is exactly this. In a MODULE body everything DISPATCHES (`fx.call_fn`,
+    /// AR.14.4.3, whose rung 1 re-checks the call frame at runtime); in a FUNCTION native a
+    /// lexically-shadowed call emits the interpreter's rung-1 rule INLINE (AR.17 stage C): a
+    /// function VALUE in the binding is invoked through `fx.call_value`, anything else does not
+    /// shadow (AD.1/p8) and the static resolution — builtins (names decorative, AR.3) then
+    /// generated siblings with the full compile-time binding rules — runs instead. Sound because
+    /// a function native's lexical world is EXACTLY the bindings the emitter saw: params and its
+    /// own emitted `let`s, with the globals fenced off by `lookup_local_function`'s parentless
+    /// stop.
     fn call(&mut self, name: &str, args: &[Arg]) -> Result<String, String> {
-        if let Some((_, ident)) = self.locals.iter().rev().find(|(n, _)| n == name) {
-            // AN.10: the name is lexically bound here. A PARAMETER's binding lives in the CALL
-            // FRAME, where `call_fn`'s rung 1 re-checks it at runtime — a function VALUE declines,
-            // anything else does not shadow a callee (AD.1/p8, `generic_threaded_rod`'s `len`
-            // param over the builtin) — so in a module body a param-named call DISPATCHES. A
+        let shadow = self
+            .locals
+            .iter()
+            .rev()
+            .find(|(n, _)| n == name)
+            .map(|(_, ident)| ident.clone());
+        if let Some(ident) = &shadow {
+            // A MODULE body's param shadow is re-checked by `call_fn` rung 1 at runtime — but a
             // HOISTED local is a Rust `let` the frame never sees, so rung 1 cannot guard it:
             // decline. The `p_` prefix is the param marker (`fresh_ident` never produces it).
-            if !(self.in_module && ident.starts_with("p_")) {
+            if self.in_module && !ident.starts_with("p_") {
                 return Err(format!(
                     "call through the local binding `{name}` (the AN.10 shape) resolves at runtime"
                 ));
             }
+        }
+        if !self.in_module
+            && let Some(ident) = &shadow
+        {
+            let cal = self.fresh_ident("cal");
+            let mut pairs: Vec<String> = Vec::with_capacity(args.len());
+            for a in args {
+                let v = self.expr(&a.value)?;
+                let n = match &a.name {
+                    Some(n) => format!("Some({:?})", &**n),
+                    None => "None".to_string(),
+                };
+                pairs.push(format!("({n}, {v})"));
+            }
+            let static_call = self.static_call(name, args)?;
+            // Both branches evaluate their OWN argument emissions; exactly one branch runs, so
+            // side effects fire once either way.
+            return Ok(format!(
+                "{{ let {cal} = &{ident}; if matches!({cal}, rt::Value::Function {{ .. }}) {{ \
+                 fx.call_value({cal}, &[{}])? }} else {{ {static_call} }} }}",
+                pairs.join(", ")
+            ));
         }
         // AR.14.4.3 — a MODULE body's function calls dispatch at RUNTIME through
         // `ModuleCtx::call_fn`, the same AN.10-safe design module calls ride: the callee is
@@ -836,6 +885,13 @@ impl Emitter<'_> {
                 pairs.join(", ")
             ));
         }
+        self.static_call(name, args)
+    }
+
+    /// The STATIC half of a function native's call resolution: a pure builtin by direct `rt::bi`
+    /// call, or a generated sibling with the compile-time binding rules. What runs when no local
+    /// binding shadows the name — or when one does and holds a non-function at runtime (AD.1/p8).
+    fn static_call(&mut self, name: &str, args: &[Arg]) -> Result<String, String> {
         if fab_lang::is_builtin(name) {
             // The capability lives in the DECLARATION (AS.2/AS.4): only a `Pure` builtin has an
             // `rt::bi` function to call. A context builtin (argument names, the rand stream, the
@@ -2259,6 +2315,13 @@ pub const GENERATED_ENTRIES: &[&str] = &[
     // and 2, so slot 1 must come back as the callee's default (7) rather than undef.
     "_fab_poc_sib",
     "_fab_poc_hole",
+    // AR.17 stage C — first-class functions through `FnCtx`. `_fab_poc_callshadow` is the AN.10
+    // rung-1 rule inline: param `last` shadows the generated sibling of the same name, so a
+    // function VALUE passed there is INVOKED and anything else falls through to the sibling —
+    // both branches in one native, decided at runtime like the interpreter. `_fab_poc_curried2`
+    // is the computed callee: a table of function values indexed then applied.
+    "_fab_poc_callshadow",
+    "_fab_poc_curried2",
     // AR.17 stage A — the migration-closed batch: every HAND native whose emitted code resolves
     // its sibling calls inside this list (measured by `hand_native_closed_batch`, not argued).
     // What stays hand traces almost entirely to `is_vector`, whose only decline is the AN.10
@@ -2287,6 +2350,24 @@ pub const GENERATED_ENTRIES: &[&str] = &[
     "point2d",
     "affine3d_identity",
     "affine3d_translate",
+    // AR.17 stage C — the rung-1 conditional un-declined is_vector (the AN.10 poster child:
+    // param `all_nonzero` shadowing the like-named function now emits the interpreter's own
+    // rule inline), and its dependency cone rides. Still hand: select/_none_inside/_point_dist/
+    // _get_ear (need an `is_range` entry), vector_angle/affine3d_rot_from_to (`constrain`),
+    // apply/_vnf_centroid (`is_vnf`), _region_region_intersections (`list_wrap`), rot (the
+    // `_NO_ARG` sentinel no bootstrap bake can express).
+    "is_vector",
+    "all_nonzero",
+    "is_matrix",
+    "sum",
+    "unit",
+    "_apply",
+    "_bt_search",
+    "is_path",
+    "v_abs",
+    "v_theta",
+    "vector_axis",
+    "affine3d_rot_by_axis",
 ];
 
 /// Record a CALL by name: builtin or user dep. Deliberately IGNORES the lexical scope — a name
@@ -2689,9 +2770,25 @@ mod tests {
             "affine3d_identity",
             "affine3d_rot_from_to",
             "affine3d_translate",
+            // Stage C candidates — the former decliners, re-eligible as bands land: is_vector
+            // (AN.10, un-declined by the rung-1 conditional), and the callee/bake-blocked tail.
+            "is_vector",
+            "select",
+            "vector_angle",
+            "_vnf_centroid",
+            "vector_axis",
+            "apply",
+            "affine3d_rot_by_axis",
+            // NOT `rot`: its `_NO_ARG` consts_v is the heterogeneous sentinel no bootstrap bake
+            // can express, and one unexpressible constant refuses the whole batch.
+            "_region_region_intersections",
         ];
         let mut batch: Vec<&str> = super::GENERATED_ENTRIES.to_vec();
-        batch.extend(candidates);
+        for c in candidates {
+            if !batch.contains(&c) {
+                batch.push(c);
+            }
+        }
         loop {
             match super::generate_module(&batch) {
                 Ok(_) => break,
@@ -2789,7 +2886,13 @@ mod tests {
         /// pure table, so `rt::builtin` returned `Undef` with no error and no warning. Those six
         /// were not coverage, they were six silent wrong answers, and they now decline by name.
         /// See `CONTEXT_BUILTINS`.
-        const FLOOR: usize = 1066;
+        ///
+        /// 1105 at AR.17 stage C: computed callees (`f(a)(b)`, `fns[i](x)`) and AN.10
+        /// local-binding calls emit through `FnCtx` — invoking a VALUE is the one capability the
+        /// flip bought. The big remaining band is function LITERALS (107, mostly re-attributed
+        /// from behind the computed-callee declines), which need closure MINTING — the
+        /// def_body-for-expressions design, deliberately not improvised.
+        const FLOOR: usize = 1105;
 
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()

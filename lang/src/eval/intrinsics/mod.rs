@@ -768,6 +768,31 @@ pub(super) static REGISTRY: &[Entry] = &[
         builtins: &[],
         func: generated::_fab_poc_hole,
     },
+    // AR.17 stage C pocs. `_fab_poc_callshadow`'s param `last` shadows the generated sibling of
+    // the same name — the AN.10 poster shape (is_vector's `all_nonzero`), emitted as the
+    // interpreter's rung-1 rule inline: a function VALUE invokes through `fx.call_value`,
+    // anything else falls to the static sibling. `_fab_poc_curried2` is the computed callee —
+    // a table of function values indexed then applied, `fnliterals.scad`'s hashmap shape.
+    Entry {
+        name: "_fab_poc_callshadow",
+        reference: "function _fab_poc_callshadow(last, x) = last(x);",
+        consts: &[],
+        consts_v: &[],
+        deps: &["last"],
+        // `len` rides in transitively through the `last` sibling's body — the derived audit
+        // (AR.5a) folds a dep's builtins into the caller's guard set.
+        builtins: &["len"],
+        func: generated::_fab_poc_callshadow,
+    },
+    Entry {
+        name: "_fab_poc_curried2",
+        reference: "function _fab_poc_curried2(fs, i, x) = fs[i](x);",
+        consts: &[],
+        consts_v: &[],
+        deps: &[],
+        builtins: &[],
+        func: generated::_fab_poc_curried2,
+    },
     // ── O.5.2, the SHAPE band (utility.scad / lists.scad) ────────────────────────────────────────────────
     // The `is_consistent`/`_list_pattern`/`same_shape` bundle is ~4.7s of self time across the O.4 four
     // (every BOSL2 path/vector assert funnels through it), `num_defined`/`force_list` are its cheap leaf
@@ -891,7 +916,7 @@ pub(super) static REGISTRY: &[Entry] = &[
         consts_v: &[],
         deps: &["is_finite", "is_nan", "is_vector"],
         builtins: &["is_num", "abs", "is_list", "len", "is_undef", "norm"],
-        func: shape::all_nonzero,
+        func: generated::all_nonzero,
     },
     Entry {
         name: "is_vector",
@@ -904,7 +929,7 @@ pub(super) static REGISTRY: &[Entry] = &[
         consts_v: &[],
         deps: &["is_finite", "is_nan", "all_nonzero"],
         builtins: &["is_list", "len", "is_undef", "is_num", "norm", "abs"],
-        func: shape::is_vector,
+        func: generated::is_vector,
     },
     // `is_vector(A[0],n)` is a fixed 2-arg call, so the zero/norm and all_nonzero branches are unreachable
     // from is_matrix — the deps close over what interpreting THIS reference can run, not all of is_vector.
@@ -920,7 +945,7 @@ pub(super) static REGISTRY: &[Entry] = &[
         consts_v: &[],
         deps: &["is_vector", "is_finite", "is_nan", "is_consistent", "_list_pattern"],
         builtins: &["is_list", "len", "is_undef", "is_num"],
-        func: shape::is_matrix,
+        func: generated::is_matrix,
     },
     // ── O.5.3, the EARCUT band (geometry.scad) ───────────────────────────────────────────────────────────
     // BOSL2 triangulates every VNF polygon by ear-cutting IN THE INTERPRETER: `_tri_class` (the CW/CCW/
@@ -1034,7 +1059,7 @@ pub(super) static REGISTRY: &[Entry] = &[
             "_sum",
         ],
         builtins: &["is_list", "len", "is_undef", "is_num"],
-        func: math::sum,
+        func: generated::sum,
     },
     Entry {
         name: "unit",
@@ -1046,7 +1071,7 @@ pub(super) static REGISTRY: &[Entry] = &[
         consts_v: &[],
         deps: &["is_vector", "is_finite", "is_nan"],
         builtins: &["norm", "is_list", "len", "is_undef", "is_num"],
-        func: vectors::unit,
+        func: generated::unit,
     },
     Entry {
         name: "is_2d_transform",
@@ -1092,7 +1117,7 @@ pub(super) static REGISTRY: &[Entry] = &[
             "is_2d_transform",
         ],
         builtins: &["is_list", "len", "is_undef", "is_num", "concat", "str"],
-        func: affine::apply_transform,
+        func: generated::_apply,
     },
     Entry {
         name: "_bt_search",
@@ -1113,7 +1138,7 @@ pub(super) static REGISTRY: &[Entry] = &[
         consts_v: &[],
         deps: &["is_vector", "is_finite", "is_nan"],
         builtins: &["is_list", "len", "is_num", "norm", "concat", "is_undef"],
-        func: vectors::bt_search,
+        func: generated::_bt_search,
     },
     // `constrain` is a dep PIN, not an entry: only its `is_num` branch is reachable here (the argument is a
     // dot-product scalar or the undef the asserts then kill), but the pin covers the whole body.
@@ -1393,7 +1418,7 @@ pub(super) static REGISTRY: &[Entry] = &[
         builtins: &[
             "is_list", "len", "is_undef", "is_num", "search",
         ],
-        func: shape::is_path,
+        func: generated::is_path,
     },
     // The reference's lesser/[equal]/greater concat recursion flattens to an iterative in-order walk (a
     // 20k-element pre-sorted input would recurse 20k deep); partition subsets are strictly smaller (the
@@ -1433,7 +1458,7 @@ pub(super) static REGISTRY: &[Entry] = &[
         consts_v: &[],
         deps: &["is_vector", "is_finite", "is_nan"],
         builtins: &["abs", "is_list", "len", "is_undef", "is_num"],
-        func: vectors::v_abs,
+        func: generated::v_abs,
     },
     Entry {
         name: "v_theta",
@@ -1444,7 +1469,7 @@ pub(super) static REGISTRY: &[Entry] = &[
         consts_v: &[],
         deps: &["is_vector", "is_finite", "is_nan"],
         builtins: &["atan2", "is_list", "len", "is_undef", "is_num"],
-        func: vectors::v_theta,
+        func: generated::v_theta,
     },
     Entry {
         name: "point2d",
@@ -1504,7 +1529,7 @@ pub(super) static REGISTRY: &[Entry] = &[
         builtins: &[
             "is_list", "len", "is_undef", "is_num", "norm", "abs", "cross",
         ],
-        func: vectors::vector_axis,
+        func: generated::vector_axis,
     },
     // `approx(from,to)` on two 3-vectors runs the LIST branch → the idx/posmod knot rides in; the
     // vector_angle chain (same_shape/constrain-pin/is_matrix) too. UP/RIGHT guard because the native
@@ -1666,7 +1691,7 @@ pub(super) static REGISTRY: &[Entry] = &[
             // non-identity angle, which is every call that does any work. It was missing.
             "is_num", "is_list", "len", "is_undef", "norm", "sin", "cos", "is_bool", "abs",
         ],
-        func: affine::affine3d_rot_by_axis,
+        func: generated::affine3d_rot_by_axis,
     },
     // The band's finale: rot's own body is a dispatcher, but its CLOSURE is the whole affine family — every
     // lane composes already-landed natives (rot_from_to, rot_by_axis, the translate conjugation, the

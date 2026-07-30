@@ -862,20 +862,12 @@ pub(super) fn invoke_function_value(
         ..
     } = callee
     else {
-        // Callers hand this only function values — but decline rather than panic if that
-        // contract ever moves: the interpreter is always the safe answer.
-        return Err(crate::Error::Unimplemented(
-            "a non-function value in call position — re-interpreting",
-        ));
+        // The interpreter's own `CallValue` rule, exactly: calling a non-function is a SILENT
+        // `undef`, no warning. This must NOT be a decline — on the function-native path
+        // (`Task::Intrinsic`, AR.17) an `Unimplemented` propagates as a fatal error where the
+        // interpreter shrugs, which is a divergence a computed callee (`5(3)`) reaches directly.
+        return Ok(Value::Undef);
     };
-    // AF.5's extracted-method receiver threads through `push_call`'s `this` slot, which this
-    // mirror does not carry. Decline, loudly — a dropped receiver would bind `undef` where
-    // the interpreter binds the object.
-    if bound_this.is_some() {
-        return Err(crate::Error::Unimplemented(
-            "a bound-method callee in a compiled body — re-interpreting",
-        ));
-    }
     let depth = ctx.live_calls.get() + 1;
     if depth > super::MAX_CALL_DEPTH {
         return Err(crate::Error::Eval(format!(
@@ -917,10 +909,19 @@ pub(super) fn invoke_function_value(
         .iter()
         .map(|(n, v)| (n.map(std::rc::Rc::from), v.clone()))
         .collect();
-    let (slots, dollars, diagnostics) =
+    let (mut slots, dollars, diagnostics) =
         super::fill_slots(params, owned.iter().map(|(n, v)| (n.as_ref(), v.clone())));
     for d in diagnostics {
         ctx.warn(d);
+    }
+    // AF.5 — an extracted method carries its receiver, which fills a param NAMED `this` iff
+    // declared and not explicitly passed: `push_call`'s exact opt-in mechanic (an explicit arg
+    // wins, a this-less fn never sees it).
+    if let Some(receiver) = bound_this
+        && let Some(i) = params.iter().position(|p| &*p.name == "this")
+        && slots[i].is_none()
+    {
+        slots[i] = Some(Value::Object(std::rc::Rc::clone(receiver)));
     }
     // Defaults evaluate in the closure's lexical `base` (push_call's rule); the dynamic parent
     // is the invoke site's scope, so the body reads the caller's reaching `$`-context, as

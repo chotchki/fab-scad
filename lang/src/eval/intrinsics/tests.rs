@@ -4869,6 +4869,62 @@ fn a_terminal_assert_inside_compiled_children_halts_like_the_interpreter() {
     }
 }
 
+/// AR.17 stage C — first-class functions through the flipped ABI, both emitted shapes, proven at
+/// SOURCE level with the console as the witness (`echo` output must match tier-on vs tier-off).
+///
+/// `_fab_poc_callshadow` is the AN.10 rung-1 rule INLINE: its param `last` shadows the generated
+/// sibling of the same name, so a closure argument is INVOKED through `fx.call_value` and a
+/// non-function argument falls through to the sibling — `is_vector`'s `all_nonzero` shape, the
+/// single gate 12 of stage A's blocked migrations stood behind. `_fab_poc_curried2` is the
+/// computed callee (`fs[i](x)`). Both entries are proven ARMABLE against the exact sources the
+/// test evaluates (`resolve` — the fingerprint gate), so agreement is tier agreement, not two
+/// interpreters agreeing with each other.
+#[test]
+fn first_class_functions_run_through_the_flipped_abi() {
+    use crate::parser::{StmtKind, parse};
+    let last_ref = reference_of("last").expect("registered");
+    let shadow_ref = reference_of("_fab_poc_callshadow").expect("registered");
+    let curried_ref = reference_of("_fab_poc_curried2").expect("registered");
+    for name in ["_fab_poc_callshadow", "_fab_poc_curried2"] {
+        let r = reference_of(name).expect("registered");
+        let prog = parse(r).expect("parses");
+        let Some(StmtKind::FunctionDef { params, body, .. }) = prog.stmts.first().map(|s| &s.kind)
+        else {
+            panic!("expected a function def");
+        };
+        assert!(
+            resolve(name, params, body).is_some(),
+            "{name} must wire before agreement means anything"
+        );
+    }
+    let src = format!(
+        "{last_ref}\n{shadow_ref}\n{curried_ref}\n\
+         echo(a=_fab_poc_callshadow(function(v) v * 10, 4));\n\
+         echo(b=_fab_poc_callshadow([7, 8, 9], [1, 2]));\n\
+         echo(c=_fab_poc_curried2([function(y) y * 2, function(y) y + 9], 1, 5));\n\
+         echo(d=_fab_poc_curried2([1, 2], 0, 5));"
+    );
+    let run = |intrinsics: bool| {
+        let config = crate::Config {
+            intrinsics,
+            ..crate::Config::default()
+        };
+        let (_, msgs) =
+            crate::evaluate_geometry_with_base_config(&src, std::path::Path::new("."), &[], config)
+                .expect("renders");
+        format!("{msgs:?}")
+    };
+    let on = run(true);
+    let off = run(false);
+    assert_eq!(on, off, "first-class function shapes diverged across tiers");
+    // Pin the VALUES, not just agreement: the closure branch (40), the non-function fallthrough
+    // to the named `last` (2), the indexed closure (14), and the non-function callee's silent
+    // undef — both tiers answering wrong together would still agree.
+    for want in ["a = 40", "b = 2", "c = 14", "d = undef"] {
+        assert!(on.contains(want), "missing `{want}` in {on}");
+    }
+}
+
 #[test]
 fn a_sibling_call_with_a_hole_takes_the_callees_default() {
     let reference = reference_of("_fab_poc_hole").expect("registered");

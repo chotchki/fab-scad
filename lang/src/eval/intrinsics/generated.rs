@@ -36,6 +36,7 @@ use fab_lang::rt;
 /// the AR.10 depth fallback's target (see `native_rt`). Constants print via Rust's
 /// roundtrip-exact float formatting, so the interpreted bindings equal the bakes bit-for-bit.
 pub(super) const FALLBACK_SOURCES: &str = r#"
+RIGHT = [1.0, 0.0, 0.0];
 UP = [0.0, 0.0, 1.0];
 _EPSILON = 1e-9;
 function _fab_poc_sq(x) = x * x;
@@ -77,6 +78,8 @@ function idx(list, s=0, e=-1, step=1) =
 function _fab_poc_band4(s, tag="q\"b\\c\nd") = [s == tag, str("x=", s, tag), len(tag), "αβ"];
 function _fab_poc_sib(a, b=7, c=1) = [a, b, c];
 function _fab_poc_hole(x) = _fab_poc_sib(x, c=3);
+function _fab_poc_callshadow(last, x) = last(x);
+function _fab_poc_curried2(fs, i, x) = fs[i](x);
 function _is_liststr(s) = is_list(s) || is_str(s);
 function point3d(p, fill=0) = assert(is_list(p)) [for (i=[0:2]) (p[i]==undef)? fill : p[i]];
 function _list_pattern(list) =
@@ -178,6 +181,109 @@ function affine3d_translate(v=[0,0,0]) =
         [0, 0, 1, v.z],
         [0 ,0, 0,   1]
     ];
+function is_vector(v, length, zero, all_nonzero=false, eps=_EPSILON) =
+    is_list(v) && len(v)>0 && []==[for(vi=v) if(!is_finite(vi)) 0]
+    && (is_undef(length) || (assert(is_num(length))len(v)==length))
+    && (is_undef(zero) || ((norm(v) >= eps) == !zero))
+    && (!all_nonzero || all_nonzero(v)) ;
+function all_nonzero(x, eps=_EPSILON) =
+    is_finite(x)? abs(x)>eps :
+    is_vector(x) && [for (xx=x) if(abs(xx)<eps) 1] == [];
+function is_matrix(A,m,n,square=false) =
+   is_list(A)
+   && (( is_undef(m) && len(A) ) || len(A)==m)
+   && (!square || len(A) == len(A[0]))
+   && is_vector(A[0],n)
+   && is_consistent(A);
+function sum(v, dflt=0) =
+    v==[]? dflt :
+    assert(is_consistent(v), "\nInput to sum is non-numeric or inconsistent.")
+    is_finite(v[0]) || is_vector(v[0]) ? [for(i=v) 1]*v :
+    _sum(v,v[0]*0);
+function unit(v, error=[[["ASSERT"]]]) =
+    assert(is_vector(v), "\nInvalid vector.")
+    norm(v)<_EPSILON? (error==[[["ASSERT"]]]? assert(norm(v)>=_EPSILON,"\nCannot normalize a zero vector.") : error) :
+    v/norm(v);
+function _apply(transform,points) =
+    assert(is_matrix(transform),"Invalid transformation matrix")
+    assert(is_matrix(points),"Invalid points list")
+    let(
+        tdim = len(transform[0])-1,
+        datadim = len(points[0])
+    )
+    assert(len(transform)==tdim || len(transform)-1==tdim, "transform matrix height not compatible with width")
+    assert(datadim==2 || datadim==3,"Data must be 2D or 3D")
+    let(
+        scale = len(transform)==tdim ? 1 : transform[tdim][tdim],
+        matrix = [for(i=[0:1:tdim]) [for(j=[0:1:datadim-1]) transform[j][i]]] / scale
+    )
+    tdim==datadim ? [for(p=points) concat(p,1)] * matrix
+  : tdim == 3 && datadim == 2 ?
+            assert(is_2d_transform(transform), str("Transforms is 3D and acts on Z, but points are 2D"))
+            [for(p=points) concat(p,[0,1])]*matrix
+  : assert(false, str("Unsupported combination: ",len(transform),"x",len(transform[0])," transform (dimension ",tdim,
+                          "), data of dimension ",datadim));
+function _bt_search(query, r, points, tree) =
+    assert( is_list(tree)
+            && (   ( len(tree)==1 && is_list(tree[0]) )
+                || ( len(tree)==4 && is_num(tree[0]) && is_num(tree[1]) ) ),
+            "\nThe tree is invalid.")
+    len(tree)==1
+    ?   assert( tree[0]==[] || is_vector(tree[0]), "\nThe tree is invalid." )
+        [for(i=tree[0]) if(norm(points[i]-query)<=r) i ]
+    :   norm(query-points[tree[0]]) > r+tree[1] ? [] :
+        concat(
+            [ if(norm(query-points[tree[0]])<=r) tree[0] ],
+            _bt_search(query, r, points, tree[2]),
+            _bt_search(query, r, points, tree[3]) ) ;
+function is_path(list, dim=[2,3], fast=false) =
+    fast
+    ?   is_list(list) && is_vector(list[0])
+    :   is_matrix(list)
+        && len(list)>1
+        && len(list[0])>0
+        && (is_undef(dim) || in_list(len(list[0]), force_list(dim)));
+function v_abs(v) =
+    assert( is_vector(v), "\nInvalid vector." )
+    [for (x=v) abs(x)];
+function v_theta(v) =
+    assert( is_vector(v,2) || is_vector(v,3) , "\nInvalid vector.")
+    atan2(v.y,v.x);
+function vector_axis(v1,v2=undef,v3=undef) =
+    is_vector(v3)
+    ?   assert(is_consistent([v3,v2,v1]), "\nBad arguments.")
+        vector_axis(v1-v2, v3-v2)
+    :   assert( is_undef(v3), "\nBad arguments.")
+        is_undef(v2)
+        ?   assert( is_list(v1), "\nBad arguments.")
+            len(v1) == 2
+            ?   vector_axis(v1[0],v1[1])
+            :   vector_axis(v1[0],v1[1],v1[2])
+        :   assert( is_vector(v1,zero=false) && is_vector(v2,zero=false) && is_consistent([v1,v2])
+                    , "\nBad arguments.")
+            let(
+              eps = 1e-6,
+              w1 = point3d(v1/norm(v1)),
+              w2 = point3d(v2/norm(v2)),
+              w3 = (norm(w1-w2) > eps && norm(w1+w2) > eps) ? w2
+                   : (norm(v_abs(w2)-UP) > eps)? UP
+                   : RIGHT
+            ) unit(cross(w1,w3));
+function affine3d_rot_by_axis(u=UP, ang=0) =
+    assert(is_finite(ang))
+    assert(is_vector(u,3))
+    approx(ang,0)? affine3d_identity() :
+    let(
+        u = unit(u),
+        c = cos(ang),
+        c2 = 1-c,
+        s = sin(ang)
+    ) [
+        [u.x*u.x*c2+c    , u.x*u.y*c2-u.z*s, u.x*u.z*c2+u.y*s, 0],
+        [u.y*u.x*c2+u.z*s, u.y*u.y*c2+c    , u.y*u.z*c2-u.x*s, 0],
+        [u.z*u.x*c2-u.y*s, u.z*u.y*c2+u.x*s, u.z*u.z*c2+c    , 0],
+        [               0,                0,                0, 1]
+    ];
 "#;
 
 /// The registry's declared surface (AR.14.5) — what `native_surface()` derived at every
@@ -189,6 +295,8 @@ pub(super) static SURFACE: &[rt::Decl] = &[
     rt::Decl { name: "_fab_poc_band2", kind: rt::Kind::Function, ret: rt::Domain::Num, names_bind: true, params: &[rt::Param { name: "v", domain: rt::Domain::List, required: true }, rt::Param { name: "i", domain: rt::Domain::Num, required: false }] },
     rt::Decl { name: "_fab_poc_band3", kind: rt::Kind::Function, ret: rt::Domain::Num, names_bind: true, params: &[rt::Param { name: "n", domain: rt::Domain::Num, required: true }] },
     rt::Decl { name: "_fab_poc_band4", kind: rt::Kind::Function, ret: rt::Domain::Num, names_bind: true, params: &[rt::Param { name: "s", domain: rt::Domain::Num, required: true }, rt::Param { name: "tag", domain: rt::Domain::List, required: false }] },
+    rt::Decl { name: "_fab_poc_callshadow", kind: rt::Kind::Function, ret: rt::Domain::Num, names_bind: true, params: &[rt::Param { name: "last", domain: rt::Domain::Num, required: true }, rt::Param { name: "x", domain: rt::Domain::Num, required: true }] },
+    rt::Decl { name: "_fab_poc_curried2", kind: rt::Kind::Function, ret: rt::Domain::Num, names_bind: true, params: &[rt::Param { name: "fs", domain: rt::Domain::List, required: true }, rt::Param { name: "i", domain: rt::Domain::Num, required: true }, rt::Param { name: "x", domain: rt::Domain::Num, required: true }] },
     rt::Decl { name: "_fab_poc_hole", kind: rt::Kind::Function, ret: rt::Domain::Num, names_bind: true, params: &[rt::Param { name: "x", domain: rt::Domain::Num, required: true }] },
     rt::Decl { name: "_fab_poc_isup", kind: rt::Kind::Function, ret: rt::Domain::Num, names_bind: true, params: &[rt::Param { name: "v", domain: rt::Domain::Num, required: true }] },
     rt::Decl { name: "_fab_poc_near0", kind: rt::Kind::Function, ret: rt::Domain::Num, names_bind: true, params: &[rt::Param { name: "x", domain: rt::Domain::Num, required: true }] },
@@ -509,6 +617,37 @@ pub(super) fn _fab_poc_hole(fx: &dyn rt::FnCtx, args: &[rt::Value]) -> rt::Resul
     };
     let p_x = args.first().cloned().unwrap_or(rt::Value::Undef);
     let out = _fab_poc_sib(fx, &[p_x.clone(), rt::Value::Num(f64::from_bits(0x401c000000000000_u64)), rt::Value::Num(f64::from_bits(0x4008000000000000_u64))])?;
+    Ok(out)
+}
+
+/// Generated native for `_fab_poc_callshadow` — semantics route through the interpreter's own value
+/// algebra (`ops::`/`builtins::`), bit-identical to the interpreted reference by construction.
+pub(super) fn _fab_poc_callshadow(fx: &dyn rt::FnCtx, args: &[rt::Value]) -> rt::Result<rt::Value> {
+    let _ = fx; // AR.17: the closure capability — unused until a body reaches one
+    // AR.10: past the depth budget, DECLINE to the pure interpreter — explicit stack,
+    // same proven semantics; recursion cannot ride the Rust stack unbounded.
+    let Some(_depth) = rt::DepthGuard::enter() else {
+        return rt::run_interpreted(FALLBACK_SOURCES, "_fab_poc_callshadow", args);
+    };
+    let p_last = args.first().cloned().unwrap_or(rt::Value::Undef);
+    let p_x = args.get(1).cloned().unwrap_or(rt::Value::Undef);
+    let out = { let l0_cal = &p_last; if matches!(l0_cal, rt::Value::Function { .. }) { fx.call_value(l0_cal, &[(None, p_x.clone())])? } else { last(fx, &[p_x.clone()])? } };
+    Ok(out)
+}
+
+/// Generated native for `_fab_poc_curried2` — semantics route through the interpreter's own value
+/// algebra (`ops::`/`builtins::`), bit-identical to the interpreted reference by construction.
+pub(super) fn _fab_poc_curried2(fx: &dyn rt::FnCtx, args: &[rt::Value]) -> rt::Result<rt::Value> {
+    let _ = fx; // AR.17: the closure capability — unused until a body reaches one
+    // AR.10: past the depth budget, DECLINE to the pure interpreter — explicit stack,
+    // same proven semantics; recursion cannot ride the Rust stack unbounded.
+    let Some(_depth) = rt::DepthGuard::enter() else {
+        return rt::run_interpreted(FALLBACK_SOURCES, "_fab_poc_curried2", args);
+    };
+    let p_fs = args.first().cloned().unwrap_or(rt::Value::Undef);
+    let p_i = args.get(1).cloned().unwrap_or(rt::Value::Undef);
+    let p_x = args.get(2).cloned().unwrap_or(rt::Value::Undef);
+    let out = fx.call_value(&rt::index(p_fs.clone(), &p_i.clone()), &[(None, p_x.clone())])?;
     Ok(out)
 }
 
@@ -835,6 +974,203 @@ pub(super) fn affine3d_translate(fx: &dyn rt::FnCtx, args: &[rt::Value]) -> rt::
     let p_v = args.first().cloned().unwrap_or_else(|| rt::build_vector(vec![rt::Value::Num(f64::from_bits(0x0_u64)), rt::Value::Num(f64::from_bits(0x0_u64)), rt::Value::Num(f64::from_bits(0x0_u64))]));
     let out = { if !(rt::bi::is_list(&[p_v.clone()])).is_truthy() { return Err(rt::bosl_assert("generated")); } { let l2_v = { let mut l0_acc: Vec<rt::Value> = Vec::new(); for l1_i in rt::iter_values_native(&rt::build_range(&rt::Value::Num(f64::from_bits(0x0_u64)), &rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64)), &rt::Value::Num(f64::from_bits(0x4000000000000000_u64)))) { l0_acc.push(default(fx, &[rt::index(p_v.clone(), &l1_i.clone()), rt::Value::Num(f64::from_bits(0x0_u64))])?);
         } rt::build_vector(l0_acc) }; rt::build_vector(vec![rt::build_vector(vec![rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64)), rt::Value::Num(f64::from_bits(0x0_u64)), rt::Value::Num(f64::from_bits(0x0_u64)), rt::member(l2_v.clone(), "x")]), rt::build_vector(vec![rt::Value::Num(f64::from_bits(0x0_u64)), rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64)), rt::Value::Num(f64::from_bits(0x0_u64)), rt::member(l2_v.clone(), "y")]), rt::build_vector(vec![rt::Value::Num(f64::from_bits(0x0_u64)), rt::Value::Num(f64::from_bits(0x0_u64)), rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64)), rt::member(l2_v.clone(), "z")]), rt::build_vector(vec![rt::Value::Num(f64::from_bits(0x0_u64)), rt::Value::Num(f64::from_bits(0x0_u64)), rt::Value::Num(f64::from_bits(0x0_u64)), rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64))])]) } };
+    Ok(out)
+}
+
+/// Generated native for `is_vector` — semantics route through the interpreter's own value
+/// algebra (`ops::`/`builtins::`), bit-identical to the interpreted reference by construction.
+pub(super) fn is_vector(fx: &dyn rt::FnCtx, args: &[rt::Value]) -> rt::Result<rt::Value> {
+    let _ = fx; // AR.17: the closure capability — unused until a body reaches one
+    // AR.10: past the depth budget, DECLINE to the pure interpreter — explicit stack,
+    // same proven semantics; recursion cannot ride the Rust stack unbounded.
+    let Some(_depth) = rt::DepthGuard::enter() else {
+        return rt::run_interpreted(FALLBACK_SOURCES, "is_vector", args);
+    };
+    let p_v = args.first().cloned().unwrap_or(rt::Value::Undef);
+    let p_length = args.get(1).cloned().unwrap_or(rt::Value::Undef);
+    let p_zero = args.get(2).cloned().unwrap_or(rt::Value::Undef);
+    let p_all_nonzero = args.get(3).cloned().unwrap_or_else(|| rt::Value::Bool(false));
+    let p_eps = args.get(4).cloned().unwrap_or_else(|| rt::Value::Num(f64::from_bits(0x3e112e0be826d695_u64)));
+    let out = rt::Value::Bool(rt::Value::Bool(rt::Value::Bool(rt::Value::Bool(rt::Value::Bool(rt::bi::is_list(&[p_v.clone()]).is_truthy() && rt::apply_binary(rt::BinOp::Gt, rt::bi::len(&[p_v.clone()]), rt::Value::Num(f64::from_bits(0x0_u64))).is_truthy()).is_truthy() && rt::apply_binary(rt::BinOp::Eq, rt::build_vector(vec![]), { let mut l0_acc: Vec<rt::Value> = Vec::new(); for l1_vi in rt::iter_values_native(&p_v.clone()) { if (rt::apply_unary(rt::UnOp::Not, is_finite(fx, &[l1_vi.clone()])?)).is_truthy() { l0_acc.push(rt::Value::Num(f64::from_bits(0x0_u64)));
+         } } rt::build_vector(l0_acc) }).is_truthy()).is_truthy() && rt::Value::Bool(rt::bi::is_undef(&[p_length.clone()]).is_truthy() || { if !(rt::bi::is_num(&[p_length.clone()])).is_truthy() { return Err(rt::bosl_assert("generated")); } rt::apply_binary(rt::BinOp::Eq, rt::bi::len(&[p_v.clone()]), p_length.clone()) }.is_truthy()).is_truthy()).is_truthy() && rt::Value::Bool(rt::bi::is_undef(&[p_zero.clone()]).is_truthy() || rt::apply_binary(rt::BinOp::Eq, rt::apply_binary(rt::BinOp::Ge, rt::bi::norm(&[p_v.clone()]), p_eps.clone()), rt::apply_unary(rt::UnOp::Not, p_zero.clone())).is_truthy()).is_truthy()).is_truthy() && rt::Value::Bool(rt::apply_unary(rt::UnOp::Not, p_all_nonzero.clone()).is_truthy() || { let l2_cal = &p_all_nonzero; if matches!(l2_cal, rt::Value::Function { .. }) { fx.call_value(l2_cal, &[(None, p_v.clone())])? } else { all_nonzero(fx, &[p_v.clone()])? } }.is_truthy()).is_truthy());
+    Ok(out)
+}
+
+/// Generated native for `all_nonzero` — semantics route through the interpreter's own value
+/// algebra (`ops::`/`builtins::`), bit-identical to the interpreted reference by construction.
+pub(super) fn all_nonzero(fx: &dyn rt::FnCtx, args: &[rt::Value]) -> rt::Result<rt::Value> {
+    let _ = fx; // AR.17: the closure capability — unused until a body reaches one
+    // AR.10: past the depth budget, DECLINE to the pure interpreter — explicit stack,
+    // same proven semantics; recursion cannot ride the Rust stack unbounded.
+    let Some(_depth) = rt::DepthGuard::enter() else {
+        return rt::run_interpreted(FALLBACK_SOURCES, "all_nonzero", args);
+    };
+    let p_x = args.first().cloned().unwrap_or(rt::Value::Undef);
+    let p_eps = args.get(1).cloned().unwrap_or_else(|| rt::Value::Num(f64::from_bits(0x3e112e0be826d695_u64)));
+    let out = if is_finite(fx, &[p_x.clone()])?.is_truthy() { rt::apply_binary(rt::BinOp::Gt, rt::bi::abs(&[p_x.clone()]), p_eps.clone()) } else { rt::Value::Bool(is_vector(fx, &[p_x.clone()])?.is_truthy() && rt::apply_binary(rt::BinOp::Eq, { let mut l0_acc: Vec<rt::Value> = Vec::new(); for l1_xx in rt::iter_values_native(&p_x.clone()) { if (rt::apply_binary(rt::BinOp::Lt, rt::bi::abs(&[l1_xx.clone()]), p_eps.clone())).is_truthy() { l0_acc.push(rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64)));
+         } } rt::build_vector(l0_acc) }, rt::build_vector(vec![])).is_truthy()) };
+    Ok(out)
+}
+
+/// Generated native for `is_matrix` — semantics route through the interpreter's own value
+/// algebra (`ops::`/`builtins::`), bit-identical to the interpreted reference by construction.
+pub(super) fn is_matrix(fx: &dyn rt::FnCtx, args: &[rt::Value]) -> rt::Result<rt::Value> {
+    let _ = fx; // AR.17: the closure capability — unused until a body reaches one
+    // AR.10: past the depth budget, DECLINE to the pure interpreter — explicit stack,
+    // same proven semantics; recursion cannot ride the Rust stack unbounded.
+    let Some(_depth) = rt::DepthGuard::enter() else {
+        return rt::run_interpreted(FALLBACK_SOURCES, "is_matrix", args);
+    };
+    let p_A = args.first().cloned().unwrap_or(rt::Value::Undef);
+    let p_m = args.get(1).cloned().unwrap_or(rt::Value::Undef);
+    let p_n = args.get(2).cloned().unwrap_or(rt::Value::Undef);
+    let p_square = args.get(3).cloned().unwrap_or_else(|| rt::Value::Bool(false));
+    let out = rt::Value::Bool(rt::Value::Bool(rt::Value::Bool(rt::Value::Bool(rt::bi::is_list(&[p_A.clone()]).is_truthy() && rt::Value::Bool(rt::Value::Bool(rt::bi::is_undef(&[p_m.clone()]).is_truthy() && rt::bi::len(&[p_A.clone()]).is_truthy()).is_truthy() || rt::apply_binary(rt::BinOp::Eq, rt::bi::len(&[p_A.clone()]), p_m.clone()).is_truthy()).is_truthy()).is_truthy() && rt::Value::Bool(rt::apply_unary(rt::UnOp::Not, p_square.clone()).is_truthy() || rt::apply_binary(rt::BinOp::Eq, rt::bi::len(&[p_A.clone()]), rt::bi::len(&[rt::index(p_A.clone(), &rt::Value::Num(f64::from_bits(0x0_u64)))])).is_truthy()).is_truthy()).is_truthy() && is_vector(fx, &[rt::index(p_A.clone(), &rt::Value::Num(f64::from_bits(0x0_u64))), p_n.clone()])?.is_truthy()).is_truthy() && is_consistent(fx, &[p_A.clone()])?.is_truthy());
+    Ok(out)
+}
+
+/// Generated native for `sum` — semantics route through the interpreter's own value
+/// algebra (`ops::`/`builtins::`), bit-identical to the interpreted reference by construction.
+pub(super) fn sum(fx: &dyn rt::FnCtx, args: &[rt::Value]) -> rt::Result<rt::Value> {
+    let _ = fx; // AR.17: the closure capability — unused until a body reaches one
+    // AR.10: past the depth budget, DECLINE to the pure interpreter — explicit stack,
+    // same proven semantics; recursion cannot ride the Rust stack unbounded.
+    let Some(_depth) = rt::DepthGuard::enter() else {
+        return rt::run_interpreted(FALLBACK_SOURCES, "sum", args);
+    };
+    let p_v = args.first().cloned().unwrap_or(rt::Value::Undef);
+    let p_dflt = args.get(1).cloned().unwrap_or_else(|| rt::Value::Num(f64::from_bits(0x0_u64)));
+    let out = if rt::apply_binary(rt::BinOp::Eq, p_v.clone(), rt::build_vector(vec![])).is_truthy() { p_dflt.clone() } else { { if !(is_consistent(fx, &[p_v.clone()])?).is_truthy() { return Err(rt::bosl_assert("generated")); } if rt::Value::Bool(is_finite(fx, &[rt::index(p_v.clone(), &rt::Value::Num(f64::from_bits(0x0_u64)))])?.is_truthy() || is_vector(fx, &[rt::index(p_v.clone(), &rt::Value::Num(f64::from_bits(0x0_u64)))])?.is_truthy()).is_truthy() { rt::apply_binary(rt::BinOp::Mul, { let mut l0_acc: Vec<rt::Value> = Vec::new(); for l1_i in rt::iter_values_native(&p_v.clone()) { l0_acc.push(rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64)));
+        } rt::build_vector(l0_acc) }, p_v.clone()) } else { _sum(fx, &[p_v.clone(), rt::apply_binary(rt::BinOp::Mul, rt::index(p_v.clone(), &rt::Value::Num(f64::from_bits(0x0_u64))), rt::Value::Num(f64::from_bits(0x0_u64)))])? } } };
+    Ok(out)
+}
+
+/// Generated native for `unit` — semantics route through the interpreter's own value
+/// algebra (`ops::`/`builtins::`), bit-identical to the interpreted reference by construction.
+pub(super) fn unit(fx: &dyn rt::FnCtx, args: &[rt::Value]) -> rt::Result<rt::Value> {
+    let _ = fx; // AR.17: the closure capability — unused until a body reaches one
+    // AR.10: past the depth budget, DECLINE to the pure interpreter — explicit stack,
+    // same proven semantics; recursion cannot ride the Rust stack unbounded.
+    let Some(_depth) = rt::DepthGuard::enter() else {
+        return rt::run_interpreted(FALLBACK_SOURCES, "unit", args);
+    };
+    let p_v = args.first().cloned().unwrap_or(rt::Value::Undef);
+    let p_error = args.get(1).cloned().unwrap_or_else(|| rt::build_vector(vec![rt::build_vector(vec![rt::build_vector(vec![rt::Value::string("ASSERT")])])]));
+    let out = { if !(is_vector(fx, &[p_v.clone()])?).is_truthy() { return Err(rt::bosl_assert("generated")); } if rt::apply_binary(rt::BinOp::Lt, rt::bi::norm(&[p_v.clone()]), rt::Value::Num(f64::from_bits(0x3e112e0be826d695_u64))).is_truthy() { if rt::apply_binary(rt::BinOp::Eq, p_error.clone(), rt::build_vector(vec![rt::build_vector(vec![rt::build_vector(vec![rt::Value::string("ASSERT")])])])).is_truthy() { { if !(rt::apply_binary(rt::BinOp::Ge, rt::bi::norm(&[p_v.clone()]), rt::Value::Num(f64::from_bits(0x3e112e0be826d695_u64)))).is_truthy() { return Err(rt::bosl_assert("generated")); } rt::Value::Undef } } else { p_error.clone() } } else { rt::apply_binary(rt::BinOp::Div, p_v.clone(), rt::bi::norm(&[p_v.clone()])) } };
+    Ok(out)
+}
+
+/// Generated native for `_apply` — semantics route through the interpreter's own value
+/// algebra (`ops::`/`builtins::`), bit-identical to the interpreted reference by construction.
+pub(super) fn _apply(fx: &dyn rt::FnCtx, args: &[rt::Value]) -> rt::Result<rt::Value> {
+    let _ = fx; // AR.17: the closure capability — unused until a body reaches one
+    // AR.10: past the depth budget, DECLINE to the pure interpreter — explicit stack,
+    // same proven semantics; recursion cannot ride the Rust stack unbounded.
+    let Some(_depth) = rt::DepthGuard::enter() else {
+        return rt::run_interpreted(FALLBACK_SOURCES, "_apply", args);
+    };
+    let p_transform = args.first().cloned().unwrap_or(rt::Value::Undef);
+    let p_points = args.get(1).cloned().unwrap_or(rt::Value::Undef);
+    let out = { if !(is_matrix(fx, &[p_transform.clone()])?).is_truthy() { return Err(rt::bosl_assert("generated")); } { if !(is_matrix(fx, &[p_points.clone()])?).is_truthy() { return Err(rt::bosl_assert("generated")); } { let l0_tdim = rt::apply_binary(rt::BinOp::Sub, rt::bi::len(&[rt::index(p_transform.clone(), &rt::Value::Num(f64::from_bits(0x0_u64)))]), rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64))); let l1_datadim = rt::bi::len(&[rt::index(p_points.clone(), &rt::Value::Num(f64::from_bits(0x0_u64)))]); { if !(rt::Value::Bool(rt::apply_binary(rt::BinOp::Eq, rt::bi::len(&[p_transform.clone()]), l0_tdim.clone()).is_truthy() || rt::apply_binary(rt::BinOp::Eq, rt::apply_binary(rt::BinOp::Sub, rt::bi::len(&[p_transform.clone()]), rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64))), l0_tdim.clone()).is_truthy())).is_truthy() { return Err(rt::bosl_assert("generated")); } { if !(rt::Value::Bool(rt::apply_binary(rt::BinOp::Eq, l1_datadim.clone(), rt::Value::Num(f64::from_bits(0x4000000000000000_u64))).is_truthy() || rt::apply_binary(rt::BinOp::Eq, l1_datadim.clone(), rt::Value::Num(f64::from_bits(0x4008000000000000_u64))).is_truthy())).is_truthy() { return Err(rt::bosl_assert("generated")); } { let l2_scale = if rt::apply_binary(rt::BinOp::Eq, rt::bi::len(&[p_transform.clone()]), l0_tdim.clone()).is_truthy() { rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64)) } else { rt::index(rt::index(p_transform.clone(), &l0_tdim.clone()), &l0_tdim.clone()) }; let l7_matrix = rt::apply_binary(rt::BinOp::Div, { let mut l3_acc: Vec<rt::Value> = Vec::new(); for l4_i in rt::iter_values_native(&rt::build_range(&rt::Value::Num(f64::from_bits(0x0_u64)), &rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64)), &l0_tdim.clone())) { l3_acc.push({ let mut l5_acc: Vec<rt::Value> = Vec::new(); for l6_j in rt::iter_values_native(&rt::build_range(&rt::Value::Num(f64::from_bits(0x0_u64)), &rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64)), &rt::apply_binary(rt::BinOp::Sub, l1_datadim.clone(), rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64))))) { l5_acc.push(rt::index(rt::index(p_transform.clone(), &l6_j.clone()), &l4_i.clone()));
+        } rt::build_vector(l5_acc) });
+        } rt::build_vector(l3_acc) }, l2_scale.clone()); if rt::apply_binary(rt::BinOp::Eq, l0_tdim.clone(), l1_datadim.clone()).is_truthy() { rt::apply_binary(rt::BinOp::Mul, { let mut l8_acc: Vec<rt::Value> = Vec::new(); for l9_p in rt::iter_values_native(&p_points.clone()) { l8_acc.push(rt::bi::concat(&[l9_p.clone(), rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64))]));
+        } rt::build_vector(l8_acc) }, l7_matrix.clone()) } else { if rt::Value::Bool(rt::apply_binary(rt::BinOp::Eq, l0_tdim.clone(), rt::Value::Num(f64::from_bits(0x4008000000000000_u64))).is_truthy() && rt::apply_binary(rt::BinOp::Eq, l1_datadim.clone(), rt::Value::Num(f64::from_bits(0x4000000000000000_u64))).is_truthy()).is_truthy() { { if !(is_2d_transform(fx, &[p_transform.clone()])?).is_truthy() { return Err(rt::bosl_assert("generated")); } rt::apply_binary(rt::BinOp::Mul, { let mut l10_acc: Vec<rt::Value> = Vec::new(); for l11_p in rt::iter_values_native(&p_points.clone()) { l10_acc.push(rt::bi::concat(&[l11_p.clone(), rt::build_vector(vec![rt::Value::Num(f64::from_bits(0x0_u64)), rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64))])]));
+        } rt::build_vector(l10_acc) }, l7_matrix.clone()) } } else { { if !(rt::Value::Bool(false)).is_truthy() { return Err(rt::bosl_assert("generated")); } rt::Value::Undef } } } } } } } } };
+    Ok(out)
+}
+
+/// Generated native for `_bt_search` — semantics route through the interpreter's own value
+/// algebra (`ops::`/`builtins::`), bit-identical to the interpreted reference by construction.
+pub(super) fn _bt_search(fx: &dyn rt::FnCtx, args: &[rt::Value]) -> rt::Result<rt::Value> {
+    let _ = fx; // AR.17: the closure capability — unused until a body reaches one
+    // AR.10: past the depth budget, DECLINE to the pure interpreter — explicit stack,
+    // same proven semantics; recursion cannot ride the Rust stack unbounded.
+    let Some(_depth) = rt::DepthGuard::enter() else {
+        return rt::run_interpreted(FALLBACK_SOURCES, "_bt_search", args);
+    };
+    let p_query = args.first().cloned().unwrap_or(rt::Value::Undef);
+    let p_r = args.get(1).cloned().unwrap_or(rt::Value::Undef);
+    let p_points = args.get(2).cloned().unwrap_or(rt::Value::Undef);
+    let p_tree = args.get(3).cloned().unwrap_or(rt::Value::Undef);
+    let out = { if !(rt::Value::Bool(rt::bi::is_list(&[p_tree.clone()]).is_truthy() && rt::Value::Bool(rt::Value::Bool(rt::apply_binary(rt::BinOp::Eq, rt::bi::len(&[p_tree.clone()]), rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64))).is_truthy() && rt::bi::is_list(&[rt::index(p_tree.clone(), &rt::Value::Num(f64::from_bits(0x0_u64)))]).is_truthy()).is_truthy() || rt::Value::Bool(rt::Value::Bool(rt::apply_binary(rt::BinOp::Eq, rt::bi::len(&[p_tree.clone()]), rt::Value::Num(f64::from_bits(0x4010000000000000_u64))).is_truthy() && rt::bi::is_num(&[rt::index(p_tree.clone(), &rt::Value::Num(f64::from_bits(0x0_u64)))]).is_truthy()).is_truthy() && rt::bi::is_num(&[rt::index(p_tree.clone(), &rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64)))]).is_truthy()).is_truthy()).is_truthy())).is_truthy() { return Err(rt::bosl_assert("generated")); } if rt::apply_binary(rt::BinOp::Eq, rt::bi::len(&[p_tree.clone()]), rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64))).is_truthy() { { if !(rt::Value::Bool(rt::apply_binary(rt::BinOp::Eq, rt::index(p_tree.clone(), &rt::Value::Num(f64::from_bits(0x0_u64))), rt::build_vector(vec![])).is_truthy() || is_vector(fx, &[rt::index(p_tree.clone(), &rt::Value::Num(f64::from_bits(0x0_u64)))])?.is_truthy())).is_truthy() { return Err(rt::bosl_assert("generated")); } { let mut l0_acc: Vec<rt::Value> = Vec::new(); for l1_i in rt::iter_values_native(&rt::index(p_tree.clone(), &rt::Value::Num(f64::from_bits(0x0_u64)))) { if (rt::apply_binary(rt::BinOp::Le, rt::bi::norm(&[rt::apply_binary(rt::BinOp::Sub, rt::index(p_points.clone(), &l1_i.clone()), p_query.clone())]), p_r.clone())).is_truthy() { l0_acc.push(l1_i.clone());
+         } } rt::build_vector(l0_acc) } } } else { if rt::apply_binary(rt::BinOp::Gt, rt::bi::norm(&[rt::apply_binary(rt::BinOp::Sub, p_query.clone(), rt::index(p_points.clone(), &rt::index(p_tree.clone(), &rt::Value::Num(f64::from_bits(0x0_u64)))))]), rt::apply_binary(rt::BinOp::Add, p_r.clone(), rt::index(p_tree.clone(), &rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64))))).is_truthy() { rt::build_vector(vec![]) } else { rt::bi::concat(&[{ let mut l2_acc: Vec<rt::Value> = Vec::new(); if (rt::apply_binary(rt::BinOp::Le, rt::bi::norm(&[rt::apply_binary(rt::BinOp::Sub, p_query.clone(), rt::index(p_points.clone(), &rt::index(p_tree.clone(), &rt::Value::Num(f64::from_bits(0x0_u64)))))]), p_r.clone())).is_truthy() { l2_acc.push(rt::index(p_tree.clone(), &rt::Value::Num(f64::from_bits(0x0_u64))));
+         } rt::build_vector(l2_acc) }, _bt_search(fx, &[p_query.clone(), p_r.clone(), p_points.clone(), rt::index(p_tree.clone(), &rt::Value::Num(f64::from_bits(0x4000000000000000_u64)))])?, _bt_search(fx, &[p_query.clone(), p_r.clone(), p_points.clone(), rt::index(p_tree.clone(), &rt::Value::Num(f64::from_bits(0x4008000000000000_u64)))])?]) } } };
+    Ok(out)
+}
+
+/// Generated native for `is_path` — semantics route through the interpreter's own value
+/// algebra (`ops::`/`builtins::`), bit-identical to the interpreted reference by construction.
+pub(super) fn is_path(fx: &dyn rt::FnCtx, args: &[rt::Value]) -> rt::Result<rt::Value> {
+    let _ = fx; // AR.17: the closure capability — unused until a body reaches one
+    // AR.10: past the depth budget, DECLINE to the pure interpreter — explicit stack,
+    // same proven semantics; recursion cannot ride the Rust stack unbounded.
+    let Some(_depth) = rt::DepthGuard::enter() else {
+        return rt::run_interpreted(FALLBACK_SOURCES, "is_path", args);
+    };
+    let p_list = args.first().cloned().unwrap_or(rt::Value::Undef);
+    let p_dim = args.get(1).cloned().unwrap_or_else(|| rt::build_vector(vec![rt::Value::Num(f64::from_bits(0x4000000000000000_u64)), rt::Value::Num(f64::from_bits(0x4008000000000000_u64))]));
+    let p_fast = args.get(2).cloned().unwrap_or_else(|| rt::Value::Bool(false));
+    let out = if p_fast.clone().is_truthy() { rt::Value::Bool(rt::bi::is_list(&[p_list.clone()]).is_truthy() && is_vector(fx, &[rt::index(p_list.clone(), &rt::Value::Num(f64::from_bits(0x0_u64)))])?.is_truthy()) } else { rt::Value::Bool(rt::Value::Bool(rt::Value::Bool(is_matrix(fx, &[p_list.clone()])?.is_truthy() && rt::apply_binary(rt::BinOp::Gt, rt::bi::len(&[p_list.clone()]), rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64))).is_truthy()).is_truthy() && rt::apply_binary(rt::BinOp::Gt, rt::bi::len(&[rt::index(p_list.clone(), &rt::Value::Num(f64::from_bits(0x0_u64)))]), rt::Value::Num(f64::from_bits(0x0_u64))).is_truthy()).is_truthy() && rt::Value::Bool(rt::bi::is_undef(&[p_dim.clone()]).is_truthy() || in_list(fx, &[rt::bi::len(&[rt::index(p_list.clone(), &rt::Value::Num(f64::from_bits(0x0_u64)))]), force_list(fx, &[p_dim.clone()])?])?.is_truthy()).is_truthy()) };
+    Ok(out)
+}
+
+/// Generated native for `v_abs` — semantics route through the interpreter's own value
+/// algebra (`ops::`/`builtins::`), bit-identical to the interpreted reference by construction.
+pub(super) fn v_abs(fx: &dyn rt::FnCtx, args: &[rt::Value]) -> rt::Result<rt::Value> {
+    let _ = fx; // AR.17: the closure capability — unused until a body reaches one
+    // AR.10: past the depth budget, DECLINE to the pure interpreter — explicit stack,
+    // same proven semantics; recursion cannot ride the Rust stack unbounded.
+    let Some(_depth) = rt::DepthGuard::enter() else {
+        return rt::run_interpreted(FALLBACK_SOURCES, "v_abs", args);
+    };
+    let p_v = args.first().cloned().unwrap_or(rt::Value::Undef);
+    let out = { if !(is_vector(fx, &[p_v.clone()])?).is_truthy() { return Err(rt::bosl_assert("generated")); } { let mut l0_acc: Vec<rt::Value> = Vec::new(); for l1_x in rt::iter_values_native(&p_v.clone()) { l0_acc.push(rt::bi::abs(&[l1_x.clone()]));
+        } rt::build_vector(l0_acc) } };
+    Ok(out)
+}
+
+/// Generated native for `v_theta` — semantics route through the interpreter's own value
+/// algebra (`ops::`/`builtins::`), bit-identical to the interpreted reference by construction.
+pub(super) fn v_theta(fx: &dyn rt::FnCtx, args: &[rt::Value]) -> rt::Result<rt::Value> {
+    let _ = fx; // AR.17: the closure capability — unused until a body reaches one
+    // AR.10: past the depth budget, DECLINE to the pure interpreter — explicit stack,
+    // same proven semantics; recursion cannot ride the Rust stack unbounded.
+    let Some(_depth) = rt::DepthGuard::enter() else {
+        return rt::run_interpreted(FALLBACK_SOURCES, "v_theta", args);
+    };
+    let p_v = args.first().cloned().unwrap_or(rt::Value::Undef);
+    let out = { if !(rt::Value::Bool(is_vector(fx, &[p_v.clone(), rt::Value::Num(f64::from_bits(0x4000000000000000_u64))])?.is_truthy() || is_vector(fx, &[p_v.clone(), rt::Value::Num(f64::from_bits(0x4008000000000000_u64))])?.is_truthy())).is_truthy() { return Err(rt::bosl_assert("generated")); } rt::bi::atan2(&[rt::member(p_v.clone(), "y"), rt::member(p_v.clone(), "x")]) };
+    Ok(out)
+}
+
+/// Generated native for `vector_axis` — semantics route through the interpreter's own value
+/// algebra (`ops::`/`builtins::`), bit-identical to the interpreted reference by construction.
+pub(super) fn vector_axis(fx: &dyn rt::FnCtx, args: &[rt::Value]) -> rt::Result<rt::Value> {
+    let _ = fx; // AR.17: the closure capability — unused until a body reaches one
+    // AR.10: past the depth budget, DECLINE to the pure interpreter — explicit stack,
+    // same proven semantics; recursion cannot ride the Rust stack unbounded.
+    let Some(_depth) = rt::DepthGuard::enter() else {
+        return rt::run_interpreted(FALLBACK_SOURCES, "vector_axis", args);
+    };
+    let p_v1 = args.first().cloned().unwrap_or(rt::Value::Undef);
+    let p_v2 = args.get(1).cloned().unwrap_or(rt::Value::Undef);
+    let p_v3 = args.get(2).cloned().unwrap_or(rt::Value::Undef);
+    let out = if is_vector(fx, &[p_v3.clone()])?.is_truthy() { { if !(is_consistent(fx, &[rt::build_vector(vec![p_v3.clone(), p_v2.clone(), p_v1.clone()])])?).is_truthy() { return Err(rt::bosl_assert("generated")); } vector_axis(fx, &[rt::apply_binary(rt::BinOp::Sub, p_v1.clone(), p_v2.clone()), rt::apply_binary(rt::BinOp::Sub, p_v3.clone(), p_v2.clone())])? } } else { { if !(rt::bi::is_undef(&[p_v3.clone()])).is_truthy() { return Err(rt::bosl_assert("generated")); } if rt::bi::is_undef(&[p_v2.clone()]).is_truthy() { { if !(rt::bi::is_list(&[p_v1.clone()])).is_truthy() { return Err(rt::bosl_assert("generated")); } if rt::apply_binary(rt::BinOp::Eq, rt::bi::len(&[p_v1.clone()]), rt::Value::Num(f64::from_bits(0x4000000000000000_u64))).is_truthy() { vector_axis(fx, &[rt::index(p_v1.clone(), &rt::Value::Num(f64::from_bits(0x0_u64))), rt::index(p_v1.clone(), &rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64)))])? } else { vector_axis(fx, &[rt::index(p_v1.clone(), &rt::Value::Num(f64::from_bits(0x0_u64))), rt::index(p_v1.clone(), &rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64))), rt::index(p_v1.clone(), &rt::Value::Num(f64::from_bits(0x4000000000000000_u64)))])? } } } else { { if !(rt::Value::Bool(rt::Value::Bool(is_vector(fx, &[p_v1.clone(), rt::Value::Undef, rt::Value::Bool(false)])?.is_truthy() && is_vector(fx, &[p_v2.clone(), rt::Value::Undef, rt::Value::Bool(false)])?.is_truthy()).is_truthy() && is_consistent(fx, &[rt::build_vector(vec![p_v1.clone(), p_v2.clone()])])?.is_truthy())).is_truthy() { return Err(rt::bosl_assert("generated")); } { let l0_eps = rt::Value::Num(f64::from_bits(0x3eb0c6f7a0b5ed8d_u64)); let l1_w1 = point3d(fx, &[rt::apply_binary(rt::BinOp::Div, p_v1.clone(), rt::bi::norm(&[p_v1.clone()]))])?; let l2_w2 = point3d(fx, &[rt::apply_binary(rt::BinOp::Div, p_v2.clone(), rt::bi::norm(&[p_v2.clone()]))])?; let l3_w3 = if rt::Value::Bool(rt::apply_binary(rt::BinOp::Gt, rt::bi::norm(&[rt::apply_binary(rt::BinOp::Sub, l1_w1.clone(), l2_w2.clone())]), l0_eps.clone()).is_truthy() && rt::apply_binary(rt::BinOp::Gt, rt::bi::norm(&[rt::apply_binary(rt::BinOp::Add, l1_w1.clone(), l2_w2.clone())]), l0_eps.clone()).is_truthy()).is_truthy() { l2_w2.clone() } else { if rt::apply_binary(rt::BinOp::Gt, rt::bi::norm(&[rt::apply_binary(rt::BinOp::Sub, v_abs(fx, &[l2_w2.clone()])?, rt::Value::num_list(vec![f64::from_bits(0x0_u64), f64::from_bits(0x0_u64), f64::from_bits(0x3ff0000000000000_u64)]))]), l0_eps.clone()).is_truthy() { rt::Value::num_list(vec![f64::from_bits(0x0_u64), f64::from_bits(0x0_u64), f64::from_bits(0x3ff0000000000000_u64)]) } else { rt::Value::num_list(vec![f64::from_bits(0x3ff0000000000000_u64), f64::from_bits(0x0_u64), f64::from_bits(0x0_u64)]) } }; unit(fx, &[rt::bi::cross(&[l1_w1.clone(), l3_w3.clone()])])? } } } } };
+    Ok(out)
+}
+
+/// Generated native for `affine3d_rot_by_axis` — semantics route through the interpreter's own value
+/// algebra (`ops::`/`builtins::`), bit-identical to the interpreted reference by construction.
+pub(super) fn affine3d_rot_by_axis(fx: &dyn rt::FnCtx, args: &[rt::Value]) -> rt::Result<rt::Value> {
+    let _ = fx; // AR.17: the closure capability — unused until a body reaches one
+    // AR.10: past the depth budget, DECLINE to the pure interpreter — explicit stack,
+    // same proven semantics; recursion cannot ride the Rust stack unbounded.
+    let Some(_depth) = rt::DepthGuard::enter() else {
+        return rt::run_interpreted(FALLBACK_SOURCES, "affine3d_rot_by_axis", args);
+    };
+    let p_u = args.first().cloned().unwrap_or_else(|| rt::Value::num_list(vec![f64::from_bits(0x0_u64), f64::from_bits(0x0_u64), f64::from_bits(0x3ff0000000000000_u64)]));
+    let p_ang = args.get(1).cloned().unwrap_or_else(|| rt::Value::Num(f64::from_bits(0x0_u64)));
+    let out = { if !(is_finite(fx, &[p_ang.clone()])?).is_truthy() { return Err(rt::bosl_assert("generated")); } { if !(is_vector(fx, &[p_u.clone(), rt::Value::Num(f64::from_bits(0x4008000000000000_u64))])?).is_truthy() { return Err(rt::bosl_assert("generated")); } if approx(fx, &[p_ang.clone(), rt::Value::Num(f64::from_bits(0x0_u64))])?.is_truthy() { affine3d_identity(fx, &[])? } else { { let l0_u = unit(fx, &[p_u.clone()])?; let l1_c = rt::bi::cos(&[p_ang.clone()]); let l2_c2 = rt::apply_binary(rt::BinOp::Sub, rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64)), l1_c.clone()); let l3_s = rt::bi::sin(&[p_ang.clone()]); rt::build_vector(vec![rt::build_vector(vec![rt::apply_binary(rt::BinOp::Add, rt::apply_binary(rt::BinOp::Mul, rt::apply_binary(rt::BinOp::Mul, rt::member(l0_u.clone(), "x"), rt::member(l0_u.clone(), "x")), l2_c2.clone()), l1_c.clone()), rt::apply_binary(rt::BinOp::Sub, rt::apply_binary(rt::BinOp::Mul, rt::apply_binary(rt::BinOp::Mul, rt::member(l0_u.clone(), "x"), rt::member(l0_u.clone(), "y")), l2_c2.clone()), rt::apply_binary(rt::BinOp::Mul, rt::member(l0_u.clone(), "z"), l3_s.clone())), rt::apply_binary(rt::BinOp::Add, rt::apply_binary(rt::BinOp::Mul, rt::apply_binary(rt::BinOp::Mul, rt::member(l0_u.clone(), "x"), rt::member(l0_u.clone(), "z")), l2_c2.clone()), rt::apply_binary(rt::BinOp::Mul, rt::member(l0_u.clone(), "y"), l3_s.clone())), rt::Value::Num(f64::from_bits(0x0_u64))]), rt::build_vector(vec![rt::apply_binary(rt::BinOp::Add, rt::apply_binary(rt::BinOp::Mul, rt::apply_binary(rt::BinOp::Mul, rt::member(l0_u.clone(), "y"), rt::member(l0_u.clone(), "x")), l2_c2.clone()), rt::apply_binary(rt::BinOp::Mul, rt::member(l0_u.clone(), "z"), l3_s.clone())), rt::apply_binary(rt::BinOp::Add, rt::apply_binary(rt::BinOp::Mul, rt::apply_binary(rt::BinOp::Mul, rt::member(l0_u.clone(), "y"), rt::member(l0_u.clone(), "y")), l2_c2.clone()), l1_c.clone()), rt::apply_binary(rt::BinOp::Sub, rt::apply_binary(rt::BinOp::Mul, rt::apply_binary(rt::BinOp::Mul, rt::member(l0_u.clone(), "y"), rt::member(l0_u.clone(), "z")), l2_c2.clone()), rt::apply_binary(rt::BinOp::Mul, rt::member(l0_u.clone(), "x"), l3_s.clone())), rt::Value::Num(f64::from_bits(0x0_u64))]), rt::build_vector(vec![rt::apply_binary(rt::BinOp::Sub, rt::apply_binary(rt::BinOp::Mul, rt::apply_binary(rt::BinOp::Mul, rt::member(l0_u.clone(), "z"), rt::member(l0_u.clone(), "x")), l2_c2.clone()), rt::apply_binary(rt::BinOp::Mul, rt::member(l0_u.clone(), "y"), l3_s.clone())), rt::apply_binary(rt::BinOp::Add, rt::apply_binary(rt::BinOp::Mul, rt::apply_binary(rt::BinOp::Mul, rt::member(l0_u.clone(), "z"), rt::member(l0_u.clone(), "y")), l2_c2.clone()), rt::apply_binary(rt::BinOp::Mul, rt::member(l0_u.clone(), "x"), l3_s.clone())), rt::apply_binary(rt::BinOp::Add, rt::apply_binary(rt::BinOp::Mul, rt::apply_binary(rt::BinOp::Mul, rt::member(l0_u.clone(), "z"), rt::member(l0_u.clone(), "z")), l2_c2.clone()), l1_c.clone()), rt::Value::Num(f64::from_bits(0x0_u64))]), rt::build_vector(vec![rt::Value::Num(f64::from_bits(0x0_u64)), rt::Value::Num(f64::from_bits(0x0_u64)), rt::Value::Num(f64::from_bits(0x0_u64)), rt::Value::Num(f64::from_bits(0x3ff0000000000000_u64))])]) } } } };
     Ok(out)
 }
 

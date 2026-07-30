@@ -4621,6 +4621,170 @@ fn bosl2_cuboid_runs_compiled_with_its_nested_defs() {
     }
 }
 
+/// The thunk-bridge lexical split (AR.14.4.5's adversarial finding 1): a registered nested fn
+/// called from INSIDE a compiled child block, rendered under ANOTHER module's ctx. The AR.22
+/// bridge replaced the whole scope with the render point's — right for the `$`-chain, wrong for
+/// the creator's LEXICAL frame where the letrec closure lives — so `h` answered warn-and-`undef`
+/// and the cube rendered WRONG GEOMETRY while both tiers returned Ok. This is `edge_profile_asym`
+/// live: its per-edge helpers are called from `default_tag`'s thunks. Both the POC (with a
+/// ran-counter, so it provably went compiled) and the BOSL2 program (geometry-bearing) pin it.
+#[test]
+fn a_nested_fn_called_from_a_compiled_child_block_resolves() {
+    let run = |src: &str, intrinsics: bool| {
+        let config = crate::Config {
+            intrinsics,
+            ..crate::Config::default()
+        };
+        let (geo, msgs) =
+            crate::evaluate_geometry_with_base_config(src, std::path::Path::new("."), &[], config)
+                .expect("renders");
+        (format!("{geo:?}"), format!("{msgs:?}"))
+    };
+    let src = "module _fab_poc_mod(k=1) { children(); }\n\
+               module _fab_poc_localfnthunk(k=1) { function h(x) = x * 2; _fab_poc_mod(k) { cube(h(k)); } }\n\
+               _fab_poc_localfnthunk(3);";
+    let before = crate::eval::module_rt::NATIVE_MODULE_RUNS.with(std::cell::Cell::get);
+    let (geo_on, msgs_on) = run(src, true);
+    let ran = crate::eval::module_rt::NATIVE_MODULE_RUNS.with(std::cell::Cell::get) - before;
+    let (geo_off, msgs_off) = run(src, false);
+    assert_eq!(
+        geo_on, geo_off,
+        "the thunk lost the creator's lexical frame"
+    );
+    assert_eq!(
+        msgs_on, msgs_off,
+        "console diverged (an `Ignoring unknown function` leak)"
+    );
+    assert!(
+        !msgs_on.contains("Ignoring unknown function"),
+        "h must RESOLVE, not warn: {msgs_on}"
+    );
+    assert!(
+        ran > 0,
+        "the POC never ran compiled — the bridge was not exercised"
+    );
+    assert!(
+        geo_on.contains("Leaf"),
+        "no geometry — empty trees would agree"
+    );
+
+    // Live: edge_profile_asym's helpers through default_tag's thunks, geometry-bearing.
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("workspace root")
+        .join("libs/BOSL2");
+    if !root.join("std.scad").exists() {
+        eprintln!("skipping BOSL2 half: libs/BOSL2 submodule not checked out");
+        return;
+    }
+    let run_b = |src: &str, intrinsics: bool| {
+        let config = crate::Config {
+            intrinsics,
+            ..crate::Config::default()
+        };
+        let (geo, msgs) =
+            crate::evaluate_geometry_with_base_config(src, &root, &[], config).expect("renders");
+        (format!("{geo:?}"), format!("{msgs:?}"))
+    };
+    for src in [
+        "include <std.scad>\ncuboid(50) edge_profile_asym(BOT+FWD, flip=true) square(10);",
+        "include <std.scad>\ndiff() cuboid(50) edge_profile_asym(FRONT, flip=true) mask2d_roundover(10, $fn=12);",
+    ] {
+        let (geo_on, msgs_on) = run_b(src, true);
+        let (geo_off, msgs_off) = run_b(src, false);
+        assert_eq!(
+            geo_on, geo_off,
+            "edge_profile_asym geometry diverged: {src}"
+        );
+        assert_eq!(
+            msgs_on, msgs_off,
+            "edge_profile_asym console diverged: {src}"
+        );
+        assert!(
+            !msgs_on.contains("Ignoring unknown function"),
+            "the helpers must resolve: {msgs_on}"
+        );
+    }
+}
+
+/// Recursion-verdict PARITY across the tier seam (adversarial finding 2): a mutual-recursion
+/// cycle between a compiled body's local module and an interpreted user module must trip the
+/// depth guard at the SAME rung — same module name, same span — as interpreting the whole
+/// program. Before the fix the native run took no `module_depth` level, so the cycle's parity
+/// was off by one and the two tiers named different modules in the error.
+#[test]
+fn a_recursion_cycle_across_the_tier_seam_trips_the_same_verdict() {
+    let src = "module cube(v) { inner(0); }\n\
+               module _fab_poc_localmod(k=1) { module inner(a) { cube([a, w, 1]); } w = k * 2; inner(3); inner(w); }\n\
+               _fab_poc_localmod(2);";
+    let run = |intrinsics: bool| {
+        let config = crate::Config {
+            intrinsics,
+            ..crate::Config::default()
+        };
+        crate::evaluate_geometry_with_base_config(src, std::path::Path::new("."), &[], config)
+            .expect_err("infinite mutual recursion must error")
+    };
+    let on = format!("{:?}", run(true));
+    let off = format!("{:?}", run(false));
+    assert_eq!(
+        on, off,
+        "the recursion verdict (module name + span) must not depend on which tier ran the call"
+    );
+    assert!(on.contains("Recursion detected"), "wrong error class: {on}");
+}
+
+/// Terminal-assert parity through NESTED driver re-entries (adversarial finding 3, pre-existing
+/// since AR.20.1 but inherited by every armed module): the L.5.8 export-what-came-before rule is
+/// a TOP-LEVEL rule, and the compiled tier's children/callee re-entries were applying it one
+/// level deep — swallowing the terminal error, exporting a partial subtree, letting LATER
+/// top-level statements run, and printing a second terminal ERROR. All three shapes pinned.
+#[test]
+fn a_terminal_assert_inside_compiled_children_halts_like_the_interpreter() {
+    let run = |src: &str, intrinsics: bool| {
+        let config = crate::Config {
+            intrinsics,
+            ..crate::Config::default()
+        };
+        let (geo, msgs) =
+            crate::evaluate_geometry_with_base_config(src, std::path::Path::new("."), &[], config)
+                .expect("the assert rule is non-fatal at top level — this still renders Ok");
+        (format!("{geo:?}"), format!("{msgs:?}"))
+    };
+    for (label, src) in [
+        (
+            "partial subtree must not export",
+            "module _fab_poc_mod(k=1) { children(); }\n\
+             _fab_poc_mod(1) { cube(3); assert(false, \"boom\"); }",
+        ),
+        (
+            "later statements must not run",
+            "module _fab_poc_mod(k=1) { children(); }\n\
+             _fab_poc_mod(1) { cube(3); assert(false, \"boom\"); }\n\
+             sphere(5, $fn=8);\n\
+             echo(\"after\");",
+        ),
+        (
+            "only ONE terminal error prints",
+            "module _fab_poc_mod(k=1) { children(); }\n\
+             _fab_poc_mod(1) assert(false, \"one\");\n\
+             _fab_poc_mod(1) assert(false, \"two\");",
+        ),
+        (
+            "the $-set band's compiled block, same rule",
+            "$fab_ds = 1;\n\
+             module _fab_poc_mod(k=1) { children(); }\n\
+             module _fab_poc_dollarset(k=1) { $fab_ds = $fab_ds + k; echo(ds=$fab_ds); _fab_poc_mod(k) { cube($fab_ds); children(); } }\n\
+             _fab_poc_dollarset(2) assert(false, \"boom\");",
+        ),
+    ] {
+        let (geo_on, msgs_on) = run(src, true);
+        let (geo_off, msgs_off) = run(src, false);
+        assert_eq!(geo_on, geo_off, "{label}: geometry diverged");
+        assert_eq!(msgs_on, msgs_off, "{label}: console diverged");
+    }
+}
+
 #[test]
 fn a_sibling_call_with_a_hole_takes_the_callees_default() {
     let reference = reference_of("_fab_poc_hole").expect("registered");

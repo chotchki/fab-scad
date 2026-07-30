@@ -95,12 +95,14 @@ impl Drop for ModuleStackGuard<'_, '_> {
 
 /// One level of the interpreter's `module_depth`, plus its high-water mark. Same reasoning as
 /// [`ModuleStackGuard`]: the compiled path unwinds through `Drop`, not through a work-stack task.
-struct ModuleDepthTicket<'a, 'c> {
+/// Taken at EVERY native run too — `try_native_module` and the fast path above — because the
+/// depth must not depend on which tier ran a call (the recursion verdict reads it).
+pub(super) struct ModuleDepthTicket<'a, 'c> {
     ctx: &'c super::Ctx<'a>,
 }
 
 impl<'a, 'c> ModuleDepthTicket<'a, 'c> {
-    fn enter(ctx: &'c super::Ctx<'a>) -> Self {
+    pub(super) fn enter(ctx: &'c super::Ctx<'a>) -> Self {
         let next = ctx.module_depth.get() + 1;
         ctx.module_depth.set(next);
         if next > ctx.peak_module_depth.get() {
@@ -175,6 +177,15 @@ pub(super) enum CallChildren<'a, 'k> {
         children: &'k CallChildren<'a, 'k>,
         /// The creator's dispatch island — a thunk's `cube()` resolves where the creator's would.
         home_island: usize,
+        /// The creator's call frame at the call site — the thunk's LEXICAL base, exactly what
+        /// [`CallChildren::Stmts`] keeps in its `scope` field. The AR.22 bridge originally
+        /// replaced the WHOLE scope with the render point's, which was right for the `$`-chain
+        /// and wrong for everything lexical: a nested function registered into the creator's
+        /// frame (AR.14.4.5) vanished inside the thunk, and `edge_profile_asym` rendered with
+        /// its helpers answering warn-and-`undef` — a silent wrong render the adversarial pass
+        /// caught. `render` now splits the two, `call_frame(creator, render_point)`, the same
+        /// split the interpreted arm has always done.
+        scope: Scope,
     },
 }
 
@@ -264,7 +275,7 @@ impl<'a> NativeModuleCtx<'a, '_, '_> {
                 let mut render: Vec<&'a Stmt> = assigns.clone();
                 render.extend(picked.iter().filter_map(|&i| stmts.get(i).copied()));
                 let global = self.ctx.island_globals.borrow()[*island].clone();
-                let parts = super::geo_stack::eval_geometry_driver(
+                let parts = super::geo_stack::eval_geometry_driver_nested(
                     &render,
                     &child_scope,
                     &global,
@@ -279,6 +290,7 @@ impl<'a> NativeModuleCtx<'a, '_, '_> {
                 args,
                 children,
                 home_island,
+                scope,
             } => {
                 // AR.22's tag-family lesson (found by the OpenSCAD differential, not a tier
                 // test): the thunk must NOT run against the creator's own dynamic context. The
@@ -286,13 +298,20 @@ impl<'a> NativeModuleCtx<'a, '_, '_> {
                 // setting `$tags_hidden` and then rendering the children `diff()` handed it means
                 // the cuboid inside those children SEES the hidden-set. Running `thunk(*caller)`
                 // read the CREATOR's chain instead, silently dropping every `$`-frame between
-                // creator and renderer, and `diff()` unioned what it should have subtracted. So:
-                // bridge — the creator's STRUCTURE (args, stashed children, home island) with
-                // THIS ctx's dynamic scope, which is the render point's chain by construction.
+                // creator and renderer, and `diff()` unioned what it should have subtracted.
+                //
+                // The bridge is the SAME lexical/dynamic split the `Stmts` arm above does:
+                // lexically the CREATOR's frame (`scope` — where a registered nested fn lives,
+                // AR.14.4.5's adversarial finding: replacing the whole scope dropped the letrec
+                // closures and `edge_profile_asym` rendered wrong while warning), dynamically
+                // THIS ctx's chain, which is the render point's by construction.
                 let bridged = NativeModuleCtx {
                     args: args.to_vec(),
                     children: (*children).clone(),
-                    call_scope: std::cell::RefCell::new(self.call_scope.borrow().clone()),
+                    call_scope: std::cell::RefCell::new(Scope::call_frame(
+                        scope,
+                        &self.call_scope.borrow(),
+                    )),
                     home_island: *home_island,
                     // A thunk is a child BLOCK's body, never a module body — registration is
                     // emitted only at a body's top scope, so the bridge never needs the AST.
@@ -653,6 +672,12 @@ impl ModuleCtx for NativeModuleCtx<'_, '_, '_> {
         if let Some(native) = native
             && let Some(_ticket) = ModuleDepthGuard::enter()
         {
+            // The interpreter's depth level for this instantiation, exactly as the interpreted
+            // arm below (and `push_user_module`) takes one — without it a native run is invisible
+            // to `module_depth`, and a recursion cycle straddling the tiers trips the guard at a
+            // DIFFERENT rung than interpreting the same program (a different module name and span
+            // in the verdict — the adversarial pass demonstrated it).
+            let _depth = ModuleDepthTicket::enter(self.ctx);
             let _frame = ModuleStackGuard::push(name, self.ctx);
             // Any local-module frame the callee registers (AR.14.4.5) lives exactly as long as
             // its run — the truncate covers success, error AND the decline that unwinds through
@@ -672,6 +697,7 @@ impl ModuleCtx for NativeModuleCtx<'_, '_, '_> {
                         args: &self.args,
                         children: &self.children,
                         home_island: self.home_island,
+                        scope: self.call_scope.borrow().clone(),
                     },
                 },
                 call_scope: std::cell::RefCell::new(call),
@@ -712,7 +738,7 @@ impl ModuleCtx for NativeModuleCtx<'_, '_, '_> {
             },
             self.ctx,
         );
-        let parts = super::geo_stack::eval_geometry_driver(
+        let parts = super::geo_stack::eval_geometry_driver_nested(
             std::slice::from_ref(&body),
             &call,
             &home_global,

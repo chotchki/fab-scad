@@ -210,6 +210,36 @@ enum GTask<'a> {
     RestoreChildrenFrame(super::ChildrenFrame<'a>),
 }
 
+/// A NESTED re-entry into the driver — a compiled module rendering its call-site children or an
+/// interpreted callee's body (`module_rt`). Every error PROPAGATES, `Error::Assert` included and
+/// UNSTAMPED: the L.5.8 assert rule (drop the failing statement's subtree, print the ERROR, keep
+/// what came before) belongs to the TRUE top level only, where [`eval_geometry_driver`] applies it
+/// per top-level statement. Applying it here — as these re-entries did until the adversarial pass
+/// demonstrated it — swallows a terminal assert one level deep: the native returns `Ok` with a
+/// partial subtree, LATER top-level statements keep running, and a second terminal ERROR can
+/// print, all of which the interpreter refuses. Assert stays unstamped because the top-level
+/// catch matches the bare variant; a span wrapper here would turn the soft halt into a loud one
+/// (the W.3.37 shape, one level down).
+pub(super) fn eval_geometry_driver_nested<'a>(
+    stmts: &[&'a Stmt],
+    scope: &Scope,
+    global: &Scope,
+    island: usize,
+    ctx: &Ctx<'a>,
+) -> crate::Result<Vec<Geo>> {
+    let mut results: Vec<Geo> = Vec::new();
+    for stmt in stmts {
+        let work = vec![GTask::Stmt {
+            stmt,
+            scope: scope.clone(),
+            global: global.clone(),
+            island,
+        }];
+        drive(work, &mut results, ctx)?;
+    }
+    Ok(results)
+}
+
 /// The top-level geometry entry: drive a PRE-HOISTED statement list (as [`eval_geometry`](super::eval_geometry)
 /// is always called — `run_stmts` publishes the global, `eval_nodes` hoists the child scope) and return the RAW
 /// top nodes (the caller — `run_stmts` or a combinator — applies any union / root-override).
@@ -897,6 +927,11 @@ fn try_native_module<'a>(
     // compiled module that skipped the push would make its callees see a shorter stack than the same
     // program interpreted — a differential that renders rather than errors (AR.20.5).
     let _frame = super::module_rt::ModuleStackGuard::push(&mi.name, ctx);
+    // The interpreter's OWN depth level for this instantiation — the interpreted path bumps
+    // `module_depth` for the body's run (below, after the decline), and a native run must count
+    // the same or a recursion cycle straddling the tiers trips the guard at a different rung
+    // (different name + span in the verdict — adversarially demonstrated).
+    let _depth = super::module_rt::ModuleDepthTicket::enter(ctx);
     // Balances any local-module frame the native registers (AR.14.4.5) — on success, on error,
     // and on the decline below, where the interpreted re-run is about to push its OWN frame for
     // the same block.

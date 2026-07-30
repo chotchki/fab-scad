@@ -2142,6 +2142,13 @@ pub const GENERATED_MODULES: &[&str] = &[
     // `call_fn`'s rung 1 used to DECLINE this shape; it now runs the interpreter's `CallValue`
     // machinery, so the native answers instead of re-interpreting the whole module.
     "module _fab_poc_callparam(f) { v = f(4); cube([v, 1, 1]); }",
+    // A registered nested fn called from INSIDE a compiled child block (the adversarial finding
+    // on AR.14.4.5's first cut): the thunk renders under ANOTHER module's ctx, and the AR.22
+    // bridge replaced the whole scope with the render point's — dropping the creator's LEXICAL
+    // frame, where the letrec closure lives. `h` answered warn-and-`undef` and the cube rendered
+    // WRONG while both tiers returned Ok — edge_profile_asym's exact shape. The bridge now
+    // splits lexical (creator) from dynamic (render point), as the interpreted arm always has.
+    "module _fab_poc_localfnthunk(k=1) { function h(x) = x * 2; _fab_poc_mod(k) { cube(h(k)); } }",
 ];
 
 /// Synthetic bakes for the POC references above — BOSL2's own values, so a tier test that binds

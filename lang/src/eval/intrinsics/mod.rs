@@ -2286,6 +2286,15 @@ pub(super) static MODULE_REGISTRY: &[ModuleEntry] = &[
         func: generated_modules::_fab_poc_callparam,
         consts: &[],
     },
+    // The thunk-bridge poc (the AR.14.4.5 adversarial finding): a nested fn called from inside
+    // a compiled child block, rendered under ANOTHER module's ctx — the bridge must keep the
+    // creator's LEXICAL frame (where the closure lives) under the render point's `$`-chain.
+    ModuleEntry {
+        name: "_fab_poc_localfnthunk",
+        reference: "module _fab_poc_localfnthunk(k=1) { function h(x) = x * 2; _fab_poc_mod(k) { cube(h(k)); } }",
+        func: generated_modules::_fab_poc_localfnthunk,
+        consts: &[],
+    },
 ];
 
 /// The compiled module for `name`, IFF one is registered, the definition in this program

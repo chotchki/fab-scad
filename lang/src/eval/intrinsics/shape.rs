@@ -71,7 +71,7 @@ pub(super) fn is_consistent(args: &[Value]) -> crate::Result<Value> {
     clippy::float_cmp,
     reason = "the reference's `len(v)==length` IS an exact f64 equality; a tolerance would diverge"
 )]
-pub(super) fn is_vector(args: &[Value]) -> crate::Result<Value> {
+pub(super) fn is_vector(fx: &dyn crate::surface::FnCtx, args: &[Value]) -> crate::Result<Value> {
     let v = args.first().cloned().unwrap_or(Value::Undef);
     if !is_vector_core(&v) {
         return Ok(Value::Bool(false));
@@ -111,14 +111,14 @@ pub(super) fn is_vector(args: &[Value]) -> crate::Result<Value> {
     if let Some(anz) = args.get(3)
         && anz.is_truthy()
     {
-        return all_nonzero(&[v]); // 1-arg → the reference's inner call takes all_nonzero's own default eps
+        return all_nonzero(fx, &[v]); // 1-arg → the reference's inner call takes all_nonzero's own default eps
     }
     Ok(Value::Bool(true))
 }
 
 /// BOSL2 `all_nonzero(x, eps=_EPSILON)` — a finite scalar farther than `eps` from zero, or a vector of them.
 /// Exotic `eps` routes the compares through the interpreter's ops (undef-propagation intact).
-pub(super) fn all_nonzero(args: &[Value]) -> crate::Result<Value> {
+pub(super) fn all_nonzero(_fx: &dyn crate::surface::FnCtx, args: &[Value]) -> crate::Result<Value> {
     let x = args.first().cloned().unwrap_or(Value::Undef);
     let eps = args.get(1).cloned().unwrap_or(Value::Num(1e-9));
     if v_is_finite(&x) {
@@ -154,7 +154,7 @@ pub(super) fn all_nonzero(args: &[Value]) -> crate::Result<Value> {
     clippy::cast_precision_loss,
     reason = "matches the `len` builtin's `count as f64`; a list past 2^52 elements is unreachable"
 )]
-pub(super) fn is_matrix(args: &[Value]) -> crate::Result<Value> {
+pub(super) fn is_matrix(fx: &dyn crate::surface::FnCtx, args: &[Value]) -> crate::Result<Value> {
     let a = args.first().cloned().unwrap_or(Value::Undef);
     if !v_is_list(&a) {
         return Ok(Value::Bool(false));
@@ -181,7 +181,7 @@ pub(super) fn is_matrix(args: &[Value]) -> crate::Result<Value> {
         }
     }
     let n = args.get(2).cloned().unwrap_or(Value::Undef);
-    if !is_vector(&[a0, n])?.is_truthy() {
+    if !is_vector(fx, &[a0, n])?.is_truthy() {
         return Ok(Value::Bool(false));
     }
     is_consistent(&[a])
@@ -189,7 +189,7 @@ pub(super) fn is_matrix(args: &[Value]) -> crate::Result<Value> {
 
 /// BOSL2 `is_path(list, dim=[2,3], fast=false)` — a matrix of ≥2 points whose width is in `dim`;
 /// composes the band's own [`is_matrix`]/[`in_list`]/[`force_list`] natives.
-pub(super) fn is_path(args: &[Value]) -> crate::Result<Value> {
+pub(super) fn is_path(fx: &dyn crate::surface::FnCtx, args: &[Value]) -> crate::Result<Value> {
     let list = args.first().cloned().unwrap_or(Value::Undef);
     let dim = args
         .get(1)
@@ -199,14 +199,14 @@ pub(super) fn is_path(args: &[Value]) -> crate::Result<Value> {
     if fast.is_truthy() {
         return Ok(Value::Bool(
             v_is_list(&list)
-                && is_vector(std::slice::from_ref(&ops::index(
-                    list.clone(),
-                    &Value::Num(0.0),
-                )))?
+                && is_vector(
+                    fx,
+                    std::slice::from_ref(&ops::index(list.clone(), &Value::Num(0.0))),
+                )?
                 .is_truthy(),
         ));
     }
-    if !is_matrix(std::slice::from_ref(&list))?.is_truthy() {
+    if !is_matrix(fx, std::slice::from_ref(&list))?.is_truthy() {
         return Ok(Value::Bool(false));
     }
     let ll = builtins::apply("len", std::slice::from_ref(&list));

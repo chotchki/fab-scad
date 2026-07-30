@@ -478,7 +478,8 @@ pub fn generate_native(
         out,
         "/// Generated native for `{name}` — semantics route through the interpreter's own value\n\
          /// algebra (`ops::`/`builtins::`), bit-identical to the interpreted reference by construction.\n\
-         pub(super) fn {name}(args: &[rt::Value]) -> rt::Result<rt::Value> {{\n\
+         pub(super) fn {name}(fx: &dyn rt::FnCtx, args: &[rt::Value]) -> rt::Result<rt::Value> {{\n\
+         \x20   let _ = fx; // AR.17: the closure capability — unused until a body reaches one\n\
          \x20   // AR.10: past the depth budget, DECLINE to the pure interpreter — explicit stack,\n\
          \x20   // same proven semantics; recursion cannot ride the Rust stack unbounded.\n\
          \x20   let Some(_depth) = rt::DepthGuard::enter() else {{\n\
@@ -895,7 +896,7 @@ impl Emitter<'_> {
         // compiled form. See `Sibling` for why inlining the default here is position-independent.
         let last_filled = slots.iter().rposition(Option::is_some);
         let Some(last) = last_filled else {
-            return Ok(format!("{name}(&[])?"));
+            return Ok(format!("{name}(fx, &[])?"));
         };
         let mut vals: Vec<String> = Vec::with_capacity(last + 1);
         for (i, slot) in slots.into_iter().enumerate().take(last + 1) {
@@ -914,7 +915,7 @@ impl Emitter<'_> {
                 },
             }
         }
-        Ok(format!("{name}(&[{}])?", vals.join(", ")))
+        Ok(format!("{name}(fx, &[{}])?", vals.join(", ")))
     }
 
     /// AR.20.4 — one STATEMENT as Rust that pushes any geometry it makes into `parts`.

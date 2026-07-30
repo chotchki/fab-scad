@@ -15,7 +15,11 @@ use crate::parser::BinOp;
 
 /// BOSL2 `list_wrap(list, eps=_EPSILON)` — close an open path by repeating its first point, unless the
 /// ends already match (`are_ends_equal`) or the list is shorter than 2.
-pub(super) fn list_wrap_val(list: &Value, eps: &Value) -> crate::Result<Value> {
+pub(super) fn list_wrap_val(
+    fx: &dyn crate::surface::FnCtx,
+    list: &Value,
+    eps: &Value,
+) -> crate::Result<Value> {
     let Value::Bool(true) = builtins::apply("is_list", std::slice::from_ref(list)) else {
         return Err(bosl_assert("list_wrap: not a list"));
     };
@@ -29,7 +33,7 @@ pub(super) fn list_wrap_val(list: &Value, eps: &Value) -> crate::Result<Value> {
         Value::List(xs) => xs.len(),
         _ => 0,
     };
-    if n < 2 || are_ends_equal_val(list, eps)?.is_truthy() {
+    if n < 2 || are_ends_equal_val(fx, list, eps)?.is_truthy() {
         return Ok(list.clone());
     }
     // [each list, list[0]] — element order preserved, variant re-coalesced like the interpreter's
@@ -46,7 +50,11 @@ pub(super) fn list_wrap_val(list: &Value, eps: &Value) -> crate::Result<Value> {
 
 /// BOSL2 `are_ends_equal(list, eps=_EPSILON)` — `approx(list[0], list[len-1], eps)` behind a
 /// nonempty-list assert.
-pub(super) fn are_ends_equal_val(list: &Value, eps: &Value) -> crate::Result<Value> {
+pub(super) fn are_ends_equal_val(
+    fx: &dyn crate::surface::FnCtx,
+    list: &Value,
+    eps: &Value,
+) -> crate::Result<Value> {
     let n = match list {
         Value::NumList(xs) => xs.len(),
         Value::List(xs) => xs.len(),
@@ -61,20 +69,25 @@ pub(super) fn are_ends_equal_val(list: &Value, eps: &Value) -> crate::Result<Val
         reason = "list lengths are far below 2^52; the interpreter indexes with the same f64"
     )]
     let final_elem = ops::index(list.clone(), &Value::Num((n - 1) as f64));
-    approx_val(&first, &final_elem, eps)
+    approx_val(fx, &first, &final_elem, eps)
 }
 
 /// BOSL2 `_general_line_intersection(s1, s2, eps=_EPSILON)` — the 2D segment/segment intersection:
 /// `undef` on (near-)parallel, else `[point, t, u]`. Every cross/sub/mul routes through ops (`cross`
 /// on 2D vectors is the scalar `a.x*b.y - a.y*b.x` builtin).
-pub(super) fn gli_val(s1: &Value, s2: &Value, eps: &Value) -> crate::Result<Value> {
+pub(super) fn gli_val(
+    fx: &dyn crate::surface::FnCtx,
+    s1: &Value,
+    s2: &Value,
+    eps: &Value,
+) -> crate::Result<Value> {
     let p = |v: &Value, i: f64| ops::index(v.clone(), &Value::Num(i));
     let sub = |a: Value, b: Value| ops::apply_binary(BinOp::Sub, a, b);
     let denominator = builtins::apply(
         "cross",
         &[sub(p(s1, 0.0), p(s1, 1.0)), sub(p(s2, 0.0), p(s2, 1.0))],
     );
-    if approx_val(&denominator, &Value::Num(0.0), eps)?.is_truthy() {
+    if approx_val(fx, &denominator, &Value::Num(0.0), eps)?.is_truthy() {
         return Ok(Value::Undef);
     }
     let t = ops::apply_binary(
@@ -201,7 +214,7 @@ pub(super) fn count_val(
 
 /// BOSL2 `mean(v)` — `sum(v)/len(v)` behind a nonempty-list assert; `sum` is the existing native
 /// (same reference the `sum` entry pins).
-pub(super) fn mean_val(v: &Value) -> crate::Result<Value> {
+pub(super) fn mean_val(fx: &dyn crate::surface::FnCtx, v: &Value) -> crate::Result<Value> {
     let n = match v {
         Value::NumList(xs) => xs.len(),
         Value::List(xs) => xs.len(),
@@ -210,7 +223,7 @@ pub(super) fn mean_val(v: &Value) -> crate::Result<Value> {
     if n == 0 {
         return Err(bosl_assert("mean: invalid list"));
     }
-    let total = sum(std::slice::from_ref(v))?;
+    let total = sum(fx, std::slice::from_ref(v))?;
     #[allow(
         clippy::cast_precision_loss,
         reason = "list lengths are far below 2^52; the reference divides by the same f64 len"
@@ -301,8 +314,11 @@ pub(super) fn transpose_val(m: &Value) -> crate::Result<Value> {
 /// dot is the interpreter's 4-LANED `ops::dot` (sign-of-zero differs from naive column extraction:
 /// `-0.0` coordinates come out `+0.0` through the lane sum) — so the projection goes through
 /// `ops::apply_binary(Mul, …)`, never a hand-rolled column read.
-pub(super) fn pointlist_bounds_val(pts: &Value) -> crate::Result<Value> {
-    let fast_path = super::shape::is_path(&[pts.clone(), Value::Undef, Value::Bool(true)])?;
+pub(super) fn pointlist_bounds_val(
+    fx: &dyn crate::surface::FnCtx,
+    pts: &Value,
+) -> crate::Result<Value> {
+    let fast_path = super::shape::is_path(fx, &[pts.clone(), Value::Undef, Value::Bool(true)])?;
     if !fast_path.is_truthy() {
         return Err(bosl_assert("pointlist_bounds: invalid pointlist"));
     }
@@ -454,7 +470,12 @@ fn value_rows(v: &Value) -> crate::Result<Vec<Value>> {
     reason = "one iterative work-stack mirror of one recursive reference — splitting it would \
               separate the build/assemble halves the invariant lives across"
 )]
-pub(super) fn bt_tree_val(points: &Value, ind: &Value, leafsize: &Value) -> crate::Result<Value> {
+pub(super) fn bt_tree_val(
+    fx: &dyn crate::surface::FnCtx,
+    points: &Value,
+    ind: &Value,
+    leafsize: &Value,
+) -> crate::Result<Value> {
     enum Work {
         Build {
             ind: Vec<Value>,
@@ -507,8 +528,8 @@ pub(super) fn bt_tree_val(points: &Value, ind: &Value, leafsize: &Value) -> crat
                     continue;
                 }
                 let ind_v = build_vector(ind.clone());
-                let selected = super::lists::select(&[points.clone(), ind_v.clone()])?;
-                let bounds = pointlist_bounds_val(&selected)?;
+                let selected = super::lists::select(fx, &[points.clone(), ind_v.clone()])?;
+                let bounds = pointlist_bounds_val(fx, &selected)?;
                 let spread = ops::apply_binary(
                     BinOp::Sub,
                     ops::index(bounds.clone(), &Value::Num(1.0)),
@@ -520,7 +541,7 @@ pub(super) fn bt_tree_val(points: &Value, ind: &Value, leafsize: &Value) -> crat
                     .map(|i| ops::index(ops::index(points.clone(), i), &coord))
                     .collect();
                 let projc_v = build_vector(projc.clone());
-                let meanpr = mean_val(&projc_v)?;
+                let meanpr = mean_val(fx, &projc_v)?;
                 let deviations: Vec<Value> = projc
                     .iter()
                     .map(|p| {
@@ -610,13 +631,18 @@ pub(super) fn bt_tree_val(points: &Value, ind: &Value, leafsize: &Value) -> crat
     clippy::too_many_lines,
     reason = "one dispatcher mirroring one reference dispatcher — the branch ladder IS the shape"
 )]
-pub(super) fn vector_search_val(query: &Value, r: &Value, target: &Value) -> crate::Result<Value> {
+pub(super) fn vector_search_val(
+    fx: &dyn crate::surface::FnCtx,
+    query: &Value,
+    r: &Value,
+    target: &Value,
+) -> crate::Result<Value> {
     let empty = build_vector(vec![]);
     if ops::apply_binary(BinOp::Eq, query.clone(), empty.clone()).is_truthy() {
         return Ok(empty);
     }
     if v_is_list(query) && ops::apply_binary(BinOp::Eq, target.clone(), empty.clone()).is_truthy() {
-        if super::shape::is_vector(std::slice::from_ref(query))?.is_truthy() {
+        if super::shape::is_vector(fx, std::slice::from_ref(query))?.is_truthy() {
             return Ok(empty);
         }
         let n = value_rows(query)?.len();
@@ -626,7 +652,7 @@ pub(super) fn vector_search_val(query: &Value, r: &Value, target: &Value) -> cra
     if !r_finite || ops::apply_binary(BinOp::Lt, r.clone(), Value::Num(0.0)).is_truthy() {
         return Err(bosl_assert("vector_search: invalid radius"));
     }
-    let tgpts = super::shape::is_matrix(std::slice::from_ref(target))?.is_truthy();
+    let tgpts = super::shape::is_matrix(fx, std::slice::from_ref(target))?.is_truthy();
     let tgtree = {
         let rows = if v_is_list(target) {
             value_rows(target)?
@@ -634,7 +660,7 @@ pub(super) fn vector_search_val(query: &Value, r: &Value, target: &Value) -> cra
             Vec::new()
         };
         rows.len() == 2
-            && super::shape::is_matrix(std::slice::from_ref(&rows[0]))?.is_truthy()
+            && super::shape::is_matrix(fx, std::slice::from_ref(&rows[0]))?.is_truthy()
             && v_is_list(&rows[1])
             && {
                 let t1 = value_rows(&rows[1])?;
@@ -653,8 +679,9 @@ pub(super) fn vector_search_val(query: &Value, r: &Value, target: &Value) -> cra
             &Value::Num(0.0),
         ))
     };
-    let simple = super::shape::is_vector(&[query.clone(), dim.clone()])?.is_truthy();
-    if !simple && !super::shape::is_matrix(&[query.clone(), Value::Undef, dim.clone()])?.is_truthy()
+    let simple = super::shape::is_vector(fx, &[query.clone(), dim.clone()])?.is_truthy();
+    if !simple
+        && !super::shape::is_matrix(fx, &[query.clone(), Value::Undef, dim.clone()])?.is_truthy()
     {
         return Err(bosl_assert("vector_search: query incompatible with target"));
     }
@@ -697,14 +724,17 @@ pub(super) fn vector_search_val(query: &Value, r: &Value, target: &Value) -> cra
             &Value::Num(1.0),
             &Value::Bool(false),
         )?;
-        let tree = bt_tree_val(target, &ind, &Value::Num(25.0))?;
+        let tree = bt_tree_val(fx, target, &ind, &Value::Num(25.0))?;
         return if simple {
-            super::vectors::bt_search(&[query.clone(), r.clone(), target.clone(), tree])
+            super::vectors::bt_search(fx, &[query.clone(), r.clone(), target.clone(), tree])
         } else {
             let out: crate::Result<Vec<Value>> = value_rows(query)?
                 .iter()
                 .map(|q| {
-                    super::vectors::bt_search(&[q.clone(), r.clone(), target.clone(), tree.clone()])
+                    super::vectors::bt_search(
+                        fx,
+                        &[q.clone(), r.clone(), target.clone(), tree.clone()],
+                    )
                 })
                 .collect();
             Ok(build_vector(out?))
@@ -714,12 +744,12 @@ pub(super) fn vector_search_val(query: &Value, r: &Value, target: &Value) -> cra
     let points = ops::index(target.clone(), &Value::Num(0.0));
     let tree = ops::index(target.clone(), &Value::Num(1.0));
     if simple {
-        super::vectors::bt_search(&[query.clone(), r.clone(), points, tree])
+        super::vectors::bt_search(fx, &[query.clone(), r.clone(), points, tree])
     } else {
         let out: crate::Result<Vec<Value>> = value_rows(query)?
             .iter()
             .map(|q| {
-                super::vectors::bt_search(&[q.clone(), r.clone(), points.clone(), tree.clone()])
+                super::vectors::bt_search(fx, &[q.clone(), r.clone(), points.clone(), tree.clone()])
             })
             .collect();
         Ok(build_vector(out?))
@@ -738,7 +768,7 @@ pub(super) fn vector_search_val(query: &Value, r: &Value, target: &Value) -> cra
     reason = "the 61-line reference comprehension ported clause-for-clause; splitting would decouple the \
               sign-prefilter from the intersection loop it guards"
 )]
-pub(super) fn rri_val(args: &[Value]) -> crate::Result<Value> {
+pub(super) fn rri_val(fx: &dyn crate::surface::FnCtx, args: &[Value]) -> crate::Result<Value> {
     let region1 = args.first().cloned().unwrap_or(Value::Undef);
     let region2 = args.get(1).cloned().unwrap_or(Value::Undef);
     let closed1 = args.get(2).cloned().unwrap_or(Value::Bool(true));
@@ -763,14 +793,14 @@ pub(super) fn rri_val(args: &[Value]) -> crate::Result<Value> {
     let mut polys: Vec<Value> = Vec::with_capacity(r2_paths.len());
     for path2 in &r2_paths {
         polys.push(if closed2.is_truthy() {
-            list_wrap_val(path2, &Value::Num(1e-9))?
+            list_wrap_val(fx, path2, &Value::Num(1e-9))?
         } else {
             path2.clone()
         });
     }
     for (p1, path1_raw) in r1_paths.iter().enumerate() {
         let path = if closed1.is_truthy() {
-            list_wrap_val(path1_raw, &Value::Num(1e-9))?
+            list_wrap_val(fx, path1_raw, &Value::Num(1e-9))?
         } else {
             path1_raw.clone()
         };
@@ -838,6 +868,7 @@ pub(super) fn rri_val(args: &[Value]) -> crate::Result<Value> {
                     let b1 = poly_pts[j].clone();
                     let b2 = poly_pts[j + 1].clone();
                     let isect = gli_val(
+                        fx,
                         &build_vector(vec![a1.clone(), a2.clone()]),
                         &build_vector(vec![b1, b2]),
                         &eps,
@@ -881,13 +912,13 @@ pub(super) fn rri_val(args: &[Value]) -> crate::Result<Value> {
         let ptind_v = build_vector(ptind);
         let points = flatten_val(region)?;
         // cornerpts: duplicate points (self-touch) via vector_search(points, eps, points).
-        let ks = vector_search_val(&points, &eps, &points)?;
+        let ks = vector_search_val(fx, &points, &eps, &points)?;
         let mut cornerpts: Vec<Value> = Vec::new();
         for k in value_rows(&ks)? {
             let kl = value_rows(&k)?.len();
             if kl > 1 {
                 // `each select(ptind, k)` — splice the selected index triples.
-                let sel = super::lists::select(&[ptind_v.clone(), k])?;
+                let sel = super::lists::select(fx, &[ptind_v.clone(), k])?;
                 cornerpts.extend(value_rows(&sel)?);
             }
         }
@@ -912,7 +943,7 @@ pub(super) fn rri_val(args: &[Value]) -> crate::Result<Value> {
         let mut half: Vec<Value> = Vec::new();
         for j in value_rows(&counts)? {
             let group_idx = ops::index(pathind.clone(), &j);
-            let group = super::lists::select(&[risect_v.clone(), group_idx])?;
+            let group = super::lists::select(fx, &[risect_v.clone(), group_idx])?;
             half.push(sort_vectors_val(&group, &Value::Undef)?);
         }
         out_halves.push(build_vector(half));

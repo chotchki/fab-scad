@@ -102,7 +102,7 @@ pub(super) fn is_at_left_val(pt: &Value, line: &Value, eps: &Value) -> Value {
 /// what terminates the exotic-input shapes — a non-list `idxs` or non-numeric `i` raises there exactly like
 /// the interpreter). Per-iteration fast path when everything is 2D + numeric; any shape break routes that
 /// iteration through the same builtins/ops the body would run.
-pub(super) fn none_inside(args: &[Value]) -> crate::Result<Value> {
+pub(super) fn none_inside(fx: &dyn crate::surface::FnCtx, args: &[Value]) -> crate::Result<Value> {
     let idxs = args.first().cloned().unwrap_or(Value::Undef);
     let poly = args.get(1).cloned().unwrap_or(Value::Undef);
     let p0 = args.get(2).cloned().unwrap_or(Value::Undef);
@@ -136,17 +136,23 @@ pub(super) fn none_inside(args: &[Value]) -> crate::Result<Value> {
         let vert = ops::index(poly.clone(), &ops::index(idxs.clone(), &i));
         let prev = ops::index(
             poly.clone(),
-            &select(&[
-                idxs.clone(),
-                ops::apply_binary(BinOp::Sub, i.clone(), Value::Num(1.0)),
-            ])?,
+            &select(
+                fx,
+                &[
+                    idxs.clone(),
+                    ops::apply_binary(BinOp::Sub, i.clone(), Value::Num(1.0)),
+                ],
+            )?,
         );
         let next = ops::index(
             poly.clone(),
-            &select(&[
-                idxs.clone(),
-                ops::apply_binary(BinOp::Add, i.clone(), Value::Num(1.0)),
-            ])?,
+            &select(
+                fx,
+                &[
+                    idxs.clone(),
+                    ops::apply_binary(BinOp::Add, i.clone(), Value::Num(1.0)),
+                ],
+            )?,
         );
         // reflex && (inside-the-ear || touches-p1-and-crosses) ? false : next i — short-circuits preserved.
         let reflex = ops::apply_binary(BinOp::Le, tc(&prev, &vert, &next, &eps), Value::Num(0.0));
@@ -191,7 +197,7 @@ pub(super) fn none_inside(args: &[Value]) -> crate::Result<Value> {
     clippy::similar_names,
     reason = "`ind`/`lind` ARE the reference's own parameter and let names"
 )]
-pub(super) fn get_ear(args: &[Value]) -> crate::Result<Value> {
+pub(super) fn get_ear(fx: &dyn crate::surface::FnCtx, args: &[Value]) -> crate::Result<Value> {
     let poly = args.first().cloned().unwrap_or(Value::Undef);
     let ind = args.get(1).cloned().unwrap_or(Value::Undef);
     let eps = args.get(2).cloned().unwrap_or(Value::Undef); // eps has NO default in the reference
@@ -214,12 +220,15 @@ pub(super) fn get_ear(args: &[Value]) -> crate::Result<Value> {
         let p2 = at(&wrap(2.0));
         let tri = build_vector(vec![p0.clone(), p1.clone(), p2.clone()]);
         if ops::apply_binary(BinOp::Gt, tri_class_val(&tri, &eps), Value::Num(0.0)).is_truthy() {
-            let window = select(&[
-                ind.clone(),
-                ops::apply_binary(BinOp::Add, i.clone(), Value::Num(2.0)),
-                i.clone(),
-            ])?;
-            if none_inside(&[window, poly.clone(), p0, p1, p2, eps.clone()])?.is_truthy() {
+            let window = select(
+                fx,
+                &[
+                    ind.clone(),
+                    ops::apply_binary(BinOp::Add, i.clone(), Value::Num(2.0)),
+                    i.clone(),
+                ],
+            )?;
+            if none_inside(fx, &[window, poly.clone(), p0, p1, p2, eps.clone()])?.is_truthy() {
                 return Ok(i);
             }
         }
@@ -238,7 +247,7 @@ pub(super) fn get_ear(args: &[Value]) -> crate::Result<Value> {
             continue;
         }
         // whiskers: adjacent-but-one vertices closer than eps
-        let jrange = idx(std::slice::from_ref(&ind))?;
+        let jrange = idx(fx, std::slice::from_ref(&ind))?;
         let mut ws: Vec<Value> = Vec::new();
         for j in iter_values_raw(&jrange) {
             let far = ops::apply_binary(
@@ -273,7 +282,7 @@ pub(super) fn get_ear(args: &[Value]) -> crate::Result<Value> {
 /// interpreted let-chains). Fully routed: dots through `apply_binary` (the 4-lane `ops::dot`), the final
 /// reduction through the real `min` builtin, the wraparound neighbor through the native [`select`] (its
 /// assert raises exactly like the reference on a degenerate `i+1`).
-pub(super) fn point_dist(args: &[Value]) -> crate::Result<Value> {
+pub(super) fn point_dist(fx: &dyn crate::surface::FnCtx, args: &[Value]) -> crate::Result<Value> {
     let path = args.first().cloned().unwrap_or(Value::Undef);
     let unit = args.get(1).cloned().unwrap_or(Value::Undef);
     let seg_len = args.get(2).cloned().unwrap_or(Value::Undef);
@@ -291,10 +300,13 @@ pub(super) fn point_dist(args: &[Value]) -> crate::Result<Value> {
         let d = if ops::apply_binary(BinOp::Lt, projection.clone(), Value::Num(0.0)).is_truthy() {
             ops::apply_binary(BinOp::Sub, pt.clone(), pi)
         } else if ops::apply_binary(BinOp::Gt, projection.clone(), li).is_truthy() {
-            let next = select(&[
-                path.clone(),
-                ops::apply_binary(BinOp::Add, iv.clone(), Value::Num(1.0)),
-            ])?;
+            let next = select(
+                fx,
+                &[
+                    path.clone(),
+                    ops::apply_binary(BinOp::Add, iv.clone(), Value::Num(1.0)),
+                ],
+            )?;
             ops::apply_binary(BinOp::Sub, pt.clone(), next)
         } else {
             ops::apply_binary(BinOp::Sub, v, ops::apply_binary(BinOp::Mul, projection, ui))
@@ -307,7 +319,7 @@ pub(super) fn point_dist(args: &[Value]) -> crate::Result<Value> {
 
 /// The [`PINS`]' `is_vnf(x)` as [`vnf_centroid`]'s assert needs it, composed from the band's own natives
 /// (`is_vector(x[0][0], 3)` / `is_vector(x[1][0])`).
-pub(super) fn is_vnf_check(x: &Value) -> crate::Result<bool> {
+pub(super) fn is_vnf_check(fx: &dyn crate::surface::FnCtx, x: &Value) -> crate::Result<bool> {
     if !v_is_list(x) {
         return Ok(false);
     }
@@ -328,20 +340,23 @@ pub(super) fn is_vnf_check(x: &Value) -> crate::Result<bool> {
             Value::Num(3.0),
         )
         .is_truthy()
-            && is_vector(&[ops::index(x0.clone(), &Value::Num(0.0)), Value::Num(3.0)])?
-                .is_truthy());
+            && is_vector(
+                fx,
+                &[ops::index(x0.clone(), &Value::Num(0.0)), Value::Num(3.0)],
+            )?
+            .is_truthy());
     if !verts_ok {
         return Ok(false);
     }
     Ok(ops::apply_binary(BinOp::Eq, x1.clone(), empty).is_truthy()
-        || is_vector(std::slice::from_ref(&ops::index(x1, &Value::Num(0.0))))?.is_truthy())
+        || is_vector(fx, std::slice::from_ref(&ops::index(x1, &Value::Num(0.0))))?.is_truthy())
 }
 
 /// BOSL2 `_vnf_centroid(vnf, eps=_EPSILON)` — the volume-weighted centroid: per face-fan triangle,
 /// `vol = cross(v2,v1)*v0` and the running `[vol, (v0+v1+v2)*vol]` pairs sum through the REAL [`sum`]
 /// entry (its `_sum` lane — the summands are [scalar, vector] pairs), then `approx(pos[0], 0, eps)` guards
 /// self-intersection. 1.9s/30 calls in `webcam_holder` — the fan loop over every face, interpreted.
-pub(super) fn vnf_centroid(args: &[Value]) -> crate::Result<Value> {
+pub(super) fn vnf_centroid(fx: &dyn crate::surface::FnCtx, args: &[Value]) -> crate::Result<Value> {
     let vnf = args.first().cloned().unwrap_or(Value::Undef);
     let eps = args.get(1).cloned().unwrap_or(Value::Num(1e-9));
     let verts = ops::index(vnf.clone(), &Value::Num(0.0));
@@ -354,7 +369,7 @@ pub(super) fn vnf_centroid(args: &[Value]) -> crate::Result<Value> {
         )
         .is_truthy()
     };
-    if !(is_vnf_check(&vnf)? && nonzero(&verts) && nonzero(&faces)) {
+    if !(is_vnf_check(fx, &vnf)? && nonzero(&verts) && nonzero(&faces)) {
         return Err(bosl_assert("_vnf_centroid: invalid or empty VNF"));
     }
     let mut pairs: Vec<Value> = Vec::new();
@@ -386,9 +401,9 @@ pub(super) fn vnf_centroid(args: &[Value]) -> crate::Result<Value> {
             pairs.push(build_vector(vec![vol, centroid_part]));
         }
     }
-    let pos = sum(&[build_vector(pairs)])?;
+    let pos = sum(fx, &[build_vector(pairs)])?;
     let p0 = ops::index(pos.clone(), &Value::Num(0.0));
-    if approx(&[p0.clone(), Value::Num(0.0), eps])?.is_truthy() {
+    if approx(fx, &[p0.clone(), Value::Num(0.0), eps])?.is_truthy() {
         return Err(bosl_assert("_vnf_centroid: the vnf has self-intersections"));
     }
     Ok(ops::apply_binary(

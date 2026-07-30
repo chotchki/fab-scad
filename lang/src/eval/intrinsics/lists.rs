@@ -16,7 +16,7 @@ use crate::parser::BinOp;
 /// (`func.cc` excludes NaN, so `select(l, nan)` takes the else branch and RAISES); `is_vector` = a non-empty
 /// list of all FINITE `Num`s (BOSL2's `[for(vi=v) if(!is_finite(vi)) 0]==[]`); `is_range` = a `Range` with
 /// all-finite fields; `is_finite` = a finite `Num`.
-pub(super) fn select(args: &[Value]) -> crate::Result<Value> {
+pub(super) fn select(_fx: &dyn crate::surface::FnCtx, args: &[Value]) -> crate::Result<Value> {
     use crate::eval::ops::index;
     let list = args.first().cloned().unwrap_or(Value::Undef);
     // assert( is_list(list) || is_string(list), "Invalid list." )

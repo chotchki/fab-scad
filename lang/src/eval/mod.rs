@@ -793,6 +793,9 @@ enum Task<'a> {
     Intrinsic {
         func: intrinsics::Intrinsic,
         nargs: usize,
+        /// The call site's scope — the dynamic chain a closure the native INVOKES reads (AR.17's
+        /// `FnCtx`), exactly the `caller` an interpreted `CallValue` would thread.
+        scope: Scope,
     },
     /// AB.2: pop `args.len()` evaluated echo-arg values, emit the `ECHO:` line, then schedule `body`
     /// (or push undef). Scheduling the body as a TASK is the point — an `echo(…) body` chain (or a
@@ -1172,9 +1175,11 @@ pub fn bench_intrinsic(name: &str, params: &[Parameter], body: &Expr) -> Option<
     intrinsics::resolve(name, params, body).map(|e| e.func)
 }
 
-/// The intrinsic tier's entry shape: the call's evaluated args in, value out — the very fn pointer
-/// [`Task::Intrinsic`] dispatches.
-pub type IntrinsicFn = fn(&[Value]) -> crate::Result<Value>;
+/// The intrinsic tier's entry shape: the [`crate::surface::FnCtx`] capability plus the call's
+/// evaluated args in, value out — the very fn pointer [`Task::Intrinsic`] dispatches (AR.17).
+/// A bench caller with no evaluator passes [`crate::surface::NoClosures`], which declines any
+/// closure invocation loudly.
+pub type IntrinsicFn = fn(&dyn crate::surface::FnCtx, &[Value]) -> crate::Result<Value>;
 
 /// Evaluate an expression with a function-store [`Ctx`] in scope (so calls resolve). At the top level
 /// the lexical `global` (the base for function bodies) IS the eval scope.
@@ -1557,12 +1562,13 @@ fn eval_with_global<'a>(
                 values.truncate(start);
                 values.push(result);
             }
-            Task::Intrinsic { func, nargs } => {
+            Task::Intrinsic { func, nargs, scope } => {
                 // Same shape as run_builtin: the args are the top `nargs` of the value stack. Fallible — an
                 // intrinsic for a function with an inline `assert` raises exactly where the interpreted body
                 // would (the `?` aborts the whole eval, same as a failed interpreted assert).
                 let start = values.len().saturating_sub(nargs);
-                let result = func(&values[start..])?;
+                let fx = module_rt::NativeFnCtx { ctx, caller: scope };
+                let result = func(&fx, &values[start..])?;
                 values.truncate(start);
                 values.push(result);
             }
@@ -2270,6 +2276,11 @@ fn resolve_ident(name: &str, scope: &Scope, ctx: &Ctx<'_>) -> Value {
     reason = "shares the fallible crate::Result<()> dispatcher contract with the eval_node call paths; \
               regains an Err path when arity/charge checks land — kept for signature symmetry"
 )]
+#[allow(
+    clippy::too_many_lines,
+    reason = "the resolution ladder reads top to bottom in dispatch order — splitting a rung out \
+              would hide the precedence the comments walk"
+)]
 fn dispatch_call<'a>(
     callee: &'a Expr,
     args: &'a [Arg],
@@ -2310,7 +2321,11 @@ fn dispatch_call<'a>(
                     if args.len() > params.len() {
                         ctx.warn("Too many unnamed arguments supplied".to_string());
                     }
-                    tasks.push(Task::Intrinsic { func, nargs });
+                    tasks.push(Task::Intrinsic {
+                        func,
+                        nargs,
+                        scope: scope.clone(),
+                    });
                     for arg in args[..nargs].iter().rev() {
                         tasks.push(Task::Eval(&arg.value, scope.clone()));
                     }
@@ -2339,6 +2354,7 @@ fn dispatch_call<'a>(
                     tasks.push(Task::Intrinsic {
                         func,
                         nargs: params.len(),
+                        scope: scope.clone(),
                     });
                     for (slot, param) in arg_slots.into_iter().zip(params).rev() {
                         match (slot, &param.default) {

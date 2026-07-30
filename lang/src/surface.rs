@@ -266,6 +266,49 @@ pub trait LibrarySurface: Send + Sync {
     fn callables(&self) -> &'static [Decl];
 }
 
+/// What a generated FUNCTION native may ask of the evaluator (AR.17) — and it is exactly ONE
+/// thing: invoke a function VALUE. A `Value::Function` carries a `closure_id` indexing the
+/// evaluator's closure table — the body lives in evaluator context, not in the value — so a
+/// ctx-less native structurally cannot call one, which is why computed callees (`f(a)(b)`),
+/// function literals and the AN.10 local-binding shape all declined.
+///
+/// DELIBERATELY NARROW, the `ModuleCtx` discipline one level down: "takes a ctx" means precisely
+/// "may call a closure", not "may reach the evaluator". A capability surface is bounded by what
+/// the trait declares, not by whether a parameter exists. `&self` for `ModuleCtx`'s reason —
+/// nested native calls (`f(fx, &[g(fx, x)?])`) fight the borrow checker under `&mut`, and the
+/// evaluator's state is already behind `RefCell`/`Cell`.
+pub trait FnCtx {
+    /// Invoke `callee` as a function with `args` (written names attached, `$`-names included),
+    /// resolving through the interpreter's own `CallValue` machinery: letrec group re-injection,
+    /// self LAST, defaults in the closure's lexical base, the name-less recursion verdict.
+    ///
+    /// # Errors
+    /// Whatever the body raises, or a decline (`Unimplemented`) where no evaluator exists
+    /// ([`NoClosures`]) — the whole call re-interprets, so the gap costs speed, never an answer.
+    fn call_value(
+        &self,
+        callee: &Value,
+        args: &[(Option<&'static str>, Value)],
+    ) -> crate::Result<Value>;
+}
+
+/// The [`FnCtx`] for call sites with NO evaluator — benches, oracles, value-level batteries. It
+/// REFUSES loudly rather than answering `undef`: a native reaching a closure here is a visible
+/// decline, not a silent wrong value.
+pub struct NoClosures;
+
+impl FnCtx for NoClosures {
+    fn call_value(
+        &self,
+        _callee: &Value,
+        _args: &[(Option<&'static str>, Value)],
+    ) -> crate::Result<Value> {
+        Err(crate::Error::Unimplemented(
+            "a closure invocation with no evaluator — re-interpreting",
+        ))
+    }
+}
+
 /// The NATIVE REGISTRY's surface — the callables served from the STATIC table the transpiler
 /// emits into `generated.rs` (AR.14.5), not derived-then-leaked at process start. The third
 /// declaration of the same library (fab-gen's runtime `from_registry`) dies against this impl:

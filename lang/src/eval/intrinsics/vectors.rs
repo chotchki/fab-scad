@@ -9,7 +9,7 @@ use crate::parser::BinOp;
 /// BOSL2 `unit(v, error=[[["ASSERT"]]])` — `v/norm(v)`, raising on a non-vector and (by default) on a
 /// near-zero one; a caller-provided `error` value is returned instead of raising. The near-zero compare and
 /// division route through ops so a `List`-shaped vector (norm → undef) degrades exactly as interpreted.
-pub(super) fn unit(args: &[Value]) -> crate::Result<Value> {
+pub(super) fn unit(_fx: &dyn crate::surface::FnCtx, args: &[Value]) -> crate::Result<Value> {
     let v = args.first().cloned().unwrap_or(Value::Undef);
     if !is_vector_core(&v) {
         return Err(bosl_assert("unit: invalid vector"));
@@ -46,7 +46,7 @@ pub(super) fn unit_sentinel() -> Value {
     clippy::float_cmp,
     reason = "the reference's len(v1)==3 IS an exact f64 equality on an integer length"
 )]
-pub(super) fn vector_angle(args: &[Value]) -> crate::Result<Value> {
+pub(super) fn vector_angle(fx: &dyn crate::surface::FnCtx, args: &[Value]) -> crate::Result<Value> {
     let v1 = args.first().cloned().unwrap_or(Value::Undef);
     let v2 = args.get(1).cloned().unwrap_or(Value::Undef);
     let v3 = args.get(2).cloned().unwrap_or(Value::Undef);
@@ -57,7 +57,7 @@ pub(super) fn vector_angle(args: &[Value]) -> crate::Result<Value> {
     if !ok1 {
         return Err(bosl_assert("vector_angle: bad arguments"));
     }
-    let ok2 = is_vector(std::slice::from_ref(&v1))?.is_truthy()
+    let ok2 = is_vector(fx, std::slice::from_ref(&v1))?.is_truthy()
         || is_consistent(std::slice::from_ref(&v1))?.is_truthy();
     if !ok2 {
         return Err(bosl_assert("vector_angle: bad arguments"));
@@ -83,8 +83,8 @@ pub(super) fn vector_angle(args: &[Value]) -> crate::Result<Value> {
     };
     let vecs0 = ops::index(vecs.clone(), &Value::Num(0.0));
     let vecs1 = ops::index(vecs, &Value::Num(1.0));
-    let ok3 = is_vector(&[vecs0.clone(), Value::Num(2.0)])?.is_truthy()
-        || is_vector(&[vecs0.clone(), Value::Num(3.0)])?.is_truthy();
+    let ok3 = is_vector(fx, &[vecs0.clone(), Value::Num(2.0)])?.is_truthy()
+        || is_vector(fx, &[vecs0.clone(), Value::Num(3.0)])?.is_truthy();
     if !ok3 {
         return Err(bosl_assert("vector_angle: bad arguments"));
     }
@@ -96,7 +96,7 @@ pub(super) fn vector_angle(args: &[Value]) -> crate::Result<Value> {
     }
     let dot = ops::apply_binary(BinOp::Mul, vecs0, vecs1);
     let ratio = ops::apply_binary(BinOp::Div, dot, ops::apply_binary(BinOp::Mul, norm0, norm1));
-    let clamped = constrain_clamp(&ratio, -1.0, 1.0)?;
+    let clamped = constrain_clamp(fx, &ratio, -1.0, 1.0)?;
     Ok(builtins::apply("acos", std::slice::from_ref(&clamped)))
 }
 
@@ -105,7 +105,7 @@ pub(super) fn vector_angle(args: &[Value]) -> crate::Result<Value> {
 /// Value-const guard proves the bakes). `is_vector(v, zero=false)` is the guarded-eps nonzero check —
 /// reproduced by calling the real [`is_vector`] native with the same arg shape. Recursion is
 /// depth-bounded (three-point → two-vector → done), so plain Rust recursion is safe.
-pub(super) fn vector_axis(args: &[Value]) -> crate::Result<Value> {
+pub(super) fn vector_axis(fx: &dyn crate::surface::FnCtx, args: &[Value]) -> crate::Result<Value> {
     let v1 = args.first().cloned().unwrap_or(Value::Undef);
     let v2 = args.get(1).cloned().unwrap_or(Value::Undef);
     let v3 = args.get(2).cloned().unwrap_or(Value::Undef);
@@ -114,10 +114,13 @@ pub(super) fn vector_axis(args: &[Value]) -> crate::Result<Value> {
         if !is_consistent(std::slice::from_ref(&trio))?.is_truthy() {
             return Err(bosl_assert("vector_axis: bad arguments"));
         }
-        return vector_axis(&[
-            ops::apply_binary(BinOp::Sub, v1, v2.clone()),
-            ops::apply_binary(BinOp::Sub, v3, v2),
-        ]);
+        return vector_axis(
+            fx,
+            &[
+                ops::apply_binary(BinOp::Sub, v1, v2.clone()),
+                ops::apply_binary(BinOp::Sub, v3, v2),
+            ],
+        );
     }
     if !matches!(v3, Value::Undef) {
         return Err(bosl_assert("vector_axis: bad arguments"));
@@ -129,13 +132,13 @@ pub(super) fn vector_axis(args: &[Value]) -> crate::Result<Value> {
         let ll = builtins::apply("len", std::slice::from_ref(&v1));
         let e = |i: f64| ops::index(v1.clone(), &Value::Num(i));
         return if ops::apply_binary(BinOp::Eq, ll, Value::Num(2.0)).is_truthy() {
-            vector_axis(&[e(0.0), e(1.0)])
+            vector_axis(fx, &[e(0.0), e(1.0)])
         } else {
-            vector_axis(&[e(0.0), e(1.0), e(2.0)])
+            vector_axis(fx, &[e(0.0), e(1.0), e(2.0)])
         };
     }
     let nonzero = |v: &Value| -> crate::Result<bool> {
-        Ok(is_vector(&[v.clone(), Value::Undef, Value::Bool(false)])?.is_truthy())
+        Ok(is_vector(fx, &[v.clone(), Value::Undef, Value::Bool(false)])?.is_truthy())
     };
     let pair = build_vector(vec![v1.clone(), v2.clone()]);
     if !(nonzero(&v1)? && nonzero(&v2)? && is_consistent(std::slice::from_ref(&pair))?.is_truthy())
@@ -162,18 +165,18 @@ pub(super) fn vector_axis(args: &[Value]) -> crate::Result<Value> {
         w2
     } else if gt_eps(ops::apply_binary(
         BinOp::Sub,
-        v_abs(std::slice::from_ref(&w2))?,
+        v_abs(fx, std::slice::from_ref(&w2))?,
         bosl_up(),
     )) {
         bosl_up()
     } else {
         bosl_right()
     };
-    unit(&[builtins::apply("cross", &[w1, w3])])
+    unit(fx, &[builtins::apply("cross", &[w1, w3])])
 }
 
 /// BOSL2 `v_abs(v)` — element-wise absolute value of a vector; each element through the REAL `abs`.
-pub(super) fn v_abs(args: &[Value]) -> crate::Result<Value> {
+pub(super) fn v_abs(_fx: &dyn crate::surface::FnCtx, args: &[Value]) -> crate::Result<Value> {
     let v = args.first().cloned().unwrap_or(Value::Undef);
     if !is_vector_core(&v) {
         return Err(bosl_assert("v_abs: invalid vector"));
@@ -187,10 +190,10 @@ pub(super) fn v_abs(args: &[Value]) -> crate::Result<Value> {
 
 /// BOSL2 `v_theta(v)` — the polar angle of a 2D/3D vector, through the REAL `atan2` and the same `.y`/`.x`
 /// member reads the body does.
-pub(super) fn v_theta(args: &[Value]) -> crate::Result<Value> {
+pub(super) fn v_theta(fx: &dyn crate::surface::FnCtx, args: &[Value]) -> crate::Result<Value> {
     let v = args.first().cloned().unwrap_or(Value::Undef);
-    let ok = is_vector(&[v.clone(), Value::Num(2.0)])?.is_truthy()
-        || is_vector(&[v.clone(), Value::Num(3.0)])?.is_truthy();
+    let ok = is_vector(fx, &[v.clone(), Value::Num(2.0)])?.is_truthy()
+        || is_vector(fx, &[v.clone(), Value::Num(3.0)])?.is_truthy();
     if !ok {
         return Err(bosl_assert("v_theta: invalid vector"));
     }
@@ -218,7 +221,7 @@ pub(super) fn bosl_right() -> Value {
     clippy::float_cmp,
     reason = "the reference's len(tree)==1 / ==4 ARE exact f64 equalities on integer lengths"
 )]
-pub(super) fn bt_search(args: &[Value]) -> crate::Result<Value> {
+pub(super) fn bt_search(_fx: &dyn crate::surface::FnCtx, args: &[Value]) -> crate::Result<Value> {
     let query = args.first().cloned().unwrap_or(Value::Undef);
     let r = args.get(1).cloned().unwrap_or(Value::Undef);
     let points = args.get(2).cloned().unwrap_or(Value::Undef);

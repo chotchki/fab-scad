@@ -122,7 +122,8 @@ fn tier_ladder_is_nan() {
     acc = 0;
     let t = Instant::now();
     for i in 0..iters {
-        if let Ok(Value::Bool(b)) = intrinsic(&[Value::Num(arg(i))]) {
+        if let Ok(Value::Bool(b)) = intrinsic(&fab_lang::surface::NoClosures, &[Value::Num(arg(i))])
+        {
             acc += u64::from(b);
         }
     }

@@ -36,13 +36,16 @@ pub(super) fn is_2d_transform(args: &[Value]) -> crate::Result<Value> {
     clippy::float_cmp,
     reason = "the reference's dimension checks (len==tdim, datadim==2) ARE exact f64 equalities"
 )]
-pub(super) fn apply_transform(args: &[Value]) -> crate::Result<Value> {
+pub(super) fn apply_transform(
+    fx: &dyn crate::surface::FnCtx,
+    args: &[Value],
+) -> crate::Result<Value> {
     let transform = args.first().cloned().unwrap_or(Value::Undef);
     let points = args.get(1).cloned().unwrap_or(Value::Undef);
-    if !is_matrix(std::slice::from_ref(&transform))?.is_truthy() {
+    if !is_matrix(fx, std::slice::from_ref(&transform))?.is_truthy() {
         return Err(bosl_assert("_apply: invalid transformation matrix"));
     }
-    if !is_matrix(std::slice::from_ref(&points))?.is_truthy() {
+    if !is_matrix(fx, std::slice::from_ref(&points))?.is_truthy() {
         return Err(bosl_assert("_apply: invalid points list"));
     }
     // is_matrix guarantees lists-of-vectors, so the dims are plain numbers.
@@ -196,7 +199,10 @@ pub(super) fn affine3d_identity(_args: &[Value]) -> crate::Result<Value> {
 /// already aligned ([`approx`] on the unit vectors), a z-rotation when both are planar (`v_theta` deltas),
 /// else Rodrigues from [`vector_axis`]/[`vector_angle`] with the reference's exact cell arithmetic
 /// (left-associated products, `.x/.y/.z` through the real member op, `sin`/`cos` through the builtins).
-pub(super) fn affine3d_rot_from_to(args: &[Value]) -> crate::Result<Value> {
+pub(super) fn affine3d_rot_from_to(
+    fx: &dyn crate::surface::FnCtx,
+    args: &[Value],
+) -> crate::Result<Value> {
     let from = args.first().cloned().unwrap_or(Value::Undef);
     let to = args.get(1).cloned().unwrap_or(Value::Undef);
     if !is_vector_core(&from) || !is_vector_core(&to) {
@@ -207,22 +213,23 @@ pub(super) fn affine3d_rot_from_to(args: &[Value]) -> crate::Result<Value> {
     if !ops::apply_binary(BinOp::Eq, lf, lt).is_truthy() {
         return Err(bosl_assert("affine3d_rot_from_to: length mismatch"));
     }
-    let from = unit(&[point3d(std::slice::from_ref(&from))?])?;
-    let to = unit(&[point3d(std::slice::from_ref(&to))?])?;
-    if approx(&[from.clone(), to.clone()])?.is_truthy() {
+    let from = unit(fx, &[point3d(std::slice::from_ref(&from))?])?;
+    let to = unit(fx, &[point3d(std::slice::from_ref(&to))?])?;
+    if approx(fx, &[from.clone(), to.clone()])?.is_truthy() {
         return affine3d_identity(&[]);
     }
     let z0 = |v: &Value| {
         ops::apply_binary(BinOp::Eq, ops::member(v.clone(), "z"), Value::Num(0.0)).is_truthy()
     };
     if z0(&from) && z0(&to) {
-        let theta =
-            |v: &Value| -> crate::Result<Value> { v_theta(&[point2d(std::slice::from_ref(v))?]) };
+        let theta = |v: &Value| -> crate::Result<Value> {
+            v_theta(fx, &[point2d(std::slice::from_ref(v))?])
+        };
         let dt = ops::apply_binary(BinOp::Sub, theta(&to)?, theta(&from)?);
         return affine3d_zrot(std::slice::from_ref(&dt));
     }
-    let u = vector_axis(&[from.clone(), to.clone()])?;
-    let ang = vector_angle(&[from, to])?;
+    let u = vector_axis(fx, &[from.clone(), to.clone()])?;
+    let ang = vector_angle(fx, &[from, to])?;
     let c = builtins::apply("cos", std::slice::from_ref(&ang));
     let c2 = ops::apply_binary(BinOp::Sub, Value::Num(1.0), c.clone());
     let s = builtins::apply("sin", std::slice::from_ref(&ang));
@@ -381,21 +388,24 @@ fn reverse_val(list: &Value) -> crate::Result<Value> {
 /// VNF (with the mirror-detection determinant + `vnf_reverse_faces` lane), bezier patch, or plain point
 /// list. Branch ORDER and the vnf `let`'s eager `newvnf`-before-determinant evaluation preserved (the
 /// `_apply` asserts fire first, which is what makes [`det_reachable`]'s 4×4-only proof hold).
-pub(super) fn apply(args: &[Value]) -> crate::Result<Value> {
+pub(super) fn apply(fx: &dyn crate::surface::FnCtx, args: &[Value]) -> crate::Result<Value> {
     let transform = args.first().cloned().unwrap_or(Value::Undef);
     let points = args.get(1).cloned().unwrap_or(Value::Undef);
     if ops::apply_binary(BinOp::Eq, points.clone(), build_vector(Vec::new())).is_truthy() {
         return Ok(build_vector(Vec::new()));
     }
     if is_vector_core(&points) {
-        let one = apply_transform(&[transform, build_vector(vec![points])])?;
+        let one = apply_transform(fx, &[transform, build_vector(vec![points])])?;
         return Ok(ops::index(one, &Value::Num(0.0)));
     }
-    if super::geometry::is_vnf_check(&points)? {
-        let new_verts = apply_transform(&[
-            transform.clone(),
-            ops::index(points.clone(), &Value::Num(0.0)),
-        ])?;
+    if super::geometry::is_vnf_check(fx, &points)? {
+        let new_verts = apply_transform(
+            fx,
+            &[
+                transform.clone(),
+                ops::index(points.clone(), &Value::Num(0.0)),
+            ],
+        )?;
         let faces = ops::index(points, &Value::Num(1.0));
         let newvnf = build_vector(vec![new_verts, faces.clone()]);
         let lt = builtins::apply("len", std::slice::from_ref(&transform));
@@ -419,21 +429,24 @@ pub(super) fn apply(args: &[Value]) -> crate::Result<Value> {
     let p0 = ops::index(points.clone(), &Value::Num(0.0));
     if super::v_is_list(&points)
         && super::v_is_list(&p0)
-        && super::shape::is_vector(std::slice::from_ref(&ops::index(p0, &Value::Num(0.0))))?
+        && super::shape::is_vector(fx, std::slice::from_ref(&ops::index(p0, &Value::Num(0.0))))?
             .is_truthy()
     {
         let rows: crate::Result<Vec<Value>> = iter_values_raw(&points)
             .iter()
-            .map(|x| apply_transform(&[transform.clone(), x.clone()]))
+            .map(|x| apply_transform(fx, &[transform.clone(), x.clone()]))
             .collect();
         return Ok(build_vector(rows?));
     }
-    apply_transform(&[transform, points])
+    apply_transform(fx, &[transform, points])
 }
 
 /// BOSL2 `affine3d_translate(v=[0,0,0])` — the translation matrix; the slot-defaulting
 /// `[for (i=[0:2]) default(v[i],0)]` runs through the real [`default`](super::lists::default).
-pub(super) fn affine3d_translate(args: &[Value]) -> crate::Result<Value> {
+pub(super) fn affine3d_translate(
+    fx: &dyn crate::surface::FnCtx,
+    args: &[Value],
+) -> crate::Result<Value> {
     let v = args
         .first()
         .cloned()
@@ -442,7 +455,10 @@ pub(super) fn affine3d_translate(args: &[Value]) -> crate::Result<Value> {
         return Err(bosl_assert("affine3d_translate: v must be a list"));
     }
     let slot = |i: f64| -> crate::Result<Value> {
-        super::generated::default(&[ops::index(v.clone(), &Value::Num(i)), Value::Num(0.0)])
+        super::generated::default(
+            fx,
+            &[ops::index(v.clone(), &Value::Num(i)), Value::Num(0.0)],
+        )
     };
     let (vx, vy, vz) = (slot(0.0)?, slot(1.0)?, slot(2.0)?);
     let z = || Value::Num(0.0);
@@ -492,7 +508,10 @@ fn rodrigues_rows(u: &Value, c: &Value, c2: &Value, s: &Value) -> Value {
 
 /// BOSL2 `affine3d_rot_by_axis(u=UP, ang=0)` — Rodrigues about an arbitrary axis; identity shortcut through
 /// the real [`approx`] (numeric lane only — `ang` is asserted finite).
-pub(super) fn affine3d_rot_by_axis(args: &[Value]) -> crate::Result<Value> {
+pub(super) fn affine3d_rot_by_axis(
+    fx: &dyn crate::surface::FnCtx,
+    args: &[Value],
+) -> crate::Result<Value> {
     let u = args
         .first()
         .cloned()
@@ -501,13 +520,13 @@ pub(super) fn affine3d_rot_by_axis(args: &[Value]) -> crate::Result<Value> {
     if !v_is_finite(&ang) {
         return Err(bosl_assert("affine3d_rot_by_axis: angle must be finite"));
     }
-    if !super::shape::is_vector(&[u.clone(), Value::Num(3.0)])?.is_truthy() {
+    if !super::shape::is_vector(fx, &[u.clone(), Value::Num(3.0)])?.is_truthy() {
         return Err(bosl_assert("affine3d_rot_by_axis: u must be a 3-vector"));
     }
-    if approx(&[ang.clone(), Value::Num(0.0)])?.is_truthy() {
+    if approx(fx, &[ang.clone(), Value::Num(0.0)])?.is_truthy() {
         return affine3d_identity(&[]);
     }
-    let u = unit(std::slice::from_ref(&u))?;
+    let u = unit(fx, std::slice::from_ref(&u))?;
     let c = builtins::apply("cos", std::slice::from_ref(&ang));
     let c2 = ops::apply_binary(BinOp::Sub, Value::Num(1.0), c.clone());
     let s = builtins::apply("sin", std::slice::from_ref(&ang));
@@ -517,7 +536,7 @@ pub(super) fn affine3d_rot_by_axis(args: &[Value]) -> crate::Result<Value> {
 /// The `rot`-reachable slice of BOSL2 `move`: `cp` is asserted a VECTOR in rot before `move(cp)` runs, so
 /// the string lane (`centroid`/`mean`/`pointlist_bounds`) is unreachable — this is the
 /// `affine3d_translate(point3d(v))` matrix branch with `p` defaulted.
-fn move_mat(v: &Value) -> crate::Result<Value> {
+fn move_mat(fx: &dyn crate::surface::FnCtx, v: &Value) -> crate::Result<Value> {
     let len_ok = |k: f64| {
         ops::apply_binary(
             BinOp::Eq,
@@ -529,16 +548,19 @@ fn move_mat(v: &Value) -> crate::Result<Value> {
     if !(is_vector_core(v) && (len_ok(3.0) || len_ok(2.0))) {
         return Err(bosl_assert("move: invalid value for v"));
     }
-    affine3d_translate(&[point3d(std::slice::from_ref(v))?])
+    affine3d_translate(fx, &[point3d(std::slice::from_ref(v))?])
 }
 
 /// The `rot`-reachable slice of BOSL2 `rot_inverse` (the `reverse=true` lane): transpose the rotation
 /// block, verify `approx(determinant(T), 1)` through [`det_reachable`], and reassemble via the pinned
 /// `hstack`'s reachable semantics — row-wise `each`-splice of the transposed block and the negated
 /// back-rotated translation, plus the `[0,…,0,1]` bottom row.
-fn rot_inverse_val(t: &Value) -> crate::Result<Value> {
-    if !super::shape::is_matrix(&[t.clone(), Value::Undef, Value::Undef, Value::Bool(true)])?
-        .is_truthy()
+fn rot_inverse_val(fx: &dyn crate::surface::FnCtx, t: &Value) -> crate::Result<Value> {
+    if !super::shape::is_matrix(
+        fx,
+        &[t.clone(), Value::Undef, Value::Undef, Value::Bool(true)],
+    )?
+    .is_truthy()
     {
         return Err(bosl_assert("rot_inverse: matrix must be square"));
     }
@@ -561,7 +583,7 @@ fn rot_inverse_val(t: &Value) -> crate::Result<Value> {
             .collect(),
     );
     let transpart = build_vector(idxs.iter().map(|row| at(row, &last)).collect());
-    if !approx(&[det_reachable(t)?, Value::Num(1.0)])?.is_truthy() {
+    if !approx(fx, &[det_reachable(t)?, Value::Num(1.0)])?.is_truthy() {
         return Err(bosl_assert("rot_inverse: matrix is not a rotation"));
     }
     // hstack(rotpart, -rotpart*transpart): row-wise each-splice — a row's elements then the scalar
@@ -596,7 +618,7 @@ fn rot_inverse_val(t: &Value) -> crate::Result<Value> {
 /// centerpoint conjugation through the translate matrices; optional inversion through the
 /// [`rot_inverse_val`] slice; `p` applied through the native [`apply`] unless it is the `_NO_ARG` sentinel
 /// (the O.8 guard proves the bake).
-pub(super) fn rot(args: &[Value]) -> crate::Result<Value> {
+pub(super) fn rot(fx: &dyn crate::surface::FnCtx, args: &[Value]) -> crate::Result<Value> {
     let a = args.first().cloned().unwrap_or(Value::Num(0.0));
     let v = args.get(1).cloned().unwrap_or(Value::Undef);
     let cp = args.get(2).cloned().unwrap_or(Value::Undef);
@@ -610,7 +632,8 @@ pub(super) fn rot(args: &[Value]) -> crate::Result<Value> {
     }
     let nonzero_vec = |x: &Value| -> crate::Result<bool> {
         Ok(matches!(x, Value::Undef)
-            || super::shape::is_vector(&[x.clone(), Value::Undef, Value::Bool(false)])?.is_truthy())
+            || super::shape::is_vector(fx, &[x.clone(), Value::Undef, Value::Bool(false)])?
+                .is_truthy())
     };
     if !nonzero_vec(&from)? {
         return Err(bosl_assert("rot: 'from' must be a non-zero vector"));
@@ -622,11 +645,11 @@ pub(super) fn rot(args: &[Value]) -> crate::Result<Value> {
         return Err(bosl_assert("rot: 'v' must be a non-zero vector"));
     }
     if !(matches!(cp, Value::Undef)
-        || super::shape::is_vector(std::slice::from_ref(&cp))?.is_truthy())
+        || super::shape::is_vector(fx, std::slice::from_ref(&cp))?.is_truthy())
     {
         return Err(bosl_assert("rot: 'cp' must be a vector"));
     }
-    if !(v_is_finite(&a) || super::shape::is_vector(std::slice::from_ref(&a))?.is_truthy()) {
+    if !(v_is_finite(&a) || super::shape::is_vector(fx, std::slice::from_ref(&a))?.is_truthy()) {
         return Err(bosl_assert("rot: 'a' must be a finite scalar or a vector"));
     }
     if !matches!(reverse, Value::Bool(_)) {
@@ -641,14 +664,14 @@ pub(super) fn rot(args: &[Value]) -> crate::Result<Value> {
         let from3 = point3d(std::slice::from_ref(&from))?;
         let to3 = point3d(std::slice::from_ref(&to))?;
         mul(
-            affine3d_rot_from_to(&[from3.clone(), to3])?,
-            affine3d_rot_by_axis(&[from3, a])?,
+            affine3d_rot_from_to(fx, &[from3.clone(), to3])?,
+            affine3d_rot_by_axis(fx, &[from3, a])?,
         )
     } else if !matches!(v, Value::Undef) {
         if !a_is_num {
             return Err(bosl_assert("rot: 'a' must be a number with v"));
         }
-        affine3d_rot_by_axis(&[v, a])?
+        affine3d_rot_by_axis(fx, &[v, a])?
     } else if a_is_num {
         affine3d_zrot(std::slice::from_ref(&a))?
     } else {
@@ -663,10 +686,10 @@ pub(super) fn rot(args: &[Value]) -> crate::Result<Value> {
     } else {
         let cp3 = point3d(std::slice::from_ref(&cp))?;
         let neg_cp = ops::apply_unary(crate::parser::UnOp::Neg, cp3.clone());
-        mul(mul(move_mat(&cp3)?, m1), move_mat(&neg_cp)?)
+        mul(mul(move_mat(fx, &cp3)?, m1), move_mat(fx, &neg_cp)?)
     };
     let m3 = if reverse.is_truthy() {
-        rot_inverse_val(&m2)?
+        rot_inverse_val(fx, &m2)?
     } else {
         m2
     };
@@ -676,7 +699,7 @@ pub(super) fn rot(args: &[Value]) -> crate::Result<Value> {
             if ops::apply_binary(BinOp::Eq, p.clone(), super::no_arg_value()).is_truthy() {
                 Ok(m3)
             } else {
-                apply(&[m3, p.clone()])
+                apply(fx, &[m3, p.clone()])
             }
         }
     }

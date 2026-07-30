@@ -398,104 +398,6 @@ impl<'a> NativeModuleCtx<'a, '_, '_> {
         ))
     }
 
-    /// Invoke a function VALUE — the native mirror of the interpreter's `Task::CallValue` apply
-    /// (AR.14.4.5): fetch the body from the closure table, rebuild the letrec base (every group
-    /// sibling reconstructed with this env, self LAST so the invoked value's identity wins), bind
-    /// through the same two-phase `bind_values` the named rung uses, and evaluate synchronously.
-    ///
-    /// The recursion verdict is the interpreter's own for a closure call: `push_call` receives
-    /// NO name from `CallValue` (a closure has no static name), so the overflow message is the
-    /// name-less variant — matched exactly, because the console is part of the answer.
-    fn call_value(
-        &self,
-        callee: &Value,
-        fcall: &crate::surface::FnCall<'_>,
-    ) -> crate::Result<Value> {
-        let ctx = self.ctx;
-        let Value::Function {
-            closure_id,
-            env,
-            self_name,
-            group,
-            bound_this,
-            ..
-        } = callee
-        else {
-            // `lookup_local_function` only returns `Value::Function` — but decline rather than
-            // panic if that contract ever moves: the interpreter is always the safe answer.
-            return Err(crate::Error::Unimplemented(
-                "a non-function value in call position — re-interpreting",
-            ));
-        };
-        // AF.5's extracted-method receiver threads through `push_call`'s `this` slot, which this
-        // mirror does not carry. Decline, loudly — a dropped receiver would bind `undef` where
-        // the interpreter binds the object.
-        if bound_this.is_some() {
-            return Err(crate::Error::Unimplemented(
-                "a bound-method callee in a compiled body — re-interpreting",
-            ));
-        }
-        let depth = ctx.live_calls.get() + 1;
-        if depth > super::MAX_CALL_DEPTH {
-            return Err(crate::Error::Eval(format!(
-                "Recursion detected calling function (over {} calls in flight)",
-                super::MAX_CALL_DEPTH
-            )));
-        }
-        ctx.live_calls.set(depth);
-        let _live = LiveCallTicket(ctx);
-        // The closure table holds `'a` borrows — copy them out and DROP the borrow before the
-        // body runs, because the body may itself register closures.
-        let (params, body) = {
-            let closures = ctx.closures.borrow();
-            closures[*closure_id]
-        };
-        // The letrec re-injection, verbatim from `Task::CallValue`: our CoW frames can't
-        // self-reference at capture time, so every call rebuilds NAME→value for the group and
-        // binds self LAST (the exact invoked value, its own group intact, wins over the group's
-        // reconstructed self-entry).
-        let needs_inject = self_name.is_some() || group.as_ref().is_some_and(|g| !g.is_empty());
-        let base = if needs_inject {
-            let mut b = env.child();
-            if let Some(g) = group {
-                for s in g.iter() {
-                    b.bind(
-                        std::rc::Rc::clone(&s.name),
-                        super::nested_fn_value(s, env, Some(g)),
-                    );
-                }
-            }
-            if let Some(n) = self_name {
-                b.bind(std::rc::Rc::clone(n), callee.clone());
-            }
-            b
-        } else {
-            env.clone()
-        };
-        let owned: Vec<(Option<std::rc::Rc<str>>, Value)> = fcall
-            .args
-            .iter()
-            .map(|(n, v)| (n.map(std::rc::Rc::from), v.clone()))
-            .collect();
-        let (slots, dollars, diagnostics) =
-            super::fill_slots(params, owned.iter().map(|(n, v)| (n.as_ref(), v.clone())));
-        for d in diagnostics {
-            ctx.warn(d);
-        }
-        // Defaults evaluate in the closure's lexical `base` (push_call's rule); the dynamic
-        // parent is this module's call scope, so the body reads the caller's reaching
-        // `$`-context, as interpreted.
-        let call = bind_values(
-            params,
-            &slots,
-            &dollars,
-            &self.call_scope.borrow(),
-            &base,
-            ctx,
-        )?;
-        super::eval_with_ctx(body, &call, ctx)
-    }
-
     /// The flattened top-level statements of the resolved body — the exact list the interpreter's
     /// `EvalNodes` hoists and collects defs over (bare `{}` blocks flattened inline, nothing
     /// deeper). `None` when this ctx has no body AST (the child-thunk bridge).
@@ -765,7 +667,7 @@ impl ModuleCtx for NativeModuleCtx<'_, '_, '_> {
         // interpreter's ladder takes.
         let local = self.call_scope.borrow().lookup_local_function(name);
         if let Some(callee) = local {
-            return self.call_value(&callee, fcall);
+            return invoke_function_value(ctx, &self.call_scope.borrow(), &callee, fcall.args);
         }
         // Rung 2: the island's user functions — which SHADOW builtins, per OpenSCAD.
         if let Some(&((params, body), home)) = ctx.functions.get(name) {
@@ -924,6 +826,124 @@ impl ModuleCtx for NativeModuleCtx<'_, '_, '_> {
         }
         self.ctx.local_modules.borrow_mut().push((store, captured));
         Ok(())
+    }
+}
+
+/// Invoke a function VALUE — the native mirror of the interpreter's `Task::CallValue` apply
+/// (AR.14.4.5, shared with AR.17's `FnCtx`): fetch the body from the closure table, rebuild the
+/// letrec base (every group sibling reconstructed with this env, self LAST so the invoked value's
+/// identity wins), bind through the same two-phase `bind_values` the named rung uses, and
+/// evaluate synchronously. `caller` is the invoke site's scope — the dynamic chain the body's
+/// `$`-reads walk.
+///
+/// The recursion verdict is the interpreter's own for a closure call: `push_call` receives NO
+/// name from `CallValue` (a closure has no static name), so the overflow message is the
+/// name-less variant — matched exactly, because the console is part of the answer.
+///
+/// # Errors
+/// Whatever the body raises, the recursion verdict, or a decline for the shapes this mirror does
+/// not carry (a bound-method receiver, a non-function value).
+#[allow(
+    clippy::similar_names,
+    reason = "caller/callee are the two roles of a call — the standard words beat invented ones"
+)]
+pub(super) fn invoke_function_value(
+    ctx: &super::Ctx<'_>,
+    caller: &Scope,
+    callee: &Value,
+    args: &[(Option<&'static str>, Value)],
+) -> crate::Result<Value> {
+    let Value::Function {
+        closure_id,
+        env,
+        self_name,
+        group,
+        bound_this,
+        ..
+    } = callee
+    else {
+        // Callers hand this only function values — but decline rather than panic if that
+        // contract ever moves: the interpreter is always the safe answer.
+        return Err(crate::Error::Unimplemented(
+            "a non-function value in call position — re-interpreting",
+        ));
+    };
+    // AF.5's extracted-method receiver threads through `push_call`'s `this` slot, which this
+    // mirror does not carry. Decline, loudly — a dropped receiver would bind `undef` where
+    // the interpreter binds the object.
+    if bound_this.is_some() {
+        return Err(crate::Error::Unimplemented(
+            "a bound-method callee in a compiled body — re-interpreting",
+        ));
+    }
+    let depth = ctx.live_calls.get() + 1;
+    if depth > super::MAX_CALL_DEPTH {
+        return Err(crate::Error::Eval(format!(
+            "Recursion detected calling function (over {} calls in flight)",
+            super::MAX_CALL_DEPTH
+        )));
+    }
+    ctx.live_calls.set(depth);
+    let _live = LiveCallTicket(ctx);
+    // The closure table holds `'a` borrows — copy them out and DROP the borrow before the
+    // body runs, because the body may itself register closures.
+    let (params, body) = {
+        let closures = ctx.closures.borrow();
+        closures[*closure_id]
+    };
+    // The letrec re-injection, verbatim from `Task::CallValue`: our CoW frames can't
+    // self-reference at capture time, so every call rebuilds NAME→value for the group and
+    // binds self LAST (the exact invoked value, its own group intact, wins over the group's
+    // reconstructed self-entry).
+    let needs_inject = self_name.is_some() || group.as_ref().is_some_and(|g| !g.is_empty());
+    let base = if needs_inject {
+        let mut b = env.child();
+        if let Some(g) = group {
+            for s in g.iter() {
+                b.bind(
+                    std::rc::Rc::clone(&s.name),
+                    super::nested_fn_value(s, env, Some(g)),
+                );
+            }
+        }
+        if let Some(n) = self_name {
+            b.bind(std::rc::Rc::clone(n), callee.clone());
+        }
+        b
+    } else {
+        env.clone()
+    };
+    let owned: Vec<(Option<std::rc::Rc<str>>, Value)> = args
+        .iter()
+        .map(|(n, v)| (n.map(std::rc::Rc::from), v.clone()))
+        .collect();
+    let (slots, dollars, diagnostics) =
+        super::fill_slots(params, owned.iter().map(|(n, v)| (n.as_ref(), v.clone())));
+    for d in diagnostics {
+        ctx.warn(d);
+    }
+    // Defaults evaluate in the closure's lexical `base` (push_call's rule); the dynamic parent
+    // is the invoke site's scope, so the body reads the caller's reaching `$`-context, as
+    // interpreted.
+    let call = bind_values(params, &slots, &dollars, caller, &base, ctx)?;
+    super::eval_with_ctx(body, &call, ctx)
+}
+
+/// The [`crate::surface::FnCtx`] a FUNCTION native runs under (AR.17): the evaluator plus the
+/// call site's scope — the dynamic chain an invoked closure's body reads. Narrow by trait, not
+/// by discipline: `FnCtx` declares `call_value` and nothing else.
+pub(super) struct NativeFnCtx<'a, 'c> {
+    pub(super) ctx: &'c super::Ctx<'a>,
+    pub(super) caller: Scope,
+}
+
+impl crate::surface::FnCtx for NativeFnCtx<'_, '_> {
+    fn call_value(
+        &self,
+        callee: &Value,
+        args: &[(Option<&'static str>, Value)],
+    ) -> crate::Result<Value> {
+        invoke_function_value(self.ctx, &self.caller, callee, args)
     }
 }
 

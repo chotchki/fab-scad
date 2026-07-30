@@ -60,9 +60,8 @@ pub(super) use fingerprint::fingerprint;
 // paths valid from the tests submodule.
 #[cfg(test)]
 use affine::{
-    affine3d_identity, affine3d_rot_by_axis, affine3d_rot_from_to, affine3d_translate,
-    affine3d_xrot, affine3d_yrot, affine3d_zrot, apply, apply_transform, ident, is_2d_transform,
-    rot,
+    affine3d_identity, affine3d_rot_by_axis, affine3d_rot_from_to, affine3d_translate, apply,
+    apply_transform, ident, is_2d_transform, rot,
 };
 #[cfg(test)]
 use generated::{_fab_poc_isup as poc_isup, _fab_poc_near0 as poc_near0, _fab_poc_sq as poc_sq};
@@ -87,15 +86,20 @@ use shape::{all_nonzero, is_consistent, is_matrix, is_path, is_vector, same_shap
 #[cfg(test)]
 use vectors::{bt_search, unit, v_abs, v_theta, vector_angle, vector_axis};
 
-/// A hand-written native implementation of a specific user function. Receives the call's POSITIONAL argument
+/// A native implementation of a specific user function. Receives the call's POSITIONAL argument
 /// VALUES (already evaluated, in source order) and returns the result — the same `Value` the interpreted body
 /// would, or the same ERROR (a BOSL2 function with an inline `assert(…)` raises when the assert fails, so the
 /// ABI is fallible; the native reproduces the assert's CONTROL FLOW — it errors where the body errors — not
-/// its diagnostic string, which is a locator, not output). PURE: a function of its args only (no scope, no
-/// `$`-vars); the dispatch gate ([`super`]) only routes all-positional calls here, so the ABI stays a flat
-/// slice. An intrinsic implements the WHOLE function for the arg shapes it accepts; it hardcodes the
-/// reference's parameter defaults (it matches that exact source), so a short positional call still gets it.
-pub(super) type Intrinsic = fn(&[Value]) -> crate::Result<Value>;
+/// its diagnostic string, which is a locator, not output). The dispatch gate ([`super`]) only routes
+/// all-positional calls here, so the args stay a flat slice. An intrinsic implements the WHOLE function for
+/// the arg shapes it accepts; it hardcodes the reference's parameter defaults (it matches that exact source),
+/// so a short positional call still gets it.
+///
+/// AR.17: the ctx is the ONE capability a native may use beyond its args — invoking a function
+/// VALUE ([`crate::surface::FnCtx`], deliberately that narrow). A native that never reaches a
+/// closure ignores it (`_fx`), and purity is preserved WHERE IT MATTERS by the trait's surface,
+/// not by the absence of a parameter — the module side's `ModuleCtx` discipline one level down.
+pub(super) type Intrinsic = fn(&dyn crate::surface::FnCtx, &[Value]) -> crate::Result<Value>;
 
 /// One registered intrinsic: the exact function it stands in for. `reference` is the VERBATIM source of that
 /// function (one `function name(params) = body;`) — the single source of truth: its fingerprint gates

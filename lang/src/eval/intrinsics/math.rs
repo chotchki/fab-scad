@@ -6,14 +6,19 @@ use crate::parser::BinOp;
 
 /// Value-level `approx` for native callers (regions) — a SHIM over the GENERATED native, so the
 /// semantics live in exactly one place. The clones are the slice ABI's price at this seam.
-pub(super) fn approx_val(a: &Value, b: &Value, eps: &Value) -> crate::Result<Value> {
-    super::generated::approx(&[a.clone(), b.clone(), eps.clone()])
+pub(super) fn approx_val(
+    fx: &dyn crate::surface::FnCtx,
+    a: &Value,
+    b: &Value,
+    eps: &Value,
+) -> crate::Result<Value> {
+    super::generated::approx(fx, &[a.clone(), b.clone(), eps.clone()])
 }
 
 /// BOSL2 `sum(v, dflt=0)` — the numeric/vector fast lane is the reference's own trick: `[for(i=v) 1]*v`
 /// (a ones-vector dot / vector-matrix product through the interpreter's `*`); anything else consistent
 /// (matrices…) folds through [`sum_tail`] with a `v[0]*0` seed.
-pub(super) fn sum(args: &[Value]) -> crate::Result<Value> {
+pub(super) fn sum(_fx: &dyn crate::surface::FnCtx, args: &[Value]) -> crate::Result<Value> {
     let v = args.first().cloned().unwrap_or(Value::Undef);
     let dflt = args.get(1).cloned().unwrap_or(Value::Num(0.0));
     if ops::apply_binary(BinOp::Eq, v.clone(), build_vector(Vec::new())).is_truthy() {
@@ -63,7 +68,12 @@ pub(super) fn sum_tail(args: &[Value]) -> crate::Result<Value> {
 /// one of those (undef, NaN — `is_num(NaN)` is false) falls to the reference's `assert(false)`. The matrix
 /// branch (`flatten`/`list_to_matrix`) is unreachable from `vector_angle`'s asserted shapes — LOUD error, not
 /// a silent wrong answer, if that proof ever breaks.
-pub(super) fn constrain_clamp(v: &Value, minval: f64, maxval: f64) -> crate::Result<Value> {
+pub(super) fn constrain_clamp(
+    fx: &dyn crate::surface::FnCtx,
+    v: &Value,
+    minval: f64,
+    maxval: f64,
+) -> crate::Result<Value> {
     let clamp1 = |f: &Value| {
         builtins::apply(
             "max",
@@ -79,7 +89,7 @@ pub(super) fn constrain_clamp(v: &Value, minval: f64, maxval: f64) -> crate::Res
             let out: Vec<Value> = iter_values_raw(v).iter().map(clamp1).collect();
             Ok(build_vector(out))
         }
-        _ if is_matrix(std::slice::from_ref(v))?.is_truthy() => Err(crate::Error::Eval(
+        _ if is_matrix(fx, std::slice::from_ref(v))?.is_truthy() => Err(crate::Error::Eval(
             "constrain: matrix input unreachable from vector_angle (intrinsic guard)".to_string(),
         )),
         Value::List(_) | Value::NumList(_) => {

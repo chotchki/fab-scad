@@ -213,14 +213,20 @@ fn fast_equals_slow_bit_for_bit() {
     for x in [0.0, 1.0, -3.5, 2.5, 1e9, std::f64::consts::PI, -0.0] {
         let input = [Value::Num(x)];
         assert!(
-            same_result(&poc_sq(&input), &interpret(reference, &input)),
+            same_result(
+                &poc_sq(&crate::surface::NoClosures, &input),
+                &interpret(reference, &input)
+            ),
             "intrinsic vs interpreter diverged at x={x}"
         );
     }
     // A non-number arg: the intrinsic must ALSO match the interpreter's undef (x*x on a string → undef).
     let bad = [Value::string("nope")];
     assert!(
-        same_result(&poc_sq(&bad), &interpret(reference, &bad)),
+        same_result(
+            &poc_sq(&crate::surface::NoClosures, &bad),
+            &interpret(reference, &bad)
+        ),
         "undef path must match too"
     );
 }
@@ -245,7 +251,10 @@ fn generated_band2_matches_the_interpreter() {
     ];
     for input in cases {
         assert!(
-            same_result(&func(input), &interpret(reference, input)),
+            same_result(
+                &func(&crate::surface::NoClosures, input),
+                &interpret(reference, input)
+            ),
             "band2 diverged on {input:?}"
         );
     }
@@ -279,7 +288,7 @@ fn deep_nesting_declines_to_the_interpreter() {
         reference_of("is_nan").expect("registered"),
     ];
     let input = [a, b];
-    let fast = func(&input);
+    let fast = func(&crate::surface::NoClosures, &input);
     assert!(
         same_result(
             &fast,
@@ -313,7 +322,10 @@ fn generated_band3_matches_the_interpreter() {
     ];
     for input in cases {
         assert!(
-            same_result(&func(input), &interpret(reference, input)),
+            same_result(
+                &func(&crate::surface::NoClosures, input),
+                &interpret(reference, input)
+            ),
             "band3 diverged on {input:?}"
         );
     }
@@ -346,7 +358,10 @@ fn generated_band4_matches_the_interpreter() {
     ];
     for input in cases {
         assert!(
-            same_result(&func(input), &interpret(reference, input)),
+            same_result(
+                &func(&crate::surface::NoClosures, input),
+                &interpret(reference, input)
+            ),
             "band4 diverged on {input:?}"
         );
     }
@@ -367,7 +382,10 @@ fn generated_poc_sq_matches_the_interpreter_on_lists() {
     ] {
         let input = [v];
         assert!(
-            same_result(&poc_sq(&input), &interpret(reference, &input)),
+            same_result(
+                &poc_sq(&crate::surface::NoClosures, &input),
+                &interpret(reference, &input)
+            ),
             "generated vs interpreter diverged on {:?}",
             input[0]
         );
@@ -413,7 +431,7 @@ fn fast_equals_slow_fab_poc_near0() {
         let args = [v.clone()];
         assert!(
             same_result(
-                &super::poc_near0(&args),
+                &super::poc_near0(&crate::surface::NoClosures, &args),
                 &interpret_with_consts(reference, &eps, &args)
             ),
             "intrinsic vs interpreter diverged at {v:?}"
@@ -498,7 +516,7 @@ fn fast_equals_slow_shape_band() {
         let args = [v.clone()];
         assert!(
             same_result(
-                &super::list_pattern(&args),
+                &super::list_pattern(&crate::surface::NoClosures, &args),
                 &interpret_with_deps(lp_ref, &[], &args)
             ),
             "_list_pattern diverged on {v:?}"
@@ -506,7 +524,7 @@ fn fast_equals_slow_shape_band() {
         let nd_ref = reference_of("num_defined").unwrap();
         assert!(
             same_result(
-                &super::num_defined(&args),
+                &super::num_defined(&crate::surface::NoClosures, &args),
                 &interpret_with_deps(nd_ref, &[], &args)
             ),
             "num_defined diverged on {v:?}"
@@ -621,7 +639,7 @@ fn fast_equals_slow_epsilon_family() {
                 }
                 assert!(
                     same_result(
-                        &super::approx(&args),
+                        &super::approx(&crate::surface::NoClosures, &args),
                         &interpret_with_deps_consts(approx_ref, &approx_deps, &consts, &args)
                     ),
                     "approx diverged on ({a:?}, {b:?}, eps {eps:?})"
@@ -653,7 +671,7 @@ fn fast_equals_slow_epsilon_family() {
             let args = [x.clone(), m.clone()];
             assert!(
                 same_result(
-                    &super::posmod(&args),
+                    &super::posmod(&crate::surface::NoClosures, &args),
                     &interpret_with_deps_consts(posmod_ref, &posmod_deps, &consts, &args)
                 ),
                 "posmod diverged on ({x:?}, {m:?})"
@@ -678,7 +696,7 @@ fn fast_equals_slow_epsilon_family() {
             args.extend(tail.iter().cloned());
             assert!(
                 same_result(
-                    &super::idx(&args),
+                    &super::idx(&crate::surface::NoClosures, &args),
                     &interpret_with_deps_consts(idx_ref, &idx_deps, &consts, &args)
                 ),
                 "idx diverged on ({v:?}, tail {tail:?})"
@@ -697,7 +715,7 @@ fn fast_equals_slow_epsilon_family() {
             }
             assert!(
                 same_result(
-                    &super::all_nonzero(&args),
+                    &super::all_nonzero(&crate::surface::NoClosures, &args),
                     &interpret_with_deps_consts(anz_ref, &anz_deps, &consts, &args)
                 ),
                 "all_nonzero diverged on ({v:?}, eps {eps:?})"
@@ -722,7 +740,7 @@ fn fast_equals_slow_epsilon_family() {
             let args = [v.clone(), length.clone()];
             assert!(
                 same_result(
-                    &super::is_vector(&args),
+                    &super::is_vector(&crate::surface::NoClosures, &args),
                     &interpret_with_deps_consts(iv_ref, &iv_deps, &consts, &args)
                 ),
                 "is_vector diverged on ({v:?}, length {length:?})"
@@ -739,7 +757,7 @@ fn fast_equals_slow_epsilon_family() {
                 ];
                 assert!(
                     same_result(
-                        &super::is_vector(&args),
+                        &super::is_vector(&crate::surface::NoClosures, &args),
                         &interpret_with_deps_consts(iv_ref, &iv_deps, &consts, &args)
                     ),
                     "is_vector diverged on ({v:?}, zero {zero:?}, eps {eps:?})"
@@ -750,7 +768,7 @@ fn fast_equals_slow_epsilon_family() {
             let args = [v.clone(), Value::Undef, Value::Undef, anz.clone()];
             assert!(
                 same_result(
-                    &super::is_vector(&args),
+                    &super::is_vector(&crate::surface::NoClosures, &args),
                     &interpret_with_deps_consts(iv_ref, &iv_deps, &consts, &args)
                 ),
                 "is_vector diverged on ({v:?}, all_nonzero {anz:?})"
@@ -792,7 +810,7 @@ fn fast_equals_slow_epsilon_family() {
                     let args = [a.clone(), m.clone(), n.clone(), square.clone()];
                     assert!(
                         same_result(
-                            &super::is_matrix(&args),
+                            &super::is_matrix(&crate::surface::NoClosures, &args),
                             &interpret_with_deps_consts(im_ref, &im_deps, &consts, &args)
                         ),
                         "is_matrix diverged on ({a:?}, m {m:?}, n {n:?}, square {square:?})"
@@ -861,7 +879,7 @@ fn fast_equals_slow_earcut_band() {
             }
             assert!(
                 same_result(
-                    &super::tri_class(&args),
+                    &super::tri_class(&crate::surface::NoClosures, &args),
                     &interpret_with_deps_consts(tc_ref, &[], &consts, &args)
                 ),
                 "_tri_class diverged on ({tri:?}, eps {eps:?})"
@@ -894,7 +912,7 @@ fn fast_equals_slow_earcut_band() {
                 }
                 assert!(
                     same_result(
-                        &super::is_at_left(&args),
+                        &super::is_at_left(&crate::surface::NoClosures, &args),
                         &interpret_with_deps_consts(al_ref, &al_deps, &consts, &args)
                     ),
                     "_is_at_left diverged on ({pt:?}, {line:?}, eps {eps:?})"
@@ -1021,7 +1039,7 @@ fn fast_equals_slow_earcut_band() {
     for args in &cases {
         assert!(
             same_result(
-                &super::none_inside(args),
+                &super::none_inside(&crate::surface::NoClosures, args),
                 &interpret_with_deps_consts(ni_ref, &ni_deps, &consts, args)
             ),
             "_none_inside diverged on {args:?}"
@@ -1075,7 +1093,7 @@ fn fast_equals_slow_aggregate_band() {
             }
             assert!(
                 same_result(
-                    &super::sum(&args),
+                    &super::sum(&crate::surface::NoClosures, &args),
                     &interpret_with_deps_consts(sum_ref, &sum_deps, &consts, &args)
                 ),
                 "sum diverged on ({v:?}, dflt {dflt:?})"
@@ -1131,7 +1149,7 @@ fn fast_equals_slow_aggregate_band() {
             }
             assert!(
                 same_result(
-                    &super::unit(&args),
+                    &super::unit(&crate::surface::NoClosures, &args),
                     &interpret_with_deps_consts(unit_ref, &unit_deps, &consts, &args)
                 ),
                 "unit diverged on ({v:?}, error {err:?})"
@@ -1214,7 +1232,7 @@ fn fast_equals_slow_aggregate_band() {
             let args = [t.clone(), p.clone()];
             assert!(
                 same_result(
-                    &super::apply_transform(&args),
+                    &super::apply_transform(&crate::surface::NoClosures, &args),
                     &interpret_with_deps_consts(ap_ref, &ap_deps, &consts, &args)
                 ),
                 "_apply diverged on ({t:?}, {p:?})"
@@ -1285,7 +1303,7 @@ fn fast_equals_slow_aggregate_band() {
     for args in &bt_cases {
         assert!(
             same_result(
-                &super::bt_search(args),
+                &super::bt_search(&crate::surface::NoClosures, args),
                 &interpret_with_deps_consts(bt_ref, &bt_deps, &consts, args)
             ),
             "_bt_search diverged on {args:?}"
@@ -1324,7 +1342,7 @@ fn fast_equals_slow_aggregate_band() {
     for args in &va_cases {
         assert!(
             same_result(
-                &super::vector_angle(args),
+                &super::vector_angle(&crate::surface::NoClosures, args),
                 &interpret_with_deps_consts(va_ref, &va_deps, &consts, args)
             ),
             "vector_angle diverged on {args:?}"
@@ -1367,7 +1385,7 @@ fn fast_equals_slow_band5_batch1() {
     for args in &pd_cases {
         assert!(
             same_result(
-                &super::point_dist(args),
+                &super::point_dist(&crate::surface::NoClosures, args),
                 &interpret_with_deps_consts(pd_ref, &select_knot, &consts, args)
             ),
             "_point_dist diverged on {args:?}"
@@ -1406,7 +1424,7 @@ fn fast_equals_slow_band5_batch1() {
             }
             assert!(
                 same_result(
-                    &super::is_point_on_line(&args),
+                    &super::is_point_on_line(&crate::surface::NoClosures, &args),
                     &interpret_with_deps_consts(ipol_ref, &ipol_deps, &consts, &args)
                 ),
                 "_is_point_on_line diverged on ({pt:?}, {line:?}, {b:?})"
@@ -1488,7 +1506,7 @@ fn fast_equals_slow_band5_batch1() {
         let args = [vnf.clone()];
         assert!(
             same_result(
-                &super::vnf_centroid(&args),
+                &super::vnf_centroid(&crate::surface::NoClosures, &args),
                 &interpret_with_deps_consts(vc_ref, &vc_deps, &consts, &args)
             ),
             "_vnf_centroid diverged on {vnf:?}"
@@ -1530,7 +1548,7 @@ fn fast_equals_slow_band5_batch1() {
     for args in &gs_cases {
         assert!(
             same_result(
-                &super::group_sort_by_index(args),
+                &super::group_sort_by_index(&crate::surface::NoClosures, args),
                 &interpret_with_deps_consts(gs_ref, &[], &consts, args)
             ),
             "_group_sort_by_index diverged on {args:?}"
@@ -1576,16 +1594,20 @@ fn fast_equals_slow_band5_batch2() {
         Some(Value::Undef),
     ];
     for (name, func) in [
-        ("affine3d_zrot", super::affine3d_zrot as super::Intrinsic),
-        ("affine3d_xrot", super::affine3d_xrot),
-        ("affine3d_yrot", super::affine3d_yrot),
+        // The GENERATED versions — the hand ones are helpers on their way out (AR.17 stage A).
+        (
+            "affine3d_zrot",
+            super::generated::affine3d_zrot as super::Intrinsic,
+        ),
+        ("affine3d_xrot", super::generated::affine3d_xrot),
+        ("affine3d_yrot", super::generated::affine3d_yrot),
     ] {
         let r = reference_of(name).unwrap();
         for ang in &angles {
             let args: Vec<Value> = ang.iter().cloned().collect();
             assert!(
                 same_result(
-                    &func(&args),
+                    &func(&crate::surface::NoClosures, &args),
                     &interpret_with_deps_consts(r, &rot_deps, &consts, &args)
                 ),
                 "{name} diverged on {ang:?}"
@@ -1637,7 +1659,7 @@ fn fast_equals_slow_band5_batch2() {
     for args in &ge_cases {
         assert!(
             same_result(
-                &super::get_ear(args),
+                &super::get_ear(&crate::surface::NoClosures, args),
                 &interpret_with_deps_consts(ge_ref, &ge_deps, &consts, args)
             ),
             "_get_ear diverged on {args:?}"
@@ -1718,7 +1740,7 @@ fn fast_equals_slow_band5_batch2() {
     for args in &ip_cases {
         assert!(
             same_result(
-                &super::is_path(args),
+                &super::is_path(&crate::surface::NoClosures, args),
                 &interpret_with_deps_consts(ip_ref, &ip_deps, &consts, args)
             ),
             "is_path diverged on {args:?}"
@@ -1744,7 +1766,7 @@ fn fast_equals_slow_fab_poc_isup() {
         let args = [v.clone()];
         assert!(
             same_result(
-                &super::poc_isup(&args),
+                &super::poc_isup(&crate::surface::NoClosures, &args),
                 &interpret_with_deps_consts(reference, &[], &consts, &args)
             ),
             "_fab_poc_isup diverged on {v:?}"
@@ -1838,7 +1860,7 @@ fn fast_equals_slow_o9_tree2a_apply() {
     for args in &cases {
         assert!(
             same_result(
-                &super::apply(args),
+                &super::apply(&crate::surface::NoClosures, args),
                 &interpret_with_deps_consts(ap_ref, &ap_deps, &consts, args)
             ),
             "apply diverged on {args:?}"
@@ -1935,7 +1957,7 @@ fn fast_equals_slow_o9_tree2b_rot() {
         let args = [v.clone()];
         assert!(
             same_result(
-                &super::affine3d_translate(&args),
+                &super::affine3d_translate(&crate::surface::NoClosures, &args),
                 &interpret_with_deps_consts(tr_ref, &tr_deps, &consts, &args)
             ),
             "affine3d_translate diverged on {v:?}"
@@ -1953,7 +1975,7 @@ fn fast_equals_slow_o9_tree2b_rot() {
     for args in &ba_cases {
         assert!(
             same_result(
-                &super::affine3d_rot_by_axis(args),
+                &super::affine3d_rot_by_axis(&crate::surface::NoClosures, args),
                 &interpret_with_deps_consts(ba_ref, &deps, &consts, args)
             ),
             "affine3d_rot_by_axis diverged on {args:?}"
@@ -2024,7 +2046,7 @@ fn fast_equals_slow_o9_tree2b_rot() {
     for args in &cases {
         assert!(
             same_result(
-                &super::rot(args),
+                &super::rot(&crate::surface::NoClosures, args),
                 &interpret_with_deps_consts(rot_ref, &deps, &consts, args)
             ),
             "rot diverged on {args:?}"
@@ -2062,14 +2084,14 @@ fn fast_equals_slow_o9_tree1() {
         let args = [v.clone()];
         assert!(
             same_result(
-                &super::v_abs(&args),
+                &super::v_abs(&crate::surface::NoClosures, &args),
                 &interpret_with_deps_consts(va_ref, &iv_knot, &consts, &args)
             ),
             "v_abs diverged on {v:?}"
         );
         assert!(
             same_result(
-                &super::v_theta(&args),
+                &super::v_theta(&crate::surface::NoClosures, &args),
                 &interpret_with_deps_consts(vt_ref, &iv_knot, &consts, &args)
             ),
             "v_theta diverged on {v:?}"
@@ -2141,7 +2163,7 @@ fn fast_equals_slow_o9_tree1() {
     for args in &vx_cases {
         assert!(
             same_result(
-                &super::vector_axis(args),
+                &super::vector_axis(&crate::surface::NoClosures, args),
                 &interpret_with_deps_consts(vx_ref, &vx_deps, &consts, args)
             ),
             "vector_axis diverged on {args:?}"
@@ -2185,7 +2207,7 @@ fn fast_equals_slow_o9_tree1() {
     for args in &rft_cases {
         assert!(
             same_result(
-                &super::affine3d_rot_from_to(args),
+                &super::affine3d_rot_from_to(&crate::surface::NoClosures, args),
                 &interpret_with_deps_consts(rft_ref, &rft_deps, &consts, args)
             ),
             "affine3d_rot_from_to diverged on {args:?}"
@@ -2306,13 +2328,19 @@ fn leaf_predicate_intrinsics_match_their_references_bit_for_bit() {
         for input in &cases {
             let one = [input.clone()];
             assert!(
-                same_result(&func(&one), &interpret(reference, &one)),
+                same_result(
+                    &func(&crate::surface::NoClosures, &one),
+                    &interpret(reference, &one)
+                ),
                 "{name}({input:?}) diverged"
             );
         }
         // Zero args: the single param defaults to undef in both paths.
         assert!(
-            same_result(&func(&[]), &interpret(reference, &[])),
+            same_result(
+                &func(&crate::surface::NoClosures, &[]),
+                &interpret(reference, &[])
+            ),
             "{name}() diverged"
         );
     }
@@ -2331,12 +2359,18 @@ fn is_nan_matches_its_reference_bit_for_bit() {
     for input in value_battery() {
         let one = [input.clone()];
         assert!(
-            same_result(&func(&one), &interpret(reference, &one)),
+            same_result(
+                &func(&crate::surface::NoClosures, &one),
+                &interpret(reference, &one)
+            ),
             "is_nan({input:?}) diverged"
         );
     }
     assert!(
-        same_result(&func(&[]), &interpret(reference, &[])),
+        same_result(
+            &func(&crate::surface::NoClosures, &[]),
+            &interpret(reference, &[])
+        ),
         "is_nan() diverged"
     );
 }
@@ -2355,12 +2389,18 @@ fn is_finite_matches_its_reference_bit_for_bit() {
     for input in value_battery() {
         let one = [input.clone()];
         assert!(
-            same_result(&func(&one), &interpret_with_deps(reference, &deps, &one)),
+            same_result(
+                &func(&crate::surface::NoClosures, &one),
+                &interpret_with_deps(reference, &deps, &one)
+            ),
             "is_finite({input:?}) diverged"
         );
     }
     assert!(
-        same_result(&func(&[]), &interpret_with_deps(reference, &deps, &[])),
+        same_result(
+            &func(&crate::surface::NoClosures, &[]),
+            &interpret_with_deps(reference, &deps, &[])
+        ),
         "is_finite() diverged"
     );
 }
@@ -2378,7 +2418,10 @@ fn last_matches_its_reference_bit_for_bit() {
     for input in value_battery() {
         let one = [input.clone()];
         assert!(
-            same_result(&func(&one), &interpret(reference, &one)),
+            same_result(
+                &func(&crate::surface::NoClosures, &one),
+                &interpret(reference, &one)
+            ),
             "last({input:?}) diverged"
         );
     }
@@ -2387,7 +2430,10 @@ fn last_matches_its_reference_bit_for_bit() {
         (0..7).map(|i| Value::Num(f64::from(i))).collect::<Vec<_>>(),
     )];
     assert!(
-        same_result(&func(&long), &interpret(reference, &long)),
+        same_result(
+            &func(&crate::surface::NoClosures, &long),
+            &interpret(reference, &long)
+        ),
         "last(0..6) diverged"
     );
 }
@@ -2405,13 +2451,19 @@ fn default_matches_its_reference_bit_for_bit() {
     for v in &battery {
         let one = [v.clone()];
         assert!(
-            same_result(&func(&one), &interpret(reference, &one)),
+            same_result(
+                &func(&crate::surface::NoClosures, &one),
+                &interpret(reference, &one)
+            ),
             "default({v:?}) diverged"
         );
         for d in &battery {
             let two = [v.clone(), d.clone()];
             assert!(
-                same_result(&func(&two), &interpret(reference, &two)),
+                same_result(
+                    &func(&crate::surface::NoClosures, &two),
+                    &interpret(reference, &two)
+                ),
                 "default({v:?}, {d:?}) diverged"
             );
         }
@@ -2431,7 +2483,10 @@ fn is_liststr_matches_its_reference_bit_for_bit() {
     for input in value_battery() {
         let one = [input.clone()];
         assert!(
-            same_result(&func(&one), &interpret_with_deps(reference, &deps, &one)),
+            same_result(
+                &func(&crate::surface::NoClosures, &one),
+                &interpret_with_deps(reference, &deps, &one)
+            ),
             "_is_liststr({input:?}) diverged"
         );
     }
@@ -2451,7 +2506,10 @@ fn point3d_matches_its_reference_bit_for_bit() {
     for input in value_battery() {
         let one = [input.clone()];
         assert!(
-            same_result(&func(&one), &interpret(reference, &one)),
+            same_result(
+                &func(&crate::surface::NoClosures, &one),
+                &interpret(reference, &one)
+            ),
             "point3d({input:?}) diverged"
         );
     }
@@ -2473,12 +2531,18 @@ fn point3d_matches_its_reference_bit_for_bit() {
         let p = Value::list(s);
         let one = [p.clone()];
         assert!(
-            same_result(&func(&one), &interpret(reference, &one)),
+            same_result(
+                &func(&crate::surface::NoClosures, &one),
+                &interpret(reference, &one)
+            ),
             "point3d({p:?}) diverged"
         );
         let two = [p.clone(), Value::Num(-1.0)];
         assert!(
-            same_result(&func(&two), &interpret(reference, &two)),
+            same_result(
+                &func(&crate::surface::NoClosures, &two),
+                &interpret(reference, &two)
+            ),
             "point3d({p:?}, -1) diverged"
         );
     }
@@ -2597,7 +2661,7 @@ fn select_matches_its_reference_bit_for_bit() {
     for inputs in &cases {
         assert!(
             same_result(
-                &func(inputs),
+                &func(&crate::surface::NoClosures, inputs),
                 &interpret_with_deps(reference, &deps, inputs)
             ),
             "select diverged on {inputs:?}"
@@ -2665,7 +2729,11 @@ fn fast_equals_slow_o10_dep_tier() {
         let args = vec![list.clone(), Value::Num(1e-9)];
         assert!(
             same_result(
-                &super::regions::list_wrap_val(list, &Value::Num(1e-9)),
+                &super::regions::list_wrap_val(
+                    &crate::surface::NoClosures,
+                    list,
+                    &Value::Num(1e-9)
+                ),
                 &interpret_with_deps_consts(lw_ref, &lw_deps, &consts, &args)
             ),
             "list_wrap diverged on {list:?}"
@@ -2678,7 +2746,11 @@ fn fast_equals_slow_o10_dep_tier() {
             .collect();
         assert!(
             same_result(
-                &super::regions::are_ends_equal_val(list, &Value::Num(1e-9)),
+                &super::regions::are_ends_equal_val(
+                    &crate::surface::NoClosures,
+                    list,
+                    &Value::Num(1e-9)
+                ),
                 &interpret_with_deps_consts(ae_ref, &ae_deps, &consts, &args)
             ),
             "are_ends_equal diverged on {list:?}"
@@ -2705,7 +2777,7 @@ fn fast_equals_slow_o10_dep_tier() {
         let args = vec![s1.clone(), s2.clone(), Value::Num(1e-9)];
         assert!(
             same_result(
-                &super::regions::gli_val(s1, s2, &Value::Num(1e-9)),
+                &super::regions::gli_val(&crate::surface::NoClosures, s1, s2, &Value::Num(1e-9)),
                 &interpret_with_deps_consts(gli_ref, &gli_deps, &consts, &args)
             ),
             "_general_line_intersection diverged on {s1:?} x {s2:?}"
@@ -2826,7 +2898,7 @@ fn fast_equals_slow_o10_dep_tier() {
     ] {
         assert!(
             same_result(
-                &super::regions::mean_val(v),
+                &super::regions::mean_val(&crate::surface::NoClosures, v),
                 &interpret_with_deps_consts(mean_ref, &mean_deps, &consts, std::slice::from_ref(v))
             ),
             "mean diverged on {v:?}"
@@ -2911,7 +2983,7 @@ fn fast_equals_slow_o10_dep_tier() {
     for pts in [&pts_2d, &pts_negz, &pts_3d, &raw_nums, &Value::Num(1.0)] {
         assert!(
             same_result(
-                &super::regions::pointlist_bounds_val(pts),
+                &super::regions::pointlist_bounds_val(&crate::surface::NoClosures, pts),
                 &interpret_with_deps_consts(pb_ref, &pb_deps, &consts, std::slice::from_ref(pts))
             ),
             "pointlist_bounds diverged on {pts:?}"
@@ -3030,7 +3102,7 @@ fn fast_equals_slow_o10_vector_search() {
         let args = vec![q.clone(), r.clone(), target.clone()];
         assert!(
             same_result(
-                &super::regions::vector_search_val(q, r, target),
+                &super::regions::vector_search_val(&crate::surface::NoClosures, q, r, target),
                 &interpret_with_deps_consts(vs_ref, &deps, &consts, &args)
             ),
             "vector_search diverged on q={q:?} r={r:?} target={target:?}"
@@ -3047,12 +3119,19 @@ fn fast_equals_slow_o10_vector_search() {
         &Value::Bool(false),
     )
     .unwrap();
-    let tree = super::regions::bt_tree_val(&small, &ind, &Value::Num(5.0)).unwrap();
+    let tree =
+        super::regions::bt_tree_val(&crate::surface::NoClosures, &small, &ind, &Value::Num(5.0))
+            .unwrap();
     let prebuilt = Value::list(vec![small.clone(), tree.clone()]);
     let args = vec![q1.clone(), Value::Num(25.0), prebuilt.clone()];
     assert!(
         same_result(
-            &super::regions::vector_search_val(&q1, &Value::Num(25.0), &prebuilt),
+            &super::regions::vector_search_val(
+                &crate::surface::NoClosures,
+                &q1,
+                &Value::Num(25.0),
+                &prebuilt
+            ),
             &interpret_with_deps_consts(vs_ref, &deps, &consts, &args)
         ),
         "vector_search diverged on the pre-built tree target"
@@ -3077,7 +3156,12 @@ fn fast_equals_slow_o10_vector_search() {
         let args = vec![(*pts).clone(), ind.clone(), Value::Num(leafsize)];
         assert!(
             same_result(
-                &super::regions::bt_tree_val(pts, &ind, &Value::Num(leafsize)),
+                &super::regions::bt_tree_val(
+                    &crate::surface::NoClosures,
+                    pts,
+                    &ind,
+                    &Value::Num(leafsize)
+                ),
                 &interpret_with_deps_consts(bt_ref, &deps, &consts, &args)
             ),
             "_bt_tree diverged on n={n} leafsize={leafsize}"
@@ -3244,7 +3328,7 @@ fn fast_equals_slow_o10_region_monster() {
         let args = vec![r1.clone(), r2.clone(), c1.clone(), c2.clone(), eps.clone()];
         assert!(
             same_result(
-                &super::regions::rri_val(&args),
+                &super::regions::rri_val(&crate::surface::NoClosures, &args),
                 &interpret_with_deps_consts(rri_ref, &deps, &consts, &args)
             ),
             "_rri diverged on closed=({c1:?},{c2:?}) eps={eps:?} r1={r1:?}"
@@ -4799,7 +4883,7 @@ fn a_sibling_call_with_a_hole_takes_the_callees_default() {
         &[Value::Undef][..],
         &[][..],
     ] {
-        let fast = func(input);
+        let fast = func(&crate::surface::NoClosures, input);
         let slow = interpret_with_deps(reference, &deps, input);
         assert!(
             same_result(&fast, &slow),

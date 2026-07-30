@@ -2368,6 +2368,15 @@ pub const GENERATED_ENTRIES: &[&str] = &[
     "v_theta",
     "vector_axis",
     "affine3d_rot_by_axis",
+    // AR.17 stage D — the clean missing callees (select's cone stood behind `is_range`,
+    // apply/_vnf_centroid behind `is_vnf`), then the cone they unblock.
+    "is_range",
+    "is_vnf",
+    "select",
+    "_none_inside",
+    "_point_dist",
+    "_get_ear",
+    "_vnf_centroid",
 ];
 
 /// Record a CALL by name: builtin or user dep. Deliberately IGNORES the lexical scope — a name

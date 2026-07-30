@@ -71,12 +71,17 @@ use generated::{approx, idx, posmod};
 // generated versions under the old names, which is strictly better: the tests cover what ships.
 #[cfg(test)]
 use generated::{
+    _get_ear as get_ear, _none_inside as none_inside, _point_dist as point_dist,
+    _vnf_centroid as vnf_centroid,
+};
+#[cfg(test)]
+use generated::{
     _group_sort_by_index as group_sort_by_index, _is_at_left as is_at_left,
     _is_point_on_line as is_point_on_line, _list_pattern as list_pattern, _tri_class as tri_class,
     num_defined,
 };
 #[cfg(test)]
-use geometry::{get_ear, none_inside, point_dist, point2d, vnf_centroid};
+use geometry::point2d;
 #[cfg(test)]
 use lists::{force_list, in_list};
 #[cfg(test)]
@@ -661,7 +666,7 @@ pub(super) static REGISTRY: &[Entry] = &[
         consts_v: &[],
         deps: &["is_vector", "is_range", "is_finite", "is_nan"],
         builtins: &["len", "is_list", "is_string", "is_num", "norm", "is_undef"],
-        func: lists::select,
+        func: generated::select,
     },
     // The CONST-GUARD POC (O.5.1, a synthetic collision-proof name like `_fab_poc_sq`): its reference bakes
     // the top-level constant `_EPSILON`, so it exercises the guarded-arm path end-to-end — it wires only
@@ -792,6 +797,30 @@ pub(super) static REGISTRY: &[Entry] = &[
         deps: &[],
         builtins: &[],
         func: generated::_fab_poc_curried2,
+    },
+    // AR.17 stage D — the two CLEAN missing-callee entries (verbatim from utility.scad /
+    // vnf.scad), added because select's whole cone stood behind `is_range` and apply/_vnf_centroid
+    // behind `is_vnf`. The other two blockers cascade (constrain needs flatten+list_to_matrix,
+    // list_wrap needs are_ends_equal) and wait for the library-scale generation instead.
+    Entry {
+        name: "is_range",
+        reference: "function is_range(x) = !is_list(x) && is_finite(x[0]) && is_finite(x[1]) && is_finite(x[2]) ;",
+        consts: &[],
+        consts_v: &[],
+        deps: &["is_finite", "is_nan"],
+        builtins: &["is_list", "is_num"],
+        func: generated::is_range,
+    },
+    Entry {
+        name: "is_vnf",
+        reference: "function is_vnf(x) =\n    is_list(x) &&\n    len(x)==2 &&\n    is_list(x[0]) &&\n    is_list(x[1]) &&\n    (x[0]==[] || (len(x[0])>=3 && is_vector(x[0][0],3))) &&\n    (x[1]==[] || is_vector(x[1][0]));",
+        consts: &[],
+        consts_v: &[],
+        // `all_nonzero`/`abs`/`is_undef` ride in transitively through `is_vector`'s body — the
+        // derived audit folds a dep's closure into the caller's guard set.
+        deps: &["is_vector", "is_finite", "is_nan", "all_nonzero"],
+        builtins: &["is_list", "len", "is_num", "norm", "abs", "is_undef"],
+        func: generated::is_vnf,
     },
     // ── O.5.2, the SHAPE band (utility.scad / lists.scad) ────────────────────────────────────────────────
     // The `is_consistent`/`_list_pattern`/`same_shape` bundle is ~4.7s of self time across the O.4 four
@@ -1025,7 +1054,7 @@ pub(super) static REGISTRY: &[Entry] = &[
             "is_num",
             "is_undef",
         ],
-        func: geometry::none_inside,
+        func: generated::_none_inside,
     },
     // ── O.5.4, the AGGREGATE/AFFINE band (math/vectors/transforms.scad) ──────────────────────────────────
     // sum+_sum 3.1s, _apply 2.2s, _bt_search 5.2s, unit 1.1s, vector_angle 1.2s across the O.4 four. These
@@ -1204,7 +1233,7 @@ pub(super) static REGISTRY: &[Entry] = &[
         builtins: &[
             "min", "norm", "len", "is_list", "is_string", "is_num", "is_undef",
         ],
-        func: geometry::point_dist,
+        func: generated::_point_dist,
     },
     Entry {
         name: "_is_point_on_line",
@@ -1263,7 +1292,7 @@ pub(super) static REGISTRY: &[Entry] = &[
         builtins: &[
             "len", "is_list", "is_undef", "is_num", "cross", "is_bool", "abs", "is_string",
         ],
-        func: geometry::vnf_centroid,
+        func: generated::_vnf_centroid,
     },
     // ── O.7, band 5 batch 2 (linalg/affine/geometry/lists/paths.scad) ───────────────────────────────────
     // The affine BUILDERS rot() leans on (rot itself is a dep avalanche — move/rot_inverse/_NO_ARG — and
@@ -1372,7 +1401,7 @@ pub(super) static REGISTRY: &[Entry] = &[
             "len", "norm", "cross", "abs", "sign", "is_list", "is_string", "is_num", "is_undef",
             "is_bool",
         ],
-        func: geometry::get_ear,
+        func: generated::_get_ear,
     },
     Entry {
         name: "in_list",

@@ -38,4 +38,6 @@ pub use crate::parser::{BinOp, UnOp};
 /// `Children` to the modules it calls — both have to be nameable through `rt`, or the emitted
 /// signature does not compile outside fab-lang. They were missing here until AR.20.5: module
 /// emission was exercised as generated TEXT, which never proved the text would build.
-pub use crate::surface::{ChildThunk, Children, FnCall, ModuleCall, ModuleCtx};
+pub use crate::surface::{
+    ChildThunk, Children, Decl, Domain, FnCall, Kind, ModuleCall, ModuleCtx, Param,
+};

@@ -214,7 +214,12 @@ impl SurfaceFn {
     /// Parse one `function name(params) = body;` into its surface. `None` when the source isn't a
     /// single function definition — which for a registry reference would mean the entry is malformed,
     /// so the caller treats it as a hard error rather than skipping quietly.
-    fn from_reference(src: &str) -> Option<Self> {
+    ///
+    /// `pub` for the TRANSPILER (AR.14.5): the derivation now runs at REGEN time, where fab-lib
+    /// emits the registry's surface as STATIC data into `generated.rs` — the same parse, once per
+    /// regen instead of once per process.
+    #[must_use]
+    pub fn from_reference(src: &str) -> Option<Self> {
         let program = crate::parse(src).ok()?;
         let stmt = program.stmts.first()?;
         let StmtKind::FunctionDef {
@@ -253,6 +258,11 @@ impl SurfaceFn {
 /// Sorted by name so the output is a STABLE description rather than registry-declaration order — a
 /// consumer indexing it with an RNG (the generator does exactly that) must not have its meaning change
 /// because an entry was inserted in the middle of the table.
+///
+/// AR.14.5: no PRODUCTION caller remains — the same derivation runs at regen time (fab-lib) and
+/// lands in `generated.rs` as the static `SURFACE` table `native_decls` serves. This stays as the
+/// equivalence test's ORACLE: the static table must equal what deriving fresh would produce, or
+/// the regen gate is describing a registry that no longer exists.
 #[must_use]
 pub fn native_surface() -> Vec<SurfaceFn> {
     let mut out: Vec<SurfaceFn> = super::REGISTRY
@@ -261,6 +271,38 @@ pub fn native_surface() -> Vec<SurfaceFn> {
         .collect();
     out.sort_by(|a, b| a.name.cmp(&b.name));
     out
+}
+
+/// The widest type observed for a parameter, as a generator [`Domain`](crate::surface::Domain).
+///
+/// "Widest" rather than "first" because a polymorphic function's LIST arm does more work than its
+/// scalar arm, and work is what the corpus is supposed to be measuring (AR.4). `Indexable` alone
+/// means the body only ever did `len(p)` or `p[i]` — true of a string as well as a list, so it
+/// maps to the list side, which is the useful guess. `Vector` maps to `VecN` rather than `Vec3` —
+/// the body said "numeric list", not "exactly three". An empty set falls back to `Num`.
+///
+/// Moved VERBATIM from fab-gen (AR.14.5) — the mapping is part of the emitted `SURFACE` table
+/// now, and the seed-stability contract means its behavior is frozen: changing a mapping silently
+/// re-points every accumulated fuzz corpus.
+#[must_use]
+pub fn widest_domain(domains: &[SurfaceDomain]) -> crate::surface::Domain {
+    use crate::surface::Domain;
+    let mut best = Domain::Num;
+    let mut rank = 0u8;
+    for d in domains {
+        let (cand, r) = match d {
+            SurfaceDomain::Bool => (Domain::Bool, 1),
+            SurfaceDomain::Str => (Domain::Str, 2),
+            SurfaceDomain::Num => (Domain::Num, 3),
+            SurfaceDomain::Indexable | SurfaceDomain::List => (Domain::List, 4),
+            SurfaceDomain::Vector => (Domain::VecN, 5),
+        };
+        if r > rank {
+            best = cand;
+            rank = r;
+        }
+    }
+    best
 }
 
 #[cfg(test)]
@@ -385,5 +427,58 @@ mod tests {
              it was 16% before assert/let were walked and 55% after",
             known * 100 / total
         );
+    }
+
+    /// AR.14.5 — the STATIC surface equals the derivation, field for field. `native_surface()`
+    /// retired from production to be exactly this oracle: the generated `SURFACE` table is bytes
+    /// the regen gate pins, and this is what proves those bytes still describe the registry —
+    /// a registry edit without a regen fails here (and at the currency gate) rather than
+    /// silently re-pointing the fuzzer's accumulated corpus at a stale table.
+    #[test]
+    fn the_static_surface_equals_the_derivation() {
+        use crate::surface::{Domain, Kind};
+        let derived = native_surface();
+        let statics = super::super::native_decls();
+        assert_eq!(
+            derived.len(),
+            statics.len(),
+            "the static table and the derivation disagree on how many callables exist"
+        );
+        for (d, s) in derived.iter().zip(statics) {
+            assert_eq!(d.name, s.name, "order or membership drifted");
+            assert_eq!(s.kind, Kind::Function);
+            assert_eq!(
+                s.ret,
+                Domain::Num,
+                "{}: ret is pinned Num for natives",
+                d.name
+            );
+            assert!(
+                s.names_bind,
+                "{}: natives stand in for user fns — names bind",
+                d.name
+            );
+            assert_eq!(
+                d.params.len(),
+                s.params.len(),
+                "{}: parameter count drifted",
+                d.name
+            );
+            for (dp, sp) in d.params.iter().zip(s.params) {
+                assert_eq!(dp.name, sp.name, "{}: param name drifted", d.name);
+                assert_eq!(
+                    dp.required, sp.required,
+                    "{}: required-ness drifted",
+                    d.name
+                );
+                assert_eq!(
+                    super::widest_domain(&dp.domains),
+                    sp.domain,
+                    "{}.{}: the widest-domain mapping drifted",
+                    d.name,
+                    dp.name
+                );
+            }
+        }
     }
 }

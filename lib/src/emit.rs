@@ -2062,7 +2062,52 @@ pub fn generate_batch(subjects: &[Subject<'_>]) -> Result<String, String> {
     }
     header.push_str(&fallback_refs);
     header.push_str("\"#;\n\n");
-    Ok(header + &fns)
+
+    // AR.14.5 — the registry's declared SURFACE as static data: the same derivation
+    // `native_surface()` ran at every process start (parse each reference, walk its body for
+    // type evidence, widest-wins per parameter), run ONCE here instead. The fuzzer's decl table
+    // stops being derived-then-leaked and becomes bytes the regen gate pins; the equivalence
+    // test in fab-lang keeps the runtime derivation as the oracle so the two cannot drift.
+    // Sorted by name — order is part of the seed-stability contract.
+    let (all_subjects, _pins) = fab_lang::bootstrap_all();
+    let mut surface: Vec<(String, String)> = all_subjects
+        .iter()
+        .filter_map(|s| fab_lang::SurfaceFn::from_reference(s.source))
+        .map(|f| {
+            let params: Vec<String> = f
+                .params
+                .iter()
+                .map(|p| {
+                    format!(
+                        "rt::Param {{ name: {:?}, domain: rt::Domain::{:?}, required: {} }}",
+                        p.name,
+                        fab_lang::widest_domain(&p.domains),
+                        p.required
+                    )
+                })
+                .collect();
+            let row = format!(
+                "    rt::Decl {{ name: {:?}, kind: rt::Kind::Function, ret: rt::Domain::Num, names_bind: true, params: &[{}] }},",
+                f.name,
+                params.join(", ")
+            );
+            (f.name, row)
+        })
+        .collect();
+    surface.sort_by(|a, b| a.0.cmp(&b.0));
+    let mut table = String::from(
+        "/// The registry's declared surface (AR.14.5) — what `native_surface()` derived at every\n\
+         /// process start, as STATIC data. `names_bind: true` throughout: these stand in for BOSL2\n\
+         /// user functions, where parameter names really do bind.\n\
+         pub(super) static SURFACE: &[rt::Decl] = &[\n",
+    );
+    for (_, row) in &surface {
+        table.push_str(row);
+        table.push('\n');
+    }
+    table.push_str("];\n\n");
+
+    Ok(header + &table + &fns)
 }
 
 /// The entries the generated module currently covers, in DEPENDENCY order (a sibling call may

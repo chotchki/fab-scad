@@ -266,6 +266,26 @@ pub trait LibrarySurface: Send + Sync {
     fn callables(&self) -> &'static [Decl];
 }
 
+/// The NATIVE REGISTRY's surface — the callables served from the STATIC table the transpiler
+/// emits into `generated.rs` (AR.14.5), not derived-then-leaked at process start. The third
+/// declaration of the same library (fab-gen's runtime `from_registry`) dies against this impl:
+/// a generated library declares itself at build time instead of being read back at startup.
+///
+/// No `preamble` here: what must precede a generated call depends on the CONSUMER's include
+/// layout (the fuzz harnesses pass their own `include <BOSL2/std.scad>` line), so the generator
+/// keeps carrying it alongside rather than this surface guessing one.
+pub struct Natives;
+
+impl LibrarySurface for Natives {
+    fn name(&self) -> &'static str {
+        "natives"
+    }
+
+    fn callables(&self) -> &'static [Decl] {
+        crate::eval::intrinsics::native_decls()
+    }
+}
+
 /// One include root and what it brings into scope. See [`LibrarySurface::roots`].
 #[derive(Clone, Copy, Debug)]
 pub struct Root {

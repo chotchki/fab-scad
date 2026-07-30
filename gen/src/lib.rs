@@ -325,64 +325,19 @@ pub struct NativeSurface {
 }
 
 impl NativeSurface {
-    /// Build it from the registry. Leaks the derived strings: a `Decl` holds `&'static str`, the
-    /// surface lives for the process, and the alternative is threading a lifetime through the whole
-    /// generator for a table built once.
+    /// Build it from the registry's [`LibrarySurface`] — the AR.14.5 shape. The decls ARE static
+    /// (the transpiler emits them into `generated.rs`, the regen gate pins the bytes, and
+    /// fab-lang's equivalence test proves they still describe the registry), so the runtime
+    /// derivation and the `Box::leak`s that made it `'static` are simply gone. Byte-identical
+    /// output to the derived table by construction — the widest-domain mapping moved VERBATIM
+    /// into fab-lang (`widest_domain`) and runs at regen time.
     #[must_use]
     pub fn from_registry(preamble: impl Into<String>) -> Self {
-        let decls: Vec<Decl> = fab_lang::native_surface()
-            .into_iter()
-            .map(|f| {
-                let params: Vec<Param> = f
-                    .params
-                    .iter()
-                    .map(|p| Param {
-                        name: Box::leak(p.name.clone().into_boxed_str()),
-                        domain: widest(&p.domains),
-                        required: p.required,
-                    })
-                    .collect();
-                Decl {
-                    name: Box::leak(f.name.into_boxed_str()),
-                    kind: Kind::Function,
-                    ret: Domain::Num,
-                    names_bind: true,
-                    params: Box::leak(params.into_boxed_slice()),
-                }
-            })
-            .collect::<Vec<Decl>>();
         NativeSurface {
-            decls: Box::leak(decls.into_boxed_slice()),
+            decls: fab_lang::surface::Natives.callables(),
             preamble: preamble.into(),
         }
     }
-}
-
-/// The widest type observed for a parameter, as a generator [`Domain`].
-///
-/// "Widest" rather than "first" because a polymorphic function's LIST arm does more work than its
-/// scalar arm, and work is what the corpus is supposed to be measuring (AR.4). `Indexable` alone means
-/// the body only ever did `len(p)` or `p[i]` — true of a string as well as a list, so it maps to the
-/// list side, which is the useful guess. `Vector` maps to `VecN` rather than `Vec3` — the body
-/// said "numeric list", not "exactly three". An empty set falls back to `Num`.
-fn widest(domains: &[fab_lang::SurfaceDomain]) -> Domain {
-    use fab_lang::SurfaceDomain as S;
-    let mut best = Domain::Num;
-    let mut rank = 0u8;
-    for d in domains {
-        let (cand, r) = match d {
-            S::Bool => (Domain::Bool, 1),
-            S::Str => (Domain::Str, 2),
-            S::Num => (Domain::Num, 3),
-            S::Indexable | S::List => (Domain::List, 4),
-            S::Vector => (Domain::VecN, 5),
-        };
-        if r > rank {
-            best = cand;
-            rank = r;
-        }
-    }
-    best
 }
 
 impl Surface for NativeSurface {

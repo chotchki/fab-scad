@@ -2453,6 +2453,13 @@ pub(crate) fn bootstrap_all() -> (
     (subjects, PINS.to_vec())
 }
 
+/// The registry's declared surface as STATIC data (AR.14.5) — generated into `generated.rs` by
+/// the same derivation `native_surface()` runs, at regen time instead of process start. This is
+/// what [`crate::surface::LibrarySurface::callables`] serves for the natives.
+pub(crate) fn native_decls() -> &'static [crate::surface::Decl] {
+    generated::SURFACE
+}
+
 /// Every constant name an entry guards, both the scalar and the value-typed halves.
 fn const_names_of(entry: &Entry) -> Vec<&'static str> {
     entry
